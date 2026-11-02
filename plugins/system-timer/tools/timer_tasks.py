@@ -21,10 +21,9 @@ _TIMER_SCHEMA = {
     "function": {
         "name": "timer",
         "description": (
-            "定时任务管理：创建到期后自动向当前会话发送触发消息的定时任务"
-            "（触发消息会开启一轮新对话）。一次性任务传 delay_seconds 或 fire_at，"
-            "循环任务传 interval_minutes；任务仅存内存，应用重启后失效。"
-            "到期触发要求会话窗口存活：任务仅当前会话内生效，切换会话即自动取消。"
+            "定时任务管理：到期后自动向当前会话发触发消息(开启新一轮对话)。"
+            "一次性用 delay_seconds 或 fire_at，循环用 interval_minutes；任务仅存内存，重启失效。"
+            "仅当前会话生效，切换会话即自动取消。"
         ),
         "parameters": {
             "type": "object",
@@ -37,13 +36,13 @@ _TIMER_SCHEMA = {
                 "prompt": {"type": "string", "description": "create 必填：到期后发给会话的触发消息"},
                 "delay_seconds": {
                     "type": "integer",
-                    "description": "create（一次性）：延迟秒数，触发一次后任务终结",
+                    "description": "create(一次性)：延迟秒数，触发一次后终结",
                 },
                 "fire_at": {
                     "type": "string",
                     "description": (
-                        "create（一次性）：指定触发时刻，支持 'YYYY-MM-DD HH:MM[:SS]'（已过去报错）"
-                        "或纯 'HH:MM[:SS]'（今天已过自动明天）"
+                        "create(一次性)：触发时刻，'YYYY-MM-DD HH:MM[:SS]'(已过去报错)"
+                        "或纯 'HH:MM[:SS]'(今天已过转明天)"
                     ),
                 },
                 "interval_minutes": {"type": "integer", "description": "create（循环）：触发间隔分钟数"},
@@ -51,8 +50,8 @@ _TIMER_SCHEMA = {
                     "type": "string",
                     "enum": ["queue", "skip", "hook"],
                     "description": (
-                        "create（可选）：到期触发方式。queue=流式中排队（默认）；"
-                        "skip=流式中忽略（返回不发送）；hook=流式中静默注入当前对话上下文（不打断）"
+                        "create(可选)：触发方式。queue=流式中排队(默认)；"
+                        "skip=流式中忽略；hook=流式中静默注入上下文(不打断)"
                     ),
                 },
                 "task_id": {"type": "string", "description": "cancel：任务 ID（创建时返回）"},

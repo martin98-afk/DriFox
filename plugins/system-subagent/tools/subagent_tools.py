@@ -66,8 +66,8 @@ _SUBAGENT_STATUS_SCHEMA = {
     "function": {
         "name": "subagent_status",
         "description": (
-            "查询子智能体任务状态。task_ids 不传只能查一次刚完成的；指定task_id始终能查。\n\n"
-            "**重要**：运行中任务勿重复查——完成后自动发[后台任务状态]通知，届时再查。轮询卡死。"
+            "查子智能体任务状态。task_ids 不传只查一次刚完成的；指定 task_id 始终可查。\n"
+            "运行中任务勿重复查，完成后自动发[后台任务状态]通知，届时再查。轮询卡死。"
         ),
         "parameters": {
             "type": "object",

@@ -301,7 +301,7 @@ class MessageCard(SimpleCardWidget):
     branchRequested = pyqtSignal(int, int)  # round_index, message_index — 用户点击页脚「分支」按钮时触发
     saveFileRequested = pyqtSignal(str, str)  # code, lang
     lazyRenderCompleted = pyqtSignal()  # 懒渲染完成信号，用于通知滚动保持
-    modelLabelClicked = pyqtSignal(str, str)  # model_name, config_id — 用户点击页脚模型标签时触发
+    modelLabelClicked = pyqtSignal(str, str, str)  # model_name, config_id, provider_name — 用户点击页脚模型标签时触发
     welcomeModeChanged = pyqtSignal(str)  # 欢迎卡片模式切换（sessions / projects / 插件注册 tab）
     saveChartPngRequested = pyqtSignal(str, str)  # (name_b64, png_b64) — 图表 PNG 导出（内部处理保存，不透传）
 
@@ -1147,11 +1147,12 @@ class MessageCard(SimpleCardWidget):
         )
 
     def _on_footer_model_clicked(self, event):
-        """用户点击页脚模型标签时，发出 modelLabelClicked(model_name, config_id)"""
+        """用户点击页脚模型标签时，发出 modelLabelClicked(model_name, config_id, provider_name)"""
         if self.model_name:
             self.modelLabelClicked.emit(
                 self.model_name,
                 getattr(self, "_provider_config_id", "") or "",
+                str(self.provider_name or ""),
             )
 
     def _refresh_footer_separators(self):

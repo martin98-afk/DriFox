@@ -3382,11 +3382,20 @@ class UIPluginRegistry:
                     from app.utils.theme_style import ensure_theme_fresh
 
                     _fresh = ensure_theme_fresh(widget_now)
+                # [DEBUG-reopen] 实例指纹 + CM 记账对照
+                _cm_vis = card_manager.is_card_visible(card_id, window_id)
+                _parent = widget_now.parent()
                 logger.warning(
                     f"[theme-probe] show card={card_id} win={window_id} cls={type(widget_now).__name__} "
                     f"visible={_vis} fresh={_fresh} "
                     f"own={getattr(widget_now, '_drifox_theme_epoch', 'MISSING')} "
                     f"provider={getattr(widget_now, '_context_provider', None) is not None}"
+                )
+                logger.warning(
+                    f"[DEBUG-reopen] show card={card_id} reg={id(self)} wid={id(widget_now)} "
+                    f"cm_vis={_cm_vis} parent={type(_parent).__name__ if _parent is not None else None} "
+                    f"parent_vis={_parent.isVisible() if _parent is not None else None} "
+                    f"w_HIDDEN={widget_now.isHidden()} w_geo={widget_now.geometry()}"
                 )
             except RuntimeError:
                 pass

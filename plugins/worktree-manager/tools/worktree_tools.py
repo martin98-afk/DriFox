@@ -436,16 +436,15 @@ _WORKTREE_MANAGE_SCHEMA = {
     "function": {
         "name": "manage_worktree",
         "description": (
-            "项目 git 工作树管理（单一入口，action 分发）。"
-            "list=列出全部工作树（路径/分支/与主仓库领先落后 + merge-tree 冲突预判，标注主仓库与当前会话；无其他参数）。"
-            "create=创建新工作树：默认基于 HEAD 新建分支 branch_name，该分支已存在则直接挂载（base_branch 被忽略）；"
-            "目录固定在主仓库 .worktrees/ 下（dir_name 缺省用分支名，/ 转 -）。"
-            "remove=删除工作树：串行 remove → prune → branch 删除（keep_branch=true 保留分支）；"
-            "有未提交改动默认拒绝（force=true 强制）；不能删除主仓库，也不能删除当前会话工作目录所在的工作树。"
-            "merge=把工作树分支合并回主仓库当前分支（双向 dirty 预检；target_branch 须为主仓库当前分支）："
-            "产生冲突时返回冲突文件与冲突块内容并保留冲突现场"
-            "（不 abort），按返回中的指引用文件工具解决后提交。"
-            "create/remove/merge 操作后工作树面板自动刷新。"
+            "项目 git 工作树管理(action 分发)。"
+            "list=列全部工作树(路径/分支/领先落后/merge-tree 冲突预判，标注主仓库与当前会话；无其他参数)。"
+            "create=建工作树：默认基于 HEAD 新建分支 branch_name，已存在则直接挂载(base_branch 被忽略)；"
+            "目录在主仓库 .worktrees/(dir_name 缺省用分支名，/ 转 -)。"
+            "remove=删工作树(remove→prune→删分支，keep_branch=true 留分支)；有未提交改动默认拒绝(force=true 强删)；"
+            "不能删主仓库与当前会话所在工作树。"
+            "merge=把工作树分支合回主仓库当前分支(双向 dirty 预检，target_branch 须为主仓库当前分支)："
+            "冲突时返回冲突文件与冲突块并保留现场(不 abort)，按返回指点用文件工具解决后提交。"
+            "操作后工作树面板自动刷新。"
         ),
         "parameters": {
             "type": "object",
@@ -467,11 +466,11 @@ _WORKTREE_MANAGE_SCHEMA = {
                 "dir_name": {"type": "string", "description": "create 可选：工作树目录名，缺省用分支名（/ 转 -）"},
                 "keep_branch": {
                     "type": "boolean",
-                    "description": "remove 可选：true=保留分支只删目录，默认 false（删分支；含未合并提交时仍保留除非 force=true）",
+                    "description": "remove 可选：true=留分支只删目录，默认 false(删分支；含未合并提交时仍保留除非 force=true)",
                 },
                 "force": {
                     "type": "boolean",
-                    "description": "remove 可选：true=工作树有未提交改动时仍强制删除并强删未合并分支（默认拒绝/保留分支）",
+                    "description": "remove 可选：true=有未提交改动也强删并强删未合分支(默认拒绝/留分支)",
                 },
                 "target_branch": {
                     "type": "string",

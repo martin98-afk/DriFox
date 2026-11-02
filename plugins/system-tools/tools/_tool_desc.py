@@ -39,10 +39,7 @@ def description_param(example: str, required: bool = True) -> dict:
     return {
         DESCRIPTION_KEY: {
             "type": "string",
-            "description": (
-                f"{prefix}一句话自然语言描述这次调用要做什么（展示给用户看，替代原始参数），"
-                f"例如 {example}。写意图，不要复述参数本身。"
-            ),
+            "description": f"{prefix}一句话说明本次调用意图(展示给用户，替代原始参数)，例 {example}。写意图，不复述参数。",
         }
     }
 

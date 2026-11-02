@@ -821,14 +821,14 @@ _TEAM_SEND_SCHEMA = {
     "type": "function",
     "function": {
         "name": "team_send_message",
-        "description": "向团队中的智能体发送任务邮件（团队成员与非团队成员均可发送；对方会串行处理任务并自动开始执行）。非团队成员发送时标识为 user；成员无法直接回复外部窗口，执行状态用 team_manage(action=list) 查看。群发为 leader 专属。",
+        "description": "向团队智能体发任务邮件(成员与非成员均可发；对方串行执行并自动开始)。非成员发送标识为 user；成员无法回复外部窗口，状态用 team_manage(action=list) 查。群发仅 leader。",
         "parameters": {
             "type": "object",
             "properties": {
                 "to_agent": {
                     "type": ["string", "array"],
                     "items": {"type": "string"},
-                    "description": "目标成员标识。单个成员名（string，任何成员可用，可私聊任意队友）或成员名数组/[\"*\"]（群发，需 leader，[\"*\"] 表示全队并自动跳过你自己）。单个支持 agent_name 或 agent_name@window_id，通过 team_manage(action=list) 查看",
+                    "description": "目标成员。单个成员名为私聊(任何成员可用)；数组/ [\"*\"] 为群发(仅 leader，* 跳过自己)。单个支持 agent_name 或 agent_name@window_id，用 team_manage(list) 查",
                 },
                 "message": {"type": "string", "description": "消息内容"},
             },
@@ -843,15 +843,12 @@ _TEAM_MANAGE_SCHEMA = {
     "function": {
         "name": "team_manage",
         "description": (
-            "团队管理统一入口（action 分发）。"
-            "list=查看团队成员（任何窗口可用，非团队成员也可只读查看，返回 agent_name@window_id 标识）；"
-            "create=创建团队（任何窗口可用；team_name/team_role 必填，members 可选）。"
-            "leader 与成员全部新建窗口（leader 角色自动创建），当前窗口保持非团队成员、不切换标签页；"
-            "create 后即可用 team_send_message 给成员派任务，成员自动开始执行；"
-            "add=拉成员入队，提交开窗请求本轮结束后由主线程开窗（须已在团队中，成员可调用无需 leader；"
-            "agent_name/role 必填，下一轮用 list 验证）；"
-            "remove=将成员移出团队（仅 leader；agent_name 必填，同名全部移除，不能移除自己）；"
-            "leave=退出当前团队（须已在团队中；leader 退出时自动移交）。"
+            "团队管理统一入口(action 分发)。"
+            "list=查成员(任何窗口可用，非成员也可只读，返回 agent_name@window_id)；"
+            "create=创建团队(任何窗口可用，team_name/team_role 必填，members 可选)，leader 与成员全新建窗口、当前窗口不切标签页；create 后即可用 team_send_message 派任务，成员自动执行；"
+            "add=拉成员入队(提交开窗请求，本轮结束后开窗；须已在团队中，成员可调用；agent_name/role 必填，下一轮用 list 验证)；"
+            "remove=移出成员(仅 leader，agent_name 必填，同名全移除，不能移除自己)；"
+            "leave=退出(须已在团队中，leader 退出自动移交)。"
         ),
         "parameters": {
             "type": "object",

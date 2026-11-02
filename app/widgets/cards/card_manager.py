@@ -331,6 +331,18 @@ class CardManager:
         if card_widget is None:
             return
 
+        # [DEBUG-reopen] 临时诊断：CM 登记的 widget 指纹与记账状态
+        try:
+            from loguru import logger as _lg
+
+            _lg.warning(
+                f"[DEBUG-reopen] CM.show card={card_id} cm_wid={id(card_widget)} "
+                f"acc_vis={win_data['visible_cards'].get(container_type)} "
+                f"sys={card_id in win_data['system_cards']}"
+            )
+        except Exception:
+            pass
+
         # 多窗口隔离：检查 widget 是否已被删除
         if self._check_and_remove_deleted_card(window_id, card_id, container_type, card_widget):
             return

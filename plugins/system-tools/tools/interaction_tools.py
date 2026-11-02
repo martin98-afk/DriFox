@@ -24,20 +24,20 @@ _QUESTION_SCHEMA = {
     "type": "function",
     "function": {
         "name": "question",
-        "description": "向用户提问。了解偏好/需求/选择时**必用**。支持多问题，每问题可带选项列表。参数：questions(必填,数组)，每项含question(string)+options(array,每项label+description)+multiple(bool)。",
+        "description": "向用户提问。需求/偏好/选择不明时**必用**。支持多问题，每题可带选项。",
         "parameters": {
             "type": "object",
             "properties": {
                 "questions": {
                     "type": "array",
-                    "description": "问题列表。每项含question+options(含label+description)+multiple",
+                    "description": "问题列表。每项 question+options(label+description)+multiple",
                     "items": {
                         "type": "object",
                         "properties": {
                             "question": {"type": "string", "description": "问题内容，尽量简洁"},
                             "options": {
                                 "type": "array",
-                                "description": "选项列表(可选)。每项含label+description，最多4个",
+                                "description": "选项列表(可选)。每项 label+description，最多 4 个",
                                 "items": {
                                     "type": "object",
                                     "properties": {
@@ -76,7 +76,7 @@ _SKILL_SCHEMA = {
     "type": "function",
     "function": {
         "name": "skill",
-        "description": "加载智能体技能到当前会话。阻断要求：用户请求命中任何可用技能描述的场景（含 /斜杠命令引用，如 /visualization）时，必须在生成其他回答前先调用本工具加载对应技能；提到某技能就必须真实调用本工具，禁止只提及不加载；同一技能已加载则勿重复调用，直接遵循其内容执行。可用技能清单见系统提示「偏好技能」段，未列出时用 manage_skill 的 list 动作查看。",
+        "description": "加载智能体技能到当前会话。阻断要求：用户请求命中任一可用技能描述(含 /斜杠命令引用)时，必须先调用本工具加载对应技能，禁止只提及不加载；同技能已加载则勿重复调用，直接按其内容执行。可用清单见系统提示「偏好技能」段，未列出时用 manage_skill(action=list)。",
         "parameters": {
             "type": "object",
             "properties": {
@@ -106,7 +106,7 @@ _MANAGE_SKILL_SCHEMA = {
     "type": "function",
     "function": {
         "name": "manage_skill",
-        "description": "技能生命周期管理（只读指导式）。list=返回技能清单（含来源/位置/agent_created 标记；支持 query/source 过滤，全量超 30 个自动降为精简视图）；create/modify/delete 本工具不直接改文件，返回目标路径、SKILL.md 模板与分步工作流，由你用 write/edit/bash 执行。仅 frontmatter 含 agent_created: true 且位于用户技能目录的自建技能可修改或删除，系统/用户安装技能受保护；删除前必须先征得用户确认。",
+        "description": "技能生命周期管理(只读指导式)。list=返回技能清单(来源/位置/agent_created，支持 query/source 过滤，超 30 个降为精简视图)；create/modify/delete 本工具不改文件，只返回目标路径、SKILL.md 模板与步骤，由你用 write/edit/bash 执行。仅用户目录内含 agent_created: true 的自建技能可改可删，系统/用户安装技能受保护；删前必须征得用户确认。",
         "parameters": {
             "type": "object",
             "properties": {
@@ -277,13 +277,12 @@ _MCP_MANAGE_SCHEMA = {
     "function": {
         "name": "mcp_manage",
         "description": (
-            "管理 MCP 服务器。action=\"list\"（默认）列出全部服务器（含已关闭的）与连接状态；"
-            "action=\"enable\" 临时开启一台已关闭的服务器，返回它的工具定义（名字+描述+参数 schema），"
+            "管理 MCP 服务器。list(默认)=列出全部(含已关闭)与连接状态；"
+            "enable=临时开启一台已关闭的服务器，返回其工具定义，"
             "随后用 tool_execute(tool_name=\"mcp__服务__工具\", arguments=...) 中转调用；"
-            "action=\"disable\" 关闭临时开启的服务器。"
-            "\n\n省 token 纪律：只有常驻开启的服务器会把工具注入工具列表；临时的不会。"
-            "所以临时开启的服务器用完必须调 action=\"disable\" 回收（不会自动超时关闭）。"
-            "\n\n能临时开启的仅限配置里已存在但被关闭的服务器；不存在的新服务器需要用户在设置里添加。"
+            "disable=关闭临时开启的服务器。"
+            "\n省 token：只有常驻开启的服务器会把工具注入工具列表，临时的不会，用完必须 disable(不会自动超时关闭)。"
+            "\n仅能开启配置中已存在且被关闭的服务器；新增需用户在设置里添加。"
         ),
         "parameters": {
             "type": "object",
@@ -291,11 +290,11 @@ _MCP_MANAGE_SCHEMA = {
                 "action": {
                     "type": "string",
                     "enum": ["list", "enable", "disable"],
-                    "description": "list=列出全部（默认）；enable=临时开启；disable=关闭临时开启的",
+                    "description": "list=列出全部(默认)；enable=临时开启；disable=关闭临时开启的",
                 },
                 "name": {
                     "type": "string",
-                    "description": "服务器名（enable / disable 必填，取 list 返回里的 name）",
+                    "description": "服务器名(enable/disable 必填，取 list 的 name)",
                 },
             },
         },
@@ -404,7 +403,7 @@ _UPLOAD_FILE_SCHEMA = {
     "type": "function",
     "function": {
         "name": "upload_file",
-        "description": "上传文件到Gitee仓库，返回下载链接。用于gateway远程调用场景。**勿滥用**，注意敏感信息。",
+        "description": "上传文件到 Gitee 仓库，返回下载链接。用于 gateway 远程调用；勿滥用，注意敏感信息。",
         "parameters": {
             "type": "object",
             "properties": {

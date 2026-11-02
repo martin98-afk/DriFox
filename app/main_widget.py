@@ -7957,18 +7957,83 @@ class OpenAIChatToolWindow(ToolWindow):
             return matched, model_name
         return None
 
-    def _on_footer_model_label_clicked(self, model_name: str, config_id: str = ""):
-        """用户点击消息卡片页脚的模型标签 — 按 UUID 精确切换到对应服务商和模型"""
-        if not config_id or config_id not in self._valid_configs:
-            InfoBar.warning(
-                "未找到服务商",
-                f"未找到服务商「{model_name}」，可能已被移除",
-                parent=TabManagerWindow.get_instance() or self.window(),
-                duration=3000,
-                position=InfoBarPosition.BOTTOM,
-            )
+    def _round_model_snapshot(self) -> tuple:
+        """本轮回复真实使用的 (model_name, config_id)。
+
+        优先读当前回复卡片的快照（卡片创建时刻记录的窗口选择，天然正确），
+        卡片缺失才回退当前窗口状态。防竞态：流式期间用户切换模型时，
+        补写消息元数据不得用「结束时刻」的选择覆盖本轮真实来源。
+        """
+        card = getattr(self, "_current_assistant_card", None)
+        if card is not None and not _is_sip_deleted(card):
+            m = str(getattr(card, "model_name", "") or "")
+            c = str(getattr(card, "_provider_config_id", "") or "")
+            if m or c:
+                return m, c
+        return (
+            str(getattr(self, "_current_model_name", "") or ""),
+            str(getattr(self, "_current_provider_name", "") or ""),
+        )
+
+    def _model_belongs_to_provider(self, model_name: str, config_id: str) -> bool:
+        """判断模型是否归属某服务商配置。
+
+        「模型列表」缺失或为空 → 视为无法判定（动态拉模型的服务商），放行；
+        列表非空时要求 model_name 在列表中或等于「模型名称」。
+        """
+        if not model_name or not config_id:
+            return False
+        info = self._valid_configs.get(config_id)
+        if not info:
+            return False
+        if info.get("模型名称") == model_name:
+            return True
+        model_list = info.get("模型列表") or []
+        if isinstance(model_list, str):
+            try:
+                import ast
+
+                model_list = ast.literal_eval(model_list) or []
+            except Exception:
+                model_list = []
+        if not model_list:
+            return True  # 无列表可查：无法证伪，放行
+        return model_name in model_list
+
+    def _switch_to_message_model(self, model_name: str, config_id: str = "", provider_hint: str = "") -> bool:
+        """点击消息卡片模型标签：精确切回该消息使用的服务商与模型。
+
+        解析优先级（与 _resolve_history_model_target 同口径）：
+          1. config_id 直查 + 模型归属校验（防 config_id 对但模型已不在该服务商）
+          2. (provider_hint, model_name) 反查
+        解析不到返回 False（调用方负责提示），绝不退而切当前服务商。
+
+        返回 True 时已切到目标（走 _on_model_selected_from_popup，含全局默认保存）。
+        """
+        if not model_name:
+            return False
+        # 1) config_id 有效且模型归属成立 → 直切
+        if config_id and config_id in self._valid_configs and self._model_belongs_to_provider(model_name, config_id):
+            self._on_model_selected_from_popup(config_id, model_name)
+            return True
+        # 2) 反查（config_id 失效 / 归属不成立时，用 provider_hint + 模型名再试一次）
+        target = self._resolve_history_model_target(model_name, provider_hint, "")
+        if target and self._model_belongs_to_provider(model_name, target[0]):
+            self._on_model_selected_from_popup(target[0], model_name)
+            return True
+        return False
+
+    def _on_footer_model_label_clicked(self, model_name: str, config_id: str = "", provider_hint: str = ""):
+        """用户点击消息卡片页脚的模型标签 — 精确切换回该消息的服务商和模型"""
+        if self._switch_to_message_model(model_name, config_id, provider_hint):
             return
-        self._on_model_selected_from_popup(config_id, model_name)
+        InfoBar.warning(
+            "未找到服务商",
+            f"未找到「{model_name}」对应的服务商记录，可能已被移除",
+            parent=TabManagerWindow.get_instance() or self.window(),
+            duration=3000,
+            position=InfoBarPosition.BOTTOM,
+        )
 
     def _get_model_btn_text_style(self) -> str:
         """动态构建模型按钮文字样式（运行时重新计算 font_size_css）"""
@@ -15954,21 +16019,26 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 🛡️ 解析 config_id：如果未传入则从 _valid_configs 反查。
         # 整个导航逻辑只依赖 UUID，不依赖 display_name / provider_name。
-        if not config_id and self._valid_configs:
-            if self._current_provider_name and self._current_provider_name in self._valid_configs:
-                cfg = self._valid_configs[self._current_provider_name]
-                if cfg.get("模型名称") == model_name or model_name in (cfg.get("模型列表") or []):
-                    config_id = self._current_provider_name
+        # 反查优先级：provider_hint（消息里存的 display_name）反查 + 归属校验
+        # → 模型名唯一匹配。解析不到保持 None，**不硬挂当前服务商**——
+        # 挂错家会导致点击模型标签切到错误的服务商（且它可能没有该模型）。
+        config_id = config_id or None
+        if config_id and config_id not in self._valid_configs:
+            config_id = None
+        if not config_id and provider_name and self._valid_configs:
+            cid = self._resolve_service_provider(provider_name)
+            if cid and self._model_belongs_to_provider(model_name or "", cid):
+                config_id = cid
         if not config_id and model_name and self._valid_configs:
+            matched = None
             for c, info in self._valid_configs.items():
                 if info.get("模型名称") == model_name or model_name in (info.get("模型列表") or []):
-                    if config_id is None:
-                        config_id = c
-                    elif config_id != c:
-                        config_id = None
+                    if matched is None:
+                        matched = c
+                    elif matched != c:
+                        matched = None
                         break
-        if not config_id and self._current_provider_name and self._current_provider_name in self._valid_configs:
-            config_id = self._current_provider_name
+            config_id = matched
 
         # 使用辅助函数创建卡片
         def on_context_action(action, context):
@@ -21138,17 +21208,21 @@ class OpenAIChatToolWindow(ToolWindow):
         self._dismiss_pending_overlay_cards()
 
         # 写入模型名称/服务商到卡片和 session 消息
+        # 🛡️ 用卡片快照（创建时刻的窗口选择）而非此刻的 _current_model_name：
+        # 流式期间用户切换模型不应改写本轮消息/卡片的模型归属（切错服务商根因之一）。
         if self._current_assistant_card:
-            current_model_name = getattr(self, "_current_model_name", "") or ""
-            if current_model_name:
-                provider_display = self._valid_configs.get(self._current_provider_name, {}).get(
-                    "display_name", self._current_provider_name
+            round_model, round_config_id = self._round_model_snapshot()
+            if round_model:
+                provider_display = self._valid_configs.get(round_config_id, {}).get(
+                    "display_name", round_config_id
                 )
-                self._current_assistant_card.set_model_name(
-                    current_model_name,
-                    provider_name=provider_display,
-                    config_id=self._current_provider_name,
-                )
+                # 卡片创建时已带正确值，仅在缺失时补写（防旧路径建卡未传 model_name）
+                if not getattr(self._current_assistant_card, "model_name", ""):
+                    self._current_assistant_card.set_model_name(
+                        round_model,
+                        provider_name=provider_display,
+                        config_id=round_config_id,
+                    )
                 session = self.session_manager.get_current_session()
                 if session and session.messages:
                     # 🐛 修复：只更新最近一条 assistant 消息，避免每次新对话把历史消息的
@@ -21156,11 +21230,11 @@ class OpenAIChatToolWindow(ToolWindow):
                     # 的页脚模型显示全部变成最后那次对话的模型。
                     for msg in reversed(session.messages):
                         if msg.get("role") == "assistant":
-                            msg["model_name"] = current_model_name
+                            msg["model_name"] = round_model
                             if not msg.get("provider_name"):
                                 msg["provider_name"] = provider_display
-                            if not msg.get("config_id") and self._current_provider_name:
-                                msg["config_id"] = self._current_provider_name
+                            if not msg.get("config_id") and round_config_id:
+                                msg["config_id"] = round_config_id
                             break
         # 计算流式耗时并设置到卡片底部栏
         elapsed = None
@@ -22236,12 +22310,14 @@ class OpenAIChatToolWindow(ToolWindow):
         # ⚠️ 写入 elapsed 和 config_id 必须在 set_messages 之前：set_messages 内部 consolidate
         # 会创建新 dict，之后修改参数 messages 不会反映到 session.messages
         if self._response_start_time is not None:
+            # 🛡️ 用卡片快照（本轮真实配置）而非此刻窗口状态，防流式期间切换模型导致归属错乱
+            _round_model, _round_cfg = self._round_model_snapshot()
             for msg in reversed(messages):
                 if msg.get("role") == "assistant":
                     if "elapsed" not in msg:
                         msg["elapsed"] = round(time.time() - self._response_start_time, 1)
-                    if not msg.get("config_id") and self._current_provider_name:
-                        msg["config_id"] = self._current_provider_name
+                    if not msg.get("config_id") and _round_cfg:
+                        msg["config_id"] = _round_cfg
 
         # 身份快照补写：worker 线程构造的消息拿不到 UI 状态（团队角色名、插件
         # manager 调用），在主线程统一补 `_identity` 后再落 session。已带快照的
@@ -22337,12 +22413,14 @@ class OpenAIChatToolWindow(ToolWindow):
             # 写入 session 最后一条 assistant 消息以便持久化
             session = self.session_manager.get_current_session()
             if session and session.messages:
+                # 🛡️ 卡片快照优先（本轮真实配置），防流式期间切换模型导致归属错乱
+                _round_model, _round_cfg = self._round_model_snapshot()
                 for msg in reversed(session.messages):
                     if msg.get("role") == "assistant":
                         if "elapsed" not in msg:
                             msg["elapsed"] = round(elapsed, 1)
-                        if not msg.get("config_id") and self._current_provider_name:
-                            msg["config_id"] = self._current_provider_name
+                        if not msg.get("config_id") and _round_cfg:
+                            msg["config_id"] = _round_cfg
             self._response_start_time = None
 
         # 🔧 异常时保存已生成的部分消息到历史记录
@@ -25724,12 +25802,14 @@ class OpenAIChatToolWindow(ToolWindow):
         session = self.session_manager.get_current_session()
         if not session or not session.messages:
             return
+        # 🛡️ 卡片快照优先（本轮真实配置），防流式期间切换模型导致归属错乱
+        _round_model, _round_cfg = self._round_model_snapshot()
         for msg in reversed(session.messages):
             if msg.get("role") == "assistant":
                 if "elapsed" not in msg:
                     msg["elapsed"] = round(self._stop_elapsed, 1)
-                if not msg.get("config_id") and self._current_provider_name:
-                    msg["config_id"] = self._current_provider_name
+                if not msg.get("config_id") and _round_cfg:
+                    msg["config_id"] = _round_cfg
 
     def _apply_interrupted_messages_to_session(self, interrupted_messages: List[Dict[str, Any]]) -> bool:
         """将 worker 中断时的快照应用到当前 session（同步）。

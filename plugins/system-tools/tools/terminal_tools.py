@@ -607,7 +607,7 @@ _BASH_SCHEMA = {
     "type": "function",
     "function": {
         "name": "bash",
-        "description": "执行shell命令。仅内置工具不够用时用：构建(pytest/ruff/build)、git(status/diff/log/add/commit)、进程(ps/kill/lsof)、管道(cat|grep|awk)、环境探测(which/env)。禁止替代: read/write/edit/multi_edit/list/glob/grep/get_diagnostics/lsp/bg_*/screenshot/mouse/keyboard/websearch/webfetch。调用前自检：有专用工具？有则用它。命令失败时勿换 shell/换写法反复重试，先读错误输出定位原因，三次仍败则说明情况并求助。",
+        "description": "执行 shell 命令。仅专用工具不足时用：构建(pytest/ruff)、git、进程、管道、环境探测(which/env)。禁替代 read/write/edit/multi_edit/list/glob/grep/get_diagnostics/lsp/bg_*/websearch/webfetch。有专用工具就用它；失败先读错误输出定位，勿换写法反复重试，三次仍败说明并求助。",
         "parameters": {
             "type": "object",
             "properties": {
@@ -629,7 +629,7 @@ _BG_START_SCHEMA = {
             "type": "object",
             "properties": {
                 "command": {"type": "string", "description": "要执行的命令"},
-                "cwd": {"type": "string", "description": "工作目录（可选，默认为项目根目录）"},
+                "cwd": {"type": "string", "description": "工作目录，默认项目根"},
                 **_desc_param("启动前端开发服务器"),
             },
             "required": ["command", "description"],
