@@ -2506,6 +2506,22 @@ class CodeWebViewer(QWebEngineView):
                     font-family: var(--dfx-font-family, '{font_family}', sans-serif);
                     line-height: 1.6;
                 }}
+                /* 思考块尾态（v2 活动 reasoning 块，见 _v2_live_html 的 think-compact）：
+                   必须与 .think-streaming-live 同口径限高 —— 只留最新一段作为预览。
+                   长思考（≥ _LIVE_MIN_CHARS）走 v2 尾态时曾是整段纯文本全高显示：
+                   切标签页返回触发 showEvent 补渲会把它从 96px 窗口换成全文
+                   （2026-11-02 用户实测「思考预览超长」）。两个容器都要覆盖：
+                   简洁模式思考 home=tool-content，非简洁模式 home=content-placeholder。
+                   overflow-y:hidden 仍可程序置 scrollTop，滚底由 _v2LiveAppendNow /
+                   _v2AfterPatch 维护。 */
+                #content-placeholder .v2-live-text.think-compact,
+                #tool-content .v2-live-text.think-compact {{
+                    max-height: 96px;
+                    overflow-y: hidden;
+                    overflow-x: hidden;
+                    -webkit-mask-image: linear-gradient(180deg, transparent 0, #000 30%);
+                    mask-image: linear-gradient(180deg, transparent 0, #000 30%);
+                }}
                 /* v2 前缀切片产物：已闭合段落的 markdown 正式渲染结果。
                    与相邻的 .v2-live-text 之间要留出正常段落间距（tail 是续写段落） */
                 #content-placeholder .v2-live-part {{ display: block; }}
@@ -5381,6 +5397,9 @@ class CodeWebViewer(QWebEngineView):
                         if (cnt) node.insertBefore(live, cnt); else node.appendChild(live);
                     }}
                     live.appendChild(document.createTextNode(text));
+                    // 思考尾态是限高窗口（CSS: .v2-live-text.think-compact）：
+                    // 追加后必须滚到底，窗口内始终是最新文字（与 .think-streaming-live 同语义）
+                    if (reasoning) live.scrollTop = live.scrollHeight;
                     return true;
                 }};
                 window._v2LiveStep = function (ts) {{
@@ -5489,7 +5508,7 @@ class CodeWebViewer(QWebEngineView):
                 // tailIsHtml：尾部已由 Python 侧行内渲染（_render_inline_tail），
                 // 此时用 innerHTML 注入让 `**加粗**` / `# 标题` 立刻变成格式，
                 // 而不是等段落闭合。false 时按纯文本处理（保留换行）。
-                window._v2LiveSplit = function (containerId, key, html, tailText, tailIsHtml) {{
+                window._v2LiveSplit = function (containerId, key, html, tailText, tailIsHtml, reasoning) {{
                     window._v2LiveFlush();
                     var node = window._v2LiveNode(containerId, key);
                     if (!node) return false;
@@ -5518,7 +5537,7 @@ class CodeWebViewer(QWebEngineView):
                     }}
                     if (!live) {{
                         live = document.createElement('div');
-                        live.className = 'v2-live-text';
+                        live.className = 'v2-live-text' + (reasoning ? ' think-compact' : '');
                         var cnt = node.querySelector(':scope > #char-count');
                         if (cnt) node.insertBefore(live, cnt); else node.appendChild(live);
                     }}
@@ -5531,6 +5550,7 @@ class CodeWebViewer(QWebEngineView):
                         live.textContent = tailText;
                         live.classList.remove('v2-live-html');
                     }}
+                    if (reasoning) live.scrollTop = live.scrollHeight;
                     var st = window._v2tw;
                     if (st) st.node = node;
                     return true;
@@ -5672,6 +5692,13 @@ class CodeWebViewer(QWebEngineView):
                                     _cpPos.parentNode.insertBefore(_tsPos, _cpPos);
                                 }}
                             }}
+                        }}
+                        // 思考尾态限高窗口滚底：首帧 patch / 节点重建后没有增量
+                        // append 可触发滚底，不处理会停在最旧的一段（用户看到的是
+                        // 思考开头而非最新）。幂等：通常只有一个节点，O(1)。
+                        var _tlvs = document.querySelectorAll('.v2-live-text.think-compact');
+                        for (var _ti = 0; _ti < _tlvs.length; _ti++) {{
+                            _tlvs[_ti].scrollTop = _tlvs[_ti].scrollHeight;
                         }}
                         var _cids = ['content-placeholder', 'tool-content'];
                         for (var ci = 0; ci < _cids.length; ci++) {{
@@ -8239,6 +8266,7 @@ class CodeWebViewer(QWebEngineView):
         live_key_now: str,
         live_text: str,
         slice_to: int,
+        live_reasoning: bool = False,
     ) -> bool:
         """把 ``[formalized_len, slice_to)`` 段渲染成 part 并下发。
 
@@ -8268,7 +8296,7 @@ class CodeWebViewer(QWebEngineView):
             char_count=False,
             cache=self._block_cache,
             live_index=live_index,
-            live_html=self._v2_live_html(live_text, reasoning=False),
+            live_html=self._v2_live_html(live_text, reasoning=live_reasoning),
         )
         self._v2_last = mr
         self._v2_live_key = live_key_now
@@ -8280,21 +8308,29 @@ class CodeWebViewer(QWebEngineView):
         if page is None:
             return True
         tail = live_text[slice_to:]
-        tail_html = self._v2_live_tail_html(tail, reasoning=False)
+        tail_html = self._v2_live_tail_html(tail, reasoning=live_reasoning)
         # 降载记账对齐 DOM：本批已把 live 尾重置为 tail 的渲染结果，下一批的
         # grown 基准必须从 tail 长度起算，否则按旧全量长度算出的增长恒为负，
         # 尾部格式化会白白多等一个时间窗口。
         self._v2_live_tail_done_len = len(tail)
         self._v2_live_tail_done_ts = time.monotonic()
+        # 容器必须按归属选：思考块（简洁模式 home=tool-content）切到正文容器会
+        # 让限高/样式选择器全部命不中（2026-11-02 思考预览无限高根因之一）。
+        _container = "tool-content" if (live_reasoning and ctx.compact) else "content-placeholder"
         try:
             page.runJavaScript(
-                "if(typeof window._v2LiveSplit==='function')window._v2LiveSplit('content-placeholder',"                + json.dumps(live_key_now).decode("utf-8")
+                "if(typeof window._v2LiveSplit==='function')window._v2LiveSplit("
+                + json.dumps(_container).decode("utf-8")
+                + ","
+                + json.dumps(live_key_now).decode("utf-8")
                 + ","
                 + json.dumps(seg_html).decode("utf-8")
                 + ","
                 + json.dumps(tail_html or tail).decode("utf-8")
                 + ","
                 + ("true" if tail_html else "false")
+                + ","
+                + ("true" if live_reasoning else "false")
                 + ");"
             )
         except RuntimeError:
@@ -8581,10 +8617,21 @@ class CodeWebViewer(QWebEngineView):
         # formalize 是 O(n) 重渲 + 整块替换。能切片就没必要整块重渲。
         # 本批切片成功后直接返回 —— 两种路径互斥，同批都跑会把刚插进去的
         # part 又整块替换掉（用户可见闪烁 + O(n) 白跑）。
-        if live_index is not None and not force_full and self._v2_live_key == live_key_now:
+        # ⚠️ reasoning 不得切片：切片产物 .v2-live-part 是不限高的正式块，
+        # 思考内容会被逐段永久铺开（预览限高窗口形同虚设）；思考也不该跑
+        # markdown（与 _v2_live_tail_html 的 reasoning 保守口径一致）。
+        # 长思考靠后续整块 formalize 定型，预览始终只在 96px 窗口内滚动。
+        if (
+            live_index is not None
+            and not force_full
+            and self._v2_live_key == live_key_now
+            and not live_reasoning
+        ):
             slice_to = self._v2_live_slice(live_text)
             if slice_to > self._v2_live_formalized_len:
-                if self._emit_v2_live_slice(blocks, ctx, live_index, live_key_now, live_text, slice_to):
+                if self._emit_v2_live_slice(
+                    blocks, ctx, live_index, live_key_now, live_text, slice_to, live_reasoning
+                ):
                     return True
 
         formalize = (

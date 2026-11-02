@@ -6148,9 +6148,17 @@ class MessageCard(SimpleCardWidget):
             # （两种形态互斥，各自 no-op 不会重复显示）。
             _v2_key = getattr(self.viewer, "_v2_live_key", "") or ""
             if _v2_key:
+                # 容器必须与 v2 尾态归属一致（简洁模式 tool-content，非简洁
+                # content-placeholder）：硬编码 tool-content 时非简洁模式的增量
+                # 选择器命不中，思考预览静默停更（2026-11-02 排查发现）。
+                _v2_cid = getattr(self.viewer, "_tool_target_id", "tool-content")
+                # orjson.dumps 返回 bytes：直接插进 f-string 会变成 b'...' 字面量，
+                # 发出的 JS 语法错误并静默失败（增量永不显示）。统一 decode。
+                _cid_js = json.dumps(_v2_cid).decode("utf-8")
+                _key_js = json.dumps(_v2_key).decode("utf-8")
                 page.runJavaScript(
                     "if(typeof window._v2LiveAppend==='function')"
-                    f"window._v2LiveAppend('tool-content',{json.dumps(_v2_key)},{safe_text},true);"
+                    f"window._v2LiveAppend({_cid_js},{_key_js},{safe_text},true);"
                 )
         except RuntimeError:
             pass

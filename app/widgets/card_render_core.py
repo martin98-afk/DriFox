@@ -3624,7 +3624,12 @@ _SKELETON_CACHE_MAX = 48
 # （--dfx-font-family / --dfx-font-mono / --dfx-font-size），供 CodeWebViewer.refresh_font
 # 运行时注入。旧骨架把字体值写死在 <style> 里且池化复用保留骨架 → 切字体后
 # 已存在的卡片永远不跟随（"要重建几次会话才刷出来"）。
-_SKELETON_CACHE_VERSION = 74
+# _SKELETON_CACHE_VERSION +1（v75）：思考 v2 尾态加限高窗口
+# （#content-placeholder/#tool-content 的 .v2-live-text.think-compact max-height:96px
+# + 顶部渐隐，_v2LiveAppendNow / _v2LiveSplit 追加后滚底，_v2AfterPatch 首帧滚底，
+# _v2LiveSplit 新增 reasoning 参数保持 think-compact 类）。旧骨架无此规则 →
+# 长思考切标签页返回后整段全高显示（2026-11-02 用户实测）。
+_SKELETON_CACHE_VERSION = 75
 
 
 def _js_literal(value) -> str:
