@@ -93,6 +93,17 @@ def _write_worktree_description(wt_path: str, text: str) -> bool:
         return False
 
 
+def _write_worktree_creator(wt_path: str, creator: str) -> bool:
+    """写工作树创建者标记（human/ai），工作树页据此显示 AI 标签；写失败不影响主流程。"""
+    if not wt_path or not os.path.isdir(wt_path) or creator not in ("human", "ai"):
+        return False
+    key = f"worktree.{os.path.basename(wt_path)}.creator"
+    try:
+        return _run_git(["config", key, creator], wt_path, timeout=5).returncode == 0
+    except Exception:
+        return False
+
+
 def _resolve_main_repo(tool_ctx: dict, path: str = "") -> Tuple[Optional[str], str]:
     """定位主仓库根目录。
 
@@ -284,6 +295,7 @@ def _action_create(tool_ctx: dict, kwargs: dict) -> ToolResult:
 
     _invalidate_info_cache(repo_root)
     _write_worktree_description(worktree_dir, description)
+    _write_worktree_creator(worktree_dir, "ai")
     _notify_changed(f"created {worktree_dir}")
     logger.info(f"[worktree_tools] 已创建工作树: {worktree_dir} (分支 {branch_name}，说明 {description})")
     return ToolResult(

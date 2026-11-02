@@ -15,6 +15,8 @@ page_id="worktree-manager"（与插件同名）：注册它即填充右侧工作
 
 from __future__ import annotations
 
+import concurrent.futures
+import dataclasses
 import os
 from typing import Dict, Optional
 
@@ -27,7 +29,12 @@ from qfluentwidgets import BodyLabel
 from app.plugins.sdk import Colors, font_size_css
 from app.plugins.sdk import GitWorktreeDetector
 from app.plugins.sdk import get_font_family_css
-from .worktree_section import WorktreeSectionWidget
+from .worktree_section import (
+    WorktreeSectionWidget,
+    _DELETE_DONE,
+    list_local_branches,
+    read_all_worktree_meta,
+)
 
 
 def _caps(cap_id):
@@ -57,28 +64,40 @@ class _PageLoadJob(QRunnable):
         self._signals = signals
 
     def run(self):
-        payload = {"ok": False, "reason": "", "git_root": "", "info": None, "main_root": ""}
+        payload = {"ok": False, "reason": "", "git_root": "", "info": None, "main_root": "", "branches": []}
         try:
-            git_root = GitWorktreeDetector.detect_git(self._workdir)
-            if not git_root:
+            # 三路并行（互不依赖的只读 git 子进程）：Windows 下每条子进程
+            # 300~600ms，串行会把首屏拖到数秒；并行使关键路径 = 最慢一路
+            with concurrent.futures.ThreadPoolExecutor(max_workers=3) as ex:
+                f_info = ex.submit(GitWorktreeDetector.get_repo_info, self._workdir)
+                f_branches = ex.submit(list_local_branches, self._workdir)
+                f_desc = ex.submit(read_all_worktree_meta, self._workdir)
+                info = f_info.result()
+                branches = f_branches.result()
+                descriptions, creators = f_desc.result()
+
+            if info is None:
                 payload["reason"] = "not_git"
+            elif not info.worktrees:
+                payload["reason"] = "no_info"
             else:
-                # 当前目录落在某个 worktree 里时，detect_git 返回的是 worktree 路径。
-                # 页面要展示「主仓库 + 全部工作树」，必须回溯到主仓库根，否则
-                # 主仓库卡片会渲染成那个 worktree，且它在列表里再出现一次（重复行）。
-                main_root = git_root
-                if GitWorktreeDetector.is_worktree(git_root):
-                    resolved = GitWorktreeDetector.get_main_repo_path(git_root)
-                    if resolved and os.path.isdir(resolved):
-                        main_root = resolved
-                payload["git_root"] = git_root
-                payload["main_root"] = main_root
-                info = GitWorktreeDetector.get_repo_info(main_root)
-                if info is None or not info.worktrees:
-                    payload["reason"] = "no_info"
-                else:
-                    payload["ok"] = True
-                    payload["info"] = info
+                # 说明与创建者标记就地补到 wt 对象（_populate_rows 直接 getattr 读取）
+                for wt in info.worktrees:
+                    if not wt.is_main:
+                        name = os.path.basename(wt.path)
+                        wt.description = descriptions.get(name, "")
+                        wt.creator = creators.get(name, "")
+                # 当前目录落在某个 worktree 里时，info.root/current_branch 是
+                # 子工作树视角；页面（主仓库卡片、分支切换）必须永远渲染主仓库，
+                # 否则主仓库卡片会显示成子工作树、下拉还能选到已被其他 worktree
+                # 检出的分支（git 必拒）。这里统一替换为主仓库视角。
+                main_wt = next((w for w in info.worktrees if w.is_main), None)
+                if main_wt and info.root != main_wt.path:
+                    info = dataclasses.replace(info, root=main_wt.path, current_branch=main_wt.branch)
+                payload["ok"] = True
+                payload["info"] = info
+                payload["main_root"] = info.root
+                payload["branches"] = branches
         except Exception as e:  # noqa: BLE001 - 后台探测兜底
             payload["reason"] = f"error: {e}"
         self._signals.finished.emit(payload)
@@ -316,6 +335,9 @@ class SystemWorktreePage(QWidget):
         self._body_layout.insertWidget(0, self._empty_hint, 0)
 
         self._section = None
+        self._branches: list = []
+        # 删除进行中行/section 可能被重建销毁（其完成回调发不出信号），兜底刷新
+        _DELETE_DONE.done.connect(lambda _p: self.refresh_data())
 
     def _clear_body(self):
         for attr in ("_section", "_workdir_card"):
@@ -381,25 +403,37 @@ class SystemWorktreePage(QWidget):
         repo_info = payload["info"]
         # original_folder 必须是主仓库根（worktree 缓存失效/刷新都按它做 key）
         main_root = payload.get("main_root") or repo_info.root
+        branches = payload.get("branches") or []
         self._empty_hint.setVisible(False)
         self._remount_workdir_card(workdir, is_git=True)
         self._repo_info = repo_info
+        self._branches = list(branches)
+        self._mount_section(repo_info, main_root, workdir, project, branches)
+
+    def _mount_section(self, repo_info, main_root: str, workdir: str, project: str, branches: list):
+        """挂载工作树 section（旧实例同帧替换：新先插入、旧再 deleteLater，无空白帧）"""
+        old = self._section
         section = WorktreeSectionWidget(
             repo_info,
             original_folder=main_root,
             parent=self._body,
             current_workdir=workdir,
             project=project,
+            branches=branches,
         )
         section.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         section.setFixedHeight(section.content_height())
         section.sizeChanged.connect(section.setFixedHeight)
         section.worktreeSwitched.connect(self._on_worktree_switched)
         section.workingDirRestored.connect(self._on_workdir_restored)
-        section.worktreeDeleted.connect(lambda _p: self.refresh_data())
+        section.worktreeDeleted.connect(self._on_worktree_deleted)
+        section.repoInfoRefreshed.connect(self._on_section_info_refreshed)
         # 拉伸因子 0：多余高度留给尾部弹性，不能被均摊到行间距上
         self._body_layout.insertWidget(1, section, 0)
         self._section = section
+        if old is not None and old is not section:
+            old.hide()
+            old.deleteLater()
 
     def _mount_workdir_card(self, workdir: str, is_git: bool):
         """在 body 顶部挂工作目录卡片（索引 0，始终最上）"""
@@ -438,8 +472,43 @@ class SystemWorktreePage(QWidget):
 
     # ── 交互 ──
 
+    def _on_section_info_refreshed(self, repo_info, branches):
+        """section 后台刷新完成：同步页面缓存（切换即时重建的数据源）
+
+        不触发重建：section 已自行渲染；这里只同步数据，否则新建工作树后
+        自动切换会用旧缓存把新列表覆盖回去（表现为建完不刷新）。
+        """
+        self._repo_info = repo_info
+        self._branches = list(branches or [])
+
+    def _on_worktree_deleted(self, worktree_path: str):
+        """删除工作树后刷新；删的是当前工作目录所在子树则先回退主仓库根
+
+        否则 _rebuild 会甩出「工作目录不存在」空态（workdir 仍指向已删目录）。
+        """
+        current = self._instance_workdir.get(self._current_project)
+        if current and self._repo_info is not None:
+            cur_n = os.path.normcase(os.path.normpath(current))
+            del_n = os.path.normcase(os.path.normpath(worktree_path))
+            if cur_n == del_n or cur_n.startswith(del_n + os.sep):
+                root = self._repo_info.root
+                memory_mgr = self._get_memory_manager()
+                if memory_mgr is not None:
+                    try:
+                        memory_mgr.set_working_directory(self._current_project, root)
+                    except Exception as e:
+                        logger.warning(f"[worktree-manager] 回退工作目录持久化失败: {e}")
+                self._instance_workdir[self._current_project] = root
+                self._emit_working_dir(root)
+        self.refresh_data()
+
     def _on_worktree_switched(self, original_folder: str, worktree_path: str):
-        """切到指定工作树/主仓库：持久化 + 上抛宿主同步"""
+        """切到指定工作树/主仓库：持久化 + 上抛宿主 + 缓存信息即时重建
+
+        同仓库内切换只有「谁是当前」变化（worktree 列表/分支/说明/领先落后
+        均不变），复用已探测的 repo_info 即时重建：零 git 探测、不清空页面、
+        无「正在读取仓库信息…」占位闪烁。
+        """
         if not worktree_path or not os.path.isdir(worktree_path):
             return
         project = self._current_project
@@ -451,7 +520,13 @@ class SystemWorktreePage(QWidget):
                 logger.warning(f"[worktree-manager] 持久化工作目录失败: {e}")
         self._instance_workdir[project] = worktree_path
         self._emit_working_dir(worktree_path)
-        self.refresh_data()
+        if self._repo_info is None or self._workdir_card is None:
+            self.refresh_data()
+            return
+        self._workdir_card.set_workdir(worktree_path)
+        self._workdir_card.set_is_git(True)
+        self._empty_hint.setVisible(False)
+        self._mount_section(self._repo_info, self._repo_info.root, worktree_path, project, self._branches)
 
     def _on_workdir_restored(self, path: str):
         """工作目录被外部删除后回退（不重建工作树）"""

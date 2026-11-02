@@ -4537,6 +4537,119 @@ class MessageCard(SimpleCardWidget):
                     return _i + 1
         return self._tool_insert_anchors.get(tool_call_id)
 
+    # ── 工具与思考独立卡（简洁模式流式期镜像）─────────────────
+
+    def _host_window(self):
+        """沿父链找承载本卡的对话窗口（提供 show/hide_tool_think_card）"""
+        parent = self.parent()
+        while parent is not None:
+            if callable(getattr(parent, "show_tool_think_card", None)):
+                return parent
+            parent = parent.parent()
+        return None
+
+    def _attach_tool_think_card(self) -> None:
+        """流式出现工具/思考块：显示独立卡并把本卡 viewer 接为镜像源
+
+        简洁模式限定：非简洁模式、历史卡、非 v2 通道、非流式均不参与
+        （工具区仍在卡内原位渲染）。
+        """
+        if self.__dict__.get("_is_history", False):
+            return
+        viewer = self.__dict__.get("viewer")
+        if viewer is None or not getattr(viewer, "_render_v2", False):
+            return
+        if not self.__dict__.get("_streaming", False):
+            return
+        if not getattr(viewer, "_tool_compact_mode", True):
+            return
+        win = self._host_window()
+        if win is None:
+            return
+        card = getattr(win, "_tool_think_card", None)
+        old = self.__dict__.get("_tool_think_bound")
+        if card is not None and old is card:
+            # 已绑定：只在「TOP 槽位空着」时确认可见。被分享卡 / 历史问题卡
+            # 顶掉时让位（用户主动打开的卡优先），那两张卡关闭后下一批数据
+            # 自然把本卡接回来。避免每条 chunk 都走一次 CardManager.show_card。
+            self._reassert_tool_think_visible(win)
+            return
+        try:
+            card = win.show_tool_think_card()
+        except Exception:
+            return
+        if card is None or getattr(card, "viewer", None) is None:
+            return
+        if old is not None and old is not card:
+            self._detach_mirror(old)
+        try:
+            viewer._tool_mirror = card.viewer.apply_tool_js
+            card.viewer._on_mirror_ready = viewer.sync_tool_mirror
+            # 镜像源回指：独立卡展开工具块时到这里反查 body（它没有 markdown 书账）
+            card.viewer._mirror_source = viewer
+            # 卡内工具区隐藏：内容已在独立卡显示，不重复
+            set_mirrored = getattr(viewer, "set_tool_section_mirrored", None)
+            if callable(set_mirrored):
+                set_mirrored(True)
+            # 弱引用回主：用户点卡片的 X 时由窗口侧解绑并恢复卡内工具区
+            win._tool_think_owner = weakref.ref(self)
+        except RuntimeError:
+            return
+        self._tool_think_bound = card
+        # 中途显示（流式已跑了一段）：补一次全量快照；首块场景此时无块可推，
+        # 下一批补丁自然带上。
+        sync = getattr(viewer, "sync_tool_mirror", None)
+        if callable(sync):
+            sync()
+
+    def _reassert_tool_think_visible(self, win) -> None:
+        """已绑定状态下确认卡片仍占着 TOP 槽位（被其他 TOP 卡占用则让位）"""
+        mgr = getattr(win, "_card_manager", None)
+        wid = getattr(win, "_window_id", None)
+        if mgr is None or not wid:
+            return
+        try:
+            from app.widgets.cards.card_manager import ContainerType
+
+            if mgr.is_card_visible("tool_think", wid):
+                return
+            if mgr.get_visible_cards(wid, ContainerType.TOP):
+                return
+            win.show_tool_think_card()
+        except Exception:
+            pass
+
+    def _detach_mirror(self, card) -> None:
+        """解绑镜像（不碰卡片显隐）：viewer 可能被池化复用给别的卡片"""
+        viewer = self.__dict__.get("viewer")
+        try:
+            if viewer is not None:
+                viewer._tool_mirror = None
+                set_mirrored = getattr(viewer, "set_tool_section_mirrored", None)
+                if callable(set_mirrored):
+                    set_mirrored(False)
+        except RuntimeError:
+            pass
+        try:
+            if card is not None and getattr(card, "viewer", None) is not None:
+                card.viewer._on_mirror_ready = None
+                card.viewer._mirror_source = None
+        except RuntimeError:
+            pass
+
+    def _release_tool_think_card(self) -> None:
+        """流式结束：解绑镜像、清空并隐藏独立卡（内容已回落卡内折叠态）"""
+        card = self.__dict__.get("_tool_think_bound")
+        self._detach_mirror(card)
+        self._tool_think_bound = None
+        win = self._host_window()
+        if win is not None:
+            try:
+                win.hide_tool_think_card()
+                win._tool_think_owner = None
+            except Exception:
+                pass
+
     def append_tool_result(
         self,
         tool_name: str,
@@ -4547,6 +4660,8 @@ class MessageCard(SimpleCardWidget):
         diff: str = None,
         echarts: str = None,
     ):
+        # 简洁模式流式：工具区镜像到常驻独立卡（首次出现才绑卡，幂等）
+        self._attach_tool_think_card()
         block = make_tool_result_block(
             tool_name=tool_name,
             arguments=arguments,
@@ -5873,6 +5988,8 @@ class MessageCard(SimpleCardWidget):
         # 已完成参数接收或已追加工具结果的不再更新，防止完成态被退回 streaming 状态
         if tool_call_id in self._finished_streaming_ids:
             return
+        # 简洁模式流式：工具区镜像到常驻独立卡（幂等）
+        self._attach_tool_think_card()
         # 🆕 Bug B：首次见 tool_call_id 记录插入锚点 = 工具调用发生时 _content_data 的长度。
         # append_tool_result 用 insert(锚点) 把结果插回工具调用发生的位置（而非恒末尾），
         # 保持"思考→工具→正文→工具→正文"交错顺序。同锚点多工具按启动序号保序。
@@ -6069,6 +6186,9 @@ class MessageCard(SimpleCardWidget):
             # 历史批量加载：渲染由末尾 finish_streaming(history=True) 统一做
             return
 
+        # 简洁模式流式：思考内容同样镜像到常驻独立卡（首 chunk 即显示）
+        self._attach_tool_think_card()
+
         if not self._lazy_rendered or not self.viewer:
             self._pending_content = self._content_data
             return
@@ -6140,7 +6260,27 @@ class MessageCard(SimpleCardWidget):
                 }}
             }})();
             """
-            self.viewer.page().runJavaScript(js_code)
+            page = self.viewer.page()
+            if page is None:
+                return
+            page.runJavaScript(js_code)
+            # 工具与思考独立卡：这条通道不走 _perform_update_v2，必须单独镜像。
+            # 否则独立卡的思考区永远停在 CSS 的「深度思考中...」占位（用户实测）。
+            push = getattr(self.viewer, "_push_tool_mirror", None)
+            if callable(push):
+                push(js_code)
+            # v2 长思考（≥ _LIVE_MIN_CHARS）活动块走 .v2-live-text 尾态，上面
+            # .think-streaming 的选择器命不中：补一条 v2 增量通道，两边都发
+            # （两种形态互斥，各自 no-op 不会重复显示）。
+            _v2_key = getattr(self.viewer, "_v2_live_key", "") or ""
+            if _v2_key:
+                js_v2 = (
+                    "if(typeof window._v2LiveAppend==='function')"
+                    f"window._v2LiveAppend('tool-content',{json.dumps(_v2_key)},{safe_text},true);"
+                )
+                page.runJavaScript(js_v2)
+                if callable(push):
+                    push(js_v2)
         except RuntimeError:
             pass
 
@@ -6281,7 +6421,12 @@ class MessageCard(SimpleCardWidget):
         if history:
             self._streaming = False
         else:
-            self.stop_streaming_anim()
+            # finally：stop_streaming_anim 抛异常时也要把独立卡收掉
+            # （卡子挂在窗口级，漏收会跟着手一直停在对话上方）
+            try:
+                self.stop_streaming_anim()
+            finally:
+                self._release_tool_think_card()
         # [B4] 轮次落定清零流式采样缓冲（与 _refresh_footer_stats elapsed 分支/
         # start_elapsed_tracking 的清零点对齐）：原文缓冲是流式期间累计的全文副本，
         # 一轮 100-300KB 残留到下次 start_elapsed_tracking 才清。

@@ -1307,17 +1307,15 @@ class CodeWebViewer(QWebEngineView):
         """
         return self._tool_compact_mode or bool(getattr(self, "_is_history", False))
 
-    def _serve_tool_body(self, tool_call_id: str) -> None:
-        """工具块展开请求：反查渲染源该块，重渲染 body 并注入。
+    def _render_tool_body_html(self, tool_call_id: str) -> str:
+        """反查渲染源，返回该工具块的 body HTML（_serve_tool_body 与镜像端共用）。
 
-        不可见的工具块 body 只有空占位（见 render_helpers.render_tool_block 的
-        lazy_body），点开或展开工具区时 JS 经 console 通道请求内容。内容从当前
-        渲染源 markdown 反查该 <tool> 段重算，不常驻内存。
+        独立卡（工具与思考面板）没有自己的 markdown 书账，由它委托本方法取
+        body；拆分后反查逻辑只维护一份。
         """
         tid = (tool_call_id or "").strip()
-        if not tid or not self._is_js_ready:
-            return
-        html = ""
+        if not tid:
+            return ""
         try:
             from app.widgets.card_render_core import (
                 _render_tool_block_content,
@@ -1348,19 +1346,35 @@ class CodeWebViewer(QWebEngineView):
             if seg:
                 # 绕过 lru_cache：展开结果是一次性大字符串，缓存只会让同一份
                 # 内容再多占一格（完整版渲染已缓存过一份）。
-                html = _render_tool_block_content.__wrapped__(
+                return _render_tool_block_content.__wrapped__(
                     seg, compact=self._tool_compact_mode, body_only=True
                 )
         except Exception as e:
             logger.warning(f"[tool-body] 反查渲染工具块失败 {tid}: {e}")
+        return ""
+
+    def _fill_tool_body(self, tool_call_id: str, html: str) -> None:
+        """把 body HTML 下发到本 viewer 的 `_fillToolBody` 通道"""
         try:
             page = self.page()
             if page is None:
                 return
             payload = base64.b64encode((html or "").encode("utf-8")).decode("ascii")
-            page.runJavaScript(f"window._fillToolBody({_js_literal(tid)}, {_js_literal(payload)});")
+            page.runJavaScript(f"window._fillToolBody({_js_literal(tool_call_id)}, {_js_literal(payload)});")
         except RuntimeError:
             pass
+
+    def _serve_tool_body(self, tool_call_id: str) -> None:
+        """工具块展开请求：反查渲染源该块，重渲染 body 并注入。
+
+        不可见的工具块 body 只有空占位（见 render_helpers.render_tool_block 的
+        lazy_body），点开或展开工具区时 JS 经 console 通道请求内容。内容从当前
+        渲染源 markdown 反查该 <tool> 段重算，不常驻内存。
+        """
+        tid = (tool_call_id or "").strip()
+        if not tid or not self._is_js_ready:
+            return
+        self._fill_tool_body(tid, self._render_tool_body_html(tid))
 
     def _handle_context_lost(self):
         """JavaScript 报告上下文丢失"""
@@ -1595,6 +1609,16 @@ class CodeWebViewer(QWebEngineView):
         try:
             if self.page() and self._is_js_ready:
                 self.page().runJavaScript(_RESET_CONTENT_FOR_REUSE_JS)
+        except RuntimeError:
+            pass
+        # 工具与思考镜像：复用后本 viewer 已属新卡片。镜像回调残留会把新卡
+        # 内容推给独立卡（串内容），注入的隐藏样式残留会让新卡工具区凭空消失。
+        self._tool_mirror = None
+        self._tool_section_mirrored = False
+        self._v2_last_mr = None
+        try:
+            if self.page():
+                self.page().runJavaScript("var s=document.getElementById('tool-mirror-hide');if(s)s.remove();")
         except RuntimeError:
             pass
         # 骨架仍在 → JS 就绪态保持 True（复用方无需重载骨架）。
@@ -8604,6 +8628,10 @@ class CodeWebViewer(QWebEngineView):
         if page is None:
             return True
         js: List[str] = []
+        # 工具区镜像（工具与思考独立卡）：同一批 tool 相关语句同步维护一份，
+        # 末尾经 _push_tool_mirror 推给独立卡 viewer。正文语句不进镜像——
+        # 独立卡不渲染正文，推过去只是白付一次 IPC + DOM 构建。
+        mirror_js: List[str] = []
         _has_patch_ops = (not content_ops.is_empty) or (not tool_ops.is_empty)
         # 帧级揭示缓冲结算：必须早于本批任何 DOM 操作。
         # - force_full / 正式化：本批 html 已含全量文本，且会替换/清空 live 节点
@@ -8652,6 +8680,12 @@ class CodeWebViewer(QWebEngineView):
                 "var _c1=document.getElementById('content-placeholder');if(_c1)_c1.innerHTML='';"
                 "var _c2=document.getElementById('tool-content');if(_c2)_c2.innerHTML='';"
             )
+            # 镜像端独立维护自己的 DOM：全量重建批必须同样清空工具区，
+            # 否则旧节点残留（两侧块 key 相同但节点身份不同，patchBlocks 会叠加）。
+            mirror_js.append(
+                "if(typeof window._v2LiveDrop==='function')window._v2LiveDrop();"
+                "var _tc=document.getElementById('tool-content');if(_tc)_tc.innerHTML='';"
+            )
         if not content_ops.is_empty:
             js.append(
                 "window.patchBlocks('content-placeholder',"
@@ -8659,18 +8693,20 @@ class CodeWebViewer(QWebEngineView):
                 + ");"
             )
         if not tool_ops.is_empty:
-            js.append(
+            _tool_patch_js = (
                 "window.patchBlocks('tool-content',"
                 + json.dumps(tool_ops.to_payload()).decode("utf-8")
                 + ");"
             )
+            js.append(_tool_patch_js)
+            mirror_js.append(_tool_patch_js)
         if live_delta:
             # 容器按块归属选：思考块归 #tool-content（_reasoning_home 返回 HOME_TOOL），
             # 硬编码 content-placeholder 会让 _v2LiveNode 在错误容器里查不到节点 →
             # _v2LiveAppend 静默返回 false → 思考增量全部丢失（实测表现为思考内容
             # 停在首帧纯文本、后续增长完全不显示）。
             _live_cid = "tool-content" if live_reasoning else "content-placeholder"
-            js.append(
+            _live_append_js = (
                 "if(typeof window._v2LiveAppend==='function')window._v2LiveAppend('"
                 + _live_cid
                 + "',"
@@ -8681,6 +8717,11 @@ class CodeWebViewer(QWebEngineView):
                 + ("true" if live_reasoning else "false")
                 + ");"
             )
+            js.append(_live_append_js)
+            if live_reasoning:
+                # 思考块的容器就是工具区（_reasoning_home = HOME_TOOL）：
+                # 独立卡必须收到同一条增量，否则思考内容滞后到正式化才出现。
+                mirror_js.append(_live_append_js)
         # ⚠️ 用 __dict__.get 而非 getattr(self, ..., None)：PyQt5 未初始化 wrapper
         # （测试桩用 __new__ 构造）上 getattr 缺属性抛 RuntimeError 而非走默认值。
         _pending_tail = self.__dict__.get("_v2_live_tail_html_pending")
@@ -8712,8 +8753,96 @@ class CodeWebViewer(QWebEngineView):
                 "window._v2AnchorRestore(document.getElementById('tool-content'),window._v2AnchorT);}"
             )
         # v2 专属收尾：流式运行框去重 / 工具区显隐与 header / 工具区滚底
-        js.append(f"if(typeof window._v2AfterPatch==='function')window._v2AfterPatch({str(self._streaming).lower()});")
+        _after_patch_js = f"if(typeof window._v2AfterPatch==='function')window._v2AfterPatch({str(self._streaming).lower()});"
+        js.append(_after_patch_js)
+        mirror_js.append(_after_patch_js)
         page.runJavaScript("".join(js))
+        # 记最近一次渲染结果：独立卡中途显示 / 骨架重建时据此补一次全量快照
+        self._v2_last_mr = mr
+        self._push_tool_mirror("".join(mirror_js))
+        return True
+
+    def set_tool_section_mirrored(self, mirrored: bool) -> None:
+        """标记「工具区已镜像到独立卡」：置位时卡内工具区整体隐藏。
+
+        隐藏必须走注入 ``<style>`` 而非 inline ``display``：``_v2AfterPatch``
+        每批都会把 ``#tool-section`` 的 inline display 重设为 ``''``（简洁模式
+        确保工具区可见），inline 写法会被下一批顶回来。``!important`` 规则
+        压过 inline 声明，注入一次即长期生效。
+
+        幂等：重复置位不重复注入；解除时移除该 style 节点。
+        """
+        self._tool_section_mirrored = bool(mirrored)
+        try:
+            page = self.page()
+            if page is None:
+                return
+            if mirrored:
+                page.runJavaScript(
+                    "(function(){if(document.getElementById('tool-mirror-hide'))return;"
+                    "var s=document.createElement('style');s.id='tool-mirror-hide';"
+                    "s.textContent='#tool-section{display:none !important;}';"
+                    "document.head.appendChild(s);})();"
+                )
+            else:
+                page.runJavaScript("var s=document.getElementById('tool-mirror-hide');if(s)s.remove();")
+        except RuntimeError:
+            pass
+
+    def _push_tool_mirror(self, js: str) -> None:
+        """把本批工具区 JS 同步给镜像端（工具与思考独立卡）。
+
+        镜像端状态与消息卡解耦：未绑定 / 已销毁 / JS 未就绪时静默跳过，
+        由 ``ToolThinkCard`` 在显示或骨架就绪后调 :meth:`sync_tool_mirror` 补全量。
+        """
+        if not js:
+            return
+        cb = self.__dict__.get("_tool_mirror")
+        if cb is None:
+            return
+        if os.environ.get("DRIFOX_TOOL_THINK_DIAG"):
+            logger.info(
+                f"[tool-think] push len={len(js)} patch={js.count('patchBlocks')} "
+                f"live={js.count('_v2LiveAppend')} after={js.count('_v2AfterPatch')}"
+            )
+        try:
+            cb(js)
+        except Exception:
+            pass
+
+    def sync_tool_mirror(self) -> bool:
+        """把当前工具区全量推给镜像端（独立卡刚显示 / 骨架重建后调用）。
+
+        独立卡不维护消息卡的 diff 状态，只能吃「从空到当前」的全量 ops；
+        因此这里按 ``diff_message(None, mr)`` 重算一份，只取 tool 侧。
+
+        Returns:
+            True = 已推送；False = 暂无可用渲染结果（等下一批补丁）。
+        """
+        cb = self.__dict__.get("_tool_mirror")
+        if cb is None:
+            return False
+        mr = self.__dict__.get("_v2_last_mr")
+        if mr is None or not mr.tool:
+            return False
+        try:
+            _, tool_ops = diff_message(None, mr)
+        except Exception:
+            return False
+        if tool_ops.is_empty:
+            return False
+        js = (
+            "if(typeof window._v2LiveDrop==='function')window._v2LiveDrop();"
+            "var _tc=document.getElementById('tool-content');if(_tc)_tc.innerHTML='';"
+            "window.patchBlocks('tool-content',"
+            + json.dumps(tool_ops.to_payload()).decode("utf-8")
+            + ");"
+            + f"if(typeof window._v2AfterPatch==='function')window._v2AfterPatch({str(self._streaming).lower()});"
+        )
+        try:
+            cb(js)
+        except Exception:
+            return False
         return True
 
     def _render_tail_inline(self):

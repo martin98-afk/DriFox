@@ -1833,6 +1833,65 @@ class OpenAIChatToolWindow(ToolWindow):
         )
         self._top_card_container.add_card("history_questions", self._history_questions_card)
 
+    # ── 工具与思考独立卡（简洁模式流式期常驻面板）──
+
+    def _ensure_tool_think_card(self):
+        """确保「工具与思考」独立卡已创建（流式首次出现工具/思考块时懒创建）
+
+        位置：TOP 卡片容器（标题栏之下、消息列表之上），与分享卡 / 历史问题卡
+        同槽位 → CardManager 同容器互斥，任一时刻只显示一张。
+        刻意不加入 ``_system_card_ids``：显示期间不隐藏输入框（流式中还要能插话）。
+        """
+        card = getattr(self, "_tool_think_card", None)
+        if card is not None:
+            return card
+        from app.widgets.cards.tool_think_card import ToolThinkCard
+
+        card = ToolThinkCard(self)
+        card.closed.connect(self._on_tool_think_closed)
+        self._card_manager.register_card(
+            self._window_id, ContainerType.TOP, "tool_think", card, system_card=True
+        )
+        self._top_card_container.add_card("tool_think", card)
+        self._tool_think_card = card
+        return card
+
+    def show_tool_think_card(self):
+        """流式出现工具/思考块时显示独立卡（已显示时幂等），返回卡片实例"""
+        card = self._ensure_tool_think_card()
+        self._card_manager.show_card("tool_think", self._window_id)
+        return card
+
+    def hide_tool_think_card(self, reset: bool = True):
+        """流式结束 / 切会话 / 新一轮开始：清空并隐藏独立卡"""
+        card = getattr(self, "_tool_think_card", None)
+        if card is not None and reset:
+            # 清空失败不能阻断隐藏：卡挂在窗口级，隐藏漏执行就会一直停在
+            # 对话上方（用户实测「对话终止了还在」）。
+            try:
+                card.reset_panel()
+            except Exception:
+                pass
+        self._card_manager.hide_card("tool_think", self._window_id)
+
+    def _on_tool_think_closed(self):
+        """用户手动关闭独立卡：解绑镜像并恢复卡内工具区
+
+        不自动重开：用户关掉就是不想看，本轮流式期间不再打扰；
+        下一轮流式开始时 MessageCard 会重新绑定并显示。
+        """
+        owner_ref = getattr(self, "_tool_think_owner", None)
+        owner = owner_ref() if callable(owner_ref) else None
+        card = getattr(self, "_tool_think_card", None)
+        if owner is not None and card is not None:
+            try:
+                owner._detach_mirror(card)
+                owner._tool_think_bound = None
+            except Exception:
+                pass
+        self._tool_think_owner = None
+        self._card_manager.hide_card("tool_think", self._window_id)
+
     def _ensure_tool_control_card(self):
         """工具控制卡片懒创建（批1）：构造/接线/注册按需执行
 
@@ -8961,6 +9020,14 @@ class OpenAIChatToolWindow(ToolWindow):
             # 🛡️ 团队实时状态同步：流式/思考/提问 → busy；空闲 → idle
             # （覆盖所有流式/思考阶段，供 team_manage(action=list) 查询路径可见）
             self._sync_team_member_runtime_status(state)
+            # 🛡️ 工具与思考独立卡兜底收尾：AI 落到 idle 且当前无流式 → 必收。
+            # MessageCard.finish_streaming 是主路径，但中断路径多（手动停止、
+            # worker 被杀、动作队列停流、错误），漏一条卡就永久悬在对话上方。
+            if state == "idle" and not getattr(self, "_is_streaming", False):
+                try:
+                    self.hide_tool_think_card()
+                except Exception:
+                    pass
 
     def _sync_team_member_runtime_status(self, state: str) -> None:
         """将 AI 状态同步到团队成员 runtime 状态（仅团队成员生效，非成员静默跳过）"""
@@ -13923,6 +13990,8 @@ class OpenAIChatToolWindow(ToolWindow):
         QTimer.singleShot(150, memory_governor._run_gc_hook)
 
     def _clear_chat_area(self, delete_widgets: bool = True):
+        # 会话切换 = 独立卡内容已属上一会话：清空并隐藏（不复用旧内容）
+        self.hide_tool_think_card()
         self._current_assistant_card = None
         self._displayed_session_id = None
         # [T23 改动3] 清空聊天区 = 全部卡片离场，布局纪元递增

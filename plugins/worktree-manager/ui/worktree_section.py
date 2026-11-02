@@ -17,7 +17,7 @@ import subprocess
 import sys
 
 from loguru import logger
-from PyQt5.QtCore import QObject, QRunnable, QThreadPool, QTimer, Qt, pyqtSignal
+from PyQt5.QtCore import QObject, QRunnable, QThreadPool, Qt, pyqtSignal
 from PyQt5.QtGui import QPaintEvent
 from PyQt5.QtWidgets import (
     QDialog,
@@ -30,7 +30,7 @@ from PyQt5.QtWidgets import (
 )
 from qfluentwidgets import ComboBox
 
-from app.plugins.sdk import Colors, font_size_css
+from app.plugins.sdk import Colors, font_size_css, readable_text_on
 from app.plugins.sdk import GitWorktreeDetector
 from app.plugins.sdk import get_font_family_css, get_icon
 from app.plugins.sdk import ElidedLabel
@@ -65,22 +65,48 @@ def _git(args, cwd, timeout=10):
     )
 
 
-def read_worktree_description(wt_path: str) -> str:
-    """读取工作树说明（git config worktree.<name>.description）
-
-    git 以工作树目录名作为 config key 的 <name> 段。读取失败一律返回空串，
-    说明只是辅助信息，不能因为它让整个列表渲染失败。
-    """
-    if not wt_path or not os.path.isdir(wt_path):
-        return ""
+def write_worktree_creator(wt_path: str, creator: str) -> bool:
+    """写工作树创建者标记（human/ai），用于区分列表里的 AI 标签；写失败不影响主流程"""
+    if not wt_path or not os.path.isdir(wt_path) or creator not in ("human", "ai"):
+        return False
+    key = f"worktree.{os.path.basename(wt_path)}.creator"
     try:
-        r = _git(["config", f"worktree.{os.path.basename(wt_path)}.description"], wt_path, timeout=3)
-        if r.returncode == 0:
-            return (r.stdout or "").strip()
+        return _git(["config", key, creator], wt_path, timeout=5).returncode == 0
     except Exception:
-        pass
-    return ""
+        return False
 
+
+def read_all_worktree_meta(repo_root: str) -> tuple:
+    """批量读取所有 worktree 说明与创建者标记（一条 git config 读全部，替代逐 worktree 读）
+
+    元数据写在各仓库共享的 common config 里，`git config --get-regexp` 一轮即
+    可取回；返回 ({worktree目录名: 说明}, {worktree目录名: creator})。
+    解析失败/无配置返回空 dict，说明只是辅助信息，不能因为它让整个列表渲染失败。
+    """
+    if not repo_root or not os.path.isdir(repo_root):
+        return {}, {}
+    try:
+        r = _git(["config", "--get-regexp", r"^worktree\..*\.(description|creator)$"], repo_root, timeout=5)
+        if r.returncode != 0:
+            return {}, {}
+        descriptions, creators = {}, {}
+        prefix = "worktree."
+        for line in (r.stdout or "").splitlines():
+            if not line.strip():
+                continue
+            key, _, value = line.partition(" ")
+            if not key.startswith(prefix):
+                continue
+            name, _, field = key[len(prefix):].rpartition(".")
+            if not name:
+                continue
+            if field == "description":
+                descriptions[name] = value
+            elif field == "creator":
+                creators[name] = value
+        return descriptions, creators
+    except Exception:
+        return {}, {}
 
 def write_worktree_description(wt_path: str, text: str) -> bool:
     """写入工作树说明；空文本表示删除该配置项"""
@@ -129,7 +155,6 @@ class ThemeIconLabel(QLabel):
         super().__init__(parent)
         self._icon_name = icon_name
         self._size = size
-        self._confirm_style = False
         self.setFixedSize(size + 4, size + 4)
         self.setStyleSheet("background: transparent;")
 
@@ -138,32 +163,26 @@ class ThemeIconLabel(QLabel):
         self._icon_name = icon_name
         self.update()
 
-    def show_confirm_style(self, on: bool):
-        """确认态：危险色。svg 是单色掩码，用 QIcon 的 paint 无法直接改色，
-        这里改用主题危险色重新生成一个临时图标（通过 colorize 保底）。"""
-        self._confirm_style = bool(on)
-        self.update()
-
     def paintEvent(self, event):
-        from PyQt5.QtGui import QColor, QPainter, QPixmap
+        from PyQt5.QtGui import QPainter
 
         p = QPainter(self)
-        icon = get_icon(self._icon_name)
-        if self._confirm_style:
-            # 危险态：把图标着色为错误色（QIcon 本身不暴露颜色，改用 pixmap + 合成）
-            pm = icon.pixmap(self._size, self._size)
-            tinted = QPixmap(pm.size())
-            tinted.fill(Qt.transparent)
-            tp = QPainter(tinted)
-            tp.drawPixmap(0, 0, pm)
-            tp.setCompositionMode(QPainter.CompositionMode_SourceIn)
-            tp.fillRect(tinted.rect(), QColor("#f85149"))
-            tp.end()
-            p.drawPixmap(2, 2, tinted)
-        else:
-            icon.paint(p, self.rect(), Qt.AlignCenter)
+        get_icon(self._icon_name).paint(p, self.rect(), Qt.AlignCenter)
         p.end()
 
+
+class _DeleteDoneBroker(QObject):
+    """删除任务完成的模块级中转信号
+
+    删除进行中目录已消失，页面任意重绘会触发 _check_paths 重建、切换会
+    触发 _mount_section 替换，都可能把正在删除的行（含所在 section）提前
+    销毁；worker 完成回调不能再依赖行存活。正常路径仍走行信号，本信号
+    仅在行已析构时由页面直连兜底刷新。
+    """
+
+    done = pyqtSignal(str)
+
+_DELETE_DONE = _DeleteDoneBroker()
 
 class _WorktreeTaskSignals(QObject):
     """后台 git 任务的完成信号（跨线程 emit → 主线程槽）"""
@@ -288,10 +307,14 @@ def _fetch_repo_info_job(git_root: str):
             _git(["worktree", "prune"], info.root, timeout=10)
         except Exception:
             pass
-    # 说明不随 get_repo_info 返回，这里补一次（每个工作树一次 git config，通常 <5ms）
+    # 说明与创建者标记不随 get_repo_info 返回，批量补一次（单条 git config 取回全部；
+    # 逐 worktree 读在 Windows 下每条子进程 300ms+）
+    descriptions, creators = read_all_worktree_meta(info.root)
     for wt in info.worktrees:
         if not wt.is_main:
-            setattr(wt, "description", read_worktree_description(wt.path))
+            name = os.path.basename(wt.path)
+            setattr(wt, "description", descriptions.get(name, ""))
+            setattr(wt, "creator", creators.get(name, ""))
     branches = list_local_branches(info.root)
     return info, missing, branches
 
@@ -321,12 +344,15 @@ class MainRepoCard(QWidget):
         # WA_StyledBackground：不设它时 QWidget 子类的 background QSS 根本不绘制
         self.setAttribute(Qt.WA_StyledBackground, True)
         Colors.refresh()
+        # 左侧竖条：仅当前工作目录落在主仓库时用强调色（与子工作树行同语义），
+        # 否则用边框灰；当前在子工作树时主树不再高亮
+        bar = Colors.TEXT_ACCENT if self._is_current else Colors.BORDER
         self.setStyleSheet(
             f"""
             QWidget#mainRepoCard {{
                 background-color: {Colors.CARD_BG.format(alpha=160)};
                 border: none;
-                border-left: 3px solid {Colors.TEXT_ACCENT};
+                border-left: 3px solid {bar};
                 border-radius: 6px;
             }}
             """
@@ -363,8 +389,11 @@ class MainRepoCard(QWidget):
             badge = QLabel("当前", self)
             badge.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
             badge.setFixedHeight(19)
+            # 真黑等主题 accent 与 BUTTON_TEXT_ON_ACCENT 可能同为纯白（白底白字不可见），
+            # 前景色按底色 WCAG 对比度自适应
+            on_accent = readable_text_on(Colors.TEXT_ACCENT, Colors.BUTTON_TEXT_ON_ACCENT)
             badge.setStyleSheet(
-                f"color: {Colors.BUTTON_TEXT_ON_ACCENT}; background: {Colors.TEXT_ACCENT};"
+                f"color: {on_accent}; background: {Colors.TEXT_ACCENT};"
                 f" {get_font_family_css()} {font_size_css(10)} padding: 1px 6px; border-radius: 3px;"
             )
             head.addWidget(badge)
@@ -399,6 +428,14 @@ class MainRepoCard(QWidget):
         self._branch_combo.setMinimumWidth(140)
         self._branch_combo.setFixedHeight(26)
         branches = list(self._branches)
+        # 被其他（非主仓库）worktree 检出的分支在主仓库 checkout 必然失败
+        # （fatal: already used by worktree），下拉里直接排除，只留主仓库可切分支
+        taken = {
+            w.branch
+            for w in self._repo_info.worktrees
+            if not w.is_main and w.branch and w.branch != "(detached)"
+        }
+        branches = [b for b in branches if b not in taken]
         current = self._repo_info.current_branch
         if current and current not in branches:
             branches.insert(0, current)
@@ -448,8 +485,6 @@ class _WorktreeRow(QWidget):
         super().__init__(parent)
         self._wt = wt
         self._is_current = is_current
-        self._confirming_delete = False
-        self._delete_timer: QTimer = None
         self._del_btn: QLabel = None
         self._delete_worker = None
         desc_text = str(getattr(wt, "description", "") or "")
@@ -516,10 +551,13 @@ class _WorktreeRow(QWidget):
         top.addWidget(branch_label, 1)  # 拉伸因子 1：本行唯一可伸缩项
 
         desc = str(getattr(wt, "description", "") or "")
-        if desc:
+        # creator 键（human/ai）区分创建者；无键的存量按 AI 处理（旧行为：带说明即 AI）
+        creator = str(getattr(wt, "creator", "") or "") or "ai"
+        if desc and creator == "ai":
             ai_tag = QLabel("AI", self)
+            on_accent = readable_text_on(Colors.TEXT_ACCENT, Colors.BUTTON_TEXT_ON_ACCENT)
             ai_tag.setStyleSheet(
-                f"color: {Colors.BUTTON_TEXT_ON_ACCENT}; background: {Colors.TEXT_ACCENT};"
+                f"color: {on_accent}; background: {Colors.TEXT_ACCENT};"
                 f" {get_font_family_css()} {font_size_css(9)} padding: 0 4px; border-radius: 2px;"
             )
             ai_tag.setFixedHeight(15)
@@ -598,41 +636,56 @@ class _WorktreeRow(QWidget):
         layout.addLayout(ops)
 
     def _on_delete_click(self):
-        """内联二次确认：首次点击图标转为危险色并换提示，3 秒后自动还原"""
-        if self._confirming_delete:
-            self._do_delete()
-            return
-        self._confirming_delete = True
-        self._del_btn.show_confirm_style(True)
-        self._del_btn.setToolTip("再点一次确认删除（3 秒内有效）")
-        self._delete_timer = QTimer(self)
-        self._delete_timer.setSingleShot(True)
-        self._delete_timer.timeout.connect(self._cancel_delete_confirm)
-        self._delete_timer.start(3000)
+        """弹框确认后删除：工作树目录一并移除，未合并提交的分支自动保留
 
-    def _cancel_delete_confirm(self):
-        self._confirming_delete = False
-        if self._del_btn is not None:
-            self._del_btn.show_confirm_style(False)
-            self._del_btn.setToolTip("删除工作树")
+        ConfirmDialog 用 close() 而非 accept()，exec_() 返回值恒为假，
+        必须连 confirmed 信号触发，不能用返回值判断。
+        """
+        from app.plugins.sdk import ConfirmDialog
+
+        dialog = ConfirmDialog(
+            title="删除工作树",
+            content=(
+                f"确定要删除「{os.path.basename(self._wt.path)}」吗？\n"
+                f"{self._wt.path}\n\n"
+                "工作树目录将被一并删除；分支含未合并提交时仅删目录、分支保留。"
+            ),
+            confirm_text="删除",
+            cancel_text="取消",
+            parent=self.window(),
+        )
+        dialog.confirmed.connect(self._do_delete)
+        dialog.exec_()
 
     def _do_delete(self):
-        if self._delete_timer:
-            self._delete_timer.stop()
-            self._delete_timer = None
         self._del_btn.setEnabled(False)
         self._del_btn.setToolTip("删除中…")
-        self._del_btn.show_confirm_style(True)
-        worker = _WorktreeTaskWorker(_delete_worktree_job, self._wt.path, self._wt.branch)
-        worker.signals.finished.connect(lambda _r: self.deleted.emit(self._wt.path))
-        worker.signals.failed.connect(self._on_delete_failed)
+        path, branch = self._wt.path, self._wt.branch
+
+        def _on_finished(_r):
+            # 删除期间页面可能已重建（目录消失即触发 _check_paths/_mount_section），
+            # 本行可能已被销毁；行死了走模块级 broker，页面直连它兜底刷新
+            try:
+                self.deleted.emit(path)
+            except RuntimeError:
+                _DELETE_DONE.done.emit(path)
+
+        def _on_failed(msg: str):
+            try:
+                self._on_delete_failed(msg)
+            except RuntimeError:
+                logger.warning(f"[Worktree] 删除失败（行已销毁）: {msg}")
+
+        worker = _WorktreeTaskWorker(_delete_worktree_job, path, branch)
+        worker.signals.finished.connect(_on_finished)
+        worker.signals.failed.connect(_on_failed)
         self._delete_worker = worker
         _WORKTREE_POOL.start(worker)
 
     def _on_delete_failed(self, msg: str):
         logger.warning(f"[Worktree] 删除失败: {msg}")
-        self._cancel_delete_confirm()
         self._del_btn.setEnabled(True)
+        self._del_btn.setToolTip("删除工作树")
 
 
 class _AddWorktreeRow(QWidget):
@@ -705,8 +758,12 @@ class WorktreeSectionWidget(QWidget):
     worktreeDeleted = pyqtSignal(str)  # 仅 UI 操作删除时发射
     workingDirRestored = pyqtSignal(str)  # 外部删除导致工作目录恢复时发射
     sizeChanged = pyqtSignal(int)  # 高度变化通知
+    repoInfoRefreshed = pyqtSignal(object, list)  # 后台刷新完成：(repo_info, branches)
 
-    def __init__(self, repo_info, original_folder: str, parent=None, current_workdir: str = None, project: str = None):
+    def __init__(
+        self, repo_info, original_folder: str, parent=None, current_workdir: str = None, project: str = None,
+        branches=None,
+    ):
         super().__init__(parent)
         self._repo_info = repo_info
         self._original_folder = original_folder
@@ -718,11 +775,10 @@ class WorktreeSectionWidget(QWidget):
         self._create_busy = False
         self._pending_switch_path = None
         self._main_card: MainRepoCard = None
-        self._branches: list = []
+        # 分支列表由页面后台探测直传（一次后台并行拉全量，首帧即完整）；
+        # 无直传时下拉框先只有当前分支，后续刷新操作会补全
+        self._branches: list = list(branches or [])
         self._setup_ui()
-        # 构造用的 repo_info 不含分支列表（首次 _populate_rows 下拉框只有当前分支），
-        # 后台补拉一次：完成后 _on_repo_info_loaded 会带全量 branches 重建卡片
-        self._repopulate()
         # 主题自刷
         try:
             ev = _caps("ui.events")
@@ -797,6 +853,9 @@ class WorktreeSectionWidget(QWidget):
                 self._restore_workdir(info.root)
 
         self._populate_rows()
+        # 先同步页面缓存再触发自动切换：切换的即时重建依赖页面缓存的最新数据
+        # （否则新建后 pending_switch 用旧缓存覆盖，新工作树刚刷出就被旧列表顶掉）
+        self.repoInfoRefreshed.emit(info, self._branches)
 
         # 创建完成后自动切到新工作树
         if self._pending_switch_path:
@@ -956,6 +1015,8 @@ class WorktreeSectionWidget(QWidget):
         self._create_worker = None
         if description:
             write_worktree_description(worktree_dir, description)
+        # 手动创建打 human 标：无此键的带说明工作树会按旧行为被标成 AI
+        write_worktree_creator(worktree_dir, "human")
         self._pending_switch_path = worktree_dir
         _invalidate_repo_cache(self._original_folder)
         self._repopulate()
