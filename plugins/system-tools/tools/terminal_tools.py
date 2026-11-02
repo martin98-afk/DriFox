@@ -673,28 +673,27 @@ def _render_bash_body(result, tool_name, tool_args, success):
 
 
 def _render_bg_body(result, tool_name, tool_args, success):
-    """bg_* / background_task 完成框渲染闭包：终端风格（任务标识头 + 状态体）"""
+    """background_task 完成框渲染闭包：终端风格（任务标识头 + 状态体）"""
     from app.plugins.sdk import global_font_family, html_escape, scale_font_size
 
     _gf = global_font_family()
     raw = getattr(result, "content", "") or ""
     tool_args = tool_args or {}
-    # background_task 用 action 区分，内部归一到旧名，后面的分支无需改动
-    _action = str(tool_args.get("action") or "").strip().lower()
-    if tool_name == "background_task":
-        tool_name = {"start": "bg_start", "stop": "bg_stop", "logs": "bg_logs"}.get(_action, "bg_list")
-    if tool_name == "bg_start":
+    action = str(tool_args.get("action") or "").strip().lower()
+    if action == "start":
         cmd = tool_args.get("command", "")
-        header = f"bg_start command={html_escape(cmd[:120])}" if cmd else "bg_start"
-    elif tool_name == "bg_stop":
+        header = f"background_task start {html_escape(cmd[:120])}" if cmd else "background_task start"
+    elif action == "stop":
         task_id = tool_args.get("task_id", "")
-        header = f"bg_stop task_id={task_id}" if task_id else "bg_stop"
-    elif tool_name == "bg_logs":
+        header = f"background_task stop {task_id}" if task_id else "background_task stop"
+    elif action == "logs":
         task_id = tool_args.get("task_id", "")
         lines = tool_args.get("lines", 100)
-        header = f"bg_logs task_id={task_id} lines={lines}"
+        header = f"background_task logs {task_id} (last {lines})"
+    elif action == "list":
+        header = "background_task list"
     else:
-        header = tool_name
+        header = "background_task"
     return f"""
     <div style="background:var(--panel-soft);border:1px solid var(--border);border-radius:8px;overflow:hidden;margin:0;">
         <div style="padding:6px 12px;border-bottom:1px solid var(--border);color:var(--text-secondary);word-break:break-word;font-family:'{_gf}',Consolas,monospace;font-size:{scale_font_size(13)}px;">
@@ -711,22 +710,19 @@ def _preview_bash(tool_args: dict) -> str:
     return f'执行 "{cmd[:60]}"' if cmd else "执行命令"
 
 
-def _make_bg_preview(tool_name: str):
-    """生成 bg_* / background_task 的自然语言预览闭包（绑定工具名，避免模块级状态）"""
+def _make_bg_preview():
+    """background_task 的自然语言预览闭包（按 action 分派）"""
 
     def _preview(tool_args: dict) -> str:
         tool_args = tool_args or {}
-        name = tool_name
-        if name == "background_task":
-            action = str(tool_args.get("action") or "").strip().lower()
-            name = {"start": "bg_start", "stop": "bg_stop", "logs": "bg_logs"}.get(action, "bg_list")
-        if name == "bg_start":
+        action = str(tool_args.get("action") or "").strip().lower()
+        if action == "start":
             cmd = tool_args.get("command", "")
             return f'后台启动 "{cmd[:40]}"' if cmd else "后台启动"
-        if name == "bg_stop":
+        if action == "stop":
             task_id = tool_args.get("task_id", "")
             return f"停止后台任务 {task_id}" if task_id else "停止后台任务"
-        if name == "bg_logs":
+        if action == "logs":
             task_id = tool_args.get("task_id", "")
             lines = tool_args.get("lines", 100)
             return f"后台日志 {task_id} (前 {lines} 行)" if task_id else "后台日志"
@@ -766,8 +762,9 @@ def _make_bg_summarize(preview_fn):
 
 
 def register(registry):
-    # background_task 的预览走带 description 优先的版本（action 由预览闭包内部归一）
-    _desc_preview_fn = _desc_preview(_make_bg_preview("background_task"))
+    # background_task 的预览走带 description 优先的版本
+    _bg_preview = _make_bg_preview()
+    _desc_preview_fn = _desc_preview(_bg_preview)
     registry.register(
         "bash",
         _BASH_SCHEMA,

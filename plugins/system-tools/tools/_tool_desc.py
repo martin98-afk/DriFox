@@ -6,7 +6,7 @@
 `description`：一句自然语言说明本次调用的意图，preview 与 summarize 优先展示它。
 
 两种形态（见 `prefer_description` 的 `tail_fn`）：
-- 替换式（bash / bg_start）：命令串对用户没信息量，description 直接替换。
+- 替换式（bash / background_task）：命令串对用户没信息量，description 直接替换。
 - 拼接式（write / edit / multi_edit）：**文件路径必须留在折叠头上**，拼成
   "description (路径)"。用户明确要求过这一点——光看意图不知道改了哪个文件。
 
