@@ -128,8 +128,14 @@ class _GaugeRing(QWidget):
     def sweep(self):
         """启动扫掠动画（show 时调用一次；重复调用会重启）"""
         if self._anim is not None:
-            self._anim.stop()
-            self._anim.deleteLater()
+            # 旧动画 finished 后已 deleteLater（C++ 对象销毁但引用残留），
+            # 直接 stop() 会抛 RuntimeError 中断 show_card → 卡片打不开。
+            try:
+                self._anim.stop()
+                self._anim.deleteLater()
+            except RuntimeError:
+                pass  # 已被回收，引用置空即可
+        self._anim = None
         anim = QVariantAnimation(self)
         anim.setStartValue(0.0)
         anim.setEndValue(1.0)

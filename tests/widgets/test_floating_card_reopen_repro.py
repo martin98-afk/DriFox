@@ -268,3 +268,28 @@ def test_dock_card_opens_while_overlay_page_active(qtbot):
     cont = tm._left_card_container
     assert cont.width() > 0, f"left 容器应有展开宽度，实际 {cont.width()}"
 
+
+def test_gauge_sweep_survives_deleted_anim(qtbot):
+    """回归（2026-11-02 排查）：旧扫掠动画 deleteLater 回收后再次 sweep 不炸
+
+    故障链：sweep 的旧动画 finished→deleteLater 后 C++ 对象已销毁但
+    self._anim 引用残留 → 下次 show_card 调 sweep 时 stop() 抛
+    RuntimeError → show_card 中断 → 卡片永远打不开。
+    """
+    from PyQt5 import sip
+
+    SystemCleanerCard = _load_real_cleaner_card()
+    card = SystemCleanerCard()
+    qtbot.addWidget(card)
+
+    card._gauge.sweep()
+    old_anim = card._gauge._anim
+    assert old_anim is not None
+
+    sip.delete(old_anim)  # 模拟 finished→deleteLater 已回收 C++ 对象
+
+    # 修复前：此处抛 RuntimeError（wrapped C/C++ object ... deleted）
+    card._gauge.sweep()
+    assert card._gauge._anim is not old_anim
+    assert card._gauge._anim is not None
+

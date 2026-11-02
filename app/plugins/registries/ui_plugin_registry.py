@@ -3374,17 +3374,19 @@ class UIPluginRegistry:
         # 正常翻转，但父链不可见导致容器展开尺寸算 0（隐藏页布局不真算，
         # 重试 2 次放弃），用户视角「点了打不开」；且 dock 容器不发
         # overlayStateChanged，没有任何机制自动切回对话页，此后每次点击
-        # 只在记账与视觉错位间翻转。此处显示 dock 卡时把内容栈切回对话页，
-        # 并踢容器一把重新展开（页切回不触发容器 showEvent/resize，不会
-        # 自动恢复）。
+        # 只在记账与视觉错位间翻转。
+        # 两步都无条件执行（幂等）：
+        # 1) 内容栈不在对话页时切回；
+        # 2) 每次显示都踢容器 _schedule_expand——隐藏页期间容器展开会被
+        #    natural_h<=0 重试放弃，仅切页时踢一次不够（切页可能早已发生）。
         if card_info.container in ("left", "bottom") and host is not None:
             stack = getattr(host, "_content_stack", None)
             if stack is not None and callable(getattr(stack, "currentIndex", None)) and stack.currentIndex() != 0:
                 stack.setCurrentIndex(0, direction=-1)
-                for _dock_attr in ("_left_card_container", "_bottom_card_container"):
-                    _cont = getattr(host, _dock_attr, None)
-                    if _cont is not None and callable(getattr(_cont, "_schedule_expand", None)):
-                        _cont._schedule_expand()
+            for _dock_attr in ("_left_card_container", "_bottom_card_container"):
+                _cont = getattr(host, _dock_attr, None)
+                if _cont is not None and callable(getattr(_cont, "_schedule_expand", None)):
+                    _cont._schedule_expand()
 
         # 显示补刷：本次 toggle 若让卡片变可见（且此前隐藏期已置脏），
         # 补刷到当前外观纪元。主题切换时隐藏卡只置脏不刷（省一次整树

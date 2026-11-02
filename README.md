@@ -337,7 +337,7 @@ plugins/<功能插件>/        # 10 个内置功能插件
 | 类别 | 工具 |
 |------|------|
 | **文件** | read, write, edit, multi_edit, grep, list, glob, scan_repo, stage_files |
-| **终端** | bash, bg_start, bg_stop, bg_logs, bg_list |
+| **终端** | bash, background_task |
 | **交互 / 技能 / MCP** | question, skill, manage_skill, mcp_manage, upload_file |
 | **子智能体 / 团队** | subagent_para, subagent_status, team_send_message, team_list_members |
 | **诊断** | get_diagnostics, lsp |

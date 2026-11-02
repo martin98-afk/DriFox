@@ -147,8 +147,9 @@ class TestSystemPluginTools:
         reg = ToolRegistry.get_instance()
         load_plugin_tools(registry=reg)
         names = set(reg.names())
-        # 系统插件固定 30 个工具；codegraph_explore 来自社区插件 codegraph-tools
-        # （引擎插件化后迁出系统插件，未安装时不注册），单独按可用性断言。
+        # 系统插件固定 28 个工具（bg_start/bg_stop/bg_logs/bg_list 已合并为
+        # background_task，旧四名不再注册）；codegraph_explore 来自社区插件
+        # codegraph-tools（引擎插件化后迁出系统插件，未安装时不注册），单独按可用性断言。
         expected = {
             "read",
             "write",
@@ -162,10 +163,7 @@ class TestSystemPluginTools:
             "websearch",
             "webfetch",
             "bash",
-            "bg_start",
-            "bg_stop",
-            "bg_logs",
-            "bg_list",
+            "background_task",
             "todowrite",
             "todoread",
             "get_diagnostics",
@@ -2080,7 +2078,6 @@ class TestRegistryMetadata:
         assert "_t_keep" in kept
         assert "_t_no_keep" not in kept, "语义借用不再隐式触发留正文"
         ToolRegistry.reset_instance()
-
 
 class TestPluginLoadFaultTolerance:
     """插件 register 抛异常 → load_plugin_tools 跳过该插件继续加载其他插件"""

@@ -702,8 +702,7 @@ def _classify_fallback(tool_name: str) -> str:
         "subagent_para",
         "todowrite",
         "stage_files",
-        "bg_start",
-        "bg_stop",
+        "background_task",
     )
     base = tool_name
     if tool_name.startswith("mcp__"):
