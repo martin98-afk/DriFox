@@ -1801,8 +1801,9 @@ class CodeWebViewer(QWebEngineView):
         self._document_height = h  # 跟踪文档高度用于 wheelEvent 边界判断
         self._content_sentinel_check()
         # [DOCK-BLANK 诊断] viewer 实际高度显著大于 JS 侧内容高度 = 折叠框下方
-        # 露出空白（用户 2026-10-15 复测：折叠框下大小不一的空白导致抖动，
-        # 正文出现滚轮钳停后消失）。带 2s 冷却防刷屏；定位虚高来源后移除。
+        # 露出空白。2026-11-02 已定位：_update_height/_apply_viewer_height 的
+        # max(40) 下限把折叠态矮内容（scrollHeight≈11）顶成 40。修复后本打点
+        # 应归于沉寂，复测确认后移除。带 2s 冷却防刷屏。
         vh_now = self.height()
         if self._streaming and vh_now - h > 16:
             now_blank = time.monotonic()

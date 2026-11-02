@@ -3043,7 +3043,12 @@ class MessageCard(SimpleCardWidget):
                 cache.pop(key, None)
 
     def _update_height(self, h):
-        target_height = max(40, h)
+        # [DOCK-BLANK 修] 原钳 max(40, h) 与折叠态矮内容冲突：思考折叠收起 +
+        # 正文未开时 JS scrollHeight≈11，13 的上报被顶成 40 → 折叠框下恒定
+        # 29px 空白（2026-11-02 [dock-blank] 打点定位：viewer=40 scrollHeight=11）。
+        # 流式塌缩噪声已由 B1 挂起窗拦（_schedule_pending_shrink），非流式由
+        # ±2px 死区拦，此处的 40 下限只剩制造空白这一个作用。
+        target_height = max(0, int(h))
         # [T44] 坞态不再给正文限高（原 order 沉底 + 600px 内滚已移除），坞态
         # 生效前后卡片高度都等于自然高度，只剩工具区 264px 限高这一点扰动，
         # 无需额外 clamp。
@@ -3549,7 +3554,8 @@ class MessageCard(SimpleCardWidget):
         self.heightChanged.emit(height)
 
     def _apply_viewer_height(self, value):
-        height = max(40, int(value))
+        # [DOCK-BLANK 修] 同 _update_height 入口钳：出口不再顶 40 下限
+        height = max(0, int(value))
         # [MEM] 面积上限：上报高度先按「物理面积封顶」钳一次（成本 ∝ 宽×高×dpr²，
         # 见 CodeWebViewer.MAX_SURFACE_MPX）。必须在下面所有记账/广播之前完成 ——
         # 否则 widget 被钳短、heightChanged 仍报原值，外层聊天列表会按未钳高度做

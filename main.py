@@ -258,6 +258,13 @@ def main():
 
     _install_wheel_guard(app)
 
+    # 🧯 qfluentwidgets ScrollBar 事件类型混淆守卫：底层合成事件可能出现
+    # 「动态类型 QWheelEvent + type=Resize」的错位对象，库内 eventFilter
+    # 直接 e.size() 会崩（2026-11-02 两连发）。详见 app/utils/scrollbar_guard.py。
+    from app.utils.scrollbar_guard import install_guard as _install_scrollbar_guard
+
+    _install_scrollbar_guard()
+
     # [T24] openai 资源预导入**不**在此处启动：预热线程会与主线程随后的
     # main_widget 级联 import 争 Python import 锁，实测拖慢主线程 26%
     # （首窗就绪 1948ms → 1433ms）。现推迟到首窗就绪之后启动，见 _show_popup
