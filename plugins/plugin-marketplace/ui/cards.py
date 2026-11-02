@@ -29,7 +29,7 @@ _icon_patch._apply_icon_cache_patch()
 
 from PyQt5 import sip
 
-from PyQt5.QtCore import QObject, QRect, QSize, QThread, Qt, pyqtSignal
+from PyQt5.QtCore import QObject, QRect, QSize, QThread, Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QColor, QFont, QFontMetrics
 from PyQt5.QtWidgets import (
     QFrame,
