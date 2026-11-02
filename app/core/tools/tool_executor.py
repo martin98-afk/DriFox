@@ -792,10 +792,6 @@ class ToolExecutor:
         except Exception:
             return str(Path(__file__).resolve().parent.parent.parent.parent)
 
-    def set_key_documents_repo(self, repo, project: str = "默认项目"):
-        """设置关键文档仓储和当前项目（工具插件化：stage_files 已自包含，仓储不再注入插件）"""
-        logger.info(f"[ToolExecutor] KeyDocumentsRepo set (project={project})")
-
     def execute(
         self,
         tool_name: str,

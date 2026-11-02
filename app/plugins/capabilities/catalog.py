@@ -140,8 +140,7 @@ CATALOG: Dict[str, CapabilitySpec] = {
         _spec(
             "project.workdir",
             _M,
-            "写库式切换项目工作目录（关键文档登记 + 工作目录持久化 + 根目录标记恢复，"
-            "与 workdir.write 的会话内切换互补）",
+            "写库式持久化项目工作目录（project_workdir 表，与 workdir.write 的会话内切换互补）",
             _UI,
         ),
         # ── 外观 ──

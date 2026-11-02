@@ -2187,7 +2187,7 @@ class TabManagerWindow(FramelessWindow):
         按钮等场景都走这里。置顶记忆在助手中心管理，不再有记忆页。
 
         Args:
-            sub_tab: 兼容旧签名；任何取值都落「工作树」页（关键文档+工作树）
+            sub_tab: 兼容旧签名；任何取值都落「工作树」页
         """
         panel = getattr(self, "workbench_panel", None)
         if panel is None:

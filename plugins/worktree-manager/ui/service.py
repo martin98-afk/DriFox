@@ -117,7 +117,7 @@ class WorktreeService:
         if mw._current_workdir.get(project) == worktree_path:
             return
 
-        # 1+2. 一次语义动作：写库（关键文档登记 + 工作目录持久化 + 根目录标记恢复）
+        # 1+2. 一次语义动作：写库（工作目录持久化）
         #      + 实例缓存 + tool_executor 同步 + 团队广播 + UI 同步。
         # 这几步原先在本插件里手拼，并直接摸 backend.memory_manager /
         # backend.tool_executor / _broadcast_team_workdir，属于宿主内部实现。
@@ -129,7 +129,7 @@ class WorktreeService:
             wd(worktree_path)
         self.update_branch(mw)
 
-        # 3. 刷新右侧工作台关键文档/工作树 UI
+        # 3. 刷新右侧工作台工作树 UI
         try:
             wb = _caps("window.workbench")
             if wb is not None:
@@ -267,7 +267,7 @@ class WorktreeService:
         if branch:
             display = branch if len(branch) <= 20 else branch[:8] + "…" + branch[-8:]
             bw.setText(display)
-            bw.setToolTip(f"分支: {branch}\n点击打开关键文档")
+            bw.setToolTip(f"分支: {branch}\n点击打开工作树页")
             bw.setVisible(True)
         else:
             bw.setVisible(False)

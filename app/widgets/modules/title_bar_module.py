@@ -18,7 +18,7 @@
 - diff_btn                  TransparentToolButton（差异对比）
 
 极简化：移除 _pb_separator（▸ 三角连接符），avatar 与分支之间靠 8px 留白 + 视觉重量差分组。
-容器不再 hover，avatar 与 branch 各自独立 hover（语义不同：切项目 vs 打开关键文档）。
+容器不再 hover，avatar 与 branch 各自独立 hover（语义不同：切项目 vs 打开工作树页）。
 
 host 方法/属性引用均经 getattr 兜底（模块对宿主弱耦合：主程序路径下解析为真实方法，
 行为零变化；测试 stub 缺失时静默跳过）。
@@ -110,7 +110,7 @@ class TitleBarModule(UIModule):
         host._project_label.setVisible(False)
 
         # Git 分支 chip：插件 slot 装配（worktree-manager 缺失时 slot 空置，无分支标签）
-        # 分支点击 = 打开工作树页关键文档，avatar 点击 = 切项目，语义各自独立。
+        # 分支点击 = 打开工作树页，avatar 点击 = 切项目，语义各自独立。
         # 点击行为/初始 tooltip/隐藏态均已内聚在插件的 BranchChip 内。
         host._branch_widget = None
         try:

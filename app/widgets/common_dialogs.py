@@ -214,7 +214,7 @@ class SingleInputDialog(MaskDialogBase):
     Usage:
         dialog = SingleInputDialog(
             title="🔗 添加 URL 链接",
-            hint="请输入网页链接，添加为关键文档引用",   # 可选
+            hint="请输入网页链接",                          # 可选
             placeholder="https://example.com",
             default_text="https://",                       # 可选
             confirm_text="添加",

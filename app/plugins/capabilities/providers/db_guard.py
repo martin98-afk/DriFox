@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """storage.db 的受限代理
 
-插件拿到的是代理而不是 ``DatabaseManager`` 本身：主程序表（sessions / messages /
-key_documents …）与插件表共用同一个库，直接给句柄等于把所有业务表交出去。
+插件拿到的是代理而不是 ``DatabaseManager`` 本身：主程序表（sessions / project_workdir /
+project_notes …）与插件表共用同一个库，直接给句柄等于把所有业务表交出去。
 约束两条：
 
 1. **语句白名单**：只允许 SELECT/INSERT/UPDATE/DELETE/REPLACE/CREATE/DROP/ALTER/WITH

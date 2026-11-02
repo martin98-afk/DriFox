@@ -658,12 +658,6 @@ class ChatBackend(QObject):
                 self._tool_executor._builtin_tools.set_team_context(self._window_id, default_agent)
             # 设置 AgentManager 的 builtin_tools 引用（用于获取 MCP 工具 schema）
             self._agent_manager._builtin_tools = self._tool_executor._builtin_tools
-            # 设置关键文档仓储
-            if self._memory_manager and self._memory_manager.key_documents:
-                self._tool_executor.set_key_documents_repo(
-                    self._memory_manager.key_documents,
-                    "默认项目",  # 初始值，main_widget 初始化后会通过 set_current_project 覆盖
-                )
             logger.info("[ChatBackend] ToolExecutor 延迟创建完成")
             self.tool_executor_ready.emit()
         except Exception as e:
@@ -1315,51 +1309,6 @@ class ChatBackend(QObject):
         except Exception:
             pass
 
-        return ctx
-
-    def build_key_documents_context(self) -> Dict[str, Any]:
-        """构建 PreUserMessage hook 关键文档上下文 — 预取当前项目的关键文档
-
-        数据源：MemoryManager.key_documents（SQLite）。条目记忆不再注入
-        （已由 assistant_hub 的人工提示/长期记忆体系取代），仅保留关键文档。
-        """
-        ctx: Dict[str, Any] = {}
-        if not self._memory_manager:
-            return ctx
-        try:
-            wd_path = self._tool_executor.get_workdir() if self._tool_executor else ""
-            # 自净化：先清掉路径已消失的 git_worktree 记录（节流，默认 60s 一次），
-            # 避免把已删除的工作树当有效关键文档持续注入
-            self._memory_manager.prune_stale_worktrees(self._current_project or "")
-            docs = self._memory_manager.get_key_documents(self._current_project)[:50]
-            if docs:
-                doc_items = []
-                for doc in docs:
-                    file_path = doc.get("file_path", "")
-                    file_name = doc.get("file_name", "")
-                    is_url = file_path.startswith(("http://", "https://"))
-                    is_wd = file_path == wd_path
-                    if not is_url and not is_wd and file_path and wd_path:
-                        try:
-                            display = str(Path(file_path).relative_to(Path(wd_path)))
-                        except ValueError:
-                            display = file_path
-                    elif is_url:
-                        display = file_path
-                    else:
-                        display = file_path
-                    doc_items.append(
-                        {
-                            "file_name": file_name,
-                            "display": display,
-                            "is_url": is_url,
-                            "is_wd": is_wd,
-                        }
-                    )
-                if doc_items:
-                    ctx["key_documents"] = doc_items
-        except Exception:
-            pass
         return ctx
 
     def _warm_git_cache(self, project_root: str):

@@ -690,7 +690,7 @@ class OpenAIChatWorker(QThread):
             # 落库后是干净 user 消息。
             # 插话经 _hook_message_queue 直通车绕过了正常发送的 PreSendWorker
             # hook 链（UserPromptSubmit/PreUserMessage/PostUserMessage），长期记忆/
-            # 系统时间/关键文档注入与正则匹配 hook 对插话全部失效；此处对每条插话
+            # 系统时间注入与正则匹配 hook 对插话全部失效；此处对每条插话
             # 补触发：hook 输出注入插话消息之前（对齐正常路径顺序），
             # PostUserMessage 仅感知不注入。
             interject_count = 0
@@ -805,14 +805,10 @@ class OpenAIChatWorker(QThread):
 
         out: List[Dict] = []
         try:
-            # PreUserMessage 增强 ctx：worktree 建议 + 关键文档（对齐 engine.py；
-            # 临时会话跳过关键文档，防止临时页泄源项目文档）
+            # PreUserMessage 增强 ctx：worktree 建议（对齐 engine.py）
             pre_ctx = _base_ctx()
             try:
                 pre_ctx.update(backend._build_worktree_context_dict() or {})
-                session = backend.get_current_session() if hasattr(backend, "get_current_session") else None
-                if session is not None and not getattr(session, "is_temp", False):
-                    pre_ctx.update(backend.build_key_documents_context() or {})
             except Exception as e:
                 logger.debug(f"[Interject] PreUserMessage 增强 ctx 构建失败（降级基础 ctx）: {e}")
 

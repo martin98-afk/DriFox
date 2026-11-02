@@ -712,6 +712,12 @@ class _DialogEventFilter(QObject):
 # 模块级单例：全局仅此一个 QApplication 级事件过滤器
 _dialog_event_filter = _DialogEventFilter()
 
+# ── 遮罩弹窗滚动位置恢复参数（_restore_chat_scroll_pos 稳定窗轮询）──
+_SCROLL_RESTORE_POLL_MS = 60  # 轮询间隔：高度链收敛在 150~500ms 量级，60ms 足够细
+_SCROLL_RESTORE_SETTLE_TICKS = 2  # maximum 到基线后连续稳定拍数，防「先恢复又塌缩」
+_SCROLL_RESTORE_TIMEOUT_MS = 2000  # 总超时兜底：到期按当前 maximum 强制回设
+_SCROLL_RESTORE_MAX_TOL = 8  # maximum 视为「已回基线」的容差 px
+
 # D3D11/WARP 单纹理物理上限 16384px，留余量取 16000（见 CodeWebViewer.MAX_HEIGHT 注释）
 _PHYSICAL_TEXTURE_LIMIT = 16000
 
@@ -1118,6 +1124,9 @@ class CodeWebViewer(QWebEngineView):
         self._hidden_dialogs = set()
         # 遮罩对话框隐藏期间记录的外层滚动位置（-1 = 无记录），恢复显示后回设
         self._saved_dialog_scroll_pos = -1
+        # 隐藏前外层滚动条 maximum 基线（-1 = 无记录）：恢复回设用它判定
+        # 「塌缩的高度链是否已收敛」，收敛前不落锤（见 _restore_chat_scroll_pos）
+        self._saved_dialog_scroll_max = -1
 
     # ──────────────────────────────────────────────
     # 对话框 HWND 穿透防护
@@ -1153,11 +1162,19 @@ class CodeWebViewer(QWebEngineView):
             return  # 同一对话框重复 Show/FocusIn 不叠加计数
         # 首个 viewer 隐藏前记录外层滚动位置：viewer 隐藏令卡片高度塌缩、
         # chat_scroll_area 内容总高骤减，滚动条 value 被 Qt 自动 clamp，
-        # 恢复显示后无人回设 → 滚动位置丢失（跳到底部/顶部）
+        # 恢复显示后无人回设 → 滚动位置丢失（跳到底部/顶部）。
+        # 同时记 maximum 基线：塌缩与恢复之间隔着异步高度链（reportHeight /
+        # resize 锁 150ms 补报），singleShot(0) 时 maximum 未必已回到基线，
+        # 直接回设会被 clamp 在中间态上 → 漂移（2026-11-02 用户报告）。
         if not hidden:
             try:
                 area = self._find_chat_scroll_area()
-                self._saved_dialog_scroll_pos = area.verticalScrollBar().value() if area is not None else -1
+                if area is not None:
+                    bar = area.verticalScrollBar()
+                    self._saved_dialog_scroll_pos = bar.value()
+                    self._saved_dialog_scroll_max = bar.maximum()
+                else:
+                    self._saved_dialog_scroll_pos = -1
             except RuntimeError:
                 self._saved_dialog_scroll_pos = -1
         hidden.add(dialog)
@@ -1186,13 +1203,42 @@ class CodeWebViewer(QWebEngineView):
     def _restore_chat_scroll_pos(self):
         """恢复 hide 前记录的外层滚动位置。
 
-        show() 触发的布局重排经 posted LayoutRequest 事件完成，Qt 事件循环
-        中 posted 事件先于 timer 处理，故 singleShot(0) 时 maximum 已恢复。
+        不能假设 singleShot(0) 时布局已恢复：卡片高度链是异步的（viewer
+        隐藏 → reportHeight 打掉 fixed 高度 → 显示后 ResizeObserver / resize
+        锁 150ms 补报才把高度长回来），塌缩甚至可能晚于 hide 当拍才发生。
+        回设过早会被 clamp 在未恢复的 maximum 上 → 滚动位置漂移。
+
+        策略：记录 hide 前的 maximum 基线，恢复时轮询等待 maximum 收敛到
+        基线（连续两拍稳定防「先恢复又塌缩」的中间态）再落锤；总超时兜底
+        按当前 maximum clamp 落锤，保证总会回设一次。无基线（老替身/无滚
+        动范围）保持 singleShot(0) 原语义。
         """
         pos = getattr(self, "_saved_dialog_scroll_pos", -1)
         self._saved_dialog_scroll_pos = -1
         if pos < 0:
             return
+        max0 = getattr(self, "_saved_dialog_scroll_max", -1)
+        self._saved_dialog_scroll_max = -1
+
+        def _set_now(bar):
+            bar.setValue(max(bar.minimum(), min(pos, bar.maximum())))
+
+        if max0 <= 0:
+
+            def _apply_simple():
+                try:
+                    area = self._find_chat_scroll_area()
+                    if area is None:
+                        return
+                    _set_now(area.verticalScrollBar())
+                except RuntimeError:
+                    pass
+
+            QTimer.singleShot(0, _apply_simple)
+            return
+
+        deadline = time.monotonic() + _SCROLL_RESTORE_TIMEOUT_MS / 1000.0
+        state = {"settle": 0}
 
         def _apply():
             try:
@@ -1200,9 +1246,22 @@ class CodeWebViewer(QWebEngineView):
                 if area is None:
                     return
                 bar = area.verticalScrollBar()
-                bar.setValue(max(bar.minimum(), min(pos, bar.maximum())))
             except RuntimeError:
-                pass
+                return
+            if time.monotonic() >= deadline:
+                _set_now(bar)  # 超时兜底：按当前 maximum clamp，保证回设一次
+                return
+            # 塌缩的高度链尚未收敛：等下一拍
+            if bar.maximum() < max0 - _SCROLL_RESTORE_MAX_TOL:
+                state["settle"] = 0
+                QTimer.singleShot(_SCROLL_RESTORE_POLL_MS, _apply)
+                return
+            # 已到基线：连续稳定两拍再落锤，防「先恢复又塌缩」的中间态
+            state["settle"] += 1
+            if state["settle"] < _SCROLL_RESTORE_SETTLE_TICKS:
+                QTimer.singleShot(_SCROLL_RESTORE_POLL_MS, _apply)
+                return
+            _set_now(bar)
 
         QTimer.singleShot(0, _apply)
 

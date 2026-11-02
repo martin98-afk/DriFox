@@ -1,10 +1,15 @@
 # -*- coding: utf-8 -*-
-"""
-Worktree 树状展示组件
+"""Worktree 树状展示组件
 
-紧贴文件夹条目下方，左侧竖线 + 圆点标识分支
-主分支也有切换按钮，当前分支高亮
-分支名自动省略、内联确认删除
+主仓库卡片 + 子工作树列表：
+- 主仓库卡片：分支名、路径、本地分支切换器、领先/落后
+- 子工作树行：分支、路径、说明（AI 创建时显示）、领先落后、切换/删除
+- 底部「＋ 新建工作树」：分支名 + 基分支 + 一句话说明
+
+约定（与 git 语义一致）：
+- 主仓库可以切分支（git switch）；子工作树不提供切分支入口，
+  因为一个工作树同时只能检出其中一个分支，切分支会让它的「用途」漂移。
+- 说明存 git config worktree.<名>.description，git 原生支持，跨工具可见。
 """
 
 import os
@@ -15,6 +20,7 @@ from loguru import logger
 from PyQt5.QtCore import QObject, QRunnable, QThreadPool, QTimer, Qt, pyqtSignal
 from PyQt5.QtGui import QPaintEvent
 from PyQt5.QtWidgets import (
+    QComboBox,
     QDialog,
     QFrame,
     QHBoxLayout,
@@ -34,16 +40,129 @@ _CREATION_FLAGS = 0
 if sys.platform == "win32":
     _CREATION_FLAGS = subprocess.CREATE_NO_WINDOW
 
+# 说明字段最大长度（与 manage_worktree 工具 schema 对齐）
+DESCRIPTION_MAX_LEN = 60
+
 
 def _caps(cap_id):
-    """取某能力（无 ctx 场景统一走 sdk 的 caps_for，host 由宿主解析）。
-
-    原实现自建 ``host=None`` 池并自报 ``declared={cap_id, ...}``：等于插件给
-    自己发权限，manifest 声明永不生效，``window.*`` 这类吃 host 的能力还恒为空。
-    """
+    """取某能力（无 ctx 场景统一走 sdk 的 caps_for，host 由宿主解析）。"""
     from app.plugins.sdk import caps_for
 
     return caps_for(cap_id)
+
+
+def _git(args, cwd, timeout=10):
+    """同步 git 调用（仅在后台线程或短操作里用）"""
+    return subprocess.run(
+        ["git"] + args,
+        capture_output=True,
+        text=True,
+        cwd=cwd,
+        timeout=timeout,
+        encoding="utf-8",
+        errors="replace",
+        creationflags=_CREATION_FLAGS,
+    )
+
+
+def read_worktree_description(wt_path: str) -> str:
+    """读取工作树说明（git config worktree.<name>.description）
+
+    git 以工作树目录名作为 config key 的 <name> 段。读取失败一律返回空串，
+    说明只是辅助信息，不能因为它让整个列表渲染失败。
+    """
+    if not wt_path or not os.path.isdir(wt_path):
+        return ""
+    try:
+        r = _git(["config", f"worktree.{os.path.basename(wt_path)}.description"], wt_path, timeout=3)
+        if r.returncode == 0:
+            return (r.stdout or "").strip()
+    except Exception:
+        pass
+    return ""
+
+
+def write_worktree_description(wt_path: str, text: str) -> bool:
+    """写入工作树说明；空文本表示删除该配置项"""
+    if not wt_path or not os.path.isdir(wt_path):
+        return False
+    key = f"worktree.{os.path.basename(wt_path)}.description"
+    try:
+        if text:
+            r = _git(["config", key, text], wt_path, timeout=5)
+        else:
+            r = _git(["config", "--unset", key], wt_path, timeout=5)
+        return r.returncode == 0
+    except Exception:
+        return False
+
+
+def list_local_branches(repo_root: str) -> list:
+    """列出本地分支（当前分支排最前）"""
+    try:
+        r = _git(["branch", "--format=%(refname:short)"], repo_root, timeout=8)
+        if r.returncode != 0:
+            return []
+        branches = [ln.strip() for ln in (r.stdout or "").splitlines() if ln.strip()]
+        current = ""
+        try:
+            cur = _git(["branch", "--show-current"], repo_root, timeout=5)
+            current = (cur.stdout or "").strip()
+        except Exception:
+            pass
+        if current and current in branches:
+            branches.remove(current)
+            branches.insert(0, current)
+        return branches
+    except Exception:
+        return []
+
+
+class ThemeIconLabel(QLabel):
+    """主题感知 svg 图标标签。
+
+    不用 QLabel.setPixmap(icon.pixmap())：那会把当前主题的像素快照固化下来，
+    主题切换后图标不刷新。本类持有 QIcon 名，每次 paintEvent 重新取色。
+    """
+
+    def __init__(self, icon_name: str, size: int = 14, parent=None):
+        super().__init__(parent)
+        self._icon_name = icon_name
+        self._size = size
+        self._confirm_style = False
+        self.setFixedSize(size + 4, size + 4)
+        self.setStyleSheet("background: transparent;")
+
+    def set_icon(self, icon_name: str):
+        """更换图标名（触发重绘）"""
+        self._icon_name = icon_name
+        self.update()
+
+    def show_confirm_style(self, on: bool):
+        """确认态：危险色。svg 是单色掩码，用 QIcon 的 paint 无法直接改色，
+        这里改用主题危险色重新生成一个临时图标（通过 colorize 保底）。"""
+        self._confirm_style = bool(on)
+        self.update()
+
+    def paintEvent(self, event):
+        from PyQt5.QtGui import QColor, QPainter, QPixmap
+
+        p = QPainter(self)
+        icon = get_icon(self._icon_name)
+        if self._confirm_style:
+            # 危险态：把图标着色为错误色（QIcon 本身不暴露颜色，改用 pixmap + 合成）
+            pm = icon.pixmap(self._size, self._size)
+            tinted = QPixmap(pm.size())
+            tinted.fill(Qt.transparent)
+            tp = QPainter(tinted)
+            tp.drawPixmap(0, 0, pm)
+            tp.setCompositionMode(QPainter.CompositionMode_SourceIn)
+            tp.fillRect(tinted.rect(), QColor("#f85149"))
+            tp.end()
+            p.drawPixmap(2, 2, tinted)
+        else:
+            icon.paint(p, self.rect(), Qt.AlignCenter)
+        p.end()
 
 
 class _WorktreeTaskSignals(QObject):
@@ -56,7 +175,7 @@ class _WorktreeTaskSignals(QObject):
 class _WorktreeTaskWorker(QRunnable):
     """后台执行 git 操作的 worker
 
-    [P3] 主线程只发起任务 + 显示进度，git 子进程在后台线程串行执行，
+    主线程只发起任务 + 显示进度，git 子进程在后台线程串行执行，
     完成后经 finished/failed 信号回主线程刷新列表，UI 不冻结。
     顺序依赖（remove→prune→branch -D）由任务内的串行步骤保证。
     """
@@ -86,8 +205,7 @@ def _invalidate_repo_cache(folder: str) -> None:
     """删除 worktree 后失效 GitWorktreeDetector 的相关缓存
 
     `_info_cache` 只是最外层；`_worktrees_cache` / `_branch_cache` 各有
-    30s TTL，不清会拿回删除前的列表（表现为已删的 worktree 仍在行里，
-    页面高度也按陈旧条数算，行间凭空多出空白）。
+    30s TTL，不清会拿回删除前的列表（表现为已删的 worktree 仍在行里）。
     """
     GitWorktreeDetector._info_cache.pop(folder, None)
     GitWorktreeDetector._worktrees_cache.clear()
@@ -98,18 +216,9 @@ def _find_git_root_for(wt_path: str) -> str:
     """后台线程：查找 worktree 所在 git 仓库根目录（rev-parse 移出主线程）"""
     if os.path.isdir(wt_path):
         try:
-            r = subprocess.run(
-                ["git", "rev-parse", "--git-common-dir"],
-                capture_output=True,
-                text=True,
-                cwd=wt_path,
-                timeout=5,
-                encoding="utf-8",
-                errors="replace",
-                creationflags=_CREATION_FLAGS,
-            )
+            r = _git(["rev-parse", "--git-common-dir"], wt_path, timeout=5)
             if r.returncode == 0:
-                common = r.stdout.strip()
+                common = (r.stdout or "").strip()
                 if "worktrees" in common:
                     return os.path.dirname(os.path.dirname(common))
                 if os.path.isdir(common):
@@ -120,362 +229,377 @@ def _find_git_root_for(wt_path: str) -> str:
 
 
 def _delete_worktree_job(wt_path: str, branch: str) -> bool:
-    """后台线程：串行执行 rev-parse → remove → prune → branch -D（顺序依赖硬约束）
-
-    失败时记录日志但不中断后续步骤（与改造前主线程版本行为一致）。
-    """
+    """后台线程：串行执行 rev-parse → remove → prune → branch -D（顺序依赖硬约束）"""
     cwd = _find_git_root_for(wt_path)
-    # 1. 删除 worktree 目录
     try:
-        r = subprocess.run(
-            ["git", "worktree", "remove", wt_path],
-            capture_output=True,
-            text=True,
-            cwd=cwd,
-            timeout=10,
-            encoding="utf-8",
-            errors="replace",
-            creationflags=_CREATION_FLAGS,
-        )
+        r = _git(["worktree", "remove", wt_path], cwd, timeout=10)
         if r.returncode != 0:
-            subprocess.run(
-                ["git", "worktree", "remove", "--force", wt_path],
-                capture_output=True,
-                text=True,
-                cwd=cwd,
-                timeout=10,
-                encoding="utf-8",
-                errors="replace",
-                creationflags=_CREATION_FLAGS,
-            )
-        subprocess.run(
-            ["git", "worktree", "prune"],
-            capture_output=True,
-            text=True,
-            cwd=cwd,
-            timeout=5,
-            encoding="utf-8",
-            errors="replace",
-            creationflags=_CREATION_FLAGS,
-        )
+            _git(["worktree", "remove", "--force", wt_path], cwd, timeout=10)
     except Exception as e:
-        logger.error(f"[Worktree] delete failed: {e}")
-
-    # 2. 自动删除分支
+        logger.warning(f"[Worktree] remove 失败: {e}")
     try:
-        subprocess.run(
-            ["git", "branch", "-D", branch],
-            capture_output=True,
-            text=True,
-            cwd=cwd,
-            timeout=10,
-            encoding="utf-8",
-            errors="replace",
-            creationflags=_CREATION_FLAGS,
-        )
-    except Exception as e:
-        logger.error(f"[Worktree] delete branch failed: {e}")
-
+        _git(["worktree", "prune"], cwd, timeout=10)
+    except Exception:
+        pass
+    if branch and branch != "(detached)":
+        try:
+            _git(["branch", "-D", branch], cwd, timeout=10)
+        except Exception as e:
+            logger.info(f"[Worktree] 分支 {branch} 未删除（可能含未合并提交）: {e}")
     return True
 
 
-def _fetch_repo_info_job(folder: str):
-    """后台线程：获取仓库信息；若存在外部删除目录则先 prune 再重新获取
-
-    返回 (GitRepoInfo | None, missing_paths)：missing_paths 供主线程做
-    DB 清理 / 工作目录恢复收尾（prune 本身已在后台完成）。
-    """
-    info = GitWorktreeDetector.get_repo_info(folder)
-    if info is None:
-        return None, []
-
-    missing_paths = [wt.path for wt in info.worktrees if not os.path.isdir(wt.path)]
-    if missing_paths:
-        logger.info(f"[Worktree] 缺失 {len(missing_paths)} 个外部删除目录，内部清理中...")
-        # 1) prune（后台线程执行，主线程不冻结）
-        try:
-            subprocess.run(
-                ["git", "worktree", "prune"],
-                capture_output=True,
-                text=True,
-                cwd=info.root,
-                timeout=5,
-                encoding="utf-8",
-                errors="replace",
-                creationflags=_CREATION_FLAGS,
-            )
-        except Exception:
-            pass
-        # 2) 重新获取（prune 后 git 记录已清理）
-        # worktrees_cache 有 30s TTL，不清会拿回 prune 之前的陈旧列表
-        GitWorktreeDetector._info_cache.pop(folder, None)
-        GitWorktreeDetector._worktrees_cache.clear()
-        info = GitWorktreeDetector.get_repo_info(folder)
-    return info, missing_paths
-
-
-def _create_worktree_job(repo_root: str, branch_name: str, worktree_dir: str, base_branch: str) -> str:
-    """后台线程：执行 `git worktree add -b`（创建 worktree）
-
-    返回创建的 worktree 目录；失败抛异常（错误消息回主线程弹窗提示）。
-    """
-    result = subprocess.run(
-        ["git", "worktree", "add", "-b", branch_name, worktree_dir, base_branch or "HEAD"],
-        capture_output=True,
-        text=True,
-        cwd=repo_root,
-        timeout=30,
-        encoding="utf-8",
-        errors="replace",
-        creationflags=_CREATION_FLAGS,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(result.stderr.strip() or f"git worktree add 失败 (rc={result.returncode})")
+def _create_worktree_job(repo_root: str, branch: str, worktree_dir: str, base: str) -> str:
+    """后台线程：git worktree add [-b branch] dir base"""
+    # 分支已存在 → 直接挂载；否则新建
+    exists = _git(["rev-parse", "--verify", f"refs/heads/{branch}"], repo_root, timeout=8)
+    if exists.returncode == 0:
+        r = _git(["worktree", "add", worktree_dir, branch], repo_root, timeout=30)
+    else:
+        r = _git(["worktree", "add", "-b", branch, worktree_dir, base or "HEAD"], repo_root, timeout=30)
+    if r.returncode != 0:
+        raise RuntimeError((r.stderr or r.stdout or "git worktree add 失败").strip())
     return worktree_dir
 
 
+def _switch_branch_job(repo_root: str, branch: str) -> tuple:
+    """后台线程：主仓库切分支（git switch）"""
+    r = _git(["switch", branch], repo_root, timeout=30)
+    if r.returncode != 0:
+        # switch 不被老 git 支持时回退 checkout
+        r = _git(["checkout", branch], repo_root, timeout=30)
+    if r.returncode != 0:
+        raise RuntimeError((r.stderr or r.stdout or "git switch 失败").strip())
+    return repo_root, branch
+
+
+def _fetch_repo_info_job(git_root: str):
+    """后台线程：拉取仓库信息 + 缺失工作树清理
+
+    Returns:
+        (GitRepoInfo | None, missing_paths: list[str])
+    """
+    info = GitWorktreeDetector.get_repo_info(git_root)
+    if info is None:
+        return None, []
+    missing = [wt.path for wt in info.worktrees if not wt.is_main and not os.path.isdir(wt.path)]
+    if missing:
+        try:
+            _git(["worktree", "prune"], info.root, timeout=10)
+        except Exception:
+            pass
+    # 说明不随 get_repo_info 返回，这里补一次（每个工作树一次 git config，通常 <5ms）
+    for wt in info.worktrees:
+        if not wt.is_main:
+            setattr(wt, "description", read_worktree_description(wt.path))
+    return info, missing
+
+
+class MainRepoCard(QWidget):
+    """主仓库卡片：分支切换器 + 路径 + 领先落后
+
+    只有主仓库允许切分支：子工作树的存在意义就是固定检出某个分支，
+    允许它切分支等于让它与别的会话抢同一个分支。
+    """
+
+    switched = pyqtSignal(str)  # worktree_path（切换到该工作目录）
+    branchSwitched = pyqtSignal(str)  # branch_name
+
+    def __init__(self, repo_info, is_current: bool, parent=None):
+        super().__init__(parent)
+        self._repo_info = repo_info
+        self._is_current = is_current
+        self._switching = False
+        self._setup_ui()
+
+    def _setup_ui(self):
+        root = self._repo_info.root
+        self.setObjectName("mainRepoCard")
+        Colors.refresh()
+        self.setStyleSheet(
+            f"""
+            QWidget#mainRepoCard {{
+                background-color: {Colors.CARD_BG.format(alpha=200)};
+                border: 1px solid {Colors.BORDER};
+                border-radius: 8px;
+            }}
+            """
+        )
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 10, 12, 10)
+        layout.setSpacing(6)
+
+        # ── 第一行：图标 + 仓库名 + 当前标记 + 切工作目录 ──
+        head = QHBoxLayout()
+        head.setSpacing(6)
+
+        icon = ThemeIconLabel("仓库", 16, self)
+        head.addWidget(icon)
+
+        name = QLabel(os.path.basename(root.rstrip("/\\")) or root, self)
+        name.setStyleSheet(
+            f"color: {Colors.TEXT_PRIMARY}; font-weight: 600;"
+            f" {get_font_family_css()} {font_size_css(13)}"
+        )
+        head.addWidget(name)
+
+        if self._is_current:
+            badge = QLabel("当前", self)
+            badge.setStyleSheet(
+                f"color: {Colors.BUTTON_TEXT_ON_ACCENT}; background: {Colors.TEXT_ACCENT};"
+                f" {font_size_css(10)} padding: 1px 6px; border-radius: 3px;"
+            )
+            head.addWidget(badge)
+
+        head.addStretch()
+
+        if not self._is_current:
+            btn = QLabel("切到此处", self)
+            btn.setCursor(Qt.PointingHandCursor)
+            btn.setStyleSheet(
+                f"color: {Colors.TEXT_ACCENT}; font-weight: 600;"
+                f" {get_font_family_css()} {font_size_css(11)}"
+            )
+            btn.mousePressEvent = lambda e: self.switched.emit(root)
+            head.addWidget(btn)
+
+        layout.addLayout(head)
+
+        # ── 第二行：分支切换器 ──
+        branch_row = QHBoxLayout()
+        branch_row.setSpacing(6)
+
+        branch_label = QLabel("分支", self)
+        branch_label.setStyleSheet(
+            f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} {font_size_css(11)}"
+        )
+        branch_row.addWidget(branch_label)
+
+        self._branch_combo = QComboBox(self)
+        self._branch_combo.setMinimumWidth(180)
+        self._branch_combo.setMaxVisibleItems(15)
+        self._branch_combo.setStyleSheet(
+            f"QComboBox {{ {get_font_family_css()} {font_size_css(12)} }}"
+        )
+        branches = list_local_branches(root)
+        current = self._repo_info.current_branch
+        if current and current not in branches:
+            branches.insert(0, current)
+        self._branch_combo.addItems(branches or [current or "(detached)"])
+        if current:
+            idx = self._branch_combo.findText(current)
+            if idx >= 0:
+                self._branch_combo.setCurrentIndex(idx)
+        self._branch_combo.currentTextChanged.connect(self._on_branch_changed)
+        branch_row.addWidget(self._branch_combo, 1)
+
+        layout.addLayout(branch_row)
+
+        # ── 第三行：路径 ──
+        path_label = QLabel(root, self)
+        path_label.setWordWrap(False)
+        path_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        path_label.setStyleSheet(
+            f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} {font_size_css(10)}"
+        )
+        layout.addWidget(path_label)
+
+    def _on_branch_changed(self, branch: str):
+        """下拉框切换 → 通知外层执行 git switch（外层负责后台线程与错误提示）"""
+        if self._switching or not branch or branch == self._repo_info.current_branch:
+            return
+        self.branchSwitched.emit(branch)
+
+    def revert_branch(self, branch: str):
+        """切分支失败时把下拉框拨回实际分支（不再触发信号）"""
+        self._switching = True
+        try:
+            idx = self._branch_combo.findText(branch)
+            if idx >= 0:
+                self._branch_combo.setCurrentIndex(idx)
+        finally:
+            self._switching = False
+
+
 class _WorktreeRow(QWidget):
-    """单行 worktree 分支"""
+    """单行 worktree（子工作树用：无切分支入口）"""
 
     switched = pyqtSignal(str)  # worktree_path
     deleted = pyqtSignal(str)  # worktree_path
 
-    def __init__(
-        self,
-        branch: str,
-        wt_path: str,
-        is_main: bool,
-        is_current: bool,
-        is_prunable: bool,
-        parent=None,
-        behind_main: int = 0,
-        ahead_main: int = 0,
-    ):
+    def __init__(self, wt, is_current: bool, parent=None):
         super().__init__(parent)
-        self._branch = branch
-        self._wt_path = wt_path
-        self._is_main = is_main
+        self._wt = wt
         self._is_current = is_current
-        self._is_prunable = is_prunable
-        self._behind_main = behind_main
-        self._ahead_main = ahead_main
         self._confirming_delete = False
         self._delete_timer: QTimer = None
         self._del_btn: QLabel = None
-        self._delete_worker = None  # [P3] 后台删除任务引用（防 GC）
-        self.setFixedHeight(24)
+        self._delete_worker = None
+        self.setMinimumHeight(30)
         self._setup_ui()
 
     def _setup_ui(self):
+        wt = self._wt
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(0, 0, 16, 0)
-        layout.setSpacing(4)
+        layout.setContentsMargins(8, 4, 8, 4)
+        layout.setSpacing(6)
 
-        # 左侧竖线（加粗到 3px，配合更大圆点）
-        bar = QFrame(self)
-        bar.setFixedWidth(3)
-        bar.setStyleSheet(f"background-color: {Colors.DIVIDER_COLOR};")
-        layout.addWidget(bar)
-
-        # 圆点（加大到 8x8，配合加粗的线）
         dot = QLabel("", self)
         dot.setFixedSize(8, 8)
         if self._is_current:
-            dot.setStyleSheet("background-color: #58a6ff; border-radius: 4px;")
+            dot.setStyleSheet(f"background-color: {Colors.TEXT_ACCENT}; border-radius: 4px;")
         else:
-            dot.setStyleSheet("background: transparent; border: 1.5px solid #484f58; border-radius: 4px;")
+            dot.setStyleSheet(f"background: transparent; border: 1.5px solid {Colors.BORDER}; border-radius: 4px;")
         layout.addWidget(dot)
 
-        # 分支名（自动省略超长名称）
-        if self._is_current:
-            branch_ss = f"color: {Colors.TEXT_PRIMARY}; font-weight: 600; {get_font_family_css()} {font_size_css(12)}"
-        else:
-            branch_ss = f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} {font_size_css(12)}"
+        # 左侧主区：分支名 + 说明 + 路径
+        text_box = QVBoxLayout()
+        text_box.setContentsMargins(0, 0, 0, 0)
+        text_box.setSpacing(1)
 
-        self._branch_label = QLabel(self._branch, self)
-        self._branch_label.setStyleSheet(branch_ss)
-        # 允许压缩：窗口缩小时分支名自动省略右侧
-        self._branch_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
-        self._branch_label.setMinimumWidth(30)
-        layout.addWidget(self._branch_label, 1)
+        top = QHBoxLayout()
+        top.setSpacing(4)
+        branch_ss = (
+            f"color: {Colors.TEXT_PRIMARY}; font-weight: 600;"
+            if self._is_current
+            else f"color: {Colors.TEXT_PRIMARY};"
+        )
+        branch_label = QLabel(wt.branch, self)
+        branch_label.setStyleSheet(f"{branch_ss} {get_font_family_css()} {font_size_css(12)}")
+        branch_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        branch_label.setMinimumWidth(40)
+        branch_label.setToolTip(wt.branch)
+        top.addWidget(branch_label)
 
-        # 标签（小圆角 badge，适配系统字体大小）
-        if self._is_main:
-            tag = QLabel("main", self)
-            tag.setStyleSheet(
-                f"color: {Colors.TEXT_MUTED}; {font_size_css(10)}"
-                f"background: {Colors.HOVER_BG};"
-                f"padding: 0 4px; border-radius: 2px;"
+        desc = str(getattr(wt, "description", "") or "")
+        if desc:
+            ai_tag = QLabel("AI", self)
+            ai_tag.setStyleSheet(
+                f"color: {Colors.BUTTON_TEXT_ON_ACCENT}; background: {Colors.TEXT_ACCENT};"
+                f" {font_size_css(9)} padding: 0 4px; border-radius: 2px;"
             )
-            layout.addWidget(tag)
+            ai_tag.setToolTip("该工作树由 AI 创建")
+            top.addWidget(ai_tag)
 
-        # 落后/超前提交数显示（仅非主 worktree）：落后红、领先深绿
-        if not self._is_main and (self._behind_main > 0 or self._ahead_main > 0):
-            base_ss = f"{get_font_family_css()} {font_size_css(10)}padding: 0 2px;"
-            if self._behind_main > 0:
-                behind_label = QLabel(f"-{self._behind_main}", self)
-                behind_label.setStyleSheet(f"color: #f85149; {base_ss}")  # 红色-落后
-                layout.addWidget(behind_label)
-            if self._ahead_main > 0:
-                ahead_label = QLabel(f"+{self._ahead_main}", self)
-                ahead_label.setStyleSheet(f"color: #3fb950; {base_ss}")  # 深绿-领先
-                layout.addWidget(ahead_label)
+        if wt.behind_main > 0:
+            b = QLabel(f"-{wt.behind_main}", self)
+            b.setToolTip(f"落后主仓库 {wt.behind_main} 个提交")
+            b.setStyleSheet(f"color: #f85149; {get_font_family_css()} {font_size_css(10)}")
+            top.addWidget(b)
+        if wt.ahead_main > 0:
+            a = QLabel(f"+{wt.ahead_main}", self)
+            a.setToolTip(f"领先主仓库 {wt.ahead_main} 个提交")
+            a.setStyleSheet(f"color: #3fb950; {get_font_family_css()} {font_size_css(10)}")
+            top.addWidget(a)
 
-        layout.addStretch()
+        top.addStretch()
+        text_box.addLayout(top)
 
-        # 切换按钮（纯白色加粗，适配系统字体）
+        # 说明行（AI 创建的工作树必带，人工创建的可选）
+        if desc:
+            desc_label = QLabel(desc, self)
+            desc_label.setWordWrap(True)
+            desc_label.setStyleSheet(
+                f"color: {Colors.TEXT_SECONDARY}; {get_font_family_css()} {font_size_css(11)}"
+            )
+            text_box.addWidget(desc_label)
+
+        path_label = QLabel(wt.path, self)
+        path_label.setStyleSheet(
+            f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} {font_size_css(10)}"
+        )
+        path_label.setToolTip(wt.path)
+        text_box.addWidget(path_label)
+
+        layout.addLayout(text_box, 1)
+
+        # 右侧操作
         if not self._is_current:
-            btn = QLabel("切换", self)
-            btn.setCursor(Qt.PointingHandCursor)
-            btn.setStyleSheet(
-                f"color: {Colors.TEXT_ACCENT}; font-weight: 600; {get_font_family_css()} {font_size_css(11)}"
-                f"padding: 0 4px;"
+            switch_btn = QLabel("切换", self)
+            switch_btn.setCursor(Qt.PointingHandCursor)
+            switch_btn.setStyleSheet(
+                f"color: {Colors.TEXT_ACCENT}; font-weight: 600;"
+                f" {get_font_family_css()} {font_size_css(11)} padding: 0 4px;"
             )
-            btn.mousePressEvent = lambda e: self.switched.emit(self._wt_path)
-            layout.addWidget(btn)
+            switch_btn.setToolTip("把当前会话工作目录切到该工作树")
+            switch_btn.mousePressEvent = lambda e: self.switched.emit(self._wt.path)
+            layout.addWidget(switch_btn)
 
-        # 删除按钮（纯白色加粗，适配系统字体，支持内联确认）
-        if not self._is_main:
-            self._del_btn = QLabel("✕", self)
-            self._del_btn.setMinimumWidth(14)
-            self._del_btn.setAlignment(Qt.AlignCenter)
-            self._del_btn.setCursor(Qt.PointingHandCursor)
-            self._del_btn.setToolTip("删除 worktree")
-            self._del_btn.setStyleSheet(
-                f"color: {Colors.TEXT_ACCENT}; font-weight: 600; {get_font_family_css()} {font_size_css(11)}"
-            )
-            self._del_btn.mousePressEvent = lambda e: self._on_delete_clicked()
-            layout.addWidget(self._del_btn)
+        self._del_btn = ThemeIconLabel("删除", 13, self)
+        self._del_btn.setCursor(Qt.PointingHandCursor)
+        self._del_btn.setToolTip("删除工作树")
+        self._del_btn.setStyleSheet(
+            f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} {font_size_css(11)} padding: 0 4px;"
+        )
+        self._del_btn.mousePressEvent = lambda e: self._on_delete_click()
+        layout.addWidget(self._del_btn)
 
-    def resizeEvent(self, event):
-        """窗口缩小时自动省略分支名右侧"""
-        super().resizeEvent(event)
-        self._update_branch_elision()
-
-    def _update_branch_elision(self):
-        """根据可用宽度自动省略分支名（右侧截断）"""
-        if not hasattr(self, "_branch_label") or self._branch_label is None:
-            return
-        available = self._branch_label.width()
-        if available <= 0:
-            return
-        fm = self._branch_label.fontMetrics()
-        elided = fm.elidedText(self._branch, Qt.ElideRight, available)
-        self._branch_label.setText(elided)
-
-    def _on_delete_clicked(self):
-        """删除按钮点击：内联确认，第二次点击才真正删除"""
-        if not self._confirming_delete:
-            # 第一次点击：进入确认状态
-            self._confirming_delete = True
-            self._del_btn.setText("确认删除")
-            self._del_btn.setStyleSheet(
-                f"color: #f85149; font-weight: 600; {get_font_family_css()} {font_size_css(11)}padding: 0 4px;"
-            )
-            self._del_btn.setToolTip("再次点击确认删除，3秒后自动取消")
-            # 3秒后自动恢复
-            self._delete_timer = QTimer(self)
-            self._delete_timer.setSingleShot(True)
-            self._delete_timer.setInterval(3000)
-            self._delete_timer.timeout.connect(self._cancel_delete_confirm)
-            self._delete_timer.start()
-        else:
-            # 第二次点击：确认删除
-            if self._delete_timer:
-                self._delete_timer.stop()
-                self._delete_timer = None
-            self._confirming_delete = False
+    def _on_delete_click(self):
+        """内联二次确认：首次点击变「确认删除?」，3 秒后自动还原"""
+        if self._confirming_delete:
             self._do_delete()
+            return
+        self._confirming_delete = True
+        self._del_btn.set_icon("删除")
+        self._del_btn.show_confirm_style(True)
+        self._del_btn.setStyleSheet(
+            f"color: #f85149; font-weight: 600;"
+            f" {get_font_family_css()} {font_size_css(11)} padding: 0 4px;"
+        )
+        self._delete_timer = QTimer(self)
+        self._delete_timer.setSingleShot(True)
+        self._delete_timer.timeout.connect(self._cancel_delete_confirm)
+        self._delete_timer.start(3000)
 
     def _cancel_delete_confirm(self):
-        """取消确认状态，恢复删除按钮样式"""
         self._confirming_delete = False
-        if self._del_btn:
-            self._del_btn.setText("✕")
-            self._del_btn.setMinimumWidth(14)
+        if self._del_btn is not None:
+            self._del_btn.set_icon("删除")
             self._del_btn.setStyleSheet(
-                f"color: {Colors.TEXT_ACCENT}; font-weight: 600; {get_font_family_css()} {font_size_css(11)}"
+                f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} {font_size_css(11)} padding: 0 4px;"
             )
-            self._del_btn.setToolTip("删除 worktree")
 
     def _do_delete(self):
-        """执行删除 worktree + 自动删除分支（后台线程串行执行，UI 不冻结）"""
-        # 防重入：删除期间禁用删除按钮并显示执行中，避免用户连点重复触发
-        if self._del_btn:
-            self._del_btn.setEnabled(False)
-            self._del_btn.setText("删除中...")
-            self._del_btn.setToolTip("正在删除，请稍候")
-        worker = _WorktreeTaskWorker(_delete_worktree_job, self._wt_path, self._branch)
-        worker.signals.finished.connect(self._on_delete_finished)
+        if self._delete_timer:
+            self._delete_timer.stop()
+            self._delete_timer = None
+        self._del_btn.setEnabled(False)
+        self._del_btn.show_confirm_style(True)
+        worker = _WorktreeTaskWorker(_delete_worktree_job, self._wt.path, self._wt.branch)
+        worker.signals.finished.connect(lambda _r: self.deleted.emit(self._wt.path))
         worker.signals.failed.connect(self._on_delete_failed)
-        self._delete_worker = worker  # 持有引用，防止任务期间被 GC
+        self._delete_worker = worker
         _WORKTREE_POOL.start(worker)
 
-    def _on_delete_finished(self, _result):
-        """删除完成（主线程）：恢复 UI 并通知父级刷新"""
-        # 恢复删除按钮
-        self._confirming_delete = False
-        if self._delete_timer:
-            self._delete_timer.stop()
-            self._delete_timer = None
-        if self._del_btn:
-            self._del_btn.setEnabled(True)
-            self._del_btn.setText("✕")
-            self._del_btn.setMinimumWidth(14)
-            self._del_btn.setStyleSheet(
-                f"color: {Colors.TEXT_ACCENT}; font-weight: 600; {get_font_family_css()} {font_size_css(11)}"
-            )
-            self._del_btn.setToolTip("删除 worktree")
-        self.deleted.emit(self._wt_path)
-
     def _on_delete_failed(self, msg: str):
-        """删除失败（主线程）：恢复 UI，失败信息已由后台记录日志"""
-        logger.error(f"[Worktree] delete failed: {msg}")
-        self._confirming_delete = False
-        if self._delete_timer:
-            self._delete_timer.stop()
-            self._delete_timer = None
-        if self._del_btn:
-            self._del_btn.setEnabled(True)
-            self._del_btn.setText("✕")
-            self._del_btn.setMinimumWidth(14)
-            self._del_btn.setStyleSheet(
-                f"color: {Colors.TEXT_ACCENT}; font-weight: 600; {get_font_family_css()} {font_size_css(11)}"
-            )
-            self._del_btn.setToolTip("删除 worktree")
-    def _find_git_root(self) -> str:
-        return _find_git_root_for(self._wt_path)
+        logger.warning(f"[Worktree] 删除失败: {msg}")
+        self._cancel_delete_confirm()
+        self._del_btn.setEnabled(True)
 
 
 class _AddWorktreeRow(QWidget):
-    """新建 worktree 行"""
+    """新建工作树入口"""
 
-    createRequested = pyqtSignal(str, str)  # (branch_name, base_branch)
+    createRequested = pyqtSignal(str, str, str)  # (branch_name, base_branch, description)
 
-    def __init__(self, repo_root: str, repo_name: str, current_branch: str, parent=None):
+    def __init__(self, repo_root: str, current_branch: str, parent=None):
         super().__init__(parent)
         self._repo_root = repo_root
-        self._repo_name = repo_name
         self._current_branch = current_branch
-        self.setFixedHeight(24)
+        self.setFixedHeight(26)
         self._setup_ui()
 
     def _setup_ui(self):
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(0, 0, 16, 0)
-        layout.setSpacing(4)
+        layout.setContentsMargins(8, 2, 8, 2)
 
-        # 竖线（加粗到 3px，配合圆点尺寸）
-        bar = QFrame(self)
-        bar.setFixedWidth(3)
-        bar.setStyleSheet(f"background-color: {Colors.DIVIDER_COLOR};")
-        layout.addWidget(bar)
-
-        add_label = QLabel("＋ 新建工作树", self)
-        add_label.setStyleSheet(
-            f"color: {Colors.TEXT_ACCENT}; font-weight: 600; {get_font_family_css()} {font_size_css(11)}"
-        )
+        add_label = QLabel("新建工作树", self)
         add_label.setCursor(Qt.PointingHandCursor)
+        add_label.setStyleSheet(
+            f"color: {Colors.TEXT_ACCENT}; font-weight: 600;"
+            f" {get_font_family_css()} {font_size_css(11)}"
+        )
         add_label.mousePressEvent = lambda e: self._on_add()
         layout.addWidget(add_label)
         layout.addStretch()
@@ -483,57 +607,57 @@ class _AddWorktreeRow(QWidget):
     def _on_add(self):
         from app.plugins.sdk import SingleInputDialog
 
-        # 注意：parent 必须传顶层窗口（self.window()）。
-        # 如果传 self（_AddWorktreeRow，24px 高），MaskDialogBase 会把
-        # dialog 强制设成 100×24，widget（420×220）溢出导致看不见。
         dialog = SingleInputDialog(
             title="新建 Worktree",
             hint=f"从 <b>{self._current_branch}</b> 创建新分支：",
-            default_text=f"{self._repo_name}/",
-            confirm_text="创建",
+            default_text=f"{os.path.basename(self._repo_root)}/",
+            confirm_text="下一步",
             cancel_text="取消",
             parent=self.window(),
         )
         if not dialog.exec_():
             return
-
         branch = dialog.input.text().strip()
-        if branch:
-            self.createRequested.emit(branch, self._current_branch)
+        if not branch:
+            return
+
+        # 第二步：说明（人工创建可选填，留空即无说明）
+        desc_dialog = SingleInputDialog(
+            title="工作树说明",
+            hint="一句话说明这个工作树要做什么（可留空）：",
+            default_text="",
+            confirm_text="创建",
+            cancel_text="取消",
+            parent=self.window(),
+        )
+        description = ""
+        if desc_dialog.exec_():
+            description = desc_dialog.input.text().strip()[:DESCRIPTION_MAX_LEN]
+        self.createRequested.emit(branch, self._current_branch or "HEAD", description)
 
 
 class WorktreeSectionWidget(QWidget):
-    """
-    紧贴文件夹条目下方的 worktree 分支列表
-
-    │ ● dev         主·当前
-    │ ○ feature     [切换] [确认删除?]
-    │ ＋ 新建
-    """
+    """工作树面板：主仓库卡片 + 子工作树列表 + 新建入口"""
 
     worktreeSwitched = pyqtSignal(str, str)  # (original_folder, worktree_path)
     worktreeDeleted = pyqtSignal(str)  # 仅 UI 操作删除时发射
-    workingDirRestored = pyqtSignal(str)  # 外部删除导致工作目录恢复时发射（无重建）
+    workingDirRestored = pyqtSignal(str)  # 外部删除导致工作目录恢复时发射
     sizeChanged = pyqtSignal(int)  # 高度变化通知
-
-    def refresh_style(self, _payload: dict = None):
-        """刷新样式（EV_THEME_CHANGED 订阅回调；payload 为事件数据，忽略）"""
-        self._repopulate()
 
     def __init__(self, repo_info, original_folder: str, parent=None, current_workdir: str = None, project: str = None):
         super().__init__(parent)
         self._repo_info = repo_info
         self._original_folder = original_folder
         self._current_workdir = current_workdir
-        self._project = project or ""  # 用于 DB 直接清理
-        self._last_check_time = 0.0  # paintEvent 防抖时间戳
-        # [P3] 后台任务引用（防止任务执行期间被 GC）+ 防重入标志
+        self._project = project or ""
+        self._last_check_time = 0.0
         self._fetch_worker = None
         self._create_worker = None
         self._create_busy = False
-        self._pending_switch_path = None  # 创建完成后待切换的 worktree 路径
+        self._pending_switch_path = None
+        self._main_card: MainRepoCard = None
         self._setup_ui()
-        # 主题自刷：已迁移出 app/widgets，main_widget 不再 isinstance 遍历刷新，改订 UIEventBus
+        # 主题自刷
         try:
             ev = _caps("ui.events")
             if ev is not None:
@@ -542,14 +666,7 @@ class WorktreeSectionWidget(QWidget):
             pass
 
     def paintEvent(self, event: QPaintEvent):
-        """在每次绘制时检查 worktree 路径是否仍然存在
-
-         为什么用 paintEvent 而非 QTimer：
-         QTimer 在嵌入 QListWidget.setItemWidget 的 widget 中可能无法可靠触发
-        （widget 不是标准层级结构的一部分）。
-         paintEvent 由 Qt 绘制系统保证调用，是检测文件系统变化的最可靠方式。
-         防抖 5s 避免频繁 I/O。
-        """
+        """绘制时检查 worktree 路径是否仍存在（防抖 5s）"""
         self._check_paths()
         super().paintEvent(event)
 
@@ -560,34 +677,32 @@ class WorktreeSectionWidget(QWidget):
         if now - self._last_check_time < 5.0:
             return
         self._last_check_time = now
-
         if not self._repo_info or not self._repo_info.worktrees:
             return
-        has_missing = any(not os.path.isdir(wt.path) for wt in self._repo_info.worktrees)
-        if has_missing:
-            logger.info("[Worktree] paintEvent 检测到外部删除，内部清理...")
+        if any(not os.path.isdir(wt.path) for wt in self._repo_info.worktrees if not wt.is_main):
+            logger.info("[Worktree] 检测到外部删除，内部清理...")
             self._repopulate()
 
     def _setup_ui(self):
         self.setStyleSheet("WorktreeSectionWidget { background: transparent; border: none; }")
-
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(24, 2, 0, 4)
-        layout.setSpacing(0)
+        layout.setContentsMargins(0, 4, 0, 4)
+        layout.setSpacing(6)
 
         self._rows = QWidget(self)
         self._rows_layout = QVBoxLayout(self._rows)
         self._rows_layout.setContentsMargins(0, 0, 0, 0)
-        self._rows_layout.setSpacing(0)
+        self._rows_layout.setSpacing(6)
         layout.addWidget(self._rows)
 
         self._populate_rows()
 
-    def _repopulate(self):
-        """清除缓存后重新 populate（git 查询移入后台线程，UI 不冻结）
+    def refresh_style(self, _payload: dict = None):
+        """主题刷新：重建（内联样式在构造时写死，重建最省心）"""
+        self._repopulate()
 
-        如果重新获取失败（_repo_info 为 None），仍要清空旧行避免残留。
-        """
+    def _repopulate(self):
+        """清缓存后重新拉取（git 查询在后台线程）"""
         _invalidate_repo_cache(self._original_folder)
         worker = _WorktreeTaskWorker(_fetch_repo_info_job, self._original_folder)
         worker.signals.finished.connect(self._on_repo_info_loaded)
@@ -596,59 +711,38 @@ class WorktreeSectionWidget(QWidget):
         _WORKTREE_POOL.start(worker)
 
     def _on_repo_info_loaded(self, payload):
-        """后台获取完成（主线程）：应用结果并重建行列表"""
+        """后台拉取完成（主线程）：应用结果并重建"""
         info, missing_paths = payload
-        self._repo_info = info
+        self._fetch_worker = None
         if not info:
-            # 获取失败（仓库已删除等），清空所有行
-            self._fetch_worker = None
             self._clear_rows()
             return
-        # 外部删除处理（prune 已在后台完成，这里只做 DB/工作目录收尾）
+        self._repo_info = info
+
         if missing_paths:
             logger.info(f"[Worktree] 缺失 {len(missing_paths)} 个外部删除目录，内部清理中...")
-            # DB 清理（直接，不走 signal → 不触发 _load_key_documents）
-            for p in missing_paths:
-                self._cleanup_db(p)
-            # 如果当前工作目录就是被删的 path，恢复为原始仓库
-            if self._current_workdir and os.path.normpath(self._current_workdir) in (
-                os.path.normpath(mp) for mp in missing_paths
+            # 当前工作目录落在被删的路径里 → 回主仓库
+            if self._current_workdir and any(
+                os.path.normpath(self._current_workdir) == os.path.normpath(mp) for mp in missing_paths
             ):
-                logger.info(f"[Worktree] 当前 workdir 已被删除，恢复为原始仓库: {self._original_folder}")
-                self._restore_workdir(self._original_folder)
-        self._fetch_worker = None
+                self._restore_workdir(info.root)
+
         self._populate_rows()
-        # 创建 worktree 成功后，刷新完成 → 切换到新 worktree
+
+        # 创建完成后自动切到新工作树
         if self._pending_switch_path:
             target = self._pending_switch_path
             self._pending_switch_path = None
-            norm_target = os.path.normpath(target)
-            for wt in info.worktrees:
-                if os.path.normpath(wt.path) == norm_target:
-                    self._on_switch(wt.path)
-                    break
+            if os.path.isdir(target):
+                self._on_switch(target)
 
     def _on_repo_info_load_failed(self, msg: str):
-        """后台获取失败（主线程）：记录日志并清空行避免残留"""
-        logger.error(f"[Worktree] repo info load failed: {msg}")
         self._fetch_worker = None
+        logger.warning(f"[Worktree] 仓库信息拉取失败: {msg}")
         self._clear_rows()
 
-    def _cleanup_db(self, path: str):
-        """直接清理 DB 中该路径的记录（不触发父级重建）"""
-        if not self._project:
-            return
-        try:
-            from app.core.conversation.memory_manager import MemoryManagerCore
-
-            mm = MemoryManagerCore.get_instance()
-            if mm and mm._key_documents_repo:
-                mm._key_documents_repo.remove_by_path(self._project, path)
-        except Exception:
-            pass
-
     def _restore_workdir(self, original_path: str):
-        """将工作目录恢复为原始 git 仓库根目录（当被删 path 恰是当前 workdir 时）"""
+        """工作目录回退到主仓库根（被删路径恰是当前 workdir 时）"""
         try:
             from app.core.conversation.memory_manager import MemoryManagerCore
 
@@ -656,19 +750,12 @@ class WorktreeSectionWidget(QWidget):
             if mm and self._project:
                 mm.set_working_directory(self._project, original_path)
                 self._current_workdir = original_path
-                # 通知父级更新缓存（工具执行器等），不触发全量重建
                 self.workingDirRestored.emit(original_path)
         except Exception:
             pass
 
     def _clear_rows(self):
-        """清空所有 worktree 行 + 新建行（供 _populate_rows 和 _repopulate 共用）
-
-        deleteLater 只排队不销毁：不先 hide，旧行在 DeferredDelete 执行前
-        仍 isVisible 且停在原位，与新行几何重叠，出现一帧叠影。
-        不调 setParent(None)：那会把所有权交回 Python，局部引用出作用域时
-        立即析构 C++ 对象，与已排队的 deleteLater 撞车。
-        """
+        """清空所有子控件（先 hide 再 deleteLater，避免一帧叠影）"""
         while self._rows_layout.count():
             item = self._rows_layout.takeAt(0)
             w = item.widget()
@@ -676,119 +763,140 @@ class WorktreeSectionWidget(QWidget):
                 continue
             w.hide()
             w.deleteLater()
+        self._main_card = None
 
     def _populate_rows(self):
-        """重新构建 worktree 行列表（纯渲染，git 查询在后台完成）
-
-        处理外部删除的策略（全内部闭环，不触发父级重建）：
-        1. 缺失路径检测 + `git worktree prune` 由后台任务 `_fetch_repo_info_job` 完成
-        2. 主线程这里只做 DB 清理、工作目录恢复收尾（_on_repo_info_loaded）
-        3. 跳过缺失行，渲染其余行
-        """
+        """重建：主仓库卡片置顶 + 子工作树列表 + 新建入口"""
         self._clear_rows()
+        if not self._repo_info:
+            return
 
         current_wd = self._current_workdir or self._original_folder
         normalized_wd = os.path.normpath(current_wd)
 
-        # ====== 渲染 ======
+        main_wt = next((w for w in self._repo_info.worktrees if w.is_main), None)
+        if main_wt is not None and os.path.isdir(main_wt.path):
+            is_current = os.path.normpath(main_wt.path) == normalized_wd
+            self._main_card = MainRepoCard(self._repo_info, is_current, parent=self)
+            self._main_card.switched.connect(self._on_switch)
+            self._main_card.branchSwitched.connect(self._on_main_branch_switch)
+            self._rows_layout.addWidget(self._main_card)
+
         for wt in self._repo_info.worktrees:
-            if not os.path.isdir(wt.path):
-                continue  # prune 失败等边缘情况
+            if wt.is_main or not os.path.isdir(wt.path):
+                continue
             is_current = os.path.normpath(wt.path) == normalized_wd
-            row = _WorktreeRow(
-                branch=wt.branch,
-                wt_path=wt.path,
-                is_main=wt.is_main,
-                is_current=is_current,
-                is_prunable=wt.is_bare,
-                parent=self,
-                behind_main=wt.behind_main,
-                ahead_main=wt.ahead_main,
-            )
+            row = _WorktreeRow(wt, is_current, parent=self)
             row.switched.connect(self._on_switch)
             row.deleted.connect(self._on_deleted)
             self._rows_layout.addWidget(row)
 
-        add = _AddWorktreeRow(
-            self._repo_info.root,
-            os.path.basename(self._repo_info.root).lower(),
-            self._repo_info.current_branch,
-            parent=self,
-        )
+        add = _AddWorktreeRow(self._repo_info.root, self._repo_info.current_branch, parent=self)
         add.createRequested.connect(self._on_create)
         self._rows_layout.addWidget(add)
 
         self.sizeChanged.emit(self.content_height())
 
     def content_height(self) -> int:
-        """本组件需要的高度（各行固定高之和 + 上下 margins）
-
-        单一事实源：调用方一律用它，不再各自套 `n*24+24+4` 公式。
-        页面的 setItemWidget 高度、sizeChanged 都从这里取，口径不一致时
-        多余高度会被 QVBoxLayout 均摊到行间，表现为行与行之间凭空多出空白。
-
-        用 `minimumHeight()`（行都 setFixedHeight(24)）而非
-        `_rows_layout.sizeHint()`：后者在行刚加入、事件循环还没跑时返回 0，
-        emit 出去会把 item 压成只剩 margins；也不要用 sizeHint()，它取的是
-        QWidget 默认值（18/17），不是 setFixedHeight 后的实际行高。
-        """
+        """本组件需要的高度（各子控件高度之和 + 间距 + margins）"""
         m = self.layout().contentsMargins()
-        total = sum(self._rows_layout.itemAt(i).widget().minimumHeight() for i in range(self._rows_layout.count()))
+        spacing = self._rows_layout.spacing()
+        total = 0
+        count = 0
+        for i in range(self._rows_layout.count()):
+            w = self._rows_layout.itemAt(i).widget()
+            if w is None:
+                continue
+            total += max(w.minimumHeight(), w.sizeHint().height())
+            count += 1
+        if count > 1:
+            total += spacing * (count - 1)
         return total + m.top() + m.bottom()
 
     def _on_switch(self, worktree_path: str):
-        """切换 worktree"""
         if os.path.isdir(worktree_path):
             self.worktreeSwitched.emit(self._original_folder, worktree_path)
 
+    def _on_main_branch_switch(self, branch: str):
+        """主仓库切分支（后台执行，失败回滚下拉框并提示）"""
+        repo_root = self._repo_info.root
+        current = self._repo_info.current_branch
+
+        def _on_ok(_result):
+            _invalidate_repo_cache(self._original_folder)
+            self._repopulate()
+            self._show_info_dialog("已切换分支", f"主仓库当前分支：{branch}")
+
+        def _on_fail(msg: str):
+            if self._main_card is not None:
+                self._main_card.revert_branch(current)
+            self._show_error_dialog(
+                "切换分支失败",
+                f"无法切换到「{branch}」：\n\n{msg}\n\n"
+                "常见原因：工作区有未提交改动与目标分支冲突，先提交或 stash 再切。",
+            )
+
+        worker = _WorktreeTaskWorker(_switch_branch_job, repo_root, branch)
+        worker.signals.finished.connect(_on_ok)
+        worker.signals.failed.connect(_on_fail)
+        self._create_worker = worker
+        _WORKTREE_POOL.start(worker)
+
     def _on_deleted(self, worktree_path: str):
-        """UI 删除 worktree（内联确认后）"""
+        """UI 删除完成（主线程）：刷新并通知外层"""
+        _invalidate_repo_cache(self._original_folder)
         self._repopulate()
         self.worktreeDeleted.emit(worktree_path)
 
     def _refresh(self):
-        """刷新 worktree 列表（外部调用，如创建新 worktree 后；后台执行）"""
-        # 清除缓存，确保获取最新的 worktree 列表
         self._repopulate()
 
-    def _on_create(self, branch_name: str, base_branch: str):
-        # 防重入：创建进行中时忽略重复点击
+    def _on_create(self, branch_name: str, base_branch: str, description: str = ""):
         if self._create_busy:
             logger.info("[Worktree] 创建进行中，忽略重复请求")
             return
         self._create_busy = True
         repo_root = self._repo_info.root
-        # 统一建到仓库内 .worktrees/（已 gitignore），分支名中的 / 转为 -
         worktree_dir = os.path.join(repo_root, ".worktrees", branch_name.replace("/", "-"))
 
-        worker = _WorktreeTaskWorker(_create_worktree_job, repo_root, branch_name, worktree_dir, base_branch or "HEAD")
-        worker.signals.finished.connect(lambda _r: self._on_create_finished(branch_name, worktree_dir))
-        worker.signals.failed.connect(lambda msg: self._on_create_failed(branch_name, msg))
+        def _on_ok(_r):
+            self._on_create_finished(branch_name, worktree_dir, description)
+
+        def _on_fail(msg: str):
+            self._on_create_failed(branch_name, msg)
+
+        worker = _WorktreeTaskWorker(
+            _create_worktree_job, repo_root, branch_name, worktree_dir, base_branch or "HEAD"
+        )
+        worker.signals.finished.connect(_on_ok)
+        worker.signals.failed.connect(_on_fail)
         self._create_worker = worker
         _WORKTREE_POOL.start(worker)
 
-    def _on_create_finished(self, branch_name: str, worktree_dir: str):
-        """创建成功（主线程）：置位待切换路径并刷新列表"""
+    def _on_create_finished(self, branch_name: str, worktree_dir: str, description: str = ""):
         self._create_busy = False
         self._create_worker = None
+        if description:
+            write_worktree_description(worktree_dir, description)
         self._pending_switch_path = worktree_dir
-        # 清除缓存后刷新（后台），刷新完成时自动切换到新 worktree
+        _invalidate_repo_cache(self._original_folder)
         self._repopulate()
 
     def _on_create_failed(self, branch_name: str, msg: str):
-        """创建失败（主线程）：恢复状态并提示"""
         self._create_busy = False
         self._create_worker = None
         self._show_error_dialog(
             "创建失败",
-            f"无法创建 worktree「{branch_name}」：\n\n{msg}\n\n💡 如果分支已存在，可先删除旧 worktree 再创建",
+            f"无法创建 worktree「{branch_name}」：\n\n{msg}\n\n"
+            "如果分支已存在，可先删除旧 worktree 再创建",
         )
 
     def _show_error_dialog(self, title: str, message: str):
         dlg = QDialog(self)
         dlg.setWindowTitle(title)
-        dlg.setFixedSize(380, 200)
-        dlg.setStyleSheet(f"""
+        dlg.setMinimumSize(420, 220)
+        dlg.setStyleSheet(
+            f"""
             QDialog {{
                 background-color: {Colors.CONTENT_BG};
                 border: 1px solid {Colors.BORDER};
@@ -798,25 +906,42 @@ class WorktreeSectionWidget(QWidget):
                 color: {Colors.TEXT_PRIMARY};
                 {get_font_family_css()} {font_size_css(12)}
             }}
-            QPushButton {{
-                background-color: {Colors.BORDER_ACCENT};
-                color: {readable_text_on(Colors.BORDER_ACCENT, "#ffffff")}; border: none;
-                border-radius: 4px; padding: 6px 20px;
-                {get_font_family_css()} {font_size_css(12)}
-                min-width: 60px;
+            """
+        )
+        lay = QVBoxLayout(dlg)
+        lay.setContentsMargins(16, 16, 16, 16)
+        lay.setSpacing(10)
+        label = QLabel(message, dlg)
+        label.setWordWrap(True)
+        lay.addWidget(label, 1)
+        btn = QPushButton("知道了", dlg)
+        btn.clicked.connect(dlg.accept)
+        lay.addWidget(btn, 0, Qt.AlignRight)
+        dlg.exec_()
+
+    def _show_info_dialog(self, title: str, message: str):
+        dlg = QDialog(self)
+        dlg.setWindowTitle(title)
+        dlg.setMinimumSize(360, 150)
+        dlg.setStyleSheet(
+            f"""
+            QDialog {{
+                background-color: {Colors.CONTENT_BG};
+                border: 1px solid {Colors.BORDER};
+                border-radius: 8px;
             }}
-        """)
-        vl = QVBoxLayout(dlg)
-        vl.setContentsMargins(16, 16, 16, 16)
-        vl.setSpacing(10)
-        lbl = QLabel(message, dlg)
-        lbl.setWordWrap(True)
-        vl.addWidget(lbl)
-        vl.addStretch()
-        bl = QHBoxLayout()
-        bl.addStretch()
-        ok = QPushButton("确定", dlg)
-        ok.clicked.connect(dlg.accept)
-        bl.addWidget(ok)
-        vl.addLayout(bl)
+            QLabel {{
+                color: {Colors.TEXT_PRIMARY};
+                {get_font_family_css()} {font_size_css(12)}
+            }}
+            """
+        )
+        lay = QVBoxLayout(dlg)
+        lay.setContentsMargins(16, 16, 16, 16)
+        label = QLabel(message, dlg)
+        label.setWordWrap(True)
+        lay.addWidget(label, 1)
+        btn = QPushButton("好", dlg)
+        btn.clicked.connect(dlg.accept)
+        lay.addWidget(btn, 0, Qt.AlignRight)
         dlg.exec_()

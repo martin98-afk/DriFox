@@ -350,13 +350,10 @@ def _workdir_write(host: Any):
 
 
 def _project_workdir(host: Any):
-    """写库式切换项目工作目录（worktree 场景）。
+    """写库式切换项目工作目录（worktree / 分支切换场景）。
 
     与 ``workdir.write`` 的分界：那条只改会话内状态（缓存 + executor + 广播 +
-    UI 同步），进程重启即失效；本能力把改动**落进记忆库**——关键文档登记、
-    工作目录持久化、根目录标记恢复。worktree-manager 原先自己拼
-    ``backend.memory_manager`` 的四步调用，且要判断旧根目录是不是 worktree
-    才决定是否恢复标记，这套判断属于宿主语义，不该由插件复制。
+    UI 同步），进程重启即失效；本能力把改动**持久化**到 project_workdir 表。
     """
 
     def _mm():
@@ -366,34 +363,12 @@ def _project_workdir(host: Any):
     def _resolve_project(project: str) -> str:
         return str(project or getattr(host, "_current_project", "") or "")
 
-    def switch(project: str, path: str, *, added_by: str = "git_worktree", restore_mark: bool = True) -> bool:
-        """登记关键文档 + 设置工作目录（可选恢复旧根目录标记）。
+    def switch(project: str, path: str, *, added_by: str = "", restore_mark: bool = True) -> bool:
+        """持久化项目工作目录。
 
-        ``restore_mark``：旧工作目录存在且不是 worktree 时恢复其 ``is_working_dir``
-        标记，保证记忆卡片能识别用户设定的根目录。调用方不需要知道判定规则。
+        ``added_by`` / ``restore_mark`` 保留在签名里仅为兼容既有插件调用点：
+        关键文档表下线后，工作目录已是单值语义，无需「登记条目标记」这类动作。
         """
-        project, path = _resolve_project(project), str(path or "")
-        mm = _mm()
-        if mm is None or not project or not path:
-            return False
-        try:
-            prev = mm.get_working_directory(project)
-            mm.add_key_document(project, path, added_by)
-            mm.set_working_directory(project, path)
-            if restore_mark and prev and prev != path and prev != "clear":
-                docs = mm.get_key_documents(project)
-                prev_is_worktree = any(
-                    d.get("file_path") == prev and d.get("added_by") == "git_worktree" for d in docs
-                )
-                if not prev_is_worktree:
-                    mm.restore_working_directory_mark(project, prev)
-            return True
-        except Exception as e:
-            logger.warning(f"[Capability] 切换项目工作目录失败 project={project}: {e}")
-            return False
-
-    def set_only(project: str, path: str) -> bool:
-        """只持久化工作目录（回主仓库场景：不需要登记关键文档/恢复标记）。"""
         project, path = _resolve_project(project), str(path or "")
         mm = _mm()
         if mm is None or not project or not path:
@@ -401,8 +376,12 @@ def _project_workdir(host: Any):
         try:
             return bool(mm.set_working_directory(project, path))
         except Exception as e:
-            logger.warning(f"[Capability] 持久化工作目录失败 project={project}: {e}")
+            logger.warning(f"[Capability] 切换项目工作目录失败 project={project}: {e}")
             return False
+
+    def set_only(project: str, path: str) -> bool:
+        """只持久化工作目录（与 switch 等价，保留给回主仓库场景的调用点）。"""
+        return switch(project, path)
 
     return {"switch": switch, "set_only": set_only}
 

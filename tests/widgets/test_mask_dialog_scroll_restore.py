@@ -15,6 +15,7 @@ QTimer.singleShot(0)（等 posted LayoutRequest 处理完）回设。
 import sys
 
 from PyQt5.QtCore import QCoreApplication, Qt
+from PyQt5.QtTest import QTest
 from PyQt5.QtWidgets import (
     QApplication,
     QDialog,
@@ -108,10 +109,45 @@ def test_restore_sets_scroll_back(qapp):
 
     assert not viewer.isHidden(), "对话框关闭后 viewer 应恢复显示"
     assert viewer._saved_dialog_scroll_pos == -1, "恢复后应清空记录"
-    # singleShot(0) 等布局重排完成后回设
-    QApplication.processEvents()
-    QApplication.processEvents()
+    # 稳定窗轮询：maximum 到基线后连续两拍（60ms×2）落锤，等足窗口
+    QTest.qWait(260)
     assert bar.value() == 300, f"滚动位置应回设到 300，实际 {bar.value()}"
+
+def test_restore_waits_for_async_height_chain(qapp):
+    """回归（2026-11-02）：高度链异步收敛时回设必须等 maximum 回基线。
+
+    真机链路：viewer 隐藏 → reportHeight 打掉 fixed 高度 → 显示后
+    ResizeObserver / resize 锁 150ms 补报才把高度长回来。旧实现
+    singleShot(0) 一次性回设，被 clamp 在未恢复的 maximum 上 → 漂移。
+    """
+    viewer = _FakeViewer()
+    host, area = _make_host(viewer)
+    bar = area.verticalScrollBar()
+    bar.setValue(250)
+    dialog = QDialog(host)
+
+    viewer._hide_for_dialog(dialog)
+    max0 = viewer._saved_dialog_scroll_max
+    assert max0 > 0, "hide 前应记录 maximum 基线"
+
+    # 模拟塌缩 + 异步恢复：value 被 clamp，maximum 掉到基线一半；
+    # 300ms 后（晚于 singleShot(0) 与稳定窗首拍）才长回基线
+    bar.setValue(0)
+    area.widget().setFixedHeight(max(50, area.widget().height() // 2))
+
+    from PyQt5.QtCore import QTimer
+
+    def _recover():
+        area.widget().setMinimumHeight(0)
+        area.widget().setMaximumHeight(16777215)
+        area.widget().adjustSize()
+
+    dialog.finished.emit(0)
+    QTimer.singleShot(300, _recover)
+    QTest.qWait(1200)
+
+    assert bar.maximum() >= max0 - 8, "恢复后 maximum 应回到基线（测试自检）"
+    assert bar.value() == 250, f"高度链收敛后滚动位置应回设到 250，实际 {bar.value()}"
 
 
 def test_restore_via_destroy_fallback(qapp):
@@ -132,8 +168,7 @@ def test_restore_via_destroy_fallback(qapp):
         viewer.show()
         viewer._restore_chat_scroll_pos()
 
-    QApplication.processEvents()
-    QApplication.processEvents()
+    QTest.qWait(260)
     assert not viewer.isHidden()
     assert bar.value() == 200, f"兜底路径滚动位置应回设到 200，实际 {bar.value()}"
 
@@ -144,4 +179,5 @@ if __name__ == "__main__":
     test_repeated_show_no_recount(_ensure_qapp())
     test_restore_sets_scroll_back(_ensure_qapp())
     test_restore_via_destroy_fallback(_ensure_qapp())
-    print("4 项守卫测试全部通过")
+    test_restore_waits_for_async_height_chain(_ensure_qapp())
+    print("5 项守卫测试全部通过")

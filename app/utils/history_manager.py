@@ -1741,8 +1741,8 @@ class HistoryManager:
     def get_project_list(self) -> List[str]:
         """全部项目名（排序返回；供历史页项目切换器）
 
-        SQLite 模式走 sessions ∪ key_documents 权威口径（与 get_projects 查重
-        口径一致）：新建项目只写 key_documents（工作目录），首轮对话后才落
+        SQLite 模式走 sessions ∪ project_workdir 权威口径（与 get_projects 查重
+        口径一致）：新建项目只写 project_workdir（工作目录），首轮对话后才落
         sessions；若只从会话聚合，空项目在切换当前项目后会从列表消失，且因
         查重命中而无法重建同名（2026-09-13 修复）。
         """

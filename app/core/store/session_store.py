@@ -944,7 +944,7 @@ class SessionStore:
     def force_cleanup_project(self, project_name: str) -> bool:
         """强制清理项目的所有关联数据（绕过 repo 层，直接 SQL 删除表记录）
 
-        归档时调用此方法，确保 sessions、key_documents
+        归档时调用此方法，确保 sessions、project_workdir
         两张表中该项目的所有记录都被删除，避免 UNION 查询让已归档项目"复活"。
         """
         if not self._db or not self._db.is_connected:
@@ -957,8 +957,8 @@ class SessionStore:
             target_ids = [r["session_id"] for r in id_rows] if ids_ok and id_rows else []
             # 删除会话（直接 SQL，不经过 repo 层）
             self._execute("DELETE FROM sessions WHERE project = ?", (project_name,))
-            # 删除关键文档
-            self._execute("DELETE FROM key_documents WHERE project = ?", (project_name,))
+            # 删除项目工作目录
+            self._execute("DELETE FROM project_workdir WHERE project = ?", (project_name,))
             # message_extras 级联清理（最后删）：前两步失败则 extras 与会话保持一致保留；
             # 前两步成功而 extras 失败只剩无害孤儿行（会话已不存在，无人查询）。
             for sid in target_ids:

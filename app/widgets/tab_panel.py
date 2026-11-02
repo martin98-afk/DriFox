@@ -3938,26 +3938,12 @@ class TabPanel(QWidget):
 
         for project in projects:
             plain = plain_by_project.get(project, [])
-            # ── 已登记的真实 git worktree（关键文档里 added_by=git_worktree）──
+            # ── 已登记的真实 git worktree ──
             # v2 不再建工作树节点，只用于把会话的 worktree_path 归一成
             # 「主仓库 / 真工作树」两类，副行显示非主仓库的工作树名。
+            # 关键文档表下线后不再有「登记」来源：改用 .git 文件特征 +
+            # worktree list 的强判据，逐个候选路径校验（见 _resolve_worktree）。
             registered: List[str] = []
-            try:
-                if memory is not None:
-                    from app.utils.git_worktree import GitWorktreeDetector
-
-                    for doc in memory.get_key_documents(project) or []:
-                        if str(doc.get("added_by") or "") != "git_worktree":
-                            continue
-                        path = (doc.get("file_path") or "").strip()
-                        if path and os.path.isdir(path) and path not in registered:
-                            # zombie 过滤：.git 指向的 gitdir 已消失（主仓库 .git
-                            # 被删/重建）的 worktree 不进树，与 worktree list 口径对齐
-                            if GitWorktreeDetector.is_valid_worktree_link(path):
-                                registered.append(path)
-            except Exception:
-                pass
-            # ⚠️ 归一：目录已不存在 / 主仓库根目录 / 临时工作目录 一律回落到主仓库("")。
             registered_norm = self._norm_registered(registered)
             plain_pairs = [
                 (r, self._resolve_worktree((r.get("worktree_path") or "").strip(), registered_norm)) for r in plain
@@ -4105,8 +4091,8 @@ class TabPanel(QWidget):
         判定顺序（全走文件系统判断，**不起 git 子进程** —— 本方法在树每次重建时
         对每条会话调用一次，起子进程会把侧栏卡住）：
         1. 空 / 目录已不存在 → 主仓库
-        2. 命中已登记的真实 worktree（关键文档 added_by=git_worktree）→ 原样
-        3. 位于某个已登记 worktree 之下 → 归到该 worktree
+        2. 命中已知工作树列表（调用方传入的预计算归一化三元组）→ 原样
+        3. 位于某个已知工作树之下 → 归到该工作树
         4. .git 是**文件**且指向的 gitdir 存在（git worktree 特征）→ 原样
         5. 其余（主仓库根目录 / 临时工作目录 / 非 git 目录 / zombie worktree）→ 主仓库
         """

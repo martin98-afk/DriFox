@@ -974,11 +974,10 @@ class SessionRepository:
             return []
 
     def get_projects(self) -> List[str]:
-        """获取所有项目名称列表（含无会话但有关键文档的项目）
+        """获取所有项目名称列表（含只有工作目录、尚无会话的项目）
 
-        关键修复：与归档清理配合使用——归档时必须同时清理 sessions、
-        key_documents 两张表，否则已归档项目会从
-        key_documents "复活"。
+        新建项目只写 project_workdir（工作目录），首轮对话后才落 sessions，
+        故项目清单必须并入该表，否则「刚建好还没聊过」的项目不显示。
         """
         if not self.is_initialized:
             return ["默认项目"]
@@ -989,7 +988,7 @@ class SessionRepository:
                 SELECT DISTINCT project FROM (
                     SELECT project FROM {self.TABLE_NAME}
                     UNION
-                    SELECT project FROM key_documents
+                    SELECT project FROM project_workdir
                 ) ORDER BY project
                 """
             )

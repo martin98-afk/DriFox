@@ -33,8 +33,17 @@ _TRAILING_WS_RE = re.compile(r"[ \t]+(?=\n)")
 _BLANK_RUN_RE = re.compile(r"\n{3,}")
 
 
+# 快速门控：四个正则各扫全文一次 ≈ 1ms/20KB，且绝大多数工具结果本就是干净文本
+# （源码/JSON/日志无 ANSI、无行尾空白）。先用 C 层子串检测（合计 ≈0.03ms）判断
+# 有没有可处理目标，全无则直接返回原文，不产生任何拷贝。
+# 覆盖关系：`[ \t]+(?=\n)` 命中必然以空格或制表符收尾 → 含 " \n" 或 "\t\n"。
+_CLEAN_HINTS = ("\x1b", " \n", "\t\n", "\n\n\n")
+
+
 def normalize_text(text: str) -> str:
     """无损规范化（纯函数、幂等）：ANSI / 控制字符 / 行尾空白 / 连续空行。"""
+    if not any(h in text for h in _CLEAN_HINTS) and _CTRL_RE.search(text) is None:
+        return text
     out = _ANSI_RE.sub("", text)
     out = _CTRL_RE.sub("", out)
     out = _TRAILING_WS_RE.sub("", out)

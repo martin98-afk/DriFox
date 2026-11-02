@@ -2882,7 +2882,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 拖拽文件到扩展区域（输入卡空白区 / 附件行 / 消息列表）→ 添加 AttachmentChip
         # chat_container = 消息列表区：拖到对话区域任意位置都进入附件；
-        # 项目卡片/关键文档卡片等位于独立卡片容器且自带 drop 处理，不在此列。
+        # 项目卡片等工作台卡片位于独立容器且自带 drop 处理，不在此列。
         if obj in (
             getattr(self, "_input_card", None),
             getattr(self, "_attach_container", None),
@@ -3656,7 +3656,7 @@ class OpenAIChatToolWindow(ToolWindow):
         """快捷键/命令入口：打开右侧工作台并跳转「工作树」页签（直开语义）
 
         记忆管理已下线：置顶记忆在助手中心管理，右侧工作台只保留
-        工作树页签（关键文档 + 工作树）。/memory 命令直达该页。
+        工作树页签。/memory 命令直达该页。
         """
         tm = TabManagerWindow.get_instance()
         if tm is not None:
@@ -23385,7 +23385,7 @@ class OpenAIChatToolWindow(ToolWindow):
         """刷新项目+分支组合控件的整体样式（极简：仅容器，hover 由子元素各自处理）
 
         极简化：移除容器级 hover 底色（避免与 avatar / branch_widget 各自的 hover 嵌套双层）。
-        avatar 点击 = 切项目，branch 点击 = 打开关键文档，语义不同，必须各自独立 hover。
+        avatar 点击 = 切项目，branch 点击 = 打开工作树页，语义不同，必须各自独立 hover。
         """
         Colors.refresh()
         # 容器 — 仅保留透明占位（占 layout 宽度，无视觉装饰）
@@ -23526,8 +23526,8 @@ class OpenAIChatToolWindow(ToolWindow):
     def _build_project_meta_map(self, projects: List[str]) -> Dict[str, Dict[str, int]]:
         """构建项目元数据映射 {项目名: {"sessions": N, "worktrees": N}}
 
-        会话数使用 session_store.get_session_counts()（COUNT DISTINCT session_id 去重），
-        工作目录数使用 memory_manager.get_worktree_counts()。
+        会话数使用 session_store.get_session_counts()（COUNT DISTINCT session_id 去重）；
+        worktrees 为「该项目 workspace 下登记的 git worktree 数」（0 或 1 表示是否已设工作目录）。
         """
         meta_map: Dict[str, Dict[str, int]] = {p: {"sessions": 0, "worktrees": 0} for p in projects}
         try:
@@ -23537,12 +23537,11 @@ class OpenAIChatToolWindow(ToolWindow):
                 for p, c in session_counts.items():
                     if p in meta_map:
                         meta_map[p]["sessions"] = c
-            # 工作目录数
+            # 工作目录：有工作目录即记 1
             if self.backend and self.backend.memory_manager:
-                worktree_counts = self.backend.memory_manager.get_worktree_counts()
-                for p, c in worktree_counts.items():
-                    if p in meta_map:
-                        meta_map[p]["worktrees"] = c
+                for p in projects:
+                    if self.backend.memory_manager.get_working_directory(p):
+                        meta_map[p]["worktrees"] = 1
         except Exception as e:
             logger.warning(f"[MainWidget] 获取项目元数据异常: {e}")
         return meta_map
@@ -23550,7 +23549,7 @@ class OpenAIChatToolWindow(ToolWindow):
     def _build_project_root_dir_map(self, projects: List[str]) -> Dict[str, str]:
         """构建项目根目录映射 {项目名: 根目录路径}（未设置的项目不会出现）
 
-        根目录来源于关键文档中标记为"工作目录"的文件夹（每个项目最多 1 个）。
+        根目录来源于 project_workdir 表记录的项目工作目录（每个项目最多 1 个）。
         若 DB 中无根目录但实例缓存有临时工作目录，也一并返回。
         """
         root_dir_map: Dict[str, str] = {}
@@ -23851,7 +23850,6 @@ class OpenAIChatToolWindow(ToolWindow):
                         if root_dir:
                             new._current_workdir[project] = root_dir
                             if new.backend and new.backend.memory_manager:
-                                new.backend.memory_manager.add_key_document(project, root_dir, added_by="manual")
                                 new.backend.memory_manager.set_working_directory(project, root_dir)
                         new._sync_working_directory()
                         self._broadcast_team_project(project, self._current_project)
@@ -23882,7 +23880,6 @@ class OpenAIChatToolWindow(ToolWindow):
         if root_dir:
             self._current_workdir[project] = root_dir
             if self.backend and self.backend.memory_manager:
-                self.backend.memory_manager.add_key_document(project, root_dir, added_by="manual")
                 self.backend.memory_manager.set_working_directory(project, root_dir)
         self._sync_working_directory()
         # 刷新历史面板
@@ -23920,8 +23917,8 @@ class OpenAIChatToolWindow(ToolWindow):
         # 后端执行归档（可能返回0个会话，但项目本身仍应被清理）
         count = self.history_manager.archive_project(project_name)
 
-        # 强制清理该项目在 SQLite 三张表中的所有数据（绕过 repo 层，直接 SQL 删除）
-        # 避免 key_documents/project_notes 残留数据导致 UNION 查询让项目"复活"
+        # 强制清理该项目在 SQLite 各表中的所有数据（绕过 repo 层，直接 SQL 删除）
+        # 避免 project_workdir / project_notes 残留数据导致 UNION 查询让项目"复活"
         if self.backend and self.backend.session_store:
             self.backend.session_store.force_cleanup_project(project_name)
         else:
@@ -24455,7 +24452,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
         1. 弹出对话框让用户确认/修改项目名（默认使用文件夹名）
         2. 创建项目
-        3. 将拖入文件夹加入关键文档并设为工作目录（根目录）
+        3. 将拖入文件夹设为工作目录（根目录）
         4. 刷新项目列表
         """
         from app.widgets.common_dialogs import SingleInputDialog
@@ -24507,26 +24504,23 @@ class OpenAIChatToolWindow(ToolWindow):
         # AGENTS.md 等文件写入指定路径而非默认路径。
         self._on_new_project_created(project_name, root_dir=folder_path)
 
-        # ── 将拖入文件夹加入关键文档并设为工作目录（根目录） ──
+        # ── 将拖入文件夹设为工作目录（根目录） ──
         try:
             if self.backend and self.backend.memory_manager:
-                # 添加为关键文档
-                self.backend.memory_manager.add_key_document(project_name, folder_path, added_by="manual")
-                # 设置为工作目录（根目录）
                 self.backend.memory_manager.set_working_directory(project_name, folder_path)
                 logger.info(f"[MainWidget] 已绑定项目「{project_name}」根目录: {folder_path}")
 
-            # 同步实例缓存（与手动添加并标记根目录路径保持一致）
+            # 同步实例缓存（与手动设置工作目录路径保持一致）
             # 修复 bug：_on_new_project_created 内部调用的 _sync_working_directory 在
-            # add_key_document 之前执行，导致 _instance_workdir 被错误缓存为空字符串，
+            # 写库之前执行，导致 _instance_workdir 被错误缓存为空字符串，
             # 后续 _get_effective_workdir 返回 None，has_active_wd=False，
-            # 关键文档 Tab 中工作目录条目下方的 worktree section 永远不显示。
+            # 工作树页永远不显示。
             self._current_workdir[project_name] = folder_path
             # 同步到 tool_executor
             if self.backend and self.backend.tool_executor:
                 self.backend.tool_executor.set_workdir(folder_path)
             # 刷新顶部项目 icon 右侧的分支标签
-            # 修复：_on_new_project_created 中的 _update_branch 在 add_key_document 之前调用，
+            # 修复：_on_new_project_created 中的 _update_branch 在写库之前调用，
             # 此时 DB 没有 workdir，分支标签停留在旧状态（隐藏或显示旧分支）。
             self._update_branch()
 
@@ -24804,14 +24798,14 @@ class OpenAIChatToolWindow(ToolWindow):
             os.makedirs(temp_dir, exist_ok=True)
             self._current_workdir[project] = temp_dir
 
-            # 将临时目录加入关键文档并标记为工作目录（set_working_directory 会自动插入路径）
+            # 设定为项目工作目录
             try:
                 if self.backend and self.backend.memory_manager:
                     self.backend.memory_manager.set_working_directory(project, temp_dir)
             except Exception as e:
-                logger.warning(f"[MainWidget] Failed to sync temp workdir to key docs: {e}")
+                logger.warning(f"[MainWidget] Failed to persist temp workdir: {e}")
 
-            # 刷新右侧工作台关键文档 UI，使新增的根目录立即可见
+            # 刷新右侧工作台「工作树」页，使新增的根目录立即可见
             try:
                 from app.widgets.tab_manager_window import TabManagerWindow
 
@@ -24819,7 +24813,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 if tm is not None:
                     tm.refresh_workbench()
             except Exception as e:
-                logger.warning(f"[MainWidget] Failed to refresh key docs UI: {e}")
+                logger.warning(f"[MainWidget] Failed to refresh worktree page: {e}")
 
             logger.info(f"[MainWidget] Created temp workdir for '{project}': {temp_dir}")
             return temp_dir

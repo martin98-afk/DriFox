@@ -31,7 +31,6 @@ def _make_history(records):
     hm = MagicMock()
     hm.get_projects.return_value = ["Demo"]
     hm.get_history_list.return_value = list(records)
-    hm.get_key_documents.return_value = []
     return hm
 
 
