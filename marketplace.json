@@ -129,12 +129,13 @@
         },
         {
             "name": "plugin-marketplace",
-            "description": "DriFox 官方插件市场 — 浏览、安装、管理插件",
-            "version": "0.3.2",
+            "description": "DriFox 官方插件市场 — 浏览、安装、管理插件，并把搜索/安装/卸载/更新/启停开放给 AI 工具",
+            "version": "0.4.0",
             "author": "DriFox Contributors",
             "license": "GPL-3.0-or-later",
             "categories": [
-                "ui"
+                "ui",
+                "tool"
             ],
             "source": {
                 "type": "git-subdir",
@@ -143,7 +144,8 @@
                 "ref": "master"
             },
             "components": {
-                "ui": true
+                "ui": true,
+                "tools": true
             },
             "homepage": "https://github.com/martin98-afk/drifox-plugins",
             "icon": {
