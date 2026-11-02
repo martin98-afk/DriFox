@@ -1294,6 +1294,41 @@ class CodeWebViewer(QWebEngineView):
     def _tool_target_id(self) -> str:
         return "tool-content" if self._tool_compact_mode else "content-placeholder"
 
+    def _apply_tool_section_below(self) -> None:
+        """简洁模式：工具与思考区移到正文下方（2026-11-02 用户诉求）
+
+        骨架默认 ``#tool-section`` 在 ``#content-placeholder`` 之前（吸顶，
+        [T44] 约定）；简洁模式下改到正文之后，位置贴近卡片底部功能区
+        （todo 任务看板之上）。非简洁模式保持吸顶不动。
+
+        同时给工具区加 CSS containment：正文大量流式更新时，浏览器只需为
+        ``#content-placeholder`` 重排，工具区内部布局/绘制被隔离（``contain``
+        让子树不受兄弟变化影响），不再跟着整页重算。
+
+        幂等：已在正文后 / 样式已注入则 no-op。只动 DOM 顺序，不动任何容器
+        内容——v2 的 patchBlocks 按容器 id 操作，与兄弟顺序无关。
+        """
+        if not self._tool_compact_mode:
+            return
+        try:
+            page = self.page()
+            if page is None:
+                return
+            page.runJavaScript(
+                "(function(){"
+                "var st=document.getElementById('tool-section-below-css');"
+                "if(!st){st=document.createElement('style');st.id='tool-section-below-css';"
+                "st.textContent='#tool-section{contain:layout paint;isolate:isolate;}';"
+                "document.head.appendChild(st);}"
+                "var ts=document.getElementById('tool-section');"
+                "var cp=document.getElementById('content-placeholder');"
+                "if(!ts||!cp||!cp.parentNode)return;"
+                "if(cp.nextElementSibling===ts)return;"
+                "cp.parentNode.insertBefore(ts,cp.nextSibling);})();"
+            )
+        except RuntimeError:
+            pass
+
     @property
     def _tool_lazy_body(self) -> bool:
         """工具块 body 是否懒注入（不可见时不构造内容，展开时再请求）。
@@ -2070,6 +2105,8 @@ class CodeWebViewer(QWebEngineView):
         self._is_js_ready = True
         # 同步简洁模式标志到 JS（统一走 sync_compact_mode_to_js）
         self.sync_compact_mode_to_js()
+        # 简洁模式下工具与思考区放正文下方（用户 2026-11-02 诉求，取代吸顶）
+        self._apply_tool_section_below()
         # [MEM-2] 文档滚动容器上限（body max-height）必须与 widget 高度上限同值：
         # 骨架里的静态 fallback 按 MAX_HEIGHT 走，实际值可能与面积上限不同 → 此处
         # 强制补推一次真实值（否则整个渲染周期都停在不匹配的上限上，超限内容

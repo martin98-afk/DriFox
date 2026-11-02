@@ -4553,7 +4553,11 @@ class MessageCard(SimpleCardWidget):
 
         简洁模式限定：非简洁模式、历史卡、非 v2 通道、非流式均不参与
         （工具区仍在卡内原位渲染）。
+
+        2026-11-02 用户改需求：工具与思考改在消息卡内正文下方显示，不再用
+        顶部独立卡。本方法整体停用（保留实现，确认定案后清理）。
         """
+        return
         if self.__dict__.get("_is_history", False):
             return
         viewer = self.__dict__.get("viewer")
