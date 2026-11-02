@@ -512,8 +512,8 @@ r = session.turn(messages=msgs, tools=[], timeout=180)
 按 id 解析，未设置/未注册时回落 `get_active()`（主对话零行为变化）。
 完整说明见 `docs/plugins/loop-policies.md` §4.2。
 
-参考实现：`plugins/assistant_hub/loop_policies/single_turn.py` +
-`plugins/assistant_hub/core/llm_client.py`（记忆/Dream/经验整理单回合调用）。
+单回合语义参考：`plugins/system-loop-policies/loop_policies/minimal.py`；
+插件自建引擎按 id 直取策略（不碰全局激活槽）见 `docs/plugins/loop-policies.md` §4.2。
 
 | lsp/ (.lsp.json) | `plugins/*/.lsp.json` | LspManager（`app/core/lsp/`） | `add_plugin_servers` / `remove_plugin_servers` 增量 | backend watchfiles → 增量重载 |
 | ui/ | `plugins/*/ui/__init__.py`（必须暴露 register_ui） | UIPluginRegistry（`app/core/ui_plugin_registry.py`） | `load_plugin`：sys.path 注入 → importlib 动态加载 → `register_ui(self)`；4 扩展点：register_content_renderer / register_message_factory / register_floating_card / register_welcome_tab；右工作台 tab：register_workbench_tab | backend watchfiles → reload_plugin（先卸旧后载新、清 sys.modules + pycache） |

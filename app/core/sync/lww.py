@@ -19,6 +19,8 @@ from typing import Dict, List, Tuple
 Entry = Dict[str, object]
 
 TOMBSTONE_KEY = "d"
+# 条目写入者标识：t 相同时靠它做确定性裁决（否则多端同写一个键会永不收敛）
+DEVICE_KEY = "dv"
 
 
 class LamportClock:
@@ -84,18 +86,31 @@ def merge_entries(
         elif rt > lt:
             merged[key] = dict(re_)
         else:
+            # t 相同：按设备标识字典序裁决，保证多端收敛到同一结果。
+            # 旧条目没有标识时退化为本地优先（与历史行为一致）。
+            ldev = str(le.get(DEVICE_KEY) or "")
+            rdev = str(re_.get(DEVICE_KEY) or "")
+            if ldev and rdev and ldev != rdev:
+                merged[key] = dict(le) if ldev > rdev else dict(re_)
+                continue
             if str(le.get("h") or "") != str(re_.get("h") or ""):
                 conflicts.append(key)
             merged[key] = dict(le)
     return merged, conflicts
 
 
-def tombstone(h: str, t: int) -> Entry:
-    return {"h": h, "t": t, TOMBSTONE_KEY: True}
+def tombstone(h: str, t: int, device: str = "") -> Entry:
+    entry: Entry = {"h": h, "t": t, TOMBSTONE_KEY: True}
+    if device:
+        entry[DEVICE_KEY] = device
+    return entry
 
 
-def live(h: str, t: int) -> Entry:
-    return {"h": h, "t": t}
+def live(h: str, t: int, device: str = "") -> Entry:
+    entry: Entry = {"h": h, "t": t}
+    if device:
+        entry[DEVICE_KEY] = device
+    return entry
 
 
 def is_tombstone(entry: Entry | None) -> bool:
@@ -153,16 +168,19 @@ def _pick_entry(
     path: str,
     local_entries: Dict[str, Entry],
     remote_entries: Dict[str, Entry],
+    remote_authority: bool = False,
 ) -> Tuple[Entry | None, str]:
     """按 t 取胜者，返回 (entry, side)。side ∈ {local, remote, conflict, none}。
 
     entry 为 None 表示两边都没有元数据（老版本抹掉 / 首次升级），调用方走
-    union 降级：本地有取本地，否则取远端。
+    union 降级：本地有取本地，否则取远端。``remote_authority=True`` 时改为
+    远端优先——用于本机没有合并基准（解绑重绑 / 新机首次绑定）的首次合并，
+    此时本地配置可能是被回滚的绑定前快照，不能压过云端。
     """
     le = local_entries.get(path)
     re_ = remote_entries.get(path)
     if le is None and re_ is None:
-        return None, "none"
+        return None, ("remote" if remote_authority else "none")
     if le is None:
         return re_, "remote"
     if re_ is None:
@@ -172,6 +190,11 @@ def _pick_entry(
         return re_, "remote"
     if lt > rt:
         return le, "local"
+    # t 相同：按设备标识字典序裁决。没有标识的旧条目退化为本地优先。
+    ldev = str(le.get(DEVICE_KEY) or "")
+    rdev = str(re_.get(DEVICE_KEY) or "")
+    if ldev and rdev and ldev != rdev:
+        return (le, "local") if ldev > rdev else (re_, "remote")
     if str(le.get("h") or "") != str(re_.get("h") or ""):
         return le, "conflict"
     return le, "local"
@@ -186,6 +209,7 @@ def _merge_collection(
     remote_entries: Dict[str, Entry],
     merged_entries: Dict[str, Entry],
     conflicts: List[str],
+    remote_authority: bool = False,
 ) -> object:
     l_items = _collection_items(kind, local_value) if local_value is not _MISSING else {}
     r_items = _collection_items(kind, remote_value) if remote_value is not _MISSING else {}
@@ -193,7 +217,7 @@ def _merge_collection(
     order = list(l_items) + [k for k in r_items if k not in l_items]
     for ek in order:
         epath = f"{path}.{ek}"
-        entry, side = _pick_entry(epath, local_entries, remote_entries)
+        entry, side = _pick_entry(epath, local_entries, remote_entries, remote_authority)
         if entry is not None:
             merged_entries[epath] = entry
             if side == "conflict":
@@ -214,10 +238,12 @@ def merge_config_lww(
     local_entries: Dict[str, Entry],
     remote_cfg: Dict[str, object],
     remote_entries: Dict[str, Entry],
+    remote_authority: bool = False,
 ) -> Tuple[Dict[str, object], Dict[str, Entry], List[str]]:
     """按条目 LWW 合并两份 app.config，返回 (结果, 条目表, 冲突路径)。
 
     直接操作嵌套结构，不经过「扁平化再重建」往返，避免路径里含点号时的歧义。
+    ``remote_authority=True`` 时，两端都缺元数据的条目改取远端（默认取本地）。
     """
     merged_cfg: Dict[str, object] = {}
     merged_entries: Dict[str, Entry] = {}
@@ -226,9 +252,16 @@ def merge_config_lww(
     for group in sorted(set(local_cfg) | set(remote_cfg)):
         lg = local_cfg.get(group, _MISSING)
         rg = remote_cfg.get(group, _MISSING)
+        # 一侧整组缺失时按空组处理，仍走逐项合并：否则会退化成组级 block
+        # 合并，组内集合条目（如 LLM.SavedProviders.p0）全部丢失条目表。
+        # 典型场景：新设备首次下载，本地配置里根本没有 LLM 组。
+        if lg is _MISSING and isinstance(rg, dict):
+            lg = {}
+        elif rg is _MISSING and isinstance(lg, dict):
+            rg = {}
         if not isinstance(lg, dict) or not isinstance(rg, dict):
             path = str(group)
-            entry, side = _pick_entry(path, local_entries, remote_entries)
+            entry, side = _pick_entry(path, local_entries, remote_entries, remote_authority)
             if entry is not None:
                 merged_entries[path] = entry
                 if side == "conflict":
@@ -257,10 +290,11 @@ def merge_config_lww(
                     remote_entries,
                     merged_entries,
                     conflicts,
+                    remote_authority,
                 )
                 g_out[name] = value
                 continue
-            entry, side = _pick_entry(path, local_entries, remote_entries)
+            entry, side = _pick_entry(path, local_entries, remote_entries, remote_authority)
             if entry is not None:
                 merged_entries[path] = entry
                 if side == "conflict":

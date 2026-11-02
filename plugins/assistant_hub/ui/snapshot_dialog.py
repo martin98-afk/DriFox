@@ -6,10 +6,10 @@
 故不设二次确认，底部以固定提示说明。
 """
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 from PyQt5.QtCore import pyqtSignal
-from PyQt5.QtWidgets import QHBoxLayout, QLabel, QListWidget, QPlainTextEdit, QVBoxLayout
+from PyQt5.QtWidgets import QHBoxLayout, QLabel, QListWidget, QPlainTextEdit
 
 from qfluentwidgets import ComboBox, SmoothScrollDelegate
 

@@ -126,7 +126,7 @@ class ProcessRegistry:
     def register(self, record: ProcessRecord) -> None:
         with self._guard:
             self._records.setdefault(record.plugin, []).append(record)
-        logger.info(
+        logger.debug(
             f"[process.start] 登记插件={record.plugin} name={record.name} "
             f"pid={record.pid} 当前该插件进程数={self.count_for(record.plugin)}"
         )

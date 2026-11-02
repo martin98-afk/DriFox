@@ -27,6 +27,15 @@ from PyQt5.QtCore import QTimer
 _HEARTBEAT_INTERVAL_MS = 200  # 心跳间隔：事件循环正常调度抖动远小于此
 _CHECK_INTERVAL_S = 0.05  # 监控线程检查粒度
 _MAX_STACK_FRAMES = 30  # 单次报告栈帧上限（防日志爆炸）
+# 裸栈判定：主线程 Python 栈帧数 ≤ 该值（只剩 exec_ 前的壳）＝阻塞在
+# 原生代码（Qt/Chromium）或等 GIL，Python 栈自证不了元凶
+_BARE_STACK_DEPTH = 3
+# 裸栈全线程 dump 最小间隔（秒）：连续阻塞时防日志爆炸
+_BARE_DUMP_MIN_INTERVAL_S = 2.0
+# 全线程 dump 时过滤的纯等待顶帧名（threading/queue/socket 的常规泊位）
+_IDLE_TOP_FRAMES = {"wait", "sleep", "get", "poll", "select", "accept", "recv", "acquire"}
+# 全线程 dump 每线程帧数上限
+_BARE_DUMP_FRAMES_PER_THREAD = 8
 
 
 class MainThreadWatchdog:
@@ -39,6 +48,7 @@ class MainThreadWatchdog:
         self._reported = False  # 同一次阻塞只报一次
         self._suspended = False  # 已知合法阻塞期间（SC_MOVE 模态循环）暂停判定
         self._main_ident = threading.main_thread().ident
+        self._last_bare_dump = 0.0  # 上次裸栈全线程 dump 时间（monotonic）
 
         self._timer = QTimer(parent)
         self._timer.setInterval(_HEARTBEAT_INTERVAL_MS)
@@ -84,17 +94,58 @@ class MainThreadWatchdog:
 
     def _report(self, gap_s: float) -> None:
         stack_lines = []
+        is_bare = False
+        all_frames: dict = {}
         try:
-            frame = sys._current_frames().get(self._main_ident)
+            all_frames = sys._current_frames()
+            frame = all_frames.get(self._main_ident)
             if frame is not None:
                 stack_lines = traceback.format_stack(frame, limit=_MAX_STACK_FRAMES)
+                is_bare = len(stack_lines) <= _BARE_STACK_DEPTH
         except Exception:  # noqa: BLE001 — 抓栈失败不掩盖阻塞事实本身
             pass
         body = "".join(stack_lines).rstrip() or "<无法抓取主线程栈>"
+        if is_bare:
+            # 裸栈：主线程卡在原生代码或等 GIL，主线程栈看不到元凶。
+            # 补全线程 dump 找持 GIL 干活的后台线程（2026-10-31 长会话
+            # watchdog 20 条裸栈无法归因，GIL 争抢 vs Chromium 布局存疑）。
+            body += "\n" + self._dump_other_threads(all_frames)
         logger.warning(
             f"[MainThreadWatchdog] 主线程阻塞 ≥{self._threshold_s * 1000:.0f}ms"
             f"（当前间隙 {gap_s * 1000:.0f}ms），阻塞期调用栈：\n{body}"
         )
+
+    def _dump_other_threads(self, all_frames: dict) -> str:
+        """裸栈辅助现场：格式化除主线程与监控线程外的活动线程栈。
+
+        过滤纯等待线程（wait/sleep/get 等顶帧），聚焦真正持 GIL 跑代码的
+        线程；2s 限频防连续阻塞时日志爆炸。抓取失败返回占位说明。
+        """
+        now = time.monotonic()
+        if now - self._last_bare_dump < _BARE_DUMP_MIN_INTERVAL_S:
+            return "(裸栈：主线程阻塞在原生代码或等 GIL；全线程 dump 限频中)"
+        self._last_bare_dump = now
+        try:
+            names = {t.ident: t.name for t in threading.enumerate()}
+            my_ident = threading.get_ident()
+            parts = []
+            for tid, frm in all_frames.items():
+                if tid in (self._main_ident, my_ident):
+                    continue
+                stack = traceback.extract_stack(frm, limit=_BARE_DUMP_FRAMES_PER_THREAD)
+                top = stack[-1] if stack else None
+                if top is not None and top.name in _IDLE_TOP_FRAMES:
+                    continue  # 纯等待线程，非 GIL 持有者嫌疑
+                text = "".join(traceback.format_list(stack))
+                parts.append(f"── 线程 [{names.get(tid, tid)}] ──\n{text}")
+            return (
+                "(裸栈：主线程阻塞在原生代码或等 GIL；以下为仍在跑代码的线程）\n"
+                + "\n".join(parts)
+                if parts
+                else "(裸栈：主线程阻塞在原生代码或等 GIL；无活动后台线程 → 指向原生阻塞)"
+            )
+        except Exception:  # noqa: BLE001 — dump 失败不掩盖阻塞事实
+            return "(裸栈：主线程阻塞在原生代码或等 GIL；全线程 dump 失败)"
 
 
 _watchdog = None

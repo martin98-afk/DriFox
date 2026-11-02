@@ -395,12 +395,13 @@ def invalidate_icon_cache():
 
 
 
-def get_local_skills() -> list:
+def get_local_skills(project_dir: str | None = None) -> list:
     """获取本地技能列表，支持多个搜索路径
 
     搜索路径优先级：
     - 已启用插件的 skills/ 目录（PluginManager）
     - 旧路径做回退：app/skills, .opencode/skills, ~/.agents/skills
+    - 插件贡献的动态技能源（ContributionRegistry skill_source，仅 project_dir 非空时求值）
 
     返回字段：
     - name: 技能名称（无前缀，用于 load_skill 内部查找）
@@ -415,7 +416,7 @@ def get_local_skills() -> list:
     # mtime，自动失效；插件启用状态变化会改 PluginManager 内目录 mtime，同样失效。
     # 如需手动失效（极少见），调用 invalidate_skills_cache()。
     global _skills_cache, _skills_cache_key
-    cache_key = _compute_skills_cache_key()
+    cache_key = _compute_skills_cache_key(project_dir)
     if _skills_cache is not None and _skills_cache_key == cache_key:
         return _skills_cache
 
@@ -447,6 +448,45 @@ def get_local_skills() -> list:
                         results.append(entry)
     except (ImportError, Exception):
         pass
+
+    # ---- Phase 1.5: 插件贡献的动态技能源（能力池 skill_source） ----
+    if project_dir:
+        try:
+            from app.plugins.registries.contribution_registry import ContributionRegistry
+
+            contrib_wd = Path(project_dir)
+            for c_plugin, c_name, c_entry in ContributionRegistry.get_instance().iter_skill_sources():
+                c_provider = c_entry.get("provider")
+                if c_provider is None:
+                    continue
+                try:
+                    c_items = c_provider(contrib_wd) or []
+                except Exception as e:
+                    import logging
+                    logging.getLogger(__name__).warning(
+                        f"[Skills] 贡献技能源 {c_plugin}/{c_name} 求值失败: {e}"
+                    )
+                    continue
+                for c_item in c_items:
+                    if not isinstance(c_item, dict) or not c_item.get("name"):
+                        continue
+                    if c_item["name"] in seen:
+                        continue
+                    seen.add(c_item["name"])
+                    c_qualified = c_item.get("qualified_name") or c_item["name"]
+                    seen_qualified.add(c_qualified)
+                    results.append({
+                        "name": c_item["name"],
+                        "qualified_name": c_qualified,
+                        "description": c_item.get("description", ""),
+                        "plugin_name": None,
+                        "is_system": False,
+                        "path": str(c_item.get("path", "")),
+                        "source": c_item.get("source") or c_plugin,
+                        "auto_enable": bool(c_item.get("auto_enable", False)),
+                    })
+        except ImportError:
+            pass
 
     # ---- Phase 2: 旧路径回退（无插件上下文） ----
     fallback_dirs = [
@@ -489,22 +529,64 @@ _skills_key_cache: tuple | None = None
 _skills_key_cached_at: float = 0.0
 
 
-def _compute_skills_cache_key() -> tuple:
-    """计算 skills 缓存 key：(扫描目录数, 文件数, max_mtime, total_size)
+def _compute_skills_cache_key(project_dir: str | None = None) -> tuple:
+    """计算 skills 缓存 key：(project_dir, 动态源签名, 扫描目录数, 文件数, max_mtime, total_size)
 
-    比逐文件 stat 列表更轻：单次扫描 ~2 ms（vs 旧 12 ms）。
-    任何 SKILL.md / skill.md 增删改都改 mtime 或 count，自动失效。
-
-    二级 TTL 缓存：key 计算本身要 stat 全部技能目录的 SKILL.md，
-    Windows + 杀软环境下实测 250~530ms（单目录枚举 26ms、单 stat 6ms）。
-    技能开关切换等短时间密集调用场景（每次 toggle 走 2~3 遍）没必要
-    每遍都真扫盘，TTL 窗口内直接复用上次结果。文件增删改的即时感知
-    不依赖 TTL，由 invalidate_skills_cache() 显式失效。
+    project_dir 纳入 key：多标签页开不同项目时，动态技能源按项目求值，切项目自动失效。
+    动态源签名：每个 skill_source 的 watched_dirs 内技能文件的
+    (目录存在数, 文件数, max_mtime)，每次现算不吃 TTL（目录小、量级 ms；
+    吃 TTL 会让项目内新技能最长 30s 不可见，违背「放进目录即被发现」）。
+    静态部分保留二级 TTL 窗口内复用（原有机制不变）。
     """
     global _skills_key_cache, _skills_key_cached_at
     now = time.monotonic()
+
+    # ---- 动态源签名：每次现算 ----
+    contrib_parts: list[tuple] = []
+    if project_dir:
+        try:
+            from app.plugins.registries.contribution_registry import ContributionRegistry
+
+            wd = Path(project_dir)
+            for c_plugin, c_name, c_entry in ContributionRegistry.get_instance().iter_skill_sources():
+                wf = c_entry.get("watched_dirs")
+                c_dirs: list[Path] = []
+                if wf is not None:
+                    try:
+                        c_dirs = [Path(d) for d in (wf(wd) or [])]
+                    except Exception:
+                        c_dirs = []
+                c_exists = 0
+                c_files = 0
+                c_mtime = 0.0
+                for c_base in c_dirs:
+                    if not c_base.exists():
+                        continue
+                    c_exists += 1
+                    try:
+                        for c_skill in c_base.iterdir():
+                            if not c_skill.is_dir():
+                                continue
+                            if c_skill.name.startswith(("_", ".")):
+                                continue
+                            for c_fname in ("SKILL.md", "skill.md"):
+                                c_f = c_skill / c_fname
+                                if c_f.exists():
+                                    c_files += 1
+                                    try:
+                                        c_mtime = max(c_mtime, c_f.stat().st_mtime)
+                                    except OSError:
+                                        pass
+                                    break
+                    except OSError:
+                        pass
+                contrib_parts.append((c_plugin, c_name, c_exists, c_files, c_mtime))
+        except ImportError:
+            contrib_parts.append(("contrib", "unavailable"))
+
+    # ---- 静态部分：二级 TTL 缓存 ----
     if _skills_key_cache is not None and now - _skills_key_cached_at < _SKILLS_KEY_TTL:
-        return _skills_key_cache
+        return (project_dir or "", tuple(contrib_parts), *_skills_key_cache)
 
     scan_dirs: list[Path] = []
 
@@ -556,7 +638,7 @@ def _compute_skills_cache_key() -> tuple:
     key = (file_count, max_mtime, total_size)
     _skills_key_cache = key
     _skills_key_cached_at = now
-    return key
+    return (project_dir or "", tuple(contrib_parts), *key)
 
 
 def invalidate_skills_cache() -> None:
@@ -609,14 +691,14 @@ def _parse_skill_dir(skill_dir: Path, plugin_name: str | None = None,
     }
 
 
-def get_skill_by_name(name: str) -> dict | None:
-    """根据名称获取技能信息
+def get_skill_by_name(name: str, project_dir: str | None = None) -> dict | None:
+    """根据名称获取技能信息（project_dir 非空时含贡献动态技能源）
 
     支持两种匹配：
     1. skill["name"] — frontmatter 中定义的 name（主匹配）
     2. skill["path"] 的文件夹名 — 技能文件夹名（回退匹配）
     """
-    skills = get_local_skills()
+    skills = get_local_skills(project_dir)
     # 第一轮：按 frontmatter name 精确匹配
     for skill in skills:
         if skill["name"] == name:
@@ -629,7 +711,7 @@ def get_skill_by_name(name: str) -> dict | None:
     return None
 
 
-def load_skill(name: str) -> tuple[bool, str, str]:
+def load_skill(name: str, project_dir: str | None = None) -> tuple[bool, str, str]:
     """加载指定技能，返回 (成功, 内容, 工作目录)
 
     支持两种名称格式：
@@ -638,6 +720,7 @@ def load_skill(name: str) -> tuple[bool, str, str]:
 
     Args:
         name: 技能名称（可选带 plugin: 前缀）
+        project_dir: 项目目录（非空时含贡献动态技能源）
 
     Returns:
         (成功标志, 内容或错误信息, 技能工作目录路径)
@@ -685,7 +768,7 @@ def load_skill(name: str) -> tuple[bool, str, str]:
 
     # 回退：按 frontmatter name 查找（处理 name ≠ 文件夹名的场景）
     if not found_path:
-        skill_info = get_skill_by_name(name)
+        skill_info = get_skill_by_name(name, project_dir)
         if skill_info:
             skill_dir = Path(skill_info["path"])
             for fname in ("SKILL.md", "skill.md"):

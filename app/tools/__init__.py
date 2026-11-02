@@ -62,7 +62,6 @@ class BuiltinTools(QObject):
         self._mcp_manager.acquire()
 
         # Dependencies injected later
-        self._sub_agent_manager = None
         self._agent_manager = None
         self._set_stage_callback = None
         self._memory_manager = None
@@ -118,9 +117,6 @@ class BuiltinTools(QObject):
         彻底清理 BuiltinTools 的所有缓存，防止内存泄漏。
         应该在对话结束后或切换会话时调用。
         """
-        # 清理子智能体管理器（工具插件待办/技能状态随插件生命周期，主程序不持有）
-        self._sub_agent_manager = None
-
         # 释放 MCP 引用（引用计数归零时才真正断开）
         self._mcp_manager.release()
 
@@ -316,11 +312,10 @@ def get_builtin_tools_schema(agent_manager=None, builtin_tools=None, session_id:
     # 委托消息自包含纪律（源自 WorkBuddy A2A 协议）：子智能体默认看不到主对话，
     # 委托方必须在 description 里写全背景/目标/约束/期望产出，否则任务必然跑偏。
     subagent_para_desc = (
-        "批量分发子智能体任务(并行执行)。调完后不可等——继续调其他工具或结束本轮。"
-        "完成后系统发[后台任务状态]，届时用subagent_status查。"
-        "\n\n委托消息自包含：子智能体默认看不到你们当前的对话。description 必须写全"
-        "背景、目标、约束、期望产出四要素；大段参考资料放 context 字段；"
-        "含糊指代（「刚才的」「上面那个」）换成具体名称/路径/结论。"
+        "批量分发子智能体任务(并行执行)。调完不可等，继续调其他工具或结束本轮；"
+        "完成后系统发[后台任务状态]，届时用 subagent_status 查。"
+        "\n委托消息自包含：子智能体看不到当前对话。description 须写全背景/目标/约束/期望产出，"
+        "大段资料放 context，含糊指代换成具体名称/路径/结论。"
     )
     if subagent_names:
         subagent_para_desc += "\n\n可用子智能体见系统提示 ## Available Subagents。"

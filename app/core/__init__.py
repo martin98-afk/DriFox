@@ -26,7 +26,6 @@ _LAZY_IMPORTS: dict[str, tuple[str, str | None]] = {
     # Worker
     "OpenAIChatWorker":        ("app.core.workers", "OpenAIChatWorker"),
     "SubAgentExecutor":        ("app.core.workers", "SubAgentExecutor"),
-    "SubAgentManager":         ("app.core.workers", "SubAgentManager"),
     "TopicSummaryTask":        ("app.core.workers", "TopicSummaryTask"),
     # Store
     "SessionStore":            ("app.core.store", "SessionStore"),
@@ -97,7 +96,6 @@ __all__ = [
     # Worker
     "OpenAIChatWorker",
     "SubAgentExecutor",
-    "SubAgentManager",
     "TopicSummaryTask",
     # Store
     "SessionStore",

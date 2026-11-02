@@ -1572,7 +1572,7 @@ class LLMSettingsCard(SystemCardFrame):
 
     def _on_light_mode_changed(self, is_light: bool):
         """浅色模式开关切换 — 自动选择对应模式的主题"""
-        target_theme = "lumia" if is_light else "fallout"
+        target_theme = "lumia" if is_light else "true-black"
         # 先重建 validator 为目标模式主题集（防旧集不含 target 被 correct 回退），
         # 当前值不在集内时回第一个（_make_theme_style_card 内处理）
         if self.cfg.ui_theme_style.value != target_theme:

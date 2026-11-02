@@ -581,24 +581,28 @@ def _bash_impl(tool_ctx, **kwargs):
     return terminal.execute_bash(kwargs.get("command", ""), kwargs.get("timeout", 120))
 
 
-def _bg_start_impl(tool_ctx, **kwargs):
+def _background_task_impl(tool_ctx, **kwargs):
+    """background_task 统一入口：按 action 分发到 bg_start/stop/logs/list"""
     terminal = _get_terminal(tool_ctx.get("workdir") or Path.cwd())
-    return terminal.bg_start(kwargs.get("command", ""), kwargs.get("cwd"))
-
-
-def _bg_stop_impl(tool_ctx, **kwargs):
-    terminal = _get_terminal(tool_ctx.get("workdir") or Path.cwd())
-    return terminal.bg_stop(kwargs.get("task_id", ""))
-
-
-def _bg_logs_impl(tool_ctx, **kwargs):
-    terminal = _get_terminal(tool_ctx.get("workdir") or Path.cwd())
-    return terminal.bg_logs(kwargs.get("task_id", ""), kwargs.get("lines", 100))
-
-
-def _bg_list_impl(tool_ctx, **kwargs):
-    terminal = _get_terminal(tool_ctx.get("workdir") or Path.cwd())
-    return terminal.bg_list()
+    action = str(kwargs.get("action") or "").strip().lower()
+    if action == "start":
+        command = kwargs.get("command", "")
+        if not command:
+            return ToolResult(False, error="action=start 需要 command")
+        return terminal.bg_start(command, kwargs.get("cwd"))
+    if action == "stop":
+        task_id = kwargs.get("task_id", "")
+        if not task_id:
+            return ToolResult(False, error="action=stop 需要 task_id")
+        return terminal.bg_stop(task_id)
+    if action == "logs":
+        task_id = kwargs.get("task_id", "")
+        if not task_id:
+            return ToolResult(False, error="action=logs 需要 task_id")
+        return terminal.bg_logs(task_id, kwargs.get("lines", 100))
+    if action == "list":
+        return terminal.bg_list()
+    return ToolResult(False, error=f"未知 action: {action}（支持 start/stop/logs/list）")
 
 
 GROUP_TERMINAL = "终端与后台"
@@ -607,7 +611,7 @@ _BASH_SCHEMA = {
     "type": "function",
     "function": {
         "name": "bash",
-        "description": "执行shell命令。仅内置工具不够用时用：构建(pytest/ruff/build)、git(status/diff/log/add/commit)、进程(ps/kill/lsof)、管道(cat|grep|awk)、环境探测(which/env)。禁止替代: read/write/edit/multi_edit/list/glob/grep/get_diagnostics/lsp/bg_*/screenshot/mouse/keyboard/websearch/webfetch。调用前自检：有专用工具？有则用它。命令失败时勿换 shell/换写法反复重试，先读错误输出定位原因，三次仍败则说明情况并求助。",
+        "description": "执行 shell 命令。仅专用工具不足时用：构建(pytest/ruff)、git、进程、管道、环境探测(which/env)。禁替代 read/write/edit/multi_edit/list/glob/grep/get_diagnostics/lsp/background_task/websearch/webfetch。有专用工具就用它；失败先读错误输出定位，勿换写法反复重试，三次仍败说明并求助。",
         "parameters": {
             "type": "object",
             "properties": {
@@ -620,63 +624,33 @@ _BASH_SCHEMA = {
     },
 }
 
-_BG_START_SCHEMA = {
+_BACKGROUND_TASK_SCHEMA = {
     "type": "function",
     "function": {
-        "name": "bg_start",
-        "description": "后台启动命令，不阻塞对话。用于持续服务(如开发服务器)。",
+        "name": "background_task",
+        "description": (
+            "后台任务管理(action 分发)。start=后台启动命令，不阻塞对话(持续服务如开发服务器)；"
+            "stop=终止任务(杀进程树)；logs=取日志(默认最近 100 行，常用来找启动日志里的端口)；list=列全部任务与状态。"
+            "任务仅存内存，重启失效。命令类工具中优先用它，不要用 bash 自己加 & 或 start。"
+        ),
         "parameters": {
             "type": "object",
             "properties": {
-                "command": {"type": "string", "description": "要执行的命令"},
-                "cwd": {"type": "string", "description": "工作目录（可选，默认为项目根目录）"},
+                "action": {
+                    "type": "string",
+                    "enum": ["start", "stop", "logs", "list"],
+                    "description": "start=启动；stop=停止；logs=看日志；list=列任务",
+                },
+                "command": {"type": "string", "description": "action=start：要执行的命令"},
+                "cwd": {"type": "string", "description": "action=start：工作目录，默认项目根"},
+                "task_id": {"type": "string", "description": "action=stop/logs：任务 ID(bg_xxxxxxxx)"},
+                "lines": {"type": "integer", "description": "action=logs：取最近 N 行，默认 100"},
                 **_desc_param("启动前端开发服务器"),
             },
-            "required": ["command", "description"],
+            "required": ["action", "description"],
         },
     },
 }
-
-_BG_STOP_SCHEMA = {
-    "type": "function",
-    "function": {
-        "name": "bg_stop",
-        "description": "停止后台任务",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "task_id": {"type": "string", "description": "任务ID，格式bg_xxxxxxxx"},
-            },
-            "required": ["task_id"],
-        },
-    },
-}
-
-_BG_LOGS_SCHEMA = {
-    "type": "function",
-    "function": {
-        "name": "bg_logs",
-        "description": "获取后台任务日志",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "task_id": {"type": "string", "description": "任务 ID"},
-                "lines": {"type": "integer", "description": "返回最近N行(默认100)"},
-            },
-            "required": ["task_id"],
-        },
-    },
-}
-
-_BG_LIST_SCHEMA = {
-    "type": "function",
-    "function": {
-        "name": "bg_list",
-        "description": "列出所有后台任务状态",
-        "parameters": {"type": "object", "properties": {}},
-    },
-}
-
 
 def _render_bash_body(result, tool_name, tool_args, success):
     """bash 完成框渲染闭包：终端风格（命令头 + 输出体，从主程序 render_helpers 迁出）"""
@@ -699,24 +673,27 @@ def _render_bash_body(result, tool_name, tool_args, success):
 
 
 def _render_bg_body(result, tool_name, tool_args, success):
-    """bg_start/bg_stop/bg_logs 完成框渲染闭包：终端风格（任务标识头 + 状态体）"""
+    """background_task 完成框渲染闭包：终端风格（任务标识头 + 状态体）"""
     from app.plugins.sdk import global_font_family, html_escape, scale_font_size
 
     _gf = global_font_family()
     raw = getattr(result, "content", "") or ""
     tool_args = tool_args or {}
-    if tool_name == "bg_start":
+    action = str(tool_args.get("action") or "").strip().lower()
+    if action == "start":
         cmd = tool_args.get("command", "")
-        header = f"bg_start command={html_escape(cmd[:120])}" if cmd else "bg_start"
-    elif tool_name == "bg_stop":
+        header = f"background_task start {html_escape(cmd[:120])}" if cmd else "background_task start"
+    elif action == "stop":
         task_id = tool_args.get("task_id", "")
-        header = f"bg_stop task_id={task_id}" if task_id else "bg_stop"
-    elif tool_name == "bg_logs":
+        header = f"background_task stop {task_id}" if task_id else "background_task stop"
+    elif action == "logs":
         task_id = tool_args.get("task_id", "")
         lines = tool_args.get("lines", 100)
-        header = f"bg_logs task_id={task_id} lines={lines}"
+        header = f"background_task logs {task_id} (last {lines})"
+    elif action == "list":
+        header = "background_task list"
     else:
-        header = tool_name
+        header = "background_task"
     return f"""
     <div style="background:var(--panel-soft);border:1px solid var(--border);border-radius:8px;overflow:hidden;margin:0;">
         <div style="padding:6px 12px;border-bottom:1px solid var(--border);color:var(--text-secondary);word-break:break-word;font-family:'{_gf}',Consolas,monospace;font-size:{scale_font_size(13)}px;">
@@ -733,18 +710,19 @@ def _preview_bash(tool_args: dict) -> str:
     return f'执行 "{cmd[:60]}"' if cmd else "执行命令"
 
 
-def _make_bg_preview(tool_name: str):
-    """生成 bg_* 工具的自然语言预览闭包（绑定工具名，避免模块级状态）"""
+def _make_bg_preview():
+    """background_task 的自然语言预览闭包（按 action 分派）"""
 
     def _preview(tool_args: dict) -> str:
         tool_args = tool_args or {}
-        if tool_name == "bg_start":
+        action = str(tool_args.get("action") or "").strip().lower()
+        if action == "start":
             cmd = tool_args.get("command", "")
             return f'后台启动 "{cmd[:40]}"' if cmd else "后台启动"
-        if tool_name == "bg_stop":
+        if action == "stop":
             task_id = tool_args.get("task_id", "")
             return f"停止后台任务 {task_id}" if task_id else "停止后台任务"
-        if tool_name == "bg_logs":
+        if action == "logs":
             task_id = tool_args.get("task_id", "")
             lines = tool_args.get("lines", 100)
             return f"后台日志 {task_id} (前 {lines} 行)" if task_id else "后台日志"
@@ -784,8 +762,9 @@ def _make_bg_summarize(preview_fn):
 
 
 def register(registry):
-    # bg_start 的预览/摘要都走带 description 优先的版本
-    _bg_start_preview = _desc_preview(_make_bg_preview("bg_start"))
+    # background_task 的预览走带 description 优先的版本
+    _bg_preview = _make_bg_preview()
+    _desc_preview_fn = _desc_preview(_bg_preview)
     registry.register(
         "bash",
         _BASH_SCHEMA,
@@ -802,57 +781,17 @@ def register(registry):
         metadata={"permission_arg": "command"},
     )
     registry.register(
-        "bg_start",
-        _BG_START_SCHEMA,
-        impl=_bg_start_impl,
+        "background_task",
+        _BACKGROUND_TASK_SCHEMA,
+        impl=_background_task_impl,
         danger="dangerous",
         icon="shell",
-        cn_name="后台启动",
+        cn_name="后台任务",
         group=GROUP_TERMINAL,
-        description="启动后台命令",
-        aliases=["BgStart", "bg_start"],
+        description="启动/停止/查看后台任务",
+        aliases=["BackgroundTask", "background_task"],
         render=_render_bg_body,
-        preview=_bg_start_preview,
-        summarize=_make_bg_summarize(_bg_start_preview),
-    )
-    registry.register(
-        "bg_stop",
-        _BG_STOP_SCHEMA,
-        impl=_bg_stop_impl,
-        danger="dangerous",
-        icon="shell",
-        cn_name="后台停止",
-        group=GROUP_TERMINAL,
-        description="停止后台任务",
-        aliases=["BgStop", "bg_stop"],
-        render=_render_bg_body,
-        preview=_make_bg_preview("bg_stop"),
-        summarize=_make_bg_summarize(_make_bg_preview("bg_stop")),
-    )
-    registry.register(
-        "bg_logs",
-        _BG_LOGS_SCHEMA,
-        impl=_bg_logs_impl,
-        danger="safe",
-        icon="shell",
-        cn_name="后台日志",
-        group=GROUP_TERMINAL,
-        description="查看后台任务日志",
-        aliases=["BgLogs", "bg_logs"],
-        render=_render_bg_body,
-        preview=_make_bg_preview("bg_logs"),
-        summarize=_make_bg_summarize(_make_bg_preview("bg_logs")),
-    )
-    registry.register(
-        "bg_list",
-        _BG_LIST_SCHEMA,
-        impl=_bg_list_impl,
-        danger="safe",
-        icon="shell",
-        cn_name="后台列表",
-        group=GROUP_TERMINAL,
-        description="列出后台任务状态",
-        aliases=["BgList", "bg_list"],
-        preview=_make_bg_preview("bg_list"),
-        summarize=_make_bg_summarize(_make_bg_preview("bg_list")),
+        preview=_desc_preview_fn,
+        summarize=_make_bg_summarize(_desc_preview_fn),
+        metadata={"permission_arg": "command"},
     )

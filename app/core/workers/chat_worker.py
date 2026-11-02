@@ -678,12 +678,19 @@ class OpenAIChatWorker(QThread):
                 except queue.Empty:
                     break
 
+            # PluginChanged 净零合并：连续开关插件（中间无消费）时各条 diff 相互抵消，整批不注入
+            try:
+                from app.core.hooks.hook_manager import filter_net_zero_plugin_messages
+
+                msgs = filter_net_zero_plugin_messages(msgs)
+            except Exception as e:
+                logger.debug(f"[HookManager] 净零合并判定跳过: {e}")
             # ── 用户插话（繁忙时插话发送）：剥离传输键 + 补触发用户消息 hook 链 ──
             # 传输键仅用于进程内识别（UI 切卡 / 取消回收），注入前必须剥净，
             # 落库后是干净 user 消息。
             # 插话经 _hook_message_queue 直通车绕过了正常发送的 PreSendWorker
             # hook 链（UserPromptSubmit/PreUserMessage/PostUserMessage），长期记忆/
-            # 系统时间/关键文档注入与正则匹配 hook 对插话全部失效；此处对每条插话
+            # 系统时间注入与正则匹配 hook 对插话全部失效；此处对每条插话
             # 补触发：hook 输出注入插话消息之前（对齐正常路径顺序），
             # PostUserMessage 仅感知不注入。
             interject_count = 0
@@ -798,14 +805,10 @@ class OpenAIChatWorker(QThread):
 
         out: List[Dict] = []
         try:
-            # PreUserMessage 增强 ctx：worktree 建议 + 关键文档（对齐 engine.py；
-            # 临时会话跳过关键文档，防止临时页泄源项目文档）
+            # PreUserMessage 增强 ctx：worktree 建议（对齐 engine.py）
             pre_ctx = _base_ctx()
             try:
                 pre_ctx.update(backend._build_worktree_context_dict() or {})
-                session = backend.get_current_session() if hasattr(backend, "get_current_session") else None
-                if session is not None and not getattr(session, "is_temp", False):
-                    pre_ctx.update(backend.build_key_documents_context() or {})
             except Exception as e:
                 logger.debug(f"[Interject] PreUserMessage 增强 ctx 构建失败（降级基础 ctx）: {e}")
 
@@ -1813,6 +1816,27 @@ class OpenAIChatWorker(QThread):
         # 防止 RSS 在多次对话间持续增长不下降
         _compact_process_heap()
 
+    def _close_http_client(self) -> None:
+        """在 worker 线程内关闭复用的 HTTP 客户端。
+
+        openai SDK 的 ``SyncHttpxClientWrapper.__del__`` 会同步 ``close()``
+        连接池。若 client 引用留到主线程 gc 才析构（cleanup → full_cleanup →
+        堆回收），连接关闭就整个跑在主线程上——2026-10-31 运行日志里
+        MainThreadWatchdog 抓到的阻塞栈正是这种形状（gc → openai __del__
+        → httpx close，最长 695ms）。
+
+        在 run() 的 finally 里调用，把释放留给本 worker 线程；cleanup() 只
+        置空引用，不再持有可析构的 client。"""
+        with self._stream_lock:
+            client = self._http_client
+            self._http_client = None
+        if client is None:
+            return
+        try:
+            client.close()
+        except Exception as e:  # noqa: BLE001 — 关闭失败不影响收尾
+            logger.debug(f"[ChatWorker] 关闭 HTTP 客户端失败: {e}")
+
     # ========== 缓存追踪方法 ==========
 
     def get_cache_stats(self) -> "AggregatedCacheStats":
@@ -2697,6 +2721,9 @@ class OpenAIChatWorker(QThread):
                 logger.warning(f"[ChatWorker] Failed to save partial messages on error: {save_err}")
             self._handle_error(e)
         finally:
+            # HTTP 客户端在本线程关闭（放最前：后面步骤若抛异常，finally 中断
+            # 就再没有机会把连接池交给本线程释放，只能等主线程 gc 析构）
+            self._close_http_client()
             # 工具执行完成后，清理 round 缓存（为下一轮 API 调用做准备）
             self._permission_cache.clear_round()
             # 🛡️ 取消退出兜底：主循环 `while not self._is_cancelled` 直接退出时
@@ -3421,7 +3448,7 @@ class OpenAIChatWorker(QThread):
             policy = None
             policy_id = self._loop_policy_id
             if policy_id:
-                # 指定 id（如 "assistant_hub_single_turn"）：按 id 直接定位策略对象
+                # 指定 id（如 "minimal"）：按 id 直接定位策略对象
                 policy = registry.policies().get(policy_id)
                 if policy is None:
                     logger.warning(f"[LoopPolicy] 未找到 id={policy_id!r}，回落全局激活策略")
@@ -3594,7 +3621,10 @@ class OpenAIChatWorker(QThread):
                     # 插件协议 / chat-completions：请求发出与响应归一全在 transport 内，
                     # 产出 StreamEvent 流由 sink 消费（下方统一处理）。
                     # stream 已由 _transport_supports_streaming 决定，此处不再硬设
+                    # TTFT 与请求起点同源重置：重试后 elapsed_ms 只算最后一次请求，
+                    # 沿用上一次的 ttft 会出现 ttft>elapsed（生成秒为负）。
                     self._llm_req_t0 = time.monotonic()
+                    self._last_ttft_ms = 0.0
                     response = active_transport.create_stream(
                         self.llm_config,
                         messages,
@@ -3606,6 +3636,7 @@ class OpenAIChatWorker(QThread):
                     # Responses API 解析器仅支持事件流（非流式返回 Response 对象不可迭代）
                     self.stream = True
                     self._llm_req_t0 = time.monotonic()
+                    self._last_ttft_ms = 0.0  # 与请求起点同源重置（重试不再沿用旧 TTFT）
                     # 原生 responses 通道：按需取 HTTP 客户端（transport 通道不经此）
                     response = self._get_http_client().responses.create(**self._build_responses_kwargs(messages))
                 if attempt > 0:
@@ -4057,6 +4088,11 @@ class OpenAIChatWorker(QThread):
                 item = getattr(event, "item", None) or {}
                 if self._responses_item_get(item, "type") == "function_call":
                     tool_calls_found = True
+                    # 📊 TTFT：纯工具调用时首个内容事件可能是 item.added（网关省掉
+                    # function_call_arguments.delta 直接给 done），只认 .delta 会漏记，
+                    # 该次调用只剩 elapsed_ms → 下游把 prefill/排队算进生成时间。
+                    if self._last_ttft_ms <= 0.0 and self._llm_req_t0 > 0:
+                        self._last_ttft_ms = round((time.monotonic() - self._llm_req_t0) * 1000, 1)
                     # 思考阶段结束：冲刷残留批次（见 function_call_arguments.delta 注释）
                     if _reasoning_batch:
                         self._emit_with_callback(
@@ -5221,33 +5257,29 @@ def _extract_tool_args_from_raw(raw_str: str, tool_name: str) -> dict:
 
 def _compact_process_heap():
     """
-    在 cleanup() 后调用：强制 gc 全量收集，让 Python 分配器将空闲
-    arena 归还给操作系统，降低 RSS。
+    在 cleanup() 后触发一次 Python 堆回收，降低 RSS。
 
-    T11：移除 Windows HeapCompact / Linux malloc_trim。
-    T10 实测：Python 3.14 下 HeapCompact 100% 抛 access violation
-    （被 except 吞掉），属无效异常开销；malloc_trim 收益同样有限。
-    保留 gc.collect(2) 全量收集——Python 对象回收后 pymalloc arena
-    的合并/归还由 CPython 内存管理自行处理。函数名/守卫保留
-    （调用方 chat_worker.py:1253 不变）。
+    [PERF] 原实现裸调 ``gc.collect(2)``（全代），而 cleanup() 跑在主线程：
+    UIEngine._on_worker_finished → ConversationExecutor 收尾 → worker.cleanup。
+    全代回收在对象图大时实测冻结主线程 500~700ms——2026-10-31 运行日志里
+    MainThreadWatchdog 抓到 5 次，最长 695ms（且回收过程顺带析构了 httpx
+    client，见 ``_close_http_client``）。
+
+    改走 memory_governor 的节流版：默认只收年轻代（毫秒级），全代按
+    「次数 ≥8 且距上次 ≥120s」节流。每轮对话都付一次 stop-the-world 不值。
+
+    T11：移除 Windows HeapCompact / Linux malloc_trim（T10 实测 HeapCompact
+    在 Python 3.14 下必抛 access violation，纯属无效开销）。
     """
     import sys as _sys
 
-    # 检测测试环境：跳过全量 gc 收集，避免拖慢测试
+    # 检测测试环境：跳过回收，避免拖慢测试
     if _sys.argv[0].endswith("pytest") or "PYTEST_CURRENT_TEST" in os.environ:
         return
 
-    before = _psutil.Process(os.getpid()).memory_info().rss if _HAS_PSUTIL else 0
+    from app.core.infra.memory_governor import _compact_process_heap_after_cleanup
 
-    # ========== 核心：全量收集三代 ==========
-    # cleanup 是低频操作，全量收集对性能影响可忽略，且能释放最多内存。
-    gc.collect(2)
-
-    if _HAS_PSUTIL and before:
-        after = _psutil.Process(os.getpid()).memory_info().rss
-        saved = before - after
-        if saved > 10 * 1024 * 1024:
-            logger.info(f"[MEM-HEAP] gc 收集后 RSS 下降 {saved / 1024 / 1024:.1f} MB")
+    _compact_process_heap_after_cleanup()
 
 
 def _get_log_dir_path(filename: str) -> str:

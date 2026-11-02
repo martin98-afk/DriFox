@@ -132,3 +132,24 @@ class TestSnapshotPruneProjection:
         snap = engine.get_context_usage_snapshot(session=None, llm_config=None)
         assert snap["pruned_tokens"] == 0
         assert snap["used_tokens"] == 0
+
+    def test_fallback_prompt_build_passes_session_id(self):
+        """兜底构建 system prompt 必须带 session_id（否则插件按主助手构建并污染缓存）"""
+        session = _FakeSession([{"role": "user", "content": "hi"}], system_prompt="")
+        engine = _engine(session)
+        seen = {}
+
+        class _Mgr:
+            def get_agent_system_prompt(self, agent_name, is_subagent_call=False, extra_context=None):
+                seen["agent"] = agent_name
+                seen["ctx"] = dict(extra_context or {})
+                return "SYS-OK"
+
+            def get_agent_tools_schema(self, *a, **k):
+                return []
+
+        engine._get_agent_manager = lambda: _Mgr()
+        snap = engine.get_context_usage_snapshot(session=session, llm_config={"model": "gpt-4o", "max_tokens": 8000})
+        assert seen["ctx"].get("session_id") == "s2-test"
+        assert session.system_prompt == "SYS-OK"
+        assert snap["used_tokens"] > 0

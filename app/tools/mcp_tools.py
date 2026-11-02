@@ -1481,9 +1481,17 @@ class MCPClientManager:
         对应的子进程不会自动退出，需要显式断开，否则残留进程继续运行。
         """
         with self._lock:
-            # 豁免临时开启项：它们不在 enabled 名单里，但用户/模型正在用
+            # 豁免临时开启项：它们不在 enabled 名单里，但用户/模型正在用。
+            # ★ 必须跳过 DISABLED 记录：_disconnect_single(keep_record=True) 会保留
+            # 连接记录并置 DISABLED（session=None、task 已退出），这类死记录长期留在
+            # _connections 里；不跳过则每次热重载都把它们当孤儿重复点名、重复触发
+            # mcp_disconnected hook，刷无意义的断开日志。
+            # 判据不能用 c.session：CONNECTING 记录的 session 尚为 None，但背后
+            # 有建连 task 与子进程，用 session 判活会漏掉这类真孤儿。
             orphans = [
-                n for n in self._connections if n not in valid_names and n not in self._ephemeral
+                n
+                for n, c in self._connections.items()
+                if n not in valid_names and n not in self._ephemeral and c.state != MCPState.DISABLED
             ]
         if not orphans:
             return

@@ -80,7 +80,12 @@ class ThemeRefreshCoordinator:
 
     @classmethod
     def begin_refresh_cycle(cls) -> int:
-        """开启新一轮刷新周期（每个 _apply_runtime_ui_settings 入口调一次）"""
+        """开启新一轮刷新周期（每个 _apply_runtime_ui_settings 入口调一次）
+
+        注意：**不**在此推进外观纪元。本方法每个窗口调一次（多窗口批处理里会
+        连进 N 次），推进会让先刷过的可见页面立刻又变「落后」，显示时白刷第二
+        遍。纪元由 ``ThemeManager.on_theme_changed`` 在每次外观变更时推进一次。
+        """
         with cls._lock:
             cls._refresh_cycle += 1
             return cls._refresh_cycle
@@ -121,6 +126,29 @@ class ThemeRefreshCoordinator:
     def get_version(cls) -> int:
         with cls._lock:
             return cls._version
+
+    # ══════════════════════════════════════════════════════════════
+    #  外观纪元（主题/字体/字号统一计数）
+    # ══════════════════════════════════════════════════════════════
+
+    _appearance_epoch: int = 0
+
+    @classmethod
+    def bump_appearance_epoch(cls) -> int:
+        """推进外观纪元（每次主题/字体/字号批量刷新 +1）
+
+        与 ``_version`` 的分工：version 只在**主题 id 变化**时推进（消息卡 HTML
+        缓存分桶用）；epoch 走**每一次外观变更**——字体家族/字号变更走同一条
+        batched 链但不改主题 id，若复用 version，脏页面会永远等不到补刷。
+        """
+        with cls._lock:
+            cls._appearance_epoch = (cls._appearance_epoch + 1) % _VERSION_MAX
+            return cls._appearance_epoch
+
+    @classmethod
+    def get_appearance_epoch(cls) -> int:
+        with cls._lock:
+            return cls._appearance_epoch
 
     # ══════════════════════════════════════════════════════════════
     #  JS 缓存

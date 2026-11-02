@@ -108,9 +108,12 @@ class ToolOffloadTier:
         single = cfg_int("single_result_threshold", 50_000)
         total = cfg_int("message_total_threshold", 200_000)
         skip = offload_skip_tools()
+        # 能力面在循环外取一次：_tool_api 每次都要经能力池 + 调用方插件名
+        # 推断，按条调用时长会话累积成主线程数百 ms 阻塞。
+        api = _tool_api("read")
         acc = 0
         for r in view.messages:
-            if self._skip(r.get("name", ""), skip):
+            if self._skip(r.get("name", ""), skip, api):
                 continue
             c = r.get("content", "")
             if not isinstance(c, str):
@@ -136,13 +139,17 @@ class ToolOffloadTier:
         )
 
     @staticmethod
-    def _skip(name: str, skip: frozenset = frozenset()) -> bool:
-        """免落盘判定：工具自声明（metadata["no_offload"]）∪ 插件配置名单。"""
+    def _skip(name: str, skip: frozenset = frozenset(), api=None) -> bool:
+        """免落盘判定：工具自声明（metadata["no_offload"]）∪ 插件配置名单。
+
+        api: 已取到的工具注册表只读面。批量判定时由调用方在循环外取一次传入，
+        避免按条重建能力池；省略则就地取（单条调用 / 测试路径）。
+        """
         if not name:
             return False
         try:
-            api = _tool_api("read")
-
+            if api is None:
+                api = _tool_api("read")
             if api and api["is_no_offload"](name):
                 return True
         except Exception:

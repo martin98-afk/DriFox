@@ -447,7 +447,10 @@ class SystemCardFrame(QFrame):
             self._count_label.setText(f"({count})")
         else:
             self._count_label.setText("")
-        self._count_label.setVisible(count > 0 or (limit and limit > 0))
+        # bool(...) 必须显式：limit 为 None 时 (limit and limit > 0) 求值为 None，
+        # `count > 0 or None` 在 count=0 时得到 None → setVisible(None) 抛
+        # TypeError（工具与思考卡清空计数时踩中）。
+        self._count_label.setVisible(bool(count > 0 or (limit and limit > 0)))
 
     def set_search_handler(self, placeholder: str, callback):
         """设置头部搜索框（在标签按钮右侧、额外按钮左侧）

@@ -23,7 +23,6 @@ def _make_host(projects, workdirs_per_project):
         win.backend = MagicMock()
         win.backend.history_manager.get_projects.return_value = projects
         win.backend.history_manager.get_history_list.return_value = []
-        win.backend.memory_manager.get_key_documents.return_value = []
         windows.append(win)
 
     class FakeHost(QWidget):

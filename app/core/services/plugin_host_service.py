@@ -218,7 +218,11 @@ class PluginHostService(QObject):
             except Exception as e:
                 logger.warning(f"[PluginHost] 延迟队列 stop failed: {e}")
         try:
-            self._stop_plugin_watcher()
+            # wait=False：应用退出路径。watchfiles 的 rust 侧要等当前
+            # debounce/step 窗口结束才检出 stop_event（实测主线程 join 阻塞
+            # 535ms，看门狗日志 4 次），而线程是 daemon、进程马上就要退出，
+            # 在主线程干等只换来关软件那半秒卡顿。
+            self._stop_plugin_watcher(wait=False)
         except Exception as e:
             logger.warning(f"[PluginHost] stop failed: {e}")
 
@@ -1100,7 +1104,7 @@ class PluginHostService(QObject):
             # 被反复重启/插件被重载（实际无任何行为）
             self._watcher_baseline_until = 0.0
 
-    def _stop_plugin_watcher(self):
+    def _stop_plugin_watcher(self, wait: bool = True):
         """backend 关闭时递减 watcher 引用计数；归零时停止 watchfiles 线程。
 
         泄漏修复（P1）：watcher 闭包持有启动它的第一个 backend 实例引用
@@ -1111,6 +1115,12 @@ class PluginHostService(QObject):
         - refcount == 0：设置 stop_event → watch() 生成器退出 → join 等待线程结束
           → 闭包释放 → 首个 backend 实例可回收；同时复位标志，允许新窗口
           重新启动 watcher（stop_event 在 _start_plugin_watcher 中重建），热更新不丢失。
+
+        Args:
+            wait: 归零时是否在调用线程（通常是主线程）等 watcher 线程退出。
+                默认 True——窗口关闭但进程存活（托盘驻留）时必须等，否则闭包
+                引用不释放、且新窗口重开 watcher 会与旧线程监听同一批目录。
+                应用退出路径传 False：daemon 线程随进程死亡，主线程干等只是白掉帧。
         """
         self._plugin_watcher_refcount = max(0, self._plugin_watcher_refcount - 1)
         if self._plugin_watcher_refcount > 0:
@@ -1119,7 +1129,7 @@ class PluginHostService(QObject):
         if stop is not None:
             stop.set()
         t = self._plugin_watcher_thread
-        if t is not None and t.is_alive():
+        if wait and t is not None and t.is_alive():
             try:
                 t.join(timeout=2.0)
             except Exception:
@@ -1367,7 +1377,11 @@ class PluginHostService(QObject):
         last = getattr(self, "_last_reload_at", 0.0)
         if now - last < 0.3:
             # 去抖窗口内：不立即重载，改为计划一次合并兜底（仅执行一次）
-            self._schedule_debounced_reload()
+            # 精准请求保真（2026-11-01）：携带 (plugin, component) 攒入待重载集合，
+            # 到期后逐个精准重载；原实现丢弃组件信息一律全量，
+            # 而 reload_plugin_subsystems 的 rescan 门禁对系统插件内部文件变更恒空，
+            # 导致 agents/hooks/commands 等修改被静默跳过、永不生效
+            self._schedule_debounced_reload(plugin_name, component)
             return
         self._last_reload_at = now
         try:
@@ -1510,24 +1524,50 @@ class PluginHostService(QObject):
             except RuntimeError:
                 pass  # 窗口关闭竞态：backend 已 deleteLater 但未 cleanup
 
-    def _schedule_debounced_reload(self):
-        """风暴期合并重载：300ms 后执行一次全量 reload_plugin_subsystems（仅触发一次）
+    def _schedule_debounced_reload(self, plugin_name: str = "", component: str = ""):
+        """风暴期合并重载：300ms 后执行一次合并重载（仅触发一次）
 
         修 #2 timer：改用 QTimer.singleShot 静态方法，不持有 QTimer 实例
         （PyQt5 下即便 stop+deleteLater 仍残留 +1 QTimer，singleShot 零实例）。
         用 _reload_pending 守卫保留"风暴期合并"语义：多次调用只在首个 300ms 后触发一次。
+
+        精准请求保真（2026-11-01）：窗口内被合并的 (plugin_name, component)
+        攒入 _pending_reload_targets，到期逐个精准重载。原实现丢弃组件信息、
+        一律全量 reload_plugin_subsystems，而其 rescan 门禁（added/removed/changed）
+        对系统插件内部文件变更恒空 → agents/hooks/commands 等修改被静默跳过、
+        永不生效（实测：改 system-agents/agents/leader.md 热重载无效）。
         """
+        targets = getattr(self, "_pending_reload_targets", None)
+        if targets is None:
+            targets = self._pending_reload_targets = set()
+        targets.add((plugin_name, component))
         if getattr(self, "_reload_pending", False):
             return
         self._reload_pending = True
         QTimer.singleShot(300, self._do_debounced_reload)
 
     def _do_debounced_reload(self):
-        """去抖到期：合并执行一次全量重载（已内部对 added/changed/removed 增量处理）"""
+        """去抖到期：合并执行一次重载
+
+        精准目标（带插件名）逐个 _do_single_reload（幂等，内部自做 rescan_plugin）
+        后合并广播；含空名目标（"", ""，全量语义）或无目标时回退全量
+        reload_plugin_subsystems（已内部对 added/changed/removed 增量处理）。
+        """
         self._reload_pending = False
         self._last_reload_at = time.time()
+        targets = getattr(self, "_pending_reload_targets", set())
+        self._pending_reload_targets = set()
         try:
-            result = self.reload_plugin_subsystems()
+            if not targets or ("", "") in targets:
+                result = self.reload_plugin_subsystems()
+            else:
+                result: dict = {}
+                for plugin_name, component in targets:
+                    sub = self._do_single_reload(plugin_name, component)
+                    if not result:
+                        result = sub
+                    else:
+                        self._merge_reload_result(result, sub, tuple(sub.keys()))
             self.emit_plugin_changed(result)
         except Exception as e:
             logger.error(f"[PluginHost] 插件热更新失败: {e}")

@@ -906,7 +906,7 @@ class SecurityCenterCard(QWidget):
         title.setObjectName("sciTitle")
         title.setWordWrap(True)
         title.setToolTip(
-            "0 = 不限。仅约束 AI 通过 bash / bg_start 与持久 shell 会话启动的进程；"
+            "0 = 不限。仅约束 AI 通过 bash / background_task 与持久 shell 会话启动的进程；"
             "DriFox 自身界面进程与用户手动启动的程序不受约束。"
         )
         lay.addWidget(title)

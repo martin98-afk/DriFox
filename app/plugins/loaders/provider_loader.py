@@ -308,7 +308,7 @@ def _run_register(
         raise
     names = proxy.registered_names
     if names:
-        logger.info(f"[ProviderLoader] 插件 {plugin_name} 注册服务商: {sorted(names)}")
+        logger.debug(f"[ProviderLoader] 插件 {plugin_name} 注册服务商: {sorted(names)}")
     return names
 
 

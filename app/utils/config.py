@@ -144,7 +144,28 @@ class Settings(QConfig):
                 qconfig._cfg = cls._instance
             except Exception:
                 pass
+            # 立即绑定同步记账器：晚绑会产生「配置改了但没打 t」的窗口，
+            # 期间云端更高 t 的旧内容会把这期间用户的改动整份回滚。
+            # 必须在 load 之后（拿到磁盘条目表）、qconfig 接管之后（信号链就绪）。
+            try:
+                cls._bind_sync_recorder(cls._instance)
+            except Exception:
+                logger.debug("同步记账器绑定失败，云同步将退化为纯 union 合并", exc_info=True)
         return cls._instance
+
+    @classmethod
+    def _bind_sync_recorder(cls, instance) -> None:
+        """把云同步的条目记账器接到 Settings 上（进程启动早期，早于 ConfigSync.enable）。
+
+        不绑的后果：enable() 之前用户改的每一项配置都只落盘、不打 Lamport 时间戳，
+        条目在 SyncMeta 里仍指向旧值指纹。随后合并时云端上次会话上传的那份
+        「更高 t 的旧内容」会赢得 LWW，本地改动被静默回滚（实测：切好的主题被刷回）。
+
+        记账器是全局单例，此处绑定后 enable() 里的 bind_settings 直接复用。
+        """
+        from app.core.sync.meta_recorder import bind_settings
+
+        bind_settings(instance)
 
     # ── 配置迁移基建（P0-7） ────────────────────────────────
     #
@@ -349,6 +370,22 @@ class Settings(QConfig):
             # toDict() 内层值与 item.value 共享引用，必须深拷贝后剥钥，
             # 否则会污染内存态导致 UI 回显 / API 请求丢 key
             data = deepcopy(self.toDict())
+            # 同步元数据以记账器为准：内存里的 System.SyncMeta 是启动时快照，
+            # 记账器每次 tick 只更新自身状态、不回写 ConfigItem，直接用 toDict()
+            # 落盘会把条目表回滚到旧版本（本地刚改的值仍配着旧 t，下一次合并必
+            # 被远端更高 t 的旧内容覆盖，表现为「改完过一阵自己变回去」）。
+            try:
+                from app.core.sync.meta_recorder import get_bound_recorder
+
+                _rec = get_bound_recorder()
+                if _rec is not None:
+                    _sys = data.get("System")
+                    if not isinstance(_sys, dict):
+                        _sys = {}
+                        data["System"] = _sys
+                    _sys["SyncMeta"] = _rec.dump()
+            except Exception:
+                logger.debug("[Settings] 同步元数据落盘失败，沿用内存值", exc_info=True)
             mode = str(self.secret_mode.value or MODE_KEYRING)
             if mode != MODE_NONE:
                 try:
@@ -618,7 +655,7 @@ class Settings(QConfig):
     auto_start = ConfigItem("General", "AutoStart", False, BoolValidator())
 
     # 版本信息
-    current_version = "v0.6.13"
+    current_version = "v0.6.14-beta"
     # 构建变体：pyqt5 | pyside6。同一 Release 同时挂两套安装包，更新器据此选包，
     # 插件市场据此选官方插件库分支（pyqt5 → main，pyside6 → pyside6）。
     # CI 构建期由 release.yml 的 Inject build_variant 步骤按 matrix 覆写，缺省取本分支值。

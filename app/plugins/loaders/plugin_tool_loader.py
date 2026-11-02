@@ -409,7 +409,7 @@ def _run_register(
         raise  # 保持 load_plugin_tools 既有 warning 语义（loaded 不含该插件）
     new_tools = proxy.registered_names
     if new_tools:
-        logger.info(f"[PluginToolLoader] 插件 {plugin_name} 注册工具: {sorted(new_tools)}")
+        logger.debug(f"[PluginToolLoader] 插件 {plugin_name} 注册工具: {sorted(new_tools)}")
     return new_tools
 
 
@@ -457,9 +457,9 @@ def load_plugin_tools(
             except Exception as e:
                 logger.warning(f"[PluginToolLoader] 插件 {plugin_name} register 失败: {e}")
     if disabled_skipped:
-        logger.info(f"[PluginToolLoader] 跳过已禁用插件的工具: {', '.join(sorted(disabled_skipped))}")
+        logger.debug(f"[PluginToolLoader] 跳过已禁用插件的工具: {', '.join(sorted(disabled_skipped))}")
     if component_skipped:
-        logger.info(f"[PluginToolLoader] 跳过 tools 组件已禁用的插件: {', '.join(sorted(component_skipped))}")
+        logger.debug(f"[PluginToolLoader] 跳过 tools 组件已禁用的插件: {', '.join(sorted(component_skipped))}")
     return loaded
 
 
@@ -512,7 +512,7 @@ def unload_plugin_tools(
             registry.unregister(name)
             if root_tracker is not None:
                 root_tracker.pop(name, None)
-            logger.info(f"[PluginToolLoader] 注销插件工具: {name} ({plugin_name})")
+            logger.debug(f"[PluginToolLoader] 注销插件工具: {name} ({plugin_name})")
     # 记账同步清理：本插件已不再持有任何工具，其覆盖关系随之失效
     _CROSS_ROOT_OVERRIDES.pop(plugin_name, None)
 
@@ -764,11 +764,11 @@ class PluginToolWatcher:
                     logger.debug(f"[PluginToolLoader] {plugin_name} 未覆盖低等级根工具，跳过跨根恢复重扫")
                 # 重注册该插件当前模块（enabled 过滤与 load_plugin_tools 一致）
                 if not _is_plugin_enabled(plugin_name):
-                    logger.info(f"[PluginToolLoader] 跳过已禁用插件的工具: {plugin_name}")
+                    logger.debug(f"[PluginToolLoader] 跳过已禁用插件的工具: {plugin_name}")
                     return
                 # D9：组件级禁用——tools 子项被关后不再重注册
                 if not _is_component_enabled(plugin_name):
-                    logger.info(f"[PluginToolLoader] 跳过 tools 组件已禁用的插件: {plugin_name}")
+                    logger.debug(f"[PluginToolLoader] 跳过 tools 组件已禁用的插件: {plugin_name}")
                     return
                 # P1/P2：版本/平台门禁——load_blocked 插件不重注册其工具
                 if _is_plugin_load_blocked(plugin_name):

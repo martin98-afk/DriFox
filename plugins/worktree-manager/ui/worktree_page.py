@@ -1,469 +1,226 @@
 # -*- coding: utf-8 -*-
-"""_worktree_page.py — 系统插件版工作树页（关键文档 + git 工作树切换）
+"""工作树页 —— git 工作树管理（主仓库卡片 + 子工作树列表）
 
-page_id="worktree-manager"（与插件同名）：注册它即填充右侧工作台的「工作树」页
-（面板本身不提供工作树实现，功能完全插件化；插件卸载后显示占位页）。
+page_id="worktree-manager"（与插件同名）：注册它即填充右侧工作台的「工作树」页。
+插件卸载后显示占位页。
 
-页面内容自原 MemoryCardContent 的 docs 子页整体迁移：
-- 关键文档列表（拖拽添加文件/文件夹/URL，设为工作目录）
-- WorktreeSectionWidget（git worktree 创建/切换/删除/恢复主仓库）
+历史：本页原先还承载「关键文档列表」（拖拽文件/文件夹/URL，设为工作目录）。
+该功能已下线，工作目录改由 project_workdir 表记录，页面只做工作树管理。
 
-数据源：context["backend"].memory_manager（KeyDocumentsRepository + WorkingDirectory）。
-工作目录变更经 context["working_dir_changed_callback"] 上报宿主。
+宿主契约：
+- set_project(project, workdir=None)：接收当前项目与工作目录并刷新
+- refresh_data()：数据自拉入口（宿主 refresh_current_page_data 调用）
+- refresh_style()：主题刷新
 """
 
 from __future__ import annotations
 
+import concurrent.futures
+import dataclasses
 import os
 from typing import Dict, Optional
 
 from loguru import logger
 
-from PyQt5.QtCore import QSize, Qt, pyqtSignal
-from PyQt5.QtGui import QColor, QDragEnterEvent, QDragMoveEvent, QDropEvent
-from PyQt5.QtWidgets import (
-    QFileDialog,
-    QGridLayout,
-    QHBoxLayout,
-    QListWidgetItem,
-    QSizePolicy,
-    QVBoxLayout,
-    QWidget,
-)
-from qfluentwidgets import (
-    BodyLabel,
-    FluentIcon,
-    LineEdit,
-    ListWidget,
-    MaskDialogBase,
-    PrimaryPushButton,
-    PushButton,
-    TransparentToolButton,
-)
+from PyQt5.QtCore import QObject, QRunnable, QThreadPool, Qt, pyqtSignal
+from PyQt5.QtWidgets import QHBoxLayout, QLabel, QSizePolicy, QVBoxLayout, QWidget
+from qfluentwidgets import BodyLabel
 
 from app.plugins.sdk import Colors, font_size_css
 from app.plugins.sdk import GitWorktreeDetector
-from app.plugins.sdk import get_font_family_css, get_icon
-from .worktree_section import WorktreeSectionWidget
-from app.plugins.sdk import SingleInputDialog
+from app.plugins.sdk import get_font_family_css
+from .worktree_section import (
+    WorktreeSectionWidget,
+    _DELETE_DONE,
+    list_local_branches,
+    read_all_worktree_meta,
+)
+
 
 def _caps(cap_id):
-    """取某能力（无 ctx 场景统一走 sdk 的 caps_for，host 由宿主解析）。
-
-    原实现自建 ``host=None`` 池并自报 ``declared={cap_id, ...}``：等于插件给
-    自己发权限，manifest 声明永不生效，``window.*`` 这类吃 host 的能力还恒为空。
-    """
+    """取某能力（无 ctx 场景统一走 sdk 的 caps_for，host 由宿主解析）。"""
     from app.plugins.sdk import caps_for
 
     return caps_for(cap_id)
 
 
-class DocDropListWidget(ListWidget):
-    """支持拖拽文件的列表控件"""
+class _PageLoadSignals(QObject):
+    """页面后台探测完成信号（后台线程 → 主线程）"""
 
-    files_dropped = pyqtSignal(list)
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setAcceptDrops(True)
-        self._is_drag_over = False
-
-    def dragEnterEvent(self, event: QDragEnterEvent):
-        if event.mimeData().hasUrls():
-            event.acceptProposedAction()
-            self._is_drag_over = True
-            self.update()
-
-    def dragMoveEvent(self, event: QDragMoveEvent):
-        if event.mimeData().hasUrls():
-            event.acceptProposedAction()
-
-    def dragLeaveEvent(self, event):
-        self._is_drag_over = False
-        self.update()
-
-    def dropEvent(self, event: QDropEvent):
-        self._is_drag_over = False
-        self.update()
-
-        file_paths = []
-        if event.mimeData().hasUrls():
-            for url in event.mimeData().urls():
-                path = url.toLocalFile()
-                # 文件和文件夹都接受
-                if path and (os.path.isfile(path) or os.path.isdir(path)):
-                    file_paths.append(path)
-
-        if file_paths:
-            self.files_dropped.emit(file_paths)
+    finished = pyqtSignal(object)  # dict: {"ok": bool, "reason": str, "git_root": str, "info": obj}
 
 
-class KeyDocumentItemWidget(QWidget):
-    """关键文档项组件"""
+class _PageLoadJob(QRunnable):
+    """后台线程：探测 git 仓库并拉取 worktree 信息。
 
-    removed = pyqtSignal(str)  # doc_id
-    open_file = pyqtSignal(str)  # file_path
-    open_folder = pyqtSignal(str)  # folder_path
-    setAsWorkingDir = pyqtSignal(str)  # file_path
-    worktreeChanged = pyqtSignal(str, str)  # (original_folder, worktree_path)
+    这一串操作（detect_git / get_repo_info）内部全是 git 子进程，Windows 下
+    单个 100~300ms，串起来必然卡主线程（实测切换页签阻塞 500ms+）。
+    全部搬到后台，主线程只做 UI 落地。
+    """
 
-    @staticmethod
-    def _is_url(path: str) -> bool:
-        """判断路径是否为 URL"""
-        return bool(path and (path.startswith("http://") or path.startswith("https://")))
+    def __init__(self, workdir: str, signals: _PageLoadSignals):
+        super().__init__()
+        self._workdir = workdir
+        self._signals = signals
 
-    def __init__(
-        self,
-        doc_id: str,
-        file_name: str,
-        file_path: str,
-        added_by: str = "manual",
-        is_working_dir: bool = False,
-        parent=None,
-    ):
-        super().__init__(parent)
-        self.doc_id = doc_id
-        self.file_path = file_path
-        self._is_url = self._is_url(file_path)
-        self._is_folder = os.path.isdir(file_path) if file_path and not self._is_url else False
-        self._is_working_dir = is_working_dir and self._is_folder
-        self._init_ui(file_name, file_path, added_by)
+    def run(self):
+        payload = {"ok": False, "reason": "", "git_root": "", "info": None, "main_root": "", "branches": []}
+        try:
+            # 三路并行（互不依赖的只读 git 子进程）：Windows 下每条子进程
+            # 300~600ms，串行会把首屏拖到数秒；并行使关键路径 = 最慢一路
+            with concurrent.futures.ThreadPoolExecutor(max_workers=3) as ex:
+                f_info = ex.submit(GitWorktreeDetector.get_repo_info, self._workdir)
+                f_branches = ex.submit(list_local_branches, self._workdir)
+                f_desc = ex.submit(read_all_worktree_meta, self._workdir)
+                info = f_info.result()
+                branches = f_branches.result()
+                descriptions, creators = f_desc.result()
 
-    def _get_icon(self, file_name: str, file_path: str) -> str:
-        """根据文件类型获取对应图标，文件夹单独处理"""
-        import os
-
-        # URL 链接
-        if self._is_url:
-            return "🔗"
-        # 先判断是否是文件夹
-        if os.path.isdir(file_path):
-            return "📁"
-
-        ext = file_name.lower().split(".")[-1] if "." in file_name else ""
-
-        icon_map = {
-            # 代码文件
-            "py": "🐍",
-            "python": "🐍",
-            "js": "🟨",
-            "javascript": "🟨",
-            "ts": "🔷",
-            "typescript": "🔷",
-            "jsx": "⚛️",
-            "tsx": "⚛️",
-            "java": "☕",
-            "go": "🐹",
-            "rs": "🦀",
-            "rust": "🦀",
-            "c": "🔶",
-            "cpp": "🔶",
-            "h": "🔶",
-            "cs": "🔷",
-            "php": "🐘",
-            "rb": "💎",
-            "swift": "🍎",
-            "kt": "🤖",
-            # 文档
-            "md": "📝",
-            "markdown": "📝",
-            "txt": "📄",
-            "rtf": "📄",
-            "pdf": "📕",
-            "doc": "📘",
-            "docx": "📘",
-            "xls": "📊",
-            "xlsx": "📊",
-            "csv": "📊",
-            "ppt": "📙",
-            "pptx": "📙",
-            "html": "🌐",
-            "htm": "🌐",
-            "css": "🎨",
-            "scss": "🎨",
-            "less": "🎨",
-            "json": "🔧",
-            "yaml": "🔧",
-            "yml": "🔧",
-            "toml": "🔧",
-            "ini": "🔧",
-            "cfg": "🔧",
-            "conf": "🔧",
-            "xml": "🔧",
-            # 图片
-            "png": "🖼️",
-            "jpg": "🖼️",
-            "jpeg": "🖼️",
-            "gif": "🖼️",
-            "bmp": "🖼️",
-            "svg": "🖼️",
-            "webp": "🖼️",
-            # 视频音频
-            "mp4": "🎬",
-            "webm": "🎬",
-            "mp3": "🎵",
-            "wav": "🎵",
-            "ogg": "🎵",
-            # 存档
-            "zip": "📦",
-            "rar": "📦",
-            "7z": "📦",
-            "tar": "📦",
-            "gz": "📦",
-            # git
-            "gitignore": "🌱",
-            # license/readme
-            "license": "📜",
-            "licence": "📜",
-            "readme": "📖",
-            "readme.md": "📖",
-        }
-
-        return icon_map.get(ext, icon_map.get(file_name.lower(), "📄"))
-
-    def _init_ui(self, file_name, file_path, added_by):
-        self.setFixedHeight(44)
-        self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
-
-        # 工作目录高亮背景（用 Palette 方式避免 QListWidget 样式表冲突）
-        if self._is_working_dir:
-            palette = self.palette()
-            palette.setColor(self.backgroundRole(), QColor(46, 160, 67, 35))
-            self.setPalette(palette)
-            self.setAutoFillBackground(True)
-            self.setStyleSheet("border-radius: 4px;")
-        else:
-            self.setAutoFillBackground(False)
-            self.setPalette(self.style().standardPalette())
-            self.setStyleSheet("")
-
-        main_layout = QHBoxLayout(self)
-        main_layout.setContentsMargins(8, 4, 8, 4)
-        main_layout.setSpacing(4)
-
-        # 文件/文件夹图标（根据类型显示不同图标）
-        icon = self._get_icon(file_name, file_path)
-        icon_label = BodyLabel(icon, self)
-        icon_label.setStyleSheet(f"{font_size_css(16)} padding: 0 4px;")
-
-        # URL 使用域名作为名称，非 URL 使用文件名
-        display_name = file_name
-        if self._is_url and file_path:
-            from urllib.parse import urlparse
-
-            parsed = urlparse(file_path)
-            domain = parsed.netloc or file_path
-            display_name = domain
-        name_label = BodyLabel(display_name, self)
-        name_label.setWordWrap(False)
-        name_label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
-        name_label.setMinimumWidth(0)
-        name_label.setStyleSheet(
-            f"color: {Colors.TEXT_PRIMARY}; background: transparent;"
-            f" {get_font_family_css()} {font_size_css(12)} padding: 0 4px;"
-        )
-        self._name_label = name_label  # 成员化：refresh_style 重设主题色（BodyLabel 默认色不随应用主题）
-
-        main_layout.addWidget(icon_label)
-        main_layout.addWidget(name_label)
-
-        # 显示绝对路径/URL（自动中间省略，窗口缩小时优先压缩）
-        self._path_label = BodyLabel("", self)
-        Colors.refresh()
-        if self._is_url:
-            # URL 显示完整链接，颜色用链接色
-            self._path_label.setStyleSheet(
-                f"color: {Colors.INFO}; {get_font_family_css()} {font_size_css(10)} text-decoration: underline;"
-            )
-        else:
-            self._path_label.setStyleSheet(f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} {font_size_css(10)}")
-        self._path_label.setToolTip(self.file_path)  # 悬浮显示完整路径
-        self._path_label.setWordWrap(False)
-        self._path_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
-        self._path_label.setMinimumWidth(0)
-        main_layout.addWidget(self._path_label, 1)
-
-        # 操作按钮
-        # 工作目录按钮（仅文件夹显示）
-        self.wd_btn = None
-        if self._is_folder:
-            self.wd_btn = TransparentToolButton(get_icon("根目录"), self)
-            self.wd_btn.setToolTip("设置为工作目录（工具将在此目录下使用相对路径）")
-            self.wd_btn.setFixedSize(24, 24)
-            if self._is_working_dir:
-                self.wd_btn.setStyleSheet("""
-                    TransparentToolButton {
-                        background-color: rgba(46, 160, 67, 0.3);
-                        border: 1px solid rgba(46, 160, 67, 0.6);
-                        border-radius: 4px;
-                    }
-                """)
-            self.wd_btn.clicked.connect(lambda: self.setAsWorkingDir.emit(self.file_path))
-            # 根目录 icon 置于行首（图标/名称之前），操作按钮（打开/删除）留在右侧
-            main_layout.insertWidget(0, self.wd_btn)
-
-        # 检测 git worktree（仅当是文件夹且被标记为根目录时才检测）
-        self._repo_info = None
-        if self._is_folder and self._is_working_dir:
-            from app.plugins.sdk import GitWorktreeDetector
-
-            self._repo_info = GitWorktreeDetector.get_repo_info(self.file_path)
-
-        self.open_btn = TransparentToolButton(FluentIcon.FOLDER, self)
-        if self._is_url:
-            self.open_btn.setToolTip("在浏览器中打开链接")
-        else:
-            self.open_btn.setToolTip("打开所在文件夹")
-        self.open_btn.clicked.connect(lambda: self.open_folder.emit(self.file_path))
-
-        self.remove_btn = TransparentToolButton(FluentIcon.DELETE, self)
-        self.remove_btn.setToolTip("移除")
-        self.remove_btn.clicked.connect(lambda: self.removed.emit(self.doc_id))
-
-        main_layout.addWidget(self.open_btn)
-        main_layout.addWidget(self.remove_btn)
-
-    def refresh_style(self):
-        """主题切换：重设条目文字颜色（setItemWidget 子件不吃 QListWidget 的 QSS）"""
-        Colors.refresh()
-        if hasattr(self, "_name_label"):
-            self._name_label.setStyleSheet(
-                f"color: {Colors.TEXT_PRIMARY}; background: transparent;"
-                f" {get_font_family_css()} {font_size_css(12)} padding: 0 4px;"
-            )
-        Colors.refresh()
-        if hasattr(self, "_path_label"):
-            if self._is_url:
-                self._path_label.setStyleSheet(
-                    f"color: {Colors.INFO}; {get_font_family_css()} {font_size_css(10)} text-decoration: underline;"
-                )
+            if info is None:
+                payload["reason"] = "not_git"
+            elif not info.worktrees:
+                payload["reason"] = "no_info"
             else:
-                self._path_label.setStyleSheet(
-                    f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} {font_size_css(10)}"
-                )
+                # 说明与创建者标记就地补到 wt 对象（_populate_rows 直接 getattr 读取）
+                for wt in info.worktrees:
+                    if not wt.is_main:
+                        name = os.path.basename(wt.path)
+                        wt.description = descriptions.get(name, "")
+                        wt.creator = creators.get(name, "")
+                # 当前目录落在某个 worktree 里时，info.root/current_branch 是
+                # 子工作树视角；页面（主仓库卡片、分支切换）必须永远渲染主仓库，
+                # 否则主仓库卡片会显示成子工作树、下拉还能选到已被其他 worktree
+                # 检出的分支（git 必拒）。这里统一替换为主仓库视角。
+                main_wt = next((w for w in info.worktrees if w.is_main), None)
+                if main_wt and info.root != main_wt.path:
+                    info = dataclasses.replace(info, root=main_wt.path, current_branch=main_wt.branch)
+                payload["ok"] = True
+                payload["info"] = info
+                payload["main_root"] = info.root
+                payload["branches"] = branches
+        except Exception as e:  # noqa: BLE001 - 后台探测兜底
+            payload["reason"] = f"error: {e}"
+        self._signals.finished.emit(payload)
 
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-        self._update_path_elision()
 
-    def _update_path_elision(self):
-        """根据可用宽度自动省略路径（中间截断），窗口缩小时优先压缩路径"""
-        if not hasattr(self, "_path_label") or self._path_label is None:
-            return
-        full_path = self.file_path
-        available_width = self._path_label.width()
-        if available_width <= 0:
-            self._path_label.setText(full_path)
-            return
-        fm = self._path_label.fontMetrics()
-        elided = fm.elidedText(full_path, Qt.ElideMiddle, available_width)
-        self._path_label.setText(elided)
+# 页面探测专用线程池（单线程：避免多次切页签并发起 git 进程）
+_PAGE_POOL = QThreadPool()
+_PAGE_POOL.setMaxThreadCount(1)
 
 
-class DropZoneWidget(QWidget):
-    """拖拽区域组件"""
+class WorkdirCard(QWidget):
+    """工作目录卡片：显示当前目录 + 更换 / 打开目录。
 
-    files_dropped = pyqtSignal(list)  # file_paths
+    无 git 的机器上这是本页唯一可操作项；有 git 时它排在主仓库卡片上方，
+    随时可以把工作目录换到任意文件夹（不必是 git 仓库）。
+    """
 
-    def __init__(self, parent=None):
+    changed = pyqtSignal(str)  # 新的工作目录（空串=未选择）
+
+    def __init__(self, workdir: str, is_git: bool, parent=None):
         super().__init__(parent)
-        self._init_ui()
+        self._workdir = workdir or ""
+        self._is_git = is_git
+        self.setObjectName("workdirCard")
+        self.setAttribute(Qt.WA_StyledBackground, True)
+        self._setup_ui()
 
-    def _init_ui(self):
-        self.setMinimumHeight(60)
-        self.setMaximumHeight(80)
-        self.setAcceptDrops(True)
+    def _setup_ui(self):
         Colors.refresh()
-        self.setStyleSheet(f"""
-            QWidget {{
-                background-color: {Colors.CARD_BG.format(alpha=180)};
-                border: 2px dashed {Colors.BORDER};
-                border-radius: 6px;
-                {get_font_family_css()}
+        self.setStyleSheet(
+            f"""
+            QWidget#workdirCard {{
+                background-color: {Colors.CARD_BG.format(alpha=200)};
+                border: 1px solid {Colors.BORDER};
+                border-radius: 8px;
             }}
-            QWidget:hover {{
-                border-color: {Colors.BORDER_ACCENT};
-                background-color: {Colors.CARD_BG.format(alpha=180)};
-            }}
-        """)
-
+            """
+        )
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(10, 10, 10, 10)
-        layout.setSpacing(4)
+        layout.setContentsMargins(12, 10, 12, 10)
+        layout.setSpacing(6)
 
-        icon_label = BodyLabel("📁", self)
-        icon_label.setAlignment(Qt.AlignCenter)
-        icon_label.setStyleSheet(font_size_css(20))
-        layout.addWidget(icon_label)
+        head = QHBoxLayout()
+        head.setSpacing(6)
+        title = QLabel("工作目录", self)
+        title.setStyleSheet(
+            f"color: {Colors.TEXT_PRIMARY}; font-weight: 600;"
+            f" {get_font_family_css()} {font_size_css(13)}"
+        )
+        head.addWidget(title)
+        self._git_tag = QLabel("非 git", self)
+        self._git_tag.setToolTip("该目录不是 git 仓库，因此不提供工作树管理")
+        self._git_tag.setStyleSheet(
+            f"color: {Colors.TEXT_MUTED}; background: {Colors.HOVER_BG};"
+            f" {font_size_css(10)} padding: 1px 6px; border-radius: 3px;"
+        )
+        self._git_tag.setVisible(not self._is_git)
+        head.addWidget(self._git_tag)
+        head.addStretch()
 
-        label = BodyLabel("拖拽文件到此处 或 点击选择文件", self)
-        label.setAlignment(Qt.AlignCenter)
-        label.setStyleSheet(f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} {font_size_css(11)}")
-        layout.addWidget(label)
+        change = QLabel("更换", self)
+        change.setCursor(Qt.PointingHandCursor)
+        change.setStyleSheet(
+            f"color: {Colors.TEXT_ACCENT}; font-weight: 600;"
+            f" {get_font_family_css()} {font_size_css(11)}"
+        )
+        change.setToolTip("选择其它文件夹作为工作目录")
+        change.mousePressEvent = lambda e: self._on_change()
+        head.addWidget(change)
+        layout.addLayout(head)
 
-        self._is_drag_over = False
+        self._path_label = QLabel(self._workdir or "（未设置）", self)
+        self._path_label.setWordWrap(True)
+        self._path_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self._path_label.setStyleSheet(
+            f"color: {Colors.TEXT_SECONDARY};"
+            f" {get_font_family_css()} {font_size_css(11)}"
+        )
+        layout.addWidget(self._path_label)
 
-    def dragEnterEvent(self, event: QDragEnterEvent):
-        if event.mimeData().hasUrls():
-            event.acceptProposedAction()
-            self._is_drag_over = True
-            self.update()
+    def _on_change(self):
+        from PyQt5.QtWidgets import QFileDialog
 
-    def dragLeaveEvent(self, event):
-        self._is_drag_over = False
-        self.update()
+        start = self._workdir if self._workdir and os.path.isdir(self._workdir) else ""
+        folder = QFileDialog.getExistingDirectory(self, "选择工作目录", start, QFileDialog.ShowDirsOnly)
+        if folder:
+            self.changed.emit(folder)
 
-    def dropEvent(self, event: QDropEvent):
-        self._is_drag_over = False
-        self.update()
+    def set_workdir(self, workdir: str):
+        self._workdir = workdir or ""
+        self._path_label.setText(self._workdir or "（未设置）")
 
-        file_paths = []
-        if event.mimeData().hasUrls():
-            for url in event.mimeData().urls():
-                path = url.toLocalFile()
-                if path and os.path.isfile(path):
-                    file_paths.append(path)
-
-        if file_paths:
-            self.files_dropped.emit(file_paths)
-
-    def mousePressEvent(self, event):
-        """点击打开文件选择对话框"""
-        if event.button() == Qt.LeftButton:
-            files, _ = QFileDialog.getOpenFileNames(
-                self, "选择关键文档", "", "所有文件 (*.*);;文本文件 (*.txt *.md);;代码文件 (*.py *.js *.ts)"
-            )
-            if files:
-                self.files_dropped.emit(files)
+    def set_is_git(self, is_git: bool):
+        """更新 git 归属标记（探测结果回来后调用）"""
+        self._is_git = bool(is_git)
+        self._git_tag.setVisible(not self._is_git)
 
 
 class SystemWorktreePage(QWidget):
-    """工作树页（系统插件版）：关键文档 + git 工作树切换
-
-    通过 context 接收数据与回调：
-    - context["backend"]: 当前窗口 backend（memory_manager 数据源）
-    - context["working_dir_changed_callback"]: 工作目录变更回调 (path: str) -> None
-      （宿主转发给活跃窗口，同步实例缓存/分支标签/团队广播）
-
-    宿主契约：
-    - ``set_project(project, workdir=None)``：接收当前项目与工作目录并刷新列表
-    - ``refresh_style()``：主题刷新
-    """
+    """工作树页：主仓库卡片 + 子工作树列表"""
 
     workingDirChanged = pyqtSignal(str)  # 工作目录路径，空字符串=清除
 
     def __init__(self, parent=None, context: Optional[Dict[str, object]] = None):
         super().__init__(parent)
         self._context = context or {}
-        self._memory_manager = None  # 延迟：经 context["backend"] 获取
+        self._memory_manager = None
         self._current_project = "默认项目"
         # 多窗口隔离：实例级工作目录缓存（{project: workdir_path}）
-        # 优先级：实例缓存 > DB；DB 写入仅作为新窗口的默认恢复值
         self._instance_workdir: Dict[str, str] = {}
-        self._search_filter = ""  # 搜索过滤文本
-        # 工具线程创建/删除工作树 → 信号桥跨线程通知 → 主线程刷新
+        self._section: WorktreeSectionWidget = None
+        self._workdir_card: WorkdirCard = None
+        self._body: QWidget = None
+        self._empty_hint: QLabel = None
+        self._repo_info = None
+        # 后台探测去重：每次重建自增，回来时对不上就丢弃（防切项目串数据）
+        self._request_id = 0
+        self._load_signals = None
+        self._load_job = None
         self._connect_change_bridge()
         self._init_ui()
+
+    # ── 宿主/插件的连接 ──
 
     def _connect_change_bridge(self) -> None:
         """连接工具变更信号桥（emit 在后台线程，本槽在主线程执行）"""
@@ -475,7 +232,6 @@ class SystemWorktreePage(QWidget):
             logger.warning(f"[worktree-manager] 工具变更信号桥连接失败（工具操作后不自动刷新）: {e}")
 
     def _on_tool_worktree_changed(self, summary: str) -> None:
-        """工具线程创建/删除工作树后刷新列表（主线程槽）"""
         logger.info(f"[worktree-manager] 工具操作工作树，刷新页面: {summary}")
         self.refresh_data()
 
@@ -499,27 +255,17 @@ class SystemWorktreePage(QWidget):
             except Exception:
                 pass
 
-    def set_project(self, project: str, workdir: Optional[str] = None):
-        """设置当前项目
+    # ── 数据 ──
 
-        Args:
-            project: 项目名
-            workdir: 可选 — 由调用方（main_widget）算好的工作目录。
-                     传入后会写入实例缓存，避免内部重复查询 DB。
-        """
+    def set_project(self, project: str, workdir: Optional[str] = None):
+        """设置当前项目与工作目录并刷新"""
         if workdir is not None:
             self._instance_workdir[project] = workdir or ""
-        if self._current_project != project:
-            self._current_project = project
-        # 强制刷新关键文档
-        self._load_key_documents()
+        self._current_project = project or "默认项目"
+        self._rebuild()
 
     def refresh_data(self) -> None:
-        """数据自拉入口（工作台通用页协议，宿主 ``refresh_current_page_data`` 调用）
-
-        面板不再向页面推送 project/workdir（原 ``WorkbenchPanel.update_project``）：
-        页面自己向当前活跃窗口取 ``_current_project`` 与实例缓存 ``_current_workdir``。
-        """
+        """数据自拉入口（工作台通用页协议）"""
         project = ""
         workdir: Optional[str] = None
         try:
@@ -533,18 +279,11 @@ class SystemWorktreePage(QWidget):
             pass
         self.set_project(project, workdir)
 
-    def _get_effective_workdir(self, project: str):
-        """获取有效工作目录（多窗口隔离：实例缓存优先，回退 DB）
-
-        实例缓存 _instance_workdir 记录了当前窗口用户的选择，
-        优先于 DB 中其他窗口可能写入的值。
-        DB 值仅作为首次启动时的回退默认值。
-        """
-        # 实例缓存优先（多窗口隔离：保持自身选择）
+    def _get_effective_workdir(self, project: str) -> Optional[str]:
+        """有效工作目录（实例缓存优先，回退 DB）"""
         workdir = self._instance_workdir.get(project)
         if workdir is not None:
-            return workdir if workdir else None
-        # 首次启动，从 DB 读取默认值（新窗口恢复用）
+            return workdir or None
         memory_mgr = self._get_memory_manager()
         if memory_mgr:
             db_workdir = memory_mgr.get_working_directory(project)
@@ -553,631 +292,265 @@ class SystemWorktreePage(QWidget):
             return db_workdir
         return None
 
+    # ── UI ──
+
     def _init_ui(self):
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        # 页头：标题 + 仓库路径
+        header = QWidget(self)
+        header_layout = QHBoxLayout(header)
+        header_layout.setContentsMargins(12, 10, 12, 6)
+        header_layout.setSpacing(8)
+
+        self._title_label = BodyLabel("工作树", header)
         Colors.refresh()
-        self.setStyleSheet(f"""
-            QWidget {{
-                background: transparent;
-            }}
-            QListWidget {{
-                background-color: {Colors.CARD_BG.format(alpha=180)};
-                border: 1px solid {Colors.BORDER};
-                color: {Colors.TEXT_PRIMARY};
-                border-radius: 6px;
-            }}
-            QListWidget::item {{
-                padding: 0;
-                border-bottom: 1px solid {Colors.BORDER};
-            }}
-            QListWidget::item:selected {{
-                background-color: {Colors.SELECTED_BG};
-            }}
-            BodyLabel {{
-                color: {Colors.TEXT_PRIMARY};
-                {get_font_family_css()}
-            }}
-            QTextEdit, QPlainTextEdit {{
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
-                    stop:0 {Colors.INPUT_BG_START}, stop:1 {Colors.INPUT_BG_END});
-                border: 1px solid {Colors.INPUT_BORDER};
-                color: {Colors.INPUT_TEXT};
-                border-radius: 6px;
-                padding: 8px;
-                {get_font_family_css()} {font_size_css(13)}
-            }}
-        """)
-
-        main_layout = QVBoxLayout(self)
-        main_layout.setContentsMargins(0, 0, 0, 0)
-        main_layout.setSpacing(6)
-
-        # 内容区域容器
-        self.content_stack = QWidget(self)
-        stack_layout = QVBoxLayout(self.content_stack)
-        stack_layout.setContentsMargins(0, 0, 0, 0)
-        stack_layout.setSpacing(0)
-
-        # 关键文档 + 工作树（单页直出）
-        self._tab_docs = self._create_docs_tab()
-        stack_layout.addWidget(self._tab_docs)
-
-        main_layout.addWidget(self.content_stack, 1)
-
-    def _create_docs_tab(self) -> QWidget:
-        """创建关键文档 Tab"""
-        widget = QWidget()
-        layout = QVBoxLayout(widget)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(6)
-
-        # 文档容器（带虚线边框，内部含工具栏行+列表）
-        docs_container = QWidget(widget)
-        Colors.refresh()
-        docs_container.setStyleSheet(f"""
-            QWidget#docsContainer {{
-                background-color: {Colors.CARD_BG.format(alpha=180)};
-                border: 2px dashed {Colors.BORDER};
-                border-radius: 6px;
-            }}
-        """)
-        docs_container.setObjectName("docsContainer")
-        docs_layout = QGridLayout(docs_container)
-        docs_layout.setContentsMargins(8, 4, 8, 4)
-        docs_layout.setSpacing(4)
-        docs_layout.setRowStretch(0, 0)  # 工具栏行
-        docs_layout.setRowStretch(1, 1)  # 列表行
-
-        # ── 顶部工具栏行 ──
-        toolbar = QWidget(docs_container)
-        toolbar.setStyleSheet("background: transparent;")
-        toolbar_layout = QHBoxLayout(toolbar)
-        toolbar_layout.setContentsMargins(0, 0, 0, 0)
-        toolbar_layout.setSpacing(4)
-
-        # 左侧标题+数量
-        self._docs_header_label = BodyLabel("📁 关键文档", toolbar)
-        self._docs_header_label.setStyleSheet(
-            f"color: {Colors.TEXT_PRIMARY}; background: transparent; {font_size_css(12)}"
+        self._title_label.setStyleSheet(
+            f"color: {Colors.TEXT_PRIMARY}; font-weight: 600;"
+            f" {get_font_family_css()} {font_size_css(14)}"
         )
-        toolbar_layout.addWidget(self._docs_header_label)
+        header_layout.addWidget(self._title_label)
+        header_layout.addStretch()
+        root.addWidget(header)
 
-        self._docs_count_label = BodyLabel("", toolbar)
-        self._docs_count_label.setStyleSheet(
-            f"color: {Colors.TEXT_MUTED}; background: transparent; {font_size_css(11)}"
+        # 内容容器
+        self._body = QWidget(self)
+        self._body_layout = QVBoxLayout(self._body)
+        self._body_layout.setContentsMargins(12, 0, 12, 12)
+        self._body_layout.setSpacing(8)
+        self._body_layout.addStretch(1)
+        root.addWidget(self._body, 1)
+
+        # 空态提示（非 git 仓库 / 无工作目录）
+        self._empty_hint = BodyLabel("", self)
+        self._empty_hint.setAlignment(Qt.AlignCenter)
+        self._empty_hint.setWordWrap(True)
+        self._empty_hint.setStyleSheet(
+            f"background: transparent; color: {Colors.TEXT_MUTED};"
+            f" {get_font_family_css()} {font_size_css(13)} padding: 24px;"
         )
-        toolbar_layout.addWidget(self._docs_count_label)
+        self._empty_hint.setVisible(False)
+        self._body_layout.insertWidget(0, self._empty_hint, 0)
 
-        toolbar_layout.addStretch()
+        self._section = None
+        self._branches: list = []
+        # 删除进行中行/section 可能被重建销毁（其完成回调发不出信号），兜底刷新
+        _DELETE_DONE.done.connect(lambda _p: self.refresh_data())
 
-        # 紧凑图标按钮
-        self.add_doc_btn = TransparentToolButton(FluentIcon.ADD, toolbar)
-        self.add_doc_btn.setFixedSize(24, 24)
-        self.add_doc_btn.setToolTip("添加文件")
-        self.add_doc_btn.clicked.connect(self._on_add_file_clicked)
-        toolbar_layout.addWidget(self.add_doc_btn)
+    def _clear_body(self):
+        for attr in ("_section", "_workdir_card"):
+            w = getattr(self, attr, None)
+            if w is not None:
+                w.hide()
+                w.deleteLater()
+                setattr(self, attr, None)
+        self._empty_hint.setVisible(False)
 
-        self.add_folder_btn = TransparentToolButton(FluentIcon.FOLDER, toolbar)
-        self.add_folder_btn.setFixedSize(24, 24)
-        self.add_folder_btn.setToolTip("添加文件夹")
-        self.add_folder_btn.clicked.connect(self._on_add_folder_clicked)
-        toolbar_layout.addWidget(self.add_folder_btn)
+    def _rebuild(self):
+        """按当前项目/工作目录重建内容（git 探测走后台线程，主线程不阻塞）"""
+        self._clear_body()
+        self._repo_info = None
 
-        # 添加 URL 链接按钮
-        self.add_url_btn = TransparentToolButton(FluentIcon.LINK, toolbar)
-        self.add_url_btn.setFixedSize(24, 24)
-        self.add_url_btn.setToolTip("添加 URL 链接")
-        self.add_url_btn.clicked.connect(self._on_add_url_clicked)
-        toolbar_layout.addWidget(self.add_url_btn)
+        project = self._current_project
+        workdir = self._get_effective_workdir(project)
 
-        docs_layout.addWidget(toolbar, 0, 0)
-
-        # ── 文档列表（无边框，由外层容器统一虚线边框）──
-        self.docs_list = DocDropListWidget(docs_container)
-        self.docs_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.docs_list.setResizeMode(ListWidget.Adjust)
-        Colors.refresh()
-        self.docs_list.setStyleSheet(f"""
-            QListWidget {{
-                background: transparent;
-                border: none;
-                color: {Colors.TEXT_PRIMARY};
-                {get_font_family_css()}
-            }}
-            QListWidget::item {{
-                padding: 0;
-                border-bottom: 1px solid {Colors.BORDER};
-            }}
-        """)
-        self.docs_list.files_dropped.connect(self._on_files_dropped)
-        docs_layout.addWidget(self.docs_list, 1, 0)
-
-        # 空列表提示（叠加在列表中央）
-        self._docs_empty_hint = BodyLabel("拖拽项目目录到此并选择设置为根目录即可开始项目开发", docs_container)
-        self._docs_empty_hint.setAlignment(Qt.AlignCenter)
-        self._docs_empty_hint.setWordWrap(True)
-        self._docs_empty_hint.setAttribute(Qt.WA_TransparentForMouseEvents, True)
-        Colors.refresh()
-        self._docs_empty_hint.setStyleSheet(
-            f"background: transparent; color: {Colors.TEXT_MUTED}; {get_font_family_css()} {font_size_css(15)} padding: 20px;"
-        )
-        self._docs_empty_hint.setVisible(False)
-        docs_layout.addWidget(self._docs_empty_hint, 1, 0, Qt.AlignCenter)
-
-        layout.addWidget(docs_container, 1)
-
-        return widget
-
-    def _on_add_file_clicked(self):
-        """点击添加文件按钮"""
-        from PyQt5.QtWidgets import QFileDialog
-
-        files, _ = QFileDialog.getOpenFileNames(self, "选择关键文档", "", "所有文件 (*.*)")
-        if files:
-            self._on_files_dropped(files)
-
-    def _on_add_folder_clicked(self):
-        """点击添加文件夹按钮"""
-        from PyQt5.QtWidgets import QFileDialog
-
-        folder = QFileDialog.getExistingDirectory(self, "选择文件夹", "", QFileDialog.ShowDirsOnly)
-        if folder:
-            self._on_files_dropped([folder])
-
-    def _on_add_url_clicked(self):
-        """点击添加 URL 链接按钮"""
-        dialog = SingleInputDialog(
-            title="🔗 添加 URL 链接",
-            hint="请输入网页链接，添加为关键文档引用",
-            placeholder="https://example.com",
-            default_text="https://",
-            confirm_text="添加",
-            cancel_text="取消",
-            parent=self.window(),
-        )
-        dialog.confirmed.connect(self._on_url_confirmed)
-        dialog.exec_()
-
-    def _on_url_confirmed(self, url: str):
-        """URL 确认后的处理"""
-        url = url.strip()
-        # 补全协议前缀
-        if not (url.startswith("http://") or url.startswith("https://")):
-            url = "https://" + url
-        # 验证 URL 基本格式
-        if "." not in url.replace("https://", "").replace("http://", ""):
-            from qfluentwidgets import InfoBar
-
-            # 挂到 tab 管理器顶层窗口（未就绪时兜底卡片所在窗口）
-            _host = _caps("window.host")
-            bar_parent = (_host() if _host else None) or self.window()
-            InfoBar.warning(
-                title="URL 格式不正确", content="请输入有效的网页链接（如 https://example.com）", parent=bar_parent
-            )
-            return
-        memory_mgr = self._get_memory_manager()
-        if memory_mgr:
-            memory_mgr.add_key_document(self._current_project, url, "manual")
-        self._load_key_documents()
-
-    def refresh_style(self):
-        """响应主题切换：刷新所有样式"""
-        from loguru import logger
-
-        from app.utils.theme_manager import theme_manager
-
-        Colors.refresh()
-        logger.debug(
-            f"[WorktreePage] refresh_style: theme_id={theme_manager.get_current_theme_id()} "
-            f"card_bg={str(Colors.CARD_BG)[:48]}"
-        )
-        self.setStyleSheet(f"""
-            QWidget {{
-                background: transparent;
-            }}
-            QListWidget {{
-                background-color: {Colors.CARD_BG.format(alpha=180)};
-                border: 1px solid {Colors.BORDER};
-                color: {Colors.TEXT_PRIMARY};
-                border-radius: 6px;
-            }}
-            QListWidget::item {{
-                padding: 0;
-                border-bottom: 1px solid {Colors.BORDER};
-            }}
-            QListWidget::item:selected {{
-                background-color: {Colors.SELECTED_BG};
-            }}
-            BodyLabel {{
-                color: {Colors.TEXT_PRIMARY};
-                {get_font_family_css()}
-            }}
-            QTextEdit, QPlainTextEdit {{
-                background-color: {Colors.CARD_BG.format(alpha=180)};
-                border: 1px solid {Colors.BORDER};
-                color: {Colors.TEXT_PRIMARY};
-                border-radius: 6px;
-                padding: 8px;
-                {get_font_family_css()} {font_size_css(13)}
-            }}
-        """)
-        # 刷新子组件的独立样式
-        self._refresh_child_styles()
-        container = self.findChild(QWidget, "docsContainer")
-        if container is not None:
-            logger.debug(
-                f"[WorktreePage] docsContainer qss head={' '.join(container.styleSheet().split())[:80]}"
-            )
-
-    def _refresh_child_styles(self):
-        """刷新各个子组件独立样式（不继承自父级的）"""
-        Colors.refresh()
-        # 文档容器（虚线边框）
-        docs_container = self.findChild(QWidget, "docsContainer")
-        if docs_container:
-            docs_container.setStyleSheet(f"""
-                QWidget#docsContainer {{
-                    background-color: {Colors.CARD_BG.format(alpha=180)};
-                    border: 2px dashed {Colors.BORDER};
-                    border-radius: 6px;
-                }}
-            """)
-        # 文档列表（无边框，透明背景）
-        if hasattr(self, "docs_list"):
-            self.docs_list.setStyleSheet(f"""
-                QListWidget {{
-                    background: transparent;
-                    border: none;
-                    color: {Colors.TEXT_PRIMARY};
-                    {get_font_family_css()}
-                }}
-                QListWidget::item {{
-                    padding: 0;
-                    border-bottom: 1px solid {Colors.BORDER};
-                }}
-            """)
-        # 文档工具栏标题
-        if hasattr(self, "_docs_header_label"):
-            self._docs_header_label.setStyleSheet(
-                f"color: {Colors.TEXT_PRIMARY}; background: transparent; {font_size_css(12)}"
-            )
-        if hasattr(self, "_docs_count_label"):
-            self._docs_count_label.setStyleSheet(
-                f"color: {Colors.TEXT_MUTED}; background: transparent; {font_size_css(11)}"
-            )
-        # 空态提示（构造期固化 TEXT_MUTED，此处重设）
-        if hasattr(self, "_docs_empty_hint"):
-            self._docs_empty_hint.setStyleSheet(
-                f"background: transparent; color: {Colors.TEXT_MUTED};"
-                f" {get_font_family_css()} {font_size_css(15)} padding: 20px;"
-            )
-        # 列表条目（setItemWidget 子件不吃 QListWidget QSS，需逐条重设）
-        for i in range(self.docs_list.count()):
-            item_w = self.docs_list.itemWidget(self.docs_list.item(i))
-            if item_w is not None and hasattr(item_w, "refresh_style"):
-                item_w.refresh_style()
-
-    # ==================== 项目笔记操作 ====================
-
-    def _load_key_documents(self, workdir_override: Optional[str] = None):
-        """加载关键文档（过滤掉 git_worktree 条目，但保留根目录视觉效果）
-
-        Args:
-            workdir_override: 调用方已算好的工作目录；非 None 时跳过 _get_effective_workdir 查询
-        """
-        self.docs_list.clear()
-        memory_mgr = self._get_memory_manager()
-        if not memory_mgr:
+        if not workdir:
+            self._mount_workdir_card("", is_git=False)
+            self._show_empty("还没有设置工作目录。\n点击上方「更换」选择任意文件夹即可开始。")
             return
 
-        all_docs = memory_mgr.get_key_documents(self._current_project)
+        if not os.path.isdir(workdir):
+            self._mount_workdir_card(workdir, is_git=False)
+            self._show_empty(f"工作目录不存在：\n{workdir}\n\n点击上方「更换」另选一个文件夹。")
+            return
 
-        # 获取实际工作目录（多窗口隔离：实例缓存优先）
-        actual_wd = (
-            (workdir_override or None)
-            if workdir_override is not None
-            else self._get_effective_workdir(self._current_project)
-        )
+        # 目录有效但 git 归属未知：先挂卡片（is_git 待探测结果修正），再后台探测
+        self._mount_workdir_card(workdir, is_git=True)
 
-        # 预检：当前工作目录是否指向 worktree（需要在循环前确定，用于后续 git 检测判断）
-        is_worktree_active = False
-        if actual_wd:
-            is_worktree_active = any(
-                d.get("file_path") == actual_wd and d.get("added_by") == "git_worktree" for d in all_docs
-            )
+        # 探测中：占位提示（避免空白页误以为没数据）
+        self._request_id += 1
+        req = self._request_id
+        self._show_empty("正在读取仓库信息…")
 
-        # 查找原始 git 仓库路径（用于 worktree 模式下的显示和恢复）
-        # 注意：worktree 本身不能作为 original_repo_path，必须是实际的 git 仓库文件夹
-        # 优先级 1：DB 中 is_working_dir=1 的非 worktree 目录（用户手动设定的根目录）
-        # 优先级 2：is_worktree_active 时，第一个非 worktree 的 git 仓库目录（兼容无根目录场景）
-        original_repo_path = None
-        if actual_wd:
-            # 第一优先级：DB 中标记为 is_working_dir 的非 worktree 目录(即用户手动设定的根目录)
-            for d in all_docs:
-                if d.get("added_by") == "git_worktree":
-                    continue
-                if d.get("is_working_dir", False):
-                    try:
-                        if GitWorktreeDetector.detect_git(d.get("file_path", "")):
-                            original_repo_path = d["file_path"]
-                            break
-                    except Exception:
-                        pass
-            # 第二优先级：worktree 激活时，取第一个非 worktree 的 git 仓库目录
-            if original_repo_path is None and is_worktree_active:
-                for d in all_docs:
-                    if d.get("added_by") == "git_worktree":
-                        continue
-                    try:
-                        if GitWorktreeDetector.detect_git(d.get("file_path", "")):
-                            original_repo_path = d["file_path"]
-                            break
-                    except Exception:
-                        pass
+        signals = _PageLoadSignals()
+        signals.finished.connect(lambda payload, r=req: self._on_repo_probed(r, payload, workdir, project))
+        job = _PageLoadJob(workdir, signals)
+        self._load_signals = signals
+        self._load_job = job
+        _PAGE_POOL.start(job)
 
-        # 过滤掉 git_worktree（不显示在 UI 中）
-        docs = [d for d in all_docs if d.get("added_by") != "git_worktree"]
-
-        # 搜索过滤
-        if self._search_filter:
-            keyword = self._search_filter.lower()
-            docs = [
-                d
-                for d in docs
-                if keyword in d.get("file_name", "").lower() or keyword in d.get("file_path", "").lower()
-            ]
-
-        # 工作目录置顶（如果 worktree 激活则原始仓库置顶，否则按 DB 标记）
-        if is_worktree_active and original_repo_path:
-            docs.sort(key=lambda d: (0 if d.get("file_path") == original_repo_path else 1, d.get("added_at", "")))
-        else:
-            docs.sort(key=lambda d: (0 if d.get("is_working_dir") else 1, d.get("added_at", "")))
-
-        inserted_worktree = False
-        self._original_folder_for_worktree = None
-        for doc in docs:
-            doc_id = doc.get("id", "")
-            file_name = doc.get("file_name", "")
-            file_path = doc.get("file_path", "")
-            added_by = doc.get("added_by", "manual")
-            # 根目录标记：如果 worktree 激活且是原始仓库，显示为根目录
-            db_is_wd = doc.get("is_working_dir", False)
-            show_as_wd = db_is_wd or (is_worktree_active and file_path == original_repo_path)
-
-            item = QListWidgetItem()
-            item.setSizeHint(self._get_doc_item_size())
-            widget = KeyDocumentItemWidget(
-                doc_id,
-                file_name,
-                file_path,
-                added_by,
-                is_working_dir=show_as_wd,
-            )
-            # worktree 激活时：原仓库虽不是根目录，但需要 _repo_info 来显示 worktree 区域
-            if is_worktree_active and file_path == original_repo_path and not widget._repo_info:
-                widget._repo_info = GitWorktreeDetector.get_repo_info(file_path)
-            widget.removed.connect(self._remove_key_document)
-            widget.open_folder.connect(self._open_folder)
-            widget.setAsWorkingDir.connect(self._set_as_working_directory)
-            widget.worktreeChanged.connect(self._on_worktree_changed)
-            self.docs_list.addItem(item)
-            self.docs_list.setItemWidget(item, widget)
-
-            # 在第一个 git 仓库文件夹后插入 worktree 树（仅当有活跃的工作目录）
-            has_active_wd = actual_wd is not None and actual_wd != "clear"
-            if has_active_wd and not inserted_worktree and widget._repo_info:
-                inserted_worktree = True
-                self._original_folder_for_worktree = file_path
-                # 先建 widget，高度问它要（单一事实源；自算公式会与真实行数脱钩）
-                wt_widget = WorktreeSectionWidget(
-                    widget._repo_info,
-                    file_path,
-                    self,
-                    current_workdir=actual_wd,
-                    project=self._current_project,
+    def _on_repo_probed(self, request_id: int, payload: dict, workdir: str, project: str):
+        """后台探测完成（主线程）：落地 UI 或空态"""
+        if request_id != self._request_id:
+            return  # 过期结果：用户已切到别的项目/工作目录
+        if not payload.get("ok"):
+            reason = payload.get("reason", "")
+            is_git = reason == "no_info"  # 是 git，只是读不出信息
+            self._remount_workdir_card(workdir, is_git=is_git)
+            if reason == "not_git":
+                self._show_empty(
+                    "该目录不是 git 仓库，无法管理工作树。\n"
+                    "工作目录已生效，可正常使用；如需工作树管理，请「更换」到 git 仓库目录。"
                 )
-                wt_item = QListWidgetItem()
-                wt_item.setSizeHint(QSize(0, wt_widget.content_height()))
-                wt_widget.sizeChanged.connect(
-                    lambda h, item=wt_item: (
-                        item.setSizeHint(QSize(0, h)),
-                        self.docs_list.update(),
-                    )
-                )
-                wt_widget.worktreeSwitched.connect(self._on_worktree_changed)
-                wt_widget.worktreeDeleted.connect(self._on_worktree_deleted)
-                wt_widget.workingDirRestored.connect(self._on_workdir_restored)
-                self.docs_list.addItem(wt_item)
-                self.docs_list.setItemWidget(wt_item, wt_widget)
-
-        # 更新文件计数
-        has_visible_items = self.docs_list.count() > 0
-        self._docs_empty_hint.setVisible(not has_visible_items)
-        if hasattr(self, "_docs_count_label"):
-            count = len(docs)
-            self._docs_count_label.setText(f"({count})" if count > 0 else "")
-
-    def _get_doc_item_size(self):
-        from PyQt5.QtCore import QSize
-
-        # 宽度随列表自适应，不设定固定宽度避免溢出
-        return QSize(0, 44)
-
-    def _on_files_dropped(self, file_paths: list):
-        """处理文件拖拽/选择"""
-        memory_mgr = self._get_memory_manager()
-        if not memory_mgr:
+            elif reason == "no_info":
+                self._show_empty(f"读取仓库信息失败：\n{payload.get('git_root', workdir)}")
+            else:
+                self._show_empty(f"读取仓库信息失败：\n{reason}")
             return
 
-        for path in file_paths:
-            memory_mgr.add_key_document(self._current_project, path, "manual")
+        repo_info = payload["info"]
+        # original_folder 必须是主仓库根（worktree 缓存失效/刷新都按它做 key）
+        main_root = payload.get("main_root") or repo_info.root
+        branches = payload.get("branches") or []
+        self._empty_hint.setVisible(False)
+        self._remount_workdir_card(workdir, is_git=True)
+        self._repo_info = repo_info
+        self._branches = list(branches)
+        self._mount_section(repo_info, main_root, workdir, project, branches)
 
-        self._load_key_documents()
+    def _mount_section(self, repo_info, main_root: str, workdir: str, project: str, branches: list):
+        """挂载工作树 section（旧实例同帧替换：新先插入、旧再 deleteLater，无空白帧）"""
+        old = self._section
+        section = WorktreeSectionWidget(
+            repo_info,
+            original_folder=main_root,
+            parent=self._body,
+            current_workdir=workdir,
+            project=project,
+            branches=branches,
+        )
+        section.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        section.setFixedHeight(section.content_height())
+        section.sizeChanged.connect(section.setFixedHeight)
+        section.worktreeSwitched.connect(self._on_worktree_switched)
+        section.workingDirRestored.connect(self._on_workdir_restored)
+        section.worktreeDeleted.connect(self._on_worktree_deleted)
+        section.repoInfoRefreshed.connect(self._on_section_info_refreshed)
+        # 拉伸因子 0：多余高度留给尾部弹性，不能被均摊到行间距上
+        self._body_layout.insertWidget(1, section, 0)
+        self._section = section
+        if old is not None and old is not section:
+            old.hide()
+            old.deleteLater()
 
-    def _remove_key_document(self, doc_id: str):
-        """移除关键文档（直接移除列表项，避免全量重建导致的卡顿）"""
+    def _mount_workdir_card(self, workdir: str, is_git: bool):
+        """在 body 顶部挂工作目录卡片（索引 0，始终最上）"""
+        card = WorkdirCard(workdir, is_git, parent=self._body)
+        card.changed.connect(self._on_workdir_changed)
+        self._body_layout.insertWidget(0, card)
+        self._workdir_card = card
+
+    def _remount_workdir_card(self, workdir: str, is_git: bool):
+        """探测结果回来后更新卡片的 git 标记（原地更新，不重建：
+        重建会打乱 body 内控件顺序，且 deleteLater 期间新旧控件会重叠一帧）"""
+        if self._workdir_card is None:
+            self._mount_workdir_card(workdir, is_git)
+            return
+        self._workdir_card.set_workdir(workdir)
+        self._workdir_card.set_is_git(is_git)
+
+    def _show_empty(self, text: str):
+        self._empty_hint.setText(text)
+        self._empty_hint.setVisible(True)
+
+    def _on_workdir_changed(self, path: str):
+        """用户更换工作目录：持久化 + 上抛宿主 + 重建（可能从非 git 变 git）"""
+        if not path:
+            return
+        project = self._current_project
         memory_mgr = self._get_memory_manager()
-        if memory_mgr:
-            memory_mgr.remove_key_document(doc_id)
+        if memory_mgr is not None:
+            try:
+                memory_mgr.set_working_directory(project, path)
+            except Exception as e:
+                logger.warning(f"[worktree-manager] 持久化工作目录失败: {e}")
+        self._instance_workdir[project] = path
+        self._emit_working_dir(path)
+        self._rebuild()
 
-        # 检查移除的是否为当前工作目录，若是则同步清除 workdir
-        is_removed_wd = False
+    # ── 交互 ──
 
-        # 直接在列表中查找并移除对应项，不走 _load_key_documents() 全量重建
-        for i in range(self.docs_list.count()):
-            item = self.docs_list.item(i)
-            widget = self.docs_list.itemWidget(item)
-            if hasattr(widget, "doc_id") and widget.doc_id == doc_id:
-                # 检查是否为工作目录
-                if getattr(widget, "_is_working_dir", False) or getattr(
-                    widget, "file_path", ""
-                ) == self._get_effective_workdir(self._current_project):
-                    is_removed_wd = True
-                taken = self.docs_list.takeItem(i)
-                if taken:
-                    widget.deleteLater()  # 主动释放 widget
-                    del taken  # 释放 item
-                break
+    def _on_section_info_refreshed(self, repo_info, branches):
+        """section 后台刷新完成：同步页面缓存（切换即时重建的数据源）
 
-        # 如果移除了工作目录，同步清除 workdir 状态
-        if is_removed_wd:
-            self._instance_workdir[self._current_project] = ""
-            if memory_mgr:
-                memory_mgr.set_working_directory(self._current_project, "clear")
-            self._emit_working_dir("")
-
-        # 更新计数（只计 KeyDocumentItemWidget，排除 worktree 区域）
-        doc_count = 0
-        for i in range(self.docs_list.count()):
-            w = self.docs_list.itemWidget(self.docs_list.item(i))
-            if isinstance(w, KeyDocumentItemWidget):
-                doc_count += 1
-        self._docs_count_label.setText(f"({doc_count})" if doc_count > 0 else "")
-        self._docs_empty_hint.setVisible(doc_count == 0)
-
-    def _set_as_working_directory(self, file_path: str):
-        """设置为工作目录（再次点击取消）
-
-        多窗口隔离：DB 写入仅作为新窗口的默认恢复值；
-        当前窗口通过 _instance_workdir 实例缓存保持自身选择独立。
+        不触发重建：section 已自行渲染；这里只同步数据，否则新建工作树后
+        自动切换会用旧缓存把新列表覆盖回去（表现为建完不刷新）。
         """
-        memory_mgr = self._get_memory_manager()
-        if not memory_mgr:
-            return
-        # 检查当前是否已经是工作目录（用实例缓存判断，不受其他窗口 DB 写入影响）
-        current_wd = self._get_effective_workdir(self._current_project)
-        if current_wd == file_path:
-            # 取消设置：更新实例缓存 + 写入 DB（新窗口默认值）
-            self._instance_workdir[self._current_project] = ""
-            memory_mgr.set_working_directory(self._current_project, "clear")
-            self._emit_working_dir("")
-        else:
-            # 设置工作目录：更新实例缓存 + 写入 DB（新窗口默认值）
-            self._instance_workdir[self._current_project] = file_path
-            memory_mgr.set_working_directory(self._current_project, file_path)
-            self._emit_working_dir(file_path)
-        self._load_key_documents()
-
-    def _on_worktree_changed(self, original_folder: str, worktree_path: str):
-        """Worktree 切换：写入 DB（新窗口默认值）+ 切换 workdir（UI 层过滤不显示 git_worktree 条目）
-
-        多窗口隔离：DB 写入仅作为新窗口的默认恢复值；
-        当前窗口通过 workingDirChanged 信号通知 main_widget 更新实例缓存。
-
-        重要：在设置 worktree 为工作目录时，必须保留原有根目录的 is_working_dir 标记，
-        否则 _load_key_documents 会因遍历顺序将根目录标记错误地分配给其他目录。
-        """
-        memory_mgr = self._get_memory_manager()
-        if not memory_mgr:
-            return
-
-        # 先记住 DB 中当前的工作目录（即用户手动设定的根目录）
-        db_wd = memory_mgr.get_working_directory(self._current_project)
-
-        # 必须写入 DB，否则 set_working_directory 找不到路径
-        # added_by="git_worktree" 标记，UI 显示时过滤掉
-        memory_mgr.add_key_document(self._current_project, worktree_path, "git_worktree")
-
-        # 设为工作目录（DB 写入：新窗口默认值 + 实例缓存更新）
-        memory_mgr.set_working_directory(self._current_project, worktree_path)
-
-        # 恢复原有根目录的 is_working_dir 标记（set_working_directory 会先清除所有标记）
-        # 这样 _load_key_documents 才能正确识别哪个是用户真正设定的根目录
-        if db_wd and db_wd != worktree_path and db_wd != "clear":
-            memory_mgr.restore_working_directory_mark(self._current_project, db_wd)
-
-        self._instance_workdir[self._current_project] = worktree_path
-        self._emit_working_dir(worktree_path)
-        self._load_key_documents()
+        self._repo_info = repo_info
+        self._branches = list(branches or [])
 
     def _on_worktree_deleted(self, worktree_path: str):
-        """Worktree 被删除后：移除 DB 记录 + 恢复到主仓库 + 清除实例缓存
+        """删除工作树后刷新；删的是当前工作目录所在子树则先回退主仓库根
 
-        多窗口隔离：通过 workingDirChanged 信号通知 main_widget 清除对应实例缓存。
+        否则 _rebuild 会甩出「工作目录不存在」空态（workdir 仍指向已删目录）。
         """
-        memory_mgr = self._get_memory_manager()
-        if not memory_mgr:
+        current = self._instance_workdir.get(self._current_project)
+        if current and self._repo_info is not None:
+            cur_n = os.path.normcase(os.path.normpath(current))
+            del_n = os.path.normcase(os.path.normpath(worktree_path))
+            if cur_n == del_n or cur_n.startswith(del_n + os.sep):
+                root = self._repo_info.root
+                memory_mgr = self._get_memory_manager()
+                if memory_mgr is not None:
+                    try:
+                        memory_mgr.set_working_directory(self._current_project, root)
+                    except Exception as e:
+                        logger.warning(f"[worktree-manager] 回退工作目录持久化失败: {e}")
+                self._instance_workdir[self._current_project] = root
+                self._emit_working_dir(root)
+        self.refresh_data()
+
+    def _on_worktree_switched(self, original_folder: str, worktree_path: str):
+        """切到指定工作树/主仓库：持久化 + 上抛宿主 + 缓存信息即时重建
+
+        同仓库内切换只有「谁是当前」变化（worktree 列表/分支/说明/领先落后
+        均不变），复用已探测的 repo_info 即时重建：零 git 探测、不清空页面、
+        无「正在读取仓库信息…」占位闪烁。
+        """
+        if not worktree_path or not os.path.isdir(worktree_path):
             return
-
-        current_wd = self._get_effective_workdir(self._current_project)
-
-        # 从关键文档中移除 worktree 路径（防止下次加载又显示）
-        if memory_mgr._key_documents_repo:
-            memory_mgr._key_documents_repo.remove_by_path(self._current_project, worktree_path)
-
-        if current_wd == worktree_path:
-            # 恢复到原始 git 仓库文件夹
-            repo_root = GitWorktreeDetector.detect_git(self._original_folder_for_worktree)
-            if repo_root:
-                memory_mgr.set_working_directory(self._current_project, repo_root)
-                self._instance_workdir[self._current_project] = repo_root
-                self._emit_working_dir(repo_root)
-            else:
-                memory_mgr.set_working_directory(self._current_project, "clear")
-                self._instance_workdir.pop(self._current_project, None)
-                self._emit_working_dir("")
-
-        self._load_key_documents()
+        project = self._current_project
+        memory_mgr = self._get_memory_manager()
+        if memory_mgr is not None:
+            try:
+                memory_mgr.set_working_directory(project, worktree_path)
+            except Exception as e:
+                logger.warning(f"[worktree-manager] 持久化工作目录失败: {e}")
+        self._instance_workdir[project] = worktree_path
+        self._emit_working_dir(worktree_path)
+        if self._repo_info is None or self._workdir_card is None:
+            self.refresh_data()
+            return
+        self._workdir_card.set_workdir(worktree_path)
+        self._workdir_card.set_is_git(True)
+        self._empty_hint.setVisible(False)
+        self._mount_section(self._repo_info, self._repo_info.root, worktree_path, project, self._branches)
 
     def _on_workdir_restored(self, path: str):
-        """外部删除导致 workdir 恢复为原始仓库时，更新实例缓存（不触发全量重建）
-
-        由 WorktreeSectionWidget.workingDirRestored 信号触发。
-        """
+        """工作目录被外部删除后回退（不重建工作树）"""
         self._instance_workdir[self._current_project] = path
         self._emit_working_dir(path)
 
-    def _open_folder(self, path: str):
-        """打开文件/文件夹/URL"""
-        import os
-        import subprocess
-        import webbrowser
-
-        try:
-            # URL 链接：在浏览器中打开
-            if path and (path.startswith("http://") or path.startswith("https://")):
-                webbrowser.open(path)
-                return
-            # 优先判断路径类型
-            if os.path.isdir(path):
-                # 文件夹：直接打开
-                os.startfile(path) if os.name == "nt" else subprocess.Popen(["xdg-open", path])
-            elif os.path.isfile(path):
-                # 文件：直接打开
-                os.startfile(path) if os.name == "nt" else subprocess.Popen(["open", path])
-            else:
-                # 路径不存在，尝试打开父目录
-                folder = os.path.dirname(path)
-                if folder and os.path.exists(folder):
-                    subprocess.Popen(["explorer", "/select,", path])
-        except Exception as e:
-            from loguru import logger
-
-            logger.error(f"Failed to open: {e}")
+    def refresh_style(self):
+        """主题刷新：重建整页（内联样式在构造时写死）"""
+        Colors.refresh()
+        self._title_label.setStyleSheet(
+            f"color: {Colors.TEXT_PRIMARY}; font-weight: 600;"
+            f" {get_font_family_css()} {font_size_css(14)}"
+        )
+        self._empty_hint.setStyleSheet(
+            f"background: transparent; color: {Colors.TEXT_MUTED};"
+            f" {get_font_family_css()} {font_size_css(13)} padding: 24px;"
+        )
+        self._rebuild()
 
     def refresh(self):
-        """刷新所有数据"""
-        self._load_key_documents()
+        """外部刷新入口（与 refresh_data 同义）"""
+        self.refresh_data()
 
     def refresh_from_db(self):
-        """刷新所有数据（兼容旧接口）"""
-        self._load_key_documents()
+        """强制从 DB 重读工作目录后刷新"""
+        self._instance_workdir.pop(self._current_project, None)
+        self.refresh_data()

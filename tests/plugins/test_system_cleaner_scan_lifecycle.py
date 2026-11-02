@@ -159,3 +159,28 @@ def test_async_scan_debounce_skips(qapp, tmp_path, monkeypatch):
         _drain_events(2000)
     finally:
         card.deleteLater()
+
+
+def test_memory_release_finishes_on_main_thread(qapp, monkeypatch):
+    """内存释放收尾必须回到主线程（2026-11-01 修复锁定）
+
+    b47875df 回归：拍3 换后台线程后用 QTimer.singleShot(0, ...) 回主线程，
+    但 daemon 线程没有 Qt 事件循环，回调永不触发 → 按钮永久卡「释放中…」。
+    修复后跨线程回主线程必须走信号（auto queued connection）。
+    """
+    _scanner, _cleaner, cards = _load_mods()
+    monkeypatch.setattr(cards, "_release_memory_light", lambda: None)
+    monkeypatch.setattr(cards, "_release_memory_deep_core", lambda: 3)
+    monkeypatch.setattr(cards, "_kill_qwebengine_processes", lambda: 2)
+    monkeypatch.setattr(cards, "_get_process_memory", lambda: 100)
+    card = cards.SystemCleanerCard()
+    try:
+        card._on_memory_release()
+        assert card._is_releasing_mem  # 触发后即处于释放中
+        # 覆盖拍2 延迟 120ms + 后台线程 + queued 信号回投
+        _drain_events(1500)
+        assert not card._is_releasing_mem  # 收尾必须发生
+        assert card._mem_release_btn.isEnabled()
+        assert card._mem_release_btn.text() != "释放中…"
+    finally:
+        card.deleteLater()

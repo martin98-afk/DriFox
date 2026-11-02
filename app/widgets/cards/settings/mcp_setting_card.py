@@ -56,6 +56,7 @@ from app.utils.design_tokens import (
     SwitchStyles,
     apply_font_size_to_widget,
     font_size_css,
+    readable_text_on,
     scale_font_size,
 )
 from app.utils.utils import get_font_family_css
@@ -121,11 +122,14 @@ def _auth_btn_qss(kind: str) -> str:
     """
     if kind == "authorize":
         return (
-            f"PushButton {{ background-color: {Colors.TEXT_ACCENT}; color: {Colors.BUTTON_TEXT_ON_ACCENT};"
+            f"PushButton {{ background-color: {Colors.TEXT_ACCENT};"
+            f" color: {readable_text_on(Colors.TEXT_ACCENT, Colors.BUTTON_TEXT_ON_ACCENT)};"
             f" border: none; border-radius: {BorderRadius.SM}; padding: 0 10px;"
             f" {font_size_css(12)} font-weight: bold; }}"
-            f"PushButton:hover {{ background-color: {Colors.BORDER_ACCENT}; }}"
-            f"PushButton:pressed {{ background-color: {Colors.BORDER_ACCENT}; }}"
+            f"PushButton:hover {{ background-color: {Colors.BORDER_ACCENT};"
+            f" color: {readable_text_on(Colors.BORDER_ACCENT)}; }}"
+            f"PushButton:pressed {{ background-color: {Colors.BORDER_ACCENT};"
+            f" color: {readable_text_on(Colors.BORDER_ACCENT)}; }}"
             f"PushButton:disabled {{ color: {Colors.TEXT_MUTED}; background-color: transparent; }}"
         )
     return (
@@ -1153,6 +1157,9 @@ class MCPListSettingCard(ExpandSettingCard):
         # 若用布尔标记会永久停在 True，导致此后所有热重载刷新被吞掉（计数更新、列表不更新）。
         # 窗口取 3s（> watchfiles 的 2s 防抖），既能在自触发刷新到达时正确抑制，又会自动过期。
         self._suppress_hot_reload_until = 0.0
+        # 热重载置脏：卡片不可见/折叠时 _refresh 全量重建（逐行 MCPServerRow + 布局计算）
+        # 纯属白干，置脏延迟到 showEvent/展开时补刷（watchdog 61 次 500ms+ 阻塞治理）
+        self._hot_reload_dirty = False
         # need_confirm 确认弹窗去重：key → InfoBar。同 key 多次失败回调只保留首个弹窗
         self._confirm_bars: Dict[str, object] = {}
         # 状态轮询定时器（3秒刷新一次连接状态指示灯 + token 占用）
@@ -1640,6 +1647,18 @@ class MCPListSettingCard(ExpandSettingCard):
         # 注意：全局开关不触发全量刷新——列表内容未变，行级状态已由上面的
         # _refresh_status_dots() 更新。全量重建会导致开关时整卡闪烁。
 
+    def _refresh_if_visible(self):
+        """热重载触发点入口：不可见/折叠时只置脏，可见时才真刷新。
+
+        _refresh 全量重建行列表（每行一个 MCPServerRow + 布局计算，实测 500ms+），
+        设置面板未打开时重建不可见内容纯属白干；每次插件热重载（watchfiles 监控
+        插件目录，开发期每次保存都触发）会广播到全部窗口，逐窗口重建放大成本。
+        """
+        if self.isHidden() or not self.isExpand:
+            self._hot_reload_dirty = True
+            return
+        self._refresh()
+
     def consume_hot_reload(self) -> bool:
         """检查并消费自触发标记。热重载触发时调用，返回 True 表示本次是自触发的，应跳过刷新
 
@@ -1797,10 +1816,18 @@ class MCPListSettingCard(ExpandSettingCard):
     def setExpand(self, isExpand: bool):
         super().setExpand(isExpand)
         self._sync_status_timer()
+        # 展开时消费热重载置脏：补刷一次（异步，不拖慢展开动画）
+        if isExpand and getattr(self, "_hot_reload_dirty", False):
+            self._hot_reload_dirty = False
+            QTimer.singleShot(0, self._refresh)
 
     def showEvent(self, event):
         super().showEvent(event)
         self._sync_status_timer()
+        # 不可见期间攒下的热重载置脏：显示后异步补刷（不拖慢面板打开）
+        if getattr(self, "_hot_reload_dirty", False):
+            self._hot_reload_dirty = False
+            QTimer.singleShot(0, self._refresh)
 
     def hideEvent(self, event):
         self._status_timer.stop()
@@ -1951,6 +1978,10 @@ class MCPListSettingCard(ExpandSettingCard):
         servers = self._get_servers()
         if not self.cfg.mcp_enabled.value:
             return
+        # 状态快照只取一次：get_status 内部会读配置侧服务器全集（缓存未命中时
+        # 逐插件 stat + read_text + json），放进循环等于 N 次重复劳动。
+        # 语义等价：_hot_connect 走后台线程连接，循环期间不会改变本快照。
+        status_list = mgr.get_status()
         for s in servers:
             if not s.get("enabled", True):
                 continue
@@ -1962,10 +1993,11 @@ class MCPListSettingCard(ExpandSettingCard):
                 logger.debug(f"[MCP] '{name}' 待用户确认，跳过自动补连")
                 continue
             # 只重新连接已断开或未连接过的
-            status_list = mgr.get_status()
             already = any(st["name"] == name and st["connected"] for st in status_list)
             if not already:
-                self._hot_connect(name, s)
+                # force=True：连接态与门禁待确认本函数都已判定，_hot_connect 内的
+                # 二次 get_status 属纯重复（其 force 仅用于跳过该检查）。
+                self._hot_connect(name, s, force=True)
 
     # ── Token 占用估算 ──────────────────────────────
 

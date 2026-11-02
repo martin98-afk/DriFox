@@ -9,24 +9,35 @@ get_task_logs 命中 DB 即返回，导致卡片永远显示「执行中」、�
 - get_task_logs 前置 get_finished_tasks：兜底无回调路径（cancel 等）
 """
 
+import importlib.util
 import time
+from pathlib import Path
 
 import pytest
 
-from app.core.workers.subagent_worker import SubAgentExecutor, SubAgentManager
+from app.core.workers.subagent_worker import SubAgentExecutor
+
+# SubAgentManager 已迁 system-subagent 插件：按文件路径加载（插件不在包内），
+# 与运行时加载方式一致，避免测试依赖 core 的旧导出。
+_MANAGER_PATH = Path(__file__).resolve().parents[2] / "plugins" / "system-subagent" / "manager.py"
+_spec = importlib.util.spec_from_file_location("test_system_subagent_manager", _MANAGER_PATH)
+assert _spec is not None and _spec.loader is not None
+_manager_mod = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(_manager_mod)
+SubAgentManager = _manager_mod.SubAgentManager
 
 
 class _FakeStore:
-    """有状态假 SessionStore：模拟 subagent 任务接口，语义对齐真实 repository。
+    """有状态假任务存储：语义对齐 SubAgentTaskStore（插件自有表）。
 
-    save_subagent_task = 全量 upsert（summary=None 会清空）；
-    update_subagent_task_status = 部分更新（None 字段不覆盖）。
+    save = 全量 upsert（summary=None 会清空）；
+    update_status = 部分更新（None 字段不覆盖）。
     """
 
     def __init__(self):
         self._tasks = {}
 
-    def save_subagent_task(
+    def save(
         self,
         task_id,
         agent_name,
@@ -51,7 +62,7 @@ class _FakeStore:
         }
         return True
 
-    def update_subagent_task_status(self, task_id, status, result=None, error=None, logs=None, summary=None):
+    def update_status(self, task_id, status, result=None, error=None, logs=None, summary=None):
         task = self._tasks.get(task_id)
         if not task:
             return False
@@ -66,14 +77,14 @@ class _FakeStore:
             task["summary"] = summary
         return True
 
-    def get_subagent_task(self, task_id):
+    def get(self, task_id):
         task = self._tasks.get(task_id)
         return dict(task) if task else None
 
 
 def _make_manager(store):
     mgr = SubAgentManager(agent_manager=None, tool_executor=None, get_llm_config=lambda: {})
-    mgr.set_session_store(store)
+    mgr.set_task_store(store)
     return mgr
 
 
@@ -103,7 +114,7 @@ def _make_executor(task_id="t1", tool_calls=3):
 
 def _seed_running_record(store, task_id="t1"):
     """模拟 executor 实时日志回调写入的 running 记录（bug 触发前提）"""
-    store.save_subagent_task(
+    store.save(
         task_id,
         "explore",
         "探查代码",
@@ -138,7 +149,7 @@ class TestMarkTaskFinished:
         assert info["agent_name"] == "explore"
         assert info["session_id"] == "sess-1"
 
-        record = store.get_subagent_task("t1")
+        record = store.get("t1")
         assert record["status"] == "finished"
         # summary 必须带最终数据（不能被全量 upsert 清空）
         assert record["summary"]["tool_call_count"] == 3
@@ -163,7 +174,7 @@ class TestMarkTaskFinished:
         assert entry["error"] == "skipped by DAG"  # 空 error 不覆盖已有
         assert entry["result"] == "最终结果"
 
-        record = store.get_subagent_task("t1")
+        record = store.get("t1")
         assert record["status"] == "finished"
         assert record["error"] == "skipped by DAG"
         # summary 未显式提供时不被清空（部分更新语义）
@@ -186,3 +197,24 @@ class TestGetTaskLogsAfterFinish:
         assert data["status"] == "finished"
         assert data["summary"]["tool_call_count"] == 3
         assert "t1" not in mgr._running_tasks
+
+
+class TestFinishedBroadcast:
+    """正常完成路径必须广播 task_finished（面板打完成 + 归档的唯一触发点）
+
+    回归背景：只有 stalled / cancel 路径 emit，正常完成不 emit → 运行面板行
+    永远停在「执行中」、计时器无限累加，任务也不归档。
+    """
+
+    def test_finished_path_emits_task_finished(self, store):
+        mgr = _make_manager(store)
+        ex = _make_executor()
+        mgr._running_tasks["t1"] = ex
+        seen = []
+        mgr.task_finished.connect(lambda tid, result: seen.append((tid, result)))
+
+        mgr._on_executor_finished("t1", "任务完成结果")
+
+        assert seen == [("t1", "任务完成结果")]
+        # 广播先于批次汇总：批次计数归零后不再有副作用
+        assert mgr._batch_task_ids == set()

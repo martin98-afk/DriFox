@@ -147,9 +147,6 @@ class ToolExecutor:
         # 文件操作记录器
         self._file_recorder: Optional[FileOperationRecorder] = None
 
-        # 子智能体管理器（实例级，每个窗口独立，不共享给 BuiltinTools）
-        self._sub_agent_manager = None
-
         # 线程安全锁：保护文件记录等非线程安全操作
         self._lock = threading.Lock()
 
@@ -795,10 +792,6 @@ class ToolExecutor:
         except Exception:
             return str(Path(__file__).resolve().parent.parent.parent.parent)
 
-    def set_key_documents_repo(self, repo, project: str = "默认项目"):
-        """设置关键文档仓储和当前项目（工具插件化：stage_files 已自包含，仓储不再注入插件）"""
-        logger.info(f"[ToolExecutor] KeyDocumentsRepo set (project={project})")
-
     def execute(
         self,
         tool_name: str,
@@ -838,7 +831,7 @@ class ToolExecutor:
             local_session_id = self._session_id
             local_call_id = call_id or self._call_id
 
-        logger.info(f"[ToolExecutor] Executing tool: {tool_name}, args: {args}")
+        logger.debug(f"[ToolExecutor] Executing tool: {tool_name}, args: {args}")
 
         # Trigger PreToolUse hook（同步执行，支持跳过和输出回填）
         # trigger_hooks=False 时整体跳过（引擎 HookPolicy.NONE）
@@ -1113,6 +1106,10 @@ class ToolExecutor:
             "sub_agent_manager": sub_agent,
             "team_window_id": getattr(bt, "_team_window_id", "") if bt else "",
             "team_agent_name": getattr(bt, "_team_agent_name", "") if bt else "",
+            # #4（team_create 回填通道）：工具 impl 经此引用调
+            # set_team_context 回填窗口团队上下文（快照 key 依赖）。
+            # 拿不到实例时为 None，impl 判空跳过回填并提示，不抛异常。
+            "builtin_tools": bt,
             "env": env,
             "services": services,
             "capabilities": pool,
@@ -1222,11 +1219,3 @@ class ToolExecutor:
             logger.warning(f"[ToolExecutor] MCP 前缀恢复歧义：'{tool_name}' 命中多个候选 {matches}，放弃补全")
         return None
 
-    def set_sub_agent_manager(self, sub_agent_manager):
-        """设置子智能体管理器（实例级 + 共享 BuiltinTools 回退）"""
-        # 实例级引用：subagent_para/subagent_status lambda 使用此引用来路由到正确的窗口
-        self._sub_agent_manager = sub_agent_manager
-        # 共享 BuiltinTools 回退：供旧代码路径兼容（sub_agent_manager 由 tool_ctx 注入插件 impl）
-        if self._builtin_tools:
-            self._builtin_tools._sub_agent_manager = sub_agent_manager
-            logger.info("[ToolExecutor] SubAgentManager attached to instance and BuiltinTools")

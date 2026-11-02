@@ -782,6 +782,147 @@ def _plugin_fence_placeholder(info, code_content_raw: str) -> str:
     return _CHART_SKELETON_HTML
 
 
+def _render_render_fence(lang: str, code_content_raw: str) -> Optional[str]:
+    """渲染型 fence → 图表/卡片容器 HTML；非渲染型返回 None。
+
+    None 的语义是「交给调用方的普通代码块处理」（高亮 + 复制按钮），不是失败。
+
+    分发只此一份：``_wrap_code_blocks_with_copy_button_web``（常规路径）与
+    ``_promote_render_fences_html``（超长 tail 降级路径）共用。两处各写一份会
+    漂移，漂移后果是同一份 echarts 围栏一条路径出容器、另一条出代码块
+    （用户可见「图表回退成代码」）。
+    """
+    # ===== 流式中的半截图表：骨架占位 =====
+    # _sanitize_incomplete_markdown 把末尾未闭合的图表 fence 改标为
+    # <lang>-streaming。这里必须在此之前拦截：残缺 JSON 若照常包成
+    # .echarts-container，其 b64 每轮随内容增长而变化 → vault key 每轮都不同，
+    # 节点被反复塞进 vault 迅速膨胀（多图白屏的次因）。骨架不入 vault、不 init。
+    if lang in ("echarts-streaming", "mermaid-streaming", "html-streaming", "widget-streaming"):
+        return _CHART_SKELETON_HTML
+    # 插件注册的 fence 在流式期同样降级为占位：半截源码交给 render_func
+    # 必然产出残缺节点，且内容每轮变化会让产物反复变更、高度抖动。
+    if lang.endswith("-streaming"):
+        _streaming_info = _get_plugin_fence_renderer(lang[: -len("-streaming")])
+        if _streaming_info is not None:
+            return _plugin_fence_placeholder(_streaming_info, code_content_raw)
+
+    # ===== 插件 fence 渲染器（架构档）：先查注册表 =====
+    # 命中 → 插件路径（产物带 data-fence-renderer 标记，供后续按需注入
+    #        插件 assets）；未命中 → 走下方内置硬编码链。
+    # 注册表禁止注册与内置同名的 lang，故不会影响 echarts/mermaid 行为。
+    _fence_info = _get_plugin_fence_renderer(lang)
+    if _fence_info is not None:
+        _plugin_html = _render_plugin_fence(_fence_info, code_content_raw)
+        if _plugin_html:
+            return _plugin_html
+
+    # ===== ECharts 代码块：渲染为交互式图表 =====
+    if lang == "echarts":
+        try:
+            # 解码 HTML 实体（&quot; → " 等），确保 JSON 可解析
+            json_text = _unescape_html(code_content_raw)
+            json.loads(json_text)  # 校验：非法 JSON 降级为普通代码块，不留空洞容器
+            # base64 编码防止 HTML 属性转义问题
+            b64_json = base64.b64encode(json_text.encode("utf-8")).decode("ascii")
+            chart_id = "echart-" + hashlib.sha1(json_text.encode("utf-8")).hexdigest()[:12]
+            return f'''
+                <div id="{chart_id}" class="echarts-container" data-echarts-json="{b64_json}" style="width: 100%; height: 400px; margin: 12px 0; border-radius: 10px; overflow: hidden;"></div>
+                '''
+        except Exception:
+            # JSON 解析失败，降级为普通代码块
+            return None
+
+    # ===== Mermaid 代码块：渲染为矢量图表 =====
+    # 这里只产出占位容器，真正的 vendor（polyfill + mermaid 10.9.1）
+    # 由 JS 侧首次遇到 .mermaid-block 时才动态加载，避免所有卡片都背上 3.3MB。
+    # 背景：Chromium 83 缺 structuredClone，mermaid 10 在模块顶层就炸、
+    #       window.mermaid 直接 undefined，必须先打 polyfill。见 docs/mermaid-chromium83.md。
+    if lang == "mermaid":
+        try:
+            mmd_text = _unescape_html(code_content_raw)
+            if mmd_text.strip():
+                b64_mmd = base64.b64encode(mmd_text.encode("utf-8")).decode("ascii")
+                mmd_id = "mmd-" + hashlib.sha1(mmd_text.encode("utf-8")).hexdigest()[:12]
+                return (
+                    f'<div id="{mmd_id}" class="mermaid-block" '
+                    f'data-mermaid-src="{b64_mmd}" style="margin: 12px 0;"></div>'
+                )
+        except Exception:
+            pass
+        return None
+
+    # ===== SVG 代码块：透传 raw HTML，浏览器直渲 =====
+    # 协议上 SVG 应内联正文（visualization skill），但模型习惯性输出 ```svg 围栏，
+    # 这里兜底：语言为 svg 且内容以 <svg 开头时按 raw HTML 透传，
+    # 与正文内联 <svg>（markdown safe=False）走同一条渲染路径。
+    # 内容不以 <svg 开头（教学代码等）保持普通代码块渲染，避免误吞。
+    if lang == "svg":
+        svg_html = _unescape_html(code_content_raw)
+        if svg_html.lstrip().lower().startswith("<svg"):
+            return svg_html
+        return None
+
+    # ===== HTML 代码块：净化后内联（UI 效果稿 / 指标卡）=====
+    # 与 svg 同层：内容不以 "<" 开头（教学代码、配置片段等）保持普通代码块，
+    # 避免把讲 HTML 语法的示例代码误吞成真实 DOM。
+    if lang == "html":
+        try:
+            raw_widget = _unescape_html(code_content_raw)
+        except Exception:
+            raw_widget = code_content_raw
+        if _HTML_WIDGET_HEAD_PATTERN.match(raw_widget):
+            widget_html = _sanitize_widget_html(raw_widget)
+            # 净化后为空（内容全是脚本 / 超长 / 无实质内容）→ 降级普通代码块，
+            # 不留空洞容器
+            if widget_html:
+                return (
+                    f'<div class="html-widget" data-fence-renderer="html" '
+                    f'style="margin: 12px 0;">{widget_html}</div>'
+                )
+        return None
+
+    # ===== 可交互 widget 围栏：沙箱 iframe + 白名单桥 =====
+    # 与 ```html 的分工：html 走 _sanitize_widget_html（脚本被剥离、纯静态），
+    # widget 保留脚本并放进沙箱 iframe。内容**不**内联进主文档，只以 base64
+    # 存在 data 属性里，由 JS 侧装配 —— 主文档开了 file:// 互访，脚本内联
+    # 等于任意本地文件读取 + 外传，必须隔离。桥权限与插件 fence 同款。
+    if lang == "widget":
+        try:
+            raw_widget = _unescape_html(code_content_raw)
+        except Exception:
+            raw_widget = code_content_raw
+        if _HTML_WIDGET_HEAD_PATTERN.match(raw_widget) and len(raw_widget) <= 200_000:
+            b64_widget = base64.b64encode(raw_widget.encode("utf-8")).decode("ascii")
+            widget_id = "wgt-" + hashlib.sha1(raw_widget.encode("utf-8")).hexdigest()[:12]
+            return (
+                f'<div id="{widget_id}" class="drifox-widget" data-fence-renderer="widget" '
+                f'data-widget-src="{b64_widget}" style="margin: 12px 0;"></div>'
+            )
+        return None
+
+    return None
+
+
+def _promote_render_fences_html(html: str) -> str:
+    """只把渲染型 fence 代码块升成容器，普通代码块原样保留。
+
+    背景：``_render_inline_tail`` 对超长 tail 跳过整页代码块包装（避免 pygments
+    全量高亮的成本），但渲染型 fence 一并跳过就会把已闭合的 echarts / mermaid
+    降级成 ``<pre><code>`` 代码块（用户可见「图表回退成代码」），未闭合的图表
+    fence 更是直接裸露半截 JSON。此处只对渲染型 lang 做转换，成本与图表数量
+    成正比，不触碰普通代码块（高亮口径与现状一致）。
+    """
+
+    def _sub(match):
+        lang = (match.group(1) or "").replace("language-", "").strip()
+        if not lang:
+            return match.group(0)
+        rendered = _render_render_fence(lang, match.group(2) or "")
+        return rendered if rendered is not None else match.group(0)
+
+    return _CODE_BLOCK_WITH_LANG_PATTERN.sub(_sub, html)
+
+
 # ======== 核心逻辑：保留你的原始代码块样式 ========
 def _wrap_code_blocks_with_copy_button_web(
     html: str,
@@ -805,109 +946,12 @@ def _wrap_code_blocks_with_copy_button_web(
         lang = (match.group(1) or "").replace("language-", "").strip()
         code_content_raw = match.group(2) or ""
 
-        # ===== 流式中的半截图表：骨架占位 =====
-        # _sanitize_incomplete_markdown 把末尾未闭合的图表 fence 改标为
-        # <lang>-streaming。这里必须在此之前拦截：残缺 JSON 若照常包成
-        # .echarts-container，其 b64 每轮随内容增长而变化 → vault key 每轮都不同，
-        # 节点被反复塞进 vault 迅速膨胀（多图白屏的次因）。骨架不入 vault、不 init。
-        if lang in ("echarts-streaming", "mermaid-streaming", "html-streaming", "widget-streaming"):
-            return _CHART_SKELETON_HTML
-        # 插件注册的 fence 在流式期同样降级为占位：半截源码交给 render_func
-        # 必然产出残缺节点，且内容每轮变化会让产物反复变更、高度抖动。
-        if lang.endswith("-streaming"):
-            _streaming_info = _get_plugin_fence_renderer(lang[: -len("-streaming")])
-            if _streaming_info is not None:
-                return _plugin_fence_placeholder(_streaming_info, code_content_raw)
-
-        # ===== 插件 fence 渲染器（架构档）：先查注册表 =====
-        # 命中 → 插件路径（产物带 data-fence-renderer 标记，供后续按需注入
-        #        插件 assets）；未命中 → 走下方内置硬编码链。
-        # 注册表禁止注册与内置同名的 lang，故不会影响 echarts/mermaid 行为。
-        _fence_info = _get_plugin_fence_renderer(lang)
-        if _fence_info is not None:
-            _plugin_html = _render_plugin_fence(_fence_info, code_content_raw)
-            if _plugin_html:
-                return _plugin_html
-
-        # ===== ECharts 代码块：渲染为交互式图表 =====
-        if lang == "echarts":
-            try:
-                # 解码 HTML 实体（&quot; → " 等），确保 JSON 可解析
-                json_text = _unescape_html(code_content_raw)
-                json.loads(json_text)  # 校验：非法 JSON 降级为普通代码块，不留空洞容器
-                # base64 编码防止 HTML 属性转义问题
-                b64_json = base64.b64encode(json_text.encode("utf-8")).decode("ascii")
-                chart_id = "echart-" + hashlib.sha1(json_text.encode("utf-8")).hexdigest()[:12]
-                return f'''
-                <div id="{chart_id}" class="echarts-container" data-echarts-json="{b64_json}" style="width: 100%; height: 400px; margin: 12px 0; border-radius: 10px; overflow: hidden;"></div>
-                '''
-            except Exception:
-                # JSON 解析失败，降级为普通代码块
-                pass
-
-        # ===== Mermaid 代码块：渲染为矢量图表 =====
-        # 这里只产出占位容器，真正的 vendor（polyfill + mermaid 10.9.1）
-        # 由 JS 侧首次遇到 .mermaid-block 时才动态加载，避免所有卡片都背上 3.3MB。
-        # 背景：Chromium 83 缺 structuredClone，mermaid 10 在模块顶层就炸、
-        #       window.mermaid 直接 undefined，必须先打 polyfill。见 docs/mermaid-chromium83.md。
-        if lang == "mermaid":
-            try:
-                mmd_text = _unescape_html(code_content_raw)
-                if mmd_text.strip():
-                    b64_mmd = base64.b64encode(mmd_text.encode("utf-8")).decode("ascii")
-                    mmd_id = "mmd-" + hashlib.sha1(mmd_text.encode("utf-8")).hexdigest()[:12]
-                    return (
-                        f'<div id="{mmd_id}" class="mermaid-block" '
-                        f'data-mermaid-src="{b64_mmd}" style="margin: 12px 0;"></div>'
-                    )
-            except Exception:
-                pass
-
-        # ===== SVG 代码块：透传 raw HTML，浏览器直渲 =====
-        # 协议上 SVG 应内联正文（visualization skill），但模型习惯性输出 ```svg 围栏，
-        # 这里兜底：语言为 svg 且内容以 <svg 开头时按 raw HTML 透传，
-        # 与正文内联 <svg>（markdown safe=False）走同一条渲染路径。
-        # 内容不以 <svg 开头（教学代码等）保持普通代码块渲染，避免误吞。
-        if lang == "svg":
-            svg_html = _unescape_html(code_content_raw)
-            if svg_html.lstrip().lower().startswith("<svg"):
-                return svg_html
-
-        # ===== HTML 代码块：净化后内联（UI 效果稿 / 指标卡）=====
-        # 与 svg 同层：内容不以 "<" 开头（教学代码、配置片段等）保持普通代码块，
-        # 避免把讲 HTML 语法的示例代码误吞成真实 DOM。
-        if lang == "html":
-            try:
-                raw_widget = _unescape_html(code_content_raw)
-            except Exception:
-                raw_widget = code_content_raw
-            if _HTML_WIDGET_HEAD_PATTERN.match(raw_widget):
-                widget_html = _sanitize_widget_html(raw_widget)
-                # 净化后为空（内容全是脚本 / 超长 / 无实质内容）→ 降级普通代码块，
-                # 不留空洞容器
-                if widget_html:
-                    return (
-                        f'<div class="html-widget" data-fence-renderer="html" '
-                        f'style="margin: 12px 0;">{widget_html}</div>'
-                    )
-
-        # ===== 可交互 widget 围栏：沙箱 iframe + 白名单桥 =====
-        # 与 ```html 的分工：html 走 _sanitize_widget_html（脚本被剥离、纯静态），
-        # widget 保留脚本并放进沙箱 iframe。内容**不**内联进主文档，只以 base64
-        # 存在 data 属性里，由 JS 侧装配 —— 主文档开了 file:// 互访，脚本内联
-        # 等于任意本地文件读取 + 外传，必须隔离。桥权限与插件 fence 同款。
-        if lang == "widget":
-            try:
-                raw_widget = _unescape_html(code_content_raw)
-            except Exception:
-                raw_widget = code_content_raw
-            if _HTML_WIDGET_HEAD_PATTERN.match(raw_widget) and len(raw_widget) <= 200_000:
-                b64_widget = base64.b64encode(raw_widget.encode("utf-8")).decode("ascii")
-                widget_id = "wgt-" + hashlib.sha1(raw_widget.encode("utf-8")).hexdigest()[:12]
-                return (
-                    f'<div id="{widget_id}" class="drifox-widget" data-fence-renderer="widget" '
-                    f'data-widget-src="{b64_widget}" style="margin: 12px 0;"></div>'
-                )
+        # 渲染型 fence（图表 / 卡片 / 插件）统一分发：与 _render_inline_tail
+        # 的超长降级路径共用 _render_render_fence 一份实现，避免两处漂移
+        # （漂移后果：同一份 echarts 围栏一条路径出容器、另一条出代码块）。
+        _rendered = _render_render_fence(lang, code_content_raw)
+        if _rendered is not None:
+            return _rendered
 
         # --- 普通代码块处理 ---
         try:
@@ -3010,6 +3054,29 @@ def _extract_formulas(md_text: str) -> str:
     return "\n".join(seg if is_fence else _extract_formulas_in_plain(seg) for is_fence, seg in segments)
 
 
+def _line_tag_pending(line: str, tag: str, pending: bool) -> bool:
+    """单行内按出现顺序推进某注册标签的「未闭合」状态。
+
+    等价于 ``_has_unclosed_registered_tag`` 的 rfind 语义（即「全文前缀里该标签
+    最后一个事件是否为 open」）。**不能用 open/close 计数比较**：``</mood><mood>``
+    两者计数相等但 rfind 判为未闭合。
+    """
+    open_tag = f"<{tag}>"
+    close_tag = f"</{tag}>"
+    i = 0
+    while True:
+        o = line.find(open_tag, i)
+        c = line.find(close_tag, i)
+        if o == -1 and c == -1:
+            return pending
+        if o != -1 and (c == -1 or o < c):
+            pending = True
+            i = o + len(open_tag)
+        else:
+            pending = False
+            i = c + len(close_tag)
+
+
 def _extract_fenced_code(md_text: str) -> tuple[list[str], str]:
     """提取完整 fenced code 块为 \x00F<i>\x00 哨兵（inject 免疫保护）。
 
@@ -3023,15 +3090,36 @@ def _extract_fenced_code(md_text: str) -> tuple[list[str], str]:
     前放回原文，fenced_code 正常渲染代码内容（协议标签转义为字面文本）。
     fence 状态机与 _extract_formulas 同款语义；未闭合 fence（流式中间态，
     _sanitize_incomplete_markdown 已补闭合，此处兜底）原样放回不提取。
+
+    [PERF] 单遍增量判定：原实现对每个 fence 开栏各调一次
+    ``_has_unclosed_think_or_tool(md_text[:offset])``，内含 4 次全文 str.count
+    + 每注册标签一次全文 rfind + 一次前缀切片拷贝 → O(fences × n) 二次复杂度。
+    实测 1.5MB 文本：60 fence 13ms、200 fence 86ms；而工具块展开
+    （_serve_tool_body → find_tool_segment_by_call_id）每次都要重跑一遍。
+    现改为随行扫描增量维护协议块状态，单次判定降为 O(1)，总复杂度 O(n)。
+
+    状态语义与 ``_has_unclosed_think_or_tool`` 逐项对齐：
+    - think/tool：原实现用 count 比较 → 净计数差分等价；
+    - 注册标签：原实现用 rfind（「最后一个事件是 open」）→ 布尔 pending 等价；
+    - 半截标签：原实现只看前缀尾 _PARTIAL_TAG_TAIL_WINDOW 字符 → 直接切窗口，
+      O(1)，不必构造前缀。
+    状态按「含 fence 内文本的原文前缀」推进（原实现的前缀就是 md_text[:offset]，
+    同样不跳过已提取的 fence），故 fence 内的协议标签也计入。
     """
     if "```" not in md_text and "~~~" not in md_text:
         return [], md_text
+
+    tag_names = _registered_tag_names_safe()
+    tag_pending: dict[str, bool] = dict.fromkeys(tag_names, False)
+    tag_open_count = 0
+    think_net = 0
+    tool_net = 0
 
     fences: list[str] = []
     out_lines: list[str] = []
     buf: list[str] | None = None
     fence_marker = ""
-    offset = 0  # 当前行之前累计的字符数（供协议块未闭合判定取样前缀）
+    offset = 0  # 当前行之前累计的字符数（协议块状态取样用）
     for line in md_text.split("\n"):
         stripped = line.lstrip()
         if buf is None:
@@ -3044,7 +3132,12 @@ def _extract_fenced_code(md_text: str) -> tuple[list[str], str]:
             # _restore_fenced_code 找不回哨兵 → 从 fence 到文末的全部内容
             # 永久丢失（历史会话重开同样丢失，"偶尔内容显示不全"根因）。
             # 放行后 fence 原文留在协议块内，由 think/tool 卡自身处理。
-            if m and not _has_unclosed_think_or_tool(md_text[:offset]):
+            if m and not (
+                think_net > 0
+                or tool_net > 0
+                or tag_open_count > 0
+                or _PARTIAL_TAG_TAIL_RE.search(md_text[max(0, offset - _PARTIAL_TAG_TAIL_WINDOW) : offset])
+            ):
                 fence_marker = m.group(1)
                 buf = [line]
             else:
@@ -3055,6 +3148,22 @@ def _extract_fenced_code(md_text: str) -> tuple[list[str], str]:
                 fences.append("\n".join(buf))
                 out_lines.append(f"\x00F{len(fences) - 1}\x00")
                 buf = None
+
+        # 协议块状态推进（放在 fence 判定之后：原实现取样的是「不含当前行」的
+        # 前缀 md_text[:offset]，与上面判定用的状态口径必须一致）
+        if "<" in line:
+            if "<think>" in line or "</think>" in line:
+                think_net += line.count("<think>") - line.count("</think>")
+            if "<tool>" in line or "</tool>" in line:
+                tool_net += line.count("<tool>") - line.count("</tool>")
+            for tag in tag_names:
+                if f"<{tag}>" in line or f"</{tag}>" in line:
+                    was = tag_pending[tag]
+                    now = _line_tag_pending(line, tag, was)
+                    if now != was:
+                        tag_pending[tag] = now
+                        tag_open_count += 1 if now else -1
+
         offset += len(line) + 1
     if buf is not None:
         # 未闭合 fence：原样放回（流式中间态兜底，语义与 _extract_formulas 一致）
@@ -3504,7 +3613,18 @@ _SKELETON_CACHE_MAX = 48
 # _SKELETON_CACHE_VERSION +1（v70）：patchBlocks 插入锚点与搬移插入点改「按存活
 # wrapper 定位」——工具区末尾挂着 JS 注入的运行框（非 wrapper），原 append 兜底会把
 # 新块/搬入卡排到运行框之后，运行框看起来「跑到思考上面」，下一批又移回 = 位置跳。
-_SKELETON_CACHE_VERSION = 71
+# _SKELETON_CACHE_VERSION +1（v72）：v2 流式帧级揭示——新增 window._v2tw 队列
+# （_v2LiveStep rAF 指数追赶 / _v2LiveFlush / _v2LiveDrop / _v2LiveAppendNow）与
+# 前缀切片结算 _v2LiveSplit + .v2-live-part 样式。旧骨架只在批边界整段 append
+# （文字一块块蹦）、且无切片通道。缺这些函数 → 新调用全部静默失效。
+# _SKELETON_CACHE_VERSION +1（v73）：_v2LiveSplit 插入切片段后就地初始化图表/
+# 公式/插件 fence（与 patchBlocks / updateTailHtml 同款五连）。缺它时切片段里的
+# echarts 容器插进 DOM 却没人 init，一直空白到下一次整块正式化（图表区空一块）。
+# _SKELETON_CACHE_VERSION +1（v74）：字体族/等宽族改走 :root CSS 变量
+# （--dfx-font-family / --dfx-font-mono / --dfx-font-size），供 CodeWebViewer.refresh_font
+# 运行时注入。旧骨架把字体值写死在 <style> 里且池化复用保留骨架 → 切字体后
+# 已存在的卡片永远不跟随（"要重建几次会话才刷出来"）。
+_SKELETON_CACHE_VERSION = 74
 
 
 def _js_literal(value) -> str:
@@ -3956,11 +4076,19 @@ def _render_inline_tail(md_text: str, compact: bool = False) -> str:
     # [T35] 与全量/差量段渲染对齐：补代码块包装（pygments 高亮 + copy 按钮 +
     # 语言标签）。缺它时流式期间代码块是素色 <pre>，结束全量渲染才变样 ——
     # 每轮回答结束一次的可见「代码块变脸」，且让差量收尾产物与全量不一致。
-    # 规模保护：超大 tail 退回素色（成本说明见 _TAIL_CODE_WRAP_MAX_CHARS）。
+    # 规模保护：超大 tail 不做整页高亮（成本说明见 _TAIL_CODE_WRAP_MAX_CHARS），
+    # 但渲染型 fence 必须单独升级 —— 整页跳过会把已闭合的 echarts / mermaid
+    # 降级成 <pre><code>（用户可见「图表回退成代码」），未闭合的图表 fence
+    # 更是直接裸露半截 JSON。普通代码块仍保持素色（口径与跳过时一致）。
     if len(md_text) <= _TAIL_CODE_WRAP_MAX_CHARS:
         try:
             html = _wrap_code_blocks_with_copy_button_web(html)
         except Exception:  # 包装失败绝不能让正文消失：保留未包装的 HTML
+            pass
+    else:
+        try:
+            html = _promote_render_fences_html(html)
+        except Exception:  # 同上：降级失败保留原 HTML
             pass
     html = _resolve_image_src(html)
     return html

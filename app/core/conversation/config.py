@@ -90,8 +90,8 @@ class ConversationConfig:
     # 可选：LoopPolicy 插件 id（plugins/*/loop_policies/ 注册）。
     # 设置后本引擎的 worker 按 id 直接取策略对象，不调用
     # LoopPolicyRegistry.set_active —— 避免污染全局激活槽（主对话仍用 default）。
-    # 用途：插件自建引擎声明自己的循环语义，如 assistant_hub 记忆整理
-    # 只需要一回合（assistant_hub_single_turn）。未设置时回落全局激活策略。
+    # 用途：插件自建引擎声明自己的循环语义，如「一问一答、不给工具」的轻量
+    # 调用直接复用内置 minimal。未设置时回落全局激活策略。
     loop_policy_id: Optional[str] = None
 
 

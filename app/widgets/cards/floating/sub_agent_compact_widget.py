@@ -24,7 +24,7 @@ from PyQt5.QtWidgets import (
 )
 
 from qfluentwidgets import ScrollArea
-from app.utils.design_tokens import CardStyles, Colors
+from app.utils.design_tokens import CardStyles, Colors, readable_text_on
 from app.utils.motion import LoopTimer
 from app.utils.utils import _is_current_theme_light, get_font_family_css, get_icon, get_unified_font
 from app.widgets.cards.card_container import CardContainer
@@ -301,7 +301,7 @@ class _AgentTaskRow(QFrame):
         self._enter_session_btn.setStyleSheet(f"""
             QPushButton {{
                 background-color: {Colors.REALTIME_ACCENT};
-                color: #ffffff;
+                color: {readable_text_on(Colors.REALTIME_ACCENT)};
                 border: none;
                 border-radius: 4px;
                 padding: 0 8px;
@@ -309,6 +309,7 @@ class _AgentTaskRow(QFrame):
             }}
             QPushButton:hover {{
                 background-color: {Colors.REALTIME_ACCENT_WARM};
+                color: {readable_text_on(Colors.REALTIME_ACCENT_WARM)};
             }}
             QPushButton:pressed {{
                 background-color: {Colors.REALTIME_ACCENT};
@@ -482,7 +483,7 @@ class _AgentTaskRow(QFrame):
             self._enter_session_btn.setStyleSheet(f"""
                 QPushButton {{
                     background-color: {Colors.REALTIME_ACCENT};
-                    color: #ffffff;
+                    color: {readable_text_on(Colors.REALTIME_ACCENT)};
                     border: none;
                     border-radius: 4px;
                     padding: 0 8px;
@@ -490,6 +491,7 @@ class _AgentTaskRow(QFrame):
                 }}
                 QPushButton:hover {{
                     background-color: {Colors.REALTIME_ACCENT_WARM};
+                    color: {readable_text_on(Colors.REALTIME_ACCENT_WARM)};
                 }}
                 QPushButton:pressed {{
                     background-color: {Colors.REALTIME_ACCENT};

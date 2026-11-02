@@ -456,14 +456,13 @@ class TestMemoryManagerCore:
             assert hasattr(inst, method), f"MemoryManagerCore missing method '{method}'"
             assert callable(getattr(inst, method)), f"MemoryManagerCore.{method} not callable"
 
-    def test_key_document_methods(self, mod):
+    def test_workdir_methods(self, mod):
         inst = mod.MemoryManagerCore.get_instance()
         for method in (
-            "get_key_documents",
-            "add_key_document",
-            "remove_key_document",
-            "clear_key_documents",
-            "get_worktree_counts",
+            "get_working_directory",
+            "set_working_directory",
+            "clear_working_directory",
+            "list_working_directories",
         ):
             assert hasattr(inst, method), f"MemoryManagerCore missing method '{method}'"
             assert callable(getattr(inst, method)), f"MemoryManagerCore.{method} not callable"

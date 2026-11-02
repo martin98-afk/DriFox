@@ -139,7 +139,7 @@ class InputCardModule(UIModule):
         host._load_input_history()
 
         # 命令卡片（必须是输入框创建后）
-        host._command_card = CommandCard(host._bottom_input_container)
+        host._command_card = CommandCard(host._bottom_input_container, host=host)
         host._command_card.setVisible(False)
         host.input_area.set_command_card(host._command_card)
         mgr = host._card_manager
@@ -239,10 +239,10 @@ class InputCardModule(UIModule):
         host._pending_send_user_text = None  # 截断后发送的用户消息文本（用于指纹比对）
 
         # （内置命令已在上方注册）更新命令 --model= 参数描述
-        host._update_subagents_param_description()
+        # /subagents 的描述由 system-subagent 插件在注册 handler 时自己回填
         host._update_title_gen_param_description()
 
         # 监听配置变更，配置同步时自动刷新命令卡参数描述和 UI
+        # （子智能体默认模型的描述刷新由插件监听，主程序不持有该业务）
         _cfg = _Cfg.get_instance()
-        _cfg.llm_subagent_default_model.valueChanged.connect(host._on_subagent_model_config_changed)
         _cfg.llm_title_gen_default_model.valueChanged.connect(host._on_title_gen_model_config_changed)

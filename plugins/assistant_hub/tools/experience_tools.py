@@ -117,9 +117,8 @@ _RECALL_SCHEMA = {
     "function": {
         "name": "recall_experience",
         "description": (
-            "回忆你的工作经验。无参调用返回经验索引（分类列表）；带 category 返回该分类下的全部经验条目。"
-            "当用户交办具体任务（写代码、调研、写文档、分析问题等）时，开工前先查这里有没有相关经验；"
-            "闲聊、问答、日常对话无需调用。"
+            "回忆工作经验。无参返回分类索引；带 category 返回该分类全部条目。"
+            "交办具体任务(写代码/调研/写文档/分析)前先查有无相关经验；闲聊问答无需调用。"
         ),
         "parameters": {
             "type": "object",
@@ -133,17 +132,14 @@ _RECORD_SCHEMA = {
     "function": {
         "name": "record_experience",
         "description": (
-            "记录一条工作经验，供未来的自己做类似事情时回忆。"
-            "以下时机应记录：用户指出错误并讲解正确做法；用户明显不耐烦或反复强调某事；"
-            "多次尝试后找到有效方法；用户明确说「以后要/不要这样做」；自主工作中踩到坑。"
-            "每条简洁直接，一句话。"
-            "分类纪律：分类要少而稳定。先用无参 recall_experience 查看现有分类，"
-            "必须选一个最接近的已有分类；只有现有分类确实装不下时才允许新建。"
+            "记录一条工作经验，供未来回忆。时机：用户指出错误并讲正确做法、明显不耐烦或反复强调、"
+            "多次尝试后找到有效方法、用户说「以后要/不要」、自主工作踩坑。每条一句话。"
+            "分类少而稳定：先用无参 recall_experience 查已有分类，优先沿用；装不下才新建。"
         ),
         "parameters": {
             "type": "object",
             "properties": {
-                "category": {"type": "string", "description": "经验分类（≤8 字。优先沿用已有分类，不确定先无参调用 recall_experience 查索引）"},
+                "category": {"type": "string", "description": "经验分类(≤8 字。优先沿用已有分类，不确定先无参 recall_experience 查索引)"},
                 "content": {"type": "string", "description": "经验内容（一句话，具体可执行）"},
             },
             "required": ["category", "content"],

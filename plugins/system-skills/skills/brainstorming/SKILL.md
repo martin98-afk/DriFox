@@ -119,18 +119,18 @@ A question about a UI topic is not automatically a visual question. "What does p
 If they agree to the companion, read the detailed guide before proceeding:
 `skills/brainstorming/visual-companion.md`
 
-## Background Bash Tool Integration (DriFox)
+## Background Task Tool Integration (DriFox)
 
-When using Visual Companion in DriFox, use the `bg_start` tool to launch the server:
+When using Visual Companion in DriFox, use the `background_task` tool with `action="start"` to launch the server:
 
 ```xml
-<bg_start command="powershell -Command \&quot;$env:BRAINSTORM_DIR='C:\tmp\brainstorm'; node server.cjs\&quot;" cwd="D:/work/DriFox/app/skills/brainstorming/scripts" />
+<background_task action="start" command="powershell -Command \&quot;$env:BRAINSTORM_DIR='C:\tmp\brainstorm'; node server.cjs\&quot;" cwd="D:/work/DriFox/app/skills/brainstorming/scripts" description="启动可视化配套服务" />
 ```
 
-**Important:** The tool response does NOT include the port. You MUST call `bg_logs` to extract it:
+**Important:** The tool response does NOT include the port. You MUST call `background_task` with `action="logs"` to extract it:
 
 ```xml
-<bg_logs task_id="bg_xxxxxxxx" />
+<background_task action="logs" task_id="bg_xxxxxxxx" description="读取服务端口" />
 ```
 
 From the logs, find the JSON output containing the port:
@@ -145,15 +145,15 @@ Extract the port number and auto-open browser:
 
 Create HTML content files to `/tmp/brainstorm/content/` using the Write tool.
 
-When done, use `bg_stop` to terminate the server:
+When done, use `background_task` with `action="stop"` to terminate the server:
 ```xml
-<bg_stop task_id="bg_xxxxxxxx" />
+<background_task action="stop" task_id="bg_xxxxxxxx" description="关闭服务" />
 ```
 
 **Server lifecycle:**
-1. `bg_start` → launch server, get task_id
-2. `bg_logs` → extract port from stdout JSON
+1. `background_task action="start"` → launch server, get task_id
+2. `background_task action="logs"` → extract port from stdout JSON
 3. `bash` → auto-open browser with `start http://localhost:<port>`
 4. Write HTML → push content to `/tmp/brainstorm/content/`
 5. User sees content in browser (already open)
-6. `bg_stop` → terminate server when finished
+6. `background_task action="stop"` → terminate server when finished

@@ -302,13 +302,13 @@ _READ_SCHEMA = {
     "type": "function",
     "function": {
         "name": "read",
-        "description": "读文件。返回原文，可选行号。默认从 startline 起读 500 行；大文件先给 endline 限定范围再按需续读。支持文本/图片(.png/.jpg/.jpeg/.gif/.webp/.bmp)，图片转 base64 供视觉模型查看，可直接读截图。只读文件不读目录，列目录用 list。改文件前必须先 read 获取精确文本（含空白）；多个独立文件应在同一轮并行读取。记录 mtime 检测外部修改。",
+        "description": "读文件原文，可选行号。默认读 500 行，大文件给 endline 分段。支持文本与图片(png/jpg/jpeg/gif/webp/bmp，转 base64 供视觉模型看)。只读文件，列目录用 list。改文件前必先 read 取原文；多个独立文件同轮并行读。",
         "parameters": {
             "type": "object",
             "properties": {
                 "path": {"type": "string", "description": "文件路径"},
                 "startline": {"type": "integer", "description": "起始行号 (从1开始)", "default": 1},
-                "endline": {"type": "integer", "description": "结束行号(从1开始,含)。不传默认从 startline 起读 500 行"},
+                "endline": {"type": "integer", "description": "结束行号(从1起,含)。缺省 startline+500"},
                 "show_line_numbers": {"type": "boolean", "description": "是否显示行号，默认 False", "default": False},
             },
             "required": ["path"],
@@ -373,7 +373,7 @@ _WRITE_SCHEMA = {
     "type": "function",
     "function": {
         "name": "write",
-        "description": "创建/覆盖文件，自动建目录。整文件覆盖写：已有文件先 read 拿到现状再决定，盲目覆盖会丢用户内容；小改动优先 edit 而非全量重写。超大文件拆成 write 骨架加多次 edit 追加。必须给完整最终内容，不放占位符。",
+        "description": "创建/覆盖文件，自动建目录。整文件覆盖：已有文件先 read 再决定，小改优先 edit。超大文件先 write 骨架再多次 edit。必须给完整内容，禁占位符。",
         "parameters": {
             "type": "object",
             "properties": {
@@ -452,14 +452,14 @@ _EDIT_SCHEMA = {
     "type": "function",
     "function": {
         "name": "edit",
-        "description": "精确文本替换。oldString 必须与文件内容逐字符一致（含空白），不唯一时替换失败——扩大上下文使其唯一，或用 replaceAll 全部替换。oldString 与 newString 相同是无操作，禁止。改前先 read 拿精确文本，行号前缀勿带入 oldString。同一文件多处改动用 multi_edit。",
+        "description": "精确替换文本。oldString 须与原文逐字符一致(含空白)，不唯一则失败：扩大上下文或 replaceAll。oldString 与 newString 相同属无操作，禁止。改前先 read 取原文，勿带行号前缀。同文件多处改用 multi_edit。",
         "parameters": {
             "type": "object",
             "properties": {
                 "path": {"type": "string", "description": "文件路径"},
                 "oldString": {"type": "string", "description": "旧文本(精确匹配，含空白)"},
                 "newString": {"type": "string", "description": "替换后的新文本"},
-                "replaceAll": {"type": "boolean", "description": "替换全部匹配(默认False)。oldString重复时设True", "default": False},
+                "replaceAll": {"type": "boolean", "description": "替换全部匹配(默认 False)。oldString 重复时用", "default": False},
                 **_desc_param("修掉空列表导致的崩溃"),
             },
             "required": ["path", "oldString", "newString"],
@@ -520,14 +520,14 @@ _MULTI_EDIT_SCHEMA = {
     "type": "function",
     "function": {
         "name": "multi_edit",
-        "description": "同一文件多处编辑。edits 按序执行，每项替换 oldString 的首个匹配；oldString 不唯一或不存在会失败——每项扩大上下文保证唯一。全部成功后生成 unified diff 供审查。同文件多处改动用它，勿拆成多次 edit。",
+        "description": "同文件多处编辑。按序替换各 oldString 首个匹配；不唯一或不存在即失败，每项扩大上下文保唯一。成功后出 unified diff。同文件多处改用它，勿拆多次 edit。",
         "parameters": {
             "type": "object",
             "properties": {
                 "path": {"type": "string", "description": "文件路径"},
                 "edits": {
                     "type": "array",
-                    "description": "编辑列表。每项{oldString,newString}，按序替换首个匹配",
+                    "description": "编辑列表 {oldString,newString}，按序替换首个匹配",
                     "items": {
                         "type": "object",
                         "properties": {
@@ -615,7 +615,7 @@ _GREP_SCHEMA = {
     "type": "function",
     "function": {
         "name": "grep",
-        "description": "递归正则搜索文件内容，返回命中行。找文件名用 glob，列目录用 list。pattern 用正则语法；include 过滤文件模式（如 '*.py'）缩小范围；path 默认当前目录。未知代码位置时先 grep 关键标识符再 read。",
+        "description": "递归正则搜索内容，返回命中行。找文件名用 glob，列目录用 list。include 过滤文件(如 '*.py')，path 默认当前目录。不知位置先 grep 关键标识符再 read。",
         "parameters": {
             "type": "object",
             "properties": {
@@ -739,11 +739,11 @@ _GLOB_SCHEMA = {
     "type": "function",
     "function": {
         "name": "glob",
-        "description": "通配符递归查找文件名，支持 **、*、?。如 '*.py'、'src/**/*.ts'。只匹配路径不搜内容，按内容找代码用 grep。",
+        "description": "通配符递归查文件名，支持 ** * ?。如 '*.py'、'src/**/*.ts'。只匹配路径；按内容找用 grep。",
         "parameters": {
             "type": "object",
             "properties": {
-                "pattern": {"type": "string", "description": "匹配模式：如 *.py, **/*.json, src/**/*.ts"},
+                "pattern": {"type": "string", "description": "匹配模式，如 *.py、src/**/*.ts"},
                 "path": {"type": "string", "description": "搜索起始路径 (默认当前目录)", "default": "."},
             },
             "required": ["pattern"],

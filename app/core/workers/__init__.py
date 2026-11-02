@@ -19,7 +19,7 @@ _LAZY_IMPORTS: dict[str, tuple[str, tuple[str, ...]]] = {
         ("AggregatedCacheStats", "CacheHitRateTracker", "CacheStats"),
     ),
     "chat_worker": ("app.core.workers.chat_worker", ("OpenAIChatWorker",)),
-    "subagent_worker": ("app.core.workers.subagent_worker", ("SubAgentExecutor", "SubAgentManager")),
+    "subagent_worker": ("app.core.workers.subagent_worker", ("SubAgentExecutor",)),
     "topic_summary": ("app.core.workers.topic_summary", ("TopicSummaryTask",)),
 }
 
@@ -57,7 +57,6 @@ __all__ = [
     # Workers
     "OpenAIChatWorker",
     "SubAgentExecutor",
-    "SubAgentManager",
     # Tasks
     "TopicSummaryTask",
     # Cache Tracker

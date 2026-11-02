@@ -24,7 +24,7 @@ import threading
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, List, Optional
 
 from app.plugins.sdk import ToolResult
 
@@ -566,12 +566,11 @@ _READ_SCHEMA = {
     "function": {
         "name": "memory_read",
         "description": (
-            "读长期记忆。scope=global/project：返回对应 MEMORY.md 全文（超上限时截断并附整理原则，整理后用 memory_write 写回精简版）；"
-            "scope=daily 带 date 读某天日志全文（长日志自动分页，翻页加 page）；不带 date 列近期索引（limit 控制条数）；"
-            "scope=daily 带 level/from_date/to_date/search/summary_only 任一参数进入查询模式：按等级/日期范围/正则过滤，"
-            "summary_only=true 只看「时刻|等级|摘要」，跨天条目流按时间线正序分页（date 收窄为单日过滤，与 from_date/to_date 互斥）；"
-            "不传 scope 返回概览。已蒸馏日志（.distilled）仍可读。"
-            "用户提到过去工作、旧决策、项目约定而当前上下文没有时，先来这里查。"
+            "读长期记忆。scope=global/project：返回 MEMORY.md 全文(超上限截断并附整理原则，整理后用 memory_write 写回)；"
+            "scope=daily 带 date 读某天日志(长日志分页，翻页加 page)；不带 date 列近期索引(limit 控条数)；"
+            "scope=daily 带 level/from_date/to_date/search/summary_only 进查询模式(按等级/日期/正则过滤，"
+            "summary_only 只出「时刻|等级|摘要」，跨天条目按时间正序分页；date 与 from_date/to_date 互斥)；"
+            "不传 scope 给概览。已蒸馏日志仍可读。用户提到过去工作/旧决策/项目约定而上下文没有时先查这里。"
         ),
         "parameters": {
             "type": "object",
@@ -583,31 +582,31 @@ _READ_SCHEMA = {
                 },
                 "page": {
                     "type": "integer",
-                    "description": "scope=daily 且带 date 时：条目分页页码（每页 20 条），缺省第 1 页",
+                    "description": "scope=daily 且带 date：条目分页页码(每页 20 条)，缺省第 1 页",
                 },
                 "level": {
                     "type": "string",
-                    "description": "scope=daily 查询模式：按等级过滤，逗号分隔多值，如 WARNING 或 info,error",
+                    "description": "按等级过滤，逗号分隔多值，如 WARNING 或 info,error",
                 },
                 "from_date": {
                     "type": "string",
-                    "description": "scope=daily 查询模式：起始日期 YYYY-MM-DD（含），缺省不限；与 date 互斥",
+                    "description": "起始日期 YYYY-MM-DD（含），缺省不限",
                 },
                 "to_date": {
                     "type": "string",
-                    "description": "scope=daily 查询模式：结束日期 YYYY-MM-DD（含），缺省今天；与 date 互斥",
+                    "description": "结束日期 YYYY-MM-DD（含），缺省今天",
                 },
                 "search": {
                     "type": "string",
-                    "description": "scope=daily 查询模式：按正则（忽略大小写）过滤条目，编译失败自动回落子串",
+                    "description": "按正则过滤(忽略大小写，编译失败回退子串)",
                 },
                 "summary_only": {
                     "type": "boolean",
-                    "description": "scope=daily 查询模式：true 只输出「时刻 | 等级 | 摘要」一行，不含正文",
+                    "description": "true 只输出「时刻 | 等级 | 摘要」一行，不含正文",
                 },
                 "limit": {
                     "type": "integer",
-                    "description": "scope=daily 不带 date 时：索引条数上限（默认 7，最大 90）",
+                    "description": "scope=daily 不带 date：索引条数上限(默认 7，最大 90)",
                 },
             },
         },
@@ -619,54 +618,48 @@ _WRITE_SCHEMA = {
     "function": {
         "name": "memory_write",
         "description": (
-            "写长期记忆。最简写法：一条一行，只写结论/关键数字/坑与修法，不写过程。\n"
-            "scope=daily：追加当日工作日志。**门槛高**：只有产出跨会话仍有用的结论时才记（定案、踩坑与修法、量化基线、"
-            "用户明确要求）；同一任务多轮打磨只记最终结论一次；探路、试错、中途状态、待办一律不记。"
-            "正文硬上限 400 字符，超限拒写。禁止：过程叙述、复述需求、推理链、代码/日志粘贴、"
-            "分节小标题（## 现象/## 根因）。summary=一句话结论（≤30 字），level=INFO/WARNING/ERROR。"
-            "新一天首条 daily 若存在未蒸馏旧日志会被拒，按返回指令蒸馏并打标后重试。\n"
-            "scope=project：项目 MEMORY.md。记一条增量内容用 mode=append（末尾追加，不碰已有行）；"
-            "整体替换（mode 缺省）必须先读后写，带 memory_read 返回末尾的 base 做版本校验，"
-            "新内容比现有缩水超 60% 需 consolidate=true 确认是有意整理。"
-            "只记 AGENTS.md 没有的动态沉淀（坑、决策理由、易错点、用户偏好），"
-            "一条一碎片、禁散文；AGENTS.md 静态规范（构建/测试/目录/风格/提交/EOL）禁止抄入；超上限拒写（默认 3000 字符）。\n"
-            "scope=global：全局 MEMORY.md。记一条用 mode=append；整体替换规则同 project（先读拿 base，大幅精简带 consolidate）。"
-            "准入极严：仅用户显式要求的跨项目规则、蒸馏筛出的最珍贵且与项目无关经验；"
-            "超上限拒写（默认 4000 字符）。除用户明确要求，不存密钥。"
-            "若已定义记忆分区（系统提示列了分区清单）：append 必须带 section，整体替换必须按 ## 分区名 组织，"
-            "出现清单外标题/分区块内 # 小节/分区外 - 条目会被拒写并返回诊断；"
-            "不确定能否通过时先 dry_run=true 只校验不落盘。"
+            "写长期记忆。一条一行，只写结论/关键数字/坑与修法，不写过程。\n"
+            "scope=daily：追加当日日志。门槛高：只记跨会话有用的结论(定案、坑与修法、量化基线、用户明确要求)；"
+            "同一任务多轮打磨只记最终结论一次；探路/试错/中途状态/待办不记。"
+            "正文 ≤400 字符，超限拒写。禁过程叙述、复述需求、推理链、代码/日志粘贴、分节小标题。"
+            "summary=一句话结论(≤30 字)，level=INFO/WARNING/ERROR。新一天首条若存在未蒸馏旧日志会被拒，按返回指令蒸馏打标后重试。\n"
+            "scope=project：项目 MEMORY.md。记一条用 mode=append；整体替换先读后写，带 memory_read 末尾 base 做版本校验，"
+            "缩水超 60% 需 consolidate=true。只记 AGENTS.md 没有的动态沉淀(坑/决策理由/易错点/偏好)，一条一碎片禁散文；"
+            "静态规范禁抄；超上限拒写(默认 3000 字符)。\n"
+            "scope=global：全局 MEMORY.md。记一条用 mode=append；整体替换同 project。"
+            "准入极严：仅用户显式要求的跨项目规则、蒸馏出的与项目无关经验；超上限拒写(默认 4000 字符)。不存密钥。"
+            "已有分区时 append 必带 section(照抄分区名)，整体替换按 ## 分区名 组织；越界会被拒并返诊断，不确定先 dry_run=true。"
         ),
         "parameters": {
             "type": "object",
             "properties": {
                 "scope": {
                     "type": "string",
-                    "description": "daily（日志追加）/ project（项目 MEMORY.md）/ global（全局 MEMORY.md）",
+                    "description": "daily(日志追加)/project(项目 MEMORY.md)/global(全局 MEMORY.md)",
                 },
                 "content": {
                     "type": "string",
-                    "description": "daily=细节正文（≤400 字符，超出拒写）；project/global=完整新文件内容（replace）或一条新内容（append）",
+                    "description": "daily=正文(≤400 字符，超出拒写)；project/global=完整新内容(replace)或单条(append)",
                 },
                 "mode": {
                     "type": "string",
-                    "description": "scope=global/project 时：replace（缺省，整体替换）/ append（末尾追加一条，高频记一条用这个，不会覆盖已有内容）",
+                    "description": "scope=global/project：replace(缺省，整体替换)/append(追加一条，高频记一条用这个，不覆盖已有内容)",
                 },
                 "section": {
                     "type": "string",
-                    "description": "scope=global 且 mode=append 时必填（已定义分区时）：目标分区名，逐字照抄系统提示的分区清单；内容插到该分区块末尾",
+                    "description": "scope=global 且 append 必填(有分区时)：分区名，照抄系统提示的分区清单",
                 },
                 "dry_run": {
                     "type": "boolean",
-                    "description": "只跑校验不落盘（不写快照、不校验乐观锁）：scope=global 且 mode=replace 时用于预检分区合规，通过后再真写",
+                    "description": "只校验不落盘：global 且 replace 时预检分区合规，通过后再真写",
                 },
                 "base": {
                     "type": "string",
-                    "description": "整体替换的乐观锁：memory_read 返回末尾 (base: ...) 的值；磁盘版本与它不一致时拒写（防多会话覆盖）",
+                    "description": "乐观锁：memory_read 末尾 (base: ...) 值，不一致拒写(防多会话覆盖)",
                 },
                 "consolidate": {
                     "type": "boolean",
-                    "description": "整体替换时新内容比现有缩水超 60% 必须为 true（确认是有意整理而非误写）",
+                    "description": "替换内容缩水超 60% 必须 true(确认有意整理)",
                 },
                 "level": {
                     "type": "string",
@@ -678,7 +671,7 @@ _WRITE_SCHEMA = {
                 },
                 "mark_distilled": {
                     "type": "boolean",
-                    "description": "daily 蒸馏完成打标：true 时给 date 指定日志打 .distilled 标（保留可查，蒸馏/门禁均忽略），content 可空",
+                    "description": "给 date 指定日志打 .distilled 标(保留可查，蒸馏/门禁忽略)，content 可空",
                 },
             },
             "required": ["scope"],

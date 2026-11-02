@@ -43,7 +43,7 @@ from loguru import logger
 from qframelesswindow.titlebar import TitleBarBase
 from qframelesswindow.titlebar.title_bar_buttons import TitleBarButton, TitleBarButtonState
 
-from app.utils.design_tokens import Animations, Colors, font_size_css
+from app.utils.design_tokens import Animations, Colors, font_size_css, readable_text_on
 from app.utils.main_thread_watchdog import resume_reporting, suspend_reporting
 from app.utils.utils import get_font_family_css, get_icon
 
@@ -608,7 +608,8 @@ class CustomTabButton(QWidget):
         if self._badge_label is None:
             return
         self._badge_label.setStyleSheet(
-            f"QLabel {{ color: {Colors.BUTTON_TEXT_ON_ACCENT}; background: {Colors.TEXT_ACCENT};"
+            f"QLabel {{ color: {readable_text_on(Colors.TEXT_ACCENT, Colors.BUTTON_TEXT_ON_ACCENT)};"
+            f" background: {Colors.TEXT_ACCENT};"
             " border-radius: 6px; font-size: 9px; font-weight: 600;"
             " padding: 0 4px; min-height: 12px; }"
         )

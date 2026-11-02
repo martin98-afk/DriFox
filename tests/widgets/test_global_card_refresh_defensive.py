@@ -45,14 +45,13 @@ def _make_controller(cards):
     ctl._diff_viewer_card = cards[5]
     ctl._chart_viewer_card = cards[6]
     ctl._file_undo_card = cards[7]
-    ctl._sub_agent_session_card = cards[8]
     return ctl
 
 
 def test_runtime_error_card_does_not_block_rest():
     """序列 [健康, 已销毁, 健康]：中间卡抛 RuntimeError，后续卡仍被刷新。"""
     live_before, dead, live_after = _LiveCard(), _DeadCard(), _LiveCard()
-    ctl = _make_controller([live_before, dead, live_after, None, None, None, None, None, None])
+    ctl = _make_controller([live_before, dead, live_after, None, None, None, None, None])
     ctl.refresh_theme_styles()
     assert live_before.refreshed == 1
     assert live_after.refreshed == 1, "已销毁卡抛 RuntimeError 后，序列后续健康卡必须仍被刷新"
@@ -60,5 +59,5 @@ def test_runtime_error_card_does_not_block_rest():
 
 def test_all_dead_cards_no_crash():
     """全已销毁序列：整体静默跳过，不向调用方抛错。"""
-    ctl = _make_controller([_DeadCard() for _ in range(9)])
+    ctl = _make_controller([_DeadCard() for _ in range(8)])
     ctl.refresh_theme_styles()  # 不抛即通过

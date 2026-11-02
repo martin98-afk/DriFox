@@ -1142,6 +1142,13 @@ class PluginManager:
         self._unload_plugin_ui(name)
         # 对齐工具注册（该插件工具注销；watcher 未启动时跳过）
         self._rescan_plugin_tools(name, enabled=False)
+        # 注销该插件的贡献项（动态技能源/命令/智能体，能力池）
+        try:
+            from app.plugins.registries.contribution_registry import ContributionRegistry
+
+            ContributionRegistry.get_instance().unregister_source(name)
+        except Exception as e:
+            logger.warning(f"[PluginManager] 注销插件贡献失败: {e}")
         # 状态实际变化才触发（幂等跳过重复禁用）；置于末尾保证 diff 拿到注销后状态
         if state_changed:
             self._trigger_plugin_changed_hook("disabled", name)

@@ -20,6 +20,7 @@ import argparse
 import base64
 import json
 import os
+import random
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -46,6 +47,12 @@ class FakeGiteeStore:
         self._lock = threading.Lock()
         self.files: Dict[str, Dict[str, str]] = {}  # path -> {"content": b64, "sha": }
         self.requests: List[Dict[str, object]] = []
+        # 故障注入：fail_rate 请求直接 5xx（未执行）；
+        # drop_response_rate 已写入但返回 5xx（模拟响应丢失）
+        self.fail_rate = 0.0
+        self.drop_response_rate = 0.0
+        self.fail_status = 500
+        self._rng = random.Random(0)
         self._load()
 
     # ── 持久化 ──
@@ -112,6 +119,9 @@ class FakeGiteeStore:
             new_sha = _git_blob_sha(content)
             self.files[path] = {"content": base64.b64encode(content).decode(), "sha": new_sha}
             self._save()
+            if self.drop_response_rate and self._rng.random() < self.drop_response_rate:
+                # 写入已生效但客户端看到 5xx：重试时会走合并而不是覆盖
+                return self.fail_status, {"message": "injected: response lost after write"}
             return 200, {"content": {"sha": new_sha, "path": path}}
 
     def post(self, path: str, content: bytes) -> tuple[int, dict]:
@@ -122,6 +132,8 @@ class FakeGiteeStore:
             new_sha = _git_blob_sha(content)
             self.files[path] = {"content": base64.b64encode(content).decode(), "sha": new_sha}
             self._save()
+            if self.drop_response_rate and self._rng.random() < self.drop_response_rate:
+                return self.fail_status, {"message": "injected: response lost after write"}
             return 201, {"content": {"sha": new_sha, "path": path}}
 
     def record(self, entry: Dict[str, object]) -> None:
@@ -160,9 +172,20 @@ class _Handler(BaseHTTPRequestHandler):
         rel = path.split(marker, 1)[1].strip("/")
         return rel or None
 
+    def _maybe_fault(self) -> bool:
+        """按故障率直接返回 5xx（请求未执行）"""
+        store = self.store
+        if not store.fail_rate or store._rng.random() >= store.fail_rate:
+            return False
+        store.record({"method": "FAULT", "path": self._parse()})
+        self._send(store.fail_status, {"message": "injected fault"})
+        return True
+
     def do_GET(self) -> None:
         rel = self._parse()
         self.store.record({"method": "GET", "path": rel})
+        if self._maybe_fault():
+            return
         if not rel:
             self._send(404, {"message": "bad path"})
             return
@@ -205,6 +228,8 @@ class _Handler(BaseHTTPRequestHandler):
     def do_PUT(self) -> None:
         rel = self._parse()
         self.store.record({"method": "PUT", "path": rel})
+        if self._maybe_fault():
+            return
         if not rel:
             self._send(404, {"message": "bad path"})
             return
@@ -218,6 +243,8 @@ class _Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         rel = self._parse()
         self.store.record({"method": "POST", "path": rel})
+        if self._maybe_fault():
+            return
         if not rel:
             self._send(404, {"message": "bad path"})
             return

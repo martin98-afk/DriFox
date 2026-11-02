@@ -1,35 +1,12 @@
 # -*- coding: utf-8 -*-
-"""prompts.py — 记忆系统说明书 + 经验体系 LLM 模板（中文）。
+"""prompts.py — 记忆系统说明书（中文）。
 
 结构对齐 WorkBuddy 的 workbuddy-memory-system.md（三层记忆规范），
-品牌词全部替换为 drifox。编译/传送带（openhanako 系）prompt 已随管线删除。
+品牌词全部替换为 drifox。写入由模型经 memory_write 自主完成，
+后台整理/反思的 LLM 模板已随管线一并删除。
 """
 
 from typing import Dict, List
-
-_SYSTEM = "你是记忆整理器。输出面向 LLM 回读而非人类阅读：记忆碎片式高密度条目，零冗余。只输出要求的内容，不解释，不加 markdown 代码围栏。"
-
-# 各模板共用的高密度输出风格：碎片化条目，形式像人类记忆，内容保真不能松
-_STYLE = (
-    "输出风格（读者是 LLM，非人类）：\n"
-    "- 一条一碎片：`[标签] 对象: 事实`，一行一条，每行 ≤60 字符，写不下拆成多条；标签取 [事实][决策][偏好][坑]，无合适则省略\n"
-    "- 只写固定内容：已完成的进展、事实、决策、偏好/用户习惯、坑；\n"
-    "  禁写待办、计划、未完成事项等实时性状态（它们天然过时，读了误导）\n"
-    "- 禁完整句、禁连接词、禁修饰语；主语可省。如「修 persona.py 打包丢 getpass」，\n"
-    "  不写「我们发现并修复了 persona.py 中的打包问题」\n"
-    "- 数字/路径/函数名/API/错误原文逐字保留，不翻译不改写、不自造缩写\n"
-    "- 时间用绝对日期（如 09-03），禁「昨天/上次/最近」\n"
-    "- 每条自包含，脱离上下文可解码；禁「同上」「见前」\n"
-    "- 不确定的信息不写，禁止脑补\n"
-)
-
-
-def _msg(user_text: str) -> list:
-    return [
-        {"role": "system", "content": _SYSTEM},
-        {"role": "user", "content": user_text},
-    ]
-
 
 # ── 记忆系统说明书（BuildSystemPrompt 注入，照抄 WorkBuddy 结构）────
 
@@ -198,41 +175,4 @@ def _distill_global_step(global_file: str, sections: List[Dict[str, str]] | None
         "   校验不通过会返回结构化诊断（unknown_titles/header_in_block/preamble_bullets/skeleton），\n"
         "   按诊断改完再提交；反复失败就直接照 skeleton 填。\n"
         "   校验通过后去掉 dry_run 真写。全局整理未成功前不要打标。"
-    )
-
-
-# ── 经验库压缩 ──────────────────────────────────────────
-
-
-def build_consolidate(entries: List[Dict[str, str]]) -> list:
-    lines = "\n".join(f"- [{e.get('category', '')}] {e.get('content', '')}" for e in entries)
-    return _msg(
-        "你是经验库的压缩器。下面是一个 AI 助手全部工作经验条目（带当前分类）。\n"
-        "压缩合并：语义相近的多条合并成一条、重复的只留一条、过时或被新实践覆盖的删掉，"
-        "长条目改写成碎片表述。跨分类的重复也一并合并，相近分类可合并成一个新分类。\n"
-        "保留全部仍然有效的事实，禁止编造原文不存在的内容。\n"
-        "- 每条仍是一条碎片：对象+动作+关键细节，具体可执行\n"
-        "- 分类纪律：分类宜少而稳定，优先沿用输入中已有的分类，相近分类可合并；确有必要才新建\n"
-        '- 只输出 JSON 数组：[{"category": "...", "content": "..."}]，无可保留内容输出 []\n\n'
-        f"【全部条目（{len(entries)} 条）】\n{lines}"
-    )
-
-
-# ── 经验反思 ────────────────────────────────────────────
-
-
-def build_reflect(identity_and_persona: str, memory_md: str, existing_experience: str) -> list:
-    return _msg(
-        "你是一个 AI 助手的自我反思器。下面是这个助手的人格简介、最近的记忆、以及已有的经验库。\n"
-        "请从**最近的记忆**中提炼出 0-3 条「工作心得」——即这个助手在与用户协作中沉淀出的、"
-        "未来做类似事情时应该记住的做法或教训（例：用户的代码风格偏好、某类任务的有效工作流、踩过的坑）。\n"
-        "要求：\n"
-        "- 只提炼记忆中有依据的心得，不要泛泛的空话（如「要认真负责」）\n"
-        "- content 一条碎片：对象+动作+关键细节，具体可执行\n"
-        "- 分类纪律：分类要少而稳定。必须优先从「已有经验库」里选一个最接近的分类，"
-        "只有现有分类确实装不下时才允许新建；给出分类（≤8 字）\n"
-        '- 只输出 JSON 数组：[{"category": "...", "content": "..."}]，没有心得输出 []\n\n'
-        f"【助手人格】\n{identity_and_persona.strip()[:1500]}\n\n"
-        f"【最近记忆】\n{memory_md.strip()[:4000] or '（空）'}\n\n"
-        f"【已有经验库】\n{existing_experience.strip()[:2500] or '（空）'}"
     )

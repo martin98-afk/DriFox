@@ -1,19 +1,20 @@
 # -*- coding: utf-8 -*-
-"""
-SubAgentSessionCard — 内嵌子智能体会话卡片，覆盖右侧对话区域（类似系统设置）
+"""子智能体会话卡（插件侧实现，full 容器浮动卡）
 
-替代弹窗式 SubAgentSessionDialog（QDialog），以系统卡片形式嵌入全局卡片容器，
-利用 TabManagerWindow 的覆盖层栈（QStackedWidget）切换对话区/会话面板，
-与 DiffViewerCard 同构。
+原 ``app/widgets/cards/settings/sub_agent_session_card.py``：自系统的 TOP 覆盖层
+迁到插件浮动卡槽位（``container="full"``），行为不变，覆盖对话区展示单个子智能体
+的完整运行日志（左导览 + 右消息流，运行中按 logs_provider 轮询刷新）。
 
-以 MessageCard 同款样式渲染子智能体的运行日志/消息：
-左侧导览栏 + 右侧详细消息布局。
-支持 logs_provider 回调实现实时更新（子智能体执行中自动轮询刷新）。
+宿主差异点：
+- 关闭走 ``closed`` 信号 → 注册表隐藏卡片（不再由 GlobalCardController 接管）；
+- 数据由 ``SubAgentSessionService.show()`` 灌入（主程序经服务门面调用）；
+- ``BaseSettingsCard`` 仍复用宿主 UI 基类（标题栏 + 内容区布局），不重造外壳。
 """
 
 import time
 from typing import Any, Callable, Dict, List, Optional
 
+from loguru import logger
 from PyQt5.QtCore import QTimer
 from PyQt5.QtWebEngineWidgets import QWebEngineView
 from PyQt5.QtWidgets import QFrame, QHBoxLayout, QLabel, QSizePolicy, QWidget
@@ -44,7 +45,7 @@ def _get_subagent_icon_html(icon_name: str = "设置-subagent", size: int = 18) 
         from app.utils.theme_manager import theme_manager
 
         prefix = "qrc:/icons_light" if theme_manager.is_light_theme() else "qrc:/icons"
-    except (ImportError, AttributeError):
+    except ImportError, AttributeError:
         prefix = "qrc:/icons"
     return f'<img src="{prefix}/{icon_name}.svg" style="width:{size}px;height:{size}px;vertical-align:middle;" />'
 
@@ -70,6 +71,27 @@ LOG_TYPE_LABELS = {
 }
 
 
+def _current_facade():
+    """取当前活跃窗口的子智能体门面与当前会话 id（插件未加载返回 (None, "")）。"""
+    try:
+        from app.plugins.capabilities.resolve import active_main_widget
+        from app.plugins.registries.window_services import get_window_services
+
+        mw = active_main_widget()
+        if mw is None:
+            return None, ""
+        window_id = str(getattr(mw, "_window_id", "") or "")
+        facade = get_window_services().get("subagent", window_id)
+        backend = getattr(mw, "backend", None)
+        try:
+            session = backend.get_current_session() if backend is not None else None
+        except Exception:  # noqa: BLE001
+            session = None
+        return facade, str(getattr(session, "session_id", "") or "")
+    except Exception:  # noqa: BLE001 - 无窗口/插件缺失按不可恢复处理
+        return None, ""
+
+
 class SubAgentSessionCard(BaseSettingsCard):
     """内嵌子智能体会话卡片 - 左侧导览栏 + 右侧详细消息布局"""
 
@@ -87,6 +109,7 @@ class SubAgentSessionCard(BaseSettingsCard):
         self._logs: List[Dict[str, Any]] = []
         self._summary: Dict[str, Any] = {}
         self._logs_provider: Optional[Callable[[], Dict]] = None
+        self._bound_session_id = ""
         self._last_log_count = 0
         self._result_appended = False
         self._poll_timer: Optional[QTimer] = None
@@ -189,9 +212,39 @@ class SubAgentSessionCard(BaseSettingsCard):
         super().hideEvent(event)
 
     def showEvent(self, event):
-        """重新显示时若任务仍在运行，恢复轮询（被互斥隐藏期间轮询已停）"""
+        """重新显示时：恢复轮询 + 按当前会话恢复内容（同成果框语义）。"""
         super().showEvent(event)
+        self._recover_for_current_session()
         self._start_polling()
+
+    def _recover_for_current_session(self) -> None:
+        """按当前会话恢复会话卡内容（空卡或会话已切换时）。
+
+        「恢复」= 打开卡片时从当前会话取最近一个子智能体任务重新灌入，
+        与成果框（artifacts）每次显示时按当前会话拉数据同构；不依赖上
+        一次的内存状态。
+        """
+        facade, session_id = _current_facade()
+        if facade is None:
+            return
+        if self._task_id and self._bound_session_id == session_id:
+            return  # 已绑定同一会话的任务，不打扰
+        try:
+            data = facade.latest_task()
+        except Exception as e:  # noqa: BLE001 - 恢复失败保持现状
+            logger.debug(f"[system-subagent] 会话卡恢复失败: {e}")
+            return
+        if not data or not data.get("found"):
+            return
+        task_id = data.get("task_id", "")
+        self._bound_session_id = session_id
+        self.load(
+            task_id,
+            data.get("agent_name", ""),
+            data.get("logs", []),
+            data.get("summary", {}),
+            lambda: facade.get_task_logs(task_id),
+        )
 
     def _stop_polling(self):
         """停止轮询定时器"""

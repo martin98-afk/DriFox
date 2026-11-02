@@ -134,7 +134,6 @@ def test_create_defaults_and_experience_field(tmp_path):
     a = mgr.create("测试助手")
     assert a.yuan == "build"
     assert a.experience_enabled is False
-    assert a.utility_model == ""
     # 落盘回读
     text = (mgr.assistant_dir(a.id) / "assistant.yaml").read_text(encoding="utf-8")
     assert "experience_enabled" in text
@@ -228,83 +227,23 @@ def test_persona_registry_via_facade(tmp_path, monkeypatch):
     assert "build" in ids and "hanako" in ids and "none" in ids
 
 
-def test_utility_llm_composite_key(tmp_path, monkeypatch):
-    """utility_model 复合键 "<config_id>||<model>"：解析 override 覆盖模型名；失效回退全局。
 
-    调用链已改走主对话引擎（services["create_engine_session"]），断言点从
-    HTTP 请求体改为引擎会话的 model_config_override。
+
+def test_invalidate_session_prompt_is_static(tmp_path, monkeypatch):
+    """守卫：instance._invalidate_session_prompt(sid) 单参可调用。
+
+    漏 staticmethod 时 session_id 会被 self 吃掉、真实 sid 变成多余实参，
+    TypeError 被上层 except 吞掉 → 会话 system_prompt 缓存永不清 → 选中的
+    助手身份本轮不生效（@提及与 UI 选中两条路径同时失效）。
     """
     mgr = _fresh_manager(tmp_path)
-    a = mgr.create("模型助手")
-    # 复合键：配置存在 → override 覆盖 模型名称
-    a.utility_model = "cfg-1||model-x"
-    mgr.update(a)
+    called = []
 
-    captured = {}
-    llm_mod = mgr._core_llm()
+    def _fake_caps(cap_id):
+        if cap_id != "session.invalidate":
+            return None
+        return lambda sid="": called.append(sid)
 
-    class _FakeSession:
-        def turn(self, messages=None, **kwargs):
-            return _FakeResult("ok")
-
-        def cleanup(self):
-            pass
-
-    class _FakeResult:
-        def __init__(self, text):
-            self.text = text
-            self.error = None
-            self.cancelled = False
-            self.timed_out = False
-
-    def _create_engine_session(engine_name, **kwargs):
-        captured["kwargs"] = kwargs
-        return _FakeSession()
-
-    llm_mod.set_services({"create_engine_session": _create_engine_session})
-
-    # mock 主路径：UIPluginRegistry 返回带 _valid_configs 的窗口（对齐真实调用链）
-    fake_mw = type("MW", (), {})()
-    fake_mw._valid_configs = {
-        "cfg-1": {"API_URL": "https://cfg1/v1", "API_KEY": "k1", "模型名称": "default-m", "provider_name": "P1"}
-    }
-
-    class _FakeReg:
-        _main_widget = fake_mw
-        _window_main_widgets = {}
-
-        @classmethod
-        def get_instance(cls):
-            return cls()
-
-    import app.plugins.registries.ui_plugin_registry as _reg_mod
-
-    monkeypatch.setattr(_reg_mod, "UIPluginRegistry", _FakeReg)
-
-    def _override():
-        return captured["kwargs"].get("model_config_override") or {}
-
-    call = mgr._utility_llm(a.id)
-    out = call([{"role": "user", "content": "hi"}])
-    assert out == "ok"
-    # 复合键生效：URL 用 cfg-1，模型名被覆盖为 model-x
-    assert _override()["API_URL"] == "https://cfg1/v1"
-    assert _override()["模型名称"] == "model-x"
-
-    # 无效复合键（配置不存在）→ 回退全局（无 override，只用工具型温度）
-    b = mgr.create("回退助手")
-    b.utility_model = "not-exist||m"
-    mgr.update(b)
-    call2 = mgr._utility_llm(b.id)
-    call2([{"role": "user", "content": "hi"}])
-    assert "模型名称" not in _override()
-
-    # 空键 → 跟随全局
-    c = mgr.create("全局助手")
-    call3 = mgr._utility_llm(c.id)
-    call3([{"role": "user", "content": "hi"}])
-    assert "模型名称" not in _override()
-
-    llm_mod.reset_sessions()
-    with llm_mod._services_lock:
-        llm_mod._services.clear()
+    monkeypatch.setattr(m, "_caps", _fake_caps)
+    mgr._invalidate_session_prompt("sid-x")
+    assert called == ["sid-x"]

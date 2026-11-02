@@ -951,8 +951,16 @@ class HistoryManager:
         """跨进程一致性：检测 SQLite 被其他 OS 进程修改后，把本进程内存缓存与
         SQLite 重新对齐，避免各窗口的历史卡片/欢迎卡片互相陈旧、且重开也无法刷新。
 
-        安全策略：重载前先 flush 本进程挂起写（确保本进程状态已落盘），再整体从
-        SQLite 重载内存缓存，杜绝「重载覆盖其他进程保存」的数据丢失。
+        [PERF] 读路径不得同步写盘。旧实现在签名变化时无条件 ``self.flush()``
+        （内部 ``_do_save(synchronous=True)``：全量 serialize+zstd+写盘，大会话
+        实测 500ms+），而签名变化最常见的来源就是**本进程自己刚写完**——
+        流式结束 → _save_current_session_to_history 置脏 → _notify_history_data_changed
+        → get_history_list → 本方法，每次对话完都白付一次同步全量写盘。
+        2026-10-31 运行日志里 MainThreadWatchdog 抓到 4 次（最长 544ms）。
+
+        改成：本进程有待保存会话时，内存就是最新权威数据。把写丢给后台线程，
+        本次**不重载**（重载会把内存换成 SQLite 旧快照，反而丢数据），签名也
+        不推进，下次读取时再对齐（后台写完成时会 ``_refresh_db_signature``）。
         仅应在读取路径（get_history_list 等）调用，不破坏写入路径的权威状态。
         """
         if not self._use_sqlite or self._session_store is None:
@@ -963,11 +971,17 @@ class HistoryManager:
         if self._db_signature_stored is not None and sig == self._db_signature_stored:
             return  # 未变化，跳过（含本进程自身写入后已对齐的情况）
 
-        # 文件变化 → 先 flush 本进程挂起写，再整体重载
-        try:
-            self.flush()
-        except Exception:
-            logger.exception("[HistoryManager] 跨进程重载前 flush 失败")
+        if self._pending_save_session_id:
+            # 本进程有未落盘的写：内存领先于 SQLite，重载会回退。后台写盘后再对齐。
+            logger.debug(
+                f"[HistoryManager] 有待保存会话，跳过跨进程重载并异步写盘: "
+                f"{self._pending_save_session_id[:8]}..."
+            )
+            try:
+                self.flush_async()
+            except Exception:
+                logger.exception("[HistoryManager] 跨进程重载前 flush_async 失败")
+            return
 
         with self._history_load_lock:
             try:
@@ -1009,7 +1023,11 @@ class HistoryManager:
             return []
 
     def get_history_list(
-        self, project: str = None, with_messages: bool = False, merge_team: bool = False
+        self,
+        project: str = None,
+        with_messages: bool = False,
+        merge_team: bool = False,
+        sync_db: bool = True,
     ) -> List[Dict]:
         """获取历史会话列表，可选按项目过滤，按最后对话时间排序
 
@@ -1019,10 +1037,17 @@ class HistoryManager:
             merge_team: 为 True 时，team_run_id 非空的会话按 run_id 聚合为
                 单个合并条目（团队成员不再逐条出现），普通会话条目保持不变。
                 仅在 with_messages=False（轻量列表）时生效。
+            sync_db: 为 False 时跳过跨进程重载探测（_reload_if_db_changed），
+                直接信任本进程内存。仅供「本进程刚写入、内存即权威」的高频
+                读取热路径使用（欢迎卡每轮收尾刷新）——db signature 每轮保存
+                后必然变化，探测会在主线程触发全量 SQLite 重载 + WAL 锁等待
+                （watchdog 实测 500ms+）。跨进程变更由低频读取方（历史面板等
+                sync_db=True 调用）兜底刷新，欢迎卡只损失展示时效性。
         """
         self._ensure_history_loaded()
         # 跨进程一致性：若其他 OS 进程已提交（WAL 模式写入 -wal），重载本进程内存缓存
-        self._reload_if_db_changed()
+        if sync_db:
+            self._reload_if_db_changed()
         # 先去重
         self._deduplicate_history_sessions()
 
@@ -1716,8 +1741,8 @@ class HistoryManager:
     def get_project_list(self) -> List[str]:
         """全部项目名（排序返回；供历史页项目切换器）
 
-        SQLite 模式走 sessions ∪ key_documents 权威口径（与 get_projects 查重
-        口径一致）：新建项目只写 key_documents（工作目录），首轮对话后才落
+        SQLite 模式走 sessions ∪ project_workdir 权威口径（与 get_projects 查重
+        口径一致）：新建项目只写 project_workdir（工作目录），首轮对话后才落
         sessions；若只从会话聚合，空项目在切换当前项目后会从列表消失，且因
         查重命中而无法重建同名（2026-09-13 修复）。
         """
@@ -2314,6 +2339,13 @@ class HistoryManager:
                     store.save_session(snapshot)
                     if db is not None and getattr(db, "is_connected", False):
                         db.flush()
+                # 与 _do_save 的后台写同口径：本进程刚写库会推进 -wal 的 mtime，
+                # 不刷新签名的话下一次 get_history_list 的 _reload_if_db_changed
+                # 会把自己的写入误判成「外部进程改动」→ 白跑一次全量重载
+                # （1915 条约 19ms，持 _history_load_lock）。读路径已改为
+                # 待保存写时跳过重载并异步落盘，这条刷新就是让紧随其后的那次
+                # 读取能直接命中签名、彻底不重载。
+                self._refresh_db_signature()
             except Exception as e:
                 logger.error(f"[HistoryManager] flush_async 后台保存失败: {e}")
 

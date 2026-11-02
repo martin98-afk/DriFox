@@ -92,12 +92,17 @@ def _caller_plugin(module_globals: Optional[dict]) -> str:
     if not module_globals:
         return ""
     try:
-        from pathlib import Path
+        from pathlib import PurePath
 
         path = module_globals.get("__file__")
         if not path:
             return ""
-        parts = Path(path).resolve().parts
+        # 用 PurePath 而非 Path().resolve()：这里只做「路径里有几个目录段」的
+        # 解析，不需要解符号链接/规范化。resolve → os.path.realpath 在 Windows 上
+        # 要对每一级目录做一次 stat/打开（实测 0.6ms/次），而本函数被 tier 的
+        # _skip() 按「每条 tool 消息」调用，长会话下累积成主线程 500ms+ 阻塞。
+        # PurePath 纯字符串切分（0.003ms），两侧都不含盘符符号链接语义差异。
+        parts = PurePath(path).parts
         if "plugins" in parts:
             return parts[parts.index("plugins") + 1]
     except Exception:

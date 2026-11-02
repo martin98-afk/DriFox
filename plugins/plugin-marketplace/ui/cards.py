@@ -29,7 +29,7 @@ _icon_patch._apply_icon_cache_patch()
 
 from PyQt5 import sip
 
-from PyQt5.QtCore import QObject, QRect, QSize, QThread, Qt, pyqtSignal
+from PyQt5.QtCore import QObject, QRect, QSize, QThread, Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QColor, QFont, QFontMetrics
 from PyQt5.QtWidgets import (
     QFrame,
@@ -129,6 +129,17 @@ def _filter_chip_qss(text_color: str) -> str:
         f"QPushButton:checked {{ background: {_CHIP_ACCENT_BG}; color: {_CHIP_ACCENT};"
         f" border: 1px solid {_CHIP_ACCENT_BORDER}; }}"
     )
+
+
+def _on_solid(bg: str) -> str:
+    """实心底上的前景文字色：亮底用深字，暗底用白字。
+
+    真黑类主题把 accent 定为纯白，按钮再写死白字就是白底白字。
+    判定交给主程序 token，插件不自己拍亮度阈值。
+    """
+    from app.plugins.sdk import readable_text_on
+
+    return readable_text_on(bg, "#ffffff")
 
 
 def _shift_color(color: str, factor: float) -> str:
@@ -939,7 +950,7 @@ class _PluginDetailDialog(MaskDialogBase):
         else:
             # hover/pressed 必须给出可见反馈（原实现两个状态的 background 值相同 → hover 无变化）
             main_btn.setStyleSheet(
-                f"QPushButton {{ background-color: {accent_bg}; color: #ffffff;"
+                f"QPushButton {{ background-color: {accent_bg}; color: {_on_solid(accent_bg)};"
                 f" border: none; border-radius: 8px; padding: 4px 22px;"
                 f" {btn_font} font-weight: bold; }}"
                 f"QPushButton:hover {{ background-color: {_shift_color(accent_bg, 1.18)}; }}"
@@ -1277,7 +1288,7 @@ class _TagFilterDialog(MaskDialogBase):
         ok_btn.setCursor(Qt.PointingHandCursor)
         ok_btn.setFixedHeight(32)
         ok_btn.setStyleSheet(
-            f"QPushButton {{ background-color: {accent_bg}; color: #ffffff; border: none;"
+            f"QPushButton {{ background-color: {accent_bg}; color: {_on_solid(accent_bg)}; border: none;"
             f" border-radius: 8px; padding: 2px 24px; {ff_qss} font-size: {max(8, fs - 1)}px; font-weight: bold; }}"
         )
         ok_btn.clicked.connect(self.accept)
@@ -1386,7 +1397,7 @@ class _ConfirmUninstallDialog(MaskDialogBase):
             f"""
             QPushButton {{
                 background-color: {accent_bg};
-                color: #ffffff;
+                color: {_on_solid(accent_bg)};
                 border: none;
                 border-radius: 8px;
                 padding: 4px 28px;
@@ -3538,6 +3549,10 @@ class MarketplaceCard(QWidget):
     # ── 渲染 ──
 
     _RENDER_BATCH = 15  # 首批同步渲染行数：单行构造 ~13ms，30 行一帧 400ms 是打开掉帧主力，减半打散
+    # [PERF] 单帧渲染时间预算（毫秒）。实测「加载更多」一次 15 行同步建完主线程
+    # 阻塞 502ms（单行 ~33ms，比 _RENDER_BATCH 注释估计的 13ms 高一倍多）。
+    # 取 60ms ≈ 4 帧预算内的可接受停顿；超预算立即让出事件循环续帧。
+    _RENDER_FRAME_BUDGET_MS = 60
     _MAX_CONCURRENT_TASKS = 3  # 任务并发上限：不同插件任务并行，超过则 FIFO 等待
 
     def _render_plugins(self, plugins: list, auto_fill: bool = True):
@@ -3948,7 +3963,7 @@ class MarketplaceCard(QWidget):
             matched.sort(key=lambda p: p.get("downloads", 0), reverse=True)
 
     def _render_next_batch(self, auto_fill: bool = True):
-        """渲染下一批缺失的匹配行（同步，每批 _RENDER_BATCH 个足够快，停住等手动加载）
+        """渲染下一批缺失的匹配行（时间预算分帧，切碎长任务）
 
         不依赖 _rendered_count 连续索引：搜索/筛选复用行后，_row_map 的行集合
         与 _matched 前部可能不一致（旧行 ≠ 新匹配列表前 N 个）。若按「已渲染
@@ -3958,6 +3973,12 @@ class MarketplaceCard(QWidget):
         auto_fill=False（数据到达/重复渲染路径）：只补首批 _RENDER_BATCH
         规模内的缺失，不自动渐进加载——历版每次开关市场自动 +15 行、
         滚动撞上补行卡 1-3s 的直接来源；超出首批的行等用户点「加载更多」。
+
+        [PERF] 时间预算分帧：原实现一次同步建满 _RENDER_BATCH（15）行。
+        2026-10-31 运行日志实测该路径在主线程阻塞 502ms（单行 ~33ms，比
+        注释估计的 13ms 高一倍多，带搜索词的浅色主题行更重）。改为每帧只
+        渲到 _RENDER_FRAME_BUDGET_MS 用完为止，余量用 singleShot(0) 续帧。
+        行仍是「建即入布局、隐藏待 reveal」，语义不变；差别只是跨了几帧。
         """
         missing = [p for p in self._matched if p.get("name", "") not in self._row_map]
         if not missing:
@@ -3969,14 +3990,41 @@ class MarketplaceCard(QWidget):
             missing = [p for p in missing if p.get("name", "") in first_batch]
             if not missing:
                 return
+        # 只取本批上限；帧内按时间预算再切
         batch = missing[: self._RENDER_BATCH]
-        self._render_rows(batch)
+        self._render_rows_framed(batch, remaining_after=len(missing) - len(batch))
+
+    def _render_rows_framed(self, rows: list, remaining_after: int, start_idx: int = 0):
+        """按时间预算逐行渲染（每帧到点让出事件循环，下一帧续）
+
+        Args:
+            rows: 本次要渲染的行数据（已截到 _RENDER_BATCH 以内）
+            remaining_after: 本批渲染完后仍未渲染的行数（用于「加载更多」文案）
+            start_idx: 本帧起始下标（续帧时传上次停下的位置）
+        """
+        import time as _time
+
+        deadline = _time.perf_counter() + self._RENDER_FRAME_BUDGET_MS / 1000.0
+        i = start_idx
+        while i < len(rows):
+            p = rows[i]
+            if not self._alive():
+                return  # 卡片已销毁，放弃剩余（不续帧，避免回调触碰已删控件）
+            # 保留原有「单行失败不中断整批」语义：_create_row 内部已 try/except
+            self._render_rows([p])
+            i += 1
+            # 至少渲一行再判超时：单行本身超标时也要推进，否则死循环
+            if _time.perf_counter() >= deadline and i < len(rows):
+                QTimer.singleShot(
+                    0,
+                    lambda _r=rows, _n=remaining_after, _i=i: self._render_rows_framed(_r, _n, _i),
+                )
+                return
         self._rendered_count = len(self._row_map)
         # 剩余数按 matched 维度算（row_map 总数含非匹配行/本地 extras，
         # 用它判定会提前收「加载更多」按钮 → 部分匹配插件永不渲染）
-        remaining = len(missing) - len(batch)
-        if remaining > 0:
-            self._set_load_more_button(remaining)
+        if remaining_after > 0:
+            self._set_load_more_button(remaining_after)
         else:
             self._all_loaded = True
             self._remove_load_more_button()

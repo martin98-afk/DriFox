@@ -61,11 +61,9 @@ _TODOWRITE_SCHEMA = {
     "function": {
         "name": "todowrite",
         "description": (
-            "创建/更新待办事项列表。使用规则："
-            "多步骤任务开始时创建列表；"
-            "每完成一项立即将该置 status=completed，勿批量补标；"
-            "开始下一项前先将其置为 in_progress（同一时刻只允许一项 in_progress）；"
-            "任务范围变化时同步增删，不要让列表过期。"
+            "创建/更新待办列表。规则：多步骤任务开始时建列表；"
+            "完成一项立即标 completed，勿批量补标；开始下一项前把其置 in_progress(同时只允许一项)；"
+            "范围变化同步增删，别让列表过期。"
         ),
         "parameters": {
             "type": "object",
@@ -78,7 +76,7 @@ _TODOWRITE_SCHEMA = {
                         "properties": {
                             "id": {"type": "string", "description": "序号"},
                             "content": {"type": "string", "description": "内容"},
-                            "status": {"type": "string", "description": "状态: pending/in_progress/completed。完成一项立即标 completed，开始下一项前置 in_progress"},
+                            "status": {"type": "string", "description": "pending/in_progress/completed。完成即标 completed，开始下一项前置 in_progress"},
                             "priority": {"type": "string", "description": "优先级: high/medium/low"},
                         },
                         "required": ["content"],

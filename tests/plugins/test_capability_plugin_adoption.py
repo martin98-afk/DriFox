@@ -156,11 +156,11 @@ def test_new_capabilities_registered(cap_id):
         bootstrap.reset_bootstrap()
 
 
-def test_project_workdir_restores_root_mark_only_for_non_worktree():
-    """project.workdir.switch 的根目录标记恢复只针对非 worktree 旧目录。
+def test_project_workdir_persists_single_value():
+    """project.workdir 只做单值持久化：switch / set_only 都写 memory_manager 的工作目录。
 
-    这是从 worktree-manager 抽出来的宿主语义：旧工作目录若本身是 worktree，
-    给它恢复 is_working_dir 标记会把记忆卡片的根目录指到 worktree 上。
+    关键文档表下线后不再有「登记条目 / 恢复根目录标记」这套语义：工作目录是
+    单值，切换即覆盖。
     """
     from unittest.mock import MagicMock
 
@@ -173,25 +173,22 @@ def test_project_workdir_restores_root_mark_only_for_non_worktree():
         reg = CapabilityRegistry.get_instance()
         bootstrap.ensure_registered("ui")
 
-        def _api(prev: str, docs: list):
+        def _api():
             mm = MagicMock()
-            mm.get_working_directory.return_value = prev
-            mm.get_key_documents.return_value = docs
+            mm.set_working_directory.return_value = True
             host = MagicMock()
             host._current_project = "P"
             host.backend.memory_manager = mm
             pool = reg.build_pool(surface="ui", host=host, plugin="probe", declared={"project.workdir"})
             return pool["project.workdir"], mm
 
-        # 旧目录是普通根目录 → 恢复标记
-        api, mm = _api("/root", [])
+        api, mm = _api()
         assert api["switch"]("P", "/wt/a") is True
-        mm.restore_working_directory_mark.assert_called_once_with("P", "/root")
+        mm.set_working_directory.assert_called_once_with("P", "/wt/a")
 
-        # 旧目录本身是 worktree → 不恢复标记
-        api, mm = _api("/wt/old", [{"file_path": "/wt/old", "added_by": "git_worktree"}])
-        assert api["switch"]("P", "/wt/b") is True
-        mm.restore_working_directory_mark.assert_not_called()
+        api, mm = _api()
+        assert api["set_only"]("P", "/root") is True
+        mm.set_working_directory.assert_called_once_with("P", "/root")
     finally:
         CapabilityRegistry.reset_instance()
         bootstrap.reset_bootstrap()

@@ -234,10 +234,6 @@ class ChatBackend(QObject):
     # 上下文
     context_updated = pyqtSignal(int, int)  # token_count, limit
 
-    # SubAgentManager 延迟创建完成信号（[审查 #8r Bug D] 窗口在 __init__ 时
-    # sub_agent_manager 尚为 None 跳过信号连接，创建完成后据此补连）
-    sub_agent_ready = pyqtSignal()
-
     # ToolExecutor 延迟创建完成信号（_deferred_create_tool_executor 成功后发射；
     # 供复制窗口的 workdir 同步事件驱动，替代原 showEvent 的 QTimer(500) 固定等待）
     tool_executor_ready = pyqtSignal()
@@ -265,14 +261,9 @@ class ChatBackend(QObject):
         self._agent_manager: Optional[AgentManager] = None
         self._memory_manager: Optional[MemoryManagerCore] = None
         self._hook_manager: Optional[HookManager] = None
-        self._sub_agent_manager = None
         self._session_store = None
         self._history_manager = None
         self._current_project = None
-        # 子智能体默认模型解析回调（由 main_widget 设置；延迟创建 SubAgentManager 时不可重置）
-        self._subagent_model_resolver: Optional[Callable] = None
-        # 子智能体获取主会话历史的回调（由 main_widget 设置；SubAgentManager 创建后补传）
-        self._sub_agent_history_getter: Optional[Callable] = None
         # ChatEngine 未创建前暂存的 UI 回调（延迟创建完成后补注册，见 set_all_callbacks）
         self._pending_engine_callbacks: Dict[str, Callable] = {}
 
@@ -326,10 +317,6 @@ class ChatBackend(QObject):
     @property
     def memory_manager(self) -> MemoryManagerCore:
         return self._memory_manager
-
-    @property
-    def sub_agent_manager(self):
-        return self._sub_agent_manager
 
     @property
     def hook_manager(self) -> Optional[HookManager]:
@@ -447,7 +434,9 @@ class ChatBackend(QObject):
         # engine.send_message）在所有 hook 输出注入完成后再 emit。
         _PRE_DIALOG_EVENTS = {"SessionStart", "PreUserMessage", "PostUserMessage"}
 
-        def on_hook_finished(event_name: str, output: str, success: bool, status_message: str = ""):
+        def on_hook_finished(
+            event_name: str, output: str, success: bool, status_message: str = "", diff: Optional[dict] = None
+        ):
             if not getattr(self, "_ui_valid", True):
                 logger.debug("[HookManager] Hook callback skipped: UI already closed")
                 return
@@ -522,13 +511,15 @@ class ChatBackend(QObject):
                 logger.debug("[HookManager] PreToolUse queued to pre-tool queue")
             elif is_prompt_hook or event_name in ("PostToolUse", "PluginChanged"):
                 hook_output = _format_hook_output(event_name, output, status_message)
-                self._hook_message_queue.put(
-                    {
-                        "role": "user",
-                        "content": hook_output,
-                        "_hook_event": event_name,
-                    }
-                )
+                msg = {
+                    "role": "user",
+                    "content": hook_output,
+                    "_hook_event": event_name,
+                }
+                # 结构化 diff 随消息入队：worker 消费时批内合并，开关抵消（净零）整批不注入
+                if event_name == "PluginChanged" and diff:
+                    msg["_plugin_diff"] = diff
+                self._hook_message_queue.put(msg)
                 self._hook_messages_updated.emit()
                 logger.debug(f"[HookManager] Hook queued for worker: {event_name}")
 
@@ -667,12 +658,6 @@ class ChatBackend(QObject):
                 self._tool_executor._builtin_tools.set_team_context(self._window_id, default_agent)
             # 设置 AgentManager 的 builtin_tools 引用（用于获取 MCP 工具 schema）
             self._agent_manager._builtin_tools = self._tool_executor._builtin_tools
-            # 设置关键文档仓储
-            if self._memory_manager and self._memory_manager.key_documents:
-                self._tool_executor.set_key_documents_repo(
-                    self._memory_manager.key_documents,
-                    "默认项目",  # 初始值，main_widget 初始化后会通过 set_current_project 覆盖
-                )
             logger.info("[ChatBackend] ToolExecutor 延迟创建完成")
             self.tool_executor_ready.emit()
         except Exception as e:
@@ -728,53 +713,10 @@ class ChatBackend(QObject):
 
         # GatewayEngine 已上移 GatewayService（应用级单例），窗口不再创建
 
-    def _deferred_create_sub_agent_and_misc(self):
-        """600ms 批：SubAgentManager + MCP 连接 + git 缓存预热"""
+    def _deferred_warm_git_cache(self):
+        """600ms 批：git 缓存预热（子智能体宿主由 system-subagent 插件自建）"""
         if self._tool_executor is None:
-            logger.warning("[ChatBackend] ToolExecutor 未创建，跳过 SubAgentManager 延迟创建")
             return
-        if self._sub_agent_manager is not None:
-            # 幂等守卫：ensure_deferred_components 同步路径可能已创建，重复建会
-            # 覆盖实例导致信号连接（sub_agent_ready 补连）落空
-            return
-        try:
-            # SubAgentManager（依赖 tool_executor / agent_manager）
-            # 注意：不得重置 _subagent_model_resolver / _sub_agent_history_getter——
-            # main_widget 在窗口构造时（initialize 返回后）已设置，此处延迟创建
-            # 若覆盖会导致子智能体默认模型/历史回调失效（审查 #8r Bug A/B）。
-
-            def _get_subagent_llm_config():
-                from app.utils.config import Settings
-
-                cfg = Settings.get_instance()
-                saved = cfg.llm_subagent_default_model.value
-                if saved and self._subagent_model_resolver:
-                    resolved = self._subagent_model_resolver(saved)
-                    if resolved:
-                        return resolved
-                return self._get_model_config()
-
-            from app.core.workers.subagent_worker import SubAgentManager
-
-            self._sub_agent_manager = SubAgentManager(
-                agent_manager=self._agent_manager,
-                tool_executor=self._tool_executor,
-                get_llm_config=_get_subagent_llm_config,
-            )
-            self._sub_agent_manager.set_session_store(self._session_store)
-            # 补传主会话历史 getter（main_widget 设置时 SubAgentManager 尚未创建）
-            if self._sub_agent_history_getter:
-                self._sub_agent_manager.set_history_getter(self._sub_agent_history_getter)
-            # 设置给 ToolExecutor，让工具能访问子智能体
-            self._tool_executor.set_sub_agent_manager(self._sub_agent_manager)
-            # 启动日志活力度 stall 检测（默认 180s 无日志输出视为卡死）
-            self._sub_agent_manager.start_stall_detector()
-            # [审查 #8r Bug D] 通知窗口补连子智能体信号（窗口构造时 manager 为 None）
-            self.sub_agent_ready.emit()
-            logger.info("[ChatBackend] SubAgentManager 延迟创建完成")
-        except Exception as e:
-            logger.error(f"[ChatBackend] SubAgentManager 延迟创建失败: {e}")
-
         # MCP 自动发现/连接已上移 PluginHostService（全局一次，非每窗口）。
 
         # 后台预热 git 缓存，避免 create_session 时同步执行 git 子进程（~1.1s）
@@ -800,8 +742,6 @@ class ChatBackend(QObject):
             self._deferred_create_tool_executor()
         if self._chat_engine is None:
             self._deferred_create_engines()
-        if self._sub_agent_manager is None:
-            self._deferred_create_sub_agent_and_misc()
 
     # 引擎回调 → 本对象同名 Qt 信号的转发表：{回调名: 透传给信号的参数个数}
     #
@@ -916,15 +856,6 @@ class ChatBackend(QObject):
         if self._chat_engine:
             self._chat_engine._emit("messages_updated", list(session.messages))
 
-    def set_subagent_model_resolver(self, resolver: Callable[[str], Optional[Dict]]):
-        """设置子智能体默认模型解析回调
-
-        Args:
-            resolver: 接收 model_value 字符串，返回完整模型配置 dict 或 None
-                      由 main_widget._resolve_subagent_model_config 提供
-        """
-        self._subagent_model_resolver = resolver
-
     # ========== 插件系统初始化 ==========
     def stop_streaming(self, timeout_ms: Optional[int] = None):
         """停止流式输出（同步方式，可能阻塞 UI 线程）
@@ -1027,15 +958,7 @@ class ChatBackend(QObject):
             except Exception as e:
                 logger.warning(f"[ChatBackend] cleanup hook_manager: {e}")
 
-        # 4. 清除 SubAgentManager：先取消所有运行中的子智能体任务 + 停止 Stall 检测器
-        if self._sub_agent_manager:
-            try:
-                self._sub_agent_manager.cancel_all()
-            except Exception as e:
-                logger.warning(f"[ChatBackend] cleanup sub_agent_manager.cancel_all: {e}")
-            self._sub_agent_manager = None
-
-        # 5. 清除 SessionManager（窗口独有的会话）
+        # 4. 清除 SessionManager（窗口独有的会话）
         self._session_manager = None
 
         # 插件 watcher 已上移 PluginHostService（应用级，随 TabManagerWindow.cleanup 停止）。
@@ -1239,9 +1162,6 @@ class ChatBackend(QObject):
         """设置会话上下文"""
         if self._tool_executor:
             self._tool_executor.set_session_context(session_id)
-        # 同步会话 ID 到子智能体管理器，确保子智能体任务按会话隔离
-        if self._sub_agent_manager:
-            self._sub_agent_manager.set_current_session_id(session_id)
 
     def reset_session_state(self):
         """重置会话状态"""
@@ -1271,12 +1191,6 @@ class ChatBackend(QObject):
         if self._tool_executor:
             return self._tool_executor.execute_skill(method, params)
         return None
-
-    def set_sub_agent_history_getter(self, getter: Callable[[], List[Dict]]):
-        """设置子智能体获取历史消息的回调"""
-        self._sub_agent_history_getter = getter
-        if self._sub_agent_manager:
-            self._sub_agent_manager.set_history_getter(getter)
 
     # ========== AgentManager 代理方法 ==========
 
@@ -1395,51 +1309,6 @@ class ChatBackend(QObject):
         except Exception:
             pass
 
-        return ctx
-
-    def build_key_documents_context(self) -> Dict[str, Any]:
-        """构建 PreUserMessage hook 关键文档上下文 — 预取当前项目的关键文档
-
-        数据源：MemoryManager.key_documents（SQLite）。条目记忆不再注入
-        （已由 assistant_hub 的人工提示/长期记忆体系取代），仅保留关键文档。
-        """
-        ctx: Dict[str, Any] = {}
-        if not self._memory_manager:
-            return ctx
-        try:
-            wd_path = self._tool_executor.get_workdir() if self._tool_executor else ""
-            # 自净化：先清掉路径已消失的 git_worktree 记录（节流，默认 60s 一次），
-            # 避免把已删除的工作树当有效关键文档持续注入
-            self._memory_manager.prune_stale_worktrees(self._current_project or "")
-            docs = self._memory_manager.get_key_documents(self._current_project)[:50]
-            if docs:
-                doc_items = []
-                for doc in docs:
-                    file_path = doc.get("file_path", "")
-                    file_name = doc.get("file_name", "")
-                    is_url = file_path.startswith(("http://", "https://"))
-                    is_wd = file_path == wd_path
-                    if not is_url and not is_wd and file_path and wd_path:
-                        try:
-                            display = str(Path(file_path).relative_to(Path(wd_path)))
-                        except ValueError:
-                            display = file_path
-                    elif is_url:
-                        display = file_path
-                    else:
-                        display = file_path
-                    doc_items.append(
-                        {
-                            "file_name": file_name,
-                            "display": display,
-                            "is_url": is_url,
-                            "is_wd": is_wd,
-                        }
-                    )
-                if doc_items:
-                    ctx["key_documents"] = doc_items
-        except Exception:
-            pass
         return ctx
 
     def _warm_git_cache(self, project_root: str):

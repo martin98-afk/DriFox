@@ -8,6 +8,7 @@
 - ID 形如 ``<group>.<name>``，group 必须等于首段
 - level 是审核语义，不参与运行时裁剪
 - surfaces 声明该能力在哪些上下文可用（ui = 浮动卡/工作台页，tool = 工具插件）
+- 新增能力必须显式核对 value_style；value 形态（pool 值即终值）若漏标，调用侧 `x()` 会在运行时炸 'dict' object is not callable（不会静默，tests/plugins/test_capability_value_style_ast.py 兜静态检查）
 """
 
 from __future__ import annotations
@@ -33,6 +34,7 @@ def _spec(
     summary: str,
     surfaces: FrozenSet[str],
     legacy: Iterable[str] = (),
+    value_style: str = "factory",
 ) -> CapabilitySpec:
     return CapabilitySpec(
         id=cid,
@@ -41,6 +43,7 @@ def _spec(
         summary=summary,
         surfaces=surfaces,
         legacy_keys=tuple(legacy),
+        value_style=value_style,
     )
 
 
@@ -56,6 +59,12 @@ CATALOG: Dict[str, CapabilitySpec] = {
             "完整模型配置（含已解密明文 API key）",
             _BOTH,
             ["get_model_config", "get_provider_config"],
+        ),
+        _spec(
+            "model.config_for",
+            _H,
+            "按 query（模型名 / 服务商 / 服务商:模型名）解析出可执行的完整模型配置（含明文 key）",
+            _BOTH,
         ),
         _spec(
             "provider.list",
@@ -105,7 +114,7 @@ CATALOG: Dict[str, CapabilitySpec] = {
         _spec("input.write", _M, "写入输入框文本", _UI),
         # ── 智能体 ──
         _spec("agent.read", _L, "agent 列表/提示词/管理器", _BOTH, ["get_agent_manager", "get_agent_prompt"]),
-        _spec("subagent.run", _H, "派生子智能体", _TOOL, ["subagent"]),
+        _spec("subagent.run", _H, "派生子智能体（ui 面返 manager 实例，tool 面返工具侧 manager）", _BOTH, ["subagent"]),
         # ── 工作目录 ──
         _spec("workdir.read", _L, "当前工作目录", _BOTH, ["get_workdir"]),
         _spec(
@@ -131,8 +140,13 @@ CATALOG: Dict[str, CapabilitySpec] = {
         _spec(
             "project.workdir",
             _M,
-            "写库式切换项目工作目录（关键文档登记 + 工作目录持久化 + 根目录标记恢复，"
-            "与 workdir.write 的会话内切换互补）",
+            "写库式持久化项目工作目录（project_workdir 表，与 workdir.write 的会话内切换互补）",
+            _UI,
+        ),
+        _spec(
+            "branch.refresh",
+            _M,
+            "失效分支检测缓存并刷新标题栏分支标签（git 分支名变更后调用）",
             _UI,
         ),
         # ── 外观 ──
@@ -140,7 +154,7 @@ CATALOG: Dict[str, CapabilitySpec] = {
         # ── 工具 ──
         _spec("tool.read", _L, "工具注册表元数据查询", _BOTH),
         _spec("tool.inject", _H, "向 LLM 注入工具（改变模型可见行为）", _UI),
-        _spec("tool.execute", _H, "执行任意工具", _BOTH, ["get_tool_executor"]),
+        _spec("tool.execute", _H, "执行任意工具", _BOTH, ["get_tool_executor"], value_style="value"),
         # ── 对话引擎 ──
         _spec("engine.session", _H, "创建对话引擎会话（消耗 token）", _UI, ["create_engine_session"]),
         _spec("engine.stack", _H, "对话执行栈工厂", _UI, ["conversation_stack"]),
@@ -160,7 +174,7 @@ CATALOG: Dict[str, CapabilitySpec] = {
         ),
 
         # ── 界面 ──
-        _spec("ui.notify", _L, "弹 InfoBar 通知", _UI, ["notify"]),
+        _spec("ui.notify", _L, "弹 InfoBar 通知（kind=success/warning/error/info，duration 毫秒）", _UI, ["notify"]),
         _spec("ui.card.show", _L, "显示浮动卡", _UI),
         _spec("ui.card.hide", _L, "隐藏浮动卡", _UI, ["hide_card"]),
         _spec("ui.exclusive", _M, "独占 UI 模式", _UI, ["enter_exclusive_ui_mode", "exit_exclusive_ui_mode"]),
@@ -197,6 +211,9 @@ CATALOG: Dict[str, CapabilitySpec] = {
         # ── 团队 ──
         _spec("team.read", _L, "团队成员/角色/运行状态", _BOTH),
         _spec("team.send", _M, "向团队成员派发任务邮件（写对方邮箱）", _TOOL),
+        _spec("team.manage", _H, "管理团队：建队/退出/加人/踢人/群发", _TOOL),
+        _spec("team.spawn", _H, "为团队拉起成员窗口（UI 副作用）", _BOTH, value_style="value"),
+        _spec("action.queue", _L, "窗口动作队列只读（peek 待执行动作）", _TOOL),
         _spec(
             "team.session",
             _H,
@@ -205,6 +222,12 @@ CATALOG: Dict[str, CapabilitySpec] = {
         ),
         # ── 存储 ──
         _spec("storage.data_dir", _L, "插件持久化数据根目录（插件自拼 plugin_data/<name>/）", _BOTH),
+        _spec(
+            "storage.db",
+            _H,
+            "通用数据库执行权限（受限代理：表名须 plugin_<name>_ 前缀，禁 ATTACH/PRAGMA 等库级语句）",
+            _BOTH,
+        ),
         # ── 基础（恒放行） ──
         _spec("plugin.log", _N, "带 plugin=<name> 前缀的 logger", _BOTH),
         _spec("state.kv", _N, "窗口级 KV 存储（无系统权限）", _BOTH, ["window_state"]),
@@ -218,6 +241,12 @@ CATALOG: Dict[str, CapabilitySpec] = {
             "按 key 读主程序配置项（非敏感标量；不含密钥，密钥走 model.config）",
             _UI,
             ["get_setting"],
+        ),
+        _spec(
+            "config.write",
+            _M,
+            "按 key 写主程序配置项（仅已声明项；密钥类字段一律拒绝）",
+            _UI,
         ),
         # ── 逃生舱 ──
         _spec("host.raw", _H, "裸 main_widget / backend 对象引用", _UI),

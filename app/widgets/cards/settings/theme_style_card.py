@@ -220,10 +220,12 @@ def collect_theme_entries(is_light: bool) -> list[dict]:
 
 
 def prepare_theme_entries(config_item, settings, is_light: bool) -> list[dict]:
-    """采集预览条目，并把 validator 对齐到这批判过滤后的主题集。
+    """采集预览条目；validator 保持全量主题集（勿收窄为当前模式 keys）。
 
-    当前值越界（主题被删 / 与深浅模式不匹配）时回退首项并落盘，与旧实现一致；
-    无任何主题时返回空列表，调用方保持旧卡片不动。
+    全局值可能属于另一深浅模式（多窗口不同步 / 模式切换在途），若按单模式集
+    判定越界并回退 keys[0]，会把用户主题打回该模式列表第一项（表现为深浅
+    切换数次后变成天空蓝 / 琥珀日落）。因此只有主题真不存在（被删 / 未注册）
+    时才回退首项并落盘；无任何主题时返回空列表，调用方保持旧卡片不动。
     """
     from app.utils.config import update_theme_options
 
@@ -232,8 +234,7 @@ def prepare_theme_entries(config_item, settings, is_light: bool) -> list[dict]:
     keys = [entry["id"] for entry in entries]
     if not keys:
         return []
-    config_item.validator.__init__(keys)
-    if config_item.value not in keys:
+    if config_item.value not in keys and config_item.value not in theme_manager.list_themes():
         settings.set(config_item, keys[0], save=True)
     return entries
 

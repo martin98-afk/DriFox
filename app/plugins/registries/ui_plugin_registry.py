@@ -10,6 +10,7 @@ import json
 import os
 import re
 import threading
+import weakref
 from dataclasses import dataclass, field
 from contextlib import contextmanager
 from pathlib import Path
@@ -493,6 +494,41 @@ class FloatingCardInfo:
     context_provider: Optional[Callable[[], Dict[str, Any]]] = None
 
 
+def _widget_alive(widget: Any) -> bool:
+    """widget 是否存活（None / 已销毁 wrapper 均视为不存活）。"""
+    if widget is None:
+        return False
+    try:
+        import sip
+
+        return not sip.isdeleted(widget)
+    except Exception:
+        return True
+
+@dataclass(frozen=True)
+class CardInlinePanelInfo:
+    """消息卡片内嵌面板注册信息
+
+    内嵌面板挂在 assistant 气泡布局末尾（正文、任务看板、成果栏之后，页脚之前），
+    与浮动卡的区别：无独立容器/标题/命令，生命周期跟随卡片，由宿主在「新卡出现」
+    时迁卡（旧卡摘除、新卡接管）。
+
+    Attributes:
+        plugin_name: 所属插件名
+        panel_id: 面板唯一 ID
+        widget_class: QWidget 子类，构造签名为 ``widget_class(parent)``
+        order: 同卡多面板时的排布顺序（升序；缺省 100，排在任务看板/成果栏之后）
+        metadata: 附加元数据
+        history_loader: 会话重载时的历史数据提供者（见 ``register_card_inline_panel``）
+    """
+
+    plugin_name: str
+    panel_id: str
+    widget_class: type
+    order: int = 100
+    metadata: Dict[str, Any] = field(default_factory=dict)
+    history_loader: Optional[Callable[..., Any]] = None
+
 @dataclass(frozen=True)
 class TitlebarTabInfo:
     """标题栏常驻 tab 注册信息
@@ -806,6 +842,10 @@ class UIPluginRegistry:
         self._plugin_paths: Dict[str, str] = {}
         self._message_factories: List[MessageFactoryInfo] = []
         self._floating_cards: Dict[str, FloatingCardInfo] = {}
+        # 插件注册的消息卡内嵌面板：{panel_id: CardInlinePanelInfo}
+        self._card_inline_panels: Dict[str, CardInlinePanelInfo] = {}
+        # 内嵌面板当前挂载的卡片（弱引用，避免阻止卡片回收）
+        self._inline_panel_cards: Dict[str, Dict[str, Any]] = {}
         self._welcome_tabs: Dict[str, WelcomeTabInfo] = {}
         # 欢迎卡片插件点击动作：{action: WelcomeActionInfo}
         self._welcome_actions: Dict[str, WelcomeActionInfo] = {}
@@ -999,41 +1039,47 @@ class UIPluginRegistry:
             logger.warning(f"[UIPluginRegistry] 主题变更订阅失败: {e}")
 
     def _on_theme_changed_event(self, payload: dict) -> None:
-        """主题变更：对全部已建浮动卡实例派发样式刷新（鸭子类型，无实现则跳过）
+        """主题变更：可见浮动卡立即刷，隐藏卡只置脏（显示时补刷）
 
         两条互补路径：
         1. ``refresh_style`` 系（约定）—— 卡片自己穷举重设各控件样式；
         2. ``replay_theme_qss``（兜底）—— 重放控件上登记过的 QSS 工厂，覆盖
            渲染期动态创建、未被 ``refresh_style`` 枚举到的控件（空态标签、
            分页按钮等）。旧插件没登记则空转，无副作用。
-        """
-        from app.utils.theme_style import replay_theme_qss
 
+        [PERF] 可见性分流：卡片样式是构造期 f-string 固化的，隐藏卡在切换时
+        刷了也看不见，却要付整棵子树 repolish（历史实测本派发单次 141ms）。
+        隐藏卡改为 ``mark_theme_dirty`` 置脏，真正显示时由
+        ``_show_floating_card`` / ``CardManager`` 路径的 ``ensure_theme_fresh``
+        补刷——正确性由纪元比对保证，不靠插件自觉。
+        """
         from time import perf_counter
+
+        from app.utils.theme_style import ensure_theme_fresh, mark_theme_dirty
 
         for _win_id, instances in list(self._card_widget_instances.items()):
             for _card_id, widget in list(instances.items()):
+                try:
+                    visible = bool(widget.isVisible())
+                except RuntimeError:
+                    continue  # C++ 对象已销毁
+                if not visible:
+                    mark_theme_dirty(widget)
+                    # [theme-probe] 临时诊断：主题切换时卡被判为不可见 → 只置脏
+                    logger.warning(
+                        f"[theme-probe] ev_hidden card={_card_id} win={_win_id} "
+                        f"cls={type(widget).__name__}"
+                    )
+                    continue
                 _t0 = perf_counter()
-                try:
-                    method = getattr(widget, "refresh_style", None)
-                    if not callable(method):
-                        # 兼容旧插件的三种私有命名
-                        for name in ("_apply_latest_theme", "_apply_theme", "_retheme"):
-                            method = getattr(widget, name, None)
-                            if callable(method):
-                                break
-                    if callable(method):
-                        method()
-                except RuntimeError:
-                    continue  # C++ 对象已销毁
-                except Exception as e:
-                    logger.warning(f"[UIPluginRegistry] 插件卡主题刷新失败: {e}")
-                try:
-                    replay_theme_qss(widget)
-                except RuntimeError:
-                    continue  # C++ 对象已销毁
-                except Exception as e:
-                    logger.warning(f"[UIPluginRegistry] 插件卡 QSS 重放失败: {e}")
+                _fresh = ensure_theme_fresh(widget)
+                # [theme-probe] 临时诊断：可见卡实际是否被刷 + 纪元与 provider 状态
+                logger.warning(
+                    f"[theme-probe] ev_visible card={_card_id} win={_win_id} "
+                    f"cls={type(widget).__name__} fresh={_fresh} "
+                    f"own={getattr(widget, '_drifox_theme_epoch', 'MISSING')} "
+                    f"provider={getattr(widget, '_context_provider', None) is not None}"
+                )
                 # [PERF] 慢卡打点：主题切换时整条 publish 是同步的，
                 # 单卡几百 ms 就会让用户感知卡顿，必须能指名道姓
                 _ms = (perf_counter() - _t0) * 1000
@@ -1535,6 +1581,145 @@ class UIPluginRegistry:
                 priority=priority,
             )
         )
+
+    # ── 消息卡内嵌面板（与浮动卡互补：无独立容器，随卡片迁卡） ──
+
+    def register_card_inline_panel(
+        self,
+        plugin_name: str,
+        panel_id: str,
+        widget_class: type,
+        order: int = 100,
+        metadata: Optional[Dict[str, Any]] = None,
+        history_loader: Optional[Callable[..., Any]] = None,
+    ) -> None:
+        """注册消息卡片内嵌面板（同 panel_id 后注册覆盖）。
+
+        面板实例由 MessageCard 在 attach 时懒创建并缓存；同一卡片重复 attach 幂等。
+        面板若定义 ``heightChanged`` 信号，宿主会自动接线到卡片高度锚定补偿
+        （契约同 ``InlineTodoPanel``：必须报「实际占高」而非 sizeHint）。
+
+        ``history_loader(batch, host) -> items``：会话重载时的历史数据通道。
+        会话重载会把消息批次重渲成新卡，运行态投影（插件桥接层）此时没有数据；
+        面板要能回看历史，只能从落库的 tool 消息侧重建——形如成果栏
+        （``ToolResult.artifacts`` 随消息落库后由 ``render_batch_to_assistant_card``
+        灌回卡片）。loader 返回非空列表时宿主会 ``ensure_inline_panel`` 并调用面板的
+        ``restore_items(items)``；面板自带去重，重复渲染幂等。插件不实现该约定则
+        历史卡上不出现该面板（运行态投影不受影响）。
+        """
+        self._card_inline_panels[panel_id] = CardInlinePanelInfo(
+            plugin_name=plugin_name,
+            panel_id=panel_id,
+            widget_class=widget_class,
+            order=order,
+            metadata=metadata or {},
+            history_loader=history_loader,
+        )
+
+    def get_card_inline_panel(self, panel_id: str) -> Optional[CardInlinePanelInfo]:
+        """按 panel_id 取注册信息；未注册返回 None。"""
+        return self._card_inline_panels.get(panel_id)
+
+    def get_card_inline_panels(self) -> List[CardInlinePanelInfo]:
+        """全部内嵌面板注册（order 升序）。"""
+        return sorted(self._card_inline_panels.values(), key=lambda i: i.order)
+
+    def attach_card_inline_panel(self, panel_id: str, main_widget=None) -> Optional[Any]:
+        """把内嵌面板挂到宿主最新 assistant 卡片（跨卡迁移：旧卡摘除、新卡接管）。
+
+        迁移语义同任务看板（运行态是「当前状态」，每轮跟随最新卡）。宿主优先序：
+        调用方传入的 main_widget → Tab 全局宿主 → 注册时的主窗口。
+
+        Returns:
+            面板实例；注册缺失 / 宿主无卡 / 卡片不支持槽位 / 创建失败返回 None。
+        """
+        info = self._card_inline_panels.get(panel_id)
+        if info is None:
+            return None
+        mw = main_widget or self._resolve_global_host() or self._main_widget
+        if mw is None:
+            return None
+        if not _widget_alive(mw):
+            return None
+        card = getattr(mw, "_current_assistant_card", None)
+        if not _widget_alive(card):
+            finder = getattr(mw, "_find_latest_assistant_card", None)
+            card = finder() if callable(finder) else None
+        if not _widget_alive(card):
+            return None
+        # 旧卡摘除：只保留最新卡片上的实例（同 _sync_todo_panel 语义）。
+        # 按宿主窗口分桶：多窗口共用一个 panel_id，A 窗口 attach 不能摘掉 B 窗口的卡。
+        host_wid = str(getattr(mw, "_window_id", "") or "")
+        win_refs = self._inline_panel_cards.setdefault(panel_id, {})
+        prev = win_refs.get(host_wid)
+        prev_card = prev() if isinstance(prev, weakref.ref) else prev
+        if _widget_alive(prev_card) and prev_card is not card:
+            try:
+                prev_card.remove_inline_panel(panel_id)
+            except (RuntimeError, AttributeError):
+                pass
+        ensure = getattr(card, "ensure_inline_panel", None)
+        if not callable(ensure):
+            return None
+        panel = ensure(panel_id)
+        if panel is not None:
+            try:
+                win_refs[host_wid] = weakref.ref(card)
+            except TypeError:
+                win_refs[host_wid] = card
+        return panel
+
+    def hydrate_inline_panels(self, card, batch: Any, main_widget=None) -> None:
+        """会话重载：按落库的 tool 消息把历史数据灌回卡片的对应内嵌面板。
+
+        与 ``attach_card_inline_panel``（运行态投影，恒迁到最新卡）互补：本方法
+        **不迁卡**，只为「产生该数据的那张卡」重建面板——语义同成果栏
+        （``update_artifact_list`` 追加到所属卡片）。面板缺失时不创建无数据的空面板：
+        loader 返回空即跳过。
+
+        Args:
+            card: 目标 assistant 卡片（由批次渲染方传入，宿主不猜）
+            batch: 该卡片对应的消息批次（含 tool 消息）
+            main_widget: 宿主窗口（插件 loader 取窗口级服务用；可缺省）
+        """
+        if not self._card_inline_panels or not _widget_alive(card):
+            return
+        for info in self.get_card_inline_panels():
+            loader = getattr(info, "history_loader", None)
+            if not callable(loader):
+                continue
+            try:
+                items = loader(batch, main_widget)
+            except Exception as e:  # noqa: BLE001 - 插件 loader 异常不打断会话渲染
+                logger.debug(f"[UIPluginRegistry] 内嵌面板历史回填失败 {info.panel_id}: {e}")
+                continue
+            if not items:
+                continue
+            ensure = getattr(card, "ensure_inline_panel", None)
+            if not callable(ensure):
+                return
+            panel = ensure(info.panel_id)
+            if panel is None:
+                continue
+            restore = getattr(panel, "restore_items", None)
+            if not callable(restore):
+                continue
+            try:
+                restore(items)
+            except RuntimeError, AttributeError:
+                pass
+
+    def detach_card_inline_panel(self, panel_id: str) -> None:
+        """从所有窗口的当前卡片摘除该内嵌面板（不注销注册；插件卸载路径用）"""
+        win_refs = self._inline_panel_cards.pop(panel_id, None) or {}
+        for ref in list(win_refs.values()):
+            card = ref() if isinstance(ref, weakref.ref) else ref
+            if not _widget_alive(card):
+                continue
+            try:
+                card.remove_inline_panel(panel_id)
+            except (RuntimeError, AttributeError):
+                pass
 
     def register_floating_card(
         self,
@@ -2603,7 +2788,7 @@ class UIPluginRegistry:
             if QApplication.instance() is not None and window_registry.alive_window_instances():
                 from app.core.commands.builtin_commands import _rebind_command_shortcuts
 
-                logger.info(f"[UIPluginRegistry] UI 命令 /{name} 快捷键变动，重建 QShortcut 绑定")
+                logger.debug(f"[UIPluginRegistry] UI 命令 /{name} 快捷键变动，重建 QShortcut 绑定")
                 _rebind_command_shortcuts()
         except Exception:
             logger.warning(f"[UIPluginRegistry] /{name} 快捷键重绑失败", exc_info=True)
@@ -2987,6 +3172,23 @@ class UIPluginRegistry:
         """
         self._show_floating_card(card_id, main_widget=main_widget)
 
+    def get_floating_card_widget(self, card_id: str, main_widget=None):
+        """取已创建的浮动卡片 widget 实例（不触发创建，未创建返回 None）
+
+        给「带数据展示」的卡片用：调用方先 ``toggle_floating_card`` 建卡，
+        再取实例灌数据（卡片的加载接口由插件自己定义，注册表不参与）。
+
+        Args:
+            card_id: 卡片唯一 ID
+            main_widget: 目标主窗口（None 时与显示路径一致地解析全局宿主）
+        """
+        host = self._resolve_global_host()
+        mw = host or main_widget or self._main_widget
+        window_id = getattr(mw, "_window_id", None) if mw is not None else None
+        if window_id is None:
+            return None
+        return self._card_widget_instances.get(window_id, {}).get(card_id)
+
     def hide_floating_card_globally(self, card_id: str) -> bool:
         """隐藏浮动卡片（公开 API — EP6 公开面，给插件调用）
 
@@ -3165,6 +3367,59 @@ class UIPluginRegistry:
 
         # toggle：显示/隐藏切换
         card_manager.toggle_card(card_id, window_id)
+
+        # ★ dock 类卡（left/bottom）显示时确保对话页在前台（2026-11-02 排查）：
+        # full 卡（覆盖层页）打开时 setCurrentIndex(1) 会把对话页整页 hide，
+        # 而 dock 容器住对话页里——卡片 show_card 正常执行、CardManager 记账
+        # 正常翻转，但父链不可见导致容器展开尺寸算 0（隐藏页布局不真算，
+        # 重试 2 次放弃），用户视角「点了打不开」；且 dock 容器不发
+        # overlayStateChanged，没有任何机制自动切回对话页，此后每次点击
+        # 只在记账与视觉错位间翻转。
+        # 两步都无条件执行（幂等）：
+        # 1) 内容栈不在对话页时切回；
+        # 2) 每次显示都踢容器 _schedule_expand——隐藏页期间容器展开会被
+        #    natural_h<=0 重试放弃，仅切页时踢一次不够（切页可能早已发生）。
+        if card_info.container in ("left", "bottom") and host is not None:
+            stack = getattr(host, "_content_stack", None)
+            if stack is not None and callable(getattr(stack, "currentIndex", None)) and stack.currentIndex() != 0:
+                stack.setCurrentIndex(0, direction=-1)
+            for _dock_attr in ("_left_card_container", "_bottom_card_container"):
+                _cont = getattr(host, _dock_attr, None)
+                if _cont is not None and callable(getattr(_cont, "_schedule_expand", None)):
+                    _cont._schedule_expand()
+
+        # 显示补刷：本次 toggle 若让卡片变可见（且此前隐藏期已置脏），
+        # 补刷到当前外观纪元。主题切换时隐藏卡只置脏不刷（省一次整树
+        # repolish），正确性靠这里兜住——不依赖插件在自己的 show_card()
+        # 里记得重设样式。
+        widget_now = win_instances.get(card_id)
+        if widget_now is not None:
+            try:
+                # [theme-probe] 临时诊断：重开路径是否补刷 + 是否被纪元短路
+                _vis = bool(widget_now.isVisible())
+                _fresh = None
+                if _vis:
+                    from app.utils.theme_style import ensure_theme_fresh
+
+                    _fresh = ensure_theme_fresh(widget_now)
+                # [DEBUG-reopen] 实例指纹 + CM 记账对照
+                _cm_vis = card_manager.is_card_visible(card_id, window_id)
+                _parent = widget_now.parent()
+                logger.warning(
+                    f"[theme-probe] show card={card_id} win={window_id} cls={type(widget_now).__name__} "
+                    f"visible={_vis} fresh={_fresh} "
+                    f"own={getattr(widget_now, '_drifox_theme_epoch', 'MISSING')} "
+                    f"provider={getattr(widget_now, '_context_provider', None) is not None}"
+                )
+                logger.warning(
+                    f"[DEBUG-reopen] show card={card_id} reg={id(self)} wid={id(widget_now)} "
+                    f"cm_vis={_cm_vis} parent={type(_parent).__name__ if _parent is not None else None} "
+                    f"parent_vis={_parent.isVisible() if _parent is not None else None} "
+                    f"w_HIDDEN={widget_now.isHidden()} w_geo={widget_now.geometry()} "
+                    f"w_VisibleBit={widget_now.testAttribute(__import__('PyQt5.QtCore', fromlist=['Qt']).Qt.WA_WState_Visible)}"
+                )
+            except RuntimeError:
+                pass
 
         # Tab 模式：按标签页记录可见状态（切换标签时投影恢复/隐藏）
         if host is not None:
@@ -3588,7 +3843,7 @@ class UIPluginRegistry:
             before_tabs = {k for k, v in self._welcome_tabs.items() if v.plugin_name == plugin_name}
             register_func(self)
             self._loaded_plugins.add(plugin_name)
-            logger.info(f"[UIPluginRegistry] Loaded UI components for plugin: {plugin_name}")
+            logger.debug(f"[UIPluginRegistry] Loaded UI components for plugin: {plugin_name}")
             # P2-2：记录 ui/ 目录 mtime 签名（静默写入兑底轮询基准）
             try:
                 self._ui_signatures[plugin_name] = self._compute_ui_signature(plugin_path)
@@ -3806,6 +4061,10 @@ class UIPluginRegistry:
                         pass
                     if was_visible:
                         self._pending_card_restore.append((plugin_name, win_id, cid))
+        # 清理消息卡内嵌面板：先摘除已挂实例（面板可能含 QTimer/线程），再注销注册
+        for pid in [k for k, v in self._card_inline_panels.items() if v.plugin_name == plugin_name]:
+            self.detach_card_inline_panel(pid)
+            self._card_inline_panels.pop(pid, None)
         # 清理 fence 渲染器注册
         self._fence_renderers = {k: v for k, v in self._fence_renderers.items() if v.plugin_name != plugin_name}
         self._plugin_paths.pop(plugin_name, None)
@@ -3879,7 +4138,7 @@ class UIPluginRegistry:
         except Exception as e:
             logger.warning(f"[UIPluginRegistry] 释放能力订阅失败 ({plugin_name}): {e}")
         self._loaded_plugins.discard(plugin_name)
-        logger.info(f"[UIPluginRegistry] Unloaded UI components for plugin: {plugin_name}")
+        logger.debug(f"[UIPluginRegistry] Unloaded UI components for plugin: {plugin_name}")
         if had_welcome_tabs:
             self._schedule_welcome_refresh()
         return True
@@ -4302,7 +4561,7 @@ class UIPluginRegistry:
         # 诊断留档（支持排查「命令没出现在命令卡片 / 快捷键管理」）：
         # 命中此日志说明命令确已进命令表，问题在消费端；看不到此日志说明账本为空。
         if self._ui_commands:
-            logger.info(
+            logger.debug(
                 f"[UIPluginRegistry] UI 命令已重放 {len(self._ui_commands)} 条 → CommandManager: "
                 f"{sorted(self._ui_commands)}"
             )

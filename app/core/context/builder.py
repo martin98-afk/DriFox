@@ -278,7 +278,7 @@ class ContextBudgetAllocator:
 
         # 预留动态上下文（已全部迁移至 hook 体系，无需再预留）
         # - 系统时间 → PostUserMessage hook
-        # - 条目记忆 + 关键文档 → PreUserMessage hook（去重，只保留最新）
+        # - 条目记忆 → PreUserMessage hook（去重，只保留最新）
         # - 项目笔记 + 路径建议 + Worktree → SessionStart hook
         DYNAMIC_CONTEXT_RESERVE = 0
         history_budget = max(500, history_budget - DYNAMIC_CONTEXT_RESERVE)

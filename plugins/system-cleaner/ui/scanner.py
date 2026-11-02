@@ -379,6 +379,40 @@ def _release_memory_deep():
 
     return collected, killed_procs
 
+def _release_memory_deep_core() -> int:
+    """第二阶段的可主线程部分：GS 全代回收 + 工作集归还 OS。
+
+    从 ``_release_memory_deep`` 拆出来，供「GC 留主线程、psutil 进后台」的分拍
+    调用（见 cards._on_memory_release）。
+
+    为什么 GC 不放后台：``gc.collect(2)`` 回收期间会暂停**全部**线程（含主线程）
+    直到回收完成，换到后台线程只是把停顿换个地方发生，主线程照样卡。真正的
+    收益来自把 psutil 的全系统进程遍历（逐个 OpenProcess 取 pid/name/ppid，
+    2026-10-31 实测主线程阻塞 501ms）挪到后台——那部分是真实的阻塞式 IO。
+
+    Returns:
+        gc.collect(2) 回收的对象数
+    """
+    import ctypes
+    import gc
+    import sys as _sys
+
+    collected = gc.collect(2)
+
+    # 工作集修剪（崩溃修复见 _release_memory_deep 的步骤 6 注释）
+    try:
+        if _sys.platform == "win32":
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            h = kernel32.GetCurrentProcess()
+            kernel32.SetProcessWorkingSetSize(h, ctypes.c_size_t(-1).value, ctypes.c_size_t(-1).value)
+        elif _sys.platform == "linux":
+            libc = ctypes.CDLL("libc.so.6", use_last_error=True)
+            libc.malloc_trim(0)
+    except Exception:
+        pass
+
+    return collected
+
 
 def _release_memory():
     """兼容入口：不分拍一次性执行两阶段（轻清理 → 深度释放）。

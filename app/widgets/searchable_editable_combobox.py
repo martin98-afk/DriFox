@@ -2,7 +2,7 @@ from PyQt5.QtCore import QStringListModel, Qt
 from PyQt5.QtWidgets import QCompleter
 from qfluentwidgets import EditableComboBox
 
-from app.utils.design_tokens import Colors, font_size_css
+from app.utils.design_tokens import Colors, font_size_css, readable_text_on
 from app.utils.utils import get_font_family_css
 
 MAX_COMBO_VISIBLE_ITEMS = 15  # 下拉框最大同时显示数量
@@ -62,6 +62,7 @@ class SearchableEditableComboBox(EditableComboBox):
     def _dropdown_style(self) -> str:
         """主题感知的下拉列表样式"""
         Colors.refresh()
+        selected_fg = readable_text_on(Colors.TEXT_ACCENT, Colors.BUTTON_TEXT_ON_ACCENT)
         return f"""
             QListWidget#comboListWidget {{
                 background-color: {Colors.CONTENT_BG};
@@ -82,13 +83,14 @@ class SearchableEditableComboBox(EditableComboBox):
             }}
             QListWidget#comboListWidget::item:selected {{
                 background-color: {Colors.TEXT_ACCENT};
-                color: {Colors.BUTTON_TEXT_ON_ACCENT};
+                color: {selected_fg};
             }}
         """
 
     def _completer_popup_style(self) -> str:
         """主题感知的补全弹窗样式"""
         Colors.refresh()
+        selected_fg = readable_text_on(Colors.TEXT_ACCENT, Colors.BUTTON_TEXT_ON_ACCENT)
         return f"""
             QAbstractItemView {{
                 background-color: {Colors.CONTENT_BG};
@@ -109,7 +111,7 @@ class SearchableEditableComboBox(EditableComboBox):
             }}
             QAbstractItemView::item:selected {{
                 background-color: {Colors.TEXT_ACCENT};
-                color: {Colors.BUTTON_TEXT_ON_ACCENT};
+                color: {selected_fg};
             }}
         """
 

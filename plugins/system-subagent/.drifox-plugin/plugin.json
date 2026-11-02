@@ -1,0 +1,31 @@
+{
+    "name": "system-subagent",
+    "description": "子智能体 — assistant 消息卡末尾展示任务运行区（旋转图标、工具计数、上下文用量、进入会话/停止），并提供 /subagents 命令与会话卡",
+    "version": "0.2.0",
+    "author": {
+        "name": "DriFox Contributors"
+    },
+    "homepage": "https://github.com/martin98-afk/DriFox",
+    "license": "GPL-3.0-or-later",
+    "type": "system",
+    "api_version": 2,
+    "components": {
+        "commands": true,
+        "tools": true,
+        "ui": true
+    },
+    "capabilities": [
+        "config.write",
+        "model.config",
+        "model.config_for",
+        "session.read",
+        "session.send",
+        "storage.db",
+        "subagent.run",
+        "ui.notify",
+        "ui.card.show"
+    ],
+    "module_prefixes": [
+        "system_subagent_manager"
+    ]
+}

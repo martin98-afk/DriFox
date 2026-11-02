@@ -348,6 +348,89 @@ class TeamManager:
 
     # ── 成员管理 ─────────────────────────────────────
 
+    def get_leader_window_id(self, team_name: str = DEFAULT_TEAM) -> str:
+        """获取团队 leader 的窗口 ID（team.json 顶层 leader_window_id 字段）
+
+        未建团（工具层 team_create 未登记 leader）或老数据无该字段时返回空串。
+        """
+        with self._data_lock:
+            data = self._get_team_data(team_name)
+            return str(data.get("leader_window_id") or "")
+
+    def set_leader_window_id(self, window_id: str, team_name: str = DEFAULT_TEAM) -> bool:
+        """登记团队 leader 窗口（create 流程：leader 是新开窗，非调用方窗口）。
+
+        create_team 建团时不再登记 leader（调用方保持非团队成员）；leader
+        窗口由主线程开窗路径 join_team 后经本方法回写顶层 leader_window_id。
+        空串 = 清空（与 leave_team 的接任/清空语义一致）。
+        """
+        window_id = str(window_id or "")
+        with self._data_lock:
+            data = self._get_team_data(team_name)
+            data["leader_window_id"] = window_id
+            self._save_team_data(team_name)
+        return bool(window_id)
+
+    def create_team(
+        self,
+        team_label: str,
+        team_role: str = "",
+        agents: Optional[List[Dict[str, Any]]] = None,
+        leader_window_id: str = "",
+        leader_agent_name: str = "",
+    ) -> Dict[str, Any]:
+        """一句话建团（内聚实现，全链路 DEFAULT_TEAM 目录 + run_id 粒度）
+
+        时序：start_team_run(force=True) 生成新 run → **槽位先写**
+        templates_by_run_id[run_id]（含 runtime: True 标记，防被误当模板
+        --save 回写）→ join_team 登记 leader 窗口（成员 run_id 必命中槽位，
+        不落 get_template_for_run_id 的顶层回退）。
+
+        不新建 team_name 目录：set_active_window_ids / _cleanup_stale_members
+        全按 DEFAULT_TEAM 设计，团队名走 team_label 字段（join_team 已支持）。
+
+        Args:
+            team_label: 团队名（对外展示，join/快照携带）
+            team_role: 团队定位描述（写槽位 description）
+            agents: 成员角色清单 [{agent_name, description}]（可空，后续增补）
+            leader_window_id: leader 窗口 ID（空=仅建 run+槽位，不登记 leader，
+                工具层在窗口无团队身份时的降级路径）
+            leader_agent_name: leader 登记用的角色名（空则取 "leader"）
+
+        Returns:
+            {"run_id", "leader_window_id", "members"}；members 为 join 后的
+            成员明细（leader 未登记时空列表）
+        """
+        run_id = self.start_team_run(force=True)
+        # 槽位先写：后续 join 的成员 run_id 必命中槽位
+        self.set_template_for_run_id(
+            {
+                "name": team_label,
+                "description": team_role,
+                "agents": [a for a in (agents or []) if isinstance(a, dict) and a.get("agent_name")],
+                "runtime": True,
+            },
+            run_id,
+        )
+        if leader_window_id:
+            # 纯增量字段先写（崩溃窗口从「有成员无 leader=管理全拒」变为
+            # 「有 leader 无成员=无害」），再 join；join 内部持同一把 RLock
+            with self._data_lock:
+                data = self._get_team_data(self.DEFAULT_TEAM)
+                data["leader_window_id"] = leader_window_id
+                self._save_team_data(self.DEFAULT_TEAM)
+            self.join_team(
+                window_id=leader_window_id,
+                agent_name=leader_agent_name or "leader",
+                run_id=run_id,
+                team_label=team_label,
+            )
+        return {
+            "run_id": run_id,
+            "leader_window_id": leader_window_id,
+            "members": self.get_members(run_id=run_id),
+        }
+
     def join_team(
         self,
         window_id: str,
@@ -461,12 +544,58 @@ class TeamManager:
                 if window_id in tm_snap:
                     tm_snap.pop(window_id, None)
                     data["team_members"] = tm_snap
+                # 🛡️ #4（leader 接任）：离开者是 leader_window_id 时，存活成员
+                # 按 joined_at 最早自动接任并回写；团队无存活成员则清空 leader
+                # 标记与 members/team_members 顶层快照（防空壳团队与恢复窗口
+                # 膨胀老坑）。leader_window_id 禁止悬空。
+                if data.get("leader_window_id") == window_id:
+                    survivors = [m for m in data["members"].values() if isinstance(m, dict)]
+                    if survivors:
+                        first = min(survivors, key=lambda m: m.get("joined_at", 0))
+                        data["leader_window_id"] = first.get("window_id", "")
+                    else:
+                        data["leader_window_id"] = ""
+                        data["members"] = {}
+                        data["team_members"] = {}
                 self._save_team_data(team_name, save_now=save_now)
 
         # 清理邮箱目录（后台线程，主线程不再同步阻塞在磁盘删除上）
         mailbox_dir = self._mailbox_dir(team_name, window_id)
         if mailbox_dir.exists():
             self._rmtree_async(mailbox_dir)
+
+    def remove_member(
+        self,
+        window_id: Optional[str] = None,
+        agent_name: Optional[str] = None,
+        team_name: str = DEFAULT_TEAM,
+    ) -> List[Dict[str, Any]]:
+        """按 window_id / agent_name 移除成员（纯数据层，不做权限校验）
+
+        - 两参至少给一个；window_id 优先（精确移除单个成员）
+        - 按 agent_name 移除**全部**同名成员（多同名不遗漏）
+        - 复用 leave_team：members/team_members 清理 + 邮箱目录后台删除 +
+          leader 接任逻辑
+
+        Returns:
+            移除明细列表 [{window_id, agent_name}]；无匹配返回空列表
+        """
+        if not window_id and not agent_name:
+            logger.warning("[TeamManager.remove_member] window_id / agent_name 至少给一个")
+            return []
+        members = self.get_members(team_name)
+        if window_id:
+            targets = [m for m in members if m.get("window_id") == window_id]
+        else:
+            targets = [m for m in members if m.get("agent_name") == agent_name]
+        removed: List[Dict[str, Any]] = []
+        for m in targets:
+            wid = m.get("window_id", "")
+            if not wid:
+                continue
+            self.leave_team(wid, team_name=team_name)
+            removed.append({"window_id": wid, "agent_name": m.get("agent_name", "")})
+        return removed
 
     @staticmethod
     def _rmtree_async(path: Path):
@@ -666,7 +795,7 @@ class TeamManager:
         # can_bash：单工具能力判定（bash 即能力名，非写死集合）
         can_bash = _is_allowed("bash")
         # 🛡️ T16：can_team 对团队成员恒真——团队工具（team_send_message /
-        # team_list_members）的实际可用性由 schema 层按 is_in_team 判定
+        # team_manage(action=list)）的实际可用性由 schema 层按 is_in_team 判定
         # （agent.py get_agent_tools_schema：仅团队成员可见），与 agent 静态
         # permission/tools 白名单无关。review 等只读角色 permission 不含
         # team_* 条目 → 旧逻辑按静态权限判定得 False，误显示"团队✗"。
@@ -947,7 +1076,7 @@ class TeamManager:
 
         优先级：模板 `template["name"]` > 团队目录名 > `"default"`。
         模板加载（/team --load）后会写入 template.name，作为用户在
-        `team_list_members` 等场景看到的"团队名"。
+        `team_manage(action=list)` 等场景看到的"团队名"。
         """
         data = self._get_team_data(team_name)
         template = data.get("template") or {}
@@ -1282,6 +1411,108 @@ class TeamManager:
         self._write_json(mailbox_dir / f"{mail_id}.json", mail)
         return mail_id
 
+    def send_task_broadcast(
+        self,
+        subject: str,
+        body: str,
+        targets: Optional[List[str]] = None,
+        exclude_self: bool = True,
+        team_name: str = DEFAULT_TEAM,
+    ) -> Dict[str, Any]:
+        """群发任务邮件（leader 专属，门禁在工具层）——逐目标独立 mail_id
+
+        发件人取 team.json 顶层 leader_window_id 反查（群发已定 leader 专属，
+        自洽）。跨团队打标逐目标判定（to_run_id 各自现查，不混用单目标值）。
+
+        Args:
+            subject: 邮件主题（body 前 80 字符兜底）
+            body: 邮件正文
+            targets: 目标标识符列表（agent_name 或 agent_name@window_id）；
+                None 或含 "*" 时展开为全队成员。agent_name 展开为该名的
+                **全部**成员（同名单发 find_member 只取第一个的坑在此绕开）。
+            exclude_self: True 时跳过 leader 自身（记入 skipped）。
+            team_name: 团队名（仅定位 team.json，全链路 DEFAULT_TEAM）
+
+        Returns:
+            {"sent": [{identifier, mail_id, to_run_id, cross_team}, ...],
+             "skipped": [(identifier, reason), ...]}；离线成员（不在 members 表）
+            记 skipped，不抛异常。
+        """
+        from_window = self.get_leader_window_id(team_name)
+        if not from_window:
+            return {"sent": [], "skipped": [("*", "团队未登记 leader 窗口，无法群发")]}
+        from_agent = self.get_member_agent_name(from_window, team_name) or "leader"
+        from_run_id = self.get_member_run_id(from_window, team_name)
+
+        members = self.get_members(team_name)
+
+        # ── 展开目标（agent_name 展开为全部同名成员）──
+        resolved: List[Dict[str, Any]] = []
+        skipped: List[tuple] = []
+        if not targets or "*" in targets:
+            resolved = list(members)
+            for ident in targets or []:
+                if ident != "*":
+                    skipped.append((ident, "已展开全队，忽略额外目标"))
+        else:
+            for ident in targets:
+                if "@" in ident:
+                    m = self.find_member(ident, team_name)
+                    if m:
+                        resolved.append(m)
+                    else:
+                        skipped.append((ident, "未找到成员（可能已离线/被清理）"))
+                else:
+                    matched = [m for m in members if m.get("agent_name") == ident]
+                    if matched:
+                        resolved.extend(matched)
+                    else:
+                        skipped.append((ident, "未找到同名成员"))
+
+        # 去重（多标识符可命中同一成员）+ 排除自己
+        seen_wids: set = set()
+        sent: List[Dict[str, Any]] = []
+        for m in resolved:
+            wid = m.get("window_id", "")
+            if not wid or wid in seen_wids:
+                continue
+            seen_wids.add(wid)
+            if exclude_self and wid == from_window:
+                skipped.append((wid, "跳过 leader 自身"))
+                continue
+
+            to_run_id = self.get_member_run_id(wid, team_name)
+            this_mail_id = self._next_mail_id()
+            mail = {
+                "id": this_mail_id,
+                "type": "task",
+                "team_name": team_name,
+                "from_window": from_window,
+                "from_agent": from_agent,
+                "to_window": wid,
+                "to_agent": m.get("agent_name", ""),
+                "from_run_id": from_run_id,
+                "to_run_id": to_run_id,
+                "subject": (subject or body)[:80],
+                "body": body,
+                "status": "pending",
+                "result": "",
+                "created_at": time.time(),
+            }
+            mailbox_dir = self._mailbox_dir(team_name, wid)
+            mailbox_dir.mkdir(parents=True, exist_ok=True)
+            self._write_json(mailbox_dir / f"{this_mail_id}.json", mail)
+            sent.append(
+                {
+                    "identifier": f"{mail['to_agent']}@{wid}",
+                    "mail_id": this_mail_id,
+                    "to_run_id": to_run_id,
+                    "cross_team": bool(from_run_id and to_run_id and from_run_id != to_run_id),
+                }
+            )
+
+        return {"sent": sent, "skipped": skipped}
+
     def send_reply(
         self,
         original_mail_id: str,
@@ -1360,7 +1591,7 @@ class TeamManager:
 
         与邮件状态互补：邮件状态反映任务生命周期（pending/running/done），
         runtime 状态反映流式输出/思考/提问等实时状态（由 main_widget
-        ._set_ai_state 同步，供 team_list_members 查询路径可见）。
+        ._set_ai_state 同步，供 team_manage(action=list) 查询路径可见）。
         非团队成员静默跳过（不落盘）；成员被清理时随 members 一并删除。
         """
         if status not in ("busy", "idle"):

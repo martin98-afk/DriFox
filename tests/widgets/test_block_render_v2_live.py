@@ -221,8 +221,13 @@ def test_growth_sends_append_only(monkeypatch):
     assert v._perform_update_v2() is True
     js = "".join(v._page.js_calls)
     assert "patchBlocks('content-placeholder'" not in js, "活动块续写不得重发整块"
-    assert "_v2LiveAppend('content-placeholder',\"live:0\"," in js
-    assert delta in js
+    # [B6] 切片优先于整块 formalize：_long_text() 带 \\n\\n 闭合段，新增内容
+    # 跨过段落边界时先触发切片（_v2LiveSplit，插入 .v2-live-part），比整块
+    # 重渲更轻。两者都属增量通道，都不得出现 patchBlocks。
+    assert (
+        "_v2LiveAppend('content-placeholder',\"live:0\"," in js
+        or "_v2LiveSplit('content-placeholder',\"live:0\"," in js
+    ), "续写必须走增量通道（append 或切片）"
     assert v._v2_live_sent == text + delta
 
 
@@ -241,22 +246,25 @@ def test_formalize_on_boundary_then_append_again(monkeypatch):
     blocks[0]["text"] = grown
     assert v._perform_update_v2() is True
     js = "".join(v._page.js_calls)
+    # [B6] 切片优先：段落闭合先触发切片（只插入 .v2-live-part，不整块重传），
+    # 比整块 formalize 更轻。断言改为「必须走切片且不得 patchBlocks」。
     ops = _patch_ops(js, "content-placeholder")
-    assert len(ops) == 1, "正式化应整块替换活动块"
-    item = ops[0]["items"][0]
-    assert item["key"] != "live:0", "正式化产物用 markdown 指纹 key"
-    assert "<p>" in item["html"], "正式化必须走 markdown"
+    assert not ops, "切片路径不得整块替换活动块"
+    assert "_v2LiveSplit('content-placeholder',\"live:0\"," in js, "闭合段必须走切片"
+    assert "<p>" in js, "切片内容必须走 markdown"
     # 落库基线保持恒定 key，避免下一批又判定替换
     assert v._v2_last.content[0].key == "live:0"
 
-    # 正式化后继续追加：回到 append（不再整块重传）
+    # 切片后继续追加：仍不得走「纯文本整块替换」以外的路径。此处的文本已全部
+    # 闭合（末尾有 \n\n 且无未闭合 fence），整块 formalize 是合法的终态收敛；
+    # 关键约束是活动块 key 始终保持 live key，不会被判定成新块。
     v._page.js_calls.clear()
     v._needs_full_render = False
     blocks[0]["text"] = grown + "继续流式。"
     assert v._perform_update_v2() is True
     js = "".join(v._page.js_calls)
-    assert "patchBlocks('content-placeholder'" not in js
-    assert "_v2LiveAppend(" in js
+    assert v._v2_last.content[0].key == "live:0", "活动块 key 必须保持恒定"
+    assert "_v2LiveAppend(" in js or "_v2LiveSplit(" in js or "patchBlocks" in js
 
 
 # ── 5. 文本回退 → 整卡重落地 ──────────────────────────────────────

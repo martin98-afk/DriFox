@@ -102,6 +102,23 @@ def register_ui(registry):
         group="plugin", priority=0, metadata=None, section="plugins",
     )
 
+    # 消息卡内嵌面板（assistant 气泡末尾的通用槽位：正文/任务看板之后、页脚之前）
+    # 与浮动卡互补——无独立容器/标题/命令，生命周期跟随卡片，宿主在「新卡出现」时
+    # 迁卡（旧卡摘除、新卡接管，语义同任务看板）。非独立可触发界面，不联动命令。
+    registry.register_card_inline_panel(
+        plugin_name, panel_id, widget_class,
+        order=100, metadata=None,
+    )  # widget_class(parent)；面板定义 heightChanged 信号即自动接卡片高度锚定
+       # 契约：必须上报「实际占高」（max(sizeHint, height) 口径），隐藏态按 0 记账
+       # 宿主侧：MessageCard.ensure_inline_panel / get_inline_panel / remove_inline_panel
+       # 取用：registry.attach_card_inline_panel(panel_id, main_widget=mw) → 实例
+       #        registry.detach_card_inline_panel(panel_id)（卸载路径，按窗口分桶）
+
+    # 服务实现反置（主程序只留门面，业务实现在插件里）
+    registry.register_service(
+        name, instance, plugin_name="",
+    )  # 主程序经 UIPluginRegistry.get_service(name) 取（history / worktree / subagent_session 先例）
+
     # 标题栏常驻 tab（无 × 关闭钮；点击走 on_click 回调自展示，主程序不接管内容区）
     registry.register_titlebar_tab(
         plugin_name, tab_id, label, icon_path="",
@@ -149,7 +166,8 @@ def register_ui(registry):
 `register_context_menu_action`（依赖右键目标上下文）、`register_settings_card`
 （设置面板内的分区卡，属导航而非独立界面）、`register_welcome_tab` /
 `register_welcome_action`（欢迎卡片内部 tab / HTML 点击动作，需欢迎卡片在场
-且携带内容参数）、`register_content_renderer` / `register_tag_renderer` /
+且携带内容参数）、`register_card_inline_panel`（挂进消息卡内部，无独立界面）、
+`register_content_renderer` / `register_tag_renderer` /
 `register_fence_renderer` / `register_message_factory` / `register_mention_provider` /
 `register_ui_module`（渲染/装配类，无用户可触发界面）。
 

@@ -28,7 +28,6 @@ import re
 import sys
 import threading
 import urllib.parse
-import weakref
 from collections import OrderedDict
 from datetime import datetime
 from functools import lru_cache
@@ -109,6 +108,7 @@ from app.utils.design_tokens import (
     fade_in_widget,
     font_size_css,
     get_unified_scrollbar_style,
+    readable_text_on,
     scale_font_size,
     scale_icon_size,
     set_style_sheet_if_changed,
@@ -300,7 +300,7 @@ class MessageCard(SimpleCardWidget):
     branchRequested = pyqtSignal(int, int)  # round_index, message_index — 用户点击页脚「分支」按钮时触发
     saveFileRequested = pyqtSignal(str, str)  # code, lang
     lazyRenderCompleted = pyqtSignal()  # 懒渲染完成信号，用于通知滚动保持
-    modelLabelClicked = pyqtSignal(str, str)  # model_name, config_id — 用户点击页脚模型标签时触发
+    modelLabelClicked = pyqtSignal(str, str, str)  # model_name, config_id, provider_name — 用户点击页脚模型标签时触发
     welcomeModeChanged = pyqtSignal(str)  # 欢迎卡片模式切换（sessions / projects / 插件注册 tab）
     saveChartPngRequested = pyqtSignal(str, str)  # (name_b64, png_b64) — 图表 PNG 导出（内部处理保存，不透传）
 
@@ -384,6 +384,11 @@ class MessageCard(SimpleCardWidget):
         self._artifact_panel_host = None
         self._artifact_panel_items: list = []
         self._artifact_panel_height_cache = 0
+        # 插件注册的消息卡内嵌面板（panel_id -> widget；槽位见
+        # UIPluginRegistry.register_card_inline_panel，挂载顺序同任务看板）
+        self._inline_panels: Dict[str, QWidget] = {}
+        self._inline_panel_host = None
+        self._inline_panel_height_cache: Dict[str, int] = {}
         self._retry_error_type = ""  # 重试错误类型
         self._retry_attempt = 0  # 当前重试次数
         self._retry_max = 15  # 最大重试次数
@@ -650,6 +655,8 @@ class MessageCard(SimpleCardWidget):
 
     def refresh_theme(self):
         """刷新主题颜色，响应全局主题切换"""
+        from app.utils.theme_style import ensure_theme_fresh, mark_theme_dirty
+
         # [T16] 渲染缓存已按主题版本分桶（lru key 含 ThemeRefreshCoordinator
         # 版本号），主题切换无需清空——旧版本条目永不命中，深浅来回切换
         # 直接命中各自版本桶，无需逐卡 clear。
@@ -752,6 +759,17 @@ class MessageCard(SimpleCardWidget):
                 self._artifact_panel.refresh_style()
             except RuntimeError:
                 self._artifact_panel = None
+        # 插件注册的内嵌面板（如子智能体运行区）：QSS 同样在构造期固化。
+        # [PERF] 可见性分流：卡片滚出视口 / 在非当前标签页时只置脏，回到
+        # 可见时由 showEvent → ensure_theme_fresh 补刷。
+        for _panel in list(self._inline_panels.values()):
+            try:
+                if _panel.isVisible():
+                    ensure_theme_fresh(_panel)
+                else:
+                    mark_theme_dirty(_panel)
+            except RuntimeError:
+                continue
 
     # ── 卡片背景色覆盖（替代 qfluentwidgets CardWidget 的固定白色覆盖层）──
     # 背景色完全由 _apply_card_style() 通过 CSS 控制，无需动态解析
@@ -1128,11 +1146,12 @@ class MessageCard(SimpleCardWidget):
         )
 
     def _on_footer_model_clicked(self, event):
-        """用户点击页脚模型标签时，发出 modelLabelClicked(model_name, config_id)"""
+        """用户点击页脚模型标签时，发出 modelLabelClicked(model_name, config_id, provider_name)"""
         if self.model_name:
             self.modelLabelClicked.emit(
                 self.model_name,
                 getattr(self, "_provider_config_id", "") or "",
+                str(self.provider_name or ""),
             )
 
     def _refresh_footer_separators(self):
@@ -1343,10 +1362,12 @@ class MessageCard(SimpleCardWidget):
             return ""
         # 头像直径 30px：首字母字号取 16px（直径的 ~53%），
         # 与项目卡片 _SquareAvatar(14/24≈58%) 比例接近，避免字符过小看不清。
+        # 字色按头像底色自适应：真黑主题 USER_CARD_ACCENT 为纯白，
+        # 硬编码 #FFFFFF 会让首字母在纯黑主题下完全消失。
         return f"""
             QLabel {{
                 {font_css} font-size: {scale_font_size(16)}px;
-                color: #FFFFFF;
+                color: {readable_text_on(self._theme["accent"])};
                 font-weight: 700;
                 background: {self._theme["accent"]};
                 border: 1px solid rgba(255,255,255,0.12);
@@ -3878,6 +3899,8 @@ class MessageCard(SimpleCardWidget):
         ensure_rendered 时窗口不可见，被 _do_ensure_rendered 的可见性守卫推迟
         （设 _render_deferred=True 并 return，避免弹出幽灵窗口）。切回该标签页
         时本事件触发，此时父 HWND 已就绪，可安全创建 QWebEngineView。
+
+        另：主题切换期间本卡若不可见，内嵌插件面板只被置脏，这里补刷。
         """
         super().showEvent(event)
         # 修 #2：用户气泡 viewer 懒加载——若已暂存待显示文本且 viewer 尚未创建，补建
@@ -3885,6 +3908,18 @@ class MessageCard(SimpleCardWidget):
             self._ensure_user_viewer()
         if getattr(self, "_render_deferred", False) and not getattr(self, "_lazy_rendered", False):
             self.ensure_rendered()
+        # 内嵌插件面板补刷（主题切换时不可见 → 只置脏）
+        if self._inline_panels:
+            try:
+                from app.utils.theme_style import ensure_theme_fresh
+            except Exception:
+                ensure_theme_fresh = None
+            if ensure_theme_fresh is not None:
+                for _panel in list(self._inline_panels.values()):
+                    try:
+                        ensure_theme_fresh(_panel)
+                    except RuntimeError:
+                        continue
 
     def _is_effectively_visible(self) -> bool:
         """判断本卡片是否真正显示在屏幕上（有有效父 native window 供 QWebEngineView 附着）。
@@ -4127,6 +4162,10 @@ class MessageCard(SimpleCardWidget):
                     # reorganizeContent 等守卫按旧模式归拢工具/思考块（"切换简洁
                     # 模式对复用卡片永不生效"）。绑定时按当前配置重同步。
                     pooled.sync_compact_mode_to_js()
+                    # 字体同理：reset_for_reuse 保留骨架 → :root 里是上一任卡片
+                    # 的字体变量。用户可能在这期间切过字体，这里按当前配置对齐
+                    # （骨架字体规则读变量，一次 IPC 即可，无需重建骨架）。
+                    pooled._apply_font_vars()
                     self.viewer = pooled
                 except Exception:
                     # 骨架重载失败（C++ 对象已删除等）：弃用该实例，回退新建
@@ -5512,6 +5551,101 @@ class MessageCard(SimpleCardWidget):
         if host is not None:
             host.removeWidget(panel)
 
+    # ── 插件内嵌面板（通用槽位；任务看板/成果栏是内置的同位面板）──
+
+    def ensure_inline_panel(self, panel_id: str):
+        """按插件注册表懒创建内嵌面板并挂进气泡布局末尾。
+
+        面板类与排布顺序由插件在 ``register_card_inline_panel`` 声明，本方法只负责
+        实例化、挂载与高度记账接线。同一卡片内幂等；面板被外部摘除后重新挂回。
+
+        Returns:
+            面板实例；注册缺失 / 无气泡 / 创建失败返回 None。
+        """
+        panel = self._inline_panels.get(panel_id)
+        if panel is not None:
+            host = self._inline_panel_host
+            if host is not None and host.indexOf(panel) < 0:
+                host.addWidget(panel)
+            return panel
+        bubble = self._assistant_bubble
+        if bubble is None:
+            return None
+        try:
+            from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+
+            info = UIPluginRegistry.get_instance().get_card_inline_panel(panel_id)
+        except Exception as e:  # noqa: BLE001 - 注册表异常降级为不渲染
+            logger.warning(f"[MessageCard] 内嵌面板注册表不可用 {panel_id}: {e}")
+            return None
+        if info is None:
+            return None
+        try:
+            panel = info.widget_class(bubble)
+        except Exception as e:  # noqa: BLE001 - 插件面板构造失败不拖垮卡片
+            logger.warning(f"[MessageCard] 内嵌面板创建失败 {panel_id}: {e}")
+            return None
+        height_signal = getattr(panel, "heightChanged", None)
+        if height_signal is not None and hasattr(height_signal, "connect"):
+            height_signal.connect(lambda *_, _pid=panel_id: self._on_inline_panel_height_changed(_pid))
+        bubble_lay = bubble.layout()
+        if bubble_lay is not None:
+            bubble_lay.addWidget(panel)
+            self._inline_panel_host = bubble_lay
+        self._inline_panels[panel_id] = panel
+        return panel
+
+    def get_inline_panel(self, panel_id: str):
+        """取本卡已创建的内嵌面板（未创建返回 None，不触发创建）。"""
+        return self._inline_panels.get(panel_id)
+
+    def remove_inline_panel(self, panel_id: str) -> None:
+        """摘除并销毁内嵌面板（迁卡/插件卸载路径）。"""
+        panel = self._inline_panels.pop(panel_id, None)
+        self._inline_panel_height_cache.pop(panel_id, None)
+        if panel is None:
+            return
+        host = self._inline_panel_host
+        try:
+            if host is not None:
+                host.removeWidget(panel)
+        except RuntimeError:
+            pass
+        try:
+            panel.setParent(None)
+            panel.deleteLater()
+        except RuntimeError:
+            pass
+
+    def _on_inline_panel_height_changed(self, panel_id: str):
+        """内嵌面板高度变化：按实际占高差上报销定补偿（契约同任务看板）
+
+        取 ``max(sizeHint, height)`` 而非单取其一：面板刚重建时内部 sizeHint 已刷新、
+        Qt 尚未重排，两者不同源会让 delta 符号与实际变化相反（详见
+        ``_todo_panel_effective_height`` 的事故注释）。
+        """
+        panel = self._inline_panels.get(panel_id)
+        if panel is None:
+            return
+        try:
+            if not panel.isVisible():
+                cur = 0
+            else:
+                cur = max(int(panel.sizeHint().height()), int(panel.height()))
+            prev = self._inline_panel_height_cache.get(panel_id, 0)
+            self._inline_panel_height_cache[panel_id] = cur
+            delta = int(cur - prev)
+            if not delta:
+                return
+            bubble = getattr(self, "_assistant_bubble", None)
+            if bubble is not None:
+                bubble.updateGeometry()
+            self.updateGeometry()
+            self._last_height_delta += delta
+            self.heightChanged.emit(self.height())
+        except RuntimeError:
+            pass
+
     def _ensure_todo_panel(self):
         """懒创建任务看板并挂进气泡布局末尾（正文 viewer 之后、页脚之前）"""
         if self._todo_panel is not None:
@@ -6005,7 +6139,19 @@ class MessageCard(SimpleCardWidget):
                 }}
             }})();
             """
-            self.viewer.page().runJavaScript(js_code)
+            page = self.viewer.page()
+            if page is None:
+                return
+            page.runJavaScript(js_code)
+            # v2 长思考（≥ _LIVE_MIN_CHARS）活动块走 .v2-live-text 尾态，上面
+            # .think-streaming 的选择器命不中：补一条 v2 增量通道
+            # （两种形态互斥，各自 no-op 不会重复显示）。
+            _v2_key = getattr(self.viewer, "_v2_live_key", "") or ""
+            if _v2_key:
+                page.runJavaScript(
+                    "if(typeof window._v2LiveAppend==='function')"
+                    f"window._v2LiveAppend('tool-content',{json.dumps(_v2_key)},{safe_text},true);"
+                )
         except RuntimeError:
             pass
 

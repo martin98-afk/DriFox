@@ -141,24 +141,24 @@ The brainstorm server lives in `scripts/`. You'll call these in the Bash tool:
 - `scripts/stop-server.sh 
 `
 
-## DriFox Integration (bg_start/bg_stop)
+## DriFox Integration (background_task)
 
-On DriFox, use the `bg_start` tool instead of Bash to launch the server. This allows:
+On DriFox, use the `background_task` tool with `action="start"` instead of Bash to launch the server. This allows:
 - Non-blocking operation (doesn't stall the conversation)
-- Easy management via `bg_stop` to terminate the server
+- Easy management via `action="stop"` to terminate the server
 - Task ID tracking for debugging
 
 ### Launch Sequence
 
-1. **Start server with bg_start (use PowerShell):**
+1. **Start server with `background_task action="start"` (use PowerShell):**
    ```xml
-   <bg_start command="powershell -Command \&quot;$env:BRAINSTORM_DIR='C:\tmp\brainstorm'; node server.cjs\&quot;" cwd="D:/work/DriFox/app/skills/brainstorming/scripts" />
+   <background_task action="start" command="powershell -Command \&quot;$env:BRAINSTORM_DIR='C:\tmp\brainstorm'; node server.cjs\&quot;" cwd="D:/work/DriFox/app/skills/brainstorming/scripts" description="启动可视化配套服务" />
    ```
    This sets BRAINSTORM_DIR so server reads from C:\tmp\brainstorm\content
 
-2. **Get port from bg_logs (NOT from bg_start response):**
+2. **Get port from `background_task action="logs"` (NOT from the start response):**
    ```xml
-   <bg_logs task_id="bg_xxxxxxxx" />
+   <background_task action="logs" task_id="bg_xxxxxxxx" description="读取服务端口" />
    ```
    Find the JSON in output:
    ```
@@ -173,9 +173,9 @@ On DriFox, use the `bg_start` tool instead of Bash to launch the server. This al
 4. **Push content:**
    Use the Write tool to create HTML files in `C:/tmp/brainstorm/content/`
 
-5. **Stop server with bg_stop:**
+5. **Stop server with `background_task action="stop"`:**
    ```xml
-   <bg_stop task_id="bg_xxxxxxxx" />
+   <background_task action="stop" task_id="bg_xxxxxxxx" description="关闭服务" />
    ```
 
 ### Content File Location
@@ -186,10 +186,10 @@ Windows PowerShell environment:
 
 ### Troubleshooting
 
-**Server still running after bg_stop:**
-- The `bg_stop` tool uses `taskkill /T /F /PID` which kills the process tree
+**Server still running after `background_task action="stop"`:**
+- The stop action uses `taskkill /T /F /PID` which kills the process tree
 - If process persists, manually kill with: `netstat -ano | findstr "<port>"` then `taskkill /PID <pid> /F`
 
 **Port conflict:**
 - Server auto-selects a random high port (49152-65535)
-- Each bg_start call gets a new port
+- Each `background_task action="start"` call gets a new port

@@ -21,6 +21,7 @@ from app.core.sync.lww import (
     Entry,
     LamportClock,
     element_key,
+    entry_ts,
     is_tombstone,
     live,
     tombstone,
@@ -41,13 +42,19 @@ def value_hash(value: object) -> str:
 
 
 class SyncMetaRecorder:
-    def __init__(self) -> None:
+    def __init__(self, device: str = "") -> None:
         self.state: Dict[str, object] = {"version": META_VERSION, "clock": 0, "entries": {}}
+        # 本设备标识：写进条目，供 t 相同时做确定性裁决
+        self.device = device
         # path（group.name）→ 该配置项当前值，用于 diff 出集合条目的增删
         self.values: Dict[str, object] = {}
         self._clock = LamportClock(0)
         self._lock = threading.RLock()
         self._suppress_depth = 0
+        # 本次会话（attach 之后）由本机真实写过的条目路径。
+        # 云端 clock 可能高于本地（上次会话 clock 未落盘 / 旧版本残留），
+        # 单纯 tick 出来的 t 未必能压过它；合并时用这份集合兜底。
+        self._session_touched: set = set()
 
     # ── 生命周期 ─────────────────────────────────────────
 
@@ -90,18 +97,58 @@ class SyncMetaRecorder:
                     for k, v in (value.items() if isinstance(value, dict) else []):
                         epath = f"{path}.{k}"
                         if epath not in entries:
-                            entries[epath] = live(value_hash(v), self._clock.tick())
+                            entries[epath] = live(value_hash(v), self._clock.tick(), self.device)
                     continue
                 if kind == "list":
                     for elem in value if isinstance(value, list) else []:
                         epath = f"{path}.{element_key(elem)}"
                         if epath not in entries:
-                            entries[epath] = live(value_hash(elem), self._clock.tick())
+                            entries[epath] = live(value_hash(elem), self._clock.tick(), self.device)
                     continue
                 if path not in entries:
-                    entries[path] = live(value_hash(value), self._clock.tick())
+                    entries[path] = live(value_hash(value), self._clock.tick(), self.device)
             self.state["entries"] = entries
             self._sync_clock()
+
+    def set_device(self, device: str) -> None:
+        """补设设备标识（Settings 早期绑定时还拿不到，enable() 时补上）。
+
+        只影响此后 tick 的新条目；存量条目已落盘，改写它们的 dv 会改变
+        平局裁决结果，不做追溯。
+        """
+        if not device:
+            return
+        with self._lock:
+            self.device = device
+
+    def session_touched(self) -> set:
+        """本次会话本机真实改过的条目路径（供合并时兜底抬高 t）。"""
+        with self._lock:
+            return set(self._session_touched)
+
+    def lift_session_touched(self, floor: int) -> list:
+        """把本次会话改过的条目 t 抬到 ``floor`` 之上，返回被抬高的路径。
+
+        云端 clock 可能高于本地（上次会话 clock 未落盘、旧版本残留、崩溃），
+        本地 tick 出来的序号压不过它，合并时本地刚改的值仍会被云端旧内容
+        覆盖。对「本次会话确实写过」的条目抬起下界，是安全的：这些值就是
+        用户刚刚的操作结果，本来就该赢过任何云端旧版本。
+        """
+        lifted: list = []
+        with self._lock:
+            entries = self._entries()
+            for path in self._session_touched:
+                cur = entries.get(path)
+                if not isinstance(cur, dict) or is_tombstone(cur):
+                    continue
+                if entry_ts(cur) >= floor:
+                    continue
+                cur["t"] = floor
+                lifted.append(path)
+            if lifted:
+                self._clock.observe(floor)
+                self._sync_clock()
+        return lifted
 
     @contextmanager
     def suppress(self):
@@ -145,7 +192,8 @@ class SyncMetaRecorder:
             self._sync_clock()
 
     def _touch(self, path: str, value: object) -> None:
-        self._entries()[path] = live(value_hash(value), self._clock.tick())
+        self._entries()[path] = live(value_hash(value), self._clock.tick(), self.device)
+        self._session_touched.add(path)
 
     def _diff_dict(self, path: str, old: object, new: object) -> None:
         old_d = old if isinstance(old, dict) else {}
@@ -155,9 +203,9 @@ class SyncMetaRecorder:
                 self._touch(f"{path}.{k}", v)
         for k, v in old_d.items():
             if k not in new_d:
-                self._entries()[f"{path}.{k}"] = tombstone(
-                    value_hash(v), self._clock.tick()
-                )
+                _epath = f"{path}.{k}"
+                self._entries()[_epath] = tombstone(value_hash(v), self._clock.tick(), self.device)
+                self._session_touched.add(_epath)
 
     def _diff_list(self, path: str, old: object, new: object) -> None:
         old_l: List[object] = list(old) if isinstance(old, list) else []
@@ -169,9 +217,9 @@ class SyncMetaRecorder:
                 self._touch(f"{path}.{k}", v)
         for k, v in old_map.items():
             if k not in new_map:
-                self._entries()[f"{path}.{k}"] = tombstone(
-                    value_hash(v), self._clock.tick()
-                )
+                _epath = f"{path}.{k}"
+                self._entries()[_epath] = tombstone(value_hash(v), self._clock.tick(), self.device)
+                self._session_touched.add(_epath)
 
     def _sync_clock(self) -> None:
         self.state["clock"] = self._clock.value
@@ -260,8 +308,17 @@ def is_tombstone_entry(entry: Optional[Entry]) -> bool:
 
 _recorder_singleton: Optional[SyncMetaRecorder] = None
 
+def get_bound_recorder() -> Optional["SyncMetaRecorder"]:
+    """返回已绑定的记账器（未绑定返回 None）。
 
-def bind_settings(cfg) -> SyncMetaRecorder:
+    供 ``Settings.save()`` 落地时取权威条目表：内存里的 ``System.SyncMeta``
+    是启动时的快照，记账器 tick 之后不会回写内存，直接用 ``toDict()`` 落盘
+    会把条目表回滚到旧版本。
+    """
+    return _recorder_singleton
+
+
+def bind_settings(cfg, device: str = "") -> SyncMetaRecorder:
     """把记账器接到 Settings 的全部 ConfigItem 上（幂等，全局单例）。
 
     只负责 app.config 内存侧的变化采集；合并下载写回内存时由调用方
@@ -273,7 +330,7 @@ def bind_settings(cfg) -> SyncMetaRecorder:
 
     from qfluentwidgets.common.config import ConfigItem
 
-    rec = SyncMetaRecorder()
+    rec = SyncMetaRecorder(device)
     rec.attach(cfg.toDict(serialize=False), getattr(cfg, "sync_meta").value)
     rec.seed_missing()
 

@@ -287,7 +287,7 @@ _GET_DIAGNOSTICS_SCHEMA = {
     "type": "function",
     "function": {
         "name": "get_diagnostics",
-        "description": "获取文件语法检查结果(错误/警告/提示)。支持 Python(pyright/mypy/flake8)、JS/TS(tsc/eslint)、Shell(shellcheck)。",
+        "description": "取文件语法检查结果(错误/警告/提示)。支持 python(pyright/mypy/flake8)、js/ts(tsc/eslint)、shell(shellcheck)。",
         "parameters": {
             "type": "object",
             "properties": {
@@ -310,17 +310,9 @@ _LSP_SCHEMA = {
     "function": {
         "name": "lsp",
         "description": (
-            "通过LSP执行代码智能操作。\n"
-            "\n"
-            "操作类型：\n"
-            "- diagnostics: 文件诊断(错误/警告/提示)\n"
-            "- documentSymbols: 符号列表(类/函数/变量)\n"
-            "- goToDefinition: 跳定义\n"
-            "- findReferences: 找引用\n"
-            "- hover: 光标位置文档/类型\n"
-            "- listServers: 列出LSP服务器状态\n"
-            "\n"
-            "line/column从1开始。diagnostics/listServers无需line/column。"
+            "通过 LSP 执行代码智能操作。diagnostics=文件诊断；documentSymbols=符号列表；goToDefinition=跳定义；"
+            "findReferences=找引用；hover=光标处文档/类型；listServers=服务器状态。"
+            "\nline/column 从 1 起；diagnostics/listServers 不需要。"
         ),
         "parameters": {
             "type": "object",

@@ -39,7 +39,6 @@ def _make_backend(hook_mgr):
         tool_executor=SimpleNamespace(get_workdir=lambda: "/tmp/proj"),
         get_current_session=lambda: SimpleNamespace(session_id="sess-1", is_temp=False),
         _build_worktree_context_dict=lambda: {"worktree_hint": "w"},
-        build_key_documents_context=lambda: {"key_docs": "d"},
     )
 
 
@@ -109,7 +108,6 @@ def test_interject_ctx_carries_session_and_workdir():
     assert ctx_by_event["UserPromptSubmit"]["session_id"] == "sess-1"
     assert ctx_by_event["UserPromptSubmit"]["message"] == "hi"
     assert ctx_by_event["PreUserMessage"]["worktree_hint"] == "w"
-    assert ctx_by_event["PreUserMessage"]["key_docs"] == "d"
 
 
 def test_non_interject_entry_skips_user_hooks():

@@ -217,6 +217,7 @@ def _window_events(host: Any, ctx: Any):
     return subscribe
 
 
+
 # ──────────────────── 模型 / 智能体 ────────────────────
 
 
@@ -239,10 +240,17 @@ def _resolve_active_host(host: Any):
 def _model_config(host: Any):
     real = _resolve_active_host(host)
 
-    def current() -> dict:
+    def current(config_id: str = "", model_name: str = "") -> dict:
+        """当前模型配置；传入 config_id 时按该服务商取（utility_model 场景）。
+
+        两种形态共用同一能力：无参 = 本窗口当前模型；带参 = 指定
+        服务商/模型（内部走 _resolve_provider_config 的五级匹配，回填空密钥）。
+        """
         if real is None:
             return {}
         try:
+            if config_id:
+                return dict(real._resolve_provider_config(config_id, model_name) or {})
             return real._get_current_model_config() or {}
         except Exception:
             return {}
@@ -292,6 +300,20 @@ def _agent_prompt(host: Any):
 
     return prompt
 
+def _subagent_manager(host: Any):
+    """子智能体窗口服务（按 window_id 取插件注册的门面；未就绪返回 None）。
+
+    管理器归 system-subagent 插件所有，主程序不持有实例：插件把每窗口门面
+    写入 ``WindowServiceRegistry``，这里只做按窗口查询。
+    """
+    try:
+        from app.plugins.registries.window_services import get_window_services
+
+        return get_window_services().get("subagent", str(getattr(host, "_window_id", "") or ""))
+    except Exception as e:  # noqa: BLE001 - 服务表不可用按未加载处理
+        logger.debug(f"[Capability] 子智能体服务查询失败: {e}")
+        return None
+
 
 # ──────────────────── 工作目录 ────────────────────
 
@@ -327,14 +349,61 @@ def _workdir_write(host: Any):
     return set_workdir
 
 
+def _branch_refresh(host: Any):
+    """刷新标题栏分支标签（git 分支名变了之后调用）。
+
+    为什么要单独的语义能力：分支标签的检测有 30s 类级缓存
+    （WorktreeService._branch_cache），切分支后缓存里还是旧分支名。
+    插件自己清不到那份缓存（在别的模块），也调不到主程序的刷新入口。
+    这里由宿主统一做「失效缓存 + 重新检测」，插件只需说「分支变了」。
+    """
+
+    def refresh() -> None:
+        # 1) 失效分支缓存：worktree-manager 的 service 缓存与 detector 缓存
+        try:
+            from app.plugins.sdk import GitWorktreeDetector
+
+            GitWorktreeDetector._branch_cache.clear()
+        except Exception:
+            pass
+        try:
+            import sys
+
+            mod = sys.modules.get("ui_plugin_worktree_manager.service")
+            svc_cls = getattr(mod, "WorktreeService", None)
+            if svc_cls is not None:
+                svc_cls._branch_cache.clear()
+        except Exception:
+            pass
+
+        # 2) 让宿主窗口重新检测并上屏
+        backend = getattr(host, "backend", None)
+        fn = getattr(host, "_update_branch", None)
+        if callable(fn):
+            try:
+                fn()
+                return
+            except Exception:
+                pass
+        # 回退：直接走 service（宿主没有 _update_branch 时）
+        try:
+            import sys
+
+            mod = sys.modules.get("ui_plugin_worktree_manager.service")
+            svc_cls = getattr(mod, "WorktreeService", None)
+            if svc_cls is not None:
+                svc_cls().update_branch(host)
+        except Exception:
+            pass
+
+    return refresh
+
+
 def _project_workdir(host: Any):
-    """写库式切换项目工作目录（worktree 场景）。
+    """写库式切换项目工作目录（worktree / 分支切换场景）。
 
     与 ``workdir.write`` 的分界：那条只改会话内状态（缓存 + executor + 广播 +
-    UI 同步），进程重启即失效；本能力把改动**落进记忆库**——关键文档登记、
-    工作目录持久化、根目录标记恢复。worktree-manager 原先自己拼
-    ``backend.memory_manager`` 的四步调用，且要判断旧根目录是不是 worktree
-    才决定是否恢复标记，这套判断属于宿主语义，不该由插件复制。
+    UI 同步），进程重启即失效；本能力把改动**持久化**到 project_workdir 表。
     """
 
     def _mm():
@@ -344,34 +413,12 @@ def _project_workdir(host: Any):
     def _resolve_project(project: str) -> str:
         return str(project or getattr(host, "_current_project", "") or "")
 
-    def switch(project: str, path: str, *, added_by: str = "git_worktree", restore_mark: bool = True) -> bool:
-        """登记关键文档 + 设置工作目录（可选恢复旧根目录标记）。
+    def switch(project: str, path: str, *, added_by: str = "", restore_mark: bool = True) -> bool:
+        """持久化项目工作目录。
 
-        ``restore_mark``：旧工作目录存在且不是 worktree 时恢复其 ``is_working_dir``
-        标记，保证记忆卡片能识别用户设定的根目录。调用方不需要知道判定规则。
+        ``added_by`` / ``restore_mark`` 保留在签名里仅为兼容既有插件调用点：
+        关键文档表下线后，工作目录已是单值语义，无需「登记条目标记」这类动作。
         """
-        project, path = _resolve_project(project), str(path or "")
-        mm = _mm()
-        if mm is None or not project or not path:
-            return False
-        try:
-            prev = mm.get_working_directory(project)
-            mm.add_key_document(project, path, added_by)
-            mm.set_working_directory(project, path)
-            if restore_mark and prev and prev != path and prev != "clear":
-                docs = mm.get_key_documents(project)
-                prev_is_worktree = any(
-                    d.get("file_path") == prev and d.get("added_by") == "git_worktree" for d in docs
-                )
-                if not prev_is_worktree:
-                    mm.restore_working_directory_mark(project, prev)
-            return True
-        except Exception as e:
-            logger.warning(f"[Capability] 切换项目工作目录失败 project={project}: {e}")
-            return False
-
-    def set_only(project: str, path: str) -> bool:
-        """只持久化工作目录（回主仓库场景：不需要登记关键文档/恢复标记）。"""
         project, path = _resolve_project(project), str(path or "")
         mm = _mm()
         if mm is None or not project or not path:
@@ -379,8 +426,12 @@ def _project_workdir(host: Any):
         try:
             return bool(mm.set_working_directory(project, path))
         except Exception as e:
-            logger.warning(f"[Capability] 持久化工作目录失败 project={project}: {e}")
+            logger.warning(f"[Capability] 切换项目工作目录失败 project={project}: {e}")
             return False
+
+    def set_only(project: str, path: str) -> bool:
+        """只持久化工作目录（与 switch 等价，保留给回主仓库场景的调用点）。"""
+        return switch(project, path)
 
     return {"switch": switch, "set_only": set_only}
 
@@ -532,17 +583,88 @@ def _session_write(host: Any):
     return host._save_messages_to_session
 
 
+def _engine_busy(backend: Any) -> bool:
+    """worker 真实繁忙判据（core 层 chat_engine.is_streaming）。
+
+    与 main_widget._worker_actually_busy 同源；backend 拿不到 / engine 未建
+    一律视为不忙（安全默认：普通入队路径兜底）。
+    """
+    engine = getattr(backend, "chat_engine", None)
+    if engine is None:
+        return False
+    try:
+        return bool(engine.is_streaming)
+    except Exception:  # noqa: BLE001 - 状态读取失败按空闲处理
+        return False
+
+
+def _send_with_mode(
+    backend: Any,
+    queue: Any,
+    wid: str,
+    text: str,
+    *,
+    ephemeral: bool = False,
+    mode: str = "queue",
+    hook_event: str = "SessionSend",
+) -> bool:
+    """session.send 三模式（queue 默认 / skip 流式中忽略 / hook 流式中注入消息列表）。
+
+    - queue：入队等本轮结束 drain 后发送（原契约）。
+    - skip：流式中直接拒绝（返回 False，调用方感知被忽略）；空闲正常入队。
+    - hook：流式中经 backend._hook_message_queue 注入当前对话上下文，worker
+      工具循环下一轮消费（不建卡不打断，同 SubAgentFinished 通道）；空闲时
+      降级为普通 send 开新轮（hook 队列无 worker 消费，滞留会拖到下轮开头）。
+    hook_event：注入消息的 _hook_event 事件标记（也用作 _format_hook_output
+    标签），调用方可自定义（如 SubAgentFinished）保留语义。
+
+    判忙 stale 误判方向保守：skip 可能误拒（语义安全），hook 注入可能落到
+    下轮开头消费（行为安全）。
+    """
+    mode = str(mode or "queue").strip().lower()
+    if mode not in ("queue", "skip", "hook"):
+        mode = "queue"
+    hook_event = str(hook_event or "SessionSend").strip() or "SessionSend"
+    text = str(text or "")
+    if mode != "queue":
+        if _engine_busy(backend):
+            if mode == "skip":
+                return False
+            hook_q = getattr(backend, "_hook_message_queue", None)
+            if hook_q is not None:
+                try:
+                    from app.core.conversation.backend import _format_hook_output
+
+                    hook_q.put(
+                        {
+                            "role": "user",
+                            "content": _format_hook_output(hook_event, text, wrap_system_reminder=False),
+                            "_hook_event": hook_event,
+                        }
+                    )
+                    return True
+                except Exception as e:  # noqa: BLE001 - 注入失败退化为普通入队
+                    import logging
+
+                    logging.getLogger(__name__).warning(f"[session.send] hook 注入失败，退化排队: {e}")
+        elif mode == "skip":
+            pass  # 空闲：skip 与 queue 同路径
+    return queue.enqueue(wid, "send", {"text": text, "ephemeral": bool(ephemeral)})
+
+
 def _session_control(host: Any):
     """会话控制三件套（入队语义，不直接操作 UI）。
 
     调用方可能在 worker 线程（工具 impl），所以只往窗口队列里塞动作，
     真正执行由 main_widget 在本轮结束时 drain。window_id 只做精确匹配，
     拿不到就拒绝——写操作回退「活跃窗口」会在多窗口同时交接时串窗。
+    send 支持三模式（queue/skip/hook），见 _send_with_mode。
     """
     from app.core.conversation.action_queue import get_action_queue
 
     wid = str(getattr(host, "_window_id", "") or "")
     queue = get_action_queue()
+    backend = getattr(host, "backend", None)
 
     def interrupt() -> bool:
         return queue.enqueue(wid, "interrupt", {})
@@ -550,8 +672,8 @@ def _session_control(host: Any):
     def new_session() -> bool:
         return queue.enqueue(wid, "new", {})
 
-    def send(text: str, *, ephemeral: bool = False) -> bool:
-        return queue.enqueue(wid, "send", {"text": str(text or ""), "ephemeral": bool(ephemeral)})
+    def send(text: str, *, ephemeral: bool = False, mode: str = "queue", hook_event: str = "SessionSend") -> bool:
+        return _send_with_mode(backend, queue, wid, text, ephemeral=ephemeral, mode=mode, hook_event=hook_event)
 
     return {"interrupt": interrupt, "new": new_session, "send": send}
 
@@ -754,15 +876,18 @@ def _ui_card_show(host: Any):
 
 
 def _ui_notify(host: Any):
-    def notify(title: str, message: str) -> None:
+    def notify(title: str, message: str, kind: str = "success", duration: int = 5000) -> None:
         from qfluentwidgets import InfoBar, InfoBarPosition
 
         def _show() -> None:
-            InfoBar.success(
-                title,
-                message,
+            bar_cls = getattr(InfoBar, kind, None)
+            if not callable(bar_cls):  # 非法 kind 回落 success，不让通知因拼写错误丢消息
+                bar_cls = InfoBar.success
+            bar_cls(
+                str(title),
+                str(message),
                 parent=_resolve_tab_window() or host.window(),
-                duration=5000,
+                duration=int(duration),
                 position=InfoBarPosition.BOTTOM,
             )
 
@@ -1083,6 +1208,70 @@ def _config_read(host: Any):
     return read
 
 
+def _config_write(host: Any):
+    """按 key 写主程序配置项（仅已声明项；密钥类字段一律拒绝）。
+
+    只认 Settings 上的具名 ConfigItem：插件能改的范围与「界面里存在的开关」
+    一致，写不进从未声明的字段。密钥类字段与 config.read 同口径拒绝（密钥
+    走 model.config 的写路径不存在，也不该存在）。
+    """
+
+    _SECRET_HINTS = ("key", "token", "secret", "password", "credential")
+
+    def write(key: str, value: Any, save: bool = True) -> bool:
+        if not key:
+            return False
+        if any(h in key.lower() for h in _SECRET_HINTS):
+            logger.warning(f"[Capability] config.write 拒绝密钥类字段: {key}")
+            return False
+        try:
+            from app.utils.config import Settings
+
+            s = Settings.get_instance()
+            item = getattr(s, key, None)
+            if item is None or not hasattr(item, "value"):
+                logger.warning(f"[Capability] config.write 未声明的配置项: {key}")
+                return False
+            item.value = value
+            if save:
+                s.save()
+            return True
+        except Exception as e:
+            logger.warning(f"[Capability] config.write 写 {key} 失败: {e}")
+            return False
+
+    return write
+
+def _model_config_for(host: Any):
+    """按 query 解析出可执行的完整模型配置（含明文 key）。
+
+    query 三种格式与 ``/subagents --model=`` / 标题生成默认模型一致：
+    模型名（当前服务商模糊匹配）/ 服务商名（config_id、display_name、provider_name
+    皆可）/ ``服务商:模型名``。解析逻辑留在宿主窗口（`_resolve_model_config_by_query`）：
+    它依赖窗口内的 ``_valid_configs`` 与模型列表缓存，插件侧没有等价数据源。
+    """
+
+    def config_for(query: str) -> Any:
+        if not query:
+            return None
+        resolver = getattr(host, "_resolve_model_config_by_query", None)
+        if not callable(resolver):
+            logger.debug("[Capability] model.config_for 宿主无模型解析器")
+            return None
+        try:
+            return resolver(query, show_error=False)
+        except Exception as e:
+            logger.warning(f"[Capability] model.config_for 解析失败 {query!r}: {e}")
+            return None
+
+    return config_for
+
+def _storage_db(host: Any, ctx: Any):
+    """通用数据库执行权限：受限代理（表名须 ``plugin_<name>_`` 前缀）。"""
+    from app.plugins.capabilities.providers.db_guard import PluginDBProxy
+
+    return PluginDBProxy(getattr(ctx, "plugin", "") or "")
+
 def _host_raw(host: Any):
     return host
 
@@ -1111,21 +1300,25 @@ def register(registry) -> None:
     # 模型 / 智能体
     reg.register("model.config", _model_config, surface="ui", owner="core:ui")
     reg.register("model.config", _provider_config, surface="ui", owner="core:ui", legacy_key="get_provider_config")
+    reg.register("model.config_for", _model_config_for, surface="ui", owner="core:ui")
     reg.register("model.schema", _model_schema, surface="ui", owner="core:ui")
     reg.register("model.metadata", _model_metadata, surface="ui", owner="core:ui")
     reg.register("provider.list", model_meta.provider_list, surface="ui", owner="core:ui")
     reg.register("model.enumerate", model_meta.model_enumerate, surface="ui", owner="core:ui")
     reg.register("agent.read", _agent_manager, surface="ui", owner="core:ui")
     reg.register("agent.read", _agent_prompt, surface="ui", owner="core:ui", legacy_key="get_agent_prompt")
+    reg.register("subagent.run", _subagent_manager, surface="ui", owner="core:ui")
     # 工作目录
     reg.register("workdir.read", _workdir_read, surface="ui", owner="core:ui")
     reg.register("workdir.write", _workdir_write, surface="ui", owner="core:ui")
     reg.register("project.workdir", _project_workdir, surface="ui", owner="core:ui")
+    reg.register("branch.refresh", _branch_refresh, surface="ui", owner="core:ui")
     reg.register(
         "workdir.write", _sync_working_directory, surface="ui", owner="core:ui", legacy_key="sync_working_directory"
     )
     # 存储
     reg.register("storage.data_dir", _storage_data_dir, surface="ui", owner="core:ui")
+    reg.register("storage.db", _storage_db, surface="ui", owner="core:ui")
     # 上下文 / 引擎
     reg.register("theme.read", _theme_read, surface="ui", owner="core:ui")
     reg.register("engine.stack", _engine_stack, surface="ui", owner="core:ui")
@@ -1177,6 +1370,7 @@ def register(registry) -> None:
         pass
     # 配置（按 key 读非敏感标量）
     reg.register("config.read", _config_read, surface="ui", owner="core:ui")
+    reg.register("config.write", _config_write, surface="ui", owner="core:ui")
     # 网络 / 云同步（host 无关实现，与 tool_core 共用 net_sync）
     reg.register("net.avatar", net_sync.net_avatar, surface="ui", owner="core:net")
     reg.register("net.download", net_sync.net_download, surface="ui", owner="core:net")
