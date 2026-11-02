@@ -102,49 +102,65 @@ def _adjust_color(hex_color: str, amount: int) -> str:
 
 
 # ══════════════════════════════════════════════════════════
-# 装饰性动态控件（环形仪表 / 旋转指示器）
+# 进程内存水位环 / 旋转指示器
 # ══════════════════════════════════════════════════════════
 
 
 class _GaugeRing(QWidget):
-    """装饰性环形仪表：打开卡片时渐变弧从 0° 扫到 270°，之后静止（无常驻动画，不耗 CPU）"""
+    """进程内存水位环：弧长 = 进程内存 / _MEM_GAUGE_CAP，达警戒线转 danger 色（无常驻动画）"""
 
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
         self._progress = 0.0
+        self._ratio = 0.0
         self._color = QColor("#62a0ea")
+        self._danger_color: Optional[QColor] = None
         self._icon_pm: Optional[QPixmap] = None
         self._anim: Optional[QVariantAnimation] = None
         self.setFixedSize(76, 76)
 
-    def set_color(self, color: str):
+    def set_color(self, color: str, danger: Optional[str] = None):
         """主题切换时更新弧色与中央图标"""
         c = QColor(color)
         if c.isValid():
             self._color = c
+        if danger:
+            d = QColor(danger)
+            if d.isValid():
+                self._danger_color = d
         self._render_icon()
         self.update()
 
-    def sweep(self):
-        """启动扫掠动画（show 时调用一次；重复调用会重启）"""
+    def set_ratio(self, ratio: float):
+        """设置水位（0~1，自动封顶），弧长缓动到目标值"""
+        target = max(0.0, min(1.0, float(ratio)))
+        self._ratio = target
         if self._anim is not None:
             # 旧动画 finished 后已 deleteLater（C++ 对象销毁但引用残留），
-            # 直接 stop() 会抛 RuntimeError 中断 show_card → 卡片打不开。
+            # 直接 stop() 会抛 RuntimeError，静默忽略即可。
             try:
                 self._anim.stop()
                 self._anim.deleteLater()
             except RuntimeError:
-                pass  # 已被回收，引用置空即可
+                pass
         self._anim = None
+        if abs(self._progress - target) < 0.001:
+            self.update()
+            return
         anim = QVariantAnimation(self)
-        anim.setStartValue(0.0)
-        anim.setEndValue(1.0)
-        anim.setDuration(900)
+        anim.setStartValue(self._progress)
+        anim.setEndValue(target)
+        anim.setDuration(600)
         anim.setEasingCurve(QEasingCurve.OutCubic)
         anim.valueChanged.connect(self._on_anim_frame)
         anim.finished.connect(anim.deleteLater)
         self._anim = anim
         anim.start()
+
+    def _paint_color(self) -> QColor:
+        if self._danger_color is not None and self._ratio >= _MEM_GAUGE_DANGER:
+            return self._danger_color
+        return self._color
 
     def _on_anim_frame(self, v):
         self._progress = float(v)
@@ -159,16 +175,17 @@ class _GaugeRing(QWidget):
         p.setRenderHint(QPainter.Antialiasing)
         rect = QRectF(self.rect()).adjusted(7, 7, -7, -7)
         pen_w = 5.0
-        # 背景环：270° 固定弧，缺口朝右下
+        # 背景环：270° 固定弧，起点在左（9 点钟），缺口朝左下
         p.setPen(QPen(QColor(128, 128, 128, 46), pen_w, Qt.SolidLine, Qt.RoundCap))
-        p.drawArc(rect, 45 * 16, 270 * 16)
+        p.drawArc(rect, 180 * 16, -270 * 16)
         if self._progress > 0.001:
-            # 前景弧：accent 锥形渐变，与背景同起点顺时针扫掠
-            grad = QConicalGradient(rect.center(), 45)
-            grad.setColorAt(0.0, self._color.lighter(125))
-            grad.setColorAt(1.0, self._color.darker(125))
+            # 前景弧：水位色锥形渐变，左侧起点顺时针扫掠
+            base = self._paint_color()
+            grad = QConicalGradient(rect.center(), 180)
+            grad.setColorAt(0.0, base.lighter(125))
+            grad.setColorAt(1.0, base.darker(125))
             p.setPen(QPen(QBrush(grad), pen_w, Qt.SolidLine, Qt.RoundCap))
-            p.drawArc(rect, 45 * 16, -int(270 * 16 * self._progress))
+            p.drawArc(rect, 180 * 16, -int(270 * 16 * self._progress))
         # 中央 activity 图标
         if self._icon_pm is not None and not self._icon_pm.isNull():
             dpr = self._icon_pm.devicePixelRatio() or 1.0
@@ -215,6 +232,10 @@ class _Spinner(QWidget):
         p.setPen(QPen(self._color, 2.0, Qt.SolidLine, Qt.RoundCap))
         p.drawArc(rect, (self._angle + 180) * 16, 100 * 16)
 
+
+# 水位环参考上限与警戒线：弧长 = 进程内存 / 上限，≥ 警戒线转 danger 色
+_MEM_GAUGE_CAP = 2 * 1024 ** 3
+_MEM_GAUGE_DANGER = 0.85
 
 # 内存大号数字统一样式（构建期与主题刷新共用，避免两处漂移）
 _MEM_VALUE_QSS = (
@@ -276,9 +297,7 @@ class SystemCleanerCard(QWidget):
         self._apply_latest_theme()
         self._apply_plugin_icon()
         self._async_scan()
-        self._refresh_memory()
-        if hasattr(self, "_gauge"):
-            self._gauge.sweep()  # 开场仪表扫掠动效
+        self._refresh_memory()  # 内存值到达后水位环经 set_ratio 缓动到实际水位
         self.setVisible(True)
         # [DEBUG-reopen] 临时诊断：show_card 尾部执行确认 + 状态位指纹
         try:
@@ -377,7 +396,7 @@ class SystemCleanerCard(QWidget):
             pass
         try:
             if hasattr(self, "_gauge"):
-                self._gauge.set_color(accent)
+                self._gauge.set_color(accent, danger)
         except RuntimeError:
             pass
         try:
@@ -638,7 +657,7 @@ class SystemCleanerCard(QWidget):
         hly.setSpacing(14)
 
         self._gauge = _GaugeRing(hero)
-        self._gauge.set_color(self._ctx_accent)
+        self._gauge.set_color(self._ctx_accent, self._ctx_danger)
         hly.addWidget(self._gauge)
 
         text_col = QVBoxLayout()
@@ -903,6 +922,8 @@ class SystemCleanerCard(QWidget):
         mem = _get_process_memory()
         accent = self._ctx_accent
         self._mem_value.setStyleSheet(_MEM_VALUE_QSS.format(accent=accent, font_qss=""))
+        if hasattr(self, "_gauge"):
+            self._gauge.set_ratio(0.0 if mem is None else mem / _MEM_GAUGE_CAP)
         if mem is None:
             self._mem_value.setText("N/A")
             return
