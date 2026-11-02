@@ -349,6 +349,10 @@ class MainRepoCard(QWidget):
         name = ElidedLabel(os.path.basename(root.rstrip("/\\")) or root, self)
         name.setMinimumWidth(40)
         name.setFixedHeight(20)
+        # ElidedLabel 默认水平 Ignored 策略会把本控件按 0 宽排位，同排的
+        # 「当前」tag 直接叠上来盖住项目名；改 Preferred 让 sizeHint 参与分配，
+        # 空间不足时仍走省略逻辑（resizeEvent 驱动，行为不变）
+        name.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
         name.setStyleSheet(
             f"color: {Colors.TEXT_PRIMARY}; font-weight: 600;"
             f" {get_font_family_css()} {font_size_css(13)}"
@@ -716,6 +720,9 @@ class WorktreeSectionWidget(QWidget):
         self._main_card: MainRepoCard = None
         self._branches: list = []
         self._setup_ui()
+        # 构造用的 repo_info 不含分支列表（首次 _populate_rows 下拉框只有当前分支），
+        # 后台补拉一次：完成后 _on_repo_info_loaded 会带全量 branches 重建卡片
+        self._repopulate()
         # 主题自刷
         try:
             ev = _caps("ui.events")
