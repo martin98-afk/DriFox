@@ -48,9 +48,6 @@ class SystemCardsModule(UIModule):
         host._share_card_content = None
         host._history_questions_card = None
         host._history_questions_card_content = None
-        # 工具与思考独立卡（简洁模式流式期常驻面板）：None 占位，
-        # 构造/注册在 host._ensure_tool_think_card() 中按需执行
-        host._tool_think_card = None
         host._memory_card = None
         host._memory_card_popup = None
         host._model_config_card = None
