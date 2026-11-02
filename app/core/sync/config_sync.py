@@ -1995,6 +1995,7 @@ class ConfigSyncService(QObject):
             LamportClock,
             is_tombstone,
             merge_entries,
+            plan_dir_merge,
             reconcile_dir_entries,
             seed_entries_from_manifest,
         )
@@ -2024,9 +2025,6 @@ class ConfigSyncService(QObject):
 
             remote_manifest = fp.dir_manifest(remote_root)
             local_manifest = fp.dir_manifest(local_dir)
-            remote_entries = seed_entries_from_manifest(
-                remote_manifest, remote_state.get("entries") or {}
-            )
 
             local_state = self._load_dir_meta(unit)
             local_entries = local_state.get("entries") or {}
@@ -2055,37 +2053,69 @@ class ConfigSyncService(QObject):
                     local_manifest = {
                         rel: h for rel, h in local_manifest.items() if rel not in remote_tombstones
                     }
+            # base 必须取 reconcile 之前的条目表：那是「上次双方确认一致」的版本，
+            # reconcile 会把本地现状写进 h，之后就分不出「本地改过没有」了
+            raw_local_base = dict(local_entries) if isinstance(local_entries, dict) else {}
+            raw_remote_base = dict(raw_remote_entries) if isinstance(raw_remote_entries, dict) else {}
             local_entries = reconcile_dir_entries(
                 local_manifest,
                 local_entries if isinstance(local_entries, dict) else {},
                 clock,
             )
-            raw_remote_entries = remote_state.get("entries") or {}
-            merged_entries, conflicts = merge_entries(local_entries, remote_entries)
+            remote_entries = seed_entries_from_manifest(remote_manifest, raw_remote_base)
+            merged_entries, _ = merge_entries(local_entries, remote_entries)
+
+            # 三方内容判定（base = 双方条目表 h）。t 跨设备不可比：两台设备
+            # Lamport clock 各自独立推进，clock 高的设备旧内容 t 会压过 clock
+            # 低的设备新内容 t，纯 t 比较曾静默丢弃远端更新（2026-11-02 全局
+            # MEMORY.md 跨设备丢失）。t 只作展示字段，不再参与目录合并胜负。
+            to_copy, to_delete, conflicts = plan_dir_merge(
+                local_manifest, remote_manifest, raw_local_base, raw_remote_base
+            )
+            # 按判定结果修正最终条目态：胜出内容写回 h，删除保持墓碑
+            for rel in to_copy:
+                e = dict(merged_entries.get(rel) or remote_entries.get(rel) or {})
+                e["h"] = str(remote_manifest.get(rel) or "")
+                e.pop("d", None)
+                merged_entries[rel] = e
+            for rel in to_delete:
+                e = dict(merged_entries.get(rel) or {})
+                prev = raw_local_base.get(rel) or raw_remote_base.get(rel) or {}
+                e["h"] = str(e.get("h") or prev.get("h") or "")
+                e["d"] = True
+                merged_entries[rel] = e
+            for rel in conflicts:
+                e = dict(merged_entries.get(rel) or {})
+                lh = local_manifest.get(rel)
+                if lh is not None:
+                    # 本地优先：条目指向本地现状
+                    e["h"] = lh
+                    e.pop("d", None)
+                else:
+                    # 删除 vs 修改的冲突：保持删除
+                    e["h"] = str(e.get("h") or (raw_local_base.get(rel) or {}).get("h") or "")
+                    e["d"] = True
+                merged_entries[rel] = e
+            # 其余无动作条目（一致/本地独有/保本地）h 一律对齐本地现状，
+            # 下一轮它就是 base；本地已删且远端没改的保持墓碑
+            for rel, lh in local_manifest.items():
+                if rel in to_copy or rel in to_delete or rel in conflicts:
+                    continue
+                e = dict(merged_entries.get(rel) or {})
+                e["h"] = lh
+                e.pop("d", None)
+                merged_entries[rel] = e
+            for rel, le in local_entries.items():
+                if rel in local_manifest or rel in to_copy or rel in to_delete or rel in conflicts:
+                    continue
+                if isinstance(le, dict) and is_tombstone(le):
+                    e = dict(merged_entries.get(rel) or le)
+                    e["d"] = True
+                    if not e.get("h"):
+                        e["h"] = str(le.get("h") or "")
+                    merged_entries[rel] = e
 
             ts = time.strftime("%Y%m%d-%H%M%S")
-            to_delete: list[str] = []
-            to_copy: list[str] = []
-            for rel, entry in merged_entries.items():
-                if is_tombstone(entry):
-                    to_delete.append(rel)
-                    continue
-                want = str(entry.get("h") or "")
-                lh = local_manifest.get(rel)
-                rh = remote_manifest.get(rel)
-                if lh == want:
-                    # 本地胜。若远端同路径内容不同、且远端那份没有正经元数据
-                    # （老版本上传的包），无从判断谁更新 → 按冲突留档，至少不静默丢内容
-                    if rh is not None and rh != lh and rel not in raw_remote_entries:
-                        conflicts.append(rel)
-                    continue
-                if rh == want:
-                    to_copy.append(rel)
-                    continue
-                # 内容对不上（本地优先的冲突）→ 远端版本留档，本地文件保持不动
-                if rh is not None:
-                    conflicts.append(rel)
-
             if to_delete or to_copy or conflicts:
                 self._backup_local_unit(unit, local_dir)
 

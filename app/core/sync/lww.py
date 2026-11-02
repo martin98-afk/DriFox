@@ -14,7 +14,7 @@
 from __future__ import annotations
 
 import json
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 Entry = Dict[str, object]
 
@@ -358,6 +358,105 @@ def seed_entries_from_manifest(
         if rel not in out:
             out[rel] = {"h": h, "t": 0}
     return out
+
+
+def plan_dir_merge(
+    local_manifest: Dict[str, str],
+    remote_manifest: Dict[str, str],
+    local_base: Dict[str, Entry],
+    remote_base: Dict[str, Entry],
+) -> Tuple[List[str], List[str], List[str]]:
+    """目录合并的三方内容判定，返回 (to_copy, to_delete, conflicts)。
+
+    背景（2026-11-02 全局 MEMORY.md 跨设备丢失）：两台设备 Lamport clock
+    各自独立推进，t 只在设备内因果递增，跨设备不可比。clock 高的设备旧内容
+    t 永远大于 clock 低的设备新内容 t，纯 t 比较会静默丢弃远端更新且不留档。
+
+    本判定不比较 t。可用的共同祖先参照只有一个：**本侧条目表的 h**（上次同步
+    确认的版本；对端条目表在上传前会被 reconcile 刷成对端现状，其 h 不可作
+    base）。判定核心：本地没改（lh == 本地 base）而远端内容不同 → 分歧必然
+    在远端侧，采纳远端；本地改了而远端内容 ≠ 共同祖先 → 两边都改，冲突留档。
+    老包（无元数据）无历史参照时保守留档保本地，与历史行为兼容。
+
+    判定表：
+    - 内容一致 → 无动作
+    - 远端墓碑 + 本地没改 → 跟随删除；本地改过/未知 → 冲突保本地
+    - 双方 base 都未知该文件 → 本地独有，保留
+    - 本地无文件无条目 → 远端新增，采纳
+    - 本地删除 + 远端没改 → 保持删除；远端改了 → 冲突（保删除 + 留档）
+    - 本地没改 + 远端改了 → 采纳远端（to_copy）★ 修复目标
+    - 两边都改了 → 真冲突：本地优先 + 远端留档
+    """
+
+    def _live_base_h(entries: Dict[str, Entry], rel: str) -> Optional[str]:
+        """非墓碑条目的内容 base（墓碑/缺失返回 None）"""
+        e = entries.get(rel)
+        if isinstance(e, dict) and e.get("h") is not None and not is_tombstone(e):
+            return str(e.get("h"))
+        return None
+
+    to_copy: List[str] = []
+    to_delete: List[str] = []
+    conflicts: List[str] = []
+    for rel in sorted(set(local_manifest) | set(remote_manifest)):
+        lh = local_manifest.get(rel)
+        rh = remote_manifest.get(rel)
+        l_entry = local_base.get(rel)
+        r_entry = remote_base.get(rel)
+        l_hist = isinstance(l_entry, dict) and l_entry.get("h") is not None
+        r_hist = isinstance(r_entry, dict) and r_entry.get("h") is not None
+        lb = _live_base_h(local_base, rel)
+        rb = _live_base_h(remote_base, rel)
+        r_tomb = is_tombstone(r_entry) if isinstance(r_entry, dict) else False
+
+        if lh == rh and lh is not None:
+            continue
+        if r_tomb:
+            if lh is None:
+                continue
+            # 本地没改（内容 == 本地 base）→ 跟随删除；改过/未知 → 冲突保本地
+            if lb is not None and lh == lb:
+                to_delete.append(rel)
+            else:
+                conflicts.append(rel)
+            continue
+        if rh is None and not r_hist:
+            # 远端从不知道这个文件 → 本地独有
+            continue
+        if lh is None and not l_hist:
+            # 本地从不知道这个文件：远端有文件 → 新增采纳；包里也没有（异常）→ 无动作
+            if rh is not None:
+                to_copy.append(rel)
+            continue
+        if lh is None:
+            # 本地删除过。远端内容 ≠ 被删时版本 → 删除 vs 修改冲突（保删除 + 留档）；
+            # 远端保持原内容 → 保持删除
+            del_h = str(l_entry.get("h") or "") if isinstance(l_entry, dict) else ""
+            if rh is not None and rh != del_h:
+                conflicts.append(rel)
+            continue
+        local_changed = not l_hist or lb is None or lh != lb
+        if not local_changed:
+            if rh is not None:
+                if rb is None:
+                    # 老包无元数据：远端历史未知，无从判断谁更新 → 留档防静默丢
+                    conflicts.append(rel)
+                else:
+                    # 本地没改 + 远端是另一份内容 → 远端有新版本，采纳（★ 修复目标）
+                    to_copy.append(rel)
+            else:
+                # 远端有条目但包里无文件且无墓碑（打包异常）→ 跟随消失
+                to_delete.append(rel)
+            continue
+        # 本地改了：远端内容也不是共同祖先版本 → 真冲突，本地优先 + 远端留档
+        if rh is not None and (rb is None or rh != lb):
+            conflicts.append(rel)
+        elif rh is None and r_hist:
+            # 远端有条目但文件没了且无墓碑（打包异常）→ 保守留档
+            conflicts.append(rel)
+        # 远端保持共同祖先版本（rh == lb）或老包无历史 → 保本地
+    return to_copy, to_delete, conflicts
+
 
 
 def dir_meta_payload(entries: Dict[str, Entry], clock: int) -> str:

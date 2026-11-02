@@ -496,6 +496,107 @@ class TestConfigMergeLww:
         assert data["UI"]["FontSize"] == "18"
 
 
+class TestDirMergeThreeWay:
+    """目录合并三方判定回归（2026-11-02 全局 MEMORY.md 跨设备丢失）。
+
+    两台设备 Lamport clock 各自独立推进，clock 高的设备旧内容 t 永远大于
+    clock 低的设备新内容 t，纯 t 比较会静默丢弃远端更新且不留档。
+    判定改三方：base = 双方条目表 h，本地没改 + 远端改了 → 采纳远端。
+    """
+
+    def test_adopts_remote_change_when_local_untouched_even_if_local_t_higher(self, svc, tmp_path):
+        """本地没改（内容==base）+ 远端改了（t 更低）→ 必须采纳远端"""
+        from app.core.sync.lww import dir_meta_payload
+
+        f = svc._user_custom_path / "MEMORY.md"
+        f.write_text("old-5590", encoding="utf-8")
+        h_old = fp.file_fingerprint(f)
+        # 本地条目表：base=h_old，t=809（clock 高设备的旧内容）
+        svc._save_dir_meta("user-custom", {"MEMORY.md": {"h": h_old, "t": 809}}, 809)
+
+        remote_dir = tmp_path / "rnew"
+        remote_dir.mkdir()
+        (remote_dir / "MEMORY.md").write_text("new-7728", encoding="utf-8")
+        meta = dir_meta_payload(
+            {"MEMORY.md": {"h": fp.file_fingerprint(remote_dir / "MEMORY.md"), "t": 698}},
+            698,
+        )
+        zip_bytes = fp.build_stable_zip(remote_dir, sync_meta=meta)
+        with patch.object(svc, "_read_remote_bytes", return_value=(zip_bytes, "sha3w1")):
+            assert svc._download_user_custom_merge() is True
+
+        assert f.read_text(encoding="utf-8") == "new-7728"
+        saved = svc._load_dir_meta("user-custom").get("entries") or {}
+        assert saved.get("MEMORY.md", {}).get("h") == fp.file_fingerprint(f)
+
+    def test_local_edit_wins_and_remote_archived_when_both_changed(self, svc, tmp_path):
+        """本地改了 + 远端也改了（真冲突）→ 本地优先 + 远端留档"""
+        from app.core.sync.lww import dir_meta_payload
+
+        f = svc._user_custom_path / "doc.md"
+        f.write_text("base", encoding="utf-8")
+        h_base = fp.file_fingerprint(f)
+        f.write_text("local-edit", encoding="utf-8")
+        # 本地条目表还停在 base → 本地改了
+        svc._save_dir_meta("user-custom", {"doc.md": {"h": h_base, "t": 10}}, 10)
+
+        remote_dir = tmp_path / "rboth"
+        remote_dir.mkdir()
+        (remote_dir / "doc.md").write_text("remote-edit", encoding="utf-8")
+        meta = dir_meta_payload(
+            {"doc.md": {"h": h_base, "t": 5}},  # 远端 base 也是 base → 远端也改了
+            5,
+        )
+        zip_bytes = fp.build_stable_zip(remote_dir, sync_meta=meta)
+        with patch.object(svc, "_read_remote_bytes", return_value=(zip_bytes, "sha3w2")):
+            assert svc._download_user_custom_merge() is True
+
+        assert f.read_text(encoding="utf-8") == "local-edit"
+        # 远端版本留档（conflicts 目录），不静默丢
+        conflicts_root = Path(svc._sync_base_dir).parent.parent / "conflicts"
+        archived = list(conflicts_root.rglob("doc.md"))
+        assert archived, "真冲突时远端副本必须留档"
+
+    def test_follows_remote_delete_when_local_untouched(self, svc, tmp_path):
+        """本地没改 + 远端墓碑 → 跟随删除（不看 t）"""
+        from app.core.sync.lww import dir_meta_payload
+
+        f = svc._user_custom_path / "gone.md"
+        f.write_text("same", encoding="utf-8")
+        h = fp.file_fingerprint(f)
+        svc._save_dir_meta("user-custom", {"gone.md": {"h": h, "t": 900}}, 900)
+
+        remote_dir = tmp_path / "rdel3w"
+        remote_dir.mkdir()
+        meta = dir_meta_payload({"gone.md": {"h": h, "t": 100, "d": True}}, 100)
+        zip_bytes = fp.build_stable_zip(remote_dir, sync_meta=meta)
+        with patch.object(svc, "_read_remote_bytes", return_value=(zip_bytes, "sha3w3")):
+            assert svc._download_user_custom_merge() is True
+
+        assert not f.exists()
+
+    def test_remote_edit_wins_over_local_delete_only_if_remote_changed(self, svc, tmp_path):
+        """本地删了 + 远端改了 → 冲突：保删除 + 远端留档（不静默二选一丢数据）"""
+        from app.core.sync.lww import dir_meta_payload
+
+        h_base = "b" * 64
+        # 本地：文件已删，条目表墓碑 t 高
+        svc._save_dir_meta("user-custom", {"doc.md": {"h": h_base, "t": 900, "d": True}}, 900)
+
+        remote_dir = tmp_path / "rdelvs"
+        remote_dir.mkdir()
+        (remote_dir / "doc.md").write_text("remote-edit", encoding="utf-8")
+        meta = dir_meta_payload({"doc.md": {"h": h_base, "t": 100}}, 100)
+        zip_bytes = fp.build_stable_zip(remote_dir, sync_meta=meta)
+        with patch.object(svc, "_read_remote_bytes", return_value=(zip_bytes, "sha3w4")):
+            assert svc._download_user_custom_merge() is True
+
+        assert not (svc._user_custom_path / "doc.md").exists()
+        conflicts_root = Path(svc._sync_base_dir).parent.parent / "conflicts"
+        archived = list(conflicts_root.rglob("doc.md"))
+        assert archived, "删除与修改冲突时远端副本必须留档"
+
+
 class TestDownloadMerge:
     def test_download_merge_keeps_local_only_files(self, svc, tmp_path):
         """下载不整包覆盖：本地独有文件与本地改动都保留"""
