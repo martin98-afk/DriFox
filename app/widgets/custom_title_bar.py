@@ -315,9 +315,8 @@ class CustomTabButton(QWidget):
     clicked = pyqtSignal(str)  # tab_id（整卡点击）
     close_clicked = pyqtSignal(str)  # tab_id（× 关闭钮）
 
-    HEIGHT = 28  # Windows / Linux（标题栏 38，容器上下各留 5）
-    #: macOS 用 22：标题栏只有 28pt，tab 加容器 3px 内边距正好铺满
-    MAC_HEIGHT = 22
+    HEIGHT = 28  # 标题栏 38，tab 容器上下各留 5
+    MAC_HEIGHT = HEIGHT  # macOS 标题栏同为 38，tab 与 Win 统一
 
     #: 圆角取 BorderRadius.SM(6px)：窗口圆角是 8px，但那是相对整窗尺寸的；
     #: 放在 28px 高的 tab 上 8px 会显得过圆。6px 是"和窗口同一弧度语言、
@@ -862,6 +861,23 @@ class TabIndicatorController(QObject):
         self._anim.start()
 
 
+class _MacTrafficLightCenterMixin:
+    """macOS：把系统交通灯垂直居中到自定义标题栏高度
+
+    qframelesswindow 的 ``_updateSystemButtonRect`` 以系统标准标题栏容器
+    （~28pt）居中交通灯；自定义栏高超过它时交通灯会偏上。库每次重算
+    （Resize / 窗口状态变化 / 显示）都会回调宿主的 ``systemTitleBarRect``，
+    在此返回 MAC_HEIGHT 高的矩形即可让交通灯持续居中于自定义栏。
+    非 mac 平台转发基类默认实现（win/linux 该方法本就仅 mac 生效）。
+    """
+
+    def systemTitleBarRect(self, size: QSize) -> QRect:  # noqa: N802
+        if _IS_MAC:
+            # 宽 75 沿用库默认（交通灯组宽 + 边距）；高度决定垂直居中位置
+            return QRect(0, 0, 75, CustomTitleBar.MAC_HEIGHT)
+        return super().systemTitleBarRect(size)
+
+
 class CustomTitleBar(TitleBarBase):
     """无边框窗口自定义标题栏（现代化自绘版）
 
@@ -873,11 +889,11 @@ class CustomTitleBar(TitleBarBase):
     外部（含基类的 ``eventFilter``）无需改动。
     """
 
-    HEIGHT = 38  # Windows / Linux
-    #: macOS 用 28 —— 与 NSWindow 标题栏容器同高。系统交通灯由 AppKit 绘制，
-    #: 尺寸固定（约 12pt），放进 38pt 高的栏里比例会明显偏小；设为 28 才是
-    #: macOS 的标准观感。
-    MAC_HEIGHT = 28
+    HEIGHT = 38  # Windows / Linux / macOS（三平台统一）
+    #: macOS 同为 38：旧版 28 对齐系统 NSWindow 标题栏但过于局促；抬高后
+    #: 系统交通灯（AppKit 绘制）由宿主窗口挂 _MacTrafficLightCenterMixin
+    #: 重定位到栏内垂直居中。
+    MAC_HEIGHT = 38
     MAC_TRAFFIC_LIGHT_PAD = 70  # macOS 系统交通灯左侧留白
 
     tab_clicked = pyqtSignal(str)

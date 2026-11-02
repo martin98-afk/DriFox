@@ -20,13 +20,13 @@ from qframelesswindow import FramelessWindow
 from loguru import logger
 
 from app.utils.utils import get_icon
-from app.widgets.custom_title_bar import CustomTitleBar
+from app.widgets.custom_title_bar import CustomTitleBar, _MacTrafficLightCenterMixin
 
 #: 窗口壳默认窗口标题（未提供 title 时）
 _DEFAULT_TITLE = "插件窗口"
 
 
-class PluginWindow(FramelessWindow):
+class PluginWindow(_MacTrafficLightCenterMixin, FramelessWindow):
     """插件独立弹窗壳：CustomTitleBar(minimal=True) + 内容页填满客户区"""
 
     def __init__(self, window_info, context: Optional[Dict[str, Any]] = None, registry=None):

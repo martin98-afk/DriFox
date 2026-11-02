@@ -36,6 +36,7 @@ from app.utils.config import Settings
 from app.utils.design_tokens import Animations, Colors, font_size_css
 from app.utils.theme_manager import theme_manager
 from app.utils.utils import get_font_family_css, get_unified_font
+from app.widgets.custom_title_bar import _MacTrafficLightCenterMixin
 
 # ── 对话区限宽档位（px）：窗口过宽时限制对话内容宽度并居中，两侧留白 ──
 # 避免聊天内容在超宽屏幕上被拉得难以阅读。档位可在 设置-外观 切换。
@@ -1111,7 +1112,7 @@ class _ContentStack(QWidget):
         return w.minimumSizeHint() if w is not None else QSize(0, 0)
 
 
-class TabManagerWindow(FramelessWindow):
+class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
     """Tab 管理器宿主窗口（单例）"""
 
     _instance: Optional["TabManagerWindow"] = None
@@ -2761,7 +2762,7 @@ class TabManagerWindow(FramelessWindow):
     def _setup_ui(self):
         # ── 外层纵向布局：直接放内容区（顶部让位自绘无边框标题栏） ──
         main_layout = QVBoxLayout(self)
-        # 顶部让位自绘无边框标题栏；mac 上标题栏只有 28（与系统交通灯配套）
+        # 顶部让位自绘无边框标题栏（mac 与 Win/Linux 统一 38，交通灯由 mixin 居中）
         main_layout.setContentsMargins(0, self.titleBar.height(), 0, 0)
         main_layout.setSpacing(0)
 
