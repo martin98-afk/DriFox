@@ -1672,7 +1672,7 @@ class TestWebFetchTinyFishFallback:
         monkeypatch.setattr(mod, "_api_key", lambda ctx, name: "tf-key")
         monkeypatch.setattr(mod, "_get_client", lambda: client)
         result = mod._webfetch_impl({}, url="https://example.com", format="markdown")
-        assert result.ok and "tinyfish md" in result.content
+        assert result.success and "tinyfish md" in result.content
         assert client.post_calls == ["https://api.fetch.tinyfish.ai"]
         assert client.get_calls == []  # 本地实现未执行
 
@@ -1685,7 +1685,7 @@ class TestWebFetchTinyFishFallback:
         monkeypatch.setattr(mod, "_api_key", lambda ctx, name: "tf-key")
         monkeypatch.setattr(mod, "_get_client", lambda: client)
         result = mod._webfetch_impl({}, url="https://example.com", format="markdown")
-        assert result.ok and "local content" in result.content
+        assert result.success and "local content" in result.content
         assert client.get_calls == ["https://example.com"]
 
     def test_no_key_skips_tinyfish(self, monkeypatch):
@@ -1696,7 +1696,7 @@ class TestWebFetchTinyFishFallback:
         monkeypatch.setattr(mod, "_api_key", lambda ctx, name: "")
         monkeypatch.setattr(mod, "_get_client", lambda: client)
         result = mod._webfetch_impl({}, url="https://example.com", format="markdown")
-        assert result.ok and "local only" in result.content
+        assert result.success and "local only" in result.content
         assert client.post_calls == []
 
     def test_text_format_skips_tinyfish(self, monkeypatch):
@@ -1708,7 +1708,7 @@ class TestWebFetchTinyFishFallback:
         monkeypatch.setattr(mod, "_api_key", lambda ctx, name: "tf-key")
         monkeypatch.setattr(mod, "_get_client", lambda: client)
         result = mod._webfetch_impl({}, url="https://example.com", format="text")
-        assert result.ok and "plain text" in result.content
+        assert result.success and "plain text" in result.content
         assert client.post_calls == []
 
 
