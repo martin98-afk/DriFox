@@ -20,9 +20,7 @@ from loguru import logger
 from PyQt5.QtCore import QObject, QRunnable, QThreadPool, QTimer, Qt, pyqtSignal
 from PyQt5.QtGui import QPaintEvent
 from PyQt5.QtWidgets import (
-    QComboBox,
     QDialog,
-    QFrame,
     QHBoxLayout,
     QLabel,
     QPushButton,
@@ -30,10 +28,12 @@ from PyQt5.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+from qfluentwidgets import ComboBox
 
-from app.plugins.sdk import Colors, font_size_css, readable_text_on
+from app.plugins.sdk import Colors, font_size_css
 from app.plugins.sdk import GitWorktreeDetector
-from app.plugins.sdk import get_font_family_css
+from app.plugins.sdk import get_font_family_css, get_icon
+from app.plugins.sdk import ElidedLabel
 
 # Windows 下隐藏 cmd 窗口
 _CREATION_FLAGS = 0
@@ -274,14 +274,14 @@ def _switch_branch_job(repo_root: str, branch: str) -> tuple:
 
 
 def _fetch_repo_info_job(git_root: str):
-    """后台线程：拉取仓库信息 + 缺失工作树清理
+    """后台线程：拉取仓库信息 + 缺失工作树清理 + 分支列表
 
     Returns:
-        (GitRepoInfo | None, missing_paths: list[str])
+        (GitRepoInfo | None, missing_paths: list[str], branches: list[str])
     """
     info = GitWorktreeDetector.get_repo_info(git_root)
     if info is None:
-        return None, []
+        return None, [], []
     missing = [wt.path for wt in info.worktrees if not wt.is_main and not os.path.isdir(wt.path)]
     if missing:
         try:
@@ -292,7 +292,8 @@ def _fetch_repo_info_job(git_root: str):
     for wt in info.worktrees:
         if not wt.is_main:
             setattr(wt, "description", read_worktree_description(wt.path))
-    return info, missing
+    branches = list_local_branches(info.root)
+    return info, missing, branches
 
 
 class MainRepoCard(QWidget):
@@ -305,39 +306,49 @@ class MainRepoCard(QWidget):
     switched = pyqtSignal(str)  # worktree_path（切换到该工作目录）
     branchSwitched = pyqtSignal(str)  # branch_name
 
-    def __init__(self, repo_info, is_current: bool, parent=None):
+    def __init__(self, repo_info, is_current: bool, parent=None, branches=None):
         super().__init__(parent)
         self._repo_info = repo_info
         self._is_current = is_current
         self._switching = False
+        # 分支列表由后台线程预先取好（主线程调 git 会阻塞 100~300ms/次）
+        self._branches = list(branches or [])
         self._setup_ui()
 
     def _setup_ui(self):
         root = self._repo_info.root
         self.setObjectName("mainRepoCard")
+        # WA_StyledBackground：不设它时 QWidget 子类的 background QSS 根本不绘制
+        self.setAttribute(Qt.WA_StyledBackground, True)
         Colors.refresh()
         self.setStyleSheet(
             f"""
             QWidget#mainRepoCard {{
-                background-color: {Colors.CARD_BG.format(alpha=200)};
-                border: 1px solid {Colors.BORDER};
-                border-radius: 8px;
+                background-color: {Colors.CARD_BG.format(alpha=160)};
+                border: none;
+                border-left: 3px solid {Colors.TEXT_ACCENT};
+                border-radius: 6px;
             }}
             """
         )
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(12, 10, 12, 10)
-        layout.setSpacing(6)
+        layout.setContentsMargins(12, 9, 12, 9)
+        layout.setSpacing(5)
+        # 内容三行：head 20 + 分支 26 + 路径 17 + 两次 spacing 5 + 上下 padding 18
+        self.setFixedHeight(91)
+        self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
 
         # ── 第一行：图标 + 仓库名 + 当前标记 + 切工作目录 ──
         head = QHBoxLayout()
         head.setSpacing(6)
 
-        icon = ThemeIconLabel("仓库", 16, self)
+        icon = ThemeIconLabel("根目录", 16, self)
         head.addWidget(icon)
 
-        name = QLabel(os.path.basename(root.rstrip("/\\")) or root, self)
+        name = ElidedLabel(os.path.basename(root.rstrip("/\\")) or root, self)
+        name.setMinimumWidth(40)
+        name.setFixedHeight(20)
         name.setStyleSheet(
             f"color: {Colors.TEXT_PRIMARY}; font-weight: 600;"
             f" {get_font_family_css()} {font_size_css(13)}"
@@ -346,9 +357,11 @@ class MainRepoCard(QWidget):
 
         if self._is_current:
             badge = QLabel("当前", self)
+            badge.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+            badge.setFixedHeight(19)
             badge.setStyleSheet(
                 f"color: {Colors.BUTTON_TEXT_ON_ACCENT}; background: {Colors.TEXT_ACCENT};"
-                f" {font_size_css(10)} padding: 1px 6px; border-radius: 3px;"
+                f" {get_font_family_css()} {font_size_css(10)} padding: 1px 6px; border-radius: 3px;"
             )
             head.addWidget(badge)
 
@@ -361,6 +374,7 @@ class MainRepoCard(QWidget):
                 f"color: {Colors.TEXT_ACCENT}; font-weight: 600;"
                 f" {get_font_family_css()} {font_size_css(11)}"
             )
+            btn.setFixedHeight(20)
             btn.mousePressEvent = lambda e: self.switched.emit(root)
             head.addWidget(btn)
 
@@ -372,17 +386,15 @@ class MainRepoCard(QWidget):
 
         branch_label = QLabel("分支", self)
         branch_label.setStyleSheet(
-            f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} {font_size_css(11)}"
+            f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} {font_size_css(10)}"
         )
+        branch_label.setFixedHeight(26)
         branch_row.addWidget(branch_label)
 
-        self._branch_combo = QComboBox(self)
-        self._branch_combo.setMinimumWidth(180)
-        self._branch_combo.setMaxVisibleItems(15)
-        self._branch_combo.setStyleSheet(
-            f"QComboBox {{ {get_font_family_css()} {font_size_css(12)} }}"
-        )
-        branches = list_local_branches(root)
+        self._branch_combo = ComboBox(self)
+        self._branch_combo.setMinimumWidth(140)
+        self._branch_combo.setFixedHeight(26)
+        branches = list(self._branches)
         current = self._repo_info.current_branch
         if current and current not in branches:
             branches.insert(0, current)
@@ -397,9 +409,9 @@ class MainRepoCard(QWidget):
         layout.addLayout(branch_row)
 
         # ── 第三行：路径 ──
-        path_label = QLabel(root, self)
-        path_label.setWordWrap(False)
-        path_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        path_label = ElidedLabel(root, self)
+        path_label.setMinimumWidth(60)
+        path_label.setFixedHeight(17)
         path_label.setStyleSheet(
             f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} {font_size_css(10)}"
         )
@@ -436,22 +448,46 @@ class _WorktreeRow(QWidget):
         self._delete_timer: QTimer = None
         self._del_btn: QLabel = None
         self._delete_worker = None
-        self.setMinimumHeight(30)
+        desc_text = str(getattr(wt, "description", "") or "")
+        # 行高按「分支行 + 说明行 + 路径行」逐行累加（每行 17px，间距 1，上下 padding 8）
+        # 用固定高度避免 QLabel 被拉成竖条；行数不同高度就不同，不能只写死两个值。
+        rows = 2 + (1 if desc_text else 0)
+        self.setFixedHeight(rows * 17 + 1 * (rows - 1) + 8)
+        self.setObjectName("worktreeRow")
+        self.setAttribute(Qt.WA_StyledBackground, True)
         self._setup_ui()
 
     def _setup_ui(self):
         wt = self._wt
+        Colors.refresh()
+        bar = Colors.TEXT_ACCENT if self._is_current else Colors.BORDER
+        self.setStyleSheet(
+            f"""
+            QWidget#worktreeRow {{
+                background-color: {Colors.CARD_BG.format(alpha=110)};
+                border: none;
+                border-left: 3px solid {bar};
+                border-radius: 6px;
+            }}
+            """
+        )
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(8, 4, 8, 4)
+        layout.setContentsMargins(10, 4, 8, 4)
         layout.setSpacing(6)
 
         dot = QLabel("", self)
-        dot.setFixedSize(8, 8)
+        dot.setFixedSize(7, 7)
         if self._is_current:
-            dot.setStyleSheet(f"background-color: {Colors.TEXT_ACCENT}; border-radius: 4px;")
+            dot.setStyleSheet(f"background-color: {Colors.TEXT_ACCENT}; border-radius: 3px;")
         else:
-            dot.setStyleSheet(f"background: transparent; border: 1.5px solid {Colors.BORDER}; border-radius: 4px;")
-        layout.addWidget(dot)
+            dot.setStyleSheet(f"background: transparent; border: 1.5px solid {Colors.BORDER}; border-radius: 3px;")
+        # 顶对齐：与外层 QHBoxLayout 垂直居中会把圆点压到中间行
+        dot_col = QVBoxLayout()
+        dot_col.setContentsMargins(0, 0, 0, 0)
+        dot_col.setSpacing(0)
+        dot_col.addWidget(dot)
+        dot_col.addStretch(1)
+        layout.addLayout(dot_col)
 
         # 左侧主区：分支名 + 说明 + 路径
         text_box = QVBoxLayout()
@@ -465,47 +501,57 @@ class _WorktreeRow(QWidget):
             if self._is_current
             else f"color: {Colors.TEXT_PRIMARY};"
         )
-        branch_label = QLabel(wt.branch, self)
+        # ElidedLabel：sizeHint 取完整文本宽度，能向布局争取空间；不够时才省略。
+        # 用裸 QLabel + Ignored 会让它放弃争空间，宽度塌到 minimumWidth，
+        # 后面的领先/落后标签就会叠到它身上（实测 branch 宽 60px、need 396px）。
+        branch_label = ElidedLabel(wt.branch, self)
         branch_label.setStyleSheet(f"{branch_ss} {get_font_family_css()} {font_size_css(12)}")
-        branch_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
-        branch_label.setMinimumWidth(40)
+        branch_label.setFixedHeight(17)
+        branch_label.setMinimumWidth(60)
         branch_label.setToolTip(wt.branch)
-        top.addWidget(branch_label)
+        top.addWidget(branch_label, 1)  # 拉伸因子 1：本行唯一可伸缩项
 
         desc = str(getattr(wt, "description", "") or "")
         if desc:
             ai_tag = QLabel("AI", self)
             ai_tag.setStyleSheet(
                 f"color: {Colors.BUTTON_TEXT_ON_ACCENT}; background: {Colors.TEXT_ACCENT};"
-                f" {font_size_css(9)} padding: 0 4px; border-radius: 2px;"
+                f" {get_font_family_css()} {font_size_css(9)} padding: 0 4px; border-radius: 2px;"
             )
-            ai_tag.setToolTip("该工作树由 AI 创建")
-            top.addWidget(ai_tag)
+            ai_tag.setFixedHeight(15)
+            ai_tag.setToolTip(f"AI 创建：{desc}")
+            top.addWidget(ai_tag, 0)
 
+        # 领先/落后：固定宽度、右对齐，不参与伸缩
+        deltas = []
         if wt.behind_main > 0:
-            b = QLabel(f"-{wt.behind_main}", self)
-            b.setToolTip(f"落后主仓库 {wt.behind_main} 个提交")
-            b.setStyleSheet(f"color: #f85149; {get_font_family_css()} {font_size_css(10)}")
-            top.addWidget(b)
+            deltas.append((f"-{wt.behind_main}", f"落后主仓库 {wt.behind_main} 个提交", "#f85149"))
         if wt.ahead_main > 0:
-            a = QLabel(f"+{wt.ahead_main}", self)
-            a.setToolTip(f"领先主仓库 {wt.ahead_main} 个提交")
-            a.setStyleSheet(f"color: #3fb950; {get_font_family_css()} {font_size_css(10)}")
-            top.addWidget(a)
+            deltas.append((f"+{wt.ahead_main}", f"领先主仓库 {wt.ahead_main} 个提交", "#3fb950"))
+        for label_text, tip, color in deltas:
+            lb = QLabel(label_text, self)
+            lb.setToolTip(tip)
+            lb.setStyleSheet(f"color: {color}; {get_font_family_css()} {font_size_css(10)}")
+            lb.setFixedHeight(17)
+            lb.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+            top.addWidget(lb, 0)
 
-        top.addStretch()
         text_box.addLayout(top)
 
         # 说明行（AI 创建的工作树必带，人工创建的可选）
         if desc:
-            desc_label = QLabel(desc, self)
-            desc_label.setWordWrap(True)
+            desc_label = ElidedLabel(desc, self)
+            desc_label.setFixedHeight(17)
+            desc_label.setMinimumWidth(80)
             desc_label.setStyleSheet(
                 f"color: {Colors.TEXT_SECONDARY}; {get_font_family_css()} {font_size_css(11)}"
             )
+            desc_label.setToolTip(desc)
             text_box.addWidget(desc_label)
 
-        path_label = QLabel(wt.path, self)
+        path_label = ElidedLabel(wt.path, self)
+        path_label.setFixedHeight(17)
+        path_label.setMinimumWidth(80)
         path_label.setStyleSheet(
             f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} {font_size_css(10)}"
         )
@@ -514,7 +560,17 @@ class _WorktreeRow(QWidget):
 
         layout.addLayout(text_box, 1)
 
-        # 右侧操作
+        # 右侧操作：放进独立垂直布局并顶对齐。
+        # 直接塞进外层 QHBoxLayout 会被垂直居中到 text_box 的中间行，
+        # 三行内容时正好压住路径那一行（表现为文字互相叠印）。
+        ops = QVBoxLayout()
+        ops.setContentsMargins(0, 0, 0, 0)
+        ops.setSpacing(0)
+
+        op_row = QHBoxLayout()
+        op_row.setContentsMargins(0, 0, 0, 0)
+        op_row.setSpacing(6)
+
         if not self._is_current:
             switch_btn = QLabel("切换", self)
             switch_btn.setCursor(Qt.PointingHandCursor)
@@ -522,31 +578,29 @@ class _WorktreeRow(QWidget):
                 f"color: {Colors.TEXT_ACCENT}; font-weight: 600;"
                 f" {get_font_family_css()} {font_size_css(11)} padding: 0 4px;"
             )
+            switch_btn.setFixedHeight(17)
             switch_btn.setToolTip("把当前会话工作目录切到该工作树")
             switch_btn.mousePressEvent = lambda e: self.switched.emit(self._wt.path)
-            layout.addWidget(switch_btn)
+            op_row.addWidget(switch_btn)
 
         self._del_btn = ThemeIconLabel("删除", 13, self)
         self._del_btn.setCursor(Qt.PointingHandCursor)
         self._del_btn.setToolTip("删除工作树")
-        self._del_btn.setStyleSheet(
-            f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} {font_size_css(11)} padding: 0 4px;"
-        )
         self._del_btn.mousePressEvent = lambda e: self._on_delete_click()
-        layout.addWidget(self._del_btn)
+        op_row.addWidget(self._del_btn)
+
+        ops.addLayout(op_row)
+        ops.addStretch(1)  # 顶对齐：操作行贴住第一行，不被居中
+        layout.addLayout(ops)
 
     def _on_delete_click(self):
-        """内联二次确认：首次点击变「确认删除?」，3 秒后自动还原"""
+        """内联二次确认：首次点击图标转为危险色并换提示，3 秒后自动还原"""
         if self._confirming_delete:
             self._do_delete()
             return
         self._confirming_delete = True
-        self._del_btn.set_icon("删除")
         self._del_btn.show_confirm_style(True)
-        self._del_btn.setStyleSheet(
-            f"color: #f85149; font-weight: 600;"
-            f" {get_font_family_css()} {font_size_css(11)} padding: 0 4px;"
-        )
+        self._del_btn.setToolTip("再点一次确认删除（3 秒内有效）")
         self._delete_timer = QTimer(self)
         self._delete_timer.setSingleShot(True)
         self._delete_timer.timeout.connect(self._cancel_delete_confirm)
@@ -555,16 +609,15 @@ class _WorktreeRow(QWidget):
     def _cancel_delete_confirm(self):
         self._confirming_delete = False
         if self._del_btn is not None:
-            self._del_btn.set_icon("删除")
-            self._del_btn.setStyleSheet(
-                f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} {font_size_css(11)} padding: 0 4px;"
-            )
+            self._del_btn.show_confirm_style(False)
+            self._del_btn.setToolTip("删除工作树")
 
     def _do_delete(self):
         if self._delete_timer:
             self._delete_timer.stop()
             self._delete_timer = None
         self._del_btn.setEnabled(False)
+        self._del_btn.setToolTip("删除中…")
         self._del_btn.show_confirm_style(True)
         worker = _WorktreeTaskWorker(_delete_worktree_job, self._wt.path, self._wt.branch)
         worker.signals.finished.connect(lambda _r: self.deleted.emit(self._wt.path))
@@ -592,7 +645,11 @@ class _AddWorktreeRow(QWidget):
 
     def _setup_ui(self):
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(8, 2, 8, 2)
+        layout.setContentsMargins(10, 2, 8, 2)
+        layout.setSpacing(6)
+
+        icon = ThemeIconLabel("新建", 13, self)
+        layout.addWidget(icon)
 
         add_label = QLabel("新建工作树", self)
         add_label.setCursor(Qt.PointingHandCursor)
@@ -601,6 +658,7 @@ class _AddWorktreeRow(QWidget):
             f" {get_font_family_css()} {font_size_css(11)}"
         )
         add_label.mousePressEvent = lambda e: self._on_add()
+        icon.mousePressEvent = lambda e: self._on_add()
         layout.addWidget(add_label)
         layout.addStretch()
 
@@ -656,6 +714,7 @@ class WorktreeSectionWidget(QWidget):
         self._create_busy = False
         self._pending_switch_path = None
         self._main_card: MainRepoCard = None
+        self._branches: list = []
         self._setup_ui()
         # 主题自刷
         try:
@@ -685,14 +744,16 @@ class WorktreeSectionWidget(QWidget):
 
     def _setup_ui(self):
         self.setStyleSheet("WorktreeSectionWidget { background: transparent; border: none; }")
+        # 高度由 content_height() 决定（宿主按它 setFixedHeight），自身不参与拉伸
+        self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 4, 0, 4)
-        layout.setSpacing(6)
+        layout.setContentsMargins(0, 2, 0, 2)
+        layout.setSpacing(4)
 
         self._rows = QWidget(self)
         self._rows_layout = QVBoxLayout(self._rows)
         self._rows_layout.setContentsMargins(0, 0, 0, 0)
-        self._rows_layout.setSpacing(6)
+        self._rows_layout.setSpacing(5)
         layout.addWidget(self._rows)
 
         self._populate_rows()
@@ -712,7 +773,8 @@ class WorktreeSectionWidget(QWidget):
 
     def _on_repo_info_loaded(self, payload):
         """后台拉取完成（主线程）：应用结果并重建"""
-        info, missing_paths = payload
+        info, missing_paths, branches = payload
+        self._branches = list(branches or [])
         self._fetch_worker = None
         if not info:
             self._clear_rows()
@@ -777,7 +839,9 @@ class WorktreeSectionWidget(QWidget):
         main_wt = next((w for w in self._repo_info.worktrees if w.is_main), None)
         if main_wt is not None and os.path.isdir(main_wt.path):
             is_current = os.path.normpath(main_wt.path) == normalized_wd
-            self._main_card = MainRepoCard(self._repo_info, is_current, parent=self)
+            self._main_card = MainRepoCard(
+                self._repo_info, is_current, parent=self, branches=getattr(self, "_branches", None)
+            )
             self._main_card.switched.connect(self._on_switch)
             self._main_card.branchSwitched.connect(self._on_main_branch_switch)
             self._rows_layout.addWidget(self._main_card)
@@ -798,7 +862,11 @@ class WorktreeSectionWidget(QWidget):
         self.sizeChanged.emit(self.content_height())
 
     def content_height(self) -> int:
-        """本组件需要的高度（各子控件高度之和 + 间距 + margins）"""
+        """本组件需要的高度（各子控件高度之和 + 间距 + margins）
+
+        子控件都是 setFixedHeight 的，统一取 maximumHeight()：sizeHint 在
+        布局尚未激活时会返回默认值，minimumHeight 又可能小于实际固定值。
+        """
         m = self.layout().contentsMargins()
         spacing = self._rows_layout.spacing()
         total = 0
@@ -807,7 +875,10 @@ class WorktreeSectionWidget(QWidget):
             w = self._rows_layout.itemAt(i).widget()
             if w is None:
                 continue
-            total += max(w.minimumHeight(), w.sizeHint().height())
+            h = w.maximumHeight()
+            if h <= 0 or h > 100000:
+                h = max(w.minimumHeight(), w.sizeHint().height())
+            total += h
             count += 1
         if count > 1:
             total += spacing * (count - 1)

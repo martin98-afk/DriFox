@@ -36,7 +36,10 @@ class ProjectWorkdirRepository:
         return self._db.execute_sql(sql, params)
 
     def ensure_table(self) -> bool:
-        """建表（幂等）"""
+        """建表（幂等）+ 同步老 key_documents 里的工作目录
+
+        迁移节流：同一进程内只跑一次全表同步（见 _sync_legacy_workdirs）。
+        """
         if not self.is_initialized:
             return False
         try:
@@ -49,9 +52,109 @@ class ProjectWorkdirRepository:
                 )
                 """
             )
+            if success:
+                self._sync_legacy_workdirs()
             return bool(success)
         except Exception as e:
             logger.error(f"[ProjectWorkdir] 创建表失败: {e}")
+            return False
+
+    # 进程内迁移节流标记（类级：单例仓储语义，多实例共享）
+    _legacy_synced: bool = False
+
+    def _sync_legacy_workdirs(self) -> int:
+        """进程内只跑一次的老数据同步入口（见 _migrate_from_key_documents）"""
+        if ProjectWorkdirRepository._legacy_synced:
+            return 0
+        ProjectWorkdirRepository._legacy_synced = True
+        return self._migrate_from_key_documents()
+
+    def _migrate_from_key_documents(self) -> int:
+        """把老 key_documents 表里 is_working_dir=1 的记录同步进本表（增量、幂等）。
+
+        背景：工作目录原先寄生在 key_documents 表（is_working_dir 标记）。关键文档
+        功能下线后本表独立承载工作目录，**老用户已有的工作目录必须迁过来**，否则
+        升级后所有项目都变成「未设置工作目录」。
+
+        为什么是「每次 ensure_table 都增量跑」而不是「打标记只跑一次」：
+        - 老版本程序可能与本版本并存（用户回退版本、多份安装），旧版本继续往
+          key_documents 写工作目录；
+        - 用户可能在旧版本里新建项目、切工作目录，这些数据只在 key_documents 里；
+        - 一次性标记一旦置位，之后这些新数据永远进不来。
+
+        冲突策略：ON CONFLICT(project) DO NOTHING —— 新表里的值优先。用户在
+        新页面改过的目录不会被老数据覆盖。
+
+        Returns:
+            本次真正插入的条数（无老表/无新增时为 0）
+        """
+        if not self.is_initialized:
+            return 0
+        try:
+            if not self._table_exists("key_documents"):
+                return 0
+            # 老库早期版本可能没有 is_working_dir 列（建表后才加的迁移列）
+            if not self._column_exists("key_documents", "is_working_dir"):
+                return 0
+
+            ok, rows = self._execute(
+                "SELECT project, file_path FROM key_documents WHERE is_working_dir = 1"
+            )
+            if not ok or not rows:
+                return 0
+
+            migrated = 0
+            now = datetime.now().isoformat(timespec="seconds")
+            for row in rows:
+                if isinstance(row, tuple):
+                    project, path = row[0], row[1]
+                else:
+                    project, path = row.get("project", ""), row.get("file_path", "")
+                project = str(project or "").strip()
+                path = str(path or "").strip()
+                if not project or not path:
+                    continue
+                normalized = path.replace("\\", "/")
+                ok_ins, affected = self._execute(
+                    f"""
+                    INSERT INTO {self.TABLE_NAME} (project, path, updated_at)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(project) DO NOTHING
+                    """,
+                    (project, normalized, now),
+                )
+                # affected 为 0 表示撞主键（新表已有值）→ 不计数也不覆盖
+                if ok_ins and isinstance(affected, int) and affected > 0:
+                    migrated += 1
+            if migrated:
+                logger.info(f"[ProjectWorkdir] 已从 key_documents 同步 {migrated} 条项目工作目录")
+            return migrated
+        except Exception as e:
+            logger.warning(f"[ProjectWorkdir] 同步老工作目录失败（不影响新数据）: {e}")
+            return 0
+
+    def _column_exists(self, table: str, column: str) -> bool:
+        """列是否存在（老库可能在建表后才加 is_working_dir 列）"""
+        try:
+            ok, rows = self._execute(f"PRAGMA table_info({table})")
+            if not ok or not rows:
+                return False
+            for row in rows:
+                name = row[1] if isinstance(row, tuple) else row.get("name", "")
+                if str(name) == column:
+                    return True
+            return False
+        except Exception:
+            return False
+
+    def _table_exists(self, name: str) -> bool:
+        """表是否存在（老库可能根本没有 key_documents）"""
+        try:
+            ok, rows = self._execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name = ?", (name,)
+            )
+            return bool(ok and rows)
+        except Exception:
             return False
 
     def get(self, project: str) -> Optional[str]:

@@ -102,9 +102,12 @@ def _resolve_main_repo(tool_ctx: dict, path: str = "") -> Tuple[Optional[str], s
     base = (path or (tool_ctx or {}).get("workdir") or "").strip()
     if not base or not os.path.isdir(base):
         return None, f"工作目录无效: {base or '(空)'}，请先在会话中设置项目工作目录"
+    # git 未安装时 detect_git 恒返回 None，报「不在 git 仓库中」会误导用户去查路径
+    if not GitWorktreeDetector._is_git_available():
+        return None, "系统未安装 git，工作树功能不可用；工作目录本身不受影响（可在工作树页更换）"
     git_root = GitWorktreeDetector.detect_git(base)
     if not git_root:
-        return None, f"{base} 不在 git 仓库中"
+        return None, f"{base} 不在 git 仓库中，工作树功能仅对 git 项目可用"
     if GitWorktreeDetector.is_worktree(git_root):
         main = GitWorktreeDetector.get_main_repo_path(git_root)
         if not main or not os.path.isdir(main):
