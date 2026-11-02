@@ -1,6 +1,66 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
+## [v0.6.14-beta] - 2026-11-02
+
+自 v0.6.13 以来的变更 | 提交数：75 · 文件变更：268 · +26007/-10870 | 贡献者：dingma, drifox-bot, mading
+
+### ✨ 新功能 (New Features)
+- **插件市场工具组件** (`a0c81665`): 新增安装/卸载/更新/启停等 6 个市场管理工具及对应测试覆盖。
+- **子智能体插件化落地** (`d7d8c376` · `7fc55a19` · `1624bace` · `d31ae21b` · `0bbe3dd6`): 子智能体运行区与会话卡迁入 system-subagent 插件；管理与团队工具重构；`subagent.run` 开放 ui 面；/subagents 命令迁入插件；结果注入迁移至 manager 经 session.send 发送。
+- **插件贡献注册表与项目技能源** (`4060c70b` · `9e99ac0d` · `f2a8fdb3` · `838a9cc2` · `89a98772` · `a403d324` · `8e4aacc4` · `87d824fe`): 新增 skill_source/command/agent 三类动态贡献注册表，SDK 暴露注册表，插件禁用整组注销；项目技能源 provider（.drifox/skills 扫描 + 助手级开关 + 设置卡 Switch）；内置 project-skill-creator 技能；/skill 与命令候选按会话项目动态求值，auto_enable 条目自动进偏好技能段。
+- **命令/智能体贡献回落** (`f4cf8312`): 插件贡献的命令/智能体接入 execute 与 get_agent 回落。
+- **消息卡内嵌面板槽位** (`e8d31181`): UIPluginRegistry + MessageCard 支持插件注入内嵌面板。
+- **上下文用量快照后台化** (`28cba64a` · `d19ade24`): 上下文用量快照任务后台化与 UI 刷新；MCPListSettingCard 可见性刷新；TraceCollector 消息投影优化。
+- **定时任务触发模式** (`a45e3cf5` · `c87d82ba`): session.send 支持 queue/skip/hook 三种模式，timer 能力增强；长任务 deadline 提醒。
+- **ui.notify 增强** (`d0625593`): 支持 kind(success/warning/error/info) 与 duration 参数，插件通知统一走能力池前置。
+- **团队管理增强** (`86635503` · `204fc4ee`): team 管理能力增强，支持非成员交互；补齐团队管理与能力测试。
+- **PluginChanged net-zero 合并** (`16331d28` · `ccbe9cff`): PluginChanged 消息 net-zero 合并并增强 team leave 后 UI 同步；传输键剥离保持持久化干净。
+- **工具思考独立卡** (`947d88b6` · `4bfea027` · `657613d2` · `bc439e36`): 工具与思考独立卡片（streamlined 模式）；可见性/高度管理、用户调高与平滑过渡；紧凑模式工具/思考区移至消息内容下方；流式工具区位置调整。
+- **workdir 契约迁移** (`3173e004`): key_documents 迁移至 project_workdir，worktree 管理后台处理增强。
+- **配置同步远端权威** (`0a5c1ddc` · `f8e64e51`): 初始合并期本地改动不覆盖远端；同步模拟支持故障注入与配置管理。
+- **v2 live 渲染增强** (`98fb5dee`): markdown 与内联 HTML 处理增强。
+- **动态颜色适配** (`70ee5362` · `758afec9`): 按背景亮度动态调整前景色，提升多组件可读性。
+- **主题 epoch 与启动探针** (`9417a8ed` · `2be22a8c`): 插件页主题外观 epoch 管理优化刷新；主题切换探针与最小启动诊断。
+- **TTFT 追踪** (`0924f04b`): 工具调用 TTFT 追踪与主题处理诊断增强。
+- **字体同步** (`e2443ce1`): 消息卡与 tab 管理器字体处理同步。
+- **内联面板历史加载** (`7a1c8489`): 会话重载时内联面板加载历史消息。
+- **分支刷新** (`50effee6`): 分支刷新清缓存并更新标签显示。
+- **MCP 卡与清理卡增强** (`50d8ab7a`): MCPListSettingCard 与 theme_style_card 功能增强；SystemCleanerCard 动态 UI 元素。
+- **孤儿临时页清理** (`283b3cb9`): 保留活跃目录，清理死目录临时页。
+- **输入区命令胶囊** (`bd1db3ba`): /命令 折叠淡黄胶囊，Backspace 解封、折叠态 Tab 静默、命令名不限宽。
+- **主线程看门狗生产启用** (`34f490c2`): 看门狗按环境设置在生产环境启用。
+
+### 🐛 问题修复 (Bug Fixes)
+- **subagent 完成路径与会话卡恢复** (`cb2a5e7f`): 完成路径补发 task_finished，会话卡按会话恢复。
+- **插件热重载组件保真** (`7a020d12`): 热重载组件保真与渲染型 fence 统一分发。
+- **ASTGuard 拒载修复** (`4b8e16ca`): 项目技能源模块名落入 module_prefixes 声明前缀，修复 ASTGuard 拒载。
+- **输入区修复** (`a3ebe79b` · `bfe44bee`): 折叠态 Tab 静默改为仅拦补全重建，恢复 detail 卡片 Tab 选参数；命令胶囊 drawObject 残留 fm 引用崩溃修复。
+- **webfetch HTML 处理** (`e2139637`): 正确处理 HTML 内容。
+- **测试与导入修复** (`a6852df3` · `ec509196`): ToolResult 断言字段 .ok → .success 修正；cards.py 补 QTimer import。
+- **任务过期描述** (`b387b6cd`): session 管理任务过期描述清晰化。
+
+### ♻️ 代码重构 (Refactoring)
+- **ToolThinkCard 移除** (`bda37ad4`): 移除 ToolThinkCard 及相关功能，由独立工具卡替代。
+- **后台任务命令统一** (`14592064` · `46c31f5d`): 合并后台任务命令为统一 background_task 工具；渲染函数一致性更新。
+- **hook.promote 移除** (`1101c398`): 移除 hook.promote 能力及相关代码。
+- **ProfileSection 重构** (`a2f5a788`): 重构 ProfileSection 及相关组件，移除 utility model 处理。
+- **内存与渲染性能重构** (`b47875df` · `16d3f2db`): 内存管理与渲染流程性能重构；代码结构可读性提升。
+- **MainRepoCard/Worktree 优化** (`59a807ad`): ElidedLabel 尺寸策略调整，repo_info 处理与 WorktreeSectionWidget 增强。
+- **hooks.json 提示词更新** (`5a8b851e`): 提示词清晰度与一致性更新。
+- **系统工具文档与测试重构** (`5933f032` · `058913fa`): 系统工具文档增强；测试移除 key document 引用。
+
+### ⚡ 性能优化 (Performance)
+- **热历史路径跳过 db reload** (`04c591d5`): 热路径跳过数据库重载；主线程看门狗能力增强。
+
+### 🔄 其他变更 (Other Changes)
+- **system-timer 调度器测试** (`68c60d82`): 新增 system-timer 插件与调度器单元测试。
+
+### 🔧 其他 (Chores & Build)
+- **memory tool schema 精简** (`c32d3aff`): 工具描述字段去冗余前缀。
+- **marketplace 自动再生** (`3c34fe36` · `75071c1b` · `eea6fd93` · `1ff7918b`): plugin.json 变更自动再生 [skip ci]。
+- **版本号升级** (`760ccf22`): v0.6.14-beta 版本号落盘。
+
 ## [v0.6.13] - 2026-10-31 (重新发布 #3)
 
 自 v0.6.13-beta 以来的变更 | 提交数：42 · 文件变更：148 · +11616/-2594 | 贡献者：dingma, mading
