@@ -351,7 +351,8 @@ class LLMSettingsCard(SystemCardFrame):
 
     # 左侧导航分组：(分组标题, ((tab_id, 显示名, 图标源), ...))
     # 图标源：字符串 → 主题感知资源图标 get_icon(name)；FluentIcon 枚举 → 内置图标
-    # 分组标题为空串表示不渲染标题（插件组按注册卡片动态显隐）
+    # 「插件」项按注册卡片动态显隐（_sync_plugin_nav_visibility）；
+    # 插件注册的独立配置大 tab（register_settings_tab）动态插到「插件」项之后
     NAV_GROUPS = (
         (
             "模型与扩展",
@@ -364,6 +365,7 @@ class LLMSettingsCard(SystemCardFrame):
                 ("agents", "智能体", "智能体"),
                 ("context", "上下文", "上下文"),
                 ("skills", "技能", "技能"),
+                ("plugins", "插件", FluentIcon.APPLICATION),
             ),
         ),
         (
@@ -381,7 +383,6 @@ class LLMSettingsCard(SystemCardFrame):
                 ("update", "更新", FluentIcon.UPDATE),
             ),
         ),
-        ("", (("plugins", "插件", FluentIcon.APPLICATION),)),
     )
 
     _autostart_toggling = False  # 类级防重入标志
@@ -393,6 +394,8 @@ class LLMSettingsCard(SystemCardFrame):
     # 插件分区指纹的类级默认：`__new__` 造的桩（测试 fixture）不跑 __init__，
     # QObject 未初始化时读实例属性会抛 RuntimeError 而非 AttributeError → 必须给默认值
     _plugin_cards_sig: tuple | None = None
+    # 同上：__new__ 桩（测试 fixture）不走 __init__，读该实例属性需类级默认兜底
+    _plugin_cards_built: bool = False
     # 懒构造分页 → 构造方法：首开不同步构建（~340ms 主体），见 _setup_content 注释
     _LAZY_PAGE_BUILDERS = {
         "common": "_build_common_page",
@@ -420,6 +423,10 @@ class LLMSettingsCard(SystemCardFrame):
         self._plugin_cards_sig = None
         # 插件设置分区是否已真正实例化（未实例化时只同步导航显隐，不构造 widget）
         self._plugin_cards_built = False
+        # 插件注册的独立设置大 tab：当前挂载清单与已实例化页面（懒构造，见
+        # _sync_plugin_tabs / _build_plugin_tab_page）
+        self._plugin_tab_infos: dict = {}
+        self._plugin_tab_pages: dict = {}
         # 已"就绪"的分页（首次进入时付一次性准备成本，见 _ensure_page_ready）
         self._page_ready: set[str] = set()
 
@@ -596,6 +603,8 @@ class LLMSettingsCard(SystemCardFrame):
         # 左侧导航：按「有无注册卡片」显隐（只查清单不构造卡片；实际实例化
         # 延迟到首次进入该页，见 _ensure_page_ready）
         self._sync_plugin_nav_visibility()
+        # 插件注册的独立设置大 tab：同步导航按钮与分页（懒实例化）
+        self._sync_plugin_tabs()
 
         # 连接信号
         # 注意：只有真正影响外观的变更才走 _on_config_changed（触发全量刷新）
@@ -974,6 +983,8 @@ class LLMSettingsCard(SystemCardFrame):
         # 首次构建延迟到「插件设置页首次进入」：实例化 5 张插件卡（含 ExpandSettingCard
         # 内部 view/滚动区）是笔一次性重活，不该在打开设置的那一帧同步付。
         # 未访问该页时只同步导航显隐（查清单，几乎零成本）。
+        # 插件大 tab 同步也挂在这里：打开设置 / 热重载重建都会走到本方法。
+        self._sync_plugin_tabs()
         if not force and not self._plugin_cards_built:
             self._sync_plugin_nav_visibility()
             return
@@ -1203,6 +1214,8 @@ class LLMSettingsCard(SystemCardFrame):
         widest = max((btn.sizeHint().width() for btn in self._nav_buttons.values()), default=150)
         nav.setFixedWidth(max(150, min(196, widest + 12)))
         self._nav_frame = nav
+        # 供动态插件 tab 按钮插入（_sync_plugin_tabs）
+        self._nav_body_layout = body_layout
         return nav
 
     @staticmethod
@@ -1258,6 +1271,97 @@ class LLMSettingsCard(SystemCardFrame):
             pass
         return has_cards
 
+    def _sync_plugin_tabs(self):
+        """同步插件注册的独立设置大 tab（register_settings_tab）：导航 + 分页增删
+
+        只查注册清单不实例化页面（懒构造在 _ensure_page_ready / _build_plugin_tab_page）。
+        tab_key 用 "tab:{plugin_name}:{tab_id}" 命名空间，不可能与静态 tab_id 冲突；
+        新增按钮固定插在「插件」导航项之后（顺序随 priority 降序）。移除 tab 时销毁
+        按钮与分页，当前停留页被移除则切回「插件」页。幂等：清单未变时零操作。
+        """
+        try:
+            infos = self._plugin_tab_infos
+        except RuntimeError:
+            return  # __new__ 桩（测试 fixture）未初始化 QObject：跳过同步
+        try:
+            from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+
+            tabs = UIPluginRegistry.get_instance().get_settings_tabs()
+        except Exception:  # noqa: BLE001 - 注册表不可用时不拖垮设置页
+            tabs = []
+        desired = {f"tab:{t.plugin_name}:{t.tab_id}": t for t in tabs}
+        if desired == infos:
+            return
+
+        # ── 移除消失的 tab ──
+        removed_current = False
+        for key in [k for k in infos if k not in desired]:
+            infos.pop(key, None)
+            self._plugin_tab_pages.pop(key, None)
+            self._page_ready.discard(key)
+            btn = self._nav_buttons.pop(key, None)
+            if btn is not None:
+                nav_layout = getattr(self, "_nav_body_layout", None)
+                if nav_layout is not None:
+                    nav_layout.removeWidget(btn)
+                btn.deleteLater()
+            page = self._page_scrolls.pop(key, None)
+            self._page_layouts.pop(key, None)
+            if page is not None:
+                self._pages_stack.removeWidget(page)
+                page.deleteLater()
+            if self._current_tab == key:
+                removed_current = True
+        if removed_current:
+            self._current_tab = "plugins"
+            fallback = self._page_scrolls.get("plugins")
+            if fallback is not None:
+                self._pages_stack.setCurrentWidget(fallback)
+            self._update_nav_styles()
+
+        # ── 新增出现的 tab ──
+        nav_layout = getattr(self, "_nav_body_layout", None)
+        anchor = self._nav_buttons.get("plugins")
+        insert_at = nav_layout.indexOf(anchor) + 1 if nav_layout is not None and anchor is not None else None
+        for idx, (key, info) in enumerate(desired.items()):
+            if key in infos:
+                continue
+            infos[key] = info
+            btn = QToolButton(self._nav_frame)
+            btn.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+            btn.setIcon(self._resolve_nav_icon(info.icon if info.icon is not None else FluentIcon.APPLICATION))
+            btn.setIconSize(QSize(18, 18))
+            btn.setText(info.title)
+            btn.setFixedHeight(36)
+            # 与 _build_side_nav 一致：高度固定、宽度铺满导航整行
+            btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            btn.setCursor(Qt.PointingHandCursor)
+            btn.setStyleSheet(self._nav_btn_style(False))
+            btn.clicked.connect(lambda _checked=False, tid=key: self._set_active_page(tid))
+            self._nav_buttons[key] = btn
+            if insert_at is not None and nav_layout is not None:
+                nav_layout.insertWidget(insert_at + idx, btn)
+            page, page_layout = self._make_page()
+            self._page_scrolls[key] = page
+            self._page_layouts[key] = page_layout
+            self._pages_stack.addWidget(page)
+        # 导航宽度按最长项自适应（上限与 _build_side_nav 一致）
+        nav_frame = getattr(self, "_nav_frame", None)
+        if nav_frame is not None and self._nav_buttons:
+            widest = max(b.sizeHint().width() for b in self._nav_buttons.values())
+            nav_frame.setFixedWidth(max(150, min(196, widest + 12)))
+
+    def _build_plugin_tab_page(self, tab_key: str):
+        """首次进入插件大 tab 时实例化页面（懒构造；失败不标 ready 由 _ensure_page_ready 重试）"""
+        info = self._plugin_tab_infos.get(tab_key)
+        layout = self._page_layouts.get(tab_key)
+        if info is None or layout is None:
+            return
+        widget = info.widget_class(parent=self)
+        self._plugin_tab_pages[tab_key] = widget
+        layout.addWidget(widget)
+        layout.addStretch(1)
+
     def _ensure_page_ready(self, tab_id: str):
         """分页首次进入时的一次性准备：把「只有这页才需要的重活」从打开设置挪走
 
@@ -1295,6 +1399,8 @@ class LLMSettingsCard(SystemCardFrame):
                 self.rebuild_plugin_cards(force=True)
             elif tab_id == "skills":
                 self._prefetch_skills()
+            elif tab_id.startswith("tab:"):
+                self._build_plugin_tab_page(tab_id)
         except Exception as e:
             # 失败不标记 ready：否则该页内容会永久为空且不再重试
             logger.warning(f"[LLMSettingsCard] {tab_id} 页首次准备失败: {e}")

@@ -804,6 +804,31 @@ class SettingsCardInfo:
     metadata: Dict[str, Any] = field(default_factory=dict)
     section: str = "plugins"  # 挂载分区：plugins/llm/common/appearance/update（对应设置面板 tab）
 
+@dataclass(frozen=True)
+class SettingsTabInfo:
+    """插件独立设置大 tab 注册信息（系统设置左侧导航的一级分页）
+
+    适合复杂插件配置：插件提供完整 QWidget 页面，宿主只负责导航挂载与
+    懒实例化；页面内部布局/滚动/主题由插件自主。
+
+    Attributes:
+        plugin_name: 所属插件名
+        tab_id: 插件内唯一 ID（与 plugin_name 组成全局 key，防跨插件冲突）
+        title: 导航显示名
+        widget_class: QWidget 子类（构造支持 parent 参数）
+        icon: 图标源（资源名字符串 / FluentIcon 枚举；None 用默认应用图标）
+        priority: 优先级（同 key 时高者覆盖低者；导航内按降序排列）
+        metadata: 附加元数据
+    """
+
+    plugin_name: str
+    tab_id: str
+    title: str
+    widget_class: type
+    icon: Any = None
+    priority: int = 0
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
 
 def _serialized(method):
     """同一注册表实例内的加载/卸载串行化
@@ -859,6 +884,8 @@ class UIPluginRegistry:
         self._input_buttons: Dict[str, InputButtonInfo] = {}
         self._context_actions: Dict[str, ContextMenuActionInfo] = {}
         self._settings_cards: Dict[str, SettingsCardInfo] = {}
+        # 插件独立设置大 tab：{key("{plugin_name}:{tab_id}"): SettingsTabInfo}
+        self._settings_tabs: Dict[str, SettingsTabInfo] = {}
         # 标题栏常驻 tab 槽位：{tab_id: TitlebarTabInfo}
         self._titlebar_tabs: Dict[str, TitlebarTabInfo] = {}
         self._titlebar_widgets: Dict[str, TitlebarWidgetInfo] = {}
@@ -2577,6 +2604,53 @@ class UIPluginRegistry:
         infos.sort(key=lambda i: -i.priority)
         return infos
 
+    def register_settings_tab(
+        self,
+        plugin_name: str,
+        tab_id: str,
+        title: str,
+        widget_class: type,
+        icon: Any = None,
+        priority: int = 0,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """注册系统设置独立大 tab（插件完整自定义配置页）
+
+        与 register_settings_card 的区别：card 挂进已有分区的卡片流；tab 是
+        左侧导航一级分页，插件页面自主布局，适合复杂配置界面。
+
+        Args:
+            plugin_name: 所属插件名
+            tab_id: 插件内唯一 ID（注册表 key 为 {plugin_name}:{tab_id}，防跨插件冲突）
+            title: 导航显示名
+            widget_class: QWidget 子类（构造支持 parent 参数；懒实例化，首次进入该页才构造）
+            icon: 图标源（资源名字符串 / FluentIcon 枚举；None 用默认应用图标）
+            priority: 优先级（同 key 高者覆盖；导航内降序排列）
+            metadata: 附加元数据
+        """
+        if not tab_id or ":" in tab_id:
+            raise ValueError(f"invalid tab_id {tab_id!r}: must be non-empty and contain no ':'")
+        if metadata is None:
+            metadata = {}
+        info = SettingsTabInfo(
+            plugin_name=plugin_name,
+            tab_id=tab_id,
+            title=title,
+            widget_class=widget_class,
+            icon=icon,
+            priority=priority,
+            metadata=metadata,
+        )
+        key = f"{plugin_name}:{tab_id}"
+        existing = self._settings_tabs.get(key)
+        if existing is not None and existing.priority > priority:
+            return
+        self._settings_tabs[key] = info
+
+    def get_settings_tabs(self) -> List[SettingsTabInfo]:
+        """获取全部插件设置大 tab（priority 降序，同序按 key 稳定排列）"""
+        return sorted(self._settings_tabs.values(), key=lambda i: (-i.priority, i.plugin_name, i.tab_id))
+
     def unregister_auto_config_cards(self, plugin_name: str) -> None:
         """移除插件的 config_schema 自动设置卡（E1，metadata.auto_config_card）。
 
@@ -4089,6 +4163,8 @@ class UIPluginRegistry:
             for k, v in self._settings_cards.items()
             if v.plugin_name != plugin_name or v.metadata.get("auto_config_card")
         }
+        # 清理插件独立设置大 tab（无 auto 语义，直接按归属清）
+        self._settings_tabs = {k: v for k, v in self._settings_tabs.items() if v.plugin_name != plugin_name}
         # 清理工作区页面槽（Phase G）
         self._workspace_pages = {k: v for k, v in self._workspace_pages.items() if v.plugin_name != plugin_name}
         # 清理右侧工作台页签槽位（含其联动命令）
@@ -4615,6 +4691,7 @@ class UIPluginRegistry:
         self._floating_cards.clear()
         self._welcome_tabs.clear()
         self._welcome_actions.clear()
+        self._settings_tabs.clear()
         self._mention_providers.clear()
         self._loaded_plugins.clear()
         self._main_widget = None
@@ -4747,6 +4824,7 @@ def _declare_builtin_slots() -> None:
     declare_slot("titlebar_widget", lambda r: r._titlebar_widgets.items())
     declare_slot("context_menu", lambda r: r._context_actions.items())
     declare_slot("settings_card", lambda r: r._settings_cards.items())
+    declare_slot("settings_tab", lambda r: r._settings_tabs.items())
     declare_slot("mention_provider", lambda r: r._mention_providers.items())
     # 消息卡片页脚：左区信息项 / 右区 hover 按钮（改动后不牵动既有视图，仅登记）
     declare_slot("footer_stat", lambda r: r._footer_stats.items())
