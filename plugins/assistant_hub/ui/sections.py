@@ -1655,6 +1655,7 @@ class ExperienceSection(_Section):
     viewCategory = pyqtSignal(str)
     deleteCategoryRequested = pyqtSignal(str)
     consolidateRequested = pyqtSignal()
+    refreshRequested = pyqtSignal()
 
     def __init__(self, parent=None):
         super().__init__("经验", parent)
@@ -1671,6 +1672,11 @@ class ExperienceSection(_Section):
         top_row = QHBoxLayout()
         self._hint = _hint("默认关闭。开启后助手可自主回忆/记录工作经验。")
         top_row.addWidget(self._hint, 1)
+        refresh_btn = QPushButton("刷新")
+        refresh_btn.setStyleSheet(_btn_style())
+        refresh_btn.setToolTip("重扫 experience/ 目录：重建索引并刷新分类卡片（对话整理/手改文件后用）")
+        refresh_btn.clicked.connect(self.refreshRequested.emit)
+        top_row.addWidget(refresh_btn)
         cons_btn = QPushButton("压缩整理")
         cons_btn.setStyleSheet(_btn_style())
         cons_btn.setToolTip("向对话输入整理提示词：由模型读全库、合并去重、重新归类")

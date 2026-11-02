@@ -835,6 +835,29 @@ def _get_gen_thread_pool() -> QThreadPool:
         _gen_thread_pool_shared.setMaxThreadCount(2)
     return _gen_thread_pool_shared
 
+class _CtxUsageSnapshotTask(QRunnable):
+    """上下文占用快照后台任务（A 优化）：快照计算移出主线程。
+
+    fn 为纯计算闭包（读 session + token 估算，禁碰任何 UI 对象）；
+    结果经 callback(result, error) 回宿主，宿主负责信号桥接回主线程。
+    任何异常一律 callback(None, error=...)，不向 QRunnable 外抛。
+    """
+
+    def __init__(self, fn, callback):
+        super().__init__()
+        self._fn = fn
+        self._callback = callback
+
+    def run(self):
+        try:
+            result = self._fn()
+            self._callback(result, "")
+        except Exception as e:  # noqa: BLE001 - 后台线程异常不外泄
+            try:
+                self._callback(None, str(e))
+            except RuntimeError:
+                pass  # 宿主窗口已析构
+
 
 class OpenAIChatToolWindow(ToolWindow):
     name = "飘狐"
@@ -975,6 +998,8 @@ class OpenAIChatToolWindow(ToolWindow):
     _topic_summary_ready = pyqtSignal(object, object)
     # AI 审核结果桥接（后台线程 → 主线程）：tool_call_id, result(dict|None), error
     _approval_review_ready = pyqtSignal(str, object, str)
+    # 上下文占用快照后台化桥接（A 优化）：快照线程池 → 主线程画圆环
+    _ctx_usage_ready = pyqtSignal(int, str, object, str)
     _interrupt_complete = pyqtSignal(object)  # 中断完成后主线程回调
     # [T4-4] diff 统计后台计算结果回主线程：tool_call_id, stats(dict|None)
     _diff_stats_ready = pyqtSignal(str, object)
@@ -1297,6 +1322,8 @@ class OpenAIChatToolWindow(ToolWindow):
         self._topic_summary_ready.connect(self._on_topic_summary_generated)
         # AI 审核结果桥接：审核任务后台线程 → 主线程落决策
         self._approval_review_ready.connect(self._on_approval_review_ready)
+        # 上下文占用快照桥接：快照后台线程 → 主线程画圆环（A 优化）
+        self._ctx_usage_ready.connect(self._on_ctx_usage_ready)
         # 线程安全桥接：中断完成后回到主线程保存会话
         self._interrupt_complete.connect(self._on_finalize_complete)
         # [T4-4] diff 统计后台计算完成 → 主线程校验卡片存活后落数字
@@ -8221,63 +8248,116 @@ class OpenAIChatToolWindow(ToolWindow):
     def _refresh_context_usage_indicator(self):
         """刷新上下文使用环。
 
-        性能优化：加入 500ms 节流。
-        get_context_usage_snapshot → build_messages 会触发 anyio.run(to_thread.run_sync, compactor.compact)，
-        在主线程上阻塞 UI 事件循环。频繁调用（如每次工具执行后）会造成累积卡顿。
+        性能：① 节流（流式/工具迭代期 2s，常态 0.5s）；② 快照计算后台化（A 优化）。
+        get_context_usage_snapshot → project_for_ui（8 层 tier）+ 全量 token 估算，
+        长会话实测单次 500ms+（watchdog 报告阻塞主线程）；现丢应用级共享线程池
+        跑，结果经 _ctx_usage_ready 信号回主线程画圆环。
+        单飞守卫：上一轮未返回时只置 pending，完成后自动补一轮最新值，防任务堆积。
         """
         import time
 
         now = time.monotonic()
         last = getattr(self, "_last_context_refresh_time", 0.0)
-        if now - last < 0.5:
+        # 流式/工具迭代期消息持续增长 → engine 快照缓存恒失效，每次全量重算，
+        # 放宽到 2s 只降频率不降精度（落定后 _is_streaming/worker 复位即回 0.5s）。
+        streaming_busy = bool(getattr(self, "_is_streaming", False)) or self._worker_actually_busy()
+        if now - last < (2.0 if streaming_busy else 0.5):
             return
 
-        ring = getattr(self, "context_usage_ring", None)
-        if not ring:
+        if not getattr(self, "context_usage_ring", None):
             return
 
-        # 注：历史上这里在 _is_streaming 时直接 return，以避免 build_messages →
-        # compactor.compact 阻塞主线程。但 engine.get_context_usage_snapshot 现在走
-        # 快速路径（仅用 session.system_prompt + session.messages + 缓存的 tools 估算，
-        # 不触发 build_messages/compact），不再阻塞；故移除该守卫。0.5s 节流已足以
-        # 限制刷新频率，使流式(工具迭代)期间也能实时补全各类型上下文占比 breakdown。
         session = self.session_manager.get_current_session()
+        if session is None:
+            return
+        self._last_context_refresh_time = now
+
+        # 单飞：in-flight 只记 pending，防计算耗时 > 节流间隔时任务堆积
+        if getattr(self, "_ctx_usage_inflight", False):
+            self._ctx_usage_pending = True
+            return
+
+        backend = self.backend
         llm_config = self._get_current_model_config()
         api_prompt_tokens = int(getattr(session, "last_api_prompt_tokens", 0) or 0)
         api_message_count = int(getattr(session, "last_api_message_count", 0) or 0)
         # 三态：None = 未知（老会话无该标记）→ 引擎按"来自 API"处理，避免丢弃权威值
         from_api = getattr(session, "last_api_prompt_from_usage", None)
-        snapshot = self.backend.get_context_usage_snapshot(
-            session,
-            llm_config,
-            api_prompt_tokens=api_prompt_tokens,
-            api_message_count=api_message_count,
-            from_api=from_api,
-        )
-        ring.set_usage(
-            snapshot.get("percent", 0),
-            snapshot.get("used_tokens", 0),
-            snapshot.get("budget_tokens", 0),
-            snapshot.get("compaction", {}),
-            snapshot.get("normal_tokens", 0),
-            snapshot.get("compacted_tokens", 0),
-            breakdown=snapshot.get("breakdown", []),
-            pruned_tokens=snapshot.get("pruned_tokens", 0),
-        )
-        # 防闪：流式期间 session.messages 可能尚未包含本轮新增消息（陈旧），快照
-        # used_tokens 会远小于 worker 实时 token_count，导致圆环/卡片闪现异常小的数值。
-        # 以 worker 实时值（last_api_prompt_tokens）作为权威总量下限，避免闪现。
-        used_for_display = snapshot.get("used_tokens", 0)
-        if api_prompt_tokens and used_for_display < api_prompt_tokens:
-            used_for_display = api_prompt_tokens
-        # 卡片底部 token 显示与上下文圆环同步（同一 used_tokens）
-        # 🆕 isdeleted 防线：_current_assistant_card 可能已被 deleteLater 排队销毁
-        # （如 send 失败回滚 / 会话切换），C++ 对象已失效时访问 set_meta_info 会抛
-        # RuntimeError: wrapped C/C++ object ... has been deleted。
-        card = getattr(self, "_current_assistant_card", None)
-        if card and not _is_sip_deleted(card) and used_for_display > 0:
-            card.set_meta_info(token_usage={"total": used_for_display})
-        self._last_context_refresh_time = now
+        session_id = session.session_id
+
+        self._ctx_usage_gen = getattr(self, "_ctx_usage_gen", 0) + 1
+        gen = self._ctx_usage_gen
+        self._ctx_usage_inflight = True
+
+        def _fn():
+            # 纯计算：读 session 消息 + token 估算 + 投影，禁碰 UI 对象。
+            # session.messages 在流式期被 worker append：Python list.append 原子，
+            # 迭代安全；EMA 校准写回是属性赋值，同样原子。
+            return backend.get_context_usage_snapshot(
+                session,
+                llm_config,
+                api_prompt_tokens=api_prompt_tokens,
+                api_message_count=api_message_count,
+                from_api=from_api,
+            )
+
+        def _bridge(result, error=""):
+            # 后台线程 → 主线程（QueuedConnection）；窗口已析构时静默丢弃
+            if getattr(self, "_is_destroyed", False):
+                return
+            try:
+                self._ctx_usage_ready.emit(gen, session_id, result, error or "")
+            except RuntimeError:
+                pass
+
+        self._gen_thread_pool.start(_CtxUsageSnapshotTask(_fn, _bridge))
+
+    def _on_ctx_usage_ready(self, gen: int, session_id: str, snapshot, error: str):
+        """快照后台计算落地：gen/会话过期丢弃 → 画圆环+卡片 token → pending 补一轮"""
+        if getattr(self, "_is_destroyed", False):
+            return
+        self._ctx_usage_inflight = False
+        if error or not isinstance(snapshot, dict):
+            if error:
+                logger.debug(f"[CtxRing] 快照后台计算失败: {error}")
+        elif (
+            gen == getattr(self, "_ctx_usage_gen", 0)
+            and self.session_manager.get_current_session() is not None
+            and session_id == self.session_manager.get_current_session().session_id
+        ):
+            ring = getattr(self, "context_usage_ring", None)
+            session = self.session_manager.get_current_session()
+            if ring and session is not None:
+                # 防闪：流式期间 session.messages 可能尚未包含本轮新增消息（陈旧），快照
+                # used_tokens 会远小于 worker 实时 token_count，导致圆环/卡片闪现异常小的数值。
+                # 以 worker 实时值（last_api_prompt_tokens）作为权威总量下限，避免闪现。
+                api_prompt_tokens = int(getattr(session, "last_api_prompt_tokens", 0) or 0)
+                ring.set_usage(
+                    snapshot.get("percent", 0),
+                    snapshot.get("used_tokens", 0),
+                    snapshot.get("budget_tokens", 0),
+                    snapshot.get("compaction", {}),
+                    snapshot.get("normal_tokens", 0),
+                    snapshot.get("compacted_tokens", 0),
+                    breakdown=snapshot.get("breakdown", []),
+                    pruned_tokens=snapshot.get("pruned_tokens", 0),
+                )
+                # 卡片底部 token 显示与上下文圆环同步（同一 used_tokens 托底值）
+                # 🆕 isdeleted 防线：_current_assistant_card 可能已被 deleteLater 排队销毁
+                # （如 send 失败回滚 / 会话切换），C++ 对象已失效时访问 set_meta_info 会抛
+                # RuntimeError: wrapped C/C++ object ... has been deleted。
+                used_for_display = snapshot.get("used_tokens", 0)
+                if api_prompt_tokens and used_for_display < api_prompt_tokens:
+                    used_for_display = api_prompt_tokens
+                card = getattr(self, "_current_assistant_card", None)
+                if card and not _is_sip_deleted(card) and used_for_display > 0:
+                    card.set_meta_info(token_usage={"total": used_for_display})
+        # pending 补一轮：in-flight 期间又有刷新请求（gen 会自增使本轮结果过期），
+        # 重置节流时间戳后立即补算最新值
+        if getattr(self, "_ctx_usage_pending", False):
+            self._ctx_usage_pending = False
+            self._last_context_refresh_time = 0.0
+            QTimer.singleShot(0, self._refresh_context_usage_indicator)
 
     def _update_balance_display(self):
         """更新余额显示（用量聚合 T6：请求委托 UsageService 全局单例）"""

@@ -759,11 +759,32 @@ class UIEngine(BaseEngine):
 
         budget_tokens = max(1, self._conversation_core.context_builder.get_context_budget(llm_config))
         # 估算总量：系统提示 + 全部消息 + 工具定义（含模型分词校正系数）
-        # 性能优化（O-01）：用 per_message_tokens 累加替代 count_messages_tokens(messages)，
-        # 避免内部 is 身份缓存的 [msg] 临时列表构造与查找开销。
         # est_total = sum(per_message_tokens) + tools_tokens，保证与下方 breakdown 之和
         # 内部自洽（scale 等比缩放基线准确）。
-        est_raw = sum(per_message_tokens(m, model, ratio) for m in approx_messages) + tools_tokens
+        # 单遍遍历同时完成角色拆分（原 O-01 优化保留）：此前 est_raw 与 breakdown
+        # 对同一组投影消息各跑一遍 per_message_tokens，长会话每次快照多一遍 hash 全扫。
+        system_tokens = 0
+        user_tokens = assistant_tokens = tool_tokens = hook_tokens = 0
+        est_raw = tools_tokens
+        _body = approx_messages
+        if system_prompt and approx_messages and approx_messages[0].get("role") == "system":
+            system_tokens = per_message_tokens(approx_messages[0], model, ratio)
+            est_raw += system_tokens
+            _body = approx_messages[1:]
+        for msg in _body:
+            t = per_message_tokens(msg, model, ratio)
+            est_raw += t
+            if msg.get("_hook_event"):
+                hook_tokens += t
+            elif msg.get("role") == "user":
+                user_tokens += t
+            elif msg.get("role") == "assistant":
+                assistant_tokens += t
+            elif msg.get("role") == "tool":
+                tool_tokens += t
+            else:
+                # 其它角色（如内联 system 消息）兜底归入用户侧
+                user_tokens += t
         # 本地估算 → 真实占用：用 API usage 反推的自适应校准因子修正。
         # 本地 cl100k_base/快估对中文会话常比真实值高 1.5~3 倍（中文模型分词更
         # 高效），静态 ratio 表已统一为 1.0 无法覆盖各厂商差异，故按会话自适应。
@@ -773,35 +794,6 @@ class UIEngine(BaseEngine):
             model,
         )
         est_total = int(est_raw * calibration)
-
-        # ---- 各类型上下文占比（按角色拆分，用于 WorkBuddy 风格占比条）----
-        system_tokens = per_message_tokens({"role": "system", "content": system_prompt}, model, ratio) if system_prompt else 0
-
-        # 按消息角色拆分：用户消息 / 助手消息 / 工具结果 / Hook 注入
-        # 每条消息独立计 token，且不含工具 schema 开销（工具定义单独计在 tools_tokens），
-        # 避免与下面的 工具定义 重复计入。
-        # 带 _hook_event 标记的消息是 hook 注入的动态上下文（如长期记忆、系统时间等），
-        # 独立统计以便用户直观了解 hook 机制对上下文的占用。
-        # 性能优化（O-01）：用 per_message_tokens 替代 count_messages_tokens([msg])，
-        # 消除 [msg] 临时列表分配 + 4-entry is 缓存必然 MISS 的开销，
-        # 100 条消息场景从 ~102 次 count_messages_tokens 降至 ~N+1 次 per_message_tokens。
-        user_tokens = assistant_tokens = tool_tokens = hook_tokens = 0
-        # 用 ui stage 的投影结果统计（已含 cascade 截断效果），不再逐条手工截断
-        for msg in _projected:
-            role = msg.get("role", "")
-            t = per_message_tokens(msg, model, ratio)
-            # 分离 hook 注入消息（带 _hook_event 标记），独立统计
-            if msg.get("_hook_event"):
-                hook_tokens += t
-            elif role == "user":
-                user_tokens += t
-            elif role == "assistant":
-                assistant_tokens += t
-            elif role == "tool":
-                tool_tokens += t
-            else:
-                # 其它角色（如内联 system 消息）兜底归入用户侧
-                user_tokens += t
 
         breakdown = [
             {"key": "tools", "label": "工具定义", "tokens": tools_tokens, "color": "#f472b6"},

@@ -1286,7 +1286,7 @@ class AssistantManager:
             for i, old_item in enumerate(old):
                 if i >= len(new):
                     break
-                old_name, new_name = old_item.get("name"), new.get(i, {}).get("name")
+                old_name, new_name = old_item.get("name"), new[i].get("name")
                 if old_name and new_name and old_name != new_name:
                     text = store.rename_section_title(text, str(old_name), str(new_name))
                     renamed.append(f"{old_name}→{new_name}")

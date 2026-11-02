@@ -310,6 +310,7 @@ class AssistantCardWidget(QWidget):
         self._experience.viewCategory.connect(self._on_view_experience)
         self._experience.deleteCategoryRequested.connect(self._on_experience_delete)
         self._experience.consolidateRequested.connect(self._on_experience_consolidate)
+        self._experience.refreshRequested.connect(self._on_experience_refresh)
         self._inner_v.addWidget(self._experience)
 
         self._inner_v.addStretch(1)
@@ -932,6 +933,23 @@ class AssistantCardWidget(QWidget):
         "4. 每条仍是一句碎片：对象+动作+关键细节，具体可执行，禁空泛表述\n"
         "5. 整理完告诉我合并/删除/新建了哪些，以及现在每个分类各多少条"
     )
+
+    def _on_experience_refresh(self) -> None:
+        """手动刷新：重扫 experience/ 目录重建索引 + 重载分类卡片。
+
+        外部改动（对话整理/手改文件）不会自动生效：UI 分类只在打开卡片时
+        加载一次，experience.md 索引只在缺失时重建（read_index 直接读旧文件），
+        此按钮一次补齐两处，工具侧 recall 无参立即可见新索引。
+        """
+        if not self._active_aid:
+            return
+        aid = self._active_aid
+        try:
+            self._mgr._core_experience().rebuild_index(self._mgr.assistant_dir(aid))
+        except Exception as e:
+            logger.warning(f"[assistant_hub] 重建经验索引失败: {e}")
+        self._experience.reload_categories(self._mgr.experience_list(aid))
+        self._notify("经验分类已刷新")
 
     def _on_experience_consolidate(self) -> None:
         """压缩整理：关闭助手中心 → 把整理提示词写进对话输入框。"""
