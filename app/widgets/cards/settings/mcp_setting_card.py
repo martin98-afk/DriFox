@@ -56,6 +56,7 @@ from app.utils.design_tokens import (
     SwitchStyles,
     apply_font_size_to_widget,
     font_size_css,
+    readable_text_on,
     scale_font_size,
 )
 from app.utils.utils import get_font_family_css
@@ -121,11 +122,14 @@ def _auth_btn_qss(kind: str) -> str:
     """
     if kind == "authorize":
         return (
-            f"PushButton {{ background-color: {Colors.TEXT_ACCENT}; color: {Colors.BUTTON_TEXT_ON_ACCENT};"
+            f"PushButton {{ background-color: {Colors.TEXT_ACCENT};"
+            f" color: {readable_text_on(Colors.TEXT_ACCENT, Colors.BUTTON_TEXT_ON_ACCENT)};"
             f" border: none; border-radius: {BorderRadius.SM}; padding: 0 10px;"
             f" {font_size_css(12)} font-weight: bold; }}"
-            f"PushButton:hover {{ background-color: {Colors.BORDER_ACCENT}; }}"
-            f"PushButton:pressed {{ background-color: {Colors.BORDER_ACCENT}; }}"
+            f"PushButton:hover {{ background-color: {Colors.BORDER_ACCENT};"
+            f" color: {readable_text_on(Colors.BORDER_ACCENT)}; }}"
+            f"PushButton:pressed {{ background-color: {Colors.BORDER_ACCENT};"
+            f" color: {readable_text_on(Colors.BORDER_ACCENT)}; }}"
             f"PushButton:disabled {{ color: {Colors.TEXT_MUTED}; background-color: transparent; }}"
         )
     return (

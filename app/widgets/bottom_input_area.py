@@ -61,7 +61,7 @@ from qfluentwidgets import (
 
 from app.widgets.stop_button import SendStopButton
 
-from app.utils.design_tokens import Animations, Colors, font_size_css, qcolor_from_token
+from app.utils.design_tokens import Animations, Colors, font_size_css, qcolor_from_token, readable_text_on
 from app.utils.utils import get_app_data_dir, get_font_family_css
 from app.widgets.simple_hover_tooltip import (
     get_hover_filter,
@@ -2420,6 +2420,8 @@ class SendableTextEdit(TextEdit):
     def _build_combo_style(self) -> str:
         """构建智能体下拉框样式"""
         Colors.refresh()
+        # 选中项 TEXT_ACCENT 实心底：真黑主题 accent 为纯白，需自适应前景
+        selected_fg = readable_text_on(Colors.TEXT_ACCENT, Colors.BUTTON_TEXT_ON_ACCENT)
         return f"""
             ComboBox {{
                 background-color: {Colors.TOOLBAR_BG};
@@ -2447,6 +2449,7 @@ class SendableTextEdit(TextEdit):
                 background-color: {Colors.CONTENT_BG};
                 color: {Colors.INPUT_TEXT};
                 selection-background-color: {Colors.TEXT_ACCENT};
+                selection-color: {selected_fg};
                 border: 1px solid {Colors.INPUT_BORDER};
                 border-radius: 10px;
                 padding: 4px;

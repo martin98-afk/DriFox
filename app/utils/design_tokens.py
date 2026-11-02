@@ -1112,6 +1112,8 @@ class ComboBoxStyles:
     @staticmethod
     def dark_combo_dropdown() -> str:
         """深色主题下拉框弹出列表样式"""
+        # 选中项：TEXT_ACCENT 实心底，前景按底亮度自适应（真黑主题 accent 是纯白）
+        selected_fg = readable_text_on(Colors.TEXT_ACCENT)
         return f"""
             QAbstractItemView {{
                 color: {Colors.TEXT_PRIMARY};
@@ -1132,7 +1134,7 @@ class ComboBoxStyles:
             }}
             QAbstractItemView::item:selected {{
                 background-color: {Colors.TEXT_ACCENT};
-                color: white;
+                color: {selected_fg};
             }}
             QScrollBar:vertical {{
                 background: {Colors.CONTENT_BG};
@@ -1286,6 +1288,74 @@ def _rgba_to_qcolor(value: str) -> "QColor":
 #: 新代码请用这个名字，不要自己写解析，也不要直接 ``QColor(Colors.X)``
 #: （对 rgba() 会得到一个 invalid 的 QColor，渲染时表现为颜色不生效）。
 qcolor_from_token = _rgba_to_qcolor
+
+
+# ── 实心强调色底上的前景文字（可读性保障） ──────────────
+#: 底色过亮时的深色前景候选。
+#: 不拿 Colors.BUTTON_TEXT_ON_ACCENT 兜底：该 token 可被主题设成纯白
+#: （true-black / amoled-black），当深色候选用会再次落到「白底白字」。
+_ON_COLOR_DARK = "#1A1F2B"
+_ON_COLOR_LIGHT = "#FFFFFF"
+
+
+def _srgb_luminance(color: "QColor") -> float:
+    """WCAG 2.1 相对亮度：sRGB 分量线性化后按 0.2126/0.7152/0.0722 加权。"""
+
+    def _lin(v: int) -> float:
+        v /= 255.0
+        return v / 12.92 if v <= 0.04045 else ((v + 0.055) / 1.055) ** 2.4
+
+    return 0.2126 * _lin(color.red()) + 0.7152 * _lin(color.green()) + 0.0722 * _lin(color.blue())
+
+
+def _contrast_ratio(fg: "QColor", bg: "QColor") -> float:
+    """WCAG 对比度，取值 1（同色）~ 21（纯黑对纯白）。"""
+    l1, l2 = _srgb_luminance(fg), _srgb_luminance(bg)
+    hi, lo = (l1, l2) if l1 >= l2 else (l2, l1)
+    return (hi + 0.05) / (lo + 0.05)
+
+
+def readable_text_on(bg_spec: str, preferred: str | None = None, min_ratio: float = 3.0) -> str:
+    """按底色实际亮度选前景文字色，用于「主题色实心底 + 文字」的按钮/选中项。
+
+    主题的 accent / realtime_accent 可能是纯白（true-black、amoled-black、
+    slinky-grey 等），此时硬编码的 ``color: #ffffff`` 会变成白底白字、
+    完全不可见（2026-11-02 真黑主题提问卡「提交」按钮实锤）。
+
+    判定用 WCAG 对比度而不是「亮度大于 0.5 就用黑字」的拍脑袋阈值：
+    主题自带的前景色对比度达标就沿用（保留主题性格），不达标才在
+    深色 / 白色之间取对比度更高者。半透明底按 RGB 直接比较（alpha 忽略），
+    按钮底色 alpha 普遍为 255，误差可忽略。
+
+    Args:
+        bg_spec: 底色，支持 ``#rrggbb`` 与主题 YAML 常用的 ``rgba()`` / ``rgb()``。
+        preferred: 优先采用的前景色（通常是 Colors.BUTTON_TEXT_ON_ACCENT）。
+        min_ratio: 可读下限。按钮字号偏小但加粗，按 WCAG AA 大字标准取 3.0。
+
+    Returns:
+        ``#rrggbb`` 前景色；底色解析失败时返回 preferred 或白色。
+    """
+    from PyQt5.QtGui import QColor
+
+    bg = _rgba_to_qcolor(bg_spec) if bg_spec else None
+    if bg is None or not bg.isValid():
+        return preferred or _ON_COLOR_LIGHT
+
+    if preferred:
+        pref = _rgba_to_qcolor(preferred)
+        if pref.isValid() and _contrast_ratio(pref, bg) >= min_ratio:
+            return preferred
+
+    # 白色优先：深色底配白字是全项目按钮的默认设计语言，主题把底色设成深色
+    # 就是为配白字（azure #3b82f6 白字 3.68 已达标），不要因为深色字对比度
+    # 略高就反转，那会把深蓝底染成脏灰。只有白字确实看不清时才反转。
+    dark, light = QColor(_ON_COLOR_DARK), QColor(_ON_COLOR_LIGHT)
+    if _contrast_ratio(light, bg) >= min_ratio:
+        return _ON_COLOR_LIGHT
+    if _contrast_ratio(dark, bg) >= min_ratio:
+        return _ON_COLOR_DARK
+    # 两头都不达标（中间灰调）→ 取对比度更高者，总比继续用原色强
+    return _ON_COLOR_DARK if _contrast_ratio(dark, bg) >= _contrast_ratio(light, bg) else _ON_COLOR_LIGHT
 
 
 # 模块级状态：供 monkey-patched qfluentwidgets ToolTip.showEvent 读取当前主题色

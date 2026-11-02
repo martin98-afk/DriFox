@@ -23,7 +23,7 @@ from PyQt5.QtWidgets import (
 )
 
 from qfluentwidgets import ScrollArea
-from app.utils.design_tokens import CardStyles, Colors, font_size_css
+from app.utils.design_tokens import CardStyles, Colors, font_size_css, readable_text_on
 from app.utils.utils import get_font_family_css, get_icon, get_unified_font
 from app.widgets.cards.card_container import CardContainer
 from app.widgets.hover_style_guard import style_if_changed
@@ -1170,10 +1170,11 @@ class QuestionFloatingWidget(QWidget):
             return
 
         # 刷新按钮主题色
+        # 前景按底亮度自适应：真黑主题 REALTIME_ACCENT = 纯白，硬编码白字会白底白字
         Colors.refresh()
         self._next_btn.setStyleSheet(f"""
-            QPushButton {{ background-color: {Colors.REALTIME_ACCENT}; color: #ffffff; border: none; border-radius: 6px; padding: 0 18px; font-weight: bold; }}
-            QPushButton:hover {{ background-color: {Colors.REALTIME_BORDER}; }}
+            QPushButton {{ background-color: {Colors.REALTIME_ACCENT}; color: {readable_text_on(Colors.REALTIME_ACCENT)}; border: none; border-radius: 6px; padding: 0 18px; font-weight: bold; }}
+            QPushButton:hover {{ background-color: {Colors.REALTIME_BORDER}; color: {readable_text_on(Colors.REALTIME_BORDER)}; }}
         """)
 
         q_data = self._questions[self._current_index]

@@ -109,6 +109,7 @@ from app.utils.design_tokens import (
     fade_in_widget,
     font_size_css,
     get_unified_scrollbar_style,
+    readable_text_on,
     scale_font_size,
     scale_icon_size,
     set_style_sheet_if_changed,
@@ -1361,10 +1362,12 @@ class MessageCard(SimpleCardWidget):
             return ""
         # 头像直径 30px：首字母字号取 16px（直径的 ~53%），
         # 与项目卡片 _SquareAvatar(14/24≈58%) 比例接近，避免字符过小看不清。
+        # 字色按头像底色自适应：真黑主题 USER_CARD_ACCENT 为纯白，
+        # 硬编码 #FFFFFF 会让首字母在纯黑主题下完全消失。
         return f"""
             QLabel {{
                 {font_css} font-size: {scale_font_size(16)}px;
-                color: #FFFFFF;
+                color: {readable_text_on(self._theme["accent"])};
                 font-weight: 700;
                 background: {self._theme["accent"]};
                 border: 1px solid rgba(255,255,255,0.12);

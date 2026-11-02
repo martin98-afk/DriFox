@@ -30,7 +30,14 @@ from PyQt5.QtWidgets import (
 
 from qfluentwidgets import Action, CheckableMenu, MenuAnimationType
 
-from app.utils.design_tokens import BorderRadius, CardStyles, Colors, font_size_css, scale_font_size
+from app.utils.design_tokens import (
+    BorderRadius,
+    CardStyles,
+    Colors,
+    font_size_css,
+    readable_text_on,
+    scale_font_size,
+)
 from app.utils.utils import get_font_family_css, get_unified_font
 from app.widgets.cards.card_container import CardContainer
 
@@ -623,10 +630,11 @@ class PermissionApprovalWidget(QWidget):
                 f" QPushButton#papSecondary:hover {{ background:{Colors.HOVER_BG}; }}"
             )
         self._allow_btn.setStyleSheet(
-            f"QPushButton#papAllow {{ background:{Colors.REALTIME_ACCENT}; color:#ffffff;"
+            f"QPushButton#papAllow {{ background:{Colors.REALTIME_ACCENT}; color:{readable_text_on(Colors.REALTIME_ACCENT)};"
             f" border:none; border-radius:{BorderRadius.SM}; padding:0 16px; font-weight:bold;"
             f" {font_size_css(12)} {get_font_family_css()} }}"
-            f" QPushButton#papAllow:hover {{ background:{Colors.REALTIME_ACCENT_WARM}; }}"
+            f" QPushButton#papAllow:hover {{ background:{Colors.REALTIME_ACCENT_WARM};"
+            f" color:{readable_text_on(Colors.REALTIME_ACCENT_WARM)}; }}"
             f" QPushButton#papAllow:disabled {{ background:{Colors.HOVER_BG}; color:{Colors.TEXT_SECONDARY}; }}"
         )
 

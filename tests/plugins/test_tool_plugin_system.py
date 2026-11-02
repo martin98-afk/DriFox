@@ -1624,6 +1624,94 @@ class TestWebToolsEnvKey:
             reg.unregister_plugin("system-tools")
 
 
+class TestWebFetchTinyFishFallback:
+    """webfetch TinyFish 优先抓取 + 失败回退本地实现"""
+
+    @staticmethod
+    def _make_resp(status_code=200, payload=None, text=""):
+        class _Resp:
+            def raise_for_status(self):
+                assert status_code < 400, f"HTTP {status_code}"
+
+            def json(self):
+                return payload
+
+        resp = _Resp()
+        resp.status_code = status_code
+        resp.text = text
+        return resp
+
+    @staticmethod
+    def _make_client(post_resp=None, get_resp=None):
+        class _Client:
+            def __init__(self):
+                self.post_calls = []
+                self.get_calls = []
+
+            def post(self, url, **kw):
+                self.post_calls.append(url)
+                if isinstance(post_resp, Exception):
+                    raise post_resp
+                return post_resp
+
+            def get(self, url, **kw):
+                self.get_calls.append(url)
+                return get_resp
+
+        return _Client()
+
+    def _load(self):
+        return TestWebToolsEnvKey._load_web_tools()
+
+    def test_tinyfish_preferred_over_local(self, monkeypatch):
+        mod = self._load()
+        client = self._make_client(
+            post_resp=self._make_resp(payload={"results": [{"url": "u", "text": "# tinyfish md"}], "errors": []}),
+            get_resp=self._make_resp(text="<html><body>local</body></html>"),
+        )
+        monkeypatch.setattr(mod, "_api_key", lambda ctx, name: "tf-key")
+        monkeypatch.setattr(mod, "_get_client", lambda: client)
+        result = mod._webfetch_impl({}, url="https://example.com", format="markdown")
+        assert result.ok and "tinyfish md" in result.content
+        assert client.post_calls == ["https://api.fetch.tinyfish.ai"]
+        assert client.get_calls == []  # 本地实现未执行
+
+    def test_fallback_to_local_on_tinyfish_failure(self, monkeypatch):
+        mod = self._load()
+        client = self._make_client(
+            post_resp=RuntimeError("network down"),
+            get_resp=self._make_resp(text="<html><body><p>local content</p></body></html>"),
+        )
+        monkeypatch.setattr(mod, "_api_key", lambda ctx, name: "tf-key")
+        monkeypatch.setattr(mod, "_get_client", lambda: client)
+        result = mod._webfetch_impl({}, url="https://example.com", format="markdown")
+        assert result.ok and "local content" in result.content
+        assert client.get_calls == ["https://example.com"]
+
+    def test_no_key_skips_tinyfish(self, monkeypatch):
+        mod = self._load()
+        client = self._make_client(
+            get_resp=self._make_resp(text="<html><body><p>local only</p></body></html>"),
+        )
+        monkeypatch.setattr(mod, "_api_key", lambda ctx, name: "")
+        monkeypatch.setattr(mod, "_get_client", lambda: client)
+        result = mod._webfetch_impl({}, url="https://example.com", format="markdown")
+        assert result.ok and "local only" in result.content
+        assert client.post_calls == []
+
+    def test_text_format_skips_tinyfish(self, monkeypatch):
+        mod = self._load()
+        client = self._make_client(
+            post_resp=self._make_resp(payload={"results": [{"url": "u", "text": "should not happen"}]}),
+            get_resp=self._make_resp(text="<html><body><p>plain text</p></body></html>"),
+        )
+        monkeypatch.setattr(mod, "_api_key", lambda ctx, name: "tf-key")
+        monkeypatch.setattr(mod, "_get_client", lambda: client)
+        result = mod._webfetch_impl({}, url="https://example.com", format="text")
+        assert result.ok and "plain text" in result.content
+        assert client.post_calls == []
+
+
 class TestSelfContained:
     """自包含验证：纯逻辑工具 impl 不依赖主程序工具模块"""
 

@@ -4,6 +4,8 @@
 
 websearch / webfetch 完全自包含：httpx/html2text/bs4 直接实现，
 API key 优先读环境变量，未设置时使用插件内置默认值（主程序不再注入）。
+webfetch 优先走 TinyFish Fetch API（真浏览器渲染，JS 动态页面可抓），
+未配置 key 或请求失败时回退本地 httpx/bs4 实现。
 """
 
 import re
@@ -193,12 +195,54 @@ _WEBFETCH_SCHEMA = {
 }
 
 
+def _tinyfish_fetch(tool_ctx, url: str, fmt: str, max_chars: int):
+    """TinyFish Fetch API 抓取（真浏览器渲染，JS 动态页面可抓）。
+
+    成功返回 ToolResult；未配置 key、请求失败或结果为空返回 None（调用方回退本地实现）。
+    """
+    key = _api_key(tool_ctx, "TINYFISH_API_KEY")
+    if not key:
+        return None
+    try:
+        response = _get_client().post(
+            "https://api.fetch.tinyfish.ai",
+            headers={"X-API-Key": key, "Content-Type": "application/json"},
+            json={"urls": [url], "format": fmt},
+            timeout=30,
+        )
+        if response.status_code in (401, 403):
+            logger.warning("[WebTools] TinyFish fetch key invalid")
+            return None
+        if response.status_code == 429:
+            logger.warning("[WebTools] TinyFish fetch rate limited")
+            return None
+        response.raise_for_status()
+        data = response.json()
+        for err in data.get("errors") or []:
+            logger.warning(f"[WebTools] TinyFish fetch error: {err.get('url')}: {err.get('error')}")
+        results = data.get("results") or []
+        text = (results[0].get("text") or "") if results else ""
+        if not text:
+            return None
+        return ToolResult(True, content=text[:max_chars])
+    except Exception as e:
+        logger.warning(f"[WebTools] TinyFish fetch error: {e}")
+        return None
+
 def _webfetch_impl(tool_ctx, **kwargs):
     url = kwargs.get("url", "")
     fmt = kwargs.get("format", "markdown")
     max_chars = int(kwargs.get("max_chars") or 26000)
     if not url:
         return ToolResult(False, error="url 不能为空")
+
+    # TinyFish 优先；text 无对应输出格式，直接走本地实现
+    if fmt in ("markdown", "html"):
+        result = _tinyfish_fetch(tool_ctx, url, fmt, max_chars)
+        if result is not None:
+            return result
+        logger.warning("[WebTools] TinyFish fetch unavailable, falling back to local fetch")
+
     import html2text
     import httpx
     from bs4 import BeautifulSoup
