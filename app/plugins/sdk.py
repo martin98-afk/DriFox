@@ -76,6 +76,7 @@ _SYMBOLS: dict[str, tuple[str, str]] = {
     "retarget": ("app.utils.motion", "retarget"),
     # ── 设计 token ──
     "Colors": ("app.utils.design_tokens", "Colors"),
+    "readable_text_on": ("app.utils.design_tokens", "readable_text_on"),
     "font_size_css": ("app.utils.design_tokens", "font_size_css"),
     "get_unified_scrollbar_style": ("app.utils.design_tokens", "get_unified_scrollbar_style"),
     "make_card_content_opaque": ("app.utils.design_tokens", "make_card_content_opaque"),
@@ -179,6 +180,7 @@ _STABLE: frozenset[str] = frozenset(
         "DANGER_SAFE",
         # 设计 token（UI 一致性依赖）
         "Colors",
+        "readable_text_on",
         "font_size_css",
         "get_unified_scrollbar_style",
         "make_card_content_opaque",

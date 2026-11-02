@@ -131,6 +131,17 @@ def _filter_chip_qss(text_color: str) -> str:
     )
 
 
+def _on_solid(bg: str) -> str:
+    """实心底上的前景文字色：亮底用深字，暗底用白字。
+
+    真黑类主题把 accent 定为纯白，按钮再写死白字就是白底白字。
+    判定交给主程序 token，插件不自己拍亮度阈值。
+    """
+    from app.plugins.sdk import readable_text_on
+
+    return readable_text_on(bg, "#ffffff")
+
+
 def _shift_color(color: str, factor: float) -> str:
     """按亮度缩放颜色（只处理 #rrggbb，其它格式原样返回）
 
@@ -939,7 +950,7 @@ class _PluginDetailDialog(MaskDialogBase):
         else:
             # hover/pressed 必须给出可见反馈（原实现两个状态的 background 值相同 → hover 无变化）
             main_btn.setStyleSheet(
-                f"QPushButton {{ background-color: {accent_bg}; color: #ffffff;"
+                f"QPushButton {{ background-color: {accent_bg}; color: {_on_solid(accent_bg)};"
                 f" border: none; border-radius: 8px; padding: 4px 22px;"
                 f" {btn_font} font-weight: bold; }}"
                 f"QPushButton:hover {{ background-color: {_shift_color(accent_bg, 1.18)}; }}"
@@ -1277,7 +1288,7 @@ class _TagFilterDialog(MaskDialogBase):
         ok_btn.setCursor(Qt.PointingHandCursor)
         ok_btn.setFixedHeight(32)
         ok_btn.setStyleSheet(
-            f"QPushButton {{ background-color: {accent_bg}; color: #ffffff; border: none;"
+            f"QPushButton {{ background-color: {accent_bg}; color: {_on_solid(accent_bg)}; border: none;"
             f" border-radius: 8px; padding: 2px 24px; {ff_qss} font-size: {max(8, fs - 1)}px; font-weight: bold; }}"
         )
         ok_btn.clicked.connect(self.accept)
@@ -1386,7 +1397,7 @@ class _ConfirmUninstallDialog(MaskDialogBase):
             f"""
             QPushButton {{
                 background-color: {accent_bg};
-                color: #ffffff;
+                color: {_on_solid(accent_bg)};
                 border: none;
                 border-radius: 8px;
                 padding: 4px 28px;

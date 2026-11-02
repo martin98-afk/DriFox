@@ -20,7 +20,7 @@ from PyQt5.QtWidgets import (
 )
 from qfluentwidgets import MaskDialogBase, SmoothScrollDelegate
 
-from app.plugins.sdk import Colors, font_size_css
+from app.plugins.sdk import Colors, font_size_css, readable_text_on
 from app.plugins.sdk import get_font_family_css
 
 
@@ -45,7 +45,7 @@ def _dialog_btn(text: str, *, primary: bool = False) -> QPushButton:
         btn.setStyleSheet(
             f"""
             QPushButton {{
-                background: {Colors.TEXT_ACCENT}; color: #ffffff; border: none;
+                background: {Colors.TEXT_ACCENT}; color: {readable_text_on(Colors.TEXT_ACCENT, "#ffffff")}; border: none;
                 border-radius: 8px; padding: 4px 26px;
                 {get_font_family_css()} {font_size_css(12)}; font-weight: 600;
             }}

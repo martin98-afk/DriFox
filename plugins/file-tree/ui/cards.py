@@ -86,6 +86,17 @@ def _same_path(a: str, b: str) -> bool:
 # ── 主题色辅助 ────────────────────────────────────────────
 
 
+def _on_solid(bg: str) -> str:
+    """实心底上的前景文字色：亮底用深字，暗底用白字。
+
+    真黑类主题（true-black / amoled-black 等）把 accent 定为纯白，
+    按钮再写死白字就是白底白字。由主程序 token 统一判定，插件不自己拍阈值。
+    """
+    from app.plugins.sdk import readable_text_on
+
+    return readable_text_on(bg, "#ffffff")
+
+
 def _text_color(secondary: bool = False) -> str:
     if isDarkTheme():
         return "rgba(255,255,255,0.55)" if secondary else "rgba(255,255,255,0.9)"
@@ -232,7 +243,7 @@ def _styled_message_box(
                 if is_primary:
                     btn.setStyleSheet(
                         f"QPushButton {{"
-                        f"  background-color: {accent.name()}; color: #ffffff;"
+                        f"  background-color: {accent.name()}; color: {_on_solid(accent.name())};"
                         f"  border: none; border-radius: 8px; padding: 4px 28px;"
                         f"  font-family: '{ff}'; font-size: {font_size - 1}px; font-weight: bold;"
                         f"}}"

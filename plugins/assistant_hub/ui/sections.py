@@ -29,7 +29,7 @@ from PyQt5.QtWidgets import (
 )
 from qfluentwidgets import BodyLabel, LineEdit, MaskDialogBase, SwitchButton
 
-from app.plugins.sdk import Colors, font_size_css, scale_font_size
+from app.plugins.sdk import Colors, font_size_css, readable_text_on, scale_font_size
 from app.plugins.sdk import get_font_family_css
 
 
@@ -1164,7 +1164,7 @@ class MemoryLimitDialog(MaskDialogBase):
             f"""
             QPushButton {{
                 background: {Colors.TEXT_ACCENT};
-                color: #ffffff;
+                color: {readable_text_on(Colors.TEXT_ACCENT, "#ffffff")};
                 border: none;
                 border-radius: 8px;
                 padding: 4px 26px;
@@ -1315,7 +1315,7 @@ class SectionEditDialog(MaskDialogBase):
             f"""
             QPushButton {{
                 background: {Colors.TEXT_ACCENT};
-                color: #ffffff;
+                color: {readable_text_on(Colors.TEXT_ACCENT, "#ffffff")};
                 border: none;
                 border-radius: 8px;
                 padding: 4px 26px;

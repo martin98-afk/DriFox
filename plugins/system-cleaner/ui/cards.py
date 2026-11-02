@@ -42,7 +42,7 @@ from qfluentwidgets import (
 )
 from loguru import logger
 
-from .cleaner import _CacheItemRow, _styled_cleaner_confirm, _styled_cleaner_info
+from .cleaner import _CacheItemRow, _on_accent_text, _styled_cleaner_confirm, _styled_cleaner_info
 from .icons import svg_pixmap
 from .scanner import (
     CACHE_DEFS,
@@ -434,6 +434,7 @@ class SystemCleanerCard(QWidget):
         _disabled_bg = "rgba(128,128,128,0.3)" if is_dark else "rgba(0,0,0,0.12)"
         hi = _adjust_color(accent, 24)
         lo = _adjust_color(accent, -28)
+        _fg = _on_accent_text(accent)
         return f"""
         QPushButton {{
             background: qlineargradient(
@@ -442,7 +443,7 @@ class SystemCleanerCard(QWidget):
                 stop:0.55 {accent},
                 stop:1 {lo}
             );
-            color: #ffffff;
+            color: {_fg};
             border: none;
             border-radius: 17px;
             font-size: {max(10, fs - 2)}px;
@@ -476,11 +477,12 @@ class SystemCleanerCard(QWidget):
         _disabled_color = "rgba(255,255,255,0.35)" if is_dark else "rgba(0,0,0,0.3)"
         hi = _adjust_color(accent, 20)
         lo = _adjust_color(accent, -26)
+        _fg = _on_accent_text(accent)
         return f"""
         QPushButton {{
             background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
                 stop:0 {hi}, stop:0.5 {accent}, stop:1 {lo});
-            color: #ffffff;
+            color: {_fg};
             border: none;
             border-radius: 12px;
             font-size: {max(11, fs - 1)}px;

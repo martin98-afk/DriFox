@@ -25,7 +25,7 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
-from app.plugins.sdk import Colors, font_size_css
+from app.plugins.sdk import Colors, font_size_css, readable_text_on
 from app.plugins.sdk import GitWorktreeDetector
 from app.plugins.sdk import get_font_family_css
 
@@ -800,7 +800,7 @@ class WorktreeSectionWidget(QWidget):
             }}
             QPushButton {{
                 background-color: {Colors.BORDER_ACCENT};
-                color: white; border: none;
+                color: {readable_text_on(Colors.BORDER_ACCENT, "#ffffff")}; border: none;
                 border-radius: 4px; padding: 6px 20px;
                 {get_font_family_css()} {font_size_css(12)}
                 min-width: 60px;

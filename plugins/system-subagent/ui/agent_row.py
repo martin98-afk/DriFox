@@ -23,7 +23,7 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
-from app.utils.design_tokens import Colors
+from app.utils.design_tokens import Colors, readable_text_on
 from app.utils.utils import _is_current_theme_light, get_font_family_css, get_unified_font
 
 class RotatingIcon(QWidget):
@@ -298,7 +298,7 @@ class AgentTaskRow(QFrame):
         self._enter_session_btn.setStyleSheet(f"""
             QPushButton {{
                 background-color: {Colors.REALTIME_ACCENT};
-                color: #ffffff;
+                color: {readable_text_on(Colors.REALTIME_ACCENT)};
                 border: none;
                 border-radius: 4px;
                 padding: 0 8px;
@@ -490,7 +490,7 @@ class AgentTaskRow(QFrame):
             self._enter_session_btn.setStyleSheet(f"""
                 QPushButton {{
                     background-color: {Colors.REALTIME_ACCENT};
-                    color: #ffffff;
+                    color: {readable_text_on(Colors.REALTIME_ACCENT)};
                     border: none;
                     border-radius: 4px;
                     padding: 0 8px;

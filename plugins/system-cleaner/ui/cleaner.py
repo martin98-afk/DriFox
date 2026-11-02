@@ -22,6 +22,25 @@ from .icons import svg_pixmap
 from .scanner import _format_size
 
 
+def _on_accent_text(accent: str) -> str:
+    """accent 实心底上的前景文字色。
+
+    真黑（true-black）/ amoled-black / slinky-grey 等主题把 accent 定为纯白，
+    按钮再写死 ``color: #ffffff`` 就是白底白字，文字完全看不见。
+    这里按底色相对亮度选：亮底用深字，暗底用白字。
+    """
+    c = QColor(accent)
+    if not c.isValid():
+        return "#ffffff"
+
+    def _lin(v: int) -> float:
+        v /= 255.0
+        return v / 12.92 if v <= 0.04045 else ((v + 0.055) / 1.055) ** 2.4
+
+    lum = 0.2126 * _lin(c.red()) + 0.7152 * _lin(c.green()) + 0.0722 * _lin(c.blue())
+    return "#1A1F2B" if lum > 0.35 else "#ffffff"
+
+
 # ── 单个缓存行 ──────────────────────────────────────────
 
 
@@ -334,7 +353,7 @@ class _StyledCleanerDialog(MaskDialogBase):
         confirm_btn.setStyleSheet(f"""
             QPushButton {{
                 background-color: {accent_bg};
-                color: #ffffff;
+                color: {_on_accent_text(accent_bg)};
                 border: none;
                 border-radius: 8px;
                 padding: 4px 28px;
@@ -435,7 +454,7 @@ class _StyledCleanerInfoDialog(MaskDialogBase):
         ok_btn.setStyleSheet(f"""
             QPushButton {{
                 background-color: {accent_bg};
-                color: #ffffff;
+                color: {_on_accent_text(accent_bg)};
                 border: none;
                 border-radius: 8px;
                 padding: 4px 28px;
