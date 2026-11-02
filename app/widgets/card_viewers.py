@@ -1314,12 +1314,17 @@ class CodeWebViewer(QWebEngineView):
             page = self.page()
             if page is None:
                 return
+            # containment 无条件注入（历史卡同样受益于「正文变化不重排工具区」）；
+            # 位置移动只在流式期间做——非流式（历史卡 / 已完成）由
+            # _v2AfterPatch(false) 放回顶部吸顶位，否则加载瞬间会先出现在下方再跳回去。
+            _move = "1" if self.__dict__.get("_streaming", False) else "0"
             page.runJavaScript(
                 "(function(){"
                 "var st=document.getElementById('tool-section-below-css');"
                 "if(!st){st=document.createElement('style');st.id='tool-section-below-css';"
                 "st.textContent='#tool-section{contain:layout paint;isolate:isolate;}';"
                 "document.head.appendChild(st);}"
+                f"if(!{_move})return;"
                 "var ts=document.getElementById('tool-section');"
                 "var cp=document.getElementById('content-placeholder');"
                 "if(!ts||!cp||!cp.parentNode)return;"
@@ -5652,6 +5657,22 @@ class CodeWebViewer(QWebEngineView):
                 // 3) 流式期间工具区内部滚底（正文滚底仍由外部高度上报链负责）。
                 window._v2AfterPatch = function (streaming) {{
                     try {{
+                        // 工具与思考区位置（2026-11-02 用户诉求）：流式中放正文下方
+                        // （跟着最新输出走），结束后回到顶部（吸顶回看，不藏在长正文
+                        // 末尾）。幂等：位置已正确时只多两次属性比较，不做 DOM 操作。
+                        if (window._toolCompactMode) {{
+                            var _tsPos = document.getElementById('tool-section');
+                            var _cpPos = document.getElementById('content-placeholder');
+                            if (_tsPos && _cpPos && _cpPos.parentNode) {{
+                                if (streaming === true) {{
+                                    if (_cpPos.nextElementSibling !== _tsPos) {{
+                                        _cpPos.parentNode.insertBefore(_tsPos, _cpPos.nextSibling);
+                                    }}
+                                }} else if (_tsPos.nextElementSibling !== _cpPos) {{
+                                    _cpPos.parentNode.insertBefore(_tsPos, _cpPos);
+                                }}
+                            }}
+                        }}
                         var _cids = ['content-placeholder', 'tool-content'];
                         for (var ci = 0; ci < _cids.length; ci++) {{
                             var c = document.getElementById(_cids[ci]);
