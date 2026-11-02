@@ -19,7 +19,8 @@
     "window.workbench",
     "ui.events",
     "workdir.write",
-    "project.workdir"
+    "project.workdir",
+    "branch.refresh"
   ],
   "components": {
     "ui": true,

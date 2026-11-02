@@ -143,6 +143,12 @@ CATALOG: Dict[str, CapabilitySpec] = {
             "写库式持久化项目工作目录（project_workdir 表，与 workdir.write 的会话内切换互补）",
             _UI,
         ),
+        _spec(
+            "branch.refresh",
+            _M,
+            "失效分支检测缓存并刷新标题栏分支标签（git 分支名变更后调用）",
+            _UI,
+        ),
         # ── 外观 ──
         _spec("theme.read", _L, "主题 id/名称/配色/字体/字号", _UI),
         # ── 工具 ──

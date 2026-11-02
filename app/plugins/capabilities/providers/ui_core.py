@@ -349,6 +349,56 @@ def _workdir_write(host: Any):
     return set_workdir
 
 
+def _branch_refresh(host: Any):
+    """刷新标题栏分支标签（git 分支名变了之后调用）。
+
+    为什么要单独的语义能力：分支标签的检测有 30s 类级缓存
+    （WorktreeService._branch_cache），切分支后缓存里还是旧分支名。
+    插件自己清不到那份缓存（在别的模块），也调不到主程序的刷新入口。
+    这里由宿主统一做「失效缓存 + 重新检测」，插件只需说「分支变了」。
+    """
+
+    def refresh() -> None:
+        # 1) 失效分支缓存：worktree-manager 的 service 缓存与 detector 缓存
+        try:
+            from app.plugins.sdk import GitWorktreeDetector
+
+            GitWorktreeDetector._branch_cache.clear()
+        except Exception:
+            pass
+        try:
+            import sys
+
+            mod = sys.modules.get("ui_plugin_worktree_manager.service")
+            svc_cls = getattr(mod, "WorktreeService", None)
+            if svc_cls is not None:
+                svc_cls._branch_cache.clear()
+        except Exception:
+            pass
+
+        # 2) 让宿主窗口重新检测并上屏
+        backend = getattr(host, "backend", None)
+        fn = getattr(host, "_update_branch", None)
+        if callable(fn):
+            try:
+                fn()
+                return
+            except Exception:
+                pass
+        # 回退：直接走 service（宿主没有 _update_branch 时）
+        try:
+            import sys
+
+            mod = sys.modules.get("ui_plugin_worktree_manager.service")
+            svc_cls = getattr(mod, "WorktreeService", None)
+            if svc_cls is not None:
+                svc_cls().update_branch(host)
+        except Exception:
+            pass
+
+    return refresh
+
+
 def _project_workdir(host: Any):
     """写库式切换项目工作目录（worktree / 分支切换场景）。
 
@@ -1262,6 +1312,7 @@ def register(registry) -> None:
     reg.register("workdir.read", _workdir_read, surface="ui", owner="core:ui")
     reg.register("workdir.write", _workdir_write, surface="ui", owner="core:ui")
     reg.register("project.workdir", _project_workdir, surface="ui", owner="core:ui")
+    reg.register("branch.refresh", _branch_refresh, surface="ui", owner="core:ui")
     reg.register(
         "workdir.write", _sync_working_directory, surface="ui", owner="core:ui", legacy_key="sync_working_directory"
     )

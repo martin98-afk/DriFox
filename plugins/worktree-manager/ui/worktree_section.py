@@ -144,6 +144,50 @@ def list_local_branches(repo_root: str) -> list:
         return []
 
 
+def _brief(msg: str, limit: int = 120) -> str:
+    """压掉 git 多行错误里的空白与噪音，供 InfoBar 单行展示"""
+    text = " ".join(str(msg or "").split())
+    if len(text) <= limit:
+        return text
+    return text[: limit - 1] + "…"
+
+
+def _show_infobar(widget, text: str, success: bool = True, tip: str = "", duration: int = 4000) -> None:
+    """顶部 InfoBar 轻提示（切分支这类可逆操作不用模态弹窗挡住用户）
+
+    弹窗会抢焦点并必须点「知道了」，切换分支是高频小动作，用 InfoBar 更合适；
+    失败时把 git 原始错误塞进 tooltip，正文只留一行摘要。
+    """
+    try:
+        from qfluentwidgets import InfoBar, InfoBarPosition
+
+        parent = None
+        try:
+            host = _caps("window.host")
+            parent = host() if host is not None else None
+        except Exception:
+            parent = None
+        if parent is None:
+            parent = widget.window()
+
+        body = text if not tip else f"{text}\n{tip}"
+        kwargs = dict(
+            title="工作树" if success else "工作树",
+            content=body,
+            orient=Qt.Horizontal,
+            isClosable=True,
+            duration=duration,
+            position=InfoBarPosition.TOP_RIGHT,
+            parent=parent,
+        )
+        if success:
+            InfoBar.success(**kwargs)
+        else:
+            InfoBar.error(**kwargs)
+    except Exception as e:
+        logger.warning(f"[worktree-manager] InfoBar 提示失败: {e}")
+
+
 class ThemeIconLabel(QLabel):
     """主题感知 svg 图标标签。
 
@@ -955,22 +999,25 @@ class WorktreeSectionWidget(QWidget):
             self.worktreeSwitched.emit(self._original_folder, worktree_path)
 
     def _on_main_branch_switch(self, branch: str):
-        """主仓库切分支（后台执行，失败回滚下拉框并提示）"""
+        """主仓库切分支（后台执行，失败回滚下拉框；结果用 InfoBar 提示）"""
         repo_root = self._repo_info.root
         current = self._repo_info.current_branch
 
         def _on_ok(_result):
             _invalidate_repo_cache(self._original_folder)
+            # 标题栏分支标签有自己的 30s 缓存，必须让宿主失效并重检
+            self._refresh_branch_chip()
             self._repopulate()
-            self._show_info_dialog("已切换分支", f"主仓库当前分支：{branch}")
+            _show_infobar(self, f"已切换到分支 {branch}", success=True)
 
         def _on_fail(msg: str):
             if self._main_card is not None:
                 self._main_card.revert_branch(current)
-            self._show_error_dialog(
-                "切换分支失败",
-                f"无法切换到「{branch}」：\n\n{msg}\n\n"
-                "常见原因：工作区有未提交改动与目标分支冲突，先提交或 stash 再切。",
+            _show_infobar(
+                self,
+                f"切换到「{branch}」失败：{_brief(msg)}",
+                success=False,
+                tip="工作区有未提交改动与目标分支冲突时，先提交或 stash 再切。",
             )
 
         worker = _WorktreeTaskWorker(_switch_branch_job, repo_root, branch)
@@ -978,6 +1025,15 @@ class WorktreeSectionWidget(QWidget):
         worker.signals.failed.connect(_on_fail)
         self._create_worker = worker
         _WORKTREE_POOL.start(worker)
+
+    def _refresh_branch_chip(self):
+        """让标题栏分支标签失效缓存并重新检测（能力缺失时静默跳过）"""
+        try:
+            fn = _caps("branch.refresh")
+            if fn is not None:
+                fn()
+        except Exception as e:
+            logger.debug(f"[worktree-manager] 分支标签刷新失败（不影响切换结果）: {e}")
 
     def _on_deleted(self, worktree_path: str):
         """UI 删除完成（主线程）：刷新并通知外层"""
