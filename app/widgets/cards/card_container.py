@@ -1137,6 +1137,21 @@ class CardContainer(QWidget):
             return False
         if obj in getattr(self, "_cards", {}).values():
             if event.type() == QEvent.Hide:
+                # [DEBUG-reopen] 临时诊断：抓 hide 卡的调用栈真凶
+                try:
+                    import traceback
+
+                    from loguru import logger as _lg
+
+                    _stack = " <- ".join(
+                        f"{fr.name}:{fr.lineno}" for fr in traceback.extract_stack()[-9:-1]
+                    )
+                    _lg.warning(
+                        f"[DEBUG-reopen] HIDE-EV card_id={[k for k, v in self._cards.items() if v is obj]} "
+                        f"stack: {_stack}"
+                    )
+                except Exception:
+                    pass
                 # 卡片被隐藏（无论经 CardManager 与否，如 todo 关闭按钮/空列表
                 # 直接 setVisible(False)）→ 触发重算：无可见卡片则折叠并释放
                 # A3 min 锁，避免容器仍占 natural_h 空间、对话区不恢复。

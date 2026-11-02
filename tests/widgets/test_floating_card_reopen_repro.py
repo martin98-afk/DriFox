@@ -76,14 +76,14 @@ def _close_like_user_x(widget):
 
 @pytest.mark.parametrize("container", ["full", "left"])
 def test_close_then_reopen_floating_card(qtbot, container):
-    """开 → 关（模拟点 X）→ 再开：第二次必须能重新显示"""
+    """开 → 关（等 120ms 去抖过期）→ 再开：复刻真机点击节奏"""
     card_id = f"reopen-{container}"
     tm, reg = _make_env(qtbot, container, card_id)
     cm = CardManager.get_instance()
 
     # 第一次打开
     reg.toggle_floating_card(card_id)
-    _pump()
+    qtbot.wait(200)
     widget = reg.get_floating_card_widget(card_id)
     assert widget is not None
     assert cm.is_card_visible(card_id, GLOBAL_WINDOW_ID), f"[{container}] 第一次打开失败"
@@ -91,12 +91,12 @@ def test_close_then_reopen_floating_card(qtbot, container):
 
     # 模拟用户点 X：widget 隐藏 + closed 信号 → registry lambda → hide_card
     _close_like_user_x(widget)
-    _pump()
+    qtbot.wait(200)  # ★ 等 120ms 关闭去抖 timer fire（真机两次点击间隔 ~500ms）
     assert not cm.is_card_visible(card_id, GLOBAL_WINDOW_ID), f"[{container}] 关闭后记账未清"
 
     # 第二次打开（复现点）
     reg.toggle_floating_card(card_id)
-    _pump()
+    qtbot.wait(200)
     assert cm.is_card_visible(card_id, GLOBAL_WINDOW_ID), f"[{container}] 第二次记账不可见"
     assert widget.isVisible(), f"[{container}] 第二次打开 widget 不可见（用户视角：打不开）"
 
@@ -236,4 +236,35 @@ def test_full_card_tab_switch_then_reopen(qtbot):
     reg.toggle_floating_card(card_id)
     _pump()
     assert widget.isVisible(), "tab 切换后关闭再开不可见（用户视角：打不开）"
+
+
+def test_dock_card_opens_while_overlay_page_active(qtbot):
+    """回归（2026-11-02 排查）：full 卡（覆盖层页）前台时打开 left 卡
+
+    故障链：full 卡打开 → setCurrentIndex(1) 把对话页整页 hide → left 容器
+    住对话页 → show_card 正常但隐藏页布局算不出宽度 → 容器宽 0 → 用户视角
+    「点了打不开」，且无任何机制自动切回对话页。
+    修复：显示 dock 类卡时把内容栈切回对话页并踢容器重新展开。
+    """
+    card_full = "overlay-page-full"
+    card_left = "overlay-page-left"
+    tm, reg = _make_env(qtbot, "full", card_full)
+    cm = CardManager.get_instance()
+    reg.register_floating_card("test-plugin", card_left, _ClosedStub, "left", title="Left")
+
+    # 1. 开 full 卡：覆盖层页应在前台（对话页被 hide）
+    reg.toggle_floating_card(card_full)
+    _pump()
+    stack = tm._content_stack
+    assert stack.currentIndex() == 1, "full 卡打开后覆盖层页应在前台"
+
+    # 2. 开 left 卡（故障点）：应自动切回对话页且容器真实展开
+    reg.toggle_floating_card(card_left)
+    qtbot.wait(300)  # 等容器展开动画/重试链
+    assert stack.currentIndex() == 0, "开 dock 卡后应切回对话页"
+    widget = reg.get_floating_card_widget(card_left)
+    assert widget is not None
+    assert widget.isVisible(), "left 卡应真实可见（父链完整）"
+    cont = tm._left_card_container
+    assert cont.width() > 0, f"left 容器应有展开宽度，实际 {cont.width()}"
 

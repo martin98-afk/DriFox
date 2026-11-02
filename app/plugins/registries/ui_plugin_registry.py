@@ -3368,6 +3368,24 @@ class UIPluginRegistry:
         # toggle：显示/隐藏切换
         card_manager.toggle_card(card_id, window_id)
 
+        # ★ dock 类卡（left/bottom）显示时确保对话页在前台（2026-11-02 排查）：
+        # full 卡（覆盖层页）打开时 setCurrentIndex(1) 会把对话页整页 hide，
+        # 而 dock 容器住对话页里——卡片 show_card 正常执行、CardManager 记账
+        # 正常翻转，但父链不可见导致容器展开尺寸算 0（隐藏页布局不真算，
+        # 重试 2 次放弃），用户视角「点了打不开」；且 dock 容器不发
+        # overlayStateChanged，没有任何机制自动切回对话页，此后每次点击
+        # 只在记账与视觉错位间翻转。此处显示 dock 卡时把内容栈切回对话页，
+        # 并踢容器一把重新展开（页切回不触发容器 showEvent/resize，不会
+        # 自动恢复）。
+        if card_info.container in ("left", "bottom") and host is not None:
+            stack = getattr(host, "_content_stack", None)
+            if stack is not None and callable(getattr(stack, "currentIndex", None)) and stack.currentIndex() != 0:
+                stack.setCurrentIndex(0, direction=-1)
+                for _dock_attr in ("_left_card_container", "_bottom_card_container"):
+                    _cont = getattr(host, _dock_attr, None)
+                    if _cont is not None and callable(getattr(_cont, "_schedule_expand", None)):
+                        _cont._schedule_expand()
+
         # 显示补刷：本次 toggle 若让卡片变可见（且此前隐藏期已置脏），
         # 补刷到当前外观纪元。主题切换时隐藏卡只置脏不刷（省一次整树
         # repolish），正确性靠这里兜住——不依赖插件在自己的 show_card()
@@ -3395,7 +3413,8 @@ class UIPluginRegistry:
                     f"[DEBUG-reopen] show card={card_id} reg={id(self)} wid={id(widget_now)} "
                     f"cm_vis={_cm_vis} parent={type(_parent).__name__ if _parent is not None else None} "
                     f"parent_vis={_parent.isVisible() if _parent is not None else None} "
-                    f"w_HIDDEN={widget_now.isHidden()} w_geo={widget_now.geometry()}"
+                    f"w_HIDDEN={widget_now.isHidden()} w_geo={widget_now.geometry()} "
+                    f"w_VisibleBit={widget_now.testAttribute(__import__('PyQt5.QtCore', fromlist=['Qt']).Qt.WA_WState_Visible)}"
                 )
             except RuntimeError:
                 pass

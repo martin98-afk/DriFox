@@ -274,6 +274,15 @@ class SystemCleanerCard(QWidget):
         if hasattr(self, "_gauge"):
             self._gauge.sweep()  # 开场仪表扫掠动效
         self.setVisible(True)
+        # [DEBUG-reopen] 临时诊断：show_card 尾部执行确认 + 状态位指纹
+        try:
+            logger.warning(
+                f"[DEBUG-reopen] card.show_card done hidden={self.isHidden()} "
+                f"vis={self.isVisible()} parent={type(self.parent()).__name__} "
+                f"parent_vis={self.parent().isVisible() if self.parent() else None}"
+            )
+        except Exception:
+            pass
 
     def _apply_plugin_icon(self):
         if self._context_provider is None or self._header_icon is None:
