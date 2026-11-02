@@ -447,7 +447,7 @@ def load_dynamic_models(
                 logger.warning("[models.dev] 远程拉取失败且无缓存，返回空动态数据")
 
     if cache is not None:
-        logger.info(
+        logger.debug(
             f"[models.dev] 使用本地缓存 (content_version={cache.get('_content_version')}, code={CACHE_CONTENT_VERSION})"
         )
         return DynamicModelsResult(

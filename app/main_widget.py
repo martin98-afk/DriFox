@@ -3131,7 +3131,7 @@ class OpenAIChatToolWindow(ToolWindow):
             cache_hits = stats_dict.get("cache_hits", 0)
             cache_misses = stats_dict.get("cache_misses", 0)
 
-            logger.info(
+            logger.debug(
                 f"[CacheStats] hit_rate={hit_rate:.1%}"
                 f" per_req={per_request_hit_rate:.1%}"
                 f" total_input={total_input_hit_rate:.1%}"
@@ -8320,7 +8320,7 @@ class OpenAIChatToolWindow(ToolWindow):
             )
             self._coding_plan_hidden = False
             return
-        logger.info(f"[CodingPlan] 收到数据: rolling={rolling}, weekly={weekly}, monthly={monthly}")
+        logger.debug(f"[CodingPlan] 收到数据: rolling={rolling}, weekly={weekly}, monthly={monthly}")
         ring.set_usage(
             rolling=rolling,
             weekly=weekly,

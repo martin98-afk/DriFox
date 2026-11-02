@@ -1438,7 +1438,7 @@ class HookManager:
             else:
                 logger.warning(f"[HookManager] Invalid rules format for {event_name}")
 
-        logger.info(f"[HookManager] Registered {count} hooks for skill {skill_name}")
+        logger.debug(f"[HookManager] Registered {count} hooks for skill {skill_name}")
 
         # 持久化生成的 hook id 到源文件（确保下次启动 id 不变）
         # ⚠️ 必须在顺序恢复之前：此时内存顺序=文件顺序，id 对齐才可靠
@@ -2427,7 +2427,7 @@ class HookManager:
                         callback_event = f"__prompt__:{callback_event}"
                     self._on_finished_callback(callback_event, output, success, status_message, context.get("diff"))
 
-                logger.info(f"[HookManager] Hook executed: {context.get('event_name')}")
+                logger.debug(f"[HookManager] Hook executed: {context.get('event_name')}")
 
                 return HookExecutionResult(
                     success=success,
@@ -3109,7 +3109,7 @@ class HookManager:
             )
             count += n
             if n > 0:
-                logger.info(f"[HookManager] Loaded {n} hooks from {dir_path.name}/hooks.json")
+                logger.debug(f"[HookManager] Loaded {n} hooks from {dir_path.name}/hooks.json")
         except Exception as e:
             logger.error(f"[HookManager] Failed to load hooks from {hooks_file}: {e}")
 

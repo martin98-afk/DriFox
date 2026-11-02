@@ -43,7 +43,7 @@ class _CacheItemRow(QWidget):
         self._accent_color = "#62a0ea"
         self._is_dark = isDarkTheme()
         self._setup_ui()
-        self.setFixedHeight(42)
+        self.setFixedHeight(44)
 
     def set_font_ctx(self, font_family: str, font_size: int):
         self._font_family = font_family
@@ -66,7 +66,7 @@ class _CacheItemRow(QWidget):
         if self._tip:
             self.setToolTip(self._tip)
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(12, 4, 12, 4)
+        layout.setContentsMargins(12, 8, 14, 8)
         layout.setSpacing(10)
 
         self._checkbox = QCheckBox(self)
@@ -76,12 +76,19 @@ class _CacheItemRow(QWidget):
         self._update_checkbox_style()
         layout.addWidget(self._checkbox)
 
-        self._icon_label = QLabel(self)
+        # 图标底座：圆角色块，勾选时随 accent 同步点亮，现代感关键细节
+        self._icon_chip = QWidget(self)
+        self._icon_chip.setFixedSize(28, 28)
+        self._icon_chip.setStyleSheet("background: rgba(128,128,128,0.10); border-radius: 8px;")
+        chip_lay = QHBoxLayout(self._icon_chip)
+        chip_lay.setContentsMargins(0, 0, 0, 0)
+        self._icon_label = QLabel(self._icon_chip)
         self._icon_label.setFixedSize(20, 20)
         self._icon_label.setAlignment(Qt.AlignCenter)
         self._icon_label.setStyleSheet("background: transparent;")
+        chip_lay.addWidget(self._icon_label)
         self._render_icon()
-        layout.addWidget(self._icon_label)
+        layout.addWidget(self._icon_chip)
 
         _tc_init = "rgba(255,255,255,0.88)" if self._is_dark else "rgba(0,0,0,0.88)"
         self._name_label = QLabel(self._label, self)
@@ -100,21 +107,45 @@ class _CacheItemRow(QWidget):
         self.setCursor(Qt.PointingHandCursor)
 
     def _apply_row_bg(self):
-        hover = "rgba(255,255,255,0.05)" if self._is_dark else "rgba(0,0,0,0.04)"
+        """行卡片化：勾选且有内容时 accent 淡底描边，否则透明 + hover 微亮。
+        所有状态都保留 1px border 占位，避免切换时布局跳动。
+        注意：_setup_ui 开头会先调一次，此时 _checkbox 可能尚未创建，须防御读取。"""
+        checkbox = getattr(self, "_checkbox", None)
+        checked = checkbox is not None and checkbox.isChecked()
+        active = checked and self._size_bytes > 0
+        idle_hover = "rgba(255,255,255,0.05)" if self._is_dark else "rgba(0,0,0,0.04)"
+        accent = QColor(self._accent_color)
+        if active and accent.isValid():
+            bg = f"rgba({accent.red()},{accent.green()},{accent.blue()},24)"
+            border = f"rgba({accent.red()},{accent.green()},{accent.blue()},70)"
+            hover_bg = bg
+            hover_border = f"rgba({accent.red()},{accent.green()},{accent.blue()},110)"
+        else:
+            bg, border = "transparent", "transparent"
+            hover_bg, hover_border = idle_hover, "transparent"
         self.setStyleSheet(
-            f"QWidget#cacheRow {{ background: transparent; border-radius: 6px; }}"
-            f"QWidget#cacheRow:hover {{ background: {hover}; }}"
+            f"QWidget#cacheRow {{ background: {bg}; border: 1px solid {border}; border-radius: 9px; }}"
+            f"QWidget#cacheRow:hover {{ background: {hover_bg}; border: 1px solid {hover_border}; }}"
         )
 
     def _render_icon(self):
-        """按主题渲染 SVG 线性图标（未勾选时随行文字一起降透明度）"""
+        """SVG 线性图标：勾选时 accent 高亮 + 底座同步点亮；未勾选降透明灰"""
         if not hasattr(self, "_icon_label"):
             return
-        opacity = 1.0 if self._checkbox.isChecked() else 0.35
-        base = 0.72 if self._is_dark else 0.60
-        alpha = base * opacity
-        color = f"rgba(255,255,255,{alpha:.2f})" if self._is_dark else f"rgba(0,0,0,{alpha:.2f})"
+        checked = self._checkbox.isChecked()
+        if checked:
+            color = self._accent_color
+            chip_bg = "rgba(128,128,128,0.10)"
+            c = QColor(self._accent_color)
+            if c.isValid():
+                chip_bg = f"rgba({c.red()},{c.green()},{c.blue()},30)"
+        else:
+            alpha = 0.45 if self._is_dark else 0.35
+            color = f"rgba(255,255,255,{alpha:.2f})" if self._is_dark else f"rgba(0,0,0,{alpha:.2f})"
+            chip_bg = "rgba(128,128,128,0.10)"
         self._icon_label.setPixmap(svg_pixmap(self._icon, color, size=16, dpr=self.devicePixelRatioF()))
+        if hasattr(self, "_icon_chip"):
+            self._icon_chip.setStyleSheet(f"background: {chip_bg}; border-radius: 8px;")
 
     def _update_styles(self):
         ff = self._font_family
@@ -126,38 +157,45 @@ class _CacheItemRow(QWidget):
             self._is_dark = isDarkTheme()
 
         if self._is_dark:
-            tc = f"rgba(255,255,255,{0.88 * opacity})"
+            tc = f"rgba(255,255,255,{0.9 * opacity})"
             tcs = f"rgba(255,255,255,{0.45 * opacity})"
         else:
-            tc = f"rgba(0,0,0,{0.88 * opacity})"
+            tc = f"rgba(0,0,0,{0.9 * opacity})"
             tcs = f"rgba(0,0,0,{0.45 * opacity})"
 
         font_qss = f"font-family: '{ff}';" if ff else ""
         self._render_icon()
         self._apply_row_bg()
+        # 勾选且有内容：大小数字用 accent 加重，形成「待清理」视觉焦点
+        active = self._checkbox.isChecked() and self._size_bytes > 0
+        size_color = self._accent_color if active else tcs
         self._name_label.setStyleSheet(
-            f"color: {tc}; background: transparent; font-size: {max(13, fs - 1)}px; {font_qss}"
+            f"color: {tc}; background: transparent; font-size: {max(13, fs - 1)}px; font-weight: 500; {font_qss}"
         )
         self._size_label.setStyleSheet(
-            f"color: {tcs}; background: transparent; font-size: {max(13, fs - 1)}px; font-weight: 500; {font_qss}"
+            f"color: {size_color}; background: transparent; font-size: {max(13, fs - 1)}px; "
+            f"font-weight: 600; {font_qss}"
         )
 
     def _update_checkbox_style(self):
         c = self._accent_color
         self._checkbox.setStyleSheet(f"""
             QCheckBox::indicator {{
-                width: 16px;
-                height: 16px;
-                border-radius: 3px;
-                border: 1px solid rgba(128,128,128,0.25);
+                width: 17px;
+                height: 17px;
+                border-radius: 5px;
+                border: 1.5px solid rgba(128,128,128,0.35);
                 background: transparent;
             }}
             QCheckBox::indicator:checked {{
                 background-color: {c};
-                border: 1px solid {c};
+                border: 1.5px solid {c};
             }}
             QCheckBox::indicator:hover {{
-                border: 1px solid rgba(128,128,128,0.45);
+                border: 1.5px solid {c};
+            }}
+            QCheckBox::indicator:disabled {{
+                border: 1.5px solid rgba(128,128,128,0.18);
             }}
         """)
 

@@ -1951,6 +1951,10 @@ class MCPListSettingCard(ExpandSettingCard):
         servers = self._get_servers()
         if not self.cfg.mcp_enabled.value:
             return
+        # 状态快照只取一次：get_status 内部会读配置侧服务器全集（缓存未命中时
+        # 逐插件 stat + read_text + json），放进循环等于 N 次重复劳动。
+        # 语义等价：_hot_connect 走后台线程连接，循环期间不会改变本快照。
+        status_list = mgr.get_status()
         for s in servers:
             if not s.get("enabled", True):
                 continue
@@ -1962,10 +1966,11 @@ class MCPListSettingCard(ExpandSettingCard):
                 logger.debug(f"[MCP] '{name}' 待用户确认，跳过自动补连")
                 continue
             # 只重新连接已断开或未连接过的
-            status_list = mgr.get_status()
             already = any(st["name"] == name and st["connected"] for st in status_list)
             if not already:
-                self._hot_connect(name, s)
+                # force=True：连接态与门禁待确认本函数都已判定，_hot_connect 内的
+                # 二次 get_status 属纯重复（其 force 仅用于跳过该检查）。
+                self._hot_connect(name, s, force=True)
 
     # ── Token 占用估算 ──────────────────────────────
 

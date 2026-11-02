@@ -1732,7 +1732,7 @@ class CodeWebViewer(QWebEngineView):
             self._rdiag_last = now_diag
             c = getattr(self, "_rdiag", None)
             if c is not None and sum(c.values()):
-                logger.info(
+                logger.debug(
                     f"[render-diag] {dict(c)} md={len(self._markdown_text or '')} "
                     f"last_r={len(self._last_rendered_markdown or '')} stable={self._stable_md_len} "
                     f"inflight={self._render_inflight} pending={self._render_pending is not None}"
@@ -7640,7 +7640,7 @@ class CodeWebViewer(QWebEngineView):
                     if self._perform_update_v2():
                         if not self.__dict__.get("_v2_diag_done", False):
                             self._v2_diag_done = True
-                            logger.info("[render-v2] 本卡已由 v2 块级通道接管（后续走 patchBlocks）")
+                            logger.debug("[render-v2] 本卡已由 v2 块级通道接管（后续走 patchBlocks）")
                         return
                 except Exception:
                     # 异常仅回退本轮（下一帧重试）；开关保持，避免暂时性错误
@@ -7652,7 +7652,7 @@ class CodeWebViewer(QWebEngineView):
                 else:
                     # 未接管 = 无块源（欢迎 / 用户消息的纯文本卡）：永久关闭
                     # v2 防每帧白试，并复位状态防 DOM 双写。
-                    logger.info(
+                    logger.debug(
                         f"[render-v2] 关闭 v2（无块源）：role={getattr(self.parent(), 'role', '?')} "
                         f"content_data_type={type(getattr(self.parent(), '_content_data', None)).__name__}"
                     )
@@ -8384,7 +8384,7 @@ class CodeWebViewer(QWebEngineView):
             # 保持 v2 接管，下一批有块时正常走 patch。
             if not self.__dict__.get("_v2_empty_logged", False):
                 self._v2_empty_logged = True
-                logger.info("[render-v2] 空块待内容（保持 v2 接管，不回退 v1）")
+                logger.debug("[render-v2] 空块待内容（保持 v2 接管，不回退 v1）")
             self._final_render_pending = False
             return True
 

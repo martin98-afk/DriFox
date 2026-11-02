@@ -2788,7 +2788,7 @@ class UIPluginRegistry:
             if QApplication.instance() is not None and window_registry.alive_window_instances():
                 from app.core.commands.builtin_commands import _rebind_command_shortcuts
 
-                logger.info(f"[UIPluginRegistry] UI 命令 /{name} 快捷键变动，重建 QShortcut 绑定")
+                logger.debug(f"[UIPluginRegistry] UI 命令 /{name} 快捷键变动，重建 QShortcut 绑定")
                 _rebind_command_shortcuts()
         except Exception:
             logger.warning(f"[UIPluginRegistry] /{name} 快捷键重绑失败", exc_info=True)
@@ -4531,7 +4531,7 @@ class UIPluginRegistry:
         # 诊断留档（支持排查「命令没出现在命令卡片 / 快捷键管理」）：
         # 命中此日志说明命令确已进命令表，问题在消费端；看不到此日志说明账本为空。
         if self._ui_commands:
-            logger.info(
+            logger.debug(
                 f"[UIPluginRegistry] UI 命令已重放 {len(self._ui_commands)} 条 → CommandManager: "
                 f"{sorted(self._ui_commands)}"
             )

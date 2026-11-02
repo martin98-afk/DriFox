@@ -704,7 +704,7 @@ class AgentManager:
                     agent = self._parse_markdown_agent(md_file)
                     if agent:
                         file_cache[fpath] = (mtime, agent)
-                        logger.info(
+                        logger.debug(
                             f"[AgentManager] Loaded agent: {agent.name} (mode={agent.mode}, hidden={agent.hidden})"
                         )
                 if agent:

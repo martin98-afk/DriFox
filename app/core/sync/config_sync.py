@@ -694,7 +694,7 @@ class ConfigSyncService(QObject):
             return
         if not (self._config_dirty or self._custom_dirty or self._records_dirty or any(self._ext_dirty.values())):
             return
-        logger.info(f"[ConfigSync] 防抖计时器启动，{DEBOUNCE_MS}ms 后上传")
+        logger.debug(f"[ConfigSync] 防抖计时器启动，{DEBOUNCE_MS}ms 后上传")
         self._debounce_timer.start(DEBOUNCE_MS)
 
     def _flush_suppressed_changes(self):
@@ -717,7 +717,7 @@ class ConfigSyncService(QObject):
         if not self._initial_sync_completed:
             logger.debug("[ConfigSync] 初始同步未完成，跳过防抖上传")
             return
-        logger.info("[ConfigSync] 防抖到期，启动后台上传线程")
+        logger.debug("[ConfigSync] 防抖到期，启动后台上传线程")
         t = threading.Thread(target=self._do_upload, daemon=True)
         t.start()
         self._upload_thread = t

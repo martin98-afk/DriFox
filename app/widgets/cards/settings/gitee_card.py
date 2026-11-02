@@ -1391,7 +1391,7 @@ class _GiteeMorePopup(QWidget):
         # 写 ui_theme_style 前先刷新 validator 选项集，防止目标主题未注册时
         # 被 OptionsValidator.correct() 静默回退到 options[0]
         update_theme_options()
-        target_theme = "lumia" if is_light else "fallout"
+        target_theme = "lumia" if is_light else "true-black"
         if self._cfg.ui_theme_style.value != target_theme:
             self._cfg.set(self._cfg.ui_theme_style, target_theme, save=True)
         theme_manager.dispatch_refresh()
