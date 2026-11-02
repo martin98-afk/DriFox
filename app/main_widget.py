@@ -1859,20 +1859,57 @@ class OpenAIChatToolWindow(ToolWindow):
     def show_tool_think_card(self):
         """流式出现工具/思考块时显示独立卡（已显示时幂等），返回卡片实例"""
         card = self._ensure_tool_think_card()
+        # 取消在途的延迟隐藏（上一轮退出淡出窗口内就开始新一轮流式）
+        self._tool_think_hide_gen = getattr(self, "_tool_think_hide_gen", 0) + 1
         self._card_manager.show_card("tool_think", self._window_id)
         return card
 
-    def hide_tool_think_card(self, reset: bool = True):
-        """流式结束 / 切会话 / 新一轮开始：清空并隐藏独立卡"""
+    def hide_tool_think_card(self, reset: bool = True, animate: bool = True):
+        """流式结束 / 切会话 / 新一轮开始：淡出后隐藏并清空独立卡
+
+        先淡出再隐藏：CardManager.hide_card 是立即 setVisible(False)，容器
+        随后才折叠 → 不淡出就是「内容瞬失 + 空白区域收缩」。
+
+        代数守卫：淡出窗口（130ms）内新一轮流式可能已开始，此时必须放弃本次
+        隐藏，否则刚显示的新内容会被旧隐藏逻辑吃掉。
+        """
         card = getattr(self, "_tool_think_card", None)
-        if card is not None and reset:
-            # 清空失败不能阻断隐藏：卡挂在窗口级，隐藏漏执行就会一直停在
-            # 对话上方（用户实测「对话终止了还在」）。
+        self._tool_think_hide_gen = getattr(self, "_tool_think_hide_gen", 0) + 1
+        gen = self._tool_think_hide_gen
+
+        def _after_fade():
+            if gen != getattr(self, "_tool_think_hide_gen", 0):
+                return
+            self._finish_hide_tool_think_card(reset)
+
+        try:
+            visible = card is not None and card.isVisible()
+        except RuntimeError:
+            visible = False
+        if visible and animate:
+            card.play_exit(_after_fade)
+        else:
+            _after_fade()
+
+    def _finish_hide_tool_think_card(self, reset: bool = True):
+        """真正收卡：交给 CardManager 走容器折叠动画，动画后再清内容"""
+        card = getattr(self, "_tool_think_card", None)
+        self._card_manager.hide_card("tool_think", self._window_id)
+        if card is None or not reset:
+            return
+
+        def _deferred_reset(_card=card):
+            # 清空必须晚于容器折叠（约 200ms）：提前清会让用户看到
+            # 「卡片瞬间变空再收起」。期间又被显示则跳过（新一轮已有新内容）。
+            # 捕获全部异常（不只 RuntimeError）：清空是收尾动作，任何失败都不该
+            # 冒到全局异常钩子上弹提示。
             try:
-                card.reset_panel()
+                if not _card.isVisible():
+                    _card.reset_panel()
             except Exception:
                 pass
-        self._card_manager.hide_card("tool_think", self._window_id)
+
+        QTimer.singleShot(260, _deferred_reset)
 
     def _on_tool_think_closed(self):
         """用户手动关闭独立卡：解绑镜像并恢复卡内工具区
@@ -1890,7 +1927,8 @@ class OpenAIChatToolWindow(ToolWindow):
             except Exception:
                 pass
         self._tool_think_owner = None
-        self._card_manager.hide_card("tool_think", self._window_id)
+        # 用户主动关不淡出，立即收（他就是要它马上消失）
+        self.hide_tool_think_card(animate=False)
 
     def _ensure_tool_control_card(self):
         """工具控制卡片懒创建（批1）：构造/接线/注册按需执行
