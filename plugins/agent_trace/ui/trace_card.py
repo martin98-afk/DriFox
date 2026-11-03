@@ -96,6 +96,23 @@ def _tool_api(kind: str = "read"):
     """工具注册表只读面 / 注入面（实现见 sdk.tool_registry_api）。"""
     return tool_registry_api(kind, module_globals=globals())
 
+# 插件级常驻 hub（模块级单例）：collector 生命周期与卡片 widget 解耦。
+#
+# 卡片 widget 会在 hide→show 循环、方位迁移、插件热重载时被销毁重建（实测
+# cm_wid 指纹变化）。hub 原先挂在 widget 上（TraceCollectorHub(self)），
+# widget 一销毁 collector 陪葬：in-flight 工具的 timing/tail 清零、对话流订阅
+# 断开，重建窗口期执行的工具在正式落盘前列表无此条目（长工具期间「条目出现
+# 慢」）；每次重建还附带一次长会话全量投影（watchdog 542ms 阻塞来源之一）。
+# 共享 hub 让 collector 跨 widget 生命周期常驻：重建卡片只换绑信号，数据与
+# 计时连续。已关闭窗口的 collector 由 cleanup_closed 在切换时回收。
+_SHARED_HUB: Optional[TraceCollectorHub] = None
+
+def _shared_hub() -> TraceCollectorHub:
+    global _SHARED_HUB
+    if _SHARED_HUB is None:
+        _SHARED_HUB = TraceCollectorHub()
+    return _SHARED_HUB
+
 class _StatusDot(QWidget):
     """状态指示点：绿=空闲/完成，金=有 in-flight，红=最近有失败。"""
 
@@ -142,7 +159,7 @@ class TraceCardWidget(QWidget):
         super().__init__(parent)
         self._ctx: Dict[str, Any] = {}
         self._ctx_provider: Optional[Any] = None
-        self._hub = TraceCollectorHub(self)
+        self._hub = _shared_hub()
         self._collector: Optional[TraceCollector] = None
         self._active_wid: str = ""
         # 当前展示的 session_id（同窗口幂等判据 —— 见 _switch_collector）
@@ -1011,7 +1028,9 @@ class TraceCardWidget(QWidget):
             self._aux_timer.stop()
             self._unbind_collector_signals()
             self._unbind_backend_stats_signals()
-            self._hub.dispose()
+            # hub 是模块级常驻（见 _shared_hub）：widget 销毁只解绑信号，
+            # 不 dispose——collector 的 timing/订阅要跨 widget 重建存活。
+            # 已关闭窗口的回收由 _switch_collector 尾部的 cleanup_closed 负责。
         except Exception:
             pass
         super().deleteLater()
