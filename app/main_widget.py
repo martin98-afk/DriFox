@@ -3255,6 +3255,10 @@ class OpenAIChatToolWindow(ToolWindow):
                 ConfigSyncService.get_instance().syncDone,
                 self._on_gitee_sync_done,
             )
+            # 启动恢复：设置大卡懒构建（3500ms 预热已移除），云同步不能等
+            # 用户打开设置卡片；延迟 1.5s 后台取 token 后自动 enable
+            _sync_svc = ConfigSyncService.get_instance()
+            QTimer.singleShot(1500, _sync_svc.resume_if_bound)
         except Exception:
             pass
 

@@ -219,6 +219,8 @@ class ConfigSyncService(QObject):
     # 供窗口级 UI（如模型选择按钮）按云端值做一次性刷新，避免依赖
     # valueChanged（llm_selected_model 无监听器）而错过更新。
     settingsRestored = pyqtSignal()
+    # 启动恢复：后台线程取到有效 token → 主线程 enable（见 resume_if_bound）
+    _resumeTokenReady = pyqtSignal(str, str)
 
     def __init__(self):
         if ConfigSyncService._instance is not None:
@@ -277,6 +279,7 @@ class ConfigSyncService(QObject):
         self._plugin_reload_window_until: float = 0.0
         self._initial_sync_completed: bool = False  # 初始同步是否已完成（禁止初始同步前上传）
         self._suppress_retry_scheduled: bool = False  # 抑制窗口结束后的重试已调度
+        self._resume_pending: bool = False  # 启动恢复已发起（防重复取 token）
 
         # 从磁盘恢复持久化的 SHA 缓存（避免每次重启全量下载）
         self._load_sha_cache()
@@ -285,6 +288,8 @@ class ConfigSyncService(QObject):
         self._configChanged.connect(self._on_config_changed_main)
         # 跨线程桥：后台线程请求重新加载 Settings → 主线程执行
         self._reloadSettings.connect(self._reload_settings_on_main_thread)
+        # 跨线程桥：启动恢复取 token（后台线程）→ 主线程 enable
+        self._resumeTokenReady.connect(self._on_resume_token_ready)
 
     # ── 单例 ──────────────────────────────────────────────
 
@@ -295,6 +300,59 @@ class ConfigSyncService(QObject):
         return cls._instance
 
     # ── 公开 API ──────────────────────────────────────────
+
+    def resume_if_bound(self):
+        """启动恢复：已绑定 Gitee 时自动 enable（不依赖设置卡片构建）。
+
+        设置大卡是懒构建（原 3500ms 预热已为性能移除），云同步不能等用户
+        打开设置卡片才启动，否则重启后这段时间完全不同步。取 token 可能
+        触发 OAuth 刷新（网络），必须后台线程；结果经信号回主线程 enable
+        （enable 内部要建 QTimer，只能在主线程）。
+        """
+        if self._state != "disabled" or self._resume_pending:
+            return
+        try:
+            cfg = Settings.get_instance()
+            if not bool(cfg.gitee_bound.value) or not str(cfg.gitee_user_owner.value or ""):
+                return
+        except Exception as e:
+            logger.debug(f"[ConfigSync] 启动恢复读绑定状态失败: {e}")
+            return
+        self._resume_pending = True
+        threading.Thread(
+            target=self._resume_fetch_token, name="ConfigSyncResume", daemon=True
+        ).start()
+
+    def _resume_fetch_token(self):
+        """后台线程：取有效 token（可能刷新 OAuth），结果经信号回主线程"""
+        token = ""
+        owner = ""
+        try:
+            from app.gateway.auth import get_oauth_backend
+
+            info = get_oauth_backend("gitee").get_bound_info() or {}
+            token = str(info.get("token") or "")
+            owner = str(info.get("owner") or "")
+        except Exception as e:
+            logger.warning(f"[ConfigSync] 启动恢复取 token 异常: {e}")
+        self._resumeTokenReady.emit(token, owner)
+
+    def _on_resume_token_ready(self, token: str, owner: str):
+        """主线程：取 token 完成 → enable；期间被解绑则放弃"""
+        self._resume_pending = False
+        if not token or not owner:
+            logger.info("[ConfigSync] 启动恢复：无有效 token，跳过自动同步")
+            return
+        # 防「取 token 期间用户解绑」：以当前绑定态为准
+        try:
+            if not bool(Settings.get_instance().gitee_bound.value):
+                return
+        except Exception:
+            return
+        if self._state != "disabled":
+            return
+        logger.info("[ConfigSync] 启动恢复：检测到已绑定，自动启动配置同步")
+        self.enable(token, owner)
 
     def backup_local(self) -> bool:
         """绑定前：备份本地 app.config → app.config.pre_bind，备份 user-custom → user-custom.pre_bind"""
