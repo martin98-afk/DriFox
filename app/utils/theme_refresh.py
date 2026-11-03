@@ -249,6 +249,18 @@ def _build_css_var_js(theme: dict, is_light: bool) -> str:
             return ""
         return s.replace("\\", "\\\\").replace("'", "\\'")
 
+    def _accent_rgba(v: str | None, alpha: float) -> str:
+        """#rrggbb → rgba(...)，与 card_render_core._accent_rgba / 骨架同语义"""
+        h = (v or "").strip().lstrip("#")
+        if len(h) == 3:
+            h = "".join(c * 2 for c in h)
+        if len(h) == 6:
+            try:
+                return "rgba(%d, %d, %s)" % (int(h[0:2], 16), int(h[2:4], 16), alpha)
+            except ValueError:
+                pass
+        return f"rgba(100, 198, 255, {alpha})"  # 解析失败兜底：原 midnight 色
+
     return (
         "(function(){"
         "var r=document.documentElement;"
@@ -267,5 +279,17 @@ def _build_css_var_js(theme: dict, is_light: bool) -> str:
         f"r.style.setProperty('--code-bg','{'var(--panel-soft)' if is_light else 'transparent'}');"
         f"r.style.setProperty('--code-toolbar','{'rgba(0,0,0,0.03)' if is_light else 'rgba(255,255,255,0.03)'}');"
         f"r.style.setProperty('--code-border','{'var(--border)' if is_light else '#2a3447'}');"
+        # 语义派生层：骨架 :root 有这批变量（字面量烘进骨架），运行时注入必须
+        # 同步覆盖，否则主题切换后已存在卡片/池化复用卡片的会话卡底色、
+        # hover、表头色停留旧主题（欢迎卡片「会话导览」直接踩中）。
+        # 与 chart_viewer_card._inject_theme_vars 的全量表保持同源。
+        f"r.style.setProperty('--accent-text','{_js_str(theme.get('accent'))}');"
+        f"r.style.setProperty('--accent-soft','{_js_str(theme.get('hover_bg'))}');"
+        f"r.style.setProperty('--accent-soft-strong','{_js_str(theme.get('selected_bg'))}');"
+        f"r.style.setProperty('--accent-border-weak','{_accent_rgba(theme.get('accent'), 0.22)}');"
+        f"r.style.setProperty('--accent-glow','{_accent_rgba(theme.get('accent'), 0.10)}');"
+        f"r.style.setProperty('--row-alt','{'rgba(15, 23, 42, 0.03)' if is_light else 'rgba(255, 255, 255, 0.02)'}');"
+        f"r.style.setProperty('--row-hover','{'rgba(15, 23, 42, 0.05)' if is_light else 'rgba(255, 255, 255, 0.05)'}');"
+        f"r.style.setProperty('--row-header','{'rgba(15, 23, 42, 0.06)' if is_light else 'rgba(255, 255, 255, 0.04)'}');"
         "})();"
     )
