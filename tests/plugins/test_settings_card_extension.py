@@ -67,6 +67,8 @@ def test_rebuild_renders_cards(qtbot, settings_card, fresh_registry):
 
     fresh_registry.register_settings_card("demo", "card-1", "插件设置卡", _FakeCard)
     settings_card.rebuild_plugin_cards()
+    # 错峰逐帧构建（2026-11-03）：卡在事件循环 tick 里逐张实例化，wait 轮询到建完
+    qtbot.wait_until(lambda: settings_card._plugin_cards_layout.count() == 1)
 
     assert settings_card._plugin_cards_layout.count() == 1
     assert captured["parent"] is settings_card._plugin_cards_widget
@@ -92,6 +94,7 @@ def test_rebuild_idempotent(qtbot, settings_card, fresh_registry):
 
     fresh_registry.register_settings_card("demo", "card-1", "卡", _FakeCard)
     settings_card.rebuild_plugin_cards()
+    qtbot.wait_until(lambda: settings_card._plugin_cards_layout.count() == 1)
     settings_card.rebuild_plugin_cards()
     assert settings_card._plugin_cards_layout.count() == 1
 
@@ -114,6 +117,7 @@ def test_rebuild_exception_safe(qtbot, settings_card, fresh_registry):
     fresh_registry.register_settings_card("demo", "bad", "坏卡", _BoomCard)
     fresh_registry.register_settings_card("demo", "good", "好卡", _GoodCard)
     settings_card.rebuild_plugin_cards()
+    qtbot.wait_until(lambda: settings_card._plugin_cards_layout.count() == 1)
     assert settings_card._plugin_cards_layout.count() == 1  # 只有好卡
 
 
