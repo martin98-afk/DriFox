@@ -4062,6 +4062,29 @@ class OpenAIChatToolWindow(ToolWindow):
         except Exception as e:
             logger.warning(f"[MainWidget] 标题栏分支标签补装失败: {e}")
 
+    def _rebuild_titlebar_widgets(self):
+        """销毁并重建标题栏 slot widget（插件热重载/卸载后调用）
+
+        _install_titlebar_widgets 只在槽位为空时装配，热重载时会「保留旧 widget」——
+        旧实例持有已卸载插件的 widget 类与闭包，界面永远是旧代码；插件删除后
+        更是永久残留一个无处注销的控件。此方法先彻底销毁已装配实例再补装。
+        """
+        try:
+            bw = self.__dict__.get("_branch_widget")
+            if bw is not None:
+                try:
+                    container = getattr(self, "_project_branch_container", None)
+                    layout = container.layout() if container is not None else None
+                    if layout is not None:
+                        layout.removeWidget(bw)
+                    bw.setParent(None)
+                    bw.deleteLater()
+                finally:
+                    self._branch_widget = None
+            self._install_titlebar_widgets()
+        except Exception as e:
+            logger.warning(f"[MainWidget] 标题栏插件 widget 重建失败: {e}")
+
     # 单帧 UI 插件装载预算：本帧累计装载耗时达到预算即让出事件循环一帧。
     # 快插件（几十 ms）打包在同一帧连续装载，避免逐个让帧引入的调度间隙
     # （实测 25 个插件因此拖出 4.7s 总窗口）；慢插件独占一帧后仍会让出。
@@ -10770,6 +10793,12 @@ class OpenAIChatToolWindow(ToolWindow):
                     continue
                 try:
                     win._build_plugin_input_buttons()
+                except RuntimeError, AttributeError:
+                    pass
+                # 标题栏 slot widget（如分支 chip）：装配后不再随注册表变化，
+                # 不销毁重建则一直持有旧插件的类（卸载后成为幽灵控件）。
+                try:
+                    win._rebuild_titlebar_widgets()
                 except RuntimeError, AttributeError:
                     pass
             # ★ 已打开标签页视图重绘：消息内容块是渲染时刻的快照，热重载后

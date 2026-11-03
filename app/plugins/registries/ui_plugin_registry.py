@@ -3807,16 +3807,20 @@ class UIPluginRegistry:
 
         if plugin_path is None:
             return False
+        ui_init = plugin_path / "ui" / "__init__.py"
+        if not ui_init.exists():
+            # 组件消失（ui/ 目录被删或 __init__.py 被删）：不能当作「无需加载」直接返回。
+            # 旧版本的注册项（渲染器/卡片/按钮/设置卡）与已挂载实例仍留在注册表和界面上，
+            # 若不卸载，热重载会把「组件已删除」永久当成「组件未加载」→ 残留到进程重启。
+            # unload_plugin 幂等：确无任何注册时内部直接返回 False，不会误伤。
+            self.unload_plugin(plugin_name)
+            return False
         # 记录插件根路径：fence 渲染器的 assets 以插件根为基准声明，
         # 宿主注入时要按此拼成 file:// URL（见 resolve_fence_assets）。
-        # 即便 ui/__init__.py 不存在也记 —— 插件根路径本身对宿主有用。
         try:
             self._plugin_paths[str(plugin_name)] = str(plugin_path)
         except Exception:
             pass
-        ui_init = plugin_path / "ui" / "__init__.py"
-        if not ui_init.exists():
-            return False
 
         # 先卸载旧版本。卸载前备份旧模块引用：register 失败时回滚恢复旧注册
         # （避免插件陷入「已卸载未加载」且 result[ui]=False 导致窗口零刷新的黑洞态）。
@@ -4214,6 +4218,23 @@ class UIPluginRegistry:
         except Exception as e:
             logger.warning(f"[UIPluginRegistry] 释放能力订阅失败 ({plugin_name}): {e}")
         self._loaded_plugins.discard(plugin_name)
+        # 静默写入兜底轮询的签名条目：不清会留下脏 key（插件路径已 pop，
+        # 下一轮 poll_silent_ui_changes 拿着失效路径空转）。
+        self._ui_signatures.pop(plugin_name, None)
+        # 摘除 sys.modules 里的插件模块（含子模块）：这是删除/禁用路径唯一的
+        # 模块清理点。load_plugin 走覆盖式重载，但删除后不再 load —— 不 pop 则
+        # 旧模块（及其模块级单例/QTimer/QThread）永久驻留，重装同名插件时
+        # 还可能命中旧引用。load_plugin 内部调用本方法时，已用局部变量备份
+        # old_module 供失败回滚，此处摘除不影响回滚。
+        try:
+            import sys as _sys_purge
+
+            _safe = plugin_name.replace("-", "_").replace(":", "_")
+            _head = f"ui_plugin_{_safe}"
+            for _mod in [m for m in list(_sys_purge.modules.keys()) if m == _head or m.startswith(_head + ".")]:
+                _sys_purge.modules.pop(_mod, None)
+        except Exception as e:
+            logger.warning(f"[UIPluginRegistry] 清理插件模块缓存失败 ({plugin_name}): {e}")
         logger.debug(f"[UIPluginRegistry] Unloaded UI components for plugin: {plugin_name}")
         if had_welcome_tabs:
             self._schedule_welcome_refresh()
