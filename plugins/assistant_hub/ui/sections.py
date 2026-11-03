@@ -863,14 +863,14 @@ class _NewPersonaChip(QFrame):
 
 
 class AboutSection(_Section):
-    """人格选择（chips，含「纯净助手」）。人格只读，只能切换；新增人格走 persona-creator 技能。"""
+    """人格选择（chips，含「纯净助手」）。UI 只切换不改写；新增人格走 persona-creator 技能。"""
 
     personaChangeRequested = pyqtSignal(str)
     createPersonaRequested = pyqtSignal()
 
     def __init__(self, personas: List[dict], current_pid: str, parent=None):
         super().__init__("关于 Ta", parent)
-        self.body().addWidget(_hint("点卡片切换人格（内置只读）；新增在对话里说「创建新人格」。", 10))
+        self.body().addWidget(_hint("点卡片切换人格；新增在对话里说「创建新人格」，存用户数据目录不随更新丢失。", 10))
 
         chips_host = QWidget()
         chips_host.setStyleSheet("background: transparent;")

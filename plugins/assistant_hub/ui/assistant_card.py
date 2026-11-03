@@ -388,8 +388,22 @@ class AssistantCardWidget(QWidget):
         if self._active_aid:
             self._refresh_memory(self._active_aid)
 
+    def _persona_save_dir(self) -> str:
+        """用户自建人格落盘目录（<app_data>/assistant_hub/personas），拿不到返回空串。"""
+        try:
+            return str(self._mgr.persona_registry().user_dir)
+        except Exception as e:
+            logger.warning(f"[assistant_hub] 定位人格目录失败: {e}")
+            return ""
+
     def _on_create_persona(self) -> None:
-        """新建人格：关闭助手中心 → 跳回对话 → 输入框填入 /persona-creator。"""
+        """新建人格：关闭助手中心 → 跳回对话 → 输入框填入 /persona-creator。
+
+        落盘目录作为技能参数一并传入：技能是 LLM 执行的，让它自己算 app_data
+        路径在打包版（bash 里的 python 可能 import 不到 app）会算错，
+        而这里拿到的 user_dir 恒为绝对路径。
+        """
+        target = self._persona_save_dir()
         try:
             from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
 
@@ -400,7 +414,8 @@ class AssistantCardWidget(QWidget):
             writer = _caps("input.write")
             if writer is None:
                 raise RuntimeError("无 input.write 能力")
-            writer("/persona-creator")
+            prompt = f"/persona-creator 落盘目录：{target}" if target else "/persona-creator"
+            writer(prompt)
         except Exception as e:
             self._notify_error(f"无法跳转对话：{e}")
 

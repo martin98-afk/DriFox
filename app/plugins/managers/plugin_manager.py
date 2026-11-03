@@ -231,6 +231,11 @@ def _detect_components(plugin_dir: Path) -> Dict[str, bool]:
 # ============================================================
 
 
+# icon_config 解析哨兵：区分「未解析」与「解析结果为 None」，None 也必须缓存
+# （无图标插件每次访问都不再重复付 FS 扫描）
+_ICON_CONFIG_UNRESOLVED = object()
+
+
 @dataclass
 class PluginInfo:
     """插件信息"""
@@ -246,6 +251,9 @@ class PluginInfo:
     api_reason: str = ""  # api_version 不兼容原因（供 UI 展示）
     manifest_warnings: List[str] = field(default_factory=list)  # 契约1：schema 校验 warning 清单（UI 角标后续）
     overridden_by: str = ""  # 同名覆盖标记：被覆盖方 plugin_type（"system"/"claude"），空=未被覆盖
+    # icon_config 解析缓存（实例级）：重扫/热重载/安装/更新走 _scan_one_plugin_dir
+    # 或 _plugin_info_from_cached 重建实例，缓存随旧实例丢弃，无需主动失效钩子
+    _icon_config_cache: Any = field(default=_ICON_CONFIG_UNRESOLVED, repr=False, compare=False)
 
     @property
     def description(self) -> str:
@@ -275,9 +283,22 @@ class PluginInfo:
 
     @property
     def icon_config(self) -> Optional[dict]:
-        """返回 {"light": Path, "dark": Path} 或 None
+        """返回 {"light": Path, "dark": Path} 或 None（解析结果缓存于实例）
 
-        从 manifest 的 "icon" 字段解析插件图标路径。
+        ★ 性能（2026-11-03）：解析走 Path.resolve/exists 文件系统调用（Windows 上
+        realpath 冷态单次可达数十 ms），本 property 是图标渲染热路径：tab_panel
+        插件标签页、设置卡 MCP 行/插件配置卡每次刷新都访问，不缓存时一次设置卡
+        构造要重复付几十次 FS 调用（watchdog 实测打开设置阻塞 519ms 栈正停在
+        icon_config 内的 os.path.realpath）。失效策略见 _icon_config_cache 字段注释。
+        """
+        if self._icon_config_cache is not _ICON_CONFIG_UNRESOLVED:
+            return self._icon_config_cache
+        self._icon_config_cache = self._resolve_icon_config()
+        return self._icon_config_cache
+
+    def _resolve_icon_config(self) -> Optional[dict]:
+        """从 manifest 的 "icon" 字段解析插件图标路径（真实 FS 解析，由 icon_config 缓存）。
+
         支持三种形式：
         1. 字符串 "icon.svg" → 同一文件用于深浅主题
         2. 字典 {"light": "a.svg", "dark": "b.svg"} → 分别指定

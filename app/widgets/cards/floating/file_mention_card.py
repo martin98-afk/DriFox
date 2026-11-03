@@ -587,7 +587,7 @@ class FileMentionItemWidget(QWidget):
         if self._query:
             hls = self._all_highlight_queries(rel, self._query)
             if hls:
-                self._path_label.setHighlights(hls, Colors.SEND_BTN_START)
+                self._path_label.setHighlights(hls, Colors.SEARCH_HIGHLIGHT)
 
     def update_data(self, file_data: Dict[str, str], query: str):
         """更新 widget 数据并刷新显示（用于回收复用）

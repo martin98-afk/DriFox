@@ -396,6 +396,9 @@ class LLMSettingsCard(SystemCardFrame):
     _plugin_cards_sig: tuple | None = None
     # 同上：__new__ 桩（测试 fixture）不走 __init__，读该实例属性需类级默认兜底
     _plugin_cards_built: bool = False
+    # 重建批次代际号：异步逐帧建卡期间若发生新的重建（清空旧卡），旧队列闭包凭
+    # 代际号自废，避免往新分区里塞旧卡（__new__ 桩同样需类级默认兜底）
+    _plugin_cards_build_gen: int = 0
     # 懒构造分页 → 构造方法：首开不同步构建（~340ms 主体），见 _setup_content 注释
     _LAZY_PAGE_BUILDERS = {
         "common": "_build_common_page",
@@ -423,6 +426,8 @@ class LLMSettingsCard(SystemCardFrame):
         self._plugin_cards_sig = None
         # 插件设置分区是否已真正实例化（未实例化时只同步导航显隐，不构造 widget）
         self._plugin_cards_built = False
+        # 插件设置分区异步构建代际号（见 rebuild_plugin_cards 尾部错峰队列）
+        self._plugin_cards_build_gen = 0
         # 插件注册的独立设置大 tab：当前挂载清单与已实例化页面（懒构造，见
         # _sync_plugin_tabs / _build_plugin_tab_page）
         self._plugin_tab_infos: dict = {}
@@ -1026,7 +1031,22 @@ class LLMSettingsCard(SystemCardFrame):
                 widget.deleteLater()
         if not has_cards:
             return
-        for info in cards:
+        # ★ 性能（2026-11-03）：卡间错峰逐帧构建。plugins 页预热单页实测 500ms+
+        # （watchdog 栈：PluginConfigCard.__init__ → _FieldRow → layout.addWidget），
+        # 5+ 张插件卡（含 ExpandSettingCard 内部 view/滚动区 + 字号全树遍历）挤一帧
+        # 就是打开设置后的一次明显顿卡；singleShot(0) 逐帧付一张卡的钱，总时长不变
+        # 但单帧不超预算。代际守卫：重建进行中若再次触发重建（热重载 force），
+        # 清空旧卡时 gen+1，旧队列闭包自废，不会往新分区里塞旧卡。
+        self._plugin_cards_build_gen += 1
+        gen = self._plugin_cards_build_gen
+        infos = list(cards)
+
+        def _build_next(idx: int):
+            if gen != self._plugin_cards_build_gen:
+                return  # 已被更新的重建批次取代
+            if idx >= len(infos):
+                return
+            info = infos[idx]
             try:
                 card = info.widget_class(parent=self._plugin_cards_widget)
                 self._plugin_cards_layout.addWidget(card)
@@ -1041,6 +1061,9 @@ class LLMSettingsCard(SystemCardFrame):
                     logger.warning(f"[LLMSettingsCard] 插件卡片字号应用失败 {info.card_id}: {e}")
             except Exception as e:
                 logger.warning(f"[LLMSettingsCard] 插件设置卡片 {info.card_id} 构建失败：{e}")
+            QTimer.singleShot(0, lambda i=idx + 1: _build_next(i))
+
+        QTimer.singleShot(0, lambda: _build_next(0))
 
     def _apply_list_accordion(self):
         """为列表形式配置卡片应用手风琴效果

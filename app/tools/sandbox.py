@@ -904,7 +904,11 @@ def sandbox_check_tool(
         return ALLOW
     items = raw_paths if isinstance(raw_paths, list) else [raw_paths]
     wd = workdir if workdir is not None else _current_workdir()
-    verdicts = [check_path(wd, str(p), mode, cfg) for p in items if p]
+    # 相对路径按 workdir 拼接（与命令分支写边界同源 _resolve_cmd_path）：
+    # 文件工具执行时相对路径按 workdir 解析（file_tools._resolve），
+    # check_path 的 _norm 按进程 cwd 解析，原样传会把 workdir 内的相对
+    # 写入误判成越界（2026-11-03 安全中心对工作目录内写入弹审批的根因）。
+    verdicts = [check_path(wd, str(_resolve_cmd_path(str(p), wd)), mode, cfg) for p in items if p]
     if any(v == CONFIRM for v in verdicts):
         return CONFIRM
     return ALLOW

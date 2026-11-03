@@ -3255,6 +3255,10 @@ class OpenAIChatToolWindow(ToolWindow):
                 ConfigSyncService.get_instance().syncDone,
                 self._on_gitee_sync_done,
             )
+            # 启动恢复：设置大卡懒构建（3500ms 预热已移除），云同步不能等
+            # 用户打开设置卡片；延迟 1.5s 后台取 token 后自动 enable
+            _sync_svc = ConfigSyncService.get_instance()
+            QTimer.singleShot(1500, _sync_svc.resume_if_bound)
         except Exception:
             pass
 
@@ -20445,6 +20449,12 @@ class OpenAIChatToolWindow(ToolWindow):
 
         传输键 ``_interject*`` 仅用于 worker 侧识别（切卡信号 / 取消回收），
         注入 API 前由 worker 剥离，落库后是干净 user 消息。
+
+        ``_interject_pending_ctx``：命令/技能提示词（`/cmd`、`/skill`）不经由
+        用户消息本体传递，而是 main_widget 写 session.metadata 后由 PreUserMessage
+        的 inject_command_prompt hook 读取注入（engine.py PreSendWorker 负责 pop）。
+        插话绕开 PreSendWorker，故在此主线程 pop pending 并随消息带给 worker，
+        否则命令提示词不注入、且残留的 pending 会污染下一条正常发送。
         """
         user_text = str(entry.get("text", ""))
         image_paths = entry.get("image_paths") or []
@@ -20463,6 +20473,21 @@ class OpenAIChatToolWindow(ToolWindow):
             "_interject_text": user_text,
             "_interject_image_paths": list(image_paths),
         }
+        _pending_ctx: dict = {}
+        try:
+            _session = self.session_manager.get_current_session() if self.session_manager else None
+            if _session is not None and getattr(_session, "metadata", None) is not None:
+                _pending_cmd = _session.metadata.pop("_pending_command", None)
+                _pending_skill = _session.metadata.pop("_pending_skill", None)
+                if _pending_cmd:
+                    _pending_ctx["pending_command"] = _pending_cmd
+                if _pending_skill:
+                    _pending_ctx["pending_skill"] = _pending_skill
+        except Exception as e:  # noqa: BLE001 — pending 提取失败不阻断插话主流程
+            logger.debug(f"[Interject] pending 提取失败（按无命令插话发送）: {e}")
+        if _pending_ctx:
+            msg["_interject_pending_ctx"] = _pending_ctx
+            logger.info(f"[Interject] 携带命令/技能提示词入队: {sorted(_pending_ctx)}")
         self.backend._hook_message_queue.put(msg)
         logger.info(
             f"[Interject] 入队 win={getattr(self, '_window_id', '?')} "

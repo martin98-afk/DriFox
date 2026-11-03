@@ -435,6 +435,11 @@ class Colors:
     SYSTEM_BORDER = "#3d4a60"
     SYSTEM_ACCENT = "#66c6ff"
 
+    # 搜索高亮 / 命令参数名强调色（文字色，必须与所在背景高对比）
+    # 独立语义 token：禁止挪用 SEND_BTN_START（按钮渐变底色，受按钮上白色 icon
+    # 约束，深色主题会被调暗成深灰 → 黑底黑字不可读，true-black 曾踩此坑）
+    SEARCH_HIGHLIGHT = "#C9A85C"
+
     # 发送按钮
     SEND_BTN_START = "#C9A85C"
     SEND_BTN_END = "#B8956A"
@@ -594,6 +599,15 @@ class Colors:
         for attr, yaml_key in cls._COLOR_ALIASES.items():
             if yaml_key in theme:
                 setattr(cls, attr, theme[yaml_key])
+
+        # 3.5 老主题缺 search_highlight 键的回退：按主题深浅模式选缺省高亮色
+        # （深色 → 亮金黑底约 9:1；浅色 → 深金白底约 4.7:1）。判定复用
+        # theme_manager.is_light_theme（mode 显式声明优先，缺省按 text_primary 亮度）。
+        # 键语义与缺省规则见 docs/plugins/themes.md
+        if "search_highlight" not in theme:
+            from app.utils.theme_manager import theme_manager
+
+            cls.SEARCH_HIGHLIGHT = "#B45309" if theme_manager.is_light_theme() else "#C9A85C"
 
         # 4. 发光预设（最后执行，会覆盖已设置的单个发光 token）
         preset_name = theme.get("input_glow_preset")

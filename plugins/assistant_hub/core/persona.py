@@ -9,9 +9,12 @@
 存储（人格只有一个自包含文件夹）：
 - 内置：plugins/assistant_hub/personas/<id>/persona.md + <id>/avatar.png
   兼容旧平铺布局：personas/<id>.md + avatars/<id>.png
+- 用户自建：<app_data>/assistant_hub/personas/<id>/persona.md + <id>/avatar.png
+  与内置同构，跟着云同步走，软件更新（整包替换 _internal）不会丢。
+  id 与内置冲突时用户目录那条直接忽略（内置优先），避免升级后被旧副本顶掉。
 - 自定义：<app_data>/assistant_hub/personas.json（builtin 不可删改）
 - "none"：恒存在的空人格（纯净助手，进 chips 行参与选择）
-- 新增人格走 persona-creator 技能落 personas/<id>/persona.md，热生效
+- 新增人格走 persona-creator 技能落用户目录 <id>/persona.md，热生效
 """
 
 from __future__ import annotations
@@ -82,19 +85,26 @@ def _builtin_dir() -> Path:
 
 
 class PersonaRegistry:
-    """人格注册表单例（内置只读 + 自定义持久化）。"""
+    """人格注册表单例（内置只读 + 用户自建目录 + personas.json 自定义）。"""
 
     _instance: Optional["PersonaRegistry"] = None
 
     def __init__(self, custom_path: Optional[Path] = None, builtin_dir: Optional[Path] = None):
         self._custom_path = custom_path or (_persona_data_dir() / "personas.json")
         self._builtin_dir = builtin_dir or _builtin_dir()
+        # 用户自建人格目录：与 personas.json 同根（<app_data>/assistant_hub/personas）。
+        # 不写插件目录——打包版插件在 _internal 下，软件更新整包替换会连人格一起冲掉。
+        # 跟随 custom_path.parent 而非硬取 app_data：测试注入 tmp custom_path 时自动隔离。
+        # resolve()：开发环境 app_data 是相对路径（Path('.drifox')），不绝对化会随 CWD 漂移。
+        self._user_dir = (self._custom_path.parent / "personas").resolve()
         # 用户级头像覆盖目录：换头像不写插件目录（内置人格只读，部署目录可能无写权限），
         # 存 <app_data>/assistant_hub/persona_avatars/<pid>.<ext>
         self._avatar_override_dir = self._custom_path.parent / "persona_avatars"
         self._custom: Dict[str, Persona] = {}
         self._builtin: Dict[str, Persona] = {}
+        self._user: Dict[str, Persona] = {}
         self._load_builtins()
+        self._load_user()
         self._load_custom()
 
     # ── 单例 ──
@@ -114,7 +124,42 @@ class PersonaRegistry:
         UI 进入助手中心时刷新，无需重启。
         """
         self._load_builtins()
+        self._load_user()
         self._load_custom()
+
+    def _load_user(self) -> None:
+        """加载用户自建人格（<app_data>/assistant_hub/personas/<id>/persona.md）。
+
+        id 与内置冲突时忽略用户目录那条并告警：内置人格跟随版本更新，
+        若允许覆盖，升级后用户会拿不到新版内置人格，报错也难定位。
+        """
+        self._user = {}
+        if not self._user_dir.exists():
+            return
+        for d in sorted(self._user_dir.iterdir()):
+            if not d.is_dir():
+                continue
+            pmd = d / "persona.md"
+            if not pmd.exists():
+                continue
+            try:
+                meta, body = _parse_frontmatter(pmd.read_text(encoding="utf-8"))
+            except Exception as e:
+                logger.warning(f"[assistant_hub] 读取用户人格失败 {pmd}: {e}")
+                continue
+            pid = meta.get("id") or d.name
+            if pid in self._builtin:
+                logger.warning(f"[assistant_hub] 用户人格 id 与内置冲突，已忽略: {pmd}")
+                continue
+            self._user[pid] = Persona(
+                id=pid,
+                name=meta.get("name") or pid,
+                description=meta.get("description") or "",
+                tag=meta.get("tag") or "",
+                avatar=meta.get("avatar") or "",
+                builtin=False,
+                prompt=body if pid != "none" else "",
+            )
 
     def _load_builtins(self) -> None:
         """加载内置人格。
@@ -190,7 +235,9 @@ class PersonaRegistry:
 
     # ── 查询 ──
     def list_all(self) -> List[Persona]:
+        """全部人格：内置 → 用户自建 → persons.json 自定义（后者覆盖前者）。"""
         merged = dict(self._builtin)
+        merged.update(self._user)
         merged.update(self._custom)
         return list(merged.values())
 
@@ -215,9 +262,17 @@ class PersonaRegistry:
             cand = Path(p.avatar)
             if cand.is_absolute() and cand.exists():
                 return cand
-            rel = self._builtin_dir / p.avatar
-            if rel.exists():
-                return rel
+            for base in (self._user_dir, self._builtin_dir):
+                rel = base / p.avatar
+                if rel.exists():
+                    return rel
+        # 用户自建：其文件夹在自己目录下，先于内置同名目录
+        if pid in self._user:
+            for d in (self._user_dir, self._builtin_dir):
+                sub = d / pid / "avatar.png"
+                if sub.exists():
+                    return sub
+            return None
         # 新布局：personas/<id>/avatar.png
         sub = self._builtin_dir / pid / "avatar.png"
         if sub.exists():
@@ -270,14 +325,16 @@ class PersonaRegistry:
 
     # ── 自定义维护 ──
     def upsert(self, p: Persona) -> bool:
-        if p.builtin or p.id in self._builtin:
+        """写 personas.json 自定义人格；内置与用户目录人格均不可覆盖。"""
+        if p.builtin or p.id in self._builtin or p.id in self._user:
             return False
         self._custom[p.id] = p
         self._persist()
         return True
 
     def delete(self, pid: str) -> bool:
-        if pid in self._builtin or pid not in self._custom:
+        """删 personas.json 自定义人格；内置与用户目录人格需直接删目录。"""
+        if pid in self._builtin or pid in self._user or pid not in self._custom:
             return False
         self._custom.pop(pid, None)
         self._persist()
@@ -297,6 +354,21 @@ class PersonaRegistry:
             for p in self._custom.values()
         ]
         self._custom_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    # ── 路径 ──
+    @property
+    def builtin_dir(self) -> Path:
+        """内置人格根（插件目录，随版本更新覆盖）。"""
+        return self._builtin_dir
+
+    @property
+    def user_dir(self) -> Path:
+        """用户自建人格根（<app_data>/assistant_hub/personas，跟云同步走、升级不丢）。"""
+        return self._user_dir
+
+    def exists(self, pid: str) -> bool:
+        """id 是否已被占用（内置/用户目录/personas.json 任一命中）。"""
+        return any(p.id == pid for p in self.list_all())
 
     # ── 渲染 ──
     def render(self, pid: str, template: str, *, agent_name: str, user_name: str) -> str:

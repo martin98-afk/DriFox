@@ -1551,6 +1551,9 @@ class GiteeCard(SettingCard):
             pass
         self._sync_svc.stateChanged.connect(self._on_sync_state_changed)
         self._sync_svc.syncDone.connect(self._on_initial_sync_done)
+        # 卡片可能在 enable 之后才构建（启动恢复 / 设置弹窗重建），此刻收不到
+        # 已发射过的 stateChanged，圆点会永远不显示 → 构造时按当前状态补一次
+        self._on_sync_state_changed(self._sync_svc._state)
 
     # ── UI 刷新 ──────────────────────────────────────────
 

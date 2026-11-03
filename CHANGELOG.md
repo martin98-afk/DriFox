@@ -1,9 +1,9 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
-## [v0.6.14] - 2026-11-03
+## [v0.6.14] - 2026-11-03 (重新发布 #2)
 
-自 v0.6.14-beta 以来的变更 | 提交数：6 · 文件变更：21 · +1261/-88 | 贡献者：dingma
+自 v0.6.14-beta 以来的变更 | 提交数：13 · 文件变更：63 · +2152/-127 | 贡献者：dingma, mading
 
 ### ✨ 新功能 (New Features)
 - **插件注册表独立设置页** (`0ec7c82f`): 插件注册表支持独立设置 tab，设置卡可脱离大设置页单独注册呈现。
@@ -14,6 +14,15 @@ All notable changes to this project will be documented in this file.
 - **ScrollBar 事件混淆崩溃** (`02a0151b`): 修复 ScrollBar 事件混淆导致的崩溃与折叠态矮内容高度异常。
 - **目录单元跨设备合并** (`545ad600`): dir 单元合并以三方内容合并取代跨设备 Lamport t 比较，避免同改误判。
 - **工作台自动展开逻辑** (`dc1be7a0`): 自动展开逻辑计入 workbench 宽度并维持折叠状态，不再误展开。
+
+### ✨ 新功能 (重新发布 #2 追加)
+- **icon_config 缓存与设置卡重建优化** (`819dfe2d`): PluginInfo icon_config 实例哨兵缓存（重扫重建即失效），LLMSettingsCard 重建错峰逐帧。
+- **云同步绑定自动恢复** (`8e3129c7`): ConfigSyncService 绑定后自动 resume，后台取 token 后主线程 enable。
+- **TraceCollector 共享 hub** (`e842b7d4`): 共享 hub 模块单例跨 widget 生命周期持久化，deleteLater 不 dispose。
+- **搜索高亮主题色** (`4e1b0538`): 主题补 search_highlight 键并更新 UI 组件取色来源。
+- **sandbox 路径解析** (`9a703b3a`): sandbox_check_tool 相对路径正确解析，补写边界测试。
+- **用户自定义人格** (`c0b5eebd`): persona 管理支持用户自定义人格与加载逻辑增强。
+- **插话上下文管理** (`aaac4fb4`): 插话处理管理 pending command 与 skill 上下文。
 
 ## [v0.6.14-beta] - 2026-11-02
 
