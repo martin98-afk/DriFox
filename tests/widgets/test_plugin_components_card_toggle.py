@@ -36,6 +36,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from app.plugins.component_items import ComponentItem  # noqa: E402
 from app.widgets.cards.settings.plugin_components_card import (  # noqa: E402
+    ComponentRow,
     PluginComponentsCard,
     PluginSectionWidget,
 )
@@ -206,3 +207,41 @@ class TestComponentToggleItemSync:
 
         ids_after = [id(r) for r in _row(card)._item_rows.values()]
         assert ids_before == ids_after
+
+class TestEmptyStateHint:
+    """空态文案必须跟随组件实际启停（2026-11-03 用户报告）
+
+    Bug 症状：设置页里组件总项是关的，展开细项却提示「该组件没有可单独配置
+    的细项」，而不是「组件已关闭，开启后可单独配置其中的条目」。
+
+    根因：打开设置页时 _apply_state 走 set_checked_silent(False) 静默回写开关，
+    该路径不回写 _component_on；构造时恒传 enabled=True，于是空态判断仍认为
+    组件是开着的。
+    """
+
+    def _empty_text(self, row):
+        labels = []
+        for i in range(row._items_layout.count()):
+            w = row._items_layout.itemAt(i).widget()
+            if w is not None and hasattr(w, "text"):
+                labels.append(w.text())
+        return labels
+
+    def test_disabled_component_shows_disabled_hint(self, qapp):
+        row = ComponentRow("tools", True)
+        row.set_checked_silent(False)
+        row.load_items([], lambda _: True)
+        try:
+            assert self._empty_text(row) == ["组件已关闭，开启后可单独配置其中的条目"]
+        finally:
+            row.deleteLater()
+
+    def test_enabled_component_shows_no_items_hint(self, qapp):
+        """组件启用且枚举为空 → 保留「本就没有细项」文案（对照）"""
+        row = ComponentRow("tools", True)
+        row.set_checked_silent(True)
+        row.load_items([], lambda _: True)
+        try:
+            assert self._empty_text(row) == ["该组件没有可单独配置的细项"]
+        finally:
+            row.deleteLater()
