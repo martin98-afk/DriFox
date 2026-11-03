@@ -1112,10 +1112,9 @@ class PluginManager:
             self.invalidate_mcp_cache()  # 启用插件可能带入新 MCP 配置
             logger.info(f"[PluginManager] Enabled plugin: {name}")
             state_changed = True
-        # 联动加载 UI 组件
-        self._load_plugin_ui(name)
-        # 对齐工具注册（该插件工具注册；watcher 未启动时跳过）
-        self._rescan_plugin_tools(name, enabled=True)
+        # 联动加载全部组件（与禁用路径对称）：只补 UI + 工具会让 providers /
+        # model_adapters / lsp / hooks 在「禁用→启用」后不再生效，直到重启。
+        self._load_plugin_components(name)
         # 状态实际变化才触发（幂等跳过重复启用）；置于末尾保证 diff 拿到注册后状态
         if state_changed:
             self._trigger_plugin_changed_hook("enabled", name)
@@ -1159,20 +1158,85 @@ class PluginManager:
             self.invalidate_mcp_cache()  # 禁用插件需剔除其 MCP 配置
             logger.info(f"[PluginManager] Disabled plugin: {name}")
             state_changed = True
-        # 联动卸载 UI 组件
-        self._unload_plugin_ui(name)
-        # 对齐工具注册（该插件工具注销；watcher 未启动时跳过）
-        self._rescan_plugin_tools(name, enabled=False)
-        # 注销该插件的贡献项（动态技能源/命令/智能体，能力池）
-        try:
-            from app.plugins.registries.contribution_registry import ContributionRegistry
-
-            ContributionRegistry.get_instance().unregister_source(name)
-        except Exception as e:
-            logger.warning(f"[PluginManager] 注销插件贡献失败: {e}")
+        # 联动卸载全部组件（不只是 UI/tools）：禁用语义 = 该插件的一切都不再生效。
+        # 历史实现只清 UI + tools + 贡献项，providers / model_adapters / storages /
+        # serializers / gateways / lsp / hooks / agents / commands 全部留在注册表里
+        # 继续生效——禁用后仍会被调用，且这类残留没有自愈轮询，只能重启进程。
+        self._unload_plugin_components(name)
         # 状态实际变化才触发（幂等跳过重复禁用）；置于末尾保证 diff 拿到注销后状态
         if state_changed:
             self._trigger_plugin_changed_hook("disabled", name)
+
+    def _load_plugin_components(self, name: str) -> None:
+        """启用路径：按 manifest 全组件加载（与 _unload_plugin_components 对称）。"""
+
+        def _run() -> None:
+            from app.core.services.plugin_host_service import PluginHostService
+
+            PluginHostService.get_instance()._reload_single_plugin(name, "__manifest__")
+
+        try:
+            import threading
+
+            from app.core.services.plugin_host_service import run_on_main_thread
+
+            # 同禁用路径：加载会碰 Qt（UI 注册 / 主题重载 / 命令快捷键重建）。
+            if threading.current_thread() is threading.main_thread():
+                _run()
+                return
+            if run_on_main_thread(_run):
+                return
+            logger.warning(f"[PluginManager] 启用插件组件加载未能投递主线程 ({name})，回退 UI+工具加载")
+        except Exception as e:
+            logger.warning(f"[PluginManager] 启用插件时全组件加载失败，回退 UI+工具加载 ({name}): {e}")
+        # 兜底：保持历史加载面
+        self._load_plugin_ui(name)
+        self._rescan_plugin_tools(name, enabled=True)
+
+    def _unload_plugin_components(self, name: str) -> None:
+        """禁用路径：按「插件已删除」语义卸载该插件全部组件 + 宿主级资源（幂等）。
+
+        复用 PluginHostService 的删除段（kernel reloader 分派），保证「禁用」与
+        「卸载」两条路径的清理面完全一致，不再各自维护一份子集。
+        """
+        plugin = self._plugins.get(name)
+        components = dict(plugin.components) if plugin is not None and isinstance(plugin.components, dict) else {}
+        manifest = (
+            dict(plugin.manifest)
+            if plugin is not None and isinstance(getattr(plugin, "manifest", None), dict)
+            else None
+        )
+
+        def _run() -> None:
+            from app.core.services.plugin_host_service import PluginHostService
+            from app.plugins.kernel import KNOWN_COMPONENTS
+
+            result = {k: (0 if k == "agents" else False) for k in KNOWN_COMPONENTS}
+            PluginHostService.get_instance()._cleanup_removed_plugin_components(
+                name, components, result, tuple(KNOWN_COMPONENTS), manifest=manifest
+            )
+
+        try:
+            import threading
+
+            from app.core.services.plugin_host_service import run_on_main_thread
+
+            # 组件卸载会碰 Qt：主题全量重载、命令快捷键重建、UI 实例销毁。
+            # 插件市场的启停在后台 worker 线程调用本方法（_set_managed_enabled），
+            # 直接执行就是跨线程操作 QShortcut/QWidget → 0xC0000005。
+            if threading.current_thread() is threading.main_thread():
+                _run()
+                return
+            if run_on_main_thread(_run):
+                return
+            logger.warning(
+                f"[PluginManager] 禁用插件组件卸载未能投递主线程 ({name})，回退 UI+工具清理"
+            )
+        except Exception as e:
+            logger.warning(f"[PluginManager] 禁用插件时全组件卸载失败，回退 UI+工具清理 ({name}): {e}")
+        # 兜底：至少保持历史清理面（UI + 工具），不让禁用整体失败
+        self._unload_plugin_ui(name)
+        self._rescan_plugin_tools(name, enabled=False)
 
     def _rescan_plugin_tools(self, name: str, enabled: bool) -> None:
         """插件启停后精准对齐工具注册（工具插件随启停热生效）。

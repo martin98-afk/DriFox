@@ -341,8 +341,25 @@ class RuntimeComponentLoader:
             removed_items = self._unload_source(plugin_name)
             if removed_items:
                 logger.info(f"[RuntimeLoader] 注销插件组件: {plugin_name}（{removed_items} 项）")
+            # 摘除该组件的插件模块引用（与 tools/providers 对齐）：reload_plugin 靠
+            # _load_module 内部 pop+exec 自然换新，但删除/禁用路径不再加载——不 pop
+            # 则旧模块（含模块级单例/QThread/定时器）永久驻留在 sys.modules。
+            self._purge_plugin_modules(plugin_name)
             # 跨根覆盖恢复：仅重扫比目标根更低等级的根（被覆盖方）
             self._rescan_roots_below(removed_rank)
+
+    def _purge_plugin_modules(self, plugin_name: str) -> int:
+        """从 sys.modules 摘除本组件类型的插件模块（前缀精确到 _ 分隔，防误伤同前缀插件）"""
+        head = f"drifox_rt_{self._comp_dir}_{plugin_name}"
+        removed = [m for m in list(sys.modules.keys()) if m == head or m.startswith(head + "_") or m.startswith(head + ".")]
+        for m in removed:
+            sys.modules.pop(m, None)
+        if removed:
+            import importlib
+
+            importlib.invalidate_caches()
+            logger.debug(f"[RuntimeLoader] 已清理模块 {len(removed)} 个: {self._comp_dir}/{plugin_name}")
+        return len(removed)
 
     def reload_plugin(self, plugin_name: str) -> None:
         """精准重载单个插件的运行时组件（安装/更新/启用路径），不波及他插件

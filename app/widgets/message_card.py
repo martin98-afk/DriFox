@@ -4172,6 +4172,15 @@ class MessageCard(SimpleCardWidget):
                     # 的字体变量。用户可能在这期间切过字体，这里按当前配置对齐
                     # （骨架字体规则读变量，一次 IPC 即可，无需重建骨架）。
                     pooled._apply_font_vars()
+                    # 🐛 主题同理（池化复用残留旧主题的实锤根因）：viewer 入池后
+                    # 挂在 WA_DontShowOnScreen 宿主上，不在任何窗口 widget 树，
+                    # 主题刷新的 findChildren 扫不到它 → 池中页面停留旧主题 CSS
+                    # 变量。跨主题切换后取用复用，body HTML（全 var() 引用）按旧
+                    # 变量渲染 → 深色主题白字画在浅色卡片上（欢迎卡片截图实证）。
+                    # refresh_theme 内部按 ThemeRefreshCoordinator 版本号幂等：
+                    # 主题没变过零 IPC，变过才注入；此时不可见则置 _theme_css_pending
+                    # 由 showEvent 补注入，两条路都闭合。
+                    pooled.refresh_theme()
                     self.viewer = pooled
                 except Exception:
                     # 骨架重载失败（C++ 对象已删除等）：弃用该实例，回退新建

@@ -691,23 +691,43 @@ class AssistantManager:
             return aid
         return fallback
 
+    def _session_state_dir(self) -> Path:
+        """会话级运行时状态目录：<app_data>/cache/assistant_hub/。
+
+        会话归属/临时 override 是纯运行时状态，非业务数据——assistant_hub
+        根目录整体注册为云同步业务目录（config_sync provider_id="assistant_hub"），
+        放根下会被整包推上云。cache 取 root 旁的 cache/assistant_hub（与宿主
+        commands_cache/头像缓存同源惯例）；root 传参时随 root 隔离，测试可断言。
+        """
+        return (self._root.parent / "cache" / "assistant_hub").resolve()
+
     def _session_map_path(self) -> Path:
-        return self._root / "_session_map.json"
+        return self._session_state_dir() / "_session_map.json"
 
     def _save_session_map(self) -> None:
         try:
-            self._ensure_dir(self._root)
+            self._ensure_dir(self._session_state_dir())
             self._session_map_path().write_text(json.dumps(self._session_map, ensure_ascii=False), encoding="utf-8")
         except Exception as e:
             logger.debug(f"[assistant_hub] 保存 session map 失败: {e}")
 
     def _load_session_map(self) -> None:
+        p = self._session_map_path()
+        legacy = self._root / "_session_map.json"
+        src = p if p.exists() else legacy
         try:
-            data = json.loads(self._session_map_path().read_text(encoding="utf-8"))
+            data = json.loads(src.read_text(encoding="utf-8"))
             if isinstance(data, dict):
                 type(self)._session_map = {str(k): str(v) for k, v in data.items()}
         except Exception:
-            pass
+            return
+        if src == legacy and src.exists():
+            # 旧位置（业务同步目录）一次性迁到 cache，避免继续被云同步上传
+            self._save_session_map()
+            try:
+                legacy.unlink()
+            except Exception:
+                pass
 
     @classmethod
     def get_session_override(cls, session_id: str) -> str:
@@ -723,11 +743,11 @@ class AssistantManager:
         return aid
 
     def _session_overrides_path(self) -> Path:
-        return self._root / "_session_overrides.json"
+        return self._session_state_dir() / "_session_overrides.json"
 
     def _save_session_overrides(self) -> None:
         try:
-            self._ensure_dir(self._root)
+            self._ensure_dir(self._session_state_dir())
             self._session_overrides_path().write_text(
                 json.dumps(self._session_overrides, ensure_ascii=False), encoding="utf-8"
             )
@@ -735,12 +755,22 @@ class AssistantManager:
             logger.debug(f"[assistant_hub] 保存 session overrides 失败: {e}")
 
     def _load_session_overrides(self) -> None:
+        p = self._session_overrides_path()
+        legacy = self._root / "_session_overrides.json"
+        src = p if p.exists() else legacy
         try:
-            data = json.loads(self._session_overrides_path().read_text(encoding="utf-8"))
+            data = json.loads(src.read_text(encoding="utf-8"))
             if isinstance(data, dict):
                 type(self)._session_overrides = {str(k): str(v) for k, v in data.items()}
         except Exception:
-            pass
+            return
+        if src == legacy and src.exists():
+            # 旧位置（业务同步目录）一次性迁到 cache，避免继续被云同步上传
+            self._save_session_overrides()
+            try:
+                legacy.unlink()
+            except Exception:
+                pass
 
     # ── 预置工具档位（初始注入 schema，hooks 与 UI 统计共用归属逻辑）──
 

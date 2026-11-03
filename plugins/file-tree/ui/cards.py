@@ -113,13 +113,18 @@ def _ctx_text_color(ctx: dict, secondary: bool = False) -> str:
 def _parse_theme_color(color_str: str) -> QColor:
     if not color_str:
         return QColor(33, 33, 38)
-    m = re.match(r"rgba\s*\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\)", color_str)
+    # alpha 兼容小数（CSS 风格 rgba(...,0.66)，主题 YAML 常用）与整数（rgba(...,160)）两种写法；
+    # 小数 alpha 不匹配会落到 QColor() 兜底，而 QColor 不认 CSS 函数格式 → invalid 纯黑
+    m = re.match(r"rgba\s*\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*([\d.]+)\s*\)", color_str)
     if m:
-        return QColor(int(m.group(1)), int(m.group(2)), int(m.group(3)), int(m.group(4)))
+        a = float(m.group(4))
+        alpha = int(round(a * 255)) if a <= 1 else int(a)
+        return QColor(int(m.group(1)), int(m.group(2)), int(m.group(3)), min(255, max(0, alpha)))
     m = re.match(r"rgb\s*\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\)", color_str)
     if m:
         return QColor(int(m.group(1)), int(m.group(2)), int(m.group(3)))
-    return QColor(color_str)
+    c = QColor(color_str)
+    return c if c.isValid() else QColor(150, 150, 150)
 
 
 def _make_colors_from_context(ctx: dict) -> dict:

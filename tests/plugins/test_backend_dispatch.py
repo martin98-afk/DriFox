@@ -305,11 +305,11 @@ def test_reload_plugin_subsystems_diff_precise(kernel_env, monkeypatch):
         staticmethod(lambda: fake_pm),
     )
 
-    def _fake_single(name, comp):
+    def _fake_single(name, comp, previous_components=None):
         seen.append((name, comp))
         return {}
 
-    def _fake_cleanup(name, comps, res, keys):
+    def _fake_cleanup(name, comps, res, keys, manifest=None):
         cleanup_calls.append((name, dict(comps)))
         return res
 
@@ -346,7 +346,7 @@ def test_reload_plugin_subsystems_no_diff_skips(kernel_env, monkeypatch):
     monkeypatch.setattr(
         backend,
         "_cleanup_removed_plugin_components",
-        lambda n, comps, res, keys: reloaded.append(n) or res,
+        lambda n, comps, res, keys, manifest=None: reloaded.append(n) or res,
     )
 
     result = backend.reload_plugin_subsystems()

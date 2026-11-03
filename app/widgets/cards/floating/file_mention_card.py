@@ -538,6 +538,32 @@ class FileMentionItemWidget(QWidget):
         self.style().unpolish(self)
         self.style().polish(self)
 
+    def refresh_theme(self):
+        """响应主题切换：重烘焙文字色与搜索高亮色
+
+        _path_label/_desc_label 的 QSS 在 _setup_ui 构造时烘焙 TEXT_PRIMARY/
+        TEXT_SECONDARY（主题源色），主题切换后停留旧色；高亮色 SEARCH_HIGHLIGHT
+        亦为主题源。背景走 _apply_bg 的指纹机制（指纹含颜色值）自动换新样式，
+        无需在此重设。
+        """
+        self._path_label.setStyleSheet(f"""
+            QLabel {{
+                color: {Colors.TEXT_PRIMARY};
+                {get_font_family_css()} {font_size_css(13)};
+                background: transparent;
+            }}
+        """)
+        self._desc_label.setStyleSheet(f"""
+            QLabel {{
+                color: {Colors.TEXT_SECONDARY};
+                {get_font_family_css()} {font_size_css(12)};
+                background: transparent;
+            }}
+        """)
+        # 重跑显示更新：有 query 时按当前主题色重设搜索高亮
+        self._update_display()
+        self._apply_bg()
+
     @staticmethod
     def _all_highlight_queries(text: str, query: str) -> List[str]:
         """从多关键字 query 中提取所有能匹配到 text 的关键字
@@ -765,14 +791,16 @@ class FileMentionCard(QWidget):
         layout.addWidget(self._scroll_area)
 
     def refresh_style(self):
-        """响应主题切换：重建滚动区 QSS（滚动条颜色随主题）
+        """响应主题切换：重烘焙卡片表面 + 滚动区 QSS + 已渲染条目
 
-        FileMentionCard 自身背景用 REALTIME_*（非主题源色，恒不变），但
-        滚动条色取自 Colors.SCROLLBAR_HANDLE_BG（主题源属性）；此前只在
-        __init__ 烘焙一次，主题切换后停留旧色。此处随主题刷新重建并强制
-        unpolish/polish 即时生效。
+        卡片表面走 CardStyles.floating（CARD_BG/BORDER 主题源色），只在
+        __init__ 烘焙一次会停留构造时主题（浅色构建 → 切深色后白底停留）。
+        滚动条色取自 Colors.SCROLLBAR_HANDLE_BG（主题源属性），随主题重建并
+        强制 unpolish/polish 即时生效。已渲染条目的文字/高亮色同理，逐个
+        refresh_theme（懒加载下通常仅几十个，成本可忽略）。
         """
         Colors.refresh()
+        self.setStyleSheet(CardStyles.floating("FileMentionCard"))
         if hasattr(self, "_scroll_area") and self._scroll_area is not None:
             self._scroll_area.setStyleSheet(f"""
                 QScrollArea, QScrollArea * {{
@@ -790,6 +818,12 @@ class FileMentionCard(QWidget):
                     if sb_style is not None:
                         sb_style.unpolish(sb)
                         sb_style.polish(sb)
+        # 已渲染条目：文字色/高亮色随主题（背景由指纹机制自愈）
+        for w in list(self._item_widgets):
+            try:
+                w.refresh_theme()
+            except RuntimeError:
+                continue
 
     def set_root_dir(self, root_dir: str):
         """设置根目录（自动归一化路径，避免 Windows 上混合斜杠）"""
