@@ -8094,6 +8094,29 @@ class OpenAIChatToolWindow(ToolWindow):
         Colors.refresh()
         return f"color: {Colors.TEXT_PRIMARY}; {font_size_css(13)} font-weight: bold; background: transparent;"
 
+    def _refresh_provider_icon_pixmap(self):
+        """按当前主题重设输入框模型按钮的服务商 icon 位图。
+
+        get_provider_icon 的 LRU 缓存键含主题状态，主题切换后取到的是新主题
+        QIcon；但 QLabel.setPixmap 落的是静态位图，必须重取重设才生效（与
+        _settings_btn_icon 同理，见 _apply_runtime_ui_settings 5b 块）。
+        自定义服务商不在 ProviderRegistry → get_provider_icon 返回空 icon，
+        回退 qrc 通用「大模型」图标（主题感知），避免空白。
+        """
+        if not hasattr(self, "_model_btn_icon"):
+            return
+        pname = self._current_provider_name
+        if pname in self._valid_configs:
+            pname = self._valid_configs[pname].get("provider_name", pname)
+        icon = get_provider_icon(pname) if pname else None
+        if icon and not icon.isNull():
+            pm = icon.pixmap(15, 15)
+            if pm.width() != pm.height():
+                pm = pm.scaled(15, 15, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            self._model_btn_icon.setPixmap(pm)
+        else:
+            self._model_btn_icon.setPixmap(get_icon("大模型").pixmap(15, 15))
+
     def _update_model_selector_btn(self):
         """更新模型选择按钮的图标和文字显示"""
         from app.widgets.cards.settings.model_selector_card import _format_cost_number
@@ -8107,18 +8130,9 @@ class OpenAIChatToolWindow(ToolWindow):
             config = self._valid_configs[self._current_provider_name]
             display = config.get("display_name", self._current_provider_name)
             pname = config.get("provider_name", display)
-        # 设置图标（按 provider_name 查插件图标注册表，不按 UUID 查）
-        icon = None
-        if pname:
-            icon = get_provider_icon(pname)
-
-        if icon and not icon.isNull():
-            pm = icon.pixmap(15, 15)
-            if pm.width() != pm.height():
-                pm = pm.scaled(15, 15, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-            self._model_btn_icon.setPixmap(pm)
-        else:
-            self._model_btn_icon.clear()
+        # 设置图标（按 provider_name 查插件图标注册表，不按 UUID 查；
+        # 含自定义服务商回退 + 主题感知重设，见 _refresh_provider_icon_pixmap）
+        self._refresh_provider_icon_pixmap()
 
         # 设置文字（用 display_name 给用户看，避免 UUID 显示）
         if self._current_provider_name and self._current_model_name:
@@ -11535,6 +11549,9 @@ class OpenAIChatToolWindow(ToolWindow):
             """)
         if hasattr(self, "_settings_btn_icon"):
             self._settings_btn_icon.setPixmap(get_icon("模型选择").pixmap(16, 16))
+        # 模型按钮服务商 icon：pixmap 是静态位图，主题切换后不会自动更新 ——
+        # 与 _settings_btn_icon 同理用当前主题重设（含自定义服务商回退图标）
+        self._refresh_provider_icon_pixmap()
 
         ThemeRefreshCoordinator.timer_end("cards_5b")
         if self._slow_refresh_cards:

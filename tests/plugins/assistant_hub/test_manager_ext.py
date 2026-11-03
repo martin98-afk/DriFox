@@ -46,10 +46,27 @@ def test_session_map_persist_and_reload(tmp_path):
     a2 = mgr.create("临时助手")
     mgr.record_session_aid("s1", a1.id)
     mgr.record_session_aid("s2", a2.id)
-    assert (tmp_path / "hub" / "_session_map.json").exists()
+    # 运行时状态存 cache（root 旁 cache/assistant_hub），不进业务同步目录
+    assert (tmp_path / "cache" / "assistant_hub" / "_session_map.json").exists()
+    assert not (tmp_path / "hub" / "_session_map.json").exists()
     # 重载后映射保留
     mgr2 = _fresh_manager(tmp_path)
     assert mgr2.resolve_session_aid("s2") == a2.id
+
+def test_session_map_migrates_from_legacy_root(tmp_path):
+    """旧版文件存业务目录根下：加载后迁到 cache，原文件删除。"""
+    mgr = _fresh_manager(tmp_path)
+    a1 = mgr.create("主助手")
+    mgr.set_primary(a1.id)
+    mgr.record_session_aid("s1", a1.id)
+    # 手工模拟旧版布局
+    legacy = tmp_path / "hub" / "_session_map.json"
+    legacy.write_text((tmp_path / "cache" / "assistant_hub" / "_session_map.json").read_text(encoding="utf-8"), encoding="utf-8")
+    (tmp_path / "cache" / "assistant_hub" / "_session_map.json").unlink()
+    mgr2 = _fresh_manager(tmp_path)
+    assert mgr2.resolve_session_aid("s1") == a1.id
+    assert (tmp_path / "cache" / "assistant_hub" / "_session_map.json").exists()
+    assert not legacy.exists()
 
 
 def test_session_map_deleted_assistant_falls_back(tmp_path):
@@ -79,7 +96,8 @@ def test_session_override_persist_and_reload(tmp_path):
     mgr.create("主助手")
     a2 = mgr.create("临时助手")
     assert mgr.set_session_override("s1", a2.id)
-    assert (tmp_path / "hub" / "_session_overrides.json").exists()
+    assert (tmp_path / "cache" / "assistant_hub" / "_session_overrides.json").exists()
+    assert not (tmp_path / "hub" / "_session_overrides.json").exists()
     # 重启（新实例）后 override 保留
     mgr2 = _fresh_manager(tmp_path)
     assert mgr2.get_session_override("s1") == a2.id
