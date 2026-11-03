@@ -1,9 +1,9 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
-## [v0.6.14] - 2026-11-03 (重新发布 #2)
+## [v0.6.14] - 2026-11-03 (重新发布 #3)
 
-自 v0.6.14-beta 以来的变更 | 提交数：13 · 文件变更：63 · +2152/-127 | 贡献者：dingma, mading
+自 v0.6.14-beta 以来的变更 | 提交数：19 · 文件变更：81 · +3293/-215 | 贡献者：dingma, mading
 
 ### ✨ 新功能 (New Features)
 - **插件注册表独立设置页** (`0ec7c82f`): 插件注册表支持独立设置 tab，设置卡可脱离大设置页单独注册呈现。
@@ -23,6 +23,11 @@ All notable changes to this project will be documented in this file.
 - **sandbox 路径解析** (`9a703b3a`): sandbox_check_tool 相对路径正确解析，补写边界测试。
 - **用户自定义人格** (`c0b5eebd`): persona 管理支持用户自定义人格与加载逻辑增强。
 - **插话上下文管理** (`aaac4fb4`): 插话处理管理 pending command 与 skill 上下文。
+
+### ✨ 新功能 (重新发布 #3 追加)
+- **主题切换刷新增强** (`8285d5aa` · `99f652bd` · `ae49e32a`): provider icon 随主题重取并对自定义 provider 回退，FileMentionCard 及其条目配色同步，池化 viewer 的 CSS 变量注入完整性补齐。
+- **插件热重载与清理保真** (`47973246` · `75e8996f`): 热重载 dedup 锁、精准全量目标保留、组件卸载释放 host 资源与 UI 注册注销；QWebEngineView 安全移除避免热重载崩溃。
+- **组件开关空态提示修正** (`696c64fe`): 空态提示按组件实际开关状态显示。
 
 ## [v0.6.14-beta] - 2026-11-02
 
