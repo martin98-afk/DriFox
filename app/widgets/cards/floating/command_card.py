@@ -417,7 +417,7 @@ class CommandItemWidget(QWidget):
                         if pos < start:
                             parts.append(safe_text[pos:start])
                         parts.append(
-                            f'<span style="color: {Colors.SEND_BTN_START}; font-weight: bold;">'
+                            f'<span style="color: {Colors.SEARCH_HIGHLIGHT}; font-weight: bold;">'
                             f"{safe_text[start:end]}</span>"
                         )
                         pos = end
@@ -437,7 +437,7 @@ class CommandItemWidget(QWidget):
         if query:
             hls = self._all_highlight_queries(desc, query)
             if hls:
-                self._desc_label.setHighlights(hls, Colors.SEND_BTN_START)
+                self._desc_label.setHighlights(hls, Colors.SEARCH_HIGHLIGHT)
 
     def _update_tag_visibility(self):
         """根据 item 类型和 subtype 更新标签文本和可见性"""
@@ -583,16 +583,16 @@ class ParameterItemWidget(QWidget):
         字体大小/族使用 font_size_css + get_font_family_css 与全局 UI 字号联动。
 
         视觉规范：
-        - 参数名：font-size 12、bold；默认色 SEND_BTN_START，必填时 HTML <span> 覆盖星号为 ERROR 红色
+        - 参数名：font-size 12、bold；默认色 SEARCH_HIGHLIGHT，必填时 HTML <span> 覆盖星号为 ERROR 红色
         - 参数说明：font-size 11、TEXT_SECONDARY、stretch 撑满
         """
         Colors.refresh()
         font_css = get_font_family_css()
-        # 参数名（12px + bold；默认色 SEND_BTN_START，必填时 HTML <span> 覆盖星号色为 ERROR）
+        # 参数名（12px + bold；默认色 SEARCH_HIGHLIGHT，必填时 HTML <span> 覆盖星号色为 ERROR）
         if hasattr(self, "_name_label") and self._name_label is not None:
             self._name_label.setStyleSheet(f"""
                 QLabel {{
-                    color: {Colors.SEND_BTN_START};
+                    color: {Colors.SEARCH_HIGHLIGHT};
                     background: transparent;
                     font-weight: bold;
                     {font_css} {font_size_css(12)};
@@ -615,14 +615,14 @@ class ParameterItemWidget(QWidget):
         必填时前缀红色 ERROR 星号；已激活参数显示 ✓ 前缀 + 次要色。
         QLabel 在 RichText 模式下，未包裹在带 color 的 span 内的文本
         会用默认调色板色（通常为黑），不会继承 stylesheet color。
-        因此把参数名也用 <span> 显式包裹，统一走 SEND_BTN_START（或 TEXT_SECONDARY 当已激活）。
+        因此把参数名也用 <span> 显式包裹，统一走 SEARCH_HIGHLIGHT（或 TEXT_SECONDARY 当已激活）。
         """
         if not hasattr(self, "_name_label") or self._name_label is None:
             return
         escaped = html.escape(self._param.name)
         star = f'<span style="color: {Colors.ERROR};">*</span>' if self._param.required else ""
         check = f'<span style="color: {Colors.REALTIME_SUCCESS};">✓ </span>' if self._active else ""
-        color = Colors.TEXT_SECONDARY if self._active else Colors.SEND_BTN_START
+        color = Colors.TEXT_SECONDARY if self._active else Colors.SEARCH_HIGHLIGHT
         self._name_label.setText(f'{check}{star}<span style="color: {color};">{escaped}</span>')
 
     @property
@@ -1340,7 +1340,7 @@ class CommandCard(QWidget):
                         if pos < start:
                             parts.append(safe[pos:start])
                         parts.append(
-                            f'<span style="color: {Colors.SEND_BTN_START}; font-weight: bold;">{safe[start:end]}</span>'
+                            f'<span style="color: {Colors.SEARCH_HIGHLIGHT}; font-weight: bold;">{safe[start:end]}</span>'
                         )
                         pos = end
                     if pos < len(safe):
@@ -1641,7 +1641,7 @@ class CommandCard(QWidget):
         if not hasattr(self, "_detail_hint_label") or self._detail_hint_label is None:
             return
         self._detail_hint_label.setStyleSheet(f"""
-            QLabel {{ color: {Colors.SEND_BTN_START}; {get_font_family_css()} {font_size_css(12)}; background: transparent; margin: 0; padding: 0; }}
+            QLabel {{ color: {Colors.SEARCH_HIGHLIGHT}; {get_font_family_css()} {font_size_css(12)}; background: transparent; margin: 0; padding: 0; }}
         """)
 
     # ---- Detail 模式 ----
