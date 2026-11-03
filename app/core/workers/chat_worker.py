@@ -764,7 +764,15 @@ class OpenAIChatWorker(QThread):
         一致）。异常兜底：hook 链失败时退化为直接注入插话消息，不影响消费
         主流程；skip_finished_callback=True 对齐 _trigger_worker_hook（输出
         由返回值收集注入，不走 on_hook_finished 队列通道防重复投递）。
+
+        消息上的 ``_interject_pending_ctx``（插话入队时从 session.metadata
+        pop 出的 pending_command/pending_skill）在首行剥净后并入 PreUserMessage
+        ctx：插话绕开 PreSendWorker，不并入则 inject_command_prompt hook
+        输出为空（`/cmd`、`/skill` 提示词不注入）。剥净同时保证降级直注入
+        路径不把传输键写进会话。
         """
+        # 必须在任何降级 return 之前剥净：无 hook_manager 时消息直接原样注入。
+        pending_ctx = msg.pop("_interject_pending_ctx", None) or {}
         import os
 
         from app.core.conversation.backend import _make_hook_message
@@ -811,6 +819,8 @@ class OpenAIChatWorker(QThread):
                 pre_ctx.update(backend._build_worktree_context_dict() or {})
             except Exception as e:
                 logger.debug(f"[Interject] PreUserMessage 增强 ctx 构建失败（降级基础 ctx）: {e}")
+            if pending_ctx:
+                pre_ctx.update(pending_ctx)
 
             for event_name, ctx in (("UserPromptSubmit", _base_ctx()), ("PreUserMessage", pre_ctx)):
                 try:
