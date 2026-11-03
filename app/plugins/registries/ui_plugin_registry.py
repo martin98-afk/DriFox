@@ -4401,6 +4401,15 @@ class UIPluginRegistry:
                             win_data["containers"].pop(card_id, None)
 
             # 2. 从容器布局移除
+            # 🛡️ 热重载防崩（2026-11-03 crash_20261103_152810）：先 hide 再脱父树。
+            # QWebEngineView 是原生 HWND：可见态直接 setParent(None) 会变独立顶层
+            # 窗口白闪，且可见性变化会同步联动 Chromium renderer——摘除若发生在
+            # 该联动栈内会走进 Qt5WebEngineWidgets 销毁链读 0x0 崩溃。收敛顺序
+            # 必须为 hide → 容器摘除 → setParent(None) → deleteLater。
+            try:
+                widget.hide()
+            except RuntimeError:
+                pass
             parent_container = widget.parent()
             if parent_container is not None and hasattr(parent_container, "remove_card"):
                 try:

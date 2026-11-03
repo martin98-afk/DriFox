@@ -314,9 +314,31 @@ class WorkbenchPanel(QWidget):
         # 关页前收敛：slide 目标页可能就是被移除的这张卡
         self._slide.finish_now()
         widget = entry["widget"]
-        if self._stack.indexOf(widget) >= 0:
-            self._stack.removeWidget(widget)
-            widget.setParent(None)
+        # 🛡️ 热重载防崩（2026-11-03 crash_20261103_152810）：含 QWebEngineView 的
+        # 页面在可见态被 removeWidget 摘出栈，会同步触发 Chromium 绑定层销毁链
+        # （Qt5WebEngineWidgets.dll 经 ctypes/libffi 读 0x0 → ACCESS_VIOLATION）。
+        # 摘除前先 hide + 脱父树收敛可见性/父子链，再摘出栈；sip 已标记 deleted
+        # 的 wrapper 跳过全部 Qt 侧操作（C++ 析构时 QStackedLayout 自清条目）。
+        # 刻意不用 ui_helpers.is_widget_alive：其模块链会拉起 MessageCard/WebEngine，
+        # 此处只需 sip.isdeleted 一个判定，避免重依赖。
+        from PyQt5 import sip
+
+        try:
+            wrapper_deleted = sip.isdeleted(widget)
+        except Exception:
+            wrapper_deleted = False
+
+        if not wrapper_deleted:
+            try:
+                if self._stack.indexOf(widget) >= 0:
+                    widget.hide()
+                    widget.setParent(None)
+                    # 脱父树后 QStackedLayout 通常已自清条目，此兜底防实现差异
+                    if self._stack.indexOf(widget) >= 0:
+                        self._stack.removeWidget(widget)
+            except RuntimeError:
+                # wrapper 已被并发析构：Qt 侧条目自清，只走下方簿记收尾
+                pass
         self._rebuild_tab_bar()
         # 当前页被移除时 QStackedWidget 已自动切到邻近页，这里同步按钮高亮；
         # 极端情况（空栈）回落产物页
