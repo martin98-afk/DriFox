@@ -24089,7 +24089,9 @@ class OpenAIChatToolWindow(ToolWindow):
             # 同步到 tool_executor，确保 stage_files 等工具写入正确的项目
             if self.backend and self.backend.tool_executor:
                 self.backend.tool_executor.set_current_project(default_project)
-            self._create_new_session(close_history=True)
+            # 归档后项目卡片保持展开（用户常在卡片内连续归档/切换）：只切
+            # 项目+新建会话，不再隐藏历史卡（真切换让位仅限用户显式动作）。
+            self._create_new_session(close_history=False)
             # 团队模式：归档当前项目切回默认项目，同样触发团队级同步
             # P2-B：prev_project = project_name（归档前项目），此时
             # _current_project 已切到默认项目，不能靠函数内兜底取值。
@@ -24120,9 +24122,9 @@ class OpenAIChatToolWindow(ToolWindow):
         # 若用户此前把筛选切到了被归档的项目 X，_project_filter_by_tab 里仍残留
         # "X"，而 X 的会话已全部归档、get_history_list("X") 恒空 → 列表永空白、
         # 折叠头仍显示已归档的 X，只能手动点「全部项目」恢复。
-        # 与 _on_project_selected / _on_new_project_created 同口径：
-        # 收起面板 + 筛选跟随窗口项目（归档当前项目时窗口已切回默认项目）。
-        self._collapse_project_selector_panel()
+        # 面板保持展开（归档后用户可能继续归档/切换其他项目），仅让筛选
+        # 跟随窗口项目（归档当前项目时窗口已切回默认项目）；列表由结尾
+        # _refresh_project_selector 刷新，被归档项目即时消失。
         self._history_page_follow_window_project()
 
         # 刷新历史面板
