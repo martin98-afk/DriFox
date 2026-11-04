@@ -173,6 +173,8 @@ def validate_marketplace_source(source: Any) -> Tuple[bool, str]:
       仓库内相对子目录（禁绝对路径与 .. 穿越）。注意：安装器本就支持
       git-subdir（DriFox 旧格式，drifox-plugins 市场全量在用），
       校验器必须与其能力面对齐，否则合法安装被误拦。
+    - tarball → url 同 url 规则（GitHub Release asset 直链）；sha256 若有必须是
+      64 位十六进制（下载后校验内容完整性，防篡改/传输损坏）
     - 其余类型与 file:///ssh:// 等一律拒绝
 
     Returns:
@@ -194,10 +196,14 @@ def validate_marketplace_source(source: Any) -> Tuple[bool, str]:
             ):
                 return True, ""
             return False, f"github repo 不合法: {repo!r}（须为 owner/name 形态，禁路径穿越）"
-        if src_type in ("url", "git-subdir"):
+        if src_type in ("url", "git-subdir", "tarball"):
             ok, reason = _validate_git_url_field(source.get("url"), allow_shorthand=(src_type == "git-subdir"))
             if not ok:
                 return False, reason
+            if src_type == "tarball":
+                sha = str(source.get("sha256") or "").strip()
+                if sha and not re.fullmatch(r"[0-9a-fA-F]{64}", sha):
+                    return False, f"tarball sha256 格式非法: {sha[:16]}…（须 64 位十六进制）"
             if src_type == "git-subdir":
                 subpath = str(source.get("path") or "").strip()
                 norm = subpath.replace("\\", "/")
@@ -468,26 +474,57 @@ class MarketplaceSourceManager:
             plugin.setdefault("_marketplace", name)
             plugin.setdefault("_marketplace_source", src)
 
-    def _http_get(self, url: str, **kwargs) -> "httpx.Response":
-        """应用代理发起 GET；代理失败回退直连
+    def _candidate_urls(self, url: str) -> List[str]:
+        """市场清单拉取候选（按序尝试，全部失败才报错）
 
-        - 未启用代理：直接请求原 URL（零开销）
-        - 启用代理：先请求改写 URL（或带 proxy 参数），失败后
-          换原 URL 直连重试一次，日志记录回退原因。
+        顺序：代理改写（若配置）→ jsDelivr gh 镜像（仅 raw.githubusercontent）
+        → 原 URL。镜像意义：实测当前环境 raw 拉 246KB 清单 15s 未完，
+        jsDelivr 同文件 11.7s 拉全且 CDN 有国内节点。
+        """
+        out: List[str] = []
+        proxy = get_proxy_config()
+        try:
+            rw = proxy.rewrite_url(url)
+            if rw and rw != url:
+                out.append(rw)
+        except Exception:
+            pass
+        m = re.match(
+            r"https://raw\.githubusercontent\.com/([^/]+)/([^/]+)/([^/]+)/(.+)", url
+        )
+        if m:
+            owner, repo, ref, path = m.groups()
+            out.append(f"https://cdn.jsdelivr.net/gh/{owner}/{repo}@{ref}/{path}")
+        out.append(url)
+        seen, uniq = set(), []
+        for u in out:
+            if u not in seen:
+                seen.add(u)
+                uniq.append(u)
+        return uniq
+
+    def _http_get(self, url: str, **kwargs) -> "httpx.Response":
+        """应用代理/镜像候选发起 GET；全部失败才抛最后一个异常
+
+        - 未启用代理：代理改写不产生候选，走镜像 → 原 URL
+        - 启用代理：改写 URL 优先，失败后换镜像/直连重试
         """
         proxy = get_proxy_config()
-        proxied_url = proxy.rewrite_url(url)
-        try:
-            resp = httpx.get(proxied_url, **kwargs, **proxy.httpx_kwargs())
-            resp.raise_for_status()
-            return resp
-        except Exception:
-            if proxied_url != url:
-                logger.warning(f"[Marketplace] proxy failed, fallback to direct: {url}")
-                resp = httpx.get(url, **kwargs)
+        last: Optional[Exception] = None
+        for cand in self._candidate_urls(url):
+            try:
+                resp = httpx.get(cand, **kwargs, **proxy.httpx_kwargs())
                 resp.raise_for_status()
+                if cand != url:
+                    logger.debug(f"[Marketplace] 清单拉取命中候选: {cand}")
                 return resp
-            raise
+            except Exception as e:
+                last = e
+                if cand != url:
+                    logger.warning(f"[Marketplace] 候选失败，换下一个: {cand} ({e})")
+        if last is not None:
+            raise last
+        raise RuntimeError(f"无可用拉取候选: {url}")
 
     def fetch_marketplace(self, source_def: Dict[str, Any], force: bool = False) -> Dict[str, Any]:
         """拉取单个市场的 marketplace.json 数据

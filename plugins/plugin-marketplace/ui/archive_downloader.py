@@ -25,6 +25,7 @@
 代理按 ProxyConfig 模式分别处理：prefix/selfhost 走 URL 改写，http 走 ProxyHandler。
 """
 
+import hashlib
 import io
 import re
 import tarfile
@@ -247,52 +248,57 @@ def _normalize_subpath(subpath: str) -> str:
     return s.strip("/")
 
 
-def extract_subtree(data: bytes, subpath: str, dest_dir: Path) -> Path:
-    """从归档字节流中只解压仓库内 subpath 子树，返回落地的目录路径
+def _extract_members(tf: tarfile.TarFile, subpath: str, dest_dir: Path, strip_top: bool = True) -> Path:
+    """流式逐成员解压（extract_subtree / extract_tarball_file 共用）
 
-    流式逐成员处理（不 extractall），实测同一 59.9MB 归档：
-    全量解压 14.0s vs 只取子目录 0.5s。
+    不 extractall；符号链接/设备文件一律不落地，子目录外成员全部跳过。
 
-    ``filter="data"`` 拦截绝对路径 / ``..`` 穿越 / 危险链接成员。
+    Args:
+        strip_top: True = 包有顶层目录（GitHub archive 的 repo-ref/），剥掉首段；
+            False = 包根即内容（单插件分发 tarball），保留原路径
     """
     sub = _normalize_subpath(subpath)
     dest_dir.mkdir(parents=True, exist_ok=True)
     top_name: Optional[str] = None
     extracted = 0
-    with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tf:
-        for m in tf:
+    for m in tf:
+        if strip_top:
             parts = m.name.split("/", 1)
             if top_name is None:
                 top_name = parts[0]
             rel = parts[1] if len(parts) > 1 else ""
-            if rel in _SKIP_TOP:
+        else:
+            if top_name is None:
+                top_name = m.name
+            rel = m.name
+        if rel in _SKIP_TOP:
+            continue
+        # subpath 为空/"." → 整包落到 dest_dir（保持顶层目录名）
+        if sub:
+            if not (rel == sub or rel.startswith(sub + "/")):
                 continue
-            # subpath 为空/"." → 整仓落到 dest_dir（保持顶层目录名）
-            if sub:
-                if not (rel == sub or rel.startswith(sub + "/")):
-                    continue
-                target_rel = rel[len(sub):].lstrip("/")
-                if not target_rel:
-                    continue  # 子目录自身条目
-            else:
-                target_rel = rel
-            if m.isdir():
-                (dest_dir / target_rel).mkdir(parents=True, exist_ok=True)
-                continue
-            if not m.isfile():
-                continue  # 符号链接/设备文件不落地（插件不需要，且规避安全问题）
-            out = dest_dir / target_rel
-            out.parent.mkdir(parents=True, exist_ok=True)
-            src = tf.extractfile(m)
-            if src is None:
-                continue
-            with src, open(out, "wb") as fh:
-                while True:
-                    chunk = src.read(1024 * 256)
-                    if not chunk:
-                        break
-                    fh.write(chunk)
-            extracted += 1
+            target_rel = rel[len(sub):].lstrip("/")
+            if not target_rel:
+                continue  # 子目录自身条目
+        else:
+            target_rel = rel
+        if m.isdir():
+            (dest_dir / target_rel).mkdir(parents=True, exist_ok=True)
+            continue
+        if not m.isfile():
+            continue  # 符号链接/设备文件不落地（插件不需要，且规避安全问题）
+        out = dest_dir / target_rel
+        out.parent.mkdir(parents=True, exist_ok=True)
+        src = tf.extractfile(m)
+        if src is None:
+            continue
+        with src, open(out, "wb") as fh:
+            while True:
+                chunk = src.read(1024 * 256)
+                if not chunk:
+                    break
+                fh.write(chunk)
+        extracted += 1
 
     if top_name is None:
         raise ArchiveFetchError("归档内容为空（tarball 无成员）")
@@ -300,6 +306,62 @@ def extract_subtree(data: bytes, subpath: str, dest_dir: Path) -> Path:
         raise ArchiveFetchError(f"归档中未找到子目录 {subpath!r}")
     logger.debug(f"[Installer] 归档流式解压 {extracted} 个文件 → {dest_dir}")
     return dest_dir
+
+
+def extract_subtree(data: bytes, subpath: str, dest_dir: Path) -> Path:
+    """从归档字节流中只解压仓库内 subpath 子树，返回落地的目录路径
+
+    流式逐成员处理（不 extractall），实测同一 59.9MB 归档：
+    全量解压 14.0s vs 只取子目录 0.5s。
+    """
+    with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tf:
+        return _extract_members(tf, subpath, dest_dir)
+
+
+def extract_tarball_file(tar_path: Path, subpath: str, dest_dir: Path) -> Path:
+    """从磁盘 tarball 流式解压（单插件分发包用；不整包入内存）
+
+    单插件包根即插件内容（无顶层目录），不剥首段。
+    """
+    with tarfile.open(tar_path, mode="r:gz") as tf:
+        return _extract_members(tf, subpath, dest_dir, strip_top=False)
+
+
+def download_tarball(
+    direct_urls: List[str], dest: Path, proxy=None, timeout: float = _HTTP_TIMEOUT
+) -> str:
+    """流式下载 tarball 到 dest（候选 URL 依次尝试），返回 sha256
+
+    边下边算哈希，不整包入内存（单插件包可达数十 MB）。
+    加速站改写候选优先、直连兜底，全部失败抛 ArchiveFetchError。
+    """
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    opener = _build_opener(proxy)
+    candidates = _url_candidates(proxy, direct_urls)
+    last = "未尝试任何候选"
+    for u in candidates:
+        sha = hashlib.sha256()
+        try:
+            req = urllib.request.Request(u, headers={"User-Agent": _UA, "Accept": "*/*"})
+            with opener.open(req, timeout=timeout) as resp, open(dest, "wb") as fh:
+                while True:
+                    chunk = resp.read(1024 * 256)
+                    if not chunk:
+                        break
+                    sha.update(chunk)
+                    fh.write(chunk)
+            if dest.stat().st_size == 0:
+                raise ArchiveFetchError("下载内容为空")
+            return sha.hexdigest()
+        except Exception as e:
+            last = f"{type(e).__name__}: {e}"
+            logger.warning(f"[Installer] tarball 下载失败（{u}）: {last}")
+            try:
+                if dest.exists():
+                    dest.unlink()
+            except OSError:
+                pass
+    raise ArchiveFetchError(f"tarball 下载失败: {last}")
 
 
 def fetch_github_repo(

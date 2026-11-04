@@ -23,7 +23,13 @@ from typing import Optional, Tuple
 
 from loguru import logger
 
-from .archive_downloader import ArchiveFetchError, fetch_github_repo, parse_github_repo
+from .archive_downloader import (
+    ArchiveFetchError,
+    download_tarball,
+    extract_tarball_file,
+    fetch_github_repo,
+    parse_github_repo,
+)
 from .data import compare_versions
 from .deps_installer import DepsInstaller
 from .proxy import get_proxy_config
@@ -555,7 +561,6 @@ class PluginInstaller:
         Returns:
             True 安装成功
         """
-        source = plugin_meta.get("source", {})
         name = plugin_meta.get("name", "")
         if not name:
             return False
@@ -587,7 +592,7 @@ class PluginInstaller:
                 logger.warning(f"[Installer] 残留目录清理失败（文件被占用），安装中止: {target}")
                 return False
 
-        success = self._install_by_source(name, source, target, plugin_meta.get("_marketplace_source"))
+        success = self._install_with_fallback(name, plugin_meta, target)
         if success:
             self._install_deps_quietly(name, target)
             self.last_error = ""
@@ -620,7 +625,6 @@ class PluginInstaller:
         if not name:
             return False
 
-        source = plugin_meta.get("source", {})
         target = self._plugins_dir / name
         # 禁用中的插件（目录在 plugins-disabled/）原地更新：目标指向禁用目录，
         # 保持禁用状态（修复此前新版装到 plugins/ 导致双副本 + 禁用失效）。
@@ -636,7 +640,7 @@ class PluginInstaller:
 
         # 目标目录已存在 → 走 _download_and_move 的备份替换分支；
         # 不存在（更新前被手动删除）→ 等同安装。
-        success = self._install_by_source(name, source, target, plugin_meta.get("_marketplace_source"))
+        success = self._install_with_fallback(name, plugin_meta, target)
         if success:
             self._install_deps_quietly(name, target)
             logger.info(f"[Installer] Updated plugin {name} -> v{remote_ver}")
@@ -674,6 +678,53 @@ class PluginInstaller:
 
     # ── Source 类型分发 ──────────────────────────────────
 
+    def _preferred_sources(self, plugin_meta: dict) -> list:
+        """按优先级返回 source 候选：tarball（当前平台）→ 原始 source
+
+        tarball 是主通道（包内含 deps，下载单包不再访问整仓），失败时回落
+        git 通道保证旧市场源/未发布产物仍可安装。
+        """
+        sources: list = []
+        tb = plugin_meta.get("tarball")
+        if isinstance(tb, dict):
+            try:
+                from app.plugins.deps_loader import current_platform_key
+
+                plat = current_platform_key()
+            except Exception:
+                plat = ""
+            entry = (tb.get(plat) if plat else None) or tb.get("default")
+            if isinstance(entry, dict) and entry.get("url"):
+                sources.append(
+                    {
+                        "type": "tarball",
+                        "url": entry["url"],
+                        "sha256": entry.get("sha256", ""),
+                        "mirrors": entry.get("mirrors") or [],
+                    }
+                )
+        base = plugin_meta.get("source")
+        if base:
+            sources.append(base)
+        return sources
+
+    def _install_with_fallback(self, name: str, plugin_meta: dict, target: Path) -> bool:
+        """按候选顺序安装：tarball 优先，失败回落 git-subdir（双轨兼容）"""
+        sources = self._preferred_sources(plugin_meta)
+        if not sources:
+            self.last_error = f"{name}: 无可用 source"
+            return False
+        mp_source = plugin_meta.get("_marketplace_source")
+        last_err = ""
+        for idx, src in enumerate(sources):
+            if self._install_by_source(name, src, target, mp_source):
+                return True
+            last_err = self.last_error or ""
+            if idx < len(sources) - 1:
+                logger.warning(f"[Installer] {name} source#{idx} 失败，回落下一通道: {last_err}")
+        self.last_error = last_err or f"Install {name} failed"
+        return False
+
     def _install_by_source(self, name: str, source, target: Path, marketplace_source: dict = None) -> bool:
         """根据 source 类型分发安装逻辑"""
         # 字符串 source → 相对路径
@@ -705,6 +756,8 @@ class PluginInstaller:
             return self._install_git_url(name, source, target)
         elif src_type == "git-subdir":
             return self._install_git_subdir(name, source, target)
+        elif src_type == "tarball":
+            return self._install_tarball(name, source, target)
         else:
             logger.error(f"[Installer] 不支持的 source 类型: {src_type}")
             return False
@@ -737,6 +790,23 @@ class PluginInstaller:
         if not url or not subpath:
             return False
         return self._download_and_move(name, url, subpath, ref, target)
+
+    def _install_tarball(self, name: str, source: dict, target: Path) -> bool:
+        """从单插件 tarball 安装（新分发通道：包内含源码 + 当前平台 deps）
+
+        包结构 = 插件目录内容（.drifox-plugin/plugin.json 在包根），与 git 通道
+        解压后的结构一致，因此复用 _download_and_move 的备份替换/回滚/manifest
+        校验/重载链路。sha256 存在时必须匹配，否则拒装（防篡改/传输损坏）。
+        """
+        url = str(source.get("url") or "").strip()
+        if not url:
+            return False
+        sha256 = str(source.get("sha256") or "").strip()
+        mirrors = source.get("mirrors")
+        mirrors = [str(m) for m in mirrors if m] if isinstance(mirrors, list) else []
+        return self._download_and_move(
+            name, url, ".", "", target, expected_sha256=sha256, mirrors=mirrors
+        )
 
     def _install_relative(self, name: str, relative_path: str, target: Path, marketplace_source: dict = None) -> bool:
         """从相对路径安装插件（从市场仓库中提取子目录）
@@ -788,22 +858,34 @@ class PluginInstaller:
 
     # ── 核心下载逻辑 ─────────────────────────────────────
 
-    def _fetch_into_cache(self, name: str, url: str, subpath: str, ref: str, cache_tmp: Path) -> Path:
-        """把仓库内容取到 cache_tmp，返回插件源目录路径
+    def _fetch_into_cache(
+        self,
+        name: str,
+        url: str,
+        subpath: str,
+        ref: str,
+        cache_tmp: Path,
+        expected_sha256: str = "",
+        mirrors: Optional[list] = None,
+    ) -> Path:
+        """把仓库/单插件包内容取到 cache_tmp，返回插件源目录路径
 
-        双通道，**顺序不可颠倒**（2026-09 实测定序）：
+        三通道，**顺序不可颠倒**（2026-09 实测定序）：
 
+        0. 单插件 tarball —— expected_sha256 非空或 URL 以 .tar.gz/.tgz 结尾时
+           走此通道：下载单包（含当前平台 deps）+ sha256 校验 + 流式解压，
+           不再访问整仓。
         1. git 稀疏克隆 —— 首选。只取目标子目录，实测同仓插件 7.4s 完成
            （drifox-plugins 仓库 116 个插件同源，稀疏克隆只拉 0.07MB）。
         2. GitHub 归档 tarball —— 仅在 git 可执行文件缺失时兜底。纯标准库
            无需 git，但必须下整仓（实测 59.9MB / 45s），代价明显更高。
 
-        即：有 git 就用 git；只有 git 不在场才启用归档。若反过来让归档抢首位，
-        装了 git 的用户反而从 7.4s 退化到 45s。
-
         Returns:
-            插件源目录（subpath="." 时为仓库根，否则为子目录）
+            插件源目录（subpath="." 时为仓库根/包根，否则为子目录）
         """
+        clean_url = url.split("?", 1)[0].lower()
+        if expected_sha256 or clean_url.endswith((".tar.gz", ".tgz")):
+            return self._fetch_tarball(name, url, cache_tmp, expected_sha256, mirrors)
         proxy = get_proxy_config()
         git_url, git_extra = proxy.git_clone_args(url)
         candidates = self._build_clone_candidates(url, git_url, git_extra, proxy)
@@ -833,6 +915,39 @@ class PluginInstaller:
             # 所有候选都失败：抛最后一个错误（带 stderr），让外层 logger.error 记录
             raise last_err
         return cache_tmp if subpath in (".", "") else cache_tmp / subpath
+
+    def _fetch_tarball(
+        self,
+        name: str,
+        url: str,
+        cache_tmp: Path,
+        expected_sha256: str = "",
+        mirrors: Optional[list] = None,
+    ) -> Path:
+        """下载单插件 tarball → sha256 校验 → 流式解压，返回插件源目录
+
+        Args:
+            url: 主下载 URL（GitHub Release asset）
+            expected_sha256: 期望哈希；为空则不校验（兼容无哈希的旧清单）
+            mirrors: 备用 URL（主 URL 与加速站候选全失败后依次尝试）
+
+        Raises:
+            ArchiveFetchError: 下载/校验/解压失败（调用方回落 git 通道或报错）
+        """
+        proxy = get_proxy_config()
+        direct_urls = [url] + [str(m) for m in (mirrors or []) if m]
+        archive_path = cache_tmp / "_plugin.tar.gz"
+        sha = download_tarball(direct_urls, archive_path, proxy=proxy)
+        if expected_sha256 and sha.lower() != expected_sha256.lower():
+            raise ArchiveFetchError(
+                f"tarball sha256 不匹配: 期望 {expected_sha256[:12]}… 实际 {sha[:12]}…"
+                "（可能被篡改或传输损坏）"
+            )
+        extracted = cache_tmp / "_extracted"
+        shutil.rmtree(extracted, ignore_errors=True)
+        extract_tarball_file(archive_path, "", extracted)
+        logger.info(f"[Installer] tarball 下载完成: {name} ← {url} ({sha[:12]}…)")
+        return extracted
 
     def _fetch_via_archive(self, name: str, url: str, subpath: str, ref: str, cache_tmp: Path) -> Path:
         """git 缺失时的兜底：从 GitHub 归档 tarball 取插件（纯标准库，无需 git）
@@ -874,15 +989,26 @@ class PluginInstaller:
         logger.info(f"[Installer] 归档通道下载成功（无需 git）: {name} ← {coords[0]}/{coords[1]}@{ref}")
         return src
 
-    def _download_and_move(self, name: str, url: str, subpath: str, ref: str, target: Path) -> bool:
-        """从 git 源下载插件并移动到目标目录
+    def _download_and_move(
+        self,
+        name: str,
+        url: str,
+        subpath: str,
+        ref: str,
+        target: Path,
+        expected_sha256: str = "",
+        mirrors: Optional[list] = None,
+    ) -> bool:
+        """从源下载插件并移动到目标目录
 
         Args:
             name: 插件名
-            url: git 仓库 URL
-            subpath: 仓库内子目录路径（"." 表示整个仓库）
-            ref: 分支/标签
+            url: 源 URL（git 仓库或 tarball 包）
+            subpath: 仓库内子目录路径（"." 表示整个仓库/包根）
+            ref: 分支/标签（tarball 通道为空）
             target: 目标安装目录
+            expected_sha256: 非空时校验下载内容哈希（tarball 通道）
+            mirrors: tarball 备用 URL（主 URL 失败后依次尝试）
         """
         try:
             self._suppress_backend_watcher()
@@ -895,7 +1021,15 @@ class PluginInstaller:
             cache_tmp = self._cache_dir / f"{name}_{int(time.time())}"
             cache_tmp.mkdir(parents=True, exist_ok=True)
             try:
-                sub_src = self._fetch_into_cache(name, url, subpath, ref, cache_tmp)
+                sub_src = self._fetch_into_cache(
+                    name,
+                    url,
+                    subpath,
+                    ref,
+                    cache_tmp,
+                    expected_sha256=expected_sha256,
+                    mirrors=mirrors,
+                )
             except Exception:
                 shutil.rmtree(cache_tmp, ignore_errors=True)
                 raise
