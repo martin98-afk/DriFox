@@ -8,7 +8,7 @@
 from __future__ import annotations
 
 import os
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from loguru import logger
 
@@ -303,3 +303,85 @@ class WorktreeService:
                 QTimer.singleShot(200, lambda: self.update_branch(target))
         except Exception:
             logger.exception("[WorktreeService] copy_branch_state 复制分支状态失败")
+
+# ── 工具侧切换请求的接收器 ─────────────────────────────
+# manage_worktree 工具面没有 workdir.write / project.workdir（catalog 标 _UI，
+# tool 面无 provider），工具请求的切换只能投递回主线程。本接收器走能力池执行，
+# 不摸窗口私有字段——project 与窗口状态全部由宿主解析的 host 提供。
+
+from PyQt5.QtCore import QObject, pyqtSlot  # noqa: E402
+
+_switch_receiver: Optional["_SwitchReceiver"] = None
+
+class _SwitchReceiver(QObject):
+    """bridge.switchRequested → 主线程执行会话工作目录切换
+
+    跨线程安全：工具线程 emit，Qt 以 QueuedConnection 派发到本槽（receiver
+    属主线程，创建时挂在 bridge 上保活）。
+    """
+
+    def __init__(self, service: "WorktreeService"):
+        super().__init__()
+        self._service = service
+
+    @pyqtSlot(str)
+    def on_switch_requested(self, path: str) -> None:
+        try:
+            ok, msg = switch_workdir_via_caps(path)
+        except Exception as e:  # noqa: BLE001 - 切换失败不能炸主线程
+            logger.warning(f"[WorktreeService] 工具请求切换失败: {e}")
+            return
+        level = logger.info if ok else logger.warning
+        level(f"[WorktreeService] 工具请求切换: {msg}")
+
+def switch_workdir_via_caps(path: str) -> tuple:
+    """走能力池把会话工作目录切到 path（持久化 + 会话内同步 + UI 联动）。
+
+    与 ``switch_to_worktree(mw, path)`` 的分界：不依赖窗口对象，project 与
+    宿主状态全部经能力池取（host 由宿主解析为活跃窗口）。幂等：已在目标
+    目录则跳过。返回 (是否成功, 人话消息)。
+    """
+    from app.plugins.sdk import pool_for
+
+    path = os.path.abspath(path)
+    pool = pool_for("worktree-manager", surface="ui")
+    if pool is None or "workdir.write" not in pool:
+        return False, "能力池不可用（workdir.write 未授权或宿主未就绪）"
+    project, current = "", ""
+    if "window.current" in pool:
+        try:
+            snap = pool["window.current"]() or {}
+            project = str(snap.get("project") or "")
+            current = str(snap.get("workdir") or "")
+        except Exception:  # noqa: BLE001 - 快照失败不拦切换
+            pass
+    if current and os.path.normcase(current) == os.path.normcase(path):
+        return True, f"已在目标工作目录: {path}"
+    pwd = pool.get("project.workdir")
+    if pwd is not None and not pwd["switch"](project, path):
+        return False, "持久化工作目录失败（project_workdir 表写入被拒）"
+    pool["workdir.write"](path)
+    if "branch.refresh" in pool:
+        try:
+            pool["branch.refresh"]()
+        except Exception:  # noqa: BLE001
+            pass
+    if "window.workbench" in pool:
+        try:
+            pool["window.workbench"]["refresh"]()
+        except Exception:  # noqa: BLE001
+            pass
+    return True, f"已切换到 {path}"
+
+def _install_switch_receiver(service: "WorktreeService") -> None:
+    """连接 bridge.switchRequested → 主线程切换（幂等：重复调用不重复连）"""
+    global _switch_receiver
+    from .change_bridge import get_bridge
+
+    bridge = get_bridge()
+    if _switch_receiver is not None:
+        return
+    _switch_receiver = _SwitchReceiver(service)
+    _switch_receiver.setParent(bridge)  # 挂在 bridge 上保活，随 app 退出销毁
+    bridge.switchRequested.connect(_switch_receiver.on_switch_requested)
+    logger.info("[WorktreeService] 工具侧切换请求通道已接入")

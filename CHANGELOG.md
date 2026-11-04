@@ -175,6 +175,7 @@ All notable changes to this project will be documented in this file.
 
 ### ✨ 新功能 (New Features)
 
+- **工作树工具支持切换与自动切工作目录** (`plugins/worktree-manager/tools/worktree_tools.py`, `plugins/worktree-manager/ui/change_bridge.py`, `plugins/worktree-manager/ui/service.py`): `manage_worktree` 新增 `action=switch`，把当前会话工作目录切到指定工作树或主仓库根（含 create 后自动切过去）；工具面没有 workdir.write / project.workdir 能力（catalog 标 _UI），切换经 change_bridge 新增的 `switchRequested` 信号投递回主线程，由 WorktreeService 走能力池执行（project.workdir 持久化 → workdir.write 同步 → branch/workbench 刷新）。
 - **会话接力机制（session handoff）** (`00ec3a68`): 实现会话上下文无缝交接，会话切换/接续时上下文平滑转移。
 - **流式期间跳过欢迎消息渲染** (`7bbb5029`): 新增安全防护，流式输出中或会话已有消息时不再渲染欢迎消息，避免闪现与状态错乱。
 - **`net.avatar` / `net.download` 能力 + `sync.register` 云同步注册** (`5d41046c`): 能力池新增网络头像与下载能力；新增 sync.register 供插件注册云同步。
