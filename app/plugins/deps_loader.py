@@ -298,9 +298,16 @@ def missing_pip_deps(plugin_dir: Path, manifest: dict) -> List[str]:
                 # 原语义（glob 通配）：同名目录/模块文件存在即算"已就绪"，
                 # 不校验 __init__.py；`-` 归一为 `_` 后集合查询
                 if entry.is_dir():
-                    have_names.add(entry.name.replace("-", "_"))
+                    have_names.add(entry.name.replace("-", "_").lower())
+                    # dist-info 是 pip 安装的权威标记，且是**分发名**而非导入名：
+                    # pycryptodome→Crypto、python-docx→docx 这类包按目录/模块名
+                    # 永远匹配不上，会误判缺失→触发重复异步安装（实测
+                    # gateway-feishu 每次安装后都重拉 20s 依赖，期间重载插失败）
+                    if entry.name.endswith(".dist-info"):
+                        dist_name = entry.name.split("-")[0].replace("-", "_")
+                        have_names.add(dist_name.lower())
                 elif entry.is_file() and entry.suffix == ".py":
-                    have_names.add(entry.stem.replace("-", "_"))
+                    have_names.add(entry.stem.replace("-", "_").lower())
         except OSError:
             continue
     for spec in resolve_pip_deps(manifest):
@@ -308,8 +315,8 @@ def missing_pip_deps(plugin_dir: Path, manifest: dict) -> List[str]:
         pkg = pkg.split("[")[0].strip().replace("-", "_")
         if not pkg:
             continue
-        # deps 目录里已有同名顶层包 → 就绪
-        if pkg in have_names:
+        # deps 目录里已有同名顶层包 / 分发名 dist-info → 就绪
+        if pkg.lower() in have_names:
             continue
         if importlib.util.find_spec(pkg) is not None:
             continue

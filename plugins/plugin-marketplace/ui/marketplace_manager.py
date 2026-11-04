@@ -477,9 +477,13 @@ class MarketplaceSourceManager:
     def _candidate_urls(self, url: str) -> List[str]:
         """市场清单拉取候选（按序尝试，全部失败才报错）
 
-        顺序：代理改写（若配置）→ jsDelivr gh 镜像（仅 raw.githubusercontent）
-        → 原 URL。镜像意义：实测当前环境 raw 拉 246KB 清单 15s 未完，
-        jsDelivr 同文件 11.7s 拉全且 CDN 有国内节点。
+        顺序：代理改写（若配置）→ 原 URL → jsDelivr 兜底。
+
+        为什么 jsDelivr 必须排最后：它对 ref（@main）引用做长缓存（官方策略
+        分支引用 12h+ 才失效，tag/commit 才即时）。实测仓库清单已含 tarball
+        字段，jsDelivr 仍返回数天前的旧版 → 客户端据此走 git-subdir 通道，
+        装出缺依赖的插件（2026-11 实证 gateway-feishu lark_oapi 缺失）。
+        它只在原 URL 完全不可达时作兜底（旧内容总比没有强）。
         """
         out: List[str] = []
         proxy = get_proxy_config()
@@ -489,13 +493,13 @@ class MarketplaceSourceManager:
                 out.append(rw)
         except Exception:
             pass
+        out.append(url)
         m = re.match(
             r"https://raw\.githubusercontent\.com/([^/]+)/([^/]+)/([^/]+)/(.+)", url
         )
         if m:
             owner, repo, ref, path = m.groups()
             out.append(f"https://cdn.jsdelivr.net/gh/{owner}/{repo}@{ref}/{path}")
-        out.append(url)
         seen, uniq = set(), []
         for u in out:
             if u not in seen:
