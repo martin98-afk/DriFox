@@ -187,15 +187,16 @@ def _notify_changed(summary: str) -> None:
     except Exception as e:  # UI 未加载（纯后端调用等）：刷新通知可缺省
         logger.debug(f"[worktree_tools] UI 刷新通知未送达: {e}")
 
-def _request_switch(path: str) -> None:
-    """请求把会话工作目录切到 path（emit → 主线程异步执行）。
+def _request_switch(path: str, session_id: str = "") -> None:
+    """请求把发起会话的工作目录切到 path（emit → 主线程异步执行）。
 
     工具面没有 workdir.write / project.workdir 能力（catalog 标 _UI），切换
-    只能投递回主线程，由 WorktreeService 的接收器走能力池执行。主线程空闲
-    即派发（毫秒级），下一次工具调用的 ctx.workdir 已是新值。
+    只能投递回主线程，由 WorktreeService 接收端按 session_id 定位发起会话
+    所在窗口后执行。session_id 必须透传：只带路径会让主线程拿「当时活跃
+    窗口」当目标，排队延迟期间用户浏览到别的项目页面就把路径写进错误项目。
     """
     try:
-        _load_get_bridge()().switchRequested.emit(os.path.abspath(path))
+        _load_get_bridge()().switchRequested.emit(os.path.abspath(path), session_id or "")
     except Exception as e:  # UI 未加载：无主线程可投递
         logger.debug(f"[worktree_tools] 切换请求未送达（无 UI 事件循环）: {e}")
         raise
@@ -315,7 +316,7 @@ def _action_create(tool_ctx: dict, kwargs: dict) -> ToolResult:
     # 不切的话新工作树是个孤儿——模型还得再调一次才能进去干活。
     # 切换失败不回滚 create：工作树已建好，模型换 switch action 或手动切都行。
     try:
-        _request_switch(worktree_dir)
+        _request_switch(worktree_dir, (tool_ctx or {}).get("session_id") or "")
     except Exception as e:  # noqa: BLE001 - UI 未就绪时切换请求可缺省
         logger.warning(f"[worktree_tools] 自动切换请求未送达: {e}")
     _notify_changed(f"created {worktree_dir}")
@@ -517,7 +518,7 @@ def _action_switch(tool_ctx: dict, kwargs: dict) -> ToolResult:
         return ToolResult(True, content=f"当前会话已在 {target_path}，无需切换")
 
     try:
-        _request_switch(target_path)
+        _request_switch(target_path, (tool_ctx or {}).get("session_id") or "")
     except Exception as e:
         return ToolResult(False, error=f"切换请求投递失败（宿主 UI 未就绪）: {e}")
     tag = "主仓库" if target.is_main else f"工作树（分支 {target.branch}）"
@@ -526,7 +527,8 @@ def _action_switch(tool_ctx: dict, kwargs: dict) -> ToolResult:
         True,
         content=(
             f"切换请求已发出：{target_path}（{tag}）。"
-            "主线程将异步完成持久化与界面同步；下一次工具调用的工作目录已是新值。"
+            "主线程将按发起会话定位窗口后异步完成持久化与界面同步；"
+            "若窗口未找到（如会话已关闭）将放弃切换，不影响其他项目。"
         ),
     )
 

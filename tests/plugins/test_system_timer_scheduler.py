@@ -669,3 +669,217 @@ class TestDrainSignalBridge:
         assert "self._action_enqueued.connect(self._on_action_enqueued)" in source, (
             "_action_enqueued 信号未连接 _on_action_enqueued 槽：空闲期入队将无人消费（B1 回归）"
         )
+
+
+# ═══════════════════════════════════════════════════════════════
+# 组 6：事件触发（watch 匹配 / repeat 冷却 / max_fires / 模板）
+# ═══════════════════════════════════════════════════════════════
+
+
+class TestEventTrigger:
+    def _add(self, s, **over):
+        kwargs = dict(
+            session_id="s1",
+            prompt="成员答完了",
+            event="stream_finished",
+            watch_kind="session",
+            watch_value="s1",
+            watch_label="当前会话",
+        )
+        kwargs.update(over)
+        return s.add_event_task(**kwargs)
+
+    def test_once_fires_and_leaves_table(self, fresh_scheduler):
+        s = fresh_scheduler
+        rec = _SendRecorder(delivered=True)
+        _arm(s, rec)
+        task = self._add(s, prompt="成员答完了：{response}")
+        s._on_event("stream_finished", "w-x", "s1", {"response": "报告已生成"})
+        assert len(rec.calls) == 1
+        assert "🔔 事件触发" in rec.calls[0][1]
+        assert "报告已生成" in rec.calls[0][1]
+        assert s.list_tasks() == [], "一次性事件任务命中后应出表"
+        assert task["id"]
+
+    def test_event_name_mismatch_skips(self, fresh_scheduler):
+        s = fresh_scheduler
+        rec = _SendRecorder(delivered=True)
+        _arm(s, rec)
+        self._add(s, event="stream_finished")
+        s._on_event("error_occurred", "w-x", "s1", {})
+        assert rec.calls == []
+        assert len(s.list_tasks()) == 1
+
+    def test_watch_window_mismatch_then_hit(self, fresh_scheduler):
+        s = fresh_scheduler
+        rec = _SendRecorder(delivered=True)
+        _arm(s, rec)
+        self._add(s, watch_kind="window", watch_value="w-target", watch_label="窗口 w-target")
+        s._on_event("stream_finished", "w-other", "s1", {})
+        assert rec.calls == [], "非目标窗口不得触发"
+        s._on_event("stream_finished", "w-target", "s1", {})
+        assert len(rec.calls) == 1
+
+    def test_session_changed_matches_new_session_id(self, fresh_scheduler):
+        s = fresh_scheduler
+        rec = _SendRecorder(delivered=True)
+        _arm(s, rec)
+        self._add(s, event="session_changed", watch_kind="session", watch_value="s-new")
+        s._on_event("session_changed", "w1", "s-old", {})
+        assert rec.calls == []
+        s._on_event("session_changed", "w1", "s-new", {})
+        assert len(rec.calls) == 1
+
+    def test_watch_all_hits_any_window(self, fresh_scheduler):
+        s = fresh_scheduler
+        rec = _SendRecorder(delivered=True)
+        _arm(s, rec)
+        self._add(s, watch_kind="all", watch_value="", watch_label="所有窗口")
+        s._on_event("stream_finished", "w-any", "s-any", {})
+        assert len(rec.calls) == 1
+
+    def test_repeat_cooldown_blocks_second_hit(self, fresh_scheduler):
+        s = fresh_scheduler
+        rec = _SendRecorder(delivered=True)
+        _arm(s, rec)
+        task = self._add(s, repeat=True, cooldown_seconds=60, max_fires=10)
+        s._on_event("stream_finished", "w-x", "s1", {})
+        s._on_event("stream_finished", "w-x", "s1", {})
+        assert len(rec.calls) == 1, "冷却窗口内重复事件应被抑制"
+        with s._lock:
+            s._tasks[task["id"]]["last_fire_at"] -= 61.0
+        s._on_event("stream_finished", "w-x", "s1", {})
+        assert len(rec.calls) == 2
+
+    def test_repeat_max_fires_removes_task(self, fresh_scheduler):
+        s = fresh_scheduler
+        rec = _SendRecorder(delivered=True)
+        _arm(s, rec)
+        self._add(s, repeat=True, cooldown_seconds=0, max_fires=2)
+        for _ in range(3):
+            s._on_event("stream_finished", "w-x", "s1", {})
+        assert len(rec.calls) == 2, "max_fires 是硬上限，不得多触发"
+        assert s.list_tasks() == []
+
+    def test_undelivered_once_leaves_table(self, fresh_scheduler):
+        s = fresh_scheduler
+        _arm(s, _SendRecorder(delivered=False))
+        self._add(s)
+        s._on_event("stream_finished", "w-x", "s1", {})
+        assert s.list_tasks() == [], "未送达的一次性事件任务按错过终结"
+
+    def test_response_truncated_to_500(self, fresh_scheduler):
+        s = fresh_scheduler
+        rec = _SendRecorder(delivered=True)
+        _arm(s, rec)
+        self._add(s, prompt="{response}")
+        s._on_event("stream_finished", "w-x", "s1", {"response": "字" * 900})
+        body = rec.calls[0][1]
+        assert body.count("字") == 500, "response 占位必须截断 500 字，防上下文爆炸"
+
+    def test_tick_ignores_event_tasks(self, fresh_scheduler):
+        s = fresh_scheduler
+        rec = _SendRecorder(delivered=True)
+        _arm(s, rec)
+        self._add(s)
+        s.tick(time.monotonic() + 10**6)
+        assert rec.calls == [], "事件任务不得被时间 tick 误触发"
+        assert len(s.list_tasks()) == 1
+
+    def test_resolve_watch_forms(self, fresh_scheduler):
+        s = fresh_scheduler
+        assert s.resolve_watch("", "s1")[:3] == ("session", "s1", "当前会话")
+        assert s.resolve_watch("*", "s1")[:3] == ("all", "", "所有窗口")
+        assert s.resolve_watch("session:abc", "s1")[:2] == ("session", "abc")
+        assert s.resolve_watch("window:w1", "s1")[:2] == ("window", "w1")
+        assert s.resolve_watch("session:", "s1")[3], "空会话 ID 必须报错"
+        assert s.resolve_watch("bogus", "s1")[3], "未知写法必须报错"
+
+    def test_resolve_watch_agent_uses_member_window(self, fresh_scheduler, monkeypatch):
+        s = fresh_scheduler
+        monkeypatch.setattr(s, "_resolve_agent_window", lambda ident: "w-agent")
+        kind, value, label, err = s.resolve_watch("agent:build@w-agent", "s1")
+        assert err == ""
+        assert (kind, value) == ("window", "w-agent")
+        assert "build" in label
+
+    def test_resolve_watch_agent_missing_member(self, fresh_scheduler, monkeypatch):
+        s = fresh_scheduler
+        monkeypatch.setattr(s, "_resolve_agent_window", lambda ident: "")
+        _kind, _value, _label, err = s.resolve_watch("agent:ghost", "s1")
+        assert "未找到团队成员" in err
+
+
+# ═══════════════════════════════════════════════════════════════
+# 组 7：事件桥接线（backend 信号 → 主线程桥 → 调度器）
+# ═══════════════════════════════════════════════════════════════
+
+
+class _FakeSessionManager:
+    def __init__(self, session_id: str):
+        self._session_id = session_id
+
+    def get_current_session(self):
+        return type("S", (), {"session_id": self._session_id})()
+
+
+class _FakeWidget:
+    def __init__(self, session_id: str, backend):
+        self.session_manager = _FakeSessionManager(session_id)
+        self.backend = backend
+
+
+class _FakeBackend(QObject):
+    stream_finished = pyqtSignal(str)
+    stream_started = pyqtSignal()
+    messages_updated = pyqtSignal()
+    error_occurred = pyqtSignal(str)
+    session_changed = pyqtSignal(str)
+
+
+class TestEventBridgeWiring:
+    def test_ensure_subscriptions_wires_backend_to_task(self, timer_mod, qapp, monkeypatch):
+        sched_mod = _scheduler_mod(timer_mod)
+        s = sched_mod.TimerScheduler()
+        rec = _SendRecorder(delivered=True)
+        _arm(s, rec)
+        backend = _FakeBackend()
+        widget = _FakeWidget("s1", backend)
+        reg = type("R", (), {"_window_main_widgets": {"w1": widget}})()
+
+        from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+
+        monkeypatch.setattr(UIPluginRegistry, "get_instance", classmethod(lambda cls: reg))
+        s.add_event_task(
+            session_id="s1",
+            prompt="答完了：{response}",
+            event="stream_finished",
+            watch_kind="session",
+            watch_value="s1",
+            watch_label="当前会话",
+        )
+        s._ensure_subscriptions()
+        assert "w1" in s._bridges, "存活窗口应建事件桥"
+        # 幂等：二次扫描不重复建桥
+        s._ensure_subscriptions()
+        assert len(s._bridges) == 1
+
+        backend.stream_finished.emit("报告内容")
+        assert len(rec.calls) == 1, "backend 信号应经桥触达调度器"
+        assert "报告内容" in rec.calls[0][1]
+
+        s.stop()
+        backend.stream_finished.emit("stop 后")
+        assert len(rec.calls) == 1, "stop 后必须断连，事件不得再触发"
+
+    def test_dead_widget_without_backend_skipped(self, timer_mod, qapp, monkeypatch):
+        sched_mod = _scheduler_mod(timer_mod)
+        s = sched_mod.TimerScheduler()
+        reg = type("R", (), {"_window_main_widgets": {"w-dead": object()}})()
+
+        from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+
+        monkeypatch.setattr(UIPluginRegistry, "get_instance", classmethod(lambda cls: reg))
+        s._ensure_subscriptions()
+        assert s._bridges == {}, "无 backend 的窗口不建桥"
+        s.stop()

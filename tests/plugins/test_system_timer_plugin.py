@@ -55,6 +55,54 @@ class _FakeScheduler:
     def list_tasks(self):
         return list(self.tasks)
 
+    def resolve_watch(self, watch, session_id):
+        text = str(watch or "").strip()
+        if not text:
+            return "session", session_id, "当前会话", ""
+        if text == "*":
+            return "all", "", "所有窗口", ""
+        if text.startswith("session:"):
+            value = text[len("session:") :]
+            return "session", value, f"会话 {value[:8]}", ""
+        if text.startswith("window:"):
+            value = text[len("window:") :]
+            return "window", value, f"窗口 {value}", ""
+        if text.startswith("agent:"):
+            ident = text[len("agent:") :]
+            if ident == "ghost":
+                return "", "", "", f"未找到团队成员 {ident}（团队未组建或成员已退出）"
+            return "window", "w-agent", f"成员 {ident.split('@', 1)[0]}", ""
+        return "", "", "", f"无法解析 watch：{text}"
+
+    def add_event_task(
+        self,
+        session_id,
+        prompt,
+        event,
+        watch_kind,
+        watch_value,
+        watch_label="",
+        mode="queue",
+        repeat=False,
+        cooldown_seconds=5,
+        max_fires=100,
+    ):
+        task = {
+            "id": "e0001",
+            "session_id": session_id,
+            "prompt": prompt,
+            "type": "event",
+            "trigger": "event",
+            "event": event,
+            "watch": watch_label,
+            "repeat": repeat,
+            "fires": 0,
+            "cooldown_seconds": cooldown_seconds,
+            "max_fires": max_fires,
+        }
+        self.added.append(task)
+        return task
+
     def cancel(self, task_id="", all_tasks=False, session_id=""):
         self.cancelled.append({"task_id": task_id, "all_tasks": all_tasks, "session_id": session_id})
         if all_tasks:
@@ -268,7 +316,7 @@ def test_list_snapshot_no_internal_fields():
     sched.add_task("s1", "循环", interval_minutes=2)
     snaps = sched.list_tasks()
     assert len(snaps) == 2
-    allowed = {"id", "session_id", "prompt", "type", "mode", "next_fire_seconds"}
+    allowed = {"id", "session_id", "prompt", "type", "mode", "next_fire_seconds", "trigger"}
     for snap in snaps:
         assert set(snap.keys()) == allowed, f"快照字段泄漏：{set(snap.keys())}"
     loop = next(s for s in snaps if s["type"] == "loop")
@@ -306,3 +354,108 @@ def test_real_load_registers_timer_tool(plugin_enabled):
     finally:
         restore()
         ToolRegistry.reset_instance()
+
+
+# ═══════════════════════════════════════════════════════════════
+# 事件任务：参数校验 / watch 解析 / list 展示
+# ═══════════════════════════════════════════════════════════════
+
+
+def test_create_event_requires_event_name(monkeypatch):
+    mod = _load_tool()
+    monkeypatch.setattr(mod, "_resolve_scheduler", lambda: _FakeScheduler())
+    res = mod._timer_impl(_CTX, action="create", prompt="x", trigger="event")
+    assert res.success is False
+    assert "event" in (res.error or "")
+
+
+def test_create_event_rejects_time_args(monkeypatch):
+    """事件任务与时间参数互斥，混用直接拒绝（防语义含糊）"""
+    mod = _load_tool()
+    monkeypatch.setattr(mod, "_resolve_scheduler", lambda: _FakeScheduler())
+    for name, kwargs in (
+        ("delay_seconds", {"delay_seconds": 10}),
+        ("interval_minutes", {"interval_minutes": 5}),
+        ("fire_at", {"fire_at": "15:00"}),
+    ):
+        res = mod._timer_impl(
+            _CTX, action="create", prompt="x", trigger="event", event="stream_finished", **kwargs
+        )
+        assert res.success is False
+        assert name in (res.error or "")
+
+
+def test_create_event_agent_watch(monkeypatch):
+    mod = _load_tool()
+    fake = _FakeScheduler()
+    monkeypatch.setattr(mod, "_resolve_scheduler", lambda: fake)
+    res = mod._timer_impl(
+        _CTX,
+        action="create",
+        prompt="成员答完提醒我",
+        trigger="event",
+        event="stream_finished",
+        watch="agent:build",
+    )
+    assert res.success is True
+    assert fake.added[0]["event"] == "stream_finished"
+    assert fake.added[0]["watch"] == "成员 build"
+    assert "事件任务已创建" in res.content
+
+
+def test_create_event_watch_errors(monkeypatch):
+    mod = _load_tool()
+    monkeypatch.setattr(mod, "_resolve_scheduler", lambda: _FakeScheduler())
+    bad = mod._timer_impl(
+        _CTX, action="create", prompt="x", trigger="event", event="stream_finished", watch="whatever"
+    )
+    assert bad.success is False
+    assert "无法解析 watch" in (bad.error or "")
+    ghost = mod._timer_impl(
+        _CTX, action="create", prompt="x", trigger="event", event="stream_finished", watch="agent:ghost"
+    )
+    assert ghost.success is False
+    assert "未找到团队成员" in (ghost.error or "")
+
+
+def test_create_event_repeat_params(monkeypatch):
+    mod = _load_tool()
+    fake = _FakeScheduler()
+    monkeypatch.setattr(mod, "_resolve_scheduler", lambda: fake)
+    res = mod._timer_impl(
+        _CTX,
+        action="create",
+        prompt="每次落盘都记一笔",
+        trigger="event",
+        event="messages_updated",
+        repeat=True,
+        cooldown_seconds=30,
+        max_fires=5,
+    )
+    assert res.success is True
+    assert fake.added[0]["repeat"] is True
+    assert fake.added[0]["cooldown_seconds"] == 30
+    assert fake.added[0]["max_fires"] == 5
+
+
+def test_list_event_task_renders_event_fields(monkeypatch):
+    mod = _load_tool()
+    fake = _FakeScheduler()
+    fake.tasks = [
+        {
+            "id": "e1",
+            "session_id": "s1",
+            "prompt": "成员答完提醒",
+            "type": "event",
+            "trigger": "event",
+            "event": "stream_finished",
+            "watch": "成员 build",
+            "repeat": False,
+            "fires": 0,
+        }
+    ]
+    monkeypatch.setattr(mod, "_resolve_scheduler", lambda: fake)
+    res = mod._timer_impl(_CTX, action="list")
+    assert res.success is True
+    assert "事件 stream_finished" in res.content
+    assert "成员 build" in res.content

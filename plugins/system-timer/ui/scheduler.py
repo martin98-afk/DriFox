@@ -18,9 +18,73 @@ from typing import Any, Dict, List, Optional
 
 from loguru import logger
 
-from PyQt5.QtCore import QTimer
+from PyQt5.QtCore import QObject, QTimer, pyqtSignal
 
 _TICK_MS = 1000
+
+# 可订阅的对话流事件（与 ChatBackend._TRACE_SIGNAL_ARITY 的真实转发集对齐）。
+# 注意 message_received 是死信号（全仓无 emit 点），不能作为事件源。
+EVENT_NAMES = (
+    "stream_finished",
+    "stream_started",
+    "messages_updated",
+    "error_occurred",
+    "session_changed",
+)
+
+
+class _WindowEventBridge(QObject):
+    """单窗口事件桥：把 backend 信号搬回主线程后再转给调度器。
+
+    backend 的 stream_finished 等在 worker 线程 emit；若直接 connect 到普通
+    callable，Qt 会在发射线程就地执行，等于在 worker 线程摸任务表和窗口。
+    桥是主线程 QObject，AutoConnection 自动排队回主线程，槽内再 emit 内部
+    信号给调度器（同线程直连）。
+    """
+
+    event = pyqtSignal(str, str, str, dict)  # event_name, window_id, session_id, payload
+
+    def __init__(self, window_id: str, widget: Any):
+        super().__init__()
+        self._window_id = str(window_id)
+        self._widget = widget
+
+    def _current_session_id(self) -> str:
+        try:
+            session = self._widget.session_manager.get_current_session()
+            return str(getattr(session, "session_id", "") or "")
+        except Exception:  # noqa: BLE001 - 窗口销毁中，视为空会话
+            return ""
+
+    def on_stream_finished(self, response: Any = "") -> None:
+        self.event.emit(
+            "stream_finished", self._window_id, self._current_session_id(), {"response": str(response or "")}
+        )
+
+    def on_stream_started(self) -> None:
+        self.event.emit("stream_started", self._window_id, self._current_session_id(), {})
+
+    def on_messages_updated(self) -> None:
+        self.event.emit("messages_updated", self._window_id, self._current_session_id(), {})
+
+    def on_error(self, error: Any = "") -> None:
+        self.event.emit(
+            "error_occurred", self._window_id, self._current_session_id(), {"error": str(error or "")}
+        )
+
+    def on_session_changed(self, session_id: Any = "") -> None:
+        sid = str(session_id or "")
+        self.event.emit("session_changed", self._window_id, sid, {"session_id": sid})
+
+
+# backend 信号名 → 桥槽方法名
+_SIGNAL_HANDLERS = {
+    "stream_finished": "on_stream_finished",
+    "stream_started": "on_stream_started",
+    "messages_updated": "on_messages_updated",
+    "error_occurred": "on_error",
+    "session_changed": "on_session_changed",
+}
 
 
 class _WindowHost:
@@ -42,6 +106,9 @@ class TimerScheduler:
         self._lock = threading.Lock()
         self._tasks: Dict[str, Dict[str, Any]] = {}
         self._timer: Optional[QTimer] = None
+        # window_id -> 事件桥；_connections 记录 (signal, handler) 供 stop 精确断开
+        self._bridges: Dict[str, _WindowEventBridge] = {}
+        self._connections: List[tuple] = []
 
     # ── 生命周期（仅主线程） ──
 
@@ -53,13 +120,28 @@ class TimerScheduler:
         self._timer.setInterval(_TICK_MS)
         self._timer.timeout.connect(self._on_tick)
         self._timer.start()
+        # 立即补一轮订阅（热加载时窗口已在，等 1s tick 会漏首条事件）
+        self._ensure_subscriptions()
         logger.info("[system-timer] 调度器已启动（tick=1000ms）")
 
     def stop(self) -> None:
-        """停定时器并清空任务表（幂等）。"""
+        """停定时器、断开事件桥并清空任务表（幂等）。"""
         if self._timer is not None:
             self._timer.stop()
             self._timer = None
+        for sig, handler in self._connections:
+            try:
+                sig.disconnect(handler)
+            except Exception:  # noqa: BLE001 - 窗口已销毁时 Qt 可能已自动断连
+                pass
+        self._connections.clear()
+        for bridge in self._bridges.values():
+            try:
+                bridge.event.disconnect()
+            except Exception:  # noqa: BLE001
+                pass
+            bridge.deleteLater()
+        self._bridges.clear()
         with self._lock:
             self._tasks.clear()
 
@@ -96,9 +178,49 @@ class TimerScheduler:
                 "mode": mode,
                 "fire_at": now + float(delay_seconds or 0),
             }
+        task["trigger"] = "time"
         with self._lock:
             self._tasks[task["id"]] = task
         return self._snapshot(task, now)
+
+    def add_event_task(
+        self,
+        session_id: str,
+        prompt: str,
+        event: str,
+        watch_kind: str,
+        watch_value: str,
+        watch_label: str = "",
+        mode: str = "queue",
+        repeat: bool = False,
+        cooldown_seconds: float = 5.0,
+        max_fires: int = 100,
+    ) -> Dict[str, Any]:
+        """登记事件任务并返回快照。watch 已在工具层解析为 kind/value。
+
+        repeat=False 时首命中即出表；repeat=True 受 cooldown 与 max_fires
+        约束（防 messages_updated 这类连发事件打出任务风暴）。
+        """
+        task: Dict[str, Any] = {
+            "id": uuid.uuid4().hex[:8],
+            "session_id": session_id,
+            "prompt": prompt,
+            "type": "event",
+            "trigger": "event",
+            "event": event,
+            "watch_kind": watch_kind,
+            "watch_value": watch_value,
+            "watch_label": watch_label,
+            "mode": mode,
+            "repeat": bool(repeat),
+            "cooldown_seconds": max(0.0, float(cooldown_seconds or 0)),
+            "max_fires": max(1, int(max_fires or 1)),
+            "fires": 0,
+            "last_fire_at": 0.0,
+        }
+        with self._lock:
+            self._tasks[task["id"]] = task
+        return self._snapshot(task, time.monotonic())
 
     def list_tasks(self) -> List[Dict[str, Any]]:
         now = time.monotonic()
@@ -141,10 +263,20 @@ class TimerScheduler:
         """
         if now is None:
             now = time.monotonic()
+        if self._timer is not None:
+            # 每秒顺带补订阅新窗口（窗口可能在调度器启动后才创建）。
+            # QTimer 槽内未捕获异常默认 abort 进程（PyQt5 ≥5.5），这里必须吞掉：
+            # 窗口销毁竞态随时可能让 _bridges/widgets 的访问抛 RuntimeError。
+            try:
+                self._ensure_subscriptions()
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"[system-timer] 事件订阅扫描异常（本轮跳过）: {e}")
         due: List[Dict[str, Any]] = []
         with self._lock:
             for task in self._tasks.values():
-                if task["fire_at"] <= now and not task.get("firing"):
+                if task.get("trigger", "time") != "time":
+                    continue  # 事件任务由 _on_event 驱动，不参与到期判定
+                if task.get("fire_at", float("inf")) <= now and not task.get("firing"):
                     task["firing"] = True
                     due.append(dict(task))
         due.sort(key=lambda item: item["fire_at"])  # 同 tick 多任务按到期先后触发
@@ -200,6 +332,188 @@ class TimerScheduler:
             else:
                 task["fire_at"] += task["interval_seconds"]
 
+    # ── 事件触发 ──
+
+    def resolve_watch(self, watch: Any, session_id: str) -> tuple:
+        """把 watch 写法解析为 (kind, value, label, error)。
+
+        kind: session / window / all。agent 在创建时一次性解析成 window，
+        避免每条事件都读团队成员表。
+        """
+        text = str(watch or "").strip()
+        if not text:
+            return "session", session_id, "当前会话", ""
+        if text == "*":
+            return "all", "", "所有窗口", ""
+        if text.startswith("session:"):
+            value = text[len("session:") :].strip()
+            if not value:
+                return "", "", "", "watch=session: 需要提供会话 ID"
+            return "session", value, f"会话 {value[:8]}", ""
+        if text.startswith("window:"):
+            value = text[len("window:") :].strip()
+            if not value:
+                return "", "", "", "watch=window: 需要提供窗口 ID"
+            return "window", value, f"窗口 {value}", ""
+        if text.startswith("agent:"):
+            ident = text[len("agent:") :].strip()
+            if not ident:
+                return "", "", "", "watch=agent: 需要提供角色名（可写 agent@window_id）"
+            window_id = self._resolve_agent_window(ident)
+            if not window_id:
+                return "", "", "", f"未找到团队成员 {ident}（团队未组建或成员已退出）"
+            label = f"成员 {ident.split('@', 1)[0]}"
+            return "window", window_id, label, ""
+        return "", "", "", f"无法解析 watch：{text}，支持 session:/window:/agent:/* 或留空"
+
+    @staticmethod
+    def _resolve_agent_window(ident: str) -> str:
+        """团队成员标识（角色名或角色名@window_id）→ 窗口 id。"""
+        try:
+            from app.core.team.team_manager import TeamManager
+
+            tm = TeamManager.get_instance()
+            member = tm.find_member(ident) if tm is not None else None
+            return str((member or {}).get("window_id", "") or "")
+        except Exception as e:  # noqa: BLE001 - 团队未启用时按解析失败处理
+            logger.warning(f"[system-timer] 成员窗口解析失败 {ident}: {e}")
+            return ""
+
+    def _ensure_subscriptions(self) -> None:
+        """给尚未订阅的存活窗口补建事件桥（tick 每秒调一次）。"""
+        try:
+            from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+
+            registry = UIPluginRegistry.get_instance()
+            if registry is None:
+                return
+            widgets = dict(getattr(registry, "_window_main_widgets", {}) or {})
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"[system-timer] 窗口表不可用，跳过事件订阅: {e}")
+            return
+        # 已关闭窗口的桥就地释放（异常退出/强制关窗时 Qt 未必及时回收）
+        for window_id in list(self._bridges):
+            if window_id in widgets:
+                continue
+            bridge = self._bridges.pop(window_id, None)
+            if bridge is not None:
+                try:
+                    bridge.event.disconnect()
+                except Exception:  # noqa: BLE001
+                    pass
+                bridge.deleteLater()
+        for window_id, widget in widgets.items():
+            window_id = str(window_id)
+            if window_id in self._bridges:
+                continue
+            backend = getattr(widget, "backend", None)
+            if backend is None:
+                continue
+            bridge = _WindowEventBridge(window_id, widget)
+            connected = 0
+            for event_name, handler_name in _SIGNAL_HANDLERS.items():
+                sig = getattr(backend, event_name, None)
+                handler = getattr(bridge, handler_name, None)
+                if sig is None or not hasattr(sig, "connect") or handler is None:
+                    continue
+                try:
+                    sig.connect(handler)
+                    self._connections.append((sig, handler))
+                    connected += 1
+                except Exception as e:  # noqa: BLE001
+                    logger.warning(f"[system-timer] 订阅 {event_name} 失败（{window_id}）: {e}")
+            if not connected:
+                bridge.deleteLater()
+                continue
+            bridge.event.connect(self._on_event)
+            self._bridges[window_id] = bridge
+            logger.debug(f"[system-timer] 已订阅窗口 {window_id} 的 {connected} 个对话流事件")
+
+    def _on_event(self, event_name: str, window_id: str, session_id: str, payload: Optional[Dict[str, Any]]) -> None:
+        """主线程事件入口：筛出匹配的重复任务并触发（锁内只标记 firing）。"""
+        payload = dict(payload or {})
+        now = time.monotonic()
+        due: List[Dict[str, Any]] = []
+        with self._lock:
+            for task in self._tasks.values():
+                if task.get("trigger") != "event" or task.get("event") != event_name:
+                    continue
+                if task.get("firing") or not self._watch_matches(task, window_id, session_id):
+                    continue
+                last = float(task.get("last_fire_at") or 0.0)
+                if last and now - last < float(task.get("cooldown_seconds") or 0.0):
+                    continue
+                task["firing"] = True
+                due.append(dict(task))
+        for snapshot in due:
+            try:
+                self._fire_event(snapshot, payload, now)
+            except Exception as e:  # noqa: BLE001 - 单任务异常不拖垮事件分发
+                with self._lock:
+                    task = self._tasks.get(snapshot["id"])
+                    if task is not None:
+                        task["firing"] = False
+                logger.warning(f"[system-timer] 事件任务 {snapshot.get('id')} 触发异常（已跳过）: {e}")
+
+    @staticmethod
+    def _watch_matches(task: Dict[str, Any], window_id: str, session_id: str) -> bool:
+        """按创建时解析的 watch 判定该事件是否命中任务。"""
+        kind = task.get("watch_kind") or "session"
+        value = str(task.get("watch_value") or "")
+        if kind == "all":
+            return True
+        if kind == "window":
+            return value == window_id
+        return value == session_id
+
+    def _fire_event(self, snapshot: Dict[str, Any], payload: Dict[str, Any], now: float) -> None:
+        """触发一个命中的事件任务：渲染模板 → session.send 入队 → 计数/出表。"""
+        task_id = snapshot["id"]
+        delivered = False
+        window_id = self._find_window(snapshot["session_id"])
+        if window_id is None:
+            logger.warning(
+                f"[system-timer] 事件任务 {task_id} 未找到目标窗口"
+                f"（session={snapshot['session_id'][:8]}，会话可能已切走/关闭）"
+            )
+        else:
+            text = self._render_event_message(snapshot, payload)
+            delivered = self._send(text, window_id, mode=snapshot.get("mode", "queue"))
+            if not delivered:
+                logger.warning(f"[system-timer] 事件任务 {task_id} 触发消息发送被拒（窗口忙/正在关闭）")
+
+        with self._lock:
+            task = self._tasks.get(task_id)
+            if task is None:
+                return  # 触发期间被 cancel
+            task["firing"] = False
+            if not delivered:
+                if not task.get("repeat"):
+                    logger.warning(f"[system-timer] 一次性事件任务 {task_id} 按错过（missed）终结")
+                    self._tasks.pop(task_id, None)
+                return
+            task["fires"] = int(task.get("fires") or 0) + 1
+            task["last_fire_at"] = now
+            if not task.get("repeat"):
+                self._tasks.pop(task_id, None)
+            elif task["fires"] >= int(task.get("max_fires") or 1):
+                logger.info(f"[system-timer] 事件任务 {task_id} 达到 max_fires 上限，自动移除")
+                self._tasks.pop(task_id, None)
+
+    @staticmethod
+    def _render_event_message(snapshot: Dict[str, Any], payload: Dict[str, Any]) -> str:
+        """渲染事件触发消息：支持 {event} / {watch_label} / {response} 占位。"""
+        text = str(snapshot.get("prompt") or "")
+        mapping = {
+            "{event}": str(snapshot.get("event") or ""),
+            "{watch_label}": str(snapshot.get("watch_label") or "当前会话"),
+            "{response}": str(payload.get("response") or "")[:500],
+        }
+        for key, value in mapping.items():
+            text = text.replace(key, value)
+        label = snapshot.get("watch_label") or "当前会话"
+        return f"🔔 事件触发（{label} · {snapshot.get('event')}）：{text}"
+
     def _find_window(self, session_id: str) -> Optional[str]:
         """按 session_id 反查窗口 id（遍历 UIPluginRegistry 的窗口主部件表）。"""
         try:
@@ -248,14 +562,26 @@ class TimerScheduler:
 
     @staticmethod
     def _snapshot(task: Dict[str, Any], now: float) -> Dict[str, Any]:
-        return {
+        snap = {
             "id": task["id"],
             "session_id": task["session_id"],
             "prompt": task["prompt"],
             "type": task["type"],
+            "trigger": task.get("trigger", "time"),
             "mode": task.get("mode", "queue"),
-            "next_fire_seconds": round(max(0.0, task["fire_at"] - now), 1),
         }
+        if task.get("trigger") == "event":
+            snap.update(
+                {
+                    "event": task.get("event", ""),
+                    "watch": task.get("watch_label", ""),
+                    "repeat": bool(task.get("repeat")),
+                    "fires": int(task.get("fires") or 0),
+                }
+            )
+        else:
+            snap["next_fire_seconds"] = round(max(0.0, task["fire_at"] - now), 1)
+        return snap
 
 
 # ── 模块级单例（ui/__init__.py 管生命周期；tools 侧经 sys.modules 解析） ──
