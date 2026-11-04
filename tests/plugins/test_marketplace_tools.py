@@ -3,9 +3,10 @@
 
 覆盖：
 - manifest 声明 tools 组件与 module_prefixes（AST 安全网放行所必需）
-- 6 个工具注册成功、danger 分级正确、schema name 与注册名一致
+- 7 个工具注册成功、danger 分级正确、schema name 与注册名一致
 - 保护分支：插件市场自身不可操作、系统/内置插件不可卸载
 - 已装列表分组输出（用户插件详列 / 内置系统折叠）
+- 详情工具：输出完整信息/本地目录，未知插件报错
 """
 import json
 from pathlib import Path
@@ -19,6 +20,7 @@ TOOL_FILE = PLUGIN / "tools" / "marketplace_tools.py"
 _TOOL_NAMES = {
     "marketplace_search",
     "marketplace_installed",
+    "marketplace_detail",
     "marketplace_install",
     "marketplace_uninstall",
     "marketplace_update",
@@ -58,6 +60,9 @@ class _FakeInstaller:
     def get_installed_version(self, name):
         return self._inst_map.get(name)
 
+    def get_manifest_map(self):
+        return {}
+
 
 def test_manifest_declares_tools_and_module_prefix():
     data = json.loads((PLUGIN / ".drifox-plugin" / "plugin.json").read_text(encoding="utf-8"))
@@ -66,7 +71,7 @@ def test_manifest_declares_tools_and_module_prefix():
     assert "_plugin_marketplace_ui" in data.get("module_prefixes", [])
 
 
-def test_registers_six_tools(tool_mod):
+def test_registers_seven_tools(tool_mod):
     from app.plugins.loaders.plugin_tool_loader import _PluginRegistryProxy
     from app.tools.registry import ToolRegistry
 
@@ -120,3 +125,50 @@ def test_installed_list_folds_builtin(tool_mod, monkeypatch):
     assert res.success is True
     assert "1. demo | 已安装·启用 v1.0.0" in res.content
     assert "另有 1 个内置/系统插件" in res.content
+
+
+def test_detail_reports_unknown_plugin(tool_mod, monkeypatch):
+    monkeypatch.setattr(tool_mod, "_installer", lambda: _FakeInstaller({}))
+    monkeypatch.setattr(tool_mod, "_find_market_plugin", lambda name, force=False: None)
+    res = tool_mod._detail_impl({}, plugin="no-such-plugin")
+    assert res.success is False
+    assert "没有任何名为" in res.error or "都没有名为" in res.error
+
+
+def test_detail_outputs_fields_and_local_dir(tool_mod, monkeypatch, tmp_path):
+    plugin_dir = tmp_path / "demo"
+    (plugin_dir / ".drifox-plugin").mkdir(parents=True)
+    (plugin_dir / ".drifox-plugin" / "plugin.json").write_text(
+        json.dumps({"name": "demo", "version": "1.2.3"}), encoding="utf-8"
+    )
+
+    class _Inst(_FakeInstaller):
+        _plugins_dir = tmp_path
+        _disabled_dir = tmp_path / "nope"
+        _system_dir = tmp_path / "nope2"
+
+        def get_manifest_map(self):
+            return {"demo": {"name": "demo", "version": "1.2.3", "components": {"ui": True}}}
+
+    monkeypatch.setattr(
+        tool_mod,
+        "_installer",
+        lambda: _Inst({"demo": "enabled"}, {"demo": "1.2.3"}),
+    )
+    monkeypatch.setattr(
+        tool_mod,
+        "_find_market_plugin",
+        lambda name, force=False: {
+            "name": "demo",
+            "version": "1.2.3",
+            "description": "演示插件",
+            "min_host_version": "0.1.0",
+        },
+    )
+    res = tool_mod._detail_impl({}, plugin="demo")
+    assert res.success is True
+    assert "插件 demo v1.2.3" in res.content
+    assert "描述：演示插件" in res.content
+    assert "兼容：平台与宿主版本均满足" in res.content
+    assert "组件：ui" in res.content
+    assert f"本地目录：{plugin_dir.resolve()}" in res.content

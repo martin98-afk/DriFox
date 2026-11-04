@@ -184,16 +184,58 @@ def _shorten(text: Any, limit: int = 120) -> str:
     return s[:limit] + "…" if len(s) > limit else s
 
 
+def _compat_notes(meta: dict) -> List[str]:
+    """兼容性提示（空列表 = 兼容）：平台 / 宿主版本不满足时给出原因。
+
+    与插件市场 UI 的置灰判定同源（``deps_loader.check_platform`` /
+    ``check_host_compat``），保证 AI 看到的结论与用户界面一致；宿主老版本
+    无该 API 时静默跳过，不阻断搜索。
+    """
+    notes: List[str] = []
+    try:
+        from app.plugins.deps_loader import check_host_compat, check_platform
+
+        ok, reason = check_platform(meta)
+        if not ok and reason:
+            notes.append(f"⚠ {reason}")
+        ok, reason = check_host_compat(meta)
+        if not ok and reason:
+            notes.append(f"⚠ {reason}")
+    except Exception as e:
+        logger.debug(f"[MarketplaceTool] 兼容性判定不可用: {e}")
+    return notes
+
+
+def _installed_dir(name: str) -> str:
+    """已安装插件的实际目录（启用 / 禁用 / 系统三处查找），未找到返回空串"""
+    try:
+        inst = _installer()
+        for attr in ("_plugins_dir", "_disabled_dir", "_system_dir"):
+            base = getattr(inst, attr, None)
+            if base is None:
+                continue
+            p = Path(base) / name
+            if (p / ".drifox-plugin" / "plugin.json").is_file() or (
+                p / ".claude-plugin" / "plugin.json"
+            ).is_file():
+                return str(p.resolve())
+    except Exception:
+        pass
+    return ""
+
+
 def _format_plugin_line(idx: int, meta: dict, status_map: dict, inst_map: dict) -> str:
     name = str(meta.get("name", ""))
     ver = str(meta.get("version", "") or "?")
     state = _install_state(name, status_map, inst_map, ver)
-    tags = list(meta.get("categories") or []) + list(meta.get("tags") or [])
+    tags = list(meta.get("categories") or []) + list(meta.get("keywords") or [])
     bits = [state]
     if tags:
         bits.append("分类 " + "/".join(str(t) for t in tags[:4]))
     if meta.get("_marketplace"):
         bits.append(f"来源 {meta['_marketplace']}")
+    # 不兼容插件显式标注：AI 推荐/安装前即可看到「装不了」的原因
+    bits.extend(_compat_notes(meta))
     head = f"{idx}. {name} v{ver} | " + " | ".join(bits)
     desc = _shorten(meta.get("description"))
     return f"{head}\n    {desc}" if desc else head
@@ -280,6 +322,12 @@ def _installed_impl(tool_ctx, **kwargs):
             market = {str(p.get("name", "")): p for p in _market_plugins(force=False)}
         except Exception as e:
             market_error = str(e)
+    # 本地 manifest（get_installed_map 扫描时已缓存）：兼容性判定用本地声明，
+    # 市场条目可能过期或缺失（本地/已下架插件）
+    try:
+        manifests = inst.get_manifest_map()
+    except Exception:
+        manifests = {}
 
     names = [n for n in sorted(status_map) if status_map.get(n) in _INSTALLED_STATES]
     if keyword:
@@ -303,7 +351,9 @@ def _installed_impl(tool_ctx, **kwargs):
     lines = [f"可操作用户插件 {len(detail)} 个（{summary}）："] if detail else ["没有可操作的用户插件。"]
     for i, name in enumerate(detail, 1):
         ver = str((market.get(name) or {}).get("version", "") or "")
-        lines.append(f"{i}. {name} | {_install_state(name, status_map, inst_map, ver)}")
+        compat = _compat_notes(manifests.get(name) or market.get(name) or {})
+        suffix = (" | " + " | ".join(compat)) if compat else ""
+        lines.append(f"{i}. {name} | {_install_state(name, status_map, inst_map, ver)}{suffix}")
     if folded:
         sample = "、".join(folded[:10]) + ("…" if len(folded) > 10 else "")
         lines.append(f"另有 {len(folded)} 个内置/系统插件（不可卸载，可用 keyword 查询）：{sample}")
@@ -480,6 +530,106 @@ def _set_enabled_impl(tool_ctx, **kwargs):
     )
 
 
+def _detail_impl(tool_ctx, **kwargs):
+    name = str(kwargs.get("plugin") or "").strip()
+    if not name:
+        return ToolResult(False, error="缺少 plugin 参数：请传市场返回的精确插件名")
+    meta = _find_market_plugin(name, force=False) or _find_market_plugin(name, force=True)
+    try:
+        inst = _installer()
+        status = inst.get_status_map().get(name)
+        local_ver = inst.get_installed_version(name)
+        manifests = inst.get_manifest_map()
+    except Exception as e:
+        logger.warning(f"[MarketplaceTool] 查询 {name} 状态失败: {e}")
+        status, local_ver, manifests = None, None, {}
+    if meta is None and not status:
+        return ToolResult(
+            False,
+            error=f"市场与本地都没有名为 {name} 的插件。先 marketplace_search 确认精确插件名",
+        )
+
+    # 市场元数据优先（含 min_host_version / platforms / 下载量），本地 manifest 补缺
+    manifest = manifests.get(name) or {}
+    info = dict(manifest)
+    if meta:
+        info.update({k: v for k, v in meta.items() if v not in (None, "", [], {})})
+
+    ver = str(info.get("version") or local_ver or "?")
+    state = _install_state(
+        name,
+        {name: status} if status else {},
+        {name: local_ver} if local_ver else {},
+        ver if meta else "",
+    )
+    lines = [f"插件 {name} v{ver} | {state}"]
+    desc = _shorten(info.get("description"), limit=2000)
+    if desc:
+        lines.append(f"描述：{desc}")
+
+    facts: List[str] = []
+    author = info.get("author")
+    if isinstance(author, dict):
+        author = author.get("name") or ""
+    if author:
+        facts.append(f"作者 {author}")
+    if info.get("license"):
+        facts.append(f"许可 {info['license']}")
+    if info.get("categories"):
+        facts.append("分类 " + "/".join(str(c) for c in info["categories"]))
+    if info.get("keywords"):
+        facts.append("关键词 " + ", ".join(str(k) for k in list(info["keywords"])[:8]))
+    if info.get("downloads") is not None:
+        facts.append(f"下载 {info['downloads']}")
+    if facts:
+        lines.append(" | ".join(facts))
+
+    compat = _compat_notes(info)
+    lines.append("兼容：" + ("；".join(compat) if compat else "平台与宿主版本均满足"))
+
+    comps = info.get("components")
+    if isinstance(comps, dict):
+        active = [k for k, v in comps.items() if v]
+        if active:
+            lines.append("组件：" + ", ".join(active))
+
+    deps = info.get("dependencies")
+    if isinstance(deps, dict):
+        pip = deps.get("pip")
+        dep_bits: List[str] = []
+        if isinstance(pip, dict):
+            try:
+                from app.plugins.deps_loader import current_platform_key
+
+                key = current_platform_key()
+            except Exception:
+                key = ""
+            for label, vals in (("通用", pip.get("default") or []), (key, pip.get(key) or [] if key else [])):
+                if vals:
+                    dep_bits.append(f"{label}: " + ", ".join(str(v) for v in vals[:12]))
+        if dep_bits:
+            lines.append("依赖：" + "；".join(dep_bits))
+
+    src = info.get("source")
+    if isinstance(src, dict):
+        loc = str(src.get("url") or src.get("repo") or "")
+        extra = []
+        if src.get("path"):
+            extra.append(f"path={src['path']}")
+        if src.get("ref"):
+            extra.append(f"ref={src['ref']}")
+        lines.append(("来源：" + " ".join([str(src.get("type") or ""), loc] + extra)).strip())
+    if info.get("homepage"):
+        lines.append(f"官网：{info['homepage']}")
+
+    local_dir = _installed_dir(name)
+    if local_dir:
+        lines.append(f"本地目录：{local_dir}")
+        lines.append("需要 README/源码细节可直接读该目录下的文件。")
+    else:
+        lines.append("未安装。安装用 marketplace_install（参数传上面的插件名）。")
+    return ToolResult(True, content="\n".join(lines))
+
 # ── schema ────────────────────────────────────────────
 
 _COMMON_PLUGIN_PARAM = {
@@ -519,6 +669,22 @@ _INSTALLED_SCHEMA = {
                 "keyword": {"type": "string", "description": "按插件名过滤"},
                 "check_update": {"type": "boolean", "description": "检查市场新版本，默认 true；false 省一次请求"},
             },
+        },
+    },
+}
+
+_DETAIL_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "marketplace_detail",
+        "description": (
+            "查看单个插件详情：完整描述、作者/许可、分类关键词、组件清单、依赖、"
+            "平台与宿主版本兼容性、安装状态、本地目录。安装前判断插件是否符合需求时先看详情。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {"plugin": _COMMON_PLUGIN_PARAM},
+            "required": ["plugin"],
         },
     },
 }
@@ -608,6 +774,10 @@ def _preview_set_enabled(tool_args: dict) -> str:
     return f"{verb}插件 {tool_args.get('plugin', '')}"
 
 
+def _preview_detail(tool_args: dict) -> str:
+    return f"插件详情 {tool_args.get('plugin', '')}"
+
+
 def register(registry):
     registry.register(
         "marketplace_search",
@@ -634,6 +804,19 @@ def register(registry):
         render_mode="inline",
         preview=_preview_installed,
         summarize=make_summarize_from_preview(_preview_installed),
+    )
+    registry.register(
+        "marketplace_detail",
+        _DETAIL_SCHEMA,
+        impl=_detail_impl,
+        danger="safe",
+        icon=_ICON,
+        cn_name="插件详情",
+        group=_GROUP,
+        description="查看单个插件完整信息",
+        render_mode="inline",
+        preview=_preview_detail,
+        summarize=make_summarize_from_preview(_preview_detail),
     )
     registry.register(
         "marketplace_install",

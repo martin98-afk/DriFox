@@ -507,6 +507,16 @@ class PluginInstaller:
             logger.error(f"[Installer] set managed {'enable' if enabled else 'disable'} {name} failed: {e}")
             return False
 
+    def get_manifest_map(self) -> dict:
+        """已安装插件的 manifest（{name: manifest}，最近一次扫描结果）。
+
+        供插件市场工具做兼容性判定（平台 / 宿主版本）与详情展示，避免
+        逐插件重读磁盘。调用前先调 get_installed_map 触发扫描（否则可能
+        为空字典）。
+        """
+        with self._cache_lock:
+            return dict(self._manifest_cache)
+
     def invalidate_installed_cache(self):
         """使缓存失效（清空后立即在调用线程重填，语义=清后立即重填）
 

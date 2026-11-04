@@ -2612,6 +2612,7 @@ class MarketplaceCard(QWidget):
     """插件市场浮动卡片"""
 
     closed = pyqtSignal()
+    _diagnosticsReady = pyqtSignal(str, str)  # (诊断报告文本, 错误信息)
 
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
@@ -2656,6 +2657,7 @@ class MarketplaceCard(QWidget):
         self._pending_scroll: int = 0  # 行重建待恢复的滚动位置（0=无）
         self._scroll_guard: int = 0  # 滚动恢复补批链次数上限防死循环
         _t0 = time.perf_counter()
+        self._diagnosticsReady.connect(self._on_diagnostics_ready)
         self._setup_ui()
         logger.debug(f"[DEBUG-mp] ctor _setup_ui {(time.perf_counter() - _t0) * 1000:.0f}ms")
         # 宽度上限：比对话气泡区（约 1000px）宽一点点（1080）即可，不铺满覆盖层全宽。
@@ -2998,7 +3000,45 @@ class MarketplaceCard(QWidget):
         )
         header_layout.addWidget(self._status_label)
 
-        # 刷新 + 关闭（刷新在左，关闭在右）
+        # 一键更新 + 诊断 + 刷新 + 关闭（一键更新在最左）
+        # 一键更新：待更新 >1 时出现图标，右上角 badge 显示数量（归零即隐藏）
+        self._update_all_btn = TransparentToolButton(FluentIcon.UPDATE, header)
+        self._update_all_btn.setFixedSize(24, 24)
+        self._update_all_btn.setToolTip("一键更新")
+        self._update_all_btn.clicked.connect(self._on_update_all)
+        self._update_all_btn.setVisible(False)
+        header_layout.addWidget(self._update_all_btn)
+
+        self._update_all_badge = None
+        try:
+            from qfluentwidgets import InfoBadge, InfoBadgePosition
+
+            self._update_all_badge = InfoBadge.custom(
+                "0",
+                QColor(255, 193, 7),
+                QColor(255, 213, 79),
+                parent=header,
+                target=self._update_all_btn,
+                position=InfoBadgePosition.TOP_RIGHT,
+            )
+            self._update_all_badge.setObjectName("updateAllBadge")
+            # 同「待更新」tab badge：注销主题自动重放，固定黑字保证亮黄底可读
+            from qfluentwidgets.common.style_sheet import styleSheetManager
+
+            styleSheetManager.deregister(self._update_all_badge)
+            self._update_all_badge.setStyleSheet("InfoBadge { color: #1a1a1a; padding: 1px 3px 1px 3px; }")
+            self._update_all_badge.setVisible(False)
+        except Exception as e:
+            logger.warning(f"[Marketplace] 一键更新 InfoBadge 挂载失败: {e}")
+
+        # 诊断 + 刷新 + 关闭（诊断在刷新左侧）
+        # 诊断导出：汇总插件状态/兼容性/依赖/日志错误，复制给 AI 排查
+        self._diag_btn = TransparentToolButton(FluentIcon.DEVELOPER_TOOLS, header)
+        self._diag_btn.setFixedSize(24, 24)
+        self._diag_btn.setToolTip("导出插件诊断（复制给 AI 排查）")
+        self._diag_btn.clicked.connect(self._on_export_diagnostics)
+        header_layout.addWidget(self._diag_btn)
+
         self._refresh_btn = TransparentToolButton(FluentIcon.SYNC, header)
         self._refresh_btn.setFixedSize(24, 24)
         self._refresh_btn.setToolTip("刷新")
@@ -3106,14 +3146,6 @@ class MarketplaceCard(QWidget):
         self._sync_sort_combo_metrics()
         self._sort_combo.currentIndexChanged.connect(self._on_sort_changed)
         filter_layout.addWidget(self._sort_combo)
-
-        # 一键更新：有待更新插件时显示（计数由 _update_update_badge 维护）
-        self._update_all_btn = TransparentPushButton("一键更新", filter_row)
-        self._update_all_btn.setObjectName("updateAllBtn")
-        self._update_all_btn.setFixedHeight(33)
-        self._update_all_btn.clicked.connect(self._on_update_all)
-        self._update_all_btn.setVisible(False)
-        filter_layout.addWidget(self._update_all_btn)
 
         browse_root.addWidget(filter_row)
 
@@ -5943,10 +5975,18 @@ class MarketplaceCard(QWidget):
                 self._updates_badge.setVisible(False)
         except RuntimeError:
             pass
-        # 一键更新按钮：有待更新才显示
+        # 一键更新硬钮：待更新 >1 才出现图标；badge 显示数量，归零隐藏
         try:
-            self._update_all_btn.setVisible(n > 0)
-            self._update_all_btn.setText(f"一键更新 ({n})")
+            show = n > 1
+            self._update_all_btn.setVisible(show)
+            self._update_all_btn.setToolTip(f"一键更新 {n} 个插件" if show else "一键更新")
+            if self._update_all_badge is not None:
+                if show:
+                    self._update_all_badge.setText(str(n))
+                    self._update_all_badge.setVisible(True)
+                else:
+                    self._update_all_badge.setText("0")
+                    self._update_all_badge.setVisible(False)
         except RuntimeError:
             pass
         _sync_sidebar_title_count(n)
@@ -5968,6 +6008,49 @@ class MarketplaceCard(QWidget):
             )
         else:
             self._status_label.setText("没有待更新的插件")
+
+    # ── 诊断导出 ──
+
+    def _on_export_diagnostics(self):
+        """后台采集插件诊断，完成后复制到剪贴板（报告可直接粘贴给 AI）"""
+        self._diag_btn.setEnabled(False)
+        self._diag_btn.setToolTip("诊断采集中…")
+
+        def _worker():
+            try:
+                from .diagnostics import collect_diagnostics
+
+                text, err = collect_diagnostics(), ""
+            except Exception as e:  # 采集失败也要回主线程恢复按钮
+                text, err = "", str(e)
+            self._diagnosticsReady.emit(text, err)
+
+        import threading
+
+        threading.Thread(target=_worker, daemon=True, name="marketplace-diagnostics").start()
+
+    def _on_diagnostics_ready(self, text: str, error: str):
+        """主线程：复制诊断到剪贴板并提示"""
+        self._diag_btn.setEnabled(True)
+        self._diag_btn.setToolTip("导出插件诊断（复制给 AI 排查）")
+        bar_parent = _host_parent(self)
+        if error or not text:
+            InfoBar.error("诊断生成失败", error or "未采集到内容", duration=4000, parent=bar_parent)
+            return
+        try:
+            from PyQt5.QtWidgets import QApplication
+
+            QApplication.clipboard().setText(text)
+        except Exception as e:
+            logger.warning(f"[Marketplace] 复制诊断失败: {e}")
+            InfoBar.error("诊断已生成但复制失败", str(e)[:120], duration=4000, parent=bar_parent)
+            return
+        InfoBar.success(
+            "诊断已复制",
+            "粘贴给 AI 即可排查（含插件状态、兼容性、依赖与日志错误）",
+            duration=4000,
+            parent=bar_parent,
+        )
 
     # ── Tag 过滤 ──
 
