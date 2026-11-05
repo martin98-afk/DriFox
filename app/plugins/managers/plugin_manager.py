@@ -441,7 +441,7 @@ class PluginManager:
             self._initialized = True
             self._restore_enabled_from_settings()
             try:
-                self._last_scan_signature = self._plugins_dir_signature()
+                self._last_scan_signature = self._plugins_dir_signature(include_mtime=False)
             except Exception:
                 self._last_scan_signature = None
             return
@@ -463,9 +463,10 @@ class PluginManager:
         self._restore_enabled_from_settings()
 
         # 记录首次扫描的目录签名：让启动期那次 rescan（ConfigSync 合并重载兜底）
-        # 能直接短路，省掉一次全量重扫（实测 ~450ms）
+        # 能直接短路，省掉一次全量重扫（实测 ~450ms）。口径与 ：919 rescan 短路
+        # 统一用弱签名（include_mtime=False），否则强签名≠弱签名永不命中（#F17）
         try:
-            self._last_scan_signature = self._plugins_dir_signature()
+            self._last_scan_signature = self._plugins_dir_signature(include_mtime=False)
         except Exception:
             self._last_scan_signature = None
 

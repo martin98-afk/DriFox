@@ -90,7 +90,11 @@ def _spy_scan(pm, monkeypatch):
 
 def _spy_config_schema(pm, monkeypatch):
     counter = {"n": 0}
-    monkeypatch.setattr(pm, "_register_config_schema", lambda name, manifest: counter.__setitem__("n", counter["n"] + 1))
+    monkeypatch.setattr(
+        pm,
+        "_register_config_schema",
+        lambda name, manifest, manifest_path=None: counter.__setitem__("n", counter["n"] + 1),
+    )
     return counter
 
 
