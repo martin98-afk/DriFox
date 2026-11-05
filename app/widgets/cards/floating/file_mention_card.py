@@ -978,6 +978,12 @@ class FileMentionCard(QWidget):
         后台全量扫描（_scan_files → _scan_tree）兜底。
         """
         dirpath = os.path.normpath(dirpath)
+        # 忽略目录不注册监视器、不扫描：新增 deps/node_modules 等大目录时
+        # 避免全量递归扫描与后续变更事件风暴（对齐 _EXTRA_SKIP_DIRS 语义）
+        rel_dir = f"{rel_prefix}/{os.path.basename(dirpath)}" if rel_prefix else os.path.basename(dirpath)
+        if self._is_ignored(rel_dir, True, self._gitignore_patterns):
+            return
+
         # 注册监视器
         if dirpath not in self._watched_dirs:
             self._watched_dirs.add(dirpath)
@@ -1099,6 +1105,7 @@ class FileMentionCard(QWidget):
         "temp",
         # 第三方依赖目录
         "vendor",  # Go/PHP
+        "deps",  # Python/JS 插件依赖（数千文件级，见 plugin_host_service._EXTRA_SKIP_DIRS）
         "Pods",  # CocoaPods
         "Carthage",  # Carthage
         ".gradle",  # Gradle 缓存

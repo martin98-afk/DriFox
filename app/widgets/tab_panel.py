@@ -1498,7 +1498,7 @@ class UIPluginRow(QFrame):
         menu = QMenu(self)
         menu.setStyleSheet(f"""
             QMenu {{
-                background: {Colors.CARD_BG};
+                background: {Colors.CARD_BG.format(alpha=180)};
                 border: 1px solid {Colors.BORDER};
                 border-radius: 6px;
                 padding: 4px;
@@ -4641,7 +4641,7 @@ class TabPanel(QWidget):
         """右键菜单统一样式（TabItem 菜单与团队框菜单共用）"""
         return f"""
             QMenu {{
-                background: {Colors.CARD_BG};
+                background: {Colors.CARD_BG.format(alpha=180)};
                 border: 1px solid {Colors.BORDER};
                 border-radius: 6px;
                 padding: 4px;

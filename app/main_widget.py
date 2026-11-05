@@ -5719,7 +5719,7 @@ class OpenAIChatToolWindow(ToolWindow):
         menu.setStyleSheet(
             f"""
             QMenu {{
-                background: {Colors.CARD_BG};
+                background: {Colors.CARD_BG.format(alpha=180)};
                 border: 1px solid {Colors.BORDER};
                 border-radius: 6px;
                 padding: 4px;
@@ -25502,6 +25502,16 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def closeEvent(self, event):
         self._release_drop_targets()
+
+        # 🔧 F14b: 注销 ToolRegistry 变更监听（注册于 __init__）。监听者虽以
+        # 弱引用持有，但 close→deleteLater 间隙 wrapper 尚存，sip 硬判前的
+        # 回调窗口仍在；此处主动幂等注销（off_change 对不存在监听静默）。
+        try:
+            from app.tools.registry import ToolRegistry
+
+            ToolRegistry.get_instance().off_change(self._on_tool_registry_changed)
+        except Exception:
+            pass
 
         # 🔧 F2: 主动断开 destroyed 清理连接 + 立即清理快捷键，避免窗口 C++ 对象
         # 销毁触发 destroyed 时 lambda 访问已删除的 self 抛 RuntimeError

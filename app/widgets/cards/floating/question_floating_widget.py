@@ -897,7 +897,7 @@ class QuestionFloatingWidget(QWidget):
         self._next_btn.setFont(get_unified_font(10, True))
         self._next_btn.clicked.connect(self._on_next)
         self._next_btn.setStyleSheet(f"""
-            QPushButton {{ background-color: {Colors.CARD_BG}; color: {Colors.TEXT_PRIMARY}; border: none; border-radius: 6px; padding: 0 18px; font-weight: bold; }}
+            QPushButton {{ background-color: {Colors.CARD_BG.format(alpha=180)}; color: {Colors.TEXT_PRIMARY}; border: none; border-radius: 6px; padding: 0 18px; font-weight: bold; }}
             QPushButton:hover {{ background-color: {Colors.CARD_BG_SOLID}; }}
         """)
 
@@ -939,7 +939,7 @@ class QuestionFloatingWidget(QWidget):
             """)
         if hasattr(self, "_next_btn") and self._next_btn:
             self._next_btn.setStyleSheet(f"""
-                QPushButton {{ background-color: {Colors.CARD_BG}; color: {Colors.TEXT_PRIMARY}; border: none; border-radius: 6px; padding: 0 18px; font-weight: bold; }}
+                QPushButton {{ background-color: {Colors.CARD_BG.format(alpha=180)}; color: {Colors.TEXT_PRIMARY}; border: none; border-radius: 6px; padding: 0 18px; font-weight: bold; }}
                 QPushButton:hover {{ background-color: {Colors.CARD_BG_SOLID}; }}
             """)
 

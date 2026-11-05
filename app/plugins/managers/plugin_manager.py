@@ -2156,7 +2156,7 @@ class PluginManager:
 
         for mcp_file in self.get_mcp_configs():
             try:
-                content = json.loads(mcp_file.read_text(encoding="utf-8"))
+                content = json.loads(mcp_file.read_text(encoding="utf-8-sig"))
 
                 # 判断格式：有 mcpServers 键 → DriFoxx 格式；否则 → .claude-plugin 格式
                 if "mcpServers" in content:
