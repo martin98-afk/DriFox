@@ -63,7 +63,11 @@ class TestSuppressRefcount:
 
         resume_plugin_watcher()
         assert PluginHostService._watcher_suppress_refs == 0
-        assert PluginHostService._suppress_watcher_until == 0.0
+        # 归零后进入宽限期（覆盖 watchfiles flight 批次），抑制不立即解除
+        assert PluginHostService._suppress_watcher_until > time.time()
+        assert svc._watcher_suppressed() is True
+        # 宽限期过后自然过期
+        PluginHostService._suppress_watcher_until = time.time() - 0.1
         assert svc._watcher_suppressed() is False
 
     def test_overlap_concurrent_ops_keep_suppression(self):
@@ -78,9 +82,11 @@ class TestSuppressRefcount:
         svc = PluginHostService.__new__(PluginHostService)
         assert svc._watcher_suppressed() is True, "并发操作未全部结束时不得解除抑制"
 
-        # B 完成：最后一次 resume 才真正放开
+        # B 完成：最后一次 resume 才进入宽限期（flight 批次防护）
         resume_plugin_watcher()
         assert PluginHostService._watcher_suppress_refs == 0
+        assert svc._watcher_suppressed() is True, "resume 归零后应留宽限期防 flight 批次穿透"
+        PluginHostService._suppress_watcher_until = time.time() - 0.1
         assert svc._watcher_suppressed() is False
 
     def test_legacy_deadline_write_still_works(self):
@@ -199,7 +205,8 @@ class TestInstallerRemoveSuppression:
         assert full == []
         # 卸载结束后抑制引用必须归零（否则 watcher 永久停摆）
         assert PluginHostService._watcher_suppress_refs == 0
-        assert PluginHostService._suppress_watcher_until == 0.0
+        # 归零后进入短宽限期（flight 批次防护），随后自然过期
+        assert PluginHostService._suppress_watcher_until > time.time()
 
     def test_uninstall_remove_returns_true_cleanup_safe(self, tmp_path, monkeypatch):
         """卸载不存在的插件：不重载（removed=False），引用仍归零（finally 兜底）"""

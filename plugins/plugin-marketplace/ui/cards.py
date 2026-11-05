@@ -2690,8 +2690,9 @@ class MarketplaceCard(QWidget):
             self._filter_bar.setCurrentItem("featured")
             self._current_filter = "featured"
             self._apply_browse_mode("featured")
-        # 清除旧搜索状态、防抖定时器
-        self._search_edit.clear()
+        # 清除隐藏期间残留的防抖定时器（防重新显示时触发过期过滤）；
+        # 不清搜索框：tab 切换每次激活都走本方法，清空会丢用户搜索词。
+        # 渲染路径现读 _search_edit.text()，旧词自动套在新数据上。
         self._search_debounce.stop()
         # 延迟 50ms 启动加载，避免阻塞 show 过程（self 子 timer，销毁自动取消）
         logger.debug(f"[DEBUG-mp] show_card sync {(time.perf_counter() - _t_show) * 1000:.0f}ms")

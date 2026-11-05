@@ -745,3 +745,60 @@ def test_detail_dialog_author_dict_not_dumped_raw(monkeypatch):
     assert "'name'" not in joined and "{" not in joined.split("http")[0], f"author dict 被原样打印: {joined[:200]}"
     assert "Vincentwei1021" in joined, "author 名称未显示"
     dlg.close()
+
+def test_show_card_keeps_search_query(monkeypatch):
+    """再次 show_card（标题栏 tab 切走再切回）必须保留搜索词
+
+    复现背景：show_card 尾部无条件 ``_search_edit.clear()``，本意只是停掉
+    隐藏期间残留的防抖定时器，但把输入框内容也一并清了。tab 每次激活都走
+    show_card → 搜索词每次切回来都丢、列表回到全量。
+    修复：保留 _search_debounce.stop()，不清输入框；渲染路径现读
+    _search_edit.text()，原搜索词自动套在新数据上。
+    """
+    card = _new_card(monkeypatch)
+    card.show()
+    card.show_card()
+    card._filter_bar.setCurrentItem("all")
+
+    deadline = time.time() + 8
+    while time.time() < deadline:
+        _pump(0.05)
+        if card._row_map:
+            break
+    assert card._row_map, "首屏未渲染"
+    _pump(0.3)
+
+    # 「plugin-m-00」恰好是 plugin-m-000..009 十个名字的前缀（010..039 不含），
+    # 用它验证过滤生效；注意 plugin-m-0 是全部 40 个名字的公共前缀，不能作查询词
+    card._search_edit.setText("plugin-m-00")
+    card._search_debounce.stop()  # 不等 300ms 防抖，立即过滤
+    card._filter_plugins()
+    _pump(0.2)
+
+    def _visible_rows():
+        return sum(1 for r in card._row_map.values() if r.isVisible())
+
+    rows_filtered = _visible_rows()
+    assert 0 < rows_filtered < 40, f"搜索过滤未生效: visible={rows_filtered}"
+    assert rows_filtered == len(card._matched), (
+        f"可见行与匹配数不一致: visible={rows_filtered} matched={len(card._matched)}"
+    )
+
+    card.show_card()  # 模拟切走 tab 再切回
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        _pump(0.05)
+        if card._row_map and all(r.isVisible() for r in card._row_map.values()):
+            break
+
+    assert card._search_edit.text() == "plugin-m-00", (
+        f"搜索词被 show_card 清空: {card._search_edit.text()!r}"
+    )
+    assert _visible_rows() == len(card._matched) == rows_filtered, (
+        f"再次 show_card 后过滤状态不一致: visible={_visible_rows()} "
+        f"matched={len(card._matched)} 期望 {rows_filtered}"
+    )
+    card._search_debounce.stop()
+    if card._load_timer is not None:
+        card._load_timer.stop()
+    card.close()

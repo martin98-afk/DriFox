@@ -44,6 +44,10 @@ _READ_THROUGH_COMPONENTS = frozenset({"hooks", "team_templates"})
 # 下方模块级函数（线程安全），不要直接写类属性。
 _watcher_suppress_lock = threading.Lock()
 
+# resume 归零后的宽限期（秒）：覆盖 watchfiles flight 批次的最晚 yield 时刻
+# （debounce 2000ms + step 2000ms = 4s），取 6s 留余量。
+_WATCHER_RESUME_GRACE_S = 6.0
+
 
 def suppress_plugin_watcher(duration: float = 180.0) -> None:
     """引用计数式抑制插件热重载 watcher（并发安装/卸载安全，幂等叠加）
@@ -71,7 +75,16 @@ def resume_plugin_watcher() -> None:
         with _watcher_suppress_lock:
             PluginHostService._watcher_suppress_refs = max(0, PluginHostService._watcher_suppress_refs - 1)
             if PluginHostService._watcher_suppress_refs == 0:
-                PluginHostService._suppress_watcher_until = 0.0
+                # 归零不立即清零，留短宽限期：watchfiles 的飞行中批次（debounce 2s +
+                # step 2s 聚合，落盘尾声的事件最晚在 resume 后 ~4s 才 yield）在解除
+                # 抑制后到达会穿透窗口，对刚被 reload_plugin_targeted 精准重载过的
+                # 插件再触发 1~2 轮重复重载（2026-11-05 bili-scroll 实测：主动重载
+                # 后 watcher 又触发 manifest-changed 全组件重载 + root fallback，
+                # 主线程三轮 import bilibili_api + 插件 control_server.shutdown
+                # 阻塞主线程 2.7s，UI 冻结十余秒）。
+                # 宽限期内批次照旧转 pending（不 emit）；窗口结束后由既有 pending
+                # 合并路径兜底（幂等，rescan diff 对已注册插件为空操作）。
+                PluginHostService._suppress_watcher_until = time.time() + _WATCHER_RESUME_GRACE_S
     except Exception as e:  # pragma: no cover - 防御极端 import 时序
         logger.debug(f"[PluginHost] resume_plugin_watcher 失败（不影响调用方）: {e}")
 
