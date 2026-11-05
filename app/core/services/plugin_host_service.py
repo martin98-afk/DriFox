@@ -1406,6 +1406,35 @@ class PluginHostService(QObject):
             # 否则已注册插件会被反复识别为"新插件"，触发 bridge.json 自触发循环）
             self._rebuild_watcher_prefixes()
 
+    @staticmethod
+    def _replay_pending_config_cards() -> int:
+        """把 rescan 期间登记的 config_schema 自动设置卡回放到 UI 注册表
+
+        PluginManager 扫描期只把 schema 写进 _pending_config_cards（零 UI import），
+        真正的 register_settings_card 由 replay_config_cards 回放；该方法原先只在
+        启动 _after_plugins_loaded 调一次。运行期热重载/安装/启停同样会经 rescan
+        重新登记 pending，却无人回放——UIPluginRegistry 里仍是旧卡（或没有卡），
+        已打开的系统配置重建也读不到新增配置项，只能新开窗口/标签页（新 backend
+        走启动回放）才出现。
+
+        放在插件变更广播前执行：各窗口收到 plugin_changed 后会重建插件设置卡，
+        回放必须先落地，UI 才能拿到最新卡清单。幂等（pending 为空即返回 0），
+        UI 栈不可用（headless）时 replay 内部降级为 0。
+        """
+        try:
+            from app.plugins.managers.plugin_manager import PluginManager
+
+            pm = PluginManager.get_instance()
+            if not pm.is_initialized():
+                return 0
+            count = pm.replay_config_cards()
+            if count:
+                logger.debug(f"[PluginHost] 插件变更前回放设置卡 {count} 张")
+            return count
+        except Exception as e:
+            logger.warning(f"[PluginHost] 回放插件设置卡失败: {e}")
+            return 0
+
     def emit_plugin_changed(self, result: dict, plugin_name: str = "", action: Optional[str] = None) -> None:
         """广播插件变更结果到全部活跃 backend 的 plugin_changed 信号
 
@@ -1425,6 +1454,9 @@ class PluginHostService(QObject):
                 其余（热重载/全量/更新）→ updated。市场路径传精确值
                 （installed/updated/uninstalled/enabled/disabled）
         """
+        # 设置卡回放：热重载/安装/启停都经 rescan 重新登记 pending，启动期那次
+        # replay 覆盖不到。先落地，随后的 UI 重建才能读到最新卡清单。
+        self._replay_pending_config_cards()
         # PluginChanged hook 触发（广播前，result 尚未被 _event_seq 污染）
         try:
             self._trigger_plugin_changed_hook(result, plugin_name, action)
