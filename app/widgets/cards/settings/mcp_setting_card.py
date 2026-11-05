@@ -1465,13 +1465,24 @@ class MCPListSettingCard(ExpandSettingCard):
         """按服务器名推导门禁 key（与 mcp_lsp_safety 门禁拼接口径一致）。
 
         key 绑定启动配置指纹（command+args，args 含 command 本体与
-        mcp_tools 调用点口径一致）：配置变更后旧 key 失配，需重新确认。"""
+        mcp_tools 调用点口径一致）：配置变更后旧 key 失配，需重新确认。
+
+        必须复刻门禁侧的 stdio 命令回落（_lifespan_stdio 先
+        _resolve_stdio_command 再算指纹）。否则配置声明 python3 而本机
+        实际回落 python 时两侧指纹错位：待确认守卫永不命中（每次热重载
+        广播都对同一台服务器发起注定被拦的连接，日志刷屏），且确认/拒绝
+        写入错位 key，点「允许启动」也无法放行。
+        """
         from app.core.tools.mcp_lsp_safety import config_hash, plugin_from_source, server_key
+        from app.tools.mcp_tools import _resolve_stdio_command
 
         server_cfg = next((s for s in self._get_servers() if s.get("name", "") == name), {})
         src = server_cfg.get("_source", "")
         cmd = server_cfg.get("command", "") or ""
-        cmd_args = [cmd] + list(server_cfg.get("args") or []) if cmd else list(server_cfg.get("args") or [])
+        raw_args = list(server_cfg.get("args") or [])
+        # 与 _lifespan_stdio 同口径：先回落 command（python3→python），再拼 [cmd]+args 算指纹
+        cmd, raw_args = _resolve_stdio_command(cmd, raw_args)
+        cmd_args = [cmd] + raw_args if cmd else raw_args
         chash = config_hash(cmd, cmd_args)
         return server_key("mcp", plugin_from_source(src), name, chash)
 
