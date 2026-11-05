@@ -24,8 +24,17 @@ _ALLOWED_VERBS = frozenset(
 )
 _FORBIDDEN = ("attach", "detach", "pragma", "vacuum", "load_extension", "reindex")
 _FORBIDDEN_RE = re.compile(r"\b(" + "|".join(_FORBIDDEN) + r")\b", re.IGNORECASE)
+# 表名候选提取。三处细节决定误判：
+# - ``update`` 后可跟冲突动作（UPDATE OR IGNORE/REPLACE <表>），要先吃掉；
+# - ``table`` 后可跟 ``IF [NOT] EXISTS``（DROP TABLE / CREATE TABLE 都要认）；
+# - ``ON CONFLICT(x) DO UPDATE SET`` 里的 ``SET`` 不是表名，用负向前瞻挡掉，
+#   否则 upsert 语句必被拒。不再单列 ``exists`` 分支：它只会把 DROP INDEX 的
+#   索引名（本就不带表前缀）误当表名，表名位置已由 ``table`` 分支覆盖。
 _TABLE_REF_RE = re.compile(
-    r"\b(?:from|into|update|join|table|exists)\s+(?:if\s+not\s+exists\s+)?([A-Za-z_][\w]*)",
+    r"\b(?:from|into|update|join|table)\s+"
+    r"(?:if\s+(?:not\s+)?exists\s+)?"
+    r"(?:or\s+(?:rollback|abort|replace|fail|ignore)\s+)?"
+    r"(?!set\b)([A-Za-z_][\w]*)",
     re.IGNORECASE,
 )
 _INDEX_ON_RE = re.compile(
