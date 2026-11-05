@@ -1197,6 +1197,13 @@ class OpenAIChatToolWindow(ToolWindow):
             priority="critical",
             delay_ms=200,
         )
+        # a1（#F22）：60ms 批预热 LSP 重链 import，把 N17 的 523ms import 锁拆两段
+        q.register(
+            "prewarm_import_lsp",
+            lambda: self._safe_timer_call(self.backend._prewarm_lsp_imports),
+            priority="critical",
+            delay_ms=60,
+        )
         q.register(
             "create_engines",
             lambda: self._safe_timer_call(self.backend._deferred_create_engines),
@@ -1228,6 +1235,7 @@ class OpenAIChatToolWindow(ToolWindow):
         q.add_order_constraint("create_tool_executor", "create_engines")  # O3
         q.add_order_constraint("create_engines", "apply_pending_agent")  # O8
         q.add_order_constraint("create_tool_executor", "resync_workdir_after_executor")  # O9
+        q.add_order_constraint("prewarm_import_lsp", "create_tool_executor")  # a1：预热先于 N17
         # [T7 H1] 插件工具全量注册移出 preheat（启动关键路径热态 -300~700ms），
         # 改在首窗延迟泵内执行：idle 优先级天然排在 critical 链之后，另加约束
         # 排 create_new_session（含 openai 包 import ~1.9s 重活，T2 画像）之后，
