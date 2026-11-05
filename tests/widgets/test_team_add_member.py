@@ -1142,3 +1142,40 @@ def test_apply_model_selection_no_match_falls_back_to_builder(qapp):
 
     assert fake_win._current_provider_name == "prov-1"
     assert fake_win._current_model_name == "gpt-4o"
+
+
+def test_apply_model_selection_uses_config_id_first(qapp):
+    """config_id 直查优先：模型名在多个配置重复 + display 映射未构建（团队恢复实况）
+
+    实测本机配置里 glm-5.3-flash / deepseek-v4.1-flash 各命中两份配置，
+    按模型名兜底必然"多匹配不明确"而放弃 → 全团队回退构建者模型。
+    """
+    inst = _make_main_widget_instance()
+    _make_builder_with_model(inst)
+    # 追加一份与 prov-2 同模型名的配置（模拟 CodeBuddy 两个配置同名模型）
+    inst._valid_configs["prov-3"] = {"provider_name": "Provider C", "模型名称": "claude-3.5"}
+    inst._display_to_config_id = {}  # 未打开过模型选择卡片 → 映射为空
+    fake_win = MagicMock()
+    fake_win._is_destroyed = False
+
+    inst._apply_model_selection_to_window(
+        fake_win, model_name="claude-3.5", provider_name="Provider B", config_id="prov-2"
+    )
+
+    assert fake_win._current_provider_name == "prov-2"
+    assert fake_win._current_model_name == "claude-3.5"
+    assert fake_win._user_manually_selected_model is True
+
+
+def test_apply_model_selection_matches_provider_field_without_map(qapp):
+    """display 映射为空且无 config_id → 按 _valid_configs 的 provider_name 字段命中"""
+    inst = _make_main_widget_instance()
+    _make_builder_with_model(inst)
+    inst._display_to_config_id = {}
+    fake_win = MagicMock()
+    fake_win._is_destroyed = False
+
+    inst._apply_model_selection_to_window(fake_win, model_name="claude-3.5", provider_name="Provider B")
+
+    assert fake_win._current_provider_name == "prov-2"
+    assert fake_win._current_model_name == "claude-3.5"
