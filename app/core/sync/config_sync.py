@@ -987,9 +987,11 @@ class ConfigSyncService(QObject):
             # 🚀 P5e：消费同步窗口内被抑制的 watcher user-custom 变更 → 合并触发一次
             # 插件子系统重载（rescan + agents/commands 等），替代 watcher 逐事件热重载链
             # （2.5-4s × N）。若 pending 已置位（watcher 在下载解压期间捕获到变更），
-            # 延迟 200ms 执行一次；另安排 3s 兜底——watchfiles 2s 防抖可能使 pending
-            # 晚于本方法置位（解压完成 → emit → 主线程重载期间 watcher 尚未处理事件），
-            # 3s 后补查一次，确保 agents/commands 最终加载、事件不丢。
+            # 延迟 8s 执行一次（#F7/F32b：原 200ms 落在启动忙窗，rescan 全价 ~512ms
+            # 阻塞主线程；挪出忙窗后走 F32a 短路，代价趋零）；另安排 12s 兜底——
+            # watchfiles 2s 防抖可能使 pending 晚于本方法置位（解压完成 → emit → 主线程
+            # 重载期间 watcher 尚未处理事件），12s 后补查一次，确保 agents/commands
+            # 最终加载、事件不丢。
             #
             # 只在「本轮确实解压了 user-custom」的时间窗内触发：app.config 单下时
             # 插件目录没有任何变化，此时消费 pending 只会拿启动期遗留的一条陈旧标记
@@ -1001,9 +1003,14 @@ class ConfigSyncService(QObject):
                     svc = PluginHostService.get_instance()
                     if getattr(svc, "_watcher_pending_reload", False):
                         svc._watcher_pending_reload = False
-                        QTimer.singleShot(200, self._trigger_merged_plugin_reload)
-                        logger.info("[ConfigSync] 检测到同步期间被抑制的插件变更，200ms 后合并重载")
-                    QTimer.singleShot(3000, self._consume_watcher_pending)
+                        QTimer.singleShot(8000, self._trigger_merged_plugin_reload)
+                        logger.info("[ConfigSync] 检测到同步期间被抑制的插件变更，8s 后合并重载")
+                    # 配套延长 watcher 抑制截止：延迟消费期内解压尾巴事件照旧转 pending
+                    # 而不穿透热重载链；8.5s 覆盖 8s 合并消费点（max 叠加语义，见 :43）
+                    PluginHostService._suppress_watcher_until = max(
+                        PluginHostService._suppress_watcher_until, time.time() + 8.5
+                    )
+                    QTimer.singleShot(12000, self._consume_watcher_pending)
             except Exception as _pe:
                 logger.warning(f"[ConfigSync] 合并插件重载调度失败: {_pe}")
         except Exception as e:
