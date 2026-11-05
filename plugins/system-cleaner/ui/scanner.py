@@ -6,10 +6,13 @@
 - 所有文件操作通过 os/shutil/stdlib 完成
 """
 
+import csv
+import locale
 import os
 import re
 import shutil
 import stat
+import subprocess
 import sys
 import traceback
 from pathlib import Path
@@ -224,7 +227,7 @@ def _kill_qwebengine_processes() -> int:
     except Exception:
         return 0
 
-    pattern = re.compile(r"qwebengine", re.IGNORECASE)
+    pattern = re.compile(r"qtwebengine", re.IGNORECASE)
     self_pid = os.getpid()
     procs = []
     seen = set()
@@ -242,21 +245,53 @@ def _kill_qwebengine_processes() -> int:
         pass
 
     # ── 2. 全系统孤儿兜底（父进程已不存在的残留） ──
+    # psutil.process_iter 全表枚举是后台线程纯 Python 迭代，长持 GIL 饿死主线程
+    # （打包版 watchdog 543ms / 源码版 9025ms 实证）。改 tasklist 子进程枚举：
+    # CSV 只取列 0（映像名）/列 1（PID），不依赖列数；候选（通常几十个）再
+    # psutil.Process(pid) 定点校验孤儿身份与 kill，不再全表迭代。
     try:
-        for p in psutil.process_iter(["pid", "name", "ppid"]):
+        raw = subprocess.run(
+            ["tasklist", "/FO", "CSV", "/NH"],
+            capture_output=True,
+            timeout=10,
+        ).stdout
+        text = raw.decode(locale.getpreferredencoding(False), errors="replace")
+        for row in csv.reader(text.splitlines()):
+            if len(row) < 2:
+                continue
+            if not pattern.search(row[0] or ""):
+                continue
             try:
-                if p.info["pid"] in seen:
-                    continue
-                if not pattern.search(p.info["name"] or ""):
-                    continue
-                ppid = p.info["ppid"]
-                if ppid in (0, 1) or not psutil.pid_exists(ppid):
-                    procs.append(p)
-                    seen.add(p.info["pid"])
+                pid = int(row[1].strip())
+            except ValueError:
+                continue
+            if pid in seen or pid == self_pid:
+                continue
+            try:
+                p = psutil.Process(pid)
+                ppid = p.ppid()
             except Exception:
-                pass
+                continue
+            if ppid in (0, 1) or not psutil.pid_exists(ppid):
+                procs.append(p)
+                seen.add(pid)
     except Exception:
-        pass
+        # tasklist 失败/超时 → 回落原 process_iter 全表路径（保底不劣化）
+        try:
+            for p in psutil.process_iter(["pid", "name", "ppid"]):
+                try:
+                    if p.info["pid"] in seen:
+                        continue
+                    if not pattern.search(p.info["name"] or ""):
+                        continue
+                    ppid = p.info["ppid"]
+                    if ppid in (0, 1) or not psutil.pid_exists(ppid):
+                        procs.append(p)
+                        seen.add(p.info["pid"])
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
     if not procs:
         return 0
