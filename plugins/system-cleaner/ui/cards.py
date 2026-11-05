@@ -299,15 +299,6 @@ class SystemCleanerCard(QWidget):
         self._async_scan()
         self._refresh_memory()  # 内存值到达后水位环经 set_ratio 缓动到实际水位
         self.setVisible(True)
-        # [DEBUG-reopen] 临时诊断：show_card 尾部执行确认 + 状态位指纹
-        try:
-            logger.warning(
-                f"[DEBUG-reopen] card.show_card done hidden={self.isHidden()} "
-                f"vis={self.isVisible()} parent={type(self.parent()).__name__} "
-                f"parent_vis={self.parent().isVisible() if self.parent() else None}"
-            )
-        except Exception:
-            pass
 
     def _apply_plugin_icon(self):
         if self._context_provider is None or self._header_icon is None:
@@ -337,14 +328,7 @@ class SystemCleanerCard(QWidget):
     def _apply_latest_theme(self):
         ctx = self._get_context()
         if ctx is None:
-            # [theme-probe] 临时诊断：provider 缺失/抛错导致整次刷新早退
-            logger.warning("[theme-probe] apply_latest ctx=None（provider 缺失或抛错）")
             return
-        logger.warning(
-            f"[theme-probe] apply_latest colors={len(_ctx_colors(ctx))} "
-            f"dark={ctx.get('is_dark')} font={ctx.get('font_family')}"
-        )
-
         self._ctx_font_family, self._ctx_font_size = _ctx_font(ctx)
         ff = self._ctx_font_family
         fs = self._ctx_font_size
