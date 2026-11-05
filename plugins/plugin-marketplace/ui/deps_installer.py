@@ -126,6 +126,11 @@ class DepsInstaller:
                 cmd,
                 capture_output=True,
                 text=True,
+                # 必须显式指定编码：uv 的报错含本地化中文（UTF-8），
+                # Windows 默认按 cp936 解码会在 _readerthread 抛
+                # UnicodeDecodeError，导致 stderr 变成 None、错误信息全丢。
+                encoding="utf-8",
+                errors="replace",
                 timeout=DEFAULT_TIMEOUT,
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0) if sys.platform == "win32" else 0,
             )
