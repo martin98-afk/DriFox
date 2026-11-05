@@ -24,6 +24,7 @@
 import inspect
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -129,25 +130,137 @@ def test_no_layout_traversal_in_finder():
     )
 
 
-def test_undo_has_large_undo_confirmation():
-    """源码契约：大额撤销必须二次确认"""
+def test_undo_has_no_confirmation_dialog():
+    """源码契约：撤销不得弹二次确认（用户 2026-11-06 明确要求去掉）"""
     src = inspect.getsource(mw.OpenAIChatToolWindow._undo_from_message)
-    assert "huge_undo_threshold" in src, "_undo_from_message 应包含大额撤销阈值判断"
-    assert "QMessageBox.question" in src, "大额撤销必须弹确认框"
-    # 阈值判断必须早于截断调用
-    threshold_pos = src.find("huge_undo_threshold")
-    truncate_pos = src.find("_truncate_session_from_user_round(")
-    assert threshold_pos != -1 and truncate_pos != -1
-    assert threshold_pos < truncate_pos, "确认框必须位于截断之前，否则拦不住误删"
+    assert "huge_undo_threshold" not in src, "撤销不应再有阈值确认逻辑"
+    assert "QMessageBox" not in src, "撤销不应弹确认框，点一下就执行"
 
 
-def test_undo_uses_message_index_as_authority():
-    """源码契约：定位以 _message_index 反算值为权威，而非直接信任 _round_index"""
-    src = inspect.getsource(mw.OpenAIChatToolWindow._undo_from_message)
-    find_pos = src.find("self._find_user_round_index_for_card(card)")
-    assert find_pos != -1, "应通过 _find_user_round_index_for_card 定位"
-    # _round_index 只能作为回落，不得作为首选
-    first_assign = src.find("round_index = card._round_index")
-    assert first_assign == -1 or first_assign > find_pos, (
-        "不得把 card._round_index 作为首选定位依据（批次回收后该值可能偏小）"
+def test_fix_new_card_message_index_keeps_prefix_cache_in_sync():
+    """新卡追加空 batch 后，前缀和缓存必须同步（否则撤销定位 IndexError）
+
+    2026-11-06 真机：连续两次点撤销抛
+    `IndexError: list index out of range`（_get_user_round_index_for_batch_index
+    读 _user_prefix_cache 越界）。根因：_fix_new_card_message_index 在
+    「没有可认领的同角色槽位」时 `self._message_batch.append([])`，只扩了
+    _message_batch / _batch_cards，没重建 _user_prefix_cache。
+    """
+    base_user = _FakeCard(role="user", message_index=0)
+    base_assistant = _FakeCard(role="assistant", message_index=1)
+    message_batch = [_user_batch("q0"), _assistant_batch("a0")]
+    batch_cards = [[base_user], [base_assistant]]
+
+    # 两张新卡都追不上任何占位（尾部已占用 → 循环立即 break）
+    new_cards = []
+    for _ in range(2):
+        card = MagicMock(spec=mw.MessageCard)
+        card._message_index = None
+        card._is_welcome = False
+        card.role = "user"
+        new_cards.append(card)
+
+    widget = mw.OpenAIChatToolWindow.__new__(mw.OpenAIChatToolWindow)
+    widget._message_batch = message_batch
+    widget._batch_cards = batch_cards
+    widget._batch_placeholders = {}
+    widget._is_widget_alive = lambda c: True
+    items = []
+    for c in new_cards:
+        item = MagicMock()
+        item.widget = MagicMock(return_value=c)
+        items.append(item)
+    widget.chat_layout = MagicMock()
+    widget.chat_layout.count = MagicMock(return_value=len(items))
+    widget.chat_layout.itemAt = MagicMock(side_effect=lambda i: items[i])
+    widget._build_user_prefix_cache()
+
+    widget._fix_new_card_message_index()
+
+    assert len(widget._message_batch) == 4, "两张新卡应各追加一个空 batch"
+    assert len(widget._user_prefix_cache) == len(widget._message_batch) + 1, (
+        "前缀和缓存长度必须始终是 len(_message_batch)+1，否则索引必然越界"
     )
+    # 按新追加的尾部 batch 反算不得抛异常
+    assert widget._get_user_round_index_for_batch_index(3) == 1
+
+
+def test_undo_prefers_session_lookup_over_batch_index():
+    """源码契约：定位以 session 文本/时间戳为准，批次下标只能做次选
+
+    _message_index 会被 _rebuild_batch_cards_from_layout 在虚拟滚动下按布局
+    顺序重编号（必然偏小），不能作为首选依据。
+    """
+    src = inspect.getsource(mw.OpenAIChatToolWindow._undo_from_message)
+    session_pos = src.find("_find_user_round_index_from_session")
+    batch_pos = src.find("self._find_user_round_index_for_card(card)")
+    assert session_pos != -1, "应优先用 session 文本+时间戳定位"
+    assert batch_pos != -1, "保留批次反算作为次选"
+    assert session_pos < batch_pos, "session 定位必须前于批次反算"
+    # card._round_index 只能作为最后回落
+    first_assign = src.find("round_index = card._round_index")
+    assert first_assign == -1 or first_assign > session_pos
+
+
+def test_find_user_round_index_uses_timestamp_when_text_repeats():
+    """重复提问：时间戳精确定位，不得短路返回第一个命中"""
+    from app.widgets.ui_helpers import find_user_round_index
+
+    session = SimpleNamespace(
+        messages=[
+            {"role": "user", "content": "继续", "timestamp": "2026-11-06 01:00:00"},
+            {"role": "assistant", "content": "a1", "timestamp": "2026-11-06 01:00:10"},
+            {"role": "user", "content": "继续", "timestamp": "2026-11-06 01:20:00"},
+            {"role": "assistant", "content": "a2", "timestamp": "2026-11-06 01:20:10"},
+        ]
+    )
+    # 卡片时间戳被 MessageCard 截断成 %m-%d %H:%M，必须能对齐到消息的分钟
+    assert find_user_round_index(session, "继续", "11-06 01:20") == 1
+    # 无时间戳 + 文本重复 → 无法唯一确定，拒绝猜
+    assert find_user_round_index(session, "继续", "") == -1
+
+
+def test_find_user_round_index_no_substring_short_circuit():
+    """短句不得命中更早的长文本（旧实现 user_text in content 会返回 0）"""
+    from app.widgets.ui_helpers import find_user_round_index
+
+    session = SimpleNamespace(
+        messages=[
+            {"role": "user", "content": "这个继续优化一下性能", "timestamp": "2026-11-06 01:00:00"},
+            {"role": "user", "content": "继续", "timestamp": "2026-11-06 01:05:00"},
+        ]
+    )
+    assert find_user_round_index(session, "继续", "") == 1
+
+
+def test_find_user_round_index_prefers_source_ts_ms():
+    """同一分钟内重复提问：source_message.ts_ms 毫秒锚点精确定位"""
+    from app.widgets.ui_helpers import find_user_round_index
+
+    session = SimpleNamespace(
+        messages=[
+            {"role": "user", "content": "继续", "timestamp": "2026-11-06 01:20:01", "ts_ms": 1001},
+            {"role": "assistant", "content": "a1", "timestamp": "2026-11-06 01:20:05"},
+            {"role": "user", "content": "继续", "timestamp": "2026-11-06 01:20:40", "ts_ms": 1040},
+            {"role": "assistant", "content": "a2", "timestamp": "2026-11-06 01:21:00"},
+        ]
+    )
+    # 分钟级命中两条，必须靠 ts_ms 收敛到第 2 条
+    assert find_user_round_index(session, "继续", "11-06 01:20", {"ts_ms": 1040}) == 1
+    assert find_user_round_index(session, "继续", "11-06 01:20", {"ts_ms": 1001}) == 0
+
+
+def test_round_diff_stats_uses_source_message_not_stale_round_index():
+    """整轮差异统计定位：按消息源反查，不信任被重编号污染的 _round_index"""
+    session = SimpleNamespace(
+        messages=[
+            {"role": "user", "content": "q0", "timestamp": "2026-11-06 01:00:00", "ts_ms": 1000},
+            {"role": "assistant", "content": "a0", "timestamp": "2026-11-06 01:00:10", "ts_ms": 1010},
+            {"role": "user", "content": "q1", "timestamp": "2026-11-06 01:00:20", "ts_ms": 1020},
+            {"role": "assistant", "content": "a1", "timestamp": "2026-11-06 01:00:30", "ts_ms": 1030},
+        ]
+    )
+    widget = mw.OpenAIChatToolWindow.__new__(mw.OpenAIChatToolWindow)
+    card = _FakeCard(role="assistant", round_index=0)  # 偏小：被虚拟滚动重编号过
+    card._source_message = {"ts_ms": 1030}
+    assert widget._find_round_index_from_card_source(session, card) == 1

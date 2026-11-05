@@ -423,7 +423,14 @@ class ModelCapabilityEditDialog(MaskDialogBase):
 
         effort_text = self.effort_edit.text().strip()
         if effort_text:
-            levels = [p.strip() for p in effort_text.replace("，", ",").replace("、", ",").split(",")]
+            # 分隔符集与 _parse_declared_value 一致：回显用 / 连接（_fmt_effort），
+            # 用户原样保存必须能拆回多档，否则塌成单元素 ["low/ultra/max"]
+            levels = [
+                p.strip()
+                for p in effort_text.replace("，", ",").replace("、", ",").replace("；", ";").replace(";", ",").replace(
+                    "/", ","
+                ).split(",")
+            ]
             levels = [p for p in levels if p]
             if not levels:
                 self._show_error("思考强度等级请用逗号分隔，如 low,medium,high")

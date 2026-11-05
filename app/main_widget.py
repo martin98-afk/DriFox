@@ -14520,8 +14520,21 @@ class OpenAIChatToolWindow(ToolWindow):
         global_batch_index = batch_index
 
         # 边界检查
-        if global_batch_index >= len(self._message_batch):
+        if global_batch_index < 0 or global_batch_index >= len(self._message_batch):
             return 0
+
+        # 🛡️ 缓存失同步自愈：_user_prefix_cache 派生自 _message_batch，长度必须是
+        # len+1。历史上有增量点只扩 _message_batch 没重建缓存（2026-11-06 撤销按钮
+        # IndexError），这里就地重建是确定性修复（数据源唯一），并告警定位漏点。
+        if global_batch_index >= len(self._user_prefix_cache):
+            logger.warning(
+                "[RoundIndex] _user_prefix_cache 失同步，就地重建: "
+                f"cache_len={len(self._user_prefix_cache)}, "
+                f"batch_len={len(self._message_batch)}, idx={global_batch_index}"
+            )
+            self._build_user_prefix_cache()
+            if global_batch_index >= len(self._user_prefix_cache):
+                return 0
 
         # 使用前缀和缓存 O(1) 获取 user 数量
         user_count = self._user_prefix_cache[global_batch_index]
@@ -14798,6 +14811,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # 认领更早的空位。新消息恒属尾部新增批次，历史下标（无论已渲染、已
         # 卸载，还是尚未渲染）都不该是新卡的归属；跨过占用位继续向前的唯一
         # 结果就是把新卡挂到别的轮次上。
+        appended_any = False
         for widget in unassigned:
             target_batch_idx = -1
             for batch_idx in range(len(self._message_batch) - 1, -1, -1):
@@ -14827,6 +14841,13 @@ class OpenAIChatToolWindow(ToolWindow):
                 widget._message_index = new_batch_idx
                 self._batch_cards[new_batch_idx].append(widget)
                 assigned_batch_indices.add(new_batch_idx)
+                appended_any = True
+
+        # 🛡️ 追加空 batch 后必须重建前缀和缓存（长度须 = len(_message_batch)+1）。
+        # 漏建会让 _get_user_round_index_for_batch_index 读缓存越界 IndexError
+        # （2026-11-06 真机：连续追加两次后点撤销即崩）。循环外一次，O(n)。
+        if appended_any:
+            self._build_user_prefix_cache()
 
     def _restore_meta_from_batch(self, card, batch: list) -> None:
         """从历史消息 batch 中恢复元信息（耗时和 token 消耗）到卡片底部栏"""
@@ -15331,6 +15352,7 @@ class OpenAIChatToolWindow(ToolWindow):
         session,
         user_text: str,
         timestamp: str,
+        source_message: Optional[dict] = None,
     ) -> Optional[int]:
         """
         从 session 数据中找到 user 消息对应的 round_index。
@@ -15339,13 +15361,15 @@ class OpenAIChatToolWindow(ToolWindow):
 
         Args:
             session: ChatSession 对象
-            user_text: 用户消息的纯文本内容
-            timestamp: 用户消息的时间戳
+            user_text: 卡片上显示的文本
+            timestamp: 卡片时间戳
+            source_message: 卡片持有的消息源（提供 ts_ms 时做毫秒级精确定位）
 
         Returns:
             round_index 或 None
         """
-        return find_user_round_index(session, user_text, timestamp)
+        found = find_user_round_index(session, user_text, timestamp, source_message)
+        return found if isinstance(found, int) and found >= 0 else None
 
     def _invalidate_current_session_card_cache(self):
         invalidate_session_card_cache(self.session_manager.get_current_session(), self._session_card_cache)
@@ -17738,41 +17762,47 @@ class OpenAIChatToolWindow(ToolWindow):
         canonical_now = consolidate_messages(session.messages)
         round_ranges_now = get_user_round_ranges(canonical_now)
 
-        # 权威定位：由 card._message_index（批次下标，虚拟滚动不改）反算 round_index。
-        # ⚠️ 不能先信 card._round_index：该字段由 _refresh_all_cards_round_index 按
-        # _batch_cards 下标回写，而批次被回收（_batch_cards[idx]=None）后下标会整体前移，
-        # 写回的值本身就可能偏小（2026-11-05 事故：卡片 _round_index=5，真实 22）。
-        # 校验从「范围」升级为「一致性」：两路不一致时以 _message_index 为准并告警。
-        round_index = self._find_user_round_index_for_card(card)
-        if (
-            round_index is not None
-            and card._round_index is not None
-            and round_index != card._round_index
-        ):
+        # 定位优先级：session 精确匹配（文本+时间戳）> 批次下标反算 > card 自带值。
+        #
+        # ⚠️ 为什么 session 优先（2026-11-06 真机：撤销内容不对 / 差异统计混入撤销点
+        # 之前的改动）：`_message_index` 由 `_rebuild_batch_cards_from_layout` 在删除
+        # 单轮后按「布局中存活卡片顺序」重新编号，而虚拟滚动下布局里只剩视口附近几张卡，
+        # 编号必然整体偏小 → 反算出的 round_index 偏小 → 撤销删错轮、diff 统计带上更早
+        # 轮次的文件改动。session.messages 是唯一权威数据源，不依赖任何 UI 簿记。
+        # 两路不一致时以 session 为准并告警（保留告警以便定位簿记继续腐化的点）。
+        session_round = self._find_user_round_index_from_session(
+            session,
+            card.get_plain_text(),
+            card.timestamp,
+            getattr(card, "_source_message", None),
+        )
+        if session_round is not None and (session_round < 0 or session_round >= len(round_ranges_now)):
+            session_round = None
+
+        batch_round = self._find_user_round_index_for_card(card)
+        if batch_round is not None and (batch_round < 0 or batch_round >= len(round_ranges_now)):
+            batch_round = None
+
+        if session_round is not None and batch_round is not None and session_round != batch_round:
             logger.warning(
-                "[UNDO] round_index 不一致，以 _message_index 反算值为准: "
-                f"card._round_index={card._round_index}, 反算={round_index}, "
-                f"message_index={card._message_index}, rounds={len(round_ranges_now)}"
+                "[UNDO] 定位分歧，以 session 文本/时间戳为准: "
+                f"session={session_round}, batch={batch_round}, "
+                f"message_index={card._message_index}, round_index={card._round_index}, "
+                f"rounds={len(round_ranges_now)}"
             )
-        if round_index is not None and (round_index < 0 or round_index >= len(round_ranges_now)):
-            round_index = None
+
+        round_index = session_round if session_round is not None else batch_round
 
         if round_index is None and card._round_index is not None:
-            # 降级：_message_index 不可用（老卡片）时才回落到 card 自带值
+            # 降级：文本与批次都失败时才回落到 card 自带值
             if 0 <= card._round_index < len(round_ranges_now):
                 round_index = card._round_index
                 logger.warning(
-                    f"[UNDO] _message_index 定位失败，回落 card._round_index={round_index}"
+                    f"[UNDO] session/批次定位均失败，回落 card._round_index={round_index}"
                 )
 
-        if round_index is None:
-            # 最终降级：使用 session 文本匹配
-            user_text = card.get_plain_text()
-            timestamp = card.timestamp
-            round_index = self._find_user_round_index_from_session(session, user_text, timestamp)
-
         if round_index is None or round_index < 0 or round_index >= len(round_ranges_now):
-            # 🛡️ 幽灵卡片兜底：四层定位全败 + 文本匹配确认 session 中无此消息
+            # 🛡️ 幽灵卡片兜底：全部定位失败 + 文本匹配确认 session 中无此消息
             # （典型：插话被停止回收后遗留的卡片）。撤回语义 = 仅移除 UI 卡片，
             # 无需截断 session。只处理带 _interject_pending 标记的卡片（语义
             # 确定），其余情况维持告警不误删。
@@ -17798,28 +17828,6 @@ class OpenAIChatToolWindow(ToolWindow):
         if undo_entry is None:
             logger.warning(f"[UNDO] 无法构造回退条目: round_index={round_index}")
             return
-        # 🛡️ 大额撤销二次确认（2026-11-05 事故：一次误定位静默删除 172 条）。
-        # 阈值内（含 1 轮对话）直接执行；超阈值必须用户显式确认。
-        huge_undo_threshold = 20
-        if undo_entry.count > huge_undo_threshold:
-            from PyQt5.QtWidgets import QMessageBox
-
-            removed_text = (undo_entry.note or "")[:60]
-            answer = QMessageBox.question(
-                self,
-                "确认撤销",
-                (
-                    f"本次撤销将移除 {undo_entry.count} 条消息"
-                    f"（从第 {round_index + 1} 轮起至会话末尾）。\n\n"
-                    f"首条内容：{removed_text}\n\n"
-                    "60 秒内可在撤销卡片上恢复，超时后不可恢复。"
-                ),
-                QMessageBox.Yes | QMessageBox.No,
-                QMessageBox.No,
-            )
-            if answer != QMessageBox.Yes:
-                logger.info(f"[UNDO] 用户取消大额撤销: count={undo_entry.count}")
-                return
         logger.debug(
             "[UNDO] Entry prepared: "
             f"session_id={session.session_id!r}, "
@@ -18017,6 +18025,57 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 使用辅助函数收集 tool_call_id
         return collect_tool_call_ids(canonical_messages, start_idx, end_idx)
+
+    def _find_round_index_from_card_source(self, session, card) -> Optional[int]:
+        """由卡片的消息源反查它所属的 user round（数据侧定位，不依赖 UI 簿记）
+
+        `card._round_index` 由 `_refresh_all_cards_round_index` 按 `_batch_cards`
+        下标回写，而该下标会被 `_rebuild_batch_cards_from_layout` 在虚拟滚动下
+        按「布局中存活卡片顺序」重编号（必然偏小）→ 页脚「整轮差异统计」把撤销点
+        之前的改动一起算进来（2026-11-06 真机）。这里改用 `card._source_message`
+        的 ts_ms / 时间戳在 canonical session 中定位消息下标，
+        再由 `get_user_round_ranges` 判定归属。
+
+        Returns:
+            round_index；无法唯一确定返回 None
+        """
+        src = getattr(card, "_source_message", None)
+        if not isinstance(src, dict):
+            return None
+
+        canonical = consolidate_messages(session.messages)
+        if not canonical:
+            return None
+
+        msg_idx: Optional[int] = None
+        # 对象身份：卡片 source_message 与 canonical 共享同一批 dict（consolidate
+        # 缓存浅拷贝），命中即绝对正确。缓存被重建时退回 ts_ms / 时间戳。
+        for i, m in enumerate(canonical):
+            if m is src:
+                msg_idx = i
+                break
+        ts_ms = src.get("ts_ms")
+        if msg_idx is None and ts_ms is not None:
+            hit = [i for i, m in enumerate(canonical) if m.get("ts_ms") == ts_ms]
+            if len(hit) == 1:
+                msg_idx = hit[0]
+        if msg_idx is None:
+            ts = str(src.get("timestamp") or "").strip()
+            if ts:
+                hit = [
+                    i
+                    for i, m in enumerate(canonical)
+                    if str(m.get("timestamp") or "").strip() == ts
+                ]
+                if len(hit) == 1:
+                    msg_idx = hit[0]
+        if msg_idx is None:
+            return None
+
+        for round_idx, (start, end) in enumerate(get_user_round_ranges(canonical)):
+            if start <= msg_idx < end:
+                return round_idx
+        return None
 
     def _show_undo_result(self, result):
         """显示撤销结果"""
@@ -21900,7 +21959,11 @@ class OpenAIChatToolWindow(ToolWindow):
         if not session:
             return
 
-        round_index = getattr(card, "_round_index", None)
+        # 定位口径：消息源反查 > card._round_index（后者可能被虚拟滚动重编号污染，
+        # 会把撤销点之前的轮次改动算进本卡统计）
+        round_index = self._find_round_index_from_card_source(session, card)
+        if round_index is None:
+            round_index = getattr(card, "_round_index", None)
         if round_index is None or round_index < 0:
             return
 

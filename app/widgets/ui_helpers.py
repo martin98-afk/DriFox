@@ -1645,47 +1645,146 @@ def restore_input_from_card(input_area, card) -> None:
     input_area.setFocus()
 
 
-def find_user_round_index(session, user_text: str, timestamp: str) -> int:
-    """
-    从 session 中找到 user 消息对应的 round_index。
+def _normalize_text_for_match(text: str) -> str:
+    """匹配用文本归一化：折叠空白（卡片显示文本与消息 content 都会有换行缩进差异）"""
+    return " ".join(str(text or "").split())
 
-    通过在 session.messages 中定位 user 消息，然后计算它是第几个 user。
+
+def _normalize_ts_for_match(ts: str) -> str:
+    """时间戳对齐到分钟口径
+
+    session 消息存 ``%Y-%m-%d %H:%M:%S``，MessageCard 构造时截断成 ``%m-%d %H:%M``，
+    直接比较永远不等。统一裁成 ``%m-%d %H:%M``。
+    """
+    s = str(ts or "").strip()
+    if len(s) >= 16 and s[4] == "-" and s[7] == "-":
+        return s[5:16]  # 2026-11-06 01:33:21 → 11-06 01:33
+    return s
+
+
+def find_user_round_index(
+    session, user_text: str, timestamp: str, source_message: Optional[dict] = None
+) -> int:
+    """在 session 中精确定位 user 消息对应的 round_index（0-based）。
+
+    数据源是 canonical session.messages，不依赖 UI 批次簿记。
+
+    ⚠️ 旧实现用 `user_text in content` **短路返回第一个命中**：用户重复问同一句
+    或发的是短句（"好""继续"）时，会命中很早的轮次，撤销因此删错内容、差异统计
+    混入撤销点之前的改动（2026-11-06 真机）。现在一律**收集全部候选再收敛**，
+    收敛不到唯一值就返回 -1，由调用方走次选定位或拒绝执行 —— 宁可失败不猜。
+
+    定位优先级：
+    1. 时间戳（对齐到分钟）唯一命中
+    2. 时间戳多条 → 文本全等/包含收敛
+    3. 文本全等唯一命中
+    4. 文本包含唯一命中（卡片文本常是 content 子串：附件内联、注入剥离）
 
     Args:
         session: ChatSession 对象
-        user_text: 用户消息的纯文本内容
-        timestamp: 用户消息的时间戳
+        user_text: 卡片上显示的 user 文本
+        timestamp: 卡片时间戳（``%m-%d %H:%M`` 或原样 ``%Y-%m-%d %H:%M:%S``）
+        source_message: 卡片持有的消息源（含 ``ts_ms`` / 秒级 ``timestamp``），
+            有就越级用于毫秒精确匹配
 
     Returns:
-        round_index (0-based)，如果找不到返回 -1
+        round_index；无法唯一确定返回 -1
     """
     if not session or not hasattr(session, "messages"):
         return -1
 
-    round_index = 0
-    for msg in session.messages:
-        # 口径与全仓统一（Bug1）：TeamMail 算作 user round（渲染为卡片），
-        # 其他 hook（SessionStart 等）不算——与 _get_current_user_round_index 对齐，
-        # 避免撤回/差异统计的 round 序号错位。
-        if msg.get("_hook_event") and msg.get("_hook_event") != "TeamMail":
-            continue
-        if msg.get("role") == "user":
-            # 检查是否匹配（通过文本内容或时间戳）
-            content = msg.get("content", "")
-            # 支持纯文本内容或结构化内容
-            if isinstance(content, dict):
-                content = content.get("text", "")
-            if isinstance(content, list):
-                for item in content:
-                    if isinstance(item, dict) and item.get("type") == "text":
-                        content = item.get("text", "")
-                        break
+    from app.core import consolidate_messages
 
-            # 通过时间戳或内容匹配
-            msg_timestamp = msg.get("timestamp", "")
-            if msg_timestamp == timestamp or (user_text and user_text in str(content)):
-                return round_index
-            round_index += 1
+    canonical = consolidate_messages(session.messages or [])
+
+    rounds: List[Tuple[int, dict]] = []
+    round_index = 0
+    for msg in canonical:
+        # 口径与全仓统一（Bug1）：TeamMail 算作 user round（渲染为卡片），
+        # 其他 hook（SessionStart 等）不算——与 _get_current_user_round_index 对齐。
+        hook_event = msg.get("_hook_event")
+        if hook_event and hook_event != "TeamMail":
+            continue
+        if msg.get("role") != "user":
+            continue
+        rounds.append((round_index, msg))
+        round_index += 1
+
+    if not rounds:
+        return -1
+
+    def _plain(msg: dict) -> str:
+        content = msg.get("content", "")
+        if isinstance(content, str):
+            text = content
+        else:
+            try:
+                text = _get_content_to_text()(content)
+            except Exception:
+                text = ""
+        try:
+            from app.core.conversation.message_content import strip_system_reminder
+
+            text = strip_system_reminder(text)
+        except Exception:
+            pass
+        return _normalize_text_for_match(text)
+
+    want_ts = _normalize_ts_for_match(timestamp)
+    want_text = _normalize_text_for_match(user_text)
+
+    # 0) 消息源锚点：ts_ms 毫秒唯一，其次源消息的秒级 timestamp。
+    # 渲染时卡片的 source_message 就是 _message_batch 里那条 dict，
+    # 同一分钟内重复提问也能精确定位。
+    src = source_message if isinstance(source_message, dict) else None
+    if src is not None:
+        # 对象身份：group_messages_for_display 与外部 consolidate 共享同一批 dict，
+        # 命中即绝对正确（零成本，最先试）
+        for r, m in rounds:
+            if m is src:
+                return r
+    if src:
+        want_ms = src.get("ts_ms")
+        if want_ms is not None:
+            hit = [r for r, m in rounds if m.get("ts_ms") == want_ms]
+            if len(hit) == 1:
+                return hit[0]
+        want_src_ts = str(src.get("timestamp") or "").strip()
+        if want_src_ts:
+            hit = [r for r, m in rounds if str(m.get("timestamp") or "").strip() == want_src_ts]
+            if len(hit) == 1:
+                return hit[0]
+
+    def _is_exact(msg: dict) -> bool:
+        return bool(want_text) and _plain(msg) == want_text
+
+    def _is_contains(msg: dict) -> bool:
+        return bool(want_text) and want_text in _plain(msg)
+
+    # 1) 时间戳
+    if want_ts:
+        ts_hits = [r for r, m in rounds if _normalize_ts_for_match(m.get("timestamp")) == want_ts]
+        if len(ts_hits) == 1:
+            return ts_hits[0]
+        if len(ts_hits) > 1:
+            # 同一分钟内多条：文本收敛；收敛不了就拒绝
+            narrowed = [r for r, m in rounds if r in ts_hits and _is_exact(m)]
+            if not narrowed:
+                narrowed = [r for r, m in rounds if r in ts_hits and _is_contains(m)]
+            return narrowed[0] if len(narrowed) == 1 else -1
+
+    # 2) 文本全等
+    if want_text:
+        exact = [r for r, m in rounds if _is_exact(m)]
+        if len(exact) == 1:
+            return exact[0]
+        if exact:
+            # 重复发送同一句：无法判断用户点的是哪一张卡
+            return -1
+        # 3) 文本包含（唯一才接受）
+        contains = [r for r, m in rounds if _is_contains(m)]
+        if len(contains) == 1:
+            return contains[0]
 
     return -1
 
