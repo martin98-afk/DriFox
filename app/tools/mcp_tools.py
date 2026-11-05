@@ -134,6 +134,99 @@ def _build_stdio_env(env: Optional[dict]) -> dict:
     return merged
 
 
+# ── stdio 命令跨平台回落 ────────────────────────────────
+# `py` 是 Windows Python launcher 专属命令，macOS / Linux 不存在，配置写死
+# `command: py` 时子进程直接 [Errno 2] No such file or directory: 'py'。
+# 这类配置多数是从 Windows 习惯照搬过来的，插件作者未必有意绑定平台。
+# 只在原命令本机确实不存在时回落到别名，不动正常运行路径。
+_STDIO_COMMAND_FALLBACKS = {
+    "py": ("python3", "python"),
+    "python3": ("python",),
+    "python": ("python3",),
+}
+
+# py launcher 的版本选择参数（-3 / -3.11），回落到真实解释器时无意义
+_PY_LAUNCHER_VERSION_ARG_RE = re.compile(r"-3(?:\.\d+)?")
+
+# 解释器可用性探测结果缓存（命令名 → 可用）。连接失败重试时不必重复 spawn
+_PY_USABLE_CACHE: Dict[str, bool] = {}
+
+def _is_store_stub(cmd: str) -> bool:
+    """判断命令是否指向 Microsoft Store 的 Python 占位 stub。
+
+    stub 装在 `%LOCALAPPDATA%\\Microsoft\\WindowsApps\\python3.exe`，是个
+    应用执行别名（reparse point）：执行它会弹出应用商店，而不是跑 Python。
+    必须靠路径识别后跳过，不能靠试跑探测——试跑本身就会弹窗骚扰用户。
+    """
+    if os.name != "nt":
+        return False
+    try:
+        resolved = Path(cmd).resolve()
+    except OSError:
+        return False
+    return "windowsapps" in str(resolved).lower()
+
+def _is_usable_python(cmd: str) -> bool:
+    """探测命令能否真正跑起 Python（结果按命令名缓存）。
+
+    Windows 上 `python3` 常命中 Microsoft Store 的占位 stub：shutil.which
+    能找到，但执行时弹商店或直接失败（退出码非 0）。这类 stub 按路径直接
+    判否，其余情况才实际试跑。
+    """
+    import subprocess
+
+    cached = _PY_USABLE_CACHE.get(cmd)
+    if cached is not None:
+        return cached
+    if _is_store_stub(cmd):
+        _PY_USABLE_CACHE[cmd] = False
+        return False
+    kwargs = {}
+    if os.name == "nt":
+        flag = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        if flag:
+            kwargs["creationflags"] = flag
+    try:
+        r = subprocess.run(
+            [cmd, "-c", "import sys; sys.exit(0)"],
+            capture_output=True,
+            timeout=10,
+            **kwargs,
+        )
+        ok = r.returncode == 0
+    except Exception:
+        ok = False
+    _PY_USABLE_CACHE[cmd] = ok
+    return ok
+
+def _resolve_stdio_command(command: str, args: List[str]) -> Tuple[str, List[str]]:
+    """command 不可用时按别名回落；返回 (command, args)。
+
+    只处理 python 家族（py / python / python3）——它们最容易因平台差异或
+    PATH 上的占位 stub 失效。其它命令原样返回，不替用户做主。
+    """
+    import shutil
+
+    if not command:
+        return command, args
+    name = _normalize_stdio_command_name(command)
+    if name not in _STDIO_COMMAND_FALLBACKS:
+        return command, args
+
+    if shutil.which(command) and _is_usable_python(command):
+        return command, args
+
+    for alt in _STDIO_COMMAND_FALLBACKS[name]:
+        if not shutil.which(alt) or not _is_usable_python(alt):
+            continue
+        logger.warning(f"[MCP] 命令 '{command}' 不可用，回落到 '{alt}'")
+        # py launcher 的 -3 / -3.x 对真实解释器无意义，一并剔除
+        if name == "py" and args and _PY_LAUNCHER_VERSION_ARG_RE.fullmatch(str(args[0])):
+            args = args[1:]
+        return alt, args
+    return command, args
+
+
 # ── MCP stdio 子进程安全校验 ─────────────────────────────
 # 参考 AstrBot(AGPL-3.0) core/agent/mcp_client.py 的 validate_mcp_stdio_config
 # 设计移植（GPL-3.0-or-later 协议下的独立实现）：
@@ -823,7 +916,9 @@ class MCPClientManager:
 
     async def _lifespan_stdio(self, conn: MCPServerConnection) -> None:
         command = conn.config.get("command", "")
-        args = conn.config.get("args", [])
+        args = list(conn.config.get("args") or [])
+        # 跨平台回落：Windows py launcher 在 mac/linux 不存在，审计门禁用实际命令
+        command, args = _resolve_stdio_command(command, args)
         env = conn.config.get("env")
 
         # P1-3：启动门禁（审计 + shell 元字符拒启 + 非内置源确认流）
