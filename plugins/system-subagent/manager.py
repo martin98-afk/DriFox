@@ -143,9 +143,11 @@ class SubAgentTaskStore:
                 sets.append(f"{name} = ?")
                 params.append(value)
         params.append(task_id)
-        ok, err = self._db.execute(f"UPDATE {self._table} SET {', '.join(sets)} WHERE task_id = ?", tuple(params))
+        ok, affected = self._db.execute(f"UPDATE {self._table} SET {', '.join(sets)} WHERE task_id = ?", tuple(params))
         if not ok:
-            logger.warning(f"[SubAgentManager] 任务状态落库失败 {task_id}: {err}")
+            logger.warning(f"[SubAgentManager] 任务状态落库失败 {task_id}: {affected}")
+        elif affected == 0:
+            logger.warning(f"[SubAgentManager] 零行更新（行不存在或已被并发清除）task_id={task_id} status={status}")
 
     def get(self, task_id: str) -> Optional[Dict]:
         if not self.ensure():
