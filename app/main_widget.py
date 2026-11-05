@@ -24851,6 +24851,46 @@ class OpenAIChatToolWindow(ToolWindow):
         except Exception:
             pass
 
+    def _recover_dead_workdir(self, project: str, workdir: Optional[str]) -> Optional[str]:
+        """工作目录已失效时回落到主仓库根并写回缓存/DB（返回修正后的路径）
+
+        场景：会话曾在 ``<主仓库>/.worktrees/<名>`` 下工作，该工作树被删
+        （本程序删/外部 git worktree remove/手动删目录）。此时缓存与
+        project_workdir 表里仍是死路径，工作树页会显示「工作目录不存在」，
+        文件工具也指向一个不存在的目录。主仓库本身还在，直接回主树最省事。
+
+        非 ``.worktrees`` 形态的死路径（如另一台机器的 ``C:/Users/xxx``）无法
+        推断归属，原样返回，由调用方走「无根目录 → 建临时工作目录」的既有路径。
+        """
+        if not workdir:
+            return workdir
+        try:
+            from app.utils.git_worktree import GitWorktreeDetector
+
+            recovered = GitWorktreeDetector.resolve_workdir_or_main(workdir)
+        except Exception as e:
+            logger.warning(f"[MainWidget] 工作目录有效性检查失败，保持原值: {e}")
+            return workdir
+
+        if recovered == workdir:
+            return workdir
+        if not recovered:
+            return workdir
+
+        # 回落到主树：同步实例缓存与持久层，避免下次启动又读到死路径
+        self._current_workdir[project] = recovered
+        try:
+            if self.backend and self.backend.memory_manager:
+                self.backend.memory_manager.set_working_directory(project, recovered)
+        except Exception as e:
+            logger.warning(f"[MainWidget] 回落主树后写回工作目录失败: {e}")
+
+        logger.info(
+            f"[MainWidget] 工作目录已失效，回落到主仓库: project={project} "
+            f"{workdir} → {recovered}"
+        )
+        return recovered
+
     def _sync_working_directory(self):
         """切换项目时自动加载并同步工作目录
 
@@ -24875,6 +24915,9 @@ class OpenAIChatToolWindow(ToolWindow):
                     workdir = self.backend.memory_manager.get_working_directory(project)
                 if workdir:
                     self._current_workdir[project] = workdir
+
+            # 失效路径回落：缓存的 worktree 目录被删后不再把死路径当工作目录
+            workdir = self._recover_dead_workdir(project, workdir)
 
             # 无根目录时自动创建临时工作目录
             if not workdir:

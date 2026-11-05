@@ -125,3 +125,69 @@ def _registered_norm(paths):
     from app.widgets.tab_panel import TabPanel
 
     return TabPanel._norm_registered(paths)
+
+class TestMainRepoFromWorktreePath:
+    """已删工作树的路径 → 主仓库根（纯字符串，无需目录存在）"""
+
+    @staticmethod
+    def _f():
+        from app.utils.git_worktree import GitWorktreeDetector
+
+        return GitWorktreeDetector.main_repo_from_worktree_path
+
+    def test_posix_style(self):
+        assert self._f()("/work/app/.worktrees/feat-x") == "/work/app"
+
+    def test_windows_style(self):
+        assert self._f()("D:/work/app/.worktrees/baseline-pre-cleanup") == "D:/work/app"
+
+    def test_backslash_input(self):
+        assert self._f()("D:\\work\\app\\.worktrees\\feat") == "D:/work/app"
+
+    def test_trailing_slash(self):
+        assert self._f()("/work/app/.worktrees/feat/") == "/work/app"
+
+    def test_main_repo_itself_returns_none(self):
+        assert self._f()("/work/app") is None
+
+    def test_nested_deeper_returns_none(self):
+        """<主>/.worktrees/<名>/sub 不是工作树根，不猜"""
+        assert self._f()("/work/app/.worktrees/feat/sub") is None
+
+    def test_empty_and_relative(self):
+        assert self._f()("") is None
+        assert self._f()(".worktrees/feat") is None
+
+class TestResolveWorkdirOrMain:
+    """失效工作目录回落：活着原样返回，死了回主树，认不出返回 None"""
+
+    @staticmethod
+    def _f():
+        from app.utils.git_worktree import GitWorktreeDetector
+
+        return GitWorktreeDetector.resolve_workdir_or_main
+
+    def test_alive_dir_kept_as_is(self, tmp_path):
+        plain = tmp_path / "plain"
+        plain.mkdir()
+        assert self._f()(str(plain)) == str(plain)
+
+    def test_dead_worktree_falls_back_to_main(self, tmp_path):
+        import os
+
+        main = tmp_path / "app"
+        main.mkdir()
+        dead = main / ".worktrees" / "gone"
+        # 返回值按项目口径归一化为正斜杠（与 project_workdir 表存储一致）
+        assert os.path.normcase(self._f()(str(dead))) == os.path.normcase(str(main).replace("\\", "/"))
+
+    def test_dead_worktree_missing_main_returns_none(self, tmp_path):
+        dead = tmp_path / "nope" / ".worktrees" / "gone"
+        assert self._f()(str(dead)) is None
+
+    def test_dead_plain_dir_returns_none(self, tmp_path):
+        assert self._f()(str(tmp_path / "never-existed")) is None
+
+    def test_empty_returns_none(self):
+        assert self._f()("") is None
+
