@@ -29,7 +29,7 @@ to_remove_common = [
     "PIL",
     "ast_serialize",
     "websockets",
-    "PyQt5/Qt5/translations/*.qm",
+    "PyQt5/Qt5/translations",
 ]
 # Linux 专用（.so 文件）
 to_remove_linux = [
