@@ -1,18 +1,22 @@
 # -*- coding: utf-8 -*-
 """GitHub 加速代理配置管理器
 
-三种模式：
+四种模式：
 - prefix：前缀加速站，地址 + 原 URL 拼接（https://ghfast.top/）
 - selfhost：自建代理服务（deno.dev 风格），地址 + 原 URL 拼接
 - http：HTTP 正向代理（http://ip:port），httpx 走 proxy= 参数、
   git 走 -c http.proxy= 参数
+- system：系统代理，行为同 http 但地址自动探测（Windows 注册表 /
+  环境变量 / macOS scutil），无需手填；探测不到时自动直连
 
 配置持久化到 .drifox/plugins/user-custom/marketplaces/proxy.json
 （随 user-custom 插件一起被云端备份/同步）。损坏/缺失视为未启用。
 """
 
 import json
+import os
 import re
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -58,8 +62,106 @@ def _drifox_dir() -> Path:
     return Path.home() / ".drifox"
 
 
+# ── 系统代理探测 ──
+
+_PROXY_SCHEME_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.-]*://")
+_PROXY_ADDR_RE = re.compile(r"^https?://([^:/@]+):(\d+)/?$")
+
+
+def _normalize_proxy_addr(raw: str) -> Optional[str]:
+    """规范化代理地址为 http://host:port；无法解析返回 None"""
+    raw = (raw or "").strip()
+    if not raw:
+        return None
+    if not _PROXY_SCHEME_RE.match(raw):
+        raw = "http://" + raw
+    return raw if _PROXY_ADDR_RE.match(raw) else None
+
+
+def _win_registry_proxy() -> Optional[str]:
+    """读 Windows 注册表系统代理（Clash/v2rayN 等工具「系统代理」开关写这里）"""
+    try:
+        import winreg
+
+        key = winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER,
+            r"Software\Microsoft\Windows\CurrentVersion\Internet Settings",
+        )
+        try:
+            enable, _ = winreg.QueryValueEx(key, "ProxyEnable")
+            if not enable:
+                return None
+            raw, _ = winreg.QueryValueEx(key, "ProxyServer")
+        finally:
+            winreg.CloseKey(key)
+    except OSError:
+        return None
+    raw = (raw or "").strip()
+    if not raw:
+        return None
+    # 分协议形式："http=127.0.0.1:7890;https=127.0.0.1:7891;<local>"
+    if "=" in raw:
+        picked = None
+        for part in raw.split(";"):
+            part = part.strip()
+            if not part or part.startswith("<"):
+                continue
+            proto, _, addr = part.partition("=")
+            if proto.lower() in ("http", "https") and addr:
+                picked = addr
+                if proto.lower() == "https":  # 下载走 https，https 优先
+                    break
+        raw = picked or ""
+    return _normalize_proxy_addr(raw)
+
+
+def _mac_scutil_proxy() -> Optional[str]:
+    """读 macOS 系统代理（scutil --proxy）"""
+    try:
+        out = subprocess.run(
+            ["scutil", "--proxy"], capture_output=True, text=True, timeout=3
+        ).stdout
+    except Exception:
+        return None
+    m = re.search(r"HTTPProxy\s*:\s*(\S+)", out)
+    p = re.search(r"HTTPPort\s*:\s*(\d+)", out)
+    if not (re.search(r"HTTPEnable\s*:\s*1", out) and m and p):
+        return None
+    return _normalize_proxy_addr(f"{m.group(1)}:{p.group(1)}")
+
+
+def _env_proxy() -> Optional[str]:
+    """读环境变量代理（HTTPS_PROXY > HTTP_PROXY > ALL_PROXY，大小写兼容）"""
+    for name in (
+        "HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy",
+    ):
+        addr = _normalize_proxy_addr(os.environ.get(name, ""))
+        if addr:
+            return addr
+    return None
+
+
+def detect_system_proxy() -> Optional[str]:
+    """探测系统全局代理地址，返回 http://host:port；未检测到返回 None
+
+    优先级：Windows/macOS 系统代理（注册表 / scutil）> 环境变量。
+    只认带端口的 HTTP(S) 代理；PAC/脚本代理不在探测范围。
+    """
+    if sys.platform == "win32":
+        addr = _win_registry_proxy()
+        if addr:
+            return addr
+    elif sys.platform == "darwin":
+        addr = _mac_scutil_proxy()
+        if addr:
+            return addr
+    return _env_proxy()
+
+
 class ProxyConfig:
     """代理配置：读写 proxy.json + URL 改写 + httpx/git 参数构造"""
+
+    HTTP_LIKE_MODES = ("http", "system")
 
     def __init__(self, file: Optional[Path] = None):
         self._file = file or (_drifox_dir() / "plugins" / "user-custom" / "marketplaces" / "proxy.json")
@@ -124,31 +226,49 @@ class ProxyConfig:
     # ── URL 改写与参数构造 ──
 
     def rewrite_url(self, url: str) -> str:
-        """prefix/selfhost：地址 + 原 URL；http/未启用：原样返回"""
-        if not self._enabled or self._mode == "http":
+        """prefix/selfhost：地址 + 原 URL；http/system/未启用：原样返回"""
+        if not self._enabled or self._mode in self.HTTP_LIKE_MODES:
             return url
         base = self._address.rstrip("/")
         if not base:
             return url
         return f"{base}/{url.lstrip('/')}"
 
+    def http_proxy_address(self) -> str:
+        """正向代理的实际地址：http/system 模式返回代理地址，其余返回 ''
+
+        system 模式每次实时探测（注册表/环境变量，本地操作毫秒级），
+        探测不到返回空串由调用方直连——系统代理关了就自动直连。
+        """
+        if not self._enabled:
+            return ""
+        if self._mode == "http":
+            return self._address
+        if self._mode == "system":
+            return detect_system_proxy() or ""
+        return ""
+
     def httpx_kwargs(self) -> dict:
-        """http 模式返回 {'proxy': address}；其他返回 {}"""
-        if self._enabled and self._mode == "http":
-            return {"proxy": self._address}
+        """http/system 模式且代理可用时返回 {'proxy': address}；其余 {}"""
+        addr = self.http_proxy_address()
+        if addr:
+            return {"proxy": addr}
         return {}
 
     def git_clone_args(self, url: str) -> Tuple[str, list]:
         """返回 (改写后 URL, git 额外参数)
 
-        http 模式：URL 不变，参数 ['-c', 'http.proxy={address}']
-        prefix/selfhost：URL 改写；github.com 仓库自动补 .git 后缀
+        http/system 模式：URL 不变，探测到地址时参数 ['-c', 'http.proxy={address}']，
+        探测不到直连无参数；prefix/selfhost：URL 改写；github.com 仓库自动补 .git 后缀；
         未启用：原样返回，无参数（零开销）
         """
         if not self._enabled:
             return url, []
-        if self._mode == "http":
-            return url, ["-c", f"http.proxy={self._address}"]
+        if self._mode in self.HTTP_LIKE_MODES:
+            addr = self.http_proxy_address()
+            if addr:
+                return url, ["-c", f"http.proxy={addr}"]
+            return url, []
         return self._ensure_git_suffix(self.rewrite_url(url)), []
 
     @staticmethod
@@ -190,7 +310,9 @@ class ProxyConfig:
 
     @staticmethod
     def validate(mode: str, address: str) -> Tuple[bool, str]:
-        """地址格式校验（不发起网络请求）"""
+        """地址格式校验（不发起网络请求）；system 模式地址自动探测，不校验"""
+        if mode == "system":
+            return True, ""
         address = address.strip()
         if not address:
             return False, "地址不能为空"
@@ -226,11 +348,16 @@ class ProxyConfig:
             "https://github.com/martin98-afk/drifox-plugins"
             "/info/refs?service=git-upload-pack"
         )
+        addr = address
+        if mode == "system":
+            addr = detect_system_proxy() or ""
+            if not addr:
+                return False, "未检测到系统代理（请在代理工具中开启「系统代理」）"
         tmp = ProxyConfig.__new__(ProxyConfig)
         tmp._file = self._file
         tmp._enabled = True
-        tmp._mode = mode
-        tmp._address = address.strip()
+        tmp._mode = "http" if mode == "system" else mode
+        tmp._address = addr.strip()
         start = time.time()
         try:
             resp = httpx.get(

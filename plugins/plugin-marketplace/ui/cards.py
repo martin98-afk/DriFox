@@ -68,7 +68,7 @@ from app.plugins.sdk import ElidedLabel as _ElidedLabel
 from .downloads import get_downloads_fetcher
 from .installer import get_installer
 from .marketplace_manager import get_marketplace_manager
-from .proxy import get_proxy_config
+from .proxy import detect_system_proxy, get_proxy_config
 from .records import get_records
 from ._squircle_avatar import (
     SquircleAvatar,
@@ -5295,6 +5295,7 @@ class MarketplaceCard(QWidget):
         config_layout.addWidget(cfg_title)
 
         self._proxy_mode_combo = ComboBox(config_widget)
+        self._proxy_mode_combo.addItem("系统代理", userData="system")
         self._proxy_mode_combo.addItem("前缀加速站", userData="prefix")
         self._proxy_mode_combo.addItem("自建代理服务", userData="selfhost")
         self._proxy_mode_combo.addItem("HTTP 正向代理", userData="http")
@@ -5562,15 +5563,37 @@ class MarketplaceCard(QWidget):
             self._proxy_mode_combo.setCurrentIndex(idx)
         self._proxy_addr_edit.setText(proxy.address)
         self._update_proxy_help(proxy.mode)
+        # system 模式：覆盖为实时探测值并置只读（磁盘 address 只是上次快照）
+        self._apply_proxy_mode_address(proxy.mode)
         if proxy.enabled:
             self._proxy_status_label.setText("已启用 · 上次保存后未改动")
         else:
             self._proxy_status_label.setText("")
 
+    def _apply_proxy_mode_address(self, mode: str):
+        """system 模式地址框只读并填实时探测结果；其余恢复可编辑（保留文本）"""
+        if mode != "system":
+            self._proxy_addr_edit.setReadOnly(False)
+            return
+        detected = detect_system_proxy() or ""
+        self._proxy_addr_edit.setText(detected)
+        self._proxy_addr_edit.setReadOnly(True)
+        if not detected:
+            self._proxy_status_label.setStyleSheet(self._proxy_status_style("#e6a23c"))
+            self._proxy_status_label.setText("未检测到系统代理，请在代理工具中开启「系统代理」")
+
     def _on_proxy_switch_toggled(self, checked: bool):
         """开关切换即保存 enabled 状态（地址非法时回弹，避免开启一个无效配置）"""
         mode = self._proxy_mode_combo.currentData()
         address = self._proxy_addr_edit.text().strip()
+        if mode == "system" and checked and not detect_system_proxy():
+            # 系统代理探测不到：回弹开关，避免启用一个实际直连的空配置
+            self._proxy_switch.blockSignals(True)
+            self._proxy_switch.setChecked(False)
+            self._proxy_switch.blockSignals(False)
+            self._proxy_status_label.setStyleSheet(self._proxy_status_style("#e6a23c"))
+            self._proxy_status_label.setText("未检测到系统代理，请先在代理工具中开启「系统代理」")
+            return
         ok, msg = get_proxy_config().validate(mode, address)
         if not ok:
             # 非法地址：回弹开关并提示先填地址
@@ -5590,14 +5613,17 @@ class MarketplaceCard(QWidget):
     def _on_proxy_mode_changed(self, index: int):
         mode = self._proxy_mode_combo.itemData(index)
         self._update_proxy_help(mode)
+        self._apply_proxy_mode_address(mode)
 
     def _update_proxy_help(self, mode: str):
         texts = {
+            "system": "系统代理：自动读取系统全局代理（Windows 注册表 / 环境变量 / macOS），无需手填。\n未检测到时自动直连；代理工具开关「系统代理」后重新保存即可生效。",
             "prefix": "前缀加速站：填公共加速站地址，如 https://ghfast.top/。\n请求会自动拼接为 加速站地址 + 原 GitHub 链接。",
             "selfhost": "自建代理服务：填你自己部署的代理地址，如 https://my-proxy.deno.dev/。\n适合官方/公共加速站不可用的网络环境。",
             "http": "HTTP 正向代理：填代理工具地址（含端口），如 http://127.0.0.1:7890。\n需先启动 Clash 等代理工具。",
         }
         placeholders = {
+            "system": "自动读取系统代理，无需填写",
             "prefix": "https://ghfast.top/",
             "selfhost": "https://my-proxy.deno.dev/",
             "http": "http://127.0.0.1:7890",
@@ -5656,6 +5682,15 @@ class MarketplaceCard(QWidget):
         enabled = self._proxy_switch.isChecked()
         mode = self._proxy_mode_combo.currentData()
         address = self._proxy_addr_edit.text().strip()
+        if mode == "system":
+            # system 模式存实时探测快照（供展示与排查）；探测不到不落盘
+            address = detect_system_proxy() or ""
+            if not address:
+                msg = "未检测到系统代理，请先在代理工具中开启「系统代理」"
+                self._proxy_status_label.setStyleSheet(self._proxy_status_style("#e6a23c"))
+                self._proxy_status_label.setText(msg)
+                self._show_proxy_info(msg, error=True)
+                return
         ok, msg = get_proxy_config().validate(mode, address)
         if not ok:
             self._proxy_status_label.setStyleSheet(self._proxy_status_style("#ef5350"))

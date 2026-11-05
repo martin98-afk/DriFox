@@ -97,9 +97,13 @@ def parse_github_repo(url: str) -> Optional[Tuple[str, str]]:
 
 
 def _build_opener(proxy):
-    """按代理模式构造 urllib opener（http 模式走 ProxyHandler，其余直通）"""
-    if proxy is not None and getattr(proxy, "enabled", False) and getattr(proxy, "mode", "") == "http":
-        addr = (getattr(proxy, "address", "") or "").strip()
+    """按代理模式构造 urllib opener（http/system 模式走 ProxyHandler，其余直通）"""
+    if proxy is not None and getattr(proxy, "enabled", False) and getattr(proxy, "mode", "") in ("http", "system"):
+        addr = ""
+        if hasattr(proxy, "http_proxy_address"):
+            addr = (proxy.http_proxy_address() or "").strip()
+        else:
+            addr = (getattr(proxy, "address", "") or "").strip()
         if addr:
             return urllib.request.build_opener(urllib.request.ProxyHandler({"http": addr, "https": addr}))
     return urllib.request.build_opener()
@@ -118,7 +122,7 @@ def _url_candidates(proxy, direct_urls: List[str]) -> List[str]:
     rewrite = None
     if proxy is not None and getattr(proxy, "enabled", False):
         mode = getattr(proxy, "mode", "")
-        if mode not in ("", "http"):
+        if mode not in ("", "http", "system"):
             rewrite = getattr(proxy, "rewrite_url", None)
     if callable(rewrite):
         for u in direct_urls:
