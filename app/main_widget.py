@@ -15254,10 +15254,31 @@ class OpenAIChatToolWindow(ToolWindow):
         return count_user_cards_in_layout(self.chat_layout)
 
     def _find_user_round_index_for_card(self, card: MessageCard) -> Optional[int]:
+        """定位 user card 对应的 round_index（虚拟滚动安全）
+
+        ⚠️ 唯一可信数据源是 ``_message_batch`` + ``card._message_index``：
+        卡片所属批次被虚拟滚动回收后，``_batch_cards[batch_idx]`` 变成 None
+        （只留等高占位），此时按布局遍历数 user 卡会漏掉全部已回收批次，
+        算出的 round_index 严重偏小。
+
+        2026-11-05 真机事故（会话 c9b78296）：23:16:28 一次性回收 14 个离屏
+        批次后，撤销 23:17 的 user 卡，布局遍历只数到 5（真实 22），
+        ``_truncate_session_from_user_round`` 从第 5 轮起截断 → 172 条消息
+        （含整段团队汇报与会话产出）被静默删除且无二次确认。
+
+        定位顺序：
+        1. ``card._message_index`` 直接命中（渲染/重建路径都会写该字段）
+        2. ``_batch_cards`` 反查（覆盖 _message_index 缺失的老卡片）
+        均失败返回 None —— 调用方按「无法定位」处理，**不得**再降级按布局计数。
         """
-        通过遍历布局找到 user card 对应的 round_index
-        """
-        # 优先通过 _batch_cards 查找（避免懒加载/回收导致布局遍历计数错误）
+        # 路径 1：卡片自带的批次下标（虚拟滚动不影响该字段）
+        batch_idx = getattr(card, "_message_index", None)
+        if isinstance(batch_idx, int) and 0 <= batch_idx < len(self._message_batch):
+            batch = self._message_batch[batch_idx]
+            if batch and batch[0].get("role") == "user":
+                return self._get_user_round_index_for_batch_index(batch_idx)
+
+        # 路径 2：_batch_cards 反查（仅覆盖仍持有卡片对象的批次）
         for batch_idx, cards in enumerate(self._batch_cards):
             if not cards:
                 continue
@@ -15266,22 +15287,6 @@ class OpenAIChatToolWindow(ToolWindow):
             for widget in cards:
                 if widget is card:
                     return self._get_user_round_index_for_batch_index(batch_idx)
-
-        # 降级：通过布局遍历（可能因懒加载/回收导致计数错误）
-        user_card_idx = 0
-        for i in range(self.chat_layout.count()):
-            item = self.chat_layout.itemAt(i)
-            if not item or not item.widget():
-                continue
-            widget = item.widget()
-            if not isinstance(widget, MessageCard):
-                continue
-            if getattr(widget, "_is_welcome", False):
-                continue
-            if widget is card:
-                return user_card_idx
-            if widget.role == "user":
-                user_card_idx += 1
         return None
 
     def _find_user_round_index_from_session(
@@ -17696,32 +17701,32 @@ class OpenAIChatToolWindow(ToolWindow):
         canonical_now = consolidate_messages(session.messages)
         round_ranges_now = get_user_round_ranges(canonical_now)
 
-        # 优先使用 card._round_index，但需要验证是否仍然有效
-        # （删除/撤销前面的 round 会导致后面卡片的 round_index 偏移）
-        round_index = card._round_index
+        # 权威定位：由 card._message_index（批次下标，虚拟滚动不改）反算 round_index。
+        # ⚠️ 不能先信 card._round_index：该字段由 _refresh_all_cards_round_index 按
+        # _batch_cards 下标回写，而批次被回收（_batch_cards[idx]=None）后下标会整体前移，
+        # 写回的值本身就可能偏小（2026-11-05 事故：卡片 _round_index=5，真实 22）。
+        # 校验从「范围」升级为「一致性」：两路不一致时以 _message_index 为准并告警。
+        round_index = self._find_user_round_index_for_card(card)
+        if (
+            round_index is not None
+            and card._round_index is not None
+            and round_index != card._round_index
+        ):
+            logger.warning(
+                "[UNDO] round_index 不一致，以 _message_index 反算值为准: "
+                f"card._round_index={card._round_index}, 反算={round_index}, "
+                f"message_index={card._message_index}, rounds={len(round_ranges_now)}"
+            )
         if round_index is not None and (round_index < 0 or round_index >= len(round_ranges_now)):
-            # round_index 已过时，降级重算
             round_index = None
 
-        if round_index is None:
-            # 降级方法 1：通过布局遍历确定卡片位置（最可靠）
-            round_index = self._find_user_round_index_for_card(card)
-            if round_index is not None and (round_index < 0 or round_index >= len(round_ranges_now)):
-                round_index = None
-
-        if round_index is None:
-            # 降级方法 2：使用 _message_index 估算
-            if card._message_index is not None:
-                round_index = 0
-                for idx in range(card._message_index):
-                    if (
-                        idx < len(self._message_batch)
-                        and self._message_batch[idx]
-                        and self._message_batch[idx][0].get("role") == "user"
-                    ):
-                        round_index += 1
-                if round_index >= len(round_ranges_now):
-                    round_index = None
+        if round_index is None and card._round_index is not None:
+            # 降级：_message_index 不可用（老卡片）时才回落到 card 自带值
+            if 0 <= card._round_index < len(round_ranges_now):
+                round_index = card._round_index
+                logger.warning(
+                    f"[UNDO] _message_index 定位失败，回落 card._round_index={round_index}"
+                )
 
         if round_index is None:
             # 最终降级：使用 session 文本匹配
@@ -17756,6 +17761,28 @@ class OpenAIChatToolWindow(ToolWindow):
         if undo_entry is None:
             logger.warning(f"[UNDO] 无法构造回退条目: round_index={round_index}")
             return
+        # 🛡️ 大额撤销二次确认（2026-11-05 事故：一次误定位静默删除 172 条）。
+        # 阈值内（含 1 轮对话）直接执行；超阈值必须用户显式确认。
+        huge_undo_threshold = 20
+        if undo_entry.count > huge_undo_threshold:
+            from PyQt5.QtWidgets import QMessageBox
+
+            removed_text = (undo_entry.note or "")[:60]
+            answer = QMessageBox.question(
+                self,
+                "确认撤销",
+                (
+                    f"本次撤销将移除 {undo_entry.count} 条消息"
+                    f"（从第 {round_index + 1} 轮起至会话末尾）。\n\n"
+                    f"首条内容：{removed_text}\n\n"
+                    "60 秒内可在撤销卡片上恢复，超时后不可恢复。"
+                ),
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if answer != QMessageBox.Yes:
+                logger.info(f"[UNDO] 用户取消大额撤销: count={undo_entry.count}")
+                return
         logger.debug(
             "[UNDO] Entry prepared: "
             f"session_id={session.session_id!r}, "
