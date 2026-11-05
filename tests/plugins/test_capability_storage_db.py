@@ -33,6 +33,15 @@ def test_select_and_dml_on_own_table_pass(db):
 
 def test_index_on_own_table_pass(db):
     assert db.check_sql("CREATE INDEX idx_task ON plugin_system_subagent_task (id)") == ""
+    assert db.check_sql("CREATE INDEX idx_plugin_task ON plugin_system_subagent_task (id)") == ""
+    assert db.check_sql("CREATE UNIQUE INDEX IF NOT EXISTS plugin_system_subagent_uq ON plugin_system_subagent_task (id)") == ""
+
+
+def test_drop_index_requires_prefix(db):
+    """索引名也在插件命名空间：不带前缀的可能属于主程序（idx_updated 等）。"""
+    assert db.check_sql("DROP INDEX IF EXISTS plugin_system_subagent_idx") == ""
+    assert db.check_sql("DROP INDEX idx_updated") != ""
+    assert db.check_sql("DROP INDEX IF EXISTS idx_project") != ""
 
 
 def test_upsert_and_ddl_phrases_not_taken_as_table(db):
