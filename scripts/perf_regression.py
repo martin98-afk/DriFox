@@ -231,7 +231,9 @@ def _phase_open_one():
     """逐个打开 tab 并计时"""
     global open_round, PEAK_AFTER_OPEN
     t_start = time.perf_counter()
-    tm._on_new_tab_requested()
+    # [漂移修复 #18-2] _on_new_tab_requested 壳期只排队不建 tab（_first_window_ready=False
+    # 时仅置 _pending_new_tab_request），实测 0.01ms 空段；改走 spawn_tab 真实建 tab
+    tm.spawn_tab(tm.get_current_window(), new_session=True)
     OPEN_TIMES.append(time.perf_counter() - t_start)
     open_round += 1
     if open_round < N_TABS:
@@ -279,7 +281,8 @@ def _phase_close_gc():
 def _phase_ui_prep():
     """再开 2 个 tab 供切换测量（轻载：避免欢迎卡片 WebEngine 构建拖慢/卡死）"""
     for _ in range(2):
-        tm._on_new_tab_requested()
+        # [漂移修复 #18-2] 同 _phase_open_one：壳期排队语义测不出真实创建
+        tm.spawn_tab(tm.get_current_window(), new_session=True)
     _next_timer(1.5, _phase_ui_switch)
 
 
@@ -371,7 +374,7 @@ def _run_single_shot(args: argparse.Namespace) -> int:
 
     # 与 main.py _deferred_startup 一致：初始化共享 WebEngine Profile，
     # 否则懒加载 CodeWebViewer 时 get_shared_web_profile() 抛 RuntimeError → qFatal abort
-    from app.core.webengine_profile import init_shared_web_profile
+    from app.core.infra.webengine_profile import init_shared_web_profile
 
     init_shared_web_profile(parent=app)
 
