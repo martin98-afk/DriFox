@@ -133,9 +133,20 @@ class DecorationLayer(QWidget):
         self._sync_all()
 
     def _clear(self) -> None:
-        """清除所有装饰件"""
+        """清除所有装饰件
+
+        deleteLater 只是排队销毁，控件在事件循环处理前仍然可见。若同一轮
+        里连续 apply_config（切页/主题刷新连发），旧装饰件会与新装饰件叠在
+        一起，用户侧表现为「切会话装饰层残留」。这里先 hide 断开可见性，
+        再 deleteLater 释放。
+        """
         for item in self._items:
-            item["label"].deleteLater()
+            label = item["label"]
+            try:
+                label.hide()
+            except RuntimeError:
+                pass  # C++ 对象已销毁
+            label.deleteLater()
         self._items.clear()
 
     def _sync_all(self) -> None:
@@ -156,8 +167,21 @@ class DecorationLayer(QWidget):
         area = getattr(self._host, "chat_scroll_area", None)
         if area is not None and ref is getattr(self._host, "chat_container", None):
             vp = area.viewport()
-            if vp is not None and vp.isVisible():
-                return vp.mapTo(self._host, QPoint(0, 0)), vp.width(), vp.height()
+            # ⚠️ 用 isVisibleTo 而非 isVisible：isVisible 在「宿主未 show」
+            # （首刷早于首帧）与「切页后旧窗口 hide」时为 False，会退回
+            # chat_container（高度随消息增长），装饰件被摆到几千像素外。
+            # isVisibleTo 只看自身相对父级的可见性，hide 期间布局尺寸仍有效。
+            if vp is not None and vp.isVisibleTo(area):
+                vp_w, vp_h = vp.width(), vp.height()
+                # 布局尚未完成时 viewport 还是默认小尺寸（实测 98x28），
+                # 与 QScrollArea 自身尺寸严重不符。此时尺寸改用 contentsRect
+                # （已扣除边框，未 show 时也是正确的 598x398），位置仍取视口
+                # 左上角——两者左上角在 QScrollArea 内一致。
+                cr = area.contentsRect()
+                if vp_w * 2 < cr.width() or vp_h * 2 < cr.height():
+                    vp_w, vp_h = cr.width(), cr.height()
+                if vp_w > 0 and vp_h > 0:
+                    return vp.mapTo(self._host, QPoint(0, 0)), vp_w, vp_h
         return ref.mapTo(self._host, QPoint(0, 0)), ref.width(), ref.height()
 
     def _position_item(self, item: dict) -> None:

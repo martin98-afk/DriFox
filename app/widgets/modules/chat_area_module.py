@@ -151,6 +151,11 @@ class ChatAreaModule(UIModule):
 
         # 初始加载（延迟到首帧后，避免阻塞 setup_ui 关键路径）
         QTimer.singleShot(0, host._apply_decorations)
+        # 首刷时机兜底：singleShot(0) 时 QScrollArea 的 viewport 往往还没完成
+        # 布局（实测仍是 98x28 默认尺寸），装饰件会按错误尺寸定位，用户侧
+        # 表现为「装了插件装饰层没显示/位置歪」。布局落定后再刷一次，
+        # 位置与缩放即恢复正常。两次 apply 幂等（_clear 会先隐藏旧件）。
+        QTimer.singleShot(120, host._apply_decorations)
 
 
 def _make_apply(host) -> callable:

@@ -264,3 +264,192 @@ class TestDecorationScrollAnchor:
         vp = scroll_host.chat_scroll_area.viewport()
         assert label.height() == vp.height()
         assert label.width() == vp.width()
+
+
+class TestDecorationHiddenHost:
+    """宿主不可见（未 show / 切页后 hide）时仍必须按视口定位
+
+    回归背景：_scene_ref_rect 曾用 `viewport.isVisible()` 判断是否可用视口
+    矩形。isVisible() 在两种状态下为 False：
+      - 窗口尚未 show（chat_area 的 QTimer.singleShot(0) 首刷早于首帧）
+      - 切页后旧窗口被 hide
+    两种情况都会退回 chat_container（QScrollArea 的内容 widget），而它的
+    高度随消息增长，于是装饰件被摆到几千像素外或退化到错误尺寸。用户侧
+    表现：「装了插件装饰层不立即显示」「新建会话位置是歪的」「切会话残留」。
+
+    正确判据是 isVisibleTo()：它只看自身相对父级的可见性，不受祖先是否
+    显示影响，hide 状态下布局尺寸依然有效。
+    """
+
+    @pytest.fixture()
+    def hidden_host(self, qapp, tmp_path):
+        from PyQt5.QtGui import QImage
+        from PyQt5.QtWidgets import QScrollArea, QWidget
+
+        host = QWidget()
+        host.resize(1000, 800)
+
+        area = QScrollArea(host)
+        area.setGeometry(20, 20, 600, 400)
+        area.setWidgetResizable(True)
+        content = QWidget()
+        content.resize(600, 5000)
+        area.setWidget(content)
+        # 关键：不 show，模拟「首刷发生在首帧之前」
+        from PyQt5.QtWidgets import QApplication
+
+        QApplication.processEvents()
+        host.chat_scroll_area = area
+        host.chat_container = content
+        host._input_card = QWidget(host)
+        host._input_card.setGeometry(20, 500, 600, 120)
+
+        png = tmp_path / "h.png"
+        QImage(200, 100, QImage.Format_ARGB32).save(str(png))
+
+        deco = DecorationLayer(host, ref_resolver=lambda attr: getattr(host, attr, None))
+        host._deco = deco
+        host._png = str(png)
+        yield host
+        host.deleteLater()
+        deco.deleteLater()
+
+    def test_hidden_host_uses_viewport_not_content(self, hidden_host):
+        """未 show 时 scene_bottom 仍落在视口底部附近，而不是 5000px 内容底部"""
+        deco = hidden_host._deco
+        deco.apply_config(
+            [{"id": "s", "image": hidden_host._png, "anchor": "scene_bottom"}],
+            image_resolver=lambda img: hidden_host._png,
+        )
+        label = deco._items[0]["label"]
+        area = hidden_host.chat_scroll_area
+        # 未 show 时 viewport 自身尺寸还是默认小值（实测 98x28），实现会用
+        # QScrollArea.contentsRect 兜底，因此期望值也按 contentsRect 算。
+        vp_top = area.viewport().mapTo(hidden_host, area.viewport().rect().topLeft()).y()
+        cr = area.contentsRect()
+        expected = vp_top + cr.height() - label.height()
+        assert abs(label.y() - expected) <= 2, (
+            f"未 show 时按内容容器定位了：label.y={label.y()} 期望≈{expected}"
+        )
+
+    def test_hidden_host_fit_width_uses_viewport_width(self, hidden_host):
+        """未 show 时 fit_width 按视口宽缩放，不能退化成内容宽或 0"""
+        deco = hidden_host._deco
+        deco.apply_config(
+            [
+                {
+                    "id": "s",
+                    "image": hidden_host._png,
+                    "anchor": "scene_bottom",
+                    "fit_width": True,
+                }
+            ],
+            image_resolver=lambda img: hidden_host._png,
+        )
+        label = deco._items[0]["label"]
+        vp = hidden_host.chat_scroll_area.viewport()
+        # 原图 200 宽 < 视口 600 宽，只缩不放 → 保持 200
+        assert label.width() == 200
+
+    def test_hide_after_show_keeps_viewport_basis(self, qapp, tmp_path):
+        """show→hide 之后重新定位，仍以视口为基准（切页残留场景）"""
+        from PyQt5.QtGui import QImage
+        from PyQt5.QtWidgets import QScrollArea, QWidget
+
+        host = QWidget()
+        host.resize(1000, 800)
+        area = QScrollArea(host)
+        area.setGeometry(20, 20, 600, 400)
+        area.setWidgetResizable(True)
+        content = QWidget()
+        content.resize(600, 5000)
+        area.setWidget(content)
+        host.show()
+        for _ in range(5):
+            qapp.processEvents()
+
+        host.chat_scroll_area = area
+        host.chat_container = content
+        png = tmp_path / "hh.png"
+        QImage(1600, 727, QImage.Format_ARGB32).save(str(png))
+
+        deco = DecorationLayer(host, ref_resolver=lambda attr: getattr(host, attr, None))
+        cfg = [
+            {
+                "id": "s",
+                "image": str(png),
+                "anchor": "scene_bottom",
+                "fit_width": True,
+                "fit_height": True,
+            }
+        ]
+        deco.apply_config(cfg, image_resolver=lambda img: str(png))
+        visible_w = deco._items[0]["label"].width()
+
+        host.hide()
+        for _ in range(5):
+            qapp.processEvents()
+        deco.apply_config(cfg, image_resolver=lambda img: str(png))
+        hidden_label = deco._items[0]["label"]
+
+        vp = area.viewport()
+        assert hidden_label.width() == min(1600, vp.width()), (
+            f"hide 后宽度基准失效：{hidden_label.width()} vs 视口 {vp.width()}"
+        )
+        assert visible_w == hidden_label.width()
+
+
+class TestDecorationClear:
+    """重复 apply_config 时旧装饰件必须立刻不可见（切页残留场景）
+
+    回归背景：_clear 只用 deleteLater 排队销毁，控件在事件循环处理前仍然
+    可见。切页/主题刷新连发时新旧装饰件会叠在一起，用户侧表现为
+    「切换其他会话装饰层还会残留」。
+    """
+
+    @pytest.fixture()
+    def host(self, qapp, tmp_path):
+        from PyQt5.QtGui import QImage
+        from PyQt5.QtWidgets import QWidget
+
+        w = QWidget()
+        w.resize(600, 400)
+        w.chat_container = QWidget(w)
+        w.chat_container.setGeometry(0, 0, 600, 400)
+        w._input_card = QWidget(w)
+        w._input_card.setGeometry(0, 300, 600, 100)
+
+        png = tmp_path / "c.png"
+        QImage(100, 50, QImage.Format_ARGB32).save(str(png))
+
+        deco = DecorationLayer(w, ref_resolver=lambda a: getattr(w, a, None))
+        w._deco = deco
+        w._png = str(png)
+        yield w
+        w.deleteLater()
+        deco.deleteLater()
+
+    def test_reapply_hides_old_labels_immediately(self, host):
+        """重新 apply 后旧 label 立即 hide，不等 deleteLater"""
+        deco = host._deco
+        cfg = [{"id": "s", "image": host._png, "anchor": "scene_bottom"}]
+        deco.apply_config(cfg, image_resolver=lambda img: host._png)
+        old = deco._items[0]["label"]
+        assert old.isVisible() or old.isHidden() is False
+
+        deco.apply_config(cfg, image_resolver=lambda img: host._png)
+        assert old.isHidden(), "旧装饰件未在重新 apply 时立即隐藏（会与新件叠加残留）"
+        assert len(deco._items) == 1
+
+    def test_empty_config_hides_and_clears(self, host):
+        """清空配置后旧 label 立即 hide"""
+        deco = host._deco
+        deco.apply_config(
+            [{"id": "s", "image": host._png, "anchor": "scene_bottom"}],
+            image_resolver=lambda img: host._png,
+        )
+        old = deco._items[0]["label"]
+        deco.apply_config([], image_resolver=lambda img: host._png)
+        assert old.isHidden()
+        assert deco._items == []
+
