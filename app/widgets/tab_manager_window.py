@@ -2634,34 +2634,87 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
         except Exception as e:
             logger.warning(f"[TabManagerWindow] 应用 scene 背景失败: {e}")
 
-    def _apply_video_overlay(self, overlay_cfg):
-        """应用 backgrounds.overlay 到 _video_overlay_layer（scene 之上、UI 之下）
+    # overlay.target 合法值 → 宿主属性名（window 特判为 self）
+    _OVERLAY_TARGETS = {
+        "window": "_window_base_layer",
+        "sidebar": "_tab_frame",
+        "chat_area": "_chat_frame",
+        "scene": "_chat_frame",
+    }
 
-        懒创建：首次出现 overlay 配置才构造；配置消失（切到无 overlay 主题）
-        时停止播放并隐藏，不销毁 widget（避免重复 installEventFilter）。
-        Z 序：layer.lower() 后 scene_layer.stackUnder(layer)，
+    def _overlay_target_widget(self, target: str):
+        """按 target 取视频层挂载父 widget；window 挂窗口自身"""
+        if target == "window":
+            return self
+        return getattr(self, self._OVERLAY_TARGETS.get(target, "_chat_frame"), None)
+
+    def _apply_video_overlay(self, overlay_cfg):
+        """应用 backgrounds.overlay 到 target 指定区域（scene 之上、UI 之下）
+
+        target 决定挂载区域（window/sidebar/chat_area/scene，缺省 chat_area，
+        非法值回落 chat_area）。一个主题只允许一处视频：切 target 时先停掉
+        其它 target 的层，但保留下层实例不销毁（避免重复 installEventFilter）。
+
+        懒创建：首次出现该 target 的 overlay 配置才构造；配置消失时停止播放并
+        隐藏，不销毁 widget。Z 序：layer.lower() 后 scene_layer.stackUnder(layer)，
         最终 SceneLayer < VideoOverlayLayer < UI 控件。
         """
-        layer = getattr(self, "_video_overlay_layer", None)
+        layers = self.__dict__.setdefault("_video_overlay_layers", {})
         active = bool(overlay_cfg) and overlay_cfg.get("enabled", True) and overlay_cfg.get("video")
+
         if not active:
-            if layer is not None:
+            for layer in layers.values():
+                try:
+                    layer.stop_video()
+                    layer.hide()
+                except RuntimeError:
+                    pass  # C++ 对象已销毁
+            return
+
+        target = str(overlay_cfg.get("target") or "chat_area").lower()
+        if target not in self._OVERLAY_TARGETS:
+            target = "chat_area"
+
+        # 一个主题只允许一处视频：其它 target 的层停掉并隐藏
+        for name, layer in layers.items():
+            if name == target:
+                continue
+            try:
                 layer.stop_video()
                 layer.hide()
+            except RuntimeError:
+                pass
+
+        parent = self._overlay_target_widget(target)
+        if parent is None:
+            logger.warning(f"[TabManagerWindow] overlay.target={target} 无挂载点，跳过")
             return
+
         try:
+            layer = layers.get(target)
+            # 同 target 但父 widget 变了（窗口重建等）：弃旧建新
+            if layer is not None and layer.parent() is not parent:
+                try:
+                    layer.stop_video()
+                    layer.hide()
+                    layer.deleteLater()
+                except RuntimeError:
+                    pass
+                layer = None
+
             if layer is None:
                 from app.widgets.video_overlay_layer import VideoOverlayLayer
 
-                layer = VideoOverlayLayer(self._chat_frame)
-                self._chat_frame.installEventFilter(layer)
-                self._video_overlay_layer = layer
+                layer = VideoOverlayLayer(parent)
+                parent.installEventFilter(layer)
+                layers[target] = layer
+
             layer.apply_config(overlay_cfg, self._resolve_theme_image)
             layer.show()
             layer.sync_geometry()
             layer.lower()
             scene = getattr(self, "_scene_layer", None)
-            if scene is not None:
+            if scene is not None and scene.parent() is parent:
                 try:
                     scene.stackUnder(layer)
                 except RuntimeError:
