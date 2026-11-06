@@ -1,0 +1,169 @@
+# -*- coding: utf-8 -*-
+"""动态光影覆盖层（backgrounds.overlay）
+
+循环播放一段黑白光影视频，paintEvent 内先铺亮度补偿色、再以
+CompositionMode_Multiply + 低不透明度把视频帧画到对话区背景上：
+视频白色区域（叶隙天光）与底色相乘后≈底色（视觉透明），暗部（树影）
+形成缓慢流动的光影。复刻自 HanaAgent LeavesOverlay（Apache-2.0）。
+
+Qt 侧无 CSS mix-blend-mode，混合在背景层内部完成：覆盖层只与下方
+背景内容（SceneLayer 的图/纯色）相乘，上层 UI 卡片不受影响，可读性无损。
+
+Z 序约定：SceneLayer < VideoOverlayLayer < UI 控件
+（挂载方负责：layer.lower() + scene_layer.stackUnder(layer)）。
+"""
+from typing import Callable, Optional
+
+from PyQt5.QtCore import QEvent, QRect, QSize, Qt, QUrl
+from PyQt5.QtGui import QColor, QImage, QPainter
+from PyQt5.QtMultimedia import (
+    QAbstractVideoBuffer,
+    QAbstractVideoSurface,
+    QMediaContent,
+    QMediaPlayer,
+    QVideoFrame,
+)
+from PyQt5.QtWidgets import QWidget
+
+# 仅声明 32 位像素格式：规避 24 位字节序坑；WMF 解码器输出 RGB32 足够
+_PIX_FMT = {
+    QVideoFrame.Format_RGB32: QImage.Format_RGB32,
+    QVideoFrame.Format_ARGB32: QImage.Format_ARGB32,
+    QVideoFrame.Format_ARGB32_Premultiplied: QImage.Format_ARGB32_Premultiplied,
+}
+
+
+class _FrameSurface(QAbstractVideoSurface):
+    """把 QMediaPlayer 解码帧搬成 QImage，回调宿主请求重绘"""
+
+    def __init__(self, on_frame_ready: Callable[[], None], parent=None):
+        super().__init__(parent)
+        self._on_frame_ready = on_frame_ready
+        self.frame: Optional[QImage] = None  # 播放间隙保留旧帧，防黑闪
+
+    def supportedPixelFormats(self, handle_type):
+        # PyQt5 的 HandleType 枚举在 QAbstractVideoBuffer 上；VideoSurface 模式
+        # 恒走 NoHandle 查询，直接返回支持列表即可
+        return list(_PIX_FMT.keys())
+
+    def present(self, frame: QVideoFrame) -> bool:
+        if not frame.isValid():
+            return False
+        qimg_fmt = _PIX_FMT.get(frame.pixelFormat())
+        if qimg_fmt is None:
+            return False
+        if not frame.map(QAbstractVideoBuffer.ReadOnly):
+            return False
+        try:
+            # bits() 只在 map 期间有效，必须 copy()
+            img = QImage(frame.bits(), frame.width(), frame.height(),
+                         frame.bytesPerLine(), qimg_fmt).copy()
+        finally:
+            frame.unmap()
+        if img.isNull():
+            return False
+        self.frame = img
+        self._on_frame_ready()
+        return True
+
+
+class VideoOverlayLayer(QWidget):
+    """对话区动态光影覆盖层
+
+    cfg 字段（来自 yaml `backgrounds.overlay`）：
+      - video             : str  视频路径（主题目录相对路径或绝对路径）
+      - opacity           : float 0.0~1.0，默认 0.28
+      - brightness_boost  : str  亮度补偿色（CSS color），补偿 multiply 变暗
+      - enabled           : bool 默认 True
+    """
+
+    def __init__(self, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self.setAttribute(Qt.WA_TransparentForMouseEvents)
+        self.setAttribute(Qt.WA_NoSystemBackground, True)
+        self._surface = _FrameSurface(self._on_frame_ready, self)
+        self._player = QMediaPlayer(self, QMediaPlayer.VideoSurface)
+        self._player.setVideoOutput(self._surface)
+        self._player.setMuted(True)
+        self._player.mediaStatusChanged.connect(self._on_status)
+        self._opacity = 0.28
+        self._boost: Optional[QColor] = None
+
+    # ── 配置 ─────────────────────────────────────────
+
+    def apply_config(self, cfg: Optional[dict], video_resolver=None) -> None:
+        """应用配置；None / enabled=False / 无 video 时停止并清空"""
+        self.stop_video()
+        if not cfg or not cfg.get("enabled", True):
+            return
+        video = cfg.get("video")
+        if not video:
+            return
+        path = video_resolver(video) if video_resolver else video
+        self._opacity = max(0.0, min(float(cfg.get("opacity", 0.28)), 1.0))
+        boost = cfg.get("brightness_boost")
+        self._boost = QColor(boost) if boost else None
+        self._player.setMedia(QMediaContent(QUrl.fromLocalFile(path)))
+        self._player.play()
+
+    def stop_video(self) -> None:
+        self._player.stop()
+        self._player.setMedia(QMediaContent())
+        self._surface.frame = None
+        self._boost = None
+        self._opacity = 0.28
+        self.update()
+
+    # ── 播放控制 ─────────────────────────────────────
+
+    def _on_frame_ready(self):
+        self.update()
+
+    def _on_status(self, status):
+        # Qt5 无 loop 属性；素材为正放+倒放无缝剪辑，回头重播无跳变
+        if status == QMediaPlayer.EndOfMedia:
+            self._player.play()
+
+    # ── 绘制 ─────────────────────────────────────────
+
+    def paintEvent(self, event):
+        frame = self._surface.frame
+        p = QPainter(self)
+        try:
+            if self._boost is not None:
+                p.fillRect(self.rect(), self._boost)
+            if frame is not None and not frame.isNull():
+                p.save()
+                p.setCompositionMode(QPainter.CompositionMode_Multiply)
+                p.setOpacity(self._opacity)
+                p.drawImage(self._cover_rect(frame.size(), self.rect()), frame)
+                p.restore()
+        finally:
+            p.end()
+
+    @staticmethod
+    def _cover_rect(src: QSize, dst: QRect) -> QRect:
+        """object-fit: cover——等比放大铺满、居中，超出部分由 widget 裁剪"""
+        if src.isEmpty() or dst.isEmpty():
+            return dst
+        scale = max(dst.width() / src.width(), dst.height() / src.height())
+        w = int(src.width() * scale + 0.5)
+        h = int(src.height() * scale + 0.5)
+        return QRect(dst.x() + (dst.width() - w) // 2,
+                     dst.y() + (dst.height() - h) // 2, w, h)
+
+    # ── 几何同步 ─────────────────────────────────────
+
+    def sync_geometry(self) -> None:
+        parent = self.parent()
+        if parent is not None:
+            self.setGeometry(parent.rect())
+
+    def eventFilter(self, watched, event):
+        if event.type() == QEvent.Resize and watched is self.parent():
+            self.sync_geometry()
+        return super().eventFilter(watched, event)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self.sync_geometry()
