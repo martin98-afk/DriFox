@@ -1,13 +1,19 @@
 # -*- coding: utf-8 -*-
 """动态光影覆盖层（backgrounds.overlay）
 
-循环播放一段黑白光影视频，paintEvent 内先铺亮度补偿色、再以
-CompositionMode_Multiply + 低不透明度把视频帧画到对话区背景上：
-视频白色区域（叶隙天光）与底色相乘后≈底色（视觉透明），暗部（树影）
-形成缓慢流动的光影。复刻自 HanaAgent LeavesOverlay（Apache-2.0）。
+循环播放一段黑白光影视频，paintEvent 内先铺亮度补偿色、再按 v 的明暗把
+视频帧转成「黑色 + alpha」遮罩叠在对话区背景上：视频白色区域（叶隙天光）
+alpha≈0 不压暗，暗部（树影）alpha 高形成缓慢流动的光影。
+复刻自 HanaAgent LeavesOverlay（Apache-2.0）的视觉效果。
 
-Qt 侧无 CSS mix-blend-mode，混合在背景层内部完成：覆盖层只与下方
-背景内容（SceneLayer 的图/纯色）相乘，上层 UI 卡片不受影响，可读性无损。
+为什么不用 CompositionMode_Multiply（2026-11-06 实测）：真实播放时
+raster 引擎对「解码器帧 + Multiply」的组合会输出远暗于理论值的结果
+（1080x1920 帧实测 35~48，理论 236），离屏复算与 SourceOver 绘制同一帧
+均正常，灰帧也正常，属引擎侧行为且不稳定。改用 SourceOver + alpha 遮罩，
+数学等价（见 _build_mask）但不读目标像素，不受该行为影响。
+
+Qt 侧无 CSS mix-blend-mode，混合在背景层内部完成：覆盖层只压暗下方
+背景内容（SceneLayer 的图/纯色），上层 UI 卡片不受影响，可读性无损。
 
 Z 序约定：SceneLayer < VideoOverlayLayer < UI 控件
 （挂载方负责：layer.lower() + scene_layer.stackUnder(layer)）。
@@ -24,6 +30,8 @@ from PyQt5.QtMultimedia import (
     QVideoFrame,
 )
 from PyQt5.QtWidgets import QWidget
+
+from app.utils.design_tokens import qcolor_from_token
 
 # 仅声明 32 位像素格式：规避 24 位字节序坑；WMF 解码器输出 RGB32 足够
 _PIX_FMT = {
@@ -73,7 +81,9 @@ class VideoOverlayLayer(QWidget):
     cfg 字段（来自 yaml `backgrounds.overlay`）：
       - video             : str  视频路径（主题目录相对路径或绝对路径）
       - opacity           : float 0.0~1.0，默认 0.28
-      - brightness_boost  : str  亮度补偿色（CSS color），补偿 multiply 变暗
+      - brightness_boost  : str  亮度补偿色（CSS color，支持 rgba() 写法），
+                                 补偿遮罩压暗（QColor 构造器不认 rgba()，
+                                 必须走 qcolor_from_token，实测 2026-11-06）
       - position          : str  cover 裁剪的垂直对齐 top/center/bottom，默认 center。
                                  竖版素材（树影集中在顶部）在横窗内必须配 top，
                                  否则居中裁剪只显示原图中段空白区（实测 2026-11-06）
@@ -92,8 +102,8 @@ class VideoOverlayLayer(QWidget):
         self._opacity = 0.28
         self._boost: Optional[QColor] = None
         self._position = "center"
-        # 预混合缓冲：把透明度烘焙进帧（见 _bake_opacity），复用避免每帧分配
-        self._blend_buf: Optional[QImage] = None
+        # 遮罩缓冲：把帧明暗烘成黑色 alpha（见 _build_mask），复用避免每帧分配
+        self._mask_buf: Optional[QImage] = None
 
     # ── 配置 ─────────────────────────────────────────
 
@@ -108,7 +118,7 @@ class VideoOverlayLayer(QWidget):
         path = video_resolver(video) if video_resolver else video
         self._opacity = max(0.0, min(float(cfg.get("opacity", 0.28)), 1.0))
         boost = cfg.get("brightness_boost")
-        self._boost = QColor(boost) if boost else None
+        self._boost = qcolor_from_token(boost) if boost else None
         pos = str(cfg.get("position") or "center").lower()
         self._position = pos if pos in ("top", "center", "bottom") else "center"
         self._player.setMedia(QMediaContent(QUrl.fromLocalFile(path)))
@@ -142,38 +152,49 @@ class VideoOverlayLayer(QWidget):
             if self._boost is not None:
                 p.fillRect(self.rect(), self._boost)
             if frame is not None and not frame.isNull():
-                processed = self._bake_opacity(frame)
-                # 全强度 multiply（不 setOpacity）：raster 引擎对
-                # Multiply+opacity 组合会忽略透明度（实测黑屏），透明度已在
-                # _bake_opacity 里烘进帧，此处数学与 HanaAgent 公式精确等价
+                mask = self._build_mask(frame, self._opacity)
                 p.save()
-                p.setCompositionMode(QPainter.CompositionMode_Multiply)
-                p.drawImage(self._cover_rect(processed.size(), self.rect(), self._position), processed)
+                p.setCompositionMode(QPainter.CompositionMode_SourceOver)
+                p.drawImage(self._cover_rect(mask.size(), self.rect(), self._position), mask)
                 p.restore()
         finally:
             p.end()
 
-    def _bake_opacity(self, frame: QImage) -> QImage:
-        """把覆盖层透明度烘进帧：v' = 255×(1-opacity) + v×opacity
+    def _build_mask(self, frame: QImage, opacity: float) -> QImage:
+        """把帧明暗转成黑色 alpha 遮罩：a = opacity × (255 - v)
 
-        与白色预混合后全强度 multiply：dst×v'/255
-        = dst×[(1-opacity) + opacity×v/255]
-        = HanaAgent 的 SourceOver(multiply(src), opacity) 期望公式。
+        SourceOver 下 out = dst×(1-a/255) + 0×(a/255)
+        = dst×[1 - opacity×(255-v)/255]
+        = dst×[(1-opacity) + opacity×v/255]，即把帧与白色预混合后做 multiply
+        的结果。等价于原 HanaAgent 公式，但不依赖目标像素。
         """
-        buf = self._blend_buf
-        if buf is None or buf.size() != frame.size() or buf.format() != QImage.Format_RGB32:
-            buf = QImage(frame.size(), QImage.Format_RGB32)
-            self._blend_buf = buf
-        pt = QPainter(buf)
+        mask = self._mask_buf
+        if mask is None or mask.size() != frame.size() or mask.format() != QImage.Format_ARGB32_Premultiplied:
+            mask = QImage(frame.size(), QImage.Format_ARGB32_Premultiplied)
+            self._mask_buf = mask
+        mask.fill(QColor(0, 0, 0, 0))
+        pt = QPainter(mask)
         try:
             pt.setCompositionMode(QPainter.CompositionMode_Source)
-            pt.fillRect(buf.rect(), QColor(255, 255, 255))
-            pt.setOpacity(self._opacity)  # 帧贡献 opacity，白底贡献 1-opacity
-            pt.setCompositionMode(QPainter.CompositionMode_SourceOver)
-            pt.drawImage(0, 0, frame)
+            pt.setOpacity(opacity)          # 整体压暗强度
+            pt.drawImage(0, 0, self._alpha_of(frame))
         finally:
             pt.end()
-        return buf
+        return mask
+
+    def _alpha_of(self, frame: QImage) -> QImage:
+        """黑底 + 「反相亮度」alpha 的黑图（白→完全透明，黑→不透明）
+
+        先 setAlphaChannel 再整体 setOpacity 绘制，两层都在带 alpha 的图上做；
+        直接把 Grayscale8 当 DestinationIn 的 src 不行——Qt 把它按不透明色
+        处理，alpha 恒 255（实测）。
+        """
+        gray = frame.convertToFormat(QImage.Format_Grayscale8)
+        gray.invertPixels()
+        canvas = QImage(frame.size(), QImage.Format_ARGB32)
+        canvas.fill(QColor(0, 0, 0, 255))
+        canvas.setAlphaChannel(gray)
+        return canvas
 
     @staticmethod
     def _cover_rect(src: QSize, dst: QRect, position: str = "center") -> QRect:

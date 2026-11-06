@@ -53,12 +53,11 @@ def test_apply_config_reads_position(layer):
     assert layer._position == "center"
 
 
-def test_multiply_pixel_blend(layer, qapp):
+def test_mask_pixel_blend(layer, qapp):
     """白底 + 200 灰帧 + opacity 0.28 → 期望 240（±2 容差）
 
-    数学：multiply 中间值 = 255*200/255 = 200；
-    final = 255*(1-0.28) + 200*0.28 = 239.6
-    白底经补偿色铺（真实运行时下层内容透上来作 multiply 的底）。
+    数学：alpha = 0.28×(255-200) = 15；final = 255×(1-15/255) = 240
+    白底由补偿色铺（真实运行时下层内容透上来作 dst）。
     """
     layer._boost = QColor(255, 255, 255)
     frame = QImage(64, 64, QImage.Format_RGB32)
@@ -99,6 +98,29 @@ def test_black_frame_does_not_blacken(layer):
     pix = layer.grab()
     c = QColor(pix.toImage().pixel(32, 32))
     assert abs(c.red() - 184) <= 2
+
+
+def test_white_frame_is_transparent(layer):
+    """白帧（叶隙天光）alpha=0，底色完全不变"""
+    layer._boost = QColor(200, 180, 160)
+    frame = QImage(64, 64, QImage.Format_RGB32)
+    frame.fill(QColor(255, 255, 255))
+    layer._surface.frame = frame
+    layer._opacity = 0.28
+    c = QColor(layer.grab().toImage().pixel(32, 32))
+    assert (c.red(), c.green(), c.blue()) == (200, 180, 160)
+
+
+def test_brightness_boost_parses_css_rgba(layer):
+    """boost 的 rgba() 写法必须解析出 alpha；QColor 构造器会退化为不透明黑"""
+    layer._player.play = lambda: None
+    layer._player.setMedia = lambda *a: None
+    layer.apply_config({"video": "x.mp4",
+                        "brightness_boost": "rgba(255, 253, 247, 0.12)"})
+    assert layer._boost is not None
+    assert layer._boost.isValid()
+    assert (layer._boost.red(), layer._boost.green(), layer._boost.blue()) == (255, 253, 247)
+    assert 25 <= layer._boost.alpha() <= 35  # 0.12×255 ≈ 31
 
 
 def test_loop_replays_on_end_of_media(layer):
