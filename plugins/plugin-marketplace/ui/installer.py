@@ -11,6 +11,7 @@
 import ctypes
 import json
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -23,6 +24,7 @@ from typing import Optional, Tuple
 
 from loguru import logger
 
+from . import cancel
 from .archive_downloader import (
     ArchiveFetchError,
     download_tarball,
@@ -60,6 +62,51 @@ class GitNotFoundError(RuntimeError):
 _GIT_STALL_ARGS = ("-c", "http.lowSpeedLimit=1000", "-c", "http.lowSpeedTime=30")
 # git 单命令总超时兜底（大仓库浅克隆 + 慢网络留足余量）
 _GIT_CMD_TIMEOUT = 300.0
+
+# git 进度行（实测 2026-11，git 2.4x）：
+#   remote: Counting objects:   5% (15/290)
+#   Receiving objects:  45% (4521/10048), 3.42 MiB | 1.20 MiB/s
+#   Resolving deltas: 100% (1234/1234), done.
+#   Updating files: 100% (523/523), done.
+# 注意 remote 前缀实测是小写，且阶段名后有两个空格，统一用 \s+ 兜住。
+_GIT_PCT_RE = re.compile(
+    r"^(?:remote:\s*)?(?P<stage>[A-Za-z][A-Za-z ]*?):\s+\d{1,3}%",
+)
+_GIT_STAGE_PCT_RE = re.compile(r"(\d{1,3})%")
+_GIT_LABEL = {
+    "Counting objects": "远端统计",
+    "Compressing objects": "远端压缩",
+    "Receiving objects": "接收对象",
+    "Resolving deltas": "解析差异",
+    "Updating files": "写入文件",
+    "Checking out files": "检出文件",
+}
+# git 各阶段的进度区间：整条链从「远端统计」到「写入文件」，
+# 按下表把各阶段自身的 0~100% 映射到整体 0~1
+_GIT_STAGE_SPAN = {
+    "Counting objects": (0.00, 0.12),
+    "Compressing objects": (0.12, 0.20),
+    "Receiving objects": (0.20, 0.85),
+    "Resolving deltas": (0.85, 0.95),
+    "Updating files": (0.95, 1.00),
+    "Checking out files": (0.95, 1.00),
+}
+
+def _report_git_progress(line: str) -> None:
+    """解析 git 的一行进度输出并上报（非进度行静默忽略）"""
+    m = _GIT_PCT_RE.match(line)
+    if not m:
+        return
+    stage = m.group("stage").strip()
+    pm = _GIT_STAGE_PCT_RE.search(line)
+    if pm is None:
+        return
+    pct = int(pm.group(1))
+    lo, hi = _GIT_STAGE_SPAN.get(stage, (0.0, 1.0))
+    fraction = lo + (hi - lo) * (pct / 100.0)
+    label = _GIT_LABEL.get(stage, "下载中")
+    cancel.report(min(fraction, 1.0), f"{label} {pct}%")
+
 
 
 def report_plugin_install(plugin_name: str):
@@ -594,6 +641,7 @@ class PluginInstaller:
 
         success = self._install_with_fallback(name, plugin_meta, target)
         if success:
+            cancel.report(None, "安装依赖")
             self._install_deps_quietly(name, target)
             self.last_error = ""
             self.invalidate_installed_cache()
@@ -642,6 +690,7 @@ class PluginInstaller:
         # 不存在（更新前被手动删除）→ 等同安装。
         success = self._install_with_fallback(name, plugin_meta, target)
         if success:
+            cancel.report(None, "安装依赖")
             self._install_deps_quietly(name, target)
             logger.info(f"[Installer] Updated plugin {name} -> v{remote_ver}")
             self.last_error = ""
@@ -884,6 +933,7 @@ class PluginInstaller:
             插件源目录（subpath="." 时为仓库根/包根，否则为子目录）
         """
         clean_url = url.split("?", 1)[0].lower()
+        cancel.check()
         if expected_sha256 or clean_url.endswith((".tar.gz", ".tgz")):
             return self._fetch_tarball(name, url, cache_tmp, expected_sha256, mirrors)
         proxy = get_proxy_config()
@@ -901,6 +951,7 @@ class PluginInstaller:
                 cache_tmp = self._cache_dir / f"{name}_{int(time.time())}_r{i}"
             shutil.rmtree(cache_tmp, ignore_errors=True)
             cache_tmp.mkdir(parents=True, exist_ok=True)
+            cancel.report(None, "克隆仓库")
             try:
                 self._sparse_clone(cu, subpath, ref, cache_tmp, extra_args=ce)
                 return cache_tmp if subpath in (".", "") else cache_tmp / subpath
@@ -908,6 +959,9 @@ class PluginInstaller:
                 # git 可执行文件缺失：换任何 URL 都不会成功，直接转归档通道
                 logger.info(f"[Installer] 未检测到 git，改用归档通道: {name}")
                 return self._fetch_via_archive(name, url, subpath, ref, cache_tmp)
+            except cancel.InstallCancelled:
+                # 取消必须透传：不能当候选失败继续试下一个 URL
+                raise
             except Exception as e:
                 last_err = e
                 logger.warning(f"[Installer] attempt #{i} failed ({cu}): {self._format_git_err(e)}")
@@ -945,6 +999,7 @@ class PluginInstaller:
             )
         extracted = cache_tmp / "_extracted"
         shutil.rmtree(extracted, ignore_errors=True)
+        cancel.report(None, "解压中")
         extract_tarball_file(archive_path, "", extracted)
         logger.info(f"[Installer] tarball 下载完成: {name} ← {url} ({sha[:12]}…)")
         return extracted
@@ -1034,6 +1089,15 @@ class PluginInstaller:
                 shutil.rmtree(cache_tmp, ignore_errors=True)
                 raise
 
+            # 解压阶段也允许取消：seal 之前再 check 一次，否则解压期间点的取消
+            # 会被 seal 静默吞掉（用户看到「取消中…」却装成功了）
+            cancel.check()
+
+            # 下载完成 → 进入落位/替换阶段（不可中断：中途取消会让插件目录
+            # 处于「旧版已移走、新版未落位」的半状态）
+            cancel.seal()
+            cancel.report(0.99, "落位中")
+
             # === 2. 确定源目录 ===
             if not sub_src.exists():
                 shutil.rmtree(cache_tmp, ignore_errors=True)
@@ -1095,6 +1159,18 @@ class PluginInstaller:
             )
             return True
 
+        except cancel.InstallCancelled:
+            # 用户取消：走同一套清理（删缓存与残骸），但不写 last_error / 不记失败
+            try:
+                self._resume_backend_watcher(reload=False)
+            except Exception:
+                pass
+            try:
+                if "cache_tmp" in dir() and cache_tmp.exists():
+                    shutil.rmtree(cache_tmp, ignore_errors=True)
+            except Exception:
+                pass
+            raise
         except Exception as e:
             # 恢复 backend watcher（失败不重载），并清理下载缓存与半安装残骸
             try:
@@ -1148,11 +1224,15 @@ class PluginInstaller:
                 raise GitNotFoundError(
                     "未检测到 git 可执行文件（git 未安装或不在 PATH），请先安装 git 后再安装插件"
                 ) from None
-            try:
-                out, err = proc.communicate(timeout=cmd_timeout)
-            except subprocess.TimeoutExpired:
+
+            kill_reason = {"value": ""}
+            stdout_pipe = proc.stdout
+            stderr_pipe = proc.stderr
+
+            def _kill_tree(reason: str):
                 # Windows 上 proc.kill() 只杀 git 主进程，孙进程（git-remote-http）
-                # 持有管道句柄会让随后的 communicate 再次挂死；必须杀整棵树。
+                # 持有管道句柄会让随后的读管道再次挂死；必须杀整棵树。
+                kill_reason["value"] = kill_reason["value"] or reason
                 if sys.platform == "win32":
                     subprocess.run(
                         ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
@@ -1160,12 +1240,62 @@ class PluginInstaller:
                         creationflags=subprocess.CREATE_NO_WINDOW,
                     )
                 else:
-                    proc.kill()
+                    try:
+                        proc.kill()
+                    except OSError:
+                        pass
+
+            token = cancel.current()
+            abort_key = None
+            if token is not None:
+                abort_key = token.add_abort(proc, lambda: _kill_tree("cancel"))
+            # 总超时看门狗：stderr 无输出时 readline 会永久阻塞，靠独立定时器打断
+            watchdog = threading.Timer(cmd_timeout, lambda: _kill_tree("timeout"))
+            watchdog.daemon = True
+            watchdog.start()
+
+            # stdout 必须并行抽干：只读 stderr 时 stdout 的管道缓冲写满会让
+            # git 阻塞在 write 上，形成经典死锁
+            out_buf: list = []
+
+            def _drain_stdout():
+                if stdout_pipe is None:
+                    return
                 try:
-                    out, err = proc.communicate(timeout=10)
-                except subprocess.TimeoutExpired:
-                    out, err = "", ""
-                tail = (err or "").strip().splitlines()[-3:]
+                    out_buf.append(stdout_pipe.read())
+                except Exception:
+                    pass
+
+            drainer = threading.Thread(target=_drain_stdout, daemon=True, name="git-stdout-drain")
+            drainer.start()
+
+            err_lines: list = []
+            try:
+                if stderr_pipe is not None:
+                    # universal newlines 下 git 的 '\r' 进度刷新也会被切成行
+                    for line in iter(stderr_pipe.readline, ""):
+                        line = line.strip()
+                        if not line:
+                            continue
+                        # --progress 会刷出成百上千行进度（每 1% 一行），只留尾部
+                        # 若干行用于报错文案；进度行本身交给 _report_git_progress
+                        err_lines.append(line)
+                        if len(err_lines) > 200:
+                            del err_lines[:100]
+                        _report_git_progress(line)
+                proc.wait()
+            finally:
+                watchdog.cancel()
+                if abort_key is not None and token is not None:
+                    token.remove_abort(abort_key)
+                drainer.join(timeout=5)
+
+            out = (out_buf[0] if out_buf else "") or ""
+            err = "\n".join(err_lines[-20:])
+            if kill_reason["value"] == "cancel":
+                raise cancel.InstallCancelled("已取消")
+            if kill_reason["value"] == "timeout":
+                tail = err_lines[-3:]
                 raise subprocess.CalledProcessError(
                     124,
                     cmd,
@@ -1182,12 +1312,14 @@ class PluginInstaller:
                 )
 
         if subpath in (".", ""):
-            # 整个仓库：直接浅克隆
-            _run(["git", *extra, "clone", "--depth=1", "--single-branch", "--branch", ref, url, str(cache_dir)])
+            # 整个仓库：直接浅克隆（--progress 强制输出进度：stderr 是管道时
+            # git 默认静默，解析不到百分比）
+            _run(["git", *extra, "clone", "--progress", "--depth=1", "--single-branch",
+                  "--branch", ref, url, str(cache_dir)])
         else:
             # 子目录：稀疏克隆（--branch 必须显式指定，否则只会拉默认分支，
             # 导致 ref=pyside6 的清单装出 main 的源码）
-            _run(["git", *extra, "clone", "--depth=1", "--filter=blob:none", "--sparse",
+            _run(["git", *extra, "clone", "--progress", "--depth=1", "--filter=blob:none", "--sparse",
                   "--branch", ref, url, str(cache_dir)])
             _run(["git", *extra, "-C", str(cache_dir), "sparse-checkout", "set", subpath])
 

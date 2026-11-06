@@ -38,6 +38,8 @@ from urllib.parse import quote
 
 from loguru import logger
 
+from . import cancel
+
 _UA = "DriFox/0.5 (+https://github.com/martin98-afk/drifox-plugins)"
 
 # 单次下载超时（秒）。大仓库整仓归档较慢（实测 60MB / 45s），留足余量；
@@ -110,10 +112,30 @@ def _build_opener(proxy):
 
 
 def _http_get_bytes(url: str, opener, timeout: float, *, accept: str = "*/*") -> bytes:
-    """GET 取字节；HTTP 非 2xx 由 urllib 抛 HTTPError，交由调用方处理"""
+    """GET 取字节；HTTP 非 2xx 由 urllib 抛 HTTPError，交由调用方处理
+
+    注册取消中止回调（归档兜底通道也需可取消），取消时 socket 被强断。
+    """
+    cancel.check()
     req = urllib.request.Request(url, headers={"User-Agent": _UA, "Accept": accept})
-    with opener.open(req, timeout=timeout) as resp:
-        return resp.read()
+    resp = opener.open(req, timeout=timeout)
+    token = cancel.current()
+    abort_key = None
+    if token is not None:
+        abort_key = token.add_abort(resp, lambda r=resp: _abort_response(r))
+    try:
+        data = resp.read()
+    finally:
+        if abort_key is not None:
+            tok = cancel.current()
+            if tok is not None:
+                tok.remove_abort(abort_key)
+        try:
+            resp.close()
+        except Exception:
+            pass
+    cancel.check()
+    return data
 
 
 def _url_candidates(proxy, direct_urls: List[str]) -> List[str]:
@@ -331,6 +353,26 @@ def extract_tarball_file(tar_path: Path, subpath: str, dest_dir: Path) -> Path:
         return _extract_members(tf, subpath, dest_dir, strip_top=False)
 
 
+def _abort_response(resp) -> None:
+    """从其他线程强断 urllib 响应（打断挂在 recv 上的半开连接）
+
+    单靠 resp.close() 在 CPython 上会等 read 线程释放缓冲区，实测仍要等对端
+    超时；先 shutdown 底层 socket 才能让阻塞中的 read 立刻抛错。
+    """
+    try:
+        sock = getattr(getattr(getattr(resp, "fp", None), "raw", None), "_sock", None)
+        if sock is not None:
+            import socket
+
+            sock.shutdown(socket.SHUT_RDWR)
+    except Exception:
+        pass
+    try:
+        resp.close()
+    except Exception:
+        pass
+
+
 def download_tarball(
     direct_urls: List[str], dest: Path, proxy=None, timeout: float = _HTTP_TIMEOUT
 ) -> str:
@@ -338,6 +380,9 @@ def download_tarball(
 
     边下边算哈希，不整包入内存（单插件包可达数十 MB）。
     加速站改写候选优先、直连兜底，全部失败抛 ArchiveFetchError。
+
+    进度/取消走 cancel 模块的线程局部上下文：有 Content-Length 时上报
+    0~1 确定进度，缺失时上报 None（UI 用不确定滚动条）。
     """
     dest.parent.mkdir(parents=True, exist_ok=True)
     opener = _build_opener(proxy)
@@ -345,26 +390,63 @@ def download_tarball(
     last = "未尝试任何候选"
     for u in candidates:
         sha = hashlib.sha256()
+        resp = None
+        abort_key = None
         try:
+            cancel.check()
             req = urllib.request.Request(u, headers={"User-Agent": _UA, "Accept": "*/*"})
-            with opener.open(req, timeout=timeout) as resp, open(dest, "wb") as fh:
+            resp = opener.open(req, timeout=timeout)
+            token = cancel.current()
+            if token is not None:
+                abort_key = token.add_abort(resp, lambda r=resp: _abort_response(r))
+            total = 0
+            try:
+                total = int(resp.headers.get("Content-Length") or 0)
+            except (TypeError, ValueError):
+                total = 0
+            cancel.report(0.0 if total else None, "下载中")
+            got = 0
+            with resp, open(dest, "wb") as fh:
+                last_report = 0.0
                 while True:
+                    cancel.check()
                     chunk = resp.read(1024 * 256)
                     if not chunk:
                         break
                     sha.update(chunk)
                     fh.write(chunk)
+                    got += len(chunk)
+                    # 节流：每 1% 或每 256KB 上报一次，避免跨线程信号淹没 GUI
+                    if total:
+                        frac = min(got / total, 1.0)
+                        if frac - last_report >= 0.01:
+                            last_report = frac
+                            cancel.report(frac, f"下载中 {int(frac * 100)}%")
+                    elif got - int(last_report) >= 1024 * 256:
+                        last_report = got
+                        cancel.report(None, f"下载中 {got // 1024} KB")
             if dest.stat().st_size == 0:
                 raise ArchiveFetchError("下载内容为空")
+            cancel.report(1.0, "下载完成")
             return sha.hexdigest()
+        except cancel.InstallCancelled:
+            raise
         except Exception as e:
             last = f"{type(e).__name__}: {e}"
+            # 取消打断的连接也会走到这里，优先按取消处理（不记失败日志）
+            if cancel.current() is not None and cancel.current().cancelled:
+                raise cancel.InstallCancelled("已取消")
             logger.warning(f"[Installer] tarball 下载失败（{u}）: {last}")
             try:
                 if dest.exists():
                     dest.unlink()
             except OSError:
                 pass
+        finally:
+            if abort_key is not None:
+                token_obj = cancel.current()
+                if token_obj is not None:
+                    token_obj.remove_abort(abort_key)
     raise ArchiveFetchError(f"tarball 下载失败: {last}")
 
 
@@ -424,7 +506,11 @@ def fetch_github_repo(
                 break
             try:
                 raw = _http_get_bytes(u, opener, min(_HTTP_TIMEOUT, left))
+            except cancel.InstallCancelled:
+                raise
             except Exception as e:
+                if cancel.current() is not None and cancel.current().cancelled:
+                    raise cancel.InstallCancelled("已取消")
                 last = e
                 logger.warning(f"[Installer] 归档下载失败（{u}）: {e}")
                 continue

@@ -14,6 +14,7 @@ import subprocess
 import sys
 import threading
 import time
+from io import StringIO
 from pathlib import Path
 
 import pytest
@@ -81,12 +82,15 @@ def test_sparse_clone_stall_args_in_clone_cmd(monkeypatch, tmp_path):
     captured = {}
 
     class _FakeProc:
+        # installer 改为逐行读 stderr 解析进度 + 并行抽干 stdout，fake 需提供文本管道
         def __init__(self):
             self.pid = 0
             self.returncode = 0
+            self.stdout = StringIO("")
+            self.stderr = StringIO("")
 
-        def communicate(self, timeout=None):
-            return "", ""
+        def wait(self, timeout=None):
+            return 0
 
     def _fake_popen(cmd, **kwargs):
         captured["cmd"] = cmd
@@ -112,9 +116,11 @@ def test_sparse_clone_stall_args_in_sparse_checkout_cmd(monkeypatch, tmp_path):
         def __init__(self):
             self.pid = 0
             self.returncode = 0
+            self.stdout = StringIO("")
+            self.stderr = StringIO("")
 
-        def communicate(self, timeout=None):
-            return "", ""
+        def wait(self, timeout=None):
+            return 0
 
     def _fake_popen(cmd, **kwargs):
         cmds.append(cmd)
@@ -141,9 +147,11 @@ def test_sparse_clone_normal_failure_keeps_stderr(monkeypatch, tmp_path):
         def __init__(self):
             self.pid = 0
             self.returncode = 128
+            self.stdout = StringIO("")
+            self.stderr = StringIO("fatal: repository 'https://example.com/x.git/' not found\n")
 
-        def communicate(self, timeout=None):
-            return "", "fatal: repository 'https://example.com/x.git/' not found"
+        def wait(self, timeout=None):
+            return 128
 
     monkeypatch.setattr(
         installer_mod.subprocess, "Popen", lambda cmd, **kw: _FakeProc()
