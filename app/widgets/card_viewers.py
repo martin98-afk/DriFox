@@ -1798,6 +1798,32 @@ class CodeWebViewer(QWebEngineView):
             if FINISH_TIMING_ENABLED or _el >= 120:
                 logger.info(f"[finish-render] js_land+layout={_el:.1f}ms height={h}")
         self._height_report_pending = False
+        # ── [风暴主修 2] 空文档同值连报拉黑 ──
+        # 虚高死锁指纹：v2 接管卡内容从未落高时 scrollHeight 恒为空文档值
+        # （≈11px < 40），JS 每拍重报同值 → Python 下限顶住 → 差值恒超 ±2px
+        # 死区永不收敛 → contentHeightChanged 每拍发射 → setFixedHeight →
+        # relayout → 再报。连续 ≥3 次同值且 <40px → 拉黑该卡 5s：期内同值
+        # 上报直接吞掉（不发 contentHeightChanged），风暴接断；期内高度变化
+        # （真实内容到达）立即解禁，静默损失仅限「确实还在报同值」的时段。
+        _now = time.monotonic()
+        if _now < getattr(self, "_empty_report_blocked_until", 0.0):
+            if h == getattr(self, "_empty_report_blocked_value", None):
+                return
+            # 高度变化 = 真实内容到达，立即解禁（连报计数一并清零）
+            self._empty_report_blocked_until = 0.0
+            self._empty_report_streak = (h, 0)
+        else:
+            last_h, streak = getattr(self, "_empty_report_streak", (None, 0))
+            streak = streak + 1 if last_h == h else 1
+            if h < 40 and streak >= 3:
+                self._empty_report_blocked_until = _now + 5.0
+                self._empty_report_blocked_value = h
+                self._empty_report_streak = (h, 0)
+                logger.warning(
+                    f"[empty-loop] 空文档同值连报 x{streak} (scrollHeight={h})，拉黑 5s 接断虚高风暴"
+                )
+                return
+            self._empty_report_streak = (h, streak)
         self._document_height = h  # 跟踪文档高度用于 wheelEvent 边界判断
         self._content_sentinel_check()
         # [DOCK-BLANK 诊断] viewer 实际高度显著大于 JS 侧内容高度 = 折叠框下方

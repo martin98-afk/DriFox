@@ -3541,16 +3541,18 @@ class MessageCard(SimpleCardWidget):
     def _commit_viewer_height(self, height: int) -> None:
         """高度应用的统一出口。
 
-        批量提交器激活时（resize 恢复期）交由它统一 flush —— 由它做
-        「一次布局 + 一次锚点修正」，与高度到达顺序无关；否则按原行为直接
-        应用。流式卡片始终走直接路径，保证跟底不受批处理延迟影响。
+        批量提交器激活时（resize 恢复期 / 落高置底窗）交由它统一 flush ——
+        由它做「一次布局 + 一次贴底」，与高度到达顺序无关；否则按原行为直接
+        应用。流式卡片也走批路径（[风暴主修 1b] 落高期合并流式卡的逐拍
+        setFixedHeight；批内贴底由 flush 的 follow_bottom_fn 统一保证，用户
+        滚离时 follow=False 不强制拉回，粘底语义不变）。
         """
         # viewer 真实高度到达 → T42 起步钉死完成使命，解除（幂等，未钉死零开销）
         self._unpin_layout_height()
         batch = getattr(self, "_height_batch", None)
         if batch is None:
             batch = self._resolve_height_batch()
-        if batch is not None and batch.active and not self._streaming:
+        if batch is not None and batch.active:
             batch.submit(self, height)
             return
         self.viewer.setFixedHeight(height)

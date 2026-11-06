@@ -15292,6 +15292,13 @@ class OpenAIChatToolWindow(ToolWindow):
             # 但用户已主动滚离底部时跳过——否则向上滚动加载历史批次
             # 完成后会把视口强制拉回底部（滚轮自动置底回归）。
             if self._initial_scroll_to_bottom and not self._user_intentionally_away_from_bottom:
+                # [风暴主修 1a] 落高期高度合并：置底窗内开启批量提交，40 卡落高
+                # 从「40×N 次布局+贴底」收敛为 flush 每轮一次布局一次贴底。
+                # 收尾靠 batch 自身 idle（150ms 无 submit 自动 end），落高停止
+                # 即自动收尾，无需手动对齐 sticky 时限；重复 begin 幂等续期。
+                _lazy_batch = self._ensure_height_batch()
+                if _lazy_batch is not None:
+                    _lazy_batch.begin()
                 self._scroll_to_bottom(sticky_ms=900)
 
     def _get_current_user_round_index(self) -> int:
