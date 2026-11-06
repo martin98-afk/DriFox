@@ -300,8 +300,17 @@ def plan_migration(wall_dir: Path, out_dir: Path) -> ThemePlan:
 
 
 def theme_yaml(plan: ThemePlan, has_decoration: bool, has_music: bool) -> str:
+    def _q(s: str) -> str:
+        """YAML 标量包装：带空格/特殊字符时用单引号，内部单引号转义"""
+        if any(c in s for c in ' :#[]{},&*!|>%@`"\\'):
+            return "'" + s.replace("'", "''") + "'"
+        return s
+
+    def _asset(name: str) -> str:
+        return _q(f"../../assets/{name}")
+
     lines = [
-        f"name: {plan.title}",
+        f"name: {_q(plan.title)}",
         f"id: {plan.theme_id}",
         "mode: dark",
         "",
@@ -315,7 +324,7 @@ def theme_yaml(plan: ThemePlan, has_decoration: bool, has_music: bool) -> str:
         lines += [
             "  overlay:",
             "    target: chat_area",
-            f"    video: ../../assets/{plan.video_path.name}",
+            f"    video: {_asset(plan.video_path.name)}",
             "    opacity: 0.35",
             "    position: center",
             "    enabled: true",
@@ -343,7 +352,7 @@ def theme_yaml(plan: ThemePlan, has_decoration: bool, has_music: bool) -> str:
     if has_music:
         lines += ["", "  music:", "    tracks:"]
         for f in plan.audio_files:
-            lines.append(f"      - ../../assets/{f.name}")
+            lines.append(f"      - {_asset(f.name)}")
         lines += ["    volume: 0.45", "    loop: true", "    fade_ms: 420", "    enabled: true"]
 
     lines += [

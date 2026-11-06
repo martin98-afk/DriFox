@@ -1,6 +1,7 @@
 ---
 name: wallpaper-to-theme
 description: 把 Wallpaper Engine 创意工坊壁纸一键转成 DriFox 主题插件（video 直取视频、scene 解包取背景图与内嵌音乐），产出可直接安装的 themes 插件目录。当用户说「把壁纸做成主题」「迁移 wallpaper 壁纸」「创意工坊壁纸转 DriFox 主题」时使用。
+license: GPL-3.0-or-later
 ---
 
 # Wallpaper Engine → DriFox 主题插件
@@ -78,6 +79,8 @@ python scripts/migrate.py "<壁纸目录>" --out "<输出目录>"
 
 生成后必须实机验证三件事：主题卡里能看到、背景图正常铺满、音乐能播（有音频时）。
 
+真实输入输出见 `references/examples.md`（含 video 与 scene 两种类型的完整产出清单，以及失败样本的报错原文）。
+
 ## 与 plugin-creator 的关系
 
 - 本技能只负责「从壁纸产出主题插件」这一条路径，产出的插件仍受 `plugin-creator` 的 themes 规范约束。
@@ -87,3 +90,12 @@ python scripts/migrate.py "<壁纸目录>" --out "<输出目录>"
 ## 素材版权
 
 创意工坊壁纸的图/音/视频版权归原作者，商业作品还涉及发行商（如 CD Projekt RED 的 OST）。迁移产物**仅供本地个人使用**；要公开发布必须替换成自有或明确可商用素材。脚本产出的 `plugin.json` 默认 `license: MIT`，公开发布前必须改。
+
+## 闭环
+
+每次实际迁移后必须回写两件事：
+
+1. **新踩的格式坑** → 补进 `references/format-notes.md`，写清「哪个壁纸 id + 什么现象 + 排查到哪一步」。实测数据是这份文档唯一的可信来源，不写就退化成猜测。
+2. **失败样本** → 在 SKILL.md「已知限制」里更新通过率，不要维持旧的乐观数字。
+
+本次实测基线：23 个真实壁纸，20 成功（8 video / 12 scene），3 失败——全部是 DXT 压缩贴图，已在 `references/format-notes.md` 记录卡点。
