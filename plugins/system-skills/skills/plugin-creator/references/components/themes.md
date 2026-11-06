@@ -97,8 +97,14 @@ backgrounds:
 | `offset` | [int, int] | `[0, 0]` | 像素偏移 `[x, y]` |
 | `stretch_x` | bool | `false` | 水平拉伸（仅 `anchor: scene` 有效） |
 | `opacity` | float | `1.0` | 0.0~1.0 |
+| `fit_width` | bool | `false` | 宽度超出锚定容器时等比缩小（只缩不放） |
+| `fit_height` | bool | `false` | 高度超出锚定容器时等比缩小（只缩不放） |
 
 `anchor` 取值：`scene`（撑满对话区）、`scene_top`、`scene_bottom`、`input_top`、`input_bottom`。
+
+**`fit_width` / `fit_height` 必须给大图开**：不写时按图片**原尺寸**摆放（历史行为）。把一张 1600px 宽的立绘挂到 700px 宽的对话区上，会左右各溢出一半，用户侧表现为「人物跑出屏幕」。开了 `fit_width: true` 后按容器宽度等比缩放并保持锚点对齐，窗口变窄时会重新计算。
+
+两者可同时开，取更严格的缩放比例。原图比容器小时不会放大（避免糊）。
 
 ### overlay（动态光影视频层）
 
@@ -174,6 +180,26 @@ backgrounds:
 
 `:qrc` 路径只能引用打包进程序的资源，插件主题通常用不到，自己的素材一律放主题目录里。
 
+### 多主题共用素材：放插件根 `assets/`
+
+插件内有多个主题要共用同一批图/音频时，把素材放插件根的 `assets/`，主题 yaml 用 `../../assets/xxx` 引用：
+
+```
+<plugin>/
+├── assets/                     ← 共用素材（不是主题目录）
+│   ├── bg.jpg
+│   └── 01-track.mp3
+└── themes/
+    ├── dark/dark.yaml          → image: ../../assets/bg.jpg
+    └── light/light.yaml        → image: ../../assets/bg.jpg
+```
+
+**不要把共用素材放 `themes/shared/`**：`themes/` 下每个子目录都会被当成主题候选，校验器会报「shared 目录下没有 .yaml 文件」直接判失败。`assets/` 在 `themes/` 之外，不会被扫描。
+
+单主题独用的素材放自己的主题目录里即可，路径写 `bg.jpg`。
+
+> 已知限制：主题预览卡（设置-外观里的缩略图）只会取 `window → scene → chat_area → sidebar` 里第一个有图区域，并且按 `basename` 在**主题目录内**找文件。素材放在 `assets/` 的跨目录主题，缩略图会显示不出来（界面本身正常）。想有缩略图就把主背景图放回主题目录内。
+
 ## colors 颜色 token
 
 ```yaml
@@ -217,6 +243,10 @@ colors:
 | 现象 | 原因 | 修法 |
 |------|------|------|
 | 背景图不显示 | 路径写错或文件不在主题目录 | 用相对主题目录的路径；确认文件名大小写 |
+| 装饰件跑出可视区 | 大图没开 `fit_width` / `fit_height`，按原尺寸溢出容器 | 加 `fit_width: true`（竖图再叠 `fit_height: true`） |
+| 主题缩略图是空的 | 主背景图放到了 `assets/`，缩略图只在主题目录内找文件 | 把主背景图放回主题目录，或用主题目录内的图作 `scene.image` |
+| 主题卡里找不到自己写的主题 | 主题 `mode` 与当前深浅模式不符（深色主题只在深色模式下列出） | 切到对应深浅模式；或把 `mode` 改成你要的模式 |
+| 校验报「shared 目录下没有 .yaml」 | 共用素材放在了 `themes/shared/` | 移到插件根 `assets/`，yaml 里改 `../../assets/...` |
 | 视频层黑屏 | 用了 multiply 期望的素材但引擎行为不符 | 本项目已改用 alpha 遮罩压暗，素材用「黑底白纹」剪切即可 |
 | 竖版视频只看到中段 | `position` 默认 `center` | 配 `position: top` 或 `bottom` |
 | 视频出现在错误区域 | 没写 `target` 或写错值 | 显式写 `target`，非法值会静默回落 `chat_area` |
