@@ -21,6 +21,22 @@ Entry = Dict[str, object]
 TOMBSTONE_KEY = "d"
 # 条目写入者标识：t 相同时靠它做确定性裁决（否则多端同写一个键会永不收敛）
 DEVICE_KEY = "dv"
+# 种子标记：seed_missing 为无元数据元素打的「历史未知」记号。
+# 种子 vs 墓碑 → 墓碑胜（无论 t）：孤儿元素不得凭 observe_clock 抬高的 t 复活
+# （2026-11-06 system-tools 组件禁用条目多端反复回魂的根因）。
+SEED_KEY = "s"
+
+def is_seed(entry: Entry | None) -> bool:
+    return isinstance(entry, dict) and bool(entry.get(SEED_KEY))
+
+def seeded(h: str, t: int, device: str = "") -> Entry:
+    """构造种子条目：live 语义 + 种子标记。仅供 seed_missing 使用。
+
+    真实写入（_touch）打的是普通 live（无 s 标记），写入即自动清除种子态。
+    """
+    entry = live(h, t, device)
+    entry[SEED_KEY] = True
+    return entry
 
 
 class LamportClock:
@@ -184,6 +200,14 @@ def _pick_entry(
     if le is None:
         return re_, "remote"
     if re_ is None:
+        return le, "local"
+    # 种子 vs 墓碑：显式删除压过「历史未知」的种子，无论 t。
+    # 种子只出现在本机同步历史不完整时（新 SyncMeta / 升级首播），
+    # 它的 t 是 observe_clock 抬钟后现打的，天然高于一切历史墓碑；
+    # 不加此判定，孤儿元素会在每次合并中凭空复活。
+    if is_seed(le) and _is_tombstone(re_):
+        return re_, "remote"
+    if _is_tombstone(le) and is_seed(re_):
         return le, "local"
     lt, rt = entry_ts(le), entry_ts(re_)
     if rt > lt:

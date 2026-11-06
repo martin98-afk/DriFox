@@ -23,6 +23,13 @@ import httpx
 from loguru import logger
 from PyQt5.QtCore import QObject, QTimer, pyqtSignal
 
+# 待上传变更的延迟重试：30s 起指数退避，封顶 300s（dirty 悬空兜底）
+_UPLOAD_RETRY_BASE = 30.0
+_UPLOAD_RETRY_MAX = 300.0
+# 初始同步中断后的自动重试：60s 起指数退避，上限 3 次
+_INITIAL_SYNC_RETRY_MAX = 3
+_INITIAL_SYNC_RETRY_BASE = 60.0
+
 from app.core.sync import fingerprint as fp
 from app.core.sync.lww import Entry
 from app.utils.config import Settings
@@ -221,6 +228,10 @@ class ConfigSyncService(QObject):
     settingsRestored = pyqtSignal()
     # 启动恢复：后台线程取到有效 token → 主线程 enable（见 resume_if_bound）
     _resumeTokenReady = pyqtSignal(str, str)
+    # 上传/初始同步重试调度（后台线程 → 主线程；_do_upload 在后台线程失败时
+    # 不能直接 QTimer，经信号桥回主线程定时）
+    _uploadRetryTick = pyqtSignal()
+    _initialSyncRetryTick = pyqtSignal()
 
     def __init__(self):
         if ConfigSyncService._instance is not None:
@@ -280,6 +291,14 @@ class ConfigSyncService(QObject):
         self._initial_sync_completed: bool = False  # 初始同步是否已完成（禁止初始同步前上传）
         self._suppress_retry_scheduled: bool = False  # 抑制窗口结束后的重试已调度
         self._resume_pending: bool = False  # 启动恢复已发起（防重复取 token）
+        # dirty 悬空兜底：上传被抑制/失败后的延迟重试（见 _schedule_upload_retry）
+        self._upload_retry_timer: Optional[QTimer] = None
+        self._upload_retry_failures: int = 0
+        # 初始同步中断后的有限次自动重试（见 _schedule_initial_sync_retry）
+        self._initial_sync_retry_timer: Optional[QTimer] = None
+        self._initial_sync_retry_count: int = 0
+        self._uploadRetryTick.connect(self._on_upload_retry_tick)
+        self._initialSyncRetryTick.connect(self._on_initial_sync_retry_tick)
 
         # 从磁盘恢复持久化的 SHA 缓存（避免每次重启全量下载）
         self._load_sha_cache()
@@ -448,6 +467,8 @@ class ConfigSyncService(QObject):
         self._token = token
         self._owner = owner
         self._initial_sync_completed = False
+        self._initial_sync_retry_count = 0
+        self._upload_retry_failures = 0
         self._debounce_timer = QTimer(self)
         self._debounce_timer.setSingleShot(True)
         self._debounce_timer.timeout.connect(self._on_debounce_timeout)
@@ -499,6 +520,10 @@ class ConfigSyncService(QObject):
         if self._initial_sync_timer:
             self._initial_sync_timer.stop()
             self._initial_sync_timer = None
+        # 撤销待触发的重试计时器（回调自身也检查 disabled，双保险）
+        for _rt in (self._upload_retry_timer, self._initial_sync_retry_timer):
+            if _rt is not None:
+                _rt.stop()
         self._token = ""
         self._owner = ""
         if not clear_state:
@@ -764,6 +789,7 @@ class ConfigSyncService(QObject):
         if time.time() < self._suppress_until:
             return
         if not self._initial_sync_completed:
+            self._schedule_initial_sync_retry()
             return
         self._start_debounce_timer()
 
@@ -771,14 +797,81 @@ class ConfigSyncService(QObject):
         """防抖到期 → 检查抑制窗口 → 启动后台上传线程"""
         if time.time() < self._suppress_until:
             logger.debug("[ConfigSync] 下载后抑制窗口内，取消本次上传")
+            self._schedule_upload_retry()
             return
         if not self._initial_sync_completed:
-            logger.debug("[ConfigSync] 初始同步未完成，跳过防抖上传")
+            logger.debug("[ConfigSync] 初始同步未完成，跳过防抖上传（已安排初始同步重试）")
+            self._schedule_initial_sync_retry()
             return
         logger.debug("[ConfigSync] 防抖到期，启动后台上传线程")
         t = threading.Thread(target=self._do_upload, daemon=True)
         t.start()
         self._upload_thread = t
+
+    # ── dirty 悬空兜底重试 ────────────────────────────────
+    # 修复背景：防抖上传被抑制窗口/初始同步未完成拦截、上传网络失败回滚
+    # dirty 后，原本没有任何重试触发——脏标记一直挂着但永远传不出去。
+    # 典型后果：用户启用插件组件写下的墓碑滞留本地，云端旧 live 条目在
+    # 多设备 LWW 合并时胜出，插件组件「启动后被自动禁用」反复复发。
+
+    def _schedule_upload_retry(self):
+        """请求重试待上传变更（任意线程可调；去重与定时在主线程槽内）"""
+        self._uploadRetryTick.emit()
+
+    def _on_upload_retry_tick(self):
+        if self._state == "disabled":
+            return
+        if self._upload_retry_timer is not None and self._upload_retry_timer.isActive():
+            return  # 已在重试等待中
+        if self._upload_retry_timer is None:
+            self._upload_retry_timer = QTimer(self)
+            self._upload_retry_timer.setSingleShot(True)
+            self._upload_retry_timer.timeout.connect(self._fire_upload_retry)
+        delay = min(
+            _UPLOAD_RETRY_BASE * (2 ** min(self._upload_retry_failures, 4)),
+            _UPLOAD_RETRY_MAX,
+        )
+        logger.debug(f"[ConfigSync] {delay:.0f}s 后重试待上传变更")
+        self._upload_retry_timer.start(int(delay * 1000))
+
+    def _fire_upload_retry(self):
+        if self._state == "disabled":
+            return
+        if not (
+            self._config_dirty or self._custom_dirty or self._records_dirty or any(self._ext_dirty.values())
+        ):
+            self._upload_retry_failures = 0  # 无待上传变更（已被其他路径消化）
+            return
+        self._on_debounce_timeout()
+
+    def _schedule_initial_sync_retry(self):
+        """请求重试初始同步（任意线程可调；上限 3 次、60s 起指数退避）"""
+        self._initialSyncRetryTick.emit()
+
+    def _on_initial_sync_retry_tick(self):
+        if self._state == "disabled" or self._initial_sync_completed:
+            return
+        if self._initial_sync_retry_count >= _INITIAL_SYNC_RETRY_MAX:
+            logger.warning("[ConfigSync] 初始同步自动重试次数用尽；网络恢复后可手动重试同步")
+            return
+        if self._initial_sync_retry_timer is not None and self._initial_sync_retry_timer.isActive():
+            return  # 已在重试等待中
+        if self._initial_sync_retry_timer is None:
+            self._initial_sync_retry_timer = QTimer(self)
+            self._initial_sync_retry_timer.setSingleShot(True)
+            self._initial_sync_retry_timer.timeout.connect(self._fire_initial_sync_retry)
+        self._initial_sync_retry_count += 1
+        delay = _INITIAL_SYNC_RETRY_BASE * (2 ** (self._initial_sync_retry_count - 1))
+        logger.info(
+            f"[ConfigSync] 初始同步未完成，{delay:.0f}s 后自动重试"
+            f"（第 {self._initial_sync_retry_count}/{_INITIAL_SYNC_RETRY_MAX} 次）"
+        )
+        self._initial_sync_retry_timer.start(int(delay * 1000))
+
+    def _fire_initial_sync_retry(self):
+        if self._state == "disabled" or self._initial_sync_completed:
+            return
+        threading.Thread(target=self._initial_sync, daemon=True).start()
 
     # ── 主线程 Settings 重载 ──────────────────────────────
 
@@ -1476,6 +1569,7 @@ class ConfigSyncService(QObject):
                 logger.warning("[ConfigSync] 无法确认远端配置状态（网络异常），跳过本次同步")
                 self._set_state("error")
                 self.syncDone.emit(False, "网络异常，无法同步")
+                self._schedule_initial_sync_retry()
         finally:
             # 上传路径（远端无配置/初次上传）：短抑制 5s
             # 下载路径（远端有配置）：_do_download 已设 30s 长抑制，保留不动
@@ -1669,21 +1763,50 @@ class ConfigSyncService(QObject):
                 self._records_dirty = True
 
             if config_ok and custom_ok and records_ok and ext_ok:
+                self._upload_retry_failures = 0
                 self._set_state("idle")
                 return True
 
+            # 失败项已回滚脏标记 → 安排延迟重试，防止 dirty 悬空（墓碑滞留本地）
+            self._upload_retry_failures += 1
+            self._schedule_upload_retry()
             self._set_state("error")
             return False
         except httpx.TimeoutException:
             logger.error("[ConfigSync] 上传超时")
+            # 异常路径 try 内的回滚不会执行：恢复脏标记再安排重试
+            if upload_config:
+                self._config_dirty = True
+            if upload_custom:
+                self._custom_dirty = True
+            if upload_records:
+                self._records_dirty = True
+            self._upload_retry_failures += 1
+            self._schedule_upload_retry()
             self._set_state("error")
             return False
         except httpx.ConnectError:
             logger.error("[ConfigSync] 网络连接失败")
+            if upload_config:
+                self._config_dirty = True
+            if upload_custom:
+                self._custom_dirty = True
+            if upload_records:
+                self._records_dirty = True
+            self._upload_retry_failures += 1
+            self._schedule_upload_retry()
             self._set_state("error")
             return False
         except Exception as e:
             logger.error(f"[ConfigSync] 上传异常: {e}")
+            if upload_config:
+                self._config_dirty = True
+            if upload_custom:
+                self._custom_dirty = True
+            if upload_records:
+                self._records_dirty = True
+            self._upload_retry_failures += 1
+            self._schedule_upload_retry()
             self._set_state("error")
             return False
         finally:

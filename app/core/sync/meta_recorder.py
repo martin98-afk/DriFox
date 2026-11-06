@@ -24,6 +24,7 @@ from app.core.sync.lww import (
     entry_ts,
     is_tombstone,
     live,
+    seeded,
     tombstone,
 )
 
@@ -88,6 +89,10 @@ class SyncMetaRecorder:
 
         已存在元数据的条目一律不动，否则每次启动都会把 ts 顶到最新，
         导致其他设备的真实修改永远输给本机「什么都没改但 ts 更新」。
+
+        种出的条目带种子标记（s=true）：本机不知道这条记录的历史，
+        合并裁决时不得凭 observe_clock 抬高的 t 压过另一侧的显式墓碑，
+        否则孤儿元素（数组有、条目表无）会在每次合并中凭空复活。
         """
         with self._lock:
             entries = self._entries()
@@ -97,16 +102,16 @@ class SyncMetaRecorder:
                     for k, v in (value.items() if isinstance(value, dict) else []):
                         epath = f"{path}.{k}"
                         if epath not in entries:
-                            entries[epath] = live(value_hash(v), self._clock.tick(), self.device)
+                            entries[epath] = seeded(value_hash(v), self._clock.tick(), self.device)
                     continue
                 if kind == "list":
                     for elem in value if isinstance(value, list) else []:
                         epath = f"{path}.{element_key(elem)}"
                         if epath not in entries:
-                            entries[epath] = live(value_hash(elem), self._clock.tick(), self.device)
+                            entries[epath] = seeded(value_hash(elem), self._clock.tick(), self.device)
                     continue
                 if path not in entries:
-                    entries[path] = live(value_hash(value), self._clock.tick(), self.device)
+                    entries[path] = seeded(value_hash(value), self._clock.tick(), self.device)
             self.state["entries"] = entries
             self._sync_clock()
 

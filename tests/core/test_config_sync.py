@@ -1771,3 +1771,181 @@ class TestSecretReloadOnSync:
         assert saved["prov_new"]["API_KEY"] == "", "新增密文条目无密码：保持空"
         assert fake._secrets_locked is True, "写回后判定：新增密文解不开应置 locked 提示解锁"
         assert fake._cipher_backup, "locked 期间备份必须保留"
+
+
+# =============================================================================
+# N. dirty 悬空兜底重试 — 墓碑上传丢失修复（2026-11-06）
+# =============================================================================
+
+class TestDirtyRetryScheduling:
+    """上传 dirty 悬空兜底：被抑制/初始同步未完成/网络失败后必须安排重试。
+
+    背景：用户启用插件组件写下的墓碑（LWW 删除标记）在防抖上传被拦截或
+    上传失败后滞留本地，云端旧 live 条目在多设备 LWW 合并时胜出，插件
+    组件「启动后被自动禁用」反复复发。修复要求三类悬空都有重试出口。
+    """
+
+    @pytest.fixture
+    def svc(self, reset_sync_service):
+        svc = reset_sync_service
+        svc._token = "valid_token"
+        svc._owner = "test_user"
+        svc._upload_retry_failures = 0
+        svc._initial_sync_retry_count = 0
+        for attr in ("_upload_retry_timer", "_initial_sync_retry_timer"):
+            t = getattr(svc, attr, None)
+            if t is not None:
+                t.stop()
+            setattr(svc, attr, None)
+        return svc
+
+    def test_suppressed_debounce_schedules_upload_retry(self, svc):
+        """抑制窗口内防抖到期 → 调度上传重试（修复前直接丢弃 dirty）"""
+        svc._state = "idle"
+        svc._suppress_until = time.time() + 60
+        svc._config_dirty = True
+        svc._on_debounce_timeout()
+        assert svc._upload_retry_timer is not None and svc._upload_retry_timer.isActive()
+
+    def test_initial_incomplete_schedules_initial_sync_retry(self, svc):
+        """初始同步未完成时防抖到期 → 调度初始同步重试（修复前丢弃 dirty）"""
+        svc._state = "idle"
+        svc._initial_sync_completed = False
+        svc._suppress_until = 0.0
+        svc._config_dirty = True
+        svc._on_debounce_timeout()
+        assert svc._initial_sync_retry_timer is not None and svc._initial_sync_retry_timer.isActive()
+
+    def test_upload_failure_reschedules_retry(self, svc):
+        """_do_upload 部分失败 → dirty 回滚 + 失败计数递增 + 安排重试"""
+        svc._state = "idle"
+        svc._initial_sync_completed = True
+        svc._config_dirty = True
+        with patch.object(svc, "_sync_token", return_value=True), patch(
+            "app.core.sync.config_sync.httpx.Client"
+        ) as mock_client_cls, patch.object(svc, "_upload_unit", return_value=False):
+            mock_client = MagicMock()
+            mock_client_cls.return_value.__enter__.return_value = mock_client
+            assert svc._do_upload() is False
+        assert svc._config_dirty is True
+        assert svc._upload_retry_failures == 1
+        assert svc._upload_retry_timer is not None and svc._upload_retry_timer.isActive()
+
+    def test_upload_exception_restores_dirty(self, svc):
+        """上传抛超时异常 → dirty 恢复（修复前异常路径 dirty 直接丢失）"""
+        svc._state = "idle"
+        svc._initial_sync_completed = True
+        svc._config_dirty = True
+        svc._custom_dirty = True
+        with patch.object(svc, "_sync_token", return_value=True), patch(
+            "app.core.sync.config_sync.httpx.Client"
+        ) as mock_client_cls, patch.object(svc, "_upload_unit", side_effect=httpx.TimeoutException("t")):
+            mock_client = MagicMock()
+            mock_client_cls.return_value.__enter__.return_value = mock_client
+            assert svc._do_upload() is False
+        assert svc._config_dirty is True
+        assert svc._custom_dirty is True
+        assert svc._upload_retry_failures == 1
+        assert svc._upload_retry_timer is not None and svc._upload_retry_timer.isActive()
+
+    def test_upload_success_resets_failures(self, svc):
+        """上传全部成功 → 失败计数归零（退避复位）"""
+        svc._state = "idle"
+        svc._initial_sync_completed = True
+        svc._config_dirty = True
+        svc._upload_retry_failures = 2
+        with patch.object(svc, "_sync_token", return_value=True), patch(
+            "app.core.sync.config_sync.httpx.Client"
+        ) as mock_client_cls, patch.object(svc, "_upload_unit", return_value=True):
+            mock_client = MagicMock()
+            mock_client_cls.return_value.__enter__.return_value = mock_client
+            assert svc._do_upload() is True
+        assert svc._upload_retry_failures == 0
+
+    def test_fire_upload_retry_without_dirty_resets_failures(self, svc):
+        """重试触发时已无脏标记 → 清零失败计数且不再上传"""
+        svc._state = "idle"
+        svc._config_dirty = False
+        svc._custom_dirty = False
+        svc._records_dirty = False
+        svc._ext_dirty = {}
+        svc._upload_retry_failures = 3
+        svc._fire_upload_retry()
+        assert svc._upload_retry_failures == 0
+
+    def test_fire_upload_retry_disabled_noop(self, svc):
+        """disabled 状态下重试触发 → 空操作不启动上传"""
+        svc._state = "disabled"
+        svc._config_dirty = True
+        svc._fire_upload_retry()
+        assert svc._state == "disabled"
+
+    def test_initial_sync_retry_bounded(self, svc):
+        """初始同步重试计数达上限后不再调度新计时"""
+        from app.core.sync.config_sync import _INITIAL_SYNC_RETRY_MAX
+
+        svc._state = "idle"
+        svc._initial_sync_completed = False
+        svc._initial_sync_retry_count = _INITIAL_SYNC_RETRY_MAX
+        svc._schedule_initial_sync_retry()
+        assert svc._initial_sync_retry_timer is None or not svc._initial_sync_retry_timer.isActive()
+
+    def test_initial_sync_retry_tick_dedup_while_active(self, svc):
+        """重试等待期间重复调度 → 不重启计时器、不重复消耗计数"""
+        svc._state = "idle"
+        svc._initial_sync_completed = False
+        svc._schedule_initial_sync_retry()
+        assert svc._initial_sync_retry_count == 1
+        svc._schedule_initial_sync_retry()
+        assert svc._initial_sync_retry_count == 1  # 等待中不递增
+
+
+# =============================================================================
+# 孤儿种子 vs 墓碑：_apply_config_merge 端到端重放（2026-11-06 污染场景）
+# =============================================================================
+
+class TestOrphanSeedTombstoneDefense:
+    """完整合并链路重放：本地孤儿元素（数组有、条目表无）+ 抬钟 seed，
+    不得压过远端显式墓碑。
+
+    重放 2026-11-02 污染：mading 墓碑 t=1917 已在云端，另一实例以
+    SyncMeta 为空的状态合并，seed_missing 在 observe_clock 之后打
+    t=1949 的种子 live → 修复前种子胜 → system-tools:tools 复活并被
+    上传，全网工具组件被禁。
+    """
+
+    def test_orphan_seed_loses_to_tombstone(self, reset_sync_service, tmp_path):
+        svc = reset_sync_service
+        svc._state = "idle"
+        svc._config_path = tmp_path / "app.config"
+        svc._backup_path = tmp_path / "app.config.pre_bind"
+        # 合并尾部回写记账器：置空避免污染全局 recorder 单例状态
+        svc._meta_recorder = None
+        svc._backup_local_unit = lambda *_a, **_k: None
+        # 合并尾部会 emit 主线程重载：断开防真实 Settings 被测试数据覆盖
+        svc._reloadSettings.disconnect()
+        try:
+            local = {
+                "Plugin": {"DisabledComponents": ["system-tools:tools"]},
+                "System": {"SyncMeta": json.dumps({"version": 1, "clock": 700, "entries": {}})},
+            }
+            svc._config_path.write_text(json.dumps(local), encoding="utf-8")
+            remote_entry_key = 'Plugin.DisabledComponents."system-tools:tools"'
+            remote = {
+                "Plugin": {"DisabledComponents": []},
+                "System": {"SyncMeta": json.dumps({
+                    "version": 1,
+                    "clock": 1948,
+                    "entries": {remote_entry_key: {"h": "elem", "t": 1917, "d": True}},
+                })},
+            }
+            svc._apply_config_merge(json.dumps(remote).encode("utf-8"))
+            merged = json.loads(svc._config_path.read_text(encoding="utf-8"))
+            assert "system-tools:tools" not in merged["Plugin"]["DisabledComponents"], (
+                "孤儿元素不得在合并后复活"
+            )
+            meta = json.loads(merged["System"]["SyncMeta"])
+            entry = meta["entries"].get(remote_entry_key)
+            assert entry is not None and entry.get("d") is True, "墓碑必须保留在条目表"
+        finally:
+            svc._reloadSettings.connect(svc._reload_settings_on_main_thread)
