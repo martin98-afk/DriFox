@@ -108,7 +108,7 @@ class Assistant:
     # 记忆字符上限（UI 可配；<=0 时回落内置默认）
     global_memory_max_chars: int = 4000
     project_memory_max_chars: int = 3000
-    # 感性占比（全局记忆分区配额的 slider，10~70；感性池 = 全局上限 × ratio%）
+    # 感性占比（全局记忆分区配额的滑轨，0~100；感性池 = 全局上限 × ratio%）
     memory_tone_ratio: int = 30
     # 对用户的称呼（{{userName}} 模板变量覆盖）：空 = 跟随系统用户名
     user_addressing: str = ""
@@ -1159,11 +1159,11 @@ class AssistantManager:
         return "# 人工提示\n\n以下是用户人工添加的明确要求，直接遵守即可。\n\n" + "\n".join(pin_lines)
 
     def memory_system_block(self, aid: str, workdir: str = "") -> str:
-        """记忆体系块（BuildSystemPrompt hook 注入系统提示词）。
+        """记忆体系说明书（BuildSystemPrompt hook 注入系统提示词）。
 
-        照抄 WorkBuddy 注入结构：说明书 + <global_memory> + <project_memory> +
-        <daily_logs> 索引 + 超期蒸馏 ACTION。memory_enabled=False 返回空串；
-        记忆超限时截断并附 ACTION 指令逼模型先整理。
+        **只含静态纪律**：记忆内容、分区清单、配额、日志索引全部不进来——
+        它们都会变，一旦进 system prompt，每变一次就把服务端前缀 KV 缓存整段作废。
+        记忆内容走 memory_snapshot_block（SessionStart 注入会话消息，会话内一次性）。
         """
         a = self.get(aid)
         if a is None or not a.memory_enabled:
@@ -1178,14 +1178,30 @@ class AssistantManager:
             if workdir
             else "{项目根}/" + store.PROJECT_DIR_NAME + "/" + store.MEMORY_SUBDIR + "/" + aid
         )
+        # 顺手确保默认分区已落盘（新助手不必等用户打开 UI 才有归类骨架）；
+        # 返回值不含分区内容，纯静态，不影响 system prompt 恒定。
+        try:
+            store.ensure_default_sections(aid_dir)
+        except Exception:
+            pass
+        return prompts.build_memory_system(global_file, proj_dir, self.memory_max_chars(aid))
+
+    def memory_snapshot_block(self, aid: str, workdir: str = "") -> str:
+        """记忆快照（SessionStart hook 注入会话消息，会话内只注入一次）。
+
+        系统提示词必须会话内恒定，记忆内容因此改走消息通道：会话首条带上快照，
+        之后记忆怎么变都不影响 system prompt 与历史前缀，前缀缓存全程命中。
+        会话内新写的内容由 memory_write 的返回值回显，模型当轮即可见。
+        memory_enabled=False 返回空串；超限时截断并附整理指令。
+        """
+        a = self.get(aid)
+        if a is None or not a.memory_enabled:
+            return ""
+        store = self._core_store()
+        aid_dir = self._assistant_dir(aid)
+        global_file = str(store.global_memory_path(aid_dir))
         limits = self.memory_max_chars(aid)
-        # 首次注入即落盘默认分区（新助手不必等用户打开 UI 才有归类骨架）
-        sections = store.ensure_default_sections(aid_dir)
-        ratio = self.memory_tone_ratio(aid)
-        quotas = store.section_quotas(sections, ratio, limits["global"]) if sections else {}
-        parts: list[str] = [
-            prompts.build_memory_system(global_file, proj_dir, limits, sections, quotas, ratio)
-        ]
+        parts: list[str] = []
 
         # 全局记忆
         g_text = (store.read_global_memory(aid_dir) or "").strip()
@@ -1202,8 +1218,6 @@ class AssistantManager:
                 + g_text
                 + "\n</global_memory>"
             )
-            # 分区超配额提示不进 system prompt：它随天平/分区变化而变，
-            # 写进来等于每拖一次天平就废掉整个前缀缓存。改由 memory_read(scope=sections) 按需给。
 
         # 项目记忆
         p_text = (store.read_project_memory(workdir, aid) or "").strip() if workdir else ""
@@ -1257,7 +1271,7 @@ class AssistantManager:
         }
 
     def memory_tone_ratio(self, aid: str = "") -> int:
-        """感性占比（10~70）：全局记忆里分给感性区的百分比。"""
+        """感性占比（0~100）：全局记忆里分给感性区的百分比。"""
         store = self._core_store()
         a = self.get(aid) if aid else None
         raw = getattr(a, "memory_tone_ratio", store.TONE_RATIO_DEFAULT) if a is not None else store.TONE_RATIO_DEFAULT
@@ -1287,6 +1301,46 @@ class AssistantManager:
             return []
         text = store.read_global_memory(self._assistant_dir(aid))
         return store.section_usage(text, self.memory_section_quotas(aid))
+
+    def memory_section_chars(self, aid: str) -> Dict[str, int]:
+        """各区已用字符数（卡片角标用，含未超配额的区）。"""
+        store = self._core_store()
+        if not aid:
+            return {}
+        text = store.read_global_memory(self._assistant_dir(aid))
+        out: Dict[str, int] = {}
+        for b in store.parse_section_blocks(text).get("blocks") or []:
+            out[str(b.get("name") or "")] = len("\n".join(b.get("lines") or []))
+        return out
+
+    def memory_section_entries(self, aid: str, section: str) -> List[Dict[str, Any]]:
+        """某区逐条账目（index 从 1 起）：超限时告诉模型删哪条，避免整篇重写。"""
+        store = self._core_store()
+        if not aid:
+            return []
+        return store.section_entries(store.read_global_memory(self._assistant_dir(aid)), section)
+
+    def delete_memory_entry(self, aid: str, section: str, index: int) -> Dict[str, Any]:
+        """删全局记忆某区的一条（覆盖写前自动快照）。返回 {ok, removed, chars} 或 {ok:False, error, count}。"""
+        store = self._core_store()
+        aid_dir = self._assistant_dir(aid)
+        path = store.global_memory_path(aid_dir)
+        text = store.read_text(path)
+        r = store.delete_section_entry(text, section, index)
+        if not r.get("ok"):
+            return r
+        try:
+            self.snapshot_memory(aid, "global")
+        except Exception as e:
+            logger.debug(f"[assistant_hub] 删除条目前快照失败: {e}")
+        store.write_global_memory(aid_dir, str(r.get("content") or ""))
+        # 不失效 system prompt：记忆内容已不在提示词里（走 SessionStart 快照），
+        # 删条不影响提示词；模型当轮从工具回显就知道删了什么。
+        return {
+            "ok": True,
+            "removed": str(r.get("removed") or ""),
+            "chars": len(str(r.get("content") or "").strip()),
+        }
 
     def memory_paths(self, aid: str, workdir: str = "") -> Dict[str, str]:
         """该助手的记忆路径集合（UI 展示用）。"""
@@ -1351,9 +1405,9 @@ class AssistantManager:
         改名识别：按列表位置对比新旧（UI 编辑只改 name/hint，不重排）。
         删除分区**不**动文件：孤儿标题保留，下次蒸馏重分配（用户决策 2026-10-25）。
 
-        改完只在「分区名或 hint 变了」时失效 system prompt 缓存：
-        system prompt 里只列名字+hint，改名/增删会让模型看到旧清单（必须重建）；
-        只改 detail 或基调则 prompt 完全不变，失效只会白白废掉服务端前缀缓存。
+        改完不失效 system prompt：分区名与配额都不在提示词里（已移入
+        memory_read(scope=sections)），提示词只留一句「先读分区清单」的静态纪律。
+        改名会同步改写 MEMORY.md 标题，但记忆内容走 SessionStart 快照，同样不影响提示词。
         """
         store = self._core_store()
         aid_dir = self._assistant_dir(aid)
@@ -1375,11 +1429,6 @@ class AssistantManager:
                     renamed.append(f"{old_name}→{new_name}")
             if renamed:
                 store.write_global_memory(aid_dir, text)
-        # 改名会重写 MEMORY.md 标题（记忆内容变），与清单变化一样必须重建
-        old_sig = [(str(s.get("name") or ""), str(s.get("hint") or "")) for s in old]
-        new_sig = [(str(s.get("name") or ""), str(s.get("hint") or "")) for s in new]
-        if old_sig != new_sig:
-            self._invalidate_session_prompt_caches()
         return {"ok": True, "count": len(new), "renamed": renamed}
 
     def memory_sections_block(self, aid: str) -> str:

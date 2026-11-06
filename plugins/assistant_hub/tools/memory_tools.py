@@ -36,6 +36,9 @@ _GROUP = "助手记忆"
 # 写并发保护：同 (进程内) 文件锁在 store 层；这里加一层短退避重试兜 Windows 句柄
 _WRITE_RETRY = 3
 
+# 单条记忆的软阈值：超过只提醒不拒写（碎片化条目才好压缩和重定位）
+_ENTRY_HINT_CHARS = 150
+
 # 窗口期桥接缓存（不写 sys.modules：AST 安全网限制；注册在 hooks 文件内完成）
 _bridge_mod: Optional[Any] = None
 _bridge_lock = threading.Lock()
@@ -89,6 +92,32 @@ def _get_manager():
     except Exception:
         return None
 
+
+def _over_quota_hint(mgr, aid: str, scope: str, section: str, over: int, lim: int) -> str:
+    """超限拒绝时的可执行指弱：点名最长的几条 + 给出删条命令。
+
+    模型对整篇字数不敏感，对「删第 3 条」这种具体动作才一次做对；
+    只给「超了 120 字」会引发反复重写整篇。
+    """
+    lines = [f"写入被拒绝：超出 {over} 字（上限 {lim}）。"]
+    if scope == "global" and section:
+        try:
+            entries = mgr.memory_section_entries(aid, section)
+        except Exception:
+            entries = []
+        if entries:
+            longest = sorted(entries, key=lambda e: -int(e.get("chars") or 0))[:3]
+            lines.append(f"「{section}」现有 {len(entries)} 条，最长的几条：")
+            for e in longest:
+                lines.append(f"  #{e['index']}·{e['chars']}字：{e['preview']}")
+            lines.append(
+                "不必重写全文：先腾空间再一次写好就行。\n"
+                "  a) 删一条：memory_write(scope=global, mode=delete, section=<分区>, index=<序号>)\n"
+                "  b) 合并语义重复的两条（合并本身也能省字数），用整体替换写回该区"
+            )
+    if len(lines) == 1:
+        lines.append("先 memory_read 读全文，合并去重、删过时条目后再写。")
+    return "\n".join(lines)
 
 def _paused() -> ToolResult:
     return ToolResult(True, content="记忆功能已暂停。已有内容会保留，但现在不能写入。请在助手中心开启记忆开关。")
@@ -185,6 +214,16 @@ def _read_impl(tool_ctx, **kw) -> ToolResult:
                 lines.append(f"- {name}（{tone}区，配额 {quotas.get(name, 0)}）")
                 if detail:
                     lines.append(f"  {detail}")
+                # 逐条账目：让「超限删哪条」成为可执行动作，而不是让模型去数行
+                try:
+                    entries = mgr.memory_section_entries(aid, name)
+                except Exception:
+                    entries = []
+                if entries:
+                    chips = "；".join(f"#{e['index']}·{e['chars']}字" for e in entries[:12])
+                    if len(entries) > 12:
+                        chips += f"；…共 {len(entries)} 条"
+                    lines.append(f"  现有 {len(entries)} 条：{chips}")
             over = mgr.memory_section_usage(aid)
             if over:
                 lines.append("")
@@ -206,7 +245,9 @@ def _read_impl(tool_ctx, **kw) -> ToolResult:
                     "再用 memory_write(scope=global) 整体写回精简版。）"
                 )
             fp = mgr.memory_fingerprint(aid, "global")
-            return ToolResult(True, content=((text or "（全局记忆为空）") + f"\n(base: {fp})"))
+            used = len(text)
+            budget = f"（上限 {lim}，已用 {used}，剩 {max(0, lim - used)} 字）"
+            return ToolResult(True, content=((text or "（全局记忆为空）") + f"\n{budget}\n(base: {fp})"))
         if scope == "project":
             if not wd:
                 return ToolResult(True, content="当前没有设置工作目录，无法读取项目记忆。")
@@ -397,8 +438,29 @@ def _write_impl(tool_ctx, **kw) -> ToolResult:
             lim = mgr.memory_max_chars(aid)[scope]
             label = "全局" if scope == "global" else "项目"
             mode = str(kw.get("mode") or "replace").strip().lower()
-            if mode not in ("replace", "append"):
-                return ToolResult(False, error="mode 必须是 replace（整体替换）/ append（末尾追加）")
+            if mode not in ("replace", "append", "delete"):
+                return ToolResult(
+                    False,
+                    error="mode 必须是 replace（整体替换）/ append（末尾追加）/ delete（删一条）",
+                )
+            if mode == "delete":
+                del_section = str(kw.get("section") or "").strip()
+                if scope != "global" or not del_section:
+                    return ToolResult(False, error="delete 只支持 scope=global 且必须带 section")
+                del_index = int(kw.get("index") or 0)
+                r = mgr.delete_memory_entry(aid, del_section, del_index)
+                if not r.get("ok"):
+                    return ToolResult(
+                        False,
+                        error=(
+                            f"删除失败：{r.get('error')}（「{del_section}」共 {r.get('count', 0)} 条，index 从 1 起）。"
+                            "先 memory_read(scope=global) 确认序号。"
+                        ),
+                    )
+                return ToolResult(
+                    True,
+                    content=f"已删除「{del_section}」第 {del_index} 条：{r.get('removed')}（现 {r.get('chars')} 字）。",
+                )
             # 全局记忆分区：schema 非空时强制归属（空 = 自由格式，全部跳过）
             sections = mgr.memory_sections(aid) if scope == "global" else []
             section = str(kw.get("section") or "").strip()
@@ -448,23 +510,42 @@ def _write_impl(tool_ctx, **kw) -> ToolResult:
                 if new_total > lim:
                     return ToolResult(
                         False,
-                        error=(
-                            f"追加被拒绝：追加后 {new_total}/{lim} 字符超上限。"
-                            f"先 memory_read(scope={scope}) 读全文，合并去重后用整体替换（mode 缺省）写回精简版。"
+                        error=_over_quota_hint(
+                            mgr, aid, scope, section, new_total - lim, lim
                         ),
                     )
                 r = _retry(lambda: mgr.append_memory(aid, scope, content, workdir=wd, section=section))
                 if not r.get("ok"):
                     return ToolResult(False, error=f"追加失败: {r.get('error')}")
                 where = f"「{section}」分区" if section else ""
-                return ToolResult(True, content=f"已追加到{label}记忆{where}（现 {r.get('chars')} 字）。已有内容不受影响。")
+                note = ""
+                if len(content) > _ENTRY_HINT_CHARS:
+                    note = (
+                        f"\n（提醒：这条 {len(content)} 字偏长，碎片化记忆建议 ≤{_ENTRY_HINT_CHARS} 字，"
+                        "下次可拆成两条）"
+                    )
+                return ToolResult(
+                    True,
+                    content=f"已追加到{label}记忆{where}（现 {r.get('chars')} 字）。已有内容不受影响。{note}",
+                )
             # ── 整体替换：超限预检 → 乐观锁 + 收缩确认 → 锁内快照落盘 ──
             if len(content) > lim:
+                # 按区统计超出量，把「删哪条」说具体（整篇重写对模型是不可控动作）
+                first_sec = ""
+                try:
+                    heavy = [
+                        (n, int(sum(e["chars"] for e in mgr.memory_section_entries(aid, n))))
+                        for n in [str(s.get("name") or "") for s in mgr.memory_sections(aid)]
+                        if n
+                    ]
+                    if heavy:
+                        first_sec = max(heavy, key=lambda x: x[1])[0]
+                except Exception:
+                    first_sec = ""
                 return ToolResult(
                     False,
-                    error=(
-                        f"写入被拒绝：{label}记忆超上限（{len(content)}/{lim} 字符）。"
-                        f"处理原则：先 memory_read(scope={scope}) 读全文，合并去重、删过时条目、压缩表述后再整体写回。"
+                    error=_over_quota_hint(
+                        mgr, aid, scope, first_sec, len(content) - lim, lim
                     ),
                 )
             base = str(kw.get("base") or "").strip()
@@ -663,7 +744,8 @@ _WRITE_SCHEMA = {
             "静态规范禁抄；超上限拒写(默认 3000 字符)。\n"
             "scope=global：全局 MEMORY.md。记一条用 mode=append；整体替换同 project。"
             "准入极严：仅用户显式要求的跨项目规则、蒸馏出的与项目无关经验；超上限拒写(默认 4000 字符)。不存密钥。"
-            "已有分区时 append 必带 section(照抄分区名)，整体替换按 ## 分区名 组织；越界会被拒并返诊断，不确定先 dry_run=true。"
+            "既有分区时 append 必带 section(照抄分区名)，整体替换按 ## 分区名 组织；越界会被拒并返诊断，不确定先 dry_run=true。"
+            "超上限时优先用 mode=delete 删一条腾空间(比整篇重写可控)，再追加；不要为凑字数反复重写全文。"
         ),
         "parameters": {
             "type": "object",
@@ -678,7 +760,11 @@ _WRITE_SCHEMA = {
                 },
                 "mode": {
                     "type": "string",
-                    "description": "scope=global/project：replace(缺省，整体替换)/append(追加一条，高频记一条用这个，不覆盖已有内容)",
+                    "description": "scope=global/project：replace(缺省，整体替换)/append(追加一条，高频记一条用这个)/delete(删一条腾空间，需配 section+index)",
+                },
+                "index": {
+                    "type": "integer",
+                    "description": "mode=delete 时必填：该分区内条目的序号(从 1 起，按 memory_read 的顺序)",
                 },
                 "section": {
                     "type": "string",

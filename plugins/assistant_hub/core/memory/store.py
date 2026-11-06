@@ -49,10 +49,11 @@ TONE_EMOTIONAL = "emotional"
 TONE_DEFAULT = TONE_RATIONAL
 TONES = (TONE_RATIONAL, TONE_EMOTIONAL)
 
-# 感性占比（slider）：范围收在 10~70，两端都是极端——0 退回纯台账机器，
-# 100 则挤掉全部工程经验。默认 30 偏理性：助手先得好用。
-TONE_RATIO_MIN = 10
-TONE_RATIO_MAX = 70
+# 感性占比（滑轨）：0~100 全开。之前收在 10~70 是为了防呆，代价是轨道两端
+# 出现灰区，条长与百分比对不上（用户看到「理性 70%」但蓝条只占三成）。
+# 表达直接比防呆重要：极端值只在标签上提示，不挡拖动。
+TONE_RATIO_MIN = 0
+TONE_RATIO_MAX = 100
 TONE_RATIO_DEFAULT = 30
 
 # 默认分区：理性 2 区（知识）+ 感性 2 区（理解）。上限仍守 4 个，
@@ -451,6 +452,54 @@ def section_block_text(text: str, name: str) -> str:
         body = "\n".join(lines)
         return f"## {target}\n{body}" if body else f"## {target}\n（这个分区还没有内容）"
     return ""
+
+def section_entries(text: str, section: str) -> List[Dict]:
+    """某区的逐条账目：[{index, chars, preview}]，index 从 1 起。
+
+    用于「超限时告诉模型删哪一条」：模型对整篇字数不敏感，对「删第 3 条（180 字）」
+    这类具体动作才有把握一次做对。
+    """
+    target = str(section or "")
+    for b in parse_section_blocks(text or "").get("blocks") or []:
+        if str(b.get("name") or "") != target:
+            continue
+        out: List[Dict] = []
+        for raw in b.get("lines") or []:
+            s = str(raw).strip()
+            if not s.startswith("-"):
+                continue
+            body = s.lstrip("-").strip()
+            out.append({"index": len(out) + 1, "chars": len(body), "preview": body[:24]})
+        return out
+    return []
+
+def delete_section_entry(text: str, section: str, index: int) -> Dict:
+    """删除某区第 index 条（1 起），返回 {ok, content, removed} 或 {ok:False, error, count}。
+
+    只动目标行，不重写整篇：让「腾空间」变成一次可预测的小操作。
+    """
+    target = str(section or "")
+    try:
+        idx = int(index)
+    except (TypeError, ValueError):
+        return {"ok": False, "error": "bad_index", "count": 0}
+    if idx < 1:
+        return {"ok": False, "error": "bad_index", "count": 0}
+    lines = str(text or "").splitlines()
+    in_block = False
+    count = 0
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.startswith("## "):
+            in_block = stripped[3:].strip() == target
+            continue
+        if in_block and stripped.startswith("-"):
+            count += 1
+            if count == idx:
+                removed = stripped
+                del lines[i]
+                return {"ok": True, "content": "\n".join(lines), "removed": removed}
+    return {"ok": False, "error": "out_of_range", "count": count}
 
 
 def parse_section_blocks(text: str) -> Dict:

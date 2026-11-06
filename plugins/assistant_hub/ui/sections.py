@@ -10,7 +10,6 @@ MemorySection（全局/项目/日志）→ ExperienceSection（经验）。
 
 from __future__ import annotations
 
-import math
 from typing import Any, Dict, List, Optional, Tuple
 
 from PyQt5.QtCore import (
@@ -26,16 +25,13 @@ from PyQt5.QtCore import (
     pyqtSignal,
 )
 from PyQt5.QtGui import (
-    QBrush,
     QColor,
     QFont,
     QFontMetrics,
     QIcon,
-    QLinearGradient,
     QPainter,
     QPen,
     QPixmap,
-    QRadialGradient,
 )
 from PyQt5.QtSvg import QSvgRenderer
 from PyQt5.QtWidgets import (
@@ -192,10 +188,14 @@ def _icon_btn(svg: str, size: int) -> "QPushButton":
 
 
 def _edit_btn(size: int) -> "QPushButton":
-    """列表行编辑按钮：铅笔图标。"""
+    """列表行编辑按钮：铅笔图标。
+
+    颜色必须用 hex（TEXT_ACCENT/TEXT_PRIMARY/ERROR）：QSvgRenderer 不认 CSS
+    的 rgba() 函数，写 rgba 会渲染成透明，按钮只剩一个空框（实测踩过）。
+    """
     svg = (
         '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" '
-        f'fill="none" stroke="{Colors.TEXT_SECONDARY}" stroke-width="2" '
+        f'fill="none" stroke="{Colors.TEXT_ACCENT}" stroke-width="2" '
         'stroke-linecap="round" stroke-linejoin="round">'
         '<path d="M12 20h9"/>'
         '<path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4Z"/>'
@@ -382,7 +382,7 @@ class _SectionChip(QFrame):
     H = 104
     INTRO_LINES = 3
 
-    def __init__(self, name: str, intro: str, tone: str = "rational", parent=None):
+    def __init__(self, name: str, intro: str, tone: str = "rational", chars: int = -1, quota: int = 0, parent=None):
         super().__init__(parent)
         self._tone = tone if str(tone) in ("rational", "emotional") else "rational"
         self.setObjectName("sectionChip")
@@ -434,6 +434,20 @@ class _SectionChip(QFrame):
         )
         v.addWidget(self._intro)
         v.addStretch()
+        # 底部字数角标：已用 / 配额，超配额转红（一眼看出该压哪个区）
+        self._usage = QLabel()
+        self._usage.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        if chars >= 0:
+            over = bool(quota) and chars > quota
+            text = f"{chars} / {quota} 字" if quota else f"{chars} 字"
+            self._usage.setText(text)
+            self._usage.setStyleSheet(
+                f"color: {Colors.ERROR if over else Colors.TEXT_MUTED};"
+                f"background: transparent; border: none;"
+                f"{get_font_family_css()} {font_size_css(9)}; {'font-weight:600;' if over else ''}"
+            )
+        self._usage.setVisible(chars >= 0)
+        v.addWidget(self._usage)
         self.setToolTip(f"{intro or name}\n\n点击查看该分区的记忆内容")
         self._apply_style()
 
@@ -515,36 +529,39 @@ class _NewSectionChip(QFrame):
 
 
 class _ToneBalance(QWidget):
-    """理性/感性天平：横梁随占比倾斜，两端圆盘写各自百分比。
+    """感性/理性配比分界滑轨（不是进度条，也不是天平）。
 
-    为什么不用 Slider：进度条形态暗示「一个值从 0 到 100」，
-    这里本质是两个盘子的轻重对比——感性越多右侧下沉，天平形状直接对应语义。
-    数值范围 10~70（两端极端会挤掉另一侧的全部空间）。
+    轨道全长对应 0~100%，**左蓝段=理性，长度就是理性百分比；右橙段=感性**。
+    分界点位置 = 100 - 感性占比，所以「百分比大的那段占得也大」。
+    一眼能看出「可调」靠三件事：把手圆点、下方刻度点、横向拖动光标。
     """
 
     valueChanged = pyqtSignal(int)
 
-    MIN = 10
-    MAX = 70
-    H = 104
-    DROP = 16.0  # 单侧最大垂直落差（px），与宽度无关，保证视觉稳定
+    MIN = 0
+    MAX = 100
+    H = 72
+    PAD = 10
+    TRACK_Y = 40
+    TRACK_H = 8
+    R = 9  # 把手半径
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._ratio = 30
         self._display = 30.0
         self._dragging = False
-        self._press_x = 0.0
-        self._press_ratio = 30
+        self._hover = False
         self.setFixedHeight(self.H)
-        self.setMinimumWidth(260)
-        self.setCursor(Qt.PointingHandCursor)
-        self.setToolTip("拖动调整配比：左盘沉=理性多，右盘沉=感性多（两端百分比即两池占比）")
+        self.setMinimumWidth(240)
+        self.setCursor(Qt.SizeHorCursor)
+        self.setMouseTracking(True)
+        self.setToolTip("拖动调整占比：左段蓝=理性（可复用的知识方法），右段橙=感性（对人的理解）")
         self._anim = QPropertyAnimation(self, b"displayRatio", self)
-        self._anim.setDuration(260)
+        self._anim.setDuration(240)
         self._anim.setEasingCurve(QEasingCurve.OutCubic)
 
-    # 动画用属性（百分比浮点，避免整格跳动）
+    # 动画用属性（百分比浮点，避免整格跳）
     def _get_display(self) -> float:
         return self._display
 
@@ -569,119 +586,131 @@ class _ToneBalance(QWidget):
             self._display = float(v)
             self.update()
 
-    # ── 几何：端点垂直落差固定，水平长度随控件宽度 ──
-    def _half(self) -> float:
-        return min(self.width() * 0.40, 220.0)
+    # ── 几何 ──
+    def _track(self) -> QRectF:
+        return QRectF(
+            self.PAD,
+            self.TRACK_Y - self.TRACK_H / 2.0,
+            max(1.0, self.width() - self.PAD * 2),
+            self.TRACK_H,
+        )
 
-    def _geom(self) -> Tuple[QPointF, QPointF, QPointF]:
-        cx = self.width() / 2.0
-        pivot = QPointF(cx, self.H - 36)
-        mid = (self.MIN + self.MAX) / 2.0
-        t = (self._display - mid) / ((self.MAX - self.MIN) / 2.0)
-        dy = t * self.DROP
-        dx = math.sqrt(max(self._half() ** 2 - dy * dy, 1.0))
-        return QPointF(cx - dx, pivot.y() - dy), QPointF(cx + dx, pivot.y() + dy), pivot
+    def _x_of(self, pct: float) -> float:
+        r = self._track()
+        return r.left() + r.width() * max(0.0, min(100.0, float(pct))) / 100.0
 
-    def _draw_pan(self, p: QPainter, pos: QPointF, color: str, label: str, pct: int) -> None:
-        r = 19.0
-        # 外发光：让两端盘子从深色背景里浮起来
-        glow = QRadialGradient(pos, r * 1.55)
-        c = QColor(color)
-        c.setAlpha(80)
-        glow.setColorAt(0.0, c)
-        c2 = QColor(color)
-        c2.setAlpha(0)
-        glow.setColorAt(1.0, c2)
-        p.setPen(Qt.NoPen)
-        p.setBrush(QBrush(glow))
-        p.drawEllipse(pos, r * 1.55, r * 1.55)
-
-        body = QColor(color)
-        body.setAlpha(225)
-        p.setBrush(body)
-        p.setPen(QPen(QColor(color), 1.5))
-        p.drawEllipse(pos, r, r)
-
-        text_color = QColor(readable_text_on(color, "#ffffff"))
-        p.setPen(text_color)
-        f = QFont(self.font())
-        f.setPixelSize(scale_font_size(8))
-        f.setBold(False)
-        p.setFont(f)
-        p.drawText(QRectF(pos.x() - r, pos.y() - 17, r * 2, 13), Qt.AlignCenter, label)
-        f.setPixelSize(scale_font_size(11))
-        f.setBold(True)
-        p.setFont(f)
-        p.drawText(QRectF(pos.x() - r, pos.y() - 4, r * 2, 17), Qt.AlignCenter, f"{pct}%")
+    def _pct_at(self, x: float) -> int:
+        r = self._track()
+        if r.width() <= 0:
+            return self._ratio
+        # 轨道位置 → 感性占比：分界点越靠左，感性越多
+        pos = (x - r.left()) / r.width() * 100.0
+        return int(round(max(self.MIN, min(self.MAX, 100.0 - pos))))
 
     def paintEvent(self, e) -> None:  # noqa: N802
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
-        left, right, pivot = self._geom()
-        c_rat = Colors.INFO
-        c_emo = Colors.WARNING
+        r = self._track()
+        c_rat = QColor(Colors.INFO)
+        c_emo = QColor(Colors.WARNING)
 
-        # 支架：两条斜腿 + 底座横线
-        pen = QPen(QColor(Colors.BORDER), 2)
-        pen.setCapStyle(Qt.RoundCap)
-        p.setPen(pen)
-        base_y = self.H - 8
-        p.drawLine(pivot, QPointF(pivot.x() - 13, base_y))
-        p.drawLine(pivot, QPointF(pivot.x() + 13, base_y))
-        p.drawLine(QPointF(pivot.x() - 22, base_y), QPointF(pivot.x() + 22, base_y))
+        # 底轨
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(Colors.BORDER))
+        p.drawRoundedRect(r, self.TRACK_H / 2.0, self.TRACK_H / 2.0)
 
-        # 横梁：蓝→橙渐变，一眼看出两端代表什么
-        grad = QLinearGradient(left, right)
-        grad.setColorAt(0.0, QColor(c_rat))
-        grad.setColorAt(1.0, QColor(c_emo))
-        beam = QPen(QBrush(grad), 3.0)
-        beam.setCapStyle(Qt.RoundCap)
-        p.setPen(beam)
-        p.drawLine(left, right)
+        # 分界点 = 理性占比（左段长度 = 理性百分比，大的那段自然更长）
+        split = self._x_of(100.0 - self._display)
 
-        # 支点：深色圆盘压住梁，露出一点亮边
-        p.setPen(QPen(QColor(Colors.TEXT_MUTED), 1.5))
-        p.setBrush(QColor(Colors.CONTENT_BG))
-        p.drawEllipse(pivot, 5, 5)
+        # 左段（理性）/ 右段（感性）：两段颜色即两端语义，不必看标签
+        left_w = split - r.left()
+        if left_w > 0.5:
+            p.setBrush(c_rat)
+            p.drawRoundedRect(QRectF(r.left(), r.top(), left_w, r.height()), 4, 4)
+        right_w = r.right() - split
+        if right_w > 0.5:
+            p.setBrush(c_emo)
+            p.drawRoundedRect(QRectF(split, r.top(), right_w, r.height()), 4, 4)
 
-        self._draw_pan(p, left, c_rat, "理性", 100 - self._ratio)
-        self._draw_pan(p, right, c_emo, "感性", self._ratio)
+        # 可选范围外压暗：范围 0~100 后不再需要，整条轨道都可拖
+
+        # 刻度点（每 10%），对应当前配比的那个加重
+        for pct in range(0, 101, 10):
+            x = self._x_of(pct)
+            active = abs((100 - pct) - self._ratio) < 5
+            dot = QColor(Colors.TEXT_MUTED)
+            dot.setAlpha(220 if active else 70)
+            p.setBrush(dot)
+            rad = 2.2 if active else 1.4
+            p.drawEllipse(QPointF(x, self.TRACK_Y + 13), rad, rad)
+
+        # 把手：白环 + 彩色芯，hover/拖动时放大
+        rad = self.R + (2 if (self._hover or self._dragging) else 0)
+        pos = QPointF(split, self.TRACK_Y)
+        near = c_emo if self._display >= 50 else c_rat
+        p.setPen(QPen(QColor(Colors.CONTENT_BG), 2.0))
+        p.setBrush(QColor("#ffffff"))
+        p.drawEllipse(pos, rad, rad)
+        p.setPen(Qt.NoPen)
+        p.setBrush(near)
+        p.drawEllipse(pos, max(1.0, rad - 4.0), max(1.0, rad - 4.0))
+
+        # 两端标签：直接写各自百分比
+        f = QFont(self.font())
+        f.setPixelSize(scale_font_size(9))
+        f.setBold(True)
+        p.setFont(f)
+        p.setPen(c_rat)
+        p.drawText(
+            QRectF(0, 8, self.width() / 2.0, 16),
+            Qt.AlignLeft | Qt.AlignVCenter,
+            f"理性 {100 - self._ratio}%",
+        )
+        p.setPen(c_emo)
+        p.drawText(
+            QRectF(self.width() / 2.0, 8, self.width() / 2.0, 16),
+            Qt.AlignRight | Qt.AlignVCenter,
+            f"感性 {self._ratio}%",
+        )
         p.end()
 
-    # ── 交互：点哪跳哪 + 拖动跟手（热区限在天平附近，点页面空白不会跳变）──
-    def _hit(self, pos) -> bool:
-        _l, _r, pivot = self._geom()
-        if abs(pos.y() - pivot.y()) > 44:
-            return False
-        return abs(pos.x() - pivot.x()) <= self._half() + 26
-
-    def _ratio_from_x(self, x: float) -> int:
-        cx = self.width() / 2.0
-        half = max(self._half(), 1.0)
-        t = max(-1.0, min(1.0, (x - cx) / half))
-        mid = (self.MIN + self.MAX) / 2.0
-        return int(round(mid + t * (self.MAX - self.MIN) / 2.0))
+    # ── 交互：点哪跳哪 + 拖动跟手 ──
+    def _in_hit(self, pos) -> bool:
+        return abs(pos.y() - self.TRACK_Y) <= 26
 
     def mousePressEvent(self, e) -> None:  # noqa: N802
-        if e.button() == Qt.LeftButton and self._hit(e.pos()):
+        if e.button() == Qt.LeftButton and self._in_hit(e.pos()):
             self._dragging = True
-            v = self._ratio_from_x(e.pos().x())
+            v = self._pct_at(e.pos().x())
             if v != self._ratio:
                 self.set_ratio(v, animate=False)
                 self.valueChanged.emit(v)
+            self.update()
         super().mousePressEvent(e)
 
     def mouseMoveEvent(self, e) -> None:  # noqa: N802
         if self._dragging:
-            v = self._ratio_from_x(e.pos().x())
+            v = self._pct_at(e.pos().x())
             if v != self._ratio:
                 self.set_ratio(v, animate=False)
                 self.valueChanged.emit(v)
+        else:
+            hover = self._in_hit(e.pos())
+            if hover != self._hover:
+                self._hover = hover
+                self.update()
         super().mouseMoveEvent(e)
+
+    def leaveEvent(self, e) -> None:  # noqa: N802
+        self._hover = False
+        self.update()
+        super().leaveEvent(e)
 
     def mouseReleaseEvent(self, e) -> None:  # noqa: N802
         self._dragging = False
+        self.update()
         super().mouseReleaseEvent(e)
+
 
 class _MetaBar(QLabel):
     """记忆元信息：单行灰字摘要，点击可调上限。
@@ -1624,7 +1653,7 @@ class MemorySection(_Section):
     dismissDriftRequested = pyqtSignal(str)
     sectionsChanged = pyqtSignal(list)
     seedSectionsRequested = pyqtSignal()
-    # 感性占比（全局记忆分区配额的比例，10~70）
+    # 感性占比（全局记忆分区配额的比例，0~100）
     toneRatioChanged = pyqtSignal(int)
     # 整理记忆：向对话输入整理提示词（模型按当前分区与配额重排）
     organizeRequested = pyqtSignal()
@@ -1812,11 +1841,17 @@ class MemorySection(_Section):
         emo = sum(int(v) for k, v in (quotas or {}).items() if tones.get(k) == "emotional")
         self._sec_head.set_desc(f"{len(self._sections)} 个 · 理性 {rat} / 感性 {emo}")
 
-    def set_sections(self, sections: List[Dict[str, str]]) -> None:
+    def set_sections(
+        self,
+        sections: List[Dict[str, str]],
+        usage: Optional[Dict[str, int]] = None,
+        quotas: Optional[Dict[str, int]] = None,
+    ) -> None:
         """重建分区卡片流。空列表 → 显示「未定义分区」提示（用户手动删光时才出现）。
 
         卡片介绍用 detail（完整归类说明）：这段文字就是蒸馏时指导模型关注什么的内容，
         不是给人看的短标签。短 hint 仅作卡片无 detail 时的兜底。
+        usage=各区已用字符、quotas=各区配额；两者都给时卡片底部显示「已用 / 配额」。
         """
         self._sections = [dict(s) for s in (sections or [])]
         while self._chips_row.count():
@@ -1834,7 +1869,9 @@ class MemorySection(_Section):
         for idx, sec in enumerate(self._sections):
             name = str(sec.get("name") or "")
             intro = str(sec.get("detail") or sec.get("hint") or "")
-            chip = _SectionChip(name, intro, str(sec.get("tone") or "rational"))
+            chars = int((usage or {}).get(name, -1))
+            quota = int((quotas or {}).get(name, 0))
+            chip = _SectionChip(name, intro, str(sec.get("tone") or "rational"), chars, quota)
             # 点卡片看内容，右上角铅笔改分区定义（编辑与查看分开，避免误触改配置）
             chip.clicked.connect(lambda n=name: self.viewSection.emit(n))
             chip.editRequested.connect(lambda i=idx: self._edit_section(i))

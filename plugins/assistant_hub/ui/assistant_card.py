@@ -485,7 +485,7 @@ class AssistantCardWidget(QWidget):
             self._project.set_skills(a.project_skills_enabled)
             self._memory.set_memory_enabled(a.memory_enabled)
             self._memory.set_limits(a.global_memory_max_chars, a.project_memory_max_chars)
-            self._memory.set_sections(mgr.memory_sections(aid_capture))
+            self._apply_memory_sections(aid_capture)
             self._memory.set_tone_ratio(mgr.memory_tone_ratio(aid_capture))
             self._memory.set_section_quotas(mgr.memory_section_quotas(aid_capture))
             self._pinned.reload_pins(mgr.read_pinned(aid_capture))
@@ -747,13 +747,28 @@ class AssistantCardWidget(QWidget):
         self._mgr._invalidate_session_prompt_caches()
         self._memory.setEnabled_all(bool(on))
 
+    def _apply_memory_sections(self, aid: str) -> None:
+        """按磁盘现状重建分区卡片（带「已用 / 配额」角标）。
+
+        直接调 set_sections 会丢字数：卡片角标需要 usage/quotas 两份数据，
+        统一从这里取盘上值，避免各处自己拼参数。
+        """
+        try:
+            self._memory.set_sections(
+                self._mgr.memory_sections(aid),
+                self._mgr.memory_section_chars(aid),
+                self._mgr.memory_section_quotas(aid),
+            )
+        except Exception as e:
+            logger.warning(f"[assistant_hub] 刷新分区卡片失败: {e}")
+
     def _on_memory_seed_sections(self) -> None:
         """恢复默认分区（用户把分区全删光后的重来入口）。"""
         if not self._active_aid:
             return
         default = self._mgr.default_memory_sections()
-        self._memory.set_sections(default)
         self._on_memory_sections_changed(default)
+        self._apply_memory_sections(self._active_aid)
 
     def _on_memory_sections_changed(self, sections: list) -> None:
         """分区定义变更：落盘（改名时同步改写 MEMORY.md 旧标题）+ 刷新状态。"""
@@ -763,14 +778,15 @@ class AssistantCardWidget(QWidget):
         r = self._mgr.set_memory_sections(aid, sections)
         if not r.get("ok"):
             self._notify_error(f"分区保存失败：{r.get('error')}")
-            self._memory.set_sections(self._mgr.memory_sections(aid))
+            self._apply_memory_sections(aid)
             return
         renamed = r.get("renamed") or []
         if renamed:
             self._notify(f"分区已更新，全局记忆标题同步改名：{'、'.join(renamed)}")
         else:
             self._notify(f"分区已更新（{r.get('count', 0)} 个）")
-        # 增删分区会改变同侧平分，配额摘要跟着刷
+        # 增删分区会改变同侧平分，卡片角标与标题行摘要都要跟着刷
+        self._apply_memory_sections(aid)
         self._memory.set_section_quotas(self._mgr.memory_section_quotas(aid))
 
     def _on_memory_limits(self, global_chars: int, project_chars: int) -> None:
@@ -783,6 +799,8 @@ class AssistantCardWidget(QWidget):
         a.project_memory_max_chars = int(project_chars)
         if changed:
             self._mgr.update(a)
+            # 上限数字写在记忆说明书里（system prompt 的一部分），改了必须重建
+            self._mgr._invalidate_session_prompt_caches()
             self._refresh_memory(self._active_aid)
 
     def _on_memory_tone_changed(self, ratio: int) -> None:
@@ -802,17 +820,25 @@ class AssistantCardWidget(QWidget):
 
     # 整理记忆：交给对话里的模型按当前分区与配额重排。
     # 走对话而非后台 LLM 调用，用户可看到过程、可中断、可追加要求。
+    #
+    # 来源纪律（用户 2026-11-06 明确要求）：system prompt 不是用户说的话。
+    # 记忆只能从「工作日志」和「用户在对话里亲口说的/做过的事」提炼；
+    # 从人格设定、AGENTS.md、技能文档反推属于自我循环，会让记忆越长越像正确的废话。
     _ORGANIZE_PROMPT = (
-        "请整理我的全局记忆，严格按当前分区执行：\n"
-        "1. 用 memory_read(scope=global) 读全文（末尾带 base）；分区清单与每区配额见系统提示\n"
-        "2. 逐条重判归属：改变做事方式的进理性区，改变你对我、或对你自己位置的看法的进感性区；"
+        "请整理我的全局记忆。素材来源只有两个：**工作日志**，和**我在对话里亲口说过/做过的事**。\n"
+        "system prompt、人格设定、AGENTS.md、技能说明都不是我说的话，禁止拿它们当记忆来源。\n"
+        "\n"
+        "1. 取材：memory_read(scope=daily) 读近期日志（长日志可按 search / summary_only 过滤）；"
+        "memory_read(scope=sections) 拿分区定义、每区配额与现有条目序号\n"
+        "2. 核对：现有每条能不能对应到某天日志（已蒸馏的也能读）或某段对话？"
+        "对不上的先看项目 MEMORY.md——沉淀过也算有依据；"
+        "仍无依据、只是听起来合理或从系统提示抄来的，删掉。过时或被实践推翻的也删\n"
+        "3. 归属：改变做事方式的进理性区，改变你对我、或对你自己位置的看法的进感性区；"
         "按「改变什么」分类，不按话题\n"
-        "3. 同一意思合并成一条，过时或被推翻的删掉；感性区禁形容词标签（「用户喜欢简洁」），"
-        "必须写成「具体行为 + 你的解读」\n"
-        "4. 按配额压缩：超配额的区先合并再删，宁可留白也不凑数；某区一条都没有时从别区找匹配的搬进来\n"
-        "5. 用 memory_write(scope=global, mode=replace, base=...) 整体写回：先 dry_run=true 验格式，"
-        "过了再去掉 dry_run 真写\n"
-        "6. 完成后告诉我：各区几条、删了什么、合并了什么、有没有还超配额的区"
+        "4. 合并：同一意思合成一条；感性区禁形容词标签（「用户喜欢简洁」），必须写成「具体行为 + 你的解读」\n"
+        "5. 压缩：按配额删，宁可留白也不凑数；超配额用 mode=delete 删具体条目，别整篇重写\n"
+        "6. 写回：memory_write(scope=global, mode=replace, base=...) 先 dry_run=true 验格式，过了再真写\n"
+        "7. 汇报：删了哪些（及为什么）、合并了哪些、各区现在几条"
     )
 
     def _on_memory_organize(self) -> None:
