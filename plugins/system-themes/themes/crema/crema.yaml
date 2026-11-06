@@ -13,17 +13,6 @@ background:
     image: :/icons/fox_bg.png
     opacity: 0.04
     enabled: true
-backgrounds:
-  overlay:
-    # 素材出处：HanaAgent (liliMozi/openhanako) LeavesOverlay，Apache-2.0
-    # 黑白树影、正放+倒放无缝循环；multiply 下白色透明、树影留底
-    video: leaves-overlay.mp4
-    opacity: 0.28
-    brightness_boost: rgba(255, 253, 247, 0.12)
-    # 竖版素材树影集中在画面顶部，横窗 cover 裁剪必须对齐顶部，
-    # 居中会只显示原图中段空白区（实测 2026-11-06）
-    position: top
-    enabled: true
 colors:
   card_bg: rgba(254, 249, 238, 238)
   card_bg_solid: rgba(254, 249, 238, 252)
