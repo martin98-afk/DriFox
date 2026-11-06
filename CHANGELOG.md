@@ -1,6 +1,50 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
+## [v0.6.15-beta] - 2026-11-06
+
+自 v0.6.14 以来的变更 | 提交数：34 · 文件变更：107 · +5593/-583 | 贡献者：dingma, drifox-bot, mading, martin98-afk
+
+### ✨ 新功能 (New Features)
+- **模型选择与推理强度** (`173cd32b` · `34edae26`): 模型选择逻辑优先使用 config_id；推理强度值归一化处理，撤销功能增强并精确匹配会话。
+- **插件市场诊断与 tarball 分发** (`4ba818fe` · `3c9bbd02`): 市场新增插件诊断与详情视图；插件安装器与市场管理器支持 tarball 包。
+- **工作树切换工具** (`c9895c55` · `5e2a048f`): worktree 工具支持切换工作树并自动变更目录；死 workdir 自动恢复到主仓库根并增强路径检测。
+- **代理配置增强** (`9f8958b2`): 支持系统代理自动检测，相关 UI 组件同步更新。
+- **插件 watcher 宽限期** (`cfe277a9`): 插件 watcher 抑制宽限期防止过早复活。
+- **配置卡重放** (`d42be028`): 插件变更广播前重放 pending 配置卡。
+- **ScrollBar 事件守卫** (`ce35696d`): ScrollBar 事件类型守卫，防止事件混淆导致崩溃。
+- **归档后项目卡展开** (`4b32b48e`): 会话归档后项目卡保持展开，支持连续用户操作。
+- **数据库测试** (`cc7c91e1` · `67a95151`): 索引创建/删除前缀约束测试；upsert 与 DDL 关键字不误判为表名。
+
+### 🐛 问题修复 (Bug Fixes)
+- **撤销错轮截断** (`f2265783`): 撤销目标改按 message_index 定位，杜绝错误轮次截断。
+- **sip 已析构 wrapper 硬拒** (`7cf435e2`): ToolRegistry 监听者引用硬拒 sip 已析构对象，窗口关闭时注销。
+- **quick-win 批量修复** (`00c28265`): BOM utf-8-sig、watcher deps 忽略、webengine locales 保留、rgba alpha=180，附回归测试。
+- **SubAgentTaskStore 零行更新告警** (`044b1161`): update_status 零行命中时告警（任务缺失或并发清除）。
+- **subprocess.run 编码** (`5c35ce08`): 显式指定编码，修复 Windows 下 UTF-8 处理错误。
+- **扫描签名对齐** (`d50d58c8`): initialize 扫描签名与 rescan 弱签名对齐（mtime 排除），偿还过期测试 spy lambda。
+- **stdio 命令跨平台回落** (`086e275d`): 修复 mac/linux 上 command=py 启动失败。
+- **市场包名归一** (`019bbbb0`): 依赖检查包名小写归一，调整市场 URL 拉取顺序。
+- **worktree switch 带 session_id** (`0f0010b8`): worktree 切换请求确保携带 session_id。
+- **测试断言修正** (`5b554769`): test_show_card_keeps_search_query 可见性断言修正。
+
+### ♻️ 代码重构 (Refactoring)
+- **调试日志清理** (`5616ad00`): 移除卡管理与 UI 插件注册表的临时调试日志与注释。
+
+### ⚡ 性能优化 (Performance)
+- **MCP token 常驻 worker** (`74528864`): 每调用一线程改为持久类级 worker（single-flight 队列、weakref job、sip 硬校验）。
+- **webengine 孤儿清理提效** (`d9b5960b`): psutil 全表枚举改 tasklist 子进程，同步修正过期 qwebengine 匹配模式。
+- **LSP import 预热** (`984946d2`): 60ms 预热 LSP import 链，N17 import lock 523ms 拆为两个 <500ms 段。
+- **插件重载延迟** (`fbfada36`): 合并插件重载延迟至 8s（避开启动忙窗口），12s 兜底与 8.5s watcher 抑制延长。
+
+### 🔄 其他变更 (Other Changes)
+- **locales 全量删除** (`38191707`): build.py 翻译回全量删除（-17.4MB）。
+- **MCP 门禁口径测试** (`222348ed`): 锁定门禁指纹与卡片 key 同口径（含 stdio 命令回落）。
+
+### 🔧 其他 (Chores & Build)
+- **市场自动再生成** (`448354cc` · `15fa3f1f`): plugin.json 变更自动再生成 [skip ci]。
+- **工作树 merge 冒烟测试** (`9b9cbe61` · `1eb18ffe`): 临时验证后撤销（净零）。
+
 ## [v0.6.14] - 2026-11-03 (重新发布 #3)
 
 自 v0.6.14-beta 以来的变更 | 提交数：19 · 文件变更：81 · +3293/-215 | 贡献者：dingma, mading
