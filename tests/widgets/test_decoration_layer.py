@@ -174,3 +174,93 @@ class TestDecorationScaling:
         label = deco._items[0]["label"]
         assert label.width() == 400
         assert label.x() == 0
+
+
+class TestDecorationScrollAnchor:
+    """scene_* 锚点必须相对滚动视口固定，而不是相对滚动的 chat_container
+
+    历史实现直接对 chat_container（QScrollArea 的内容 widget）定位：
+    - 消息越多 chat_container 越高，scene_bottom 的 y 跑到几千像素外
+    - 滚动时 chat_container 相对 host 的位置变化，装饰件跟着上下移动
+    用户侧表现：「装饰层老是乱跳」+「人物跑出可视区」。
+    """
+
+    @pytest.fixture()
+    def scroll_host(self, qapp, tmp_path):
+        from PyQt5.QtGui import QImage
+        from PyQt5.QtWidgets import QScrollArea, QWidget
+
+        host = QWidget()
+        host.resize(1000, 800)
+
+        area = QScrollArea(host)
+        area.setGeometry(20, 20, 600, 400)
+        area.setWidgetResizable(True)
+        content = QWidget()
+        content.resize(600, 5000)  # 内容远高于视口，模拟长对话
+        area.setWidget(content)
+        host.show()
+        from PyQt5.QtWidgets import QApplication
+
+        QApplication.processEvents()  # 让 QScrollArea 完成布局，viewport 才有真实尺寸
+        host.chat_scroll_area = area
+        host.chat_container = content
+        host._input_card = QWidget(host)
+        host._input_card.setGeometry(20, 500, 600, 120)
+
+        png = tmp_path / "s.png"
+        QImage(200, 100, QImage.Format_ARGB32).save(str(png))
+
+        deco = DecorationLayer(host, ref_resolver=lambda attr: getattr(host, attr, None))
+        host._deco = deco
+        host._png = str(png)
+        yield host
+        host.deleteLater()
+        deco.deleteLater()
+
+    def test_scene_bottom_clamps_to_viewport_not_content(self, scroll_host):
+        """scene_bottom 落在视口底部附近，而不是 5000px 内容底部"""
+        deco = scroll_host._deco
+        deco.apply_config(
+            [{"id": "s", "image": scroll_host._png, "anchor": "scene_bottom"}],
+            image_resolver=lambda img: scroll_host._png,
+        )
+        label = deco._items[0]["label"]
+        viewport_h = scroll_host.chat_scroll_area.viewport().height()
+        assert label.y() < 20 + viewport_h + 100
+        assert label.y() > 0
+
+    def test_scene_top_uses_viewport_top(self, scroll_host):
+        """scene_top 贴视口顶部（允许 1px 边框误差），不受内容偏移影响"""
+        deco = scroll_host._deco
+        deco.apply_config(
+            [{"id": "s", "image": scroll_host._png, "anchor": "scene_top"}],
+            image_resolver=lambda img: scroll_host._png,
+        )
+        label = deco._items[0]["label"]
+        assert abs(label.y() - 20) <= 2
+
+    def test_scroll_does_not_move_decoration(self, scroll_host):
+        """滚动后装饰件位置不变（相对视口固定）"""
+        deco = scroll_host._deco
+        deco.apply_config(
+            [{"id": "s", "image": scroll_host._png, "anchor": "scene_bottom"}],
+            image_resolver=lambda img: scroll_host._png,
+        )
+        label = deco._items[0]["label"]
+        before = label.geometry()
+        scroll_host.chat_scroll_area.verticalScrollBar().setValue(1200)
+        deco.sync_now()
+        assert label.geometry() == before
+
+    def test_scene_anchor_sizes_to_viewport(self, scroll_host):
+        """anchor=scene 撑满视口，而不是撑满 5000px 高内容"""
+        deco = scroll_host._deco
+        deco.apply_config(
+            [{"id": "s", "image": scroll_host._png, "anchor": "scene"}],
+            image_resolver=lambda img: scroll_host._png,
+        )
+        label = deco._items[0]["label"]
+        vp = scroll_host.chat_scroll_area.viewport()
+        assert label.height() == vp.height()
+        assert label.width() == vp.width()

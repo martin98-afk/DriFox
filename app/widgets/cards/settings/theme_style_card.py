@@ -137,15 +137,28 @@ _load_queue: list = []
 
 
 def _resolve_theme_image_source(entry: dict) -> Optional[str]:
-    """解析主题背景图源：Qt 资源路径直接用，相对路径按主题目录解析"""
+    """解析主题背景图源：Qt 资源路径直接用，相对路径按主题目录解析
+
+    ⚠️ 不能用 os.path.basename 削掉目录层级：主题常用 `../assets/x.jpg`
+    或 `../../assets/x.jpg` 跨目录引用素材（多主题共享一份图），
+    basename 后只剩文件名，再到主题目录里找必然 miss，表现为
+    主题卡预览图空白（codex 2026-11-07 实测：cyberpunk-2077-somi）。
+    这里必须按完整相对路径拼接并规范化。
+    """
     spec = entry.get("image")
     if not spec:
         return None
     spec_str = str(spec)
-    if spec_str.startswith(":/"):
+    if spec_str.startswith(":/") or spec_str.startswith("qrc:"):
         return spec_str
-    path = theme_manager.get_theme_resource(entry.get("id", ""), os.path.basename(spec_str))
-    return None if path is None else str(path)
+    theme_id = entry.get("id", "")
+    theme_dir = theme_manager.get_theme_dir(theme_id)
+    if not theme_dir:
+        return None
+    if os.path.isabs(spec_str):
+        return spec_str if os.path.exists(spec_str) else None
+    candidate = os.path.normpath(os.path.join(str(theme_dir), spec_str))
+    return candidate if os.path.exists(candidate) else None
 
 
 def _request_theme_image(entry: dict, on_ready) -> None:
@@ -183,8 +196,13 @@ def _load_next_theme_image() -> None:
 
 
 def _first_background(backgrounds: dict) -> dict:
-    """取第一个「启用且有图」的背景区域（window → scene → chat_area → sidebar）"""
-    for key in ("window", "scene", "chat_area", "sidebar"):
+    """取第一个「启用且有图」的背景区域
+
+    顺序有意让 scene 优先于 window：window 常被主题用作极低不透明度的
+    装饰底纹（例如 `:/icons/fox_bg.png` + opacity 0.03），拿它当主题卡
+    预览会得到一张近乎空白的缩略图，而 scene 才是主题真正的视觉主张。
+    """
+    for key in ("scene", "window", "chat_area", "sidebar"):
         area = backgrounds.get(key) or {}
         if area.get("image") and area.get("enabled", True):
             return area

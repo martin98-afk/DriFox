@@ -138,6 +138,17 @@ class ChatAreaModule(UIModule):
         # [P1 步骤6] chat_scroll_area 就绪后接 rangeChanged 事件驱动贴底
         host._wire_scroll_range_changed()
 
+        # 视口尺寸/滚动变化 → 重算装饰件
+        # 装饰件现在按滚动区 viewport 定位（不随内容高度跳动），但视口本身的
+        # 尺寸变化（窗口缩放、侧栏开合、上下卡片显隐）不会触发 chat_container
+        # 的 Resize，必须显式订阅，否则装饰件会停在旧位置。
+        try:
+            _vp = host.chat_scroll_area.viewport()
+            _vp.installEventFilter(host._decoration_layer)
+            host._decoration_layer.observe_widget(_vp)
+        except Exception:
+            pass
+
         # 初始加载（延迟到首帧后，避免阻塞 setup_ui 关键路径）
         QTimer.singleShot(0, host._apply_decorations)
 
