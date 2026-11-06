@@ -65,6 +65,18 @@ def test_apply_config_none_stops_and_clears(layer):
     assert layer._boost is None
 
 
+def test_black_frame_does_not_blacken(layer):
+    """黑帧 + 白补偿底 → 期望 184（=255×0.72），纯黑帧不得把底涂黑"""
+    layer._boost = QColor(255, 255, 255)
+    frame = QImage(64, 64, QImage.Format_RGB32)
+    frame.fill(QColor(0, 0, 0))
+    layer._surface.frame = frame
+    layer._opacity = 0.28
+    pix = layer.grab()
+    c = QColor(pix.toImage().pixel(32, 32))
+    assert abs(c.red() - 184) <= 2
+
+
 def test_loop_replays_on_end_of_media(layer):
     plays = []
     layer._player.play = lambda: plays.append(1)

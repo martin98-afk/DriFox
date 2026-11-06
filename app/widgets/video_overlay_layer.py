@@ -88,6 +88,8 @@ class VideoOverlayLayer(QWidget):
         self._player.mediaStatusChanged.connect(self._on_status)
         self._opacity = 0.28
         self._boost: Optional[QColor] = None
+        # 预混合缓冲：把透明度烘焙进帧（见 _bake_opacity），复用避免每帧分配
+        self._blend_buf: Optional[QImage] = None
 
     # ── 配置 ─────────────────────────────────────────
 
@@ -133,13 +135,38 @@ class VideoOverlayLayer(QWidget):
             if self._boost is not None:
                 p.fillRect(self.rect(), self._boost)
             if frame is not None and not frame.isNull():
+                processed = self._bake_opacity(frame)
+                # 全强度 multiply（不 setOpacity）：raster 引擎对
+                # Multiply+opacity 组合会忽略透明度（实测黑屏），透明度已在
+                # _bake_opacity 里烘进帧，此处数学与 HanaAgent 公式精确等价
                 p.save()
                 p.setCompositionMode(QPainter.CompositionMode_Multiply)
-                p.setOpacity(self._opacity)
-                p.drawImage(self._cover_rect(frame.size(), self.rect()), frame)
+                p.drawImage(self._cover_rect(processed.size(), self.rect()), processed)
                 p.restore()
         finally:
             p.end()
+
+    def _bake_opacity(self, frame: QImage) -> QImage:
+        """把覆盖层透明度烘进帧：v' = 255×(1-opacity) + v×opacity
+
+        与白色预混合后全强度 multiply：dst×v'/255
+        = dst×[(1-opacity) + opacity×v/255]
+        = HanaAgent 的 SourceOver(multiply(src), opacity) 期望公式。
+        """
+        buf = self._blend_buf
+        if buf is None or buf.size() != frame.size() or buf.format() != QImage.Format_RGB32:
+            buf = QImage(frame.size(), QImage.Format_RGB32)
+            self._blend_buf = buf
+        pt = QPainter(buf)
+        try:
+            pt.setCompositionMode(QPainter.CompositionMode_Source)
+            pt.fillRect(buf.rect(), QColor(255, 255, 255))
+            pt.setOpacity(self._opacity)  # 帧贡献 opacity，白底贡献 1-opacity
+            pt.setCompositionMode(QPainter.CompositionMode_SourceOver)
+            pt.drawImage(0, 0, frame)
+        finally:
+            pt.end()
+        return buf
 
     @staticmethod
     def _cover_rect(src: QSize, dst: QRect) -> QRect:
