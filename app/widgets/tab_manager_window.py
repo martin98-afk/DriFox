@@ -2615,6 +2615,7 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
             self._apply_area_bg("sidebar", getattr(self, "_tab_frame", None), bgs["sidebar"])
             self._apply_area_bg("chat_area", getattr(self, "_chat_frame", None), bgs["chat_area"])
             self._apply_scene_layer(bgs["scene"])
+            self._apply_video_overlay(bgs.get("overlay"))
         except Exception as e:
             logger.warning(f"[TabManagerWindow] 应用主题背景失败: {e}")
 
@@ -2632,6 +2633,41 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
             self._scene_layer.apply_config(scene_cfg, self._resolve_theme_image)
         except Exception as e:
             logger.warning(f"[TabManagerWindow] 应用 scene 背景失败: {e}")
+
+    def _apply_video_overlay(self, overlay_cfg):
+        """应用 backgrounds.overlay 到 _video_overlay_layer（scene 之上、UI 之下）
+
+        懒创建：首次出现 overlay 配置才构造；配置消失（切到无 overlay 主题）
+        时停止播放并隐藏，不销毁 widget（避免重复 installEventFilter）。
+        Z 序：layer.lower() 后 scene_layer.stackUnder(layer)，
+        最终 SceneLayer < VideoOverlayLayer < UI 控件。
+        """
+        layer = getattr(self, "_video_overlay_layer", None)
+        active = bool(overlay_cfg) and overlay_cfg.get("enabled", True) and overlay_cfg.get("video")
+        if not active:
+            if layer is not None:
+                layer.stop_video()
+                layer.hide()
+            return
+        try:
+            if layer is None:
+                from app.widgets.video_overlay_layer import VideoOverlayLayer
+
+                layer = VideoOverlayLayer(self._chat_frame)
+                self._chat_frame.installEventFilter(layer)
+                self._video_overlay_layer = layer
+            layer.apply_config(overlay_cfg, self._resolve_theme_image)
+            layer.show()
+            layer.sync_geometry()
+            layer.lower()
+            scene = getattr(self, "_scene_layer", None)
+            if scene is not None:
+                try:
+                    scene.stackUnder(layer)
+                except RuntimeError:
+                    pass  # scene 层已销毁
+        except Exception as e:
+            logger.warning(f"[TabManagerWindow] 应用动态背景失败: {e}")
 
     def _apply_area_bg(self, area, parent_widget, bg_cfg):
         """统一区域背景加载器（window/sidebar/chat_area 共用）
