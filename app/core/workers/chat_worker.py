@@ -582,12 +582,20 @@ class OpenAIChatWorker(QThread):
         phases["other"] = round(max(0.0, total - spent), 1)
         return phases
 
-    def _serialize_for_api(self, messages: List[Dict[str, Any]], supports_vision: bool = True):
+    def _serialize_for_api(
+        self, messages: List[Dict[str, Any]], supports_vision: bool = True, revoke_after: bool = True
+    ):
         """序列化单入口（Phase C）：adapter flags → serializer_id → 序列化器 → SerializeResult。
 
         worker 不再按协议形态直接调 messages_to_api / messages_to_responses_input，
         统一经本入口：序列化器内部按 flags.use_responses_api 路由到 chat/responses 形态，
         serializer_id 由 adapter 解析（默认 openai，插件可指定专属序列化器）。
+
+        [方案 A] 出口即回收（revoke_after=True 默认）：revive 产出的 data:image 块
+        在返回前还原为 image_ref 引用块（image_utils.revoke_vision_blocks，幂等）。
+        产物从此保持轻量形态常驻，data URI 只在 _materialize_for_send 的发送
+        作用域内存在。直接把产物发请求的调用方（如 _build_responses_kwargs）
+        必须传 revoke_after=False。
         """
         from app.plugins.contracts.message_serializer import SerializeContext
         from app.plugins.registries.serializer_registry import SerializerRegistry
@@ -603,7 +611,47 @@ class OpenAIChatWorker(QThread):
 
         flags = self._adapter_flags()
         serializer = SerializerRegistry.get_instance().resolve(flags.serializer_id)
-        return serializer.serialize(messages, SerializeContext(supports_vision=supports_vision, flags=flags))
+        result = serializer.serialize(messages, SerializeContext(supports_vision=supports_vision, flags=flags))
+        if revoke_after:
+            # [方案 A] 产出即回收：产物与入参双扫（passthrough 直通时二者同引用，
+            # 幂等重复扫零害；拷贝型序列化器两份都可能持有 data URI）
+            try:
+                from app.utils.image_utils import revoke_vision_blocks
+
+                restored = revoke_vision_blocks(result.messages, self.session_id or "")
+                if result.messages is not messages:
+                    restored += revoke_vision_blocks(messages, self.session_id or "")
+                if restored:
+                    logger.debug(f"[Memory] serialize 出口回收 {restored} 张图片（data URI → image_ref）")
+            except Exception as e:  # noqa: BLE001 — 回收失败保留 data URI，不阻断
+                logger.warning(f"[chat_worker] vision revoke 失败（保留 data URI，下轮重试）: {e}")
+        return result
+
+    def _materialize_for_send(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """[方案 A] 发送前物化：从轻量 cache 构造可发送副本（data URI 只在本作用域存在）。
+
+        cache 常驻 image_ref 形态（出口已回收）；发送需要 data:image 形态，
+        因此浅拷贝消息骨架（msg dict + content list 两层）后 revive 幂等读回。
+        副本随请求结束 GC，cache 本体不被污染。
+        """
+        out: List[Dict[str, Any]] = []
+        for msg in messages:
+            if not isinstance(msg, dict):
+                out.append(msg)
+                continue
+            m2 = dict(msg)
+            content = msg.get("content")
+            if isinstance(content, list):
+                # content 必须拷贝：revive 就地按索引替换块，会污染共享列表
+                m2["content"] = [dict(b) if isinstance(b, dict) else b for b in content]
+            out.append(m2)
+        try:
+            from app.core.store.session_repository import revive_vision_image_refs
+
+            return revive_vision_image_refs(out)
+        except Exception as e:  # noqa: BLE001 — 物化失败按原副本发送（cache 内是 image_ref 时 provider 会拒，走重试/报错链路）
+            logger.warning(f"[chat_worker] materialize revive 失败（按 cache 副本发送）: {e}")
+            return out
 
     def _build_api_messages_cache(self) -> List[Dict[str, Any]]:
         """
@@ -2097,7 +2145,7 @@ class OpenAIChatWorker(QThread):
         Phase C：消息转换走序列化器单入口（flags.use_responses_api 已由调用方保证），
         取 result.input_items / instructions。
         """
-        result = self._serialize_for_api(messages)
+        result = self._serialize_for_api(messages, revoke_after=False)
         input_items, instructions = result.input_items, result.instructions
         model = str(self.llm_config.get("模型名称", "") or "")
         kwargs: Dict[str, Any] = {
@@ -3574,14 +3622,17 @@ class OpenAIChatWorker(QThread):
         # 但如果所有重试都失败，这些内容需要用于异常路径的 _build_response_message_sequence 构建 partial 消息。
         self._partial_content_backup = None
 
-        # 性能优化：使用缓存的 API 消息
+        # 性能优化：使用缓存的 API 消息。cache 常驻轻量 image_ref 形态（出口已
+        # 回收），发送前 _materialize_for_send 物化出 data URI 副本（请求作用域）
         if use_cache and self._api_messages_cache is not None:
-            sanitized = self._api_messages_cache
+            sanitized = self._materialize_for_send(self._api_messages_cache)
         else:
-            sanitized = self._serialize_for_api(messages).messages
+            fresh = self._serialize_for_api(messages).messages
             if use_cache:
-                self._api_messages_cache = sanitized
+                # cache 常驻轻量 image_ref 形态；materialize 副本只进发送作用域
+                self._api_messages_cache = fresh
                 self._api_messages_built = True
+            sanitized = self._materialize_for_send(fresh)
 
         # 消息序列化（协议无关，序列化器插件负责形态）
         # 请求参数组装已下沉至 transport 插件（system-transports/openai_chat.py）；
@@ -3709,10 +3760,10 @@ class OpenAIChatWorker(QThread):
 
                         if was_fixed:
                             fixed_sanitized = self._serialize_for_api(fixed_messages).messages
-                            api_messages = fixed_sanitized
-                            # 更新 API 消息缓存，修复结果持久化，避免下一轮迭代重复修复
+                            # cache 存轻量形态；重试发送用物化副本（data URI 只在本作用域）
                             if use_cache:
                                 self._api_messages_cache = fixed_sanitized
+                            api_messages = self._materialize_for_send(fixed_sanitized)
                             # 同步修复源头 current_messages：fixed_messages 与 messages 同型（都是内部格式），
                             # 直接 slice 赋值即可固化源头，避免再次调用 _fix_tool_result_order
                             if fixed_messages is not messages:
@@ -3735,10 +3786,9 @@ class OpenAIChatWorker(QThread):
 
                         if fixed_messages is not None:
                             fixed_sanitized = self._serialize_for_api(fixed_messages).messages
-                            api_messages = fixed_sanitized
-                            # 更新 API 消息缓存，修复结果持久化，避免下一轮迭代重复修复
                             if use_cache:
                                 self._api_messages_cache = fixed_sanitized
+                            api_messages = self._materialize_for_send(fixed_sanitized)
                             logger.warning(f"[API] 已恢复工具参数，已更新缓存，重试 (attempt {attempt + 1}/{max_retries})")
                             continue
                         else:

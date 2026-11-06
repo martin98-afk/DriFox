@@ -502,6 +502,9 @@ class SubAgentExecutor(QThread):
     def _execute_agent_loop(self, messages: List[Dict], tools: List[Dict], llm_config: Dict) -> str:
         """执行子智能体对话循环"""
         current_messages = messages.copy()
+        # [方案 A] 继承历史的 image_ref 块携带真实落盘 session_id（revive 后丢失），
+        # 在首次 serialize 前收集作为 revoke 的候选目录
+        self._vision_session_ids = self._collect_vision_session_ids(current_messages)
         response_content = ""
         current_reasoning = ""  # DeepSeek V4 thinking mode
         iteration_count = 0
@@ -529,6 +532,8 @@ class SubAgentExecutor(QThread):
                     # 强制续命前也触发 PreAssistantMessage（与正常轮次一致）
                     self._trigger_hook_sync("PreAssistantMessage", current_messages)
                     response_content, _, _ = self._make_api_call(current_messages, None, llm_config)
+                    # [方案 A] 强制总结轮收尾：迭代间回收 data URI，下轮 serialize 幂等读回
+                    self._revoke_vision_after_send(current_messages)
                     return self._filter_thinking_content(response_content)
 
             # ====== PreAssistantMessage hook：每次 API 调用前触发 ======
@@ -536,6 +541,8 @@ class SubAgentExecutor(QThread):
             self._trigger_hook_sync("PreAssistantMessage", current_messages)
 
             response_content, tool_calls, reasoning_content = self._make_api_call(current_messages, tools, llm_config)
+            # [方案 A] 每轮发送收尾：回收 data URI（迭代间不驻留），下轮 revive 幂等读回
+            self._revoke_vision_after_send(current_messages)
             current_reasoning = reasoning_content
 
             # ====== PostAssistantMessage hook：assistant 响应后触发 ======
@@ -974,6 +981,40 @@ class SubAgentExecutor(QThread):
             logger.debug(f"[SubAgent] drain hook queues failed: {e}")
         return msgs
 
+    def _collect_vision_session_ids(self, messages: List[Dict]) -> List[str]:
+        """[方案 A] 收集消息中 image_ref 块的真实落盘 session_id（revive 前调用）。"""
+        ids = []
+        for msg in messages:
+            if not isinstance(msg, dict):
+                continue
+            content = msg.get("content")
+            if not isinstance(content, list):
+                continue
+            for b in content:
+                if isinstance(b, dict) and b.get("type") == "image_ref":
+                    ref = b.get("image_ref") or {}
+                    sid = str(ref.get("session_id") or "")
+                    if sid and sid not in ids:
+                        ids.append(sid)
+        return ids
+
+    def _revoke_vision_after_send(self, messages: List[Dict]) -> None:
+        """[方案 A] 子代理发送收尾：data URI 还原为 image_ref（对称 chat_worker）。
+
+        current_messages 跨迭代常驻，revive 每轮就地升级为 data URI，迭代间
+        由本方法回收；下一轮 _serialize_for_api 经 revive 幂等读回。
+        """
+        try:
+            from app.utils.image_utils import revoke_vision_blocks
+
+            restored = revoke_vision_blocks(
+                messages,
+                getattr(self, "_vision_session_ids", None) or "",
+            )
+            if restored:
+                logger.debug(f"[Memory] 子代理发送后回收 {restored} 张图片")
+        except Exception as e:  # noqa: BLE001 — 回收失败保留 data URI
+            logger.warning(f"[SubAgentWorker] vision revoke 失败（保留 data URI）: {e}")
 
     def _make_api_call(self, messages: List[Dict], tools: List[Dict] = None, llm_config: Dict = None) -> tuple:
         """调用 LLM API（流式发起 + 聚合，子智能体后台执行无需逐字渲染）"""
