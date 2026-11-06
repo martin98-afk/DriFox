@@ -942,8 +942,14 @@ class PluginManager:
         )
 
         # 先清旧判定：热重载/卸载后冲突可能已消失，不清会永久拦截
+        live_map = getattr(self, "_plugins", None) or {}
         for p in plugins.values():
             p.deps_conflict_reason = ""
+            live = live_map.get(p.name)
+            # rescan 只把新增插件写回 _plugins，存量插件仍是旧实例：
+            # 不镜像的话，热重载路径上被裁为让出方的存量插件 load_blocked 不生效
+            if live is not None and live is not p:
+                live.deps_conflict_reason = ""
 
         declarations: Dict[str, List[str]] = {}
         for p in plugins.values():
@@ -964,6 +970,9 @@ class PluginManager:
             if p is None:
                 continue
             p.deps_conflict_reason = "；".join(reasons)
+            live = live_map.get(name)
+            if live is not None and live is not p:
+                live.deps_conflict_reason = p.deps_conflict_reason
             removed = remove_deps_from_path(p.path)
             logger.warning(
                 f"[PluginManager] {name} 因依赖冲突被拦截（组件不加载）: {p.deps_conflict_reason}"

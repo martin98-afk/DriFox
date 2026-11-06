@@ -122,3 +122,91 @@ class TestDepsConflictGate:
             assert a.deps_conflict_reason == ""
         finally:
             _cleanup(a)
+
+
+class TestDiagnosticsIntegration:
+    def test_gate_issues_surface_conflict_and_blocked(self, tmp_path: Path, monkeypatch):
+        """诊断报告必须把「装了但不工作」的原因写出来。
+
+        漏了这段，插件因冲突或平台门禁被拦时，报告会显示「一切正常」，
+        与用户看到的现象完全相反。
+        """
+        from app.plugins.managers.plugin_manager import PluginManager
+
+        a = _info(tmp_path, "aaa", ["httpx>=0.28"], "system")
+        b = _info(tmp_path, "bbb", ["httpx<0.24"], "user")
+        blocked = PluginInfo(
+            name="ccc",
+            manifest={"name": "ccc"},
+            path=tmp_path / "ccc",
+            platform_compatible=False,
+        )
+        plugins = {p.name: p for p in (a, b, blocked)}
+        pm = _pm(list(plugins.values()))
+        pm._apply_deps_conflict_gate(plugins)
+        monkeypatch.setattr(PluginManager, "_instance", pm, raising=False)
+
+        pm_dir = Path(__file__).resolve().parents[2] / "plugins" / "plugin-marketplace"
+        added = str(pm_dir) not in sys.path
+        if added:
+            sys.path.insert(0, str(pm_dir))
+        if "pm_ui" not in sys.modules:
+            import types
+
+            pkg = types.ModuleType("pm_ui")
+            pkg.__path__ = [str(pm_dir / "ui")]
+            pkg.__package__ = "pm_ui"
+            sys.modules["pm_ui"] = pkg
+
+        from pm_ui import diagnostics
+
+        try:
+            text = "\n".join(diagnostics._gate_issues())
+            assert "bbb" in text and "httpx" in text
+            assert "ccc" in text and "平台不兼容" in text
+        finally:
+            _cleanup(a, b, blocked)
+            if added:
+                while str(pm_dir) in sys.path:
+                    sys.path.remove(str(pm_dir))
+            sys.modules.pop("pm_ui", None)
+
+
+class TestRescanInstanceMirror:
+    def test_reason_mirrored_to_retained_instance(self, tmp_path: Path):
+        """rescan 只把新增插件写回 _plugins，存量插件仍是旧实例。
+
+        门禁结论若只写在新实例上，热重载路径上被裁为让出方的存量插件
+        load_blocked 仍为假，继续加载组件，等于门禁失效。
+        """
+        live = _info(tmp_path, "aaa", ["httpx<0.24"], "user")
+        fresh = _info(tmp_path, "aaa", ["httpx<0.24"], "user")
+        keep = _info(tmp_path, "bbb", ["httpx>=0.28"], "system")
+        assert live is not fresh
+        pm = _pm([live, keep])  # _plugins 持存量实例
+        try:
+            pm._apply_deps_conflict_gate({"aaa": fresh, "bbb": keep})
+            assert fresh.deps_conflict_reason
+            assert live.deps_conflict_reason == fresh.deps_conflict_reason
+            assert live.load_blocked is True
+        finally:
+            _cleanup(live, fresh, keep)
+
+    def test_reason_cleared_on_retained_instance(self, tmp_path: Path):
+        """冲突消失后存量实例的旧结论也必须清空，否则永久拦截。"""
+        live = _info(tmp_path, "aaa", ["httpx<0.24"], "user")
+        fresh = _info(tmp_path, "aaa", ["httpx<0.24"], "user")
+        keep = _info(tmp_path, "bbb", ["httpx>=0.28"], "system")
+        pm = _pm([live, keep])
+        try:
+            pm._apply_deps_conflict_gate({"aaa": fresh, "bbb": keep})
+            assert live.deps_conflict_reason
+            fresh.manifest = {
+                "name": "aaa",
+                "dependencies": {"pip": {"default": ["httpx>=0.28"]}},
+            }
+            pm._apply_deps_conflict_gate({"aaa": fresh, "bbb": keep})
+            assert live.deps_conflict_reason == ""
+            assert live.load_blocked is False
+        finally:
+            _cleanup(live, fresh, keep)
