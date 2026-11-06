@@ -108,6 +108,8 @@ class Assistant:
     # 记忆字符上限（UI 可配；<=0 时回落内置默认）
     global_memory_max_chars: int = 4000
     project_memory_max_chars: int = 3000
+    # 感性占比（全局记忆分区配额的 slider，10~70；感性池 = 全局上限 × ratio%）
+    memory_tone_ratio: int = 30
     # 对用户的称呼（{{userName}} 模板变量覆盖）：空 = 跟随系统用户名
     user_addressing: str = ""
     # 创建/更新时间戳
@@ -135,6 +137,7 @@ class Assistant:
             "tool_access": self.tool_access,
             "global_memory_max_chars": self.global_memory_max_chars,
             "project_memory_max_chars": self.project_memory_max_chars,
+            "memory_tone_ratio": self.memory_tone_ratio,
             "user_addressing": self.user_addressing,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
@@ -166,6 +169,8 @@ class Assistant:
             tool_access=str(data.get("tool_access") or "full"),
             global_memory_max_chars=int(data.get("global_memory_max_chars", 4000) or 0),
             project_memory_max_chars=int(data.get("project_memory_max_chars", 3000) or 0),
+            # 旧 yaml 无此字段：直接取默认 30，不把 int(None) 当成 0（否则被 clamp 到 10）
+            memory_tone_ratio=int(data.get("memory_tone_ratio", 30) or 30),
             user_addressing=str(data.get("user_addressing") or ""),
             created_at=str(data.get("created_at") or ""),
             updated_at=str(data.get("updated_at") or ""),
@@ -1174,8 +1179,13 @@ class AssistantManager:
             else "{项目根}/" + store.PROJECT_DIR_NAME + "/" + store.MEMORY_SUBDIR + "/" + aid
         )
         limits = self.memory_max_chars(aid)
-        sections = store.load_sections(aid_dir)
-        parts: list[str] = [prompts.build_memory_system(global_file, proj_dir, limits, sections)]
+        # 首次注入即落盘默认分区（新助手不必等用户打开 UI 才有归类骨架）
+        sections = store.ensure_default_sections(aid_dir)
+        ratio = self.memory_tone_ratio(aid)
+        quotas = store.section_quotas(sections, ratio, limits["global"]) if sections else {}
+        parts: list[str] = [
+            prompts.build_memory_system(global_file, proj_dir, limits, sections, quotas, ratio)
+        ]
 
         # 全局记忆
         g_text = (store.read_global_memory(aid_dir) or "").strip()
@@ -1188,10 +1198,19 @@ class AssistantManager:
                     + "：合并去重、删过时内容、保持精简，然后继续用户的任务。"
                 )
             parts.append(
-                "<global_memory>\n以下是跨项目的全局记忆（用户对助手长期稳定的要求）。\n\n"
+                "<global_memory>\n以下是跨项目的全局记忆（知识层让你少犯错，感性层让你更像个人）。\n\n"
                 + g_text
                 + "\n</global_memory>"
             )
+            over = store.section_usage(g_text, quotas)
+            if over:
+                detail = "、".join(f"{o['name']} {o['chars']}/{o['quota']}" for o in over[:4])
+                parts.append(
+                    "**ACTION REQUIRED**: 全局记忆分区超配额（"
+                    + detail
+                    + "）。按记忆说明书整理：理性区合并重复条目，感性区删标签式空话；"
+                    "配额是上限不是任务，写不满就空着。"
+                )
 
         # 项目记忆
         p_text = (store.read_project_memory(workdir, aid) or "").strip() if workdir else ""
@@ -1243,6 +1262,30 @@ class AssistantManager:
             "global": g if g > 0 else store.GLOBAL_MEMORY_MAX_CHARS,
             "project": p if p > 0 else store.PROJECT_MEMORY_MAX_CHARS,
         }
+
+    def memory_tone_ratio(self, aid: str = "") -> int:
+        """感性占比（10~70）：全局记忆里分给感性区的百分比。"""
+        store = self._core_store()
+        a = self.get(aid) if aid else None
+        raw = getattr(a, "memory_tone_ratio", store.TONE_RATIO_DEFAULT) if a is not None else store.TONE_RATIO_DEFAULT
+        return store.clamp_tone_ratio(raw)
+
+    def set_memory_tone_ratio(self, aid: str, ratio: int) -> Dict[str, Any]:
+        """写感性占比（UI slider）并落盘；不触 system prompt 缓存失效也可，比例只影响说明书文本。"""
+        a = self.get(aid)
+        if a is None:
+            return {"ok": False, "error": "not_found"}
+        a.memory_tone_ratio = self._core_store().clamp_tone_ratio(ratio)
+        self.update(a)
+        return {"ok": True, "ratio": a.memory_tone_ratio}
+
+    def memory_section_quotas(self, aid: str = "") -> Dict[str, int]:
+        """各分区字符配额（注入/UI/蒸馏共用；空 schema 返回 {}）。"""
+        store = self._core_store()
+        sections = self.memory_sections(aid) if aid else []
+        if not sections:
+            return {}
+        return store.section_quotas(sections, self.memory_tone_ratio(aid), self.memory_max_chars(aid)["global"])
 
     def memory_paths(self, aid: str, workdir: str = "") -> Dict[str, str]:
         """该助手的记忆路径集合（UI 展示用）。"""
@@ -1301,6 +1344,9 @@ class AssistantManager:
 
         改名识别：按列表位置对比新旧（UI 编辑只改 name/hint，不重排）。
         删除分区**不**动文件：孤儿标题保留，下次蒸馏重分配（用户决策 2026-10-25）。
+
+        改完必须失效 system prompt 缓存：分区清单是注入说明书的一部分，
+        已缓存 prompt 的会话不失效就会继续用旧清单（用户新增分区后模型「忘」的直接根因）。
         """
         store = self._core_store()
         aid_dir = self._assistant_dir(aid)
@@ -1322,11 +1368,14 @@ class AssistantManager:
                     renamed.append(f"{old_name}→{new_name}")
             if renamed:
                 store.write_global_memory(aid_dir, text)
+        self._invalidate_session_prompt_caches()
         return {"ok": True, "count": len(new), "renamed": renamed}
 
     def memory_sections_block(self, aid: str) -> str:
         """分区清单 prompt 文本（蒸馏/说明书共用）；无分区返回空串。"""
-        return self._core_store().sections_prompt_text(self.memory_sections(aid))
+        return self._core_store().sections_prompt_text(
+            self.memory_sections(aid), self.memory_section_quotas(aid)
+        )
 
     def default_memory_sections(self) -> List[Dict[str, str]]:
         """默认分区（UI 恢复默认用的唯一定义源）。"""
@@ -1412,6 +1461,8 @@ class AssistantManager:
             str(store.project_memory_path(workdir, aid)),
             str(store.global_memory_path(self._assistant_dir(aid))),
             self.memory_sections(aid),
+            self.memory_section_quotas(aid),
+            self.memory_tone_ratio(aid),
         )
 
     # ── 快照 / 健康（用户侧恢复与状态，模型工具面不含）──

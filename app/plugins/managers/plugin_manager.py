@@ -1541,6 +1541,10 @@ class PluginManager:
         每个子目录如果包含 .drifox-plugin/plugin.json，即视为一个插件。
         """
         discovered = []
+        # 启动期逐条 Discovered DEBUG 最多 90+ 条，每条一次管道写入（10 个 enqueue
+        # sink 串行 put），管道满时会阻塞主线程（2026-11-06 实测 500ms）。改为循环
+        # 后聚合一次 emit：内容不变，管道往返从 N 次降到 1 次。
+        discovered_log_lines: list[str] = []
 
         if not base_dir.exists():
             return discovered
@@ -1620,13 +1624,17 @@ class PluginManager:
                         manifest_warnings=schema_warnings,
                     )
                 )
-                logger.debug(
-                    f"[PluginManager] Discovered plugin: {plugin_name} "
-                    f"(type={plugin_type}, format={manifest_format}) at {item}"
+                discovered_log_lines.append(
+                    f"{plugin_name} (type={plugin_type}, format={manifest_format}) at {item}"
                 )
             except Exception as e:
                 logger.error(f"[PluginManager] Failed to load plugin at {item}: {e}")
 
+        if discovered_log_lines:
+            logger.debug(
+                f"[PluginManager] Discovered plugins ({len(discovered_log_lines)}):\n  "
+                + "\n  ".join(discovered_log_lines)
+            )
         return discovered
 
     def _scan_one_plugin_dir(self, plugin_dir: Path, plugin_type: str) -> Optional[PluginInfo]:
