@@ -1363,6 +1363,61 @@ class PluginInstaller:
 
     # ── 卸载前释放引用 ──────────────────────────────────
 
+    def _detach_plugin_deps(self, name: str) -> None:
+        """把插件注入过的 deps 路径从 sys.path 摘除（卸载/禁用后调用，幂等）。
+
+        磁盘目录已删但 sys.path 里留着路径：僵尸项长期占据，同名目录一旦被
+        复用旧依赖就“复活”；插件 A 的包被插件 B 隐式 import 的能力也不会随
+        卸载消失。三个根都扫：用户插件、禁用区、内置插件目录。
+        """
+        try:
+            from app.plugins.deps_loader import remove_deps_from_path
+        except Exception as e:
+            logger.debug(f"[Installer] 导入 deps_loader 失败（跳过摘除）: {e}")
+            return
+        bases = [self._plugins_dir, self._disabled_dir]
+        system_dir = getattr(self, "_system_dir", None)
+        if system_dir is not None:
+            bases.append(system_dir)
+        for base in bases:
+            try:
+                remove_deps_from_path(base / name)
+            except Exception as e:
+                logger.debug(f"[Installer] 摘除 {name} deps 失败（忽略）: {e}")
+
+    def _deps_conflict_with_enabled(self, name: str, manifest: dict) -> str:
+        """待启用插件与已启用插件的依赖版本要求是否不可调和。
+
+        Returns:
+            非空 = 冲突说明（调用方据此拒绝启用）；空 = 无冲突或无法判定。
+        """
+        try:
+            from app.plugins.deps_loader import find_deps_conflicts, resolve_pip_deps
+            from app.plugins.managers.plugin_manager import PluginManager
+
+            specs = resolve_pip_deps(manifest)
+            if not specs:
+                return ""
+            decl = {name: specs}
+            for other in PluginManager.get_instance().get_enabled_plugins():
+                if other.name == name or other.load_blocked:
+                    continue
+                other_specs = resolve_pip_deps(other.manifest)
+                if other_specs:
+                    decl[other.name] = other_specs
+            if len(decl) < 2:
+                return ""
+            reasons = []
+            for pkg, a, b in find_deps_conflicts(decl):
+                if name not in (a, b):
+                    continue
+                reasons.append(f"{pkg} 与 {b if a == name else a} 要求不可调和")
+            return "；".join(reasons)
+        except Exception as e:
+            # 检查本身失败不阻断启用（宁可能装上但跑错版本，也不要因门禁自身故障拦死）
+            logger.debug(f"[Installer] 依赖冲突检查失败（放行）: {e}")
+            return ""
+
     @staticmethod
     def _purge_plugin_module_cache(name: str):
         """删除/移动插件目录前，清理该插件的模块缓存（线程安全，无 GUI 操作）
@@ -1561,6 +1616,8 @@ class PluginInstaller:
             self._stop_gateway_platforms(name, wait=True)
             # 清理模块缓存（UI 注册表卸载由 GUI 线程在主线程先行完成）
             self._purge_plugin_module_cache(name)
+            # L1：摘除 deps 注入路径（目录马上要删，不留僵尸 sys.path 项）
+            self._detach_plugin_deps(name)
             leftover: list = []
             for base in (self._plugins_dir, self._disabled_dir):
                 target = base / name
@@ -1655,6 +1712,8 @@ class PluginInstaller:
             self._kill_plugin_processes(name)
             # 清理模块缓存（UI 注册表卸载由主线程先行完成，此处不碰 GUI）
             self._purge_plugin_module_cache(name)
+            # L1：禁用后不再加载，deps 路径也从 sys.path 摘除（重新启用时再注入）
+            self._detach_plugin_deps(name)
             # 抑制 backend watcher：避免移动期间 watcher 抢跑 import 插件的 deps
             # （如 gateway 插件的 Crypto 等 .pyd），造成 WinError 5 拒绝访问
             self._suppress_backend_watcher()
@@ -1686,6 +1745,18 @@ class PluginInstaller:
           通过 PluginManager 写 Settings 启用
         """
         src = self._disabled_dir / name
+        # L2：启用前统一做依赖冲突检查（用户插件与内置插件两个启用通道都覆盖）
+        manifest = self._read_manifest_at(src) if src.exists() else None
+        if manifest is None:
+            system_dir = getattr(self, "_system_dir", None)
+            if system_dir is not None:
+                manifest = self._read_manifest_at(system_dir / name)
+        if manifest:
+            conflict = self._deps_conflict_with_enabled(name, manifest)
+            if conflict:
+                self.last_error = f"{name} 依赖冲突，无法启用：{conflict}"
+                logger.warning(f"[Installer] {self.last_error}")
+                return False
         if src.exists():
             # 释放 deps 模块句柄（gateway 插件 vendor 的 Crypto 等 .pyd 被进程
             # 加载后会占用文件，移动前清理可降低 WinError 5 概率）

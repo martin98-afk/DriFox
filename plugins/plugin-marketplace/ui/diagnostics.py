@@ -79,47 +79,53 @@ def _plugin_dir_map(inst) -> Dict[str, Path]:
     return result
 
 
-def _missing_deps(plugin_dir: Path, manifest: dict) -> List[str]:
-    """缺失的 pip 依赖（复用市场的依赖安装器判定）
+def _dep_issues(plugin_dir: Path, manifest: dict) -> List[str]:
+    """依赖问题的可读描述（含已装版本），判定口径与宿主 missing_pip_deps 同源。
 
-    宿主 missing_pip_deps 按「包名 = 顶层目录名」匹配，会误报安装了
-    dist-info 但导入名不同的包（python-docx 实装为 docx + python_docx-*.dist-info）。
-    这里用 dist-info 目录二次校验，命中则视为已就绪，避免诊断报告误导 AI。
+    宿主侧已按 dist-info 权威版本判定（版本不满足也归为异常），不再需要早前
+    那套「按导入名二次校验」的误报修补：python-docx 这类导入名/分发名不一致
+    的包由 PEP 503 归一处理。
     """
     try:
-        from .deps_installer import DepsInstaller
+        from app.plugins.deps_loader import describe_dep_issues
 
-        missing = list(DepsInstaller()._missing(plugin_dir, manifest) or [])
+        return list(describe_dep_issues(plugin_dir, manifest) or [])
     except Exception:
         return []
-    if not missing:
-        return []
 
-    installed: set = set()
+
+def _gate_issues() -> List[str]:
+    """被门禁拦截 / 因依赖冲突让出的插件（读 PluginManager 已算好的判定）。
+
+    这些插件不加载任何组件，用户看到的是「装了但不工作」。报告里若没有这段，
+    异常项会显示「一切正常」，与实际后果完全相反。只读已初始化的单例，
+    避免在后台线程里构造 PluginManager（首次构造有 FS 扫描副作用）。
+    """
+    out: List[str] = []
     try:
-        from app.plugins.deps_loader import current_platform_key
+        from app.plugins.managers.plugin_manager import PluginManager
 
-        dep_dirs = [plugin_dir / "deps" / current_platform_key(), plugin_dir / "deps"]
-    except Exception:
-        dep_dirs = [plugin_dir / "deps"]
-    for d in dep_dirs:
-        if not d.is_dir():
-            continue
-        try:
-            for entry in d.iterdir():
-                if entry.is_dir() and entry.name.endswith(".dist-info"):
-                    installed.add(entry.name.split("-")[0].replace("-", "_").lower())
-        except OSError:
-            continue
-
-    kept: List[str] = []
-    for spec in missing:
-        pkg = spec.split("==")[0].split(">=")[0].split("<=")[0].split("~=")[0].split("!=")[0]
-        pkg = pkg.split("[")[0].strip().replace("-", "_").lower()
-        if pkg and pkg in installed:
-            continue
-        kept.append(spec)
-    return kept
+        pm = PluginManager._instance
+        if pm is None:
+            return out
+        for p in pm.list_plugins():
+            reason = str(getattr(p, "deps_conflict_reason", "") or "")
+            if reason:
+                out.append(f"- {p.name}（已装）: 依赖冲突被拦截，组件未加载 —— {reason}")
+                continue
+            if not getattr(p, "load_blocked", False):
+                continue
+            bits: List[str] = []
+            if not getattr(p, "platform_compatible", True):
+                bits.append("平台不兼容")
+            if not getattr(p, "version_compatible", True):
+                bits.append(getattr(p, "version_reason", "") or "宿主版本不满足")
+            if not getattr(p, "api_compatible", True):
+                bits.append(getattr(p, "api_reason", "") or "插件 API 版本不兼容")
+            out.append(f"- {p.name}（已装）: 门禁拦截，组件未加载 —— " + "；".join(bits))
+    except Exception as e:
+        logger.debug(f"[diagnostics] 读取门禁状态失败: {e}")
+    return out
 
 
 def _compat_reasons(manifest: dict) -> List[str]:
@@ -217,15 +223,15 @@ def collect_diagnostics() -> str:
     summary = " / ".join(f"{k} {v}" for k, v in sorted(counts.items()) if v)
     lines.append(f"\n## 一、已安装插件（{len(names)} 个：{summary or '无'}）")
 
-    # ── 二、异常项汇总（兼容性 / 依赖） ──
-    anomalies: List[str] = []
+    # ── 二、异常项汇总（门禁拦截 / 兼容性 / 依赖） ──
+    anomalies: List[str] = list(_gate_issues())
     for name in names:
         manifest = manifests.get(name) or {}
         reasons = _compat_reasons(manifest)
         plugin_dir = dir_map.get(name)
-        missing = _missing_deps(plugin_dir, manifest) if plugin_dir and manifest else []
-        if missing:
-            reasons.append("依赖缺失: " + ", ".join(missing[:8]))
+        dep_issues = _dep_issues(plugin_dir, manifest) if plugin_dir and manifest else []
+        if dep_issues:
+            reasons.append("依赖异常: " + "; ".join(dep_issues[:8]))
         if reasons:
             anomalies.append(f"- {name}（{status_map.get(name)}）: " + "；".join(reasons))
 

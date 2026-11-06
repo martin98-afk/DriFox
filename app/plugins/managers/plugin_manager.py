@@ -249,6 +249,7 @@ class PluginInfo:
     version_reason: str = ""  # 版本不兼容原因（供 UI 展示）
     api_compatible: bool = True  # 契约2：api_version 与宿主插件 API 版本比对（缺省=兼容）
     api_reason: str = ""  # api_version 不兼容原因（供 UI 展示）
+    deps_conflict_reason: str = ""  # L2：跨插件依赖版本不可调和的原因（非空=拦截）
     manifest_warnings: List[str] = field(default_factory=list)  # 契约1：schema 校验 warning 清单（UI 角标后续）
     overridden_by: str = ""  # 同名覆盖标记：被覆盖方 plugin_type（"system"/"claude"），空=未被覆盖
     # icon_config 解析缓存（实例级）：重扫/热重载/安装/更新走 _scan_one_plugin_dir
@@ -265,8 +266,10 @@ class PluginInfo:
 
     @property
     def load_blocked(self) -> bool:
-        """是否被门禁拦截（平台/版本/api_version 任一不满足），拦截时宿主不得加载其任何组件"""
-        return not (self.platform_compatible and self.version_compatible and self.api_compatible)
+        """是否被门禁拦截（平台/版本/api_version/依赖冲突任一不满足），拦截时宿主不得加载其任何组件"""
+        if not (self.platform_compatible and self.version_compatible and self.api_compatible):
+            return True
+        return bool(self.deps_conflict_reason)
 
     @property
     def is_system(self) -> bool:
@@ -342,6 +345,26 @@ class PluginInfo:
             if "dark" not in result and "light" in result:
                 result["dark"] = result["light"]
             return result if result else None
+
+
+def _hard_gate_blocked(p: PluginInfo) -> bool:
+    """平台/版本/api 三维硬门禁（不含依赖冲突，避免判定自引用）。"""
+    return not (p.platform_compatible and p.version_compatible and p.api_compatible)
+
+
+def _pick_deps_winner(plugins: Dict[str, PluginInfo], a: str, b: str) -> tuple:
+    """冲突对裁决：返回 (保留方, 让出方)。
+
+    优先级 system > claude > user：内置插件是 app 功能的一部分，用户插件是扩展。
+    同类型按名字字典序，保证每次启动裁决结果一致（不随扫描顺序漂移）。
+    """
+    rank = {"system": 0, "claude": 1, "user": 2}
+
+    def key(name: str) -> tuple:
+        p = plugins.get(name)
+        return (rank.get(getattr(p, "plugin_type", "user"), 2), name)
+
+    return (a, b) if key(a) <= key(b) else (b, a)
 
 
 # ============================================================
@@ -813,6 +836,8 @@ class PluginManager:
                 rebuilt["system"], rebuilt["claude"], rebuilt["user"], allow_user_override
             )
             self._plugins = new_plugins
+            # L2：先跑依赖冲突裁决，replay 注入循环会自然跳过被裁为让出方的插件
+            self._apply_deps_conflict_gate(new_plugins)
             # 副作用重放（幂等）：deps 注入仅门禁通过插件（G3 对齐）；config_schema 注册
             _probe("p2.replay.start")
             for p in self._plugins.values():
@@ -895,6 +920,56 @@ class PluginManager:
             new_plugins[name] = p
         return new_plugins, changed
 
+    def _apply_deps_conflict_gate(self, plugins: Dict[str, PluginInfo]) -> None:
+        """L2：跨插件依赖冲突门禁（合并后统一判定，让出方不加载任何组件）
+
+        冲突判定需要全局视图：deps 注入是逐插件在扫描阶段完成的，而"两个插件
+        要了不可调和的版本"要等全部扫完才知道。此处执行时尚未 import 任何插件
+        组件，sys.modules 里没有第三方包，因此撤销注入是安全的（不会把已加载
+        模块扣在半路）。
+
+        让出方的 deps 路径从 sys.path 摘除并把原因写进 load_blocked，三个组件
+        loader（tool/provider/runtime）与 UI 挂载会一并跳过它，避免它静默跑在
+        对方版本的包上。
+
+        Args:
+            plugins: 合并后的完整插件集合（rescan 传 new_plugins，缓存路径传重建结果）
+        """
+        from app.plugins.deps_loader import (
+            find_deps_conflicts,
+            remove_deps_from_path,
+            resolve_pip_deps,
+        )
+
+        # 先清旧判定：热重载/卸载后冲突可能已消失，不清会永久拦截
+        for p in plugins.values():
+            p.deps_conflict_reason = ""
+
+        declarations: Dict[str, List[str]] = {}
+        for p in plugins.values():
+            if _hard_gate_blocked(p):
+                continue
+            specs = resolve_pip_deps(p.manifest)
+            if specs:
+                declarations[p.name] = specs
+        if len(declarations) < 2:
+            return
+
+        losers: Dict[str, List[str]] = {}
+        for pkg, a, b in find_deps_conflicts(declarations):
+            keep, drop = _pick_deps_winner(plugins, a, b)
+            losers.setdefault(drop, []).append(f"{pkg}（与 {keep} 要求不可调和）")
+        for name, reasons in losers.items():
+            p = plugins.get(name)
+            if p is None:
+                continue
+            p.deps_conflict_reason = "；".join(reasons)
+            removed = remove_deps_from_path(p.path)
+            logger.warning(
+                f"[PluginManager] {name} 因依赖冲突被拦截（组件不加载）: {p.deps_conflict_reason}"
+                + (f"；已摘除 deps 注入 {removed}" if removed else "")
+            )
+
     def rescan(self, force: bool = False) -> dict:
         """运行时重新扫描插件目录，检测新增/移除的插件
 
@@ -956,6 +1031,8 @@ class PluginManager:
         new_plugins, changed_list = self._merge_discovered(
             current_system, current_claude, current_user, allow_user_override
         )
+        # L2：全量扫完后裁决跨插件依赖冲突（注入已在扫描阶段完成，此处撤销让出方）
+        self._apply_deps_conflict_gate(new_plugins)
         result["changed"] = changed_list
 
         new_names = set(new_plugins.keys())
