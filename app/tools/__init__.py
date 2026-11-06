@@ -55,11 +55,12 @@ class BuiltinTools(QObject):
         self._register_tools()
 
         # MCP 客户端管理器（全局单例，多窗口共享连接）
-        # [PERF] 延迟导入：mcp SDK 仅在 BuiltinTools 实例化（backend 延迟段）时加载
-        from app.tools.mcp_tools import MCPClientManager
-
-        self._mcp_manager = MCPClientManager.get_instance()
-        self._mcp_manager.acquire()
+        # [PERF #36] 惰性加载：mcp SDK 冷导入实测 ~550ms/569 模块，未配置 MCP
+        # 服务器的用户完全不付这笔成本。改为首次经 mcp_manager property 访问时
+        # 加载，且守卫读配置（mcp_enabled + 已配置 servers）——已配置用户行为
+        # 不变（首次访问即加载），未配置用户恒 None（get_tool_schemas 注入点
+        # 已有 except 吞护）。幂等：Settings/PluginManager 在启动同步段已就绪。
+        self._mcp_manager = None
 
         # Dependencies injected later
         self._agent_manager = None
@@ -85,6 +86,28 @@ class BuiltinTools(QObject):
 
     @property
     def mcp_manager(self):
+        """MCP 管理器惰性访问点：首次访问时按配置加载（mcp SDK 按需化 #36）。
+
+        守卫语义：mcp_enabled 开启且存在已配置 servers 才加载；未配置返回 None
+        （调用方自行处理），不再无条件付出 mcp SDK import 成本。单例加载后
+        后续访问短路，幂等。
+        """
+        if self._mcp_manager is None:
+            try:
+                from app.utils.config import Settings
+                from app.plugins.managers.plugin_manager import PluginManager
+
+                if not Settings.get_instance().mcp_enabled.value:
+                    return None
+                if not PluginManager.get_instance().get_mcp_servers():
+                    return None
+            except Exception:
+                # 配置读不到时保守照旧加载（行为回退到无条件加载，不误伤已配置用户）
+                pass
+            from app.tools.mcp_tools import MCPClientManager
+
+            self._mcp_manager = MCPClientManager.get_instance()
+            self._mcp_manager.acquire()
         return self._mcp_manager
 
     def __getattr__(self, name: str):
@@ -117,8 +140,10 @@ class BuiltinTools(QObject):
         彻底清理 BuiltinTools 的所有缓存，防止内存泄漏。
         应该在对话结束后或切换会话时调用。
         """
-        # 释放 MCP 引用（引用计数归零时才真正断开）
-        self._mcp_manager.release()
+        # 释放 MCP 引用（引用计数归零时才真正断开）；惰性加载后可能从未
+        # acquire（未配置 MCP），None 检查保持 acquire/release 配对平衡
+        if self._mcp_manager is not None:
+            self._mcp_manager.release()
 
     def gitee_upload(self, local_path: str) -> ToolResult:
         """将本地文件上传至 Gitee 仓库，返回公开下载链接（平台能力，供 upload_file 工具服务调用）"""
@@ -331,10 +356,11 @@ def get_builtin_tools_schema(agent_manager=None, builtin_tools=None, session_id:
             if callable(builder):
                 schema["function"]["description"] = builder(subagent_names)
 
-    # 动态注入 MCP 工具 schema
-    if builtin_tools and hasattr(builtin_tools, "_mcp_manager"):
+    # 动态注入 MCP 工具 schema（走 mcp_manager property：未配置 MCP 时返回
+    # None 且不加载 SDK；异常吞护保持原样）
+    if builtin_tools is not None:
         try:
-            mcp_schemas = builtin_tools._mcp_manager.get_tool_schemas()
+            mcp_schemas = builtin_tools.mcp_manager.get_tool_schemas() if builtin_tools.mcp_manager else None
             if mcp_schemas:
                 schemas.extend(mcp_schemas)
                 logger.debug(f"[BuiltinTools] 注入 {len(mcp_schemas)} 个 MCP 工具 schema")

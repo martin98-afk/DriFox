@@ -471,22 +471,28 @@ class PluginHostService(QObject):
         幂等保护，进程内只执行一次 → **当前无重复初始化风险**。
         为防未来新增调用点（窗口重开路径等）踩坑，此处加类级一次性标志兜底。
         """
-        pm = self._pm_for_deferred
-        if pm is None:  # 防御：绕过 _defer_non_critical_plugin_init 的直接调用（正常路径必已赋值）
-            logger.warning("[PluginHost] LSP 延迟初始化缺少 PluginManager 引用，跳过")
-            return
-        with self._deferred_once_lock:
-            if self._lsp_initialized_once:
-                logger.debug("[PluginHost] LSP 已初始化过（类级标志），跳过")
-                return
-            self._lsp_initialized_once = True
         try:
-            from app.core.lsp.lsp_manager import get_lsp_manager
-
-            lsp_mgr = get_lsp_manager()
+            pm = self._pm_for_deferred
+            if pm is None:  # 防御：绕过 _defer_non_critical_plugin_init 的直接调用（正常路径必已赋值）
+                logger.warning("[PluginHost] LSP 延迟初始化缺少 PluginManager 引用，跳过")
+                return
+            with self._deferred_once_lock:
+                if self._lsp_initialized_once:
+                    logger.debug("[PluginHost] LSP 已初始化过（类级标志），跳过")
+                    return
+                self._lsp_initialized_once = True
+            # [PERF #36] 配置守卫前置：lsp_manager 顶层拉起 lsprotocol/pygls 重链
+            # （~255ms）。无 LSP 配置时跳过 import 与空初始化（原空配置路径仅置
+            # _initialized 标志，无实质消费差异；消费接口 _ensure_started 按需拉起）。
             lsp_configs = pm.get_lsp_configs()
             # P2：消费端过滤 load_blocked 插件的 LSP 配置（被门禁拦截的插件不注册 LSP）
             lsp_configs = self._filter_blocked_lsp_configs(pm, lsp_configs)
+            if not lsp_configs:
+                logger.debug("[PluginHost] 无 LSP 配置，跳过 LSP 延迟初始化")
+                return
+            from app.core.lsp.lsp_manager import get_lsp_manager
+
+            lsp_mgr = get_lsp_manager()
             workdir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
             lsp_mgr.initialize(workdir, lsp_configs)
             logger.info(f"[PluginHost] LspManager 延迟初始化完成，已注册 {len(lsp_mgr._clients)} 个 LSP 服务器")
@@ -2783,24 +2789,26 @@ class PluginHostService(QObject):
         from app.plugins.managers.plugin_manager import PluginManager
         from app.utils.config import Settings
 
+        cfg = Settings.get_instance()
+        # [PERF #36] 守卫前置：mcp_tools 顶层拉起整个 mcp SDK（冷导入 ~550ms/569
+        # 模块）。原实现 import 在开关/配置检查之前，未配置 MCP 的用户也全额付费。
+        # 配置读内存值幂等（deferred 2000ms 时 Settings/PluginManager 早已就绪）。
+        # 行为保真：已配置用户走到的分支不变，仅未配置用户提前短路。
+        if not cfg.mcp_enabled.value:
+            logger.info("[PluginHost] MCP 全局开关已关闭，跳过连接")
+            return
+        pm = PluginManager.get_instance()
+        servers = pm.get_mcp_servers()
+        if not servers:
+            logger.info("[PluginHost] 无 MCP 服务器配置，跳过连接")
+            return
+
         from app.tools.mcp_tools import MCPClientManager
 
         mcp_manager = MCPClientManager.get_instance()
 
         if mcp_manager.is_connected:
             logger.info("[PluginHost] MCP 已连接，复用现有连接")
-            return
-
-        cfg = Settings.get_instance()
-        if not cfg.mcp_enabled.value:
-            logger.info("[PluginHost] MCP 全局开关已关闭，跳过连接")
-            return
-
-        # 从 PluginManager 获取 MCP 服务器列表
-        pm = PluginManager.get_instance()
-        servers = pm.get_mcp_servers()
-        if not servers:
-            logger.info("[PluginHost] 无 MCP 服务器配置，跳过连接")
             return
 
         mcp_manager.connect_all_background(
