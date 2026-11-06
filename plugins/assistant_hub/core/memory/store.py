@@ -76,7 +76,8 @@ DEFAULT_SECTIONS = (
         "hint": "他是个什么样的人",
         "tone": TONE_EMOTIONAL,
         "detail": "对这个人的稳定理解：他怎么想事、在意什么、什么让他不耐烦、他的品味与雷区。"
-        "写「为什么」不写「他要求了什么」；换一个项目仍然成立",
+        "用户亲口提的硬性要求必须保留并补一句背后的原因（例：他要中文，因为他用中文思考），"
+        "但别只停在「他要求了什么」。换一个项目仍然成立",
     },
     {
         "name": "身份定位",
@@ -86,6 +87,12 @@ DEFAULT_SECTIONS = (
         "我在哪些事上会犯什么错。不依赖用户指令，自己决定自己是谁",
     },
 )
+
+# 旧默认 detail：内容一字未改的区（用户没自定义过）在 v1→v2 迁移时跟着升级，
+# 防止旧文案把新语义按死（典型：「用户偏好」旧文案只说「他要求了什么」）。
+_LEGACY_DETAILS = {
+    "用户偏好": "用户亲口提的长期要求、表达习惯、明确禁止事项。与具体项目无关的都放这里",
+}
 
 # 默认分区名的 tone 速查（旧文件无 tone 字段时按名补齐）
 _DEFAULT_TONE_BY_NAME = {str(s["name"]): str(s["tone"]) for s in DEFAULT_SECTIONS}
@@ -354,6 +361,14 @@ def ensure_default_sections(aid_dir: Path) -> List[Dict[str, str]]:
             return sections
         if _read_sections_version(p) < SECTIONS_SCHEMA_VERSION:
             names = {str(s.get("name") or "") for s in sections}
+            by_name = {str(d["name"]): d for d in DEFAULT_SECTIONS}
+            for s in sections:
+                # 未自定义过的旧区：文案跟默认一起升级（保留用户改过的内容）
+                legacy = _LEGACY_DETAILS.get(str(s.get("name") or ""))
+                d = by_name.get(str(s.get("name") or ""))
+                if d is not None and legacy and str(s.get("detail") or "").strip() == legacy:
+                    s["detail"] = str(d["detail"])
+                    s["hint"] = str(d["hint"])
             for d in DEFAULT_SECTIONS:
                 if str(d["name"]) == "身份定位" and str(d["name"]) not in names:
                     sections.append(dict(d))
@@ -420,6 +435,22 @@ def section_usage(
             out.append({"name": name, "chars": chars, "quota": quota, "over": chars - quota})
     out.sort(key=lambda x: -int(x.get("over") or 0))
     return out
+
+def section_block_text(text: str, name: str) -> str:
+    """取某个分区的原文块（含 "## 名称" 行）；分区不存在返回空串，存在但空返回标题+占位。
+
+    卡片点开看内容用：只给这一区的条目，不让用户在大全文里找。
+    """
+    target = str(name or "")
+    if not target:
+        return ""
+    for b in parse_section_blocks(text or "").get("blocks") or []:
+        if str(b.get("name") or "") != target:
+            continue
+        lines = [str(x) for x in (b.get("lines") or []) if str(x).strip()]
+        body = "\n".join(lines)
+        return f"## {target}\n{body}" if body else f"## {target}\n（这个分区还没有内容）"
+    return ""
 
 
 def parse_section_blocks(text: str) -> Dict:

@@ -89,43 +89,48 @@ def build_memory_system(
     )
     if not sections:
         return base
-    emo = int(g_limit) * max(0, min(100, int(tone_ratio))) // 100
     parts = [
         base,
         "",
         "# 全局记忆分区（强制）",
         "全局记忆必须按下列分区组织；每条内容必须归属某个分区，"
         "禁出现清单外的 ## 标题、禁在分区块内用 # 小节、禁在分区外写 - 条目：",
-        _sections_block(sections, quotas),
+        _sections_block(sections),
         "",
-        f"配额配比由用户的感性/理性滑杆决定（当前感性占 {tone_ratio}%）："
-        f"感性池 {emo} 字符、理性池 {int(g_limit) - emo} 字符，同侧各区平分（见上方每区配额）。",
-        "配额是上限不是任务：写不满就空着，为了填满写标签式空话比留白更糟。",
-        "",
-        "分区后面那段「介绍」是用户对这个分区关注点的定义，不是装饰：整理时按它判断"
-        "一条内容该归属哪里，也按它判断该分区内哪些条目已经偏离主题、需要重分配或删除。",
+        "分区收什么/不收什么、每区字符配额与实际用量，用 memory_read(scope=sections) 拉取。"
+        "首次往某区写入前、或要整理全局记忆时，必须先读它。",
+        "配额由用户的感性/理性天平决定（同侧各区平分）。配额是上限不是任务："
+        "写不满就空着，为了填满写标签式空话比留白更糟；超配额先合并同义条目再删过时内容。",
         "",
         "记一条用 memory_write(scope=global, mode=append, section=<分区名>)；"
         "整体整理用 mode=replace，正文按 ## 分区名 组织，不确定能否通过校验时先 dry_run=true 试写。",
     ]
     return "\n".join(parts)
 
-
 def _sections_block(
     sections: List[Dict[str, str]],
     quotas: Dict[str, int] | None = None,
 ) -> str:
-    """分区清单文本（- 名称：完整归类规则（基调，配额））；空 schema 返回空串。"""
+    """分区清单文本（- 名称：完整归类规则（基调，配额））；空 schema 返回空串。
+
+    quotas 为 None 时只出名称+hint：system prompt 里不放大段可变文本，
+    否则拖一次天平就得重建整个 system prompt，服务端前缀缓存全废。
+    """
     lines = []
     for s in sections or []:
         name = str(s.get("name") or "").strip()
         if not name:
             continue
+        if quotas is None:
+            # 轻量形态：只给名字+一句话，保证写对区；完整规则走工具按需读
+            hint = str(s.get("hint") or "").strip()
+            lines.append(f"- {name}：{hint}" if hint else f"- {name}")
+            continue
         text = str(s.get("detail") or s.get("hint") or "").strip()
         line = f"- {name}：{text}" if text else f"- {name}"
         tone = str(s.get("tone") or "rational").strip().lower()
         line += f"（{'感性' if tone == 'emotional' else '理性'}区"
-        if quotas and name in quotas:
+        if name in quotas:
             line += f"，配额 {quotas[name]} 字符"
         line += "）"
         lines.append(line)

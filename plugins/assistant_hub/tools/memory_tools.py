@@ -163,6 +163,39 @@ def _read_impl(tool_ctx, **kw) -> ToolResult:
     wd = _workdir(tool_ctx)
 
     try:
+        if scope == "sections":
+            sections = mgr.memory_sections(aid)
+            if not sections:
+                return ToolResult(
+                    True,
+                    content="当前没有定义分区：全局记忆为自由格式，内容直接按 ## 标题组织即可。",
+                )
+            quotas = mgr.memory_section_quotas(aid)
+            ratio = mgr.memory_tone_ratio(aid)
+            total = mgr.memory_max_chars(aid)["global"]
+            emo = total * ratio // 100
+            lines = [
+                f"全局记忆分区（感性占 {ratio}%：感性池 {emo} 字 / 理性池 {total - emo} 字，同侧各区平分）",
+                "",
+            ]
+            for s in sections:
+                name = str(s.get("name") or "")
+                tone = "感性" if str(s.get("tone") or "") == "emotional" else "理性"
+                detail = str(s.get("detail") or s.get("hint") or "").strip()
+                lines.append(f"- {name}（{tone}区，配额 {quotas.get(name, 0)}）")
+                if detail:
+                    lines.append(f"  {detail}")
+            over = mgr.memory_section_usage(aid)
+            if over:
+                lines.append("")
+                lines.append(
+                    "⚠ 已超配额："
+                    + "、".join(f"{o['name']} {o['chars']}/{o['quota']}" for o in over)
+                )
+            lines.append("")
+            lines.append("归属判定：改变做事方式进理性区，改变我对这个人或对自己位置的看法进感性区。")
+            lines.append("配额是上限不是任务：写不满就空着；超配额先合并同义条目再删过时内容。")
+            return ToolResult(True, content="\n".join(lines))
         if scope == "global":
             text = mgr.read_global_memory(aid).strip()
             lim = mgr.memory_max_chars(aid)["global"]
@@ -570,12 +603,14 @@ _READ_SCHEMA = {
             "scope=daily 带 date 读某天日志(长日志分页，翻页加 page)；不带 date 列近期索引(limit 控条数)；"
             "scope=daily 带 level/from_date/to_date/search/summary_only 进查询模式(按等级/日期/正则过滤，"
             "summary_only 只出「时刻|等级|摘要」，跨天条目按时间正序分页；date 与 from_date/to_date 互斥)；"
+            "scope=sections 返回全局记忆的分区定义（每区收什么/不收什么、基调、配额、已超限的区）："
+            "首次往某区写入或要整理全局记忆前先读它（system prompt 只列分区名，完整规则在这里）；"
             "不传 scope 给概览。已蒸馏日志仍可读。用户提到过去工作/旧决策/项目约定而上下文没有时先查这里。"
         ),
         "parameters": {
             "type": "object",
             "properties": {
-                "scope": {"type": "string", "description": "global / project / daily；缺省返回概览"},
+                "scope": {"type": "string", "description": "global / project / daily / sections；缺省返回概览"},
                 "date": {
                     "type": "string",
                     "description": "scope=daily 时的日期 YYYY-MM-DD；缺省列出近期索引；与 from_date/to_date 互斥",

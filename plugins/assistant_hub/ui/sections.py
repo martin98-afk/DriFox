@@ -10,10 +10,33 @@ MemorySection（全局/项目/日志）→ ExperienceSection（经验）。
 
 from __future__ import annotations
 
+import math
 from typing import Any, Dict, List, Optional, Tuple
 
-from PyQt5.QtCore import QRect, QSize, Qt, QTimer, pyqtSignal
-from PyQt5.QtGui import QColor, QFont, QFontMetrics, QIcon, QPainter, QPixmap
+from PyQt5.QtCore import (
+    QEasingCurve,
+    QPointF,
+    QPropertyAnimation,
+    QRect,
+    QRectF,
+    QSize,
+    Qt,
+    QTimer,
+    pyqtProperty,
+    pyqtSignal,
+)
+from PyQt5.QtGui import (
+    QBrush,
+    QColor,
+    QFont,
+    QFontMetrics,
+    QIcon,
+    QLinearGradient,
+    QPainter,
+    QPen,
+    QPixmap,
+    QRadialGradient,
+)
 from PyQt5.QtSvg import QSvgRenderer
 from PyQt5.QtWidgets import (
     QFrame,
@@ -23,6 +46,7 @@ from PyQt5.QtWidgets import (
     QLayout,
     QPlainTextEdit,
     QPushButton,
+    QRadioButton,
     QSizePolicy,
     QVBoxLayout,
     QWidget,
@@ -85,6 +109,12 @@ def _title_label(text: str, size: int = 12) -> QLabel:
         f"{get_font_family_css()} {font_size_css(size)}; font-weight: 600;"
     )
     return lbl
+
+def _tone_color(tone: str, alpha: int = 255) -> str:
+    """分区基调色：理性=蓝（知识），感性=橙（理解）。alpha<255 输出 #AARRGGBB。"""
+    c = QColor(Colors.WARNING if str(tone) == "emotional" else Colors.INFO)
+    c.setAlpha(max(0, min(255, int(alpha))))
+    return c.name(QColor.HexArgb)
 
 
 def _card_frame(parent=None) -> QFrame:
@@ -161,6 +191,17 @@ def _icon_btn(svg: str, size: int) -> "QPushButton":
     return btn
 
 
+def _edit_btn(size: int) -> "QPushButton":
+    """列表行编辑按钮：铅笔图标。"""
+    svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" '
+        f'fill="none" stroke="{Colors.TEXT_SECONDARY}" stroke-width="2" '
+        'stroke-linecap="round" stroke-linejoin="round">'
+        '<path d="M12 20h9"/>'
+        '<path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4Z"/>'
+        "</svg>"
+    )
+    return _icon_btn(svg, size)
 def _del_btn(size: int) -> "QPushButton":
     """列表行删除按钮：垃圾桶图标。"""
     svg = (
@@ -330,17 +371,20 @@ class _SectionChip(QFrame):
 
     视觉对齐人格卡：圆角边框、hover 高亮边框、点击进编辑。删除按钮在卡片右上角，
     默认隐藏（悬停可见），不与名称抢位。介绍容忍 3 行（多行输入），超长靠 tooltip 补全。
+    理性区（知识）用项目强调色，感性区（理解）用暖色：两类内容在同一行里一眼可分。
     """
 
     clicked = pyqtSignal()
     deleteRequested = pyqtSignal()
+    editRequested = pyqtSignal()
 
     W = 168
     H = 104
     INTRO_LINES = 3
 
-    def __init__(self, name: str, intro: str, parent=None):
+    def __init__(self, name: str, intro: str, tone: str = "rational", parent=None):
         super().__init__(parent)
+        self._tone = tone if str(tone) in ("rational", "emotional") else "rational"
         self.setObjectName("sectionChip")
         self.setCursor(Qt.PointingHandCursor)
         self.setFixedSize(self.W, self.H)
@@ -357,6 +401,14 @@ class _SectionChip(QFrame):
             f"{get_font_family_css()} {font_size_css(11)}; font-weight: 600;"
         )
         head.addWidget(self._name, 1)
+        # 右上角：编辑（改名称/介绍/基调）与删除；点卡片本身是查看内容
+        self._edit = _edit_btn(12)
+        self._edit.setFixedSize(20, 20)
+        self._edit.setToolTip("编辑分区（名称/介绍/基调）；点卡片本身查看内容")
+        self._edit.setStyleSheet(_btn_style(icon_only=True))
+        self._edit.setVisible(False)
+        self._edit.clicked.connect(self.editRequested.emit)
+        head.addWidget(self._edit, 0, Qt.AlignTop)
         self._del = _del_btn(12)
         self._del.setFixedSize(20, 20)
         self._del.setToolTip("删除该分区（记忆内容保留，下次蒸馏时重分配）")
@@ -382,27 +434,31 @@ class _SectionChip(QFrame):
         )
         v.addWidget(self._intro)
         v.addStretch()
-        self.setToolTip(intro or name)
+        self.setToolTip(f"{intro or name}\n\n点击查看该分区的记忆内容")
         self._apply_style()
 
     def _apply_style(self) -> None:
+        edge = _tone_color(self._tone, 110)
+        hover = _tone_color(self._tone, 255)
         self.setStyleSheet(
             f"""
             QFrame#sectionChip {{
                 background: transparent;
-                border: 1.5px solid {Colors.BORDER};
+                border: 1.5px solid {edge};
                 border-radius: 12px;
             }}
-            QFrame#sectionChip:hover {{ border-color: {Colors.TEXT_ACCENT}; }}
+            QFrame#sectionChip:hover {{ border-color: {hover}; }}
             QFrame#sectionChip QLabel {{ background: transparent; border: none; }}
         """
         )
 
     def enterEvent(self, e) -> None:  # noqa: N802
+        self._edit.setVisible(True)
         self._del.setVisible(True)
         super().enterEvent(e)
 
     def leaveEvent(self, e) -> None:  # noqa: N802
+        self._edit.setVisible(False)
         self._del.setVisible(False)
         super().leaveEvent(e)
 
@@ -457,6 +513,175 @@ class _NewSectionChip(QFrame):
             self.clicked.emit()
         super().mouseReleaseEvent(e)
 
+
+class _ToneBalance(QWidget):
+    """理性/感性天平：横梁随占比倾斜，两端圆盘写各自百分比。
+
+    为什么不用 Slider：进度条形态暗示「一个值从 0 到 100」，
+    这里本质是两个盘子的轻重对比——感性越多右侧下沉，天平形状直接对应语义。
+    数值范围 10~70（两端极端会挤掉另一侧的全部空间）。
+    """
+
+    valueChanged = pyqtSignal(int)
+
+    MIN = 10
+    MAX = 70
+    H = 104
+    DROP = 16.0  # 单侧最大垂直落差（px），与宽度无关，保证视觉稳定
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._ratio = 30
+        self._display = 30.0
+        self._dragging = False
+        self._press_x = 0.0
+        self._press_ratio = 30
+        self.setFixedHeight(self.H)
+        self.setMinimumWidth(260)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setToolTip("拖动调整配比：左盘沉=理性多，右盘沉=感性多（两端百分比即两池占比）")
+        self._anim = QPropertyAnimation(self, b"displayRatio", self)
+        self._anim.setDuration(260)
+        self._anim.setEasingCurve(QEasingCurve.OutCubic)
+
+    # 动画用属性（百分比浮点，避免整格跳动）
+    def _get_display(self) -> float:
+        return self._display
+
+    def _set_display(self, v: float) -> None:
+        self._display = float(v)
+        self.update()
+
+    displayRatio = pyqtProperty(float, _get_display, _set_display)
+
+    def ratio(self) -> int:
+        return int(self._ratio)
+
+    def set_ratio(self, v: int, animate: bool = True) -> None:
+        v = max(self.MIN, min(self.MAX, int(v)))
+        self._ratio = v
+        self._anim.stop()
+        if animate:
+            self._anim.setStartValue(float(self._display))
+            self._anim.setEndValue(float(v))
+            self._anim.start()
+        else:
+            self._display = float(v)
+            self.update()
+
+    # ── 几何：端点垂直落差固定，水平长度随控件宽度 ──
+    def _half(self) -> float:
+        return min(self.width() * 0.40, 220.0)
+
+    def _geom(self) -> Tuple[QPointF, QPointF, QPointF]:
+        cx = self.width() / 2.0
+        pivot = QPointF(cx, self.H - 36)
+        mid = (self.MIN + self.MAX) / 2.0
+        t = (self._display - mid) / ((self.MAX - self.MIN) / 2.0)
+        dy = t * self.DROP
+        dx = math.sqrt(max(self._half() ** 2 - dy * dy, 1.0))
+        return QPointF(cx - dx, pivot.y() - dy), QPointF(cx + dx, pivot.y() + dy), pivot
+
+    def _draw_pan(self, p: QPainter, pos: QPointF, color: str, label: str, pct: int) -> None:
+        r = 19.0
+        # 外发光：让两端盘子从深色背景里浮起来
+        glow = QRadialGradient(pos, r * 1.55)
+        c = QColor(color)
+        c.setAlpha(80)
+        glow.setColorAt(0.0, c)
+        c2 = QColor(color)
+        c2.setAlpha(0)
+        glow.setColorAt(1.0, c2)
+        p.setPen(Qt.NoPen)
+        p.setBrush(QBrush(glow))
+        p.drawEllipse(pos, r * 1.55, r * 1.55)
+
+        body = QColor(color)
+        body.setAlpha(225)
+        p.setBrush(body)
+        p.setPen(QPen(QColor(color), 1.5))
+        p.drawEllipse(pos, r, r)
+
+        text_color = QColor(readable_text_on(color, "#ffffff"))
+        p.setPen(text_color)
+        f = QFont(self.font())
+        f.setPixelSize(scale_font_size(8))
+        f.setBold(False)
+        p.setFont(f)
+        p.drawText(QRectF(pos.x() - r, pos.y() - 17, r * 2, 13), Qt.AlignCenter, label)
+        f.setPixelSize(scale_font_size(11))
+        f.setBold(True)
+        p.setFont(f)
+        p.drawText(QRectF(pos.x() - r, pos.y() - 4, r * 2, 17), Qt.AlignCenter, f"{pct}%")
+
+    def paintEvent(self, e) -> None:  # noqa: N802
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        left, right, pivot = self._geom()
+        c_rat = Colors.INFO
+        c_emo = Colors.WARNING
+
+        # 支架：两条斜腿 + 底座横线
+        pen = QPen(QColor(Colors.BORDER), 2)
+        pen.setCapStyle(Qt.RoundCap)
+        p.setPen(pen)
+        base_y = self.H - 8
+        p.drawLine(pivot, QPointF(pivot.x() - 13, base_y))
+        p.drawLine(pivot, QPointF(pivot.x() + 13, base_y))
+        p.drawLine(QPointF(pivot.x() - 22, base_y), QPointF(pivot.x() + 22, base_y))
+
+        # 横梁：蓝→橙渐变，一眼看出两端代表什么
+        grad = QLinearGradient(left, right)
+        grad.setColorAt(0.0, QColor(c_rat))
+        grad.setColorAt(1.0, QColor(c_emo))
+        beam = QPen(QBrush(grad), 3.0)
+        beam.setCapStyle(Qt.RoundCap)
+        p.setPen(beam)
+        p.drawLine(left, right)
+
+        # 支点：深色圆盘压住梁，露出一点亮边
+        p.setPen(QPen(QColor(Colors.TEXT_MUTED), 1.5))
+        p.setBrush(QColor(Colors.CONTENT_BG))
+        p.drawEllipse(pivot, 5, 5)
+
+        self._draw_pan(p, left, c_rat, "理性", 100 - self._ratio)
+        self._draw_pan(p, right, c_emo, "感性", self._ratio)
+        p.end()
+
+    # ── 交互：点哪跳哪 + 拖动跟手（热区限在天平附近，点页面空白不会跳变）──
+    def _hit(self, pos) -> bool:
+        _l, _r, pivot = self._geom()
+        if abs(pos.y() - pivot.y()) > 44:
+            return False
+        return abs(pos.x() - pivot.x()) <= self._half() + 26
+
+    def _ratio_from_x(self, x: float) -> int:
+        cx = self.width() / 2.0
+        half = max(self._half(), 1.0)
+        t = max(-1.0, min(1.0, (x - cx) / half))
+        mid = (self.MIN + self.MAX) / 2.0
+        return int(round(mid + t * (self.MAX - self.MIN) / 2.0))
+
+    def mousePressEvent(self, e) -> None:  # noqa: N802
+        if e.button() == Qt.LeftButton and self._hit(e.pos()):
+            self._dragging = True
+            v = self._ratio_from_x(e.pos().x())
+            if v != self._ratio:
+                self.set_ratio(v, animate=False)
+                self.valueChanged.emit(v)
+        super().mousePressEvent(e)
+
+    def mouseMoveEvent(self, e) -> None:  # noqa: N802
+        if self._dragging:
+            v = self._ratio_from_x(e.pos().x())
+            if v != self._ratio:
+                self.set_ratio(v, animate=False)
+                self.valueChanged.emit(v)
+        super().mouseMoveEvent(e)
+
+    def mouseReleaseEvent(self, e) -> None:  # noqa: N802
+        self._dragging = False
+        super().mouseReleaseEvent(e)
 
 class _MetaBar(QLabel):
     """记忆元信息：单行灰字摘要，点击可调上限。
@@ -1196,16 +1421,24 @@ class MemoryLimitDialog(MaskDialogBase):
 
 
 class SectionEditDialog(MaskDialogBase):
-    """记忆分区编辑弹窗：名称 + 介绍，确认发 confirmed(name, intro)。
+    """记忆分区编辑弹窗：名称 + 介绍 + 基调，确认发 confirmed(name, intro, tone)。
 
     介绍不是装饰文字：它会被注入蒸馏指令，指导模型整理时往这个分区关注什么内容。
+    基调决定该区的字符配额池：理性区吃理性池，感性区吃感性池（滑杆定比例）。
     """
 
-    confirmed = pyqtSignal(str, str)
+    confirmed = pyqtSignal(str, str, str)
 
     _INPUT_QSS = MemoryLimitDialog._INPUT_QSS
 
-    def __init__(self, name: str = "", hint: str = "", title: str = "新增分区", parent=None):
+    def __init__(
+        self,
+        name: str = "",
+        hint: str = "",
+        title: str = "新增分区",
+        tone: str = "rational",
+        parent=None,
+    ):
         super().__init__(parent)
         self.setShadowEffect(60, (0, 10), QColor(0, 0, 0, 100))
         self.setClosableOnMaskClicked(True)
@@ -1281,6 +1514,29 @@ class SectionEditDialog(MaskDialogBase):
         )
         v.addWidget(self._hint_edit)
 
+        # 基调：决定该区吃哪个配额池（理性池/感性池由记忆区滑杆分配）
+        tone_lab = QLabel("基调", self.widget)
+        tone_lab.setStyleSheet(f"color: {Colors.TEXT_PRIMARY}; {get_font_family_css()} {font_size_css(12)}")
+        v.addWidget(tone_lab)
+        tone_row = QHBoxLayout()
+        tone_row.setContentsMargins(0, 0, 0, 0)
+        tone_row.setSpacing(18)
+        radio_qss = (
+            f"QRadioButton {{ color: {Colors.TEXT_PRIMARY}; {get_font_family_css()} {font_size_css(12)};"
+            " spacing: 6px; background: transparent; }"
+            "QRadioButton::indicator { width: 14px; height: 14px; }"
+        )
+        self._tone_rational = QRadioButton("理性（知识：下次少犯错）", self.widget)
+        self._tone_emotional = QRadioButton("感性（理解：下次更像个人）", self.widget)
+        for rb in (self._tone_rational, self._tone_emotional):
+            rb.setStyleSheet(radio_qss)
+            rb.setCursor(Qt.PointingHandCursor)
+            tone_row.addWidget(rb)
+        tone_row.addStretch()
+        self._tone_rational.setChecked(str(tone) != "emotional")
+        self._tone_emotional.setChecked(str(tone) == "emotional")
+        v.addLayout(tone_row)
+
         err = QLabel("", self.widget)
         err.setWordWrap(True)
         err.setVisible(False)
@@ -1342,7 +1598,11 @@ class SectionEditDialog(MaskDialogBase):
             self._err.setText("分区名不能含换行，也不能以 # 开头")
             self._err.setVisible(True)
             return
-        self.confirmed.emit(name, self._hint_edit.toPlainText().strip())
+        self.confirmed.emit(
+            name,
+            self._hint_edit.toPlainText().strip(),
+            "emotional" if self._tone_emotional.isChecked() else "rational",
+        )
         self.accept()
 
 
@@ -1364,6 +1624,12 @@ class MemorySection(_Section):
     dismissDriftRequested = pyqtSignal(str)
     sectionsChanged = pyqtSignal(list)
     seedSectionsRequested = pyqtSignal()
+    # 感性占比（全局记忆分区配额的比例，10~70）
+    toneRatioChanged = pyqtSignal(int)
+    # 整理记忆：向对话输入整理提示词（模型按当前分区与配额重排）
+    organizeRequested = pyqtSignal()
+    # 查看某个分区的记忆内容（点卡片本身触发）
+    viewSection = pyqtSignal(str)
 
     def __init__(self, parent=None):
         super().__init__("记忆", parent)
@@ -1377,6 +1643,7 @@ class MemorySection(_Section):
         self._global_chars = 4000
         self._project_chars = 3000
         self._sections: List[Dict[str, str]] = []
+        self._tone_loading = False
 
         # ── 顶部元信息：单行灰字摘要，点它改上限 ──
         self._meta = _MetaBar()
@@ -1409,8 +1676,13 @@ class MemorySection(_Section):
         self._wrap_v.setSpacing(2)
 
         # ── 全局记忆组：标题行 + 可点的分区行 ──
-        self._global_row = _RowItem("全局记忆", "跨项目 MEMORY.md")
+        self._global_row = _RowItem("全局记忆", "跨项目")
         self._global_row.clicked.connect(self.viewGlobal.emit)
+        self._organize_btn = QPushButton("整理")
+        self._organize_btn.setStyleSheet(_btn_style())
+        self._organize_btn.setToolTip("向对话输入整理提示词：模型按当前分区与配额重排全局记忆")
+        self._organize_btn.clicked.connect(self.organizeRequested.emit)
+        self._global_row.add_tail(self._organize_btn)
         self._restore_btn = QPushButton("恢复")
         self._restore_btn.setStyleSheet(_btn_style())
         self._restore_btn.setToolTip("从快照恢复记忆（每次覆盖写/清除前自动存快照）")
@@ -1418,6 +1690,22 @@ class MemorySection(_Section):
         self._restore_btn.setVisible(False)
         self._global_row.add_tail(self._restore_btn)
         self._wrap_v.addWidget(self._global_row)
+
+        # ── 理性/感性天平：横梁倾斜表示两侧配额轻重，两端圆盘写百分比 ──
+        self._balance = _ToneBalance()
+        self._balance.set_ratio(30, animate=False)
+        self._balance.valueChanged.connect(self._on_tone_changed)
+        # 拖动中只重绘，停手 400ms 才落盘（逐像素写 yaml 会卡且刷日志）
+        self._tone_timer = QTimer(self)
+        self._tone_timer.setSingleShot(True)
+        self._tone_timer.setInterval(400)
+        self._tone_timer.timeout.connect(lambda: self.toneRatioChanged.emit(self._balance.ratio()))
+        tone_row = QHBoxLayout()
+        tone_row.setContentsMargins(0, 0, 0, 0)
+        tone_row.addWidget(self._balance, 1)
+        self._tone_row = QWidget()
+        self._tone_row.setLayout(tone_row)
+        self._wrap_v.addWidget(self._tone_row)
 
         # 记忆分区：标题行 + 卡片流（紧贴全局记忆，卡片在标题行下面）
         self._sec_head = _RowItem("记忆分区", "指导蒸馏时按区归类")
@@ -1501,6 +1789,29 @@ class MemorySection(_Section):
 
     # ── 记忆分区（全局记忆归类骨架）──
 
+    def _on_tone_changed(self, v: int) -> None:
+        """天平拖动：百分比由控件自身渲染，这里只做落盘防抖。"""
+        if not self._tone_loading:
+            self._tone_timer.start()
+
+    def set_tone_ratio(self, v: int) -> None:
+        """回填感性占比（不触发 toneRatioChanged，避免打开卡片就回写磁盘）。"""
+        self._tone_loading = True
+        try:
+            self._tone_timer.stop()
+            self._balance.set_ratio(int(v), animate=False)
+        finally:
+            self._tone_loading = False
+
+    def set_section_quotas(self, quotas: Dict[str, int]) -> None:
+        """分区标题行摘要：理性池/感性池的实际字符配额（随滑杆与区数变化）。"""
+        if not self._sections:
+            return
+        tones = {str(s.get("name") or ""): str(s.get("tone") or "rational") for s in self._sections}
+        rat = sum(int(v) for k, v in (quotas or {}).items() if tones.get(k) == "rational")
+        emo = sum(int(v) for k, v in (quotas or {}).items() if tones.get(k) == "emotional")
+        self._sec_head.set_desc(f"{len(self._sections)} 个 · 理性 {rat} / 感性 {emo}")
+
     def set_sections(self, sections: List[Dict[str, str]]) -> None:
         """重建分区卡片流。空列表 → 显示「未定义分区」提示（用户手动删光时才出现）。
 
@@ -1523,8 +1834,10 @@ class MemorySection(_Section):
         for idx, sec in enumerate(self._sections):
             name = str(sec.get("name") or "")
             intro = str(sec.get("detail") or sec.get("hint") or "")
-            chip = _SectionChip(name, intro)
-            chip.clicked.connect(lambda i=idx: self._edit_section(i))
+            chip = _SectionChip(name, intro, str(sec.get("tone") or "rational"))
+            # 点卡片看内容，右上角铅笔改分区定义（编辑与查看分开，避免误触改配置）
+            chip.clicked.connect(lambda n=name: self.viewSection.emit(n))
+            chip.editRequested.connect(lambda i=idx: self._edit_section(i))
             chip.deleteRequested.connect(lambda i=idx: self._delete_section(i))
             self._chips_row.addWidget(chip)
         new_chip = _NewSectionChip()
@@ -1564,7 +1877,9 @@ class MemorySection(_Section):
     def _on_add_section(self) -> None:
         dlg = SectionEditDialog(title="新增分区", parent=self.window())
         dlg.confirmed.connect(
-            lambda n, h: self._commit_sections([*(self._sections), {"name": n, "hint": h, "detail": h}])
+            lambda n, h, t: self._commit_sections(
+                [*(self._sections), {"name": n, "hint": h, "detail": h, "tone": t}]
+            )
         )
         dlg.exec()
 
@@ -1573,11 +1888,14 @@ class MemorySection(_Section):
             return
         cur = self._sections[idx]
         cur_detail = str(cur.get("detail") or cur.get("hint") or "")
-        dlg = SectionEditDialog(str(cur.get("name") or ""), cur_detail, "编辑分区", self.window())
-        dlg.confirmed.connect(lambda n, h, i=idx: self._replace_section(i, n, h))
+        cur_tone = str(cur.get("tone") or "rational")
+        dlg = SectionEditDialog(
+            str(cur.get("name") or ""), cur_detail, "编辑分区", cur_tone, self.window()
+        )
+        dlg.confirmed.connect(lambda n, h, t, i=idx: self._replace_section(i, n, h, t))
         dlg.exec()
 
-    def _replace_section(self, idx: int, name: str, hint: str) -> None:
+    def _replace_section(self, idx: int, name: str, hint: str, tone: str = "rational") -> None:
         names = {str(s.get("name") or "") for i, s in enumerate(self._sections) if i != idx}
         if name in names:
             self._sec_head.set_desc(f"分区「{name}」已存在")
@@ -1585,7 +1903,7 @@ class MemorySection(_Section):
         items = [dict(s) for s in self._sections]
         # 弹窗输入的是完整归类说明：detail 存全文，hint 取首句做行内短标签
         short = hint.split("。", 1)[0].strip() or hint
-        items[idx] = {"name": name, "hint": short, "detail": hint}
+        items[idx] = {"name": name, "hint": short, "detail": hint, "tone": tone}
         self._commit_sections(items)
 
     def _delete_section(self, idx: int) -> None:

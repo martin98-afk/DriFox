@@ -300,6 +300,9 @@ class AssistantCardWidget(QWidget):
         self._memory.limitsChanged.connect(self._on_memory_limits)
         self._memory.sectionsChanged.connect(self._on_memory_sections_changed)
         self._memory.seedSectionsRequested.connect(self._on_memory_seed_sections)
+        self._memory.toneRatioChanged.connect(self._on_memory_tone_changed)
+        self._memory.organizeRequested.connect(self._on_memory_organize)
+        self._memory.viewSection.connect(self._on_view_section)
         self._memory.restoreRequested.connect(self._on_restore_memory)
         self._memory.migrateRequested.connect(self._on_migrate_memory)
         self._memory.dismissDriftRequested.connect(self._on_dismiss_drift)
@@ -483,6 +486,8 @@ class AssistantCardWidget(QWidget):
             self._memory.set_memory_enabled(a.memory_enabled)
             self._memory.set_limits(a.global_memory_max_chars, a.project_memory_max_chars)
             self._memory.set_sections(mgr.memory_sections(aid_capture))
+            self._memory.set_tone_ratio(mgr.memory_tone_ratio(aid_capture))
+            self._memory.set_section_quotas(mgr.memory_section_quotas(aid_capture))
             self._pinned.reload_pins(mgr.read_pinned(aid_capture))
             self._refresh_memory(aid_capture)
             self._experience.set_enabled(a.experience_enabled)
@@ -765,6 +770,8 @@ class AssistantCardWidget(QWidget):
             self._notify(f"分区已更新，全局记忆标题同步改名：{'、'.join(renamed)}")
         else:
             self._notify(f"分区已更新（{r.get('count', 0)} 个）")
+        # 增删分区会改变同侧平分，配额摘要跟着刷
+        self._memory.set_section_quotas(self._mgr.memory_section_quotas(aid))
 
     def _on_memory_limits(self, global_chars: int, project_chars: int) -> None:
         """记忆字符上限变更：存助手配置（工具拦截/注入截断即时生效）。"""
@@ -777,6 +784,54 @@ class AssistantCardWidget(QWidget):
         if changed:
             self._mgr.update(a)
             self._refresh_memory(self._active_aid)
+
+    def _on_memory_tone_changed(self, ratio: int) -> None:
+        """理性/感性天平：只落盘 + 刷新 UI 摘要。
+
+        故意不失效 system prompt 缓存：配额与分区规则已被移出 system prompt
+        （改由 memory_read(scope=sections) 按需给），这里重建只会白白废掉
+        服务端前缀缓存，模型又看不到任何变化。
+        """
+        if not self._active_aid:
+            return
+        r = self._mgr.set_memory_tone_ratio(self._active_aid, ratio)
+        if not r.get("ok"):
+            self._notify_error(f"配比保存失败：{r.get('error')}")
+            return
+        self._memory.set_section_quotas(self._mgr.memory_section_quotas(self._active_aid))
+
+    # 整理记忆：交给对话里的模型按当前分区与配额重排。
+    # 走对话而非后台 LLM 调用，用户可看到过程、可中断、可追加要求。
+    _ORGANIZE_PROMPT = (
+        "请整理我的全局记忆，严格按当前分区执行：\n"
+        "1. 用 memory_read(scope=global) 读全文（末尾带 base）；分区清单与每区配额见系统提示\n"
+        "2. 逐条重判归属：改变做事方式的进理性区，改变你对我、或对你自己位置的看法的进感性区；"
+        "按「改变什么」分类，不按话题\n"
+        "3. 同一意思合并成一条，过时或被推翻的删掉；感性区禁形容词标签（「用户喜欢简洁」），"
+        "必须写成「具体行为 + 你的解读」\n"
+        "4. 按配额压缩：超配额的区先合并再删，宁可留白也不凑数；某区一条都没有时从别区找匹配的搬进来\n"
+        "5. 用 memory_write(scope=global, mode=replace, base=...) 整体写回：先 dry_run=true 验格式，"
+        "过了再去掉 dry_run 真写\n"
+        "6. 完成后告诉我：各区几条、删了什么、合并了什么、有没有还超配额的区"
+    )
+
+    def _on_memory_organize(self) -> None:
+        """整理记忆：关闭助手中心 → 把整理提示词写进对话输入框。"""
+        if not self._active_aid:
+            return
+        try:
+            from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+
+            UIPluginRegistry.get_instance().hide_floating_card_globally(CARD_ID)
+        except Exception as e:
+            logger.warning(f"[assistant_hub] 关闭助手中心失败: {e}")
+        try:
+            writer = _caps("input.write")
+            if writer is None:
+                raise RuntimeError("无 input.write 能力")
+            writer(self._ORGANIZE_PROMPT)
+        except Exception as e:
+            self._notify_error(f"无法填入提示词：{e}")
 
     def _reload_pinned(self, aid: str) -> None:
         """写盘后回刷置顶列表：UI 永远以盘上数据为准（增删改即时可见）。"""
@@ -822,6 +877,18 @@ class AssistantCardWidget(QWidget):
         paths = self._mgr.memory_paths(self._active_aid)
         title = f"全局记忆 · {paths.get('global', '')}"
         _open_dialog(TextViewOverlay(title, text.strip() or "（暂无全局记忆）", parent=_host_window() or self.window()))
+
+    def _on_view_section(self, name: str) -> None:
+        """查看单个分区的记忆内容（点分区卡片触发，不带整篇全文）。"""
+        if not self._active_aid or not name:
+            return
+        text = self._mgr.read_global_section(self._active_aid, name)
+        if not text.strip():
+            self._notify_error(f"全局记忆里没有「{name}」分区（可能还没写过内容）")
+            return
+        _open_dialog(
+            TextViewOverlay(f"全局记忆 · {name}", text, parent=_host_window() or self.window())
+        )
 
     def _on_view_project(self) -> None:
         """查看项目记忆（当前工作目录 .drifox/memory/<aid>/MEMORY.md）。"""

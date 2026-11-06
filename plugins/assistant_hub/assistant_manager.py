@@ -1202,15 +1202,8 @@ class AssistantManager:
                 + g_text
                 + "\n</global_memory>"
             )
-            over = store.section_usage(g_text, quotas)
-            if over:
-                detail = "、".join(f"{o['name']} {o['chars']}/{o['quota']}" for o in over[:4])
-                parts.append(
-                    "**ACTION REQUIRED**: 全局记忆分区超配额（"
-                    + detail
-                    + "）。按记忆说明书整理：理性区合并重复条目，感性区删标签式空话；"
-                    "配额是上限不是任务，写不满就空着。"
-                )
+            # 分区超配额提示不进 system prompt：它随天平/分区变化而变，
+            # 写进来等于每拖一次天平就废掉整个前缀缓存。改由 memory_read(scope=sections) 按需给。
 
         # 项目记忆
         p_text = (store.read_project_memory(workdir, aid) or "").strip() if workdir else ""
@@ -1287,6 +1280,14 @@ class AssistantManager:
             return {}
         return store.section_quotas(sections, self.memory_tone_ratio(aid), self.memory_max_chars(aid)["global"])
 
+    def memory_section_usage(self, aid: str) -> List[Dict[str, Any]]:
+        """各区实际用量 vs 配额（只返回超配额的区，memory_read(scope=sections) 用）。"""
+        store = self._core_store()
+        if not aid:
+            return []
+        text = store.read_global_memory(self._assistant_dir(aid))
+        return store.section_usage(text, self.memory_section_quotas(aid))
+
     def memory_paths(self, aid: str, workdir: str = "") -> Dict[str, str]:
         """该助手的记忆路径集合（UI 展示用）。"""
         store = self._core_store()
@@ -1299,6 +1300,11 @@ class AssistantManager:
 
     def read_global_memory(self, aid: str) -> str:
         return self._core_store().read_global_memory(self._assistant_dir(aid))
+
+    def read_global_section(self, aid: str, name: str) -> str:
+        """取全局记忆里某个分区的块（UI 点卡片查看用）；无此分区返回空串。"""
+        store = self._core_store()
+        return store.section_block_text(store.read_global_memory(self._assistant_dir(aid)), name)
 
     def write_global_memory(self, aid: str, content: str) -> bool:
         return self._core_store().write_global_memory(self._assistant_dir(aid), content)
@@ -1345,8 +1351,9 @@ class AssistantManager:
         改名识别：按列表位置对比新旧（UI 编辑只改 name/hint，不重排）。
         删除分区**不**动文件：孤儿标题保留，下次蒸馏重分配（用户决策 2026-10-25）。
 
-        改完必须失效 system prompt 缓存：分区清单是注入说明书的一部分，
-        已缓存 prompt 的会话不失效就会继续用旧清单（用户新增分区后模型「忘」的直接根因）。
+        改完只在「分区名或 hint 变了」时失效 system prompt 缓存：
+        system prompt 里只列名字+hint，改名/增删会让模型看到旧清单（必须重建）；
+        只改 detail 或基调则 prompt 完全不变，失效只会白白废掉服务端前缀缓存。
         """
         store = self._core_store()
         aid_dir = self._assistant_dir(aid)
@@ -1368,7 +1375,11 @@ class AssistantManager:
                     renamed.append(f"{old_name}→{new_name}")
             if renamed:
                 store.write_global_memory(aid_dir, text)
-        self._invalidate_session_prompt_caches()
+        # 改名会重写 MEMORY.md 标题（记忆内容变），与清单变化一样必须重建
+        old_sig = [(str(s.get("name") or ""), str(s.get("hint") or "")) for s in old]
+        new_sig = [(str(s.get("name") or ""), str(s.get("hint") or "")) for s in new]
+        if old_sig != new_sig:
+            self._invalidate_session_prompt_caches()
         return {"ok": True, "count": len(new), "renamed": renamed}
 
     def memory_sections_block(self, aid: str) -> str:
