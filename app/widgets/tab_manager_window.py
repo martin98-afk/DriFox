@@ -2771,7 +2771,10 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
             return image
         theme_dir = theme_manager.get_theme_dir(theme_manager.get_current_theme_id())
         if theme_dir:
-            abs_path = str(theme_dir / image)
+            # normpath 清掉 `../` 段：跨主题共享资源（../shared/x.mp3）拼出的
+            # 原始字符串带 "demo/../shared"，exists 能过，但 QUrl.fromLocalFile
+            # 会把它原样带进 file:// URL，媒体后端不保证能解析
+            abs_path = _os.path.normpath(str(theme_dir / image))
             if _os.path.exists(abs_path):
                 return abs_path
         return image  # fallback 原值
