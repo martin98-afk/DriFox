@@ -18,6 +18,11 @@
   - offset    : [int, int] 偏移像素 [x, y]
   - stretch_x : bool 是否水平拉伸（仅 anchor='scene' 有效）
   - opacity   : float 0.0~1.0
+  - fit_width : bool 宽度超过 ref 容器时等比缩小（只缩不放，默认 False）
+  - fit_height: bool 高度超过 ref 容器时等比缩小（只缩不放，默认 False）
+
+不写 fit_* 时按图片原尺寸摆放（历史行为）。超出容器的装饰件在旧行为下
+会溢出到可视区域外，大图必须显式开启 fit。
 """
 
 from typing import Optional
@@ -142,6 +147,18 @@ class DecorationLayer(QWidget):
         if pixmap is None or pixmap.isNull():
             return
         pix_w, pix_h = pixmap.width(), pixmap.height()
+
+        # fit_width / fit_height：按 ref 容器等比缩放，只缩不放。
+        # 不写这两个字段时保持历史行为（原尺寸摆放），避免改变已有主题外观。
+        _fit_w, _fit_h = ref.width(), ref.height()
+        scale = 1.0
+        if dec.get("fit_width") and pix_w > 0 and _fit_w > 0:
+            scale = min(scale, _fit_w / pix_w)
+        if dec.get("fit_height") and pix_h > 0 and _fit_h > 0:
+            scale = min(scale, _fit_h / pix_h)
+        if scale < 1.0:
+            pix_w = max(1, int(pix_w * scale))
+            pix_h = max(1, int(pix_h * scale))
 
         # anchor='scene' 撑满 ref_widget
         if anchor == "scene":
