@@ -232,6 +232,8 @@ class ThemeManager:
                           停靠区 / UI 插件槽位等所有 _chat_frame 内的内容）
           - decorations : 装饰件数组（多张 PNG，按 anchor 摆放；anchor 坐标系以
                           OpenAIChatToolWindow 为基准，定位在对话区/输入框附近）
+          - overlay     : 动态光影视频覆盖层（循环视频帧 multiply 混合，scene 之上、
+                          UI 之下；字段 video/opacity/brightness_boost/enabled）
 
         旧字段兼容（避免破坏现有 17 套内置主题）：
           - background.window_bg → backgrounds.window
@@ -247,6 +249,7 @@ class ThemeManager:
             "chat_area": dict | None,
             "scene": dict | None,
             "decorations": list[dict],
+            "overlay": dict | None,
           }
         """
         self._ensure_loaded()
@@ -266,6 +269,9 @@ class ThemeManager:
                 "blur": d.get("blur", 0),
                 "dim": d.get("dim"),
                 "enabled": d.get("enabled", True),
+                # overlay 区块专用：视频路径与亮度补偿色，其余区块恒 None
+                "video": d.get("video"),
+                "brightness_boost": d.get("brightness_boost"),
             }
 
         return {
@@ -278,6 +284,7 @@ class ThemeManager:
             "chat_area": _normalize(new_bg.get("chat_area")),
             "scene": _normalize(new_bg.get("scene")),
             "decorations": new_bg.get("decorations") or [],
+            "overlay": _normalize(new_bg.get("overlay")),
         }
 
     def get_theme_dir(self, theme_id: str) -> Optional[Path]:
