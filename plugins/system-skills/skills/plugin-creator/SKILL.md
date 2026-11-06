@@ -39,6 +39,8 @@ allowed-tools: Read, Glob, Grep, Write, Edit, Bash(python:*), question
 | "配置 MCP 服务器" | MCP | references/components/mcp.md |
 | "配置 LSP 语言服务器" | LSP | references/components/lsp.md |
 | "做个主题""改配色" | Themes | references/components/themes.md |
+| "换个区域放视频背景""视频挂侧栏" | Themes | references/components/themes.md |
+| "主题带音乐""切主题放歌""主题背景音" | Themes | references/components/themes.md |
 | "做 UI 卡片""浮动卡" | UI | → 调用 ui-plugin-creator 技能 |
 | "加个工具""做个 AI 工具" | Tools | references/components/tools.md |
 | "加个服务商""接新模型厂商" | Providers | references/components/providers.md |
