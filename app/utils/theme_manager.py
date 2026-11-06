@@ -232,8 +232,11 @@ class ThemeManager:
                           停靠区 / UI 插件槽位等所有 _chat_frame 内的内容）
           - decorations : 装饰件数组（多张 PNG，按 anchor 摆放；anchor 坐标系以
                           OpenAIChatToolWindow 为基准，定位在对话区/输入框附近）
-          - overlay     : 动态光影视频覆盖层（循环视频帧 multiply 混合，scene 之上、
-                          UI 之下；字段 video/opacity/brightness_boost/enabled）
+          - overlay     : 动态光影视频覆盖层（循环视频帧压暗混合，scene 之上、
+                          UI 之下；字段 video/target/opacity/brightness_boost/
+                          position/enabled）
+          - music       : 主题背景音乐播放列表（字段 tracks/volume/loop/
+                          fade_ms/enabled）
 
         旧字段兼容（避免破坏现有 17 套内置主题）：
           - background.window_bg → backgrounds.window
@@ -250,6 +253,7 @@ class ThemeManager:
             "scene": dict | None,
             "decorations": list[dict],
             "overlay": dict | None,
+            "music": dict | None,
           }
         """
         self._ensure_loaded()
@@ -269,10 +273,26 @@ class ThemeManager:
                 "blur": d.get("blur", 0),
                 "dim": d.get("dim"),
                 "enabled": d.get("enabled", True),
-                # overlay 区块专用：视频路径与亮度补偿色，其余区块恒 None
+                # overlay 区块专用：视频路径、亮度补偿色与挂载区域，其余区块恒 None
                 "video": d.get("video"),
                 "brightness_boost": d.get("brightness_boost"),
                 "position": d.get("position"),
+                "target": d.get("target"),
+            }
+
+        def _normalize_music(d: Optional[dict]) -> Optional[dict]:
+            """music 区块字段集与区域背景不同，单独归一（不套 _normalize）"""
+            if not d:
+                return None
+            tracks = d.get("tracks") or []
+            if isinstance(tracks, str):
+                tracks = [tracks]
+            return {
+                "tracks": [str(t) for t in tracks],
+                "volume": float(d.get("volume", 0.6)),
+                "loop": bool(d.get("loop", True)),
+                "fade_ms": int(d.get("fade_ms", 300)),
+                "enabled": d.get("enabled", True),
             }
 
         return {
@@ -286,6 +306,7 @@ class ThemeManager:
             "scene": _normalize(new_bg.get("scene")),
             "decorations": new_bg.get("decorations") or [],
             "overlay": _normalize(new_bg.get("overlay")),
+            "music": _normalize_music(new_bg.get("music")),
         }
 
     def get_theme_dir(self, theme_id: str) -> Optional[Path]:
