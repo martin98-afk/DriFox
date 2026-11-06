@@ -37,7 +37,19 @@ def _ensure_split_system_plugins_enabled():
 
         cfg = Settings.get_instance()
         enabled = [n for n in (cfg.enabled_plugins.value or []) if n != "system"]
-        missing = [n for n in PluginManager._SPLIT_COMPONENT_TO_PLUGIN.values() if n not in enabled]
+        # 独立功能插件（不在 system 拆分族 _SPLIT_COMPONENT_TO_PLUGIN 内，但产品
+        # 默认启用）：缺补录时其工具被整载跳过（plugin_tool_loader 日志「跳过已
+        # 禁用插件的工具」），subagent_para 等工具描述缺后缀 → 依赖完整工具
+        # 形态的用例（如 schema_cache 的 agent 维度断言）失败（诊 #16）。
+        _standalone_plugins = (
+            "assistant_hub",
+            "plugin-marketplace",
+            "system-handoff",
+            "system-subagent",
+            "system-timer",
+            "worktree-manager",
+        )
+        missing = [n for n in (*PluginManager._SPLIT_COMPONENT_TO_PLUGIN.values(), *_standalone_plugins) if n not in enabled]
         if missing:
             cfg.set(cfg.enabled_plugins, enabled + missing, save=False)
     except Exception:
