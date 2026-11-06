@@ -1184,7 +1184,13 @@ class AssistantManager:
             store.ensure_default_sections(aid_dir)
         except Exception:
             pass
-        return prompts.build_memory_system(global_file, proj_dir, self.memory_max_chars(aid))
+        # 统一分区标签：system prompt 里每一块都要有 <xxx> 边界，
+        # 模型才能分清哪段是人格、哪段是记忆纪律、哪段是项目笔记。
+        return (
+            "<memory_system>\n"
+            + prompts.build_memory_system(global_file, proj_dir, self.memory_max_chars(aid))
+            + "\n</memory_system>"
+        )
 
     def memory_snapshot_block(self, aid: str, workdir: str = "") -> str:
         """记忆快照（SessionStart hook 注入会话消息，会话内只注入一次）。

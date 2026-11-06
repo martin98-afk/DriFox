@@ -178,16 +178,20 @@ def _svg_icon(svg: str, size: int) -> QIcon:
     return QIcon(pm)
 
 
-def _icon_btn(svg: str, size: int) -> "QPushButton":
-    """纯图标按钮（列表行增删，替代字符 +/×）。"""
-    btn = QPushButton()
+def _icon_btn(svg: str, size: int, parent=None) -> "QPushButton":
+    """纯图标按钮（列表行增删，替代字符 +/×）。
+
+    parent 必须传：图钮创建后会调 setVisible，无 parent 的 QWidget 一旦
+    setVisible(True) 就会先弹成顶层窗口（幽灵小窗）。
+    """
+    btn = QPushButton(parent)
     icon = _svg_icon(svg, size)
     btn.setIcon(icon)
     btn.setIconSize(icon.actualSize(QSize(size, size)))
     return btn
 
 
-def _edit_btn(size: int) -> "QPushButton":
+def _edit_btn(size: int, parent=None) -> "QPushButton":
     """列表行编辑按钮：铅笔图标。
 
     颜色必须用 hex（TEXT_ACCENT/TEXT_PRIMARY/ERROR）：QSvgRenderer 不认 CSS
@@ -201,8 +205,8 @@ def _edit_btn(size: int) -> "QPushButton":
         '<path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4Z"/>'
         "</svg>"
     )
-    return _icon_btn(svg, size)
-def _del_btn(size: int) -> "QPushButton":
+    return _icon_btn(svg, size, parent)
+def _del_btn(size: int, parent=None) -> "QPushButton":
     """列表行删除按钮：垃圾桶图标。"""
     svg = (
         '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" '
@@ -214,7 +218,7 @@ def _del_btn(size: int) -> "QPushButton":
         '<line x1="14" y1="11" x2="14" y2="17"/>'
         "</svg>"
     )
-    return _icon_btn(svg, size)
+    return _icon_btn(svg, size, parent)
 
 
 def _add_btn(size: int) -> "QPushButton":
@@ -382,7 +386,16 @@ class _SectionChip(QFrame):
     H = 104
     INTRO_LINES = 3
 
-    def __init__(self, name: str, intro: str, tone: str = "rational", chars: int = -1, quota: int = 0, parent=None):
+    def __init__(
+        self,
+        name: str,
+        intro: str,
+        tone: str = "rational",
+        chars: int = -1,
+        quota: int = 0,
+        show_edit: bool = True,
+        parent=None,
+    ):
         super().__init__(parent)
         self._tone = tone if str(tone) in ("rational", "emotional") else "rational"
         self.setObjectName("sectionChip")
@@ -395,28 +408,35 @@ class _SectionChip(QFrame):
         head = QHBoxLayout()
         head.setContentsMargins(0, 0, 0, 0)
         head.setSpacing(4)
-        self._name = QLabel(name)
+        self._name = QLabel(name, self)
         self._name.setStyleSheet(
             f"color: {Colors.TEXT_PRIMARY}; background: transparent; border: none;"
             f"{get_font_family_css()} {font_size_css(11)}; font-weight: 600;"
         )
-        head.addWidget(self._name, 1)
-        # 右上角：编辑（改名称/介绍/基调）与删除；点卡片本身是查看内容
-        self._edit = _edit_btn(12)
-        self._edit.setFixedSize(20, 20)
-        self._edit.setToolTip("编辑分区（名称/介绍/基调）；点卡片本身查看内容")
-        self._edit.setStyleSheet(_btn_style(icon_only=True))
-        self._edit.setVisible(False)
-        self._edit.clicked.connect(self.editRequested.emit)
-        head.addWidget(self._edit, 0, Qt.AlignTop)
-        self._del = _del_btn(12)
+        # 标题过长时省略，避免顶到右上角按钮被遮住
+        _f = QFont(self._name.font())
+        _f.setPixelSize(scale_font_size(11))
+        _f.setBold(True)
+        self._name.setText(QFontMetrics(_f).elidedText(name, Qt.ElideRight, self.W - 62))
+        head.addWidget(self._name)
+        v.addLayout(head)
+
+        # 右上角按钮改为绝对定位：进布局会挤压标题宽度（长分区名直接被截）
+        self._edit = None
+        if show_edit:
+            self._edit = _edit_btn(12, self)
+            self._edit.setFixedSize(20, 20)
+            self._edit.setToolTip("编辑分区（名称/介绍/基调）；点卡片本身查看内容")
+            self._edit.setStyleSheet(_btn_style(icon_only=True))
+            self._edit.setVisible(False)
+            self._edit.clicked.connect(self.editRequested.emit)
+        self._del = _del_btn(12, self)
         self._del.setFixedSize(20, 20)
         self._del.setToolTip("删除该分区（记忆内容保留，下次蒸馏时重分配）")
         self._del.setStyleSheet(_btn_style(danger=True, icon_only=True))
         self._del.setVisible(False)
         self._del.clicked.connect(self.deleteRequested.emit)
-        head.addWidget(self._del, 0, Qt.AlignTop)
-        v.addLayout(head)
+        self._layout_corner_buttons()
 
         # 介绍：按像素折 3 行（多行输入可能带换行，_elide_lines 只折行不认 \n，先压平）
         self._intro = QLabel()
@@ -435,7 +455,9 @@ class _SectionChip(QFrame):
         v.addWidget(self._intro)
         v.addStretch()
         # 底部字数角标：已用 / 配额，超配额转红（一眼看出该压哪个区）
-        self._usage = QLabel()
+        # ⚠ 必须传 parent=self：无 parent 的 QWidget 调 setVisible(True) 会先被 Qt
+        # 当作顶层窗口弹出来（每张卡一个，实测变成一排幽灵小窗），然后才被 addWidget 收养。
+        self._usage = QLabel(self)
         self._usage.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         if chars >= 0:
             over = bool(quota) and chars > quota
@@ -446,8 +468,8 @@ class _SectionChip(QFrame):
                 f"background: transparent; border: none;"
                 f"{get_font_family_css()} {font_size_css(9)}; {'font-weight:600;' if over else ''}"
             )
-        self._usage.setVisible(chars >= 0)
         v.addWidget(self._usage)
+        self._usage.setVisible(chars >= 0)
         self.setToolTip(f"{intro or name}\n\n点击查看该分区的记忆内容")
         self._apply_style()
 
@@ -466,13 +488,28 @@ class _SectionChip(QFrame):
         """
         )
 
+    def _layout_corner_buttons(self) -> None:
+        """把右上角按钮钉在固定位置（绝对定位，不参与布局）。"""
+        y = 7
+        x = self.width() - 10
+        self._del.move(x - 20, y)
+        x -= 22
+        if self._edit is not None:
+            self._edit.move(x - 20, y)
+
+    def resizeEvent(self, e) -> None:  # noqa: N802
+        self._layout_corner_buttons()
+        super().resizeEvent(e)
+
     def enterEvent(self, e) -> None:  # noqa: N802
-        self._edit.setVisible(True)
+        if self._edit is not None:
+            self._edit.setVisible(True)
         self._del.setVisible(True)
         super().enterEvent(e)
 
     def leaveEvent(self, e) -> None:  # noqa: N802
-        self._edit.setVisible(False)
+        if self._edit is not None:
+            self._edit.setVisible(False)
         self._del.setVisible(False)
         super().leaveEvent(e)
 
@@ -1871,7 +1908,14 @@ class MemorySection(_Section):
             intro = str(sec.get("detail") or sec.get("hint") or "")
             chars = int((usage or {}).get(name, -1))
             quota = int((quotas or {}).get(name, 0))
-            chip = _SectionChip(name, intro, str(sec.get("tone") or "rational"), chars, quota)
+            chip = _SectionChip(
+                name,
+                intro,
+                str(sec.get("tone") or "rational"),
+                chars,
+                quota,
+                show_edit=True,
+            )
             # 点卡片看内容，右上角铅笔改分区定义（编辑与查看分开，避免误触改配置）
             chip.clicked.connect(lambda n=name: self.viewSection.emit(n))
             chip.editRequested.connect(lambda i=idx: self._edit_section(i))
@@ -2068,7 +2112,7 @@ class ExperienceSection(_Section):
         self._empty.setVisible(not docs)
         for doc in docs:
             cat = str(doc.get("category") or "")
-            chip = _SectionChip(cat, f"{int(doc.get('count') or 0)} 条经验 · 点击查看与编辑")
+            chip = _SectionChip(cat, f"{int(doc.get('count') or 0)} 条经验 · 点击查看与编辑", show_edit=False)
             chip.clicked.connect(lambda c=cat: self.viewCategory.emit(c))
             chip.deleteRequested.connect(lambda c=cat: self.deleteCategoryRequested.emit(c))
             self._chips_row.addWidget(chip)

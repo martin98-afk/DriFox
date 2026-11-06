@@ -1063,7 +1063,21 @@ Use the tools available to you based on your permissions."""
                 current_message="",
                 trigger_async=False,
             )
-            contributions = [r.output.strip() for r in results if r.success and r.output.strip()]
+            contributions = []
+            for r in results:
+                if not (r.success and r.output.strip()):
+                    continue
+                out = r.output.strip()
+                # 兜底：插件漏加分区标签时自动包裹，避免 system prompt 出现裸段
+                # （每块内容都要有 <xxx> 边界，否则相邻插件的内容会粘在一起，
+                # 模型分不清哪段属于哪个系统。插件应自己带标签，这里只兜底。）
+                if not out.startswith("<"):
+                    logger.warning(
+                        "[agent] BuildSystemPrompt 输出缺少分区标签，已兜底包裹为 "
+                        f"<hook_context>（{len(out)} 字符）"
+                    )
+                    out = "<hook_context>\n" + out + "\n</hook_context>"
+                contributions.append(out)
             if contributions:
                 base = base + "\n\n" + "\n\n".join(contributions)
 

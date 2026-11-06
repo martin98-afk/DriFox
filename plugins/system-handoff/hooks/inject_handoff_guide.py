@@ -32,7 +32,11 @@ _HANDOFF_GUIDE = """## 会话交接（update_handoff）
 
 
 def hook(event: str, context: dict) -> str:
-    """输出交接文档使用指引（仅主智能体）"""
+    """输出交接文档使用指引（仅主智能体）。
+
+    必须带 <handoff_guide> 分区标签：system prompt 里每一块都要有边界，
+    裸 markdown 会和相邻插件的内容粘在一起，模型分不清归属。
+    """
     if (context or {}).get("current_role") != "primary":
         return ""
-    return _HANDOFF_GUIDE
+    return f"<handoff_guide>\n{_HANDOFF_GUIDE}\n</handoff_guide>"
