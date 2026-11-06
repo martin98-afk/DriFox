@@ -230,6 +230,8 @@ class ThemeManager:
           - scene       : 右侧 _chat_frame 图片/场景化背景（撑满整个右侧圆角矩形，
                           含 replace_tab_bar / 对话区 / 输入框 / LEFT/RIGHT/BOTTOM
                           停靠区 / UI 插件槽位等所有 _chat_frame 内的内容）
+                          可嵌套 foreground 子对象放全画布前景层（壁纸拆出的人物等）：
+                          {image, opacity, enabled}，与 image 同矩形同拉伸，逐像素对齐
           - decorations : 装饰件数组（多张 PNG，按 anchor 摆放；anchor 坐标系以
                           OpenAIChatToolWindow 为基准，定位在对话区/输入框附近）
           - overlay     : 动态光影视频覆盖层（循环视频帧压暗混合，scene 之上、
@@ -295,6 +297,26 @@ class ThemeManager:
                 "enabled": d.get("enabled", True),
             }
 
+        def _normalize_scene(d: Optional[dict]) -> Optional[dict]:
+            """scene 专用归一化：在通用区域字段之外保留 foreground 子对象
+
+            foreground 是壁纸拆出的全画布前景图层（如人物），字段集与 image/
+            opacity 相同。它是嵌套 dict，不能被 _normalize 的白名单拍平。
+            """
+            normalized = _normalize(d)
+            if normalized is None:
+                return None
+            fg = d.get("foreground")
+            if isinstance(fg, dict):
+                normalized["foreground"] = {
+                    "image": fg.get("image"),
+                    "opacity": fg.get("opacity", 1.0),
+                    "enabled": fg.get("enabled", True),
+                }
+            else:
+                normalized["foreground"] = None
+            return normalized
+
         return {
             "window": (
                 _normalize(new_bg.get("window"))
@@ -303,7 +325,7 @@ class ThemeManager:
             ),
             "sidebar": _normalize(new_bg.get("sidebar")),
             "chat_area": _normalize(new_bg.get("chat_area")),
-            "scene": _normalize(new_bg.get("scene")),
+            "scene": _normalize_scene(new_bg.get("scene")),
             "decorations": new_bg.get("decorations") or [],
             "overlay": _normalize(new_bg.get("overlay")),
             "music": _normalize_music(new_bg.get("music")),

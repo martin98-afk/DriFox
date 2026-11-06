@@ -35,7 +35,7 @@
       "id": "N02",
       "type": "negative",
       "query": "主题卡片里人物跑出屏幕了怎么修",
-      "expected_route": "plugin-creator:themes 组件 + decorations fit_width（或 drifox-dev 改 DecorationLayer）"
+      "expected_route": "plugin-creator:themes 组件 + scene.foreground（前景层与背景同矩形同拉伸，不要用 decorations）"
     },
     {
       "id": "N03",

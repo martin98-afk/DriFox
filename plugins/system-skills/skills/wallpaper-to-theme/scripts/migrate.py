@@ -338,16 +338,16 @@ def theme_yaml(plan: ThemePlan, has_decoration: bool, has_music: bool) -> str:
             "    enabled: true",
         ]
         if has_decoration:
+            # 装饰层是同一张壁纸拆出的全画布前景图层，必须与背景共用同一矩形
+            # 与同一拉伸方式才能还原原始构图。decorations 的 reference 是对话
+            # 滚动区、等比 fit，与 scene 的拉伸铺满不同，用它做前景会错位。
             lines += [
-                "",
-                "  decorations:",
-                "    - id: foreground",
+                "    foreground:",
                 "      image: ../../assets/decoration.png",
-                "      anchor: scene_bottom",
-                "      offset: [0, 40]",
-                "      opacity: 0.55",
-                "      fit_width: true",
-                "      fit_height: true",
+                # 前景与背景同矩形同拉伸，不透明才是原壁纸的观感；
+                # 旧的 0.55 是 decorations 时代的默认（当时人物浮在输入框上方）
+                "      opacity: 1.0",
+                "      enabled: true",
             ]
     if has_music:
         lines += ["", "  music:", "    tracks:"]

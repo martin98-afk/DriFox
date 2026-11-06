@@ -42,7 +42,9 @@ license: GPL-3.0-or-later
 
 - **有视频** → `overlay.video`（`target: chat_area`）
 - **有主图** → `scene.image` + `dim` 蒙版
-- **有透明前景图** → `decorations`（`anchor: scene_bottom` + `fit_width/fit_height`）
+- **有透明前景图** → `scene.foreground`（`{image, opacity, enabled}`，与 scene.image 同矩形同拉伸，逐像素对齐）
+
+> 前景图必须用 `scene.foreground`，不要用 `decorations`：decorations 的 reference 是对话滚动区且等比 fit，与 scene 的拉伸铺满不同，同一张壁纸拆出的前景层会与背景错位。
 - **有音频** → `music.tracks` 列表
 
 装饰件判定：在非主图贴图里找「RGBA 且透明像素 ≥ 25%、宽度 ≥ 800」的那张。这是角色立绘/前景元素的典型特征。

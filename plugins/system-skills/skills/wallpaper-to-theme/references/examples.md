@@ -68,14 +68,10 @@ backgrounds:
     image: ../../assets/scene.png
     opacity: 1.0
     dim: rgba(8, 6, 12, 0.42)
-  decorations:
-    - id: foreground
+    foreground:
       image: ../../assets/decoration.png
-      anchor: scene_bottom
-      offset: [0, 40]
-      opacity: 0.55
-      fit_width: true
-      fit_height: true
+      opacity: 1.0
+      enabled: true
   music:
     tracks:
       - ../../assets/01-...mp3

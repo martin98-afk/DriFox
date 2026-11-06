@@ -47,6 +47,11 @@ class SceneLayer(QWidget):
       - opacity : float 0.0~1.0（<1.0 时挂 QGraphicsOpacityEffect）
       - blur    : int   0~30（>0 时挂 QGraphicsBlurEffect 到 _image_label）
       - dim     : str  半透明蒙版（CSS color），叠加在图片上压暗提升文字可读性
+      - foreground: dict 前景图层（全画布图层，如壁纸拆分出的人物）
+          结构与 image/opacity 相同：{image, opacity, enabled}
+          与 image 共用同一矩形与同一缩放方式（拉伸铺满），保证拆分图层
+          与背景逐像素对齐；Z 序在 dim 之上，不被压暗（dim 是给背景文字
+          提可读性的，压在前景上会把人物淡到看不清）。
       - enabled : bool  默认 True
     """
 
@@ -56,6 +61,7 @@ class SceneLayer(QWidget):
         self.setAttribute(Qt.WA_NoSystemBackground, True)
 
         self._image_label: Optional[QLabel] = None
+        self._foreground_label: Optional[QLabel] = None
         self._dim_label: Optional[QLabel] = None
         # 跨宿主共享画布：宿主注入求值函数，让本层只显示同一张图的某一段。
         # 多栏共享背景时各栏用同一画布尺寸 + 各自左缘偏移，保证接缝处图案
@@ -133,6 +139,33 @@ class SceneLayer(QWidget):
                     self._blur_pad = int(min(float(blur), 30.0)) * 2
                     self._sync_content_geometry()
 
+        # 2.5 前景图层（壁纸拆出的全画布图层，如人物）
+        # 与 image 同矩形、同 setScaledContents 拉伸，才能与背景构图逐像素对齐。
+        # Z 序在 dim 之上（见 dim 块末尾的 raise_）：dim 负责压暗背景提可读性，
+        # 盖到前景上会让人物淡到看不清。
+        fg = cfg.get("foreground")
+        if isinstance(fg, dict) and fg.get("enabled", True):
+            fg_image = fg.get("image")
+            if fg_image and image_resolver:
+                resolved = image_resolver(fg_image)
+                from PyQt5.QtGui import QPixmap
+
+                fg_pix = QPixmap(resolved)
+                if not fg_pix.isNull():
+                    self._foreground_label = QLabel(self)
+                    self._foreground_label.setPixmap(fg_pix)
+                    self._foreground_label.setScaledContents(True)
+                    self._foreground_label.setStyleSheet(
+                        f"border-radius: {_CHAT_FRAME_RADIUS}px;"
+                    )
+                    fg_opacity = fg.get("opacity", 1.0)
+                    if fg_opacity < 1.0:
+                        fg_effect = QGraphicsOpacityEffect(self._foreground_label)
+                        fg_effect.setOpacity(fg_opacity)
+                        self._foreground_label.setGraphicsEffect(fg_effect)
+                    self._sync_content_geometry()
+                    self._foreground_label.show()
+
         # 3. dim 蒙版（半透明黑色，叠在 image_label 之上压暗）
         dim = cfg.get("dim")
         if dim:
@@ -143,6 +176,11 @@ class SceneLayer(QWidget):
             self._sync_content_geometry()
             self._dim_label.raise_()
             self._dim_label.show()
+
+        # 前景层浮到 dim 之上：dim 是给背景提文字可读性的压暗蒙版，盖到
+        # 前景（人物等）上会把它淡到看不清，用户要的是「淡但清晰」。
+        if self._foreground_label is not None:
+            self._foreground_label.raise_()
 
         # 4. 整体透明度（不影响 blur effect 的内部计算）
         opacity = cfg.get("opacity", 1.0)
@@ -156,9 +194,15 @@ class SceneLayer(QWidget):
     def _clear(self) -> None:
         """清除旧 widgets 和 effects"""
         if self._image_label is not None:
+            self._image_label.hide()
             self._image_label.deleteLater()
             self._image_label = None
+        if self._foreground_label is not None:
+            self._foreground_label.hide()
+            self._foreground_label.deleteLater()
+            self._foreground_label = None
         if self._dim_label is not None:
+            self._dim_label.hide()
             self._dim_label.deleteLater()
             self._dim_label = None
         self._blur_pad = 0
@@ -202,7 +246,7 @@ class SceneLayer(QWidget):
     def _sync_content_geometry(self) -> None:
         """把内容层几何对齐到画布（self 自身始终撑满 parent）"""
         x, y, w, h = self._content_geometry()
-        for label in (self._image_label, self._dim_label):
+        for label in (self._image_label, self._foreground_label, self._dim_label):
             if label is not None:
                 label.setGeometry(x, y, w, h)
 
