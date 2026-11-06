@@ -67,6 +67,7 @@ try:  # pygments 独立包，顶层安全导入
     _HAS_PYGMENTS = True
 except Exception:  # pragma: no cover - demo 环境兜底
     _HAS_PYGMENTS = False
+    highlight = None  # 保持名字绑定，调用方必须以 _HAS_PYGMENTS 守卫
 
 
 def _md_components():
@@ -382,11 +383,20 @@ _HTML_PREFIX_CACHE: "OrderedDict[str, str]" = OrderedDict()
 # value = 块列表。上限/LRU 策略同上。
 _TEXT_BLOCK_CACHE_MAX = 512
 _TEXT_BLOCK_CACHE: "OrderedDict[str, List[Dict[str, Any]]]" = OrderedDict()
+# [PERF] 代码块 Pygments 高亮结果缓存：key = (code, lang, style, 字号档位 key)，
+# value = <pre> inner HTML。虚拟滚动把 CodeBlockWidget 卸载/重建当常态（批次
+# 回收 → 滚动回看 → 原位重建），实例级缓存随实例死亡、重建路径命中率恒为 0，
+# 必须模块级才能跨重建命中（#9 cProfile 实证 highlight 占导出耗时 46%）。
+# 单条硬顶：超大 diff 高亮 HTML 膨胀 12.7 倍（见 test_tool_block_lazy_body 头注），
+# 不设单条上限时少数巨块即可挤占全池；超限条目现算不缓存。
+_CODE_HIGHLIGHT_CACHE_MAX = 64
+_CODE_HIGHLIGHT_CACHE_MAX_ITEM_CHARS = 128 * 1024
+_CODE_HIGHLIGHT_CACHE: "OrderedDict[tuple, str]" = OrderedDict()
 _LIST_OR_QUOTE_CONT_RE = re.compile(r"^\s*(?:[-*+]|\d+[.)]|>)\s?")
 
 
-def _cache_put(cache: "OrderedDict[str, Any]", key: str, value: Any, max_size: int) -> None:
-    """写入缓存并按 LRU 淘汰最久未用项。
+def _cache_put(cache: "OrderedDict", key, value: Any, max_size: int) -> None:
+    """写入缓存并按 LRU 淘汰最久未用项（key 类型由各缓存自定：str / tuple）。
 
     为什么不用整体 clear：真实回复的段数可达上百，一旦触顶就全清会让所有稳定
     文本段同时失效，下一拍全部重算 → 表现为周期性卡顿（断崖式归零）。
@@ -397,12 +407,64 @@ def _cache_put(cache: "OrderedDict[str, Any]", key: str, value: Any, max_size: i
         cache.popitem(last=False)
 
 
-def _cache_get(cache: "OrderedDict[str, Any]", key: str) -> Any:
+def _cache_get(cache: "OrderedDict", key) -> Any:
     """读缓存并刷新 LRU 位置。"""
     value = cache.get(key)
     if value is not None:
         cache.move_to_end(key)
     return value
+
+
+def _highlight_inner_cached(code: str, lang: str) -> Optional[str]:
+    """代码块 Pygments 高亮（带模块级 LRU memo），返回 <pre> inner HTML。
+
+    Pygments 不可用 / lexer 或高亮失败时返回 None，调用方走 escape 兜底。
+
+    key 四元组 = (code, lang, style, 字号档位 key)，逐一唯一决定输出：
+    - style：浅色 friendly / 深色 dracula（与 WebEngine 版同步，见 _apply_highlight
+      原注释）。主题切换经 style 维度自动失效，HTML 本身 theme-agnostic
+      （noclasses=False，token 色由 CSS 注入，test_code_block_icon_theme 固化契约）。
+    - 字号：formatter 的 prestyles 内联 font-size（card_render_core._get_formatter_cached），
+      字号档位一变 HTML 即过期。必须用 `get_ui_font_size_key()`（档位唯一区分），
+      不能用 scale_font_size 的 base 值（FONT_SIZE_OPTIONS 全档 base=14，维度空转，
+      见 _config_fingerprint 的教训注释）。
+
+    ⚠️ key 维度 = formatter 输入的函数：未来给 HtmlFormatter 加任何影响输出的
+    参数（如 noclasses 切换），必须同步扩 key，否则输出脏命中。
+    """
+    style = "friendly" if _is_light_theme() else "dracula"
+    try:
+        # 与 WebEngine 版同步：按主题切换 Pygments 风格，否则浅色主题下
+        # dracula 浅灰文字在浅色底上不可见（原 _apply_highlight 逻辑上移）
+        from app.widgets.message_card import set_pygments_style
+
+        set_pygments_style(style)
+    except Exception:
+        pass
+    try:
+        from app.utils.design_tokens import get_ui_font_size_key
+
+        fs_key = get_ui_font_size_key()
+    except Exception:
+        fs_key = "default"
+    key = (code, lang, style, fs_key)
+    cached = _cache_get(_CODE_HIGHLIGHT_CACHE, key)
+    if cached is not None:
+        return cached
+    if not _HAS_PYGMENTS or highlight is None:
+        return None
+    try:
+        _, get_lexer_cached, get_formatter_cached = _md_components()
+        lexer = get_lexer_cached(lang)
+        fmt = get_formatter_cached()
+        highlighted = highlight(code, lexer, fmt)
+        m = re.search(r"<pre[^>]*>(.*?)</pre>", highlighted, re.S)
+        inner = m.group(1) if m else None
+    except Exception:
+        inner = None
+    if inner is not None and len(inner) <= _CODE_HIGHLIGHT_CACHE_MAX_ITEM_CHARS:
+        _cache_put(_CODE_HIGHLIGHT_CACHE, key, inner, _CODE_HIGHLIGHT_CACHE_MAX)
+    return inner
 
 
 def _config_fingerprint() -> str:
@@ -1304,25 +1366,9 @@ class CodeBlockWidget(QFrame):
         return "rgba(0,0,0,0.38)" if _is_light_theme() else "rgba(255,255,255,0.35)"
 
     def _apply_highlight(self, code: str) -> None:
-        inner = None
-        if _HAS_PYGMENTS:
-            try:
-                # 与 WebEngine 版同步：按主题切换 Pygments 风格（浅色 friendly / 深色 dracula），
-                # 否则浅色主题下 dracula 浅灰文字在浅色底上不可见
-                try:
-                    from app.widgets.message_card import set_pygments_style
-
-                    set_pygments_style("friendly" if _is_light_theme() else "dracula")
-                except Exception:
-                    pass
-                _, get_lexer_cached, get_formatter_cached = _md_components()
-                lexer = get_lexer_cached(self._lang)
-                fmt = get_formatter_cached()
-                highlighted = highlight(code, lexer, fmt)
-                m = re.search(r"<pre[^>]*>(.*?)</pre>", highlighted, re.S)
-                inner = m.group(1) if m else None
-            except Exception:
-                inner = None
+        # [PERF] 高亮结果 memo（_highlight_inner_cached）：虚拟滚动反复重建时
+        # 同 (code, lang, style, 字号) 直接命中缓存，跳过全量 Pygments highlight。
+        inner = _highlight_inner_cached(code, self._lang)
         if inner is None:
             inner = _html_mod.escape(code)
         self.text_edit.document().setDefaultStyleSheet("pre { margin:0; padding:0 0 0 4px; }")
