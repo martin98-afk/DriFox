@@ -2,7 +2,8 @@
 """会话级工具 schema 快照（冻结）回归测试
 
 契约：tools 是请求前缀最外层，服务端 prompt cache 按前缀匹配；
-会话内必须冻结，插件工具热重载不得改动当前会话的工具定义。
+会话内必须完全冻结，插件工具增删改、热重载、MCP 启停均不得改动当前会话的
+工具定义（新工具由 PluginChanged hook 注入 schema + tool_execute 中转调用）。
 换代条件只有：换会话 / 换 agent / 进出团队。
 """
 
@@ -104,59 +105,12 @@ def test_snapshot_returned_copy_is_isolated():
     assert engine.get_session_tools_schema("s1")[0]["function"]["description"] != "被污染"
 
 
-def test_invalidate_snapshot_rebuilds_next_request():
-    """失效后再取 → 重新聚合（拿到新注册表内容）"""
-    mgr = _FakeAgentMgr([_tool("bash")])
-    engine = _engine(mgr)
-    engine.get_session_tools_schema("s1")
+def test_plugin_tool_changes_never_rotate_snapshot(monkeypatch):
+    """插件工具增删改一律不换代：tools 前缀永远稳定
 
-    mgr.tools = [_tool("bash", "新描述")]
-    engine.invalidate_tools_snapshot()
-    tools = engine.get_session_tools_schema("s1")
-
-    assert mgr.calls == 2
-    assert tools[0]["function"]["description"] == "新描述"
-
-
-def test_plugin_diff_invalidates_only_on_tool_changes(monkeypatch):
-    """PluginChanged diff：只有工具/MCP 签名变化才失效快照"""
-    from app.core.conversation.backend import ChatBackend
-    from app.core.hooks import hook_manager
-
-    mgr = _FakeAgentMgr([_tool("bash")])
-    engine = _engine(mgr)
-    backend = type("B", (), {"chat_engine": engine})()
-    monkeypatch.setattr(ChatBackend, "_active_instances", {backend}, raising=False)
-
-    # 只有 UI 组件变化（diff 无工具/MCP 键）：不失效
-    hook_manager.invalidate_tools_snapshots_if_changed({"ui": True})
-    engine.get_session_tools_schema("s1")
-    assert mgr.calls == 1
-
-    # 工具描述/参数变了：失效 → 下次请求重建
-    hook_manager.invalidate_tools_snapshots_if_changed({"tools_updated": ["bash"]})
-    engine.get_session_tools_schema("s1")
-    assert mgr.calls == 2
-
-
-def test_plugin_diff_ignores_empty_changes():
-    """空 diff / 全空列表：不失效（改实现不改 schema 的场景）"""
-    from app.core.hooks import hook_manager
-
-    mgr = _FakeAgentMgr([_tool("bash")])
-    engine = _engine(mgr)
-    engine.get_session_tools_schema("s1")
-
-    hook_manager.invalidate_tools_snapshots_if_changed(None)
-    hook_manager.invalidate_tools_snapshots_if_changed({})
-    hook_manager.invalidate_tools_snapshots_if_changed({"tools_added": [], "tools_removed": [], "tools_updated": []})
-
-    engine.get_session_tools_schema("s1")
-    assert mgr.calls == 1
-
-
-def test_plugin_diff_ignores_mcp_changes(monkeypatch):
-    """MCP 启停不换代：前缀保持稳定，新工具需新会话才见到"""
+    新工具由 PluginChanged hook 注入 schema + tool_execute 中转调用；
+    移除工具调用时由 ToolExecutor 返 Unknown tool。
+    """
     from app.core.conversation.backend import ChatBackend
     from app.core.hooks import hook_manager
 
@@ -166,10 +120,17 @@ def test_plugin_diff_ignores_mcp_changes(monkeypatch):
     monkeypatch.setattr(ChatBackend, "_active_instances", {backend}, raising=False)
 
     engine.get_session_tools_schema("s1")
-    hook_manager.invalidate_tools_snapshots_if_changed({"mcp_added": ["github"], "mcp_removed": ["fs"]})
-    engine.get_session_tools_schema("s1")
 
-    assert mgr.calls == 1, "MCP 启停不得触发快照换代"
+    # 模拟完整一轮插件工具变更：UI 组件、工具新增/变更/移除、MCP 启停
+    hook_manager.trigger_plugin_changed_hook({"action": "updated", "diff": {"ui": True}})
+    hook_manager.trigger_plugin_changed_hook({"action": "installed", "diff": {"tools_added": ["grep"]}})
+    hook_manager.trigger_plugin_changed_hook({"action": "updated", "diff": {"tools_updated": ["bash"]}})
+    hook_manager.trigger_plugin_changed_hook({"action": "uninstalled", "diff": {"tools_removed": ["grep"]}})
+    hook_manager.trigger_plugin_changed_hook({"action": "mcp_connected", "diff": {"mcp_added": ["github"]}})
+
+    after = engine.get_session_tools_schema("s1")
+    assert mgr.calls == 1, "插件工具增删改不得触发快照换代"
+    assert after == [_tool("bash")], "当前会话工具定义必须冻结"
 
 
 def test_presend_worker_uses_tools_provider():
