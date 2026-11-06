@@ -208,14 +208,14 @@ def _delete_cache(path: Path, dir_mode: bool):
 
 
 def _kill_qwebengine_processes() -> int:
-    """终止残留的 QtWebEngine(Chromium) 子进程，归还其占用的内存。
+    """终止残留的 QtWebEngine(Chromium) 孤儿子进程，归还其占用的内存。
 
-    只清理与当前 DriFox 相关的进程，避免误杀其它应用：
-
-    1. 当前进程的全部后代中名称含 qwebengine 的进程
-       （renderer / GPU / network service 等，通常各占数百 MB 内存）；
-    2. 全系统中名称含 qwebengine、但父进程已消失的孤儿进程
-       （DriFox 退出/崩溃后残留的"僵尸" Chromium 进程）。
+    只清理「父进程已消失」的孤儿进程（DriFox 退出/崩溃后残留的"僵尸"
+    Chromium 进程）。**绝不杀当前进程的后代**（2026-11-06）：主进程存活时，
+    其 WebEngine renderer/GPU/network 子进程是正在渲染消息页面的活动资源，
+    一并杀掉会把在途渲染内容直接清空。正常退出由 Qt 生命周期回收子进程；
+    异常残留会变孤儿，由下方兜底捕获。误杀在途渲染的代价远大于漏杀几个
+    孤儿的收益，取舍明确。
 
     先发 terminate 优雅退出，超时未退的再强杀（kill）。
 
@@ -232,19 +232,7 @@ def _kill_qwebengine_processes() -> int:
     procs = []
     seen = set()
 
-    # ── 1. 当前进程的子孙进程 ──
-    try:
-        for p in psutil.Process(self_pid).children(recursive=True):
-            try:
-                if pattern.search(p.name() or ""):
-                    procs.append(p)
-                    seen.add(p.pid)
-            except Exception:
-                pass
-    except Exception:
-        pass
-
-    # ── 2. 全系统孤儿兜底（父进程已不存在的残留） ──
+    # ── 全系统孤儿兜底（父进程已不存在的残留；父存活的进程一律不碰） ──
     # psutil.process_iter 全表枚举是后台线程纯 Python 迭代，长持 GIL 饿死主线程
     # （打包版 watchdog 543ms / 源码版 9025ms 实证）。改 tasklist 子进程枚举：
     # CSV 只取列 0（映像名）/列 1（PID），不依赖列数；候选（通常几十个）再
@@ -371,7 +359,7 @@ def _release_memory_light():
 
 
 def _release_memory_deep():
-    """第二阶段：全代 GC + 工作集归还 OS + 清理 WebEngine 子进程（高危原生操作）。
+    """第二阶段：全代 GC + 工作集归还 OS + 清理孤儿 WebEngine 子进程（高危原生操作）。
 
     注意：调用前必须让主线程事件循环排干在途回调（见 cards._on_memory_release 的
     分拍设计）：本阶段的 gc.collect(2) 可能连带析构 Python 独占的 QObject，
@@ -409,7 +397,7 @@ def _release_memory_deep():
     except Exception:
         pass
 
-    # ── 7. 终止残留 QtWebEngine(Chromium) 子进程，归还其内存 ──
+    # ── 7. 终止残留 QtWebEngine(Chromium) 孤儿子进程，归还其内存 ──
     killed_procs = _kill_qwebengine_processes()
 
     return collected, killed_procs
