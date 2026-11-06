@@ -908,6 +908,18 @@ class LLMSettingsCard(SystemCardFrame):
         appearance_layout.addWidget(self.uiLightModeCard)
         appearance_layout.addWidget(self.uiThemeStyleCard)
 
+        # 主题音乐音量（只作用于 backgrounds.music；视频覆盖层恒静音）
+        self.uiMusicVolumeCard = RangeSettingCard(
+            self.cfg.ui_music_volume,
+            FluentIcon.MUSIC,
+            "主题音乐音量",
+            "主题背景音乐的音量，视频背景不受影响",
+            parent=self,
+        )
+        self.uiMusicVolumeCard.slider.setFixedWidth(160)  # 与 render 页滑条同款压缩
+        self.uiMusicVolumeCard.valueChanged.connect(self._on_music_volume_changed)
+        appearance_layout.addWidget(self.uiMusicVolumeCard)
+
         # 界面字号 + 全局字体
         appearance_layout.addWidget(self.uiFontSizeCard)
         self._setup_font_card()
@@ -1626,6 +1638,15 @@ class LLMSettingsCard(SystemCardFrame):
             icon=get_icon("主题风格"),
             parent=self,
         )
+
+    def _on_music_volume_changed(self, value: int) -> None:
+        """主题音乐音量滑块 → 播放器（value 为 0~100）"""
+        try:
+            from app.widgets.theme_music_player import ThemeMusicPlayer
+
+            ThemeMusicPlayer.instance().set_volume(value / 100.0)
+        except Exception:
+            pass
 
     def _rebuild_theme_style_card(self) -> None:
         """按当前深浅模式重建主题风格卡（选项动态过滤），保持原布局位置"""

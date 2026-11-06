@@ -2616,8 +2616,23 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
             self._apply_area_bg("chat_area", getattr(self, "_chat_frame", None), bgs["chat_area"])
             self._apply_scene_layer(bgs["scene"])
             self._apply_video_overlay(bgs.get("overlay"))
+            self._apply_theme_music(bgs.get("music"))
         except Exception as e:
             logger.warning(f"[TabManagerWindow] 应用主题背景失败: {e}")
+
+    def _apply_theme_music(self, music_cfg):
+        """应用 backgrounds.music 到主窗口级播放器
+
+        播放器是主窗口级单例：多个 TabManagerWindow 不叠音。无配置（None）
+        或 enabled=False 时停止播放并清空列表身份。
+        """
+        try:
+            from app.widgets.theme_music_player import ThemeMusicPlayer
+
+            player = ThemeMusicPlayer.instance()
+            player.apply_config(music_cfg, self._resolve_theme_image)
+        except Exception as e:
+            logger.warning(f"[TabManagerWindow] 应用主题音乐失败: {e}")
 
     def _apply_scene_layer(self, scene_cfg):
         """应用 scene 配置到 _scene_layer（撑满整个右侧 _chat_frame 圆角矩形）
@@ -3198,9 +3213,13 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
         if hasattr(self, "_splitter"):
             self._splitter.splitterMoved.connect(self._on_splitter_manually_moved)
 
+        # 应用焦点变化 → 主题音乐失焦暂停（所有平台）
+        _app_inst = QApplication.instance()
+        if _app_inst is not None:
+            _app_inst.applicationStateChanged.connect(self._on_application_focus_changed)
         # macOS 软置顶：应用激活时补抬升（详见 _on_app_state_changed）
-        if _IS_MAC:
-            QApplication.instance().applicationStateChanged.connect(self._on_app_state_changed)
+        if _IS_MAC and _app_inst is not None:
+            _app_inst.applicationStateChanged.connect(self._on_app_state_changed)
 
         # 对话区限宽档位变更（设置-外观）→ 立即重算 wrapper margins，
         # 无需等窗口 resize；同时通知已存在的消息卡按新宽度重新折行。
@@ -6557,6 +6576,18 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
         panel = getattr(self, "_tab_panel", None)
         if panel is not None:
             panel.set_auto_collapse_suppressed(False)
+
+    def _on_application_focus_changed(self, state):
+        """应用激活态变化 → 转发给主题音乐播放器（失焦暂停 / 回焦续播）
+
+        只在状态真正切换时同步音量，避免每次焦点变化都写一次 setVolume。
+        """
+        try:
+            from app.widgets.theme_music_player import ThemeMusicPlayer
+
+            ThemeMusicPlayer.instance().set_app_active(state == Qt.ApplicationActive)
+        except Exception as e:
+            logger.debug(f"[TabManagerWindow] 同步主题音乐焦点状态失败: {e}")
 
     def _on_app_state_changed(self, state):
         """macOS 软置顶：应用激活时若开启置顶配置则抬升主窗口

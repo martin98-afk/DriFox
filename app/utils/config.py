@@ -799,6 +799,10 @@ class Settings(QConfig):
     # 工具区折叠显示（简洁模式）：工具调用/思考块集中在卡片顶部可滚动容器
     ui_compact_tool_area = ConfigItem("UI", "CompactToolArea", True, BoolValidator())
 
+    # 主题背景音乐音量（0~100）；用户调过之后恒优先于主题推荐音量。
+    # 只作用于 backgrounds.music，视频覆盖层恒静音不受影响。
+    ui_music_volume = RangeConfigItem("UI", "MusicVolume", 60, RangeValidator(0, 100))
+
     # 对话区限宽档位：窗口过宽时限制对话内容宽度并居中留白
     # narrow=720 / standard=900 / wide=1200 / full=不限宽（铺满）
     ui_chat_width = OptionsConfigItem(
