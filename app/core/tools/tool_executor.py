@@ -1141,12 +1141,15 @@ class ToolExecutor:
 
         # 获取 MCP Manager（单例，可能在 BuiltinTools 清理后仍存在）
         try:
-            mcp_manager = self._builtin_tools._mcp_manager
+            # [bc697c93 补防] 必须走 property 守卫：未配置 MCP 时返回 None；
+            # 裸 ._mcp_manager 绕过守卫恒 None 且不触发 AttributeError 分支，
+            # 下方 is_connected 直接抛 AttributeError（LLM 幻觉 mcp__ 前缀名必进此链）
+            mcp_manager = self._builtin_tools.mcp_manager
         except AttributeError:
             logger.error("[ToolExecutor] _mcp_manager not accessible")
             return ToolResult(False, error="MCP 管理器不可用")
 
-        if not mcp_manager.is_connected:
+        if not mcp_manager or not mcp_manager.is_connected:
             return ToolResult(False, error="MCP 未连接，请先配置并连接 MCP 服务器")
 
         try:
