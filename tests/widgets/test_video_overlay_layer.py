@@ -29,6 +29,30 @@ def test_cover_rect_crops_wide_source():
     assert r.x() == -32 and r.y() == 0
 
 
+def test_cover_rect_position_top_aligns_overflow():
+    from app.widgets.video_overlay_layer import VideoOverlayLayer
+    # 竖版 1080x1920 铺进 1600x900：scale=1.48→高 2844，溢出 1944；top=顶部对齐
+    r = VideoOverlayLayer._cover_rect(QSize(1080, 1920), QRect(0, 0, 1600, 900), "top")
+    assert r.y() == 0 and r.x() == 0
+    assert r.height() == 2844
+    # center 居中、bottom 贴底
+    rc = VideoOverlayLayer._cover_rect(QSize(1080, 1920), QRect(0, 0, 1600, 900), "center")
+    assert rc.y() == -972
+    rb = VideoOverlayLayer._cover_rect(QSize(1080, 1920), QRect(0, 0, 1600, 900), "bottom")
+    assert rb.y() == -1944
+
+
+def test_apply_config_reads_position(layer):
+    layer._player.play = lambda: None
+    layer._player.setMedia = lambda *a: None
+    layer.apply_config({"video": "x.mp4", "position": "top"})
+    assert layer._position == "top"
+    layer.apply_config({"video": "x.mp4", "position": "nonsense"})
+    assert layer._position == "center"  # 非法值回退默认
+    layer.apply_config({"video": "x.mp4"})
+    assert layer._position == "center"
+
+
 def test_multiply_pixel_blend(layer, qapp):
     """白底 + 200 灰帧 + opacity 0.28 → 期望 240（±2 容差）
 

@@ -74,6 +74,9 @@ class VideoOverlayLayer(QWidget):
       - video             : str  视频路径（主题目录相对路径或绝对路径）
       - opacity           : float 0.0~1.0，默认 0.28
       - brightness_boost  : str  亮度补偿色（CSS color），补偿 multiply 变暗
+      - position          : str  cover 裁剪的垂直对齐 top/center/bottom，默认 center。
+                                 竖版素材（树影集中在顶部）在横窗内必须配 top，
+                                 否则居中裁剪只显示原图中段空白区（实测 2026-11-06）
       - enabled           : bool 默认 True
     """
 
@@ -88,6 +91,7 @@ class VideoOverlayLayer(QWidget):
         self._player.mediaStatusChanged.connect(self._on_status)
         self._opacity = 0.28
         self._boost: Optional[QColor] = None
+        self._position = "center"
         # 预混合缓冲：把透明度烘焙进帧（见 _bake_opacity），复用避免每帧分配
         self._blend_buf: Optional[QImage] = None
 
@@ -105,6 +109,8 @@ class VideoOverlayLayer(QWidget):
         self._opacity = max(0.0, min(float(cfg.get("opacity", 0.28)), 1.0))
         boost = cfg.get("brightness_boost")
         self._boost = QColor(boost) if boost else None
+        pos = str(cfg.get("position") or "center").lower()
+        self._position = pos if pos in ("top", "center", "bottom") else "center"
         self._player.setMedia(QMediaContent(QUrl.fromLocalFile(path)))
         self._player.play()
 
@@ -114,6 +120,7 @@ class VideoOverlayLayer(QWidget):
         self._surface.frame = None
         self._boost = None
         self._opacity = 0.28
+        self._position = "center"
         self.update()
 
     # ── 播放控制 ─────────────────────────────────────
@@ -141,7 +148,7 @@ class VideoOverlayLayer(QWidget):
                 # _bake_opacity 里烘进帧，此处数学与 HanaAgent 公式精确等价
                 p.save()
                 p.setCompositionMode(QPainter.CompositionMode_Multiply)
-                p.drawImage(self._cover_rect(processed.size(), self.rect()), processed)
+                p.drawImage(self._cover_rect(processed.size(), self.rect(), self._position), processed)
                 p.restore()
         finally:
             p.end()
@@ -169,15 +176,26 @@ class VideoOverlayLayer(QWidget):
         return buf
 
     @staticmethod
-    def _cover_rect(src: QSize, dst: QRect) -> QRect:
-        """object-fit: cover——等比放大铺满、居中，超出部分由 widget 裁剪"""
+    def _cover_rect(src: QSize, dst: QRect, position: str = "center") -> QRect:
+        """object-fit: cover + object-position——等比放大铺满，溢出侧按 position 对齐裁剪
+
+        position 控制溢出方向的对齐（CSS object-position 的 top/center/bottom）：
+        竖版素材在横窗内溢出的是高度方向，top=显示原图顶部段（树影密集区）。
+        """
         if src.isEmpty() or dst.isEmpty():
             return dst
         scale = max(dst.width() / src.width(), dst.height() / src.height())
         w = int(src.width() * scale + 0.5)
         h = int(src.height() * scale + 0.5)
-        return QRect(dst.x() + (dst.width() - w) // 2,
-                     dst.y() + (dst.height() - h) // 2, w, h)
+        x = dst.x() + (dst.width() - w) // 2  # 水平恒居中（横窗裁竖图时宽恰好铺满）
+        overflow = dst.height() - h
+        if position == "top":
+            y = dst.y()
+        elif position == "bottom":
+            y = dst.y() + overflow
+        else:
+            y = dst.y() + overflow // 2
+        return QRect(x, y, w, h)
 
     # ── 几何同步 ─────────────────────────────────────
 

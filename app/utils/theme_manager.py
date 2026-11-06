@@ -272,6 +272,7 @@ class ThemeManager:
                 # overlay 区块专用：视频路径与亮度补偿色，其余区块恒 None
                 "video": d.get("video"),
                 "brightness_boost": d.get("brightness_boost"),
+                "position": d.get("position"),
             }
 
         return {
