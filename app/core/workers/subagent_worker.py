@@ -1021,18 +1021,22 @@ class SubAgentExecutor(QThread):
             logger.warning(f"[SubAgentWorker] vision revoke 失败（保留 data URI）: {e}")
 
     def _make_api_call(self, messages: List[Dict], tools: List[Dict] = None, llm_config: Dict = None) -> tuple:
-        """调用 LLM API（流式发起 + 聚合，子智能体后台执行无需逐字渲染）"""
+        """调用 LLM API（流式发起 + 事件聚合，子智能体后台执行无需逐字渲染）。
+
+        Phase 3（2026-11-07）：协议差异全部交给 transport 插件（chat/completions
+        与 responses 共用 StreamEvent 接口），本方法只做认证头、序列化与事件聚合。
+        """
         # 使用传入的 llm_config 或回退到 self.llm_config
         config = llm_config if llm_config is not None else self.llm_config
         # 防御：确保 config 是 dict（传递给子智能体的配置可能被意外覆盖为字符串）
         if not isinstance(config, dict):
             logger.warning(
-                f"[SubAgentExecutor] _make_api_call received non-dict config: {type(config).__name__}={config!r}, falling back to empty config"
+                f"[SubAgentExecutor] _make_api_call received non-dict config: "
+                f"{type(config).__name__}={config!r}, falling back to empty config"
             )
             config = {}
-        api_key = config.get("API_KEY", "").strip()
+        api_key = str(config.get("API_KEY", "") or "").strip()
         base_url = config.get("API_URL") or None
-        model = str(config.get("模型名称", "gpt-4o"))
 
         # Code Assist 原生协议暂不支持子代理链路（非流式分支未实现 generateContent 形态），
         # 显式拦截避免错误格式的 OpenAI 请求打到该端点产生难排查的 400
@@ -1041,260 +1045,131 @@ class SubAgentExecutor(QThread):
                 "子代理暂不支持 Gemini OAuth（Code Assist）协议：请在团队/子代理配置中改用 OpenAI 兼容模型"
             )
 
-        # chat/completions 分支同样必须过序列化单入口：inherit_history 继承的主智能体
-        # 历史是内部格式（assistant.content 可含 tool_result block、image_ref 等），
-        # 裸发给 API 会被严格校验的 provider 拒绝
-        # （实测 GLM 400 code=1214 "messages[N].content[M].type类型错误"）
-        messages = self._serialize_for_api(messages, config).messages
-
-        req_kwargs = {
-            "model": model,
-            "messages": messages,
-            "stream": False,
-        }
-        # 添加会话标识（帮助服务商区分不同会话的缓存 key / 用量监控）
-        task_session_id = getattr(self, "_task_session_id", None)
-        if task_session_id:
-            req_kwargs["user"] = task_session_id
-
-        extra_body = {}
-
-        for cn_key, value in config.items():
-            if cn_key in {
-                "API_KEY",
-                "API_URL",
-                "API_BASE",
-                "认证方式",
-                "模型名称",
-                "系统提示",
-                "启用技能",
-                "name",
-                "provider_name",
-                "config_id",
-                "display_name",
-                "_suffix_index",
-                "备注",
-                "获取地址",
-            }:
-                continue
-            if cn_key in PROVIDER_MANAGED_KEYS:
-                continue
-            if cn_key in QUOTA_EXCLUDE_KEYS():
-                continue
-            # 空值不发：老配置残留的空串键（如 server_id）过不了严格网关的参数白名单
-            if value is None or value == "":
-                continue
-
-            meta = PARAM_SCHEMA.get(cn_key, {})
-            en_key = meta.get("api_param")
-            if not en_key and _VALID_IDENTIFIER_PATTERN.match(cn_key):
-                en_key = cn_key
-            if not en_key:
-                continue
-            # P1-21 语义拆分收尾：四个键共享 api_param="max_tokens"（最大Token /
-            # 最大输出 / 上下文长度 / max_new_tokens），通配分支按 dict 迭代序赋值
-            # → 后迭代者覆盖先者，窗口值（最大Token/上下文长度）会顶掉输出值。
-            # 这里跳过窗口语义的两个键，只让「最大输出」（及英文同义键）进 max_tokens。
-            if cn_key in _CONTEXT_WINDOW_ONLY_KEYS:
-                continue
-            elif en_key in ["temperature", "max_tokens", "top_p"]:
-                req_kwargs[en_key] = value
-            else:
-                extra_body[en_key] = value
-
-        if "max_tokens" in req_kwargs:
-            req_kwargs["max_tokens"] = self._cap_max_output_tokens(model, req_kwargs["max_tokens"], config)
-
-        # 处理思考模式（P1-9 批 d：能力查询走 resolve 链——声明_思考参数/
-        # 声明_思考强度非空时压制 caps/family 自动链；profile 兜底保留）
-        thinking_mode = config.get("思考模式")
-        if thinking_mode is not None:
-            caps = resolve_model_capabilities(config)
-            t_param = None
-            enable_value = "enabled"
-            if caps:
-                t_param = caps.get("thinking_param")
-                enable_value = caps.get("thinking_enable_value", "enabled")
-            if not t_param:
-                profile = get_provider_profile(config)
-                t_param = profile.get("thinking_param")
-
-            if thinking_mode is True:
-                if t_param == "thinking":
-                    extra_body["thinking"] = {"type": enable_value}
-                    extra_body.pop("reasoning_effort", None)
-                    extra_body.pop("thinking_budget", None)
-                elif t_param == "thinking_budget":
-                    budget = config.get("思考预算", 4096)
-                    extra_body["thinking_budget"] = budget
-                    extra_body.pop("reasoning_effort", None)
-                    extra_body.pop("thinking", None)
-                elif t_param == "reasoning_effort":
-                    if "reasoning_effort" not in extra_body:
-                        # 等级经 normalize 强制校验：保存值不在该模型可选值中时
-                        # 回退中间配置，防止无效值发到 API
-                        extra_body["reasoning_effort"] = normalize_reasoning_effort(
-                            config.get("思考等级", "medium"), caps.get("reasoning_effort_values")
-                        )
-                    extra_body.pop("thinking", None)
-                    extra_body.pop("thinking_budget", None)
-            else:  # False - 关闭思考
-                extra_body["thinking"] = {"type": "disabled"}
-                extra_body.pop("thinking_budget", None)
-                extra_body.pop("reasoning_effort", None)
-
-        if extra_body:
-            req_kwargs["extra_body"] = extra_body
-
-        # 服务商插件声明的请求头（伪装 UA / X-Product / 动态 access_token）必须注入，
-        # 否则仅流式端点（CodeBuddy）在身份校验阶段即被拒。与 chat_worker 同源走
-        # provider_profile.resolve_extra_headers，避免两份实现漂移。
-        provider_headers = resolve_extra_headers(config, getattr(self, "_task_session_id", None) or "")
-        if provider_headers:
-            req_kwargs["extra_headers"] = provider_headers
-
-        # 固定流式发起：部分服务商端点（如 CodeBuddy）非流式请求直接 400
-        # （code 11101 "Non-stream chat request is currently not supported"），
-        # 且该错误确定性不可重试。子智能体在后台执行、无需逐字渲染，故流式
-        # 发起后在 _aggregate_stream 内聚合为完整结果（含 tool_calls / reasoning）。
-        req_kwargs["stream"] = True
-
-        from app.utils.http_client import build_openai_client
-
-        client = build_openai_client(
-            api_key=api_key,
-            base_url=base_url,
-            timeout=120.0,
-        )
-
-        # 协议入口裁决：与 chat_worker._resolve_use_responses 同语义
-        # （旧键显式 > 新键 responses > 自动）。transport:<id> 子智能体暂不支持
-        # （Phase 3 搬迁进 transport+sink 体系后移除本警告）。
-        entry = str(config.get("协议入口", "") or "").strip()
-        legacy = config.get("使用ResponsesAPI")
-        if legacy is not None:
-            # 旧键显式设置不可被「协议入口」翻案（兼容纪律，与主线程一致）
-            use_responses = bool(legacy)
-        elif entry == "responses":
-            use_responses = True
-        else:
-            use_responses = self._use_responses_api(config)
-        if entry.startswith("transport:"):
-            logger.warning(
-                f"[SubAgentWorker] 协议入口={entry} 暂不支持子智能体链路，按 chat/completions 执行"
-            )
-        if use_responses:
-            try:
-                return self._make_responses_api_call(client, messages, tools, config)
-            except Exception as e:
-                # 网关不支持 responses 时回退 chat/completions
-                logger.warning(f"[SubAgentWorker] Responses API 调用失败，回退 chat/completions: {e}")
-                if self._is_cancelled:
-                    return "", [], ""
+        # chat 形态消息：chat transport 直接用它发请求；responses transport 忽略它，
+        # 从内部格式 messages 自行序列化 input_items
+        api_messages = self._serialize_for_api(messages, config).messages
 
         from app.core.workers.error_handler import create_api_call_with_retry
+        from app.core.workers.protocol_dispatch import resolve_transport_target
+        from app.plugins.registries.transport_registry import TransportRegistry
+        from app.utils.http_client import build_openai_client
 
-        def create_completion():
-            return client.chat.completions.create(**req_kwargs, tools=tools)
+        target = resolve_transport_target(config, self._protocol_flags(config))
+        if isinstance(target, str):
+            transport = TransportRegistry.get_instance().resolve(target)
+        elif target is not None:
+            transport = target
+        else:
+            transport = TransportRegistry.get_instance().resolve()
+        if transport is None:
+            raise RuntimeError("未注册协议传输器（system-transports 插件未启用），子智能体无法发起请求")
 
-        stream = create_api_call_with_retry(
+        client = build_openai_client(api_key=api_key, base_url=base_url, timeout=120.0)
+        auth_headers = resolve_extra_headers(config, getattr(self, "_task_session_id", None) or "")
+
+        def create_stream():
+            return transport.create_stream(
+                config,
+                messages,
+                tools=tools,
+                auth_headers=auth_headers or None,
+                api_messages=api_messages,
+                client=client,
+                cap_max_tokens=lambda m, v: self._cap_max_output_tokens(m, v, config),
+            )
+
+        events = create_api_call_with_retry(
             client,
-            create_completion,
+            create_stream,
             cancel_check=lambda: self._is_cancelled,
         )
+        return self._aggregate_events(events)
 
-        return self._aggregate_stream(stream)
+    def _aggregate_events(self, events) -> tuple:
+        """StreamEvent 流 → (content, tool_calls, reasoning)（协议无关聚合）。
 
-    def _aggregate_stream(self, stream) -> tuple:
-        """聚合 chat/completions 流式响应 → (content, tool_calls, reasoning)。
-
-        与 `http_client.chat_completion_text` 的区别：该函数只聚合 content，
-        子智能体循环依赖工具调用（以及各厂商 reasoning 字段），
-        故在此单独实现并按内部 tool_calls 结构还原。
-
-        tool_calls 分片规则（OpenAI SDK）：首片带 id + name（arguments 可能为空），
-        后续片仅 index + arguments 增量。按 index 聚合后一次性输出完整参数串，
-        与上游非流式 message.tool_calls 的形状一致。
-
-        usage：部分模型只在流末尾独立 chunk 携带（choices 为空列表），单独记账。
-
-        取消：迭代中检测到 _is_cancelled 即中断，抛 CancelledError 由上层收尾。
+        工具调用差异：chat/completions 只发 begin + args 增量（参数靠累积），
+        responses 还会发 done（完整参数）。这里两者都收：id 缺失时按 index 兜底，
+        参数在结束时统一补齐，避免下游拿空 arguments 解析失败。
         """
         content_parts: List[str] = []
         reasoning_parts: List[str] = []
-        # index -> {"id","name","args"}（保序，按 index 而非 id 聚合：部分网关
-        # 只在首片给 id，后续片 id 为空）
-        tool_buffers: Dict[int, Dict[str, str]] = {}
+        tool_calls: List[Dict] = []
+        by_id: Dict[str, Dict] = {}
+        index_to_id: Dict[Any, str] = {}
 
-        for chunk in stream:
+        def _ensure(tc_id: str, name: str = "") -> Dict:
+            tc = by_id.get(tc_id)
+            if tc is None:
+                tc = {
+                    "id": tc_id,
+                    "type": "function",
+                    "function": {"name": name or "", "arguments": ""},
+                }
+                by_id[tc_id] = tc
+                tool_calls.append(tc)
+            return tc
+
+        for ev in events:
             if self._is_cancelled:
                 logger.info("[SubAgentWorker] 流式聚合被取消")
                 raise RuntimeError("cancelled")
+            etype = getattr(ev, "type", "")
+            if etype == "content_delta":
+                if ev.text:
+                    content_parts.append(ev.text)
+            elif etype == "reasoning_delta":
+                if ev.text:
+                    reasoning_parts.append(ev.text)
+            elif etype == "tool_call_begin":
+                tc_id = ev.tool_call_id or ""
+                if not tc_id:
+                    tc_id = f"subagent_{len(tool_calls)}"
+                if ev.index != -1:
+                    index_to_id[ev.index] = tc_id
+                tc = _ensure(tc_id, ev.name or "")
+                if ev.name:
+                    tc["function"]["name"] = ev.name
+            elif etype == "tool_args_delta":
+                tc_id = ev.tool_call_id or index_to_id.get(ev.index, "")
+                if tc_id and ev.text:
+                    _ensure(tc_id)["function"]["arguments"] += ev.text
+            elif etype == "tool_call_done":
+                tc_id = ev.tool_call_id or index_to_id.get(ev.index, "")
+                if tc_id:
+                    tc = _ensure(tc_id, ev.name or "")
+                    if ev.name:
+                        tc["function"]["name"] = ev.name
+                    if ev.arguments:
+                        tc["function"]["arguments"] = ev.arguments
+            elif etype == "usage":
+                if ev.usage:
+                    self._record_usage(ev.usage)
 
-            choices = getattr(chunk, "choices", None) or []
-            usage = getattr(chunk, "usage", None)
-            if not choices:
-                if usage:
-                    self._record_usage(usage)
-                continue
-
-            choice = choices[0]
-            delta = getattr(choice, "delta", None)
-            if delta is not None:
-                piece = getattr(delta, "content", None)
-                if piece:
-                    content_parts.append(piece)
-                reasoning = extract_reasoning_delta(delta)
-                if reasoning:
-                    reasoning_parts.append(reasoning)
-
-                for tc in getattr(delta, "tool_calls", None) or []:
-                    tc_index = getattr(tc, "index", None)
-                    index = int(tc_index) if isinstance(tc_index, int) else -1
-                    if index == -1:
-                        index = len(tool_buffers)
-                    buf = tool_buffers.setdefault(index, {"id": "", "name": "", "args": ""})
-                    tc_id = getattr(tc, "id", "") or ""
-                    if tc_id:
-                        buf["id"] = tc_id
-                    func = getattr(tc, "function", None)
-                    if func is not None:
-                        name = getattr(func, "name", "") or ""
-                        if name:
-                            buf["name"] = name
-                        args = getattr(func, "arguments", "") or ""
-                        if args:
-                            buf["args"] += args
-
-            if usage:
-                self._record_usage(usage)
+        for tc in tool_calls:
+            if not tc["function"]["arguments"]:
+                tc["function"]["arguments"] = "{}"
+        # 无名工具调用无法执行，丢弃（与旧聚合器同口径）
+        tool_calls = [tc for tc in tool_calls if tc["function"]["name"]]
 
         response_content = self._filter_thinking_content("".join(content_parts))
         reasoning_content = "".join(reasoning_parts)
-
-        tool_calls_found = []
-        for buf in tool_buffers.values():
-            if not buf["name"]:
-                continue
-            tool_calls_found.append(
-                {
-                    "id": buf["id"] or f"subagent_{len(tool_calls_found)}",
-                    "type": "function",
-                    "function": {"name": buf["name"], "arguments": buf["args"]},
-                }
-            )
-
-        if not content_parts and not tool_calls_found and not reasoning_parts:
+        if not content_parts and not tool_calls and not reasoning_parts:
             logger.warning("[SubAgentWorker] 流式响应未产出内容、思考或工具调用")
 
-        return response_content, tool_calls_found, reasoning_content
+        return response_content, tool_calls, reasoning_content
 
     def _record_usage(self, usage) -> None:
-        """流式 usage chunk → token 用量记账与信号发射（chunk / 非流式两路共用）。"""
+        """usage → token 用量记账与信号发射（transport 统一给 dict）。"""
         try:
-            pt = getattr(usage, "prompt_tokens", 0) or 0
-            ct = getattr(usage, "completion_tokens", 0) or 0
-            tt = getattr(usage, "total_tokens", 0) or 0
+            if isinstance(usage, dict):
+                pt = usage.get("prompt_tokens", 0) or 0
+                ct = usage.get("completion_tokens", 0) or 0
+                tt = usage.get("total_tokens", 0) or 0
+            else:
+                pt = getattr(usage, "prompt_tokens", 0) or 0
+                ct = getattr(usage, "completion_tokens", 0) or 0
+                tt = getattr(usage, "total_tokens", 0) or 0
             self._total_prompt_tokens += pt
             self._total_completion_tokens += ct
             self._total_tokens += tt
@@ -1303,158 +1178,6 @@ class SubAgentExecutor(QThread):
             self.token_usage_updated.emit(self.task_id, pt, ct, tt)
         except Exception:
             pass
-
-    # ========== Responses API（GPT-5.x 系列）==========
-
-    def _use_responses_api(self, llm_config: Dict = None) -> bool:
-        """GPT-5.x+ 系列走 Responses API（chat/completions 不透传 reasoning）。
-
-        判定逻辑与 plugins/system-model-adapters/model_adapters/_detectors.py
-        的 detect_use_responses 保持同步（Phase 3 搬迁时统一到 adapter flags）。
-        """
-        config = llm_config if llm_config is not None else self.llm_config
-        try:
-            if not isinstance(config, dict):
-                return False
-            override = config.get("使用ResponsesAPI")
-            if override is not None:
-                return bool(override)
-            m = _GPT_VERSIONED_RE.match(str(config.get("模型名称", "") or "").lower())
-            return bool(m and int(m.group(1)) >= 5)
-        except Exception:
-            return False
-
-    @staticmethod
-    def _responses_tools(tools: List[Dict]) -> List[Dict]:
-        """chat/completions 工具格式 → Responses API 扁平格式。"""
-        out: List[Dict] = []
-        for t in tools or []:
-            if not isinstance(t, dict):
-                continue
-            func = t.get("function") or {}
-            if not isinstance(func, dict) or not func.get("name"):
-                continue
-            out.append(
-                {
-                    "type": "function",
-                    "name": func.get("name"),
-                    "description": func.get("description", ""),
-                    "parameters": func.get("parameters") or {"type": "object", "properties": {}},
-                }
-            )
-        return out
-
-    def _make_responses_api_call(self, client, messages, tools, config) -> tuple:
-        """非流式 Responses API 调用：解析 output 数组 → (content, tool_calls, reasoning)。"""
-        result = self._serialize_for_api(messages, config)
-        input_items, instructions = result.input_items, result.instructions
-        model = str(config.get("模型名称", "") or "")
-        kwargs: Dict[str, Any] = {
-            "model": model,
-            "input": input_items,
-            "stream": False,
-        }
-        # 服务商请求头（伪装身份 / 动态 token / 会话标识）：与 chat/completions
-        # 分支同源走 resolve_extra_headers，勿在两分支重复实现
-        provider_headers = resolve_extra_headers(config, getattr(self, "_task_session_id", None) or "")
-        if provider_headers:
-            kwargs["extra_headers"] = provider_headers
-        if instructions:
-            kwargs["instructions"] = instructions
-        if tools:
-            kwargs["tools"] = self._responses_tools(tools)
-
-        thinking_mode = config.get("思考模式")
-        if thinking_mode is True:
-            kwargs["reasoning"] = {"effort": config.get("思考等级", "medium")}
-        elif thinking_mode is False:
-            kwargs["reasoning"] = {"effort": "none"}
-
-        # P1-21：「最大输出」为唯一输出上限键（与 chat_worker responses 分支同源）
-        max_output = config.get("最大输出")
-        if max_output is not None:
-            kwargs["max_output_tokens"] = self._cap_max_output_tokens(model, max_output, config)
-
-        task_session_id = getattr(self, "_task_session_id", None)
-        if task_session_id:
-            kwargs["user"] = task_session_id
-
-        logger.info(f"[SubAgentWorker][ResponsesAPI] model={model} 使用 Responses API")
-        response = client.responses.create(**kwargs)
-        return self._parse_responses_output(response)
-
-    def _parse_responses_output(self, response) -> tuple:
-        """解析非流式 Responses 对象 output 数组。
-
-        Returns:
-            (content, tool_calls, reasoning)
-        """
-        reasoning_parts: List[str] = []
-        content_parts: List[str] = []
-        tool_calls: List[Dict] = []
-
-        def _item_get(item, key, default=None):
-            if isinstance(item, dict):
-                return item.get(key, default)
-            return getattr(item, key, default)
-
-        for item in getattr(response, "output", None) or []:
-            itype = _item_get(item, "type", "")
-            if itype == "reasoning":
-                # summary 数组：OpenCode Go 网关提供思考摘要
-                summary = _item_get(item, "summary", None) or []
-                for s in summary:
-                    if isinstance(s, dict):
-                        text = s.get("text", "")
-                    else:
-                        text = getattr(s, "text", "") or ""
-                    if text:
-                        reasoning_parts.append(text)
-                # 兜底：完整思考内容（部分网关放 content/raw）
-                raw = _item_get(item, "content", None) or _item_get(item, "raw", None)
-                if isinstance(raw, str) and raw:
-                    reasoning_parts.append(raw)
-            elif itype == "message":
-                for part in _item_get(item, "content", None) or []:
-                    if _item_get(part, "type", "") == "output_text":
-                        text = _item_get(part, "text", "") or ""
-                        if text:
-                            content_parts.append(text)
-            elif itype == "function_call":
-                call_id = _item_get(item, "call_id", "") or _item_get(item, "id", "")
-                name = _item_get(item, "name", "") or ""
-                arguments = _item_get(item, "arguments", "") or "{}"
-                if call_id and name:
-                    tool_calls.append(
-                        {
-                            "id": call_id,
-                            "type": "function",
-                            "function": {"name": name, "arguments": arguments},
-                        }
-                    )
-
-        content = "".join(content_parts)
-        reasoning = "".join(reasoning_parts)
-        if content:
-            content = self._filter_thinking_content(content)
-
-        # 追踪 token 用量
-        try:
-            usage = getattr(response, "usage", None)
-            if usage:
-                pt = getattr(usage, "input_tokens", 0) or 0
-                ct = getattr(usage, "output_tokens", 0) or 0
-                tt = getattr(usage, "total_tokens", 0) or 0
-                self._total_prompt_tokens += pt
-                self._total_completion_tokens += ct
-                self._total_tokens += tt
-                if tt > self._peak_total_tokens:
-                    self._peak_total_tokens = tt
-                self.token_usage_updated.emit(self.task_id, pt, ct, tt)
-        except Exception:
-            pass
-
-        return content, tool_calls, reasoning
 
     def _cap_max_output_tokens(self, model: str, requested: int, llm_config: Dict = None) -> int:
         """

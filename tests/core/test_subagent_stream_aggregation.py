@@ -186,61 +186,41 @@ def test_vendor_reasoning_aggregated(capture_create, delta_fields, expected):
     assert tool_calls == []
 
 
-# ---------- 协议入口：subagent 对齐 ----------
+# ---------- 协议入口：subagent 与主链路共用同一映射（protocol_dispatch） ----------
+def _transport_target(ex, **overrides):
+    from app.core.workers.protocol_dispatch import resolve_transport_target
+
+    config = dict(ex.llm_config)
+    config.update(overrides)
+    return resolve_transport_target(config, ex._protocol_flags(config))
+
 
 def test_subagent_entry_responses_forced(capture_create):
-    """协议入口=responses：非 gpt5 模型也强制走 responses 分支"""
+    """协议入口=responses：非 gpt5 模型也映射到 openai_responses"""
     _ensure_plugins_loaded()
-    capture_create["stream"] = iter([_chunk(content="hi", finish_reason="stop")])
     ex = _build_executor()
-    calls = {"responses": False}
-
-    def _fake_responses(client, messages, tools, config):
-        calls["responses"] = True
-        return "r", [], ""
-
-    ex._make_responses_api_call = _fake_responses
-    config = dict(ex.llm_config)
-    config["协议入口"] = "responses"
-    ex._make_api_call([{"role": "user", "content": "x"}], llm_config=config)
-    assert calls["responses"] is True, "协议入口=responses 必须强制走 responses 分支"
+    assert _transport_target(ex, 协议入口="responses") == "openai_responses"
 
 
 def test_subagent_entry_legacy_key_overrides(capture_create):
     """旧键显式 False 压过 协议入口=responses（与主线程同语义）"""
     _ensure_plugins_loaded()
-    capture_create["stream"] = iter([_chunk(content="hi", finish_reason="stop")])
     ex = _build_executor()
-    calls = {"responses": False}
-
-    def _fake_responses(client, messages, tools, config):
-        calls["responses"] = True
-        return "r", [], ""
-
-    ex._make_responses_api_call = _fake_responses
-    config = dict(ex.llm_config)
-    config["协议入口"] = "responses"
-    config["使用ResponsesAPI"] = False
-    ex._make_api_call([{"role": "user", "content": "x"}], llm_config=config)
-    assert calls["responses"] is False, "旧键显式 False 时不得走 responses"
+    assert _transport_target(ex, 协议入口="responses", 使用ResponsesAPI=False) is None
 
 
-def test_subagent_entry_transport_warns_and_falls_back(capture_create):
-    """协议入口=transport:<id>：警告并回退 chat/completions（Phase 3 前的边界）"""
+def test_subagent_entry_transport_id_passthrough(capture_create):
+    """协议入口=transport:<id>：直接按 id 交给注册表（子智能体现已支持）"""
     _ensure_plugins_loaded()
-    capture_create["stream"] = iter([_chunk(content="hi", finish_reason="stop")])
     ex = _build_executor()
-    config = dict(ex.llm_config)
-    config["协议入口"] = "transport:some_plugin"
-    content, _, _ = ex._make_api_call([{"role": "user", "content": "x"}], llm_config=config)
-    assert content == "hi"
+    assert _transport_target(ex, 协议入口="transport:openai_chat") == "openai_chat"
 
 
 def test_subagent_gpt6_auto_responses(capture_create):
-    """自动模式下 gpt-6 走 responses（detector 修复经 subagent 判定生效）"""
+    """自动模式下 gpt-6 映射到 openai_responses（detector 修复经 subagent 判定生效）"""
     _ensure_plugins_loaded()
     ex = _build_executor(模型名称="gpt-6-luna")
-    assert ex._use_responses_api(dict(ex.llm_config)) is True
+    assert _transport_target(ex) == "openai_responses"
 
 
 def test_tool_call_fragments_aggregated(capture_create):

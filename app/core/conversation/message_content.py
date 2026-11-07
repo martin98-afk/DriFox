@@ -1494,6 +1494,33 @@ def messages_to_responses_input(
     return result.input_items, result.instructions
 
 
+def tools_to_responses(tools: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """chat/completions 工具格式 → Responses API 扁平格式（纯函数）。
+
+    chat:      ``{"type":"function","function":{"name","description","parameters"}}``
+    responses: ``{"type":"function","name","description","parameters"}``
+
+    从 chat_worker._tools_to_responses 原地搬出（2026-11-07 Phase 3 插件化），
+    供 worker 与 responses transport 插件共用同一实现。
+    """
+    out: List[Dict[str, Any]] = []
+    for tool in tools or []:
+        if not isinstance(tool, dict):
+            continue
+        func = tool.get("function") or {}
+        if not isinstance(func, dict) or not func.get("name"):
+            continue
+        out.append(
+            {
+                "type": "function",
+                "name": func.get("name"),
+                "description": func.get("description", ""),
+                "parameters": func.get("parameters") or {"type": "object", "properties": {}},
+            }
+        )
+    return out
+
+
 def extract_reasoning_delta(obj: Any) -> str:
     """从流式 delta / message 对象里提取思考增量，兼容各厂商字段名。
 
