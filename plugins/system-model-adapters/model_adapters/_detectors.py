@@ -7,9 +7,14 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any, Dict
 
 from app.plugins.sdk import detect_provider_family
+
+# gpt-<主版本号>：主版本 >=5 走 Responses API（chat/completions 不透传 reasoning）。
+# 不逐版本加前缀：gpt-6-luna 曾因只认 gpt-5 前缀漏判（2026-11-07）。
+_GPT_VERSIONED_RE = re.compile(r"^gpt-(\d+)")
 
 __all__ = [
     "detect_provider_family",
@@ -62,6 +67,7 @@ def detect_use_responses(llm_config: Dict[str, Any]) -> bool:
         if override is not None:
             return bool(override)
         model = str(llm_config.get("模型名称", "") or "").lower()
-        return model.startswith("gpt-5")
+        m = _GPT_VERSIONED_RE.match(model)
+        return bool(m and int(m.group(1)) >= 5)
     except Exception:
         return False

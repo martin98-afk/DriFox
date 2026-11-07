@@ -1,6 +1,10 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+- **模型协议入口手动选择**: 模型参数卡新增「接口入口」下拉（自动 / Responses API / 已注册协议插件动态枚举），手选值按模型落盘（`ModelOverrides`）并在 worker 分派单点生效；旧键 `使用ResponsesAPI` 显式设置时优先。子智能体链路对齐 `responses` / 自动，手选插件通道警告回退。Responses API 自动判定改为按 gpt 主版本号（≥5）通用匹配，修复 gpt-6-luna 思考内容不显示；恢复 worker `_chat_transport` 测试注入点读取（a6946c9f5 搬迁回归）。
+
 ## [v0.6.15-beta] - 2026-11-06
 
 自 v0.6.14 以来的变更 | 提交数：34 · 文件变更：107 · +5593/-583 | 贡献者：dingma, drifox-bot, mading, martin98-afk

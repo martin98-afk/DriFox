@@ -32,6 +32,9 @@ from app.tools.result import ToolResult
 
 # ========== 性能优化：预编译正则表达式 ==========
 _THINKING_PATTERN = re.compile(r"<think>[\s\S]*?</think>")  # 过滤完整思考块
+# 与 plugins/system-model-adapters/model_adapters/_detectors.py 的判定保持同步
+# （Phase 3 搬迁进 adapter flags 时统一，消除重复实现）
+_GPT_VERSIONED_RE = re.compile(r"^gpt-(\d+)")
 _TOOL_TAG_PATTERN = re.compile(r"<tool>[\s\S]*?</tool>")  # 过滤工具调用标签
 _VALID_IDENTIFIER_PATTERN = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")  # 验证标识符格式
 
@@ -1164,9 +1167,23 @@ class SubAgentExecutor(QThread):
             timeout=120.0,
         )
 
-        # GPT-5.x 系列走 Responses API（chat/completions 不透传 reasoning，思考在
-        # /v1/responses 的 reasoning item 中返回）
-        if self._use_responses_api(config):
+        # 协议入口裁决：与 chat_worker._resolve_use_responses 同语义
+        # （旧键显式 > 新键 responses > 自动）。transport:<id> 子智能体暂不支持
+        # （Phase 3 搬迁进 transport+sink 体系后移除本警告）。
+        entry = str(config.get("协议入口", "") or "").strip()
+        legacy = config.get("使用ResponsesAPI")
+        if legacy is not None:
+            # 旧键显式设置不可被「协议入口」翻案（兼容纪律，与主线程一致）
+            use_responses = bool(legacy)
+        elif entry == "responses":
+            use_responses = True
+        else:
+            use_responses = self._use_responses_api(config)
+        if entry.startswith("transport:"):
+            logger.warning(
+                f"[SubAgentWorker] 协议入口={entry} 暂不支持子智能体链路，按 chat/completions 执行"
+            )
+        if use_responses:
             try:
                 return self._make_responses_api_call(client, messages, tools, config)
             except Exception as e:
@@ -1290,7 +1307,11 @@ class SubAgentExecutor(QThread):
     # ========== Responses API（GPT-5.x 系列）==========
 
     def _use_responses_api(self, llm_config: Dict = None) -> bool:
-        """GPT-5.x 系列走 Responses API（chat/completions 不透传 reasoning）。"""
+        """GPT-5.x+ 系列走 Responses API（chat/completions 不透传 reasoning）。
+
+        判定逻辑与 plugins/system-model-adapters/model_adapters/_detectors.py
+        的 detect_use_responses 保持同步（Phase 3 搬迁时统一到 adapter flags）。
+        """
         config = llm_config if llm_config is not None else self.llm_config
         try:
             if not isinstance(config, dict):
@@ -1298,8 +1319,8 @@ class SubAgentExecutor(QThread):
             override = config.get("使用ResponsesAPI")
             if override is not None:
                 return bool(override)
-            model = str(config.get("模型名称", "") or "").lower()
-            return model.startswith("gpt-5")
+            m = _GPT_VERSIONED_RE.match(str(config.get("模型名称", "") or "").lower())
+            return bool(m and int(m.group(1)) >= 5)
         except Exception:
             return False
 

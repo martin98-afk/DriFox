@@ -39,6 +39,7 @@ _CONFIG_ONLY_KEYS = {
     "模型名称",
     "系统提示",
     "启用技能",
+    "协议入口",
     "name",
     "provider_name",
     "config_id",
