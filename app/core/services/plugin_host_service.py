@@ -1709,6 +1709,12 @@ class PluginHostService(QObject):
 
             # P1/P2：版本/平台门禁闸口——被拦截的插件不进任何组件分派
             if not self._load_gate(plugin):
+                # 主题是纯文件数据（YAML + 资源），不执行插件代码，ThemeManager 的
+                # 目录直扫本就不过门禁。此处直接 return 会让 themes reloader 不跑 →
+                # UI 收不到 on_reload → 装纯主题插件时主题列表不刷新（要等下一次
+                # 别的插件热重载才突然出现）。故拦截后仍补一次主题源刷新。
+                if self._refresh_gated_plugin_theme_sources(plugin):
+                    result["themes"] = True
                 return result
 
             comps = plugin.components
@@ -1865,6 +1871,34 @@ class PluginHostService(QObject):
             )
             return False
         return True
+
+    @staticmethod
+    def _refresh_gated_plugin_theme_sources(plugin) -> bool:
+        """门禁拦截后的兜底刷新：重扫主题源，返回是否执行了刷新。
+
+        门禁拦的是「执行插件代码」的组件（tools/hooks/ui/...）。主题是纯文件
+        数据（YAML + 图片/音频资源），既不 import 插件模块也不注册回调，
+        ThemeManager 的目录直扫本就不看门禁——被拦插件的主题已被加载。
+        但列表刷新依赖 theme_manager.reload() 触发的 on_reload 回调链，
+        拦截分支早退会把它一并跳过。
+
+        插件未声明 themes 时跳过（避免每次拦截都白跑一次指纹计算）。
+        plugin 为 None（扫描失败）或组件表不可读时保守刷新：目录直扫可能
+        已经捡到该插件下的 themes/。
+        """
+        comps = getattr(plugin, "components", None)
+        if isinstance(comps, dict) and not comps.get("themes"):
+            return False
+        try:
+            from app.utils.config import update_theme_options
+            from app.utils.theme_manager import theme_manager
+
+            theme_manager.reload()
+            update_theme_options()
+            return True
+        except Exception as e:
+            logger.warning(f"[PluginHost] 门禁拦截后刷新主题源失败: {e}")
+            return False
 
     @staticmethod
     def _filter_blocked_lsp_configs(pm, lsp_configs: list) -> list:
@@ -2253,6 +2287,10 @@ class PluginHostService(QObject):
             # P1/P2：版本/平台门禁闸口——被拦截的插件不进任何组件分派；
             # 清理路径已在上方处理完毕，本处只挡「插件对象存在但不该加载」情形。
             if not self._load_gate(plugin):
+                # 同 _reload_new_plugin：主题是纯数据组件，拦截后仍须刷新主题源，
+                # 否则列表停留在旧快照（详见上方同款注释）。
+                if self._refresh_gated_plugin_theme_sources(plugin):
+                    result["themes"] = True
                 return result
 
             # 2-N. 组件分派：查 kernel reloader 注册表（原 8 分支 if 已迁 builtin_reloaders）

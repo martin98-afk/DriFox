@@ -66,9 +66,10 @@ backgrounds:
   window:      {...}   # 整个窗口最底层
   sidebar:     {...}   # 左侧 Tab 面板
   chat_area:   {...}   # 右侧对话区纯色底
-  scene:       {...}   # 右侧整个圆角矩形的场景图（推荐用这个做主题主背景）
+  chat:        {...}   # 右侧整个圆角矩形（新名，等价旧 scene，推荐）
+  scene:       {...}   # 旧名字，仍可用；与 chat 同时存在时 chat 逐字段覆盖
   decorations: [...]   # 装饰件数组
-  overlay:     {...}   # 动态光影视频覆盖层
+  overlay:     {...}   # 旧动态视频层（Qt5 已停用，改用 animation）
   music:       {...}   # 主题背景音乐播放列表
 ```
 
@@ -81,9 +82,66 @@ backgrounds:
 | `opacity` | float | `1.0` | 图片透明度 0.0~1.0 |
 | `blur` | int | `0` | 模糊半径 0~30（仅图片层，纯色不受影响） |
 | `dim` | string | 无 | 半透明蒙版，叠在图片上压暗提升可读性 |
+| `animation` | object | 无 | 动画背景（动画 WebP / GIF），见下节 |
 | `enabled` | bool | `true` | 关闭后忽略该区域 |
 
 `scene` 撑满整个右侧圆角矩形，覆盖 tab bar / 对话区 / 输入框 / 各方向停靠区 / UI 插件槽位，是主题主背景的首选落点。`chat_area` 是更内层的老区域，仅在需要兼容旧主题时用。
+
+### animation（动画背景）
+
+三个区域（`window` / `sidebar` / `chat`）都能各自配动态背景，互不影响：
+
+```yaml
+backgrounds:
+  chat:
+    animation:
+      src: bg/chat.webp
+      canvas: shared      # 与其它区域共用同一张动画
+      fps: 12
+      blend: overlay
+      fit: cover
+      position: center
+      opacity: 0.6
+```
+
+| 字段 | 类型 | 默认 | 说明 |
+|------|------|------|------|
+| `src` | string | 必填 | 动画素材路径（动画 WebP 优先，也兼容 GIF） |
+| `canvas` | string | `independent` | `shared` = 多区域共用同一张动画，各取自己的矩形，接缝连续且只解码一次 |
+| `fps` | int | `12` | 播放帧率，上限 15（超过自动压到 15） |
+| `blend` | string | `normal` | `overlay` = 光影压暗（素材需预烘成黑底+反相亮度 alpha） |
+| `fit` | string | `cover` | `cover` / `contain` / `tile` |
+| `position` | string | `center` | cover 裁剪的垂直对齐：`top` / `center` / `bottom` |
+| `opacity` | float | `1.0` | 0.0~1.0 |
+| `enabled` | bool | `true` | 关闭后不加载 |
+
+**为什么不用视频**：Qt5 的 `QMediaPlayer` 只是壳，解码交给系统媒体栈（Windows 的 DirectShow/Media Foundation、Linux 的 GStreamer、macOS 的 AVFoundation）。同一份 mp4 在不同机器上能不能播取决于那台机器装了什么解码器，实测 MediaFoundation 注册缺失时报 `InvalidMedia` 且 `errorString` 为空。动画 WebP 由 Qt 内置 qwebp 插件直接解码，三平台行为一致，零外部依赖。
+
+**素材规格**（客户端成本随像素量线性上升）：
+
+| 规格 | 单帧解码 | 建议 |
+|------|----------|------|
+| 640×360 @12fps | 2.6~3.2ms | 推荐；配 8~12px 模糊，光影/雾/流体类无损 |
+| 800×450 @12fps | ~5ms | 实拍素材要留细节时用 |
+| 1280×720 @12fps | 8.8~9.5ms | 不推荐，软渲染机器会明显吃 CPU |
+
+5 秒 / 640×360 / q55 约 0.2~0.5MB。素材分辨率在转码时降下来，客户端不做实时缩放。
+
+**转码**（制作端一次性，客户端不需要 ffmpeg）：
+
+```bash
+# 普通动态背景
+python scripts/anim_encode.py in.mp4 bg/chat.webp --blur 0.8
+
+# 光影遮罩（黑底 + 反相亮度 alpha，复刻旧 overlay 的效果）
+python scripts/anim_encode.py in.mp4 bg/leaves.webp --mode mask --blur 1.0
+```
+
+脚本在 `wallpaper-to-theme/scripts/anim_encode.py`。
+
+**降级链**：动画素材缺失或解码失败 → 同区域的 `image` 静态图 → `color` 底色 → 透明。不会白屏，也不会反复重试。
+
+**性能行为**：全局只有一个时钟，多区域同时动时共用；窗口最小化或区域隐藏时自动停表，不烧 CPU。
 
 ### decorations（装饰件）
 
@@ -106,7 +164,9 @@ backgrounds:
 
 两者可同时开，取更严格的缩放比例。原图比容器小时不会放大（避免糊）。
 
-### overlay（动态光影视频层）
+### overlay（旧动态光影视频层，已停用）
+
+> **Qt5 下不再播放**：QMediaPlayer 依赖系统解码器，同一素材在部分机器上无法播放。动态背景改用上面的 `animation`（动画 WebP）。`overlay` 字段保留仅为兼容存量主题与 Qt6（QtMultimedia 自带 ffmpeg 后端）复活用；Qt5 读到 `video` 会记一条 info 后跳过，不影响静态背景。
 
 ```yaml
 backgrounds:

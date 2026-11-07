@@ -2615,7 +2615,15 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
             self._apply_area_bg("sidebar", getattr(self, "_tab_frame", None), bgs["sidebar"])
             self._apply_area_bg("chat_area", getattr(self, "_chat_frame", None), bgs["chat_area"])
             self._apply_scene_layer(bgs["scene"])
+            self._apply_region_animation("window", self, bgs["window"])
+            self._apply_region_animation(
+                "sidebar", getattr(self, "_tab_frame", None), bgs["sidebar"]
+            )
             self._apply_video_overlay(bgs.get("overlay"))
+            # 主题切换后回收不再被任何区域订阅的动画源（旧素材不占内存）
+            from app.widgets.anim_background import AnimationRegistry
+
+            AnimationRegistry.instance().prune()
             self._apply_theme_music(bgs.get("music"))
         except Exception as e:
             logger.warning(f"[TabManagerWindow] 应用主题背景失败: {e}")
@@ -2654,8 +2662,37 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
         # image 解析：复用 _resolve_theme_image（已在文件内）
         try:
             self._scene_layer.apply_config(scene_cfg, self._resolve_theme_image)
+            anim = (scene_cfg or {}).get("animation")
+            if anim and anim.get("canvas") == "shared":
+                self._scene_layer.set_canvas_provider(
+                    self._make_canvas_provider(getattr(self, "_chat_frame", None))
+                )
+            else:
+                self._scene_layer.set_canvas_provider(None)
         except Exception as e:
             logger.warning(f"[TabManagerWindow] 应用 scene 背景失败: {e}")
+
+    def _make_canvas_provider(self, region_widget):
+        """共享画布求值函数：画布=整窗，返回区域左缘在窗口中的 x 偏移
+
+        多个区域用同一张动画时，各自按画布尺寸绘制一块，父控件裁剪后只显示
+        自己那段，左右分栏的接缝处图案严格连续（不用各自 cover 重排）。
+        垂直方向以区域自身高度为画布高，与窗口层差一个标题栏高度，渐变动画
+        里看不出来。
+        """
+
+        def provider():
+            if region_widget is None:
+                return None
+            try:
+                from PyQt5.QtCore import QPoint
+
+                origin = region_widget.mapTo(self, QPoint(0, 0))
+                return (self.width(), region_widget.height(), max(0, origin.x()), 0)
+            except RuntimeError:
+                return None
+
+        return provider
 
     # overlay.target 合法值 → 宿主属性名（window 特判为 self）
     _OVERLAY_TARGETS = {
@@ -2664,6 +2701,68 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
         "chat_area": "_chat_frame",
         "scene": "_chat_frame",
     }
+
+    def _apply_region_animation(self, area, parent_widget, cfg):
+        """给 window/sidebar 挂动画背景层
+
+        静态图/纯色仍由 _apply_area_bg 的 QLabel 负责（路径不变、开销更低），
+        动画另叠一个透明 SceneLayer：素材是动画 WebP，Qt 内置解码，
+        不依赖系统媒体栈。同一区域重复应用时按 src+fps 去重。
+        """
+        if parent_widget is None:
+            return
+        anim = (cfg or {}).get("animation")
+        src = (anim or {}).get("src") or "__none__"
+        key = (
+            f"{src}:{(anim or {}).get('fps', 12)}:"
+            f"{(anim or {}).get('canvas') or 'independent'}:"
+            f"{(anim or {}).get('opacity', 1.0)}"
+        )
+        attr = f"_{area}_anim_layer"
+        key_attr = f"_last_{area}_anim_key"
+        old = getattr(self, attr, None)
+        if getattr(self, key_attr, None) == key and old is not None:
+            return
+        setattr(self, key_attr, key)
+
+        if old is not None:
+            try:
+                old.clear()
+                old.hide()
+                old.deleteLater()
+            except RuntimeError:
+                pass
+            setattr(self, attr, None)
+
+        if not anim or not anim.get("enabled", True) or not anim.get("src"):
+            return
+
+        try:
+            from app.widgets.scene_layer import SceneLayer
+
+            layer = SceneLayer(parent_widget, radius=0 if area == "window" else 8)
+            layer.apply_config({"animation": anim}, self._resolve_theme_image)
+            if anim.get("canvas") == "shared":
+                layer.set_canvas_provider(self._make_canvas_provider(parent_widget))
+            layer.setGeometry(parent_widget.rect())
+            layer.lower()
+            if area == "window":
+                base = getattr(self, "_window_base_layer", None)
+                if base is not None:
+                    base.stackUnder(layer)
+            # 静态图（QLabel）垫在动画层之下，否则 image+animation 同时配置时
+            # 动画会被静态图完全盖住
+            static_label = getattr(self, f"_{area}_bg_label", None)
+            if static_label is not None:
+                try:
+                    static_label.stackUnder(layer)
+                except RuntimeError:
+                    pass
+            layer.show()
+            setattr(self, attr, layer)
+        except Exception as e:
+            logger.warning(f"[TabManagerWindow] 应用 {area} 动画背景失败: {e}")
+
 
     def _overlay_target_widget(self, target: str):
         """按 target 取视频层挂载父 widget；window 挂窗口自身"""
@@ -2692,6 +2791,19 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
                     layer.hide()
                 except RuntimeError:
                     pass  # C++ 对象已销毁
+            return
+
+        # Qt5 的 QMediaPlayer 只是壳，解码委托系统媒体栈：同一素材在不同机器上
+        # 能不能播取决于系统装了什么解码器（实测 MediaFoundation 注册缺失时报
+        # InvalidMedia 且 errorString 为空）。统一改用 animation.webp，视频层
+        # 保留给 Qt6 复活（QtMultimedia 自带 ffmpeg 后端）。
+        from PyQt5.QtCore import QT_VERSION_STR
+
+        if int(QT_VERSION_STR.split(".")[0]) < 6:
+            logger.info(
+                "[TabManagerWindow] 跳过视频 overlay：Qt5 无内置解码器，"
+                "请把素材转成 animation.webp（见 wallpaper-to-theme 技能）"
+            )
             return
 
         target = str(overlay_cfg.get("target") or "chat_area").lower()
@@ -2872,6 +2984,16 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
                 if parent is not None:
                     lbl.resize(parent.size())
             except Exception:
+                pass
+        # 共享画布动画层：resize 阶段二跳过布局传播，子控件不会收到 resize，
+        # 必须手动重算画布几何，否则缩放过程中侧栏/对话区动画会错位
+        for attr in ("_window_anim_layer", "_sidebar_anim_layer", "_scene_layer"):
+            layer = getattr(self, attr, None)
+            if layer is None or not hasattr(layer, "refresh_canvas_geometry"):
+                continue
+            try:
+                layer.refresh_canvas_geometry()
+            except RuntimeError:
                 pass
 
     def _setup_ui(self):

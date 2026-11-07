@@ -22,7 +22,7 @@ license: GPL-3.0-or-later
 
 | 壁纸 type | 载体 | 处理方式 | 实测通过率 |
 |---|---|---|---|
-| `video` | 单个 mp4/webm | 直接取 `project.json` 的 `file` 字段，挂 `overlay.target` | 全部 |
+| `video` | 单个 mp4/webm | 用 `scripts/anim_encode.py` 转成动画 WebP（640×360@12fps），挂 `chat.animation` | 全部 |
 | `scene` | `scene.pkg` 或 `gifscene.pkg` | 解 PKG 索引，抽主视觉图 + 内嵌音频 | 见下方限制 |
 | `web` | 内嵌浏览器 | **不支持**，DriFox 主题无 Web 载体 | — |
 
@@ -40,12 +40,36 @@ license: GPL-3.0-or-later
 
 主题 yaml 会自动决定用哪几块 `backgrounds`：
 
-- **有视频** → `overlay.video`（`target: chat_area`）
+- **有视频** → `chat.animation.src`（先用 `scripts/anim_encode.py` 转码，见下节）。**不要写 `overlay.video`**：Qt5 下依赖系统解码器，部分机器直接播不了，已停用
 - **有主图** → `window.image` + `dim` 蒙版（整窗铺底），`sidebar` 半透明罩保左侧文字可读，`scene` 纯透明让窗口层透出。**不要把主图只挂在右侧对话区**（参考内置 true-black 的分层写法）
 - **有透明前景图** → `scene.foreground`（`{image, opacity, enabled}`，与 scene.image 同矩形同拉伸，逐像素对齐）
 
 > 前景图必须用 `scene.foreground`，不要用 `decorations`：decorations 的 reference 是对话滚动区且等比 fit，与 scene 的拉伸铺满不同，同一张壁纸拆出的前景层会与背景错位。
 - **有音频** → `music.tracks` 列表
+
+### 视频素材转码
+
+Wallpaper Engine 的 mp4 不能直接给客户端播（Qt5 的 QMediaPlayer 依赖系统解码器，同一份素材在不同机器上能不能播取决于系统装了什么）。先转成动画 WebP：
+
+```bash
+python scripts/anim_encode.py <壁纸目录>/xxx.mp4 <out>/themes/<id>/bg/chat.webp --blur 0.8
+```
+
+参数建议：`--width 640 --fps 12`（默认值），`--duration 6~10` 截一段干净的循环，`--blur 0.8~1.5` 预烘模糊掩盖低分辨率。产物 0.2~0.5MB/5s，比原 mp4 小。
+
+yaml 里对应写法：
+
+```yaml
+backgrounds:
+  chat:
+    animation:
+      src: bg/chat.webp
+      canvas: shared
+      fps: 12
+      fit: cover
+```
+
+需要「光影压暗」而非直接铺画面时，用 `--mode mask`（黑底 + 反相亮度 alpha），并把 `blend` 写成 `overlay`。
 
 ### 配色必须适配背景
 
@@ -68,7 +92,7 @@ license: GPL-3.0-or-later
 
 - **DXT 压缩贴图**（`TEXB` 头部声明 `isLZ4=1` 且载荷不是完整 PNG/JPEG）无法提取。这类壁纸的 `scene.pkg` 里所有贴图都是压缩原始像素，脚本会明确报错而不是产出空主题。批量测试里 3/23 属于这类。
 - **PKG 内的音频**只在载荷是标准 `ID3`/`FF FB` 头时提取；被压缩的音轨会被跳过。
-- **动态效果无法还原**：Wallpaper Engine 的 shader、粒子、视差滚动在 DriFox 主题里没有对应能力，迁移结果是一张静态背景图（加上可选的角色剪影）。
+- **动态效果有限还原**：video 类型能整段转成动画 WebP 保住画面运动；scene 类型的 shader、粒子、视差滚动没有对应能力，迁移结果是静态背景图（加可选角色剪影）。
 
 ## 验证
 

@@ -30,6 +30,10 @@ _BUILTIN_THEMES_DIR = Path(__file__).parent.parent.parent / "plugins" / "system-
 # 仅「已存在 yaml 就地改内容」会延迟到本窗口之后（或显式 reload(force=True)）。
 _FINGERPRINT_FULL_WINDOW_S = 10.0
 
+# 动画背景帧率上限：素材按 12fps 制作，主题写再高也没有帧可用，
+# 且解码成本随时长线性上升（640x360 单帧约 3ms），必须 clamp。
+_ANIM_FPS_CAP = 15
+
 
 class ThemeManager:
     """主题管理器 - 单例，纯文件驱动"""
@@ -264,6 +268,55 @@ class ThemeManager:
         new_bg = theme.get("backgrounds") or {}
         legacy_bg = theme.get("background") or {}
 
+        def _normalize_animation(d) -> Optional[dict]:
+            """动画背景归一化（backgrounds.<region>.animation）
+
+            动画素材为动画 WebP（也兼容 GIF），由 Qt 内置解码器逐帧读取，
+            不依赖系统媒体栈。字段：
+              - src      : str  主题目录相对路径或绝对路径
+              - canvas   : shared | independent（默认 independent）
+                           shared = 多区域共用同一张动画，各区域取自己的矩形，
+                           接缝连续且只解码一次
+              - fps      : int  1~15（上限 clamp，防止主题写出高帧率吃满 CPU）
+              - blend    : normal | overlay（overlay=黑底+alpha 压暗，光影遮罩）
+              - fit      : cover | contain | tile
+              - position : cover 裁切对齐 top/center/bottom
+              - opacity  : float 0.0~1.0
+              - enabled  : bool
+            """
+            if not isinstance(d, dict):
+                return None
+            src = d.get("src")
+            if not src:
+                return None
+
+            def _f(v, default, lo, hi):
+                try:
+                    return max(lo, min(hi, float(v)))
+                except (TypeError, ValueError):
+                    return default
+
+            fps = int(_f(d.get("fps", 12), 12, 1, _ANIM_FPS_CAP))
+            blend = str(d.get("blend") or "normal").lower()
+            if blend not in ("normal", "overlay"):
+                blend = "normal"
+            fit = str(d.get("fit") or "cover").lower()
+            if fit not in ("cover", "contain", "tile"):
+                fit = "cover"
+            position = str(d.get("position") or "center").lower()
+            if position not in ("top", "center", "bottom"):
+                position = "center"
+            return {
+                "src": str(src),
+                "canvas": "shared" if str(d.get("canvas") or "").lower() == "shared" else "independent",
+                "fps": fps,
+                "blend": blend,
+                "fit": fit,
+                "position": position,
+                "opacity": _f(d.get("opacity", 1.0), 1.0, 0.0, 1.0),
+                "enabled": bool(d.get("enabled", True)),
+            }
+
         def _normalize(d: Optional[dict]) -> Optional[dict]:
             """统一区域字段：补默认值 + 兼容旧字段"""
             if not d:
@@ -275,6 +328,7 @@ class ThemeManager:
                 "blur": d.get("blur", 0),
                 "dim": d.get("dim"),
                 "enabled": d.get("enabled", True),
+                "animation": _normalize_animation(d.get("animation")),
                 # overlay 区块专用：视频路径、亮度补偿色与挂载区域，其余区块恒 None
                 "video": d.get("video"),
                 "brightness_boost": d.get("brightness_boost"),
@@ -317,6 +371,14 @@ class ThemeManager:
                 normalized["foreground"] = None
             return normalized
 
+        # scene 与 chat 是同一块（右侧整个 _chat_frame）：chat 为新区块名，
+        # 与 scene 同时存在时逐字段覆盖，便于新主题只用 chat。
+        scene_cfg = dict(new_bg.get("scene") or {})
+        chat_cfg = new_bg.get("chat")
+        if isinstance(chat_cfg, dict):
+            scene_cfg.update(chat_cfg)
+        scene_normalized = _normalize_scene(scene_cfg)
+
         return {
             "window": (
                 _normalize(new_bg.get("window"))
@@ -325,7 +387,8 @@ class ThemeManager:
             ),
             "sidebar": _normalize(new_bg.get("sidebar")),
             "chat_area": _normalize(new_bg.get("chat_area")),
-            "scene": _normalize_scene(new_bg.get("scene")),
+            "scene": scene_normalized,
+            "chat": scene_normalized,  # 新区块名，与 scene 同一对象
             "decorations": new_bg.get("decorations") or [],
             "overlay": _normalize(new_bg.get("overlay")),
             "music": _normalize_music(new_bg.get("music")),

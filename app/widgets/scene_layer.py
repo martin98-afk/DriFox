@@ -24,7 +24,8 @@
 
 from typing import Optional
 
-from PyQt5.QtCore import QEvent, Qt
+from PyQt5.QtCore import QEvent, QRect, Qt
+from PyQt5.QtGui import QImage, QPainter, QPixmap
 from PyQt5.QtWidgets import (
     QGraphicsBlurEffect,
     QGraphicsOpacityEffect,
@@ -32,8 +33,78 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
+from app.widgets.anim_background import AnimationRegistry, BackgroundClock
+
 # 适配 _chat_frame 的 8px 圆角；SceneLayer 自身和内部图片标签都按此设置
 _CHAT_FRAME_RADIUS = 8
+
+class _AnimView(QWidget):
+    """动画帧绘制层
+
+    直接画 QImage（cover 时只取源帧可见的那段），比 QLabel 少一次
+    「整帧缩放到 label 尺寸再裁切」的浪费。
+    """
+
+    def __init__(self, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self.setAttribute(Qt.WA_TransparentForMouseEvents)
+        self.setAttribute(Qt.WA_NoSystemBackground, True)
+        self._frame: Optional[QImage] = None
+        self._fit = "cover"
+        self._position = "center"
+
+    def configure(self, fit: str, position: str) -> None:
+        self._fit = fit or "cover"
+        self._position = position or "center"
+        self.update()
+
+    def set_frame(self, image: Optional[QImage]) -> None:
+        self._frame = image
+        self.update()
+
+    def paintEvent(self, event) -> None:
+        img = self._frame
+        if img is None or img.isNull():
+            return
+        painter = QPainter(self)
+        target = self.rect()
+        if target.isEmpty():
+            return
+        if self._fit == "tile":
+            painter.drawTiledPixmap(target, QPixmap.fromImage(img))
+            return
+        tw, th = target.width(), target.height()
+        iw, ih = img.width(), img.height()
+        if iw <= 0 or ih <= 0:
+            return
+        if self._fit == "contain":
+            scale = min(tw / iw, th / ih)
+            w, h = int(iw * scale), int(ih * scale)
+            painter.drawImage(
+                QRect(target.x() + (tw - w) // 2, target.y() + (th - h) // 2, w, h),
+                img,
+                img.rect(),
+            )
+            return
+        # cover：只取源帧中真正可见的那段
+        painter.drawImage(target, img, self.source_rect((iw, ih), (tw, th)))
+
+    def source_rect(self, image_size, target_size) -> QRect:
+        """cover 模式下从源帧取的矩形（只取可见那段，不做整帧缩放）"""
+        iw, ih = int(image_size[0]), int(image_size[1])
+        tw, th = int(target_size[0]), int(target_size[1])
+        if iw <= 0 or ih <= 0 or tw <= 0 or th <= 0:
+            return QRect(0, 0, max(1, iw), max(1, ih))
+        scale = max(tw / iw, th / ih)
+        sw, sh = tw / scale, th / scale
+        sx = (iw - sw) / 2
+        if self._position == "top":
+            sy = 0.0
+        elif self._position == "bottom":
+            sy = ih - sh
+        else:
+            sy = (ih - sh) / 2
+        return QRect(int(sx), int(sy), max(1, int(sw)), max(1, int(sh)))
 
 
 
@@ -55,14 +126,18 @@ class SceneLayer(QWidget):
       - enabled : bool  默认 True
     """
 
-    def __init__(self, parent: Optional[QWidget] = None):
+    def __init__(self, parent: Optional[QWidget] = None, radius: int = _CHAT_FRAME_RADIUS):
         super().__init__(parent)
         self.setAttribute(Qt.WA_TransparentForMouseEvents)
         self.setAttribute(Qt.WA_NoSystemBackground, True)
+        # 圆角：对话区/侧栏 8px，窗口层 0（整窗无圆角）
+        self._radius = int(radius)
 
         self._image_label: Optional[QLabel] = None
         self._foreground_label: Optional[QLabel] = None
         self._dim_label: Optional[QLabel] = None
+        self._anim_view: Optional[_AnimView] = None
+        self._anim_source = None
         # 跨宿主共享画布：宿主注入求值函数，让本层只显示同一张图的某一段。
         # 多栏共享背景时各栏用同一画布尺寸 + 各自左缘偏移，保证接缝处图案
         # 严格连续。None = 退化为撑满自身 rect（原有单宿主行为）。
@@ -110,7 +185,7 @@ class SceneLayer(QWidget):
         if color:
             self.setAutoFillBackground(True)
             self.setStyleSheet(
-                f"background-color: {color}; border-radius: {_CHAT_FRAME_RADIUS}px;"
+                f"background-color: {color}; border-radius: {self._radius}px;"
             )
 
         # 2. 图片层（独立 widget，可挂 blur effect）
@@ -127,7 +202,7 @@ class SceneLayer(QWidget):
                 self._sync_content_geometry()
                 # 图片也设圆角（避免溢出到 _chat_frame 圆角外）
                 self._image_label.setStyleSheet(
-                    f"border-radius: {_CHAT_FRAME_RADIUS}px;"
+                    f"border-radius: {self._radius}px;"
                 )
                 self._image_label.show()
                 # blur 效果挂到 _image_label
@@ -138,6 +213,12 @@ class SceneLayer(QWidget):
                     self._image_label.setGraphicsEffect(blur_effect)
                     self._blur_pad = int(min(float(blur), 30.0)) * 2
                     self._sync_content_geometry()
+
+        # 2.2 动画层（动画 WebP / GIF，Qt 内置解码，不依赖系统媒体栈）
+        # Z 序：静态图之上、dim 之下（dim 是给文字提可读性的压暗层）
+        anim = cfg.get("animation")
+        if isinstance(anim, dict) and anim.get("enabled", True) and anim.get("src"):
+            self._apply_animation(anim, image_resolver)
 
         # 2.5 前景图层（壁纸拆出的全画布图层，如人物）
         # 与 image 同矩形、同 setScaledContents 拉伸，才能与背景构图逐像素对齐。
@@ -156,7 +237,7 @@ class SceneLayer(QWidget):
                     self._foreground_label.setPixmap(fg_pix)
                     self._foreground_label.setScaledContents(True)
                     self._foreground_label.setStyleSheet(
-                        f"border-radius: {_CHAT_FRAME_RADIUS}px;"
+                        f"border-radius: {self._radius}px;"
                     )
                     fg_opacity = fg.get("opacity", 1.0)
                     if fg_opacity < 1.0:
@@ -171,7 +252,7 @@ class SceneLayer(QWidget):
         if dim:
             self._dim_label = QLabel(self)
             self._dim_label.setStyleSheet(
-                f"background-color: {dim}; border-radius: {_CHAT_FRAME_RADIUS}px;"
+                f"background-color: {dim}; border-radius: {self._radius}px;"
             )
             self._sync_content_geometry()
             self._dim_label.raise_()
@@ -191,8 +272,58 @@ class SceneLayer(QWidget):
 
         self._sync_geometry()
 
+    def _apply_animation(self, anim_cfg: dict, image_resolver) -> None:
+        """挂载动画层
+
+        动画素材为动画 WebP（也兼容 GIF），由 Qt 内置解码器逐帧读取。
+        素材缺失/解码失败时直接返回，调用方保留静态图或底色（降级链：
+        动画 → 首帧静态图 → color → 透明）。
+        """
+        if image_resolver is None:
+            return
+        resolved = image_resolver(anim_cfg.get("src") or "")
+        if not resolved:
+            return
+        source = AnimationRegistry.instance().acquire(resolved, anim_cfg.get("fps", 12))
+        if source.failed or source.current is None:
+            return
+
+        view = _AnimView(self)
+        view.configure(anim_cfg.get("fit", "cover"), anim_cfg.get("position", "center"))
+        opacity = anim_cfg.get("opacity", 1.0)
+        if opacity < 1.0:
+            effect = QGraphicsOpacityEffect(view)
+            effect.setOpacity(float(opacity))
+            view.setGraphicsEffect(effect)
+        if self._radius:
+            view.setStyleSheet(f"border-radius: {self._radius}px;")
+
+        self._anim_view = view
+        self._anim_source = source
+        source.subscribe(self)
+        BackgroundClock.instance().track(source)
+        view.set_frame(source.current)
+        self._sync_content_geometry()
+        view.show()
+
+    def on_animation_frame(self, image) -> None:
+        """帧源回调（主线程，由全局时钟驱动）"""
+        if self._anim_view is not None and image is not None:
+            self._anim_view.set_frame(image)
+
+    def clear(self) -> None:
+        """清除所有内容层（公开入口，供宿主主题切换时释放动画订阅）"""
+        self._clear()
+
     def _clear(self) -> None:
         """清除旧 widgets 和 effects"""
+        if self._anim_view is not None:
+            if self._anim_source is not None:
+                self._anim_source.unsubscribe(self)
+                self._anim_source = None
+            self._anim_view.hide()
+            self._anim_view.deleteLater()
+            self._anim_view = None
         if self._image_label is not None:
             self._image_label.hide()
             self._image_label.deleteLater()
@@ -249,6 +380,8 @@ class SceneLayer(QWidget):
         for label in (self._image_label, self._foreground_label, self._dim_label):
             if label is not None:
                 label.setGeometry(x, y, w, h)
+        if self._anim_view is not None:
+            self._anim_view.setGeometry(x, y, w, h)
 
     def _sync_geometry(self) -> None:
         """同步到 parent 的几何"""
