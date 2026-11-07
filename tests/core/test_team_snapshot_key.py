@@ -30,7 +30,7 @@ def registry_env(monkeypatch):
 
     spec = importlib.util.spec_from_file_location(
         "team_tools_snap",
-        str(Path(__file__).resolve().parent.parent.parent / "plugins" / "system-tools" / "tools" / "team_tools.py"),
+        str(Path(__file__).resolve().parent.parent.parent / "plugins" / "system-team" / "tools" / "team_tools.py"),
     )
     tt = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(tt)

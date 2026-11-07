@@ -48,24 +48,52 @@ def _get_client() -> "httpx.Client":
 # ── E1 插件配置契约：schema 声明在 plugin.json（config_schema），存储走 PluginConfigStore ──
 
 
+_PLUGIN_NAME = "system-web"
+# 拆分前的宿主插件名：搜索 Key 曾存在 system-tools 的 config.json 里
+_LEGACY_PLUGIN_NAME = "system-tools"
+
 def _ensure_migrated() -> None:
-    """旧 <app_data>/tools/web_search_keys.json 一次性迁移到统一存储（幂等）。
+    """旧存储一次性迁移到本插件（幂等）。
 
-    旧文件存在且新存储为空 → 迁移并改名 .bak；否则静默跳过。
+    两级来源：
+    1. <app_data>/tools/web_search_keys.json（更早的单文件存储）
+    2. plugin_data/system-tools/config.json（本轮拆分前的宿主插件配置）
+    新存储已有内容时静默跳过。
+
+    路径一律从 PluginConfigStore 反推（`<app_data>/plugin_data/<name>/config.json`
+    上溯两级），不走 sdk.get_app_data_dir —— 后者是 SDK 的缓存符号，测试里改名
+    数据目录时不生效。
     """
-    from pathlib import Path
-
     from app.plugins.managers.plugin_config_store import PluginConfigStore
-    from app.plugins.sdk import get_app_data_dir
 
-    legacy = Path(get_app_data_dir()) / "tools" / "web_search_keys.json"
-    if not legacy.exists():
+    store = PluginConfigStore()
+    legacy_keys = {"tavily_api_key": "tavily_api_key", "tinyfish_api_key": "tinyfish_api_key"}
+
+    try:
+        app_data = store._path(_PLUGIN_NAME).parent.parent.parent
+    except Exception:  # noqa: BLE001 - 路径不可推断时放弃迁移（不影响读取默认值）
         return
-    PluginConfigStore().migrate(
-        "system-tools",
-        legacy,
-        key_map={"tavily_api_key": "tavily_api_key", "tinyfish_api_key": "tinyfish_api_key"},
-    )
+
+    legacy_file = app_data / "tools" / "web_search_keys.json"
+    if legacy_file.exists():
+        if store.migrate(_PLUGIN_NAME, legacy_file, key_map=legacy_keys):
+            return
+
+    # 拆分承继：system-tools 配置里的搜索 Key 搬到 system-web（两边键名一致）
+    # 仅在新插件尚无配置文件时搬一次，避免覆盖用户在新插件里改过的值
+    new_cfg = store._path(_PLUGIN_NAME)
+    if new_cfg.exists():
+        return
+    carried = {}
+    for key in legacy_keys:
+        try:
+            old_val = store.get(_LEGACY_PLUGIN_NAME, key)
+        except Exception:
+            old_val = None
+        if old_val:
+            carried[key] = old_val
+    if carried:
+        store.set_values(_PLUGIN_NAME, carried)
 
 
 def _api_key(tool_ctx, name: str) -> str:
@@ -79,7 +107,7 @@ def _api_key(tool_ctx, name: str) -> str:
     from app.plugins.managers.plugin_config_store import PluginConfigStore
 
     key = "tavily_api_key" if name == "TAVILY_API_KEY" else "tinyfish_api_key"
-    val = PluginConfigStore().get("system-tools", key)
+    val = PluginConfigStore().get(_PLUGIN_NAME, key)
     return str(val or "")
 
 

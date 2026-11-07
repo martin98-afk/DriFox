@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""能力目录：69 条定义完整性 / 命名空间 / 别名 / 通配展开 / 旧键映射。"""
+"""能力目录：74 条定义完整性 / 命名空间 / 别名 / 通配展开 / 旧键映射。"""
 import re
 
 import pytest
@@ -8,7 +8,7 @@ import pytest
 def test_catalog_size_and_ids():
     from app.plugins.capabilities import catalog
 
-    assert len(catalog.CATALOG) == 69
+    assert len(catalog.CATALOG) == 74
     for cid, spec in catalog.CATALOG.items():
         assert spec.id == cid
         assert re.fullmatch(r"[a-z]+(\.[a-z][a-z_]*)+", cid), cid

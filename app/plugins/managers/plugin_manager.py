@@ -393,6 +393,8 @@ class PluginManager:
     _NON_DISABLEABLE = frozenset(
         {
             "system-tools",
+            "system-core",
+            "system-question",
             "system-serializers",
             "system-storages",
             "system-model-adapters",
@@ -542,6 +544,38 @@ class PluginManager:
     # 旧单体插件 config_schema（网页搜索 API Key）的承继插件
     _SPLIT_CONFIG_HEIR = "system-tools"
 
+    # 工具级禁用键迁移：`system-tools:tools:<tool>` → `<拆分后插件>:tools:<tool>`
+    # （拆分后工具分散到多个插件，旧禁用键不改写会让用户已禁用的工具重新出现）
+    _SPLIT_TOOL_PLUGINS = (
+        "system-core",
+        "system-web",
+        "system-question",
+        "system-team",
+        "system-diagnostics",
+    )
+    _SPLIT_TOOL_TO_PLUGIN = {
+        "read": "system-core",
+        "write": "system-core",
+        "edit": "system-core",
+        "multi_edit": "system-core",
+        "grep": "system-core",
+        "list": "system-core",
+        "glob": "system-core",
+        "scan_repo": "system-core",
+        "stage_files": "system-core",
+        "bash": "system-core",
+        "background_task": "system-core",
+        "todowrite": "system-core",
+        "todoread": "system-core",
+        "websearch": "system-web",
+        "webfetch": "system-web",
+        "question": "system-question",
+        "team_send_message": "system-team",
+        "team_manage": "system-team",
+        "get_diagnostics": "system-diagnostics",
+        "lsp": "system-diagnostics",
+    }
+
     def _migrate_split_system_states(self) -> None:
         """system 插件按类型拆分后的一次性状态迁移（幂等，无旧键时零写入）。
 
@@ -569,6 +603,19 @@ class PluginManager:
                         changed = True
                         continue
                 mapped.append(key)
+            # 1b. 工具级禁用键改写：system-tools:tools:<tool> → <拆分后插件>:tools:<tool>
+            remapped: List[str] = []
+            for key in mapped:
+                if isinstance(key, str) and key.startswith("system-tools:tools:"):
+                    tool = key[len("system-tools:tools:") :]
+                    owner = self._SPLIT_TOOL_TO_PLUGIN.get(tool)
+                    if owner:
+                        remapped.append(f"{owner}:tools:{tool}")
+                        changed = True
+                        continue
+                remapped.append(key)
+            mapped = remapped
+
             if changed:
                 cfg.set(cfg.disabled_plugin_components, mapped, save=True)
                 logger.info(f"[PluginManager] 迁移 system 拆分禁用键 {len(mapped)} 条")
@@ -585,6 +632,7 @@ class PluginManager:
                     changed = True
             enabled = list(cfg.enabled_plugins.value or [])
             missing = [n for n in self._SPLIT_COMPONENT_TO_PLUGIN.values() if n not in enabled]
+            missing += [n for n in self._SPLIT_TOOL_PLUGINS if n not in enabled]
             if missing:
                 cfg.set(cfg.enabled_plugins, enabled + missing, save=True)
                 changed = True

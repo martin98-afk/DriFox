@@ -38,7 +38,7 @@ def team_env(monkeypatch):
     import importlib.util
 
     spec = importlib.util.spec_from_file_location(
-        "team_tools_test", str(_TEST_DIR.parent.parent / "plugins" / "system-tools" / "tools" / "team_tools.py")
+        "team_tools_test", str(_TEST_DIR.parent.parent / "plugins" / "system-team" / "tools" / "team_tools.py")
     )
     tt = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(tt)

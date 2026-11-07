@@ -1,10 +1,10 @@
 # -*- coding: utf-8 -*-
-"""工具 description 预览拼接规则测试（plugins/system-tools/tools/_tool_desc.py）"""
+"""工具 description 预览拼接规则测试（plugins/system-core/tools/_tool_desc.py）"""
 
 import importlib.util
 from pathlib import Path
 
-_MOD_PATH = Path(__file__).resolve().parents[2] / "plugins" / "system-tools" / "tools" / "_tool_desc.py"
+_MOD_PATH = Path(__file__).resolve().parents[2] / "plugins" / "system-core" / "tools" / "_tool_desc.py"
 
 
 def _load_mod():

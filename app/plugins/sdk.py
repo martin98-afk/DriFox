@@ -73,6 +73,7 @@ _SYMBOLS: dict[str, tuple[str, str]] = {
     "count_messages_tokens": ("app.core.infra.token_estimator", "count_messages_tokens"),
     "clear_cache": ("app.core.infra.message_identity", "clear_cache"),
     "build_openai_client": ("app.utils.http_client", "build_openai_client"),
+    "chat_completion_text": ("app.utils.http_client", "chat_completion_text"),
     "format_relative_time": ("app.utils.session_preview", "format_relative_time"),
     "retarget": ("app.utils.motion", "retarget"),
     # ── 设计 token ──

@@ -49,7 +49,15 @@ def _ensure_split_system_plugins_enabled():
             "system-timer",
             "worktree-manager",
         )
-        missing = [n for n in (*PluginManager._SPLIT_COMPONENT_TO_PLUGIN.values(), *_standalone_plugins) if n not in enabled]
+        missing = [
+            n
+            for n in (
+                *PluginManager._SPLIT_COMPONENT_TO_PLUGIN.values(),
+                *PluginManager._SPLIT_TOOL_PLUGINS,
+                *_standalone_plugins,
+            )
+            if n not in enabled
+        ]
         if missing:
             cfg.set(cfg.enabled_plugins, enabled + missing, save=False)
     except Exception:

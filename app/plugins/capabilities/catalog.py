@@ -181,6 +181,13 @@ CATALOG: Dict[str, CapabilitySpec] = {
         _spec("ui.dialog", _L, "文件/目录选择、确认框、单行输入（跟随主题）", _UI),
         _spec("ui.events", _L, "订阅/发布 UI 事件总线（主题切换/欢迎页刷新等）", _UI),
         _spec(
+            "question.control",
+            _M,
+            "提问卡控制：订阅提问生命周期、读取当前题目/已答、驱动倒计时、代用户提交答案",
+            _UI,
+            value_style="value",
+        ),
+        _spec(
             "ui.artifacts.show",
             _M,
             "向消息卡片成果栏推送成果条目（图片/视频/HTML/文本/文件，跨窗口副作用）",

@@ -228,7 +228,7 @@ _exclude_modules = [
     # 开发/测试工具：仅 dev 依赖组安装，运行时零引用（诊断工具走系统 PATH 的
     # 外部可执行文件，不走这些包）。不排会被 PyInstaller 收进 _internal，
     # 实测曾把 mypy（0.74MB，black 经 mypy_extensions 连带）打进发行包。
-    # ⚠️ 不要排 pyright：plugins/system-tools/tools/diagnostics_tools.py 有
+    # ⚠️ 不要排 pyright：plugins/system-diagnostics/tools/diagnostics_tools.py 有
     # `from pyright import cli`（try/except 保护，装了就走模块调用），排掉会让
     # get_diagnostics 在装了该包的用户机上永久降级到外部命令回退路径。
     "mypy",

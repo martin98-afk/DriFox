@@ -1557,6 +1557,9 @@ class OpenAIChatToolWindow(ToolWindow):
         # 待决审批上下文（超时转 AI 审核时复用；worker 反查不可靠）
         self._pending_permission_tool: Optional[dict] = None
         self._question_tool_call_id: Optional[str] = None
+        # 提问生命周期监听者（question.control 能力）：插件订阅后拿到
+        # asked / page / closed 事件，自行实现超时策略
+        self._question_listeners: list = []
         self._current_assistant_round_index: Optional[int] = None  # 跟踪当前应分配给 assistant 的 round_index
         self._pending_scroll_to_index: Optional[int] = None  # 时间线节点滚动目标索引
         self._pending_scroll_to_batch: Optional[int] = None  # 时间线节点滚动目标 batch 索引
@@ -1917,6 +1920,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self._question_floating_widget.answered.connect(self._on_question_answered)
         self._question_floating_widget.cancelled.connect(self._on_question_cancelled)
         self._question_floating_widget.previewRequested.connect(self._on_question_preview_requested)
+        self._question_floating_widget.questionChanged.connect(self._on_question_page_changed)
         if not getattr(self, "_question_floating_registered", False):
             self._question_floating_registered = True
             self._card_manager.register_card(
@@ -22895,6 +22899,79 @@ class OpenAIChatToolWindow(ToolWindow):
 
         question_text = questions[0].get("question", "") if questions else ""
         self._notify_if_inactive("需要回答问题", question_text[:100])
+        # 通知 question.control 订阅者：提问已弹出（含 tool_call_id 与题目列表）
+        self._notify_question_event("asked", {"tool_call_id": tool_call_id, "questions": questions})
+
+    def _on_question_page_changed(self, index: int, total: int):
+        """提问卡翻页（每题独立计时的重置信号）"""
+        self._notify_question_event("page", {"index": int(index), "total": int(total)})
+
+    # ══════════════════ question.control 能力（插件超时策略用） ══════════════════
+
+    def _notify_question_event(self, event: str, payload: dict) -> None:
+        """向已订阅的插件广播提问生命周期事件（监听者异常不得影响主流程）
+
+        ⚠️ 用 __dict__ 取监听者列表：测试桩以 __new__ 构造（不跑 Qt 基类 __init__），
+        PyQt 包装对象上 hasattr/getattr 会抛 RuntimeError 而非 AttributeError。
+        """
+        listeners = self.__dict__.get("_question_listeners") or []
+        for callback in list(listeners):
+            try:
+                callback(event, dict(payload))
+            except Exception as e:  # noqa: BLE001 - 插件异常不得阻断提问卡
+                logger.warning(f"[Question] 生命周期监听者异常 event={event}: {e}")
+
+    def question_control_subscribe(self, callback) -> bool:
+        """订阅提问生命周期（asked / page / closed）"""
+        if not callable(callback):
+            return False
+        listeners = self.__dict__.setdefault("_question_listeners", [])
+        if callback not in listeners:
+            listeners.append(callback)
+        return True
+
+    def question_control_unsubscribe(self, callback) -> bool:
+        listeners = self.__dict__.get("_question_listeners") or []
+        try:
+            listeners.remove(callback)
+            return True
+        except ValueError:
+            return False
+
+    def question_control_snapshot(self) -> dict:
+        """当前提问卡快照（无提问时返回空 dict）"""
+        widget = getattr(self, "_question_floating_widget", None)
+        if widget is None or not self._question_tool_call_id:
+            return {}
+        try:
+            snap = widget.snapshot()
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"[Question] 快照读取失败: {e}")
+            return {}
+        snap["tool_call_id"] = self._question_tool_call_id
+        return snap
+
+    def question_control_answer(self, text: str) -> bool:
+        """代用户提交答案（与用户点提交同一条收尾链）"""
+        if not self._question_tool_call_id:
+            return False
+        self._on_question_answered(str(text or ""))
+        return True
+
+    def question_control_countdown(self, seconds: int) -> bool:
+        """启动提问卡倒计时徽标（seconds <= 0 = 不显示）"""
+        widget = getattr(self, "_question_floating_widget", None)
+        if widget is None or not self._question_tool_call_id:
+            return False
+        widget.start_countdown(int(seconds or 0))
+        return True
+
+    def question_control_stop_countdown(self) -> bool:
+        widget = getattr(self, "_question_floating_widget", None)
+        if widget is None:
+            return False
+        widget.stop_countdown()
+        return True
 
     def _on_question_answered(self, answer: str):
         if getattr(self, "_is_destroyed", False):
@@ -22904,6 +22981,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # 恢复输入框 + 工具栏 + 胶囊发光层
         self._set_bottom_input_visible(True)
         self._restore_after_question_close()
+        self._notify_question_event("closed", {"reason": "answered"})
         if not self._question_tool_call_id:
             return
 
@@ -22924,7 +23002,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # 恢复输入框 + 工具栏 + 胶囊发光层
         self._set_bottom_input_visible(True)
         self._restore_after_question_close()
-
+        self._notify_question_event("closed", {"reason": "cancelled"})
         if not self._question_tool_call_id:
             return
 
@@ -23143,12 +23221,17 @@ class OpenAIChatToolWindow(ToolWindow):
         if getattr(self, "_is_destroyed", False):
             return
         changed = False
+        question_closed = False
         if getattr(self, "_question_floating_widget", None) is not None and (
             self._question_floating_widget.isVisible() or self._question_tool_call_id
         ):
             self._question_floating_widget.clear()
             self._question_tool_call_id = None
             changed = True
+            question_closed = True
+        if question_closed:
+            # 通知 question.control 订阅者：提问被清理（流结束/取消/错误路径）
+            self._notify_question_event("closed", {"reason": "dismissed"})
         if getattr(self, "_pending_permission_id", None) or (
             getattr(self, "_permission_floating_widget", None) is not None
             and self._permission_floating_widget.isVisible()
