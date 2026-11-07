@@ -191,3 +191,34 @@ def test_track_changed_signal_reports_current(player, tmp_path):
     assert seen[-1] == a[0]
     player.stop()
     assert seen[-1] == ""
+
+def test_all_disabled_invalid_media_keeps_identity_and_no_recursive_stop(
+    player, tmp_path, monkeypatch
+):
+    """全禁用态后端同步上报 InvalidMedia：不得递归 stop()、不得清掉列表身份
+
+    本机 DirectShow 0x80040266 现场：_rebuild_enabled_playlist 的 clear() 期间
+    后端同步发 InvalidMedia，旧逻辑在「_tracks 非空 + playlist 空」这一全禁用
+    独有状态下调 stop()，stop() 又 clear() → 无限递归（启动即闪退）。
+    """
+    from PyQt5.QtMultimedia import QMediaPlayer
+
+    a = _mk(tmp_path, ["a.mp3", "b.mp3"])
+    orig_clear = player._playlist.clear
+    calls = {"clear": 0}
+
+    def clear_then_backend_error():
+        orig_clear()
+        calls["clear"] += 1
+        # 后端只在移除 current media 时上报；限次防真栈溢出把测试进程带崩
+        if calls["clear"] <= 3:
+            player._player.mediaStatusChanged.emit(QMediaPlayer.InvalidMedia)
+
+    monkeypatch.setattr(player._playlist, "clear", clear_then_backend_error)
+    player.apply_config({"tracks": a, "fade_ms": 0}, resolver=lambda p: p, disabled=a)
+
+    assert player.current_track() == ""
+    # 一次 InvalidMedia 不能把全禁用态的列表身份洗掉，否则「重新勾上即恢复」失效
+    assert player.current_tracks() == tuple(a)
+    # clear 只应由 _rebuild_enabled_playlist 调用一次，回调不得再触发（递归）
+    assert calls["clear"] == 1

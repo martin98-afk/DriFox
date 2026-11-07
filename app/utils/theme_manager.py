@@ -503,20 +503,18 @@ class ThemeManager:
         try:
             from app.utils.config import DEFAULT_DARK_THEME, DEFAULT_LIGHT_THEME, Settings
 
-            fallback_id = (
-                DEFAULT_LIGHT_THEME
-                if Settings.get_instance().ui_light_mode.value
-                else DEFAULT_DARK_THEME
-            )
+            light = bool(Settings.get_instance().ui_light_mode.value)
+            fallback_id = DEFAULT_LIGHT_THEME if light else DEFAULT_DARK_THEME
+        except Exception:
+            fallback_id = None
+        if fallback_id:
             fallback = self.get_theme(fallback_id) or {}
             colors = fallback.get("colors", {})
             if colors:
                 return colors
-            # 极端：连默认主题文件都缺失，取任意已加载主题，仍不返回空集合
-            first = next(iter(self._themes.values()), {})
-            return first.get("colors", {}) or {}
-        except Exception:
-            return {}
+        # 极端：连默认主题文件都缺失，取任意已加载主题，仍不返回空集合
+        first = next(iter(self._themes.values()), {})
+        return first.get("colors", {}) or {}
 
     # ── 主题管理 ──────────────────────────────────────────
 

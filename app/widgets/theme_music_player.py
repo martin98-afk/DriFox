@@ -157,12 +157,14 @@ class ThemeMusicPlayer(QObject):
 
     def stop(self) -> None:
         """停止播放并清空当前列表身份"""
-        self._player.stop()
-        self._playlist.clear()
+        # 先清状态再碰后端：DirectShow 在 stop()/clear() 期间会同步上报
+        # InvalidMedia，状态未清时 _on_media_status 会再次调 stop() 无限递归。
         self._tracks = ()
         self._enabled = ()
         self._disabled = frozenset()
         self._paused_by_focus = False
+        self._player.stop()
+        self._playlist.clear()
         self.trackChanged.emit("")
 
     def current_tracks(self) -> tuple:
@@ -291,7 +293,9 @@ class ThemeMusicPlayer(QObject):
         """失效曲跳过；列表播完由 playlist 模式决定，无需干预"""
         if status != QMediaPlayer.InvalidMedia:
             return
-        if not self._tracks:
+        # 全禁用态（有列表身份但无启用曲目）不属于「播放失败」：clear() 期间
+        # 后端同步上报 InvalidMedia 时直接早退，保留身份供重新勾选恢复。
+        if not self._tracks or not self._enabled:
             return
         # currentIndex 在播放开始前可能为 -1，用 max(0, ...) 归一；
         # 只要还有下一首就前进，最后一首失效则停止
