@@ -2,41 +2,28 @@
 """
 服务商插件 — OpenCode Zen / OpenCode Go
 
-数据 + 套餐用量查询 fetcher + 用量查询额外配置字段，全部由本插件声明。
-用量：opencode.ai/_server 接口（server_id / cookie / workspace_id 三者必填）。
-其中 server_id 是 SolidStart server function 的构建哈希，opencode 前端每次发版都会变，
-失效时接口返回 500；cookie 必需，未认证时服务端在 RSC payload 里回 302 跳 /auth/authorize。
+数据由本插件声明。套餐用量查询仅 OpenCode Go 提供：
+GET https://opencode.ai/zen/go/v1/usage（官方接口，Bearer API Key 鉴权，
+复用服务商配置里已有的 API Key，无需 server_id / cookie / workspace_id）。
+OpenCode Zen 是按量 API 型（非订阅），无套餐用量，不注册 fetcher。
 """
 
 import json
-import re
-import urllib.parse
+from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
-from app.plugins.registries.provider_registry import ProviderDef, QuotaField
+from app.plugins.registries.provider_registry import ProviderDef
 
-# 用量块锚点：响应里形如 rollingUsage:$R[2]={...}，字段顺序与数量均不锁定
-_USAGE_ANCHORS = [("rolling", "rollingUsage"), ("weekly", "weeklyUsage"), ("monthly", "monthlyUsage")]
-_RE_RESET_SEC = re.compile(r"resetInSec:(\d+)")
-_RE_USAGE_PCT = re.compile(r"usagePercent:([\d.]+)")
-
-_SERVER_URL = "https://opencode.ai/_server"
-_SERVER_HEADERS = {
-    "X-Server-Instance": "server-fn:0",
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/145.0.0.0 Safari/537.36"
-    ),
+_USAGE_URL = "https://opencode.ai/zen/go/v1/usage"
+_REQUEST_HEADERS = {
+    "User-Agent": "DriFox/1.0",
+    "Accept": "application/json",
 }
-
 
 class OpenCodeUsageError(RuntimeError):
     """用量查询失败，异常文本即归因说明（由 UsageService 捕获后写 warning 日志）"""
 
-
 _SSL_CONTEXT = None  # 进程级缓存；False 哨兵 = 已探测且 truststore 不可用
-
 
 def _system_ssl_context():
     """系统证书链 SSLContext（信任 macOS 钥匙串/Windows 证书存储）；不可用回退 None。"""
@@ -52,139 +39,92 @@ def _system_ssl_context():
             _SSL_CONTEXT = False
     return _SSL_CONTEXT or None
 
-
 def _fetch_opencode_coding_plan(config: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """从 opencode.ai/_server 获取 OpenCode Zen/Go 套餐用量。
+    """从官方 /zen/go/v1/usage 获取 OpenCode Go 套餐用量。
 
-    需要在服务商配置中额外填写 server_id / cookie / workspace_id。
-    这些字段不会影响正常的 API 调用，仅用于用量查询。
+    用服务商配置中的 API Key（Bearer）鉴权，无额外配置字段。
     """
     # 延迟导入：避免模块级网络库触发 AST 危险 import 审计告警
     import urllib.error
     import urllib.request
 
-    server_id = (config.get("server_id", "") or "").strip()
-    cookie = (config.get("cookie", "") or "").strip()
-    workspace_id = (config.get("workspace_id", "") or "").strip()
-
-    if not server_id or not cookie or not workspace_id:
+    api_key = (config.get("API_KEY", "") or "").strip()
+    if not api_key:
         return None
 
-    args_obj = {
-        "t": {"t": 9, "i": 0, "l": 1, "a": [{"t": 1, "s": workspace_id}], "o": 0},
-        "f": 31,
-        "m": [],
-    }
-    args_encoded = urllib.parse.quote(json.dumps(args_obj, separators=(",", ":")))
-    url = f"{_SERVER_URL}?id={server_id}&args={args_encoded}"
-
-    headers = {
-        **_SERVER_HEADERS,
-        "X-Server-Id": server_id,
-        "Referer": f"https://opencode.ai/workspace/{workspace_id}/go",
-        "Cookie": cookie,
-    }
+    headers = {**_REQUEST_HEADERS, "Authorization": f"Bearer {api_key}"}
 
     try:
-        req = urllib.request.Request(url, headers=headers)
+        req = urllib.request.Request(_USAGE_URL, headers=headers)
         with urllib.request.urlopen(req, timeout=10, context=_system_ssl_context()) as resp:
             charset = resp.headers.get_content_charset() or "utf-8"
             raw = resp.read().decode(charset, errors="replace")
     except urllib.error.HTTPError as e:
-        # 500 = 服务端找不到该 server function，即 Server ID 已随前端构建失效
-        if e.code == 500:
-            raise OpenCodeUsageError(
-                "Server ID 已失效（opencode 前端重新构建），请重新抓取 _server 请求的 X-Server-Id"
-            ) from e
+        if e.code == 401:
+            raise OpenCodeUsageError("鉴权失败：API Key 无效或已撤销") from e
+        if e.code == 403:
+            raise OpenCodeUsageError("无 Go 订阅：该 API Key 所属账号未订阅 OpenCode Go") from e
         raise OpenCodeUsageError(f"用量请求失败：HTTP {e.code}") from e
     except OSError as e:
         raise OpenCodeUsageError(f"用量请求异常：{e}") from e
 
-    # 未认证：HTTP 仍是 200，登录跳转藏在 RSC payload 内
-    if "auth/authorize" in raw:
-        raise OpenCodeUsageError("未认证：Cookie 缺失或已过期，请重新复制浏览器 Cookie")
-
-    # 标准 JSON
     try:
         data = json.loads(raw)
-        return _parse_json(data)
-    except json.JSONDecodeError:
-        pass
+    except json.JSONDecodeError as e:
+        raise OpenCodeUsageError("响应非 JSON：接口结构可能变更") from e
 
-    # RSC（JavaScript 风格）响应
-    parsed = _parse_js(raw)
-    if parsed.get("rolling") or parsed.get("weekly") or parsed.get("monthly"):
-        return parsed
-
-    raise OpenCodeUsageError("响应结构变更：未解析到 usagePercent，请核对 _server 接口返回体")
-
-
-def _parse_json(data: dict) -> Dict[str, Any]:
-    result = {}
-    for key, api_key in _USAGE_ANCHORS:
-        usage = data.get(api_key, {})
-        pct = usage.get("usagePercent")
-        sec = usage.get("resetInSec")
-        result[key] = {"percent": float(pct), "reset_sec": int(sec)} if pct is not None and sec is not None else None
+    result = _parse_usage(data)
+    if not any(v is not None for v in result.values()):
+        raise OpenCodeUsageError("响应结构变更：未解析到任何窗口用量，请核对接口返回体")
     return result
 
-
-def _extract_block(raw: str, anchor: str) -> Optional[str]:
-    """取 anchor 后首个花括号配平的块内容。
-
-    服务端会往用量对象里追加字段（当前已有 usage / limit），也可能出现嵌套对象，
-    因此按花括号深度扫描取整块，不用 [^{}]* 之类的单层匹配。
+def _parse_usage(data: dict) -> Dict[str, Any]:
+    """解析用量响应，兼容两种已知布局：
+    - 实测（2026-08，cc-switch #6433）：{"usage": {"rolling": {"percent", "resetsAt"}, ...}}
+    - PR #16513 原始：{"rollingUsage": {"usagePercent", "resetInSec"}, ...}
     """
-    i = raw.find(anchor + ":")
-    if i < 0:
-        return None
-    j = raw.find("{", i)
-    if j < 0:
-        return None
-    depth = 0
-    for k in range(j, len(raw)):
-        ch = raw[k]
-        if ch == "{":
-            depth += 1
-        elif ch == "}":
-            depth -= 1
-            if depth == 0:
-                return raw[j + 1 : k]
-    return None
-
-
-def _parse_js(raw: str) -> Dict[str, Any]:
-    """解析 RSC 响应中的用量块，percent 保留小数（44.9 这类值 UI 侧自行取整）"""
-    result: Dict[str, Any] = {}
-    for key, api_key in _USAGE_ANCHORS:
-        block = _extract_block(raw, api_key)
-        if block is None:
-            result[key] = None
+    usage = data.get("usage") if isinstance(data.get("usage"), dict) else data
+    # (结果键, 响应键)：实测布局在前，PR 原始布局兜底
+    groups = [
+        ("rolling", "rolling"),
+        ("weekly", "weekly"),
+        ("monthly", "monthly"),
+        ("rolling", "rollingUsage"),
+        ("weekly", "weeklyUsage"),
+        ("monthly", "monthlyUsage"),
+    ]
+    result: Dict[str, Any] = {"rolling": None, "weekly": None, "monthly": None}
+    for key, field in groups:
+        if result[key] is not None:
             continue
-        m_sec = _RE_RESET_SEC.search(block)
-        m_pct = _RE_USAGE_PCT.search(block)
-        result[key] = {"percent": float(m_pct.group(1)), "reset_sec": int(m_sec.group(1))} if m_sec and m_pct else None
+        block = usage.get(field)
+        if isinstance(block, dict):
+            result[key] = _parse_block(block)
     return result
 
+def _parse_block(block: dict) -> Optional[Dict[str, Any]]:
+    """从单个窗口块取 percent 与 reset_sec，缺任一则视为不可用。"""
+    pct = block.get("percent", block.get("usagePercent"))
+    if not isinstance(pct, (int, float)) or isinstance(pct, bool):
+        return None
+    sec = block.get("resetInSec")
+    if not isinstance(sec, (int, float)) or isinstance(sec, bool):
+        sec = _resets_at_to_sec(block.get("resetsAt"))
+        if sec is None:
+            return None
+    return {"percent": float(pct), "reset_sec": max(0, int(sec))}
 
-# 用量查询额外配置字段（仅用于用量查询，不进模型参数/API 请求）
-_QUOTA_FIELDS = [
-    QuotaField(
-        key="server_id",
-        label="Server ID:",
-        placeholder="_server 请求的 X-Server-Id（随 opencode 前端构建变化，失效时接口返回 500）",
-    ),
-    QuotaField(
-        key="cookie",
-        label="Cookie:",
-        placeholder="oc_locale=zh; auth=Fe26.2**... （必填，从浏览器复制完整 Cookie 值，过期时提示未认证）",
-    ),
-    QuotaField(
-        key="workspace_id",
-        label="Workspace ID:",
-        placeholder="wrk_xxxxxxxxxxxx（必填，用量页面 URL 中可见）",
-    ),
-]
+def _resets_at_to_sec(iso: Any) -> Optional[int]:
+    """resetsAt（ISO8601 时间）→ 距重置秒数；过去时刻取 0。"""
+    if not isinstance(iso, str) or not iso:
+        return None
+    try:
+        resets_at = datetime.fromisoformat(iso.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if resets_at.tzinfo is None:
+        resets_at = resets_at.replace(tzinfo=timezone.utc)
+    return int((resets_at - datetime.now(timezone.utc)).total_seconds())
 
 _ZEN_CAPABILITIES = {
     "context_limit": 200000,
@@ -198,7 +138,6 @@ _ZEN_CAPABILITIES = {
     # （2026-09-06 起缺失报 400 MissingSessionID），值由主程序填当前会话 ID
     "session_header": "x-opencode-session",
 }
-
 
 def register(registry):
     """注册 OpenCode Zen / OpenCode Go 两个服务商定义"""
@@ -250,8 +189,6 @@ def register(registry):
             # Zen 是按量 API 型（非订阅）：显式声明列表分组，
             # 避免被「有 coding_plan_fetcher → Coding Plan」自动判据误归
             capabilities={**_ZEN_CAPABILITIES, "list_group": "API"},
-            extra_quota_fields=_QUOTA_FIELDS,
-            coding_plan_fetcher=_fetch_opencode_coding_plan,
         )
     )
 
@@ -292,7 +229,6 @@ def register(registry):
             models_dev_id="opencode-go",
             family="opencode",
             capabilities={**_ZEN_CAPABILITIES, "list_group": "Coding Plan"},
-            extra_quota_fields=_QUOTA_FIELDS,
             coding_plan_fetcher=_fetch_opencode_coding_plan,
         )
     )

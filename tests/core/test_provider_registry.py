@@ -196,12 +196,15 @@ def test_system_providers_loaded_from_plugins():
     assert reg.family_capabilities("deepseek")["context_limit"] == 320000
     # SiliconFlow 余额
     assert reg.has_balance_support("SiliconFlow (硅基流动)") is True
-    # 用量 fetcher：火山方舟 / MiniMax / 智谱AI / OpenAI / OpenCode
-    for name in ["火山方舟", "MiniMax", "智谱AI", "OpenAI", "OpenCode Zen", "OpenCode Go"]:
+    # 用量 fetcher：火山方舟 / MiniMax / 智谱AI / OpenAI / OpenCode Go
+    # （OpenCode Zen 是按量 API 型，2026-11-07 起不提供套餐用量查询）
+    for name in ["火山方舟", "MiniMax", "智谱AI", "OpenAI", "OpenCode Go"]:
         assert reg.has_coding_plan_support(name), f"{name} 应有套餐用量 fetcher"
-    # 用量额外字段：5 个 key 全由插件聚合
+    assert not reg.has_coding_plan_support("OpenCode Zen"), "OpenCode Zen 不应有套餐用量 fetcher"
+    # 用量额外字段：火山方舟的 3 个 key（OpenCode 改官方接口后无额外字段）
     quota_keys = reg.quota_exclude_keys()
-    assert {"server_id", "cookie", "workspace_id", "csrf_token", "x_web_id"} <= quota_keys
+    assert {"cookie", "csrf_token", "x_web_id"} <= quota_keys
+    assert not {"server_id", "workspace_id"} & quota_keys
     # models.dev 白名单
     dev_map = reg.models_dev_map()
     assert dev_map["DeepSeek"] == "deepseek"
