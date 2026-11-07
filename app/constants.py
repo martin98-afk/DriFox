@@ -206,6 +206,24 @@ PROVIDER_MANAGED_KEYS = frozenset({
     "模型刷新状态",
 })
 
+# 用量查询字段永久黑名单。
+#
+# 这类字段本由 providers 插件的 extra_quota_fields 动态声明、经
+# provider_quota_exclude_keys() 排除，但插件改版删掉声明后，老配置里残留的
+# 同名键就脱离覆盖范围，会顺着「未知英文键原样直发」通配分支进 extra_body
+# 打到网关。实测（2026-11-07）：OpenCode Go 配置残留 server_id/cookie/
+# workspace_id 空串，经 OpenAI→anthropic-messages 转换的网关报
+# 400 "server_id: cannot be represented by anthropic-messages"。
+# 消费方（transport / subagent_worker / 模型参数卡）一律走
+# provider_quota_exclude_keys()，本集合在其中取并集，不依赖插件当前声明。
+LEGACY_QUOTA_KEYS = frozenset({
+    "server_id",
+    "cookie",
+    "workspace_id",
+    "csrf_token",
+    "x_web_id",
+})
+
 # ──────────────────────────────────────────────────────────────
 # 服务商数据全部移入 providers 插件（万物为插件）：
 #   PROVIDER_MODELS / FREE_PROVIDERS / PROVIDER_ICONS /
@@ -259,7 +277,7 @@ def provider_quota_exclude_keys() -> "frozenset[str]":
     from app.plugins.registries.provider_registry import ProviderRegistry
 
     try:
-        return ProviderRegistry.get_instance().quota_exclude_keys()
+        return ProviderRegistry.get_instance().quota_exclude_keys() | LEGACY_QUOTA_KEYS
     except Exception:
-        # 注册表未初始化：保守返回空集（调用方通常已提前加载插件）
-        return frozenset()
+        # 注册表未初始化：只剩永久黑名单（调用方通常已提前加载插件）
+        return LEGACY_QUOTA_KEYS

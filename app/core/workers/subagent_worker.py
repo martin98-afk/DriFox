@@ -1077,6 +1077,9 @@ class SubAgentExecutor(QThread):
                 continue
             if cn_key in QUOTA_EXCLUDE_KEYS():
                 continue
+            # 空值不发：老配置残留的空串键（如 server_id）过不了严格网关的参数白名单
+            if value is None or value == "":
+                continue
 
             meta = PARAM_SCHEMA.get(cn_key, {})
             en_key = meta.get("api_param")

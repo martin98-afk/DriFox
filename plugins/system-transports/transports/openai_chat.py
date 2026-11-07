@@ -132,6 +132,9 @@ class OpenAIChatTransport:
         for cn_key, value in llm_config.items():
             if cn_key in _CONFIG_ONLY_KEYS or cn_key in QUOTA_EXCLUDE_KEYS():
                 continue
+            # 空值不发：老配置残留的空串键（如 server_id）过不了严格网关的参数白名单
+            if value is None or value == "":
+                continue
             meta = PARAM_SCHEMA.get(cn_key, {})
             en_key = meta.get("api_param")
             if not en_key and _VALID_IDENTIFIER_PATTERN.match(cn_key):
