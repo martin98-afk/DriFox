@@ -74,7 +74,7 @@ def _get_openai_errors() -> Dict[str, type]:
 
 from app.core.context.budget import resolve_context_budget
 from app.core.conversation.config import HookPolicy, PermissionCache
-from app.core.conversation.message_content import append_text_block, consolidate_messages, extract_reasoning_delta
+from app.core.conversation.message_content import append_text_block, consolidate_messages
 
 from app.core.modelmeta.model_capabilities import (
     ABSOLUTE_FALLBACK_CEILING,
@@ -582,13 +582,23 @@ class OpenAIChatWorker(QThread):
         phases["other"] = round(max(0.0, total - spent), 1)
         return phases
 
-    def _serialize_for_api(self, messages: List[Dict[str, Any]], supports_vision: bool = True):
-        """序列化单入口（Phase C）：adapter flags → serializer_id → 序列化器 → SerializeResult。
+    def _serialize_for_api(
+        self, messages: List[Dict[str, Any]], supports_vision: bool = True, revoke_after: bool = True
+    ):
+        """序列化单入口：adapter flags → serializer_id → 序列化器 → SerializeResult。
 
-        worker 不再按协议形态直接调 messages_to_api / messages_to_responses_input，
-        统一经本入口：序列化器内部按 flags.use_responses_api 路由到 chat/responses 形态，
-        serializer_id 由 adapter 解析（默认 openai，插件可指定专属序列化器）。
+        Phase 3（2026-11-07）：responses 已迁到 ``openai_responses`` transport，它
+        自己从内部消息序列化 input_items；worker 侧序列化只服务 chat 形态
+        （api_messages 缓存 / 自愈修正 / transport 的 api_messages 入参），故这里
+        强制 chat 形态，忽略 adapter 的 responses 声明。
+
+        [方案 A] 出口即回收（revoke_after=True 默认）：revive 产出的 data:image 块
+        在返回前还原为 image_ref 引用块（image_utils.revoke_vision_blocks，幂等）。
+        产物从此保持轻量形态常驻，data URI 只在 _materialize_for_send 的发送
+        作用域内存在。
         """
+        from dataclasses import replace
+
         from app.plugins.contracts.message_serializer import SerializeContext
         from app.plugins.registries.serializer_registry import SerializerRegistry
 
@@ -602,8 +612,50 @@ class OpenAIChatWorker(QThread):
             logger.warning(f"[chat_worker] revive image_refs 失败（按原消息发送）: {e}")
 
         flags = self._adapter_flags()
+        if flags.use_responses_api:
+            flags = replace(flags, use_responses_api=False)
         serializer = SerializerRegistry.get_instance().resolve(flags.serializer_id)
-        return serializer.serialize(messages, SerializeContext(supports_vision=supports_vision, flags=flags))
+        result = serializer.serialize(messages, SerializeContext(supports_vision=supports_vision, flags=flags))
+        if revoke_after:
+            # [方案 A] 产出即回收：产物与入参双扫（passthrough 直通时二者同引用，
+            # 幂等重复扫零害；拷贝型序列化器两份都可能持有 data URI）
+            try:
+                from app.utils.image_utils import revoke_vision_blocks
+
+                restored = revoke_vision_blocks(result.messages, self.session_id or "")
+                if result.messages is not messages:
+                    restored += revoke_vision_blocks(messages, self.session_id or "")
+                if restored:
+                    logger.debug(f"[Memory] serialize 出口回收 {restored} 张图片（data URI → image_ref）")
+            except Exception as e:  # noqa: BLE001 — 回收失败保留 data URI，不阻断
+                logger.warning(f"[chat_worker] vision revoke 失败（保留 data URI，下轮重试）: {e}")
+        return result
+
+    def _materialize_for_send(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """[方案 A] 发送前物化：从轻量 cache 构造可发送副本（data URI 只在本作用域存在）。
+
+        cache 常驻 image_ref 形态（出口已回收）；发送需要 data:image 形态，
+        因此浅拷贝消息骨架（msg dict + content list 两层）后 revive 幂等读回。
+        副本随请求结束 GC，cache 本体不被污染。
+        """
+        out: List[Dict[str, Any]] = []
+        for msg in messages:
+            if not isinstance(msg, dict):
+                out.append(msg)
+                continue
+            m2 = dict(msg)
+            content = msg.get("content")
+            if isinstance(content, list):
+                # content 必须拷贝：revive 就地按索引替换块，会污染共享列表
+                m2["content"] = [dict(b) if isinstance(b, dict) else b for b in content]
+            out.append(m2)
+        try:
+            from app.core.store.session_repository import revive_vision_image_refs
+
+            return revive_vision_image_refs(out)
+        except Exception as e:  # noqa: BLE001 — 物化失败按原副本发送（cache 内是 image_ref 时 provider 会拒，走重试/报错链路）
+            logger.warning(f"[chat_worker] materialize revive 失败（按 cache 副本发送）: {e}")
+            return out
 
     def _build_api_messages_cache(self) -> List[Dict[str, Any]]:
         """
@@ -1892,29 +1944,6 @@ class OpenAIChatWorker(QThread):
             )
         return self._http_client
 
-    @staticmethod
-    def _tools_to_responses(tools: List[Dict]) -> List[Dict]:
-        """chat/completions 工具格式 → Responses API 扁平格式。
-
-        chat: {"type":"function","function":{"name","description","parameters"}}
-        responses: {"type":"function","name","description","parameters"}
-        """
-        out: List[Dict] = []
-        for t in tools or []:
-            if not isinstance(t, dict):
-                continue
-            func = t.get("function") or {}
-            if not isinstance(func, dict) or not func.get("name"):
-                continue
-            out.append(
-                {
-                    "type": "function",
-                    "name": func.get("name"),
-                    "description": func.get("description", ""),
-                    "parameters": func.get("parameters") or {"type": "object", "properties": {}},
-                }
-            )
-        return out
 
     # ========== 协议传输器 / 流式接收器（插件化通道）==========
 
@@ -1936,10 +1965,11 @@ class OpenAIChatWorker(QThread):
             headers.update(provider_headers)
         return headers or None
 
-    def _get_chat_transport(self):
-        """解析 chat/completions 使用的 transport（TransportRegistry 默认实现）。
+    def _get_chat_transport(self, transport_id: str = None):
+        """解析 chat/completions 使用的 transport（TransportRegistry 按 id 解析，缺省默认）。
 
-        每次调用现取注册表并做每 worker 包装，不缓存插件实例：
+        transport_id：协议入口手选值（transport:<id> 去前缀后的 id）。None = 自动
+        （adapter flags / 注册表默认 openai_chat）。每次调用现取注册表并做每 worker 包装，不缓存插件实例：
         1) 注册表单例会被热重载整体替换（注销旧→注册新），缓存会跨周期持有
            已注销实例——旧实例上的 client_factory 指向本 worker 连接池，热重载后
            继续使用等于把两个周期的连接池混用，新标签页建池会让其他窗口飞行中的
@@ -1950,7 +1980,13 @@ class OpenAIChatWorker(QThread):
         """
         from app.plugins.registries.transport_registry import TransportRegistry
 
-        transport = TransportRegistry.get_instance().resolve()
+        # 测试注入点：与 _stream_sink_override 同模式。a6946c9f5 插件化搬迁时
+        # 该读取点曾丢失，retry 组测试挂载的 FakeChatTransport 因此失效（2026-11-07 恢复）。
+        injected = self.__dict__.get("_chat_transport")
+        if injected is not None:
+            return injected
+
+        transport = TransportRegistry.get_instance().resolve(transport_id)
         if transport is None:
             raise RuntimeError("未注册 chat/completions 传输器（system-transports 插件未启用），无法发起对话请求")
 
@@ -2091,55 +2127,6 @@ class OpenAIChatWorker(QThread):
         )
         return sink.consume(self._guarded_stream_iter(response), ctx)
 
-    def _build_responses_kwargs(self, messages: List[Dict]) -> Dict[str, Any]:
-        """构造 Responses API 请求参数（input/instructions/tools/reasoning）。
-
-        Phase C：消息转换走序列化器单入口（flags.use_responses_api 已由调用方保证），
-        取 result.input_items / instructions。
-        """
-        result = self._serialize_for_api(messages)
-        input_items, instructions = result.input_items, result.instructions
-        model = str(self.llm_config.get("模型名称", "") or "")
-        kwargs: Dict[str, Any] = {
-            "model": model,
-            "input": input_items,
-            "stream": self.stream,
-        }
-        if instructions:
-            kwargs["instructions"] = instructions
-        if self.tools:
-            kwargs["tools"] = self._tools_to_responses(self.tools)
-
-        # 思考参数：responses 用 reasoning.effort（含 "none" 关闭）。
-        # 声明_思考强度经 resolve 链生效：给了 values 则 normalize 校验等级
-        # （无效等级回退中位；无 values 原样返回，行为兼容）——P1-9 批 d。
-        thinking_mode = self.llm_config.get("思考模式")
-        if thinking_mode is True:
-            _caps = resolve_model_capabilities(self.llm_config)
-            kwargs["reasoning"] = {
-                "effort": normalize_reasoning_effort(
-                    self.llm_config.get("思考等级", "medium"), _caps.get("reasoning_effort_values")
-                )
-            }
-        elif thinking_mode is False:
-            kwargs["reasoning"] = {"effort": "none"}
-
-        # 最大输出 token（复用 chat 分支的上限保护）
-        # P1-21：「最大输出」为唯一输出上限键；用户没填则不传，由服务端默认
-        max_output = self.llm_config.get("最大输出")
-        if max_output is not None:
-            kwargs["max_output_tokens"] = self._cap_max_output_tokens(model, max_output)
-
-        # 会话标识
-        if self.session_id:
-            kwargs["user"] = self.session_id
-
-        # 认证头（bce 认证方式）+ 服务商能力头（extra_headers / session_header）
-        # 统一走 _build_auth_headers（与 transport 通道同源，避免两处实现漂移）
-        auth_headers = self._build_auth_headers()
-        if auth_headers:
-            kwargs["extra_headers"] = auth_headers
-        return kwargs
 
     def provide_answer(self, answer: str):
         self._pending_answer = answer
@@ -3548,8 +3535,24 @@ class OpenAIChatWorker(QThread):
         """当前模型是否走 Responses API（/v1/responses）。
 
         实现已迁入系统插件 plugins/system-model-adapters/model_adapters/openai.py（可被插件覆盖）。
+        仅保留为兼容读取：分派以 ``_resolve_transport_id`` 为准。
         """
         return self._adapter_flags().use_responses_api
+
+    def _resolve_transport_id(self, llm_config: Dict) -> Optional[str]:
+        """协议单点裁决：旧键显式 > 协议入口 > adapter 声明 > 注册表默认。
+
+        返回 transport id（None = 默认 openai_chat）。映射规则与子智能体共用
+        ``app.core.workers.protocol_dispatch.resolve_transport_target``。
+        """
+        from app.core.workers.protocol_dispatch import resolve_transport_target
+
+        target = resolve_transport_target(llm_config, self._adapter_flags())
+        return target if isinstance(target, str) else None
+
+    def _resolve_use_responses(self, llm_config: Dict) -> bool:
+        """是否走 responses 协议（``_resolve_transport_id`` 的布尔投影）。"""
+        return self._resolve_transport_id(llm_config) == "openai_responses"
 
     def _make_api_call(self, messages: List[Dict], use_cache: bool = True) -> (bool, bool):
         """
@@ -3574,14 +3577,17 @@ class OpenAIChatWorker(QThread):
         # 但如果所有重试都失败，这些内容需要用于异常路径的 _build_response_message_sequence 构建 partial 消息。
         self._partial_content_backup = None
 
-        # 性能优化：使用缓存的 API 消息
+        # 性能优化：使用缓存的 API 消息。cache 常驻轻量 image_ref 形态（出口已
+        # 回收），发送前 _materialize_for_send 物化出 data URI 副本（请求作用域）
         if use_cache and self._api_messages_cache is not None:
-            sanitized = self._api_messages_cache
+            sanitized = self._materialize_for_send(self._api_messages_cache)
         else:
-            sanitized = self._serialize_for_api(messages).messages
+            fresh = self._serialize_for_api(messages).messages
             if use_cache:
-                self._api_messages_cache = sanitized
+                # cache 常驻轻量 image_ref 形态；materialize 副本只进发送作用域
+                self._api_messages_cache = fresh
                 self._api_messages_built = True
+            sanitized = self._materialize_for_send(fresh)
 
         # 消息序列化（协议无关，序列化器插件负责形态）
         # 请求参数组装已下沉至 transport 插件（system-transports/openai_chat.py）；
@@ -3592,27 +3598,22 @@ class OpenAIChatWorker(QThread):
         auth_headers = self._build_auth_headers()
 
         max_retries = 15
-        # GPT-5.x 系列走 Responses API（思考内容只在 /v1/responses 返回）
-        use_responses = self._use_responses_api()
-        # 协议分派（三层优先级）：
-        # 1) adapter 声明的 transport（插件协议，flags.extra["transport"]）
-        # 2) responses 原生通道（未插件化，二期）
-        # 3) chat/completions → TransportRegistry 默认 transport + 对应 sink
-        adapter_flags = self._adapter_flags()
-        adapter_transport = (adapter_flags.extra or {}).get("transport")
-        # 流式能力由 transport 声明（不再按模型名硬编码）；responses 通道固定流式
-        if use_responses:
-            active_transport = None  # 原生通道不经 transport，无需解析
-        elif adapter_transport is not None:
-            active_transport = adapter_transport
-        else:
-            active_transport = self._get_chat_transport()
+        # 协议分派（Phase 3：responses 也是 transport 插件，worker 只认 id）：
+        # 1) 手选 transport:<id> / 旧键 responses / 协议入口 responses
+        # 2) adapter 声明（flags.protocol / extra["transport"]）
+        # 3) 注册表默认（openai_chat）
+        transport_id = self._resolve_transport_id(self.llm_config)
+        active_transport = self._get_chat_transport(transport_id)
+        # 自愈（tool_order / missing_args）修的是 chat 形态 api_messages；
+        # responses 由 transport 自己从内部消息序列化，chat 形态修复对它无效
+        _is_responses_transport = getattr(active_transport, "id", "") == "openai_responses"
         if active_transport is not None and not self._transport_supports_streaming(active_transport):
             self.stream = False
         # sink 配对校验：transport 声明的 sink_id 缺失时提前报错（否则静默用错 sink 解析响应）
         self._verify_sink_pairing(active_transport)
-        if use_responses:
-            logger.info(f"[ResponsesAPI] model={model} 使用 Responses API（chat/completions 不透传 reasoning）")
+        logger.debug(
+            f"[Transport] model={model} transport={getattr(active_transport, 'id', None) or 'default'}"
+        )
 
         retry_delay = 5
 
@@ -3627,36 +3628,23 @@ class OpenAIChatWorker(QThread):
                 logger.info(f"[API] 检测到用户插话，放弃剩余重试（attempt={attempt}）")
                 return self._abort_retry_for_interject()
             try:
-                if not use_responses:
-                    # 插件协议 / chat-completions：请求发出与响应归一全在 transport 内，
-                    # 产出 StreamEvent 流由 sink 消费（下方统一处理）。
-                    # stream 已由 _transport_supports_streaming 决定，此处不再硬设
-                    # TTFT 与请求起点同源重置：重试后 elapsed_ms 只算最后一次请求，
-                    # 沿用上一次的 ttft 会出现 ttft>elapsed（生成秒为负）。
-                    self._llm_req_t0 = time.monotonic()
-                    self._last_ttft_ms = 0.0
-                    response = active_transport.create_stream(
-                        self.llm_config,
-                        messages,
-                        tools=self.tools,
-                        auth_headers=auth_headers,
-                        api_messages=api_messages,
-                    )
-                else:
-                    # Responses API 解析器仅支持事件流（非流式返回 Response 对象不可迭代）
-                    self.stream = True
-                    self._llm_req_t0 = time.monotonic()
-                    self._last_ttft_ms = 0.0  # 与请求起点同源重置（重试不再沿用旧 TTFT）
-                    # 原生 responses 通道：按需取 HTTP 客户端（transport 通道不经此）
-                    response = self._get_http_client().responses.create(**self._build_responses_kwargs(messages))
+                # 请求发出与响应归一全在 transport 内，产出 StreamEvent 流由 sink 消费。
+                # stream 已由 _transport_supports_streaming 决定，此处不再硬设。
+                # TTFT 与请求起点同源重置：重试后 elapsed_ms 只算最后一次请求，
+                # 沿用上一次的 ttft 会出现 ttft>elapsed（生成秒为负）。
+                self._llm_req_t0 = time.monotonic()
+                self._last_ttft_ms = 0.0
+                response = active_transport.create_stream(
+                    self.llm_config,
+                    messages,
+                    tools=self.tools,
+                    auth_headers=auth_headers,
+                    api_messages=api_messages,
+                )
                 if attempt > 0:
                     self.retry_resolved.emit()
                 # 🛡️ 流式响应处理移入重试循环，流式协议错误可完整重试
-                # 🛡️ 流式响应处理移入重试循环，流式协议错误可完整重试
                 try:
-                    if use_responses:
-                        return self._process_responses_stream(response)
-                    # 插件协议与 chat/completions 统一走 sink 消费 StreamEvent
                     return self._consume_stream_via_sink(
                         response,
                         transport=active_transport,
@@ -3700,7 +3688,7 @@ class OpenAIChatWorker(QThread):
                         or "tool_calls" in error_str.lower()
                     )
 
-                    if is_tool_call_order_error and attempt < max_retries - 1 and not use_responses:
+                    if is_tool_call_order_error and attempt < max_retries - 1 and not _is_responses_transport:
                         # 自动修复 tool result 顺序问题
                         logger.warning("[API] 检测到 tool call result 顺序错误 (2013)，尝试自动修复...")
                         # 🛡️ 仅调用一次修复：api_messages 与 messages 的 tool_call_id 集合等价
@@ -3709,10 +3697,10 @@ class OpenAIChatWorker(QThread):
 
                         if was_fixed:
                             fixed_sanitized = self._serialize_for_api(fixed_messages).messages
-                            api_messages = fixed_sanitized
-                            # 更新 API 消息缓存，修复结果持久化，避免下一轮迭代重复修复
+                            # cache 存轻量形态；重试发送用物化副本（data URI 只在本作用域）
                             if use_cache:
                                 self._api_messages_cache = fixed_sanitized
+                            api_messages = self._materialize_for_send(fixed_sanitized)
                             # 同步修复源头 current_messages：fixed_messages 与 messages 同型（都是内部格式），
                             # 直接 slice 赋值即可固化源头，避免再次调用 _fix_tool_result_order
                             if fixed_messages is not messages:
@@ -3727,7 +3715,7 @@ class OpenAIChatWorker(QThread):
                         "Missing required arguments" in error_str or "missing a required argument" in error_str.lower()
                     )
 
-                    if is_missing_args_error and attempt < max_retries - 1 and not use_responses:
+                    if is_missing_args_error and attempt < max_retries - 1 and not _is_responses_transport:
                         logger.warning("[API] 检测到工具参数丢失错误，尝试从历史消息中恢复...")
 
                         # 尝试从历史消息中恢复 tool_calls 的参数
@@ -3735,10 +3723,9 @@ class OpenAIChatWorker(QThread):
 
                         if fixed_messages is not None:
                             fixed_sanitized = self._serialize_for_api(fixed_messages).messages
-                            api_messages = fixed_sanitized
-                            # 更新 API 消息缓存，修复结果持久化，避免下一轮迭代重复修复
                             if use_cache:
                                 self._api_messages_cache = fixed_sanitized
+                            api_messages = self._materialize_for_send(fixed_sanitized)
                             logger.warning(f"[API] 已恢复工具参数，已更新缓存，重试 (attempt {attempt + 1}/{max_retries})")
                             continue
                         else:
@@ -3938,241 +3925,6 @@ class OpenAIChatWorker(QThread):
             return None
         sig = google.get("thought_signature")
         return sig if sig else None
-
-    @staticmethod
-    def _responses_item_get(item, key: str, default=None):
-        """兼容访问 Responses API item（pydantic 对象或 dict）。"""
-        if isinstance(item, dict):
-            return item.get(key, default)
-        return getattr(item, key, default)
-
-    def _handle_responses_function_call(self, item) -> None:
-        """Responses output_item.done(function_call) → 内部 tool_call 结构。
-
-        参数在 done 事件中已完整（arguments 为字符串），无需逐块预解析。
-        """
-        call_id = self._responses_item_get(item, "call_id") or self._responses_item_get(item, "id")
-        name = self._responses_item_get(item, "name") or ""
-        arguments = self._responses_item_get(item, "arguments") or "{}"
-        if not call_id or not name:
-            return
-        self._current_tool_calls[call_id] = {
-            "id": call_id,
-            "type": "function",
-            "function": {"name": name, "arguments": arguments},
-            "_args_parsed": True,
-        }
-        self._tool_calls_buffer.pop(self._responses_item_get(item, "id"), None)
-
-        # 解析参数用于预览
-        try:
-            parsed_args = json.loads(arguments) if arguments else {}
-        except Exception:
-            parsed_args = {"_status": "loading", "_raw_args": arguments[:500]}
-
-        # 发射 preview 阶段工具开始 + 参数更新
-        if name not in self._DEFERRED_PREVIEW_TOOLS and call_id not in self._previewed_tool_call_ids:
-            self._previewed_tool_call_ids.add(call_id)
-            if self.tool_start_callback:
-                self.tool_start_callback(call_id, name, parsed_args, "preview")
-            else:
-                self._emit_with_callback(
-                    "tool_call_started", self.tool_call_started, call_id, name, parsed_args, "preview"
-                )
-        self._emit_with_callback("tool_args_updated", self.tool_args_updated, call_id, name, parsed_args)
-
-    def _process_responses_stream(self, response) -> (bool, bool):
-        """解析 Responses API 流式事件，复用 chat/completions 的信号与状态机。
-
-        事件 → 信号映射：
-        - response.reasoning_summary_text.delta → thinking_started + reasoning_content_received
-        - response.output_text.delta → content_received
-        - response.output_item.done(function_call) → tool_call_started + tool_args_updated
-        - response.failed / error → 抛错
-        """
-        # 🛡️ 锁内写入，理由同 _process_response（与 _abort_current_stream 配对）
-        with self._stream_lock:
-            self._current_response = response
-        self._response_content_blocks = []
-        self._current_tool_calls = {}
-        self._tool_calls_buffer = {}
-        self._previewed_tool_call_ids = set()
-        tool_calls_found = False
-        tool_args_pending = True
-        reasoning_started_this_call = False
-        _reasoning_batch = ""
-        _reasoning_batch_time = time.time()
-        _content_batch = ""
-        _content_batch_time = time.time()
-        saw_any_chunk = False
-        failed_error: Optional[str] = None
-
-        for event in self._guarded_stream_iter(response):
-            if self._is_cancelled:
-                # 取消前刷新待处理批次
-                if _reasoning_batch:
-                    self._emit_with_callback(
-                        "reasoning_content_received", self.reasoning_content_received, _reasoning_batch
-                    )
-                    _reasoning_batch = ""
-                if _content_batch:
-                    self._emit_with_callback("content_received", self.content_received, _content_batch)
-                    _content_batch = ""
-                self._current_response = None
-                return False, False
-
-            saw_any_chunk = True
-            etype = getattr(event, "type", "") or ""
-            # 📊 TTFT：首个内容事件（思考/正文/工具参数 delta）距请求发出的延迟
-            if self._last_ttft_ms <= 0.0 and etype.endswith(".delta"):
-                self._last_ttft_ms = round((time.monotonic() - self._llm_req_t0) * 1000, 1)
-
-            # ----- 思考内容（摘要/完整思考文本，兼容多种网关事件名）-----
-            # OpenAI 官方：reasoning_summary_text.delta（摘要，默认）
-            #          或 reasoning_text.delta（完整思考，需 include）
-            # 部分中转网关可能用 reasoning.delta / reasoning_summary_part.delta
-            if etype in (
-                "response.reasoning_summary_text.delta",
-                "response.reasoning_text.delta",
-                "response.reasoning.delta",
-                "response.reasoning_summary_part.delta",
-            ):
-                piece = getattr(event, "delta", "") or ""
-                if piece:
-                    if not reasoning_started_this_call:
-                        reasoning_started_this_call = True
-                        self._emit_with_callback("thinking_started", self.thinking_started)
-                    self._reasoning_chunks.append(piece)
-                    _reasoning_batch += piece
-                    now = time.time()
-                    if len(_reasoning_batch) >= 20 or (now - _reasoning_batch_time) > 0.08:
-                        self._emit_with_callback(
-                            "reasoning_content_received", self.reasoning_content_received, _reasoning_batch
-                        )
-                        _reasoning_batch = ""
-                        _reasoning_batch_time = now
-
-            # ----- 正文内容 -----
-            elif etype == "response.output_text.delta":
-                piece = getattr(event, "delta", "") or ""
-                if piece:
-                    self._response_chunks.append(piece)
-                    self._chunks_total_len += len(piece)
-                    self._response_content_blocks = append_text_block(self._response_content_blocks, piece)
-                    _content_batch += piece
-                    now = time.time()
-                    if len(_content_batch) >= 30 or (now - _content_batch_time) > 0.08:
-                        self._emit_with_callback("content_received", self.content_received, _content_batch)
-                        _content_batch = ""
-                        _content_batch_time = now
-
-            # ----- 工具调用参数累积 -----
-            elif etype == "response.function_call_arguments.delta":
-                tool_calls_found = True
-                # 工具调用开始 → 思考阶段结束：先冲刷残留的思考批次。
-                # 不冲刷时，模型最后吐的一小段思考（<20 字且距上次发射 <80ms）
-                # 会卡在批次里，一直等到**流结束**（工具执行完）才发射 —— 用户
-                # 感知就是"思考内容等工具执行完才刷新"。
-                if _reasoning_batch:
-                    self._emit_with_callback(
-                        "reasoning_content_received", self.reasoning_content_received, _reasoning_batch
-                    )
-                    _reasoning_batch = ""
-                    _reasoning_batch_time = time.time()
-                item_id = getattr(event, "item_id", "")
-                piece = getattr(event, "delta", "") or ""
-                buffer = self._tool_calls_buffer.get(item_id)
-                if buffer:
-                    buffer["function"]["arguments"] += piece
-
-            # ----- 工具调用参数完成 -----
-            elif etype == "response.function_call_arguments.done":
-                item_id = getattr(event, "item_id", "")
-                buffer = self._tool_calls_buffer.get(item_id)
-                if buffer:
-                    args = getattr(event, "arguments", "") or ""
-                    buffer["function"]["arguments"] = args
-
-            # ----- 工具调用 item 新增（建立 buffer）-----
-            elif etype == "response.output_item.added":
-                item = getattr(event, "item", None) or {}
-                if self._responses_item_get(item, "type") == "function_call":
-                    tool_calls_found = True
-                    # 📊 TTFT：纯工具调用时首个内容事件可能是 item.added（网关省掉
-                    # function_call_arguments.delta 直接给 done），只认 .delta 会漏记，
-                    # 该次调用只剩 elapsed_ms → 下游把 prefill/排队算进生成时间。
-                    if self._last_ttft_ms <= 0.0 and self._llm_req_t0 > 0:
-                        self._last_ttft_ms = round((time.monotonic() - self._llm_req_t0) * 1000, 1)
-                    # 思考阶段结束：冲刷残留批次（见 function_call_arguments.delta 注释）
-                    if _reasoning_batch:
-                        self._emit_with_callback(
-                            "reasoning_content_received", self.reasoning_content_received, _reasoning_batch
-                        )
-                        _reasoning_batch = ""
-                        _reasoning_batch_time = time.time()
-                    item_id = self._responses_item_get(item, "id")
-                    name = self._responses_item_get(item, "name") or ""
-                    if item_id and name:
-                        self._tool_calls_buffer[item_id] = {
-                            "id": item_id,
-                            "type": "function",
-                            "function": {"name": name, "arguments": ""},
-                        }
-                        self._response_content_blocks.append({"type": "tool_call_marker", "tool_call_id": item_id})
-
-            # ----- 工具调用 item 完成（拿到 call_id）-----
-            elif etype == "response.output_item.done":
-                item = getattr(event, "item", None) or {}
-                if self._responses_item_get(item, "type") == "function_call":
-                    tool_calls_found = True
-                    self._handle_responses_function_call(item)
-
-            # ----- 错误事件 -----
-            elif etype == "response.failed":
-                resp = getattr(event, "response", None) or {}
-                err = resp.get("error") if isinstance(resp, dict) else None
-                if isinstance(err, dict):
-                    failed_error = f"模型响应失败: {err.get('message', '')} ({err.get('code', '')})"
-                else:
-                    failed_error = "模型响应失败（response.failed）"
-            elif etype == "error":
-                err = getattr(event, "error", None) or {}
-                if isinstance(err, dict):
-                    failed_error = f"API 错误: {err.get('message', '')} ({err.get('code', '')})"
-                else:
-                    failed_error = f"API 错误: {err}"
-
-        # 冲刷剩余批次
-        if _reasoning_batch:
-            self._emit_with_callback("reasoning_content_received", self.reasoning_content_received, _reasoning_batch)
-        if _content_batch:
-            self._emit_with_callback("content_received", self.content_received, _content_batch)
-
-        # 清除响应引用
-        self._current_response = None
-        self._tool_calls_index_to_id = {}
-
-        # 工具参数在 done 事件已完整 → 直接标记完成
-        if tool_calls_found and not self._tool_calls_buffer:
-            tool_args_pending = False
-            for tc in self._current_tool_calls.values():
-                if not tc["function"]["arguments"]:
-                    tc["function"]["arguments"] = "{}"
-
-        # 错误上报
-        if failed_error:
-            raise StreamInterruptedError(failed_error)
-
-        # 空响应校验：收到事件但无任何输出（无 content/reasoning/tool_calls）
-        if saw_any_chunk and not tool_calls_found:
-            has_text = bool(self._response_chunks or self._response_content_blocks)
-            has_reasoning = bool(self._get_reasoning_content())
-            if not has_text and not has_reasoning:
-                raise StreamInterruptedError(
-                    "[空响应] 模型返回了空响应（未生成任何内容），可能是服务端过载或网络异常。请稍后重试。"
-                )
-
-        return tool_calls_found, tool_args_pending
 
     # ========== 并行工具执行 ==========
     # 用户交互类工具的串行化锁：确保同一时间只有一个工具等待用户响应（权限审批、提问）

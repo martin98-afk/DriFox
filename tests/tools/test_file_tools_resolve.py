@@ -22,7 +22,7 @@ if str(_REPO_ROOT) not in sys.path:
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from importlib import import_module
-_resolve = import_module("plugins.system-tools.tools.file_tools")._resolve
+_resolve = import_module("plugins.system-core.tools.file_tools")._resolve
 
 
 # ========== 环境变量展开 ==========

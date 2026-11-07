@@ -1,0 +1,23 @@
+{
+  "icon": {
+    "light": "icon.svg",
+    "dark": "icon_dark.svg"
+  },
+  "name": "system-core",
+  "description": "DriFox 内置核心工具：文件读写（read/write/edit/grep/glob）、终端执行（bash/后台任务）、待办（todowrite）",
+  "version": "1.0.0",
+  "author": {
+    "name": "DriFoxx Team"
+  },
+  "homepage": "https://github.com/martin98-afk/DriFox",
+  "license": "GPL-3.0-or-later",
+  "type": "system",
+  "api_version": 2,
+  "components": {
+    "tools": true
+  },
+  "capabilities": [
+    "lsp.query",
+    "process.start"
+  ]
+}

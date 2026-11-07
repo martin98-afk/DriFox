@@ -208,7 +208,7 @@ pump(100)
 from qfluentwidgets.common.config import isDarkTheme, qconfig  # noqa: E402
 
 before_theme = settings.ui_theme_style.value
-popup._on_dark_mode_toggled(not settings.ui_light_mode.value)
+popup._on_theme_mode_changed("dark")
 pump(800)
 
 print(f"切换前 theme={before_theme} → 切换后 theme={settings.ui_theme_style.value}", flush=True)
@@ -220,7 +220,7 @@ print("\n=== 场景 B：gitee 弹窗切回 ===", flush=True)
 popup2 = _GiteeMorePopup(row)
 popup2.show()
 pump(100)
-popup2._on_dark_mode_toggled(settings.ui_light_mode.value)  # 再反转
+popup2._on_theme_mode_changed("light")  # 再反转
 pump(800)
 snapshot("after-B")
 
@@ -233,7 +233,7 @@ if ctrl is not None:
     popup3 = _GiteeMorePopup(row)
     popup3.show()
     pump(100)
-    popup3._on_dark_mode_toggled(not settings.ui_light_mode.value)
+    popup3._on_theme_mode_changed("dark")
     pump(1000)
     snapshot("after-C")
 

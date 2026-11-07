@@ -833,6 +833,19 @@ class ToolExecutor:
 
         logger.debug(f"[ToolExecutor] Executing tool: {tool_name}, args: {args}")
 
+        # 🛡️ 自杀守卫（宿主统一闸门，永久开启，先于 hook 与参数校验）
+        # 任何带 command 参数的工具都在这里过一遍，与工具来自哪个插件无关；
+        # 新增命令工具无需做任何适配。判定逻辑见 app/tools/self_guard.py。
+        from app.tools.self_guard import guard_tool_call
+
+        _self_kill_reason = guard_tool_call(tool_name, args)
+        if _self_kill_reason:
+            logger.warning(
+                f"[ToolExecutor] Self-kill guard blocked tool={tool_name} "
+                f"command={args.get('command')!r}"
+            )
+            return ToolResult(False, error=_self_kill_reason)
+
         # Trigger PreToolUse hook（同步执行，支持跳过和输出回填）
         # trigger_hooks=False 时整体跳过（引擎 HookPolicy.NONE）
         if trigger_hooks and self._backend and self._backend.hook_manager:
@@ -1141,12 +1154,15 @@ class ToolExecutor:
 
         # 获取 MCP Manager（单例，可能在 BuiltinTools 清理后仍存在）
         try:
-            mcp_manager = self._builtin_tools._mcp_manager
+            # [bc697c93 补防] 必须走 property 守卫：未配置 MCP 时返回 None；
+            # 裸 ._mcp_manager 绕过守卫恒 None 且不触发 AttributeError 分支，
+            # 下方 is_connected 直接抛 AttributeError（LLM 幻觉 mcp__ 前缀名必进此链）
+            mcp_manager = self._builtin_tools.mcp_manager
         except AttributeError:
             logger.error("[ToolExecutor] _mcp_manager not accessible")
             return ToolResult(False, error="MCP 管理器不可用")
 
-        if not mcp_manager.is_connected:
+        if not mcp_manager or not mcp_manager.is_connected:
             return ToolResult(False, error="MCP 未连接，请先配置并连接 MCP 服务器")
 
         try:

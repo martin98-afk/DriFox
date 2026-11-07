@@ -197,10 +197,13 @@ class OpenAIChatSerializer:
                             # tool 结果中的图片转为文本描述
                             tool_text_parts.append("[Image: base64 data]")
                 tool_content = "\n".join(tool_text_parts)
+            # 不输出 name：OpenAI 协议中 tool 消息的 name 是可选冗余字段
+            # （关联靠 tool_call_id）；上游为 anthropic-messages 兼容端点/转换
+            # 网关时，messages[i].name 会触发 400 "cannot preserve named
+            # conversation participants"（2026-11-07 实测）。
             return {
                 "role": "tool",
                 "tool_call_id": str(normalized_message.get("tool_call_id", "")),
-                "name": str(normalized_message.get("name", "")),
                 "content": mc._prune_tool_content_for_api(str(tool_content or "")),
             }
         return {

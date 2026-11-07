@@ -33,7 +33,12 @@ def register_ui(registry) -> None:
         logger.warning(f"[worktree-manager] 注册工作树页失败（将显示占位页）: {e}")
     try:
         # 服务：主程序 5 个门面方法的实现体
-        registry.register_service(WorktreeService.SERVICE_NAME, WorktreeService(), plugin_name=_PLUGIN_NAME)
+        service = WorktreeService()
+        registry.register_service(WorktreeService.SERVICE_NAME, service, plugin_name=_PLUGIN_NAME)
+        # 工具侧切换请求通道：manage_worktree(switch) 经 bridge 投递到主线程执行
+        from .service import _install_switch_receiver
+
+        _install_switch_receiver(service)
         # 标题栏分支标签：窗口 build 时经 get_titlebar_widget("branch") 装配
         from .branch_chip import BranchChip
 

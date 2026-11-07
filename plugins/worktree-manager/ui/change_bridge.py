@@ -7,6 +7,8 @@
 - 工具线程 emit changed(str) → Qt 自动以 QueuedConnection 派发到主线程
 - SystemWorktreePage 构造时连接该信号，收到后 refresh_data()
 - 页面销毁后 Qt 自动断连，无悬挂引用
+- 工具线程 emit switchRequested(str) → WorktreeService 的接收器在主线程
+  执行「切换会话工作目录」（工具面没有 workdir.write 能力，只能请求）
 
 单例实现：挂在 QCoreApplication 上（objectName 查找），而非模块级变量。
 原因：tool loader 以裸模块（无 __package__）加载 tools/*.py，UI loader
@@ -24,6 +26,11 @@ class WorktreeChangeBridge(QObject):
     """工作树变更通知（跨线程安全：任意线程 emit，主线程收槽）"""
 
     changed = pyqtSignal(str)  # 操作摘要（如 "created <path>"）
+    # 切换会话工作目录到该路径（绝对路径）+ 发起会话 session_id。
+    # session_id 必带：接收端按会话定位窗口执行切换；若只带路径，主线程
+    # 排队延迟期间用户可能已切到别的项目页面，会把路径持久化进错误项目的
+    # project_workdir 表（跨项目污染，实测缺陷）。
+    switchRequested = pyqtSignal(str, str)
 
     def __init__(self, parent=None):
         super().__init__(parent)

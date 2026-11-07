@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
-"""复现：UI 插件浮动卡（full/left）只能打开一次，第二次 toggle 无法再显示
+"""回归：UI 插件浮动卡（full/left）关后重开
 
-用户路径：侧栏点击开卡 → 点卡片 X 关闭 → 再点侧栏 → 无反应。
-[DEBUG-reopen] 临时复现用例，定位后转正式回归或删除。
+原始故障：侧栏点击开卡 → 点卡片 X 关闭 → 再点侧栏 → 无反应（2026-11 定位修复）。
+本文件已转为正式回归：记账状态、真卡开关循环、dock 展开链与 gauge 动画回收。
 """
 
 from types import SimpleNamespace

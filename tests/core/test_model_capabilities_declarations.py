@@ -73,7 +73,9 @@ def test_declared_overrides_all_layers(no_family):
     assert out["max_output_tokens"] == 8192
     assert out["supports_vision"] is True
     assert out["supports_thinking"] is True
-    assert out["thinking_param"] == "thinking_budget"
+    # 归一规则：声明了档位列表 → thinking_param 强制 reasoning_effort
+    #（与 models_dev_sync 自动链 effort 型优先同规则，矛盾声明收口）
+    assert out["thinking_param"] == "reasoning_effort"
     assert out["reasoning_effort_values"] == ["low", "medium"]
     assert set(sources.values()) == {"declared"}, f"六键应全标 declared，实际 {sources}"
 
@@ -439,3 +441,72 @@ def test_responses_branch_effort_via_declared_values(monkeypatch):
 
     assert norm("high", values) == "high"
     assert norm("ultra", values) == "low", "无效等级回退声明 values 中位"
+
+
+# ── 矛盾声明归一 + 档位拆分（2026-11-06 hy4free 回归）─────
+
+def test_conflicting_thinking_param_normalized_to_effort(no_family):
+    """声明 thinking 型思考参数 + 非空档位列表 → thinking_param 归一为 reasoning_effort。
+
+    矛盾组合不收口时：参数卡「思考等级」行与工具栏思考胶囊双双隐藏
+    （两处 UI 均以 thinking_param=="reasoning_effort" 为显示门槛），
+    发送链只发 thinking 布尔而强度不生效。实测 hy4free。
+    """
+    llm_config = {
+        "模型名称": _UNKNOWN_MODEL,
+        "声明_支持思考": True,
+        "声明_思考参数": "thinking",
+        "声明_思考强度": "low/ultra/max",
+    }
+    sources: dict = {}
+    out = resolve_model_capabilities(llm_config, "", sources)
+
+    assert out["thinking_param"] == "reasoning_effort"
+    assert out["reasoning_effort_values"] == ["low", "ultra", "max"]
+    # 参数卡思考等级行 + 思考胶囊的显示条件（main_widget._update_settings_effort_btn /
+    # model_config_card.set_config 同款判定）必须为真
+    assert out["supports_thinking"] is True
+    assert out["thinking_param"] == "reasoning_effort" and out["reasoning_effort_values"]
+    # 归一生效层跟随档位来源（弹窗来源列与档位一致显示「自定义」）
+    assert sources["thinking_param"] == "declared"
+
+
+def test_effort_values_list_element_slash_split():
+    """档位声明为单元素列表 ["low/ultra/max"] → 拆成三档。
+
+    弹窗回显用 / 连接（_fmt_effort），用户原样保存会塌成单元素；
+    解析层必须与 str 分支同口径拆分隔符，否则下拉/胶囊只剩一个非法档。
+    """
+    from app.core.modelmeta.model_capabilities import _parse_declared_value
+
+    assert _parse_declared_value("reasoning_effort_values", ["low/ultra/max"]) == ["low", "ultra", "max"]
+    assert _parse_declared_value("reasoning_effort_values", ["low", "ultra"]) == ["low", "ultra"]
+    assert _parse_declared_value("reasoning_effort_values", "high；max") == ["high", "max"]
+    assert _parse_declared_value("reasoning_effort_values", []) is None
+
+
+def test_apply_model_defaults_seeds_thinking_keys_for_declared_effort(no_family):
+    """声明档位但未设参数值 → apply_model_defaults 补思考模式/思考等级默认档。
+
+    不补则参数卡 config 无「思考等级」键整行不渲染、胶囊 raw_effort 为空恒隐藏。
+    """
+    declared = {"声明_支持思考": True, "声明_思考参数": "thinking", "声明_思考强度": "low/ultra/max"}
+    cfg = mc.apply_model_defaults({"模型名称": _UNKNOWN_MODEL}, _UNKNOWN_MODEL, declared=declared, provider="")
+
+    assert cfg.get("思考模式") is True
+    # 默认取第一个非关闭档位（对齐 L3 自动链同款规则）
+    assert cfg.get("思考等级") == "low"
+
+
+def test_apply_model_defaults_no_overwrite_existing_user_values(no_family):
+    """config 已有思考参数值 → 声明档位不覆盖用户已设值"""
+    declared = {"声明_支持思考": True, "声明_思考强度": "low/ultra/max"}
+    cfg = mc.apply_model_defaults(
+        {"模型名称": _UNKNOWN_MODEL, "思考模式": False, "思考等级": "max"},
+        _UNKNOWN_MODEL,
+        declared=declared,
+        provider="",
+    )
+
+    assert cfg.get("思考模式") is False
+    assert cfg.get("思考等级") == "max"

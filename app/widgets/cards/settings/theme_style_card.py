@@ -32,7 +32,9 @@ from PyQt5.QtWidgets import QGridLayout, QLabel, QSizePolicy, QWidget
 from qfluentwidgets import ExpandSettingCard, FluentIcon
 
 from app.utils.design_tokens import Colors, _get_global_font, scale_font_size
+from app.utils import theme_mode
 from app.utils.theme_manager import theme_manager
+from app.widgets.cards.settings.expand_height_mixin import DynamicHeightExpandCardMixin
 
 # ── 网格几何 ──────────────────────────────────────────
 _TILE_MIN_W = 156  # 单格最小宽度（决定一行放几格）
@@ -137,15 +139,28 @@ _load_queue: list = []
 
 
 def _resolve_theme_image_source(entry: dict) -> Optional[str]:
-    """解析主题背景图源：Qt 资源路径直接用，相对路径按主题目录解析"""
+    """解析主题背景图源：Qt 资源路径直接用，相对路径按主题目录解析
+
+    ⚠️ 不能用 os.path.basename 削掉目录层级：主题常用 `../assets/x.jpg`
+    或 `../../assets/x.jpg` 跨目录引用素材（多主题共享一份图），
+    basename 后只剩文件名，再到主题目录里找必然 miss，表现为
+    主题卡预览图空白（codex 2026-11-07 实测：cyberpunk-2077-somi）。
+    这里必须按完整相对路径拼接并规范化。
+    """
     spec = entry.get("image")
     if not spec:
         return None
     spec_str = str(spec)
-    if spec_str.startswith(":/"):
+    if spec_str.startswith(":/") or spec_str.startswith("qrc:"):
         return spec_str
-    path = theme_manager.get_theme_resource(entry.get("id", ""), os.path.basename(spec_str))
-    return None if path is None else str(path)
+    theme_id = entry.get("id", "")
+    theme_dir = theme_manager.get_theme_dir(theme_id)
+    if not theme_dir:
+        return None
+    if os.path.isabs(spec_str):
+        return spec_str if os.path.exists(spec_str) else None
+    candidate = os.path.normpath(os.path.join(str(theme_dir), spec_str))
+    return candidate if os.path.exists(candidate) else None
 
 
 def _request_theme_image(entry: dict, on_ready) -> None:
@@ -183,13 +198,29 @@ def _load_next_theme_image() -> None:
 
 
 def _first_background(backgrounds: dict) -> dict:
-    """取第一个「启用且有图」的背景区域（window → scene → chat_area → sidebar）"""
-    for key in ("window", "scene", "chat_area", "sidebar"):
+    """取第一个「启用且有图」的背景区域
+
+    顺序有意让 scene 优先于 window：window 常被主题用作极低不透明度的
+    装饰底纹（例如 `:/icons/fox_bg.png` + opacity 0.03），拿它当主题卡
+    预览会得到一张近乎空白的缩略图，而 scene 才是主题真正的视觉主张。
+    """
+    for key in ("scene", "window", "chat_area", "sidebar"):
         area = backgrounds.get(key) or {}
         if area.get("image") and area.get("enabled", True):
             return area
     return {}
 
+
+def _has_animation(backgrounds: dict) -> bool:
+    """主题是否配了动态背景（新 schema 的 animation，任意区域）
+
+    scene 与 chat 归一化后是同一对象，列全是为兼容只写旧名的主题。
+    """
+    for key in ("chat", "scene", "window", "sidebar"):
+        anim = (backgrounds.get(key) or {}).get("animation")
+        if anim and anim.get("src") and anim.get("enabled", True):
+            return True
+    return False
 
 def collect_theme_entries(is_light: bool) -> list[dict]:
     """采集当前深浅模式下的主题预览条目。
@@ -204,7 +235,10 @@ def collect_theme_entries(is_light: bool) -> list[dict]:
         theme = theme_manager.get_theme(theme_id) or {}
         window = theme.get("window") or {}
         colors = theme.get("colors") or {}
-        background = _first_background(theme_manager.get_theme_backgrounds(theme_id))
+        backgrounds = theme_manager.get_theme_backgrounds(theme_id)
+        background = _first_background(backgrounds)
+        overlay = backgrounds.get("overlay") or {}
+        music = backgrounds.get("music") or {}
         entries.append(
             {
                 "id": theme_id,
@@ -214,6 +248,14 @@ def collect_theme_entries(is_light: bool) -> list[dict]:
                 "accent": colors.get("accent") or colors.get("border_accent"),
                 "image": background.get("image"),
                 "image_opacity": background.get("opacity") or 0.0,
+                # 角标：主题是否自带动态背景 / 背景音乐（贴图左上角标注）。
+                # 动态背景有两种承载：旧 overlay.video 与新 animation（动画 WebP），
+                # 后者不依赖系统解码器，是现在的主路径。
+                "has_video": (
+                    bool(overlay.get("video")) and overlay.get("enabled", True) is not False
+                )
+                or _has_animation(backgrounds),
+                "has_music": bool(music.get("tracks")) and music.get("enabled", True) is not False,
             }
         )
     return entries
@@ -381,6 +423,31 @@ class _ThemeTile(QWidget):
 
         if self._selected:
             self._draw_badge(painter, rect, accent)
+        self._draw_media_flags(painter, rect)
+
+    def _draw_media_flags(self, painter: QPainter, rect: QRectF) -> None:
+        """左上角媒体角标：视频 / 音乐（两者可同时存在，横向排列）"""
+        icons = []
+        if self._entry.get("has_video"):
+            icons.append(FluentIcon.MOVIE)
+        if self._entry.get("has_music"):
+            icons.append(FluentIcon.MUSIC)
+        if not icons:
+            return
+
+        size = 22
+        x = rect.left() + 8
+        y = rect.top() + 8
+        painter.save()
+        painter.setClipRect(rect)
+        for icon in icons:
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QColor(0, 0, 0, 140))
+            painter.drawRoundedRect(QRectF(x, y, size, size), 6, 6)
+            pix = icon.icon(color=QColor(255, 255, 255, 245)).pixmap(size - 7, size - 7)
+            painter.drawPixmap(QRectF(x + 3.5, y + 3.5, size - 7, size - 7), pix, QRectF(pix.rect()))
+            x += size + 4
+        painter.restore()
 
     def _draw_cover(self, painter: QPainter, rect: QRectF, opacity: float) -> None:
         """背景图按 cover 方式缩放后居中裁切，兼顾高 DPI 清晰度"""
@@ -434,8 +501,13 @@ class _ThemeTile(QWidget):
         super().leaveEvent(event)
 
 
-class ThemeStyleCard(ExpandSettingCard):
-    """主题风格卡：展开后是主题预览网格，点格子即切主题"""
+class ThemeStyleCard(DynamicHeightExpandCardMixin, ExpandSettingCard):
+    """主题风格卡：展开后是主题预览网格，点格子即切主题
+
+    高度走 DynamicHeightExpandCardMixin：网格是动态重建的（主题源热重载 /
+    深浅模式切换），基类「滚动条动画 + spaceWidget 占位」那套在内容高度变化时
+    会算错卡高，典型表现是展开后只露出一行、或顶部留一大块空白。
+    """
 
     def __init__(self, configItem, entries: list[dict], settings, is_light: bool = False, icon=None, parent=None):
         # icon 不能传 None：SettingIconWidget 的重载解析会直接抛 TypeError
@@ -506,6 +578,8 @@ class ThemeStyleCard(ExpandSettingCard):
             return
         # 必须走 Settings.set：直接赋 item.value 只发信号不落盘
         self._settings.set(self.configItem, theme_id, save=True)
+        # 记到该主题所属的深浅模式下：切到另一模式再切回来时恢复它
+        theme_mode.remember_theme(theme_id)
 
     # ── 布局 ──────────────────────────────────────────
 
@@ -531,7 +605,7 @@ class ThemeStyleCard(ExpandSettingCard):
         self._grid.invalidate()
         self.viewLayout.invalidate()
         self.viewLayout.activate()
-        self._adjustViewSize()
+        self._adjust_view_size()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)

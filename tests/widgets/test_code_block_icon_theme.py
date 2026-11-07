@@ -110,3 +110,69 @@ def test_no_value_import_of_icon_prefix():
     assert not hasattr(card_viewers, "_ICON_PREFIX_CACHE"), (
         "card_viewers 不得持有 _ICON_PREFIX_CACHE 的按值导入；请用 current_icon_prefix()"
     )
+
+
+# ── #17 代码块高亮 memo（markdown_block_viewer._highlight_inner_cached）──
+# 契约：同 key 只算一次 / style 切换必须重算 / 超限条目不进缓存仍正确。
+
+def _hl_counter(monkeypatch):
+    """给 markdown_block_viewer.highlight 套计数桩，返回调用计数列表。"""
+    from app.widgets import markdown_block_viewer as mbv
+
+    calls = []
+    real = mbv.highlight
+
+    def counting(code, lexer, fmt):
+        calls.append(1)
+        return real(code, lexer, fmt)
+
+    monkeypatch.setattr(mbv, "highlight", counting)
+    return calls
+
+
+def test_highlight_memo_same_key_single_compute(monkeypatch):
+    """同 (code, lang, style, 字号) 二次调用命中缓存：highlight 只跑一次且输出一致。"""
+    from app.widgets import markdown_block_viewer as mbv
+
+    calls = _hl_counter(monkeypatch)
+    monkeypatch.setattr(mbv, "_is_light_theme", lambda: True)
+    mbv._CODE_HIGHLIGHT_CACHE.clear()
+    code = "def f():\n    return 1\n"
+    first = mbv._highlight_inner_cached(code, "python")
+    assert first is not None
+    assert len(calls) == 1
+    second = mbv._highlight_inner_cached(code, "python")
+    assert second == first, "缓存命中输出必须与现算逐字节一致"
+    assert len(calls) == 1, "同 key 二次调用不得重跑 highlight"
+
+
+def test_highlight_memo_invalidates_on_style_switch(monkeypatch):
+    """style 变化（深↔浅主题切换）key 失效：必须重算，不得脏命中旧 style 条目。"""
+    from app.widgets import markdown_block_viewer as mbv
+
+    calls = _hl_counter(monkeypatch)
+    mbv._CODE_HIGHLIGHT_CACHE.clear()
+    code = "x = 1\n"
+    monkeypatch.setattr(mbv, "_is_light_theme", lambda: True)
+    light = mbv._highlight_inner_cached(code, "python")
+    assert light is not None and len(calls) == 1
+    monkeypatch.setattr(mbv, "_is_light_theme", lambda: False)
+    dark = mbv._highlight_inner_cached(code, "python")
+    assert dark is not None
+    assert len(calls) == 2, "style 维度变化必须重算（key 分立，禁止跨 style 命中）"
+    assert len(mbv._CODE_HIGHLIGHT_CACHE) == 2, "两套 style 各自持条目"
+
+
+def test_highlight_memo_skips_oversized(monkeypatch):
+    """高亮结果超 128K 字符不写入缓存，但本次渲染仍正确返回现算结果。"""
+    from app.widgets import markdown_block_viewer as mbv
+
+    calls = _hl_counter(monkeypatch)
+    monkeypatch.setattr(mbv, "_is_light_theme", lambda: True)
+    mbv._CODE_HIGHLIGHT_CACHE.clear()
+    big_code = "x = 1\n" * 4000  # 28KB 源码，class 化膨胀后必超 128K
+    inner = mbv._highlight_inner_cached(big_code, "python")
+    assert inner is not None, "超限条目必须照常现算返回"
+    assert len(inner) > mbv._CODE_HIGHLIGHT_CACHE_MAX_ITEM_CHARS, "测试前提：输入应产生超限 HTML"
+    assert all(k[0] != big_code for k in mbv._CODE_HIGHLIGHT_CACHE), "超限条目不得写入缓存"
+    assert len(calls) == 1

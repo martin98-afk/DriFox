@@ -6,10 +6,13 @@
 - 所有文件操作通过 os/shutil/stdlib 完成
 """
 
+import csv
+import locale
 import os
 import re
 import shutil
 import stat
+import subprocess
 import sys
 import traceback
 from pathlib import Path
@@ -17,6 +20,8 @@ from typing import Dict, List, NamedTuple, Optional
 
 from PyQt5.QtCore import QObject, pyqtSignal
 
+# Windows 下从 GUI 进程调用控制台程序会弹黑框，需显式隐藏子进程控制台窗口
+_CREATE_NO_WINDOW = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
 
 # ── 路径常量 ──────────────────────────────────────────────
 
@@ -82,9 +87,9 @@ CACHE_DEFS: List[CleanerItem] = [
         False,
         "AI 删除文件前的自动备份（垃圾箱），误删后唯一恢复手段，建议保留",
     ),
-    CleanerItem("logs", "file", "日志文件", "logs", False, False, "运行日志，排查问题时有用"),
-    CleanerItem("cache", "database", "应用缓存", "cache", True, True, "可重建的离线缓存"),
-    CleanerItem("screenshots", "camera", "截图文件", "screenshots", False, False),
+    CleanerItem("logs", "file", "日志文件", "logs", False, True, "运行日志，排查问题时有用"),
+    CleanerItem("cache", "database", "应用缓存", "cache", True, False, "可重建的离线缓存"),
+    CleanerItem("screenshots", "camera", "截图文件", "screenshots", False, True),
     CleanerItem("archived", "archive", "归档会话", "archived", False, False),
     CleanerItem("share_sessions", "upload", "分享会话文件", "share/sessions", False, False),
     # 工具执行结果缓存:app/core/tool_result_persister.py 写入
@@ -205,14 +210,14 @@ def _delete_cache(path: Path, dir_mode: bool):
 
 
 def _kill_qwebengine_processes() -> int:
-    """终止残留的 QtWebEngine(Chromium) 子进程，归还其占用的内存。
+    """终止残留的 QtWebEngine(Chromium) 孤儿子进程，归还其占用的内存。
 
-    只清理与当前 DriFox 相关的进程，避免误杀其它应用：
-
-    1. 当前进程的全部后代中名称含 qwebengine 的进程
-       （renderer / GPU / network service 等，通常各占数百 MB 内存）；
-    2. 全系统中名称含 qwebengine、但父进程已消失的孤儿进程
-       （DriFox 退出/崩溃后残留的"僵尸" Chromium 进程）。
+    只清理「父进程已消失」的孤儿进程（DriFox 退出/崩溃后残留的"僵尸"
+    Chromium 进程）。**绝不杀当前进程的后代**（2026-11-06）：主进程存活时，
+    其 WebEngine renderer/GPU/network 子进程是正在渲染消息页面的活动资源，
+    一并杀掉会把在途渲染内容直接清空。正常退出由 Qt 生命周期回收子进程；
+    异常残留会变孤儿，由下方兜底捕获。误杀在途渲染的代价远大于漏杀几个
+    孤儿的收益，取舍明确。
 
     先发 terminate 优雅退出，超时未退的再强杀（kill）。
 
@@ -224,39 +229,60 @@ def _kill_qwebengine_processes() -> int:
     except Exception:
         return 0
 
-    pattern = re.compile(r"qwebengine", re.IGNORECASE)
+    pattern = re.compile(r"qtwebengine", re.IGNORECASE)
     self_pid = os.getpid()
     procs = []
     seen = set()
 
-    # ── 1. 当前进程的子孙进程 ──
+    # ── 全系统孤儿兜底（父进程已不存在的残留；父存活的进程一律不碰） ──
+    # psutil.process_iter 全表枚举是后台线程纯 Python 迭代，长持 GIL 饿死主线程
+    # （打包版 watchdog 543ms / 源码版 9025ms 实证）。改 tasklist 子进程枚举：
+    # CSV 只取列 0（映像名）/列 1（PID），不依赖列数；候选（通常几十个）再
+    # psutil.Process(pid) 定点校验孤儿身份与 kill，不再全表迭代。
     try:
-        for p in psutil.Process(self_pid).children(recursive=True):
+        raw = subprocess.run(
+            ["tasklist", "/FO", "CSV", "/NH"],
+            capture_output=True,
+            timeout=10,
+            creationflags=_CREATE_NO_WINDOW,
+        ).stdout
+        text = raw.decode(locale.getpreferredencoding(False), errors="replace")
+        for row in csv.reader(text.splitlines()):
+            if len(row) < 2:
+                continue
+            if not pattern.search(row[0] or ""):
+                continue
             try:
-                if pattern.search(p.name() or ""):
-                    procs.append(p)
-                    seen.add(p.pid)
-            except Exception:
-                pass
-    except Exception:
-        pass
-
-    # ── 2. 全系统孤儿兜底（父进程已不存在的残留） ──
-    try:
-        for p in psutil.process_iter(["pid", "name", "ppid"]):
+                pid = int(row[1].strip())
+            except ValueError:
+                continue
+            if pid in seen or pid == self_pid:
+                continue
             try:
-                if p.info["pid"] in seen:
-                    continue
-                if not pattern.search(p.info["name"] or ""):
-                    continue
-                ppid = p.info["ppid"]
-                if ppid in (0, 1) or not psutil.pid_exists(ppid):
-                    procs.append(p)
-                    seen.add(p.info["pid"])
+                p = psutil.Process(pid)
+                ppid = p.ppid()
             except Exception:
-                pass
+                continue
+            if ppid in (0, 1) or not psutil.pid_exists(ppid):
+                procs.append(p)
+                seen.add(pid)
     except Exception:
-        pass
+        # tasklist 失败/超时 → 回落原 process_iter 全表路径（保底不劣化）
+        try:
+            for p in psutil.process_iter(["pid", "name", "ppid"]):
+                try:
+                    if p.info["pid"] in seen:
+                        continue
+                    if not pattern.search(p.info["name"] or ""):
+                        continue
+                    ppid = p.info["ppid"]
+                    if ppid in (0, 1) or not psutil.pid_exists(ppid):
+                        procs.append(p)
+                        seen.add(p.info["pid"])
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
     if not procs:
         return 0
@@ -336,7 +362,7 @@ def _release_memory_light():
 
 
 def _release_memory_deep():
-    """第二阶段：全代 GC + 工作集归还 OS + 清理 WebEngine 子进程（高危原生操作）。
+    """第二阶段：全代 GC + 工作集归还 OS + 清理孤儿 WebEngine 子进程（高危原生操作）。
 
     注意：调用前必须让主线程事件循环排干在途回调（见 cards._on_memory_release 的
     分拍设计）：本阶段的 gc.collect(2) 可能连带析构 Python 独占的 QObject，
@@ -374,7 +400,7 @@ def _release_memory_deep():
     except Exception:
         pass
 
-    # ── 7. 终止残留 QtWebEngine(Chromium) 子进程，归还其内存 ──
+    # ── 7. 终止残留 QtWebEngine(Chromium) 孤儿子进程，归还其内存 ──
     killed_procs = _kill_qwebengine_processes()
 
     return collected, killed_procs

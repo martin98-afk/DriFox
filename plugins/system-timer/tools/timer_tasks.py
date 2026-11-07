@@ -16,14 +16,24 @@ from app.plugins.sdk import ToolResult
 # ui 组件在宿主里的注册模块名（ui_plugin_registry.load_plugin 命名规则）
 _UI_MODULE = "ui_plugin_system_timer"
 
+# 可订阅事件：与 ui/scheduler.py 的 EVENT_NAMES 保持一致（backend 真实转发集）
+_EVENT_NAMES = (
+    "stream_finished",
+    "stream_started",
+    "messages_updated",
+    "error_occurred",
+    "session_changed",
+)
+
 _TIMER_SCHEMA = {
     "type": "function",
     "function": {
         "name": "timer",
         "description": (
-            "定时任务管理：到期后自动向当前会话发触发消息(开启新一轮对话)。"
-            "一次性用 delay_seconds 或 fire_at，循环用 interval_minutes；任务仅存内存，重启失效。"
-            "仅当前会话生效，切换会话即自动取消。"
+            "定时/事件任务管理：到期或命中事件后自动向当前会话发触发消息(开启新一轮对话)。"
+            "时间触发用 delay_seconds / fire_at / interval_minutes；"
+            "事件触发用 trigger=event + event + watch(可监听指定窗口/会话/团队成员的回答结束)。"
+            "任务仅存内存，重启失效。仅当前会话生效，切换会话即自动取消。"
         ),
         "parameters": {
             "type": "object",
@@ -56,6 +66,45 @@ _TIMER_SCHEMA = {
                 },
                 "task_id": {"type": "string", "description": "cancel：任务 ID（创建时返回）"},
                 "all": {"type": "boolean", "description": "cancel：true 时取消当前会话的全部任务"},
+                "trigger": {
+                    "type": "string",
+                    "enum": ["time", "event"],
+                    "description": "create(可选)：time=时间触发(默认)；event=事件触发",
+                },
+                "event": {
+                    "type": "string",
+                    "enum": [
+                        "stream_finished",
+                        "stream_started",
+                        "messages_updated",
+                        "error_occurred",
+                        "session_changed",
+                    ],
+                    "description": (
+                        "create(trigger=event 必填)：stream_finished=一轮回答结束；"
+                        "stream_started=开始回答；messages_updated=消息落盘；"
+                        "error_occurred=本轮出错；session_changed=窗口切换会话"
+                    ),
+                },
+                "watch": {
+                    "type": "string",
+                    "description": (
+                        "create(trigger=event 可选)：监听对象。留空=当前会话；"
+                        "session:<id> / window:<id> / agent:<角色名>[@window_id] / *（所有窗口）"
+                    ),
+                },
+                "repeat": {
+                    "type": "boolean",
+                    "description": "create(trigger=event 可选)：true=每次命中都触发；默认只触发一次",
+                },
+                "cooldown_seconds": {
+                    "type": "integer",
+                    "description": "create(trigger=event 可选)：repeat=true 时的最小触发间隔，默认 5 秒",
+                },
+                "max_fires": {
+                    "type": "integer",
+                    "description": "create(trigger=event 可选)：repeat=true 时的最大触发次数，默认 100，上限 1000",
+                },
             },
             "required": ["action"],
         },
@@ -157,11 +206,17 @@ def _create(scheduler, tool_ctx, kwargs: dict) -> ToolResult:
     if not session_id:
         return ToolResult(False, error="拿不到当前会话 session_id，无法创建定时任务")
 
-    delay_val = _as_positive_int(kwargs.get("delay_seconds"))
-    interval_val = _as_positive_int(kwargs.get("interval_minutes"))
     mode_val = str(kwargs.get("mode") or "queue").strip().lower()
     if mode_val not in ("queue", "skip", "hook"):
         return ToolResult(False, error=f"非法 mode：{mode_val}，可用值 queue/skip/hook")
+    trigger = str(kwargs.get("trigger") or "time").strip().lower()
+    if trigger not in ("time", "event"):
+        return ToolResult(False, error=f"非法 trigger：{trigger}，可用值 time/event")
+    if trigger == "event":
+        return _create_event(scheduler, session_id, prompt, kwargs, mode_val)
+
+    delay_val = _as_positive_int(kwargs.get("delay_seconds"))
+    interval_val = _as_positive_int(kwargs.get("interval_minutes"))
     fire_delay, fire_target, fire_err = _parse_fire_at(kwargs.get("fire_at"))
     if fire_err:
         return ToolResult(False, error=fire_err)
@@ -206,6 +261,51 @@ def _create(scheduler, tool_ctx, kwargs: dict) -> ToolResult:
     )
 
 
+def _create_event(scheduler, session_id: str, prompt: str, kwargs: dict, mode_val: str) -> ToolResult:
+    """事件任务分支：校验事件名与 watch，交给调度器登记。"""
+    event = str(kwargs.get("event") or "").strip()
+    if event not in _EVENT_NAMES:
+        return ToolResult(
+            False,
+            error=f"trigger=event 需要 event 参数，可用值：{'/'.join(_EVENT_NAMES)}",
+        )
+    for name in ("delay_seconds", "interval_minutes", "fire_at"):
+        if kwargs.get(name) not in (None, ""):
+            return ToolResult(False, error=f"事件任务不能用 {name}，请去掉时间触发参数")
+
+    resolve = getattr(scheduler, "resolve_watch", None)
+    if not callable(resolve):
+        return ToolResult(False, error="调度器不支持事件任务（组件版本不匹配，请重载插件）")
+    watch_kind, watch_value, watch_label, watch_err = resolve(kwargs.get("watch"), session_id)
+    if watch_err:
+        return ToolResult(False, error=watch_err)
+
+    repeat = bool(kwargs.get("repeat"))
+    cooldown = _as_positive_int(kwargs.get("cooldown_seconds")) or 5
+    max_fires = min(_as_positive_int(kwargs.get("max_fires")) or 100, 1000)
+    task = scheduler.add_event_task(
+        session_id=session_id,
+        prompt=prompt,
+        event=event,
+        watch_kind=watch_kind,
+        watch_value=watch_value,
+        watch_label=watch_label,
+        mode=mode_val,
+        repeat=repeat,
+        cooldown_seconds=cooldown,
+        max_fires=max_fires,
+    )
+    life = f"每次命中触发，间隔≥{cooldown}秒，最多{max_fires}次" if repeat else "命中一次后自动结束"
+    return ToolResult(
+        True,
+        content=(
+            f"事件任务已创建（ID: {task['id']}）：监听 {watch_label} 的 {event}，{life}。"
+            f"命中后将向本会话发送：{prompt[:80]}"
+        ),
+        data={"task": task},
+    )
+
+
 def _list(scheduler, tool_ctx) -> ToolResult:
     session_id = _session_id_of(tool_ctx)
     tasks = [t for t in scheduler.list_tasks() if not session_id or t["session_id"] == session_id]
@@ -213,6 +313,12 @@ def _list(scheduler, tool_ctx) -> ToolResult:
         return ToolResult(True, content="当前会话没有定时任务")
     lines = [f"共 {len(tasks)} 个定时任务："]
     for t in tasks:
+        if t.get("trigger") == "event":
+            life = f"已触发 {t.get('fires', 0)} 次" if t.get("repeat") else "命中一次后结束"
+            lines.append(
+                f"- [{t['id']}] 事件 {t.get('event')}（监听 {t.get('watch') or '当前会话'}），{life}：{t['prompt'][:60]}"
+            )
+            continue
         kind = "循环" if t["type"] == "loop" else "一次性"
         when = (
             f"下次 {t['next_fire_seconds'] / 60:.1f} 分钟后"

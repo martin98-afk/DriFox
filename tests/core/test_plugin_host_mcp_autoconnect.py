@@ -132,6 +132,13 @@ class TestLspOnDemandStart:
     def test_do_deferred_registers_but_never_preheats_lsp(self, deferred_spied):
         svc, fired = deferred_spied
         svc._defer_non_critical_plugin_init(MagicMock())
+        # [#36] LSP 配置守卫前置后，_deferred_init_lsp 在空配置时早退（不再调
+        # initialize）。MagicMock.get_lsp_configs() 的隐式空迭代会让该守卫误判，
+        # 必须显式给非空配置，测试意图（注册发生）才成立。
+        svc._pm_for_deferred.get_lsp_configs.return_value = [
+            {"plugin": "demo", "source": "", "config": {"demo": {"command": "x"}}}
+        ]
+        svc._pm_for_deferred.get_plugin.return_value = None
 
         queue = svc._deferred_queue
         assert queue is not None, "非关键初始化应注册延迟队列（T31）"

@@ -5,7 +5,7 @@
 """
 
 from loguru import logger
-from PyQt5.QtCore import QPointF, QRectF, QPoint, QSize, Qt, QTimer, pyqtSignal
+from PyQt5.QtCore import QPointF, QPropertyAnimation, QRectF, QPoint, QSize, Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QBrush, QColor, QFont, QIcon, QPainter, QPen
 from PyQt5.QtWidgets import (
     QFontComboBox,
@@ -34,6 +34,7 @@ from app.utils.design_tokens import (
     FONT_SIZE_OPTIONS,
     _DEFAULT_FONT_SIZE_KEY,
     _LEGACY_FONT_SIZE_KEYS,
+    Animations,
     ButtonStyles,
     Colors,
     ComboBoxStyles,
@@ -50,20 +51,24 @@ from app.utils.startup_manager import (
     get_registered_command,
     request_auto_start_update,
 )
+from app.utils.theme_mode import apply_light
 from app.utils.utils import get_font_family_css, get_icon, invalidate_font_family_css_cache
 from app.widgets.cards.settings.gitee_card import GiteeCard
 from app.widgets.cards.settings.list_setting_card import SkillListSettingCard
 from app.widgets.cards.settings.mcp_setting_card import MCPListSettingCard
 from app.widgets.cards.settings.plugin_components_card import PluginComponentsCard
+from app.widgets.cards.settings.plugin_settings_page import PluginSettingsPage
 from app.widgets.cards.settings.provider_setting_card import ProviderListSettingCard
 from app.widgets.cards.settings.secret_mode_card import SecretModeSettingCard
 from app.widgets.cards.settings.render_restart_card import RenderRestartCard
+from app.widgets.cards.settings.theme_mode_card import ThemeModeSettingCard
 from app.widgets.cards.settings.render_advanced_card import RenderAdvancedCard
 from app.widgets.cards.settings.update_proxy_card import UpdateProxyCard
 from app.widgets.cards.settings.render_backend_card import RenderBackendCard
 from app.widgets.cards.settings.render_status_card import RenderStatusCard
 from app.widgets.cards.settings.system_card_frame import SystemCardFrame
 from app.widgets.cards.settings.theme_style_card import ThemeStyleCard, prepare_theme_entries
+from app.widgets.cards.settings.theme_music_card import ThemeMusicCard
 
 
 class NoWheelFontComboBox(QFontComboBox):
@@ -396,9 +401,6 @@ class LLMSettingsCard(SystemCardFrame):
     _plugin_cards_sig: tuple | None = None
     # 同上：__new__ 桩（测试 fixture）不走 __init__，读该实例属性需类级默认兜底
     _plugin_cards_built: bool = False
-    # 重建批次代际号：异步逐帧建卡期间若发生新的重建（清空旧卡），旧队列闭包凭
-    # 代际号自废，避免往新分区里塞旧卡（__new__ 桩同样需类级默认兜底）
-    _plugin_cards_build_gen: int = 0
     # 懒构造分页 → 构造方法：首开不同步构建（~340ms 主体），见 _setup_content 注释
     _LAZY_PAGE_BUILDERS = {
         "common": "_build_common_page",
@@ -426,8 +428,6 @@ class LLMSettingsCard(SystemCardFrame):
         self._plugin_cards_sig = None
         # 插件设置分区是否已真正实例化（未实例化时只同步导航显隐，不构造 widget）
         self._plugin_cards_built = False
-        # 插件设置分区异步构建代际号（见 rebuild_plugin_cards 尾部错峰队列）
-        self._plugin_cards_build_gen = 0
         # 插件注册的独立设置大 tab：当前挂载清单与已实例化页面（懒构造，见
         # _sync_plugin_tabs / _build_plugin_tab_page）
         self._plugin_tab_infos: dict = {}
@@ -472,7 +472,37 @@ class LLMSettingsCard(SystemCardFrame):
             self._page_scrolls[tab_id] = page
             self._page_layouts[tab_id] = page_layout
             self._pages_stack.addWidget(page)
-        body_layout.addWidget(self._pages_stack, 1)
+        # 全宽页（插件页/插件注册大 tab）收起左导航：分页区顶部条 = 返回按钮
+        # + 插件筛选 chips（仅插件页显示），整条只在全宽页可见（2026-11-08 设计）
+        self._back_btn = QToolButton(self)
+        self._back_btn.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        self._back_btn.setIcon(FluentIcon.RETURN.qicon())
+        self._back_btn.setIconSize(QSize(16, 16))
+        self._back_btn.setText("返回设置")
+        self._back_btn.setFixedHeight(32)
+        self._back_btn.setCursor(Qt.PointingHandCursor)
+        self._back_btn.setStyleSheet(self._back_btn_style())
+        self._back_btn.hide()
+        self._back_btn.clicked.connect(self._exit_fullwidth_mode)
+        self._chips_holder = QWidget(self)
+        chips_holder_layout = QHBoxLayout(self._chips_holder)
+        chips_holder_layout.setContentsMargins(0, 0, 0, 0)
+        chips_holder_layout.setSpacing(0)
+        chips_holder_layout.addStretch(1)
+        self._fullwidth_bar = QWidget(self)
+        bar_layout = QHBoxLayout(self._fullwidth_bar)
+        bar_layout.setContentsMargins(0, 0, 0, 0)
+        bar_layout.setSpacing(12)
+        bar_layout.addWidget(self._back_btn, 0, Qt.AlignLeft | Qt.AlignVCenter)
+        bar_layout.addWidget(self._chips_holder, 1)
+        self._fullwidth_bar.hide()
+        pages_column = QWidget(self)
+        pages_col_layout = QVBoxLayout(pages_column)
+        pages_col_layout.setContentsMargins(0, 0, 0, 0)
+        pages_col_layout.setSpacing(4)
+        pages_col_layout.addWidget(self._fullwidth_bar)
+        pages_col_layout.addWidget(self._pages_stack, 1)
+        body_layout.addWidget(pages_column, 1)
         content_layout.addWidget(body)
         self._update_nav_styles()
 
@@ -597,16 +627,17 @@ class LLMSettingsCard(SystemCardFrame):
         # 上述五页合计 ~300ms（2026-10-30 watchdog 现场 514ms 的主体），挪到
         # 首次进页（_ensure_page_ready）或显示后空闲帧（_prefetch_pages 错峰）。
 
-        # ════ 插件设置页（初始隐藏，有注册卡片时显示）════
-        self._plugin_cards_widget = QWidget(self)
-        self._plugin_cards_layout = QVBoxLayout(self._plugin_cards_widget)
-        self._plugin_cards_layout.setContentsMargins(0, 0, 0, 0)
-        self._plugin_cards_layout.setSpacing(6)
-        self._page_layouts["plugins"].addWidget(self._plugin_cards_widget)
-        self._page_layouts["plugins"].addStretch(1)
+        # ════ 插件设置页（主从：全部插件清单 + 配置/权限/关于 详情）════
+        # 页面 UI 轻量，数据在首次进页时 reload（rebuild_plugin_cards 触发）：
+        # 打开设置的那一帧不读插件清单、不建 60+ 列表行。
+        self.pluginSettingsPage = PluginSettingsPage(self)
+        self._plugin_cards_widget = self.pluginSettingsPage  # 兼容既有可见性控制
+        self._page_layouts["plugins"].addWidget(self.pluginSettingsPage, 1)
+        # 筛选 chips 挂到全宽顶部条（返回按钮右侧），跨父级 reparent 由 Qt 处理
+        self._chips_holder.layout().insertWidget(0, self.pluginSettingsPage.filter_bar)
         self._plugin_cards_widget.setVisible(False)
-        # 左侧导航：按「有无注册卡片」显隐（只查清单不构造卡片；实际实例化
-        # 延迟到首次进入该页，见 _ensure_page_ready）
+        # 左侧导航：按「有无插件」显隐（只查清单不构造行；列表数据延迟到
+        # 首次进入该页 reload，见 _ensure_page_ready）
         self._sync_plugin_nav_visibility()
         # 插件注册的独立设置大 tab：同步导航按钮与分页（懒实例化）
         self._sync_plugin_tabs()
@@ -905,8 +936,14 @@ class LLMSettingsCard(SystemCardFrame):
 
         # 浅色模式、主题风格
         self._setup_appearance_cards()
-        appearance_layout.addWidget(self.uiLightModeCard)
+        appearance_layout.addWidget(self.uiThemeModeCard)
         appearance_layout.addWidget(self.uiThemeStyleCard)
+
+        # 主题音乐（无音乐的主题整卡隐藏；展开看歌单/单曲开关/当前播放）
+        self.uiMusicCard = ThemeMusicCard(self.cfg.ui_music_volume, parent=self)
+        # 配置项级监听：卡内滑块与其他入口（配置文件/云同步）都能同步到播放器
+        self.cfg.ui_music_volume.valueChanged.connect(self._on_music_volume_changed)
+        appearance_layout.addWidget(self.uiMusicCard)
 
         # 界面字号 + 全局字体
         appearance_layout.addWidget(self.uiFontSizeCard)
@@ -972,98 +1009,24 @@ class LLMSettingsCard(SystemCardFrame):
             logger.warning(f"[LLMSettingsCard] {tab_id} 页外观对齐失败: {e}")
 
     def rebuild_plugin_cards(self, force: bool = False):
-        """重建插件设置分区（Phase D，幂等）
+        """刷新插件设置页（幂等）
 
-        按 UIPluginRegistry.get_settings_cards() 实例化插件卡片 widget_class；
-        无注册卡片时整个分区隐藏（行为零变化）。设置弹窗每次打开时调用，
-        保证插件增删/热重载后分区内容最新。
-
-        ★ 性能（2026-09-13）：插件清单未变时跳过「清空 + 重建整片卡片」。
-        原来每次打开设置面板都走 `deleteLater()` + 全量 new，即使清单一个都没变
-        —— 每张插件卡（含 ExpandSettingCard 内部 view/滚动区）都要重新构造并
-        应用字号，是打开设置时纯浪费的一笔主线程开销。签名只取
-        (card_id, widget_class) 清单指纹：内容型变化由各卡自身的 refresh 负责，
-        清单增删（插件装卸/热重载）才需要真正重建。
+        数据源是 PluginManager 全量插件清单（含没有 config_schema 的插件，
+        它们仍可查看权限与关于），不再是「有设置卡的插件」子集。
+        首次构建延迟到「插件设置页首次进入」：读清单 + 60+ 行挂载是一笔一次性
+        开销，不该在打开设置的那一帧同步付。
         """
-        # 首次构建延迟到「插件设置页首次进入」：实例化 5 张插件卡（含 ExpandSettingCard
-        # 内部 view/滚动区）是笔一次性重活，不该在打开设置的那一帧同步付。
-        # 未访问该页时只同步导航显隐（查清单，几乎零成本）。
-        # 插件大 tab 同步也挂在这里：打开设置 / 热重载重建都会走到本方法。
         self._sync_plugin_tabs()
         if not force and not self._plugin_cards_built:
             self._sync_plugin_nav_visibility()
             return
-        # 工具/智能体开关卡：仅在其页已访问过后才顺带刷新（首次构建由
-        # _ensure_page_ready 在该页首次进入时付，非 force 路径命中脏检查时近乎零成本）
-        for tab_id, card_name in (("tools", "pluginToolCard"), ("agents", "pluginAgentCard")):
-            if tab_id not in self._page_ready:
-                continue
-            try:
-                getattr(self, card_name).refresh_components()
-            except Exception as e:
-                logger.warning(f"[LLMSettingsCard] {card_name} 刷新失败: {e}")
-        try:
-            from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
-
-            cards = UIPluginRegistry.get_instance().get_settings_cards()
-        except Exception:
-            cards = []
-
-        sig = tuple((getattr(info, "card_id", ""), getattr(info, "widget_class", None)) for info in cards)
-        # 分区显隐无论是否重建都幂等同步一次：不让「跳过重建」路径依赖上一轮留下的
-        # 界面状态（插件全被停用 / 最后一张卡被卸载后仍显示空分区就是这种脏状态）。
-        has_cards = bool(cards)
-        self._plugin_cards_widget.setVisible(has_cards)
-        try:
-            self._nav_buttons["plugins"].setVisible(has_cards)
-        except Exception:
-            pass
-        if not force and sig == self._plugin_cards_sig:
+        if not self._sync_plugin_nav_visibility():
             return
-        self._plugin_cards_sig = sig
         self._plugin_cards_built = True
-
-        # 清空旧卡片
-        while self._plugin_cards_layout.count():
-            item = self._plugin_cards_layout.takeAt(0)
-            widget = item.widget()
-            if widget is not None:
-                widget.deleteLater()
-        if not has_cards:
-            return
-        # ★ 性能（2026-11-03）：卡间错峰逐帧构建。plugins 页预热单页实测 500ms+
-        # （watchdog 栈：PluginConfigCard.__init__ → _FieldRow → layout.addWidget），
-        # 5+ 张插件卡（含 ExpandSettingCard 内部 view/滚动区 + 字号全树遍历）挤一帧
-        # 就是打开设置后的一次明显顿卡；singleShot(0) 逐帧付一张卡的钱，总时长不变
-        # 但单帧不超预算。代际守卫：重建进行中若再次触发重建（热重载 force），
-        # 清空旧卡时 gen+1，旧队列闭包自废，不会往新分区里塞旧卡。
-        self._plugin_cards_build_gen += 1
-        gen = self._plugin_cards_build_gen
-        infos = list(cards)
-
-        def _build_next(idx: int):
-            if gen != self._plugin_cards_build_gen:
-                return  # 已被更新的重建批次取代
-            if idx >= len(infos):
-                return
-            info = infos[idx]
-            try:
-                card = info.widget_class(parent=self._plugin_cards_widget)
-                self._plugin_cards_layout.addWidget(card)
-                # 动态创建的新卡片不在 _apply_runtime_ui_settings 上一轮 apply 范围
-                # 内（首次启动 / 每次重建都未跑 apply），主动触发字号 / 字族应用，
-                # 与全局设置弹窗其他卡片一致
-                try:
-                    from app.utils.design_tokens import apply_font_size_to_widget
-
-                    apply_font_size_to_widget(card, 14)
-                except Exception as e:
-                    logger.warning(f"[LLMSettingsCard] 插件卡片字号应用失败 {info.card_id}: {e}")
-            except Exception as e:
-                logger.warning(f"[LLMSettingsCard] 插件设置卡片 {info.card_id} 构建失败：{e}")
-            QTimer.singleShot(0, lambda i=idx + 1: _build_next(i))
-
-        QTimer.singleShot(0, lambda: _build_next(0))
+        try:
+            self.pluginSettingsPage.reload(force=force)
+        except Exception as e:
+            logger.warning(f"[LLMSettingsCard] 插件设置页刷新失败: {e}")
 
     def _apply_list_accordion(self):
         """为列表形式配置卡片应用手风琴效果
@@ -1236,6 +1199,7 @@ class LLMSettingsCard(SystemCardFrame):
         # 宽度按最长项自适应（sizeHint 已含图标/文字/内边距，只补左侧指示条与外边距）
         widest = max((btn.sizeHint().width() for btn in self._nav_buttons.values()), default=150)
         nav.setFixedWidth(max(150, min(196, widest + 12)))
+        self._nav_full_width = nav.width()  # 全宽模式收起/展开动画的目标宽度
         self._nav_frame = nav
         # 供动态插件 tab 按钮插入（_sync_plugin_tabs）
         self._nav_body_layout = body_layout
@@ -1276,23 +1240,121 @@ class LLMSettingsCard(SystemCardFrame):
         self._current_tab = tab_id
         self._pages_stack.setCurrentWidget(self._page_scrolls[tab_id])
         self._update_nav_styles()
+        self._apply_fullwidth_mode(tab_id)
         self._expand_page_cards(tab_id)
         self.tabChanged.emit(tab_id)
 
-    def _sync_plugin_nav_visibility(self) -> bool:
-        """同步「插件设置」导航项与分区显隐：只查注册清单，不构造卡片（成本可忽略）"""
-        try:
-            from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+    @staticmethod
+    def _is_fullwidth_tab(tab_id: str) -> bool:
+        """仅内置插件页独占全宽；插件注册大 tab 保持导航可见（用户反馈 2026-11-08）"""
+        return tab_id == "plugins"
 
-            has_cards = bool(UIPluginRegistry.get_instance().get_settings_cards())
-        except Exception:
-            has_cards = False
-        self._plugin_cards_widget.setVisible(has_cards)
+    def _apply_fullwidth_mode(self, tab_id: str) -> None:
+        """按当前页收起/恢复左导航、顶部条与返回按钮
+
+        收起带滑动动画；展开时若导航本来就开着由幂等守卫拦截，不重放。
+        属性访问包 RuntimeError：__new__ 桩（测试 fixture）的 QObject 未初始化，
+        读未定义属性抛 RuntimeError 而非 AttributeError，getattr 默认值救不了。
+        """
+        full = self._is_fullwidth_tab(tab_id)
         try:
-            self._nav_buttons["plugins"].setVisible(has_cards)
+            self._set_nav_collapsed(full, animate=full)
+            back = getattr(self, "_back_btn", None)
+            if back is not None:
+                back.setVisible(full)
+            bar = getattr(self, "_fullwidth_bar", None)
+            if bar is not None:
+                bar.setVisible(full)
+        except RuntimeError:
+            pass  # __new__ 桩：跳过视觉同步
+
+    def _exit_fullwidth_mode(self) -> None:
+        """「← 返回设置」：恢复导航，只收返回按钮；顶部条（筛选 chips）保留"""
+        try:
+            current = getattr(self, "_current_tab", None)
+            self._set_nav_collapsed(False, animate=current == "plugins")
+            back = getattr(self, "_back_btn", None)
+            if back is not None:
+                back.setVisible(False)
+        except RuntimeError:
+            pass  # __new__ 桩：跳过视觉同步
+
+    def _set_nav_collapsed(self, collapsed: bool, animate: bool = True) -> None:
+        """左导航收起/展开：maximumWidth 滑动动画；降级或 animate=False 时直接显隐
+
+        收起：min 置 0 后动画 max 当前宽→0，结束 hide 并把宽度恢复正常值
+        （下次展开起点干净）；展开反向。连点由 stop() 旧动画防护。
+        """
+        try:
+            nav = getattr(self, "_nav_frame", None)
+            if nav is None:
+                return
+            full_w = getattr(self, "_nav_full_width", 0) or nav.width() or 160
+            old_anim = getattr(self, "_nav_anim", None)
+            if old_anim is not None:
+                old_anim.stop()
+            if not animate or not Animations.motion_enabled():
+                nav.setVisible(not collapsed)
+                return
+            # 动画路径幂等守卫：目标状态已达成时不重放。普通 tab 之间切换也会
+            # 走展开分支，无守卫时导航每次都被置 0 再撑开，肉眼可见闪一下
+            if collapsed and not nav.isVisible():
+                return
+            if not collapsed and nav.isVisible() and nav.maximumWidth() >= full_w:
+                return
+            if collapsed:
+                start = nav.width() or full_w
+                nav.setMinimumWidth(0)
+                nav.setMaximumWidth(start)
+                anim = QPropertyAnimation(nav, b"maximumWidth", nav)
+                anim.setDuration(Animations.NORMAL_MS)
+                anim.setStartValue(start)
+                anim.setEndValue(0)
+                anim.setEasingCurve(Animations.EASE_EXIT)
+
+                def _on_hide_done():
+                    nav.setVisible(False)
+                    nav.setFixedWidth(full_w)
+
+                anim.finished.connect(_on_hide_done)
+            else:
+                nav.setMinimumWidth(0)
+                nav.setMaximumWidth(0)
+                nav.setVisible(True)
+                anim = QPropertyAnimation(nav, b"maximumWidth", nav)
+                anim.setDuration(Animations.NORMAL_MS)
+                anim.setStartValue(0)
+                anim.setEndValue(full_w)
+                anim.setEasingCurve(Animations.EASE_ENTER)
+
+                def _on_show_done():
+                    nav.setFixedWidth(full_w)
+
+                anim.finished.connect(_on_show_done)
+            self._nav_anim = anim
+            anim.start()
+        except RuntimeError:
+            pass  # __new__ 桩：跳过动画
+
+    def _sync_plugin_nav_visibility(self) -> bool:
+        """同步「插件」导航项与分区显隐：有插件就显示
+
+        判定从「有无注册设置卡」改为「有无插件」：插件全部没有 config_schema 时
+        仍要能查看它们的权限与关于，导航不能整块消失。
+        """
+        try:
+            from app.plugins.managers.plugin_manager import PluginManager
+
+            pm = PluginManager.get_instance()
+            has_plugins = bool(pm.is_initialized() and pm.list_plugins())
+        except Exception:
+            has_plugins = False
+        self._plugin_cards_widget.setVisible(has_plugins)
+        try:
+            self._nav_buttons["plugins"].setVisible(has_plugins)
         except Exception:
             pass
-        return has_cards
+        return has_plugins
 
     def _sync_plugin_tabs(self):
         """同步插件注册的独立设置大 tab（register_settings_tab）：导航 + 分页增删
@@ -1341,6 +1403,7 @@ class LLMSettingsCard(SystemCardFrame):
             if fallback is not None:
                 self._pages_stack.setCurrentWidget(fallback)
             self._update_nav_styles()
+            self._apply_fullwidth_mode("plugins")
 
         # ── 新增出现的 tab ──
         nav_layout = getattr(self, "_nav_body_layout", None)
@@ -1373,6 +1436,7 @@ class LLMSettingsCard(SystemCardFrame):
         if nav_frame is not None and self._nav_buttons:
             widest = max(b.sizeHint().width() for b in self._nav_buttons.values())
             nav_frame.setFixedWidth(max(150, min(196, widest + 12)))
+            self._nav_full_width = nav_frame.width()
 
     def _build_plugin_tab_page(self, tab_key: str):
         """首次进入插件大 tab 时实例化页面（懒构造；失败不标 ready 由 _ensure_page_ready 重试）"""
@@ -1441,6 +1505,9 @@ class LLMSettingsCard(SystemCardFrame):
             card = item.widget() if item is not None else None
             if card is None or not hasattr(card, "toggleExpand"):
                 continue
+            # 标记 _skip_auto_expand 的卡（如主题音乐歌单）默认保持收起
+            if getattr(card, "_skip_auto_expand", False):
+                continue
             try:
                 # qfluentwidgets ExpandSettingCard 的展开状态属性是 isExpand
                 if not getattr(card, "isExpand", False):
@@ -1475,6 +1542,28 @@ class LLMSettingsCard(SystemCardFrame):
             QFrame#settingsSideNav {{
                 background: transparent;
                 border-right: 1px solid {Colors.BORDER};
+            }}
+        """
+
+    @staticmethod
+    def _back_btn_style() -> str:
+        """全宽页顶部返回按钮：与导航项同一视觉语言（次要色，hover 提亮）"""
+        return f"""
+            QToolButton {{
+                color: {Colors.TEXT_SECONDARY};
+                {font_size_css(13)}
+                padding: 0 10px;
+                border: none;
+                border-radius: 6px;
+                background-color: transparent;
+                {get_font_family_css()}
+            }}
+            QToolButton:hover {{
+                color: {Colors.TEXT_PRIMARY};
+                background-color: {Colors.TAB_HOVER_BG};
+            }}
+            QToolButton:focus {{
+                outline: none;
             }}
         """
 
@@ -1564,6 +1653,9 @@ class LLMSettingsCard(SystemCardFrame):
             set_style_sheet_if_changed(self._nav_frame, self._nav_frame_style())
         if hasattr(self, "_nav_buttons"):
             self._update_nav_styles()
+        _back_btn = getattr(self, "_back_btn", None)
+        if _back_btn is not None:
+            set_style_sheet_if_changed(_back_btn, self._back_btn_style())
         _nav_group_css = self._nav_group_style()
         for label in getattr(self, "_nav_group_labels", []):
             set_style_sheet_if_changed(label, _nav_group_css)
@@ -1582,6 +1674,14 @@ class LLMSettingsCard(SystemCardFrame):
         except Exception:
             pass
         _TRC.timer_end("llm_sb")
+        # 插件页是自定义行控件（非 SettingCard/SystemCardFrame），不在上面两条
+        # 刷新路径的 findChildren 范围内，单独刷一次行样式（选中/hover 用主题色）
+        try:
+            page = getattr(self, "pluginSettingsPage", None)
+            if page is not None:
+                page.refresh_style()
+        except Exception:
+            pass
 
     def _setup_appearance_cards(self):
         self.uiFontSizeCard = FontSizeStepperCard(
@@ -1599,13 +1699,9 @@ class LLMSettingsCard(SystemCardFrame):
             texts=["窄", "标准", "宽", "不限宽"],
             parent=self,
         )
-        self.uiLightModeCard = SwitchSettingCard(
-            get_icon("主题风格"),
-            "浅色模式",
-            "切换为浅色界面配色",
-            self.cfg.ui_light_mode,
-            self,
-        )
+        # 深浅是三态（自动 / 深 / 浅），布尔开关表达不了「跟随系统」，
+        # 换自绘分段控件（见 theme_mode_card 模块）
+        self.uiThemeModeCard = ThemeModeSettingCard(self.cfg.ui_theme_mode, self)
         self.uiThemeStyleCard = self._make_theme_style_card()
 
     def _make_theme_style_card(self):
@@ -1626,6 +1722,15 @@ class LLMSettingsCard(SystemCardFrame):
             icon=get_icon("主题风格"),
             parent=self,
         )
+
+    def _on_music_volume_changed(self, value: int) -> None:
+        """主题音乐音量滑块 → 播放器（value 为 0~100）"""
+        try:
+            from app.widgets.theme_music_player import ThemeMusicPlayer
+
+            ThemeMusicPlayer.instance().set_volume(value / 100.0)
+        except Exception:
+            pass
 
     def _rebuild_theme_style_card(self) -> None:
         """按当前深浅模式重建主题风格卡（选项动态过滤），保持原布局位置"""
@@ -1700,13 +1805,13 @@ class LLMSettingsCard(SystemCardFrame):
         self.closed.emit()
 
     def _on_light_mode_changed(self, is_light: bool):
-        """浅色模式开关切换 — 自动选择对应模式的主题"""
-        target_theme = "lumia" if is_light else "true-black"
-        # 先重建 validator 为目标模式主题集（防旧集不含 target 被 correct 回退），
-        # 当前值不在集内时回第一个（_make_theme_style_card 内处理）
-        if self.cfg.ui_theme_style.value != target_theme:
-            self.cfg.set(self.cfg.ui_theme_style, target_theme, save=True)
-        # 重建主题风格卡（展开式选项按新模式过滤）
+        """生效深浅变化（模式切档 / 自动跟随系统 / 外部同步）
+
+        主题与生效深浅的对齐收在 app.utils.theme_mode.apply_light：只在当前
+        主题深浅与目标不符时才切默认主题，不再无条件把用户手选的主题打回默认。
+        """
+        apply_light(is_light)
+        # 重建主题风格卡（选项按新模式过滤）
         self._rebuild_theme_style_card()
         # 触发全量刷新
         self._on_config_changed()
@@ -1721,8 +1826,8 @@ class LLMSettingsCard(SystemCardFrame):
         sender = self.sender()
         if sender is self.cfg.ui_theme_style:
             LLMSettingsCard._last_change_type = "theme"
-        elif sender is self.cfg.ui_light_mode:
-            # 浅色模式开关切换 → 实质是换主题
+        elif sender in (self.cfg.ui_light_mode, self.cfg.ui_theme_mode):
+            # 深浅 / 外观模式切档 → 实质是换主题
             LLMSettingsCard._last_change_type = "theme"
         elif sender is self.cfg.llm_font_family:
             LLMSettingsCard._last_change_type = "font_family"
@@ -1748,6 +1853,14 @@ class LLMSettingsCard(SystemCardFrame):
                 self._update_nav_styles()
             except Exception:
                 pass
+            # 插件设置页字号跟随：标签/表单 QSS 烧死字号，靠切插件重建才吃到
+            # 新值的旧路径覆盖不了已显示的详情页，这里显式刷
+            try:
+                page = getattr(self, "pluginSettingsPage", None)
+                if page is not None:
+                    page.refresh_style()
+            except RuntimeError:
+                pass  # __new__ 桩（测试 fixture）无真实页面
 
     def _refresh_appearance_from_config(self):
         """根据当前配置刷新外观样式
@@ -1776,8 +1889,9 @@ class LLMSettingsCard(SystemCardFrame):
         for card_name in (
             "uiFontSizeCard",
             "uiChatWidthCard",
-            "uiLightModeCard",
+            "uiThemeModeCard",
             "uiThemeStyleCard",
+            "uiMusicCard",
             "llmFontCard",
             "renderRestartCard",
             "renderStatusCard",
@@ -1959,6 +2073,8 @@ class LLMSettingsCard(SystemCardFrame):
         # 订阅热重载广播（放这里而非 __init__：避免过早拉起 PluginHostService，
         # 后者会连带全量加载智能体 + 启动文件监听，实测约 330ms）
         self._ensure_hot_reload_connected()
+        # 重新打开设置卡时恢复正常导航（全宽模式不跨开关保留，分页不动）
+        self._exit_fullwidth_mode()
         # 预热技能发现：展开技能卡时要同步扫盘 + parse 每个 SKILL.md（~90ms），
         # 挪到打开设置后的空闲帧做，用户点开卡片时就不必再等
         QTimer.singleShot(300, self._prefetch_skills)

@@ -249,6 +249,7 @@ class PluginInfo:
     version_reason: str = ""  # 版本不兼容原因（供 UI 展示）
     api_compatible: bool = True  # 契约2：api_version 与宿主插件 API 版本比对（缺省=兼容）
     api_reason: str = ""  # api_version 不兼容原因（供 UI 展示）
+    deps_conflict_reason: str = ""  # L2：跨插件依赖版本不可调和的原因（非空=拦截）
     manifest_warnings: List[str] = field(default_factory=list)  # 契约1：schema 校验 warning 清单（UI 角标后续）
     overridden_by: str = ""  # 同名覆盖标记：被覆盖方 plugin_type（"system"/"claude"），空=未被覆盖
     # icon_config 解析缓存（实例级）：重扫/热重载/安装/更新走 _scan_one_plugin_dir
@@ -265,8 +266,10 @@ class PluginInfo:
 
     @property
     def load_blocked(self) -> bool:
-        """是否被门禁拦截（平台/版本/api_version 任一不满足），拦截时宿主不得加载其任何组件"""
-        return not (self.platform_compatible and self.version_compatible and self.api_compatible)
+        """是否被门禁拦截（平台/版本/api_version/依赖冲突任一不满足），拦截时宿主不得加载其任何组件"""
+        if not (self.platform_compatible and self.version_compatible and self.api_compatible):
+            return True
+        return bool(self.deps_conflict_reason)
 
     @property
     def is_system(self) -> bool:
@@ -344,6 +347,26 @@ class PluginInfo:
             return result if result else None
 
 
+def _hard_gate_blocked(p: PluginInfo) -> bool:
+    """平台/版本/api 三维硬门禁（不含依赖冲突，避免判定自引用）。"""
+    return not (p.platform_compatible and p.version_compatible and p.api_compatible)
+
+
+def _pick_deps_winner(plugins: Dict[str, PluginInfo], a: str, b: str) -> tuple:
+    """冲突对裁决：返回 (保留方, 让出方)。
+
+    优先级 system > claude > user：内置插件是 app 功能的一部分，用户插件是扩展。
+    同类型按名字字典序，保证每次启动裁决结果一致（不随扫描顺序漂移）。
+    """
+    rank = {"system": 0, "claude": 1, "user": 2}
+
+    def key(name: str) -> tuple:
+        p = plugins.get(name)
+        return (rank.get(getattr(p, "plugin_type", "user"), 2), name)
+
+    return (a, b) if key(a) <= key(b) else (b, a)
+
+
 # ============================================================
 # 插件管理器（单例）
 # ============================================================
@@ -370,6 +393,8 @@ class PluginManager:
     _NON_DISABLEABLE = frozenset(
         {
             "system-tools",
+            "system-core",
+            "system-question",
             "system-serializers",
             "system-storages",
             "system-model-adapters",
@@ -441,7 +466,7 @@ class PluginManager:
             self._initialized = True
             self._restore_enabled_from_settings()
             try:
-                self._last_scan_signature = self._plugins_dir_signature()
+                self._last_scan_signature = self._plugins_dir_signature(include_mtime=False)
             except Exception:
                 self._last_scan_signature = None
             return
@@ -463,9 +488,10 @@ class PluginManager:
         self._restore_enabled_from_settings()
 
         # 记录首次扫描的目录签名：让启动期那次 rescan（ConfigSync 合并重载兜底）
-        # 能直接短路，省掉一次全量重扫（实测 ~450ms）
+        # 能直接短路，省掉一次全量重扫（实测 ~450ms）。口径与 ：919 rescan 短路
+        # 统一用弱签名（include_mtime=False），否则强签名≠弱签名永不命中（#F17）
         try:
-            self._last_scan_signature = self._plugins_dir_signature()
+            self._last_scan_signature = self._plugins_dir_signature(include_mtime=False)
         except Exception:
             self._last_scan_signature = None
 
@@ -518,6 +544,38 @@ class PluginManager:
     # 旧单体插件 config_schema（网页搜索 API Key）的承继插件
     _SPLIT_CONFIG_HEIR = "system-tools"
 
+    # 工具级禁用键迁移：`system-tools:tools:<tool>` → `<拆分后插件>:tools:<tool>`
+    # （拆分后工具分散到多个插件，旧禁用键不改写会让用户已禁用的工具重新出现）
+    _SPLIT_TOOL_PLUGINS = (
+        "system-core",
+        "system-web",
+        "system-question",
+        "system-team",
+        "system-diagnostics",
+    )
+    _SPLIT_TOOL_TO_PLUGIN = {
+        "read": "system-core",
+        "write": "system-core",
+        "edit": "system-core",
+        "multi_edit": "system-core",
+        "grep": "system-core",
+        "list": "system-core",
+        "glob": "system-core",
+        "scan_repo": "system-core",
+        "stage_files": "system-core",
+        "bash": "system-core",
+        "background_task": "system-core",
+        "todowrite": "system-core",
+        "todoread": "system-core",
+        "websearch": "system-web",
+        "webfetch": "system-web",
+        "question": "system-question",
+        "team_send_message": "system-team",
+        "team_manage": "system-team",
+        "get_diagnostics": "system-diagnostics",
+        "lsp": "system-diagnostics",
+    }
+
     def _migrate_split_system_states(self) -> None:
         """system 插件按类型拆分后的一次性状态迁移（幂等，无旧键时零写入）。
 
@@ -545,6 +603,19 @@ class PluginManager:
                         changed = True
                         continue
                 mapped.append(key)
+            # 1b. 工具级禁用键改写：system-tools:tools:<tool> → <拆分后插件>:tools:<tool>
+            remapped: List[str] = []
+            for key in mapped:
+                if isinstance(key, str) and key.startswith("system-tools:tools:"):
+                    tool = key[len("system-tools:tools:") :]
+                    owner = self._SPLIT_TOOL_TO_PLUGIN.get(tool)
+                    if owner:
+                        remapped.append(f"{owner}:tools:{tool}")
+                        changed = True
+                        continue
+                remapped.append(key)
+            mapped = remapped
+
             if changed:
                 cfg.set(cfg.disabled_plugin_components, mapped, save=True)
                 logger.info(f"[PluginManager] 迁移 system 拆分禁用键 {len(mapped)} 条")
@@ -561,6 +632,7 @@ class PluginManager:
                     changed = True
             enabled = list(cfg.enabled_plugins.value or [])
             missing = [n for n in self._SPLIT_COMPONENT_TO_PLUGIN.values() if n not in enabled]
+            missing += [n for n in self._SPLIT_TOOL_PLUGINS if n not in enabled]
             if missing:
                 cfg.set(cfg.enabled_plugins, enabled + missing, save=True)
                 changed = True
@@ -812,6 +884,8 @@ class PluginManager:
                 rebuilt["system"], rebuilt["claude"], rebuilt["user"], allow_user_override
             )
             self._plugins = new_plugins
+            # L2：先跑依赖冲突裁决，replay 注入循环会自然跳过被裁为让出方的插件
+            self._apply_deps_conflict_gate(new_plugins)
             # 副作用重放（幂等）：deps 注入仅门禁通过插件（G3 对齐）；config_schema 注册
             _probe("p2.replay.start")
             for p in self._plugins.values():
@@ -894,6 +968,65 @@ class PluginManager:
             new_plugins[name] = p
         return new_plugins, changed
 
+    def _apply_deps_conflict_gate(self, plugins: Dict[str, PluginInfo]) -> None:
+        """L2：跨插件依赖冲突门禁（合并后统一判定，让出方不加载任何组件）
+
+        冲突判定需要全局视图：deps 注入是逐插件在扫描阶段完成的，而"两个插件
+        要了不可调和的版本"要等全部扫完才知道。此处执行时尚未 import 任何插件
+        组件，sys.modules 里没有第三方包，因此撤销注入是安全的（不会把已加载
+        模块扣在半路）。
+
+        让出方的 deps 路径从 sys.path 摘除并把原因写进 load_blocked，三个组件
+        loader（tool/provider/runtime）与 UI 挂载会一并跳过它，避免它静默跑在
+        对方版本的包上。
+
+        Args:
+            plugins: 合并后的完整插件集合（rescan 传 new_plugins，缓存路径传重建结果）
+        """
+        from app.plugins.deps_loader import (
+            find_deps_conflicts,
+            remove_deps_from_path,
+            resolve_pip_deps,
+        )
+
+        # 先清旧判定：热重载/卸载后冲突可能已消失，不清会永久拦截
+        live_map = getattr(self, "_plugins", None) or {}
+        for p in plugins.values():
+            p.deps_conflict_reason = ""
+            live = live_map.get(p.name)
+            # rescan 只把新增插件写回 _plugins，存量插件仍是旧实例：
+            # 不镜像的话，热重载路径上被裁为让出方的存量插件 load_blocked 不生效
+            if live is not None and live is not p:
+                live.deps_conflict_reason = ""
+
+        declarations: Dict[str, List[str]] = {}
+        for p in plugins.values():
+            if _hard_gate_blocked(p):
+                continue
+            specs = resolve_pip_deps(p.manifest)
+            if specs:
+                declarations[p.name] = specs
+        if len(declarations) < 2:
+            return
+
+        losers: Dict[str, List[str]] = {}
+        for pkg, a, b in find_deps_conflicts(declarations):
+            keep, drop = _pick_deps_winner(plugins, a, b)
+            losers.setdefault(drop, []).append(f"{pkg}（与 {keep} 要求不可调和）")
+        for name, reasons in losers.items():
+            p = plugins.get(name)
+            if p is None:
+                continue
+            p.deps_conflict_reason = "；".join(reasons)
+            live = live_map.get(name)
+            if live is not None and live is not p:
+                live.deps_conflict_reason = p.deps_conflict_reason
+            removed = remove_deps_from_path(p.path)
+            logger.warning(
+                f"[PluginManager] {name} 因依赖冲突被拦截（组件不加载）: {p.deps_conflict_reason}"
+                + (f"；已摘除 deps 注入 {removed}" if removed else "")
+            )
+
     def rescan(self, force: bool = False) -> dict:
         """运行时重新扫描插件目录，检测新增/移除的插件
 
@@ -955,6 +1088,8 @@ class PluginManager:
         new_plugins, changed_list = self._merge_discovered(
             current_system, current_claude, current_user, allow_user_override
         )
+        # L2：全量扫完后裁决跨插件依赖冲突（注入已在扫描阶段完成，此处撤销让出方）
+        self._apply_deps_conflict_gate(new_plugins)
         result["changed"] = changed_list
 
         new_names = set(new_plugins.keys())
@@ -1454,6 +1589,10 @@ class PluginManager:
         每个子目录如果包含 .drifox-plugin/plugin.json，即视为一个插件。
         """
         discovered = []
+        # 启动期逐条 Discovered DEBUG 最多 90+ 条，每条一次管道写入（10 个 enqueue
+        # sink 串行 put），管道满时会阻塞主线程（2026-11-06 实测 500ms）。改为循环
+        # 后聚合一次 emit：内容不变，管道往返从 N 次降到 1 次。
+        discovered_log_lines: list[str] = []
 
         if not base_dir.exists():
             return discovered
@@ -1533,13 +1672,17 @@ class PluginManager:
                         manifest_warnings=schema_warnings,
                     )
                 )
-                logger.debug(
-                    f"[PluginManager] Discovered plugin: {plugin_name} "
-                    f"(type={plugin_type}, format={manifest_format}) at {item}"
+                discovered_log_lines.append(
+                    f"{plugin_name} (type={plugin_type}, format={manifest_format}) at {item}"
                 )
             except Exception as e:
                 logger.error(f"[PluginManager] Failed to load plugin at {item}: {e}")
 
+        if discovered_log_lines:
+            logger.debug(
+                f"[PluginManager] Discovered plugins ({len(discovered_log_lines)}):\n  "
+                + "\n  ".join(discovered_log_lines)
+            )
         return discovered
 
     def _scan_one_plugin_dir(self, plugin_dir: Path, plugin_type: str) -> Optional[PluginInfo]:
@@ -2156,7 +2299,7 @@ class PluginManager:
 
         for mcp_file in self.get_mcp_configs():
             try:
-                content = json.loads(mcp_file.read_text(encoding="utf-8"))
+                content = json.loads(mcp_file.read_text(encoding="utf-8-sig"))
 
                 # 判断格式：有 mcpServers 键 → DriFoxx 格式；否则 → .claude-plugin 格式
                 if "mcpServers" in content:

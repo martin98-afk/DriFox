@@ -78,10 +78,48 @@ def _migrate_remove_opencode_free_provider_entry(instance) -> bool:
     return Settings._migrate_remove_opencode_free_provider(instance)
 
 
+def _migrate_theme_mode(instance) -> bool:
+    """外观模式：旧版只有布尔 LightMode，升级时按当前值固化 ThemeMode。
+
+    全新安装（配置文件里没有 UI.LightMode）不迁移，保留默认 auto —— 新用户
+    开箱跟随系统；老用户则保持升级前的深浅，不会突然变色。
+    """
+    path = getattr(instance, "file", None)
+    if path is None or not path.exists():
+        return False
+    try:
+        import orjson as json
+
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return False
+    ui = raw.get("UI") or {}
+    if "ThemeMode" in ui or "LightMode" not in ui:
+        return False
+    mode = "light" if ui.get("LightMode") else "dark"
+    instance.ui_theme_mode.value = mode
+    instance.save()
+    logger.info(f"[配置迁移] 外观模式：LightMode={ui.get('LightMode')} → ThemeMode={mode}")
+    return True
+
+
+def _migrate_theme_mode_entry(instance) -> bool:
+    """注册表末项：布尔深浅 → 三态外观模式（默认 auto 仅对新安装生效）"""
+    return _migrate_theme_mode(instance)
+
+
 _MIGRATIONS: List[Callable[[Any], bool]] = [
     _migrate_saved_providers_entry,
     _migrate_remove_opencode_free_provider_entry,
+    _migrate_theme_mode_entry,
 ]
+
+
+# 各深浅模式的默认主题（切模式且该模式没有用户记忆时的落点）。
+# 这是全仓唯一的主题名字面量来源：ui_theme_style 的默认值、theme_mode 的
+# 模式切换都引用这里，别再散落到各处。
+DEFAULT_LIGHT_THEME = "lumia"
+DEFAULT_DARK_THEME = "true-black"
 
 
 class Settings(QConfig):
@@ -655,7 +693,7 @@ class Settings(QConfig):
     auto_start = ConfigItem("General", "AutoStart", False, BoolValidator())
 
     # 版本信息
-    current_version = "v0.6.14"
+    current_version = "v0.7.0-beta"
     # 构建变体：pyqt5 | pyside6。同一 Release 同时挂两套安装包，更新器据此选包，
     # 插件市场据此选官方插件库分支（pyqt5 → main，pyside6 → pyside6）。
     # CI 构建期由 release.yml 的 Inject build_variant 步骤按 matrix 覆写，缺省取本分支值。
@@ -791,13 +829,25 @@ class Settings(QConfig):
     ui_theme_style = OptionsConfigItem(
         "UI",
         "ThemeStyle",
-        "lumia",
-        OptionsValidator(["lumia"]),  # 运行时动态补充
+        DEFAULT_LIGHT_THEME,
+        OptionsValidator([DEFAULT_LIGHT_THEME]),  # 运行时动态补充
+    )
+    # 外观模式真源：auto=跟随系统 / light / dark。ui_light_mode 是「生效值」，
+    # 既有主题过滤与主题卡读取点保持不变（见 app/utils/theme_mode.py）
+    ui_theme_mode = OptionsConfigItem(
+        "UI",
+        "ThemeMode",
+        "auto",
+        OptionsValidator(["auto", "light", "dark"]),
     )
     ui_light_mode = ConfigItem("UI", "LightMode", True, BoolValidator())
 
     # 工具区折叠显示（简洁模式）：工具调用/思考块集中在卡片顶部可滚动容器
     ui_compact_tool_area = ConfigItem("UI", "CompactToolArea", True, BoolValidator())
+
+    # 主题背景音乐音量（0~100）；用户调过之后恒优先于主题推荐音量。
+    # 只作用于 backgrounds.music，视频覆盖层恒静音不受影响。
+    ui_music_volume = RangeConfigItem("UI", "MusicVolume", 60, RangeValidator(0, 100))
 
     # 对话区限宽档位：窗口过宽时限制对话内容宽度并居中留白
     # narrow=720 / standard=900 / wide=1200 / full=不限宽（铺满）

@@ -119,6 +119,18 @@ def _from_listener_ref(ref) -> Optional[Callable[[int], None]]:
         obj = ref[0]()
         if obj is None:
             return None
+        # PyQt 已析构 wrapper 读属性不抛异常：weakref 存活但 C++ 对象已删时
+        # __get__ 仍返回可用 wrapper，继续回调会打死人（RuntimeError）或空转。
+        # sip 硬判拦截空壳 → 返回 None 走调用方 dead 清理分支（F14b）。
+        try:
+            from PyQt5 import sip
+
+            if sip.isdeleted(obj):
+                return None
+        except (ImportError, RuntimeError, TypeError):
+            # ImportError：无 Qt 绑定；TypeError：非 Qt wrapper（纯 Python 对象）
+            # 无 deleted 概念；RuntimeError：绑定层异常一律按「无硬判能力」放行
+            pass
         return ref[1].__get__(obj)
     return ref
 

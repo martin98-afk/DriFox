@@ -1,6 +1,90 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
+## [v0.7.0-beta] - 2026-11-08
+
+自 v0.6.15-beta 以来的变更 | 提交数：88 · 文件变更：274 · +23378/-3993 | 贡献者：dingma, drifox-bot, mading, martin98-afk
+
+### ✨ 新功能 (New Features)
+- **动态背景与主题影音系统**: 主题 `backgrounds` schema 新增 `overlay` 动态覆盖层与 `music` 区块；新增 `VideoOverlayLayer` 视频混合组件（multiply 混合、mask blending、亮度提升、window/sidebar/chat_area/scene 区域切换），主窗口挂载消费链路；主题背景音乐播放器（ThemeMusicCard）接线主窗口，支持焦点暂停与音量设置；动态背景动画检测带回归测试；系统插件主题图标与 SVG 素材更新。
+- **主题模式与记忆**: 主题模式管理（auto/light/dark 三态）；用户选择主题跨模式记忆；默认主题定义集中化；detail frame 样式随主题切换刷新；fallback 主题色兜底。
+- **壁纸转主题（wallpaper-to-theme）**: Wallpaper Engine 壁纸迁移脚本与评估用例；scene_layer 新增前景层（foreground）像素级对齐与回归测试；装饰层 fit_width/fit_height 缩放选项与视口稳定定位；动画编码默认宽度 800 与模糊建议；技能文档同步更新。
+- **助手中心记忆治理**: 记忆分区（sections）管理与 tone 配比（分区配额按 tone 比例同侧平分）；记忆条目删除与分区处理；助手与插件系统日志增强。
+- **插件依赖冲突治理**: PluginManager 依赖冲突检测与解决（按 dist-info METADATA 判版本，冲突时让出方 load_blocked），诊断报告同步更新。
+- **云同步可靠性**: 进程级文件锁防双开并发访问；脏状态上传重试与初始同步失败处理。
+- **OpenCode OAuth**: OpenCode Zen/Go 新增 OAuth device-flow 登录，保留 API Key 方式。
+- **会话 handoff**: 交接文档机制保证任务结果在新会话可达。
+- **QWebEngine 子进程保护**: 清理孤儿进程时跳过活跃子进程，附回归测试。
+- **其他**: scanner 子进程 Windows 下隐藏控制台窗口；工具消息移除可选 name 字段防 API 400；LLMSettingsCard 全宽模式与动画支持；思考摘要首行加粗标题上移至折叠框 summary 行；渲染环境平台推荐 profile（render_env）与一致性测试；legacy quota keys 防旧配置发送空值；session.read 能力增强 AI 响应上下文；后台时钟 idle 轮询与场景层几何同步。
+- **bash 自杀守卫**: 命令工具新增永久开启的自身进程保护（`app/tools/self_guard.py`），宿主统一闸门 `ToolExecutor.execute()` 拦截所有带 `command` 参数的工具调用（与命令来自哪个插件无关），能力池 `process.start` 的 argv 同样过守卫：目标 PID 等于当前进程、目标名等于自身镜像名（`taskkill /IM`、`killall`、`pkill`、`Stop-Process -Name`、`wmic ... call terminate` 等）、或 POSIX `$PPID` 一律拒绝。不受沙箱开关控制、不弹审批；清理其它进程的命令照旧放行。另加宽泛层：命令同时出现杀进程倾向与自身标识（当前 PID 字面量 / `getpid()`·`getppid()`·`$PPID` / 自身镜像名 / `psutil.Process().kill()`）即拒，覆盖 `python -c "psutil.Process(<pid>).kill()"` 这类动态构造；纯文本提及 kill 且无自身标识的照旧放行。
+- **分享记录下载/导入**: 「分享记录」卡新增「导入」按钮：json 会话与项目压缩包（.drifox_project）类记录在有远程链接、本地无文件时，下载落盘后直接经能力池导入当前项目（会话入历史 / 项目恢复，提示由宿主导入流程弹出）；manifest 显式声明 `session.history.write` 与 `project.write` 能力，能力不可用时降级提示。同卡修复：下载成功后列表全量重载导致滚动位置重置到顶部，现改为记录行内就地刷新按钮（下载/导入 → 打开），不再清空滚动区。
+- **插件设置页改主从结构**: 「设置 → 插件」原先把所有 config_schema 自动卡平铺成一列，插件多了只能滚动找，不同插件的同名配置块（如「上下文管理阈值」与「上下文压缩阈值」）分不清归属。现改为左侧可搜索插件清单 + 右侧详情（配置 / 权限 / 关于），列表来源从「注册了设置卡的插件」改为 PluginManager 全量清单：没有 config_schema 的插件同样出现在列表里，可查看 manifest 声明的权限与关于信息。搜索覆盖插件名、描述、字段名与能力 id，支持全部 / 待配置 / 已启用 / 已停用筛选，待配置置顶。config_schema 新增 `required` 字段标记：必填项为空时字段名带星号、插件行标「待配置」并置顶。插件自定义设置卡（`register_settings_card` 非自动卡）在详情页配置 tab 渲染，插件独立设置大 tab（`register_settings_tab`）机制保持不变。
+- **审批倒计时同款环形徽标**: 抽出公共控件 `CountdownChip`（进度环 + 剩余时间，分档变色，danger 呼吸光晕），提问卡与审批卡共用。审批徽标原「N s 后自动拒绝」文案写死了 deny 语义（配置 allow/AI 审核时显示错误），改为 tooltip 说明按「安全中心 → 审核处理」配置处理。
+- **提问超时（插件化）**: `question` 工具从 system-tools 拆出为独立插件 `system-question`（tools + ui）。超时策略全部在插件内实现，宿主只提供 `question.control` 能力（订阅生命周期 / 读快照 / 代答 / 倒计时）。三种模式：不设置超时（默认，行为零变化）/ 超时跳过（未答题标记已跳过）/ 超时 AI 判断（由模型代答，结果带 `[AI 代答]` 标注，失败自动降级跳过）。每题独立计时（翻页重置），提问卡右上角显示倒计时徽标。配置在「设置 → 插件 → 提问工具设置」；超时判断模型为模型下拉（新增 config_schema `model` 字段类型，选项经 `provider.list × model.enumerate` 能力动态填充，空值 = 跟随当前会话模型）。
+- **工具插件拆分**: `system-tools` 拆为 `system-core`（文件/终端/待办）、`system-web`（websearch/webfetch + 搜索 API Key 配置）、`system-question`（提问）、`system-team`（团队协作）、`system-diagnostics`（get_diagnostics / lsp），原插件保留技能加载/管理、MCP 管理、Gitee 上传。插件启停、工具级禁用键与搜索 Key 配置均有一次性迁移。
+- **模型协议入口手动选择**: 「接口入口」下拉收口到「服务商 → 模型列表 → 齿轮 → 模型能力」弹窗（参数卡不再渲染：渲染是配置驱动的，键不存在整行不出现，而三条注入链都不产出该键 → 死循环；能力弹窗里手选的插件被禁用/卸载时原值单独成项保留，不静默回退自动）。选项为自动 / Responses API / 已注册协议插件动态枚举，手选值按模型落盘（`ModelOverrides` 同条目）并在 worker 分派单点生效；旧键 `使用ResponsesAPI` 显式设置时优先。子智能体链路对齐 `responses` / 自动，手选插件通道警告回退。
+- **gpt-6 思考流式**: Responses 请求补 `reasoning.summary="auto"`（官方语义：不显式 opt in 就不返回思考摘要，此前只发 `effort` → 服务端只给 reasoning_tokens，UI 一个 reasoning delta 都收不到）；服务端 400 拒绝该字段时去掉后重试一次。Responses API 自动判定改为按 gpt 主版本号（≥5）通用匹配；恢复 worker `_chat_transport` 测试注入点读取（a6946c9f5 搬迁回归）。
+- **Responses API 插件化（Phase 3）**: \`/v1/responses\` 从 worker 原生通道迁入 \`system-transports/transports/openai_responses.py\`（id=\`openai_responses\`）：请求组装（input/instructions/tools/reasoning.summary/max_output_tokens）、SDK 流事件归一（reasoning/content/tool_call 三段/usage/finish）、错误映射全在插件内；worker 与子智能体统一按 \`protocol_dispatch.resolve_transport_target\` 解析 transport id，删除 \`_build_responses_kwargs\` / \`_process_responses_stream\` 与子智能体非流式 responses 实现（主程序净减约 400 行）。adapter \`protocol\` 字段补 \`responses\` 声明；SDK 新增 \`messages_to_responses_input\` / \`tools_to_responses\` 两个稳定符号。子智能体改走同一 transport + StreamEvent 聚合，不再有独立 responses 分支。
+
+### 🐛 问题修复 (Bug Fixes)
+- **关 tab 必现崩溃修复（system-timer 事件桥悬挂连接）**: 关闭任意标签页稳定触发 `TypeError: native Qt signal is not callable`（C 层异常，excepthook 连 traceback 都拿不到）。根因：`TimerScheduler._ensure_subscriptions` 清桥分支只 `bridge.event.disconnect()` + `deleteLater()`，未断开 `_connections` 中 backend 5 个对话流信号到桥的订阅，悬挂连接留到桥析构批次清理时炸出。修复为删桥前按 `handler.__self__ is bridge` 精确断开并同步清 `_connections`（与 `stop()` 逻辑一致）。附带改进：`main.py` 全局异常钩子补 no-tb 兜底——`exc_tb` 缺失时读 `exc_val.__traceback__`，仍无则 dump 主线程当前栈，纯 C 层异常不再只留一行孤立错误文本。回归测试 `tests/plugins/test_system_timer_bridge_cleanup.py`（清桥后 emit 不得穿透调度器），复现链 `tests/debug/repro_close_tab_full_boot.py`。
+- **动态背景黑屏与树影不可见**: raster 引擎忽略 Multiply+opacity 组合导致黑屏——透明度烘进帧并白预混合修复；cover 支持垂直对齐 position，竖版素材配 top 对齐树影密集区不可见；跨主题共享路径规范化清除 `../` 段。
+- **装饰层视口定位**: 宿主隐藏/布局未完成时按视口定位，并修重复 apply 残留。
+- **流式思考显示回归**: 恢复国外模型思考字段归一（流式思考内容不显示）；Responses API 判定按 gpt 主版本号通用化，修 gpt-6-luna 漏判；恢复 worker `_chat_transport` 测试注入点读取。
+- **启动与内存性能批次**: MCP/LSP SDK 改按需导入（延迟启动批次）；懒排空期间批量高度提交 + 空 doc 上报黑窗；代码块高亮 memo LRU；视觉图片发送后回收与压缩 LRU；thread_guard 仅启动时打墓碑；幻觉工具分派的 mcp_manager 空指针防护；perf_regression 版本漂移修复。
+- **tools schema 稳定**: 插件变更期间保持 tools schema 稳定，防止快照失效。
+- **transport 重构回归**: 修复重构后 12 个遗留测试失败。
+- **agent_trace 日志**: session 就绪与聚合条件日志改进。
+
+### 🔧 其他 (Chores & Build)
+- **市场自动再生成** (`4f53bb93` · `7e722e0b`): plugin.json 变更自动再生成 [skip ci]。
+- **协议入口键排除** (`fb932f12`): 协议入口配置键加入排除集合。
+- **crema 素材迁出** (`8cbca236`): 动态树影素材迁出系统主题（迁至 drifox-plugins2 crema-leaves 插件）。
+
+## [v0.6.15-beta] - 2026-11-06
+
+自 v0.6.14 以来的变更 | 提交数：34 · 文件变更：107 · +5593/-583 | 贡献者：dingma, drifox-bot, mading, martin98-afk
+
+### ✨ 新功能 (New Features)
+- **模型选择与推理强度** (`173cd32b` · `34edae26`): 模型选择逻辑优先使用 config_id；推理强度值归一化处理，撤销功能增强并精确匹配会话。
+- **插件市场诊断与 tarball 分发** (`4ba818fe` · `3c9bbd02`): 市场新增插件诊断与详情视图；插件安装器与市场管理器支持 tarball 包。
+- **工作树切换工具** (`c9895c55` · `5e2a048f`): worktree 工具支持切换工作树并自动变更目录；死 workdir 自动恢复到主仓库根并增强路径检测。
+- **代理配置增强** (`9f8958b2`): 支持系统代理自动检测，相关 UI 组件同步更新。
+- **插件 watcher 宽限期** (`cfe277a9`): 插件 watcher 抑制宽限期防止过早复活。
+- **配置卡重放** (`d42be028`): 插件变更广播前重放 pending 配置卡。
+- **ScrollBar 事件守卫** (`ce35696d`): ScrollBar 事件类型守卫，防止事件混淆导致崩溃。
+- **归档后项目卡展开** (`4b32b48e`): 会话归档后项目卡保持展开，支持连续用户操作。
+- **数据库测试** (`cc7c91e1` · `67a95151`): 索引创建/删除前缀约束测试；upsert 与 DDL 关键字不误判为表名。
+
+### 🐛 问题修复 (Bug Fixes)
+- **撤销错轮截断** (`f2265783`): 撤销目标改按 message_index 定位，杜绝错误轮次截断。
+- **sip 已析构 wrapper 硬拒** (`7cf435e2`): ToolRegistry 监听者引用硬拒 sip 已析构对象，窗口关闭时注销。
+- **quick-win 批量修复** (`00c28265`): BOM utf-8-sig、watcher deps 忽略、webengine locales 保留、rgba alpha=180，附回归测试。
+- **SubAgentTaskStore 零行更新告警** (`044b1161`): update_status 零行命中时告警（任务缺失或并发清除）。
+- **subprocess.run 编码** (`5c35ce08`): 显式指定编码，修复 Windows 下 UTF-8 处理错误。
+- **扫描签名对齐** (`d50d58c8`): initialize 扫描签名与 rescan 弱签名对齐（mtime 排除），偿还过期测试 spy lambda。
+- **stdio 命令跨平台回落** (`086e275d`): 修复 mac/linux 上 command=py 启动失败。
+- **市场包名归一** (`019bbbb0`): 依赖检查包名小写归一，调整市场 URL 拉取顺序。
+- **worktree switch 带 session_id** (`0f0010b8`): worktree 切换请求确保携带 session_id。
+- **测试断言修正** (`5b554769`): test_show_card_keeps_search_query 可见性断言修正。
+
+### ♻️ 代码重构 (Refactoring)
+- **调试日志清理** (`5616ad00`): 移除卡管理与 UI 插件注册表的临时调试日志与注释。
+
+### ⚡ 性能优化 (Performance)
+- **MCP token 常驻 worker** (`74528864`): 每调用一线程改为持久类级 worker（single-flight 队列、weakref job、sip 硬校验）。
+- **webengine 孤儿清理提效** (`d9b5960b`): psutil 全表枚举改 tasklist 子进程，同步修正过期 qwebengine 匹配模式。
+- **LSP import 预热** (`984946d2`): 60ms 预热 LSP import 链，N17 import lock 523ms 拆为两个 <500ms 段。
+- **插件重载延迟** (`fbfada36`): 合并插件重载延迟至 8s（避开启动忙窗口），12s 兜底与 8.5s watcher 抑制延长。
+
+### 🔄 其他变更 (Other Changes)
+- **locales 全量删除** (`38191707`): build.py 翻译回全量删除（-17.4MB）。
+- **MCP 门禁口径测试** (`222348ed`): 锁定门禁指纹与卡片 key 同口径（含 stdio 命令回落）。
+
+### 🔧 其他 (Chores & Build)
+- **市场自动再生成** (`448354cc` · `15fa3f1f`): plugin.json 变更自动再生成 [skip ci]。
+- **工作树 merge 冒烟测试** (`9b9cbe61` · `1eb18ffe`): 临时验证后撤销（净零）。
+
 ## [v0.6.14] - 2026-11-03 (重新发布 #3)
 
 自 v0.6.14-beta 以来的变更 | 提交数：19 · 文件变更：81 · +3293/-215 | 贡献者：dingma, mading
@@ -11,6 +95,7 @@ All notable changes to this project will be documented in this file.
 - **v2 推理渲染增强** (`69cc5c21`): 推理区高度约束与容器逻辑增强，流式推理展示更稳定。
 
 ### 🐛 问题修复 (Bug Fixes)
+- **「撤销到这里」错定位轮次，一次误删上百条消息** (`app/main_widget.py`, `tests/widgets/test_undo_round_index_virtual_scroll.py` 新增): 长会话滚出视口的批次被虚拟滚动回收后 `_batch_cards[idx]` 变成 `None`（只留等高占位），`_find_user_round_index_for_card` 首选的反查路径因此找不到目标卡片，降级去遍历 `chat_layout` 数 user 卡 —— 可布局里只剩视口附近几张卡，被回收的批次只剩占位 QWidget，数出来的 `round_index` 严重偏小。真机事故（会话 `c9b78296`）：撤销 23:17 的一条 user 消息（真实 `round_index=22`）被算成 5，`_truncate_session_from_user_round` 从第 5 轮起截断，**172 条消息（含 40 分钟的团队汇报与会话产出）被静默删除**，撤销条目 60 秒 TTL 到期后彻底不可恢复。修复：①定位改以 `card._message_index`（批次下标，回收不改）反算 `round_index`，失败再反查 `_batch_cards`，两路皆失败返回 `None`，**彻底删除布局遍历降级**；②`_undo_from_message` 以 `_message_index` 反算值为权威，与 `card._round_index` 不一致时告警并采信反算值；③大额撤销（>20 条）弹 `QMessageBox` 二次确认，显示条数、起始轮次与被删首条内容。新增 6 条回归测试锁定三件事：回收后仍能正确定位、`_round_index` 偏小时以 `_message_index` 为准、无法定位时返回 `None`（宁可失败也不错删）。
 - **ScrollBar 事件混淆崩溃** (`02a0151b`): 修复 ScrollBar 事件混淆导致的崩溃与折叠态矮内容高度异常。
 - **目录单元跨设备合并** (`545ad600`): dir 单元合并以三方内容合并取代跨设备 Lamport t 比较，避免同改误判。
 - **工作台自动展开逻辑** (`dc1be7a0`): 自动展开逻辑计入 workbench 宽度并维持折叠状态，不再误展开。
@@ -175,6 +260,7 @@ All notable changes to this project will be documented in this file.
 
 ### ✨ 新功能 (New Features)
 
+- **工作树工具支持切换与自动切工作目录** (`plugins/worktree-manager/tools/worktree_tools.py`, `plugins/worktree-manager/ui/change_bridge.py`, `plugins/worktree-manager/ui/service.py`): `manage_worktree` 新增 `action=switch`，把当前会话工作目录切到指定工作树或主仓库根（含 create 后自动切过去）；工具面没有 workdir.write / project.workdir 能力（catalog 标 _UI），切换经 change_bridge 新增的 `switchRequested` 信号投递回主线程，由 WorktreeService 走能力池执行（project.workdir 持久化 → workdir.write 同步 → branch/workbench 刷新）。
 - **会话接力机制（session handoff）** (`00ec3a68`): 实现会话上下文无缝交接，会话切换/接续时上下文平滑转移。
 - **流式期间跳过欢迎消息渲染** (`7bbb5029`): 新增安全防护，流式输出中或会话已有消息时不再渲染欢迎消息，避免闪现与状态错乱。
 - **`net.avatar` / `net.download` 能力 + `sync.register` 云同步注册** (`5d41046c`): 能力池新增网络头像与下载能力；新增 sync.register 供插件注册云同步。
@@ -1620,6 +1706,7 @@ All notable changes to this project will be documented in this file.
 
 ### ✨ 新功能 (New Features)
 
+- **插件市场下载进度条与取消** (`plugins/plugin-marketplace/ui/cancel.py` 新增, `plugins/plugin-marketplace/ui/cards.py`, `plugins/plugin-marketplace/ui/installer.py`, `plugins/plugin-marketplace/ui/archive_downloader.py`, `plugins/plugin-marketplace/.drifox-plugin/plugin.json`, `tests/plugins/test_plugin_marketplace_cancel_progress.py` 新增, `tests/plugins/test_plugin_marketplace_progress_ui.py` 新增): 安装/更新时行内出现 3px 细进度条，按钮变「取消」可点即中止——tarball 通道按 Content-Length 上报真实百分比，git 稀疏克隆改逐行读 stderr 解析 `Counting/Compressing/Receiving/Resolving/Updating` 各阶段百分比并按区间映射到整体进度（首次支持无 Content-Length 时的不确定滚动条）；取消走线程局部 CancelToken，阻塞点用 socket shutdown / `taskkill /F /T` 打断，下载完成后 seal 封盘使落位与装依赖阶段不可中断（避免插件目录停在半移动状态）；取消不计入失败记录、不弹错误、更新取消后自动重载旧版 UI。插件版本 0.5.0 → 0.6.0。
 - **上下文交接（handoff）替代被动压缩** (`plugins/system-tools/tools/handoff_tools.py` 新增, `plugins/system-hooks/hooks/inject_handoff.py` 新增, `plugins/system-hooks/hooks/inject_handoff_guide.py` 新增, `app/core/context/handoff.py` 新增, `app/core/conversation/backend.py`, `app/main_widget.py`, `tests/core/test_handoff_context.py` 新增, `tests/core/test_backend_handoff.py` 新增, `tests/plugins/test_handoff_components.py` 新增): 上下文到阈值时不再直接清空会话，改为走交接：①新工具 `update_handoff` 让主智能体在关键节点自主把工作状态写成 `<project_root>/.drifox/handoff/<session_id>.md`（六节结构 + frontmatter 记 `updated_at` / `injected_into`）；②BuildSystemPrompt 注入交接指引（仅 primary）；③触发时先判新鲜度（`updated_at` 之后新增消息 ≤10 条且 ≤3000 token），新鲜直接切会话，过期才让主智能体补写一轮（复用主会话 prompt cache，比新开 context 的子智能体便宜）；④切会话前 `set_pending_handoff` 置位，`create_session` / `trigger_session_event` 两条 SessionStart 路径注入交接后清 pending、记 `injected_into`、发 `handoff_injected`，主窗口据此自动发「继续」指令；⑤旧会话由 `_auto_save_current_session` 完整落库可回查；⑥团队窗口 / 临时对话页 / 子智能体任务中禁用交接，走原 compaction 兜底（`compaction` 子智能体与 `compaction_cache` 全保留）。
 
 - **left 卡片嵌入侧边栏右侧** (`app/widgets/tab_manager_window.py`, `tests/widgets/test_left_card_sidebar_embed.py` 新增, `tests/widgets/test_dock_repro2.py`): `container="left"` 的全局浮动卡（历史会话 / 快捷指令等）宿主从对话区 `dockSplitter` 左停靠区迁到 `#tabFrame` 内部新建的 `sidebarSplitter`，嵌在侧边栏圆角框内、TabPanel 右侧，视觉上从侧边栏长出，与对话区彻底解耦。交互语义：卡片打开时 TabPanel 自动收起让位（46px 图标条）、卡片区展开（默认 300px，按插件 per-card 记忆）、`#tabFrame` 整体加宽、对话区让位；卡片关闭时卡片区收 0、TabPanel 恢复打开前宽度、frame 缩回。拖主 splitter（tabFrame ↔ chatFrame）增量只加卡片宽度、TabPanel 保持不动；拖内部分隔条（TabPanel ↔ 卡片区）两者互借宽度、frame 总宽不变，可把 tab 列表重新拉开。实现：`_DockSideWrapper` 新增 `expandedChanged` 信号与伙伴窗格联动（`set_partner_pane`），`_sync` 重入改为置脏重跑（修卡片关闭后 wrapper 停留展开态）；宿主编排 `_on_left_card_area_toggled` / `_sync_tab_frame_cap` / 拖拽落定（`_on_splitter_manually_moved` + `_on_splitter_idle`）显式锁死内部分配 `[tab宽, 卡片宽]`，避免 QSplitter 按比例重排把 TabPanel 摊窄（实测 46→19）；`_apply_restored_panel_width` 启动补射在卡片展开期跳过。新增 10 条回归测试（结构 / 开关 / 主把手拖拽 / 内把手互借 / frame 上限）。**后续修复（同日）**：① 卡片打开期拖内部分隔条导致整个侧边栏宽度坍缩（实测 frame 被压到 60px、卡片区只剩 19px）——根因是 TabPanel.resizeEvent 的宽度自治在共享 splitter 场景下仍会 emit `sidebarToggled`，宿主随即把 frame 压到面板收起宽；新增 `TabPanel._left_card_present` 占位期抑制开关（卡片显隐时由宿主编排置位/复位），占位期面板只同步紧凑 UI、不发信号不自治。② 分隔条上下留空（未贯穿到 frame 上下内缘）——样式里的 `margin: 10px 2px` 改为 `margin: 0`。③ 主把手拖拽门控失效——`_on_splitter_manually_moved` 硬编码 `index != 0` 早退，而实测 `splitterMoved` 上报的是**右邻**窗格索引（左把手 = 1），导致拖拽会话从未开启；改为按把手位置判定（左邻须是 `_tab_frame`）。回归测试增至 15 条（新增坍缩防回归 / 主把手拖拽会话 / 分隔条贯穿样式）。
@@ -1630,6 +1717,8 @@ All notable changes to this project will be documented in this file.
 - **编辑工具运行框的增删行数流式显示** (`app/core/tool_arg_lines.py`, `app/core/workers/chat_worker.py`, `app/widgets/message_card.py`, `plugins/system-tools/tools/_tool_desc.py`): write/edit/multi_edit 在参数流式接收期间显示 `+N/-M` 胶囊（复用完成框 diff 统计的 `.tool-diff-stats` 结构，运行中与完成态形态一致），取代对编辑场景没有信息量的 `(N字符)`。行数从 worker 手里的**半截 JSON 缓冲**估算：按字段取 `"field": "…"` 片段（未闭合截到缓冲末尾），转义感知计数（连续反斜杠奇数才是 `\n`），行数 = 换行转义数 + 1 对齐 diff 语义；同一 tool_call 内只增不减防正则失配抖动，完成后由真实 diff 统计接管。顺带修两处预览缺陷：progress 阶段路径字段扩展 `path/file_path/file/target`，且 path 未到达时显示「编辑文件中」而非空窗「准备中...」；`description` 与文件路径拼接时超 30 字符截断，保证路径不被单行省略裁掉。
 
 - **file-tree 插件：图片 / 文本类文件卡片内预览** (`plugins/file-tree/ui/preview.py` 新增, `plugins/file-tree/ui/cards.py`, `tests/widgets/test_file_tree_preview.py` 新增): 文件树此前对任何文件只能「用默认程序打开」，在 IDE 之外快速看一眼截图、配置、日志都得跳出应用。改为双击可预览文件即在卡片内部切换到预览页（树页不销毁，返回后展开 / 选中 / 滚动原样保留）。①类型判定：图片走 `QImageReader.supportedImageFormats()`（按 Qt 实际能力，不硬编码后缀，跨平台自动跟随）、文本走代码 / 配置 / 文档后缀白名单 + `Dockerfile`/`Makefile`/`LICENSE` 等无后缀常见名，其余类型仍交系统默认程序，右键菜单同步只对可预览文件出现「👁 预览」。②图片视图自绘：以「适应窗口」为 1x 基准（小图不放大），Ctrl+滚轮或按钮 0.05x–20x 缩放且锚定光标位置，左键拖动平移、双击复位，图像小于视口时钳制居中。③文本视图 `QPlainTextEdit` 只读 + 等宽字体 + 左侧自绘行号区，跟随卡片主题（正文 / 行号 / 选区 / 滚动条）。④限流：文本 >1MB 或 >2000 行只读前 2000 行并顶部黄条提示；图片 >50MB 拒绝预览、像素 >2000 万按长边 4096 缩放载入（防 300MB+ QImage 冻结 UI）；含 NUL 字节的文件按二进制拒读。⑤编码 UTF-8（含 BOM）→ GBK → `errors="replace"` 三级兜底，不因编码失败丢预览。⑥预览态下顶栏刷新按钮改为重读当前文件（文件被外部改动可即时看），根目录监听与项目切换不再抢走预览页。39 条单元测试覆盖类型判定 / 行数截断 / GBK 兜底 / 大图缩放 / 缩放钳制 / 平移钳位 / 载入与刷新路径。
+
+- **插件市场代理新增「系统代理」模式** (`plugins/plugin-marketplace/ui/proxy.py`, `plugins/plugin-marketplace/ui/cards.py`, `plugins/plugin-marketplace/ui/archive_downloader.py`, `tests/plugins/test_marketplace_proxy.py`): 市场加速页此前三种模式（前缀加速站 / 自建代理 / HTTP 正向代理）都要手填地址，本机挂着 Clash 等工具时还得去查端口再抄进来。新增 `system` 模式：启用后自动探测系统全局代理——Windows 读注册表 `HKCU\...\Internet Settings`（`ProxyEnable` + `ProxyServer`，兼容 `host:port` 与 `http=...;https=...` 分协议形式、https 优先，与 Clash/v2rayN「系统代理」开关同源），macOS 走 `scutil --proxy`，兜底环境变量（`HTTPS_PROXY`/`HTTP_PROXY`/`ALL_PROXY` 大小写兼容）；选中后地址框只读并自动填探测结果，无需手填。行为语义与 HTTP 模式一致（httpx `proxy=` / git `-c http.proxy=` / URL 不改写），但每次使用实时探测：探测不到（系统代理开关关闭）自动直连不报错，测试连接在探测为空时明确提示「请先开启系统代理」；启用开关与保存按钮都会拦截探测空配置，避免保存一个实际直连的空代理。真机验证 `ProxyEnable=0` 时探测返回空走直连。新增 9 条单元测试覆盖 system 模式行为 / 探测地址解析 / 直连回落（fake winreg 隔离注册表依赖）。
 
 ### 🐛 问题修复 (Bug Fixes)
 
@@ -1652,6 +1741,8 @@ All notable changes to this project will be documented in this file.
 - **提问卡片提交后关不掉、点击无反应** (`app/widgets/cards/card_manager.py`, `tests/widgets/test_question_card_stuck.py`): 修掉一处栈顶记账被抢走的竞态。`CardManager` 用 `visible_cards[容器]` 单值记「谁是栈顶」，而 L2 状态层的 `refresh_layer() → _apply_visible_set()` 会无条件覆写该单值；提问卡注册在 `BOTTOM` 且非 stackable，因此只要提问等待期间状态层刷过一次（子智能体进度刷新 / 紧凑卡 auto_hide 定时器 / 撤销卡 TTL / 新消息进队列，共 4 处可自发触发），记账就被换成状态卡或置空，此后 `hide_card("question")` 命中「记账不匹配」早退，widget 永不 `setVisible(False)`。表现为：提交后卡片仍压在输入框上方、再点提交/忽略全无反应（答案其实每次都送达、正文照常输出），而非提问卡独占的输入区隐藏与卡片隐藏是两条独立动作，前者成功后者失败。修复两处结构性问题且均不硬编码 `question` 字面量：① `_apply_visible_set` 写栈顶记账时，若现栈顶不在本次重算的管辖集内（非本层成员）则不抢，保住「question 覆盖一切」的优先级判定（`is_card_visible` 不再被侵蚀）；② `hide_card` 语义由「按记账判定该不该隐藏」改为「让指定卡消失」，新增 `_hand_over_stack_top` 只在记账确实属于本卡时交接、不动其他卡占位（同修 `multi_visible` 分支同类抢占）。5 条回归测试锁死关不掉路径、反复点击、优先级不被侵蚀，以及状态层在无提问卡时照常接管栈顶。
 
 - **超长 API Key 无法存入系统凭证库，静默退回明文落盘** (`app/utils/secret_store.py`, `tests/utils/test_secret_store.py`): Windows 单个凭证 Blob 上限 2560 字节（`CRED_MAX_CREDENTIAL_BLOB_SIZE = 5*512`，utf-16 下 1280 字符），超出时 `CredWriteW` 直接失败（错误码 1783）。此前 `strip_secrets` 的 fail-open 逻辑「写入失败则保留明文」虽避免双丢，但 Windows 分支的 `set()` 不落任何日志，叠加后表现为**该服务商密钥静默以明文留在 app.config 里**——典型如 CodeBuddy 的 1472 字符 access_token JWT（需 2944 字节，溢出 384 字节），而其余短密钥正常入库，用户只看到「钥匙串已生效」与「某一条仍是明文」并存。修复：超限值自动分片，拆成 `provider/<id>#0..#n-1`，主条目只存 `\x00drifox:chunks:<n>` 标记，读取按标记拼回；向后兼容老条目（无标记按单片直读）；任一分片缺失返回空而非半截密钥；写入中途失败回滚已写分片、主条目保持原值；值改短时清理陈旧分片；删除时主条目与分片一并清理（主条目标记缺失时探测清理脏残留）。同时给 `strip_secrets` 的失败分支补 warning 日志，杜绝同类静默降级。10 条新增用例覆盖分片边界（含代理对不切断）、回滚、残缺分片、收缩清理与 1472 字符 key 的端到端闭环。
+
+- **工作目录失效后自动回落主仓库根** (`app/utils/git_worktree.py`, `app/main_widget.py`, `tests/widgets/test_dead_workdir_recover.py` 新增, `tests/utils/test_git_worktree_zombie.py`): 会话曾在 `<主仓库>/.worktrees/<名>` 下工作时，工作树被删（本程序删 / 外部 `git worktree remove` / 手动删目录）后 `project_workdir` 表与实例缓存里仍是死路径——工作树页长期显示「工作目录不存在」的空态，文件工具也指向不存在的目录，只能手动点「更换」重选。新增 `GitWorktreeDetector.main_repo_from_worktree_path`（纯字符串反推主仓库根，不碰文件系统，工作树目录连同 `.git` 一起消失时仍可用）与 `resolve_workdir_or_main`（活目录原样返回，死路径且能推断主仓库根则回落），`MainWidget._recover_dead_workdir` 在 `_sync_working_directory` 的取值链末端调用一次，回落后同步写回实例缓存与 `project_workdir` 表，避免下次启动再读到死路径。非 `.worktrees` 形态的死路径（他机路径 / 未挂载盘）无法推断归属，保持用户原设置不动，仍走既有「无根目录 → 建临时工作目录」路径。
 
 ### ⚡ 性能优化 (Performance)
 
@@ -3850,7 +3941,7 @@ All notable changes to this project will be documented in this file.
 - **布局边距与命令卡片对齐优化**: 调整 `OpenAIChatToolWindow`、`CardContainer`、`bottom_input_area` 的布局边距以改进整体间距；将命令卡片标签对齐到顶部避免不均匀的内边距；新增 `CardManager` 方法支持跨容器隐藏非系统卡片
 - **command_card tooltip 首次显示延迟**: 修复 `command_card` 中 tooltip 在首次显示时的位置延迟问题，提升交互即时感
 - **Windows 命令找不到自动回退 cmd /c**: `command_safety.run_safe` 在 Windows 上找不到可执行文件时自动回退到 `cmd /c` 包装，支持 PATHEXT 扩展名解析（如 `pip → pip.exe`、`tsc → tsc.cmd`），解决 `shell=False` 模式下的 PATH 查找问题
-- **Windows Shell 元字符正则增强**: 修正 `WINDOWS_SHELL_META` 正则匹配逻辑，正确处理 Windows 路径分隔符 `\` 与字面 `^`，避免路径误判
+- **Windows Shell 元字符正则增强**: 修正 `WINDOWS_SHELL_META` 正则匹配逻辑，正确处理 Windows 路径分隔符 `` 与字面 `^`，避免路径误判
 - **command_safety 字符串风格与内置命令列表统一**: `command_safety` 模块统一使用双引号字符串风格（替换单引号）；扩展 Windows Shell 内置命令列表，覆盖 cmd.exe 内置命令全集
 - **diff 生成会话消息回退机制**: 实现从会话消息生成 diff 的回退路径，当工具调用结果不可用时仍能生成可读 diff；同步新增 `app.tools` 模块相关 diff 生成入口
 - **provider 配置处理与消息卡片交互优化**: 增强 `main_widget` 中 provider 配置的处理逻辑；改进 `tool_popup`、`terminal_tools`、`message_card` 等模块的交互流程，提升多 provider 切换与命令触发场景下的稳定性

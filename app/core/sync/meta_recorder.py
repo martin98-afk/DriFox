@@ -24,6 +24,7 @@ from app.core.sync.lww import (
     entry_ts,
     is_tombstone,
     live,
+    seeded,
     tombstone,
 )
 
@@ -88,6 +89,10 @@ class SyncMetaRecorder:
 
         已存在元数据的条目一律不动，否则每次启动都会把 ts 顶到最新，
         导致其他设备的真实修改永远输给本机「什么都没改但 ts 更新」。
+
+        种出的条目带种子标记（s=true）：本机不知道这条记录的历史，
+        合并裁决时不得凭 observe_clock 抬高的 t 压过另一侧的显式墓碑，
+        否则孤儿元素（数组有、条目表无）会在每次合并中凭空复活。
         """
         with self._lock:
             entries = self._entries()
@@ -97,16 +102,16 @@ class SyncMetaRecorder:
                     for k, v in (value.items() if isinstance(value, dict) else []):
                         epath = f"{path}.{k}"
                         if epath not in entries:
-                            entries[epath] = live(value_hash(v), self._clock.tick(), self.device)
+                            entries[epath] = seeded(value_hash(v), self._clock.tick(), self.device)
                     continue
                 if kind == "list":
                     for elem in value if isinstance(value, list) else []:
                         epath = f"{path}.{element_key(elem)}"
                         if epath not in entries:
-                            entries[epath] = live(value_hash(elem), self._clock.tick(), self.device)
+                            entries[epath] = seeded(value_hash(elem), self._clock.tick(), self.device)
                     continue
                 if path not in entries:
-                    entries[path] = live(value_hash(value), self._clock.tick(), self.device)
+                    entries[path] = seeded(value_hash(value), self._clock.tick(), self.device)
             self.state["entries"] = entries
             self._sync_clock()
 
@@ -149,6 +154,16 @@ class SyncMetaRecorder:
                 self._clock.observe(floor)
                 self._sync_clock()
         return lifted
+
+    def clear_session_touched(self) -> None:
+        """清空「本会话改过」集合（一次成功上传/合并之后调用）。
+
+        抬高只是为了让本机刚改的值压过云端更高的 clock；这些值已经随本次
+        上传进了云端，再留着抬高记录会让下一轮合并重新制造一次平局冲突：
+        两端都把各自的值抬到 remote_clock+1，谁都不收敛，配置在设备间来回覆盖。
+        """
+        with self._lock:
+            self._session_touched.clear()
 
     @contextmanager
     def suppress(self):

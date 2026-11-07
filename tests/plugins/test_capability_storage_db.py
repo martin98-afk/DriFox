@@ -33,6 +33,40 @@ def test_select_and_dml_on_own_table_pass(db):
 
 def test_index_on_own_table_pass(db):
     assert db.check_sql("CREATE INDEX idx_task ON plugin_system_subagent_task (id)") == ""
+    assert db.check_sql("CREATE INDEX idx_plugin_task ON plugin_system_subagent_task (id)") == ""
+    assert db.check_sql("CREATE UNIQUE INDEX IF NOT EXISTS plugin_system_subagent_uq ON plugin_system_subagent_task (id)") == ""
+
+
+def test_drop_index_requires_prefix(db):
+    """索引名也在插件命名空间：不带前缀的可能属于主程序（idx_updated 等）。"""
+    assert db.check_sql("DROP INDEX IF EXISTS plugin_system_subagent_idx") == ""
+    assert db.check_sql("DROP INDEX idx_updated") != ""
+    assert db.check_sql("DROP INDEX IF EXISTS idx_project") != ""
+
+
+def test_upsert_and_ddl_phrases_not_taken_as_table(db):
+    """upsert / DDL / 冲突子句里的关键字不能当表名（曾把 SET 当表名拒掉 upsert）。"""
+    for sql in (
+        "INSERT INTO plugin_system_subagent_task (id) VALUES (?) "
+        "ON CONFLICT(id) DO UPDATE SET id=excluded.id, status=excluded.status",
+        "INSERT OR REPLACE INTO plugin_system_subagent_task (id) VALUES (?)",
+        "UPDATE OR IGNORE plugin_system_subagent_task SET status=? WHERE task_id=?",
+        "UPDATE OR REPLACE plugin_system_subagent_task SET status=?",
+        "DROP TABLE IF EXISTS plugin_system_subagent_task",
+        "CREATE TABLE IF NOT EXISTS plugin_system_subagent_task (id TEXT)",
+    ):
+        assert db.check_sql(sql) == "", sql
+
+
+def test_conflict_clause_does_not_bypass_prefix(db):
+    """跳过冲突子句后仍要校验真表名，不能因此放过主程序表。"""
+    for sql in (
+        "UPDATE OR IGNORE sessions SET status=?",
+        "UPDATE OR REPLACE messages SET body=?",
+        "DROP TABLE IF EXISTS project_notes",
+        "INSERT OR REPLACE INTO sessions (id) VALUES (?)",
+    ):
+        assert db.check_sql(sql) != "", sql
 
 
 def test_main_program_table_rejected(db):

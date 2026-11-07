@@ -44,6 +44,10 @@ _READ_THROUGH_COMPONENTS = frozenset({"hooks", "team_templates"})
 # 下方模块级函数（线程安全），不要直接写类属性。
 _watcher_suppress_lock = threading.Lock()
 
+# resume 归零后的宽限期（秒）：覆盖 watchfiles flight 批次的最晚 yield 时刻
+# （debounce 2000ms + step 2000ms = 4s），取 6s 留余量。
+_WATCHER_RESUME_GRACE_S = 6.0
+
 
 def suppress_plugin_watcher(duration: float = 180.0) -> None:
     """引用计数式抑制插件热重载 watcher（并发安装/卸载安全，幂等叠加）
@@ -71,7 +75,16 @@ def resume_plugin_watcher() -> None:
         with _watcher_suppress_lock:
             PluginHostService._watcher_suppress_refs = max(0, PluginHostService._watcher_suppress_refs - 1)
             if PluginHostService._watcher_suppress_refs == 0:
-                PluginHostService._suppress_watcher_until = 0.0
+                # 归零不立即清零，留短宽限期：watchfiles 的飞行中批次（debounce 2s +
+                # step 2s 聚合，落盘尾声的事件最晚在 resume 后 ~4s 才 yield）在解除
+                # 抑制后到达会穿透窗口，对刚被 reload_plugin_targeted 精准重载过的
+                # 插件再触发 1~2 轮重复重载（2026-11-05 bili-scroll 实测：主动重载
+                # 后 watcher 又触发 manifest-changed 全组件重载 + root fallback，
+                # 主线程三轮 import bilibili_api + 插件 control_server.shutdown
+                # 阻塞主线程 2.7s，UI 冻结十余秒）。
+                # 宽限期内批次照旧转 pending（不 emit）；窗口结束后由既有 pending
+                # 合并路径兜底（幂等，rescan diff 对已注册插件为空操作）。
+                PluginHostService._suppress_watcher_until = time.time() + _WATCHER_RESUME_GRACE_S
     except Exception as e:  # pragma: no cover - 防御极端 import 时序
         logger.debug(f"[PluginHost] resume_plugin_watcher 失败（不影响调用方）: {e}")
 
@@ -458,22 +471,28 @@ class PluginHostService(QObject):
         幂等保护，进程内只执行一次 → **当前无重复初始化风险**。
         为防未来新增调用点（窗口重开路径等）踩坑，此处加类级一次性标志兜底。
         """
-        pm = self._pm_for_deferred
-        if pm is None:  # 防御：绕过 _defer_non_critical_plugin_init 的直接调用（正常路径必已赋值）
-            logger.warning("[PluginHost] LSP 延迟初始化缺少 PluginManager 引用，跳过")
-            return
-        with self._deferred_once_lock:
-            if self._lsp_initialized_once:
-                logger.debug("[PluginHost] LSP 已初始化过（类级标志），跳过")
-                return
-            self._lsp_initialized_once = True
         try:
-            from app.core.lsp.lsp_manager import get_lsp_manager
-
-            lsp_mgr = get_lsp_manager()
+            pm = self._pm_for_deferred
+            if pm is None:  # 防御：绕过 _defer_non_critical_plugin_init 的直接调用（正常路径必已赋值）
+                logger.warning("[PluginHost] LSP 延迟初始化缺少 PluginManager 引用，跳过")
+                return
+            with self._deferred_once_lock:
+                if self._lsp_initialized_once:
+                    logger.debug("[PluginHost] LSP 已初始化过（类级标志），跳过")
+                    return
+                self._lsp_initialized_once = True
+            # [PERF #36] 配置守卫前置：lsp_manager 顶层拉起 lsprotocol/pygls 重链
+            # （~255ms）。无 LSP 配置时跳过 import 与空初始化（原空配置路径仅置
+            # _initialized 标志，无实质消费差异；消费接口 _ensure_started 按需拉起）。
             lsp_configs = pm.get_lsp_configs()
             # P2：消费端过滤 load_blocked 插件的 LSP 配置（被门禁拦截的插件不注册 LSP）
             lsp_configs = self._filter_blocked_lsp_configs(pm, lsp_configs)
+            if not lsp_configs:
+                logger.debug("[PluginHost] 无 LSP 配置，跳过 LSP 延迟初始化")
+                return
+            from app.core.lsp.lsp_manager import get_lsp_manager
+
+            lsp_mgr = get_lsp_manager()
             workdir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
             lsp_mgr.initialize(workdir, lsp_configs)
             logger.info(f"[PluginHost] LspManager 延迟初始化完成，已注册 {len(lsp_mgr._clients)} 个 LSP 服务器")
@@ -1406,6 +1425,35 @@ class PluginHostService(QObject):
             # 否则已注册插件会被反复识别为"新插件"，触发 bridge.json 自触发循环）
             self._rebuild_watcher_prefixes()
 
+    @staticmethod
+    def _replay_pending_config_cards() -> int:
+        """把 rescan 期间登记的 config_schema 自动设置卡回放到 UI 注册表
+
+        PluginManager 扫描期只把 schema 写进 _pending_config_cards（零 UI import），
+        真正的 register_settings_card 由 replay_config_cards 回放；该方法原先只在
+        启动 _after_plugins_loaded 调一次。运行期热重载/安装/启停同样会经 rescan
+        重新登记 pending，却无人回放——UIPluginRegistry 里仍是旧卡（或没有卡），
+        已打开的系统配置重建也读不到新增配置项，只能新开窗口/标签页（新 backend
+        走启动回放）才出现。
+
+        放在插件变更广播前执行：各窗口收到 plugin_changed 后会重建插件设置卡，
+        回放必须先落地，UI 才能拿到最新卡清单。幂等（pending 为空即返回 0），
+        UI 栈不可用（headless）时 replay 内部降级为 0。
+        """
+        try:
+            from app.plugins.managers.plugin_manager import PluginManager
+
+            pm = PluginManager.get_instance()
+            if not pm.is_initialized():
+                return 0
+            count = pm.replay_config_cards()
+            if count:
+                logger.debug(f"[PluginHost] 插件变更前回放设置卡 {count} 张")
+            return count
+        except Exception as e:
+            logger.warning(f"[PluginHost] 回放插件设置卡失败: {e}")
+            return 0
+
     def emit_plugin_changed(self, result: dict, plugin_name: str = "", action: Optional[str] = None) -> None:
         """广播插件变更结果到全部活跃 backend 的 plugin_changed 信号
 
@@ -1425,6 +1473,9 @@ class PluginHostService(QObject):
                 其余（热重载/全量/更新）→ updated。市场路径传精确值
                 （installed/updated/uninstalled/enabled/disabled）
         """
+        # 设置卡回放：热重载/安装/启停都经 rescan 重新登记 pending，启动期那次
+        # replay 覆盖不到。先落地，随后的 UI 重建才能读到最新卡清单。
+        self._replay_pending_config_cards()
         # PluginChanged hook 触发（广播前，result 尚未被 _event_seq 污染）
         try:
             self._trigger_plugin_changed_hook(result, plugin_name, action)
@@ -1508,14 +1559,9 @@ class PluginHostService(QObject):
         if diff:
             context["diff"] = diff
             context["sub_actions"] = _sub_actions_from_diff(diff)
-            # registry 工具签名真变了才失效各窗口工具快照（改实现不动 schema → 缓存不受影响；
-            # MCP 启停不参与，快照保持前缀稳定）
-            try:
-                from app.core.hooks.hook_manager import invalidate_tools_snapshots_if_changed
-
-                invalidate_tools_snapshots_if_changed(diff)
-            except Exception as e:
-                logger.debug(f"[PluginHost] 失效工具快照失败: {e}")
+            # 工具快照不因插件工具增删改而换代：tools 定义会话内冻结（prompt 缓存保护），
+            # 新增工具经 PluginChanged hook 注入 schema + tool_execute 中转调用，
+            # 移除工具调用时由 ToolExecutor 返 Unknown tool。
         # 广播：全部活跃 backend 的 hook_manager 各自触发（hook 输出进各自队列）。
         # 服务自身的 _host_hook_manager 仅作 AgentManager 重载时的注册目标
         # （_hooks 类级共享，注册即全局可见），无对话队列、不作为触发目标。
@@ -1663,6 +1709,12 @@ class PluginHostService(QObject):
 
             # P1/P2：版本/平台门禁闸口——被拦截的插件不进任何组件分派
             if not self._load_gate(plugin):
+                # 主题是纯文件数据（YAML + 资源），不执行插件代码，ThemeManager 的
+                # 目录直扫本就不过门禁。此处直接 return 会让 themes reloader 不跑 →
+                # UI 收不到 on_reload → 装纯主题插件时主题列表不刷新（要等下一次
+                # 别的插件热重载才突然出现）。故拦截后仍补一次主题源刷新。
+                if self._refresh_gated_plugin_theme_sources(plugin):
+                    result["themes"] = True
                 return result
 
             comps = plugin.components
@@ -1819,6 +1871,34 @@ class PluginHostService(QObject):
             )
             return False
         return True
+
+    @staticmethod
+    def _refresh_gated_plugin_theme_sources(plugin) -> bool:
+        """门禁拦截后的兜底刷新：重扫主题源，返回是否执行了刷新。
+
+        门禁拦的是「执行插件代码」的组件（tools/hooks/ui/...）。主题是纯文件
+        数据（YAML + 图片/音频资源），既不 import 插件模块也不注册回调，
+        ThemeManager 的目录直扫本就不看门禁——被拦插件的主题已被加载。
+        但列表刷新依赖 theme_manager.reload() 触发的 on_reload 回调链，
+        拦截分支早退会把它一并跳过。
+
+        插件未声明 themes 时跳过（避免每次拦截都白跑一次指纹计算）。
+        plugin 为 None（扫描失败）或组件表不可读时保守刷新：目录直扫可能
+        已经捡到该插件下的 themes/。
+        """
+        comps = getattr(plugin, "components", None)
+        if isinstance(comps, dict) and not comps.get("themes"):
+            return False
+        try:
+            from app.utils.config import update_theme_options
+            from app.utils.theme_manager import theme_manager
+
+            theme_manager.reload()
+            update_theme_options()
+            return True
+        except Exception as e:
+            logger.warning(f"[PluginHost] 门禁拦截后刷新主题源失败: {e}")
+            return False
 
     @staticmethod
     def _filter_blocked_lsp_configs(pm, lsp_configs: list) -> list:
@@ -2207,6 +2287,10 @@ class PluginHostService(QObject):
             # P1/P2：版本/平台门禁闸口——被拦截的插件不进任何组件分派；
             # 清理路径已在上方处理完毕，本处只挡「插件对象存在但不该加载」情形。
             if not self._load_gate(plugin):
+                # 同 _reload_new_plugin：主题是纯数据组件，拦截后仍须刷新主题源，
+                # 否则列表停留在旧快照（详见上方同款注释）。
+                if self._refresh_gated_plugin_theme_sources(plugin):
+                    result["themes"] = True
                 return result
 
             # 2-N. 组件分派：查 kernel reloader 注册表（原 8 分支 if 已迁 builtin_reloaders）
@@ -2743,24 +2827,26 @@ class PluginHostService(QObject):
         from app.plugins.managers.plugin_manager import PluginManager
         from app.utils.config import Settings
 
+        cfg = Settings.get_instance()
+        # [PERF #36] 守卫前置：mcp_tools 顶层拉起整个 mcp SDK（冷导入 ~550ms/569
+        # 模块）。原实现 import 在开关/配置检查之前，未配置 MCP 的用户也全额付费。
+        # 配置读内存值幂等（deferred 2000ms 时 Settings/PluginManager 早已就绪）。
+        # 行为保真：已配置用户走到的分支不变，仅未配置用户提前短路。
+        if not cfg.mcp_enabled.value:
+            logger.info("[PluginHost] MCP 全局开关已关闭，跳过连接")
+            return
+        pm = PluginManager.get_instance()
+        servers = pm.get_mcp_servers()
+        if not servers:
+            logger.info("[PluginHost] 无 MCP 服务器配置，跳过连接")
+            return
+
         from app.tools.mcp_tools import MCPClientManager
 
         mcp_manager = MCPClientManager.get_instance()
 
         if mcp_manager.is_connected:
             logger.info("[PluginHost] MCP 已连接，复用现有连接")
-            return
-
-        cfg = Settings.get_instance()
-        if not cfg.mcp_enabled.value:
-            logger.info("[PluginHost] MCP 全局开关已关闭，跳过连接")
-            return
-
-        # 从 PluginManager 获取 MCP 服务器列表
-        pm = PluginManager.get_instance()
-        servers = pm.get_mcp_servers()
-        if not servers:
-            logger.info("[PluginHost] 无 MCP 服务器配置，跳过连接")
             return
 
         mcp_manager.connect_all_background(

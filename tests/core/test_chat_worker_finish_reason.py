@@ -19,6 +19,7 @@
 5. 正常工具调用结束（'tool_calls'）→ 不抛
 """
 
+import importlib.util
 import sys
 from pathlib import Path
 
@@ -26,6 +27,44 @@ from pathlib import Path
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
+
+# transport 重构（2026-09 协议插件化）后，w._http_client 不再被 _make_api_call 读取：
+# 请求发出与响应归一下沉到 system-transports，流式状态机（含 finish_reason 校验）
+# 下沉到 system-stream-sinks。本文件的验证对象正是真 sink 的截断/空响应校验，
+# 故注入「真 transport（chunks→StreamEvent 归一）+ 真 sink」，client 仍用 FakeClient。
+# sink 经 _stream_sink_override 直注（官方测试注入点，不经注册表，见
+# _get_stream_sink；registry 注入会被 session 级 warmup 顺序干扰，见
+# test_retry_queue_full_503 头注）。
+_TRANSPORT_PATH = _REPO_ROOT / "plugins" / "system-transports" / "transports" / "openai_chat.py"
+_SINK_PATH = _REPO_ROOT / "plugins" / "system-stream-sinks" / "stream_sinks" / "openai_chat.py"
+
+
+def _load_plugin_module(name: str, path: Path):
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _install_real_channel(w):
+    """向 worker 注入真 transport（registry 临时注册）+ 真 sink（override）。
+
+    client 仍为 w._http_client（FakeClient）；返回 restore 闭包，用例 finally 调用。
+    """
+    from app.plugins.registries.transport_registry import TransportRegistry
+
+    transport_mod = _load_plugin_module("_t_openai_chat_finish_reason", _TRANSPORT_PATH)
+    sink_mod = _load_plugin_module("_s_openai_chat_finish_reason", _SINK_PATH)
+    transport = transport_mod.OpenAIChatTransport()
+    transport.set_client_factory(lambda: w._http_client)
+    TransportRegistry.get_instance().register(transport, source="_test_fake")
+    w._stream_sink_override = sink_mod.OpenAIChatStreamSink()
+
+    def _restore():
+        TransportRegistry.get_instance().unregister_source("_test_fake")
+        w._stream_sink_override = None
+
+    return _restore
 
 
 class FakeDelta:
@@ -104,7 +143,6 @@ def pytest_raises(exc):
 
 def test_length_truncation_raises(monkeypatch):
     """finish_reason='length'（max_tokens 截断）→ 必须抛 StreamInterruptedError"""
-    from app.core.workers import chat_worker as cw
     from app.core.workers.chat_worker import StreamInterruptedError
 
     resp = FakeResp(
@@ -116,9 +154,13 @@ def test_length_truncation_raises(monkeypatch):
     )
     w = _make_worker()
     w._http_client = FakeClient(resp)
+    restore = _install_real_channel(w)
 
-    with pytest_raises(StreamInterruptedError):
-        w._make_api_call([{"role": "user", "content": "hi"}], use_cache=False)
+    try:
+        with pytest_raises(StreamInterruptedError):
+            w._make_api_call([{"role": "user", "content": "hi"}], use_cache=False)
+    finally:
+        restore()
     print("  ✓ length 截断抛出 StreamInterruptedError")
 
 
@@ -134,9 +176,13 @@ def test_content_filter_raises(monkeypatch):
     )
     w = _make_worker()
     w._http_client = FakeClient(resp)
+    restore = _install_real_channel(w)
 
-    with pytest_raises(StreamInterruptedError):
-        w._make_api_call([{"role": "user", "content": "hi"}], use_cache=False)
+    try:
+        with pytest_raises(StreamInterruptedError):
+            w._make_api_call([{"role": "user", "content": "hi"}], use_cache=False)
+    finally:
+        restore()
     print("  ✓ content_filter 抛出 StreamInterruptedError")
 
 
@@ -151,9 +197,13 @@ def test_empty_response_raises(monkeypatch):
     )
     w = _make_worker()
     w._http_client = FakeClient(resp)
+    restore = _install_real_channel(w)
 
-    with pytest_raises(StreamInterruptedError):
-        w._make_api_call([{"role": "user", "content": "hi"}], use_cache=False)
+    try:
+        with pytest_raises(StreamInterruptedError):
+            w._make_api_call([{"role": "user", "content": "hi"}], use_cache=False)
+    finally:
+        restore()
     print("  ✓ 空响应抛出 StreamInterruptedError")
 
 
@@ -167,8 +217,12 @@ def test_normal_stop_ok(monkeypatch):
     )
     w = _make_worker()
     w._http_client = FakeClient(resp)
+    restore = _install_real_channel(w)
 
-    result = w._make_api_call([{"role": "user", "content": "hi"}], use_cache=False)
+    try:
+        result = w._make_api_call([{"role": "user", "content": "hi"}], use_cache=False)
+    finally:
+        restore()
     assert result[0] is False, f"正常完成应无工具调用，实际 tool_calls_found={result[0]}"
     print("  ✓ 正常 stop 完成不抛异常")
 
@@ -204,8 +258,12 @@ def test_tool_calls_finish_ok(monkeypatch):
     )
     w = _make_worker()
     w._http_client = FakeClient(resp)
+    restore = _install_real_channel(w)
 
-    result = w._make_api_call([{"role": "user", "content": "hi"}], use_cache=False)
+    try:
+        result = w._make_api_call([{"role": "user", "content": "hi"}], use_cache=False)
+    finally:
+        restore()
     assert result[0] is True, f"工具调用应 tool_calls_found=True，实际 {result[0]}"
     print("  ✓ tool_calls 结束不抛异常")
 
@@ -221,9 +279,13 @@ def test_usage_only_response_raises(monkeypatch):
     )
     w = _make_worker()
     w._http_client = FakeClient(resp)
+    restore = _install_real_channel(w)
 
-    with pytest_raises(StreamInterruptedError):
-        w._make_api_call([{"role": "user", "content": "hi"}], use_cache=False)
+    try:
+        with pytest_raises(StreamInterruptedError):
+            w._make_api_call([{"role": "user", "content": "hi"}], use_cache=False)
+    finally:
+        restore()
     print("  ✓ 仅 usage 空响应抛出 StreamInterruptedError")
 
 

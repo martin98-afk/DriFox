@@ -20,6 +20,9 @@ from PyQt5.QtCore import QObject, QTimer, pyqtSignal
 from app.core.workers.subagent_worker import SubAgentExecutor
 from app.tools.result import ToolResult
 
+# 批次汇总携带结果正文时的单任务截断上限（与 tools/subagent_tools 注入器对齐）
+_MAX_BATCH_RESULT_CHARS = 4096
+
 
 class _BoundedTaskDict(dict):
     """有界字典（H1）：超过容量上限时弹出最旧条目，防止 _finished_tasks 无限增长。
@@ -143,9 +146,11 @@ class SubAgentTaskStore:
                 sets.append(f"{name} = ?")
                 params.append(value)
         params.append(task_id)
-        ok, err = self._db.execute(f"UPDATE {self._table} SET {', '.join(sets)} WHERE task_id = ?", tuple(params))
+        ok, affected = self._db.execute(f"UPDATE {self._table} SET {', '.join(sets)} WHERE task_id = ?", tuple(params))
         if not ok:
-            logger.warning(f"[SubAgentManager] 任务状态落库失败 {task_id}: {err}")
+            logger.warning(f"[SubAgentManager] 任务状态落库失败 {task_id}: {affected}")
+        elif affected == 0:
+            logger.warning(f"[SubAgentManager] 零行更新（行不存在或已被并发清除）task_id={task_id} status={status}")
 
     def get(self, task_id: str) -> Optional[Dict]:
         if not self.ensure():
@@ -274,6 +279,9 @@ class SubAgentManager(QObject):
         self._session_send: Optional[Callable[..., Any]] = None
         # 当前会话 ID（用于隔离不同会话的子智能体任务）
         self._current_session_id: str = ""
+        # 最近一次派发任务所属的会话：交接切到新会话后，无参 subagent_status
+        # 在当前会话无任务时回退到此，取回上一任的后台结果。
+        self._last_task_session_id: str = ""
 
         # ========== 日志活力度 Stall 检测 ==========
         self._stall_timeout: int = 300  # 日志静默超时秒数（默认 5 分钟）
@@ -516,8 +524,12 @@ class SubAgentManager(QObject):
         except Exception as e:  # noqa: BLE001 - 广播失败不阻断注入/批次汇总
             logger.error(f"[SubAgentManager] task_finished.emit 失败 (finished path): {e}")
 
-        # 单任务流式注入（不中断当前流式；空闲时降级为普通发送开新轮）
-        if self._is_engine_streaming():
+        # 引擎状态在整条完成链内只判一次：单任务注入与批次汇总必须用同一口径，
+        # 否则极端时序下会既逐条注入又带全文汇总，重复灌上下文。
+        streaming = self._is_engine_streaming()
+        # 流式中逐条静默注入；空闲时不逐条注入（避免 N 个任务开 N 轮对话），
+        # 结果正文统一由下面的批次汇总承载。
+        if streaming:
             self._dispatch_result_injection(task_id, result, success, agent_name, task_description)
 
         # 批次计数与全完成判定
@@ -550,15 +562,29 @@ class SubAgentManager(QObject):
         callback_content = (
             f"子智能体全部完成。\n"
             f"共 {total} 个，成功 {total - failed} 个，失败 {failed} 个。\n"
-            f"本次完成的任务：\n{task_list_text}\n"
-            f"可使用 subagent_status 查询详细结果。"
+            f"本次完成的任务：\n{task_list_text}"
         )
+        if streaming:
+            # 流式：单任务已逐条注入，汇总保持精简
+            callback_content += "\n可使用 subagent_status 查询详细结果。"
+        else:
+            # 非流式（含交接切会话后的空闲窗口）：单任务 hook 注入未触发，
+            # 结果正文必须随汇总这一轮带过去，否则新会话只看到任务清单。
+            result_lines = []
+            for t in batch_tasks:
+                body = t["error"] if not t["success"] and t["error"] else t["result"]
+                if len(body) > _MAX_BATCH_RESULT_CHARS:
+                    body = body[:_MAX_BATCH_RESULT_CHARS] + "\n[... 已省略 ...]"
+                result_lines.append(
+                    f"### [{t['agent_name']}] {t['task_description'][:50]} (id: {t['task_id']})\n{body}"
+                )
+            callback_content += "\n\n各任务执行结果：\n" + "\n\n".join(result_lines)
 
         self._batch_total = 0
         self._batch_completed = 0
         self._batch_task_ids = set()
 
-        if self._is_engine_streaming():
+        if streaming:
             # 流式：汇总静默注入，不中断
             self._dispatch_result_injection("__batch_summary__", callback_content, failed == 0, "", "")
         else:
@@ -741,6 +767,10 @@ class SubAgentManager(QObject):
 
             self._running_tasks[task_id] = executor
             executor.start()
+
+            # 记录最近派发任务所属会话，供交接后 subagent_status 回退查询
+            if task_session_id:
+                self._last_task_session_id = task_session_id
 
             # 批次计数：本次启动的任务数
             self._batch_total += 1
@@ -1187,7 +1217,10 @@ class SubAgentManager(QObject):
     def get_all_active_tasks_with_details(
         self, with_log: bool = False, with_result: bool = True, session_id: str = None
     ) -> ToolResult:
-        """获取当前会话任务的详细状态（会话隔离），同时包含运行中与已完成。
+        """获取当前会话任务的详细状态，同时包含运行中与已完成。
+
+        默认按会话隔离；当前会话无任务且存在最近派发会话（交接切会话场景）时，
+        回退到该会话取回后台结果，当前会话一旦有任务即恢复严格隔离。
 
         Args:
             with_log: 是否包含执行日志
@@ -1200,6 +1233,17 @@ class SubAgentManager(QObject):
                 - running/finishing 任务：附带 _hint 提醒调用方不要重复查询
         """
         target_session = session_id or self._current_session_id
+        # 交接切会话后：新会话还没有自己的任务时，回退到最近派发任务的会话，
+        # 让无参 subagent_status 能取回上一任的后台结果（同一段工作的延续）。
+        # 当前会话一旦有任务即恢复严格隔离，不混入旧会话任务。
+        if target_session and self._last_task_session_id != target_session:
+            has_own = any(
+                info.get("session_id", "") == target_session for info in self._finished_tasks.values()
+            ) or any(
+                getattr(ex, "_task_session_id", "") == target_session for ex in self._running_tasks.values()
+            )
+            if not has_own and self._last_task_session_id:
+                target_session = self._last_task_session_id
         tasks_info = []
 
         for task_id, task_info in self._finished_tasks.items():

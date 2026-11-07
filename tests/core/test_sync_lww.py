@@ -320,3 +320,49 @@ def test_seed_entries_from_manifest_uses_ts_zero():
     assert out["a.txt"] == {"h": "h1", "t": 0}
     kept = seed_entries_from_manifest({"a.txt": "h1"}, {"a.txt": {"h": "h1", "t": 7}})
     assert kept["a.txt"]["t"] == 7
+
+
+# =============================================================================
+# 种子 vs 墓碑：孤儿元素复活防御（2026-11-06 system-tools 回魂根因）
+# =============================================================================
+
+_SEED_KEY = 'Plugin.DisabledComponents."system-tools:tools"'
+
+
+def test_seed_loses_to_remote_tombstone_despite_higher_t():
+    """本地孤儿种子（observe_clock 抬钟后打的高 t）不得压过远端显式墓碑。
+
+    重放 2026-11-02 污染：mading 墓碑 t=1917，孤儿元素被 seed_missing
+    打成 live t=2791 → 修复前 live 胜 → system-tools:tools 复活。
+    """
+    from app.core.sync.lww import seeded
+    local_cfg = {'Plugin': {'DisabledComponents': ['system-tools:tools']}}
+    local_entries = {_SEED_KEY: seeded('elem', 2791, 'gaohu1-c05b')}
+    remote_cfg = {'Plugin': {'DisabledComponents': []}}
+    remote_entries = {_SEED_KEY: tombstone('elem', 1917, 'mading-59f2')}
+    merged_cfg, merged_entries, _conflicts = merge_config_lww(
+        local_cfg, local_entries, remote_cfg, remote_entries,
+    )
+    assert 'system-tools:tools' not in merged_cfg['Plugin']['DisabledComponents']
+    assert merged_entries[_SEED_KEY]['d'] is True, '条目表应保留远端墓碑'
+
+
+def test_seed_survives_when_remote_has_no_explicit_record():
+    """种子 vs 无条目 → 种子按 live 参与（保留「首次升级本地新增」语义）"""
+    from app.core.sync.lww import seeded
+    merged_cfg, merged_entries, _conflicts = merge_config_lww(
+        {'G': {'Item': 'v1'}},
+        {'G.Item': seeded('v1', 100, 'dev-x')},
+        {'G': {}},
+        {},
+    )
+    assert merged_cfg['G']['Item'] == 'v1'
+    assert merged_entries['G.Item'].get('d') is None
+
+
+def test_real_write_clears_seed_marker():
+    """真实写入（live/tombstone）不带 s 标记：写入即自动退出种子态"""
+    from app.core.sync.lww import is_seed, live, seeded
+    assert is_seed(seeded('v', 1))
+    assert not is_seed(live('v', 1))
+    assert not is_seed(tombstone('v', 1))

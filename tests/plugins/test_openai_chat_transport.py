@@ -46,6 +46,21 @@ def _tc(index=0, tc_id=None, name=None, arguments=None, thought_signature=None):
     return SimpleNamespace(index=index, id=tc_id, function=func, thought_signature=thought_signature)
 
 
+def _delta_chunk(**delta_fields):
+    """任意 delta 字段形状：模拟各厂商 SSE chunk（未声明的字段视为缺失）"""
+    delta = SimpleNamespace(**delta_fields)
+    return SimpleNamespace(
+        choices=[SimpleNamespace(delta=delta, finish_reason=None, index=0)],
+        usage=None,
+    )
+
+
+def _message_completion(**message_fields):
+    """任意 message 字段形状：模拟 stream=False 的 ChatCompletion 单对象"""
+    message = SimpleNamespace(**message_fields)
+    return SimpleNamespace(choices=[SimpleNamespace(message=message, finish_reason="stop")], usage=None)
+
+
 # ---------- 1. 纯文本 + finish ----------
 
 
@@ -114,6 +129,40 @@ def test_thought_signature_passthrough(transport):
 def test_reasoning_delta(transport):
     events = list(transport.to_events([_chunk(reasoning="思考中")]))
     assert events[0].type == "reasoning_delta" and events[0].text == "思考中"
+
+
+@pytest.mark.parametrize(
+    "delta_fields, expected",
+    [
+        ({"reasoning": "OpenRouter 思考"}, "OpenRouter 思考"),
+        (
+            {"reasoning_details": [{"type": "reasoning.text", "text": "结构化思考", "index": 0}]},
+            "结构化思考",
+        ),
+        (
+            {"reasoning_details": [{"type": "reasoning.summary", "summary": "摘要思考", "index": 0}]},
+            "摘要思考",
+        ),
+        # 网关常同时下发两个同义字段：只取其一，避免思考内容重复计入
+        (
+            {
+                "reasoning": "归一化思考",
+                "reasoning_details": [{"type": "reasoning.text", "text": "归一化思考"}],
+            },
+            "归一化思考",
+        ),
+    ],
+)
+def test_reasoning_vendor_fields(transport, delta_fields, expected):
+    """国外模型/网关的思考字段必须归一成 reasoning_delta（a6946c9f5 搬迁回归）"""
+    events = list(transport.to_events([_delta_chunk(**delta_fields)]))
+    assert [(e.type, e.text) for e in events] == [("reasoning_delta", expected)]
+
+
+def test_reasoning_vendor_fields_non_stream(transport):
+    """stream=False 通道同字段对称覆盖（o1/o3 单对象）"""
+    events = list(transport.to_events(_message_completion(reasoning="非流式思考", content="答")))
+    assert [(e.type, e.text) for e in events] == [("reasoning_delta", "非流式思考"), ("content_delta", "答")]
 
 
 # ---------- 6. finish_reason=None 不发 finish ----------

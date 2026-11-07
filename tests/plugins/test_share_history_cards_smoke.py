@@ -214,3 +214,117 @@ def test_full_card_renders(qt_app):
     card._render_records([], update_search=False)
     assert isinstance(card._search_icon, IconWidget)
     assert isinstance(card._header_icon, IconWidget)
+
+# ── 导入按钮 + 行内刷新（下载完成后不重载列表） ──
+
+def _url_rec(rid, rtype, fmt):
+    return {
+        "id": rid,
+        "type": rtype,
+        "title": "t",
+        "format": fmt,
+        "file_path": "",
+        "upload_url": "https://example.com/a",
+        "extra_info": {},
+        "created_at": "2026-01-01 00:00:00",
+    }
+
+def test_json_session_url_only_has_import_btn(qt_app):
+    """json 会话仅链接时应同时有下载 + 导入按钮"""
+    from ui.cards import _RecordItem
+
+    item = _RecordItem(_url_rec(10, "session", "json"), theme=_theme())
+    assert item._download_btn is not None and item._download_btn.text() == "下载"
+    assert item._import_btn is not None and item._import_btn.text() == "导入"
+
+def test_md_session_url_only_no_import_btn(qt_app):
+    """md 会话仅链接时无导入按钮（宿主 import_from_json 只认 json）"""
+    from ui.cards import _RecordItem
+
+    item = _RecordItem(_url_rec(11, "session", "md"), theme=_theme())
+    assert item._download_btn is not None
+    assert item._import_btn is None
+
+def test_project_url_only_has_import_btn(qt_app):
+    """drifox_project 仅链接时有导入按钮"""
+    from ui.cards import _RecordItem
+
+    item = _RecordItem(_url_rec(12, "project", "drifox_project"), theme=_theme())
+    assert item._download_btn is not None
+    assert item._import_btn is not None
+
+def test_download_done_rebuilds_row_inline(qt_app, tmp_path, monkeypatch):
+    """下载完成回调应行内刷新按钮（下载 → 打开）并发出 downloaded 信号"""
+    from ui import cards as cards_mod
+    from ui.cards import _RecordItem
+
+    monkeypatch.setattr(cards_mod, "update_record_file_path", lambda rid, fp: None)
+    f = tmp_path / "a.json"
+    f.write_text("{}", encoding="utf-8")
+    item = _RecordItem(_url_rec(13, "session", "json"), theme=_theme())
+    assert item._download_btn is not None and item._open_btn is None
+
+    got = []
+    item.downloaded.connect(lambda rid, fp: got.append((rid, fp)))
+    item._download_mode = "download"
+    item._on_download_done(str(f), 13)
+
+    assert got == [(13, str(f))]
+    assert item._download_btn is None
+    assert item._open_btn is not None and item._open_btn.text() == "打开"
+
+def test_import_done_emits_imported_not_downloaded(qt_app, tmp_path, monkeypatch):
+    """导入模式完成应发 imported 信号（不发 downloaded）且行内刷新"""
+    from ui import cards as cards_mod
+    from ui.cards import _RecordItem
+
+    monkeypatch.setattr(cards_mod, "update_record_file_path", lambda rid, fp: None)
+    f = tmp_path / "a.json"
+    f.write_text("{}", encoding="utf-8")
+    item = _RecordItem(_url_rec(14, "session", "json"), theme=_theme())
+
+    got = []
+    item.imported.connect(lambda rid, fp: got.append(("imported", rid, fp)))
+    item.downloaded.connect(lambda rid, fp: got.append(("downloaded", rid, fp)))
+    item._download_mode = "import"
+    item._on_download_done(str(f), 14)
+
+    assert got == [("imported", 14, str(f))]
+    assert item._open_btn is not None and item._open_btn.text() == "打开"
+
+def test_card_import_dispatches_by_type(qt_app):
+    """父卡片按记录类型经能力池分派：session → import，project → drop_file"""
+    from ui.cards import ShareHistoryCard
+
+    card = ShareHistoryCard()
+    calls = []
+
+    def provider():
+        return {
+            "capabilities": {
+                "session.history.write": lambda: {
+                    "import": lambda fp: calls.append(("session", fp)) or True
+                },
+                "project.write": lambda: {
+                    "drop_file": lambda fp: calls.append(("project", fp)) or True
+                },
+            }
+        }
+
+    card.set_context_provider(provider)
+    card._all_records = [
+        {"id": 1, "type": "session", "file_path": ""},
+        {"id": 2, "type": "project", "file_path": ""},
+    ]
+    card._on_item_imported(1, "C:/tmp/a.json")
+    card._on_item_imported(2, "C:/tmp/p.drifox_project")
+    assert calls == [("session", "C:/tmp/a.json"), ("project", "C:/tmp/p.drifox_project")]
+
+def test_card_import_missing_capability_degrades(qt_app):
+    """能力不可用（ctx 无 capabilities）时应降级提示，不抛异常"""
+    from ui.cards import ShareHistoryCard
+
+    card = ShareHistoryCard()
+    card.set_context_provider(lambda: {"capabilities": None})
+    card._all_records = [{"id": 1, "type": "session", "file_path": ""}]
+    card._on_item_imported(1, "C:/x.json")  # 不抛异常即可

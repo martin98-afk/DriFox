@@ -2615,8 +2615,40 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
             self._apply_area_bg("sidebar", getattr(self, "_tab_frame", None), bgs["sidebar"])
             self._apply_area_bg("chat_area", getattr(self, "_chat_frame", None), bgs["chat_area"])
             self._apply_scene_layer(bgs["scene"])
+            self._apply_region_animation("window", self, bgs["window"])
+            self._apply_region_animation(
+                "sidebar", getattr(self, "_tab_frame", None), bgs["sidebar"]
+            )
+            self._apply_video_overlay(bgs.get("overlay"))
+            # 主题切换后回收不再被任何区域订阅的动画源（旧素材不占内存）
+            from app.widgets.anim_background import AnimationRegistry
+
+            AnimationRegistry.instance().prune()
+            self._apply_theme_music(bgs.get("music"))
         except Exception as e:
             logger.warning(f"[TabManagerWindow] 应用主题背景失败: {e}")
+
+    def _apply_theme_music(self, music_cfg):
+        """应用 backgrounds.music 到主窗口级播放器
+
+        播放器是主窗口级单例：多个 TabManagerWindow 不叠音。无配置（None）
+        或 enabled=False 时停止播放并清空列表身份。
+        """
+        try:
+            from app.utils import theme_music_store
+            from app.widgets.theme_music_player import ThemeMusicPlayer
+
+            player = ThemeMusicPlayer.instance()
+            # 单曲开关按主题存（plugin_data/<插件>/theme_music.json），
+            # 只影响播放子集，不改变列表身份
+            disabled = (
+                theme_music_store.load_disabled(theme_manager.get_current_theme_id())
+                if music_cfg
+                else ()
+            )
+            player.apply_config(music_cfg, self._resolve_theme_image, disabled=disabled)
+        except Exception as e:
+            logger.warning(f"[TabManagerWindow] 应用主题音乐失败: {e}")
 
     def _apply_scene_layer(self, scene_cfg):
         """应用 scene 配置到 _scene_layer（撑满整个右侧 _chat_frame 圆角矩形）
@@ -2630,8 +2662,205 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
         # image 解析：复用 _resolve_theme_image（已在文件内）
         try:
             self._scene_layer.apply_config(scene_cfg, self._resolve_theme_image)
+            anim = (scene_cfg or {}).get("animation")
+            if anim and anim.get("canvas") == "shared":
+                self._scene_layer.set_canvas_provider(
+                    self._make_canvas_provider(getattr(self, "_chat_frame", None))
+                )
+            else:
+                self._scene_layer.set_canvas_provider(None)
         except Exception as e:
             logger.warning(f"[TabManagerWindow] 应用 scene 背景失败: {e}")
+
+    def _make_canvas_provider(self, region_widget):
+        """共享画布求值函数：画布=整窗，返回区域左缘在窗口中的 x 偏移
+
+        多个区域用同一张动画时，各自按画布尺寸绘制一块，父控件裁剪后只显示
+        自己那段，左右分栏的接缝处图案严格连续（不用各自 cover 重排）。
+        垂直方向以区域自身高度为画布高，与窗口层差一个标题栏高度，渐变动画
+        里看不出来。
+        """
+
+        def provider():
+            if region_widget is None:
+                return None
+            try:
+                from PyQt5.QtCore import QPoint
+
+                origin = region_widget.mapTo(self, QPoint(0, 0))
+                return (self.width(), region_widget.height(), max(0, origin.x()), 0)
+            except RuntimeError:
+                return None
+
+        return provider
+
+    # overlay.target 合法值 → 宿主属性名（window 特判为 self）
+    _OVERLAY_TARGETS = {
+        "window": "_window_base_layer",
+        "sidebar": "_tab_frame",
+        "chat_area": "_chat_frame",
+        "scene": "_chat_frame",
+    }
+
+    def _apply_region_animation(self, area, parent_widget, cfg):
+        """给 window/sidebar 挂动画背景层
+
+        静态图/纯色仍由 _apply_area_bg 的 QLabel 负责（路径不变、开销更低），
+        动画另叠一个透明 SceneLayer：素材是动画 WebP，Qt 内置解码，
+        不依赖系统媒体栈。同一区域重复应用时按 src+fps 去重。
+        """
+        if parent_widget is None:
+            return
+        anim = (cfg or {}).get("animation")
+        src = (anim or {}).get("src") or "__none__"
+        key = (
+            f"{src}:{(anim or {}).get('fps', 12)}:"
+            f"{(anim or {}).get('canvas') or 'independent'}:"
+            f"{(anim or {}).get('opacity', 1.0)}"
+        )
+        attr = f"_{area}_anim_layer"
+        key_attr = f"_last_{area}_anim_key"
+        old = getattr(self, attr, None)
+        if getattr(self, key_attr, None) == key and old is not None:
+            return
+        setattr(self, key_attr, key)
+
+        if old is not None:
+            try:
+                old.clear()
+                old.hide()
+                old.deleteLater()
+            except RuntimeError:
+                pass
+            setattr(self, attr, None)
+
+        if not anim or not anim.get("enabled", True) or not anim.get("src"):
+            return
+
+        try:
+            from app.widgets.scene_layer import SceneLayer
+
+            layer = SceneLayer(parent_widget, radius=0 if area == "window" else 8)
+            layer.apply_config({"animation": anim}, self._resolve_theme_image)
+            if anim.get("canvas") == "shared":
+                layer.set_canvas_provider(self._make_canvas_provider(parent_widget))
+            layer.setGeometry(parent_widget.rect())
+            # parent resize → SceneLayer.eventFilter 同步几何。动画层是绝对
+            # 定位子控件、不参与布局，漏装 filter 时窗口/侧栏 resize 后动画
+            # 背景停在创建时的尺寸（静态图走 _AutoGeometryLabel 有同步，
+            # 动画层此前漏了，表现为 webp 背景不同步缩放）。
+            parent_widget.installEventFilter(layer)
+            layer.lower()
+            if area == "window":
+                base = getattr(self, "_window_base_layer", None)
+                if base is not None:
+                    base.stackUnder(layer)
+            # 静态图（QLabel）垫在动画层之下，否则 image+animation 同时配置时
+            # 动画会被静态图完全盖住
+            static_label = getattr(self, f"_{area}_bg_label", None)
+            if static_label is not None:
+                try:
+                    static_label.stackUnder(layer)
+                except RuntimeError:
+                    pass
+            layer.show()
+            setattr(self, attr, layer)
+        except Exception as e:
+            logger.warning(f"[TabManagerWindow] 应用 {area} 动画背景失败: {e}")
+
+
+    def _overlay_target_widget(self, target: str):
+        """按 target 取视频层挂载父 widget；window 挂窗口自身"""
+        if target == "window":
+            return self
+        return getattr(self, self._OVERLAY_TARGETS.get(target, "_chat_frame"), None)
+
+    def _apply_video_overlay(self, overlay_cfg):
+        """应用 backgrounds.overlay 到 target 指定区域（scene 之上、UI 之下）
+
+        target 决定挂载区域（window/sidebar/chat_area/scene，缺省 chat_area，
+        非法值回落 chat_area）。一个主题只允许一处视频：切 target 时先停掉
+        其它 target 的层，但保留下层实例不销毁（避免重复 installEventFilter）。
+
+        懒创建：首次出现该 target 的 overlay 配置才构造；配置消失时停止播放并
+        隐藏，不销毁 widget。Z 序：layer.lower() 后 scene_layer.stackUnder(layer)，
+        最终 SceneLayer < VideoOverlayLayer < UI 控件。
+        """
+        layers = self.__dict__.setdefault("_video_overlay_layers", {})
+        active = bool(overlay_cfg) and overlay_cfg.get("enabled", True) and overlay_cfg.get("video")
+
+        if not active:
+            for layer in layers.values():
+                try:
+                    layer.stop_video()
+                    layer.hide()
+                except RuntimeError:
+                    pass  # C++ 对象已销毁
+            return
+
+        # Qt5 的 QMediaPlayer 只是壳，解码委托系统媒体栈：同一素材在不同机器上
+        # 能不能播取决于系统装了什么解码器（实测 MediaFoundation 注册缺失时报
+        # InvalidMedia 且 errorString 为空）。统一改用 animation.webp，视频层
+        # 保留给 Qt6 复活（QtMultimedia 自带 ffmpeg 后端）。
+        from PyQt5.QtCore import QT_VERSION_STR
+
+        if int(QT_VERSION_STR.split(".")[0]) < 6:
+            logger.info(
+                "[TabManagerWindow] 跳过视频 overlay：Qt5 无内置解码器，"
+                "请把素材转成 animation.webp（见 wallpaper-to-theme 技能）"
+            )
+            return
+
+        target = str(overlay_cfg.get("target") or "chat_area").lower()
+        if target not in self._OVERLAY_TARGETS:
+            target = "chat_area"
+
+        # 一个主题只允许一处视频：其它 target 的层停掉并隐藏
+        for name, layer in layers.items():
+            if name == target:
+                continue
+            try:
+                layer.stop_video()
+                layer.hide()
+            except RuntimeError:
+                pass
+
+        parent = self._overlay_target_widget(target)
+        if parent is None:
+            logger.warning(f"[TabManagerWindow] overlay.target={target} 无挂载点，跳过")
+            return
+
+        try:
+            layer = layers.get(target)
+            # 同 target 但父 widget 变了（窗口重建等）：弃旧建新
+            if layer is not None and layer.parent() is not parent:
+                try:
+                    layer.stop_video()
+                    layer.hide()
+                    layer.deleteLater()
+                except RuntimeError:
+                    pass
+                layer = None
+
+            if layer is None:
+                from app.widgets.video_overlay_layer import VideoOverlayLayer
+
+                layer = VideoOverlayLayer(parent)
+                parent.installEventFilter(layer)
+                layers[target] = layer
+
+            layer.apply_config(overlay_cfg, self._resolve_theme_image)
+            layer.show()
+            layer.sync_geometry()
+            layer.lower()
+            scene = getattr(self, "_scene_layer", None)
+            if scene is not None and scene.parent() is parent:
+                try:
+                    scene.stackUnder(layer)
+                except RuntimeError:
+                    pass  # scene 层已销毁
+        except Exception as e:
+            logger.warning(f"[TabManagerWindow] 应用动态背景失败: {e}")
 
     def _apply_area_bg(self, area, parent_widget, bg_cfg):
         """统一区域背景加载器（window/sidebar/chat_area 共用）
@@ -2735,7 +2964,10 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
             return image
         theme_dir = theme_manager.get_theme_dir(theme_manager.get_current_theme_id())
         if theme_dir:
-            abs_path = str(theme_dir / image)
+            # normpath 清掉 `../` 段：跨主题共享资源（../shared/x.mp3）拼出的
+            # 原始字符串带 "demo/../shared"，exists 能过，但 QUrl.fromLocalFile
+            # 会把它原样带进 file:// URL，媒体后端不保证能解析
+            abs_path = _os.path.normpath(str(theme_dir / image))
             if _os.path.exists(abs_path):
                 return abs_path
         return image  # fallback 原值
@@ -2757,6 +2989,18 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
                 if parent is not None:
                     lbl.resize(parent.size())
             except Exception:
+                pass
+        # 动画层与场景层：resize 阶段二跳过布局传播，子控件不会收到 resize，
+        # eventFilter 不触发，必须手动同步。sync_geometry = 自身撑满 parent +
+        # 内容层重算画布几何（覆盖原 refresh_canvas_geometry 的语义），否则
+        # 缩放过程中侧栏/对话区动画会错位
+        for attr in ("_window_anim_layer", "_sidebar_anim_layer", "_scene_layer"):
+            layer = getattr(self, attr, None)
+            if layer is None or not hasattr(layer, "sync_geometry"):
+                continue
+            try:
+                layer.sync_geometry()
+            except RuntimeError:
                 pass
 
     def _setup_ui(self):
@@ -3106,9 +3350,13 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
         if hasattr(self, "_splitter"):
             self._splitter.splitterMoved.connect(self._on_splitter_manually_moved)
 
+        # 应用焦点变化 → 主题音乐失焦暂停（所有平台）
+        _app_inst = QApplication.instance()
+        if _app_inst is not None:
+            _app_inst.applicationStateChanged.connect(self._on_application_focus_changed)
         # macOS 软置顶：应用激活时补抬升（详见 _on_app_state_changed）
-        if _IS_MAC:
-            QApplication.instance().applicationStateChanged.connect(self._on_app_state_changed)
+        if _IS_MAC and _app_inst is not None:
+            _app_inst.applicationStateChanged.connect(self._on_app_state_changed)
 
         # 对话区限宽档位变更（设置-外观）→ 立即重算 wrapper margins，
         # 无需等窗口 resize；同时通知已存在的消息卡按新宽度重新折行。
@@ -3914,6 +4162,15 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
         # 实时读 cfg：补射跟随用户最新折叠意图（启动后用户已操作的，
         # 按最新值落位；不用启动快照——它会把 0.7s 内的新操作静默翻回）
         saved_collapsed = bool(Settings.get_instance().ui_sidebar_collapsed.value)
+        # ★ 先对齐存档折叠态再动 splitter（顺序不可对调）：setSizes 会同步
+        #   触发 TabPanel.resizeEvent，若此刻 _collapsed 仍是展开态而宽度跌到
+        #   折叠线以下（且抑制已解除），会走自动折叠分支误置
+        #   _collapsed_by_squeeze=True——把"程序化恢复折叠"标成"被挤压"。
+        #   残留的挤压标记让下一次切页/新建会话命中"挤压折叠非用户意图 →
+        #   恢复展开"分支，侧边栏被弹开（实测：存档折叠启动 → 新建会话自动
+        #   展开）。先 set_collapsed 再 setSizes，resizeEvent 看到的已是折叠态。
+        if self._tab_panel._collapsed != saved_collapsed:
+            self._tab_panel.set_collapsed(saved_collapsed)
         frame_w = (
             (self._tab_panel._collapsed_min_width + _FRAME_PADDING_X)
             if saved_collapsed
@@ -3928,9 +4185,6 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
             return
         frame_w = min(frame_w, total)
         self._splitter.setSizes([frame_w, max(0, total - frame_w)])
-        # 对齐存档折叠态（set_collapsed 不发信号，避免与启动期动画互打断）
-        if self._tab_panel._collapsed != saved_collapsed:
-            self._tab_panel.set_collapsed(saved_collapsed)
         self._tab_panel.sync_collapsed_ui()
 
     # ── 覆盖层状态切换 ──
@@ -6465,6 +6719,18 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
         panel = getattr(self, "_tab_panel", None)
         if panel is not None:
             panel.set_auto_collapse_suppressed(False)
+
+    def _on_application_focus_changed(self, state):
+        """应用激活态变化 → 转发给主题音乐播放器（失焦暂停 / 回焦续播）
+
+        只在状态真正切换时同步音量，避免每次焦点变化都写一次 setVolume。
+        """
+        try:
+            from app.widgets.theme_music_player import ThemeMusicPlayer
+
+            ThemeMusicPlayer.instance().set_app_active(state == Qt.ApplicationActive)
+        except Exception as e:
+            logger.debug(f"[TabManagerWindow] 同步主题音乐焦点状态失败: {e}")
 
     def _on_app_state_changed(self, state):
         """macOS 软置顶：应用激活时若开启置顶配置则抬升主窗口

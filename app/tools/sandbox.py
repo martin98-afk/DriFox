@@ -143,7 +143,7 @@ class SandboxConfig:
 # 路径边界（写窄读宽）
 # ============================================================
 # 读/写工具的归属由 ToolRegistry 分组驱动（sandbox_check_tool），
-# 分组名与插件侧 GROUP_WRITE/GROUP_READ（plugins/system-tools/tools/file_tools.py:109）
+# 分组名与插件侧 GROUP_WRITE/GROUP_READ（plugins/system-core/tools/file_tools.py:109）
 # 对齐；不在此写死工具名清单——插件增删热生效，写死必漏。
 
 
@@ -726,7 +726,7 @@ def write_targets(command: str) -> list:
 # ============================================================
 # 工具路由（worker 层唯一入口）
 # ============================================================
-# 分组名与插件侧 GROUP_WRITE/GROUP_READ（plugins/system-tools/tools/file_tools.py:109）
+# 分组名与插件侧 GROUP_WRITE/GROUP_READ（plugins/system-core/tools/file_tools.py:109）
 # 对齐；"文件写入" 同时是 FileRecorder 追踪组的同源字符串。
 # 不写死工具名清单——插件增删热生效，写死必漏。
 GROUP_WRITE_NAME = "文件写入"

@@ -11,6 +11,7 @@
 import ctypes
 import json
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -23,7 +24,14 @@ from typing import Optional, Tuple
 
 from loguru import logger
 
-from .archive_downloader import ArchiveFetchError, fetch_github_repo, parse_github_repo
+from . import cancel
+from .archive_downloader import (
+    ArchiveFetchError,
+    download_tarball,
+    extract_tarball_file,
+    fetch_github_repo,
+    parse_github_repo,
+)
 from .data import compare_versions
 from .deps_installer import DepsInstaller
 from .proxy import get_proxy_config
@@ -54,6 +62,51 @@ class GitNotFoundError(RuntimeError):
 _GIT_STALL_ARGS = ("-c", "http.lowSpeedLimit=1000", "-c", "http.lowSpeedTime=30")
 # git 单命令总超时兜底（大仓库浅克隆 + 慢网络留足余量）
 _GIT_CMD_TIMEOUT = 300.0
+
+# git 进度行（实测 2026-11，git 2.4x）：
+#   remote: Counting objects:   5% (15/290)
+#   Receiving objects:  45% (4521/10048), 3.42 MiB | 1.20 MiB/s
+#   Resolving deltas: 100% (1234/1234), done.
+#   Updating files: 100% (523/523), done.
+# 注意 remote 前缀实测是小写，且阶段名后有两个空格，统一用 \s+ 兜住。
+_GIT_PCT_RE = re.compile(
+    r"^(?:remote:\s*)?(?P<stage>[A-Za-z][A-Za-z ]*?):\s+\d{1,3}%",
+)
+_GIT_STAGE_PCT_RE = re.compile(r"(\d{1,3})%")
+_GIT_LABEL = {
+    "Counting objects": "远端统计",
+    "Compressing objects": "远端压缩",
+    "Receiving objects": "接收对象",
+    "Resolving deltas": "解析差异",
+    "Updating files": "写入文件",
+    "Checking out files": "检出文件",
+}
+# git 各阶段的进度区间：整条链从「远端统计」到「写入文件」，
+# 按下表把各阶段自身的 0~100% 映射到整体 0~1
+_GIT_STAGE_SPAN = {
+    "Counting objects": (0.00, 0.12),
+    "Compressing objects": (0.12, 0.20),
+    "Receiving objects": (0.20, 0.85),
+    "Resolving deltas": (0.85, 0.95),
+    "Updating files": (0.95, 1.00),
+    "Checking out files": (0.95, 1.00),
+}
+
+def _report_git_progress(line: str) -> None:
+    """解析 git 的一行进度输出并上报（非进度行静默忽略）"""
+    m = _GIT_PCT_RE.match(line)
+    if not m:
+        return
+    stage = m.group("stage").strip()
+    pm = _GIT_STAGE_PCT_RE.search(line)
+    if pm is None:
+        return
+    pct = int(pm.group(1))
+    lo, hi = _GIT_STAGE_SPAN.get(stage, (0.0, 1.0))
+    fraction = lo + (hi - lo) * (pct / 100.0)
+    label = _GIT_LABEL.get(stage, "下载中")
+    cancel.report(min(fraction, 1.0), f"{label} {pct}%")
+
 
 
 def report_plugin_install(plugin_name: str):
@@ -507,6 +560,16 @@ class PluginInstaller:
             logger.error(f"[Installer] set managed {'enable' if enabled else 'disable'} {name} failed: {e}")
             return False
 
+    def get_manifest_map(self) -> dict:
+        """已安装插件的 manifest（{name: manifest}，最近一次扫描结果）。
+
+        供插件市场工具做兼容性判定（平台 / 宿主版本）与详情展示，避免
+        逐插件重读磁盘。调用前先调 get_installed_map 触发扫描（否则可能
+        为空字典）。
+        """
+        with self._cache_lock:
+            return dict(self._manifest_cache)
+
     def invalidate_installed_cache(self):
         """使缓存失效（清空后立即在调用线程重填，语义=清后立即重填）
 
@@ -545,7 +608,6 @@ class PluginInstaller:
         Returns:
             True 安装成功
         """
-        source = plugin_meta.get("source", {})
         name = plugin_meta.get("name", "")
         if not name:
             return False
@@ -577,8 +639,9 @@ class PluginInstaller:
                 logger.warning(f"[Installer] 残留目录清理失败（文件被占用），安装中止: {target}")
                 return False
 
-        success = self._install_by_source(name, source, target, plugin_meta.get("_marketplace_source"))
+        success = self._install_with_fallback(name, plugin_meta, target)
         if success:
+            cancel.report(None, "安装依赖")
             self._install_deps_quietly(name, target)
             self.last_error = ""
             self.invalidate_installed_cache()
@@ -610,7 +673,6 @@ class PluginInstaller:
         if not name:
             return False
 
-        source = plugin_meta.get("source", {})
         target = self._plugins_dir / name
         # 禁用中的插件（目录在 plugins-disabled/）原地更新：目标指向禁用目录，
         # 保持禁用状态（修复此前新版装到 plugins/ 导致双副本 + 禁用失效）。
@@ -626,8 +688,9 @@ class PluginInstaller:
 
         # 目标目录已存在 → 走 _download_and_move 的备份替换分支；
         # 不存在（更新前被手动删除）→ 等同安装。
-        success = self._install_by_source(name, source, target, plugin_meta.get("_marketplace_source"))
+        success = self._install_with_fallback(name, plugin_meta, target)
         if success:
+            cancel.report(None, "安装依赖")
             self._install_deps_quietly(name, target)
             logger.info(f"[Installer] Updated plugin {name} -> v{remote_ver}")
             self.last_error = ""
@@ -664,6 +727,53 @@ class PluginInstaller:
 
     # ── Source 类型分发 ──────────────────────────────────
 
+    def _preferred_sources(self, plugin_meta: dict) -> list:
+        """按优先级返回 source 候选：tarball（当前平台）→ 原始 source
+
+        tarball 是主通道（包内含 deps，下载单包不再访问整仓），失败时回落
+        git 通道保证旧市场源/未发布产物仍可安装。
+        """
+        sources: list = []
+        tb = plugin_meta.get("tarball")
+        if isinstance(tb, dict):
+            try:
+                from app.plugins.deps_loader import current_platform_key
+
+                plat = current_platform_key()
+            except Exception:
+                plat = ""
+            entry = (tb.get(plat) if plat else None) or tb.get("default")
+            if isinstance(entry, dict) and entry.get("url"):
+                sources.append(
+                    {
+                        "type": "tarball",
+                        "url": entry["url"],
+                        "sha256": entry.get("sha256", ""),
+                        "mirrors": entry.get("mirrors") or [],
+                    }
+                )
+        base = plugin_meta.get("source")
+        if base:
+            sources.append(base)
+        return sources
+
+    def _install_with_fallback(self, name: str, plugin_meta: dict, target: Path) -> bool:
+        """按候选顺序安装：tarball 优先，失败回落 git-subdir（双轨兼容）"""
+        sources = self._preferred_sources(plugin_meta)
+        if not sources:
+            self.last_error = f"{name}: 无可用 source"
+            return False
+        mp_source = plugin_meta.get("_marketplace_source")
+        last_err = ""
+        for idx, src in enumerate(sources):
+            if self._install_by_source(name, src, target, mp_source):
+                return True
+            last_err = self.last_error or ""
+            if idx < len(sources) - 1:
+                logger.warning(f"[Installer] {name} source#{idx} 失败，回落下一通道: {last_err}")
+        self.last_error = last_err or f"Install {name} failed"
+        return False
+
     def _install_by_source(self, name: str, source, target: Path, marketplace_source: dict = None) -> bool:
         """根据 source 类型分发安装逻辑"""
         # 字符串 source → 相对路径
@@ -695,6 +805,8 @@ class PluginInstaller:
             return self._install_git_url(name, source, target)
         elif src_type == "git-subdir":
             return self._install_git_subdir(name, source, target)
+        elif src_type == "tarball":
+            return self._install_tarball(name, source, target)
         else:
             logger.error(f"[Installer] 不支持的 source 类型: {src_type}")
             return False
@@ -727,6 +839,23 @@ class PluginInstaller:
         if not url or not subpath:
             return False
         return self._download_and_move(name, url, subpath, ref, target)
+
+    def _install_tarball(self, name: str, source: dict, target: Path) -> bool:
+        """从单插件 tarball 安装（新分发通道：包内含源码 + 当前平台 deps）
+
+        包结构 = 插件目录内容（.drifox-plugin/plugin.json 在包根），与 git 通道
+        解压后的结构一致，因此复用 _download_and_move 的备份替换/回滚/manifest
+        校验/重载链路。sha256 存在时必须匹配，否则拒装（防篡改/传输损坏）。
+        """
+        url = str(source.get("url") or "").strip()
+        if not url:
+            return False
+        sha256 = str(source.get("sha256") or "").strip()
+        mirrors = source.get("mirrors")
+        mirrors = [str(m) for m in mirrors if m] if isinstance(mirrors, list) else []
+        return self._download_and_move(
+            name, url, ".", "", target, expected_sha256=sha256, mirrors=mirrors
+        )
 
     def _install_relative(self, name: str, relative_path: str, target: Path, marketplace_source: dict = None) -> bool:
         """从相对路径安装插件（从市场仓库中提取子目录）
@@ -778,22 +907,35 @@ class PluginInstaller:
 
     # ── 核心下载逻辑 ─────────────────────────────────────
 
-    def _fetch_into_cache(self, name: str, url: str, subpath: str, ref: str, cache_tmp: Path) -> Path:
-        """把仓库内容取到 cache_tmp，返回插件源目录路径
+    def _fetch_into_cache(
+        self,
+        name: str,
+        url: str,
+        subpath: str,
+        ref: str,
+        cache_tmp: Path,
+        expected_sha256: str = "",
+        mirrors: Optional[list] = None,
+    ) -> Path:
+        """把仓库/单插件包内容取到 cache_tmp，返回插件源目录路径
 
-        双通道，**顺序不可颠倒**（2026-09 实测定序）：
+        三通道，**顺序不可颠倒**（2026-09 实测定序）：
 
+        0. 单插件 tarball —— expected_sha256 非空或 URL 以 .tar.gz/.tgz 结尾时
+           走此通道：下载单包（含当前平台 deps）+ sha256 校验 + 流式解压，
+           不再访问整仓。
         1. git 稀疏克隆 —— 首选。只取目标子目录，实测同仓插件 7.4s 完成
            （drifox-plugins 仓库 116 个插件同源，稀疏克隆只拉 0.07MB）。
         2. GitHub 归档 tarball —— 仅在 git 可执行文件缺失时兜底。纯标准库
            无需 git，但必须下整仓（实测 59.9MB / 45s），代价明显更高。
 
-        即：有 git 就用 git；只有 git 不在场才启用归档。若反过来让归档抢首位，
-        装了 git 的用户反而从 7.4s 退化到 45s。
-
         Returns:
-            插件源目录（subpath="." 时为仓库根，否则为子目录）
+            插件源目录（subpath="." 时为仓库根/包根，否则为子目录）
         """
+        clean_url = url.split("?", 1)[0].lower()
+        cancel.check()
+        if expected_sha256 or clean_url.endswith((".tar.gz", ".tgz")):
+            return self._fetch_tarball(name, url, cache_tmp, expected_sha256, mirrors)
         proxy = get_proxy_config()
         git_url, git_extra = proxy.git_clone_args(url)
         candidates = self._build_clone_candidates(url, git_url, git_extra, proxy)
@@ -809,6 +951,7 @@ class PluginInstaller:
                 cache_tmp = self._cache_dir / f"{name}_{int(time.time())}_r{i}"
             shutil.rmtree(cache_tmp, ignore_errors=True)
             cache_tmp.mkdir(parents=True, exist_ok=True)
+            cancel.report(None, "克隆仓库")
             try:
                 self._sparse_clone(cu, subpath, ref, cache_tmp, extra_args=ce)
                 return cache_tmp if subpath in (".", "") else cache_tmp / subpath
@@ -816,6 +959,9 @@ class PluginInstaller:
                 # git 可执行文件缺失：换任何 URL 都不会成功，直接转归档通道
                 logger.info(f"[Installer] 未检测到 git，改用归档通道: {name}")
                 return self._fetch_via_archive(name, url, subpath, ref, cache_tmp)
+            except cancel.InstallCancelled:
+                # 取消必须透传：不能当候选失败继续试下一个 URL
+                raise
             except Exception as e:
                 last_err = e
                 logger.warning(f"[Installer] attempt #{i} failed ({cu}): {self._format_git_err(e)}")
@@ -823,6 +969,40 @@ class PluginInstaller:
             # 所有候选都失败：抛最后一个错误（带 stderr），让外层 logger.error 记录
             raise last_err
         return cache_tmp if subpath in (".", "") else cache_tmp / subpath
+
+    def _fetch_tarball(
+        self,
+        name: str,
+        url: str,
+        cache_tmp: Path,
+        expected_sha256: str = "",
+        mirrors: Optional[list] = None,
+    ) -> Path:
+        """下载单插件 tarball → sha256 校验 → 流式解压，返回插件源目录
+
+        Args:
+            url: 主下载 URL（GitHub Release asset）
+            expected_sha256: 期望哈希；为空则不校验（兼容无哈希的旧清单）
+            mirrors: 备用 URL（主 URL 与加速站候选全失败后依次尝试）
+
+        Raises:
+            ArchiveFetchError: 下载/校验/解压失败（调用方回落 git 通道或报错）
+        """
+        proxy = get_proxy_config()
+        direct_urls = [url] + [str(m) for m in (mirrors or []) if m]
+        archive_path = cache_tmp / "_plugin.tar.gz"
+        sha = download_tarball(direct_urls, archive_path, proxy=proxy)
+        if expected_sha256 and sha.lower() != expected_sha256.lower():
+            raise ArchiveFetchError(
+                f"tarball sha256 不匹配: 期望 {expected_sha256[:12]}… 实际 {sha[:12]}…"
+                "（可能被篡改或传输损坏）"
+            )
+        extracted = cache_tmp / "_extracted"
+        shutil.rmtree(extracted, ignore_errors=True)
+        cancel.report(None, "解压中")
+        extract_tarball_file(archive_path, "", extracted)
+        logger.info(f"[Installer] tarball 下载完成: {name} ← {url} ({sha[:12]}…)")
+        return extracted
 
     def _fetch_via_archive(self, name: str, url: str, subpath: str, ref: str, cache_tmp: Path) -> Path:
         """git 缺失时的兜底：从 GitHub 归档 tarball 取插件（纯标准库，无需 git）
@@ -864,15 +1044,26 @@ class PluginInstaller:
         logger.info(f"[Installer] 归档通道下载成功（无需 git）: {name} ← {coords[0]}/{coords[1]}@{ref}")
         return src
 
-    def _download_and_move(self, name: str, url: str, subpath: str, ref: str, target: Path) -> bool:
-        """从 git 源下载插件并移动到目标目录
+    def _download_and_move(
+        self,
+        name: str,
+        url: str,
+        subpath: str,
+        ref: str,
+        target: Path,
+        expected_sha256: str = "",
+        mirrors: Optional[list] = None,
+    ) -> bool:
+        """从源下载插件并移动到目标目录
 
         Args:
             name: 插件名
-            url: git 仓库 URL
-            subpath: 仓库内子目录路径（"." 表示整个仓库）
-            ref: 分支/标签
+            url: 源 URL（git 仓库或 tarball 包）
+            subpath: 仓库内子目录路径（"." 表示整个仓库/包根）
+            ref: 分支/标签（tarball 通道为空）
             target: 目标安装目录
+            expected_sha256: 非空时校验下载内容哈希（tarball 通道）
+            mirrors: tarball 备用 URL（主 URL 失败后依次尝试）
         """
         try:
             self._suppress_backend_watcher()
@@ -885,10 +1076,27 @@ class PluginInstaller:
             cache_tmp = self._cache_dir / f"{name}_{int(time.time())}"
             cache_tmp.mkdir(parents=True, exist_ok=True)
             try:
-                sub_src = self._fetch_into_cache(name, url, subpath, ref, cache_tmp)
+                sub_src = self._fetch_into_cache(
+                    name,
+                    url,
+                    subpath,
+                    ref,
+                    cache_tmp,
+                    expected_sha256=expected_sha256,
+                    mirrors=mirrors,
+                )
             except Exception:
                 shutil.rmtree(cache_tmp, ignore_errors=True)
                 raise
+
+            # 解压阶段也允许取消：seal 之前再 check 一次，否则解压期间点的取消
+            # 会被 seal 静默吞掉（用户看到「取消中…」却装成功了）
+            cancel.check()
+
+            # 下载完成 → 进入落位/替换阶段（不可中断：中途取消会让插件目录
+            # 处于「旧版已移走、新版未落位」的半状态）
+            cancel.seal()
+            cancel.report(0.99, "落位中")
 
             # === 2. 确定源目录 ===
             if not sub_src.exists():
@@ -951,6 +1159,18 @@ class PluginInstaller:
             )
             return True
 
+        except cancel.InstallCancelled:
+            # 用户取消：走同一套清理（删缓存与残骸），但不写 last_error / 不记失败
+            try:
+                self._resume_backend_watcher(reload=False)
+            except Exception:
+                pass
+            try:
+                if "cache_tmp" in dir() and cache_tmp.exists():
+                    shutil.rmtree(cache_tmp, ignore_errors=True)
+            except Exception:
+                pass
+            raise
         except Exception as e:
             # 恢复 backend watcher（失败不重载），并清理下载缓存与半安装残骸
             try:
@@ -1004,11 +1224,15 @@ class PluginInstaller:
                 raise GitNotFoundError(
                     "未检测到 git 可执行文件（git 未安装或不在 PATH），请先安装 git 后再安装插件"
                 ) from None
-            try:
-                out, err = proc.communicate(timeout=cmd_timeout)
-            except subprocess.TimeoutExpired:
+
+            kill_reason = {"value": ""}
+            stdout_pipe = proc.stdout
+            stderr_pipe = proc.stderr
+
+            def _kill_tree(reason: str):
                 # Windows 上 proc.kill() 只杀 git 主进程，孙进程（git-remote-http）
-                # 持有管道句柄会让随后的 communicate 再次挂死；必须杀整棵树。
+                # 持有管道句柄会让随后的读管道再次挂死；必须杀整棵树。
+                kill_reason["value"] = kill_reason["value"] or reason
                 if sys.platform == "win32":
                     subprocess.run(
                         ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
@@ -1016,12 +1240,62 @@ class PluginInstaller:
                         creationflags=subprocess.CREATE_NO_WINDOW,
                     )
                 else:
-                    proc.kill()
+                    try:
+                        proc.kill()
+                    except OSError:
+                        pass
+
+            token = cancel.current()
+            abort_key = None
+            if token is not None:
+                abort_key = token.add_abort(proc, lambda: _kill_tree("cancel"))
+            # 总超时看门狗：stderr 无输出时 readline 会永久阻塞，靠独立定时器打断
+            watchdog = threading.Timer(cmd_timeout, lambda: _kill_tree("timeout"))
+            watchdog.daemon = True
+            watchdog.start()
+
+            # stdout 必须并行抽干：只读 stderr 时 stdout 的管道缓冲写满会让
+            # git 阻塞在 write 上，形成经典死锁
+            out_buf: list = []
+
+            def _drain_stdout():
+                if stdout_pipe is None:
+                    return
                 try:
-                    out, err = proc.communicate(timeout=10)
-                except subprocess.TimeoutExpired:
-                    out, err = "", ""
-                tail = (err or "").strip().splitlines()[-3:]
+                    out_buf.append(stdout_pipe.read())
+                except Exception:
+                    pass
+
+            drainer = threading.Thread(target=_drain_stdout, daemon=True, name="git-stdout-drain")
+            drainer.start()
+
+            err_lines: list = []
+            try:
+                if stderr_pipe is not None:
+                    # universal newlines 下 git 的 '\r' 进度刷新也会被切成行
+                    for line in iter(stderr_pipe.readline, ""):
+                        line = line.strip()
+                        if not line:
+                            continue
+                        # --progress 会刷出成百上千行进度（每 1% 一行），只留尾部
+                        # 若干行用于报错文案；进度行本身交给 _report_git_progress
+                        err_lines.append(line)
+                        if len(err_lines) > 200:
+                            del err_lines[:100]
+                        _report_git_progress(line)
+                proc.wait()
+            finally:
+                watchdog.cancel()
+                if abort_key is not None and token is not None:
+                    token.remove_abort(abort_key)
+                drainer.join(timeout=5)
+
+            out = (out_buf[0] if out_buf else "") or ""
+            err = "\n".join(err_lines[-20:])
+            if kill_reason["value"] == "cancel":
+                raise cancel.InstallCancelled("已取消")
+            if kill_reason["value"] == "timeout":
+                tail = err_lines[-3:]
                 raise subprocess.CalledProcessError(
                     124,
                     cmd,
@@ -1038,12 +1312,14 @@ class PluginInstaller:
                 )
 
         if subpath in (".", ""):
-            # 整个仓库：直接浅克隆
-            _run(["git", *extra, "clone", "--depth=1", "--single-branch", "--branch", ref, url, str(cache_dir)])
+            # 整个仓库：直接浅克隆（--progress 强制输出进度：stderr 是管道时
+            # git 默认静默，解析不到百分比）
+            _run(["git", *extra, "clone", "--progress", "--depth=1", "--single-branch",
+                  "--branch", ref, url, str(cache_dir)])
         else:
             # 子目录：稀疏克隆（--branch 必须显式指定，否则只会拉默认分支，
             # 导致 ref=pyside6 的清单装出 main 的源码）
-            _run(["git", *extra, "clone", "--depth=1", "--filter=blob:none", "--sparse",
+            _run(["git", *extra, "clone", "--progress", "--depth=1", "--filter=blob:none", "--sparse",
                   "--branch", ref, url, str(cache_dir)])
             _run(["git", *extra, "-C", str(cache_dir), "sparse-checkout", "set", subpath])
 
@@ -1218,6 +1494,61 @@ class PluginInstaller:
         return out
 
     # ── 卸载前释放引用 ──────────────────────────────────
+
+    def _detach_plugin_deps(self, name: str) -> None:
+        """把插件注入过的 deps 路径从 sys.path 摘除（卸载/禁用后调用，幂等）。
+
+        磁盘目录已删但 sys.path 里留着路径：僵尸项长期占据，同名目录一旦被
+        复用旧依赖就“复活”；插件 A 的包被插件 B 隐式 import 的能力也不会随
+        卸载消失。三个根都扫：用户插件、禁用区、内置插件目录。
+        """
+        try:
+            from app.plugins.deps_loader import remove_deps_from_path
+        except Exception as e:
+            logger.debug(f"[Installer] 导入 deps_loader 失败（跳过摘除）: {e}")
+            return
+        bases = [self._plugins_dir, self._disabled_dir]
+        system_dir = getattr(self, "_system_dir", None)
+        if system_dir is not None:
+            bases.append(system_dir)
+        for base in bases:
+            try:
+                remove_deps_from_path(base / name)
+            except Exception as e:
+                logger.debug(f"[Installer] 摘除 {name} deps 失败（忽略）: {e}")
+
+    def _deps_conflict_with_enabled(self, name: str, manifest: dict) -> str:
+        """待启用插件与已启用插件的依赖版本要求是否不可调和。
+
+        Returns:
+            非空 = 冲突说明（调用方据此拒绝启用）；空 = 无冲突或无法判定。
+        """
+        try:
+            from app.plugins.deps_loader import find_deps_conflicts, resolve_pip_deps
+            from app.plugins.managers.plugin_manager import PluginManager
+
+            specs = resolve_pip_deps(manifest)
+            if not specs:
+                return ""
+            decl = {name: specs}
+            for other in PluginManager.get_instance().get_enabled_plugins():
+                if other.name == name or other.load_blocked:
+                    continue
+                other_specs = resolve_pip_deps(other.manifest)
+                if other_specs:
+                    decl[other.name] = other_specs
+            if len(decl) < 2:
+                return ""
+            reasons = []
+            for pkg, a, b in find_deps_conflicts(decl):
+                if name not in (a, b):
+                    continue
+                reasons.append(f"{pkg} 与 {b if a == name else a} 要求不可调和")
+            return "；".join(reasons)
+        except Exception as e:
+            # 检查本身失败不阻断启用（宁可能装上但跑错版本，也不要因门禁自身故障拦死）
+            logger.debug(f"[Installer] 依赖冲突检查失败（放行）: {e}")
+            return ""
 
     @staticmethod
     def _purge_plugin_module_cache(name: str):
@@ -1417,6 +1748,8 @@ class PluginInstaller:
             self._stop_gateway_platforms(name, wait=True)
             # 清理模块缓存（UI 注册表卸载由 GUI 线程在主线程先行完成）
             self._purge_plugin_module_cache(name)
+            # L1：摘除 deps 注入路径（目录马上要删，不留僵尸 sys.path 项）
+            self._detach_plugin_deps(name)
             leftover: list = []
             for base in (self._plugins_dir, self._disabled_dir):
                 target = base / name
@@ -1511,6 +1844,8 @@ class PluginInstaller:
             self._kill_plugin_processes(name)
             # 清理模块缓存（UI 注册表卸载由主线程先行完成，此处不碰 GUI）
             self._purge_plugin_module_cache(name)
+            # L1：禁用后不再加载，deps 路径也从 sys.path 摘除（重新启用时再注入）
+            self._detach_plugin_deps(name)
             # 抑制 backend watcher：避免移动期间 watcher 抢跑 import 插件的 deps
             # （如 gateway 插件的 Crypto 等 .pyd），造成 WinError 5 拒绝访问
             self._suppress_backend_watcher()
@@ -1542,6 +1877,18 @@ class PluginInstaller:
           通过 PluginManager 写 Settings 启用
         """
         src = self._disabled_dir / name
+        # L2：启用前统一做依赖冲突检查（用户插件与内置插件两个启用通道都覆盖）
+        manifest = self._read_manifest_at(src) if src.exists() else None
+        if manifest is None:
+            system_dir = getattr(self, "_system_dir", None)
+            if system_dir is not None:
+                manifest = self._read_manifest_at(system_dir / name)
+        if manifest:
+            conflict = self._deps_conflict_with_enabled(name, manifest)
+            if conflict:
+                self.last_error = f"{name} 依赖冲突，无法启用：{conflict}"
+                logger.warning(f"[Installer] {self.last_error}")
+                return False
         if src.exists():
             # 释放 deps 模块句柄（gateway 插件 vendor 的 Crypto 等 .pyd 被进程
             # 加载后会占用文件，移动前清理可降低 WinError 5 概率）

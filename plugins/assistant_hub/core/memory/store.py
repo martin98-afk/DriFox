@@ -38,27 +38,115 @@ SNAPSHOT_KEEP = 10
 WORKDIR_STATE_FILE = "workdir_state.json"
 # 全局记忆分区定义（用户可编辑；空 schema = 自由格式，行为与改造前一致）
 MEMORY_SECTIONS_FILE = "memory_sections.json"
-# 默认分区：按「内容成因」划分，不看主题词。分三类是为了让归属判定只剩三选一：
-# 我总结出的方法 / 工具自身的固有行为 / 用户亲口说的要求。
-# 上限守住 4 个：分区一多分类就不确定，与本功能「严格归属」的前提冲突。
+# schema 版本：1=纯知识分区（旧）；2=分区带 tone（理性/感性）。
+# v1 升级时只补「身份定位」一个区（本设计的核心新增），其他区用户删就删。
+SECTIONS_SCHEMA_VERSION = 2
+
+# 分区基调：理性区装「下次少犯错」的知识，感性区装「下次更像个人」的理解。
+# 两类分区共享全局上限但各自有配额池，见 section_quotas()。
+TONE_RATIONAL = "rational"
+TONE_EMOTIONAL = "emotional"
+TONE_DEFAULT = TONE_RATIONAL
+TONES = (TONE_RATIONAL, TONE_EMOTIONAL)
+
+# 感性占比（滑轨）：0~100 全开。之前收在 10~70 是为了防呆，代价是轨道两端
+# 出现灰区，条长与百分比对不上（用户看到「理性 70%」但蓝条只占三成）。
+# 表达直接比防呆重要：极端值只在标签上提示，不挡拖动。
+TONE_RATIO_MIN = 0
+TONE_RATIO_MAX = 100
+TONE_RATIO_DEFAULT = 30
+
+# 默认分区：理性 2 区（知识）+ 感性 2 区（理解）。上限仍守 4 个，
+# 归类判定只在「理性/感性」二选一 + 同侧区内归属，不确定性可控。
 # hint 会被 UI 单行显示，主句控制在 12 字内；完整规则用 detail（悬停提示 + 注入 prompt）。
 DEFAULT_SECTIONS = (
     {
         "name": "工程方法论",
         "hint": "做事顺序与验证方法",
+        "tone": TONE_RATIONAL,
         "detail": "做事的顺序、验证与判定方法、质量纪律。写「怎么判断改对了」，不写具体工具行为",
     },
     {
         "name": "工具与环境",
         "hint": "工具平台的客观坑",
+        "tone": TONE_RATIONAL,
         "detail": "工具/平台/框架/命令的客观坑与修法，谁用都会撞上。写工具自身行为，不写本项目业务规则",
     },
     {
         "name": "用户偏好",
-        "hint": "用户的长期要求",
-        "detail": "用户亲口提的长期要求、表达习惯、明确禁止事项。与具体项目无关的都放这里",
+        "hint": "他是个什么样的人",
+        "tone": TONE_EMOTIONAL,
+        "detail": "对这个人的稳定理解：他怎么想事、在意什么、什么让他不耐烦、他的品味与雷区。"
+        "用户亲口提的硬性要求必须保留并补一句背后的原因（例：他要中文，因为他用中文思考），"
+        "但别只停在「他要求了什么」。换一个项目仍然成立",
+    },
+    {
+        "name": "身份定位",
+        "hint": "我是谁、我们的关系",
+        "tone": TONE_EMOTIONAL,
+        "detail": "对自身位置的理解：我是谁、我和这个人是什么关系、我该以什么姿态出现、"
+        "我在哪些事上会犯什么错。不依赖用户指令，自己决定自己是谁",
     },
 )
+
+# 旧默认 detail：内容一字未改的区（用户没自定义过）在 v1→v2 迁移时跟着升级，
+# 防止旧文案把新语义按死（典型：「用户偏好」旧文案只说「他要求了什么」）。
+_LEGACY_DETAILS = {
+    "用户偏好": "用户亲口提的长期要求、表达习惯、明确禁止事项。与具体项目无关的都放这里",
+}
+
+# 默认分区名的 tone 速查（旧文件无 tone 字段时按名补齐）
+_DEFAULT_TONE_BY_NAME = {str(s["name"]): str(s["tone"]) for s in DEFAULT_SECTIONS}
+
+def normalize_tone(v) -> str:
+    """tone 容错：非法值一律回落 rational。"""
+    t = str(v or "").strip().lower()
+    return t if t in TONES else TONE_DEFAULT
+
+def tone_of(section: Dict[str, str]) -> str:
+    """分区基调：优先显式字段，缺失按默认表同名补齐，再回落 rational。"""
+    raw = str((section or {}).get("tone") or "").strip().lower()
+    if raw in TONES:
+        return raw
+    name = str((section or {}).get("name") or "")
+    return _DEFAULT_TONE_BY_NAME.get(name, TONE_DEFAULT)
+
+def clamp_tone_ratio(v) -> int:
+    """感性占比收敛到 [MIN, MAX]；非法值取默认。"""
+    try:
+        n = int(v)
+    except (TypeError, ValueError):
+        return TONE_RATIO_DEFAULT
+    return max(TONE_RATIO_MIN, min(TONE_RATIO_MAX, n))
+
+def section_quotas(
+    sections: List[Dict[str, str]],
+    tone_ratio: int = TONE_RATIO_DEFAULT,
+    total: Optional[int] = None,
+) -> Dict[str, int]:
+    """按 tone 分组分配全局记忆配额（同侧平分，余数给最后一个区）。
+
+    同侧平分而非按区加权：不均匀意味着用户该合并条目，而不是让某一区无限膨胀。
+    无分区的区名不进结果；空 schema 返回 {}。total 缺省取 GLOBAL_MEMORY_MAX_CHARS
+    （模块常量定义在本函数之后，不能写在默认参数里）。
+    """
+    total = GLOBAL_MEMORY_MAX_CHARS if total is None else int(total)
+
+    names = {
+        TONE_RATIONAL: [str(s.get("name") or "") for s in (sections or []) if str(s.get("name") or "").strip() and tone_of(s) == TONE_RATIONAL],
+        TONE_EMOTIONAL: [str(s.get("name") or "") for s in (sections or []) if str(s.get("name") or "").strip() and tone_of(s) == TONE_EMOTIONAL],
+    }
+    emo_pool = total * clamp_tone_ratio(tone_ratio) // 100
+    pools = {TONE_RATIONAL: total - emo_pool, TONE_EMOTIONAL: emo_pool}
+    out: Dict[str, int] = {}
+    for tone, pool in pools.items():
+        group = names[tone]
+        if not group:
+            continue
+        each = pool // len(group)
+        for i, name in enumerate(group):
+            out[name] = each if i < len(group) - 1 else pool - each * (len(group) - 1)
+    return out
 
 _SNAP_NAME_RE = re.compile(r"^\d{8}-\d{6}\.md$")
 
@@ -206,6 +294,8 @@ def load_sections(aid_dir: Path) -> List[Dict[str, str]]:
                 "name": name,
                 "hint": str(it.get("hint") or "").strip(),
                 "detail": str(it.get("detail") or "").strip(),
+                # 旧文件无 tone：按默认表同名补齐，自定义区回落 rational
+                "tone": tone_of({"name": name, "tone": it.get("tone")}),
             }
         )
     return out
@@ -229,11 +319,20 @@ def save_sections(aid_dir: Path, sections: List[Dict[str, str]]) -> Dict:
                 "name": name,
                 "hint": str((it or {}).get("hint") or "").strip(),
                 "detail": str((it or {}).get("detail") or "").strip(),
+                "tone": normalize_tone((it or {}).get("tone")),
             }
         )
     p = sections_path(aid_dir)
     with _lock_for(p):
-        _atomic_write(p, json.dumps({"version": 1, "sections": clean}, ensure_ascii=False, indent=2) + "\n")
+        _atomic_write(
+            p,
+            json.dumps(
+                {"version": SECTIONS_SCHEMA_VERSION, "sections": clean},
+                ensure_ascii=False,
+                indent=2,
+            )
+            + "\n",
+        )
     return {"ok": True, "count": len(clean)}
 
 
@@ -252,31 +351,155 @@ def ensure_default_sections(aid_dir: Path) -> List[Dict[str, str]]:
     与 load_sections 的区别：load 的 [] 同时表示「文件缺失」和「用户清空了所有分区」。
     本函数只在文件缺失时初始化 —— 用户手动删光所有分区（文件仍在、sections 为空数组）
     是要自由格式，不能被重新塞回默认值（否则删不掉）。
+
+    附带 v1→v2 迁移：旧文件（无 tone、无身份定位区）在首次读取时补上「身份定位」
+    并升版号，之后用户再删就不再补（版本已到手）。
     """
     p = sections_path(aid_dir)
     if p.exists():
-        return load_sections(aid_dir)
+        sections = load_sections(aid_dir)
+        if not sections:
+            return sections
+        if _read_sections_version(p) < SECTIONS_SCHEMA_VERSION:
+            names = {str(s.get("name") or "") for s in sections}
+            by_name = {str(d["name"]): d for d in DEFAULT_SECTIONS}
+            for s in sections:
+                # 未自定义过的旧区：文案跟默认一起升级（保留用户改过的内容）
+                legacy = _LEGACY_DETAILS.get(str(s.get("name") or ""))
+                d = by_name.get(str(s.get("name") or ""))
+                if d is not None and legacy and str(s.get("detail") or "").strip() == legacy:
+                    s["detail"] = str(d["detail"])
+                    s["hint"] = str(d["hint"])
+            for d in DEFAULT_SECTIONS:
+                if str(d["name"]) == "身份定位" and str(d["name"]) not in names:
+                    sections.append(dict(d))
+            save_sections(aid_dir, sections)
+        return sections
     sections = default_sections()
     save_sections(aid_dir, sections)
     return sections
 
+def _read_sections_version(p: Path) -> int:
+    """读分区文件 schema 版本；缺失/损坏按 1 处理（触发迁移）。"""
+    try:
+        data = json.loads(read_text(p) or "{}")
+        return int((data or {}).get("version") or 1)
+    except (ValueError, TypeError, AttributeError):
+        return 1
 
-def sections_prompt_text(sections: List[Dict[str, str]]) -> str:
+
+def sections_prompt_text(
+    sections: List[Dict[str, str]],
+    quotas: Dict[str, int] | None = None,
+) -> str:
     """分区清单的 prompt 文本（注入说明书/蒸馏指令共用）；空 schema 返回空串。
 
     优先用 detail（完整归类规则），无则回落 hint：模型需能判边界，不能只有短标签。
+    quotas 非空时每个区尾附字符配额（供模型判断该压还是该搬）。
     """
     lines = []
     for s in sections or []:
         name = s.get("name")
         text = str(s.get("detail") or s.get("hint") or "").strip()
-        lines.append(f"- {name}：{text}" if text else f"- {name}")
+        line = f"- {name}：{text}" if text else f"- {name}"
+        tone = tone_of(s)
+        line += f"（{'感性' if tone == TONE_EMOTIONAL else '理性'}区"
+        if quotas and name in quotas:
+            line += f"，配额 {quotas[name]} 字符"
+        line += "）"
+        lines.append(line)
     return "\n".join(lines)
 
 
 def section_skeleton(sections: List[Dict[str, str]]) -> str:
     """分区骨架（校验失败时回传，模型照填也能通过）。"""
     return "\n\n".join(f"## {s.get('name')}\n- " for s in (sections or []) if (s.get("name") or "").strip())
+
+def section_usage(
+    text: str,
+    quotas: Dict[str, int] | None,
+) -> List[Dict[str, int | str]]:
+    """统计各分区块实际字符数，只返回超配额的分区（按超出量降序）。
+
+    注入时据此给模型点名的 ACTION：配额不落到实际内容上就只是纸面数字。
+    """
+    if not quotas:
+        return []
+    out: List[Dict[str, int | str]] = []
+    for b in parse_section_blocks(text).get("blocks") or []:
+        name = str(b.get("name") or "")
+        quota = int(quotas.get(name) or 0)
+        if not quota:
+            continue
+        chars = len("\n".join(b.get("lines") or []))
+        if chars > quota:
+            out.append({"name": name, "chars": chars, "quota": quota, "over": chars - quota})
+    out.sort(key=lambda x: -int(x.get("over") or 0))
+    return out
+
+def section_block_text(text: str, name: str) -> str:
+    """取某个分区的原文块（含 "## 名称" 行）；分区不存在返回空串，存在但空返回标题+占位。
+
+    卡片点开看内容用：只给这一区的条目，不让用户在大全文里找。
+    """
+    target = str(name or "")
+    if not target:
+        return ""
+    for b in parse_section_blocks(text or "").get("blocks") or []:
+        if str(b.get("name") or "") != target:
+            continue
+        lines = [str(x) for x in (b.get("lines") or []) if str(x).strip()]
+        body = "\n".join(lines)
+        return f"## {target}\n{body}" if body else f"## {target}\n（这个分区还没有内容）"
+    return ""
+
+def section_entries(text: str, section: str) -> List[Dict]:
+    """某区的逐条账目：[{index, chars, preview}]，index 从 1 起。
+
+    用于「超限时告诉模型删哪一条」：模型对整篇字数不敏感，对「删第 3 条（180 字）」
+    这类具体动作才有把握一次做对。
+    """
+    target = str(section or "")
+    for b in parse_section_blocks(text or "").get("blocks") or []:
+        if str(b.get("name") or "") != target:
+            continue
+        out: List[Dict] = []
+        for raw in b.get("lines") or []:
+            s = str(raw).strip()
+            if not s.startswith("-"):
+                continue
+            body = s.lstrip("-").strip()
+            out.append({"index": len(out) + 1, "chars": len(body), "preview": body[:24]})
+        return out
+    return []
+
+def delete_section_entry(text: str, section: str, index: int) -> Dict:
+    """删除某区第 index 条（1 起），返回 {ok, content, removed} 或 {ok:False, error, count}。
+
+    只动目标行，不重写整篇：让「腾空间」变成一次可预测的小操作。
+    """
+    target = str(section or "")
+    try:
+        idx = int(index)
+    except (TypeError, ValueError):
+        return {"ok": False, "error": "bad_index", "count": 0}
+    if idx < 1:
+        return {"ok": False, "error": "bad_index", "count": 0}
+    lines = str(text or "").splitlines()
+    in_block = False
+    count = 0
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.startswith("## "):
+            in_block = stripped[3:].strip() == target
+            continue
+        if in_block and stripped.startswith("-"):
+            count += 1
+            if count == idx:
+                removed = stripped
+                del lines[i]
+                return {"ok": True, "content": "\n".join(lines), "removed": removed}
+    return {"ok": False, "error": "out_of_range", "count": count}
 
 
 def parse_section_blocks(text: str) -> Dict:

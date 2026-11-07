@@ -20,6 +20,7 @@ from typing import Any, Dict, Iterator, List, Optional
 from app.plugins.contracts.stream_sink import StreamEvent
 from app.plugins.sdk import (
     PARAM_SCHEMA,
+    extract_reasoning_delta,
     get_provider_profile,
     normalize_reasoning_effort,
     provider_quota_exclude_keys as QUOTA_EXCLUDE_KEYS,
@@ -38,6 +39,7 @@ _CONFIG_ONLY_KEYS = {
     "模型名称",
     "系统提示",
     "启用技能",
+    "协议入口",
     "name",
     "provider_name",
     "config_id",
@@ -131,6 +133,9 @@ class OpenAIChatTransport:
 
         for cn_key, value in llm_config.items():
             if cn_key in _CONFIG_ONLY_KEYS or cn_key in QUOTA_EXCLUDE_KEYS():
+                continue
+            # 空值不发：老配置残留的空串键（如 server_id）过不了严格网关的参数白名单
+            if value is None or value == "":
                 continue
             meta = PARAM_SCHEMA.get(cn_key, {})
             en_key = meta.get("api_param")
@@ -285,7 +290,7 @@ class OpenAIChatTransport:
                 if content:
                     yield StreamEvent(type="content_delta", text=content)
 
-                reasoning = getattr(delta, "reasoning_content", None)
+                reasoning = extract_reasoning_delta(delta)
                 if reasoning:
                     yield StreamEvent(type="reasoning_delta", text=reasoning)
 
@@ -336,7 +341,7 @@ class OpenAIChatTransport:
         message = getattr(choices[0], "message", None)
         if message is None:
             return
-        reasoning = getattr(message, "reasoning_content", None)
+        reasoning = extract_reasoning_delta(message)
         if reasoning:
             # 思考先于正文 emit，保持 UI 思考块在前
             yield StreamEvent(type="reasoning_delta", text=reasoning)

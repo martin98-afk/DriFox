@@ -8,7 +8,7 @@
 from __future__ import annotations
 
 import os
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from loguru import logger
 
@@ -303,3 +303,74 @@ class WorktreeService:
                 QTimer.singleShot(200, lambda: self.update_branch(target))
         except Exception:
             logger.exception("[WorktreeService] copy_branch_state 复制分支状态失败")
+
+# ── 工具侧切换请求的接收器 ─────────────────────────────
+# manage_worktree 工具面没有 workdir.write / project.workdir（catalog 标 _UI，
+# tool 面无 provider），工具请求的切换只能投递回主线程。信号携带发起会话
+# session_id，本接收器按会话定位窗口后复用 switch_to_worktree（host 绑定
+# 该窗口）——禁止回落「当前活跃窗口」：排队延迟期间用户可能已浏览到别的
+# 项目页面，回落会把路径持久化进错误项目的 project_workdir 表。
+
+from PyQt5.QtCore import QObject, pyqtSlot  # noqa: E402
+
+_switch_receiver: Optional["_SwitchReceiver"] = None
+
+def _resolve_tab_manager():
+    """延迟解析 TabManagerWindow 单例（测试可 monkeypatch 本函数）。"""
+    try:
+        from app.widgets.tab_manager_window import TabManagerWindow
+
+        return TabManagerWindow.get_instance()
+    except Exception:
+        return None
+
+def _find_window_by_session(session_id: str):
+    """按会话 id 在打开的窗口中定位宿主窗口；找不到返回 None（调用方放弃切换）。"""
+    if not session_id:
+        return None
+    tm = _resolve_tab_manager()
+    if tm is None:
+        return None
+    for win in getattr(tm, "_windows", []) or []:
+        if getattr(win, "_current_session_id", "") == session_id:
+            return win
+    return None
+
+class _SwitchReceiver(QObject):
+    """bridge.switchRequested → 主线程执行会话工作目录切换
+
+    跨线程安全：工具线程 emit，Qt 以 QueuedConnection 派发到本槽（receiver
+    属主线程，创建时挂在 bridge 上保活）。
+    """
+
+    def __init__(self, service: "WorktreeService"):
+        super().__init__()
+        self._service = service
+
+    @pyqtSlot(str, str)
+    def on_switch_requested(self, path: str, session_id: str) -> None:
+        try:
+            win = _find_window_by_session(session_id)
+            if win is None:
+                logger.warning(
+                    f"[WorktreeService] 工具请求切换 {path} 失败: 无法定位会话 "
+                    f"{session_id or '(空)'} 所在窗口，已放弃切换（避免污染当前活跃窗口）"
+                )
+                return
+            self._service.switch_to_worktree(win, path)
+        except Exception as e:  # noqa: BLE001 - 切换失败不能炸主线程
+            logger.warning(f"[WorktreeService] 工具请求切换失败: {e}")
+            return
+
+def _install_switch_receiver(service: "WorktreeService") -> None:
+    """连接 bridge.switchRequested → 主线程切换（幂等：重复调用不重复连）"""
+    global _switch_receiver
+    from .change_bridge import get_bridge
+
+    bridge = get_bridge()
+    if _switch_receiver is not None:
+        return
+    _switch_receiver = _SwitchReceiver(service)
+    _switch_receiver.setParent(bridge)  # 挂在 bridge 上保活，随 app 退出销毁
+    bridge.switchRequested.connect(_switch_receiver.on_switch_requested)
+    logger.info("[WorktreeService] 工具侧切换请求通道已接入")

@@ -20,6 +20,7 @@
 
 from __future__ import annotations
 
+import csv
 import json
 import shutil
 import subprocess
@@ -86,11 +87,93 @@ class DepsInstaller:
         target = plugin_dir / "deps" / current_platform_key()
         target.mkdir(parents=True, exist_ok=True)
 
+        # L1 配套：版本不满足触发的重装必须先清旧分发。uv/pip 的 --target 是覆盖
+        # 写入，不删旧版本文件：0.20 → 0.28 会留着旧 dist-info 与旧模块文件，
+        # import 可能命中旧代码。按 RECORD 精确删（只碰 target 内文件）。
+        self._purge_stale_dists(target, missing)
+
         res = self._install_with_uv(missing, target)
         if res.success:
             return res
         logger.info(f"[DepsInstaller] uv 路径失败，回退 wheel 解压: {res.log[-1] if res.log else ''}")
         return self._install_with_wheels(missing, target, res)
+
+    def _purge_stale_dists(self, target: Path, specs: List[str]) -> List[str]:
+        """删掉 target 里这些包名对应的旧分发（dist-info + RECORD 列出的文件）。
+
+        只删 target 目录内的文件（RECORD 路径可能带 ../ 或以 / 开头，一律判越界
+        跳过）。命名空间包共享父目录时不受影响：RECORD 只列自己那份文件，
+        空目录用 rmdir 回收，非空自然留下。
+
+        Returns:
+            被清掉的 dist-info 目录名（供日志/测试断言）。
+        """
+        try:
+            from app.plugins.deps_loader import canonical_pkg_name
+        except Exception:
+            return []
+        names = {canonical_pkg_name(s) for s in specs}
+        names.discard("")
+        if not target.is_dir() or not names:
+            return []
+
+        try:
+            root = target.resolve()
+        except OSError:
+            return []
+
+        purged: List[str] = []
+        for entry in list(target.iterdir()):
+            if not entry.name.endswith(".dist-info"):
+                continue
+            if canonical_pkg_name(entry.name.split("-")[0]) not in names:
+                continue
+            self._unlink_by_record(entry, root)
+            shutil.rmtree(entry, ignore_errors=True)
+            if not entry.exists():
+                purged.append(entry.name)
+
+        if purged:
+            self._prune_empty_dirs(root)
+            logger.info(f"[DepsInstaller] 重装前清理旧分发: {purged}")
+        return purged
+
+    @staticmethod
+    def _unlink_by_record(dist_info: Path, root: Path) -> None:
+        """按 dist-info/RECORD 删文件（越界路径跳过）。"""
+        try:
+            with (dist_info / "RECORD").open("r", encoding="utf-8", newline="") as fh:
+                rows = list(csv.reader(fh))
+        except OSError:
+            return
+        for row in rows:
+            if not row:
+                continue
+            rel = (row[0] or "").strip()
+            if not rel:
+                continue
+            try:
+                p = (root / rel).resolve()
+                if not p.is_relative_to(root) or p == root:
+                    continue
+                if p.is_dir() or not p.exists():
+                    continue
+                p.unlink()
+            except (OSError, ValueError):
+                continue
+
+    @staticmethod
+    def _prune_empty_dirs(root: Path) -> None:
+        """自下而上回收空目录（rmdir 失败说明非空，忽略）。"""
+        try:
+            dirs = [p for p in root.rglob("*") if p.is_dir()]
+        except OSError:
+            return
+        for d in sorted(dirs, key=lambda p: len(p.parts), reverse=True):
+            try:
+                d.rmdir()
+            except OSError:
+                continue
 
     # ── 缺失检测 ──────────────────────────────────────────
 
@@ -126,6 +209,11 @@ class DepsInstaller:
                 cmd,
                 capture_output=True,
                 text=True,
+                # 必须显式指定编码：uv 的报错含本地化中文（UTF-8），
+                # Windows 默认按 cp936 解码会在 _readerthread 抛
+                # UnicodeDecodeError，导致 stderr 变成 None、错误信息全丢。
+                encoding="utf-8",
+                errors="replace",
                 timeout=DEFAULT_TIMEOUT,
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0) if sys.platform == "win32" else 0,
             )

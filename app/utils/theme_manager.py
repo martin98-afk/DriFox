@@ -30,6 +30,10 @@ _BUILTIN_THEMES_DIR = Path(__file__).parent.parent.parent / "plugins" / "system-
 # 仅「已存在 yaml 就地改内容」会延迟到本窗口之后（或显式 reload(force=True)）。
 _FINGERPRINT_FULL_WINDOW_S = 10.0
 
+# 动画背景帧率上限：素材按 12fps 制作，主题写再高也没有帧可用，
+# 且解码成本随时长线性上升（640x360 单帧约 3ms），必须 clamp。
+_ANIM_FPS_CAP = 15
+
 
 class ThemeManager:
     """主题管理器 - 单例，纯文件驱动"""
@@ -230,8 +234,15 @@ class ThemeManager:
           - scene       : 右侧 _chat_frame 图片/场景化背景（撑满整个右侧圆角矩形，
                           含 replace_tab_bar / 对话区 / 输入框 / LEFT/RIGHT/BOTTOM
                           停靠区 / UI 插件槽位等所有 _chat_frame 内的内容）
+                          可嵌套 foreground 子对象放全画布前景层（壁纸拆出的人物等）：
+                          {image, opacity, enabled}，与 image 同矩形同拉伸，逐像素对齐
           - decorations : 装饰件数组（多张 PNG，按 anchor 摆放；anchor 坐标系以
                           OpenAIChatToolWindow 为基准，定位在对话区/输入框附近）
+          - overlay     : 动态光影视频覆盖层（循环视频帧压暗混合，scene 之上、
+                          UI 之下；字段 video/target/opacity/brightness_boost/
+                          position/enabled）
+          - music       : 主题背景音乐播放列表（字段 tracks/volume/loop/
+                          fade_ms/enabled）
 
         旧字段兼容（避免破坏现有 17 套内置主题）：
           - background.window_bg → backgrounds.window
@@ -247,6 +258,8 @@ class ThemeManager:
             "chat_area": dict | None,
             "scene": dict | None,
             "decorations": list[dict],
+            "overlay": dict | None,
+            "music": dict | None,
           }
         """
         self._ensure_loaded()
@@ -254,6 +267,55 @@ class ThemeManager:
 
         new_bg = theme.get("backgrounds") or {}
         legacy_bg = theme.get("background") or {}
+
+        def _normalize_animation(d) -> Optional[dict]:
+            """动画背景归一化（backgrounds.<region>.animation）
+
+            动画素材为动画 WebP（也兼容 GIF），由 Qt 内置解码器逐帧读取，
+            不依赖系统媒体栈。字段：
+              - src      : str  主题目录相对路径或绝对路径
+              - canvas   : shared | independent（默认 independent）
+                           shared = 多区域共用同一张动画，各区域取自己的矩形，
+                           接缝连续且只解码一次
+              - fps      : int  1~15（上限 clamp，防止主题写出高帧率吃满 CPU）
+              - blend    : normal | overlay（overlay=黑底+alpha 压暗，光影遮罩）
+              - fit      : cover | contain | tile
+              - position : cover 裁切对齐 top/center/bottom
+              - opacity  : float 0.0~1.0
+              - enabled  : bool
+            """
+            if not isinstance(d, dict):
+                return None
+            src = d.get("src")
+            if not src:
+                return None
+
+            def _f(v, default, lo, hi):
+                try:
+                    return max(lo, min(hi, float(v)))
+                except (TypeError, ValueError):
+                    return default
+
+            fps = int(_f(d.get("fps", 12), 12, 1, _ANIM_FPS_CAP))
+            blend = str(d.get("blend") or "normal").lower()
+            if blend not in ("normal", "overlay"):
+                blend = "normal"
+            fit = str(d.get("fit") or "cover").lower()
+            if fit not in ("cover", "contain", "tile"):
+                fit = "cover"
+            position = str(d.get("position") or "center").lower()
+            if position not in ("top", "center", "bottom"):
+                position = "center"
+            return {
+                "src": str(src),
+                "canvas": "shared" if str(d.get("canvas") or "").lower() == "shared" else "independent",
+                "fps": fps,
+                "blend": blend,
+                "fit": fit,
+                "position": position,
+                "opacity": _f(d.get("opacity", 1.0), 1.0, 0.0, 1.0),
+                "enabled": bool(d.get("enabled", True)),
+            }
 
         def _normalize(d: Optional[dict]) -> Optional[dict]:
             """统一区域字段：补默认值 + 兼容旧字段"""
@@ -266,7 +328,56 @@ class ThemeManager:
                 "blur": d.get("blur", 0),
                 "dim": d.get("dim"),
                 "enabled": d.get("enabled", True),
+                "animation": _normalize_animation(d.get("animation")),
+                # overlay 区块专用：视频路径、亮度补偿色与挂载区域，其余区块恒 None
+                "video": d.get("video"),
+                "brightness_boost": d.get("brightness_boost"),
+                "position": d.get("position"),
+                "target": d.get("target"),
             }
+
+        def _normalize_music(d: Optional[dict]) -> Optional[dict]:
+            """music 区块字段集与区域背景不同，单独归一（不套 _normalize）"""
+            if not d:
+                return None
+            tracks = d.get("tracks") or []
+            if isinstance(tracks, str):
+                tracks = [tracks]
+            return {
+                "tracks": [str(t) for t in tracks],
+                "volume": float(d.get("volume", 0.6)),
+                "loop": bool(d.get("loop", True)),
+                "fade_ms": int(d.get("fade_ms", 300)),
+                "enabled": d.get("enabled", True),
+            }
+
+        def _normalize_scene(d: Optional[dict]) -> Optional[dict]:
+            """scene 专用归一化：在通用区域字段之外保留 foreground 子对象
+
+            foreground 是壁纸拆出的全画布前景图层（如人物），字段集与 image/
+            opacity 相同。它是嵌套 dict，不能被 _normalize 的白名单拍平。
+            """
+            normalized = _normalize(d)
+            if normalized is None:
+                return None
+            fg = d.get("foreground")
+            if isinstance(fg, dict):
+                normalized["foreground"] = {
+                    "image": fg.get("image"),
+                    "opacity": fg.get("opacity", 1.0),
+                    "enabled": fg.get("enabled", True),
+                }
+            else:
+                normalized["foreground"] = None
+            return normalized
+
+        # scene 与 chat 是同一块（右侧整个 _chat_frame）：chat 为新区块名，
+        # 与 scene 同时存在时逐字段覆盖，便于新主题只用 chat。
+        scene_cfg = dict(new_bg.get("scene") or {})
+        chat_cfg = new_bg.get("chat")
+        if isinstance(chat_cfg, dict):
+            scene_cfg.update(chat_cfg)
+        scene_normalized = _normalize_scene(scene_cfg)
 
         return {
             "window": (
@@ -276,8 +387,11 @@ class ThemeManager:
             ),
             "sidebar": _normalize(new_bg.get("sidebar")),
             "chat_area": _normalize(new_bg.get("chat_area")),
-            "scene": _normalize(new_bg.get("scene")),
+            "scene": scene_normalized,
+            "chat": scene_normalized,  # 新区块名，与 scene 同一对象
             "decorations": new_bg.get("decorations") or [],
+            "overlay": _normalize(new_bg.get("overlay")),
+            "music": _normalize_music(new_bg.get("music")),
         }
 
     def get_theme_dir(self, theme_id: str) -> Optional[Path]:
@@ -373,9 +487,34 @@ class ThemeManager:
         return self.get_theme(theme_id) or {}
 
     def get_current_colors(self) -> dict:
-        """获取当前主题的 colors 部分"""
+        """获取当前主题的 colors 部分（保证完整，供 UI 直接硬索引）
+
+        启动期竞态：ui_theme_style 可能指向尚未加载（或版本门禁下永久不可用）
+        的插件主题，此时 get_current_theme() 返回空 dict。旧实现静默返回 {}，
+        current_theme() 的下游按完整字典硬索引（card_viewers._load_skeleton 的
+        theme["card_bg_solid"]、chart_viewer_card 的 theme["accent"]）即抛
+        KeyError。这里按生效深浅回退到内置默认主题，保证 colors 始终完整；
+        插件主题刷新完成后自然切回真实主题，仅影响这一帧的取色。
+        """
         theme = self.get_current_theme()
-        return theme.get("colors", {})
+        colors = theme.get("colors", {})
+        if colors:
+            return colors
+        try:
+            from app.utils.config import DEFAULT_DARK_THEME, DEFAULT_LIGHT_THEME, Settings
+
+            light = bool(Settings.get_instance().ui_light_mode.value)
+            fallback_id = DEFAULT_LIGHT_THEME if light else DEFAULT_DARK_THEME
+        except Exception:
+            fallback_id = None
+        if fallback_id:
+            fallback = self.get_theme(fallback_id) or {}
+            colors = fallback.get("colors", {})
+            if colors:
+                return colors
+        # 极端：连默认主题文件都缺失，取任意已加载主题，仍不返回空集合
+        first = next(iter(self._themes.values()), {})
+        return first.get("colors", {}) or {}
 
     # ── 主题管理 ──────────────────────────────────────────
 

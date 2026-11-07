@@ -78,10 +78,12 @@ def _resolve_aid(mgr, context: Dict[str, Any]) -> str:
 
 
 def hook(event: str, context: Dict[str, Any]) -> str:
-    """BuildSystemPrompt hook：身份块 + 记忆体系块（均进系统提示词）。
+    """BuildSystemPrompt hook：身份块 + 记忆说明书（进系统提示词）。
 
-    记忆单一通道：说明书 + <global_memory> + <project_memory> + <daily_logs>
-    全在系统提示词里；写回后由 memory_write 失效 prompt 缓存，下轮重建。
+    **系统提示词会话内必须恒定**：这里只放身份/人格与静态纪律。
+    记忆内容与分区清单/配额全部不进系统提示词——它们会变，一变就让服务端
+    前缀 KV 缓存整段作废。记忆内容走 SessionStart（on_session_start）注入
+    会话消息，分区清单走 memory_read(scope=sections) 按需拉取。
     会话级临时助手（@提及）优先于全局 active_id。
     """
     if (context or {}).get("current_role") != "primary":
@@ -106,12 +108,12 @@ def hook(event: str, context: Dict[str, Any]) -> str:
 
 
 def on_session_start(event: str, context: Dict[str, Any]) -> str:
-    """SessionStart hook：注入人工提示（pinned）到 session.messages。
+    """SessionStart hook：人工提示 + 记忆快照，注入会话消息列表（会话内一次性）。
 
-    由主程序 _inject_hook_to_session 包装为 hook 消息注入会话消息列表
-    （带 <session-start-hook> / <system-reminder> 标记）。记忆内容不走
-    此通道（系统提示词注入，写后失效缓存刷新）；pinned 是人工要求，
-    会话启动/清空/压缩时注入一次即可。
+    记忆内容走这里而不是 system prompt：system prompt 必须会话内恒定，
+    否则每次记忆变化都要重建，服务端前缀缓存整段作废。
+    快照只在 startup/clear/compact 时生成，会话中记忆怎么变都不影响已建好的前缀；
+    会话内新写入的内容由 memory_write 的返回值回显。
     """
     try:
         mgr = _get_manager()
@@ -120,7 +122,9 @@ def on_session_start(event: str, context: Dict[str, Any]) -> str:
         aid = _resolve_aid(mgr, context or {})
         if not aid:
             return ""
-        return mgr.pinned_block(aid) or ""
+        workdir = str((context or {}).get("project_root") or "")
+        parts = [mgr.pinned_block(aid), mgr.memory_snapshot_block(aid, workdir)]
+        return "\n\n".join(p for p in parts if p)
     except Exception as e:
         logger.warning(f"[assistant_hub.hooks] SessionStart 处理失败: {e}")
         return ""

@@ -689,6 +689,11 @@ class AgentManager:
         cache_key = source_plugin or str(agents_dir)
         file_cache = _agent_file_cache.setdefault(cache_key, {})
 
+        # 逐条 Loaded DEBUG 在冷启动首扫可达 50+ 条，每条一次管道写入（10 个
+        # enqueue sink 串行 put），管道满时阻塞主线程（2026-11-06 实测 500ms）。
+        # 改为循环后聚合一次 emit：内容不变，管道往返从 N 次降到 1 次。
+        loaded_log_lines: list[str] = []
+
         for md_file in agents_dir.glob("*.md"):
             try:
                 fpath = str(md_file)
@@ -704,8 +709,8 @@ class AgentManager:
                     agent = self._parse_markdown_agent(md_file)
                     if agent:
                         file_cache[fpath] = (mtime, agent)
-                        logger.debug(
-                            f"[AgentManager] Loaded agent: {agent.name} (mode={agent.mode}, hidden={agent.hidden})"
+                        loaded_log_lines.append(
+                            f"{agent.name} (mode={agent.mode}, hidden={agent.hidden})"
                         )
                 if agent:
                     # 同名智能体去重：先加载的（系统插件优先）保留，后续的跳过
@@ -725,6 +730,12 @@ class AgentManager:
                     target_dict[agent.name] = agent
             except Exception as e:
                 logger.error(f"[AgentManager] Failed to load {md_file}: {e}")
+
+        if loaded_log_lines:
+            logger.debug(
+                f"[AgentManager] Loaded agents ({len(loaded_log_lines)}):\n  "
+                + "\n  ".join(loaded_log_lines)
+            )
 
         for yaml_file in agents_dir.glob("*.yaml"):
             try:
@@ -1052,7 +1063,21 @@ Use the tools available to you based on your permissions."""
                 current_message="",
                 trigger_async=False,
             )
-            contributions = [r.output.strip() for r in results if r.success and r.output.strip()]
+            contributions = []
+            for r in results:
+                if not (r.success and r.output.strip()):
+                    continue
+                out = r.output.strip()
+                # 兜底：插件漏加分区标签时自动包裹，避免 system prompt 出现裸段
+                # （每块内容都要有 <xxx> 边界，否则相邻插件的内容会粘在一起，
+                # 模型分不清哪段属于哪个系统。插件应自己带标签，这里只兜底。）
+                if not out.startswith("<"):
+                    logger.warning(
+                        "[agent] BuildSystemPrompt 输出缺少分区标签，已兜底包裹为 "
+                        f"<hook_context>（{len(out)} 字符）"
+                    )
+                    out = "<hook_context>\n" + out + "\n</hook_context>"
+                contributions.append(out)
             if contributions:
                 base = base + "\n\n" + "\n\n".join(contributions)
 

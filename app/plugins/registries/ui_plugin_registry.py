@@ -1092,21 +1092,9 @@ class UIPluginRegistry:
                     continue  # C++ 对象已销毁
                 if not visible:
                     mark_theme_dirty(widget)
-                    # [theme-probe] 临时诊断：主题切换时卡被判为不可见 → 只置脏
-                    logger.warning(
-                        f"[theme-probe] ev_hidden card={_card_id} win={_win_id} "
-                        f"cls={type(widget).__name__}"
-                    )
                     continue
                 _t0 = perf_counter()
-                _fresh = ensure_theme_fresh(widget)
-                # [theme-probe] 临时诊断：可见卡实际是否被刷 + 纪元与 provider 状态
-                logger.warning(
-                    f"[theme-probe] ev_visible card={_card_id} win={_win_id} "
-                    f"cls={type(widget).__name__} fresh={_fresh} "
-                    f"own={getattr(widget, '_drifox_theme_epoch', 'MISSING')} "
-                    f"provider={getattr(widget, '_context_provider', None) is not None}"
-                )
+                ensure_theme_fresh(widget)
                 # [PERF] 慢卡打点：主题切换时整条 publish 是同步的，
                 # 单卡几百 ms 就会让用户感知卡顿，必须能指名道姓
                 _ms = (perf_counter() - _t0) * 1000
@@ -3469,29 +3457,10 @@ class UIPluginRegistry:
         widget_now = win_instances.get(card_id)
         if widget_now is not None:
             try:
-                # [theme-probe] 临时诊断：重开路径是否补刷 + 是否被纪元短路
-                _vis = bool(widget_now.isVisible())
-                _fresh = None
-                if _vis:
+                if widget_now.isVisible():
                     from app.utils.theme_style import ensure_theme_fresh
 
-                    _fresh = ensure_theme_fresh(widget_now)
-                # [DEBUG-reopen] 实例指纹 + CM 记账对照
-                _cm_vis = card_manager.is_card_visible(card_id, window_id)
-                _parent = widget_now.parent()
-                logger.warning(
-                    f"[theme-probe] show card={card_id} win={window_id} cls={type(widget_now).__name__} "
-                    f"visible={_vis} fresh={_fresh} "
-                    f"own={getattr(widget_now, '_drifox_theme_epoch', 'MISSING')} "
-                    f"provider={getattr(widget_now, '_context_provider', None) is not None}"
-                )
-                logger.warning(
-                    f"[DEBUG-reopen] show card={card_id} reg={id(self)} wid={id(widget_now)} "
-                    f"cm_vis={_cm_vis} parent={type(_parent).__name__ if _parent is not None else None} "
-                    f"parent_vis={_parent.isVisible() if _parent is not None else None} "
-                    f"w_HIDDEN={widget_now.isHidden()} w_geo={widget_now.geometry()} "
-                    f"w_VisibleBit={widget_now.testAttribute(__import__('PyQt5.QtCore', fromlist=['Qt']).Qt.WA_WState_Visible)}"
-                )
+                    ensure_theme_fresh(widget_now)
             except RuntimeError:
                 pass
 

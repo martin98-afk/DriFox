@@ -93,165 +93,61 @@ class FakeEvent:
             setattr(self, k, v)
 
 
-def make_worker():
-    worker = OpenAIChatWorker(
+# ---------- 协议入口单点裁决（chat_worker._resolve_use_responses） ----------
+
+_DISPATCH_CASES = [
+    # (协议入口, 使用ResponsesAPI, 期望 use_responses)；基线模型 gpt-4o 自动=False
+    (None, None, False),
+    (None, True, True),
+    (None, False, False),
+    ("responses", None, True),
+    ("responses", False, False),  # 旧键显式 False 压过新键
+    ("transport:openai_chat", None, False),
+]
+
+@pytest.mark.parametrize("entry,legacy,expect", _DISPATCH_CASES)
+def test_entry_dispatch_matrix(qapp, entry, legacy, expect):
+    from app.core.workers.chat_worker import OpenAIChatWorker
+
+    w = OpenAIChatWorker(
         messages=[{"role": "user", "content": "hi"}],
         session_messages=[],
-        llm_config={"模型名称": "gpt-5.6-luna", "API_URL": "http://fake", "API_KEY": ""},
+        llm_config={"模型名称": "gpt-4o", "API_URL": "http://fake", "API_KEY": ""},
         stream=True,
     )
-    worker.received_reasoning = []
-    worker.received_content = []
-    worker.thinking_count = [0]
-    worker.tool_starts = []
-    worker.tool_args = []
-    worker.reasoning_content_received.connect(lambda p: worker.received_reasoning.append(p))
-    worker.content_received.connect(lambda p: worker.received_content.append(p))
-    worker.thinking_started.connect(lambda: worker.thinking_count.__setitem__(0, worker.thinking_count[0] + 1))
-    worker.tool_call_started.connect(lambda cid, name, args, stage: worker.tool_starts.append((cid, name, args, stage)))
-    worker.tool_args_updated.connect(lambda cid, name, args: worker.tool_args.append((cid, name, args)))
-    return worker
+    if entry is not None:
+        w.llm_config["协议入口"] = entry
+    if legacy is not None:
+        w.llm_config["使用ResponsesAPI"] = legacy
+    assert w._resolve_use_responses(w.llm_config) is expect
 
+def test_entry_dispatch_gpt6_auto(qapp):
+    """自动模式下 gpt-6 走 responses（detector 修复经 flags 生效）"""
+    from app.core.workers.chat_worker import OpenAIChatWorker
 
-class FakeResponsesStream:
-    """模拟 client.responses.create(stream=True) 返回的可迭代对象"""
+    w = OpenAIChatWorker(
+        messages=[{"role": "user", "content": "hi"}],
+        session_messages=[],
+        llm_config={"模型名称": "gpt-6-luna", "API_URL": "http://fake", "API_KEY": ""},
+        stream=True,
+    )
+    assert w._resolve_use_responses(w.llm_config) is True
 
-    def __init__(self, events):
-        self._events = events
+def test_get_chat_transport_accepts_id(qapp):
+    """手选 id 经注册表解析且返回 worker 包装实例（连接池竞态修复不被绕过）"""
+    from app.core.workers.chat_worker import OpenAIChatWorker
+    from app.core.workers.stream_sink_context import StreamSinkContext  # noqa: F401 触发插件 warmup 前置
+    from tests.core.test_subagent_stream_aggregation import _ensure_plugins_loaded
 
-    def __iter__(self):
-        return iter(self._events)
-
-
-class TestProcessResponsesStream:
-    def test_reasoning_and_content(self):
-        worker = make_worker()
-        events = [
-            FakeEvent("response.reasoning_summary_text.delta", item_id="rs_1", delta="先算乘法"),
-            FakeEvent("response.reasoning_summary_text.delta", item_id="rs_1", delta="再算除法"),
-            FakeEvent("response.output_text.delta", item_id="msg_1", delta="答案是"),
-            FakeEvent("response.output_text.delta", item_id="msg_1", delta=" 399"),
-            FakeEvent("response.completed"),
-        ]
-        found, pending = worker._process_responses_stream(FakeResponsesStream(events))
-        assert found is False
-        assert pending is True
-        assert worker.thinking_count[0] == 1
-        assert "".join(worker.received_reasoning) == "先算乘法再算除法"
-        assert "".join(worker.received_content) == "答案是 399"
-
-    def test_tool_call_flow(self):
-        worker = make_worker()
-        events = [
-            FakeEvent(
-                "response.output_item.added",
-                item={"id": "fc_1", "type": "function_call", "name": "get_weather", "arguments": ""},
-            ),
-            FakeEvent("response.function_call_arguments.delta", item_id="fc_1", delta='{"city":'),
-            FakeEvent("response.function_call_arguments.delta", item_id="fc_1", delta='"北京"}'),
-            FakeEvent(
-                "response.output_item.done",
-                item={
-                    "id": "fc_1",
-                    "type": "function_call",
-                    "call_id": "call_abc",
-                    "name": "get_weather",
-                    "arguments": '{"city":"北京"}',
-                },
-            ),
-            FakeEvent("response.completed"),
-        ]
-        found, pending = worker._process_responses_stream(FakeResponsesStream(events))
-        assert found is True
-        assert pending is False
-        assert "call_abc" in worker._current_tool_calls
-        tc = worker._current_tool_calls["call_abc"]
-        assert tc["function"]["name"] == "get_weather"
-        assert json.loads(tc["function"]["arguments"]) == {"city": "北京"}
-        # preview 阶段 tool_call_started + 参数更新已发射
-        assert any(cid == "call_abc" for cid, _, _, _ in worker.tool_starts)
-        assert any(cid == "call_abc" for cid, _, _ in worker.tool_args)
-
-    def test_failed_event_raises(self):
-        worker = make_worker()
-        events = [FakeEvent("response.failed", response={"error": {"message": "upstream error", "code": "x"}})]
-        with pytest.raises(Exception):
-            worker._process_responses_stream(FakeResponsesStream(events))
-
-    def test_empty_response_raises(self):
-        worker = make_worker()
-        events = [FakeEvent("response.in_progress")]
-        with pytest.raises(Exception):
-            worker._process_responses_stream(FakeResponsesStream(events))
-
-    def test_cancel_flushes_batches(self):
-        worker = make_worker()
-        worker._is_cancelled = True
-        events = [FakeEvent("response.reasoning_summary_text.delta", item_id="rs_1", delta="思考中")]
-        found, pending = worker._process_responses_stream(FakeResponsesStream(events))
-        assert found is False
-        # 取消路径返回 (False, False)
-        assert pending is False
-
-
-# ---------- SubAgentExecutor 非流式 Responses 解析 ----------
-
-
-class _FakeItem:
-    def __init__(self, **kw):
-        self.__dict__.update(kw)
-
-
-class _FakeUsage:
-    def __init__(self):
-        self.input_tokens = 10
-        self.output_tokens = 20
-        self.total_tokens = 30
-
-
-class _FakeSubResp:
-    def __init__(self, output, usage=None):
-        self.output = output
-        self.usage = usage
-
-
-class TestSubAgentResponses:
-    def _make_subagent(self):
-        w = SubAgentExecutor.__new__(SubAgentExecutor)
-        w._total_prompt_tokens = 0
-        w._total_completion_tokens = 0
-        w._total_tokens = 0
-        w._peak_total_tokens = 0
-        w.task_id = "t1"
-        w.token_usage_updated = type("S", (), {"emit": lambda *a, **k: None})()
-        return w
-
-    def test_parse_output(self):
-        w = self._make_subagent()
-        resp = _FakeSubResp(
-            output=[
-                _FakeItem(type="reasoning", summary=[_FakeItem(type="summary_text", text="先算乘法")]),
-                _FakeItem(type="reasoning", summary=[{"type": "summary_text", "text": "再算除法"}]),
-                _FakeItem(type="message", content=[_FakeItem(type="output_text", text="答案是 399")]),
-                _FakeItem(type="function_call", call_id="call_1", name="get_weather", arguments='{"city":"北京"}'),
-            ],
-            usage=_FakeUsage(),
-        )
-        content, tool_calls, reasoning = w._parse_responses_output(resp)
-        assert content == "答案是 399"
-        assert reasoning == "先算乘法再算除法"
-        assert tool_calls == [
-            {"id": "call_1", "type": "function", "function": {"name": "get_weather", "arguments": '{"city":"北京"}'}}
-        ]
-        assert w._total_tokens == 30
-
-    def test_use_responses_api_judge(self):
-        w = self._make_subagent()
-        assert w._use_responses_api({"模型名称": "gpt-5.6-luna"}) is True
-        assert w._use_responses_api({"模型名称": "deepseek-v4-flash"}) is False
-        # 强制覆盖
-        assert w._use_responses_api({"模型名称": "deepseek-v4-flash", "使用ResponsesAPI": True}) is True
-        assert w._use_responses_api({"模型名称": "gpt-5.6-luna", "使用ResponsesAPI": False}) is False
+    _ensure_plugins_loaded()
+    w = OpenAIChatWorker(
+        messages=[{"role": "user", "content": "hi"}],
+        session_messages=[],
+        llm_config={"模型名称": "gpt-4o", "API_URL": "http://fake", "API_KEY": ""},
+        stream=True,
+    )
+    t = w._get_chat_transport("openai_chat")
+    assert getattr(t, "id", "") == "openai_chat"
 
     def test_responses_tools_conversion(self):
         tools = [
@@ -269,3 +165,45 @@ class TestSubAgentResponses:
                 "parameters": {"type": "object"},
             }
         ]
+
+# ---------- 协议分派：transport id 映射（Phase 3，responses 插件化） ----------
+_DISPATCH_ID_CASES = [
+    # (协议入口, 使用ResponsesAPI, 期望 transport id)；基线模型 gpt-4o 自动非 responses
+    (None, None, None),
+    (None, True, "openai_responses"),
+    (None, False, None),
+    ("responses", None, "openai_responses"),
+    ("responses", False, None),  # 旧键显式 False 压过新键
+    ("transport:openai_chat", None, "openai_chat"),
+]
+
+
+@pytest.mark.parametrize("entry,legacy,expect", _DISPATCH_ID_CASES)
+def test_resolve_transport_id_matrix(qapp, entry, legacy, expect):
+    from app.core.workers.chat_worker import OpenAIChatWorker
+
+    w = OpenAIChatWorker(
+        messages=[{"role": "user", "content": "hi"}],
+        session_messages=[],
+        llm_config={"模型名称": "gpt-4o", "API_URL": "http://fake", "API_KEY": ""},
+        stream=True,
+    )
+    if entry is not None:
+        w.llm_config["协议入口"] = entry
+    if legacy is not None:
+        w.llm_config["使用ResponsesAPI"] = legacy
+    assert w._resolve_transport_id(w.llm_config) == expect
+
+
+def test_resolve_transport_id_gpt6_auto(qapp):
+    """gpt-6 自动判定 → 映射到 openai_responses 插件"""
+    from app.core.workers.chat_worker import OpenAIChatWorker
+
+    w = OpenAIChatWorker(
+        messages=[{"role": "user", "content": "hi"}],
+        session_messages=[],
+        llm_config={"模型名称": "gpt-6-luna", "API_URL": "http://fake", "API_KEY": ""},
+        stream=True,
+    )
+    assert w._resolve_transport_id(w.llm_config) == "openai_responses"
+

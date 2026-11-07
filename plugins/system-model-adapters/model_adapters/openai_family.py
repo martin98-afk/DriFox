@@ -27,10 +27,14 @@ class OpenAIFamilyAdapter:
         return 1  # 兜底：非 gemini 非 deepseek 家族时命中（resolve 取最高分）
 
     def protocol_flags(self, llm_config: Dict[str, Any]) -> ProtocolFlags:
+        use_responses = det.detect_use_responses(llm_config)
         return ProtocolFlags(
             is_gemini=False,
             requires_reasoning_content=False,
-            use_responses_api=det.detect_use_responses(llm_config),
+            use_responses_api=use_responses,
+            # Phase 3：responses 已插件化（transport id = openai_responses）；
+            # protocol 字段供 worker 做 id 映射，use_responses_api 保留兼容读取
+            protocol="responses" if use_responses else "openai",
         )
 
 

@@ -37,9 +37,9 @@ from app.core.team.template_schema import (
 )
 
 # 工具插件化：TeamTools 类已删除，team_list_members 迁移为
-# plugins/system-tools/tools/team_tools.py 模块级函数（tool_ctx 签名）。
+# plugins/system-team/tools/team_tools.py 模块级函数（tool_ctx 签名）。
 # 复用 _load_module 模式加载插件模块（plugins/ 非 Python 包）。
-_PLUGIN_TOOLS = Path(__file__).resolve().parent.parent.parent / "plugins" / "system-tools" / "tools"
+_PLUGIN_TOOLS = Path(__file__).resolve().parent.parent.parent / "plugins" / "system-team" / "tools"
 
 
 def _load_subagent_tools():

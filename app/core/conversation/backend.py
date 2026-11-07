@@ -663,6 +663,32 @@ class ChatBackend(QObject):
         except Exception as e:
             logger.error(f"[ChatBackend] ToolExecutor 延迟创建失败: {e}")
 
+    def _prewarm_lsp_imports(self):
+        """预热前移：LSP 重链 import（lsp_manager→lsp_client→lsprotocol/pygls ~255ms）
+
+        a1 预热前移（#F22）：把 N17 create_tool_executor 里 importlib._lock 上
+        的 LSP 级联 import 拆到 60ms 批提前执行，两段均低于 watchdog 500ms 阈值。
+        仅 import 不构造：lsp 单例仍由原路径惰性创建，acquire 语义不变。幂等
+        （重复 import 命中 sys.modules 缓存）。失败非致命，仅告警。
+        """
+        try:
+            # [PERF #36] LSP 按配置预热：未配置 LSP 服务器时跳过 lsp_manager→
+            # lsprotocol/pygls 重链 import（~255ms）。守卫保守：PluginManager
+            # 未就绪或读取异常时无法判定 → 照旧预热（不误伤已配置用户）；
+            # 已就绪且配置为空 → 跳过（消费接口 _ensure_started 按需拉起，行为不变）。
+            try:
+                from app.plugins.managers.plugin_manager import PluginManager
+
+                pm = PluginManager.get_instance()
+                if pm is not None and pm.is_initialized() and not pm.get_lsp_configs():
+                    logger.debug("[ChatBackend] 未配置 LSP 服务器，跳过 import 预热")
+                    return
+            except Exception:
+                pass
+            import app.core.lsp.lsp_manager  # noqa: F401
+        except Exception as e:
+            logger.warning(f"[ChatBackend] LSP import 预热失败（非致命）: {e}")
+
     def _deferred_create_engines(self):
         """400ms 批：ChatEngine（依赖 tool_executor）
 

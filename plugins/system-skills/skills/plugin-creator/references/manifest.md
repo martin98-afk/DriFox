@@ -53,7 +53,7 @@ python tools/validate_plugins.py
 | `type` | enum | `"user"` | `"user"`（用户插件）\| `"system"`（系统级，需签名） |
 | `keywords` | string[] | 无 | 检索关键词 |
 | `drifox` | object | 无 | DriFox 兼容性声明 |
-| `dependencies` | object | 无 | 插件间依赖 |
+| `dependencies` | object | 无 | 插件间依赖 + 第三方 pip 依赖声明（见下节） |
 | `icon` | object | 无 | `{"light": "icon.svg", "dark": "icon_dark.svg"}` |
 | `config_schema` | object | 无 | E1 配置契约，见下节 |
 | `api_version` | int | `1` | 插件 API 契约版本。`>= 2` 时 `capabilities` 缺失按空清单处理（从严） |
@@ -91,12 +91,34 @@ python tools/validate_plugins.py
 
 ### `dependencies` 依赖
 
+一层放插件间依赖（键=插件名，值=SemVer 范围）；第三方 pip 依赖放 `pip` 子键。
+
+#### 插件间依赖
+
 ```json
 "dependencies": {
   "evolver": ">=1.0.0",
   "code-review": "^2.1.0"
 }
 ```
+
+#### 第三方 pip 依赖
+
+```json
+"dependencies": {
+  "pip": {
+    "default": ["httpx>=0.27", "cryptography>=42"],
+    "win32": ["pywin32>=306; sys_platform == 'win32'"],
+    "darwin": []
+  }
+}
+```
+
+- 平台键取 `sys.platform` 值：`win32` / `linux` / `darwin`（`win`/`mac`/`macos` 归一到 win32/darwin）；生效集合 = `default` 与当前平台键合并去重
+- spec 必须 PEP 508 白名单形态：包名 + 可选 extras + 版本约束；`git+`、`file://`、`-r`、`--flag` 一律拒收（warning + 忽略，防注入）
+- 版本约束必须写：裸包名拒绝
+
+**分发约定（2026-11 起）**：插件仓库里不放 `deps/` 目录，只声明 manifest。市场 CI 打包时按 `dependencies.pip` 从 PyPI 现场构建，把依赖打进按平台分发的单插件 tarball（GitHub Release 直链 + sha256），安装端优先走 tarball 通道。本地开发要把依赖装进插件 `deps/<platform>/` 自测可以，但不要提交进市场 PR。
 
 ---
 
@@ -209,7 +231,7 @@ manifest 加 `api_version: 2`，必须同时把用到的能力全部列上。** 
 
 ## E1 配置契约（config_schema）
 
-在 manifest 里声明 `config_schema`，主程序自动在设置页渲染配置卡片；用户保存后值写入 `PluginConfigStore`，插件代码随时读取。
+在 manifest 里声明 `config_schema`，主程序自动在「设置 → 插件」的插件详情页渲染配置表单；用户保存后值写入 `PluginConfigStore`，插件代码随时读取。没声明 `config_schema` 的插件同样会出现在插件列表里，可以在详情页查看权限与关于信息。
 
 ### 结构
 
@@ -220,7 +242,7 @@ manifest 加 `api_version: 2`，必须同时把用到的能力全部列上。** 
 }
 ```
 
-### 字段属性（14 个）
+### 字段属性（15 个）
 
 | 属性 | 必填 | 说明 |
 |------|------|------|
@@ -237,6 +259,7 @@ manifest 加 `api_version: 2`，必须同时把用到的能力全部列上。** 
 | `rows` | textarea 可选 | 行数 |
 | `url` | link 必配 | 链接地址 |
 | `action` | action 必配 | 工具编排配置（见下） |
+| `required` | 可选 | 必填标记（默认 `false`）。为 `true` 时表单字段名后显示星号，值为空即计入「待配置」：插件在设置列表置顶，详情页顶部提示待填项，搜索筛选项可只看待配置 |
 
 ### type 全集（8 种）
 

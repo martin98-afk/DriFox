@@ -174,7 +174,6 @@ def _window_workbench(host: Any):
 
 def _ui_events(host: Any, ctx: Any):
     """UI 事件总线的订阅 / 发布（订阅随插件卸载自动退订）。"""
-
     def api() -> dict:
         from app.core.infra.ui_event_bus import UIEventBus
 
@@ -203,6 +202,64 @@ def _window_list(host: Any):
         return {getattr(w, "_window_id", "") for w in getattr(tm, "_windows", [])}
 
     return ids
+
+
+def _question_control(host: Any, ctx: Any):
+    """提问卡控制面：订阅生命周期 / 读快照 / 代答 / 倒计时。
+
+    只暴露提问交互所需的四件事，插件据此自行实现超时策略（跳过 / AI 代答 /
+    不限时）。订阅随插件卸载自动退订（registry.track_subscription）。
+
+    value_style=value：provider 直接返回 facade dict（不是需要再调一次的工厂），
+    调用侧 ``pool["question.control"]["answer"](...)``。
+    """
+    real = host if host is not None else _resolve_active_host(None)
+
+    def subscribe(callback):
+        if real is None or not hasattr(real, "question_control_subscribe"):
+            raise RuntimeError("宿主窗口不支持提问控制")
+        if not real.question_control_subscribe(callback):
+            return False
+        ctx.registry.track_subscription(ctx.plugin, _QuestionSignal(real, callback), callback)
+        return True
+
+    def snapshot() -> dict:
+        return dict(real.question_control_snapshot() or {}) if real is not None else {}
+
+    def answer(text: str) -> bool:
+        return bool(real.question_control_answer(str(text or ""))) if real is not None else False
+
+    def countdown(seconds: int) -> bool:
+        return bool(real.question_control_countdown(int(seconds or 0))) if real is not None else False
+
+    def stop_countdown() -> bool:
+        return bool(real.question_control_stop_countdown()) if real is not None else False
+
+    def unsubscribe(callback) -> bool:
+        return bool(real.question_control_unsubscribe(callback)) if real is not None else False
+
+    return {
+        "subscribe": subscribe,
+        "unsubscribe": unsubscribe,
+        "snapshot": snapshot,
+        "answer": answer,
+        "countdown": countdown,
+        "stop_countdown": stop_countdown,
+    }
+
+
+class _QuestionSignal:
+    """把「从宿主监听者列表移除」适配成 signal.disconnect 形状（供能力注册表退订）。"""
+
+    def __init__(self, widget: Any, callback: Any):
+        self._widget = widget
+        self._callback = callback
+
+    def disconnect(self, *_args) -> None:  # noqa: D401 - 与 Qt signal 同形
+        try:
+            self._widget.question_control_unsubscribe(self._callback)
+        except Exception:  # noqa: BLE001 - 窗口已销毁时静默
+            pass
 
 
 def _window_events(host: Any, ctx: Any):
@@ -1339,6 +1396,7 @@ def register(registry) -> None:
     reg.register("ui.card.hide", _ui_card_hide, surface="ui", owner="core:ui")
     reg.register("ui.artifacts.show", _ui_artifacts_show, surface="ui", owner="core:ui")
     reg.register("ui.events", _ui_events, surface="ui", owner="core:ui")
+    reg.register("question.control", _question_control, surface="ui", owner="core:ui")
     reg.register("command.read", _command_read, surface="ui", owner="core:ui")
     reg.register("command.reload", _command_reload, surface="ui", owner="core:ui")
     reg.register("plugin.read", _plugin_read, surface="ui", owner="core:ui")

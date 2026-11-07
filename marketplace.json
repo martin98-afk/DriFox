@@ -75,8 +75,8 @@
             },
             "homepage": "https://github.com/martin98-afk/DriFox",
             "icon": {
-                "light": "D:/work/DriFox/plugins/assistant_hub/icons/avatars/avatar-13.png",
-                "dark": "D:/work/DriFox/plugins/assistant_hub/icons/avatars/avatar-13.png"
+                "light": "icons/avatars/avatar-13.png",
+                "dark": "icons/avatars/avatar-13.png"
             }
         },
         {
@@ -130,7 +130,7 @@
         {
             "name": "plugin-marketplace",
             "description": "DriFox 官方插件市场 — 浏览、安装、管理插件，并把搜索/安装/卸载/更新/启停开放给 AI 工具",
-            "version": "0.4.0",
+            "version": "0.6.0",
             "author": "DriFox Contributors",
             "license": "GPL-3.0-or-later",
             "categories": [
@@ -287,6 +287,54 @@
             "components": {
                 "context_tiers": true,
                 "budget_resolvers": true
+            },
+            "homepage": "https://github.com/martin98-afk/DriFox",
+            "icon": {
+                "light": "icon.svg",
+                "dark": "icon_dark.svg"
+            }
+        },
+        {
+            "name": "system-core",
+            "description": "DriFox 内置核心工具：文件读写（read/write/edit/grep/glob）、终端执行（bash/后台任务）、待办（todowrite）",
+            "version": "1.0.0",
+            "author": "DriFoxx Team",
+            "license": "GPL-3.0-or-later",
+            "categories": [
+                "tool"
+            ],
+            "source": {
+                "type": "git-subdir",
+                "url": "https://github.com/martin98-afk/DriFox",
+                "path": "plugins/system-core",
+                "ref": "master"
+            },
+            "components": {
+                "tools": true
+            },
+            "homepage": "https://github.com/martin98-afk/DriFox",
+            "icon": {
+                "light": "icon.svg",
+                "dark": "icon_dark.svg"
+            }
+        },
+        {
+            "name": "system-diagnostics",
+            "description": "DriFox 内置诊断工具：get_diagnostics 静态检查与 LSP 代码智能",
+            "version": "1.0.0",
+            "author": "DriFoxx Team",
+            "license": "GPL-3.0-or-later",
+            "categories": [
+                "tool"
+            ],
+            "source": {
+                "type": "git-subdir",
+                "url": "https://github.com/martin98-afk/DriFox",
+                "path": "plugins/system-diagnostics",
+                "ref": "master"
+            },
+            "components": {
+                "tools": true
             },
             "homepage": "https://github.com/martin98-afk/DriFox",
             "icon": {
@@ -456,6 +504,32 @@
             }
         },
         {
+            "name": "system-question",
+            "description": "DriFox 内置提问工具：向用户提问（选项/多选/自定义），支持超时跳过与超时 AI 代答",
+            "version": "1.0.0",
+            "author": "DriFoxx Team",
+            "license": "GPL-3.0-or-later",
+            "categories": [
+                "ui",
+                "tool"
+            ],
+            "source": {
+                "type": "git-subdir",
+                "url": "https://github.com/martin98-afk/DriFox",
+                "path": "plugins/system-question",
+                "ref": "master"
+            },
+            "components": {
+                "tools": true,
+                "ui": true
+            },
+            "homepage": "https://github.com/martin98-afk/DriFox",
+            "icon": {
+                "light": "icon.svg",
+                "dark": "icon_dark.svg"
+            }
+        },
+        {
             "name": "system-serializers",
             "description": "DriFox 内置消息序列化器：OpenAI 消息格式",
             "version": "1.0.0",
@@ -566,7 +640,35 @@
                 "tools": true,
                 "ui": true
             },
-            "homepage": "https://github.com/martin98-afk/DriFox"
+            "homepage": "https://github.com/martin98-afk/DriFox",
+            "icon": {
+                "light": "icon.svg",
+                "dark": "icon_dark.svg"
+            }
+        },
+        {
+            "name": "system-team",
+            "description": "DriFox 内置团队工具：组建/加入团队、派发任务邮件与成员查询",
+            "version": "1.0.0",
+            "author": "DriFoxx Team",
+            "license": "GPL-3.0-or-later",
+            "categories": [
+                "tool"
+            ],
+            "source": {
+                "type": "git-subdir",
+                "url": "https://github.com/martin98-afk/DriFox",
+                "path": "plugins/system-team",
+                "ref": "master"
+            },
+            "components": {
+                "tools": true
+            },
+            "homepage": "https://github.com/martin98-afk/DriFox",
+            "icon": {
+                "light": "icon.svg",
+                "dark": "icon_dark.svg"
+            }
         },
         {
             "name": "system-team-templates",
@@ -616,7 +718,7 @@
         },
         {
             "name": "system-timer",
-            "description": "系统定时任务 — 让模型创建一次性/循环定时任务，到期后向创建任务的会话自动发送触发消息开启新一轮对话（内存级，不持久化）",
+            "description": "系统定时/事件任务 — 让模型创建一次性/循环定时任务，或监听指定窗口/会话/团队成员的回答结束等事件，命中后向创建任务的会话自动发送触发消息开启新一轮对话（内存级，不持久化）",
             "version": "0.1.0",
             "author": "DriFox Contributors",
             "license": "GPL-3.0-or-later",
@@ -634,12 +736,16 @@
                 "tools": true,
                 "ui": true
             },
-            "homepage": "https://github.com/martin98-afk/DriFox"
+            "homepage": "https://github.com/martin98-afk/DriFox",
+            "icon": {
+                "light": "icon.svg",
+                "dark": "icon_dark.svg"
+            }
         },
         {
             "name": "system-tools",
-            "description": "DriFox 内置工具集：文件读写、终端执行、网页搜索、诊断、任务管理、子智能体调度、用户交互，含 Tavily/TinyFish 搜索 API Key 配置",
-            "version": "1.0.1",
+            "description": "DriFox 内置交互工具：技能加载/管理、MCP 服务器管理、Gitee 文件上传（文件/终端/搜索/诊断/团队/提问已拆分为独立插件）",
+            "version": "2.0.0",
             "author": "DriFoxx Team",
             "license": "GPL-3.0-or-later",
             "categories": [
@@ -683,6 +789,30 @@
             }
         },
         {
+            "name": "system-web",
+            "description": "DriFox 内置网络工具：网页搜索与抓取（Tavily / TinyFish，含 API Key 配置）",
+            "version": "1.0.0",
+            "author": "DriFoxx Team",
+            "license": "GPL-3.0-or-later",
+            "categories": [
+                "tool"
+            ],
+            "source": {
+                "type": "git-subdir",
+                "url": "https://github.com/martin98-afk/DriFox",
+                "path": "plugins/system-web",
+                "ref": "master"
+            },
+            "components": {
+                "tools": true
+            },
+            "homepage": "https://github.com/martin98-afk/DriFox",
+            "icon": {
+                "light": "icon.svg",
+                "dark": "icon_dark.svg"
+            }
+        },
+        {
             "name": "welcome_changelog",
             "description": "欢迎卡片「更新」tab — 拉取 DriFox GitHub Releases 作为更新日志展示。禁用插件后该 tab 消失。",
             "version": "1.0.2",
@@ -700,7 +830,11 @@
             "components": {
                 "ui": true
             },
-            "homepage": "https://github.com/martin98-afk/DriFox"
+            "homepage": "https://github.com/martin98-afk/DriFox",
+            "icon": {
+                "light": "icon.svg",
+                "dark": "icon_dark.svg"
+            }
         },
         {
             "name": "worktree-manager",

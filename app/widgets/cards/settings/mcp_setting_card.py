@@ -10,6 +10,7 @@ MCP Server 配置卡片
 import json
 import threading
 import time
+import weakref
 from pathlib import Path
 from typing import Dict
 
@@ -1131,6 +1132,12 @@ class MCPListSettingCard(ExpandSettingCard):
     _authorizeDone = pyqtSignal(str, bool, str, bool)  # name, ok, error, cancelled
     _unbindDone = pyqtSignal(str, bool, str)
 
+    # 类级常驻 token 估算 worker（#F37 Step2）：跨卡片实例复用，卡片重建不重建线程。
+    # 启动一次永不重启；job 经 maxsize=1 队列单飞（密集触发只算一次）；job 携带
+    # weakref(card)，worker emit 前 sip 存活硬判，卡片销毁不留泄漏。
+    _token_worker_thread = None
+    _token_calc_queue = None
+
     def __init__(self, icon, title: str, content: str = None, parent=None):
         self.cfg = Settings.get_instance()
         # 必须在任何可能触发 _update_mcp_token_count 的路径之前初始化，
@@ -1465,13 +1472,24 @@ class MCPListSettingCard(ExpandSettingCard):
         """按服务器名推导门禁 key（与 mcp_lsp_safety 门禁拼接口径一致）。
 
         key 绑定启动配置指纹（command+args，args 含 command 本体与
-        mcp_tools 调用点口径一致）：配置变更后旧 key 失配，需重新确认。"""
+        mcp_tools 调用点口径一致）：配置变更后旧 key 失配，需重新确认。
+
+        必须复刻门禁侧的 stdio 命令回落（_lifespan_stdio 先
+        _resolve_stdio_command 再算指纹）。否则配置声明 python3 而本机
+        实际回落 python 时两侧指纹错位：待确认守卫永不命中（每次热重载
+        广播都对同一台服务器发起注定被拦的连接，日志刷屏），且确认/拒绝
+        写入错位 key，点「允许启动」也无法放行。
+        """
         from app.core.tools.mcp_lsp_safety import config_hash, plugin_from_source, server_key
+        from app.tools.mcp_tools import _resolve_stdio_command
 
         server_cfg = next((s for s in self._get_servers() if s.get("name", "") == name), {})
         src = server_cfg.get("_source", "")
         cmd = server_cfg.get("command", "") or ""
-        cmd_args = [cmd] + list(server_cfg.get("args") or []) if cmd else list(server_cfg.get("args") or [])
+        raw_args = list(server_cfg.get("args") or [])
+        # 与 _lifespan_stdio 同口径：先回落 command（python3→python），再拼 [cmd]+args 算指纹
+        cmd, raw_args = _resolve_stdio_command(cmd, raw_args)
+        cmd_args = [cmd] + raw_args if cmd else raw_args
         chash = config_hash(cmd, cmd_args)
         return server_key("mcp", plugin_from_source(src), name, chash)
 
@@ -2002,33 +2020,65 @@ class MCPListSettingCard(ExpandSettingCard):
     # ── Token 占用估算 ──────────────────────────────
 
     def _update_mcp_token_count(self):
-        """更新头部 subtitle：服务器计数 + token 占用估算（后台线程计算）
+        """更新头部 subtitle：服务器计数 + token 占用估算（常驻后台线程计算）
 
         全部重活（.mcp.json 读取解析 + json.dumps(全部工具 schema) + token 估算）
-        都在 daemon 线程执行，结果经 _tokenCountReady 信号（Qt 队列连接）回
-        主线程 setCount。主线程路径零 I/O 零重计算——采样器曾抓到同步版本
-        在主线程阻塞 2582ms（磁盘 I/O 高压时单次 stat 可达 2s）。
+        都在类级常驻 daemon 线程执行（#F37 Step2：原实现每次
+        Thread(name="mcp-token-calc").start() 后立即 _started.wait() 等新线程
+        拿 GIL——与 system-cleaner 的 psutil 全表枚举互饿，watchdog 实证
+        543ms/9025ms），结果经 _tokenCountReady 信号（Qt 队列连接）回主线程
+        setCount。主线程路径零 I/O 零重计算零线程创建。
         """
         if getattr(self, "_token_calc_running", False):
             return
         self._token_calc_running = True
 
+        import queue
         import threading
 
-        def _work():
+        cls = MCPListSettingCard  # worker 单例固定挂宿主类，跨子类/假卡实例复用
+        if cls._token_worker_thread is None or not cls._token_worker_thread.is_alive():
+            if cls._token_calc_queue is None:
+                cls._token_calc_queue = queue.Queue(maxsize=1)
+            t = threading.Thread(target=cls._token_worker_loop, name="mcp-token-calc", daemon=True)
+            cls._token_worker_thread = t
+            t.start()
+
+        try:
+            cls._token_calc_queue.put_nowait(weakref.ref(self))
+        except Exception:
+            # queue.Full：已有待处理 job（单飞），本次入队丢弃——密集触发只算一次
+            pass
+
+    @staticmethod
+    def _token_worker_loop():
+        """常驻 worker 主循环：q.get() → 计算 → sip 硬判存活后 emit（永不退出）"""
+        import queue
+
+        from PyQt5 import sip
+
+        q = MCPListSettingCard._token_calc_queue
+        while True:
+            card_ref = q.get()
+            card = card_ref() if card_ref is not None else None
+            if card is None:
+                continue
             try:
+                if sip.isdeleted(card):
+                    # 卡片已销毁：跳过本次 job（无 UI 可更新，无需复位其标志）
+                    continue
                 from app.core.infra.token_estimator import estimate_tokens
 
-                servers = self._get_servers()
+                servers = card._get_servers()
                 count = len(servers)
                 enabled_count = sum(1 for s in servers if s.get("enabled", True))
                 base = f"{enabled_count}/{count}"
 
                 # 按服务器分组估算：头部展示总数，行内展示各自占用
-                mgr = self._get_mcp_manager()
+                mgr = card._get_mcp_manager()
                 token_count = 0
                 per_server: dict = {}
-                if mgr and self.cfg.mcp_enabled.value:
+                if mgr and card.cfg.mcp_enabled.value:
                     schemas_by_server = mgr.get_tool_schemas_by_server()
                     for name, schemas in schemas_by_server.items():
                         if not schemas:
@@ -2037,15 +2087,19 @@ class MCPListSettingCard(ExpandSettingCard):
                         per_server[name] = n
                         token_count += n
 
-                self._tokenCountReady.emit(f"{base} · ~{token_count:,} tokens", per_server)
+                card._tokenCountReady.emit(f"{base} · ~{token_count:,} tokens", per_server)
             except RuntimeError:
-                pass  # 卡片已销毁
+                pass  # 卡片已销毁（emit 链路）
             except Exception as e:
                 logger.debug(f"[MCP] token 估算后台计算失败: {e}")
             finally:
-                self._token_calc_running = False
-
-        threading.Thread(target=_work, name="mcp-token-calc", daemon=True).start()
+                try:
+                    if not sip.isdeleted(card):
+                        card._token_calc_running = False
+                except (RuntimeError, TypeError):
+                    # RuntimeError：wrapper 已析构；TypeError：非 Qt wrapper
+                    # （防 worker 被 finally 异常击穿退出）
+                    pass
 
     # ── 供外部调用的添加/更新方法 ──────────────────────
 

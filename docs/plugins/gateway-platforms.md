@@ -228,13 +228,23 @@ if _deps not in _sys.path:
 
 ### 4.4 跨插件同名 SDK 冲突
 
-两个插件同时 vendor 不同版本的同一 SDK 时，先注入者 wins（`sys.path.insert(0)`）。
-建议：
+两个插件同时 vendor 不同版本的同一 SDK 时，宿主**不再**允许「先注入者 wins」这种
+静默结果。加载链路现在的处理（2026-11）：
 
-- 把 SDK 命名空间包移到插件内私有路径（如 `deps/teams_sdk_v1/`）再用
-  `sys.modules` 别名映射，避免版本碰撞。
-- 平台 SDK 通常差异不大，社区仓 6 内置平台 vendor 模式（`gateway-dingtalk/deps/`、
-  `gateway-discord/deps/` 等）已验证可行。
+1. 全部插件扫描合并后，`deps_loader.find_deps_conflicts` 对同一规范化包名的版本
+   区间求交，不可调和即判冲突（`specs_conflict`，保守口径：读不懂的约束不算冲突）
+2. 裁决优先级 `system > claude > user`，同类型按插件名字典序，保证每次启动结果一致
+3. 让出方标记 `deps_conflict_reason` → `PluginInfo.load_blocked` 为真，其 deps 路径
+   从 `sys.path` 摘除，tool/provider/runtime/UI 四类组件一律不加载
+4. 插件市场「诊断报告」的异常项会列出被拦截插件与具体冲突包，启用插件前也会做同样
+   检查，冲突直接拒绝并在 `last_error` 里说明
+
+插件侧建议不变：同一生态内的 SDK 尽量收敛版本；确有版本分裂需求时走私有路径 +
+`sys.modules` 别名，别指望宿主替你把两个版本同时跑起来（同进程内 C 扩展只能有一个）。
+
+依赖版本判定也变了：`missing_pip_deps` 现在读 `deps/*.dist-info/METADATA` 的
+`Version` 与声明范围比对，声明 `httpx>=0.28` 而 deps 里装着 0.20 会判缺失并触发
+重装（重装前按 RECORD 精确清理旧分发，避免新旧文件共存）。
 
 ### 4.5 适配器断连纪律（历史教训：2026-08-20 连接泄漏）
 

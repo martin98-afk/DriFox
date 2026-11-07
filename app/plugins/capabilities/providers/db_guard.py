@@ -24,12 +24,25 @@ _ALLOWED_VERBS = frozenset(
 )
 _FORBIDDEN = ("attach", "detach", "pragma", "vacuum", "load_extension", "reindex")
 _FORBIDDEN_RE = re.compile(r"\b(" + "|".join(_FORBIDDEN) + r")\b", re.IGNORECASE)
+# 表名候选提取。三处细节决定误判：
+# - ``update`` 后可跟冲突动作（UPDATE OR IGNORE/REPLACE <表>），要先吃掉；
+# - ``table`` 后可跟 ``IF [NOT] EXISTS``（DROP TABLE / CREATE TABLE 都要认）；
+# - ``ON CONFLICT(x) DO UPDATE SET`` 里的 ``SET`` 不是表名，用负向前瞻挡掉，
+#   否则 upsert 语句必被拒。不把 ``exists`` 当表名锚点：``WHERE EXISTS (...)`` 无害，
+#   而 ``DROP INDEX IF EXISTS <名>`` 的索引名另由 _DROP_INDEX_RE 单独校验。
 _TABLE_REF_RE = re.compile(
-    r"\b(?:from|into|update|join|table|exists)\s+(?:if\s+not\s+exists\s+)?([A-Za-z_][\w]*)",
+    r"\b(?:from|into|update|join|table)\s+"
+    r"(?:if\s+(?:not\s+)?exists\s+)?"
+    r"(?:or\s+(?:rollback|abort|replace|fail|ignore)\s+)?"
+    r"(?!set\b)([A-Za-z_][\w]*)",
     re.IGNORECASE,
 )
 _INDEX_ON_RE = re.compile(
     r"\bcreate\s+(?:unique\s+)?index\s+(?:if\s+not\s+exists\s+)?[\w]+\s+on\s+([A-Za-z_][\w]*)",
+    re.IGNORECASE,
+)
+_DROP_INDEX_RE = re.compile(
+    r"\bdrop\s+index\s+(?:if\s+exists\s+)?([A-Za-z_][\w]*)",
     re.IGNORECASE,
 )
 
@@ -101,6 +114,9 @@ class PluginDBProxy:
 
         tables = set(m.group(1) for m in _TABLE_REF_RE.finditer(stmt))
         tables.update(m.group(1) for m in _INDEX_ON_RE.finditer(stmt))
+        # DROP INDEX 的索引名同样要求前缀：索引与表同处插件命名空间，
+        # 不带前缀的名字可能属于主程序（idx_updated / idx_project）。
+        tables.update(m.group(1) for m in _DROP_INDEX_RE.finditer(stmt))
         for name in tables:
             lowered = name.lower()
             if lowered.startswith("sqlite_"):

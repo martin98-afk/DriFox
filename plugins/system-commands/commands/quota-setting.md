@@ -1,14 +1,11 @@
 ---
-description: 通过 Playwright 辅助抓取 OpenCode Zen/Go 和火山方舟的套餐用量查询配置（cookie / csrf_token 等），避免手动从浏览器 DevTools 复制
+description: 通过 Playwright 辅助抓取火山方舟的套餐用量查询配置（cookie / csrf_token 等），避免手动从浏览器 DevTools 复制
+（OpenCode Go 已改用官方 Bearer 接口，用服务商 API Key 即可查询，无需抓取）
 type: prompt
 argument-hint:
-  "[--opencode]": "抓取 OpenCode Zen/Go 的 cookie + server_id + workspace_id"
   "[--volcengine]": "抓取火山方舟的 cookie + csrf_token + x-web-id"
-  "[--timeout=]": "自定义登录等待超时秒数（默认 300，范围 60-900）。可与平台名同时使用"
-mutex_groups:
-  mode: ["--opencode", "--volcengine"]
+  "[--timeout=]": "自定义登录等待超时秒数（默认 300，范围 60-900）"
 prompt_sections:
-  --opencode: "opencode"
   --volcengine: "volcengine"
 ---
 
@@ -20,22 +17,22 @@ prompt_sections:
 
 | 取值 | 行为 |
 |------|------|
-| 空 | 询问用户"请指定要抓取哪个平台：opencode / volcengine（可同时指定多个）"，等待用户回复后再继续 |
-| `--opencode` | 仅执行 OpenCode 抓取流程 |
-| `--volcengine` | 仅执行火山方舟抓取流程 |
-| 未知平台名 | 提示"不支持的平台：{xxx}，目前支持 opencode / volcengine"并停止 |
+| 空 | 询问用户"请指定要抓取哪个平台：volcengine"，等待用户回复后再继续 |
+| `--volcengine` | 执行火山方舟抓取流程 |
+| 未知平台名 | 提示"不支持的平台：{xxx}，目前支持 volcengine"并停止 |
 
-支持的可选标志（**可与平台名混用**）：
+支持的可选标志：
 
 | 标志 | 行为 |
 |------|------|
 | `--timeout=` | 自定义登录等待超时秒数，默认 300（5 分钟），范围 60-900 |
 
 参数解析示例：
-- `/quota-setting --opencode` → target=opencode，timeout=300
+- `/quota-setting --volcengine` → target=volcengine，timeout=300
 - `/quota-setting --volcengine --timeout=180` → target=volcengine，timeout=180
-- `/quota-setting --opencode --volcengine` → 依次抓 opencode 和 volcengine
 - `/quota-setting` → 询问用户
+
+> 注：OpenCode Go 用量查询已改走官方接口（Bearer API Key），无需抓取配置。
 
 ### 2. 工具后端探测
 
@@ -66,14 +63,12 @@ prompt_sections:
               登录成功后本工具会自动抓取所需配置，无需您手动复制。
               登录过程有 5 分钟超时限制。」
 3. 调用对应平台的具体流程
-4. 全部平台抓取完成后，mcp__playwright__browser_close() 关闭浏览器
+4. 抓取完成后，mcp__playwright__browser_close() 关闭浏览器
 ```
 
 ### 6. 输出格式规范
 
 每个平台抓取完成后，**用 Markdown 表格展示**，整段放在 ```` ```text ```` 代码块里方便用户一次性全选复制。
-
-**多平台抓取**时，用 `---` 分隔多个平台结果。
 
 ### 7. 错误处理
 
@@ -94,8 +89,6 @@ prompt_sections:
 - 用户手动登录（账号密码、扫码、2FA 都支持）
 - 自动从登录后的网络请求中提取 httpOnly cookie
 - 清晰标注每个字段对应 DriFox 的哪个配置项
-- 多平台一次性抓取
-- 当 server_id 无法自动捕获时，给出手动填写指引
 
 **不会做**：
 - 存储结果到任何文件/数据库/配置
@@ -103,62 +96,6 @@ prompt_sections:
 - 替用户自动登录
 - 抓取 cookie 之外的敏感信息
 - 没有真实浏览器交互时用其他工具替代
-
-<!-- section:opencode -->
-### 4. OpenCode Zen / Go 抓取流程
-
-**所需字段**：`cookie`、`server_id`、`workspace_id`
-
-**关键经验**：直接导航到 Go 页面不会触发 `/_server` 请求。必须先导航到工作区首页（Zen 页），然后**点击 Go 导航链接**，此时会发出**两个** `/_server?id=` 请求，**第二个**才是正确的 server_id。
-
-**步骤详解**：
-
-```
-0. workspace_id 不提前询问用户（登录后才能看到）。如果用户消息中已含 `wrk_xxx` 或 opencode.ai/workspace/wrk_xxx URL 则用正则提取。
-1. 【导航到工作区首页】构造目标 URL（有 workspace_id → opencode.ai/workspace/{id}，否则 → opencode.ai），不要直接跳到 /go 页
-2. mcp__playwright__browser_navigate(url=目标URL)
-3. 等待登录（轮询 5 秒间隔，最长 timeout 秒）：URL 含 /workspace/wrk_ 或 snapshot 出现模型列表/BYOK/计费导航
-4. 提取 workspace_id（从 URL 正则提取 wrk_xxx）
-5. 【关键】点击 Go 导航链接 + 捕获 `/_server` 请求：
-   5.1 用 browser_run_code_unsafe 注册 request 监听器（监听含 /_server?id= 的请求）
-   5.2 用 page.click('a[href*="/go"]') 或类似选择器点击 Go 导航链接（**不要直接 navigate 到 /go 路径**）
-   5.3 等待 3-5 秒确保两个 `/_server` 请求都发出
-   5.4 提取**第二个**请求的 id 参数作为 server_id（第一个请求的 id 是旧的/错误的）
-   5.5 兜底方案：如果监听未捕获到，从 page HTML 中搜索 `<form action="/_server?id=xxx"` 提取 server_id
-6. 抓取 cookie：browser_run_code_unsafe + page.context().cookies('https://opencode.ai')
-7. 组装结果：{"cookie": "...", "server_id": "...", "workspace_id": "..."}
-```
-
-> ⚠️ 经验教训：**务必通过点击 Go 导航链接来触发 `/_server` 请求**，而非直接导航。直接访问 `/go` URL 会导致页面复用缓存，不会发出 `/_server` 请求，导致 server_id 无法捕获或捕获到旧值。
-
-**OpenCode 特有错误处理**：
-
-| 错误场景 | 应对 |
-|---------|------|
-| 只捕获到一个 `/_server` 请求 | 检查是否直接 navigate 到了 /go 路径。按步骤 5 操作：导航到工作区首页 → **点击 Go 链接**（而非 navigate），才会触发两个 `/_server` 请求 |
-| server_id 不正确（用户反馈） | 大概率是取了**第一个** `/_server` 请求的 id。正确的 server_id 在**第二次**请求中。重新按 5.1-5.4 的点击流程捕获，取第二个请求的 id 参数 |
-
-**字段填充提示**：
-
-| 抓取字段 | DriFox 服务商配置字段 |
-|---------|---------------------|
-| `cookie` | `套餐用量查询 → Cookie` |
-| `server_id` | `套餐用量查询 → Server ID` |
-| `workspace_id` | `套餐用量查询 → Workspace ID` |
-
-**输出模板**：
-
-````markdown
-## ✅ OpenCode Zen / Go 配置已抓取
-
-```text
-Server ID:    <64字符SHA256>
-Workspace ID: wrk_xxxxxxxx
-Cookie:       <完整 Cookie 字符串>
-```
-⚠️ Cookie 有效期通常为数小时到数天，过期后用 `/quota-setting opencode` 重新抓取。
-````
-<!-- end -->
 
 <!-- section:volcengine -->
 ### 5. 火山方舟抓取流程

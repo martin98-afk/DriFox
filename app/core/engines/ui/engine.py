@@ -105,10 +105,12 @@ class UIEngine(BaseEngine):
             executor=self._conversation_executor,
         )
 
-        # ===== 工具 schema 会话级快照：会话内冻结，保证 tools 前缀稳定 =====
+        # ===== 工具 schema 会话级快照：会话内完全冻结，保证 tools 前缀稳定 =====
         # 动机：tools 在请求前缀最外层，服务端 prompt cache 按前缀匹配；
         # 每轮从活注册表聚合 → 工具热重载即击穿整段缓存。
         # 冻结粒度：换会话 / 换 agent / 进出团队才换代（见 _tools_snapshot_key）。
+        # 插件工具增删改、MCP 启停一律不换代：新增工具由 PluginChanged hook
+        # 注入 schema + tool_execute 中转调用，移除工具调用时返 Unknown tool。
         self._tools_snapshot: Optional[Dict[str, Any]] = None
         self._tools_snapshot_lock = threading.Lock()
         # token 计算缓存（count_tools_tokens 要跑分词）：键 = (快照指纹, 模型, 校正比)
@@ -388,8 +390,9 @@ class UIEngine(BaseEngine):
     def _tools_snapshot_key(self, session_id: str) -> tuple:
         """快照键：只含用户显式切换的状态，**故意不含 registry 版本**。
 
-        冻结语义（见 get_session_tools_schema）：插件工具热重载（改代码、装卸、
-        MCP 启停）不换代，保证 tools 前缀稳定、服务端 KV 缓存可复用。
+        冻结语义（见 get_session_tools_schema）：插件工具增删改、热重载、
+        MCP 启停一律不换代，保证 tools 前缀稳定、服务端 KV 缓存可复用。
+        新工具经 PluginChanged hook 注入 schema + tool_execute 中转调用。
         换会话 / 换 agent / 进出团队属显式动作，换代可接受（system prompt
         本身也变了，缓存段本来就会断）。
         """
@@ -443,25 +446,12 @@ class UIEngine(BaseEngine):
         """本轮发送用工具 schema（会话内冻结）。
 
         冻结动机：tools 是请求前缀最外层，任何变动都会击穿服务端 prompt cache。
-        插件工具热重载（改代码、装卸）不影响快照——要生效请开新会话。
+        插件工具增删改、热重载、MCP 启停均不影响快照——新工具经 PluginChanged
+        hook 注入 schema 后用 tool_execute 中转调用，调用时按注入的最新 schema 传参。
         唯一例外：切会话 / 切 agent / 进出团队（_tools_snapshot_key）。
         """
         snap = self._get_tools_snapshot(session_id)
         return copy.deepcopy(snap["tools"])
-
-    def invalidate_tools_snapshot(self) -> None:
-        """失效工具 schema 快照，下一次请求重建。
-
-        由 PluginChanged 的工具签名 diff 驱动（见
-        hook_manager.invalidate_tools_snapshots_if_changed）：判据是 description +
-        parameters 的 hash，**不含实现代码**。所以改工具实现不触发换代，
-        prompt cache 照旧命中；改描述/参数、增删工具才换代。MCP 启停不换代。
-        """
-        snap = getattr(self, "_tools_snapshot", None)
-        if snap is None:
-            return
-        self._tools_snapshot = None
-        logger.info(f"[ToolsSchema] 快照失效（工具定义已变更，下次请求重建）old={snap.get('hash')}")
 
     # ========== 消息发送 ==========
 

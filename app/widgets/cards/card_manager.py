@@ -331,23 +331,8 @@ class CardManager:
         if card_widget is None:
             return
 
-        # [DEBUG-reopen] 临时诊断：CM 登记的 widget 指纹与记账状态
-        try:
-            from loguru import logger as _lg
-
-            _lg.warning(
-                f"[DEBUG-reopen] CM.show card={card_id} cm_wid={id(card_widget)} "
-                f"acc_vis={win_data['visible_cards'].get(container_type)} "
-                f"sys={card_id in win_data['system_cards']}"
-            )
-        except Exception:
-            pass
-
         # 多窗口隔离：检查 widget 是否已被删除
         if self._check_and_remove_deleted_card(window_id, card_id, container_type, card_widget):
-            from loguru import logger as _lg
-
-            _lg.warning(f"[DEBUG-reopen] CM.show 早退: widget 已删 card={card_id}")
             return
 
         # ★ L2 状态层：可堆叠卡片走"层可见集重算"路径
@@ -472,11 +457,7 @@ class CardManager:
                     card_widget.setVisible(True)
             else:
                 card_widget.setVisible(True)
-        except RuntimeError as _e:
-            # [DEBUG-reopen] 抓异常原文：定位中途 return 的真凶
-            from loguru import logger as _lg
-
-            _lg.warning(f"[DEBUG-reopen] CM.show RuntimeError card={card_id}: {_e}")
+        except RuntimeError:
             # 竞态条件：检测后 widget 被删除了
             self._check_and_remove_deleted_card(window_id, card_id, container_type, card_widget)
             return
@@ -503,19 +484,6 @@ class CardManager:
 
     def hide_card(self, card_id: str, window_id: str):
         """隐藏指定窗口的指定卡片"""
-        # [DEBUG-reopen] 临时诊断：谁在 hide 本卡，打调用栈
-        if card_id == "system-cleaner":
-            try:
-                import traceback
-
-                from loguru import logger as _lg
-
-                _stack = " <- ".join(
-                    f"{fr.name}:{fr.lineno}" for fr in traceback.extract_stack()[-6:-1]
-                )
-                _lg.warning(f"[DEBUG-reopen] CM.hide card={card_id} stack: {_stack}")
-            except Exception:
-                pass
         if window_id not in self._window_data:
             return
 
@@ -896,19 +864,6 @@ class CardManager:
 
     def _set_card_visible_raw(self, card_id: str, window_id: str, visible: bool) -> None:
         """底层显隐（不做互斥/压制决策）：驱动 widget + 回调 + 显隐事件"""
-        # [DEBUG-reopen] 临时诊断：底层显隐的调用栈（refresh_layer/_apply_visible_set 通道）
-        if card_id == "system-cleaner":
-            try:
-                import traceback
-
-                from loguru import logger as _lg
-
-                _stack = " <- ".join(
-                    f"{fr.name}:{fr.lineno}" for fr in traceback.extract_stack()[-7:-1]
-                )
-                _lg.warning(f"[DEBUG-reopen] CM.raw card={card_id} visible={visible} stack: {_stack}")
-            except Exception:
-                pass
         win_data = self._window_data.get(window_id)
         if not win_data:
             return

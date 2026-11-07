@@ -32,6 +32,7 @@ from app.plugins.capabilities.process_registry import (
     ProcessRegistry,
     build_process_env,
 )
+from app.tools.self_guard import check_self_kill_argv
 
 # 首启确认弹窗等待上限（秒）：用户在场很快点击；超时按拒绝处理
 _CONFIRM_TIMEOUT_S = 120.0
@@ -52,6 +53,14 @@ def process_start(host: Any, ctx: Any):
         registry = ProcessRegistry.get_instance()
         registry.check_limit(ctx.plugin)
         _confirm_once(registry, ctx.plugin, argv, cwd)
+
+        # 自杀守卫：能力池层统一拦截会终止宿主自身的 argv（与具体插件无关）
+        self_kill_reason = check_self_kill_argv(argv)
+        if self_kill_reason:
+            logger.warning(
+                f"[process.start] 拒绝会终止宿主的命令 plugin={ctx.plugin} argv={argv!r}"
+            )
+            raise PermissionError(self_kill_reason)
 
         merged_env = build_process_env(env)
 

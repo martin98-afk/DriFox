@@ -1044,9 +1044,12 @@ class MessageCard(SimpleCardWidget):
             self._stream_last_text_t = None
             # 插件信息项按落定态刷新（token_usage 透传给 provider 自行取舍）
             self._refresh_footer_stats(streaming=False, elapsed=elapsed, token_usage=token_usage)
-            # 单次补刷：历史会话加载 / 投影晚到的兜底（旧版 1s+2.5s 二连发是为等
-            # collector 投影；现在会话均值由插件累加表即时算出，1s 兜底足够）
+            # 落定补刷：历史会话加载 / 投影晚到的兜底
             self._schedule_stat_refresh(1000, elapsed, token_usage)
+            # 会话均值已改走 collector 投影（插件累加表 2026-09-17 移除），投影侧有
+            # 400ms messages_updated 节流 + 5s 重投影守卫，1s 单拍可能正落在投影
+            # 未就绪窗口且此后再无刷新节拍 → 页脚 stat 永久空白。补一拍 3s 兜底。
+            self._schedule_stat_refresh(3000, elapsed, token_usage)
 
     def _schedule_stat_refresh(self, delay_ms: int, elapsed, token_usage) -> None:
         """延迟补刷页脚插件 stat（绑定卡片生命周期）。
@@ -3538,16 +3541,18 @@ class MessageCard(SimpleCardWidget):
     def _commit_viewer_height(self, height: int) -> None:
         """高度应用的统一出口。
 
-        批量提交器激活时（resize 恢复期）交由它统一 flush —— 由它做
-        「一次布局 + 一次锚点修正」，与高度到达顺序无关；否则按原行为直接
-        应用。流式卡片始终走直接路径，保证跟底不受批处理延迟影响。
+        批量提交器激活时（resize 恢复期 / 落高置底窗）交由它统一 flush ——
+        由它做「一次布局 + 一次贴底」，与高度到达顺序无关；否则按原行为直接
+        应用。流式卡片也走批路径（[风暴主修 1b] 落高期合并流式卡的逐拍
+        setFixedHeight；批内贴底由 flush 的 follow_bottom_fn 统一保证，用户
+        滚离时 follow=False 不强制拉回，粘底语义不变）。
         """
         # viewer 真实高度到达 → T42 起步钉死完成使命，解除（幂等，未钉死零开销）
         self._unpin_layout_height()
         batch = getattr(self, "_height_batch", None)
         if batch is None:
             batch = self._resolve_height_batch()
-        if batch is not None and batch.active and not self._streaming:
+        if batch is not None and batch.active:
             batch.submit(self, height)
             return
         self.viewer.setFixedHeight(height)
@@ -6281,6 +6286,17 @@ class MessageCard(SimpleCardWidget):
             # 这里只停定时器，不改任何状态标记（仍由下方 stop_streaming_anim 收尾）。
             try:
                 self._anim_timer.stop()
+            except RuntimeError:
+                pass
+            # [兜底] 停页脚耗时计时器：finish_streaming 是所有流式收尾路径的必经点
+            # （正常完成 / 错误 / 手动停止 / 插话开新卡收尾旧卡）。插话场景旧卡被
+            # _on_queued_user_injected 换下后不再是 _current_assistant_card，完成链路
+            # 的 set_meta_info 只打新卡，旧卡计时器曾在此泄漏（页脚时间永久跳动）。
+            # 正常路径 set_meta_info 已先停过，此处幂等；工具迭代的重启由
+            # _on_stream_started 的 _elapsed_start_time is None 守卫负责，行为不变。
+            try:
+                self._elapsed_timer.stop()
+                self._elapsed_start_time = None
             except RuntimeError:
                 pass
             # 挂起的延迟小收缩作废：finish 后由非流式 _update_height 全量收敛接管

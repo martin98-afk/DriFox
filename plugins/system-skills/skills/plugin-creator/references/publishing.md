@@ -14,10 +14,11 @@ description: 发布插件到 drifox-plugins 官方市场的完整流程
 ① Fork 官方仓库 → https://github.com/martin98-afk/drifox-plugins（点右上角 Fork）
 ② Clone 你的 fork → git clone https://github.com/<你的帐号>/drifox-plugins.git
 ③ 把你的插件复制到仓库中 → cp -r ~/.drifox/plugins/<name> plugins/<name>
+   （不带 deps/：第三方依赖只写在 plugin.json 的 dependencies.pip）
 ④ 跑验证 → python tools/validate_plugins.py + generate_marketplace.py
 ⑤ Commit & Push 到你的 fork
 ⑥ 在 GitHub 提交 PR（你的 fork → martin98-afk/drifox-plugins main）
-⑦ CI 自动校验，通过后 maintainer 合并 → 你的插件上架 🎉
+⑦ CI 自动校验；合并后 CI 自动按 dependencies.pip 打包 tarball → 你的插件上架 🎉
 ```
 
 ---
@@ -39,7 +40,12 @@ git remote add upstream https://github.com/martin98-afk/drifox-plugins.git
 git checkout -b feat/<plugin-name>
 
 # 5. 把你的插件从本地开发目录复制进来
+#    ⚠ 第三方依赖不进仓库：依赖写进 plugin.json 的 dependencies.pip（平台键
+#      win32/linux/darwin，见 manifest.md），仓库里不放 deps/ 目录；
+#    deps/ 由市场 CI 打包时按声明从 PyPI 自动构建，打进按平台分发的 tarball
 cp -r ~/.drifox/plugins/<plugin-name> plugins/<plugin-name>
+#    本地开发曾把依赖装进 deps/ 的，复制前先清掉：
+rm -rf plugins/<plugin-name>/deps
 
 # 6. 跑验证
 python tools/validate_plugins.py
@@ -75,11 +81,18 @@ refactor(<plugin-name>): 重构 xx 模块
 
 ## CI 说明
 
-PR 提交后 GitHub Actions 自动执行：
+PR 阶段（GitHub Actions 自动执行）：
 
 1. **validate** — 检查所有插件 manifest + 组件完整性；跑 validate + generate，失败排查见 references/troubleshooting.md「PR 的 CI 失败」
 2. **auto-fix-marketplace** — 如果 `marketplace.json` 过期，bot 自动修复并 commit 到 PR 分支
 3. ✅ 全部通过 → 等待 maintainer 合并
+
+合并进 main 后（**release-plugins** workflow）：
+
+4. **detect_plugin_changes.py** — 找出「已启用 tarball 通道且版本变化」的插件（比 URL 里的版本与 manifest version）
+5. **build_plugin_tarballs.py --deps-source pip --strict-deps** — 按平台构建单插件 tarball：依赖按 `dependencies.pip` 从 PyPI 现场装进包（跨平台包合并进 default），缺依赖即失败，宁可不发也不发残缺包
+6. **publish_plugin_tarballs.py** — 发布到 GitHub Releases（tag 约定 `plugin-<name>-v<version>`，asset 直链 + sha256）
+7. **generate_marketplace.py** — 回填 `marketplace.json` 的 `tarball` 字段并提交（带 `[skip ci]`）
 
 ### Bot 自动修复
 
@@ -93,9 +106,10 @@ PR 提交后 GitHub Actions 自动执行：
 
 ## PR 合并后
 
-- marketplace.json 自动更新
-- 你的插件名称出现在官方市场中
+- marketplace.json 自动更新，你的插件出现在官方市场中
 - 所有 DriFox 用户可通过 plugin-marketplace UI 浏览和安装你的插件 🎉
+- **安装通道双轨**：已启用 tarball 通道的插件优先走 tarball（单包直链 + sha256 校验，包内含当前平台依赖，下载即用）；失败回落 git-subdir 源码通道（装后需自行补依赖）。老客户端无 tarball 字段时照旧走 git-subdir，双轨兼容
+- **首次启用 tarball**：合并后手动跑一次 `tools/build_plugin_tarballs.py` + `tools/publish_plugin_tarballs.py` + `tools/generate_marketplace.py`；之后升版本 push 到 main，CI 自动重打发布
 
 ---
 
@@ -110,12 +124,15 @@ PR 提交后 GitHub Actions 自动执行：
 
 破坏性变更必须在 PR 描述中写明迁移指南。
 
+已启用 tarball 通道的插件：版本号变了 push 到 main 即自动重打 tarball 并发布，无需手动跑打包脚本。
+
 ---
 
 ## 插件维护
 
 - 不再维护的插件：`components` 全部设为 `false`，**不要删除插件目录**
 - 新增事件或字段：同步更新 `schemas/plugin.schema.json`、`tools/generate_marketplace.py`、`docs/`
+- 依赖变更：只改 `dependencies.pip`，下次 CI 打包自动生效；不要往仓库提交 deps/ 目录
 - 修改别人的插件：先开 Issue 讨论
 
 marketplace.json 中每条记录的结构由 `tools/generate_marketplace.py` 自动从 `plugin.json` 生成，无需手动编辑。

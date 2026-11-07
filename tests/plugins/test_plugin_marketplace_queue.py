@@ -64,6 +64,9 @@ class FakeRow:
     def update_search_highlight(self, query):
         pass
 
+    def clear_progress(self):
+        pass
+
 
 def _new_card():
     """构造卡片（不触发 show_card/网络拉取，仅用其队列与行状态逻辑）"""

@@ -1,36 +1,70 @@
 # -*- coding: utf-8 -*-
-"""qfluentwidgets ScrollBar 事件类型混淆守卫
+"""事件类型混淆守卫（qfluentwidgets 的 Resize / Wheel 消费点）
 
-背景（2026-11-02 崩溃，同栈两连发）：
-    qfluentwidgets 的 ScrollBar（SmoothScrollBar 基类）在 __init__ 里
-    ``parent.installEventFilter(self)`` 监听滚动区自身事件，eventFilter
-    （v1.11.2 scroll_bar.py:405）：
+## 症状与根因
 
-        if e.type() == QEvent.Resize:
-            self._adjustPos(e.size())
+同一类错位事件已二次复发：
 
-    真机在消息卡折叠框上滚动滚轮时崩：
+- 2026-11-02，两连发。ScrollBar.eventFilter（scroll_bar.py:405）在
+  ``e.type() == QEvent.Resize`` 后调 ``e.size()`` 崩：
+  ``AttributeError: 'QWheelEvent' object has no attribute 'size'``
+- 2026-11-05，ExpandBorderWidget.eventFilter（expand_setting_card.py:170）
+  同一条判断、同一个崩法：
+  ``AttributeError: 'QMouseEvent' object has no attribute 'size'``
 
-        AttributeError: 'QWheelEvent' object has no attribute 'size'
+即事件的 Python 包装类型与 ``type()`` 字段来自不同对象。实测（
+tmp 复现脚本）机制是**悬垂 wrapper**：Python 侧长期持有某个事件对象后，
+C++ 事件在 ``notify`` 返回时即销毁，内存被后续事件复用；sip 的包装类型
+在创建时定死（仍是 QMouseEvent），``type()`` 却读到复用者的字段。此时
+既没有 ``size()`` 也没有 ``setType``。若错位值恰好是 14（Resize），就
+骗过判断一路走到 ``e.size()``。
 
-    即一个 C++ 动态类型为 QWheelEvent、type() 字段却是 Resize 的事件
-    通过了判断。实测（tests/utils/test_scrollbar_guard.py 注释）PyQt5/
-    sip 对事件包装的选择只看动态类型、不看 type 字段，二者错位只能来自
-    底层合成事件（疑似 QtWebEngine/Chromium 输入事件合成路径的类型混
-    淆）。Qt 分发自身只信 type 字段、对 Resize 盲转 QResizeEvent*——
-    同样的错位对象若走到 Qt 内部是段错误，Python 侧先崩反而留了现场。
+Qt 自身只信 type 字段、对 Resize 盲转 ``QResizeEvent*``——同样的错位
+对象若进 C++ 内部是段错误，Python 侧先崩反而留了现场。
 
-修法（防御，不赌根因）：
-    monkeypatch ScrollBar.eventFilter：type==Resize 但包装类型不是
-    QResizeEvent → 跳过 _adjustPos 直接放行。滚动条位置少重定位一次，
-    下一个真 Resize 补回，交互代价为零。SmoothScrollDelegate 的 Wheel
-    分支同理：包装不是 QWheelEvent 时不喂 angleDelta。
+## 修法（防御，不赌根因）
+
+两层，一层兜全部、一层兜自己：
+
+1. **应用级过滤器**（主防线）：包装是 ``QInputEvent``（鼠标/滚轮/键盘/
+   悬停）但 ``type() == Resize`` 的事件在下发前直接吞掉。控件侧
+   eventFilter 一根都收不到，qfluentwidgets 全部 ``e.size()`` 点一次覆盖——
+   ``expand_setting_card.ExpandBorderWidget``、``line_edit.EditLayer``、
+   ``info_bar``（两处）、``mask_dialog_base``、``expand_layout``、
+   ``splash_screen``，以及宿主与插件将来写的同类判断。
+   判据用「输入事件包装」而非「非 QResizeEvent」：后者会误吞宿主自建的
+   ``QEvent(QEvent.Resize)``（实测打到
+   tests/widgets/test_welcome_card_tab_bar.py）。真 resize 事件 4/4 均为
+   QResizeEvent 包装；应用级过滤器先于目标控件 eventFilter 生效，拦下后
+   控件确实收不到。
+2. **ScrollBar / SmoothScrollDelegate 类级补丁**（2026-11-02 的旧防线，
+   保留）：应用级过滤器只覆盖经过 ``QApplication::notify`` 的分发路径，
+   monkeypatch 兜住旁路调用与直接实例调用的场景。
+
+两处放行都是「少重定位/少滚动一次」，下一个真事件补回，交互代价为零。
 """
 
-from PyQt5.QtCore import QEvent
-from PyQt5.QtGui import QResizeEvent, QWheelEvent
+from PyQt5.QtCore import QEvent, QObject
+from PyQt5.QtGui import QInputEvent, QResizeEvent, QWheelEvent
+from PyQt5.QtWidgets import QApplication
 from qfluentwidgets.components.widgets.scroll_bar import ScrollBar, SmoothScrollDelegate
 
+
+class _ResizeTypeGuard(QObject):
+    """应用级守卫：吞掉「type=Resize 但包装是输入事件」的错位事件。
+
+    判据用 ``QInputEvent`` 而非「非 QResizeEvent」：后者会把
+    ``QEvent(QEvent.Resize)`` 这种合法替身（宿主自建、单测里常见）一并
+    吞掉（实测误伤 tests/widgets/test_welcome_card_tab_bar.py）。输入事件
+    的 type 字段不可能是 Resize——出现即错位，判据精确且零误伤。
+    覆盖 qfluentwidgets 全部 ``e.size()`` 消费点，见模块 docstring。
+    """
+
+    def eventFilter(self, obj, e):  # noqa: N802 - Qt 回调
+        # 应用级过滤器每个事件都会过一遍，快路径先做整型比较再判包装类型
+        if e.type() == QEvent.Resize and isinstance(e, QInputEvent):
+            return True
+        return False
 
 def _patch_scrollbar_filter(cls) -> None:
     if getattr(cls.eventFilter, "_drifox_guarded", False):
@@ -70,10 +104,16 @@ def _patch_delegate_filter(cls) -> None:
 
 
 def install_guard() -> None:
-    """安装 ScrollBar / SmoothScrollDelegate 事件类型守卫（幂等）
+    """安装事件类型守卫（幂等）
 
-    方法查找在调用期进行，补丁对已创建的实例同样生效；在 UI 起来前后
-    装都安全，越早越好。
+    应用级过滤器 + 类级补丁。方法查找在调用期进行；应用级过滤器需
+    QApplication 已创建，故在 main.py 里 QApp 就绪后立刻调用。
     """
+    app = QApplication.instance()
+    if app is not None and getattr(app, "_drifox_resize_guard", None) is None:
+        guard = _ResizeTypeGuard(app)
+        app.installEventFilter(guard)
+        app._drifox_resize_guard = guard  # 挂引用，防 GC 后过滤器失效
+
     _patch_scrollbar_filter(ScrollBar)
     _patch_delegate_filter(SmoothScrollDelegate)

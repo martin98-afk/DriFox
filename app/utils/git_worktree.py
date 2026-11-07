@@ -473,4 +473,44 @@ class GitWorktreeDetector:
             pass
         return None
 
+    @staticmethod
+    def main_repo_from_worktree_path(path: str) -> Optional[str]:
+        """从**已删除**的 worktree 路径推断主仓库根（纯字符串运算，不碰文件系统）
+
+        工作树目录被删后 ``.git`` 文件也不在了，``get_main_repo_path`` 失效。
+        但路径形态固定为 ``<主仓库>/.worktrees/<名>``（本程序 manage_worktree
+        创建时即如此，见 plugins/worktree-manager/tools/worktree_tools.py），
+        据此反推主仓库根。主仓库本身（不在 .worktrees 下）返回 None。
+        """
+        if not path:
+            return None
+        norm = str(path).replace("\\", "/").rstrip("/")
+        marker = "/.worktrees/"
+        idx = norm.find(marker)
+        if idx <= 0:
+            return None
+        # 只认一层：<主仓库>/.worktrees/<名>，多一层说明不是本程序创建的
+        if "/" in norm[idx + len(marker):]:
+            return None
+        return norm[:idx]
+
+    @staticmethod
+    def resolve_workdir_or_main(path: str) -> Optional[str]:
+        """工作目录失效时回落到主仓库根
+
+        - 目录存在 → 原样返回（不判 git，非 git 目录也照常可用）
+        - 目录不存在且是 ``<主仓库>/.worktrees/<名>`` → 返回主仓库根
+        - 其余（从未存在/主仓库也找不到）→ None，调用方按「未设置」处理
+        """
+        if not path:
+            return None
+        raw = str(path)
+        if os.path.isdir(raw):
+            return raw
+        main_root = GitWorktreeDetector.main_repo_from_worktree_path(raw)
+        if main_root and os.path.isdir(main_root):
+            logger.info(f"[GitWorktree] 工作目录已失效，回落到主仓库: {raw} → {main_root}")
+            return main_root
+        return None
+
 

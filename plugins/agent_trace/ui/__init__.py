@@ -202,7 +202,11 @@ def _aggregate_records(ctx):
         except Exception:
             be_sid = ""
         if be_sid != cur_sid:
-            # 会话还没就位：不投影、不记守卫，下一次刷新（1s 补刷）自然重试。
+            # 会话还没就位：不投影、不记守卫，下一次刷新（1s/3s 补刷）自然重试。
+            logger.debug(
+                f"[agent_trace] footer 聚合跳过：backend 会话未就位 "
+                f"(be={be_sid[:8] or '空'} != cur={cur_sid[:8]})，等下一拍重试"
+            )
             return None
         wid = str(ctx.get("window_id") or "")
         guard_key = (wid, cur_sid)
@@ -242,6 +246,12 @@ def _aggregate_records(ctx):
         total_gen_s += gen_ms / 1000.0
         rounds += 1
     if total_gen_s <= 0 or total_tokens <= 0:
+        # 常见命中：纯工具轮（无 content/reasoning delta）缺 ttft_ms 被口径整条跳过，
+        # 新会话仅此一条时聚合为空 → 页脚不显示 tps。留 DEBUG 便于定位「不显示」。
+        logger.debug(
+            f"[agent_trace] footer 聚合为空：rounds={rounds} tokens={total_tokens} "
+            f"gen_s={total_gen_s:.1f}（多为缺 ttft_ms 的纯工具轮被口径跳过）"
+        )
         return None
     return total_tokens, total_gen_s, rounds
 
