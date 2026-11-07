@@ -211,6 +211,17 @@ def _first_background(backgrounds: dict) -> dict:
     return {}
 
 
+def _has_animation(backgrounds: dict) -> bool:
+    """主题是否配了动态背景（新 schema 的 animation，任意区域）
+
+    scene 与 chat 归一化后是同一对象，列全是为兼容只写旧名的主题。
+    """
+    for key in ("chat", "scene", "window", "sidebar"):
+        anim = (backgrounds.get(key) or {}).get("animation")
+        if anim and anim.get("src") and anim.get("enabled", True):
+            return True
+    return False
+
 def collect_theme_entries(is_light: bool) -> list[dict]:
     """采集当前深浅模式下的主题预览条目。
 
@@ -237,8 +248,13 @@ def collect_theme_entries(is_light: bool) -> list[dict]:
                 "accent": colors.get("accent") or colors.get("border_accent"),
                 "image": background.get("image"),
                 "image_opacity": background.get("opacity") or 0.0,
-                # 角标：主题是否自带动态视频层 / 背景音乐（贴图左上角标注）
-                "has_video": bool(overlay.get("video")) and overlay.get("enabled", True) is not False,
+                # 角标：主题是否自带动态背景 / 背景音乐（贴图左上角标注）。
+                # 动态背景有两种承载：旧 overlay.video 与新 animation（动画 WebP），
+                # 后者不依赖系统解码器，是现在的主路径。
+                "has_video": (
+                    bool(overlay.get("video")) and overlay.get("enabled", True) is not False
+                )
+                or _has_animation(backgrounds),
                 "has_music": bool(music.get("tracks")) and music.get("enabled", True) is not False,
             }
         )
