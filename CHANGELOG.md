@@ -1,9 +1,21 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [v0.7.0-beta] - 2026-11-08
 
-- **关 tab 必现崩溃修复（system-timer 事件桥悬挂连接）**: 关闭任意标签页稳定触发 `TypeError: native Qt signal is not callable`（C 层异常，excepthook 连 traceback 都拿不到）。根因：`TimerScheduler._ensure_subscriptions` 清桥分支只 `bridge.event.disconnect()` + `deleteLater()`，未断开 `_connections` 中 backend 5 个对话流信号到桥的订阅，悬挂连接留到桥析构批次清理时炸出。修复为删桥前按 `handler.__self__ is bridge` 精确断开并同步清 `_connections`（与 `stop()` 逻辑一致）。附带改进：`main.py` 全局异常钩子补 no-tb 兜底——`exc_tb` 缺失时读 `exc_val.__traceback__`，仍无则 dump 主线程当前栈，纯 C 层异常不再只留一行孤立错误文本。回归测试 `tests/plugins/test_system_timer_bridge_cleanup.py`（清桥后 emit 不得穿透调度器），复现链 `tests/debug/repro_close_tab_full_boot.py`。
+自 v0.6.15-beta 以来的变更 | 提交数：88 · 文件变更：274 · +23378/-3993 | 贡献者：dingma, drifox-bot, mading, martin98-afk
+
+### ✨ 新功能 (New Features)
+- **动态背景与主题影音系统**: 主题 `backgrounds` schema 新增 `overlay` 动态覆盖层与 `music` 区块；新增 `VideoOverlayLayer` 视频混合组件（multiply 混合、mask blending、亮度提升、window/sidebar/chat_area/scene 区域切换），主窗口挂载消费链路；主题背景音乐播放器（ThemeMusicCard）接线主窗口，支持焦点暂停与音量设置；动态背景动画检测带回归测试；系统插件主题图标与 SVG 素材更新。
+- **主题模式与记忆**: 主题模式管理（auto/light/dark 三态）；用户选择主题跨模式记忆；默认主题定义集中化；detail frame 样式随主题切换刷新；fallback 主题色兜底。
+- **壁纸转主题（wallpaper-to-theme）**: Wallpaper Engine 壁纸迁移脚本与评估用例；scene_layer 新增前景层（foreground）像素级对齐与回归测试；装饰层 fit_width/fit_height 缩放选项与视口稳定定位；动画编码默认宽度 800 与模糊建议；技能文档同步更新。
+- **助手中心记忆治理**: 记忆分区（sections）管理与 tone 配比（分区配额按 tone 比例同侧平分）；记忆条目删除与分区处理；助手与插件系统日志增强。
+- **插件依赖冲突治理**: PluginManager 依赖冲突检测与解决（按 dist-info METADATA 判版本，冲突时让出方 load_blocked），诊断报告同步更新。
+- **云同步可靠性**: 进程级文件锁防双开并发访问；脏状态上传重试与初始同步失败处理。
+- **OpenCode OAuth**: OpenCode Zen/Go 新增 OAuth device-flow 登录，保留 API Key 方式。
+- **会话 handoff**: 交接文档机制保证任务结果在新会话可达。
+- **QWebEngine 子进程保护**: 清理孤儿进程时跳过活跃子进程，附回归测试。
+- **其他**: scanner 子进程 Windows 下隐藏控制台窗口；工具消息移除可选 name 字段防 API 400；LLMSettingsCard 全宽模式与动画支持；思考摘要首行加粗标题上移至折叠框 summary 行；渲染环境平台推荐 profile（render_env）与一致性测试；legacy quota keys 防旧配置发送空值；session.read 能力增强 AI 响应上下文；后台时钟 idle 轮询与场景层几何同步。
 - **bash 自杀守卫**: 命令工具新增永久开启的自身进程保护（`app/tools/self_guard.py`），宿主统一闸门 `ToolExecutor.execute()` 拦截所有带 `command` 参数的工具调用（与命令来自哪个插件无关），能力池 `process.start` 的 argv 同样过守卫：目标 PID 等于当前进程、目标名等于自身镜像名（`taskkill /IM`、`killall`、`pkill`、`Stop-Process -Name`、`wmic ... call terminate` 等）、或 POSIX `$PPID` 一律拒绝。不受沙箱开关控制、不弹审批；清理其它进程的命令照旧放行。另加宽泛层：命令同时出现杀进程倾向与自身标识（当前 PID 字面量 / `getpid()`·`getppid()`·`$PPID` / 自身镜像名 / `psutil.Process().kill()`）即拒，覆盖 `python -c "psutil.Process(<pid>).kill()"` 这类动态构造；纯文本提及 kill 且无自身标识的照旧放行。
 - **分享记录下载/导入**: 「分享记录」卡新增「导入」按钮：json 会话与项目压缩包（.drifox_project）类记录在有远程链接、本地无文件时，下载落盘后直接经能力池导入当前项目（会话入历史 / 项目恢复，提示由宿主导入流程弹出）；manifest 显式声明 `session.history.write` 与 `project.write` 能力，能力不可用时降级提示。同卡修复：下载成功后列表全量重载导致滚动位置重置到顶部，现改为记录行内就地刷新按钮（下载/导入 → 打开），不再清空滚动区。
 - **插件设置页改主从结构**: 「设置 → 插件」原先把所有 config_schema 自动卡平铺成一列，插件多了只能滚动找，不同插件的同名配置块（如「上下文管理阈值」与「上下文压缩阈值」）分不清归属。现改为左侧可搜索插件清单 + 右侧详情（配置 / 权限 / 关于），列表来源从「注册了设置卡的插件」改为 PluginManager 全量清单：没有 config_schema 的插件同样出现在列表里，可查看 manifest 声明的权限与关于信息。搜索覆盖插件名、描述、字段名与能力 id，支持全部 / 待配置 / 已启用 / 已停用筛选，待配置置顶。config_schema 新增 `required` 字段标记：必填项为空时字段名带星号、插件行标「待配置」并置顶。插件自定义设置卡（`register_settings_card` 非自动卡）在详情页配置 tab 渲染，插件独立设置大 tab（`register_settings_tab`）机制保持不变。
@@ -13,6 +25,21 @@ All notable changes to this project will be documented in this file.
 - **模型协议入口手动选择**: 「接口入口」下拉收口到「服务商 → 模型列表 → 齿轮 → 模型能力」弹窗（参数卡不再渲染：渲染是配置驱动的，键不存在整行不出现，而三条注入链都不产出该键 → 死循环；能力弹窗里手选的插件被禁用/卸载时原值单独成项保留，不静默回退自动）。选项为自动 / Responses API / 已注册协议插件动态枚举，手选值按模型落盘（`ModelOverrides` 同条目）并在 worker 分派单点生效；旧键 `使用ResponsesAPI` 显式设置时优先。子智能体链路对齐 `responses` / 自动，手选插件通道警告回退。
 - **gpt-6 思考流式**: Responses 请求补 `reasoning.summary="auto"`（官方语义：不显式 opt in 就不返回思考摘要，此前只发 `effort` → 服务端只给 reasoning_tokens，UI 一个 reasoning delta 都收不到）；服务端 400 拒绝该字段时去掉后重试一次。Responses API 自动判定改为按 gpt 主版本号（≥5）通用匹配；恢复 worker `_chat_transport` 测试注入点读取（a6946c9f5 搬迁回归）。
 - **Responses API 插件化（Phase 3）**: \`/v1/responses\` 从 worker 原生通道迁入 \`system-transports/transports/openai_responses.py\`（id=\`openai_responses\`）：请求组装（input/instructions/tools/reasoning.summary/max_output_tokens）、SDK 流事件归一（reasoning/content/tool_call 三段/usage/finish）、错误映射全在插件内；worker 与子智能体统一按 \`protocol_dispatch.resolve_transport_target\` 解析 transport id，删除 \`_build_responses_kwargs\` / \`_process_responses_stream\` 与子智能体非流式 responses 实现（主程序净减约 400 行）。adapter \`protocol\` 字段补 \`responses\` 声明；SDK 新增 \`messages_to_responses_input\` / \`tools_to_responses\` 两个稳定符号。子智能体改走同一 transport + StreamEvent 聚合，不再有独立 responses 分支。
+
+### 🐛 问题修复 (Bug Fixes)
+- **关 tab 必现崩溃修复（system-timer 事件桥悬挂连接）**: 关闭任意标签页稳定触发 `TypeError: native Qt signal is not callable`（C 层异常，excepthook 连 traceback 都拿不到）。根因：`TimerScheduler._ensure_subscriptions` 清桥分支只 `bridge.event.disconnect()` + `deleteLater()`，未断开 `_connections` 中 backend 5 个对话流信号到桥的订阅，悬挂连接留到桥析构批次清理时炸出。修复为删桥前按 `handler.__self__ is bridge` 精确断开并同步清 `_connections`（与 `stop()` 逻辑一致）。附带改进：`main.py` 全局异常钩子补 no-tb 兜底——`exc_tb` 缺失时读 `exc_val.__traceback__`，仍无则 dump 主线程当前栈，纯 C 层异常不再只留一行孤立错误文本。回归测试 `tests/plugins/test_system_timer_bridge_cleanup.py`（清桥后 emit 不得穿透调度器），复现链 `tests/debug/repro_close_tab_full_boot.py`。
+- **动态背景黑屏与树影不可见**: raster 引擎忽略 Multiply+opacity 组合导致黑屏——透明度烘进帧并白预混合修复；cover 支持垂直对齐 position，竖版素材配 top 对齐树影密集区不可见；跨主题共享路径规范化清除 `../` 段。
+- **装饰层视口定位**: 宿主隐藏/布局未完成时按视口定位，并修重复 apply 残留。
+- **流式思考显示回归**: 恢复国外模型思考字段归一（流式思考内容不显示）；Responses API 判定按 gpt 主版本号通用化，修 gpt-6-luna 漏判；恢复 worker `_chat_transport` 测试注入点读取。
+- **启动与内存性能批次**: MCP/LSP SDK 改按需导入（延迟启动批次）；懒排空期间批量高度提交 + 空 doc 上报黑窗；代码块高亮 memo LRU；视觉图片发送后回收与压缩 LRU；thread_guard 仅启动时打墓碑；幻觉工具分派的 mcp_manager 空指针防护；perf_regression 版本漂移修复。
+- **tools schema 稳定**: 插件变更期间保持 tools schema 稳定，防止快照失效。
+- **transport 重构回归**: 修复重构后 12 个遗留测试失败。
+- **agent_trace 日志**: session 就绪与聚合条件日志改进。
+
+### 🔧 其他 (Chores & Build)
+- **市场自动再生成** (`4f53bb93` · `7e722e0b`): plugin.json 变更自动再生成 [skip ci]。
+- **协议入口键排除** (`fb932f12`): 协议入口配置键加入排除集合。
+- **crema 素材迁出** (`8cbca236`): 动态树影素材迁出系统主题（迁至 drifox-plugins2 crema-leaves 插件）。
 
 ## [v0.6.15-beta] - 2026-11-06
 
