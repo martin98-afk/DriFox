@@ -340,3 +340,17 @@ def test_icons_refresh_on_theme_toggle(env, qapp, monkeypatch):
     page.refresh_style()
     assert _pix_color(page._rows[0]._icon) == "#00ff00"
     assert _pix_color(page._detail._icon) == "#00ff00"
+
+
+def test_detail_frame_bg_refreshes_on_theme_toggle(env, qapp, monkeypatch):
+    """主题切换后详情面板背景/边框重读 Colors token（不再停留在旧主题色）"""
+    page = page_mod.PluginSettingsPage()
+    page.reload(force=True)
+    _pump(qapp)
+    old_css = page._detail_frame.styleSheet()
+    monkeypatch.setattr(page_mod.Colors, "CARD_BG", "rgba(9, 8, 7, {alpha})")
+    monkeypatch.setattr(page_mod.Colors, "BORDER", "#010203")
+    page.refresh_style()
+    new_css = page._detail_frame.styleSheet()
+    assert new_css != old_css
+    assert "rgba(9, 8, 7, 140)" in new_css and "#010203" in new_css

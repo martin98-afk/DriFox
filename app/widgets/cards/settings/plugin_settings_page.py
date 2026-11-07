@@ -310,6 +310,13 @@ _PAINT_RULES = {
 }
 
 
+def _detail_frame_css() -> str:
+    """详情面板背景/边框：每次调用重读 Colors token（主题切换后重算）"""
+    return (
+        f"#pluginDetailFrame {{ background: {Colors.CARD_BG.format(alpha=140)};"
+        f" border: 1px solid {Colors.BORDER}; border-radius: 8px; }}"
+    )
+
 def _paint_theme_colors(root: QWidget) -> None:
     """把页面内文字统一成当前主题色
 
@@ -771,20 +778,18 @@ class PluginSettingsPage(QWidget):
         self._list_area.setWidget(list_body)
         body.addWidget(self._list_area)
 
-        detail_frame = QFrame(self)
-        detail_frame.setObjectName("pluginDetailFrame")
-        detail_frame.setStyleSheet(
-            f"#pluginDetailFrame {{ background: {Colors.CARD_BG.format(alpha=140)}; border: 1px solid {Colors.BORDER}; border-radius: 8px; }}"
-        )
-        detail_layout = QVBoxLayout(detail_frame)
+        self._detail_frame = QFrame(self)
+        self._detail_frame.setObjectName("pluginDetailFrame")
+        self._detail_frame.setStyleSheet(_detail_frame_css())
+        detail_layout = QVBoxLayout(self._detail_frame)
         detail_layout.setContentsMargins(0, 0, 0, 0)
         self._empty = _EmptyHint("选择左侧插件查看详情", "配置 / 权限 / 关于都在这里。")
-        self._detail = _PluginDetailView(detail_frame)
+        self._detail = _PluginDetailView(self._detail_frame)
         self._detail.configChanged.connect(self.refresh_entry_state)
         self._detail.hide()
         detail_layout.addWidget(self._empty)
         detail_layout.addWidget(self._detail)
-        body.addWidget(detail_frame, 1)
+        body.addWidget(self._detail_frame, 1)
 
         layout.addLayout(body, 1)
         # 页面挂在设置页的 QScrollArea 里，不给最小高度会被压成 sizeHint 高度
@@ -953,6 +958,7 @@ class PluginSettingsPage(QWidget):
             row._apply_style()
             row.refresh_icon()
         self._detail.refresh_icon()
+        self._detail_frame.setStyleSheet(_detail_frame_css())
         _paint_theme_colors(self)
 
     def refresh_entry_state(self, entry: PluginEntry) -> None:
