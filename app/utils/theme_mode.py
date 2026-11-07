@@ -51,6 +51,60 @@ def current_mode() -> str:
     return mode if mode in MODES else MODE_AUTO
 
 
+# 主题记忆存在 app_state 缓存（cache/app_state.json），不进 app.config：
+# 它只描述「这台机器上次选了什么」，不是用户偏好项，也就不该进设置页、
+# 不该参与云端配置同步。
+_STATE_KEY = "theme_style_by_mode"
+
+
+def _memory_key(light: bool) -> str:
+    return "light" if light else "dark"
+
+
+def _load_theme_memory() -> dict:
+    from app.utils import app_state
+
+    value = app_state.get(_STATE_KEY, {})
+    return dict(value) if isinstance(value, dict) else {}
+
+
+def remembered_theme(light: bool) -> Optional[str]:
+    """取某深浅模式下用户上次选的主题；没记录 / 主题已消失 / 深浅不符都返回 None"""
+    theme_id = _load_theme_memory().get(_memory_key(light))
+    if not theme_id:
+        return None
+    try:
+        from app.utils.theme_manager import theme_manager
+
+        if theme_id not in theme_manager.list_themes():
+            return None
+        if bool(theme_manager.is_light_theme(theme_id)) != bool(light):
+            return None
+    except Exception:
+        return None
+    return str(theme_id)
+
+
+def remember_theme(theme_id: str) -> None:
+    """记住用户在某深浅模式下选的主题（切走再切回时恢复，而不是落回默认）"""
+    if not theme_id:
+        return
+    try:
+        from app.utils.theme_manager import theme_manager
+
+        light = bool(theme_manager.is_light_theme(theme_id))
+    except Exception:
+        return
+    from app.utils import app_state
+
+    memory = _load_theme_memory()
+    key = _memory_key(light)
+    if memory.get(key) == theme_id:
+        return
+    memory[key] = str(theme_id)
+    app_state.set(_STATE_KEY, memory)
+
+
 def resolve_light(mode: str, probe: Optional[bool], current: bool) -> bool:
     """纯函数：模式 + 系统探测结果 + 当前生效值 → 应生效的深浅
 
@@ -90,7 +144,7 @@ def apply_light(light: bool, *, save: bool = True) -> bool:
 
         current = cfg.ui_theme_style.value
         if bool(theme_manager.is_light_theme(current)) != bool(light):
-            target = default_theme_for(light)
+            target = remembered_theme(light) or default_theme_for(light)
             if current != target:
                 # 写之前刷新 validator 选项集：目标主题尚未注册时会被
                 # OptionsValidator.correct 静默回退到 options[0]
@@ -107,6 +161,8 @@ def set_mode(mode: str, *, save: bool = True, broadcast: bool = True) -> None:
     if mode not in MODES:
         return
     cfg = _settings()
+    # 先把当前主题记到它所属的深浅模式下，再切模式，否则切回来只能落回默认
+    remember_theme(cfg.ui_theme_style.value)
     if cfg.ui_theme_mode.value != mode:
         cfg.set(cfg.ui_theme_mode, mode, save=save)
     apply_light(effective_light(mode), save=save)
@@ -202,5 +258,6 @@ def reconcile_on_startup() -> None:
     决定，晚了会先按旧主题渲染一帧再翻色。
     """
     cfg = _settings()
+    remember_theme(cfg.ui_theme_style.value)
     apply_light(effective_light(cfg.ui_theme_mode.value), save=True)
     sync_watcher()

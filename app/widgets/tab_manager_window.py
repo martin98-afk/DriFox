@@ -4025,6 +4025,15 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
         # 实时读 cfg：补射跟随用户最新折叠意图（启动后用户已操作的，
         # 按最新值落位；不用启动快照——它会把 0.7s 内的新操作静默翻回）
         saved_collapsed = bool(Settings.get_instance().ui_sidebar_collapsed.value)
+        # ★ 先对齐存档折叠态再动 splitter（顺序不可对调）：setSizes 会同步
+        #   触发 TabPanel.resizeEvent，若此刻 _collapsed 仍是展开态而宽度跌到
+        #   折叠线以下（且抑制已解除），会走自动折叠分支误置
+        #   _collapsed_by_squeeze=True——把"程序化恢复折叠"标成"被挤压"。
+        #   残留的挤压标记让下一次切页/新建会话命中"挤压折叠非用户意图 →
+        #   恢复展开"分支，侧边栏被弹开（实测：存档折叠启动 → 新建会话自动
+        #   展开）。先 set_collapsed 再 setSizes，resizeEvent 看到的已是折叠态。
+        if self._tab_panel._collapsed != saved_collapsed:
+            self._tab_panel.set_collapsed(saved_collapsed)
         frame_w = (
             (self._tab_panel._collapsed_min_width + _FRAME_PADDING_X)
             if saved_collapsed
@@ -4039,9 +4048,6 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
             return
         frame_w = min(frame_w, total)
         self._splitter.setSizes([frame_w, max(0, total - frame_w)])
-        # 对齐存档折叠态（set_collapsed 不发信号，避免与启动期动画互打断）
-        if self._tab_panel._collapsed != saved_collapsed:
-            self._tab_panel.set_collapsed(saved_collapsed)
         self._tab_panel.sync_collapsed_ui()
 
     # ── 覆盖层状态切换 ──

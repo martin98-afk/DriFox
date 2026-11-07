@@ -32,6 +32,7 @@ from PyQt5.QtWidgets import QGridLayout, QLabel, QSizePolicy, QWidget
 from qfluentwidgets import ExpandSettingCard, FluentIcon
 
 from app.utils.design_tokens import Colors, _get_global_font, scale_font_size
+from app.utils import theme_mode
 from app.utils.theme_manager import theme_manager
 
 # ── 网格几何 ──────────────────────────────────────────
@@ -524,6 +525,8 @@ class ThemeStyleCard(ExpandSettingCard):
             return
         # 必须走 Settings.set：直接赋 item.value 只发信号不落盘
         self._settings.set(self.configItem, theme_id, save=True)
+        # 记到该主题所属的深浅模式下：切到另一模式再切回来时恢复它
+        theme_mode.remember_theme(theme_id)
 
     # ── 布局 ──────────────────────────────────────────
 

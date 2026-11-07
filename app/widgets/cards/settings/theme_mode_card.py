@@ -19,8 +19,9 @@ from __future__ import annotations
 
 import math
 import re
+import weakref
 
-from PyQt5.QtCore import QEasingCurve, QPointF, QRectF, Qt, QVariantAnimation, pyqtSignal
+from PyQt5.QtCore import QEasingCurve, QPointF, QRectF, QSize, Qt, QVariantAnimation, pyqtSignal
 from PyQt5.QtGui import QColor, QFont, QFontMetrics, QPainter, QPainterPath, QPen
 from PyQt5.QtWidgets import QWidget
 from qfluentwidgets import SettingCard
@@ -58,6 +59,35 @@ def _with_alpha(color: QColor, alpha: float) -> QColor:
     return out
 
 
+# ── 主题切换重绘：EV_THEME_CHANGED（不是 qconfig.themeChanged）──
+# 深色主题之间互切时 qfluentwidgets 的 Theme 枚举不变，themeChanged 不发射；
+# 项目自己的 on_theme_changed() 会无条件 publish EV_THEME_CHANGED，才是可靠广播源。
+# UIEventBus 强引用回调 → 只订阅模块级函数，实例用 WeakSet 登记。
+_SELECTORS: "weakref.WeakSet" = weakref.WeakSet()
+_selector_theme_subscribed = False
+
+
+def _on_selector_theme_changed(payload=None):
+    for selector in list(_SELECTORS):
+        try:
+            selector.update()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def _ensure_selector_theme_subscription():
+    global _selector_theme_subscribed
+    if _selector_theme_subscribed:
+        return
+    try:
+        from app.core.infra.ui_event_bus import EV_THEME_CHANGED, UIEventBus
+
+        UIEventBus.get_instance().subscribe(EV_THEME_CHANGED, _on_selector_theme_changed)
+        _selector_theme_subscribed = True
+    except Exception:  # noqa: BLE001
+        pass
+
+
 class ThemeModeSelector(QWidget):
     """三态分段控件（自动 / 深色 / 浅色）"""
 
@@ -78,15 +108,31 @@ class ThemeModeSelector(QWidget):
         self._indicator_rect = QRectF()
         self._seg_widths: list = []
         self._anim = QVariantAnimation(self)
-        self._anim.setDuration(190)
+        self._anim.setDuration(240)
         self._anim.setEasingCurve(QEasingCurve.OutCubic)
         self._anim.valueChanged.connect(self._on_anim_value)
+        # 颜色过渡：切走段淡出、新段淡入（与指示器滑动同拍，避免"硬跳"）
+        self._fade = QVariantAnimation(self)
+        self._fade.setDuration(200)
+        self._fade.setEasingCurve(QEasingCurve.OutCubic)
+        self._fade.setStartValue(0.0)
+        self._fade.setEndValue(1.0)
+        self._fade.valueChanged.connect(self._on_fade_value)
+        self._fade_progress = 1.0
+        self._fade_index = -1
         self.setMouseTracking(True)
         self.setCursor(Qt.PointingHandCursor)
         self.setFocusPolicy(Qt.StrongFocus)
         self.setAccessibleName("外观模式")
         self.setToolTip("自动：跟随系统深浅色设置；深色 / 浅色：固定配色")
         self._apply_size()
+        self.resize(self._ideal_width, self.height())
+        # 主题切换自愈：宿主（设置卡 / 菜单行 / 弹窗）漏刷时也不会停在旧配色
+        try:
+            _SELECTORS.add(self)
+            _ensure_selector_theme_subscription()
+        except Exception:  # noqa: BLE001
+            pass
 
     # ── 外部接口 ──────────────────────────────────────────
 
@@ -98,8 +144,20 @@ class ThemeModeSelector(QWidget):
         if mode not in [key for key, _ in self._SEGMENTS]:
             return
         changed = mode != self._mode
+        previous_index = self._active_index()
         self._mode = mode
-        self._move_indicator(animate=animate and changed)
+        # ★ 只有真的换段才重定位：点击后配置回写会再调一次 set_mode(同值)，
+        # 若无条件 _move_indicator(animate=False) 会把刚起步的滑动动画瞬杀
+        if changed or not self._indicator_rect.isValid():
+            self._move_indicator(animate=animate and changed)
+            if changed and animate:
+                self._fade_index = previous_index
+                self._fade_progress = 0.0
+                self._fade.stop()
+                self._fade.start()
+            else:
+                self._fade_index = -1
+                self._fade_progress = 1.0
         self.update()
         if changed and emit:
             self.modeChanged.emit(mode)
@@ -118,33 +176,61 @@ class ThemeModeSelector(QWidget):
         return font
 
     def _apply_size(self) -> None:
+        """算理想宽度与最小宽度；高度固定，宽度允许被父布局压缩
+
+        ★ 不能用 setFixedSize：菜单行（QPushButton）文字占位后留给右侧的空间
+        可能小于理想宽度，固定尺寸的控件会溢出父矩形，第三段被裁掉（真机
+        只剩两个图标）。改为 min/max + 按实际宽度均分，空间不足时各段等比
+        收缩，三段始终在界内。
+        """
+        count = len(self._SEGMENTS)
         if self._compact:
+            # 段内留白刻意收紧：菜单行里胶囊与左侧文字并排，pad 偏大时整块
+            # 显得挤在文字边上（真机反馈「胶囊有点拥挤」）
             icon_w = scale_font_size(11)
-            pad = scale_font_size(9)
-            self._seg_widths = [icon_w + pad * 2] * len(self._SEGMENTS)
-            self.setFixedSize(sum(self._seg_widths) + 4, scale_font_size(26))
-            return
-        # 宽度按「图标 + 文字 + 内边距」实测，随全局字号缩放；
-        # 设置卡右侧空间有限，内边距与图标刻意收紧（12px 字号会撑到 270+）
-        metrics = QFontMetrics(self._text_font())
-        icon_w = scale_font_size(10)
-        gap = scale_font_size(3)
-        pad = scale_font_size(7)
-        self._seg_widths = [
-            max(scale_font_size(46), metrics.horizontalAdvance(label) + icon_w + gap + pad * 2)
-            for _, label in self._SEGMENTS
-        ]
-        height = scale_font_size(28)
-        self.setFixedSize(sum(self._seg_widths) + 4, height)
+            pad = scale_font_size(6)
+            seg = icon_w + pad * 2
+            ideal = seg * count + 4
+            self.setMinimumWidth(int(seg * 0.62) * count + 4)
+            self.setMaximumWidth(ideal)
+        else:
+            metrics = QFontMetrics(self._text_font())
+            icon_w = scale_font_size(10)
+            gap = scale_font_size(3)
+            pad = scale_font_size(7)
+            widths = [
+                max(scale_font_size(46), metrics.horizontalAdvance(label) + icon_w + gap + pad * 2)
+                for _, label in self._SEGMENTS
+            ]
+            ideal = sum(widths) + 4
+            self.setMinimumWidth(int(sum(widths) * 0.7) + 4)
+            self.setMaximumWidth(ideal)
+        self.setFixedHeight(scale_font_size(26 if self._compact else 28))
+        self._ideal_width = ideal
+        self._min_width = self.minimumWidth()
+        self._seg_widths = [self.width() / float(count)] * count
+        self.updateGeometry()
+
+    def sizeHint(self):
+        # 布局按 sizeHint 给宽度：不给就会被默认值（minimumSizeHint）压到最小，
+        # 表现为控件永远只有最小宽度、图标挤成一团
+        return QSize(getattr(self, "_ideal_width", super().sizeHint().width()), self.height())
+
+    def minimumSizeHint(self):
+        return QSize(getattr(self, "_min_width", super().minimumSizeHint().width()), self.height())
 
     def _segment_rects(self) -> list:
-        rects = []
-        x = 2.0
+        count = len(self._SEGMENTS)
+        segment = max(1.0, (self.width() - 4.0) / count)
         height = float(self.height())
-        for width in self._seg_widths:
-            rects.append(QRectF(x, 1.0, float(width), height - 2.0))
-            x += width
-        return rects
+        return [QRectF(2.0 + index * segment, 1.0, segment, height - 2.0) for index in range(count)]
+
+    def resizeEvent(self, event):
+        # 父布局压缩/拉伸后重新均分，并钉住指示器（尺寸变化不播动画，避免抖动）
+        count = len(self._SEGMENTS)
+        self._seg_widths = [max(1.0, (self.width() - 4.0) / count)] * count
+        self._move_indicator(animate=False)
+        super().resizeEvent(event)
 
     def _active_index(self) -> int:
         for index, (key, _label) in enumerate(self._SEGMENTS):
@@ -201,9 +287,18 @@ class ThemeModeSelector(QWidget):
         gap = float(scale_font_size(3))
         for index, ((key, label), rect) in enumerate(zip(self._SEGMENTS, rects)):
             selected = index == active
-            color = _color(Colors.TEXT_PRIMARY if selected else Colors.TEXT_SECONDARY, "#ffffff")
-            if index == self._hover_index and not selected:
-                color = _color(Colors.TEXT_SECONDARY_HOVER, "#d0d0d0")
+            # 未选中态用 TEXT_PRIMARY 降透明度派生：部分主题的 text_secondary
+            # 只有 0.5~0.6 alpha，叠在同样偏暗的轨道上，细线图标（太阳）几乎
+            # 看不见（真机截图只剩两个图标）。
+            base = _color(Colors.TEXT_PRIMARY, "#ffffff")
+            if selected:
+                color = _with_alpha(base, 0.78 + 0.22 * self._fade_progress)
+            elif index == self._fade_index:
+                color = _with_alpha(base, 1.0 - 0.22 * self._fade_progress)
+            elif index == self._hover_index:
+                color = _with_alpha(base, 0.95)
+            else:
+                color = _with_alpha(base, 0.78)
 
             if self._compact:
                 icon_rect = QRectF(
@@ -255,7 +350,7 @@ class ThemeModeSelector(QWidget):
         painter.setPen(Qt.NoPen)
         painter.setBrush(color)
         painter.drawEllipse(QPointF(cx, cy), core, core)
-        painter.setPen(QPen(color, max(1.0, radius * 0.17), Qt.SolidLine, Qt.RoundCap))
+        painter.setPen(QPen(color, max(1.3, radius * 0.2), Qt.SolidLine, Qt.RoundCap))
         inner = radius * 0.74
         outer = radius * 0.98
         for step in range(8):
@@ -290,7 +385,7 @@ class ThemeModeSelector(QWidget):
         painter.drawPath(circle)
         painter.restore()
 
-        painter.setPen(QPen(color, max(1.0, radius * 0.17)))
+        painter.setPen(QPen(color, max(1.3, radius * 0.2)))
         painter.setBrush(Qt.NoBrush)
         painter.drawEllipse(QPointF(cx, cy), radius * 0.95, radius * 0.95)
 
@@ -298,6 +393,10 @@ class ThemeModeSelector(QWidget):
 
     def _on_anim_value(self, value) -> None:
         self._indicator_rect = QRectF(value)
+        self.update()
+
+    def _on_fade_value(self, value) -> None:
+        self._fade_progress = float(value)
         self.update()
 
     def _move_indicator(self, *, animate: bool) -> None:

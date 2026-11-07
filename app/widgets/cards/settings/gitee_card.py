@@ -7,6 +7,7 @@ Gitee 账号绑定设置卡片
 """
 
 import hashlib
+import weakref
 import sip
 import threading
 import time
@@ -986,28 +987,34 @@ class _MenuRow(QPushButton):
         super().__init__(parent)
         self.setCursor(Qt.PointingHandCursor)
         self.setFixedHeight(scale_font_size(34))
+        self._icon_src = icon_src
         row_layout = QHBoxLayout(self)
         row_layout.setContentsMargins(scale_font_size(12), 0, scale_font_size(12), 0)
         row_layout.setSpacing(scale_font_size(10))
 
-        icon_lbl = QLabel(self)
-        icon_lbl.setPixmap(_menu_icon_pixmap(icon_src, scale_font_size(16)))
-        icon_lbl.setFixedSize(scale_font_size(16), scale_font_size(16))
-        icon_lbl.setAttribute(Qt.WA_TransparentForMouseEvents, True)
-        row_layout.addWidget(icon_lbl)
+        self._icon_lbl = QLabel(self)
+        self._icon_lbl.setPixmap(_menu_icon_pixmap(icon_src, scale_font_size(16)))
+        self._icon_lbl.setFixedSize(scale_font_size(16), scale_font_size(16))
+        self._icon_lbl.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        row_layout.addWidget(self._icon_lbl)
 
-        text_lbl = QLabel(text, self)
-        text_lbl.setStyleSheet(
-            f"color: {Colors.TEXT_PRIMARY}; background: transparent; {get_font_family_css()} {font_size_css(12)};"
-        )
-        text_lbl.setAttribute(Qt.WA_TransparentForMouseEvents, True)
-        row_layout.addWidget(text_lbl)
+        self._text_lbl = QLabel(text, self)
+        self._text_lbl.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        row_layout.addWidget(self._text_lbl)
         row_layout.addStretch(1)
 
         if right is not None:
             row_layout.addWidget(right)
 
+        self.refresh_style()
+
+    def refresh_style(self) -> None:
+        """主题切换后重刷（图标是主题着色位图、文字与 hover 底色是构造期快照）"""
         Colors.refresh()
+        self._text_lbl.setStyleSheet(
+            f"color: {Colors.TEXT_PRIMARY}; background: transparent; {get_font_family_css()} {font_size_css(12)};"
+        )
+        self._icon_lbl.setPixmap(_menu_icon_pixmap(self._icon_src, scale_font_size(16)))
         self.setStyleSheet(f"""
             QPushButton {{
                 background: transparent;
@@ -1019,6 +1026,36 @@ class _MenuRow(QPushButton):
             QPushButton:hover {{ background: {Colors.HOVER_BG}; }}
             QPushButton:pressed {{ background: {Colors.SELECTED_BG}; }}
         """)
+
+
+# ── 主题切换刷新：走 UIEventBus 的 EV_THEME_CHANGED，不用 qconfig.themeChanged ──
+# qconfig.themeChanged 只在 qfluentwidgets 的 Theme 枚举真变化时发射：深色主题之间
+# 互切（true-black → midnight）时 setTheme 命中幂等短路，信号不发 → 弹窗停在旧配色
+# （真机反馈"主题刷新了，弹窗没刷，关掉重开才对"）。
+# UIEventBus 强引用回调，所以只订阅模块级函数 + WeakSet 登记实例，避免弹窗泄漏。
+_POPUPS: "weakref.WeakSet" = weakref.WeakSet()
+_popup_theme_subscribed = False
+
+
+def _on_popup_theme_changed(payload=None):
+    for popup in list(_POPUPS):
+        try:
+            popup.refresh_style()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def _ensure_popup_theme_subscription():
+    global _popup_theme_subscribed
+    if _popup_theme_subscribed:
+        return
+    try:
+        from app.core.infra.ui_event_bus import EV_THEME_CHANGED, UIEventBus
+
+        UIEventBus.get_instance().subscribe(EV_THEME_CHANGED, _on_popup_theme_changed)
+        _popup_theme_subscribed = True
+    except Exception:  # noqa: BLE001
+        pass
 
 
 class _GiteeMorePopup(QWidget):
@@ -1151,12 +1188,12 @@ class _GiteeMorePopup(QWidget):
         layout.addWidget(self._feedback_row)
 
         # ── 检查更新（右侧显示当前版本号，与托盘菜单同款）──
-        version_lbl = QLabel(str(self._cfg.current_version or ""), self._container)
-        version_lbl.setStyleSheet(
+        self._version_lbl = QLabel(str(self._cfg.current_version or ""), self._container)
+        self._version_lbl.setStyleSheet(
             f"color: {Colors.TEXT_MUTED}; background: transparent; {get_font_family_css()} {font_size_css(11)};"
         )
-        version_lbl.setAttribute(Qt.WA_TransparentForMouseEvents, True)
-        self._update_row = _MenuRow(FluentIcon.UPDATE, "检查更新", right=version_lbl, parent=self._container)
+        self._version_lbl.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self._update_row = _MenuRow(FluentIcon.UPDATE, "检查更新", right=self._version_lbl, parent=self._container)
         self._update_row.clicked.connect(self._on_check_update)
         layout.addWidget(self._update_row)
 
@@ -1182,6 +1219,58 @@ class _GiteeMorePopup(QWidget):
         # 刷新账号状态
         self._refresh_account_state()
 
+        # 主题切换 → 整卡重刷（弹窗是独立顶层窗口，不在设置刷新链的遍历范围）
+        try:
+            _POPUPS.add(self)
+            _ensure_popup_theme_subscription()
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _on_theme_changed(self, *_args) -> None:
+        self.refresh_style()
+
+    def refresh_style(self) -> None:
+        """主题切换后重刷整卡
+
+        弹窗内的颜色全部写在构造期（容器背景、标签、行 hover 底色、图标位图），
+        QLabel 与自绘控件不会自动跟随 qfluentwidgets 的 setTheme，必须显式重写。
+        解绑按钮的配色按绑定状态生成，交给 _refresh_account_state 覆盖。
+        """
+        Colors.refresh()
+        self._container.setStyleSheet(f"""
+            #giteePopupContainer {{
+                background: {Colors.CONTENT_BG};
+                border: 1px solid {Colors.BORDER};
+                border-radius: 12px;
+            }}
+        """)
+        self._popup_name.setStyleSheet(
+            f"color: {Colors.TEXT_PRIMARY}; background: transparent; "
+            f"{get_font_family_css()} {font_size_css(13)}; font-weight: 600;"
+        )
+        self._popup_repo.setStyleSheet(
+            f"color: {Colors.TEXT_MUTED}; background: transparent; {get_font_family_css()} {font_size_css(10)};"
+        )
+        if getattr(self, "_version_lbl", None) is not None:
+            self._version_lbl.setStyleSheet(
+                f"color: {Colors.TEXT_MUTED}; background: transparent; {get_font_family_css()} {font_size_css(11)};"
+            )
+        for sep in self.findChildren(QFrame):
+            if sep.objectName() == "giteeMenuSeparator":
+                sep.setStyleSheet(f"background: {Colors.DIVIDER_COLOR}; border: none;")
+        for chevron in self.findChildren(QLabel):
+            if chevron.objectName() == "giteeMenuChevron":
+                chevron.setStyleSheet(
+                    f"color: {Colors.TEXT_MUTED}; background: transparent; "
+                    f"{get_font_family_css()} {font_size_css(14)};"
+                )
+        for row in self.findChildren(_MenuRow):
+            row.refresh_style()
+        if getattr(self, "_mode_selector", None) is not None:
+            self._mode_selector.refresh_style()
+        self._refresh_account_state()
+        self.update()
+
     def _make_separator(self) -> QWidget:
         """带左右留白的分隔线（全宽直顶圆角边不够精致）"""
         wrap = QWidget(self._container)
@@ -1191,6 +1280,7 @@ class _GiteeMorePopup(QWidget):
         sep = QFrame(wrap)
         sep.setFrameShape(QFrame.HLine)
         sep.setFixedHeight(1)
+        sep.setObjectName("giteeMenuSeparator")
         sep.setStyleSheet(f"background: {Colors.DIVIDER_COLOR}; border: none;")
         wrap_layout.addWidget(sep)
         return wrap
@@ -1198,6 +1288,7 @@ class _GiteeMorePopup(QWidget):
     def _make_chevron(self) -> QLabel:
         """导航行右侧箭头"""
         lbl = QLabel("›", self._container)
+        lbl.setObjectName("giteeMenuChevron")
         lbl.setStyleSheet(
             f"color: {Colors.TEXT_MUTED}; background: transparent; {get_font_family_css()} {font_size_css(14)};"
         )
