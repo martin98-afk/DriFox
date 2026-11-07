@@ -34,6 +34,7 @@ from qfluentwidgets import ExpandSettingCard, FluentIcon
 from app.utils.design_tokens import Colors, _get_global_font, scale_font_size
 from app.utils import theme_mode
 from app.utils.theme_manager import theme_manager
+from app.widgets.cards.settings.expand_height_mixin import DynamicHeightExpandCardMixin
 
 # ── 网格几何 ──────────────────────────────────────────
 _TILE_MIN_W = 156  # 单格最小宽度（决定一行放几格）
@@ -223,7 +224,10 @@ def collect_theme_entries(is_light: bool) -> list[dict]:
         theme = theme_manager.get_theme(theme_id) or {}
         window = theme.get("window") or {}
         colors = theme.get("colors") or {}
-        background = _first_background(theme_manager.get_theme_backgrounds(theme_id))
+        backgrounds = theme_manager.get_theme_backgrounds(theme_id)
+        background = _first_background(backgrounds)
+        overlay = backgrounds.get("overlay") or {}
+        music = backgrounds.get("music") or {}
         entries.append(
             {
                 "id": theme_id,
@@ -233,6 +237,9 @@ def collect_theme_entries(is_light: bool) -> list[dict]:
                 "accent": colors.get("accent") or colors.get("border_accent"),
                 "image": background.get("image"),
                 "image_opacity": background.get("opacity") or 0.0,
+                # 角标：主题是否自带动态视频层 / 背景音乐（贴图左上角标注）
+                "has_video": bool(overlay.get("video")) and overlay.get("enabled", True) is not False,
+                "has_music": bool(music.get("tracks")) and music.get("enabled", True) is not False,
             }
         )
     return entries
@@ -400,6 +407,31 @@ class _ThemeTile(QWidget):
 
         if self._selected:
             self._draw_badge(painter, rect, accent)
+        self._draw_media_flags(painter, rect)
+
+    def _draw_media_flags(self, painter: QPainter, rect: QRectF) -> None:
+        """左上角媒体角标：视频 / 音乐（两者可同时存在，横向排列）"""
+        icons = []
+        if self._entry.get("has_video"):
+            icons.append(FluentIcon.VIDEO)
+        if self._entry.get("has_music"):
+            icons.append(FluentIcon.MUSIC)
+        if not icons:
+            return
+
+        size = 22
+        x = rect.left() + 8
+        y = rect.top() + 8
+        painter.save()
+        painter.setClipRect(rect)
+        for icon in icons:
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QColor(0, 0, 0, 140))
+            painter.drawRoundedRect(QRectF(x, y, size, size), 6, 6)
+            pix = icon.icon(color=QColor(255, 255, 255, 245)).pixmap(size - 7, size - 7)
+            painter.drawPixmap(QRectF(x + 3.5, y + 3.5, size - 7, size - 7), pix, QRectF(pix.rect()))
+            x += size + 4
+        painter.restore()
 
     def _draw_cover(self, painter: QPainter, rect: QRectF, opacity: float) -> None:
         """背景图按 cover 方式缩放后居中裁切，兼顾高 DPI 清晰度"""
@@ -453,8 +485,13 @@ class _ThemeTile(QWidget):
         super().leaveEvent(event)
 
 
-class ThemeStyleCard(ExpandSettingCard):
-    """主题风格卡：展开后是主题预览网格，点格子即切主题"""
+class ThemeStyleCard(DynamicHeightExpandCardMixin, ExpandSettingCard):
+    """主题风格卡：展开后是主题预览网格，点格子即切主题
+
+    高度走 DynamicHeightExpandCardMixin：网格是动态重建的（主题源热重载 /
+    深浅模式切换），基类「滚动条动画 + spaceWidget 占位」那套在内容高度变化时
+    会算错卡高，典型表现是展开后只露出一行、或顶部留一大块空白。
+    """
 
     def __init__(self, configItem, entries: list[dict], settings, is_light: bool = False, icon=None, parent=None):
         # icon 不能传 None：SettingIconWidget 的重载解析会直接抛 TypeError
@@ -552,7 +589,7 @@ class ThemeStyleCard(ExpandSettingCard):
         self._grid.invalidate()
         self.viewLayout.invalidate()
         self.viewLayout.activate()
-        self._adjustViewSize()
+        self._adjust_view_size()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)

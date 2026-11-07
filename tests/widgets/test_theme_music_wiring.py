@@ -14,9 +14,10 @@ def test_music_config_reaches_player(qapp, monkeypatch):
         def instance(cls):
             return cls()
 
-        def apply_config(self, cfg, resolver):
+        def apply_config(self, cfg, resolver, disabled=()):
             seen["cfg"] = cfg
             seen["resolver"] = resolver
+            seen["disabled"] = disabled
 
         def set_app_active(self, active):
             seen["active"] = active
@@ -45,7 +46,7 @@ def test_no_music_config_stops_player(qapp, monkeypatch):
         def instance(cls):
             return cls()
 
-        def apply_config(self, cfg, resolver):
+        def apply_config(self, cfg, resolver, disabled=()):
             seen["cfg"] = cfg
 
     monkeypatch.setattr(tmod, "ThemeMusicPlayer", FakePlayer)

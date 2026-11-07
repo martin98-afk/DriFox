@@ -2627,10 +2627,18 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
         或 enabled=False 时停止播放并清空列表身份。
         """
         try:
+            from app.utils import theme_music_store
             from app.widgets.theme_music_player import ThemeMusicPlayer
 
             player = ThemeMusicPlayer.instance()
-            player.apply_config(music_cfg, self._resolve_theme_image)
+            # 单曲开关按主题存（plugin_data/<插件>/theme_music.json），
+            # 只影响播放子集，不改变列表身份
+            disabled = (
+                theme_music_store.load_disabled(theme_manager.get_current_theme_id())
+                if music_cfg
+                else ()
+            )
+            player.apply_config(music_cfg, self._resolve_theme_image, disabled=disabled)
         except Exception as e:
             logger.warning(f"[TabManagerWindow] 应用主题音乐失败: {e}")
 

@@ -148,3 +148,46 @@ def test_fade_used_when_fade_ms_positive(player, tmp_path):
     assert volumes[-1] == 80
     assert min(volumes) >= 0
     assert max(volumes) <= 100
+
+
+def test_disabled_tracks_are_not_queued(player, tmp_path):
+    """用户关掉的曲目不进 playlist，但列表身份仍是全量"""
+    a = _mk(tmp_path, ["a.mp3", "b.mp3"])
+    player.apply_config({"tracks": a, "fade_ms": 0}, resolver=lambda p: p, disabled=[a[1]])
+    assert player.current_tracks() == tuple(a)
+    assert player._playlist.mediaCount() == 1
+    assert player.current_track() == a[0]
+
+
+def test_disable_playing_track_advances_to_next(player, tmp_path):
+    a = _mk(tmp_path, ["a.mp3", "b.mp3"])
+    player.apply_config({"tracks": a, "fade_ms": 0}, resolver=lambda p: p)
+    assert player.current_track() == a[0]
+    player._calls.clear()
+    player.set_disabled_tracks([a[0]])
+    assert player.current_track() == a[1]
+    assert "play" in player._calls
+
+
+def test_disable_all_tracks_keeps_identity_and_resumes(player, tmp_path):
+    """全部关掉 → 停止但保留列表；重新开 → 从第一条启用曲恢复"""
+    a = _mk(tmp_path, ["a.mp3", "b.mp3"])
+    player.apply_config({"tracks": a, "fade_ms": 0}, resolver=lambda p: p)
+    player.set_disabled_tracks(a)
+    assert player.current_track() == ""
+    assert player.current_tracks() == tuple(a)
+    assert player._playlist.mediaCount() == 0
+    player._calls.clear()
+    player.set_disabled_tracks([])
+    assert player.current_track() == a[0]
+    assert "play" in player._calls
+
+
+def test_track_changed_signal_reports_current(player, tmp_path):
+    seen = []
+    player.trackChanged.connect(seen.append)
+    a = _mk(tmp_path, ["a.mp3"])
+    player.apply_config({"tracks": a, "fade_ms": 0}, resolver=lambda p: p)
+    assert seen[-1] == a[0]
+    player.stop()
+    assert seen[-1] == ""

@@ -66,6 +66,7 @@ from app.widgets.cards.settings.render_backend_card import RenderBackendCard
 from app.widgets.cards.settings.render_status_card import RenderStatusCard
 from app.widgets.cards.settings.system_card_frame import SystemCardFrame
 from app.widgets.cards.settings.theme_style_card import ThemeStyleCard, prepare_theme_entries
+from app.widgets.cards.settings.theme_music_card import ThemeMusicCard
 
 
 class NoWheelFontComboBox(QFontComboBox):
@@ -910,17 +911,11 @@ class LLMSettingsCard(SystemCardFrame):
         appearance_layout.addWidget(self.uiThemeModeCard)
         appearance_layout.addWidget(self.uiThemeStyleCard)
 
-        # 主题音乐音量（只作用于 backgrounds.music；视频覆盖层恒静音）
-        self.uiMusicVolumeCard = RangeSettingCard(
-            self.cfg.ui_music_volume,
-            FluentIcon.MUSIC,
-            "主题音乐音量",
-            "主题背景音乐的音量，视频背景不受影响",
-            parent=self,
-        )
-        self.uiMusicVolumeCard.slider.setFixedWidth(160)  # 与 render 页滑条同款压缩
-        self.uiMusicVolumeCard.valueChanged.connect(self._on_music_volume_changed)
-        appearance_layout.addWidget(self.uiMusicVolumeCard)
+        # 主题音乐（无音乐的主题整卡隐藏；展开看歌单/单曲开关/当前播放）
+        self.uiMusicCard = ThemeMusicCard(self.cfg.ui_music_volume, parent=self)
+        # 配置项级监听：卡内滑块与其他入口（配置文件/云同步）都能同步到播放器
+        self.cfg.ui_music_volume.valueChanged.connect(self._on_music_volume_changed)
+        appearance_layout.addWidget(self.uiMusicCard)
 
         # 界面字号 + 全局字体
         appearance_layout.addWidget(self.uiFontSizeCard)
@@ -1455,6 +1450,9 @@ class LLMSettingsCard(SystemCardFrame):
             card = item.widget() if item is not None else None
             if card is None or not hasattr(card, "toggleExpand"):
                 continue
+            # 标记 _skip_auto_expand 的卡（如主题音乐歌单）默认保持收起
+            if getattr(card, "_skip_auto_expand", False):
+                continue
             try:
                 # qfluentwidgets ExpandSettingCard 的展开状态属性是 isExpand
                 if not getattr(card, "isExpand", False):
@@ -1797,6 +1795,7 @@ class LLMSettingsCard(SystemCardFrame):
             "uiChatWidthCard",
             "uiThemeModeCard",
             "uiThemeStyleCard",
+            "uiMusicCard",
             "llmFontCard",
             "renderRestartCard",
             "renderStatusCard",

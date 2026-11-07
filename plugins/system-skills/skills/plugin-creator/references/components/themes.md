@@ -164,6 +164,8 @@ backgrounds:
 - 应用失焦（切到别的窗口）自动暂停，切回续播。用户主动停止后不会自动复活。
 - `volume` 只是主题推荐值。用户在外观页调过「主题音乐音量」后，恒以用户设置为准。
 - 单曲无法解码时跳过继续下一首；全部无法播放则停止，只记日志不弹窗。
+- **外观页的「主题音乐」卡只在当前主题有可用音乐时出现**：没配 `music`、`enabled: false` 或曲目文件全部无效时整卡隐藏，不会留一条调不出声的音量条。
+- 卡片展开是当前主题歌单，逐曲可开关。关掉的曲目按主题记在 `<app_data>/plugin_data/<插件名>/theme_music.json`（跟着插件数据走，不占主程序配置）；关掉正在播放的那首会立即跳到下一首启用曲，全部关掉则暂停但保留列表，重新打开可立即恢复。
 
 > **`tracks` 不支持 `:qrc`**。QtMultimedia 的后端（Windows 上是 DirectShow / WMF）读不到 Qt 资源系统，`:qrc` 路径的音频会直接报 ResourceError。音乐只支持文件路径。
 
@@ -252,9 +254,10 @@ colors:
 | 视频出现在错误区域 | 没写 `target` 或写错值 | 显式写 `target`，非法值会静默回落 `chat_area` |
 | 音乐不响 | 用了 `:qrc` 路径，或文件不存在 | 改文件路径；看日志里的 `[ThemeMusic]` warning |
 | 切主题音乐重启 | 两个主题的 `tracks` 解析结果不同 | 想续播就指向同一批文件（可跨主题共用） |
-| 音量滑块调了没反应 | 主题没配 `music` | 音量只作用于主题音乐 |
+| 音量滑块找不到 | 当前主题没配 `music`（无音乐时「主题音乐」卡整卡隐藏） | 属于预期；给主题加 `backgrounds.music` 后卡片出现 |
+| 单曲开关关了还在放 | 曲目路径解析不一致（同一文件不同写法） | 开关按解析后的绝对路径比对，同一曲目在 yaml 里只写一次 |
 
 ## 参考
 
 - 内置主题：`plugins/system-themes/themes/`（11 套）
-- 主题实现：`app/utils/theme_manager.py`（加载与归一化）、`app/widgets/scene_layer.py`（场景层）、`app/widgets/decoration_layer.py`（装饰件）、`app/widgets/video_overlay_layer.py`（视频层）、`app/widgets/theme_music_player.py`（音乐）
+- 主题实现：`app/utils/theme_manager.py`（加载与归一化）、`app/widgets/scene_layer.py`（场景层）、`app/widgets/decoration_layer.py`（装饰件）、`app/widgets/video_overlay_layer.py`（视频层）、`app/widgets/theme_music_player.py`（音乐播放与单曲过滤）、`app/utils/theme_music_store.py`（单曲开关存储）
