@@ -1133,6 +1133,26 @@ _PREVIEW_TARGET_LEN: int = 60
 # 结论标记之后的正文最小长度：短于此说明标记紧贴文末，不构成摘要，退回开头采样
 _PREVIEW_MIN_CONCLUSION_BODY: int = 8
 
+# Responses 思考摘要的小节标题：summary_text 首行的 `**标题**`。
+# 服务端没有独立 title 字段（事件只带 delta / summary_index），ChatGPT 与
+# Codex 客户端那个分段标题就是这一行加粗文本（2026-11-07 实测 OpenCode Go）。
+_THINK_TITLE_RE = re.compile(r"^\s*\*\*(.+?)\*\*\s*$")
+
+
+def _split_think_title(content: str) -> tuple:
+    """拆出思考摘要的小节标题：返回 (title, body)。
+
+    无标题时（chat/completions 的 reasoning_content 常见形态）title 为空、
+    body 原样返回，调用方按旧逻辑走预览采样。
+    """
+    if not content:
+        return "", ""
+    head, sep, rest = content.partition("\n")
+    match = _THINK_TITLE_RE.match(head)
+    if not match:
+        return "", content
+    return match.group(1).strip(), (rest.lstrip("\n") if sep else "")
+
 
 def _get_think_preview(content: str, max_length: int = 160) -> str:
     """生成思考内容折叠框的预览文本
@@ -1458,9 +1478,14 @@ def _render_think_block(content: str, completed: bool = True, compact: bool = Fa
     _flip_attr = f' data-flip-key="think-{flip_idx}"' if flip_idx >= 0 else ""
     if completed:
         # ── 完成态 ──
+        # Responses 摘要自带小节标题（首行 **标题**）：标题进 summary 行、正文去掉该行，
+        # 避免展开后重复一行带星号的标题。无标题时回到旧行为（预览采样）。
+        think_title, think_body = _split_think_title(content)
+        body_source = think_body or content
         think_icon = _get_think_icon_html()
         status_text = f'<span class="think-bulb">{think_icon}</span>'
-        preview = _get_think_preview(content)
+        preview = think_title or _get_think_preview(body_source)
+        preview_weight = '500' if think_title else 'normal'
         font_style = _get_think_block_styles()
 
         # ── 简洁模式：纯文本行，不走折叠框（避免 save/restore 导致的消失→重现闪烁）──
@@ -1468,7 +1493,7 @@ def _render_think_block(content: str, completed: bool = True, compact: bool = Fa
             block_seed = f"{content}|1"
             block_key = "think-" + hashlib.sha1(block_seed.encode("utf-8")).hexdigest()[:12]
             preview_right = (
-                f'<span style="color: var(--text-secondary); font-weight: normal; margin-left: 8px; font-size: {scale_font_size(11)}px;">'
+                f'<span style="color: var(--text-secondary); font-weight: {preview_weight}; margin-left: 8px; font-size: {scale_font_size(11)}px;">'
                 f"{escape(preview)}</span>"
             )
             return f"""<div class="think-compact" data-block-key="{block_key}"{_flip_attr} style="margin: 2px 0; padding: 4px 8px; {font_style} display: flex; align-items: baseline; gap: 6px; border-radius: 4px;">
@@ -1477,12 +1502,12 @@ def _render_think_block(content: str, completed: bool = True, compact: bool = Fa
 </div>"""
 
         # ── 非简洁模式：完整折叠框UI（图标标签 + 预览 + 可展开全文）──
-        content_escaped = escape(_strip_code_blocks(content))
+        content_escaped = escape(_strip_code_blocks(body_source))
         block_seed = f"{content}|1"
         block_key = "think-" + hashlib.sha1(block_seed.encode("utf-8")).hexdigest()[:12]
         # 预览文字单行省略：长预览不再折行撑高 summary 行（视觉升级）
         summary_right = (
-            f'<span style="color: var(--text-secondary); font-weight: normal; margin-left: 12px; '
+            f'<span style="color: var(--text-secondary); font-weight: {preview_weight}; margin-left: 12px; '
             f'font-size: {scale_font_size(11)}px; flex: 1 1 auto; min-width: 0; '
             f'overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">'
             f"{escape(preview)}</span>"
@@ -1520,14 +1545,17 @@ def _render_think_block_lightweight(content: str, completed: bool = True) -> str
     """
     if completed:
         # ── 完成态：可折叠UI（图标 + 预览 + 可展开全文） ──
+        think_title, think_body = _split_think_title(content)
+        body_source = think_body or content
         think_icon = _get_think_icon_html()
         status_text = f'<span class="think-bulb">{think_icon}</span>'
-        content_escaped = escape(content)
+        content_escaped = escape(body_source)
         font_style = _get_think_block_styles()
-        preview = _get_think_preview(content)
+        preview = think_title or _get_think_preview(body_source)
+        preview_weight = '500' if think_title else 'normal' 
         # 预览文字单行省略：与 _render_think_block 同款（视觉升级）
         summary_right = (
-            f'<span style="color: var(--text-secondary); font-weight: normal; margin-left: 12px; '
+            f'<span style="color: var(--text-secondary); font-weight: {preview_weight}; margin-left: 12px; '
             f'font-size: {scale_font_size(11)}px; flex: 1 1 auto; min-width: 0; '
             f'overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">'
             f"{escape(preview)}</span>"
