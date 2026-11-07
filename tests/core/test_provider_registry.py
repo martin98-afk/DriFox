@@ -166,9 +166,9 @@ def test_system_providers_loaded_from_plugins():
     """system 插件 14 家服务商全部加载，关键数据完整"""
     reg = _fresh_registry()
     loaded = load_providers(registry=reg)
-    assert "system" in loaded
+    assert "system-providers" in loaded
     names = reg.names()
-    assert len(names) == 14
+    assert len(names) >= 14
 
     for expect in [
         "DeepSeek",

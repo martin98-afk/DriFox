@@ -487,9 +487,36 @@ class ThemeManager:
         return self.get_theme(theme_id) or {}
 
     def get_current_colors(self) -> dict:
-        """获取当前主题的 colors 部分"""
+        """获取当前主题的 colors 部分（保证完整，供 UI 直接硬索引）
+
+        启动期竞态：ui_theme_style 可能指向尚未加载（或版本门禁下永久不可用）
+        的插件主题，此时 get_current_theme() 返回空 dict。旧实现静默返回 {}，
+        current_theme() 的下游按完整字典硬索引（card_viewers._load_skeleton 的
+        theme["card_bg_solid"]、chart_viewer_card 的 theme["accent"]）即抛
+        KeyError。这里按生效深浅回退到内置默认主题，保证 colors 始终完整；
+        插件主题刷新完成后自然切回真实主题，仅影响这一帧的取色。
+        """
         theme = self.get_current_theme()
-        return theme.get("colors", {})
+        colors = theme.get("colors", {})
+        if colors:
+            return colors
+        try:
+            from app.utils.config import DEFAULT_DARK_THEME, DEFAULT_LIGHT_THEME, Settings
+
+            fallback_id = (
+                DEFAULT_LIGHT_THEME
+                if Settings.get_instance().ui_light_mode.value
+                else DEFAULT_DARK_THEME
+            )
+            fallback = self.get_theme(fallback_id) or {}
+            colors = fallback.get("colors", {})
+            if colors:
+                return colors
+            # 极端：连默认主题文件都缺失，取任意已加载主题，仍不返回空集合
+            first = next(iter(self._themes.values()), {})
+            return first.get("colors", {}) or {}
+        except Exception:
+            return {}
 
     # ── 主题管理 ──────────────────────────────────────────
 

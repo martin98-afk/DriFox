@@ -55,7 +55,7 @@ def register(registry):
                 "thinking_param": "thinking",
             },
             extra_quota_fields=[                # 用量查询额外配置（可选）
-                QuotaField(key="server_id", label="Server ID:", placeholder="..."),
+                QuotaField(key="csrf_token", label="CSRF Token:", placeholder="..."),
             ],
             balance_fetcher=make_bearer_balance_fetcher(   # 余额查询（可选）
                 url="https://api.deepseek.com/user/balance",
