@@ -18,7 +18,8 @@
     "model.config",
     "model.config_for",
     "provider.list",
-    "model.enumerate"
+    "model.enumerate",
+    "session.read"
   ],
   "components": {
     "tools": true,

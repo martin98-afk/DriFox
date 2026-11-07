@@ -285,6 +285,55 @@ class QuestionTimeoutController(QObject):
             return
         self._submit(session, self._build_ai_text(snap, text, session.sec))
 
+    @staticmethod
+    def _build_context_block(pool: Any) -> str:
+        """会话上下文：最近一条用户消息（用户目标）+ 最近几条消息摘要。
+
+        经 session.read 能力取（需 manifest 声明）；任何失败静默返回空串，
+        prompt 退回无上下文形态——上下文是代答质量的增强项，不得阻断代答链。
+        """
+        try:
+            if not (isinstance(pool, dict) or hasattr(pool, "get")) or "session.read" not in pool:
+                return ""
+            read = pool["session.read"]
+            if not callable(read):
+                return ""
+            data = read() or {}
+            msgs = [m for m in (data.get("messages") or []) if isinstance(m, dict)]
+
+            def _text(m: dict) -> str:
+                c = m.get("content")
+                if isinstance(c, str):
+                    return c
+                if isinstance(c, list):
+                    return " ".join(
+                        str(b.get("text") or b.get("content") or "")
+                        for b in c if isinstance(b, dict)
+                    ).strip()
+                return ""
+
+            lines = []
+            goal = ""
+            for m in reversed(msgs):
+                if m.get("role") == "user":
+                    goal = _text(m).strip()
+                    break
+            if goal:
+                lines.append("用户目标：" + goal[:500])
+            parts = []
+            for m in msgs[-6:]:
+                role = "用户" if m.get("role") == "user" else "助手"
+                t = _text(m).strip()[:80]
+                if t:
+                    parts.append(f"{role}：{t}")
+            if parts:
+                lines.append("最近对话：\n" + "\n".join(parts))
+            if not lines:
+                return ""
+            return "任务上下文（据此判断用户最可能的意图）：\n" + "\n".join(lines) + "\n\n"
+        except Exception:  # noqa: BLE001 - 上下文失败不阻断代答
+            return ""
+
     def _ask_model(self, snap: dict, model_query: str, pool: Any) -> str:
         """调模型为未答问题作答，返回模型原始输出（JSON 文本）。"""
         from app.plugins.sdk import build_openai_client, chat_completion_text
@@ -314,7 +363,8 @@ class QuestionTimeoutController(QObject):
 
         prompt = (
             "你是桌面 AI 助手的代理。主 AI 向用户提了问题，用户超时未回答，请代用户给出最合理的回答。\n\n"
-            "待回答问题（index 为题目序号）：\n" + "\n".join(lines) + "\n\n"
+            + self._build_context_block(pool)
+            + "待回答问题（index 为题目序号）：\n" + "\n".join(lines) + "\n\n"
             "输出格式（程序解析，必须严格遵守）：\n"
             '你的回复第一个字符必须是 {，最后一个字符必须是 }。\n'
             '格式：{"answers": [{"index": 0, "answer": "回答内容"}]}\n'
