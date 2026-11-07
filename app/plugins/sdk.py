@@ -54,6 +54,7 @@ _SYMBOLS: dict[str, tuple[str, str]] = {
     "extract_partial_path": ("app.core.tools.tool_arg_lines", "extract_partial_path"),
     "should_emit_progress": ("app.core.tools.tool_arg_lines", "should_emit_progress"),
     "append_text_block": ("app.core.conversation.message_content", "append_text_block"),
+    "extract_reasoning_delta": ("app.core.conversation.message_content", "extract_reasoning_delta"),
     "create_agent_manager": ("app.core.conversation.agent", "create_agent_manager"),
     "get_model_capabilities": ("app.core.modelmeta.model_capabilities", "get_model_capabilities"),
     "normalize_reasoning_effort": (
@@ -240,6 +241,7 @@ _STABLE: frozenset[str] = frozenset(
         "get_message_preview",
         "extract_project_initials",
         "append_text_block",
+        "extract_reasoning_delta",
         "build_openai_client",
         "clear_cache",
         "provider_quota_exclude_keys",

@@ -74,7 +74,7 @@ def _get_openai_errors() -> Dict[str, type]:
 
 from app.core.context.budget import resolve_context_budget
 from app.core.conversation.config import HookPolicy, PermissionCache
-from app.core.conversation.message_content import append_text_block, consolidate_messages, extract_reasoning_delta
+from app.core.conversation.message_content import append_text_block, consolidate_messages
 
 from app.core.modelmeta.model_capabilities import (
     ABSOLUTE_FALLBACK_CEILING,
