@@ -114,6 +114,14 @@ def main():
         traceback.print_exc()
 
     pump(800)
+    # 心跳 _sync_windows 周期 1000ms，teardown（cancel_all/Stall 停止）由心跳触发，
+    # 泵满 4 秒确保心跳跑过 3 轮 + DeferredDelete/GC 完成
+    for _ in range(4):
+        pump(1000)
+    import gc as _gc
+
+    _gc.collect()
+    pump(500)
     if not _seen:
         print("\n=== 未捕获到异常（复现失败或症状在别的路径） ===", flush=True)
     tm.close()

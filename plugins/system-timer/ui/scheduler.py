@@ -392,11 +392,26 @@ class TimerScheduler:
             logger.debug(f"[system-timer] 窗口表不可用，跳过事件订阅: {e}")
             return
         # 已关闭窗口的桥就地释放（异常退出/强制关窗时 Qt 未必及时回收）
+        # ★ 删桥前必须精确断开 backend→bridge 的订阅（_connections 中归属该桥的
+        # 条目）：只 deleteLater 时悬挂连接留到桥析构批次清理，实测触发
+        # 「TypeError: native Qt signal is not callable」（C 层异常，excepthook
+        # 拿不到 traceback；2026-11-08 关任意 tab 必现）。与 stop() 的精确断开
+        # 逻辑保持一致。
         for window_id in list(self._bridges):
             if window_id in widgets:
                 continue
             bridge = self._bridges.pop(window_id, None)
             if bridge is not None:
+                kept = []
+                for sig, handler in self._connections:
+                    if getattr(handler, "__self__", None) is bridge:
+                        try:
+                            sig.disconnect(handler)
+                        except Exception:  # noqa: BLE001 - Qt 可能已自动断连
+                            pass
+                    else:
+                        kept.append((sig, handler))
+                self._connections[:] = kept
                 try:
                     bridge.event.disconnect()
                 except Exception:  # noqa: BLE001
