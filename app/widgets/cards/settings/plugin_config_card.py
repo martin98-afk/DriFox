@@ -177,6 +177,14 @@ class PluginConfigCard(DynamicHeightExpandCardMixin, ExpandSettingCard):
                 row = _FieldRow(f.label, combo, self.view)
                 self._rows[f.key] = combo
                 self._add_field_row(f, row)
+            elif f.type == "model":
+                # 模型选择下拉：选项走 provider.list × model.enumerate 能力动态填充，
+                # 首项「跟随当前会话模型」= 空值；存储与保存语义同 select
+                combo = SelectComboRow(self._load_model_options(), self.view)
+                combo.valueChanged.connect(lambda _v, _k=f.key: self._on_field_changed(_k))
+                row = _FieldRow(f.label, combo, self.view)
+                self._rows[f.key] = combo
+                self._add_field_row(f, row)
             elif f.type == "number":
                 spin = SpinBox(self.view)
                 spin.setRange(f.min if f.min is not None else 0, f.max if f.max is not None else 2147483647)
@@ -234,6 +242,43 @@ class PluginConfigCard(DynamicHeightExpandCardMixin, ExpandSettingCard):
                 self._add_field_row(f, row)
 
         self._echo()
+
+    def _load_model_options(self) -> tuple:
+        """模型下拉选项：首项「跟随当前会话模型」+ provider.list × model.enumerate。
+
+        能力授权按本插件 manifest 裁剪；能力不可用（旧宿主 / 无活跃窗口 /
+        未声明能力）时只剩首项，下拉仍可用（存空值 = 跟随会话模型）。
+        """
+        options: list = [("", "跟随当前会话模型")]
+        seen: set = {""}
+        try:
+            from app.plugins.capabilities.resolve import caps_for
+
+            list_providers = caps_for("provider.list", plugin=self._plugin_name, surface="ui")
+            enumerate_models = caps_for("model.enumerate", plugin=self._plugin_name, surface="ui")
+            if not callable(list_providers) or not callable(enumerate_models):
+                return tuple(options)
+            for p in list_providers() or []:
+                if not isinstance(p, dict):
+                    continue
+                display = str(p.get("display_name") or p.get("id") or "").strip()
+                pid = str(p.get("id") or "").strip()
+                if not display or not pid:
+                    continue
+                for m in enumerate_models(pid) or []:
+                    if not isinstance(m, dict):
+                        continue
+                    name = str(m.get("name") or "").strip()
+                    if not name:
+                        continue
+                    value = f"{display}:{name}"
+                    if value in seen:
+                        continue
+                    seen.add(value)
+                    options.append((value, value))
+        except Exception as e:  # noqa: BLE001 - 选项加载失败不阻断卡构建
+            logger.debug(f"[PluginConfigCard] 模型选项加载失败: {e}")
+        return tuple(options)
 
     def _add_field_row(self, f, row: QWidget) -> None:
         """添加字段行；schema 带 description 时补一行小号说明（与控件列对齐）。
@@ -302,7 +347,7 @@ class PluginConfigCard(DynamicHeightExpandCardMixin, ExpandSettingCard):
         """按字段类型把存储值设置到控件 + 记录回显基线（_echoing 置位期间调用）"""
         if f.type == "bool":
             control.setChecked(bool(val))
-        elif f.type == "select":
+        elif f.type in ("select", "model"):
             control.setCurrentData(val)
             self._echoed[f.key] = control.currentData()
         elif f.type == "number":
@@ -343,7 +388,7 @@ class PluginConfigCard(DynamicHeightExpandCardMixin, ExpandSettingCard):
             return
         if target_field.type == "bool":
             value: object = control.isChecked()
-        elif target_field.type == "select":
+        elif target_field.type in ("select", "model"):
             value = control.currentData()
         elif target_field.type == "number":
             value = str(control.value())

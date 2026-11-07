@@ -24,6 +24,10 @@
               声明式工具编排：点击 → 调注册工具（args）→ image_data 弹窗展示 +
               content 作状态文案 → 可选 poll 声明按模板轮询至终止条件。通用机制，
               宿主不含任何平台/插件专属逻辑。
+    model     模型选择下拉（ComboBox，首项「跟随当前会话模型」= 空值）。
+              选项由宿主经 provider.list × model.enumerate 能力动态填充，
+              存储值「display_name:模型名」（与 model.config_for 同语义）；
+              插件需在 capabilities 声明这两个能力。
 
 类型别名（向前兼容，社区插件可能误用：解析时归一化后再校验）：
     int / integer  →  number
@@ -61,7 +65,7 @@ _CONFIG_MAX_DESC = 2048  # 字段 description ≤ 2KB
 _CONFIG_MAX_DEFAULT_BYTES = 8192  # 字段 default 序列化后 ≤ 8KB
 
 # 支持的字段类型（渲染映射见 plugin_config_card.py）
-FIELD_TYPES = ("text", "password", "bool", "select", "number", "textarea", "link", "action")
+FIELD_TYPES = ("text", "password", "bool", "select", "number", "textarea", "link", "action", "model")
 
 # 类型别名：非标准写法 → 标准 type（解析时归一化，老插件不被打回整个 schema）
 # 仅做容错；新插件仍应按 FIELD_TYPES 书写

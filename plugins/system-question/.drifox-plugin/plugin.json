@@ -13,11 +13,7 @@
   "license": "GPL-3.0-or-later",
   "type": "system",
   "api_version": 2,
-  "capabilities": [
-    "question.control",
-    "model.config",
-    "model.config_for"
-  ],
+
   "components": {
     "tools": true,
     "ui": true
@@ -50,10 +46,9 @@
       {
         "key": "question_timeout_model",
         "label": "超时判断模型",
-        "type": "text",
+        "type": "model",
         "default": "",
-        "placeholder": "留空跟随当前会话模型",
-        "description": "「超时 AI 判断」使用的模型，填「服务商:模型名」；留空则用当前会话模型"
+        "description": "「超时 AI 判断」使用的模型；留空跟随当前会话模型"
       }
     ]
   }
