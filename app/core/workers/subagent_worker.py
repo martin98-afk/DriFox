@@ -1167,9 +1167,23 @@ class SubAgentExecutor(QThread):
             timeout=120.0,
         )
 
-        # GPT-5.x 系列走 Responses API（chat/completions 不透传 reasoning，思考在
-        # /v1/responses 的 reasoning item 中返回）
-        if self._use_responses_api(config):
+        # 协议入口裁决：与 chat_worker._resolve_use_responses 同语义
+        # （旧键显式 > 新键 responses > 自动）。transport:<id> 子智能体暂不支持
+        # （Phase 3 搬迁进 transport+sink 体系后移除本警告）。
+        entry = str(config.get("协议入口", "") or "").strip()
+        legacy = config.get("使用ResponsesAPI")
+        if legacy is not None:
+            # 旧键显式设置不可被「协议入口」翻案（兼容纪律，与主线程一致）
+            use_responses = bool(legacy)
+        elif entry == "responses":
+            use_responses = True
+        else:
+            use_responses = self._use_responses_api(config)
+        if entry.startswith("transport:"):
+            logger.warning(
+                f"[SubAgentWorker] 协议入口={entry} 暂不支持子智能体链路，按 chat/completions 执行"
+            )
+        if use_responses:
             try:
                 return self._make_responses_api_call(client, messages, tools, config)
             except Exception as e:
