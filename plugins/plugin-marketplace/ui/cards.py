@@ -2066,12 +2066,12 @@ class _PluginRow(QFrame):
            manifest.icon + source 指向 git-subdir GitHub 源）
         3. SquircleAvatar 缩写头像（兜底）
 
-        卡片行内图标按 font_size * 2.4 放大（最小 36px），让图标在列表中
-        更醒目。当前 font_size=14 → 36px（之前 23px）。
+        卡片行内图标按 font_size * 3.4 放大（最小 48px），让图标在列表中
+        更醒目。当前 font_size=14 → 48px（之前 36px，更早 23px）。
         """
         plugin_name = self._meta.get("name", "?")
-        # 卡片行内放大：font_size > 0 时按 2.4 倍率放大，下限 36px
-        icon_size = max(36, int(self._font_size * 2.4)) if self._font_size > 0 else 36
+        # 卡片行内放大：font_size > 0 时按 3.4 倍率放大，下限 48px
+        icon_size = max(48, int(self._font_size * 3.4)) if self._font_size > 0 else 48
 
         local_path = self._local_path
         if local_path:
@@ -2156,8 +2156,8 @@ class _PluginRow(QFrame):
             return
         self._font_size = font_size
         if self._avatar is not None:
-            # 卡片行内图标按字号 2.4 倍放大（最小 36px），与 _create_icon_widget 保持一致
-            icon_size = max(36, int(font_size * 2.4))
+            # 卡片行内图标按字号 3.4 倍放大（最小 48px），与 _create_icon_widget 保持一致
+            icon_size = max(48, int(font_size * 3.4))
             if hasattr(self._avatar, "set_icon_size"):
                 self._avatar.set_icon_size(icon_size)
             elif hasattr(self._avatar, "set_size"):

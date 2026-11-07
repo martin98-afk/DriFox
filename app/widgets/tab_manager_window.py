@@ -2745,6 +2745,11 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
             if anim.get("canvas") == "shared":
                 layer.set_canvas_provider(self._make_canvas_provider(parent_widget))
             layer.setGeometry(parent_widget.rect())
+            # parent resize → SceneLayer.eventFilter 同步几何。动画层是绝对
+            # 定位子控件、不参与布局，漏装 filter 时窗口/侧栏 resize 后动画
+            # 背景停在创建时的尺寸（静态图走 _AutoGeometryLabel 有同步，
+            # 动画层此前漏了，表现为 webp 背景不同步缩放）。
+            parent_widget.installEventFilter(layer)
             layer.lower()
             if area == "window":
                 base = getattr(self, "_window_base_layer", None)
@@ -2985,14 +2990,16 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
                     lbl.resize(parent.size())
             except Exception:
                 pass
-        # 共享画布动画层：resize 阶段二跳过布局传播，子控件不会收到 resize，
-        # 必须手动重算画布几何，否则缩放过程中侧栏/对话区动画会错位
+        # 动画层与场景层：resize 阶段二跳过布局传播，子控件不会收到 resize，
+        # eventFilter 不触发，必须手动同步。sync_geometry = 自身撑满 parent +
+        # 内容层重算画布几何（覆盖原 refresh_canvas_geometry 的语义），否则
+        # 缩放过程中侧栏/对话区动画会错位
         for attr in ("_window_anim_layer", "_sidebar_anim_layer", "_scene_layer"):
             layer = getattr(self, attr, None)
-            if layer is None or not hasattr(layer, "refresh_canvas_geometry"):
+            if layer is None or not hasattr(layer, "sync_geometry"):
                 continue
             try:
-                layer.refresh_canvas_geometry()
+                layer.sync_geometry()
             except RuntimeError:
                 pass
 

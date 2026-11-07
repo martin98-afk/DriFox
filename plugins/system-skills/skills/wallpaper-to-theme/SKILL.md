@@ -52,10 +52,10 @@ license: GPL-3.0-or-later
 Wallpaper Engine 的 mp4 不能直接给客户端播（Qt5 的 QMediaPlayer 依赖系统解码器，同一份素材在不同机器上能不能播取决于系统装了什么）。先转成动画 WebP：
 
 ```bash
-python scripts/anim_encode.py <壁纸目录>/xxx.mp4 <out>/themes/<id>/bg/chat.webp --blur 0.8
+python scripts/anim_encode.py <壁纸目录>/xxx.mp4 <out>/themes/<id>/bg/chat.webp --blur 0.4
 ```
 
-参数建议：`--width 640 --fps 12`（默认值），`--duration 6~10` 截一段干净的循环，`--blur 0.8~1.5` 预烘模糊掩盖低分辨率。产物 0.2~0.5MB/5s，比原 mp4 小。
+参数建议：`--width 800 --fps 12`（默认值，640 档整窗背景实测被嫌糊），`--duration 6~10` 截一段干净的循环，`--blur 0.4~0.8` 轻度预烘模糊（高模糊会把画面糊掉，实测 0.4 佳）。产物 0.2~0.5MB/5s，比原 mp4 小。
 
 yaml 里对应写法：
 

@@ -11,6 +11,8 @@ from PyQt5.QtGui import QImage
 
 from app.widgets.anim_background import (
     FPS_CAP,
+    IDLE_TICK_MS,
+    TICK_MS,
     AnimationRegistry,
     AnimationSource,
     BackgroundClock,
@@ -97,19 +99,49 @@ class TestClockLifecycle:
         clock.track(AnimationSource(png, 12))
         assert clock._timer.isActive()
 
-    def test_stops_when_no_subscriber(self, png):
+    def test_idles_when_no_subscriber(self, png):
+        """无订阅者：降频轮询而非停表（停表后无人能重启 → 永久卡帧）"""
         clock = BackgroundClock()
         clock.track(AnimationSource(png, 12))
         clock._tick()
-        assert not clock._timer.isActive()
+        assert clock._timer.isActive()
+        assert clock._timer.interval() == IDLE_TICK_MS
 
-    def test_stops_when_subscriber_hidden(self, png):
+    def test_idles_when_subscriber_hidden(self, png):
+        """订阅者隐藏：降频轮询而非停表"""
         clock = BackgroundClock()
         src = AnimationSource(png, 12)
         src.subscribe(_FakeLayer(visible=False))
         clock.track(src)
         clock._tick()
-        assert not clock._timer.isActive()
+        assert clock._timer.isActive()
+        assert clock._timer.interval() == IDLE_TICK_MS
+
+    def test_resumes_after_becoming_visible(self, png):
+        """最小化→停跳降频→恢复可见→下一拍回全速并继续推帧（卡死回归）"""
+        clock = BackgroundClock()
+        src = AnimationSource(png, 60)
+        layer = _FakeLayer(visible=False)
+        src.subscribe(layer)
+        clock.track(src)
+        clock._tick()
+        assert clock._timer.interval() == IDLE_TICK_MS
+        layer._visible = True
+        clock._tick()
+        assert clock._timer.interval() == TICK_MS
+        assert layer.frames, "恢复可见后应继续收到帧"
+
+    def test_track_from_idle_restores_full_speed(self, png):
+        """时钟在 idle 轮询中挂入新源：立即回全速，不竛 500ms"""
+        clock = BackgroundClock()
+        hidden = _FakeLayer(visible=False)
+        src_a = AnimationSource(png, 12)
+        src_a.subscribe(hidden)
+        clock.track(src_a)
+        clock._tick()
+        assert clock._timer.interval() == IDLE_TICK_MS
+        clock.track(AnimationSource(png, 12))
+        assert clock._timer.interval() == TICK_MS
 
     def test_keeps_running_and_pushes_frames(self, png):
         clock = BackgroundClock()
@@ -119,6 +151,7 @@ class TestClockLifecycle:
         clock.track(src)
         clock._tick()
         assert clock._timer.isActive()
+        assert clock._timer.interval() == TICK_MS
         assert layer.frames, "可见订阅者应收到帧"
 
     def test_dead_subscriber_is_dropped(self, png):

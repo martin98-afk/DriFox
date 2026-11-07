@@ -37,6 +37,13 @@ logger = logging.getLogger(__name__)
 FPS_CAP = 15
 # 时钟基准间隔：按上限帧率走，各源内部按自己的 fps 抽帧
 _TICK_MS = max(1, 1000 // FPS_CAP)
+# 全部订阅者不可见时的降频轮询间隔。不能停表：停表后没有任何可见性回调
+# 能重启它（Qt 不因窗口恢复可见唤醒已 stop 的 QTimer），窗口最小化/切走
+# 再恢复后动画永久卡在最后一帧。500ms 空转只是一次弱引用列表遍历。
+_IDLE_TICK_MS = 500
+# 公开别名：测试与外部模块（theme_manager 同款 FPS_CAP 模式）引用用
+TICK_MS = _TICK_MS
+IDLE_TICK_MS = _IDLE_TICK_MS
 
 class AnimationSource:
     """一个动画文件的帧源
@@ -158,7 +165,10 @@ class BackgroundClock(QObject):
     """全局动画时钟
 
     只有一个 QTimer：多区域同时动时不会各起一个定时器互相抢主线程。
-    没有任何可见订阅者时停表，窗口最小化/切走不烧 CPU。
+    没有任何可见订阅者时降频到 _IDLE_TICK_MS 轮询（解码与通知全跳过，
+    只留列表遍历），窗口最小化/切走几乎不烧 CPU；恢复可见后下一拍
+    自动回到全速。不能停表：停表后没有任何回调能重启它，窗口恢复
+    后动画会永久卡帧（2026-11-08 用户实测「播一会就卡住」即此根因）。
     """
 
     _instance: Optional["BackgroundClock"] = None
@@ -180,6 +190,9 @@ class BackgroundClock(QObject):
     def track(self, source: AnimationSource) -> None:
         if not any(r() is source for r in self._sources):
             self._sources.append(weakref.ref(source))
+        # 无论 timer 是否已活跃都恢复全速：可能正停在 idle 降频间隔上，
+        # 新源（如刚挂上的动画层）不该等最多 500ms 才动第一帧
+        self._timer.setInterval(_TICK_MS)
         if not self._timer.isActive():
             self._timer.start()
 
@@ -200,8 +213,9 @@ class BackgroundClock(QObject):
             if src.advance(now_ms):
                 src.notify()
         self._sources = alive
-        if not any_visible:
-            self._timer.stop()
+        # 可见→全速抽帧；全部不可见→降频轮询等待恢复可见。不停表：
+        # 停表后无人能重启，窗口恢复可见后动画就永远卡在最后一帧
+        self._timer.setInterval(_TICK_MS if any_visible else _IDLE_TICK_MS)
 
     @staticmethod
     def _source_visible(source: AnimationSource) -> bool:

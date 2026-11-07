@@ -166,6 +166,14 @@ class SceneLayer(QWidget):
         """
         self._sync_content_geometry()
 
+    def sync_geometry(self) -> None:
+        """公开几何同步入口：自身撑满 parent + 内容层对齐画布
+
+        与 VideoOverlayLayer.sync_geometry 同名同语义。用于宿主 resize
+        节流阶段二（布局传播被跳过）时由 _resize_bg_labels 手动收拢。
+        """
+        self._sync_geometry()
+
     def apply_config(self, cfg: Optional[dict], image_resolver=None) -> None:
         """应用主题配置（None 或 enabled=False 时清除所有内容）
 

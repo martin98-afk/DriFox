@@ -6,8 +6,9 @@
 """
 
 import pytest
-from PyQt5.QtGui import QImage
-from PyQt5.QtWidgets import QWidget
+from PyQt5.QtCore import QSize
+from PyQt5.QtGui import QImage, QResizeEvent
+from PyQt5.QtWidgets import QApplication, QWidget
 
 class _FakeSource:
     def __init__(self, failed=False):
@@ -111,6 +112,36 @@ class TestAnimationMount:
         layer.apply_config({"animation": _anim()}, image_resolver=lambda p: p)
         assert layer._anim_view is None
         host.deleteLater()
+
+class TestResizeSync:
+    """窗口/侧栏 resize 同步链（动画层是绝对定位子控件，不参与布局）
+
+    回归背景：_apply_region_animation 此前漏装 installEventFilter，
+    webp 动画背景停在创建时的尺寸，窗口拉大后露底。
+    """
+
+    def test_parent_resize_via_event_filter(self, harness):
+        """宿主装 filter 后 resize，层与动画视图几何跟随"""
+        host, layer, source, _clock = harness
+        layer.apply_config({"animation": _anim()}, image_resolver=lambda p: p)
+        host.installEventFilter(layer)
+        host.resize(1000, 750)
+        # 未 show 的顶层 widget resize() 只改尺寸不派发 Resize 事件（原生
+        # 句柄未创建），真实窗口已 show 必然派发；此处补同步派发走真实
+        # eventFilter 链
+        QApplication.sendEvent(host, QResizeEvent(QSize(1000, 750), QSize(800, 600)))
+        assert (layer.width(), layer.height()) == (1000, 750)
+        assert (layer._anim_view.width(), layer._anim_view.height()) == (1000, 750)
+
+    def test_sync_geometry_manual_after_missed_resize(self, harness):
+        """漏掉的 resize 由宿主手动 sync_geometry 收拢（resize 节流阶段二路径）"""
+        host, layer, source, _clock = harness
+        layer.apply_config({"animation": _anim()}, image_resolver=lambda p: p)
+        host.resize(1024, 768)  # 未装 filter，层不跟随（复现原始缺陷）
+        assert (layer.width(), layer.height()) == (800, 600)
+        layer.sync_geometry()
+        assert (layer.width(), layer.height()) == (1024, 768)
+        assert (layer._anim_view.width(), layer._anim_view.height()) == (1024, 768)
 
 class TestAnimViewFit:
     def test_cover_center_crop(self, qapp):
