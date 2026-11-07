@@ -33,8 +33,9 @@ from PyQt5.QtWidgets import (
 from qfluentwidgets import (
     BodyLabel,
     CaptionLabel,
+    HyperlinkButton,
     PillPushButton,
-    PrimaryPushButton,
+    PushButton,
     SearchLineEdit,
     SegmentedWidget,
     StrongBodyLabel,
@@ -105,7 +106,9 @@ class _PluginListRow(QWidget):
         text_box.setContentsMargins(0, 0, 0, 0)
         text_box.setSpacing(1)
         self._name = BodyLabel(entry.info.name, self)
+        self._name.setObjectName("pluginRowName")
         self._sub = CaptionLabel(self._subtitle_text(entry), self)
+        self._sub.setObjectName("pluginRowSub")
         text_box.addWidget(self._name)
         text_box.addWidget(self._sub)
         layout.addLayout(text_box, 1)
@@ -160,6 +163,14 @@ class _PluginListRow(QWidget):
                 """
             )
 
+    def refresh_icon(self) -> None:
+        """主题深浅切换后按对应侧重解码图标（构造时烧死的 pixmap 不跟主题）"""
+        pix = _plugin_icon(self._entry.info, 24)
+        if pix is not None:
+            self._icon.setPixmap(pix)
+        else:
+            self._icon.clear()
+
     def update_entry(self, state: str, missing: list) -> None:
         """配置保存后刷新副标题与状态点（不重建行，避免搜索框丢焦点）"""
         self._entry.state = state
@@ -189,20 +200,52 @@ class _PluginListRow(QWidget):
 
 
 class _KeyValueRow(QWidget):
-    """关于页键值行：左标签定宽，右值自动换行。"""
+    """关于页键值行：label 次要色定宽，值可选中复制"""
 
     def __init__(self, key: str, value: str, parent=None):
         super().__init__(parent)
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 3, 0, 3)
-        layout.setSpacing(12)
+        layout.setSpacing(16)
         label = CaptionLabel(key, self)
-        label.setMinimumWidth(96)
+        label.setObjectName("kvLabel")
+        label.setFixedWidth(104)
         label.setAlignment(Qt.AlignLeft | Qt.AlignTop)
         val = BodyLabel(value or "-", self)
+        val.setObjectName("kvValue")
         val.setWordWrap(True)
+        val.setTextInteractionFlags(Qt.TextSelectableByMouse)
         layout.addWidget(label, 0, Qt.AlignLeft | Qt.AlignTop)
         layout.addWidget(val, 1)
+
+
+class _SectionTitle(QLabel):
+    """关于页分组小标题：小字号 + 次要色 + 上方留白"""
+
+    def __init__(self, text: str, parent=None):
+        super().__init__(text, parent)
+        self.setObjectName("sectionTitle")
+        self.setStyleSheet(
+            f"color: {Colors.TEXT_MUTED}; font-size: 12px; padding: 14px 0 2px 0;"
+        )
+
+
+def _h_line(parent: QWidget) -> QFrame:
+    """1px 分隔线（关于页分组之间）"""
+    line = QFrame(parent)
+    line.setFixedHeight(1)
+    line.setStyleSheet(f"background: {Colors.BORDER}; border: none;")
+    return line
+
+
+def _badge(text: str, parent: QWidget) -> QLabel:
+    """组件徽章：accent 文字 + 半透明底"""
+    label = QLabel(text, parent)
+    label.setStyleSheet(
+        f"color: {Colors.TEXT_ACCENT}; background: {Colors.TAB_ACTIVE_BG};"
+        "border-radius: 4px; padding: 1px 8px; font-size: 12px;"
+    )
+    return label
 
 
 class _EmptyHint(QWidget):
@@ -213,9 +256,12 @@ class _EmptyHint(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(24, 32, 24, 32)
         layout.setSpacing(6)
-        layout.addWidget(BodyLabel(title, self), 0, Qt.AlignCenter)
+        title_label = BodyLabel(title, self)
+        title_label.setObjectName("emptyTitle")
+        layout.addWidget(title_label, 0, Qt.AlignCenter)
         if detail:
             hint = CaptionLabel(detail, self)
+            hint.setObjectName("emptyDetail")
             hint.setWordWrap(True)
             hint.setAlignment(Qt.AlignCenter)
             layout.addWidget(hint, 0, Qt.AlignCenter)
@@ -242,6 +288,52 @@ def _font_px(widget: QWidget, delta: int) -> None:
 
         px = scale_font_size(max(9, get_ui_font_size() + delta))
         widget.setStyleSheet(f"font-size: {px}px;")
+    except Exception:
+        pass
+
+
+# 标签 objectName → 主题色角色（只处理登记过的标签，避免误伤徽章/链接）
+_PAINT_RULES = {
+    "pluginRowName": "primary",
+    "pluginRowSub": "secondary",
+    "detailTitle": "primary",
+    "detailMeta": "secondary",
+    "fieldLabel": "primary",
+    "configHint": "secondary",
+    "kvLabel": "secondary",
+    "kvValue": "primary",
+    "sectionTitle": "muted",
+    "emptyTitle": "primary",
+    "emptyDetail": "secondary",
+    "permCap": "primary",
+    "permSummary": "secondary",
+}
+
+
+def _paint_theme_colors(root: QWidget) -> None:
+    """把页面内文字统一成当前主题色
+
+    qfluentwidgets 的标签在构造时把颜色烧成黑/白两套（setTextColor），不跟随
+    自定义主题的 text_primary/text_secondary；这里按 objectName 显式覆盖，
+    并保留各标签已有字号（分组标题固定 12px）。
+    """
+    try:
+        from app.utils.design_tokens import Colors
+
+        palette = {
+            "primary": Colors.TEXT_PRIMARY,
+            "secondary": Colors.TEXT_SECONDARY,
+            "muted": Colors.TEXT_MUTED,
+        }
+        import re
+
+        for label in root.findChildren(QLabel):
+            role = _PAINT_RULES.get(label.objectName())
+            if not role:
+                continue
+            # 只换颜色，保留样式表里已有的字号（说明文字 base-3、分组标题 12px）
+            css = re.sub(r"color:\s*[^;]+;", "", label.styleSheet() or "")
+            label.setStyleSheet(f"color: {palette[role]};" + css)
     except Exception:
         pass
 
@@ -293,7 +385,9 @@ class _PluginDetailView(QWidget):
         title_box.setContentsMargins(0, 0, 0, 0)
         title_box.setSpacing(1)
         self._title = StrongBodyLabel("", self)
+        self._title.setObjectName("detailTitle")
         self._meta = CaptionLabel("", self)
+        self._meta.setObjectName("detailMeta")
         title_box.addWidget(self._title)
         title_box.addWidget(self._meta)
         header.addLayout(title_box, 1)
@@ -348,6 +442,17 @@ class _PluginDetailView(QWidget):
             has_perms=bool(entry.info.manifest.get("capabilities")),
         )
         _apply_font(self)
+        _paint_theme_colors(self)
+
+    def refresh_icon(self) -> None:
+        """主题深浅切换后按对应侧重解码头部图标"""
+        if self._entry is None:
+            return
+        pix = _plugin_icon(self._entry.info, 32)
+        if pix is not None:
+            self._icon.setPixmap(pix)
+        else:
+            self._icon.clear()
 
     def _rebuild_segments(self, has_config: bool, has_perms: bool) -> None:
         """按插件实际能力重建页签
@@ -480,9 +585,12 @@ class _PluginDetailView(QWidget):
             text_box = QVBoxLayout()
             text_box.setContentsMargins(0, 0, 0, 0)
             text_box.setSpacing(1)
-            text_box.addWidget(BodyLabel(cap, row))
+            cap_label = BodyLabel(cap, row)
+            cap_label.setObjectName("permCap")
+            text_box.addWidget(cap_label)
             summary = spec.summary if spec is not None else "未在能力目录登记（插件自建能力，宿主不做语义校验）"
             hint = CaptionLabel(summary, row)
+            hint.setObjectName("permSummary")
             hint.setWordWrap(True)
             text_box.addWidget(hint)
             row_layout.addLayout(text_box, 1)
@@ -497,36 +605,93 @@ class _PluginDetailView(QWidget):
         manifest = info.manifest
         author = manifest.get("author") or {}
         if isinstance(author, dict):
-            author_text = str(author.get("name") or "")
-            if author.get("url"):
-                author_text = f"{author_text} ({author['url']})"
+            author_name = str(author.get("name") or "")
+            author_url = str(author.get("url") or "")
         else:
-            author_text = str(author)
-        comps = "、".join(_component_display_name(c) for c in entry.components) or "无"
+            author_name, author_url = str(author), ""
+        home = author_url or str(manifest.get("homepage") or manifest.get("repository") or "")
 
         body = QWidget()
         layout = QVBoxLayout(body)
-        layout.setContentsMargins(2, 4, 8, 12)
+        layout.setContentsMargins(2, 8, 12, 16)
         layout.setSpacing(2)
-        layout.addWidget(_KeyValueRow("描述", info.description, body))
+
+        # 描述独立成段：不塞进键值行，避免长描述把两列撑歪
+        desc = BodyLabel(info.description or "此插件未提供描述", body)
+        desc.setWordWrap(True)
+        layout.addWidget(desc)
+
+        layout.addWidget(_SectionTitle("基本信息", body))
+        layout.addWidget(_h_line(body))
         layout.addWidget(_KeyValueRow("版本", str(info.version), body))
-        layout.addWidget(_KeyValueRow("作者", author_text, body))
-        layout.addWidget(_KeyValueRow("许可证", str(manifest.get("license") or "-"), body))
+        layout.addWidget(_KeyValueRow("许可证", str(manifest.get("license") or "未声明"), body))
         layout.addWidget(_KeyValueRow("来源", "内置插件" if info.is_system else "用户插件", body))
         layout.addWidget(_KeyValueRow("状态", "已启用" if entry.enabled else "已停用", body))
-        layout.addWidget(_KeyValueRow("组件", comps, body))
-        layout.addWidget(_KeyValueRow("宿主要求", f"api {manifest.get('api_version', '-')} / 最低 {manifest.get('min_host_version', '-')}", body))
-        layout.addWidget(_KeyValueRow("目录", str(getattr(info, "path", "")), body))
+        if entry.components:
+            comp_row = QWidget(body)
+            h = QHBoxLayout(comp_row)
+            h.setContentsMargins(0, 3, 0, 3)
+            h.setSpacing(16)
+            lbl = CaptionLabel("组件", comp_row)
+            lbl.setFixedWidth(104)
+            lbl.setStyleSheet(f"color: {Colors.TEXT_SECONDARY};")
+            h.addWidget(lbl, 0, Qt.AlignTop)
+            badges = QHBoxLayout()
+            badges.setSpacing(6)
+            for comp in entry.components:
+                badges.addWidget(_badge(_component_display_name(comp), comp_row))
+            badges.addStretch(1)
+            h.addLayout(badges, 1)
+            layout.addWidget(comp_row)
+
+        if author_name or home:
+            layout.addWidget(_SectionTitle("作者与来源", body))
+            layout.addWidget(_h_line(body))
+            if author_name:
+                layout.addWidget(_KeyValueRow("作者", author_name, body))
+            if home:
+                home_row = QWidget(body)
+                hh = QHBoxLayout(home_row)
+                hh.setContentsMargins(0, 3, 0, 3)
+                hh.setSpacing(16)
+                home_lbl = CaptionLabel("主页", home_row)
+                home_lbl.setFixedWidth(104)
+                home_lbl.setStyleSheet(f"color: {Colors.TEXT_SECONDARY};")
+                hh.addWidget(home_lbl, 0, Qt.AlignTop)
+                hh.addWidget(HyperlinkButton(home, home, home_row), 1)
+                layout.addWidget(home_row)
+
+        layout.addWidget(_SectionTitle("兼容性", body))
+        layout.addWidget(_h_line(body))
+        layout.addWidget(_KeyValueRow("API 版本", str(manifest.get("api_version", "-")), body))
+        layout.addWidget(_KeyValueRow("最低宿主", str(manifest.get("min_host_version", "-")), body))
+
+        layout.addWidget(_SectionTitle("本地位置", body))
+        layout.addWidget(_h_line(body))
+        layout.addWidget(_KeyValueRow("插件目录", str(getattr(info, "path", "")), body))
 
         btn_row = QHBoxLayout()
-        btn_row.setContentsMargins(0, 10, 0, 0)
-        open_btn = PrimaryPushButton("打开插件目录", body)
+        btn_row.setContentsMargins(0, 14, 0, 0)
+        btn_row.setSpacing(8)
+        open_btn = PushButton("打开插件目录", body)
         open_btn.clicked.connect(lambda: self._open_dir(info))
+        copy_btn = PushButton("复制路径", body)
+        copy_btn.clicked.connect(lambda: self._copy_path(info))
         btn_row.addWidget(open_btn)
+        btn_row.addWidget(copy_btn)
         btn_row.addStretch(1)
         layout.addLayout(btn_row)
         layout.addStretch(1)
         return body
+
+    @staticmethod
+    def _copy_path(info: Any) -> None:
+        try:
+            from PyQt5.QtWidgets import QApplication
+
+            QApplication.clipboard().setText(str(getattr(info, "path", "")))
+        except Exception as e:  # noqa: BLE001 - 复制失败不影响页面
+            logger.warning(f"[PluginSettingsPage] 复制插件路径失败: {e}")
 
     @staticmethod
     def _open_dir(info: Any) -> None:
@@ -700,6 +865,9 @@ class PluginSettingsPage(QWidget):
 
         def _build_next(idx: int) -> None:
             if idx >= len(entries):
+                # 分帧建行完成后统一补刷：行内 qfluentwidgets 标签构造时按浅色主题
+                # 烧死黑色文字，不刷则深色主题下列表不可读（详情页由 show_entry 刷）
+                _paint_theme_colors(self)
                 return
             entry = entries[idx]
             row = _PluginListRow(entry, self._list_area.widget())
@@ -780,9 +948,12 @@ class PluginSettingsPage(QWidget):
         self._detail.show_entry(entry)
 
     def refresh_style(self) -> None:
-        """主题切换后刷新行样式（设置面板统一调用）"""
+        """主题切换后刷新行样式、文字色与图标（设置面板统一调用）"""
         for row in self._rows:
             row._apply_style()
+            row.refresh_icon()
+        self._detail.refresh_icon()
+        _paint_theme_colors(self)
 
     def refresh_entry_state(self, entry: PluginEntry) -> None:
         """字段保存后同步列表行、排序签名与筛选计数（详情页信号回调）"""

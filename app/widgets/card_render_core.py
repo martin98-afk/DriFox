@@ -1484,12 +1484,18 @@ def _render_think_block(content: str, completed: bool = True, compact: bool = Fa
         body_source = think_body or content
         think_icon = _get_think_icon_html()
         status_text = f'<span class="think-bulb">{think_icon}</span>'
-        preview = think_title or _get_think_preview(body_source)
-        preview_weight = '500' if think_title else 'normal'
         font_style = _get_think_block_styles()
 
         # ── 简洁模式：纯文本行，不走折叠框（避免 save/restore 导致的消失→重现闪烁）──
+        # 带标题特例（Responses API）必须拼「标题 · 正文片段」：单行形态正文无处可见，
+        # 只显示标题会让思考内容彻底不可见（088c365e 回归）。无标题保持原预览采样。
         if compact:
+            if think_title:
+                body_sample = _get_think_preview(think_body) if think_body.strip() else ""
+                preview = f"{think_title} · {body_sample}" if body_sample else think_title
+            else:
+                preview = _get_think_preview(content)
+            preview_weight = "500" if think_title else "normal"
             block_seed = f"{content}|1"
             block_key = "think-" + hashlib.sha1(block_seed.encode("utf-8")).hexdigest()[:12]
             preview_right = (
@@ -1502,6 +1508,9 @@ def _render_think_block(content: str, completed: bool = True, compact: bool = Fa
 </div>"""
 
         # ── 非简洁模式：完整折叠框UI（图标标签 + 预览 + 可展开全文）──
+        # 标题进 summary 行、正文在展开区完整可见，preview 用标题（无标题退回采样）。
+        preview = think_title or _get_think_preview(body_source)
+        preview_weight = '500' if think_title else 'normal'
         content_escaped = escape(_strip_code_blocks(body_source))
         block_seed = f"{content}|1"
         block_key = "think-" + hashlib.sha1(block_seed.encode("utf-8")).hexdigest()[:12]

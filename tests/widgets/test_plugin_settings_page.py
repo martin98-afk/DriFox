@@ -54,7 +54,7 @@ def env(tmp_path, monkeypatch, qapp):
                 "title": "语音播报配置",
                 "fields": [
                     {"key": "api_key", "label": "在线 Key", "type": "password", "required": True},
-                    {"key": "engine", "label": "引擎", "type": "text", "default": "edge"},
+                    {"key": "engine", "label": "引擎", "type": "text", "default": "edge", "description": "合成语音使用的引擎"},
                 ],
             },
         )
@@ -251,3 +251,92 @@ def test_segments_follow_plugin_capabilities(env, qapp, tmp_path):
     page._select("voice-reply", force=True)  # 有 config_schema、有 capabilities
     _pump(qapp)
     assert set(page._detail._seg.items.keys()) == {"config", "perms", "about"}
+
+
+def test_row_and_detail_font_scaled(env, qapp):
+    """列表名与详情标题在全局字号基础上有层级偏移（样式表生效，未被异常吞掉）"""
+    page = page_mod.PluginSettingsPage()
+    page.reload(force=True)
+    _pump(qapp)
+    row = page._rows[0]
+    assert "font-size" in row._name.styleSheet()
+    assert "font-size" in row._sub.styleSheet()
+    page._select("voice-reply", force=True)
+    _pump(qapp)
+    assert "font-size" in page._detail._title.styleSheet()
+    assert "font-size" in page._detail._meta.styleSheet()
+
+
+def test_about_page_sections(env, qapp):
+    """关于页按分组组织：描述独立成段 + 四组标题 + 目录可复制按钮"""
+    from qfluentwidgets import PushButton
+
+    page = page_mod.PluginSettingsPage()
+    page.reload(force=True)
+    _pump(qapp)
+    page._select("browser", force=True)
+    _pump(qapp)
+    about = page._detail._pages["about"].widget()
+    titles = [w.text() for w in about.findChildren(page_mod._SectionTitle)]
+    assert titles == ["基本信息", "兼容性", "本地位置"]
+    buttons = [b.text() for b in about.findChildren(PushButton)]
+    assert "复制路径" in buttons and "打开插件目录" in buttons
+
+
+def test_theme_colors_applied(env, qapp):
+    """页面文字颜色走主题色（qfluentwidgets 默认黑白不跟自定义主题）"""
+    page = page_mod.PluginSettingsPage()
+    page.reload(force=True)
+    _pump(qapp)
+    page._select("voice-reply", force=True)
+    _pump(qapp)
+    detail = page._detail
+    assert "color" in detail._title.styleSheet()
+    assert "color" in detail._meta.styleSheet()
+    # 说明文字同时保留 color 与更小字号
+    hints = [w for w in detail.findChildren(page_mod.CaptionLabel) if w.objectName() == "configHint"]
+    assert hints, "配置页应有说明文字"
+    css = hints[0].styleSheet()
+    assert "color" in css and "font-size" in css
+
+
+def test_list_row_theme_colors_applied(env, qapp):
+    """列表行文字也走主题色（分帧建行完成后统一补刷，深色模式不再黑字）"""
+    page = page_mod.PluginSettingsPage()
+    page.reload(force=True)
+    _pump(qapp)
+    assert page._rows, "应已建出列表行"
+    for row in page._rows:
+        assert "color" in row._name.styleSheet()
+        assert "color" in row._sub.styleSheet()
+
+
+def test_icons_refresh_on_theme_toggle(env, qapp, monkeypatch):
+    """主题深浅切换后列表行与详情页图标按对应侧重解码"""
+    from PyQt5.QtGui import QColor, QPixmap
+
+    state = {"dark": False}
+
+    def fake_icon(info, size):
+        pix = QPixmap(8, 8)
+        pix.fill(QColor("#ff0000") if not state["dark"] else QColor("#00ff00"))
+        return pix
+
+    monkeypatch.setattr(page_mod, "_plugin_icon", fake_icon)
+    page = page_mod.PluginSettingsPage()
+    page.reload(force=True)
+    _pump(qapp)
+    page._select("browser", force=True)
+    _pump(qapp)
+
+    def _pix_color(label):
+        img = label.pixmap().toImage()
+        return img.pixelColor(0, 0).name()
+
+    assert _pix_color(page._rows[0]._icon) == "#ff0000"
+    assert _pix_color(page._detail._icon) == "#ff0000"
+
+    state["dark"] = True
+    page.refresh_style()
+    assert _pix_color(page._rows[0]._icon) == "#00ff00"
+    assert _pix_color(page._detail._icon) == "#00ff00"
