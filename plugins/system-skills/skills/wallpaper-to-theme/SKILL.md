@@ -22,7 +22,7 @@ license: GPL-3.0-or-later
 
 | 壁纸 type | 载体 | 处理方式 | 实测通过率 |
 |---|---|---|---|
-| `video` | 单个 mp4/webm | 用 `scripts/anim_encode.py` 转成动画 WebP（640×360@12fps），挂 `chat.animation` | 全部 |
+| `video` | 单个 mp4/webm | 用 `scripts/anim_encode.py` 转成动画 WebP（800×450@12fps），挂 `chat.animation` | 全部 |
 | `scene` | `scene.pkg` 或 `gifscene.pkg` | 解 PKG 索引，抽主视觉图 + 内嵌音频 | 见下方限制 |
 | `web` | 内嵌浏览器 | **不支持**，DriFox 主题无 Web 载体 | — |
 

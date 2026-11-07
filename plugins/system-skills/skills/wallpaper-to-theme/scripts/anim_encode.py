@@ -27,7 +27,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-DEFAULT_WIDTH = 640
+DEFAULT_WIDTH = 800
 DEFAULT_FPS = 12
 DEFAULT_QUALITY = 55
 # 客户端 fps 上限（theme_manager._ANIM_FPS_CAP / anim_background.FPS_CAP）
@@ -189,11 +189,11 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="视频/动图 → 主题动画 WebP")
     parser.add_argument("input", help="源文件（mp4/gif/webm 等 ffmpeg 可读的格式）")
     parser.add_argument("output", help="输出 .webp 路径")
-    parser.add_argument("--width", type=int, default=DEFAULT_WIDTH, help="输出宽度，高度按比例（默认 640）")
+    parser.add_argument("--width", type=int, default=DEFAULT_WIDTH, help="输出宽度，高度按比例（默认 800）")
     parser.add_argument("--fps", type=int, default=DEFAULT_FPS, help=f"帧率，上限 {FPS_CAP}（默认 12）")
     parser.add_argument("--quality", type=int, default=DEFAULT_QUALITY, help="质量 0~100（默认 55）")
     parser.add_argument("--mode", choices=("normal", "mask"), default="normal", help="normal=原画面 / mask=光影遮罩")
-    parser.add_argument("--blur", type=float, default=0.0, help="预烘模糊 sigma（默认 0，建议 0.8~1.5）")
+    parser.add_argument("--blur", type=float, default=0.0, help="预烘模糊 sigma（默认 0，建议 0.4~0.8）")
     parser.add_argument("--start", type=float, default=0.0, help="起始秒（默认 0）")
     parser.add_argument("--duration", type=float, default=0.0, help="截取时长秒（默认整段）")
     parser.add_argument("--aspect", help="按目标比例先从源裁切再缩放，如 16:9（竖版素材必用）")
