@@ -41,11 +41,19 @@ license: GPL-3.0-or-later
 主题 yaml 会自动决定用哪几块 `backgrounds`：
 
 - **有视频** → `overlay.video`（`target: chat_area`）
-- **有主图** → `scene.image` + `dim` 蒙版
+- **有主图** → `window.image` + `dim` 蒙版（整窗铺底），`sidebar` 半透明罩保左侧文字可读，`scene` 纯透明让窗口层透出。**不要把主图只挂在右侧对话区**（参考内置 true-black 的分层写法）
 - **有透明前景图** → `scene.foreground`（`{image, opacity, enabled}`，与 scene.image 同矩形同拉伸，逐像素对齐）
 
 > 前景图必须用 `scene.foreground`，不要用 `decorations`：decorations 的 reference 是对话滚动区且等比 fit，与 scene 的拉伸铺满不同，同一张壁纸拆出的前景层会与背景错位。
 - **有音频** → `music.tracks` 列表
+
+### 配色必须适配背景
+
+`colors` 从主视觉图取色派生（`derive_colors()`：accent 取画面中间调高饱和主色，底色系从暗部压暗，文本色从亮部提亮），**禁止固定色板**。迁移后目检 yaml 的 accent 是否与画面同调——森林图出绿褐系、霓虹城出青紫系才算对。video 类型无帧可取时才允许兜底色板。
+
+浅色模式（mode: light）配暗调主图时的实测经验：图必须淡化处理（`opacity: 0.55` + `blur: 6` + 浓白蒙版 `0.5`）做出雾感，卡片 alpha 提到 246+ 减少透色，否则暗部透出来整体发灰发脏。
+
+**必写 token**：欢迎大卡与用户卡的背景不读 `card_bg`，走 `assistant_card_bg` / `user_card_bg`（经 `design_tokens.Colors.refresh()` 1:1 映射）；缺省时回落硬编码 `rgba(45,30,20,150)` 深棕 / `rgba(27,42,67,150)` 深蓝，浅色主题下会整块发深。迁移产出的 colors 必须包含这两个键，取值与 `card_bg` 同族。sidebar 需要与对话区拉开：半透明罩（alpha 140 左右）透出窗背景，比对话区略提亮即可，实色罩会显得死板。
 
 装饰件判定：在非主图贴图里找「RGBA 且透明像素 ≥ 25%、宽度 ≥ 800」的那张。这是角色立绘/前景元素的典型特征。
 

@@ -299,6 +299,117 @@ def plan_migration(wall_dir: Path, out_dir: Path) -> ThemePlan:
     return plan
 
 
+def _hsv2rgb(h, s, v):
+    import colorsys
+    r, g, b = colorsys.hsv_to_rgb(h % 1.0, max(0.0, min(1.0, s)), max(0.0, min(1.0, v)))
+    return int(r * 255), int(g * 255), int(b * 255)
+
+
+def _rgb2hsv(rgb):
+    import colorsys
+    return colorsys.rgb_to_hsv(*(c / 255 for c in rgb))
+
+
+def _hex(rgb):
+    return "#{:02x}{:02x}{:02x}".format(*rgb)
+
+
+def _rgba(rgb, a):
+    return f"rgba({rgb[0]}, {rgb[1]}, {rgb[2]}, {a})"
+
+
+# video 类型无主图可取色时的兜底色板（沿用旧默认）
+_FALLBACK_COLORS = {
+    "card_bg": "rgba(22, 18, 28, 232)",
+    "card_bg_solid": "rgba(22, 18, 28, 248)",
+    "content_bg": "#16121c",
+    "border": "#3a2a44",
+    "border_accent": "#e8467c",
+    "text_primary": "#ece6f2",
+    "text_secondary": "rgba(236, 230, 242, 0.66)",
+    "text_muted": "#8a80a0",
+    "accent": "#e8467c",
+    "accent_warm": "#38d6e0",
+    "hover_bg": "rgba(232, 70, 124, 0.12)",
+    "selected_bg": "rgba(232, 70, 124, 0.26)",
+    "input_bg_start": "rgba(24, 20, 32, 200)",
+    "input_bg_end": "rgba(32, 24, 40, 200)",
+    "input_text": "#ece6f2",
+    "input_border": "#3a2a44",
+    "input_focus_border": "#e8467c",
+    "send_btn_start": "#e8467c",
+    "send_btn_end": "#b8325f",
+}
+
+
+def derive_colors(scene_image):
+    """从主视觉图取色，派生整套 colors token
+
+    规则：accent 取画面中间调（0.25≤V≤0.75）高饱和（S≥0.25）里占比最高的颜色；
+    底色系从画面暗部压暗派生；文本色从亮部提亮。取不出满足条件的 accent 时
+    取占比第一的颜色强制提饱和。所有派生只依赖 HSV，不依赖具体色相，
+    保证森林图出绿系、赛博城出青紫系。
+    """
+    if scene_image is None:
+        return dict(_FALLBACK_COLORS), (16, 14, 22), (26, 18, 26)
+    small = scene_image.convert("RGB").resize((48, 48))
+    q = small.quantize(colors=16, method=Image.MEDIANCUT)
+    pal = q.getpalette()
+    counts = sorted(q.getcolors(48 * 48), reverse=True)
+
+    def hsv_of(idx):
+        return _rgb2hsv(tuple(pal[idx * 3 : idx * 3 + 3]))
+
+    # accent：中间调高饱和里占比最高
+    accent = None
+    for _n, idx in counts:
+        h, s, v = hsv_of(idx)
+        if 0.25 <= v <= 0.75 and s >= 0.25:
+            accent = _hsv2rgb(h, s, v)
+            break
+    if accent is None:
+        h, s, v = hsv_of(counts[0][1])
+        accent = _hsv2rgb(h, min(1.0, s + 0.25), 0.55)
+
+    # 暗部基色：占比加权后 V 最低的色，压到近黑
+    h_d, s_d, v_d = min((hsv_of(idx) for _n, idx in counts), key=lambda t: t[2])
+    dark = _hsv2rgb(h_d, s_d * 0.6, 0.10)
+    dark_deep = _hsv2rgb(h_d, s_d * 0.5, 0.055)
+
+    # 亮部文本色：V 最高的色提亮去饱和
+    h_t, s_t, v_t = max((hsv_of(idx) for _n, idx in counts), key=lambda t: t[2])
+    text = _hsv2rgb(h_t, s_t * 0.2, 0.92)
+
+    h_a, s_a, v_a = _rgb2hsv(accent)
+    warm = _hsv2rgb(h_a + 0.11, s_a * 0.75, v_a)
+    border = _hsv2rgb(h_d, s_d * 0.8, 0.24)
+    accent_bright = _hsv2rgb(h_a, s_a, min(1.0, v_a * 1.15))
+    accent_dim = _hsv2rgb(h_a, s_a, v_a * 0.7)
+
+    colors = {
+        "card_bg": _rgba(dark, 232),
+        "card_bg_solid": _rgba(dark, 248),
+        "content_bg": _hex(dark),
+        "border": _hex(border),
+        "border_accent": _hex(accent_bright),
+        "text_primary": _hex(text),
+        "text_secondary": _rgba(text, 0.66),
+        "text_muted": _hex(_hsv2rgb(h_t, s_t * 0.2, 0.60)),
+        "accent": _hex(accent),
+        "accent_warm": _hex(warm),
+        "hover_bg": _rgba(accent, 0.12),
+        "selected_bg": _rgba(accent, 0.26),
+        "input_bg_start": _rgba(_hsv2rgb(h_d, s_d * 0.6, 0.12), 200),
+        "input_bg_end": _rgba(_hsv2rgb(h_d, s_d * 0.6, 0.16), 200),
+        "input_text": _hex(text),
+        "input_border": _hex(border),
+        "input_focus_border": _hex(accent),
+        "send_btn_start": _hex(accent),
+        "send_btn_end": _hex(accent_dim),
+    }
+    return colors, dark_deep, dark
+
+
 def theme_yaml(plan: ThemePlan, has_decoration: bool, has_music: bool) -> str:
     def _q(s: str) -> str:
         """YAML 标量包装：带空格/特殊字符时用单引号，内部单引号转义"""
@@ -309,14 +420,19 @@ def theme_yaml(plan: ThemePlan, has_decoration: bool, has_music: bool) -> str:
     def _asset(name: str) -> str:
         return _q(f"../../assets/{name}")
 
+    # 配色从主图取色派生；video 类型无主图时用兜底色板
+    colors, g_start, g_end = derive_colors(
+        plan.scene_image if isinstance(plan.scene_image, Image.Image) else None
+    )
+
     lines = [
         f"name: {_q(plan.title)}",
         f"id: {plan.theme_id}",
         "mode: dark",
         "",
         "window:",
-        "  gradient_start: rgba(16, 14, 22, 255)",
-        "  gradient_end: rgba(26, 18, 26, 255)",
+        f"  gradient_start: {_rgba(g_start, 255)}",
+        f"  gradient_end: {_rgba(g_end, 255)}",
         "",
         "backgrounds:",
     ]
@@ -330,11 +446,21 @@ def theme_yaml(plan: ThemePlan, has_decoration: bool, has_music: bool) -> str:
             "    enabled: true",
         ]
     else:
+        # 背景挂 window（整窗最底层），sidebar 半透明罩保文字可读，
+        # scene 透明让窗口层透出：参考内置 true-black 的分层写法
         lines += [
-            "  scene:",
+            "  window:",
             "    image: ../../assets/scene.png",
             "    opacity: 1.0",
-            "    dim: rgba(8, 6, 12, 0.42)",
+            f"    dim: {_rgba(g_start, 0.45)}",
+            "    enabled: true",
+            "",
+            "  sidebar:",
+            f"    color: {_rgba(g_end, 140)}",
+            "    enabled: true",
+            "",
+            "  scene:",
+            "    color: rgba(0, 0, 0, 0)",
             "    enabled: true",
         ]
         if has_decoration:
@@ -355,29 +481,9 @@ def theme_yaml(plan: ThemePlan, has_decoration: bool, has_music: bool) -> str:
             lines.append(f"      - {_asset(f.name)}")
         lines += ["    volume: 0.45", "    loop: true", "    fade_ms: 420", "    enabled: true"]
 
-    lines += [
-        "",
-        "colors:",
-        "  card_bg: rgba(22, 18, 28, 232)",
-        "  card_bg_solid: rgba(22, 18, 28, 248)",
-        "  content_bg: '#16121c'",
-        "  border: '#3a2a44'",
-        "  border_accent: '#e8467c'",
-        "  text_primary: '#ece6f2'",
-        "  text_secondary: rgba(236, 230, 242, 0.66)",
-        "  text_muted: '#8a80a0'",
-        "  accent: '#e8467c'",
-        "  accent_warm: '#38d6e0'",
-        "  hover_bg: rgba(232, 70, 124, 0.12)",
-        "  selected_bg: rgba(232, 70, 124, 0.26)",
-        "  input_bg_start: rgba(24, 20, 32, 200)",
-        "  input_bg_end: rgba(32, 24, 40, 200)",
-        "  input_text: '#ece6f2'",
-        "  input_border: '#3a2a44'",
-        "  input_focus_border: '#e8467c'",
-        "  send_btn_start: '#e8467c'",
-        "  send_btn_end: '#b8325f'",
-    ]
+    lines += [""]
+    for k, v in colors.items():
+        lines.append(f"  {k}: {v}")
     return "\n".join(lines) + "\n"
 
 
