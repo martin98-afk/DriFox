@@ -2440,6 +2440,10 @@ class ConfigSyncService(QObject):
                     _next += 1
                     _entry["t"] = _next
             merged_clock = max(merged_clock, _next)
+        # 本机模型选择存缓存目录，云端旧值不得随合并结果落回 app.config
+        _llm = merged_cfg.get("LLM")
+        if isinstance(_llm, dict):
+            _llm.pop("SelectedModel", None)
         merged_cfg.setdefault("System", {})["SyncMeta"] = json.dumps(
             {
                 "version": 1,

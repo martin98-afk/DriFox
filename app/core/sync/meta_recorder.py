@@ -30,8 +30,10 @@ from app.core.sync.lww import (
 
 META_VERSION = 1
 
-# 同步元数据自身存放的配置项路径：不得进入条目表
-META_ITEM_PATHS = frozenset({"System.SyncMeta"})
+# 不得进入同步条目表的配置项路径：
+# - System.SyncMeta：元数据自身（否则每次 dump 改变自身内容 → 无限自激）
+# - LLM.SelectedModel：本机上次选中的模型，存 cache/app_state.json，不参与 LWW
+META_ITEM_PATHS = frozenset({"System.SyncMeta", "LLM.SelectedModel"})
 
 
 def value_hash(value: object) -> str:
@@ -69,10 +71,13 @@ class SyncMetaRecorder:
         with self._lock:
             self.values = _item_values(config)
             loaded = load_state(state)
+            # 本地态路径的存量条目（升级前遗留 / 旧版上传的）一律丢弃：
+            # 留着会让 dump 把它们重新写回 SyncMeta，切模型就触发一次上传
+            entries = {k: v for k, v in (loaded.get("entries") or {}).items() if k not in META_ITEM_PATHS}
             self.state = {
                 "version": META_VERSION,
                 "clock": int(loaded.get("clock") or 0),
-                "entries": dict(loaded.get("entries") or {}),
+                "entries": entries,
             }
             self._clock = LamportClock(int(self.state["clock"] or 0))
             for entry in self._entries().values():
@@ -343,6 +348,8 @@ def bind_settings(cfg, device: str = "") -> SyncMetaRecorder:
         item = getattr(type(cfg), name)
         if not isinstance(item, ConfigItem) or item is getattr(cfg, "sync_meta", None):
             continue
+        if item.key in META_ITEM_PATHS:
+            continue  # 本地态/元数据自身不接线：不打 t、不进条目表
         item.valueChanged.connect(_make_handler(rec, item))
 
     _recorder_singleton = rec
