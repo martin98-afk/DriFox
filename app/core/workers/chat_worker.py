@@ -1984,10 +1984,11 @@ class OpenAIChatWorker(QThread):
             headers.update(provider_headers)
         return headers or None
 
-    def _get_chat_transport(self):
-        """解析 chat/completions 使用的 transport（TransportRegistry 默认实现）。
+    def _get_chat_transport(self, transport_id: str = None):
+        """解析 chat/completions 使用的 transport（TransportRegistry 按 id 解析，缺省默认）。
 
-        每次调用现取注册表并做每 worker 包装，不缓存插件实例：
+        transport_id：协议入口手选值（transport:<id> 去前缀后的 id）。None = 自动
+        （adapter flags / 注册表默认 openai_chat）。每次调用现取注册表并做每 worker 包装，不缓存插件实例：
         1) 注册表单例会被热重载整体替换（注销旧→注册新），缓存会跨周期持有
            已注销实例——旧实例上的 client_factory 指向本 worker 连接池，热重载后
            继续使用等于把两个周期的连接池混用，新标签页建池会让其他窗口飞行中的
@@ -1998,7 +1999,7 @@ class OpenAIChatWorker(QThread):
         """
         from app.plugins.registries.transport_registry import TransportRegistry
 
-        transport = TransportRegistry.get_instance().resolve()
+        transport = TransportRegistry.get_instance().resolve(transport_id)
         if transport is None:
             raise RuntimeError("未注册 chat/completions 传输器（system-transports 插件未启用），无法发起对话请求")
 
@@ -3599,6 +3600,18 @@ class OpenAIChatWorker(QThread):
         """
         return self._adapter_flags().use_responses_api
 
+    def _resolve_use_responses(self, llm_config: Dict) -> bool:
+        """协议入口单点裁决：旧键显式 > 新键 responses > 自动（detector/flags）。
+
+        「使用ResponsesAPI」显式设置时不可被「协议入口」翻案（兼容纪律）。
+        """
+        legacy = llm_config.get("使用ResponsesAPI")
+        if legacy is not None:
+            return bool(legacy)
+        if str(llm_config.get("协议入口", "") or "").strip() == "responses":
+            return True
+        return self._use_responses_api()
+
     def _make_api_call(self, messages: List[Dict], use_cache: bool = True) -> (bool, bool):
         """
         发起 API 调用。
@@ -3643,17 +3656,22 @@ class OpenAIChatWorker(QThread):
         auth_headers = self._build_auth_headers()
 
         max_retries = 15
-        # GPT-5.x 系列走 Responses API（思考内容只在 /v1/responses 返回）
-        use_responses = self._use_responses_api()
-        # 协议分派（三层优先级）：
-        # 1) adapter 声明的 transport（插件协议，flags.extra["transport"]）
-        # 2) responses 原生通道（未插件化，二期）
-        # 3) chat/completions → TransportRegistry 默认 transport + 对应 sink
+        # 协议入口单点裁决：旧键显式 > 新键 responses > 自动（detector/flags，含 gpt-5/6+）。
+        # 「使用ResponsesAPI」显式设置时不可被「协议入口」翻案（兼容纪律）。
+        entry = str(self.llm_config.get("协议入口", "") or "").strip()
+        use_responses = self._resolve_use_responses(self.llm_config)
+        # 协议分派（responses 优先于一切 chat 通道）：
+        # 1) responses 原生通道（Phase 2 插件化）
+        # 2) 手选 transport:<id>（协议入口下拉）
+        # 3) adapter 声明的 transport（插件协议，flags.extra["transport"]）
+        # 4) chat/completions → TransportRegistry 默认 transport + 对应 sink
         adapter_flags = self._adapter_flags()
         adapter_transport = (adapter_flags.extra or {}).get("transport")
         # 流式能力由 transport 声明（不再按模型名硬编码）；responses 通道固定流式
         if use_responses:
             active_transport = None  # 原生通道不经 transport，无需解析
+        elif entry.startswith("transport:"):
+            active_transport = self._get_chat_transport(entry.split(":", 1)[1])
         elif adapter_transport is not None:
             active_transport = adapter_transport
         else:

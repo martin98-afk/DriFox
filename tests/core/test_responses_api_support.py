@@ -252,6 +252,65 @@ class TestSubAgentResponses:
         # 强制覆盖
         assert w._use_responses_api({"模型名称": "deepseek-v4-flash", "使用ResponsesAPI": True}) is True
         assert w._use_responses_api({"模型名称": "gpt-5.6-luna", "使用ResponsesAPI": False}) is False
+        # gpt-6 主版本号判定
+        assert w._use_responses_api({"模型名称": "gpt-6-luna"}) is True
+
+
+# ---------- 协议入口单点裁决（chat_worker._resolve_use_responses） ----------
+
+_DISPATCH_CASES = [
+    # (协议入口, 使用ResponsesAPI, 期望 use_responses)；基线模型 gpt-4o 自动=False
+    (None, None, False),
+    (None, True, True),
+    (None, False, False),
+    ("responses", None, True),
+    ("responses", False, False),  # 旧键显式 False 压过新键
+    ("transport:openai_chat", None, False),
+]
+
+@pytest.mark.parametrize("entry,legacy,expect", _DISPATCH_CASES)
+def test_entry_dispatch_matrix(qapp, entry, legacy, expect):
+    from app.core.workers.chat_worker import OpenAIChatWorker
+
+    w = OpenAIChatWorker(
+        messages=[{"role": "user", "content": "hi"}],
+        session_messages=[],
+        llm_config={"模型名称": "gpt-4o", "API_URL": "http://fake", "API_KEY": ""},
+        stream=True,
+    )
+    if entry is not None:
+        w.llm_config["协议入口"] = entry
+    if legacy is not None:
+        w.llm_config["使用ResponsesAPI"] = legacy
+    assert w._resolve_use_responses(w.llm_config) is expect
+
+def test_entry_dispatch_gpt6_auto(qapp):
+    """自动模式下 gpt-6 走 responses（detector 修复经 flags 生效）"""
+    from app.core.workers.chat_worker import OpenAIChatWorker
+
+    w = OpenAIChatWorker(
+        messages=[{"role": "user", "content": "hi"}],
+        session_messages=[],
+        llm_config={"模型名称": "gpt-6-luna", "API_URL": "http://fake", "API_KEY": ""},
+        stream=True,
+    )
+    assert w._resolve_use_responses(w.llm_config) is True
+
+def test_get_chat_transport_accepts_id(qapp):
+    """手选 id 经注册表解析且返回 worker 包装实例（连接池竞态修复不被绕过）"""
+    from app.core.workers.chat_worker import OpenAIChatWorker
+    from app.core.workers.stream_sink_context import StreamSinkContext  # noqa: F401 触发插件 warmup 前置
+    from tests.core.test_subagent_stream_aggregation import _ensure_plugins_loaded
+
+    _ensure_plugins_loaded()
+    w = OpenAIChatWorker(
+        messages=[{"role": "user", "content": "hi"}],
+        session_messages=[],
+        llm_config={"模型名称": "gpt-4o", "API_URL": "http://fake", "API_KEY": ""},
+        stream=True,
+    )
+    t = w._get_chat_transport("openai_chat")
+    assert getattr(t, "id", "") == "openai_chat"
 
     def test_responses_tools_conversion(self):
         tools = [
