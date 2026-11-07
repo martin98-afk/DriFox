@@ -5,7 +5,8 @@ All notable changes to this project will be documented in this file.
 
 - **提问超时（插件化）**: `question` 工具从 system-tools 拆出为独立插件 `system-question`（tools + ui）。超时策略全部在插件内实现，宿主只提供 `question.control` 能力（订阅生命周期 / 读快照 / 代答 / 倒计时）。三种模式：不设置超时（默认，行为零变化）/ 超时跳过（未答题标记已跳过）/ 超时 AI 判断（由模型代答，结果带 `[AI 代答]` 标注，失败自动降级跳过）。每题独立计时（翻页重置），提问卡右上角显示倒计时徽标。配置在「设置 → 插件 → 提问工具设置」；超时判断模型为模型下拉（新增 config_schema `model` 字段类型，选项经 `provider.list × model.enumerate` 能力动态填充，空值 = 跟随当前会话模型）。
 - **工具插件拆分**: `system-tools` 拆为 `system-core`（文件/终端/待办）、`system-web`（websearch/webfetch + 搜索 API Key 配置）、`system-question`（提问）、`system-team`（团队协作）、`system-diagnostics`（get_diagnostics / lsp），原插件保留技能加载/管理、MCP 管理、Gitee 上传。插件启停、工具级禁用键与搜索 Key 配置均有一次性迁移。
-- **模型协议入口手动选择**: 模型参数卡新增「接口入口」下拉（自动 / Responses API / 已注册协议插件动态枚举），手选值按模型落盘（`ModelOverrides`）并在 worker 分派单点生效；旧键 `使用ResponsesAPI` 显式设置时优先。子智能体链路对齐 `responses` / 自动，手选插件通道警告回退。Responses API 自动判定改为按 gpt 主版本号（≥5）通用匹配，修复 gpt-6-luna 思考内容不显示；恢复 worker `_chat_transport` 测试注入点读取（a6946c9f5 搬迁回归）。
+- **模型协议入口手动选择**: 「接口入口」下拉收口到「服务商 → 模型列表 → 齿轮 → 模型能力」弹窗（参数卡不再渲染：渲染是配置驱动的，键不存在整行不出现，而三条注入链都不产出该键 → 死循环；能力弹窗里手选的插件被禁用/卸载时原值单独成项保留，不静默回退自动）。选项为自动 / Responses API / 已注册协议插件动态枚举，手选值按模型落盘（`ModelOverrides` 同条目）并在 worker 分派单点生效；旧键 `使用ResponsesAPI` 显式设置时优先。子智能体链路对齐 `responses` / 自动，手选插件通道警告回退。
+- **gpt-6 思考流式**: Responses 请求补 `reasoning.summary="auto"`（官方语义：不显式 opt in 就不返回思考摘要，此前只发 `effort` → 服务端只给 reasoning_tokens，UI 一个 reasoning delta 都收不到）；服务端 400 拒绝该字段时去掉后重试一次。Responses API 自动判定改为按 gpt 主版本号（≥5）通用匹配；恢复 worker `_chat_transport` 测试注入点读取（a6946c9f5 搬迁回归）。
 
 ## [v0.6.15-beta] - 2026-11-06
 
