@@ -46,6 +46,11 @@ def _tool_call_delta(index, call_id=None, name=None, arguments=None):
         func = SimpleNamespace(name=name, arguments=arguments)
     return SimpleNamespace(index=index, id=call_id, function=func)
 
+def _vendor_delta_chunk(**delta_fields):
+    """任意 delta 字段形状：模拟国外模型 / 网关的 SSE chunk"""
+    delta = SimpleNamespace(**delta_fields)
+    return SimpleNamespace(choices=[SimpleNamespace(delta=delta, finish_reason=None)], usage=None)
+
 
 def _build_executor(**cfg) -> SubAgentExecutor:
     llm_config = {"API_KEY": "sk-test", "模型名称": "glm-5.3-flash", "API_URL": "https://copilot.tencent.com/v2"}
@@ -155,6 +160,29 @@ def test_content_and_reasoning_aggregated(capture_create):
 
     assert content == "你好，世界"
     assert reasoning == "让我想一下"
+    assert tool_calls == []
+
+
+@pytest.mark.parametrize(
+    "delta_fields, expected",
+    [
+        ({"reasoning": "OpenRouter 思考"}, "OpenRouter 思考"),
+        ({"reasoning_details": [{"type": "reasoning.text", "text": "结构化思考"}]}, "结构化思考"),
+        ({"reasoning_details": [{"type": "reasoning.summary", "summary": "摘要思考"}]}, "摘要思考"),
+        ({"thinking": "Claude 兼容层思考"}, "Claude 兼容层思考"),
+    ],
+)
+def test_vendor_reasoning_aggregated(capture_create, delta_fields, expected):
+    """子智能体链路与主线程共用多厂商字段识别，不能只认 reasoning_content"""
+    _ensure_plugins_loaded()
+    capture_create["stream"] = iter([_vendor_delta_chunk(**delta_fields), _chunk(finish_reason="stop")])
+    ex = _build_executor()
+    content, tool_calls, reasoning = ex._make_api_call(
+        [{"role": "user", "content": "x"}], llm_config=dict(ex.llm_config)
+    )
+
+    assert content == ""
+    assert reasoning == expected
     assert tool_calls == []
 
 

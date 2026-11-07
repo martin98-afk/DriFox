@@ -16,6 +16,7 @@ from PyQt5.QtCore import QThread, pyqtSignal
 from app.constants import PARAM_SCHEMA
 from app.constants import PROVIDER_MANAGED_KEYS
 from app.constants import provider_quota_exclude_keys as QUOTA_EXCLUDE_KEYS
+from app.core.conversation.message_content import extract_reasoning_delta
 from app.core.modelmeta.model_capabilities import (
     ABSOLUTE_FALLBACK_CEILING,
     get_caps_max_output_tokens,
@@ -1191,7 +1192,7 @@ class SubAgentExecutor(QThread):
         """聚合 chat/completions 流式响应 → (content, tool_calls, reasoning)。
 
         与 `http_client.chat_completion_text` 的区别：该函数只聚合 content，
-        子智能体循环依赖工具调用（以及 DeepSeek 系的 reasoning_content），
+        子智能体循环依赖工具调用（以及各厂商 reasoning 字段），
         故在此单独实现并按内部 tool_calls 结构还原。
 
         tool_calls 分片规则（OpenAI SDK）：首片带 id + name（arguments 可能为空），
@@ -1226,7 +1227,7 @@ class SubAgentExecutor(QThread):
                 piece = getattr(delta, "content", None)
                 if piece:
                     content_parts.append(piece)
-                reasoning = getattr(delta, "reasoning_content", None)
+                reasoning = extract_reasoning_delta(delta)
                 if reasoning:
                     reasoning_parts.append(reasoning)
 
@@ -1266,8 +1267,8 @@ class SubAgentExecutor(QThread):
                 }
             )
 
-        if not content_parts and not tool_calls_found:
-            logger.warning("[SubAgentWorker] 流式响应未产出内容或工具调用")
+        if not content_parts and not tool_calls_found and not reasoning_parts:
+            logger.warning("[SubAgentWorker] 流式响应未产出内容、思考或工具调用")
 
         return response_content, tool_calls_found, reasoning_content
 
