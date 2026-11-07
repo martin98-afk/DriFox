@@ -20,6 +20,8 @@ from typing import Dict, List, NamedTuple, Optional
 
 from PyQt5.QtCore import QObject, pyqtSignal
 
+# Windows 下从 GUI 进程调用控制台程序会弹黑框，需显式隐藏子进程控制台窗口
+_CREATE_NO_WINDOW = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
 
 # ── 路径常量 ──────────────────────────────────────────────
 
@@ -85,9 +87,9 @@ CACHE_DEFS: List[CleanerItem] = [
         False,
         "AI 删除文件前的自动备份（垃圾箱），误删后唯一恢复手段，建议保留",
     ),
-    CleanerItem("logs", "file", "日志文件", "logs", False, False, "运行日志，排查问题时有用"),
-    CleanerItem("cache", "database", "应用缓存", "cache", True, True, "可重建的离线缓存"),
-    CleanerItem("screenshots", "camera", "截图文件", "screenshots", False, False),
+    CleanerItem("logs", "file", "日志文件", "logs", False, True, "运行日志，排查问题时有用"),
+    CleanerItem("cache", "database", "应用缓存", "cache", True, False, "可重建的离线缓存"),
+    CleanerItem("screenshots", "camera", "截图文件", "screenshots", False, True),
     CleanerItem("archived", "archive", "归档会话", "archived", False, False),
     CleanerItem("share_sessions", "upload", "分享会话文件", "share/sessions", False, False),
     # 工具执行结果缓存:app/core/tool_result_persister.py 写入
@@ -242,6 +244,7 @@ def _kill_qwebengine_processes() -> int:
             ["tasklist", "/FO", "CSV", "/NH"],
             capture_output=True,
             timeout=10,
+            creationflags=_CREATE_NO_WINDOW,
         ).stdout
         text = raw.decode(locale.getpreferredencoding(False), errors="replace")
         for row in csv.reader(text.splitlines()):

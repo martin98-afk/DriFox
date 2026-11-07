@@ -35,6 +35,7 @@ from PyQt5.QtGui import (
 )
 from PyQt5.QtSvg import QSvgRenderer
 from PyQt5.QtWidgets import (
+    QApplication,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -51,6 +52,7 @@ from qfluentwidgets import BodyLabel, LineEdit, MaskDialogBase, SwitchButton
 
 from app.plugins.sdk import Colors, font_size_css, readable_text_on, scale_font_size
 from app.plugins.sdk import get_font_family_css
+from app.utils.design_tokens import _get_global_font
 
 
 from .assistant_avatar import RoundAvatar
@@ -386,6 +388,31 @@ class _SectionChip(QFrame):
     H = 104
     INTRO_LINES = 3
 
+    @classmethod
+    def preferred_height(cls) -> int:
+        """按当前全局字号实测行高定卡高。
+
+        H=104 只在最小字号档够用：字号是全局 delta（scale_font_size），卡内
+        名称/介绍 3 行/底部角标的行高全跟着涨。垂直预算超支后 QVBoxLayout
+        会把标签 rect 压得互相交叠（透明背景 → 文字叠加，截图实测）。
+        必须用 QSS 实际字体族（_get_global_font，与 get_font_family_css 同源）的真实
+        metrics 现算，与 H 取较大者兜底。
+        """
+        f_name = QFont(_get_global_font())
+        f_name.setPixelSize(scale_font_size(11))
+        f_small = QFont(_get_global_font())
+        f_small.setPixelSize(scale_font_size(9))
+        ls_name = QFontMetrics(f_name).lineSpacing()
+        ls_small = QFontMetrics(f_small).lineSpacing()
+        need = (
+            20                                # 布局上下 margins (12,10,10,10)
+            + 12                              # 三处 spacing(4)
+            + ls_name                         # 名称行
+            + ls_small * cls.INTRO_LINES      # 介绍 3 行（fixed height）
+            + ls_small                        # 底部字数角标
+        )
+        return max(cls.H, need)
+
     def __init__(
         self,
         name: str,
@@ -400,7 +427,7 @@ class _SectionChip(QFrame):
         self._tone = tone if str(tone) in ("rational", "emotional") else "rational"
         self.setObjectName("sectionChip")
         self.setCursor(Qt.PointingHandCursor)
-        self.setFixedSize(self.W, self.H)
+        self.setFixedSize(self.W, self.preferred_height())
         v = QVBoxLayout(self)
         v.setContentsMargins(12, 10, 10, 10)
         v.setSpacing(4)
@@ -439,9 +466,11 @@ class _SectionChip(QFrame):
         self._layout_corner_buttons()
 
         # 介绍：按像素折 3 行（多行输入可能带换行，_elide_lines 只折行不认 \n，先压平）
+        # ⚠ metrics 必须用 QSS 实际字体族折行/定高：QLabel.font() 是继承的 app 字体
+        #（族与 QSS 不同，行高系数差 15%+），按它算的 fixed height 会被三行文字溢出。
         self._intro = QLabel()
         self._intro.setWordWrap(False)
-        fm = QFont(self._intro.font())
+        fm = QFont(_get_global_font())
         fm.setPixelSize(scale_font_size(9))
         metrics = QFontMetrics(fm)
         flat = " ".join(str(intro or "").split())
@@ -528,7 +557,7 @@ class _NewSectionChip(QFrame):
         super().__init__(parent)
         self.setObjectName("sectionChip")
         self.setCursor(Qt.PointingHandCursor)
-        self.setFixedSize(_SectionChip.W, _SectionChip.H)
+        self.setFixedSize(_SectionChip.W, _SectionChip.preferred_height())
         v = QVBoxLayout(self)
         v.setContentsMargins(10, 10, 10, 10)
         v.setSpacing(2)
