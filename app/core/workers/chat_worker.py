@@ -1999,6 +1999,12 @@ class OpenAIChatWorker(QThread):
         """
         from app.plugins.registries.transport_registry import TransportRegistry
 
+        # 测试注入点：与 _stream_sink_override 同模式。a6946c9f5 插件化搬迁时
+        # 该读取点曾丢失，retry 组测试挂载的 FakeChatTransport 因此失效（2026-11-07 恢复）。
+        injected = self.__dict__.get("_chat_transport")
+        if injected is not None:
+            return injected
+
         transport = TransportRegistry.get_instance().resolve(transport_id)
         if transport is None:
             raise RuntimeError("未注册 chat/completions 传输器（system-transports 插件未启用），无法发起对话请求")
