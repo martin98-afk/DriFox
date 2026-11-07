@@ -39,7 +39,6 @@ _FIELD_GROUPS = [
     ("上下文", ("最大Token", "上下文长度", "最大输出")),
     ("思考", ("思考模式", "思考预算", "思考等级")),
     ("采样", ("温度", "temp", "top_p", "max_new_tokens")),
-    ("协议", ("协议入口",)),
 ]
 
 # =============================================================================
@@ -338,23 +337,6 @@ class ModelConfigCard(QWidget):
         elif ui_type == "combobox":
             widget = ComboBox(self)
             options = list(meta.get("options", []))
-            # 声明式动态选项源：渲染时实时枚举（不缓存），userData 为落盘值。
-            # qfluentwidgets ComboBox.addItem 不透传 userData，落盘值用 setItemData 写入
-            options_source = meta.get("options_source")
-            if options_source == "transport_registry":
-                from app.plugins.registries.transport_registry import TransportRegistry
-
-                entries = [("自动", "auto"), ("Responses API", "responses")]
-                for tid, t in TransportRegistry.get_instance().transports().items():
-                    entries.append((getattr(t, "display_name", None) or tid, f"transport:{tid}"))
-                for text, data in entries:
-                    widget.addItem(text)
-                    widget.setItemData(widget.count() - 1, data)
-                idx = widget.findData(str(value) if value else "auto")
-                widget.setCurrentIndex(idx if idx >= 0 else 0)
-                widget.setMinimumWidth(280)
-                widget.currentIndexChanged.connect(lambda: self._on_field_changed())
-                return widget
             # 思考等级：以 models.dev 模型能力为准——下拉选项来自该模型
             # reasoning_options 中 effort 的 values（如 ["high", "max"]）；
             # models.dev 无数据时回退 PARAM_SCHEMA 固定默认。

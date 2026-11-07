@@ -13,7 +13,13 @@
   "license": "GPL-3.0-or-later",
   "type": "system",
   "api_version": 2,
-
+  "capabilities": [
+    "question.control",
+    "model.config",
+    "model.config_for",
+    "provider.list",
+    "model.enumerate"
+  ],
   "components": {
     "tools": true,
     "ui": true

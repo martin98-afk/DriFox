@@ -558,7 +558,7 @@ class ModelListEditorWidget(QWidget):
     def _on_row_edit_caps(self, name: str):
         """打开能力声明弹窗；保存后写 ModelOverrides 并只刷新对应行"""
         try:
-            from app.core.modelmeta.model_declarations import apply_declarations
+            from app.core.modelmeta.model_declarations import apply_declarations, apply_protocol_entry
             from app.utils.config import Settings
             from app.widgets.model_capability_edit_dialog import ModelCapabilityEditDialog
 
@@ -571,6 +571,8 @@ class ModelListEditorWidget(QWidget):
             settings = Settings.get_instance()
             overrides = dict(settings.llm_model_overrides.value or {})
             updated = apply_declarations(overrides, self._provider_name, name, dialog.declared)
+            # 接口入口（模型级协议路由）与六键同条目落盘；空值 = 删键 = 自动
+            updated = apply_protocol_entry(updated, self._provider_name, name, dialog.protocol_entry)
             settings.set(settings.llm_model_overrides, updated, save=True)
             self._caps_cache.pop(name, None)
             self._sources_cache.pop(name, None)

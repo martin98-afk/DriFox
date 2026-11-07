@@ -91,6 +91,92 @@ def test_oauth_uses_independent_family_and_group(plugin, monkeypatch):
     assert _group_of("OpenCode Go", {}) == "Coding Plan"
 
 
+# ── 套餐用量（仅 Go 两版有）─────────────────────────────────────
+
+def test_coding_plan_fetcher_only_on_go_variants(plugin, monkeypatch):
+    """Zen 是按量 API 型不挂；Go 的 API 版与 OAuth 版都挂。
+
+    Go (OAuth) 虽挂了 fetcher，_group_of 里 login_hook 判据优先于
+    coding_plan_fetcher，仍归 OAuth 组而非 Coding Plan。
+    """
+    from app.widgets.cards.settings.provider_setting_card import _group_of
+    from app.plugins.registries.provider_registry import ProviderRegistry
+
+    reg = _Registry()
+    plugin.register(reg)
+    assert reg.items["OpenCode Zen"].coding_plan_fetcher is None
+    assert reg.items["OpenCode Zen (OAuth)"].coding_plan_fetcher is None
+    assert reg.items["OpenCode Go"].coding_plan_fetcher is not None
+    assert reg.items["OpenCode Go (OAuth)"].coding_plan_fetcher is not None
+
+    live = ProviderRegistry()
+    plugin.register(live)
+    monkeypatch.setattr(ProviderRegistry, "get_instance", staticmethod(lambda: live))
+    assert _group_of("OpenCode Go (OAuth)", {}) == "OAuth"
+
+
+def test_go_oauth_coding_plan_uses_access_token_and_parses(plugin, monkeypatch):
+    """OAuth 版用短效 access_token（非 refresh_token）查用量并复用 _parse_usage。"""
+    oa = plugin._load_oauth()
+    oa.cache_put(
+        "rt-go",
+        access_token="at-go",
+        refresh_token="rt-go",
+        expires_at=time.time() + 3600,
+        org_id="org-go",
+    )
+    seen = {}
+
+    def _fake_request_usage(token):
+        seen["token"] = token
+        return {"rolling": {"percent": 42, "reset_sec": 3600}}
+
+    monkeypatch.setattr(plugin, "_request_usage", _fake_request_usage)
+    result = plugin._go_oauth_coding_plan({"API_KEY": "rt-go"})
+    assert seen["token"] == "at-go"  # 短效 access，不是配置里的 rt-go
+    assert result["rolling"]["percent"] == 42
+
+
+def test_go_oauth_coding_plan_tolerates_all_failures(plugin, monkeypatch):
+    """容错：未登录 / 401 / 刷新失败 / 结构异常 都返回 None，不抛异常。
+
+    UsageService 会把 None 显示为隐藏圆环 + 60s 重试，聊天主链路不受影响。
+    """
+    assert plugin._go_oauth_coding_plan({"API_KEY": ""}) is None
+
+    monkeypatch.setattr(
+        plugin, "_request_usage", lambda token: (_ for _ in ()).throw(
+            plugin.OpenCodeUsageError("鉴权失败：凭据无效")
+        ),
+    )
+    oa = plugin._load_oauth()
+    oa.cache_put(
+        "rt-bad",
+        access_token="at-bad",
+        refresh_token="rt-bad",
+        expires_at=time.time() + 3600,
+        org_id="org",
+    )
+    assert plugin._go_oauth_coding_plan({"API_KEY": "rt-bad"}) is None
+
+    # get_auth_context 自身抛错（refresh 失败）也要吞掉
+    monkeypatch.setattr(
+        oa, "get_auth_context", lambda cfg: (_ for _ in ()).throw(RuntimeError("刷新失败"))
+    )
+    assert plugin._go_oauth_coding_plan({"API_KEY": "rt-bad"}) is None
+
+
+def test_api_key_coding_plan_still_raises_on_error(plugin, monkeypatch):
+    """API 版行为不变：仍抛 OpenCodeUsageError（由 UsageService 记 warning）。"""
+    monkeypatch.setattr(
+        plugin, "_request_usage", lambda token: (_ for _ in ()).throw(
+            plugin.OpenCodeUsageError("鉴权失败")
+        ),
+    )
+    with pytest.raises(plugin.OpenCodeUsageError):
+        plugin._fetch_opencode_coding_plan({"API_KEY": "sk-go"})
+
+
 # ── 动态头 ────────────────────────────────────────────────────
 
 def test_dynamic_headers_from_cache(plugin):

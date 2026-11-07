@@ -328,3 +328,46 @@ def test_get_chat_transport_accepts_id(qapp):
                 "parameters": {"type": "object"},
             }
         ]
+
+
+# ---------- Responses 请求参数：思考摘要必须显式 opt in ----------
+def _make_responses_worker(thinking=True):
+    from app.core.workers.chat_worker import OpenAIChatWorker
+
+    return OpenAIChatWorker(
+        messages=[{"role": "user", "content": "hi"}],
+        session_messages=[],
+        llm_config={
+            "模型名称": "gpt-6-luna",
+            "API_URL": "http://fake",
+            "API_KEY": "",
+            "思考模式": thinking,
+            "思考等级": "low",
+        },
+        stream=True,
+    )
+
+
+def test_responses_kwargs_requests_reasoning_summary(qapp):
+    """思考开启时必带 reasoning.summary（不带则服务端一个 reasoning delta 都不发）"""
+    w = _make_responses_worker()
+    kwargs = w._build_responses_kwargs([{"role": "user", "content": "hi"}])
+    assert kwargs["reasoning"]["effort"] == "low"
+    assert kwargs["reasoning"]["summary"] == "auto"
+
+
+def test_responses_kwargs_drops_summary_when_unsupported(qapp):
+    """服务端明确不接受 summary 后（400 降级标记），重试请求不再带该字段"""
+    w = _make_responses_worker()
+    w._responses_summary_unsupported = True
+    kwargs = w._build_responses_kwargs([{"role": "user", "content": "hi"}])
+    assert "summary" not in kwargs["reasoning"]
+    assert kwargs["reasoning"]["effort"] == "low"
+
+
+def test_responses_kwargs_thinking_off_has_no_summary(qapp):
+    """思考关闭：effort=none，也不带 summary（省一次服务端校验）"""
+    w = _make_responses_worker(thinking=False)
+    kwargs = w._build_responses_kwargs([{"role": "user", "content": "hi"}])
+    assert kwargs["reasoning"] == {"effort": "none"}
+

@@ -2171,11 +2171,19 @@ class OpenAIChatWorker(QThread):
         thinking_mode = self.llm_config.get("思考模式")
         if thinking_mode is True:
             _caps = resolve_model_capabilities(self.llm_config)
-            kwargs["reasoning"] = {
+            _reasoning = {
                 "effort": normalize_reasoning_effort(
                     self.llm_config.get("思考等级", "medium"), _caps.get("reasoning_effort_values")
                 )
             }
+            # Responses 默认**不**返回思考摘要（OpenAI 文档：不显式 opt in 就不发
+            # reasoning_summary_text.* 事件），只给 reasoning_tokens 计数 → UI 无
+            # 思考流。gpt-6-luna 走 responses 仍无思考文本就是缺这一项（2026-11-07
+            # 实测：请求里只有 effort，服务端一个 reasoning delta 都不发）。
+            # 第三方网关若不认该字段，由 _make_api_call 的 400 分支去掉后重试一次。
+            if not self.__dict__.get("_responses_summary_unsupported", False):
+                _reasoning["summary"] = "auto"
+            kwargs["reasoning"] = _reasoning
         elif thinking_mode is False:
             kwargs["reasoning"] = {"effort": "none"}
 
@@ -3768,6 +3776,19 @@ class OpenAIChatWorker(QThread):
                 _OE = _get_openai_errors()
                 if isinstance(e, _OE["bad_request"]):
                     error_str = str(e)
+                    # Responses 第三方网关可能不认 reasoning.summary：去掉该可选参数
+                    # 重试一次（保留 effort，思考仍生效，只是没有摘要文本）
+                    if (
+                        use_responses
+                        and not self.__dict__.get("_responses_summary_unsupported", False)
+                        and attempt < max_retries - 1
+                        and ("summary" in error_str.lower() or "reasoning" in error_str.lower())
+                    ):
+                        self._responses_summary_unsupported = True
+                        logger.warning(
+                            f"[ResponsesAPI] 服务端不接受 reasoning.summary，去掉摘要参数重试: {error_str[:200]}"
+                        )
+                        continue
                     # 检测 tool call result 错误码 2013
                     is_tool_call_order_error = (
                         "2013" in error_str

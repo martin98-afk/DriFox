@@ -2,10 +2,10 @@
 """
 服务商插件 — OpenCode Zen / OpenCode Go / OpenCode Zen (OAuth)
 
-数据由本插件声明。套餐用量查询仅 OpenCode Go 提供：
-GET https://opencode.ai/zen/go/v1/usage（官方接口，Bearer API Key 鉴权，
-复用服务商配置里已有的 API Key，无需 server_id / cookie / workspace_id）。
-OpenCode Zen 是按量 API 型（非订阅），无套餐用量，不注册 fetcher。
+数据由本插件声明。套餐用量查询挂在两个 Go 版：
+GET https://opencode.ai/zen/go/v1/usage（官方接口，Bearer 鉴权）。
+API Key 版用配置里的 API Key；OAuth 版用短效 access_token（容错，失败返
+None）。OpenCode Zen 是按量 API 型（非订阅），无套餐用量，不注册 fetcher。
 
 另注册「OpenCode Zen (OAuth)」：console device-flow 登录，供 v2 console 隐藏
 API key 的 workspace 成员使用。与上面两个 API Key 版并存、互不干扰（独立
@@ -45,21 +45,16 @@ def _system_ssl_context():
             _SSL_CONTEXT = False
     return _SSL_CONTEXT or None
 
-def _fetch_opencode_coding_plan(config: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """从官方 /zen/go/v1/usage 获取 OpenCode Go 套餐用量。
+def _request_usage(token: str) -> Dict[str, Any]:
+    """GET /zen/go/v1/usage + 解析；token 为 Bearer 凭据（API key 或 OAuth access）。
 
-    用服务商配置中的 API Key（Bearer）鉴权，无额外配置字段。
+    抛 OpenCodeUsageError 归因，由调用方决定是透出还是容错吞掉。
     """
     # 延迟导入：避免模块级网络库触发 AST 危险 import 审计告警
     import urllib.error
     import urllib.request
 
-    api_key = (config.get("API_KEY", "") or "").strip()
-    if not api_key:
-        return None
-
-    headers = {**_REQUEST_HEADERS, "Authorization": f"Bearer {api_key}"}
-
+    headers = {**_REQUEST_HEADERS, "Authorization": f"Bearer {token}"}
     try:
         req = urllib.request.Request(_USAGE_URL, headers=headers)
         with urllib.request.urlopen(req, timeout=10, context=_system_ssl_context()) as resp:
@@ -67,9 +62,9 @@ def _fetch_opencode_coding_plan(config: Dict[str, Any]) -> Optional[Dict[str, An
             raw = resp.read().decode(charset, errors="replace")
     except urllib.error.HTTPError as e:
         if e.code == 401:
-            raise OpenCodeUsageError("鉴权失败：API Key 无效或已撤销") from e
+            raise OpenCodeUsageError("鉴权失败：凭据无效或已撤销") from e
         if e.code == 403:
-            raise OpenCodeUsageError("无 Go 订阅：该 API Key 所属账号未订阅 OpenCode Go") from e
+            raise OpenCodeUsageError("无 Go 订阅：该凭据所属账号未订阅 OpenCode Go") from e
         raise OpenCodeUsageError(f"用量请求失败：HTTP {e.code}") from e
     except OSError as e:
         raise OpenCodeUsageError(f"用量请求异常：{e}") from e
@@ -83,6 +78,13 @@ def _fetch_opencode_coding_plan(config: Dict[str, Any]) -> Optional[Dict[str, An
     if not any(v is not None for v in result.values()):
         raise OpenCodeUsageError("响应结构变更：未解析到任何窗口用量，请核对接口返回体")
     return result
+
+def _fetch_opencode_coding_plan(config: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """API Key 版 Go：用配置里的 API Key（Bearer）查套餐用量。"""
+    api_key = (config.get("API_KEY", "") or "").strip()
+    if not api_key:
+        return None
+    return _request_usage(api_key)
 
 def _parse_usage(data: dict) -> Dict[str, Any]:
     """解析用量响应，兼容两种已知布局：
@@ -257,8 +259,37 @@ def _go_oauth_fetch_models(config: dict):
     return _load_oauth().fetch_go_models()
 
 
+def _go_oauth_coding_plan(config: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Go (OAuth)：用短效 access_token 查 /zen/go/v1/usage 套餐用量。
+
+    容错口径：官方该端点以 API key 鉴权，OAuth token 是否被接受需真实账号
+    才能确认。任一环节失败（未登录 / token 刷新失败 / 401 / 403 / 结构变更）
+    都返回 None —— UsageService 会隐藏圆环并 60s 后重试，不抛异常刷 warning，
+    且绝不影响聊天主链路。
+
+    只挂 Go (OAuth)：Zen 是按量 API 型，本就无套餐额度。
+    """
+    from loguru import logger
+
+    oa = _load_oauth()
+    api_key = str((config or {}).get("API_KEY", "") or "").strip()
+    if not api_key:
+        return None
+    try:
+        access, _org = oa.get_auth_context({"API_KEY": api_key})
+        if not access:
+            return None
+        return _request_usage(access)
+    except Exception as e:
+        logger.info(f"[OpenCode Go OAuth] 套餐用量不可用：{e}")
+        return None
+
 def _oauth_capabilities(models_hook):
-    """两个 OAuth 版共用登录与动态头，仅模型池钩子不同。"""
+    """两个 OAuth 版共用登录与动态头，仅模型池钩子不同。
+
+    套餐用量是 ProviderDef 顶层字段（不是 capabilities），只在 Go (OAuth)
+    的 ProviderDef 上挂 _go_oauth_coding_plan。
+    """
     return {
         "context_limit": 200000,
         "max_output_tokens": 8192,
@@ -448,5 +479,6 @@ def register(registry):
             models_dev_id="opencode-go",
             family="opencode_go_oauth",
             capabilities=_oauth_capabilities(_go_oauth_fetch_models),
+            coding_plan_fetcher=_go_oauth_coding_plan,
         )
     )

@@ -162,12 +162,17 @@ PARAM_SCHEMA = {
     "协议入口": {
         "display_name": "接口入口",
         "ui_type": "combobox",
-        # 声明式动态枚举：ModelConfigCard 按 options_source 从 TransportRegistry
-        # 实时取已注册 transport（不缓存，热重载后自动刷新）
+        # 声明式动态枚举：按 options_source 从 TransportRegistry 实时取已注册
+        # transport（不缓存，热重载后自动刷新）。当前消费方是模型能力编辑弹窗
+        # （model_capability_edit_dialog.py），参数卡不渲染该键。
         "options_source": "transport_registry",
-        # 选 auto = 删键（get_config 通用分支执行），回退自动识别
+        # 选 auto = 删键，回退自动识别
         "delete_on": "auto",
         "order": 160,
+        # 2026-11-07 用户决策：参数卡不渲染（渲染是配置驱动的，键不存在就整行
+        # 不出现，而三条注入链都不产出该键 → 死循环）。编辑入口统一收口到
+        # 「服务商 → 模型列表 → 齿轮 → 接口入口」，落盘 ModelOverrides 同条目。
+        "hide_in_card": True,
         # 内部路由键：无 api_param，中文键名不匹配 _VALID_IDENTIFIER_PATTERN，
         # 请求组装天然跳过；transport 侧 _CONFIG_ONLY_KEYS 另有显式兜底
     },

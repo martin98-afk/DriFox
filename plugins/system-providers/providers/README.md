@@ -161,6 +161,11 @@ ProviderDef 并存**，勿在原定义上叠加动态头：
   按路径显式 `compile` 加载，规避 `SourceFileLoader` 的 .pyc 秒级 mtime 缓存。
 - callable **不得抛异常**：`resolve_extra_headers` 遇异常会吞掉整组头
   （含 session_header）。失败时记 warning 后返回空串，让网关回 401。
+- **套餐用量挂在 `ProviderDef.coding_plan_fetcher`**（顶层字段，不是
+  capabilities）。OAuth 版可用短效 access_token 复用 API 版同一端点，但
+  该端点未必接受 OAuth token，故 fetcher 须容错：任一失败返 `None`（隐藏
+  圆环 + 60s 重试），别抛异常刷屏；API 版可继续抛 `OpenCodeUsageError`
+  做归因。挂了 fetcher 也不影响分组，`login_hook` 判据优先于它。
 - 参考实现：`providers/opencode.py`（`OpenCode Zen (OAuth)` /
   `OpenCode Go (OAuth)`）+ `providers/_opencode_oauth.py`，
   测试见 `tests/plugins/test_opencode_zen_oauth.py`。
