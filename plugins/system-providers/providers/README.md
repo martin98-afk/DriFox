@@ -128,8 +128,46 @@ None                                    # 无 API key 等（不请求）
 | `BALANCE_APIS` | `ProviderRegistry.balance_fetch(name, config)` |
 | `coding_plan_fetcher` 注册表 | `ProviderRegistry.coding_plan_fetch(name, config)` |
 
-## 7. 测试
+## 7. OAuth 登录型服务商（capabilities 三件套）
+
+同一网关若既有 API Key 版又有 OAuth 版（如 OpenCode Zen），**另注册一个
+ProviderDef 并存**，勿在原定义上叠加动态头：
+
+| capabilities 键 | 签名 / 作用 |
+|---|---|
+| `login_hook` | `(cancel_event=None) -> {"api_key": str, "info": str}`。编辑卡后台线程调用，返回长效 refresh_token 回填 API Key 输入框；`cancel_event` 是 `threading.Event`，轮询必须用它可中断等待（用户点「中止」立即退出） |
+| `models_hook` | `(config: dict) -> list[str]`。按当前表单的 API_KEY 拉动态模型池 |
+| `extra_headers` | dict，值可为 `callable(llm_config) -> str`。每次请求按当前配置求值（换 token / workspace 头）；解析统一走 `provider_profile.resolve_extra_headers` |
+| `login_hint` | 编辑卡 InfoBar 文案，说明授权页要做什么 |
+| `session_header` | 会话标识头名，值取宿主当前 session_id（在 extra_headers 之后写入，同名会覆盖） |
+
+要点：
+
+- **必须用独立 `family`**。`family_capabilities(family)` 聚合同族所有
+  ProviderDef 的能力并集，沿用 API Key 版的 family 会把动态
+  `Authorization` 串到 API Key 配置上（每请求拿空 refresh_token 刷新）。
+- **不要声明 `list_group`**。列表分组判据里显式声明优先级最高，会压掉
+  「有 `login_hook` → OAuth 组」的自动判据，把 OAuth 版错分到 API 组。
+- 同一网关多个 OAuth 变体（如 OpenCode Console 与 Go 共用 device flow、
+  仅端点/模型池不同）可共用登录与动态头，各自独立 family +
+  不同 `models_hook`。
+- API_KEY 存长效 refresh_token（config_id = hash(API_URL, API_KEY) 稳定），
+  短效 access_token 存插件自有缓存；刷新时若服务端轮转 refresh_token，
+  只更新缓存字段，**不动配置**。
+- 两个动态头 callable 会各调一次取凭证，刷新段需加锁 + double-check，
+  避免并发重复刷新。辅助模块实例要缓存在插件模块级变量，否则各 callable
+  各持一份内存缓存、去重失效。
+- 辅助模块文件名以 `_` 开头（loader 跳过、不要求 `register`），由主定义
+  按路径显式 `compile` 加载，规避 `SourceFileLoader` 的 .pyc 秒级 mtime 缓存。
+- callable **不得抛异常**：`resolve_extra_headers` 遇异常会吞掉整组头
+  （含 session_header）。失败时记 warning 后返回空串，让网关回 401。
+- 参考实现：`providers/opencode.py`（`OpenCode Zen (OAuth)` /
+  `OpenCode Go (OAuth)`）+ `providers/_opencode_oauth.py`，
+  测试见 `tests/plugins/test_opencode_zen_oauth.py`。
+
+## 8. 测试
 
 ```bash
 python -m pytest tests/core/test_provider_registry.py -v
+python -m pytest tests/plugins/test_opencode_zen_oauth.py -v
 ```

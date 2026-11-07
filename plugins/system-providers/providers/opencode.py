@@ -1,15 +1,21 @@
 # -*- coding: utf-8 -*-
 """
-服务商插件 — OpenCode Zen / OpenCode Go
+服务商插件 — OpenCode Zen / OpenCode Go / OpenCode Zen (OAuth)
 
 数据由本插件声明。套餐用量查询仅 OpenCode Go 提供：
 GET https://opencode.ai/zen/go/v1/usage（官方接口，Bearer API Key 鉴权，
 复用服务商配置里已有的 API Key，无需 server_id / cookie / workspace_id）。
 OpenCode Zen 是按量 API 型（非订阅），无套餐用量，不注册 fetcher。
+
+另注册「OpenCode Zen (OAuth)」：console device-flow 登录，供 v2 console 隐藏
+API key 的 workspace 成员使用。与上面两个 API Key 版并存、互不干扰（独立
+family，动态 Authorization 不会串到 API Key 配置）。协议实现见同目录
+_opencode_oauth.py。
 """
 
 import json
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Dict, Optional
 
 from app.plugins.registries.provider_registry import ProviderDef
@@ -139,8 +145,140 @@ _ZEN_CAPABILITIES = {
     "session_header": "x-opencode-session",
 }
 
+# ── OpenCode Zen (OAuth) ─────────────────────────────────────────
+#
+# 与上面两个 API Key 版并存。OAuth token 走 console device flow，推理端点为
+# https://opencode.ai/inference/openai/v1，需动态 Authorization + workspace
+# 头，故用**独立 family**：family_capabilities 按 family 聚合，若沿用
+# "opencode" 会把动态头串到 API Key 配置上（每请求拿空 refresh_token 刷新）。
+
+_INFERENCE_URL = "https://opencode.ai/inference/openai/v1"
+_GO_INFERENCE_URL = "https://opencode.ai/inference/go/openai/v1"
+
+
+_OAUTH_MODULE = None
+
+
+def _load_oauth():
+    """按路径显式 compile 加载同目录辅助模块（规避 .pyc 秒级 mtime 缓存）。
+
+    模块实例必须缓存：两个动态头 callable、登录钩子共享同一份 _MEM 缓存与
+    _REFRESH_LOCK，否则 prime_cache 与 get_auth_context 各持一份内存、刷新
+    去重失效。opencode.py 热重载会重建本模块级变量，天然拿到新代码。
+    """
+    global _OAUTH_MODULE
+    if _OAUTH_MODULE is None:
+        import importlib.util
+
+        path = Path(__file__).with_name("_opencode_oauth.py")
+        spec = importlib.util.spec_from_file_location("_drifox_opencode_oauth", path)
+        mod = importlib.util.module_from_spec(spec)
+        exec(compile(path.read_text(encoding="utf-8"), str(path), "exec"), mod.__dict__)
+        _OAUTH_MODULE = mod
+    return _OAUTH_MODULE
+
+
+def _oauth_authorization(llm_config: dict) -> str:
+    """动态 Authorization：按配置里的 refresh_token 取短效 access_token。
+
+    不能抛异常：resolve_extra_headers 对 callable 抛错会吞掉整组头（含
+    session_header），反而不如留空 Authorization 让网关回 401。故失败时
+    记录 warning（含「请重新登录」线索）后返回空串。
+    """
+    try:
+        access, _org = _load_oauth().get_auth_context(llm_config)
+    except Exception as e:
+        from loguru import logger
+
+        logger.warning(f"[OpenCode OAuth] 获取访问令牌失败：{e}")
+        return ""
+    return f"Bearer {access}" if access else ""
+
+
+def _oauth_org_header(llm_config: dict) -> str:
+    """workspace 标识头。与 Authorization 同源于缓存，两次调用经刷新锁去重。"""
+    try:
+        _access, org = _load_oauth().get_auth_context(llm_config)
+    except Exception:
+        return ""
+    return org
+
+
+_OAUTH_EXTRA_HEADERS = {
+    "User-Agent": "opencode/cli",
+    "Authorization": _oauth_authorization,
+    "x-opencode-org-id": _oauth_org_header,
+}
+
+
+def _oauth_login(cancel_event=None):
+    """登录钩子：device flow 授权 → 回填长效 refresh_token 到 API Key 输入框。"""
+    oa = _load_oauth()
+    result = oa.login(cancel_event=cancel_event)
+    api_key = result["refresh_token"] or result["access_token"]
+    oa.prime_cache(
+        api_key,
+        access_token=result["access_token"],
+        refresh_token=result["refresh_token"],
+        expires_in=result["expires_in"],
+        org_id=result["org_id"],
+        orgs=result["orgs"],
+        allowed_models=result["allowed_models"],
+    )
+    parts = ["登录成功：API Key 为长效续期令牌，聊天自动换取访问令牌"]
+    if len(result["orgs"]) > 1:
+        names = "、".join(o["name"] for o in result["orgs"][:5])
+        parts.append(f"检测到 {len(result['orgs'])} 个 workspace，已选第一个（{names}）")
+    if not result["org_id"]:
+        parts.append("未检测到 workspace，请求可能无 x-opencode-org-id 头")
+    parts.append("API Key 已回填请保存")
+    return {"api_key": api_key, "info": "，".join(parts)}
+
+
+def _oauth_fetch_models(config: dict):
+    """Zen (OAuth) 模型列表钩子：按 workspace 拉 /api/config 模型池。"""
+    oa = _load_oauth()
+    api_key = str((config or {}).get("API_KEY", "") or "").strip()
+    access, org = oa.get_auth_context({"API_KEY": api_key})
+    if not access:
+        raise RuntimeError("尚未登录或令牌已失效：请先点击「登录」")
+    if not org:
+        raise RuntimeError("未检测到 workspace，无法拉取模型列表")
+    return oa.fetch_workspace_models(access, org)
+
+
+def _go_oauth_fetch_models(config: dict):
+    """Go (OAuth) 模型列表钩子：公开 /inference/go/v1/models（lite 目录）。
+
+    Go 订阅的模型池由订阅档位决定，与 workspace /api/config 无关；公开目录
+    是权威来源（pi-provider-opencode-console 2.x 同口径）。无需 token，故
+    不做登录前置检查。
+    """
+    return _load_oauth().fetch_go_models()
+
+
+def _oauth_capabilities(models_hook):
+    """两个 OAuth 版共用登录与动态头，仅模型池钩子不同。"""
+    return {
+        "context_limit": 200000,
+        "max_output_tokens": 8192,
+        "absolute_limit": 65536,
+        "supports_vision": True,
+        "supports_thinking": True,
+        "thinking_param": "reasoning_effort",
+        "reasoning_effort_param": "reasoning_effort",
+        "session_header": "x-opencode-session",
+        # 不声明 list_group：_group_of 的「有 login_hook → OAuth」自动判据生效；
+        # 显式写 "API" 会压掉该判据，把 OAuth 版错分到 API 组
+        "extra_headers": _OAUTH_EXTRA_HEADERS,
+        "login_hook": _oauth_login,
+        "models_hook": models_hook,
+        "login_hint": "已打开浏览器，user_code 已复制到剪贴板：粘贴授权后点 Continue（可点「中止」退出）",
+    }
+
+
 def register(registry):
-    """注册 OpenCode Zen / OpenCode Go 两个服务商定义"""
+    """注册 4 个服务商：Zen/Go 的 API Key 版 + 各自的 OAuth 版"""
     # ── OpenCode Zen（免费额度） ──
     #
     # 免费层闸门（实测 2026-09-24）：
@@ -230,5 +368,85 @@ def register(registry):
             family="opencode",
             capabilities={**_ZEN_CAPABILITIES, "list_group": "Coding Plan"},
             coding_plan_fetcher=_fetch_opencode_coding_plan,
+        )
+    )
+
+    # ── OpenCode Zen (OAuth)：workspace 成员无 API key 时走 device flow ──
+    #
+    # 独立 family（见上）：动态 Authorization / x-opencode-org-id 只作用于
+    # 本配置。模型列表为 workspace 动态池，内置表仅作离线兜底；免费层
+    # 零价模型网关按服务端账号维度判定，选中可能 403，与 API Key 版同口径。
+    registry.register(
+        ProviderDef(
+            name="OpenCode Zen (OAuth)",
+            icon="opencode",
+            api_url=_INFERENCE_URL,
+            auth_type="bearer",
+            default_model="glm-5.3-flash",
+            default_params={
+                "温度": 0.7,
+                "最大Token": 200000,
+            },
+            register_url="https://opencode.ai/console",
+            models=[
+                "glm-5.3-flash",
+                "deepseek-v4.1-flash",
+                "glm-5.1",
+                "glm-5",
+                "kimi-k2.6",
+                "kimi-k2.5",
+                "deepseek-v4-pro",
+                "deepseek-v4-flash",
+                "minimax-m2.7",
+                "minimax-m2.5",
+                "qwen3.6-plus",
+                "qwen3.5-plus",
+            ],
+            models_dev_id="opencode",
+            family="opencode_zen_oauth",
+            capabilities=_oauth_capabilities(_oauth_fetch_models),
+        )
+    )
+
+    # ── OpenCode Go (OAuth)：同一 device flow / 同一 workspace，换 Go 端点 ──
+    #
+    # Go 与 Console 共用 console device flow，Go org 就是 Console org
+    # （pi-provider-opencode-console 2.x 实测）。差异只在：
+    #   - 推理端点 /inference/go/openai/v1（而非 /inference/openai/v1）
+    #   - 模型池为公开 /inference/go/v1/models（而非 org-scoped /api/config）
+    # 独立 family 保证两个 OAuth 版的能力互不覆盖；动态头本身相同。
+    registry.register(
+        ProviderDef(
+            name="OpenCode Go (OAuth)",
+            icon="opencode",
+            api_url=_GO_INFERENCE_URL,
+            auth_type="bearer",
+            default_model="deepseek-v4.1-flash",
+            default_params={
+                "温度": 0.7,
+                "最大Token": 200000,
+            },
+            register_url="https://opencode.ai/console",
+            models=[
+                "deepseek-v4.1-flash",
+                "deepseek-v4-pro",
+                "glm-5.2",
+                "glm-5.3",
+                "glm-5.3-flash",
+                "kimi-k2.7-code",
+                "kimi-k3",
+                "kimi-k3.1-pro",
+                "mimo-v2.6-flash",
+                "mimo-v2.6-pro",
+                "minimax-m3.1-flash",
+                "hy3",
+                "hy4",
+                "hy4-preview",
+                "step-5-preview",
+                "longcat-2.0",
+            ],
+            models_dev_id="opencode-go",
+            family="opencode_go_oauth",
+            capabilities=_oauth_capabilities(_go_oauth_fetch_models),
         )
     )
