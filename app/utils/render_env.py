@@ -58,6 +58,7 @@ __all__ = [
     "compute_settings",
     "default_config_path",
     "describe_applied",
+    "platform_recommended_profile",
 ]
 
 # 后端档位 → ANGLE 平台（QT_ANGLE_PLATFORM）。不含 software_gl：它不走 ANGLE，
@@ -90,6 +91,24 @@ _RENDERER_LIMIT_RANGE = (1, 32)
 _DEFAULT_JS_HEAP_MB = 128
 _JS_HEAP_RANGE = (64, 1024)
 _DEFAULT_DISABLED_FEATURES = "Translate,MediaRouter,optimizeHints,CalculateNativeWinOcclusion"
+
+# ── 平台推荐档（设置页「恢复默认/推荐档」提示与测试的单一数据源）────────────
+# 2026-11-07 macOS（M5 Pro，Retina dpr=2）空载隔离实例实测，footprint 口径：
+#   本组出厂默认（software 档）主进程 426MB + 2 个 renderer 135MB ≈ 全应用 561MB；
+#   hardware + WebGL on + ShareGL off + JsHeap 1024 + limit 32 + low-end off 的
+#   组合则为主进程 585MB + 6 个 renderer 600MB ≈ 1.2GB（差距 53%）。
+# 收益主体来自 low-end-device-mode 与 WebGL 开关把 renderer 进程数压下来，
+# 而非单一旋钮。与 config.py Render 组出厂默认的一致性由
+# tests/utils/test_render_env.py::test_platform_profile_matches_factory_defaults 锁定，
+# 改任一侧必须同步另一侧。
+_PLATFORM_RECOMMENDED_PROFILE = {
+    "RenderBackend": "software",
+    "WebglEnabled": "auto",
+    "ShareGLContexts": True,
+    "JsHeapMb": 128,
+    "RendererProcessLimit": 12,
+    "LowEndDeviceMode": True,
+}
 
 # apply_render_env 的留档（AA_* 类设置无处反查，见 applied_settings）
 _APPLIED: dict = {}
@@ -168,6 +187,17 @@ def compute_settings(render: dict) -> dict:
         "extra_flags": _to_str(render.get("ExtraChromiumFlags"), ""),
     }
 
+
+def platform_recommended_profile() -> dict:
+    """当前平台推荐的渲染档（config 键名 → 推荐值）。
+
+    全平台目前同用出厂默认那组：Windows 的 software=WARP 是为躲 Intel 核显
+    崩溃路径，mac 的 software=纯 CPU 光栅最省内存，语义不同但推荐值一致。
+    只含内存治理核心六项；SmoothScrolling / CanvasAA / DisableBackgroundThrottling /
+    DisabledFeatures / ExtraChromiumFlags 属体验开关，不在「推荐档」口径内。
+    返回副本，调用方可安全改写。
+    """
+    return dict(_PLATFORM_RECOMMENDED_PROFILE)
 
 def build_chromium_flags(s: dict) -> str:
     """渲染设置 → QTWEBENGINE_CHROMIUM_FLAGS。

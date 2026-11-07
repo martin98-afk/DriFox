@@ -23,6 +23,7 @@ from app.utils.render_env import (
     build_chromium_flags,
     compute_settings,
     describe_applied,
+    platform_recommended_profile,
 )
 
 
@@ -434,3 +435,24 @@ def test_apply_render_env_records_applied_settings(tmp_path, monkeypatch):
     s = describe_applied({})
     assert s["use_open_gles"] is False
     assert s["share_gl_contexts"] is False
+
+
+# ══ 平台推荐档 ══
+def test_platform_profile_matches_factory_defaults():
+    """推荐档必须与 config.py Render 组出厂默认一致（两处数据源防漂移）"""
+    from app.utils.config import Settings
+
+    profile = platform_recommended_profile()
+    assert profile["RenderBackend"] == Settings.render_backend.defaultValue
+    assert profile["WebglEnabled"] == Settings.render_webgl.defaultValue
+    assert profile["ShareGLContexts"] == Settings.render_share_gl_contexts.defaultValue
+    assert profile["JsHeapMb"] == Settings.render_js_heap_mb.defaultValue
+    assert profile["RendererProcessLimit"] == Settings.render_renderer_process_limit.defaultValue
+    assert profile["LowEndDeviceMode"] == Settings.render_low_end_device_mode.defaultValue
+
+
+def test_platform_profile_returns_copy():
+    """返回副本：调用方改写不得污染常量源"""
+    profile = platform_recommended_profile()
+    profile["JsHeapMb"] = 9999
+    assert platform_recommended_profile()["JsHeapMb"] == 128
