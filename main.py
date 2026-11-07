@@ -551,6 +551,15 @@ def main():
     # [T24 R2] 锁就绪 → 立即接上 show 请求入口，覆盖后续 import 窗口期
     _guard.show_requested.connect(_on_show_requested)
 
+    # 外观模式（自动跟随系统）对齐，必须在首次 setTheme 之前：
+    # qfluentwidgets 首帧深浅由当前主题决定，晚了对不上会先渲染一帧旧配色
+    try:
+        from app.utils.theme_mode import reconcile_on_startup
+
+        reconcile_on_startup()
+    except Exception as exc:
+        logger.warning(f"外观模式初始化失败: {exc}")
+
     # 设置 qfluentwidgets 主题 — 跟随 DriFox 主题的 mode
     from qfluentwidgets import Theme, setTheme
 

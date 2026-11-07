@@ -1052,6 +1052,18 @@ class ConfigSyncService(QObject):
                     self._meta_recorder.reset_suppress()
                 logger.warning(f"[ConfigSync] 从文件同步配置项失败: {_e}")
 
+            # ── 外观模式对齐：云端 ThemeMode 落地后按模式重算生效深浅 ──
+            # 跨设备系统深浅不一定相同：auto 模式不能沿用云端那台机器的
+            # LightMode。save=False —— 磁盘是云端权威值，这里只对齐内存，
+            # 下次正常保存再落盘。主题被改写时强制走一次主题刷新（old 置 None）。
+            try:
+                from app.utils.theme_mode import apply_light, effective_light
+
+                if apply_light(effective_light(), save=False):
+                    _old_theme_id = None
+            except Exception as _tme:
+                logger.debug(f"[ConfigSync] 外观模式对齐失败: {_tme}")
+
             # ── 主题显式全量刷新（修复 bug#6） ──
             # 完整主题刷新链路（ui_theme_style.valueChanged → LLMSettingsCard._on_config_changed
             # → configChanged → 各窗口批量刷新，含 qfluentwidgets setTheme/Colors/图标资源）

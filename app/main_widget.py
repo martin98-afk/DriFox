@@ -11489,7 +11489,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     # 补充刷新设置弹窗中的命名子卡片（不在 findChildren 范围的子类）
                     for card_name in (
                         "uiFontSizeCard",
-                        "uiLightModeCard",
+                        "uiThemeModeCard",
                         "uiThemeStyleCard",
                         "llmFontCard",
                         "llmSkillsCard",

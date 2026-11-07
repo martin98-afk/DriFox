@@ -50,6 +50,7 @@ from app.utils.startup_manager import (
     get_registered_command,
     request_auto_start_update,
 )
+from app.utils.theme_mode import apply_light
 from app.utils.utils import get_font_family_css, get_icon, invalidate_font_family_css_cache
 from app.widgets.cards.settings.gitee_card import GiteeCard
 from app.widgets.cards.settings.list_setting_card import SkillListSettingCard
@@ -58,6 +59,7 @@ from app.widgets.cards.settings.plugin_components_card import PluginComponentsCa
 from app.widgets.cards.settings.provider_setting_card import ProviderListSettingCard
 from app.widgets.cards.settings.secret_mode_card import SecretModeSettingCard
 from app.widgets.cards.settings.render_restart_card import RenderRestartCard
+from app.widgets.cards.settings.theme_mode_card import ThemeModeSettingCard
 from app.widgets.cards.settings.render_advanced_card import RenderAdvancedCard
 from app.widgets.cards.settings.update_proxy_card import UpdateProxyCard
 from app.widgets.cards.settings.render_backend_card import RenderBackendCard
@@ -905,7 +907,7 @@ class LLMSettingsCard(SystemCardFrame):
 
         # 浅色模式、主题风格
         self._setup_appearance_cards()
-        appearance_layout.addWidget(self.uiLightModeCard)
+        appearance_layout.addWidget(self.uiThemeModeCard)
         appearance_layout.addWidget(self.uiThemeStyleCard)
 
         # 主题音乐音量（只作用于 backgrounds.music；视频覆盖层恒静音）
@@ -1611,13 +1613,9 @@ class LLMSettingsCard(SystemCardFrame):
             texts=["窄", "标准", "宽", "不限宽"],
             parent=self,
         )
-        self.uiLightModeCard = SwitchSettingCard(
-            get_icon("主题风格"),
-            "浅色模式",
-            "切换为浅色界面配色",
-            self.cfg.ui_light_mode,
-            self,
-        )
+        # 深浅是三态（自动 / 深 / 浅），布尔开关表达不了「跟随系统」，
+        # 换自绘分段控件（见 theme_mode_card 模块）
+        self.uiThemeModeCard = ThemeModeSettingCard(self.cfg.ui_theme_mode, self)
         self.uiThemeStyleCard = self._make_theme_style_card()
 
     def _make_theme_style_card(self):
@@ -1721,13 +1719,13 @@ class LLMSettingsCard(SystemCardFrame):
         self.closed.emit()
 
     def _on_light_mode_changed(self, is_light: bool):
-        """浅色模式开关切换 — 自动选择对应模式的主题"""
-        target_theme = "lumia" if is_light else "true-black"
-        # 先重建 validator 为目标模式主题集（防旧集不含 target 被 correct 回退），
-        # 当前值不在集内时回第一个（_make_theme_style_card 内处理）
-        if self.cfg.ui_theme_style.value != target_theme:
-            self.cfg.set(self.cfg.ui_theme_style, target_theme, save=True)
-        # 重建主题风格卡（展开式选项按新模式过滤）
+        """生效深浅变化（模式切档 / 自动跟随系统 / 外部同步）
+
+        主题与生效深浅的对齐收在 app.utils.theme_mode.apply_light：只在当前
+        主题深浅与目标不符时才切默认主题，不再无条件把用户手选的主题打回默认。
+        """
+        apply_light(is_light)
+        # 重建主题风格卡（选项按新模式过滤）
         self._rebuild_theme_style_card()
         # 触发全量刷新
         self._on_config_changed()
@@ -1742,8 +1740,8 @@ class LLMSettingsCard(SystemCardFrame):
         sender = self.sender()
         if sender is self.cfg.ui_theme_style:
             LLMSettingsCard._last_change_type = "theme"
-        elif sender is self.cfg.ui_light_mode:
-            # 浅色模式开关切换 → 实质是换主题
+        elif sender in (self.cfg.ui_light_mode, self.cfg.ui_theme_mode):
+            # 深浅 / 外观模式切档 → 实质是换主题
             LLMSettingsCard._last_change_type = "theme"
         elif sender is self.cfg.llm_font_family:
             LLMSettingsCard._last_change_type = "font_family"
@@ -1797,7 +1795,7 @@ class LLMSettingsCard(SystemCardFrame):
         for card_name in (
             "uiFontSizeCard",
             "uiChatWidthCard",
-            "uiLightModeCard",
+            "uiThemeModeCard",
             "uiThemeStyleCard",
             "llmFontCard",
             "renderRestartCard",

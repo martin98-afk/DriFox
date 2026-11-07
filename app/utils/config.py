@@ -78,9 +78,40 @@ def _migrate_remove_opencode_free_provider_entry(instance) -> bool:
     return Settings._migrate_remove_opencode_free_provider(instance)
 
 
+def _migrate_theme_mode(instance) -> bool:
+    """外观模式：旧版只有布尔 LightMode，升级时按当前值固化 ThemeMode。
+
+    全新安装（配置文件里没有 UI.LightMode）不迁移，保留默认 auto —— 新用户
+    开箱跟随系统；老用户则保持升级前的深浅，不会突然变色。
+    """
+    path = getattr(instance, "file", None)
+    if path is None or not path.exists():
+        return False
+    try:
+        import orjson as json
+
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return False
+    ui = raw.get("UI") or {}
+    if "ThemeMode" in ui or "LightMode" not in ui:
+        return False
+    mode = "light" if ui.get("LightMode") else "dark"
+    instance.ui_theme_mode.value = mode
+    instance.save()
+    logger.info(f"[配置迁移] 外观模式：LightMode={ui.get('LightMode')} → ThemeMode={mode}")
+    return True
+
+
+def _migrate_theme_mode_entry(instance) -> bool:
+    """注册表末项：布尔深浅 → 三态外观模式（默认 auto 仅对新安装生效）"""
+    return _migrate_theme_mode(instance)
+
+
 _MIGRATIONS: List[Callable[[Any], bool]] = [
     _migrate_saved_providers_entry,
     _migrate_remove_opencode_free_provider_entry,
+    _migrate_theme_mode_entry,
 ]
 
 
@@ -793,6 +824,14 @@ class Settings(QConfig):
         "ThemeStyle",
         "lumia",
         OptionsValidator(["lumia"]),  # 运行时动态补充
+    )
+    # 外观模式真源：auto=跟随系统 / light / dark。ui_light_mode 是「生效值」，
+    # 既有主题过滤与主题卡读取点保持不变（见 app/utils/theme_mode.py）
+    ui_theme_mode = OptionsConfigItem(
+        "UI",
+        "ThemeMode",
+        "auto",
+        OptionsValidator(["auto", "light", "dark"]),
     )
     ui_light_mode = ConfigItem("UI", "LightMode", True, BoolValidator())
 

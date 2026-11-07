@@ -28,9 +28,11 @@ from qfluentwidgets import FluentIcon, InfoBar, InfoBarPosition, MaskDialogBase,
 
 from app.core.infra import window_registry
 from app.gateway.auth.base import CANCEL_MESSAGE
+from app.utils import theme_mode
 from app.utils.config import Settings
 from app.utils.design_tokens import Colors, font_size_css, scale_font_size
 from app.utils.utils import get_font_family_css, get_icon, get_unified_font
+from app.widgets.cards.settings.theme_mode_card import ThemeModeSelector
 from app.widgets.common_dialogs import ConfirmDialog
 from app.widgets.elided_label import _ElidedLabel
 
@@ -1024,7 +1026,7 @@ class _GiteeMorePopup(QWidget):
 
     点击 GiteeAccountRow 的 ⚙ 按钮后弹出，分区结构：
     ① 账号区（头像 + 名称/仓库，点击跳仓库）+ 绑定/解绑
-    ② 快捷开关：深色模式 / 窗口置顶
+    ② 快捷设置：外观模式（自动 / 深 / 浅，三态分段控件）/ 窗口置顶
     ③ 快捷导航：外观 / 插件设置（直跳设置卡对应页）
     ③ 快捷导航：外观 / 插件设置（直跳设置卡对应页）
     ④ 帮助与反馈（新建会话发起 issue 提交引导）/ 检查更新
@@ -1106,15 +1108,14 @@ class _GiteeMorePopup(QWidget):
         # ── 分隔线 ──
         layout.addWidget(self._make_separator())
 
-        # ── 快捷开关：深色模式 / 窗口置顶 ──
-        dark_switch = SwitchButton(self._container)
-        dark_switch.setOnText("")
-        dark_switch.setOffText("")
-        dark_switch.label.setVisible(False)  # 只留开关本体；_updateText 会重写文字，仅 setText 压不住
-        dark_switch.setChecked(not self._cfg.ui_light_mode.value)
-        dark_switch.checkedChanged.connect(self._on_dark_mode_toggled)
-        self._dark_mode_row = _MenuRow(FluentIcon.BRIGHTNESS, "深色模式", right=dark_switch, parent=self._container)
-        layout.addWidget(self._dark_mode_row)
+        # ── 快捷设置：外观模式（三态，与设置页同一控件）/ 窗口置顶 ──
+        self._mode_selector = ThemeModeSelector(self._container, compact=True)
+        self._mode_selector.set_mode(theme_mode.current_mode(), emit=False, animate=False)
+        self._mode_selector.modeChanged.connect(self._on_theme_mode_changed)
+        self._appearance_mode_row = _MenuRow(
+            FluentIcon.BRIGHTNESS, "外观模式", right=self._mode_selector, parent=self._container
+        )
+        layout.addWidget(self._appearance_mode_row)
 
         topmost_switch = SwitchButton(self._container)
         topmost_switch.setOnText("")
@@ -1125,7 +1126,7 @@ class _GiteeMorePopup(QWidget):
         self._topmost_row = _MenuRow(FluentIcon.PIN, "窗口置顶", right=topmost_switch, parent=self._container)
         layout.addWidget(self._topmost_row)
         # 保持 Python 引用，防止 SwitchButton 被提前 GC 回收
-        self._switch_refs = [dark_switch, topmost_switch]
+        self._switch_refs = [self._mode_selector, topmost_switch]
 
         layout.addWidget(self._make_separator())
 
@@ -1366,35 +1367,13 @@ class _GiteeMorePopup(QWidget):
 
     # ── 快捷开关回调 ──
 
-    def _on_dark_mode_toggled(self, checked: bool):
-        """深色模式切换
+    def _on_theme_mode_changed(self, mode: str):
+        """外观模式三态切换（自动 / 深 / 浅）
 
-        完整刷新链（ui_light_mode.valueChanged → LLMSettingsCard._on_light_mode_changed
-        → ui_theme_style → configChanged → 全量刷新）依赖懒构建设置卡；本次启动
-        未打开过设置页时无人监听 valueChanged，界面不会切换。此处兜底：设置卡
-        未构建时直写目标主题并 dispatch_refresh 显式全量刷新（与 config_sync 同款）。
+        与设置页共用 theme_mode.set_mode：写配置 + 主题深浅对齐 + 窗口广播，
+        设置卡未构建时也能即时生效。
         """
-        is_light = not checked
-        self._cfg.ui_light_mode.value = is_light
-        self._cfg.save()
-
-        from app.widgets.cards.global_card_controller import get_global_card_controller
-
-        controller = get_global_card_controller()
-        if controller is not None and controller._settings_popup is not None:
-            # 设置卡已构建 → valueChanged 链自动完成主题切换，不重复触发
-            return
-
-        from app.utils.config import update_theme_options
-        from app.utils.theme_manager import theme_manager
-
-        # 写 ui_theme_style 前先刷新 validator 选项集，防止目标主题未注册时
-        # 被 OptionsValidator.correct() 静默回退到 options[0]
-        update_theme_options()
-        target_theme = "lumia" if is_light else "true-black"
-        if self._cfg.ui_theme_style.value != target_theme:
-            self._cfg.set(self._cfg.ui_theme_style, target_theme, save=True)
-        theme_manager.dispatch_refresh()
+        theme_mode.set_mode(mode)
 
     def _on_topmost_toggled(self, checked: bool):
         """窗口置顶开关切换
