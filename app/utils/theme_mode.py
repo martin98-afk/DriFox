@@ -29,8 +29,6 @@ MODE_LIGHT = "light"
 MODE_DARK = "dark"
 MODES = (MODE_AUTO, MODE_LIGHT, MODE_DARK)
 
-DEFAULT_THEME_LIGHT = "lumia"
-DEFAULT_THEME_DARK = "true-black"
 
 _watcher: Optional["_SystemThemeWatcher"] = None
 
@@ -42,7 +40,10 @@ def _settings():
 
 
 def default_theme_for(light: bool) -> str:
-    return DEFAULT_THEME_LIGHT if light else DEFAULT_THEME_DARK
+    """该深浅模式的默认主题（字面量唯一来源在 app/utils/config.py）"""
+    from app.utils.config import DEFAULT_DARK_THEME, DEFAULT_LIGHT_THEME
+
+    return DEFAULT_LIGHT_THEME if light else DEFAULT_DARK_THEME
 
 
 def current_mode() -> str:

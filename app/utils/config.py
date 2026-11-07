@@ -115,6 +115,13 @@ _MIGRATIONS: List[Callable[[Any], bool]] = [
 ]
 
 
+# 各深浅模式的默认主题（切模式且该模式没有用户记忆时的落点）。
+# 这是全仓唯一的主题名字面量来源：ui_theme_style 的默认值、theme_mode 的
+# 模式切换都引用这里，别再散落到各处。
+DEFAULT_LIGHT_THEME = "lumia"
+DEFAULT_DARK_THEME = "true-black"
+
+
 class Settings(QConfig):
     _instance = None
     # 类级别关闭标志 — 一旦设置，任何实例的 save() 都会跳过
@@ -822,8 +829,8 @@ class Settings(QConfig):
     ui_theme_style = OptionsConfigItem(
         "UI",
         "ThemeStyle",
-        "lumia",
-        OptionsValidator(["lumia"]),  # 运行时动态补充
+        DEFAULT_LIGHT_THEME,
+        OptionsValidator([DEFAULT_LIGHT_THEME]),  # 运行时动态补充
     )
     # 外观模式真源：auto=跟随系统 / light / dark。ui_light_mode 是「生效值」，
     # 既有主题过滤与主题卡读取点保持不变（见 app/utils/theme_mode.py）

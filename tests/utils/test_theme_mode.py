@@ -70,7 +70,7 @@ def test_apply_light_switches_default_theme(monkeypatch):
 
     assert theme_mode.apply_light(False) is True
     assert stub.ui_light_mode.value is False
-    assert stub.ui_theme_style.value == theme_mode.DEFAULT_THEME_DARK
+    assert stub.ui_theme_style.value == theme_mode.default_theme_for(False)
     assert stub.saved == 2
 
 
@@ -164,7 +164,7 @@ def test_set_mode_writes_mode_and_light(monkeypatch):
     theme_mode.set_mode(theme_mode.MODE_DARK, broadcast=False)
     assert stub.ui_theme_mode.value == "dark"
     assert stub.ui_light_mode.value is False
-    assert stub.ui_theme_style.value == theme_mode.DEFAULT_THEME_DARK
+    assert stub.ui_theme_style.value == theme_mode.default_theme_for(False)
 
 
 # ── 旧配置迁移 ────────────────────────────────────────
