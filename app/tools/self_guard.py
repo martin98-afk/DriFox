@@ -71,6 +71,23 @@ _PS_PIPE_RE = re.compile(
     r"(?is)get-process\b([^|]*)\|\s*(?:stop-process|kill|taskkill)\b"
 )
 
+# ── 宽泛层（静态命令族解析不到的形态）──
+# 判据刻意放宽：命令同时出现「杀进程倾向」+ 任一自身标识即拒。
+# 典型绕过：python -c "import psutil; psutil.Process(46320).kill()"
+# 宁可误伤一次，也不让宿主被静默杀掉。
+_SELF_KILL_INTENT = re.compile(
+    r"(?i)(?:\b(?:kill|taskkill|tskill|killall|pkill|terminate|stop-process)\b"
+    r"|\.kill\s*\(|\.terminate\s*\()"
+)
+# 取自身/父进程 PID 的 API（杀掉它们等于杀掉宿主）
+_SELF_ID_INTENT = re.compile(
+    r"(?i)(?:getpid\s*\(|getppid\s*\(|\$\{?ppid\}?|%ppid%|\.ppid\s*\()"
+)
+# psutil 无参 Process() 指向自身；.parent() 指向父进程（宿主）
+_SELF_PROCESS_API = re.compile(
+    r"(?is)psutil\s*\.\s*Process\s*\(\s*\)\s*\.\s*(?:parent\s*\(\s*\)\s*\.\s*)?(?:kill|terminate)\s*\("
+)
+
 _PPID_LITERALS = frozenset({"$ppid", "${ppid}", "$$ppid"})
 
 
@@ -330,6 +347,53 @@ def _self_names() -> set[str]:
     return names
 
 
+def _self_image_tokens() -> set[str]:
+    """自身镜像全名（含扩展名），用于宽泛层的字面子串匹配"""
+    tokens: set[str] = set()
+    try:
+        tokens.add(Path(sys.executable).name.lower())
+    except Exception:
+        pass
+    if psutil is not None:
+        try:
+            tokens.add(psutil.Process().name().lower())
+        except Exception:
+            pass
+    # 打包版额外用无后缀名（DriFox），拦 'DriFox' in p.name() 这类形态；
+    # 源码模式不加（python 是泛词，会把所有含 python 的命令误伤）
+    if getattr(sys, "frozen", False):
+        try:
+            stem = Path(sys.executable).stem.lower()
+            if stem:
+                tokens.add(stem)
+        except Exception:
+            pass
+    return {t for t in tokens if t}
+
+
+def _broad_self_kill_reason(
+    command: str, self_pid: int, self_names: set[str]
+) -> Optional[str]:
+    """宽泛判定：杀进程倾向 + 自身标识（PID 字面量 / 取 PID API / 镜像名）
+
+    覆盖静态命令族解析不到的形态，例如
+    ``python -c "import psutil; psutil.Process(<pid>).kill()"``。
+    误伤代价是一句拒绝提示，漏判代价是宿主被杀。
+    """
+    if not _SELF_KILL_INTENT.search(command):
+        return None
+    if _SELF_PROCESS_API.search(command):
+        return _reject_message(self_pid, self_names)
+    if re.search(rf"(?<!\d){self_pid}(?!\d)", command):
+        return _reject_message(self_pid, self_names)
+    if _SELF_ID_INTENT.search(command):
+        return _reject_message(self_pid, self_names)
+    lower = command.lower()
+    if any(token in lower for token in _self_image_tokens()):
+        return _reject_message(self_pid, self_names)
+    return None
+
+
 def _reject_message(self_pid: int, self_names: set[str]) -> str:
     name = next(iter(sorted(self_names)), "")
     who = f"PID {self_pid}" + (f" / 进程名 {name}" if name else "")
@@ -348,6 +412,11 @@ def check_self_kill(command: str) -> Optional[str]:
 
     self_pid = os.getpid()
     self_names = _self_names()
+
+    # 宽泛层先判：不看命令族，只认「杀意 + 自身标识」
+    broad_reason = _broad_self_kill_reason(command, self_pid, self_names)
+    if broad_reason:
+        return broad_reason
 
     for head, args in _iter_commands(command):
         pids: set[int] = set()

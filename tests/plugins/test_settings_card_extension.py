@@ -308,7 +308,7 @@ class TestFullwidthMode:
         from app.widgets.cards.settings.llm_settings_card import LLMSettingsCard
 
         assert LLMSettingsCard._is_fullwidth_tab("plugins") is True
-        assert LLMSettingsCard._is_fullwidth_tab("tab:git-panel:main") is True
+        assert LLMSettingsCard._is_fullwidth_tab("tab:git-panel:main") is False  # 注册 tab 保持导航可见
         assert LLMSettingsCard._is_fullwidth_tab("provider") is False
         assert LLMSettingsCard._is_fullwidth_tab("plugins_extra") is False  # 仅精确匹配
 
@@ -318,11 +318,14 @@ class TestFullwidthMode:
         assert card._nav_frame._vis_calls[-1] is False
         assert card._back_btn._vis_calls[-1] is True
 
-    def test_plugin_registered_tab_also_fullwidth(self, qtbot, monkeypatch):
+    def test_plugin_registered_tab_keeps_nav(self, qtbot, monkeypatch):
+        """注册大 tab 不收导航、不显返回按钮（2026-11-08 用户反馈）"""
         card = self._make_fullwidth_stub(qtbot, monkeypatch)
+        card._nav_frame.setVisible(True)
+        card._nav_frame._vis_calls.clear()
         card._apply_fullwidth_mode("tab:demo:adv")
-        assert card._nav_frame._vis_calls[-1] is False
-        assert card._back_btn._vis_calls[-1] is True
+        assert card._nav_frame._vis_calls[-1] is True
+        assert card._back_btn._vis_calls[-1] is False
 
     def test_normal_tab_restores_nav(self, qtbot, monkeypatch):
         card = self._make_fullwidth_stub(qtbot, monkeypatch)

@@ -121,6 +121,45 @@ def test_empty_command_passes():
     assert check_self_kill("   ") is None
 
 
+# ══════════════ 宽泛层：静态解析不到的动态形态 ══════════════
+
+def test_rejects_dynamic_psutil_kill_by_pid():
+    """用户实测绕过：python -c 里用 psutil 按 PID 杀宿主"""
+    pid = os.getpid()
+    cmd = (
+        'python -c "import psutil; p=psutil.Process({pid}); '
+        "cmd=' '.join(p.cmdline()); assert 'main.py' in cmd; p.kill()\""
+    ).format(pid=pid)
+    assert check_self_kill(cmd)
+
+
+def test_rejects_dynamic_os_kill_getppid():
+    assert check_self_kill('python -c "import os; os.kill(os.getppid(), 9)"')
+
+
+def test_rejects_dynamic_os_kill_getpid():
+    assert check_self_kill('python -c "import os, signal; os.kill(os.getpid(), signal.SIGKILL)"')
+
+
+def test_rejects_bare_psutil_process_kill():
+    assert check_self_kill('python -c "import psutil; psutil.Process().kill()"')
+    assert check_self_kill('python -c "import psutil; psutil.Process().parent().kill()"')
+
+
+def test_rejects_kill_intent_with_self_image_name():
+    assert check_self_kill(f'python -c "import os; os.system(\'taskkill /F /IM {_self_image()}\')"')
+
+
+def test_rejects_kill_intent_with_pid_literal():
+    assert check_self_kill(f'python -c "import os; os.kill({os.getpid()}, 9)"')
+
+
+def test_broad_layer_allows_plain_scripts():
+    assert check_self_kill('python -c "print(\\"hello\\")"') is None
+    assert check_self_kill('python -c "import psutil; print(psutil.Process(999999).name())"') is None
+    assert check_self_kill('grep -rn "kill" src/') is None
+
+
 # ══════════════ 宿主统一闸门：guard_tool_call / argv 形态 ══════════════
 
 def test_guard_tool_call_reads_command_arg():

@@ -1246,45 +1246,36 @@ class LLMSettingsCard(SystemCardFrame):
 
     @staticmethod
     def _is_fullwidth_tab(tab_id: str) -> bool:
-        """插件类页面独占全宽：内置插件页 + 插件注册的独立设置大 tab"""
-        return tab_id == "plugins" or tab_id.startswith("tab:")
+        """仅内置插件页独占全宽；插件注册大 tab 保持导航可见（用户反馈 2026-11-08）"""
+        return tab_id == "plugins"
 
     def _apply_fullwidth_mode(self, tab_id: str) -> None:
         """按当前页收起/恢复左导航、顶部条与返回按钮
 
-        仅内置插件页有收起动画；插件注册大 tab 直接显隐（它们是低频页面，
-        逐次过渡反而拖泥带水）。
+        收起带滑动动画；展开时若导航本来就开着由幂等守卫拦截，不重放。
         属性访问包 RuntimeError：__new__ 桩（测试 fixture）的 QObject 未初始化，
         读未定义属性抛 RuntimeError 而非 AttributeError，getattr 默认值救不了。
         """
         full = self._is_fullwidth_tab(tab_id)
-        animate = tab_id == "plugins"
         try:
-            self._set_nav_collapsed(full, animate=animate)
+            self._set_nav_collapsed(full, animate=full)
             back = getattr(self, "_back_btn", None)
             if back is not None:
                 back.setVisible(full)
             bar = getattr(self, "_fullwidth_bar", None)
             if bar is not None:
                 bar.setVisible(full)
-            holder = getattr(self, "_chips_holder", None)
-            if holder is not None:
-                # chips 是插件列表专属：注册 tab 页没有列表，只留返回按钮
-                holder.setVisible(tab_id == "plugins")
         except RuntimeError:
             pass  # __new__ 桩：跳过视觉同步
 
     def _exit_fullwidth_mode(self) -> None:
-        """「← 返回设置」：恢复导航显示，分页停在当前页不动"""
+        """「← 返回设置」：恢复导航，只收返回按钮；顶部条（筛选 chips）保留"""
         try:
             current = getattr(self, "_current_tab", None)
             self._set_nav_collapsed(False, animate=current == "plugins")
             back = getattr(self, "_back_btn", None)
             if back is not None:
                 back.setVisible(False)
-            bar = getattr(self, "_fullwidth_bar", None)
-            if bar is not None:
-                bar.setVisible(False)
         except RuntimeError:
             pass  # __new__ 桩：跳过视觉同步
 
