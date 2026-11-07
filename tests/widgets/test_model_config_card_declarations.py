@@ -69,3 +69,57 @@ def test_existing_declarations_passthrough_on_save(card):
     for key in DECL_KEYS:
         assert got[key] == cfg[key], f"已有声明值 {key} 被静默抹掉或改写"
     assert got["温度"] == 0.7, "常规键不受影响"
+
+
+# ---------- 协议入口下拉（动态枚举 + userData 落盘） ----------
+
+def test_protocol_entry_dynamic_options(card):
+    """协议入口下拉：静态两项 + 已注册 transport 动态追加，userData 带前缀"""
+    from tests.core.test_subagent_stream_aggregation import _ensure_plugins_loaded
+
+    _ensure_plugins_loaded()
+    from app.plugins.registries.transport_registry import TransportRegistry
+
+    card.set_config("测试", _config(协议入口=""), "m1")
+    widget = card._widgets["协议入口"][1]
+    items = [(widget.itemText(i), widget.itemData(i)) for i in range(widget.count())]
+    assert ("自动", "auto") in items
+    assert ("Responses API", "responses") in items
+    registry = TransportRegistry.get_instance()
+    for tid, t in registry.transports().items():
+        assert (getattr(t, "display_name", None) or tid, f"transport:{tid}") in items
+
+
+def test_protocol_entry_auto_deletes_key(card):
+    """选自动 → get_config 删键（防 copy 残留假声明）"""
+    card.set_config("测试", _config(协议入口="responses"), "m1")
+    widget = card._widgets["协议入口"][1]
+    widget.setCurrentIndex(0)  # 自动
+    cfg = card.get_config()
+    assert "协议入口" not in cfg
+
+
+def test_protocol_entry_transport_saved_with_prefix(card):
+    """选已注册 transport → 落盘 transport:<id>"""
+    from tests.core.test_subagent_stream_aggregation import _ensure_plugins_loaded
+
+    _ensure_plugins_loaded()
+    from app.plugins.registries.transport_registry import TransportRegistry
+
+    card.set_config("测试", _config(协议入口=""), "m1")
+    widget = card._widgets["协议入口"][1]
+    tid = next(iter(TransportRegistry.get_instance().transports()))
+    idx = widget.findData(f"transport:{tid}")
+    widget.setCurrentIndex(idx)
+    cfg = card.get_config()
+    assert cfg["协议入口"] == f"transport:{tid}"
+
+
+def test_protocol_entry_roundtrip_display(card):
+    """回显：落盘值 transport:<id> 重进卡片，选中项 data 匹配"""
+    from tests.core.test_subagent_stream_aggregation import _ensure_plugins_loaded
+
+    _ensure_plugins_loaded()
+    card.set_config("测试", _config(协议入口="transport:openai_chat"), "m1")
+    widget = card._widgets["协议入口"][1]
+    assert widget.currentData() == "transport:openai_chat"
