@@ -126,10 +126,28 @@ class PluginConfigStore:
 
     def get_all(self, plugin_name: str) -> Dict[str, Any]:
         """全部字段当前生效值（渲染卡回显用；无 schema 返回空 dict）"""
+        return self.effective_values(plugin_name)
+
+    def effective_values(self, plugin_name: str) -> Dict[str, Any]:
+        """全部字段当前生效值，一次读盘（语义同 get：env → 存储 → schema 默认）。
+
+        设置页状态判定（必填缺失 / 未配置）需要遍历整张 schema，逐字段调 get()
+        会把同一个 config.json 读 N 遍；本方法把读盘收敛成一次。
+        """
         schema = self._schema(plugin_name)
         if schema is None:
             return {}
-        return {f.key: self.get(plugin_name, f.key) for f in schema.fields}
+        raw = self._read_raw(plugin_name)
+        values: Dict[str, Any] = {}
+        for f in schema.fields:
+            env_val = os.environ.get(f.env) if f.env else None
+            if env_val:
+                values[f.key] = self._normalize(f, env_val)
+            elif f.key in raw and raw[f.key] not in ("", None):
+                values[f.key] = self._normalize(f, raw[f.key])
+            else:
+                values[f.key] = f.default
+        return values
 
     @staticmethod
     def _normalize(f: Optional[PluginConfigField], value: Any) -> Any:

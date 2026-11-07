@@ -8,6 +8,7 @@ _tick 语义靠手调 _on_tick / _on_question_event 验证。
 import importlib.util
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -197,3 +198,60 @@ def test_ai_failure_submits_skip_text(monkeypatch):
     ctx.ctrl._on_ai_result("w1", "")
     answers = [args[0] for name, args in api.calls if name == "answer"]
     assert answers and "已跳过" in answers[0]
+
+def test_ensure_subscriptions_skips_host_without_question_control(monkeypatch):
+    """回归：__global__ 全局卡片宿主无 question.control 能力，每秒扫描时
+    不应被发起订阅，否则 provider 抛 RuntimeError、WARNING 每秒刷屏。
+    """
+    mod = _load_timeout_module()
+    from app.plugins.capabilities.providers.ui_core import _question_control
+
+    ctx = SimpleNamespace(
+        plugin="system-question",
+        registry=SimpleNamespace(track_subscription=lambda *a: None),
+    )
+    # 无能力宿主壳（TabManagerWindow 全局容器）与真实对话窗口
+    shell = SimpleNamespace(_window_id="__global__")
+    real = SimpleNamespace(_window_id="w1", question_control_subscribe=lambda cb: True)
+
+    attempted = []
+    warnings = []
+
+    def fake_build_pool(widget):
+        api = dict(_question_control(widget, ctx))
+        orig_subscribe = api["subscribe"]
+
+        def traced(cb):
+            attempted.append(getattr(widget, "_window_id", "?"))
+            return orig_subscribe(cb)
+
+        api["subscribe"] = traced
+        return {"question.control": api}
+
+    monkeypatch.setattr(
+        mod.QuestionTimeoutController, "_windows",
+        lambda self: {"__global__": shell, "w1": real},
+    )
+    monkeypatch.setattr(
+        mod.QuestionTimeoutController, "_build_pool", staticmethod(fake_build_pool),
+    )
+    monkeypatch.setattr(
+        mod, "logger",
+        SimpleNamespace(
+            warning=lambda *a: warnings.append(" ".join(map(str, a))),
+            debug=lambda *a: None,
+            info=lambda *a: None,
+        ),
+    )
+
+    ctrl = mod.QuestionTimeoutController.__new__(mod.QuestionTimeoutController)
+    ctrl._sessions = {}
+    ctrl._ensure_subscriptions()
+
+    # 无能力宿主既不触发订阅尝试，也不产生失败告警，更不登记 session
+    assert "__global__" not in attempted
+    assert "__global__" not in ctrl._sessions
+    assert not any("订阅提问事件失败" in w for w in warnings)
+    # 真实对话窗口仍正常订阅
+    assert attempted == ["w1"]
+    assert "w1" in ctrl._sessions

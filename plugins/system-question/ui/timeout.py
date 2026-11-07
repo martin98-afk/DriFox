@@ -103,6 +103,16 @@ class QuestionTimeoutController(QObject):
             window_id = str(window_id)
             if window_id in self._sessions:
                 continue
+            # 全局卡片宿主（__global__ 容器等）不是对话窗口，没有提问控制能力。
+            # 直接订阅会在 provider 抛 RuntimeError，且订阅失败不登记 session，
+            # 于是下一秒重复尝试、WARNING 每秒刷屏。按能力方法预检，跳过这类宿主。
+            # 析构中的 PyQt 包装对象 hasattr 可能抛 RuntimeError，一并吞掉跳过。
+            try:
+                capable = hasattr(widget, "question_control_subscribe")
+            except Exception:  # noqa: BLE001 - 窗口析构中跳过本轮
+                continue
+            if not capable:
+                continue
             pool = self._build_pool(widget)
             if pool is None or "question.control" not in pool:
                 continue

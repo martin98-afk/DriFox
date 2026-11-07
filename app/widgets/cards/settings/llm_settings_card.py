@@ -56,6 +56,7 @@ from app.widgets.cards.settings.gitee_card import GiteeCard
 from app.widgets.cards.settings.list_setting_card import SkillListSettingCard
 from app.widgets.cards.settings.mcp_setting_card import MCPListSettingCard
 from app.widgets.cards.settings.plugin_components_card import PluginComponentsCard
+from app.widgets.cards.settings.plugin_settings_page import PluginSettingsPage
 from app.widgets.cards.settings.provider_setting_card import ProviderListSettingCard
 from app.widgets.cards.settings.secret_mode_card import SecretModeSettingCard
 from app.widgets.cards.settings.render_restart_card import RenderRestartCard
@@ -399,9 +400,6 @@ class LLMSettingsCard(SystemCardFrame):
     _plugin_cards_sig: tuple | None = None
     # 同上：__new__ 桩（测试 fixture）不走 __init__，读该实例属性需类级默认兜底
     _plugin_cards_built: bool = False
-    # 重建批次代际号：异步逐帧建卡期间若发生新的重建（清空旧卡），旧队列闭包凭
-    # 代际号自废，避免往新分区里塞旧卡（__new__ 桩同样需类级默认兜底）
-    _plugin_cards_build_gen: int = 0
     # 懒构造分页 → 构造方法：首开不同步构建（~340ms 主体），见 _setup_content 注释
     _LAZY_PAGE_BUILDERS = {
         "common": "_build_common_page",
@@ -429,8 +427,6 @@ class LLMSettingsCard(SystemCardFrame):
         self._plugin_cards_sig = None
         # 插件设置分区是否已真正实例化（未实例化时只同步导航显隐，不构造 widget）
         self._plugin_cards_built = False
-        # 插件设置分区异步构建代际号（见 rebuild_plugin_cards 尾部错峰队列）
-        self._plugin_cards_build_gen = 0
         # 插件注册的独立设置大 tab：当前挂载清单与已实例化页面（懒构造，见
         # _sync_plugin_tabs / _build_plugin_tab_page）
         self._plugin_tab_infos: dict = {}
@@ -600,16 +596,15 @@ class LLMSettingsCard(SystemCardFrame):
         # 上述五页合计 ~300ms（2026-10-30 watchdog 现场 514ms 的主体），挪到
         # 首次进页（_ensure_page_ready）或显示后空闲帧（_prefetch_pages 错峰）。
 
-        # ════ 插件设置页（初始隐藏，有注册卡片时显示）════
-        self._plugin_cards_widget = QWidget(self)
-        self._plugin_cards_layout = QVBoxLayout(self._plugin_cards_widget)
-        self._plugin_cards_layout.setContentsMargins(0, 0, 0, 0)
-        self._plugin_cards_layout.setSpacing(6)
-        self._page_layouts["plugins"].addWidget(self._plugin_cards_widget)
-        self._page_layouts["plugins"].addStretch(1)
+        # ════ 插件设置页（主从：全部插件清单 + 配置/权限/关于 详情）════
+        # 页面 UI 轻量，数据在首次进页时 reload（rebuild_plugin_cards 触发）：
+        # 打开设置的那一帧不读插件清单、不建 60+ 列表行。
+        self.pluginSettingsPage = PluginSettingsPage(self)
+        self._plugin_cards_widget = self.pluginSettingsPage  # 兼容既有可见性控制
+        self._page_layouts["plugins"].addWidget(self.pluginSettingsPage, 1)
         self._plugin_cards_widget.setVisible(False)
-        # 左侧导航：按「有无注册卡片」显隐（只查清单不构造卡片；实际实例化
-        # 延迟到首次进入该页，见 _ensure_page_ready）
+        # 左侧导航：按「有无插件」显隐（只查清单不构造行；列表数据延迟到
+        # 首次进入该页 reload，见 _ensure_page_ready）
         self._sync_plugin_nav_visibility()
         # 插件注册的独立设置大 tab：同步导航按钮与分页（懒实例化）
         self._sync_plugin_tabs()
@@ -981,98 +976,24 @@ class LLMSettingsCard(SystemCardFrame):
             logger.warning(f"[LLMSettingsCard] {tab_id} 页外观对齐失败: {e}")
 
     def rebuild_plugin_cards(self, force: bool = False):
-        """重建插件设置分区（Phase D，幂等）
+        """刷新插件设置页（幂等）
 
-        按 UIPluginRegistry.get_settings_cards() 实例化插件卡片 widget_class；
-        无注册卡片时整个分区隐藏（行为零变化）。设置弹窗每次打开时调用，
-        保证插件增删/热重载后分区内容最新。
-
-        ★ 性能（2026-09-13）：插件清单未变时跳过「清空 + 重建整片卡片」。
-        原来每次打开设置面板都走 `deleteLater()` + 全量 new，即使清单一个都没变
-        —— 每张插件卡（含 ExpandSettingCard 内部 view/滚动区）都要重新构造并
-        应用字号，是打开设置时纯浪费的一笔主线程开销。签名只取
-        (card_id, widget_class) 清单指纹：内容型变化由各卡自身的 refresh 负责，
-        清单增删（插件装卸/热重载）才需要真正重建。
+        数据源是 PluginManager 全量插件清单（含没有 config_schema 的插件，
+        它们仍可查看权限与关于），不再是「有设置卡的插件」子集。
+        首次构建延迟到「插件设置页首次进入」：读清单 + 60+ 行挂载是一笔一次性
+        开销，不该在打开设置的那一帧同步付。
         """
-        # 首次构建延迟到「插件设置页首次进入」：实例化 5 张插件卡（含 ExpandSettingCard
-        # 内部 view/滚动区）是笔一次性重活，不该在打开设置的那一帧同步付。
-        # 未访问该页时只同步导航显隐（查清单，几乎零成本）。
-        # 插件大 tab 同步也挂在这里：打开设置 / 热重载重建都会走到本方法。
         self._sync_plugin_tabs()
         if not force and not self._plugin_cards_built:
             self._sync_plugin_nav_visibility()
             return
-        # 工具/智能体开关卡：仅在其页已访问过后才顺带刷新（首次构建由
-        # _ensure_page_ready 在该页首次进入时付，非 force 路径命中脏检查时近乎零成本）
-        for tab_id, card_name in (("tools", "pluginToolCard"), ("agents", "pluginAgentCard")):
-            if tab_id not in self._page_ready:
-                continue
-            try:
-                getattr(self, card_name).refresh_components()
-            except Exception as e:
-                logger.warning(f"[LLMSettingsCard] {card_name} 刷新失败: {e}")
-        try:
-            from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
-
-            cards = UIPluginRegistry.get_instance().get_settings_cards()
-        except Exception:
-            cards = []
-
-        sig = tuple((getattr(info, "card_id", ""), getattr(info, "widget_class", None)) for info in cards)
-        # 分区显隐无论是否重建都幂等同步一次：不让「跳过重建」路径依赖上一轮留下的
-        # 界面状态（插件全被停用 / 最后一张卡被卸载后仍显示空分区就是这种脏状态）。
-        has_cards = bool(cards)
-        self._plugin_cards_widget.setVisible(has_cards)
-        try:
-            self._nav_buttons["plugins"].setVisible(has_cards)
-        except Exception:
-            pass
-        if not force and sig == self._plugin_cards_sig:
+        if not self._sync_plugin_nav_visibility():
             return
-        self._plugin_cards_sig = sig
         self._plugin_cards_built = True
-
-        # 清空旧卡片
-        while self._plugin_cards_layout.count():
-            item = self._plugin_cards_layout.takeAt(0)
-            widget = item.widget()
-            if widget is not None:
-                widget.deleteLater()
-        if not has_cards:
-            return
-        # ★ 性能（2026-11-03）：卡间错峰逐帧构建。plugins 页预热单页实测 500ms+
-        # （watchdog 栈：PluginConfigCard.__init__ → _FieldRow → layout.addWidget），
-        # 5+ 张插件卡（含 ExpandSettingCard 内部 view/滚动区 + 字号全树遍历）挤一帧
-        # 就是打开设置后的一次明显顿卡；singleShot(0) 逐帧付一张卡的钱，总时长不变
-        # 但单帧不超预算。代际守卫：重建进行中若再次触发重建（热重载 force），
-        # 清空旧卡时 gen+1，旧队列闭包自废，不会往新分区里塞旧卡。
-        self._plugin_cards_build_gen += 1
-        gen = self._plugin_cards_build_gen
-        infos = list(cards)
-
-        def _build_next(idx: int):
-            if gen != self._plugin_cards_build_gen:
-                return  # 已被更新的重建批次取代
-            if idx >= len(infos):
-                return
-            info = infos[idx]
-            try:
-                card = info.widget_class(parent=self._plugin_cards_widget)
-                self._plugin_cards_layout.addWidget(card)
-                # 动态创建的新卡片不在 _apply_runtime_ui_settings 上一轮 apply 范围
-                # 内（首次启动 / 每次重建都未跑 apply），主动触发字号 / 字族应用，
-                # 与全局设置弹窗其他卡片一致
-                try:
-                    from app.utils.design_tokens import apply_font_size_to_widget
-
-                    apply_font_size_to_widget(card, 14)
-                except Exception as e:
-                    logger.warning(f"[LLMSettingsCard] 插件卡片字号应用失败 {info.card_id}: {e}")
-            except Exception as e:
-                logger.warning(f"[LLMSettingsCard] 插件设置卡片 {info.card_id} 构建失败：{e}")
-            QTimer.singleShot(0, lambda i=idx + 1: _build_next(i))
-
-        QTimer.singleShot(0, lambda: _build_next(0))
+        try:
+            self.pluginSettingsPage.reload(force=force)
+        except Exception as e:
+            logger.warning(f"[LLMSettingsCard] 插件设置页刷新失败: {e}")
 
     def _apply_list_accordion(self):
         """为列表形式配置卡片应用手风琴效果
@@ -1289,19 +1210,24 @@ class LLMSettingsCard(SystemCardFrame):
         self.tabChanged.emit(tab_id)
 
     def _sync_plugin_nav_visibility(self) -> bool:
-        """同步「插件设置」导航项与分区显隐：只查注册清单，不构造卡片（成本可忽略）"""
-        try:
-            from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+        """同步「插件」导航项与分区显隐：有插件就显示
 
-            has_cards = bool(UIPluginRegistry.get_instance().get_settings_cards())
-        except Exception:
-            has_cards = False
-        self._plugin_cards_widget.setVisible(has_cards)
+        判定从「有无注册设置卡」改为「有无插件」：插件全部没有 config_schema 时
+        仍要能查看它们的权限与关于，导航不能整块消失。
+        """
         try:
-            self._nav_buttons["plugins"].setVisible(has_cards)
+            from app.plugins.managers.plugin_manager import PluginManager
+
+            pm = PluginManager.get_instance()
+            has_plugins = bool(pm.is_initialized() and pm.list_plugins())
+        except Exception:
+            has_plugins = False
+        self._plugin_cards_widget.setVisible(has_plugins)
+        try:
+            self._nav_buttons["plugins"].setVisible(has_plugins)
         except Exception:
             pass
-        return has_cards
+        return has_plugins
 
     def _sync_plugin_tabs(self):
         """同步插件注册的独立设置大 tab（register_settings_tab）：导航 + 分页增删
@@ -1594,6 +1520,14 @@ class LLMSettingsCard(SystemCardFrame):
         except Exception:
             pass
         _TRC.timer_end("llm_sb")
+        # 插件页是自定义行控件（非 SettingCard/SystemCardFrame），不在上面两条
+        # 刷新路径的 findChildren 范围内，单独刷一次行样式（选中/hover 用主题色）
+        try:
+            page = getattr(self, "pluginSettingsPage", None)
+            if page is not None:
+                page.refresh_style()
+        except Exception:
+            pass
 
     def _setup_appearance_cards(self):
         self.uiFontSizeCard = FontSizeStepperCard(

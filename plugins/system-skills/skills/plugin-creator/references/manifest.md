@@ -231,7 +231,7 @@ manifest 加 `api_version: 2`，必须同时把用到的能力全部列上。** 
 
 ## E1 配置契约（config_schema）
 
-在 manifest 里声明 `config_schema`，主程序自动在设置页渲染配置卡片；用户保存后值写入 `PluginConfigStore`，插件代码随时读取。
+在 manifest 里声明 `config_schema`，主程序自动在「设置 → 插件」的插件详情页渲染配置表单；用户保存后值写入 `PluginConfigStore`，插件代码随时读取。没声明 `config_schema` 的插件同样会出现在插件列表里，可以在详情页查看权限与关于信息。
 
 ### 结构
 
@@ -242,7 +242,7 @@ manifest 加 `api_version: 2`，必须同时把用到的能力全部列上。** 
 }
 ```
 
-### 字段属性（14 个）
+### 字段属性（15 个）
 
 | 属性 | 必填 | 说明 |
 |------|------|------|
@@ -259,6 +259,7 @@ manifest 加 `api_version: 2`，必须同时把用到的能力全部列上。** 
 | `rows` | textarea 可选 | 行数 |
 | `url` | link 必配 | 链接地址 |
 | `action` | action 必配 | 工具编排配置（见下） |
+| `required` | 可选 | 必填标记（默认 `false`）。为 `true` 时表单字段名后显示星号，值为空即计入「待配置」：插件在设置列表置顶，详情页顶部提示待填项，搜索筛选项可只看待配置 |
 
 ### type 全集（8 种）
 

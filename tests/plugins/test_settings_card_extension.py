@@ -28,22 +28,44 @@ def _vis_spy(w):
 
 @pytest.fixture()
 def settings_card(qtbot):
-    """轻量设置卡骨架：仅插件分区属性 + tab 按钮（避免构造完整 LLMSettingsCard）"""
+    """轻量设置卡骨架：插件分区可见性 spy + 假插件页（避免构造完整 LLMSettingsCard）
+
+    2026-11-07 起插件页改为 PluginSettingsPage（主从结构），rebuild_plugin_cards
+    不再实例化各插件设置卡，改为刷新页面；自定义设置卡在页面详情里实例化，
+    由 tests/widgets/test_plugin_settings_page.py 覆盖。
+    """
     from app.widgets.cards.settings.llm_settings_card import LLMSettingsCard
+
+    class _FakePage:
+        def __init__(self):
+            self.reloads = 0
+            self.last_force = None
+
+        def reload(self, force=False):
+            self.reloads += 1
+            self.last_force = force
 
     card = LLMSettingsCard.__new__(LLMSettingsCard)
     card._plugin_cards_widget = _vis_spy(QWidget())
     card._plugin_cards_widget.setLayout(QVBoxLayout())
-    card._plugin_cards_layout = card._plugin_cards_widget.layout()
     card._tab_buttons = {"plugins": _vis_spy(QLabel("插件设置"))}
-    # rebuild_plugin_cards 现走 _nav_buttons（与 _tab_buttons 同对象，断言两侧一致）
     card._nav_buttons = card._tab_buttons
-    # 已构建标志置 True：跳过「未构建 early return」，否则桩上不会真正实例化卡片
     card._plugin_cards_built = True
     card._page_ready = set()
+    card.pluginSettingsPage = _FakePage()
+    card._sync_plugin_tabs = lambda: None
+    card._has_plugins = True
+    card._sync_plugin_nav_visibility = lambda: _apply_visibility(card)
     qtbot.addWidget(card._plugin_cards_widget)
     qtbot.addWidget(card._tab_buttons["plugins"])
     return card
+
+
+def _apply_visibility(card):
+    """按 card._has_plugins 同步可见性，语义与真实实现一致"""
+    card._plugin_cards_widget.setVisible(card._has_plugins)
+    card._tab_buttons["plugins"].setVisible(card._has_plugins)
+    return card._has_plugins
 
 
 def test_registry_settings_cards(fresh_registry):
@@ -56,69 +78,46 @@ def test_registry_settings_cards(fresh_registry):
     assert cards[0].card_id == "card-1" and cards[0].widget_class is _FakeCard
 
 
-def test_rebuild_renders_cards(qtbot, settings_card, fresh_registry):
-    """注册卡片 → rebuild 实例化 widget_class（parent 正确）+ 分区与导航项收到显示指令"""
-    captured = {}
-
-    class _FakeCard(QWidget):
-        def __init__(self, parent=None):
-            super().__init__(parent)
-            captured["parent"] = parent
-
-    fresh_registry.register_settings_card("demo", "card-1", "插件设置卡", _FakeCard)
-    settings_card.rebuild_plugin_cards()
-    # 错峰逐帧构建（2026-11-03）：卡在事件循环 tick 里逐张实例化，wait 轮询到建完
-    qtbot.wait_until(lambda: settings_card._plugin_cards_layout.count() == 1)
-
-    assert settings_card._plugin_cards_layout.count() == 1
-    assert captured["parent"] is settings_card._plugin_cards_widget
-    # 分区与导航项均收到「显示」指令
+def test_rebuild_refreshes_plugin_page(qtbot, settings_card, fresh_registry):
+    """有插件 → 刷新插件页 + 分区与导航项收到显示指令"""
+    settings_card.rebuild_plugin_cards(force=True)
+    assert settings_card.pluginSettingsPage.reloads == 1
+    assert settings_card.pluginSettingsPage.last_force is True
     assert settings_card._plugin_cards_widget._vis_calls[-1] is True
     assert settings_card._tab_buttons["plugins"]._vis_calls[-1] is True
 
 
-def test_rebuild_hidden_when_empty(qtbot, settings_card, fresh_registry):
-    """无注册卡片 → 分区与导航项均隐藏（行为零变化）"""
+def test_rebuild_hidden_when_no_plugins(qtbot, settings_card, fresh_registry):
+    """无插件 → 分区与导航项均隐藏，且不触发页面刷新"""
+    settings_card._has_plugins = False
     settings_card._plugin_cards_widget.setVisible(True)
     settings_card._tab_buttons["plugins"].setVisible(True)
-    settings_card.rebuild_plugin_cards()
-    assert settings_card._plugin_cards_layout.count() == 0
+    settings_card.rebuild_plugin_cards(force=True)
+    assert settings_card.pluginSettingsPage.reloads == 0
     assert settings_card._plugin_cards_widget._vis_calls[-1] is False
     assert settings_card._tab_buttons["plugins"]._vis_calls[-1] is False
 
 
 def test_rebuild_idempotent(qtbot, settings_card, fresh_registry):
-    """重建幂等：重复调用不产生重复卡片；清空注册后分区隐藏"""
-    class _FakeCard(QWidget):
-        pass
+    """重复调用不重复刷新副作用；插件清空后分区隐藏"""
+    settings_card.rebuild_plugin_cards(force=True)
+    settings_card.rebuild_plugin_cards(force=True)
+    assert settings_card.pluginSettingsPage.reloads == 2
 
-    fresh_registry.register_settings_card("demo", "card-1", "卡", _FakeCard)
-    settings_card.rebuild_plugin_cards()
-    qtbot.wait_until(lambda: settings_card._plugin_cards_layout.count() == 1)
-    settings_card.rebuild_plugin_cards()
-    assert settings_card._plugin_cards_layout.count() == 1
-
-    fresh_registry.unload_plugin("demo")
-    settings_card.rebuild_plugin_cards()
-    assert settings_card._plugin_cards_layout.count() == 0
+    settings_card._has_plugins = False
+    settings_card.rebuild_plugin_cards(force=True)
     assert settings_card._plugin_cards_widget._vis_calls[-1] is False
     assert settings_card._tab_buttons["plugins"]._vis_calls[-1] is False
 
 
 def test_rebuild_exception_safe(qtbot, settings_card, fresh_registry):
-    """widget_class 构造抛异常 → 跳过该卡，其余正常（毒条目隔离）"""
-    class _BoomCard(QWidget):
-        def __init__(self, parent=None):
-            raise RuntimeError("boom")
+    """页面刷新抛异常 → 不向上传播（设置卡其他分区不受影响）"""
+    def _boom(force=False):
+        raise RuntimeError("boom")
 
-    class _GoodCard(QWidget):
-        pass
-
-    fresh_registry.register_settings_card("demo", "bad", "坏卡", _BoomCard)
-    fresh_registry.register_settings_card("demo", "good", "好卡", _GoodCard)
-    settings_card.rebuild_plugin_cards()
-    qtbot.wait_until(lambda: settings_card._plugin_cards_layout.count() == 1)
-    assert settings_card._plugin_cards_layout.count() == 1  # 只有好卡
+    settings_card.pluginSettingsPage.reload = _boom
+    settings_card.rebuild_plugin_cards(force=True)  # 不应抛异常
+    assert settings_card._plugin_cards_widget._vis_calls[-1] is True
 
 
 # ---------- Phase E：section 分区 ----------

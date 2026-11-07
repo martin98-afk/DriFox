@@ -96,6 +96,8 @@ class PluginConfigField:
         rows: textarea 专用，显示行数（默认 3）
         url: link 专用，点击跳转的外部地址（必填）
         action: action 专用，ToolActionSpec 声明（必填；tool+args+可选 poll）
+        required: 必填标记（默认 False）。true 时设置表单显示星号，
+            当前生效值为空即计入「待配置」（插件条目置顶 + 导航提示）。
     """
 
     key: str
@@ -112,6 +114,7 @@ class PluginConfigField:
     rows: int = 3
     url: str = ""
     action: Optional["ToolActionSpec"] = None
+    required: bool = False
 
 
 @dataclass(frozen=True)
@@ -294,6 +297,8 @@ def parse_config_schema(plugin_name: str, raw: Optional[dict]) -> Optional[Plugi
                 rows=_parse_optional_int(item.get("rows"), 3) if ftype == "textarea" else 3,
                 url=url,
                 action=action_spec,
+                # 非布尔真值按 bool() 归一化：社区插件常写 "true"/1
+                required=bool(item.get("required", False)),
             )
         )
     return PluginConfigSchema(plugin_name=plugin_name, title=title, fields=fields)

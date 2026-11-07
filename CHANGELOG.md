@@ -3,6 +3,7 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+- **插件设置页改主从结构**: 「设置 → 插件」原先把所有 config_schema 自动卡平铺成一列，插件多了只能滚动找，不同插件的同名配置块（如「上下文管理阈值」与「上下文压缩阈值」）分不清归属。现改为左侧可搜索插件清单 + 右侧详情（配置 / 权限 / 关于），列表来源从「注册了设置卡的插件」改为 PluginManager 全量清单：没有 config_schema 的插件同样出现在列表里，可查看 manifest 声明的权限与关于信息。搜索覆盖插件名、描述、字段名与能力 id，支持全部 / 待配置 / 已启用 / 已停用筛选，待配置置顶。config_schema 新增 `required` 字段标记：必填项为空时字段名带星号、插件行标「待配置」并置顶。插件自定义设置卡（`register_settings_card` 非自动卡）在详情页配置 tab 渲染，插件独立设置大 tab（`register_settings_tab`）机制保持不变。
 - **审批倒计时同款环形徽标**: 抽出公共控件 `CountdownChip`（进度环 + 剩余时间，分档变色，danger 呼吸光晕），提问卡与审批卡共用。审批徽标原「N s 后自动拒绝」文案写死了 deny 语义（配置 allow/AI 审核时显示错误），改为 tooltip 说明按「安全中心 → 审核处理」配置处理。
 - **提问超时（插件化）**: `question` 工具从 system-tools 拆出为独立插件 `system-question`（tools + ui）。超时策略全部在插件内实现，宿主只提供 `question.control` 能力（订阅生命周期 / 读快照 / 代答 / 倒计时）。三种模式：不设置超时（默认，行为零变化）/ 超时跳过（未答题标记已跳过）/ 超时 AI 判断（由模型代答，结果带 `[AI 代答]` 标注，失败自动降级跳过）。每题独立计时（翻页重置），提问卡右上角显示倒计时徽标。配置在「设置 → 插件 → 提问工具设置」；超时判断模型为模型下拉（新增 config_schema `model` 字段类型，选项经 `provider.list × model.enumerate` 能力动态填充，空值 = 跟随当前会话模型）。
 - **工具插件拆分**: `system-tools` 拆为 `system-core`（文件/终端/待办）、`system-web`（websearch/webfetch + 搜索 API Key 配置）、`system-question`（提问）、`system-team`（团队协作）、`system-diagnostics`（get_diagnostics / lsp），原插件保留技能加载/管理、MCP 管理、Gitee 上传。插件启停、工具级禁用键与搜索 Key 配置均有一次性迁移。
