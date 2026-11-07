@@ -280,6 +280,63 @@ class TestSettingsTabSync:
         assert card._pages_stack.count() == 2
         assert len(card._nav_buttons) == 2
 
+class TestFullwidthMode:
+    """插件类页面独占全宽（2026-11-08 设计）：进插件页收起左导航，返回按钮退出
+
+    痛点：设置导航(150~196px) + 插件列表(236px) + 详情主从并存，四栏挤压详情。
+    """
+
+    def _make_fullwidth_stub(self, qtbot):
+        from app.widgets.cards.settings.llm_settings_card import LLMSettingsCard
+
+        card = LLMSettingsCard.__new__(LLMSettingsCard)
+        card._nav_frame = _vis_spy(QWidget())
+        card._back_btn = _vis_spy(QWidget())
+        qtbot.addWidget(card._nav_frame)
+        qtbot.addWidget(card._back_btn)
+        return card
+
+    def test_fullwidth_predicate(self):
+        from app.widgets.cards.settings.llm_settings_card import LLMSettingsCard
+
+        assert LLMSettingsCard._is_fullwidth_tab("plugins") is True
+        assert LLMSettingsCard._is_fullwidth_tab("tab:git-panel:main") is True
+        assert LLMSettingsCard._is_fullwidth_tab("provider") is False
+        assert LLMSettingsCard._is_fullwidth_tab("plugins_extra") is False  # 仅精确匹配
+
+    def test_enter_plugins_hides_nav(self, qtbot):
+        card = self._make_fullwidth_stub(qtbot)
+        card._apply_fullwidth_mode("plugins")
+        assert card._nav_frame._vis_calls[-1] is False
+        assert card._back_btn._vis_calls[-1] is True
+
+    def test_plugin_registered_tab_also_fullwidth(self, qtbot):
+        card = self._make_fullwidth_stub(qtbot)
+        card._apply_fullwidth_mode("tab:demo:adv")
+        assert card._nav_frame._vis_calls[-1] is False
+        assert card._back_btn._vis_calls[-1] is True
+
+    def test_normal_tab_restores_nav(self, qtbot):
+        card = self._make_fullwidth_stub(qtbot)
+        card._apply_fullwidth_mode("provider")
+        assert card._nav_frame._vis_calls[-1] is True
+        assert card._back_btn._vis_calls[-1] is False
+
+    def test_exit_restores_nav(self, qtbot):
+        card = self._make_fullwidth_stub(qtbot)
+        card._apply_fullwidth_mode("plugins")
+        card._exit_fullwidth_mode()
+        assert card._nav_frame._vis_calls[-1] is True
+        assert card._back_btn._vis_calls[-1] is False
+
+    def test_stub_without_widgets_safe(self, qtbot):
+        """__new__ 桩缺 _nav_frame/_back_btn 时收起/恢复不抛异常"""
+        from app.widgets.cards.settings.llm_settings_card import LLMSettingsCard
+
+        card = LLMSettingsCard.__new__(LLMSettingsCard)
+        card._apply_fullwidth_mode("plugins")
+        card._exit_fullwidth_mode()
+
 if __name__ == "__main__":
     import sys
 

@@ -9,6 +9,7 @@
 """
 
 import base64
+import contextlib
 import json
 import os
 import shutil
@@ -41,6 +42,10 @@ REMOTE_PATH = "drifox/app.config"
 USER_CUSTOM_REMOTE_PATH = "drifox/user-custom.zip"
 REMOTE_RECORDS_PATH = "drifox/share_records.json"
 SHA_CACHE_FILE = ".sync_shas.json"
+# 双开互斥锁文件（OS 级文件锁，进程退出自动释放）
+SYNC_OWNER_LOCK_FILE = ".sync_owner.lock"
+# 被其他实例占着时多久重试一次接管（主实例退场后自动接棒）
+SYNC_OWNER_RETRY_MS = 60 * 1000
 DEBOUNCE_MS = 10000
 # 远端变更轮询间隔（毫秒）。单轮只发 1 个目录列表请求，48 次/小时，远低于 Gitee 限流。
 POLL_INTERVAL_MS = 5 * 60 * 1000
@@ -93,6 +98,80 @@ def _should_reload_plugins(window_until: float, now: Optional[float] = None) -> 
     触发一次 rescan 全量扫描（76 个插件目录重新解析），纯开销。
     """
     return (time.time() if now is None else now) < float(window_until or 0.0)
+
+
+class _SyncOwnerLock:
+    """双开互斥：同一个数据目录只允许一个进程启用云同步。
+
+    为什么必须互斥：两个进程共用同一份 app.config / .sync_shas.json 时，
+    - 一方写盘立刻被另一方的 watcher 当成「用户改动」触发上传；
+    - device_tag 从共享的 sha 缓存继承，两台「设备」标识相同，LWW 平局
+      裁决（比 dv 字典序）失效，退化为「本地优先 + 冲突」；
+    - 结果是主题等配置在两个实例之间被反复覆盖、每轮都多一次回传。
+    同步模型本就假定一个数据目录只有一个写入者，这里用 OS 级字节锁把该
+    约束显式化：锁由系统在进程退出时释放，不需要 pid 存活探测与过期清理。
+    """
+
+    def __init__(self, path: Path) -> None:
+        self._path = path
+        self._fd: Optional[int] = None
+
+    def acquire(self) -> bool:
+        """抢锁；已被其他进程持有时返回 False（不阻塞）。"""
+        if self._fd is not None:
+            return True
+        try:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            fd = os.open(str(self._path), os.O_CREAT | os.O_RDWR)
+        except OSError as e:
+            # 锁文件不可用不应连累同步本身：降级为旧行为（允许同步）
+            logger.warning(f"[ConfigSync] 同步互斥锁打开失败，降级为允许同步: {e}")
+            return True
+        try:
+            if os.name == "nt":
+                import msvcrt
+
+                msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            return False
+        try:
+            # 仅用于排查「谁在同步」；锁的语义由 OS 保证，不依赖这段内容
+            os.write(fd, f"pid={os.getpid()} since={int(time.time())}\n".encode("utf-8"))
+            os.lseek(fd, 0, os.SEEK_SET)
+        except OSError:
+            pass
+        self._fd = fd
+        return True
+
+    def release(self) -> None:
+        fd = self._fd
+        self._fd = None
+        if fd is None:
+            return
+        try:
+            if os.name == "nt":
+                import msvcrt
+
+                os.lseek(fd, 0, os.SEEK_SET)
+                msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(fd, fcntl.LOCK_UN)
+        except OSError:
+            pass
+        try:
+            os.close(fd)
+        except OSError:
+            pass
 
 
 # ─────────────────────────────────────────────────────────────
@@ -294,6 +373,10 @@ class ConfigSyncService(QObject):
         # dirty 悬空兜底：上传被抑制/失败后的延迟重试（见 _schedule_upload_retry）
         self._upload_retry_timer: Optional[QTimer] = None
         self._upload_retry_failures: int = 0
+        # 双开互斥：同一数据目录只允许一个进程启用云同步；被占用时定时重试接管
+        self._owner_lock = _SyncOwnerLock(get_app_data_dir().resolve() / SYNC_OWNER_LOCK_FILE)
+        self._enable_retry_timer: Optional[QTimer] = None
+        self._owner_blocked_logged: bool = False
         # 初始同步中断后的有限次自动重试（见 _schedule_initial_sync_retry）
         self._initial_sync_retry_timer: Optional[QTimer] = None
         self._initial_sync_retry_count: int = 0
@@ -463,6 +546,19 @@ class ConfigSyncService(QObject):
             logger.warning("[ConfigSync] 已在运行中，忽略重复 enable")
             return
 
+        # 双开互斥：另一实例持锁时本进程不启动任何 watcher/上传。两个进程共享
+        # 同一份 app.config 与 device_tag，同时跑同步会让主题等配置在两边来回覆盖。
+        # 排到重试队列：主实例退出（OS 释放锁）后自动接管。
+        if not self._owner_lock.acquire():
+            if not self._owner_blocked_logged:
+                self._owner_blocked_logged = True
+                logger.info("[ConfigSync] 另一实例正在同步，本实例跳过（双开共用同一数据目录）")
+            self._schedule_enable_retry()
+            return
+        self._owner_blocked_logged = False
+        if self._enable_retry_timer is not None:
+            self._enable_retry_timer.stop()
+
         # 残留清理由 _start_watching 内部的 _stop_watching 处理
         self._token = token
         self._owner = owner
@@ -513,6 +609,9 @@ class ConfigSyncService(QObject):
         """
         self._stop_watching()
         self._stop_polling()
+        if self._enable_retry_timer is not None:
+            self._enable_retry_timer.stop()
+        self._owner_lock.release()
         if self._debounce_timer:
             self._debounce_timer.stop()
             self._debounce_timer = None
@@ -844,6 +943,29 @@ class ConfigSyncService(QObject):
             return
         self._on_debounce_timeout()
 
+    def _schedule_enable_retry(self):
+        """被其他实例占着同步权：定时重试接管（主实例退出后自动接棒）"""
+        if self._enable_retry_timer is not None and self._enable_retry_timer.isActive():
+            return
+        if self._enable_retry_timer is None:
+            self._enable_retry_timer = QTimer(self)
+            self._enable_retry_timer.setSingleShot(True)
+            self._enable_retry_timer.timeout.connect(self._retry_enable)
+        self._enable_retry_timer.start(SYNC_OWNER_RETRY_MS)
+
+    def _retry_enable(self):
+        if self._state != "disabled":
+            return
+        # 先廉价探锁：主实例还在就直接排下一轮，避免每 60s 触发一次 OAuth 取
+        # token（refresh_token 轮换在多进程下容易互踩）
+        if not self._owner_lock.acquire():
+            self._schedule_enable_retry()
+            return
+        self._owner_lock.release()
+        # 走 resume_if_bound 重新取有效 token，避免拿着上一次 enable 的过期凭证
+        self._resume_pending = False
+        self.resume_if_bound()
+
     def _schedule_initial_sync_retry(self):
         """请求重试初始同步（任意线程可调；上限 3 次、60s 起指数退避）"""
         self._initialSyncRetryTick.emit()
@@ -1059,8 +1181,12 @@ class ConfigSyncService(QObject):
             try:
                 from app.utils.theme_mode import apply_light, effective_light
 
-                if apply_light(effective_light(), save=False):
-                    _old_theme_id = None
+                # 记账抑制：这是把云端值落到本机的衍生写入，不是用户改动。
+                # 不抑制会让 UI.LightMode / UI.ThemeStyle 进 _session_touched，
+                # 下一次合并又被抬到云端之上（双开时直接变成主题互搏）。
+                with self._suppress_recorder():
+                    if apply_light(effective_light(), save=False):
+                        _old_theme_id = None
             except Exception as _tme:
                 logger.debug(f"[ConfigSync] 外观模式对齐失败: {_tme}")
 
@@ -1154,6 +1280,12 @@ class ConfigSyncService(QObject):
         此处兜底按变更类型驱动窗口刷新：仅字体变 → 精确 scope；与主题同变 →
         scope=None 一次全量（避免同批 theme/font/font_size 三连刷）。
         """
+        # 记账抑制：dispatch_refresh → setTheme 会写 QFluentWidgets.ThemeMode，
+        # 窗口刷新也可能回写派生配置。这些是同步应用链的衍生写入，记成本机
+        # 改动会在下一次合并被抬到云端之上，导致多端反复冲突。
+        _rec = getattr(self, "_meta_recorder", None)
+        if _rec is not None:
+            _rec.begin_suppress()
         try:
             theme_changed = bool(cfg.ui_theme_style.value != old_theme_id or cloud_theme_mode_differs)
             _ff_changed = old_font_family is not None and cfg.llm_font_family.value != old_font_family
@@ -1196,6 +1328,9 @@ class ConfigSyncService(QObject):
                 )
         except Exception as _te:
             logger.warning(f"[ConfigSync] 下载后外观全量刷新失败: {_te}")
+        finally:
+            if _rec is not None:
+                _rec.end_suppress()
 
     def _trigger_merged_plugin_reload(self):
         """合并触发一次插件子系统重载（同步窗口内被抑制的 watcher 变更兜底）
@@ -2531,6 +2666,17 @@ class ConfigSyncService(QObject):
         except Exception as e:
             logger.debug(f"[ConfigSync] {unit} 远端留档失败: {e}")
 
+    def _suppress_recorder(self):
+        """同步应用链的记账抑制上下文（无记账器时退化为空操作）。
+
+        把云端值写回内存后触发的衍生写入（深浅模式对齐、setTheme 更新
+        qfluentwidgets ThemeMode、窗口按新配置刷新）不是用户操作，不能进
+        _session_touched；否则下一次合并会把这些条目抬到云端之上，让两端
+        各自保留自己的值、每轮合并都制造一次冲突。
+        """
+        rec = getattr(self, "_meta_recorder", None)
+        return rec.suppress() if rec is not None else contextlib.nullcontext()
+
     def _pause_after_merge(self) -> None:
         """本地被合并改写后，抑制一次 watcher 触发的回传（合并结果已由上传侧接管）"""
         self._suppress_until = max(self._suppress_until, time.time() + 20.0)
@@ -2644,6 +2790,15 @@ class ConfigSyncService(QObject):
             self._merge_bases.add(unit)
         if content_hash:
             self._content_hashes[unit] = content_hash
+        if unit == "app.config":
+            # 本会话的改动已随这次上传/合并进入云端，抬升记录到此为止：
+            # 留着它会让下一轮合并把同一个条目再抬一次，制造平局冲突
+            rec = getattr(self, "_meta_recorder", None)
+            if rec is not None:
+                try:
+                    rec.clear_session_touched()
+                except Exception as e:
+                    logger.debug(f"[ConfigSync] 清理会话抬升记录失败: {e}")
         self._save_sha_cache()
 
     @staticmethod

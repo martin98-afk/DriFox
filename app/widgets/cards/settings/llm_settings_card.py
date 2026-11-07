@@ -471,7 +471,25 @@ class LLMSettingsCard(SystemCardFrame):
             self._page_scrolls[tab_id] = page
             self._page_layouts[tab_id] = page_layout
             self._pages_stack.addWidget(page)
-        body_layout.addWidget(self._pages_stack, 1)
+        # 全宽页（插件页/插件注册大 tab）收起左导航：返回按钮在分页区顶部，
+        # 导航隐藏时才显示（互斥），避免四栏挤压详情（2026-11-08 设计）
+        self._back_btn = QToolButton(self)
+        self._back_btn.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        self._back_btn.setIcon(FluentIcon.RETURN.qicon())
+        self._back_btn.setIconSize(QSize(16, 16))
+        self._back_btn.setText("返回设置")
+        self._back_btn.setFixedHeight(32)
+        self._back_btn.setCursor(Qt.PointingHandCursor)
+        self._back_btn.setStyleSheet(self._back_btn_style())
+        self._back_btn.hide()
+        self._back_btn.clicked.connect(self._exit_fullwidth_mode)
+        pages_column = QWidget(self)
+        pages_col_layout = QVBoxLayout(pages_column)
+        pages_col_layout.setContentsMargins(0, 0, 0, 0)
+        pages_col_layout.setSpacing(4)
+        pages_col_layout.addWidget(self._back_btn, 0, Qt.AlignLeft)
+        pages_col_layout.addWidget(self._pages_stack, 1)
+        body_layout.addWidget(pages_column, 1)
         content_layout.addWidget(body)
         self._update_nav_styles()
 
@@ -1206,8 +1224,41 @@ class LLMSettingsCard(SystemCardFrame):
         self._current_tab = tab_id
         self._pages_stack.setCurrentWidget(self._page_scrolls[tab_id])
         self._update_nav_styles()
+        self._apply_fullwidth_mode(tab_id)
         self._expand_page_cards(tab_id)
         self.tabChanged.emit(tab_id)
+
+    @staticmethod
+    def _is_fullwidth_tab(tab_id: str) -> bool:
+        """插件类页面独占全宽：内置插件页 + 插件注册的独立设置大 tab"""
+        return tab_id == "plugins" or tab_id.startswith("tab:")
+
+    def _apply_fullwidth_mode(self, tab_id: str) -> None:
+        """按当前页收起/恢复左导航与返回按钮（两者互斥显示）
+
+        属性访问包 RuntimeError：__new__ 桩（测试 fixture）的 QObject 未初始化，
+        读未定义属性抛 RuntimeError 而非 AttributeError，getattr 默认值救不了。
+        """
+        full = self._is_fullwidth_tab(tab_id)
+        try:
+            if self._nav_frame is not None:
+                self._nav_frame.setVisible(not full)
+            back = getattr(self, "_back_btn", None)
+            if back is not None:
+                back.setVisible(full)
+        except RuntimeError:
+            pass  # __new__ 桩：跳过视觉同步
+
+    def _exit_fullwidth_mode(self) -> None:
+        """「← 返回设置」：恢复导航显示，分页停在当前页不动"""
+        try:
+            if self._nav_frame is not None:
+                self._nav_frame.setVisible(True)
+            back = getattr(self, "_back_btn", None)
+            if back is not None:
+                back.setVisible(False)
+        except RuntimeError:
+            pass  # __new__ 桩：跳过视觉同步
 
     def _sync_plugin_nav_visibility(self) -> bool:
         """同步「插件」导航项与分区显隐：有插件就显示
@@ -1276,6 +1327,7 @@ class LLMSettingsCard(SystemCardFrame):
             if fallback is not None:
                 self._pages_stack.setCurrentWidget(fallback)
             self._update_nav_styles()
+            self._apply_fullwidth_mode("plugins")
 
         # ── 新增出现的 tab ──
         nav_layout = getattr(self, "_nav_body_layout", None)
@@ -1417,6 +1469,28 @@ class LLMSettingsCard(SystemCardFrame):
         """
 
     @staticmethod
+    def _back_btn_style() -> str:
+        """全宽页顶部返回按钮：与导航项同一视觉语言（次要色，hover 提亮）"""
+        return f"""
+            QToolButton {{
+                color: {Colors.TEXT_SECONDARY};
+                {font_size_css(13)}
+                padding: 0 10px;
+                border: none;
+                border-radius: 6px;
+                background-color: transparent;
+                {get_font_family_css()}
+            }}
+            QToolButton:hover {{
+                color: {Colors.TEXT_PRIMARY};
+                background-color: {Colors.TAB_HOVER_BG};
+            }}
+            QToolButton:focus {{
+                outline: none;
+            }}
+        """
+
+    @staticmethod
     def _nav_group_style() -> str:
         return f"""
             QLabel {{
@@ -1502,6 +1576,9 @@ class LLMSettingsCard(SystemCardFrame):
             set_style_sheet_if_changed(self._nav_frame, self._nav_frame_style())
         if hasattr(self, "_nav_buttons"):
             self._update_nav_styles()
+        _back_btn = getattr(self, "_back_btn", None)
+        if _back_btn is not None:
+            set_style_sheet_if_changed(_back_btn, self._back_btn_style())
         _nav_group_css = self._nav_group_style()
         for label in getattr(self, "_nav_group_labels", []):
             set_style_sheet_if_changed(label, _nav_group_css)
@@ -1911,6 +1988,8 @@ class LLMSettingsCard(SystemCardFrame):
         # 订阅热重载广播（放这里而非 __init__：避免过早拉起 PluginHostService，
         # 后者会连带全量加载智能体 + 启动文件监听，实测约 330ms）
         self._ensure_hot_reload_connected()
+        # 重新打开设置卡时恢复正常导航（全宽模式不跨开关保留，分页不动）
+        self._exit_fullwidth_mode()
         # 预热技能发现：展开技能卡时要同步扫盘 + parse 每个 SKILL.md（~90ms），
         # 挪到打开设置后的空闲帧做，用户点开卡片时就不必再等
         QTimer.singleShot(300, self._prefetch_skills)

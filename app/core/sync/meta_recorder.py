@@ -155,6 +155,16 @@ class SyncMetaRecorder:
                 self._sync_clock()
         return lifted
 
+    def clear_session_touched(self) -> None:
+        """清空「本会话改过」集合（一次成功上传/合并之后调用）。
+
+        抬高只是为了让本机刚改的值压过云端更高的 clock；这些值已经随本次
+        上传进了云端，再留着抬高记录会让下一轮合并重新制造一次平局冲突：
+        两端都把各自的值抬到 remote_clock+1，谁都不收敛，配置在设备间来回覆盖。
+        """
+        with self._lock:
+            self._session_touched.clear()
+
     @contextmanager
     def suppress(self):
         """抑制记账（下载合并写回内存时必须用，否则会把远端改动记成本机修改）。"""
