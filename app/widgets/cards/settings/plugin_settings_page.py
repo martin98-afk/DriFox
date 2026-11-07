@@ -76,7 +76,10 @@ class PluginEntry:
 
 
 class _PluginListRow(QWidget):
-    """插件列表行：图标 + 名称 + 状态副标题；点击切换右侧详情。"""
+    """插件列表行：状态点 + 图标 + 名称（单行，参考服务商列表）；点击切换右侧详情。
+
+    状态只靠圆点颜色表达：红=待配置、灰=已停用、绿=正常；版本/组件数进详情页看。
+    """
 
     clicked = pyqtSignal(str)  # plugin_name
 
@@ -89,11 +92,16 @@ class _PluginListRow(QWidget):
         # #pluginListRow 的 background/border-left 全部不生效（选中态看不见）
         self.setAttribute(Qt.WA_StyledBackground, True)
         self.setCursor(Qt.PointingHandCursor)
-        self.setMinimumHeight(58)
+        self.setMinimumHeight(40)
 
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(10, 6, 10, 6)
+        layout.setContentsMargins(10, 4, 10, 4)
         layout.setSpacing(10)
+
+        self._dot = QLabel(self)
+        self._dot.setFixedSize(8, 8)
+        self._dot.setStyleSheet(f"background: {_state_color(entry)}; border-radius: 4px;")
+        layout.addWidget(self._dot, 0, Qt.AlignVCenter)
 
         self._icon = QLabel(self)
         self._icon.setFixedSize(24, 24)
@@ -102,37 +110,12 @@ class _PluginListRow(QWidget):
             self._icon.setPixmap(pix)
         layout.addWidget(self._icon, 0, Qt.AlignVCenter)
 
-        text_box = QVBoxLayout()
-        text_box.setContentsMargins(0, 0, 0, 0)
-        text_box.setSpacing(1)
         self._name = BodyLabel(entry.info.name, self)
         self._name.setObjectName("pluginRowName")
-        self._sub = CaptionLabel(self._subtitle_text(entry), self)
-        self._sub.setObjectName("pluginRowSub")
-        text_box.addWidget(self._name)
-        text_box.addWidget(self._sub)
-        layout.addLayout(text_box, 1)
+        layout.addWidget(self._name, 1)
 
-        self._dot = QLabel(self)
-        self._dot.setFixedSize(8, 8)
-        self._dot.setStyleSheet(f"background: {_state_color(entry)}; border-radius: 4px;")
-        layout.addWidget(self._dot, 0, Qt.AlignVCenter)
-
-        _font_px(self._name, 1)
-        _font_px(self._sub, -1)
+        _font_px(self._name, 0)
         self._apply_style()
-
-    @staticmethod
-    def _subtitle_text(entry: PluginEntry) -> str:
-        if entry.state == "missing":
-            return f"待填 {len(entry.missing)} 项 · v{entry.info.version}"
-        if entry.state == "unconfigured":
-            return f"未配置 · v{entry.info.version}"
-        if not entry.enabled:
-            return f"已停用 · v{entry.info.version}"
-        if entry.custom_cards and not entry.has_schema:
-            return f"v{entry.info.version} · 自定义配置"
-        return f"v{entry.info.version} · {len(entry.components)} 类组件"
 
     def set_selected(self, selected: bool) -> None:
         if self._selected == selected:
@@ -172,10 +155,9 @@ class _PluginListRow(QWidget):
             self._icon.clear()
 
     def update_entry(self, state: str, missing: list) -> None:
-        """配置保存后刷新副标题与状态点（不重建行，避免搜索框丢焦点）"""
+        """配置保存后刷新状态点（不重建行，避免搜索框丢焦点）"""
         self._entry.state = state
         self._entry.missing = missing
-        self._sub.setText(self._subtitle_text(self._entry))
         self._dot.setStyleSheet(f"background: {_state_color(self._entry)}; border-radius: 4px;")
 
     def matches(self, keyword: str) -> bool:
@@ -292,10 +274,21 @@ def _font_px(widget: QWidget, delta: int) -> None:
         pass
 
 
+def _refresh_hint_fonts(root: QWidget) -> None:
+    """说明文字字号随系统刷新（_style_hint 构建时写死的 px 会过期）"""
+    try:
+        from app.utils.design_tokens import Colors, get_ui_font_size, scale_font_size
+
+        px = scale_font_size(max(11, get_ui_font_size() - 3))
+        for label in root.findChildren(QLabel):
+            if label.objectName() == "configHint":
+                label.setStyleSheet(f"color: {Colors.TEXT_SECONDARY}; font-size: {px}px;")
+    except Exception:
+        pass
+
 # 标签 objectName → 主题色角色（只处理登记过的标签，避免误伤徽章/链接）
 _PAINT_RULES = {
     "pluginRowName": "primary",
-    "pluginRowSub": "secondary",
     "detailTitle": "primary",
     "detailMeta": "secondary",
     "fieldLabel": "primary",
@@ -736,7 +729,10 @@ class PluginSettingsPage(QWidget):
         self._search.textChanged.connect(self._on_search_text_changed)
         layout.addWidget(self._search)
 
-        chips = QHBoxLayout()
+        # 筛选 chips：不进页面布局，由设置卡取走放到「返回设置」那一行（全宽模式）
+        # 只留四个状态档：已启用/停用信息在详情页，避免一排胶囊喧宾夺主
+        self.filter_bar = QWidget(self)
+        chips = QHBoxLayout(self.filter_bar)
         chips.setContentsMargins(0, 0, 0, 0)
         chips.setSpacing(6)
         self._chips = {}
@@ -744,21 +740,17 @@ class PluginSettingsPage(QWidget):
         for key, text in (
             ("configured", "有配置"),
             ("todo", "待配置"),
-            ("on", "已启用"),
             ("off", "已停用"),
             ("none", "无配置"),
             ("all", "全部"),
         ):
-            chip = PillPushButton(text, self)
+            chip = PillPushButton(text, self.filter_bar)
             chip.setCheckable(True)
             chip.setChecked(key == "configured")
             chip.clicked.connect(lambda _c=False, k=key: self._on_chip_clicked(k))
             chips.addWidget(chip)
             self._chips[key] = chip
         chips.addStretch(1)
-        self._count_label = CaptionLabel("", self)
-        chips.addWidget(self._count_label)
-        layout.addLayout(chips)
 
         body = QHBoxLayout()
         body.setContentsMargins(0, 0, 0, 0)
@@ -907,8 +899,6 @@ class PluginSettingsPage(QWidget):
             return not entry.has_config
         if self._filter == "todo":
             return entry.state in ("missing", "unconfigured")
-        if self._filter == "on":
-            return entry.enabled
         if self._filter == "off":
             return not entry.enabled
         return True
@@ -922,20 +912,13 @@ class PluginSettingsPage(QWidget):
     def _update_counts(self) -> None:
         total = len(self._entries)
         todo = sum(1 for e in self._entries if e.state in ("missing", "unconfigured"))
-        on = sum(1 for e in self._entries if e.enabled)
-        off = total - on
+        off = sum(1 for e in self._entries if not e.enabled)
         configured = sum(1 for e in self._entries if e.has_config)
         self._chips["configured"].setText(f"有配置 {configured}")
         self._chips["todo"].setText(f"待配置 {todo}")
-        self._chips["on"].setText(f"已启用 {on}")
         self._chips["off"].setText(f"已停用 {off}")
         self._chips["none"].setText(f"无配置 {total - configured}")
         self._chips["all"].setText(f"全部 {total}")
-        if self._keyword:
-            shown = sum(1 for r in self._rows if not r.isHidden())
-            self._count_label.setText(f"命中 {shown} / {total}")
-        else:
-            self._count_label.setText(f"共 {total} 个插件")
 
     # ── 选中与详情 ────────────────────────────────────────
 
@@ -953,12 +936,21 @@ class PluginSettingsPage(QWidget):
         self._detail.show_entry(entry)
 
     def refresh_style(self) -> None:
-        """主题切换后刷新行样式、文字色与图标（设置面板统一调用）"""
+        """主题/字号切换后刷新行样式、文字色、图标与字号（设置面板统一调用）
+
+        字号链路：qfluentwidgets 标签/输入框 QSS 烧死字号，setFont 不生效；
+        _font_px 级控件只在构建时写入，字号变更后必须逐个重写 stylesheet。
+        """
         for row in self._rows:
             row._apply_style()
             row.refresh_icon()
+            _font_px(row._name, 0)
         self._detail.refresh_icon()
+        _font_px(self._detail._title, 3)
+        _font_px(self._detail._meta, -1)
+        _refresh_hint_fonts(self._detail)
         self._detail_frame.setStyleSheet(_detail_frame_css())
+        _apply_font(self)
         _paint_theme_colors(self)
 
     def refresh_entry_state(self, entry: PluginEntry) -> None:

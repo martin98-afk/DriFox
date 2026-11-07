@@ -5,7 +5,7 @@
 """
 
 from loguru import logger
-from PyQt5.QtCore import QPointF, QRectF, QPoint, QSize, Qt, QTimer, pyqtSignal
+from PyQt5.QtCore import QPointF, QPropertyAnimation, QRectF, QPoint, QSize, Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QBrush, QColor, QFont, QIcon, QPainter, QPen
 from PyQt5.QtWidgets import (
     QFontComboBox,
@@ -34,6 +34,7 @@ from app.utils.design_tokens import (
     FONT_SIZE_OPTIONS,
     _DEFAULT_FONT_SIZE_KEY,
     _LEGACY_FONT_SIZE_KEYS,
+    Animations,
     ButtonStyles,
     Colors,
     ComboBoxStyles,
@@ -471,8 +472,8 @@ class LLMSettingsCard(SystemCardFrame):
             self._page_scrolls[tab_id] = page
             self._page_layouts[tab_id] = page_layout
             self._pages_stack.addWidget(page)
-        # 全宽页（插件页/插件注册大 tab）收起左导航：返回按钮在分页区顶部，
-        # 导航隐藏时才显示（互斥），避免四栏挤压详情（2026-11-08 设计）
+        # 全宽页（插件页/插件注册大 tab）收起左导航：分页区顶部条 = 返回按钮
+        # + 插件筛选 chips（仅插件页显示），整条只在全宽页可见（2026-11-08 设计）
         self._back_btn = QToolButton(self)
         self._back_btn.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
         self._back_btn.setIcon(FluentIcon.RETURN.qicon())
@@ -483,11 +484,23 @@ class LLMSettingsCard(SystemCardFrame):
         self._back_btn.setStyleSheet(self._back_btn_style())
         self._back_btn.hide()
         self._back_btn.clicked.connect(self._exit_fullwidth_mode)
+        self._chips_holder = QWidget(self)
+        chips_holder_layout = QHBoxLayout(self._chips_holder)
+        chips_holder_layout.setContentsMargins(0, 0, 0, 0)
+        chips_holder_layout.setSpacing(0)
+        chips_holder_layout.addStretch(1)
+        self._fullwidth_bar = QWidget(self)
+        bar_layout = QHBoxLayout(self._fullwidth_bar)
+        bar_layout.setContentsMargins(0, 0, 0, 0)
+        bar_layout.setSpacing(12)
+        bar_layout.addWidget(self._back_btn, 0, Qt.AlignLeft | Qt.AlignVCenter)
+        bar_layout.addWidget(self._chips_holder, 1)
+        self._fullwidth_bar.hide()
         pages_column = QWidget(self)
         pages_col_layout = QVBoxLayout(pages_column)
         pages_col_layout.setContentsMargins(0, 0, 0, 0)
         pages_col_layout.setSpacing(4)
-        pages_col_layout.addWidget(self._back_btn, 0, Qt.AlignLeft)
+        pages_col_layout.addWidget(self._fullwidth_bar)
         pages_col_layout.addWidget(self._pages_stack, 1)
         body_layout.addWidget(pages_column, 1)
         content_layout.addWidget(body)
@@ -620,6 +633,8 @@ class LLMSettingsCard(SystemCardFrame):
         self.pluginSettingsPage = PluginSettingsPage(self)
         self._plugin_cards_widget = self.pluginSettingsPage  # 兼容既有可见性控制
         self._page_layouts["plugins"].addWidget(self.pluginSettingsPage, 1)
+        # 筛选 chips 挂到全宽顶部条（返回按钮右侧），跨父级 reparent 由 Qt 处理
+        self._chips_holder.layout().insertWidget(0, self.pluginSettingsPage.filter_bar)
         self._plugin_cards_widget.setVisible(False)
         # 左侧导航：按「有无插件」显隐（只查清单不构造行；列表数据延迟到
         # 首次进入该页 reload，见 _ensure_page_ready）
@@ -1184,6 +1199,7 @@ class LLMSettingsCard(SystemCardFrame):
         # 宽度按最长项自适应（sizeHint 已含图标/文字/内边距，只补左侧指示条与外边距）
         widest = max((btn.sizeHint().width() for btn in self._nav_buttons.values()), default=150)
         nav.setFixedWidth(max(150, min(196, widest + 12)))
+        self._nav_full_width = nav.width()  # 全宽模式收起/展开动画的目标宽度
         self._nav_frame = nav
         # 供动态插件 tab 按钮插入（_sync_plugin_tabs）
         self._nav_body_layout = body_layout
@@ -1234,31 +1250,100 @@ class LLMSettingsCard(SystemCardFrame):
         return tab_id == "plugins" or tab_id.startswith("tab:")
 
     def _apply_fullwidth_mode(self, tab_id: str) -> None:
-        """按当前页收起/恢复左导航与返回按钮（两者互斥显示）
+        """按当前页收起/恢复左导航、顶部条与返回按钮
 
+        仅内置插件页有收起动画；插件注册大 tab 直接显隐（它们是低频页面，
+        逐次过渡反而拖泥带水）。
         属性访问包 RuntimeError：__new__ 桩（测试 fixture）的 QObject 未初始化，
         读未定义属性抛 RuntimeError 而非 AttributeError，getattr 默认值救不了。
         """
         full = self._is_fullwidth_tab(tab_id)
+        animate = tab_id == "plugins"
         try:
-            if self._nav_frame is not None:
-                self._nav_frame.setVisible(not full)
+            self._set_nav_collapsed(full, animate=animate)
             back = getattr(self, "_back_btn", None)
             if back is not None:
                 back.setVisible(full)
+            bar = getattr(self, "_fullwidth_bar", None)
+            if bar is not None:
+                bar.setVisible(full)
+            holder = getattr(self, "_chips_holder", None)
+            if holder is not None:
+                # chips 是插件列表专属：注册 tab 页没有列表，只留返回按钮
+                holder.setVisible(tab_id == "plugins")
         except RuntimeError:
             pass  # __new__ 桩：跳过视觉同步
 
     def _exit_fullwidth_mode(self) -> None:
         """「← 返回设置」：恢复导航显示，分页停在当前页不动"""
         try:
-            if self._nav_frame is not None:
-                self._nav_frame.setVisible(True)
+            current = getattr(self, "_current_tab", None)
+            self._set_nav_collapsed(False, animate=current == "plugins")
             back = getattr(self, "_back_btn", None)
             if back is not None:
                 back.setVisible(False)
+            bar = getattr(self, "_fullwidth_bar", None)
+            if bar is not None:
+                bar.setVisible(False)
         except RuntimeError:
             pass  # __new__ 桩：跳过视觉同步
+
+    def _set_nav_collapsed(self, collapsed: bool, animate: bool = True) -> None:
+        """左导航收起/展开：maximumWidth 滑动动画；降级或 animate=False 时直接显隐
+
+        收起：min 置 0 后动画 max 当前宽→0，结束 hide 并把宽度恢复正常值
+        （下次展开起点干净）；展开反向。连点由 stop() 旧动画防护。
+        """
+        try:
+            nav = getattr(self, "_nav_frame", None)
+            if nav is None:
+                return
+            full_w = getattr(self, "_nav_full_width", 0) or nav.width() or 160
+            old_anim = getattr(self, "_nav_anim", None)
+            if old_anim is not None:
+                old_anim.stop()
+            if not animate or not Animations.motion_enabled():
+                nav.setVisible(not collapsed)
+                return
+            # 动画路径幂等守卫：目标状态已达成时不重放。普通 tab 之间切换也会
+            # 走展开分支，无守卫时导航每次都被置 0 再撑开，肉眼可见闪一下
+            if collapsed and not nav.isVisible():
+                return
+            if not collapsed and nav.isVisible() and nav.maximumWidth() >= full_w:
+                return
+            if collapsed:
+                start = nav.width() or full_w
+                nav.setMinimumWidth(0)
+                nav.setMaximumWidth(start)
+                anim = QPropertyAnimation(nav, b"maximumWidth", nav)
+                anim.setDuration(Animations.NORMAL_MS)
+                anim.setStartValue(start)
+                anim.setEndValue(0)
+                anim.setEasingCurve(Animations.EASE_EXIT)
+
+                def _on_hide_done():
+                    nav.setVisible(False)
+                    nav.setFixedWidth(full_w)
+
+                anim.finished.connect(_on_hide_done)
+            else:
+                nav.setMinimumWidth(0)
+                nav.setMaximumWidth(0)
+                nav.setVisible(True)
+                anim = QPropertyAnimation(nav, b"maximumWidth", nav)
+                anim.setDuration(Animations.NORMAL_MS)
+                anim.setStartValue(0)
+                anim.setEndValue(full_w)
+                anim.setEasingCurve(Animations.EASE_ENTER)
+
+                def _on_show_done():
+                    nav.setFixedWidth(full_w)
+
+                anim.finished.connect(_on_show_done)
+            self._nav_anim = anim
+            anim.start()
+        except RuntimeError:
+            pass  # __new__ 桩：跳过动画
 
     def _sync_plugin_nav_visibility(self) -> bool:
         """同步「插件」导航项与分区显隐：有插件就显示
@@ -1360,6 +1445,7 @@ class LLMSettingsCard(SystemCardFrame):
         if nav_frame is not None and self._nav_buttons:
             widest = max(b.sizeHint().width() for b in self._nav_buttons.values())
             nav_frame.setFixedWidth(max(150, min(196, widest + 12)))
+            self._nav_full_width = nav_frame.width()
 
     def _build_plugin_tab_page(self, tab_key: str):
         """首次进入插件大 tab 时实例化页面（懒构造；失败不标 ready 由 _ensure_page_ready 重试）"""
@@ -1776,6 +1862,14 @@ class LLMSettingsCard(SystemCardFrame):
                 self._update_nav_styles()
             except Exception:
                 pass
+            # 插件设置页字号跟随：标签/表单 QSS 烧死字号，靠切插件重建才吃到
+            # 新值的旧路径覆盖不了已显示的详情页，这里显式刷
+            try:
+                page = getattr(self, "pluginSettingsPage", None)
+                if page is not None:
+                    page.refresh_style()
+            except RuntimeError:
+                pass  # __new__ 桩（测试 fixture）无真实页面
 
     def _refresh_appearance_from_config(self):
         """根据当前配置刷新外观样式

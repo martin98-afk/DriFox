@@ -286,12 +286,20 @@ class TestFullwidthMode:
     痛点：设置导航(150~196px) + 插件列表(236px) + 详情主从并存，四栏挤压详情。
     """
 
-    def _make_fullwidth_stub(self, qtbot):
+    def _make_fullwidth_stub(self, qtbot, monkeypatch):
+        from app.utils.design_tokens import Animations
         from app.widgets.cards.settings.llm_settings_card import LLMSettingsCard
 
+        # 禁动画走 setVisible 直通路径：动画模式下收起的显隐在 finished 回调，
+        # 桩测试不泵动画事件，spy 断言拿不到
+        monkeypatch.setattr(Animations, "motion_enabled", classmethod(lambda cls: False))
         card = LLMSettingsCard.__new__(LLMSettingsCard)
         card._nav_frame = _vis_spy(QWidget())
         card._back_btn = _vis_spy(QWidget())
+        # _set_nav_collapsed/_exit 读取的属性面：桩上缺一即抛 RuntimeError 被防御吞掉
+        card._nav_full_width = 160
+        card._nav_anim = None
+        card._current_tab = "plugins"
         qtbot.addWidget(card._nav_frame)
         qtbot.addWidget(card._back_btn)
         return card
@@ -304,26 +312,26 @@ class TestFullwidthMode:
         assert LLMSettingsCard._is_fullwidth_tab("provider") is False
         assert LLMSettingsCard._is_fullwidth_tab("plugins_extra") is False  # 仅精确匹配
 
-    def test_enter_plugins_hides_nav(self, qtbot):
-        card = self._make_fullwidth_stub(qtbot)
+    def test_enter_plugins_hides_nav(self, qtbot, monkeypatch):
+        card = self._make_fullwidth_stub(qtbot, monkeypatch)
         card._apply_fullwidth_mode("plugins")
         assert card._nav_frame._vis_calls[-1] is False
         assert card._back_btn._vis_calls[-1] is True
 
-    def test_plugin_registered_tab_also_fullwidth(self, qtbot):
-        card = self._make_fullwidth_stub(qtbot)
+    def test_plugin_registered_tab_also_fullwidth(self, qtbot, monkeypatch):
+        card = self._make_fullwidth_stub(qtbot, monkeypatch)
         card._apply_fullwidth_mode("tab:demo:adv")
         assert card._nav_frame._vis_calls[-1] is False
         assert card._back_btn._vis_calls[-1] is True
 
-    def test_normal_tab_restores_nav(self, qtbot):
-        card = self._make_fullwidth_stub(qtbot)
+    def test_normal_tab_restores_nav(self, qtbot, monkeypatch):
+        card = self._make_fullwidth_stub(qtbot, monkeypatch)
         card._apply_fullwidth_mode("provider")
         assert card._nav_frame._vis_calls[-1] is True
         assert card._back_btn._vis_calls[-1] is False
 
-    def test_exit_restores_nav(self, qtbot):
-        card = self._make_fullwidth_stub(qtbot)
+    def test_exit_restores_nav(self, qtbot, monkeypatch):
+        card = self._make_fullwidth_stub(qtbot, monkeypatch)
         card._apply_fullwidth_mode("plugins")
         card._exit_fullwidth_mode()
         assert card._nav_frame._vis_calls[-1] is True
@@ -336,6 +344,43 @@ class TestFullwidthMode:
         card = LLMSettingsCard.__new__(LLMSettingsCard)
         card._apply_fullwidth_mode("plugins")
         card._exit_fullwidth_mode()
+
+    def test_collapse_animation_completes(self, qtbot, monkeypatch):
+        """动画路径：收起后导航隐藏且宽度恢复，展开后回到正常宽
+
+        防回归点：动画 finished 回调若丢了 setFixedWidth 恢复，导航会卡在
+        maximumWidth=0，下次展开起点坏掉（宽度动画最常见的烂尾形态）。
+        """
+        from app.utils.design_tokens import Animations
+        from app.widgets.cards.settings.llm_settings_card import LLMSettingsCard
+
+        monkeypatch.setattr(Animations, "motion_enabled", classmethod(lambda cls: True))
+        card = LLMSettingsCard.__new__(LLMSettingsCard)
+        card._nav_frame = QWidget()
+        card._nav_frame.setFixedWidth(160)
+        card._nav_frame.show()  # 幂等守卫以 isVisible 判状态，无父级的桩需先 show
+        card._back_btn = QWidget()
+        card._nav_full_width = 160
+        card._nav_anim = None
+        card._current_tab = "plugins"
+        qtbot.addWidget(card._nav_frame)
+        qtbot.addWidget(card._back_btn)
+
+        card._apply_fullwidth_mode("plugins")
+        qtbot.wait(400)  # NORMAL_MS=200 动画 + 余量
+        assert card._nav_frame.isHidden()
+        assert card._nav_frame.maximumWidth() == 160
+
+        card._exit_fullwidth_mode()
+        qtbot.wait(400)
+        assert not card._nav_frame.isHidden()
+        assert card._nav_frame.maximumWidth() == 160
+
+        # 幂等：已展开状态下再切普通 tab 不重放动画（宽度不被置 0）
+        card._apply_fullwidth_mode("provider")
+        qtbot.wait(60)
+        assert not card._nav_frame.isHidden()
+        assert card._nav_frame.maximumWidth() == 160
 
 if __name__ == "__main__":
     import sys

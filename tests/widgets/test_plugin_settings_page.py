@@ -260,7 +260,6 @@ def test_row_and_detail_font_scaled(env, qapp):
     _pump(qapp)
     row = page._rows[0]
     assert "font-size" in row._name.styleSheet()
-    assert "font-size" in row._sub.styleSheet()
     page._select("voice-reply", force=True)
     _pump(qapp)
     assert "font-size" in page._detail._title.styleSheet()
@@ -308,7 +307,33 @@ def test_list_row_theme_colors_applied(env, qapp):
     assert page._rows, "应已建出列表行"
     for row in page._rows:
         assert "color" in row._name.styleSheet()
-        assert "color" in row._sub.styleSheet()
+
+
+def test_row_font_follows_refresh(env, qapp):
+    """refresh_style 后列表行/详情标题/说明文字字号串重写（字号变更链路）"""
+    page = page_mod.PluginSettingsPage()
+    page.reload(force=True)
+    _pump(qapp)
+    page._select("voice-reply", force=True)
+    _pump(qapp)
+    page.refresh_style()
+    for row in page._rows:
+        assert "font-size" in row._name.styleSheet()
+    assert "font-size" in page._detail._title.styleSheet()
+    assert "font-size" in page._detail._meta.styleSheet()
+    hints = [w for w in page._detail.findChildren(page_mod.CaptionLabel) if w.objectName() == "configHint"]
+    if hints:
+        assert "font-size" in hints[0].styleSheet()
+
+
+def test_single_line_row_structure(env, qapp):
+    """列表行为单行结构：圆点+图标+名称，无副标题（对齐服务商列表样式）"""
+    page = page_mod.PluginSettingsPage()
+    page.reload(force=True)
+    _pump(qapp)
+    row = page._rows[0]
+    assert not hasattr(row, "_sub"), "副标题已移除"
+    assert row._dot.x() < row._icon.x() < row._name.x(), "圆点应在图标前、图标在名称前"
 
 
 def test_icons_refresh_on_theme_toggle(env, qapp, monkeypatch):
