@@ -169,6 +169,8 @@ backgrounds:
 
 > **`tracks` 不支持 `:qrc`**。QtMultimedia 的后端（Windows 上是 DirectShow / WMF）读不到 Qt 资源系统，`:qrc` 路径的音频会直接报 ResourceError。音乐只支持文件路径。
 
+> 配了 `music` 或 `overlay.video` 的主题，在设置 → 外观 → 主题风格的主题格左上角会带对应角标（场记板 = 动态视频层，音符 = 背景音乐），用来一眼分辨哪些主题不是静态配色。
+
 ## 资源路径三种写法
 
 | 写法 | 示例 | 解析规则 |

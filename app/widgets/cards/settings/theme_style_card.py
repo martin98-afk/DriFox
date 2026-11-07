@@ -413,7 +413,7 @@ class _ThemeTile(QWidget):
         """左上角媒体角标：视频 / 音乐（两者可同时存在，横向排列）"""
         icons = []
         if self._entry.get("has_video"):
-            icons.append(FluentIcon.VIDEO)
+            icons.append(FluentIcon.MOVIE)
         if self._entry.get("has_music"):
             icons.append(FluentIcon.MUSIC)
         if not icons:
