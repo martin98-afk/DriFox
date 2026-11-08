@@ -13,6 +13,7 @@ import contextlib
 import json
 import os
 import shutil
+import sys
 import threading
 import time
 import uuid
@@ -1121,6 +1122,14 @@ class ConfigSyncService(QObject):
                 _rec = getattr(self, "_meta_recorder", None)
                 if _rec is not None:
                     _rec.begin_suppress()
+                # 🐛 屏蔽写回循环中的 valueChanged 联动：UI.LightMode 键序在
+                # ThemeMode/ThemeStyle 之前，中途赋值会同步触发
+                # _on_light_mode_changed → apply_light(save=True)，用旧值
+                # ThemeStyle 判深浅并把半同步态落盘成矛盾文件（浅色模式+
+                # 深色主题），二次重载读到矛盾即把云端主题打回本地旧主题。
+                # 深浅对齐由循环后统一的 apply_light 兜底。
+                from app.utils import theme_mode as _tm_mode
+                _tm_mode.begin_sync_apply()
                 for _section_name, _section_data in _file_data.items():
                     for _key, _value in _section_data.items():
                         _matched = None
@@ -1157,6 +1166,7 @@ class ConfigSyncService(QObject):
                                 getattr(cfg, _matched).value = _value
                 if _rec is not None:
                     _rec.end_suppress()
+                _tm_mode.end_sync_apply()
 
                 # 🔒 密钥态判定必须在写回循环之后（基于新内存值）：
                 # - 无锁定条目且密码在手上 → 清备份（解锁成功即清，防设置卡误读「等待解锁」）；
@@ -1172,6 +1182,10 @@ class ConfigSyncService(QObject):
             except Exception as _e:
                 if getattr(self, "_meta_recorder", None) is not None:
                     self._meta_recorder.reset_suppress()
+                # begin_sync_apply 已执行（异常发生在其后）才需回收；import 失败时未入栈，防御性取模块
+                _tm = sys.modules.get("app.utils.theme_mode")
+                if _tm is not None:
+                    _tm.end_sync_apply()
                 logger.warning(f"[ConfigSync] 从文件同步配置项失败: {_e}")
 
             # ── 外观模式对齐：云端 ThemeMode 落地后按模式重算生效深浅 ──
@@ -2643,9 +2657,10 @@ class ConfigSyncService(QObject):
                 rec.attach(merged_cfg, merged_cfg["System"]["SyncMeta"])
             except Exception as e:
                 logger.warning(f"[ConfigSync] 合并后同步记账器回写失败: {e}")
-        # 后台线程写盘后桥接主线程重载 Settings，避免 UI 与磁盘不一致
+        # 后台线程写盘后暂停 watch/防抖（_pause_after_merge）。Settings 重载
+        # 不在这里发射：同一次下载的尾部还会再 emit 一次（downloaded_config
+        # 分支），双重重载曾读到中间态文件触发主题回退，统一由尾部触发。
         self._pause_after_merge()
-        self._reloadSettings.emit()
 
     def _conflict_path(self, unit: str, rel: str, ts: str) -> Path:
         """冲突副本落地路径（业务目录之外，按单元+时间戳+设备分组）"""

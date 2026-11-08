@@ -1721,7 +1721,7 @@ class UIPluginRegistry:
                 continue
             try:
                 restore(items)
-            except RuntimeError, AttributeError:
+            except (RuntimeError, AttributeError):
                 pass
 
     def detach_card_inline_panel(self, panel_id: str) -> None:

@@ -205,6 +205,49 @@ def test_migrate_theme_mode_skips_new_install(tmp_path):
     assert stub.saved == 0
 
 
+# ── 同步应用屏蔽（主题同步回退 bug 回归） ─────────────────
+
+def test_sync_apply_flag_lifecycle():
+    """begin/end 配对：进入标志态、退出复位、异常安全依赖显式配对"""
+    assert theme_mode.is_sync_applying() is False
+    theme_mode.begin_sync_apply()
+    try:
+        assert theme_mode.is_sync_applying() is True
+    finally:
+        theme_mode.end_sync_apply()
+    assert theme_mode.is_sync_applying() is False
+
+
+def test_sync_apply_flag_never_negative():
+    """多余 end 不把深度打成负数（except 兜底可能多调一次）"""
+    theme_mode.end_sync_apply()
+    theme_mode.end_sync_apply()
+    assert theme_mode.is_sync_applying() is False
+    theme_mode.begin_sync_apply()
+    theme_mode.end_sync_apply()
+    assert theme_mode.is_sync_applying() is False
+
+
+def test_apply_light_still_works_outside_sync(monkeypatch):
+    """标志态外 apply_light 行为不变：深浅不符时切记忆主题（修复不改变正常路径）"""
+    store = {"theme_style_by_mode": {"dark": "the-last-of-us", "light": "sledding-game"}}
+    _patch_app_state(monkeypatch, store)
+    _patch_theme_manager(monkeypatch, light_theme_ids={"lumia", "sledding-game"})
+    monkeypatch.setattr(theme_mode, "_settings", lambda: _StubConfig(light=True, mode="light", style="the-last-of-us"))
+    monkeypatch.setattr(
+        "app.utils.config.update_theme_options", lambda: None, raising=False
+    )
+
+    # 深色主题 + 浅色模式 → 切浅色记忆主题（本次 bug 中第二次重载的翻转路径）
+    changed = theme_mode.apply_light(True, save=False)
+    assert changed is True
+
+    # 深浅一致 → 不切、不落盘
+    monkeypatch.setattr(theme_mode, "_settings", lambda: _StubConfig(light=True, mode="light", style="sledding-game"))
+    changed = theme_mode.apply_light(True, save=False)
+    assert changed is False
+
+
 def test_migrate_theme_mode_skips_when_already_migrated(tmp_path):
     from app.utils import config as config_mod
 

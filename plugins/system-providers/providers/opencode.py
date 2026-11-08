@@ -197,13 +197,22 @@ def _oauth_authorization(llm_config: dict) -> str:
     return f"Bearer {access}" if access else ""
 
 
-def _oauth_org_header(llm_config: dict) -> str:
-    """workspace 标识头。与 Authorization 同源于缓存，两次调用经刷新锁去重。"""
+def _oauth_org_header(llm_config: dict) -> Optional[str]:
+    """workspace 标识头。与 Authorization 同源于缓存，两次调用经刷新锁去重。
+
+    两种情况下不发送该头（返回 None）：
+    - Go 公开端点（/inference/go/）不绑 workspace，带任意 org 头会被判
+      403 Workspace access denied（2026-11-08 实测）。
+    - 账号无 workspace：空值头会被网关判 400 且响应体为空，日志无法归因。
+    """
+    url = str((llm_config or {}).get("API_URL", "") or "")
+    if "/inference/go/" in url:
+        return None
     try:
         _access, org = _load_oauth().get_auth_context(llm_config)
     except Exception:
-        return ""
-    return org
+        return None
+    return org or None
 
 
 _OAUTH_EXTRA_HEADERS = {
@@ -211,6 +220,22 @@ _OAUTH_EXTRA_HEADERS = {
     "Authorization": _oauth_authorization,
     "x-opencode-org-id": _oauth_org_header,
 }
+
+def _oauth_auth_retry(llm_config: dict) -> bool:
+    """401 自愈：忽略本地过期时间强制换新 access_token，返回是否可重试。
+
+    服务端会提前吊销整条会话链（access 401 + refresh invalid_grant，2026-11-08
+    实测），本地 expires_in 却是 30 天，靠时间判定永远等不到刷新。故由执行层在
+    收到 401 时回调本钩子，换到新 token 后重试一次。刷新失败（链已废）只记
+    warning 并返回 False，由执行层抛出原始 401，用户重新登录即可。
+    """
+    from loguru import logger
+
+    try:
+        return bool(_load_oauth().force_refresh(llm_config))
+    except Exception as e:
+        logger.warning(f"[OpenCode OAuth] 401 后强制刷新失败：{e}")
+        return False
 
 
 def _oauth_login(cancel_event=None):
@@ -304,6 +329,8 @@ def _oauth_capabilities(models_hook):
         "extra_headers": _OAUTH_EXTRA_HEADERS,
         "login_hook": _oauth_login,
         "models_hook": models_hook,
+        # 401 自愈：执行层收到 401 时回调，换新 access_token 后重试一次
+        "auth_error_hook": _oauth_auth_retry,
         "login_hint": "已打开浏览器，user_code 已复制到剪贴板：粘贴授权后点 Continue（可点「中止」退出）",
     }
 

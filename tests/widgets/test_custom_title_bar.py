@@ -360,3 +360,50 @@ def test_mouse_move_starts_system_move_when_idle(qtbot, container, monkeypatch):
 
     tb.mouseMoveEvent(_make_left_button_move_event())
     assert len(calls) == 1
+
+
+def test_titlebar_scrim_default_follows_theme_mode(qtbot, container, monkeypatch):
+    """顶栏雾化遮罩：无主题 token 时按明暗取白 / 黑雾，alpha 过 AA 底线
+
+    标题栏透明叠在壁纸上，浅色主题撞上深色壁纸时文字对比度会跌到 1:1；
+    这层雾的中段 alpha 必须 ≥0.55，否则黑壁纸下仍不可读。
+    """
+    from app.utils.design_tokens import Colors
+    from app.utils.theme_manager import theme_manager
+
+    tb = CustomTitleBar(container)
+    qtbot.addWidget(tb)
+    monkeypatch.setattr(Colors, "TITLEBAR_SCRIM", "")
+
+    monkeypatch.setattr(theme_manager, "is_light_theme", lambda *a, **k: True)
+    light = tb._scrim_base_color()
+    assert light.red() > 240 and light.alphaF() >= 0.55
+
+    monkeypatch.setattr(theme_manager, "is_light_theme", lambda *a, **k: False)
+    dark = tb._scrim_base_color()
+    assert dark.red() < 40 and dark.alphaF() >= 0.55
+
+
+def test_titlebar_scrim_token_override(qtbot, container, monkeypatch):
+    """主题 yaml 的 titlebar_scrim 覆盖生效（含 rgba 整数 alpha）"""
+    from app.utils.design_tokens import Colors
+
+    tb = CustomTitleBar(container)
+    qtbot.addWidget(tb)
+    monkeypatch.setattr(Colors, "TITLEBAR_SCRIM", "rgba(10, 20, 30, 200)")
+    c = tb._scrim_base_color()
+    assert (c.red(), c.green(), c.blue()) == (10, 20, 30)
+    assert abs(c.alphaF() - 200 / 255) < 0.01
+
+
+def test_titlebar_scrim_ignores_invalid_token(qtbot, container, monkeypatch):
+    """写坏的主题值回退到明暗默认色，不能把整条顶栏刷成默认深灰"""
+    from app.utils.design_tokens import Colors
+    from app.utils.theme_manager import theme_manager
+
+    tb = CustomTitleBar(container)
+    qtbot.addWidget(tb)
+    monkeypatch.setattr(Colors, "TITLEBAR_SCRIM", "not-a-color")
+    monkeypatch.setattr(theme_manager, "is_light_theme", lambda *a, **k: True)
+    c = tb._scrim_base_color()
+    assert c.red() > 240

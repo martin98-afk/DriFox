@@ -139,6 +139,108 @@ def test_plugin_registered_fence_needs_webengine(monkeypatch):
     # 未注册的 lang 仍按普通代码块处理
     assert crc._content_needs_webengine("```python\nprint(1)\n```") is False
 
+# ── R2-A2：list 内容的图片/自定义块漏检修复 ───────────────────────────
+@pytest.mark.parametrize(
+    "block",
+    [
+        {"type": "image_url", "image_url": {"url": "http://x/a.png"}},
+        {"type": "input_image", "input_image": {"url": "data:image/png;base64,xx"}},
+        {"type": "image", "url": "http://x/b.png"},
+        {"type": "image_ref", "ref": "img://1"},
+        {"type": "custom", "custom_type": "chart", "data": {}},
+    ],
+)
+def test_list_image_like_blocks_need_webengine(block):
+    """list 含图片类/自定义块 → 必须 WebEngine。
+
+    content_to_text 会丢弃这些块（判定函数看不见），但实际渲染走
+    content_to_markdown 会把图片转 ![image](url) 交给 viewer；纯 Qt 侧
+    没有图片异步加载 → 静默丢图。判定必须保守。
+    """
+    assert crc._content_needs_webengine([block]) is True
+
+def test_pure_image_list_needs_webengine():
+    """纯图片块 list（无任何文本）→ 必须 WebEngine。
+
+    回归：content_to_text 对纯图片 list 返回空串，旧逻辑 `if not text:
+    return False` 直接判 False 走 Qt，整卡图片全丢。
+    """
+    content = [
+        {"type": "image_url", "image_url": {"url": "http://x/1.png"}},
+        {"type": "image_url", "image_url": {"url": "http://x/2.png"}},
+    ]
+    assert crc._content_needs_webengine(content) is True
+
+def test_list_with_text_and_image_needs_webengine():
+    """文本 + 图片混合 list → 必须 WebEngine。"""
+    content = [
+        {"type": "text", "text": "看这张图"},
+        {"type": "image_ref", "ref": "img://1"},
+    ]
+    assert crc._content_needs_webengine(content) is True
+
+def test_plain_text_list_still_normal_path(monkeypatch):
+    """纯文本 blocks list（无其他类型块）→ 走既有 fence 判定路径。
+
+    monkeypatch 插件表隔离环境：测试进程里注册表通常未加载（返回 None
+    会触发保守 True），这里固定为空集合以验证判定逻辑本身。
+    """
+    monkeypatch.setattr(crc, "_registered_fence_langs", lambda: frozenset())
+    content = [{"type": "text", "text": "普通正文，无特殊语法"}]
+    assert crc._content_needs_webengine(content) is False
+
+def test_plain_text_list_with_md_image_goes_shared_scan(monkeypatch):
+    """纯 text list 含 markdown 图片 → 走共享扫描段返 True（未被新规则短路）。
+
+    证明「仅 text 块」的文本确实进入 fence/LaTeX/图片扫描逻辑（与 str 同路径）。
+    用 markdown 图片做信号：_MD_IMAGE_RE 无锚定，任意位置命中，不依赖 fence
+    正则的行首锚定行为。
+    """
+    monkeypatch.setattr(crc, "_registered_fence_langs", lambda: frozenset())
+    content = [{"type": "text", "text": "看图 ![alt](http://x/a.png)"}]
+    assert crc._content_needs_webengine(content) is True
+
+def test_text_plus_reasoning_needs_webengine():
+    """text + reasoning 混合 list → 必须 WebEngine。
+
+    回归：reasoning 块渲染为 <think> 走 _inject_think_cards，纯 Qt 不处理；
+    旧枚举集合不含 reasoning，content_to_text 只取 text 得非空串后按纯文本
+    判 False，思考内容被静默丢弃。
+    """
+    content = [
+        {"type": "text", "text": "hi"},
+        {"type": "reasoning", "content": "think"},
+    ]
+    assert crc._content_needs_webengine(content) is True
+
+def test_text_plus_tool_result_needs_webengine():
+    """text + tool_result 混合 list → 必须 WebEngine。
+
+    回归：tool_result 渲染为 <tool> 卡走 _render_tool_block_content；
+    include_tool_results=False 时 content_to_text 丢弃它，混合态漏判。
+    """
+    content = [
+        {"type": "text", "text": "结果如下"},
+        {"type": "tool_result", "tool_call_id": "c1", "name": "t", "result": "r"},
+    ]
+    assert crc._content_needs_webengine(content) is True
+
+def test_list_with_unknown_block_type_is_conservative():
+    """list 含未知类型块 / 非 dict 元素 → 一律保守 True。
+
+    「非 text 即 True」规则对未来新增块类型自动保守覆盖，不依赖枚举。
+    """
+    assert crc._content_needs_webengine([
+        {"type": "text", "text": "ok"},
+        {"type": "brand_new_block_v9", "data": {}},
+    ]) is True
+    assert crc._content_needs_webengine([{"type": "text", "text": "ok"}, "raw str"]) is True
+    assert crc._content_needs_webengine([{"data": {}}]) is True  # 无 type 字段
+
+def test_empty_list_does_not_need_webengine():
+    """空 blocks 列表：无内容可降级 → False（与空 str 同语义）。"""
+    assert crc._content_needs_webengine([]) is False
+
 
 # ── R2-B：通道决策 + 回退开关 ─────────────────────────────────────────
 def _enable_auto(monkeypatch):

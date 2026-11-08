@@ -32,7 +32,7 @@ from collections import OrderedDict
 from datetime import datetime
 from functools import lru_cache
 from html import escape, unescape
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import orjson as json
 import sip
@@ -3313,7 +3313,7 @@ class MessageCard(SimpleCardWidget):
                 # 0.85 与基线 0.84 只差 0.01，自适应提速等于失效。
                 factor = min(STREAM_HEIGHT_TRACK_MAX_FACTOR, factor + STREAM_HEIGHT_TRACK_BOOST)
             self._apply_viewer_height(int(current_height + diff * factor))
-        except RuntimeError, AttributeError:
+        except (RuntimeError, AttributeError):
             # viewer 已被虚拟滚动池化摘走（detach 置 None）/ 对象析构：
             # 停拍防泄漏。内容重挂后会自行上报高度，走常规路径校正。
             self._stop_stream_height_track()
@@ -3516,7 +3516,7 @@ class MessageCard(SimpleCardWidget):
             self._layout_height_pinned = True
             self._pinned_height = int(height)
             self._pinned_overhead = content_overhead
-        except RuntimeError, AttributeError:
+        except (RuntimeError, AttributeError):
             pass
 
     def _unpin_layout_height(self) -> None:

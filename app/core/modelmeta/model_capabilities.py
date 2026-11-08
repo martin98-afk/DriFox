@@ -87,7 +87,7 @@ def _parse_declared_value(field: str, value: Any) -> Any:
     if field in ("context_limit", "max_output_tokens"):
         try:
             parsed = int(value)
-        except ValueError, TypeError:
+        except (ValueError, TypeError):
             return None
         return parsed if parsed > 0 else None
     if field in ("supports_vision", "supports_thinking"):
@@ -597,7 +597,7 @@ def resolve_context_limit(llm_config: Dict[str, Any], default: int = 128000) -> 
         if value not in (None, ""):
             try:
                 return max(1, int(value))
-            except ValueError, TypeError:
+            except (ValueError, TypeError):
                 continue
 
     # L2: 模型名查表（带 provider 走分区精确查，防同名模型跨服务商串味）
@@ -607,7 +607,7 @@ def resolve_context_limit(llm_config: Dict[str, Any], default: int = 128000) -> 
     if caps.get("context_limit"):
         try:
             return max(1, int(caps["context_limit"]))
-        except ValueError, TypeError:
+        except (ValueError, TypeError):
             pass
 
     # L3: 服务商默认
@@ -619,14 +619,14 @@ def resolve_context_limit(llm_config: Dict[str, Any], default: int = 128000) -> 
             if v not in (None, ""):
                 try:
                     return max(1, int(v))
-                except ValueError, TypeError:
+                except (ValueError, TypeError):
                     pass
 
     # L4: family 兜底
     profile = get_provider_profile(llm_config)
     try:
         return max(1, int(profile.get("context_limit", default)))
-    except ValueError, TypeError:
+    except (ValueError, TypeError):
         return max(1, int(default))
 
 
@@ -651,7 +651,7 @@ def resolve_max_output_tokens(llm_config: Dict[str, Any], default: int = 4096) -
         if value not in (None, ""):
             try:
                 return max(1, int(value))
-            except ValueError, TypeError:
+            except (ValueError, TypeError):
                 continue
 
     # L2: 模型真实输出上限（models.dev per-model，带 provider 走分区精确查）
@@ -662,13 +662,13 @@ def resolve_max_output_tokens(llm_config: Dict[str, Any], default: int = 4096) -
     if caps_max not in (None, ""):
         try:
             return max(1, int(caps_max))
-        except ValueError, TypeError:
+        except (ValueError, TypeError):
             pass
 
     profile = get_provider_profile(llm_config)
     try:
         return max(1, int(profile.get("max_output_tokens", default)))
-    except ValueError, TypeError:
+    except (ValueError, TypeError):
         return max(1, int(default))
 
 
@@ -694,7 +694,7 @@ def get_caps_max_output_tokens(model: str, llm_config: Optional[Dict[str, Any]] 
         return None
     try:
         parsed = int(value)
-    except ValueError, TypeError:
+    except (ValueError, TypeError):
         return None
     return parsed if parsed > 0 else None
 

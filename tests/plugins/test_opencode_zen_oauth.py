@@ -196,10 +196,14 @@ def test_dynamic_headers_from_cache(plugin):
 
 
 def test_authorization_failure_does_not_throw(plugin):
-    """callable 抛异常会被 resolve_extra_headers 吞掉整组头，故必须内部消化。"""
+    """callable 抛异常会被 resolve_extra_headers 吞掉整组头，故必须内部消化。
+
+    Authorization 失败返回空串（发空头让网关回 401）；org 头失败返回 None
+    （省略头，空值头会被网关判 400 且响应体为空）。
+    """
     cfg = {"API_KEY": "rt-bad"}
     assert plugin._OAUTH_EXTRA_HEADERS["Authorization"](cfg) == ""
-    assert plugin._OAUTH_EXTRA_HEADERS["x-opencode-org-id"](cfg) == ""
+    assert plugin._OAUTH_EXTRA_HEADERS["x-opencode-org-id"](cfg) is None
 
 
 def test_refresh_rotates_access_token_and_stable_cache_key(plugin, monkeypatch):
@@ -439,6 +443,65 @@ def test_resolve_extra_headers_oauth_vs_api_key_isolation(plugin, monkeypatch, t
     assert zen_headers.get("x-opencode-session") == "sess-2"
 
 
+def test_org_header_omitted_for_go_endpoint_and_missing_workspace(plugin):
+    """Go 公开端点不绑 workspace；无 org 账号也不得发空头。
+
+    实测（2026-11-08）：x-opencode-org-id 空值 → 网关 400 且响应体为空
+    （日志只剩「Error response body:」无法归因）；非空 org 打到 Go 端点 → 403。
+    """
+    oa = plugin._load_oauth()
+    oa.cache_put(
+        "rt-2",
+        access_token="at-2",
+        refresh_token="rt-2",
+        expires_at=time.time() + 3600,
+        org_id="org-2",
+    )
+    go_cfg = {"API_KEY": "rt-2", "API_URL": "https://opencode.ai/inference/go/openai/v1"}
+    assert plugin._OAUTH_EXTRA_HEADERS["x-opencode-org-id"](go_cfg) is None
+
+    oa.cache_put(
+        "rt-3",
+        access_token="at-3",
+        refresh_token="rt-3",
+        expires_at=time.time() + 3600,
+    )
+    zen_cfg = {"API_KEY": "rt-3", "API_URL": "https://opencode.ai/inference/openai/v1"}
+    assert plugin._OAUTH_EXTRA_HEADERS["x-opencode-org-id"](zen_cfg) is None
+
+
+def test_resolve_extra_headers_omits_none_valued_header(plugin, monkeypatch, tmp_path):
+    """callable 返回 None → 该头不出现（而非空串）：Go OAuth 端到端回归。"""
+    from app.core.modelmeta.provider_profile import resolve_extra_headers
+    from app.plugins.registries.provider_registry import ProviderRegistry
+
+    reg = ProviderRegistry()
+    plugin.register(reg)
+    monkeypatch.setattr(ProviderRegistry, "get_instance", staticmethod(lambda: reg))
+
+    oa = plugin._load_oauth()
+    oa._CACHE_DIR = tmp_path
+    oa.cache_put(
+        "rt-go",
+        access_token="at-go",
+        refresh_token="rt-go",
+        expires_at=time.time() + 3600,
+    )
+
+    headers = resolve_extra_headers(
+        {
+            "provider_name": "OpenCode Go (OAuth)",
+            "API_KEY": "rt-go",
+            "API_URL": "https://opencode.ai/inference/go/openai/v1",
+            "模型名称": "beam-free",
+        },
+        "sess-9",
+    )
+    assert "x-opencode-org-id" not in headers
+    assert headers["Authorization"] == "Bearer at-go"
+    assert headers["x-opencode-session"] == "sess-9"
+
+
 # ── 端点探活口径（纯解析，不发请求）────────────────────────────
 
 def test_device_flow_error_classification(plugin, monkeypatch):
@@ -450,3 +513,126 @@ def test_device_flow_error_classification(plugin, monkeypatch):
     assert oa.verification_url({"verification_uri": "https://opencode.ai/console/device"}) == (
         "https://opencode.ai/console/device"
     )
+
+# ── 401 自愈：本地 TTL 上限 + 强制刷新 ────────────────────────
+# 背景（2026-11-08 实测）：device/token 返回 expires_in=2592000（30 天），但整条
+# 会话链会被服务端提前吊销（access 401 + refresh invalid_grant）。只按 expires_in
+# 判临期，刷新分支永不触发，吊销后就是永久 401。
+
+def _seed_cache(oa, api_key, *, access="at-1", expires_in=30 * 24 * 3600):
+    oa.cache_put(
+        api_key,
+        access_token=access,
+        refresh_token=api_key,
+        expires_at=time.time() + expires_in,
+        org_id="org-1",
+    )
+    return oa._MEM[api_key]
+
+def test_fresh_refreshes_after_local_ttl_cap(plugin, monkeypatch):
+    """本地 TTL 上限：签发超 1 小时即换新，即使服务端说还有 30 天。"""
+    oa = plugin._load_oauth()
+    entry = _seed_cache(oa, "rt-ttl")
+    entry["issued_at"] = time.time() - oa.ACCESS_MAX_TTL_SEC - 1
+    calls = []
+
+    def _fake_device_token(body, timeout=None):
+        calls.append(body)
+        return {"access_token": "at-new", "refresh_token": "rt-ttl", "expires_in": 2592000}
+
+    monkeypatch.setattr(oa, "device_token", _fake_device_token)
+    access, org = oa.get_auth_context({"API_KEY": "rt-ttl"})
+    assert (access, org) == ("at-new", "org-1")
+    assert len(calls) == 1
+
+def test_fresh_keeps_token_within_local_ttl(plugin, monkeypatch):
+    oa = plugin._load_oauth()
+    _seed_cache(oa, "rt-fresh", access="at-fresh")
+    monkeypatch.setattr(
+        oa, "device_token", lambda *a, **k: (_ for _ in ()).throw(AssertionError("不应刷新"))
+    )
+    assert oa.get_auth_context({"API_KEY": "rt-fresh"}) == ("at-fresh", "org-1")
+
+def test_force_refresh_ignores_expires_at(plugin, monkeypatch):
+    """401 自愈：即使本地认为 token 还有 30 天，也强制换新。"""
+    oa = plugin._load_oauth()
+    entry = _seed_cache(oa, "rt-force", access="at-old")
+    entry["issued_at"] = time.time() - 60  # 超出 10 秒去重窗口
+    calls = []
+
+    def _fake_device_token(body, timeout=None):
+        calls.append(body)
+        return {"access_token": "at-new", "refresh_token": "rt-force-2", "expires_in": 2592000}
+
+    monkeypatch.setattr(oa, "device_token", _fake_device_token)
+    assert oa.force_refresh({"API_KEY": "rt-force"}) is True
+    assert len(calls) == 1
+    assert oa.cache_get("rt-force")["access_token"] == "at-new"
+
+def test_force_refresh_dedupes_within_10s(plugin, monkeypatch):
+    """并发 401：另一线程刚换过 token 时不重复刷新，直接允许重试。"""
+    oa = plugin._load_oauth()
+    _seed_cache(oa, "rt-dup", access="at-just")
+    monkeypatch.setattr(
+        oa, "device_token", lambda *a, **k: (_ for _ in ()).throw(AssertionError("不应重复刷新"))
+    )
+    assert oa.force_refresh({"API_KEY": "rt-dup"}) is True
+
+def test_force_refresh_invalid_grant_hook_returns_false(plugin, monkeypatch):
+    """整链已废：刷新抛错，钩子吞掉异常返回 False（执行层按原 401 抛出）。"""
+    oa = plugin._load_oauth()
+    entry = _seed_cache(oa, "rt-dead", access="at-dead")
+    entry["issued_at"] = time.time() - 60
+    monkeypatch.setattr(oa, "device_token", lambda body, timeout=None: {"error": "invalid_grant"})
+    with pytest.raises(RuntimeError):
+        oa.force_refresh({"API_KEY": "rt-dead"})
+    assert plugin._oauth_auth_retry({"API_KEY": "rt-dead"}) is False
+
+def test_auth_error_hook_registered_on_both_oauth_variants(plugin):
+    reg = _Registry()
+    plugin.register(reg)
+    for name in ("OpenCode Zen (OAuth)", "OpenCode Go (OAuth)"):
+        assert callable(reg.items[name].capabilities["auth_error_hook"])
+
+def test_resolve_auth_error_hook_reads_registry(plugin, monkeypatch):
+    """通用解析入口：OAuth family 有钩子，API Key family 无。"""
+    from app.core.modelmeta.provider_profile import resolve_auth_error_hook
+    from app.plugins.registries.provider_registry import ProviderRegistry
+
+    reg = ProviderRegistry()
+    plugin.register(reg)
+    monkeypatch.setattr(ProviderRegistry, "get_instance", staticmethod(lambda: reg))
+
+    oauth_cfg = {
+        "provider_name": "OpenCode Go (OAuth)",
+        "API_KEY": "rt-x",
+        "API_URL": "https://opencode.ai/inference/go/openai/v1",
+    }
+    assert resolve_auth_error_hook(oauth_cfg) is plugin._oauth_auth_retry
+    api_cfg = {"provider_name": "OpenCode Zen", "API_URL": "https://opencode.ai/zen/v1"}
+    assert resolve_auth_error_hook(api_cfg) is None
+
+def test_cache_get_backfills_issued_at_from_mtime(plugin):
+    """升级前的旧缓存没有 issued_at：用文件 mtime 近似，不能当成刚签发。"""
+    import json
+    import os
+
+    oa = plugin._load_oauth()
+    oa.cache_put(
+        "rt-legacy",
+        access_token="at-legacy",
+        refresh_token="rt-legacy",
+        expires_at=time.time() + 2592000,
+    )
+    path = oa._cache_path("rt-legacy")
+    data = json.loads(path.read_text(encoding="utf-8"))
+    data.pop("issued_at", None)
+    path.write_text(json.dumps(data), encoding="utf-8")
+    old = time.time() - 7200
+    os.utime(path, (old, old))
+    oa._MEM.pop("rt-legacy", None)
+
+    entry = oa.cache_get("rt-legacy")
+    assert abs(entry["issued_at"] - old) < 2
+    # 超本地 TTL 的旧缓存 → 下次请求必须刷新
+    assert oa._fresh({"API_KEY": "rt-legacy"})[0] == ""

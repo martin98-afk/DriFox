@@ -4,6 +4,9 @@
     "dark": "icon_dark.svg"
   },
   "name": "history-manager",
+  "display_name": {
+      "zh": "历史会话"
+  },
   "description": "DriFox 内置 UI 组件：工作台历史会话页（历史 / 归档列表、项目切换、置顶、归档 · 恢复 · 导入）",
   "version": "1.1.0",
   "author": {

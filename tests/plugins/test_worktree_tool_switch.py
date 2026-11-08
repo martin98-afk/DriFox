@@ -87,6 +87,19 @@ class TestActionSwitchCarriesCtxSession:
         created = root / ".worktrees" / "t-br"
         assert args == (os.path.abspath(str(created)), "s-7")
 
+    def test_switch_noop_emits_changed(self, tools, repo_with_worktree):
+        """已在该工作树时也要通知变更：主线程靠这个时机清分支缓存、校准 chip。
+
+        直接返回会让同一目录内切过分支的旧标签永远得不到修正。
+        """
+        mod, fake = tools
+        _root, wt = repo_with_worktree
+        ctx = {"workdir": str(wt), "session_id": "s-1"}
+        result = mod._worktree_manage_impl(ctx, action="switch", path=str(wt))
+        assert result.success, getattr(result, "error", "")
+        fake.changed.emit.assert_called_once()
+        fake.switchRequested.emit.assert_not_called()
+
 
 class TestReceiverRoutesBySession:
     """主线程接收端：按 session_id 定位窗口，禁止回落活跃窗口。"""

@@ -515,6 +515,12 @@ def _action_switch(tool_ctx: dict, kwargs: dict) -> ToolResult:
 
     current_workdir = _norm((tool_ctx or {}).get("workdir") or "")
     if current_workdir and current_workdir == _norm(target_path):
+        # 已在该工作树：仍通知一次变更，让主线程清分支缓存并重检 chip。
+        # 同一目录内切过分支时 chip 可能陈旧，直接返回会让它一直不修。
+        try:
+            _notify_changed(f"switch-noop {target_path}")
+        except Exception:  # noqa: BLE001 - 纯通知，失败不影响结果
+            pass
         return ToolResult(True, content=f"当前会话已在 {target_path}，无需切换")
 
     try:

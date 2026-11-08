@@ -1505,7 +1505,7 @@ class MemoryLimitDialog(MaskDialogBase):
         def _parse(edit, fallback: int) -> int:
             try:
                 val = int(edit.text().strip())
-            except TypeError, ValueError:
+            except (TypeError, ValueError):
                 return fallback
             return val if 100 <= val <= 1000000 else fallback
 

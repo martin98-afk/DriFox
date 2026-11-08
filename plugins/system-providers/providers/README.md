@@ -137,7 +137,7 @@ ProviderDef 并存**，勿在原定义上叠加动态头：
 |---|---|
 | `login_hook` | `(cancel_event=None) -> {"api_key": str, "info": str}`。编辑卡后台线程调用，返回长效 refresh_token 回填 API Key 输入框；`cancel_event` 是 `threading.Event`，轮询必须用它可中断等待（用户点「中止」立即退出） |
 | `models_hook` | `(config: dict) -> list[str]`。按当前表单的 API_KEY 拉动态模型池 |
-| `extra_headers` | dict，值可为 `callable(llm_config) -> str`。每次请求按当前配置求值（换 token / workspace 头）；解析统一走 `provider_profile.resolve_extra_headers` |
+| `extra_headers` | dict，值可为 `callable(llm_config) -> str \| None`。每次请求按当前配置求值（换 token / workspace 头）；解析统一走 `provider_profile.resolve_extra_headers`，callable 返回 `None` 表示本次不发送该头 |
 | `login_hint` | 编辑卡 InfoBar 文案，说明授权页要做什么 |
 | `session_header` | 会话标识头名，值取宿主当前 session_id（在 extra_headers 之后写入，同名会覆盖） |
 
@@ -161,6 +161,8 @@ ProviderDef 并存**，勿在原定义上叠加动态头：
   按路径显式 `compile` 加载，规避 `SourceFileLoader` 的 .pyc 秒级 mtime 缓存。
 - callable **不得抛异常**：`resolve_extra_headers` 遇异常会吞掉整组头
   （含 session_header）。失败时记 warning 后返回空串，让网关回 401。
+- 头值不能为空串的网关（如 OpenCode Go 的 `x-opencode-org-id`，空值返回
+  400 且响应体为空）必须让 callable 返回 `None` 省略该头，而不是返回 `""`。
 - **套餐用量挂在 `ProviderDef.coding_plan_fetcher`**（顶层字段，不是
   capabilities）。OAuth 版可用短效 access_token 复用 API 版同一端点，但
   该端点未必接受 OAuth token，故 fetcher 须容错：任一失败返 `None`（隐藏

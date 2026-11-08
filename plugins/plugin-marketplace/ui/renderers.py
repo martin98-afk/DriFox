@@ -4,6 +4,8 @@
 from html import escape
 from typing import Any, Dict
 
+from app.plugins.contracts.plugin_display import plugin_display_name
+
 
 def _plugin_card_html(plugin: Dict[str, Any], font_size: int = 14) -> str:
     """生成单个插件的 HTML 卡片
@@ -12,7 +14,8 @@ def _plugin_card_html(plugin: Dict[str, Any], font_size: int = 14) -> str:
         plugin: 插件元数据 dict
         font_size: 上下文字体大小（用于派生各元素字号，默认14）
     """
-    name = escape(plugin.get("name", ""))
+    raw_name = escape(plugin.get("name", ""))
+    name = escape(plugin_display_name(plugin))
     description = escape(plugin.get("description", ""))
     version = escape(plugin.get("version", ""))
     author = escape(plugin.get("author", ""))
@@ -35,7 +38,7 @@ def _plugin_card_html(plugin: Dict[str, Any], font_size: int = 14) -> str:
     homepage_html = f'<a href="{escape(homepage)}" target="_blank" class="homepage">🔗 主页</a>' if homepage else ""
 
     return f"""
-    <div class="marketplace-card" data-plugin-name="{name}">
+    <div class="marketplace-card" data-plugin-name="{raw_name}">
         <div class="marketplace-card__header">
             <h3 class="marketplace-card__name">{name}</h3>
             <span class="marketplace-card__version">v{version}</span>
@@ -52,7 +55,7 @@ def _plugin_card_html(plugin: Dict[str, Any], font_size: int = 14) -> str:
         <div class="marketplace-card__keywords">{kw_html}</div>
         <div class="marketplace-card__actions">
             {homepage_html}
-            <button class="marketplace-card__install" data-plugin="{name}">
+            <button class="marketplace-card__install" data-plugin="{raw_name}">
                 📥 安装
             </button>
         </div>

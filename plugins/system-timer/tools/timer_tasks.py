@@ -142,7 +142,7 @@ def _as_positive_int(value: Any) -> Optional[int]:
     """归一为正整数；无法解析或非正数返回 None（视同未提供）。"""
     try:
         num = int(float(value))
-    except TypeError, ValueError:
+    except (TypeError, ValueError):
         return None
     return num if num > 0 else None
 

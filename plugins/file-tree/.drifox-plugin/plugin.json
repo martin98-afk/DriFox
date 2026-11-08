@@ -4,6 +4,9 @@
         "dark": "icon_dark.svg"
     },
     "name": "file-tree",
+    "display_name": {
+        "zh": "文件树"
+    },
     "description": "当前项目文件树浏览 — 直观展示项目目录结构，支持图片/文本预览、右键菜单与实时文件监听",
     "version": "0.3.0",
     "author": {

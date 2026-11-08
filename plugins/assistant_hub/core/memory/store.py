@@ -868,7 +868,7 @@ def daily_exists(workdir: str | Path, aid: str, date: str = "") -> bool:
     try:
         p = daily_path(workdir, aid, date)
         return p.exists() and p.stat().st_size > 0
-    except ValueError, OSError:
+    except (ValueError, OSError):
         return False
 
 

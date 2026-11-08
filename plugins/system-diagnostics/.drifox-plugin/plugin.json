@@ -4,6 +4,9 @@
     "dark": "icon_dark.svg"
   },
   "name": "system-diagnostics",
+  "display_name": {
+      "zh": "内置诊断工具"
+  },
   "description": "DriFox 内置诊断工具：get_diagnostics 静态检查与 LSP 代码智能",
   "version": "1.0.0",
   "author": {
