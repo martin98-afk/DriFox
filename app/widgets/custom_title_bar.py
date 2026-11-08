@@ -36,7 +36,7 @@ from PyQt5.QtCore import (
     QVariantAnimation,
     pyqtSignal,
 )
-from PyQt5.QtGui import QColor, QCursor, QIcon, QPainter, QPainterPath
+from PyQt5.QtGui import QColor, QCursor, QIcon, QLinearGradient, QPainter, QPainterPath
 from PyQt5.QtWidgets import QHBoxLayout, QLabel, QPushButton, QWidget
 
 from loguru import logger
@@ -903,6 +903,11 @@ class CustomTitleBar(TitleBarBase):
     sidebar_hover_changed = pyqtSignal(bool)  # 左按钮：True=进入 False=离开
     workbench_hover_changed = pyqtSignal(bool)  # 右按钮：True=进入 False=离开
 
+    #: 标题栏雾化遮罩纵向 alpha 系数（顶 / 中 / 底），以基色 alpha 为 1.0。
+    #: 中段落在文字基线附近，决定最终对比度；底缘衰减保留与内容区的过渡，
+    #: 避免顶栏像一条切开的实心带。
+    SCRIM_ALPHA_STOPS = ((0.0, 1.15), (0.55, 1.0), (1.0, 0.5))
+
     def __init__(self, parent, minimal: bool = False):
         """自定义标题栏
 
@@ -1426,6 +1431,46 @@ class CustomTitleBar(TitleBarBase):
             " background: transparent; border: none; padding: 0 6px;"
         )
 
+    def _scrim_base_color(self) -> QColor:
+        """标题栏雾化遮罩基色：主题 token 优先，缺省按明暗取白 / 黑雾。
+
+        默认 alpha 按「最坏壁纸」标定：浅色主题白雾 0.60 叠纯黑壁纸仍有
+        5.2:1，深色主题黑雾 0.58 叠纯白壁纸仍有 4.8:1，过 WCAG AA 正文线。
+        """
+        raw = (Colors.TITLEBAR_SCRIM or "").strip()
+        # 只接受 CSS 颜色字面量：_qcolor 解析失败会静默返回不透明深灰，
+        # 主题写坏时整条顶栏会直接变灰块，比不加雾更糟。
+        if raw.lower().startswith(("#", "rgb")):
+            c = _qcolor(raw, "")
+            if c.alphaF() > 0.05:
+                return c
+        from app.utils.theme_manager import theme_manager
+
+        light = theme_manager.is_light_theme()
+        c = QColor(250, 251, 252) if light else QColor(14, 16, 20)
+        c.setAlphaF(0.60 if light else 0.58)
+        return c
+
+    def paintEvent(self, e) -> None:
+        """在子控件之下铺一层纵向渐变雾化底。
+
+        标题栏自身透明、直接叠在窗口壁纸上；前景色只跟主题明暗走，壁纸局部
+        亮暗与主题相反时（浅色主题 + 深色天空）对比度会跌到 1:1 附近。父 widget
+        先于子控件绘制，这层雾天然垫在 tab 文字/图标之下，不改变壁纸层逻辑。
+        """
+        super().paintEvent(e)
+        if getattr(self, "_minimal", False):
+            return  # 插件独立弹窗无壁纸，避免整条发灰
+        base = self._scrim_base_color()
+        grad = QLinearGradient(0, 0, 0, self.height())
+        for pos, factor in self.SCRIM_ALPHA_STOPS:
+            c = QColor(base)
+            c.setAlphaF(min(1.0, base.alphaF() * factor))
+            grad.setColorAt(pos, c)
+        painter = QPainter(self)
+        painter.fillRect(self.rect(), grad)
+        painter.end()
+
     def refresh_style(self) -> None:
         """主题切换后刷新样式（Colors.refresh() 由调用方先执行）"""
         for b in self._tabs.values():
@@ -1456,6 +1501,8 @@ class CustomTitleBar(TitleBarBase):
         if self._minimal:
             self._apply_plugin_title_style()
         # 品牌（DriFox + 版本号）已按极简要求移除，顶栏只留功能控件。
+        # 雾化底色实时取 token / 主题明暗，切换主题后主动重绘一次
+        self.update()
 
     # ── 内部 ──
 
