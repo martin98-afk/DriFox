@@ -1314,7 +1314,7 @@ class HistoryCard(QWidget):
                 return month_names[session_date.month - 1]
             else:
                 return f"{session_date.year}年"
-        except ValueError, TypeError:
+        except (ValueError, TypeError):
             return "更早"
 
     def _clear_content(self):

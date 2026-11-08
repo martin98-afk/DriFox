@@ -1787,7 +1787,14 @@ def _content_needs_webengine(content: Any) -> bool:
     if content is None:
         return True
     if isinstance(content, list):
-        # content blocks：图片块在 blocks 里有独立类型标记，仅取文本会丢语义 → 保守
+        # content blocks：只认得 text 块的降级判定——list 中出现任何「非 text」
+        # 元素（图片/自定义/思考/工具结果/落盘图片引用，乃至未来新增类型）即保守
+        # 返 True。枚举永远会漏新类型，「认不全就走 WebEngine」对未来自动保守。
+        # 注：image_ref 本应由 revive_vision_image_refs 恢复成 data:image 才进渲染，
+        # 原样进 content_to_markdown 会落空；此处返 True 是冗余保护而非渲染必需。
+        for block in content:
+            if not (isinstance(block, dict) and block.get("type") == "text"):
+                return True
         try:
             from app.core.conversation.message_content import content_to_text
 
@@ -1796,13 +1803,17 @@ def _content_needs_webengine(content: Any) -> bool:
             return True
         if not isinstance(text, str):
             return True
+        if not text:
+            # list 非空但仅取文本为空（tool_result 等块被丢弃）→ 仍有可渲染内容，
+            # 保守走 WebEngine；空列表无内容可降级，与空 str 同语义走 Qt
+            return bool(content)
     elif isinstance(content, str):
         text = content
     else:
         return True
 
     if not text:
-        # 空内容没有可降级的东西
+        # 空内容没有可降级的东西（仅 str 路径能到这里）
         return False
 
     # 插件注册的 fence lang：拿不到表 → 保守

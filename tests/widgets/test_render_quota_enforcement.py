@@ -49,6 +49,13 @@ def _make_window(**overrides):
     win._batch_cards = []
     win._batch_placeholders = {}
     win._current_assistant_card = None
+    win._programmatic_scroll = MagicMock()
+    # 守卫依赖状态（2f22cf81 引入的 loading/jump 守卫在 __new__ 桩上不初始化会
+    # 抛 RuntimeError: super-class __init__() was never called）
+    win._is_loading_history_batches = False
+    win._is_jump_in_flight = lambda: False
+    win._last_visible_card_ids = set()
+    win._pending_lazy_cards = []
     win._is_widget_alive = lambda w: True
     win._log_render_quota = MagicMock()
     win._maybe_strong_recycle = MagicMock()
@@ -93,22 +100,48 @@ def _reset_global_pages():
 # ─── 缺陷 1：补渲染必须计入配额 ───────────────────────────────
 
 
-def test_recycle_path_render_is_counted_toward_quota():
-    """`_recycle_out_of_view_batches` 补渲染出的 viewer 必须写回计数。
+def test_recycle_path_render_is_counted_toward_quota(monkeypatch):
+    """[MEM] 行为级：`_recycle_out_of_view_batches` 的补渲染必须真实写回计数。
 
-    源码级断言：锁定「渲染后按 _lazy_rendered 归属 + 调 _sync_global_rendered_pages」
-    这一对关系。漏掉任一步，配额都会被永久低估（真机表现为淘汰链一次不跑）。
+    回归「配额驱动回收空转」前半段：补渲染（ensure_rendered）若不写回
+    `_rendered_card_count`，计数恒低于实况 → 配额恒判「未超限」→ 淘汰链
+    一次不跑（实验 10 实证）。构造 1 批 2 张未渲染卡，跑一次回收器，
+    断言计数实测从 0 写回 2 且两卡的 ensure_rendered 真的被调用。
+    （替代旧版源码字符串断言；isinstance 门控经 monkeypatch 模块内
+    MessageCard 指向轻量桩类通过，生产代码零改动。）
     """
-    text = _src()
-    start = text.index("def _recycle_out_of_view_batches(")
-    end = text.index("def _register_unloaded_pid(", start)
-    body = text[start:end]
-    assert "rendered_delta" in body, "补渲染必须累计本批新增渲染数"
-    assert "_sync_global_rendered_pages(self._rendered_card_count + rendered_delta)" in body, (
-        "补渲染后必须把计数写回 _rendered_card_count（否则配额失效）"
+    import app.main_widget as mw
+
+    class _FakeMessageCard:
+        def __init__(self, idx):
+            self._message_index = idx
+            self._lazy_rendered = False  # 未渲染（漏记态）
+            self.render_calls = 0
+
+        def ensure_rendered(self):
+            self.render_calls += 1
+            self._lazy_rendered = True
+
+    monkeypatch.setattr(mw, "MessageCard", _FakeMessageCard)
+    cards = [_FakeMessageCard(idx=0), _FakeMessageCard(idx=1)]
+    win = _make_window(
+        _batch_cards=[cards],
+        _rendered_card_count=0,  # 漏记态：实物未渲染、计数 0
+        _effective_max_rendered_cards=lambda: 6,
+        _is_loading_history_batches=False,
+        _is_jump_in_flight=lambda: False,
+        _incremental_visible_batch_count=8,
+        _virtual_scroll_buffer=1,
+        _resolve_viewport_range=lambda: (0, 0),
+        _recycle_lru_batches=MagicMock(),
     )
-    # 归属口径：以渲染后的 _lazy_rendered 为准（可见性门控会让 ensure_rendered 空转）
-    assert 'getattr(card, "_lazy_rendered", False)' in body
+
+    win._recycle_out_of_view_batches()
+
+    for c in cards:
+        assert c.render_calls == 1, "补渲染必须真的调用 ensure_rendered"
+        assert c._lazy_rendered is True
+    assert win._rendered_card_count == 2, "补渲染必须把计数从 0 写回实况 2"
 
 
 def test_recount_helper_uses_batch_cards_and_lazy_flag():
@@ -128,6 +161,46 @@ def test_recount_helper_uses_batch_cards_and_lazy_flag():
 
 # ─── 缺陷 2：保留范围必须基于真实视口 ─────────────────────────
 
+
+
+def test_stale_zero_count_recovers_before_quota_check():
+    """[MEM] 计数漂移钉子：实物 40 / 计数 0 → 配额判断前校准为 40 → 触发卸载。
+
+    回归「配额驱动回收空转」：懒渲染消费路径漏更新计数 → `_rendered_card_count`
+    恒 0 → `0 <= quota` 恒成立 → 淘汰链一次不跑（实验 10 的另一半）。修复在
+    `_recycle_lru_batches` 入口对「明显不一致」（计数 0 或 > 批次总数）先按
+    实况校准，再进配额比较。
+    """
+    cards = [[_card(True, idx=i)] for i in range(40)]
+    unloaded = []
+    win = _make_window(
+        _batch_cards=cards,
+        _rendered_card_count=0,
+        _effective_max_rendered_cards=lambda: 6,
+        _is_loading_history_batches=False,
+        _is_jump_in_flight=lambda: False,
+        _batch_fully_rendered=lambda cards_: all(
+            getattr(c, "_lazy_rendered", False) for c in cards_
+        ),
+        _batch_is_protected=lambda idx, vp_range: False,
+        _batch_distance=lambda idx, vp_range: 10 + idx,
+        _resolve_viewport_range=lambda: (0, 1),
+        _batch_is_streaming_or_welcome=lambda idx: False,
+        _virtual_buffer_batches=lambda: 2,
+    )
+
+    def _fake_unload(idx):
+        win._batch_cards[idx] = None
+        unloaded.append(idx)
+        win._rendered_card_count -= 1
+        return 0
+
+    win._unload_batch = _fake_unload
+
+    win._recycle_lru_batches()
+
+    assert win._rendered_card_count <= 6, "必须裁到配额内"
+    assert len(unloaded) >= 34, "40 - quota(6) = 34 批应被卸载"
 
 def _patch_layout_geometry(win, entries):
     """entries: [(index, top, height)] → 让 chat_layout 返回带几何的卡片。"""
@@ -230,12 +303,20 @@ def test_lru_recycle_degrades_when_all_batches_protected():
     """全部批次落在可视区 ±1 内时，仍要按距离降级淘汰到配额内。
 
     修复前：candidates 为空 → 循环不执行 → 计数永久停在超配额状态。
+
+    T42 语义收紧后：降级候选只有 dist > _virtual_buffer_batches()（桩上回退 1）
+    才会被真的卸载，dist ≤ buffer 的仍被「卸了立刻被建回」护栏挡住。故视口取
+    (3,4)：dist(0)=2 > 1 是唯一可降级批次，dist(5)=0 在视口邻域守住。
     """
     win = _make_window()
     win._batch_cards = [[_card()] for _ in range(6)]
     win._rendered_card_count = 6
     win._effective_max_rendered_cards = lambda: 3
-    win._viewport_batch_range = lambda: (2, 3)  # 全部 6 批都在 ±1 保护范围内
+    win._viewport_batch_range = lambda: (3, 4)
+    # 真实卡片高度：MagicMock 的 int(height())=1px 会让 _restore_window_batches
+    # 的像素累加永远凑不满 need_px → 保护窗口被 limit 顶成全表 → 无候选（假红）
+    for batch in win._batch_cards:
+        batch[0].height.return_value = 3000
     unloaded = []
 
     def _fake_unload(idx):
@@ -247,10 +328,11 @@ def test_lru_recycle_degrades_when_all_batches_protected():
     win._unload_batch = _fake_unload
     win._recycle_lru_batches()
 
-    # 视口 = (2,3) → 保护区间 [1,4]；其中 0/5 距离 1（可淘汰），1/4 距离 0（视口邻域，守住）
-    assert unloaded == [0, 5], f"应按距离最远优先淘汰，实际 {unloaded}"
-    assert win._rendered_card_count == 4, "视口邻域守住后计数停在该处，不会强压到配额"
-    assert win._batch_cards[1] is not None and win._batch_cards[4] is not None
+    # 视口 = (3,4) → 保护窗口 =1（3000px/批 一步凑满 need_px）→ dist≤1 全保护；
+    # dist(0)=2 > buffer=1 → 主候选直接淘汰；降级候选（dist≤1）被护栏 break
+    assert unloaded == [0], f"dist>buffer 的最远批应被淘汰，其余守住，实际 {unloaded}"
+    assert win._rendered_card_count == 5, "主候选卸完计数回落但仍超配额，降级护栏截停"
+    assert win._batch_cards[1] is not None and win._batch_cards[5] is not None
 
 
 def test_lru_recycle_never_unloads_viewport_batches():
@@ -287,3 +369,296 @@ def test_lru_recycle_noop_within_quota():
     win._recycle_lru_batches()
 
     win._unload_batch.assert_not_called()
+
+# ─── 守卫拒绝分支：加载中 / 跳转中必须零卸载（2f22cf81 守卫）────────
+
+def test_loading_history_guard_blocks_unload():
+    """守卫 A：历史加载中（`_is_loading_history_batches=True`）必须零卸载。
+
+    加载中布局是中间态：回收器会拆掉视口外的目标批次 → 跳转落点失败
+    （真机日志：跳转瞬间连着回收 8 批 → Card not found → 视口留在底部）。
+    超配额也不得例外——配额压力由 45s 兜底节拍避让，不在本入口抢跑。
+    """
+    cards = [[_card(True, idx=i)] for i in range(10)]
+    unloaded = []
+    win = _make_window(
+        _batch_cards=cards,
+        _rendered_card_count=10,  # 超 quota 6：证明守卫优先于配额压力
+        _effective_max_rendered_cards=lambda: 6,
+        _is_loading_history_batches=True,  # 守卫命中
+        _is_jump_in_flight=lambda: False,
+        _resolve_viewport_range=lambda: (0, 1),
+        _batch_is_protected=lambda idx, vp: False,
+        _batch_distance=lambda idx, vp: 10 + idx,
+        _batch_fully_rendered=lambda cards_: all(
+            getattr(c, "_lazy_rendered", False) for c in cards_
+        ),
+        _batch_is_streaming_or_welcome=lambda idx: False,
+        _virtual_buffer_batches=lambda: 2,
+    )
+
+    def _fake_unload(idx):
+        unloaded.append(idx)
+        win._rendered_card_count -= 1
+        return 0
+
+    win._unload_batch = _fake_unload
+
+    win._recycle_lru_batches()
+
+    assert unloaded == [], "加载中守卫必须零卸载"
+    assert win._rendered_card_count == 10, "计数不得被守卫分支改动"
+
+def test_jump_in_flight_guard_blocks_unload():
+    """守卫 B：跳转收敛链未完成（`_is_jump_in_flight=True`）必须零卸载。"""
+    cards = [[_card(True, idx=i)] for i in range(10)]
+    unloaded = []
+    win = _make_window(
+        _batch_cards=cards,
+        _rendered_card_count=10,  # 超 quota 6：证明守卫优先于配额压力
+        _effective_max_rendered_cards=lambda: 6,
+        _is_loading_history_batches=False,
+        _is_jump_in_flight=lambda: True,  # 守卫命中
+        _resolve_viewport_range=lambda: (0, 1),
+        _batch_is_protected=lambda idx, vp: False,
+        _batch_distance=lambda idx, vp: 10 + idx,
+        _batch_fully_rendered=lambda cards_: all(
+            getattr(c, "_lazy_rendered", False) for c in cards_
+        ),
+        _batch_is_streaming_or_welcome=lambda idx: False,
+        _virtual_buffer_batches=lambda: 2,
+    )
+
+    def _fake_unload(idx):
+        unloaded.append(idx)
+        win._rendered_card_count -= 1
+        return 0
+
+    win._unload_batch = _fake_unload
+
+    win._recycle_lru_batches()
+
+    assert unloaded == [], "跳转中守卫必须零卸载"
+    assert win._rendered_card_count == 10, "计数不得被守卫分支改动"
+
+# ─── 池化成功场景：`_unload_batch` 必须按入口态递减（建议 B 测试锚）───
+
+def test_unload_batch_counts_before_detach_pooled_success(monkeypatch):
+    """池化成功（detach 置 `_lazy_rendered=False`）不得漏减：4 张 True 卡、
+    detach 桩把其中 2 张翻 False，断言递减 **4**（入口态）而非 2（detach 后态）。
+
+    防止后人把统计点挪回 detach 之后——挪回后本用例立即红（递减变 2）。
+    pre/post 自检：卸载后强制 recount，pre == post 才算记账与实况一致。
+    """
+    import app.main_widget as mw
+
+    class _PoolableCard:
+        def __init__(self, idx):
+            self._message_index = idx
+            self._lazy_rendered = True
+            self._renderer_pid = 0
+            self._height = 300
+            self.viewer = None
+
+        def height(self):
+            return self._height
+
+    monkeypatch.setattr(mw, "MessageCard", _PoolableCard)
+    cards = [_PoolableCard(idx=i) for i in range(4)]
+    win = _make_window(
+        _batch_cards=[cards],
+        _rendered_card_count=4,
+        _is_widget_alive=lambda w: True,
+        _batch_fully_rendered=lambda cards_: all(
+            getattr(c, "_lazy_rendered", False) for c in cards_
+        ),
+        _batch_slot_gap=lambda n: 0,
+        _is_loading_history_batches=False,
+        _is_jump_in_flight=lambda: False,
+        _is_virtual_recycling=False,
+    )
+    # 池化语义：前 2 张池化成功（detach 置 False），后 2 张池化失败
+    def _detach(card):
+        if card is cards[0] or card is cards[1]:
+            setattr(card, "_lazy_rendered", False)
+        return True
+
+    win.chat_layout = MagicMock()
+    win.chat_layout.indexOf.return_value = 0
+    win._try_detach_card_viewer = _detach
+    win._register_unloaded_pid = MagicMock()
+    win._install_batch_placeholder = MagicMock(return_value=True)
+    win._last_visible_card_ids = set()
+    win._maybe_strong_recycle = MagicMock()
+    win._programmatic_scroll = MagicMock()
+    win._unload_batch = lambda idx: OpenAIChatToolWindow._unload_batch(win, idx)
+
+    result = win._unload_batch(0)
+
+    assert result == 0, "占位成功时净高度为 0"
+    assert win._batch_cards[0] is None
+    # 入口态递减：4 张全部计减（含池化成功的 2 张）——统计点若在 detach 后则漏减为 2
+    assert win._rendered_card_count == 0, (
+        f"池化成功 2 张不得漏减：期望 4-4=0，实际 {win._rendered_card_count}"
+    )
+    # pre/post 自检：记账与实况一致
+    pre = win._rendered_card_count
+    win._recount_rendered_cards()
+    post = win._rendered_card_count
+    assert pre == post, f"记账与实况漂移：pre={pre} post={post}"
+
+
+# ─── 方向测试：上方卸载递减 + 重建路径记账（双向 pre/post）───────────
+
+def test_above_batches_decrement_on_recycle(monkeypatch):
+    """[MEM] 上方（历史方向）批次卸载必须按入口态递减计数。
+
+    修复前上方段只置 None 不递减：卸载后计数虚高不回落 → 配额永不满足 →
+    下方批次被殃及。修复后上方卸载即递减：5→2（上方 3 批裁掉，quota 2
+    之上的部分回收，视口附近 2 批不受影响）。
+    pre/post 自检：recount 后计数与实况一致（上方 3 批置 None 后实况只剩
+    下方 2 批，初始计数按实况 5 构造）。
+    """
+    import app.main_widget as mw
+
+    class _FakeMessageCard:
+        def __init__(self, idx):
+            self._message_index = idx
+            self._lazy_rendered = True
+            self._is_welcome = False
+            self._height = 100
+            self.viewer = None
+
+        def height(self):
+            return self._height
+
+    monkeypatch.setattr(mw, "MessageCard", _FakeMessageCard)
+    cards_by_batch = [
+        [_FakeMessageCard(0)],
+        [_FakeMessageCard(1)],
+        [_FakeMessageCard(2)],
+        None, None, None, None, None,
+        [_FakeMessageCard(8)],
+        [_FakeMessageCard(9)],
+    ]
+    win = _make_window(
+        _batch_cards=cards_by_batch,
+        _rendered_card_count=5,  # 实况 = 上方 3 + 下方 2
+        _effective_max_rendered_cards=lambda: 2,
+        _is_loading_history_batches=False,
+        _is_jump_in_flight=lambda: False,
+        _incremental_visible_batch_count=1,
+        _virtual_scroll_buffer=1,
+        _resolve_viewport_range=lambda: (8, 9),
+        _message_batch=[None] * 10,
+        _current_assistant_card=None,
+        _batch_is_protected=lambda idx, vp: False,
+        _batch_distance=lambda idx, vp: 10 + idx,
+        _batch_fully_rendered=lambda cards_: all(
+            getattr(c, "_lazy_rendered", False) for c in cards_
+        ),
+        _batch_is_streaming_or_welcome=lambda idx: False,
+        _virtual_buffer_batches=lambda: 2,
+        _maybe_strong_recycle=MagicMock(),
+    )
+    win.chat_layout = MagicMock()
+    win.chat_layout.indexOf.return_value = 0
+    win._try_detach_card_viewer = lambda c: True
+
+    win._recycle_out_of_view_batches()
+
+    # 上方 3 批被卸载（置 None），下方视口批次保留
+    assert win._batch_cards[0] is None and win._batch_cards[1] is None and win._batch_cards[2] is None
+    assert win._batch_cards[8] is not None and win._batch_cards[9] is not None
+    # 入口态递减：5 - 3（上方）= 2
+    assert win._rendered_card_count == 2, (
+        f"上方卸载必须递减计数：期望 2，实际 {win._rendered_card_count}"
+    )
+    # pre/post 自检：记账与实况一致
+    pre = win._rendered_card_count
+    win._recount_rendered_cards()
+    post = win._rendered_card_count
+    assert pre == post, f"记账与实况漂移：pre={pre} post={post}"
+def test_restore_step_counts_new_cards(monkeypatch):
+    """[MEM] 重建路径记账：原位重建的新卡必须累加计数。
+
+    回归「重建渲染 6 张只记 3 张」（evidence-scout 实测）：缺口全部来自
+    「第 1.5 步原位重建」——\`_render_message_to_card\` 新建卡片写回
+    \`_batch_cards\`，但没有任何计数更新 → 计数低估 → 配额恒判「未超限」。
+    修复在重建成功后按实况对账（\`_recount_rendered_cards\`）。
+    计数流验证：初始 3（上方 3 批）→ 重建 +1 = 4 → 上方批次卸载 -3 = 1。
+    pre/post 自检：卸载后 recount，计数与实况一致。
+    """
+    import app.main_widget as mw
+
+    class _FakeLazyCard:
+        def __init__(self, idx):
+            self._message_index = idx
+            self._lazy_rendered = True
+            self._is_welcome = False
+            self._height = 100
+            self.viewer = None
+
+        def height(self):
+            return self._height
+
+        def is_layout_height_settled(self):
+            return True  # 已落定（缺此探针 _batch_fully_rendered 判 False 整批跳过）
+
+    monkeypatch.setattr(mw, "MessageCard", _FakeLazyCard)
+    cards_by_batch = [
+        [_FakeLazyCard(0)],
+        [_FakeLazyCard(1)],
+        [_FakeLazyCard(2)],
+        None,  # batch 3：占位批次（将被原位重建）
+    ]
+    win = _make_window(
+        _batch_cards=cards_by_batch,
+        _rendered_card_count=3,  # 上方 3 批已渲染
+        _effective_max_rendered_cards=lambda: 99,
+        _is_loading_history_batches=False,
+        _is_jump_in_flight=lambda: False,
+        _incremental_visible_batch_count=0,
+        _virtual_scroll_buffer=0,
+        _resolve_viewport_range=lambda: (3, 3),
+        _message_batch=[None, None, None, [{"role": "assistant", "content": "重建批次的消息"}]],
+        _current_assistant_card=None,
+        _last_visible_card_ids=set(),
+        _virtual_buffer_batches=lambda: 2,
+        _maybe_strong_recycle=MagicMock(),
+        _recycle_lru_batches=MagicMock(),
+    )
+    ph = MagicMock()
+    ph.height.return_value = 200
+    win._batch_placeholders = {3: ph}
+
+    def _fake_render(batch, batch_offset, anchor_layout_index):
+        # 模拟 \`_render_message_to_card\` 的产物：新卡片写回批次（已渲染态）
+        win._batch_cards[batch_offset] = [_FakeLazyCard(idx=batch_offset)]
+
+    win.chat_layout.indexOf.return_value = 0
+    win._render_message_to_card = _fake_render
+
+    decr_calls = []
+    real_decr = OpenAIChatToolWindow._decr_rendered_count
+    win._decr_rendered_count = lambda n: (decr_calls.append(n), real_decr(win, n))
+
+    win._recycle_out_of_view_batches()
+
+    # 终态：重建 +1（batch3）与上方卸载 -3（batch0-2）在同一次调用内完成 → 1
+    assert win._batch_cards[3] is not None, "batch3 占位必须被原位重建"
+    assert win._rendered_card_count == 1, (
+        f"重建 +1 / 上方卸载 -3 的净效果：期望 1，实际 {win._rendered_card_count}"
+    )
+    # 「重建的新卡被记账」独立验证：再模拟一次原位重建（batch0 复活 +1 卡），
+    # 对账式 recount 应把新卡计入（3→2 之外的新增 → 2）
+    win._batch_cards[0] = [_FakeLazyCard(idx=0)]
+    win._recount_rendered_cards()
+    assert win._rendered_card_count == 2, (
+        f"原位重建的新卡必须被对账计入：期望 2，实际 {win._rendered_card_count}"
+    )
+    # pre/post 自检：recount 幂等（连续两次第二次 diff=0）
+    pre = win._rendered_card_count
+    win._recount_rendered_cards()
+    post = win._rendered_card_count
+    assert pre == post, f"记账与实况漂移：pre={pre} post={post}"
