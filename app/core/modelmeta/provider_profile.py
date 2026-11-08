@@ -221,8 +221,15 @@ def resolve_extra_headers(
             if value is None:
                 continue
             # 可调用值 = 动态头：按当前请求的 llm_config 取值
-            # （如 CodeBuddy 按各配置的 refresh_token 换 access_token）
-            headers[str(name)] = str(value(llm_config)) if callable(value) else str(value)
+            # （如 CodeBuddy 按各配置的 refresh_token 换 access_token）。
+            # 求值后为 None = 本次请求不发送该头：OpenCode Go 无 workspace 时
+            # 空值 x-opencode-org-id 会被网关判 400 且响应体为空（2026-11-08 实测），
+            # 日志只剩 "Error response body:" 无法归因。空串仍照发（保留
+            # 「空 Authorization → 网关 401」的既有语义）。
+            resolved = value(llm_config) if callable(value) else value
+            if resolved is None:
+                continue
+            headers[str(name)] = str(resolved)
     if session_id:
         header = profile.get("session_header")
         if header:

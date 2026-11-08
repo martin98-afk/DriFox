@@ -33,6 +33,7 @@ All notable changes to this project will be documented in this file.
 - **流式思考显示回归**: 恢复国外模型思考字段归一（流式思考内容不显示）；Responses API 判定按 gpt 主版本号通用化，修 gpt-6-luna 漏判；恢复 worker `_chat_transport` 测试注入点读取。
 - **启动与内存性能批次**: MCP/LSP SDK 改按需导入（延迟启动批次）；懒排空期间批量高度提交 + 空 doc 上报黑窗；代码块高亮 memo LRU；视觉图片发送后回收与压缩 LRU；thread_guard 仅启动时打墓碑；幻觉工具分派的 mcp_manager 空指针防护；perf_regression 版本漂移修复。
 - **tools schema 稳定**: 插件变更期间保持 tools schema 稳定，防止快照失效。
+- **OpenCode Go (OAuth) 对话 400（响应体为空）**: `extra_headers` 里 `x-opencode-org-id` 的取值 callable 在「Go 公开端点」或「账号无 workspace」时返回空串，通用头解析原样写出，网关对空值 org 头直接 400 且不回 body（日志只剩 `Error response body:`，无法归因）。修复：`resolve_extra_headers` 支持 callable 返回 `None` 表示省略该头；opencode 插件对 Go 端点（`/inference/go/`）与无 workspace 账号不再发 org 头（带任意非空 org 打到 Go 端点会 403）。回归测试 `tests/plugins/test_opencode_zen_oauth.py`。
 - **transport 重构回归**: 修复重构后 12 个遗留测试失败。
 - **agent_trace 日志**: session 就绪与聚合条件日志改进。
 

@@ -196,10 +196,14 @@ def test_dynamic_headers_from_cache(plugin):
 
 
 def test_authorization_failure_does_not_throw(plugin):
-    """callable 抛异常会被 resolve_extra_headers 吞掉整组头，故必须内部消化。"""
+    """callable 抛异常会被 resolve_extra_headers 吞掉整组头，故必须内部消化。
+
+    Authorization 失败返回空串（发空头让网关回 401）；org 头失败返回 None
+    （省略头，空值头会被网关判 400 且响应体为空）。
+    """
     cfg = {"API_KEY": "rt-bad"}
     assert plugin._OAUTH_EXTRA_HEADERS["Authorization"](cfg) == ""
-    assert plugin._OAUTH_EXTRA_HEADERS["x-opencode-org-id"](cfg) == ""
+    assert plugin._OAUTH_EXTRA_HEADERS["x-opencode-org-id"](cfg) is None
 
 
 def test_refresh_rotates_access_token_and_stable_cache_key(plugin, monkeypatch):
@@ -437,6 +441,65 @@ def test_resolve_extra_headers_oauth_vs_api_key_isolation(plugin, monkeypatch, t
     assert "Authorization" not in zen_headers
     assert "x-opencode-org-id" not in zen_headers
     assert zen_headers.get("x-opencode-session") == "sess-2"
+
+
+def test_org_header_omitted_for_go_endpoint_and_missing_workspace(plugin):
+    """Go 公开端点不绑 workspace；无 org 账号也不得发空头。
+
+    实测（2026-11-08）：x-opencode-org-id 空值 → 网关 400 且响应体为空
+    （日志只剩「Error response body:」无法归因）；非空 org 打到 Go 端点 → 403。
+    """
+    oa = plugin._load_oauth()
+    oa.cache_put(
+        "rt-2",
+        access_token="at-2",
+        refresh_token="rt-2",
+        expires_at=time.time() + 3600,
+        org_id="org-2",
+    )
+    go_cfg = {"API_KEY": "rt-2", "API_URL": "https://opencode.ai/inference/go/openai/v1"}
+    assert plugin._OAUTH_EXTRA_HEADERS["x-opencode-org-id"](go_cfg) is None
+
+    oa.cache_put(
+        "rt-3",
+        access_token="at-3",
+        refresh_token="rt-3",
+        expires_at=time.time() + 3600,
+    )
+    zen_cfg = {"API_KEY": "rt-3", "API_URL": "https://opencode.ai/inference/openai/v1"}
+    assert plugin._OAUTH_EXTRA_HEADERS["x-opencode-org-id"](zen_cfg) is None
+
+
+def test_resolve_extra_headers_omits_none_valued_header(plugin, monkeypatch, tmp_path):
+    """callable 返回 None → 该头不出现（而非空串）：Go OAuth 端到端回归。"""
+    from app.core.modelmeta.provider_profile import resolve_extra_headers
+    from app.plugins.registries.provider_registry import ProviderRegistry
+
+    reg = ProviderRegistry()
+    plugin.register(reg)
+    monkeypatch.setattr(ProviderRegistry, "get_instance", staticmethod(lambda: reg))
+
+    oa = plugin._load_oauth()
+    oa._CACHE_DIR = tmp_path
+    oa.cache_put(
+        "rt-go",
+        access_token="at-go",
+        refresh_token="rt-go",
+        expires_at=time.time() + 3600,
+    )
+
+    headers = resolve_extra_headers(
+        {
+            "provider_name": "OpenCode Go (OAuth)",
+            "API_KEY": "rt-go",
+            "API_URL": "https://opencode.ai/inference/go/openai/v1",
+            "模型名称": "beam-free",
+        },
+        "sess-9",
+    )
+    assert "x-opencode-org-id" not in headers
+    assert headers["Authorization"] == "Bearer at-go"
+    assert headers["x-opencode-session"] == "sess-9"
 
 
 # ── 端点探活口径（纯解析，不发请求）────────────────────────────

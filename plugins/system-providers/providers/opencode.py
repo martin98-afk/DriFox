@@ -197,13 +197,22 @@ def _oauth_authorization(llm_config: dict) -> str:
     return f"Bearer {access}" if access else ""
 
 
-def _oauth_org_header(llm_config: dict) -> str:
-    """workspace 标识头。与 Authorization 同源于缓存，两次调用经刷新锁去重。"""
+def _oauth_org_header(llm_config: dict) -> Optional[str]:
+    """workspace 标识头。与 Authorization 同源于缓存，两次调用经刷新锁去重。
+
+    两种情况下不发送该头（返回 None）：
+    - Go 公开端点（/inference/go/）不绑 workspace，带任意 org 头会被判
+      403 Workspace access denied（2026-11-08 实测）。
+    - 账号无 workspace：空值头会被网关判 400 且响应体为空，日志无法归因。
+    """
+    url = str((llm_config or {}).get("API_URL", "") or "")
+    if "/inference/go/" in url:
+        return None
     try:
         _access, org = _load_oauth().get_auth_context(llm_config)
     except Exception:
-        return ""
-    return org
+        return None
+    return org or None
 
 
 _OAUTH_EXTRA_HEADERS = {
