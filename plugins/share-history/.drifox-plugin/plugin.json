@@ -4,6 +4,7 @@
         "dark": "icon_dark.svg"
     },
     "name": "share-history",
+    "display_name_zh": "分享记录",
     "description": "分享记录管理器 - 追踪会话分享和项目导出的历史记录",
     "version": "1.0.0",
     "author": {

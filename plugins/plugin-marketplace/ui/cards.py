@@ -22,6 +22,8 @@ from typing import Callable, Optional
 
 from loguru import logger
 
+from .display_name import plugin_display_name
+
 # FluentIcon SVG 渲染缓存补丁：必须在导入 qfluentwidgets 前生效
 from . import _icon_cache_patch as _icon_patch
 
@@ -707,7 +709,7 @@ class _PluginDetailDialog(MaskDialogBase):
         layout.setSpacing(0)
 
         # ── 标题行：名称 + 版本徽标（徽标独立成 chip，不再用内联 HTML 拼字符串） ──
-        name = self._meta.get("name", "未知")
+        name = plugin_display_name(self._meta)
         remote_ver = self._meta.get("version", "")
         head = QWidget(self.widget)
         head.setStyleSheet("background: transparent;")
@@ -1655,7 +1657,7 @@ class _PluginRow(QFrame):
         # info 在行布局中的固定 index（heightForWidth 手动计算用）
         self._info_index = 1
 
-        name = self._meta.get("name", "未知")
+        name = plugin_display_name(self._meta)
         self._name_raw = name
         # 标题行：只有插件名（下载量已移到下方元信息行，见 meta_row）
         title_row = QWidget(self)
@@ -2115,7 +2117,7 @@ class _PluginRow(QFrame):
 
         # Fallback to initials avatar
         return SquircleAvatar(
-            extract_initials(plugin_name),
+            extract_initials(plugin_display_name(self._meta)),
             name_color(plugin_name),
             self,
             size=icon_size,
@@ -2350,7 +2352,7 @@ class _ExploreCard(QFrame):
         self._avatar = self._create_icon_widget(head)
         head_lay.addWidget(self._avatar)
 
-        name = self._meta.get("name", "未知")
+        name = plugin_display_name(self._meta)
         self._name_label = QLabel(name, head)
         self._name_label.setObjectName("exploreCardName")
         self._name_label.setStyleSheet(
@@ -3999,6 +4001,7 @@ class MarketplaceCard(QWidget):
             "_local_only": True,
             "_status": status,
             "_marketplace": "本地",
+            "display_name_zh": "",
         }
         try:
             import json as _json
@@ -4008,6 +4011,7 @@ class MarketplaceCard(QWidget):
                 if _mp.exists():
                     m = _json.loads(_mp.read_text(encoding="utf-8"))
                     meta["description"] = m.get("description", "")
+                    meta["display_name_zh"] = m.get("display_name_zh", "")
                     meta["author"] = (
                         m.get("author", {}).get("name", "")
                         if isinstance(m.get("author"), dict)
@@ -4045,6 +4049,7 @@ class MarketplaceCard(QWidget):
             "_local_only": True,
             "_status": status,
             "_marketplace": "本地",
+            "display_name_zh": "",
         }
         try:
             import json as _json
@@ -4054,6 +4059,7 @@ class MarketplaceCard(QWidget):
                 if _mp.exists():
                     m = _json.loads(_mp.read_text(encoding="utf-8"))
                     meta["description"] = m.get("description", "")
+                    meta["display_name_zh"] = m.get("display_name_zh", "")
                     meta["author"] = (
                         m.get("author", {}).get("name", "")
                         if isinstance(m.get("author"), dict)
@@ -4095,9 +4101,14 @@ class MarketplaceCard(QWidget):
         Returns: bool
         """
         name = p.get("name", "")
+        display = plugin_display_name(p)
 
         if query:
-            if query not in name.lower() and query not in (p.get("description", "")).lower():
+            if (
+                query not in name.lower()
+                and query not in display.lower()
+                and query not in (p.get("description", "")).lower()
+            ):
                 tags = p.get("_cached_tags", [])
                 if not any(query in t.lower() for t in tags):
                     return False
@@ -5729,7 +5740,7 @@ class MarketplaceCard(QWidget):
         act_lb.setStyleSheet(f"color: {tcs}; font-size: {fs_row}px; background: transparent;{ff_qss}")
         lay.addWidget(act_lb)
 
-        name = rec.get("name", "")
+        name = plugin_display_name(rec.get("meta") or {}) or rec.get("name", "")
         name_lb = QLabel(name, row)
         name_lb.setObjectName("proxyRecordRow")
         name_lb.setStyleSheet(f"color: {tc}; font-size: {fs_row}px; background: transparent;{ff_qss}")
@@ -5795,7 +5806,7 @@ class MarketplaceCard(QWidget):
             self._show_proxy_info("缺少插件元数据，无法重试", error=True)
             return
         action_text = "安装" if rec.get("action") == "install" else "更新"
-        name = rec.get("name", "")
+        name = plugin_display_name(rec.get("meta") or {}) or rec.get("name", "")
         if btn is not None:
             btn.setEnabled(False)
             btn.setText("重试中…")

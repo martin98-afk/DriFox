@@ -4,6 +4,7 @@
     "dark": "icon_dark.svg"
   },
   "name": "system-core",
+  "display_name_zh": "内置核心工具",
   "description": "DriFox 内置核心工具：文件读写（read/write/edit/grep/glob）、终端执行（bash/后台任务）、待办（todowrite）",
   "version": "1.0.0",
   "author": {

@@ -4,6 +4,7 @@
     "dark": "icon_dark.svg"
   },
   "name": "system-skills",
+  "display_name_zh": "内置技能库",
   "description": "DriFox 内置技能库：brainstorming / tdd / diagnose / drifox-dev / visualization 等",
   "version": "1.0.0",
   "author": {

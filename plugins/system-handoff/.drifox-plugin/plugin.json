@@ -4,6 +4,7 @@
     "dark": "icon_dark.svg"
   },
   "name": "system-handoff",
+  "display_name_zh": "会话交接",
   "description": "会话交接：上下文接近上限时把工作状态写成交接文档，切新会话继续，不断档",
   "version": "1.0.0",
   "author": {

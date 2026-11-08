@@ -16,6 +16,7 @@ from typing import Dict, List, Optional, Tuple
 # 缺省 None 表示：类型不符时直接丢弃该字段（视为未声明，下游按缺省语义处理）
 SPEC: Dict[str, tuple] = {
     "name": ((str,), None),  # 缺失回退目录名（fallback_name）
+    "display_name_zh": ((str,), None),  # 中文展示别名，可选；市场 UI 优先显示
     "version": ((str,), "0.0.0"),
     "type": ((str,), None),  # 枚举值非关键，宽容
     "icon": ((str, dict), None),

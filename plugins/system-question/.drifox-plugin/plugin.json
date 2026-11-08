@@ -4,6 +4,7 @@
     "dark": "icon_dark.svg"
   },
   "name": "system-question",
+  "display_name_zh": "内置提问工具",
   "description": "DriFox 内置提问工具：向用户提问（选项/多选/自定义），支持超时跳过与超时 AI 代答",
   "version": "1.0.0",
   "author": {

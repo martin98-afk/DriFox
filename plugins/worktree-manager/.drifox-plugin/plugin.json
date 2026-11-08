@@ -4,6 +4,7 @@
     "dark": "icon.svg"
   },
   "name": "worktree-manager",
+  "display_name_zh": "工作树管理",
   "description": "DriFox 内置 UI 组件：工作台工作树页、git worktree 管理与分支标签",
   "version": "1.0.0",
   "author": {

@@ -4,6 +4,7 @@
     "dark": "icon_dark.svg"
   },
   "name": "system-team",
+  "display_name_zh": "内置团队工具",
   "description": "DriFox 内置团队工具：组建/加入团队、派发任务邮件与成员查询",
   "version": "1.0.0",
   "author": {

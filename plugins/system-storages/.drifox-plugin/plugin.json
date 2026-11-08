@@ -4,6 +4,7 @@
     "dark": "icon_dark.svg"
   },
   "name": "system-storages",
+  "display_name_zh": "内置会话存储",
   "description": "DriFox 内置会话存储引擎：SQLite",
   "version": "1.0.0",
   "author": {

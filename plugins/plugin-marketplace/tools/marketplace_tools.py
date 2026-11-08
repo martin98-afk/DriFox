@@ -88,6 +88,13 @@ def _installer():
     return _ui_module("installer").get_installer()
 
 
+def _display_name(meta: dict) -> str:
+    """展示名：中文别名优先，缺失回退标识名（与 ui/display_name.py 同口径）。"""
+    alias = meta.get("display_name_zh")
+    if isinstance(alias, str) and alias.strip():
+        return alias.strip()
+    return str(meta.get("name", "") or "")
+
 def _market_data():
     return _ui_module("data")
 
@@ -236,7 +243,7 @@ def _format_plugin_line(idx: int, meta: dict, status_map: dict, inst_map: dict) 
         bits.append(f"来源 {meta['_marketplace']}")
     # 不兼容插件显式标注：AI 推荐/安装前即可看到「装不了」的原因
     bits.extend(_compat_notes(meta))
-    head = f"{idx}. {name} v{ver} | " + " | ".join(bits)
+    head = f"{idx}. {_display_name(meta)} v{ver} | " + " | ".join(bits)
     desc = _shorten(meta.get("description"))
     return f"{head}\n    {desc}" if desc else head
 
@@ -250,6 +257,9 @@ def _match_score(meta: dict, keyword: str) -> int:
         return 80
     if keyword in name:
         return 60
+    display = _display_name(meta).lower()
+    if keyword in display:
+        return 55
     tag_text = " ".join(
         str(t) for t in (list(meta.get("categories") or []) + list(meta.get("tags") or []))
     ).lower()
@@ -562,7 +572,7 @@ def _detail_impl(tool_ctx, **kwargs):
         {name: local_ver} if local_ver else {},
         ver if meta else "",
     )
-    lines = [f"插件 {name} v{ver} | {state}"]
+    lines = [f"插件 {_display_name(info)} v{ver} | {state}"]
     desc = _shorten(info.get("description"), limit=2000)
     if desc:
         lines.append(f"描述：{desc}")

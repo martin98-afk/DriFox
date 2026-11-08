@@ -4,6 +4,7 @@
     "dark": "icon_dark.svg"
   },
   "name": "system-web",
+  "display_name_zh": "内置网络工具",
   "description": "DriFox 内置网络工具：网页搜索与抓取（Tavily / TinyFish，含 API Key 配置）",
   "version": "1.0.0",
   "author": {
