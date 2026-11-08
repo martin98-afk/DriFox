@@ -12,11 +12,13 @@
 - edit：oldString 唯一性校验 + unified diff 产出
 - grep/glob/list/scan_repo：排除目录集合与主程序一致
 """
+import ast
 import base64
 import difflib
 import fnmatch
 import os
 import re
+from uuid import uuid4
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from itertools import islice
 from pathlib import Path
@@ -546,9 +548,31 @@ _MULTI_EDIT_SCHEMA = {
 
 
 def _multi_edit_impl(tool_ctx, **kwargs):
+    """同文件多处编辑（全有或全无 + 原文定位 + 重叠拒绝 + 原子写 + 落盘自校验）。
+
+    语义（2026-11-08 重构，修复「部分失败静默写入」与「流式替换锚点漂移」）：
+    - 全有或全无：任何一条失败（未找到 / 不唯一 / oldString 为空）→ 整体不写盘
+    - 基于原文定位：所有 oldString 在原文上查找并要求唯一；两两区间重叠 → 整体
+      拒绝并报出冲突序号；按 start 倒序拼接，消除流式替换的锚点漂移
+    - 原子写：临时文件 + os.replace，其他进程不会读到中间态
+    - 落盘前自校验：所有 newString 必须原样出现、所有 oldString 不得残留、
+      py 文件 ast.parse 必须通过 —— 任一不过整体不写
+    - P4 跨度体检（py 文件）：改动前后按 AST 比较函数/类跨度，增长超阈值
+      （>50% 或 >100 行）在返回 content 里附 ⚠️ WARNING（不阻断，人工确认）
+
+    EOL 归一化语义（`_normalize_eol_pair`，保留）：归一化**只影响匹配**；匹配
+    成功时写入的 newString 是归一化后的版本（与文件主导行尾一致）。即用户给
+    LF 而文件是 CRLF 时，写入的将是 CRLF 版本——这是现状语义，调用方需要
+    精确字节时请改用单条 edit 或 write。
+
+    读取使用 errors="strict"：非 UTF-8 字节直接报错，不再静默替换为 U+FFFD
+    （旧实现会把坏字节写回文件，属数据损坏）。
+    """
     workdir = Path(tool_ctx["workdir"]) if tool_ctx.get("workdir") else None
     path = kwargs.get("path", "")
     edits = kwargs.get("edits", [])
+    cleanup_note = ""  # tmp 清理结果说明；必须在 try 之前初始化——try 前段
+    # （_resolve/read/_check_modified/定位/自校验）任何异常都会走 except 并引用它
     try:
         full_path = _resolve(workdir, path)
         if not full_path.exists():
@@ -556,9 +580,11 @@ def _multi_edit_impl(tool_ctx, **kwargs):
         check = _check_modified(tool_ctx, workdir, full_path, path)
         if check:
             return check
-        old_content = full_path.read_text(encoding="utf-8", errors="replace", newline="")
-        current = old_content
-        failures = []
+        old_content = full_path.read_text(encoding="utf-8", errors="strict", newline="")
+
+        # ── 第一步：全部 edit 在原文上定位（全有或全无：任何失败整体拒绝）──
+        errors = []
+        prepared = []  # (序号, start, end, old_s, new_s)
         for i, edit in enumerate(edits or []):
             # 键名兼容：camelCase（schema 声明）/ 全小写 / snake_case
             # （上游某些参数规范化路径会把嵌套 dict 键折叠为全小写，历史 bug 免疫）
@@ -566,26 +592,123 @@ def _multi_edit_impl(tool_ctx, **kwargs):
             new_s = edit.get("newString") or edit.get("newstring") or edit.get("new_string") or ""
             if not old_s:
                 # 空串 in 任意内容恒真，会把 replace("", x, 1) 伪装成成功——必须显式失败
-                failures.append(f"Edit #{i + 1} failed: oldString 为空（键名或内容缺失）")
+                errors.append(f"Edit #{i + 1}: oldString 为空（键名或内容缺失）")
                 continue
-            if old_s in current:
-                current = current.replace(old_s, new_s, 1)
-            else:
-                pair = _normalize_eol_pair(current, old_s, new_s)
+            start = old_content.find(old_s)
+            if start < 0:
+                pair = _normalize_eol_pair(old_content, old_s, new_s)
                 if pair is not None:
-                    current = current.replace(pair[0], pair[1], 1)
-                else:
+                    old_s, new_s = pair
+                    start = old_content.find(old_s)
+                if start < 0:
                     snippet = old_s[:50].replace("\n", "\\n")
-                    failures.append(
-                        f"Edit #{i + 1} failed: oldString 未找到。oldString 开头: {snippet!r}"
+                    errors.append(
+                        f"Edit #{i + 1}: oldString 未找到。oldString 开头: {snippet!r}"
                     )
-        if failures and current == old_content:
-            # 全部失败：不写文件，避免破坏原内容
+                    continue
+            count = old_content.count(old_s)
+            if count > 1:
+                errors.append(
+                    f"Edit #{i + 1}: oldString 在原文出现 {count} 次，不唯一。"
+                    "请扩大上下文保唯一，或拆成多次单条 edit。"
+                )
+                continue
+            prepared.append((i, start, start + len(old_s), old_s, new_s))
+
+        if errors:
             return ToolResult(
                 False,
-                error="批量编辑全部失败（文件未改动）：\n" + "\n".join(failures),
+                error="批量编辑未执行（全有或全无：任一条失败即整体不写）：\n"
+                + "\n".join(errors),
             )
-        full_path.write_text(current, encoding="utf-8", newline="")
+
+        # ── 第二步：区间重叠拒绝 ──
+        prepared.sort(key=lambda x: x[1])
+        for a, b in zip(prepared, prepared[1:]):
+            if b[1] < a[2]:
+                return ToolResult(
+                    False,
+                    error=(
+                        f"批量编辑未执行：Edit #{a[0] + 1}（[{a[1]}, {a[2]})）与 "
+                        f"Edit #{b[0] + 1}（[{b[1]}, {b[2]})）区间重叠，无法安全应用。"
+                        "请拆分或扩大各自上下文。"
+                    ),
+                )
+
+        # ── 第三步：按 start 倒序拼接（原文定位，无漂移）──
+        current = old_content
+        for _i, start, end, _old_s, new_s in reversed(prepared):
+            current = current[:start] + new_s + current[end:]
+
+        # ── 第四步：落盘前自校验（任何不过 → 整体不写）──
+        # 残留用「次数守恒」判定而非裸 `old_s in current`：newString 以 oldString
+        # 为前缀时（如 "alpha = 1" → "alpha = 11"），裸 in 必误报。守恒式 =
+        # 替换后 old_s 的出现次数应恰好等于各 newString 注入的子串次数总和
+        # （原文的 1 处已被替换消除）。
+        for i, _start, _end, old_s, _new_s in prepared:
+            injected_total = sum(ns.count(old_s) for _i2, _s2, _e2, _o2, ns in prepared)
+            after = current.count(old_s)
+            if after != injected_total:
+                errors.append(
+                    f"Edit #{i + 1}: 替换未完全生效（oldString 出现次数应为 {injected_total}，实际 {after}）"
+                )
+        for i, _start, _end, _old_s, new_s in prepared:
+            if new_s and new_s not in current:
+                errors.append(f"Edit #{i + 1}: newString 未出现在结果中（替换丢失）")
+        if path.endswith(".py"):
+            try:
+                ast.parse(current)
+            except SyntaxError as e:
+                errors.append(f"结果 ast.parse 失败: line {e.lineno}: {e.msg}")
+        if errors:
+            return ToolResult(
+                False,
+                error="自校验失败（整体未写盘，文件保持原样）：\n" + "\n".join(errors),
+            )
+
+        # ── 第五步：P4 跨度体检（py 文件，不阻断只提醒）──
+        span_warnings = []
+        if path.endswith(".py"):
+            old_spans = _py_def_spans(old_content)
+            new_spans = _py_def_spans(current)
+            if old_spans is not None and new_spans is not None:
+                for name, (n_lo, n_hi) in new_spans.items():
+                    if name not in old_spans:
+                        continue
+                    o_lo, o_hi = old_spans[name]
+                    o_lines, n_lines = o_hi - o_lo + 1, n_hi - n_lo + 1
+                    delta = n_lines - o_lines
+                    if delta > 100 or (o_lines > 0 and delta > o_lines // 2):
+                        span_warnings.append(
+                            f"{name}: {o_lines} → {n_lines} 行（+{delta}），"
+                            "跨度异常增长，请确认是否误拼接"
+                        )
+                    elif o_lines >= 8 and (delta < 0 and (abs(delta) > 10 or n_lines * 2 < o_lines)):
+                        # 缩减方向（13 场景对比的盲区）：dedent 注入会把原函数体
+                        # 「挤」成新的顶层 def，被编辑函数跨度骤缩（如 10 行 → 2 行）。
+                        # 新增顶层函数是正常编辑，不查 def 数量；查同名定义的骤缩。
+                        span_warnings.append(
+                            f"{name}: {o_lines} → {n_lines} 行（-{abs(delta)}），"
+                            "跨度骤缩，请确认函数体是否被顶出（dedent 注入）"
+                        )
+
+        # ── 第六步：原子写（tmp + os.replace）──
+        # tmp 名含 pid + 随机段：多进程同时编辑同一文件不会互相覆盖对方的 tmp。
+        # try/finally 保证只读/权限/磁盘满/os.replace 失败时 tmp 必被清理，
+        # 不在目标目录残留「看起来像源文件」的完整副本。
+        tmp_path = full_path.with_name(
+            f"{full_path.name}.{os.getpid()}.{uuid4().hex[:8]}.tmp-multiedit"
+        )
+        try:
+            tmp_path.write_text(current, encoding="utf-8", newline="")
+            os.replace(tmp_path, full_path)
+        finally:
+            if tmp_path.exists():
+                try:
+                    os.remove(tmp_path)
+                    cleanup_note = "临时文件已清理"
+                except OSError as cleanup_err:
+                    cleanup_note = f"临时文件清理失败：{cleanup_err}"
         _record_mtime(tool_ctx, full_path)
         diff_lines = list(
             difflib.unified_diff(
@@ -595,18 +718,37 @@ def _multi_edit_impl(tool_ctx, **kwargs):
         )
         diff_str = "\n".join(diff_lines) if diff_lines else ""
         display = _display_path(workdir, full_path, path)
-        if failures:
-            success_count = len(edits or []) - len(failures)
-            content = (
-                f"已批量编辑 {display}（成功 {success_count}/{len(edits)} 处，"
-                f"失败 {len(failures)} 处，成功项已写入）：\n"
-                + "\n".join(failures)
+        content = f"已批量编辑 {display}（{len(edits)} 处全部成功）"
+        if cleanup_note:
+            content += f"\nℹ️ {cleanup_note}"
+        if span_warnings:
+            content += "\n⚠️ [multi-edit 体检] 以下定义跨度异常增长，请确认：\n" + "\n".join(
+                f"  - {w}" for w in span_warnings
             )
-        else:
-            content = f"已批量编辑 {display}（{len(edits)} 处全部成功）"
         return ToolResult(True, content=content, diff=diff_str)
+    except UnicodeDecodeError as e:
+        return ToolResult(
+            False,
+            error=f"MultiEdit error: 文件不是合法 UTF-8（{e}）。"
+            "旧实现会静默把坏字节替换为 U+FFFD 再写回（数据损坏），现已改为报错。",
+        )
     except Exception as e:
-        return ToolResult(False, error=f"MultiEdit error: {str(e)}")
+        msg = f"MultiEdit error: {str(e)}"
+        if cleanup_note:
+            msg += f"\nℹ️ {cleanup_note}"
+        return ToolResult(False, error=msg)
+
+def _py_def_spans(text: str):
+    """py 文本的函数/类跨度表 {名字: (起始行, 结束行)}；语法错误返回 None。"""
+    try:
+        tree = ast.parse(text)
+    except (SyntaxError, ValueError):
+        return None
+    spans = {}
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            spans[node.name] = (node.lineno, node.end_lineno)
+    return spans
 
 
 # ========== grep ==========
