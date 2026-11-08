@@ -49,6 +49,11 @@ def _make_window(**overrides):
     win._batch_cards = []
     win._batch_placeholders = {}
     win._current_assistant_card = None
+    # 守卫依赖状态（2f22cf81 引入的 loading/jump 守卫在 __new__ 桩上不初始化会
+    # 抛 RuntimeError: super-class __init__() was never called）
+    win._is_loading_history_batches = False
+    win._is_jump_in_flight = lambda: False
+    win._last_visible_card_ids = set()
     win._is_widget_alive = lambda w: True
     win._log_render_quota = MagicMock()
     win._maybe_strong_recycle = MagicMock()
@@ -128,6 +133,46 @@ def test_recount_helper_uses_batch_cards_and_lazy_flag():
 
 # ─── 缺陷 2：保留范围必须基于真实视口 ─────────────────────────
 
+
+
+def test_stale_zero_count_recovers_before_quota_check():
+    """[MEM] 计数漂移钉子：实物 40 / 计数 0 → 配额判断前校准为 40 → 触发卸载。
+
+    回归「配额驱动回收空转」：懒渲染消费路径漏更新计数 → `_rendered_card_count`
+    恒 0 → `0 <= quota` 恒成立 → 淘汰链一次不跑（实验 10 的另一半）。修复在
+    `_recycle_lru_batches` 入口对「明显不一致」（计数 0 或 > 批次总数）先按
+    实况校准，再进配额比较。
+    """
+    cards = [[_card(True, idx=i)] for i in range(40)]
+    unloaded = []
+    win = _make_window(
+        _batch_cards=cards,
+        _rendered_card_count=0,
+        _effective_max_rendered_cards=lambda: 6,
+        _is_loading_history_batches=False,
+        _is_jump_in_flight=lambda: False,
+        _batch_fully_rendered=lambda cards_: all(
+            getattr(c, "_lazy_rendered", False) for c in cards_
+        ),
+        _batch_is_protected=lambda idx, vp_range: False,
+        _batch_distance=lambda idx, vp_range: 10 + idx,
+        _resolve_viewport_range=lambda: (0, 1),
+        _batch_is_streaming_or_welcome=lambda idx: False,
+        _virtual_buffer_batches=lambda: 2,
+    )
+
+    def _fake_unload(idx):
+        win._batch_cards[idx] = None
+        unloaded.append(idx)
+        win._rendered_card_count -= 1
+        return 0
+
+    win._unload_batch = _fake_unload
+
+    win._recycle_lru_batches()
+
+    assert win._rendered_card_count <= 6, "必须裁到配额内"
+    assert len(unloaded) >= 34, "40 - quota(6) = 34 批应被卸载"
 
 def _patch_layout_geometry(win, entries):
     """entries: [(index, top, height)] → 让 chat_layout 返回带几何的卡片。"""
@@ -230,12 +275,20 @@ def test_lru_recycle_degrades_when_all_batches_protected():
     """全部批次落在可视区 ±1 内时，仍要按距离降级淘汰到配额内。
 
     修复前：candidates 为空 → 循环不执行 → 计数永久停在超配额状态。
+
+    T42 语义收紧后：降级候选只有 dist > _virtual_buffer_batches()（桩上回退 1）
+    才会被真的卸载，dist ≤ buffer 的仍被「卸了立刻被建回」护栏挡住。故视口取
+    (3,4)：dist(0)=2 > 1 是唯一可降级批次，dist(5)=0 在视口邻域守住。
     """
     win = _make_window()
     win._batch_cards = [[_card()] for _ in range(6)]
     win._rendered_card_count = 6
     win._effective_max_rendered_cards = lambda: 3
-    win._viewport_batch_range = lambda: (2, 3)  # 全部 6 批都在 ±1 保护范围内
+    win._viewport_batch_range = lambda: (3, 4)
+    # 真实卡片高度：MagicMock 的 int(height())=1px 会让 _restore_window_batches
+    # 的像素累加永远凑不满 need_px → 保护窗口被 limit 顶成全表 → 无候选（假红）
+    for batch in win._batch_cards:
+        batch[0].height.return_value = 3000
     unloaded = []
 
     def _fake_unload(idx):
@@ -247,10 +300,11 @@ def test_lru_recycle_degrades_when_all_batches_protected():
     win._unload_batch = _fake_unload
     win._recycle_lru_batches()
 
-    # 视口 = (2,3) → 保护区间 [1,4]；其中 0/5 距离 1（可淘汰），1/4 距离 0（视口邻域，守住）
-    assert unloaded == [0, 5], f"应按距离最远优先淘汰，实际 {unloaded}"
-    assert win._rendered_card_count == 4, "视口邻域守住后计数停在该处，不会强压到配额"
-    assert win._batch_cards[1] is not None and win._batch_cards[4] is not None
+    # 视口 = (3,4) → 保护窗口 =1（3000px/批 一步凑满 need_px）→ dist≤1 全保护；
+    # dist(0)=2 > buffer=1 → 主候选直接淘汰；降级候选（dist≤1）被护栏 break
+    assert unloaded == [0], f"dist>buffer 的最远批应被淘汰，其余守住，实际 {unloaded}"
+    assert win._rendered_card_count == 5, "主候选卸完计数回落但仍超配额，降级护栏截停"
+    assert win._batch_cards[1] is not None and win._batch_cards[5] is not None
 
 
 def test_lru_recycle_never_unloads_viewport_batches():
