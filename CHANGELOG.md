@@ -1,7 +1,13 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [v0.7.0] - 2026-11-09
+
+自 v0.7.0-beta 以来的变更 | 提交数：24 · 文件变更：115 · +4775/-986 | 贡献者：dingma
+
+### ✨ 新功能 (New Features)
+- **壁纸场景截图脚本** (`ec1c4b8c`): wallpaper-to-theme 技能新增 `capture_scene.py`，对壁纸渲染场景做高保真截图采样。
+- **coding_plan 徽标主题同步** (`04c0fa4b`): coding_plan_ring 徽标随主题切换刷新重绘，附回归测试。
 
 ### 🐛 问题修复 (Bug Fixes)
 - **顶栏文字/图标撞上壁纸暗部不可读（标题栏无底色，前景色只看主题明暗）** (`app/widgets/custom_title_bar.py`, `app/utils/design_tokens.py`, `tests/widgets/test_custom_title_bar.py`): 标题栏透明、直接叠在窗口壁纸上，前景色只跟 light/dark 主题走；浅色主题（`text_primary: #2b262a`）撞上壁纸顶部的深色天空时，文字与背景亮度差不足 10%（对比度约 1.1:1，AA 正文线 4.5:1），同栏系统按钮图标还走独立资源链路、与文字不同源。修复：`CustomTitleBar.paintEvent` 在子控件之下铺一层纵向渐变雾化底（浅色白雾 / 深色黑雾，顶 1.15× / 中 1.0× / 底 0.5× 基准 alpha，中段叠纯黑壁纸仍有 5.2:1），`_minimal` 插件独立弹窗（无壁纸）跳过；新增 `Colors.TITLEBAR_SCRIM` 供主题 yaml 覆盖，非 CSS 字面量的坏值回退明暗默认，不会把顶栏刷成灰块。测试覆盖默认明暗、token 覆盖、非法值回退。
@@ -18,6 +24,17 @@ All notable changes to this project will be documented in this file.
 - **自动渲染通道漏判非文本内容块（图片卡被降级到纯 Qt）** (`app/widgets/card_render_core.py`, `tests/widgets/test_render_channel_auto.py`): `_content_needs_webengine` 旧实现把 content blocks 交给 `content_to_text` 取文本再判定，而该函数对 `image_url` / `input_image` / `image` / `image_ref` 块直接跳过，纯图片与「文本 + 图片」混合消息因此被判为「纯 Qt 可渲染」，自动通道启用时整卡丢图。修复为 list 中出现任一非 `text` 块即返 `True`（图片 / 自定义 / 思考 / 工具结果 / 未来新增类型一律保守走 WebEngine），list 非空但取文本为空时同样返 `True`，空列表与空字符串保持返 `False`。该函数仅在 `DRIFOX_RENDER_CHANNEL_AUTO=1`、`DRIFOX_QT_RENDERER != 1`、非流式三者同时成立时进入，默认配置不经过该路径，属灰度通道下的潜伏缺陷，不是在用功能的既成故障。回归测试覆盖纯图片块、文本 + 图片、`text+reasoning`、`text+tool_result`、未知块类型与空列表分支。
 - **滚离底部后被锚定定时器拽回（`_bottom_anchor_timer` 缺 away 守卫）**: `_bottom_anchor_timer` 未做 `_should_follow_bottom()` 守卫，用户上滚后仍逐拍把视口拉回底部；补同款 away 守卫并在离开跟随态时停表（`app/main_widget.py:19651-19657`）。
 - **跳转历史后视口被拽回底部（跳转锁空窗 + `_snap_bottom_queued` 未收紧）**: `_should_follow_bottom()` 的跳转锁分支只比较 `_jump_scroll_lock_until`，尾巴（`JUMP_SCROLL_LOCK_TAIL_MS=1200`）过期后不再检查 `_is_jump_in_flight()`；而 `_is_jump_scroll_locked()` 过期后会继续查 in_flight——两个函数对同一时刻给出相反裁决，形成空窗。跳转约 3.1s 后卡片落高触发 `_schedule_bottom_snap` 队列化投递，`_snap_bottom_queued` 复查 `_should_follow_bottom()` 放行，`setValue(_landed_bottom_value())` 连续 6 次递增把视口拽到底部。修法：只在 `_snap_bottom_queued` 单点收紧，判据改为「不跟随 **或** 跳转锁生效」时 return，复用 `_is_jump_scroll_locked()`（自带 in_flight 检查与 10s hard cap）；`_should_follow_bottom()` 公共语义零改动，其余 17 个调用点行为不变。实测：对照实验两树（memint2 与 memory_savior 基线）修复前 t=5000 均被拉到 9094/9334；修复后 t=1000/2000/5000 全程停在 6/6608→6/9334，打点确认 t=554 至 5500ms 无任何 valueChanged。`tests/widgets/test_scroll_hot_path.py` 新增 2 用例（锁生效不 setValue + 锁失效照常贴底），该文件 8 → 10 passed。
+- **OpenCode Go 端点 org 头处理** (`e0d9a366`): Go 公开端点与无 workspace 账号不再发送 org 头（空值头会被网关 400 且无 body），`resolve_extra_headers` 支持 callable 返回 `None` 表示省略。
+- **云同步后主题被闪回本地旧值** (`42589885`): 云端同步写入的主题相关键被本地 UI 持有的旧状态回写覆盖，主题闪回旧值；同步侧对主题键做来源区分，UI 侧加短路标记防回写，附回归测试。
+- **multi_edit 批量编辑非原子** (`ea8d7566`): 多处替换时报成功但整块内容丢失（非首个匹配点静默落空）；改为逐处唯一性校验，任一处失配整体失败不落盘，附回归测试。
+- **团队成员窗口权限/角色对齐** (`34ee04b1`): 团队成员窗口按角色推导权限并对齐角色注入；顺带全仓 except 多异常补括号（兼容 Python 3.13 及以下）。
+- **UI 删除消息前未落位占位批次** (`10fbbb11`): 虚拟滚动下批量删除消息时未先 materialize 已回收的占位批次，对应数据一起丢失；删除前强制落位防数据丢失，附回归测试。
+- **纯动画主题预览回退** (`c2229a1a`): 无 image 的纯动画主题在主题卡预览时无素材可显示，预览回退 animation 首帧并增强 fallback 逻辑，附回归测试。
+
+### 🔧 其他 (Chores & Build)
+- **废弃主题清理** (`683742d8`): 移除 amber / forest / jade / midnight / slate 五套废弃主题文件。
+- **插件显示名统一** (`1c104d6d` · `c133fbd8`): plugin metadata 统一 display_name 格式，各插件补充中文显示名。
+- **CHANGELOG 补条目** (`9de9141b`): 为闸门裸名 / 计数校准 / 活跃判据 / worker 寿命 / 通道判定 / 行为变更补 Unreleased 条目。
 
 ### 🔄 其他变更 (Other Changes)
 - **worker 超长续跑被主动截断（行为变更）**: 单次 worker 总寿命上限默认 3600s（`DRIFOX_WORKER_MAX_LIFETIME_S`），hook 续命上限默认 8 次（`DRIFOX_WORKER_MAX_CONTINUATIONS`）。超过寿命的 worker 在下一轮 API 调用前结束并走正常完成路径；超过续命上限后不再续跑。两个参数设 `0` 表示不设上限（关闭该限制），正数生效，负数 / 非数字 / `nan` / `inf` 视为非法并回退默认。正常使用路径（单次请求在寿命内、续轮不超限、用户正常响应）行为不变。`question` 与权限等待本次不处理，仍为无上限等待；这是已知的潜伏风险，尚未真实发生，且 worker 寿命守卫只在每轮循环开始前判定，覆盖不到卡在等待中的 worker，本次维持原状。该守卫属挂死防护，与内存占用无直接关系。
