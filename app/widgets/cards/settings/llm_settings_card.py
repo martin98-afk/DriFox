@@ -1810,6 +1810,14 @@ class LLMSettingsCard(SystemCardFrame):
         主题与生效深浅的对齐收在 app.utils.theme_mode.apply_light：只在当前
         主题深浅与目标不符时才切默认主题，不再无条件把用户手选的主题打回默认。
         """
+        from app.utils.theme_mode import is_sync_applying
+
+        if is_sync_applying():
+            # 云端配置写回循环中途的衍生信号：此刻 ThemeStyle/ThemeMode 可能
+            # 还是旧值，此处插手会 apply_light(save=True) 把半同步态落盘成
+            # 「浅色模式+深色主题」矛盾文件（曾致同步后主题被闪回本地旧主题）。
+            # 深浅对齐由 _reload_settings_on_main_thread 末尾的统一 apply_light 兜底。
+            return
         apply_light(is_light)
         # 重建主题风格卡（选项按新模式过滤）
         self._rebuild_theme_style_card()
