@@ -5,6 +5,7 @@ Chat Worker - OpenAI 对话执行器
 
 import concurrent.futures
 import gc
+import math
 import os
 import queue
 import re
@@ -41,6 +42,50 @@ _PLUGIN_CODE_ERRORS = (AttributeError, NameError, TypeError, KeyError, ImportErr
 # 实测 ~1.86s）。异常类仅在异常路径使用，首次需要时双检锁加载一次。
 _OPENAI_ERRORS: Optional[Dict[str, type]] = None
 _OPENAI_ERRORS_LOCK = threading.Lock()
+
+
+def _env_float(name: str, default: float) -> float:
+    """读环境变量为 float，三条语义：0=显式关闭；正数=生效；负数/nan/inf=非法回退 default 并告警。
+
+    nan 会让守卫静默失效（elapsed > nan 恒 False），负数无自然含义，
+    均比让 import 崩溃更危险，拦下并留痕。
+    """
+    try:
+        raw = os.environ.get(name, "")
+        val = float(raw) if raw else default
+        if val == 0:
+            return 0.0  # 显式关闭哨兵，不打扰
+        if not math.isfinite(val) or val < 0:
+            logger.warning(
+                f"[WorkerLifetime] 环境变量 {name}={raw!r} 非法（0=关闭，正数=秒数），回退默认 {default}"
+            )
+            val = default
+        return val
+    except (TypeError, ValueError) as exc:
+        logger.warning(
+            f"[WorkerLifetime] 环境变量 {name} 解析失败（{exc!r}），回退默认 {default}"
+        )
+        return default
+
+
+def _env_int(name: str, default: int) -> int:
+    """读环境变量为 int，三条语义同 _env_float：0=关闭；正数=生效；负数/非法=回退 default 并告警。"""
+    try:
+        raw = os.environ.get(name, "")
+        val = int(raw) if raw else default
+        if val == 0:
+            return 0  # 显式关闭哨兵
+        if val < 0:
+            logger.warning(
+                f"[WorkerLifetime] 环境变量 {name}={raw!r} 非法（0=关闭，正数=次数），回退默认 {default}"
+            )
+            val = default
+        return val
+    except (TypeError, ValueError, OverflowError) as exc:
+        logger.warning(
+            f"[WorkerLifetime] 环境变量 {name} 解析失败（{exc!r}），回退默认 {default}"
+        )
+        return default
 
 
 def _get_openai_errors() -> Dict[str, type]:
@@ -169,6 +214,18 @@ class OpenAIChatWorker(QThread):
     retry_resolved = pyqtSignal()  # 重试成功，恢复正常状态
     context_updated = pyqtSignal(int, int, bool)  # token_count, limit, from_api，每轮 API 调用后实时更新
     _DEFERRED_PREVIEW_TOOLS = {"question", "subagent_para", "todowrite", "todoread"}
+
+    # ========== Worker 硬性寿命守卫（防 Stop hook / hook 队列注入无限续命）==========
+    # Stop hook CONTINUE 与退出前 hook 队列注入反复 continue 会让 run() 永不返回：
+    # finished 不发、T6-A 收尾（executor.py）与残留回收（engine_session）不触发，
+    # 实测单 worker 最长存活 4511s。超限必须走正常完成路径（emit finished 两组
+    # 信号 + _clear_pending_response_state），禁止直接 return 跳过收尾。
+    # 环境变量可覆盖。默认值依据：正常 agent 任务（几十次工具调用、长上下文）
+    # 常超 15 分钟，900s 会截断合法长任务；3600s 仍能截断 4511s 的异常。
+    # 两个参数统一三条语义：0=显式关闭；正数=生效；负数 / 非数字 / nan / inf =
+    # 非法，回退默认并告警。（此处的 0 只涉及寿命/续轮，与权限审批路径的 0 语义无关）
+    MAX_WORKER_LIFETIME_S = _env_float("DRIFOX_WORKER_MAX_LIFETIME_S", 3600.0)
+    MAX_CONTINUATIONS = _env_int("DRIFOX_WORKER_MAX_CONTINUATIONS", 8)
 
     # ========== 客户端主动循环检测（防止触发 Qwen 服务端 Repetitive tool calls 拒绝）==========
     # Qwen/DashScope 服务端会拒绝"连续多轮相同 (name, args) 的工具调用"，返回 400。
@@ -2202,6 +2259,9 @@ class OpenAIChatWorker(QThread):
 
             # LoopPolicy：每轮循环计数（默认策略不限轮数 → 零行为变化）
             self._loop_round_count = 0
+            # [WorkerLifetime] 总寿命起点与续轮计数（守卫见 _worker_lifetime_reason）
+            self._run_started_at = time.monotonic()
+            self._continuation_count = 0
 
             while not self._is_cancelled:
                 if self._is_cancelled:
@@ -2219,6 +2279,19 @@ class OpenAIChatWorker(QThread):
                     # 存 final_response=self.full_response →
                     # _clear_pending_response_state()（清理 state 防覆盖）→
                     # 再发 finished_with_content(final_response)
+                    self._emit_with_callback(
+                        "finished_with_messages", self.finished_with_messages, current_session_messages
+                    )
+                    final_response = self.full_response
+                    self._clear_pending_response_state()
+                    self._emit_with_callback("finished_with_content", self.finished_with_content, final_response)
+                    return
+
+                # [WorkerLifetime] 总寿命/续轮超限：走与 LoopPolicy 相同的完成序列，
+                # finished 正常发出 → T6-A 收尾被触发
+                _lt_reason = self._worker_lifetime_reason()
+                if _lt_reason:
+                    logger.warning(f"[WorkerLifetime] {_lt_reason}，拒绝继续续命循环，走正常完成路径")
                     self._emit_with_callback(
                         "finished_with_messages", self.finished_with_messages, current_session_messages
                     )
@@ -2442,6 +2515,7 @@ class OpenAIChatWorker(QThread):
                                 )
                                 return
                             if _lp_decision is LoopDecision.CONTINUE:
+                                self._continuation_count = getattr(self, "_continuation_count", 0) + 1
                                 # 1. 翻转 _stop_hook_active：下一轮 Stop 时直接跳过 hook 执行
                                 self._stop_hook_active = True
                                 # 2. 发射 finished_with_messages 让 UI 看到注入的消息（可选）
@@ -2469,11 +2543,19 @@ class OpenAIChatWorker(QThread):
                     # 返回 False（队列空或策略拒绝续轮）时方法内部已按 T23 以
                     # include_team_mail=False 兜底消费，TeamMail 保持 pending。
                     if self._drain_pending_hooks_before_exit(current_session_messages):
-                        # 对齐 Stop hook 续命路径：清 pending state 后回 while 顶部
-                        # 重跑 API；本轮 full_response 已随 response_sequence 落入
-                        # 消息列表与 API 缓存，清空当轮缓冲不丢内容
-                        self._clear_pending_response_state()
-                        continue
+                        self._continuation_count = getattr(self, "_continuation_count", 0) + 1
+                        if self._worker_lifetime_reason():
+                            # [WorkerLifetime] hook 队列请求续命但已超限：不 continue，
+                            # 落穿到下方正常完成路径（emit finished + 收尾）
+                            logger.warning(
+                                f"[WorkerLifetime] hook 队列续命被拒（{self._worker_lifetime_reason()}），走正常完成路径"
+                            )
+                        else:
+                            # 对齐 Stop hook 续命路径：清 pending state 后回 while 顶部
+                            # 重跑 API；本轮 full_response 已随 response_sequence 落入
+                            # 消息列表与 API 缓存，清空当轮缓冲不丢内容
+                            self._clear_pending_response_state()
+                            continue
 
                     self._emit_with_callback(
                         "finished_with_messages", self.finished_with_messages, current_session_messages
@@ -3516,6 +3598,51 @@ class OpenAIChatWorker(QThread):
             logger.warning(f"[LoopPolicy] 达到最大轮数 {max_rounds}（{self._loop_policy().id}），主动结束本轮对话")
             return True
         return False
+
+    def _worker_lifetime_reason(self) -> str:
+        """[WorkerLifetime] 返回超限原因（空串=未超限），调用方必须走正常完成路径。
+
+        总寿命：run() 起点起算的 monotonic 时长 > MAX_WORKER_LIFETIME_S；
+        续轮：Stop hook / hook 队列注入导致的 continue 次数 > MAX_CONTINUATIONS。
+        **两个开关互不干扰、各自独立判定**：阈值 0 = 关闭该限制；负数 = 非法回退默认。
+        属性缺失（__new__ 测试桩未跑 run）视为未超限。
+        """
+        try:
+            lifetime_s = float(self.MAX_WORKER_LIFETIME_S)
+        except Exception as exc:
+            logger.warning(f"[WorkerLifetime] MAX_WORKER_LIFETIME_S 读取异常（{exc!r}），回退 3600.0")
+            lifetime_s = 3600.0
+        if lifetime_s == 0:
+            lifetime_s = None  # 0 = 显式关闭寿命检查（None 与「关闭」区分开，便于条件包裹）
+        elif not math.isfinite(lifetime_s) or lifetime_s < 0:
+            logger.warning(
+                f"[WorkerLifetime] MAX_WORKER_LIFETIME_S={lifetime_s!r} 非法（0=关闭，正数=秒数），回退 3600.0"
+            )
+            lifetime_s = 3600.0
+        started = getattr(self, "_run_started_at", None)
+        if started is None:
+            # run() 里初始化紧邻 while 之前，正常不可达；真出现说明守卫输入缺失
+            logger.debug("[WorkerLifetime] _run_started_at 缺失（对象未跑 run），寿命守卫跳过")
+        elif lifetime_s is not None:
+            elapsed = time.monotonic() - started
+            if elapsed > lifetime_s:
+                return f"总寿命 {elapsed:.0f}s 超过上限 {lifetime_s:.0f}s"
+        # 续轮检查独立执行：寿命设 0 关闭不得连带关闭续轮守卫（P0 单边耦合回归）
+        try:
+            max_cont = int(self.MAX_CONTINUATIONS)
+        except Exception as exc:
+            logger.warning(f"[WorkerLifetime] MAX_CONTINUATIONS 读取异常（{exc!r}），回退 8")
+            max_cont = 8
+        if max_cont < 0:
+            logger.warning(
+                f"[WorkerLifetime] MAX_CONTINUATIONS={max_cont!r} 非法（0=关闭，正数=次数），回退 8"
+            )
+            max_cont = 8
+        if max_cont != 0:
+            cont = getattr(self, "_continuation_count", 0)
+            if cont > max_cont:
+                return f"hook 续命 {cont} 次超过上限 {max_cont} 次"
+        return ""
 
     def _requires_reasoning_content(self) -> bool:
         """thinking 模式下，兼容要求 tool-call assistant 保留 reasoning_content 字段的 provider。
