@@ -12921,6 +12921,11 @@ class OpenAIChatToolWindow(ToolWindow):
                 anchor_layout_index=anchor,
             )
             restored += 1
+            # [MEM] 重建路径对账式补记：本步的卡分两类——经懒队列的已在
+            # _process_next_lazy_batch 计过、同步建卡的完全漏记，无法按卡数
+            # 区分（两者 _lazy_rendered 均为 True）。改用对账：按 _batch_cards
+            # 实况重算并同步，差值只含漏记量，幂等不重复。
+            self._recount_rendered_cards()
         return restored
 
     def _recycle_out_of_view_batches(self):
@@ -13045,6 +13050,12 @@ class OpenAIChatToolWindow(ToolWindow):
                         batch_offset=batch_idx,
                         anchor_layout_index=anchor,
                     )
+                    # [MEM] 重建路径对账式补记：本步的卡分两类——经懒队列的已
+                    # 在 _process_next_lazy_batch 计过、同步建卡的完全漏记，无法
+                    # 按卡数区分（两者 _lazy_rendered 均为 True）。改用对账：按
+                    # _batch_cards 实况重算并同步，差值只含漏记量，幂等不重复。
+                    # （evidence-scout 实测：重建渲染 6 张只记 3 张。）
+                    self._recount_rendered_cards()
                 logger.debug(f"[virtual-scroll] 原位重建 {len(pending_restore)} 个视口附近占位批次")
 
             # 第二步：回收超出缓冲区的批次
@@ -13107,6 +13118,12 @@ class OpenAIChatToolWindow(ToolWindow):
                             ):
                                 above_removed_height += batch_height
                             above_widgets.extend(batch_cards)
+                            # [MEM] detach 前按入口态记账（alive 子集口径，与
+                            # _recount_rendered_cards 一致）：detach 会把池化
+                            # 成功卡置 False，detach 后统计会漏减。
+                            self._decr_rendered_count(
+                                sum(1 for c in batch_cards if getattr(c, "_lazy_rendered", False))
+                            )
                             # [池化] 高度已记录、占位已装好，此时摘 WebView 不影响几何
                             for card in batch_cards:
                                 self._try_detach_card_viewer(card)
@@ -13155,6 +13172,13 @@ class OpenAIChatToolWindow(ToolWindow):
                             batch_height += self._batch_slot_gap(len(batch_cards))
                             self._install_batch_placeholder(batch_idx, batch_height, first_index, batch_overhead)
                             below_widgets.extend(batch_cards)
+                            # [MEM] detach 前按入口态记账（alive 子集口径，与
+                            # _recount_rendered_cards 一致）：detach 会把池化
+                            # 成功卡置 False，detach 后统计会漏减（与
+                            # _unload_batch 同款教训）。只减已渲染卡。
+                            self._decr_rendered_count(
+                                sum(1 for c in batch_cards if getattr(c, "_lazy_rendered", False))
+                            )
                             # [池化] 同上：几何已固定后再摘 WebView
                             for card in batch_cards:
                                 self._try_detach_card_viewer(card)
@@ -13339,6 +13363,15 @@ class OpenAIChatToolWindow(ToolWindow):
         # 含未渲染卡的批次整批跳过：高度失真 + 不占配额（见 _batch_fully_rendered）
         if not self._batch_fully_rendered(cards):
             return 0
+        # [MEM] 计数入口态：detach 前先记下本批已渲染卡数。detach 会把池化
+        # 成功的卡置 _lazy_rendered=False（message_card 侧正确语义），若在
+        # detach 后再统计，池化成功 = 计 0 = 漏减（实测 8 批 4 池化，记账 8
+        # 对实况 4）→ 计数虚高 → 配额过早触发过度回收。
+        rendered_in_batch = sum(
+            1
+            for c in cards
+            if getattr(c, "_lazy_rendered", False) and self._is_widget_alive(c)
+        )
         # ── 第一步：先按「viewer 仍在」的状态量出真实高度 ──
         # ⚠️ 顺序关键：摘掉 viewer 会让卡片高度立刻塌陷，必须在摘之前量完，
         # 否则占位高度与滚动补偿都会算错（表现为回收后视口跳动）。
@@ -13391,7 +13424,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # [T23 改动2] 剔除已卸载卡的 id（防 id() 地址复用误判「已在视口」）
         self._last_visible_card_ids -= {id(c) for c in alive_cards}
         # 只减已渲染的卡数（_rendered_card_count 语义 = 已渲染未卸载）
-        rendered_in_batch = sum(1 for c in cards if getattr(c, "_lazy_rendered", False))
+        # rendered_in_batch 已在入口态（detach 前）统计，此处不再重算
         self._decr_rendered_count(rendered_in_batch)
         return net_removed_h
 
@@ -19134,7 +19167,13 @@ class OpenAIChatToolWindow(ToolWindow):
         由「目标批次重建卡的高度回调」把视口贴回底部。
         """
         self._bottom_snap_queued = False
-        if not self._should_follow_bottom():
+        # 🐛 跳转锁单点收紧：`_should_follow_bottom()` 只认 `until` 未过期，
+        # 尾巴（TAIL_MS=1200）过期但收敛链未结束时它会放行——#45 实测跳转
+        # 3.1s 后卡片落高的本槽投递撞进该空窗，setValue(landed) 把刚落好的
+        # 跳转落点拽回底部。`_is_jump_scroll_locked()` 过期后还查
+        # `_is_jump_in_flight()` 且自带 10s hard cap，复用它即获得兜底，
+        # 不动公共判据（其余 17 个调用点零变化，「回到底部」显式解锁链不受影响）。
+        if not self._should_follow_bottom() or self._is_jump_scroll_locked():
             return
         try:
             sb = self.chat_scroll_area.verticalScrollBar()
@@ -19614,6 +19653,15 @@ class OpenAIChatToolWindow(ToolWindow):
         # 上锁时已 stop 本 timer，这里再兜一层（timer 可能在锁生效前已 start）。
         if self._is_jump_scroll_locked():
             self._bottom_anchor_deadline = 0.0
+            return
+        # 🐛 away 守卫：sticky 窗口内用户滚离底部时，`_scroll_bottom_timer` 被
+        # 停但本 timer 不停，逐拍 setValue(landed_bottom) 把视口拽回底部——
+        # 与 `_do_scroll_to_bottom` 的 away 守卫（同款判据）不对齐的漏网。
+        # 拦截时清 deadline 并停 timer；用 _scroll_diag 节流记录（每秒一条）。
+        if not self._should_follow_bottom():
+            self._bottom_anchor_deadline = 0.0
+            self._bottom_anchor_timer.stop()
+            self._scroll_diag("anchor-away", throttle=1.0)
             return
         if self._bottom_anchor_deadline <= time.monotonic():
             self._bottom_anchor_deadline = 0.0
