@@ -1,9 +1,9 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
-## [v0.7.0] - 2026-11-09
+## [v0.7.0] - 2026-11-09 (重新发布 #2)
 
-自 v0.7.0-beta 以来的变更 | 提交数：24 · 文件变更：115 · +4775/-986 | 贡献者：dingma
+自 v0.7.0-beta 以来的变更 | 提交数：25 · 文件变更：116 · +4775/-987 | 贡献者：dingma
 
 ### ✨ 新功能 (New Features)
 - **壁纸场景截图脚本** (`ec1c4b8c`): wallpaper-to-theme 技能新增 `capture_scene.py`，对壁纸渲染场景做高保真截图采样。
@@ -38,6 +38,9 @@ All notable changes to this project will be documented in this file.
 
 ### 🔄 其他变更 (Other Changes)
 - **worker 超长续跑被主动截断（行为变更）**: 单次 worker 总寿命上限默认 3600s（`DRIFOX_WORKER_MAX_LIFETIME_S`），hook 续命上限默认 8 次（`DRIFOX_WORKER_MAX_CONTINUATIONS`）。超过寿命的 worker 在下一轮 API 调用前结束并走正常完成路径；超过续命上限后不再续跑。两个参数设 `0` 表示不设上限（关闭该限制），正数生效，负数 / 非数字 / `nan` / `inf` 视为非法并回退默认。正常使用路径（单次请求在寿命内、续轮不超限、用户正常响应）行为不变。`question` 与权限等待本次不处理，仍为无上限等待；这是已知的潜伏风险，尚未真实发生，且 worker 寿命守卫只在每轮循环开始前判定，覆盖不到卡在等待中的 worker，本次维持原状。该守卫属挂死防护，与内存占用无直接关系。
+
+### 🔧 其他 (Chores & Build) (重新发布 #2 追加)
+- **macOS 打包版主题音乐无声** (`build.py`): `to_remove_macos` 误删 `PyQt5/Qt5/lib/QtMultimedia.framework`（清理项 2026-05 引入，早于主题音乐功能 2026-11-06 上线），打包后 `Contents/Frameworks/QtMultimedia` 变成断链符号链接，mediaservice 插件与 `PyQt5.QtMultimedia` 均 `dlopen` 失败（`Library not loaded: @rpath/QtMultimedia`），异常被 `_apply_theme_music` 的 try/except 吞成一条 warning，用户侧无感。移除该清理项即可恢复。
 
 ## [v0.7.0-beta] - 2026-11-08
 
