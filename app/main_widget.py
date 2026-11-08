@@ -2879,11 +2879,22 @@ class OpenAIChatToolWindow(ToolWindow):
         # 🛡️ 引擎角色对齐（幂等）：join 重试耗尽路径只补了 controller 权限，
         # 引擎角色可能仍停在 build——执行层模板检查查错对象。此时延迟组件
         # 已全部就绪（屏障），_on_agent_changed 不再走暂存分支。
-        if _team_agent and self.__dict__.get("_current_agent", "") != _team_agent:
+        # ⚠️ 判据取引擎真实状态而非窗口 _current_agent：后者可能被
+        # set_current_agent 单独写成目标角色（engine.set_current_agent 只赋值、
+        # 不清 system_prompt 缓存、不切角色），窗口字段与引擎会分叉，
+        # 用窗口字段比较会误判「已对齐」而永远不补切。
+        if _team_agent:
+            _engine_agent = ""
             try:
-                self._on_agent_changed(_team_agent)
+                _engine = getattr(self.backend, "chat_engine", None)
+                _engine_agent = (_engine.current_agent if _engine is not None else "") or ""
             except Exception:  # noqa: BLE001
-                logger.exception(f"[InitComplete] 补切换引擎角色失败: {_team_agent}")
+                _engine_agent = ""
+            if _engine_agent != _team_agent:
+                try:
+                    self._on_agent_changed(_team_agent)
+                except Exception:  # noqa: BLE001
+                    logger.exception(f"[InitComplete] 补切换引擎角色失败: {_team_agent}")
 
         # 复制/分支窗口的 _valid_configs（含模型列表）已在 _duplicate_window 中
         # 从源窗口直接复制，不需要再重新拉取模型列表，避免冗余网络请求和日志
@@ -6087,25 +6098,14 @@ class OpenAIChatToolWindow(ToolWindow):
                         win.backend.ensure_deferred_components()
                 except Exception:  # noqa: BLE001
                     logger.warning("[_join_new_window_for_template] ensure_deferred_components 失败", exc_info=True)
-                if getattr(win, "backend", None) and win.backend.agent_manager and win.backend.chat_engine:
-                    pass  # 补建成功 → 当轮继续（不增计数、不排队重试）
-                else:
+                if not (getattr(win, "backend", None) and win.backend.agent_manager and win.backend.chat_engine):
                     self._team_join_schedule_retry(win, agent_name, window_id, track_arrange, keep_team_name)
                     return
-
-                # C4a：watcher 不依赖 backend，无条件补启动（缺则任务邮件永不主动触发；
-                # 有 _is_destroyed 守卫 + _start_team_watcher 内部 try/except）
-                try:
-                    if not getattr(win, "_is_destroyed", False):
-                        win._start_team_watcher()
-                except Exception:
-                    pass
-                # E3：重试耗尽同样收口计数
-                if track_arrange:
-                    self._pending_arrange_count = max(0, self._pending_arrange_count - 1)
-                    if self._pending_arrange_count == 0:
-                        self._do_team_window_arrange()
-                return
+                # 补建成功 → 落下去继续走角色切换。原实现在此处无条件 return，
+                # 导致靠 ensure_deferred_components() 才补齐 chat_engine 的窗口
+                # 跳过 _on_agent_changed / 权限注入 / _refresh_team_ui：成员表里
+                # 角色名正确，引擎却停在默认 build，SessionStart 的身份注入与
+                # 团队工具全按错误角色走（批量建团靠后成员「丢智能体身份」根因）。
             if hasattr(win, "_on_agent_changed"):
                 win._on_agent_changed(agent_name)
             if hasattr(win, "_apply_agent_command_permissions"):
@@ -6176,6 +6176,14 @@ class OpenAIChatToolWindow(ToolWindow):
                     if tm_win is not None:
                         tm_win.refresh_capsule_for_window(win)
             except Exception:
+                pass
+            # C4a 兜底：角色切换等步骤异常时正常路径末尾的 watcher 启动会被跳过，
+            # 缺 watcher 成员永远收不到任务邮件。_rearm_team_watcher 自带
+            # _team_agent_name 守卫，非成员窗口调用是 no-op。
+            try:
+                if not getattr(win, "_is_destroyed", False):
+                    win._start_team_watcher()
+            except Exception:  # noqa: BLE001
                 pass
             if track_arrange:
                 self._pending_arrange_count = max(0, self._pending_arrange_count - 1)
@@ -21740,6 +21748,11 @@ class OpenAIChatToolWindow(ToolWindow):
         # UI 卡顿后「刷的更新一片」
         QTimer.singleShot(0, self._do_post_stream_cleanup)
 
+        # 分支标签校准：本轮模型可能在会话里用 bash 自行 git switch/checkout，
+        # 工作目录没变 → chip 的缓存键没变，不主动重检就会一直显示切走前的分支。
+        # 延后到下一轮事件循环，不抢终渲染的主线程；缓存命中时零 git 开销。
+        QTimer.singleShot(0, self._update_branch)
+
         # ★ B4 强回收层（低频触发）：流式结束后顺带检查内存阈值
         self._maybe_strong_recycle()
 
@@ -23986,7 +23999,12 @@ class OpenAIChatToolWindow(ToolWindow):
         return UIPluginRegistry.get_instance().get_service("worktree")
 
     def _update_branch(self):
-        """门面：刷新分支标签（实现在 WorktreeService.update_branch）"""
+        """门面：刷新分支标签（实现在 WorktreeService.update_branch）
+
+        可能在 QTimer.singleShot 回调里被调用（轮次结束校准），窗口已销毁时直接返回。
+        """
+        if getattr(self, "_is_destroyed", False):
+            return
         svc = self._worktree_service()
         if svc is not None:
             svc.update_branch(self)
