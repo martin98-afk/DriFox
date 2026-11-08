@@ -2713,6 +2713,11 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
             return
         anim = (cfg or {}).get("animation")
         src = (anim or {}).get("src") or "__none__"
+        # 去重键必须用解析后的绝对路径：各主题普遍写相同的相对路径
+        # （../../assets/chat.webp），用原串会让不同插件的不同素材命中同一
+        # key，切换主题时直接 return，动画背景停在旧素材上。
+        if src != "__none__":
+            src = self._resolve_theme_image(src)
         key = (
             f"{src}:{(anim or {}).get('fps', 12)}:"
             f"{(anim or {}).get('canvas') or 'independent'}:"
@@ -2881,9 +2886,12 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
         image = bg_cfg.get("image")
         opacity = bg_cfg.get("opacity", 1.0)
         color = bg_cfg.get("color")
+        # 先解析成绝对路径：不同主题常用同名相对路径（sidebar.jpg），用原串
+        # 作缓存键会跨主题误命中，切主题后背景图不换。
+        resolved_image = self._resolve_theme_image(image) if image else None
 
         # 缓存键：image + opacity + color 共同决定唯一性
-        bg_key = f"{(image or '__none__')}:{opacity:.3f}:{(color or '__none__')}"
+        bg_key = f"{(resolved_image or '__none__')}:{opacity:.3f}:{(color or '__none__')}"
         if getattr(self, key_attr, None) == bg_key and getattr(self, label_attr, None) is not None:
             return
         setattr(self, key_attr, bg_key)
@@ -2905,8 +2913,7 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
 
         # 1. 图片
         if image:
-            resolved = self._resolve_theme_image(image)
-            pix = QPixmap(resolved)
+            pix = QPixmap(resolved_image)
             if not pix.isNull():
                 label.setPixmap(pix)
                 label.setScaledContents(True)

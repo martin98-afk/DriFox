@@ -104,6 +104,9 @@ def build_filter(args, src_size: tuple[int, int] | None = None) -> str:
         parts.append(crop)
     parts.append(f"fps={args.fps}")
     parts.append(f"scale={args.width}:-2:flags=lanczos")
+    # 提亮/伽马：浅色主题背景素材偏暗时用（gamma 提暗部，brightness 平移中间调）
+    if getattr(args, "brightness", 0) or getattr(args, "gamma", 1.0) != 1.0:
+        parts.append(f"eq=brightness={args.brightness:.3f}:gamma={args.gamma:.3f}")
     base = ",".join(parts)
     if args.mode == "mask":
         # 黑底 + 反相亮度作 alpha：亮部透明、暗部压暗。
