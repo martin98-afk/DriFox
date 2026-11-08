@@ -190,13 +190,13 @@ def test_other_provider_selection_untouched(cc):
 # ══════════════════════════════════════════════════════════════════
 
 
-def _make_load_stub(cfg, provider: str, model: str):
+def _make_load_stub(cfg, provider: str, model: str, valid: dict | None = None):
     """OpenAIChatToolWindow.__new__ 桩，只跑 _load_model_configs 主逻辑"""
     from app.main_widget import OpenAIChatToolWindow
 
     inst = OpenAIChatToolWindow.__new__(OpenAIChatToolWindow)
     inst._is_destroyed = False
-    inst._valid_configs = {}
+    inst._valid_configs = dict(valid or {})
     inst._current_provider_name = provider
     inst._current_model_name = model
     inst._pending_model_restore = None
@@ -242,3 +242,72 @@ def test_load_model_configs_stale_id_still_falls_back():
     inst._load_model_configs()
 
     assert inst._current_provider_name == first_id, "选择失效时应回退配置列表第一项"
+
+
+# ══════════════════════════════════════════════════════════════
+# id 漂移治愈：旧 id 消失但服务商还在（改 key / 解锁迁移 / 云同步）
+# ══════════════════════════════════════════════════════════════
+
+
+def test_load_model_configs_heals_drifted_id_by_provider_name():
+    """旧 id 不在配置里，但旧快照的 provider_name 唯一命中新条目 → 跟随新 id 并保留模型"""
+    old_entry = _entry(OLD_KEY)  # provider_name=TestProvider, name=TestProvider
+    new_id = compute_provider_config_id({"API_URL": API_URL, "API_KEY": NEW_KEY})
+    other = {
+        "config_id": "other-id",
+        "provider_name": "OtherProvider",
+        "API_URL": "https://api.other.example",
+        "API_KEY": "sk-other",
+        "模型名称": "model-y",
+        "模型列表": ["model-y"],
+    }
+    cfg = _FakeCfg(
+        {
+            "other-id": dict(other),
+            new_id: dict(old_entry, config_id=new_id, API_KEY=NEW_KEY),
+        },
+        selected="",
+    )
+
+    stub = _make_load_stub(cfg, old_entry["config_id"], MODEL, valid={old_entry["config_id"]: old_entry})
+    stub._load_model_configs()
+
+    assert (stub._current_provider_name, stub._current_model_name) == (new_id, MODEL), (
+        "同一服务商换 id 后应跟随新 id 并保留原模型，而不是回退首项"
+    )
+
+
+def test_load_model_configs_ambiguous_provider_falls_back():
+    """同名服务商多条且无法用配置名收窄 → 不猜，仍走回退首项"""
+    first = {
+        "config_id": "first-id",
+        "provider_name": "DupProvider",
+        "name": "Dup-A",
+        "API_URL": "https://api.a.example",
+        "API_KEY": "sk-a",
+        "模型名称": "model-a",
+        "模型列表": ["model-a"],
+    }
+    second = {
+        "config_id": "second-id",
+        "provider_name": "DupProvider",
+        "name": "Dup-B",
+        "API_URL": "https://api.b.example",
+        "API_KEY": "sk-b",
+        "模型名称": "model-b",
+        "模型列表": ["model-b"],
+    }
+    cfg = _FakeCfg({"first-id": dict(first), "second-id": dict(second)}, selected="")
+    old_info = {
+        "config_id": "gone-id",
+        "provider_name": "DupProvider",
+        "name": "",
+        "API_URL": "https://api.gone.example",
+        "API_KEY": "sk-gone",
+        "模型名称": MODEL,
+    }
+
+    stub = _make_load_stub(cfg, "gone-id", MODEL, valid={"gone-id": old_info})
+    stub._load_model_configs()
+
+    assert stub._current_provider_name == "first-id", "多匹配不明确时不得猜，回退首项"

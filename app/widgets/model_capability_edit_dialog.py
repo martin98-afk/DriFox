@@ -10,7 +10,8 @@
 留空 = 未声明，走自动链（插件 per-model 声明 → models.dev → 硬编码 → family
 → 默认）。每个字段右侧标出「自动值 + 来源」，让用户看清自己覆盖的是什么。
 
-另有一行「接口入口」：模型级协议路由（自动 / Responses API / 已注册协议插件），
+另有一行「接口入口」：模型级协议路由（自动 / 已注册协议插件，
+Responses API 由 system-transports 插件枚举，不在 UI 层内置），
 与六键同表落盘（``LLM.ModelOverrides`` 同条目），发送链 chat_worker 单点消费。
 模型参数卡不渲染该键（PARAM_SCHEMA.hide_in_card），这里是唯一编辑入口。
 
@@ -131,19 +132,34 @@ class ModelCapabilityEditDialog(MaskDialogBase):
             return {}
 
     def _load_protocol_entry(self) -> str:
-        """读当前已保存的接口入口（来自 ModelOverrides 同条目；"" = 自动）"""
+        """读当前已保存的接口入口（来自 ModelOverrides 同条目；"" = 自动）。
+
+        存量值 ``responses``（插件化前内置项的落盘格式）归一为
+        ``transport:openai_responses`` 显示与保存；消费端
+        protocol_dispatch 对旧值的映射保留不动，落盘不用改数据。
+        """
         try:
             from app.core.modelmeta.model_declarations import read_protocol_entry
             from app.utils.config import Settings
 
             overrides = Settings.llm_model_overrides.value or {}
-            return read_protocol_entry(overrides, self.provider_name, self.model_name)
+            saved = read_protocol_entry(overrides, self.provider_name, self.model_name)
         except Exception:
             return ""
+        if saved == "responses":
+            from app.core.workers.protocol_dispatch import RESPONSES_TRANSPORT_ID
+
+            saved = f"transport:{RESPONSES_TRANSPORT_ID}"
+        return saved
 
     def _protocol_options(self) -> Tuple:
-        """接口入口选项：自动 / Responses API / 已注册协议插件（实时枚举，不缓存）"""
-        options = [("自动", ""), ("Responses API", "responses")]
+        """接口入口选项：自动 / 已注册协议插件（实时枚举，不缓存）。
+
+        Responses API 已插件化（Phase 3），不再内置固定项——内置
+        ("Responses API", "responses") 与插件 openai_responses 在消费端
+        完全等价，同时出现会让下拉出现两个同名项（2026-11-08 用户报告）。
+        """
+        options = [("自动", "")]
         try:
             from app.plugins.registries.transport_registry import TransportRegistry
 

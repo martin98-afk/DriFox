@@ -6986,6 +6986,38 @@ class OpenAIChatToolWindow(ToolWindow):
             logger.debug(f"[MainWidget] 子智能体服务不可用: {e}")
             return None
 
+    def _resolve_drifted_provider_config(self, old_info: dict) -> str:
+        """旧 config_id 消失时，按服务商身份在新配置里找回对应条目 id。
+
+        config_id 由 (API_URL, API_KEY) hash 生成，改 KEY 必换 id；密钥解锁后的
+        配置迁移、云同步重写条目同样会换 id，而窗口仍握着旧 id。直接走
+        「失效 → 回退列表第一项」会让用户看到模型被重置。这里用旧快照的
+        provider_name 做唯一匹配（同名多条时再用配置名 name 收窄）；多匹配
+        视为不明确，返回空串交给既有回退链。
+        """
+        if not old_info:
+            return ""
+        pname = str(old_info.get("provider_name", "") or "")
+        if not pname:
+            return ""
+        candidates = [
+            cid
+            for cid, info in self._valid_configs.items()
+            if str(info.get("provider_name", "") or "") == pname
+        ]
+        name = str(old_info.get("name", "") or "")
+        if name and len(candidates) > 1:
+            named = [
+                cid
+                for cid in candidates
+                if str(self._valid_configs.get(cid, {}).get("name", "") or "") == name
+            ]
+            if named:
+                candidates = named
+        if len(candidates) != 1:
+            return ""
+        return candidates[0]
+
     def _resolve_service_provider(self, name: str) -> Optional[str]:
         """把用户传入的"服务商名"解析成 config_id
 
@@ -11768,6 +11800,8 @@ class OpenAIChatToolWindow(ToolWindow):
         # 保存当前窗口的实例级选择状态（多窗口隔离的关键：优先保持自身选择）
         old_provider = self._current_provider_name
         old_model = self._current_model_name
+        # 旧快照的完整配置：旧 id 消失时用它按服务商身份找回新 id（见下方漂移治愈）
+        old_provider_info = dict(self._valid_configs.get(old_provider, {}) or {}) if old_provider else {}
 
         self._valid_configs.clear()
 
@@ -11815,17 +11849,31 @@ class OpenAIChatToolWindow(ToolWindow):
             self._current_provider_name = old_provider
             self._current_model_name = old_model
         else:
-            # 当前选择无效（可能被删除），回退到全局默认或列表第一个
+            # 当前选择无效：可能是服务商被删除，也可能是 config_id 漂移
             saved_model = self.cfg.llm_selected_model.value
-            if saved_model and saved_model in self._valid_configs:
+            drifted = "" if force_global else self._resolve_drifted_provider_config(old_provider_info)
+            if drifted:
+                # id 漂移治愈：改 API_KEY（hash id 变）、密钥解锁后的配置迁移、云同步
+                # 重写条目都会换 id，但服务商还是同一个 → 跟随新 id 并保留原模型，
+                # 否则整窗回退到列表第一项（用户看到“模型被重置”）。
+                self._current_provider_name = drifted
+                logger.info(
+                    f"[_load_model_configs] config_id 漂移治愈: {old_provider!r} → {drifted!r}"
+                    f"（provider={old_provider_info.get('provider_name', '')!r}, model={old_model!r}）"
+                )
+            elif saved_model and saved_model in self._valid_configs:
                 self._current_provider_name = saved_model
             else:
                 self._current_provider_name = list(self._valid_configs.keys())[0] if self._valid_configs else ""
 
             # 回退时从配置中获取默认模型名称
             if self._current_provider_name:
-                provider_config = self._valid_configs.get(self._current_provider_name, {})
-                self._current_model_name = provider_config.get("模型名称", "")
+                if drifted:
+                    # 漂移治愈：保留用户原模型；旧模型名为空时用配置默认值
+                    self._current_model_name = old_model or self._valid_configs.get(drifted, {}).get("模型名称", "")
+                else:
+                    provider_config = self._valid_configs.get(self._current_provider_name, {})
+                    self._current_model_name = provider_config.get("模型名称", "")
             else:
                 self._current_model_name = ""
 
