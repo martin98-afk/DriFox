@@ -16734,6 +16734,40 @@ class OpenAIChatToolWindow(ToolWindow):
         )
         return bool(self._batch_cards[batch_idx])
 
+    def _materialize_placeholder_batches_for_rebuild(self) -> int:
+        """结构重排（删除轮次/清幽灵插话）前，把所有「已卸载留占位」的批次原位实化为卡片。
+
+        为什么必须这么做（2026-11-08 真机：删除+撤销后用户气泡永久丢失 / 顺序错乱）：
+        `_rebuild_batch_cards_from_layout` 按「布局存活卡顺序」重排 `_batch_cards`，
+        隐含前提是布局内容 == 批次全量。虚拟滚动下大量批次处于卸载态（只有等高
+        占位没有卡），且所有重建路径（`_restore_placeholders_in_viewport` /
+        `_recycle_out_of_view_batches` 第 1.5 步 / `_restore_batch_ui`）都以
+        「占位存在」为触发条件。重排把占位全摘掉之后：
+
+        1. 卸载批次数据槽位变 ``None`` 且无占位 → 永远失去重建入口（该批次
+           的用户气泡/回复永久丢失）；
+        2. 存活卡被按顺序塞进前面空出的槽位 → ``_message_index`` /
+           ``_round_index`` 整体错位，后续回收按错位下标销毁别人的卡
+           （丢失扩大）、跳转与撤销定位全部打偏。
+
+        删除 UI 前先原位建卡（<1ms/张，删除是低频操作），让重排前提重新成立。
+
+        Returns:
+            实化的批次数（0 = 无占位，无需处理）。
+        """
+        # 🛡️ 经 __dict__ 直读：测试用 __new__ 桩实例上 getattr 走 sip 属性转发会
+        # 抛 RuntimeError（见 _safe_instance_attr 注释），不能裸读属性。
+        placeholders = self._safe_instance_attr(self, "_batch_placeholders")
+        if not placeholders:
+            return 0
+        restored = 0
+        for batch_idx in sorted(placeholders.keys()):
+            if self._restore_batch_ui(batch_idx):
+                restored += 1
+        if restored:
+            logger.debug(f"[virtual-scroll] 结构重排前实化 {restored} 个占位批次（防卸载批次永久丢失）")
+        return restored
+
     def _locate_and_scroll_to_batch(self, batch_index: int) -> bool:
         """把视口定位到指定批次的 user 卡片顶部（全项目唯一跳转落点）。
 
@@ -17864,6 +17898,12 @@ class OpenAIChatToolWindow(ToolWindow):
         from loguru import logger
 
         logger.info(f"[DELETE] Starting deletion for card at round_index={card._round_index}")
+
+        # 🛡️ 结构重排前实化所有占位批次：_rebuild_batch_cards_from_layout 按
+        # 「布局存活卡」重排批次表，卸载批次一旦只剩占位（无卡），重排摘占位后
+        # 就永久失去重建入口（气泡丢失）+ 存活卡错位登记（后续回收销毁别人的卡）。
+        # 详见 _materialize_placeholder_batches_for_rebuild。
+        self._materialize_placeholder_batches_for_rebuild()
 
         # [DEBUG-diagnose-welcome] 记录删除前状态
         logger.info(
@@ -20951,6 +20991,10 @@ class OpenAIChatToolWindow(ToolWindow):
             if hasattr(w, "role") and w.role == "user" and not getattr(w, "_is_welcome", False):
                 break
             widgets_to_remove.append(w)
+        # 🛡️ 结构重排前实化所有占位批次（同 _delete_user_round 的守卫）：
+        # 下面的删除 + _rebuild_batch_cards_from_layout 会摘占位并按存活卡重排，
+        # 卸载批次必须先原位建卡，否则永久失去重建入口。
+        self._materialize_placeholder_batches_for_rebuild()
         delete_widgets_from_layout(widgets_to_remove, self.chat_layout)
         # 🛡️ 队列里的同一插话必须一并摘除：中止时 worker 可能仍卡在工具执行，
         # 主循环退出不经过取消排空 → 残留条目会被下一个 worker 当新插话消费，
