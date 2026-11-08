@@ -4,6 +4,8 @@
 from html import escape
 from typing import Any, Dict
 
+from app.plugins.contracts.plugin_display import plugin_display_name
+
 
 def _plugin_card_html(plugin: Dict[str, Any], font_size: int = 14) -> str:
     """生成单个插件的 HTML 卡片
@@ -13,8 +15,7 @@ def _plugin_card_html(plugin: Dict[str, Any], font_size: int = 14) -> str:
         font_size: 上下文字体大小（用于派生各元素字号，默认14）
     """
     raw_name = escape(plugin.get("name", ""))
-    alias = plugin.get("display_name_zh")
-    name = escape(alias.strip()) if isinstance(alias, str) and alias.strip() else raw_name
+    name = escape(plugin_display_name(plugin))
     description = escape(plugin.get("description", ""))
     version = escape(plugin.get("version", ""))
     author = escape(plugin.get("author", ""))

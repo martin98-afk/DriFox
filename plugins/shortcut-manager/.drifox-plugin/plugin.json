@@ -4,7 +4,9 @@
         "dark": "icon_dark.svg"
     },
     "name": "shortcut-manager",
-    "display_name_zh": "快捷键管理",
+    "display_name": {
+        "zh": "快捷键管理"
+    },
     "description": "管理系统命令的快捷键，支持自定义快捷键覆盖系统配置",
     "version": "0.1.1",
     "author": {

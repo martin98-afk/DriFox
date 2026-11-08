@@ -4,7 +4,9 @@
     "dark": "icon_dark.svg"
   },
   "name": "system-hook-policies",
-  "display_name_zh": "内置 Hook 策略",
+  "display_name": {
+      "zh": "内置 Hook 策略"
+  },
   "description": "DriFox 内置 Hook 触发策略：all / none / tool_only / subagent_default / team_member",
   "version": "1.0.0",
   "author": {

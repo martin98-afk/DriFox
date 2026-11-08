@@ -4,7 +4,9 @@
     "dark": "icon_dark.svg"
   },
   "name": "system-team-templates",
-  "display_name_zh": "内置团队模板",
+  "display_name": {
+      "zh": "内置团队模板"
+  },
   "description": "DriFox 内置团队模板：default-team",
   "version": "1.0.0",
   "author": {

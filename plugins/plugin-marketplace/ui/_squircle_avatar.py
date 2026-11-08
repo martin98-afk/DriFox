@@ -658,11 +658,16 @@ class PluginIconWidget(QWidget):
         """
         self._clear_children()
         plugin_name = self._manifest.get("name", "?")
-        display = self._manifest.get("display_name_zh")
-        if not (isinstance(display, str) and display.strip()):
-            display = plugin_name
+        raw = self._manifest.get("display_name")
+        display = plugin_name
+        if isinstance(raw, dict):
+            display = raw.get("zh") or next(
+                (v for v in raw.values() if isinstance(v, str) and v.strip()), plugin_name
+            )
+        elif isinstance(raw, str) and raw.strip():
+            display = raw.strip()
         self._avatar = SquircleAvatar(
-            extract_initials(display),
+            extract_initials(display or plugin_name),
             name_color(plugin_name),
             self,
             size=self._icon_size_override,

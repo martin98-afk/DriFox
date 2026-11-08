@@ -3600,6 +3600,19 @@ class MarketplaceCard(QWidget):
         # 不移除、数据翻倍 + 状态徽标查不到。
         market_name = market_data.get("_marketplace") or market_data.get("name", "")
         plugins = market_data.get("plugins", []) or []
+        # 远端清单可能尚未发布 display_name（未 push 前），已安装插件从本地
+        # manifest 补一次，保证重开即显示中文；远程已有字段时以其为准。
+        try:
+            local_manifests = get_installer().get_manifest_map()
+        except Exception:
+            local_manifests = {}
+        if local_manifests:
+            for p in plugins:
+                if p.get("display_name"):
+                    continue
+                lm = local_manifests.get(p.get("name"))
+                if lm and lm.get("display_name"):
+                    p["display_name"] = lm["display_name"]
         # 合并：移除该市场旧数据，追加新数据（同名插件按市场覆盖）
         old = self._plugin_data
         merged = [p for p in old if p.get("_marketplace") != market_name]
@@ -4001,7 +4014,7 @@ class MarketplaceCard(QWidget):
             "_local_only": True,
             "_status": status,
             "_marketplace": "本地",
-            "display_name_zh": "",
+            "display_name": {},
         }
         try:
             import json as _json
@@ -4011,7 +4024,7 @@ class MarketplaceCard(QWidget):
                 if _mp.exists():
                     m = _json.loads(_mp.read_text(encoding="utf-8"))
                     meta["description"] = m.get("description", "")
-                    meta["display_name_zh"] = m.get("display_name_zh", "")
+                    meta["display_name"] = m.get("display_name") or {}
                     meta["author"] = (
                         m.get("author", {}).get("name", "")
                         if isinstance(m.get("author"), dict)
@@ -4049,7 +4062,7 @@ class MarketplaceCard(QWidget):
             "_local_only": True,
             "_status": status,
             "_marketplace": "本地",
-            "display_name_zh": "",
+            "display_name": {},
         }
         try:
             import json as _json
@@ -4059,7 +4072,7 @@ class MarketplaceCard(QWidget):
                 if _mp.exists():
                     m = _json.loads(_mp.read_text(encoding="utf-8"))
                     meta["description"] = m.get("description", "")
-                    meta["display_name_zh"] = m.get("display_name_zh", "")
+                    meta["display_name"] = m.get("display_name") or {}
                     meta["author"] = (
                         m.get("author", {}).get("name", "")
                         if isinstance(m.get("author"), dict)

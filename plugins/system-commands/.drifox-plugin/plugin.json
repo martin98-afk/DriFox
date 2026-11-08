@@ -4,7 +4,9 @@
     "dark": "icon_dark.svg"
   },
   "name": "system-commands",
-  "display_name_zh": "内置斜杠命令",
+  "display_name": {
+      "zh": "内置斜杠命令"
+  },
   "description": "DriFox 内置斜杠命令：/new /compact /team /theme /debug /release 等",
   "version": "1.0.0",
   "author": {

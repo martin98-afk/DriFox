@@ -4,7 +4,9 @@
     "dark": "icon_dark.svg"
   },
   "name": "system-hooks",
-  "display_name_zh": "内置 Hooks",
+  "display_name": {
+      "zh": "内置 Hooks"
+  },
   "description": "DriFox 内置 Hooks：系统提示注入、编码契约、时间日期、安全防护、技能内容注入等",
   "version": "1.0.0",
   "author": {

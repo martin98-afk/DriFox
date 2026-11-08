@@ -45,6 +45,7 @@ from qfluentwidgets import (
 from loguru import logger
 
 from app.plugins.capabilities.catalog import CATALOG
+from app.plugins.contracts.plugin_display import plugin_display_name
 from app.plugins.registries.plugin_config_registry import PluginConfigRegistry
 from app.utils.design_tokens import Colors
 from app.widgets.cards.settings.plugin_config_form import PluginConfigForm, evaluate_config_status
@@ -110,7 +111,7 @@ class _PluginListRow(QWidget):
             self._icon.setPixmap(pix)
         layout.addWidget(self._icon, 0, Qt.AlignVCenter)
 
-        self._name = BodyLabel(entry.info.name, self)
+        self._name = BodyLabel(plugin_display_name(entry.info.manifest), self)
         self._name.setObjectName("pluginRowName")
         layout.addWidget(self._name, 1)
 
@@ -165,7 +166,12 @@ class _PluginListRow(QWidget):
         if not kw:
             return True
         info = self._entry.info
-        haystack = [info.name, info.description, " ".join(self._entry.components)]
+        haystack = [
+            plugin_display_name(info.manifest),
+            info.name,
+            info.description,
+            " ".join(self._entry.components),
+        ]
         schema = PluginConfigRegistry.get_instance().get(info.name)
         if schema is not None:
             haystack.append(schema.title)
@@ -424,7 +430,7 @@ class _PluginDetailView(QWidget):
     def show_entry(self, entry: PluginEntry) -> None:
         self._entry = entry
         info = entry.info
-        self._title.setText(info.name)
+        self._title.setText(plugin_display_name(info.manifest))
         meta = f"v{info.version} · {'内置' if info.is_system else '用户'} · {'已启用' if entry.enabled else '已停用'}"
         self._meta.setText(meta)
         _font_px(self._title, 3)

@@ -4,7 +4,9 @@
         "dark": "icon_dark.svg"
     },
     "name": "system-transports",
-    "display_name_zh": "内置协议传输器",
+    "display_name": {
+        "zh": "内置协议传输器"
+    },
     "description": "DriFox 内置协议传输器：OpenAI chat/completions 请求组装与响应事件归一（协议形状 → StreamEvent）",
     "version": "1.0.0",
     "author": {

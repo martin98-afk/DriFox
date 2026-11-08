@@ -89,11 +89,10 @@ def _installer():
 
 
 def _display_name(meta: dict) -> str:
-    """展示名：中文别名优先，缺失回退标识名（与 ui/display_name.py 同口径）。"""
-    alias = meta.get("display_name_zh")
-    if isinstance(alias, str) and alias.strip():
-        return alias.strip()
-    return str(meta.get("name", "") or "")
+    """展示名：转调主程序公共契约层（与设置页、市场卡片同口径）。"""
+    from app.plugins.contracts.plugin_display import plugin_display_name
+
+    return plugin_display_name(meta)
 
 def _market_data():
     return _ui_module("data")

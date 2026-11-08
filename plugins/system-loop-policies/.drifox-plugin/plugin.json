@@ -4,7 +4,9 @@
     "dark": "icon_dark.svg"
   },
   "name": "system-loop-policies",
-  "display_name_zh": "内置循环策略",
+  "display_name": {
+      "zh": "内置循环策略"
+  },
   "description": "DriFox 内置循环策略：default / minimal / subagent",
   "version": "1.0.0",
   "author": {

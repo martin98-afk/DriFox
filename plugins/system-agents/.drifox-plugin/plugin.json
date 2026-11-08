@@ -4,7 +4,9 @@
     "dark": "icon_dark.svg"
   },
   "name": "system-agents",
-  "display_name_zh": "内置智能体",
+  "display_name": {
+      "zh": "内置智能体"
+  },
   "description": "DriFox 内置智能体：build / plan / review / explore / leader / code-reviewer 等",
   "version": "1.0.0",
   "author": {
