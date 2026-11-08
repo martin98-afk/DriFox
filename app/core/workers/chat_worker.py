@@ -113,7 +113,7 @@ def _accepts_per_request_client(fn) -> bool:
 
     try:
         params = inspect.signature(fn).parameters
-    except TypeError, ValueError:
+    except (TypeError, ValueError):
         return False
     if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()):
         return True
@@ -1244,7 +1244,7 @@ class OpenAIChatWorker(QThread):
                 # 优先级 3: additionalContext
                 if data.get("additionalContext"):
                     return str(data["additionalContext"])
-        except json.JSONDecodeError, TypeError, ValueError:
+        except (json.JSONDecodeError, TypeError, ValueError):
             pass
 
         # 优先级 4: raw output 兜底
@@ -2329,7 +2329,7 @@ class OpenAIChatWorker(QThread):
                             tools=self.tools,
                             ratio=resolve_token_ratio(self.llm_config, model_name),
                         )
-                    except ValueError, TypeError, RuntimeError:
+                    except (ValueError, TypeError, RuntimeError):
                         ctx_count = 0
                 self._last_context_token_count = ctx_count
                 if ctx_count > 0 and budget > 0:
@@ -3109,7 +3109,7 @@ class OpenAIChatWorker(QThread):
                             d = ast.literal_eval(content)
                             if isinstance(d, dict):
                                 img_path = d.get("absolute_path") or d.get("path")
-                        except ValueError, SyntaxError:
+                        except (ValueError, SyntaxError):
                             pass
                     if not img_path:
                         m = re.search(r"路径[：:]\s*(\S+\.\w+)", content)
@@ -3652,7 +3652,7 @@ class OpenAIChatWorker(QThread):
                         # getattr 会抛 RuntimeError: super-class __init__() was never called
                         token_update_callback=self.__dict__.get("_token_update_callback"),
                     )
-                except httpx.ReadError, httpcore.ReadError:
+                except (httpx.ReadError, httpcore.ReadError):
                     # ⚠️ ReadError 不一定是用户取消：
                     # - cancel() 关闭 HTTP 连接 → 抛 ReadError（用户取消，静默返回）
                     # - 真实网络断流（服务端/代理断开、网络抖动）→ 同样抛 ReadError

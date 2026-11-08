@@ -41,7 +41,7 @@ def _tools_schema_hash(tools: List[Dict]) -> str:
     """工具 schema 内容指纹（日志对账用，方便定位「哪一轮前缀变了」）"""
     try:
         blob = json.dumps(tools, sort_keys=True, ensure_ascii=False)
-    except TypeError, ValueError:
+    except (TypeError, ValueError):
         blob = repr(tools)
     return hashlib.md5(blob.encode("utf-8")).hexdigest()[:8]
 

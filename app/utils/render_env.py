@@ -379,7 +379,7 @@ def _to_int(raw, default: int, lo: int, hi: int) -> int:
         return default
     try:
         value = int(raw)
-    except TypeError, ValueError:
+    except (TypeError, ValueError):
         return default
     return max(lo, min(hi, value))
 

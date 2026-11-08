@@ -147,7 +147,7 @@ class SubAgentRunBridge(QObject):
         for signal, slot in binding.connections:
             try:
                 signal.disconnect(slot)
-            except RuntimeError, TypeError:
+            except (RuntimeError, TypeError):
                 pass
         binding.connections.clear()
 
@@ -182,13 +182,13 @@ class SubAgentRunBridge(QObject):
                 executor.tool_call_started.connect(
                     lambda tid, name, args, _wid=window_id: self._on_tool_call(_wid, tid)
                 )
-            except RuntimeError, TypeError:
+            except (RuntimeError, TypeError):
                 pass
             try:
                 executor.token_usage_updated.connect(
                     lambda tid, pt, ct, tt, _wid=window_id: self._on_token_usage(_wid, tid, tt)
                 )
-            except RuntimeError, TypeError:
+            except (RuntimeError, TypeError):
                 pass
 
         self._project(window_id, task_id)
@@ -202,7 +202,7 @@ class SubAgentRunBridge(QObject):
         if panel is not None:
             try:
                 panel.set_task_tool_count(task_id, rec["tool_count"])
-            except RuntimeError, AttributeError:
+            except (RuntimeError, AttributeError):
                 pass
 
     def _on_token_usage(self, window_id: str, task_id: str, total_tokens: int) -> None:
@@ -215,7 +215,7 @@ class SubAgentRunBridge(QObject):
         if panel is not None:
             try:
                 panel.set_task_context(task_id, rec["context"])
-            except RuntimeError, AttributeError:
+            except (RuntimeError, AttributeError):
                 pass
 
     def _on_task_finished(self, window_id: str, task_id: str, result: str) -> None:
@@ -237,7 +237,7 @@ class SubAgentRunBridge(QObject):
         if panel is not None:
             try:
                 panel.finish_task(task_id, success)
-            except RuntimeError, AttributeError:
+            except (RuntimeError, AttributeError):
                 pass
         # 完成后即出表：面板行保留展示，新批次不再迁移旧行（跟最新卡语义）
         self._tasks.pop(task_id, None)
@@ -305,7 +305,7 @@ class SubAgentRunBridge(QObject):
         try:
             if not panel.has_task(task_id):
                 self._project(window_id, task_id, panel)
-        except RuntimeError, AttributeError:
+        except (RuntimeError, AttributeError):
             return None
         return panel
 

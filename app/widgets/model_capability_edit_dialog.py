@@ -54,7 +54,7 @@ def _fmt_limit(value: Any) -> str:
     """上下文/输出上限 → 紧凑显示（1024K 而非 1048576）"""
     try:
         num = int(value)
-    except TypeError, ValueError:
+    except (TypeError, ValueError):
         return "未知"
     if num <= 0:
         return "未知"
