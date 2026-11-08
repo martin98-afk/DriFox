@@ -41,6 +41,11 @@ CLIENT_ID = "opencode-cli"
 UA = "opencode/cli"  # versionless，console 接受，无版本漂移
 SLOW_DOWN_PENALTY_SEC = 5
 REFRESH_SKEW_SEC = 5 * 60
+# 本地 access_token 寿命上限。服务端 device/token 返回 expires_in=2592000（30 天，
+# 2026-11-08 实测），但整条会话链可能被服务端提前吊销（access 401 且 refresh
+# invalid_grant，同批实测）。只信 expires_in 会让刷新分支永不触发，吊销后就是
+# 永久 401，只能手动重新登录。故本地强制每小时换一次，把自愈窗口压到 1 小时。
+ACCESS_MAX_TTL_SEC = 60 * 60
 DEFAULT_TIMEOUT = 30.0
 
 # gpt/grok/muse 走 Responses API，DriFox 单一 chat/completions 通道不支持
@@ -80,7 +85,12 @@ def cache_get(api_key: str) -> dict:
         if api_key in _MEM:
             return dict(_MEM[api_key])
     try:
-        entry = json.loads(_cache_path(api_key).read_text(encoding="utf-8"))
+        path = _cache_path(api_key)
+        entry = json.loads(path.read_text(encoding="utf-8"))
+        if entry.get("access_token") and not entry.get("issued_at"):
+            # 旧缓存无签发时刻：用文件 mtime 近似（写盘即签发），否则升级后会被
+            # 误判成「刚签发」而一直不刷新
+            entry["issued_at"] = path.stat().st_mtime
     except (OSError, json.JSONDecodeError, ValueError):
         entry = {}
     with _CACHE_LOCK:
@@ -90,6 +100,9 @@ def cache_get(api_key: str) -> dict:
 
 def cache_put(api_key: str, **fields) -> dict:
     """merge 写入（保留已有的 org_id / allowed_models 等字段）。"""
+    if "access_token" in fields:
+        # 每次换到新 access 都刷新签发时刻：_fresh 的本地 TTL 上限依赖它
+        fields["issued_at"] = time.time()
     with _CACHE_LOCK:
         entry = dict(_MEM.get(api_key) or {})
         entry.update(fields)
@@ -397,18 +410,36 @@ def prime_cache(
 
 
 def _fresh(llm_config: dict) -> Tuple[str, str]:
-    """读缓存里的 (access_token, org_id)，未临期即返回，否则返回空串待刷新。"""
+    """读缓存里的 (access_token, org_id)；临期或超本地 TTL 上限返回空串待刷新。"""
     api_key = str((llm_config or {}).get("API_KEY", "") or "").strip()
     if not api_key:
         return ("", "")
     entry = cache_get(api_key)
     access = str(entry.get("access_token") or "")
     expires_at = float(entry.get("expires_at") or 0)
+    issued_at = float(entry.get("issued_at") or 0)
     org_id = str(entry.get("org_id") or "")
-    if access and expires_at > time.time() + REFRESH_SKEW_SEC:
+    now = time.time()
+    if access and expires_at > now + REFRESH_SKEW_SEC and now - issued_at < ACCESS_MAX_TTL_SEC:
         return (access, org_id)
     return ("", org_id)
 
+
+def _do_refresh(api_key: str) -> Tuple[str, str]:
+    """换新 access_token 并落缓存。调用前必须持有 _REFRESH_LOCK。"""
+    entry = cache_get(api_key)
+    refresh = str(entry.get("refresh_token") or api_key)
+    data = device_token({"grant_type": "refresh_token", "refresh_token": refresh})
+    new_access = str(data.get("access_token") or "")
+    if not new_access:
+        raise RuntimeError(f"令牌刷新失败：{data.get('error') or '未返回 access_token'}，请重新登录")
+    cache_put(
+        api_key,
+        access_token=new_access,
+        refresh_token=str(data.get("refresh_token") or refresh),
+        expires_at=time.time() + float(data.get("expires_in") or 1800),
+    )
+    return (new_access, str(entry.get("org_id") or ""))
 
 def get_auth_context(llm_config: dict) -> Tuple[str, str]:
     """返回 (access_token, org_id)；access 临期则按 refresh_token 自动续期。
@@ -429,16 +460,21 @@ def get_auth_context(llm_config: dict) -> Tuple[str, str]:
         access, org_id = _fresh(llm_config)
         if access:
             return (access, org_id)
+        return _do_refresh(api_key)
+
+def force_refresh(llm_config: dict) -> bool:
+    """401 后强制换新 access_token（忽略本地 expires_at），返回是否可直接重试。
+
+    与 get_auth_context 共用刷新锁：并发 401 只换一次；10 秒内刚换过说明另一
+    线程已完成刷新，直接返回 True 让调用方重试。整链已废（refresh invalid_grant）
+    时抛 RuntimeError，由调用方归因并提示重新登录。
+    """
+    api_key = str((llm_config or {}).get("API_KEY", "") or "").strip()
+    if not api_key:
+        return False
+    with _REFRESH_LOCK:
         entry = cache_get(api_key)
-        refresh = str(entry.get("refresh_token") or api_key)
-        data = device_token({"grant_type": "refresh_token", "refresh_token": refresh})
-        new_access = str(data.get("access_token") or "")
-        if not new_access:
-            raise RuntimeError(f"令牌刷新失败：{data.get('error') or '未返回 access_token'}，请重新登录")
-        cache_put(
-            api_key,
-            access_token=new_access,
-            refresh_token=str(data.get("refresh_token") or refresh),
-            expires_at=time.time() + float(data.get("expires_in") or 1800),
-        )
-        return (new_access, str(entry.get("org_id") or ""))
+        if time.time() - float(entry.get("issued_at") or 0) < 10:
+            return bool(entry.get("access_token"))
+        _do_refresh(api_key)
+        return True

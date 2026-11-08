@@ -237,6 +237,21 @@ def resolve_extra_headers(
     return headers
 
 
+def resolve_auth_error_hook(llm_config: Optional[Dict[str, Any]] = None) -> Optional[Any]:
+    """服务商插件声明的 401 自愈钩子（capabilities.auth_error_hook）；无声明返回 None。
+
+    钩子签名 ``hook(llm_config) -> bool``：True = 已换到新凭据，调用方可重试；
+    False = 无法自愈，调用方按原错误抛出。OAuth 类服务商的 access_token 可能
+    在本地过期时间之前被服务端吊销（OpenCode 实测），仅靠时间判定刷新永远
+    等不到，故由执行层在收到 401 时回调。
+    """
+    try:
+        profile = get_provider_profile(llm_config or {})
+    except Exception:
+        return None
+    hook = profile.get("auth_error_hook")
+    return hook if callable(hook) else None
+
 def resolve_token_ratio(llm_config: Optional[Dict[str, Any]] = None, model: Optional[str] = None) -> float:
     """解析本地 token 估算的模型校正系数（除数）。
 

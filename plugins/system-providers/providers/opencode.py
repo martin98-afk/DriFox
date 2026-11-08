@@ -221,6 +221,22 @@ _OAUTH_EXTRA_HEADERS = {
     "x-opencode-org-id": _oauth_org_header,
 }
 
+def _oauth_auth_retry(llm_config: dict) -> bool:
+    """401 自愈：忽略本地过期时间强制换新 access_token，返回是否可重试。
+
+    服务端会提前吊销整条会话链（access 401 + refresh invalid_grant，2026-11-08
+    实测），本地 expires_in 却是 30 天，靠时间判定永远等不到刷新。故由执行层在
+    收到 401 时回调本钩子，换到新 token 后重试一次。刷新失败（链已废）只记
+    warning 并返回 False，由执行层抛出原始 401，用户重新登录即可。
+    """
+    from loguru import logger
+
+    try:
+        return bool(_load_oauth().force_refresh(llm_config))
+    except Exception as e:
+        logger.warning(f"[OpenCode OAuth] 401 后强制刷新失败：{e}")
+        return False
+
 
 def _oauth_login(cancel_event=None):
     """登录钩子：device flow 授权 → 回填长效 refresh_token 到 API Key 输入框。"""
@@ -313,6 +329,8 @@ def _oauth_capabilities(models_hook):
         "extra_headers": _OAUTH_EXTRA_HEADERS,
         "login_hook": _oauth_login,
         "models_hook": models_hook,
+        # 401 自愈：执行层收到 401 时回调，换新 access_token 后重试一次
+        "auth_error_hook": _oauth_auth_retry,
         "login_hint": "已打开浏览器，user_code 已复制到剪贴板：粘贴授权后点 Continue（可点「中止」退出）",
     }
 

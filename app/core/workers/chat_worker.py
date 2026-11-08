@@ -3458,6 +3458,23 @@ class OpenAIChatWorker(QThread):
             logger.warning(f"[ToolCall恢复] 尝试恢复工具参数时出错: {e}")
             return None
 
+    def _retry_after_auth_error(self) -> bool:
+        """401 自愈：回调服务商插件声明的 auth_error_hook，成功返回 True。
+
+        只有显式声明钩子的服务商（OAuth 类）才可能自愈；无钩子或刷新失败返回
+        False，由调用方按原 401 抛出，避免把填错的 key 反复重试。
+        """
+        try:
+            from app.core.modelmeta.provider_profile import resolve_auth_error_hook
+
+            hook = resolve_auth_error_hook(self.llm_config or {})
+            if hook is None:
+                return False
+            return bool(hook(self.llm_config or {}))
+        except Exception as e:
+            logger.warning(f"[API] 401 自愈钩子执行失败: {e}")
+            return False
+
     def _provider_extra_headers(self) -> Optional[Dict[str, str]]:
         """服务商插件声明的能力头（capabilities）——通用解析见
         ``provider_profile.resolve_extra_headers``（chat_worker / subagent_worker
@@ -3744,6 +3761,9 @@ class OpenAIChatWorker(QThread):
 
         retry_delay = 5
 
+        # 401 自愈只做一次：刷新后仍 401 说明凭据本身不可用，继续重试无意义
+        auth_retried = False
+
         for attempt in range(max_retries):
             # 用户取消时立即退出重试循环
             if self._is_cancelled:
@@ -3875,6 +3895,19 @@ class OpenAIChatWorker(QThread):
                     )
                     self._restore_partial_content_backup()
                     raise
+
+                # 401 自愈：OAuth access_token 可能在本地过期时间之前被服务端吊销
+                # （OpenCode 实测：expires_in 报 30 天，链却被提前作废），换新凭据
+                # 后重试一次。无钩子 / 刷新失败按原错误抛出，避免把填错的 key 也
+                # 反复重试。
+                if not auth_retried and getattr(e, "status_code", None) == 401:
+                    auth_retried = True
+                    if self._retry_after_auth_error():
+                        auth_headers = self._build_auth_headers()
+                        logger.warning(
+                            f"[API] 401 鉴权失败，已刷新凭据并重试 (attempt {attempt + 1}/{max_retries})"
+                        )
+                        continue
 
                 # 判断是否应该重试 - 使用异常继承关系系统性覆盖
                 # httpx/httpcore 的异常体系：
