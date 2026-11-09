@@ -252,11 +252,11 @@ def main():
     app.setApplicationName("Drifox")
     app.setApplicationDisplayName("Drifox")
 
-    # 🔍 paint 热点采样（诊断用，默认关闭）：主进程在不操作时仍高 CPU、
-    # native 采样只看到 sipQWidget::paintEvent 看不出具体类时启用：
-    #   DRIFOX_PAINT_PROFILE=1 python main.py
-    # 按控件类统计 Paint 事件次数，窗口到期打印 [PAINT-PROF] 报告。
-    # 耗时构成仍需同刻 native 采样（sample / Instruments）配合看。
+    # 🔍 paint 热点采样（**默认开启**，用户零配合）：主进程在不操作时仍高 CPU、
+    # native 采样只看到 sipQWidget::paintEvent 看不出具体类时，靠它按控件类
+    # 统计 Paint 事件次数。正常只在 DEBUG 留一行；超过 120 次/秒升级为 WARNING
+    # 并点名热点类（完整榜在 DEBUG）。
+    # 关掉：DRIFOX_PAINT_PROFILE=0；调窗口：DRIFOX_PAINT_PROFILE_WINDOW=60
     try:
         from app.utils.paint_profiler import start as _start_paint_profiler
 

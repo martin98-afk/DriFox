@@ -1,14 +1,16 @@
 # -*- coding: utf-8 -*-
 """paint_profiler 行为测试。
 
-覆盖三条关键约束（都是实现时踩过或容易踩的坑）：
-1. 默认关闭：没有环境变量时 ``start()`` 直接返回 False，不装任何过滤器
-   （诊断设施不能给正常启动增加成本）。
+覆盖四条关键约束（都是实现时踩过或容易踩的坑）：
+1. **默认开启**：这是给用户零配合的诊断设施 —— 卡顿现场无法复现时，
+   日志里必须已经有数据。环境变量只用于关掉它（`=0`）或调窗口。
 2. 过滤器能按类统计 Paint 事件：Qt 的 Paint 派发必经
    ``QApplication`` 事件过滤器，这是唯一有效的统计点；给
    ``QWidget.paintEvent`` 打 Python 补丁是无效的（C++ 虚函数调度，
    计数恒为 0），本测试用真实绘制路径锁住正确实现。
 3. 过滤器绝不吞事件：``eventFilter`` 必须返回 False，否则控件不再重绘。
+4. 周期滚动采样：``reset()`` 用 ``clear()`` 原地清空，否则过滤器闭包
+   会写进废弃字典，第二轮起统计恒为空。
 """
 
 import os
@@ -43,20 +45,20 @@ def clean_state(monkeypatch):
     paint_profiler.reset()
 
 
-def test_disabled_by_default(qapp):
-    """没有环境变量时不得启用，也不得安装过滤器。"""
-    assert paint_profiler.enabled() is False
-    assert paint_profiler.start() is False
-    assert paint_profiler._started is False
+def test_enabled_by_default(qapp):
+    """没有环境变量时默认启用（用户零配合是硬要求）。"""
+    assert paint_profiler.enabled() is True
+    assert paint_profiler.start() is True
+    assert paint_profiler._started is True
 
 
-@pytest.mark.parametrize("value", ["0", "false", "no", "off", ""])
+@pytest.mark.parametrize("value", ["0", "false", "no", "off"])
 def test_disabled_values(qapp, monkeypatch, value):
     monkeypatch.setenv(paint_profiler._ENV_KEY, value)
     assert paint_profiler.enabled() is False
 
 
-@pytest.mark.parametrize("value", ["1", "true", "yes", "on"])
+@pytest.mark.parametrize("value", ["", "1", "true", "yes", "on"])
 def test_enabled_values(monkeypatch, value):
     monkeypatch.setenv(paint_profiler._ENV_KEY, value)
     assert paint_profiler.enabled() is True
@@ -148,3 +150,44 @@ def test_report_does_not_crash_with_no_data(qapp):
     """无数据时打印报告不得抛（窗口到期必然走这条路径）。"""
     paint_profiler.reset()
     paint_profiler.report()
+
+
+def test_reset_keeps_filter_writing(qapp, monkeypatch):
+    """周期复位后统计仍能累积（锁住 clear() vs 重新绑定的坑）。
+
+    reset() 若把 `_stats` 重新绑定成新 dict，而过滤器闭包持有旧引用，
+    第二轮采样起会恒为空 —— 表现为「采样器装了但永远报 0 次」。
+    """
+    monkeypatch.setenv(paint_profiler._ENV_KEY, "1")
+    assert paint_profiler.start(window_s=60) is True
+
+    class _Cycle(QWidget):
+        def paintEvent(self, e):  # noqa: N802 - Qt 命名
+            QPainter(self).fillRect(self.rect(), QColor("#567"))
+
+    w = _Cycle()
+    w.resize(90, 70)
+    w.show()
+
+    from PyQt5.QtCore import QEventLoop
+
+    loop = QEventLoop()
+    QTimer.singleShot(0, w.update)
+    QTimer.singleShot(300, loop.quit)
+    loop.exec_()
+    first = paint_profiler._stats.get("_Cycle", 0)
+    assert first >= 1, "首轮未统计到"
+
+    # 模拟一轮采样结束
+    paint_profiler.reset()
+    assert paint_profiler._stats.get("_Cycle", 0) == 0, "reset 未清空"
+
+    loop2 = QEventLoop()
+    QTimer.singleShot(0, w.update)
+    QTimer.singleShot(300, loop2.quit)
+    loop2.exec_()
+    second = paint_profiler._stats.get("_Cycle", 0)
+    assert second >= 1, (
+        "复位后统计恒为 0 —— reset() 重新绑定了 _stats，过滤器闭包写进了废弃字典"
+    )
+    w.close()
