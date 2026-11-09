@@ -79,6 +79,29 @@ def _stream_subscribe(host: Any, ctx: Any):
     return subscribe
 
 
+def _stream_errors(host: Any, ctx: Any):
+    """stream.errors：订阅 backend.conversation_error(dict) 结构化报错事件。
+
+    负载字段：window_id/session_id/provider/model/message/error_type/timestamp。
+    连接登记到 CapabilityRegistry.track_subscription，插件卸载时由
+    release_plugin 统一断开（与 _stream_subscribe 同模式）。
+    """
+
+    def subscribe(callback) -> bool:
+        backend = getattr(host, "backend", None)
+        if backend is None:
+            raise RuntimeError("backend 未就绪，无法订阅对话报错事件")
+        signal = getattr(backend, "conversation_error", None)
+        if not hasattr(signal, "connect"):
+            logger.warning("[Capability] backend 无 conversation_error 信号，跳过订阅")
+            return False
+        signal.connect(callback)
+        ctx.registry.track_subscription(ctx.plugin, signal, callback)
+        return True
+
+    return subscribe
+
+
 def _window_active(host: Any):
     def current():
         tm = _resolve_tab_window()
@@ -1323,6 +1346,40 @@ def _model_config_for(host: Any):
 
     return config_for
 
+def _model_set(host: Any):
+    """model.set：设置当前窗口的服务商与模型（只改窗口实例态，不写全局默认）。
+
+    解析复用宿主 ``_resolve_history_model_target``（config_id 直查 → provider
+    反查 → 模型名唯一匹配；多匹配不明确返回 None），该函数是纯解析，复用安全。
+    成功后刷新模型按钮与上下文用量；不置 ``_user_manually_selected_model``
+    （插件选择不视为用户偏好，云端同步仍可覆盖）、不写 ``cfg.llm_selected_model``。
+    流式中调用允许：本轮 worker 已持有 llm_config，下一轮生效。
+    """
+
+    def set_model(model: str = "", provider: str = "", config_id: str = "") -> dict:
+        resolver = getattr(host, "_resolve_history_model_target", None)
+        if not callable(resolver):
+            return {"ok": False, "error": "not_found", "detail": "宿主窗口不支持模型解析"}
+        try:
+            target = resolver(str(model or ""), str(provider or ""), str(config_id or ""))
+        except Exception as e:  # noqa: BLE001 — 解析异常按 not_found 降级
+            logger.warning(f"[Capability] model.set 解析失败: {e}")
+            return {"ok": False, "error": "not_found", "detail": str(e)}
+        if not target:
+            return {"ok": False, "error": "not_found", "detail": "无法解析到唯一的服务商/模型组合"}
+        resolved_cid, resolved_model = target
+        host._current_provider_name = resolved_cid
+        host._current_model_name = resolved_model
+        refresh_btn = getattr(host, "_update_model_selector_btn", None)
+        if callable(refresh_btn):
+            refresh_btn()
+        refresh_ctx = getattr(host, "_refresh_context_usage_indicator", None)
+        if callable(refresh_ctx):
+            refresh_ctx()
+        return {"ok": True, "config_id": resolved_cid, "model": resolved_model}
+
+    return set_model
+
 def _storage_db(host: Any, ctx: Any):
     """通用数据库执行权限：受限代理（表名须 ``plugin_<name>_`` 前缀）。"""
     from app.plugins.capabilities.providers.db_guard import PluginDBProxy
@@ -1348,6 +1405,7 @@ def register(registry) -> None:
     reg = registry
     # 对话流 / 窗口
     reg.register("stream.subscribe", _stream_subscribe, surface="ui", owner="core:ui")
+    reg.register("stream.errors", _stream_errors, surface="ui", owner="core:ui")
     reg.register("window.active", _window_active, surface="ui", owner="core:ui")
     reg.register("window.host", _window_host, surface="ui", owner="core:ui")
     reg.register("window.current", _window_current, surface="ui", owner="core:ui")
@@ -1358,6 +1416,7 @@ def register(registry) -> None:
     reg.register("model.config", _model_config, surface="ui", owner="core:ui")
     reg.register("model.config", _provider_config, surface="ui", owner="core:ui", legacy_key="get_provider_config")
     reg.register("model.config_for", _model_config_for, surface="ui", owner="core:ui")
+    reg.register("model.set", _model_set, surface="ui", owner="core:ui")
     reg.register("model.schema", _model_schema, surface="ui", owner="core:ui")
     reg.register("model.metadata", _model_metadata, surface="ui", owner="core:ui")
     reg.register("provider.list", model_meta.provider_list, surface="ui", owner="core:ui")
