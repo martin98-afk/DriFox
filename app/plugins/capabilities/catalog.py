@@ -163,6 +163,7 @@ CATALOG: Dict[str, CapabilitySpec] = {
         _spec("platform.read", _M, "平台与会话列表", _UI, ["list_platform_sessions", "list_platforms"]),
         # ── 内部资源 ──
         _spec("mcp.call", _H, "MCP 工具调用", _TOOL, ["mcp"]),
+        _spec("mcp.register", _H, "注册进程内 MCP server 工具处理器（工具调用在本机执行）", _UI),
         _spec("lsp.query", _M, "LSP 查询", _TOOL, ["lsp"]),
         _spec("net.upload", _H, "Gitee 上传（数据外发）", _TOOL, ["gitee"]),
         _spec("net.download", _M, "从 Gitee 绑定仓库下载文件到本地路径", _BOTH),
