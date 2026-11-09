@@ -184,6 +184,10 @@ class _RUsageInfoV4(ctypes.Structure):
         ("ri_idle_wkups", ctypes.c_uint64),
         ("ri_idle_wkups_max", ctypes.c_uint64),
         ("ri_counters", ctypes.c_uint64 * 6),
+        # 实测(2026-11-09)：现代 macOS 内核对 RUSAGE_INFO_V4 实际写入 >208 字节，
+        # 按旧 libproc.h 布局给足 208B 会被越界写坏堆(调用即返回正常、之后
+        # 任意 gc/free 段错误)。加尾垫到 512B，读取字段(off 72)不受影响。
+        ("_tail_pad", ctypes.c_uint64 * 32),
     ]
 
 

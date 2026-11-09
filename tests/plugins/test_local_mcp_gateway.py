@@ -3,6 +3,7 @@
 
 Run: pytest tests/plugins/test_local_mcp_gateway.py -v
 """
+import inspect
 import json
 import urllib.request
 
@@ -68,3 +69,10 @@ def test_port_is_dynamic_and_unregister(gateway):
     _, body = _post(gateway, {"jsonrpc": "2.0", "id": 5, "method": "tools/list"},
                     path="/mcp/browser")
     assert "error" in body
+
+
+def test_unload_hook_calls_unregister():
+    from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+
+    src = inspect.getsource(UIPluginRegistry.unload_plugin)
+    assert "unregister_plugin" in src

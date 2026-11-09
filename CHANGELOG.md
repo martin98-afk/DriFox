@@ -6,6 +6,7 @@ All notable changes to this project will be documented in this file.
 自 v0.7.0-beta 以来的变更 | 提交数：37 · 文件变更：140 · +6437/-1093 | 贡献者：dingma, martin98-afk
 
 ### ✨ 新功能 (New Features)
+- **宿主进程内 MCP gateway** (`app/core/services/local_mcp_gateway.py`, `app/plugins/capabilities/providers/mcp_core.py`, `app/tools/mcp_tools.py`): 插件可声明 `mcp.register` 能力，经 `caps_for` 取注册函数把工具 handler 登记进宿主进程内的 `ThreadingHTTPServer`（端口 `:0`）；`.mcp.json` 用 `type: http` + `url: ${LOCAL_MCP}/<name>`，连接前由 `_resolve_plugin_paths` 替换成 gateway 实际地址，复用 `streamablehttp_client` 纯 JSON 分支。MCP server 不再需要外部 python 子进程，打包版不依赖系统解释器安装 `mcp`/`httpx`；现有 stdio/sse/http 连接路径与设置页零改动。附 gateway 握手、能力注册、占位符解析 9 个单测，并用真实 SDK 客户端验证 `initialize → list_tools → call_tool` 三步。
 - **壁纸场景截图脚本** (`ec1c4b8c`): wallpaper-to-theme 技能新增 `capture_scene.py`，对壁纸渲染场景做高保真截图采样。
 - **coding_plan 徽标主题同步** (`04c0fa4b`): coding_plan_ring 徽标随主题切换刷新重绘，附回归测试。
 

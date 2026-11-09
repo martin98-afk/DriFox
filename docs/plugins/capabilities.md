@@ -257,8 +257,19 @@ cfg = caps.legacy("get_provider_config", "model.config")(
 | ID | level | 说明 |
 |---|---|---|
 | `mcp.call` | **high** | MCP 工具调用 |
+| `mcp.register` | medium | 注册进程内 MCP server 工具处理器（见下） |
 | `lsp.query` | medium | LSP 查询 |
 | `net.upload` | **high** | Gitee 上传（数据外发） |
+
+`mcp.register` 是注册型能力，池值是一个注册函数，插件经 `caps_for("mcp.register", surface="ui")` 取来调用，把工具 handler 登记进宿主进程内的 `LocalMcpGateway`：
+
+```python
+from app.plugins.sdk import caps_for
+register_mcp = caps_for("mcp.register", surface="ui")
+register_mcp("browser", mcp_handle, tools=MCP_TOOLS)
+```
+
+配套 `.mcp.json` 用 `type: http` + `url: ${LOCAL_MCP}/browser`，宿主连接前把占位符替换成 gateway 的运行时地址（端口 `:0` 由 OS 分配），走现成的 `streamablehttp_client`。这样 MCP server 不需要外部 python 子进程，打包版也不依赖系统解释器装了 `mcp`/`httpx`。handler 只需返回 `{"text": str}`，gateway 负责包成 `CallToolResult`。插件卸载时宿主按 plugin 自动注销 handler。
 
 ### 界面
 
