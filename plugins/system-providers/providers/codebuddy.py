@@ -391,6 +391,48 @@ def _fetch_balance(config):
     )
     return {"balance": round(left, 1), "currency": ""}
 
+def _health_probe(config) -> str:
+    """健康探测钩子：按本配置的号换短效 access_token 后对聊天端点发真请求。
+
+    /v3/config（列表探测）对失效号不敏感，验不出凭据被吊销；打
+    /v2/chat/completions 才能验出真实可用性（状态点语义 = 当前联通）。
+    返回对齐 model_refresh_service 四态：ok / auth_failed / unreachable。
+    探测计入活跃上报（_mark_active），与列表拉取同口径。
+    """
+    import urllib.error
+    import urllib.request
+
+    refresh_token = str((config or {}).get("API_KEY", "") or "").strip()
+    if not refresh_token:
+        return "auth_failed"  # 尚未登录
+    _mark_active(refresh_token)
+    try:
+        token = _exchange_access_token(refresh_token)
+    except Exception:
+        return "auth_failed"  # refresh 链已废 / 换取失败
+    model = str((config or {}).get("模型名称", "") or "").strip()
+    if not model:
+        return "unreachable"
+
+    ba = _load_auth_module()
+    body = json.dumps(
+        {"model": model, "messages": [{"role": "user", "content": "ping"}], "max_tokens": 1, "stream": False}
+    ).encode("utf-8")
+    headers = {**ba.build_headers(token), "Content-Type": "application/json"}
+    try:
+        req = urllib.request.Request(
+            f"{_ENDPOINT}{ba.CHAT_COMPLETIONS_PATH}", data=body, method="POST", headers=headers
+        )
+        with urllib.request.urlopen(req, timeout=15, context=_system_ssl_context()) as resp:
+            resp.read()
+        return "ok"
+    except urllib.error.HTTPError as e:
+        if e.code in (401, 403, 402):
+            return "auth_failed"
+        return "unreachable"
+    except Exception:
+        return "unreachable"
+
 
 # daemon 守护线程与解释器拆解竞态的防护：
 # - 退出信标：aboutToQuit 置位，线程在分段睡眠间隙退出，不再 exec auth 模块
@@ -1304,6 +1346,8 @@ def register(registry):
                 "extra_headers": _EXTRA_HEADERS,
                 "login_hook": _auto_login,
                 "models_hook": _fetch_models,
+                # 健康探测：插件内换短效凭据对聊天端点发真请求（状态点语义 = 当前联通）
+                "health_probe": _health_probe,
             },
             balance_fetcher=_fetch_balance,
         )

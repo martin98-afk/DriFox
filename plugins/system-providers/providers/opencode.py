@@ -309,6 +309,66 @@ def _go_oauth_coding_plan(config: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         logger.info(f"[OpenCode Go OAuth] 套餐用量不可用：{e}")
         return None
 
+def _oauth_health_probe(config: dict) -> str:
+    """Zen/Go (OAuth) 健康探测钩子：对推理端点发 max_tokens=1 真实请求。
+
+    服务端 ModelRefreshService 的探测优先级高于 models_hook（列表语义）：
+    本钩子在插件内换取短效 access_token 后打聊天端点，能验出「凭据被服务端
+    提前吊销」这类列表探测永远看不到的失效（2026-11-08 实测的 401 链）。
+
+    返回对齐 model_refresh_service 四态：
+    - 未登录 / refresh 链已废 / 网关 401/403/402 → "auth_failed"
+    - HTTP 200 → "ok"；其余网络/服务端异常 → "unreachable"
+    """
+    import json
+    import urllib.error
+    import urllib.request
+    import uuid
+
+    oa = _load_oauth()
+    api_key = str((config or {}).get("API_KEY", "") or "").strip()
+    if not api_key:
+        return "auth_failed"  # 尚未登录
+    try:
+        access, org = oa.get_auth_context({"API_KEY": api_key})
+    except Exception:
+        return "auth_failed"  # refresh 链已废（需重新登录）
+    if not access:
+        return "auth_failed"
+
+    model = str((config or {}).get("模型名称", "") or "").strip()
+    api_url = str((config or {}).get("API_URL", "") or "").rstrip("/")
+    if not model or not api_url:
+        return "unreachable"
+    is_go = "/inference/go/" in api_url
+
+    headers = {
+        "User-Agent": "opencode/cli",
+        "Authorization": f"Bearer {access}",
+        "Content-Type": "application/json",
+        # 网关会话标识（2026-09 起 400 MissingSessionID）；探测用一次性会话 id
+        "x-opencode-session": uuid.uuid4().hex,
+    }
+    if not is_go and org:
+        headers["x-opencode-org-id"] = org  # Go 公开端点带 org 头会被 403
+
+    body = json.dumps(
+        {"model": model, "messages": [{"role": "user", "content": "ping"}], "max_tokens": 1, "stream": False}
+    ).encode("utf-8")
+    try:
+        req = urllib.request.Request(
+            f"{api_url}/chat/completions", data=body, method="POST", headers=headers
+        )
+        with urllib.request.urlopen(req, timeout=15, context=oa._ssl_context()) as resp:
+            resp.read()
+        return "ok"
+    except urllib.error.HTTPError as e:
+        if e.code in (401, 403, 402):
+            return "auth_failed"
+        return "unreachable"
+    except Exception:
+        return "unreachable"
+
 def _oauth_capabilities(models_hook):
     """两个 OAuth 版共用登录与动态头，仅模型池钩子不同。
 
@@ -329,6 +389,8 @@ def _oauth_capabilities(models_hook):
         "extra_headers": _OAUTH_EXTRA_HEADERS,
         "login_hook": _oauth_login,
         "models_hook": models_hook,
+        # 健康探测：插件内换短效凭据对聊天端点发真请求（状态点语义 = 当前联通）
+        "health_probe": _oauth_health_probe,
         # 401 自愈：执行层收到 401 时回调，换新 access_token 后重试一次
         "auth_error_hook": _oauth_auth_retry,
         "login_hint": "已打开浏览器，user_code 已复制到剪贴板：粘贴授权后点 Continue（可点「中止」退出）",
