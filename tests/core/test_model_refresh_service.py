@@ -17,6 +17,7 @@
 """
 
 import sys
+import time
 from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
@@ -25,11 +26,14 @@ import pytest
 
 from app.core.modelmeta import model_refresh_service as mrs
 from app.core.modelmeta.model_refresh_service import (
+    HEALTH_INTERVAL_S,
     KEY_AUTO_REFRESH,
     KEY_HEALTH_CHECK,
+    KEY_HEALTH_TS,
     KEY_LAST_REFRESH,
     KEY_MODELS,
     KEY_REFRESH_STATUS,
+    KEY_STATUS_TS,
     REFRESH_INTERVAL_S,
     STATUS_AUTH_FAILED,
     STATUS_OK,
@@ -73,6 +77,79 @@ class TestDue:
         assert parse_refresh_ts(None) == 0.0
         assert parse_refresh_ts(12345) == 12345.0
         assert parse_refresh_ts("2026-10-09 12:00:00") > 0
+
+
+class TestHealthDue:
+    def test_health_due_independent_of_list_ts(self):
+        """列表 23h59m 前刚刷过，但健康计时 2h 前到期 → 健康检查仍触发"""
+        now = 1_000_000_000.0
+        info = {
+            KEY_LAST_REFRESH: now - (REFRESH_INTERVAL_S - 60),
+            KEY_HEALTH_TS: now - (HEALTH_INTERVAL_S + 60),
+        }
+        assert ModelRefreshService.is_due(info, now) is False
+        assert ModelRefreshService.is_health_due(info, now) is True
+
+    def test_health_not_due_within_1h(self):
+        now = 1_000_000_000.0
+        info = {KEY_HEALTH_TS: now - (HEALTH_INTERVAL_S - 60)}
+        assert ModelRefreshService.is_health_due(info, now) is False
+
+    def test_health_missing_ts_is_due(self):
+        assert ModelRefreshService.is_health_due({"健康检查": True}, 1_000_000_000.0) is True
+
+
+class TestTickDispatch:
+    def _catch_thread(self, monkeypatch, svc, calls):
+        """把 _on_tick 派发的线程参数捕获到 calls 列表"""
+
+        class _FakeThread:
+            def __init__(self, target=None, args=(), daemon=None, name=None):
+                calls.append(args)
+
+            def start(self):
+                pass
+
+        monkeypatch.setattr(mrs.threading, "Thread", _FakeThread)
+        svc._in_flight.clear()
+
+    def test_dispatch_both_channels_when_both_due(self, service, monkeypatch):
+        calls = []
+        self._catch_thread(monkeypatch, service, calls)
+        service.sync_from_config({"c1": {
+            KEY_AUTO_REFRESH: True,
+            KEY_HEALTH_CHECK: True,
+            KEY_LAST_REFRESH: 0,  # 从未 → 双到期
+        }})
+        service._on_tick()
+        assert len(calls) == 1
+        config_id, info, do_models, do_health = calls[0]
+        assert config_id == "c1" and do_models is True and do_health is True
+
+    def test_dispatch_health_only_when_list_fresh(self, service, monkeypatch):
+        """列表刚刷过（24h 内）但健康到期 → 只派健康探测"""
+        calls = []
+        self._catch_thread(monkeypatch, service, calls)
+        service.sync_from_config({"c1": {
+            KEY_AUTO_REFRESH: True,
+            KEY_HEALTH_CHECK: True,
+            KEY_LAST_REFRESH: time.time() - 3600,       # 24h 内
+            KEY_HEALTH_TS: time.time() - 7200,          # 1h 前到期
+        }})
+        service._on_tick()
+        assert len(calls) == 1
+        assert calls[0][2] is False and calls[0][3] is True
+
+    def test_no_dispatch_when_neither_due(self, service, monkeypatch):
+        calls = []
+        self._catch_thread(monkeypatch, service, calls)
+        service.sync_from_config({"c1": {
+            KEY_AUTO_REFRESH: True,
+            KEY_LAST_REFRESH: time.time(),
+            KEY_HEALTH_TS: time.time(),
+        }})
+        service._on_tick()
+        assert calls == []
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -176,7 +253,7 @@ class TestSettleSemantics:
             "模型列表": ["m1"],
         }
         service.sync_from_config({"c1": info})
-        service._on_refresh_result("c1", True, STATUS_OK, ["m1", "m2"])
+        service._on_refresh_result("c1", STATUS_OK, STATUS_OK, ["m1", "m2"])
 
         entry = service._store["providers"]["c1"]
         assert entry[KEY_MODELS] == ["m1", "m2"], "应静默合并新列表"
@@ -192,12 +269,13 @@ class TestSettleSemantics:
             "模型列表": ["m1"],
         }
         service.sync_from_config({"c1": info})
-        service._on_refresh_result("c1", True, STATUS_OK, ["m1", "m2", "m3"])
+        service._on_refresh_result("c1", STATUS_OK, "", [])
 
         entry = service._store["providers"]["c1"]
         assert entry[KEY_MODELS] == ["m1"], "健康检查不得修改模型列表"
         assert entry[KEY_REFRESH_STATUS] == STATUS_OK
-        assert entry[KEY_LAST_REFRESH]
+        assert not entry.get(KEY_LAST_REFRESH), "纯健康探测不得写「上次模型刷新」"
+        assert entry.get(KEY_HEALTH_TS), "应写健康计时键"
 
     def test_default_model_missing_does_not_merge(self, service):
         """默认模型不在新列表 → 不写列表（防配置指向已下线模型）"""
@@ -208,7 +286,7 @@ class TestSettleSemantics:
             "模型列表": ["gone-model"],
         }
         service.sync_from_config({"c1": info})
-        service._on_refresh_result("c1", True, STATUS_OK, ["other-1", "other-2"])
+        service._on_refresh_result("c1", STATUS_OK, STATUS_OK, ["other-1", "other-2"])
 
         entry = service._store["providers"]["c1"]
         assert entry[KEY_MODELS] == ["gone-model"], "默认模型失效时不得合并"
@@ -225,7 +303,7 @@ class TestSettleSemantics:
         service.sync_from_config({"c1": {KEY_AUTO_REFRESH: True}})
         service.invalidate("c1")
         service._store["providers"] = {}  # 模拟条目已被删除（配置里也没有）
-        service._on_refresh_result("c1", True, STATUS_OK, ["m"])
+        service._on_refresh_result("c1", STATUS_OK, STATUS_OK, ["m"])
         assert service._store["providers"] == {}, "不应凭空创建条目"
 
 
@@ -236,12 +314,14 @@ class TestSettleSemantics:
 
 class TestFetchStatus:
     def _run_fetch(self, service, config_id, info):
-        """跑 _fetch_one 并把信号结果收到局部（绕过 Qt 队列，直连收集）"""
+        """跑 _fetch_one（列表通道）并把信号结果收到局部（绕过 Qt 队列，直连收集）"""
         got = {}
         service.refresh_finished.connect(
-            lambda cid, ok, st, models: got.update(cid=cid, ok=ok, status=st, models=models)
+            lambda cid, sfinal, smodels, models: got.update(
+                cid=cid, status=sfinal, status_models=smodels, models=models
+            )
         )
-        service._fetch_one(config_id, info)
+        service._fetch_one(config_id, info, do_models=True)
         return got
 
     def test_rest_401_maps_to_auth_failed(self, service, monkeypatch):
@@ -254,7 +334,7 @@ class TestFetchStatus:
         info = {"provider_name": "P", "API_URL": "https://x/v1", "API_KEY": "bad"}
         got = self._run_fetch(service, "c1", info)
         assert got["status"] == STATUS_AUTH_FAILED
-        assert got["ok"] is False
+        assert got["status_models"] == STATUS_AUTH_FAILED
 
     def test_rest_timeout_maps_to_unreachable(self, service, monkeypatch):
         from app.widgets.cards.settings import provider_edit_card as pec
@@ -263,7 +343,7 @@ class TestFetchStatus:
         info = {"provider_name": "P", "API_URL": "https://x/v1", "API_KEY": "k"}
         got = self._run_fetch(service, "c1", info)
         assert got["status"] == STATUS_UNREACHABLE
-        assert got["ok"] is False
+        assert got["status_models"] == STATUS_UNREACHABLE
 
     def test_rest_ok_returns_models(self, service, monkeypatch):
         from app.widgets.cards.settings import provider_edit_card as pec
@@ -271,7 +351,7 @@ class TestFetchStatus:
         monkeypatch.setattr(pec, "fetch_provider_models", lambda *a, **k: (["m1", "m2"], [], STATUS_OK))
         info = {"provider_name": "P", "API_URL": "https://x/v1", "API_KEY": "k"}
         got = self._run_fetch(service, "c1", info)
-        assert got["ok"] is True
+        assert got["status"] == STATUS_OK
         assert got["models"] == ["m1", "m2"]
 
     def test_hook_path_preferred(self, service, monkeypatch):
@@ -298,7 +378,7 @@ class TestFetchStatus:
         info = {"provider_name": "HookProvider", "API_URL": "https://x/v1", "API_KEY": "k"}
         got = self._run_fetch(service, "c1", info)
         assert got["models"] == ["h1", "h2"]
-        assert got["ok"] is True
+        assert got["status"] == STATUS_OK
         assert called["rest"] is False, "有 hook 时不该走 REST"
 
     def test_hook_exception_maps_to_unreachable(self, service, monkeypatch):
@@ -314,7 +394,6 @@ class TestFetchStatus:
 
         got = self._run_fetch(service, "c1", {"provider_name": "BadHook", "API_URL": "https://x", "API_KEY": "k"})
         assert got["status"] == STATUS_UNREACHABLE
-        assert got["ok"] is False
 
     def test_missing_api_url_unreachable(self, service):
         got = self._run_fetch(service, "c1", {"provider_name": "P", "API_KEY": "k"})

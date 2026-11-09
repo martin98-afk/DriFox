@@ -29,13 +29,15 @@ import threading
 import time
 from copy import deepcopy
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple, Tuple
 
 from loguru import logger
 from PyQt5.QtCore import QObject, Qt, QTimer, pyqtSignal
 
 # 刷新周期（秒）与 tick 粒度（毫秒）
 REFRESH_INTERVAL_S = 24 * 3600
+# 健康检查周期（秒）：聊天端点 ping 兕底探测，1h 一次（列表刷新仍是 24h）
+HEALTH_INTERVAL_S = 3600
 TICK_MS = 5 * 60 * 1000
 
 # 配置键（与服务商配置同键名，随 saved_providers 落盘）
@@ -44,6 +46,8 @@ KEY_HEALTH_CHECK = "健康检查"
 KEY_MODELS = "模型列表"
 KEY_LAST_REFRESH = "上次模型刷新"
 KEY_REFRESH_STATUS = "模型刷新状态"
+KEY_HEALTH_TS = "上次健康检查"
+KEY_STATUS_TS = "状态更新时间"
 
 # 状态取值（供 UI 状态点映射）
 STATUS_OK = "ok"
@@ -91,8 +95,9 @@ def now_ts_str() -> str:
 class ModelRefreshService(QObject):
     """模型列表定时刷新（进程级单例，风格对齐 UsageService）。"""
 
-    # (config_id, ok, status, models) — 刷新完成（主线程发射；models 供落盘合并）
-    refresh_finished = pyqtSignal(str, bool, str, list)
+    # (config_id, 最终状态, 列表抓取状态, models) — 主线程发射
+    # status_models 非空表示本轮拉了列表（落盘侧据此写「上次模型刷新」）
+    refresh_finished = pyqtSignal(str, str, str, list)
 
     _instance: Optional["ModelRefreshService"] = None
 
@@ -198,6 +203,18 @@ class ModelRefreshService(QObject):
             return True
         return (now - last) >= interval_s
 
+    @staticmethod
+    def is_health_due(info: Dict[str, Any], now: Optional[float] = None, interval_s: int = HEALTH_INTERVAL_S) -> bool:
+        """健康检查是否到期（独立计时键「上次健康检查」，1h 周期）。
+
+        与「上次模型刷新」解耦：手动拉列表不再推迟健康探测。
+        """
+        now = time.time() if now is None else now
+        last = parse_refresh_ts((info or {}).get(KEY_HEALTH_TS))
+        if last <= 0:
+            return True
+        return (now - last) >= interval_s
+
     # ══════════════════════════════════════════════════════════
     # tick 链（主线程）
     # ══════════════════════════════════════════════════════════
@@ -213,7 +230,7 @@ class ModelRefreshService(QObject):
             self._timer.start(TICK_MS)
 
     def _on_tick(self) -> None:
-        """tick：把到期条目派给后台线程，然后续下一次 tick。"""
+        """tick：把到期条目派给后台线程（列表/健康双通道），然后续下一次 tick。"""
         if self._stopped:
             return
         now = time.time()
@@ -222,14 +239,16 @@ class ModelRefreshService(QObject):
             if info is None:
                 self._active.discard(config_id)
                 continue
-            if not self.is_due(info, now):
+            do_models = bool(info.get(KEY_AUTO_REFRESH)) and self.is_due(info, now)
+            do_health = bool(info.get(KEY_HEALTH_CHECK)) and self.is_health_due(info, now)
+            if not (do_models or do_health):
                 continue
             if config_id in self._in_flight:
                 continue  # 并发去重：上一轮还没回来
             self._in_flight.add(config_id)
             threading.Thread(
                 target=self._fetch_one,
-                args=(config_id, dict(info)),
+                args=(config_id, dict(info), do_models, do_health),
                 daemon=True,
                 name=f"model-refresh-{config_id}",
             ).start()
@@ -239,44 +258,52 @@ class ModelRefreshService(QObject):
     # 后台线程（⚠ 只做 HTTP + 内存 + emit，禁碰 cfg / QTimer / QWidget）
     # ══════════════════════════════════════════════════════════
 
-    def _fetch_one(self, config_id: str, info: Dict[str, Any]) -> None:
-        """后台抓取单条：hook 优先 → REST 兜底；结果经信号回主线程。"""
+    def _fetch_one(self, config_id: str, info: Dict[str, Any], do_models: bool = False, do_health: bool = False) -> None:
+        """后台抓取单条：按需执行列表抓取与健康探测；结果经信号回主线程。"""
         models: List[str] = []
-        status = STATUS_UNREACHABLE
+        status_models = ""
+        status_final = ""
         try:
-            provider_name = str(info.get("provider_name", "") or "")
-            hook = self._resolve_models_hook(provider_name)
-            if hook is not None:
-                try:
-                    result = hook(dict(info)) or []
-                    models = [str(m) for m in result if m]
-                    status = STATUS_OK if models else STATUS_EMPTY
-                except Exception as e:
-                    logger.info(f"[ModelRefresh] models_hook 失败 config_id={config_id}: {e}")
-                    status = STATUS_UNREACHABLE
-            else:
-                from app.widgets.cards.settings.provider_edit_card import fetch_provider_models
-
-                api_url = str(info.get("API_URL", "") or "")
-                api_key = str(info.get("API_KEY", "") or "")
-                if not api_url:
-                    status = STATUS_UNREACHABLE
-                else:
-                    filtered, _removed, status = fetch_provider_models(
-                        api_url,
-                        api_key,
-                        provider_name,
-                        str(info.get("认证方式", "") or "bearer"),
-                    )
-                    models = list(filtered)
+            if do_models:
+                models, status_models = self._fetch_models(info, config_id)
+            if do_health:
+                status_final = self._probe_health(info, config_id)
         except Exception as e:
             logger.warning(f"[ModelRefresh] 刷新异常 config_id={config_id}: {e}")
-            status = STATUS_UNREACHABLE
+            if do_models and not status_models:
+                status_models = STATUS_UNREACHABLE
+            if do_health and not status_final:
+                status_final = STATUS_UNREACHABLE
         finally:
             self._in_flight.discard(config_id)
+        if not status_final:
+            status_final = status_models or STATUS_UNREACHABLE
+        self.refresh_finished.emit(config_id, status_final, status_models, list(models))
 
-        ok = status in (STATUS_OK, STATUS_EMPTY)
-        self.refresh_finished.emit(config_id, ok, status, list(models))
+    def _fetch_models(self, info: Dict[str, Any], config_id: str) -> Tuple[List[str], str]:
+        """拉模型列表（hook 优先 → REST 兜底），返回 (models, status)。"""
+        provider_name = str(info.get("provider_name", "") or "")
+        hook = self._resolve_models_hook(provider_name)
+        if hook is not None:
+            try:
+                result = hook(dict(info)) or []
+                models = [str(m) for m in result if m]
+                return models, (STATUS_OK if models else STATUS_EMPTY)
+            except Exception as e:
+                logger.info(f"[ModelRefresh] models_hook 失败 config_id={config_id}: {e}")
+                return [], STATUS_UNREACHABLE
+        from app.widgets.cards.settings.provider_edit_card import fetch_provider_models
+
+        api_url = str(info.get("API_URL", "") or "")
+        if not api_url:
+            return [], STATUS_UNREACHABLE
+        filtered, _removed, status = fetch_provider_models(
+            api_url,
+            str(info.get("API_KEY", "") or ""),
+            provider_name,
+            str(info.get("认证方式", "") or "bearer"),
+        )
+        return list(filtered), status
 
     @staticmethod
     def _resolve_models_hook(provider_name: str):
@@ -308,11 +335,12 @@ class ModelRefreshService(QObject):
             return False
         return is_default_model_safe(str(info.get("模型名称", "") or ""), models)
 
-    def _on_refresh_result(self, config_id: str, ok: bool, status: str, models: List[str]) -> None:
+    def _on_refresh_result(self, config_id: str, status_final: str, status_models: str, models: List[str]) -> None:
         """主线程槽：写状态 / 静默合并 / 落盘 / 通知窗口重载。
 
-        本方法必须在主线程（`refresh_finished` 用 QueuedConnection 投递，
-        见 `__init__`）。
+        「上次模型刷新」只在真拉了列表时写（status_models 非空），
+        健康探测不再混用列表计时键。
+        本方法必须在主线程（refresh_finished 用 QueuedConnection 投递）。
         """
         info = self._configs.get(config_id)
         if info is None:
@@ -330,11 +358,15 @@ class ModelRefreshService(QObject):
 
             updated = deepcopy(saved)
             entry = updated[config_id]
-            entry[KEY_LAST_REFRESH] = now_ts_str()
-            entry[KEY_REFRESH_STATUS] = status if not ok else (STATUS_OK if models else STATUS_EMPTY)
-            if ok and models and self._should_merge(current, models):
-                entry[KEY_MODELS] = list(models)
-                logger.info(f"[ModelRefresh] 静默合并模型列表 config_id={config_id}（{len(models)} 个）")
+            if status_models:  # 本轮拉了列表：更新列表计时 + 按需合并
+                entry[KEY_LAST_REFRESH] = now_ts_str()
+                if models and self._should_merge(current, models):
+                    entry[KEY_MODELS] = list(models)
+                    logger.info(f"[ModelRefresh] 静默合并模型列表 config_id={config_id}（{len(models)} 个）")
+            if status_final:  # 本轮有探测结果：更新状态两键 + 健康计时
+                entry[KEY_REFRESH_STATUS] = status_final
+                entry[KEY_STATUS_TS] = now_ts_str()
+                entry[KEY_HEALTH_TS] = now_ts_str()
 
             cfg.set(cfg.llm_saved_providers, updated, save=True)
             # 同步进程内快照，下一轮到期判定读到新时间戳
