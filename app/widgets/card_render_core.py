@@ -688,6 +688,15 @@ _HTML_WIDGET_HEAD_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+# ```svg 围栏可前置 <style>/注释（visualization skill 的 svg-guide 规范要求），
+# 剥掉这些前导块后仍须以 <svg 元素开头，且含闭合标签，才算完整 SVG 结构。
+# 教学片段（仅提到 <svg> 字样）与流式半截（缺 </svg>）都不该被误吞。
+_SVG_LEADING_STRIP_PATTERN = re.compile(
+    r"^(?:\s|<!--[\s\S]*?-->|<style\b[^>]*>[\s\S]*?</style\s*>)*",
+    re.IGNORECASE,
+)
+_SVG_CLOSE_PATTERN = re.compile(r"</svg\s*>", re.IGNORECASE)
+
 
 def _sanitize_widget_html(raw_html: str, max_len: int = 200_000) -> str:
     """净化 ```html fence 内容，产出可直接内联的静态 HTML 片段。
@@ -853,12 +862,14 @@ def _render_render_fence(lang: str, code_content_raw: str) -> Optional[str]:
 
     # ===== SVG 代码块：透传 raw HTML，浏览器直渲 =====
     # 协议上 SVG 应内联正文（visualization skill），但模型习惯性输出 ```svg 围栏，
-    # 这里兜底：语言为 svg 且内容以 <svg 开头时按 raw HTML 透传，
-    # 与正文内联 <svg>（markdown safe=False）走同一条渲染路径。
-    # 内容不以 <svg 开头（教学代码等）保持普通代码块渲染，避免误吞。
+    # 且 svg-guide 要求在 <svg> 前放一段标准 <style>。这里兜底：剥掉前导
+    # style/注释/空白后以 <svg 开头且含闭合标签时按 raw HTML 透传，与正文内联
+    # <svg>（markdown safe=False）走同一条渲染路径。教学片段与流式半截保持
+    # 普通代码块渲染，避免误吞或撕碎后续 DOM。
     if lang == "svg":
         svg_html = _unescape_html(code_content_raw)
-        if svg_html.lstrip().lower().startswith("<svg"):
+        head = _SVG_LEADING_STRIP_PATTERN.sub("", svg_html, count=1)
+        if head.lstrip().lower().startswith("<svg") and _SVG_CLOSE_PATTERN.search(head):
             return svg_html
         return None
 
@@ -3681,7 +3692,10 @@ _SKELETON_CACHE_MAX = 48
 # （_v2LiveAppendNow 的 `lastChild.appendData` 替代每帧 createTextNode）。
 # 旧骨架逐帧新建文本节点，长回答下同一 live 容器积累上千兄弟节点，
 # Chromium 每次重排/选择都要线性遍历，是流式掉帧的一分子。
-_SKELETON_CACHE_VERSION = 76
+# _SKELETON_CACHE_VERSION +1（v77）：ECharts vendor 加载失败兜底——
+# _echLoadScript 的 onerror 清 _echLibLoading/_echLibQueue、给容器打失败标记，
+# _echartsEnsure 加 _echLibFailed 熔断。旧骨架 CDN 断时容器永久停在 400px 空框。
+_SKELETON_CACHE_VERSION = 77
 
 
 def _js_literal(value) -> str:

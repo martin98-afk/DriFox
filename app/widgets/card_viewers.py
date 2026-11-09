@@ -3790,8 +3790,9 @@ class CodeWebViewer(QWebEngineView):
                     .think-streaming-tip,
                     .tool-streaming-block[data-streaming="true"] .tool-streaming-preview {{ animation: none !important; }}
                 }}
-                /* option 解析失败兜底（fence 已闭合但 JSON 畸形）：收起空洞，给出提示。
-                   成功渲染时 JS 移除该 class，容器恢复 300px。 */
+                /* 图表不可用兜底：两类失败共用同一 class —— ① fence 已闭合但 JSON
+                   畸形（option 解析失败，流式补齐后重试）；② echarts vendor 加载失败
+                   （打包版缺本地文件 + CDN 不通）。成功渲染时 JS 移除该 class。 */
                 .echarts-container.echarts-failed {{
                     min-height: 120px;
                     display: flex;
@@ -3799,7 +3800,7 @@ class CodeWebViewer(QWebEngineView):
                     justify-content: center;
                 }}
                 .echarts-container.echarts-failed::before {{
-                    content: "图表数据暂不完整，等待生成…";
+                    content: "图表暂不可用：数据生成中或组件加载失败";
                     font-size: 12px;
                     color: var(--text-muted, #8b949e);
                 }}
@@ -4730,11 +4731,25 @@ class CodeWebViewer(QWebEngineView):
                     var s = document.createElement('script');
                     s.src = src;
                     s.onload = onOk;
-                    s.onerror = function () {{ console.error('[echarts] load failed: ' + src); }};
+                    s.onerror = function () {{
+                        // vendor 与 CDN 都不可达时不能只打日志：否则 _echLibLoading
+                        // 恒 true、等待队列永不执行，容器永久停在 400px 空框，且后续
+                        // 所有图表一起饿死（macOS 打包版实测）。清锁 + 清队列 + 熔断，
+                        // 并给容器打失败标记，让用户看到原因而非空白。
+                        console.error('[echarts] load failed: ' + src);
+                        window._echLibLoading = false;
+                        window._echLibQueue = [];
+                        window._echLibFailed = true;
+                        document.querySelectorAll('.echarts-container').forEach(function (el) {{
+                            el.classList.add('echarts-failed');
+                        }});
+                        if (typeof reportHeightDebounced === 'function') reportHeightDebounced();
+                    }};
                     document.head.appendChild(s);
                 }}
                 function _echartsEnsure(cb) {{
                     if (window.echarts) {{ cb(); return; }}
+                    if (window._echLibFailed) return;   // 已判失败：不再排队重试（CDN 已断）
                     if (!window._echLibQueue) window._echLibQueue = [];
                     window._echLibQueue.push(cb);
                     if (window._echLibLoading) return;   // 已在加载中，排队即可
@@ -4751,6 +4766,13 @@ class CodeWebViewer(QWebEngineView):
                 }}
                 window._initEchartsIn = function (roots) {{
                     if (!window.echarts) {{
+                        if (window._echLibFailed) {{
+                            // 库加载失败后新落地的图表容器也要显示失败态，别留空框
+                            window._scopeQuery(roots, '.echarts-container').forEach(function (el) {{
+                                el.classList.add('echarts-failed');
+                            }});
+                            return;
+                        }}
                         window._echartsEnsure(function () {{ window._initEchartsIn(roots); }});
                         return;
                     }}
