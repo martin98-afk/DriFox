@@ -3397,7 +3397,14 @@ class MessageCard(SimpleCardWidget):
             self._shrink_timer.stop()
 
     def _apply_pending_shrink(self):
-        """延迟收缩落地：仅当流式中且当前落地值仍大于挂起目标。"""
+        """延迟收缩落地：仅当流式中且当前落地值仍大于挂起目标。
+
+        ⚠️ `not self._streaming` 早退**不能去掉**：finish_streaming 会主动
+        `_cancel_pending_shrink()` 作废挂起项，改由非流式 `_update_height`
+        全量收敛接管。两条路径都写 viewer 高度会互相打架（追踪 tick 与
+        结束态缓动同时进行 → 高度锯齿）。挂起项在 finish 时已清空，
+        正常不会走到这里；本早退是二道保险。
+        """
         target = self._pending_shrink_height
         self._pending_shrink_height = None
         if target is None or not self._streaming:
