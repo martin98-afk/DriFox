@@ -1610,6 +1610,14 @@ class OpenAIChatToolWindow(ToolWindow):
         self._topic_summary_cancelled = False  # 用于取消正在进行的标题生成任务
         self._response_start_time = None
         self._stop_elapsed = None  # 手动停止时暂存的耗时
+        # 🛡️ 流式中途周期落盘（P1）：流式期间正文只活在 worker 私有状态和卡片 DOM 里，
+        # session.messages 连 assistant 条目都还没有 —— 进程在这段时间被杀，整轮内容
+        # 无从恢复。这里按时间节流把「当前已有的部分回复」写进 session 尾部一条
+        # 带 _partial 标记的 assistant 消息并落盘，崩溃后最多丢一个间隔的内容。
+        # 正常结束时这条会被 worker 的完整消息整体替换（见 _on_messages_updated）。
+        # 节流判据放 _on_content_received（流式心跳，天然 80ms 批一次），不额外起 timer。
+        self._last_partial_flush_ts: float = 0.0
+        self._partial_flush_interval_s: float = 25.0
         # 使用 try-except 保护 homepage 操作，防止 C++ 对象已删除错误
         try:
             from PyQt5 import sip
@@ -16539,6 +16547,97 @@ class OpenAIChatToolWindow(ToolWindow):
         ):
             self._scroll_to_bottom()
 
+    def _maybe_flush_partial_reply(self) -> None:
+        """流式中途把当前已有的部分回复落一次盘（节流，幂等）。
+
+        为什么需要：流式期间正文只存在于两处——worker 私有的
+        ``_response_content_blocks`` 与卡片 DOM 的 ``_markdown_text``，
+        ``session.messages`` 里连 assistant 条目都还没建。进程在这段时间被杀
+        （崩溃/强杀/断电），整轮内容从头到尾没有可恢复的东西。
+
+        做法：在 session.messages 尾部维护**一条**带 ``_partial`` 标记的
+        assistant 消息，每次覆盖更新。不新增条目 → 不影响 message_count /
+        context_usage 口径；正常结束时 worker 的完整消息会整体替换它
+        （``_on_messages_updated`` 走 set_messages），标记随之消失。
+
+        跳过条件（任一命中直接返回）：
+        - 不在流式中 / 窗口已销毁 / 会话已切换（写入会落到别的会话）
+        - 临时对话页（该页一律不落盘，见 _auto_save_current_session 守卫链）
+        - 尾部是「等待工具结果」的 assistant(tool_calls)：此时 assistant 必须
+          带 tool_calls 且紧跟配对结果，插入一条裸文本会破坏协议，下一轮
+          API 调用直接报 tool_call_id 找不到。
+        """
+        interval = self._partial_flush_interval_s
+        now = time.time()
+        if now - self._last_partial_flush_ts < interval:
+            return
+        if getattr(self, "_is_destroyed", False) or getattr(self, "_session_switched", False):
+            return
+        if not self._is_streaming:
+            return
+
+        card = self._current_assistant_card
+        if card is None or _is_sip_deleted(card):
+            return
+        blocks = getattr(card, "_content_data", None)
+        if not blocks:
+            return
+        text = content_to_text(blocks)
+        if not text.strip():
+            return
+
+        session = self.session_manager.get_current_session()
+        if session is None or getattr(session, "is_temp", False):
+            return
+
+        messages = session.messages
+        tail = messages[-1] if messages else None
+        # 等待工具结果：assistant(tool_calls) 后面必须紧跟 tool 消息，中间插不进
+        # 任何东西。工具返回后尾部变 tool，那之后又允许落盘。
+        if tail is not None and tail.get("role") == "assistant" and tail.get("tool_calls") and not tail.get("_partial"):
+            return
+
+        self._last_partial_flush_ts = now
+
+        # 覆盖式更新：已有 partial 尾巴就替换内容，否则追加一条
+        partial = tail if (tail is not None and tail.get("_partial")) else None
+        if partial is None:
+            from datetime import datetime
+
+            partial = {
+                "role": "assistant",
+                "content": text,
+                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "ts_ms": int(now * 1000),
+                "_partial": True,
+            }
+            _round_model, _round_cfg = "", ""
+            try:
+                _round_model, _round_cfg = self._round_model_snapshot()
+            except Exception:  # noqa: BLE001
+                # 模型归属只是元数据，取不到不影响内容落盘（窗口态夹缝）
+                pass
+            if _round_model:
+                partial["model_name"] = _round_model
+                partial["config_id"] = _round_cfg
+            messages.append(partial)
+        else:
+            partial["content"] = text
+            partial["ts_ms"] = int(now * 1000)
+        session.bump_messages_version()
+
+        # 直接走保存链（不经过 set_messages/consolidate：那是全量重建，
+        # 会把刚 append 的对象换掉，且流式期间没必要付这个成本）
+        self._session_dirty = True
+        if not self.history_manager:
+            return
+        try:
+            self._save_current_session_to_history()
+            self.history_manager.flush_async()
+        except Exception as e:  # noqa: BLE001
+            # 周期落盘是尽力而为：失败不得影响流式渲染主链
+            logger.debug(f"[PartialFlush] 周期落盘失败（不影响流式）: {e}")
+
     def _update_node_preview(self):
         session = self.session_manager.get_current_session()
         if not session:
@@ -21257,6 +21356,8 @@ class OpenAIChatToolWindow(ToolWindow):
         if self._current_assistant_card:
             self._update_assistant_message(self._current_assistant_card, content_piece)
         # 内容已由 MessageCard.append_chunk 内部累加，无需主窗口冗余存储
+        # 🛡️ 周期落盘（P1）：崩溃/强杀时至少保住已生成的部分回复
+        self._maybe_flush_partial_reply()
         # ★ B4 强回收层（低频触发）：流式内容到达时顺带检查内存阈值
         self._maybe_strong_recycle()
 

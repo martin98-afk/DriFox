@@ -3846,6 +3846,14 @@ class MessageCard(SimpleCardWidget):
             self._set_actions_visible(self._user_action_btns, True)
         super().enterEvent(event)
 
+    def showEvent(self, event):
+        super().showEvent(event)
+        # macOS 兜底：后台标签页期间气泡底色的 update() 可能不被补画，
+        # 重新可见时 backing store 拿旧像素（场景背景图）直接 blit，
+        # 表现为气泡底色缺失、只有 WebEngine 文字浮在壁纸上，resize 才恢复。
+        # 显示瞬间强制整卡标脏一次，补掉这笔绘制欠账（一次性成本，非热路径）。
+        self.update()
+
     def leaveEvent(self, event):
         if self.role == "user" and getattr(self, "_user_action_btns", None) is not None:
             self._set_actions_visible(self._user_action_btns, False)

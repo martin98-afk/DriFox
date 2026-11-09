@@ -433,6 +433,11 @@ class HistoryManager:
         # （防抖 timer 到期与 flush 交叉时，旧快照后完成会覆盖新内容）。
         self._save_write_lock = threading.Lock()
         self._save_seq = 0
+        # 🛡️ 在飞写盘计数：_do_save 起线程前把自己登记进来，线程结束（含失败/早退）
+        # 时注销。flush / flush_async / 关窗路径据此等待「已交给后台但还没落盘」的写，
+        # 否则 pending 提前清空 + 线程 daemon 化的组合会让退出瞬间静默丢最后一次保存。
+        self._save_cond = threading.Condition()
+        self._save_inflight = 0
 
         # === 轻量列表缓存 ===
         # get_history_list() 的结果缓存，避免每次调用都排序+过滤+重建 dict。
@@ -2111,7 +2116,7 @@ class HistoryManager:
         # 持有的旧消息快照有再次写回的风险。
         if self._pending_save_session_id == session_id:
             self._pending_save_session_id = None
-            self._save_timer = None
+            self._cancel_save_timer()
 
         try:
             ok = bool(self._session_store.save_session(cleared))
@@ -2148,8 +2153,59 @@ class HistoryManager:
             self._do_save()
 
         self._pending_save_session_id = session_id
-        if self._save_timer is None:
-            self._save_timer = QTimer.singleShot(self._save_delay_ms, self._do_save)
+        self._start_save_timer()
+
+    def _cancel_save_timer(self) -> None:
+        """取消排队中的防抖保存定时器（幂等）。
+
+        ⚠️ 必须是实例 QTimer，不能用 `QTimer.singleShot(...)`：静态调用返回
+        **None**，历史实现写成 `self._save_timer = QTimer.singleShot(...)` 后，
+        所有「_save_timer is not None」的判断永假 →
+        - `_schedule_save` 开头「同一会话合并保存请求」永不生效（每次保存都新排
+          一个定时器，短时间连发 N 次保存就有 N 个回调）；
+        - `flush()` / `flush_async()` 里的 `if self._save_timer is not None`
+          永假，取消逻辑等于没写，也判不出「还有一次防抖保存没落盘」。
+        另外 singleShot 也无法取消。
+        """
+        timer = self._save_timer
+        self._save_timer = None
+        if timer is None:
+            return
+        # 跨线程不能动 Qt 定时器（killTimer 只在所属线程有效，会打
+        # "Timers cannot be stopped from another thread" 且实际没停）。后台
+        # finalize 线程也会走 flush → _do_save 到这里，此时只丢引用：定时器
+        # 到期后 _do_save 读 pending 早退，最坏是一次空回调，不影响数据。
+        if threading.current_thread() is not threading.main_thread():
+            return
+        stop = getattr(timer, "stop", None)
+        if callable(stop):
+            try:
+                stop()
+            except RuntimeError:
+                pass  # C++ 对象已销毁（窗口/管理器析构期），无需再停
+
+    def _start_save_timer(self) -> None:
+        """启动一次性防抖保存定时器。
+
+        语义与历史实现一致：**已有定时器在跑就不重启窗口**（不因连续保存把
+        落盘时间无限往后推），到期时 _do_save 读的是那一刻最新的 pending。
+        区别只在于定时器现在是可取消的实例 QTimer，而不是返回 None 的静态调用。
+
+        ⚠️ 非主线程不排定时器：Qt 定时器只在有事件循环的线程生效。后台
+        finalize 线程也会走 update_session → _schedule_save，在那里创建 QTimer
+        既不触发、又会让 _save_timer 永久非 None，把后续主线程的调度全部挡掉
+        （保存彻底停摆）。这种场景保持 pending 挂着，由主线程下一次调度或
+        flush() 消费，与旧实现的实际效果一致。
+        """
+        if self._save_timer is not None:
+            return
+        if threading.current_thread() is not threading.main_thread():
+            return
+        timer = QTimer()
+        timer.setSingleShot(True)
+        timer.timeout.connect(self._do_save)
+        self._save_timer = timer
+        timer.start(self._save_delay_ms)
 
     def _do_save(self, synchronous: bool = False):
         """延迟保存会话到 SQLite
@@ -2167,7 +2223,7 @@ class HistoryManager:
         dict），后台写的是捕获时快照——该更新会再次 _schedule_save 排新一轮
         防抖写盘，最终一致（最后一次写盘必为最新快照）。
         """
-        self._save_timer = None
+        self._cancel_save_timer()
 
         if not (self._use_sqlite and self._session_store):
             logger.debug("[HistoryManager] SQLite 未就绪，跳过保存")
@@ -2231,16 +2287,38 @@ class HistoryManager:
         logger.debug(f"[HistoryManager] 后台保存会话: {pending_id[:8]}...")
 
         def _write():
-            with self._save_write_lock:
-                # 持锁后复核：若期间已有更晚的保存请求入队，本次快照已陈旧，
-                # 直接放弃写盘（更晚那次必然在本次之后拿到锁并写入更新内容）。
-                if seq < self._save_seq:
-                    return
-                try:
-                    store.save_session(snapshot)
-                except Exception as e:
-                    logger.warning(f"[HistoryManager] 后台保存会话失败: {e}")
-                    return
+            try:
+                with self._save_write_lock:
+                    # 持锁后复核：若期间已有更晚的保存请求入队，本次快照已陈旧，
+                    # 直接放弃写盘（更晚那次必然在本次之后拿到锁并写入更新内容）。
+                    if seq < self._save_seq:
+                        return
+                    # 🛡️ 写失败不静默放弃：旧实现 except 后仅打 warning 就返回，
+                    # 而调用方（_save_current_session_to_history）在派发写盘**之前**
+                    # 已把 _session_dirty 置 False → 一次 IO 失败（磁盘满/锁等待超时/
+                    # 库被外部占用）就让这轮内容永久不落库，且界面上没有任何异常。
+                    # 这里重试 3 次（间隔递增），仍失败则把 session_id 回填 pending，
+                    # 让下一次 flush / 防抖写重新尝试，丢弃由上层显式决策。
+                    last_err: Optional[Exception] = None
+                    for attempt in range(3):
+                        try:
+                            if store.save_session(snapshot):
+                                last_err = None
+                                break
+                            last_err = RuntimeError("save_session 返回 False")
+                        except Exception as e:  # noqa: BLE001
+                            last_err = e
+                        time.sleep(0.05 * (attempt + 1))
+                    if last_err is not None:
+                        logger.error(f"[HistoryManager] 后台保存会话失败（已重试 3 次）: {last_err}")
+                        with self._save_cond:
+                            # 仅在期间没有更晚的请求排队时回填，避免把新 pending 覆盖成旧会话
+                            if self._pending_save_session_id is None:
+                                self._pending_save_session_id = pending_id
+                        return
+            finally:
+                # 无论成功/失败/陈旧早退都必须注销，否则 flush 会一直等到超时
+                self._finish_inflight_save()
             # 🛡️ 本进程刚写库：WAL 提交会推进 -wal 的 mtime，若不刷新变更签名，
             # 下一次 get_history_list 的 _reload_if_db_changed 会把自己的写入误判为
             # 「其他进程修改」→ 先 flush 再从 SQLite 全量重载（实测 1915 条约 19ms，
@@ -2248,7 +2326,13 @@ class HistoryManager:
             # 签名滞后刷新 = 只把自己造成的变更记为已对齐（后台读 mtime 同样有效）。
             self._refresh_db_signature()
 
-        threading.Thread(target=_write, daemon=True, name="history-save").start()
+        self._register_inflight_save()
+        try:
+            threading.Thread(target=_write, daemon=True, name="history-save").start()
+        except Exception:
+            # 线程创建失败（极少：资源耗尽）必须撤销登记，否则 flush 白等 5s
+            self._finish_inflight_save()
+            raise
 
     def _refresh_db_signature(self):
         """写库后刷新变更签名（原 _do_save 尾部逻辑抽出，同步/后台路径共用）"""
@@ -2257,6 +2341,42 @@ class HistoryManager:
                 self._db_signature_stored = self._db_signature()
         except Exception:
             pass
+
+    # ── 在飞写盘登记（关闭「pending 已清空但线程还没写完」的丢失缺口）──
+
+    def _register_inflight_save(self) -> None:
+        """线程启动前登记：必须早于 Thread.start() 调用，否则 flush 可能在
+        线程真正开始前就判定「没有在飞写」而放行退出。"""
+        with self._save_cond:
+            self._save_inflight += 1
+
+    def _finish_inflight_save(self) -> None:
+        """写线程收尾（含异常/早退路径）：注销并唤醒等待者。"""
+        with self._save_cond:
+            if self._save_inflight > 0:
+                self._save_inflight -= 1
+            self._save_cond.notify_all()
+
+    def _wait_inflight_saves(self, timeout: float = 5.0) -> bool:
+        """等待所有已交给后台线程的写盘结束（返回 False = 超时）。
+
+        为什么需要：_do_save / flush_async 都在**起线程之前**就把
+        _pending_save_session_id 置 None，flush() 只看 pending 会判定「无事可做」
+        直接跳过 → 进程退出时 daemon 写线程被静默杀掉，最后一次保存丢失。
+        本方法补上「等已交出去的写」这一环，flush() 之后才能安全地穿透提交。
+        """
+        deadline = time.monotonic() + timeout
+        with self._save_cond:
+            while self._save_inflight > 0:
+                remain = deadline - time.monotonic()
+                if remain <= 0:
+                    logger.error(
+                        f"[HistoryManager] 等待在飞写盘超时（{timeout}s），"
+                        f"仍有 {self._save_inflight} 个写线程未完成"
+                    )
+                    return False
+                self._save_cond.wait(remain)
+        return True
 
     def flush(self):
         """立即持久化所有待保存的会话（同步写入 SQLite）
@@ -2272,6 +2392,10 @@ class HistoryManager:
             # synchronous=True：退出/关键保存点必须写完成再返回（daemon 后台写
             # 线程会随进程退出被杀，不能用于本语义）
             self._do_save(synchronous=True)
+        # 🛡️ 关键：等「已交给后台线程但还没写完」的写盘结束。_do_save / flush_async
+        # 都在起线程前就把 pending 置 None，只看 pending 会判定空转直接返回，
+        # 随后进程退出把 daemon 写线程杀掉 = 最后一次保存静默丢失。
+        self._wait_inflight_saves()
         # 穿透到 db 层：同步提交 SQLite 挂起事务（攒批窗口内的写立即落盘）
         # 🛡️ P4-C1-Y1（devil-advocate 复核）：flush 失败透传 error 日志
         # （退出链经本方法最终落 db.close()，由 close 的失败保留逻辑兜底）。
@@ -2310,8 +2434,7 @@ class HistoryManager:
         - _save_timer 已排队回调触发 _do_save 时读 pending_id=None 早退，
           不会与后台线程双写。
         """
-        if self._save_timer is not None:
-            self._save_timer = None
+        self._cancel_save_timer()
         pending_id = self._pending_save_session_id
         self._pending_save_session_id = None
         if not pending_id or not (self._use_sqlite and self._session_store):
@@ -2336,9 +2459,21 @@ class HistoryManager:
                 # （即便期间有更晚的快照入队，本线程非 daemon 保证一定写完，
                 # 且它深拷贝的就是当前最新状态）。
                 with self._save_write_lock:
-                    store.save_session(snapshot)
-                    if db is not None and getattr(db, "is_connected", False):
-                        db.flush()
+                    last_err: Optional[Exception] = None
+                    for attempt in range(3):
+                        try:
+                            if store.save_session(snapshot):
+                                last_err = None
+                                break
+                            last_err = RuntimeError("save_session 返回 False")
+                        except Exception as e:  # noqa: BLE001
+                            last_err = e
+                        time.sleep(0.05 * (attempt + 1))
+                    if last_err is not None:
+                        logger.error(f"[HistoryManager] flush_async 后台保存失败（已重试 3 次）: {last_err}")
+                        raise last_err
+                    if db is not None and getattr(db, "is_connected", False) and not db.flush():
+                        logger.error("[HistoryManager] flush_async 穿透提交失败：SQLite 挂起事务未落盘")
                 # 与 _do_save 的后台写同口径：本进程刚写库会推进 -wal 的 mtime，
                 # 不刷新签名的话下一次 get_history_list 的 _reload_if_db_changed
                 # 会把自己的写入误判成「外部进程改动」→ 白跑一次全量重载
@@ -2348,8 +2483,20 @@ class HistoryManager:
                 self._refresh_db_signature()
             except Exception as e:
                 logger.error(f"[HistoryManager] flush_async 后台保存失败: {e}")
+                with self._save_cond:
+                    # 关窗路径没有后续保存点，必须回填 pending 让退出链的
+                    # aboutToQuit / 下一次 flush 重试，而不是静默丢掉这次内容
+                    if self._pending_save_session_id is None:
+                        self._pending_save_session_id = pending_id
+            finally:
+                self._finish_inflight_save()
 
-        threading.Thread(target=_bg_flush, name="history-flush-async").start()
+        self._register_inflight_save()
+        try:
+            threading.Thread(target=_bg_flush, name="history-flush-async").start()
+        except Exception:
+            self._finish_inflight_save()
+            raise
 
     def _extract_last_message_time(self, messages: List[Dict]) -> str:
         for msg in reversed(messages or []):
