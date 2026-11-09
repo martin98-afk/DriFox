@@ -5409,6 +5409,14 @@ class CodeWebViewer(QWebEngineView):
                 // reasoning：思考块尾态要带 think-compact 类。首帧由 Python 侧的
                 // _v2_live_html 生成（含该类），但正式化后节点被重建、live 尾要
                 // 重新创建时就丢了 → 思考块背景/间距退化成普通正文。
+                //
+                // [PERF] 2026-11-09：揭示是**逐帧**追加（~60 次/秒），旧实现每帧
+                // `createTextNode(text)` 新建一个文本节点并 append。长回答下同一
+                // 个 live 容器里会积累上千个兄弟文本节点，Chromium 每次重排/粘连
+                // 选择都要线性遍历，布局成本随节点数增长。改为把增量**追加到同一
+                // 个文本节点**（`node.appendData`），节点数恒定 1 个，DOM 结构不变、
+                // 字符序列与旧实现逐字符相同（只是分批落地而非分节点）。
+                // 节点失效/不是文本节点时回退到新建（保证任何情况下都能落地）。
                 window._v2LiveAppendNow = function (containerId, key, text, reasoning) {{
                     if (!text) return false;
                     var node = window._v2LiveNode(containerId, key);
@@ -5423,7 +5431,13 @@ class CodeWebViewer(QWebEngineView):
                         var cnt = node.querySelector(':scope > #char-count');
                         if (cnt) node.insertBefore(live, cnt); else node.appendChild(live);
                     }}
-                    live.appendChild(document.createTextNode(text));
+                    // 增量挂到同一个文本节点上（复用其尾部文本节点）
+                    var tailNode = live.classList.contains('v2-live-html') ? null : live.lastChild;
+                    if (tailNode && tailNode.nodeType === 3) {{
+                        tailNode.appendData(text);
+                    }} else {{
+                        live.appendChild(document.createTextNode(text));
+                    }}
                     // 思考尾态是限高窗口（CSS: .v2-live-text.think-compact）：
                     // 追加后必须滚到底，窗口内始终是最新文字（与 .think-streaming-live 同语义）
                     if (reasoning) live.scrollTop = live.scrollHeight;
