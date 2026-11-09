@@ -1,9 +1,9 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
-## [v0.7.0] - 2026-11-09 (重新发布 #4)
+## [v0.7.0] - 2026-11-09 (重新发布 #5)
 
-自 v0.7.0-beta 以来的变更 | 提交数：37 · 文件变更：140 · +6437/-1093 | 贡献者：dingma, martin98-afk
+自 v0.7.0-beta 以来的变更 | 提交数：43 · 文件变更：162 · +7402/-1170 | 贡献者：dingma, martin98-afk
 
 ### ✨ 新功能 (New Features)
 - **宿主进程内 MCP gateway** (`app/core/services/local_mcp_gateway.py`, `app/plugins/capabilities/providers/mcp_core.py`, `app/tools/mcp_tools.py`): 插件可声明 `mcp.register` 能力，经 `caps_for` 取注册函数把工具 handler 登记进宿主进程内的 `ThreadingHTTPServer`（端口 `:0`）；`.mcp.json` 用 `type: http` + `url: ${LOCAL_MCP}/<name>`，连接前由 `_resolve_plugin_paths` 替换成 gateway 实际地址，复用 `streamablehttp_client` 纯 JSON 分支。MCP server 不再需要外部 python 子进程，打包版不依赖系统解释器安装 `mcp`/`httpx`；现有 stdio/sse/http 连接路径与设置页零改动。附 gateway 握手、能力注册、占位符解析 9 个单测，并用真实 SDK 客户端验证 `initialize → list_tools → call_tool` 三步。
@@ -66,6 +66,14 @@ All notable changes to this project will be documented in this file.
 
 ### 🐛 问题修复 (Bug Fixes) (重新发布 #4 追加)
 - **bash 输出被压成「?」（复合命令整段喂给 git status 解析器）** (`plugins/system-core/tools/_shell_compressor.py`, `tests/plugins/test_shell_compressor.py`): `_compress_git` 用子串匹配，`git branch && git status` 的整段输出（分支名、tag 列表、grep 结果）被喂给 `_compress_git_status`；长格式解析不到 `On branch` 时返回 branch 默认值 `"?"`，而 `_shorter_only` 只看 token 数，`"?"` 必然通过 → 整段输出被替换为 `?` + `[saved N tok, 9X%]`。修复：解析不到有效信息返回 None（上游回退原始输出）；复合命令（`&&` / `||` / `;`）跳过 pattern 压缩，只做通用清理。
+
+### ✨ 新功能 (New Features) (重新发布 #5 追加)
+- **上下文 tooltip 定位抽离 + 隐藏期欠账补刷 + 可见期跟随重定位** (`app/widgets/context_usage_ring.py`, `app/widgets/context_usage_tooltip.py`, `c0cb8d26`): 流式 2Hz 刷新会改变气泡高度，向上弹出的气泡不跟随重定位就向下长、盖住圆环与鼠标；show 同帧无条件 `_refresh()` 会重建 legend，尺寸瞬间缩水再逐级长回 → 可见闪烁。新增 `prepare_for_show()`（递归 polish + 逐级激活布局，show 前把尺寸一次算准）、`_refresh_pending` 欠账标记（仅隐藏期被短路的刷新才在 showEvent 补刷）、定位计算抽成 `_calc_tooltip_pos` 供首显与跟随重定位复用，show 后尺寸有变按最终值同帧重校正。
+
+### 🐛 问题修复 (Bug Fixes) (重新发布 #5 追加)
+- **tooltip 新建 legend 行不计入布局（addWidget 的 reparent 把行置为隐藏）** (`app/widgets/context_usage_tooltip.py`, `25ea3131`): Qt `setParent` 语义下新建行进布局时为隐藏态，隐藏控件不计入 sizeHint，`adjustSize()` 拿到旧高度（实测 111 vs 真实 190）→ 定位错 + show 后跳变。修复：新建行先 `show()` 再 `ensurePolished()` + 逐级 `layout.activate()`，尺寸一次到位。
+- **```svg 围栏前置 `<style>` 被当普通代码块 / ECharts vendor 加载失败永久空框** (`app/widgets/card_render_core.py`, `app/widgets/card_viewers.py`, `build.py`, `tests/widgets/test_chart_vendor_and_svg_fallback.py` 新增, `71d04c86`): svg-guide 规范要求 `<svg>` 前置 `<style>`，而围栏兜底只认「以 `<svg` 开头」→ 整块降级成代码墙。改为剥掉前导 style/注释/空白后须以 `<svg` 开头且含闭合标签才透传（教学片段与流式半截仍走代码块）。ECharts vendor 加载失败原先只打日志：`_echLibLoading` 恒 true、等待队列永不执行，容器永久停在 400px 空框且后续图表全部饿死（macOS 打包版漏打 vendor 实测）；onerror 改为清锁 + 清队列 + `_echLibFailed` 熔断，容器打 `echarts-failed` 显示原因，`build.py` 补打 `echarts.min.js` / `echarts-wordcloud.min.js`。
+- **隐藏期尺寸变化后整卡内容被压成竖条** (`app/widgets/card_viewers.py`, `tests/widgets/test_surface_resync.py` 新增, `548a664c`): CodeWebViewer 在 QStackedWidget 隐藏页期间窗口 resize、或 WebViewPool 跨顶层 reparent 后，Chromium render surface 与 widget 尺寸失配，整卡内容被压进左侧约 1/6 宽的竖条，拖动窗口才恢复。Qt 5.15 无公开 API 读 surface 尺寸，修复：重新可见后「宽度不动、高度 -1 再复原」抖一次几何逼 Chromium 重发 view size，两次 resize 跨事件循环防合并；`DRIFOX_SURFACE_RESYNC=0` 可关（对照排查用）。
 
 ## [v0.7.0-beta] - 2026-11-08
 
