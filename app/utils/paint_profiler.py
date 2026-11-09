@@ -4,13 +4,15 @@
 `sipQWidget::paintEvent` 而看不出具体类名时，按类统计 Paint 事件次数，
 直接给出 Top 榜单。
 
-**默认开启**（用户零配合）：卡顿现场往往无法复现，日志里必须已经有数据。
+**源码仓默认开启，打包版默认关闭**：卡顿现场往往无法复现，源码运行时
+日志里必须已经有数据；打包版不做常驻观测，排障时用环境变量强开。
 正常情况下每轮只写一行 DEBUG（`[PAINT-PROF] 30s 24.3 次/秒（正常）`），
 不打扰日志；频率超过 `_ALERT_CPS`（120 次/秒）时升级为一行 WARNING，
 摘要里直接点名热点类，完整榜走 DEBUG。
 
-环境变量只用于关闭或调参（不是开启开关）：
+环境变量：
 
+    DRIFOX_PAINT_PROFILE=1                  # 打包版强开（源码版本就开）
     DRIFOX_PAINT_PROFILE=0                  # 显式关闭
     DRIFOX_PAINT_PROFILE_WINDOW=60          # 采样窗口长度（秒，默认 30）
 
@@ -33,6 +35,7 @@
 from __future__ import annotations
 
 import os
+import sys
 import time
 
 _ENV_KEY = "DRIFOX_PAINT_PROFILE"
@@ -50,12 +53,17 @@ _stats: dict[str, int] = {}
 _t0 = 0.0
 
 
+def _packaged() -> bool:
+    """是否运行在打包产物里（PyInstaller 等）。"""
+    return bool(getattr(sys, "frozen", False) or hasattr(sys, "_MEIPASS"))
+
 def enabled() -> bool:
     """是否启用。
 
-    **默认开启**：这是给用户零配合的诊断设施 —— 卡顿现场无法复现时，
-    日志里必须已经有数据。环境变量只用于**关掉它**或调参，不是开关：
+    **源码仓默认开启，打包版默认关闭**：卡顿现场无法复现时源码运行的
+    日志里必须已经有数据；打包版不做常驻观测，排障时用环境变量强开：
 
+        DRIFOX_PAINT_PROFILE=1      # 打包版强开（源码版本本来就是开）
         DRIFOX_PAINT_PROFILE=0      # 显式关闭（排查本设施的怀疑时用）
         DRIFOX_PAINT_PROFILE_WINDOW=60   # 调采样窗口长度
 
@@ -64,7 +72,11 @@ def enabled() -> bool:
     正常使用不会刷日志。
     """
     raw = (os.environ.get(_ENV_KEY) or "").strip().lower()
-    return raw not in ("0", "false", "no", "off")
+    if raw in ("0", "false", "no", "off"):
+        return False
+    if raw in ("1", "true", "yes", "on"):
+        return True
+    return not _packaged()
 
 
 def _window_seconds() -> float:

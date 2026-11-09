@@ -2,8 +2,9 @@
 """paint_profiler 行为测试。
 
 覆盖四条关键约束（都是实现时踩过或容易踩的坑）：
-1. **默认开启**：这是给用户零配合的诊断设施 —— 卡顿现场无法复现时，
-   日志里必须已经有数据。环境变量只用于关掉它（`=0`）或调窗口。
+1. **源码仓默认开启、打包版默认关闭**：卡顿现场无法复现时，源码运行的
+   日志里必须已经有数据；打包版不做常驻观测（`DRIFOX_PAINT_PROFILE=1`
+   可强开）。环境变量同时用于关闭（`=0`）与调窗口。
 2. 过滤器能按类统计 Paint 事件：Qt 的 Paint 派发必经
    ``QApplication`` 事件过滤器，这是唯一有效的统计点；给
    ``QWidget.paintEvent`` 打 Python 补丁是无效的（C++ 虚函数调度，
@@ -61,6 +62,18 @@ def test_disabled_values(qapp, monkeypatch, value):
 @pytest.mark.parametrize("value", ["", "1", "true", "yes", "on"])
 def test_enabled_values(monkeypatch, value):
     monkeypatch.setenv(paint_profiler._ENV_KEY, value)
+    assert paint_profiler.enabled() is True
+
+def test_packaged_disabled_by_default(monkeypatch):
+    """打包版默认关闭：诊断设施不随产品发布。"""
+    monkeypatch.delenv(paint_profiler._ENV_KEY, raising=False)
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    assert paint_profiler.enabled() is False
+
+def test_packaged_forced_on(monkeypatch):
+    """打包版排障时 DRIFOX_PAINT_PROFILE=1 强开。"""
+    monkeypatch.setenv(paint_profiler._ENV_KEY, "1")
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
     assert paint_profiler.enabled() is True
 
 
