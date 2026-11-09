@@ -183,6 +183,23 @@ def _gw_str_platform(platform: Any):
         return platform
 
 
+# 报错文本 → 粗分类（conversation_error.error_type 字段）。
+# worker 侧重试耗尽后最终错误只剩 str，按关键词首命中分类；
+# 后续如需精确分类可在 worker 侧透传 retry error_type。
+_ERROR_TYPE_PATTERNS: tuple = (
+    ("timeout", re.compile(r"tim(e?)d?\.?\s*out|超时", re.IGNORECASE)),
+    ("rate_limit", re.compile(r"429|rate.?limit", re.IGNORECASE)),
+    ("auth", re.compile(r"401|403|unauthorized|invalid.{0,12}(?:key|credential)|api.?key", re.IGNORECASE)),
+    ("network", re.compile(r"connection|network|unreachable|refused|reset|ssl", re.IGNORECASE)),
+)
+
+
+def _classify_error_text(message: str) -> str:
+    text = str(message or "")
+    for name, pattern in _ERROR_TYPE_PATTERNS:
+        if pattern.search(text):
+            return name
+    return "unknown"
 
 
 class ChatBackend(QObject):
@@ -230,6 +247,10 @@ class ChatBackend(QObject):
 
     # 错误
     error_occurred = pyqtSignal(str)
+    # 结构化报错事件（window_id/session_id/provider/model/message/error_type/timestamp），
+    # 与 error_occurred 同点 emit，旧信号负载不变、UI 主链路零改动。
+    # 消费方：能力池 stream.errors（自动换模型插件的信息源）。
+    conversation_error = pyqtSignal(dict)
 
     # 上下文
     context_updated = pyqtSignal(int, int)  # token_count, limit
@@ -818,8 +839,51 @@ class ChatBackend(QObject):
                     sig.emit(*args[:arity])
                 except Exception as e:  # 转发失败绝不能影响主流程
                     logger.debug(f"[ChatBackend] {name} 事件转发到信号失败: {e}")
+                if name == "error":
+                    # 结构化报错事件：旧 error_occurred(str) 之外补发 conversation_error(dict)，
+                    # 供能力池 stream.errors 订阅；组装/emit 失败吞掉记 debug，绝不影响旧信号。
+                    try:
+                        err_sig = getattr(self, "conversation_error", None)
+                        if hasattr(err_sig, "emit"):
+                            err_sig.emit(
+                                self._build_conversation_error_payload(str(args[0]) if args else "")
+                            )
+                    except Exception as e:
+                        logger.debug(f"[ChatBackend] conversation_error emit 失败: {e}")
 
         return wrapped
+
+    def _build_conversation_error_payload(self, message: str) -> dict:
+        """组装结构化报错上下文（纯取值，不发信号）。
+
+        provider/model 取 _get_model_config() 当前值：流式进行中窗口模型
+        不可换，错误即本轮失败，当前值即本轮真实来源。取不到留空串；
+        payload 只含非敏感字段，绝不透传完整配置（含明文 key）。
+        """
+        payload = {
+            "window_id": str(getattr(self, "_window_id", "") or ""),
+            "session_id": "",
+            "provider": "",
+            "model": "",
+            "message": str(message or ""),
+            "error_type": _classify_error_text(message),
+            "timestamp": time.time(),
+        }
+        try:
+            session = self.get_current_session()
+            if session is not None:
+                payload["session_id"] = str(getattr(session, "session_id", "") or "")
+        except Exception:
+            pass
+        try:
+            getter = self._get_model_config
+            cfg = getter() if callable(getter) else None
+            if isinstance(cfg, dict):
+                payload["provider"] = str(cfg.get("display_name") or cfg.get("provider_name") or "")
+                payload["model"] = str(cfg.get("模型名称") or "")
+        except Exception:
+            pass
+        return payload
 
     def set_callback(self, name: str, callback: Callable):
         """设置回调（代理到 ChatEngine），并顺带把事件转发到同名 Qt 信号。"""
