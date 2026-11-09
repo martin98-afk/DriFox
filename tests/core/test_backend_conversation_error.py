@@ -76,3 +76,33 @@ def test_error_branch_emits_both_signals(qapp):
     assert new[0]["error_type"] == "network"
     assert new[0]["provider"] == "P"
     assert new[0]["model"] == "m"
+
+
+def test_error_branch_publishes_to_global_bus(qapp):
+    """全局广播：conversation_error 同步发布到 UIEventBus（插件 ui.events 订阅）。
+
+    能力池的 stream.errors 只能订阅宿主窗口；全局监听（自动换模型插件）
+    依赖这条总线，payload 必须自带 window_id 供消费方定向。
+    """
+    from app.core.infra.ui_event_bus import EV_CONVERSATION_ERROR, UIEventBus
+
+    bus = UIEventBus.get_instance()
+    got = []
+    bus.subscribe(EV_CONVERSATION_ERROR, got.append, plugin_name="probe_bus")
+    try:
+        backend = _make_backend(
+            window_id="win_bus_1",
+            model_config=lambda: {"provider_name": "P", "模型名称": "m"},
+            session=_Session(),
+        )
+        backend.set_callback("error", lambda e: None)
+        backend._pending_engine_callbacks["error"]("Request timeout")
+    finally:
+        bus.unsubscribe_plugin("probe_bus")
+    assert len(got) == 1
+    payload = got[0]
+    assert payload["window_id"] == "win_bus_1"
+    assert payload["session_id"] == "sess-1"
+    assert payload["provider"] == "P"
+    assert payload["model"] == "m"
+    assert payload["error_type"] == "timeout"

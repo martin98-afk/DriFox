@@ -22,6 +22,10 @@ EV_WELCOME_TAB_REFRESHED = "welcome_tab_refreshed"
 # 通知主程序对指定 mode_key 触发重渲染（不重建 QWebEngineView）。
 # payload: mode_key, plugin_name, window_id（可选；缺省 = 全窗口）
 EV_PROJECT_CHANGED = "project_changed"  # payload: project, workdir, window_id
+# 对话报错（backend conversation_error 同步广播；能力池 ui.events 订阅）。
+# payload: window_id, session_id, provider, model, message, error_type, timestamp。
+# 全局监听插件（如自动换模型）按 window_id 定向操作目标窗口。
+EV_CONVERSATION_ERROR = "conversation_error"
 # 工作台页签徽标条目已变化（插件 register_slot_entry 到 "workbench:tab" region 后
 # 由注册表发布，WorkbenchPanel 订阅并重挂徽标）。payload: 无（消费方全量重读 region）
 EV_WORKBENCH_BADGES_CHANGED = "workbench.badges_changed"

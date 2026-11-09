@@ -6,6 +6,7 @@ All notable changes to this project will be documented in this file.
 - **OAuth 插件类真探测**: 服务商插件可声明 `capabilities.health_probe` 钩子在插件内换短效凭据后对聊天端点发真请求（OpenCode Zen/Go、GitHub Copilot、CodeBuddy 已接入），验出 `/models` 列表探测永远看不到的凭据吊销失效；探测优先级高于 models_hook。
 - **探活自动挑最便宜模型**: 探测请求的模型自动从「模型列表」中按 models.dev 输入价（$/M）挑最低者（免费模型优先），无价格数据回退当前模型；探测成本压到最低，行为对无价格数据的自定义网关不变。
 - feat(capabilities): 能力池新增 model.set（设置当前窗口服务商/模型，只改窗口态不写全局默认）与 stream.errors（结构化对话报错事件订阅），backend 新增 conversation_error(dict) 信号，为「报错自动换模型」插件铺路
+- feat(capabilities): 全局对话报错监听——conversation_error 同步广播到 ui.events 总线；model.set / session.read / session.write / session.send 支持 `window_id` 定向到指定窗口，全局监听插件（如自动换模型）可按事件窗口操作目标窗口
 
 ## [v0.7.0] - 2026-11-09 (重新发布 #5)
 

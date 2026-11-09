@@ -45,6 +45,24 @@ def _resolve_tab_window():
 # ──────────────────── 对话流 / 窗口 ────────────────────
 
 
+def _resolve_window_by_id(window_id: str) -> Any:
+    """按 _window_id 找存活聊天窗口（找不到返回 None）。
+
+    与 window.list 同源（遍历 TabManagerWindow._windows），供 window_id
+    定向能力解析目标窗口。空 id 返回 None（调用方自行回退宿主窗口）。
+    """
+    wid = str(window_id or "").strip()
+    if not wid:
+        return None
+    tm = _resolve_tab_window()
+    if tm is None:
+        return None
+    for win in getattr(tm, "_windows", None) or []:
+        if str(getattr(win, "_window_id", "") or "") == wid:
+            return win
+    return None
+
+
 def _stream_subscribe(host: Any, ctx: Any):
     """返回 subscribe(events, callback) -> 已绑定信号名列表。
 
@@ -555,8 +573,13 @@ def _session_read(host: Any):
     给副本而非对象：插件无法直接 mutate 会话（改会话走 session.write / manage）。
     """
 
-    def read() -> dict:
-        backend = getattr(host, "backend", None)
+    def read(window_id: str = "") -> dict:
+        target_host = host
+        if str(window_id or "").strip():
+            target_host = _resolve_window_by_id(str(window_id))
+            if target_host is None:
+                return {"session_id": "", "name": "", "messages": [], "system_prompt": ""}
+        backend = getattr(target_host, "backend", None)
         session = backend.get_current_session() if backend is not None else None
         if session is None:
             return {"session_id": "", "name": "", "messages": [], "system_prompt": ""}
@@ -660,7 +683,28 @@ def _session_invalidate(host: Any):
 
 
 def _session_write(host: Any):
-    return host._save_messages_to_session
+    """消息写回会话（可按 window_id 定向到其他窗口）。
+
+    宿主无 _save_messages_to_session / 写入失败返回 0（与 tool 面同语义）。
+    """
+
+    def write(messages, task_prompt: str = "", window_id: str = "") -> int:
+        target_host = host
+        if str(window_id or "").strip():
+            target_host = _resolve_window_by_id(str(window_id))
+            if target_host is None:
+                return 0
+        fn = getattr(target_host, "_save_messages_to_session", None)
+        if not callable(fn):
+            return 0
+        try:
+            fn(messages, task_prompt=task_prompt)
+            return len(messages) if messages is not None else 0
+        except Exception as e:  # noqa: BLE001 — 写回失败不抛给插件
+            logger.warning(f"[Capability] session.write 失败: {e}")
+            return 0
+
+    return write
 
 
 def _engine_busy(backend: Any) -> bool:
@@ -752,8 +796,24 @@ def _session_control(host: Any):
     def new_session() -> bool:
         return queue.enqueue(wid, "new", {})
 
-    def send(text: str, *, ephemeral: bool = False, mode: str = "queue", hook_event: str = "SessionSend") -> bool:
-        return _send_with_mode(backend, queue, wid, text, ephemeral=ephemeral, mode=mode, hook_event=hook_event)
+    def send(
+        text: str,
+        *,
+        ephemeral: bool = False,
+        mode: str = "queue",
+        hook_event: str = "SessionSend",
+        window_id: str = "",
+    ) -> bool:
+        target_wid = str(window_id or "").strip() or wid
+        if not target_wid:
+            return False
+        target_backend = backend
+        if target_wid != wid:
+            target_win = _resolve_window_by_id(target_wid)
+            target_backend = getattr(target_win, "backend", None) if target_win is not None else None
+        return _send_with_mode(
+            target_backend, queue, target_wid, text, ephemeral=ephemeral, mode=mode, hook_event=hook_event
+        )
 
     return {"interrupt": interrupt, "new": new_session, "send": send}
 
@@ -1356,8 +1416,13 @@ def _model_set(host: Any):
     流式中调用允许：本轮 worker 已持有 llm_config，下一轮生效。
     """
 
-    def set_model(model: str = "", provider: str = "", config_id: str = "") -> dict:
-        resolver = getattr(host, "_resolve_history_model_target", None)
+    def set_model(model: str = "", provider: str = "", config_id: str = "", window_id: str = "") -> dict:
+        target_host = host
+        if str(window_id or "").strip():
+            target_host = _resolve_window_by_id(str(window_id))
+            if target_host is None:
+                return {"ok": False, "error": "window_not_found", "detail": f"窗口不存在: {window_id}"}
+        resolver = getattr(target_host, "_resolve_history_model_target", None)
         if not callable(resolver):
             return {"ok": False, "error": "not_found", "detail": "宿主窗口不支持模型解析"}
         try:
@@ -1368,12 +1433,12 @@ def _model_set(host: Any):
         if not target:
             return {"ok": False, "error": "not_found", "detail": "无法解析到唯一的服务商/模型组合"}
         resolved_cid, resolved_model = target
-        host._current_provider_name = resolved_cid
-        host._current_model_name = resolved_model
-        refresh_btn = getattr(host, "_update_model_selector_btn", None)
+        target_host._current_provider_name = resolved_cid
+        target_host._current_model_name = resolved_model
+        refresh_btn = getattr(target_host, "_update_model_selector_btn", None)
         if callable(refresh_btn):
             refresh_btn()
-        refresh_ctx = getattr(host, "_refresh_context_usage_indicator", None)
+        refresh_ctx = getattr(target_host, "_refresh_context_usage_indicator", None)
         if callable(refresh_ctx):
             refresh_ctx()
         return {"ok": True, "config_id": resolved_cid, "model": resolved_model}

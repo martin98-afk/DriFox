@@ -69,7 +69,7 @@ CATALOG: Dict[str, CapabilitySpec] = {
         _spec(
             "model.set",
             _H,
-            "设置当前窗口的服务商与模型（只改窗口实例态，不写全局默认）",
+            "设置窗口的服务商与模型（只改窗口实例态，不写全局默认；可按 window_id 定向指定窗口）",
             _UI,
         ),
         _spec(
@@ -85,8 +85,14 @@ CATALOG: Dict[str, CapabilitySpec] = {
             _BOTH,
         ),
         # ── 会话 ──
-        _spec("session.read", _M, "当前 session_id 与消息列表", _BOTH),
-        _spec("session.write", _M, "消息写回当前会话（入库 + 刷 UI + 发事件）", _BOTH, ["save_messages_to_session"]),
+        _spec("session.read", _M, "当前 session_id 与消息列表（可按 window_id 定向到指定窗口）", _BOTH),
+        _spec(
+            "session.write",
+            _M,
+            "消息写回当前会话（入库 + 刷 UI + 发事件；可按 window_id 定向）",
+            _BOTH,
+            ["save_messages_to_session"],
+        ),
         _spec("session.list", _M, "历史会话列表与元数据", _UI),
         _spec(
             "session.history",
@@ -114,7 +120,7 @@ CATALOG: Dict[str, CapabilitySpec] = {
         ),
         _spec("session.interrupt", _M, "停止当前流式输出（入队，本轮结束后执行）", _BOTH),
         _spec("session.new", _M, "新建会话（入队，停流后执行）", _BOTH),
-        _spec("session.send", _M, "发消息驱动一轮对话（入队；ephemeral 不写会话不渲染）", _BOTH),
+        _spec("session.send", _M, "发消息驱动一轮对话（入队；ephemeral 不写会话不渲染；可按 window_id 定向）", _BOTH),
         # ── 输入框 ──
         _spec("input.read", _M, "输入框文本与附件列表", _UI),
         _spec("input.write", _M, "写入输入框文本", _UI),
@@ -186,7 +192,7 @@ CATALOG: Dict[str, CapabilitySpec] = {
         _spec("ui.card.hide", _L, "隐藏浮动卡", _UI, ["hide_card"]),
         _spec("ui.exclusive", _M, "独占 UI 模式", _UI, ["enter_exclusive_ui_mode", "exit_exclusive_ui_mode"]),
         _spec("ui.dialog", _L, "文件/目录选择、确认框、单行输入（跟随主题）", _UI),
-        _spec("ui.events", _L, "订阅/发布 UI 事件总线（主题切换/欢迎页刷新等）", _UI),
+        _spec("ui.events", _L, "订阅/发布 UI 事件总线（主题切换/欢迎页刷新/全局对话报错 conversation_error 等）", _UI),
         _spec(
             "question.control",
             _M,

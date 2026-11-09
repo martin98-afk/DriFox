@@ -841,13 +841,20 @@ class ChatBackend(QObject):
                     logger.debug(f"[ChatBackend] {name} 事件转发到信号失败: {e}")
                 if name == "error":
                     # 结构化报错事件：旧 error_occurred(str) 之外补发 conversation_error(dict)，
-                    # 供能力池 stream.errors 订阅；组装/emit 失败吞掉记 debug，绝不影响旧信号。
+                    # 供能力池 stream.errors（窗口内）与 ui.events（全局）订阅；
+                    # 组装/emit 失败吞掉记 debug，绝不影响旧信号。
                     try:
+                        payload = self._build_conversation_error_payload(str(args[0]) if args else "")
                         err_sig = getattr(self, "conversation_error", None)
                         if hasattr(err_sig, "emit"):
-                            err_sig.emit(
-                                self._build_conversation_error_payload(str(args[0]) if args else "")
-                            )
+                            err_sig.emit(payload)
+                        # 全局广播：payload 自带 window_id，全局监听插件按窗口定向处理
+                        try:
+                            from app.core.infra.ui_event_bus import EV_CONVERSATION_ERROR, UIEventBus
+
+                            UIEventBus.get_instance().publish(EV_CONVERSATION_ERROR, **payload)
+                        except Exception as bus_err:
+                            logger.debug(f"[ChatBackend] conversation_error 广播失败: {bus_err}")
                     except Exception as e:
                         logger.debug(f"[ChatBackend] conversation_error emit 失败: {e}")
 
