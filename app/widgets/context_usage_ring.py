@@ -138,7 +138,7 @@ class ContextUsageRing(QWidget):
         self._rebuild_tooltip()
         self.update()
 
-    def _rebuild_tooltip(self):
+    def _rebuild_tooltip(self, force: bool = False):
         # [PERF T35] 未构造则早退：set_usage 2Hz 调用本方法，tooltip 未 hover
         # 过时构造它纯属浪费（构造含 13 处 setStyleSheet + legend 重建）。
         if self._tooltip_obj is None:
@@ -155,18 +155,21 @@ class ContextUsageRing(QWidget):
                 "breakdown": self._breakdown,
                 "cache": self._cache_data,
                 "pruned_tokens": getattr(self, "_pruned_tokens", 0),
-            }
+            },
+            force=force,
         )
 
     def _show_tooltip(self):
-        # 每次显示前刷新 tooltip 数据，确保主题色/字体等与当前主题同步
+        # 每次显示前刷新 tooltip 数据，确保主题色/字体等与当前主题同步。
+        # force=True：隐藏态 _refresh 会短路，不强制则 adjustSize() 拿到的是
+        # 空内容尺寸，定位后 showEvent 才填充放大 → 首次 hover 错位。
         self._ensure_tooltip()
-        self._rebuild_tooltip()
+        self._rebuild_tooltip(force=True)
 
         # 即使没有会话 / 模型配置，也给出一个轻量提示，避免「hover 圆环却毫无反馈」。
         # 仅当「既没有预算、也没有占比、也没有明细、也没有缓存」时，构造空状态引导文案。
         if self._budget_tokens <= 0 and self._percent <= 0 and not self._breakdown and not self._cache_data:
-            # 空状态覆盖 _rebuild_tooltip 设置的数据
+            # 空状态覆盖 _rebuild_tooltip 设置的数据（同样需要 force，定位前尺寸必须真实）
             self._tooltip.set_data(
                 {
                     "used_tokens": 0,
@@ -179,7 +182,8 @@ class ContextUsageRing(QWidget):
                     "breakdown": [],
                     "cache": {},
                     "empty": True,
-                }
+                },
+                force=True,
             )
 
         self._tooltip.adjustSize()

@@ -223,19 +223,21 @@ class ContextBreakdownTooltip(QWidget):
         self._layout.addWidget(self._extras)
 
     # ---------- 数据更新 ----------
-    def set_data(self, data: Dict):
+    def set_data(self, data: Dict, force: bool = False):
         self._data = data or {}
-        self._refresh()
+        self._refresh(force=force)
 
     def showEvent(self, event):
         super().showEvent(event)
         self._refresh()  # show 后 isVisible=True，完整跑一次真实刷新（覆盖前置 rebuild 被短路）
 
-    def _refresh(self):
+    def _refresh(self, force: bool = False):
         # 隐藏时短路：流式期间 set_usage 2Hz 调 set_data → _refresh，tooltip 隐藏时
-        # 13 处 setStyleSheet + legend rebuild 全是无效工作。显示前 _show_tooltip()
-        # 会主动调 _rebuild_tooltip() 补齐数据，短路不丢数据、不丢主题同步。
-        if not self.isVisible():
+        # 13 处 setStyleSheet + legend rebuild 全是无效工作。
+        # force=True 供 _show_tooltip() 定位前使用：此时必须拿到填充后的真实尺寸，
+        # 否则 adjustSize() 按空内容尺寸算坐标，showEvent 填充放大后位置已定死 →
+        # 首次 hover 气泡错位（盖住鼠标），第二次 hover 才落对位置。
+        if not force and not self.isVisible():
             return
         data = self._data
         # 跟随主题：每次显示前重新读取主题色并回填静态控件样式
