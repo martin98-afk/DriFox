@@ -98,6 +98,15 @@ class _ListEditorCard(QWidget):
         self.setStyleSheet(self._theme_qss())
         self.reload()
 
+    def refresh_style(self):
+        """主题变更时重设容器级 QSS
+
+        QSS 里的 Colors token 在构造时定格，不重设则切深浅主题后
+        整卡（输入框/添加/删除/行底色/hover）停旧主题。
+        """
+        Colors.refresh()
+        self.setStyleSheet(self._theme_qss())
+
     @staticmethod
     def _theme_qss() -> str:
         """主题化样式：修复裸控件黑块/黑字（浅色主题下按钮默认样式不可读）"""
@@ -246,6 +255,19 @@ class SecurityCenterCard(QWidget):
     # 主线程做：2026-10-25 垃圾桶里躺着整个 C 盘副本时，同步统计把启动后的
     # 设置面板构建冻死（py-spy 实锤 MainThread 卡在 pathlib.stat）。
     _snapshot_stats_ready = pyqtSignal(int, int)
+
+    def refresh_style(self):
+        """主题变更时刷新全部名单编辑区配色
+
+        页面懒构建 + 本卡无内建刷新链，需由 llm_settings_card 的
+        主题刷新遍历调用；子编辑区样式全部来自容器级 QSS，重设即可。
+        """
+        Colors.refresh()
+        for editor in self.findChildren(_ListEditorCard):
+            try:
+                editor.refresh_style()
+            except RuntimeError:
+                pass  # 已销毁
 
     def __init__(self, parent=None):
         super().__init__(parent)

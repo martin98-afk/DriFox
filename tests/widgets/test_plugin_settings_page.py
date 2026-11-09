@@ -133,6 +133,28 @@ def test_filter_chip_pending(env, qapp):
     visible = [r._entry.info.name for r in page._rows if not r.isHidden()]
     assert visible == ["voice-reply"]
 
+def test_type_combo_filters_by_component(env, qapp):
+    """类型下拉按组件能力过滤，并与状态 chips 叠加（AND）；「已停用」档已移除"""
+    page = page_mod.PluginSettingsPage()
+    page.reload(force=True)
+    _pump(qapp)
+    assert "off" not in page._chips
+    # 档位只列清单实际出现的组件，按 COMPONENT_ORDER 排列：skills < mcp < ui < tools
+    assert page._type_keys == [None, "skills", "mcp", "ui", "tools"]
+    # 选「工具」→ 只剩 voice-reply（默认「有配置」chip 下三者都有配置）
+    page._type_combo.setCurrentIndex(page._type_keys.index("tools"))
+    visible = [r._entry.info.name for r in page._rows if not r.isHidden()]
+    assert visible == ["voice-reply"]
+    # 切「全部」chip + 「界面扩展」→ 无配置的 browser 也能被类型筛出
+    page._on_chip_clicked("all")
+    page._type_combo.setCurrentIndex(page._type_keys.index("ui"))
+    visible = [r._entry.info.name for r in page._rows if not r.isHidden()]
+    assert visible == ["browser"]
+    # 回「全部类型」恢复全量
+    page._type_combo.setCurrentIndex(0)
+    visible = {r._entry.info.name for r in page._rows if not r.isHidden()}
+    assert visible == {"browser", "git-panel", "voice-reply"}
+
 
 def test_detail_shows_config_form_for_schema_plugin(env, qapp):
     page = page_mod.PluginSettingsPage()

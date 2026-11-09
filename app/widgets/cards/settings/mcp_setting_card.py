@@ -873,6 +873,7 @@ class MCPServerRow(CardWidget):
                 self._auth_btn.setStyleSheet(_auth_btn_qss("cancel"))
             else:
                 self._auth_btn.setStyleSheet(_auth_btn_qss("unbind" if self._authorized else "authorize"))
+        self._apply_cred_row_style()
 
     def _setup_ui(self, data: dict):
         # 两行布局：第一行 = 图标 + 名称 + (弹性) + 授权按钮 + 开关 + 编辑/删除（操作组靠右）；
@@ -1001,6 +1002,9 @@ class MCPServerRow(CardWidget):
         # Key 存插件 config.json，连接时按 credential.inject 注入；输入框失焦即保存。
         self._cred_edit = None
         self._cred_saved_value = ""
+        # credential 行控件引用（无 credential 声明时保持 None），refresh_style 按此补刷
+        self._cred_label = None
+        self._cred_get_btn = None
         self._setup_credential_row(data, layout)
 
     def _credential_plugin(self) -> str:
@@ -1040,15 +1044,13 @@ class MCPServerRow(CardWidget):
         row.setContentsMargins(0, 2, 0, 0)
         row.setSpacing(6)
 
-        label = BodyLabel(cred.get("label") or "Key")
-        label.setStyleSheet(f"{get_font_family_css()} font-size: {scale_font_size(12)}px;")
-        row.addWidget(label)
+        self._cred_label = BodyLabel(cred.get("label") or "Key")
+        row.addWidget(self._cred_label)
 
         edit = QLineEdit()
         edit.setClearButtonEnabled(True)
         edit.setPlaceholderText(cred.get("placeholder") or "粘贴 Key 后自动保存")
         edit.setFixedHeight(Sizes.TOOL_BUTTON_SZ.height())
-        edit.setStyleSheet(f"{get_font_family_css()} font-size: {scale_font_size(12)}px; padding: 0 6px;")
         # 始终密码模式：Key 是敏感信息，不摊在屏幕上
         edit.setEchoMode(QLineEdit.Password)
         _plugin = self._credential_plugin()
@@ -1064,13 +1066,47 @@ class MCPServerRow(CardWidget):
 
         get_url = cred.get("getUrl")
         if get_url:
-            get_btn = PushButton("获取 Key")
-            get_btn.setFixedSize(88, Sizes.TOOL_BUTTON_SZ.height())
-            get_btn.setToolTip(get_url)
-            get_btn.clicked.connect(lambda: self._open_get_url(get_url))
-            row.addWidget(get_btn)
+            self._cred_get_btn = PushButton("获取 Key")
+            self._cred_get_btn.setFixedSize(88, Sizes.TOOL_BUTTON_SZ.height())
+            self._cred_get_btn.setToolTip(get_url)
+            self._cred_get_btn.clicked.connect(lambda: self._open_get_url(get_url))
+            row.addWidget(self._cred_get_btn)
 
+        self._apply_cred_row_style()
         layout.addLayout(row)
+
+    def _apply_cred_row_style(self):
+        """credential 行三控件按当前主题上色（构造时与 refresh_style 共用）。
+
+        三处都不能依赖 qfluentwidgets 主题广播：label 原实现的手动
+        setStyleSheet(字体) 会整体覆盖 FluentLabelBase qss，颜色落到
+        调色板（恒为系统黑）；输入框是原生 QLineEdit，不注册 fluent
+        样式表，颜色恒随系统；按钮在收起的展开卡里切主题时只能靠
+        lazy 补刷，时序不保证。统一走 Colors token，由 refresh_style
+        链显式重刷，与名称/描述同款机制。
+        """
+        Colors.refresh()
+        if self._cred_label is not None:
+            self._cred_label.setStyleSheet(
+                f"color: {Colors.TEXT_PRIMARY}; {get_font_family_css()} font-size: {scale_font_size(12)}px;"
+            )
+        if self._cred_edit is not None:
+            self._cred_edit.setStyleSheet(
+                f"QLineEdit {{ background-color: {Colors.CONTENT_BG}; color: {Colors.TEXT_PRIMARY};"
+                f" border: 1px solid {Colors.BORDER}; border-radius: {BorderRadius.XS}; padding: 0 6px;"
+                f" {get_font_family_css()} font-size: {scale_font_size(12)}px; }}"
+                f"QLineEdit:focus {{ border-color: {Colors.INPUT_FOCUS_BORDER}; }}"
+                f"QLineEdit::placeholder {{ color: {Colors.INPUT_PLACEHOLDER}; }}"
+            )
+        if self._cred_get_btn is not None:
+            self._cred_get_btn.setStyleSheet(
+                f"PushButton {{ background-color: {Colors.CONTENT_BG}; color: {Colors.TEXT_PRIMARY};"
+                f" border: 1px solid {Colors.BORDER}; border-radius: {BorderRadius.SM}; padding: 0 8px;"
+                f" {get_font_family_css()} {font_size_css(12)} }}"
+                f"PushButton:hover {{ border-color: {Colors.BORDER_ACCENT}; color: {Colors.TEXT_ACCENT}; }}"
+                f"PushButton:pressed {{ background-color: {Colors.HOVER_BG}; }}"
+                f"PushButton:disabled {{ color: {Colors.TEXT_MUTED}; border-color: {Colors.TEXT_MUTED}; }}"
+            )
 
     def _open_get_url(self, url: str):
         """打开 Key 申请页（系统默认浏览器）。"""

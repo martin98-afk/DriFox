@@ -186,7 +186,7 @@ manifest 加 `api_version: 2`，必须同时把用到的能力全部列上。** 
 | `tool.inject` | 向 LLM 注入工具（改变模型可见行为） | **ui** |
 | `engine.session` / `engine.stack` | 创建引擎会话（消耗 token）/ 执行栈工厂 | ui |
 | `platform.send` / `platform.read` | 通讯平台收发 | ui |
-| `mcp.call` / `lsp.query` / `net.upload` | MCP 调用 / LSP 查询 / Gitee 上传 | tool |
+| `mcp.call` / `mcp.register` / `lsp.query` / `net.upload` | MCP 调用 / 注册进程内 MCP server（gateway，接入方式见 components/mcp.md）/ LSP 查询 / Gitee 上传 | tool / **ui** |
 | `ui.notify` `ui.card.show` `ui.card.hide` | 弹 InfoBar / 显示浮动卡 / 隐藏浮动卡 | ui |
 | `ui.artifacts.show` | 向消息卡片成果栏推成果条目（image/video/html/text/file）；工具侧常规通道是 `ToolResult.artifacts` 免声明字段 | ui, tool |
 | `ui.exclusive` `ui.dialog` `ui.events` | 独占 UI 模式 / 文件与确认对话框 / UI 事件总线 | ui |
