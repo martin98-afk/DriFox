@@ -2119,9 +2119,56 @@ class CodeWebViewer(QWebEngineView):
             self._apply_font_vars()
         # delegate wheel 抢断补装（幂等；hide/show 或 tab 切回后 focusProxy 若重建则重挂）
         self._ensure_wheel_filter_installed()
+        # 隐藏期尺寸变化会让 Chromium 的 render surface 与 widget 失配，
+        # 表现为整卡内容被横向压成竖条（见 _schedule_surface_resync）
+        self._schedule_surface_resync()
             # 🛡️ F2：JS 未就绪时保留 deferred（不清标志）——先清标志再调
             # _schedule_render 会因 JS 未就绪直接 return，积压请求被清但永不
             # 补渲；保留后由 _on_js_ready 统一补渲（可以延迟，不能丢失）。
+
+    def _schedule_surface_resync(self) -> None:
+        """重新可见后抖一次几何，逼 Chromium 重发 view size。
+
+        症状（2026-11-09 用户截图）：整卡内容被压进左侧约 1/6 宽的竖条，
+        文字成 1-3px 竖线而行高正常，拖动窗口 resize 一次即恢复。缩放比
+        恒定、行高不变 → DOM 布局本身是对的，错的是 QtWebEngine 的 render
+        surface 与 widget 尺寸失配（隐藏期尺寸变化后合成面没跟上）。
+        Qt 5.15 没有公开 API 能读到该 surface 尺寸，只能让 view 尺寸真的
+        变化一次来触发重发。宽度不动、高度 -1 再复原：重排代价最小，且
+        两次 resize 必须跨一次事件循环，否则会被 Qt 合并成「尺寸没变」。
+
+        覆盖两条已确认的触发路径：QStackedWidget 隐藏页期间窗口/面板
+        resize、WebViewPool 跨顶层 reparent。DRIFOX_SURFACE_RESYNC=0 可
+        关闭（对照排查用）。
+        """
+        if os.environ.get("DRIFOX_SURFACE_RESYNC", "").strip().lower() in (
+            "0", "false", "no", "off",
+        ):
+            return
+        w, h = self.width(), self.height()
+        if w < 8 or h < 8:
+            return
+        try:
+            self.resize(w, h - 1)
+        except RuntimeError:
+            return
+        QTimer.singleShot(0, lambda: self._restore_surface_geometry_after_resync(w, h))
+
+    def _restore_surface_geometry_after_resync(self, w: int, h: int) -> None:
+        """``_schedule_surface_resync`` 第二拍：把高度复原。"""
+        try:
+            from PyQt5 import sip
+
+            if sip.isdeleted(self):
+                return
+        except Exception:
+            return
+        if w < 8 or h < 1:
+            return
+        try:
+            self.resize(w, h)
+        except RuntimeError:
+            pass
 
     def _on_js_ready(self):
         self._is_js_ready = True
