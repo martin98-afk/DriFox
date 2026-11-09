@@ -152,6 +152,125 @@ class TestTickDispatch:
         assert calls == []
 
 
+class TestProbeHealth:
+    def _post_stub(self, monkeypatch, responder):
+        """monkeypatch requests.post（_probe_health 内延迟 import）"""
+        import requests as _requests
+
+        monkeypatch.setattr(_requests, "post", responder)
+
+    def test_bearer_200_is_ok(self, service, monkeypatch):
+        self._post_stub(monkeypatch, lambda url, **k: SimpleNamespace(status_code=200, text="{}"))
+        status = service._probe_health(
+            {"API_URL": "https://api.x.com/v1", "API_KEY": "k", "模型名称": "m1"}, "c1"
+        )
+        assert status == STATUS_OK
+
+    def test_401_is_auth_failed(self, service, monkeypatch):
+        self._post_stub(monkeypatch, lambda url, **k: SimpleNamespace(status_code=401, text=""))
+        status = service._probe_health(
+            {"API_URL": "https://api.x.com/v1", "API_KEY": "bad", "模型名称": "m1"}, "c1"
+        )
+        assert status == STATUS_AUTH_FAILED
+
+    def test_no_v1_url_tries_both_paths(self, service, monkeypatch):
+        """URL 不含 /v1 → 依次试 /chat/completions 与 /v1/chat/completions"""
+        seen = []
+
+        def responder(url, **k):
+            seen.append(url)
+            if url.endswith("/v1/chat/completions"):
+                return SimpleNamespace(status_code=200, text="{}")
+            return SimpleNamespace(status_code=404, text="")
+
+        self._post_stub(monkeypatch, responder)
+        status = service._probe_health(
+            {"API_URL": "https://api.x.com", "API_KEY": "k", "模型名称": "m1"}, "c1"
+        )
+        assert status == STATUS_OK
+        assert seen[0].endswith("/chat/completions") and seen[1].endswith("/v1/chat/completions")
+
+    def test_400_max_completion_tokens_retry(self, service, monkeypatch):
+        """400 提示 max_completion_tokens → 换字段重试一次"""
+        bodies = []
+
+        def responder(url, **k):
+            bodies.append(k.get("json") or {})
+            if "max_tokens" in bodies[-1]:
+                return SimpleNamespace(status_code=400, text="use 'max_completion_tokens'")
+            return SimpleNamespace(status_code=200, text="{}")
+
+        self._post_stub(monkeypatch, responder)
+        status = service._probe_health(
+            {"API_URL": "https://api.x.com/v1", "API_KEY": "k", "模型名称": "o1"}, "c1"
+        )
+        assert status == STATUS_OK
+        assert "max_completion_tokens" in bodies[-1]
+
+    def test_anthropic_endpoint_and_headers(self, service, monkeypatch):
+        captured = {}
+
+        def responder(url, **k):
+            captured["url"] = url
+            captured["headers"] = k.get("headers") or {}
+            return SimpleNamespace(status_code=200, text="{}")
+
+        self._post_stub(monkeypatch, responder)
+        status = service._probe_health(
+            {"API_URL": "https://api.anthropic.com", "API_KEY": "k", "认证方式": "anthropic", "模型名称": "claude-x"},
+            "c1",
+        )
+        assert status == STATUS_OK
+        assert captured["url"].endswith("/v1/messages")
+        assert captured["headers"]["x-api-key"] == "k"
+        assert captured["headers"]["anthropic-version"] == "2023-06-01"
+
+    def test_empty_model_name_is_unreachable(self, service, monkeypatch):
+        self._post_stub(monkeypatch, lambda url, **k: SimpleNamespace(status_code=200, text="{}"))
+        status = service._probe_health(
+            {"API_URL": "https://api.x.com/v1", "API_KEY": "k", "模型名称": ""}, "c1"
+        )
+        assert status == STATUS_UNREACHABLE
+
+    def test_no_key_bearer_is_unreachable(self, service, monkeypatch):
+        status = service._probe_health(
+            {"API_URL": "https://api.x.com/v1", "API_KEY": "", "模型名称": "m1"}, "c1"
+        )
+        assert status == STATUS_UNREACHABLE
+
+    def test_auth_none_needs_no_key(self, service, monkeypatch):
+        self._post_stub(monkeypatch, lambda url, **k: SimpleNamespace(status_code=200, text="{}"))
+        status = service._probe_health(
+            {"API_URL": "http://localhost:11434/v1", "API_KEY": "", "认证方式": "none", "模型名称": "m1"},
+            "c1",
+        )
+        assert status == STATUS_OK
+
+    def test_bce_without_hook_is_unreachable(self, service, monkeypatch):
+        """bce 签名无法本地构造 → 不发请求直接 unreachable"""
+        status = service._probe_health(
+            {"API_URL": "https://aip.baidubce.com", "API_KEY": "k", "认证方式": "bce", "模型名称": "m1"},
+            "c1",
+        )
+        assert status == STATUS_UNREACHABLE
+
+    def test_hook_provider_degrades_to_list_probe(self, service, monkeypatch):
+        """OAuth 插件类（models_hook）→ hook 探测（降级列表探测）"""
+        from app.plugins.registries.provider_registry import ProviderDef, ProviderRegistry
+
+        reg = ProviderRegistry()
+        reg.register(
+            ProviderDef(name="钩子P", capabilities={"models_hook": lambda cfg: ["m1"]}),
+            source="plugin:test",
+        )
+        monkeypatch.setattr(ProviderRegistry, "_instance", reg)
+        monkeypatch.setattr(ProviderRegistry, "get_instance", classmethod(lambda cls: reg))
+        status = service._probe_health(
+            {"provider_name": "钩子P", "API_URL": "", "API_KEY": "", "模型名称": "m1"}, "c1"
+        )
+        assert status == STATUS_OK
+
+
 # ══════════════════════════════════════════════════════════════════
 # 2/3/4/5. sync 注册集 + 落盘语义
 # ══════════════════════════════════════════════════════════════════

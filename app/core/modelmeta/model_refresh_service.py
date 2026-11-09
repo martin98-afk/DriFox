@@ -306,6 +306,86 @@ class ModelRefreshService(QObject):
         return list(filtered), status
 
     @staticmethod
+    def _status_from_http(code: int) -> str:
+        """HTTP 状态码 → 健康状态。402 计入鉴权失败（余额属凭据层）。"""
+        if code in (401, 403, 402):
+            return STATUS_AUTH_FAILED
+        return STATUS_UNREACHABLE
+
+    def _probe_health(self, info: Dict[str, Any], config_id: str) -> str:
+        """对聊天端点发 max_tokens=1 真实请求探测连通性。
+
+        OAuth 插件类（models_hook）凭据在插件内，本地无法构造鉴权头 → 降级
+        hook 探测（列表语义）；UI 侧按派生规则标注「列表探测」。
+        bce 签名类无法本地构造签名 → 直接 unreachable。
+        """
+        provider_name = str(info.get("provider_name", "") or "")
+        hook = self._resolve_models_hook(provider_name)
+        if hook is not None:
+            try:
+                result = hook(dict(info)) or []
+                return STATUS_OK if result else STATUS_EMPTY
+            except Exception as e:
+                logger.info(f"[ModelRefresh] hook 健康探测失败 config_id={config_id}: {e}")
+                return STATUS_UNREACHABLE
+
+        auth = str(info.get("认证方式", "") or "bearer").lower()
+        if auth == "bce":
+            return STATUS_UNREACHABLE
+        api_url = str(info.get("API_URL", "") or "").rstrip("/")
+        api_key = str(info.get("API_KEY", "") or "")
+        model = str(info.get("模型名称", "") or "").strip()
+        if not api_url or not model:
+            return STATUS_UNREACHABLE
+        if not api_key and auth != "none":
+            return STATUS_UNREACHABLE
+
+        import requests
+
+        headers: Dict[str, str] = {}
+        if auth == "bearer":
+            headers["Authorization"] = f"Bearer {api_key}"
+        elif auth == "anthropic":
+            headers["x-api-key"] = api_key
+            headers["anthropic-version"] = "2023-06-01"
+
+        body: Dict[str, Any] = {
+            "model": model,
+            "messages": [{"role": "user", "content": "ping"}],
+            "max_tokens": 1,
+            "stream": False,
+        }
+        if auth == "anthropic":
+            urls = [f"{api_url}/v1/messages" if not api_url.endswith("/v1") else f"{api_url}/messages"]
+        else:
+            urls = [f"{api_url}/chat/completions"]
+            if not api_url.endswith("/v1"):
+                urls.append(f"{api_url}/v1/chat/completions")
+
+        for url in urls:
+            try:
+                resp = requests.post(url, headers=headers, json=body, timeout=15)
+                if resp.status_code == 200:
+                    return STATUS_OK
+                if resp.status_code == 400 and "max_completion_tokens" in (resp.text or ""):
+                    retry_body = dict(body)
+                    retry_body.pop("max_tokens", None)
+                    retry_body["max_completion_tokens"] = 1
+                    try:
+                        resp2 = requests.post(url, headers=headers, json=retry_body, timeout=15)
+                        if resp2.status_code == 200:
+                            return STATUS_OK
+                        return self._status_from_http(resp2.status_code)
+                    except Exception:
+                        return STATUS_UNREACHABLE
+                if resp.status_code in (401, 403, 402):
+                    return self._status_from_http(resp.status_code)  # 鉴权失败换路径无意义
+                continue  # 404/5xx 等：试下一个候选路径
+            except Exception:
+                continue
+        return STATUS_UNREACHABLE
+
+    @staticmethod
     def _resolve_models_hook(provider_name: str):
         """取插件的 capabilities["models_hook"]（无则 None）"""
         if not provider_name:
