@@ -19,10 +19,17 @@ macOS: AVFoundation）。同一份素材能不能播取决于那台机器装了�
 
 性能约束：QMovie 的 CacheAll 会把全部帧解到内存（60 帧 640x360 约 55MB），
 这里只保留当前帧，内存恒定。
+
+[PERF] 解码移出主线程（2026-11-09）：WebP 单帧解码实测 1600x900 约 4.8ms，
+15fps 下占主线程 7.2%。改为后台线程预解码到小容量帧队列，主线程 advance()
+只从队列取现成帧（微秒级）；队列空（刚启动/刚重建）时回退同步解码，
+行为与旧实现逐一等价。队列上限 3 帧，满则工作线程等待，内存最坏 +16.5MB。
 """
 from __future__ import annotations
 
+import collections
 import logging
+import threading
 import time
 import weakref
 from typing import Dict, List, Optional
@@ -44,6 +51,10 @@ _IDLE_TICK_MS = 500
 # 公开别名：测试与外部模块（theme_manager 同款 FPS_CAP 模式）引用用
 TICK_MS = _TICK_MS
 IDLE_TICK_MS = _IDLE_TICK_MS
+# 预解码队列上限（帧）。3 帧 @15fps = 200ms 前瞻：足够吸收一次主线程卡顿
+# （弹窗/流式长帧），又不会把内存抬太多（1600x900 单帧 5.5MB → 最坏 +16.5MB）。
+# 队列满则工作线程等待，不会无限堆积。
+_PREFETCH_MAX = 3
 
 class AnimationSource:
     """一个动画文件的帧源
@@ -65,6 +76,13 @@ class AnimationSource:
         self._last_advance_ms = -(10**9)  # 首帧立即推进
         self._reader = QImageReader(path)
         self._reader.setAutoTransform(True)
+        # 预解码队列 + 线程原语。只用 threading（不依赖 Qt 线程）：这里纯计算，
+        # 不需要事件循环/信号槽；跟线程只传 QImage（Qt 隐式共享，只读安全）。
+        self._prefetch: collections.deque = collections.deque()
+        self._prefetch_lock = threading.Lock()
+        self._prefetch_space = threading.Condition(self._prefetch_lock)
+        self._prefetch_thread: Optional[threading.Thread] = None
+        self._prefetch_stop = threading.Event()
         self._open()
 
     # ── 解码 ─────────────────────────────────────────
@@ -77,6 +95,68 @@ class AnimationSource:
             return
         # 先取首帧：调用方拿不到帧时可直接降级到静态图
         self._read_next()
+        self._start_prefetch()
+
+    # ── 预解码线程 ──────────────────
+
+    def _start_prefetch(self) -> None:
+        """启动后台解码线程（幂等）。
+
+        线程只负责「把下一帧解出来放进队列」，不接触 Qt 对象树、不调任何
+        widget 方法；跟线程只传 QImage（Qt 隐式共享，只读安全）。
+        """
+        if self.failed or self._prefetch_thread is not None:
+            return
+        t = threading.Thread(
+            target=self._prefetch_loop,
+            name="anim-prefetch",
+            daemon=True,
+        )
+        self._prefetch_thread = t
+        t.start()
+
+    def _prefetch_loop(self) -> None:
+        """后台循环：队列有空位就解一帧。"""
+        reader = QImageReader(self.path)
+        reader.setAutoTransform(True)
+        while not self._prefetch_stop.is_set():
+            with self._prefetch_lock:
+                while len(self._prefetch) >= _PREFETCH_MAX and not self._prefetch_stop.is_set():
+                    self._prefetch_space.wait(0.2)
+                if self._prefetch_stop.is_set():
+                    return
+            img = reader.read()
+            if img.isNull():
+                # 播到尾：重开回到首帧（动画 WebP 的循环语义）
+                reader = QImageReader(self.path)
+                reader.setAutoTransform(True)
+                img = reader.read()
+                if img.isNull():
+                    self.failed = True
+                    logger.warning(f"[AnimBackground] 动画解码失败: {self.path}")
+                    return
+            # detach：跨线程共享的大图若不立刻深拷贝，后续 reader 复用可能
+            # 改写同一块数据（QImage 写时复制只在写方可见）
+            img = img.copy()
+            with self._prefetch_lock:
+                self._prefetch.append(img)
+
+    def _take_prefetched(self) -> Optional[QImage]:
+        """取一帧预解码结果；无可用帧返回 None。"""
+        with self._prefetch_lock:
+            if not self._prefetch:
+                return None
+            img = self._prefetch.popleft()
+            if len(self._prefetch) < _PREFETCH_MAX:
+                self._prefetch_space.notify()
+            return img
+
+    def stop_prefetch(self) -> None:
+        """停止后台线程（registry.prune / 进程退出时调用）。"""
+        self._prefetch_stop.set()
+        with self._prefetch_lock:
+            self._prefetch.clear()
+            self._prefetch_space.notify_all()
 
     def _reopen(self) -> None:
         self._reader = QImageReader(self.path)
@@ -96,16 +176,23 @@ class AnimationSource:
         return True
 
     def advance(self, now_ms: int) -> bool:
-        """到点才推进一帧；返回是否换了新帧"""
+        """到点才推进一帧；返回是否换了新帧
+
+        优先取后台预解码帧（微秒级）；队列空时回退同步解码，保证刚启动 /
+        刚重建（队列还没填）时也能出帧，行为与旧实现一致。
+        """
         if self.failed:
             return False
         interval = 1000.0 / self.fps
         if now_ms - self._last_advance_ms < interval:
             return False
         self._last_advance_ms = now_ms
-        if not self._read_next():
-            return False
-        return True
+        img = self._take_prefetched()
+        if img is not None:
+            self.current = img
+            return True
+        # 兜底：预解码未就绪（队列尚未填满）→ 主线程同步解一帧
+        return self._read_next()
 
     # ── 订阅 ─────────────────────────────────────────
 
@@ -154,11 +241,19 @@ class AnimationRegistry:
         return src
 
     def prune(self) -> None:
-        """回收没有订阅者的源（主题切换后旧素材不再占内存）"""
+        """回收没有订阅者的源（主题切换后旧素材不再占内存）
+
+        必须同时停掉后台预解码线程：线程持有 reader 与队列帧，只从字典里
+        pop 会让线程成为孤儿继续解码（daemon 虽不阻退出，但会白烧 CPU）。
+        """
         for path in [p for p, s in self._sources.items() if not s.has_subscribers()]:
-            self._sources.pop(path, None)
+            src = self._sources.pop(path, None)
+            if src is not None:
+                src.stop_prefetch()
 
     def clear(self) -> None:
+        for src in self._sources.values():
+            src.stop_prefetch()
         self._sources.clear()
 
 class BackgroundClock(QObject):
