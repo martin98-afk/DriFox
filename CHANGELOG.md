@@ -1,6 +1,9 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+- **服务商状态点语义升级**: 状态点表示当前能否真正联通（对话请求失败立即变红、超时/5xx 网络失败同红、tooltip 显示中文状态与探测方式）；健康检查改为每 1 小时对聊天端点发真实请求探测（`max_tokens=1`），与手动刷新模型列表的计时解耦；OAuth 插件类（models_hook）降级列表探测并在 tooltip 标注。
+
 ## [v0.7.0] - 2026-11-09 (重新发布 #5)
 
 自 v0.7.0-beta 以来的变更 | 提交数：43 · 文件变更：162 · +7402/-1170 | 贡献者：dingma, martin98-afk

@@ -522,7 +522,9 @@ class ProviderEditCard(QWidget):
         model_row.addWidget(health_label)
         self.healthCheckSwitch = _RowSwitch()
         self.healthCheckSwitch.setChecked(bool(self.provider_info.get("健康检查", False)))
-        self.healthCheckSwitch.setToolTip("每 24 小时探测一次可用性，只更新状态不修改模型列表")
+        self.healthCheckSwitch.setToolTip(
+            "每 1 小时对聊天端点发一次真实请求探测可用性；对话请求失败时立即更新状态。只更新状态，不修改模型列表"
+        )
         model_row.addWidget(self.healthCheckSwitch)
         model_row.addSpacing(16)
 
