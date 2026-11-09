@@ -169,11 +169,13 @@ manifest 加 `api_version: 2`，必须同时把用到的能力全部列上。** 
 | `model.metadata` | 当前模型 provider/名称/上下文/能力元数据 | ui, tool |
 | `model.schema` | 指定 agent 视角的工具 schema | ui, tool |
 | `model.config` | **完整模型配置（含已解密明文 API key）** | ui, tool |
+| `model.config_for` / `model.set` | 按 query 解析可执行配置（含明文 key）/ 设置窗口服务商与模型（只改窗口实例态，`window_id` 可定向） | ui, tool / **ui** |
 | `provider.list` / `model.enumerate` | 服务商清单（**不含密钥与 URL**）/ 服务商可选模型列表（含视觉/思考标记） | ui, tool |
-| `session.read` / `session.write` | 会话读写（write 写库 + 刷 UI + 发事件） | ui, tool |
+| `session.read` / `session.write` | 会话读写（write 写库 + 刷 UI + 发事件；两者 `window_id` 可定向到指定窗口） | ui, tool |
 | `session.list` | 窗口内存会话列表（`host.session_manager.sessions`） | ui |
 | `session.history` / `session.history.write` | **持久化**历史会话只读面 / 改写（置顶·移动·归档·恢复·删除·导入） | ui |
 | `session.manage` / `session.invalidate` | 切换·新建当前会话 / 失效 system_prompt 缓存 | ui |
+| `session.interrupt` / `session.new` / `session.send` | 停流 / 新建会话 / 发消息驱动一轮对话（均入队语义；send 支持 mode=queue/skip/hook、ephemeral、`window_id` 定向） | ui, tool |
 | `input.read` | 输入框文本与附件列表 | **ui** |
 | `input.write` | 写入输入框文本 | **ui** |
 | `agent.read` | agent 列表/提示词/管理器 | ui, tool |
@@ -181,25 +183,32 @@ manifest 加 `api_version: 2`，必须同时把用到的能力全部列上。** 
 | `workdir.read` / `workdir.write` | 工作目录读 / 切换 | ui（read 含 tool） |
 | `project.read` / `project.write` | 项目读（当前/清单/元数据/根目录）/ 写（切换·新建·归档·导入导出·拖拽） | ui |
 | `project.workdir` | **写库式**切换项目工作目录（关键文档登记 + 持久化 + 根目录标记恢复）；与 `workdir.write`（会话内）互补 | ui |
+| `branch.refresh` | 失效分支检测缓存并刷新标题栏分支标签 | ui |
 | `theme.read` | 主题 id/名称/配色/字体/字号 | ui |
 | `tool.read` / `tool.execute` | 工具元信息 / 执行任意工具 | ui, tool |
 | `tool.inject` | 向 LLM 注入工具（改变模型可见行为） | **ui** |
 | `engine.session` / `engine.stack` | 创建引擎会话（消耗 token）/ 执行栈工厂 | ui |
 | `platform.send` / `platform.read` | 通讯平台收发 | ui |
-| `mcp.call` / `mcp.register` / `lsp.query` / `net.upload` | MCP 调用 / 注册进程内 MCP server（gateway，接入方式见 components/mcp.md）/ LSP 查询 / Gitee 上传 | tool / **ui** |
+| `mcp.call` / `mcp.register` / `lsp.query` | MCP 调用 / 注册进程内 MCP server（gateway，接入方式见 components/mcp.md）/ LSP 查询 | tool / **ui** |
+| `net.upload` / `net.download` / `net.avatar` | Gitee 上传 / 下载文件到本地路径 / 账户头像（avatar 须后台线程） | tool / ui, tool / **ui** |
 | `ui.notify` `ui.card.show` `ui.card.hide` | 弹 InfoBar / 显示浮动卡 / 隐藏浮动卡 | ui |
 | `ui.artifacts.show` | 向消息卡片成果栏推成果条目（image/video/html/text/file）；工具侧常规通道是 `ToolResult.artifacts` 免声明字段 | ui, tool |
-| `ui.exclusive` `ui.dialog` `ui.events` | 独占 UI 模式 / 文件与确认对话框 / UI 事件总线 | ui |
+| `ui.exclusive` `ui.dialog` `ui.events` | 独占 UI 模式 / 文件与确认对话框 / UI 事件总线；`ui.events` 含全局对话报错 `conversation_error` 事件（payload: window_id/session_id/provider/model/message/error_type/timestamp），全局监听插件用它收所有窗口的事件 | ui |
+| `question.control` | 提问卡控制：订阅提问生命周期 / 读当前题目与已答 / 驱动倒计时 / 代用户提交答案 | ui |
 | `stream.subscribe` | 订阅对话流事件（工具/流/错误/上下文/会话切换） | ui |
+| `stream.errors` | 订阅**宿主窗口**对话报错（结构化：window_id/服务商/模型/error_type）；全局监听全部窗口走 `ui.events` 的 `conversation_error` | ui |
 | `window.active` `window.current` `window.host` | 活跃窗口 / 窗口语义快照 / 宿主顶层窗口 | ui |
 | `window.list` `window.events` `window.workbench` | 窗口 id 集 / tab 切换事件 / 右侧工作台页 | ui |
 | `plugin.read` / `plugin.control` | 已安装插件列表 / 重载启停其他插件 | ui |
 | `command.read` / `command.reload` | 命令列表 / 命令热重载 | ui |
+| `sync.register` | 注册本地目录进入云同步监控（目录内容打包备份到云端，数据外发） | ui |
 | `team.read` / `team.send` | 团队成员与运行状态 / 派发任务邮件（send 仅 tool） | ui, tool / **tool** |
+| `team.manage` / `team.spawn` / `action.queue` | 建队退出加人踢人群发 / 为团队拉起成员窗口 / 窗口动作队列只读（peek） | **tool** / ui, tool / **tool** |
 | `team.session` | 团队历史会话恢复 / 归档 / 进入成员会话（跨窗口开标签页） | ui |
 | `cache.purge` | 清理主程序进程内 LRU 缓存 | ui |
 | `process.start` | 启动后台进程（argv 数组、无 shell，独立于宿主生命周期） | ui, tool |
-| `config.read` | 按 key 读主程序配置项（**不含密钥**，密钥走 `model.config`） | ui |
+| `storage.data_dir` / `storage.db` | 插件数据根目录 / 通用数据库执行（受限代理：表名须 `plugin_<name>_` 前缀，禁 ATTACH/PRAGMA） | ui, tool |
+| `config.read` / `config.write` | 按 key 读写主程序配置项（**不含密钥**，密钥走 `model.config`；write 仅已声明项） | ui |
 | `host.raw` | 裸 `main_widget` / `backend` 对象引用（逃生舱） | ui |
 | `plugin.log` / `state.kv` | 带前缀的 logger / 窗口级 KV（**恒放行，无需声明**） | - |
 
