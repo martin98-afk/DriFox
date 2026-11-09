@@ -401,9 +401,11 @@ class ContextBreakdownTooltip(QWidget):
             self._legend_layout.addWidget(row)
             new_rows.append(row)
 
-        # 新建行的 QSS 字体在 polish 前不参与尺寸计算，直接 adjustSize() 拿到
-        # 的是旧高度；先 polish 再逐级激活布局，让本次刷新后的尺寸一次到位
+        # 新建行的 QSS 字体在 polish 前不参与尺寸计算；且 addWidget 的 reparent
+        # 会把行置为隐藏（Qt setParent 语义），隐藏控件不计入布局 → sizeHint 为空，
+        # adjustSize() 拿到旧高度。先 show 再 polish，让本次刷新尺寸一次到位。
         for row in new_rows:
+            row.show()
             row.ensurePolished()
             for child in row.findChildren(QWidget):
                 child.ensurePolished()
