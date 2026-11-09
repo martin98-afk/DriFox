@@ -393,6 +393,9 @@ class MessageCard(SimpleCardWidget):
         self._retry_attempt = 0  # 当前重试次数
         self._retry_max = 15  # 最大重试次数
         self._retry_wait_time = 0.0  # 等待时间
+        # 重试状态栏刷新累加器（ms）：按真实经过时间累积，与动画节拍解耦。
+        # 原实现按「固定拍数」判定，节拍一变间隔就漂移。
+        self._retry_status_acc = 0.0
         self._round_index: Optional[int] = None  # 用于卡片差异功能
         self._message_index: Optional[int] = None  # 用于卡片差异和撤销功能：消息在 session.messages 中的索引
         # 底部元信息栏（助手卡片）
@@ -2376,7 +2379,13 @@ class MessageCard(SimpleCardWidget):
         self._anim_t_ms = 0.0
         self._anim_clock.restart()
         try:
-            self._anim_timer.start(50)  # 80→50ms，帧率从12.5fps提升到20fps
+            # [PERF] 2026-11-09：20fps（50ms）→ 15fps（66ms）。光带是慢速往返的
+            # 柔和渐变（单程 1600ms、位移约 36px/50ms），15fps 与 20fps 在观感上
+            # 无差异（慢速平移 + 3px 高度，采样点从 32/单程降到 24/单程仍连续）。
+            # 相位按真实经过时间 dt 累加（见 _update_anim），**运动速度与轨迹
+            # 完全不变**，只是重绘次数降 25%。与背景动画的 15fps 同频后，两路
+            # 动画天然对齐，减少一帧内两次独立合成的机会。
+            self._anim_timer.start(66)
         except RuntimeError:
             return
         self.update()
@@ -2435,13 +2444,13 @@ class MessageCard(SimpleCardWidget):
         elif dt > _STREAM_BAND_MAX_DT_MS:
             dt = _STREAM_BAND_MAX_DT_MS
         self._anim_t_ms += dt
-        # 重试状态栏降频更新（每200ms一次，避免和paintEvent双重刷新导致卡顿）
+        # 重试状态栏降频更新（~200ms 一次，避免和 paintEvent 双重刷新导致卡顿）
+        # [PERF] 2026-11-09：原按「固定拍数」计（50ms*4），节拍改 66ms 后拍数不变
+        # 会把间隔拉成 264ms。改为按真实经过时间判定，与定时器间隔解耦。
         if self._retrying:
-            if not hasattr(self, "_retry_status_tick"):
-                self._retry_status_tick = 0
-            self._retry_status_tick += 1
-            if self._retry_status_tick >= 4:  # 50ms * 4 = 200ms
-                self._retry_status_tick = 0
+            self._retry_status_acc += dt
+            if self._retry_status_acc >= 200.0:
+                self._retry_status_acc = 0.0
                 self._update_retry_status_bar()
         # 局部重绘：动画帧只标脏底部光带这一条窄带（不碰描边所在的卡片边缘），
         # 免得每帧都把整卡交给 Qt 重绘、和流式内容渲染抢主线程。重试中状态栏
@@ -2551,7 +2560,7 @@ class MessageCard(SimpleCardWidget):
             self._anim_t_ms = 0.0
             self._anim_clock.restart()
             try:
-                self._anim_timer.start(50)
+                self._anim_timer.start(66)
             except RuntimeError:
                 return
         # 更新状态栏
