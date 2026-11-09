@@ -270,6 +270,99 @@ class TestProbeHealth:
         )
         assert status == STATUS_OK
 
+    def test_health_probe_hook_preferred_over_everything(self, service, monkeypatch):
+        """capabilities.health_probe 优先于 models_hook 与 REST：OAuth 类真探测入口
+
+        models_hook 返回空列表（旧语义 → STATUS_EMPTY），health_probe 返回 ok：
+        断言 ok 即证明走的是 health_probe 分支。
+        """
+        import requests as _requests
+
+        from app.plugins.registries.provider_registry import ProviderDef, ProviderRegistry
+
+        posts = []
+        monkeypatch.setattr(_requests, "post", lambda url, **k: posts.append(url))
+
+        reg = ProviderRegistry()
+        reg.register(
+            ProviderDef(
+                name="探测P",
+                capabilities={
+                    "health_probe": lambda cfg: STATUS_OK,
+                    "models_hook": lambda cfg: [],
+                },
+            ),
+            source="plugin:test",
+        )
+        monkeypatch.setattr(ProviderRegistry, "_instance", reg)
+        monkeypatch.setattr(ProviderRegistry, "get_instance", classmethod(lambda cls: reg))
+        status = service._probe_health(
+            {"provider_name": "探测P", "API_URL": "https://x/v1", "API_KEY": "", "模型名称": "m1"},
+            "c1",
+        )
+        assert status == STATUS_OK, "models_hook 空列表语义是 empty，得 ok 只能来自 health_probe"
+        assert posts == [], "有 health_probe 时不该发 REST 请求"
+
+    def test_health_probe_hook_invalid_value_is_unreachable(self, service, monkeypatch):
+        """钩子返回非法状态值 → unreachable（不透传垃圾进状态键）"""
+        from app.plugins.registries.provider_registry import ProviderDef, ProviderRegistry
+
+        hp_calls = []
+        reg = ProviderRegistry()
+        reg.register(
+            ProviderDef(
+                name="坏值P",
+                capabilities={
+                    "health_probe": lambda cfg: (hp_calls.append(1), "什么玩意")[1],
+                    "models_hook": lambda cfg: ["m1"],
+                },
+            ),
+            source="plugin:test",
+        )
+        monkeypatch.setattr(ProviderRegistry, "_instance", reg)
+        monkeypatch.setattr(ProviderRegistry, "get_instance", classmethod(lambda cls: reg))
+        status = service._probe_health({"provider_name": "坏值P"}, "c1")
+        assert hp_calls == [1], "health_probe 必须被调用（优先于 models_hook）"
+        assert status == STATUS_UNREACHABLE, "models_hook 语义是 ok，得 unreachable 证明走了 health_probe 且坏值被拦截"
+
+    def test_health_probe_hook_exception_is_unreachable(self, service, monkeypatch):
+        """钩子抛异常（约定内不应抛，仍兜底）→ unreachable"""
+        from app.plugins.registries.provider_registry import ProviderDef, ProviderRegistry
+
+        hp_calls = []
+
+        def _boom(cfg):
+            hp_calls.append(1)
+            raise RuntimeError("probe exploded")
+
+        reg = ProviderRegistry()
+        reg.register(
+            ProviderDef(
+                name="炸P",
+                capabilities={"health_probe": _boom, "models_hook": lambda cfg: ["m1"]},
+            ),
+            source="plugin:test",
+        )
+        monkeypatch.setattr(ProviderRegistry, "_instance", reg)
+        monkeypatch.setattr(ProviderRegistry, "get_instance", classmethod(lambda cls: reg))
+        status = service._probe_health({"provider_name": "炸P"}, "c1")
+        assert hp_calls == [1], "health_probe 必须被调用（优先于 models_hook）"
+        assert status == STATUS_UNREACHABLE, "models_hook 语义是 ok，得 unreachable 证明走了 health_probe 且异常被兜底"
+
+    def test_health_probe_hook_auth_failed_passthrough(self, service, monkeypatch):
+        """钩子返回 auth_failed → 原样透传（OAuth 凭据废是最高价值信号）"""
+        from app.plugins.registries.provider_registry import ProviderDef, ProviderRegistry
+
+        reg = ProviderRegistry()
+        reg.register(
+            ProviderDef(name="凭据废P", capabilities={"health_probe": lambda cfg: STATUS_AUTH_FAILED}),
+            source="plugin:test",
+        )
+        monkeypatch.setattr(ProviderRegistry, "_instance", reg)
+        monkeypatch.setattr(ProviderRegistry, "get_instance", classmethod(lambda cls: reg))
+        status = service._probe_health({"provider_name": "凭据废P"}, "c1")
+        assert status == STATUS_AUTH_FAILED
+
 
 class TestReportResult:
     def test_report_writes_status_keys_only(self, service):

@@ -215,11 +215,15 @@ class ProviderItem(QWidget):
     }
 
     def _probe_mode(self) -> str:
-        """探测方式派生（不落盘）：OAuth/插件 hook 类与 bce 签名类只能列表探测。"""
+        """探测方式派生（不落盘）：health_probe/models_hook 插件类与 bce 签名类只能列表探测。"""
         try:
             p = ProviderRegistry.get_instance().get(self.provider_name)
-            if p is not None and callable(p.capabilities.get("models_hook")):
-                return "列表探测"
+            if p is not None:
+                caps = p.capabilities or {}
+                if callable(caps.get("health_probe")):
+                    return "聊天探测"
+                if callable(caps.get("models_hook")):
+                    return "列表探测"
         except Exception:
             pass
         if str(self.provider_info.get("认证方式", "") or "").lower() in ("bearer", "none", "anthropic"):

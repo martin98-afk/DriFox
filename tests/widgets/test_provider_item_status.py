@@ -124,6 +124,21 @@ class TestStatusDot:
         tip = item.statusDot.toolTip()
         assert "可用" in tip and "聊天探测" in tip
 
+    def test_probe_mode_health_probe_hook_is_chat(self, _qapp, monkeypatch):
+        """插件声明 health_probe → 真探测，tooltip 标「聊天探测」而非「列表探测」"""
+        reg = ProviderRegistry()
+        reg.register(
+            ProviderDef(
+                name="探针服务商",
+                capabilities={"health_probe": lambda cfg: "ok", "models_hook": lambda cfg: ["m"]},
+            ),
+            source="plugin:test",
+        )
+        monkeypatch.setattr(ProviderRegistry, "_instance", reg)
+        monkeypatch.setattr(ProviderRegistry, "get_instance", classmethod(lambda cls: reg))
+        item = _make_item({"provider_name": "探针服务商", "模型刷新状态": "ok"})
+        assert item._probe_mode() == "聊天探测"
+
 
 class TestSubtitle:
     def test_subtitle_with_model_count(self, _qapp, registry):

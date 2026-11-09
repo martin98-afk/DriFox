@@ -319,11 +319,23 @@ class ModelRefreshService(QObject):
     def _probe_health(self, info: Dict[str, Any], config_id: str) -> str:
         """对聊天端点发 max_tokens=1 真实请求探测连通性。
 
-        OAuth 插件类（models_hook）凭据在插件内，本地无法构造鉴权头 → 降级
-        hook 探测（列表语义）；UI 侧按派生规则标注「列表探测」。
+        探测优先级：health_probe（插件内换凭据真探测）→ models_hook（列表
+        语义降级）→ REST（bearer/anthropic/none 直连）。
         bce 签名类无法本地构造签名 → 直接 unreachable。
         """
         provider_name = str(info.get("provider_name", "") or "")
+        probe_hook = self._resolve_health_probe_hook(provider_name)
+        if probe_hook is not None:
+            try:
+                status = str(probe_hook(dict(info)) or "").strip()
+            except Exception as e:
+                logger.info(f"[ModelRefresh] health_probe 钩子失败 config_id={config_id}: {e}")
+                return STATUS_UNREACHABLE
+            return (
+                status
+                if status in (STATUS_OK, STATUS_EMPTY, STATUS_AUTH_FAILED, STATUS_UNREACHABLE)
+                else STATUS_UNREACHABLE
+            )
         hook = self._resolve_models_hook(provider_name)
         if hook is not None:
             try:
@@ -388,6 +400,26 @@ class ModelRefreshService(QObject):
             except Exception:
                 continue
         return STATUS_UNREACHABLE
+
+    @staticmethod
+    def _resolve_health_probe_hook(provider_name: str):
+        """取插件的 capabilities["health_probe"]（签名 (config) -> status，无则 None）。
+
+        OAuth 插件类用它在插件内换短效凭据后对聊天端点发真探测；
+        优先级高于 models_hook（后者只能验证列表可达性）。
+        """
+        if not provider_name:
+            return None
+        try:
+            from app.plugins.registries.provider_registry import ProviderRegistry
+
+            p = ProviderRegistry.get_instance().get(provider_name)
+            if p is None:
+                return None
+            hook = p.capabilities.get("health_probe")
+            return hook if callable(hook) else None
+        except Exception:
+            return None
 
     @staticmethod
     def _resolve_models_hook(provider_name: str):
