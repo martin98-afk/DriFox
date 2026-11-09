@@ -635,6 +635,14 @@ class HistoryManager:
         _usage = self._resolve_api_usage_fields(_usage_provided, _existing_for_usage)
 
         merged_messages = merge_session_messages(messages)
+        # partial 尾巴跳过 token 全量估算时用的占位值（见 _build_session_record）。
+        # 这条路径只在会话被挤出内存后走到，partial 撞上的概率极低，仍然
+        # 沿用库里现值，避免占用显示被清零。
+        _ctx_hint = None
+        if merged_messages and merged_messages[-1].get("_partial") and session_id:
+            _existing_for_hint = self.get_session_by_session_id(session_id)
+            if _existing_for_hint:
+                _ctx_hint = _existing_for_hint.get("context_usage", 0)
         session_record = self._build_session_record(
             merged_messages,
             title,
@@ -650,6 +658,7 @@ class HistoryManager:
             agent_name=agent_name,
             team_members=team_members,
             pinned=pinned,
+            context_usage_hint=_ctx_hint,
         )
         new_session_id = session_record["session_id"]
 
@@ -724,6 +733,7 @@ class HistoryManager:
         agent_name: str = "",
         team_members: str = "",
         pinned: bool = False,
+        context_usage_hint: Optional[int] = None,
     ) -> Dict:
         now = datetime.now()
         saved_at = now.strftime("%Y-%m-%d %H:%M:%S")
@@ -749,7 +759,16 @@ class HistoryManager:
 
         _pair_count = self._count_conversation_pairs(merged_messages)
         _preview = extract_message_preview(merged_messages)
-        _ctx_tokens = count_messages_tokens(merged_messages)
+        # 🛡️ 流式中途落盘的 partial 尾巴：跳过全量 token 估算。
+        # 这条是半截回复（main_widget._maybe_flush_partial_reply 每 25s 覆盖一次），
+        # context_usage 只是它的中间值，正常结束会被完整消息整体替换并重算。
+        # 每 25s 为半截内容全量遍历一次消息列表纯属浪费（800 轮会话实测 0.45ms）。
+        # 用上一版记录值占位：局部更新，不会让占用显示在两次落盘之间来回跳。
+        _tail_partial = bool(merged_messages) and bool(merged_messages[-1].get("_partial"))
+        if _tail_partial:
+            _ctx_tokens = int(context_usage_hint or 0)
+        else:
+            _ctx_tokens = count_messages_tokens(merged_messages)
         return {
             "session_id": session_id,
             "saved_at": saved_at,
@@ -2029,6 +2048,7 @@ class HistoryManager:
                 team_name=team_name if team_name is not None else existing.get("team_name", ""),
                 agent_name=agent_name if agent_name is not None else existing.get("agent_name", ""),
                 team_members=team_members if team_members is not None else existing.get("team_members", ""),
+                context_usage_hint=existing.get("context_usage", 0),
             )
             # 移动到列表开头以保持与 SQLite ORDER BY updated_at DESC 一致
             self._history_sessions.pop(index)

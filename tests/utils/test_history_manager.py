@@ -701,3 +701,63 @@ def test_save_timer_actually_fires(monkeypatch, tmp_path, qapp):
     QCoreApplication.processEvents()
 
     assert fired["n"] >= 1, "防抖定时器到期必须真正触发 _do_save"
+
+
+def test_partial_tail_skips_token_estimation(monkeypatch, tmp_path):
+    """partial 尾巴跳过 token 全量估算，沿用上一版 context_usage。
+
+    流式中途落盘的半截回复每 25s 覆盖一次，为它全量遍历消息列表算 token
+    是纯浪费（800 轮会话实测 0.45ms）；且该值在正常结束时会被完整消息的
+    重算覆盖。跳过时必须沿用旧值，不能让占用显示在两次落盘之间清零。
+    """
+    manager = _make_manager(monkeypatch, tmp_path)
+    manager._use_sqlite = False
+    manager._history_loaded = True
+    manager._history_sessions = [
+        {
+            "session_id": "session-1",
+            "title": "会话 1",
+            "project": "默认项目",
+            "messages": [{"role": "user", "content": "内容", "timestamp": "2026-08-18 16:00:00"}],
+            "context_usage": 12345,
+        }
+    ]
+
+    manager.update_session(
+        0,
+        [
+            {"role": "user", "content": "内容", "timestamp": "2026-08-18 16:00:00"},
+            {"role": "assistant", "content": "半截回复", "_partial": True, "timestamp": "2026-08-18 16:00:01"},
+        ],
+    )
+
+    record = manager._history_sessions[0]
+    assert record["context_usage"] == 12345, "partial 尾巴必须沿用旧占用值，不得清零"
+
+
+def test_normal_tail_still_estimates_tokens(monkeypatch, tmp_path):
+    """非 partial 尾巴照常全量估算（不能因为优化而漏掉正常路径）。"""
+    manager = _make_manager(monkeypatch, tmp_path)
+    manager._use_sqlite = False
+    manager._history_loaded = True
+    manager._history_sessions = [
+        {
+            "session_id": "session-1",
+            "title": "会话 1",
+            "project": "默认项目",
+            "messages": [{"role": "user", "content": "内容", "timestamp": "2026-08-18 16:00:00"}],
+            "context_usage": 12345,
+        }
+    ]
+
+    manager.update_session(
+        0,
+        [
+            {"role": "user", "content": "内容", "timestamp": "2026-08-18 16:00:00"},
+            {"role": "assistant", "content": "完整回复内容", "timestamp": "2026-08-18 16:00:01"},
+        ],
+    )
+
+    record = manager._history_sessions[0]
+    assert record["context_usage"] > 0
+    assert record["context_usage"] != 12345, "正常尾巴必须重新估算，不能沿用旧值"
