@@ -271,6 +271,42 @@ class TestProbeHealth:
         assert status == STATUS_OK
 
 
+class TestReportResult:
+    def test_report_writes_status_keys_only(self, service):
+        """实时校准只写状态两键，不碰「上次模型刷新」与「模型列表」"""
+        service.sync_from_config({"c1": {
+            KEY_AUTO_REFRESH: False,
+            KEY_HEALTH_CHECK: True,
+            KEY_LAST_REFRESH: "2026-01-01 00:00:00",
+            KEY_MODELS: ["m1"],
+        }})
+        service._on_health_reported("c1", STATUS_AUTH_FAILED)
+        entry = service._store["providers"]["c1"]
+        assert entry[KEY_REFRESH_STATUS] == STATUS_AUTH_FAILED
+        assert entry[KEY_STATUS_TS]
+        assert entry[KEY_LAST_REFRESH] == "2026-01-01 00:00:00", "列表计时不得被实时校准触碰"
+        assert entry[KEY_MODELS] == ["m1"]
+
+    def test_report_skips_write_when_status_unchanged(self, service, monkeypatch):
+        """状态未变不写盘（多轮对话多次成功回写幂等，防写放大）"""
+        service.sync_from_config({"c1": {KEY_HEALTH_CHECK: True, "模型刷新状态": "ok"}})
+        writes = []
+        real_set = service._fake_cfg.set
+
+        def counting_set(item, value, save=True):
+            writes.append(1)
+            real_set(item, value, save=save)
+
+        monkeypatch.setattr(service._fake_cfg, "set", counting_set)
+        service._on_health_reported("c1", STATUS_OK)  # 已是 ok → 跳过
+        assert writes == []
+        service._on_health_reported("c1", STATUS_AUTH_FAILED)  # 翻转 → 写
+        assert writes == [1]
+
+    def test_report_unknown_config_id_silently_ignored(self, service):
+        service._on_health_reported("ghost", STATUS_OK)  # 不抛异常即可
+
+
 # ══════════════════════════════════════════════════════════════════
 # 2/3/4/5. sync 注册集 + 落盘语义
 # ══════════════════════════════════════════════════════════════════

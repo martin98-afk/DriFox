@@ -98,6 +98,8 @@ class ModelRefreshService(QObject):
     # (config_id, 最终状态, 列表抓取状态, models) — 主线程发射
     # status_models 非空表示本轮拉了列表（落盘侧据此写「上次模型刷新」）
     refresh_finished = pyqtSignal(str, str, str, list)
+    # (config_id, status) — 实时校准（chat_worker 后台线程回写请求结果）
+    health_reported = pyqtSignal(str, str)
 
     _instance: Optional["ModelRefreshService"] = None
 
@@ -124,6 +126,8 @@ class ModelRefreshService(QObject):
         # 默认 AutoConnection 在同线程时是直连（会变成后台线程里落盘），故显式声明
         # QueuedConnection 保证落盘恒在主线程（QConfig/qfluentwidgets 非线程安全）。
         self.refresh_finished.connect(self._on_refresh_result, Qt.QueuedConnection)
+        # 实时校准：chat_worker 后台线程回写请求结果（queued → 主线程落盘）
+        self.health_reported.connect(self._on_health_reported, Qt.QueuedConnection)
 
     # ══════════════════════════════════════════════════════════
     # 注册 / 生命周期（主线程）
@@ -456,6 +460,41 @@ class ModelRefreshService(QObject):
             self._notify_windows()
         except Exception as e:
             logger.warning(f"[ModelRefresh] 落盘失败 config_id={config_id}: {e}")
+
+    def report_result(self, config_id: str, status: str) -> None:
+        """实时校准入口（chat_worker 后台线程可调）：queued 投递主线程落盘。"""
+        if config_id and status:
+            self.health_reported.emit(str(config_id), str(status))
+
+    def _on_health_reported(self, config_id: str, status: str) -> None:
+        """实时校准落盘（主线程槽）：只写状态两键；状态未变跳过写盘。
+
+        与「健康检查」开关解耦：真实聊天结果是最可信的联通证据，
+        条目存在即写（没开开关的服务商也能点亮状态点）。
+        不碰 KEY_LAST_REFRESH / KEY_HEALTH_TS / KEY_MODELS。
+        """
+        if not config_id or not status:
+            return
+        try:
+            from app.utils.config import Settings
+
+            cfg = Settings.get_instance()
+            saved = cfg.llm_saved_providers.value
+            if not isinstance(saved, dict):
+                return
+            current = saved.get(config_id)
+            if not isinstance(current, dict):
+                return
+            if str(current.get(KEY_REFRESH_STATUS, "") or "") == status:
+                return  # 状态未变：跳过 deepcopy+落盘（多轮对话写放大防线）
+            updated = deepcopy(saved)
+            entry = updated[config_id]
+            entry[KEY_REFRESH_STATUS] = status
+            entry[KEY_STATUS_TS] = now_ts_str()
+            cfg.set(cfg.llm_saved_providers, updated, save=True)
+            self._notify_windows()
+        except Exception as e:
+            logger.warning(f"[ModelRefresh] 实时校准落盘失败 config_id={config_id}: {e}")
 
     def _notify_windows(self) -> None:
         """通知各窗口重载模型配置（刷新列表行副标题 / 选择器）。
