@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 """model.set / stream.errors：设置窗口模型 / 订阅结构化报错事件。"""
+
 import pytest
 from PyQt5.QtCore import QObject, pyqtSignal
 
@@ -54,9 +55,7 @@ def _pool(host, plugin="auto-fallback", declared=None):
     ensure_registered("ui")
     if declared is None:
         declared = {"model.set", "stream.errors"}
-    return CapabilityRegistry.get_instance().build_pool(
-        surface="ui", host=host, plugin=plugin, declared=declared
-    )
+    return CapabilityRegistry.get_instance().build_pool(surface="ui", host=host, plugin=plugin, declared=declared)
 
 
 def test_model_set_success(qapp):

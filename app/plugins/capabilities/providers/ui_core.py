@@ -197,6 +197,7 @@ def _window_workbench(host: Any):
 
 def _ui_events(host: Any, ctx: Any):
     """UI 事件总线的订阅 / 发布（订阅随插件卸载自动退订）。"""
+
     def api() -> dict:
         from app.core.infra.ui_event_bus import UIEventBus
 
@@ -297,7 +298,6 @@ def _window_events(host: Any, ctx: Any):
     return subscribe
 
 
-
 # ──────────────────── 模型 / 智能体 ────────────────────
 
 
@@ -379,6 +379,7 @@ def _agent_prompt(host: Any):
         return agent.prompt if agent else ""
 
     return prompt
+
 
 def _subagent_manager(host: Any):
     """子智能体窗口服务（按 window_id 取插件注册的门面；未就绪返回 None）。
@@ -871,6 +872,7 @@ def _input_write(host: Any):
             cursor.movePosition(cursor.End)
             area.setTextCursor(cursor)
         _back_to_chat()
+
     return write
 
 
@@ -997,7 +999,7 @@ def _ui_artifacts_show(host: Any):
     def show(items, target: str = "latest", call_id: str = "") -> int:
         try:
             payload = [dict(x) for x in (items or []) if isinstance(x, dict)]
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             return 0
         if not payload:
             return 0
@@ -1322,6 +1324,7 @@ def _config_write(host: Any):
 
     return write
 
+
 def _model_config_for(host: Any):
     """按 query 解析出可执行的完整模型配置（含明文 key）。
 
@@ -1345,6 +1348,7 @@ def _model_config_for(host: Any):
             return None
 
     return config_for
+
 
 def _model_set(host: Any):
     """model.set：设置当前窗口的服务商与模型（只改窗口实例态，不写全局默认）。
@@ -1380,11 +1384,13 @@ def _model_set(host: Any):
 
     return set_model
 
+
 def _storage_db(host: Any, ctx: Any):
     """通用数据库执行权限：受限代理（表名须 ``plugin_<name>_`` 前缀）。"""
     from app.plugins.capabilities.providers.db_guard import PluginDBProxy
 
     return PluginDBProxy(getattr(ctx, "plugin", "") or "")
+
 
 def _host_raw(host: Any):
     return host

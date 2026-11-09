@@ -124,6 +124,7 @@ app.plugins.capabilities.pool.CapabilityDenied:
 | `model.schema` | low | 指定 agent 视角的工具 schema |
 | `model.config` | **high** | 完整模型配置，**含已解密明文 API key** |
 | `model.config_for` | **high** | 按 query（模型名 / 服务商 / `服务商:模型名`）解析出可执行的完整配置（含明文 key） |
+| `model.set` | **high** | 设置当前窗口的服务商与模型（只改窗口实例态，不写全局默认） |
 | `provider.list` | low | 已配置服务商清单（id / 名称 / 模型数，**不含密钥与 URL**） |
 | `model.enumerate` | low | 指定服务商的可选模型列表（含视觉 / 思考能力标记） |
 
@@ -304,6 +305,7 @@ UIPluginRegistry.get_instance().register_slot_entry(
 | ID | level | 说明 |
 |---|---|---|
 | `stream.subscribe` | medium | 订阅对话流事件（工具调用 / 结果 / 流起止 / 错误 / 上下文更新 / 会话切换） |
+| `stream.errors` | medium | 订阅窗口对话报错事件（结构化：窗口/服务商/模型/错误类型） |
 | `window.active` | low | 当前活跃聊天窗口**对象**（要调它的方法时用这个） |
 | `window.current` | low | 当前窗口的**语义快照** dict（只读字段：backend/session_id/project/workdir） |
 | `window.host` | low | 宿主顶层窗口（弹窗 / InfoBar 的合适 parent） |

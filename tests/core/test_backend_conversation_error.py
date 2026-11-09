@@ -4,6 +4,7 @@
 背景：能力池 stream.errors 需要结构化报错（窗口/服务商/模型/错误类型），
 backend error 转发点在旧 error_occurred(str) 之外补发 conversation_error(dict)。
 """
+
 from unittest.mock import MagicMock
 
 from app.core.conversation.backend import ChatBackend, _classify_error_text

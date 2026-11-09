@@ -49,8 +49,6 @@ def get_session_storage():
     return registry.get_active()
 
 
-
-
 def _event_to_tag(event_name: str) -> str:
     """将事件名转换为 Claude Code 兼容的 kebab-case 标签
 
@@ -67,8 +65,6 @@ def _event_to_tag(event_name: str) -> str:
     kebab = re.sub(r"([a-z0-9])([A-Z])", r"\1-\2", event_name)
     kebab = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1-\2", kebab)
     return kebab.lower()
-
-
 
 
 def _format_hook_output(
@@ -368,7 +364,6 @@ class ChatBackend(QObject):
     def history_manager(self):
         return self._history_manager
 
-
     def _reload_session_messages(self, session_id: str):
         """消息体重载器：SessionManager 释放非活跃会话消息体后按需重读。
 
@@ -614,9 +609,11 @@ class ChatBackend(QObject):
             _hm = self._history_manager
             _sm = self._session_manager
             if _hm is not None and _sm is not None and hasattr(_hm, "release_messages_except"):
+
                 def _on_evict(_sid: str) -> None:
                     active = {s.session_id for s in _sm.sessions}
                     _hm.release_messages_except(active)
+
                 _sm.set_on_evict(_on_evict)
         except Exception as e:
             logger.warning(f"[ChatBackend] 注入 evict 释放回调失败（跳过）: {e}")
@@ -845,9 +842,7 @@ class ChatBackend(QObject):
                     try:
                         err_sig = getattr(self, "conversation_error", None)
                         if hasattr(err_sig, "emit"):
-                            err_sig.emit(
-                                self._build_conversation_error_payload(str(args[0]) if args else "")
-                            )
+                            err_sig.emit(self._build_conversation_error_payload(str(args[0]) if args else ""))
                     except Exception as e:
                         logger.debug(f"[ChatBackend] conversation_error emit 失败: {e}")
 
@@ -1062,7 +1057,6 @@ class ChatBackend(QObject):
 
         logger.info("[ChatBackend] 窗口资源清理完成")
 
-
     def get_current_worker(self):
         """获取当前 Worker 实例"""
         if self._chat_engine:
@@ -1130,9 +1124,7 @@ class ChatBackend(QObject):
             True = 已投递到引擎；False = engine 未就绪，决策未送出（宿主据此提示用户）
         """
         if not self._chat_engine:
-            logger.warning(
-                f"[Permission] 决策丢弃：engine 未就绪 id={tool_call_id} decision={decision}"
-            )
+            logger.warning(f"[Permission] 决策丢弃：engine 未就绪 id={tool_call_id} decision={decision}")
             return False
         self._chat_engine.decide_tool_permission(tool_call_id, decision, remember, reason)
         return True
@@ -1543,7 +1535,6 @@ class ChatBackend(QObject):
 
     # ========== 状态查询 ==========
 
-
     def set_current_agent(self, agent_name: str):
         """设置当前 Agent"""
         if self._chat_engine:
@@ -1551,7 +1542,6 @@ class ChatBackend(QObject):
         # 同步更新团队工具上下文
         if self._tool_executor and self._tool_executor._builtin_tools:
             self._tool_executor._builtin_tools.set_team_context(self._window_id, agent_name)
-
 
     def get_context_usage(self) -> tuple:
         """获取上下文使用情况"""
