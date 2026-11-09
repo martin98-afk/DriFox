@@ -253,6 +253,10 @@ params = [
     # mermaid vendor：polyfill 无 CDN 降级（Chromium 83 必需），mermaid 降级 jsdelivr 国内不稳
     f"--add-data=app/resources/web/vendor/chromium83-polyfill.js{os.pathsep}app/resources/web/vendor",
     f"--add-data=app/resources/web/vendor/mermaid.min.js{os.pathsep}app/resources/web/vendor",
+    # ECharts vendor：懒加载本地优先、缺失才降级 CDN。macOS 打包版漏打这两个文件
+    # → 离线/网络受限时容器永久停在 400px 空框（wordcloud 须随本体一起进包）。
+    f"--add-data=app/resources/web/vendor/echarts.min.js{os.pathsep}app/resources/web/vendor",
+    f"--add-data=app/resources/web/vendor/echarts-wordcloud.min.js{os.pathsep}app/resources/web/vendor",
     # KaTeX 公式渲染 vendor：整目录收集（js + css + fonts/，css 相对路径引字体）
     f"--add-data=app/resources/web/vendor/katex{os.pathsep}app/resources/web/vendor",
     # 隐藏导入：gateway adapter 模块（importlib.import_module 动态加载，PyInstaller 无法自动发现）

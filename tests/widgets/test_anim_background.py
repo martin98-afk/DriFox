@@ -16,6 +16,7 @@ from app.widgets.anim_background import (
     FPS_CAP,
     IDLE_TICK_MS,
     TICK_MS,
+    UNFOCUSED_TICK_MS,
     AnimationRegistry,
     AnimationSource,
     BackgroundClock,
@@ -49,6 +50,17 @@ def _clean(qapp):
     reset_for_tests()
     yield
     reset_for_tests()
+
+@pytest.fixture()
+def focused_app(monkeypatch):
+    """模拟本应用有激活窗口（offscreen/CI 无真实焦点窗口，activeWindow()
+    恒为 None → 失焦档恒触发，全速档测试必须 mock）"""
+    from PyQt5.QtWidgets import QApplication, QWidget
+
+    sentinel = QWidget()
+    monkeypatch.setattr(QApplication, "activeWindow", classmethod(lambda cls: sentinel))
+    yield sentinel
+    sentinel.deleteLater()
 
 class TestAnimationSource:
     def test_loads_first_frame(self, png):
@@ -120,7 +132,7 @@ class TestClockLifecycle:
         assert clock._timer.isActive()
         assert clock._timer.interval() == IDLE_TICK_MS
 
-    def test_resumes_after_becoming_visible(self, png):
+    def test_resumes_after_becoming_visible(self, png, focused_app):
         """最小化→停跳降频→恢复可见→下一拍回全速并继续推帧（卡死回归）"""
         clock = BackgroundClock()
         src = AnimationSource(png, 60)
@@ -146,7 +158,7 @@ class TestClockLifecycle:
         clock.track(AnimationSource(png, 12))
         assert clock._timer.interval() == TICK_MS
 
-    def test_keeps_running_and_pushes_frames(self, png):
+    def test_keeps_running_and_pushes_frames(self, png, focused_app):
         clock = BackgroundClock()
         src = AnimationSource(png, 60)
         layer = _FakeLayer(visible=True)
@@ -156,6 +168,27 @@ class TestClockLifecycle:
         assert clock._timer.isActive()
         assert clock._timer.interval() == TICK_MS
         assert layer.frames, "可见订阅者应收到帧"
+
+    def test_unfocused_throttles(self, png, monkeypatch):
+        """可见但失焦：降帧 3 倍（12fps→4fps），timer 唤醒同步降；
+        切回后最多一个降档间隔恢复全速"""
+        from PyQt5.QtWidgets import QApplication, QWidget
+
+        monkeypatch.setattr(QApplication, "activeWindow", classmethod(lambda cls: None))
+        clock = BackgroundClock()
+        src = AnimationSource(png, 60)
+        layer = _FakeLayer(visible=True)
+        src.subscribe(layer)
+        clock.track(src)
+        clock._tick()
+        assert clock._timer.interval() == UNFOCUSED_TICK_MS
+        assert layer.frames, "失焦档仍在推帧（只是降频，不是停表）"
+        # 恢复焦点 → 下一拍回全速
+        sentinel = QWidget()
+        monkeypatch.setattr(QApplication, "activeWindow", classmethod(lambda cls: sentinel))
+        clock._tick()
+        assert clock._timer.interval() == TICK_MS
+        sentinel.deleteLater()
 
     def test_dead_subscriber_is_dropped(self, png):
         clock = BackgroundClock()

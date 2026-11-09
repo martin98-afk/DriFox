@@ -8,7 +8,7 @@ import pytest
 def test_catalog_size_and_ids():
     from app.plugins.capabilities import catalog
 
-    assert len(catalog.CATALOG) == 74
+    assert len(catalog.CATALOG) == 77
     for cid, spec in catalog.CATALOG.items():
         assert spec.id == cid
         assert re.fullmatch(r"[a-z]+(\.[a-z][a-z_]*)+", cid), cid
@@ -52,6 +52,11 @@ def test_high_level_set_is_stable():
         # 2026-11-01 子智能体插件抽离：模型解析与通用 DB 执行面
         "model.config_for",
         "storage.db",
+        # 2026-11-09 能力池 model.set：改窗口模型实例态，高危需显式登记
+        "model.set",
+        # 2026-11-09 补登记：此前 catalog 已有但守护测试漏登的既有高危项
+        "team.manage",
+        "team.spawn",
     }
 
 

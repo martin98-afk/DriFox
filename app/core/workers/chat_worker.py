@@ -127,6 +127,11 @@ from app.core.modelmeta.model_capabilities import (
     normalize_reasoning_effort,
     resolve_model_capabilities,
 )
+from app.core.modelmeta.model_refresh_service import (
+    STATUS_AUTH_FAILED,
+    STATUS_OK,
+    STATUS_UNREACHABLE,
+)
 from app.core.modelmeta.provider_profile import get_provider_profile, resolve_extra_headers
 from app.core.tools.tool_call_parser import smart_parse_arguments
 from app.core.infra.token_estimator import count_messages_tokens
@@ -1424,6 +1429,43 @@ class OpenAIChatWorker(QThread):
             return
         bus.emit(event, *args, **kwargs)
 
+    def _report_health(self, status: str) -> None:
+        """把本次请求结果回写服务商健康状态（静默失败，绝不影响主流程）。
+
+        config_id 用 (API_URL, API_KEY) 现算（与 compute_provider_config_id
+        同算法）；条目不存在或凭据为占位（OAuth 插件类）时服务侧静默忽略。
+        """
+        try:
+            from app.core.modelmeta.model_refresh_service import get_model_refresh_service
+            from app.core.modelmeta.provider_profile import compute_provider_config_id
+
+            config_id = compute_provider_config_id(self.llm_config or {})
+            get_model_refresh_service().report_result(config_id, status)
+        except Exception as e:
+            logger.debug(f"[API] 健康状态回写失败: {e}")
+
+    @staticmethod
+    def _classify_error_for_health(error) -> Optional[str]:
+        """异常 → 健康状态；None = 跳过回写（瞬态/与服务商无关/本地故障）。"""
+        try:
+            _OE = _get_openai_errors()
+            if isinstance(error, StreamInterruptedError):
+                return None  # 流已建立：鉴权/路由都过了，不改状态
+            if isinstance(error, _PLUGIN_CODE_ERRORS):
+                return None  # 插件代码故障，与服务商无关
+            code = getattr(error, "status_code", None)
+            if code is not None:
+                if code in (401, 403, 402):
+                    return STATUS_AUTH_FAILED
+                if code == 429:
+                    return None  # 限流 = 端点通，瞬态
+                return STATUS_UNREACHABLE
+            if isinstance(error, (_OE["timeout"], _OE["api_connection"])):
+                return STATUS_UNREACHABLE
+            return None
+        except Exception:
+            return None
+
     def _emit_with_callback(self, signal_name: str, signal, *args) -> None:
         """发射信号并尝试直接回调（已废弃，推荐使用 _emit_via_event_bus）
 
@@ -1439,6 +1481,8 @@ class OpenAIChatWorker(QThread):
             event = self._signal_name_to_event(signal_name)
             if event:
                 self._emit_via_event_bus(event, *args)
+                if event in (WorkerEvent.FINISHED_WITH_CONTENT, WorkerEvent.FINISHED_WITH_MESSAGES):
+                    self._report_health(STATUS_OK)
 
             # 向后兼容：仍然发射 PyQt Signal（UI 层依赖）
             # 注意：从 ThreadPoolExecutor 线程访问 pyqtSignal 时，
@@ -4939,6 +4983,10 @@ class OpenAIChatWorker(QThread):
             )
 
     def _handle_error(self, error):
+        fail_status = self._classify_error_for_health(error)
+        if fail_status:
+            self._report_health(fail_status)
+
         _OE = _get_openai_errors()
 
         error_msg = str(error)

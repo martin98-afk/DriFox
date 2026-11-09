@@ -426,6 +426,13 @@ def _resolve_plugin_paths(config: dict) -> dict:
             plugin_root = p.parent
 
     cfg = copy.deepcopy(config)
+    # ${LOCAL_MCP}：宿主进程内 gateway 地址，端口 :0 运行时分配，连接前才确定
+    url = cfg.get("url", "")
+    if isinstance(url, str) and "${LOCAL_MCP}" in url:
+        from app.core.services.local_mcp_gateway import get_gateway
+
+        base = f"http://127.0.0.1:{get_gateway().port}/mcp"
+        cfg["url"] = url.replace("${LOCAL_MCP}", base)
     if plugin_root is not None:
         cfg["command"] = _expand_mcp_placeholder(cfg.get("command", ""), plugin_root)
         cfg["args"] = [_expand_mcp_placeholder(a, plugin_root) for a in cfg.get("args", [])]

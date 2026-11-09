@@ -2119,9 +2119,56 @@ class CodeWebViewer(QWebEngineView):
             self._apply_font_vars()
         # delegate wheel 抢断补装（幂等；hide/show 或 tab 切回后 focusProxy 若重建则重挂）
         self._ensure_wheel_filter_installed()
+        # 隐藏期尺寸变化会让 Chromium 的 render surface 与 widget 失配，
+        # 表现为整卡内容被横向压成竖条（见 _schedule_surface_resync）
+        self._schedule_surface_resync()
             # 🛡️ F2：JS 未就绪时保留 deferred（不清标志）——先清标志再调
             # _schedule_render 会因 JS 未就绪直接 return，积压请求被清但永不
             # 补渲；保留后由 _on_js_ready 统一补渲（可以延迟，不能丢失）。
+
+    def _schedule_surface_resync(self) -> None:
+        """重新可见后抖一次几何，逼 Chromium 重发 view size。
+
+        症状（2026-11-09 用户截图）：整卡内容被压进左侧约 1/6 宽的竖条，
+        文字成 1-3px 竖线而行高正常，拖动窗口 resize 一次即恢复。缩放比
+        恒定、行高不变 → DOM 布局本身是对的，错的是 QtWebEngine 的 render
+        surface 与 widget 尺寸失配（隐藏期尺寸变化后合成面没跟上）。
+        Qt 5.15 没有公开 API 能读到该 surface 尺寸，只能让 view 尺寸真的
+        变化一次来触发重发。宽度不动、高度 -1 再复原：重排代价最小，且
+        两次 resize 必须跨一次事件循环，否则会被 Qt 合并成「尺寸没变」。
+
+        覆盖两条已确认的触发路径：QStackedWidget 隐藏页期间窗口/面板
+        resize、WebViewPool 跨顶层 reparent。DRIFOX_SURFACE_RESYNC=0 可
+        关闭（对照排查用）。
+        """
+        if os.environ.get("DRIFOX_SURFACE_RESYNC", "").strip().lower() in (
+            "0", "false", "no", "off",
+        ):
+            return
+        w, h = self.width(), self.height()
+        if w < 8 or h < 8:
+            return
+        try:
+            self.resize(w, h - 1)
+        except RuntimeError:
+            return
+        QTimer.singleShot(0, lambda: self._restore_surface_geometry_after_resync(w, h))
+
+    def _restore_surface_geometry_after_resync(self, w: int, h: int) -> None:
+        """``_schedule_surface_resync`` 第二拍：把高度复原。"""
+        try:
+            from PyQt5 import sip
+
+            if sip.isdeleted(self):
+                return
+        except Exception:
+            return
+        if w < 8 or h < 1:
+            return
+        try:
+            self.resize(w, h)
+        except RuntimeError:
+            pass
 
     def _on_js_ready(self):
         self._is_js_ready = True
@@ -3790,8 +3837,9 @@ class CodeWebViewer(QWebEngineView):
                     .think-streaming-tip,
                     .tool-streaming-block[data-streaming="true"] .tool-streaming-preview {{ animation: none !important; }}
                 }}
-                /* option 解析失败兜底（fence 已闭合但 JSON 畸形）：收起空洞，给出提示。
-                   成功渲染时 JS 移除该 class，容器恢复 300px。 */
+                /* 图表不可用兜底：两类失败共用同一 class —— ① fence 已闭合但 JSON
+                   畸形（option 解析失败，流式补齐后重试）；② echarts vendor 加载失败
+                   （打包版缺本地文件 + CDN 不通）。成功渲染时 JS 移除该 class。 */
                 .echarts-container.echarts-failed {{
                     min-height: 120px;
                     display: flex;
@@ -3799,7 +3847,7 @@ class CodeWebViewer(QWebEngineView):
                     justify-content: center;
                 }}
                 .echarts-container.echarts-failed::before {{
-                    content: "图表数据暂不完整，等待生成…";
+                    content: "图表暂不可用：数据生成中或组件加载失败";
                     font-size: 12px;
                     color: var(--text-muted, #8b949e);
                 }}
@@ -4730,11 +4778,25 @@ class CodeWebViewer(QWebEngineView):
                     var s = document.createElement('script');
                     s.src = src;
                     s.onload = onOk;
-                    s.onerror = function () {{ console.error('[echarts] load failed: ' + src); }};
+                    s.onerror = function () {{
+                        // vendor 与 CDN 都不可达时不能只打日志：否则 _echLibLoading
+                        // 恒 true、等待队列永不执行，容器永久停在 400px 空框，且后续
+                        // 所有图表一起饿死（macOS 打包版实测）。清锁 + 清队列 + 熔断，
+                        // 并给容器打失败标记，让用户看到原因而非空白。
+                        console.error('[echarts] load failed: ' + src);
+                        window._echLibLoading = false;
+                        window._echLibQueue = [];
+                        window._echLibFailed = true;
+                        document.querySelectorAll('.echarts-container').forEach(function (el) {{
+                            el.classList.add('echarts-failed');
+                        }});
+                        if (typeof reportHeightDebounced === 'function') reportHeightDebounced();
+                    }};
                     document.head.appendChild(s);
                 }}
                 function _echartsEnsure(cb) {{
                     if (window.echarts) {{ cb(); return; }}
+                    if (window._echLibFailed) return;   // 已判失败：不再排队重试（CDN 已断）
                     if (!window._echLibQueue) window._echLibQueue = [];
                     window._echLibQueue.push(cb);
                     if (window._echLibLoading) return;   // 已在加载中，排队即可
@@ -4751,6 +4813,13 @@ class CodeWebViewer(QWebEngineView):
                 }}
                 window._initEchartsIn = function (roots) {{
                     if (!window.echarts) {{
+                        if (window._echLibFailed) {{
+                            // 库加载失败后新落地的图表容器也要显示失败态，别留空框
+                            window._scopeQuery(roots, '.echarts-container').forEach(function (el) {{
+                                el.classList.add('echarts-failed');
+                            }});
+                            return;
+                        }}
                         window._echartsEnsure(function () {{ window._initEchartsIn(roots); }});
                         return;
                     }}

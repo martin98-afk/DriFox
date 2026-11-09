@@ -336,8 +336,17 @@ class EmptyStateWidget(QWidget):
         layout.addWidget(self._text_label)
 
     def refresh_style(self):
-        """主题/字体变更后刷新样式"""
+        """主题/字体变更后刷新样式
+
+        原 QSS 含 Colors.TEXT_MUTED（构造时定格），只 setFont 不重建
+        QSS 的话文字色不随主题切换。
+        """
+        Colors.refresh()
         self._text_label.setFont(get_unified_font(14))
+        self._text_label.setStyleSheet(
+            f"color: {Colors.TEXT_MUTED}; background: transparent;"
+            f" {get_font_family_css()} {font_size_css(14)}"
+        )
         self._text_label.setStyleSheet(
             f"color: {Colors.TEXT_MUTED}; background: transparent; {get_font_family_css()} {font_size_css(14)}"
         )

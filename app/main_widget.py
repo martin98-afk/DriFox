@@ -8819,7 +8819,7 @@ class OpenAIChatToolWindow(ToolWindow):
         except Exception:
             pass
 
-    def _on_model_refresh_finished(self, config_id: str, ok: bool, status: str, models: list):
+    def _on_model_refresh_finished(self, config_id: str, status_final: str, status_models: str, models: list):
         """定时刷新完成回调（主线程）。
 
         落盘由 ModelRefreshService._on_refresh_result 负责（它已持 cfg）；

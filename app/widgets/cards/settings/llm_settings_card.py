@@ -1911,6 +1911,7 @@ class LLMSettingsCard(SystemCardFrame):
         for card_name in (
             "llmSkillsCard",
             "llmProviderCard",
+            "hookListCard",
             "mcpListCard",
             "lspListCard",
             "pluginToolCard",
@@ -1922,6 +1923,15 @@ class LLMSettingsCard(SystemCardFrame):
             card = getattr(self, card_name, None)
             if card is not None and hasattr(card, "refresh_style"):
                 card.refresh_style()
+        # 安全中心：容器级 QSS 构造时定格，需显式重设（页懒构建，未建时 findChildren 为空即构造时已用新主题）
+        from app.widgets.cards.settings.security_center_card import SecurityCenterCard
+
+        for card in self.findChildren(SecurityCenterCard):
+            if hasattr(card, "refresh_style"):
+                try:
+                    card.refresh_style()
+                except RuntimeError:
+                    pass
         # ── SettingCard 图标大小（单次 findChildren） ──
         icon_sz = scale_icon_size(16)
         for card in self.findChildren(SettingCard):

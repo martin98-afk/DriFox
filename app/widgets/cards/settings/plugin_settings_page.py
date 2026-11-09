@@ -33,6 +33,7 @@ from PyQt5.QtWidgets import (
 from qfluentwidgets import (
     BodyLabel,
     CaptionLabel,
+    ComboBox,
     HyperlinkButton,
     PillPushButton,
     PushButton,
@@ -46,6 +47,7 @@ from loguru import logger
 
 from app.plugins.capabilities.catalog import CATALOG
 from app.plugins.contracts.plugin_display import plugin_display_name
+from app.plugins.kernel import COMPONENT_ORDER
 from app.plugins.registries.plugin_config_registry import PluginConfigRegistry
 from app.utils.design_tokens import Colors
 from app.widgets.cards.settings.plugin_config_form import PluginConfigForm, evaluate_config_status
@@ -708,7 +710,7 @@ class _PluginDetailView(QWidget):
 
 
 class PluginSettingsPage(QWidget):
-    """插件设置页：搜索 + 状态筛选 + 插件列表 + 详情。"""
+    """插件设置页：搜索 + 类型/状态筛选 + 插件列表 + 详情。"""
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -717,6 +719,9 @@ class PluginSettingsPage(QWidget):
         self._keyword = ""
         self._filter = "configured"
         self._current: Optional[str] = None
+        # 类型筛选（组件能力维度）：None=全部类型，否则为组件键（tools/skills…）
+        self._type_keys: List[Optional[str]] = [None]
+        self._type_filter: Optional[str] = None
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -733,10 +738,23 @@ class PluginSettingsPage(QWidget):
         self._search_timer.setInterval(_SEARCH_DEBOUNCE_MS)
         self._search_timer.timeout.connect(self._apply_filter)
         self._search.textChanged.connect(self._on_search_text_changed)
-        layout.addWidget(self._search)
+
+        # 类型下拉（搜索框左侧）：按组件能力过滤（工具/技能/智能体…），
+        # 档位在 reload 时按插件清单实际出现的组件动态生成，避免空档
+        self._type_combo = ComboBox(self)
+        self._type_combo.setFixedHeight(32)
+        self._type_combo.setMinimumWidth(132)
+        self._type_combo.addItem("全部类型")
+        self._type_combo.currentIndexChanged.connect(self._on_type_changed)
+        search_row = QHBoxLayout()
+        search_row.setContentsMargins(0, 0, 0, 0)
+        search_row.setSpacing(8)
+        search_row.addWidget(self._type_combo)
+        search_row.addWidget(self._search, 1)
+        layout.addLayout(search_row)
 
         # 筛选 chips：不进页面布局，由设置卡取走放到「返回设置」那一行（全宽模式）
-        # 只留四个状态档：已启用/停用信息在详情页，避免一排胶囊喧宾夺主
+        # 状态档去掉「已停用」：数量常年为 0 且圆点灰色已表达停用，停用插件搜索/类型筛选照常可见
         self.filter_bar = QWidget(self)
         chips = QHBoxLayout(self.filter_bar)
         chips.setContentsMargins(0, 0, 0, 0)
@@ -746,7 +764,6 @@ class PluginSettingsPage(QWidget):
         for key, text in (
             ("configured", "有配置"),
             ("todo", "待配置"),
-            ("off", "已停用"),
             ("none", "无配置"),
             ("all", "全部"),
         ):
@@ -804,6 +821,7 @@ class PluginSettingsPage(QWidget):
             return
         self._sig = self._signature(entries)
         self._entries = entries
+        self._rebuild_type_options()
         self._rebuild_rows()
         self._update_counts()
         if self._current and any(e.info.name == self._current for e in entries):
@@ -891,6 +909,29 @@ class PluginSettingsPage(QWidget):
     def _on_search_text_changed(self, _text: str) -> None:
         self._search_timer.start()
 
+    def _on_type_changed(self, index: int) -> None:
+        if 0 <= index < len(self._type_keys):
+            self._type_filter = self._type_keys[index]
+            self._apply_filter()
+
+    def _rebuild_type_options(self) -> None:
+        """按当前插件清单重建类型下拉档位：只列实际出现的组件，避免选了空档"""
+        present = {c for e in self._entries for c in e.components}
+        order = {k: i for i, k in enumerate(COMPONENT_ORDER)}
+        keys: List[Optional[str]] = [None] + sorted(present, key=lambda k: order.get(k, len(order)))
+        if keys == self._type_keys:
+            return
+        self._type_keys = keys
+        self._type_combo.blockSignals(True)
+        self._type_combo.clear()
+        for key in keys:
+            self._type_combo.addItem("全部类型" if key is None else _component_display_name(key))
+        # 当前选中档已消失（插件卸载/组件移除）时回退「全部类型」
+        if self._type_filter not in keys:
+            self._type_filter = None
+        self._type_combo.setCurrentIndex(keys.index(self._type_filter))
+        self._type_combo.blockSignals(False)
+
     def _apply_filter(self) -> None:
         self._keyword = self._search.text().strip()
         for row in self._rows:
@@ -899,14 +940,14 @@ class PluginSettingsPage(QWidget):
         self._update_counts()
 
     def _match_filter(self, entry: PluginEntry) -> bool:
+        if self._type_filter is not None and self._type_filter not in entry.components:
+            return False
         if self._filter == "configured":
             return entry.has_config
         if self._filter == "none":
             return not entry.has_config
         if self._filter == "todo":
             return entry.state in ("missing", "unconfigured")
-        if self._filter == "off":
-            return not entry.enabled
         return True
 
     def _on_chip_clicked(self, key: str) -> None:
@@ -918,11 +959,9 @@ class PluginSettingsPage(QWidget):
     def _update_counts(self) -> None:
         total = len(self._entries)
         todo = sum(1 for e in self._entries if e.state in ("missing", "unconfigured"))
-        off = sum(1 for e in self._entries if not e.enabled)
         configured = sum(1 for e in self._entries if e.has_config)
         self._chips["configured"].setText(f"有配置 {configured}")
         self._chips["todo"].setText(f"待配置 {todo}")
-        self._chips["off"].setText(f"已停用 {off}")
         self._chips["none"].setText(f"无配置 {total - configured}")
         self._chips["all"].setText(f"全部 {total}")
 
