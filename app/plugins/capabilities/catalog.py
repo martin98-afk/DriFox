@@ -67,6 +67,12 @@ CATALOG: Dict[str, CapabilitySpec] = {
             _BOTH,
         ),
         _spec(
+            "model.set",
+            _H,
+            "设置当前窗口的服务商与模型（只改窗口实例态，不写全局默认）",
+            _UI,
+        ),
+        _spec(
             "provider.list",
             _L,
             "已配置服务商清单（id/名称/模型数，不含密钥与 URL）",
@@ -196,6 +202,12 @@ CATALOG: Dict[str, CapabilitySpec] = {
         ),
         # ── 对话流 ──
         _spec("stream.subscribe", _M, "订阅对话流事件（工具/流/错误/上下文/会话切换）", _UI),
+        _spec(
+            "stream.errors",
+            _M,
+            "订阅窗口对话报错事件（结构化：窗口/服务商/模型/错误类型）",
+            _UI,
+        ),
         # ── 窗口 ──
         _spec("window.active", _L, "当前活跃聊天窗口", _UI),
         _spec("window.current", _L, "当前窗口的语义快照（backend/session/project/workdir）", _UI),
