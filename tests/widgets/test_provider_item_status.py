@@ -2,9 +2,9 @@
 """服务商列表行状态点 / 副标题 / tooltip 改版回归测试（波7 段三）
 
 覆盖：
-1. 状态点三色（ok=绿 / unreachable=灰 / auth_failed=红）+ 无点场景
+1. 状态点三色（ok=绿 / unreachable=红 / auth_failed=红 / 其余=灰）+ 无点场景
 2. 副标题格式「{模型名称} · {N} 个模型」+ 「模型列表」键缺失时退化
-3. tooltip 相对时间（自动刷新开关状态 + 上次刷新）
+3. tooltip（中文状态 + 探测方式 + 状态更新相对时间）
 """
 
 import sys
@@ -57,7 +57,8 @@ class TestStatusDot:
         assert hasattr(item, "statusDot"), "有状态 + 有刷新能力应画点"
         assert "#2ecc71" in item.statusDot.styleSheet()
 
-    def test_unreachable_gray_dot(self, _qapp, registry):
+    def test_unreachable_red_dot(self, _qapp, registry):
+        """网络不通也是「不能用」→ 红（状态点语义 = 当前能否联通）"""
         item = _make_item(
             {
                 "provider_name": "测试服务商",
@@ -65,7 +66,7 @@ class TestStatusDot:
                 "模型刷新状态": "unreachable",
             }
         )
-        assert "#95a5a6" in item.statusDot.styleSheet()
+        assert "#e74c3c" in item.statusDot.styleSheet()
 
     def test_auth_failed_red_dot(self, _qapp, registry):
         item = _make_item(
@@ -102,6 +103,26 @@ class TestStatusDot:
 
         item = _make_item({"provider_name": "钩子服务商", "模型刷新状态": "ok"})
         assert hasattr(item, "statusDot")
+
+    def test_empty_status_gray_dot(self, _qapp, registry):
+        """empty（通但无模型）→ 灰（无有效数据）"""
+        item = _make_item(
+            {"provider_name": "测试服务商", "API_URL": "https://api.example.com/v1", "模型刷新状态": "empty"}
+        )
+        assert "#95a5a6" in item.statusDot.styleSheet()
+
+    def test_tooltip_shows_status_and_probe_mode(self, _qapp, registry):
+        item = _make_item(
+            {
+                "provider_name": "测试服务商",
+                "API_URL": "https://api.example.com/v1",
+                "模型刷新状态": "ok",
+                "认证方式": "bearer",
+                "状态更新时间": "2026-11-09 21:00:00",
+            }
+        )
+        tip = item.statusDot.toolTip()
+        assert "可用" in tip and "聊天探测" in tip
 
 
 class TestSubtitle:
@@ -149,19 +170,18 @@ class TestSubtitle:
 
 
 class TestTooltip:
-    def test_tooltip_contains_switch_state_and_relative_time(self, _qapp, registry):
+    def test_tooltip_contains_status_and_relative_time(self, _qapp, registry):
         item = _make_item(
             {
                 "provider_name": "测试服务商",
                 "API_URL": "https://api.example.com/v1",
                 "模型刷新状态": "ok",
-                "自动刷新模型": True,
-                "上次模型刷新": "2026-10-09 12:00:00",
+                "认证方式": "bearer",
+                "状态更新时间": "2026-10-09 12:00:00",
             }
         )
         tip = item.statusDot.toolTip()
-        assert "自动刷新：开" in tip
-        assert "上次刷新" in tip
+        assert "可用" in tip
         assert "从未" not in tip, "有时间戳时不应显示「从未」"
 
     def test_tooltip_never_when_no_timestamp(self, _qapp, registry):
@@ -173,5 +193,4 @@ class TestTooltip:
             }
         )
         tip = item.statusDot.toolTip()
-        assert "自动刷新：关" in tip
         assert "从未" in tip

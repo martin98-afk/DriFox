@@ -201,25 +201,52 @@ class ProviderItem(QWidget):
             pass
         return bool(str(self.provider_info.get("API_URL", "") or "").strip())
 
+    _STATUS_COLORS = {
+        "ok": "#2ecc71",
+        "auth_failed": "#e74c3c",
+        # 网络不通同红：状态点语义 = 当前能否真正联通
+        "unreachable": "#e74c3c",
+    }
+    _STATUS_TEXT = {
+        "ok": "可用",
+        "auth_failed": "鉴权失败",
+        "unreachable": "网络不通",
+        "empty": "无模型",
+    }
+
+    def _probe_mode(self) -> str:
+        """探测方式派生（不落盘）：OAuth/插件 hook 类与 bce 签名类只能列表探测。"""
+        try:
+            p = ProviderRegistry.get_instance().get(self.provider_name)
+            if p is not None and callable(p.capabilities.get("models_hook")):
+                return "列表探测"
+        except Exception:
+            pass
+        if str(self.provider_info.get("认证方式", "") or "").lower() in ("bearer", "none", "anthropic"):
+            return "聊天探测"
+        return "列表探测"
+
     def _status_dot_color(self) -> str:
         """状态点颜色；无「模型刷新状态」或无刷新能力 → 空串（不画点）。"""
         status = str(self.provider_info.get("模型刷新状态", "") or "")
         if not status or not self._has_refresh_capability():
             return ""
-        return {
-            "ok": "#2ecc71",
-            "unreachable": "#95a5a6",
-            "auth_failed": "#e74c3c",
-        }.get(status, "#95a5a6")
+        return self._STATUS_COLORS.get(status, "#95a5a6")
 
     def _refresh_tooltip(self) -> str:
-        """刷新状态 tooltip：开关状态 + 上次刷新相对时间"""
+        """刷新状态 tooltip：中文状态 + 探测方式 + 状态更新相对时间。"""
         from app.utils.session_preview import format_relative_time
 
-        auto = "开" if self.provider_info.get("自动刷新模型") else "关"
-        last = str(self.provider_info.get("上次模型刷新", "") or "")
-        when = format_relative_time(last) if last else "从未"
-        return f"自动刷新：{auto} · 上次刷新 {when}"
+        status = str(self.provider_info.get("模型刷新状态", "") or "")
+        parts = []
+        if status:
+            parts.append(self._STATUS_TEXT.get(status, status))
+        ts = str(self.provider_info.get("状态更新时间", "") or "") or str(
+            self.provider_info.get("上次模型刷新", "") or ""
+        )
+        when = format_relative_time(ts) if ts else "从未"
+        parts.append(f"{self._probe_mode()} · {when}")
+        return " · ".join(parts)
 
     def _connect_signals(self):
         self.removeButton.clicked.connect(lambda: self.removed.emit(self))
