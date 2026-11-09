@@ -179,6 +179,7 @@ CATALOG: Dict[str, CapabilitySpec] = {
             "Gitee 账户头像（fetch 确保已缓存并返回路径，须后台线程；cached_path 纯本地查，主线程安全）",
             _UI,
         ),
+
         # ── 界面 ──
         _spec("ui.notify", _L, "弹 InfoBar 通知（kind=success/warning/error/info，duration 毫秒）", _UI, ["notify"]),
         _spec("ui.card.show", _L, "显示浮动卡", _UI),
