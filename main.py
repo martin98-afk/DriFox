@@ -252,6 +252,18 @@ def main():
     app.setApplicationName("Drifox")
     app.setApplicationDisplayName("Drifox")
 
+    # 🔍 paint 热点采样（诊断用，默认关闭）：主进程在不操作时仍高 CPU、
+    # native 采样只看到 sipQWidget::paintEvent 看不出具体类时启用：
+    #   DRIFOX_PAINT_PROFILE=1 python main.py
+    # 按控件类统计 Paint 事件次数，窗口到期打印 [PAINT-PROF] 报告。
+    # 耗时构成仍需同刻 native 采样（sample / Instruments）配合看。
+    try:
+        from app.utils.paint_profiler import start as _start_paint_profiler
+
+        _start_paint_profiler()
+    except Exception:  # noqa: BLE001 - 诊断设施绝不能阻断启动
+        pass
+
     # 🛡️ InfoBar 系统级守卫：死壳清洗 + notify 主线程投递桥预热。
     # 只在 GUI 分支装（qfluentwidgets 仅 GUI 需要）；CLI 不加载。
     # 背景：后台线程直弹 InfoBar 被析构后 manager 列表留死壳，新 InfoBar
