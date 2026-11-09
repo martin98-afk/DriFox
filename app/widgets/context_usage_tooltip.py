@@ -19,6 +19,7 @@ from PyQt5.QtGui import QColor, QFont, QFontMetrics, QPainter, QPainterPath
 from PyQt5.QtWidgets import (
     QHBoxLayout,
     QLabel,
+    QLayout,
     QVBoxLayout,
     QWidget,
 )
@@ -166,6 +167,8 @@ class ContextBreakdownTooltip(QWidget):
         super().__init__(parent, Qt.ToolTip | Qt.FramelessWindowHint)
         self.setAttribute(Qt.WA_TranslucentBackground, True)
         self._data: Dict = {}
+        # 隐藏期间 set_data 被短路后置位，showEvent 据此决定是否需要补刷
+        self._refresh_pending = False
         self._load_theme_colors()
         self._build_ui()
 
@@ -229,7 +232,27 @@ class ContextBreakdownTooltip(QWidget):
 
     def showEvent(self, event):
         super().showEvent(event)
-        self._refresh()  # show 后 isVisible=True，完整跑一次真实刷新（覆盖前置 rebuild 被短路）
+        # 仅当隐藏期间有数据被短路未刷新时才补刷。无条件刷新会在 show 的同一帧
+        # 重建 legend（takeAt 先移除旧行），尺寸瞬间缩水再逐级长回 → 可见闪烁。
+        if self._refresh_pending:
+            self._refresh()
+
+    def prepare_for_show(self):
+        """在 show 之前把布局尺寸稳定到最终值。
+
+        legend 行等子控件未 polish 时 QSS 字体度量不生效，直接 adjustSize()
+        得到的是偏小尺寸（实测 111 vs 真实 190）。拿这个尺寸定位会让向上弹出的
+        气泡错位、show 后尺寸跳变产生闪烁。此处递归 polish + 激活全部布局，
+        确保 adjustSize() 一次算准。
+        """
+        self.ensurePolished()
+        for child in self.findChildren(QWidget):
+            child.ensurePolished()
+        # 内层布局（legend 行）先激活，顶层再算一次，避免逐级传播的中间态
+        for layout in self.findChildren(QLayout):
+            layout.activate()
+        self._layout.activate()
+        self.adjustSize()
 
     def _refresh(self, force: bool = False):
         # 隐藏时短路：流式期间 set_usage 2Hz 调 set_data → _refresh，tooltip 隐藏时
@@ -238,7 +261,9 @@ class ContextBreakdownTooltip(QWidget):
         # 否则 adjustSize() 按空内容尺寸算坐标，showEvent 填充放大后位置已定死 →
         # 首次 hover 气泡错位（盖住鼠标），第二次 hover 才落对位置。
         if not force and not self.isVisible():
+            self._refresh_pending = True
             return
+        self._refresh_pending = False
         data = self._data
         # 跟随主题：每次显示前重新读取主题色并回填静态控件样式
         self._load_theme_colors()
@@ -325,13 +350,19 @@ class ContextBreakdownTooltip(QWidget):
 
     def _rebuild_legend(self, breakdown: List[Dict], budget: int):
         # 清空旧图例
+        new_rows: List[QWidget] = []
         while self._legend_layout.count():
             item = self._legend_layout.takeAt(0)
             w = item.widget()
             if w:
+                # 先脱离父控件：deleteLater 要等事件循环，可见态刷新时旧行
+                # 仍会残留在窗口上多画一帧
+                w.setParent(None)
                 w.deleteLater()
 
         if not breakdown:
+            self._legend_layout.activate()
+            self._layout.activate()
             return
 
         for b in breakdown:
@@ -368,6 +399,16 @@ class ContextBreakdownTooltip(QWidget):
             rlay.addWidget(pc)
 
             self._legend_layout.addWidget(row)
+            new_rows.append(row)
+
+        # 新建行的 QSS 字体在 polish 前不参与尺寸计算，直接 adjustSize() 拿到
+        # 的是旧高度；先 polish 再逐级激活布局，让本次刷新后的尺寸一次到位
+        for row in new_rows:
+            row.ensurePolished()
+            for child in row.findChildren(QWidget):
+                child.ensurePolished()
+        self._legend_layout.activate()
+        self._layout.activate()
 
     def _rebuild_extras(self, data: Dict):
         lines: List[str] = []

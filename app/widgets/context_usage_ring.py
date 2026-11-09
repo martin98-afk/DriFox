@@ -158,6 +158,40 @@ class ContextUsageRing(QWidget):
             },
             force=force,
         )
+        # 可见期间数据更新（流式 2Hz）会改变气泡高度；不跟随重定位的话，
+        # 向上弹出的气泡会向下长、盖住圆环和鼠标
+        if self._tooltip_obj.isVisible():
+            self._position_tooltip()
+
+    def _calc_tooltip_pos(self, size) -> tuple:
+        """按触发控件位置计算气泡左上角：窗口下半部向上弹，上半部向下弹"""
+        widget_global = self.mapToGlobal(QPoint(0, 0))
+        widget_center_x = widget_global.x() + self.width() // 2
+        pos_width = max(size.width(), 1)
+        window = self.window()
+        window_center = window.y() + window.height() / 2
+        if widget_global.y() > window_center:
+            x = widget_center_x - pos_width // 2
+            y = widget_global.y() - size.height() - 4
+        else:
+            x = widget_center_x - pos_width // 2
+            y = widget_global.y() + self.height() + 4
+        screen_geom = self.screen().geometry() if self.screen() else QApplication.primaryScreen().geometry()
+        if x < screen_geom.left():
+            x = screen_geom.left() + 5
+        if x + pos_width > screen_geom.right():
+            x = screen_geom.right() - pos_width - 5
+        if y < screen_geom.top():
+            y = screen_geom.top() + 5
+        if y + size.height() > screen_geom.bottom():
+            y = screen_geom.bottom() - size.height() - 5
+        return x, y
+
+    def _position_tooltip(self):
+        # 先稳定尺寸再算坐标：set_data 刚重建 legend，布局可能还停在中间态
+        self._tooltip_obj.prepare_for_show()
+        x, y = self._calc_tooltip_pos(self._tooltip_obj.size())
+        self._tooltip_obj.move(x, y)
 
     def _show_tooltip(self):
         # 每次显示前刷新 tooltip 数据，确保主题色/字体等与当前主题同步。
@@ -186,35 +220,13 @@ class ContextUsageRing(QWidget):
                 force=True,
             )
 
-        self._tooltip.adjustSize()
+        # show 前把尺寸定死：递归 polish + 激活布局后再取尺寸，否则子控件
+        # QSS 字体未生效时 adjustSize() 偏小，定位后 show 才变大 → 位置错 + 闪烁
+        self._tooltip.prepare_for_show()
         tip_size = self._tooltip.size()
 
         # tooltip 定位：紧贴 widget 上方或下方显示
-        widget_global = self.mapToGlobal(QPoint(0, 0))
-        widget_center_x = widget_global.x() + self.width() // 2
-
-        def _calc_pos(size: "QSize") -> tuple:
-            pos_width = max(size.width(), 1)
-            window = self.window()
-            window_center = window.y() + window.height() / 2
-            if widget_global.y() > window_center:
-                x = widget_center_x - pos_width // 2
-                y = widget_global.y() - size.height() - 4
-            else:
-                x = widget_center_x - pos_width // 2
-                y = widget_global.y() + self.height() + 4
-            screen_geom = self.screen().geometry() if self.screen() else QApplication.primaryScreen().geometry()
-            if x < screen_geom.left():
-                x = screen_geom.left() + 5
-            if x + pos_width > screen_geom.right():
-                x = screen_geom.right() - pos_width - 5
-            if y < screen_geom.top():
-                y = screen_geom.top() + 5
-            if y + size.height() > screen_geom.bottom():
-                y = screen_geom.bottom() - size.height() - 5
-            return x, y
-
-        x, y = _calc_pos(tip_size)
+        x, y = self._calc_tooltip_pos(tip_size)
 
         # 预创建原生窗口句柄，确保 move 直接作用于 HWND，
         # 避免 hide() 后 show() 新建窗口时 WM 在默认位置闪一帧。
@@ -227,8 +239,7 @@ class ContextUsageRing(QWidget):
         # 尺寸可能与定位用的尺寸不一致 → 用最终尺寸同帧重校正一次位置。
         final_size = self._tooltip.size()
         if (final_size.width(), final_size.height()) != (tip_size.width(), tip_size.height()):
-            fx, fy = _calc_pos(final_size)
-            self._tooltip.move(fx, fy)
+            self._position_tooltip()
 
     @staticmethod
     def _compute_track_color() -> QColor:
