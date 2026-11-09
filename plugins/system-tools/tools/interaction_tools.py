@@ -251,6 +251,7 @@ _MCP_STATE_CN = {
     "connecting": "启动中",
     "connected": "已连接",
     "failed": "连接失败",
+    "auth_expired": "授权失效",
     "disabled": "已关闭",
 }
 
@@ -277,6 +278,8 @@ def _mcp_render_list(status: list) -> str:
             line += f" → 可临时开启：action=\"enable\", name=\"{name}\""
         elif item.get("ephemeral"):
             line += f" → 用完请关闭：action=\"disable\", name=\"{name}\""
+        if item.get("state") == "auth_expired":
+            line += " → 授权已失效，需在「设置 → MCP 连接器」重新授权"
         lines.append(line)
         if item.get("error"):
             lines.append(f"    错误：{item['error']}")

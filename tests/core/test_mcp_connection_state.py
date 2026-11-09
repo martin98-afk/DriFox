@@ -41,6 +41,8 @@ def mgr():
     m._loop = None
     m._thread = None
     m._ephemeral = set()  # 临时开启集合（生产由 __init__ 初始化）
+    # 探活结果缓存（生产由 __init__ 初始化；get_status 会合并它）
+    m._probes = {}
     # 配置侧服务器来源：get_status 会合并进来（含从未建连的）。
     # 这里固定为空，避免测试依赖本机真实的插件 MCP 配置——否则装了
     # 任何 MCP 插件的机器上都会多出一批占位条目，断言无谓失败。

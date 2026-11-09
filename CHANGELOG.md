@@ -3,6 +3,12 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### ✨ 新功能 (New Features)
+- **MCP 授权探活：关掉的服务也能看见授权失效** (`app/tools/mcp_tools.py`, `app/core/mcp_oauth/provider.py`, `app/core/mcp_oauth/token_store.py`, `app/widgets/cards/settings/mcp_setting_card.py`, `tests/core/test_mcp_probe.py` 新增): 新增第五态 `MCPState.AUTH_EXPIRED`（红点「授权失效」，区别于启动失败）。设置卡展开可见时触发一次探活，覆盖 `type` 为 http/sse 的**全部**服务（含 `enabled=false`，此前它们在连接表里没有条目、状态恒为「已关闭」，而 figma / notion / tencent-docs 这类 OAuth 服务的 token 过期或被撤销完全无从感知）。判定两级：本地读 `expires_at`（token 存储里早就有，UI 从未用过），已过期且无 `refresh_token` 直接判死、零网络；其余发一次 `initialize`，OAuth 型走 SDK 的 `async_auth_flow` 让 token 自动续期，一旦需要交互授权即判失效、不弹浏览器。结果按服务名缓存在内存（TTL 10 分钟，并发 3、单服务 8 秒超时），`get_status()` 统一合并后设置卡与 `mcp_manage` 两处同时受益；`connected`/`connecting` 仍以连接事实为准，`stdio` 类型不探（等于重新拉起 npx/uvx 子进程）。
+
+### 🐛 问题修复 (Bug Fixes)
+- **服务商状态灯被单个最便宜模型的偶发故障误判红灯** (`app/core/modelmeta/model_refresh_service.py`, `tests/core/test_model_refresh_service.py`): 健康检查此前只挑「模型列表」内输入价最低的 1 个模型打一次 ping，该模型下线 / 被限流 / 网关路由缺失就让整家服务商显示红灯，实际换个模型就能通。改为按输入价升序取前 3 个候选（`PROBE_MODEL_LIMIT`），逐个探测、任一返回 ok 即停且不再消耗剩余候选；`auth_failed`（401/402/403，凭据或余额问题）同样立即停，换模型无意义。REST 与插件 `health_probe` 两条分支都走这套回退；无价格数据 / 无模型列表仍回退「模型名称」，行为不变。测试覆盖前 3 排序、404 回退、首个即通早停、鉴权即停、钩子回退。
+
 ## [v0.7.0] - 2026-11-09 (重新发布 #6)
 
 自 v0.7.0-beta 以来的变更 | 提交数：62 · 文件变更：203 · +10431/-1433 | 贡献者：dingma, martin98-afk

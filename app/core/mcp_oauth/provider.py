@@ -80,6 +80,67 @@ def _reject_unexpected_status(response) -> Optional[str]:
     return f"首请求返回 HTTP {status}，服务端未按 MCP 规范要求授权（应按需 401）"
 
 
+async def probe_authorized(server_url: str, provider, timeout: float = 8.0) -> tuple:
+    """带 OAuth 的一次探测：发 initialize，允许 SDK 自动刷新 token。
+
+    与 authorize() 的区别：不弹浏览器、不创建回调 server。流程一旦要求
+    交互授权即判失效并中止，因此可在设置卡打开时对多个服务并发调用。
+
+    Returns:
+        ("ok", "")                 有效（必要时已顺带续期）
+        ("auth_expired", detail)   需重新授权
+        ("unreachable", detail)    网络 / 协议层失败
+    """
+    import httpx
+
+    need_auth = {"flag": False}
+    saved_redirect = provider.context.redirect_handler
+    saved_callback = provider.context.callback_handler
+
+    async def redirect_handler(auth_url):
+        need_auth["flag"] = True
+        raise RuntimeError("probe: needs interactive authorization")
+
+    async def callback_handler():
+        need_auth["flag"] = True
+        raise RuntimeError("probe: needs interactive authorization")
+
+    provider.context.redirect_handler = redirect_handler
+    provider.context.callback_handler = callback_handler
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            flow = provider.async_auth_flow(_build_probe_request(server_url))
+            target = server_url.split("?")[0]
+            checked = False
+            try:
+                pending = await flow.__anext__()
+                while True:
+                    response = await client.send(pending)
+                    # 只校验发往 server_url 的请求；发往 token 端点的刷新请求
+                    # 不是可达性依据。
+                    if not checked and str(pending.url).split("?")[0] == target:
+                        checked = True
+                        if response.status_code in (200, 202):
+                            return "ok", ""
+                        if response.status_code not in (401, 403):
+                            return "unreachable", f"HTTP {response.status_code}"
+                    # 401/403 交给 SDK：它会 yield 刷新请求，再 yield 带新 token 的重试
+                    pending = await flow.asend(response)
+            except StopAsyncIteration:
+                if need_auth["flag"]:
+                    return "auth_expired", "需要重新授权"
+                return "unreachable", "未返回可用响应"
+            except Exception as e:
+                if need_auth["flag"]:
+                    return "auth_expired", "需要重新授权"
+                return "unreachable", f"{type(e).__name__}: {e}"
+            finally:
+                await flow.aclose()
+    finally:
+        provider.context.redirect_handler = saved_redirect
+        provider.context.callback_handler = saved_callback
+
+
 @dataclass
 class OAuthSession:
     """一次授权会话的状态。"""
@@ -422,6 +483,10 @@ class McpOAuthProviderFactory:
         if isinstance(expires_at, (int, float)) and expires_at <= 0:
             return False
         return True
+
+    def peek_expiry(self, plugin_name: str, server_name: str) -> tuple:
+        """(has_token, expires_at, has_refresh)。同步只读，UI 线程可调。"""
+        return PluginMcpTokenStore(plugin_name, server_name).peek_expiry()
 
     def revoke(self, plugin_name: str, server_name: str) -> bool:
         """清除本地 token 与 client info（登出）。
