@@ -6,7 +6,10 @@
 避免测试依赖 ffmpeg。
 """
 
+import time
+
 import pytest
+
 from PyQt5.QtGui import QImage
 
 from app.widgets.anim_background import (
@@ -163,3 +166,77 @@ class TestClockLifecycle:
         del layer
         clock._tick()
         assert src.has_subscribers() is False
+
+
+class TestPrefetchDecode:
+    """预解码线程：把 WebP 解码从主线程移走（2026-11-09）。
+
+    断言只锁「行为契约」，不锁具体毫秒数（机器间差异大）：
+    1. 队列能被后台线程填满（说明线程真的在跑、真的产帧）；
+    2. 推进优先消费队列，且帧内容正确（不是空图）；
+    3. prune / clear 必须停掉线程，否则主题切换后线程变成孤儿继续烧 CPU。
+    """
+
+    def test_background_thread_fills_queue(self, png):
+        src = AnimationSource(png, 15)
+        try:
+            assert src._prefetch_thread is not None
+            # 等后台把队列填到上限（单帧极小，给足 2s）
+            deadline = time.time() + 2.0
+            while time.time() < deadline:
+                with src._prefetch_lock:
+                    if len(src._prefetch) >= 1:
+                        break
+                time.sleep(0.02)
+            with src._prefetch_lock:
+                assert len(src._prefetch) >= 1, "预解码线程没有产出任何帧"
+        finally:
+            src.stop_prefetch()
+
+    def test_advance_consumes_prefetch_queue(self, png):
+        src = AnimationSource(png, 60)
+        try:
+            # 等队列有货，再推进；推进后队列应减少
+            deadline = time.time() + 2.0
+            while time.time() < deadline:
+                with src._prefetch_lock:
+                    if len(src._prefetch) >= 1:
+                        break
+                time.sleep(0.02)
+            with src._prefetch_lock:
+                before = len(src._prefetch)
+            assert before >= 1
+            assert src.advance(1_000_000) is True
+            assert src.current is not None and not src.current.isNull()
+        finally:
+            src.stop_prefetch()
+
+    def test_stop_prefetch_terminates_thread(self, png):
+        src = AnimationSource(png, 15)
+        t = src._prefetch_thread
+        assert t is not None and t.is_alive()
+        src.stop_prefetch()
+        t.join(timeout=3.0)
+        assert not t.is_alive(), "stop_prefetch 后线程仍在跑（会变成孤儿烧 CPU）"
+
+    def test_registry_prune_stops_threads(self, png):
+        reg = AnimationRegistry()
+        src = reg.acquire(png, 12)
+        t = src._prefetch_thread
+        assert t is not None and t.is_alive()
+        reg.prune()  # 无订阅者 → 回收并停线程
+        t.join(timeout=3.0)
+        assert not t.is_alive(), "prune 只从字典 pop 而不停线程 → 孤儿解码"
+
+    def test_registry_clear_stops_threads(self, png):
+        reg = AnimationRegistry()
+        src = reg.acquire(png, 12)
+        t = src._prefetch_thread
+        reg.clear()
+        t.join(timeout=3.0)
+        assert not t.is_alive()
+
+    def test_missing_file_does_not_start_thread(self, tmp_path):
+        src = AnimationSource(str(tmp_path / "nope.webp"), 12)
+        assert src.failed is True
+        assert src._prefetch_thread is None, "素材不可读时不得起解码线程"

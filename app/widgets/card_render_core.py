@@ -3677,7 +3677,11 @@ _SKELETON_CACHE_MAX = 48
 # + 顶部渐隐，_v2LiveAppendNow / _v2LiveSplit 追加后滚底，_v2AfterPatch 首帧滚底，
 # _v2LiveSplit 新增 reasoning 参数保持 think-compact 类）。旧骨架无此规则 →
 # 长思考切标签页返回后整段全高显示（2026-11-02 用户实测）。
-_SKELETON_CACHE_VERSION = 75
+# _SKELETON_CACHE_VERSION +1（v76）：v2 揭示追加复用尾部文本节点
+# （_v2LiveAppendNow 的 `lastChild.appendData` 替代每帧 createTextNode）。
+# 旧骨架逐帧新建文本节点，长回答下同一 live 容器积累上千兄弟节点，
+# Chromium 每次重排/选择都要线性遍历，是流式掉帧的一分子。
+_SKELETON_CACHE_VERSION = 76
 
 
 def _js_literal(value) -> str:

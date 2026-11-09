@@ -1,9 +1,9 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
-## [v0.7.0] - 2026-11-09
+## [v0.7.0] - 2026-11-09 (重新发布 #4)
 
-自 v0.7.0-beta 以来的变更 | 提交数：24 · 文件变更：115 · +4775/-986 | 贡献者：dingma
+自 v0.7.0-beta 以来的变更 | 提交数：37 · 文件变更：140 · +6437/-1093 | 贡献者：dingma, martin98-afk
 
 ### ✨ 新功能 (New Features)
 - **壁纸场景截图脚本** (`ec1c4b8c`): wallpaper-to-theme 技能新增 `capture_scene.py`，对壁纸渲染场景做高保真截图采样。
@@ -38,6 +38,33 @@ All notable changes to this project will be documented in this file.
 
 ### 🔄 其他变更 (Other Changes)
 - **worker 超长续跑被主动截断（行为变更）**: 单次 worker 总寿命上限默认 3600s（`DRIFOX_WORKER_MAX_LIFETIME_S`），hook 续命上限默认 8 次（`DRIFOX_WORKER_MAX_CONTINUATIONS`）。超过寿命的 worker 在下一轮 API 调用前结束并走正常完成路径；超过续命上限后不再续跑。两个参数设 `0` 表示不设上限（关闭该限制），正数生效，负数 / 非数字 / `nan` / `inf` 视为非法并回退默认。正常使用路径（单次请求在寿命内、续轮不超限、用户正常响应）行为不变。`question` 与权限等待本次不处理，仍为无上限等待；这是已知的潜伏风险，尚未真实发生，且 worker 寿命守卫只在每轮循环开始前判定，覆盖不到卡在等待中的 worker，本次维持原状。该守卫属挂死防护，与内存占用无直接关系。
+
+### 🔧 其他 (Chores & Build) (重新发布 #2 追加)
+- **macOS 打包版主题音乐无声** (`build.py`): `to_remove_macos` 误删 `PyQt5/Qt5/lib/QtMultimedia.framework`（清理项 2026-05 引入，早于主题音乐功能 2026-11-06 上线），打包后 `Contents/Frameworks/QtMultimedia` 变成断链符号链接，mediaservice 插件与 `PyQt5.QtMultimedia` 均 `dlopen` 失败（`Library not loaded: @rpath/QtMultimedia`），异常被 `_apply_theme_music` 的 try/except 吞成一条 warning，用户侧无感。移除该清理项即可恢复。
+
+### ✨ 新功能 (New Features) (重新发布 #3 追加)
+- **paint 热点采样器** (`app/utils/paint_profiler.py` 新增, `tests/utils/test_paint_profiler.py` 新增): 主进程空闲仍占 ~85% CPU，native 采样只能看到 `sipQWidget::paintEvent` 一层，看不出是哪个 Python 控件在重绘。用 `QApplication.installEventFilter` 拦截 `QEvent.Paint`，按控件类累计次数并定期打印 Top 榜，报告给出「次/秒」，明显高于刷新率的类即空转重绘元凶。实现要点：不能给 `QWidget.paintEvent` 打 Python 补丁（Qt Paint 事件在 C++ 侧虚函数调度，子类覆写不流经父类 Python 方法，计数恒为 0）；过滤器必须返回 False，否则控件不再重绘。
+- **paint 采样器默认开启 + 周期滚动采样** (`app/utils/paint_profiler.py`, `main.py`, `tests/utils/test_paint_profiler.py`): 用户不该为诊断加环境变量，改为默认启用：正常每轮只写一行 DEBUG，频率超 120 次/秒升级 WARNING 并点名热点类；环境变量降级为「关闭/调窗口」。改为周期滚动采样（卡顿常发生在启动很久之后，单次 30 秒窗口会错过）。修一个静默失效坑：`reset()` 原先重新绑定 `_stats`，而 eventFilter 闭包持有旧引用 → 第二轮起统计恒为空，改为 `clear()` 原地清空并补测试锁住。
+- **流式 partial reply 落盘机制** (`app/main_widget.py`, `app/utils/history_manager.py`, `app/core/context/builder.py`, `app/core/conversation/message_content.py`, `app/widgets/message_card.py`, `tests/core/test_partial_reply_flush.py` 新增, `tests/utils/test_history_manager.py`): 流式会话每 25s 把半截回复标记 `_partial` 覆盖落盘，中断/崩溃后不再丢失已生成内容；`ContextBudgetAllocator` 排除 partial 消息不发给模型；`HistoryManager` 补 in-flight 保存与失败重试，保证会话数据可靠落盘。
+- **partial 尾巴跳过 token 全量估算** (`app/utils/history_manager.py`, `tests/utils/test_history_manager.py`): 每 25s 为半截内容全量遍历消息列表纯属浪费（800 轮会话实测 0.45ms），改为落盘 partial 时沿用上一版 `context_usage` 占位，占用显示不在两次落盘之间来回跳。
+- **上下文 tooltip 支持强制刷新** (`app/widgets/context_usage_ring.py`, `app/widgets/context_usage_tooltip.py`): `set_data()` 增加 `force` 参数，隐藏态 `_refresh` 短路时也能强制重建内容。
+
+### 🐛 问题修复 (Bug Fixes) (重新发布 #3 追加)
+- **上下文圆环 tooltip 首次 hover 错位（隐藏态短路让定位拿到空尺寸）** (`app/widgets/context_usage_ring.py`): 隐藏态 `_refresh` 短路使定位前的 `adjustSize()` 拿到空内容尺寸，`showEvent` 填充放大后位置已定死 → 气泡盖住鼠标，二次 hover 才落对。修复：`_show_tooltip` 强制刷新后再取尺寸定位；QSS polish 前后字体度量不同，show 后按最终尺寸同帧重校正一次。
+- **重试状态栏刷新间隔随动画节拍漂移** (`app/widgets/message_card.py`): 原实现按「固定拍数」（50ms × 4）判定 200ms 刷新，动画节拍从 50ms 改 66ms 后间隔被拉成 264ms。改为按真实经过时间累积（`_retry_status_acc`），与定时器间隔解耦；同时光带动画 20fps → 15fps，相位按真实 dt 累加，运动速度与轨迹不变，重绘次数降 25%，与背景动画同频对齐。
+- **流式光带整气泡重绘 / 背景每帧现场缩放 / 长回复 DOM 节点膨胀** (`app/widgets/modules/message_bubble.py`, `app/widgets/scene_layer.py`, `app/widgets/card_render_core.py`, `app/widgets/card_viewers.py`): 三处渲染热点。① 气泡光带无参 `update()` → 长回复（1200x3000）每秒光栅化 20 次，Python paintEvent 占主线程 34%，改为只标脏光带扫过的矩形（前后帧取并集，平均脏区 2498 px²，为整卡的 1/1441）；② 背景 `cover` 每帧现场双线性缩放（p50 3.64ms/帧），改为帧到达时按目标缩放一次并缓存，paintEvent 退化为 1:1 blit（p50 0.64ms），缓存只在几何/适配模式变化时失效；③ 骨架 v76 揭示改为 `lastChild.appendData` 复用同一文本节点，替代每帧 `createTextNode`（长回答下同一 live 容器曾积累上千兄弟节点，Chromium 每次重排线性遍历）。
+
+### ⚡ 性能优化 (Performance) (重新发布 #3 追加)
+- **背景动画解码移出主线程** (`app/widgets/anim_background.py`, `tests/widgets/test_anim_background.py`): WebP 单帧解码 1600x900 约 4.8ms，15fps 下占主线程 7.2%（paint 采样确认空转重绘里解码是最大单项），逐帧解码无法避免（446 帧全量预解码要 2.39GB，`QMovie CacheAll` 同理不可行）。改为后台线程预解码到深度 3 的帧队列（200ms 前瞻），主线程 `advance()` 只从队列取现成帧：advance p50 4.83ms → 0.024ms，max 0.097ms，150 帧零兜底；队列空回退同步解码，内存增量恒定 ≤3 帧（+16.5MB）。`prune()`/`clear()` 必须 `stop_prefetch()`，否则线程成孤儿继续解码烧 CPU（测试锁住该契约）。
+
+### 📚 文档 (Docs) (重新发布 #3 追加)
+- **`_apply_pending_shrink` 流式早退约束注释** (`app/widgets/message_card.py`): 尝试去掉该早退以修复「折叠工具区下方空白」时验证到：`finish_streaming` 已主动 `_cancel_pending_shrink()` 把挂起项交棒给非流式 `_update_height` 收敛，两条路径同时写 viewer 高度会互相打架（追踪 tick 与结束态缓动并存 → 高度锯齿）。补注释锁定约束，避免下次误删。
+
+### ✨ 新功能 (New Features) (重新发布 #4 追加)
+- **paint 采样器打包版默认关闭** (`app/utils/paint_profiler.py`, `main.py`, `tests/utils/test_paint_profiler.py`): 打包产物不随产品发布常驻诊断设施。`enabled()` 未显式设置时按 `sys.frozen` / `_MEIPASS` 判定：源码仓默认开启、打包版默认关闭；`DRIFOX_PAINT_PROFILE=1` 可在打包版强开排障（与看门狗同口径）。测试覆盖打包默认关闭与强开。
+
+### 🐛 问题修复 (Bug Fixes) (重新发布 #4 追加)
+- **bash 输出被压成「?」（复合命令整段喂给 git status 解析器）** (`plugins/system-core/tools/_shell_compressor.py`, `tests/plugins/test_shell_compressor.py`): `_compress_git` 用子串匹配，`git branch && git status` 的整段输出（分支名、tag 列表、grep 结果）被喂给 `_compress_git_status`；长格式解析不到 `On branch` 时返回 branch 默认值 `"?"`，而 `_shorter_only` 只看 token 数，`"?"` 必然通过 → 整段输出被替换为 `?` + `[saved N tok, 9X%]`。修复：解析不到有效信息返回 None（上游回退原始输出）；复合命令（`&&` / `||` / `;`）跳过 pattern 压缩，只做通用清理。
 
 ## [v0.7.0-beta] - 2026-11-08
 

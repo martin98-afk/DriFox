@@ -1262,6 +1262,20 @@ def fade_in_widget(widget, duration: int = Animations.NORMAL_MS):
     anim.setDuration(duration)
     anim.setStartValue(0.0)
     anim.setEndValue(1.0)
+
+    def _drop_effect():
+        # 动画结束立即摘除 effect：带 effect 的 widget 走 Qt 离屏合成路径，
+        # macOS 上后台标签页期间积累的绘制欠账在重新可见时不被补画
+        # （表现为气泡底色缺失、露出场景背景图，resize 才恢复）。
+        # 摘除后卡片回到常规绘制路径，也消除「父级常驻 effect + 子级 effect
+        # 合成不可靠」这一历史坑的前提（2026-09-16「先显示随后消失」同因）。
+        try:
+            widget.setGraphicsEffect(None)
+        except RuntimeError:
+            return
+        widget._fade_anim = None
+
+    anim.finished.connect(_drop_effect)
     anim.start()
     # 保持引用防止被回收
     widget._fade_anim = anim

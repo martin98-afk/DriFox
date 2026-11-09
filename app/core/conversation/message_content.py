@@ -868,6 +868,14 @@ def normalize_message(message: Any) -> Optional[Dict[str, Any]]:
                 # 用原消息更新持久化（直接回写 message 引用）
                 message["_hook_event"] = _fill_hook_event
 
+        # 流式中途周期落盘的「残缺回复」标记（main_widget._flush_partial_reply）。
+        # 崩溃恢复后这条消息仍在（正常结束会被 worker 的完整消息整体替换掉），
+        # 发送前必须剔除，否则把半截回复当正常历史发给模型。
+        # 与 _x_idx / _identity 同理：白名单外字段会被本函数剥掉，标记一丢就
+        # 再也分不清「模型真说完了」和「进程死在半路」。
+        if message.get("_partial"):
+            normalized["_partial"] = True
+
         if not normalized.get("content") and not normalized.get("tool_calls") and not normalized.get(
                 "reasoning_content"):
             return None
