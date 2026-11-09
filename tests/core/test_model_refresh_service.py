@@ -364,6 +364,123 @@ class TestProbeHealth:
         assert status == STATUS_AUTH_FAILED
 
 
+class TestProbeModelPick:
+    """探活模型选择：模型列表中输入价最低者优先，无价格数据回退当前模型"""
+
+    def _stub_models_dev(self, monkeypatch, per_provider):
+        from app.core.modelmeta import models_dev_sync as mds
+
+        result = SimpleNamespace(
+            provider_models={},
+            model_capabilities={},
+            model_capabilities_partitioned={"devprov": per_provider},
+        )
+        monkeypatch.setattr(mds, "load_dynamic_models", lambda **k: result)
+        return mds
+
+    def _stub_registry(self, monkeypatch, dev_id="devprov"):
+        from app.plugins.registries.provider_registry import ProviderDef, ProviderRegistry
+
+        reg = ProviderRegistry()
+        reg.register(ProviderDef(name="价P", models_dev_id=dev_id), source="plugin:test")
+        monkeypatch.setattr(ProviderRegistry, "_instance", reg)
+        monkeypatch.setattr(ProviderRegistry, "get_instance", classmethod(lambda cls: reg))
+
+    def test_picks_cheapest_input_price(self, service, monkeypatch):
+        self._stub_models_dev(
+            monkeypatch,
+            {
+                "expensive": {"cost": {"input": 15.0}},
+                "cheap": {"cost": {"input": 0.3}},
+                "free": {"cost": {"input": 0.0}},
+            },
+        )
+        self._stub_registry(monkeypatch)
+        picked = service._pick_probe_model(
+            {"provider_name": "价P", "模型名称": "expensive", KEY_MODELS: ["expensive", "cheap", "free"]}
+        )
+        assert picked == "free", "输入价 0 的免费模型是探测成本最低选择"
+
+    def test_fallback_to_current_when_no_pricing(self, service, monkeypatch):
+        """列表内模型全部无价格数据 → 回退「模型名称」（行为不变）"""
+        mds = self._stub_models_dev(monkeypatch, {"m1": {"cost": {"input": None}}, "m2": {}})
+        self._stub_registry(monkeypatch)
+        picked = service._pick_probe_model(
+            {"provider_name": "价P", "模型名称": "m1", KEY_MODELS: ["m1", "m2"]}
+        )
+        assert picked == "m1"
+
+    def test_fallback_when_no_models_dev_id(self, service, monkeypatch):
+        """插件未声明 models_dev_id（自定义网关）→ 回退「模型名称」"""
+        self._stub_registry(monkeypatch, dev_id="")
+        picked = service._pick_probe_model(
+            {"provider_name": "价P", "模型名称": "m1", KEY_MODELS: ["a", "b"]}
+        )
+        assert picked == "m1"
+
+    def test_fallback_when_models_key_missing(self, service):
+        """无「模型列表」键 → 回退「模型名称」，不碰 models.dev"""
+        picked = service._pick_probe_model({"provider_name": "价P", "模型名称": "m1"})
+        assert picked == "m1"
+
+    def test_rest_ping_uses_picked_model(self, service, monkeypatch):
+        """REST 探测的 body.model 用探活模型（最便宜），非配置当前模型"""
+        import requests as _requests
+
+        mds = self._stub_models_dev(monkeypatch, {"expensive": {"cost": {"input": 15.0}}, "cheap": {"cost": {"input": 0.3}}})
+        self._stub_registry(monkeypatch)
+        bodies = []
+
+        def responder(url, **k):
+            bodies.append(k.get("json") or {})
+            return SimpleNamespace(status_code=200, text="{}")
+
+        monkeypatch.setattr(_requests, "post", responder)
+        status = service._probe_health(
+            {
+                "provider_name": "价P",
+                "API_URL": "https://api.x.com/v1",
+                "API_KEY": "k",
+                "模型名称": "expensive",
+                KEY_MODELS: ["expensive", "cheap"],
+            },
+            "c1",
+        )
+        assert status == STATUS_OK
+        assert bodies and bodies[0]["model"] == "cheap", "探活应用列表内最便宜的模型"
+
+    def test_hook_receives_probe_model_key(self, service, monkeypatch):
+        """health_probe 钩子收到的 config 带「探活模型」键（插件可选消费）"""
+        from app.plugins.registries.provider_registry import ProviderDef, ProviderRegistry
+
+        mds = self._stub_models_dev(monkeypatch, {"expensive": {"cost": {"input": 15.0}}, "cheap": {"cost": {"input": 0.3}}})
+        seen = {}
+        reg = ProviderRegistry()
+        reg.register(
+            ProviderDef(
+                name="价P",
+                models_dev_id="devprov",
+                capabilities={
+                    "health_probe": lambda cfg: seen.update(cfg=cfg) or STATUS_OK,
+                },
+            ),
+            source="plugin:test",
+        )
+        monkeypatch.setattr(ProviderRegistry, "_instance", reg)
+        monkeypatch.setattr(ProviderRegistry, "get_instance", classmethod(lambda cls: reg))
+        status = service._probe_health(
+            {
+                "provider_name": "价P",
+                "API_KEY": "k",
+                "模型名称": "expensive",
+                KEY_MODELS: ["expensive", "cheap"],
+            },
+            "c1",
+        )
+        assert status == STATUS_OK
+        assert seen["cfg"].get("探活模型") == "cheap"
+
+
 class TestReportResult:
     def test_report_writes_status_keys_only(self, service):
         """实时校准只写状态两键，不碰「上次模型刷新」与「模型列表」"""

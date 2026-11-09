@@ -4,6 +4,7 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 - **服务商状态点语义升级**: 状态点表示当前能否真正联通（对话请求失败立即变红、超时/5xx 网络失败同红、tooltip 显示中文状态与探测方式）；健康检查改为每 1 小时对聊天端点发真实请求探测（`max_tokens=1`），与手动刷新模型列表的计时解耦。
 - **OAuth 插件类真探测**: 服务商插件可声明 `capabilities.health_probe` 钩子在插件内换短效凭据后对聊天端点发真请求（OpenCode Zen/Go、GitHub Copilot、CodeBuddy 已接入），验出 `/models` 列表探测永远看不到的凭据吊销失效；探测优先级高于 models_hook。
+- **探活自动挑最便宜模型**: 探测请求的模型自动从「模型列表」中按 models.dev 输入价（$/M）挑最低者（免费模型优先），无价格数据回退当前模型；探测成本压到最低，行为对无价格数据的自定义网关不变。
 
 ## [v0.7.0] - 2026-11-09 (重新发布 #5)
 

@@ -410,7 +410,7 @@ def _health_probe(config) -> str:
         token = _exchange_access_token(refresh_token)
     except Exception:
         return "auth_failed"  # refresh 链已废 / 换取失败
-    model = str((config or {}).get("模型名称", "") or "").strip()
+    model = str((config or {}).get("探活模型") or (config or {}).get("模型名称", "") or "").strip()
     if not model:
         return "unreachable"
 

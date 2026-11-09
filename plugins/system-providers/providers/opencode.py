@@ -336,7 +336,7 @@ def _oauth_health_probe(config: dict) -> str:
     if not access:
         return "auth_failed"
 
-    model = str((config or {}).get("模型名称", "") or "").strip()
+    model = str((config or {}).get("探活模型") or (config or {}).get("模型名称", "") or "").strip()
     api_url = str((config or {}).get("API_URL", "") or "").rstrip("/")
     if not model or not api_url:
         return "unreachable"

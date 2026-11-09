@@ -12,6 +12,7 @@
 urlopen 全部 mock，无网络。
 """
 import importlib.util
+import json
 import sys
 import urllib.error
 from pathlib import Path
@@ -228,3 +229,78 @@ def test_codebuddy_declares_health_probe_after_register(monkeypatch):
     mod.register(reg)
     caps = reg.get("CodeBuddy").capabilities
     assert callable(caps.get("health_probe"))
+
+
+# ── 探活模型透传（服务端挑最便宜模型，经「探活模型」键传入钩子） ──
+
+def test_opencode_probe_uses_probe_model(monkeypatch):
+    """config 带「探活模型」→ 请求体 model 用它（不用配置的贵模型）"""
+    import urllib.request as _ur
+
+    mod = _load("opencode_probe_pm", _PROVIDERS / "opencode.py")
+    _stub_opencode_oauth(monkeypatch, mod)
+    seen = {}
+
+    def fake_urlopen(req, **kwargs):
+        seen["body"] = json.loads(req.data.decode("utf-8"))
+        return _FakeResp()
+
+    monkeypatch.setattr(_ur, "urlopen", fake_urlopen)
+    mod._oauth_health_probe(
+        {
+            "API_KEY": "rt",
+            "API_URL": "https://opencode.ai/inference/openai/v1",
+            "模型名称": "claude-opus-4.1",
+            "探活模型": "mimo-v2.5-free",
+        }
+    )
+    assert seen["body"]["model"] == "mimo-v2.5-free"
+
+
+def test_copilot_probe_uses_probe_model(monkeypatch):
+    import urllib.request as _ur
+
+    mod = _load("copilot_probe_pm", _PROVIDERS / "github_copilot.py")
+    _stub_copilot_auth(monkeypatch, mod)
+    seen = {}
+
+    def fake_urlopen(req, **kwargs):
+        seen["body"] = json.loads(req.data.decode("utf-8"))
+        return _FakeResp()
+
+    monkeypatch.setattr(_ur, "urlopen", fake_urlopen)
+    mod._health_probe({"API_KEY": "gho", "模型名称": "claude-opus-4.1", "探活模型": "gpt-4o-mini"})
+    assert seen["body"]["model"] == "gpt-4o-mini"
+
+
+def test_codebuddy_probe_uses_probe_model(monkeypatch):
+    import urllib.request as _ur
+
+    mod = _load("codebuddy_probe_pm", _PROVIDERS / "codebuddy.py")
+    _stub_codebuddy_auth(monkeypatch, mod)
+    seen = {}
+
+    def fake_urlopen(req, **kwargs):
+        seen["body"] = json.loads(req.data.decode("utf-8"))
+        return _FakeResp()
+
+    monkeypatch.setattr(_ur, "urlopen", fake_urlopen)
+    mod._health_probe({"API_KEY": "rt", "模型名称": "glm-5.3", "探活模型": "glm-5.3-flash"})
+    assert seen["body"]["model"] == "glm-5.3-flash"
+
+
+def test_plugins_fallback_to_current_model_without_probe_key(monkeypatch):
+    """无「探活模型」键（旧调用方）→ 回退「模型名称」，行为不变"""
+    import urllib.request as _ur
+
+    mod = _load("codebuddy_probe_fb", _PROVIDERS / "codebuddy.py")
+    _stub_codebuddy_auth(monkeypatch, mod)
+    seen = {}
+
+    def fake_urlopen(req, **kwargs):
+        seen["body"] = json.loads(req.data.decode("utf-8"))
+        return _FakeResp()
+
+    monkeypatch.setattr(_ur, "urlopen", fake_urlopen)
+    mod._health_probe({"API_KEY": "rt", "模型名称": "glm-5.3"})
+    assert seen["body"]["model"] == "glm-5.3"

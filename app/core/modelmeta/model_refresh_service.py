@@ -316,18 +316,64 @@ class ModelRefreshService(QObject):
             return STATUS_AUTH_FAILED
         return STATUS_UNREACHABLE
 
+    @staticmethod
+    def _pick_probe_model(info: Dict[str, Any]) -> str:
+        """探活模型选择：「模型列表」中输入价（$/M，models.dev cost.input）最低者优先。
+
+        ping 只需验证凭据/端点/路由通，用最便宜的模型把探测成本压到最低；
+        免费（input=0）天然胜出。候选必须来自「模型列表」（网关按模型路由，
+        列表外模型会 404 误报）。无价格数据 / 插件未声明 models_dev_id /
+        无列表 → 回退「模型名称」（行为不变）。只读 models.dev 本地缓存
+        （allow_network=False，毫秒级，任意线程安全）。
+        """
+        current = str(info.get("模型名称", "") or "").strip()
+        models = info.get(KEY_MODELS)
+        if not isinstance(models, list) or not models:
+            return current
+        try:
+            from app.core.modelmeta.models_dev_sync import load_dynamic_models
+            from app.plugins.registries.provider_registry import ProviderRegistry
+
+            p = ProviderRegistry.get_instance().get(str(info.get("provider_name", "") or ""))
+            dev_id = str(getattr(p, "models_dev_id", "") or "") if p is not None else ""
+            if not dev_id:
+                return current
+            result = load_dynamic_models(allow_network=False)
+            partitioned = getattr(result, "model_capabilities_partitioned", None) or {}
+            per_provider = partitioned.get(dev_id) or {}
+            best_model, best_price = "", None
+            for m in models:
+                name = str(m or "").strip()
+                if not name:
+                    continue
+                caps = per_provider.get(name) or {}
+                price = (caps.get("cost") or {}).get("input")
+                if not isinstance(price, (int, float)):
+                    continue  # 无价格数据：不参与排序（None 不误当 0 价）
+                if best_price is None or price < best_price:
+                    best_model, best_price = name, price
+            return best_model or current
+        except Exception:
+            return current
+
     def _probe_health(self, info: Dict[str, Any], config_id: str) -> str:
         """对聊天端点发 max_tokens=1 真实请求探测连通性。
 
         探测优先级：health_probe（插件内换凭据真探测）→ models_hook（列表
         语义降级）→ REST（bearer/anthropic/none 直连）。
+        探活模型自动挑「模型列表」内输入价最低者（_pick_probe_model），
+        并以「探活模型」键注入钩子 config 供插件消费。
         bce 签名类无法本地构造签名 → 直接 unreachable。
         """
         provider_name = str(info.get("provider_name", "") or "")
+        probe_model = self._pick_probe_model(info)
         probe_hook = self._resolve_health_probe_hook(provider_name)
         if probe_hook is not None:
+            probe_info = dict(info)
+            if probe_model:
+                probe_info["探活模型"] = probe_model
             try:
-                status = str(probe_hook(dict(info)) or "").strip()
+                status = str(probe_hook(probe_info) or "").strip()
             except Exception as e:
                 logger.info(f"[ModelRefresh] health_probe 钩子失败 config_id={config_id}: {e}")
                 return STATUS_UNREACHABLE
@@ -350,7 +396,7 @@ class ModelRefreshService(QObject):
             return STATUS_UNREACHABLE
         api_url = str(info.get("API_URL", "") or "").rstrip("/")
         api_key = str(info.get("API_KEY", "") or "")
-        model = str(info.get("模型名称", "") or "").strip()
+        model = probe_model or str(info.get("模型名称", "") or "").strip()
         if not api_url or not model:
             return STATUS_UNREACHABLE
         if not api_key and auth != "none":
