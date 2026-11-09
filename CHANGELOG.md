@@ -1,9 +1,9 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
-## [v0.7.0] - 2026-11-09 (重新发布 #3)
+## [v0.7.0] - 2026-11-09 (重新发布 #4)
 
-自 v0.7.0-beta 以来的变更 | 提交数：35 · 文件变更：135 · +6334/-1075 | 贡献者：dingma, martin98-afk
+自 v0.7.0-beta 以来的变更 | 提交数：37 · 文件变更：140 · +6437/-1093 | 贡献者：dingma, martin98-afk
 
 ### ✨ 新功能 (New Features)
 - **壁纸场景截图脚本** (`ec1c4b8c`): wallpaper-to-theme 技能新增 `capture_scene.py`，对壁纸渲染场景做高保真截图采样。
@@ -59,6 +59,12 @@ All notable changes to this project will be documented in this file.
 
 ### 📚 文档 (Docs) (重新发布 #3 追加)
 - **`_apply_pending_shrink` 流式早退约束注释** (`app/widgets/message_card.py`): 尝试去掉该早退以修复「折叠工具区下方空白」时验证到：`finish_streaming` 已主动 `_cancel_pending_shrink()` 把挂起项交棒给非流式 `_update_height` 收敛，两条路径同时写 viewer 高度会互相打架（追踪 tick 与结束态缓动并存 → 高度锯齿）。补注释锁定约束，避免下次误删。
+
+### ✨ 新功能 (New Features) (重新发布 #4 追加)
+- **paint 采样器打包版默认关闭** (`app/utils/paint_profiler.py`, `main.py`, `tests/utils/test_paint_profiler.py`): 打包产物不随产品发布常驻诊断设施。`enabled()` 未显式设置时按 `sys.frozen` / `_MEIPASS` 判定：源码仓默认开启、打包版默认关闭；`DRIFOX_PAINT_PROFILE=1` 可在打包版强开排障（与看门狗同口径）。测试覆盖打包默认关闭与强开。
+
+### 🐛 问题修复 (Bug Fixes) (重新发布 #4 追加)
+- **bash 输出被压成「?」（复合命令整段喂给 git status 解析器）** (`plugins/system-core/tools/_shell_compressor.py`, `tests/plugins/test_shell_compressor.py`): `_compress_git` 用子串匹配，`git branch && git status` 的整段输出（分支名、tag 列表、grep 结果）被喂给 `_compress_git_status`；长格式解析不到 `On branch` 时返回 branch 默认值 `"?"`，而 `_shorter_only` 只看 token 数，`"?"` 必然通过 → 整段输出被替换为 `?` + `[saved N tok, 9X%]`。修复：解析不到有效信息返回 None（上游回退原始输出）；复合命令（`&&` / `||` / `;`）跳过 pattern 压缩，只做通用清理。
 
 ## [v0.7.0-beta] - 2026-11-08
 
