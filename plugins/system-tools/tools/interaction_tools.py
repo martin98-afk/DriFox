@@ -7,6 +7,7 @@ skill / manage_skill / mcp_manage / upload_file：
 impl 通过 tool_ctx["services"] / tool_ctx["capabilities"] 调用，工具层逻辑在插件内。
 """
 import re
+from pathlib import Path
 
 from app.plugins.sdk import ToolResult
 from app.plugins.sdk import make_summarize_from_preview
