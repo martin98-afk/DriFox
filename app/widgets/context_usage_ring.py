@@ -192,32 +192,43 @@ class ContextUsageRing(QWidget):
         # tooltip 定位：紧贴 widget 上方或下方显示
         widget_global = self.mapToGlobal(QPoint(0, 0))
         widget_center_x = widget_global.x() + self.width() // 2
-        pos_width = max(tip_size.width(), 1)
 
-        window = self.window()
-        window_center = window.y() + window.height() / 2
-        if widget_global.y() > window_center:
-            x = widget_center_x - pos_width // 2
-            y = widget_global.y() - tip_size.height() - 4
-        else:
-            x = widget_center_x - pos_width // 2
-            y = widget_global.y() + self.height() + 4
+        def _calc_pos(size: "QSize") -> tuple:
+            pos_width = max(size.width(), 1)
+            window = self.window()
+            window_center = window.y() + window.height() / 2
+            if widget_global.y() > window_center:
+                x = widget_center_x - pos_width // 2
+                y = widget_global.y() - size.height() - 4
+            else:
+                x = widget_center_x - pos_width // 2
+                y = widget_global.y() + self.height() + 4
+            screen_geom = self.screen().geometry() if self.screen() else QApplication.primaryScreen().geometry()
+            if x < screen_geom.left():
+                x = screen_geom.left() + 5
+            if x + pos_width > screen_geom.right():
+                x = screen_geom.right() - pos_width - 5
+            if y < screen_geom.top():
+                y = screen_geom.top() + 5
+            if y + size.height() > screen_geom.bottom():
+                y = screen_geom.bottom() - size.height() - 5
+            return x, y
 
-        screen_geom = self.screen().geometry() if self.screen() else QApplication.primaryScreen().geometry()
-        if x < screen_geom.left():
-            x = screen_geom.left() + 5
-        if x + pos_width > screen_geom.right():
-            x = screen_geom.right() - pos_width - 5
-        if y < screen_geom.top():
-            y = screen_geom.top() + 5
-        if y + tip_size.height() > screen_geom.bottom():
-            y = screen_geom.bottom() - tip_size.height() - 5
+        x, y = _calc_pos(tip_size)
 
         # 预创建原生窗口句柄，确保 move 直接作用于 HWND，
         # 避免 hide() 后 show() 新建窗口时 WM 在默认位置闪一帧。
         self._tooltip.winId()
         self._tooltip.move(x, y)
         self._tooltip.show()
+
+        # showEvent 里 _refresh 会触发 QSS polish 并 adjustSize；polish 前后字体
+        # 度量不同（QSS font-size 不反映到 polish 前的 sizeHint），show 后的真实
+        # 尺寸可能与定位用的尺寸不一致 → 用最终尺寸同帧重校正一次位置。
+        final_size = self._tooltip.size()
+        if (final_size.width(), final_size.height()) != (tip_size.width(), tip_size.height()):
+            fx, fy = _calc_pos(final_size)
+            self._tooltip.move(fx, fy)
 
     @staticmethod
     def _compute_track_color() -> QColor:
