@@ -48,9 +48,16 @@ _TICK_MS = max(1, 1000 // FPS_CAP)
 # 能重启它（Qt 不因窗口恢复可见唤醒已 stop 的 QTimer），窗口最小化/切走
 # 再恢复后动画永久卡在最后一帧。500ms 空转只是一次弱引用列表遍历。
 _IDLE_TICK_MS = 500
+# 应用失焦（本进程无激活窗口，用户切到别的应用）时的降帧倍数。
+# 分屏开发是常态：DriFox 挂在后台仍可见，但用户正在看的是别的窗口，
+# 壁纸动效没必要全速。3 倍 = 12fps→4fps，timer 唤醒同步降 3 倍；
+# 切回后最多一个降档间隔（~200ms）恢复全速，无感。
+# 不合并进 _IDLE_TICK_MS：失焦档仍推进解码队列（回来时不卡帧重解码）。
+_UNFOCUSED_FACTOR = 3
 # 公开别名：测试与外部模块（theme_manager 同款 FPS_CAP 模式）引用用
 TICK_MS = _TICK_MS
 IDLE_TICK_MS = _IDLE_TICK_MS
+UNFOCUSED_TICK_MS = _TICK_MS * _UNFOCUSED_FACTOR
 # 预解码队列上限（帧）。3 帧 @15fps = 200ms 前瞻：足够吸收一次主线程卡顿
 # （弹窗/流式长帧），又不会把内存抬太多（1600x900 单帧 5.5MB → 最坏 +16.5MB）。
 # 队列满则工作线程等待，不会无限堆积。
@@ -308,9 +315,30 @@ class BackgroundClock(QObject):
             if src.advance(now_ms):
                 src.notify()
         self._sources = alive
-        # 可见→全速抽帧；全部不可见→降频轮询等待恢复可见。不停表：
-        # 停表后无人能重启，窗口恢复可见后动画就永远卡在最后一帧
-        self._timer.setInterval(_TICK_MS if any_visible else _IDLE_TICK_MS)
+        # 三档节流：可见且有焦点→全速抽帧；可见但失焦→降帧 3 倍（壁纸是
+        # 氛围层，用户在看别的窗口时没必要全速重绘整窗）；全部不可见→降频
+        # 轮询。不停表：停表后无人能重启，窗口恢复可见后动画就永远卡在
+        # 最后一帧。
+        if not any_visible:
+            self._timer.setInterval(_IDLE_TICK_MS)
+        elif self._app_focused():
+            self._timer.setInterval(_TICK_MS)
+        else:
+            self._timer.setInterval(_TICK_MS * _UNFOCUSED_FACTOR)
+
+    @staticmethod
+    def _app_focused() -> bool:
+        """本进程当前是否有激活窗口（用户是否在看本应用）。
+
+        QApplication.activeWindow() 无激活窗口时返回 None。调用成本是一次
+        窗口管理器查询，在 tick 频率（≤15 次/秒）下可忽略。
+        """
+        try:
+            from PyQt5.QtWidgets import QApplication
+
+            return QApplication.activeWindow() is not None
+        except Exception:
+            return True  # 查询失败按有焦点处理，宁可全速不可卡帧
 
     @staticmethod
     def _source_visible(source: AnimationSource) -> bool:
