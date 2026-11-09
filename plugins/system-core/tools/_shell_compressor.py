@@ -146,6 +146,13 @@ def compress_output(command: str, output: str) -> Optional[str]:
             lines = _compact_lines(lines, 100)
         return '\n'.join(lines)
 
+    # 复合命令（&& / || / ; 串联）：输出是多段拼接，单命令 pattern 解析器
+    # 语义错位 —— `git branch && git status` 的整段输出会被喂给 git status
+    # 解析器，解析不到 `On branch` 就产出占位符。只做通用清理，保住信息。
+    # （引号内的分号会误判为复合命令，后果只是不压缩，安全侧偏差）
+    if re.search(r'&&|\|\||;', command):
+        return _compress_generic(output)
+
     # compress: 尝试各 pattern
     # 按使用频率排序
     if (cmd_starts_with(command, "git ") or cmd_starts_with(command, "git.exe")):
@@ -315,7 +322,7 @@ def _compress_git(command: str, output: str) -> Optional[str]:
     return None
 
 
-def _compress_git_status(output: str) -> str:
+def _compress_git_status(output: str) -> Optional[str]:
     """git status 压缩为核心信息
 
     支持两种格式：
@@ -387,6 +394,13 @@ def _compress_git_status(output: str) -> str:
         elif section == "untracked" and t and not t.startswith('(') and not t.startswith('Untracked'):
             untracked.append(t)
 
+    # 解析不到任何有效信息（非 git status 输出、空输出、或复合命令拼接的
+    # 异质输出）：返回 None 表示无法压缩，让上游回退原始输出。绝不能返回
+    # "?" 占位 —— _shorter_only 只看 token 数，"?" 必然通过，整段输出被
+    # 换成一个问号（2026-11-09 实际发生：`git branch && git status` 拼接
+    # 输出被误当长格式，返回 "?" + [saved N tok, 9X%]）。
+    if branch == "?" and not staged and not unstaged and not untracked and "nothing to commit" not in output:
+        return None
     # 构造输出
     parts = []
     if ahead > 0:
