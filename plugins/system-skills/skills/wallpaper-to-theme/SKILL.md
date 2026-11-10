@@ -12,9 +12,12 @@ license: GPL-3.0-or-later
 
 | 你说 | 动作 |
 |------|------|
-| 「把壁纸做成主题」「迁移这个壁纸」 | 跑 `scripts/migrate.py <壁纸目录> --out <输出目录>` |
+| 「把壁纸做成主题」「迁移这个壁纸」 | 跑 `scripts/migrate.py <壁纸目录> --out <输出目录>`（scene 建议改用 capture_scene.py 全保真渲染，见下） |
+| 「我想要 XX 风格的主题」 | `scripts/search_wallpaper.py "XX"` 搜创意工坊，挑中订阅/下载后再迁移 |
 | 「我有哪些壁纸可以转」 | 跑 `scripts/migrate.py --list <workshop 根目录>` |
 | 「先看看会生成什么」 | 加 `--dry-run` |
+
+**代理**：steamcommunity.com 直连不稳，搜索需设环境变量 `DRIFOX_STEAM_PROXY`（如本机 v2rayN http://127.0.0.1:10808，182.183 注意 18080 无服务； browse 页是 React 应用，数据嵌在转义 JSON 里，解析已内置）。
 
 **第一动作永远是 `--dry-run`。** 先让用户看到类型识别、能取到什么素材、有哪些警告，确认后再真正落盘。
 
@@ -22,11 +25,24 @@ license: GPL-3.0-or-later
 
 | 壁纸 type | 载体 | 处理方式 | 实测通过率 |
 |---|---|---|---|
-| `video` | 单个 mp4/webm | 用 `scripts/anim_encode.py` 转成动画 WebP（640×360@12fps），挂 `chat.animation` | 全部 |
-| `scene` | `scene.pkg` 或 `gifscene.pkg` | 解 PKG 索引，抽主视觉图 + 内嵌音频 | 见下方限制 |
+| `video` | 单个 mp4/webm | `anim_encode.py` 完整转动画 WebP（1600×900@15fps，超长片自动降 1280），音轨抽 mp3 | 全部 |
+| `scene` | `scene.pkg` | **全保真渲染**：`capture_scene.py` 让 WE 原生渲染并录屏（shader/粒子/相机全保留），自动关闭日期时钟类属性 | 15/19 |
 | `web` | 内嵌浏览器 | **不支持**，DriFox 主题无 Web 载体 | — |
 
-实测 23 个真实壁纸：20 个成功（8 video / 12 scene），3 个失败，失败原因全部是「贴图只有 DXT 压缩，没有现成 PNG/JPEG」。这个限制写在 `references/format-notes.md`。
+实测 37 个真实壁纸（2026-11-08）：33 个产出动画素材（video 15/16 全成，scene 15/19，4 个剔除：gifscene 时钟无属性开关、媒体播放器类、日期文字层关不掉）。旧的「解 PKG 抽静态图」保留为无 WE 环境时的降级路径——静态图丢掉全部动态。
+
+## 一步到位流程（按序执行，每步已验证）
+
+0. **本地没有合适的？先搜**：`search_wallpaper.py "关键词" --sort week`（走 DRIFOX_STEAM_PROXY 代理；browse 页数据嵌在转义 JSON 里，解析已内置，含文件大小可提前避坑超大壁纸）。挑中后让用户在 Steam 里订阅，等 `workshop/content/431960/<id>/` 出现即接步骤 2。
+
+1. **侦察**：`migrate.py --list <根>` 列全量；video 用 ffprobe 看时长与音轨；scene 解 pkg 看 objects 数量与 shader/粒子占比（>100 对象的复杂 scene 加载慢，settle 要加长）。
+2. **video**：`anim_encode.py` 完整转 1600×900@15fps，不截断；≤60s 用 q72，更长按内置档位（120s→q66、200s→q60、更长→q56），产物 >40MB 自动降 1280×720 q72。音轨 `ffmpeg -vn -c:a libmp3lame -b:a 192k` 抽 mp3。
+3. **scene**：`capture_scene.py <pkg> <out.mp4> --duration 30`（自动解包关日期属性、等首帧、置顶去最小化）。需要 WE 正在运行 + `pip install windows-capture`。做完 `-control unmute` 恢复音量。
+4. **放弃名单（不要硬做）**：gifscene 时钟、媒体播放器类壁纸、日期是 script 文字层关不掉的、带播放进度 UI 的——录出来会永远显示录制时刻的时间/进度。
+5. **组装**：取色（多帧采样→明暗判定→accent 从中间调高饱和簇取）→ 97 token 全集派生 → yaml。**hex 值必须带单引号**（`accent: '#ff2e63'`，不带引号会被 YAML 当注释，40 个 token 静默变 None）。`user_card_bg` / `assistant_card_bg` 必写。
+6. **音频入库**：ffprobe 查时长，>240s 截断，flac/wav/超 12MB 转 192k mp3。
+7. **校验三件套**：全部 colors token 非 None 且 ≥90 键；`src`/`tracks` 相对路径可解析到真实文件；icon 目检（webp 首帧居中裁方）。
+8. **既有插件升级**：先 git 保护原 yaml，只替换 backgrounds 段加 animation，colors 原样保留；禁止批量脚本直接覆盖。
 
 ## 产出结构
 
@@ -52,24 +68,34 @@ license: GPL-3.0-or-later
 Wallpaper Engine 的 mp4 不能直接给客户端播（Qt5 的 QMediaPlayer 依赖系统解码器，同一份素材在不同机器上能不能播取决于系统装了什么）。先转成动画 WebP：
 
 ```bash
-python scripts/anim_encode.py <壁纸目录>/xxx.mp4 <out>/themes/<id>/bg/chat.webp --blur 0.8
+python scripts/anim_encode.py <壁纸目录>/xxx.mp4 <out>/themes/<id>/bg/chat.webp --blur 0.4
 ```
 
-参数建议：`--width 640 --fps 12`（默认值），`--duration 6~10` 截一段干净的循环，`--blur 0.8~1.5` 预烘模糊掩盖低分辨率。产物 0.2~0.5MB/5s，比原 mp4 小。
+整窗背景的推荐档位（2026-11-08 用户确认）：**1600×900@15fps 不截断完整转**（用户要求「完整播放一轮」）；时长 ≤60s 用 q72，更长的按 `anim_encode` 内建档位自动降质；产物 >40MB 时自动降 1280×720 换回画质。实测单帧解码成本（PyQt5 QImageReader）：1600×900=8.14ms、1280×720=5.33ms、800×450=2.52ms；宿主 fps 硬上限 15（`theme_manager._ANIM_FPS_CAP`），解码是逐帧流式的，时长只影响体积不影响内存。
 
-yaml 里对应写法：
-
-```yaml
-backgrounds:
-  chat:
-    animation:
-      src: bg/chat.webp
-      canvas: shared
-      fps: 12
-      fit: cover
-```
+视频里的音轨一并抽出（`ffmpeg -vn -c:a libmp3lame -b:a 192k`），挂 `music.tracks`。
 
 需要「光影压暗」而非直接铺画面时，用 `--mode mask`（黑底 + 反相亮度 alpha），并把 `blend` 写成 `overlay`。
+
+### scene 全保真渲染（首选路径）
+
+scene 是多层贴图 + shader + 粒子 + 相机动画的实时合成，解 pkg 抽静态图会丢掉全部动态。用 WE 本体渲染再抓帧：
+
+```bash
+python scripts/capture_scene.py <壁纸目录>/scene.pkg <out>.mp4 --duration 30
+```
+
+原理与已验证的坑（全部实测踩过）：
+
+1. `wallpaper64.exe -control openWallpaper -file <pkg> -playInWindow "DriFoxCap" -width 1920 -height 1080`（width/height 指定的是**客户区**尺寸，窗口被 WE 居中放置）。
+2. **抓帧必须用 Windows Graphics Capture 直抓 HWND**（`pip install windows-capture`）。三条路里只有它能抗遮挡：gdigrab 走 BitBlt 抓 D3D 窗口是纯黑屏；ddagrab 抓全屏再裁窗口区域，一旦用户最小化窗口就录到桌面内容。
+3. WGC 的帧含标题栏，裁剪偏移**不能用 GetWindowRect**（它含 DWM 阴影，实测差 12px），要用帧尺寸自校准：`dx=(frame_w-cw)//2`，`dy=frame_h-ch-dx`。
+4. 录制前把 `-playInWindow` 窗口去掉 WS_MINIMIZEBOX（防误触最小化中断），WGC 靠「2.5s 无新帧」判 stall；WE 加载期间不重绘，要先等首帧（最多 12s）再开始计时。
+5. WE 桌面壁纸音量会被 `-control mute` 波及，做完记得 `-control unmute`。
+
+**日期/时钟去除**：很多 scene 自带动态日期、时钟、歌名层，录进主题会永远显示「录制那一刻」的时间。去除方式是**解包 scene.pkg 成项目目录**（WE 支持直接加载 project.json），把 `project.json → general.properties` 里日期类属性默认值改掉：bool 型设 `false`，slider 型设 `0`（属性名按 date/time/clock/hour/week/media/spectrum 关键词匹配）。capture_scene.py 已内置该流程。没有属性开关的（gifscene 的时钟是硬编码、部分壁纸日期是 script 驱动的文字层）→ 停止并告知用户，不要硬抠 scene.json。
+
+**scene 没有循环周期**：project.json/scene.json 不声明任何时长字段，粒子是随机的，动画是无限程序化的。「完整播放一轮」只对 video 类型成立；scene 固定采样 30s 即可，加长只增加体积。
 
 ### 配色必须适配背景
 
@@ -90,9 +116,12 @@ backgrounds:
 
 ## 已知限制
 
-- **DXT 压缩贴图**（`TEXB` 头部声明 `isLZ4=1` 且载荷不是完整 PNG/JPEG）无法提取。这类壁纸的 `scene.pkg` 里所有贴图都是压缩原始像素，脚本会明确报错而不是产出空主题。批量测试里 3/23 属于这类。
-- **PKG 内的音频**只在载荷是标准 `ID3`/`FF FB` 头时提取；被压缩的音轨会被跳过。
-- **动态效果有限还原**：video 类型能整段转成动画 WebP 保住画面运动；scene 类型的 shader、粒子、视差滚动没有对应能力，迁移结果是静态背景图（加可选角色剪影）。
+- **无 WE 运行环境的机器**：全保真渲染需要 WE 正在运行 + windows-capture。降级路径是解 PKG 抽静态图（migrate.py），但 scene 会丢掉全部动态。
+- **DXT 压缩贴图**（`TEXB` 头部声明 `isLZ4=1` 且载荷不是完整 PNG/JPEG）无法提取，只影响降级路径；全保真渲染不受影响。
+- **PKG 内的音频**只在载荷是标准 `ID3`/`FF FB` 头时提取；被压缩的音轨会被跳过。入库前统一 ffprobe：>240s 截断，flac/wav/超大文件转 192k mp3（实测过单壁纸内嵌 137MB 完整专辑）。
+- **动态日期/时钟/媒体层关不掉的壁纸**：gifscene（时钟硬编码无属性）、日期是 script 驱动文字层（如 Crimson Empress）、壁纸本体就是媒体播放器（Media Player | Seyul）→ 直接放弃，做成主题会永远显示录制时刻的时间/进度。
+- **hex 色值必须带引号写进 yaml**：`accent: #ff2e63` 会被 YAML 当注释解析成 None，40 个 token 静默变空，切主题后大面积残留默认配色（深色主题黑字）。必须写 `accent: '#ff2e63'`。
+- **既有插件升级不要用批量脚本直接覆盖**：会冲掉手调 colors 与既有音频命名。正确做法：git checkout 恢复被覆盖文件，只替换 backgrounds 段加 animation，colors 原样保留。
 
 ## 验证
 

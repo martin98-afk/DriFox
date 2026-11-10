@@ -45,6 +45,24 @@ def _resolve_tab_window():
 # ──────────────────── 对话流 / 窗口 ────────────────────
 
 
+def _resolve_window_by_id(window_id: str) -> Any:
+    """按 _window_id 找存活聊天窗口（找不到返回 None）。
+
+    与 window.list 同源（遍历 TabManagerWindow._windows），供 window_id
+    定向能力解析目标窗口。空 id 返回 None（调用方自行回退宿主窗口）。
+    """
+    wid = str(window_id or "").strip()
+    if not wid:
+        return None
+    tm = _resolve_tab_window()
+    if tm is None:
+        return None
+    for win in getattr(tm, "_windows", None) or []:
+        if str(getattr(win, "_window_id", "") or "") == wid:
+            return win
+    return None
+
+
 def _stream_subscribe(host: Any, ctx: Any):
     """返回 subscribe(events, callback) -> 已绑定信号名列表。
 
@@ -75,6 +93,29 @@ def _stream_subscribe(host: Any, ctx: Any):
             ctx.registry.track_subscription(ctx.plugin, signal, cb)
             bound.append(name)
         return bound
+
+    return subscribe
+
+
+def _stream_errors(host: Any, ctx: Any):
+    """stream.errors：订阅 backend.conversation_error(dict) 结构化报错事件。
+
+    负载字段：window_id/session_id/provider/model/message/error_type/timestamp。
+    连接登记到 CapabilityRegistry.track_subscription，插件卸载时由
+    release_plugin 统一断开（与 _stream_subscribe 同模式）。
+    """
+
+    def subscribe(callback) -> bool:
+        backend = getattr(host, "backend", None)
+        if backend is None:
+            raise RuntimeError("backend 未就绪，无法订阅对话报错事件")
+        signal = getattr(backend, "conversation_error", None)
+        if not hasattr(signal, "connect"):
+            logger.warning("[Capability] backend 无 conversation_error 信号，跳过订阅")
+            return False
+        signal.connect(callback)
+        ctx.registry.track_subscription(ctx.plugin, signal, callback)
+        return True
 
     return subscribe
 
@@ -174,7 +215,6 @@ def _window_workbench(host: Any):
 
 def _ui_events(host: Any, ctx: Any):
     """UI 事件总线的订阅 / 发布（订阅随插件卸载自动退订）。"""
-
     def api() -> dict:
         from app.core.infra.ui_event_bus import UIEventBus
 
@@ -203,6 +243,64 @@ def _window_list(host: Any):
         return {getattr(w, "_window_id", "") for w in getattr(tm, "_windows", [])}
 
     return ids
+
+
+def _question_control(host: Any, ctx: Any):
+    """提问卡控制面：订阅生命周期 / 读快照 / 代答 / 倒计时。
+
+    只暴露提问交互所需的四件事，插件据此自行实现超时策略（跳过 / AI 代答 /
+    不限时）。订阅随插件卸载自动退订（registry.track_subscription）。
+
+    value_style=value：provider 直接返回 facade dict（不是需要再调一次的工厂），
+    调用侧 ``pool["question.control"]["answer"](...)``。
+    """
+    real = host if host is not None else _resolve_active_host(None)
+
+    def subscribe(callback):
+        if real is None or not hasattr(real, "question_control_subscribe"):
+            raise RuntimeError("宿主窗口不支持提问控制")
+        if not real.question_control_subscribe(callback):
+            return False
+        ctx.registry.track_subscription(ctx.plugin, _QuestionSignal(real, callback), callback)
+        return True
+
+    def snapshot() -> dict:
+        return dict(real.question_control_snapshot() or {}) if real is not None else {}
+
+    def answer(text: str) -> bool:
+        return bool(real.question_control_answer(str(text or ""))) if real is not None else False
+
+    def countdown(seconds: int) -> bool:
+        return bool(real.question_control_countdown(int(seconds or 0))) if real is not None else False
+
+    def stop_countdown() -> bool:
+        return bool(real.question_control_stop_countdown()) if real is not None else False
+
+    def unsubscribe(callback) -> bool:
+        return bool(real.question_control_unsubscribe(callback)) if real is not None else False
+
+    return {
+        "subscribe": subscribe,
+        "unsubscribe": unsubscribe,
+        "snapshot": snapshot,
+        "answer": answer,
+        "countdown": countdown,
+        "stop_countdown": stop_countdown,
+    }
+
+
+class _QuestionSignal:
+    """把「从宿主监听者列表移除」适配成 signal.disconnect 形状（供能力注册表退订）。"""
+
+    def __init__(self, widget: Any, callback: Any):
+        self._widget = widget
+        self._callback = callback
+
+    def disconnect(self, *_args) -> None:  # noqa: D401 - 与 Qt signal 同形
+        try:
+            self._widget.question_control_unsubscribe(self._callback)
+        except Exception:  # noqa: BLE001 - 窗口已销毁时静默
+            pass
 
 
 def _window_events(host: Any, ctx: Any):
@@ -475,8 +573,13 @@ def _session_read(host: Any):
     给副本而非对象：插件无法直接 mutate 会话（改会话走 session.write / manage）。
     """
 
-    def read() -> dict:
-        backend = getattr(host, "backend", None)
+    def read(window_id: str = "") -> dict:
+        target_host = host
+        if str(window_id or "").strip():
+            target_host = _resolve_window_by_id(str(window_id))
+            if target_host is None:
+                return {"session_id": "", "name": "", "messages": [], "system_prompt": ""}
+        backend = getattr(target_host, "backend", None)
         session = backend.get_current_session() if backend is not None else None
         if session is None:
             return {"session_id": "", "name": "", "messages": [], "system_prompt": ""}
@@ -580,7 +683,28 @@ def _session_invalidate(host: Any):
 
 
 def _session_write(host: Any):
-    return host._save_messages_to_session
+    """消息写回会话（可按 window_id 定向到其他窗口）。
+
+    宿主无 _save_messages_to_session / 写入失败返回 0（与 tool 面同语义）。
+    """
+
+    def write(messages, task_prompt: str = "", window_id: str = "") -> int:
+        target_host = host
+        if str(window_id or "").strip():
+            target_host = _resolve_window_by_id(str(window_id))
+            if target_host is None:
+                return 0
+        fn = getattr(target_host, "_save_messages_to_session", None)
+        if not callable(fn):
+            return 0
+        try:
+            fn(messages, task_prompt=task_prompt)
+            return len(messages) if messages is not None else 0
+        except Exception as e:  # noqa: BLE001 — 写回失败不抛给插件
+            logger.warning(f"[Capability] session.write 失败: {e}")
+            return 0
+
+    return write
 
 
 def _engine_busy(backend: Any) -> bool:
@@ -672,8 +796,24 @@ def _session_control(host: Any):
     def new_session() -> bool:
         return queue.enqueue(wid, "new", {})
 
-    def send(text: str, *, ephemeral: bool = False, mode: str = "queue", hook_event: str = "SessionSend") -> bool:
-        return _send_with_mode(backend, queue, wid, text, ephemeral=ephemeral, mode=mode, hook_event=hook_event)
+    def send(
+        text: str,
+        *,
+        ephemeral: bool = False,
+        mode: str = "queue",
+        hook_event: str = "SessionSend",
+        window_id: str = "",
+    ) -> bool:
+        target_wid = str(window_id or "").strip() or wid
+        if not target_wid:
+            return False
+        target_backend = backend
+        if target_wid != wid:
+            target_win = _resolve_window_by_id(target_wid)
+            target_backend = getattr(target_win, "backend", None) if target_win is not None else None
+        return _send_with_mode(
+            target_backend, queue, target_wid, text, ephemeral=ephemeral, mode=mode, hook_event=hook_event
+        )
 
     return {"interrupt": interrupt, "new": new_session, "send": send}
 
@@ -1266,6 +1406,45 @@ def _model_config_for(host: Any):
 
     return config_for
 
+def _model_set(host: Any):
+    """model.set：设置当前窗口的服务商与模型（只改窗口实例态，不写全局默认）。
+
+    解析复用宿主 ``_resolve_history_model_target``（config_id 直查 → provider
+    反查 → 模型名唯一匹配；多匹配不明确返回 None），该函数是纯解析，复用安全。
+    成功后刷新模型按钮与上下文用量；不置 ``_user_manually_selected_model``
+    （插件选择不视为用户偏好，云端同步仍可覆盖）、不写 ``cfg.llm_selected_model``。
+    流式中调用允许：本轮 worker 已持有 llm_config，下一轮生效。
+    """
+
+    def set_model(model: str = "", provider: str = "", config_id: str = "", window_id: str = "") -> dict:
+        target_host = host
+        if str(window_id or "").strip():
+            target_host = _resolve_window_by_id(str(window_id))
+            if target_host is None:
+                return {"ok": False, "error": "window_not_found", "detail": f"窗口不存在: {window_id}"}
+        resolver = getattr(target_host, "_resolve_history_model_target", None)
+        if not callable(resolver):
+            return {"ok": False, "error": "not_found", "detail": "宿主窗口不支持模型解析"}
+        try:
+            target = resolver(str(model or ""), str(provider or ""), str(config_id or ""))
+        except Exception as e:  # noqa: BLE001 — 解析异常按 not_found 降级
+            logger.warning(f"[Capability] model.set 解析失败: {e}")
+            return {"ok": False, "error": "not_found", "detail": str(e)}
+        if not target:
+            return {"ok": False, "error": "not_found", "detail": "无法解析到唯一的服务商/模型组合"}
+        resolved_cid, resolved_model = target
+        target_host._current_provider_name = resolved_cid
+        target_host._current_model_name = resolved_model
+        refresh_btn = getattr(target_host, "_update_model_selector_btn", None)
+        if callable(refresh_btn):
+            refresh_btn()
+        refresh_ctx = getattr(target_host, "_refresh_context_usage_indicator", None)
+        if callable(refresh_ctx):
+            refresh_ctx()
+        return {"ok": True, "config_id": resolved_cid, "model": resolved_model}
+
+    return set_model
+
 def _storage_db(host: Any, ctx: Any):
     """通用数据库执行权限：受限代理（表名须 ``plugin_<name>_`` 前缀）。"""
     from app.plugins.capabilities.providers.db_guard import PluginDBProxy
@@ -1291,6 +1470,7 @@ def register(registry) -> None:
     reg = registry
     # 对话流 / 窗口
     reg.register("stream.subscribe", _stream_subscribe, surface="ui", owner="core:ui")
+    reg.register("stream.errors", _stream_errors, surface="ui", owner="core:ui")
     reg.register("window.active", _window_active, surface="ui", owner="core:ui")
     reg.register("window.host", _window_host, surface="ui", owner="core:ui")
     reg.register("window.current", _window_current, surface="ui", owner="core:ui")
@@ -1301,6 +1481,7 @@ def register(registry) -> None:
     reg.register("model.config", _model_config, surface="ui", owner="core:ui")
     reg.register("model.config", _provider_config, surface="ui", owner="core:ui", legacy_key="get_provider_config")
     reg.register("model.config_for", _model_config_for, surface="ui", owner="core:ui")
+    reg.register("model.set", _model_set, surface="ui", owner="core:ui")
     reg.register("model.schema", _model_schema, surface="ui", owner="core:ui")
     reg.register("model.metadata", _model_metadata, surface="ui", owner="core:ui")
     reg.register("provider.list", model_meta.provider_list, surface="ui", owner="core:ui")
@@ -1339,6 +1520,7 @@ def register(registry) -> None:
     reg.register("ui.card.hide", _ui_card_hide, surface="ui", owner="core:ui")
     reg.register("ui.artifacts.show", _ui_artifacts_show, surface="ui", owner="core:ui")
     reg.register("ui.events", _ui_events, surface="ui", owner="core:ui")
+    reg.register("question.control", _question_control, surface="ui", owner="core:ui")
     reg.register("command.read", _command_read, surface="ui", owner="core:ui")
     reg.register("command.reload", _command_reload, surface="ui", owner="core:ui")
     reg.register("plugin.read", _plugin_read, surface="ui", owner="core:ui")

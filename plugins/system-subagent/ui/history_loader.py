@@ -57,12 +57,12 @@ def _extract_task_ids(msg: Dict[str, Any]) -> List[str]:
         data = None
         try:
             data = json.loads(text)
-        except ValueError, TypeError:
+        except (ValueError, TypeError):
             try:
                 import ast
 
                 data = ast.literal_eval(text)
-            except ValueError, TypeError, SyntaxError, MemoryError, RecursionError:
+            except (ValueError, TypeError, SyntaxError, MemoryError, RecursionError):
                 data = None
         if data is None:
             found = _UUID_RE.findall(text) + _AGENT_ID_RE.findall(text)

@@ -80,13 +80,14 @@ EDIT_CARD_STYLE = CardStyles.edit_card_style()
 
 
 # ═══════════════════════════════════════════════════════════
-# 连接状态指示灯配色（四态）
+# 连接状态指示灯配色（五态：探活可把已关闭的服务标成「授权失效」）
 # ═══════════════════════════════════════════════════════════
 
 _STATUS_STYLE = {
     MCPState.CONNECTING: ("#f59e0b", "正在启动..."),
     MCPState.CONNECTED: ("#22c55e", "已连接"),
     MCPState.FAILED: ("#ef4444", "启动失败"),
+    MCPState.AUTH_EXPIRED: ("#ef4444", "授权失效"),
     MCPState.DISABLED: ("#000000", "已关闭"),
 }
 
@@ -836,12 +837,12 @@ class MCPServerRow(CardWidget):
             self.authorizeRequested.emit(self._name)
 
     def set_status(self, state: str, error: str = "", tool_count: int = 0):
-        """更新连接状态指示灯（四态）
+        """更新连接状态指示灯（五态）
 
-        启动中 → 黄色，启动失败 → 红色，已关闭 → 黑色，成功 → 绿色。
+        启动中 → 黄色，启动失败 / 授权失效 → 红色，已关闭 → 黑色，成功 → 绿色。
 
         Args:
-            state: MCPState 之一（connecting / connected / failed / disabled）
+            state: MCPState 之一（connecting / connected / failed / auth_expired / disabled）
             error: 失败原因（作为 tooltip 展示）
             tool_count: 已发现的工具数量
         """
@@ -850,7 +851,7 @@ class MCPServerRow(CardWidget):
             color = _disabled_dot_color()
         elif state == MCPState.CONNECTED and tool_count:
             tip = f"已连接 · {tool_count} 个工具"
-        elif state == MCPState.FAILED and error:
+        elif state in (MCPState.FAILED, MCPState.AUTH_EXPIRED) and error:
             tip = error if len(error) <= 400 else error[:400] + "..."
 
         self._current_state = state
@@ -873,6 +874,7 @@ class MCPServerRow(CardWidget):
                 self._auth_btn.setStyleSheet(_auth_btn_qss("cancel"))
             else:
                 self._auth_btn.setStyleSheet(_auth_btn_qss("unbind" if self._authorized else "authorize"))
+        self._apply_cred_row_style()
 
     def _setup_ui(self, data: dict):
         # 两行布局：第一行 = 图标 + 名称 + (弹性) + 授权按钮 + 开关 + 编辑/删除（操作组靠右）；
@@ -1001,6 +1003,9 @@ class MCPServerRow(CardWidget):
         # Key 存插件 config.json，连接时按 credential.inject 注入；输入框失焦即保存。
         self._cred_edit = None
         self._cred_saved_value = ""
+        # credential 行控件引用（无 credential 声明时保持 None），refresh_style 按此补刷
+        self._cred_label = None
+        self._cred_get_btn = None
         self._setup_credential_row(data, layout)
 
     def _credential_plugin(self) -> str:
@@ -1040,15 +1045,13 @@ class MCPServerRow(CardWidget):
         row.setContentsMargins(0, 2, 0, 0)
         row.setSpacing(6)
 
-        label = BodyLabel(cred.get("label") or "Key")
-        label.setStyleSheet(f"{get_font_family_css()} font-size: {scale_font_size(12)}px;")
-        row.addWidget(label)
+        self._cred_label = BodyLabel(cred.get("label") or "Key")
+        row.addWidget(self._cred_label)
 
         edit = QLineEdit()
         edit.setClearButtonEnabled(True)
         edit.setPlaceholderText(cred.get("placeholder") or "粘贴 Key 后自动保存")
         edit.setFixedHeight(Sizes.TOOL_BUTTON_SZ.height())
-        edit.setStyleSheet(f"{get_font_family_css()} font-size: {scale_font_size(12)}px; padding: 0 6px;")
         # 始终密码模式：Key 是敏感信息，不摊在屏幕上
         edit.setEchoMode(QLineEdit.Password)
         _plugin = self._credential_plugin()
@@ -1064,13 +1067,47 @@ class MCPServerRow(CardWidget):
 
         get_url = cred.get("getUrl")
         if get_url:
-            get_btn = PushButton("获取 Key")
-            get_btn.setFixedSize(88, Sizes.TOOL_BUTTON_SZ.height())
-            get_btn.setToolTip(get_url)
-            get_btn.clicked.connect(lambda: self._open_get_url(get_url))
-            row.addWidget(get_btn)
+            self._cred_get_btn = PushButton("获取 Key")
+            self._cred_get_btn.setFixedSize(88, Sizes.TOOL_BUTTON_SZ.height())
+            self._cred_get_btn.setToolTip(get_url)
+            self._cred_get_btn.clicked.connect(lambda: self._open_get_url(get_url))
+            row.addWidget(self._cred_get_btn)
 
+        self._apply_cred_row_style()
         layout.addLayout(row)
+
+    def _apply_cred_row_style(self):
+        """credential 行三控件按当前主题上色（构造时与 refresh_style 共用）。
+
+        三处都不能依赖 qfluentwidgets 主题广播：label 原实现的手动
+        setStyleSheet(字体) 会整体覆盖 FluentLabelBase qss，颜色落到
+        调色板（恒为系统黑）；输入框是原生 QLineEdit，不注册 fluent
+        样式表，颜色恒随系统；按钮在收起的展开卡里切主题时只能靠
+        lazy 补刷，时序不保证。统一走 Colors token，由 refresh_style
+        链显式重刷，与名称/描述同款机制。
+        """
+        Colors.refresh()
+        if self._cred_label is not None:
+            self._cred_label.setStyleSheet(
+                f"color: {Colors.TEXT_PRIMARY}; {get_font_family_css()} font-size: {scale_font_size(12)}px;"
+            )
+        if self._cred_edit is not None:
+            self._cred_edit.setStyleSheet(
+                f"QLineEdit {{ background-color: {Colors.CONTENT_BG}; color: {Colors.TEXT_PRIMARY};"
+                f" border: 1px solid {Colors.BORDER}; border-radius: {BorderRadius.XS}; padding: 0 6px;"
+                f" {get_font_family_css()} font-size: {scale_font_size(12)}px; }}"
+                f"QLineEdit:focus {{ border-color: {Colors.INPUT_FOCUS_BORDER}; }}"
+                f"QLineEdit::placeholder {{ color: {Colors.INPUT_PLACEHOLDER}; }}"
+            )
+        if self._cred_get_btn is not None:
+            self._cred_get_btn.setStyleSheet(
+                f"PushButton {{ background-color: {Colors.CONTENT_BG}; color: {Colors.TEXT_PRIMARY};"
+                f" border: 1px solid {Colors.BORDER}; border-radius: {BorderRadius.SM}; padding: 0 8px;"
+                f" {get_font_family_css()} {font_size_css(12)} }}"
+                f"PushButton:hover {{ border-color: {Colors.BORDER_ACCENT}; color: {Colors.TEXT_ACCENT}; }}"
+                f"PushButton:pressed {{ background-color: {Colors.HOVER_BG}; }}"
+                f"PushButton:disabled {{ color: {Colors.TEXT_MUTED}; border-color: {Colors.TEXT_MUTED}; }}"
+            )
 
     def _open_get_url(self, url: str):
         """打开 Key 申请页（系统默认浏览器）。"""
@@ -1310,6 +1347,9 @@ class MCPListSettingCard(ExpandSettingCard):
 
     def _on_authorize_done(self, name: str, ok: bool, error: str, cancelled: bool = False):
         """授权完成回调（主线程）：更新按钮态 + 提示 + 触发热连接"""
+        if ok:
+            # 刚授权的服务不能再挂着上一轮的「授权失效」，否则红点要等 TTL 到期才消
+            self._clear_probe(name)
         row = self._server_rows.get(name)
         if row is not None:
             row.set_authorized(ok)
@@ -1401,6 +1441,9 @@ class MCPListSettingCard(ExpandSettingCard):
 
     def _on_unbind_done(self, name: str, ok: bool, error: str):
         """解绑完成回调（主线程）：更新按钮态 + 提示"""
+        if ok:
+            # 凭证已清除，旧的「曾是授权失效」结论过期，等下一轮探活重判
+            self._clear_probe(name)
         row = self._server_rows.get(name)
         if row is not None:
             row.set_authorized(False)
@@ -1714,11 +1757,15 @@ class MCPListSettingCard(ExpandSettingCard):
                     continue
                 try:
                     st = status_map.get(name)
-                    if not global_on or not cfg_enabled.get(name, True):
-                        # 用户主动关闭（全局或单个）→ 黑色
+                    if not global_on or st is None:
+                        # 全局关 / 管理器无记录 → 黑色
                         row.set_status(MCPState.DISABLED)
-                    elif st is None:
-                        # 已启用但管理器还没有任何记录 → 尚未开始启动
+                    elif st.get("state") == MCPState.AUTH_EXPIRED:
+                        # 授权失效优先于「已关闭」：用户关掉的 OAuth 服务也可能
+                        # token 早已过期，必须在打开前就看见，否则一开就连不上
+                        row.set_status(MCPState.AUTH_EXPIRED, st.get("error", ""))
+                    elif not cfg_enabled.get(name, True):
+                        # 用户主动关闭 → 黑色
                         row.set_status(MCPState.DISABLED)
                     else:
                         row.set_status(
@@ -1828,8 +1875,30 @@ class MCPListSettingCard(ExpandSettingCard):
         """
         if self.isExpand and not self.isHidden():
             self._status_timer.start()
+            self._kick_probe()
         else:
             self._status_timer.stop()
+
+    def _kick_probe(self):
+        """展开可见时触发一次授权探活。
+
+        管理器内部按 TTL（10 分钟）与「已有批次在跑」去重，所以本方法可以
+        被展开/显示事件反复调用，不会重复发请求。全局 MCP 关闭时不探。
+        """
+        try:
+            if not self.cfg.mcp_enabled.value:
+                return
+            self._get_mcp_manager().probe_servers_background()
+        except Exception as e:
+            logger.debug(f"[MCP] 触发探活失败: {e}")
+
+    def _clear_probe(self, name: str):
+        """清掉某个服务的探活结论（重新授权/解绑后立即失效，不等 TTL）。"""
+        try:
+            self._get_mcp_manager().clear_probe(name)
+            self._refresh_status_dots()
+        except Exception as e:
+            logger.debug(f"[MCP] 清除探活结果失败 {name}: {e}")
 
     def setExpand(self, isExpand: bool):
         super().setExpand(isExpand)

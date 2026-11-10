@@ -67,6 +67,12 @@ CATALOG: Dict[str, CapabilitySpec] = {
             _BOTH,
         ),
         _spec(
+            "model.set",
+            _H,
+            "设置窗口的服务商与模型（只改窗口实例态，不写全局默认；可按 window_id 定向指定窗口）",
+            _UI,
+        ),
+        _spec(
             "provider.list",
             _L,
             "已配置服务商清单（id/名称/模型数，不含密钥与 URL）",
@@ -79,8 +85,14 @@ CATALOG: Dict[str, CapabilitySpec] = {
             _BOTH,
         ),
         # ── 会话 ──
-        _spec("session.read", _M, "当前 session_id 与消息列表", _BOTH),
-        _spec("session.write", _M, "消息写回当前会话（入库 + 刷 UI + 发事件）", _BOTH, ["save_messages_to_session"]),
+        _spec("session.read", _M, "当前 session_id 与消息列表（可按 window_id 定向到指定窗口）", _BOTH),
+        _spec(
+            "session.write",
+            _M,
+            "消息写回当前会话（入库 + 刷 UI + 发事件；可按 window_id 定向）",
+            _BOTH,
+            ["save_messages_to_session"],
+        ),
         _spec("session.list", _M, "历史会话列表与元数据", _UI),
         _spec(
             "session.history",
@@ -108,7 +120,7 @@ CATALOG: Dict[str, CapabilitySpec] = {
         ),
         _spec("session.interrupt", _M, "停止当前流式输出（入队，本轮结束后执行）", _BOTH),
         _spec("session.new", _M, "新建会话（入队，停流后执行）", _BOTH),
-        _spec("session.send", _M, "发消息驱动一轮对话（入队；ephemeral 不写会话不渲染）", _BOTH),
+        _spec("session.send", _M, "发消息驱动一轮对话（入队；ephemeral 不写会话不渲染；可按 window_id 定向）", _BOTH),
         # ── 输入框 ──
         _spec("input.read", _M, "输入框文本与附件列表", _UI),
         _spec("input.write", _M, "写入输入框文本", _UI),
@@ -163,6 +175,7 @@ CATALOG: Dict[str, CapabilitySpec] = {
         _spec("platform.read", _M, "平台与会话列表", _UI, ["list_platform_sessions", "list_platforms"]),
         # ── 内部资源 ──
         _spec("mcp.call", _H, "MCP 工具调用", _TOOL, ["mcp"]),
+        _spec("mcp.register", _M, "注册进程内 MCP server 工具处理器（工具调用在本机执行）", _UI),
         _spec("lsp.query", _M, "LSP 查询", _TOOL, ["lsp"]),
         _spec("net.upload", _H, "Gitee 上传（数据外发）", _TOOL, ["gitee"]),
         _spec("net.download", _M, "从 Gitee 绑定仓库下载文件到本地路径", _BOTH),
@@ -179,7 +192,14 @@ CATALOG: Dict[str, CapabilitySpec] = {
         _spec("ui.card.hide", _L, "隐藏浮动卡", _UI, ["hide_card"]),
         _spec("ui.exclusive", _M, "独占 UI 模式", _UI, ["enter_exclusive_ui_mode", "exit_exclusive_ui_mode"]),
         _spec("ui.dialog", _L, "文件/目录选择、确认框、单行输入（跟随主题）", _UI),
-        _spec("ui.events", _L, "订阅/发布 UI 事件总线（主题切换/欢迎页刷新等）", _UI),
+        _spec("ui.events", _L, "订阅/发布 UI 事件总线（主题切换/欢迎页刷新/全局对话报错 conversation_error 等）", _UI),
+        _spec(
+            "question.control",
+            _M,
+            "提问卡控制：订阅提问生命周期、读取当前题目/已答、驱动倒计时、代用户提交答案",
+            _UI,
+            value_style="value",
+        ),
         _spec(
             "ui.artifacts.show",
             _M,
@@ -188,6 +208,12 @@ CATALOG: Dict[str, CapabilitySpec] = {
         ),
         # ── 对话流 ──
         _spec("stream.subscribe", _M, "订阅对话流事件（工具/流/错误/上下文/会话切换）", _UI),
+        _spec(
+            "stream.errors",
+            _M,
+            "订阅窗口对话报错事件（结构化：窗口/服务商/模型/错误类型）",
+            _UI,
+        ),
         # ── 窗口 ──
         _spec("window.active", _L, "当前活跃聊天窗口", _UI),
         _spec("window.current", _L, "当前窗口的语义快照（backend/session/project/workdir）", _UI),

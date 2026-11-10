@@ -399,7 +399,15 @@ class ModelConfigCard(QWidget):
                 else:
                     result[actual_key] = text
             elif isinstance(widget, ComboBox):
-                if PARAM_SCHEMA.get(key, {}).get("ui_type") == "tri_state":
+                schema_meta = PARAM_SCHEMA.get(key, {})
+                if schema_meta.get("options_source"):
+                    # 动态枚举键：取 userData（显示文案不落盘）；delete_on 命中即删键
+                    data = widget.currentData()
+                    if not data or data == schema_meta.get("delete_on"):
+                        result.pop(actual_key, None)
+                    else:
+                        result[actual_key] = data
+                elif schema_meta.get("ui_type") == "tri_state":
                     # 声明三态：「自动」= 未声明 → 删键（最关键一行，防 copy 残留）
                     if widget.currentText() == "自动":
                         result.pop(actual_key, None)

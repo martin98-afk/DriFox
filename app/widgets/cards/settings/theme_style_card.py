@@ -198,7 +198,10 @@ def _load_next_theme_image() -> None:
 
 
 def _first_background(backgrounds: dict) -> dict:
-    """取第一个「启用且有图」的背景区域
+    """取第一个「启用且有视觉素材」的背景区域
+
+    素材 = 静态 image 或动画 animation.src（纯动画 WebP 主题没有静态图，
+    预览用动画首帧兜底，2026-11-08 lucy-edgerunner 预览全黑实证）。
 
     顺序有意让 scene 优先于 window：window 常被主题用作极低不透明度的
     装饰底纹（例如 `:/icons/fox_bg.png` + opacity 0.03），拿它当主题卡
@@ -206,7 +209,9 @@ def _first_background(backgrounds: dict) -> dict:
     """
     for key in ("scene", "window", "chat_area", "sidebar"):
         area = backgrounds.get(key) or {}
-        if area.get("image") and area.get("enabled", True):
+        anim = area.get("animation") or {}
+        has_visual = area.get("image") or (anim.get("src") and anim.get("enabled", True))
+        if has_visual and area.get("enabled", True):
             return area
     return {}
 
@@ -246,7 +251,10 @@ def collect_theme_entries(is_light: bool) -> list[dict]:
                 "grad_start": window.get("gradient_start"),
                 "grad_end": window.get("gradient_end"),
                 "accent": colors.get("accent") or colors.get("border_accent"),
-                "image": background.get("image"),
+                # 纯动画主题（只有 animation.src 无静态 image）用动画首帧做预览：
+                # QImage 读动画 WebP 默认解出第一帧静态图，Qt 内置解码零依赖
+                "image": background.get("image")
+                or (background.get("animation") or {}).get("src"),
                 "image_opacity": background.get("opacity") or 0.0,
                 # 角标：主题是否自带动态背景 / 背景音乐（贴图左上角标注）。
                 # 动态背景有两种承载：旧 overlay.video 与新 animation（动画 WebP），

@@ -122,7 +122,6 @@ to_remove_macos = [
     "PyQt5/Qt5/lib/QtQuickTemplates2.framework",
     "PyQt5/Qt5/lib/QtQuickShapes.framework",
     "PyQt5/Qt5/lib/QtLocation.framework",
-    "PyQt5/Qt5/lib/QtMultimedia.framework",
     # QtPositioning 保留 —— QtWebEngineWidgets.abi3.so 依赖 @rpath/QtPositioning
     # "PyQt5/Qt5/lib/QtPositioning.framework",
     # qml 目录（对应 Windows 的 qml 清理项）
@@ -228,7 +227,7 @@ _exclude_modules = [
     # 开发/测试工具：仅 dev 依赖组安装，运行时零引用（诊断工具走系统 PATH 的
     # 外部可执行文件，不走这些包）。不排会被 PyInstaller 收进 _internal，
     # 实测曾把 mypy（0.74MB，black 经 mypy_extensions 连带）打进发行包。
-    # ⚠️ 不要排 pyright：plugins/system-tools/tools/diagnostics_tools.py 有
+    # ⚠️ 不要排 pyright：plugins/system-diagnostics/tools/diagnostics_tools.py 有
     # `from pyright import cli`（try/except 保护，装了就走模块调用），排掉会让
     # get_diagnostics 在装了该包的用户机上永久降级到外部命令回退路径。
     "mypy",
@@ -254,6 +253,10 @@ params = [
     # mermaid vendor：polyfill 无 CDN 降级（Chromium 83 必需），mermaid 降级 jsdelivr 国内不稳
     f"--add-data=app/resources/web/vendor/chromium83-polyfill.js{os.pathsep}app/resources/web/vendor",
     f"--add-data=app/resources/web/vendor/mermaid.min.js{os.pathsep}app/resources/web/vendor",
+    # ECharts vendor：懒加载本地优先、缺失才降级 CDN。macOS 打包版漏打这两个文件
+    # → 离线/网络受限时容器永久停在 400px 空框（wordcloud 须随本体一起进包）。
+    f"--add-data=app/resources/web/vendor/echarts.min.js{os.pathsep}app/resources/web/vendor",
+    f"--add-data=app/resources/web/vendor/echarts-wordcloud.min.js{os.pathsep}app/resources/web/vendor",
     # KaTeX 公式渲染 vendor：整目录收集（js + css + fonts/，css 相对路径引字体）
     f"--add-data=app/resources/web/vendor/katex{os.pathsep}app/resources/web/vendor",
     # 隐藏导入：gateway adapter 模块（importlib.import_module 动态加载，PyInstaller 无法自动发现）

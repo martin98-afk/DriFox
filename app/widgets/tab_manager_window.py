@@ -336,8 +336,17 @@ class EmptyStateWidget(QWidget):
         layout.addWidget(self._text_label)
 
     def refresh_style(self):
-        """主题/字体变更后刷新样式"""
+        """主题/字体变更后刷新样式
+
+        原 QSS 含 Colors.TEXT_MUTED（构造时定格），只 setFont 不重建
+        QSS 的话文字色不随主题切换。
+        """
+        Colors.refresh()
         self._text_label.setFont(get_unified_font(14))
+        self._text_label.setStyleSheet(
+            f"color: {Colors.TEXT_MUTED}; background: transparent;"
+            f" {get_font_family_css()} {font_size_css(14)}"
+        )
         self._text_label.setStyleSheet(
             f"color: {Colors.TEXT_MUTED}; background: transparent; {get_font_family_css()} {font_size_css(14)}"
         )
@@ -2713,6 +2722,11 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
             return
         anim = (cfg or {}).get("animation")
         src = (anim or {}).get("src") or "__none__"
+        # 去重键必须用解析后的绝对路径：各主题普遍写相同的相对路径
+        # （../../assets/chat.webp），用原串会让不同插件的不同素材命中同一
+        # key，切换主题时直接 return，动画背景停在旧素材上。
+        if src != "__none__":
+            src = self._resolve_theme_image(src)
         key = (
             f"{src}:{(anim or {}).get('fps', 12)}:"
             f"{(anim or {}).get('canvas') or 'independent'}:"
@@ -2745,6 +2759,11 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
             if anim.get("canvas") == "shared":
                 layer.set_canvas_provider(self._make_canvas_provider(parent_widget))
             layer.setGeometry(parent_widget.rect())
+            # parent resize → SceneLayer.eventFilter 同步几何。动画层是绝对
+            # 定位子控件、不参与布局，漏装 filter 时窗口/侧栏 resize 后动画
+            # 背景停在创建时的尺寸（静态图走 _AutoGeometryLabel 有同步，
+            # 动画层此前漏了，表现为 webp 背景不同步缩放）。
+            parent_widget.installEventFilter(layer)
             layer.lower()
             if area == "window":
                 base = getattr(self, "_window_base_layer", None)
@@ -2876,9 +2895,12 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
         image = bg_cfg.get("image")
         opacity = bg_cfg.get("opacity", 1.0)
         color = bg_cfg.get("color")
+        # 先解析成绝对路径：不同主题常用同名相对路径（sidebar.jpg），用原串
+        # 作缓存键会跨主题误命中，切主题后背景图不换。
+        resolved_image = self._resolve_theme_image(image) if image else None
 
         # 缓存键：image + opacity + color 共同决定唯一性
-        bg_key = f"{(image or '__none__')}:{opacity:.3f}:{(color or '__none__')}"
+        bg_key = f"{(resolved_image or '__none__')}:{opacity:.3f}:{(color or '__none__')}"
         if getattr(self, key_attr, None) == bg_key and getattr(self, label_attr, None) is not None:
             return
         setattr(self, key_attr, bg_key)
@@ -2900,8 +2922,7 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
 
         # 1. 图片
         if image:
-            resolved = self._resolve_theme_image(image)
-            pix = QPixmap(resolved)
+            pix = QPixmap(resolved_image)
             if not pix.isNull():
                 label.setPixmap(pix)
                 label.setScaledContents(True)
@@ -2985,14 +3006,16 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
                     lbl.resize(parent.size())
             except Exception:
                 pass
-        # 共享画布动画层：resize 阶段二跳过布局传播，子控件不会收到 resize，
-        # 必须手动重算画布几何，否则缩放过程中侧栏/对话区动画会错位
+        # 动画层与场景层：resize 阶段二跳过布局传播，子控件不会收到 resize，
+        # eventFilter 不触发，必须手动同步。sync_geometry = 自身撑满 parent +
+        # 内容层重算画布几何（覆盖原 refresh_canvas_geometry 的语义），否则
+        # 缩放过程中侧栏/对话区动画会错位
         for attr in ("_window_anim_layer", "_sidebar_anim_layer", "_scene_layer"):
             layer = getattr(self, attr, None)
-            if layer is None or not hasattr(layer, "refresh_canvas_geometry"):
+            if layer is None or not hasattr(layer, "sync_geometry"):
                 continue
             try:
-                layer.refresh_canvas_geometry()
+                layer.sync_geometry()
             except RuntimeError:
                 pass
 

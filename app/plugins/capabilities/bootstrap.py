@@ -23,11 +23,12 @@ def ensure_registered(surface: str) -> None:
 
         tool_core.register(registry)
     elif surface == "ui":
-        from app.plugins.capabilities.providers import history_core, platform, ui_core
+        from app.plugins.capabilities.providers import history_core, mcp_core, platform, ui_core
 
         ui_core.register(registry)
         history_core.register(registry)
         platform.register_ui(registry)
+        mcp_core.register(registry)
     else:
         raise ValueError(f"未知 surface: {surface}")
     _READY[surface] = True

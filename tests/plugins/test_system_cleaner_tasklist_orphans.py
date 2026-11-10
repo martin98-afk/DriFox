@@ -41,6 +41,7 @@ def _load_scanner():
 def test_tasklist_parse_and_candidates(monkeypatch):
     """tasklist CSV → 候选定点校验：qwebengine 命中、其他映像过滤、坏行跳过"""
     scanner = _load_scanner()
+    monkeypatch.setattr(sys, "platform", "win32")  # 锁定 Windows 枚举路径（mac 走 pgrep，另测）
 
     fake_csv = (
         '"QtWebEngineProcess.exe","111","Console","1","1,000 K"\r\n'
@@ -88,6 +89,7 @@ def test_tasklist_parse_and_candidates(monkeypatch):
 def test_tasklist_failure_falls_back_to_process_iter(monkeypatch):
     """tasklist 失败 → 回落 process_iter 全表路径（保底不劣化）"""
     scanner = _load_scanner()
+    monkeypatch.setattr(sys, "platform", "win32")
 
     class _FakeP:
         def __init__(self, pid, name, ppid):
@@ -124,3 +126,77 @@ def test_no_bytes_text_mode():
     assert "text=True" not in src, "禁 text=True 裸默认编码"
     assert "capture_output=True" in src
     assert "getpreferredencoding" in src and 'errors="replace"' in src
+
+
+def test_mac_pgrep_parse_and_candidates(monkeypatch):
+    """macOS pgrep 路径（2026-11-09）：pid 行解析 + 孤儿定点校验，活后代不误杀"""
+    scanner = _load_scanner()
+    monkeypatch.setattr(sys, "platform", "darwin")
+
+    fake_out = b"111\n333\nnot-a-pid\n700\n"  # 坏行跳过
+
+    class _FakeP:
+        def __init__(self, pid, ppid):
+            self.pid_ = pid
+            self._ppid = ppid
+            self.killed = []
+
+        def name(self):
+            return "QtWebEngineProcess"
+
+        def ppid(self):
+            return self._ppid
+
+        def terminate(self):
+            self.killed.append("t")
+
+    procs = {
+        111: _FakeP(111, 999),  # 父 999 不存在 → 孤儿
+        333: _FakeP(333, 0),  # ppid=0 → 孤儿
+        700: _FakeP(700, os.getpid()),  # 活后代 → 不杀
+    }
+    import psutil
+
+    monkeypatch.setattr(psutil, "pid_exists", lambda pid: pid == os.getpid())
+    monkeypatch.setattr(psutil, "Process", lambda pid: procs[pid])
+    monkeypatch.setattr(psutil, "wait_procs", lambda procs_, timeout=None: (procs_, []))
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda *a, **k: subprocess.CompletedProcess(a, 0, fake_out, b""),
+    )
+
+    killed = scanner._kill_qwebengine_processes()
+    assert killed == 2, f"应终止 2 个孤儿（111/333），实际 {killed}"
+    assert procs[111].killed == ["t"] and procs[333].killed == ["t"]
+    assert procs[700].killed == [], "活后代（在途渲染）被误杀"
+
+
+def test_mac_pgrep_failure_falls_back(monkeypatch):
+    """macOS pgrep 失败 → 回落 process_iter 全表路径"""
+    scanner = _load_scanner()
+    monkeypatch.setattr(sys, "platform", "darwin")
+
+    class _FakeP:
+        def __init__(self, pid, name, ppid):
+            self.info = {"pid": pid, "name": name, "ppid": ppid}
+            self.killed = []
+
+        def terminate(self):
+            self.killed.append("t")
+
+    fake = _FakeP(555, "QtWebEngineProcess", 0)
+    import psutil
+
+    monkeypatch.setattr(psutil, "pid_exists", lambda pid: False)
+    monkeypatch.setattr(psutil, "process_iter", lambda attrs=None: iter([fake]))
+    monkeypatch.setattr(psutil, "wait_procs", lambda procs_, timeout=None: (procs_, []))
+
+    def _boom(*a, **k):
+        raise OSError("pgrep not found")
+
+    monkeypatch.setattr(subprocess, "run", _boom)
+
+    killed = scanner._kill_qwebengine_processes()
+    assert killed == 1, "pgrep 失败应回落 process_iter 并清理候选"
+    assert fake.killed == ["t"]

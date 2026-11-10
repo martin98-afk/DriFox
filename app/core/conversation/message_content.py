@@ -868,6 +868,14 @@ def normalize_message(message: Any) -> Optional[Dict[str, Any]]:
                 # 用原消息更新持久化（直接回写 message 引用）
                 message["_hook_event"] = _fill_hook_event
 
+        # 流式中途周期落盘的「残缺回复」标记（main_widget._flush_partial_reply）。
+        # 崩溃恢复后这条消息仍在（正常结束会被 worker 的完整消息整体替换掉），
+        # 发送前必须剔除，否则把半截回复当正常历史发给模型。
+        # 与 _x_idx / _identity 同理：白名单外字段会被本函数剥掉，标记一丢就
+        # 再也分不清「模型真说完了」和「进程死在半路」。
+        if message.get("_partial"):
+            normalized["_partial"] = True
+
         if not normalized.get("content") and not normalized.get("tool_calls") and not normalized.get(
                 "reasoning_content"):
             return None
@@ -1494,14 +1502,47 @@ def messages_to_responses_input(
     return result.input_items, result.instructions
 
 
+def tools_to_responses(tools: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """chat/completions 工具格式 → Responses API 扁平格式（纯函数）。
+
+    chat:      ``{"type":"function","function":{"name","description","parameters"}}``
+    responses: ``{"type":"function","name","description","parameters"}``
+
+    从 chat_worker._tools_to_responses 原地搬出（2026-11-07 Phase 3 插件化），
+    供 worker 与 responses transport 插件共用同一实现。
+    """
+    out: List[Dict[str, Any]] = []
+    for tool in tools or []:
+        if not isinstance(tool, dict):
+            continue
+        func = tool.get("function") or {}
+        if not isinstance(func, dict) or not func.get("name"):
+            continue
+        out.append(
+            {
+                "type": "function",
+                "name": func.get("name"),
+                "description": func.get("description", ""),
+                "parameters": func.get("parameters") or {"type": "object", "properties": {}},
+            }
+        )
+    return out
+
+
 def extract_reasoning_delta(obj: Any) -> str:
     """从流式 delta / message 对象里提取思考增量，兼容各厂商字段名。
 
-    厂商差异（实测）：
-        - ``reasoning_content`` : DeepSeek / GLM / 混元官方 / vLLM reasoning-parser
-        - ``reasoning``         : OpenRouter 及兼容网关（OpenCode Go）的归一化字段
-        - ``reasoning_details`` : OpenRouter 结构化数组
-          ``[{"type": "reasoning.text", "text": "...", "index": 0}]``
+    厂商差异（2025-2026 官方文档与网关实测）：
+        - ``reasoning_content`` : DeepSeek / DashScope Qwen3 / GLM / 混元 / Kimi /
+          硅基流动 / vLLM 旧 reasoning-parser
+        - ``reasoning``         : OpenRouter、vLLM 新版（旧字段已改名）、兼容网关；
+          标量为文本，少数网关给 ``{"text"/"content"/"summary": ...}`` 对象
+        - ``reasoning_details`` : OpenRouter / Vercel AI Gateway 结构化数组，
+          明文 type 为 ``reasoning.text``（text）与 ``reasoning.summary``（summary）
+        - ``thinking``          : Anthropic thinking_delta 经 OpenAI 兼容层的常见别名
+
+    不显示的内容（返回空）：``reasoning.encrypted`` 密文、``thought_signature``
+    签名、只有 signature 无文本的 details 项。这些是服务端限制，客户端解不出明文。
 
     只取第一个命中的字段，避免同一段思考被重复计入（网关通常同时下发
     ``reasoning`` 与 ``reasoning_details``，两者内容一致）。
@@ -1518,24 +1559,40 @@ def extract_reasoning_delta(obj: Any) -> str:
             return container.get(key)
         return getattr(container, key, None)
 
-    for key in ("reasoning_content", "reasoning"):
-        value = _pick(obj, key)
-        # 只接受标量文本：dict/list（某些网关的 reasoning 是对象）不塞进思考框
+    def _text(value):
+        """标量文本原样返回；对象取明文键；密文/签名/容器一律忽略。"""
         if isinstance(value, str) and value:
             return value
+        if isinstance(value, dict):
+            for key in ("text", "content", "summary"):
+                piece = value.get(key)
+                if isinstance(piece, str) and piece:
+                    return piece
+            return ""
         if value and not isinstance(value, (dict, list, tuple)):
             return str(value)
+        return ""
+
+    for key in ("reasoning_content", "reasoning", "thinking"):
+        piece = _text(_pick(obj, key))
+        if piece:
+            return piece
 
     details = _pick(obj, "reasoning_details")
     if isinstance(details, list) and details:
         parts = []
         for item in details:
-            if isinstance(item, dict):
-                piece = item.get("text") or item.get("summary") or ""
+            if isinstance(item, str):
+                piece = item
+            elif isinstance(item, dict):
+                # 密文项不显示：解不出明文，塞进思考框只会是乱码
+                if str(item.get("type", "")).endswith(".encrypted"):
+                    continue
+                piece = item.get("text") or item.get("summary") or item.get("content") or ""
             else:
                 piece = getattr(item, "text", None) or getattr(item, "summary", None) or ""
-            if piece:
-                parts.append(str(piece))
+            if isinstance(piece, str) and piece:
+                parts.append(piece)
         if parts:
             return "".join(parts)
     return ""

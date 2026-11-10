@@ -87,6 +87,22 @@ class PluginMcpTokenStore(TokenStorage):
         else:
             logger.warning(f"[MCP-OAuth] {self._plugin_name}/{self._server_name} token 保存失败")
 
+    def peek_expiry(self) -> tuple:
+        """只读 token 是否存在、绝对过期时刻、是否可刷新（零网络）。
+
+        探活预判用：已过期且没有 refresh_token 时可直接判失效，不必发请求。
+
+        Returns:
+            (has_token, expires_at 或 None, has_refresh)
+        """
+        blob = self._read_blob()
+        token = blob.get("token")
+        if not isinstance(token, dict) or not token.get("access_token"):
+            return False, None, False
+        raw = blob.get("expires_at")
+        expires_at = float(raw) if isinstance(raw, (int, float)) else None
+        return True, expires_at, bool(token.get("refresh_token"))
+
     async def get_client_info(self) -> Optional[OAuthClientInformationFull]:
         blob = self._read_blob()
         info = blob.get("client_info")

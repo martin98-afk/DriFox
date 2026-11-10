@@ -1,0 +1,25 @@
+{
+  "icon": {
+    "light": "icon.svg",
+    "dark": "icon_dark.svg"
+  },
+  "name": "system-diagnostics",
+  "display_name": {
+      "zh": "内置诊断工具"
+  },
+  "description": "DriFox 内置诊断工具：get_diagnostics 静态检查与 LSP 代码智能",
+  "version": "1.0.0",
+  "author": {
+    "name": "DriFoxx Team"
+  },
+  "homepage": "https://github.com/martin98-afk/DriFox",
+  "license": "GPL-3.0-or-later",
+  "type": "system",
+  "api_version": 2,
+  "components": {
+    "tools": true
+  },
+  "capabilities": [
+    "lsp.query"
+  ]
+}

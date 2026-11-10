@@ -116,3 +116,21 @@ TEXB0004  mipCount=1, 2, 0, 5, w=3840, h=2160, 0, 0
 - 主图常为 3840×2160 或 4096×2048，原样落盘单张 5~15MB
 - 技能脚本默认缩到 2560 宽（背景）与 1600 宽（装饰件）
 - 装饰件判定后如果透明像素 < 25%，说明它是又一张不透明背景图，不应当装饰件用
+
+## video 类型迁移流水线（3531878415 Sledding Game 实测）
+
+### migrate.py 产物与 SKILL.md 规范的三处脱节（2026-11-08）
+
+- **生成的 yaml 默认写 `overlay.video`**（指向 `../../assets/<name>.mp4`）。overlay 在 Qt5 已停用（读到的机器直接跳过，背景全无），必须手工改写成 `chat`/`window.animation` + 动画 WebP，mp4 产物本身也不该留在插件里。脚本模板没同步 SKILL.md 的规范，每次迁移后都要手动改这一层。
+- **manifest 引用 icon.png / icon_dark.png 但生成器不产出 icon 文件**：悬空引用，主题卡可能没图。修法：ffmpeg 从视频抽帧裁方形补（`-vf "crop=<方>:<方>:<x>:<y>,scale=256:256"`，取主角所在画幅比例处，实测 4K 帧主角在约 31% 宽 / 57% 高处）。
+- **anim_encode.py 不自动创建输出目录**：目标 `bg/chat.webp` 的父目录不存在时 ffmpeg 直接报 `No such file or directory`（exit 1），先 `mkdir` 再转码。
+
+### 转码量级基准
+
+3840×2160 / 11.25s 源 → 640×360 @12fps、`--blur 0.8`，产物 135 帧 0.49MB，正常量级（0.2~0.5MB/5s 区间内）。验收动画 WebP 用 PIL：`is_animated` + `n_frames`， ffprobe 看动画 WebP 的 duration 不可靠。
+
+### 浅色模式 + 动画背景的可行写法
+
+画面本身偏亮时（雪景/天空类）动画不必重淡化（0.55+blur6 那套是配暗调主图的经验）：`window.animation opacity 0.95` 整窗铺，`sidebar` 半透明浅青罩 alpha 145，`scene` 极淡白罩 alpha 40 微提亮对话区；accent 从画面唯一的饱和冷色取（本例河蓝滑痕 #3e86ad），warm 色从主角取（橙 #c8783a）。96 键 token 全集照 the-last-of-us-light 口径覆盖，防切主题残留。
+
+清晰度实测反馈（同一壁纸 3531878415）：640×360 + blur 0.8 被用户嫌糊，整窗背景场景首轮就该用 800×450 + blur 0.4（产物 0.77MB/135 帧，可接受）。用户明确要求「作为整个窗口背景」时，动画透明度给到 0.95、对话区罩降到 alpha 40 以下，别让罩子吃掉画面细节。

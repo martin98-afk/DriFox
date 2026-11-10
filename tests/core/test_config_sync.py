@@ -89,6 +89,16 @@ def reset_sync_service(tmp_path):
     svc._suppress_retry_scheduled = False
     svc._debounce_timer = None
     svc._merge_bases = set()
+    # 双开互斥锁落测试临时目录，避免在真实 .drifox/ 留下锁文件；
+    # 上一用例若抢过锁先释放，防止同一进程持有导致后续用例误判
+    svc._owner_lock.release()
+    from app.core.sync.config_sync import _SyncOwnerLock
+
+    svc._owner_lock = _SyncOwnerLock(tmp_path / ".sync_owner.lock")
+    svc._owner_blocked_logged = False
+    if svc._enable_retry_timer is not None:
+        svc._enable_retry_timer.stop()
+        svc._enable_retry_timer = None
     # 同步状态与合并基准必须落在测试临时目录，否则会写脏真实 .drifox/
     # （_commit_unit_state / _backup_local_unit 都按这两个路径落盘）
     svc._sha_cache_path = tmp_path / ".sync_shas.json"
@@ -1949,3 +1959,145 @@ class TestOrphanSeedTombstoneDefense:
             assert entry is not None and entry.get("d") is True, "墓碑必须保留在条目表"
         finally:
             svc._reloadSettings.connect(svc._reload_settings_on_main_thread)
+
+
+# =============================================================================
+# 13. 双开互斥 + 记账抑制 — 多实例共用同一数据目录的防护
+# =============================================================================
+
+class TestSyncOwnerLock:
+    """同一数据目录只允许一个进程启用云同步（OS 级文件锁）"""
+
+    def test_second_owner_cannot_acquire(self, tmp_path):
+        from app.core.sync.config_sync import _SyncOwnerLock
+
+        first = _SyncOwnerLock(tmp_path / "owner.lock")
+        second = _SyncOwnerLock(tmp_path / "owner.lock")
+        try:
+            assert first.acquire() is True
+            assert second.acquire() is False, "另一持有者存在时不得重复抢锁"
+        finally:
+            first.release()
+            second.release()
+
+    def test_release_allows_takeover(self, tmp_path):
+        from app.core.sync.config_sync import _SyncOwnerLock
+
+        first = _SyncOwnerLock(tmp_path / "owner.lock")
+        second = _SyncOwnerLock(tmp_path / "owner.lock")
+        try:
+            assert first.acquire() is True
+            assert second.acquire() is False
+            first.release()
+            assert second.acquire() is True, "主实例退场后必须能接棒"
+        finally:
+            first.release()
+            second.release()
+
+    def test_acquire_is_idempotent(self, tmp_path):
+        from app.core.sync.config_sync import _SyncOwnerLock
+
+        lock = _SyncOwnerLock(tmp_path / "owner.lock")
+        try:
+            assert lock.acquire() is True
+            assert lock.acquire() is True, "本进程重复 enable 不应被判成他人占用"
+        finally:
+            lock.release()
+
+
+class TestEnableOwnerGuard:
+    """enable() 被其他实例占着时不启动任何同步链路"""
+
+    @pytest.fixture
+    def svc(self, reset_sync_service):
+        return reset_sync_service
+
+    def test_enable_refused_when_other_instance_owns(self, svc, tmp_path):
+        from app.core.sync.config_sync import _SyncOwnerLock
+
+        other = _SyncOwnerLock(tmp_path / "oauth-owner.lock")
+        assert other.acquire() is True
+        svc._owner_lock = _SyncOwnerLock(tmp_path / "oauth-owner.lock")
+        try:
+            with patch.object(svc, "_start_watching") as mock_watch, patch.object(
+                svc, "_start_polling"
+            ) as mock_poll, patch.object(svc, "_schedule_enable_retry") as mock_retry:
+                svc.enable("token", "owner")
+            assert svc._state == "disabled"
+            assert mock_watch.called is False
+            assert mock_poll.called is False
+            assert mock_retry.called is True, "被占用时必须安排接管重试"
+        finally:
+            other.release()
+
+    def test_enable_acquires_and_disable_releases(self, svc):
+        with patch.object(svc, "_start_watching"), patch.object(
+            svc, "_start_polling"
+        ), patch.object(svc, "_initial_sync"):
+            svc.enable("token", "owner")
+            assert svc._owner_lock._fd is not None, "enable 成功后必须持有同步锁"
+            svc.disable()
+            assert svc._owner_lock._fd is None, "disable 必须释放同步锁"
+
+    def test_retry_waits_while_owned(self, svc, tmp_path):
+        from app.core.sync.config_sync import _SyncOwnerLock
+
+        other = _SyncOwnerLock(tmp_path / "oauth-owner.lock")
+        assert other.acquire() is True
+        svc._owner_lock = _SyncOwnerLock(tmp_path / "oauth-owner.lock")
+        try:
+            with patch.object(svc, "_schedule_enable_retry") as mock_retry, patch.object(
+                svc, "resume_if_bound"
+            ) as mock_resume:
+                svc._retry_enable()
+            assert mock_retry.called is True, "主实例仍持锁时必须继续排队"
+            assert mock_resume.called is False, "持锁期间不得去刷 token"
+        finally:
+            other.release()
+
+    def test_retry_hands_over_when_free(self, svc):
+        with patch.object(svc, "resume_if_bound") as mock_resume:
+            svc._retry_enable()
+        assert mock_resume.called is True, "锁空出来后必须重新取 token 接管"
+
+
+class TestRecorderSuppression:
+    """同步应用链的写入不能被记账成本机用户改动"""
+
+    @pytest.fixture
+    def svc(self, reset_sync_service):
+        return reset_sync_service
+
+    def test_suppress_recorder_blocks_touch(self, svc):
+        from app.core.sync.meta_recorder import SyncMetaRecorder
+
+        rec = SyncMetaRecorder("dev")
+        svc._meta_recorder = rec
+        with svc._suppress_recorder():
+            rec.on_item_changed("UI.ThemeStyle", "lumia", "cyberpunk")
+        assert rec.session_touched() == set()
+        assert rec.entries().get("UI.ThemeStyle") is None
+
+    def test_suppress_recorder_noop_without_recorder(self, svc):
+        svc._meta_recorder = None
+        with svc._suppress_recorder():
+            pass  # 不抛异常即可
+
+    def test_upload_commit_clears_session_touched(self, svc):
+        from app.core.sync.meta_recorder import SyncMetaRecorder
+
+        rec = SyncMetaRecorder("dev")
+        rec.on_item_changed("UI.ThemeStyle", "lumia", "cyberpunk")
+        assert rec.session_touched() == {"UI.ThemeStyle"}
+        svc._meta_recorder = rec
+        svc._commit_unit_state("app.config", "sha1", "hash1")
+        assert rec.session_touched() == set(), "上传成功后不得继续抬高同一批条目"
+
+    def test_other_unit_commit_keeps_session_touched(self, svc):
+        from app.core.sync.meta_recorder import SyncMetaRecorder
+
+        rec = SyncMetaRecorder("dev")
+        rec.on_item_changed("UI.ThemeStyle", "lumia", "cyberpunk")
+        svc._meta_recorder = rec
+        svc._commit_unit_state("user-custom", "sha1", "hash1")
+        assert rec.session_touched() == {"UI.ThemeStyle"}

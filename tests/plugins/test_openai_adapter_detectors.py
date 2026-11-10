@@ -75,6 +75,23 @@ class TestDetectUseResponses:
     def test_plain_false(self):
         assert det.detect_use_responses({"API_URL": "https://api.openai.com/v1", "模型名称": "gpt-4o"}) is False
 
+    def test_gpt6_and_higher_detected(self):
+        """gpt-6 及以后主版本自动走 Responses API（gpt-6-luna 漏判回归）"""
+        assert det.detect_use_responses({"API_URL": "https://api.openai.com/v1", "模型名称": "gpt-6-luna"}) is True
+        assert det.detect_use_responses({"API_URL": "https://api.openai.com/v1", "模型名称": "gpt-7-x"}) is True
+
+    def test_low_version_and_non_gpt_not_detected(self):
+        """gpt-4o 等旧版本与第三方模型名不误判"""
+        assert det.detect_use_responses({"API_URL": "https://api.openai.com/v1", "模型名称": "gpt-3.5-turbo"}) is False
+        assert det.detect_use_responses({"API_URL": "https://api.openai.com/v1", "模型名称": "deepseek-v4"}) is False
+
+    def test_legacy_key_overrides_gpt6(self):
+        """旧键显式 False 仍可否决 gpt-6 自动判定"""
+        assert (
+            det.detect_use_responses({"API_URL": "https://api.openai.com/v1", "模型名称": "gpt-6-luna", "使用ResponsesAPI": False})
+            is False
+        )
+
 
 # ---------- 组合：家族 protocol_flags 与旧方法逐点等价 ----------
 

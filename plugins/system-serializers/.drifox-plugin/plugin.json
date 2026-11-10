@@ -4,6 +4,9 @@
     "dark": "icon_dark.svg"
   },
   "name": "system-serializers",
+  "display_name": {
+      "zh": "内置消息序列化器"
+  },
   "description": "DriFox 内置消息序列化器：OpenAI 消息格式",
   "version": "1.0.0",
   "author": {

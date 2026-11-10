@@ -163,6 +163,7 @@ def test_edit_dialog_save_writes_overrides(provider_registry, qapp, monkeypatch)
     class _FakeDialog:
         saved = True
         declared = {"声明_支持思考": True}
+        protocol_entry = ""
 
         def __init__(self, *args, **kwargs):
             pass

@@ -84,7 +84,27 @@ from loguru import logger as _hook_logger
 
 def _pyqt_exception_hook(exc_type, exc_val, exc_tb):
     _hook_logger.error(f"[UnhandledException] {exc_type.__name__}: {exc_val}")
-    _hook_logger.error("".join(_exc_tb.format_exception(exc_type, exc_val, exc_tb)))
+    # tb 兜底：纯 C 层（PyQt 事件调度直接调用失效对象）产生的异常经 PyErr_Fetch
+    # 时 tb 为 NULL，format_exception 只输出异常行、丢光现场。此时 exc_val 上
+    # 可能挂着 __traceback__，仍无则 dump 主线程当前栈定位案发调用链。
+    tb = exc_tb or getattr(exc_val, "__traceback__", None)
+    if tb is not None:
+        _hook_logger.error("".join(_exc_tb.format_exception(exc_type, exc_val, tb)))
+        return
+    try:
+        import threading as _th_mod
+
+        _main_tid = _th_mod.main_thread().ident
+        _frame = sys._current_frames().get(_main_tid)
+        if _frame is not None:
+            _hook_logger.error(
+                "[no-tb] traceback 缺失（C 层异常），主线程当前栈:\n"
+                + "".join(_exc_tb.format_stack(_frame))
+            )
+        else:
+            _hook_logger.error("[no-tb] traceback 缺失且无法获取主线程栈")
+    except Exception:
+        _hook_logger.error("[no-tb] traceback 缺失，兜底栈获取失败")
 
 
 def _unraisable_hook(unraisable):
@@ -231,6 +251,19 @@ def main():
     app.setStyle("Fusion")
     app.setApplicationName("Drifox")
     app.setApplicationDisplayName("Drifox")
+
+    # 🔍 paint 热点采样（源码仓默认开启，打包版默认关闭）：主进程在不操作时
+    # 仍高 CPU、native 采样只看到 sipQWidget::paintEvent 看不出具体类时，靠它
+    # 按控件类统计 Paint 事件次数。正常只在 DEBUG 留一行；超过 120 次/秒升级
+    # 为 WARNING 并点名热点类（完整榜在 DEBUG）。
+    # 打包版排障强开：DRIFOX_PAINT_PROFILE=1；关掉：=0；
+    # 调窗口：DRIFOX_PAINT_PROFILE_WINDOW=60
+    try:
+        from app.utils.paint_profiler import start as _start_paint_profiler
+
+        _start_paint_profiler()
+    except Exception:  # noqa: BLE001 - 诊断设施绝不能阻断启动
+        pass
 
     # 🛡️ InfoBar 系统级守卫：死壳清洗 + notify 主线程投递桥预热。
     # 只在 GUI 分支装（qfluentwidgets 仅 GUI 需要）；CLI 不加载。

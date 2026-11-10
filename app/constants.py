@@ -159,6 +159,23 @@ PARAM_SCHEMA = {
         "ui_type": "checkbox",
         "hide_in_card": True,  # 配置卡里不显示，启用技能在别处控制
     },
+    "协议入口": {
+        "display_name": "接口入口",
+        "ui_type": "combobox",
+        # 声明式动态枚举：按 options_source 从 TransportRegistry 实时取已注册
+        # transport（不缓存，热重载后自动刷新）。当前消费方是模型能力编辑弹窗
+        # （model_capability_edit_dialog.py），参数卡不渲染该键。
+        "options_source": "transport_registry",
+        # 选 auto = 删键，回退自动识别
+        "delete_on": "auto",
+        "order": 160,
+        # 2026-11-07 用户决策：参数卡不渲染（渲染是配置驱动的，键不存在就整行
+        # 不出现，而三条注入链都不产出该键 → 死循环）。编辑入口统一收口到
+        # 「服务商 → 模型列表 → 齿轮 → 接口入口」，落盘 ModelOverrides 同条目。
+        "hide_in_card": True,
+        # 内部路由键：无 api_param，中文键名不匹配 _VALID_IDENTIFIER_PATTERN，
+        # 请求组装天然跳过；transport 侧 _CONFIG_ONLY_KEYS 另有显式兜底
+    },
     "API_KEY": {
         "ui_type": "password",
     },
@@ -177,7 +194,8 @@ MODEL_LEVEL_KEYS = frozenset(
     "温度 temp 最大Token 上下文长度 max_new_tokens "
     "top_p frequency_penalty presence_penalty "
     "思考模式 思考预算 思考等级 启用技能 "
-    "声明_支持思考 声明_支持图像 声明_上下文长度 声明_最大输出 声明_思考参数 声明_思考强度".split()
+    "声明_支持思考 声明_支持图像 声明_上下文长度 声明_最大输出 声明_思考参数 声明_思考强度 "
+    "协议入口".split()
 )
 
 # ============================================================

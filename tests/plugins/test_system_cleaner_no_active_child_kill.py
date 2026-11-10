@@ -56,6 +56,7 @@ class _FakeP:
 def test_active_child_of_current_process_not_killed(monkeypatch):
     """当前进程的存活 WebEngine 后代（正在渲染）绝不被杀"""
     scanner = _load_scanner()
+    monkeypatch.setattr(sys, "platform", "win32")  # 锁定 Windows 枚举路径（mac 走 pgrep）
 
     active_child = _FakeP(700, os.getpid())  # 活后代：正在渲染消息
     orphan = _FakeP(800, 9999)  # 孤儿：父进程 9999 已消失
@@ -87,6 +88,7 @@ def test_active_child_of_current_process_not_killed(monkeypatch):
 def test_active_child_hidden_from_tasklist_not_killed(monkeypatch):
     """活后代即使 tasklist 快照缺失（旧实现经 children() 误杀的路径）也不被杀"""
     scanner = _load_scanner()
+    monkeypatch.setattr(sys, "platform", "win32")
 
     active_child = _FakeP(700, os.getpid())
     fake_csv = b'"System","4","Services"\r\n'

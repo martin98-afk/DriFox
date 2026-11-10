@@ -127,6 +127,27 @@ def effective_light(mode: Optional[str] = None) -> bool:
     return resolve_light(mode, system_theme.system_prefers_light(), bool(cfg.ui_light_mode.value))
 
 
+# ── 同步应用屏蔽 ──
+# 云端配置写回循环按文件键序赋值，UI.LightMode 排在 ThemeMode/ThemeStyle 之前，
+# 中途 .value= 触发的 valueChanged 会同步执行 _on_light_mode_changed →
+# apply_light(save=True)：此刻 ThemeStyle 还是旧值，会把半同步态内存落盘成
+# 「浅色模式+深色主题」矛盾文件，同一下载的第二次 Settings 重载读到矛盾后
+# apply_light 再次翻转，把云端主题打回本地旧主题。写回循环期间置此标志，
+# 监听器短路，深浅对齐由重载末尾的统一 apply_light 兜底。
+_sync_apply_depth = 0
+
+def begin_sync_apply() -> None:
+    global _sync_apply_depth
+    _sync_apply_depth += 1
+
+def end_sync_apply() -> None:
+    global _sync_apply_depth
+    _sync_apply_depth = max(0, _sync_apply_depth - 1)
+
+def is_sync_applying() -> bool:
+    """云端配置写回循环进行中（监听器联动应短路）"""
+    return _sync_apply_depth > 0
+
 def apply_light(light: bool, *, save: bool = True) -> bool:
     """把生效深浅落到配置：写 ui_light_mode，必要时切默认主题。
 

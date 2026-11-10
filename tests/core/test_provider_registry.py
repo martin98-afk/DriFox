@@ -163,7 +163,7 @@ def test_coding_plan_fetcher_registration_and_resolution():
 
 
 def test_system_providers_loaded_from_plugins():
-    """system-providers 插件 12 家服务商全部加载，关键数据完整
+    """system-providers 插件 14 家服务商全部加载，关键数据完整
 
     注：测试环境 enabled_plugins 白名单只启用 system-providers，
     Anthropic/OpenAI/Groq/Ollama 由各自 source 插件提供，不在此断言范围。
@@ -172,7 +172,7 @@ def test_system_providers_loaded_from_plugins():
     loaded = load_providers(registry=reg)
     assert "system-providers" in loaded
     names = reg.names()
-    assert len(names) == 12
+    assert len(names) == 14
 
     for expect in [
         "DeepSeek",
@@ -185,6 +185,8 @@ def test_system_providers_loaded_from_plugins():
         "火山方舟",
         "OpenCode Zen",
         "OpenCode Go",
+        "OpenCode Zen (OAuth)",
+        "OpenCode Go (OAuth)",
         "CodeBuddy",
         "GitHub Copilot",
     ]:

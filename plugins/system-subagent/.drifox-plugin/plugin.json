@@ -4,6 +4,9 @@
         "dark": "icon_dark.svg"
     },
     "name": "system-subagent",
+    "display_name": {
+        "zh": "子智能体"
+    },
     "description": "子智能体 — assistant 消息卡末尾展示任务运行区（旋转图标、工具计数、上下文用量、进入会话/停止），并提供 /subagents 命令与会话卡",
     "version": "0.2.0",
     "author": {

@@ -580,7 +580,7 @@ class InlineArtifactPanel(QWidget):
             pix = row.grab()
             if not pix.isNull():
                 drag.setPixmap(pix.scaledToWidth(min(240, max(64, pix.width())), Qt.SmoothTransformation))
-        except RuntimeError, AttributeError:
+        except (RuntimeError, AttributeError):
             pass
         return drag
 
@@ -713,7 +713,7 @@ class InlineArtifactPanel(QWidget):
                 label.setPixmap(pix)
             else:
                 label.setText("✕")
-        except OSError, RuntimeError:
+        except (OSError, RuntimeError):
             pass
 
     def _load_thumb(self, path: str) -> Optional[QPixmap]:

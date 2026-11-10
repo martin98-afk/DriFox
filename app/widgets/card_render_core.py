@@ -688,6 +688,15 @@ _HTML_WIDGET_HEAD_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+# ```svg 围栏可前置 <style>/注释（visualization skill 的 svg-guide 规范要求），
+# 剥掉这些前导块后仍须以 <svg 元素开头，且含闭合标签，才算完整 SVG 结构。
+# 教学片段（仅提到 <svg> 字样）与流式半截（缺 </svg>）都不该被误吞。
+_SVG_LEADING_STRIP_PATTERN = re.compile(
+    r"^(?:\s|<!--[\s\S]*?-->|<style\b[^>]*>[\s\S]*?</style\s*>)*",
+    re.IGNORECASE,
+)
+_SVG_CLOSE_PATTERN = re.compile(r"</svg\s*>", re.IGNORECASE)
+
 
 def _sanitize_widget_html(raw_html: str, max_len: int = 200_000) -> str:
     """净化 ```html fence 内容，产出可直接内联的静态 HTML 片段。
@@ -853,12 +862,14 @@ def _render_render_fence(lang: str, code_content_raw: str) -> Optional[str]:
 
     # ===== SVG 代码块：透传 raw HTML，浏览器直渲 =====
     # 协议上 SVG 应内联正文（visualization skill），但模型习惯性输出 ```svg 围栏，
-    # 这里兜底：语言为 svg 且内容以 <svg 开头时按 raw HTML 透传，
-    # 与正文内联 <svg>（markdown safe=False）走同一条渲染路径。
-    # 内容不以 <svg 开头（教学代码等）保持普通代码块渲染，避免误吞。
+    # 且 svg-guide 要求在 <svg> 前放一段标准 <style>。这里兜底：剥掉前导
+    # style/注释/空白后以 <svg 开头且含闭合标签时按 raw HTML 透传，与正文内联
+    # <svg>（markdown safe=False）走同一条渲染路径。教学片段与流式半截保持
+    # 普通代码块渲染，避免误吞或撕碎后续 DOM。
     if lang == "svg":
         svg_html = _unescape_html(code_content_raw)
-        if svg_html.lstrip().lower().startswith("<svg"):
+        head = _SVG_LEADING_STRIP_PATTERN.sub("", svg_html, count=1)
+        if head.lstrip().lower().startswith("<svg") and _SVG_CLOSE_PATTERN.search(head):
             return svg_html
         return None
 
@@ -1132,6 +1143,26 @@ def _get_think_block_styles() -> str:
 _PREVIEW_TARGET_LEN: int = 60
 # 结论标记之后的正文最小长度：短于此说明标记紧贴文末，不构成摘要，退回开头采样
 _PREVIEW_MIN_CONCLUSION_BODY: int = 8
+
+# Responses 思考摘要的小节标题：summary_text 首行的 `**标题**`。
+# 服务端没有独立 title 字段（事件只带 delta / summary_index），ChatGPT 与
+# Codex 客户端那个分段标题就是这一行加粗文本（2026-11-07 实测 OpenCode Go）。
+_THINK_TITLE_RE = re.compile(r"^\s*\*\*(.+?)\*\*\s*$")
+
+
+def _split_think_title(content: str) -> tuple:
+    """拆出思考摘要的小节标题：返回 (title, body)。
+
+    无标题时（chat/completions 的 reasoning_content 常见形态）title 为空、
+    body 原样返回，调用方按旧逻辑走预览采样。
+    """
+    if not content:
+        return "", ""
+    head, sep, rest = content.partition("\n")
+    match = _THINK_TITLE_RE.match(head)
+    if not match:
+        return "", content
+    return match.group(1).strip(), (rest.lstrip("\n") if sep else "")
 
 
 def _get_think_preview(content: str, max_length: int = 160) -> str:
@@ -1458,17 +1489,28 @@ def _render_think_block(content: str, completed: bool = True, compact: bool = Fa
     _flip_attr = f' data-flip-key="think-{flip_idx}"' if flip_idx >= 0 else ""
     if completed:
         # ── 完成态 ──
+        # Responses 摘要自带小节标题（首行 **标题**）：标题进 summary 行、正文去掉该行，
+        # 避免展开后重复一行带星号的标题。无标题时回到旧行为（预览采样）。
+        think_title, think_body = _split_think_title(content)
+        body_source = think_body or content
         think_icon = _get_think_icon_html()
         status_text = f'<span class="think-bulb">{think_icon}</span>'
-        preview = _get_think_preview(content)
         font_style = _get_think_block_styles()
 
         # ── 简洁模式：纯文本行，不走折叠框（避免 save/restore 导致的消失→重现闪烁）──
+        # 带标题特例（Responses API）必须拼「标题 · 正文片段」：单行形态正文无处可见，
+        # 只显示标题会让思考内容彻底不可见（088c365e 回归）。无标题保持原预览采样。
         if compact:
+            if think_title:
+                body_sample = _get_think_preview(think_body) if think_body.strip() else ""
+                preview = f"{think_title} · {body_sample}" if body_sample else think_title
+            else:
+                preview = _get_think_preview(content)
+            preview_weight = "500" if think_title else "normal"
             block_seed = f"{content}|1"
             block_key = "think-" + hashlib.sha1(block_seed.encode("utf-8")).hexdigest()[:12]
             preview_right = (
-                f'<span style="color: var(--text-secondary); font-weight: normal; margin-left: 8px; font-size: {scale_font_size(11)}px;">'
+                f'<span style="color: var(--text-secondary); font-weight: {preview_weight}; margin-left: 8px; font-size: {scale_font_size(11)}px;">'
                 f"{escape(preview)}</span>"
             )
             return f"""<div class="think-compact" data-block-key="{block_key}"{_flip_attr} style="margin: 2px 0; padding: 4px 8px; {font_style} display: flex; align-items: baseline; gap: 6px; border-radius: 4px;">
@@ -1477,12 +1519,15 @@ def _render_think_block(content: str, completed: bool = True, compact: bool = Fa
 </div>"""
 
         # ── 非简洁模式：完整折叠框UI（图标标签 + 预览 + 可展开全文）──
-        content_escaped = escape(_strip_code_blocks(content))
+        # 标题进 summary 行、正文在展开区完整可见，preview 用标题（无标题退回采样）。
+        preview = think_title or _get_think_preview(body_source)
+        preview_weight = '500' if think_title else 'normal'
+        content_escaped = escape(_strip_code_blocks(body_source))
         block_seed = f"{content}|1"
         block_key = "think-" + hashlib.sha1(block_seed.encode("utf-8")).hexdigest()[:12]
         # 预览文字单行省略：长预览不再折行撑高 summary 行（视觉升级）
         summary_right = (
-            f'<span style="color: var(--text-secondary); font-weight: normal; margin-left: 12px; '
+            f'<span style="color: var(--text-secondary); font-weight: {preview_weight}; margin-left: 12px; '
             f'font-size: {scale_font_size(11)}px; flex: 1 1 auto; min-width: 0; '
             f'overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">'
             f"{escape(preview)}</span>"
@@ -1520,14 +1565,17 @@ def _render_think_block_lightweight(content: str, completed: bool = True) -> str
     """
     if completed:
         # ── 完成态：可折叠UI（图标 + 预览 + 可展开全文） ──
+        think_title, think_body = _split_think_title(content)
+        body_source = think_body or content
         think_icon = _get_think_icon_html()
         status_text = f'<span class="think-bulb">{think_icon}</span>'
-        content_escaped = escape(content)
+        content_escaped = escape(body_source)
         font_style = _get_think_block_styles()
-        preview = _get_think_preview(content)
+        preview = think_title or _get_think_preview(body_source)
+        preview_weight = '500' if think_title else 'normal' 
         # 预览文字单行省略：与 _render_think_block 同款（视觉升级）
         summary_right = (
-            f'<span style="color: var(--text-secondary); font-weight: normal; margin-left: 12px; '
+            f'<span style="color: var(--text-secondary); font-weight: {preview_weight}; margin-left: 12px; '
             f'font-size: {scale_font_size(11)}px; flex: 1 1 auto; min-width: 0; '
             f'overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">'
             f"{escape(preview)}</span>"
@@ -1750,7 +1798,14 @@ def _content_needs_webengine(content: Any) -> bool:
     if content is None:
         return True
     if isinstance(content, list):
-        # content blocks：图片块在 blocks 里有独立类型标记，仅取文本会丢语义 → 保守
+        # content blocks：只认得 text 块的降级判定——list 中出现任何「非 text」
+        # 元素（图片/自定义/思考/工具结果/落盘图片引用，乃至未来新增类型）即保守
+        # 返 True。枚举永远会漏新类型，「认不全就走 WebEngine」对未来自动保守。
+        # 注：image_ref 本应由 revive_vision_image_refs 恢复成 data:image 才进渲染，
+        # 原样进 content_to_markdown 会落空；此处返 True 是冗余保护而非渲染必需。
+        for block in content:
+            if not (isinstance(block, dict) and block.get("type") == "text"):
+                return True
         try:
             from app.core.conversation.message_content import content_to_text
 
@@ -1759,13 +1814,17 @@ def _content_needs_webengine(content: Any) -> bool:
             return True
         if not isinstance(text, str):
             return True
+        if not text:
+            # list 非空但仅取文本为空（tool_result 等块被丢弃）→ 仍有可渲染内容，
+            # 保守走 WebEngine；空列表无内容可降级，与空 str 同语义走 Qt
+            return bool(content)
     elif isinstance(content, str):
         text = content
     else:
         return True
 
     if not text:
-        # 空内容没有可降级的东西
+        # 空内容没有可降级的东西（仅 str 路径能到这里）
         return False
 
     # 插件注册的 fence lang：拿不到表 → 保守
@@ -3629,7 +3688,14 @@ _SKELETON_CACHE_MAX = 48
 # + 顶部渐隐，_v2LiveAppendNow / _v2LiveSplit 追加后滚底，_v2AfterPatch 首帧滚底，
 # _v2LiveSplit 新增 reasoning 参数保持 think-compact 类）。旧骨架无此规则 →
 # 长思考切标签页返回后整段全高显示（2026-11-02 用户实测）。
-_SKELETON_CACHE_VERSION = 75
+# _SKELETON_CACHE_VERSION +1（v76）：v2 揭示追加复用尾部文本节点
+# （_v2LiveAppendNow 的 `lastChild.appendData` 替代每帧 createTextNode）。
+# 旧骨架逐帧新建文本节点，长回答下同一 live 容器积累上千兄弟节点，
+# Chromium 每次重排/选择都要线性遍历，是流式掉帧的一分子。
+# _SKELETON_CACHE_VERSION +1（v77）：ECharts vendor 加载失败兜底——
+# _echLoadScript 的 onerror 清 _echLibLoading/_echLibQueue、给容器打失败标记，
+# _echartsEnsure 加 _echLibFailed 熔断。旧骨架 CDN 断时容器永久停在 400px 空框。
+_SKELETON_CACHE_VERSION = 77
 
 
 def _js_literal(value) -> str:

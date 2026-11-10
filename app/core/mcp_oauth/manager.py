@@ -87,6 +87,10 @@ class McpOAuthManager:
     def has_token(self, plugin_name: str, server_name: str) -> bool:
         return self._factory.has_token(plugin_name, server_name)
 
+    def peek_expiry(self, plugin_name: str, server_name: str) -> tuple:
+        """(has_token, expires_at 绝对时间戳或 None, 是否可刷新)。零网络。"""
+        return self._factory.peek_expiry(plugin_name, server_name)
+
     def revoke(self, plugin_name: str, server_name: str) -> bool:
         """登出：清本地 token + client info + provider 缓存。"""
         ok = self._factory.revoke(plugin_name, server_name)

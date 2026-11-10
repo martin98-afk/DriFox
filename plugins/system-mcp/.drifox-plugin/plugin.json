@@ -4,6 +4,9 @@
     "dark": "icon_dark.svg"
   },
   "name": "system-mcp",
+  "display_name": {
+      "zh": "内置 MCP 配置"
+  },
   "description": "DriFox 内置 MCP 服务器配置：MiniMax / GitHub / Playwright（默认关闭）",
   "version": "1.0.0",
   "author": {

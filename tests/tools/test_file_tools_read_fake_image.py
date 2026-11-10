@@ -22,7 +22,7 @@ if str(_REPO_ROOT) not in sys.path:
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-ft = import_module("plugins.system-tools.tools.file_tools")
+ft = import_module("plugins.system-core.tools.file_tools")
 
 
 _MIN_PNG = b"\x89PNG\r\n\x1a\n" + b"\x00\x00\x00\rIHDR" + b"\x00" * 8

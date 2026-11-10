@@ -13,7 +13,7 @@
 ![Stars](https://img.shields.io/github/stars/martin98-afk/DriFox)
 ![Downloads](https://img.shields.io/github/downloads/martin98-afk/DriFox/total)
 ![Last Commit](https://img.shields.io/github/last-commit/martin98-afk/DriFox)
-![Version](https://img.shields.io/badge/version-0.6.15-beta-brightgreen)
+![Version](https://img.shields.io/badge/version-0.7.0-brightgreen)
 
 </div>
 
@@ -52,7 +52,7 @@ DriFox 是一个桌面 AI 智能体工作台。它把「一支 AI 团队」装�
 
 **上下文管理** — 8 层 tier cascade 降级链：图片剥离 → 去重 → 工具结果截断 → 超限落盘 → 参数截断 → 摘要化 → 尾保留 → LLM 压缩。阈值与开关全部可视化配置，Token 预算环形图实时反馈。
 
-**模型接入** — 12 家内置服务商：DeepSeek / 智谱 AI / 阿里云 DashScope / 百度千帆 / 火山方舟 / MiniMax / SiliconFlow / Google Gemini / GitHub Copilot / CodeBuddy / OpenCode Zen / OpenCode Go。Copilot 与 CodeBuddy 支持 OAuth 登录；任意 OpenAI 兼容端点可加为自定义服务商；模型元数据从 models.dev 动态同步，服务商编辑卡的每个模型可手动声明多模态 / 思考开关 / 思考参数与强度 / 上下文长度 / 输出上限（声明优先于自动识别）；同名模型在不同服务商下的参数完全隔离。
+**模型接入** — 12 家内置服务商：DeepSeek / 智谱 AI / 阿里云 DashScope / 百度千帆 / 火山方舟 / MiniMax / SiliconFlow / Google Gemini / GitHub Copilot / CodeBuddy / OpenCode Zen / OpenCode Go。Copilot 与 CodeBuddy 支持 OAuth 登录；任意 OpenAI 兼容端点可加为自定义服务商；模型元数据从 models.dev 动态同步，服务商编辑卡的每个模型可手动声明多模态 / 思考开关 / 思考参数与强度 / 上下文长度 / 输出上限（声明优先于自动识别）；同名模型在不同服务商下的参数完全隔离。模型参数卡的「接口入口」可按模型手选协议通道：自动（gpt 主版本号 ≥5 判定）/ Responses API / 已注册协议插件；第三方网关不一定提供 `/v1/responses`，手选后 404 请回退自动。
 
 **MCP 系统** — 完整 Model Context Protocol 支持，含 OAuth 2.1 授权流（元数据发现 / PKCE / 动态客户端注册 / token 自动刷新），Notion 等需授权的服务一次登录即可使用；MCP 工具自动并入工具池。
 
@@ -70,7 +70,7 @@ DriFox 是一个桌面 AI 智能体工作台。它把「一支 AI 团队」装�
 
 ## 与 Claude Code / DeepSeek Harness 的核心差异
 
-> **比较时点**：2026-08-17（竞品列）；DriFox 列已更新至 v0.6.15-beta。
+> **比较时点**：2026-08-17（竞品列）；DriFox 列已更新至 v0.7.0。
 > Claude Code Agent Teams 为 **research preview / experimental**（需 `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` 启用）。
 > DeepSeek Harness 为 **developer preview**（2026-08-13 发布）。
 
@@ -92,7 +92,7 @@ DriFox 是一个桌面 AI 智能体工作台。它把「一支 AI 团队」装�
 | **多模型后端** | ✅ **原生 OpenAI 兼容**：DeepSeek / 智谱 / DashScope / 千帆 / 火山方舟 / MiniMax / SiliconFlow / Gemini / GitHub Copilot / CodeBuddy / OpenCode Zen / OpenCode Go 共 12 家内置 + 自定义端点 | ⚠️ 需 proxy（claude-code-proxy / claude-code-openai-wrapper / Bifrost gateway） | ✅ plugin-based，可接入任意 LLM 适配器 |
 | **开源协议** | GPL-3.0-or-later | 闭源（商业） | MIT |
 | **技术栈** | Python 3.14+ / PyQt5 | TypeScript / Node | TypeScript + Cordis 插件框架 |
-| **开发成熟度** | v0.6.15-beta（持续迭代） | 研究预览（v2.1.32+） | 开发者预览（2026-08-13） |
+| **开发成熟度** | v0.7.0（持续迭代） | 研究预览（v2.1.32+） | 开发者预览（2026-08-13） |
 
 ### DriFox 真正独有的四件事
 
@@ -273,7 +273,7 @@ python main.py
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
-│                    DriFox v0.6.15-beta 架构                       │
+│                    DriFox v0.7.0 架构                       │
 ├──────────────────────────────────────────────────────────────┤
 │  UI 层      标签页宿主 / 消息卡片 / 工作台 / 输入区                │
 │             标题栏 + 侧栏 / 设置面板 / 浮动卡片 / 系统托盘     │

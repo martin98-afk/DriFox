@@ -69,3 +69,16 @@ def test_existing_declarations_passthrough_on_save(card):
     for key in DECL_KEYS:
         assert got[key] == cfg[key], f"已有声明值 {key} 被静默抹掉或改写"
     assert got["温度"] == 0.7, "常规键不受影响"
+
+
+# ---------- 协议入口：参数卡不渲染（编辑入口在模型能力弹窗） ----------
+def test_protocol_entry_not_rendered(card):
+    """2026-11-07 用户决策：参数卡不渲染接口入口（渲染是配置驱动的，键不存在就整行不出现）"""
+    card.set_config("测试", _config(协议入口="responses"), "m1")
+    assert "协议入口" not in card._widgets
+
+
+def test_protocol_entry_passthrough_on_save(card):
+    """hide_in_card 只挡渲染：ModelOverrides 里的值经 set_config->get_config 原样透传"""
+    card.set_config("测试", _config(协议入口="transport:openai_chat"), "m1")
+    assert card.get_config()["协议入口"] == "transport:openai_chat"

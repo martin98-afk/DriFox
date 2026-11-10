@@ -419,6 +419,12 @@ class Colors:
     TOOLBAR_STRIP_BG = "rgba(24, 31, 45, 150)"
     TOOLBAR_STRIP_BORDER = "#2B3850"
 
+    # 标题栏雾化遮罩（scrim）：标题栏透明、直接叠在壁纸上，前景色只跟主题明暗走，
+    # 壁纸局部亮暗与主题相反时（浅色主题撞上深色天空）对比度会跌到 1:1 附近。
+    # 留空 = 按明暗自动取默认（浅色白雾 / 深色黑雾）；主题可写
+    # `titlebar_scrim: rgba(...)` 覆盖，alpha 建议 ≥ 0.5。
+    TITLEBAR_SCRIM = ""
+
     # 实时卡片色
     REALTIME_BORDER = "#4a90d9"
     REALTIME_ACCENT = "#7dd3fc"
@@ -1256,6 +1262,20 @@ def fade_in_widget(widget, duration: int = Animations.NORMAL_MS):
     anim.setDuration(duration)
     anim.setStartValue(0.0)
     anim.setEndValue(1.0)
+
+    def _drop_effect():
+        # 动画结束立即摘除 effect：带 effect 的 widget 走 Qt 离屏合成路径，
+        # macOS 上后台标签页期间积累的绘制欠账在重新可见时不被补画
+        # （表现为气泡底色缺失、露出场景背景图，resize 才恢复）。
+        # 摘除后卡片回到常规绘制路径，也消除「父级常驻 effect + 子级 effect
+        # 合成不可靠」这一历史坑的前提（2026-09-16「先显示随后消失」同因）。
+        try:
+            widget.setGraphicsEffect(None)
+        except RuntimeError:
+            return
+        widget._fade_anim = None
+
+    anim.finished.connect(_drop_effect)
     anim.start()
     # 保持引用防止被回收
     widget._fade_anim = anim

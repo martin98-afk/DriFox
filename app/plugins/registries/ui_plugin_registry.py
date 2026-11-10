@@ -1721,7 +1721,7 @@ class UIPluginRegistry:
                 continue
             try:
                 restore(items)
-            except RuntimeError, AttributeError:
+            except (RuntimeError, AttributeError):
                 pass
 
     def detach_card_inline_panel(self, panel_id: str) -> None:
@@ -4150,6 +4150,12 @@ class UIPluginRegistry:
         self.unregister_titlebar_widgets(plugin_name)
         # 清理服务槽
         self._services = {k: v for k, v in self._services.items() if v[0] != plugin_name}
+        # 清理进程内 MCP gateway 中该插件登记的 handler
+        try:
+            from app.core.services.local_mcp_gateway import get_gateway
+            get_gateway().unregister_plugin(plugin_name)
+        except Exception as e:
+            logger.debug(f"[UIPluginRegistry] MCP handler 清理失败: {e}")
         # 清理通用区域条目（Phase E）；settings: 分区中 auto_config_card 条目保留（同上）
         removed_badge = False
         for region in self._regions.values():

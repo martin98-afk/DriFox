@@ -146,6 +146,11 @@ class ContextBudgetAllocator:
 
         # 处理历史消息
         normalized_session_messages = consolidate_messages(session.get_context_messages())
+        # 剔除流式中途落盘的残缺回复（_partial）：那是进程崩溃/强杀留下的半截
+        # 内容，正常结束的回复不会有该标记（会被 worker 的完整消息替换）。
+        # 不清掉就会把半截话当正常历史发给模型，续写时接在半句后面。
+        if any(m.get("_partial") for m in normalized_session_messages):
+            normalized_session_messages = [m for m in normalized_session_messages if not m.get("_partial")]
         latest_user_message = ""
         latest_user_timestamp = ""
         params = {}

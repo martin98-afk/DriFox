@@ -37,6 +37,7 @@ def mgr():
     m._lock = threading.Lock()
     m._loop = None
     m._thread = None
+    m._probes = {}  # 探活结果缓存（get_status / connect 清结论用）
     return m
 
 

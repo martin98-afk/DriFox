@@ -27,14 +27,14 @@ def isolated_config(monkeypatch, tmp_path):
 
 
 def _load_system_manifest():
-    with open("plugins/system-tools/.drifox-plugin/plugin.json", encoding="utf-8") as fp:
+    with open("plugins/system-web/.drifox-plugin/plugin.json", encoding="utf-8") as fp:
         return json.load(fp)
 
 
 def test_plugin_json_declares_config_schema():
-    """system-tools 插件 plugin.json 必须声明 config_schema（E1 契约面）"""
+    """system-web 插件 plugin.json 必须声明 config_schema（E1 契约面）"""
     manifest = _load_system_manifest()
-    schema = parse_config_schema("system-tools", manifest.get("config_schema"))
+    schema = parse_config_schema("system-web", manifest.get("config_schema"))
     assert schema is not None
     assert {f.key for f in schema.fields} == {
         "tavily_api_key",
@@ -45,35 +45,35 @@ def test_plugin_json_declares_config_schema():
 
 def test_auto_card_registered_for_system(fresh_registry, monkeypatch):
     """plugin.json config_schema 声明后，自动卡 system-config 出现在设置卡注册表。"""
-    # 清掉已有 schema（其它用例可能已注册 system-tools）
-    PluginConfigRegistry.get_instance().unregister_plugin("system-tools")
+    # 清掉已有 schema（其它用例可能已注册 system-web）
+    PluginConfigRegistry.get_instance().unregister_plugin("system-web")
     manifest = _load_system_manifest()
-    schema = parse_config_schema("system-tools", manifest.get("config_schema"))
+    schema = parse_config_schema("system-web", manifest.get("config_schema"))
     assert schema is not None
     PluginConfigRegistry.get_instance().register(schema)
     from app.widgets.cards.settings.plugin_config_card import make_card_class
 
     UIPluginRegistry.get_instance().register_settings_card(
-        "system-tools", "system-config", schema.title, make_card_class("system-tools")
+        "system-web", "system-config", schema.title, make_card_class("system-web")
     )
     cards = [c for c in fresh_registry.get_settings_cards() if c.card_id == "system-config"]
-    assert cards and cards[0].plugin_name == "system-tools"
-    PluginConfigRegistry.get_instance().unregister_plugin("system-tools")
+    assert cards and cards[0].plugin_name == "system-web"
+    PluginConfigRegistry.get_instance().unregister_plugin("system-web")
 
 
 def test_auto_card_echo_falls_back_to_schema_default(qapp, fresh_registry, isolated_config):
     """未注册任何值时，卡片输入框回显 schema default（用户可见真实在用 key）"""
     from app.widgets.cards.settings.plugin_config_card import PluginConfigCard
 
-    PluginConfigRegistry.get_instance().unregister_plugin("system-tools")
+    PluginConfigRegistry.get_instance().unregister_plugin("system-web")
     manifest = _load_system_manifest()
-    schema = parse_config_schema("system-tools", manifest.get("config_schema"))
+    schema = parse_config_schema("system-web", manifest.get("config_schema"))
     PluginConfigRegistry.get_instance().register(schema)
-    card = PluginConfigCard("system-tools")
+    card = PluginConfigCard("system-web")
     defaults = {f.key: f.default for f in schema.fields}
     assert card._rows["tavily_api_key"].text() == defaults["tavily_api_key"]
     assert card._rows["tinyfish_api_key"].text() == defaults["tinyfish_api_key"]
-    PluginConfigRegistry.get_instance().unregister_plugin("system-tools")
+    PluginConfigRegistry.get_instance().unregister_plugin("system-web")
 
 
 def test_auto_card_save_persists_via_store(qapp, fresh_registry, isolated_config):
@@ -81,19 +81,19 @@ def test_auto_card_save_persists_via_store(qapp, fresh_registry, isolated_config
     from app.plugins.managers.plugin_config_store import PluginConfigStore
     from app.widgets.cards.settings.plugin_config_card import PluginConfigCard
 
-    PluginConfigRegistry.get_instance().unregister_plugin("system-tools")
+    PluginConfigRegistry.get_instance().unregister_plugin("system-web")
     manifest = _load_system_manifest()
-    schema = parse_config_schema("system-tools", manifest.get("config_schema"))
+    schema = parse_config_schema("system-web", manifest.get("config_schema"))
     PluginConfigRegistry.get_instance().register(schema)
-    card = PluginConfigCard("system-tools")
+    card = PluginConfigCard("system-web")
     card._rows["tavily_api_key"].setText("tvly-ui-key")
     card._rows["tavily_api_key"].editingFinished.emit()
     card._rows["tinyfish_api_key"].setText("tf-ui-key")
     card._rows["tinyfish_api_key"].editingFinished.emit()
     store = PluginConfigStore()
-    assert store.get("system-tools", "tavily_api_key") == "tvly-ui-key"
-    assert store.get("system-tools", "tinyfish_api_key") == "tf-ui-key"
-    PluginConfigRegistry.get_instance().unregister_plugin("system-tools")
+    assert store.get("system-web", "tavily_api_key") == "tvly-ui-key"
+    assert store.get("system-web", "tinyfish_api_key") == "tf-ui-key"
+    PluginConfigRegistry.get_instance().unregister_plugin("system-web")
 
 
 def test_save_empty_clears_back_to_default(qapp, fresh_registry, isolated_config):
@@ -101,18 +101,18 @@ def test_save_empty_clears_back_to_default(qapp, fresh_registry, isolated_config
     from app.plugins.managers.plugin_config_store import PluginConfigStore
     from app.widgets.cards.settings.plugin_config_card import PluginConfigCard
 
-    PluginConfigRegistry.get_instance().unregister_plugin("system-tools")
+    PluginConfigRegistry.get_instance().unregister_plugin("system-web")
     manifest = _load_system_manifest()
-    schema = parse_config_schema("system-tools", manifest.get("config_schema"))
+    schema = parse_config_schema("system-web", manifest.get("config_schema"))
     PluginConfigRegistry.get_instance().register(schema)
-    PluginConfigStore().set_values("system-tools", {"tavily_api_key": "tvly-tmp"})
-    card = PluginConfigCard("system-tools")
+    PluginConfigStore().set_values("system-web", {"tavily_api_key": "tvly-tmp"})
+    card = PluginConfigCard("system-web")
     card._rows["tavily_api_key"].setText("")
     card._rows["tavily_api_key"].editingFinished.emit()
     defaults = {f.key: f.default for f in schema.fields}
     assert card._rows["tavily_api_key"].text() == defaults["tavily_api_key"]
-    assert PluginConfigStore().get("system-tools", "tavily_api_key") == defaults["tavily_api_key"]
-    PluginConfigRegistry.get_instance().unregister_plugin("system-tools")
+    assert PluginConfigStore().get("system-web", "tavily_api_key") == defaults["tavily_api_key"]
+    PluginConfigRegistry.get_instance().unregister_plugin("system-web")
 
 
 if __name__ == "__main__":

@@ -22,6 +22,8 @@ from typing import Callable, Optional
 
 from loguru import logger
 
+from .display_name import plugin_display_name
+
 # FluentIcon SVG 渲染缓存补丁：必须在导入 qfluentwidgets 前生效
 from . import _icon_cache_patch as _icon_patch
 
@@ -92,6 +94,10 @@ _DOWNLOADS_LIVE_QUERY_ENABLED = False
 # 取消标记：worker 把 InstallCancelled 走 error 通道时加此前缀，上层据此
 # 区分「用户取消」与「真失败」（不回滚提示、不写失败记录）
 _CANCELLED_MARK = "\x00cancelled\x00"
+
+# 列表内容层半透明面板不透明度：与 #chatFrame 面板（CARD_BG a150）一致，
+# 列表区与顶部筛选区融为一体透出壁纸。改小会更透但文字可读性下降。
+_LIST_SURFACE_ALPHA = 150
 
 # ── 主题色辅助 ──────────────────────────────────────────────
 
@@ -703,7 +709,7 @@ class _PluginDetailDialog(MaskDialogBase):
         layout.setSpacing(0)
 
         # ── 标题行：名称 + 版本徽标（徽标独立成 chip，不再用内联 HTML 拼字符串） ──
-        name = self._meta.get("name", "未知")
+        name = plugin_display_name(self._meta)
         remote_ver = self._meta.get("version", "")
         head = QWidget(self.widget)
         head.setStyleSheet("background: transparent;")
@@ -1651,7 +1657,7 @@ class _PluginRow(QFrame):
         # info 在行布局中的固定 index（heightForWidth 手动计算用）
         self._info_index = 1
 
-        name = self._meta.get("name", "未知")
+        name = plugin_display_name(self._meta)
         self._name_raw = name
         # 标题行：只有插件名（下载量已移到下方元信息行，见 meta_row）
         title_row = QWidget(self)
@@ -2062,12 +2068,12 @@ class _PluginRow(QFrame):
            manifest.icon + source 指向 git-subdir GitHub 源）
         3. SquircleAvatar 缩写头像（兜底）
 
-        卡片行内图标按 font_size * 2.4 放大（最小 36px），让图标在列表中
-        更醒目。当前 font_size=14 → 36px（之前 23px）。
+        卡片行内图标按 font_size * 3.4 放大（最小 48px），让图标在列表中
+        更醒目。当前 font_size=14 → 48px（之前 36px，更早 23px）。
         """
         plugin_name = self._meta.get("name", "?")
-        # 卡片行内放大：font_size > 0 时按 2.4 倍率放大，下限 36px
-        icon_size = max(36, int(self._font_size * 2.4)) if self._font_size > 0 else 36
+        # 卡片行内放大：font_size > 0 时按 3.4 倍率放大，下限 48px
+        icon_size = max(48, int(self._font_size * 3.4)) if self._font_size > 0 else 48
 
         local_path = self._local_path
         if local_path:
@@ -2111,7 +2117,7 @@ class _PluginRow(QFrame):
 
         # Fallback to initials avatar
         return SquircleAvatar(
-            extract_initials(plugin_name),
+            extract_initials(plugin_display_name(self._meta)),
             name_color(plugin_name),
             self,
             size=icon_size,
@@ -2152,8 +2158,8 @@ class _PluginRow(QFrame):
             return
         self._font_size = font_size
         if self._avatar is not None:
-            # 卡片行内图标按字号 2.4 倍放大（最小 36px），与 _create_icon_widget 保持一致
-            icon_size = max(36, int(font_size * 2.4))
+            # 卡片行内图标按字号 3.4 倍放大（最小 48px），与 _create_icon_widget 保持一致
+            icon_size = max(48, int(font_size * 3.4))
             if hasattr(self._avatar, "set_icon_size"):
                 self._avatar.set_icon_size(icon_size)
             elif hasattr(self._avatar, "set_size"):
@@ -2346,7 +2352,7 @@ class _ExploreCard(QFrame):
         self._avatar = self._create_icon_widget(head)
         head_lay.addWidget(self._avatar)
 
-        name = self._meta.get("name", "未知")
+        name = plugin_display_name(self._meta)
         self._name_label = QLabel(name, head)
         self._name_label.setObjectName("exploreCardName")
         self._name_label.setStyleSheet(
@@ -2999,27 +3005,31 @@ class MarketplaceCard(QWidget):
     }
 
     def _apply_content_surface_color(self):
-        """给列表内容层刷主题实底色（滚动 blit 的前置条件）
+        """给列表内容层刷半透明面板底（与 #chatFrame 同色同透明度）
 
-        取上下文 ``colors.content_bg``，缺键回退 ``Colors.CONTENT_BG``。
-        必须用 palette（autoFillBackground）而非 QSS：QSS 背景由
-        QStyleSheetStyle 在 paintEvent 内绘制，不改写 QWidget 的 opaque
-        判定 → Qt 滚动位块传输优化仍被禁用（实测每步仍 106 次 paint）。
+        2026-11-08 起改为半透明：列表区与顶部筛选区融为同一块半透明
+        面板，透出壁纸。底色取 ``CARD_BG alpha=150``（chatFrame 面板
+        同款），仍走 palette + autoFillBackground（QSS 背景无法保证
+        与下层壁纸正确合成）。
+
+        代价：底色不再全不透明 → Qt 滚动 blit 失效，回退全视口重绘
+        （实测透明时 ~106 次 paint / p50 1.9ms/步 vs 实底 20 次 /
+        0.6ms，基准数据见 tests/perf/test_marketplace_scroll_blit.py，
+        60fps 帧预算内可接受）。勿因性能把它改回实底：那是产品决策。
         """
         from PyQt5.QtGui import QColor
 
+        alpha = _LIST_SURFACE_ALPHA
         try:
-            from app.plugins.sdk import Colors
+            from app.plugins.sdk import Colors, qcolor_from_token
 
-            fallback = Colors.CONTENT_BG
+            # CARD_BG 是 "rgba(r,g,b,{alpha})" 模板；rgba 解析必须走
+            # qcolor_from_token（QColor 构造函数不认 CSS rgba 写法）
+            color = qcolor_from_token(Colors.CARD_BG.format(alpha=alpha))
+            if not color.isValid():
+                raise ValueError(color.name())
         except Exception:
-            fallback = "#2a2a2e"
-        theme_colors = getattr(self, "_cached_theme_colors", {}) or {}
-        raw = theme_colors.get("content_bg") or fallback
-        color = QColor(raw)
-        if not color.isValid():
-            color = QColor(fallback)
-        color.setAlpha(255)  # 必须全不透明，否则 blit 优化失效
+            color = QColor(33, 33, 38, alpha)
         pal = self._content.palette()
         pal.setColor(self._content.backgroundRole(), color)
         self._content.setPalette(pal)
@@ -3368,20 +3378,16 @@ class MarketplaceCard(QWidget):
         self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self._scroll.setStyleSheet(_scroll_area_qss())
         self._content = _MarketListContent(self._scroll)
-        # ── 内容层必须"不透明实底"（滚动性能关键）──
-        # QScrollArea 滚动时走 QWidgetPrivate::scrollRect 位块传输（blit）：
-        # 已绘制区域整块搬移，只重绘新露出的一条。该优化要求滚动内容
-        # widget 自身不透明，否则 Qt 无法判断搬移后残留像素是否需与背景
-        # 合成，会回退到「全视口重绘」。
-        # 实测（150 行 / 视口 1000x577 / 原生平台）：
-        #   content 透明（background: transparent）→ 每滚动一步 106 次 paint
-        #     （视口内 6 行 × 17 控件全部重绘）、paint 耗时 p50 1.9ms；
-        #   content 不透明 → 每步 20 次 paint（仅新露出的一行）、p50 0.6ms。
-        # 注意：autoFillBackground（走 palette）才有效，setStyleSheet 设
-        # background 实测无效——QSS 背景由 QStyleSheetStyle 在 paintEvent 里
-        # 绘制，不改写 QWidget 的 opaque 判定，blit 仍被禁用。
-        # 实际底色（含 setAutoFillBackground）在 setWidget 之后由
-        # _apply_content_surface_color 统一设置。
+        # ── 内容层底色走半透明面板（alpha=150，透出壁纸）──
+        # 历史背景：实底曾是滚动 blit 优化的前置条件（widget 自身不
+        # 透明 Qt 才能位块搬移已绘制区域），2026-11-08 按需求改为与
+        # chatFrame 同款半透明面板，blit 失效回退全视口重绘（单步
+        # paint p50 0.6ms → 1.9ms，60fps 预算内）。
+        # 通道限制不变：palette（autoFillBackground）才有效，QSS 背景
+        # 由 QStyleSheetStyle 在 paintEvent 里绘制，不改写 QWidget 的
+        # opaque 判定。
+        # 实际底色在 setWidget 之后由 _apply_content_surface_color
+        # 统一设置（见 tests/perf/test_marketplace_scroll_blit.py）。
         self._content_layout = QVBoxLayout(self._content)
         self._content_layout.setContentsMargins(12, 8, 12, 8)
         # 间距 0：行与行之间靠行自身的 1px 分隔线分隔（行上下各有 8px 内边距，
@@ -3594,6 +3600,19 @@ class MarketplaceCard(QWidget):
         # 不移除、数据翻倍 + 状态徽标查不到。
         market_name = market_data.get("_marketplace") or market_data.get("name", "")
         plugins = market_data.get("plugins", []) or []
+        # 远端清单可能尚未发布 display_name（未 push 前），已安装插件从本地
+        # manifest 补一次，保证重开即显示中文；远程已有字段时以其为准。
+        try:
+            local_manifests = get_installer().get_manifest_map()
+        except Exception:
+            local_manifests = {}
+        if local_manifests:
+            for p in plugins:
+                if p.get("display_name"):
+                    continue
+                lm = local_manifests.get(p.get("name"))
+                if lm and lm.get("display_name"):
+                    p["display_name"] = lm["display_name"]
         # 合并：移除该市场旧数据，追加新数据（同名插件按市场覆盖）
         old = self._plugin_data
         merged = [p for p in old if p.get("_marketplace") != market_name]
@@ -3995,6 +4014,7 @@ class MarketplaceCard(QWidget):
             "_local_only": True,
             "_status": status,
             "_marketplace": "本地",
+            "display_name": {},
         }
         try:
             import json as _json
@@ -4004,6 +4024,7 @@ class MarketplaceCard(QWidget):
                 if _mp.exists():
                     m = _json.loads(_mp.read_text(encoding="utf-8"))
                     meta["description"] = m.get("description", "")
+                    meta["display_name"] = m.get("display_name") or {}
                     meta["author"] = (
                         m.get("author", {}).get("name", "")
                         if isinstance(m.get("author"), dict)
@@ -4041,6 +4062,7 @@ class MarketplaceCard(QWidget):
             "_local_only": True,
             "_status": status,
             "_marketplace": "本地",
+            "display_name": {},
         }
         try:
             import json as _json
@@ -4050,6 +4072,7 @@ class MarketplaceCard(QWidget):
                 if _mp.exists():
                     m = _json.loads(_mp.read_text(encoding="utf-8"))
                     meta["description"] = m.get("description", "")
+                    meta["display_name"] = m.get("display_name") or {}
                     meta["author"] = (
                         m.get("author", {}).get("name", "")
                         if isinstance(m.get("author"), dict)
@@ -4091,9 +4114,14 @@ class MarketplaceCard(QWidget):
         Returns: bool
         """
         name = p.get("name", "")
+        display = plugin_display_name(p)
 
         if query:
-            if query not in name.lower() and query not in (p.get("description", "")).lower():
+            if (
+                query not in name.lower()
+                and query not in display.lower()
+                and query not in (p.get("description", "")).lower()
+            ):
                 tags = p.get("_cached_tags", [])
                 if not any(query in t.lower() for t in tags):
                     return False
@@ -5725,7 +5753,7 @@ class MarketplaceCard(QWidget):
         act_lb.setStyleSheet(f"color: {tcs}; font-size: {fs_row}px; background: transparent;{ff_qss}")
         lay.addWidget(act_lb)
 
-        name = rec.get("name", "")
+        name = plugin_display_name(rec.get("meta") or {}) or rec.get("name", "")
         name_lb = QLabel(name, row)
         name_lb.setObjectName("proxyRecordRow")
         name_lb.setStyleSheet(f"color: {tc}; font-size: {fs_row}px; background: transparent;{ff_qss}")
@@ -5791,7 +5819,7 @@ class MarketplaceCard(QWidget):
             self._show_proxy_info("缺少插件元数据，无法重试", error=True)
             return
         action_text = "安装" if rec.get("action") == "install" else "更新"
-        name = rec.get("name", "")
+        name = plugin_display_name(rec.get("meta") or {}) or rec.get("name", "")
         if btn is not None:
             btn.setEnabled(False)
             btn.setText("重试中…")

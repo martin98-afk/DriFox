@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import os
+import time
 from typing import Any, Dict, Optional
 
 from loguru import logger
@@ -50,8 +51,13 @@ class WorktreeService:
     SERVICE_NAME = "worktree"
 
     # workdir→branch 类级缓存（原 OpenAIChatToolWindow._branch_cache 迁入）
+    # ★ 缓存键是「工作目录」而非「仓库状态」：在同一目录内 git switch/checkout
+    #   换了分支，键不变。没有时间维度的缓存在这条路径上永不失效，chip 会
+    #   一直显示切走前的分支（与用户实际所在工作树的分支不符）。
     _branch_cache: Dict[str, str] = {}
+    _branch_cache_ts: Dict[str, float] = {}
     _MAX_BRANCH_CACHE = 64
+    _BRANCH_CACHE_TTL = 5.0  # 分支名对即时性敏感（同目录内 git switch），不宜照搬 30s
 
     # ── 会话联动 ──
 
@@ -113,8 +119,14 @@ class WorktreeService:
             return
         project = mw._current_project
 
-        # 幂等：已在目标 worktree 中则跳过
-        if mw._current_workdir.get(project) == worktree_path:
+        # 幂等：已在目标 worktree 中则跳过（路径归一：Windows 大小写/斜杠差异会误判）
+        cur_workdir = mw._current_workdir.get(project)
+        if cur_workdir and os.path.normcase(os.path.abspath(str(cur_workdir))) == os.path.normcase(
+            os.path.abspath(worktree_path)
+        ):
+            # 短路前仍刷一次分支标签：同目录内切过分支时 chip 可能陈旧，
+            # 直接 return 会让它永远停在旧分支（模型重复 switch 也修不好）
+            self.update_branch(mw)
             return
 
         # 1+2. 一次语义动作：写库（工作目录持久化）
@@ -185,6 +197,41 @@ class WorktreeService:
 
     # ── 分支标签 ──
 
+    @classmethod
+    def _branch_cache_get(cls, workdir: str) -> Optional[str]:
+        """取缓存分支；过期即剔除并返回 None（None 与合法空分支 "" 区分）。"""
+        if workdir not in cls._branch_cache:
+            return None
+        if time.monotonic() - cls._branch_cache_ts.get(workdir, 0.0) > cls._BRANCH_CACHE_TTL:
+            cls._branch_cache.pop(workdir, None)
+            cls._branch_cache_ts.pop(workdir, None)
+            return None
+        return cls._branch_cache[workdir]
+
+    @classmethod
+    def _branch_cache_set(cls, workdir: str, branch: str) -> None:
+        if workdir not in cls._branch_cache and len(cls._branch_cache) >= cls._MAX_BRANCH_CACHE:
+            # Python 3.7+ dict 保插入序：弹出最早插入的 key
+            oldest = next(iter(cls._branch_cache))
+            cls._branch_cache.pop(oldest, None)
+            cls._branch_cache_ts.pop(oldest, None)
+        cls._branch_cache[workdir] = branch
+        cls._branch_cache_ts[workdir] = time.monotonic()
+
+    @classmethod
+    def invalidate_branch_cache(cls, workdir: str = "") -> None:
+        """失效分支缓存（workdir 为空=全清）。
+
+        触发点：工具侧 create/remove/merge/switch（工作树拓扑或分支已变，但缓存
+        键仍是路径）。UI 侧主仓库切分支走 branch.refresh 能力（同一语义）。
+        """
+        if workdir:
+            cls._branch_cache.pop(workdir, None)
+            cls._branch_cache_ts.pop(workdir, None)
+            return
+        cls._branch_cache.clear()
+        cls._branch_cache_ts.clear()
+
     def update_branch(self, mw: Any) -> None:
         """刷新分支标签（原 main_widget._update_branch 迁入）。
 
@@ -202,16 +249,19 @@ class WorktreeService:
             tooltip += f"\n{workdir}"
         mw._project_avatar.setToolTip(tooltip)
 
-        # 先隐藏分支标签，等后台检测完成再决定显示
-        bw.setVisible(False)
+        # 先隐藏分支标签，等后台检测完成再决定显示。
+        # 例外：同一目录刷新（切会话/轮次结束）保留旧文字 —— 旧文字本来就对应
+        # 这个目录，没有串显风险；每轮闪一下比短暂陈旧更恼人。
+        if not (workdir and getattr(bw, "_rendered_workdir", None) == workdir):
+            bw.setVisible(False)
 
         if not workdir or not os.path.isdir(workdir):
             return
 
-        # 缓存命中：直接应用，避免重复 git 调用（类级缓存，跨窗口共享）
-        cache = WorktreeService._branch_cache
-        if workdir in cache:
-            self._apply_branch_to_ui(mw, workdir, cache[workdir])
+        # 缓存命中：直接应用，避免重复 git 调用（类级缓存，跨窗口共享；带 TTL）
+        cached = self._branch_cache_get(workdir)
+        if cached is not None:
+            self._apply_branch_to_ui(mw, workdir, cached)
             return
 
         # 发起后台检测：自增 request_id 使在飞旧任务过期（per-widget 状态）
@@ -243,11 +293,7 @@ class WorktreeService:
             return  # 过期结果：用户已切换，丢弃
         if not ok:
             return
-        cache = WorktreeService._branch_cache
-        if len(cache) >= self._MAX_BRANCH_CACHE:
-            # Python 3.7+ dict 保插入序：弹出最早插入的 key
-            cache.pop(next(iter(cache)), None)
-        cache[workdir] = branch
+        self._branch_cache_set(workdir, branch)
         if request_id != getattr(bw, "_detect_request_id", -1):
             return  # 缓存写完后再校验一次（并发切换）
         if mw._resolve_project_workdir() != workdir:
@@ -264,6 +310,7 @@ class WorktreeService:
         mw._project_avatar.setToolTip(tooltip)
 
         bw = mw._branch_widget
+        bw._rendered_workdir = workdir
         if branch:
             display = branch if len(branch) <= 20 else branch[:8] + "…" + branch[-8:]
             bw.setText(display)
@@ -296,11 +343,15 @@ class WorktreeService:
             tgt_bw.setText(src_bw.text())
             tgt_bw.setVisible(branch_visible)
             tgt_bw.setToolTip(src_bw.toolTip())
+            # 连同「已渲染目录」一起继承：否则 200ms 后的重检会把标签当成
+            # 换目录而隐藏一次（复制窗口闪一下）
+            tgt_bw._rendered_workdir = getattr(src_bw, "_rendered_workdir", None)
             # 同步项目 avatar tooltip（含完整项目名、路径、分支）
             if hasattr(target, "_project_avatar") and hasattr(source, "_project_avatar"):
                 target._project_avatar.setToolTip(source._project_avatar.toolTip())
-            if not branch_visible:
-                QTimer.singleShot(200, lambda: self.update_branch(target))
+            # 无条件排一次重检：源标签正在检测（不可见）时要恢复显示；可见时也
+            # 可能是陈旧文本（源窗口在同一 workdir 内切过分支），缓存命中零 git 开销
+            QTimer.singleShot(200, lambda: self.update_branch(target))
         except Exception:
             logger.exception("[WorktreeService] copy_branch_state 复制分支状态失败")
 
@@ -362,8 +413,31 @@ class _SwitchReceiver(QObject):
             logger.warning(f"[WorktreeService] 工具请求切换失败: {e}")
             return
 
+    @pyqtSlot(str)
+    def on_worktree_changed(self, summary: str) -> None:
+        """工具侧写操作完成（create/remove/merge）→ 分支标签失效重检。
+
+        工具侧只把 changed 给工作树页刷新，chip 不在其触发范围内；而 chip 的
+        缓存键是路径，工作树删了重建 / 挂载了别的分支都不会自己失效，会永久
+        显示旧分支。UI 侧主仓库切分支走 branch.refresh，工具侧必须有对应补偿。
+        """
+        try:
+            WorktreeService.invalidate_branch_cache()
+            tm = _resolve_tab_manager()
+            windows = (getattr(tm, "_windows", []) or []) if tm is not None else []
+            for win in windows:
+                try:
+                    self._service.update_branch(win)
+                except Exception as e:  # noqa: BLE001 - 单窗口失败不影响其他窗口
+                    logger.debug(f"[WorktreeService] 工具变更后刷新分支标签失败: {e}")
+        except Exception as e:  # noqa: BLE001 - 刷新失败不能炸主线程
+            logger.warning(f"[WorktreeService] 工具变更后刷新分支标签失败: {e}")
+
 def _install_switch_receiver(service: "WorktreeService") -> None:
-    """连接 bridge.switchRequested → 主线程切换（幂等：重复调用不重复连）"""
+    """连接 bridge 信号 → 主线程处理（幂等：重复调用不重复连）
+
+    switchRequested：切换会话工作目录；changed：工具侧写操作后分支标签失效重检。
+    """
     global _switch_receiver
     from .change_bridge import get_bridge
 
@@ -373,4 +447,5 @@ def _install_switch_receiver(service: "WorktreeService") -> None:
     _switch_receiver = _SwitchReceiver(service)
     _switch_receiver.setParent(bridge)  # 挂在 bridge 上保活，随 app 退出销毁
     bridge.switchRequested.connect(_switch_receiver.on_switch_requested)
-    logger.info("[WorktreeService] 工具侧切换请求通道已接入")
+    bridge.changed.connect(_switch_receiver.on_worktree_changed)
+    logger.info("[WorktreeService] 工具侧切换/变更信号通道已接入")

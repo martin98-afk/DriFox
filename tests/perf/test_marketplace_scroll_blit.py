@@ -17,7 +17,10 @@
     1. 必须用 **palette + autoFillBackground**，不能用 QSS。QSS 背景由
        QStyleSheetStyle 在 paintEvent 内绘制，不改写 QWidget 的 opaque
        判定 → blit 仍被禁用（实测 106 次/步，与透明时一致）。
-    2. 底色 alpha 必须为 255（``color.setAlpha(255)``）：半透明同样禁用 blit。
+    2. 底色 2026-11-08 起为**半透明面板**（``CARD_BG alpha=150``，与
+       #chatFrame 同款，透出壁纸）：产品决策让位于滚动 blit 性能
+       （回退全视口重绘 p50 1.9ms/步，60fps 预算内）。勿因性能改回
+       实底 alpha=255。
     3. 调用点必须落在 ``_scroll.setWidget(...)`` 与 ``SmoothScrollDelegate``
        安装之后：setWidget 会 reparent content 到视口，实测紧跟其设置仍会被
        清掉（构造结束后读回 autoFillBackground=False）。
@@ -62,15 +65,23 @@ def test_surface_uses_palette_autofill(surface_fn_body: str):
     assert "setStyleSheet" not in surface_fn_body, "QSS 背景不改写 opaque 判定，不能用于此处"
 
 
-def test_surface_color_is_fully_opaque(surface_fn_body: str):
-    """底色 alpha 必须强制 255：半透明同样会禁用滚动 blit。"""
-    assert "setAlpha(255)" in surface_fn_body, "内容层底色必须全不透明（alpha=255），否则 blit 优化失效"
+def test_surface_color_is_semitransparent_panel(surface_fn_body: str):
+    """底色为 chatFrame 同款半透明面板（CARD_BG a<255），透出壁纸。"""
+    assert "setAlpha(255)" not in surface_fn_body, (
+        "底色不得强制全不透明：2026-11-08 起列表区改为半透明面板（透出壁纸），"
+        "勿因滚动 blit 性能改回实底"
+    )
+    assert "CARD_BG.format(alpha=" in surface_fn_body, (
+        "底色应取 CARD_BG.format(alpha=...)，与 #chatFrame 半透明面板同色同透明度"
+    )
+    assert "qcolor_from_token" in surface_fn_body, (
+        "rgba 模板解析必须走 qcolor_from_token（QColor 构造函数不认 CSS rgba 写法）"
+    )
 
 
 def test_surface_color_follows_theme(surface_fn_body: str):
-    """底色取上下文 content_bg，主题切换时随之刷新。"""
-    assert 'get("content_bg")' in surface_fn_body, "底色应取上下文 colors.content_bg"
-    assert "_cached_theme_colors" in surface_fn_body, "底色应复用已缓存的上下文色表"
+    """底色取主题 CARD_BG（Colors 动态读 ThemeManager，天然随主题）。"""
+    assert "Colors.CARD_BG" in surface_fn_body, "底色应取主题 CARD_BG（与面板底同源）"
 
 
 def test_surface_applied_after_scroll_widget_installed(src_text: str):

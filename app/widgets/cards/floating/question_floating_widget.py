@@ -7,10 +7,11 @@
 """
 
 from functools import partial
+from typing import Optional
 
 from loguru import logger
-from PyQt5.QtCore import QEvent, QSize, Qt, QTimer, pyqtSignal
-from PyQt5.QtGui import QColor, QKeySequence, QPalette
+from PyQt5.QtCore import QEvent, QRectF, QVariantAnimation, QSize, Qt, QTimer, pyqtSignal
+from PyQt5.QtGui import QColor, QKeySequence, QPalette, QPainter, QPen
 from PyQt5.QtWidgets import (
     QHBoxLayout,
     QLabel,
@@ -26,6 +27,7 @@ from qfluentwidgets import ScrollArea
 from app.utils.design_tokens import CardStyles, Colors, font_size_css, readable_text_on
 from app.utils.utils import get_font_family_css, get_icon, get_unified_font
 from app.widgets.cards.card_container import CardContainer
+from app.widgets.cards.floating.countdown_chip import CountdownChip
 from app.widgets.hover_style_guard import style_if_changed
 from app.widgets.status_dot import StatusDot
 
@@ -692,6 +694,8 @@ class QuestionFloatingWidget(QWidget):
     cancelled = pyqtSignal()
     previewRequested = pyqtSignal(object)
     heightChanged = pyqtSignal()
+    # 翻页信号(index, total)：超时策略按「每题独立计时」消费，翻页即重置倒计时
+    questionChanged = pyqtSignal(int, int)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -703,6 +707,9 @@ class QuestionFloatingWidget(QWidget):
         self._show_custom_input = True
         self._preview_payload = None
         self._collapsed = False
+        # 倒计时：剩余秒数（None = 不显示徽标）+ 1Hz 刷新定时器
+        self._countdown_left: Optional[int] = None
+        self._countdown_timer: Optional[QTimer] = None
         # 高度通知合并标志（见 _emit_height_changed）
         self._height_emit_pending = False
         # 高度严格跟随内容：即使容器处于 dock 模式（高度由 QSplitter 分配、
@@ -788,6 +795,10 @@ class QuestionFloatingWidget(QWidget):
         self._page_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         header.addWidget(self._page_label)
         header.addStretch()
+
+        # 倒计时徽标（右上角）：宿主经 question.control 驱动，start 前不可见
+        self._countdown_chip = CountdownChip(self)
+        header.addWidget(self._countdown_chip)
 
         main_layout.addWidget(self._header_widget)
 
@@ -921,8 +932,7 @@ class QuestionFloatingWidget(QWidget):
         self._setup_shortcuts()
 
     def _apply_card_style(self):
-        Colors.refresh()
-        # 旧写的 border-radius: 8px 8px 0 0 是 CSS 四值简写，Qt QSS 不认（只支持
+        Colors.refresh()        # 旧写的 border-radius: 8px 8px 0 0 是 CSS 四值简写，Qt QSS 不认（只支持
         # 单值或四个 border-*-radius 单角属性），圆角实际也未生效。
         self.setStyleSheet(CardStyles.floating("QuestionFloatingWidget"))
         self._question_label.setStyleSheet(f"color:{Colors.REALTIME_TEXT};background:transparent;")
@@ -1100,6 +1110,8 @@ class QuestionFloatingWidget(QWidget):
         self._answers = {}
         self._show_custom_input = show_custom_input
         self._preview_payload = preview_payload
+        # 每次新提问重置倒计时：宿主的超时策略重新下发才显示
+        self.stop_countdown()
         # 新问题进来时自动展开
         if self._collapsed:
             self._toggle_collapse()
@@ -1121,6 +1133,7 @@ class QuestionFloatingWidget(QWidget):
         self._answers = {}
         self._preview_payload = None
         self._preview_btn.setVisible(False)
+        self.stop_countdown()
         self._full_clear_options()
         self.setVisible(False)
 
@@ -1245,6 +1258,8 @@ class QuestionFloatingWidget(QWidget):
             self._restore_answer(saved)
 
         self._update_footer(total)
+        # 翻页/首次渲染完成：通知宿主重置每题计时（超时策略逐题独立）
+        self.questionChanged.emit(self._current_index, total)
         # 自动聚焦到下一步按钮，键盘操作立即可用
         # ★ 仅在可见时聚焦——否则 QStackedWidget 隐藏页的 setFocus()
         #   会从当前活动 Tab 的输入框窃取焦点（Tab 模式 bug）。
@@ -1414,3 +1429,59 @@ class QuestionFloatingWidget(QWidget):
         Colors.refresh()
         alpha = max(1, int(opacity * 255))
         self.setStyleSheet(CardStyles.floating("QuestionFloatingWidget", alpha=alpha))
+
+    # ══════════════════ 超时倒计时（question.control 能力驱动） ══════════════════
+
+    def start_countdown(self, total_sec: int) -> None:
+        """启动右上角倒计时徽标（total_sec <= 0 时 no-op）"""
+        if total_sec <= 0:
+            return
+        self._countdown_left = int(total_sec)
+        if self._countdown_timer is None:
+            self._countdown_timer = QTimer(self)
+            self._countdown_timer.setInterval(1000)
+            self._countdown_timer.timeout.connect(self._tick_countdown)
+        self._countdown_chip.start(self._countdown_left)
+        self._countdown_timer.start()
+
+    def stop_countdown(self) -> None:
+        """停表并隐藏倒计时徽标（答完/取消/清理路径统一调用）"""
+        if self._countdown_timer is not None:
+            self._countdown_timer.stop()
+        self._countdown_left = None
+        self._countdown_chip.stop()
+
+    def _tick_countdown(self) -> None:
+        if self._countdown_left is None:
+            return
+        self._countdown_left -= 1
+        if self._countdown_left <= 0:
+            # 终局由宿主/插件的超时定时器落动作，此处只负责收起显示
+            self.stop_countdown()
+            return
+        self._countdown_chip.set_left(self._countdown_left)
+
+    def snapshot(self) -> dict:
+        """当前提问卡状态快照（超时插件拼回传文本用）
+
+        answers 保留每题已答文本（index → 纯文本，不含内部 dict 结构）。
+        """
+        self._save_current_answer()  # 正在编辑的当前题也计入
+        answers = {}
+        for index, data in self._answers.items():
+            text = data.get("text") if isinstance(data, dict) else data
+            if text:
+                answers[index] = str(text)
+        return {
+            "questions": list(self._questions),
+            "index": self._current_index,
+            "total": len(self._questions),
+            "answers": answers,
+        }
+
+    def submit_answer_text(self, text: str) -> None:
+        """代用户提交答案（与用户点「提交」同一条出口）"""
+        if not text:
+            self._on_ignore()
+            return
+        self.answered.emit(text)

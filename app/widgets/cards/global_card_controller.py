@@ -525,6 +525,13 @@ class GlobalCardController:
         saved_providers = copy.deepcopy(self.cfg.llm_saved_providers.value) or {}
         from app.core.modelmeta.provider_profile import ProviderConfigCollision, apply_provider_save
 
+        # 编辑时改 (API_URL, API_KEY) → config_id 换成新 hash，旧条目被删除。
+        # 旧 id 必须在 apply_provider_save 覆盖 provider_info["config_id"] 前捕获：
+        # 窗口 _current_provider_name 与全局 llm_selected_model 存的都是旧 id，
+        # 不迁移的话紧随其后的 _load_model_configs 会判定「当前选择已失效」，
+        # 回退到服务商列表第一项（用户看到模型选择被重置）。
+        old_config_id = "" if is_new else str(provider_info.get("config_id", "") or "")
+
         try:
             new_config_id = apply_provider_save(saved_providers, provider_info, provider_name, is_new=is_new)
         except ProviderConfigCollision:
@@ -543,17 +550,19 @@ class GlobalCardController:
 
         self.cfg.set(self.cfg.llm_saved_providers, saved_providers, save=True)
 
-        # 各窗口选中服务商随 config_id 迁移
-        for win in self._all_windows():
-            try:
-                old = win._current_provider_name
-                if old and old != new_config_id and win._valid_configs.get(old):
-                    if saved_providers.get(new_config_id) is provider_info and old not in saved_providers:
+        # 各窗口选中服务商随 config_id 迁移。
+        # 判据只能是旧 id → 新 id 的映射本身：apply_provider_save 落盘时按
+        # merge 语义新建了 dict，不能用 `saved_providers.get(new_config_id)
+        # is provider_info` 判身份（该判定在 merge 改造后恒为 False，迁移静默失效）。
+        if old_config_id and old_config_id != new_config_id and old_config_id not in saved_providers:
+            if self.cfg.llm_selected_model.value == old_config_id:
+                self.cfg.set(self.cfg.llm_selected_model, new_config_id, save=True)
+            for win in self._all_windows():
+                try:
+                    if getattr(win, "_current_provider_name", "") == old_config_id:
                         win._current_provider_name = new_config_id
-                        if win.cfg.llm_selected_model.value == old:
-                            win.cfg.set(win.cfg.llm_selected_model, new_config_id, save=True)
-            except Exception:
-                pass
+                except Exception:
+                    pass
 
         # 隐藏服务商卡（同步移除 replace tab），显示设置卡
         self._close_edit_card("provider_picker")

@@ -51,3 +51,21 @@ def test_long_description_truncated():
 def test_empty_schemas_hint():
     out = m._mcp_render_enabled("srv", [])
     assert "未发现任何工具" in out
+
+
+def test_auth_expired_rendered_with_reauth_hint():
+    """关闭的 OAuth 服务授权失效时，模型也要看到「需重新授权」而不是裸状态码。"""
+    out = m._mcp_render_list(
+        [
+            {
+                "name": "figma",
+                "enabled": False,
+                "state": "auth_expired",
+                "error": "授权已过期",
+                "tools": [],
+            }
+        ]
+    )
+    assert "授权失效" in out
+    assert "重新授权" in out
+    assert "auth_expired" not in out

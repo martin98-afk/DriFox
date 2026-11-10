@@ -161,7 +161,7 @@ def _enabled_or_reload(mgr, aid: str, a) -> bool:
 def _to_int(v, default: int) -> int:
     try:
         return int(v)
-    except TypeError, ValueError:
+    except (TypeError, ValueError):
         return default
 
 

@@ -7,6 +7,9 @@
 
 本模块只做 dict 变换：不 import Qt、不碰 cfg，便于单测。发送链侧的消费点
 是 ``model_capabilities.resolve_model_capabilities`` 的 L0 声明层。
+
+「协议入口」与六键同表同条目（模型级路由参数，2026-11-07 起能力弹窗可编辑），
+读写走本模块的 protocol 系列函数，语义与声明一致：空值 = 删键 = 自动。
 """
 
 from __future__ import annotations
@@ -17,6 +20,10 @@ from app.core.modelmeta.model_capabilities import DECLARED_CAPABILITY_KEYS
 
 # 空值等价物：写 None/空串/空列表 = 删除该声明（回到自动链）
 _EMPTY_VALUES = (None, "", [])
+
+# 模型级路由参数：与六键同表同条目，但语义属「协议选择」而非「能力声明」。
+# 键名与 constants.PARAM_SCHEMA 的协议入口一致（消费方 chat_worker 按此读）。
+PROTOCOL_ENTRY_KEY = "协议入口"
 
 # 生效层 → 展示文案（对话框与模型列表共用，口径必须一致）
 SOURCE_LABELS = {
@@ -51,6 +58,49 @@ def read_declarations(overrides: Dict[str, Any], provider: str, model: str) -> D
     """读该模型的六键声明子集（空值键不返回，缺键 = 未声明）"""
     entry = _lookup_entry(overrides, provider, model)
     return {key: entry[key] for key in DECLARED_CAPABILITY_KEYS if key in entry and entry[key] not in _EMPTY_VALUES}
+
+
+def read_protocol_entry(overrides: Dict[str, Any], provider: str, model: str) -> str:
+    """读该模型的「协议入口」手选值（"" = 自动/未设）。"""
+    entry = _lookup_entry(overrides, provider, model)
+    value = entry.get(PROTOCOL_ENTRY_KEY)
+    return "" if value in _EMPTY_VALUES else str(value)
+
+
+def apply_protocol_entry(
+    overrides: Dict[str, Any],
+    provider: str,
+    model: str,
+    value: Any,
+) -> Dict[str, Any]:
+    """返回**新** overrides：写入/删除该模型的「协议入口」。
+
+    空值（None/""/"auto"）等于删除键，回到自动判定；其余按原样落盘
+    （``responses`` / ``transport:<id>``）。旧格式（纯模型名）条目里的同键
+    一并清理，否则「改回自动」会被旧键复活。
+    """
+    data = dict(overrides or {})
+    key = override_key(provider, model)
+    entry = dict(data.get(key) or {})
+    normalized = "" if value in _EMPTY_VALUES or str(value).strip() == "auto" else str(value).strip()
+    if normalized:
+        entry[PROTOCOL_ENTRY_KEY] = normalized
+    else:
+        entry.pop(PROTOCOL_ENTRY_KEY, None)
+    if entry:
+        data[key] = entry
+    else:
+        data.pop(key, None)
+
+    legacy = data.get(model)
+    if isinstance(legacy, dict) and PROTOCOL_ENTRY_KEY in legacy:
+        legacy_clean = dict(legacy)
+        legacy_clean.pop(PROTOCOL_ENTRY_KEY, None)
+        if legacy_clean:
+            data[model] = legacy_clean
+        else:
+            data.pop(model, None)
+    return data
 
 
 def apply_declarations(

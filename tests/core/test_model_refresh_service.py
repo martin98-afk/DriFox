@@ -17,6 +17,7 @@
 """
 
 import sys
+import time
 from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
@@ -25,11 +26,14 @@ import pytest
 
 from app.core.modelmeta import model_refresh_service as mrs
 from app.core.modelmeta.model_refresh_service import (
+    HEALTH_INTERVAL_S,
     KEY_AUTO_REFRESH,
     KEY_HEALTH_CHECK,
+    KEY_HEALTH_TS,
     KEY_LAST_REFRESH,
     KEY_MODELS,
     KEY_REFRESH_STATUS,
+    KEY_STATUS_TS,
     REFRESH_INTERVAL_S,
     STATUS_AUTH_FAILED,
     STATUS_OK,
@@ -73,6 +77,585 @@ class TestDue:
         assert parse_refresh_ts(None) == 0.0
         assert parse_refresh_ts(12345) == 12345.0
         assert parse_refresh_ts("2026-10-09 12:00:00") > 0
+
+
+class TestHealthDue:
+    def test_health_due_independent_of_list_ts(self):
+        """列表 23h59m 前刚刷过，但健康计时 2h 前到期 → 健康检查仍触发"""
+        now = 1_000_000_000.0
+        info = {
+            KEY_LAST_REFRESH: now - (REFRESH_INTERVAL_S - 60),
+            KEY_HEALTH_TS: now - (HEALTH_INTERVAL_S + 60),
+        }
+        assert ModelRefreshService.is_due(info, now) is False
+        assert ModelRefreshService.is_health_due(info, now) is True
+
+    def test_health_not_due_within_1h(self):
+        now = 1_000_000_000.0
+        info = {KEY_HEALTH_TS: now - (HEALTH_INTERVAL_S - 60)}
+        assert ModelRefreshService.is_health_due(info, now) is False
+
+    def test_health_missing_ts_is_due(self):
+        assert ModelRefreshService.is_health_due({"健康检查": True}, 1_000_000_000.0) is True
+
+
+class TestTickDispatch:
+    def _catch_thread(self, monkeypatch, svc, calls):
+        """把 _on_tick 派发的线程参数捕获到 calls 列表"""
+
+        class _FakeThread:
+            def __init__(self, target=None, args=(), daemon=None, name=None):
+                calls.append(args)
+
+            def start(self):
+                pass
+
+        monkeypatch.setattr(mrs.threading, "Thread", _FakeThread)
+        svc._in_flight.clear()
+
+    def test_dispatch_both_channels_when_both_due(self, service, monkeypatch):
+        calls = []
+        self._catch_thread(monkeypatch, service, calls)
+        service.sync_from_config({"c1": {
+            KEY_AUTO_REFRESH: True,
+            KEY_HEALTH_CHECK: True,
+            KEY_LAST_REFRESH: 0,  # 从未 → 双到期
+        }})
+        service._on_tick()
+        assert len(calls) == 1
+        config_id, info, do_models, do_health = calls[0]
+        assert config_id == "c1" and do_models is True and do_health is True
+
+    def test_dispatch_health_only_when_list_fresh(self, service, monkeypatch):
+        """列表刚刷过（24h 内）但健康到期 → 只派健康探测"""
+        calls = []
+        self._catch_thread(monkeypatch, service, calls)
+        service.sync_from_config({"c1": {
+            KEY_AUTO_REFRESH: True,
+            KEY_HEALTH_CHECK: True,
+            KEY_LAST_REFRESH: time.time() - 3600,       # 24h 内
+            KEY_HEALTH_TS: time.time() - 7200,          # 1h 前到期
+        }})
+        service._on_tick()
+        assert len(calls) == 1
+        assert calls[0][2] is False and calls[0][3] is True
+
+    def test_no_dispatch_when_neither_due(self, service, monkeypatch):
+        calls = []
+        self._catch_thread(monkeypatch, service, calls)
+        service.sync_from_config({"c1": {
+            KEY_AUTO_REFRESH: True,
+            KEY_LAST_REFRESH: time.time(),
+            KEY_HEALTH_TS: time.time(),
+        }})
+        service._on_tick()
+        assert calls == []
+
+
+class TestProbeHealth:
+    def _post_stub(self, monkeypatch, responder):
+        """monkeypatch requests.post（_probe_health 内延迟 import）"""
+        import requests as _requests
+
+        monkeypatch.setattr(_requests, "post", responder)
+
+    def test_bearer_200_is_ok(self, service, monkeypatch):
+        self._post_stub(monkeypatch, lambda url, **k: SimpleNamespace(status_code=200, text="{}"))
+        status = service._probe_health(
+            {"API_URL": "https://api.x.com/v1", "API_KEY": "k", "模型名称": "m1"}, "c1"
+        )
+        assert status == STATUS_OK
+
+    def test_401_is_auth_failed(self, service, monkeypatch):
+        self._post_stub(monkeypatch, lambda url, **k: SimpleNamespace(status_code=401, text=""))
+        status = service._probe_health(
+            {"API_URL": "https://api.x.com/v1", "API_KEY": "bad", "模型名称": "m1"}, "c1"
+        )
+        assert status == STATUS_AUTH_FAILED
+
+    def test_no_v1_url_tries_both_paths(self, service, monkeypatch):
+        """URL 不含 /v1 → 依次试 /chat/completions 与 /v1/chat/completions"""
+        seen = []
+
+        def responder(url, **k):
+            seen.append(url)
+            if url.endswith("/v1/chat/completions"):
+                return SimpleNamespace(status_code=200, text="{}")
+            return SimpleNamespace(status_code=404, text="")
+
+        self._post_stub(monkeypatch, responder)
+        status = service._probe_health(
+            {"API_URL": "https://api.x.com", "API_KEY": "k", "模型名称": "m1"}, "c1"
+        )
+        assert status == STATUS_OK
+        assert seen[0].endswith("/chat/completions") and seen[1].endswith("/v1/chat/completions")
+
+    def test_400_max_completion_tokens_retry(self, service, monkeypatch):
+        """400 提示 max_completion_tokens → 换字段重试一次"""
+        bodies = []
+
+        def responder(url, **k):
+            bodies.append(k.get("json") or {})
+            if "max_tokens" in bodies[-1]:
+                return SimpleNamespace(status_code=400, text="use 'max_completion_tokens'")
+            return SimpleNamespace(status_code=200, text="{}")
+
+        self._post_stub(monkeypatch, responder)
+        status = service._probe_health(
+            {"API_URL": "https://api.x.com/v1", "API_KEY": "k", "模型名称": "o1"}, "c1"
+        )
+        assert status == STATUS_OK
+        assert "max_completion_tokens" in bodies[-1]
+
+    def test_anthropic_endpoint_and_headers(self, service, monkeypatch):
+        captured = {}
+
+        def responder(url, **k):
+            captured["url"] = url
+            captured["headers"] = k.get("headers") or {}
+            return SimpleNamespace(status_code=200, text="{}")
+
+        self._post_stub(monkeypatch, responder)
+        status = service._probe_health(
+            {"API_URL": "https://api.anthropic.com", "API_KEY": "k", "认证方式": "anthropic", "模型名称": "claude-x"},
+            "c1",
+        )
+        assert status == STATUS_OK
+        assert captured["url"].endswith("/v1/messages")
+        assert captured["headers"]["x-api-key"] == "k"
+        assert captured["headers"]["anthropic-version"] == "2023-06-01"
+
+    def test_empty_model_name_is_unreachable(self, service, monkeypatch):
+        self._post_stub(monkeypatch, lambda url, **k: SimpleNamespace(status_code=200, text="{}"))
+        status = service._probe_health(
+            {"API_URL": "https://api.x.com/v1", "API_KEY": "k", "模型名称": ""}, "c1"
+        )
+        assert status == STATUS_UNREACHABLE
+
+    def test_no_key_bearer_is_unreachable(self, service, monkeypatch):
+        status = service._probe_health(
+            {"API_URL": "https://api.x.com/v1", "API_KEY": "", "模型名称": "m1"}, "c1"
+        )
+        assert status == STATUS_UNREACHABLE
+
+    def test_auth_none_needs_no_key(self, service, monkeypatch):
+        self._post_stub(monkeypatch, lambda url, **k: SimpleNamespace(status_code=200, text="{}"))
+        status = service._probe_health(
+            {"API_URL": "http://localhost:11434/v1", "API_KEY": "", "认证方式": "none", "模型名称": "m1"},
+            "c1",
+        )
+        assert status == STATUS_OK
+
+    def test_bce_without_hook_is_unreachable(self, service, monkeypatch):
+        """bce 签名无法本地构造 → 不发请求直接 unreachable"""
+        status = service._probe_health(
+            {"API_URL": "https://aip.baidubce.com", "API_KEY": "k", "认证方式": "bce", "模型名称": "m1"},
+            "c1",
+        )
+        assert status == STATUS_UNREACHABLE
+
+    def test_hook_provider_degrades_to_list_probe(self, service, monkeypatch):
+        """OAuth 插件类（models_hook）→ hook 探测（降级列表探测）"""
+        from app.plugins.registries.provider_registry import ProviderDef, ProviderRegistry
+
+        reg = ProviderRegistry()
+        reg.register(
+            ProviderDef(name="钩子P", capabilities={"models_hook": lambda cfg: ["m1"]}),
+            source="plugin:test",
+        )
+        monkeypatch.setattr(ProviderRegistry, "_instance", reg)
+        monkeypatch.setattr(ProviderRegistry, "get_instance", classmethod(lambda cls: reg))
+        status = service._probe_health(
+            {"provider_name": "钩子P", "API_URL": "", "API_KEY": "", "模型名称": "m1"}, "c1"
+        )
+        assert status == STATUS_OK
+
+    def test_health_probe_hook_preferred_over_everything(self, service, monkeypatch):
+        """capabilities.health_probe 优先于 models_hook 与 REST：OAuth 类真探测入口
+
+        models_hook 返回空列表（旧语义 → STATUS_EMPTY），health_probe 返回 ok：
+        断言 ok 即证明走的是 health_probe 分支。
+        """
+        import requests as _requests
+
+        from app.plugins.registries.provider_registry import ProviderDef, ProviderRegistry
+
+        posts = []
+        monkeypatch.setattr(_requests, "post", lambda url, **k: posts.append(url))
+
+        reg = ProviderRegistry()
+        reg.register(
+            ProviderDef(
+                name="探测P",
+                capabilities={
+                    "health_probe": lambda cfg: STATUS_OK,
+                    "models_hook": lambda cfg: [],
+                },
+            ),
+            source="plugin:test",
+        )
+        monkeypatch.setattr(ProviderRegistry, "_instance", reg)
+        monkeypatch.setattr(ProviderRegistry, "get_instance", classmethod(lambda cls: reg))
+        status = service._probe_health(
+            {"provider_name": "探测P", "API_URL": "https://x/v1", "API_KEY": "", "模型名称": "m1"},
+            "c1",
+        )
+        assert status == STATUS_OK, "models_hook 空列表语义是 empty，得 ok 只能来自 health_probe"
+        assert posts == [], "有 health_probe 时不该发 REST 请求"
+
+    def test_health_probe_hook_invalid_value_is_unreachable(self, service, monkeypatch):
+        """钩子返回非法状态值 → unreachable（不透传垃圾进状态键）"""
+        from app.plugins.registries.provider_registry import ProviderDef, ProviderRegistry
+
+        hp_calls = []
+        reg = ProviderRegistry()
+        reg.register(
+            ProviderDef(
+                name="坏值P",
+                capabilities={
+                    "health_probe": lambda cfg: (hp_calls.append(1), "什么玩意")[1],
+                    "models_hook": lambda cfg: ["m1"],
+                },
+            ),
+            source="plugin:test",
+        )
+        monkeypatch.setattr(ProviderRegistry, "_instance", reg)
+        monkeypatch.setattr(ProviderRegistry, "get_instance", classmethod(lambda cls: reg))
+        status = service._probe_health({"provider_name": "坏值P"}, "c1")
+        assert hp_calls == [1], "health_probe 必须被调用（优先于 models_hook）"
+        assert status == STATUS_UNREACHABLE, "models_hook 语义是 ok，得 unreachable 证明走了 health_probe 且坏值被拦截"
+
+    def test_health_probe_hook_exception_is_unreachable(self, service, monkeypatch):
+        """钩子抛异常（约定内不应抛，仍兜底）→ unreachable"""
+        from app.plugins.registries.provider_registry import ProviderDef, ProviderRegistry
+
+        hp_calls = []
+
+        def _boom(cfg):
+            hp_calls.append(1)
+            raise RuntimeError("probe exploded")
+
+        reg = ProviderRegistry()
+        reg.register(
+            ProviderDef(
+                name="炸P",
+                capabilities={"health_probe": _boom, "models_hook": lambda cfg: ["m1"]},
+            ),
+            source="plugin:test",
+        )
+        monkeypatch.setattr(ProviderRegistry, "_instance", reg)
+        monkeypatch.setattr(ProviderRegistry, "get_instance", classmethod(lambda cls: reg))
+        status = service._probe_health({"provider_name": "炸P"}, "c1")
+        assert hp_calls == [1], "health_probe 必须被调用（优先于 models_hook）"
+        assert status == STATUS_UNREACHABLE, "models_hook 语义是 ok，得 unreachable 证明走了 health_probe 且异常被兜底"
+
+    def test_health_probe_hook_auth_failed_passthrough(self, service, monkeypatch):
+        """钩子返回 auth_failed → 原样透传（OAuth 凭据废是最高价值信号）"""
+        from app.plugins.registries.provider_registry import ProviderDef, ProviderRegistry
+
+        reg = ProviderRegistry()
+        reg.register(
+            ProviderDef(name="凭据废P", capabilities={"health_probe": lambda cfg: STATUS_AUTH_FAILED}),
+            source="plugin:test",
+        )
+        monkeypatch.setattr(ProviderRegistry, "_instance", reg)
+        monkeypatch.setattr(ProviderRegistry, "get_instance", classmethod(lambda cls: reg))
+        status = service._probe_health({"provider_name": "凭据废P"}, "c1")
+        assert status == STATUS_AUTH_FAILED
+
+
+class TestProbeModelPick:
+    """探活候选：模型列表中输入价升序前 3 个，命中一个即停；无价格数据回退当前模型"""
+
+    def _stub_models_dev(self, monkeypatch, per_provider):
+        from app.core.modelmeta import models_dev_sync as mds
+
+        result = SimpleNamespace(
+            provider_models={},
+            model_capabilities={},
+            model_capabilities_partitioned={"devprov": per_provider},
+        )
+        monkeypatch.setattr(mds, "load_dynamic_models", lambda **k: result)
+        return mds
+
+    def _stub_registry(self, monkeypatch, dev_id="devprov"):
+        from app.plugins.registries.provider_registry import ProviderDef, ProviderRegistry
+
+        reg = ProviderRegistry()
+        reg.register(ProviderDef(name="价P", models_dev_id=dev_id), source="plugin:test")
+        monkeypatch.setattr(ProviderRegistry, "_instance", reg)
+        monkeypatch.setattr(ProviderRegistry, "get_instance", classmethod(lambda cls: reg))
+
+    def test_picks_cheapest_input_price(self, service, monkeypatch):
+        self._stub_models_dev(
+            monkeypatch,
+            {
+                "expensive": {"cost": {"input": 15.0}},
+                "cheap": {"cost": {"input": 0.3}},
+                "free": {"cost": {"input": 0.0}},
+            },
+        )
+        self._stub_registry(monkeypatch)
+        picked = service._pick_probe_models(
+            {"provider_name": "价P", "模型名称": "expensive", KEY_MODELS: ["expensive", "cheap", "free"]}
+        )
+        assert picked[0] == "free", "输入价 0 的免费模型是探测成本最低选择"
+
+    def test_picks_top3_by_price(self, service, monkeypatch):
+        """候选只要价格最低的 3 个，升序排列（第 4 名及以后不试）"""
+        self._stub_models_dev(
+            monkeypatch,
+            {
+                "free": {"cost": {"input": 0.0}},
+                "cheap": {"cost": {"input": 0.3}},
+                "mid": {"cost": {"input": 1.2}},
+                "pricey": {"cost": {"input": 9.0}},
+            },
+        )
+        self._stub_registry(monkeypatch)
+        picked = service._pick_probe_models(
+            {
+                "provider_name": "价P",
+                "模型名称": "pricey",
+                KEY_MODELS: ["pricey", "mid", "cheap", "free"],
+            }
+        )
+        assert picked == ["free", "cheap", "mid"], "按输入价升序取前 3，超出 3 个不入选"
+
+    def test_fallback_to_current_when_no_pricing(self, service, monkeypatch):
+        """列表内模型全部无价格数据 → 回退「模型名称」（行为不变）"""
+        mds = self._stub_models_dev(monkeypatch, {"m1": {"cost": {"input": None}}, "m2": {}})
+        self._stub_registry(monkeypatch)
+        picked = service._pick_probe_models(
+            {"provider_name": "价P", "模型名称": "m1", KEY_MODELS: ["m1", "m2"]}
+        )
+        assert picked == ["m1"]
+
+    def test_fallback_when_no_models_dev_id(self, service, monkeypatch):
+        """插件未声明 models_dev_id（自定义网关）→ 回退「模型名称」"""
+        self._stub_registry(monkeypatch, dev_id="")
+        picked = service._pick_probe_models(
+            {"provider_name": "价P", "模型名称": "m1", KEY_MODELS: ["a", "b"]}
+        )
+        assert picked == ["m1"]
+
+    def test_fallback_when_models_key_missing(self, service):
+        """无「模型列表」键 → 回退「模型名称」，不碰 models.dev"""
+        picked = service._pick_probe_models({"provider_name": "价P", "模型名称": "m1"})
+        assert picked == ["m1"]
+
+    def test_rest_ping_uses_picked_model(self, service, monkeypatch):
+        """REST 探测的 body.model 用探活模型（最便宜），非配置当前模型"""
+        import requests as _requests
+
+        mds = self._stub_models_dev(monkeypatch, {"expensive": {"cost": {"input": 15.0}}, "cheap": {"cost": {"input": 0.3}}})
+        self._stub_registry(monkeypatch)
+        bodies = []
+
+        def responder(url, **k):
+            bodies.append(k.get("json") or {})
+            return SimpleNamespace(status_code=200, text="{}")
+
+        monkeypatch.setattr(_requests, "post", responder)
+        status = service._probe_health(
+            {
+                "provider_name": "价P",
+                "API_URL": "https://api.x.com/v1",
+                "API_KEY": "k",
+                "模型名称": "expensive",
+                KEY_MODELS: ["expensive", "cheap"],
+            },
+            "c1",
+        )
+        assert status == STATUS_OK
+        assert bodies and bodies[0]["model"] == "cheap", "探活应用列表内最便宜的模型"
+
+    def _stub_four_models(self, monkeypatch):
+        self._stub_models_dev(
+            monkeypatch,
+            {
+                "free": {"cost": {"input": 0.0}},
+                "cheap": {"cost": {"input": 0.3}},
+                "mid": {"cost": {"input": 1.2}},
+                "pricey": {"cost": {"input": 9.0}},
+            },
+        )
+        self._stub_registry(monkeypatch)
+
+    def test_rest_falls_back_to_next_model(self, service, monkeypatch):
+        """最便宜模型 404（下线/路由缺失）→ 换下一个候选，第二个调通即绿"""
+        import requests as _requests
+
+        self._stub_four_models(monkeypatch)
+        seen = []
+
+        def responder(url, **k):
+            model = (k.get("json") or {}).get("model")
+            seen.append(model)
+            if model == "free":
+                return SimpleNamespace(status_code=404, text='{"error":"model not found"}')
+            return SimpleNamespace(status_code=200, text="{}")
+
+        monkeypatch.setattr(_requests, "post", responder)
+        status = service._probe_health(
+            {
+                "provider_name": "价P",
+                "API_URL": "https://api.x.com/v1",
+                "API_KEY": "k",
+                "模型名称": "pricey",
+                KEY_MODELS: ["free", "cheap", "mid"],
+            },
+            "c1",
+        )
+        assert status == STATUS_OK
+        assert seen == ["free", "cheap"], "free 404 后换 cheap 调通即停，mid 不再探测"
+
+    def test_rest_stops_at_first_ok(self, service, monkeypatch):
+        """第一个候选就调通 → 只发一次请求，剩余候选不浪费额度"""
+        import requests as _requests
+
+        self._stub_four_models(monkeypatch)
+        seen = []
+
+        def responder(url, **k):
+            seen.append((k.get("json") or {}).get("model"))
+            return SimpleNamespace(status_code=200, text="{}")
+
+        monkeypatch.setattr(_requests, "post", responder)
+        status = service._probe_health(
+            {
+                "provider_name": "价P",
+                "API_URL": "https://api.x.com/v1",
+                "API_KEY": "k",
+                "模型名称": "pricey",
+                KEY_MODELS: ["free", "cheap", "mid"],
+            },
+            "c1",
+        )
+        assert status == STATUS_OK
+        assert seen == ["free"]
+
+    def test_rest_auth_failed_stops_all_candidates(self, service, monkeypatch):
+        """401 属凭据/余额层，换模型无意义 → 立即停并返回 auth_failed"""
+        import requests as _requests
+
+        self._stub_four_models(monkeypatch)
+        seen = []
+
+        def responder(url, **k):
+            seen.append((k.get("json") or {}).get("model"))
+            return SimpleNamespace(status_code=401, text="unauthorized")
+
+        monkeypatch.setattr(_requests, "post", responder)
+        status = service._probe_health(
+            {
+                "provider_name": "价P",
+                "API_URL": "https://api.x.com/v1",
+                "API_KEY": "k",
+                "模型名称": "pricey",
+                KEY_MODELS: ["free", "cheap", "mid"],
+            },
+            "c1",
+        )
+        assert status == STATUS_AUTH_FAILED
+        assert seen == ["free"], "鉴权失败不换模型重试"
+
+    def test_hook_falls_back_to_next_model(self, service, monkeypatch):
+        """health_probe 钩子返回 unreachable → 换下一个候选；ok 即停"""
+        from app.plugins.registries.provider_registry import ProviderDef, ProviderRegistry
+
+        self._stub_four_models(monkeypatch)
+        seen = []
+
+        def probe(cfg):
+            seen.append(cfg.get("探活模型"))
+            return STATUS_UNREACHABLE if cfg.get("探活模型") == "free" else STATUS_OK
+
+        reg = ProviderRegistry()
+        reg.register(
+            ProviderDef(name="价P", models_dev_id="devprov", capabilities={"health_probe": probe}),
+            source="plugin:test",
+        )
+        monkeypatch.setattr(ProviderRegistry, "_instance", reg)
+        monkeypatch.setattr(ProviderRegistry, "get_instance", classmethod(lambda cls: reg))
+        status = service._probe_health(
+            {
+                "provider_name": "价P",
+                "API_KEY": "k",
+                "模型名称": "pricey",
+                KEY_MODELS: ["free", "cheap", "mid"],
+            },
+            "c1",
+        )
+        assert status == STATUS_OK
+        assert seen == ["free", "cheap"]
+
+    def test_hook_receives_probe_model_key(self, service, monkeypatch):
+        """health_probe 钩子收到的 config 带「探活模型」键（插件可选消费）"""
+        from app.plugins.registries.provider_registry import ProviderDef, ProviderRegistry
+
+        mds = self._stub_models_dev(monkeypatch, {"expensive": {"cost": {"input": 15.0}}, "cheap": {"cost": {"input": 0.3}}})
+        seen = {}
+        reg = ProviderRegistry()
+        reg.register(
+            ProviderDef(
+                name="价P",
+                models_dev_id="devprov",
+                capabilities={
+                    "health_probe": lambda cfg: seen.update(cfg=cfg) or STATUS_OK,
+                },
+            ),
+            source="plugin:test",
+        )
+        monkeypatch.setattr(ProviderRegistry, "_instance", reg)
+        monkeypatch.setattr(ProviderRegistry, "get_instance", classmethod(lambda cls: reg))
+        status = service._probe_health(
+            {
+                "provider_name": "价P",
+                "API_KEY": "k",
+                "模型名称": "expensive",
+                KEY_MODELS: ["expensive", "cheap"],
+            },
+            "c1",
+        )
+        assert status == STATUS_OK
+        assert seen["cfg"].get("探活模型") == "cheap"
+
+
+class TestReportResult:
+    def test_report_writes_status_keys_only(self, service):
+        """实时校准只写状态两键，不碰「上次模型刷新」与「模型列表」"""
+        service.sync_from_config({"c1": {
+            KEY_AUTO_REFRESH: False,
+            KEY_HEALTH_CHECK: True,
+            KEY_LAST_REFRESH: "2026-01-01 00:00:00",
+            KEY_MODELS: ["m1"],
+        }})
+        service._on_health_reported("c1", STATUS_AUTH_FAILED)
+        entry = service._store["providers"]["c1"]
+        assert entry[KEY_REFRESH_STATUS] == STATUS_AUTH_FAILED
+        assert entry[KEY_STATUS_TS]
+        assert entry[KEY_LAST_REFRESH] == "2026-01-01 00:00:00", "列表计时不得被实时校准触碰"
+        assert entry[KEY_MODELS] == ["m1"]
+
+    def test_report_skips_write_when_status_unchanged(self, service, monkeypatch):
+        """状态未变不写盘（多轮对话多次成功回写幂等，防写放大）"""
+        service.sync_from_config({"c1": {KEY_HEALTH_CHECK: True, "模型刷新状态": "ok"}})
+        writes = []
+        real_set = service._fake_cfg.set
+
+        def counting_set(item, value, save=True):
+            writes.append(1)
+            real_set(item, value, save=save)
+
+        monkeypatch.setattr(service._fake_cfg, "set", counting_set)
+        service._on_health_reported("c1", STATUS_OK)  # 已是 ok → 跳过
+        assert writes == []
+        service._on_health_reported("c1", STATUS_AUTH_FAILED)  # 翻转 → 写
+        assert writes == [1]
+
+    def test_report_unknown_config_id_silently_ignored(self, service):
+        service._on_health_reported("ghost", STATUS_OK)  # 不抛异常即可
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -176,7 +759,7 @@ class TestSettleSemantics:
             "模型列表": ["m1"],
         }
         service.sync_from_config({"c1": info})
-        service._on_refresh_result("c1", True, STATUS_OK, ["m1", "m2"])
+        service._on_refresh_result("c1", STATUS_OK, STATUS_OK, ["m1", "m2"])
 
         entry = service._store["providers"]["c1"]
         assert entry[KEY_MODELS] == ["m1", "m2"], "应静默合并新列表"
@@ -192,12 +775,13 @@ class TestSettleSemantics:
             "模型列表": ["m1"],
         }
         service.sync_from_config({"c1": info})
-        service._on_refresh_result("c1", True, STATUS_OK, ["m1", "m2", "m3"])
+        service._on_refresh_result("c1", STATUS_OK, "", [])
 
         entry = service._store["providers"]["c1"]
         assert entry[KEY_MODELS] == ["m1"], "健康检查不得修改模型列表"
         assert entry[KEY_REFRESH_STATUS] == STATUS_OK
-        assert entry[KEY_LAST_REFRESH]
+        assert not entry.get(KEY_LAST_REFRESH), "纯健康探测不得写「上次模型刷新」"
+        assert entry.get(KEY_HEALTH_TS), "应写健康计时键"
 
     def test_default_model_missing_does_not_merge(self, service):
         """默认模型不在新列表 → 不写列表（防配置指向已下线模型）"""
@@ -208,7 +792,7 @@ class TestSettleSemantics:
             "模型列表": ["gone-model"],
         }
         service.sync_from_config({"c1": info})
-        service._on_refresh_result("c1", True, STATUS_OK, ["other-1", "other-2"])
+        service._on_refresh_result("c1", STATUS_OK, STATUS_OK, ["other-1", "other-2"])
 
         entry = service._store["providers"]["c1"]
         assert entry[KEY_MODELS] == ["gone-model"], "默认模型失效时不得合并"
@@ -225,7 +809,7 @@ class TestSettleSemantics:
         service.sync_from_config({"c1": {KEY_AUTO_REFRESH: True}})
         service.invalidate("c1")
         service._store["providers"] = {}  # 模拟条目已被删除（配置里也没有）
-        service._on_refresh_result("c1", True, STATUS_OK, ["m"])
+        service._on_refresh_result("c1", STATUS_OK, STATUS_OK, ["m"])
         assert service._store["providers"] == {}, "不应凭空创建条目"
 
 
@@ -236,12 +820,14 @@ class TestSettleSemantics:
 
 class TestFetchStatus:
     def _run_fetch(self, service, config_id, info):
-        """跑 _fetch_one 并把信号结果收到局部（绕过 Qt 队列，直连收集）"""
+        """跑 _fetch_one（列表通道）并把信号结果收到局部（绕过 Qt 队列，直连收集）"""
         got = {}
         service.refresh_finished.connect(
-            lambda cid, ok, st, models: got.update(cid=cid, ok=ok, status=st, models=models)
+            lambda cid, sfinal, smodels, models: got.update(
+                cid=cid, status=sfinal, status_models=smodels, models=models
+            )
         )
-        service._fetch_one(config_id, info)
+        service._fetch_one(config_id, info, do_models=True)
         return got
 
     def test_rest_401_maps_to_auth_failed(self, service, monkeypatch):
@@ -254,7 +840,7 @@ class TestFetchStatus:
         info = {"provider_name": "P", "API_URL": "https://x/v1", "API_KEY": "bad"}
         got = self._run_fetch(service, "c1", info)
         assert got["status"] == STATUS_AUTH_FAILED
-        assert got["ok"] is False
+        assert got["status_models"] == STATUS_AUTH_FAILED
 
     def test_rest_timeout_maps_to_unreachable(self, service, monkeypatch):
         from app.widgets.cards.settings import provider_edit_card as pec
@@ -263,7 +849,7 @@ class TestFetchStatus:
         info = {"provider_name": "P", "API_URL": "https://x/v1", "API_KEY": "k"}
         got = self._run_fetch(service, "c1", info)
         assert got["status"] == STATUS_UNREACHABLE
-        assert got["ok"] is False
+        assert got["status_models"] == STATUS_UNREACHABLE
 
     def test_rest_ok_returns_models(self, service, monkeypatch):
         from app.widgets.cards.settings import provider_edit_card as pec
@@ -271,7 +857,7 @@ class TestFetchStatus:
         monkeypatch.setattr(pec, "fetch_provider_models", lambda *a, **k: (["m1", "m2"], [], STATUS_OK))
         info = {"provider_name": "P", "API_URL": "https://x/v1", "API_KEY": "k"}
         got = self._run_fetch(service, "c1", info)
-        assert got["ok"] is True
+        assert got["status"] == STATUS_OK
         assert got["models"] == ["m1", "m2"]
 
     def test_hook_path_preferred(self, service, monkeypatch):
@@ -298,7 +884,7 @@ class TestFetchStatus:
         info = {"provider_name": "HookProvider", "API_URL": "https://x/v1", "API_KEY": "k"}
         got = self._run_fetch(service, "c1", info)
         assert got["models"] == ["h1", "h2"]
-        assert got["ok"] is True
+        assert got["status"] == STATUS_OK
         assert called["rest"] is False, "有 hook 时不该走 REST"
 
     def test_hook_exception_maps_to_unreachable(self, service, monkeypatch):
@@ -314,7 +900,6 @@ class TestFetchStatus:
 
         got = self._run_fetch(service, "c1", {"provider_name": "BadHook", "API_URL": "https://x", "API_KEY": "k"})
         assert got["status"] == STATUS_UNREACHABLE
-        assert got["ok"] is False
 
     def test_missing_api_url_unreachable(self, service):
         got = self._run_fetch(service, "c1", {"provider_name": "P", "API_KEY": "k"})

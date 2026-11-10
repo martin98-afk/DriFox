@@ -23,6 +23,7 @@ from qfluentwidgets import (
     BodyLabel,
     ExpandSettingCard,
     FluentIcon,
+    isDarkTheme,
     PushButton,
     SwitchButton,
     ToolButton,
@@ -196,6 +197,23 @@ class _FlowLayout(QLayout):
         return y - rect.y()
 
 
+def _hook_group_header_style() -> str:
+    """事件分组标题样式：深色主题深底浅字，浅色主题浅底深字
+
+    原实现硬编码 #F0F0F0/#333，深色主题下是刺眼浅色横条
+    （mcp_setting_card._group_header_style 同款问题同款修法）。
+    """
+    if isDarkTheme():
+        return (
+            f"background-color: #2b2b2b; color: #ddd; font-weight: bold; "
+            f"{get_font_family_css()} font-size: {scale_font_size(12)}px; padding: 6px 8px;"
+        )
+    return (
+        f"background-color: #F0F0F0; color: #333; font-weight: bold; "
+        f"{get_font_family_css()} font-size: {scale_font_size(12)}px; padding: 6px 8px;"
+    )
+
+
 class HookItem(QWidget):
     """单个 Hook 条目"""
 
@@ -208,6 +226,18 @@ class HookItem(QWidget):
         self.hook_id = hook_data.get("id", "")
         self._hook_data = hook_data
         self._setup_ui()
+
+    def refresh_style(self):
+        """主题变更时刷新命令文本颜色
+
+        原实现 QSS 只有字体无 color，颜色落到调色板（恒黑），深色主题下
+        命令文本暗淡。来源/类型等徽章是固定语义色，不随主题，不在刷新范围。
+        """
+        Colors.refresh()
+        self.commandLabel.setStyleSheet(
+            f"color: {Colors.TEXT_PRIMARY}; {get_font_family_css()}"
+            f" font-size: {scale_font_size(13)}px;"
+        )
 
     def _setup_ui(self):
         self.setStyleSheet("background-color: transparent;")
@@ -1086,6 +1116,8 @@ class HookListSettingCard(ExpandSettingCard):
         self._hooks_config_file = self._get_global_hooks_file()
         # hook_id -> HookItem 映射，用于轻量级状态更新（不触发全量 _refresh）
         self._hook_items: Dict[str, HookItem] = {}
+        # 事件分组标题引用（随 _refresh 重建，旧引用必然失效）
+        self._group_headers = []
         self._setup_ui()
         self._refresh()
 
@@ -1144,6 +1176,7 @@ class HookListSettingCard(ExpandSettingCard):
                 w.deleteLater()
 
         self._hook_items.clear()
+        self._group_headers.clear()
         self._render_hooks()
 
         # ★ 原实现在这里 QCoreApplication.processEvents()：它会把当时事件队列里
@@ -1163,6 +1196,26 @@ class HookListSettingCard(ExpandSettingCard):
             h = self.viewLayout.sizeHint().height()
             if h > 0:
                 self.setFixedHeight(self.card.height() + h)
+
+    def refresh_style(self):
+        """主题变更时刷新分组标题与各 Hook 行文字颜色
+
+        原卡无此方法：分组头硬编码浅色横条、行命令文本落调色板黑字，
+        深色主题下前者刺眼后者暗淡（mcpListCard 同款问题同款修法）。
+        """
+        Colors.refresh()
+        for header in self._group_headers:
+            try:
+                header.setStyleSheet(_hook_group_header_style())
+            except RuntimeError:
+                pass  # 已随列表重建销毁
+        for item in self._hook_items.values():
+            if item is None:
+                continue
+            try:
+                item.refresh_style()
+            except RuntimeError:
+                pass
 
     def _load_hooks(self):
         """从 HookManager 加载分组后的 hooks"""
@@ -1207,11 +1260,9 @@ class HookListSettingCard(ExpandSettingCard):
             cn_name = HOOK_EVENT_DISPLAY_NAMES.get(event, "")
             header_text = f"Event: {event}  ·  {cn_name}" if cn_name else f"Event: {event}"
             header = QLabel(header_text, self.view)
-            header.setStyleSheet(
-                f"background-color: #F0F0F0; color: #333; font-weight: bold; "
-                f"{get_font_family_css()} font-size: {scale_font_size(12)}px; padding: 6px 8px;"
-            )
+            header.setStyleSheet(_hook_group_header_style())
             self.viewLayout.addWidget(header)
+            self._group_headers.append(header)
             header.show()
 
             # Hook 条目

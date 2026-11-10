@@ -10,6 +10,11 @@
 留空 = 未声明，走自动链（插件 per-model 声明 → models.dev → 硬编码 → family
 → 默认）。每个字段右侧标出「自动值 + 来源」，让用户看清自己覆盖的是什么。
 
+另有一行「接口入口」：模型级协议路由（自动 / 已注册协议插件，
+Responses API 由 system-transports 插件枚举，不在 UI 层内置），
+与六键同表落盘（``LLM.ModelOverrides`` 同条目），发送链 chat_worker 单点消费。
+模型参数卡不渲染该键（PARAM_SCHEMA.hide_in_card），这里是唯一编辑入口。
+
 弹窗只负责编辑与校验，落盘由调用方（模型列表编辑器）写 ``LLM.ModelOverrides``。
 """
 
@@ -50,7 +55,7 @@ def _fmt_limit(value: Any) -> str:
     """上下文/输出上限 → 紧凑显示（1024K 而非 1048576）"""
     try:
         num = int(value)
-    except TypeError, ValueError:
+    except (TypeError, ValueError):
         return "未知"
     if num <= 0:
         return "未知"
@@ -93,6 +98,8 @@ class ModelCapabilityEditDialog(MaskDialogBase):
         self.provider_name = str(provider_name or "")
         self.saved = False
         self.declared: Dict[str, Any] = {}
+        # 接口入口手选值（"" = 自动）；保存时由调用方写 ModelOverrides
+        self.protocol_entry = ""
         self._auto: Dict[str, Any] = {}
         self._sources: Dict[str, Any] = {}
         self._load_auto_caps()
@@ -123,6 +130,44 @@ class ModelCapabilityEditDialog(MaskDialogBase):
             return read_declarations(overrides, self.provider_name, self.model_name)
         except Exception:
             return {}
+
+    def _load_protocol_entry(self) -> str:
+        """读当前已保存的接口入口（来自 ModelOverrides 同条目；"" = 自动）。
+
+        存量值 ``responses``（插件化前内置项的落盘格式）归一为
+        ``transport:openai_responses`` 显示与保存；消费端
+        protocol_dispatch 对旧值的映射保留不动，落盘不用改数据。
+        """
+        try:
+            from app.core.modelmeta.model_declarations import read_protocol_entry
+            from app.utils.config import Settings
+
+            overrides = Settings.llm_model_overrides.value or {}
+            saved = read_protocol_entry(overrides, self.provider_name, self.model_name)
+        except Exception:
+            return ""
+        if saved == "responses":
+            from app.core.workers.protocol_dispatch import RESPONSES_TRANSPORT_ID
+
+            saved = f"transport:{RESPONSES_TRANSPORT_ID}"
+        return saved
+
+    def _protocol_options(self) -> Tuple:
+        """接口入口选项：自动 / 已注册协议插件（实时枚举，不缓存）。
+
+        Responses API 已插件化（Phase 3），不再内置固定项——内置
+        ("Responses API", "responses") 与插件 openai_responses 在消费端
+        完全等价，同时出现会让下拉出现两个同名项（2026-11-08 用户报告）。
+        """
+        options = [("自动", "")]
+        try:
+            from app.plugins.registries.transport_registry import TransportRegistry
+
+            for tid, transport in TransportRegistry.get_instance().transports().items():
+                options.append((getattr(transport, "display_name", None) or tid, f"transport:{tid}"))
+        except Exception:
+            pass
+        return tuple(options)
 
     def _source_text(self, field: str) -> str:
         """字段来源提示文案：自动值 + 生效层"""
@@ -172,6 +217,24 @@ class ModelCapabilityEditDialog(MaskDialogBase):
         layout.addSpacing(4)
 
         declared = self._load_declared()
+
+        # 接口入口：模型级协议路由（自动 / Responses API / 已注册协议插件）。
+        # 与六键同表落盘，chat_worker._resolve_use_responses 单点消费。
+        _saved_protocol = self._load_protocol_entry()
+        self.protocol_combo = self._add_choice_row(
+            layout,
+            "接口入口",
+            "protocol_entry",
+            self._protocol_options(),
+            _saved_protocol or None,
+            "自动（按模型名判定）",
+        )
+        if _saved_protocol and self.protocol_combo.findData(_saved_protocol) < 0:
+            # 手选的协议插件被禁用/卸载：保留原值单独成项，避免下次保存
+            # 静默回退「自动」把用户的配置改掉
+            self.protocol_combo.addItem(f"{_saved_protocol}（未注册）", userData=_saved_protocol)
+            self.protocol_combo.setCurrentIndex(self.protocol_combo.count() - 1)
+        layout.addSpacing(2)
 
         # 上下文长度 / 最大输出：整数输入，空 = 自动
         self.context_edit = self._add_int_row(
@@ -438,11 +501,14 @@ class ModelCapabilityEditDialog(MaskDialogBase):
             declared[_DECL_KEYS["effort"]] = levels
 
         self.declared = declared
+        # 接口入口与六键分开返回：语义不同（路由 vs 能力），调用方分别落盘
+        self.protocol_entry = str(self.protocol_combo.currentData() or "")
         self.saved = True
         self.accept()
 
     def _on_reset(self):
         """清空全部声明（回到自动链），作为一次保存生效"""
         self.declared = {}
+        self.protocol_entry = ""
         self.saved = True
         self.accept()

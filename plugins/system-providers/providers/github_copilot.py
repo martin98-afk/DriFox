@@ -211,6 +211,46 @@ _MODELS = [
 ]
 
 
+def _health_probe(config) -> str:
+    """健康探测钩子：按本配置的 gho 换短效 Copilot token 后对聊天端点发真请求。
+
+    列表探测（/models 对任意 gho 都宽松）验不出 gho 被吊销/订阅过期；
+    本钩子打 /chat/completions 才能验出真实可用性（状态点语义 = 当前联通）。
+    返回对齐 model_refresh_service 四态：ok / auth_failed / unreachable。
+    """
+    import urllib.error
+    import urllib.request
+
+    github_token = str((config or {}).get("API_KEY", "") or "").strip()
+    if not github_token:
+        return "auth_failed"  # 尚未登录
+    try:
+        token = _exchange_copilot_token(github_token)
+    except Exception:
+        return "auth_failed"  # gho 失效 / 换取失败
+    model = str((config or {}).get("探活模型") or (config or {}).get("模型名称", "") or "").strip()
+    if not model:
+        return "unreachable"
+
+    ca = _load_auth_module()
+    body = json.dumps(
+        {"model": model, "messages": [{"role": "user", "content": "ping"}], "max_tokens": 1, "stream": False}
+    ).encode("utf-8")
+    headers = {**ca.build_chat_headers(token), "Content-Type": "application/json"}
+    try:
+        req = urllib.request.Request(
+            f"{_API_ENDPOINT}/chat/completions", data=body, method="POST", headers=headers
+        )
+        with urllib.request.urlopen(req, timeout=15, context=_system_ssl_context()) as resp:
+            resp.read()
+        return "ok"
+    except urllib.error.HTTPError as e:
+        if e.code in (401, 403, 402):
+            return "auth_failed"
+        return "unreachable"
+    except Exception:
+        return "unreachable"
+
 def register(registry):
     registry.register(
         ProviderDef(
@@ -227,6 +267,8 @@ def register(registry):
                 "extra_headers": _EXTRA_HEADERS,
                 "login_hook": _auto_login,
                 "models_hook": _fetch_models,
+                # 健康探测：插件内换短效凭据对聊天端点发真请求（状态点语义 = 当前联通）
+                "health_probe": _health_probe,
                 # 编辑卡「登录」InfoBar 的提示文案：GitHub device 页强制手输 code
                 #（不认 URL 预填，安全设计），告知 code 已在剪贴板
                 "login_hint": "已打开 GitHub 授权页，user_code 已复制到剪贴板：粘贴后点 Continue（最长等待 5 分钟）",
