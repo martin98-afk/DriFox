@@ -111,6 +111,7 @@ from app.core.infra.memory_governor import (
     _KILL_COOLDOWN_S,
     _LRU_RENDERER_KEEP,
     _LRU_RENDERER_KEEP_ACTIVE,
+    _MAIN_RSS_GATE_SOFT_MB,
     _cleanup_global_lru_caches,
     _compact_process_heap_after_cleanup,
     _is_sip_deleted,
@@ -1602,7 +1603,9 @@ class OpenAIChatToolWindow(ToolWindow):
         # 冷却中/未超阈值均快速返回），覆盖空闲盲区。QTimer(self) 随窗口销毁。
         self._strong_recycle_timer = QTimer(self)
         self._strong_recycle_timer.setInterval(45 * 1000)
-        self._strong_recycle_timer.timeout.connect(self._maybe_strong_recycle)
+        # [T22] 回调改为 _on_strong_recycle_tick：既有强回收之后追加动态阈值闸门
+        # （主进程/renderer 双判据），不新增 timer。
+        self._strong_recycle_timer.timeout.connect(self._on_strong_recycle_tick)
         self._strong_recycle_timer.start()
         self.toolStartUiSyncRequested.connect(self._handle_tool_start_ui_sync, type=Qt.QueuedConnection)
         self._is_streaming = False
@@ -14069,6 +14072,12 @@ class OpenAIChatToolWindow(ToolWindow):
         web_threshold = _WEB_MEM_THRESHOLD_MB_ACTIVE if active else _WEB_MEM_THRESHOLD_MB
         if web_mb >= web_threshold:
             return True
+        # [T22] 主进程单项判据：主进程 RSS 超软阈也触发（T21 发现：主进程从
+        # 417MB 涨到 1.8GB 期间，子进程恒 57-93MB 永不达阈、_unloaded_pids 恒空，
+        # 旧双判据一次都不触发 —— 监控失明）。阈值依据：空实例 ~417MB 正常、
+        # 2202MB 已严重卡顿（用户实感）。与 renderer 判据相互独立。
+        if rss_mb >= _MAIN_RSS_GATE_SOFT_MB:
+            return True
         total_threshold = _MEM_THRESHOLD_TOTAL_MB_ACTIVE if active else _MEM_THRESHOLD_TOTAL_MB
         return (rss_mb + web_mb) > total_threshold
 
@@ -14085,6 +14094,19 @@ class OpenAIChatToolWindow(ToolWindow):
             for _, _, idx in self._unloaded_pids
         )
         return offscreen and self._rendered_card_count > self._max_rendered_cards
+
+    def _on_strong_recycle_tick(self):
+        """[T28 L3 + T22] 45s 兑底拍：既有强回收 → 动态阈值闸门。
+
+        两个动作各自幂等（队列空/冷却中/未超阈均快速返回），合并到同一
+        timer 拍不新增定时器。闸门异常兑底不冒泡，不影响既有强回收。
+        """
+        self._maybe_strong_recycle()
+        try:
+            memory_governor.enforce_renderer_rss_gate(self)
+        except Exception:
+            # 闸门任何异常都不能打断兑底拍（退化 = 本拍不动作）
+            pass
 
     def _kill_lru_unloaded_renderers(self, keep: int = None, min_offscreen: int = 0) -> int:
         """按卸载时间升序（最老在前）kill 超 keep 部分，每轮 ≤ _KILL_BATCH_MAX。
@@ -14187,6 +14209,50 @@ class OpenAIChatToolWindow(ToolWindow):
             )
         else:
             self._kill_lru_unloaded_renderers(keep=_LRU_RENDERER_KEEP)
+
+    @staticmethod
+    def _kill_unloaded_pids_deferred(pids) -> int:
+        """关窗延后回收：逐 pid 过全局在用护栏后 kill（T16）。
+
+        与 _kill_lru_unloaded_renderers（实例方法）的差异：
+        - 调用时机在 closeEvent 之后一拍，原窗口实例已销毁，不能再用
+          self._pid_still_in_use（只覆盖本窗口 _batch_cards）；改用
+          window_registry 遍历全部存活窗口的同名护栏，防止 Chromium
+          renderer-process-limit 复用下误杀其他窗口正在显示的 renderer。
+        - 一次性杀完整个入参队列（不受 _KILL_BATCH_MAX 限制）：关窗场景
+          不存在「用户即将滚回」，全部记账都是死账。
+        - _kill_renderer 自带 cmdline 校验（QtWebEngineProcess +
+          --type=renderer），双保险。
+
+        Returns:
+            成功 kill 的数量（仅用于日志）。
+        """
+        killed = 0
+        for pid in pids or []:
+            try:
+                busy = False
+                for w in window_registry.alive_window_instances():
+                    if w is None:
+                        continue
+                    try:
+                        if w._pid_still_in_use(pid):
+                            busy = True
+                            break
+                    except RuntimeError:
+                        # 窗口 C++ 对象已销毁但弱引用未脱落：视为不占用
+                        continue
+                if busy:
+                    continue
+                if OpenAIChatToolWindow._kill_renderer(pid):
+                    killed += 1
+            except Exception:
+                continue
+        if killed:
+            try:
+                logger.info(f"[T16] 关窗延后回收 {killed}/{len(pids)} 个离屏 renderer")
+            except Exception:
+                pass
+        return killed
 
     def _open_diff_viewer(self):
         """打开差异查看窗口，显示当前会话修改文件的 git diff"""
@@ -26414,9 +26480,28 @@ class OpenAIChatToolWindow(ToolWindow):
         memory_governor._global_rendered_pages = max(
             0, memory_governor._global_rendered_pages - self._rendered_card_count
         )
-        # ★ B4 强回收层：进程退出整体回收，不 kill（窗口销毁时 renderer
-        # 子进程随 WebEngine profile 自动退出，显式 kill 反而可能误伤共享进程）
-        self._unloaded_pids.clear()
+        # ★ B4 强回收层（T16 修复）：关窗时回收本窗口名下的离屏 renderer。
+        # 旧实现直接 clear()，注释假设「renderer 随 WebEngine profile 自动退出」；
+        # 但 profile 是进程级单例（webengine_profile OTR 共享 profile 永不销毁），
+        # 多窗口场景下关掉一个窗口，其已卸载批次的 renderer 进程成为孤儿：
+        # kill 记账被丢弃、强回收永不触发，实测 1h 内 3 个 → 13 个（1371MB）。
+        # 现改为：取出记账 → 延后一拍（QTimer.singleShot(0)，不拖慢关窗路径）
+        # 逐 pid 过全局护栏后 kill；最后一个窗口关闭 = 应用退出，renderer 随
+        # 进程退出，不 kill（与旧行为一致）。异常兜底：任何失败都退化为旧的
+        # clear() 行为，绝不阻断关窗。
+        try:
+            stale_pids = [entry[0] for entry in self._unloaded_pids]
+        except Exception:
+            stale_pids = []
+        self._unloaded_pids = []
+        if stale_pids and window_registry.alive_window_instances():
+            try:
+                QTimer.singleShot(
+                    0, lambda pids=tuple(stale_pids): OpenAIChatToolWindow._kill_unloaded_pids_deferred(pids)
+                )
+            except Exception:
+                # 延后调度失败（事件循环即将退出等）：放弃 kill，退化为旧行为
+                pass
 
         # 最后一个窗口关闭 → 应用退出，保存工作目录到 DB，下次启动时自动恢复
         if not window_registry.alive_window_instances():
