@@ -12,15 +12,11 @@
 - edit：oldString 唯一性校验 + unified diff 产出
 - grep/glob/list/scan_repo：排除目录集合与主程序一致
 """
-import ast
 import base64
 import difflib
 import fnmatch
-import json
 import os
 import re
-import subprocess
-import sys
 from uuid import uuid4
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from itertools import islice
@@ -558,10 +554,8 @@ def _multi_edit_impl(tool_ctx, **kwargs):
     - 基于原文定位：所有 oldString 在原文上查找并要求唯一；两两区间重叠 → 整体
       拒绝并报出冲突序号；按 start 倒序拼接，消除流式替换的锚点漂移
     - 原子写：临时文件 + os.replace，其他进程不会读到中间态
-    - 落盘前自校验：所有 newString 必须原样出现、所有 oldString 不得残留、
-      py 文件 ast.parse 必须通过 —— 任一不过整体不写
-    - P4 跨度体检（py 文件）：改动前后按 AST 比较函数/类跨度，增长超阈值
-      （>50% 或 >100 行）在返回 content 里附 ⚠️ WARNING（不阻断，人工确认）
+    - 落盘前自校验：所有 newString 必须原样出现、所有 oldString 不得残留
+      —— 任一不过整体不写
 
     EOL 归一化语义（`_normalize_eol_pair`，保留）：归一化**只影响匹配**；匹配
     成功时写入的 newString 是归一化后的版本（与文件主导行尾一致）。即用户给
@@ -584,9 +578,8 @@ def _multi_edit_impl(tool_ctx, **kwargs):
         if check:
             return check
         raw_bytes = full_path.read_bytes()
-        # UTF-8 BOM 兼容：带 BOM 的 py 文件按 utf-8 读时首字符是 U+FEFF，
-        # ast.parse 直接 SyntaxError（U+FEFF 非法非打印字符），导致 multi_edit
-        # 被整体误拒。读时剥离，写回时按原样补回。
+        # UTF-8 BOM 兼容：按 utf-8 读时首字符是 U+FEFF，会混进 diff 与
+        # oldString 匹配。读时剥离，写回时按原样补回。
         file_has_bom = raw_bytes.startswith(b"\xef\xbb\xbf")
         old_content = raw_bytes.decode("utf-8-sig" if file_has_bom else "utf-8")
 
@@ -663,45 +656,13 @@ def _multi_edit_impl(tool_ctx, **kwargs):
         for i, _start, _end, _old_s, new_s in prepared:
             if new_s and new_s not in current:
                 errors.append(f"Edit #{i + 1}: newString 未出现在结果中（替换丢失）")
-        py_spans = None
-        if path.endswith(".py"):
-            syntax_err, py_spans = _py_syntax_and_spans(current)
-            if syntax_err:
-                errors.append(f"结果 ast.parse 失败: {syntax_err}")
         if errors:
             return ToolResult(
                 False,
                 error="自校验失败（整体未写盘，文件保持原样）：\n" + "\n".join(errors),
             )
 
-        # ── 第五步：P4 跨度体检（py 文件，不阻断只提醒）──
-        span_warnings = []
-        # 语法校验时已顺带算出新跨度，不再重复 parse
-        new_spans = py_spans if py_spans is not None else {}
-        if py_spans is not None:
-            old_spans = _cached_old_spans(full_path, old_content)
-            if old_spans is not None:
-                for name, (n_lo, n_hi) in new_spans.items():
-                    if name not in old_spans:
-                        continue
-                    o_lo, o_hi = old_spans[name]
-                    o_lines, n_lines = o_hi - o_lo + 1, n_hi - n_lo + 1
-                    delta = n_lines - o_lines
-                    if delta > 100 or (o_lines > 0 and delta > o_lines // 2):
-                        span_warnings.append(
-                            f"{name}: {o_lines} → {n_lines} 行（+{delta}），"
-                            "跨度异常增长，请确认是否误拼接"
-                        )
-                    elif o_lines >= 8 and (delta < 0 and (abs(delta) > 10 or n_lines * 2 < o_lines)):
-                        # 缩减方向（13 场景对比的盲区）：dedent 注入会把原函数体
-                        # 「挤」成新的顶层 def，被编辑函数跨度骤缩（如 10 行 → 2 行）。
-                        # 新增顶层函数是正常编辑，不查 def 数量；查同名定义的骤缩。
-                        span_warnings.append(
-                            f"{name}: {o_lines} → {n_lines} 行（-{abs(delta)}），"
-                            "跨度骤缩，请确认函数体是否被顶出（dedent 注入）"
-                        )
-
-        # ── 第六步：原子写（tmp + os.replace）──
+        # ── 第五步：原子写（tmp + os.replace）──
         # tmp 名含 pid + 随机段：多进程同时编辑同一文件不会互相覆盖对方的 tmp。
         # try/finally 保证只读/权限/磁盘满/os.replace 失败时 tmp 必被清理，
         # 不在目标目录残留「看起来像源文件」的完整副本。
@@ -723,8 +684,6 @@ def _multi_edit_impl(tool_ctx, **kwargs):
                 except OSError as cleanup_err:
                     cleanup_note = f"临时文件清理失败：{cleanup_err}"
         _record_mtime(tool_ctx, full_path)
-        if py_spans is not None:
-            _cache_spans(full_path, new_spans)
         diff_lines = list(
             difflib.unified_diff(
                 old_content.splitlines(), current.splitlines(),
@@ -736,10 +695,6 @@ def _multi_edit_impl(tool_ctx, **kwargs):
         content = f"已批量编辑 {display}（{len(edits)} 处全部成功）"
         if cleanup_note:
             content += f"\nℹ️ {cleanup_note}"
-        if span_warnings:
-            content += "\n⚠️ [multi-edit 体检] 以下定义跨度异常增长，请确认：\n" + "\n".join(
-                f"  - {w}" for w in span_warnings
-            )
         return ToolResult(True, content=content, diff=diff_str)
     except UnicodeDecodeError as e:
         return ToolResult(
@@ -752,124 +707,6 @@ def _multi_edit_impl(tool_ctx, **kwargs):
         if cleanup_note:
             msg += f"\nℹ️ {cleanup_note}"
         return ToolResult(False, error=msg)
-
-# ── py 跨度缓存 ──
-# 动机：main_widget.py（27k 行 / 1.1MB）单次 ast.parse 实测 858ms（Python 3.14）。
-# multi_edit 原先对「语法校验 + 新旧两棵树」共 parse 3 次，累计持 GIL 约 2.5s，
-# 期间 Qt 主线程等不到 GIL，watchdog 反复报裸栈阻塞（2026-11-10 实证）。
-# 现在：语法校验的树复用给新跨度；旧跨度走缓存，未命中时大文件跳过体检。
-_SPANS_CACHE: Dict[str, tuple] = {}
-_SPANS_CACHE_MAX_FILES = 128
-# 超过该字符数且缓存未命中时不再现算 old_spans（本次跳过跨度体检）。
-# 体检是不阻断的提醒，大文件用一次全量 parse 换这条提醒不值得。
-_SPANS_OLD_PARSE_MAX_CHARS = 200_000
-
-# 超过该字符数的 py 文件，语法校验改在子进程执行：ast.parse 是 C 全量解析，
-# 期间不释放 GIL，进程内解析 27k 行实测 766ms，Qt 主线程整段卡死（2026-11-10）。
-# 子进程冷启动 + 解析实测 821ms，多花 55ms 换主线程零阻塞。
-# 打包版（sys.frozen）的 sys.executable 是宿主 exe，暂不支持子进程，回退主进程。
-_SUBPROCESS_CHECK_MIN_CHARS = 200_000
-_SUBPROCESS_CHECK_TIMEOUT_S = 60
-
-# 子进程校验器：只做 ast.parse + 跨度提取，输出 JSON。
-_PY_SPANS_WORKER = r"""
-import ast, json, sys
-
-payload = json.loads(sys.stdin.buffer.read().decode("utf-8"))
-try:
-    tree = ast.parse(payload["text"])
-except SyntaxError as e:
-    out = {"error": "line %s: %s" % (e.lineno, e.msg), "spans": None}
-else:
-    spans = {}
-    for node in ast.walk(tree):
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            spans[node.name] = [node.lineno, node.end_lineno]
-    out = {"error": None, "spans": spans}
-sys.stdout.buffer.write(json.dumps(out).encode("utf-8"))
-"""
-
-def _subprocess_py_spans(text: str):
-    """子进程里做语法校验并算跨度；任何失败返回 None，由调用方降级。"""
-    try:
-        payload = json.dumps({"text": text}).encode("utf-8")
-        proc = subprocess.run(
-            [sys.executable, "-c", _PY_SPANS_WORKER],
-            input=payload,
-            capture_output=True,
-            timeout=_SUBPROCESS_CHECK_TIMEOUT_S,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-        )
-        if proc.returncode != 0:
-            return None
-        out = json.loads(proc.stdout.decode("utf-8"))
-        return out.get("error"), out.get("spans")
-    except Exception:
-        return None
-
-def _py_syntax_and_spans(text: str):
-    """语法校验 + 跨度表，返回 (错误信息或 None, 跨度表或 None)。
-
-    大文件且非打包环境走子进程，避免 ast.parse 持 GIL 阻塞 Qt 主线程；
-    子进程不可用时回退主进程，保证功能不降级。
-    """
-    if len(text) > _SUBPROCESS_CHECK_MIN_CHARS and not getattr(sys, "frozen", False):
-        result = _subprocess_py_spans(text)
-        if result is not None:
-            return result
-    try:
-        tree = ast.parse(text)
-    except SyntaxError as e:
-        return f"line {e.lineno}: {e.msg}", None
-    return None, _spans_from_tree(tree)
-
-def _spans_from_tree(tree) -> dict:
-    """从已解析的 AST 取函数/类跨度表 {名字: (起始行, 结束行)}。"""
-    spans = {}
-    for node in ast.walk(tree):
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            spans[node.name] = (node.lineno, node.end_lineno)
-    return spans
-
-def _cache_spans(full_path: Path, spans: dict) -> None:
-    """按文件当前 mtime/size 更新跨度缓存。"""
-    try:
-        st = full_path.stat()
-    except OSError:
-        return
-    if len(_SPANS_CACHE) >= _SPANS_CACHE_MAX_FILES:
-        _SPANS_CACHE.clear()
-    _SPANS_CACHE[str(full_path)] = (st.st_mtime_ns, st.st_size, spans)
-
-def _cached_old_spans(full_path: Path, old_content: str):
-    """取编辑前文件的跨度表；缓存未命中时按文件大小决定是否现算。
-
-    缓存键带 (mtime_ns, size)，文件被外部改动后自动失效。大文件未命中返回
-    None（本次跳过体检），写盘后 _cache_spans 会建立基线，后续编辑恢复体检。
-    """
-    key = str(full_path)
-    try:
-        st = full_path.stat()
-    except OSError:
-        return None
-    hit = _SPANS_CACHE.get(key)
-    if hit is not None and hit[0] == st.st_mtime_ns and hit[1] == st.st_size:
-        return hit[2]
-    if len(old_content) > _SPANS_OLD_PARSE_MAX_CHARS:
-        return None
-    spans = _py_def_spans(old_content)
-    if spans is not None:
-        _cache_spans(full_path, spans)
-    return spans
-
-def _py_def_spans(text: str):
-    """py 文本的函数/类跨度表 {名字: (起始行, 结束行)}；语法错误返回 None。"""
-    try:
-        tree = ast.parse(text)
-    except (SyntaxError, ValueError):
-        return None
-    return _spans_from_tree(tree)
-
 
 # ========== grep ==========
 
