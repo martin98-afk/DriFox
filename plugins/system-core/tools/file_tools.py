@@ -580,7 +580,12 @@ def _multi_edit_impl(tool_ctx, **kwargs):
         check = _check_modified(tool_ctx, workdir, full_path, path)
         if check:
             return check
-        old_content = full_path.read_text(encoding="utf-8", errors="strict", newline="")
+        raw_bytes = full_path.read_bytes()
+        # UTF-8 BOM 兼容：带 BOM 的 py 文件按 utf-8 读时首字符是 U+FEFF，
+        # ast.parse 直接 SyntaxError（U+FEFF 非法非打印字符），导致 multi_edit
+        # 被整体误拒。读时剥离，写回时按原样补回。
+        file_has_bom = raw_bytes.startswith(b"\xef\xbb\xbf")
+        old_content = raw_bytes.decode("utf-8-sig" if file_has_bom else "utf-8")
 
         # ── 第一步：全部 edit 在原文上定位（全有或全无：任何失败整体拒绝）──
         errors = []
@@ -655,9 +660,10 @@ def _multi_edit_impl(tool_ctx, **kwargs):
         for i, _start, _end, _old_s, new_s in prepared:
             if new_s and new_s not in current:
                 errors.append(f"Edit #{i + 1}: newString 未出现在结果中（替换丢失）")
+        py_tree = None
         if path.endswith(".py"):
             try:
-                ast.parse(current)
+                py_tree = ast.parse(current)
             except SyntaxError as e:
                 errors.append(f"结果 ast.parse 失败: line {e.lineno}: {e.msg}")
         if errors:
@@ -668,10 +674,11 @@ def _multi_edit_impl(tool_ctx, **kwargs):
 
         # ── 第五步：P4 跨度体检（py 文件，不阻断只提醒）──
         span_warnings = []
-        if path.endswith(".py"):
-            old_spans = _py_def_spans(old_content)
-            new_spans = _py_def_spans(current)
-            if old_spans is not None and new_spans is not None:
+        # 复用落盘自校验那颗树算新跨度，避免再 parse 一遍
+        new_spans = _spans_from_tree(py_tree) if py_tree is not None else {}
+        if py_tree is not None:
+            old_spans = _cached_old_spans(full_path, old_content)
+            if old_spans is not None:
                 for name, (n_lo, n_hi) in new_spans.items():
                     if name not in old_spans:
                         continue
@@ -700,7 +707,11 @@ def _multi_edit_impl(tool_ctx, **kwargs):
             f"{full_path.name}.{os.getpid()}.{uuid4().hex[:8]}.tmp-multiedit"
         )
         try:
-            tmp_path.write_text(current, encoding="utf-8", newline="")
+            tmp_path.write_text(
+                current,
+                encoding="utf-8-sig" if file_has_bom else "utf-8",
+                newline="",
+            )
             os.replace(tmp_path, full_path)
         finally:
             if tmp_path.exists():
@@ -710,6 +721,8 @@ def _multi_edit_impl(tool_ctx, **kwargs):
                 except OSError as cleanup_err:
                     cleanup_note = f"临时文件清理失败：{cleanup_err}"
         _record_mtime(tool_ctx, full_path)
+        if py_tree is not None:
+            _cache_spans(full_path, new_spans)
         diff_lines = list(
             difflib.unified_diff(
                 old_content.splitlines(), current.splitlines(),
@@ -738,17 +751,63 @@ def _multi_edit_impl(tool_ctx, **kwargs):
             msg += f"\nℹ️ {cleanup_note}"
         return ToolResult(False, error=msg)
 
+# ── py 跨度缓存 ──
+# 动机：main_widget.py（27k 行 / 1.1MB）单次 ast.parse 实测 858ms（Python 3.14）。
+# multi_edit 原先对「语法校验 + 新旧两棵树」共 parse 3 次，累计持 GIL 约 2.5s，
+# 期间 Qt 主线程等不到 GIL，watchdog 反复报裸栈阻塞（2026-11-10 实证）。
+# 现在：语法校验的树复用给新跨度；旧跨度走缓存，未命中时大文件跳过体检。
+_SPANS_CACHE: Dict[str, tuple] = {}
+_SPANS_CACHE_MAX_FILES = 128
+# 超过该字符数且缓存未命中时不再现算 old_spans（本次跳过跨度体检）。
+# 体检是不阻断的提醒，大文件用一次全量 parse 换这条提醒不值得。
+_SPANS_OLD_PARSE_MAX_CHARS = 200_000
+
+def _spans_from_tree(tree) -> dict:
+    """从已解析的 AST 取函数/类跨度表 {名字: (起始行, 结束行)}。"""
+    spans = {}
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            spans[node.name] = (node.lineno, node.end_lineno)
+    return spans
+
+def _cache_spans(full_path: Path, spans: dict) -> None:
+    """按文件当前 mtime/size 更新跨度缓存。"""
+    try:
+        st = full_path.stat()
+    except OSError:
+        return
+    if len(_SPANS_CACHE) >= _SPANS_CACHE_MAX_FILES:
+        _SPANS_CACHE.clear()
+    _SPANS_CACHE[str(full_path)] = (st.st_mtime_ns, st.st_size, spans)
+
+def _cached_old_spans(full_path: Path, old_content: str):
+    """取编辑前文件的跨度表；缓存未命中时按文件大小决定是否现算。
+
+    缓存键带 (mtime_ns, size)，文件被外部改动后自动失效。大文件未命中返回
+    None（本次跳过体检），写盘后 _cache_spans 会建立基线，后续编辑恢复体检。
+    """
+    key = str(full_path)
+    try:
+        st = full_path.stat()
+    except OSError:
+        return None
+    hit = _SPANS_CACHE.get(key)
+    if hit is not None and hit[0] == st.st_mtime_ns and hit[1] == st.st_size:
+        return hit[2]
+    if len(old_content) > _SPANS_OLD_PARSE_MAX_CHARS:
+        return None
+    spans = _py_def_spans(old_content)
+    if spans is not None:
+        _cache_spans(full_path, spans)
+    return spans
+
 def _py_def_spans(text: str):
     """py 文本的函数/类跨度表 {名字: (起始行, 结束行)}；语法错误返回 None。"""
     try:
         tree = ast.parse(text)
     except (SyntaxError, ValueError):
         return None
-    spans = {}
-    for node in ast.walk(tree):
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            spans[node.name] = (node.lineno, node.end_lineno)
-    return spans
+    return _spans_from_tree(tree)
 
 
 # ========== grep ==========
