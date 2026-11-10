@@ -272,6 +272,20 @@ class TestStreamingInterruptBehavior:
         stub.backend.stop_streaming.assert_called_once()
         stub._apply_interrupted_messages_to_session.assert_not_called()
 
+    @patch("PyQt5.sip.isdeleted", return_value=False)
+    def test_force_in_place_skips_spawn_tab(self, _mock_isdeleted):
+        """团队「新建任务」：force_in_place=True 时流式中不得 spawn_tab 新标签页
+
+        回归：团队成员流式输出时点「新建任务」，每个成员窗口都因流式保护
+        走 spawn_tab，在团队分组外冒出等量普通标签页。
+        """
+        stub = _make_stub(streaming=True, interrupted_messages=[{"role": "assistant", "content": "x"}])
+        fake_tm = MagicMock()
+        with patch("app.widgets.tab_manager_window.TabManagerWindow.get_instance", return_value=fake_tm):
+            stub._create_new_session(force_in_place=True)
+        fake_tm.spawn_tab.assert_not_called()
+        stub.backend.stop_streaming.assert_called_once()
+        stub.backend.create_session.assert_called_once()
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
