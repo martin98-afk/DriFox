@@ -6001,7 +6001,10 @@ class OpenAIChatToolWindow(ToolWindow):
                 return
             win = member_windows[_idx]
             try:
-                win._create_new_session()
+                # force_in_place：流式中也必须就地新建。成员窗口走 _create_new_session
+                # 的 spawn_tab 流式保护会在团队分组外多出普通标签页，且新 run_id 只
+                # 回写到旧窗口，成员表与分组错位。
+                win._create_new_session(force_in_place=True)
             except Exception as e:  # noqa: BLE001
                 logger.error(f"[_handle_team_new_task] 成员窗口新建会话失败: {e}")
             # 下一窗交错执行：期间事件循环可处理绘制/输入/welcome
@@ -12058,13 +12061,17 @@ class OpenAIChatToolWindow(ToolWindow):
             if hasattr(self, "_agent_buttons") and agent_name in self._agent_buttons:
                 self._agent_buttons[agent_name]["btn"].setToolTip(tooltip)
 
-    def _create_new_session(self, close_history: bool = False):
+    def _create_new_session(self, close_history: bool = False, force_in_place: bool = False):
         """新建会话
 
         Args:
             close_history: 用户动作触发的新建会话（按钮/命令/历史页签/项目切换）
                           传 True：新建后收起工作台「历史会话」页签（新建 = 真切换，
                           页签让位；启动恢复路径不传，保持页签原状）。
+            force_in_place: 流式中也强制**就地**新建（跳过 spawn_tab 流式保护）。
+                          团队框「新建任务」专用：语义是全员就地清空当前窗口并留在
+                          团队分组内，走 spawn_tab 会在团队外多出普通标签页，且新
+                          run_id 只回写旧窗口（成员与分组错位）。
         """
         import time as _time
 
@@ -12091,7 +12098,9 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 🆕 流式保护：当前标签页正在流式输出时，新建会话改开新标签页，
         # 不强行停止当前对话（由 TabManagerWindow.spawn_tab 承载新会话）。
-        if self._is_streaming:
+        # 例外：force_in_place（团队「新建任务」）——必须就地打断并清空，
+        # 否则每个正在流式的成员窗口都会在团队框外 spawn 一个普通标签页。
+        if self._is_streaming and not force_in_place:
             tm = TabManagerWindow.get_instance()
             if tm is not None:
                 # 临时页内流式中新建会话：新 tab 继承临时属性（页内新建一律临时）
