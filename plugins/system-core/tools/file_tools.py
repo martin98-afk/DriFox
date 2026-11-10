@@ -16,8 +16,11 @@ import ast
 import base64
 import difflib
 import fnmatch
+import json
 import os
 import re
+import subprocess
+import sys
 from uuid import uuid4
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from itertools import islice
@@ -660,12 +663,11 @@ def _multi_edit_impl(tool_ctx, **kwargs):
         for i, _start, _end, _old_s, new_s in prepared:
             if new_s and new_s not in current:
                 errors.append(f"Edit #{i + 1}: newString 未出现在结果中（替换丢失）")
-        py_tree = None
+        py_spans = None
         if path.endswith(".py"):
-            try:
-                py_tree = ast.parse(current)
-            except SyntaxError as e:
-                errors.append(f"结果 ast.parse 失败: line {e.lineno}: {e.msg}")
+            syntax_err, py_spans = _py_syntax_and_spans(current)
+            if syntax_err:
+                errors.append(f"结果 ast.parse 失败: {syntax_err}")
         if errors:
             return ToolResult(
                 False,
@@ -674,9 +676,9 @@ def _multi_edit_impl(tool_ctx, **kwargs):
 
         # ── 第五步：P4 跨度体检（py 文件，不阻断只提醒）──
         span_warnings = []
-        # 复用落盘自校验那颗树算新跨度，避免再 parse 一遍
-        new_spans = _spans_from_tree(py_tree) if py_tree is not None else {}
-        if py_tree is not None:
+        # 语法校验时已顺带算出新跨度，不再重复 parse
+        new_spans = py_spans if py_spans is not None else {}
+        if py_spans is not None:
             old_spans = _cached_old_spans(full_path, old_content)
             if old_spans is not None:
                 for name, (n_lo, n_hi) in new_spans.items():
@@ -721,7 +723,7 @@ def _multi_edit_impl(tool_ctx, **kwargs):
                 except OSError as cleanup_err:
                     cleanup_note = f"临时文件清理失败：{cleanup_err}"
         _record_mtime(tool_ctx, full_path)
-        if py_tree is not None:
+        if py_spans is not None:
             _cache_spans(full_path, new_spans)
         diff_lines = list(
             difflib.unified_diff(
@@ -761,6 +763,65 @@ _SPANS_CACHE_MAX_FILES = 128
 # 超过该字符数且缓存未命中时不再现算 old_spans（本次跳过跨度体检）。
 # 体检是不阻断的提醒，大文件用一次全量 parse 换这条提醒不值得。
 _SPANS_OLD_PARSE_MAX_CHARS = 200_000
+
+# 超过该字符数的 py 文件，语法校验改在子进程执行：ast.parse 是 C 全量解析，
+# 期间不释放 GIL，进程内解析 27k 行实测 766ms，Qt 主线程整段卡死（2026-11-10）。
+# 子进程冷启动 + 解析实测 821ms，多花 55ms 换主线程零阻塞。
+# 打包版（sys.frozen）的 sys.executable 是宿主 exe，暂不支持子进程，回退主进程。
+_SUBPROCESS_CHECK_MIN_CHARS = 200_000
+_SUBPROCESS_CHECK_TIMEOUT_S = 60
+
+# 子进程校验器：只做 ast.parse + 跨度提取，输出 JSON。
+_PY_SPANS_WORKER = r"""
+import ast, json, sys
+
+payload = json.loads(sys.stdin.buffer.read().decode("utf-8"))
+try:
+    tree = ast.parse(payload["text"])
+except SyntaxError as e:
+    out = {"error": "line %s: %s" % (e.lineno, e.msg), "spans": None}
+else:
+    spans = {}
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            spans[node.name] = [node.lineno, node.end_lineno]
+    out = {"error": None, "spans": spans}
+sys.stdout.buffer.write(json.dumps(out).encode("utf-8"))
+"""
+
+def _subprocess_py_spans(text: str):
+    """子进程里做语法校验并算跨度；任何失败返回 None，由调用方降级。"""
+    try:
+        payload = json.dumps({"text": text}).encode("utf-8")
+        proc = subprocess.run(
+            [sys.executable, "-c", _PY_SPANS_WORKER],
+            input=payload,
+            capture_output=True,
+            timeout=_SUBPROCESS_CHECK_TIMEOUT_S,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        if proc.returncode != 0:
+            return None
+        out = json.loads(proc.stdout.decode("utf-8"))
+        return out.get("error"), out.get("spans")
+    except Exception:
+        return None
+
+def _py_syntax_and_spans(text: str):
+    """语法校验 + 跨度表，返回 (错误信息或 None, 跨度表或 None)。
+
+    大文件且非打包环境走子进程，避免 ast.parse 持 GIL 阻塞 Qt 主线程；
+    子进程不可用时回退主进程，保证功能不降级。
+    """
+    if len(text) > _SUBPROCESS_CHECK_MIN_CHARS and not getattr(sys, "frozen", False):
+        result = _subprocess_py_spans(text)
+        if result is not None:
+            return result
+    try:
+        tree = ast.parse(text)
+    except SyntaxError as e:
+        return f"line {e.lineno}: {e.msg}", None
+    return None, _spans_from_tree(tree)
 
 def _spans_from_tree(tree) -> dict:
     """从已解析的 AST 取函数/类跨度表 {名字: (起始行, 结束行)}。"""
