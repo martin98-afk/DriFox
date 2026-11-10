@@ -348,8 +348,11 @@ class ToolActionDialog(QDialog):
 
     def _on_result(self, result) -> None:
         """每轮结果：图片刷新展示 + content 刷新状态文案"""
-        img = getattr(result, "image_data", None)
-        if img and img.get("data"):
+        from app.tools.result import as_image_list
+
+        images = as_image_list(getattr(result, "image_data", None))
+        img = images[0] if images else None
+        if img:
             try:
                 pm = QPixmap()
                 if pm.loadFromData(base64.b64decode(img["data"])):
