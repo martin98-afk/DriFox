@@ -264,6 +264,10 @@ class SubAgentManager(QObject):
         self._finished_tasks = _BoundedTaskDict(
             maxlen=200
         )  # task_id -> {"result": str, "error": str, "session_id": str}
+        # 结算幂等标记：同一 task_id 只进一次完成链。executor 线程的两种出口
+        # 信号（finished_with_result / error_occurred）与 stall 路径可能对同一
+        # 任务先后到达，重复结算会让 _batch_completed 超发、下一批提前汇总。
+        self._settled_tasks: set = set()
         self._task_store: Optional[SubAgentTaskStore] = None
         # 批次计数：本次启动的任务总数
         self._batch_total = 0
@@ -408,18 +412,18 @@ class SubAgentManager(QObject):
                 session_id=task_session_id,
             )
 
-            # 4. 通知 UI
-            try:
-                self.task_finished.emit(task_id, "")
-            except Exception as e:
-                logger.error(f"[SubAgentManager] task_finished.emit 失败 (stalled path): {e}")
-
-            # 5. 从 running_tasks 移除（避免 get_finished_tasks 再处理一次）
+            # 4. 从 running_tasks 移除（避免 get_finished_tasks 再处理一次）
             #    注意：executor 线程可能还在运行（卡在 API 调用中），
             #    但已经从管理器角度"移除"了，后续 finished_with_result 回调
             #    会因 task_id 不在 running_tasks 而被安全忽略。
             if task_id in self._running_tasks:
                 del self._running_tasks[task_id]
+
+            # 5. 统一结算：emit task_finished（UI 归档）+ 批次计数 + 全完成判定。
+            #    此前 stall 路径只归档不计数，批次内一个任务 stall 即令批次汇总
+            #    永久缺席（执行完/报错都无注入消息的直接成因之一）。线程随后
+            #    真正退出再发 error_occurred 时由 _settled_tasks 幂等拦住。
+            self._on_executor_finished(task_id, "")
 
     @staticmethod
     def _connect_cb(signal, callback, connection_type: int = None):
@@ -504,6 +508,20 @@ class SubAgentManager(QObject):
             }
         return {}
 
+    def _on_executor_error(self, task_id: str, error: str):
+        """executor error 出口统一结算。
+
+        run() 的 error_occurred（执行异常 / 被 cancel / agent 丢失）此前无人
+        监听（subagent_para 传 on_error=None），_batch_completed 永久缺口 →
+        批次汇总与单条注入永不触发，面板行也收不了尾。全部转入完成链：
+        归档 + 批次计数 + 全完成判定。若线程之后又发 finished_with_result，
+        由 _settled_tasks 拦住。
+        """
+        ex = self._running_tasks.get(task_id)
+        if ex is not None and not getattr(ex, "_execution_error", None):
+            ex._execution_error = error or "SubAgent execution error"
+        self._on_executor_finished(task_id, "")
+
     def _on_executor_finished(self, task_id: str, result: str):
         """executor 完成回调（manager 内部接线，AutoConnection 落主线程）。
 
@@ -514,6 +532,13 @@ class SubAgentManager(QObject):
         窗口宿主靠它把任务归档进 _finished_tasks/插件表。此前只有 stalled /
         cancel 路径发射，行会永远停在「执行中」且计时器无限累加。
         """
+        # 结算幂等：同一 task_id 只进一次完成链（error 与 finished 信号可能
+        # 先后到达；stall 路径与线程退出信号亦然）。超发会令批次提前汇总。
+        if task_id in self._settled_tasks:
+            return
+        self._settled_tasks.add(task_id)
+        while len(self._settled_tasks) > 512:  # uuid 全局唯一，有界防涨
+            self._settled_tasks.discard(next(iter(self._settled_tasks)))
         executor = self._running_tasks.get(task_id)
         success = not (getattr(executor, "_execution_error", None) or "")
         agent_name = getattr(executor, "agent_name", "") if executor else ""
@@ -761,6 +786,10 @@ class SubAgentManager(QObject):
             # 不跟随调用方 connection_type——同步等待型调用方的 DirectConnection
             # 会让本回调在 executor 线程执行，与主线程 UI 归档槽产生时序竞争）。
             executor.finished_with_result.connect(self._on_executor_finished)
+            # error 出口同样进完成链：此前 error_occurred 无人监听（on_error
+            # 为 None 的 subagent_para 路径），批次计数永久缺口 → 批次汇总/
+            # 单条注入永不触发，模型永远等不到 [后台任务状态] 通知。
+            executor.error_occurred.connect(self._on_executor_error)
 
             # ★ T24：转发子智能体 ask 权限请求到主线程（带 window_id 供多窗口定位弹窗）
             executor.permission_requested.connect(self._forward_permission_request)

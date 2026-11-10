@@ -363,7 +363,10 @@ class SubAgentExecutor(QThread):
 
             agent = self.agent_manager.get_agent(self.agent_name)
             if not agent:
-                self.error_occurred.emit(self.task_id, f"Agent not found: {self.agent_name}")
+                # 必须发 error_occurred：裸 return 会让完成链（批次计数/汇总
+                # 注入）永远等不到该任务的终态，批次通知永久缺席
+                self._execution_error = f"Agent not found: {self.agent_name}"
+                self.error_occurred.emit(self.task_id, self._execution_error)
                 return
 
             # 子智能体被调用时 is_subagent_call=True，此时应该使用 subagent_constraints

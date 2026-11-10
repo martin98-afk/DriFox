@@ -288,9 +288,22 @@ class SubAgentHost(QObject):
         """进入子智能体会话：读任务日志并灌入会话卡。"""
         manager = self.manager_for(window_id)
         if manager is None:
+            # 此前静默 return：用户点「进入会话」无任何反应且日志零痕迹
+            logger.warning(f"[system-subagent] 进入会话失败: 窗口 {window_id} 管理器未就绪 (task={task_id[:8]})")
+            _notify(
+                window_id,
+                self._bindings,
+                "子智能体服务未就绪",
+                "窗口管理器尚未初始化，请稍候 1-2 秒后重试",
+            )
             return
         data = manager.get_task_logs(task_id)
         if not data.get("found"):
+            logger.warning(
+                f"[system-subagent] 进入会话失败: 任务日志未找到 (task={task_id[:8]}, "
+                f"agent={agent_name}, window={window_id})——任务可能早于 7 天清理期或落库失败"
+            )
+            _notify(window_id, self._bindings, "任务日志不存在", f"任务 {task_id[:8]} 的日志查不到，可能已被清理")
             return
         logs = data.get("logs", [])
         summary = data.get("summary", {})
@@ -298,7 +311,8 @@ class SubAgentHost(QObject):
         summary["agent_name"] = agent_name
         service = self._registry.get_service("subagent_session")
         if service is None:
-            logger.warning("[system-subagent] 会话服务不可用，跳过进入会话")
+            logger.warning(f"[system-subagent] 会话服务不可用，跳过进入会话 (task={task_id[:8]})")
+            _notify(window_id, self._bindings, "会话卡不可用", "会话服务未注册，请检查 system-subagent 插件是否正常加载")
             return
         service.show(
             task_id=task_id,
