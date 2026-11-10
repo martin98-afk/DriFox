@@ -361,6 +361,11 @@ class SceneLayer(QWidget):
         self._image_source_path: Optional[str] = None
         self._image_bake_key: Optional[tuple] = None
         self._image_bake_timer: Optional[QTimer] = None
+        # [T51] 共享缓存生命周期：活跃使用者计数（全部 SceneLayer 销毁后宽限释放）。
+        # acquire 在构造时；release 挂 destroyed 信号（析构时机只碰纯 Python
+        # 单例，不触碰 Qt 对象，事件循环内/外均安全）。重复 release 幂等。
+        scene_pixmap_cache.acquire()
+        self.destroyed.connect(scene_pixmap_cache.release)
 
     def set_canvas_provider(self, provider) -> None:
         """注入跨宿主画布求值函数（幂等，可重复调用）
