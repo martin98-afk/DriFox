@@ -43,8 +43,17 @@ def register(registry) -> None:
         return getattr(bt, "_lsp_tools", None) if bt is not None else None
 
     def _mcp(host: Any):
-        bt = getattr(host, "_builtin_tools", None)
-        return getattr(bt, "_mcp_manager", None) if bt is not None else None
+        # MCP 连接与 schema 是全局单例（多窗口共享；BuiltinTools._mcp_manager
+        # 也指向它）。后台 pool_for / hook 路径的 host 是窗口，没有 _builtin_tools
+        # 属性，经 host 链取会恒 None（值班轮「MCP 未连接」误报的根因）。
+        # 直接取单例：未连接时 _connections 为空，get_tool_schemas_by_server
+        # 自然返回空 dict，无需守卫配置开关。
+        try:
+            from app.tools.mcp_tools import MCPClientManager
+
+            return MCPClientManager.get_instance()
+        except Exception:
+            return None
 
     def _gitee(host: Any):
         bt = getattr(host, "_builtin_tools", None)
