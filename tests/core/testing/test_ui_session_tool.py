@@ -36,7 +36,10 @@ def fake_mw(monkeypatch):
         get_current_session=lambda: sess,
     )
     mw.history_manager = SimpleNamespace(
-        get_session_by_session_id=lambda sid: {"session_id": sid, "title": "t"} if sid == "known" else None
+        # "known" 为 load 链路用例的固定会话；sess-aaaa-1111 为 new 创建的会话
+        # （真实场景 create_new_session 会落历史登记，switch 可查）
+        get_session_by_session_id=lambda sid: {"session_id": sid, "title": "t"}
+        if sid in ("known", "sess-aaaa-1111") else None
     )
     mw._display_current_session = lambda: None
 
@@ -62,6 +65,20 @@ def _issue_token(srv, object_name: str, expired: bool = False) -> str:
 def test_new_action_no_token(srv, fake_mw):
     out = srv._tool_ui_session(action="new")
     assert out["ok"] is True and out["action"] == "new"
+
+def test_new_returns_full_session_id_usable_for_switch(srv, fake_mw):
+    """[T34] new 返回完整 session_id（>8 位）且可直接用于 switch——
+    旧实现返回 [:8] 截断 ID，new→switch 自动化序列恒失败。"""
+    out = srv._tool_ui_session(action="new")
+    assert out["ok"] is True
+    assert len(out["session_id"]) > 8
+    assert out["session_id"] == "sess-aaaa-1111"
+    assert out["session_id_short"] == out["session_id"][:8]
+    # 直接把 new 返回的完整 ID 交给 switch，必须成功
+    out2 = srv._tool_ui_session(action="switch", session_id=out["session_id"])
+    assert out2["ok"] is True
+    assert out2["session_id"] == out["session_id"]
+    assert out2["session_id_short"] == out["session_id"][:8]
 
 
 def test_load_without_token_allowed(srv, fake_mw):
