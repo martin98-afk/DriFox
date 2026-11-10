@@ -11191,25 +11191,10 @@ class _ThemeRerenderQueue:
 _theme_rerender_queue = _ThemeRerenderQueue()
 
 
-# [B2] 工具 markdown 懒缓存条目上限：写入方在 MessageCard（禁区文件）直接
-# []= 追加，只能在此侧包装 dict 有界化。取 32 ≈ 单轮工具块数粗估（≤11）
-# 的 3 倍余量，且每轮流式结束已有 clear()（finish_streaming 内），单轮内
-# 条目数 = 实际工具块数，正常使用永不触发淘汰；触发时淘汰后果仅是
-# 命中缺失后按需重转换（content_to_markdown 单块，等价输出，毫秒级）。
-_MAX_TOOL_MD_ENTRIES = 32
-
-
-class _BoundedToolMdCache(dict):
-    """[B2] 有界工具 markdown 缓存：写入超上限按插入序淘汰最旧键。
-
-    读路径（MessageCard cache.get）不经此类，无触碰热语义；淘汰发生在
-    超上限写入时（正常使用不触发，见 _MAX_TOOL_MD_ENTRIES 注释）。
-    """
-
-    def __setitem__(self, key, value) -> None:
-        if key not in self and len(self) >= _MAX_TOOL_MD_ENTRIES:
-            del self[next(iter(self))]  # dict 保插入序：最早键即最旧
-        super().__setitem__(key, value)
+# [B2] 有界工具 markdown 缓存已搬至 app/widgets/_bounded_caches.py
+# （qt 渲染通道 markdown_block_viewer 也要用；从本模块 import 会把
+# QWebEngineWidgets 链拉进 Qt 通道，故独立成无依赖模块。命名空间保持兼容。）
+from app.widgets._bounded_caches import _BoundedToolMdCache, _MAX_TOOL_MD_ENTRIES  # noqa: F401
 
 
 class PlainTextViewer(QWidget):
