@@ -172,3 +172,116 @@ def test_detail_outputs_fields_and_local_dir(tool_mod, monkeypatch, tmp_path):
     assert "兼容：平台与宿主版本均满足" in res.content
     assert "组件：ui" in res.content
     assert f"本地目录：{plugin_dir.resolve()}" in res.content
+
+
+# ── 展示名（display_name）解析回归 ──────────────────────
+# 市场条目 name 是英文 slug 主键，display_name.zh 是中文展示名；
+# 搜索结果只展示中文名，工具必须两者都收，否则「搜得到装不了」。
+
+_MARKET_STUB = [
+    {"name": "demo-a", "display_name": {"zh": "演示插件"}, "version": "1.0.0", "downloads": 3},
+    {"name": "demo-b", "display_name": {"zh": "另一个"}, "version": "2.0.0", "downloads": 9},
+]
+
+
+def test_find_market_plugin_by_display_name(tool_mod, monkeypatch):
+    monkeypatch.setattr(tool_mod, "_market_plugins", lambda force=False: list(_MARKET_STUB))
+    assert tool_mod._find_market_plugin("demo-a")["name"] == "demo-a"
+    assert tool_mod._find_market_plugin("演示插件")["name"] == "demo-a"
+    assert tool_mod._find_market_plugin("不存在的名字") is None
+
+
+def test_find_market_plugin_display_ambiguous_takes_top_downloads(tool_mod, monkeypatch):
+    plugins = [
+        {"name": "low", "display_name": {"zh": "同名"}, "downloads": 3},
+        {"name": "high", "display_name": {"zh": "同名"}, "downloads": 9},
+    ]
+    monkeypatch.setattr(tool_mod, "_market_plugins", lambda force=False: list(plugins))
+    assert tool_mod._find_market_plugin("同名")["name"] == "high"
+
+
+class _FakeMarketData:
+    """search 链路桩：fetch 返回预置插件列表，零网络"""
+
+    def __init__(self, plugins):
+        self._plugins = plugins
+
+    def get_marketplace(self):
+        return self
+
+    def fetch(self, force=False):
+        return {"plugins": list(self._plugins), "_errors": []}
+
+
+def test_search_line_includes_slug(tool_mod, monkeypatch):
+    monkeypatch.setattr(tool_mod, "_market_data", lambda: _FakeMarketData(list(_MARKET_STUB)))
+    monkeypatch.setattr(tool_mod, "_installer", lambda: _FakeInstaller({}, {}))
+    res = tool_mod._search_impl({})
+    assert res.success is True
+    assert "演示插件 (demo-a)" in res.content
+    assert "标识名" in res.content
+
+
+def test_resolve_local_name_by_display(tool_mod):
+    class _Inst(_FakeInstaller):
+        def get_manifest_map(self):
+            return {"demo-a": {"name": "demo-a", "display_name": {"zh": "演示插件"}}}
+
+    inst = _Inst({"demo-a": "enabled"}, {"demo-a": "1.0.0"})
+    assert tool_mod._resolve_local_name("demo-a", inst) == "demo-a"
+    assert tool_mod._resolve_local_name("演示插件", inst) == "demo-a"
+    assert tool_mod._resolve_local_name("no-such", inst) == "no-such"
+
+
+def test_install_resolves_display_name_short_circuit(tool_mod, monkeypatch):
+    class _Inst(_FakeInstaller):
+        def get_manifest_map(self):
+            return {"browser": {"name": "browser", "display_name": {"zh": "内置浏览器"}}}
+
+    monkeypatch.setattr(
+        tool_mod, "_installer", lambda: _Inst({"browser": "enabled"}, {"browser": "1.7.1"})
+    )
+    monkeypatch.setattr(
+        tool_mod,
+        "_find_market_plugin",
+        lambda name, force=False: {"name": "browser", "version": "1.7.1"}
+        if name == "内置浏览器"
+        else None,
+    )
+    res = tool_mod._install_impl({}, plugin="内置浏览器")
+    assert res.success is True
+    assert "已安装" in res.content and "未重复安装" in res.content
+
+
+def test_detail_resolves_display_name(tool_mod, monkeypatch):
+    class _Inst(_FakeInstaller):
+        def get_manifest_map(self):
+            return {"demo-a": {"name": "demo-a", "version": "1.0.0"}}
+
+    monkeypatch.setattr(
+        tool_mod, "_installer", lambda: _Inst({"demo-a": "enabled"}, {"demo-a": "1.0.0"})
+    )
+    monkeypatch.setattr(
+        tool_mod,
+        "_find_market_plugin",
+        lambda name, force=False: {"name": "demo-a", "version": "1.0.0"}
+        if name == "演示插件"
+        else None,
+    )
+    res = tool_mod._detail_impl({}, plugin="演示插件")
+    assert res.success is True
+    assert "插件 demo-a v1.0.0" in res.content
+    assert "已安装·启用" in res.content
+
+
+def test_installed_keyword_matches_display_name(tool_mod, monkeypatch):
+    class _Inst(_FakeInstaller):
+        def get_manifest_map(self):
+            return {"demo-a": {"name": "demo-a", "display_name": {"zh": "演示插件"}}}
+
+    monkeypatch.setattr(
+        tool_mod, "_installer", lambda: _Inst({"demo-a": "enabled"}, {"demo-a": "1.0.0"})
+    )
+    res = tool_mod._installed_impl({}, keyword="演示", check_update=False)
+    assert res.success is True
+    assert "demo-a（演示插件）" in res.content
