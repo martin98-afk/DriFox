@@ -805,6 +805,46 @@ def _abort_team_window(win) -> None:
         pass
 
 
+def _reap_renderer_async(pid: int, create_time: float, cmd: str) -> None:
+    """[B4] renderer 后台收敛：terminate 之后的 wait/kill 移出主线程。
+
+    只接收纯值（pid/create_time/cmd），不触碰任何 QWidget/QObject、不 import
+    Qt；异常只记 debug 不冒泡（进程退出本就由 OS 兜底），失败路径必须留痕
+    （孤儿 renderer 不可观测 = 静默回退）。pid 复用防护：create_time 偏差
+    >2s 视为 pid 已被复用，直接放弃。
+    """
+    try:
+        import psutil
+
+        cur = psutil.Process(pid)
+        try:
+            if abs(float(cur.create_time()) - create_time) > 2.0:
+                return
+            name = (cur.name() or "").lower()
+            cur_cmd = " ".join(cur.cmdline() or [])
+            if not name.startswith("qtwebengineprocess") or "--type=renderer" not in cur_cmd:
+                return
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            logger.debug(f"[B4-reap] reap 校验阶段进程消失/无权限: pid={pid}")
+            return
+        try:
+            cur.wait(timeout=1.0)
+        except psutil.TimeoutExpired:
+            # 升级 kill 前再校验一次 create_time（防 wait 期间 pid 被复用误杀）
+            try:
+                if abs(float(cur.create_time()) - create_time) > 2.0:
+                    return
+                cur.kill()
+            except Exception as e:
+                logger.debug(f"[B4-reap] reap kill 阶段失败（进程或仍存活）: pid={pid} err={e!r}")
+                return
+        except Exception as e:
+            logger.debug(f"[B4-reap] reap wait 阶段失败: pid={pid} err={e!r}")
+            return
+    except Exception as e:
+        logger.debug(f"[B4-reap] reap 入口失败（Process 取句柄等）: pid={pid} err={e!r}")
+        return
+
 def _image_path_to_data_uri(img_path: str) -> "str | None":
     """把单个图片路径编码为 data URI，三档分支处理大图。
 
@@ -13963,7 +14003,9 @@ class OpenAIChatToolWindow(ToolWindow):
         QtWebEngineProcess 且 --type=renderer 才 kill）。
 
         Returns:
-            True = 已成功终止（或进程已不存在）
+            True = 已成功发起终止（terminate 已返回；收敛 wait/kill 由
+            后台线程 _reap_renderer_async 完成，主线程零阻塞）
+            False = 校验未通过 / 进程不存在 / 无权限
 
         注意：调用方需先用 `_pid_still_in_use()` 排除「进程被其他卡片共享」
         的情况（Chromium 开启 renderer-process-limit 后会出现）。
@@ -13983,11 +14025,23 @@ class OpenAIChatToolWindow(ToolWindow):
             if not proc_name.startswith("qtwebengineprocess") or "--type=renderer" not in cmd:
                 logger.debug(f"[B4-strong] kill 拒绝非 renderer 子进程: pid={pid} name={proc_name}")
                 return False
+            # terminate 前采集 create_time：后台 reap 用它做 pid 复用防护
+            create_time = float(p.create_time())
             p.terminate()
-            try:
-                p.wait(timeout=1.0)
-            except psutil.TimeoutExpired:
-                p.kill()
+            if os.environ.get("DRIFOX_KILL_ASYNC", "1") == "0":
+                # 回滚路径：原同步 wait/kill（主线程阻塞至多 1s/个，T31 每拍
+                # 最多 6 个 victim 时极端 ~6s 冻结——仅紧急回退时使用）
+                try:
+                    p.wait(timeout=1.0)
+                except psutil.TimeoutExpired:
+                    p.kill()
+                return True
+            threading.Thread(
+                target=_reap_renderer_async,
+                args=(pid, create_time, cmd),
+                daemon=True,
+                name="renderer-reap",
+            ).start()
             return True
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             return False
