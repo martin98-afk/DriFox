@@ -10,9 +10,9 @@ All notable changes to this project will be documented in this file.
 ### 🐛 问题修复 (Bug Fixes)
 - **服务商状态灯被单个最便宜模型的偶发故障误判红灯** (`app/core/modelmeta/model_refresh_service.py`, `tests/core/test_model_refresh_service.py`): 健康检查此前只挑「模型列表」内输入价最低的 1 个模型打一次 ping，该模型下线 / 被限流 / 网关路由缺失就让整家服务商显示红灯，实际换个模型就能通。改为按输入价升序取前 3 个候选（`PROBE_MODEL_LIMIT`），逐个探测、任一返回 ok 即停且不再消耗剩余候选；`auth_failed`（401/402/403，凭据或余额问题）同样立即停，换模型无意义。REST 与插件 `health_probe` 两条分支都走这套回退；无价格数据 / 无模型列表仍回退「模型名称」，行为不变。测试覆盖前 3 排序、404 回退、首个即通早停、鉴权即停、钩子回退。
 
-## [v0.7.0] - 2026-11-09 (重新发布 #6)
+## [v0.7.0] - 2026-11-09 (重新发布 #7)
 
-自 v0.7.0-beta 以来的变更 | 提交数：62 · 文件变更：203 · +10431/-1433 | 贡献者：dingma, martin98-afk
+自 v0.7.0-beta 以来的变更 | 提交数：71 · 文件变更：230 · +11800/-1636 | 贡献者：dingma, drifox-bot, martin98-afk
 
 ### ✨ 新功能 (New Features)
 - **宿主进程内 MCP gateway** (`app/core/services/local_mcp_gateway.py`, `app/plugins/capabilities/providers/mcp_core.py`, `app/tools/mcp_tools.py`): 插件可声明 `mcp.register` 能力，经 `caps_for` 取注册函数把工具 handler 登记进宿主进程内的 `ThreadingHTTPServer`（端口 `:0`）；`.mcp.json` 用 `type: http` + `url: ${LOCAL_MCP}/<name>`，连接前由 `_resolve_plugin_paths` 替换成 gateway 实际地址，复用 `streamablehttp_client` 纯 JSON 分支。MCP server 不再需要外部 python 子进程，打包版不依赖系统解释器安装 `mcp`/`httpx`；现有 stdio/sse/http 连接路径与设置页零改动。附 gateway 握手、能力注册、占位符解析 9 个单测，并用真实 SDK 客户端验证 `initialize → list_tools → call_tool` 三步。
@@ -99,6 +99,16 @@ All notable changes to this project will be documented in this file.
 
 ### 🔧 其他 (Chores & Build) (重新发布 #6 追加)
 - **回滚无关格式化** (`38a9b869a`): 回滚 ruff format 对既有代码区域的无关格式化（项目约定禁 ruff format）。
+
+### ✨ 新功能 (New Features) (重新发布 #7 追加)
+- **MCP 图片内容透传到视觉模型** (`b34d6a44`, `f15d16be`, `007c0305`, `0109a010`, `9ef6c248`): MCP server 按规范返回的 `ImageContent` 此前四处被丢——客户端 `_call_tool` 只收 `TextContent`（`ImageContent` 无 `.text` 被静默跳过）、`ToolResult.image_data` 只容单张、视觉注入只认 `ToolRegistry` 白名单而 MCP schema 从不进 registry、内嵌 gateway 把 handler 结果硬编码成 text 块。修复：`_split_tool_content` 按 `type` 字符串分派收图片（兼容 SDK 小版本与 dict 块）；`image_data` 放宽为单 dict 或列表并新增 `as_image_list` 归一化；视觉注入改为按载荷判定，协议 A 本地路径提取仍留白名单防误伤；gateway 支持 handler 返回规范 content 块，旧 `{"text"}` handler 零改动。新增 8MB 多图总量预算，超限压缩后丢末尾并在提示文本写明省略数。工具动作弹窗同步兼容多图 `image_data`。附 53 个相关测试全过。
+- **MCP 授权探活：关掉的服务也能看见授权失效** (`d9fb05ea`): 新增第五态 `MCPState.AUTH_EXPIRED`（红点「授权失效」，区别于启动失败）。设置卡展开可见时触发一次探活，覆盖 `type` 为 http/sse 的**全部**服务（含 `enabled=false`，此前它们在连接表里没有条目、状态恒为「已关闭」，而 figma / notion / tencent-docs 这类 OAuth 服务的 token 过期或被撤销完全无从感知）。判定两级：本地读 `expires_at`（token 存储里早就有，UI 从未用过），已过期且无 `refresh_token` 直接判死、零网络；其余发一次 `initialize`，OAuth 型走 SDK 的 `async_auth_flow` 让 token 自动续期，一旦需要交互授权即判失效、不弹浏览器。结果按服务名缓存在内存（TTL 10 分钟，并发 3、单服务 8 秒超时），`get_status()` 统一合并后设置卡与 `mcp_manage` 两处同时受益；`connected`/`connecting` 仍以连接事实为准，`stdio` 类型不探（等于重新拉起 npx/uvx 子进程）。
+
+### 📚 文档 (Docs) (重新发布 #7 追加)
+- **plugin-creator 发布前置清单与双仓副本说明** (`91d569a8`)；**MCP 图片透传能力文档** (`a42b1cf3`)。
+
+### 🔧 其他 (Chores & Build) (重新发布 #7 追加)
+- **插件市场 README 自动再生** (`a07b2d01`)。
 
 ## [v0.7.0-beta] - 2026-11-08
 
