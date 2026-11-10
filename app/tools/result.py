@@ -4,7 +4,7 @@ from typing import Any, Optional
 class ToolResult:
     def __init__(self, success: bool, content: Any = None, error: Optional[str] = None,
                  diff: Optional[str] = None, anchors: Optional[str] = None,
-                 echarts: Optional[str] = None, image_data: Optional[dict] = None,
+                 echarts: Optional[str] = None, image_data: Optional[dict | list] = None,
                  todos: Optional[list] = None, data: Optional[dict] = None,
                  artifacts: Optional[list] = None, end_turn: bool = False):
         self.success = success
@@ -13,7 +13,7 @@ class ToolResult:
         self.diff = diff      # diff 字符串，供 UI inline diff 展示
         self.anchors = anchors  # 新锚点块，供 LLM 链式编辑
         self.echarts = echarts  # ECharts 图表 JSON，供 UI 渲染 DAG 图
-        self.image_data = image_data  # 图片数据: {"mime": str, "data": str(base64)}
+        self.image_data = image_data  # 图片数据: {"mime","data"} 或其列表（多图）
         self.todos = todos  # 待办列表（工具插件 todowrite/todoread 回传，UI 卡片联动读取）
         self.data = data    # 结构化回传通道（通用）：设置卡动作按钮等 UI 编排消费
         self.artifacts = artifacts  # 成果条目列表（工具产出的文件/媒体，卡片成果栏数据源）
@@ -53,3 +53,12 @@ class ToolResult:
 
     def is_success(self) -> bool:
         return self.success
+
+
+def as_image_list(image_data) -> list[dict]:
+    """把 image_data 归一化为非空图片 dict 列表，兼容单张旧形态。"""
+    if isinstance(image_data, dict):
+        return [image_data] if image_data.get("data") else []
+    if isinstance(image_data, list):
+        return [x for x in image_data if isinstance(x, dict) and x.get("data")]
+    return []
