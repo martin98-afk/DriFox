@@ -37,3 +37,21 @@ def test_markdown_block_viewer_uses_bounded_cache(qapp):
     for i in range(40):
         v._tool_md_cache[f"t{i}"] = "x"
     assert len(v._tool_md_cache) == 32
+
+
+def test_bounded_lru_cap_and_touch():
+    """[A3-2] 缩略图 LRU：超上限有界、最老淘汰、命中刷新热序"""
+    from app.widgets._bounded_caches import _BoundedLRUCache
+
+    c = _BoundedLRUCache(3)
+    c["a"] = object(); c["b"] = object(); c["c"] = object()
+    assert list(c) == ["a", "b", "c"]
+    c.get("a")  # 命中触碰：a 变最新
+    c["d"] = object()  # 超限 → 淘汰 b（最旧未触碰）
+    assert list(c) == ["c", "a", "d"], "命中未刷新热序或淘汰了非最旧"
+
+    pix_cache = _BoundedLRUCache(32)
+    for i in range(40):
+        pix_cache[f"/p/{i}.png"] = object()
+    assert len(pix_cache) == 32, "缩略图缓存未封顶"
+    assert "/p/0.png" not in pix_cache and "/p/39.png" in pix_cache

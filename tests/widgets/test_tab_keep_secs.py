@@ -50,6 +50,7 @@ def win(qapp):
         "_is_loading_history_batches": False,
         "_lazy_batch_timer_active": False,
         "_pending_lazy_cards": [],
+        "_tool_card_map": {},
         "_current_assistant_card": None,
     }.items():
         setattr(w, key, value)
@@ -178,6 +179,34 @@ def test_kept_pid_protected_by_guard(win, monkeypatch):
 
     QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
     assert win._pid_still_in_use(1000) is False
+
+
+def test_tool_card_map_cleared_on_switch(win, monkeypatch):
+    """[A3-2] 切会话 _clear_chat_area 清空 _tool_card_map；新写入可正常读出"""
+    from unittest.mock import MagicMock
+
+    monkeypatch.setenv("DRIFOX_TAB_KEEP_SECS", "0")
+
+    win._tool_card_map = {"old_tid": MagicMock()}
+    # _clear_chat_area 需要的容器已由 fixture/chat_layout 提供
+    win._current_assistant_card = None
+    win._clear_chat_area(delete_widgets=False)
+    assert not win._tool_card_map, "切会话后工具卡映射未清空"
+    # 新会话写入新工具卡 → 正常读出（clear 不破坏功能）
+    new_card = MagicMock()
+    win._tool_card_map["new_tid"] = new_card
+    assert win._tool_card_map.get("new_tid") is new_card
+
+
+def test_tool_card_map_cleared_on_expire(win, monkeypatch):
+    """[A3-2] 保留卡到期销毁同样清空 _tool_card_map"""
+    monkeypatch.setenv("DRIFOX_TAB_KEEP_SECS", "30")
+    _make_cards(win, 1)
+    win._displayed_session_id = "s1"
+    win._keep_previous_session_tab()
+    win._tool_card_map = {"kept_tid": MagicMock()}
+    win._expire_kept_session()
+    assert not win._tool_card_map, "保留卡到期后映射未清空"
 
 
 def test_invalid_env_falls_back_to_zero(win, monkeypatch):

@@ -5,6 +5,7 @@
 （markdown_block_viewer）的存在意义就是脱离 WebEngine 依赖——若从 card_viewers
 import 本类会把 WebEngine DLL 链拉进 Qt 通道，故此处只放无依赖的纯数据结构。
 """
+from collections import OrderedDict
 from typing import Dict
 
 # [B2] 工具 markdown 懒缓存条目上限：写入方在 MessageCard 直接 []= 追加，
@@ -26,3 +27,27 @@ class _BoundedToolMdCache(dict):
         if key not in self and len(self) >= _MAX_TOOL_MD_ENTRIES:
             del self[next(iter(self))]  # dict 保插入序：最早键即最旧
         super().__setitem__(key, value)
+
+
+class _BoundedLRUCache(OrderedDict):
+    """[A3-2] 有界 LRU 缓存：写入超上限淘汰最旧（最久未触碰），命中触碰热序。
+
+    用于缩略图一类「键=路径、值=QPixmap」的存活期内只增缓存（读侧同文件
+    可触碰热序，与 _BoundedToolMdCache 的 FIFO 不同）。
+    """
+
+    def __init__(self, max_entries: int = 32):
+        super().__init__()
+        self._max_entries = max_entries
+
+    def __setitem__(self, key, value) -> None:
+        if key in self:
+            self.move_to_end(key)
+        elif len(self) >= self._max_entries:
+            self.popitem(last=False)
+        super().__setitem__(key, value)
+
+    def get(self, key, default=None):
+        if key in self:
+            self.move_to_end(key)
+        return super().get(key, default)

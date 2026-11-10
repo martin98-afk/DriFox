@@ -14465,6 +14465,10 @@ class OpenAIChatToolWindow(ToolWindow):
     def _clear_chat_area(self, delete_widgets: bool = True):
         self._current_assistant_card = None
         self._displayed_session_id = None
+        # [A3-2] 工具卡映射清理：键=tool_call_id 无界增长、值持 MessageCard
+        # 引用（卡销毁后成 sip 死 wrapper 常驻）。切会话后 tool_call_id 全新，
+        # 旧映射全失效，直接 clear（两个读取点均有 None 兜底，安全）。
+        self._tool_card_map.clear()
         # [T23 改动3] 清空聊天区 = 全部卡片离场，布局纪元递增
         # [T23 改动2] 同步重置可视集：卡片已全部销毁，id() 是内存地址，
         # 新卡可能复用旧地址 → 残留集合会让新卡被误判为「已在视口」跳过同步。
@@ -14620,6 +14624,8 @@ class OpenAIChatToolWindow(ToolWindow):
         if kept is None:
             return
         self._kept_session_tab = None
+        # [A3-2] 保留卡销毁同样使 tool_call_id 映射失效
+        self._tool_card_map.clear()
         try:
             kept["timer"].stop()
         except RuntimeError:
