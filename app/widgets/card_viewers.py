@@ -893,7 +893,9 @@ class CodeWebViewer(QWebEngineView):
         # [PERF] 工具结果 markdown 缓存：tool_call_id → <tool>...</tool> markdown 字符串
         # 已完成的工具块的 markdown 只計算一次，後續增量渲染跳過昂貴的
         # _sanitize_result + sorted() + JSON 序列化，直接拼接緩存結果。
-        self._tool_md_cache: Dict[str, str] = {}
+        # [B2] 有界化（_BoundedToolMdCache）：写入点在 MessageCard（禁区文件），
+        # 只能在此侧换实现收敛上限。
+        self._tool_md_cache: Dict[str, str] = _BoundedToolMdCache()
         # [B2] 工具 DOM 脏标记：MessageCard 层 JS 增量注入工具块（_inject_tool_streaming_html /
         # append_tool_result）时置 True，_perform_update 则必须走 save/restore 保护（否则
         # updateContent 整块替换会被 JS 注入的运行框/完成框抹掉）；无工具 DOM 注入时走裸
@@ -11187,6 +11189,27 @@ class _ThemeRerenderQueue:
 
 # 模块级单例：消息卡主题补渲共用一条分帧队列
 _theme_rerender_queue = _ThemeRerenderQueue()
+
+
+# [B2] 工具 markdown 懒缓存条目上限：写入方在 MessageCard（禁区文件）直接
+# []= 追加，只能在此侧包装 dict 有界化。取 32 ≈ 单轮工具块数粗估（≤11）
+# 的 3 倍余量，且每轮流式结束已有 clear()（finish_streaming 内），单轮内
+# 条目数 = 实际工具块数，正常使用永不触发淘汰；触发时淘汰后果仅是
+# 命中缺失后按需重转换（content_to_markdown 单块，等价输出，毫秒级）。
+_MAX_TOOL_MD_ENTRIES = 32
+
+
+class _BoundedToolMdCache(dict):
+    """[B2] 有界工具 markdown 缓存：写入超上限按插入序淘汰最旧键。
+
+    读路径（MessageCard cache.get）不经此类，无触碰热语义；淘汰发生在
+    超上限写入时（正常使用不触发，见 _MAX_TOOL_MD_ENTRIES 注释）。
+    """
+
+    def __setitem__(self, key, value) -> None:
+        if key not in self and len(self) >= _MAX_TOOL_MD_ENTRIES:
+            del self[next(iter(self))]  # dict 保插入序：最早键即最旧
+        super().__setitem__(key, value)
 
 
 class PlainTextViewer(QWidget):
