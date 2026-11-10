@@ -58,6 +58,25 @@ description: 插件开发常见问题与解决方案（症状→原因→修法�
 
 **修法**：
 - 对照目录结构逐项检查
+
+### ❌ 改了插件但用户端 / 本机没有生效
+
+**症状**：源码仓里代码明明改了，调用行为还是旧的；或 `git status` 在主仓看不到任何插件改动。
+
+**原因**：改的是源码仓，运行时加载的是主仓 `.drifox/plugins/<name>` 副本；两处没同步。主仓 `.gitignore` 通常忽略 `/.drifox*/`，所以副本改动不进主仓历史，容易误判成「插件没改」。
+
+**修法**：
+1. 用 `find ~ -maxdepth 7 -type d -name "<name>"` 列出实际存在的副本，别照抄历史笔记里的三处路径
+2. 把改过的文件同步到每一处运行时副本，用 `diff -q` 确认一致
+3. 重启宿主或触发插件热重载，再验证行为
+
+### ❌ 升了 version 后 generate_marketplace.py 拒绝写出
+
+**症状**：报「tarball URL 版本与清单版本不一致，拒绝写出」；`validate_plugins.py` 同步报 `marketplace.json` 的 version 与 `plugin.json` 不一致。
+
+**原因**：该插件已启用 tarball 通道，`marketplace.json` 里还挂着上一版本的 Release 产物 URL。生成脚本为防止「新版本号 + 旧产物」混合清单，强制要求先发布新版本 tarball；本地改清单是绕不过去的。
+
+**修法**：本地只保留 `plugin.json` 的新版本号，push 到 main 让 `release-plugins.yml` 走 `detect_plugin_changes.py` → 构建 tarball → 发布 Release → `generate_marketplace.py` 回填清单（bot 带 `[skip ci]` 提交）。本地无 `GITHUB_TOKEN` 时不要尝试 `publish_plugin_tarballs.py`，那是写远端 Release 的外部操作。详见 references/publishing.md「升版本后的清单门禁」。
 - 用 `python -c "import json; json.load(open('.drifox-plugin/plugin.json'))"` 测 JSON
 - 重启 DriFox
 

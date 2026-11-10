@@ -23,7 +23,7 @@ description: 发布插件到 drifox-plugins 官方市场的完整流程
 
 ---
 
-## 完整提交流程（八步）
+## 完整提交流程（九步）
 
 ```bash
 # 1. 先在 GitHub 上 Fork 官方市场仓库
@@ -39,7 +39,12 @@ git remote add upstream https://github.com/martin98-afk/drifox-plugins.git
 # 4. 建立特性分支
 git checkout -b feat/<plugin-name>
 
-# 5. 把你的插件从本地开发目录复制进来
+# 5. 改 plugin.json 的 version（新增功能升 minor，Bug 修复升 patch）
+#    ⚠ 这一步不能漏：marketplace.json 的 version 从 plugin.json 生成，且
+#      validate_plugins.py 会校验两者一致；版本号不变会让用户端拿不到更新。
+#      已启用 tarball 通道的插件还靠版本变化触发 CI 重新打包发布。
+
+# 6. 把你的插件从本地开发目录复制进来
 #    ⚠ 第三方依赖不进仓库：依赖写进 plugin.json 的 dependencies.pip（平台键
 #      win32/linux/darwin，见 manifest.md），仓库里不放 deps/ 目录；
 #    deps/ 由市场 CI 打包时按声明从 PyPI 自动构建，打进按平台分发的 tarball
@@ -47,22 +52,22 @@ cp -r ~/.drifox/plugins/<plugin-name> plugins/<plugin-name>
 #    本地开发曾把依赖装进 deps/ 的，复制前先清掉：
 rm -rf plugins/<plugin-name>/deps
 
-# 6. 跑验证
+# 7. 跑验证
 python tools/validate_plugins.py
 python tools/generate_marketplace.py
 #    marketplace.json 由 generate 脚本自动生成，无需手动编辑
 
-# 7. commit 并推送
+# 8. commit 并推送
 git add plugins/<plugin-name>/ marketplace.json
 git commit -m "feat(<plugin-name>): 添加 xx 插件"
 git push origin feat/<plugin-name>
 
-# 8. 到 GitHub 上创建 Pull Request
+# 9. 到 GitHub 上创建 Pull Request
 #    你的 fork → martin98-afk/drifox-plugins main
 #    链接：https://github.com/martin98-afk/drifox-plugins/pulls
 ```
 
-> ⚠️ 第 6 步未通过 → 禁止进入第 7 步（SKILL.md 硬停止第 6 条）。
+> ⚠️ 第 7 步验证未通过 → 禁止进入第 8 步推送（SKILL.md 硬停止第 6 条）。
 
 ---
 
@@ -125,6 +130,17 @@ PR 阶段（GitHub Actions 自动执行）：
 破坏性变更必须在 PR 描述中写明迁移指南。
 
 已启用 tarball 通道的插件：版本号变了 push 到 main 即自动重打 tarball 并发布，无需手动跑打包脚本。
+
+**升版本后的清单门禁（实测坑）**：`generate_marketplace.py` 会校验 `marketplace.json` 里 tarball URL 内嵌版本与新 `version` 是否一致，不一致时**拒绝写出清单**并提示先构建发布对应版本。此时本地改不动清单，`validate_plugins.py` 也会因 version 与清单不一致而失败。正确顺序：
+
+```
+push 含新 version 的 plugin.json 到 main
+  → release-plugins.yml 的 detect_plugin_changes.py 比对 tarball URL 版本，发现有变更
+  → CI 构建 tarball、发布 GitHub Release、generate_marketplace.py 回填清单
+  → CI 以 [skip ci] 提交 marketplace.json
+```
+
+即：tarball 通道的插件**不要在本地手工改 marketplace.json 的 version**，也不要试图本地 `publish_plugin_tarballs.py`（需要 `GITHUB_TOKEN` 且写入远端 Release，属外部写操作）。本地只需保证 `plugin.json` 版本升了、代码 commit 完整。若 push 前想自查，跑 `validate_plugins.py` 观察是否只剩「清单版本不一致」这一条，并把它记为已知待 CI 回填项。
 
 ---
 

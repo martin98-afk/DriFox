@@ -102,6 +102,16 @@ brainstorming 技能
 1. 本地热更新测试 + `validate_plugins.py` → 见 references/testing.md
 2. Fork → PR 上架官方市场 → 见 references/publishing.md
 
+**发布前置清单**（逐项确认，缺一项就别 push）：
+
+- [ ] `plugin.json` 的 `version` 已按变更类型升（新增功能 minor / 修复 patch）
+- [ ] `validate_plugins.py` 通过；tarball 通道插件的版本不一致报错已确认由 CI 回填
+- [ ] `marketplace.json` 已由 `generate_marketplace.py` 重生成（或明确交由 CI 回填）
+- [ ] 代码改动与版本改动都已 commit，无遗留本地提交
+- [ ] 运行时副本与源码仓一致（见下节）
+
+**双仓与运行时副本**：插件源码通常在独立仓库（`~/.drifox/workspaces/DriFoxPlugins/plugins/<name>`），主仓 `.drifox/plugins/<name>` 是运行时副本且常被主仓 `.gitignore` 忽略。改已安装插件必须同时落到两处，否则本机热更新用的是旧副本，`git status` 也看不见插件改动。macOS 实测只有这两处；`~/Library/Application Support/Drifox/plugins/` 属 Windows 口径，落地前用 `find` 复核，不要照抄路径。
+
 ---
 
 ## 版本管理（SemVer）
