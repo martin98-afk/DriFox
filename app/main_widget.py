@@ -1637,6 +1637,10 @@ class OpenAIChatToolWindow(ToolWindow):
         # 常驻视口内的卡片（读取历史时占大多数）无需每拍重跑 sync_width
         # （1.4ms/张：setMin/MaxWidth 布局失效 + runJavaScript IPC）。
         self._last_visible_card_ids: set = set()
+        # [A3-C] 方案 C：非活动标签卡片延迟销毁（DRIFOX_TAB_KEEP_SECS，默认 0）。
+        # 0 = 现状（切走即走 _clear_chat_area 销毁链，本槽恒 None 无任何副作用）；
+        # >0 = 切走时保留最近一个会话的卡片（单名额），快速切回零重建。
+        self._kept_session_tab: Optional[dict] = None
         # [T28 L3] 强回收空闲兜底：_maybe_strong_recycle 原仅事件驱动（流式 chunk /
         # 流式结束 / 温和层尾部 / 滚动链），用户空闲（不滚动不流式）时即便子进程
         # RSS 已超阈值也不回收，只能等下一次交互。45s 低频兜底（自身幂等：队列空/
@@ -12332,7 +12336,17 @@ class OpenAIChatToolWindow(ToolWindow):
             QTimer.singleShot(0, lambda: self._sync_todo_panel())
             return
 
-        self._clear_chat_area()
+        # [A3-C] 方案 C：切回保留期未过期的会话 → 零重建恢复
+        if self._restore_kept_session(session.session_id):
+            self._update_node_preview()
+            self._refresh_context_usage_indicator()
+            self._push_workbench_updates(refresh_artifacts=True)
+            return
+
+        # [A3-C] 方案 C：切走时保留最近一个会话的卡片（keep>0 才生效）。
+        # 返回 False = 未保留（keep=0 或无可保留内容）→ 走原销毁链，逐字节等价。
+        if not self._keep_previous_session_tab():
+            self._clear_chat_area()
         self._message_batch = group_messages_for_display(session.messages)
         # 初始化 batch_cards：每个batch对应一个卡片列表，None表示已回收
         self._batch_cards = [None for _ in self._message_batch]
@@ -13995,6 +14009,16 @@ class OpenAIChatToolWindow(ToolWindow):
                 return True
         except Exception:
             pass
+        # [A3-C] 方案 C 保留期内的卡片：widget 已摘出布局、_batch_cards 已被
+        # 新会话重建覆盖，但卡片活着且随时会被切回复用——kill 会让切回白屏。
+        kept = getattr(self, "_kept_session_tab", None)
+        if kept is not None:
+            for card in kept.get("widgets", []):
+                try:
+                    if getattr(card, "_renderer_pid", 0) == pid and self._is_widget_alive(card):
+                        return True
+                except RuntimeError:
+                    continue
         return False
 
     @staticmethod
@@ -14511,6 +14535,110 @@ class OpenAIChatToolWindow(ToolWindow):
         # GC 钩子：防抖触发全局缓存清理 + 堆回收
         if delete_widgets:
             self._schedule_gc_hook()
+
+    # ── [A3-C] 方案 C：非活动标签卡片延迟销毁（DRIFOX_TAB_KEEP_SECS，默认 0） ──
+
+    def _load_tab_keep_secs(self) -> int:
+        """读取保留秒数：非法/缺失/负值回退 0（= 现状销毁链，逐字节等价）"""
+        try:
+            v = int(os.environ.get("DRIFOX_TAB_KEEP_SECS", ""))
+            if v > 0:
+                return v
+        except ValueError:
+            pass
+        return 0
+
+    def _keep_previous_session_tab(self) -> bool:
+        """切走时保留最近一个会话的卡片 widget（单名额，keep>0 才生效）。
+
+        Returns:
+            True = 已保留（调用方跳过 _clear_chat_area 的销毁段，状态重置照做）；
+            False = 未保留（keep=0 / 无显示中会话 / 布局空）→ 走原销毁链。
+        """
+        keep = self._load_tab_keep_secs()
+        if keep <= 0:
+            return False
+        # 名额被占（快速 A→B→A→B）：旧的先走原销毁链，腾出名额
+        if self._kept_session_tab is not None:
+            self._expire_kept_session()
+        if not self._displayed_session_id or not self.chat_layout.count():
+            return False
+        sid = self._displayed_session_id  # _take_chat_widgets 会置空它，先取
+        widgets = self._take_chat_widgets()  # hide + 摘布局 + 跳过欢迎卡（现成助手）
+        if not widgets:
+            return False
+        snap = (
+            self._batch_cards,
+            self._message_batch,
+            getattr(self, "_user_prefix_cache", [0]),
+            self._node_batch_map_cache,
+        )
+        # 不挂 parent：__new__ 最小实例（测试）无 QObject 包装；生产中槽引用
+        # 保持 timer 存活，到期/切回后槽置 None 即无泄漏
+        timer = QTimer()
+        timer.setSingleShot(True)
+        timer.timeout.connect(self._expire_kept_session)
+        timer.start(keep * 1000)
+        self._kept_session_tab = {"sid": sid, "widgets": widgets, "snap": snap, "timer": timer}
+        # 状态重置段：与 _clear_chat_area 头部语义保持同步（widget 已由
+        # _take_chat_widgets 摘出，这里只复位窗口状态，供新会话干净重建）
+        self._visible_batch_start = 0
+        self._visible_batch_end = 0
+        self._is_loading_history_batches = False
+        self._pending_lazy_cards.clear()
+        self._lazy_batch_timer_active = False
+        self._clear_pending_diff_stats()
+        self._reset_bottom_follow()
+        self._sync_global_rendered_pages(0)
+        return True
+
+    def _restore_kept_session(self, session_id: str) -> bool:
+        """切回保留期未过期的会话：零重建恢复（widget 回布局 + 快照还原）"""
+        kept = self._kept_session_tab
+        if kept is None or kept["sid"] != session_id:
+            return False
+        kept["timer"].stop()
+        widgets = [w for w in kept["widgets"] if self._is_widget_alive(w)]
+        if not widgets:
+            self._expire_kept_session()
+            return False
+        for w in widgets:
+            self.chat_layout.addWidget(w)
+            w.show()
+        _batch_cards, _message_batch, prefix, node_cache = kept["snap"]
+        self._batch_cards = _batch_cards
+        self._message_batch = _message_batch
+        self._user_prefix_cache = prefix
+        self._node_batch_map_cache = node_cache
+        self._displayed_session_id = session_id
+        self._kept_session_tab = None
+        return True
+
+    def _expire_kept_session(self):
+        """保留到期 / 名额腾挪：对保留中的卡片执行原销毁链（cleanup→hide→脱父→deleteLater）"""
+        kept = self._kept_session_tab
+        if kept is None:
+            return
+        self._kept_session_tab = None
+        try:
+            kept["timer"].stop()
+        except RuntimeError:
+            pass
+        for widget in kept["widgets"]:
+            if not self._is_widget_alive(widget):
+                continue
+            if hasattr(widget, "cleanup"):
+                try:
+                    widget.cleanup()
+                except Exception:
+                    pass
+            try:
+                widget.hide()
+                if widget.parent() is not None:
+                    widget.setParent(None)
+            except Exception:
+                pass
+            widget.deleteLater()
 
     def _take_chat_widgets(self) -> List[QWidget]:
         """从布局中取出所有 widgets，返回列表（不删除，由调用方负责删除）"""

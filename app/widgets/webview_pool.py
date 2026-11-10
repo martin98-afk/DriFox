@@ -37,9 +37,9 @@ from PyQt5.QtCore import Qt
 def _load_max_idle_per_bucket() -> int:
     """[A3-3] 池容量实验开关：DRIFOX_POOL_MAX_IDLE（1/2/4/6 churn 对比用）。
 
-    实际生效值 = 2（light/full 两桶各 2）；perf 实测池中典型只占 1 个
-    （full 桶常只有 1 个归还实例，light 桶仅欢迎卡使用，实测 pool_pids
-    恒长 1）。非法值 / 缺失 / <1 回退 2 —— 与 fd440524f 逐字节等价。
+    容量上限 2/桶；实测稳态常驻 1 个（light 桶 welcome viewer），
+    full 桶常态 0 —— 收益估算勿按「viewer 数 × 常量」线性外推。
+    非法值 / 缺失 / <1 回退 2 —— 与 fd440524f 逐字节等价。
     注意：import 期读取固化，进程内不热变（实验按进程设 env 启动）。
     """
     try:
