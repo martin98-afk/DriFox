@@ -14107,6 +14107,14 @@ class OpenAIChatToolWindow(ToolWindow):
         except Exception:
             # 闸门任何异常都不能打断兑底拍（退化 = 本拍不动作）
             pass
+        # [T31] 空闲超时回收（与 RSS 闸门互补：时间驱动 vs 总量应急），
+        # 独立 try 兜底，日志标记 idle-kill(n) 与闸门的 kill(n) 区分。
+        try:
+            _idle_killed = memory_governor.reclaim_idle_renderers(self)
+            if _idle_killed:
+                logger.info(f"[T31] idle-kill({_idle_killed}): 回收空闲超时 renderer")
+        except Exception:
+            pass
 
     def _kill_lru_unloaded_renderers(self, keep: int = None, min_offscreen: int = 0) -> int:
         """按卸载时间升序（最老在前）kill 超 keep 部分，每轮 ≤ _KILL_BATCH_MAX。

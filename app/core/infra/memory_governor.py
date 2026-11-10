@@ -413,3 +413,82 @@ def enforce_renderer_rss_gate(host) -> str:
         return "+".join(actions) if actions else "idle"
     except Exception:
         return "error"
+
+
+# ═══════════════ T31 renderer 空闲超时回收（一期：复用记账 ts） ═══════════════
+
+# 实测依据（T23 真窗六会话梯度，HTTP RPC 驱动）：renderer 3→8 个、~60MB/个、
+# 累计 +357MB 全部滞留；8 个合计 493MB 低于 RSS 软阈 800 → RSS 闸门不触发
+# （总量应急的设计边界）。本回收器与 enforce_renderer_rss_gate 互补：
+# 闸门管「总量超限」（症状驱动），本函数管「单页空闲」（时间驱动），判据正交。
+RENDERER_IDLE_RECLAIM_S = 600.0  # 空闲 10 分钟。定稿取 600 而非 300：用户切会话
+                                 # 间隔可低至几十秒，300s 会造成「切回即回收」锯齿
+RENDERER_IDLE_RECLAIM_BATCH_MAX = 6  # 每拍 ≤6 个：常态动作宁慢勿抖（kill 上限 12 的一半）
+
+def reclaim_idle_renderers(host) -> int:
+    """T31：回收记账里空闲超过阈值的离屏 renderer（一期，零打点改动）。
+
+    候选域=本窗口 _unloaded_pids，时间戳直接用登记时的 ts（_unload_batch
+    登记时刻），一期不需要页面 hide 打点。三条判据同时满足才回收：
+    1. 批次距离 ≥ 离屏护栏（8/12 批，覆盖活跃视口 ±2 豁免）
+    2. 全局护栏：未被任何存活窗口的在用卡片占用（_pid_still_in_use
+       实例级检查含流式 _current_assistant_card + 全局跨窗口检查）
+    3. 空闲时长 now - ts > RENDERER_IDLE_RECLAIM_S
+    动作复用 _kill_renderer（cmdline 双校验），成功后从记账移除并写
+    _last_kill_at 冷却（与 RSS 闸门共用 60s）。
+
+    Returns:
+        成功 kill 数量（日志用）。
+    """
+    try:
+        now = time.time()
+        if now - float(getattr(host, "_last_kill_at", 0.0) or 0.0) < _KILL_COOLDOWN_S:
+            return 0
+        active = bool(host._is_active_window_for_recycle())
+        min_off = _gate_min_offscreen(active)
+        batch_cards = getattr(host, "_batch_cards", None) or []
+        entries = list(getattr(host, "_unloaded_pids", None) or [])
+        victims = []
+        for pid, ts, idx in entries:
+            if now - float(ts) <= RENDERER_IDLE_RECLAIM_S:
+                continue
+            try:
+                dist = (
+                    host._batch_distance(idx)
+                    if 0 <= idx < len(batch_cards)
+                    else 10 ** 9  # 批次已裁掉 = 足够远
+                )
+            except Exception:
+                dist = 10 ** 9
+            if dist < min_off:
+                continue
+            try:
+                if host._pid_still_in_use(pid):
+                    continue  # 本窗口护栏（含流式卡片）
+            except Exception:
+                continue
+            victims.append((float(ts), pid))  # ts 小 = 空闲最久优先
+        victims.sort()
+        killed = 0
+        kill_set = set()
+        for _ts, pid in victims[:RENDERER_IDLE_RECLAIM_BATCH_MAX]:
+            if _pid_used_by_alive_windows(pid, exclude=host):
+                continue  # T16/T22 全局护栏
+            try:
+                if host._kill_renderer(pid):
+                    killed += 1
+                    kill_set.add(pid)
+            except Exception:
+                continue
+        if kill_set:
+            try:
+                host._unloaded_pids = [e for e in entries if e[0] not in kill_set]
+            except Exception:
+                pass
+            try:
+                host._last_kill_at = now  # 与 RSS 闸门共用 60s 冷却
+            except Exception:
+                pass
+        return killed
+    except Exception:
+        return 0
