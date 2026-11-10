@@ -30,6 +30,7 @@ from PyQt5.QtCore import QThread, pyqtSignal
 
 from app.constants import PARAM_SCHEMA
 from app.constants import provider_quota_exclude_keys as QUOTA_EXCLUDE_KEYS
+from app.tools.result import as_image_list
 
 from app.plugins.contracts.stream_sink import StreamInterruptedError  # noqa: F401  契约层定义，此处兼容 re-export
 
@@ -3171,9 +3172,11 @@ class OpenAIChatWorker(QThread):
                 if not isinstance(r, dict) or not r.get("success"):
                     continue
                 tn = r.get("name", "")
-                if tn in _provides_image and self._result_has_image(
-                    r.get("content"), r.get("raw_content"), r.get("image_data")
-                ):
+                _has_b = bool(as_image_list(r.get("image_data")))
+                _has_a = tn in _provides_image and self._result_has_image(
+                    r.get("content"), r.get("raw_content")
+                )
+                if _has_b or _has_a:
                     _non_vision_tools.add(tn)
             if _non_vision_tools:
                 _nv_hint = (
@@ -3204,19 +3207,18 @@ class OpenAIChatWorker(QThread):
             if not isinstance(r, dict) or not r.get("success"):
                 continue
             tool_name = r.get("name", "")
-            if tool_name not in _provides_image:
+
+            # 协议 B：结果自带图片载荷（含 MCP ImageContent），不依赖工具名白名单
+            images = as_image_list(r.get("image_data"))
+            if images:
+                for img in images:
+                    data_uris.append(f"data:{img.get('mime') or 'image/png'};base64,{img['data']}")
+                logger.debug(f"[Vision] {tool_name} 图片注入(协议B): {len(images)} 张")
                 continue
 
-            # 协议 B：优先用 image_data 字段（read 图片等已编码的 base64）
-            img_data = r.get("image_data")
-            if isinstance(img_data, dict):
-                mime = img_data.get("mime", "image/png")
-                data = img_data.get("data", "")
-                if data:
-                    data_uris.append(f"data:{mime};base64,{data}")
-                    logger.debug(f"[Vision] {tool_name} 图片注入(协议B): mime={mime}, base64_len={len(data)}")
-                    continue
-                # T4d：data 为空时继续协议 A 路径提取兜底（不提前 continue）
+            # 协议 A：本地路径提取仍限白名单，避免普通文本里的路径被误读
+            if tool_name not in _provides_image:
+                continue
 
             # 协议 A：从 raw_content/content 提取本地图片路径（screenshot 等）
             raw = r.get("raw_content")
@@ -3276,6 +3278,20 @@ class OpenAIChatWorker(QThread):
         if compressed_count:
             logger.info(f"[Vision] 已压缩 {compressed_count}/{len(data_uris)} 张图片以避免 API 大小限制")
 
+        # 总量预算：多图（如 bili_frames 6 帧）叠加会超 API 10MB 限制。
+        # 逐张压完仍超限时丢末尾，并在提示文本写明省略数，避免模型幻觉「看到了全部」。
+        _VISION_TOTAL_BUDGET = 8 * 1024 * 1024
+        omitted = 0
+
+        def _b64_len(du: str) -> int:
+            return len(du.split(",", 1)[1]) if "," in du else 0
+
+        while len(data_uris) > 1 and sum(_b64_len(d) for d in data_uris) > _VISION_TOTAL_BUDGET:
+            data_uris.pop()
+            omitted += 1
+        if omitted:
+            logger.info(f"[Vision] 总量超预算，已省略末尾 {omitted} 张图片")
+
         # ---- 用 hook 注入模式插入一条 user 消息承载图片 ----
         # 根因：之前将图片注入到旧 user message，LLM 无法将图片与工具调用关联。
         # LLM 调用 read/screenshot 后看到工具结果是文本描述，认为"任务未完成"，
@@ -3284,6 +3300,7 @@ class OpenAIChatWorker(QThread):
         # 相同的注入模式（仅加入 API 缓存和 session_messages，不加 current_messages），
         # 避免被 UI 渲染为多余卡片，同时让 LLM 以常规方式看到图片。
         tool_names_str = ", ".join(r.get("name", "") for r in tool_results if isinstance(r, dict) and r.get("success"))
+        omission_hint = f" 已省略 {omitted} 张图片（总量超预算）。" if omitted else ""
         vision_content: List[Dict] = [
             {
                 "type": "text",
@@ -3291,6 +3308,7 @@ class OpenAIChatWorker(QThread):
                     f"<system-reminder>\n"
                     f"The following image(s) were obtained via {tool_names_str}. "
                     "Please analyze the visual content directly.\n"
+                    f"{omission_hint}"
                     f"</system-reminder>"
                 ),
             },
@@ -4829,7 +4847,7 @@ class OpenAIChatWorker(QThread):
         read 声明 provides_image 但读普通文件时无图像载荷，不能只按工具名判定，
         否则 read 文本结果也会被追加视觉提示。
         """
-        if isinstance(image_data, dict) and image_data.get("data"):
+        if as_image_list(image_data):
             return True
         for c in (content, raw_content):
             if isinstance(c, dict) and (c.get("absolute_path") or c.get("path")):
@@ -4857,14 +4875,11 @@ class OpenAIChatWorker(QThread):
         except Exception:
             # T4d：registry 异常时保守回退，保持旧工具名兜底
             _provides_image = frozenset({"screenshot", "read"})
-        if (
-            tool_name in _provides_image
-            and success
-            and self._result_has_image(
-                getattr(result_obj, "content", None) if result_obj else None,
-                image_data=getattr(result_obj, "image_data", None) if result_obj else None,
-            )
-        ):
+        _has_b = bool(as_image_list(getattr(result_obj, "image_data", None) if result_obj else None))
+        _has_a = tool_name in _provides_image and self._result_has_image(
+            getattr(result_obj, "content", None) if result_obj else None,
+        )
+        if success and (_has_b or _has_a):
             try:
                 from app.core.modelmeta.model_capabilities import resolve_model_capabilities
 
