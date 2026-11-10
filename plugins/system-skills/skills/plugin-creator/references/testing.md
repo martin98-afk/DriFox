@@ -136,6 +136,37 @@ python tools/check_sdk_imports.py
 
 ---
 
+## 3.5 UI 插件的最小验证集（三个无头冒烟 + 一次出图）
+
+UI 插件光靠 `py_compile` 与 `validate_plugins.py` 证明不了「卡片能活」：导入错误、控件不存在、布局崩溃、主题切换异常都藏在运行时。交付前至少跑这三类冒烟，全部放在插件 `tests/` 下、不依赖宿主：
+
+| 冒烟 | 验什么 | 关键断言 |
+|------|--------|---------|
+| `smoke_ui_card.py` | 注册参数 + 卡片实例化 + 渲染 | `register_floating_card` 的 `container/title/metadata` 对；`show_card()` 后能重建出转写/列表行；深浅色 ctx 各切一次不崩 |
+| `smoke_config_card.py` | 自绘设置卡能构造 | 下拉项数、回填值、提示词预填长度 |
+| `smoke_dialogs.py` | 确认弹窗构造与尺寸 | 按钮文案是中文、卡片宽度 420、高度 > 80 |
+
+三个都要做的隔离：
+
+```python
+pkg = type(sys)("xxx_ui"); pkg.__path__ = [UI_DIR]      # 插件目录名含连字符，不能直接 import
+sys.modules["xxx_ui"] = pkg
+store = importlib.import_module("xxx_ui.store")
+store.data_root = lambda: tmp        # 数据目录指到临时目录，别污染真实 plugin_data
+```
+
+### 出图自检：自己看，别让用户当眼睛
+
+布局/字号/层次这类问题，断言查不出来。写一个 `render_preview.py`：造一份假数据 → 渲染卡片 → `card.grab().save("preview.png")`，然后**自己读这张图**判断。
+
+- **不要用 `QT_QPA_PLATFORM=offscreen`**：该平台没有字体库，grab 出来只有色块没有文字，会误判成「文字没渲染」。
+- 用默认平台 + `card.show()` + `processEvents()` 再 grab。
+- 深浅色各出一张；出图文件看完删掉，别提交进仓库。
+
+> 这套办法在本轮开发里抓到了「标题字号被 Qt 内置 heading 格式盖掉」「纪要首行被裁」「输入框与标签重叠」三个纯视觉问题。
+
+---
+
 ## 4. 技能包自检脚本
 
 本技能包自带结构自检脚本（校验 frontmatter、行数上限、references/evals 引用完整性）：

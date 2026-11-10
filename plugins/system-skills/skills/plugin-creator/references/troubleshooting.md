@@ -91,6 +91,28 @@ description: 插件开发常见问题与解决方案（症状→原因→修法�
 - 把 `api_version` 降到 ≤ 宿主当前值；宿主升版前不要抢先声明更高版本
 - 仓库级守卫：`tests/core/test_api_version_contract.py` 会扫全部 manifest，超标直接测试失败
 
+### ❌ 能力声明了，但插件里取到的是 None / 功能静默退化
+
+**症状**：manifest 的 `capabilities` 明明写了 `ui.dialog` / `engine.session`，调用处却拿到 `None`，代码走了兜底分支（回退原生控件、跳过功能），没有任何报错。
+
+**原因**（按概率排序）：
+1. 卡片里用了 `caps_for(...)` 而不是 `ctx["capabilities"]`——`caps_for` 要重新解析插件绑定窗口，卡片/后台线程场景可能解不出 host，**静默返回 None**
+2. `api_version >= 2` 但 manifest 漏声明该能力 → 能力池里压根没有这一项（无 warning）
+3. 改了 manifest 没重载插件（`plugin.json` 变更需重启宿主）
+
+**修法**：
+- 卡片内统一从 ctx 池取：`(self._ctx() or {}).get("capabilities", {}).get(cap_id)`；`caps_for` 只用于无 ctx 场景
+- 日志核对：`plugins.log` 搜 `[CapabilityAudit] plugin=<name>`，看是「全量注入」还是按清单裁剪
+- 兜底分支必须打日志（`logger.warning`），否则「退化」和「本来就没实现」分不清
+
+### ❌ 改了 plugin.json 的 capabilities 但行为没变
+
+**症状**：补上能力声明后仍然拿不到，或反过来仍然被拒。
+
+**原因**：`plugin.json` 属于需要重启宿主的文件；热重载只重扫组件目录，不重读 manifest。
+
+**修法**：改完 manifest 重启宿主，再用 §「能力声明了但取不到」的日志核对法确认新清单生效。
+
 ### ❌ 工具注册被拒（registry 拒绝加载）
 
 **症状**：`tools/*.py` 写完不生效，日志报注册失败。

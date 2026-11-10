@@ -110,6 +110,25 @@ ctx = {
 
 > 永远不要假设某个键一定存在——用 `.get()` + fallback。
 
+### 1.3.1 能力池：`ctx["capabilities"]` 优先，`caps_for` 只作兜底 ⚠️
+
+宿主构建卡片 ctx 时会按 manifest 的 `capabilities` 裁剪出一份能力池，放在 `ctx["capabilities"]`：
+
+```python
+pool = (self._ctx() or {}).get("capabilities")
+if pool is not None and "ui.notify" in pool:
+    fn = pool["ui.notify"]          # 宿主已经绑定好窗口，不会失配
+```
+
+`from app.plugins.sdk import caps_for` 是**无 ctx 场景**（后台线程、独立弹窗、模块级）的入口，它要重新解析「这个插件绑在哪个窗口」；卡片拿不到宿主时它**静默返回 None**，不会报错。
+
+真实事故：删除确认弹窗走 `caps_for("ui.dialog")` 拿不到 → `api` 为空 → 代码回退 `QMessageBox.question` → 用户看到 Windows 原生英文 Yes/No 弹窗，与宿主主题完全两张皮，连续被投诉两次「没用系统规范弹窗」。改成 ctx 池优先后一次解决。
+
+规则：
+- 卡片/回调里有 ctx → 一律 `ctx["capabilities"]`
+- 只有拿不到 ctx 的地方才 `caps_for`，且必须处理返回 None 的情况
+- 任何「拿不到就回退到原生控件」的分支都要打日志（否则退化后无从排查）
+
 ### 1.4 字体注入（重要 — 易踩坑⚠️）
 
 ctx 中的 `font_family` 和 `font_size` 必须应用到所有子控件，否则插件字体和主程序不一致。
@@ -470,6 +489,9 @@ while p is not None:
 | 设计点 | 说明 |
 |--------|------|
 | **parent vs color_source 分离** | `parent=self.window()` 给 `MaskDialogBase`（全屏遮罩），`color_source=self` 从调用 widget 向上找卡片缓存 |
+| **`_hBoxLayout` 必须显式 AlignCenter** | `self._hBoxLayout.addWidget(self.widget, 0, Qt.AlignCenter)`；不加对齐参数时卡片会被拉伸到整个遮罩区域，看起来像「弹窗糊满屏」 |
+| **parent 不能是 None** | `MaskDialogBase.__init__` 里会读 `parent.width()`，传 None 直接 `AttributeError`；弹窗从卡片里调用时用 `self.window() or self` |
+| **不要在外部 setGeometry/move** | `_hBoxLayout` 是卡片位置的权威，外部手动改几何会互相覆盖导致卡片漂移 |
 | **缓存 `_cached_theme_colors`** | 在 `_apply_latest_theme` 中保存 `ctx.get("colors", {})`，给弹窗提供 `accent` / `content_bg` / `hover_bg` 等键 |
 | **按钮风格** | 取消按钮（有边框，hover accent 边框）；确认按钮（accent 填充白字，粗体） |
 | **圆角 8px** | 卡片和按钮统一 8px border-radius |
@@ -668,3 +690,27 @@ shot.setDevicePixelRatio(dpr)
 
 完整先例：`plugins/file-tree/ui/cards.py`（工作台页首个接入方）；
 派发实现与协议说明：`app/core/project_changed.py`。
+
+---
+
+## 12. 操作模型先于布局（用户说「逻辑很蠢」时）
+
+**症状**：界面能跑、功能都在，但用户连着说「操作逻辑很别扭」「整体逻辑太蠢」，甚至指名道姓说某个按钮位置不对。
+
+**这不是布局问题，是操作模型问题**。典型错法是把动作平均摊在四个角：主操作在中间、结果动作在右边、创建入口在左上、删除在右下。每个动作都合理，但用户不知道该先点哪个。
+
+**修法：先分三层，再谈位置。**
+
+| 层 | 放什么 | 放哪 |
+|---|---|---|
+| 主操作（唯一） | 当前实体的核心动作，如「录音/暂停/继续」 | 内容区最醒目的位置，一个圆形主按钮，图标随状态变 |
+| 次级动作 | 只对有意义的视图生效，如「生成纪要」只在纪要页 | 贴着它作用的视图（tab 行右侧），换 tab 就消失 |
+| 管理动作 | 重命名 / 导出 / 删除 / 定位文件 | 收进标题栏 `⋯` 菜单；列表项再给一份右键菜单 |
+
+三条配套规则：
+
+1. **入口不重复语义**：既有「+ 新建」又有「点录音自动新建」时，用户会以为其中一个是错的。二选一（新建归按钮，录音只往当前实体追加）。
+2. **不要制造空壳**：点新建就立刻落一条空记录、结果列表里堆一串同名空条目。当前实体本来就是空的就复用，列表刷新时清掉无内容的草稿。
+3. **改名就地做**：双击标题进编辑、点徽章改名字，回车/失焦提交、Esc 取消。弹输入框属于上一代交互，一律不要。
+
+> 判据：把所有动作按「谁最常用、谁依赖当前视图、谁很少用」排一次，落在三个不同的层上；三层里有任意一层放了两类动作，就还没排完。

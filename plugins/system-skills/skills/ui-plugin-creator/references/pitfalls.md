@@ -22,6 +22,9 @@ description: UI 插件编码级踩坑记录（症状→原因→修法），来�
 7. 提示条看得见吗？            → 看不见 → 检查是否用了 InfoBar 而非 QToolTip（见下）
 8. 样式真的生效了吗？          → 没生效 → HTML 片段必走无头截图（见下 §28），字符串断言查不出
 9. 窄窗口挤一下会坏吗？        → 溢出/粘连 → 动态宽度容器禁写死 px（见下 §23）
+10. 弹窗是宿主同款吗？          → 原生白底/英文按钮 → 用了 QMessageBox 或 caps_for 拿不到 ui.dialog（见下 §30）
+11. 宽屏下内容还读得下去吗？    → 行太长/糊满屏 → 给面板设 maximumWidth，别整页铺满
+12. 改完数据后界面刷新了吗？    → 状态文字变了按钮没变 → 图标/文案放在状态机同一处切换（暂停态漏刷是高频 bug）
 ```
 
 ### 渲染类插件（HTML 片段 / 欢迎 tab / 消息卡片）的额外自检
@@ -801,6 +804,77 @@ for name, old, new in MUTATIONS:
 
 > 断言 `old in src`：锚点没命中说明代码变了，这条变异根本没注入成功，
 > 静默跳过会让人误以为"这条变异不影响功能"。
+
+## 30. 能力取不到就静默回退原生控件（弹窗风格反复不合规）
+
+**症状**：代码里写了「优先系统规范弹窗，拿不到再回退 Qt 原生」，实际运行时用户看到的始终是 Windows 原生 `QMessageBox`（英文 Yes/No、系统蓝问号），被反复要求「用系统规范弹窗」。
+
+**原因**：`caps_for("ui.dialog", ...)` 在卡片里解不出窗口宿主时**静默返回 None**，`api.get("confirm")` 不是 callable，代码走了 except/回退分支，没有任何报错。日志里只有一行 debug，默认级别看不到。
+
+**修法**：卡片内一律走 ctx 能力池（宿主已按 manifest 裁剪并绑定好窗口），`caps_for` 只留给无 ctx 场景：
+
+```python
+def _cap(self, cap_id):
+    pool = (self._ctx() or {}).get("capabilities")
+    if pool is not None and cap_id in pool:
+        return pool[cap_id]
+    from app.plugins.sdk import caps_for
+    return caps_for(cap_id, plugin=PLUGIN_NAME, surface="ui")   # 兜底，可能 None
+```
+
+更彻底的做法是**别依赖该能力**：确认框直接用 `MaskDialogBase` 自绘（见 patterns.md §7），样式与宿主一致且不受能力解析影响。
+
+## 31. QTextDocument 不吃标题标签的 CSS（纪要/文档类渲染标题失控）
+
+**症状**：给 `QTextBrowser` 设了 `setDefaultStyleSheet("h2 { font-size: 19px }")`，但 `## 标题` 渲染出来还是巨大且是衬线字体；改用 `setMarkdown` 也一样。
+
+**原因**：Qt 富文本引擎对 `<h1>`~`<h6>` 有内置格式，优先级高于默认样式表；`setMarkdown` 内部也是映射到这些标签。
+
+**修法**：自己把 markdown 转成 HTML，标题输出成带内联样式的 `<p>`：
+
+```python
+# markdown.py：## 标题 → <p style="font-size:21px;font-weight:700;margin:18px 0 6px">
+style = css.get(f"h{level}", "")
+out.append(f'<p style="{style}">{inline(text)}</p>')
+```
+
+列表同理用 `<p>• 文本</p>` 而不是 `<ul><li>`，字号继承才可控。内联 style 是 QTextDocument 唯一稳定生效的通道。
+
+## 32. QStackedLayout 只 show()/hide() → 两层内容叠在一起
+
+**症状**：双击标题进入编辑，输入框和原标签的文字重叠成一团；或切换视图后两个页面同时可见。
+
+**原因**：`QStackedLayout` 里 addWidget 的控件，显示与否由 `currentWidget` 决定；直接 `widget.show()` 只是让它「可见」，没切换堆叠页。
+
+**修法**：
+
+```python
+self._lay.setCurrentWidget(self._edit)    # ✅ 切页面
+# self._edit.show()                       # ❌ 与标签叠加
+```
+
+## 33. 多线程写同一文件 + 后台结果跟着「当前选中」走
+
+**症状**：录音/精转并行时会议 JSON 偶发损坏；录音结束立刻切到别的会议，最后几片识别结果写进了新会议。
+
+**原因**：
+1. `save()` 用固定 `.tmp` 文件名，两个线程同时写互相截断；
+2. 回调里用 `self._current` 找目标对象，而不是任务自带的 id。
+
+**修法**：
+
+```python
+# 1) 唯一临时名 + 原子替换
+tmp = folder / f".meeting.json.{uuid.uuid4().hex[:8]}.tmp"
+tmp.write_text(payload, encoding="utf-8")
+os.replace(tmp, target)
+
+# 2) 任务带上归属 id，回调按 id 找回对象
+queue.submit(wav, offset, meeting_id=m.id)
+...
+def _on_result(self, task):
+    target = self._current if self._current.id == task["meeting_id"] else store.load(task["meeting_id"])
+```
 
 ---
 > 新坑写回格式：`## N. 标题` + **症状/原因/修法** 三段 + 可运行代码片段。
