@@ -1731,19 +1731,11 @@ class MCPClientManager:
         # 中转一次，让真正的 session.call_tool 落到 lifespan Task 上执行。
         async def _do_call():
             result = await conn.session.call_tool(tool_name, arguments)
-
-            text_parts = []
-            for content in result.content or []:
-                if isinstance(content, mcp_types.TextContent):
-                    text_parts.append(content.text)
-                elif hasattr(content, "text"):
-                    text_parts.append(str(content.text))
-
-            output = "\n".join(text_parts) if text_parts else str(result)
+            output, images = self._split_tool_content(result)
 
             if result.isError:
                 return ToolResult(False, error=output)
-            return ToolResult(True, content=output)
+            return ToolResult(True, content=output, image_data=images or None)
 
         try:
             # 已在后台事件循环内（call_tool_sync 用 run_coroutine_threadsafe 送进来），
@@ -1760,6 +1752,33 @@ class MCPClientManager:
             return ToolResult(False, error=f"MCP 工具调用失败: {e}")
 
     # ── 辅助方法 ──────────────────────────────────────
+
+    @staticmethod
+    def _split_tool_content(result) -> tuple:
+        """把 CallToolResult.content 拆成 (文本, 图片载荷列表)。
+
+        用 type 字符串分派而非 isinstance，兼容不同 mcp SDK 小版本的类定义
+        与 dict 形态内容块；Audio/ResourceLink/EmbeddedResource 本期不收。
+        """
+        text_parts: List[str] = []
+        images: List[dict] = []
+        for content in getattr(result, "content", None) or []:
+            btype = content.get("type") if isinstance(content, dict) else getattr(content, "type", "")
+            if btype == "text":
+                val = content.get("text") if isinstance(content, dict) else getattr(content, "text", "")
+                if val:
+                    text_parts.append(str(val))
+            elif btype == "image":
+                data = content.get("data") if isinstance(content, dict) else getattr(content, "data", "")
+                mime = (
+                    content.get("mimeType")
+                    if isinstance(content, dict)
+                    else getattr(content, "mimeType", "image/png")
+                )
+                if data:
+                    images.append({"mime": mime or "image/png", "data": data})
+        output = "\n".join(text_parts) if text_parts else str(result)
+        return output, images
 
     def _parse_tool_name(self, prefixed_name: str) -> Optional[tuple]:
         if not prefixed_name.startswith(self.TOOL_PREFIX):
