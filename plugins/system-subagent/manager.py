@@ -23,6 +23,23 @@ from app.tools.result import ToolResult
 # 批次汇总携带结果正文时的单任务截断上限（与 tools/subagent_tools 注入器对齐）
 _MAX_BATCH_RESULT_CHARS = 4096
 
+# [H5-2] 归档内存 result 上限：DB（storage.db）优先存全文，UI 读取走 DB；
+# 内存归档仅作 DB 写失败时的回退与近期查询缓存。32KB 上限防 200 条
+# _finished_tasks 常驻膨胀（T13 实测重度 793MB/窗口）。
+_ARCHIVED_RESULT_MAX_CHARS = 32 * 1024
+
+# [H5-3] 注入父对话上下文的 result 上限：长子智能体结果全量注入会灌爆主
+# 对话上下文（独立于内存的功能缺陷），16KB 足够还原结论，超长内容应由
+# 子任务落盘后用 read 取回。
+_INJECTED_RESULT_MAX_CHARS = 16 * 1024
+
+
+def _cap_text(text, limit, tag):
+    """超长字符串截断并附原长标记（非字符串/短文本原样返回）。"""
+    if isinstance(text, str) and len(text) > limit:
+        return text[:limit] + f"\n…（{tag}已截断，全文 {len(text)} 字符）"
+    return text
+
 
 class _BoundedTaskDict(dict):
     """有界字典（H1）：超过容量上限时弹出最旧条目，防止 _finished_tasks 无限增长。
@@ -896,7 +913,10 @@ class SubAgentManager(QObject):
                 # 如果 _on_sub_agent_task_finished 已经写入过，避免覆盖已有字段
                 if task_id not in self._finished_tasks:
                     self._finished_tasks[task_id] = {
-                        "result": result,
+                        # [H5-2] 兕底归档路径（executor 完成信号未走 host 归档时
+                        # 在此落归档）与 mark_task_finished 同标准截 32KB；
+                        # _save_task_to_store 仍传全文（DB 全文优先，见下方调用）。
+                        "result": _cap_text(result, _ARCHIVED_RESULT_MAX_CHARS, "归档结果"),
                         "error": error,
                         "agent_name": agent_name,
                         "task_description": task_description,
@@ -913,7 +933,10 @@ class SubAgentManager(QObject):
                     self._finished_tasks[task_id].setdefault("elapsed_seconds", elapsed)
                     # 总是更新 result/error（_on_sub_agent_task_finished 可能拿到更准的数据）
                     if result is not None:
-                        self._finished_tasks[task_id]["result"] = result
+                        # [H5-2] 同上：兕底归档路径同标准截 32KB，DB 全文见下方
+                        self._finished_tasks[task_id]["result"] = _cap_text(
+                            result, _ARCHIVED_RESULT_MAX_CHARS, "归档结果"
+                        )
                     if error is not None:
                         self._finished_tasks[task_id]["error"] = error
 
@@ -1009,7 +1032,11 @@ class SubAgentManager(QObject):
 
         if task_id in self._finished_tasks:
             entry = self._finished_tasks[task_id]
-            entry["result"] = result
+            # [H5-2] 内存归档截 32KB；DB 侧 update_status 仍传全文（见下），
+            # UI 读取 DB 优先无感。唯一退化场景：DB 写失败时 UI 回退到内存
+            # 归档，「查看结果」会变短（32KB + 提示文案）——此为本改动唯一
+            # 行为差异，仅在 storage.db 不可用/写失败时出现。
+            entry["result"] = _cap_text(result, _ARCHIVED_RESULT_MAX_CHARS, "归档结果")
             if not entry.get("error"):
                 entry["error"] = final_error
             entry.setdefault("agent_name", agent_name)
@@ -1019,7 +1046,8 @@ class SubAgentManager(QObject):
                 entry.setdefault("logs", logs)
         else:
             self._finished_tasks[task_id] = {
-                "result": result,
+                # [H5-2] 同上：内存归档截 32KB，DB 全文无感
+                "result": _cap_text(result, _ARCHIVED_RESULT_MAX_CHARS, "归档结果"),
                 "error": final_error,
                 "agent_name": agent_name,
                 "task_description": task_description,
@@ -1229,7 +1257,9 @@ class SubAgentManager(QObject):
                 result = task_data.get("result") or task_data.get("summary", {}).get("result", "")
                 error = task_data.get("error") or task_data.get("summary", {}).get("error", "")
                 if result:
-                    task_info["result"] = result
+                    # [H5-3] 本路径结果直接注入父对话上下文（LLM 可见），无上限
+                    # 会灌爆主对话；16KB 足够还原结论，全文应落盘后用 read 取回。
+                    task_info["result"] = _cap_text(result, _INJECTED_RESULT_MAX_CHARS, "注入上下文的结果")
                 if error:
                     task_info["error"] = error
 
@@ -1309,7 +1339,18 @@ class SubAgentManager(QObject):
                 result = task_info.get("result", "") or ""
                 error = task_info.get("error", "") or ""
                 if result:
-                    task_entry["result"] = result
+                    # [H5-3] 与 get_tasks_status_with_details 同标准：本路径结果
+                    # 直接注入父对话上下文（LLM 可见），16KB 上限防灌爆。
+                    # [T26] 输入是内存归档文本（H5-2 已截 32KB），其「原长」是
+                    # 下界非真值——文案必须让 LLM 知道这点，否则会低估全文规模
+                    # 而放弃 read 落盘文件。
+                    if len(result) > _INJECTED_RESULT_MAX_CHARS:
+                        task_entry["result"] = (
+                            result[:_INJECTED_RESULT_MAX_CHARS]
+                            + f"\n…[结果已截断：归档层原长 {len(result)} 字符，原始全文可能更长]"
+                        )
+                    else:
+                        task_entry["result"] = result
                 if error:
                     task_entry["error"] = error
             if with_log:
