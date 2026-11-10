@@ -1388,6 +1388,10 @@ class OpenAIChatToolWindow(ToolWindow):
         self.session_manager = self.backend.session_manager
         # 会话卡片缓存只保存轻量状态快照，不再保存整组 QWidget / QWebEngineView 对象
         self._session_card_cache: Dict[str, Dict[str, Any]] = {}
+        # [A3-2] tool_call_id -> 拥有其运行折叠框的卡片（原在 _on_stream_started
+        # 路径内懒初始化：未流过式的窗口无此属性，切会话必经的 _clear_chat_area
+        # 触达即 AttributeError → 会话加载失败、欢迎卡不渲染。提升到 __init__）
+        self._tool_card_map: dict = {}
         self._current_history_project: Optional[str] = None  # 当前历史面板项目过滤
         self._welcome_card_cache: Dict[str, MessageCard] = {}
         self._displayed_session_id: Optional[str] = None
@@ -21606,7 +21610,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # tool_call_id -> 拥有其运行折叠框的卡片。
         # 保证工具结果（append_tool_result）与运行折叠框落在同一张卡片上，
         # 避免结果写入别的卡片导致运行框永远无法转换为完成框、并持续累积。
-        self._tool_card_map: dict = {}
+        self._tool_card_map.clear()  # 每轮重置（初始化已上移 __init__）
         # 当 LLM 实际开始流式响应时切换为停止按钮
         # 这样内建函数/子智能体执行后的回调阶段不会误切换按钮状态
         self._toggle_send_stop(True)
