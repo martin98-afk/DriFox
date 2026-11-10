@@ -1,14 +1,15 @@
 # -*- coding: utf-8 -*-
-"""[B4] _kill_renderer 异步化验证：主线程零阻塞、语义等价、回滚路径可用。
+"""[B4] _kill_renderer 异步收尸验证（#18 回滚后：默认同步，显式 DRIFOX_KILL_ASYNC=1 才异步）。
 
-覆盖（#13 规格 a-g）：
-(a) mock wait 阻塞 1s → _kill_renderer 返回耗时 < 16ms（主线程零阻塞）
+覆盖（#13 规格 a-g + R1 日志观测）：
+(a) mock wait 阻塞 1s → _kill_renderer 返回耗时 < 16ms（主线程零阻塞，仅显式开异步）
 (b) wait 执行线程非主线程
 (c) 返回值语义等价（terminate 成功即 True；拒绝/异常 False 不变）
 (d) create_time 不匹配 → 后台不调 wait/kill
 (e) --type=renderer 缺失 → False 且不起线程
-(f) DRIFOX_KILL_ASYNC=0 走同步旧分支
+(f) 默认（不设 env）与显式 DRIFOX_KILL_ASYNC=0 均走同步旧分支
 (g) _reap_renderer_async 的 args 不含 self/窗口对象
+(h) kill 阶段异常时 debug 日志留痕（R1）
 """
 import os
 import threading
@@ -65,13 +66,13 @@ class _FakeProc:
 
 
 @pytest.fixture
-def no_async(monkeypatch):
-    """默认走异步：清掉回滚开关"""
-    monkeypatch.delenv("DRIFOX_KILL_ASYNC", raising=False)
+def async_on(monkeypatch):
+    """显式开启异步收尸（默认已改回同步，见 #18 回滚）"""
+    monkeypatch.setenv("DRIFOX_KILL_ASYNC", "1")
 
 
-def test_a_kill_returns_fast_while_wait_blocks(monkeypatch, no_async):
-    """(a) wait 阻塞 1s 时 _kill_renderer 耗时 < 16ms（主线程零阻塞）"""
+def test_a_kill_returns_fast_while_wait_blocks(monkeypatch, async_on):
+    """(a) wait 阻塞 1s 时 _kill_renderer 耗时 < 16ms（主线程零阻塞；仅显式开异步时）"""
     fake = _FakeProc(wait_block=1.0)
     monkeypatch.setattr("psutil.Process", lambda pid: fake)
     t0 = time.perf_counter()
@@ -84,7 +85,7 @@ def test_a_kill_returns_fast_while_wait_blocks(monkeypatch, no_async):
     assert fake.wait_calls, "后台 reap 未执行 wait"
 
 
-def test_b_wait_runs_off_main_thread(monkeypatch, no_async):
+def test_b_wait_runs_off_main_thread(monkeypatch, async_on):
     """(b) wait 执行线程非主线程（renderer-reap 守卫）"""
     fake = _FakeProc()
     monkeypatch.setattr("psutil.Process", lambda pid: fake)
@@ -97,7 +98,7 @@ def test_b_wait_runs_off_main_thread(monkeypatch, no_async):
     assert fake.wait_thread_name == "renderer-reap"
 
 
-def test_c_return_semantics_unchanged(monkeypatch, no_async):
+def test_c_return_semantics_unchanged(monkeypatch, async_on):
     """(c) 返回值语义：终止发起成功=True；拒绝非 renderer/异常=False（与改前等价）"""
     # 非 renderer（gpu-process）→ False
     fake = _FakeProc(cmd='"C:/x/QtWebEngineProcess.exe" --type=gpu-process')
@@ -120,8 +121,8 @@ def test_c_return_semantics_unchanged(monkeypatch, no_async):
     assert OpenAIChatToolWindow._kill_renderer(-5) is False
 
 
-def test_d_reap_aborts_on_pid_reuse(monkeypatch, no_async):
-    """(d) create_time 不匹配（pid 复用）→ 后台不调 wait/kill"""
+def test_d_reap_aborts_on_pid_reuse(monkeypatch):
+    """(d) create_time 不匹配（pid 复用）→ 后台不调 wait/kill（与开关无关）"""
     called = []
     fake = _FakeProc(create_time=9999.0, wait_block=0.0)  # 与主线程采集的 1000.0 不符
     fake.wait = lambda timeout=None: called.append("wait")
@@ -130,7 +131,7 @@ def test_d_reap_aborts_on_pid_reuse(monkeypatch, no_async):
     assert called == [], "pid 复用时后台仍执行了 wait/kill"
 
 
-def test_e_missing_renderer_flag_no_thread(monkeypatch, no_async):
+def test_e_missing_renderer_flag_no_thread(monkeypatch, async_on):
     """(e) --type=renderer 缺失 → False 且不起线程（无 renderer-reap 线程产生）"""
     before = set(t.name for t in threading.enumerate())
     fake = _FakeProc(cmd='"C:/x/QtWebEngineProcess.exe" --type=utility')
@@ -141,17 +142,24 @@ def test_e_missing_renderer_flag_no_thread(monkeypatch, no_async):
     assert "renderer-reap" not in (after - before)
 
 
-def test_f_sync_fallback_env(monkeypatch):
-    """(f) DRIFOX_KILL_ASYNC=0 走同步旧分支：wait 在主线程执行"""
+def test_f_sync_fallback_and_default_sync(monkeypatch):
+    """(f) 同步旧分支：显式 0 与默认（不设 env）都走主线程 wait（#18 回滚后默认同步）"""
     fake = _FakeProc()
     monkeypatch.setattr("psutil.Process", lambda pid: fake)
     monkeypatch.setenv("DRIFOX_KILL_ASYNC", "0")
     assert OpenAIChatToolWindow._kill_renderer(77) is True
     assert fake.wait_calls == [1.0]  # 同分支：wait 被主线程直接调用
     assert fake.wait_thread_name == threading.current_thread().name
+    # 默认值（不设 env）：走同步
+    fake2 = _FakeProc()
+    monkeypatch.setattr("psutil.Process", lambda pid: fake2)
+    monkeypatch.delenv("DRIFOX_KILL_ASYNC", raising=False)
+    assert OpenAIChatToolWindow._kill_renderer(78) is True
+    assert fake2.wait_calls == [1.0]
+    assert fake2.wait_thread_name == threading.current_thread().name
 
 
-def test_g_reap_args_are_pure_values(monkeypatch, no_async):
+def test_g_reap_args_are_pure_values(monkeypatch, async_on):
     """(g) _reap_renderer_async 只收纯值：args 不含 self/窗口/Qt 对象"""
     captured = {}
 
@@ -176,7 +184,7 @@ def test_g_reap_args_are_pure_values(monkeypatch, no_async):
     assert captured["target"] is _reap_renderer_async
 
 
-def test_reap_failure_logged(monkeypatch, no_async):
+def test_reap_failure_logged(monkeypatch, async_on):
     """(h)[R1] kill 阶段异常：日志留痕（含 pid 与阶段）、函数不抛、正常结束"""
     import psutil
     from app import main_widget as mw

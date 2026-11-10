@@ -14028,7 +14028,9 @@ class OpenAIChatToolWindow(ToolWindow):
             # terminate 前采集 create_time：后台 reap 用它做 pid 复用防护
             create_time = float(p.create_time())
             p.terminate()
-            if os.environ.get("DRIFOX_KILL_ASYNC", "1") == "0":
+            # 异步收尸在快速切换场景会使崩溃率上升（A/B: 50%→100%，怀疑 kill
+            # 与卡片共享 renderer 的 TOCTOU），默认关闭；重做需先补共享关系复查
+            if os.environ.get("DRIFOX_KILL_ASYNC", "0") != "1":
                 # 回滚路径：原同步 wait/kill（主线程阻塞至多 1s/个，T31 每拍
                 # 最多 6 个 victim 时极端 ~6s 冻结——仅紧急回退时使用）
                 try:
