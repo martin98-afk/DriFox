@@ -560,7 +560,11 @@ class ProviderListSettingCard(DynamicHeightExpandCardMixin, ExpandSettingCard):
 
         anchor = QWidget(header)
         anchor.setFixedSize(3, 12)
-        anchor.setStyleSheet(f"background: {_GROUP_COLORS[group]}; border: none; border-radius: 1px;")
+        # 能力组（语音合成等）不在凭据四组颜色表内，用中性色兜底（与
+        # provider_picker_card color=None 的弱化色一致），不中断渲染
+        anchor.setStyleSheet(
+            f"background: {_GROUP_COLORS.get(group, Colors.TEXT_MUTED)}; border: none; border-radius: 1px;"
+        )
         layout.addWidget(anchor)
 
         label = QLabel(f"{group}（{count}）", header)
