@@ -10975,6 +10975,13 @@ class OpenAIChatToolWindow(ToolWindow):
             return
         window_registry.last_hot_reload_fingerprint = _fingerprint
         OpenAIChatToolWindow._last_hot_reload_at = _now
+        # 热重载性能定位（主线程同步执行整段）：分段计时，只在总耗时 >=30ms 时落一行
+        _t0 = time.perf_counter()
+        _marks: list = []
+
+        def _mark(name: str) -> None:
+            _marks.append((name, time.perf_counter()))
+
         # 不弹 InfoBar，仅日志记录
         logger.debug(
             f"[HotReload] plugin reloaded: agents={result.get('agents', 0)}, "
@@ -11005,6 +11012,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 except (RuntimeError, AttributeError):
                     # 多窗口竞态：窗口已被销毁
                     pass
+        _mark("命令卡片")
 
         # 命令变更：同步刷新快捷键绑定
         if result.get("commands"):
@@ -11020,6 +11028,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 except (RuntimeError, AttributeError):
                     pass
             logger.debug("[HotReload] 命令快捷键已重建（先销毁旧 QShortcut 再注册）")
+        _mark("快捷键重建")
         # UI 插件增删：重建输入区插件按钮（幂等；未注册任何按钮时零渲染）
         # ⚠️ 本分支不重建命令快捷键（命令表没变）；只有上面的 commands 分支才重建。
         #
@@ -11045,21 +11054,25 @@ class OpenAIChatToolWindow(ToolWindow):
                     win._rebuild_titlebar_widgets()
                 except (RuntimeError, AttributeError):
                     pass
+            _mark("输入区/标题栏")
             # ★ 已打开标签页视图重绘：消息内容块是渲染时刻的快照，热重载后
             # 不会自动更新（新建标签页才显示新版）——遍历所有窗口的已渲染
             # 消息卡片，命中该插件的 custom 块时用最新 render_func 重新生成。
             # plugin_name 为空（全量/合并重载）时重绘全部 custom 块。
+            _card_hits = 0
             for win in list(window_registry.alive_window_instances()):
                 if not OpenAIChatToolWindow._win_alive(win):
                     continue
                 try:
                     for _card in win.findChildren(MessageCard):
+                        _card_hits += 1
                         try:
                             _card.rerender_custom_blocks(_ui_plugin_name)
                         except (RuntimeError, AttributeError):
                             pass
                 except (RuntimeError, AttributeError):
                     pass
+            _mark(f"消息卡片x{_card_hits}")
             # ★ 右侧工作台插件页重建：ui 热重载后 registry 已更新，但面板
             # widget 是构建时快照，(page_id, label) 签名不变会被 sync_plugin_pages
             # 短路跳过——强制销毁重建，常驻插件页（工作树/产物/自注册 tab）
@@ -11091,6 +11104,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 tray._setup_global_hotkey()
             except Exception:
                 pass
+            _mark("工作台调度/全局热键")
 
         # 技能变更：刷新技能列表（settings popup + 卡片 token 估算）
         # 注意：settings popup 是全局共享单例（所有窗口通过 property 访问同一实例），
@@ -11229,6 +11243,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     pass
             logger.debug("[HotReload] LSP server list refreshed")
 
+        _mark("设置卡族")
         # 服务商变更：刷新添加服务商卡片墙（provider 插件热装/卸载后注册表
         # 已更新，但卡片墙是构建时快照；refresh_provider_wall 内部按视图
         # 状态判定，非 picker 视图/卡片未打开时零成本）
@@ -11279,6 +11294,18 @@ class OpenAIChatToolWindow(ToolWindow):
             except Exception:
                 logger.exception("[HotReload] 刷新共享 Launcher 异常")
             logger.debug("[HotReload] UI 插件列表已刷新")
+
+        # 热重载性能分段汇总（主线程占用；只记 >=30ms，避免刷日志）
+        _t_end = time.perf_counter()
+        _total_ms = (_t_end - _t0) * 1000
+        if _total_ms >= 30.0:
+            _prev = _t0
+            _seg = []
+            for _name, _t in _marks:
+                _seg.append(f"{_name}={(_t - _prev) * 1000:.0f}ms")
+                _prev = _t
+            _seg.append(f"尾部={(_t_end - _prev) * 1000:.0f}ms")
+            logger.info(f"[HotReload-Perf] 广播总耗时 {_total_ms:.0f}ms（{', '.join(_seg)}）")
 
     def _safe_refresh(self, widget, method_name: str = "refresh_style") -> None:
         """周期内刷新去重 + 隐藏门控：同一 widget 的同名刷新方法每周期只调一次。

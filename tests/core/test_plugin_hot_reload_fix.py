@@ -327,3 +327,28 @@ class TestPluginChangedBroadcast:
             assert b not in ChatBackend._active_instances, "cleanup 后不得留在活跃集合"
         finally:
             a.cleanup()
+
+class TestManifestDispatchCoalesce:
+    """同批变更含 __manifest__ 时的派发归并
+
+    背景：一次批量保存（实测 29 文件）会同时命中 ui 与 __manifest__ 两个组件。
+    __manifest__ 分支遍历该插件全部已声明组件逐个重载，同批再派发具体组件会让
+    ui 被完整 import 两次（rmtree __pycache__ + exec 整个 ui 包），主线程双倍占用。
+    """
+
+    def test_set_with_manifest_collapses_to_manifest(self):
+        got = PluginHostService._coalesce_manifest_dispatch({"ui", "__manifest__", "tools"})
+        assert got == {"__manifest__"}
+
+    def test_list_with_manifest_collapses_to_list(self):
+        """fallback 路径传入 list：返回同类型，保持后续按序 emit 的语义"""
+        got = PluginHostService._coalesce_manifest_dispatch(["ui", "__manifest__"])
+        assert got == ["__manifest__"]
+        assert isinstance(got, list)
+
+    def test_components_without_manifest_untouched(self):
+        components = {"ui", "tools"}
+        assert PluginHostService._coalesce_manifest_dispatch(components) == components
+
+    def test_manifest_only_untouched(self):
+        assert PluginHostService._coalesce_manifest_dispatch(["__manifest__"]) == ["__manifest__"]
