@@ -90,3 +90,20 @@ def test_chat_fallback_candidate_only_chat():
 
 def test_chat_fallback_candidate_empty_when_no_chat():
     assert chat_fallback_candidate({"img-1": {"capability_type": "image_generation"}}) == ""
+
+
+def test_resolve_capability_type_prefers_disk_key_for_custom_provider():
+    """自定义服务商（无 ProviderDef）：磁盘 capability_type 键是权威来源，反查失败不得回退 chat。"""
+    assert resolve_capability_type({
+        "provider_name": "我的图像服务商",
+        "capability_type": "image_generation",
+    }) == "image_generation"
+
+
+def test_resolve_capability_type_disk_key_overrides_registry():
+    """磁盘键存在时优先于反查（预置实例保存后磁盘值=声明值，两者应一致）。"""
+    # 该 provider_name 反查不到定义（未注册），磁盘键生效
+    assert resolve_capability_type({
+        "provider_name": "未知服务商",
+        "capability_type": "video_generation",
+    }) == "video_generation"

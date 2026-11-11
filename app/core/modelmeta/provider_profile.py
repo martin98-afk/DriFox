@@ -284,11 +284,16 @@ def resolve_token_ratio(llm_config: Optional[Dict[str, Any]] = None, model: Opti
 
 
 def resolve_capability_type(provider_info: Dict[str, Any]) -> str:
-    """配置 dict → 能力类型。provider_name 反查 ProviderDef，缺失一律按 chat 兼容老配置。
-
-    磁盘不落该字段：与 display_name 同属运行时派生值，避免云同步指纹判变与迁移。
+    """配置 dict → 能力类型。两级解析：
+    1. 磁盘键 capability_type（自定义实例的权威来源，编辑卡下拉落盘，恒写入）
+    2. provider_name 反查 ProviderDef.capability_type（预置实例的声明来源；
+       老配置无磁盘键时走此路，缺失一律按 chat 兼容）
     """
-    name = str((provider_info or {}).get("provider_name", "") or "").strip()
+    info = provider_info or {}
+    disk_value = str(info.get("capability_type", "") or "").strip()
+    if disk_value:
+        return disk_value
+    name = str(info.get("provider_name", "") or "").strip()
     if not name:
         return "chat"
     try:
