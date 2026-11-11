@@ -435,3 +435,28 @@ class TestProviderCardNav:
         """卡片未懒构建时调用刷新 → 静默无副作用（广播早于首次打开）"""
         assert cc._provider_picker_card is None
         cc.refresh_provider_wall()  # 不抛错即可
+
+
+# ══════════════════════════════════════════════════════════════════
+# 4. 能力类型动态分组（按注册表 capability_type 出组头）
+# ══════════════════════════════════════════════════════════════════
+
+
+class TestCapabilityGroupRendering:
+    def test_capability_type_gets_extra_group_header(self, _qapp, registry):
+        """注册表声明非 chat 能力类型 → 卡片墙出现对应动态组头（chat 仍走凭据四组）"""
+        from app.widgets.cards.settings.provider_picker_card import ProviderPickerCard
+
+        registry.register(
+            ProviderDef(
+                name="FluxImg",
+                api_url="https://api.flux.example/v1",
+                capability_type="image_generation",
+            ),
+            source="plugin:test",
+        )
+        card = ProviderPickerCard()
+        labels = [label.text() for _anchor, label, _color in card._headers]
+        assert "图像生成（1）" in labels, f"未生成能力组头，实际: {labels}"
+        # reg 经 all() 的 ensure_loaded 会带上真实插件服务商，只断言凭据组仍在、不数数量
+        assert any(lb.startswith("API（") for lb in labels), "chat 服务商仍应保留既有凭据组"

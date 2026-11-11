@@ -232,6 +232,9 @@ class ProviderPickerCard(QWidget):
         # （Ollama / LM Studio）永远落不进「本地」组。
         grouped: Dict[str, list] = {}
         for p in providers:
+            # 非 chat 能力实例（图像/视频/语音等）不进凭据四组，走后面动态能力组
+            if getattr(p, "capability_type", "chat") != "chat":
+                continue
             pseudo_info = {
                 "认证方式": getattr(p, "auth_type", "") or "",
                 "API_URL": getattr(p, "api_url", "") or "",
@@ -253,6 +256,26 @@ class ProviderPickerCard(QWidget):
                         _provider_caption(getattr(p, "api_url", ""), getattr(p, "family", ""), group),
                     )
                     for p in items
+                ]
+            )
+
+        # 动态能力组（按注册表 capability_type 收集），排在凭据四组之后。
+        # color=None → 跟随主题 TEXT_MUTED（能力组无固定色，与「其他」组一致）
+        from app.widgets.cards.settings.provider_setting_card import capability_sections_for_wall
+
+        for cap_type, label in capability_sections_for_wall():
+            caps = [p for p in providers if getattr(p, "capability_type", "chat") == cap_type]
+            if not caps:
+                continue
+            self._add_group_header(label, len(caps), None, first=first_group)
+            first_group = False
+            self._add_flow_row(
+                [
+                    (
+                        p.name,
+                        _provider_caption(getattr(p, "api_url", ""), getattr(p, "family", ""), label),
+                    )
+                    for p in caps
                 ]
             )
 

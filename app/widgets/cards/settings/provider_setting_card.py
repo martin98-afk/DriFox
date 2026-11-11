@@ -307,6 +307,27 @@ _GROUP_COLORS = {
     "API": "#0078d4",
 }
 
+# 能力类型 → 中文组头文案。只是显示名映射，不是白名单：任意新字符串自动成组。
+_CAPABILITY_LABELS = {
+    "image_generation": "图像生成",
+    "video_generation": "视频生成",
+    "speech_generation": "语音合成",
+    "speech_recognition": "语音识别",
+}
+
+
+def capability_sections_for_wall() -> list:
+    """[(capability_type, 组头文案)]，来自注册表动态收集；未知值原样显示。
+
+    直接引用模块级 ProviderRegistry（勿函数内 re-import：那会绑定到 registries
+    模块的真实类，绕过测试对模块属性的 monkeypatch）。
+    """
+    try:
+        types = ProviderRegistry.get_instance().capability_types()
+    except Exception:
+        return []
+    return [(t, _CAPABILITY_LABELS.get(t, t)) for t in types]
+
 
 def _group_of(provider_name: str, info: dict) -> str:
     """判定一条服务商配置所属分组
@@ -432,18 +453,26 @@ class ProviderListSettingCard(DynamicHeightExpandCardMixin, ExpandSettingCard):
             self._empty_label.hide()
         self._group_headers.clear()
 
-        # 过滤 + 按组归集（保持配置字典插入序）
+        # 过滤 + 按组归集（保持配置字典插入序）。非 chat 能力实例另收能力组，
+        # 不进凭据四组（凭据分组判据只对 chat 有意义）
+        from app.core.modelmeta.provider_profile import resolve_capability_type
+
         grouped: dict[str, list[tuple[str, dict]]] = {}
+        capability_rows: dict[str, list[tuple[str, dict]]] = {}
         for config_id, info in self.providers.items():
             # 附加后缀索引到 info（供 ProviderItem 显示使用，不持久化到配置）
             display_info = dict(info)
             display_info["_suffix_index"] = suffix_map.get(config_id, 0)
             if not self._match_keyword(display_info, config_id):
                 continue
+            cap = resolve_capability_type(info)
+            if cap != "chat":
+                capability_rows.setdefault(cap, []).append((config_id, display_info))
+                continue
             group = _group_of(info.get("provider_name", config_id), info)
             grouped.setdefault(group, []).append((config_id, display_info))
 
-        if not grouped:
+        if not grouped and not capability_rows:
             self._show_empty_state()
             self._adjust_view_size()
             return
@@ -455,6 +484,19 @@ class ProviderListSettingCard(DynamicHeightExpandCardMixin, ExpandSettingCard):
             self.viewLayout.addWidget(self._make_group_header(group, len(rows)))
             for config_id, display_info in rows:
                 # 判断是否为默认服务商：比较配置 ID 或服务商名称
+                info = self.providers[config_id]
+                is_default = (config_id == self.default_provider) or (
+                    info.get("provider_name") == self.default_provider
+                )
+                self._add_provider_item(config_id, display_info, is_default)
+
+        # 能力组（按注册表动态收集，非 chat 实例），排在凭据四组之后
+        for cap_type, label in capability_sections_for_wall():
+            rows = capability_rows.get(cap_type)
+            if not rows:
+                continue
+            self.viewLayout.addWidget(self._make_group_header(label, len(rows)))
+            for config_id, display_info in rows:
                 info = self.providers[config_id]
                 is_default = (config_id == self.default_provider) or (
                     info.get("provider_name") == self.default_provider
