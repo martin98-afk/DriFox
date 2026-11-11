@@ -75,3 +75,18 @@ def test_different_url_no_collision():
     c2 = apply_provider_save(saved, b, "示例图像", is_new=True)
     assert c1 != c2
     assert compute_provider_config_id(a) != compute_provider_config_id(b)
+
+
+from app.core.modelmeta.provider_profile import chat_fallback_candidate
+
+
+def test_chat_fallback_candidate_only_chat():
+    configs = {
+        "img-1": {"provider_name": "示例图像", "capability_type": "image_generation"},
+        "chat-1": {"provider_name": "示例Chat", "capability_type": "chat"},
+    }
+    assert chat_fallback_candidate(configs) == "chat-1"
+
+
+def test_chat_fallback_candidate_empty_when_no_chat():
+    assert chat_fallback_candidate({"img-1": {"capability_type": "image_generation"}}) == ""

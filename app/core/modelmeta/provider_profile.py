@@ -302,3 +302,11 @@ def resolve_capability_type(provider_info: Dict[str, Any]) -> str:
     except Exception:
         pass
     return "chat"
+
+
+def chat_fallback_candidate(valid_configs: Dict[str, Dict[str, Any]]) -> str:
+    """当前选择失效时，从 chat 实例里取首个 config_id；无 chat 返回空串。"""
+    for config_id, info in (valid_configs or {}).items():
+        if str((info or {}).get("capability_type", "chat") or "chat") == "chat":
+            return str(config_id)
+    return ""

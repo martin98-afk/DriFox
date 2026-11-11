@@ -94,6 +94,7 @@ from app.core.modelmeta.model_capabilities import (
     resolve_capabilities_for_model,
     resolve_model_capabilities,
 )
+from app.core.modelmeta.provider_profile import chat_fallback_candidate, resolve_capability_type
 from app.core.infra import memory_governor
 from app.core.infra.memory_governor import (
     _MAX_GLOBAL_RENDERED_PAGES,
@@ -2665,7 +2666,7 @@ class OpenAIChatToolWindow(ToolWindow):
         selected_name = (
             self._current_provider_name
             if self._current_provider_name
-            else (list(self._valid_configs.keys())[0] if self._valid_configs else "")
+            else (chat_fallback_candidate(self._valid_configs))
         )
 
         # 优先从 _valid_configs 获取（已合并默认配置）
@@ -11901,6 +11902,8 @@ class OpenAIChatToolWindow(ToolWindow):
             base_name = config.get("name", "") or pname
             idx = suffix_map.get(config_id, 0)
             config["display_name"] = base_name if idx == 0 else f"{base_name} #{idx + 1}"
+            # 内存态能力类型：磁盘不落该字段（运行时派生），回退候选按 chat 过滤依赖此键
+            config["capability_type"] = resolve_capability_type(config)
             self._valid_configs[config_id] = config
 
         # 恢复或设置当前选中的服务商和模型
@@ -11926,7 +11929,7 @@ class OpenAIChatToolWindow(ToolWindow):
             elif saved_model and saved_model in self._valid_configs:
                 self._current_provider_name = saved_model
             else:
-                self._current_provider_name = list(self._valid_configs.keys())[0] if self._valid_configs else ""
+                self._current_provider_name = chat_fallback_candidate(self._valid_configs)
 
             # 回退时从配置中获取默认模型名称
             if self._current_provider_name:
