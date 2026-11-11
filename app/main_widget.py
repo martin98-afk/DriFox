@@ -7871,24 +7871,17 @@ class OpenAIChatToolWindow(ToolWindow):
         from app.core.modelmeta.selector_data import build_selector_provider_data
 
         merged_provider_models = get_merged_provider_models()
-        provider_models_data, self._display_to_config_id = build_selector_provider_data(
-            self._valid_configs,
-            self._current_provider_name,
-            merged_provider_models,
+        provider_models_data, self._display_to_config_id, self._display_to_provider_name = (
+            build_selector_provider_data(self._valid_configs, self._current_provider_name, merged_provider_models)
         )
-        # 维护 display_name → provider_name 映射，用于 model_selector 找 icon（只收 chat 实例）
-        self._display_to_provider_name: dict[str, str] = {}
-        for config_id, config in self._valid_configs.items():
-            if str(config.get("capability_type", "chat") or "chat") != "chat":
-                continue
-            display_name = config.get("display_name", config.get("provider_name", config_id))
-            self._display_to_provider_name[display_name] = config.get("provider_name", config_id)
+        # display_name → provider_name 映射（model_selector 找 icon 用）与 rows 同源产出，口径一致
 
-        # 找当前选中服务商的 display_name
+        # 找当前选中服务商的 display_name（与 selector 同口径 or 链：display_name → provider_name → current 本身）
         current_display = ""
         if self._current_provider_name in self._valid_configs:
-            current_display = self._valid_configs[self._current_provider_name].get(
-                "display_name", self._current_provider_name
+            config = self._valid_configs[self._current_provider_name]
+            current_display = (
+                config.get("display_name") or config.get("provider_name") or self._current_provider_name
             )
 
         # 收集模型描述（来自 models.dev / 硬编码能力字典）

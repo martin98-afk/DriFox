@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""模型选择器数据源：只收 chat 实例，产出 (display_name, model_list, is_current) 行与反查映射。"""
+"""模型选择器数据源：只收 chat 实例，产出 (display_name, model_list, is_current) 行与两个反查映射。"""
 from __future__ import annotations
 
 import ast
@@ -12,10 +12,15 @@ def build_selector_provider_data(
     valid_configs: Dict[str, Dict[str, Any]],
     current_provider_name: str,
     merged_provider_models: Dict[str, List[str]] | None = None,
-) -> Tuple[List[Tuple[str, List[str], bool]], Dict[str, str]]:
+) -> Tuple[List[Tuple[str, List[str], bool]], Dict[str, str], Dict[str, str]]:
+    """返回 (rows, display_to_config, display_to_provider_name)。
+    display_to_config / display_to_provider_name 均以同一 display_name 口径为键
+    （display_name → config_id / provider_name），两映射键集恒一致。
+    """
     merged = merged_provider_models or {}
     rows: List[Tuple[str, List[str], bool]] = []
     display_to_config: Dict[str, str] = {}
+    display_to_provider_name: Dict[str, str] = {}
     for config_id, config in (valid_configs or {}).items():
         # 生成类实例（图像/嵌入等）不进聊天模型选择器；字段缺失按 chat 兼容老配置
         if str(config.get("capability_type", "chat") or "chat") != "chat":
@@ -23,6 +28,7 @@ def build_selector_provider_data(
         display_name = config.get("display_name") or config.get("provider_name") or config_id
         pname = config.get("provider_name", config_id)
         display_to_config[display_name] = config_id
+        display_to_provider_name[display_name] = pname
 
         model_list: List[str] = []
         if "模型列表" in config:
@@ -50,4 +56,4 @@ def build_selector_provider_data(
         if not model_list and cur_model:
             model_list = [cur_model]
         rows.append((display_name, model_list, config_id == current_provider_name))
-    return rows, display_to_config
+    return rows, display_to_config, display_to_provider_name

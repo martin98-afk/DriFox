@@ -310,3 +310,7 @@ def chat_fallback_candidate(valid_configs: Dict[str, Dict[str, Any]]) -> str:
         if str((info or {}).get("capability_type", "chat") or "chat") == "chat":
             return str(config_id)
     return ""
+
+
+# re-export：selector_data 属 provider_profile 同链既有导入入口，测试与调用方从此处取
+from app.core.modelmeta.selector_data import build_selector_provider_data  # noqa: E402,F401
