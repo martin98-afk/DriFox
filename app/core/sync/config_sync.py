@@ -3407,6 +3407,41 @@ class ConfigSyncService(QObject):
 # ── 模块级辅助 ────────────────────────────────────────
 
 
+# ── 应用启动自动同步（#37 条 3 分支 B）─────────────────────────
+
+def auto_enable_if_bound(svc=None) -> bool:
+    """已配置 Gitee 同步则自动启动 ConfigSyncService（幂等，全路径共用）。
+
+    Args:
+        svc: 可选服务实例（卡片路径传 self._sync_svc 以兼容桩/多实例测试）；
+             缺省取进程单例。两路在运行时是同一对象。
+
+    [分支 B 背景] 全仓核实：enable() 唯一调用方曾只有 GiteeCard/GiteeAccountRow
+    的 _auto_enable_sync，而卡片只在点设置时构造 → 已配置用户冷启动后不点设置
+    就永不自动同步（与用户预期相反）。本函数由 main.py 首帧后 8s singleShot
+    挂点调用：未绑定立即返回（零网络），已绑定才拉 token 并 enable；重复
+    调用（点设置触发的 _auto_enable_sync）由 `_state != disabled` 幂等挡掉。
+
+    Returns:
+        True = 本次实际调用了 enable；False = 未绑定 / 已启用 / token 失效 / 异常
+    """
+    try:
+        svc = svc or ConfigSyncService.get_instance()
+        if svc._state != "disabled":
+            return False  # 幂等：已启动不重复拉线程
+        from app.gateway.auth import get_oauth_backend
+
+        bound = get_oauth_backend("gitee").get_bound_info()
+        if not bound or not bound.get("token") or not bound.get("owner"):
+            return False  # 未绑定（get_bound_info 首行守卫，零网络）
+        logger.info("[ConfigSync] 启动链自动启用（已配置同步）")
+        svc.enable(bound["token"], bound["owner"])
+        return True
+    except Exception as e:  # noqa: BLE001 — 同步启用失败绝不阻塞启动
+        logger.warning(f"[ConfigSync] 启动链自动启用失败（非致命）: {e}")
+        return False
+
+
 def _loads_json_list(raw: bytes) -> Optional[list]:
     """把字节解析成 JSON 数组，失败返回 None"""
     try:

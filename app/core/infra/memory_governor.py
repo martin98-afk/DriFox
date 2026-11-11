@@ -12,6 +12,7 @@
 禁止 from-import 这两个名字（int 值拷贝会与真实计数脱钩，闸门/防抖失效）。
 """
 
+import contextlib
 import gc
 import time
 
@@ -421,24 +422,69 @@ def enforce_renderer_rss_gate(host) -> str:
 # 累计 +357MB 全部滞留；8 个合计 493MB 低于 RSS 软阈 800 → RSS 闸门不触发
 # （总量应急的设计边界）。本回收器与 enforce_renderer_rss_gate 互补：
 # 闸门管「总量超限」（症状驱动），本函数管「单页空闲」（时间驱动），判据正交。
-RENDERER_IDLE_RECLAIM_S = 600.0  # 空闲 10 分钟。定稿取 600 而非 300：用户切会话
-                                 # 间隔可低至几十秒，300s 会造成「切回即回收」锯齿
+RENDERER_IDLE_RECLAIM_S = 420.0  # 空闲 7 分钟（#37 条 2，原 600s）
+                                  # 依据 t33 §6.2 静置实测：8 个 renderer 静置
+                                  # 合计 540MB 全滞留（池内 pid 占大头）。原注释反对
+                                  # 300s 的理由是「切回即回收」锯齿；现 keep-tab 保留期
+                                  # 与 LRU keep 两个兜底仍在（活跃视口 ±2 批豁免 +
+                                  # _kept_session_tab 切回复用），420s 安全且削 -180s 滞留窗
 RENDERER_IDLE_RECLAIM_BATCH_MAX = 6  # 每拍 ≤6 个：常态动作宁慢勿抖（kill 上限 12 的一半）
+
+def _idle_pool_pids() -> list:
+    """#37 条 1：池内空闲 viewer 的 renderer PID 候选（按归还时刻排序，LRU keep 语义）。
+
+    原候选域只有 _unloaded_pids；WebViewPool.pids() 的池内进程（8 个静置
+    540MB 实测）不受空闲回收管辖。读池内 viewer 的归还时间戳
+    （_pool_idle_since，release 时打点；缺省按已空闲足够久处理，兼容老实例）。
+    keep-tab / 在用 pid 的排除在 reclaim_idle_renderers 统一护栏层完成。
+    """
+    try:
+        from app.widgets.webview_pool import WebViewPool
+
+        pool = WebViewPool.get_instance()
+    except Exception:
+        return []
+    now = time.time()
+    out = []
+    seen = set()
+    for bucket in pool._idle.values():
+        for viewer in bucket:
+            try:
+                pid = int(getattr(viewer, "_renderer_pid", 0) or 0)
+            except Exception:
+                continue
+            if pid <= 0 or pid in seen:
+                continue
+            seen.add(pid)
+            ts = float(getattr(viewer, "_pool_idle_since", 0) or 0) or (
+                now - RENDERER_IDLE_RECLAIM_S - 1
+            )
+            if now - ts <= RENDERER_IDLE_RECLAIM_S:
+                continue  # 刚归还（LRU keep 新鲜期），不动
+            out.append((ts, pid))
+    return out
 
 def reclaim_idle_renderers(host) -> int:
     """T31：回收记账里空闲超过阈值的离屏 renderer（一期，零打点改动）。
 
-    候选域=本窗口 _unloaded_pids，时间戳直接用登记时的 ts（_unload_batch
-    登记时刻），一期不需要页面 hide 打点。三条判据同时满足才回收：
-    1. 批次距离 ≥ 离屏护栏（8/12 批，覆盖活跃视口 ±2 豁免）
+    候选域（#37 条 1）= 本窗口 _unloaded_pids ∪ WebViewPool 池内空闲 pid
+    （池内进程曾完全不受空闲回收管辖，8 个静置 540MB 全滞留）。
+    记账 ts 沿用 _unload_batch 登记时刻；池内候选 ts=_pool_idle_since（release
+    打点，缺省兼容老实例）。keep-tab/LRU keep 语义保留：池内候选 kill 后由
+    WebViewPool.acquire 的 _is_usable 兜底剔除失效 viewer，且本窗口 keep-tab
+    （_kept_session_tab）与流式卡片仍由 _pid_still_in_use 护栏保护。
+    三条判据同时满足才回收：
+    1. 批次距离 ≥ 离屏护栏（8/12 批，覆盖活跃视口 ±2 豁免）——仅记账候选适用
     2. 全局护栏：未被任何存活窗口的在用卡片占用（_pid_still_in_use
        实例级检查含流式 _current_assistant_card + 全局跨窗口检查）
     3. 空闲时长 now - ts > RENDERER_IDLE_RECLAIM_S
     动作复用 _kill_renderer（cmdline 双校验），成功后从记账移除并写
     _last_kill_at 冷却（与 RSS 闸门共用 60s）。
 
-    Returns:
-        成功 kill 数量（日志用）。
+    ⚠️ _pid_still_in_use 对池内 pid 恒 True（防止强回收误杀可复用 viewer）——
+    空闲回收路径（本函数）刻意绕过该池护栏：池内 pid 正是本轮要回收的候选，
+    其余护栏（keep-tab / 跨窗口在用 / 流式卡）由 _pid_used_by_alive_windows 与
+    keep-tab 检查承担，二者语义不冲突。
     """
     try:
         now = time.time()
@@ -464,10 +510,28 @@ def reclaim_idle_renderers(host) -> int:
                 continue
             try:
                 if host._pid_still_in_use(pid):
-                    continue  # 本窗口护栏（含流式卡片）
+                    continue  # 本窗口护栏（含流式卡片、keep-tab）
             except Exception:
                 continue
             victims.append((float(ts), pid))  # ts 小 = 空闲最久优先
+        # #37 条 1：池内空闲候选（池护栏只在强回收闸门生效，本路径可收）
+        pool_victims = []
+        keep_pids = set()
+        try:
+            kept = getattr(host, "_kept_session_tab", None)
+            if kept is not None:
+                for card in kept.get("widgets", []):
+                    with contextlib.suppress(Exception):
+                        p = int(getattr(card, "_renderer_pid", 0) or 0)
+                        if p > 0:
+                            keep_pids.add(p)
+        except Exception:
+            pass
+        for ts, pid in _idle_pool_pids():
+            if pid in keep_pids:
+                continue  # keep-tab 保留期：活跃切回复用语义，绝不回收
+            pool_victims.append((float(ts), pid))
+        victims.extend(pool_victims)
         victims.sort()
         killed = 0
         kill_set = set()

@@ -916,6 +916,19 @@ def main():
     # 调度：主窗口先创建 → 再弹窗 → 最后执行延迟启动
     QTimer.singleShot(0, _show_popup)
     QTimer.singleShot(0, _deferred_startup)
+    # [PERF #37 条 3 分支 B] 已配置同步的用户「进软件就开始同步」：首帧稳定后
+    # 8s 自动启用 ConfigSyncService（原唯一入口是点设置才构造的 GiteeCard，
+    # 冷启动不点设置永不自动同步）。未绑定零网络；与卡片 _auto_enable_sync
+    # 共用 auto_enable_if_bound 幂等（_state 判重），绝不双拉线程。
+    def _auto_start_config_sync():
+        try:
+            from app.core.sync.config_sync import auto_enable_if_bound
+
+            auto_enable_if_bound()
+        except Exception as e:
+            logger.warning(f"[DeferredStartup] 自动启用配置同步失败（非致命）: {e}")
+
+    QTimer.singleShot(8000, _auto_start_config_sync)
 
     # ── UI 测试服务（默认关）：DRIFOX_UI_TEST_SERVER=host:port 开启（M2）──
     # 开启时 daemon 线程起 JSON-RPC 服务并置 ARM 总闸；打包产物无 tools/，

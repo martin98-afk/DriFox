@@ -789,14 +789,15 @@ class GiteeAccountRow(QFrame):
         )
 
     def _auto_enable_sync(self):
-        if self._sync_svc._state != "disabled":
-            return
-        from app.gateway.auth import get_oauth_backend
+        """绑定成功后自动 enable（重启恢复 / 点设置补触发）。
 
-        bound_info = get_oauth_backend("gitee").get_bound_info()
-        if bound_info and bound_info.get("token") and bound_info.get("owner"):
-            logger.info("[GiteeAccountRow] 检测到已绑定，自动启动配置同步")
-            self._sync_svc.enable(bound_info["token"], bound_info["owner"])
+        [PERF #37 条 3 分支 B] 与启动链共用 auto_enable_if_bound（幂等）：
+        启动后 8s 已自动启的，这里 _state 判重零操作；未启的（如冷启动
+        8s 前点设置）即时补启，不缓。
+        """
+        from app.core.sync.config_sync import auto_enable_if_bound
+
+        auto_enable_if_bound(self._sync_svc)
 
     def _on_unbind(self):
         owner = str(self.cfg.gitee_user_owner.value or "")
@@ -1650,7 +1651,7 @@ class GiteeCard(SettingCard):
                 f"}}"
                 f"QPushButton:hover {{ background-color: rgba(250, 81, 81, 0.1); }}"
             )
-            # 已绑定 → 自动启动同步（如尚未启动）
+            # 已绑定 → 自动启用同步（如尚未启动）；与启动链共用幂等函数
             self._auto_enable_sync()
         else:
             self._bound_owner = ""
@@ -1714,22 +1715,24 @@ class GiteeCard(SettingCard):
             logger.warning(f"[GiteeCard] 头像缓存写盘失败: {e}")
 
     def _auto_enable_sync(self):
-        """如果已绑定且同步未启动，自动 enable（重启恢复场景）"""
-        if self._sync_svc._state != "disabled":
-            return
-        # 通过 OAuth 后端获取有效 token（支持自动刷新）
-        from app.gateway.auth import get_oauth_backend
+        """如果已绑定且同步未启动，自动 enable（重启恢复场景）。
 
-        bound_info = get_oauth_backend("gitee").get_bound_info()
-        if bound_info and bound_info.get("token") and bound_info.get("owner"):
-            logger.info("[GiteeCard] 检测到已绑定，自动启动配置同步")
-            self._sync_svc.enable(bound_info["token"], bound_info["owner"])
-        elif bool(self.cfg.gitee_bound.value):
-            # ★ T8B 断点① 修复：get_bound_info 返回 None 但 cfg 仍标记已绑定
-            # （refresh_token 被吊销，_ensure_valid_token 返回 None）→ 之前静默
-            # 跳过导致 ConfigSync 永不启动、syncDone 永不发。此处主动执行失效处理。
-            logger.warning("[GiteeCard] 绑定已失效（token 无法刷新），清除绑定并提示重新绑定")
-            self._handle_binding_invalid()
+        [PERF #37 条 3 分支 B] 与启动链共用 auto_enable_if_bound（幂等）：
+        启动后 8s 已自动启的，这里零操作；未启的即时补启（不重复拉线程）。
+        """
+        from app.core.sync.config_sync import auto_enable_if_bound
+
+        if auto_enable_if_bound(self._sync_svc):
+            return
+        # ★ T8B 断点① 保留：已标记绑定但 get_bound_info 拿不到有效 token
+        # （refresh_token 被吊销）→ 公共函数返 False，此处主动失效处理，
+        # 否则 ConfigSync 永不启动、syncDone 永不发（历史缺陷回归防护）
+        if self._sync_svc._state == "disabled" and bool(self.cfg.gitee_bound.value):
+            from app.gateway.auth import get_oauth_backend
+
+            if get_oauth_backend("gitee").get_bound_info() is None:
+                logger.warning("[GiteeCard] 绑定已失效（token 无法刷新），清除绑定并提示重新绑定")
+                self._handle_binding_invalid()
 
     def _handle_binding_invalid(self):
         """绑定失效处理：清绑定 + 账户行失效红标 + 全局失效提醒"""

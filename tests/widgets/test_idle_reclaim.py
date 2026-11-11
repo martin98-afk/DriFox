@@ -67,11 +67,10 @@ def _fresh_pids(spec):
     return [(pid, now - off, idx) for pid, off, idx in spec]
 
 
-def test_idle_boundary_599_vs_601():
-    """① 空闲 599s 不回收 / 601s 回收"""
-    now = time.time()
+def test_idle_boundary_419_vs_421():
+    """① 空闲 419s 不回收 / 421s 回收（#37 条 2：阈值 420s）"""
     host = _FakeWindow(
-        unloaded_pids=_fresh_pids([(101, 599, 0)]),
+        unloaded_pids=_fresh_pids([(101, RENDERER_IDLE_RECLAIM_S - 1, 0)]),
         batch_cards=[["c"]],
         distances={0: 50},
     )
@@ -174,3 +173,61 @@ def test_batch_max_cap():
     )
     killed = reclaim_idle_renderers(host)
     assert killed == RENDERER_IDLE_RECLAIM_BATCH_MAX
+
+
+# ── #37 条 1：renderer 池内 pid 纳入空闲回收候选域 ──────────────
+
+def test_idle_threshold_is_420s():
+    """条 2 常量：600→420s（t33 §6.2 静置 540MB 依据）"""
+    assert RENDERER_IDLE_RECLAIM_S == 420.0
+
+
+def test_pool_idle_pid_enters_candidate_domain(monkeypatch):
+    """条 1：池内空闲 pid 进入候选 → 被回收（池护栏不拦空闲回收路径）"""
+    now = time.time()
+    stale = [(now - RENDERER_IDLE_RECLAIM_S - 10, 901)]
+    monkeypatch.setattr(memory_governor, "_idle_pool_pids", lambda: stale)
+    host = _FakeWindow(
+        unloaded_pids=[],
+        batch_cards=[["c"]],
+        distances={0: 50},
+    )
+    killed = reclaim_idle_renderers(host)
+    assert killed == 1, "池内空闲 pid 必须进入回收候选域（原实现恒 0）"
+    assert host.killed == [901]
+
+
+def test_pool_keep_tab_pid_not_reclaimed(monkeypatch):
+    """条 1 保底：keep-tab 在用 pid（切回复用语义）不被回收"""
+    now = time.time()
+    stale = [(now - RENDERER_IDLE_RECLAIM_S - 10, 902)]
+    monkeypatch.setattr(memory_governor, "_idle_pool_pids", lambda: stale)
+    card = type("Card", (), {"_renderer_pid": 902})()
+    host = _FakeWindow(unloaded_pids=[], batch_cards=[["c"]], distances={0: 50})
+    host._kept_session_tab = {"widgets": [card]}
+    assert reclaim_idle_renderers(host) == 0, "keep-tab 保留期 pid 绝不回收"
+    assert host.killed == []
+
+
+def test_pool_lru_keep_fresh_pid_not_reclaimed(monkeypatch):
+    """条 1 保底：LRU keep 新鲜期（_idle_pool_pids 不返回刚归还项）"""
+    monkeypatch.setattr(memory_governor, "_idle_pool_pids", lambda: [])
+    host = _FakeWindow(unloaded_pids=[], batch_cards=[["c"]], distances={0: 50})
+    assert reclaim_idle_renderers(host) == 0
+
+
+def test_pool_candidate_blocked_by_other_window(monkeypatch):
+    """条 1 保底：池候选仍受跨窗口在用护栏约束"""
+    now = time.time()
+    monkeypatch.setattr(
+        memory_governor, "_idle_pool_pids", lambda: [(now - RENDERER_IDLE_RECLAIM_S - 10, 903)]
+    )
+    host = _FakeWindow(unloaded_pids=[], batch_cards=[["c"]], distances={0: 50})
+    other = _FakeWindow(busy_pids={903})
+    window_registry.window_instances.clear()
+    window_registry.register_window(other)
+    try:
+        assert reclaim_idle_renderers(host) == 0, "跨窗口在用 pid 绝不回收"
+        assert host.killed == []
+    finally:
+        window_registry.window_instances.clear()
