@@ -37,6 +37,7 @@ file   徽标+名   双击系统程序；左键拖拽导出；右键菜单
 
 import os
 from typing import Any, Dict, List, Optional
+from app.widgets._bounded_caches import _BoundedLRUCache
 
 from PyQt5.QtCore import QEvent, Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QColor, QDesktopServices, QImageReader, QMouseEvent, QPainter, QPixmap
@@ -195,7 +196,9 @@ class InlineArtifactPanel(QWidget):
         self._last_sig: Optional[str] = None
         self._pending_thumbs: List[tuple] = []  # [(QLabel, path)] 展开态列表行的分帧解码队列
         self._pending_strip_thumbs: List[tuple] = []  # [(QLabel, path)] 折叠态缩略图带的解码队列
-        self._thumb_pixmaps: Dict[str, QPixmap] = {}  # path → 缩略图缓存
+        # [A3-2] 有界 LRU（32 ≈ 384KB 上界 @64x48 RGBA 12KB/条）：面板随卡片
+        # 存活、无确定性收尾点，上限是唯一可靠边界；命中触碰热序。
+        self._thumb_pixmaps = _BoundedLRUCache(32)  # path → 缩略图缓存
         # 左键拖拽导出（拖到资源管理器/聊天软件即引用该文件）
         self._drag_press_pos = None
         self._drag_started = False

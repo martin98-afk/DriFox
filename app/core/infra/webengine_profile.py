@@ -7,8 +7,9 @@
 
 注意：Profile 与 Chromium renderer 进程是两个不同的概念。
 - Profile：逻辑分组，决定缓存/Cookie/Storage 等用户数据的共享范围。
-- Renderer 进程：由 Chromium 调度，每张卡片（CodeWebViewer）独立一个进程
-  （见 main.py 的 QTWEBENGINE_CHROMIUM_FLAGS 设置）。
+- Renderer 进程：由 Chromium 按 site-instance 调度进共享进程池，同 profile
+  的多张卡片（CodeWebViewer）通常聚类复用同一 renderer（perf 实测池内
+  pids 恒长 1），并非每卡独立一个进程。
 
 [PERF] 消息卡片通过本地 setHtml 渲染，无 HTTP 请求/cookie/localStorage 持久化需求。
 带 parent 构造的 profile 是 off-the-record 的，HTTP 缓存天然在内存，不做磁盘缓存初始化。

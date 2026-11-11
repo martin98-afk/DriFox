@@ -251,7 +251,14 @@ def _tool_ui_session(**kwargs) -> Dict[str, Any]:
         assert sm is not None
         session = sm.create_new_session()
         mw._display_current_session()
-        return {"ok": True, "action": "new", "session_id": str(session.session_id)[:8]}
+        # [T34] 惯例：日志打短 ID、数据传完整 ID。返回值是数据（供 new→switch
+        # 自动化序列直接使用），必须完整 ID；短 ID 仅限日志（:264 报错文案保留）。
+        return {
+            "ok": True,
+            "action": "new",
+            "session_id": str(session.session_id),
+            "session_id_short": str(session.session_id)[:8],
+        }
 
     session_id = str(kwargs.get("session_id") or "")
     # [M2-r 简化] 测试服务三重闸（enabled 默认关 + 环境变量 + ARM）已含准入控制，
@@ -266,10 +273,12 @@ def _tool_ui_session(**kwargs) -> Dict[str, Any]:
         manager = getattr(mw, "session_manager", None)
         cur = manager.get_current_session() if manager is not None else None
         msgs = getattr(cur, "messages", None) if cur else None
+        # [T34] 同 new：返回完整 ID（数据），短 ID 单独给展示字段
         return {
             "ok": True,
             "action": action,
-            "session_id": str(getattr(cur, "session_id", ""))[:8],
+            "session_id": str(getattr(cur, "session_id", "")),
+            "session_id_short": str(getattr(cur, "session_id", ""))[:8],
             "msgs": len(msgs) if isinstance(msgs, list) else 0,
         }
     return {"ok": False, "error": f"未知 action: {action}"}

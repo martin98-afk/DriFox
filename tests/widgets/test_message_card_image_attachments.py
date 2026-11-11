@@ -149,8 +149,10 @@ def test_deferred_send_passes_image_attachments_to_engine():
     """回归（2026-09-02）：发送时漏传 _image_attachments → session 消息无标记，
     历史加载的会话用户气泡图片预览条永不显示。
 
-    _do_deferred_send 必须把 _image_attachments 放进 engine_kwargs，
+    _finish_deferred_send 必须把 _image_attachments 放进 engine_kwargs，
     engine 侧（_PreSendWorker）才能写入 session.add_user_message。
+    （2026-11-10：赋值自 _do_deferred_send 迁入 _finish_deferred_send
+    （提交 71d29a1eb），断言锚点随迁。）
     """
     from pathlib import Path
 
@@ -158,11 +160,11 @@ def test_deferred_send_passes_image_attachments_to_engine():
     src = (repo_root / "app" / "main_widget.py").read_text(encoding="utf-8")
     tree = ast.parse(src, filename="main_widget.py")
     class_node = next(n for n in ast.walk(tree) if isinstance(n, ast.ClassDef) and n.name == "OpenAIChatToolWindow")
-    deferred = _find_nested_func(class_node, "_do_deferred_send")
-    assert deferred is not None, "未找到 _do_deferred_send 嵌套函数"
+    finish = _find_nested_func(class_node, "_finish_deferred_send")
+    assert finish is not None, "未找到 _finish_deferred_send 方法"
 
     found = False
-    for node in ast.walk(deferred):
+    for node in ast.walk(finish):
         if (
             isinstance(node, ast.Assign)
             and isinstance(node.targets[0], ast.Subscript)
@@ -173,7 +175,18 @@ def test_deferred_send_passes_image_attachments_to_engine():
         ):
             found = True
             break
-    assert found, "_do_deferred_send 未把 _image_attachments 透传进 engine_kwargs"
+    assert found, "_finish_deferred_send 未把 _image_attachments 透传进 engine_kwargs"
+
+    # 链路守卫：_do_deferred_send 的两条出口（有图 emit _deferred_send_ready /
+    # 无图直调 _finish_deferred_send）至少存在一条，防止将来再次搬空赋值后
+    # 本用例锚点悬空而静默失效
+    deferred = _find_nested_func(class_node, "_do_deferred_send")
+    assert deferred is not None, "未找到 _do_deferred_send 嵌套函数"
+    linked = any(
+        isinstance(node, ast.Attribute) and node.attr in ("_finish_deferred_send", "_deferred_send_ready")
+        for node in ast.walk(deferred)
+    )
+    assert linked, "_do_deferred_send 已不引用 _deferred_send_ready/_finish_deferred_send，链路断言需随迁"
 
 
 # ==================== image 块格式提取 ====================

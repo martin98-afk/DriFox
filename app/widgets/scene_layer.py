@@ -25,6 +25,8 @@
 
 from typing import Optional
 
+from app.core.infra.scene_pixmap_cache import scene_pixmap_cache
+
 from PyQt5.QtCore import QEvent, QRect, QRectF, Qt, QTimer
 from PyQt5.QtGui import (
     QColor,
@@ -355,8 +357,15 @@ class SceneLayer(QWidget):
         # 静态图 blur 烘焙：radius>0 时启用；原图保存 + 防抖定时器 + 已烘几何 key
         self._image_blur_radius: float = 0.0
         self._image_source_pixmap: Optional[QPixmap] = None
+        # [T43] baked 缓存 key 需要源图路径（解析后绝对路径，由 apply_config 写入）
+        self._image_source_path: Optional[str] = None
         self._image_bake_key: Optional[tuple] = None
         self._image_bake_timer: Optional[QTimer] = None
+        # [T51] 共享缓存生命周期：活跃使用者计数（全部 SceneLayer 销毁后宽限释放）。
+        # acquire 在构造时；release 挂 destroyed 信号（析构时机只碰纯 Python
+        # 单例，不触碰 Qt 对象，事件循环内/外均安全）。重复 release 幂等。
+        scene_pixmap_cache.acquire()
+        self.destroyed.connect(scene_pixmap_cache.release)
 
     def set_canvas_provider(self, provider) -> None:
         """注入跨宿主画布求值函数（幂等，可重复调用）
@@ -386,6 +395,14 @@ class SceneLayer(QWidget):
         节流阶段二（布局传播被跳过）时由 _resize_bg_labels 手动收拢。
         """
         self._sync_geometry()
+
+    @staticmethod
+    def _load_premult(resolved_path: str, source_kind: str, opacity: float):
+        """[T43] 预乘副本构建：从共享 source 派生（source 命中缓存则零解码）。"""
+        base = scene_pixmap_cache.get_pixmap(
+            source_kind, resolved_path, load=lambda p: QPixmap(p)
+        )
+        return QPixmap.fromImage(_premultiply_opacity(base.toImage(), opacity))
 
     def apply_config(self, cfg: Optional[dict], image_resolver=None) -> None:
         """应用主题配置（None 或 enabled=False 时清除所有内容）
@@ -423,12 +440,24 @@ class SceneLayer(QWidget):
         image = cfg.get("image")
         if image and image_resolver:
             resolved = image_resolver(image)
-            pix = QPixmap(resolved)
+            # [T43] source 与预乘副本走跨窗口共享缓存：同壁纸同参数全进程一份，
+            # QLabel.setPixmap 走 Qt 隐式共享（引用计数），零复制。
+            pix = scene_pixmap_cache.get_pixmap(
+                "source", resolved, load=lambda p: QPixmap(p)
+            )
             if not pix.isNull():
                 self._image_label = QLabel(self)
                 self._image_source_pixmap = pix
+                self._image_source_path = resolved
                 # 整体透明度预乘进图片 alpha（QGraphicsOpacityEffect 等价物）
-                pix = QPixmap.fromImage(_premultiply_opacity(pix.toImage(), self._layer_opacity))
+                pix = scene_pixmap_cache.get_pixmap(
+                    "premult",
+                    resolved,
+                    load=lambda p, o=self._layer_opacity: SceneLayer._load_premult(
+                        p, "source", o
+                    ),
+                    opacity_255=int(round(self._layer_opacity * 255)),
+                )
                 self._image_label.setPixmap(pix)
                 self._image_label.setScaledContents(True)
                 self._sync_content_geometry()
@@ -463,15 +492,23 @@ class SceneLayer(QWidget):
             fg_image = fg.get("image")
             if fg_image and image_resolver:
                 resolved = image_resolver(fg_image)
-                fg_pix = QPixmap(resolved)
+                # [T43] fg source/预乘副本同走共享缓存
+                fg_pix = scene_pixmap_cache.get_pixmap(
+                    "fg_source", resolved, load=lambda p: QPixmap(p)
+                )
                 if not fg_pix.isNull():
                     try:
                         fg_opacity = float(fg.get("opacity", 1.0))
                     except (TypeError, ValueError):
                         fg_opacity = 1.0
                     self._foreground_label = QLabel(self)
-                    fg_pix = QPixmap.fromImage(
-                        _premultiply_opacity(fg_pix.toImage(), fg_opacity * self._layer_opacity)
+                    fg_pix = scene_pixmap_cache.get_pixmap(
+                        "fg_premult",
+                        resolved,
+                        load=lambda p, o=fg_opacity * self._layer_opacity: SceneLayer._load_premult(
+                            p, "fg_source", o
+                        ),
+                        opacity_255=int(round((fg_opacity * self._layer_opacity) * 255)),
                     )
                     self._foreground_label.setPixmap(fg_pix)
                     self._foreground_label.setScaledContents(True)
@@ -593,6 +630,7 @@ class SceneLayer(QWidget):
         # blur 烘焙状态复位（timer 是 QTimer(self)，随本层析构，这里只停）
         self._image_blur_radius = 0.0
         self._image_source_pixmap = None
+        self._image_source_path = None
         self._image_bake_key = None
         if self._image_bake_timer is not None:
             self._image_bake_timer.stop()
@@ -686,9 +724,22 @@ class SceneLayer(QWidget):
             geo.width(), geo.height(),
             Qt.IgnoreAspectRatio, Qt.SmoothTransformation,
         )
-        baked = _bake_blur(scaled, self._image_blur_radius)
-        baked = QPixmap.fromImage(
-            _premultiply_opacity(baked.toImage(), self._layer_opacity)
+        # [T43] baked（blur+预乘）副本走共享缓存：同壁纸同几何同 blur 同 opacity
+        # 的窗口（共享画布下两栏几何一致）全进程只烘一份。
+        baked = scene_pixmap_cache.get_pixmap(
+            "baked",
+            self._image_source_path or "",
+            load=lambda p: QPixmap.fromImage(
+                _premultiply_opacity(
+                    _bake_blur(scaled, self._image_blur_radius).toImage(),
+                    self._layer_opacity,
+                )
+            ),
+            width=geo.width(),
+            height=geo.height(),
+            opacity_255=int(round(self._layer_opacity * 255)),
+            blur_radius=self._image_blur_radius,
+            pad=int(self._blur_pad),
         )
         self._image_label.setPixmap(baked)
         self._image_label.setScaledContents(False)

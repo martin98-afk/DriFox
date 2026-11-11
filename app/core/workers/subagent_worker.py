@@ -89,6 +89,40 @@ def _compute_context_budget(llm_config: Dict) -> int:
     return max(500, context_limit - reserved)
 
 
+# [H5] tool_result 日志预览上限。UI 完整视图本就只渲染前 2000 字符
+# （session_card._format_content_full 同值截断），全文驻留 logs 无任何消费方，
+# 却是任务日志内存膨胀主因（T13 实测重度 200 条 793MB/窗口，静置不回落）。
+_LOG_RESULT_PREVIEW_CHARS = 2000
+
+# [H5-2 补漏] ai_response/thinking 的 UI 完整视图上限（session_card.py 同值 10000）；
+# tool_call.args 序列化字符串的 UI 上限（session_card 同值 3000）。日志侧先截，
+# UI 显示逐字不变（UI 自己的截断分支不再触发，内容一致）。
+_LOG_TEXT_PREVIEW_CHARS = 10000
+_LOG_ARGS_PREVIEW_CHARS = 3000
+
+
+def _cap_str(value, limit, tag):
+    """超长字符串截断并附原长标记（非字符串原样返回）。"""
+    if isinstance(value, str) and len(value) > limit:
+        return value[:limit] + f"\n…（{tag}已截断，全文 {len(value)} 字符）"
+    return value
+
+
+def _cap_args_tree(obj, limit, depth=0):
+    """递归截断 args（dict/list）中的超长字符串值，保持容器类型不变
+    （UI 读侧对 args 做 orjson.dumps，类型契约不可破坏）。"""
+    if depth > 4:
+        return obj
+    if isinstance(obj, str):
+        if len(obj) > limit:
+            return obj[:limit] + f"…（参数已截断，全文 {len(obj)} 字符）"
+        return obj
+    if isinstance(obj, dict):
+        return {k: _cap_args_tree(v, limit, depth + 1) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_cap_args_tree(v, limit, depth + 1) for v in obj]
+    return obj
+
 class SubAgentExecutor(QThread):
     """子智能体执行器 - 独立线程运行子智能体任务"""
 
@@ -286,13 +320,45 @@ class SubAgentExecutor(QThread):
         import time
 
         now = time.time()
+        # [H5-2 补漏] ai_response/thinking 截 10000、tool_call 参数截 3000：
+        # 与 session_card.py UI 显示上限逐字对齐，用户看到的内容不变；
+        # 日志驻留从「全文」降为「预览」，与 tool_result 同语义。
+        if log_type in ("thinking", "ai_response"):
+            content = _cap_str(content, _LOG_TEXT_PREVIEW_CHARS, "内容")
         log_entry = {
             "type": log_type,
             "content": content,
             "timestamp": now,
         }
         if extra:
+            if log_type == "tool_call" and isinstance(extra.get("args"), dict):
+                capped = _cap_args_tree(extra["args"], _LOG_ARGS_PREVIEW_CHARS)
+                # [T25] 单值截 3000 不够：multi_edit.edits 20 项 / subagent_para.tasks[]
+                # 等多项容器叠加仍可几十 KB。总量判定：序列化超 2×3000 则整体替换
+                # 为占位 dict（保持 JSON 可序列化，UI orjson.dumps 契约不破）。
+                try:
+                    if len(orjson.dumps(capped).decode()) > _LOG_ARGS_PREVIEW_CHARS * 2:
+                        capped = {
+                            "_truncated": True,
+                            "_original_len": len(orjson.dumps(extra["args"]).decode()),
+                            "_preview": orjson.dumps(capped).decode()[:_LOG_ARGS_PREVIEW_CHARS],
+                        }
+                except Exception:
+                    pass  # 序列化兜底：极端不可序列化值保持逐值截断结果
+                extra["args"] = capped
             log_entry.update(extra)
+        # [H5] tool_result 全文驻留是日志膨胀主因：日志侧只存 2KB 级预览 +
+        # 原始长度字段（便于定位最重工具）。执行链消息（raw_result）与此独立，
+        # 模型拿到的仍是全文，子智能体行为不变；UI 完整视图本就只显示前
+        # 2000 字符（session_card._format_content_full），显示内容不变。
+        if log_type == "tool_result":
+            _raw = log_entry.get("result")
+            if isinstance(_raw, str) and len(_raw) > _LOG_RESULT_PREVIEW_CHARS:
+                log_entry["result_original_len"] = len(_raw)
+                log_entry["result"] = (
+                    _raw[:_LOG_RESULT_PREVIEW_CHARS]
+                    + f"\n…（结果过长，已截断；全文 {len(_raw)} 字符）"
+                )
         self._logs.append(log_entry)
         # 每次输出日志都刷新活跃时间（供外部 stall 检测）
         self._last_activity_time = now
@@ -363,7 +429,10 @@ class SubAgentExecutor(QThread):
 
             agent = self.agent_manager.get_agent(self.agent_name)
             if not agent:
-                self.error_occurred.emit(self.task_id, f"Agent not found: {self.agent_name}")
+                # 必须发 error_occurred：裸 return 会让完成链（批次计数/汇总
+                # 注入）永远等不到该任务的终态，批次通知永久缺席
+                self._execution_error = f"Agent not found: {self.agent_name}"
+                self.error_occurred.emit(self.task_id, self._execution_error)
                 return
 
             # 子智能体被调用时 is_subagent_call=True，此时应该使用 subagent_constraints

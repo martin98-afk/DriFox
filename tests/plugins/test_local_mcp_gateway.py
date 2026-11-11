@@ -76,3 +76,26 @@ def test_unload_hook_calls_unregister():
 
     src = inspect.getsource(UIPluginRegistry.unload_plugin)
     assert "unregister_plugin" in src
+
+
+def test_tools_call_with_image_content_blocks(gateway):
+    """handler 返回规范 content 块 → 原样透传，不压成 text。"""
+    blocks = [
+        {"type": "text", "text": '{"ok":true}'},
+        {"type": "image", "data": "aGk=", "mimeType": "image/png"},
+    ]
+    gateway.register("bili", lambda req: {"content": blocks}, plugin="bili", tools=[])
+    _, body = _post(gateway, {"jsonrpc": "2.0", "id": 9, "method": "tools/call",
+                              "params": {"name": "bili_cover", "arguments": {}}},
+                    path="/mcp/bili")
+    assert body["result"]["content"] == blocks
+    assert body["result"]["isError"] is False
+
+
+def test_tools_call_legacy_text_handler_unchanged(gateway):
+    gateway.register("bili", lambda req: {"text": "PONG", "isError": True}, plugin="bili", tools=[])
+    _, body = _post(gateway, {"jsonrpc": "2.0", "id": 10, "method": "tools/call",
+                              "params": {"name": "x", "arguments": {}}},
+                    path="/mcp/bili")
+    assert body["result"]["content"] == [{"type": "text", "text": "PONG"}]
+    assert body["result"]["isError"] is True

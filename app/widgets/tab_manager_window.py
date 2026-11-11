@@ -5306,6 +5306,20 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
                 self._content_area.widget(0).show()
             except Exception:
                 pass
+            # [R2 清池] 全部标签页已关闭：池中 ≤4 个常驻 viewer（每桶
+            # MAX_IDLE_PER_BUCKET=2）的 renderer（实测单个 65~217MB）已无
+            # 复用前景，清池回收，避免全关页后 renderer 常驻（T8a 实测依据）。
+            # 行为变化：仅「关最后一个 tab 后再新开」首帧多一次 renderer
+            # 初始化（webview_pool.py 模块头记录 100~500ms 量级）；保留
+            # ≥1 窗口的日常开关不受影响。回退方式：删除本 try 段即可，
+            # WebViewPool.clear() 只对池中对象 setParent(None)+deleteLater，
+            # 无残留状态，不触碰活跃卡片。
+            try:
+                from app.widgets.webview_pool import WebViewPool
+
+                WebViewPool.get_instance().clear()
+            except Exception:
+                pass
         self.tabCountChanged.emit(len(self._windows))
 
     def get_current_window(self):

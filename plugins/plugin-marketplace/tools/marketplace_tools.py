@@ -103,12 +103,42 @@ def _market_plugins(force: bool = False) -> List[Dict[str, Any]]:
 
 
 def _find_market_plugin(name: str, force: bool = False) -> Optional[Dict[str, Any]]:
-    """按精确名查市场元数据（大小写不敏感）"""
+    """按标识名或展示名查市场元数据（大小写不敏感）
+
+    标识名（meta.name，安装主键）精确匹配优先；未命中回退展示名
+    （display_name 解析结果）精确匹配，多个同名时取下载量最高，
+    与 marketplace_search 排序口径一致。
+    """
     target = name.strip().lower()
-    for meta in _market_plugins(force=force):
+    if not target:
+        return None
+    plugins = _market_plugins(force=force)
+    for meta in plugins:
         if str(meta.get("name", "")).strip().lower() == target:
             return meta
+    display_hits = [m for m in plugins if _display_name(m).strip().lower() == target]
+    if display_hits:
+        return max(display_hits, key=lambda m: _to_int(m.get("downloads")))
     return None
+
+def _resolve_local_name(name: str, inst) -> str:
+    """把输入名解析成本地已装插件的标识名（slug）
+
+    标识名直接命中；否则按已装插件的展示名反查。未装返回原输入，由调用方报错。
+    """
+    if inst.get_status_map().get(name):
+        return name
+    target = name.strip().lower()
+    if target:
+        try:
+            manifests = inst.get_manifest_map()
+        except Exception:
+            manifests = {}
+        for n in inst.get_status_map():
+            manifest = manifests.get(n)
+            if manifest and _display_name(manifest).strip().lower() == target:
+                return n
+    return name
 
 
 # ── 主线程投递（UI 卸载 / 组件重载） ─────────────────────
@@ -242,7 +272,9 @@ def _format_plugin_line(idx: int, meta: dict, status_map: dict, inst_map: dict) 
         bits.append(f"来源 {meta['_marketplace']}")
     # 不兼容插件显式标注：AI 推荐/安装前即可看到「装不了」的原因
     bits.extend(_compat_notes(meta))
-    head = f"{idx}. {_display_name(meta)} v{ver} | " + " | ".join(bits)
+    display = _display_name(meta)
+    label = display if display == name else f"{display} ({name})"
+    head = f"{idx}. {label} v{ver} | " + " | ".join(bits)
     desc = _shorten(meta.get("description"))
     return f"{head}\n    {desc}" if desc else head
 
@@ -310,7 +342,10 @@ def _search_impl(tool_ctx, **kwargs):
         lines.append(f"... 还有 {len(plugins) - len(shown)} 个未显示，可加 keyword 缩小范围或提高 limit")
     if source_errors:
         lines.append("⚠ 部分市场源拉取失败（结果可能不全）：" + "；".join(source_errors[:3]))
-    lines.append("安装请用 marketplace_install，参数 plugin 传上面输出的插件名（原样）。")
+    lines.append(
+        "安装/详情请用 marketplace_install / marketplace_detail，"
+        "参数 plugin 传上面括号内的标识名（展示名也支持）。"
+    )
     return ToolResult(True, content="\n".join(lines))
 
 
@@ -340,7 +375,12 @@ def _installed_impl(tool_ctx, **kwargs):
 
     names = [n for n in sorted(status_map) if status_map.get(n) in _INSTALLED_STATES]
     if keyword:
-        names = [n for n in names if keyword in n.lower()]
+        def _kw_hit(n: str) -> bool:
+            if keyword in n.lower():
+                return True
+            manifest = manifests.get(n) or market.get(n) or {}
+            return keyword in _display_name(manifest).lower()
+        names = [n for n in names if _kw_hit(n)]
     if not names:
         return ToolResult(True, content="没有匹配的已安装插件。")
 
@@ -360,9 +400,12 @@ def _installed_impl(tool_ctx, **kwargs):
     lines = [f"可操作用户插件 {len(detail)} 个（{summary}）："] if detail else ["没有可操作的用户插件。"]
     for i, name in enumerate(detail, 1):
         ver = str((market.get(name) or {}).get("version", "") or "")
-        compat = _compat_notes(manifests.get(name) or market.get(name) or {})
+        local_meta = manifests.get(name) or market.get(name) or {}
+        compat = _compat_notes(local_meta)
         suffix = (" | " + " | ".join(compat)) if compat else ""
-        lines.append(f"{i}. {name} | {_install_state(name, status_map, inst_map, ver)}{suffix}")
+        display = _display_name(local_meta)
+        label = name if not display or display == name else f"{name}（{display}）"
+        lines.append(f"{i}. {label} | {_install_state(name, status_map, inst_map, ver)}{suffix}")
     if folded:
         sample = "、".join(folded[:10]) + ("…" if len(folded) > 10 else "")
         lines.append(f"另有 {len(folded)} 个内置/系统插件（不可卸载，可用 keyword 查询）：{sample}")
@@ -381,6 +424,9 @@ def _install_impl(tool_ctx, **kwargs):
         return ToolResult(False, error=blocked)
     try:
         inst = _installer()
+        meta = _find_market_plugin(name, force=False) or _find_market_plugin(name, force=True)
+        # 展示名输入在这里规范化成 slug，后续本地状态/安装记录全部按 slug 走
+        name = str((meta or {}).get("name") or name)
         status = inst.get_status_map().get(name)
         if status:
             local = inst.get_installed_version(name)
@@ -391,7 +437,6 @@ def _install_impl(tool_ctx, **kwargs):
                     "未重复安装。升级用 marketplace_update；启用/禁用用 marketplace_set_enabled。"
                 ),
             )
-        meta = _find_market_plugin(name, force=False) or _find_market_plugin(name, force=True)
         if meta is None:
             return ToolResult(
                 False,
@@ -426,6 +471,7 @@ def _uninstall_impl(tool_ctx, **kwargs):
         return ToolResult(False, error=blocked)
     try:
         inst = _installer()
+        name = _resolve_local_name(name, inst)
         status = inst.get_status_map().get(name)
         if status is None:
             return ToolResult(False, error=f"{name} 未安装，无需卸载")
@@ -466,6 +512,7 @@ def _update_impl(tool_ctx, **kwargs):
         return ToolResult(False, error=blocked)
     try:
         inst = _installer()
+        name = _resolve_local_name(name, inst)
         status = inst.get_status_map().get(name)
         if status is None:
             return ToolResult(False, error=f"{name} 未安装；安装请用 marketplace_install")
@@ -508,6 +555,9 @@ def _set_enabled_impl(tool_ctx, **kwargs):
         return ToolResult(False, error=f"{name} 是核心插件（禁用会断主链路），不能禁用")
     try:
         inst = _installer()
+        name = _resolve_local_name(name, inst)
+        if not enabled and name in _protected_names():
+            return ToolResult(False, error=f"{name} 是核心插件（禁用会断主链路），不能禁用")
         status = inst.get_status_map().get(name)
         if status is None:
             return ToolResult(False, error=f"{name} 未安装；先 marketplace_install")
@@ -544,6 +594,8 @@ def _detail_impl(tool_ctx, **kwargs):
     if not name:
         return ToolResult(False, error="缺少 plugin 参数：请传市场返回的精确插件名")
     meta = _find_market_plugin(name, force=False) or _find_market_plugin(name, force=True)
+    if meta:
+        name = str(meta.get("name") or name)
     try:
         inst = _installer()
         status = inst.get_status_map().get(name)

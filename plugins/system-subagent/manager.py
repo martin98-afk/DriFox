@@ -23,6 +23,23 @@ from app.tools.result import ToolResult
 # 批次汇总携带结果正文时的单任务截断上限（与 tools/subagent_tools 注入器对齐）
 _MAX_BATCH_RESULT_CHARS = 4096
 
+# [H5-2] 归档内存 result 上限：DB（storage.db）优先存全文，UI 读取走 DB；
+# 内存归档仅作 DB 写失败时的回退与近期查询缓存。32KB 上限防 200 条
+# _finished_tasks 常驻膨胀（T13 实测重度 793MB/窗口）。
+_ARCHIVED_RESULT_MAX_CHARS = 32 * 1024
+
+# [H5-3] 注入父对话上下文的 result 上限：长子智能体结果全量注入会灌爆主
+# 对话上下文（独立于内存的功能缺陷），16KB 足够还原结论，超长内容应由
+# 子任务落盘后用 read 取回。
+_INJECTED_RESULT_MAX_CHARS = 16 * 1024
+
+
+def _cap_text(text, limit, tag):
+    """超长字符串截断并附原长标记（非字符串/短文本原样返回）。"""
+    if isinstance(text, str) and len(text) > limit:
+        return text[:limit] + f"\n…（{tag}已截断，全文 {len(text)} 字符）"
+    return text
+
 
 class _BoundedTaskDict(dict):
     """有界字典（H1）：超过容量上限时弹出最旧条目，防止 _finished_tasks 无限增长。
@@ -264,6 +281,10 @@ class SubAgentManager(QObject):
         self._finished_tasks = _BoundedTaskDict(
             maxlen=200
         )  # task_id -> {"result": str, "error": str, "session_id": str}
+        # 结算幂等标记：同一 task_id 只进一次完成链。executor 线程的两种出口
+        # 信号（finished_with_result / error_occurred）与 stall 路径可能对同一
+        # 任务先后到达，重复结算会让 _batch_completed 超发、下一批提前汇总。
+        self._settled_tasks: set = set()
         self._task_store: Optional[SubAgentTaskStore] = None
         # 批次计数：本次启动的任务总数
         self._batch_total = 0
@@ -408,18 +429,18 @@ class SubAgentManager(QObject):
                 session_id=task_session_id,
             )
 
-            # 4. 通知 UI
-            try:
-                self.task_finished.emit(task_id, "")
-            except Exception as e:
-                logger.error(f"[SubAgentManager] task_finished.emit 失败 (stalled path): {e}")
-
-            # 5. 从 running_tasks 移除（避免 get_finished_tasks 再处理一次）
+            # 4. 从 running_tasks 移除（避免 get_finished_tasks 再处理一次）
             #    注意：executor 线程可能还在运行（卡在 API 调用中），
             #    但已经从管理器角度"移除"了，后续 finished_with_result 回调
             #    会因 task_id 不在 running_tasks 而被安全忽略。
             if task_id in self._running_tasks:
                 del self._running_tasks[task_id]
+
+            # 5. 统一结算：emit task_finished（UI 归档）+ 批次计数 + 全完成判定。
+            #    此前 stall 路径只归档不计数，批次内一个任务 stall 即令批次汇总
+            #    永久缺席（执行完/报错都无注入消息的直接成因之一）。线程随后
+            #    真正退出再发 error_occurred 时由 _settled_tasks 幂等拦住。
+            self._on_executor_finished(task_id, "")
 
     @staticmethod
     def _connect_cb(signal, callback, connection_type: int = None):
@@ -504,6 +525,20 @@ class SubAgentManager(QObject):
             }
         return {}
 
+    def _on_executor_error(self, task_id: str, error: str):
+        """executor error 出口统一结算。
+
+        run() 的 error_occurred（执行异常 / 被 cancel / agent 丢失）此前无人
+        监听（subagent_para 传 on_error=None），_batch_completed 永久缺口 →
+        批次汇总与单条注入永不触发，面板行也收不了尾。全部转入完成链：
+        归档 + 批次计数 + 全完成判定。若线程之后又发 finished_with_result，
+        由 _settled_tasks 拦住。
+        """
+        ex = self._running_tasks.get(task_id)
+        if ex is not None and not getattr(ex, "_execution_error", None):
+            ex._execution_error = error or "SubAgent execution error"
+        self._on_executor_finished(task_id, "")
+
     def _on_executor_finished(self, task_id: str, result: str):
         """executor 完成回调（manager 内部接线，AutoConnection 落主线程）。
 
@@ -514,6 +549,13 @@ class SubAgentManager(QObject):
         窗口宿主靠它把任务归档进 _finished_tasks/插件表。此前只有 stalled /
         cancel 路径发射，行会永远停在「执行中」且计时器无限累加。
         """
+        # 结算幂等：同一 task_id 只进一次完成链（error 与 finished 信号可能
+        # 先后到达；stall 路径与线程退出信号亦然）。超发会令批次提前汇总。
+        if task_id in self._settled_tasks:
+            return
+        self._settled_tasks.add(task_id)
+        while len(self._settled_tasks) > 512:  # uuid 全局唯一，有界防涨
+            self._settled_tasks.discard(next(iter(self._settled_tasks)))
         executor = self._running_tasks.get(task_id)
         success = not (getattr(executor, "_execution_error", None) or "")
         agent_name = getattr(executor, "agent_name", "") if executor else ""
@@ -761,6 +803,10 @@ class SubAgentManager(QObject):
             # 不跟随调用方 connection_type——同步等待型调用方的 DirectConnection
             # 会让本回调在 executor 线程执行，与主线程 UI 归档槽产生时序竞争）。
             executor.finished_with_result.connect(self._on_executor_finished)
+            # error 出口同样进完成链：此前 error_occurred 无人监听（on_error
+            # 为 None 的 subagent_para 路径），批次计数永久缺口 → 批次汇总/
+            # 单条注入永不触发，模型永远等不到 [后台任务状态] 通知。
+            executor.error_occurred.connect(self._on_executor_error)
 
             # ★ T24：转发子智能体 ask 权限请求到主线程（带 window_id 供多窗口定位弹窗）
             executor.permission_requested.connect(self._forward_permission_request)
@@ -867,7 +913,10 @@ class SubAgentManager(QObject):
                 # 如果 _on_sub_agent_task_finished 已经写入过，避免覆盖已有字段
                 if task_id not in self._finished_tasks:
                     self._finished_tasks[task_id] = {
-                        "result": result,
+                        # [H5-2] 兕底归档路径（executor 完成信号未走 host 归档时
+                        # 在此落归档）与 mark_task_finished 同标准截 32KB；
+                        # _save_task_to_store 仍传全文（DB 全文优先，见下方调用）。
+                        "result": _cap_text(result, _ARCHIVED_RESULT_MAX_CHARS, "归档结果"),
                         "error": error,
                         "agent_name": agent_name,
                         "task_description": task_description,
@@ -884,7 +933,10 @@ class SubAgentManager(QObject):
                     self._finished_tasks[task_id].setdefault("elapsed_seconds", elapsed)
                     # 总是更新 result/error（_on_sub_agent_task_finished 可能拿到更准的数据）
                     if result is not None:
-                        self._finished_tasks[task_id]["result"] = result
+                        # [H5-2] 同上：兕底归档路径同标准截 32KB，DB 全文见下方
+                        self._finished_tasks[task_id]["result"] = _cap_text(
+                            result, _ARCHIVED_RESULT_MAX_CHARS, "归档结果"
+                        )
                     if error is not None:
                         self._finished_tasks[task_id]["error"] = error
 
@@ -980,7 +1032,11 @@ class SubAgentManager(QObject):
 
         if task_id in self._finished_tasks:
             entry = self._finished_tasks[task_id]
-            entry["result"] = result
+            # [H5-2] 内存归档截 32KB；DB 侧 update_status 仍传全文（见下），
+            # UI 读取 DB 优先无感。唯一退化场景：DB 写失败时 UI 回退到内存
+            # 归档，「查看结果」会变短（32KB + 提示文案）——此为本改动唯一
+            # 行为差异，仅在 storage.db 不可用/写失败时出现。
+            entry["result"] = _cap_text(result, _ARCHIVED_RESULT_MAX_CHARS, "归档结果")
             if not entry.get("error"):
                 entry["error"] = final_error
             entry.setdefault("agent_name", agent_name)
@@ -990,7 +1046,8 @@ class SubAgentManager(QObject):
                 entry.setdefault("logs", logs)
         else:
             self._finished_tasks[task_id] = {
-                "result": result,
+                # [H5-2] 同上：内存归档截 32KB，DB 全文无感
+                "result": _cap_text(result, _ARCHIVED_RESULT_MAX_CHARS, "归档结果"),
                 "error": final_error,
                 "agent_name": agent_name,
                 "task_description": task_description,
@@ -1200,7 +1257,9 @@ class SubAgentManager(QObject):
                 result = task_data.get("result") or task_data.get("summary", {}).get("result", "")
                 error = task_data.get("error") or task_data.get("summary", {}).get("error", "")
                 if result:
-                    task_info["result"] = result
+                    # [H5-3] 本路径结果直接注入父对话上下文（LLM 可见），无上限
+                    # 会灌爆主对话；16KB 足够还原结论，全文应落盘后用 read 取回。
+                    task_info["result"] = _cap_text(result, _INJECTED_RESULT_MAX_CHARS, "注入上下文的结果")
                 if error:
                     task_info["error"] = error
 
@@ -1280,7 +1339,18 @@ class SubAgentManager(QObject):
                 result = task_info.get("result", "") or ""
                 error = task_info.get("error", "") or ""
                 if result:
-                    task_entry["result"] = result
+                    # [H5-3] 与 get_tasks_status_with_details 同标准：本路径结果
+                    # 直接注入父对话上下文（LLM 可见），16KB 上限防灌爆。
+                    # [T26] 输入是内存归档文本（H5-2 已截 32KB），其「原长」是
+                    # 下界非真值——文案必须让 LLM 知道这点，否则会低估全文规模
+                    # 而放弃 read 落盘文件。
+                    if len(result) > _INJECTED_RESULT_MAX_CHARS:
+                        task_entry["result"] = (
+                            result[:_INJECTED_RESULT_MAX_CHARS]
+                            + f"\n…[结果已截断：归档层原长 {len(result)} 字符，原始全文可能更长]"
+                        )
+                    else:
+                        task_entry["result"] = result
                 if error:
                     task_entry["error"] = error
             if with_log:

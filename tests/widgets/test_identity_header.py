@@ -235,7 +235,12 @@ def test_name_label_font_and_size(qapp):
     2. QSS 的 `font-family` 解析不到中文字体名（`'楷体'`/`楷体`/`KaiTi` 全落到宋体），
        而 `QFont("楷体")` 能正确匹配。故字族必须走 `setFont()`。
     """
-    from PyQt5.QtGui import QFontInfo
+    from PyQt5.QtGui import QFontDatabase, QFontInfo
+
+    # 环境守卫：offscreen 平台无字体目录，QFontDatabase 为空、QFontInfo 返回
+    # 空串，字族断言必败（环境性失败，非 app 回归）。windows 平台正常断言。
+    if not QFontDatabase().families():
+        pytest.skip("offscreen 无字体后端")
 
     header = ih.IdentityHeader(MessageIdentity(name="mading"), align_right=True)
     label = header._name_label

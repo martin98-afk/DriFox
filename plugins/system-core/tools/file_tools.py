@@ -12,7 +12,6 @@
 - edit：oldString 唯一性校验 + unified diff 产出
 - grep/glob/list/scan_repo：排除目录集合与主程序一致
 """
-import ast
 import base64
 import difflib
 import fnmatch
@@ -555,10 +554,8 @@ def _multi_edit_impl(tool_ctx, **kwargs):
     - 基于原文定位：所有 oldString 在原文上查找并要求唯一；两两区间重叠 → 整体
       拒绝并报出冲突序号；按 start 倒序拼接，消除流式替换的锚点漂移
     - 原子写：临时文件 + os.replace，其他进程不会读到中间态
-    - 落盘前自校验：所有 newString 必须原样出现、所有 oldString 不得残留、
-      py 文件 ast.parse 必须通过 —— 任一不过整体不写
-    - P4 跨度体检（py 文件）：改动前后按 AST 比较函数/类跨度，增长超阈值
-      （>50% 或 >100 行）在返回 content 里附 ⚠️ WARNING（不阻断，人工确认）
+    - 落盘前自校验：所有 newString 必须原样出现、所有 oldString 不得残留
+      —— 任一不过整体不写
 
     EOL 归一化语义（`_normalize_eol_pair`，保留）：归一化**只影响匹配**；匹配
     成功时写入的 newString 是归一化后的版本（与文件主导行尾一致）。即用户给
@@ -580,7 +577,11 @@ def _multi_edit_impl(tool_ctx, **kwargs):
         check = _check_modified(tool_ctx, workdir, full_path, path)
         if check:
             return check
-        old_content = full_path.read_text(encoding="utf-8", errors="strict", newline="")
+        raw_bytes = full_path.read_bytes()
+        # UTF-8 BOM 兼容：按 utf-8 读时首字符是 U+FEFF，会混进 diff 与
+        # oldString 匹配。读时剥离，写回时按原样补回。
+        file_has_bom = raw_bytes.startswith(b"\xef\xbb\xbf")
+        old_content = raw_bytes.decode("utf-8-sig" if file_has_bom else "utf-8")
 
         # ── 第一步：全部 edit 在原文上定位（全有或全无：任何失败整体拒绝）──
         errors = []
@@ -655,44 +656,13 @@ def _multi_edit_impl(tool_ctx, **kwargs):
         for i, _start, _end, _old_s, new_s in prepared:
             if new_s and new_s not in current:
                 errors.append(f"Edit #{i + 1}: newString 未出现在结果中（替换丢失）")
-        if path.endswith(".py"):
-            try:
-                ast.parse(current)
-            except SyntaxError as e:
-                errors.append(f"结果 ast.parse 失败: line {e.lineno}: {e.msg}")
         if errors:
             return ToolResult(
                 False,
                 error="自校验失败（整体未写盘，文件保持原样）：\n" + "\n".join(errors),
             )
 
-        # ── 第五步：P4 跨度体检（py 文件，不阻断只提醒）──
-        span_warnings = []
-        if path.endswith(".py"):
-            old_spans = _py_def_spans(old_content)
-            new_spans = _py_def_spans(current)
-            if old_spans is not None and new_spans is not None:
-                for name, (n_lo, n_hi) in new_spans.items():
-                    if name not in old_spans:
-                        continue
-                    o_lo, o_hi = old_spans[name]
-                    o_lines, n_lines = o_hi - o_lo + 1, n_hi - n_lo + 1
-                    delta = n_lines - o_lines
-                    if delta > 100 or (o_lines > 0 and delta > o_lines // 2):
-                        span_warnings.append(
-                            f"{name}: {o_lines} → {n_lines} 行（+{delta}），"
-                            "跨度异常增长，请确认是否误拼接"
-                        )
-                    elif o_lines >= 8 and (delta < 0 and (abs(delta) > 10 or n_lines * 2 < o_lines)):
-                        # 缩减方向（13 场景对比的盲区）：dedent 注入会把原函数体
-                        # 「挤」成新的顶层 def，被编辑函数跨度骤缩（如 10 行 → 2 行）。
-                        # 新增顶层函数是正常编辑，不查 def 数量；查同名定义的骤缩。
-                        span_warnings.append(
-                            f"{name}: {o_lines} → {n_lines} 行（-{abs(delta)}），"
-                            "跨度骤缩，请确认函数体是否被顶出（dedent 注入）"
-                        )
-
-        # ── 第六步：原子写（tmp + os.replace）──
+        # ── 第五步：原子写（tmp + os.replace）──
         # tmp 名含 pid + 随机段：多进程同时编辑同一文件不会互相覆盖对方的 tmp。
         # try/finally 保证只读/权限/磁盘满/os.replace 失败时 tmp 必被清理，
         # 不在目标目录残留「看起来像源文件」的完整副本。
@@ -700,7 +670,11 @@ def _multi_edit_impl(tool_ctx, **kwargs):
             f"{full_path.name}.{os.getpid()}.{uuid4().hex[:8]}.tmp-multiedit"
         )
         try:
-            tmp_path.write_text(current, encoding="utf-8", newline="")
+            tmp_path.write_text(
+                current,
+                encoding="utf-8-sig" if file_has_bom else "utf-8",
+                newline="",
+            )
             os.replace(tmp_path, full_path)
         finally:
             if tmp_path.exists():
@@ -721,10 +695,6 @@ def _multi_edit_impl(tool_ctx, **kwargs):
         content = f"已批量编辑 {display}（{len(edits)} 处全部成功）"
         if cleanup_note:
             content += f"\nℹ️ {cleanup_note}"
-        if span_warnings:
-            content += "\n⚠️ [multi-edit 体检] 以下定义跨度异常增长，请确认：\n" + "\n".join(
-                f"  - {w}" for w in span_warnings
-            )
         return ToolResult(True, content=content, diff=diff_str)
     except UnicodeDecodeError as e:
         return ToolResult(
@@ -737,19 +707,6 @@ def _multi_edit_impl(tool_ctx, **kwargs):
         if cleanup_note:
             msg += f"\nℹ️ {cleanup_note}"
         return ToolResult(False, error=msg)
-
-def _py_def_spans(text: str):
-    """py 文本的函数/类跨度表 {名字: (起始行, 结束行)}；语法错误返回 None。"""
-    try:
-        tree = ast.parse(text)
-    except (SyntaxError, ValueError):
-        return None
-    spans = {}
-    for node in ast.walk(tree):
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            spans[node.name] = (node.lineno, node.end_lineno)
-    return spans
-
 
 # ========== grep ==========
 

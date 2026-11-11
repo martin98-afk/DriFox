@@ -8,7 +8,7 @@
         "zh": "插件市场"
     },
     "description": "DriFox 官方插件市场 — 浏览、安装、管理插件，并把搜索/安装/卸载/更新/启停开放给 AI 工具",
-    "version": "0.6.0",
+    "version": "0.6.1",
     "author": {
         "name": "DriFox Contributors"
     },

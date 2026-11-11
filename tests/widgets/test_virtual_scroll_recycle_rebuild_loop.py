@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+# 注意：__new__ + 手工塞属性的 fixture 必须与生产 __init__ 对账，否则会掩盖 AttributeError 类回归
 """虚拟滚动「回收 → 重建 → 高度塌陷 / 滚动漂移」自激回路回归（T42）。
 
 ## 用户可见现象
@@ -302,6 +303,73 @@ def test_no_transient_geometry_anchor_compensation():
         "重建侧必须有占位高度还原（高度守恒的另一半，缺了它容器总高会在重建瞬间塌陷）"
     )
     assert "_take_batch_placeholder" in src and "_install_batch_placeholder" in src, "占位安装/归还两侧必须成对存在"
+
+
+def test_recycle_containers_no_stale_growth(qapp):
+    """[A3-2] 占位/懒队列/可见集的断引用守卫（#22）。
+
+    行为级：可直驱的清理点语义正确（占位成对清空、懒队列剔回收+剔死卡、
+    可见集剔回收 id）。防退化锚点见 test_recycle_cleanup_anchors_present。
+    """
+    from unittest.mock import MagicMock
+
+    from PyQt5.QtWidgets import QWidget
+
+    win = _make_window(qapp)
+
+    # 占位与 overhead：_clear_batch_placeholders 必须成对清空
+    win._batch_placeholders = {0: QWidget(), 1: QWidget()}
+    win._batch_placeholder_overhead = {0: 100, 1: 120}
+    win._clear_batch_placeholders(remove_from_layout=False)
+    assert not win._batch_placeholders, "占位表未清空"
+    assert not win._batch_placeholder_overhead, "overhead 未与占位成对清空"
+
+    # 懒队列：生产过滤语义（剔已回收 id + 剔已销毁 widget，复刻 main_widget
+    # 回收尾部「从懒渲染队列中移除已回收的卡片」段）。
+    # 最小实例的 _is_widget_alive 是恒真 mock，此处换回生产级 sip 判定；
+    # deleteLater 是延迟删除，须 sendPostedEvents 强投后 sip 才视作已删。
+    from PyQt5.QtCore import QCoreApplication, QEvent
+
+    import sip as _sip
+
+    win._is_widget_alive = lambda w: not _sip.isdeleted(w)
+    dead = QWidget()
+    dead.deleteLater()
+    QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+    alive_card = QWidget()  # 生产过滤会调 sip.isdeleted，须真实 sip 对象
+    recycled = QWidget()
+    win._pending_lazy_cards = [dead, recycled, alive_card]
+    recycled_ids = {id(recycled)}
+    win._pending_lazy_cards = [
+        c for c in win._pending_lazy_cards if id(c) not in recycled_ids and win._is_widget_alive(c)
+    ]
+    assert alive_card in win._pending_lazy_cards, "活卡被误剔"
+    assert recycled not in win._pending_lazy_cards, "已回收卡残留在懒队列"
+    assert dead not in win._pending_lazy_cards, "已销毁卡残留在懒队列"
+
+    # 可见集：回收 id 剔除（复刻「剔除已回收卡的 id」段）
+    win._last_visible_card_ids = {id(alive_card), id(recycled)}
+    win._last_visible_card_ids -= recycled_ids
+    assert id(recycled) not in win._last_visible_card_ids, "回收 id 残留可见集"
+    assert id(alive_card) in win._last_visible_card_ids
+
+
+def test_recycle_cleanup_anchors_present():
+    """[A3-2] 防退化锚点：四容器的清理语句必须存在（注掉任一清理即失败）。
+
+    静态审计结论（#22）：四容器均有配对清理点，无卸载后残留增长；
+    本断言锁住这些清理点，防止将来重构时被静默删掉。
+    """
+    src = SRC_PATH.read_text(encoding="utf-8")
+    for anchor in (
+        "self._last_visible_card_ids -= recycled_card_ids",  # 回收剔除可见集
+        "id(c) not in recycled_card_ids and self._is_widget_alive(c)",  # 懒队列双守卫过滤
+        "def _clear_batch_placeholders",  # 占位清理函数
+        "self._batch_placeholder_overhead.clear()",  # overhead 成对清空
+        "stale_ph = self._batch_placeholders.pop(global_batch_index, None)",  # 重建期 stale 占位摘除
+        "self._node_batch_map_cache = None",  # 单缓存槽指纹重置
+    ):
+        assert anchor in src, f"清理锚点丢失: {anchor}"
 
 
 if __name__ == "__main__":

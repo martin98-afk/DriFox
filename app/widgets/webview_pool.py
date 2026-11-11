@@ -28,9 +28,27 @@
 """
 
 import contextlib
+import os
 from typing import Dict, List, Optional, Set
 
 from PyQt5.QtCore import Qt
+
+
+def _load_max_idle_per_bucket() -> int:
+    """[A3-3] 池容量实验开关：DRIFOX_POOL_MAX_IDLE（1/2/4/6 churn 对比用）。
+
+    容量上限 2/桶；实测稳态常驻 1 个（light 桶 welcome viewer），
+    full 桶常态 0 —— 收益估算勿按「viewer 数 × 常量」线性外推。
+    非法值 / 缺失 / <1 回退 2 —— 与 fd440524f 逐字节等价。
+    注意：import 期读取固化，进程内不热变（实验按进程设 env 启动）。
+    """
+    try:
+        v = int(os.environ.get("DRIFOX_POOL_MAX_IDLE", ""))
+        if v >= 1:
+            return v
+    except ValueError:
+        pass
+    return 2
 
 try:  # 仅用于剔除已销毁对象，缺失时退化为不清理
     import sip
@@ -44,7 +62,7 @@ except Exception:  # pragma: no cover
 # 50MB 起，高分屏上还挂着页面级 JS 堆），而滚动方向的复用需求本来就只有
 # 「一进一出」两次 —— 多的那 4 个是纯内存成本。命中率下降时退化为新建实例，
 # 有 100-500ms 代价（见模块头），但只发生在快速来回滚动时。
-MAX_IDLE_PER_BUCKET = 2
+MAX_IDLE_PER_BUCKET = _load_max_idle_per_bucket()
 
 # 连续失败多少次后整池停用（防止在异常环境里反复做无效尝试）
 MAX_CONSECUTIVE_FAILURES = 3

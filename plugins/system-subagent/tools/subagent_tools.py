@@ -101,6 +101,7 @@ def _subagent_para_impl(tool_ctx, **kwargs):
     session_id = tool_ctx.get("session_id", "")
 
     task_ids = []
+    dispatch_failed = []
     for task_item in tasks:
         agent = task_item.get("agent", "")
         description = task_item.get("description", "")
@@ -108,7 +109,7 @@ def _subagent_para_impl(tool_ctx, **kwargs):
         if not agent or not description:
             continue
         task_id = str(uuid.uuid4())
-        manager.execute_task(
+        ok = manager.execute_task(
             task_id=task_id,
             agent_name=agent,
             task_description=description,
@@ -119,16 +120,23 @@ def _subagent_para_impl(tool_ctx, **kwargs):
             share_context=share_context,
             session_id=session_id,
         )
-        task_ids.append(task_id)
+        if ok:
+            task_ids.append(task_id)
+        else:
+            # 派发失败（agent 不存在/运行上限/无模型配置）：不再伪装成 running
+            # 让模型空等通知，立即回传失败原因
+            info = manager._finished_tasks.get(task_id) or {}
+            dispatch_failed.append({"task_id": task_id, "agent": agent, "error": info.get("error") or "任务派发失败"})
 
-    return ToolResult(
-        True,
-        content={
-            "task_ids": task_ids,
-            "status": "running",
-            "count": len(task_ids),
-        },
-    )
+    content = {
+        "task_ids": task_ids,
+        "status": "running",
+        "count": len(task_ids),
+    }
+    if dispatch_failed:
+        content["dispatch_failed"] = dispatch_failed
+        content["note"] = "dispatch_failed 中的任务未派发成功，不会收到完成通知，勿等待"
+    return ToolResult(True, content=content)
 
 
 def _subagent_status_impl(tool_ctx, **kwargs):

@@ -893,7 +893,9 @@ class CodeWebViewer(QWebEngineView):
         # [PERF] 工具结果 markdown 缓存：tool_call_id → <tool>...</tool> markdown 字符串
         # 已完成的工具块的 markdown 只計算一次，後續增量渲染跳過昂貴的
         # _sanitize_result + sorted() + JSON 序列化，直接拼接緩存結果。
-        self._tool_md_cache: Dict[str, str] = {}
+        # [B2] 有界化（_BoundedToolMdCache）：写入点在 MessageCard（禁区文件），
+        # 只能在此侧换实现收敛上限。
+        self._tool_md_cache: Dict[str, str] = _BoundedToolMdCache()
         # [B2] 工具 DOM 脏标记：MessageCard 层 JS 增量注入工具块（_inject_tool_streaming_html /
         # append_tool_result）时置 True，_perform_update 则必须走 save/restore 保护（否则
         # updateContent 整块替换会被 JS 注入的运行框/完成框抹掉）；无工具 DOM 注入时走裸
@@ -11187,6 +11189,12 @@ class _ThemeRerenderQueue:
 
 # 模块级单例：消息卡主题补渲共用一条分帧队列
 _theme_rerender_queue = _ThemeRerenderQueue()
+
+
+# [B2] 有界工具 markdown 缓存已搬至 app/widgets/_bounded_caches.py
+# （qt 渲染通道 markdown_block_viewer 也要用；从本模块 import 会把
+# QWebEngineWidgets 链拉进 Qt 通道，故独立成无依赖模块。命名空间保持兼容。）
+from app.widgets._bounded_caches import _BoundedToolMdCache, _MAX_TOOL_MD_ENTRIES  # noqa: F401
 
 
 class PlainTextViewer(QWidget):
