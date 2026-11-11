@@ -494,3 +494,22 @@ def test_concurrent_requests_keep_own_client(transport):
     # 每个 worker 的 client 只应发出自己的模型名
     for i in range(N):
         assert seen.get(f"w{i}") == {f"w{i}"}, seen
+
+
+# ---------- N. capability_type 内存态键不得经通配分支直发网关 ----------
+
+
+def test_capability_type_not_leaked_into_extra_body(transport):
+    """capability_type 是 Task 4 派生的内存态配置元数据，严禁进请求体（server_id 同款坑）。"""
+    result = transport.build_request_kwargs(
+        {
+            "模型名称": "gpt-4o",
+            "API_URL": "https://x/v1",
+            "API_KEY": "sk",
+            "capability_type": "chat",
+            "display_name": "示例",
+        }
+    )
+    assert result["model"] == "gpt-4o"
+    assert "capability_type" not in result["extra_body"]
+    assert "capability_type" not in result["top_level"]

@@ -48,6 +48,9 @@ _CONFIG_ONLY_KEYS = {
     "备注",
     "获取地址",
     "模型列表",
+    # capability_type 为 Task 4 在 _valid_configs 上附带的内存态派生键，
+    # 非网关 API 参数；不排除会被通配分支直发，严格端点报 400 unknown parameter
+    "capability_type",
 }
 
 # 采样参数：走 SDK 顶层参数（与 subagent_worker 行为对齐），不进 extra_body；
