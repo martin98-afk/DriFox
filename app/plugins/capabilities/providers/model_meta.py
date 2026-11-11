@@ -73,7 +73,7 @@ def provider_list(host: Any):
     """provider.list 的 provider：返回已配置服务商清单（不含密钥与 URL）。
 
     每项：id / provider_name / display_name / is_current / model_count /
-    models_dev_id。
+    models_dev_id / capability_type（实例内存态能力类型，缺省回落 chat）。
     ⚠️ 刻意不带 API_KEY 与 API_URL：前者属于 model.config 的职责；后者看着
     无害，配合社工手法可把插件流量引到别处。
     """
@@ -98,6 +98,7 @@ def provider_list(host: Any):
                     "is_current": cid == current_id,
                     "model_count": len(_models_for(widget, cid)),
                     "models_dev_id": _models_dev_id(pname),
+                    "capability_type": str(config.get("capability_type", "chat") or "chat"),
                 }
             )
         out.sort(key=lambda item: (item["display_name"] or "").lower())
@@ -110,7 +111,7 @@ def model_enumerate(host: Any):
     """model.enumerate 的 provider：指定服务商的可选模型列表（含能力标记）。
 
     每项：name / is_current / supports_vision / supports_thinking /
-    context_limit / note。
+    context_limit / note / capability_type（该实例的能力类型，缺省回落 chat）。
 
     provider 参数走主窗口 `_resolve_service_provider` 的五级匹配（config_id →
     display_name 缓存 → display_name 遍历 → provider_name 精确 → 大小写不敏感）；
@@ -152,6 +153,7 @@ def model_enumerate(host: Any):
                 {
                     "name": name,
                     "is_current": bool(current_model) and name == current_model,
+                    "capability_type": str(config.get("capability_type", "chat") or "chat"),
                     **_model_caps(name, pname),
                 }
             )

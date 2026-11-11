@@ -111,6 +111,20 @@ def test_provider_list_empty_when_host_none():
     assert _pool("tool", {"provider.list"}, host)["provider.list"]() == []
 
 
+def test_provider_list_includes_capability_type():
+    """每条服务商带内存态 capability_type（生成类实例标 image_generation，其余回落 chat）"""
+    w = _widget()
+    w._valid_configs["img-1"] = {
+        "provider_name": "示例图像",
+        "display_name": "示例图像",
+        "capability_type": "image_generation",
+        "模型列表": ["dall-e-3"],
+    }
+    rows = _pool("ui", {"provider.list"}, w)["provider.list"]()
+    assert any(r.get("capability_type") == "image_generation" for r in rows)
+    assert any(r.get("capability_type") == "chat" for r in rows)
+
+
 # ── model.enumerate ──
 
 
@@ -134,12 +148,13 @@ def test_enumerate_unknown_provider_returns_empty():
 
 
 def test_enumerate_fields_shape():
-    """返回结构固定：name/is_current/supports_vision/supports_thinking/context_limit/note"""
+    """返回结构固定：name/is_current/capability_type/supports_vision/supports_thinking/context_limit/note"""
     out = _pool("ui", {"model.enumerate"}, _widget())["model.enumerate"]("cid-1")
     for item in out:
         assert set(item) == {
             "name",
             "is_current",
+            "capability_type",
             "supports_vision",
             "supports_thinking",
             "context_limit",
@@ -267,3 +282,19 @@ def test_config_for_passes_capability_type():
     cfg = ui_core._model_config_for(host)("豆包语音合成:seed-tts-2.0")
     assert seen["args"][0] == "豆包语音合成:seed-tts-2.0"
     assert cfg["capability_type"] == "chat"
+
+
+def test_config_for_explicit_non_chat_passthrough():
+    """config_for 显式传非 chat 类型时应透传给宿主解析器。"""
+    from app.plugins.capabilities.providers import ui_core
+
+    sentinel = object()
+    seen = {}
+
+    def resolver(query, show_error=False, capability_type=sentinel):
+        seen["capability_type"] = capability_type
+        return {"ok": True}
+
+    host = SimpleNamespace(_resolve_model_config_by_query=resolver)
+    ui_core._model_config_for(host)("示例图像:dall-e-3", capability_type="image_generation")
+    assert seen["capability_type"] == "image_generation"
