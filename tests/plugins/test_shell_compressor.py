@@ -16,7 +16,7 @@ if str(_REPO_ROOT) not in sys.path:
 # shell_compressor 随工具插件存放（工具插件化），从插件路径加载
 import importlib.util  # noqa: E402
 
-_plugin_path = _REPO_ROOT / "plugins" / "system-tools" / "tools" / "_shell_compressor.py"
+_plugin_path = _REPO_ROOT / "plugins" / "system-core" / "tools" / "_shell_compressor.py"
 _spec = importlib.util.spec_from_file_location("_shell_compressor", _plugin_path)
 _shell_compressor = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_shell_compressor)
@@ -216,15 +216,16 @@ class TestGitStatusShortEdgeCases:
     """边界情况"""
 
     def test_empty_output(self):
-        """空输出应不崩溃"""
+        """空输出：返回 None 表示无法压缩（绝不能是 '?' 占位）"""
         result = compress_output("git status --short", "")
-        # 压缩后应至少是可读字符串，不应抛异常
-        assert isinstance(result, str)
+        assert result != "?"
+        assert result is None or isinstance(result, str)
 
     def test_only_whitespace(self):
-        """仅空白行"""
+        """仅空白行：同样不能被压成 '?'"""
         result = compress_output("git status --short", "\n\n\n")
-        assert isinstance(result, str)
+        assert result != "?"
+        assert result is None or isinstance(result, str)
 
     def test_filename_with_spaces(self):
         """文件名含空格（split(None, 1) 应正确切分）"""
@@ -282,6 +283,50 @@ class TestCompressOutputIntegration:
         assert "\nunstaged:" in result
         assert "\nuntracked:" in result
 
+
+# ============================================================================
+# 回归：复合命令与解析失败不能产出 "?" 占位
+# ============================================================================
+
+class TestQuestionMarkPlaceholderRegression:
+    """2026-11-09 实际故障：`git branch && git status` 整段输出被压成 "?"
+
+    根因三层叠加：
+    1. `_compress_git` 用子串匹配把复合命令的整段输出喂给 git status 解析器；
+    2. 长格式解析不到 `On branch` 时返回 branch 默认值 "?"；
+    3. `_shorter_only` 只看 token 数，"?" 必然通过。
+    """
+
+    COMPOUND_CMD = (
+        "git branch --show-current && echo '---STATUS---' && git status --short "
+        "&& echo '---TAGS---' && git tag --list 'v*' | tail -3"
+    )
+    COMPOUND_OUTPUT = (
+        "dev\n---STATUS---\n---TAGS---\nv0.7.0-beta\nv0.7.0\nv0.6.15-beta"
+    )
+
+    def test_compound_command_keeps_content(self):
+        """复合命令走通用清理，不再套 git status 解析器"""
+        result = compress_output(self.COMPOUND_CMD, self.COMPOUND_OUTPUT)
+        assert result != "?"
+        assert result is not None
+        assert "dev" in result
+        assert "v0.7.0" in result
+
+    def test_unrecognized_output_returns_none(self):
+        """非 git status 输出交给解析器：返回 None 而非 "?"""
+        assert _compress_git_status("hello world\nfoo bar") is None
+
+    def test_clean_status_short_not_question_mark(self):
+        """干净工作树的 --short 空输出：不能是 "?"""
+        assert compress_output("git status --short", "") != "?"
+
+    def test_compress_never_returns_bare_question_mark(self):
+        """完整 compress() 链路：短内容不会被换成 "?\\n[saved ...]"""
+        out = (self.COMPOUND_OUTPUT + "\n") * 3  # 超过 50 字符，绕过长度短路
+        result = _shell_compressor.compress(self.COMPOUND_CMD, out)
+        assert not result.startswith("?"), f"输出被压成问号: {result!r}"
+        assert "v0.7.0" in result
 
 if __name__ == "__main__":
     import pytest

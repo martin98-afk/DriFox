@@ -1,0 +1,492 @@
+# -*- coding: utf-8 -*-
+"""云同步的 LWW（Last Write Wins）+ 墓碑合并。
+
+每个同步条目带一份元数据 ``{"h": 内容指纹, "t": Lamport 计数, "d": 墓碑标记}``。
+合并逐条目比 ``t``，大者胜；胜者为墓碑时删除。与设备时钟无关，
+也不需要「上一次一致版本」（base）。
+
+设计取舍：
+- 删除是显式数据（墓碑），不靠「缺失」推断，所以换机、清缓存后仍能传播。
+- 不认识的条目（老版本客户端不认识的新配置项）缺失即视为本地新增，
+  最坏结果是多保留一条，不会误删。
+"""
+
+from __future__ import annotations
+
+import json
+from typing import Dict, List, Optional, Tuple
+
+Entry = Dict[str, object]
+
+TOMBSTONE_KEY = "d"
+# 条目写入者标识：t 相同时靠它做确定性裁决（否则多端同写一个键会永不收敛）
+DEVICE_KEY = "dv"
+# 种子标记：seed_missing 为无元数据元素打的「历史未知」记号。
+# 种子 vs 墓碑 → 墓碑胜（无论 t）：孤儿元素不得凭 observe_clock 抬高的 t 复活
+# （2026-11-06 system-tools 组件禁用条目多端反复回魂的根因）。
+SEED_KEY = "s"
+
+def is_seed(entry: Entry | None) -> bool:
+    return isinstance(entry, dict) and bool(entry.get(SEED_KEY))
+
+def seeded(h: str, t: int, device: str = "") -> Entry:
+    """构造种子条目：live 语义 + 种子标记。仅供 seed_missing 使用。
+
+    真实写入（_touch）打的是普通 live（无 s 标记），写入即自动清除种子态。
+    """
+    entry = live(h, t, device)
+    entry[SEED_KEY] = True
+    return entry
+
+
+class LamportClock:
+    """逻辑时钟：只保证因果递增，不依赖系统时间。"""
+
+    def __init__(self, start: int = 0) -> None:
+        self._t = int(start or 0)
+
+    def observe(self, other: object) -> None:
+        try:
+            self._t = max(self._t, int(other or 0))
+        except (TypeError, ValueError):
+            pass
+
+    def tick(self) -> int:
+        self._t += 1
+        return self._t
+
+    @property
+    def value(self) -> int:
+        return self._t
+
+
+def entry_ts(entry: Entry | None) -> int:
+    """条目时间戳（缺失/非法返回 0 或 -1，供合并与取值共用）。"""
+    if not isinstance(entry, dict):
+        return -1
+    try:
+        return int(entry.get("t") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+_t = entry_ts
+
+
+def _is_tombstone(entry: Entry | None) -> bool:
+    return isinstance(entry, dict) and bool(entry.get(TOMBSTONE_KEY))
+
+
+def merge_entries(
+    local: Dict[str, Entry],
+    remote: Dict[str, Entry],
+) -> Tuple[Dict[str, Entry], List[str]]:
+    """逐条目 LWW 合并，返回 (合并结果, 冲突条目路径)。
+
+    冲突判定：t 相同但 h 不同。此时本地胜出，远端内容由调用方留档。
+    """
+    merged: Dict[str, Entry] = {}
+    conflicts: List[str] = []
+    for key in set(local) | set(remote):
+        le = local.get(key)
+        re_ = remote.get(key)
+        if le is None:
+            merged[key] = dict(re_ or {})
+            continue
+        if re_ is None:
+            merged[key] = dict(le)
+            continue
+        lt, rt = _t(le), _t(re_)
+        if lt > rt:
+            merged[key] = dict(le)
+        elif rt > lt:
+            merged[key] = dict(re_)
+        else:
+            # t 相同：按设备标识字典序裁决，保证多端收敛到同一结果。
+            # 旧条目没有标识时退化为本地优先（与历史行为一致）。
+            ldev = str(le.get(DEVICE_KEY) or "")
+            rdev = str(re_.get(DEVICE_KEY) or "")
+            if ldev and rdev and ldev != rdev:
+                merged[key] = dict(le) if ldev > rdev else dict(re_)
+                continue
+            if str(le.get("h") or "") != str(re_.get("h") or ""):
+                conflicts.append(key)
+            merged[key] = dict(le)
+    return merged, conflicts
+
+
+def tombstone(h: str, t: int, device: str = "") -> Entry:
+    entry: Entry = {"h": h, "t": t, TOMBSTONE_KEY: True}
+    if device:
+        entry[DEVICE_KEY] = device
+    return entry
+
+
+def live(h: str, t: int, device: str = "") -> Entry:
+    entry: Entry = {"h": h, "t": t}
+    if device:
+        entry[DEVICE_KEY] = device
+    return entry
+
+
+def is_tombstone(entry: Entry | None) -> bool:
+    return _is_tombstone(entry)
+
+
+# ── config 结构合并 ──────────────────────────────────────
+#
+# 集合型配置项显式登记，不做递归深度猜测。新增集合型配置时需要在这里加一行，
+# 未登记的一律整块作为一个条目（最坏情况是一次整体覆盖，不会静默误删）。
+COLLECTION_KEYS: Dict[str, str] = {
+    "LLM.SavedProviders": "dict",
+    "LLM.ModelOverrides": "dict",
+    "Tools.Toggles": "dict",
+    "Tools.PermissionPolicy": "dict",
+    "MCP.Servers": "list",
+    "Plugin.EnabledPlugins": "list",
+    "Plugin.DisabledPlugins": "list",
+    "Plugin.DisabledComponents": "list",
+    "LLM.EnabledSkills": "list",
+    "Plugin.ConfirmedPluginServers": "list",
+    "Marketplace.AllowedGitHosts": "list",
+    "Hooks.SafePythonModules": "list",
+    "QFluentWidgets.FontFamilies": "list",
+}
+
+_ELEM_ID_FIELDS = ("id", "name", "key", "uuid", "url", "model", "provider")
+
+_MISSING = object()
+
+
+def element_key(value: object) -> str:
+    """list 元素身份：优先语义字段，否则取整体序列化。"""
+    if isinstance(value, dict):
+        for name in _ELEM_ID_FIELDS:
+            v = value.get(name)
+            if isinstance(v, (str, int)) and str(v):
+                return f"{name}:{v}"
+    try:
+        return json.dumps(value, sort_keys=True, ensure_ascii=False, default=str)
+    except Exception:
+        return repr(value)
+
+
+def _collection_items(kind: str, value: object) -> Dict[str, object]:
+    if kind == "dict":
+        return dict(value) if isinstance(value, dict) else {}
+    items: Dict[str, object] = {}
+    for elem in value if isinstance(value, list) else []:
+        items[element_key(elem)] = elem
+    return items
+
+
+def _pick_entry(
+    path: str,
+    local_entries: Dict[str, Entry],
+    remote_entries: Dict[str, Entry],
+    remote_authority: bool = False,
+) -> Tuple[Entry | None, str]:
+    """按 t 取胜者，返回 (entry, side)。side ∈ {local, remote, conflict, none}。
+
+    entry 为 None 表示两边都没有元数据（老版本抹掉 / 首次升级），调用方走
+    union 降级：本地有取本地，否则取远端。``remote_authority=True`` 时改为
+    远端优先——用于本机没有合并基准（解绑重绑 / 新机首次绑定）的首次合并，
+    此时本地配置可能是被回滚的绑定前快照，不能压过云端。
+    """
+    le = local_entries.get(path)
+    re_ = remote_entries.get(path)
+    if le is None and re_ is None:
+        return None, ("remote" if remote_authority else "none")
+    if le is None:
+        return re_, "remote"
+    if re_ is None:
+        return le, "local"
+    # 种子 vs 墓碑：显式删除压过「历史未知」的种子，无论 t。
+    # 种子只出现在本机同步历史不完整时（新 SyncMeta / 升级首播），
+    # 它的 t 是 observe_clock 抬钟后现打的，天然高于一切历史墓碑；
+    # 不加此判定，孤儿元素会在每次合并中凭空复活。
+    if is_seed(le) and _is_tombstone(re_):
+        return re_, "remote"
+    if _is_tombstone(le) and is_seed(re_):
+        return le, "local"
+    lt, rt = entry_ts(le), entry_ts(re_)
+    if rt > lt:
+        return re_, "remote"
+    if lt > rt:
+        return le, "local"
+    # t 相同：按设备标识字典序裁决。没有标识的旧条目退化为本地优先。
+    ldev = str(le.get(DEVICE_KEY) or "")
+    rdev = str(re_.get(DEVICE_KEY) or "")
+    if ldev and rdev and ldev != rdev:
+        return (le, "local") if ldev > rdev else (re_, "remote")
+    if str(le.get("h") or "") != str(re_.get("h") or ""):
+        return le, "conflict"
+    return le, "local"
+
+
+def _merge_collection(
+    path: str,
+    kind: str,
+    local_value: object,
+    remote_value: object,
+    local_entries: Dict[str, Entry],
+    remote_entries: Dict[str, Entry],
+    merged_entries: Dict[str, Entry],
+    conflicts: List[str],
+    remote_authority: bool = False,
+) -> object:
+    l_items = _collection_items(kind, local_value) if local_value is not _MISSING else {}
+    r_items = _collection_items(kind, remote_value) if remote_value is not _MISSING else {}
+    out_items: Dict[str, object] = {}
+    order = list(l_items) + [k for k in r_items if k not in l_items]
+    for ek in order:
+        epath = f"{path}.{ek}"
+        entry, side = _pick_entry(epath, local_entries, remote_entries, remote_authority)
+        if entry is not None:
+            merged_entries[epath] = entry
+            if side == "conflict":
+                conflicts.append(epath)
+            if _is_tombstone(entry):
+                continue
+        if side == "remote":
+            out_items[ek] = r_items.get(ek, l_items.get(ek))
+        else:
+            out_items[ek] = l_items.get(ek, r_items.get(ek))
+    if kind == "dict":
+        return dict(out_items)
+    return [v for v in out_items.values()]
+
+
+def merge_config_lww(
+    local_cfg: Dict[str, object],
+    local_entries: Dict[str, Entry],
+    remote_cfg: Dict[str, object],
+    remote_entries: Dict[str, Entry],
+    remote_authority: bool = False,
+) -> Tuple[Dict[str, object], Dict[str, Entry], List[str]]:
+    """按条目 LWW 合并两份 app.config，返回 (结果, 条目表, 冲突路径)。
+
+    直接操作嵌套结构，不经过「扁平化再重建」往返，避免路径里含点号时的歧义。
+    ``remote_authority=True`` 时，两端都缺元数据的条目改取远端（默认取本地）。
+    """
+    merged_cfg: Dict[str, object] = {}
+    merged_entries: Dict[str, Entry] = {}
+    conflicts: List[str] = []
+
+    for group in sorted(set(local_cfg) | set(remote_cfg)):
+        lg = local_cfg.get(group, _MISSING)
+        rg = remote_cfg.get(group, _MISSING)
+        # 一侧整组缺失时按空组处理，仍走逐项合并：否则会退化成组级 block
+        # 合并，组内集合条目（如 LLM.SavedProviders.p0）全部丢失条目表。
+        # 典型场景：新设备首次下载，本地配置里根本没有 LLM 组。
+        if lg is _MISSING and isinstance(rg, dict):
+            lg = {}
+        elif rg is _MISSING and isinstance(lg, dict):
+            rg = {}
+        if not isinstance(lg, dict) or not isinstance(rg, dict):
+            path = str(group)
+            entry, side = _pick_entry(path, local_entries, remote_entries, remote_authority)
+            if entry is not None:
+                merged_entries[path] = entry
+                if side == "conflict":
+                    conflicts.append(path)
+                if _is_tombstone(entry):
+                    continue
+            if side == "remote" or (side == "none" and lg is _MISSING):
+                if rg is not _MISSING:
+                    merged_cfg[group] = rg
+            elif lg is not _MISSING:
+                merged_cfg[group] = lg
+            continue
+
+        g_out: Dict[str, object] = {}
+        order = list(lg) + [n for n in rg if n not in lg]
+        for name in order:
+            path = f"{group}.{name}"
+            kind = COLLECTION_KEYS.get(path)
+            if kind in ("dict", "list"):
+                value = _merge_collection(
+                    path,
+                    kind,
+                    lg.get(name, _MISSING),
+                    rg.get(name, _MISSING),
+                    local_entries,
+                    remote_entries,
+                    merged_entries,
+                    conflicts,
+                    remote_authority,
+                )
+                g_out[name] = value
+                continue
+            entry, side = _pick_entry(path, local_entries, remote_entries, remote_authority)
+            if entry is not None:
+                merged_entries[path] = entry
+                if side == "conflict":
+                    conflicts.append(path)
+                if _is_tombstone(entry):
+                    continue
+            if side == "remote":
+                if name in rg:
+                    g_out[name] = rg[name]
+                elif name in lg:
+                    g_out[name] = lg[name]
+            else:
+                if name in lg:
+                    g_out[name] = lg[name]
+                elif name in rg:
+                    g_out[name] = rg[name]
+        merged_cfg[group] = g_out
+
+    return merged_cfg, merged_entries, conflicts
+
+
+# ── 目录单元条目对齐 ────────────────────────────────────
+
+DIR_META_NAME = ".__drifox_sync__.json"
+
+
+def reconcile_dir_entries(
+    manifest: Dict[str, str],
+    entries: Dict[str, Entry],
+    clock: LamportClock,
+) -> Dict[str, Entry]:
+    """把目录现状（{相对路径: 内容 sha256}）对齐到条目表，返回新表。
+
+    - 文件新增 / 内容变化 → live，打新 t
+    - 文件消失且条目仍是 live → 墓碑（保留原内容指纹，对方可据此判断删的是哪一版）
+    - 已是墓碑且文件确实不存在 → 保持原 t，不刷新（否则墓碑会被本地空转推新）
+    """
+    out: Dict[str, Entry] = {str(k): dict(v) for k, v in entries.items() if isinstance(v, dict)}
+    for rel, h in manifest.items():
+        cur = out.get(rel)
+        if cur is None or _is_tombstone(cur) or str(cur.get("h") or "") != str(h):
+            out[rel] = live(h, clock.tick())
+    for rel, cur in list(out.items()):
+        if rel in manifest or _is_tombstone(cur):
+            continue
+        out[rel] = tombstone(str(cur.get("h") or ""), clock.tick())
+    return out
+
+
+def seed_entries_from_manifest(
+    manifest: Dict[str, str],
+    entries: Dict[str, Entry],
+) -> Dict[str, Entry]:
+    """给没有元数据的文件补 t=0 条目（兼容没有包内元数据的老版本 zip）。
+
+    t=0 是最低优先级：对方有正经序号时永远输给对方，只在「独有文件」场景
+    被保留，不会拿它去覆盖任何有元数据的内容。
+    """
+    out: Dict[str, Entry] = {str(k): dict(v) for k, v in entries.items() if isinstance(v, dict)}
+    for rel, h in manifest.items():
+        if rel not in out:
+            out[rel] = {"h": h, "t": 0}
+    return out
+
+
+def plan_dir_merge(
+    local_manifest: Dict[str, str],
+    remote_manifest: Dict[str, str],
+    local_base: Dict[str, Entry],
+    remote_base: Dict[str, Entry],
+) -> Tuple[List[str], List[str], List[str]]:
+    """目录合并的三方内容判定，返回 (to_copy, to_delete, conflicts)。
+
+    背景（2026-11-02 全局 MEMORY.md 跨设备丢失）：两台设备 Lamport clock
+    各自独立推进，t 只在设备内因果递增，跨设备不可比。clock 高的设备旧内容
+    t 永远大于 clock 低的设备新内容 t，纯 t 比较会静默丢弃远端更新且不留档。
+
+    本判定不比较 t。可用的共同祖先参照只有一个：**本侧条目表的 h**（上次同步
+    确认的版本；对端条目表在上传前会被 reconcile 刷成对端现状，其 h 不可作
+    base）。判定核心：本地没改（lh == 本地 base）而远端内容不同 → 分歧必然
+    在远端侧，采纳远端；本地改了而远端内容 ≠ 共同祖先 → 两边都改，冲突留档。
+    老包（无元数据）无历史参照时保守留档保本地，与历史行为兼容。
+
+    判定表：
+    - 内容一致 → 无动作
+    - 远端墓碑 + 本地没改 → 跟随删除；本地改过/未知 → 冲突保本地
+    - 双方 base 都未知该文件 → 本地独有，保留
+    - 本地无文件无条目 → 远端新增，采纳
+    - 本地删除 + 远端没改 → 保持删除；远端改了 → 冲突（保删除 + 留档）
+    - 本地没改 + 远端改了 → 采纳远端（to_copy）★ 修复目标
+    - 两边都改了 → 真冲突：本地优先 + 远端留档
+    """
+
+    def _live_base_h(entries: Dict[str, Entry], rel: str) -> Optional[str]:
+        """非墓碑条目的内容 base（墓碑/缺失返回 None）"""
+        e = entries.get(rel)
+        if isinstance(e, dict) and e.get("h") is not None and not is_tombstone(e):
+            return str(e.get("h"))
+        return None
+
+    to_copy: List[str] = []
+    to_delete: List[str] = []
+    conflicts: List[str] = []
+    for rel in sorted(set(local_manifest) | set(remote_manifest)):
+        lh = local_manifest.get(rel)
+        rh = remote_manifest.get(rel)
+        l_entry = local_base.get(rel)
+        r_entry = remote_base.get(rel)
+        l_hist = isinstance(l_entry, dict) and l_entry.get("h") is not None
+        r_hist = isinstance(r_entry, dict) and r_entry.get("h") is not None
+        lb = _live_base_h(local_base, rel)
+        rb = _live_base_h(remote_base, rel)
+        r_tomb = is_tombstone(r_entry) if isinstance(r_entry, dict) else False
+
+        if lh == rh and lh is not None:
+            continue
+        if r_tomb:
+            if lh is None:
+                continue
+            # 本地没改（内容 == 本地 base）→ 跟随删除；改过/未知 → 冲突保本地
+            if lb is not None and lh == lb:
+                to_delete.append(rel)
+            else:
+                conflicts.append(rel)
+            continue
+        if rh is None and not r_hist:
+            # 远端从不知道这个文件 → 本地独有
+            continue
+        if lh is None and not l_hist:
+            # 本地从不知道这个文件：远端有文件 → 新增采纳；包里也没有（异常）→ 无动作
+            if rh is not None:
+                to_copy.append(rel)
+            continue
+        if lh is None:
+            # 本地删除过。远端内容 ≠ 被删时版本 → 删除 vs 修改冲突（保删除 + 留档）；
+            # 远端保持原内容 → 保持删除
+            del_h = str(l_entry.get("h") or "") if isinstance(l_entry, dict) else ""
+            if rh is not None and rh != del_h:
+                conflicts.append(rel)
+            continue
+        local_changed = not l_hist or lb is None or lh != lb
+        if not local_changed:
+            if rh is not None:
+                if rb is None:
+                    # 老包无元数据：远端历史未知，无从判断谁更新 → 留档防静默丢
+                    conflicts.append(rel)
+                else:
+                    # 本地没改 + 远端是另一份内容 → 远端有新版本，采纳（★ 修复目标）
+                    to_copy.append(rel)
+            else:
+                # 远端有条目但包里无文件且无墓碑（打包异常）→ 跟随消失
+                to_delete.append(rel)
+            continue
+        # 本地改了：远端内容也不是共同祖先版本 → 真冲突，本地优先 + 远端留档
+        if rh is not None and (rb is None or rh != lb):
+            conflicts.append(rel)
+        elif rh is None and r_hist:
+            # 远端有条目但文件没了且无墓碑（打包异常）→ 保守留档
+            conflicts.append(rel)
+        # 远端保持共同祖先版本（rh == lb）或老包无历史 → 保本地
+    return to_copy, to_delete, conflicts
+
+
+
+def dir_meta_payload(entries: Dict[str, Entry], clock: int) -> str:
+    return json.dumps(
+        {"version": 1, "clock": int(clock or 0), "entries": entries},
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+

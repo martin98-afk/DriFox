@@ -95,6 +95,33 @@ def test_scan_and_register_loop_policy_plugin(tmp_path, plugin_enabled):
     restore()
 
 
+def test_warmup_component_is_idempotent_per_component():
+    """组件级 warmup：同一 loader 重复调用返回 None（不重扫），首轮返回插件集合。
+
+    async 后台化后 warmup 会与 watcher 路径并发进入，组件级幂等是「不重复 exec
+    插件模块」的唯一保证；戳记按 loader id 而非布尔，是为 registry 单例被替换
+    （测试 monkeypatch get_instance）时能重建重扫。
+    """
+    from app.plugins.loaders import runtime_component_loader as rcl
+
+    first = rcl.warmup_component("loop_policies")
+    assert first is not None, "首轮 warmup 应返回扫描结果（None 表示被跳过）"
+    second = rcl.warmup_component("loop_policies")
+    assert second is None, "同一 loader 二次 warmup 未跳过（重复扫全量插件）"
+
+    with pytest.raises(KeyError):
+        rcl.warmup_component("not_a_component")
+
+
+def test_warmup_covers_all_components_after_partial():
+    """先逐组件预热，再整体 warmup：整体轮次应返回空 dict（全部已扫过）。"""
+    from app.plugins.loaders import runtime_component_loader as rcl
+
+    for comp in rcl._LOADER_SPECS:
+        rcl.warmup_component(comp)
+    assert rcl.warmup_runtime_components() == {}
+
+
 def test_warmup_registers_system_builtin_first():
     """warmup 后全局单例含系统插件实现（三家族/default/sqlite 不丢）"""
     from app.plugins.loaders.runtime_component_loader import warmup_runtime_components

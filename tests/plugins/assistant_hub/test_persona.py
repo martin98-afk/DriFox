@@ -85,3 +85,52 @@ def test_module_loads_without_getpass(monkeypatch):
     sys.modules["test_persona_no_getpass"] = mod
     spec.loader.exec_module(mod)  # 修复前：ModuleNotFoundError: No module named 'getpass'
     assert mod.resolve_user_name()  # 回落链兜底，非空即可
+
+def test_user_dir_personas_loaded(tmp_path):
+    """用户自建人格：<custom_path 同级>/personas/<id>/persona.md 被加载。"""
+    user_dir = tmp_path / "personas" / "my-p"
+    user_dir.mkdir(parents=True)
+    (user_dir / "persona.md").write_text(
+        "---\nid: my-p\nname: 我的\ndescription: 自建\ntag: MINE\n---\n\n正文 {{userName}}",
+        encoding="utf-8",
+    )
+    reg = _fresh_registry(tmp_path)
+    persona = reg.get("my-p")
+    assert persona is not None
+    assert persona.builtin is False
+    assert persona.tag == "MINE"
+    assert reg.exists("my-p") is True
+    assert reg.user_dir == (tmp_path / "personas").resolve()
+
+
+def test_user_dir_avatar(tmp_path):
+    """用户自建人格的头像从其自身目录解析。"""
+    d = tmp_path / "personas" / "my-p"
+    d.mkdir(parents=True)
+    (d / "persona.md").write_text("---\nid: my-p\nname: 我的\n---\n\nbody", encoding="utf-8")
+    png = b"\x89PNG\r\n\x1a\n"
+    (d / "avatar.png").write_bytes(png)
+    reg = _fresh_registry(tmp_path)
+    ap = reg.avatar_path("my-p")
+    assert ap is not None and ap.read_bytes() == png
+
+
+def test_user_dir_id_conflict_ignored(tmp_path):
+    """id 与内置冲突：用户目录那条被忽略，内置人格仍生效（升级不被旧副本顶掉）。"""
+    d = tmp_path / "personas" / "build"
+    d.mkdir(parents=True)
+    (d / "persona.md").write_text("---\nid: build\nname: 冒充内置\n---\n\nX", encoding="utf-8")
+    reg = _fresh_registry(tmp_path)
+    persona = reg.get("build")
+    assert persona.builtin is True
+    assert persona.name != "冒充内置"
+
+
+def test_user_persona_not_deletable_by_json_api(tmp_path):
+    """用户目录人格不归 personas.json 管：upsert/delete 均拒绝，删要靠删目录。"""
+    d = tmp_path / "personas" / "my-p"
+    d.mkdir(parents=True)
+    (d / "persona.md").write_text("---\nid: my-p\nname: 我的\n---\n\nbody", encoding="utf-8")
+    reg = _fresh_registry(tmp_path)
+    assert reg.delete("my-p") is False
+    assert reg.upsert(m.Persona(id="my-p", name="覆盖")) is False

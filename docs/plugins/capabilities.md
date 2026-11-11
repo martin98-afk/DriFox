@@ -123,6 +123,8 @@ app.plugins.capabilities.pool.CapabilityDenied:
 | `model.metadata` | low | 当前模型的 provider / 名称 / 上下文长度 |
 | `model.schema` | low | 指定 agent 视角的工具 schema |
 | `model.config` | **high** | 完整模型配置，**含已解密明文 API key** |
+| `model.config_for` | **high** | 按 query（模型名 / 服务商 / `服务商:模型名`）解析出可执行的完整配置（含明文 key） |
+| `model.set` | **high** | 设置当前窗口的服务商与模型（只改窗口实例态，不写全局默认）；`window_id` 参数可定向到指定窗口 |
 | `provider.list` | low | 已配置服务商清单（id / 名称 / 模型数，**不含密钥与 URL**） |
 | `model.enumerate` | low | 指定服务商的可选模型列表（含视觉 / 思考能力标记） |
 
@@ -169,15 +171,25 @@ cfg = caps.legacy("get_provider_config", "model.config")(
 
 | ID | level | 说明 |
 |---|---|---|
-| `session.read` | medium | 当前 session_id 与消息列表 |
-| `session.write` | medium | 消息写回当前会话（入库 + 刷 UI + 发事件） |
-| `session.list` | medium | 历史会话列表与元数据 |
-| `session.manage` | **high** | 新建 / 切换 / 删除会话（破坏性） |
+| `session.read` | medium | 当前 session_id 与消息列表（`window_id` 可定向到指定窗口） |
+| `session.write` | medium | 消息写回当前会话（入库 + 刷 UI + 发事件；`window_id` 可定向，返回写入条数） |
+| `session.list` | medium | 窗口内存会话列表与元数据（`host.session_manager.sessions`） |
+| `session.history` | medium | **持久化**历史会话只读面（列表 / 归档 / 项目聚合 / 按 session_id 定位 / 团队会话查询） |
+| `session.history.write` | **high** | 改写持久化历史（置顶 / 移动项目 / 归档 / 恢复 / 删除 / 导入） |
+| `session.manage` | **high** | 切换 / 新建当前会话（加载历史会话、清空开新会话） |
 | `session.interrupt` | medium | 停止当前流式输出（入队，本轮结束后执行） |
 | `session.new` | medium | 新建会话（入队，停流后执行） |
-| `session.send` | medium | 发消息驱动一轮对话（入队；`ephemeral` 不写会话、不渲染气泡） |
+| `session.send` | medium | 发消息驱动一轮对话（`mode`: queue 流式中排队默认 / skip 流式中忽略 / hook 流式中注入消息列表；`ephemeral` 不写会话、不渲染气泡；`window_id` 可定向到指定窗口） |
+
+> `session.list` 与 `session.history` 不是一回事：前者是**当前窗口内存里的活跃会话对象**（`host.session_manager.sessions`），后者是 `HistoryManager` 的**跨会话落库记录**（含归档、项目归属、团队 run_id）。取历史面板数据必须用 `session.history`。
+
+> `session.history.write` 的写动作**内部已含宿主联动通知**（历史页刷新 + 欢迎卡片失效 + 跨窗口广播）。插件调完不必再自己调窗口方法。
 
 > `session.interrupt` / `session.new` / `session.send` 是**入队语义**：插件在工具执行期调用只登记动作，主程序在本轮结束（`stream_finished`）后按登记顺序执行。原因：工具跑在 worker 线程，同步停流会杀掉自己所在的 worker。队列按 `window_id` 隔离，拿不到 id 一律拒绝（写操作回退「活跃窗口」会在多窗口同时交接时串窗）。
+>
+> `session.send` 的 `mode` 参数改变流式中的行为：`queue`（默认）本轮结束后发送并开新轮；`skip` 流式中直接拒绝（返回 False，调用方感知被忽略）；`hook` 流式中经 `_hook_message_queue` 静默注入当前对话上下文（worker 下一轮消费，不建卡不打断，同 SubAgentFinished 通道），空闲时降级为普通发送。三模式判忙均以 `chat_engine.is_streaming` 为准。
+>
+> `session.read` / `session.write` / `session.send` / `model.set` 的 `window_id` 参数支持**定向到其他窗口**（空 = 当前宿主窗口，向后兼容）。用途：全局监听插件（如报错自动换模型）收到任意窗口事件后，按事件里的 `window_id` 操作目标窗口。定向失败返回 `window_not_found`（model.set）/ 空快照 / 0。
 
 ### 输入框
 
@@ -200,12 +212,26 @@ cfg = caps.legacy("get_provider_config", "model.config")(
 | `workdir.read` | low | 当前工作目录 |
 | `workdir.write` | medium | 切换工作目录（一次封装：实例缓存 + executor 同步 + 团队广播 + 事件） |
 
-### 外观 / 上下文
+### 项目
+
+| ID | level | 说明 |
+|---|---|---|
+| `project.read` | low | 当前项目名 + 项目清单 + 元数据（会话数 / 工作目录数）+ 根目录映射 |
+| `project.write` | **high** | 切换 / 新建 / 提交 / 归档 / 导入导出 / 打开文件夹 / 拖拽建项目（含团队广播与 Tab 图标联动） |
+| `project.workdir` | medium | **写库式**切换项目工作目录（关键文档登记 + 工作目录持久化 + 根目录标记恢复） |
+
+> `project.write.switch` 内含「切项目 + 同步工作目录 + 新建会话 + 团队广播 + 收起面板」，插件不需要知道其中任何一步。要单独新建会话（不切项目）用 `session.manage.new()`。
+
+> `workdir.write` 与 `project.workdir` 不是一回事：前者只改会话内状态（实例缓存 +
+> tool_executor + 团队广播 + UI 同步），进程重启即失效；后者把改动落进记忆库
+> （关键文档登记 + 工作目录持久化 + 根目录标记恢复）。worktree 切换两者都要调：
+> 先 `project.workdir["switch"](project, path)` 再 `workdir.write(path)`。
+
+### 外观
 
 | ID | level | 说明 |
 |---|---|---|
 | `theme.read` | low | 主题 id / 名称 / 配色 / 字体 / 字号 |
-| `context.compact` | medium | 上下文压缩器 |
 
 ### 工具
 
@@ -234,8 +260,19 @@ cfg = caps.legacy("get_provider_config", "model.config")(
 | ID | level | 说明 |
 |---|---|---|
 | `mcp.call` | **high** | MCP 工具调用 |
+| `mcp.register` | medium | 注册进程内 MCP server 工具处理器（见下） |
 | `lsp.query` | medium | LSP 查询 |
 | `net.upload` | **high** | Gitee 上传（数据外发） |
+
+`mcp.register` 是注册型能力，池值是一个注册函数，插件经 `caps_for("mcp.register", surface="ui")` 取来调用，把工具 handler 登记进宿主进程内的 `LocalMcpGateway`：
+
+```python
+from app.plugins.sdk import caps_for
+register_mcp = caps_for("mcp.register", surface="ui")
+register_mcp("browser", mcp_handle, tools=MCP_TOOLS)
+```
+
+配套 `.mcp.json` 用 `type: http` + `url: ${LOCAL_MCP}/browser`，宿主连接前把占位符替换成 gateway 的运行时地址（端口 `:0` 由 OS 分配），走现成的 `streamablehttp_client`。这样 MCP server 不需要外部 python 子进程，打包版也不依赖系统解释器装了 `mcp`/`httpx`。handler 只需返回 `{"text": str}`，gateway 负责包成 `CallToolResult`。插件卸载时宿主按 plugin 自动注销 handler。
 
 ### 界面
 
@@ -244,9 +281,10 @@ cfg = caps.legacy("get_provider_config", "model.config")(
 | `ui.notify` | low | 弹 InfoBar 通知 |
 | `ui.card.show` | low | 显示浮动卡 |
 | `ui.card.hide` | low | 隐藏浮动卡 |
-| `ui.artifacts.show` | medium | 向消息卡片成果栏推送成果条目（image/video/html/text/file 五类分控件；`show(items, target="latest", call_id="")`，返回投递条目数；`ToolResult.artifacts` 字段是工具插件的免声明通道） |
+| `ui.artifacts.show` | medium | 向消息卡片成果栏推送成果条目（image/video/html/text/file 五类分控件；`show(items, target="latest", call_id="")`，返回投递条目数；多次调用按 `path` 累积不覆盖；`ToolResult.artifacts` 字段是工具插件的免声明通道，随消息落库可在重开会话后恢复） |
 | `ui.exclusive` | medium | 独占 UI 模式 |
 | `ui.dialog` | low | 文件 / 目录选择、确认框、单行输入（跟随主题） |
+| `ui.events` | low | 订阅 / 发布 UI 事件总线（主题切换 / 欢迎页刷新 / 全局对话报错 `conversation_error` 等） |
 
 
 页签徽标（任意元素挂到工作台页签，走 slot region 而非能力池）：
@@ -270,12 +308,20 @@ UIPluginRegistry.get_instance().register_slot_entry(
 | ID | level | 说明 |
 |---|---|---|
 | `stream.subscribe` | medium | 订阅对话流事件（工具调用 / 结果 / 流起止 / 错误 / 上下文更新 / 会话切换） |
+| `stream.errors` | medium | 订阅**宿主窗口**对话报错事件（结构化：窗口/服务商/模型/错误类型）。**全局监听**（所有窗口）走 `ui.events` 订阅 `conversation_error` 事件 |
 | `window.active` | low | 当前活跃聊天窗口**对象**（要调它的方法时用这个） |
 | `window.current` | low | 当前窗口的**语义快照** dict（只读字段：backend/session_id/project/workdir） |
 | `window.host` | low | 宿主顶层窗口（弹窗 / InfoBar 的合适 parent） |
 | `window.list` | low | 存活窗口 id 集合 |
 | `window.events` | medium | 订阅 tab 切换等窗口级事件 |
 | `window.workbench` | medium | 打开 / 刷新右侧工作台页 |
+
+> **全局对话报错事件**：backend 在错误最终回传时同步发布 `conversation_error` 到 `ui.events` 总线（与窗口内 `stream.errors` 同源，payload 相同）。字段：`window_id` / `session_id` / `provider` / `model` / `message` / `error_type` / `timestamp`；`error_type` 粗分类为 `timeout` / `rate_limit` / `auth` / `network` / `unknown`。全局监听插件（如报错自动换模型）用它收所有窗口的事件，再按 `window_id` 调 `model.set` / `session.send` 定向处理：
+>
+> ```python
+> bus = caps_for("ui.events")()
+> bus["subscribe"]("conversation_error", lambda p: handle(p["window_id"], p["error_type"]))
+> ```
 
 > **选哪个**：只想要字段 → `window.current`（拿不到窗口对象，无从摸私有状态）；
 > 需要**调窗口的方法**（如 `win._on_history_session_selected(...)`）→ `window.active`。
@@ -318,16 +364,36 @@ caps["stream.subscribe"]({
 | `sync.register` | **high** | 把插件数据接入云端同步（数据外发） |
 | `team.read` | low | 团队成员 / 角色 / 运行状态（只读门面，写操作不可见） |
 | `team.send` | medium | 向团队成员派发任务邮件（写对方邮箱） |
+| `team.session` | **high** | 团队历史会话恢复 / 归档 / 进入成员会话（跨窗口开标签页） |
 
 ### 存储
 
 | ID | level | 说明 |
 |---|---|---|
 | `storage.data_dir` | low | 插件持久化数据根目录 `<app_data>`（插件自拼 `plugin_data/<name>/` 自用） |
+| `storage.db` | **high** | 通用数据库执行权限（受限代理：表名须 `plugin_<name>_` 前缀，禁 ATTACH/PRAGMA/VACUUM） |
 
 只给根目录：CapabilityPool 的 provider 全局共享、调用不传插件名，per-plugin
 目录隔离没有现成机制。目录约定与 E1 配置契约（`plugin_data/<name>/config.json`）
 一致。
+
+`storage.db` 给的是**受限代理**（`PluginDBProxy`）而不是 `DatabaseManager` 句柄：
+插件表与主程序表共用一个库，直接给句柄等于把 `sessions` / `messages` 等业务表
+一并交出去。代理做了两道约束：
+
+1. 语句白名单：只允许 SELECT / INSERT / UPDATE / DELETE / REPLACE / CREATE / DROP /
+   ALTER / WITH 开头的单段语句；ATTACH / DETACH / PRAGMA / VACUUM / LOAD_EXTENSION
+   一律拒绝（这几个能绕过表名前缀约束，甚至读写文件）。
+2. 表名前缀：语句里出现的表名必须带 `plugin_<name>_` 前缀，`sqlite_*` 系统表拒绝。
+
+```python
+db = caps["storage.db"]          # PluginDBProxy
+db.execute(f"CREATE TABLE IF NOT EXISTS {db.table('task')} (id TEXT, body TEXT)", ())
+db.query(f"SELECT * FROM {db.table('task')} WHERE id=?", ("t1",))
+```
+
+定位是**防手滑**而非防恶意：插件在本机是可信代码，真要绕过的人可以直接 import
+sqlite3 自己开库（这也正是把它标 high 的原因）。
 
 ### 基础（恒放行）
 
@@ -344,6 +410,7 @@ caps["stream.subscribe"]({
 |---|---|---|
 | `cache.purge` | low | 清理主程序进程内 LRU 缓存（HTML 渲染 / token 估算 / grep 编译） |
 | `config.read` | medium | 按 key 读主程序配置项（非敏感标量） |
+| `config.write` | medium | 按 key 写主程序配置项（仅已声明项；密钥类字段一律拒绝） |
 | `process.start` | **high** | 启动后台进程（argv 数组、无 shell；宿主退出即全杀） |
 
 `process.start` 启动的进程**绑定宿主存续期**（2026-10 定稿）：每个进程入专属

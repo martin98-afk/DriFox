@@ -27,11 +27,17 @@
 """
 
 from pathlib import Path
+import re
 
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+# [T22] DOM 注入主路径在 CodeWebViewer（Chromium 载体），不在 message_card.py；
+# markdown_block_viewer.py 里存在同名副本但那是纯 Qt 渲染器路径，不是本用例
+# 要守的对象。两个源文件分工：card_viewers.py 守 viewer 侧，message_card.py
+# 守 MessageCard 侧（_apply_viewer_height / preview 退出 / cleanup）。
 SRC = REPO_ROOT / "app" / "widgets" / "message_card.py"
+SRC_VIEWER = REPO_ROOT / "app" / "widgets" / "card_viewers.py"
 
 
 @pytest.fixture(scope="module")
@@ -39,16 +45,26 @@ def src_text() -> str:
     return SRC.read_text(encoding="utf-8")
 
 
-def test_perf_append_text_incremental_skips_when_hidden(src_text: str):
+@pytest.fixture(scope="module")
+def viewer_src() -> str:
+    return SRC_VIEWER.read_text(encoding="utf-8")
+
+
+def test_perf_append_text_incremental_skips_when_hidden(viewer_src: str):
     """流式增量 DOM 注入（_append_text_incremental）在 viewer 不可见时早返回。
 
     不可见期间 Chromium 停止累积 DOM，preview 退出后首帧 paint 不需重排整页。
+
+    [T22] 扫描目标为 card_viewers.py 的 CodeWebViewer —— 它才是 Chromium DOM
+    注入主路径；message_card.py 只是调用方，无此方法。
     """
-    # 取 CodeWebViewer._append_text_incremental 函数体
-    start = src_text.find("def _append_text_incremental(self, text: str):")
-    assert start != -1, "未找到 CodeWebViewer._append_text_incremental 定义"
-    end = src_text.find("\n    def ", start + 1)
-    body = src_text[start:end]
+    # 取 CodeWebViewer._append_text_incremental 函数体。
+    # 签名匹配放宽容忍可选的 `-> None` 返回注解（源码演进可能补注解）。
+    m = re.search(r"def _append_text_incremental\(self, text: str\)\s*(?:->\s*None\s*)?:", viewer_src)
+    assert m is not None, "未找到 CodeWebViewer._append_text_incremental 定义"
+    start = m.start()
+    end = viewer_src.find("\n    def ", start + 1)
+    body = viewer_src[start:end]
 
     # 必须有 isVisible() 守卫
     assert "self.isVisible()" in body, (

@@ -51,12 +51,13 @@ class _StubPanel:
     """
 
     def __init__(self):
-        from app.widgets.tab_manager_window import _EXPANDED_MIN_CONTENT_WIDTH
+        from app.widgets.tab_manager_window import _COLLAPSED_PANEL_WIDTH, _EXPANDED_MIN_CONTENT_WIDTH
 
         self._collapsed = False
         self._collapsed_by_squeeze = False
         self._animating = False
         self._auto_collapse_width = _EXPANDED_MIN_CONTENT_WIDTH
+        self._collapsed_min_width = _COLLAPSED_PANEL_WIDTH
         self._auto_collapse_suppressed = False
         self.sync_calls = 0
         self.toggle_btn_calls = 0
@@ -66,6 +67,7 @@ class _StubPanel:
 
     def sync_collapsed_ui(self):
         self.sync_calls += 1
+
 
     def set_auto_collapse_suppressed(self, suppressed):
         self._auto_collapse_suppressed = suppressed
@@ -187,3 +189,20 @@ def test_evaluate_squeeze_collapse_respects_collapsed_and_animating(qapp):
     win2._tab_panel._animating = True
     assert TabManagerWindow._evaluate_squeeze_collapse(win2) is False
     assert win2._tab_panel._collapsed is False
+
+
+def test_auto_expand_accounts_for_workbench_width(qapp):
+    """自动展开空间判定必须扣除工作台占位
+
+    回归：漏扣时「左栏 + 聊天最小宽 + 工作台」实际放不下的布局会被判成
+    放得下，展开请求落地后 chat 被挤破最小宽、左栏再被折回（弹动）。
+    """
+    host = _StubWindow(60, total=0)
+    host._splitter = _StubSplitter([60, 440, 600])  # 总宽 1100，工作台 600
+    host._saved_panel_frame_width = 201
+    host._tab_panel._collapsed = True
+    host._tab_panel._collapsed_by_squeeze = True
+    host._maybe_restore_workbench_after_squeeze = lambda **kw: None
+    TabManagerWindow._maybe_auto_expand_after_squeeze(host, growth_required=False)
+    assert host._tab_panel._collapsed is True  # 保持折叠
+    assert host.toggled == []  # 未发起展开

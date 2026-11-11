@@ -506,8 +506,10 @@ def unwrap_secrets(data: Dict[str, Any], store, mode: str = MODE_KEYRING, passwo
     可穿透到 item.value；不可变 str 类扁平项写不回 item.value，禁止加入本函数范围。
 
     keyring 模式：
-    - 文件值非空（旧版明文残留）→ 迁入 keyring，内存保留明文，运行不中断；
-    - 文件值空 → 从 keyring 取回填内存；
+    - 文件值非空且非密文（旧版明文残留）→ 迁入 keyring，内存保留明文，运行不中断；
+    - 文件值空或为密文（云端 password 模式残留）→ 从 keyring 取回填内存；
+      密文绝不能当明文写进凭证库：后续回填会把它当 key 用（401），
+      且覆盖掉本机原本可用的明文条目；
     - keyring 无条目（新机器）→ 保持空，由用户重输；
     - store 不可用 → 整体旁路。
 
@@ -525,11 +527,11 @@ def unwrap_secrets(data: Dict[str, Any], store, mode: str = MODE_KEYRING, passwo
                 continue
             account = provider_account(str(cfg_id))
             key = str(info.get("API_KEY") or "")
-            if key:
+            if key and not is_ciphertext(key):
                 store.set(account, key)
             else:
                 back = store.get(account)
-                if back:
+                if back and not is_ciphertext(back):
                     info["API_KEY"] = back
         return
 

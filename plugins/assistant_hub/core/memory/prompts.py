@@ -1,35 +1,12 @@
 # -*- coding: utf-8 -*-
-"""prompts.py — 记忆系统说明书 + 经验体系 LLM 模板（中文）。
+"""prompts.py — 记忆系统说明书（中文）。
 
 结构对齐 WorkBuddy 的 workbuddy-memory-system.md（三层记忆规范），
-品牌词全部替换为 drifox。编译/传送带（openhanako 系）prompt 已随管线删除。
+品牌词全部替换为 drifox。写入由模型经 memory_write 自主完成，
+后台整理/反思的 LLM 模板已随管线一并删除。
 """
 
 from typing import Dict, List
-
-_SYSTEM = "你是记忆整理器。输出面向 LLM 回读而非人类阅读：记忆碎片式高密度条目，零冗余。只输出要求的内容，不解释，不加 markdown 代码围栏。"
-
-# 各模板共用的高密度输出风格：碎片化条目，形式像人类记忆，内容保真不能松
-_STYLE = (
-    "输出风格（读者是 LLM，非人类）：\n"
-    "- 一条一碎片：`[标签] 对象: 事实`，一行一条，每行 ≤60 字符，写不下拆成多条；标签取 [事实][决策][偏好][坑]，无合适则省略\n"
-    "- 只写固定内容：已完成的进展、事实、决策、偏好/用户习惯、坑；\n"
-    "  禁写待办、计划、未完成事项等实时性状态（它们天然过时，读了误导）\n"
-    "- 禁完整句、禁连接词、禁修饰语；主语可省。如「修 persona.py 打包丢 getpass」，\n"
-    "  不写「我们发现并修复了 persona.py 中的打包问题」\n"
-    "- 数字/路径/函数名/API/错误原文逐字保留，不翻译不改写、不自造缩写\n"
-    "- 时间用绝对日期（如 09-03），禁「昨天/上次/最近」\n"
-    "- 每条自包含，脱离上下文可解码；禁「同上」「见前」\n"
-    "- 不确定的信息不写，禁止脑补\n"
-)
-
-
-def _msg(user_text: str) -> list:
-    return [
-        {"role": "system", "content": _SYSTEM},
-        {"role": "user", "content": user_text},
-    ]
-
 
 # ── 记忆系统说明书（BuildSystemPrompt 注入，照抄 WorkBuddy 结构）────
 
@@ -39,12 +16,15 @@ def build_memory_system(
     project_dir: str,
     limits: Dict[str, int] | None = None,
     sections: List[Dict[str, str]] | None = None,
+    quotas: Dict[str, int] | None = None,
+    tone_ratio: int = 30,
 ) -> str:
     """生成记忆体系说明书（对齐 WorkBuddy memory_system fragment 的 Layer 2/3 纪律）。
 
     只写分层结构与读写纪律：各层范围、何时写、写什么、检索选源、角色边界。
     操作语义（参数、截断拒写）归工具 schema；蒸馏完全由门禁指令注入，此处零提及。
     sections 非空时追加全局记忆分区纪律（空 = 自由格式，说明书中不出现分区段）。
+    quotas/tone_ratio 由用户的感性/理性滑杆决定，只影响分区段的配额提示。
     """
     g_limit = (limits or {}).get("global", 4000)
     p_limit = (limits or {}).get("project", 3000)
@@ -60,19 +40,32 @@ def build_memory_system(
         "写入前提只有一个：这条内容离开当前项目后仍然成立。换一个项目就不成立的内容，\n"
         "一律写项目记忆，不要写这里。\n"
         "\n"
-        "该进全局记忆的四类：\n"
-        "- 用户的硬性要求：表达语言、禁用项、交互习惯。关于用户而非关于代码，换项目照样成立\n"
+        "全局记忆有两种价值，缺一种就会退化成工作台账或正确的废话：\n"
+        "- 理性：让下一个项目少犯错。可复用、可验证。\n"
+        "- 感性：让下一次更像个人。对这个人的稳定理解、对自己位置的认识。\n"
+        "  感性条目不要求独特，只要求真实——「不独特」正是它成立的原因（谁都遇到的事，\n"
+        "  才是稳定的人性）。\n"
+        "\n"
+        "理性的两类（该进全局）：\n"
         "- 工具与平台的客观坑：某工具/命令/框架自身的固有行为，谁用都会撞上\n"
         "- 验证方法论：判断「改对了没有」的通用框架（对照实验、指标校验、交叉验证）\n"
-        "- 协作纪律：多会话/多 agent 并发下的通用生存法则\n"
         "\n"
-        "不该进全局记忆的三类（写错层会误导其他项目）：\n"
+        "感性的两类（该进全局）：\n"
+        "- 这个人的样子：他怎么想事、在意什么、什么让他不耐烦、他的品味与雷区。\n"
+        "  写成「具体行为 + 我的解读」，例如「他说先不做多半是已在心里权衡过成本，\n"
+        "  这时追问细节会被嫌烦，直接给判断他才接话」。禁形容词标签（「用户喜欢简洁」）。\n"
+        "- 我自己：我是谁、我和他是什么关系、我该以什么姿态出现、\n"
+        "  我在哪些事上会反复犯同一个错。\n"
+        "\n"
+        "不该进全局记忆（写错层会误导其他项目）：\n"
         "- 项目架构知识（本项目实际有几层、哪个模块负责什么）→ 项目记忆\n"
         "- 具体业务规则（某个服务/接口/第三方的约定）→ 项目记忆\n"
         "- 过程与临时状态（今天修了什么、正在试什么方案）→ 工作日志，或干脆不记\n"
+        "- 正确的废话（「用户重视效率」「用户喜欢清晰表达」）→ 什么都不算，删掉\n"
         "\n"
         "边界判据：「工具坑」与「业务规则」最易混。工具坑的适用面是「任何用这个工具的人」，\n"
         "业务规则的适用面是「这个项目的人」。前者进全局，后者进项目。\n"
+        "感性条目的判断标准：它能不能改变我下次的反应。改变不了就是标签，不是记忆。\n"
         "除用户明确要求，不存密钥。\n"
         "\n"
         "# 项目级工作记忆（scope=project / daily）\n"
@@ -83,7 +76,13 @@ def build_memory_system(
         "\n"
         "何时写：完成实质工作后立即记录。实质工作包括：修复 bug、改动或新建功能、\n"
         "重构或架构调整、选定技术方案；用户交代项目约定或偏好时，同时更新项目 MEMORY.md。\n"
+        "对这个人的理解发生变化时，立刻写——不要等他要求。典型时刻：他的判断出乎你预料、\n"
+        "他对同一件事反复表达同一种态度、他的情绪或节奏明显变化。\n"
         "不写过程性信息（搜索结果、临时路径、工具报错）——只留跨会话仍有价值的结论。\n"
+        "\n"
+        "素材来源只有两个：**用户亲口说过/做过的事**，以及**工作日志里记下的实际过程**。\n"
+        "system prompt、人格设定、AGENTS.md、技能文档是设定或参考，不是用户说的话；\n"
+        "从它们反推出来的「记忆」是自我循环，只会让条目越长越像正确的废话。\n"
         "\n"
         "怎么读：按需选源，不必全读。\n"
         "- 本项目过去的工作 → 近期日志（新→旧）与项目 MEMORY.md\n"
@@ -92,34 +91,49 @@ def build_memory_system(
         "\n"
         "角色边界：记忆只是补充，不替代正常回复、最终答案或用户要的交付物。"
     )
-    if not sections:
-        return base
-    parts = [
-        base,
-        "",
-        "# 全局记忆分区（强制）",
-        "全局记忆必须按下列分区组织；每条内容必须归属某个分区，"
-        "禁出现清单外的 ## 标题、禁在分区块内用 # 小节、禁在分区外写 - 条目：",
-        _sections_block(sections),
-        "",
-        "分区后面那段「介绍」是用户对这个分区关注点的定义，不是装饰：整理时按它判断"
-        "一条内容该归属哪里，也按它判断该分区内哪些条目已经偏离主题、需要重分配或删除。",
-        "",
+    # 分区纪律：必须是**完全静态**的文本。分区名/配额/现有条目全不写进来，
+    # 否则用户加个分区、拖下天平、模型写条记忆，system prompt 就变，
+    # 服务端前缀 KV 缓存整段作废。动态部分一律走 memory_read(scope=sections)。
+    partition = (
+        "# 全局记忆分区（强制）\n"
+        "全局记忆按分区组织，每条内容必须归属某个分区，禁出现清单外的 ## 标题、"
+        "禁在分区块内用 # 小节、禁在分区外写 - 条目。\n"
+        "分区清单（每区收什么、基调、字符配额、现有条目与序号）用 memory_read(scope=sections) 拉取："
+        "首次往某区写入前、或要整理全局记忆时必读，不读就不知道有哪些分区。\n"
         "记一条用 memory_write(scope=global, mode=append, section=<分区名>)；"
-        "整体整理用 mode=replace，正文按 ## 分区名 组织，不确定能否通过校验时先 dry_run=true 试写。",
-    ]
-    return "\n".join(parts)
+        "整体整理用 mode=replace，正文按 ## 分区名 组织，不确定能否通过校验时先 dry_run=true 试写。\n"
+        "配额是上限不是任务：写不满就空着，为填满写标签式空话比留白更糟。"
+        "超配额时用 mode=delete 删一条腾空间（比反复重写全文可控），再追加。"
+    )
+    return base + "\n\n" + partition
 
+def _sections_block(
+    sections: List[Dict[str, str]],
+    quotas: Dict[str, int] | None = None,
+) -> str:
+    """分区清单文本（- 名称：完整归类规则（基调，配额））；空 schema 返回空串。
 
-def _sections_block(sections: List[Dict[str, str]]) -> str:
-    """分区清单文本（- 名称：完整归类规则）；空 schema 返回空串。"""
+    quotas 为 None 时只出名称+hint：system prompt 里不放大段可变文本，
+    否则拖一次天平就得重建整个 system prompt，服务端前缀缓存全废。
+    """
     lines = []
     for s in sections or []:
         name = str(s.get("name") or "").strip()
         if not name:
             continue
+        if quotas is None:
+            # 轻量形态：只给名字+一句话，保证写对区；完整规则走工具按需读
+            hint = str(s.get("hint") or "").strip()
+            lines.append(f"- {name}：{hint}" if hint else f"- {name}")
+            continue
         text = str(s.get("detail") or s.get("hint") or "").strip()
-        lines.append(f"- {name}：{text}" if text else f"- {name}")
+        line = f"- {name}：{text}" if text else f"- {name}"
+        tone = str(s.get("tone") or "rational").strip().lower()
+        line += f"（{'感性' if tone == 'emotional' else '理性'}区"
+        if name in quotas:
+            line += f"，配额 {quotas[name]} 字符"
+        line += "）"
+        lines.append(line)
     return "\n".join(lines)
 
 
@@ -131,6 +145,8 @@ def build_distill_gate(
     project_file: str,
     global_file: str,
     sections: List[Dict[str, str]] | None = None,
+    quotas: Dict[str, int] | None = None,
+    tone_ratio: int = 30,
 ) -> str:
     """生成蒸馏指令：新的一天首次写日志前，必须先蒸馏全部未蒸馏旧日志。
 
@@ -139,7 +155,7 @@ def build_distill_gate(
     """
     date_list = "、".join(dates)
     reads = "\n".join(f"   memory_read(scope=daily, date={d})" for d in dates)
-    global_step = _distill_global_step(global_file, sections)
+    global_step = _distill_global_step(global_file, sections, quotas, tone_ratio)
     return f"""本次写入被暂时拒绝：今天的第一条日志之前，必须先蒸馏所有未蒸馏的旧日志。
 
 待蒸馏日志：{date_list}
@@ -151,6 +167,8 @@ def build_distill_gate(
 
 2. 校对记忆（去伪存真）：逐条核对，移除不实、过时、已被后续实践推翻的内容；
    与 {project_file} 现有条目重复的直接丢弃；数字/路径/错误原文必须与日志一致，禁止脑补。
+   来源判据：每条都要能对应到日志里的某段过程、或用户亲口说过的话；
+   从系统提示词、人格设定、AGENTS.md、技能文档反推出来的条目一律删（那不是用户说的，是设定）。
 
 3. 蒸馏进项目记忆：把校对后仍成立的内容合并进 {project_file}
    （memory_write scope=project 整体更新，先读后写，保持精简，遵守 AGENTS.md 分层铁律）。
@@ -163,26 +181,43 @@ def build_distill_gate(
 6. 全部完成后，重试刚才的日志写入。"""
 
 
-def _distill_global_step(global_file: str, sections: List[Dict[str, str]] | None) -> str:
-    """蒸馏第 4 步：无分区时保持原自由整理；有分区时改为强制重分配。"""
+def _distill_global_step(
+    global_file: str,
+    sections: List[Dict[str, str]] | None,
+    quotas: Dict[str, int] | None = None,
+    tone_ratio: int = 30,
+) -> str:
+    """蒸馏第 4 步：无分区时自由整理；有分区时按理性/感性分区强制重分配。"""
     if not sections:
         return (
-            f"4. 严选全局记忆：只把「最珍贵 **且** 与项目无关」的经验放进 {global_file}\n"
-            "   （memory_write scope=global 整体更新）。两个条件缺一不可：珍贵但不独特的不进、\n"
-            "   珍贵但属于本项目特有的不进；没有合格条目就不改全局记忆，宁缺勿滥。"
+            f"4. 严选全局记忆：只把「与项目无关、离开当前项目仍成立」的内容放进 {global_file}\n"
+            "   （memory_write scope=global 整体更新）。两种价值都要看：\n"
+            "   理性——可复用、可验证的工具坑与方法；\n"
+            "   感性——对这个人的稳定理解、对自己位置的认识（不要求独特，只要求真实，\n"
+            "   且能改变我下次的反应；「用户喜欢简洁」这类标签不算）。\n"
+            "   没有合格条目就不改全局记忆，宁缺勿滥。"
         )
-    names = _sections_block(sections)
+    g_limit = sum(int(v) for v in (quotas or {}).values()) or 4000
+    emo = int(g_limit) * max(0, min(100, int(tone_ratio))) // 100
+    names = _sections_block(sections, quotas)
     return (
         f"4. 严选全局记忆并按分区整理 {global_file}（memory_write scope=global 整体更新）：\n"
-        "   入选标准不变：只收「最珍贵 **且** 与项目无关」的经验；两个条件缺一不可，\n"
-        "   珍贵但不独特的不进、属于本项目特有的不进；没有合格条目不改全局记忆。\n"
+        "   入选前提不变：与项目无关、离开当前项目仍成立。在此之上分两种价值：\n"
+        "   理性（知识）：可复用、可验证的工具坑与方法。同一坑只留一条，不写重复踩坑的流水账。\n"
+        "   感性（理解）：对这个人的稳定理解、对自己位置的认识。\n"
+        "     入选标准是「真实且能改变我下次的反应」，**不要求独特**——\n"
+        "     不独特正是它成立的原因（谁都遇到的事才是稳定的人性）。\n"
+        "     典型候选：他的判断出乎你预料的地方、他对同一件事反复表达的同一种态度、\n"
+        "     他明显不耐烦或明显满意的时刻、你自己反复犯的同一个错。\n"
+        "     必须写成「具体行为 + 我的解读」；形容词标签要么改写要么删。\n"
         "\n"
         "   全局记忆只接受下列分区，每条内容必须归属其中，禁自建分区、禁「其他/杂项」类兜底区：\n"
         f"{names}\n"
+        f"   感性占 {tone_ratio}%：感性池 {emo} 字符、理性池 {int(g_limit) - emo} 字符，同侧各区平分。\n"
         "\n"
-        "   每个分区后面的介绍是用户对该分区关注点的定义，按它判断归属，不要只看分区名：\n"
-        "   介绍里说「不写 X」的内容一律不进该区；介绍指向的关注点在本分区一条都没有时，\n"
-        "   优先从其他分区的条目里找匹配的搬进来，而不是放着空。\n"
+        "   归属判定：先判这条记忆改变我什么——改变做事方式进理性区，改变我对这个人\n"
+        "   或对自己位置的看法进感性区。两边都像时按这个判，不按话题。\n"
+        "   分区介绍说「不写 X」的内容一律不进该区；某区一条都没有时优先从其他分区找匹配的搬进来。\n"
         "\n"
         "   现有条目逐条重判，按固定顺序决策（保证每次结果一致，不会在分区之间来回搬）：\n"
         "   a) 条目所在分区仍在清单内 → 检查它是否与该分区介绍明显不符；\n"
@@ -192,47 +227,13 @@ def _distill_global_step(global_file: str, sections: List[Dict[str, str]] | None
         "   e) 任何分区都不匹配 → 删除该条，禁强塞；\n"
         "   f) 位于清单外标题下的孤儿条目按同样规则重分配，归属不了就删。\n"
         "\n"
+        "   配额是上限不是任务：某区写不满就留着，禁为凑数编条目；超配额时先合并同义条目、\n"
+        "   再删过时内容，仍超说明该区该精简到只留最锋利的。\n"
+        "\n"
         "   格式硬要求：只有 ## 分区名 可作标题（分区名逐字照抄清单），条目一律 - 开头，\n"
         "   分区块内禁止 # 小节，分区外的总述区禁止 - 条目。\n"
         "   写之前先 memory_write(scope=global, mode=replace, dry_run=true) 提交候选，\n"
         "   校验不通过会返回结构化诊断（unknown_titles/header_in_block/preamble_bullets/skeleton），\n"
         "   按诊断改完再提交；反复失败就直接照 skeleton 填。\n"
         "   校验通过后去掉 dry_run 真写。全局整理未成功前不要打标。"
-    )
-
-
-# ── 经验库压缩 ──────────────────────────────────────────
-
-
-def build_consolidate(entries: List[Dict[str, str]]) -> list:
-    lines = "\n".join(f"- [{e.get('category', '')}] {e.get('content', '')}" for e in entries)
-    return _msg(
-        "你是经验库的压缩器。下面是一个 AI 助手全部工作经验条目（带当前分类）。\n"
-        "压缩合并：语义相近的多条合并成一条、重复的只留一条、过时或被新实践覆盖的删掉，"
-        "长条目改写成碎片表述。跨分类的重复也一并合并，相近分类可合并成一个新分类。\n"
-        "保留全部仍然有效的事实，禁止编造原文不存在的内容。\n"
-        "- 每条仍是一条碎片：对象+动作+关键细节，具体可执行\n"
-        "- 分类纪律：分类宜少而稳定，优先沿用输入中已有的分类，相近分类可合并；确有必要才新建\n"
-        '- 只输出 JSON 数组：[{"category": "...", "content": "..."}]，无可保留内容输出 []\n\n'
-        f"【全部条目（{len(entries)} 条）】\n{lines}"
-    )
-
-
-# ── 经验反思 ────────────────────────────────────────────
-
-
-def build_reflect(identity_and_persona: str, memory_md: str, existing_experience: str) -> list:
-    return _msg(
-        "你是一个 AI 助手的自我反思器。下面是这个助手的人格简介、最近的记忆、以及已有的经验库。\n"
-        "请从**最近的记忆**中提炼出 0-3 条「工作心得」——即这个助手在与用户协作中沉淀出的、"
-        "未来做类似事情时应该记住的做法或教训（例：用户的代码风格偏好、某类任务的有效工作流、踩过的坑）。\n"
-        "要求：\n"
-        "- 只提炼记忆中有依据的心得，不要泛泛的空话（如「要认真负责」）\n"
-        "- content 一条碎片：对象+动作+关键细节，具体可执行\n"
-        "- 分类纪律：分类要少而稳定。必须优先从「已有经验库」里选一个最接近的分类，"
-        "只有现有分类确实装不下时才允许新建；给出分类（≤8 字）\n"
-        '- 只输出 JSON 数组：[{"category": "...", "content": "..."}]，没有心得输出 []\n\n'
-        f"【助手人格】\n{identity_and_persona.strip()[:1500]}\n\n"
-        f"【最近记忆】\n{memory_md.strip()[:4000] or '（空）'}\n\n"
-        f"【已有经验库】\n{existing_experience.strip()[:2500] or '（空）'}"
     )

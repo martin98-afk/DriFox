@@ -23,7 +23,7 @@ def test_command_shaped_args_routed_to_check_command():
     cfg = _cfg()
     cfg.set("delete_protection", True)
     assert sandbox_check_tool("bash", {"command": "cmd /c del x"}, cfg) == "confirm"
-    assert sandbox_check_tool("bg_start", {"command": "cacls C:\\ /g u:F"}, _cfg()) == "deny"
+    assert sandbox_check_tool("background_task", {"command": "cacls C:\\ /g u:F"}, _cfg()) == "deny"
     assert sandbox_check_tool("any_future_cmd_tool", {"command": "git status"}, _cfg()) == "allow"
 
 

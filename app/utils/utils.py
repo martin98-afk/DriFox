@@ -405,12 +405,13 @@ def invalidate_icon_cache():
 
 
 
-def get_local_skills() -> list:
+def get_local_skills(project_dir: str | None = None) -> list:
     """获取本地技能列表，支持多个搜索路径
 
     搜索路径优先级：
     - 已启用插件的 skills/ 目录（PluginManager）
     - 旧路径做回退：app/skills, .opencode/skills, ~/.agents/skills
+    - 插件贡献的动态技能源（ContributionRegistry skill_source，仅 project_dir 非空时求值）
 
     返回字段：
     - name: 技能名称（无前缀，用于 load_skill 内部查找）
@@ -425,7 +426,7 @@ def get_local_skills() -> list:
     # mtime，自动失效；插件启用状态变化会改 PluginManager 内目录 mtime，同样失效。
     # 如需手动失效（极少见），调用 invalidate_skills_cache()。
     global _skills_cache, _skills_cache_key
-    cache_key = _compute_skills_cache_key()
+    cache_key = _compute_skills_cache_key(project_dir)
     if _skills_cache is not None and _skills_cache_key == cache_key:
         return _skills_cache
 
@@ -457,6 +458,45 @@ def get_local_skills() -> list:
                         results.append(entry)
     except (ImportError, Exception):
         pass
+
+    # ---- Phase 1.5: 插件贡献的动态技能源（能力池 skill_source） ----
+    if project_dir:
+        try:
+            from app.plugins.registries.contribution_registry import ContributionRegistry
+
+            contrib_wd = Path(project_dir)
+            for c_plugin, c_name, c_entry in ContributionRegistry.get_instance().iter_skill_sources():
+                c_provider = c_entry.get("provider")
+                if c_provider is None:
+                    continue
+                try:
+                    c_items = c_provider(contrib_wd) or []
+                except Exception as e:
+                    import logging
+                    logging.getLogger(__name__).warning(
+                        f"[Skills] 贡献技能源 {c_plugin}/{c_name} 求值失败: {e}"
+                    )
+                    continue
+                for c_item in c_items:
+                    if not isinstance(c_item, dict) or not c_item.get("name"):
+                        continue
+                    if c_item["name"] in seen:
+                        continue
+                    seen.add(c_item["name"])
+                    c_qualified = c_item.get("qualified_name") or c_item["name"]
+                    seen_qualified.add(c_qualified)
+                    results.append({
+                        "name": c_item["name"],
+                        "qualified_name": c_qualified,
+                        "description": c_item.get("description", ""),
+                        "plugin_name": None,
+                        "is_system": False,
+                        "path": str(c_item.get("path", "")),
+                        "source": c_item.get("source") or c_plugin,
+                        "auto_enable": bool(c_item.get("auto_enable", False)),
+                    })
+        except ImportError:
+            pass
 
     # ---- Phase 2: 旧路径回退（无插件上下文） ----
     fallback_dirs = [
@@ -490,26 +530,73 @@ def get_local_skills() -> list:
 _skills_cache: list | None = None
 _skills_cache_key: tuple = ()
 # key 计算的二级 TTL 缓存（见 _compute_skills_cache_key docstring）
-_SKILLS_KEY_TTL = 1.0  # 秒
+# Windows + 杀软环境实测：单次目录枚举 ~26ms、单次 stat ~6ms，一轮 key
+# 扫描 250~530ms（主线程阻塞）。故放到 30s，即时感知改由
+# invalidate_skills_cache() 承担（plugins/builtin_reloaders.py 插件变更时已调），
+# TTL 只作「外部直接改文件」的兜底轮询窗口。
+_SKILLS_KEY_TTL = 30.0  # 秒
 _skills_key_cache: tuple | None = None
 _skills_key_cached_at: float = 0.0
 
 
-def _compute_skills_cache_key() -> tuple:
-    """计算 skills 缓存 key：(扫描目录数, 文件数, max_mtime, total_size)
+def _compute_skills_cache_key(project_dir: str | None = None) -> tuple:
+    """计算 skills 缓存 key：(project_dir, 动态源签名, 扫描目录数, 文件数, max_mtime, total_size)
 
-    比逐文件 stat 列表更轻：单次扫描 ~2 ms（vs 旧 12 ms）。
-    任何 SKILL.md / skill.md 增删改都改 mtime 或 count，自动失效。
-
-    二级 TTL 缓存：key 计算本身要 stat 全部技能目录的 SKILL.md，
-    Windows + 杀软环境下单次可达数十 ms。技能开关切换等短时间
-    密集调用场景（每次 toggle 走 2~3 遍）没必要每遍都真扫盘，
-    1 秒内的重复调用直接复用上次结果；1 秒足以及时感知文件增删改。
+    project_dir 纳入 key：多标签页开不同项目时，动态技能源按项目求值，切项目自动失效。
+    动态源签名：每个 skill_source 的 watched_dirs 内技能文件的
+    (目录存在数, 文件数, max_mtime)，每次现算不吃 TTL（目录小、量级 ms；
+    吃 TTL 会让项目内新技能最长 30s 不可见，违背「放进目录即被发现」）。
+    静态部分保留二级 TTL 窗口内复用（原有机制不变）。
     """
     global _skills_key_cache, _skills_key_cached_at
     now = time.monotonic()
+
+    # ---- 动态源签名：每次现算 ----
+    contrib_parts: list[tuple] = []
+    if project_dir:
+        try:
+            from app.plugins.registries.contribution_registry import ContributionRegistry
+
+            wd = Path(project_dir)
+            for c_plugin, c_name, c_entry in ContributionRegistry.get_instance().iter_skill_sources():
+                wf = c_entry.get("watched_dirs")
+                c_dirs: list[Path] = []
+                if wf is not None:
+                    try:
+                        c_dirs = [Path(d) for d in (wf(wd) or [])]
+                    except Exception:
+                        c_dirs = []
+                c_exists = 0
+                c_files = 0
+                c_mtime = 0.0
+                for c_base in c_dirs:
+                    if not c_base.exists():
+                        continue
+                    c_exists += 1
+                    try:
+                        for c_skill in c_base.iterdir():
+                            if not c_skill.is_dir():
+                                continue
+                            if c_skill.name.startswith(("_", ".")):
+                                continue
+                            for c_fname in ("SKILL.md", "skill.md"):
+                                c_f = c_skill / c_fname
+                                if c_f.exists():
+                                    c_files += 1
+                                    try:
+                                        c_mtime = max(c_mtime, c_f.stat().st_mtime)
+                                    except OSError:
+                                        pass
+                                    break
+                    except OSError:
+                        pass
+                contrib_parts.append((c_plugin, c_name, c_exists, c_files, c_mtime))
+        except ImportError:
+            contrib_parts.append(("contrib", "unavailable"))
+
+    # ---- 静态部分：二级 TTL 缓存 ----
     if _skills_key_cache is not None and now - _skills_key_cached_at < _SKILLS_KEY_TTL:
-        return _skills_key_cache
+        return (project_dir or "", tuple(contrib_parts), *_skills_key_cache)
 
     scan_dirs: list[Path] = []
 
@@ -561,7 +648,7 @@ def _compute_skills_cache_key() -> tuple:
     key = (file_count, max_mtime, total_size)
     _skills_key_cache = key
     _skills_key_cached_at = now
-    return key
+    return (project_dir or "", tuple(contrib_parts), *key)
 
 
 def invalidate_skills_cache() -> None:
@@ -614,14 +701,14 @@ def _parse_skill_dir(skill_dir: Path, plugin_name: str | None = None,
     }
 
 
-def get_skill_by_name(name: str) -> dict | None:
-    """根据名称获取技能信息
+def get_skill_by_name(name: str, project_dir: str | None = None) -> dict | None:
+    """根据名称获取技能信息（project_dir 非空时含贡献动态技能源）
 
     支持两种匹配：
     1. skill["name"] — frontmatter 中定义的 name（主匹配）
     2. skill["path"] 的文件夹名 — 技能文件夹名（回退匹配）
     """
-    skills = get_local_skills()
+    skills = get_local_skills(project_dir)
     # 第一轮：按 frontmatter name 精确匹配
     for skill in skills:
         if skill["name"] == name:
@@ -634,7 +721,7 @@ def get_skill_by_name(name: str) -> dict | None:
     return None
 
 
-def load_skill(name: str) -> tuple[bool, str, str]:
+def load_skill(name: str, project_dir: str | None = None) -> tuple[bool, str, str]:
     """加载指定技能，返回 (成功, 内容, 工作目录)
 
     支持两种名称格式：
@@ -643,6 +730,7 @@ def load_skill(name: str) -> tuple[bool, str, str]:
 
     Args:
         name: 技能名称（可选带 plugin: 前缀）
+        project_dir: 项目目录（非空时含贡献动态技能源）
 
     Returns:
         (成功标志, 内容或错误信息, 技能工作目录路径)
@@ -690,7 +778,7 @@ def load_skill(name: str) -> tuple[bool, str, str]:
 
     # 回退：按 frontmatter name 查找（处理 name ≠ 文件夹名的场景）
     if not found_path:
-        skill_info = get_skill_by_name(name)
+        skill_info = get_skill_by_name(name, project_dir)
         if skill_info:
             skill_dir = Path(skill_info["path"])
             for fname in ("SKILL.md", "skill.md"):
@@ -845,6 +933,8 @@ class AsyncUpdateChecker(QThread):
         super().__init__(parent)
         # 使用 weakref 避免循环引用导致 parent 被删除后仍持有引用
         self._parent_ref = weakref.ref(parent) if parent else None
+        # True 时检查 Beta 预览版：拉 releases 列表（含 prerelease）而非 latest
+        self.allow_beta = False
 
     @property
     def repo(self):
@@ -888,7 +978,11 @@ class AsyncUpdateChecker(QThread):
             "X-GitHub-Api-Version": "2022-11-28"
         }
         headers = headers | {"Authorization": f"token {self.token}"} if self.token else headers
-        url = f"https://api.github.com/repos/{self.repo}/releases/latest"
+        # Beta 模式拉列表取最新（含 prerelease）；latest 接口恒不返回预发布版
+        if self.allow_beta:
+            url = f"https://api.github.com/repos/{self.repo}/releases?per_page=10"
+        else:
+            url = f"https://api.github.com/repos/{self.repo}/releases/latest"
         import httpx  # [PERF] 延迟导入：仅更新检查路径需要
 
         # 检查更新始终直连 API 域（加速前缀只作用于下载）；
@@ -896,8 +990,9 @@ class AsyncUpdateChecker(QThread):
         async with httpx.AsyncClient(timeout=10.0, **update_proxy.httpx_kwargs()) as client:
             resp = await client.get(url, headers=headers)
             if resp.status_code == 200:
-                logger.debug(f"GitHub API 响应: {resp.json()}")
-                return resp.json()
+                release = self._pick_release(resp.json())
+                logger.debug(f"GitHub API 响应: {release}")
+                return release
             if resp.status_code in (403, 429) and "rate limit" in resp.text.lower():
                 # 限流与一般失败区分提示：匿名配额 60 次/小时/IP，易被共享出口耗尽
                 logger.debug(f"GitHub API 响应: {resp.text}")
@@ -907,28 +1002,48 @@ class AsyncUpdateChecker(QThread):
             self.error.emit(f"GitHub API 请求失败：{resp.status_code}")
             return None
 
+    @staticmethod
+    def _pick_release(data):
+        """从 API 响应选目标 release：latest 接口返回单对象原样透传；
+        列表接口（allow_beta）按序取第一个非 draft 项（含 prerelease）"""
+        if isinstance(data, dict):
+            return data
+        if isinstance(data, list):
+            for item in data:
+                if isinstance(item, dict) and not item.get("draft"):
+                    return item
+        return None
+
     async def fetch_gitee(self):
         headers = {"Authorization": self.token} if self.token else {}
-        url = f"https://gitee.com/api/v5/repos/{self.repo}/releases/latest"
+        # Beta 模式拉列表取最新（含 prerelease）；latest 接口恒不返回预发布版
+        if self.allow_beta:
+            url = f"https://gitee.com/api/v5/repos/{self.repo}/releases?per_page=10"
+        else:
+            url = f"https://gitee.com/api/v5/repos/{self.repo}/releases/latest"
         import httpx  # [PERF] 延迟导入
 
         async with httpx.AsyncClient(timeout=10.0, **update_proxy.httpx_kwargs()) as client:
             resp = await client.get(url, headers=headers)
             if resp.status_code == 200:
-                return resp.json()
+                return self._pick_release(resp.json())
             else:
                 self.error.emit(f"Gitee API 请求失败：{resp.status_code}")
                 return None
 
     async def fetch_gitcode(self):
         headers = {"Authorization": self.token} if self.token else {}
-        url = f"https://gitcode.com/api/v5/repos/{self.repo}/releases/latest"
+        # Beta 模式拉列表取最新（含 prerelease）；latest 接口恒不返回预发布版
+        if self.allow_beta:
+            url = f"https://gitcode.com/api/v5/repos/{self.repo}/releases?per_page=10"
+        else:
+            url = f"https://gitcode.com/api/v5/repos/{self.repo}/releases/latest"
         import httpx  # [PERF] 延迟导入
 
         async with httpx.AsyncClient(timeout=10.0, **update_proxy.httpx_kwargs()) as client:
             resp = await client.get(url, headers=headers)
             if resp.status_code == 200:
-                return resp.json()
+                return self._pick_release(resp.json())
             else:
                 self.error.emit(f"Gitcode API 请求失败：{resp.status_code}")
                 return None

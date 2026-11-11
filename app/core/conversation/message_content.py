@@ -592,6 +592,19 @@ def content_to_markdown(content: Any) -> str:
             if text:
                 parts.append(text)
         elif block_type == "tool_result":
+            # 渲染源瘦身：inline（单行卡：无折叠、无 body）与 none（不渲染）形态的块，
+            # UI 完全不展示结果内容 —— 结果只服务模型上下文。这类字段（result/diff/
+            # echarts）不进渲染用 markdown：markdown 变短 → 每轮重渲染少扫一遍。
+            # 形态由插件注册的 render_mode 声明，主程序不按工具名写死。
+            try:
+                from app.tools.registry import ToolRegistry
+
+                _render_mode = ToolRegistry.get_instance().get_render_mode(block.get("name", ""))
+            except Exception:
+                _render_mode = ""
+            if _render_mode == "none":
+                continue
+            _hide_payload = _render_mode == "inline"
             # 直接从 block 中提取关键参数，避免 JSON 序列化问题
             args = block.get("arguments", {}) or {}
 
@@ -635,6 +648,8 @@ def content_to_markdown(content: Any) -> str:
             # question 工具的回答可能包含多个问题，不截断
             if block.get("name") == "question":
                 result_escaped = _sanitize_result(result_raw)
+            elif _hide_payload:
+                result_escaped = ""
             else:
                 result_escaped = _sanitize_result(result_raw)[:300]
 
@@ -642,14 +657,14 @@ def content_to_markdown(content: Any) -> str:
             tool_call_id = block.get("tool_call_id", "")
 
             # 读取 diff 字段（用于 inline diff 展示）
-            diff_raw = block.get("diff", "") or ""
+            diff_raw = "" if _hide_payload else (block.get("diff", "") or "")
             diff_escaped = ""  # 显式初始化，避免 LSP 误报未绑定
             if diff_raw:
                 # diff 多行内容，直接嵌入
                 diff_escaped = _sanitize_result(str(diff_raw))
 
             # 读取 echarts 字段（用于 DAG 图展示）
-            echarts_raw = block.get("echarts", "") or ""
+            echarts_raw = "" if _hide_payload else (block.get("echarts", "") or "")
 
             tool_lines = [
                 "<tool>",
@@ -710,6 +725,52 @@ def normalize_tool_call(tool_call: Any) -> Optional[Dict[str, Any]]:
     if sig:
         normalized["thought_signature"] = sig
     return normalized
+
+
+# 工具成果条目的落库上限：条目来自任意插件 dict，原样写入会让 messages BLOB 无限膨胀
+_ARTIFACT_MAX_ITEMS = 50
+_ARTIFACT_TEXT_LIMIT = 300
+_ARTIFACT_META_LIMIT = 8
+
+
+def normalize_artifact_items(raw: Any) -> List[Dict[str, Any]]:
+    """工具成果条目白名单归一化（落库与历史恢复共用）
+
+    只保留展示所需字段并封顶条数/长度：成果栏只需要 path/kind/name/caption/
+    尺寸/meta，其他字段（插件私有数据、大文本）不落库。坏条目静默丢弃。
+    """
+    if not isinstance(raw, (list, tuple)):
+        return []
+    out: List[Dict[str, Any]] = []
+    for item in raw[:_ARTIFACT_MAX_ITEMS]:
+        if not isinstance(item, dict):
+            continue
+        path = str(item.get("path") or "").strip()
+        if not path:
+            continue
+        clean: Dict[str, Any] = {"path": path[:1024]}
+        for key in ("kind", "name", "caption"):
+            value = item.get(key)
+            if isinstance(value, str) and value.strip():
+                clean[key] = value.strip()[:_ARTIFACT_TEXT_LIMIT]
+        for key in ("width", "height", "size"):
+            value = item.get(key)
+            if isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0:
+                clean[key] = value
+        meta = item.get("meta")
+        if isinstance(meta, dict):
+            clean_meta: Dict[str, Any] = {}
+            for k, v in list(meta.items())[:_ARTIFACT_META_LIMIT]:
+                if not isinstance(k, str):
+                    continue
+                if isinstance(v, str):
+                    clean_meta[k] = v[:200]
+                elif isinstance(v, (int, float, bool)):
+                    clean_meta[k] = v
+            if clean_meta:
+                clean["meta"] = clean_meta
+        out.append(clean)
+    return out
 
 
 def normalize_message(message: Any) -> Optional[Dict[str, Any]]:
@@ -807,6 +868,14 @@ def normalize_message(message: Any) -> Optional[Dict[str, Any]]:
                 # 用原消息更新持久化（直接回写 message 引用）
                 message["_hook_event"] = _fill_hook_event
 
+        # 流式中途周期落盘的「残缺回复」标记（main_widget._flush_partial_reply）。
+        # 崩溃恢复后这条消息仍在（正常结束会被 worker 的完整消息整体替换掉），
+        # 发送前必须剔除，否则把半截回复当正常历史发给模型。
+        # 与 _x_idx / _identity 同理：白名单外字段会被本函数剥掉，标记一丢就
+        # 再也分不清「模型真说完了」和「进程死在半路」。
+        if message.get("_partial"):
+            normalized["_partial"] = True
+
         if not normalized.get("content") and not normalized.get("tool_calls") and not normalized.get(
                 "reasoning_content"):
             return None
@@ -834,6 +903,11 @@ def normalize_message(message: Any) -> Optional[Dict[str, Any]]:
             normalized["anchors"] = str(message.get("anchors"))
         if message.get("echarts"):
             normalized["echarts"] = str(message.get("echarts"))
+        # 成果条目：重开会话时卡片成果栏据此重建（旧实现只在内存里挂栏，
+        # 切会话/重启后成果不可追溯）
+        artifacts = normalize_artifact_items(message.get("artifacts"))
+        if artifacts:
+            normalized["artifacts"] = artifacts
         return normalized
 
     raw_content = message.get("content", "")
@@ -1428,14 +1502,47 @@ def messages_to_responses_input(
     return result.input_items, result.instructions
 
 
+def tools_to_responses(tools: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """chat/completions 工具格式 → Responses API 扁平格式（纯函数）。
+
+    chat:      ``{"type":"function","function":{"name","description","parameters"}}``
+    responses: ``{"type":"function","name","description","parameters"}``
+
+    从 chat_worker._tools_to_responses 原地搬出（2026-11-07 Phase 3 插件化），
+    供 worker 与 responses transport 插件共用同一实现。
+    """
+    out: List[Dict[str, Any]] = []
+    for tool in tools or []:
+        if not isinstance(tool, dict):
+            continue
+        func = tool.get("function") or {}
+        if not isinstance(func, dict) or not func.get("name"):
+            continue
+        out.append(
+            {
+                "type": "function",
+                "name": func.get("name"),
+                "description": func.get("description", ""),
+                "parameters": func.get("parameters") or {"type": "object", "properties": {}},
+            }
+        )
+    return out
+
+
 def extract_reasoning_delta(obj: Any) -> str:
     """从流式 delta / message 对象里提取思考增量，兼容各厂商字段名。
 
-    厂商差异（实测）：
-        - ``reasoning_content`` : DeepSeek / GLM / 混元官方 / vLLM reasoning-parser
-        - ``reasoning``         : OpenRouter 及兼容网关（OpenCode Go）的归一化字段
-        - ``reasoning_details`` : OpenRouter 结构化数组
-          ``[{"type": "reasoning.text", "text": "...", "index": 0}]``
+    厂商差异（2025-2026 官方文档与网关实测）：
+        - ``reasoning_content`` : DeepSeek / DashScope Qwen3 / GLM / 混元 / Kimi /
+          硅基流动 / vLLM 旧 reasoning-parser
+        - ``reasoning``         : OpenRouter、vLLM 新版（旧字段已改名）、兼容网关；
+          标量为文本，少数网关给 ``{"text"/"content"/"summary": ...}`` 对象
+        - ``reasoning_details`` : OpenRouter / Vercel AI Gateway 结构化数组，
+          明文 type 为 ``reasoning.text``（text）与 ``reasoning.summary``（summary）
+        - ``thinking``          : Anthropic thinking_delta 经 OpenAI 兼容层的常见别名
+
+    不显示的内容（返回空）：``reasoning.encrypted`` 密文、``thought_signature``
+    签名、只有 signature 无文本的 details 项。这些是服务端限制，客户端解不出明文。
 
     只取第一个命中的字段，避免同一段思考被重复计入（网关通常同时下发
     ``reasoning`` 与 ``reasoning_details``，两者内容一致）。
@@ -1452,24 +1559,40 @@ def extract_reasoning_delta(obj: Any) -> str:
             return container.get(key)
         return getattr(container, key, None)
 
-    for key in ("reasoning_content", "reasoning"):
-        value = _pick(obj, key)
-        # 只接受标量文本：dict/list（某些网关的 reasoning 是对象）不塞进思考框
+    def _text(value):
+        """标量文本原样返回；对象取明文键；密文/签名/容器一律忽略。"""
         if isinstance(value, str) and value:
             return value
+        if isinstance(value, dict):
+            for key in ("text", "content", "summary"):
+                piece = value.get(key)
+                if isinstance(piece, str) and piece:
+                    return piece
+            return ""
         if value and not isinstance(value, (dict, list, tuple)):
             return str(value)
+        return ""
+
+    for key in ("reasoning_content", "reasoning", "thinking"):
+        piece = _text(_pick(obj, key))
+        if piece:
+            return piece
 
     details = _pick(obj, "reasoning_details")
     if isinstance(details, list) and details:
         parts = []
         for item in details:
-            if isinstance(item, dict):
-                piece = item.get("text") or item.get("summary") or ""
+            if isinstance(item, str):
+                piece = item
+            elif isinstance(item, dict):
+                # 密文项不显示：解不出明文，塞进思考框只会是乱码
+                if str(item.get("type", "")).endswith(".encrypted"):
+                    continue
+                piece = item.get("text") or item.get("summary") or item.get("content") or ""
             else:
                 piece = getattr(item, "text", None) or getattr(item, "summary", None) or ""
-            if piece:
-                parts.append(str(piece))
+            if isinstance(piece, str) and piece:
+                parts.append(piece)
         if parts:
             return "".join(parts)
     return ""

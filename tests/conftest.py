@@ -37,7 +37,27 @@ def _ensure_split_system_plugins_enabled():
 
         cfg = Settings.get_instance()
         enabled = [n for n in (cfg.enabled_plugins.value or []) if n != "system"]
-        missing = [n for n in PluginManager._SPLIT_COMPONENT_TO_PLUGIN.values() if n not in enabled]
+        # 独立功能插件（不在 system 拆分族 _SPLIT_COMPONENT_TO_PLUGIN 内，但产品
+        # 默认启用）：缺补录时其工具被整载跳过（plugin_tool_loader 日志「跳过已
+        # 禁用插件的工具」），subagent_para 等工具描述缺后缀 → 依赖完整工具
+        # 形态的用例（如 schema_cache 的 agent 维度断言）失败（诊 #16）。
+        _standalone_plugins = (
+            "assistant_hub",
+            "plugin-marketplace",
+            "system-handoff",
+            "system-subagent",
+            "system-timer",
+            "worktree-manager",
+        )
+        missing = [
+            n
+            for n in (
+                *PluginManager._SPLIT_COMPONENT_TO_PLUGIN.values(),
+                *PluginManager._SPLIT_TOOL_PLUGINS,
+                *_standalone_plugins,
+            )
+            if n not in enabled
+        ]
         if missing:
             cfg.set(cfg.enabled_plugins, enabled + missing, save=False)
     except Exception:
@@ -88,6 +108,21 @@ def _ensure_context_tiers_loaded():
 @pytest.fixture(scope="session")
 def qapp(_setup_qt_attributes):
     """PyQt5 QApplication 单例（Phase F：UIModule 测试需要 Qt 事件循环）"""
+    from PySide6.QtWidgets import QApplication
+
+    app = QApplication.instance() or QApplication([])
+    yield app
+
+@pytest.fixture(scope="session", autouse=True)
+def _qapp_keepalive(_setup_qt_attributes):
+    """QApplication 必须活到会话结束（autouse，先于各模块自建 _qapp 生效）。
+
+    多个测试模块自带 module 级 `_qapp`（`QApplication.instance() or QApplication()`）。
+    若本 fixture 不存在，模块结束后其返回值失去引用，QApplication 被 GC 销毁；
+    Settings 单例（QConfig）挂在 app 下会一起销毁，后续任何测试访问
+    `Settings.llm_*` 抛「wrapped C/C++ object of type QConfig has been deleted」
+    （2026-10-30 实测：test_capability_badges 之后 model_config_card 全崩）。
+    """
     from PySide6.QtWidgets import QApplication
 
     app = QApplication.instance() or QApplication([])

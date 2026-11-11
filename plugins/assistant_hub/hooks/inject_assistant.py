@@ -4,7 +4,8 @@
 Hook 清单（hooks.json 对应）：
 1. BuildSystemPrompt（``hook``）：激活助手时输出 助手身份块 → 记忆体系块
    （记忆说明书 + 全局记忆 + 项目记忆 + 日志索引，全部进系统提示词，
-   照抄 WorkBuddy 注入结构）；并把 context 里预取的智能体提示词置空防重复。
+   照抄 WorkBuddy 注入结构）。主链路 system prompt 不注入原智能体身份，
+   故无需依赖 hook 注册顺序做「替换注入」。
 2. SessionStart（``on_session_start``）：注入人工提示（pinned）到会话消息。
    记忆内容不进会话消息（单一通道：系统提示词，写后失效缓存即可刷新）。
 3. PreUserMessage（``on_pre_user``）：@提及检测，切会话级临时助手。
@@ -77,10 +78,12 @@ def _resolve_aid(mgr, context: Dict[str, Any]) -> str:
 
 
 def hook(event: str, context: Dict[str, Any]) -> str:
-    """BuildSystemPrompt hook：身份块 + 记忆体系块（均进系统提示词）。
+    """BuildSystemPrompt hook：身份块 + 记忆说明书（进系统提示词）。
 
-    记忆单一通道：说明书 + <global_memory> + <project_memory> + <daily_logs>
-    全在系统提示词里；写回后由 memory_write 失效 prompt 缓存，下轮重建。
+    **系统提示词会话内必须恒定**：这里只放身份/人格与静态纪律。
+    记忆内容与分区清单/配额全部不进系统提示词——它们会变，一变就让服务端
+    前缀 KV 缓存整段作废。记忆内容走 SessionStart（on_session_start）注入
+    会话消息，分区清单走 memory_read(scope=sections) 按需拉取。
     会话级临时助手（@提及）优先于全局 active_id。
     """
     if (context or {}).get("current_role") != "primary":
@@ -98,7 +101,6 @@ def hook(event: str, context: Dict[str, Any]) -> str:
         block = "\n\n".join(p for p in parts if p)
         if not block:
             return ""
-        context["agent_identity_content"] = ""
         return block
     except Exception as e:
         logger.warning(f"[assistant_hub.hooks] BuildSystemPrompt 处理失败: {e}")
@@ -106,12 +108,12 @@ def hook(event: str, context: Dict[str, Any]) -> str:
 
 
 def on_session_start(event: str, context: Dict[str, Any]) -> str:
-    """SessionStart hook：注入人工提示（pinned）到 session.messages。
+    """SessionStart hook：人工提示 + 记忆快照，注入会话消息列表（会话内一次性）。
 
-    由主程序 _inject_hook_to_session 包装为 hook 消息注入会话消息列表
-    （带 <session-start-hook> / <system-reminder> 标记）。记忆内容不走
-    此通道（系统提示词注入，写后失效缓存刷新）；pinned 是人工要求，
-    会话启动/清空/压缩时注入一次即可。
+    记忆内容走这里而不是 system prompt：system prompt 必须会话内恒定，
+    否则每次记忆变化都要重建，服务端前缀缓存整段作废。
+    快照只在 startup/clear/compact 时生成，会话中记忆怎么变都不影响已建好的前缀；
+    会话内新写入的内容由 memory_write 的返回值回显。
     """
     try:
         mgr = _get_manager()
@@ -120,26 +122,49 @@ def on_session_start(event: str, context: Dict[str, Any]) -> str:
         aid = _resolve_aid(mgr, context or {})
         if not aid:
             return ""
-        return mgr.pinned_block(aid) or ""
+        workdir = str((context or {}).get("project_root") or "")
+        parts = [mgr.pinned_block(aid), mgr.memory_snapshot_block(aid, workdir)]
+        return "\n\n".join(p for p in parts if p)
     except Exception as e:
         logger.warning(f"[assistant_hub.hooks] SessionStart 处理失败: {e}")
         return ""
 
 
-# @提及助手检测：@ 后到下一个空白之间的 token（支持中文名）
-_AT_MENTION_RE = re.compile(r"(?:^|\s)@([^\s@]+)")
+# @提及助手检测：按助手名单在消息里定位「@名字」。
+# 边界口径与输入框胶囊还原（bottom_input_area._find_assistant_mention_spans）
+# 一致：前边界只挡 ASCII 字母数字与 @ _（邮箱/路径里的 @），中文紧邻放行；
+# 后边界要求串尾/空白/占位符起始/常见中文标点。旧实现要求 @ 前必为串首或
+# 空白，导致「你好@毒蛇妹」能插入胶囊却切不了助手。
+_AT_AFTER_CHARS = '，。！？；：、)）】」》"\''
+_AT_BEFORE_BLOCK = frozenset("@_")
 
+def _mention_bounds_ok(message: str, start: int, end: int) -> bool:
+    """@名字 前后边界是否符合胶囊还原口径。"""
+    if start > 0:
+        prev = message[start - 1]
+        if prev.isascii() and (prev.isalnum() or prev in _AT_BEFORE_BLOCK):
+            return False
+    if end < len(message):
+        nxt = message[end]
+        if not (nxt.isspace() or nxt == "[" or nxt in _AT_AFTER_CHARS):
+            return False
+    return True
 
-def _match_assistant_by_name(mgr, token: str) -> str:
-    """按名字/id 匹配助手，返回 aid；无匹配返回空串。"""
-    if not token:
+def _find_assistant_mention(mgr, message: str) -> str:
+    """在消息中定位 @助手名，返回 aid；无匹配返回空串（长名优先，防前缀误匹配）。"""
+    if not message or "@" not in message:
         return ""
-    token_lower = token.lower()
+    labels = []
     for a in mgr.list_assistants_sorted_by_stable():
-        if a.name == token or a.id == token_lower:
-            return a.id
+        for label in (a.name, a.id):
+            label = (label or "").strip()
+            if label:
+                labels.append((label, a.id))
+    for label, aid in sorted(labels, key=lambda x: len(x[0]), reverse=True):
+        for m in re.finditer("@" + re.escape(label), message):
+            if _mention_bounds_ok(message, m.start(), m.end()):
+                return aid
     return ""
-
 
 def on_pre_user(event: str, context: Dict[str, Any]) -> str:
     """PreUserMessage hook：检测消息中的 @助手名 → 设置会话级临时助手。
@@ -155,18 +180,17 @@ def on_pre_user(event: str, context: Dict[str, Any]) -> str:
         sid = str((context or {}).get("session_id") or "")
         if not message or not sid:
             return ""
-        # 只看第一个 @token（多个时取最先出现的）
-        m = _AT_MENTION_RE.search(message)
-        if not m:
-            return ""
         mgr = _get_manager()
         if mgr is None:
             return ""
-        aid = _match_assistant_by_name(mgr, m.group(1))
+        aid = _find_assistant_mention(mgr, message)
         if not aid:
             return ""
-        if mgr.set_session_override(sid, aid):
-            mgr._invalidate_session_prompt(sid)
+        changed = mgr.set_session_override(sid, aid)
+        # 命中即失效缓存（不只 changed 时）：UI 上下文统计等旁路会把 system_prompt
+        # 重新填成主助手身份，override 数值未变也会出现陈旧身份，命中即重建最稳。
+        mgr._invalidate_session_prompt(sid)
+        if changed:
             a = mgr.get(aid)
             logger.info(f"[assistant_hub] 会话 {sid[:8]} 临时切换助手: {a.name if a else aid}")
     except Exception as e:

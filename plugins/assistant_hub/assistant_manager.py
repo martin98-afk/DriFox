@@ -32,7 +32,7 @@ import sys
 import time
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -95,19 +95,21 @@ class Assistant:
     steps: Optional[int] = None
     # 对外人格（控制其他 agent 调用本助手时看到的描述）
     public_description: str = ""
-    # 经验体系（recall/record_experience 工具 + 每日反思）：默认关闭
+    # 经验体系（recall/record_experience 工具自主维护）：默认关闭
     experience_enabled: bool = False
     # 项目笔记（AGENTS.md）注入开关：主智能体按此开关控制；子智能体始终注入
     project_notes_enabled: bool = True
     # 项目上下文（项目根目录 + git 状态）注入开关：主智能体按此开关控制；子智能体始终注入
     project_context_enabled: bool = True
+    # 项目技能（<项目根>/.drifox/skills/ 自动发现与注入）开关
+    project_skills_enabled: bool = True
     # 预置工具档位（控制初始注入的 schema，不影响可用性）：full=全量 / readonly=仅安全类 / minimal=bash+write+edit / search=仅搜索+中转 / none=无工具
     tool_access: str = "full"
     # 记忆字符上限（UI 可配；<=0 时回落内置默认）
     global_memory_max_chars: int = 4000
     project_memory_max_chars: int = 3000
-    # 记忆整理模型（llm_saved_providers 的 config_id）：空 = 跟随全局当前模型
-    utility_model: str = ""
+    # 感性占比（全局记忆分区配额的滑轨，0~100；感性池 = 全局上限 × ratio%）
+    memory_tone_ratio: int = 30
     # 对用户的称呼（{{userName}} 模板变量覆盖）：空 = 跟随系统用户名
     user_addressing: str = ""
     # 创建/更新时间戳
@@ -131,10 +133,11 @@ class Assistant:
             "experience_enabled": self.experience_enabled,
             "project_notes_enabled": self.project_notes_enabled,
             "project_context_enabled": self.project_context_enabled,
+            "project_skills_enabled": self.project_skills_enabled,
             "tool_access": self.tool_access,
             "global_memory_max_chars": self.global_memory_max_chars,
             "project_memory_max_chars": self.project_memory_max_chars,
-            "utility_model": self.utility_model,
+            "memory_tone_ratio": self.memory_tone_ratio,
             "user_addressing": self.user_addressing,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
@@ -162,10 +165,12 @@ class Assistant:
             experience_enabled=bool(data.get("experience_enabled", False)),
             project_notes_enabled=bool(data.get("project_notes_enabled", True)),
             project_context_enabled=bool(data.get("project_context_enabled", True)),
+            project_skills_enabled=bool(data.get("project_skills_enabled", True)),
             tool_access=str(data.get("tool_access") or "full"),
             global_memory_max_chars=int(data.get("global_memory_max_chars", 4000) or 0),
             project_memory_max_chars=int(data.get("project_memory_max_chars", 3000) or 0),
-            utility_model=str(data.get("utility_model") or ""),
+            # 旧 yaml 无此字段：直接取默认 30，不把 int(None) 当成 0（否则被 clamp 到 10）
+            memory_tone_ratio=int(data.get("memory_tone_ratio", 30) or 30),
             user_addressing=str(data.get("user_addressing") or ""),
             created_at=str(data.get("created_at") or ""),
             updated_at=str(data.get("updated_at") or ""),
@@ -194,6 +199,7 @@ class Assistant:
             public_description="",
             project_notes_enabled=True,
             project_context_enabled=True,
+            project_skills_enabled=True,
             created_at=now,
             updated_at=now,
         )
@@ -349,17 +355,33 @@ class AssistantManager:
     # ── 根目录 ──
 
     def _default_root(self) -> Path:
-        """默认根目录：<app_data_dir>/assistant_hub"""
-        try:
-            from app.plugins.sdk import get_app_data_dir
+        """默认根目录：<app_data_dir>/assistant_hub
 
-            app_data = get_app_data_dir()
+        数据根优先经能力池 ``storage.data_dir`` 取（插件不直连主程序内部模块），
+        能力未就绪/未授权时退回 sdk 直通，最后兜底用户目录。
+
+        统一 ``resolve()``：开发环境 app_data 是相对路径（``Path('.drifox')``），
+        不绝对化会随进程 CWD 漂移——同步 provider 注册的 local_dir 按注册时
+        CWD 解析，插件读写按调用时 CWD 解析，两者会分叉到不同目录。
+        """
+        app_data = ""
+        try:
+            from app.plugins.sdk import caps_for
+
+            app_data = str(caps_for("storage.data_dir") or "")
         except Exception:
-            app_data = None
+            app_data = ""
+        if not app_data:
+            try:
+                from app.plugins.sdk import get_app_data_dir
+
+                app_data = str(get_app_data_dir() or "")
+            except Exception:
+                app_data = ""
         if not app_data:
             # 兜底：用户目录/.drifox6/assistant_hub
             app_data = str(Path.home() / ".drifox6")
-        return Path(app_data) / "assistant_hub"
+        return (Path(app_data) / "assistant_hub").resolve()
 
     @property
     def root(self) -> Path:
@@ -443,7 +465,7 @@ class AssistantManager:
 
         只在根目录完全为空时执行一次；用户删除后不会复活（目录已存在 yaml）。
         头像：从 personas/<id>/avatar.png 复制到助手 avatars/agent.png。
-        毒蛇妹：默认关闭记忆（不沉淀跨会话上下文）、开启经验（保留经验库与反思）。
+        毒蛇妹：默认关闭记忆（不沉淀跨会话上下文）、开启经验（保留经验库与回忆工具）。
         """
         seeds = [
             ("build", "DriFox", "build", True, None, None),
@@ -674,23 +696,43 @@ class AssistantManager:
             return aid
         return fallback
 
+    def _session_state_dir(self) -> Path:
+        """会话级运行时状态目录：<app_data>/cache/assistant_hub/。
+
+        会话归属/临时 override 是纯运行时状态，非业务数据——assistant_hub
+        根目录整体注册为云同步业务目录（config_sync provider_id="assistant_hub"），
+        放根下会被整包推上云。cache 取 root 旁的 cache/assistant_hub（与宿主
+        commands_cache/头像缓存同源惯例）；root 传参时随 root 隔离，测试可断言。
+        """
+        return (self._root.parent / "cache" / "assistant_hub").resolve()
+
     def _session_map_path(self) -> Path:
-        return self._root / "_session_map.json"
+        return self._session_state_dir() / "_session_map.json"
 
     def _save_session_map(self) -> None:
         try:
-            self._ensure_dir(self._root)
+            self._ensure_dir(self._session_state_dir())
             self._session_map_path().write_text(json.dumps(self._session_map, ensure_ascii=False), encoding="utf-8")
         except Exception as e:
             logger.debug(f"[assistant_hub] 保存 session map 失败: {e}")
 
     def _load_session_map(self) -> None:
+        p = self._session_map_path()
+        legacy = self._root / "_session_map.json"
+        src = p if p.exists() else legacy
         try:
-            data = json.loads(self._session_map_path().read_text(encoding="utf-8"))
+            data = json.loads(src.read_text(encoding="utf-8"))
             if isinstance(data, dict):
                 type(self)._session_map = {str(k): str(v) for k, v in data.items()}
         except Exception:
-            pass
+            return
+        if src == legacy and src.exists():
+            # 旧位置（业务同步目录）一次性迁到 cache，避免继续被云同步上传
+            self._save_session_map()
+            try:
+                legacy.unlink()
+            except Exception:
+                pass
 
     @classmethod
     def get_session_override(cls, session_id: str) -> str:
@@ -706,11 +748,11 @@ class AssistantManager:
         return aid
 
     def _session_overrides_path(self) -> Path:
-        return self._root / "_session_overrides.json"
+        return self._session_state_dir() / "_session_overrides.json"
 
     def _save_session_overrides(self) -> None:
         try:
-            self._ensure_dir(self._root)
+            self._ensure_dir(self._session_state_dir())
             self._session_overrides_path().write_text(
                 json.dumps(self._session_overrides, ensure_ascii=False), encoding="utf-8"
             )
@@ -718,12 +760,22 @@ class AssistantManager:
             logger.debug(f"[assistant_hub] 保存 session overrides 失败: {e}")
 
     def _load_session_overrides(self) -> None:
+        p = self._session_overrides_path()
+        legacy = self._root / "_session_overrides.json"
+        src = p if p.exists() else legacy
         try:
-            data = json.loads(self._session_overrides_path().read_text(encoding="utf-8"))
+            data = json.loads(src.read_text(encoding="utf-8"))
             if isinstance(data, dict):
                 type(self)._session_overrides = {str(k): str(v) for k, v in data.items()}
         except Exception:
-            pass
+            return
+        if src == legacy and src.exists():
+            # 旧位置（业务同步目录）一次性迁到 cache，避免继续被云同步上传
+            self._save_session_overrides()
+            try:
+                legacy.unlink()
+            except Exception:
+                pass
 
     # ── 预置工具档位（初始注入 schema，hooks 与 UI 统计共用归属逻辑）──
 
@@ -758,11 +810,16 @@ class AssistantManager:
         except Exception as e:
             logger.warning(f"[assistant_hub] 失效 system_prompt 缓存失败: {e}")
 
+    @staticmethod
     def _invalidate_session_prompt(session_id: str) -> None:
         """只清空指定 session 的 system_prompt 缓存（会话级临时助手切换用）。
 
         经能力池 session.invalidate(session_id)：一次语义动作，插件不再遍历
         ChatBackend._active_instances 摸私有类属性。
+
+        ⚠️ 必须是 staticmethod：调用方写 ``mgr._invalidate_session_prompt(sid)``，
+        漏装饰时 session_id 被 self 吃掉、真实 sid 变成多余实参 → TypeError
+        被上层 except 吞掉，缓存永不清 → 选中的助手身份本轮不生效。
         """
         if not session_id:
             return
@@ -1022,9 +1079,6 @@ class AssistantManager:
     def _core_persona(self):
         return _load_core_module("persona", "persona.py")
 
-    def _core_llm(self):
-        return _load_core_module("llm_client", "llm_client.py")
-
     def _core_store(self):
         return _load_core_module("memory.store", "memory/store.py")
 
@@ -1033,68 +1087,6 @@ class AssistantManager:
 
     def _core_experience(self):
         return _load_core_module("experience", "experience.py")
-
-    def _utility_llm(self, aid: str):
-        """返回绑定了该助手记忆整理模型的 chat_once（走主对话引擎，单回合）。
-
-        utility_model 复合键格式（对齐 cron-tasks）："&lt;config_id&gt;||&lt;model_name&gt;"；
-        兼容旧纯 config_id。解析失败/配置不存在 → None override = 回退全局当前模型。
-
-        调用链：chat_once → services["create_engine_session"] → 主对话引擎，
-        并用本插件的 single_turn 循环策略钳制成一回合（见 core/llm_client.py）。
-        """
-        a = self.get(aid)
-        model_key = (a.utility_model if a else "") or ""
-        chat_once = self._core_llm().chat_once
-        override = self._resolve_model_override(model_key)
-
-        def _call(messages, **kwargs):
-            if override is not None:
-                return chat_once(messages, model_config=override, **kwargs)
-            return chat_once(messages, **kwargs)
-
-        return _call
-
-    def _resolve_model_override(self, model_key: str) -> Optional[Dict[str, Any]]:
-        """解析 "<config_id>||<model_name>" 复合键为完整配置覆盖。
-
-        未指定/配置缺失 → None（回退当前全局模型）。对齐 cron-tasks scheduler。
-        数据源：main_widget._valid_configs（双源兜底，同 ui/sections.py）。
-        """
-        if not model_key:
-            return None
-        config_id, _, model_name = str(model_key).partition("||")
-        mw = None
-        try:
-            from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
-
-            reg = UIPluginRegistry.get_instance()
-            mw = getattr(reg, "_main_widget", None) or next(
-                iter(getattr(reg, "_window_main_widgets", {}).values()), None
-            )
-        except Exception:
-            mw = None
-        valid = getattr(mw, "_valid_configs", None) if mw is not None else None
-        if not isinstance(valid, dict):
-            # 无窗口场景：走 model.config 能力（从主程序内存态取，
-            # 不读磁盘 app.config —— 密钥模式下那里是密文/空串）
-            get_config = _caps("model.config")
-            if get_config is None:
-                return None
-            try:
-                cfg = get_config(config_id, model_name)
-            except Exception:
-                return None
-            if not isinstance(cfg, dict) or not cfg:
-                return None
-            return dict(cfg)
-        cfg = valid.get(config_id)
-        if not isinstance(cfg, dict) or not cfg:
-            return None
-        override = dict(cfg)
-        if model_name:
-            override["模型名称"] = model_name
-        return override
 
     # ── 通用 ──
 
@@ -1167,11 +1159,11 @@ class AssistantManager:
         return "# 人工提示\n\n以下是用户人工添加的明确要求，直接遵守即可。\n\n" + "\n".join(pin_lines)
 
     def memory_system_block(self, aid: str, workdir: str = "") -> str:
-        """记忆体系块（BuildSystemPrompt hook 注入系统提示词）。
+        """记忆体系说明书（BuildSystemPrompt hook 注入系统提示词）。
 
-        照抄 WorkBuddy 注入结构：说明书 + <global_memory> + <project_memory> +
-        <daily_logs> 索引 + 超期蒸馏 ACTION。memory_enabled=False 返回空串；
-        记忆超限时截断并附 ACTION 指令逼模型先整理。
+        **只含静态纪律**：记忆内容、分区清单、配额、日志索引全部不进来——
+        它们都会变，一旦进 system prompt，每变一次就把服务端前缀 KV 缓存整段作废。
+        记忆内容走 memory_snapshot_block（SessionStart 注入会话消息，会话内一次性）。
         """
         a = self.get(aid)
         if a is None or not a.memory_enabled:
@@ -1186,9 +1178,36 @@ class AssistantManager:
             if workdir
             else "{项目根}/" + store.PROJECT_DIR_NAME + "/" + store.MEMORY_SUBDIR + "/" + aid
         )
+        # 顺手确保默认分区已落盘（新助手不必等用户打开 UI 才有归类骨架）；
+        # 返回值不含分区内容，纯静态，不影响 system prompt 恒定。
+        try:
+            store.ensure_default_sections(aid_dir)
+        except Exception:
+            pass
+        # 统一分区标签：system prompt 里每一块都要有 <xxx> 边界，
+        # 模型才能分清哪段是人格、哪段是记忆纪律、哪段是项目笔记。
+        return (
+            "<memory_system>\n"
+            + prompts.build_memory_system(global_file, proj_dir, self.memory_max_chars(aid))
+            + "\n</memory_system>"
+        )
+
+    def memory_snapshot_block(self, aid: str, workdir: str = "") -> str:
+        """记忆快照（SessionStart hook 注入会话消息，会话内只注入一次）。
+
+        系统提示词必须会话内恒定，记忆内容因此改走消息通道：会话首条带上快照，
+        之后记忆怎么变都不影响 system prompt 与历史前缀，前缀缓存全程命中。
+        会话内新写的内容由 memory_write 的返回值回显，模型当轮即可见。
+        memory_enabled=False 返回空串；超限时截断并附整理指令。
+        """
+        a = self.get(aid)
+        if a is None or not a.memory_enabled:
+            return ""
+        store = self._core_store()
+        aid_dir = self._assistant_dir(aid)
+        global_file = str(store.global_memory_path(aid_dir))
         limits = self.memory_max_chars(aid)
-        sections = store.load_sections(aid_dir)
-        parts: list[str] = [prompts.build_memory_system(global_file, proj_dir, limits, sections)]
+        parts: list[str] = []
 
         # 全局记忆
         g_text = (store.read_global_memory(aid_dir) or "").strip()
@@ -1201,7 +1220,7 @@ class AssistantManager:
                     + "：合并去重、删过时内容、保持精简，然后继续用户的任务。"
                 )
             parts.append(
-                "<global_memory>\n以下是跨项目的全局记忆（用户对助手长期稳定的要求）。\n\n"
+                "<global_memory>\n以下是跨项目的全局记忆（知识层让你少犯错，感性层让你更像个人）。\n\n"
                 + g_text
                 + "\n</global_memory>"
             )
@@ -1257,6 +1276,78 @@ class AssistantManager:
             "project": p if p > 0 else store.PROJECT_MEMORY_MAX_CHARS,
         }
 
+    def memory_tone_ratio(self, aid: str = "") -> int:
+        """感性占比（0~100）：全局记忆里分给感性区的百分比。"""
+        store = self._core_store()
+        a = self.get(aid) if aid else None
+        raw = getattr(a, "memory_tone_ratio", store.TONE_RATIO_DEFAULT) if a is not None else store.TONE_RATIO_DEFAULT
+        return store.clamp_tone_ratio(raw)
+
+    def set_memory_tone_ratio(self, aid: str, ratio: int) -> Dict[str, Any]:
+        """写感性占比（UI slider）并落盘；不触 system prompt 缓存失效也可，比例只影响说明书文本。"""
+        a = self.get(aid)
+        if a is None:
+            return {"ok": False, "error": "not_found"}
+        a.memory_tone_ratio = self._core_store().clamp_tone_ratio(ratio)
+        self.update(a)
+        return {"ok": True, "ratio": a.memory_tone_ratio}
+
+    def memory_section_quotas(self, aid: str = "") -> Dict[str, int]:
+        """各分区字符配额（注入/UI/蒸馏共用；空 schema 返回 {}）。"""
+        store = self._core_store()
+        sections = self.memory_sections(aid) if aid else []
+        if not sections:
+            return {}
+        return store.section_quotas(sections, self.memory_tone_ratio(aid), self.memory_max_chars(aid)["global"])
+
+    def memory_section_usage(self, aid: str) -> List[Dict[str, Any]]:
+        """各区实际用量 vs 配额（只返回超配额的区，memory_read(scope=sections) 用）。"""
+        store = self._core_store()
+        if not aid:
+            return []
+        text = store.read_global_memory(self._assistant_dir(aid))
+        return store.section_usage(text, self.memory_section_quotas(aid))
+
+    def memory_section_chars(self, aid: str) -> Dict[str, int]:
+        """各区已用字符数（卡片角标用，含未超配额的区）。"""
+        store = self._core_store()
+        if not aid:
+            return {}
+        text = store.read_global_memory(self._assistant_dir(aid))
+        out: Dict[str, int] = {}
+        for b in store.parse_section_blocks(text).get("blocks") or []:
+            out[str(b.get("name") or "")] = len("\n".join(b.get("lines") or []))
+        return out
+
+    def memory_section_entries(self, aid: str, section: str) -> List[Dict[str, Any]]:
+        """某区逐条账目（index 从 1 起）：超限时告诉模型删哪条，避免整篇重写。"""
+        store = self._core_store()
+        if not aid:
+            return []
+        return store.section_entries(store.read_global_memory(self._assistant_dir(aid)), section)
+
+    def delete_memory_entry(self, aid: str, section: str, index: int) -> Dict[str, Any]:
+        """删全局记忆某区的一条（覆盖写前自动快照）。返回 {ok, removed, chars} 或 {ok:False, error, count}。"""
+        store = self._core_store()
+        aid_dir = self._assistant_dir(aid)
+        path = store.global_memory_path(aid_dir)
+        text = store.read_text(path)
+        r = store.delete_section_entry(text, section, index)
+        if not r.get("ok"):
+            return r
+        try:
+            self.snapshot_memory(aid, "global")
+        except Exception as e:
+            logger.debug(f"[assistant_hub] 删除条目前快照失败: {e}")
+        store.write_global_memory(aid_dir, str(r.get("content") or ""))
+        # 不失效 system prompt：记忆内容已不在提示词里（走 SessionStart 快照），
+        # 删条不影响提示词；模型当轮从工具回显就知道删了什么。
+        return {
+            "ok": True,
+            "removed": str(r.get("removed") or ""),
+            "chars": len(str(r.get("content") or "").strip()),
+        }
+
     def memory_paths(self, aid: str, workdir: str = "") -> Dict[str, str]:
         """该助手的记忆路径集合（UI 展示用）。"""
         store = self._core_store()
@@ -1269,6 +1360,11 @@ class AssistantManager:
 
     def read_global_memory(self, aid: str) -> str:
         return self._core_store().read_global_memory(self._assistant_dir(aid))
+
+    def read_global_section(self, aid: str, name: str) -> str:
+        """取全局记忆里某个分区的块（UI 点卡片查看用）；无此分区返回空串。"""
+        store = self._core_store()
+        return store.section_block_text(store.read_global_memory(self._assistant_dir(aid)), name)
 
     def write_global_memory(self, aid: str, content: str) -> bool:
         return self._core_store().write_global_memory(self._assistant_dir(aid), content)
@@ -1314,6 +1410,10 @@ class AssistantManager:
 
         改名识别：按列表位置对比新旧（UI 编辑只改 name/hint，不重排）。
         删除分区**不**动文件：孤儿标题保留，下次蒸馏重分配（用户决策 2026-10-25）。
+
+        改完不失效 system prompt：分区名与配额都不在提示词里（已移入
+        memory_read(scope=sections)），提示词只留一句「先读分区清单」的静态纪律。
+        改名会同步改写 MEMORY.md 标题，但记忆内容走 SessionStart 快照，同样不影响提示词。
         """
         store = self._core_store()
         aid_dir = self._assistant_dir(aid)
@@ -1329,7 +1429,7 @@ class AssistantManager:
             for i, old_item in enumerate(old):
                 if i >= len(new):
                     break
-                old_name, new_name = old_item.get("name"), new.get(i, {}).get("name")
+                old_name, new_name = old_item.get("name"), new[i].get("name")
                 if old_name and new_name and old_name != new_name:
                     text = store.rename_section_title(text, str(old_name), str(new_name))
                     renamed.append(f"{old_name}→{new_name}")
@@ -1339,7 +1439,9 @@ class AssistantManager:
 
     def memory_sections_block(self, aid: str) -> str:
         """分区清单 prompt 文本（蒸馏/说明书共用）；无分区返回空串。"""
-        return self._core_store().sections_prompt_text(self.memory_sections(aid))
+        return self._core_store().sections_prompt_text(
+            self.memory_sections(aid), self.memory_section_quotas(aid)
+        )
 
     def default_memory_sections(self) -> List[Dict[str, str]]:
         """默认分区（UI 恢复默认用的唯一定义源）。"""
@@ -1425,6 +1527,8 @@ class AssistantManager:
             str(store.project_memory_path(workdir, aid)),
             str(store.global_memory_path(self._assistant_dir(aid))),
             self.memory_sections(aid),
+            self.memory_section_quotas(aid),
+            self.memory_tone_ratio(aid),
         )
 
     # ── 快照 / 健康（用户侧恢复与状态，模型工具面不含）──
@@ -1517,54 +1621,19 @@ class AssistantManager:
     def experience_delete(self, aid: str, category: str, index: int) -> Dict[str, Any]:
         return self._core_experience().delete_entry(self._assistant_dir(aid), category, index)
 
-    def experience_reflect(self, aid: str) -> Dict[str, Any]:
-        """经验反思：从近期日志/项目记忆提炼工作心得，随后自动压缩超限分类（需 LLM）。
-
-        数据源改版（拆传送带后）：项目 MEMORY.md + 近期日志拼接，取代原编译产物 memory.md。
-        """
-        try:
-            llm = self._utility_llm(aid)
-        except Exception as e:
-            return {"added": 0, "items": [], "error": f"llm_unavailable: {e}"}
-        r = self._core_experience().reflect(
-            self._assistant_dir(aid),
-            identity_and_persona=self.identity_and_persona(aid),
-            memory_md=self._recent_memory_text(aid),
-            llm=llm,
-        )
-        r["consolidated"] = self._experience_auto_consolidate(aid, llm)
-        return r
-
-    def _recent_memory_text(self, aid: str) -> str:
-        """反思素材：项目 MEMORY.md + 最近日志（无 workdir 时取全局记忆兑底）。"""
-        parts: list[str] = []
-        wd = self._current_workdir()
-        if wd:
-            pm = self.read_project_memory(aid, wd).strip()
-            if pm:
-                parts.append("# 项目记忆\n" + pm)
-            for it in self.list_daily(aid, wd, limit=3):
-                body = self.read_daily(aid, wd, it["date"]).strip()
-                if body:
-                    parts.append(f"# {it['date']}\n{body}")
-        if not parts:
-            g = self.read_global_memory(aid).strip()
-            if g:
-                parts.append("# 全局记忆\n" + g)
-        return "\n\n".join(parts)
-
     @staticmethod
     def _current_workdir(pool=None) -> str:
-        """当前应使用的项目工作目录（UI 查看/反思/统计等无 tool_ctx 场景用）。
+        """当前应使用的项目工作目录（UI 查看/统计等无 tool_ctx 场景用）。
 
         pool（宿主 ctx 能力池）优先：宿主已按卡片形态解析窗口并裁剪授权
         （dock 卡=归属窗口，全局卡=当前选中 tab），插件只消费语义快照，
-        全程不持有窗口对象。None（后台线程）时回退全局链路：caps_for
-        （授权仍按 manifest 裁剪）→ UIPluginRegistry 注册表。
+        全程不持有窗口对象。None（后台线程）时回退全局链路 caps_for
+        （授权仍按 manifest 裁剪，host 由宿主按插件登记窗口/活跃窗口解析）。
 
         历史 bug（0.4.0）：manifest api_version=2 但 capabilities 漏声明
         window.current → caps_for 恒 None → 每次落到注册表 fallback 取
-        「第一个注册窗口」的 workdir，多窗口下必然串味。
+        「第一个注册窗口」的 workdir，多窗口下必然串味。故不再保留注册表
+        直连兜底（也就不能再绕过声明裁剪）。
         """
         if pool is not None and "window.current" in pool:
             try:
@@ -1584,44 +1653,4 @@ class AssistantManager:
                 return str(snap["workdir"])
         except Exception as e:
             logger.debug(f"[assistant_hub] 全局链取窗口快照失败: {e}")
-        try:
-            from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
-
-            reg = UIPluginRegistry.get_instance()
-            mw = getattr(reg, "_main_widget", None) or next(
-                iter(getattr(reg, "_window_main_widgets", {}).values()), None
-            )
-            if mw is not None and getattr(mw, "backend", None) is not None:
-                return str(mw.backend.tool_executor.get_workdir() or "")
-        except Exception:
-            pass
         return ""
-
-    def _experience_auto_consolidate(self, aid: str, llm) -> List[Dict[str, Any]]:
-        """水位检查：全库条目超阈值时自动压缩一次（无人管理，反思收尾时跑）。
-
-        冷却熔断：上次失败 30 分钟内跳过（防失败任务每次反思重烧双倍超时）；
-        retries=0（失败有冷却兜底，重试只翻倍烧时间）。手动压缩不受限。
-        """
-        try:
-            core = self._core_experience()
-            if not core.needs_consolidate(self._assistant_dir(aid)):
-                return []
-            if core.consolidate_in_cooldown(self._assistant_dir(aid)):
-                return []
-        except Exception:
-            return []
-        try:
-            r = core.consolidate(self._assistant_dir(aid), llm=llm, retries=0)
-        except Exception as e:
-            return [{"error": str(e)}]
-        return [r]
-
-    def experience_consolidate(self, aid: str) -> Dict[str, Any]:
-        """手动全库压缩（跨分类语义合并去重 + 重新归类）。"""
-        try:
-            llm = self._utility_llm(aid)
-        except Exception as e:
-            return {"changed": False, "error": f"llm_unavailable: {e}"}
-        r = self._core_experience().consolidate(self._assistant_dir(aid), llm=llm)
-        return r

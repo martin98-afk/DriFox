@@ -21,6 +21,9 @@
             "components": {
                 "ui": true
             },
+            "display_name": {
+                "zh": "智能体轨迹"
+            },
             "homepage": "https://github.com/martin98-afk/DriFox",
             "icon": {
                 "light": "icons/icon_light.svg",
@@ -45,6 +48,9 @@
             "components": {
                 "ui": true
             },
+            "display_name": {
+                "zh": "产物工作台"
+            },
             "homepage": "https://github.com/martin98-afk/DriFox",
             "icon": {
                 "light": "icon.svg",
@@ -53,7 +59,7 @@
         },
         {
             "name": "assistant_hub",
-            "description": "智能体助手中心 — 助手切换 + 人格（persona）切换：人格是只读的内置预设（personas/<id>/persona.md），点卡片即切换；新增人格在对话里说「创建新人格」走 persona-creator 技能。含人工提示（pinned.md）、长期记忆体系（全局 MEMORY.md + 项目 .drifox/memory/<助手>/：MEMORY.md 长期笔记 + YYYY-MM-DD.md 每日日志，模型经 memory_read/memory_write 工具自主读写，照抄 WorkBuddy 双层结构）、专属技能、头像库、预置工具三档快捷切换（全量/只读/极简，控制初始注入的工具 schema，未注入的可经 tool_search 搜索、tool_execute 中转调用）、经验库（recall/record_experience 工具 + 手动反思，分类少而稳定）。激活助手后通过系统提示词替换当前智能体身份注入（不改动原 build 智能体，仍可被子智能体调用）。",
+            "description": "智能体助手中心 — 助手切换 + 人格（persona）切换：人格是只读的内置预设（personas/<id>/persona.md），点卡片即切换；新增人格在对话里说「创建新人格」走 persona-creator 技能。含人工提示（pinned.md）、长期记忆体系（全局 MEMORY.md + 项目 .drifox/memory/<助手>/：MEMORY.md 长期笔记 + YYYY-MM-DD.md 每日日志，模型经 memory_read/memory_write 工具自主读写，照抄 WorkBuddy 双层结构）、专属技能、头像库、预置工具三档快捷切换（全量/只读/极简，控制初始注入的工具 schema，未注入的可经 tool_search 搜索、tool_execute 中转调用）、经验库（recall/record_experience 工具自主维护，无后台 LLM 管线）。激活助手后通过系统提示词替换当前智能体身份注入（不改动原 build 智能体，仍可被子智能体调用）。",
             "version": "0.4.1",
             "author": "DriFox Contributors",
             "license": "GPL-3.0-or-later",
@@ -71,13 +77,15 @@
                 "ui": true,
                 "hooks": true,
                 "tools": true,
-                "skills": true,
-                "loop_policies": true
+                "skills": true
+            },
+            "display_name": {
+                "zh": "助手中心"
             },
             "homepage": "https://github.com/martin98-afk/DriFox",
             "icon": {
-                "light": "D:/work/DriFox/plugins/assistant_hub/icons/avatars/avatar-13.png",
-                "dark": "D:/work/DriFox/plugins/assistant_hub/icons/avatars/avatar-13.png"
+                "light": "icons/avatars/avatar-13.png",
+                "dark": "icons/avatars/avatar-13.png"
             }
         },
         {
@@ -98,6 +106,9 @@
             "components": {
                 "ui": true
             },
+            "display_name": {
+                "zh": "文件树"
+            },
             "homepage": "https://github.com/martin98-afk/DriFox",
             "icon": {
                 "light": "icon.svg",
@@ -107,7 +118,7 @@
         {
             "name": "history-manager",
             "description": "DriFox 内置 UI 组件：工作台历史会话页（历史 / 归档列表、项目切换、置顶、归档 · 恢复 · 导入）",
-            "version": "1.0.0",
+            "version": "1.1.0",
             "author": "DriFox Team",
             "license": "GPL-3.0-or-later",
             "categories": [
@@ -122,6 +133,9 @@
             "components": {
                 "ui": true
             },
+            "display_name": {
+                "zh": "历史会话"
+            },
             "homepage": "https://github.com/martin98-afk/DriFox",
             "icon": {
                 "light": "icon.svg",
@@ -130,12 +144,13 @@
         },
         {
             "name": "plugin-marketplace",
-            "description": "DriFox 官方插件市场 — 浏览、安装、管理插件",
-            "version": "0.3.2",
+            "description": "DriFox 官方插件市场 — 浏览、安装、管理插件，并把搜索/安装/卸载/更新/启停开放给 AI 工具",
+            "version": "0.6.1",
             "author": "DriFox Contributors",
             "license": "GPL-3.0-or-later",
             "categories": [
-                "ui"
+                "ui",
+                "tool"
             ],
             "source": {
                 "type": "git-subdir",
@@ -144,7 +159,11 @@
                 "ref": "master"
             },
             "components": {
-                "ui": true
+                "ui": true,
+                "tools": true
+            },
+            "display_name": {
+                "zh": "插件市场"
             },
             "homepage": "https://github.com/martin98-afk/drifox-plugins",
             "icon": {
@@ -170,6 +189,9 @@
             "components": {
                 "ui": true
             },
+            "display_name": {
+                "zh": "分享记录"
+            },
             "icon": {
                 "light": "icon.svg",
                 "dark": "icon_dark.svg"
@@ -193,6 +215,9 @@
             "components": {
                 "ui": true
             },
+            "display_name": {
+                "zh": "快捷键管理"
+            },
             "icon": {
                 "light": "icon.svg",
                 "dark": "icon_dark.svg"
@@ -215,6 +240,9 @@
             },
             "components": {
                 "agents": true
+            },
+            "display_name": {
+                "zh": "内置智能体"
             },
             "homepage": "https://github.com/martin98-afk/DriFox",
             "icon": {
@@ -240,6 +268,9 @@
             "components": {
                 "ui": true
             },
+            "display_name": {
+                "zh": "系统清理"
+            },
             "homepage": "https://github.com/martin98-afk/DriFox",
             "icon": {
                 "light": "icon.svg",
@@ -264,6 +295,9 @@
             "components": {
                 "commands": true
             },
+            "display_name": {
+                "zh": "内置斜杠命令"
+            },
             "homepage": "https://github.com/martin98-afk/DriFox",
             "icon": {
                 "light": "icon.svg",
@@ -286,6 +320,63 @@
             "components": {
                 "context_tiers": true,
                 "budget_resolvers": true
+            },
+            "display_name": {
+                "zh": "上下文瘦身"
+            },
+            "homepage": "https://github.com/martin98-afk/DriFox",
+            "icon": {
+                "light": "icon.svg",
+                "dark": "icon_dark.svg"
+            }
+        },
+        {
+            "name": "system-core",
+            "description": "DriFox 内置核心工具：文件读写（read/write/edit/grep/glob）、终端执行（bash/后台任务）、待办（todowrite）",
+            "version": "1.0.0",
+            "author": "DriFoxx Team",
+            "license": "GPL-3.0-or-later",
+            "categories": [
+                "tool"
+            ],
+            "source": {
+                "type": "git-subdir",
+                "url": "https://github.com/martin98-afk/DriFox",
+                "path": "plugins/system-core",
+                "ref": "master"
+            },
+            "components": {
+                "tools": true
+            },
+            "display_name": {
+                "zh": "内置核心工具"
+            },
+            "homepage": "https://github.com/martin98-afk/DriFox",
+            "icon": {
+                "light": "icon.svg",
+                "dark": "icon_dark.svg"
+            }
+        },
+        {
+            "name": "system-diagnostics",
+            "description": "DriFox 内置诊断工具：get_diagnostics 静态检查与 LSP 代码智能",
+            "version": "1.0.0",
+            "author": "DriFoxx Team",
+            "license": "GPL-3.0-or-later",
+            "categories": [
+                "tool"
+            ],
+            "source": {
+                "type": "git-subdir",
+                "url": "https://github.com/martin98-afk/DriFox",
+                "path": "plugins/system-diagnostics",
+                "ref": "master"
+            },
+            "components": {
+                "tools": true
+            },
+            "display_name": {
+                "zh": "内置诊断工具"
             },
             "homepage": "https://github.com/martin98-afk/DriFox",
             "icon": {
@@ -312,6 +403,9 @@
                 "tools": true,
                 "hooks": true
             },
+            "display_name": {
+                "zh": "会话交接"
+            },
             "homepage": "https://github.com/martin98-afk/DriFox",
             "icon": {
                 "light": "icon.svg",
@@ -333,6 +427,9 @@
             },
             "components": {
                 "hook_policies": true
+            },
+            "display_name": {
+                "zh": "内置 Hook 策略"
             },
             "homepage": "https://github.com/martin98-afk/DriFox",
             "icon": {
@@ -358,6 +455,9 @@
             "components": {
                 "hooks": true
             },
+            "display_name": {
+                "zh": "内置 Hooks"
+            },
             "homepage": "https://github.com/martin98-afk/DriFox",
             "icon": {
                 "light": "icon.svg",
@@ -379,6 +479,9 @@
             },
             "components": {
                 "loop_policies": true
+            },
+            "display_name": {
+                "zh": "内置循环策略"
             },
             "homepage": "https://github.com/martin98-afk/DriFox",
             "icon": {
@@ -404,6 +507,9 @@
             "components": {
                 "mcp": true
             },
+            "display_name": {
+                "zh": "内置 MCP 配置"
+            },
             "homepage": "https://github.com/martin98-afk/DriFox",
             "icon": {
                 "light": "icon.svg",
@@ -426,6 +532,9 @@
             "components": {
                 "model_adapters": true
             },
+            "display_name": {
+                "zh": "内置模型适配器"
+            },
             "homepage": "https://github.com/martin98-afk/DriFox",
             "icon": {
                 "light": "icon.svg",
@@ -435,7 +544,7 @@
         {
             "name": "system-providers",
             "description": "DriFox 内置服务商定义：DeepSeek / 智谱 / 通达 / 阿里 / 火山 / MiniMax / SiliconFlow / Gemini / 百度 / OpenCode / CodeBuddy",
-            "version": "1.1.1",
+            "version": "1.2.0",
             "author": "DriFoxx Team",
             "license": "GPL-3.0-or-later",
             "categories": [],
@@ -447,6 +556,38 @@
             },
             "components": {
                 "providers": true
+            },
+            "display_name": {
+                "zh": "内置服务商"
+            },
+            "homepage": "https://github.com/martin98-afk/DriFox",
+            "icon": {
+                "light": "icon.svg",
+                "dark": "icon_dark.svg"
+            }
+        },
+        {
+            "name": "system-question",
+            "description": "DriFox 内置提问工具：向用户提问（选项/多选/自定义），支持超时跳过与超时 AI 代答",
+            "version": "1.0.0",
+            "author": "DriFoxx Team",
+            "license": "GPL-3.0-or-later",
+            "categories": [
+                "ui",
+                "tool"
+            ],
+            "source": {
+                "type": "git-subdir",
+                "url": "https://github.com/martin98-afk/DriFox",
+                "path": "plugins/system-question",
+                "ref": "master"
+            },
+            "components": {
+                "tools": true,
+                "ui": true
+            },
+            "display_name": {
+                "zh": "内置提问工具"
             },
             "homepage": "https://github.com/martin98-afk/DriFox",
             "icon": {
@@ -469,6 +610,9 @@
             },
             "components": {
                 "serializers": true
+            },
+            "display_name": {
+                "zh": "内置消息序列化器"
             },
             "homepage": "https://github.com/martin98-afk/DriFox",
             "icon": {
@@ -494,6 +638,9 @@
             "components": {
                 "skills": true
             },
+            "display_name": {
+                "zh": "内置技能库"
+            },
             "homepage": "https://github.com/martin98-afk/DriFox",
             "icon": {
                 "light": "icon.svg",
@@ -515,6 +662,9 @@
             },
             "components": {
                 "storages": true
+            },
+            "display_name": {
+                "zh": "内置会话存储"
             },
             "homepage": "https://github.com/martin98-afk/DriFox",
             "icon": {
@@ -538,6 +688,66 @@
             "components": {
                 "stream_sinks": true
             },
+            "display_name": {
+                "zh": "内置流式接收器"
+            },
+            "homepage": "https://github.com/martin98-afk/DriFox",
+            "icon": {
+                "light": "icon.svg",
+                "dark": "icon_dark.svg"
+            }
+        },
+        {
+            "name": "system-subagent",
+            "description": "子智能体 — assistant 消息卡末尾展示任务运行区（旋转图标、工具计数、上下文用量、进入会话/停止），并提供 /subagents 命令与会话卡",
+            "version": "0.2.0",
+            "author": "DriFox Contributors",
+            "license": "GPL-3.0-or-later",
+            "categories": [
+                "ui",
+                "tool"
+            ],
+            "source": {
+                "type": "git-subdir",
+                "url": "https://github.com/martin98-afk/DriFox",
+                "path": "plugins/system-subagent",
+                "ref": "master"
+            },
+            "components": {
+                "commands": true,
+                "tools": true,
+                "ui": true
+            },
+            "display_name": {
+                "zh": "子智能体"
+            },
+            "homepage": "https://github.com/martin98-afk/DriFox",
+            "icon": {
+                "light": "icon.svg",
+                "dark": "icon_dark.svg"
+            }
+        },
+        {
+            "name": "system-team",
+            "description": "DriFox 内置团队工具：组建/加入团队、派发任务邮件与成员查询",
+            "version": "1.0.0",
+            "author": "DriFoxx Team",
+            "license": "GPL-3.0-or-later",
+            "categories": [
+                "tool"
+            ],
+            "source": {
+                "type": "git-subdir",
+                "url": "https://github.com/martin98-afk/DriFox",
+                "path": "plugins/system-team",
+                "ref": "master"
+            },
+            "components": {
+                "tools": true
+            },
+            "display_name": {
+                "zh": "内置团队工具"
+            },
             "homepage": "https://github.com/martin98-afk/DriFox",
             "icon": {
                 "light": "icon.svg",
@@ -559,6 +769,9 @@
             },
             "components": {
                 "team_templates": true
+            },
+            "display_name": {
+                "zh": "内置团队模板"
             },
             "homepage": "https://github.com/martin98-afk/DriFox",
             "icon": {
@@ -584,6 +797,38 @@
             "components": {
                 "themes": true
             },
+            "display_name": {
+                "zh": "内置主题"
+            },
+            "homepage": "https://github.com/martin98-afk/DriFox",
+            "icon": {
+                "light": "icon.svg",
+                "dark": "icon_dark.svg"
+            }
+        },
+        {
+            "name": "system-timer",
+            "description": "系统定时/事件任务 — 让模型创建一次性/循环定时任务，或监听指定窗口/会话/团队成员的回答结束等事件，命中后向创建任务的会话自动发送触发消息开启新一轮对话（内存级，不持久化）",
+            "version": "0.1.0",
+            "author": "DriFox Contributors",
+            "license": "GPL-3.0-or-later",
+            "categories": [
+                "ui",
+                "tool"
+            ],
+            "source": {
+                "type": "git-subdir",
+                "url": "https://github.com/martin98-afk/DriFox",
+                "path": "plugins/system-timer",
+                "ref": "master"
+            },
+            "components": {
+                "tools": true,
+                "ui": true
+            },
+            "display_name": {
+                "zh": "系统定时任务"
+            },
             "homepage": "https://github.com/martin98-afk/DriFox",
             "icon": {
                 "light": "icon.svg",
@@ -592,8 +837,8 @@
         },
         {
             "name": "system-tools",
-            "description": "DriFox 内置工具集：文件读写、终端执行、网页搜索、诊断、任务管理、子智能体调度、用户交互，含 Tavily/TinyFish 搜索 API Key 配置",
-            "version": "1.0.1",
+            "description": "DriFox 内置交互工具：技能加载/管理、MCP 服务器管理、Gitee 文件上传（文件/终端/搜索/诊断/团队/提问已拆分为独立插件）",
+            "version": "2.0.0",
             "author": "DriFoxx Team",
             "license": "GPL-3.0-or-later",
             "categories": [
@@ -607,6 +852,9 @@
             },
             "components": {
                 "tools": true
+            },
+            "display_name": {
+                "zh": "内置交互工具"
             },
             "homepage": "https://github.com/martin98-afk/DriFox",
             "icon": {
@@ -629,6 +877,36 @@
             },
             "components": {
                 "transports": true
+            },
+            "display_name": {
+                "zh": "内置协议传输器"
+            },
+            "homepage": "https://github.com/martin98-afk/DriFox",
+            "icon": {
+                "light": "icon.svg",
+                "dark": "icon_dark.svg"
+            }
+        },
+        {
+            "name": "system-web",
+            "description": "DriFox 内置网络工具：网页搜索与抓取（Tavily / TinyFish，含 API Key 配置）",
+            "version": "1.0.0",
+            "author": "DriFoxx Team",
+            "license": "GPL-3.0-or-later",
+            "categories": [
+                "tool"
+            ],
+            "source": {
+                "type": "git-subdir",
+                "url": "https://github.com/martin98-afk/DriFox",
+                "path": "plugins/system-web",
+                "ref": "master"
+            },
+            "components": {
+                "tools": true
+            },
+            "display_name": {
+                "zh": "内置网络工具"
             },
             "homepage": "https://github.com/martin98-afk/DriFox",
             "icon": {
@@ -654,7 +932,14 @@
             "components": {
                 "ui": true
             },
-            "homepage": "https://github.com/martin98-afk/DriFox"
+            "display_name": {
+                "zh": "更新日志"
+            },
+            "homepage": "https://github.com/martin98-afk/DriFox",
+            "icon": {
+                "light": "icon.svg",
+                "dark": "icon_dark.svg"
+            }
         },
         {
             "name": "worktree-manager",
@@ -675,6 +960,9 @@
             "components": {
                 "ui": true,
                 "tools": true
+            },
+            "display_name": {
+                "zh": "工作树管理"
             },
             "homepage": "https://github.com/martin98-afk/DriFox",
             "icon": {

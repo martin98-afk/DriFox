@@ -25,10 +25,10 @@ import pytest
 
 from app.core.team import team_manager as tm_mod
 
-# 工具插件化：TeamTools 类已删除，团队工具迁移为 plugins/system-tools/tools/subagent_tools.py
+# 工具插件化：TeamTools 类已删除，团队工具迁移为 plugins/system-team/tools/team_tools.py
 # 的模块级函数（_format_capability / _team_list_members / _team_send_message，tool_ctx 签名）。
 # 复用 test_file_tree_root_watch.py 的 _load_module 模式加载插件模块（plugins/ 非 Python 包）。
-_PLUGIN_TOOLS = Path(__file__).resolve().parent.parent.parent / "plugins" / "system-tools" / "tools"
+_PLUGIN_TOOLS = Path(__file__).resolve().parent.parent.parent / "plugins" / "system-team" / "tools"
 
 
 def _load_subagent_tools():
@@ -36,7 +36,7 @@ def _load_subagent_tools():
     mod_name = "_team_capability_subagent_tools"
     if mod_name in sys.modules:
         return sys.modules[mod_name]
-    spec = importlib.util.spec_from_file_location(mod_name, _PLUGIN_TOOLS / "subagent_tools.py")
+    spec = importlib.util.spec_from_file_location(mod_name, _PLUGIN_TOOLS / "team_tools.py")
     mod = importlib.util.module_from_spec(spec)
     sys.modules[mod_name] = mod
     spec.loader.exec_module(mod)
@@ -432,8 +432,9 @@ class TestTeamToolsCapabilityDisplay:
         assert result.success, result.error
         mails = tm.get_mailbox_mails("win_02")
         assert mails and mails[0]["from_agent"] == "leader", "角色一致时不应被覆盖"
-        # 成员表无此 window 时不崩溃，保持 tool_ctx 原值
+        # 成员表无此 window（非团队成员）→ 发送方标识为 user（外部发起）
         result2 = subagent._team_send_message(self._tool_ctx("win_99", "build"), to_agent="build", message="派活2")
         assert result2.success, result2.error
         mails2 = tm.get_mailbox_mails("win_02")
-        assert mails2[-1]["from_agent"] == "build", "成员表查不到时保留 tool_ctx 角色"
+        assert mails2[-1]["from_agent"] == "user", "非团队成员发送时标识为 user"
+        assert mails2[-1]["from_window"] == "win_99"

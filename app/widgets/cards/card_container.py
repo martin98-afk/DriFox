@@ -183,53 +183,23 @@ class CardContainer(QWidget):
             self.setStyleSheet(css)
 
     def _apply_background_style(self):
-        """应用主题背景 + 边框
+        """容器面板背景（当前为**空实现**）
 
-        使用主题的 card_bg 作为容器背景色，border 作为边框色。
-        顶部 8px 圆角，底部直角（与下方输入框/页面边缘融合）。
-        覆写此方法可定制子类的背景样式。
+        ★ 2026-10-30 实证：本类是 QWidget 且从未设 ``Qt.WA_StyledBackground``，
+        ``CardContainer {{ background: ... }}`` 这类 QSS 背景**从未被绘制**
+        （offscreen grab 实测：有父窗口时角落像素=父窗口底色，裸 QWidget 设同类
+        QSS 也不画；无父窗口的顶层窗口特例才会画）。真机上各卡片表面均由卡片
+        自身绘制（CardStyles.floating / SystemCardFrame.paintEvent / _ThemedPanel），
+        容器只做透明承托。
+
+        保留 QSS 的唯一后果：每轮主题切换白付一次整子树 repolish（实测
+        TabManagerWindow 三个全局容器合计 535~699ms）。故清空 —— 主题切换对
+        容器零成本，视觉零变化。
+
+        若将来确实需要容器底色，用 paintEvent 自绘 + update()，不要回到 QSS。
         """
-        Colors.refresh()
-        bg = Colors.CARD_BG.format(alpha=232)
-        if self._overlay_mode:
-            # 覆盖层模式：卡片声明透明 → 容器只做透明承托，透出宿主背景
-            if self._has_transparent_card():
-                self._set_style_sheet_cached("""
-                    CardContainer {
-                        background: transparent;
-                        border: none;
-                    }
-                """)
-                return
-            # 覆盖层模式：四角圆角独立面板视觉 + 较实背景，与对话区形成明确边界
-            self._set_style_sheet_cached(f"""
-                CardContainer {{
-                    background: {Colors.CARD_BG.format(alpha=246)};
-                    border: 1px solid {Colors.BORDER};
-                    border-radius: 8px;
-                }}
-            """)
-            return
-        if self._horizontal or self._dock_splitter is not None:
-            # 停靠区（左右容器 / 启用停靠模式的上下容器）：
-            # 四角圆角独立面板视觉 + 更实的背景，与对话区形成明确边界
-            self._set_style_sheet_cached(f"""
-                CardContainer {{
-                    background: {Colors.CARD_BG.format(alpha=246)};
-                    border: 1px solid {Colors.BORDER};
-                    border-radius: 8px;
-                }}
-            """)
-            return
-        self._set_style_sheet_cached(f"""
-            CardContainer {{
-                background: {bg};
-                border: 1px solid {Colors.BORDER};
-                border-radius: 8px;
-                border-bottom-left-radius: 0px;
-                border-bottom-right-radius: 0px;
-            }}
-        """)
+        Colors.refresh()  # 幂等（同主题 dict 直接返回），供 showEvent 单调用路径兼容
+        self._set_style_sheet_cached("")
 
     def refresh_style(self):
         """响应主题切换：刷新容器背景 + 边框
@@ -1218,13 +1188,12 @@ class CompletionCardContainer(CardContainer):
         self._layout.setSpacing(6)
 
     def _apply_background_style(self):
-        """透明承托：面板表面由卡片自绘（见类 docstring）"""
-        self._set_style_sheet_cached("""
-            CompletionCardContainer {
-                background: transparent;
-                border: none;
-            }
-        """)
+        """透明承托：面板表面由卡片自绘（见类 docstring）
+
+        同基类：QSS 背景在本类（无 WA_StyledBackground 的 QWidget）上从未
+        生效，保留只会白付 repolish。见 CardContainer._apply_background_style。
+        """
+        self._set_style_sheet_cached("")
 
     def add_card(self, card_id: str, card_widget: QWidget):
         """添加入容器（不做 bottomCard 圆角修正：补全卡自带完整圆角）"""
@@ -1253,13 +1222,11 @@ class BottomCardContainer(CardContainer):
         CardStyles.floating 自绘完整表面；容器再画一圈 CARD_BG+BORDER 就是双层
         边框嵌套（两层之间只隔 8px padding）。故容器只保留 padding 与卡间距，
         边界交给卡片自己表达。
+
+        同基类：QSS 背景在本类（无 WA_StyledBackground 的 QWidget）上从未
+        生效，保留只会白付 repolish。见 CardContainer._apply_background_style。
         """
-        self._set_style_sheet_cached("""
-            BottomCardContainer {
-                background: transparent;
-                border: none;
-            }
-        """)
+        self._set_style_sheet_cached("")
 
     def add_card(self, card_id: str, card_widget: QWidget):
         """添加卡片并修正底部圆角，使其与下方输入框视觉融合"""

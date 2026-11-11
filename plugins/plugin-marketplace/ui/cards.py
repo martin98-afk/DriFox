@@ -22,13 +22,15 @@ from typing import Callable, Optional
 
 from loguru import logger
 
+from .display_name import plugin_display_name
+
 # FluentIcon SVG 渲染缓存补丁：必须在导入 qfluentwidgets 前生效
 from . import _icon_cache_patch as _icon_patch
 
 _icon_patch._apply_icon_cache_patch()
 
-import shiboken6 as sip
-from PySide6.QtCore import QEvent, QObject, QRect, QSize, QThread, Qt, Signal
+import shiboken6
+from PySide6.QtCore import QEvent, QObject, QRect, QSize, QTimer, QThread, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QFontMetrics
 from PySide6.QtWidgets import (
     QFrame,
@@ -36,6 +38,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLayout,
+    QProgressBar,
     QPushButton,
     QScrollArea,
     QSizePolicy,
@@ -67,8 +70,9 @@ from app.plugins.sdk import ElidedLabel as _ElidedLabel
 from .downloads import get_downloads_fetcher
 from .installer import get_installer
 from .marketplace_manager import get_marketplace_manager
-from .proxy import get_proxy_config
+from .proxy import detect_system_proxy, get_proxy_config
 from .records import get_records
+from . import cancel as _cancel
 from ._squircle_avatar import (
     SquircleAvatar,
     PluginIconWidget,
@@ -85,6 +89,14 @@ _orphan_threads: list = []
 # 官方源 downloads 靠 market.json 自带字段；社区源 key 在 CountAPI 上不存在
 # （大量 404）且服务无批量接口 → 逐个查询开销大。恢复时置 True。
 _DOWNLOADS_LIVE_QUERY_ENABLED = False
+
+# 取消标记：worker 把 InstallCancelled 走 error 通道时加此前缀，上层据此
+# 区分「用户取消」与「真失败」（不回滚提示、不写失败记录）
+_CANCELLED_MARK = "\x00cancelled\x00"
+
+# 列表内容层半透明面板不透明度：与 #chatFrame 面板（CARD_BG a150）一致，
+# 列表区与顶部筛选区融为一体透出壁纸。改小会更透但文字可读性下降。
+_LIST_SURFACE_ALPHA = 150
 
 # ── 主题色辅助 ──────────────────────────────────────────────
 
@@ -128,6 +140,17 @@ def _filter_chip_qss(text_color: str) -> str:
         f"QPushButton:checked {{ background: {_CHIP_ACCENT_BG}; color: {_CHIP_ACCENT};"
         f" border: 1px solid {_CHIP_ACCENT_BORDER}; }}"
     )
+
+
+def _on_solid(bg: str) -> str:
+    """实心底上的前景文字色：亮底用深字，暗底用白字。
+
+    真黑类主题把 accent 定为纯白，按钮再写死白字就是白底白字。
+    判定交给主程序 token，插件不自己拍亮度阈值。
+    """
+    from app.plugins.sdk import readable_text_on
+
+    return readable_text_on(bg, "#ffffff")
 
 
 def _shift_color(color: str, factor: float) -> str:
@@ -211,23 +234,37 @@ def _host_parent(widget: QWidget):
 
 
 class _MarketplaceWorker(QObject):
-    """在后台线程执行阻塞操作，通过信号返回结果"""
+    """在后台线程执行阻塞操作，通过信号返回结果
+
+    progress 用于下载阶段上报进度（fraction=None 表示不确定进度）。
+    取消走 cancel.CancelToken：worker 线程内绑定 token，安装链路的阻塞点
+    （chunk 循环 / git 子进程读循环）据此轮询与中断。
+    """
 
     finished = Signal(object)
     error = Signal(str)
+    progress = Signal(object, str)  # (fraction|None, 文案)
 
-    def __init__(self, fn, *args, **kwargs):
+    def __init__(self, fn, token=None, *args, **kwargs):
         super().__init__()
         self._fn = fn
+        self._token = token
         self._args = args
         self._kwargs = kwargs
 
     def run(self):
         try:
-            result = self._fn(*self._args, **self._kwargs)
+            with _cancel.bind(self._token, self._emit_progress):
+                result = self._fn(*self._args, **self._kwargs)
             self.finished.emit(result)
+        except _cancel.InstallCancelled:
+            # 取消不是失败：单独走 error 通道但带可识别前缀，由上层按取消处理
+            self.error.emit(f"{_CANCELLED_MARK}已取消")
         except Exception as e:
             self.error.emit(f"{e}\n{traceback.format_exc()}")
+
+    def _emit_progress(self, fraction, text: str):
+        self.progress.emit(fraction, text)
 
 
 class _MarketFetchWorker(QObject):
@@ -671,7 +708,7 @@ class _PluginDetailDialog(MaskDialogBase):
         layout.setSpacing(0)
 
         # ── 标题行：名称 + 版本徽标（徽标独立成 chip，不再用内联 HTML 拼字符串） ──
-        name = self._meta.get("name", "未知")
+        name = plugin_display_name(self._meta)
         remote_ver = self._meta.get("version", "")
         head = QWidget(self.widget)
         head.setStyleSheet("background: transparent;")
@@ -938,7 +975,7 @@ class _PluginDetailDialog(MaskDialogBase):
         else:
             # hover/pressed 必须给出可见反馈（原实现两个状态的 background 值相同 → hover 无变化）
             main_btn.setStyleSheet(
-                f"QPushButton {{ background-color: {accent_bg}; color: #ffffff;"
+                f"QPushButton {{ background-color: {accent_bg}; color: {_on_solid(accent_bg)};"
                 f" border: none; border-radius: 8px; padding: 4px 22px;"
                 f" {btn_font} font-weight: bold; }}"
                 f"QPushButton:hover {{ background-color: {_shift_color(accent_bg, 1.18)}; }}"
@@ -1276,7 +1313,7 @@ class _TagFilterDialog(MaskDialogBase):
         ok_btn.setCursor(Qt.PointingHandCursor)
         ok_btn.setFixedHeight(32)
         ok_btn.setStyleSheet(
-            f"QPushButton {{ background-color: {accent_bg}; color: #ffffff; border: none;"
+            f"QPushButton {{ background-color: {accent_bg}; color: {_on_solid(accent_bg)}; border: none;"
             f" border-radius: 8px; padding: 2px 24px; {ff_qss} font-size: {max(8, fs - 1)}px; font-weight: bold; }}"
         )
         ok_btn.clicked.connect(self.accept)
@@ -1385,7 +1422,7 @@ class _ConfirmUninstallDialog(MaskDialogBase):
             f"""
             QPushButton {{
                 background-color: {accent_bg};
-                color: #ffffff;
+                color: {_on_solid(accent_bg)};
                 border: none;
                 border-radius: 8px;
                 padding: 4px 28px;
@@ -1430,6 +1467,7 @@ class _PluginRow(QFrame):
     enableRequested = Signal(dict)  # 启用已禁用插件
     disableRequested = Signal(dict)  # 禁用已启用插件
     uninstallRequested = Signal(dict)  # 卸载插件
+    cancelRequested = Signal(str)  # 取消进行中的安装/更新（插件名）
 
     def __init__(
         self,
@@ -1452,6 +1490,7 @@ class _PluginRow(QFrame):
         self._local_version = local_version
         self._status = status  # "enabled"|"disabled"（用户）|"system"（真系统）|builtin_enabled/builtin_disabled（内置非 system）|""（未安装）
         self._busy = False
+        self._cancellable = False  # busy 期间按钮是否可点（下载阶段 True → 按钮显示「取消」）
         self._font_size = font_size  # 上下文字体大小（用于头像自适应 + 行内字号派生）
         self._ff = font_family  # 上下文字体家族
         self._btn_font_size = max(13, font_size) if font_size > 0 else 14
@@ -1617,7 +1656,7 @@ class _PluginRow(QFrame):
         # info 在行布局中的固定 index（heightForWidth 手动计算用）
         self._info_index = 1
 
-        name = self._meta.get("name", "未知")
+        name = plugin_display_name(self._meta)
         self._name_raw = name
         # 标题行：只有插件名（下载量已移到下方元信息行，见 meta_row）
         title_row = QWidget(self)
@@ -1705,6 +1744,21 @@ class _PluginRow(QFrame):
         meta_layout.addStretch(1)
         info_layout.addWidget(meta_row)
 
+        # 下载进度条（默认隐藏）：高度 3px 细条，贴在元信息行下方。
+        # 布局常驻（不加/删 widget），显隐只切 visible，避免触发行高跳动。
+        self._progress = QProgressBar(self)
+        self._progress.setFixedHeight(3)
+        self._progress.setTextVisible(False)
+        self._progress.setRange(0, 100)
+        self._progress.setValue(0)
+        self._progress.setObjectName("pluginRowProgress")
+        self._progress.setStyleSheet(
+            "QProgressBar { background: rgba(128,128,128,0.18); border: none; border-radius: 1px; }"
+            "QProgressBar::chunk { background: #62a0ea; border-radius: 1px; }"
+        )
+        self._progress.setVisible(False)
+        info_layout.addWidget(self._progress)
+
         layout.addLayout(info_layout, 1)
 
         # 图标按钮列（目录/官网/信息）：置顶排列，不垂直居中
@@ -1771,9 +1825,17 @@ class _PluginRow(QFrame):
         self._btn.setFont(btn_font)
 
         if self._busy:
-            self._btn.setText(getattr(self, "_busy_text", "处理中…"))
-            self._btn.setEnabled(False)
-            self._btn.setStyleSheet(self._original_btn_style)
+            if getattr(self, "_cancellable", False):
+                # 可取消阶段：按钮变「取消」且保持可点（进度看下方细条）
+                self._btn.setText("取消")
+                self._btn.setEnabled(True)
+                self._btn.setToolTip(self._busy_text or "")
+                self._btn.setStyleSheet(self._outline_btn_style("#F44336"))
+            else:
+                self._btn.setText(getattr(self, "_busy_text", "处理中…"))
+                self._btn.setEnabled(False)
+                self._btn.setToolTip("")
+                self._btn.setStyleSheet(self._original_btn_style)
             self._btn.setVisible(True)
         elif not self._plat_ok:
             # 平台 / 宿主版本不兼容：置灰并说明原因（详情弹窗可见完整对比）
@@ -1873,6 +1935,9 @@ class _PluginRow(QFrame):
 
     def _on_click(self):
         if self._busy:
+            # busy 期间按钮文案为「取消」（可取消阶段）→ 点它取消；否则禁用不可点
+            if getattr(self, "_cancellable", False):
+                self.cancelRequested.emit(self._meta.get("name", ""))
             return
         if not self._installed:
             # 未安装 → 安装
@@ -1913,6 +1978,8 @@ class _PluginRow(QFrame):
         self._status = status
         self._busy = False
         self._busy_text = ""  # 清除操作中的残留文案（如「卸载中…」），避免下次点击误显示
+        self._cancellable = False
+        self.clear_progress()
         if changed:
             self._refresh_title()
         # 文件夹按钮仅已安装时可见
@@ -1929,7 +1996,33 @@ class _PluginRow(QFrame):
         """
         self._busy = True
         self._busy_text = "下载中…"
+        self._cancellable = True
         self._update_btn_text()
+
+    def set_progress(self, fraction: Optional[float], text: str = ""):
+        """更新下载进度条与按钮 tooltip
+
+        fraction=None → 不确定进度（忙碌滚动条）；0.0~1.0 → 确定进度。
+        按钮文案保持「取消」不变（位置固定，用户点哪儿不用重新找）。
+        """
+        if not self._busy:
+            return
+        if text:
+            self._busy_text = text
+        if fraction is None:
+            self._progress.setRange(0, 0)
+        else:
+            self._progress.setRange(0, 100)
+            self._progress.setValue(int(max(0.0, min(1.0, fraction)) * 100))
+        self._progress.setVisible(True)
+        self._btn.setToolTip(text or "下载中")
+
+    def clear_progress(self):
+        """隐藏进度条（任务结束/失败/取消）"""
+        self._progress.setVisible(False)
+        self._progress.setRange(0, 100)
+        self._progress.setValue(0)
+        self._cancellable = False
 
     def _refresh_title(self):
         """按当前状态重算标题：名称 + 彩色版本徽标 + 状态标签
@@ -1961,6 +2054,8 @@ class _PluginRow(QFrame):
         """安装/更新失败后恢复按钮"""
         self._busy = False
         self._busy_text = ""  # 清除操作中残留文案
+        self._cancellable = False
+        self.clear_progress()
         self._update_btn_text()
 
     def _create_icon_widget(self) -> QWidget:
@@ -1972,12 +2067,12 @@ class _PluginRow(QFrame):
            manifest.icon + source 指向 git-subdir GitHub 源）
         3. SquircleAvatar 缩写头像（兜底）
 
-        卡片行内图标按 font_size * 2.4 放大（最小 36px），让图标在列表中
-        更醒目。当前 font_size=14 → 36px（之前 23px）。
+        卡片行内图标按 font_size * 3.4 放大（最小 48px），让图标在列表中
+        更醒目。当前 font_size=14 → 48px（之前 36px，更早 23px）。
         """
         plugin_name = self._meta.get("name", "?")
-        # 卡片行内放大：font_size > 0 时按 2.4 倍率放大，下限 36px
-        icon_size = max(36, int(self._font_size * 2.4)) if self._font_size > 0 else 36
+        # 卡片行内放大：font_size > 0 时按 3.4 倍率放大，下限 48px
+        icon_size = max(48, int(self._font_size * 3.4)) if self._font_size > 0 else 48
 
         local_path = self._local_path
         if local_path:
@@ -2021,7 +2116,7 @@ class _PluginRow(QFrame):
 
         # Fallback to initials avatar
         return SquircleAvatar(
-            extract_initials(plugin_name),
+            extract_initials(plugin_display_name(self._meta)),
             name_color(plugin_name),
             self,
             size=icon_size,
@@ -2062,8 +2157,8 @@ class _PluginRow(QFrame):
             return
         self._font_size = font_size
         if self._avatar is not None:
-            # 卡片行内图标按字号 2.4 倍放大（最小 36px），与 _create_icon_widget 保持一致
-            icon_size = max(36, int(font_size * 2.4))
+            # 卡片行内图标按字号 3.4 倍放大（最小 48px），与 _create_icon_widget 保持一致
+            icon_size = max(48, int(font_size * 3.4))
             if hasattr(self._avatar, "set_icon_size"):
                 self._avatar.set_icon_size(icon_size)
             elif hasattr(self._avatar, "set_size"):
@@ -2189,6 +2284,7 @@ class _ExploreCard(QFrame):
     installRequested = Signal(dict)
     updateRequested = Signal(dict)
     detailRequested = Signal(dict)
+    cancelRequested = Signal(str)  # 取消进行中的安装/更新（插件名）
 
     def __init__(
         self,
@@ -2210,6 +2306,7 @@ class _ExploreCard(QFrame):
         self._local_version = local_version
         self._status = status
         self._busy = False
+        self._cancellable = False
         self._font_size = font_size
         self._ff = font_family
         self._tc = tc or _text_color()
@@ -2254,7 +2351,7 @@ class _ExploreCard(QFrame):
         self._avatar = self._create_icon_widget(head)
         head_lay.addWidget(self._avatar)
 
-        name = self._meta.get("name", "未知")
+        name = plugin_display_name(self._meta)
         self._name_label = QLabel(name, head)
         self._name_label.setObjectName("exploreCardName")
         self._name_label.setStyleSheet(
@@ -2304,6 +2401,19 @@ class _ExploreCard(QFrame):
         meta_lay.addStretch(1)
         lay.addWidget(meta_row)
 
+        # 下载进度条（默认隐藏，与列表行同语义）
+        self._progress = QProgressBar(self)
+        self._progress.setFixedHeight(3)
+        self._progress.setTextVisible(False)
+        self._progress.setRange(0, 100)
+        self._progress.setValue(0)
+        self._progress.setStyleSheet(
+            "QProgressBar { background: rgba(128,128,128,0.18); border: none; border-radius: 1px; }"
+            "QProgressBar::chunk { background: #62a0ea; border-radius: 1px; }"
+        )
+        self._progress.setVisible(False)
+        lay.addWidget(self._progress)
+
         # 关注点：下载量标签不随主题 re-theme（橙色固定），objectName 保留
 
         # 操作按钮
@@ -2351,8 +2461,21 @@ class _ExploreCard(QFrame):
 
     def _update_btn_text(self):
         if self._busy:
-            self._btn.setText(self._busy_text or "处理中…")
-            self._btn.setEnabled(False)
+            if self._cancellable:
+                # 可取消阶段：按钮变「取消」且保持可点（进度看上方细条）
+                self._btn.setText("取消")
+                self._btn.setEnabled(True)
+                self._btn.setToolTip(self._busy_text or "")
+                self._btn.setStyleSheet(
+                    "QPushButton { background: rgba(244,67,54,0.15); color: #F44336;"
+                    f" border: none; border-radius: 6px; {self._font_qss(self._derive_size(11, -2))} }}"
+                    "QPushButton:hover { background: rgba(244,67,54,0.28); }"
+                )
+            else:
+                self._btn.setText(self._busy_text or "处理中…")
+                self._btn.setEnabled(False)
+                self._btn.setToolTip("")
+                self._style_button()
             return
         if not self._installed:
             self._btn.setText("安装")
@@ -2375,6 +2498,9 @@ class _ExploreCard(QFrame):
 
     def _on_main_action(self):
         if self._busy:
+            # busy 期间按钮文案为「取消」→ 点它取消
+            if self._cancellable:
+                self.cancelRequested.emit(self._meta.get("name", ""))
             return
         if not self._installed:
             self._busy = True
@@ -2399,17 +2525,43 @@ class _ExploreCard(QFrame):
         self._status = status
         self._busy = False
         self._busy_text = ""
+        self._cancellable = False
+        self.clear_progress()
         self._update_btn_text()
 
     def set_downloading(self):
-        """更新流程：按钮置「下载中…」禁用（旧版保留，同列表行语义）"""
+        """更新流程：按钮置「取消」可点（旧版保留，同列表行语义）"""
         self._busy = True
         self._busy_text = "下载中…"
+        self._cancellable = True
         self._update_btn_text()
+
+    def set_progress(self, fraction: Optional[float], text: str = ""):
+        """更新下载进度条与按钮 tooltip（None=不确定进度）"""
+        if not self._busy:
+            return
+        if text:
+            self._busy_text = text
+        if fraction is None:
+            self._progress.setRange(0, 0)
+        else:
+            self._progress.setRange(0, 100)
+            self._progress.setValue(int(max(0.0, min(1.0, fraction)) * 100))
+        self._progress.setVisible(True)
+        self._btn.setToolTip(text or "下载中")
+
+    def clear_progress(self):
+        """隐藏进度条（任务结束/失败/取消）"""
+        self._progress.setVisible(False)
+        self._progress.setRange(0, 100)
+        self._progress.setValue(0)
+        self._cancellable = False
 
     def set_error(self):
         self._busy = False
         self._busy_text = ""
+        self._cancellable = False
+        self.clear_progress()
         self._update_btn_text()
 
     def _resolve_local_path(self) -> Optional[Path]:
@@ -2600,6 +2752,7 @@ class MarketplaceCard(QWidget):
     """插件市场浮动卡片"""
 
     closed = Signal()
+    _diagnosticsReady = Signal(str, str)  # (诊断报告文本, 错误信息)
 
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
@@ -2644,6 +2797,7 @@ class MarketplaceCard(QWidget):
         self._pending_scroll: int = 0  # 行重建待恢复的滚动位置（0=无）
         self._scroll_guard: int = 0  # 滚动恢复补批链次数上限防死循环
         _t0 = time.perf_counter()
+        self._diagnosticsReady.connect(self._on_diagnostics_ready)
         self._setup_ui()
         logger.debug(f"[DEBUG-mp] ctor _setup_ui {(time.perf_counter() - _t0) * 1000:.0f}ms")
         # 宽度上限：比对话气泡区（约 1000px）宽一点点（1080）即可，不铺满覆盖层全宽。
@@ -2676,8 +2830,9 @@ class MarketplaceCard(QWidget):
             self._filter_bar.setCurrentItem("featured")
             self._current_filter = "featured"
             self._apply_browse_mode("featured")
-        # 清除旧搜索状态、防抖定时器
-        self._search_edit.clear()
+        # 清除隐藏期间残留的防抖定时器（防重新显示时触发过期过滤）；
+        # 不清搜索框：tab 切换每次激活都走本方法，清空会丢用户搜索词。
+        # 渲染路径现读 _search_edit.text()，旧词自动套在新数据上。
         self._search_debounce.stop()
         # 延迟 50ms 启动加载，避免阻塞 show 过程（self 子 timer，销毁自动取消）
         logger.debug(f"[DEBUG-mp] show_card sync {(time.perf_counter() - _t_show) * 1000:.0f}ms")
@@ -2849,27 +3004,31 @@ class MarketplaceCard(QWidget):
     }
 
     def _apply_content_surface_color(self):
-        """给列表内容层刷主题实底色（滚动 blit 的前置条件）
+        """给列表内容层刷半透明面板底（与 #chatFrame 同色同透明度）
 
-        取上下文 ``colors.content_bg``，缺键回退 ``Colors.CONTENT_BG``。
-        必须用 palette（autoFillBackground）而非 QSS：QSS 背景由
-        QStyleSheetStyle 在 paintEvent 内绘制，不改写 QWidget 的 opaque
-        判定 → Qt 滚动位块传输优化仍被禁用（实测每步仍 106 次 paint）。
+        2026-11-08 起改为半透明：列表区与顶部筛选区融为同一块半透明
+        面板，透出壁纸。底色取 ``CARD_BG alpha=150``（chatFrame 面板
+        同款），仍走 palette + autoFillBackground（QSS 背景无法保证
+        与下层壁纸正确合成）。
+
+        代价：底色不再全不透明 → Qt 滚动 blit 失效，回退全视口重绘
+        （实测透明时 ~106 次 paint / p50 1.9ms/步 vs 实底 20 次 /
+        0.6ms，基准数据见 tests/perf/test_marketplace_scroll_blit.py，
+        60fps 帧预算内可接受）。勿因性能把它改回实底：那是产品决策。
         """
         from PySide6.QtGui import QColor
 
+        alpha = _LIST_SURFACE_ALPHA
         try:
-            from app.plugins.sdk import Colors
+            from app.plugins.sdk import Colors, qcolor_from_token
 
-            fallback = Colors.CONTENT_BG
+            # CARD_BG 是 "rgba(r,g,b,{alpha})" 模板；rgba 解析必须走
+            # qcolor_from_token（QColor 构造函数不认 CSS rgba 写法）
+            color = qcolor_from_token(Colors.CARD_BG.format(alpha=alpha))
+            if not color.isValid():
+                raise ValueError(color.name())
         except Exception:
-            fallback = "#2a2a2e"
-        theme_colors = getattr(self, "_cached_theme_colors", {}) or {}
-        raw = theme_colors.get("content_bg") or fallback
-        color = QColor(raw)
-        if not color.isValid():
-            color = QColor(fallback)
-        color.setAlpha(255)  # 必须全不透明，否则 blit 优化失效
+            color = QColor(33, 33, 38, alpha)
         pal = self._content.palette()
         pal.setColor(self._content.backgroundRole(), color)
         self._content.setPalette(pal)
@@ -2986,7 +3145,45 @@ class MarketplaceCard(QWidget):
         )
         header_layout.addWidget(self._status_label)
 
-        # 刷新 + 关闭（刷新在左，关闭在右）
+        # 一键更新 + 诊断 + 刷新 + 关闭（一键更新在最左）
+        # 一键更新：待更新 >1 时出现图标，右上角 badge 显示数量（归零即隐藏）
+        self._update_all_btn = TransparentToolButton(FluentIcon.UPDATE, header)
+        self._update_all_btn.setFixedSize(24, 24)
+        self._update_all_btn.setToolTip("一键更新")
+        self._update_all_btn.clicked.connect(self._on_update_all)
+        self._update_all_btn.setVisible(False)
+        header_layout.addWidget(self._update_all_btn)
+
+        self._update_all_badge = None
+        try:
+            from qfluentwidgets import InfoBadge, InfoBadgePosition
+
+            self._update_all_badge = InfoBadge.custom(
+                "0",
+                QColor(255, 193, 7),
+                QColor(255, 213, 79),
+                parent=header,
+                target=self._update_all_btn,
+                position=InfoBadgePosition.TOP_RIGHT,
+            )
+            self._update_all_badge.setObjectName("updateAllBadge")
+            # 同「待更新」tab badge：注销主题自动重放，固定黑字保证亮黄底可读
+            from qfluentwidgets.common.style_sheet import styleSheetManager
+
+            styleSheetManager.deregister(self._update_all_badge)
+            self._update_all_badge.setStyleSheet("InfoBadge { color: #1a1a1a; padding: 1px 3px 1px 3px; }")
+            self._update_all_badge.setVisible(False)
+        except Exception as e:
+            logger.warning(f"[Marketplace] 一键更新 InfoBadge 挂载失败: {e}")
+
+        # 诊断 + 刷新 + 关闭（诊断在刷新左侧）
+        # 诊断导出：汇总插件状态/兼容性/依赖/日志错误，复制给 AI 排查
+        self._diag_btn = TransparentToolButton(FluentIcon.DEVELOPER_TOOLS, header)
+        self._diag_btn.setFixedSize(24, 24)
+        self._diag_btn.setToolTip("导出插件诊断（复制给 AI 排查）")
+        self._diag_btn.clicked.connect(self._on_export_diagnostics)
+        header_layout.addWidget(self._diag_btn)
+
         self._refresh_btn = TransparentToolButton(FluentIcon.SYNC, header)
         self._refresh_btn.setFixedSize(24, 24)
         self._refresh_btn.setToolTip("刷新")
@@ -3095,14 +3292,6 @@ class MarketplaceCard(QWidget):
         self._sort_combo.currentIndexChanged.connect(self._on_sort_changed)
         filter_layout.addWidget(self._sort_combo)
 
-        # 一键更新：有待更新插件时显示（计数由 _update_update_badge 维护）
-        self._update_all_btn = TransparentPushButton("一键更新", filter_row)
-        self._update_all_btn.setObjectName("updateAllBtn")
-        self._update_all_btn.setFixedHeight(33)
-        self._update_all_btn.clicked.connect(self._on_update_all)
-        self._update_all_btn.setVisible(False)
-        filter_layout.addWidget(self._update_all_btn)
-
         browse_root.addWidget(filter_row)
 
         # ── 市场来源过滤栏（横向滚动，数据加载后构建）──
@@ -3188,20 +3377,16 @@ class MarketplaceCard(QWidget):
         self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self._scroll.setStyleSheet(_scroll_area_qss())
         self._content = _MarketListContent(self._scroll)
-        # ── 内容层必须"不透明实底"（滚动性能关键）──
-        # QScrollArea 滚动时走 QWidgetPrivate::scrollRect 位块传输（blit）：
-        # 已绘制区域整块搬移，只重绘新露出的一条。该优化要求滚动内容
-        # widget 自身不透明，否则 Qt 无法判断搬移后残留像素是否需与背景
-        # 合成，会回退到「全视口重绘」。
-        # 实测（150 行 / 视口 1000x577 / 原生平台）：
-        #   content 透明（background: transparent）→ 每滚动一步 106 次 paint
-        #     （视口内 6 行 × 17 控件全部重绘）、paint 耗时 p50 1.9ms；
-        #   content 不透明 → 每步 20 次 paint（仅新露出的一行）、p50 0.6ms。
-        # 注意：autoFillBackground（走 palette）才有效，setStyleSheet 设
-        # background 实测无效——QSS 背景由 QStyleSheetStyle 在 paintEvent 里
-        # 绘制，不改写 QWidget 的 opaque 判定，blit 仍被禁用。
-        # 实际底色（含 setAutoFillBackground）在 setWidget 之后由
-        # _apply_content_surface_color 统一设置。
+        # ── 内容层底色走半透明面板（alpha=150，透出壁纸）──
+        # 历史背景：实底曾是滚动 blit 优化的前置条件（widget 自身不
+        # 透明 Qt 才能位块搬移已绘制区域），2026-11-08 按需求改为与
+        # chatFrame 同款半透明面板，blit 失效回退全视口重绘（单步
+        # paint p50 0.6ms → 1.9ms，60fps 预算内）。
+        # 通道限制不变：palette（autoFillBackground）才有效，QSS 背景
+        # 由 QStyleSheetStyle 在 paintEvent 里绘制，不改写 QWidget 的
+        # opaque 判定。
+        # 实际底色在 setWidget 之后由 _apply_content_surface_color
+        # 统一设置（见 tests/perf/test_marketplace_scroll_blit.py）。
         self._content_layout = QVBoxLayout(self._content)
         self._content_layout.setContentsMargins(12, 8, 12, 8)
         # 间距 0：行与行之间靠行自身的 1px 分隔线分隔（行上下各有 8px 内边距，
@@ -3414,6 +3599,19 @@ class MarketplaceCard(QWidget):
         # 不移除、数据翻倍 + 状态徽标查不到。
         market_name = market_data.get("_marketplace") or market_data.get("name", "")
         plugins = market_data.get("plugins", []) or []
+        # 远端清单可能尚未发布 display_name（未 push 前），已安装插件从本地
+        # manifest 补一次，保证重开即显示中文；远程已有字段时以其为准。
+        try:
+            local_manifests = get_installer().get_manifest_map()
+        except Exception:
+            local_manifests = {}
+        if local_manifests:
+            for p in plugins:
+                if p.get("display_name"):
+                    continue
+                lm = local_manifests.get(p.get("name"))
+                if lm and lm.get("display_name"):
+                    p["display_name"] = lm["display_name"]
         # 合并：移除该市场旧数据，追加新数据（同名插件按市场覆盖）
         old = self._plugin_data
         merged = [p for p in old if p.get("_marketplace") != market_name]
@@ -3537,6 +3735,10 @@ class MarketplaceCard(QWidget):
     # ── 渲染 ──
 
     _RENDER_BATCH = 15  # 首批同步渲染行数：单行构造 ~13ms，30 行一帧 400ms 是打开掉帧主力，减半打散
+    # [PERF] 单帧渲染时间预算（毫秒）。实测「加载更多」一次 15 行同步建完主线程
+    # 阻塞 502ms（单行 ~33ms，比 _RENDER_BATCH 注释估计的 13ms 高一倍多）。
+    # 取 60ms ≈ 4 帧预算内的可接受停顿；超预算立即让出事件循环续帧。
+    _RENDER_FRAME_BUDGET_MS = 60
     _MAX_CONCURRENT_TASKS = 3  # 任务并发上限：不同插件任务并行，超过则 FIFO 等待
 
     def _render_plugins(self, plugins: list, auto_fill: bool = True):
@@ -3811,6 +4013,7 @@ class MarketplaceCard(QWidget):
             "_local_only": True,
             "_status": status,
             "_marketplace": "本地",
+            "display_name": {},
         }
         try:
             import json as _json
@@ -3820,6 +4023,7 @@ class MarketplaceCard(QWidget):
                 if _mp.exists():
                     m = _json.loads(_mp.read_text(encoding="utf-8"))
                     meta["description"] = m.get("description", "")
+                    meta["display_name"] = m.get("display_name") or {}
                     meta["author"] = (
                         m.get("author", {}).get("name", "")
                         if isinstance(m.get("author"), dict)
@@ -3857,6 +4061,7 @@ class MarketplaceCard(QWidget):
             "_local_only": True,
             "_status": status,
             "_marketplace": "本地",
+            "display_name": {},
         }
         try:
             import json as _json
@@ -3866,6 +4071,7 @@ class MarketplaceCard(QWidget):
                 if _mp.exists():
                     m = _json.loads(_mp.read_text(encoding="utf-8"))
                     meta["description"] = m.get("description", "")
+                    meta["display_name"] = m.get("display_name") or {}
                     meta["author"] = (
                         m.get("author", {}).get("name", "")
                         if isinstance(m.get("author"), dict)
@@ -3907,9 +4113,14 @@ class MarketplaceCard(QWidget):
         Returns: bool
         """
         name = p.get("name", "")
+        display = plugin_display_name(p)
 
         if query:
-            if query not in name.lower() and query not in (p.get("description", "")).lower():
+            if (
+                query not in name.lower()
+                and query not in display.lower()
+                and query not in (p.get("description", "")).lower()
+            ):
                 tags = p.get("_cached_tags", [])
                 if not any(query in t.lower() for t in tags):
                     return False
@@ -3947,7 +4158,7 @@ class MarketplaceCard(QWidget):
             matched.sort(key=lambda p: p.get("downloads", 0), reverse=True)
 
     def _render_next_batch(self, auto_fill: bool = True):
-        """渲染下一批缺失的匹配行（同步，每批 _RENDER_BATCH 个足够快，停住等手动加载）
+        """渲染下一批缺失的匹配行（时间预算分帧，切碎长任务）
 
         不依赖 _rendered_count 连续索引：搜索/筛选复用行后，_row_map 的行集合
         与 _matched 前部可能不一致（旧行 ≠ 新匹配列表前 N 个）。若按「已渲染
@@ -3957,6 +4168,12 @@ class MarketplaceCard(QWidget):
         auto_fill=False（数据到达/重复渲染路径）：只补首批 _RENDER_BATCH
         规模内的缺失，不自动渐进加载——历版每次开关市场自动 +15 行、
         滚动撞上补行卡 1-3s 的直接来源；超出首批的行等用户点「加载更多」。
+
+        [PERF] 时间预算分帧：原实现一次同步建满 _RENDER_BATCH（15）行。
+        2026-10-31 运行日志实测该路径在主线程阻塞 502ms（单行 ~33ms，比
+        注释估计的 13ms 高一倍多，带搜索词的浅色主题行更重）。改为每帧只
+        渲到 _RENDER_FRAME_BUDGET_MS 用完为止，余量用 singleShot(0) 续帧。
+        行仍是「建即入布局、隐藏待 reveal」，语义不变；差别只是跨了几帧。
         """
         missing = [p for p in self._matched if p.get("name", "") not in self._row_map]
         if not missing:
@@ -3968,14 +4185,41 @@ class MarketplaceCard(QWidget):
             missing = [p for p in missing if p.get("name", "") in first_batch]
             if not missing:
                 return
+        # 只取本批上限；帧内按时间预算再切
         batch = missing[: self._RENDER_BATCH]
-        self._render_rows(batch)
+        self._render_rows_framed(batch, remaining_after=len(missing) - len(batch))
+
+    def _render_rows_framed(self, rows: list, remaining_after: int, start_idx: int = 0):
+        """按时间预算逐行渲染（每帧到点让出事件循环，下一帧续）
+
+        Args:
+            rows: 本次要渲染的行数据（已截到 _RENDER_BATCH 以内）
+            remaining_after: 本批渲染完后仍未渲染的行数（用于「加载更多」文案）
+            start_idx: 本帧起始下标（续帧时传上次停下的位置）
+        """
+        import time as _time
+
+        deadline = _time.perf_counter() + self._RENDER_FRAME_BUDGET_MS / 1000.0
+        i = start_idx
+        while i < len(rows):
+            p = rows[i]
+            if not self._alive():
+                return  # 卡片已销毁，放弃剩余（不续帧，避免回调触碰已删控件）
+            # 保留原有「单行失败不中断整批」语义：_create_row 内部已 try/except
+            self._render_rows([p])
+            i += 1
+            # 至少渲一行再判超时：单行本身超标时也要推进，否则死循环
+            if _time.perf_counter() >= deadline and i < len(rows):
+                QTimer.singleShot(
+                    0,
+                    lambda _r=rows, _n=remaining_after, _i=i: self._render_rows_framed(_r, _n, _i),
+                )
+                return
         self._rendered_count = len(self._row_map)
         # 剩余数按 matched 维度算（row_map 总数含非匹配行/本地 extras，
         # 用它判定会提前收「加载更多」按钮 → 部分匹配插件永不渲染）
-        remaining = len(missing) - len(batch)
-        if remaining > 0:
-            self._set_load_more_button(remaining)
+        if remaining_after > 0:
+            self._set_load_more_button(remaining_after)
         else:
             self._all_loaded = True
             self._remove_load_more_button()
@@ -4054,6 +4298,7 @@ class MarketplaceCard(QWidget):
             return None
         row.installRequested.connect(self._async_install)
         row.updateRequested.connect(self._async_update)
+        row.cancelRequested.connect(self._cancel_task)
         row.openUrlRequested.connect(self._open_url)
         row.openDirRequested.connect(self._on_open_plugin_dir)
         row.detailRequested.connect(self._on_plugin_detail)
@@ -4425,6 +4670,9 @@ class MarketplaceCard(QWidget):
                 "meta": meta,
                 "keep_disabled": keep_disabled,
                 "reload_ui": reload_ui,
+                # 取消令牌：行按钮「取消」→ cancel(name) 置位，下载阶段的
+                # 阻塞点（socket read / git 子进程）据此中断
+                "token": _cancel.CancelToken() if kind in ("install", "update") else None,
             }
         )
         # 行立即置 busy（行可能未渲染/已隐藏，忽略）
@@ -4468,10 +4716,11 @@ class MarketplaceCard(QWidget):
         # 任务真正开始时行再确认 busy（排队期间可能被其他操作刷新）
         self._set_row_busy(name, task["busy_text"])
 
-        worker = _MarketplaceWorker(task["fn"])
+        worker = _MarketplaceWorker(task["fn"], task.get("token"))
         thread = QThread(self)
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
+        worker.progress.connect(lambda frac, txt, t=task: self._on_task_progress(t, frac, txt))
         worker.finished.connect(lambda ok, t=task: self._on_task_done(t, bool(ok)))
         worker.error.connect(lambda e, t=task: self._on_task_error(t, e))
         worker.finished.connect(thread.quit)
@@ -4484,6 +4733,69 @@ class MarketplaceCard(QWidget):
         self._worker = worker  # 兼容字段：最近启动的 worker
         self._worker_thread = thread  # 兼容字段：最近启动的线程
         thread.start()
+
+    def _on_task_progress(self, task: dict, fraction, text: str):
+        """下载进度回调（worker 线程 → 主线程）：更新对应行的细进度条"""
+        if not self._alive():
+            return
+        if task.get("kind") not in ("install", "update"):
+            return
+        name = task.get("name", "")
+        if not name:
+            return
+        row = self._row_map.get(name)
+        if row is not None and row._busy:
+            row.set_progress(fraction, text)
+        card = self._explore_card_by_name(name)
+        if card is not None and card._busy:
+            card.set_progress(fraction, text)
+        if text:
+            self._status_label.setText(f"{name} {text}")
+            self._status_label.setStyleSheet(
+                f"color: {task.get('status_color', _text_color(secondary=True))};"
+                " font-size: 12px; background: transparent;"
+            )
+
+    def _cancel_task(self, name: str):
+        """取消指定插件的安装/更新任务（行按钮「取消」）
+
+        排队中的任务直接移出队列；运行中的置 token，由下载阻塞点自行中断
+        （git 杀进程树 / socket shutdown）。落位与依赖安装阶段不可取消。
+        """
+        for i, task in enumerate(list(self._task_queue)):
+            if task.get("name") == name:
+                self._task_queue.pop(i)
+                token = task.get("token")
+                if token is not None:
+                    token.cancel()
+                self._release_row_busy(name)
+                self._status_label.setText(f"{name} 已取消")
+                self._status_label.setStyleSheet(
+                    f"color: {_text_color(secondary=True)}; font-size: 12px; background: transparent;"
+                )
+                return
+        task = self._active_tasks.get(name)
+        if task is None:
+            return
+        token = task.get("token")
+        if token is None:
+            return
+        token.cancel()
+        row = self._row_map.get(name)
+        if row is not None and row._busy:
+            # 立刻给反馈：按钮转「取消中…」禁用，等 worker 抛取消后收尾
+            row._cancellable = False
+            row._busy_text = "取消中…"
+            row._update_btn_text()
+        card = self._explore_card_by_name(name)
+        if card is not None and card._busy:
+            card._cancellable = False
+            card._busy_text = "取消中…"
+            card._update_btn_text()
+        self._status_label.setText(f"{name} 取消中…")
+        self._status_label.setStyleSheet(
+            f"color: {_text_color(secondary=True)}; font-size: 12px; background: transparent;"
+        )
 
     def _on_task_done(self, task: dict, success: bool):
         """任务完成：从活跃表移除 + 分发完成处理 + 启动下一个可运行任务"""
@@ -4513,6 +4825,25 @@ class MarketplaceCard(QWidget):
         if not self._alive():
             return
         kind, name = task["kind"], task["name"]
+        if err.startswith(_CANCELLED_MARK):
+            # 用户取消：不是失败 → 不写失败记录、不弹错误、不按失败改状态
+            if self._active_tasks.get(name) is task:
+                self._active_tasks.pop(name, None)
+                self._active_task = next(iter(self._active_tasks.values()), None)
+                self._task_active = bool(self._active_tasks)
+            self._release_row_busy(name)
+            if kind == "update":
+                # 更新取消时下载前已卸载旧版 UI，需重载恢复旧版可用
+                was_disabled = task.get("keep_disabled", False)
+                if not was_disabled:
+                    self._reload_plugin_ui_on_gui(name)
+            self._status_label.setText(f"{name} 已取消")
+            self._status_label.setStyleSheet(
+                f"color: {_text_color(secondary=True)}; font-size: 12px; background: transparent;"
+            )
+            InfoBar.warning(f"{name} 已取消", "", duration=2000, parent=_host_parent(self))
+            self._try_start_next()
+            return
         if self._active_tasks.get(name) is task:
             self._active_tasks.pop(name, None)
             self._active_task = next(iter(self._active_tasks.values()), None)
@@ -4557,12 +4888,16 @@ class MarketplaceCard(QWidget):
         if row is not None and row._busy:
             row._busy = False
             row._busy_text = ""
+            row._cancellable = False
+            row.clear_progress()
             row._update_btn_text()
         # 同步探索卡片
         card = self._explore_card_by_name(name)
         if card is not None and card._busy:
             card._busy = False
             card._busy_text = ""
+            card._cancellable = False
+            card.clear_progress()
             card._update_btn_text()
 
     def _set_row_busy(self, name: str, busy_text: str):
@@ -4598,6 +4933,9 @@ class MarketplaceCard(QWidget):
         这里从等待队列 + 活跃任务恢复 busy，防止「下载中」状态消失、
         按钮被误点重复提交同一插件。
         已完成任务不在队列/活跃表中，不会误恢复。
+
+        install/update 任务额外恢复「可取消」：重建后按钮仍是「取消」，
+        否则用户切 tab 回来就失去了取消入口。
         """
         tasks = list(self._task_queue)
         for task in self._active_tasks.values():
@@ -4610,6 +4948,18 @@ class MarketplaceCard(QWidget):
             if not name:
                 continue  # 插件数据缺 name：无行可恢复，跳过
             self._set_row_busy(name, task.get("busy_text", ""))
+            if task.get("kind") in ("install", "update") and task.get("token") is not None:
+                token = task["token"]
+                # 已封盘（落位阶段）或已取消（等 worker 收尾）→ 不再提供取消
+                cancellable = not token.is_sealed and not token.cancelled
+                row = self._row_map.get(name)
+                if row is not None:
+                    row._cancellable = cancellable
+                    row._update_btn_text()
+                card = self._explore_card_by_name(name)
+                if card is not None:
+                    card._cancellable = cancellable
+                    card._update_btn_text()
 
     # ── 异步安装 ──
 
@@ -4625,6 +4975,7 @@ class MarketplaceCard(QWidget):
             status_color=_text_color(secondary=True),
             meta=plugin_meta,
         )
+        self._mark_cancellable(name)
 
     def _on_install_done(self, name: str, success: bool):
         """安装完成"""
@@ -4762,6 +5113,23 @@ class MarketplaceCard(QWidget):
             meta=plugin_meta,
             keep_disabled=was_disabled,
         )
+        self._mark_cancellable(name)
+
+    def _mark_cancellable(self, name: str):
+        """标记该行任务处于可取消阶段：按钮变「取消」（保持可点）
+
+        与 _set_row_busy 分开：_set_row_busy 负责「忙」语义（按钮禁用），
+        本方法在其上把按钮改成可点的「取消」。排队中的任务也可取消
+        （_cancel_task 直接移出队列）。
+        """
+        row = self._row_map.get(name)
+        if row is not None and row._busy:
+            row._cancellable = True
+            row._update_btn_text()
+        card = self._explore_card_by_name(name)
+        if card is not None and card._busy:
+            card._cancellable = True
+            card._update_btn_text()
 
     def _set_row_downloading(self, name: str):
         """将该插件行立即置为「下载中…」（保留已安装态，旧版未删）"""
@@ -4936,7 +5304,7 @@ class MarketplaceCard(QWidget):
             card_bg=card_bg,
             border_c=border_c,
         )
-        return dialog.exec_() == 1
+        return dialog.exec() == 1
 
     def _on_manage_done(self, task: dict, success: bool):
         """启用/禁用/卸载完成"""
@@ -5213,6 +5581,7 @@ class MarketplaceCard(QWidget):
         config_layout.addWidget(cfg_title)
 
         self._proxy_mode_combo = ComboBox(config_widget)
+        self._proxy_mode_combo.addItem("系统代理", userData="system")
         self._proxy_mode_combo.addItem("前缀加速站", userData="prefix")
         self._proxy_mode_combo.addItem("自建代理服务", userData="selfhost")
         self._proxy_mode_combo.addItem("HTTP 正向代理", userData="http")
@@ -5383,7 +5752,7 @@ class MarketplaceCard(QWidget):
         act_lb.setStyleSheet(f"color: {tcs}; font-size: {fs_row}px; background: transparent;{ff_qss}")
         lay.addWidget(act_lb)
 
-        name = rec.get("name", "")
+        name = plugin_display_name(rec.get("meta") or {}) or rec.get("name", "")
         name_lb = QLabel(name, row)
         name_lb.setObjectName("proxyRecordRow")
         name_lb.setStyleSheet(f"color: {tc}; font-size: {fs_row}px; background: transparent;{ff_qss}")
@@ -5449,7 +5818,7 @@ class MarketplaceCard(QWidget):
             self._show_proxy_info("缺少插件元数据，无法重试", error=True)
             return
         action_text = "安装" if rec.get("action") == "install" else "更新"
-        name = rec.get("name", "")
+        name = plugin_display_name(rec.get("meta") or {}) or rec.get("name", "")
         if btn is not None:
             btn.setEnabled(False)
             btn.setText("重试中…")
@@ -5480,15 +5849,37 @@ class MarketplaceCard(QWidget):
             self._proxy_mode_combo.setCurrentIndex(idx)
         self._proxy_addr_edit.setText(proxy.address)
         self._update_proxy_help(proxy.mode)
+        # system 模式：覆盖为实时探测值并置只读（磁盘 address 只是上次快照）
+        self._apply_proxy_mode_address(proxy.mode)
         if proxy.enabled:
             self._proxy_status_label.setText("已启用 · 上次保存后未改动")
         else:
             self._proxy_status_label.setText("")
 
+    def _apply_proxy_mode_address(self, mode: str):
+        """system 模式地址框只读并填实时探测结果；其余恢复可编辑（保留文本）"""
+        if mode != "system":
+            self._proxy_addr_edit.setReadOnly(False)
+            return
+        detected = detect_system_proxy() or ""
+        self._proxy_addr_edit.setText(detected)
+        self._proxy_addr_edit.setReadOnly(True)
+        if not detected:
+            self._proxy_status_label.setStyleSheet(self._proxy_status_style("#e6a23c"))
+            self._proxy_status_label.setText("未检测到系统代理，请在代理工具中开启「系统代理」")
+
     def _on_proxy_switch_toggled(self, checked: bool):
         """开关切换即保存 enabled 状态（地址非法时回弹，避免开启一个无效配置）"""
         mode = self._proxy_mode_combo.currentData()
         address = self._proxy_addr_edit.text().strip()
+        if mode == "system" and checked and not detect_system_proxy():
+            # 系统代理探测不到：回弹开关，避免启用一个实际直连的空配置
+            self._proxy_switch.blockSignals(True)
+            self._proxy_switch.setChecked(False)
+            self._proxy_switch.blockSignals(False)
+            self._proxy_status_label.setStyleSheet(self._proxy_status_style("#e6a23c"))
+            self._proxy_status_label.setText("未检测到系统代理，请先在代理工具中开启「系统代理」")
+            return
         ok, msg = get_proxy_config().validate(mode, address)
         if not ok:
             # 非法地址：回弹开关并提示先填地址
@@ -5508,14 +5899,17 @@ class MarketplaceCard(QWidget):
     def _on_proxy_mode_changed(self, index: int):
         mode = self._proxy_mode_combo.itemData(index)
         self._update_proxy_help(mode)
+        self._apply_proxy_mode_address(mode)
 
     def _update_proxy_help(self, mode: str):
         texts = {
+            "system": "系统代理：自动读取系统全局代理（Windows 注册表 / 环境变量 / macOS），无需手填。\n未检测到时自动直连；代理工具开关「系统代理」后重新保存即可生效。",
             "prefix": "前缀加速站：填公共加速站地址，如 https://ghfast.top/。\n请求会自动拼接为 加速站地址 + 原 GitHub 链接。",
             "selfhost": "自建代理服务：填你自己部署的代理地址，如 https://my-proxy.deno.dev/。\n适合官方/公共加速站不可用的网络环境。",
             "http": "HTTP 正向代理：填代理工具地址（含端口），如 http://127.0.0.1:7890。\n需先启动 Clash 等代理工具。",
         }
         placeholders = {
+            "system": "自动读取系统代理，无需填写",
             "prefix": "https://ghfast.top/",
             "selfhost": "https://my-proxy.deno.dev/",
             "http": "http://127.0.0.1:7890",
@@ -5574,6 +5968,15 @@ class MarketplaceCard(QWidget):
         enabled = self._proxy_switch.isChecked()
         mode = self._proxy_mode_combo.currentData()
         address = self._proxy_addr_edit.text().strip()
+        if mode == "system":
+            # system 模式存实时探测快照（供展示与排查）；探测不到不落盘
+            address = detect_system_proxy() or ""
+            if not address:
+                msg = "未检测到系统代理，请先在代理工具中开启「系统代理」"
+                self._proxy_status_label.setStyleSheet(self._proxy_status_style("#e6a23c"))
+                self._proxy_status_label.setText(msg)
+                self._show_proxy_info(msg, error=True)
+                return
         ok, msg = get_proxy_config().validate(mode, address)
         if not ok:
             self._proxy_status_label.setStyleSheet(self._proxy_status_style("#ef5350"))
@@ -5780,6 +6183,7 @@ class MarketplaceCard(QWidget):
                 continue
             card.installRequested.connect(self._async_install)
             card.updateRequested.connect(self._async_update)
+            card.cancelRequested.connect(self._cancel_task)
             card.detailRequested.connect(self._on_plugin_detail)
             section.add_card(p.get("name", ""), card)
 
@@ -5894,10 +6298,18 @@ class MarketplaceCard(QWidget):
                 self._updates_badge.setVisible(False)
         except RuntimeError:
             pass
-        # 一键更新按钮：有待更新才显示
+        # 一键更新硬钮：待更新 >1 才出现图标；badge 显示数量，归零隐藏
         try:
-            self._update_all_btn.setVisible(n > 0)
-            self._update_all_btn.setText(f"一键更新 ({n})")
+            show = n > 1
+            self._update_all_btn.setVisible(show)
+            self._update_all_btn.setToolTip(f"一键更新 {n} 个插件" if show else "一键更新")
+            if self._update_all_badge is not None:
+                if show:
+                    self._update_all_badge.setText(str(n))
+                    self._update_all_badge.setVisible(True)
+                else:
+                    self._update_all_badge.setText("0")
+                    self._update_all_badge.setVisible(False)
         except RuntimeError:
             pass
         _sync_sidebar_title_count(n)
@@ -5915,10 +6327,53 @@ class MarketplaceCard(QWidget):
         if queued:
             self._status_label.setText(f"已加入更新队列：{queued} 个插件")
             self._status_label.setStyleSheet(
-                f"color: #FFA726; font-size: 12px; background: transparent;"
+                "color: #FFA726; font-size: 12px; background: transparent;"
             )
         else:
             self._status_label.setText("没有待更新的插件")
+
+    # ── 诊断导出 ──
+
+    def _on_export_diagnostics(self):
+        """后台采集插件诊断，完成后复制到剪贴板（报告可直接粘贴给 AI）"""
+        self._diag_btn.setEnabled(False)
+        self._diag_btn.setToolTip("诊断采集中…")
+
+        def _worker():
+            try:
+                from .diagnostics import collect_diagnostics
+
+                text, err = collect_diagnostics(), ""
+            except Exception as e:  # 采集失败也要回主线程恢复按钮
+                text, err = "", str(e)
+            self._diagnosticsReady.emit(text, err)
+
+        import threading
+
+        threading.Thread(target=_worker, daemon=True, name="marketplace-diagnostics").start()
+
+    def _on_diagnostics_ready(self, text: str, error: str):
+        """主线程：复制诊断到剪贴板并提示"""
+        self._diag_btn.setEnabled(True)
+        self._diag_btn.setToolTip("导出插件诊断（复制给 AI 排查）")
+        bar_parent = _host_parent(self)
+        if error or not text:
+            InfoBar.error("诊断生成失败", error or "未采集到内容", duration=4000, parent=bar_parent)
+            return
+        try:
+            from PySide6.QtWidgets import QApplication
+
+            QApplication.clipboard().setText(text)
+        except Exception as e:
+            logger.warning(f"[Marketplace] 复制诊断失败: {e}")
+            InfoBar.error("诊断已生成但复制失败", str(e)[:120], duration=4000, parent=bar_parent)
+            return
+        InfoBar.success(
+            "诊断已复制",
+            "粘贴给 AI 即可排查（含插件状态、兼容性、依赖与日志错误）",
+            duration=4000,
+            parent=bar_parent,
+        )
 
     # ── Tag 过滤 ──
 
@@ -6121,7 +6576,7 @@ class MarketplaceCard(QWidget):
             card_bg=getattr(self, "_cached_theme_colors", {}).get("content_bg", "#2a2a2e"),
             border_c=(getattr(self, "_cached_theme_colors", {}) or {}).get("border", "rgba(128,128,128,0.15)"),
         )
-        if dialog.exec_():
+        if dialog.exec():
             self._active_tags = set(dialog.selected_tags())
             self._sync_tag_buttons()
             if self._plugin_data:
@@ -6160,7 +6615,7 @@ class MarketplaceCard(QWidget):
         dialog.disableRequested.connect(self._async_disable)
         dialog.uninstallRequested.connect(self._async_uninstall)
         dialog.openDirRequested.connect(self._on_open_plugin_dir)
-        dialog.exec_()
+        dialog.exec()
 
     # ── 市场管理 ──
 

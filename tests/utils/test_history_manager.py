@@ -343,6 +343,68 @@ def test_save_cleared_session_invalidates_pending_save(monkeypatch, tmp_path):
     assert manager._pending_save_session_id is None
     assert manager._save_timer is None
 
+# ---------- 懒加载查询失败：不得把「查询失败」固化成「真的没有历史」（启动空列表根因） ----------
+
+def test_lazy_load_query_failure_keeps_retryable_state(monkeypatch, tmp_path):
+    """🔴 回归（2026-10-31 启动空历史）：启动瞬时 disk I/O error 时
+    get_all_lightweight 静默返回 [] → _ensure_history_loaded 把空列表当真实
+    数据固化 _history_loaded=True → 整个会话期历史列表为空，直到用户对话
+    触发 db 签名变化才恢复。修复后：失败返回 None，加载态保持未加载可重试，
+    且重试成功后必须置脏轻量缓存（失败窗口期已缓存空快照）。"""
+    manager = _make_manager(monkeypatch, tmp_path)
+    store = _FakeSessionStore([_lightweight_session(1), _lightweight_session(2)])
+    manager._use_sqlite = True
+    manager._session_store = store
+
+    # 模拟瞬时磁盘故障：查询失败（store 层返回 None，非合法空列表）
+    monkeypatch.setattr(store, "get_sessions_lightweight", lambda limit=500: None)
+    result = manager.get_history_list()
+    assert manager._history_loaded is False, "查询失败不得固化已加载态（否则永不重试）"
+    assert result == [], "失败窗口期对外呈现空列表（不抛异常）"
+
+    # 磁盘恢复 → 下次读取自动重试加载全量
+    monkeypatch.setattr(
+        store, "get_sessions_lightweight", lambda limit=500: [dict(s) for s in store.sessions[:limit]]
+    )
+    result = manager.get_history_list()
+    assert manager._history_loaded is True, "恢复后重试应完成加载"
+    assert len(result) == 2, "重试成功后 UI 读取必须拿到全量（缓存已被置脏重建）"
+
+def test_lazy_load_success_marks_cache_dirty_for_later_readers(monkeypatch, tmp_path):
+    """空快照已入缓存后，懒加载成功必须置脏缓存，否则后续读取者命中陈旧空快照。"""
+    manager = _make_manager(monkeypatch, tmp_path)
+    store = _FakeSessionStore([_lightweight_session(1)])
+    manager._use_sqlite = True
+    manager._session_store = store
+
+    # 第一次：失败 → 空快照入缓存
+    monkeypatch.setattr(store, "get_sessions_lightweight", lambda limit=500: None)
+    manager.get_history_list()
+    assert manager._cached_lightweight.get(None) == []
+
+    # 第二次：成功 → 缓存必须重建而非命中空快照
+    monkeypatch.setattr(store, "get_sessions_lightweight", lambda limit=500: [dict(store.sessions[0])])
+    result = manager.get_history_list()
+    assert len(result) == 1, "加载成功后不得再返回缓存中的空快照"
+
+def test_reload_query_failure_keeps_memory_intact(monkeypatch, tmp_path):
+    """跨进程重载查询失败（返回 None）时不得把内存历史污染成 None。"""
+    manager = _make_manager(monkeypatch, tmp_path)
+    store = _FakeSessionStore([_lightweight_session(1)])
+    manager._use_sqlite = True
+    manager._session_store = store
+    manager._history_loaded = True
+    manager._history_sessions = [_lightweight_session(9)]
+    manager._db_signature_stored = (0.9,)
+    monkeypatch.setattr(manager, "_db_signature", lambda: (1.0, 2.0))
+    monkeypatch.setattr(store, "get_sessions_lightweight", lambda limit=500: None)
+
+    manager._reload_if_db_changed()
+
+    assert manager._history_sessions and manager._history_sessions[0]["session_id"] == "session-9", (
+        "重载失败必须保留内存现有数据（不得被 None 污染）"
+    )
+
 
 def test_save_cleared_session_returns_false_when_session_absent(monkeypatch, tmp_path):
     """会话不在内存记录中时跳过（返回 False），不得凭空造记录。"""
@@ -440,3 +502,262 @@ def test_cache_key_interleave_reverse_direction(monkeypatch, tmp_path):
     # ④ 普通键也已刷新（整表作废后重建，不再是旧快照）
     plain = [s["session_id"] for s in manager.get_history_list("默认项目")]
     assert "b" in plain, f"普通列表返回陈旧缓存：{plain}"
+
+
+# ---------- 保存落盘可靠性：防抖 timer 语义、在飞写等待、失败重试 ----------
+
+
+def test_save_timer_is_cancellable_instance_timer(monkeypatch, tmp_path, qapp):
+    """🛡️ 回归：`QTimer.singleShot` 返回 None 曾让所有 timer 判断永假。
+
+    旧实现 `self._save_timer = QTimer.singleShot(...)` →
+    ① 合并保存请求永不生效（每次都新排定时器）；② flush/flush_async 里的
+    `_save_timer is not None` 永假，取消逻辑等于没写。改为实例 QTimer 后
+    必须能停掉且句柄被清空。
+    """
+    manager = _make_manager(monkeypatch, tmp_path)
+    manager._use_sqlite = False  # 只测 timer 语义，不落盘
+
+    manager._pending_save_session_id = "session-1"
+    manager._start_save_timer()
+    timer = manager._save_timer
+    assert timer is not None, "定时器必须是可判活的实例对象"
+
+    # 同一会话重复调度：合并请求，不新排定时器
+    manager._schedule_save("session-1")
+    assert manager._save_timer is timer, "同一会话的重复保存必须复用已有定时器"
+
+    manager._cancel_save_timer()
+    assert manager._save_timer is None
+    assert not timer.isActive(), "取消后定时器不得再触发"
+
+
+def test_schedule_save_from_background_thread_does_not_wedge(monkeypatch, tmp_path, qapp):
+    """后台线程调 _schedule_save 不得留下永久非 None 的 timer。
+
+    后台 finalize 线程也会走 update_session → _schedule_save。Qt 定时器在无
+    事件循环的线程不会触发；若仍写入 _save_timer，主线程后续所有调度都会被
+    `if self._save_timer is not None: return` 挡掉 → 保存彻底停摆。
+    """
+    import threading as _threading
+
+    manager = _make_manager(monkeypatch, tmp_path)
+    manager._use_sqlite = False
+
+    t = _threading.Thread(target=lambda: manager._schedule_save("session-1"))
+    t.start()
+    t.join()
+
+    assert manager._save_timer is None, "后台线程不得留下无法触发的定时器"
+    assert manager._pending_save_session_id == "session-1", "pending 仍需保留供 flush 消费"
+
+
+def test_flush_waits_for_inflight_save(monkeypatch, tmp_path):
+    """🛡️ 回归：flush 必须等「已交给后台但未写完」的保存结束。
+
+    旧实现 _do_save 在起线程前就清 pending，flush() 只看 pending 判空转 →
+    进程退出杀掉 daemon 写线程，最后一次保存静默丢失。
+    """
+    import threading as _threading
+    import time as _time
+
+    manager = _make_manager(monkeypatch, tmp_path)
+    store = _FakeSessionStore([_lightweight_session(1)])
+    manager._use_sqlite = True
+    manager._session_store = store
+    manager._history_loaded = True
+    manager._history_sessions = [
+        {
+            "session_id": "session-1",
+            "title": "会话 1",
+            "project": "默认项目",
+            "messages": [{"role": "user", "content": "内容", "timestamp": "2026-08-18 16:00:00"}],
+        }
+    ]
+
+    gate = _threading.Event()
+
+    def _slow_save(session):
+        gate.wait(2.0)  # 模拟大会话序列化+写盘耗时
+        store.saved_session_ids.append(session["session_id"])
+        return True
+
+    monkeypatch.setattr(store, "save_session", _slow_save)
+
+    manager._pending_save_session_id = "session-1"
+    manager._do_save()  # 异步：起后台线程后立即返回
+
+    # 此刻 pending 已被清空、写线程还没写完——旧实现在这里会让 flush 空转返回
+    assert manager._pending_save_session_id is None
+
+    _threading.Timer(0.1, gate.set).start()
+    manager.flush()
+
+    assert store.saved_session_ids == ["session-1"], "flush 返回时在飞写必须已落盘"
+    assert manager._save_inflight == 0
+
+
+def test_background_save_failure_requeues_pending(monkeypatch, tmp_path):
+    """写盘失败不得静默吞掉：重试后仍失败必须回填 pending 供后续重试。
+
+    旧实现 except 只打 warning 就返回，而调用方已在派发前清掉 _session_dirty
+    → 一次 IO 失败等于这轮内容永久不落库。
+    """
+    import threading as _threading
+
+    manager = _make_manager(monkeypatch, tmp_path)
+    store = _FakeSessionStore([_lightweight_session(1)])
+    manager._use_sqlite = True
+    manager._session_store = store
+    manager._history_loaded = True
+    manager._history_sessions = [
+        {
+            "session_id": "session-1",
+            "title": "会话 1",
+            "project": "默认项目",
+            "messages": [{"role": "user", "content": "内容", "timestamp": "2026-08-18 16:00:00"}],
+        }
+    ]
+
+    attempts = {"n": 0}
+
+    def _always_fail(session):
+        attempts["n"] += 1
+        raise OSError("disk I/O error")
+
+    monkeypatch.setattr(store, "save_session", _always_fail)
+
+    manager._pending_save_session_id = "session-1"
+    manager._do_save()
+    manager._wait_inflight_saves(timeout=5.0)
+
+    assert attempts["n"] == 3, f"失败必须重试 3 次，实际 {attempts['n']} 次"
+    assert manager._pending_save_session_id == "session-1", "重试仍失败必须回填 pending"
+    assert manager._save_inflight == 0, "失败路径也必须注销在飞计数"
+
+
+def test_background_save_retry_succeeds_on_second_attempt(monkeypatch, tmp_path):
+    """瞬时失败（第一次抛、第二次成功）不得丢保存。"""
+    manager = _make_manager(monkeypatch, tmp_path)
+    store = _FakeSessionStore([_lightweight_session(1)])
+    manager._use_sqlite = True
+    manager._session_store = store
+    manager._history_loaded = True
+    manager._history_sessions = [
+        {
+            "session_id": "session-1",
+            "title": "会话 1",
+            "project": "默认项目",
+            "messages": [{"role": "user", "content": "内容", "timestamp": "2026-08-18 16:00:00"}],
+        }
+    ]
+
+    calls = {"n": 0}
+
+    def _flaky(session):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise OSError("temporary I/O error")
+        store.saved_session_ids.append(session["session_id"])
+        return True
+
+    monkeypatch.setattr(store, "save_session", _flaky)
+
+    manager._pending_save_session_id = "session-1"
+    manager._do_save()
+    manager._wait_inflight_saves(timeout=5.0)
+
+    assert store.saved_session_ids == ["session-1"]
+    assert manager._pending_save_session_id is None, "成功落盘后不得残留 pending"
+
+
+def test_save_timer_actually_fires(monkeypatch, tmp_path, qapp):
+    """防抖定时器必须真能触发 _do_save（实例 QTimer 的 timeout 连接要被验证）。
+
+    只测「句柄非 None」不够：`timer.timeout.connect(self._do_save)` 若签名不匹配
+    （QTimer.timeout 无参、_do_save 首参 synchronous 有默认值），连接会在运行期
+    静默失败或被拒绝，保存从此不再自动发生。
+    """
+    from PySide6.QtCore import QCoreApplication, QEventLoop, QTimer
+
+    manager = _make_manager(monkeypatch, tmp_path)
+    manager._use_sqlite = False  # 只验证触发，不落盘
+    manager._save_delay_ms = 10
+
+    fired = {"n": 0}
+    original = manager._do_save
+
+    def _counting(synchronous: bool = False):
+        fired["n"] += 1
+        return original(synchronous=synchronous)
+
+    monkeypatch.setattr(manager, "_do_save", _counting)
+    manager._pending_save_session_id = "session-1"
+    manager._start_save_timer()
+
+    loop = QEventLoop()
+    QTimer.singleShot(200, loop.quit)
+    loop.exec()
+    QCoreApplication.processEvents()
+
+    assert fired["n"] >= 1, "防抖定时器到期必须真正触发 _do_save"
+
+
+def test_partial_tail_skips_token_estimation(monkeypatch, tmp_path):
+    """partial 尾巴跳过 token 全量估算，沿用上一版 context_usage。
+
+    流式中途落盘的半截回复每 25s 覆盖一次，为它全量遍历消息列表算 token
+    是纯浪费（800 轮会话实测 0.45ms）；且该值在正常结束时会被完整消息的
+    重算覆盖。跳过时必须沿用旧值，不能让占用显示在两次落盘之间清零。
+    """
+    manager = _make_manager(monkeypatch, tmp_path)
+    manager._use_sqlite = False
+    manager._history_loaded = True
+    manager._history_sessions = [
+        {
+            "session_id": "session-1",
+            "title": "会话 1",
+            "project": "默认项目",
+            "messages": [{"role": "user", "content": "内容", "timestamp": "2026-08-18 16:00:00"}],
+            "context_usage": 12345,
+        }
+    ]
+
+    manager.update_session(
+        0,
+        [
+            {"role": "user", "content": "内容", "timestamp": "2026-08-18 16:00:00"},
+            {"role": "assistant", "content": "半截回复", "_partial": True, "timestamp": "2026-08-18 16:00:01"},
+        ],
+    )
+
+    record = manager._history_sessions[0]
+    assert record["context_usage"] == 12345, "partial 尾巴必须沿用旧占用值，不得清零"
+
+
+def test_normal_tail_still_estimates_tokens(monkeypatch, tmp_path):
+    """非 partial 尾巴照常全量估算（不能因为优化而漏掉正常路径）。"""
+    manager = _make_manager(monkeypatch, tmp_path)
+    manager._use_sqlite = False
+    manager._history_loaded = True
+    manager._history_sessions = [
+        {
+            "session_id": "session-1",
+            "title": "会话 1",
+            "project": "默认项目",
+            "messages": [{"role": "user", "content": "内容", "timestamp": "2026-08-18 16:00:00"}],
+            "context_usage": 12345,
+        }
+    ]
+
+    manager.update_session(
+        0,
+        [
+            {"role": "user", "content": "内容", "timestamp": "2026-08-18 16:00:00"},
+            {"role": "assistant", "content": "完整回复内容", "timestamp": "2026-08-18 16:00:01"},
+        ],
+    )
+
+    record = manager._history_sessions[0]
+    assert record["context_usage"] > 0
+    assert record["context_usage"] != 12345, "正常尾巴必须重新估算，不能沿用旧值"

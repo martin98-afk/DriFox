@@ -33,6 +33,67 @@ _DEDUP = frozenset({"interrupt", "new"})
 _DISCARD_SEND = frozenset({"interrupt", "new"})
 
 
+# 入队观察者：enqueue 成功后回调 observer(window_id)。回调在入队线程同步执行
+# （通常是 worker 线程，也可能是主线程），只允许做线程安全的调度动作
+# （如 pyqtSignal.emit），严禁直接触碰 UI 对象；注册方用弱引用自防生命周期。
+_enqueue_observers: List[Callable[[str], None]] = []
+
+
+def add_enqueue_observer(observer: Callable[[str], None]) -> None:
+    """注册入队观察者（去重）。"""
+    if observer not in _enqueue_observers:
+        _enqueue_observers.append(observer)
+
+
+def remove_enqueue_observer(observer: Callable[[str], None]) -> None:
+    """注销入队观察者（窗口销毁时调用，防泄漏）。"""
+    try:
+        _enqueue_observers.remove(observer)
+    except ValueError:
+        pass
+
+
+# 实时动作处理器：不入队、由注册方（主线程）在收到回调后立即执行。
+# 与 enqueue 的区别是绕开「本轮对话结束才 drain」的时序约束——用于
+# team_spawn 这类必须实时生效的 UI 动作。回调同样在调用线程同步执行，
+# 只允许做线程安全调度（pyqtSignal.emit），严禁直接触碰 UI。
+# 多窗口各自注册一个处理器：处理器自己比对 window_id，命中返回 True。
+_immediate_handlers: Dict[str, List[Callable[[str, dict], bool]]] = {}
+
+
+def register_immediate_handler(action: str, handler: Callable[[str, dict], bool]) -> None:
+    """注册实时动作处理器（多窗口并存时按 window_id 命中）。"""
+    handlers = _immediate_handlers.setdefault(str(action), [])
+    if handler not in handlers:
+        handlers.append(handler)
+
+
+def unregister_immediate_handler(action: str, handler: Callable[[str, dict], bool]) -> None:
+    handlers = _immediate_handlers.get(str(action))
+    if not handlers:
+        return
+    try:
+        handlers.remove(handler)
+    except ValueError:
+        pass
+    if not handlers:
+        _immediate_handlers.pop(str(action), None)
+
+
+def submit_immediate(window_id: str, action: str, payload: Optional[dict] = None) -> bool:
+    """交给实时处理器执行；无处理器命中时返回 False（调用方回退入队）。"""
+    handlers = _immediate_handlers.get(str(action))
+    if not handlers:
+        return False
+    for handler in tuple(handlers):
+        try:
+            if handler(str(window_id or ""), dict(payload or {})):
+                return True
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[ActionQueue] 实时动作 {action} 提交失败: {e}")
+    return False
+
+
 class WindowActionQueue:
     """按 window_id 隔离的动作队列"""
 
@@ -59,6 +120,14 @@ class WindowActionQueue:
             self._queues[wid] = queue = deque(item for item in queue if item["action"] != "send")
             logger.info(f"[ActionQueue] {action} 入队：丢弃旧会话排队的 send")
         queue.append({"action": action, "payload": dict(payload or {})})
+        # 通知观察者：空闲期入队的动作（如定时器 session.send）没有
+        # _on_stream_finished 末尾的 drain 时机可等，必须由观察方立即调度消费；
+        # busy 期入队由观察方自行判忙跳过，维持「本轮结束 drain」原契约。
+        for observer in tuple(_enqueue_observers):
+            try:
+                observer(wid)
+            except Exception as e:  # noqa: BLE001 - 单个观察者异常不影响入队结果
+                logger.debug(f"[ActionQueue] 入队观察者异常: {e}")
         return True
 
     def peek(self, window_id: str) -> List[dict]:

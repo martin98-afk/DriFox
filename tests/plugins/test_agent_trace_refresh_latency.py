@@ -32,6 +32,7 @@ import time
 
 import pytest
 from PySide6.QtCore import QObject, Signal
+from PySide6.QtTest import QTest
 
 pytest.importorskip("qfluentwidgets")
 
@@ -175,6 +176,9 @@ def test_messages_updated_signal_drives_reprojection(qapp):
         )
         backend.messages_updated.emit()
         qapp.processEvents()
+        # 节流（400ms singleShot，watchdog 阻塞治理）：等过窗口期再断言
+        QTest.qWait(_trace_collector._SYNC_INTERVAL_MS + 120)
+        qapp.processEvents()
 
         assert len(c.records) > before, "落盘信号未驱动重投影（collector 没有订阅 messages_updated）"
         assert any(r.kind == EntryKind.TOOL for r in c.records), "落盘的 tool 记录未进入投影"
@@ -219,6 +223,9 @@ def test_tool_record_survives_until_persist(qapp):
             }
         )
         backend.messages_updated.emit()
+        qapp.processEvents()
+        # 节流（400ms singleShot）：等过窗口期，正式记录才取代临时记录
+        QTest.qWait(_trace_collector._SYNC_INTERVAL_MS + 120)
         qapp.processEvents()
         tools = [r for r in c.visible_records if r.kind == EntryKind.TOOL]
         assert len(tools) == 1, f"落盘后应只剩正式记录，实际 {len(tools)} 条"

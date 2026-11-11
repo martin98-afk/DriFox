@@ -4,8 +4,11 @@
         "dark": "icon_dark.svg"
     },
     "name": "plugin-marketplace",
-    "description": "DriFox 官方插件市场 — 浏览、安装、管理插件",
-    "version": "0.3.2",
+    "display_name": {
+        "zh": "插件市场"
+    },
+    "description": "DriFox 官方插件市场 — 浏览、安装、管理插件，并把搜索/安装/卸载/更新/启停开放给 AI 工具",
+    "version": "0.6.1",
     "author": {
         "name": "DriFox Contributors"
     },
@@ -13,12 +16,16 @@
     "license": "GPL-3.0-or-later",
     "type": "system",
     "api_version": 2,
+    "module_prefixes": [
+        "_plugin_marketplace_ui"
+    ],
     "capabilities": [
         "config.read",
         "input.write"
     ],
     "components": {
-        "ui": true
+        "ui": true,
+        "tools": true
     },
     "config_schema": {
         "title": "插件市场",

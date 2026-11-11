@@ -11,7 +11,9 @@ QTWEBENGINE_CHROMIUM_FLAGS 被清空）也如实显示。
 两个操作按钮（icon-only + tooltip，符合项目按钮约定）：
 - 复制：把 QT_OPENGL / QT_ANGLE_PLATFORM / QTWEBENGINE_CHROMIUM_FLAGS 完整拷走，
   方便贴给开发者或自己对照改 ExtraChromiumFlags
-- 恢复默认：把 Render 组所有配置项写回 defaultValue（仍需重启生效）
+- 恢复默认：把 Render 组所有配置项写回 defaultValue（仍需重启生效）。
+  其中内存治理核心六项同时是「平台推荐档」口径（render_env.platform_recommended_profile）：
+  有偏离时在 content 里标注「N 项偏离推荐」，恢复默认的 tooltip 点名偏离项。
 """
 
 from __future__ import annotations
@@ -28,7 +30,7 @@ from qfluentwidgets import (
 )
 
 from app.utils.design_tokens import Colors, font_size_css
-from app.utils.render_env import describe_applied
+from app.utils.render_env import describe_applied, platform_recommended_profile
 from app.utils.utils import get_font_family_css
 from app.widgets.elided_label import _ElidedLabel
 
@@ -43,6 +45,16 @@ _BACKEND_TEXT = {
     "swiftshader": "SwiftShader",
     "custom": "外部覆盖",
     "": "系统默认",
+}
+
+# 推荐档配置键 → 中文短名（偏离提示用；键与 render_env 推荐档对齐）
+_ITEM_LABELS = {
+    "RenderBackend": "后端档位",
+    "WebglEnabled": "WebGL",
+    "ShareGLContexts": "GL 上下文共享",
+    "JsHeapMb": "JS 堆上限",
+    "RendererProcessLimit": "renderer 进程上限",
+    "LowEndDeviceMode": "低内存模式",
 }
 
 
@@ -83,11 +95,23 @@ class RenderStatusCard(SettingCard):
         self._applied = describe_applied()
         s = self._applied
         backend = _BACKEND_TEXT.get(s["backend"], s["backend"] or "系统默认")
+        deviations = self._recommended_deviations()
         # 文案刻意短：contentLabel 的 sizeHint 会撑大卡片 → 顺着布局链把设置弹窗
-        # 顶宽。这里只留后端 + 开关数，GL 模式在本页有独立开关卡、不必重复，
+        # 顶宽。这里只留后端 + 开关数 + 偏离数，GL 模式在本页有独立开关卡、不必重复，
         # 其余细节全在 tooltip 与「复制」里。
-        self.setContent(f"{backend} · {s['flag_count']} 开关")
+        content = f"{backend} · {s['flag_count']} 开关"
+        if deviations:
+            content += f" · {len(deviations)} 项偏离推荐"
+        self.setContent(content)
         self.contentLabel.setToolTip(self.detail_text())
+        if deviations:
+            labels = []
+            for item, _ in deviations:
+                short = item.key.rsplit(".", 1)[-1]
+                labels.append(_ITEM_LABELS.get(short) or short)
+            self.resetBtn.setToolTip(f"恢复推荐档（偏离：{'、'.join(labels)}）（需重启生效）")
+        else:
+            self.resetBtn.setToolTip("已与平台推荐档一致")
         self._apply_content_style()
 
     def detail_text(self) -> str:
@@ -105,6 +129,23 @@ class RenderStatusCard(SettingCard):
         lines.append(f"Qt.AA_UseOpenGLES={'开' if s.get('use_open_gles', True) else '关'}")
         lines.append(f"Qt.AA_ShareOpenGLContexts={'开' if s.get('share_gl_contexts', True) else '关'}")
         return "\n".join(lines)
+
+    # ------------------------------------------------------------------
+    # 推荐档对照
+    # ------------------------------------------------------------------
+    def _recommended_deviations(self) -> list:
+        """内存核心六项中与平台推荐档不一致的 (ConfigItem, 推荐值) 列表。
+
+        对照对象是 item 当前值（重启后才会生效），与「当前生效参数」的回显
+        口径不同：刚改完还没重启时，偏离数反映的是待生效的目标态。
+        """
+        profile = platform_recommended_profile()
+        out = []
+        for item in self._items:
+            short_key = item.key.rsplit(".", 1)[-1]
+            if short_key in profile and item.value != profile[short_key]:
+                out.append((item, profile[short_key]))
+        return out
 
     def _apply_content_style(self) -> None:
         """必须显式写 font-size：会盖掉 apply_font_size_to_widget 的 content 规则"""

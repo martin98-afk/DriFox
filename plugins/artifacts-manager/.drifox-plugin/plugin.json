@@ -4,6 +4,9 @@
     "dark": "icon_dark.svg"
   },
   "name": "artifacts-manager",
+  "display_name": {
+      "zh": "产物工作台"
+  },
   "description": "DriFox 内置 UI 组件：工作台产物页（按用户问题分组展示会话文件产物）",
   "version": "1.0.0",
   "author": {
@@ -12,6 +15,8 @@
   "homepage": "https://github.com/martin98-afk/DriFox",
   "license": "GPL-3.0-or-later",
   "type": "system",
+  "api_version": 2,
+  "capabilities": ["window.current"],
   "components": {
     "ui": true
   }

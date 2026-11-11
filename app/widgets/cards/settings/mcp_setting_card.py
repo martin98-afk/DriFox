@@ -10,6 +10,7 @@ MCP Server 配置卡片
 import json
 import threading
 import time
+import weakref
 from pathlib import Path
 from typing import Dict
 
@@ -56,6 +57,7 @@ from app.utils.design_tokens import (
     SwitchStyles,
     apply_font_size_to_widget,
     font_size_css,
+    readable_text_on,
     scale_font_size,
 )
 from app.utils.utils import get_font_family_css
@@ -78,13 +80,14 @@ EDIT_CARD_STYLE = CardStyles.edit_card_style()
 
 
 # ═══════════════════════════════════════════════════════════
-# 连接状态指示灯配色（四态）
+# 连接状态指示灯配色（五态：探活可把已关闭的服务标成「授权失效」）
 # ═══════════════════════════════════════════════════════════
 
 _STATUS_STYLE = {
     MCPState.CONNECTING: ("#f59e0b", "正在启动..."),
     MCPState.CONNECTED: ("#22c55e", "已连接"),
     MCPState.FAILED: ("#ef4444", "启动失败"),
+    MCPState.AUTH_EXPIRED: ("#ef4444", "授权失效"),
     MCPState.DISABLED: ("#000000", "已关闭"),
 }
 
@@ -121,11 +124,14 @@ def _auth_btn_qss(kind: str) -> str:
     """
     if kind == "authorize":
         return (
-            f"PushButton {{ background-color: {Colors.TEXT_ACCENT}; color: {Colors.BUTTON_TEXT_ON_ACCENT};"
+            f"PushButton {{ background-color: {Colors.TEXT_ACCENT};"
+            f" color: {readable_text_on(Colors.TEXT_ACCENT, Colors.BUTTON_TEXT_ON_ACCENT)};"
             f" border: none; border-radius: {BorderRadius.SM}; padding: 0 10px;"
             f" {font_size_css(12)} font-weight: bold; }}"
-            f"PushButton:hover {{ background-color: {Colors.BORDER_ACCENT}; }}"
-            f"PushButton:pressed {{ background-color: {Colors.BORDER_ACCENT}; }}"
+            f"PushButton:hover {{ background-color: {Colors.BORDER_ACCENT};"
+            f" color: {readable_text_on(Colors.BORDER_ACCENT)}; }}"
+            f"PushButton:pressed {{ background-color: {Colors.BORDER_ACCENT};"
+            f" color: {readable_text_on(Colors.BORDER_ACCENT)}; }}"
             f"PushButton:disabled {{ color: {Colors.TEXT_MUTED}; background-color: transparent; }}"
         )
     return (
@@ -831,12 +837,12 @@ class MCPServerRow(CardWidget):
             self.authorizeRequested.emit(self._name)
 
     def set_status(self, state: str, error: str = "", tool_count: int = 0):
-        """更新连接状态指示灯（四态）
+        """更新连接状态指示灯（五态）
 
-        启动中 → 黄色，启动失败 → 红色，已关闭 → 黑色，成功 → 绿色。
+        启动中 → 黄色，启动失败 / 授权失效 → 红色，已关闭 → 黑色，成功 → 绿色。
 
         Args:
-            state: MCPState 之一（connecting / connected / failed / disabled）
+            state: MCPState 之一（connecting / connected / failed / auth_expired / disabled）
             error: 失败原因（作为 tooltip 展示）
             tool_count: 已发现的工具数量
         """
@@ -845,7 +851,7 @@ class MCPServerRow(CardWidget):
             color = _disabled_dot_color()
         elif state == MCPState.CONNECTED and tool_count:
             tip = f"已连接 · {tool_count} 个工具"
-        elif state == MCPState.FAILED and error:
+        elif state in (MCPState.FAILED, MCPState.AUTH_EXPIRED) and error:
             tip = error if len(error) <= 400 else error[:400] + "..."
 
         self._current_state = state
@@ -868,6 +874,7 @@ class MCPServerRow(CardWidget):
                 self._auth_btn.setStyleSheet(_auth_btn_qss("cancel"))
             else:
                 self._auth_btn.setStyleSheet(_auth_btn_qss("unbind" if self._authorized else "authorize"))
+        self._apply_cred_row_style()
 
     def _setup_ui(self, data: dict):
         # 两行布局：第一行 = 图标 + 名称 + (弹性) + 授权按钮 + 开关 + 编辑/删除（操作组靠右）；
@@ -996,6 +1003,9 @@ class MCPServerRow(CardWidget):
         # Key 存插件 config.json，连接时按 credential.inject 注入；输入框失焦即保存。
         self._cred_edit = None
         self._cred_saved_value = ""
+        # credential 行控件引用（无 credential 声明时保持 None），refresh_style 按此补刷
+        self._cred_label = None
+        self._cred_get_btn = None
         self._setup_credential_row(data, layout)
 
     def _credential_plugin(self) -> str:
@@ -1035,15 +1045,13 @@ class MCPServerRow(CardWidget):
         row.setContentsMargins(0, 2, 0, 0)
         row.setSpacing(6)
 
-        label = BodyLabel(cred.get("label") or "Key")
-        label.setStyleSheet(f"{get_font_family_css()} font-size: {scale_font_size(12)}px;")
-        row.addWidget(label)
+        self._cred_label = BodyLabel(cred.get("label") or "Key")
+        row.addWidget(self._cred_label)
 
         edit = QLineEdit()
         edit.setClearButtonEnabled(True)
         edit.setPlaceholderText(cred.get("placeholder") or "粘贴 Key 后自动保存")
         edit.setFixedHeight(Sizes.TOOL_BUTTON_SZ.height())
-        edit.setStyleSheet(f"{get_font_family_css()} font-size: {scale_font_size(12)}px; padding: 0 6px;")
         # 始终密码模式：Key 是敏感信息，不摊在屏幕上
         edit.setEchoMode(QLineEdit.Password)
         _plugin = self._credential_plugin()
@@ -1059,13 +1067,47 @@ class MCPServerRow(CardWidget):
 
         get_url = cred.get("getUrl")
         if get_url:
-            get_btn = PushButton("获取 Key")
-            get_btn.setFixedSize(88, Sizes.TOOL_BUTTON_SZ.height())
-            get_btn.setToolTip(get_url)
-            get_btn.clicked.connect(lambda: self._open_get_url(get_url))
-            row.addWidget(get_btn)
+            self._cred_get_btn = PushButton("获取 Key")
+            self._cred_get_btn.setFixedSize(88, Sizes.TOOL_BUTTON_SZ.height())
+            self._cred_get_btn.setToolTip(get_url)
+            self._cred_get_btn.clicked.connect(lambda: self._open_get_url(get_url))
+            row.addWidget(self._cred_get_btn)
 
+        self._apply_cred_row_style()
         layout.addLayout(row)
+
+    def _apply_cred_row_style(self):
+        """credential 行三控件按当前主题上色（构造时与 refresh_style 共用）。
+
+        三处都不能依赖 qfluentwidgets 主题广播：label 原实现的手动
+        setStyleSheet(字体) 会整体覆盖 FluentLabelBase qss，颜色落到
+        调色板（恒为系统黑）；输入框是原生 QLineEdit，不注册 fluent
+        样式表，颜色恒随系统；按钮在收起的展开卡里切主题时只能靠
+        lazy 补刷，时序不保证。统一走 Colors token，由 refresh_style
+        链显式重刷，与名称/描述同款机制。
+        """
+        Colors.refresh()
+        if self._cred_label is not None:
+            self._cred_label.setStyleSheet(
+                f"color: {Colors.TEXT_PRIMARY}; {get_font_family_css()} font-size: {scale_font_size(12)}px;"
+            )
+        if self._cred_edit is not None:
+            self._cred_edit.setStyleSheet(
+                f"QLineEdit {{ background-color: {Colors.CONTENT_BG}; color: {Colors.TEXT_PRIMARY};"
+                f" border: 1px solid {Colors.BORDER}; border-radius: {BorderRadius.XS}; padding: 0 6px;"
+                f" {get_font_family_css()} font-size: {scale_font_size(12)}px; }}"
+                f"QLineEdit:focus {{ border-color: {Colors.INPUT_FOCUS_BORDER}; }}"
+                f"QLineEdit::placeholder {{ color: {Colors.INPUT_PLACEHOLDER}; }}"
+            )
+        if self._cred_get_btn is not None:
+            self._cred_get_btn.setStyleSheet(
+                f"PushButton {{ background-color: {Colors.CONTENT_BG}; color: {Colors.TEXT_PRIMARY};"
+                f" border: 1px solid {Colors.BORDER}; border-radius: {BorderRadius.SM}; padding: 0 8px;"
+                f" {get_font_family_css()} {font_size_css(12)} }}"
+                f"PushButton:hover {{ border-color: {Colors.BORDER_ACCENT}; color: {Colors.TEXT_ACCENT}; }}"
+                f"PushButton:pressed {{ background-color: {Colors.HOVER_BG}; }}"
+                f"PushButton:disabled {{ color: {Colors.TEXT_MUTED}; border-color: {Colors.TEXT_MUTED}; }}"
+            )
 
     def _open_get_url(self, url: str):
         """打开 Key 申请页（系统默认浏览器）。"""
@@ -1127,6 +1169,12 @@ class MCPListSettingCard(ExpandSettingCard):
     _authorizeDone = Signal(str, bool, str, bool)  # name, ok, error, cancelled
     _unbindDone = Signal(str, bool, str)
 
+    # 类级常驻 token 估算 worker（#F37 Step2）：跨卡片实例复用，卡片重建不重建线程。
+    # 启动一次永不重启；job 经 maxsize=1 队列单飞（密集触发只算一次）；job 携带
+    # weakref(card)，worker emit 前 sip 存活硬判，卡片销毁不留泄漏。
+    _token_worker_thread = None
+    _token_calc_queue = None
+
     def __init__(self, icon, title: str, content: str = None, parent=None):
         self.cfg = Settings.get_instance()
         # 必须在任何可能触发 _update_mcp_token_count 的路径之前初始化，
@@ -1153,6 +1201,9 @@ class MCPListSettingCard(ExpandSettingCard):
         # 若用布尔标记会永久停在 True，导致此后所有热重载刷新被吞掉（计数更新、列表不更新）。
         # 窗口取 3s（> watchfiles 的 2s 防抖），既能在自触发刷新到达时正确抑制，又会自动过期。
         self._suppress_hot_reload_until = 0.0
+        # 热重载置脏：卡片不可见/折叠时 _refresh 全量重建（逐行 MCPServerRow + 布局计算）
+        # 纯属白干，置脏延迟到 showEvent/展开时补刷（watchdog 61 次 500ms+ 阻塞治理）
+        self._hot_reload_dirty = False
         # need_confirm 确认弹窗去重：key → InfoBar。同 key 多次失败回调只保留首个弹窗
         self._confirm_bars: Dict[str, object] = {}
         # 状态轮询定时器（3秒刷新一次连接状态指示灯 + token 占用）
@@ -1296,6 +1347,9 @@ class MCPListSettingCard(ExpandSettingCard):
 
     def _on_authorize_done(self, name: str, ok: bool, error: str, cancelled: bool = False):
         """授权完成回调（主线程）：更新按钮态 + 提示 + 触发热连接"""
+        if ok:
+            # 刚授权的服务不能再挂着上一轮的「授权失效」，否则红点要等 TTL 到期才消
+            self._clear_probe(name)
         row = self._server_rows.get(name)
         if row is not None:
             row.set_authorized(ok)
@@ -1387,6 +1441,9 @@ class MCPListSettingCard(ExpandSettingCard):
 
     def _on_unbind_done(self, name: str, ok: bool, error: str):
         """解绑完成回调（主线程）：更新按钮态 + 提示"""
+        if ok:
+            # 凭证已清除，旧的「曾是授权失效」结论过期，等下一轮探活重判
+            self._clear_probe(name)
         row = self._server_rows.get(name)
         if row is not None:
             row.set_authorized(False)
@@ -1458,13 +1515,24 @@ class MCPListSettingCard(ExpandSettingCard):
         """按服务器名推导门禁 key（与 mcp_lsp_safety 门禁拼接口径一致）。
 
         key 绑定启动配置指纹（command+args，args 含 command 本体与
-        mcp_tools 调用点口径一致）：配置变更后旧 key 失配，需重新确认。"""
+        mcp_tools 调用点口径一致）：配置变更后旧 key 失配，需重新确认。
+
+        必须复刻门禁侧的 stdio 命令回落（_lifespan_stdio 先
+        _resolve_stdio_command 再算指纹）。否则配置声明 python3 而本机
+        实际回落 python 时两侧指纹错位：待确认守卫永不命中（每次热重载
+        广播都对同一台服务器发起注定被拦的连接，日志刷屏），且确认/拒绝
+        写入错位 key，点「允许启动」也无法放行。
+        """
         from app.core.tools.mcp_lsp_safety import config_hash, plugin_from_source, server_key
+        from app.tools.mcp_tools import _resolve_stdio_command
 
         server_cfg = next((s for s in self._get_servers() if s.get("name", "") == name), {})
         src = server_cfg.get("_source", "")
         cmd = server_cfg.get("command", "") or ""
-        cmd_args = [cmd] + list(server_cfg.get("args") or []) if cmd else list(server_cfg.get("args") or [])
+        raw_args = list(server_cfg.get("args") or [])
+        # 与 _lifespan_stdio 同口径：先回落 command（python3→python），再拼 [cmd]+args 算指纹
+        cmd, raw_args = _resolve_stdio_command(cmd, raw_args)
+        cmd_args = [cmd] + raw_args if cmd else raw_args
         chash = config_hash(cmd, cmd_args)
         return server_key("mcp", plugin_from_source(src), name, chash)
 
@@ -1640,6 +1708,18 @@ class MCPListSettingCard(ExpandSettingCard):
         # 注意：全局开关不触发全量刷新——列表内容未变，行级状态已由上面的
         # _refresh_status_dots() 更新。全量重建会导致开关时整卡闪烁。
 
+    def _refresh_if_visible(self):
+        """热重载触发点入口：不可见/折叠时只置脏，可见时才真刷新。
+
+        _refresh 全量重建行列表（每行一个 MCPServerRow + 布局计算，实测 500ms+），
+        设置面板未打开时重建不可见内容纯属白干；每次插件热重载（watchfiles 监控
+        插件目录，开发期每次保存都触发）会广播到全部窗口，逐窗口重建放大成本。
+        """
+        if self.isHidden() or not self.isExpand:
+            self._hot_reload_dirty = True
+            return
+        self._refresh()
+
     def consume_hot_reload(self) -> bool:
         """检查并消费自触发标记。热重载触发时调用，返回 True 表示本次是自触发的，应跳过刷新
 
@@ -1677,11 +1757,15 @@ class MCPListSettingCard(ExpandSettingCard):
                     continue
                 try:
                     st = status_map.get(name)
-                    if not global_on or not cfg_enabled.get(name, True):
-                        # 用户主动关闭（全局或单个）→ 黑色
+                    if not global_on or st is None:
+                        # 全局关 / 管理器无记录 → 黑色
                         row.set_status(MCPState.DISABLED)
-                    elif st is None:
-                        # 已启用但管理器还没有任何记录 → 尚未开始启动
+                    elif st.get("state") == MCPState.AUTH_EXPIRED:
+                        # 授权失效优先于「已关闭」：用户关掉的 OAuth 服务也可能
+                        # token 早已过期，必须在打开前就看见，否则一开就连不上
+                        row.set_status(MCPState.AUTH_EXPIRED, st.get("error", ""))
+                    elif not cfg_enabled.get(name, True):
+                        # 用户主动关闭 → 黑色
                         row.set_status(MCPState.DISABLED)
                     else:
                         row.set_status(
@@ -1791,16 +1875,46 @@ class MCPListSettingCard(ExpandSettingCard):
         """
         if self.isExpand and not self.isHidden():
             self._status_timer.start()
+            self._kick_probe()
         else:
             self._status_timer.stop()
+
+    def _kick_probe(self):
+        """展开可见时触发一次授权探活。
+
+        管理器内部按 TTL（10 分钟）与「已有批次在跑」去重，所以本方法可以
+        被展开/显示事件反复调用，不会重复发请求。全局 MCP 关闭时不探。
+        """
+        try:
+            if not self.cfg.mcp_enabled.value:
+                return
+            self._get_mcp_manager().probe_servers_background()
+        except Exception as e:
+            logger.debug(f"[MCP] 触发探活失败: {e}")
+
+    def _clear_probe(self, name: str):
+        """清掉某个服务的探活结论（重新授权/解绑后立即失效，不等 TTL）。"""
+        try:
+            self._get_mcp_manager().clear_probe(name)
+            self._refresh_status_dots()
+        except Exception as e:
+            logger.debug(f"[MCP] 清除探活结果失败 {name}: {e}")
 
     def setExpand(self, isExpand: bool):
         super().setExpand(isExpand)
         self._sync_status_timer()
+        # 展开时消费热重载置脏：补刷一次（异步，不拖慢展开动画）
+        if isExpand and getattr(self, "_hot_reload_dirty", False):
+            self._hot_reload_dirty = False
+            QTimer.singleShot(0, self._refresh)
 
     def showEvent(self, event):
         super().showEvent(event)
         self._sync_status_timer()
+        # 不可见期间攒下的热重载置脏：显示后异步补刷（不拖慢面板打开）
+        if getattr(self, "_hot_reload_dirty", False):
+            self._hot_reload_dirty = False
+            QTimer.singleShot(0, self._refresh)
 
     def hideEvent(self, event):
         self._status_timer.stop()
@@ -1951,6 +2065,10 @@ class MCPListSettingCard(ExpandSettingCard):
         servers = self._get_servers()
         if not self.cfg.mcp_enabled.value:
             return
+        # 状态快照只取一次：get_status 内部会读配置侧服务器全集（缓存未命中时
+        # 逐插件 stat + read_text + json），放进循环等于 N 次重复劳动。
+        # 语义等价：_hot_connect 走后台线程连接，循环期间不会改变本快照。
+        status_list = mgr.get_status()
         for s in servers:
             if not s.get("enabled", True):
                 continue
@@ -1962,41 +2080,74 @@ class MCPListSettingCard(ExpandSettingCard):
                 logger.debug(f"[MCP] '{name}' 待用户确认，跳过自动补连")
                 continue
             # 只重新连接已断开或未连接过的
-            status_list = mgr.get_status()
             already = any(st["name"] == name and st["connected"] for st in status_list)
             if not already:
-                self._hot_connect(name, s)
+                # force=True：连接态与门禁待确认本函数都已判定，_hot_connect 内的
+                # 二次 get_status 属纯重复（其 force 仅用于跳过该检查）。
+                self._hot_connect(name, s, force=True)
 
     # ── Token 占用估算 ──────────────────────────────
 
     def _update_mcp_token_count(self):
-        """更新头部 subtitle：服务器计数 + token 占用估算（后台线程计算）
+        """更新头部 subtitle：服务器计数 + token 占用估算（常驻后台线程计算）
 
         全部重活（.mcp.json 读取解析 + json.dumps(全部工具 schema) + token 估算）
-        都在 daemon 线程执行，结果经 _tokenCountReady 信号（Qt 队列连接）回
-        主线程 setCount。主线程路径零 I/O 零重计算——采样器曾抓到同步版本
-        在主线程阻塞 2582ms（磁盘 I/O 高压时单次 stat 可达 2s）。
+        都在类级常驻 daemon 线程执行（#F37 Step2：原实现每次
+        Thread(name="mcp-token-calc").start() 后立即 _started.wait() 等新线程
+        拿 GIL——与 system-cleaner 的 psutil 全表枚举互饿，watchdog 实证
+        543ms/9025ms），结果经 _tokenCountReady 信号（Qt 队列连接）回主线程
+        setCount。主线程路径零 I/O 零重计算零线程创建。
         """
         if getattr(self, "_token_calc_running", False):
             return
         self._token_calc_running = True
 
+        import queue
         import threading
 
-        def _work():
+        cls = MCPListSettingCard  # worker 单例固定挂宿主类，跨子类/假卡实例复用
+        if cls._token_worker_thread is None or not cls._token_worker_thread.is_alive():
+            if cls._token_calc_queue is None:
+                cls._token_calc_queue = queue.Queue(maxsize=1)
+            t = threading.Thread(target=cls._token_worker_loop, name="mcp-token-calc", daemon=True)
+            cls._token_worker_thread = t
+            t.start()
+
+        try:
+            cls._token_calc_queue.put_nowait(weakref.ref(self))
+        except Exception:
+            # queue.Full：已有待处理 job（单飞），本次入队丢弃——密集触发只算一次
+            pass
+
+    @staticmethod
+    def _token_worker_loop():
+        """常驻 worker 主循环：q.get() → 计算 → sip 硬判存活后 emit（永不退出）"""
+        import queue
+
+        import shiboken6 as sip
+
+        q = MCPListSettingCard._token_calc_queue
+        while True:
+            card_ref = q.get()
+            card = card_ref() if card_ref is not None else None
+            if card is None:
+                continue
             try:
+                if not sip.isValid(card):
+                    # 卡片已销毁：跳过本次 job（无 UI 可更新，无需复位其标志）
+                    continue
                 from app.core.infra.token_estimator import estimate_tokens
 
-                servers = self._get_servers()
+                servers = card._get_servers()
                 count = len(servers)
                 enabled_count = sum(1 for s in servers if s.get("enabled", True))
                 base = f"{enabled_count}/{count}"
 
                 # 按服务器分组估算：头部展示总数，行内展示各自占用
-                mgr = self._get_mcp_manager()
+                mgr = card._get_mcp_manager()
                 token_count = 0
                 per_server: dict = {}
-                if mgr and self.cfg.mcp_enabled.value:
+                if mgr and card.cfg.mcp_enabled.value:
                     schemas_by_server = mgr.get_tool_schemas_by_server()
                     for name, schemas in schemas_by_server.items():
                         if not schemas:
@@ -2005,15 +2156,19 @@ class MCPListSettingCard(ExpandSettingCard):
                         per_server[name] = n
                         token_count += n
 
-                self._tokenCountReady.emit(f"{base} · ~{token_count:,} tokens", per_server)
+                card._tokenCountReady.emit(f"{base} · ~{token_count:,} tokens", per_server)
             except RuntimeError:
-                pass  # 卡片已销毁
+                pass  # 卡片已销毁（emit 链路）
             except Exception as e:
                 logger.debug(f"[MCP] token 估算后台计算失败: {e}")
             finally:
-                self._token_calc_running = False
-
-        threading.Thread(target=_work, name="mcp-token-calc", daemon=True).start()
+                try:
+                    if not sip.isdeleted(card):
+                        card._token_calc_running = False
+                except (RuntimeError, TypeError):
+                    # RuntimeError：wrapper 已析构；TypeError：非 Qt wrapper
+                    # （防 worker 被 finally 异常击穿退出）
+                    pass
 
     # ── 供外部调用的添加/更新方法 ──────────────────────
 

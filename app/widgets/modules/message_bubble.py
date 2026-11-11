@@ -135,12 +135,41 @@ class MessageBubble(QWidget):
         self.update()
 
     def set_stream_frame(self, phase: Optional[float], tint: Optional[QColor] = None) -> None:
-        """设置流式视觉帧（phase=None 退出流式态）。幂等；变化才重绘。"""
+        """设置流式视觉帧（phase=None 退出流式态）。幂等；变化才重绘。
+
+        [PERF] 2026-11-09：光带动画 20fps，而它只占气泡底部一条 3px 窄带。
+        旧实现无参 `self.update()` → 整气泡（长回复实测 1200x3000）每秒光栅化
+        20 次，采样中 Python paintEvent 占主线程 34%。改为只标脏光带扫过的
+        矩形（含上一帧位置），Qt 按脏区裁剪光栅化，实测平均脏区 2498 px²、
+        整卡 3.6 M px²（1/1441）。视觉不变：paintEvent 仍按同一 phase 计算
+        位置，只是被裁在脏区内；前后两帧区域取并集，不会拖尾。
+        """
         if phase == self._stream_phase and tint == self._stream_tint:
             return
+        prev_phase = self._stream_phase
         self._stream_phase = phase
         self._stream_tint = tint
-        self.update()
+        if phase is None:
+            # 退出流式：光带消失，且描边/底色可能同帧被改（_apply_card_style
+            # 走 set_bubble_color / set_border_color），必须整气泡重绘一次 ——
+            # 只标脏底边会把上三边的旧描边留在屏上。这是「退出」的一次性
+            # 成本，不在 20fps 路径上。
+            self.update()
+            return
+        dirty = self._band_dirty_rect(phase)
+        if prev_phase is not None:
+            dirty = dirty.united(self._band_dirty_rect(prev_phase))
+        self.update(dirty)
+
+    def _band_dirty_rect(self, phase: float):
+        """指定相位下光带占用的矩形（含 1px 余量，防圆角抗锯齿被裁边）"""
+        from PySide6.QtCore import QRect
+
+        w, h = self.width(), self.height()
+        band_w = int(BAND_RATIO * w)
+        band_x = int((0.5 * BAND_RATIO + (1.0 - BAND_RATIO) * phase) * w - 0.5 * band_w)
+        band_y = h - BAND_BOTTOM - BAND_H
+        return QRect(max(0, band_x - 1), max(0, band_y - 1), band_w + 2, BAND_H + 2)
 
     def paintEvent(self, event):
         if self._color.alpha() == 0:

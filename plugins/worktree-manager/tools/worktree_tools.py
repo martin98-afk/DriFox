@@ -8,6 +8,8 @@
            分支含未合并提交时默认保留分支，keep_branch=true 直接保留）
 - merge  → 把工作树分支合并回主仓库当前分支（target_branch 校验 + 双向 dirty 预检 + 可自定义信息）；
            冲突时返回冲突文件与冲突块内容，不 abort，保留冲突现场由模型用文件工具解决后提交
+- switch → 把当前会话的工作目录切到指定工作树（或主仓库根）；
+           工具面没有 workdir.write 能力，经 change_bridge 投递回主线程执行
 
 写操作成功/冲突后：
 1. 清 GitWorktreeDetector 相关缓存（否则 UI 刷新仍读旧数据）
@@ -61,6 +63,49 @@ def _dirty_files(cwd: str) -> list:
     return [ln for ln in (r.stdout or "").splitlines() if ln.strip()]
 
 
+# 说明字段最大长度（与 UI 侧 worktree_section.DESCRIPTION_MAX_LEN 对齐）
+_DESC_MAX_LEN = 60
+
+
+def _read_worktree_description(wt_path: str) -> str:
+    """读工作树说明（git config worktree.<name>.description），失败返回空串"""
+    if not wt_path or not os.path.isdir(wt_path):
+        return ""
+    try:
+        r = _run_git(["config", f"worktree.{os.path.basename(wt_path)}.description"], wt_path, timeout=5)
+        if r.returncode == 0:
+            return (r.stdout or "").strip()
+    except Exception:
+        pass
+    return ""
+
+
+def _write_worktree_description(wt_path: str, text: str) -> bool:
+    """写工作树说明；空文本表示删除配置项。写失败不影响主流程。"""
+    if not wt_path or not os.path.isdir(wt_path):
+        return False
+    key = f"worktree.{os.path.basename(wt_path)}.description"
+    try:
+        if text:
+            r = _run_git(["config", key, text], wt_path, timeout=5)
+        else:
+            r = _run_git(["config", "--unset", key], wt_path, timeout=5)
+        return r.returncode == 0
+    except Exception:
+        return False
+
+
+def _write_worktree_creator(wt_path: str, creator: str) -> bool:
+    """写工作树创建者标记（human/ai），工作树页据此显示 AI 标签；写失败不影响主流程。"""
+    if not wt_path or not os.path.isdir(wt_path) or creator not in ("human", "ai"):
+        return False
+    key = f"worktree.{os.path.basename(wt_path)}.creator"
+    try:
+        return _run_git(["config", key, creator], wt_path, timeout=5).returncode == 0
+    except Exception:
+        return False
+
+
 def _resolve_main_repo(tool_ctx: dict, path: str = "") -> Tuple[Optional[str], str]:
     """定位主仓库根目录。
 
@@ -70,9 +115,12 @@ def _resolve_main_repo(tool_ctx: dict, path: str = "") -> Tuple[Optional[str], s
     base = (path or (tool_ctx or {}).get("workdir") or "").strip()
     if not base or not os.path.isdir(base):
         return None, f"工作目录无效: {base or '(空)'}，请先在会话中设置项目工作目录"
+    # git 未安装时 detect_git 恒返回 None，报「不在 git 仓库中」会误导用户去查路径
+    if not GitWorktreeDetector._is_git_available():
+        return None, "系统未安装 git，工作树功能不可用；工作目录本身不受影响（可在工作树页更换）"
     git_root = GitWorktreeDetector.detect_git(base)
     if not git_root:
-        return None, f"{base} 不在 git 仓库中"
+        return None, f"{base} 不在 git 仓库中，工作树功能仅对 git 项目可用"
     if GitWorktreeDetector.is_worktree(git_root):
         main = GitWorktreeDetector.get_main_repo_path(git_root)
         if not main or not os.path.isdir(main):
@@ -139,6 +187,20 @@ def _notify_changed(summary: str) -> None:
     except Exception as e:  # UI 未加载（纯后端调用等）：刷新通知可缺省
         logger.debug(f"[worktree_tools] UI 刷新通知未送达: {e}")
 
+def _request_switch(path: str, session_id: str = "") -> None:
+    """请求把发起会话的工作目录切到 path（emit → 主线程异步执行）。
+
+    工具面没有 workdir.write / project.workdir 能力（catalog 标 _UI），切换
+    只能投递回主线程，由 WorktreeService 接收端按 session_id 定位发起会话
+    所在窗口后执行。session_id 必须透传：只带路径会让主线程拿「当时活跃
+    窗口」当目标，排队延迟期间用户浏览到别的项目页面就把路径写进错误项目。
+    """
+    try:
+        _load_get_bridge()().switchRequested.emit(os.path.abspath(path), session_id or "")
+    except Exception as e:  # UI 未加载：无主线程可投递
+        logger.debug(f"[worktree_tools] 切换请求未送达（无 UI 事件循环）: {e}")
+        raise
+
 
 def _find_registered_worktree(tool_ctx: dict, path: str) -> Tuple[Optional[str], Optional[WorktreeInfo], str]:
     """校验 path 是当前项目主仓库登记的工作树。
@@ -194,6 +256,9 @@ def _action_list(tool_ctx: dict, kwargs: dict) -> ToolResult:
             tags.append("主仓库")
         if current_workdir and current_workdir.startswith(_norm(wt.path)):
             tags.append("当前会话")
+        desc = "" if wt.is_main else _read_worktree_description(wt.path)
+        if desc:
+            tags.append("AI 创建")
         tag = f" [{','.join(tags)}]" if tags else ""
         delta = ""
         if not wt.is_main and (wt.ahead_main or wt.behind_main):
@@ -201,7 +266,8 @@ def _action_list(tool_ctx: dict, kwargs: dict) -> ToolResult:
         preview = ""
         if not wt.is_main and wt.branch and wt.branch != "(detached)":
             preview = f"\n  {_merge_preview(repo_root, wt.branch)}"
-        lines.append(f"- {wt.path}{tag}\n  分支: {wt.branch}{delta}{preview}")
+        desc_line = f"\n  说明: {desc}" if desc else ""
+        lines.append(f"- {wt.path}{tag}\n  分支: {wt.branch}{delta}{desc_line}{preview}")
     return ToolResult(True, content=f"仓库 {repo_root} 共 {len(info.worktrees)} 个工作树:\n" + "\n".join(lines))
 
 
@@ -212,6 +278,13 @@ def _action_create(tool_ctx: dict, kwargs: dict) -> ToolResult:
     branch_name = str(kwargs.get("branch_name") or "").strip()
     if not branch_name:
         return ToolResult(False, error="create 需要 branch_name（分支名）")
+    description = str(kwargs.get("description") or "").strip()
+    if not description:
+        return ToolResult(
+            False,
+            error="create 需要 description：一句话说明这个工作树要做什么（≤60 字，会显示在工作树页供用户辨认）",
+        )
+    description = description[:_DESC_MAX_LEN]
     base_branch = str(kwargs.get("base_branch") or "").strip()
     dir_name = str(kwargs.get("dir_name") or "").strip() or branch_name.replace("/", "-")
 
@@ -237,10 +310,24 @@ def _action_create(tool_ctx: dict, kwargs: dict) -> ToolResult:
         return ToolResult(False, error=r.stderr.strip() or f"git worktree add 失败 (rc={r.returncode})")
 
     _invalidate_info_cache(repo_root)
+    _write_worktree_description(worktree_dir, description)
+    _write_worktree_creator(worktree_dir, "ai")
+    # 对齐 UI 行为（worktree_section._pending_switch_path）：建完自动切过去。
+    # 不切的话新工作树是个孤儿——模型还得再调一次才能进去干活。
+    # 切换失败不回滚 create：工作树已建好，模型换 switch action 或手动切都行。
+    try:
+        _request_switch(worktree_dir, (tool_ctx or {}).get("session_id") or "")
+    except Exception as e:  # noqa: BLE001 - UI 未就绪时切换请求可缺省
+        logger.warning(f"[worktree_tools] 自动切换请求未送达: {e}")
     _notify_changed(f"created {worktree_dir}")
-    logger.info(f"[worktree_tools] 已创建工作树: {worktree_dir} (分支 {branch_name})")
+    logger.info(f"[worktree_tools] 已创建工作树: {worktree_dir} (分支 {branch_name}，说明 {description})")
     return ToolResult(
-        True, content=f"工作树已创建: {worktree_dir}\n分支: {branch_name}（{'已有分支挂载' if exists else '新建分支'}）"
+        True,
+        content=(
+            f"工作树已创建: {worktree_dir}\n"
+            f"分支: {branch_name}（{'已有分支挂载' if exists else '新建分支'}）\n"
+            f"说明: {description}"
+        ),
     )
 
 
@@ -411,6 +498,46 @@ def _action_merge(tool_ctx: dict, kwargs: dict) -> ToolResult:
     return ToolResult(False, error="\n".join(parts))
 
 
+# ── action: switch ──
+
+def _action_switch(tool_ctx: dict, kwargs: dict) -> ToolResult:
+    """把当前会话的工作目录切到指定工作树（或主仓库根）。
+
+    切换是主线程动作（窗口实例缓存 + UI 联动），工具线程只负责校验与投递：
+    经 change_bridge.switchRequested 派发到主线程，由 WorktreeService 走
+    能力池执行。异步生效，下一次工具调用的 ctx.workdir 已是新值。
+    """
+    repo_root, target, err = _find_registered_worktree(tool_ctx, kwargs.get("path", ""))
+    if err:
+        return ToolResult(False, error=err)
+    assert target is not None and repo_root is not None
+    target_path = os.path.abspath(target.path)
+
+    current_workdir = _norm((tool_ctx or {}).get("workdir") or "")
+    if current_workdir and current_workdir == _norm(target_path):
+        # 已在该工作树：仍通知一次变更，让主线程清分支缓存并重检 chip。
+        # 同一目录内切过分支时 chip 可能陈旧，直接返回会让它一直不修。
+        try:
+            _notify_changed(f"switch-noop {target_path}")
+        except Exception:  # noqa: BLE001 - 纯通知，失败不影响结果
+            pass
+        return ToolResult(True, content=f"当前会话已在 {target_path}，无需切换")
+
+    try:
+        _request_switch(target_path, (tool_ctx or {}).get("session_id") or "")
+    except Exception as e:
+        return ToolResult(False, error=f"切换请求投递失败（宿主 UI 未就绪）: {e}")
+    tag = "主仓库" if target.is_main else f"工作树（分支 {target.branch}）"
+    logger.info(f"[worktree_tools] 已请求切换会话工作目录 → {target_path} ({tag})")
+    return ToolResult(
+        True,
+        content=(
+            f"切换请求已发出：{target_path}（{tag}）。"
+            "主线程将按发起会话定位窗口后异步完成持久化与界面同步；"
+            "若窗口未找到（如会话已关闭）将放弃切换，不影响其他项目。"
+        ),
+    )
+
 # ── action 分发 ──
 
 _ACTIONS = {
@@ -418,6 +545,7 @@ _ACTIONS = {
     "create": _action_create,
     "remove": _action_remove,
     "merge": _action_merge,
+    "switch": _action_switch,
 }
 
 
@@ -425,7 +553,7 @@ def _worktree_manage_impl(tool_ctx, **kwargs) -> ToolResult:
     action = (kwargs.get("action") or "").lower()
     handler = _ACTIONS.get(action)
     if handler is None:
-        return ToolResult(False, error=f"未知 action: {kwargs.get('action')!r}（支持 list/create/remove/merge）")
+        return ToolResult(False, error=f"未知 action: {kwargs.get('action')!r}（支持 list/create/remove/merge/switch）")
     return handler(tool_ctx or {}, kwargs)
 
 
@@ -436,30 +564,38 @@ _WORKTREE_MANAGE_SCHEMA = {
     "function": {
         "name": "manage_worktree",
         "description": (
-            "项目 git 工作树管理（单一入口，action 分发）。"
-            "list=列出全部工作树（路径/分支/与主仓库领先落后 + merge-tree 冲突预判，标注主仓库与当前会话；无其他参数）。"
-            "create=创建新工作树：默认基于 HEAD 新建分支 branch_name，该分支已存在则直接挂载（base_branch 被忽略）；"
-            "目录固定在主仓库 .worktrees/ 下（dir_name 缺省用分支名，/ 转 -）。"
-            "remove=删除工作树：串行 remove → prune → branch 删除（keep_branch=true 保留分支）；"
-            "有未提交改动默认拒绝（force=true 强制）；不能删除主仓库，也不能删除当前会话工作目录所在的工作树。"
-            "merge=把工作树分支合并回主仓库当前分支（双向 dirty 预检；target_branch 须为主仓库当前分支）："
-            "产生冲突时返回冲突文件与冲突块内容并保留冲突现场"
-            "（不 abort），按返回中的指引用文件工具解决后提交。"
-            "create/remove/merge 操作后工作树面板自动刷新。"
+            "项目 git 工作树管理(action 分发)。"
+            "list=列全部工作树(路径/分支/领先落后/说明/merge-tree 冲突预判，标注主仓库、当前会话与 AI 创建)。"
+            "create=建工作树(必填 description 一句话说明用途，会显示在工作树页供用户辨认)："
+            "默认基于 HEAD 新建分支 branch_name，已存在则直接挂载(base_branch 被忽略)；目录在主仓库 .worktrees/(dir_name 缺省用分支名，/ 转 -)。"
+            "建完自动把会话工作目录切过去。"
+            "remove=删工作树(remove→prune→删分支，keep_branch=true 留分支)；有未提交改动默认拒绝(force=true 强删)；"
+            "不能删主仓库与当前会话所在工作树（先用 switch 切走再删）。"
+            "merge=把工作树分支合回主仓库当前分支(双向 dirty 预检，target_branch 须为主仓库当前分支)："
+            "冲突时返回冲突文件与冲突块并保留现场(不 abort)，按返回指点用文件工具解决后提交。"
+            "switch=把当前会话的工作目录切到指定工作树或主仓库根(异步生效)。"
+            "操作后工作树页自动刷新。"
         ),
         "parameters": {
             "type": "object",
             "properties": {
                 "action": {
                     "type": "string",
-                    "enum": ["list", "create", "remove", "merge"],
-                    "description": "list=列出；create=创建；remove=删除；merge=合并回主仓库",
+                    "enum": ["list", "create", "remove", "merge", "switch"],
+                    "description": "list=列出；create=创建；remove=删除；merge=合并回主仓库；switch=切换会话工作目录",
                 },
                 "path": {
                     "type": "string",
-                    "description": "remove/merge 必填：工作树路径（可用 action=list 查询）",
+                    "description": "remove/merge/switch 必填：工作树路径或主仓库路径（可用 action=list 查询）",
                 },
                 "branch_name": {"type": "string", "description": "create 必填：分支名（已存在则挂载，否则新建）"},
+                "description": {
+                    "type": "string",
+                    "description": (
+                        "create 必填：一句话说明这个工作树要做什么（≤60 字）。"
+                        "会显示在工作树页供用户辨认，也用于 list 输出。"
+                    ),
+                },
                 "base_branch": {
                     "type": "string",
                     "description": "create 可选：新分支的起点（分支名/提交/标签），缺省 HEAD",
@@ -467,11 +603,11 @@ _WORKTREE_MANAGE_SCHEMA = {
                 "dir_name": {"type": "string", "description": "create 可选：工作树目录名，缺省用分支名（/ 转 -）"},
                 "keep_branch": {
                     "type": "boolean",
-                    "description": "remove 可选：true=保留分支只删目录，默认 false（删分支；含未合并提交时仍保留除非 force=true）",
+                    "description": "remove 可选：true=留分支只删目录，默认 false(删分支；含未合并提交时仍保留除非 force=true)",
                 },
                 "force": {
                     "type": "boolean",
-                    "description": "remove 可选：true=工作树有未提交改动时仍强制删除并强删未合并分支（默认拒绝/保留分支）",
+                    "description": "remove 可选：true=有未提交改动也强删并强删未合分支(默认拒绝/留分支)",
                 },
                 "target_branch": {
                     "type": "string",
@@ -491,11 +627,15 @@ _WORKTREE_MANAGE_SCHEMA = {
 def _preview_manage(tool_args: dict) -> str:
     action = (tool_args.get("action") or "").lower()
     if action == "create":
-        return f"创建工作树 {tool_args.get('branch_name', '')}".strip()
+        branch = tool_args.get("branch_name", "")
+        desc = str(tool_args.get("description") or "").strip()
+        return f"创建工作树 {branch}（{desc}）" if desc else f"创建工作树 {branch}".strip()
     if action == "remove":
         return f"删除工作树 {tool_args.get('path', '')}".strip()
     if action == "merge":
         return f"合并工作树 {tool_args.get('path', '')}".strip()
+    if action == "switch":
+        return f"切换到 {tool_args.get('path', '')}".strip()
     return "查看工作树列表"
 
 
@@ -508,7 +648,7 @@ def register(registry) -> None:
         icon="manage_worktree",
         cn_name="管理工作树",
         group=_GROUP,
-        description="工作树增删查与合并（list/create/remove/merge）",
+        description="工作树增删查、合并与切换（list/create/remove/merge/switch）",
         aliases=["ManageWorktree"],
         preview=_preview_manage,
     )

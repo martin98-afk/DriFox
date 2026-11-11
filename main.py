@@ -85,7 +85,27 @@ from loguru import logger as _hook_logger
 
 def _pyqt_exception_hook(exc_type, exc_val, exc_tb):
     _hook_logger.error(f"[UnhandledException] {exc_type.__name__}: {exc_val}")
-    _hook_logger.error("".join(_exc_tb.format_exception(exc_type, exc_val, exc_tb)))
+    # tb 兜底：纯 C 层（PyQt 事件调度直接调用失效对象）产生的异常经 PyErr_Fetch
+    # 时 tb 为 NULL，format_exception 只输出异常行、丢光现场。此时 exc_val 上
+    # 可能挂着 __traceback__，仍无则 dump 主线程当前栈定位案发调用链。
+    tb = exc_tb or getattr(exc_val, "__traceback__", None)
+    if tb is not None:
+        _hook_logger.error("".join(_exc_tb.format_exception(exc_type, exc_val, tb)))
+        return
+    try:
+        import threading as _th_mod
+
+        _main_tid = _th_mod.main_thread().ident
+        _frame = sys._current_frames().get(_main_tid)
+        if _frame is not None:
+            _hook_logger.error(
+                "[no-tb] traceback 缺失（C 层异常），主线程当前栈:\n"
+                + "".join(_exc_tb.format_stack(_frame))
+            )
+        else:
+            _hook_logger.error("[no-tb] traceback 缺失且无法获取主线程栈")
+    except Exception:
+        _hook_logger.error("[no-tb] traceback 缺失，兜底栈获取失败")
 
 
 def _unraisable_hook(unraisable):
@@ -234,6 +254,19 @@ def main():
     app.setApplicationName("Drifox")
     app.setApplicationDisplayName("Drifox")
 
+    # 🔍 paint 热点采样（源码仓默认开启，打包版默认关闭）：主进程在不操作时
+    # 仍高 CPU、native 采样只看到 sipQWidget::paintEvent 看不出具体类时，靠它
+    # 按控件类统计 Paint 事件次数。正常只在 DEBUG 留一行；超过 120 次/秒升级
+    # 为 WARNING 并点名热点类（完整榜在 DEBUG）。
+    # 打包版排障强开：DRIFOX_PAINT_PROFILE=1；关掉：=0；
+    # 调窗口：DRIFOX_PAINT_PROFILE_WINDOW=60
+    try:
+        from app.utils.paint_profiler import start as _start_paint_profiler
+
+        _start_paint_profiler()
+    except Exception:  # noqa: BLE001 - 诊断设施绝不能阻断启动
+        pass
+
     # 🛡️ InfoBar 系统级守卫：死壳清洗 + notify 主线程投递桥预热。
     # 只在 GUI 分支装（qfluentwidgets 仅 GUI 需要）；CLI 不加载。
     # 背景：后台线程直弹 InfoBar 被析构后 manager 列表留死壳，新 InfoBar
@@ -242,6 +275,17 @@ def main():
 
     _install_info_bar_guard()
 
+    # 🐕 主线程阻塞看门狗：后台线程在阻塞持续期抓主线程栈，指名「让帧后等待」
+    # 类警告背后的真正占用者（心跳 QTimer 阻塞期不跳，主线程自证不可能）。
+    # 仓库版（源码运行）默认开启；打包版默认关闭：200ms 心跳 QTimer + 50ms
+    # 监控线程是常驻开销，生产环境不做观测。打包版排障时 DRIFOX_WATCHDOG=1 强开。
+    _watchdog_packaged = getattr(sys, "frozen", False) or hasattr(sys, "_MEIPASS")
+    _watchdog_forced = os.environ.get("DRIFOX_WATCHDOG", "").strip().lower() in ("1", "true", "on", "yes")
+    if not _watchdog_packaged or _watchdog_forced:
+        from app.utils.main_thread_watchdog import install_watchdog as _install_watchdog
+
+        _install_watchdog()
+
     # 🎡 SpinBox 滚轮守卫：数字框不再吃滚轮改值（误改要等失焦才落盘，
     # 用户几乎无感）。滚轮转交外层滚动容器，页面照常滚动；插件里的 SpinBox
     # 同在应用级过滤范围内。详见 app/utils/wheel_guard.py。
@@ -249,16 +293,24 @@ def main():
 
     _install_wheel_guard(app)
 
-    # [A1] openai 资源预导入前移：QApp 就绪即启动预热线程（原在首窗构建后的
-    # _deferred_startup，预热完成点被首窗构建推迟 2-3s）。预热线程单线程顺序导入
-    # 不触发 Python 3.14 import 锁死锁；后续 worker 线程若等待 openai 模块锁为单向等待、无环。
-    try:
-        from app.utils.http_client import preload_openai_resources_async
+    # 🔢 SpinBox 编辑区塌缩补丁：Qt6 的 QStyleSheetStyle 在 NoButtons + qss
+    # 命中时把数字框内部编辑区压成 1px（数字不可见），此处在 Paint/Show 前
+    # 校正编辑区几何。详见 app/utils/spin_box_compat.py。
+    from app.utils.spin_box_compat import install_guard as _install_spinbox_edit_guard
 
-        preload_openai_resources_async()
-        logger.debug("[Startup] openai resources 子模块预导入已转后台线程（前移）")
-    except Exception:
-        logger.exception("[Startup] openai resources 预导入失败（非致命）")
+    _install_spinbox_edit_guard(app)
+
+    # 🧯 qfluentwidgets ScrollBar 事件类型混淆守卫：底层合成事件可能出现
+    # 「动态类型 QWheelEvent + type=Resize」的错位对象，库内 eventFilter
+    # 直接 e.size() 会崩（2026-11-02 两连发）。详见 app/utils/scrollbar_guard.py。
+    from app.utils.scrollbar_guard import install_guard as _install_scrollbar_guard
+
+    _install_scrollbar_guard()
+
+    # [T24] openai 资源预导入**不**在此处启动：预热线程会与主线程随后的
+    # main_widget 级联 import 争 Python import 锁，实测拖慢主线程 26%
+    # （首窗就绪 1948ms → 1433ms）。现推迟到首窗就绪之后启动，见 _show_popup
+    # 内 singleShot(0) 处。预热仅影响首次 LLM 调用快慢，晚启动无正确性代价。
 
     # ========== 延迟启动的非关键 I/O 操作 ==========
     # 以下操作不阻塞首帧渲染，放到一次性定时器中执行
@@ -495,6 +547,7 @@ def main():
 
     # ========== 单实例检查 ==========
     from app.core.infra.single_instance import SingleInstanceGuard
+    from app.utils._startup_probe import dump as _probe_dump, mark as _probe
     from app.utils.config import Settings
 
     # [T24 R2] 二次启动 show 请求的接入口必须在拿到单实例锁后**立即**注册。
@@ -540,9 +593,19 @@ def main():
     # [T24 R2] 锁就绪 → 立即接上 show 请求入口，覆盖后续 import 窗口期
     _guard.show_requested.connect(_on_show_requested)
 
+    # 外观模式（自动跟随系统）对齐，必须在首次 setTheme 之前：
+    # qfluentwidgets 首帧深浅由当前主题决定，晚了对不上会先渲染一帧旧配色
+    try:
+        from app.utils.theme_mode import reconcile_on_startup
+
+        reconcile_on_startup()
+    except Exception as exc:
+        logger.warning(f"外观模式初始化失败: {exc}")
+
     # 设置 qfluentwidgets 主题 — 跟随 DriFox 主题的 mode
     from qfluentwidgets import Theme, setTheme
 
+    _probe("p1a.before_setTheme")
     try:
         from app.utils.theme_manager import theme_manager
 
@@ -552,6 +615,7 @@ def main():
             setTheme(Theme.DARK)
     except Exception:
         setTheme(Theme.DARK)
+    _probe("p1b.after_setTheme")
 
     # 获取全局字体配置
     from app.utils.config import Settings
@@ -564,6 +628,7 @@ def main():
             font_family = Settings.get_instance().canvas_font_selected.value
         except Exception:
             font_family = "Segoe UI"
+    _probe("p1c.after_font_config")
 
     # 注意：不在这里设置 QToolTip/ToolTip 样式，
     # 由 Colors.refresh() 在主题加载后用主题色统一设置。
@@ -687,6 +752,61 @@ def main():
         tm.add_window(chat_window)
         tm.remove_boot_placeholder()
         tm._mark_first_window_ready()
+        _probe_dump()
+        # [T24] openai 资源预导入推迟到此处（原在 QApp 就绪处）：预热线程的
+        # 串行 import 与主线程 main_widget 级联 import 争 Python import 锁，
+        # 实测拖慢主线程 26%。singleShot(0) 保证不阻塞首帧后的第一次交互；
+        # 预热失败不得阻塞启动。
+        def _preload_openai_resources():
+            try:
+                from app.utils.http_client import preload_openai_resources_async
+
+                preload_openai_resources_async()
+                logger.debug("[Startup] openai resources 子模块预导入已转后台线程（首窗就绪后）")
+            except Exception:
+                logger.exception("[Startup] openai resources 预导入失败（非致命）")
+
+        QTimer.singleShot(0, _preload_openai_resources)
+
+        # [PERF] 重依赖预导入后台化：启动期主线程 deferred 任务会冷导入的重模块
+        # 提前在后台线程填充缓存，主线程届时 import/扫盘均为命中。
+        # MainThreadWatchdog 实证（2026-10-30）：不预热时启动后 6-10s 处有两次
+        # ≥500ms 主线程阻塞——①BuiltinTools.__init__ 冷导入 mcp SDK（~500ms，
+        # Windows+杀软下文件系统开销为主）；②get_local_skills 首调缓存 miss
+        # 全量读 SKILL.md+YAML（~506ms）。预热只填缓存不改任何后续行为；
+        # 与 openai 预热同样的权衡：导入窗口内主线程若也要 import 会在锁上
+        # 等待（时序上预热先跑，实测 deferred 任务在其后 ~4s）。
+        def _preload_heavy_imports():
+            try:
+                import app.tools.mcp_tools  # noqa: F401
+            except Exception:
+                logger.exception("[Startup] mcp SDK 预导入失败（非致命）")
+            # provider 插件 warmup：plugin_host 的 register_async 通道 delay 2s，
+            # 窗口 deferred 段的 _load_model_configs 更早消费 provider_default_config
+            # → ensure_loaded 首调落在主线程，冷加载全部 provider 插件 ~500ms
+            # （MainThreadWatchdog 实证 2026-10-30 19:52:04）。此处提前后台加载，
+            # 与该通道经 ensure_loaded 的 _loading/_load_done 互斥语义协调，
+            # 谁先到谁加载，后到者等待或直接命中 _warmup_done。
+            try:
+                from app.plugins.registries.provider_registry import ProviderRegistry
+
+                ProviderRegistry.get_instance().ensure_loaded()
+            except Exception:
+                logger.exception("[Startup] provider 插件预热失败（非致命）")
+            # skills 索引预热仅在 PluginManager 已初始化时做：未初始化时
+            # get_local_skills 只能扫到 fallback 路径，写入的残缺缓存会被
+            # 后续 key（含插件目录）判 miss，预热白做还污染 key TTL。
+            try:
+                from app.plugins.managers.plugin_manager import PluginManager
+
+                if PluginManager.get_instance().is_initialized():
+                    from app.utils.utils import get_local_skills
+
+                    get_local_skills()
+            except Exception:
+                logger.exception("[Startup] skills 索引预热失败（非致命）")
+
+        QTimer.singleShot(0, lambda: threading.Thread(target=_preload_heavy_imports, daemon=True, name="heavy-import-preload").start())
         # [T24 R2] 窗口就绪 → 登记到共享状态；若 import 窗口期已有二次启动请求
         # （_on_show_requested 记了 pending），此处立即补激活，不再静默丢失。
         _show_window_state["window"] = tm
@@ -803,7 +923,7 @@ def main():
             logger.warning(f"[ui-test-server] 启动失败（跳过）: {exc}")
     # ── UI 测试服务接线结束 ──
 
-    sys.exit(app.exec_())
+    sys.exit(app.exec())
 
 
 if __name__ == "__main__":

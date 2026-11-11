@@ -10,9 +10,9 @@ plugin_manager / mcp_tools），含：
              "mcp_added": [], "mcp_removed": []}
 
 注入语义（打消模型对可用性的怀疑）：
-- 新增/变更工具：注入与 API 请求一致的完整 schema，并明确声明
-  「已加入当前工具列表，本轮可直接调用」（工具列表每轮动态构建，
-  插件启停后下一轮请求即生效——注入即真实可用）。
+- 新增/变更工具：注入与注册表一致的完整 schema，并声明「工具定义在会话内冻结，
+  请用 tool_execute 中转调用」——tools 数组为保护 prompt cache 在会话内不变，
+  插件启停不会刷新本次请求的工具定义，故新工具一律走中转。
 - 移除工具：明确声明「已从工具列表移除，请勿再调用」。
 - 无工具/MCP 层变化 → 空输出（不注入，避免噪音）。
 """
@@ -28,9 +28,13 @@ _ACTION_NAMES = {
     "disabled": "插件已禁用",
 }
 
-# 与 API 请求同构的 schema 声明前缀（新增/变更工具）
-_AVAILABLE_NOTE = "已加入当前请求的工具列表，本轮起可直接调用，无需再探测其是否存在"
-_REMOVED_NOTE = "已从工具列表移除，后续请求不可用，请勿再调用（如需同类能力请说明缺口，不要重试）"
+# 新增/变更工具的可用性声明。tools 定义在会话内冻结（保护 prompt cache），
+# 插件热装/启停不会改变本次请求的 tools 数组，因此新工具必须经 tool_execute 中转。
+_AVAILABLE_NOTE = (
+    "已注册（工具定义在会话内冻结以保护缓存，不随插件变更刷新）；"
+    "请按下方 schema 用 tool_execute 中转调用，参数以这里提供的最新定义为准"
+)
+_REMOVED_NOTE = "已从工具列表移除，后续调用会返回未知工具，请勿再调用（如需同类能力请说明缺口，不要重试）"
 
 
 def _tool_api(kind: str = "read"):
@@ -87,8 +91,11 @@ def hook(event: str, context: dict) -> str:
                 lines.append(f"  - {name} 完整 schema：")
                 lines.append("    " + json.dumps(schema, ensure_ascii=False, separators=(",", ":")))
             else:
-                # MCP 工具：registry 查不到（schema 由 MCP 动态发现），列名即可用
-                lines.append(f"  - {name}（MCP 工具，随 MCP 会话动态提供，可直接调用）")
+                # MCP 工具：registry 查不到（schema 由 MCP 动态发现），列名 + 中转方式
+                lines.append(
+                    f"  - {name}（MCP 工具，随 MCP 会话动态提供；不在本次 tools 列表内，"
+                    f"用 tool_execute(tool_name=\"{name}\", arguments={{...}}) 调用）"
+                )
     if tools_updated:
         lines.append(f"🟡 变更工具（{_AVAILABLE_NOTE}，以下为最新 schema）：")
         for name in tools_updated:
@@ -101,7 +108,10 @@ def hook(event: str, context: dict) -> str:
     if tools_removed:
         lines.append(f"🔴 移除工具（{_REMOVED_NOTE}：{', '.join(tools_removed)}）")
     if mcp_added:
-        lines.append("🟢 新增 MCP 服务器（其工具随连接就绪后可用）：" + ", ".join(mcp_added))
+        lines.append(
+            "🟢 新增 MCP 服务器（其工具经 tool_execute 中转调用，不进本次 tools 列表）："
+            + ", ".join(mcp_added)
+        )
     if mcp_removed:
         lines.append("🔴 移除 MCP 服务器（其 mcp__ 前缀工具一并失效，请勿再调用）：" + ", ".join(mcp_removed))
 

@@ -4,6 +4,9 @@
     "dark": "icon.svg"
   },
   "name": "worktree-manager",
+  "display_name": {
+      "zh": "工作树管理"
+  },
   "description": "DriFox 内置 UI 组件：工作台工作树页、git worktree 管理与分支标签",
   "version": "1.0.0",
   "author": {
@@ -12,6 +15,16 @@
   "homepage": "https://github.com/martin98-afk/DriFox",
   "license": "GPL-3.0-or-later",
   "type": "system",
+  "api_version": 2,
+  "capabilities": [
+    "window.current",
+    "window.host",
+    "window.workbench",
+    "ui.events",
+    "workdir.write",
+    "project.workdir",
+    "branch.refresh"
+  ],
   "components": {
     "ui": true,
     "tools": true

@@ -62,6 +62,11 @@ class _FakeBuiltinTools:
         self._team_window_id = ""
         self._team_agent_name = ""
 
+    @property
+    def mcp_manager(self):
+        # [bc697c93 补防] 对齐生产守卫语义：tool_executor 走 property 访问
+        return self._mcp_manager
+
 
 def _new_executor(mcp_manager):
     from types import SimpleNamespace

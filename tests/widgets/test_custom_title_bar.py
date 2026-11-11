@@ -3,6 +3,7 @@
 import sys
 
 import pytest
+from PySide6.QtCore import QAbstractAnimation
 from PySide6.QtWidgets import QWidget
 
 from app.widgets.custom_title_bar import CustomTitleBar
@@ -135,7 +136,7 @@ def test_tab_active_animates_progress(qtbot, container):
 
     tb.set_active_tab("usage")
     assert btn._active is True  # 状态立即翻转
-    assert btn._anim_active.state() == btn._anim_active.Running  # 进度走动画
+    assert btn._anim_active.state() == QAbstractAnimation.State.Running  # 进度走动画
 
     # 动画结束后进度收拢到 1
     btn._anim_active.stop()
@@ -160,7 +161,7 @@ def test_set_active_heals_stuck_progress(qtbot, container):
     btn._active_t = 0.4
 
     tb.set_active_tab("chat")  # 意图未变，但进度没到位 → 必须重启
-    assert btn._anim_active.state() == btn._anim_active.Running
+    assert btn._anim_active.state() == QAbstractAnimation.State.Running
 
 
 def test_set_active_is_noop_when_settled(qtbot, container):
@@ -177,7 +178,7 @@ def test_set_active_is_noop_when_settled(qtbot, container):
     btn._anim_active.stop()
     btn._active_t = 1.0
     tb.set_active_tab("chat")
-    assert btn._anim_active.state() != btn._anim_active.Running
+    assert btn._anim_active.state() != QAbstractAnimation.State.Running
 
 
 def test_sync_tab_hover_picks_the_tab_under_cursor(qtbot, container, monkeypatch):
@@ -304,7 +305,7 @@ def test_reduce_motion_hover_and_active_land_final_value(qtbot, container, monke
 
     btn.set_hover(True)  # enterEvent 路径
     assert btn._hover_t == 1.0
-    assert btn._anim_hover.state() != btn._anim_hover.Running
+    assert btn._anim_hover.state() != QAbstractAnimation.State.Running
 
     btn.set_hover(False)
     assert btn._hover_t == 0.0
@@ -313,7 +314,7 @@ def test_reduce_motion_hover_and_active_land_final_value(qtbot, container, monke
     assert btn._active_t == 0.0
     btn.set_active(True)
     assert btn._active_t == 1.0
-    assert btn._anim_active.state() != btn._anim_active.Running
+    assert btn._anim_active.state() != QAbstractAnimation.State.Running
 
 # ── 拖拽：SC_MOVE 模态循环重入短路 ──
 
@@ -360,3 +361,50 @@ def test_mouse_move_starts_system_move_when_idle(qtbot, container, monkeypatch):
 
     tb.mouseMoveEvent(_make_left_button_move_event())
     assert len(calls) == 1
+
+
+def test_titlebar_scrim_default_follows_theme_mode(qtbot, container, monkeypatch):
+    """顶栏雾化遮罩：无主题 token 时按明暗取白 / 黑雾，alpha 过 AA 底线
+
+    标题栏透明叠在壁纸上，浅色主题撞上深色壁纸时文字对比度会跌到 1:1；
+    这层雾的中段 alpha 必须 ≥0.55，否则黑壁纸下仍不可读。
+    """
+    from app.utils.design_tokens import Colors
+    from app.utils.theme_manager import theme_manager
+
+    tb = CustomTitleBar(container)
+    qtbot.addWidget(tb)
+    monkeypatch.setattr(Colors, "TITLEBAR_SCRIM", "")
+
+    monkeypatch.setattr(theme_manager, "is_light_theme", lambda *a, **k: True)
+    light = tb._scrim_base_color()
+    assert light.red() > 240 and light.alphaF() >= 0.55
+
+    monkeypatch.setattr(theme_manager, "is_light_theme", lambda *a, **k: False)
+    dark = tb._scrim_base_color()
+    assert dark.red() < 40 and dark.alphaF() >= 0.55
+
+
+def test_titlebar_scrim_token_override(qtbot, container, monkeypatch):
+    """主题 yaml 的 titlebar_scrim 覆盖生效（含 rgba 整数 alpha）"""
+    from app.utils.design_tokens import Colors
+
+    tb = CustomTitleBar(container)
+    qtbot.addWidget(tb)
+    monkeypatch.setattr(Colors, "TITLEBAR_SCRIM", "rgba(10, 20, 30, 200)")
+    c = tb._scrim_base_color()
+    assert (c.red(), c.green(), c.blue()) == (10, 20, 30)
+    assert abs(c.alphaF() - 200 / 255) < 0.01
+
+
+def test_titlebar_scrim_ignores_invalid_token(qtbot, container, monkeypatch):
+    """写坏的主题值回退到明暗默认色，不能把整条顶栏刷成默认深灰"""
+    from app.utils.design_tokens import Colors
+    from app.utils.theme_manager import theme_manager
+
+    tb = CustomTitleBar(container)
+    qtbot.addWidget(tb)
+    monkeypatch.setattr(Colors, "TITLEBAR_SCRIM", "not-a-color")
+    monkeypatch.setattr(theme_manager, "is_light_theme", lambda *a, **k: True)
+    c = tb._scrim_base_color()
+    assert c.red() > 240

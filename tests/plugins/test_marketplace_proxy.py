@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
 """marketplace proxy 配置模块测试
 
-覆盖：三种模式的 URL 改写 / httpx_kwargs / git_clone_args /
-配置持久化往返 / 损坏回退 / 地址校验 / 未启用零开销。
+覆盖：四种模式的 URL 改写 / httpx_kwargs / git_clone_args /
+配置持久化往返 / 损坏回退 / 地址校验 / 未启用零开销 /
+system 模式系统代理探测与直连回落。
 """
 
 import importlib.util
@@ -25,7 +26,7 @@ if "pm_ui" not in sys.modules:
     _pkg.__package__ = "pm_ui"
     sys.modules["pm_ui"] = _pkg
 
-from pm_ui.proxy import ProxyConfig, get_proxy_config  # noqa: E402
+from pm_ui.proxy import ProxyConfig, detect_system_proxy, get_proxy_config  # noqa: E402
 
 GIT_URL = "https://github.com/martin98-afk/drifox-plugins.git"
 RAW_URL = "https://raw.githubusercontent.com/martin98-afk/drifox-plugins/main/marketplace.json"
@@ -83,6 +84,124 @@ def test_git_clone_args_prefix(tmp_path):
     url, extra = p.git_clone_args(GIT_URL)
     assert url == "https://ghfast.top/" + GIT_URL
     assert extra == []
+
+# ── system 模式：系统代理探测 ──
+
+def test_validate_system_always_ok():
+    assert ProxyConfig.validate("system", "") == (True, "")
+    assert ProxyConfig.validate("system", "anything") == (True, "")
+
+def test_system_mode_with_detected_proxy(monkeypatch, tmp_path):
+    """system 模式探测到代理：行为同 http 模式"""
+    import pm_ui.proxy as pm_proxy
+
+    monkeypatch.setattr(pm_proxy, "detect_system_proxy", lambda: "http://127.0.0.1:7890")
+    p = _mk(tmp_path, mode="system", address="http://127.0.0.1:7890")
+    assert p.http_proxy_address() == "http://127.0.0.1:7890"
+    assert p.httpx_kwargs() == {"proxy": "http://127.0.0.1:7890"}
+    url, extra = p.git_clone_args(GIT_URL)
+    assert url == GIT_URL
+    assert extra == ["-c", "http.proxy=http://127.0.0.1:7890"]
+    assert p.rewrite_url(GIT_URL) == GIT_URL  # 不做前缀改写
+
+def test_system_mode_without_proxy_falls_back_direct(monkeypatch, tmp_path):
+    """system 模式探测不到代理：自动直连（空参数，不报错）"""
+    import pm_ui.proxy as pm_proxy
+
+    monkeypatch.setattr(pm_proxy, "detect_system_proxy", lambda: None)
+    p = _mk(tmp_path, mode="system", address="http://127.0.0.1:7890")
+    assert p.http_proxy_address() == ""
+    assert p.httpx_kwargs() == {}
+    url, extra = p.git_clone_args(GIT_URL)
+    assert url == GIT_URL and extra == []
+
+def test_system_mode_disabled_zero_effect(monkeypatch, tmp_path):
+    import pm_ui.proxy as pm_proxy
+
+    monkeypatch.setattr(pm_proxy, "detect_system_proxy", lambda: "http://127.0.0.1:7890")
+    p = _mk(tmp_path, mode="system", address="", enabled=False)
+    assert p.http_proxy_address() == ""
+    assert p.httpx_kwargs() == {}
+
+def test_test_connection_system_no_proxy(monkeypatch, tmp_path):
+    """system 模式探测不到代理时 test_connection 给明确提示"""
+    import pm_ui.proxy as pm_proxy
+
+    monkeypatch.setattr(pm_proxy, "detect_system_proxy", lambda: None)
+    p = ProxyConfig(file=tmp_path / "proxy.json")
+    ok, msg = p.test_connection("system", "")
+    assert not ok
+    assert "系统代理" in msg
+
+def test_normalize_proxy_addr_formats():
+    from pm_ui.proxy import _normalize_proxy_addr
+
+    assert _normalize_proxy_addr("127.0.0.1:7890") == "http://127.0.0.1:7890"
+    assert _normalize_proxy_addr("http://127.0.0.1:7890") == "http://127.0.0.1:7890"
+    assert _normalize_proxy_addr("127.0.0.1") is None  # 缺端口
+    assert _normalize_proxy_addr("") is None
+    assert _normalize_proxy_addr("   ") is None
+
+def test_win_registry_proxy_parsing(monkeypatch):
+    """注册表分协议形式取 https 优先；ProxyEnable=0 返回 None"""
+    import sys
+    import types
+
+    import pm_ui.proxy as pm_proxy
+
+    class FakeKey:
+        def __init__(self, values):
+            self._v = values
+
+        def QueryValueEx(self, name):
+            return self._v[name]
+
+        def Close(self):
+            pass
+
+    fake = types.ModuleType("winreg")
+    fake.HKEY_CURRENT_USER = 0
+    fake.CloseKey = lambda key: None
+    fake.QueryValueEx = lambda key, name: key.QueryValueEx(name)
+    fake.OpenKey = lambda key, path: FakeKey({
+        "ProxyEnable": (1, None),
+        "ProxyServer": ("http=10.0.0.1:8080;https=10.0.0.2:8443;<local>", None),
+    })
+    monkeypatch.setitem(sys.modules, "winreg", fake)
+    assert pm_proxy._win_registry_proxy() == "http://10.0.0.2:8443"
+
+    fake.OpenKey = lambda key, path: FakeKey({
+        "ProxyEnable": (0, None),
+        "ProxyServer": ("10.0.0.1:8080", None),
+    })
+    assert pm_proxy._win_registry_proxy() is None
+
+    fake.OpenKey = lambda key, path: FakeKey({
+        "ProxyEnable": (1, None),
+        "ProxyServer": ("127.0.0.1:7890", None),
+    })
+    assert pm_proxy._win_registry_proxy() == "http://127.0.0.1:7890"
+
+def test_detect_system_proxy_env_fallback(monkeypatch):
+    """无注册表命中时回落环境变量（大小写兼容）"""
+    import pm_ui.proxy as pm_proxy
+
+    monkeypatch.setattr(pm_proxy, "_win_registry_proxy", lambda: None)
+    monkeypatch.delenv("HTTPS_PROXY", raising=False)
+    monkeypatch.delenv("https_proxy", raising=False)
+    monkeypatch.delenv("HTTP_PROXY", raising=False)
+    monkeypatch.setenv("http_proxy", "http://10.0.0.9:1080")
+    monkeypatch.delenv("ALL_PROXY", raising=False)
+    monkeypatch.delenv("all_proxy", raising=False)
+    assert detect_system_proxy() == "http://10.0.0.9:1080"
+
+def test_detect_system_proxy_none(monkeypatch):
+    import pm_ui.proxy as pm_proxy
+
+    monkeypatch.setattr(pm_proxy, "_win_registry_proxy", lambda: None)
+    for name in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"):
+        monkeypatch.delenv(name, raising=False)
+    assert detect_system_proxy() is None
 
 
 def test_save_load_roundtrip(tmp_path):

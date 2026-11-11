@@ -59,6 +59,7 @@ from app.utils.design_tokens import (
     get_unified_scrollbar_style,
     scale_font_size,
     scale_icon_size,
+    set_style_sheet_if_changed,
 )
 from app.utils.motion import retarget
 from app.utils.theme_manager import theme_manager
@@ -560,7 +561,10 @@ class TabItem(QFrame):
         self._icon_size = scale_icon_size(20)
 
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(8, 4, 4, 4)
+        # 左右 2：选中/hover 块已改为贴 widget 缘（paintEvent），块内 pad = margin 2
+        # + 图标环位 3 = 5px（原 margin 8 + 内缩叠加达 9px，用户反馈过大）。
+        # 左 4 与系统插件行（uiPluginRow 行内 4）对齐的旧约定由块贴缘方案取代
+        layout.setContentsMargins(2, 4, 4, 4)
         layout.setSpacing(6)
 
         # 图标 — _TabProjectIcon 直接 QPainter 绘制圆角矩形+文字，与 _SquareAvatar 一致
@@ -641,18 +645,31 @@ class TabItem(QFrame):
         # 树行化后并入 12px 体系（与历史会话行一致）；列表模式保持 13px
         size = 12 if self._tree_row else 13
         # 直接通过 setFont 强制应用字体（避开 stylesheet 继承坑）
-        self._title_label.setFont(get_unified_font(size))
+        # [PERF] 同字体短路：setFont 即使字体完全不变也会走 fontChange →
+        # 布局失效重算（全量标签项 × 3 个 QLabel）；比较值后再设，
+        # 与 apply_font_size_to_widget 的短路写法一致。
+        _tf = get_unified_font(size)
+        if self._title_label.font() != _tf:
+            self._title_label.setFont(_tf)
         # 颜色随主题刷新（字体同一行写也能 setFont，但颜色走 stylesheet 更稳）
-        self._title_label.setStyleSheet(
-            f"color: {Colors.TEXT_PRIMARY}; background: transparent; {get_font_family_css()} {font_size_css(size)}"
+        # 同串短路：主题刷新会遍历**全部**标签项，N 个标签 × 3 次 setStyleSheet
+        # 的 repolish 是多标签拖慢主题刷新的直接来源之一。
+        set_style_sheet_if_changed(
+            self._title_label,
+            f"color: {Colors.TEXT_PRIMARY}; background: transparent; {get_font_family_css()} {font_size_css(size)}",
         )
-        self._sub_label.setFont(get_unified_font(10))
-        self._sub_label.setStyleSheet(
-            f"color: {Colors.TEXT_MUTED}; background: transparent; {get_font_family_css()} {font_size_css(10)};"
+        _sf = get_unified_font(10)
+        if self._sub_label.font() != _sf:
+            self._sub_label.setFont(_sf)
+        set_style_sheet_if_changed(
+            self._sub_label,
+            f"color: {Colors.TEXT_MUTED}; background: transparent; {get_font_family_css()} {font_size_css(10)};",
         )
-        self._sub_time.setFont(get_unified_font(10))
-        self._sub_time.setStyleSheet(
-            f"color: {Colors.TEXT_MUTED}; background: transparent; {get_font_family_css()} {font_size_css(10)};"
+        if self._sub_time.font() != _sf:
+            self._sub_time.setFont(_sf)
+        set_style_sheet_if_changed(
+            self._sub_time,
+            f"color: {Colors.TEXT_MUTED}; background: transparent; {get_font_family_css()} {font_size_css(10)};",
         )
 
     def refresh_style(self):
@@ -1121,13 +1138,18 @@ class TabItem(QFrame):
 
         w, h = self.width(), self.height()
 
-        # ── 构建统一圆角路径（列表 8px 圆角 / 树行 6px，与节点头对齐 + 2px 内边距） ──
+        # ── 构建统一圆角路径（列表 8px 圆角 / 树行 6px）──
+        # 列表模式左右贴 widget 缘（右留 2 给滚动条）：原整体 2px 内缩叠加
+        # 行 margin + 图标环位，使选中块内左右 pad 达 9px（用户反馈过大）。
+        # 树行保留 2px 内缩：左侧有从属引导竖线，块贴边会盖线。
         # ★ 缓存：尺寸与树行化状态未变时复用 QPainterPath（用 tuple key 避免 mutable 污染）
         _key = (w, h, self._tree_row)
         if _key != self._cached_rect_key:
             self._cached_round_rect = _QPainterPath()
-            _radius = 6 if self._tree_row else 8
-            self._cached_round_rect.addRoundedRect(2, 2, w - 4, h - 4, _radius, _radius)
+            if self._tree_row:
+                self._cached_round_rect.addRoundedRect(2, 2, w - 4, h - 4, 6, 6)
+            else:
+                self._cached_round_rect.addRoundedRect(0, 2, w - 2, h - 4, 8, 8)
             self._cached_rect_key = _key
         _round_rect = self._cached_round_rect
 
@@ -1421,14 +1443,26 @@ class UIPluginRow(QFrame):
         self.update()
 
     def refresh_style(self):
-        """刷新主题样式：字体 + 颜色 + 主题相关图标"""
+        """刷新主题样式：字体 + 颜色 + 主题相关图标
+
+        [PERF] 三个短路：字体同值不 setFont（fontChange 会触发布局重算）、
+        QSS 同串不重设（setStyleSheet 恒 repolish）、图标仅在明暗模式翻转时
+        重取（QIcon(路径) + set_icon 每次都是新的 pixmap 链，纯色切换下图标
+        不变）。插件行数量 = 已装插件数，主题刷新会逐行走一遍。
+        """
         from app.utils.utils import get_unified_font
 
         # 应用系统字体（避免 stylesheet 继承问题）
-        self._title_label.setFont(get_unified_font(12))
-        self._title_label.setStyleSheet(f"color: {Colors.TEXT_PRIMARY}; {get_font_family_css()} {font_size_css(12)}")
-        self._icon_label.setStyleSheet("background: transparent;")
-        self.setStyleSheet(f"""
+        _tf = get_unified_font(12)
+        if self._title_label.font() != _tf:
+            self._title_label.setFont(_tf)
+        set_style_sheet_if_changed(
+            self._title_label, f"color: {Colors.TEXT_PRIMARY}; {get_font_family_css()} {font_size_css(12)}"
+        )
+        set_style_sheet_if_changed(self._icon_label, "background: transparent;")
+        set_style_sheet_if_changed(
+            self,
+            f"""
             #uiPluginRow {{
                 background: transparent;
                 border-radius: 5px;
@@ -1436,17 +1470,20 @@ class UIPluginRow(QFrame):
             #uiPluginRow:hover {{
                 background: {Colors.HOVER_BG};
             }}
-        """)
+        """,
+        )
 
-        # 重新获取主题相关图标（浅/深色主题图标不同）
-        if self._plugin_name:
+        # 重新获取主题相关图标（浅/深色主题图标不同）——仅明暗模式确实翻转时
+        _is_dark = isDarkTheme()
+        if self._plugin_name and getattr(self, "_icon_theme_is_dark", None) != _is_dark:
+            self._icon_theme_is_dark = _is_dark
             try:
                 from app.plugins.managers.plugin_manager import PluginManager
 
                 pm = PluginManager.get_instance()
                 plugin = pm.get_plugin(self._plugin_name)
                 icon_config = getattr(plugin, "icon_config", None) if plugin else None
-                icon_path = icon_config.get("dark" if isDarkTheme() else "light") if icon_config else None
+                icon_path = icon_config.get("dark" if _is_dark else "light") if icon_config else None
                 if icon_path:
                     self.set_icon(QIcon(str(icon_path)))
             except Exception:
@@ -1463,7 +1500,7 @@ class UIPluginRow(QFrame):
         menu = QMenu(self)
         menu.setStyleSheet(f"""
             QMenu {{
-                background: {Colors.CARD_BG};
+                background: {Colors.CARD_BG.format(alpha=180)};
                 border: 1px solid {Colors.BORDER};
                 border-radius: 6px;
                 padding: 4px;
@@ -1665,18 +1702,35 @@ class TabPanel(QWidget):
         self._tree_scroll: Optional[ScrollArea] = None
         self._tree_widget: Optional[WorkspaceTree] = None
         self._tree_snapshot = None  # 树节点签名，用于跳过无变化的重建
+        self._plugin_divider: Optional[QFrame] = None  # 常驻区 pin ↔ 非 pin 的分隔线（重建时重建）
         self._setup_ui()
         # 注册主题刷新回调：主题/字体变更后刷新所有 Tab 项样式
         theme_manager.register_refresh_target(self)
 
-    _SEPARATOR_STYLE = f"""
-        QFrame {{
-            background: {Colors.DIVIDER_COLOR};
-            border: none;
-            min-height: 1px;
-            max-height: 1px;
-        }}
-    """
+    # ══════════════════════════════════════════════════════════
+    # 分隔线 QSS（三条共用一个生成入口）
+    # ⚠️ 必须在运行时生成，不能写成类级 f-string：DIVIDER_COLOR 深色主题
+    #    是白色微透明、浅色主题是黑色微透明，任何静态化都会把线色锁死在
+    #    首帧主题，切到对比色主题后线与底色同向 → 视觉上"分隔线消失"。
+    # ══════════════════════════════════════════════════════════
+    def _divider_qss(self, margin_top: int = 0, margin_bottom: int = 0) -> str:
+        return f"""
+            QFrame {{
+                background: {Colors.DIVIDER_COLOR};
+                border: none;
+                min-height: 1px;
+                max-height: 1px;
+                margin-top: {margin_top}px;
+                margin-bottom: {margin_bottom}px;
+            }}
+        """
+
+    def _refresh_divider_styles(self):
+        """主题/字体刷新入口：重刷面板内三条分隔线颜色（绝不在多线程调用）"""
+        self._separator.setStyleSheet(self._divider_qss())
+        self._plugin_separator_2.setStyleSheet(self._divider_qss(0, 2))
+        if getattr(self, "_plugin_divider", None) is not None:
+            self._plugin_divider.setStyleSheet(self._divider_qss(2, 2))
 
     def _setup_ui(self):
         layout = QVBoxLayout(self)
@@ -1768,18 +1822,10 @@ class TabPanel(QWidget):
         # ── 分隔线：UI 插件区域 ↔ 新建标签页 ──
         self._plugin_separator_2 = QFrame(self)
         self._plugin_separator_2.setFrameShape(QFrame.HLine)
-        self._plugin_separator_2.setStyleSheet(
-            f"""
-            QFrame {{
-                background: {Colors.DIVIDER_COLOR};
-                border: none;
-                min-height: 1px;
-                max-height: 1px;
-                margin-top: 4px;
-                margin-bottom: 2px;
-            }}
-            """
-        )
+        # 线色随主题（见 _divider_qss 说明）：此处走运行时生成，refresh_style 重刷。
+        # 上 0 下 2：折叠头自身底部 margin 5 + 卡片 QSS margin-bottom 4 已贡献 9px，
+        # 线再给 4 会叠加到 13px，与线下 8px 失衡（用户反馈间隔不均）
+        self._plugin_separator_2.setStyleSheet(self._divider_qss(0, 2))
         self._plugin_separator_2.setVisible(False)
         layout.addWidget(self._plugin_separator_2)
 
@@ -1847,7 +1893,9 @@ class TabPanel(QWidget):
         self._list_widget = QWidget()
         self._list_widget.setStyleSheet("background: transparent;")
         self._list_layout = QVBoxLayout(self._list_widget)
-        self._list_layout.setContentsMargins(2, 0, 2, 0)
+        # 左 0：tab 行 hover/选中块左缘与上方菜单行对齐（都从 frame padding 6px 处起）；
+        # 原左 2 叠 frame 6 = 8px，用户感知「对话列表外部 pad 太多」。右 2 保留给滚动条
+        self._list_layout.setContentsMargins(0, 0, 2, 0)
         self._list_layout.setSpacing(2)
         self._list_layout.addStretch()
         self._scroll_area.setWidget(self._list_widget)
@@ -1885,8 +1933,6 @@ class TabPanel(QWidget):
         self._tree_widget = WorkspaceTree(self._tree_scroll)
         self._tree_widget.setStyleSheet("background: transparent;")
         self._tree_widget.newSessionRequested.connect(self.newSessionInWorkspaceRequested)
-        # PySide6 迁移注记：QVariantMap(dict) -> PyObject(object) 信号直连
-        # 签名不兼容，改 lambda 转发。
         self._tree_widget.openSessionRequested.connect(
             lambda rec: self.openSessionRecordRequested.emit(rec)
         )
@@ -1896,7 +1942,7 @@ class TabPanel(QWidget):
         self._tree_header = QWidget(self)
         self._tree_header.setStyleSheet("background: transparent;")
         _tree_header_layout = QHBoxLayout(self._tree_header)
-        _tree_header_layout.setContentsMargins(8, 2, 6, 2)
+        _tree_header_layout.setContentsMargins(6, 2, 6, 2)
         _tree_header_layout.setSpacing(4)
         self._tree_header_label = QLabel("工作区", self._tree_header)
         self._tree_header_label.setStyleSheet("background: transparent;")
@@ -1927,7 +1973,7 @@ class TabPanel(QWidget):
         # ── 分隔线 ──
         self._separator = QFrame(self)
         self._separator.setFrameShape(QFrame.HLine)
-        self._separator.setStyleSheet(self._SEPARATOR_STYLE)
+        self._separator.setStyleSheet(self._divider_qss())
         layout.addWidget(self._separator)
 
         # ── 底部：Gitee 账户（头像/名称右侧为 ⚙ 设置按钮） ──
@@ -2120,6 +2166,21 @@ class TabPanel(QWidget):
         custom_infos = _sort_plugin_entries(custom_infos)
         self._plugin_infos = system_infos + custom_infos
 
+        # [PERF] 数据签名短路：本方法被窗口 showEvent / 插件注册表变更 / pin
+        # 切换反复调用，而多数调用时插件数据并无变化。全量销毁重建 N 行实测
+        # 500ms+（每行一次 UIPluginRow 构造 + 多路信号连接 + deleteLater 排队）。
+        # 签名含分组与排序结果、pin 集合、图标路径，任一插件增删/改名/换图标/
+        # 改分组或 pin 变更都会改变签名 → 照旧走真重建。
+        signature = (
+            tuple(system_infos),
+            tuple(custom_infos),
+            tuple(sorted(pinned)),
+            tuple(self._plugin_icon_path(pm, entry[3]) for entry in system_infos + custom_infos),
+        )
+        if signature == getattr(self, "_ui_plugins_signature", None) and self._plugin_rows_alive():
+            return
+        self._ui_plugins_signature = signature
+
         # ── 系统插件区 ──
         while self._system_plugin_layout.count() > 0:
             item = self._system_plugin_layout.takeAt(0)
@@ -2127,6 +2188,7 @@ class TabPanel(QWidget):
             if widget is not None:
                 widget.deleteLater()
         self._system_plugin_buttons = []
+        self._plugin_divider = None  # 重建后旧分隔线已 deleteLater，引用同步作废
         seen_pinned_row = False  # 已成功渲染的固定行（分隔线只插在固定行之后）
         divider_added = False
         for kind, key, title, plugin_name, _priority in system_infos:
@@ -2135,19 +2197,10 @@ class TabPanel(QWidget):
             if not divider_added and seen_pinned_row and plugin_name not in pinned:
                 divider = QFrame(self._system_plugin_section)
                 divider.setFrameShape(QFrame.HLine)
-                divider.setStyleSheet(
-                    f"""
-                    QFrame {{
-                        background: {Colors.DIVIDER_COLOR};
-                        border: none;
-                        min-height: 1px;
-                        max-height: 1px;
-                        margin-top: 4px;
-                        margin-bottom: 2px;
-                    }}
-                    """
-                )
+                # 线色随主题，refresh_style → _refresh_divider_styles 负责重刷
+                divider.setStyleSheet(self._divider_qss(4, 2))
                 self._system_plugin_layout.addWidget(divider)
+                self._plugin_divider = divider
                 divider_added = True
             # ★ T3 修复：单行构造异常不中断整体刷新（任一插件构造抛异常时
             # 跳过该插件，其余插件继续重建——否则一个"毒条目"导致整批
@@ -2483,6 +2536,31 @@ class TabPanel(QWidget):
         except Exception:
             return None
 
+    @staticmethod
+    def _plugin_icon_path(plugin_manager, plugin_name: str):
+        """插件当前主题图标路径（refresh_ui_plugins 签名用，不构造 QIcon）"""
+        try:
+            plugin = plugin_manager.get_plugin(plugin_name)
+            icon_config = getattr(plugin, "icon_config", None) if plugin else None
+            if not icon_config:
+                return None
+            return str(icon_config.get("dark" if isDarkTheme() else "light") or "")
+        except Exception:
+            return None
+
+    def _plugin_rows_alive(self) -> bool:
+        """现有插件行控件是否仍存活
+
+        签名短路的前提是「上次构建的行还在」。父容器被销毁/行被外部
+        deleteLater 后再命中签名，会留下空白列表，故逐行做析构探测。
+        """
+        import shiboken6 as sip
+
+        rows = list(self._system_plugin_buttons) + list(self._custom_plugin_buttons)
+        if not rows:
+            return True
+        return not any(not sip.isValid(row) for row in rows)
+
     def _on_ui_plugin_clicked(self, card_id: str):
         """在当前活动 Tab 中打开 UI 插件卡片"""
         parent = self.parent()
@@ -2627,10 +2705,16 @@ class TabPanel(QWidget):
             self.set_mode(PANEL_MODE_TREE)
 
     def _refresh_top_bar_style(self):
-        """刷新顶部行样式：「新建对话」行（颜色/字体/图标）+ 图标按钮（主题图标/图标尺寸）"""
+        """刷新顶部行样式：「新建对话」行（颜色/字体/图标）+ 图标按钮（主题图标/图标尺寸）
+
+        [PERF] QSS 走同串短路；图标（新建会话 pixmap / 竖向「⋯」旋转位图）
+        仅在明暗模式翻转或图标尺寸变化时重建——主题刷新会每轮走到这里，
+        纯色切换下图标本身不变。
+        """
         # 「新建对话」行：复用插件行样式惯例（hover 背景 + 圆角），随主题刷新
         if getattr(self, "_new_chat_row", None) is not None:
-            self._new_chat_row.setStyleSheet(
+            set_style_sheet_if_changed(
+                self._new_chat_row,
                 f"""
                 #uiPluginRow {{
                     background: transparent;
@@ -2639,21 +2723,25 @@ class TabPanel(QWidget):
                 #uiPluginRow:hover {{
                     background: {Colors.HOVER_BG};
                 }}
-            """
+            """,
             )
         if getattr(self, "_new_chat_label", None) is not None:
-            self._new_chat_label.setFont(get_unified_font(12))
-            self._new_chat_label.setStyleSheet(
-                f"color: {Colors.TEXT_PRIMARY}; background: transparent; {get_font_family_css()} {font_size_css(12)}"
+            _tf = get_unified_font(12)
+            if self._new_chat_label.font() != _tf:
+                self._new_chat_label.setFont(_tf)
+            set_style_sheet_if_changed(
+                self._new_chat_label,
+                f"color: {Colors.TEXT_PRIMARY}; background: transparent; {get_font_family_css()} {font_size_css(12)}",
             )
-        self._update_new_chat_icon()
-        # 竖向「⋯」是旋转位图（不随主题自动变色），主题/字号变更时必须重新生成
-        if getattr(self, "_new_more_btn", None) is not None:
-            self._new_more_btn.setIcon(_vertical_more_icon())
         _icon_px = scale_icon_size(14)
-        for _btn in (
-            getattr(self, "_new_more_btn", None),
-        ):
+        _icon_sig = (isDarkTheme(), _icon_px)
+        if getattr(self, "_top_bar_icon_sig", None) != _icon_sig:
+            self._top_bar_icon_sig = _icon_sig
+            self._update_new_chat_icon()
+            # 竖向「⋯」是旋转位图（不随主题自动变色），主题/字号变更时必须重新生成
+            if getattr(self, "_new_more_btn", None) is not None:
+                self._new_more_btn.setIcon(_vertical_more_icon())
+        for _btn in (getattr(self, "_new_more_btn", None),):
             if _btn is not None:
                 _btn.setIconSize(QSize(_icon_px, _icon_px))
 
@@ -3854,26 +3942,12 @@ class TabPanel(QWidget):
 
         for project in projects:
             plain = plain_by_project.get(project, [])
-            # ── 已登记的真实 git worktree（关键文档里 added_by=git_worktree）──
+            # ── 已登记的真实 git worktree ──
             # v2 不再建工作树节点，只用于把会话的 worktree_path 归一成
             # 「主仓库 / 真工作树」两类，副行显示非主仓库的工作树名。
+            # 关键文档表下线后不再有「登记」来源：改用 .git 文件特征 +
+            # worktree list 的强判据，逐个候选路径校验（见 _resolve_worktree）。
             registered: List[str] = []
-            try:
-                if memory is not None:
-                    from app.utils.git_worktree import GitWorktreeDetector
-
-                    for doc in memory.get_key_documents(project) or []:
-                        if str(doc.get("added_by") or "") != "git_worktree":
-                            continue
-                        path = (doc.get("file_path") or "").strip()
-                        if path and os.path.isdir(path) and path not in registered:
-                            # zombie 过滤：.git 指向的 gitdir 已消失（主仓库 .git
-                            # 被删/重建）的 worktree 不进树，与 worktree list 口径对齐
-                            if GitWorktreeDetector.is_valid_worktree_link(path):
-                                registered.append(path)
-            except Exception:
-                pass
-            # ⚠️ 归一：目录已不存在 / 主仓库根目录 / 临时工作目录 一律回落到主仓库("")。
             registered_norm = self._norm_registered(registered)
             plain_pairs = [
                 (r, self._resolve_worktree((r.get("worktree_path") or "").strip(), registered_norm)) for r in plain
@@ -4021,8 +4095,8 @@ class TabPanel(QWidget):
         判定顺序（全走文件系统判断，**不起 git 子进程** —— 本方法在树每次重建时
         对每条会话调用一次，起子进程会把侧栏卡住）：
         1. 空 / 目录已不存在 → 主仓库
-        2. 命中已登记的真实 worktree（关键文档 added_by=git_worktree）→ 原样
-        3. 位于某个已登记 worktree 之下 → 归到该 worktree
+        2. 命中已知工作树列表（调用方传入的预计算归一化三元组）→ 原样
+        3. 位于某个已知工作树之下 → 归到该工作树
         4. .git 是**文件**且指向的 gitdir 存在（git worktree 特征）→ 原样
         5. 其余（主仓库根目录 / 临时工作目录 / 非 git 目录 / zombie worktree）→ 主仓库
         """
@@ -4421,25 +4495,43 @@ class TabPanel(QWidget):
         """
         # 刷新模块级缓存颜色，避免 paintEvent 使用旧主题色值
         _invalidate_cached_colors()
+        from app.utils.theme_refresh import ThemeRefreshCoordinator as _TRC
+
+        # 分隔线线色随主题（深色白线 / 浅色黑线），静态化会锁死首帧色
+        _TRC.timer_start("tab_divider")
+        self._refresh_divider_styles()
+        _TRC.timer_end("tab_divider")
         # 重新应用侧边两个滚动区的滚动条 QSS（滚动条颜色随主题）
+        _TRC.timer_start("tab_scroll")
         self._reapply_scroll_styles()
+        _TRC.timer_end("tab_scroll")
         # 「工作区」标题行样式（颜色/字号随主题与字体缩放）
+        _TRC.timer_start("tab_header")
         self._refresh_tree_header_style()
+        _TRC.timer_end("tab_header")
         # 先全部调用 update()（异步，Qt 自动合并绘制事件），
         # 再对 panel 统一触发一次重绘，避免逐个 repaint() 同步卡顿
+        _TRC.timer_start("tab_items")
         for item in self._items:
             item.refresh_style()
+        _TRC.timer_end("tab_items")
         # 同步刷新团队分组框样式（边框/背景色随主题）
+        _TRC.timer_start("tab_groups")
         for grp in self._team_groups.values():
             # 折叠态保持加深背景（bg_alpha=70），避免主题刷新把 alpha 重置回 40
             self._apply_team_group_style(grp, bg_alpha=70 if getattr(grp, "_team_compact", False) else 40)
+        _TRC.timer_end("tab_groups")
         self.update()
         # 工作区树（即使当前不可见也要刷新，否则切过去还是旧主题）
+        _TRC.timer_start("tab_tree")
         if self._tree_widget is not None:
             self._tree_widget.refresh_style()
+        _TRC.timer_end("tab_tree")
+        _TRC.timer_start("tab_plugin")
         self._refresh_plugin_style()
         if self._gitee_account_row is not None:
             self._gitee_account_row.refresh_style()
+        _TRC.timer_end("tab_plugin")
 
     def _apply_custom_card_style(self, compact: bool = False):
         """应用自定义插件卡片分组样式（二级菜单风：去边框 + 极淡底色块）。
@@ -4553,7 +4645,7 @@ class TabPanel(QWidget):
         """右键菜单统一样式（TabItem 菜单与团队框菜单共用）"""
         return f"""
             QMenu {{
-                background: {Colors.CARD_BG};
+                background: {Colors.CARD_BG.format(alpha=180)};
                 border: 1px solid {Colors.BORDER};
                 border-radius: 6px;
                 padding: 4px;
@@ -4684,4 +4776,3 @@ class TabPanel(QWidget):
                 self.tabCloseRequested.emit(clicked_index)
             elif branch_action is not None and action == branch_action:
                 self.tabBranchRequested.emit(clicked_index)
-

@@ -28,16 +28,14 @@ def _resolve_widget(host: Any) -> Any:
 
     host 是 MainWidget（ui surface）时直接用；否则（tool surface 的
     ToolExecutor / host=None）解析活跃主窗口。取不到返回 None。
+
+    ★ 活跃 = 用户此刻所在标签页；``_main_widget`` 是最后构造的窗口，多标签下会指错。
     """
     if getattr(host, "_valid_configs", None) is not None:
         return host
-    try:
-        from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+    from app.plugins.capabilities.resolve import active_main_widget
 
-        reg = UIPluginRegistry.get_instance()
-        return getattr(reg, "_main_widget", None) or next(iter(getattr(reg, "_window_main_widgets", {}).values()), None)
-    except Exception:
-        return None
+    return active_main_widget()
 
 
 def _models_for(widget: Any, config_id: str) -> List[str]:
@@ -165,14 +163,15 @@ def model_enumerate(host: Any):
 def _model_caps(model: str, provider_name: str) -> Dict[str, Any]:
     """单模型的展示用能力字段（视觉/思考/上下文/说明）。
 
-    走 resolve_model_capabilities 而非裸 get_model_capabilities：前者把
-    「声明_*」六键放在 L0，用户对自家网关的显式声明优先于 models.dev 推断值
-    ——第三方网关的额度与能力与官方 API 各自成立，不该被反向覆盖。
+    走 resolve_capabilities_for_model：它把用户「声明_*」六键（ModelOverrides）
+    灌进 resolve 链 L0，第三方网关的显式声明优先于 models.dev 推断值——网关额度
+    与官方 API 各自成立，不该被反向覆盖。裸 resolve_model_capabilities 不读
+    ModelOverrides，声明层恒空（注释与实现曾经不符）。
     """
     try:
-        from app.plugins.sdk import resolve_model_capabilities
+        from app.core.modelmeta.model_capabilities import resolve_capabilities_for_model
 
-        caps = resolve_model_capabilities({"模型名称": model, "provider_name": provider_name}) or {}
+        caps = resolve_capabilities_for_model(model, provider_name) or {}
     except Exception as e:  # noqa: BLE001 — 能力查询失败不该中断枚举
         logger.debug(f"[Capability] 取模型能力失败 {provider_name}/{model}: {e}")
         caps = {}
@@ -187,5 +186,5 @@ def _model_caps(model: str, provider_name: str) -> Dict[str, Any]:
 def _as_int_or_none(value: Any) -> Optional[int]:
     try:
         return int(value)
-    except TypeError, ValueError:
+    except (TypeError, ValueError):
         return None

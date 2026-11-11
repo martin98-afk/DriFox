@@ -53,7 +53,7 @@ from qfluentwidgets import (
 
 from app.widgets.stop_button import SendStopButton
 
-from app.utils.design_tokens import Animations, Colors, font_size_css, qcolor_from_token
+from app.utils.design_tokens import Animations, Colors, font_size_css, qcolor_from_token, readable_text_on
 from app.utils.utils import get_app_data_dir, get_font_family_css
 from app.widgets.simple_hover_tooltip import (
     get_hover_filter,
@@ -80,6 +80,12 @@ _FILE_MENTION_PATH_PROP = QTextFormat.UserProperty + 1
 _ASSISTANT_MENTION_TYPE = QTextFormat.UserObject + 2
 _ASSISTANT_MENTION_NAME_PROP = QTextFormat.UserProperty + 2
 _ASSISTANT_MENTION_COLOR_PROP = QTextFormat.UserProperty + 3
+
+# ── inline 命令胶囊（/ 命令名，淡黄圆角胶囊）──
+# 与文件/助手胶囊同款机制：文档里占一个 U+FFFC，toPlainText() 展开回 "/名字"，
+# 对发送链路的命令检测完全透明。
+_COMMAND_MENTION_TYPE = QTextFormat.UserObject + 3
+_COMMAND_MENTION_NAME_PROP = QTextFormat.UserProperty + 4
 
 # 输入框滚动条显示阈值：原生滚动条真实滚动余量（maximum - pageStep）
 # 需超过该值才显示 Fluent 竖条。取一个行高量级，用于滤掉 QSS 上下
@@ -157,7 +163,7 @@ PLACEHOLDER_TIPS = [
     "点击上下文指示器查看 Token 趋势与消息量",
     "子智能体 DAG 工作流编排复杂多步骤任务",
     "子智能体对话框实时查看任务日志与执行摘要",
-    "长对话自动启用上下文压缩省 Token",
+    "长对话按无损层截断工具结果与冗余文本，不改写前缀",
     "历史会话自动保存，关闭不丢失",
     "来源项目追踪：切换项目不串会话",
     "/debug 调试模式查看内部状态",
@@ -173,7 +179,7 @@ PLACEHOLDER_TIPS = [
     "UI 插件提供可热加载的组件，支持自定义按钮、面板、卡片等",
     "已安装插件：插件市场 / 文件树 / 系统清理 / Token 统计",
     # ════ Hook 预设 ════
-    "系统 Hook 链：会话注入→安全检查→自动压缩→智能增强",
+    "系统 Hook 链：会话注入→安全检查→上下文增强",
     "安全守卫在写/改文件前自动审查指令安全性",
     "长期记忆 Hook 让 AI 跨会话记住你的偏好",
     "项目笔记自动注入对话上下文，无需手动引用",
@@ -334,6 +340,12 @@ class SendableTextEdit(TextEdit):
         # 助手提及胶囊（@ 智能体角色）同款强引用要求
         self._assistant_mention_object = AssistantMentionObject()
         self.document().documentLayout().registerHandler(_ASSISTANT_MENTION_TYPE, self._assistant_mention_object)
+        # 命令胶囊（/ 命令名）同款强引用要求
+        self._command_mention_object = CommandMentionObject()
+        self.document().documentLayout().registerHandler(_COMMAND_MENTION_TYPE, self._command_mention_object)
+        # 命令 token 折叠防重入：折叠内部的 insertText 会同步触发
+        # textChanged → _on_slash_trigger_check 重入，无标志会递归
+        self._collapsing_command = False
 
         # detail 参数同步防抖（参考 / 命令触发节流：合并快速敲键 + IME 保护）
         # 值选择模式（枚举列表）每次 textChanged 都会触发 _sync_detail_params →
@@ -504,7 +516,9 @@ class SendableTextEdit(TextEdit):
         try:
             cursor = self.textCursor()
             text = self.toPlainText()
-            cursor_pos = cursor.position()
+            # 胶囊展开后 doc 与 plain 坐标不等长；query/空格判定全在 plain 域，
+            # 命令胶囊折叠后重入本函数时尤其依赖换算（否则 query 截短 → detail 被打回列表）
+            cursor_pos = self._plain_offset_from_doc(cursor.position())
 
             if cursor_pos < 0 or cursor_pos > len(text):
                 return
@@ -573,6 +587,8 @@ class SendableTextEdit(TextEdit):
 
                 if exact_match or raw_match:
                     # 已知命令/技能 + 参数 → 切换到 detail 模式
+                    # 手打的命令名折叠成淡黄胶囊（幂等；已折叠则 no-op）
+                    self._collapse_command_token()
                     self._slash_trigger_pos = 0
                     # check_name：精确匹配用原 cmd_name（防止真名含后缀被截断），
                     # 只有 raw_cmd 才匹配时用 raw_cmd（处理 display_name 后缀如"tdd-prompt"→"tdd"）
@@ -808,6 +824,9 @@ class SendableTextEdit(TextEdit):
                     elif fmt.objectType() == _ASSISTANT_MENTION_TYPE and is_single_object:
                         name = fmt.stringProperty(_ASSISTANT_MENTION_NAME_PROP) or ""
                         parts.append(f"@{name}")
+                    elif fmt.objectType() == _COMMAND_MENTION_TYPE and is_single_object:
+                        name = fmt.stringProperty(_COMMAND_MENTION_NAME_PROP) or ""
+                        parts.append(f"/{name}")
                     else:
                         parts.append(frag.text())
                 it += 1
@@ -830,6 +849,216 @@ class SendableTextEdit(TextEdit):
         fmt.setProperty(_FILE_MENTION_PATH_PROP, file_path)
         fmt.setToolTip(file_path)
         return fmt
+
+    @staticmethod
+    def _make_command_format(name: str) -> QTextCharFormat:
+        """构造 inline 命令胶囊的字符格式（objectType + 命令名属性 + tooltip）"""
+        fmt = QTextCharFormat()
+        fmt.setObjectType(_COMMAND_MENTION_TYPE)
+        fmt.setProperty(_COMMAND_MENTION_NAME_PROP, name)
+        fmt.setToolTip(f"命令：/{name}")
+        return fmt
+
+    @staticmethod
+    def _is_mention_frag(frag) -> bool:
+        """fragment 是否为严格意义上的 inline 胶囊（单 U+FFFC + 已知 object 类型）
+
+        格式污染的多字符 fragment（见 setPlainText 覆盖处注释）不算胶囊。
+        """
+        if frag.length() > 2 or frag.text() != _OBJECT_REPLACEMENT:
+            return False
+        return frag.charFormat().objectType() in (
+            _FILE_MENTION_TYPE,
+            _ASSISTANT_MENTION_TYPE,
+            _COMMAND_MENTION_TYPE,
+        )
+
+    def _frag_expanded_len(self, frag) -> int:
+        """fragment 在 toPlainText() 展开文本中的长度（胶囊展开后变长）"""
+        if not self._is_mention_frag(frag):
+            return frag.length()
+        fmt = frag.charFormat()
+        ot = fmt.objectType()
+        if ot == _FILE_MENTION_TYPE:
+            path = fmt.stringProperty(_FILE_MENTION_PATH_PROP) or ""
+            return len(f"[[{os.path.basename(path)}]]")
+        if ot == _ASSISTANT_MENTION_TYPE:
+            name = fmt.stringProperty(_ASSISTANT_MENTION_NAME_PROP) or ""
+            return len(f"@{name}")
+        name = fmt.stringProperty(_COMMAND_MENTION_NAME_PROP) or ""
+        return len(f"/{name}")
+
+    def _plain_offset_from_doc(self, doc_pos: int) -> int:
+        """文档位置 → toPlainText() 展开文本位置
+
+        胶囊在文档里占 1 字符、展开文本里占多字符，两套坐标不等长。
+        detail 模式参数定位（_find_partial_param → setPosition）在 plain 域
+        搜索、在 doc 域落光标，必须经本组函数换算，否则胶囊后所有参数
+        偏移错位。
+        """
+        plain = 0
+        block = self.document().begin()
+        while block.isValid():
+            block_end = block.position() + block.length()  # 含块分隔符
+            if doc_pos >= block_end:
+                it = block.begin()
+                while not it.atEnd():
+                    frag = it.fragment()
+                    if frag.isValid():
+                        plain += self._frag_expanded_len(frag)
+                    it += 1
+                plain += 1  # 块分隔符 → 展开文本里的 \n
+                block = block.next()
+                continue
+            it = block.begin()
+            while not it.atEnd():
+                frag = it.fragment()
+                if not frag.isValid():
+                    it += 1
+                    continue
+                frag_end = frag.position() + frag.length()
+                if frag_end <= doc_pos:
+                    plain += self._frag_expanded_len(frag)
+                    it += 1
+                    continue
+                if self._is_mention_frag(frag):
+                    return plain  # doc_pos 落在胶囊字符上（光标进不去，防御）
+                return plain + (doc_pos - frag.position())
+            return plain  # doc_pos 落在块分隔符上 → 展开文本里换行符之前
+        return plain
+
+    def _doc_offset_from_plain(self, plain_pos: int) -> int:
+        """toPlainText() 展开文本位置 → 文档位置（_plain_offset_from_doc 逆变换）
+
+        plain_pos 落在胶囊展开区间内时钳到胶囊后（光标进不去胶囊）；
+        落在块尾时对应块分隔符位置。
+        """
+        plain = 0
+        block = self.document().begin()
+        while block.isValid():
+            it = block.begin()
+            while not it.atEnd():
+                frag = it.fragment()
+                if not frag.isValid():
+                    it += 1
+                    continue
+                flen = self._frag_expanded_len(frag)
+                if plain + flen > plain_pos:
+                    if self._is_mention_frag(frag):
+                        return frag.position() + 1
+                    return frag.position() + (plain_pos - plain)
+                plain += flen
+                it += 1
+            block_end = block.position() + block.length()
+            if plain == plain_pos:
+                return block_end - 1  # 块尾 → 分隔符位置（光标在行尾）
+            plain += 1
+            if plain > plain_pos:
+                return block_end - 1
+            block = block.next()
+        return max(0, self.document().characterCount() - 1)
+
+    def _command_mention_at(self, doc_pos: int) -> Optional[str]:
+        """doc_pos 所在 fragment 是命令胶囊时返回命令名，否则 None"""
+        if doc_pos < 0:
+            return None
+        block = self.document().begin()
+        while block.isValid():
+            if block.position() > doc_pos:
+                break
+            it = block.begin()
+            while not it.atEnd():
+                frag = it.fragment()
+                if not frag.isValid():
+                    it += 1
+                    continue
+                if frag.position() <= doc_pos < frag.position() + frag.length():
+                    if self._is_mention_frag(frag):
+                        fmt = frag.charFormat()
+                        if fmt.objectType() == _COMMAND_MENTION_TYPE:
+                            return fmt.stringProperty(_COMMAND_MENTION_NAME_PROP) or ""
+                    return None
+                it += 1
+            block = block.next()
+        return None
+
+    def _is_known_command_token(self, name: str) -> bool:
+        """命令名是否已知（精确或剥 display_name 后缀后匹配），与
+        _on_slash_trigger_check 的 detail 判定同一口径"""
+        from app.core.commands.command_manager import CommandManager
+        from app.utils.utils import get_skill_by_name
+
+        cmd_mgr = CommandManager.get_instance()
+        if cmd_mgr.has_command(name) or bool(get_skill_by_name(name)):
+            return True
+        raw_cmd, _ = CommandManager.parse_suffixed_name(name)
+        return bool(raw_cmd) and (
+            cmd_mgr.has_command(raw_cmd) or bool(get_skill_by_name(raw_cmd))
+        )
+
+    def _collapse_command_token(self) -> bool:
+        """把文档开头的已知命令 token（"/cmd"）折叠为淡黄胶囊
+
+        触发时机：手敲空格确认已知命令（_on_slash_trigger_check detail 分支）。
+        卡片选中路径由 insert_command_text 直接插入胶囊，不走这里。
+        幂等：开头已是命令胶囊时返回 False。光标 plain 位置全程保持。
+        """
+        if self._collapsing_command:
+            return False
+        text = self.toPlainText()
+        m = re.match(r"^/(\S+)", text)
+        if not m:
+            return False
+        token, name = m.group(0), m.group(1)
+        # 首 fragment 已是胶囊：命令胶囊 → 已折叠；其他胶囊 → token 不在文档开头
+        first_frag = self.document().firstBlock().begin().fragment()
+        if first_frag.isValid() and self._is_mention_frag(first_frag):
+            return False
+        if not self._is_known_command_token(name):
+            return False
+        self._collapsing_command = True
+        try:
+            old_plain_pos = self._plain_offset_from_doc(self.textCursor().position())
+            ins = QTextCursor(self.document())
+            ins.setPosition(0)
+            ins.setPosition(len(token), QTextCursor.KeepAnchor)
+            ins.insertText(_OBJECT_REPLACEMENT, self._make_command_format(name))
+            # 光标恢复：折叠使 token 区间 len(token) 字符 → 1 字符；光标原本
+            # 在 token 内（异常时序）则钳到胶囊后
+            cursor = self.textCursor()
+            cursor.setPosition(self._doc_offset_from_plain(max(old_plain_pos, len(token))))
+            self.setTextCursor(cursor)
+            return True
+        finally:
+            self._collapsing_command = False
+
+    def _unfold_command_if_at_cursor(self, backspace: bool) -> bool:
+        """光标紧贴命令胶囊按 Backspace/Delete 时「解封」为纯文本
+
+        与 @ 胶囊「整体删除」不同：命令名是用户可能要改的文本，第一次按键
+        只解封（胶囊 → "/cmd" 纯文本，不删字），再按才逐字删除；解封后
+        textChanged → slash 检测自然回到命令列表模式。
+
+        backspace=True：光标在胶囊后，解封后光标落在文本尾；
+        backspace=False：光标在胶囊前（Delete），解封后光标原地。
+        """
+        cursor = self.textCursor()
+        if cursor.hasSelection():
+            return False  # 用户明确选了一段，交给默认删除行为
+        check_pos = cursor.position() - 1 if backspace else cursor.position()
+        name = self._command_mention_at(check_pos)
+        if not name:
+            return False
+        full = f"/{name}"
+        ins = QTextCursor(self.document())
+        ins.setPosition(check_pos)
+        ins.setPosition(check_pos + 1, QTextCursor.KeepAnchor)
+        # 干净 charFormat：防胶囊格式残留污染解封后的文本
+        ins.insertText(full, QTextCharFormat())
+        new_pos = check_pos + len(full) if backspace else check_pos
+        cursor.setPosition(new_pos)
+        self.setTextCursor(cursor)
+        return True
 
     def insert_file_mention(self, file_path: str):
         """@ 提及选中文件 → 把已键入的 @query 替换为一枚 inline 文件胶囊
@@ -890,7 +1119,11 @@ class SendableTextEdit(TextEdit):
         self.setFocus(Qt.OtherFocusReason)
 
     def insert_command_text(self, item_name: str):
-        """将选中的命令/技能文本插入输入框（由 main_widget 调用）"""
+        """将选中的命令/技能文本插入输入框（由 main_widget 调用）
+
+        命令名以淡黄胶囊插入（与手打空格确认后的折叠观感一致），
+        胶囊后跟一个普通空格供继续输入参数。
+        """
         cursor = self.textCursor()
         cursor_pos = cursor.position()
 
@@ -900,11 +1133,10 @@ class SendableTextEdit(TextEdit):
             cursor.setPosition(trigger_pos)
             cursor.setPosition(cursor_pos, QTextCursor.KeepAnchor)
 
-            # 统一使用 / 前缀（命令、技能、智能体都用 /）
-            insert_text = f"/{item_name} "
-            cursor.insertText(insert_text)
-
-            cursor.setPosition(trigger_pos + len(insert_text))
+            # 与 insert_file_mention 同款两步插入：胶囊与后续空格分开，
+            # 避免空格带上 objectType 被渲染成第二个胶囊
+            cursor.insertText(_OBJECT_REPLACEMENT, self._make_command_format(item_name))
+            cursor.insertText(" ")
             self.setTextCursor(cursor)
 
         self._slash_trigger_pos = -1
@@ -973,7 +1205,8 @@ class SendableTextEdit(TextEdit):
         而不是追加在末尾。
         """
         text = self.toPlainText()
-        cursor_pos = self.textCursor().position()
+        # plain 域光标：before_cursor 切片与 eq_matches 搜索全在 plain 域
+        cursor_pos = self._plain_offset_from_doc(self.textCursor().position())
         before_cursor = text[:cursor_pos]
 
         # 确定要插入的值（含空格时自动加双引号）
@@ -992,9 +1225,9 @@ class SendableTextEdit(TextEdit):
 
             if partial_input:
                 cursor = self.textCursor()
-                # 选中 partial_input 并替换为完整值
-                cursor.setPosition(eq_end)
-                cursor.setPosition(cursor_pos, QTextCursor.KeepAnchor)
+                # 选中 partial_input 并替换为完整值（plain span → doc 落点换算）
+                cursor.setPosition(self._doc_offset_from_plain(eq_end))
+                cursor.setPosition(self._doc_offset_from_plain(cursor_pos), QTextCursor.KeepAnchor)
                 cursor.insertText(inserted_value)
                 cursor.insertText(" ")
                 self.setTextCursor(cursor)
@@ -1085,11 +1318,13 @@ class SendableTextEdit(TextEdit):
         text = self.toPlainText()
 
         # 智能补全：部分匹配则原地替换（优先光标附近的匹配）
-        cursor_pos = cursor.position()
+        # ⚠️ _find_partial_param 在 plain 域搜索，setPosition 落在 doc 域；
+        # 胶囊展开后两套坐标不等长，必须经 _doc_offset_from_plain 换算
+        cursor_pos = self._plain_offset_from_doc(cursor.position())
         partial = self._find_partial_param(text, param_name, cursor_pos)
         if partial:
-            cursor.setPosition(partial[0])
-            cursor.setPosition(partial[1], QTextCursor.KeepAnchor)
+            cursor.setPosition(self._doc_offset_from_plain(partial[0]))
+            cursor.setPosition(self._doc_offset_from_plain(partial[1]), QTextCursor.KeepAnchor)
             if param_type == "flag":
                 cursor.insertText(f"{param_name} ")
             elif param_type == "value":
@@ -1101,10 +1336,11 @@ class SendableTextEdit(TextEdit):
             return
 
         # 无部分匹配 → 在光标处追加
-        pos = cursor.position()
+        # 光标 doc pos → plain pos：后文用 plain 域判断前导空格/前缀
+        pos = self._plain_offset_from_doc(cursor.position())
         if pos < 0:
             pos = len(text)
-        cursor.setPosition(pos)
+        cursor.setPosition(self._doc_offset_from_plain(pos))
         # 智能判断是否需要前导空格：光标前是空格 / -- / 文本开头 → 不加
         need_space = pos > 0 and text[pos - 1] not in (" ", "\t", "\n")
         if pos > 0 and text[pos - 1] == "-":
@@ -1115,8 +1351,8 @@ class SendableTextEdit(TextEdit):
                 prefix_start -= 1
             # 仅处理独立的参数前缀，避免修改普通文本末尾的连字符。
             if prefix_start == 0 or text[prefix_start - 1] in (" ", "\t", "\n"):
-                cursor.setPosition(prefix_start)
-                cursor.setPosition(pos, QTextCursor.KeepAnchor)
+                cursor.setPosition(self._doc_offset_from_plain(prefix_start))
+                cursor.setPosition(self._doc_offset_from_plain(pos), QTextCursor.KeepAnchor)
                 if param_type == "flag":
                     cursor.insertText(f"{param_name} ")
                 elif param_type == "value":
@@ -1179,8 +1415,8 @@ class SendableTextEdit(TextEdit):
         if new_text and not new_text.endswith(" "):
             new_text += " "
 
-        # 光标位置智能调整：前/中/后 三段
-        old_pos = self.textCursor().position()
+        # 光标位置智能调整：前/中/后 三段（plain 域：start/end 来自 plain 文本）
+        old_pos = self._plain_offset_from_doc(self.textCursor().position())
         if old_pos <= start:
             new_pos = old_pos
         elif old_pos >= end:
@@ -1196,6 +1432,9 @@ class SendableTextEdit(TextEdit):
         self._cancel_slash_throttle()
         cursor = self.textCursor()
         cursor.setPosition(max(0, new_pos))
+        # setPlainText 把命令胶囊打回纯文本，重折叠恢复观感
+        # （内部保持光标 plain 位置：token 区间折叠后光标前移）
+        self._collapse_command_token()
         self.setTextCursor(cursor)
         self.setFocus(Qt.OtherFocusReason)
         # 用正确的光标位置重新评估 / 状态
@@ -1216,7 +1455,9 @@ class SendableTextEdit(TextEdit):
         if not card or not card.is_detail_mode:
             return
         text = self.toPlainText()
-        cursor_pos = self.textCursor().position()
+        # 卡片内部全程在 plain 域用 cursor_pos 切片/比较 full_text，
+        # 胶囊存在时 doc 与 plain 坐标不等长，必须先换算
+        cursor_pos = self._plain_offset_from_doc(self.textCursor().position())
         active = CommandManager.parse_active_params(text) if text else set()
         card.update_active_params(active, full_text=text, cursor_pos=cursor_pos)
 
@@ -1424,7 +1665,8 @@ class SendableTextEdit(TextEdit):
         if new_text == current:
             return False
 
-        cursor_pos = self.textCursor().position()
+        # 光标恢复用 plain 域（new_text 是 plain 域；setPlainText 后 doc=plain）
+        cursor_pos = self._plain_offset_from_doc(self.textCursor().position())
         # 守卫：setPlainText 会同步触发 textChanged → _sync_placeholder_removals。
         # 不加守卫的话，这次程序化删除会被误判成「用户删了引用」，反过来再删一遍附件。
         self._syncing_attachments = True
@@ -1787,6 +2029,13 @@ class SendableTextEdit(TextEdit):
                 event.accept()
                 return
 
+        # 命令胶囊解封：Backspace/Delete 第一次只解封为纯文本（不删字），
+        # 再按才逐字删除；无胶囊紧贴光标时返回 False 走默认行为
+        if event.key() in (Qt.Key_Backspace, Qt.Key_Delete) and not event.modifiers():
+            if self._unfold_command_if_at_cursor(backspace=event.key() == Qt.Key_Backspace):
+                event.accept()
+                return
+
         # 历史浏览模式下，↑↓ 始终导航历史，不受命令卡片影响
         in_history_mode = self._history_index >= 0
 
@@ -1851,6 +2100,13 @@ class SendableTextEdit(TextEdit):
                 # 模拟 / 触发，然后选择当前项
                 self._slash_trigger_pos = 0
                 self.slashTriggered.emit(text[1:] if len(text) > 1 else "")
+                # 命令已折叠（确认过）→ 不再重新触发补全：否则 slashTriggered →
+                # select_current → insert_command_text 会把「胶囊+已打参数」整段
+                # 替换成新胶囊。detail 卡片自身的 Tab 选参数在上面分支已处理，
+                # 不受此拦截影响。
+                if self._command_mention_at(0) is not None:
+                    event.accept()
+                    return
                 # 延迟选中（等待卡片加载）
                 QTimer.singleShot(10, lambda: self._tab_complete_if_card_visible())
                 event.accept()
@@ -2156,6 +2412,8 @@ class SendableTextEdit(TextEdit):
     def _build_combo_style(self) -> str:
         """构建智能体下拉框样式"""
         Colors.refresh()
+        # 选中项 TEXT_ACCENT 实心底：真黑主题 accent 为纯白，需自适应前景
+        selected_fg = readable_text_on(Colors.TEXT_ACCENT, Colors.BUTTON_TEXT_ON_ACCENT)
         return f"""
             ComboBox {{
                 background-color: {Colors.TOOLBAR_BG};
@@ -2183,6 +2441,7 @@ class SendableTextEdit(TextEdit):
                 background-color: {Colors.CONTENT_BG};
                 color: {Colors.INPUT_TEXT};
                 selection-background-color: {Colors.TEXT_ACCENT};
+                selection-color: {selected_fg};
                 border: 1px solid {Colors.INPUT_BORDER};
                 border-radius: 10px;
                 padding: 4px;
@@ -2320,17 +2579,47 @@ class SendableTextEdit(TextEdit):
         self._reset_history_mode()
         super().clear()
 
+    @staticmethod
+    def _context_menu_stylesheet() -> str:
+        """右键菜单样式：与 TabPanel / 卡片菜单同款视觉，运行时插值跟随主题色"""
+        return f"""
+            QMenu {{
+                background-color: {Colors.CARD_BG_SOLID};
+                border: 1px solid {Colors.BORDER};
+                border-radius: 6px;
+                padding: 4px;
+            }}
+            QMenu::item {{
+                padding: 6px 20px;
+                border-radius: 4px;
+                color: {Colors.TEXT_PRIMARY};
+                {get_font_family_css()} {font_size_css(13)}
+            }}
+            QMenu::item:selected {{
+                background: {Colors.HOVER_BG};
+            }}
+            QMenu::item:disabled {{
+                color: {Colors.TEXT_MUTED};
+            }}
+        """
+
     def contextMenuEvent(self, event):
-        """Phase E：接管输入框右键菜单——保留基础 cut/copy/paste + 追加插件项"""
+        """Phase E：接管输入框右键菜单——cut/copy/paste（按可用性置灰）+ 追加插件项"""
         from PySide6.QtWidgets import QMenu
 
         menu = QMenu(self)
+        menu.setStyleSheet(self._context_menu_stylesheet())
+        # 禁用态走 Qt 自身判据：空选区时 cut/copy 无意义，剪贴板无可用内容时 paste 无意义
+        has_selection = self.textCursor().hasSelection()
         cut_act = menu.addAction("剪切")
         cut_act.triggered.connect(lambda: self.cut())
+        cut_act.setEnabled(has_selection)
         copy_act = menu.addAction("复制")
         copy_act.triggered.connect(lambda: self.copy())
+        copy_act.setEnabled(has_selection)
         paste_act = menu.addAction("粘贴")
         paste_act.triggered.connect(lambda: self.paste())
+        paste_act.setEnabled(self.canPaste())
         # 插件菜单项注入（main_widget 提供方法）
         win = self.window()
         builder = getattr(win, "_build_plugin_input_menu", None)
@@ -2942,6 +3231,67 @@ class AssistantMentionObject(QObject, QTextObjectInterface):
     @staticmethod
     def _name_and_metrics(doc, format) -> tuple[str, QFontMetrics]:
         name = (format.stringProperty(_ASSISTANT_MENTION_NAME_PROP) or "") if format else ""
+        font = doc.defaultFont() if doc else QFont()
+        return name or "?", QFontMetrics(font)
+
+
+class CommandMentionObject(QObject, QTextObjectInterface):
+    """输入框正文中的 inline 命令胶囊（/ 命令名，淡黄圆角）
+
+    与 FileMentionObject / AssistantMentionObject 同款机制：文档里占一个
+    字符（U+FFFC），Backspace 整体不可拆；toPlainText() 展开为 ``/名字``，
+    发送链路的命令检测与参数解析保持兼容。
+
+    交互约定（与 @ 胶囊不同）：Backspace 第一次只「解封」为纯文本再逐字编辑，
+    见 :meth:`SendableTextEdit._unfold_command_if_at_cursor`。
+
+    外观：淡黄描边 + 低透明黄底（Colors.WARNING，固定 token 不随主题变化），
+    与文件胶囊（灰底）、助手胶囊（主色底）形成视觉区分。
+    """
+
+    _PAD_LEFT = 6
+    _PAD_RIGHT = 6
+    _HEIGHT = 20
+    _RADIUS = 6
+
+    def intrinsicSize(self, doc, posInDocument, format) -> QSizeF:  # noqa: A002
+        name, fm = self._name_and_metrics(doc, format)
+        width = self._PAD_LEFT + fm.horizontalAdvance(name) + self._PAD_RIGHT
+        return QSizeF(width, self._HEIGHT)
+
+    def drawObject(self, painter, rect, doc, posInDocument, format):  # noqa: A002
+        """绘制胶囊（淡黄描边 + 低透明黄底 + 命令名，不限宽不省略）"""
+        Colors.refresh()
+        name = self._name_and_metrics(doc, format)[0]
+
+        painter.save()
+        try:
+            painter.setRenderHint(QPainter.Antialiasing, True)
+            painter.setRenderHint(QPainter.TextAntialiasing, True)
+
+            h = min(self._HEIGHT, rect.height())
+            top = rect.top() + (rect.height() - h) / 2
+            pill = QRectF(rect.left(), top, rect.width(), h)
+
+            border = qcolor_from_token(Colors.WARNING)
+            bg = QColor(border)
+            bg.setAlpha(26)
+            painter.setPen(QPen(border, 1))
+            painter.setBrush(QBrush(bg))
+            painter.drawRoundedRect(pill, self._RADIUS, self._RADIUS)
+
+            x = pill.left() + self._PAD_LEFT
+            painter.setFont(doc.defaultFont() if doc else QFont())
+
+            text_rect = QRectF(x, pill.top(), max(0.0, pill.right() - self._PAD_RIGHT - x), h)
+            painter.setPen(QPen(QColor(Colors.INPUT_TEXT)))
+            painter.drawText(text_rect, Qt.AlignVCenter | Qt.AlignLeft, name)
+        finally:
+            painter.restore()
+
+    @staticmethod
+    def _name_and_metrics(doc, format) -> tuple[str, QFontMetrics]:
+        name = (format.stringProperty(_COMMAND_MENTION_NAME_PROP) or "") if format else ""
         font = doc.defaultFont() if doc else QFont()
         return name or "?", QFontMetrics(font)
 

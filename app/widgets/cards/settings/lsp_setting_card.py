@@ -83,11 +83,26 @@ class LspServerRow(CardWidget):
                 self._install_btn.setVisible(bool(self._install_hint))
 
     def refresh_style(self):
-        """主题变更时刷新扩展名后缀文字颜色"""
+        """主题变更时刷新扩展名后缀文字 + 安装/放行按钮配色
+
+        两个按钮原实现 QSS 只有字体，覆盖了 fluent 控件自带主题样式，
+        颜色落到调色板（恒黑），深色主题下不可读（与 mcp 卡 credential
+        行同款问题同款修法）。
+        """
         Colors.refresh()
         self._ext_label.setStyleSheet(
             f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} font-size: {scale_font_size(11)}px;"
         )
+        btn_qss = (
+            f"PushButton {{ background-color: {Colors.CONTENT_BG}; color: {Colors.TEXT_PRIMARY};"
+            f" border: 1px solid {Colors.BORDER}; border-radius: 4px; padding: 2px 8px;"
+            f" {get_font_family_css()} font-size: {scale_font_size(11)}px; }}"
+            f"PushButton:hover {{ border-color: {Colors.TEXT_ACCENT}; color: {Colors.TEXT_ACCENT}; }}"
+            f"PushButton:pressed {{ background-color: {Colors.HOVER_BG}; }}"
+            f"PushButton:disabled {{ color: {Colors.TEXT_MUTED}; border-color: {Colors.TEXT_MUTED}; }}"
+        )
+        self._install_btn.setStyleSheet(btn_qss)
+        self._confirm_btn.setStyleSheet(btn_qss)
 
     def _setup_ui(self):
         layout = QHBoxLayout(self)
@@ -137,6 +152,8 @@ class LspServerRow(CardWidget):
         self._confirm_btn.clicked.connect(lambda: self.confirmRequested.emit(self._gate_key, True))
         self._confirm_btn.setVisible(False)
         layout.addWidget(self._confirm_btn)
+        # 构造时即按当前主题上色：按钮 QSS 只有字体，不主动刷一次首显就是黑字
+        self.refresh_style()
 
 
 # ── LSP 列表卡片 ────────────────────────────────────────────────

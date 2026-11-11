@@ -186,6 +186,8 @@ def build_plugin_entry(plugin_dir: Path, manifest: dict) -> dict:
         },
         "components": manifest.get("components", {}),
     }
+    if manifest.get("display_name"):
+        entry["display_name"] = manifest["display_name"]
 
     # 选填字段
     if manifest.get("keywords"):
@@ -255,7 +257,7 @@ def check_consistency(generated: dict, existing: dict) -> list[str]:
         gen_p = gen_plugins[name]
         ex_p = ex_plugins[name]
 
-        for field in ("name", "description", "version", "author", "license", "components"):
+        for field in ("name", "description", "version", "author", "license", "components", "display_name"):
             if gen_p.get(field) != ex_p.get(field):
                 diffs.append(
                     f"插件 {name} 字段 {field} 不一致: "

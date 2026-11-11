@@ -1,5 +1,12 @@
 {
+    "icon": {
+        "light": "icon.svg",
+        "dark": "icon_dark.svg"
+    },
     "name": "welcome_changelog",
+    "display_name": {
+        "zh": "更新日志"
+    },
     "description": "欢迎卡片「更新」tab — 拉取 DriFox GitHub Releases 作为更新日志展示。禁用插件后该 tab 消失。",
     "version": "1.0.2",
     "author": {
@@ -8,6 +15,8 @@
     "homepage": "https://github.com/martin98-afk/DriFox",
     "license": "GPL-3.0-or-later",
     "type": "system",
+    "api_version": 2,
+    "capabilities": ["ui.events"],
     "components": {
         "ui": true
     }

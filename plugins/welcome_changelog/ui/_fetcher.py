@@ -38,27 +38,14 @@ _bridge_lock = threading.Lock()
 
 
 def _caps(cap_id):
-    """取某能力（经能力池；无 ctx 时按插件名自建，与 agent_trace 同构）。"""
-    try:
-        from app.plugins.capabilities.bootstrap import ensure_registered
-        from app.plugins.capabilities.registry import CapabilityRegistry
+    """取某能力（无 ctx 场景统一走 sdk 的 caps_for，host 由宿主解析）。
 
-        ensure_registered("ui")
-        plugin = ""
-        try:
-            from pathlib import Path
+    原实现自建 ``host=None`` 池并自报 ``declared={cap_id, ...}``：等于插件给
+    自己发权限，manifest 声明永不生效。
+    """
+    from app.plugins.sdk import caps_for
 
-            parts = Path(__file__).resolve().parts
-            if "plugins" in parts:
-                plugin = parts[parts.index("plugins") + 1]
-        except Exception:
-            pass
-        pool = CapabilityRegistry.get_instance().build_pool(
-            surface="ui", host=None, plugin=plugin, declared={cap_id, "state.kv", "plugin.log"}
-        )
-        return pool[cap_id] if cap_id in pool else None
-    except Exception:
-        return None
+    return caps_for(cap_id)
 
 
 def _get_bridge() -> "_Bridge":

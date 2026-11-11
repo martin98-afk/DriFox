@@ -6,10 +6,10 @@
     ┌────────────────────────────────────┐
     │        ArcCardStack 弧形卡片堆叠     │
     │   名称 + ★主助手 + 操作行（重命名等）  │
-    │   基本信息（对话模型 / 记忆整理模型）    │
+    │   基本信息（昵称 / 称呼 / 用户头像）      │
     │   关于 Ta（人格 chips 切换）          │
     │   记忆（全局 + 项目 + 日志）           │
-    │   经验（工具型 + 反思）               │
+    │   经验（工具型，模型自主维护）          │
     │   专属技能                          │
     └────────────────────────────────────┘
 
@@ -18,10 +18,8 @@
 
 from __future__ import annotations
 
-import json
 import threading
 import uuid
-from pathlib import Path
 from typing import List
 
 from PySide6.QtCore import Qt, QTimer, Signal
@@ -143,7 +141,7 @@ class AssistantCardWidget(QWidget):
 
     # 后台线程 → 主线程调度的唯一通道。
     # ⚠️ 不能用 QTimer.singleShot(0, fn)：Qt 的 singleShot 会在**调用方线程**
-    # 创建 QSingleShotTimer，而经验反思跑在纯 Python daemon 线程里
+    # 创建 QSingleShotTimer，而 gitee 头像拉取跑在纯 Python daemon 线程里
     # （没有 Qt 事件循环）→ 计时器永不触发 → 回调永不执行。
     # 信号 + QueuedConnection 会把调用投递到本 widget 所在线程（主线程）的事件循环。
     _main_thread_call = Signal(object)
@@ -191,19 +189,6 @@ class AssistantCardWidget(QWidget):
         except Exception as e:
             logger.debug(f"[assistant_hub] 实时拉能力池失败: {e}")
         return None
-
-    def set_context(self, ctx: dict) -> None:
-        """主程序注入的卡片上下文（UIPluginRegistry 创建卡片时调用）。
-
-        把 ctx["services"]（含 create_engine_session）提前缓存进 core/llm_client：
-        经验反思等后台任务拿不到卡片 context，只能靠注册表兜底解析（多窗口时可能取到非本窗口的 services）。
-        """
-        try:
-            services = (ctx or {}).get("services")
-            if isinstance(services, dict):
-                self._mgr._core_llm().set_services(services)
-        except Exception as e:
-            logger.debug(f"[assistant_hub] 注入 services 失败（走注册表兜底）: {e}")
 
     # ══════════════════════════════════════════════════
     #  UI 构建
@@ -297,6 +282,7 @@ class AssistantCardWidget(QWidget):
         self._project = ProjectSection()
         self._project.toggleNotes.connect(self._on_project_notes_toggle)
         self._project.toggleContext.connect(self._on_project_context_toggle)
+        self._project.toggleSkills.connect(self._on_project_skills_toggle)
         self._inner_v.addWidget(self._project)
 
         self._pinned = PinnedSection()
@@ -314,6 +300,9 @@ class AssistantCardWidget(QWidget):
         self._memory.limitsChanged.connect(self._on_memory_limits)
         self._memory.sectionsChanged.connect(self._on_memory_sections_changed)
         self._memory.seedSectionsRequested.connect(self._on_memory_seed_sections)
+        self._memory.toneRatioChanged.connect(self._on_memory_tone_changed)
+        self._memory.organizeRequested.connect(self._on_memory_organize)
+        self._memory.viewSection.connect(self._on_view_section)
         self._memory.restoreRequested.connect(self._on_restore_memory)
         self._memory.migrateRequested.connect(self._on_migrate_memory)
         self._memory.dismissDriftRequested.connect(self._on_dismiss_drift)
@@ -324,6 +313,7 @@ class AssistantCardWidget(QWidget):
         self._experience.viewCategory.connect(self._on_view_experience)
         self._experience.deleteCategoryRequested.connect(self._on_experience_delete)
         self._experience.consolidateRequested.connect(self._on_experience_consolidate)
+        self._experience.refreshRequested.connect(self._on_experience_refresh)
         self._inner_v.addWidget(self._experience)
 
         self._inner_v.addStretch(1)
@@ -401,8 +391,22 @@ class AssistantCardWidget(QWidget):
         if self._active_aid:
             self._refresh_memory(self._active_aid)
 
+    def _persona_save_dir(self) -> str:
+        """用户自建人格落盘目录（<app_data>/assistant_hub/personas），拿不到返回空串。"""
+        try:
+            return str(self._mgr.persona_registry().user_dir)
+        except Exception as e:
+            logger.warning(f"[assistant_hub] 定位人格目录失败: {e}")
+            return ""
+
     def _on_create_persona(self) -> None:
-        """新建人格：关闭助手中心 → 跳回对话 → 输入框填入 /persona-creator。"""
+        """新建人格：关闭助手中心 → 跳回对话 → 输入框填入 /persona-creator。
+
+        落盘目录作为技能参数一并传入：技能是 LLM 执行的，让它自己算 app_data
+        路径在打包版（bash 里的 python 可能 import 不到 app）会算错，
+        而这里拿到的 user_dir 恒为绝对路径。
+        """
+        target = self._persona_save_dir()
         try:
             from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
 
@@ -413,7 +417,8 @@ class AssistantCardWidget(QWidget):
             writer = _caps("input.write")
             if writer is None:
                 raise RuntimeError("无 input.write 能力")
-            writer("/persona-creator")
+            prompt = f"/persona-creator 落盘目录：{target}" if target else "/persona-creator"
+            writer(prompt)
         except Exception as e:
             self._notify_error(f"无法跳转对话：{e}")
 
@@ -468,7 +473,7 @@ class AssistantCardWidget(QWidget):
 
         def _do_bind() -> None:
             mgr = self._mgr
-            self._profile.bind(a.name or a.id, a.user_addressing or mgr.user_name(), a.utility_model or "")
+            self._profile.bind(a.name or a.id, a.user_addressing or mgr.user_name())
             shown = mgr.display_user_avatar_path(aid_capture)
             self._profile.set_user_avatar(shown, a.user_addressing or mgr.user_name())
             # 自设与 gitee 缓存均未命中：后台拉取，完成后回主线程刷新回落显示
@@ -477,9 +482,12 @@ class AssistantCardWidget(QWidget):
             self._about.set_persona(a.yuan)
             self._project.set_notes(a.project_notes_enabled)
             self._project.set_context_enabled(a.project_context_enabled)
+            self._project.set_skills(a.project_skills_enabled)
             self._memory.set_memory_enabled(a.memory_enabled)
             self._memory.set_limits(a.global_memory_max_chars, a.project_memory_max_chars)
-            self._memory.set_sections(mgr.memory_sections(aid_capture))
+            self._apply_memory_sections(aid_capture)
+            self._memory.set_tone_ratio(mgr.memory_tone_ratio(aid_capture))
+            self._memory.set_section_quotas(mgr.memory_section_quotas(aid_capture))
             self._pinned.reload_pins(mgr.read_pinned(aid_capture))
             self._refresh_memory(aid_capture)
             self._experience.set_enabled(a.experience_enabled)
@@ -599,7 +607,7 @@ class AssistantCardWidget(QWidget):
     #  基本信息 / 关于 Ta
     # ══════════════════════════════════════════════════
 
-    def _on_profile_save(self, name: str, addressing: str, utility_model: str) -> None:
+    def _on_profile_save(self, name: str, addressing: str) -> None:
         """基本信息实时保存（对话模型跟随系统当前配置，不再持久化覆盖）。"""
         a = self._mgr.get(self._active_aid)
         if not a:
@@ -610,9 +618,6 @@ class AssistantCardWidget(QWidget):
             changed = True
         if a.model:  # 历史遗留的对话模型覆盖一并清除，避免旧值暗中生效
             a.model = ""
-            changed = True
-        if a.utility_model != utility_model:
-            a.utility_model = utility_model
             changed = True
         if a.user_addressing != addressing:
             a.user_addressing = addressing
@@ -725,6 +730,14 @@ class AssistantCardWidget(QWidget):
         self._mgr.update(a)
         self._mgr._invalidate_session_prompt_caches()
 
+    def _on_project_skills_toggle(self, on: bool) -> None:
+        a = self._mgr.get(self._active_aid)
+        if not a:
+            return
+        a.project_skills_enabled = bool(on)
+        self._mgr.update(a)
+        self._mgr._invalidate_session_prompt_caches()
+
     def _on_memory_toggle(self, on: bool) -> None:
         a = self._mgr.get(self._active_aid)
         if not a:
@@ -734,13 +747,28 @@ class AssistantCardWidget(QWidget):
         self._mgr._invalidate_session_prompt_caches()
         self._memory.setEnabled_all(bool(on))
 
+    def _apply_memory_sections(self, aid: str) -> None:
+        """按磁盘现状重建分区卡片（带「已用 / 配额」角标）。
+
+        直接调 set_sections 会丢字数：卡片角标需要 usage/quotas 两份数据，
+        统一从这里取盘上值，避免各处自己拼参数。
+        """
+        try:
+            self._memory.set_sections(
+                self._mgr.memory_sections(aid),
+                self._mgr.memory_section_chars(aid),
+                self._mgr.memory_section_quotas(aid),
+            )
+        except Exception as e:
+            logger.warning(f"[assistant_hub] 刷新分区卡片失败: {e}")
+
     def _on_memory_seed_sections(self) -> None:
         """恢复默认分区（用户把分区全删光后的重来入口）。"""
         if not self._active_aid:
             return
         default = self._mgr.default_memory_sections()
-        self._memory.set_sections(default)
         self._on_memory_sections_changed(default)
+        self._apply_memory_sections(self._active_aid)
 
     def _on_memory_sections_changed(self, sections: list) -> None:
         """分区定义变更：落盘（改名时同步改写 MEMORY.md 旧标题）+ 刷新状态。"""
@@ -750,13 +778,16 @@ class AssistantCardWidget(QWidget):
         r = self._mgr.set_memory_sections(aid, sections)
         if not r.get("ok"):
             self._notify_error(f"分区保存失败：{r.get('error')}")
-            self._memory.set_sections(self._mgr.memory_sections(aid))
+            self._apply_memory_sections(aid)
             return
         renamed = r.get("renamed") or []
         if renamed:
             self._notify(f"分区已更新，全局记忆标题同步改名：{'、'.join(renamed)}")
         else:
             self._notify(f"分区已更新（{r.get('count', 0)} 个）")
+        # 增删分区会改变同侧平分，卡片角标与标题行摘要都要跟着刷
+        self._apply_memory_sections(aid)
+        self._memory.set_section_quotas(self._mgr.memory_section_quotas(aid))
 
     def _on_memory_limits(self, global_chars: int, project_chars: int) -> None:
         """记忆字符上限变更：存助手配置（工具拦截/注入截断即时生效）。"""
@@ -768,7 +799,65 @@ class AssistantCardWidget(QWidget):
         a.project_memory_max_chars = int(project_chars)
         if changed:
             self._mgr.update(a)
+            # 上限数字写在记忆说明书里（system prompt 的一部分），改了必须重建
+            self._mgr._invalidate_session_prompt_caches()
             self._refresh_memory(self._active_aid)
+
+    def _on_memory_tone_changed(self, ratio: int) -> None:
+        """理性/感性天平：只落盘 + 刷新 UI 摘要。
+
+        故意不失效 system prompt 缓存：配额与分区规则已被移出 system prompt
+        （改由 memory_read(scope=sections) 按需给），这里重建只会白白废掉
+        服务端前缀缓存，模型又看不到任何变化。
+        """
+        if not self._active_aid:
+            return
+        r = self._mgr.set_memory_tone_ratio(self._active_aid, ratio)
+        if not r.get("ok"):
+            self._notify_error(f"配比保存失败：{r.get('error')}")
+            return
+        self._memory.set_section_quotas(self._mgr.memory_section_quotas(self._active_aid))
+
+    # 整理记忆：交给对话里的模型按当前分区与配额重排。
+    # 走对话而非后台 LLM 调用，用户可看到过程、可中断、可追加要求。
+    #
+    # 来源纪律（用户 2026-11-06 明确要求）：system prompt 不是用户说的话。
+    # 记忆只能从「工作日志」和「用户在对话里亲口说的/做过的事」提炼；
+    # 从人格设定、AGENTS.md、技能文档反推属于自我循环，会让记忆越长越像正确的废话。
+    _ORGANIZE_PROMPT = (
+        "请整理我的全局记忆。素材来源只有两个：**工作日志**，和**我在对话里亲口说过/做过的事**。\n"
+        "system prompt、人格设定、AGENTS.md、技能说明都不是我说的话，禁止拿它们当记忆来源。\n"
+        "\n"
+        "1. 取材：memory_read(scope=daily) 读近期日志（长日志可按 search / summary_only 过滤）；"
+        "memory_read(scope=sections) 拿分区定义、每区配额与现有条目序号\n"
+        "2. 核对：现有每条能不能对应到某天日志（已蒸馏的也能读）或某段对话？"
+        "对不上的先看项目 MEMORY.md——沉淀过也算有依据；"
+        "仍无依据、只是听起来合理或从系统提示抄来的，删掉。过时或被实践推翻的也删\n"
+        "3. 归属：改变做事方式的进理性区，改变你对我、或对你自己位置的看法的进感性区；"
+        "按「改变什么」分类，不按话题\n"
+        "4. 合并：同一意思合成一条；感性区禁形容词标签（「用户喜欢简洁」），必须写成「具体行为 + 你的解读」\n"
+        "5. 压缩：按配额删，宁可留白也不凑数；超配额用 mode=delete 删具体条目，别整篇重写\n"
+        "6. 写回：memory_write(scope=global, mode=replace, base=...) 先 dry_run=true 验格式，过了再真写\n"
+        "7. 汇报：删了哪些（及为什么）、合并了哪些、各区现在几条"
+    )
+
+    def _on_memory_organize(self) -> None:
+        """整理记忆：关闭助手中心 → 把整理提示词写进对话输入框。"""
+        if not self._active_aid:
+            return
+        try:
+            from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+
+            UIPluginRegistry.get_instance().hide_floating_card_globally(CARD_ID)
+        except Exception as e:
+            logger.warning(f"[assistant_hub] 关闭助手中心失败: {e}")
+        try:
+            writer = _caps("input.write")
+            if writer is None:
+                raise RuntimeError("无 input.write 能力")
+            writer(self._ORGANIZE_PROMPT)
+        except Exception as e:
+            self._notify_error(f"无法填入提示词：{e}")
 
     def _reload_pinned(self, aid: str) -> None:
         """写盘后回刷置顶列表：UI 永远以盘上数据为准（增删改即时可见）。"""
@@ -814,6 +903,18 @@ class AssistantCardWidget(QWidget):
         paths = self._mgr.memory_paths(self._active_aid)
         title = f"全局记忆 · {paths.get('global', '')}"
         _open_dialog(TextViewOverlay(title, text.strip() or "（暂无全局记忆）", parent=_host_window() or self.window()))
+
+    def _on_view_section(self, name: str) -> None:
+        """查看单个分区的记忆内容（点分区卡片触发，不带整篇全文）。"""
+        if not self._active_aid or not name:
+            return
+        text = self._mgr.read_global_section(self._active_aid, name)
+        if not text.strip():
+            self._notify_error(f"全局记忆里没有「{name}」分区（可能还没写过内容）")
+            return
+        _open_dialog(
+            TextViewOverlay(f"全局记忆 · {name}", text, parent=_host_window() or self.window())
+        )
 
     def _on_view_project(self) -> None:
         """查看项目记忆（当前工作目录 .drifox6/memory/<aid>/MEMORY.md）。"""
@@ -940,6 +1041,23 @@ class AssistantCardWidget(QWidget):
         "4. 每条仍是一句碎片：对象+动作+关键细节，具体可执行，禁空泛表述\n"
         "5. 整理完告诉我合并/删除/新建了哪些，以及现在每个分类各多少条"
     )
+
+    def _on_experience_refresh(self) -> None:
+        """手动刷新：重扫 experience/ 目录重建索引 + 重载分类卡片。
+
+        外部改动（对话整理/手改文件）不会自动生效：UI 分类只在打开卡片时
+        加载一次，experience.md 索引只在缺失时重建（read_index 直接读旧文件），
+        此按钮一次补齐两处，工具侧 recall 无参立即可见新索引。
+        """
+        if not self._active_aid:
+            return
+        aid = self._active_aid
+        try:
+            self._mgr._core_experience().rebuild_index(self._mgr.assistant_dir(aid))
+        except Exception as e:
+            logger.warning(f"[assistant_hub] 重建经验索引失败: {e}")
+        self._experience.reload_categories(self._mgr.experience_list(aid))
+        self._notify("经验分类已刷新")
 
     def _on_experience_consolidate(self) -> None:
         """压缩整理：关闭助手中心 → 把整理提示词写进对话输入框。"""

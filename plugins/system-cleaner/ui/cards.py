@@ -8,9 +8,21 @@
 """
 
 from datetime import datetime
+import threading
 from typing import Callable, Dict, Optional, Tuple
 
-from PySide6.QtCore import QEvent, QSize, Qt, QThread, QTimer, Signal
+from PySide6.QtCore import (
+    QEvent,
+    QEasingCurve,
+    QRectF,
+    QSize,
+    Qt,
+    QThread,
+    QTimer,
+    QVariantAnimation,
+    Signal,
+)
+from PySide6.QtGui import QBrush, QColor, QConicalGradient, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -30,7 +42,7 @@ from qfluentwidgets import (
 )
 from loguru import logger
 
-from .cleaner import _CacheItemRow, _styled_cleaner_confirm, _styled_cleaner_info
+from .cleaner import _CacheItemRow, _on_accent_text, _styled_cleaner_confirm, _styled_cleaner_info
 from .icons import svg_pixmap
 from .scanner import (
     CACHE_DEFS,
@@ -39,7 +51,8 @@ from .scanner import (
     _drifox_dir,
     _format_size,
     _get_process_memory,
-    _release_memory_deep,
+    _kill_qwebengine_processes,
+    _release_memory_deep_core,
     _release_memory_light,
 )
 
@@ -89,6 +102,148 @@ def _adjust_color(hex_color: str, amount: int) -> str:
 
 
 # ══════════════════════════════════════════════════════════
+# 进程内存水位环 / 旋转指示器
+# ══════════════════════════════════════════════════════════
+
+
+class _GaugeRing(QWidget):
+    """进程内存水位环：弧长 = 进程内存 / _MEM_GAUGE_CAP，达警戒线转 danger 色（无常驻动画）"""
+
+    def __init__(self, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self._progress = 0.0
+        self._ratio = 0.0
+        self._color = QColor("#62a0ea")
+        self._danger_color: Optional[QColor] = None
+        self._icon_pm: Optional[QPixmap] = None
+        self._anim: Optional[QVariantAnimation] = None
+        self.setFixedSize(76, 76)
+
+    def set_color(self, color: str, danger: Optional[str] = None):
+        """主题切换时更新弧色与中央图标"""
+        c = QColor(color)
+        if c.isValid():
+            self._color = c
+        if danger:
+            d = QColor(danger)
+            if d.isValid():
+                self._danger_color = d
+        self._render_icon()
+        self.update()
+
+    def set_ratio(self, ratio: float):
+        """设置水位（0~1，自动封顶），弧长缓动到目标值"""
+        target = max(0.0, min(1.0, float(ratio)))
+        self._ratio = target
+        if self._anim is not None:
+            # 旧动画 finished 后已 deleteLater（C++ 对象销毁但引用残留），
+            # 直接 stop() 会抛 RuntimeError，静默忽略即可。
+            try:
+                self._anim.stop()
+                self._anim.deleteLater()
+            except RuntimeError:
+                pass
+        self._anim = None
+        if abs(self._progress - target) < 0.001:
+            self.update()
+            return
+        anim = QVariantAnimation(self)
+        anim.setStartValue(self._progress)
+        anim.setEndValue(target)
+        anim.setDuration(600)
+        anim.setEasingCurve(QEasingCurve.OutCubic)
+        anim.valueChanged.connect(self._on_anim_frame)
+        anim.finished.connect(anim.deleteLater)
+        self._anim = anim
+        anim.start()
+
+    def _paint_color(self) -> QColor:
+        if self._danger_color is not None and self._ratio >= _MEM_GAUGE_DANGER:
+            return self._danger_color
+        return self._color
+
+    def _on_anim_frame(self, v):
+        self._progress = float(v)
+        self.update()
+
+    def _render_icon(self):
+        self._icon_pm = svg_pixmap("activity", self._color.name(), size=20, dpr=self.devicePixelRatioF())
+        self.update()
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        rect = QRectF(self.rect()).adjusted(7, 7, -7, -7)
+        pen_w = 5.0
+        # 背景环：270° 固定弧，起点在左（9 点钟），缺口朝左下
+        p.setPen(QPen(QColor(128, 128, 128, 46), pen_w, Qt.SolidLine, Qt.RoundCap))
+        p.drawArc(rect, 180 * 16, -270 * 16)
+        if self._progress > 0.001:
+            # 前景弧：水位色锥形渐变，左侧起点顺时针扫掠
+            base = self._paint_color()
+            grad = QConicalGradient(rect.center(), 180)
+            grad.setColorAt(0.0, base.lighter(125))
+            grad.setColorAt(1.0, base.darker(125))
+            p.setPen(QPen(QBrush(grad), pen_w, Qt.SolidLine, Qt.RoundCap))
+            p.drawArc(rect, 180 * 16, -int(270 * 16 * self._progress))
+        # 中央 activity 图标
+        if self._icon_pm is not None and not self._icon_pm.isNull():
+            dpr = self._icon_pm.devicePixelRatio() or 1.0
+            x = int((self.width() - self._icon_pm.width() / dpr) / 2)
+            y = int((self.height() - self._icon_pm.height() / dpr) / 2)
+            p.drawPixmap(x, y, self._icon_pm)
+
+
+class _Spinner(QWidget):
+    """旋转弧指示器：仅在扫描/清理进行中转动（QTimer 驱动，结束后停止）"""
+
+    def __init__(self, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self._angle = 0
+        self._color = QColor("#62a0ea")
+        self._timer = QTimer(self)
+        self._timer.setInterval(40)
+        self._timer.timeout.connect(self._tick)
+        self.setFixedSize(14, 14)
+        self.hide()
+
+    def set_color(self, color: str):
+        c = QColor(color)
+        if c.isValid():
+            self._color = c
+            self.update()
+
+    def start(self):
+        self.show()
+        self._timer.start()
+
+    def stop(self):
+        self._timer.stop()
+        self.hide()
+
+    def _tick(self):
+        self._angle = (self._angle + 14) % 360
+        self.update()
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        rect = QRectF(self.rect()).adjusted(2, 2, -2, -2)
+        p.setPen(QPen(self._color, 2.0, Qt.SolidLine, Qt.RoundCap))
+        p.drawArc(rect, (self._angle + 180) * 16, 100 * 16)
+
+
+# 水位环参考上限与警戒线：弧长 = 进程内存 / 上限，≥ 警戒线转 danger 色
+_MEM_GAUGE_CAP = 2 * 1024 ** 3
+_MEM_GAUGE_DANGER = 0.85
+
+# 内存大号数字统一样式（构建期与主题刷新共用，避免两处漂移）
+_MEM_VALUE_QSS = (
+    "color: {accent}; background: transparent; font-size: 24px; font-weight: 700; letter-spacing: 0.5px; {font_qss}"
+)
+
+
+# ══════════════════════════════════════════════════════════
 # 主卡片
 # ══════════════════════════════════════════════════════════
 
@@ -97,6 +252,9 @@ class SystemCleanerCard(QWidget):
     """系统清理浮动卡片"""
 
     closed = Signal()
+    # 内存释放收尾信号：拍3 后台线程完成时 emit，跨线程自动 queued 回主线程。
+    # 后台线程没有 Qt 事件循环，不能在那里调 QTimer.singleShot（回调永不执行）。
+    _mem_release_finished = Signal(object, int, int)
 
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
@@ -119,6 +277,7 @@ class SystemCleanerCard(QWidget):
         self._ctx_danger = "#e34c4c"
         self._ctx_is_dark = isDarkTheme()
 
+        self._mem_release_finished.connect(self._finish_memory_release)
         self._setup_ui()
         self._apply_fallback_theme()
 
@@ -138,7 +297,7 @@ class SystemCleanerCard(QWidget):
         self._apply_latest_theme()
         self._apply_plugin_icon()
         self._async_scan()
-        self._refresh_memory()
+        self._refresh_memory()  # 内存值到达后水位环经 set_ratio 缓动到实际水位
         self.setVisible(True)
 
     def _apply_plugin_icon(self):
@@ -170,7 +329,6 @@ class SystemCleanerCard(QWidget):
         ctx = self._get_context()
         if ctx is None:
             return
-
         self._ctx_font_family, self._ctx_font_size = _ctx_font(ctx)
         ff = self._ctx_font_family
         fs = self._ctx_font_size
@@ -210,14 +368,27 @@ class SystemCleanerCard(QWidget):
 
         try:
             if hasattr(self, "_mem_label"):
-                self._mem_label.setStyleSheet(f"color: {tc}; background: transparent; {font_qss}")
+                self._mem_label.setStyleSheet(
+                    f"color: {tcs}; background: transparent; font-size: {max(11, fs - 3)}px; {font_qss}"
+                )
         except RuntimeError:
             pass
         try:
             if hasattr(self, "_mem_value"):
-                self._mem_value.setStyleSheet(f"color: {accent}; background: transparent; font-weight: 600; {font_qss}")
+                self._mem_value.setStyleSheet(_MEM_VALUE_QSS.format(accent=accent, font_qss=font_qss))
         except RuntimeError:
             pass
+        try:
+            if hasattr(self, "_gauge"):
+                self._gauge.set_color(accent, danger)
+        except RuntimeError:
+            pass
+        try:
+            if hasattr(self, "_spinner"):
+                self._spinner.set_color(accent)
+        except RuntimeError:
+            pass
+        self._apply_hero_style()
 
         for row in self._cache_rows.values():
             row.set_font_ctx(ff, fs)
@@ -273,44 +444,44 @@ class SystemCleanerCard(QWidget):
                 )
         except RuntimeError:
             pass
-        try:
-            if hasattr(self, "_mem_icon"):
-                self._render_mem_icon()
-        except RuntimeError:
-            pass
-        try:
-            if hasattr(self, "_mem_value"):
-                self._mem_value.setStyleSheet(
-                    f"color: {accent}; background: transparent; font-size: {fs}px; font-weight: 600; {font_qss}"
-                )
-        except RuntimeError:
-            pass
 
     # ── 按钮样式工厂 ──
 
     def _mem_release_btn_style(self, accent: str, fs: int, is_dark: bool = True) -> str:
-        _text_color = "#ffffff"
         _disabled_text = "rgba(255,255,255,0.5)" if is_dark else "rgba(0,0,0,0.4)"
         _disabled_bg = "rgba(128,128,128,0.3)" if is_dark else "rgba(0,0,0,0.12)"
+        hi = _adjust_color(accent, 24)
+        lo = _adjust_color(accent, -28)
+        _fg = _on_accent_text(accent)
         return f"""
         QPushButton {{
             background: qlineargradient(
                 x1:0, y1:0, x2:1, y2:1,
-                stop:0 {accent},
-                stop:1 {_adjust_color(accent, -20)}
+                stop:0 {_adjust_color(accent, 12)},
+                stop:0.55 {accent},
+                stop:1 {lo}
             );
-            color: {_text_color};
+            color: {_fg};
             border: none;
-            border-radius: 6px;
+            border-radius: 17px;
             font-size: {max(10, fs - 2)}px;
             font-weight: 600;
-            padding: 0 10px;
+            padding: 0 16px;
         }}
         QPushButton:hover {{
             background: qlineargradient(
                 x1:0, y1:0, x2:1, y2:1,
-                stop:0 {_adjust_color(accent, 10)},
+                stop:0 {hi},
+                stop:0.55 {_adjust_color(accent, 12)},
                 stop:1 {accent}
+            );
+        }}
+        QPushButton:pressed {{
+            background: qlineargradient(
+                x1:0, y1:0, x2:1, y2:1,
+                stop:0 {accent},
+                stop:0.55 {lo},
+                stop:1 {_adjust_color(lo, -12)}
             );
         }}
         QPushButton:disabled {{
@@ -320,52 +491,38 @@ class SystemCleanerCard(QWidget):
         """
 
     def _clean_cache_btn_style(self, accent: str, fs: int, is_dark: bool = True) -> str:
-        if is_dark:
-            _bg = "rgba(255,255,255,0.08)"
-            _color = "rgba(255,255,255,0.85)"
-            _hover_bg = "rgba(255,255,255,0.14)"
-            _hover_color = "#ffffff"
-            _border = "rgba(255,255,255,0.12)"
-            _disabled_bg = "rgba(128,128,128,0.15)"
-            _disabled_color = "rgba(255,255,255,0.3)"
-        else:
-            _bg = "rgba(0,0,0,0.06)"
-            _color = "rgba(0,0,0,0.85)"
-            _hover_bg = "rgba(0,0,0,0.10)"
-            _hover_color = "#1a1a1a"
-            _border = "rgba(0,0,0,0.12)"
-            _disabled_bg = "rgba(0,0,0,0.06)"
-            _disabled_color = "rgba(0,0,0,0.3)"
+        _disabled_bg = "rgba(128,128,128,0.22)" if is_dark else "rgba(0,0,0,0.08)"
+        _disabled_color = "rgba(255,255,255,0.35)" if is_dark else "rgba(0,0,0,0.3)"
+        hi = _adjust_color(accent, 20)
+        lo = _adjust_color(accent, -26)
+        _fg = _on_accent_text(accent)
         return f"""
         QPushButton {{
-            background: {_bg};
-            color: {_color};
-            border: 1px solid {_border};
-            border-radius: 8px;
-            font-size: {max(10, fs - 2)}px;
-            font-weight: 500;
-            padding: 12px 0;
+            background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                stop:0 {hi}, stop:0.5 {accent}, stop:1 {lo});
+            color: {_fg};
+            border: none;
+            border-radius: 12px;
+            font-size: {max(11, fs - 1)}px;
+            font-weight: 600;
+            letter-spacing: 1px;
+            padding: 13px 0;
         }}
         QPushButton:hover {{
-            background: {_hover_bg};
-            border-color: {accent};
-            color: {_hover_color};
+            background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                stop:0 {_adjust_color(hi, 12)}, stop:0.5 {hi}, stop:1 {accent});
+        }}
+        QPushButton:pressed {{
+            background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                stop:0 {accent}, stop:0.5 {lo}, stop:1 {_adjust_color(lo, -14)});
         }}
         QPushButton:disabled {{
             background: {_disabled_bg};
             color: {_disabled_color};
-            border-color: transparent;
         }}
         """
 
     # ── UI 构建 ──
-
-    def _render_mem_icon(self):
-        """内存区 SVG 图标：跟随主题/强调色重渲染"""
-        if not hasattr(self, "_mem_icon"):
-            return
-        color = self._ctx_accent
-        self._mem_icon.setPixmap(svg_pixmap("activity", color, size=16, dpr=self.devicePixelRatioF()))
 
     def _setup_ui(self):
         self.setMinimumHeight(0)
@@ -380,7 +537,12 @@ class SystemCleanerCard(QWidget):
 
         self._sep = QFrame(self)
         self._sep.setFrameShape(QFrame.HLine)
-        self._sep.setStyleSheet("background: rgba(128,128,128,0.12); max-height: 1px;")
+        # 两端淡出的渐变分隔线（比硬直线更轻盈现代）
+        self._sep.setStyleSheet(
+            "background: qlineargradient(x1:0, y1:0, x2:1, y2:0,"
+            " stop:0 rgba(128,128,128,0), stop:0.5 rgba(128,128,128,0.28), stop:1 rgba(128,128,128,0));"
+            " max-height: 1px; border: none;"
+        )
         root.addWidget(self._sep)
 
         self._scroll = QScrollArea(self)
@@ -393,9 +555,12 @@ class SystemCleanerCard(QWidget):
                 background: transparent;
             }
             QScrollBar::handle:vertical {
-                background: rgba(255,255,255,0.12);
+                background: rgba(128,128,128,0.25);
                 border-radius: 3px;
                 min-height: 30px;
+            }
+            QScrollBar::handle:vertical:hover {
+                background: rgba(128,128,128,0.45);
             }
             QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
                 height: 0;
@@ -409,11 +574,8 @@ class SystemCleanerCard(QWidget):
         self._content_layout.setSpacing(0)
         self._content_layout.setAlignment(Qt.AlignTop)
         self._scroll.setWidget(self._content)
-        # 内容层不透明实底：启用 Qt 滚动位块传输（blit），否则每滚动一步
-        # 全视口重绘（实测 200 行列表 30 次 paint/步 → 4 次）。必须在 setWidget 之后。
-        from app.plugins.sdk import make_card_content_opaque
-
-        make_card_content_opaque(self._content, 246)
+        # 背景透明（用户要求）：不刷等价实底，放弃滚动 blit 优化。
+        # 本卡片仅 8 行缓存项，滚动量极小，全视口重绘代价可接受。
         SmoothScrollDelegate(self._scroll)  # 平滑滚动（与主程序同款引擎）
         root.addWidget(self._scroll, 1)
 
@@ -439,6 +601,10 @@ class SystemCleanerCard(QWidget):
         self._header_title.setStyleSheet(f"color: {_tc}; background: transparent;")
         hly.addWidget(self._header_title)
 
+        self._spinner = _Spinner(header)
+        self._spinner.set_color(self._ctx_accent)
+        hly.addWidget(self._spinner)
+
         self._status_lb = QLabel("", header)
         self._status_lb.setStyleSheet(f"color: {_tcs}; font-size: 12px; background: transparent;")
         hly.addWidget(self._status_lb)
@@ -459,48 +625,60 @@ class SystemCleanerCard(QWidget):
         root.addWidget(header)
 
     def _build_memory_row(self):
-        _dark = isDarkTheme()
-        _mem_bg = "rgba(255,255,255,0.04)" if _dark else "rgba(0,0,0,0.04)"
-        _mem_tc = "rgba(255,255,255,0.85)" if _dark else "rgba(0,0,0,0.85)"
+        """内存英雄卡：环形仪表 + 大号数字 + 渐变胶囊按钮，形成卡片视觉锚点"""
         fs = self._ctx_font_size or 14
-        container = QWidget(self._content)
-        container.setStyleSheet("background: transparent;")
-        layout = QHBoxLayout(container)
-        layout.setContentsMargins(16, 8, 16, 4)
+        wrap = QWidget(self._content)
+        wrap.setStyleSheet("background: transparent;")
+        wl = QVBoxLayout(wrap)
+        wl.setContentsMargins(16, 12, 16, 4)
 
-        mem_bg = QWidget(container)
-        mem_bg.setStyleSheet(f"background: {_mem_bg}; border-radius: 8px;")
-        mem_layout = QHBoxLayout(mem_bg)
-        mem_layout.setContentsMargins(14, 8, 6, 8)
-        mem_layout.setSpacing(8)
+        hero = QFrame(wrap)
+        hero.setObjectName("memHero")
+        self._hero = hero
+        self._apply_hero_style()
+        hly = QHBoxLayout(hero)
+        hly.setContentsMargins(14, 12, 14, 12)
+        hly.setSpacing(14)
 
-        self._mem_icon = QLabel(mem_bg)
-        self._mem_icon.setFixedSize(20, 20)
-        self._mem_icon.setAlignment(Qt.AlignCenter)
-        self._mem_icon.setStyleSheet("background: transparent;")
-        self._render_mem_icon()
-        mem_layout.addWidget(self._mem_icon)
+        self._gauge = _GaugeRing(hero)
+        self._gauge.set_color(self._ctx_accent, self._ctx_danger)
+        hly.addWidget(self._gauge)
 
-        self._mem_label = QLabel("DriFox 进程内存", mem_bg)
-        self._mem_label.setStyleSheet(f"color: {_mem_tc}; background: transparent; font-size: 13px;")
-        mem_layout.addWidget(self._mem_label)
+        text_col = QVBoxLayout()
+        text_col.setSpacing(1)
+        init_tcs = "rgba(255,255,255,0.55)" if isDarkTheme() else "rgba(0,0,0,0.5)"
+        self._mem_label = QLabel("DriFox 进程内存", hero)
+        self._mem_label.setStyleSheet(f"color: {init_tcs}; background: transparent; font-size: {max(11, fs - 3)}px;")
+        text_col.addWidget(self._mem_label)
+        self._mem_value = QLabel("获取中…", hero)
+        self._mem_value.setStyleSheet(_MEM_VALUE_QSS.format(accent=self._ctx_accent, font_qss=""))
+        text_col.addWidget(self._mem_value)
+        hly.addLayout(text_col)
 
-        mem_layout.addStretch(1)
+        hly.addStretch(1)
 
-        self._mem_value = QLabel("获取中…", mem_bg)
-        self._mem_value.setStyleSheet("color: #62a0ea; background: transparent; font-size: 14px; font-weight: 600;")
-        mem_layout.addWidget(self._mem_value)
-
-        self._mem_release_btn = TransparentPushButton("释放内存", mem_bg)
+        self._mem_release_btn = TransparentPushButton("释放内存", hero)
         self._mem_release_btn.setCursor(Qt.PointingHandCursor)
-        btn_fs = max(10, fs - 2)
-        self._mem_release_btn.setFixedSize(max(160, btn_fs * 6 + 20), 32)
+        self._mem_release_btn.setFixedHeight(34)
+        self._mem_release_btn.setMinimumWidth(112)
         self._mem_release_btn.setStyleSheet(self._mem_release_btn_style(self._ctx_accent, fs, isDarkTheme()))
         self._mem_release_btn.clicked.connect(self._on_memory_release)
-        mem_layout.addWidget(self._mem_release_btn)
+        hly.addWidget(self._mem_release_btn, 0, Qt.AlignVCenter)
 
-        layout.addWidget(mem_bg)
-        self._content_layout.addWidget(container)
+        wl.addWidget(hero)
+        self._content_layout.addWidget(wrap)
+
+    def _apply_hero_style(self):
+        """英雄卡玻璃质感：半透明底 + 细描边 + 大圆角（跟随主题）"""
+        if not hasattr(self, "_hero"):
+            return
+        if self._ctx_is_dark:
+            bg, border = "rgba(255,255,255,0.045)", "rgba(255,255,255,0.09)"
+        else:
+            bg, border = "rgba(0,0,0,0.035)", "rgba(0,0,0,0.10)"
+        self._hero.setStyleSheet(
+            f"QFrame#memHero {{ background: {bg}; border: 1px solid {border}; border-radius: 14px; }}"
+        )
 
     def _build_cache_section(self):
         container = QWidget(self._content)
@@ -525,27 +703,35 @@ class SystemCleanerCard(QWidget):
 
         self._clean_cache_btn = TransparentPushButton("一键清理选中缓存", btn_container)
         self._clean_cache_btn.setCursor(Qt.PointingHandCursor)
-        self._clean_cache_btn.setMinimumHeight(42)
+        self._clean_cache_btn.setMinimumHeight(46)
         self._clean_cache_btn.setStyleSheet(self._clean_cache_btn_style(self._ctx_accent, fs, isDarkTheme()))
         self._clean_cache_btn.clicked.connect(self._on_clean_cache_clicked)
         btn_layout.addWidget(self._clean_cache_btn)
 
         layout.addWidget(btn_container)
 
+        # 行卡片独立容器：行间距 4px，与主按钮左右对齐（16px 边距）
+        rows_wrap = QWidget(container)
+        rows_wrap.setStyleSheet("background: transparent;")
+        rows_lay = QVBoxLayout(rows_wrap)
+        rows_lay.setContentsMargins(16, 4, 16, 4)
+        rows_lay.setSpacing(4)
+
         for item in CACHE_DEFS:
             row = _CacheItemRow(
-                item.cid, item.icon, item.label, container, tip=item.tip, default_checked=item.default_checked
+                item.cid, item.icon, item.label, rows_wrap, tip=item.tip, default_checked=item.default_checked
             )
             row.toggled.connect(self._on_row_toggled)
             self._cache_rows[item.cid] = row
-            layout.addWidget(row)
+            rows_lay.addWidget(row)
+
+        layout.addWidget(rows_wrap)
 
         self._content_layout.addWidget(container)
 
     def _build_footer(self):
         _dark = isDarkTheme()
         _tcs = "rgba(255,255,255,0.35)" if _dark else "rgba(0,0,0,0.35)"
-        _sep = "rgba(255,255,255,0.06)" if _dark else "rgba(0,0,0,0.06)"
         container = QWidget(self._content)
         container.setStyleSheet("background: transparent;")
         layout = QHBoxLayout(container)
@@ -563,7 +749,11 @@ class SystemCleanerCard(QWidget):
 
         footer_sep = QFrame(self._content)
         footer_sep.setFrameShape(QFrame.HLine)
-        footer_sep.setStyleSheet(f"background: {_sep}; max-height: 1px;")
+        footer_sep.setStyleSheet(
+            "background: qlineargradient(x1:0, y1:0, x2:1, y2:0,"
+            " stop:0 rgba(128,128,128,0), stop:0.5 rgba(128,128,128,0.28), stop:1 rgba(128,128,128,0));"
+            " max-height: 1px; border: none;"
+        )
         self._content_layout.addWidget(footer_sep)
         self._content_layout.addWidget(container)
 
@@ -627,11 +817,60 @@ class SystemCleanerCard(QWidget):
         mem_before = _get_process_memory()
         _release_memory_light()
 
-        def _finish_deep():
+        # ── 分三拍（2026-10-31 运行日志驱动）──
+        # 拍1（本帧）：轻清理。
+        # 拍2（+120ms 主线程）：GC 全代 + 工作集修剪。留主线程是因为 gc.collect(2)
+        #   回收期间暂停全部线程，换到后台只是把停顿挪个位置，主线程照样卡；
+        #   而它确实需要「事件循环已排干在途回调」这个前置（既有崩溃修复）。
+        # 拍3（后台线程）：`_kill_qwebengine_processes` 的 psutil.process_iter
+        #   全系统遍历。这是真实的阻塞式 IO（逐个 OpenProcess 取 pid/name/ppid），
+        #   实测主线程阻塞 501ms，栈顶落在 psutil._pswindows.ppid。它只碰 OS
+        #   进程句柄，不碰任何 QObject，放后台是安全的。
+        # 收尾回主线程，所有 UI 写操作 + sip 活性硬判都在那里。
+        def _deep_core_on_main():
             try:
-                collected, killed_procs = _release_memory_deep()
-            except RuntimeError:
-                return  # 卡片/控件已销毁，直接放弃收尾
+                collected = _release_memory_deep_core()
+            except Exception:  # noqa: BLE001 — 主线程阶段失败不能吞掉按钮复位
+                collected = 0
+
+            def _kill_in_background():
+                try:
+                    killed = _kill_qwebengine_processes()
+                except Exception:  # noqa: BLE001
+                    killed = 0
+                try:
+                    # 跨线程回主线程只能走信号（auto queued connection）。
+                    # b47875df 曾在此调 QTimer.singleShot(0, ...)：daemon 线程无
+                    # 事件循环，回调永不执行，按钮永久卡「释放中…」。
+                    self._mem_release_finished.emit(mem_before, collected, killed)
+                except RuntimeError:
+                    pass  # 卡片已销毁，无需收尾
+
+            threading.Thread(
+                target=_kill_in_background,
+                daemon=True,
+                name="cleaner-kill-webengine",
+            ).start()
+
+        QTimer.singleShot(120, _deep_core_on_main)
+
+    def _finish_memory_release(self, mem_before, collected, killed_procs):
+        """深度释放完成后的主线程收尾（按钮文案 / 状态 / 刷新）。
+
+        单独成方法是为了让 QTimer 回调里只有一个方法调用：卡片在后台线程
+        工作期间被销毁时，lambda 内的属性访问会在调用时立刻抛 RuntimeError，
+        由 sip 活性检查提前拦截。
+        """
+        # 活性判定用 shiboken6.isValid 硬判：已析构 wrapper 上访问 Python 侧实例
+        # 属性不会抛异常（项目既有坑），靠属性访问做存在性检查会静默漏过。
+        try:
+            import shiboken6
+
+            if not shiboken6.isValid(self) or not shiboken6.isValid(self._mem_release_btn):
+                return
+        except Exception:
+            return
+        try:
             mem_after = _get_process_memory()
 
             freed_mem = (mem_before - mem_after) if (mem_before and mem_after) else None
@@ -654,8 +893,8 @@ class SystemCleanerCard(QWidget):
             self._set_status("")
 
             QTimer.singleShot(3000, self._reset_mem_release_btn)
-
-        QTimer.singleShot(120, _finish_deep)
+        except RuntimeError:
+            return  # 控件在收尾途中被销毁
 
     def _reset_mem_release_btn(self):
         if not self._is_releasing_mem:
@@ -666,15 +905,35 @@ class SystemCleanerCard(QWidget):
     def _refresh_memory(self):
         mem = _get_process_memory()
         accent = self._ctx_accent
-        fs = self._ctx_font_size or 14
-        if mem is not None:
-            self._mem_value.setText(_format_size(mem))
-            self._mem_value.setStyleSheet(
-                f"color: {accent}; background: transparent; font-size: {fs}px; font-weight: 600;"
-            )
-        else:
+        self._mem_value.setStyleSheet(_MEM_VALUE_QSS.format(accent=accent, font_qss=""))
+        if hasattr(self, "_gauge"):
+            self._gauge.set_ratio(0.0 if mem is None else mem / _MEM_GAUGE_CAP)
+        if mem is None:
             self._mem_value.setText("N/A")
-            self._mem_value.setStyleSheet(f"color: rgba(255,255,255,0.3); background: transparent; font-size: {fs}px;")
+            return
+        self._animate_mem_value(mem)
+
+    def _animate_mem_value(self, target: int):
+        """内存数字缓动：从旧值滚到新值（首次从 0 起），与仪表扫掠呼应"""
+        old = getattr(self, "_mem_display_bytes", None)
+        self._mem_display_bytes = target
+        if old is None or old == target:
+            self._mem_value.setText(_format_size(target))
+            return
+        anim = QVariantAnimation(self)  # parent=self：卡片销毁时动画一并销毁
+        anim.setStartValue(float(old))
+        anim.setEndValue(float(target))
+        anim.setDuration(450)
+        anim.setEasingCurve(QEasingCurve.OutCubic)
+        anim.valueChanged.connect(self._on_mem_anim_frame)
+        anim.finished.connect(anim.deleteLater)
+        anim.start()
+
+    def _on_mem_anim_frame(self, v):
+        try:
+            self._mem_value.setText(_format_size(int(v)))
+        except RuntimeError:
+            pass  # 动画途中卡片被销毁
 
     # ── 扫描 ──
 
@@ -840,15 +1099,20 @@ class SystemCleanerCard(QWidget):
         total_size = sum(row.get_contribution() for row in self._cache_rows.values())
 
         if total_size > 0:
-            self._clean_cache_btn.setText(f"一键清理选中缓存 (共 {_format_size(total_size)})")
+            self._clean_cache_btn.setText(f"一键清理 · {_format_size(total_size)}")
             self._clean_cache_btn.setEnabled(True)
         else:
-            self._clean_cache_btn.setText("一键清理选中缓存")
+            self._clean_cache_btn.setText("勾选下方要清理的缓存项")
             self._clean_cache_btn.setEnabled(False)
 
     def _set_status(self, text: str):
         try:
             self._status_lb.setText(text)
+            # 进行中的任务都以「…」结尾，此时转 spinner；错误/提示类停转
+            if text.endswith("…"):
+                self._spinner.start()
+            else:
+                self._spinner.stop()
         except RuntimeError:
             pass
 

@@ -102,16 +102,21 @@ class TestRefreshConnections:
         assert sorted(name for name, _ in mgr._connect_calls) == ["b", "c"]
 
     def test_skips_pending_gate_confirm(self):
-        """门禁待确认的服务器 → 自动补连跳过（防插件批量安装时重复发起被拦连接）"""
-        from app.core.tools import mcp_lsp_safety
+        """门禁待确认的服务器 → 自动补连跳过（防插件批量安装时重复发起被拦连接）
 
+        置位必须走 gate_server_launch 真实口径（带 command+args 指纹），
+        不能手工 add 无指纹 legacy key——曾因此掩盖卡片 _mcp_gate_key 指纹
+        错位（回落未对齐），守卫实际失效却测试全绿。"""
         srv = _server("browser")
         srv["_source"] = str(Path.home() / ".drifox6" / "plugins" / "browser" / ".mcp.json")
-        key = mcp_lsp_safety.server_key("mcp", "browser", "browser")
-        mcp_lsp_safety._PENDING_CONFIRM.add(key)
+        from app.core.tools.mcp_lsp_safety import gate_server_launch
+
+        gate_server_launch("mcp", "browser", "browser", ["echo"], source=srv["_source"], command="echo")
         try:
             card, mgr = _make_card(enabled=True, servers=[srv, _server("on")], status_list=[])
             card.refresh_connections()
             assert [name for name, _ in mgr._connect_calls] == ["on"]
         finally:
-            mcp_lsp_safety._PENDING_CONFIRM.discard(key)
+            from app.core.tools import mcp_lsp_safety
+
+            mcp_lsp_safety._PENDING_CONFIRM.discard("mcp:browser:browser")

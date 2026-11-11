@@ -51,6 +51,7 @@ from app.plugins.kernel import KNOWN_COMPONENTS
 
 # 插件平台声明与 deps 统一加载（设计：docs/superpowers/specs/2026-08-27-plugin-platform-deps-design.md）
 from app.plugins.deps_loader import check_platform, ensure_deps_on_path
+from app.utils._startup_probe import mark as _probe
 
 # 插件名合法字符：首字符必须为字母或数字，后续允许字母数字与 _ . -
 # 严禁路径分隔符与 `..`（plugin_name 会参与配置存储路径拼接，见 plugin_config_store）
@@ -58,6 +59,15 @@ _PLUGIN_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 
 # [T26/H2] 插件发现缓存 schema 版本：缓存结构变化时递增（整体失效）
 _DISCOVERY_CACHE_SCHEMA_VERSION = 1
+
+# [T25] config_schema 解析结果缓存：key = (plugin_name, manifest_mtime_ns, size)，
+# value = parse_config_schema() 的返回值（None 也缓存，表示"无合法 schema"）。
+# parse_config_schema 只依赖 manifest 内容，而每次扫描/热重载都会对所有插件重跑
+# 一遍（72 插件 × 每次），按 manifest mtime+size 缓存可跳过重复解析。
+# 口径与 agent.py 的 _agent_file_cache 一致（mtime 寻址，非内容哈希）。
+# 失效：_unregister_config_schema（所有插件移除/schema 删除路径的公共下沉点）
+# 统一 pop；mtime/size 变化自然 miss，无需额外失效逻辑。
+_CONFIG_SCHEMA_CACHE: Dict[tuple, Any] = {}
 
 
 def _normalize_plugin_name(raw: object, fallback: str) -> Optional[str]:
@@ -221,6 +231,11 @@ def _detect_components(plugin_dir: Path) -> Dict[str, bool]:
 # ============================================================
 
 
+# icon_config 解析哨兵：区分「未解析」与「解析结果为 None」，None 也必须缓存
+# （无图标插件每次访问都不再重复付 FS 扫描）
+_ICON_CONFIG_UNRESOLVED = object()
+
+
 @dataclass
 class PluginInfo:
     """插件信息"""
@@ -234,8 +249,12 @@ class PluginInfo:
     version_reason: str = ""  # 版本不兼容原因（供 UI 展示）
     api_compatible: bool = True  # 契约2：api_version 与宿主插件 API 版本比对（缺省=兼容）
     api_reason: str = ""  # api_version 不兼容原因（供 UI 展示）
+    deps_conflict_reason: str = ""  # L2：跨插件依赖版本不可调和的原因（非空=拦截）
     manifest_warnings: List[str] = field(default_factory=list)  # 契约1：schema 校验 warning 清单（UI 角标后续）
     overridden_by: str = ""  # 同名覆盖标记：被覆盖方 plugin_type（"system"/"claude"），空=未被覆盖
+    # icon_config 解析缓存（实例级）：重扫/热重载/安装/更新走 _scan_one_plugin_dir
+    # 或 _plugin_info_from_cached 重建实例，缓存随旧实例丢弃，无需主动失效钩子
+    _icon_config_cache: Any = field(default=_ICON_CONFIG_UNRESOLVED, repr=False, compare=False)
 
     @property
     def description(self) -> str:
@@ -247,8 +266,10 @@ class PluginInfo:
 
     @property
     def load_blocked(self) -> bool:
-        """是否被门禁拦截（平台/版本/api_version 任一不满足），拦截时宿主不得加载其任何组件"""
-        return not (self.platform_compatible and self.version_compatible and self.api_compatible)
+        """是否被门禁拦截（平台/版本/api_version/依赖冲突任一不满足），拦截时宿主不得加载其任何组件"""
+        if not (self.platform_compatible and self.version_compatible and self.api_compatible):
+            return True
+        return bool(self.deps_conflict_reason)
 
     @property
     def is_system(self) -> bool:
@@ -265,9 +286,22 @@ class PluginInfo:
 
     @property
     def icon_config(self) -> Optional[dict]:
-        """返回 {"light": Path, "dark": Path} 或 None
+        """返回 {"light": Path, "dark": Path} 或 None（解析结果缓存于实例）
 
-        从 manifest 的 "icon" 字段解析插件图标路径。
+        ★ 性能（2026-11-03）：解析走 Path.resolve/exists 文件系统调用（Windows 上
+        realpath 冷态单次可达数十 ms），本 property 是图标渲染热路径：tab_panel
+        插件标签页、设置卡 MCP 行/插件配置卡每次刷新都访问，不缓存时一次设置卡
+        构造要重复付几十次 FS 调用（watchdog 实测打开设置阻塞 519ms 栈正停在
+        icon_config 内的 os.path.realpath）。失效策略见 _icon_config_cache 字段注释。
+        """
+        if self._icon_config_cache is not _ICON_CONFIG_UNRESOLVED:
+            return self._icon_config_cache
+        self._icon_config_cache = self._resolve_icon_config()
+        return self._icon_config_cache
+
+    def _resolve_icon_config(self) -> Optional[dict]:
+        """从 manifest 的 "icon" 字段解析插件图标路径（真实 FS 解析，由 icon_config 缓存）。
+
         支持三种形式：
         1. 字符串 "icon.svg" → 同一文件用于深浅主题
         2. 字典 {"light": "a.svg", "dark": "b.svg"} → 分别指定
@@ -313,6 +347,26 @@ class PluginInfo:
             return result if result else None
 
 
+def _hard_gate_blocked(p: PluginInfo) -> bool:
+    """平台/版本/api 三维硬门禁（不含依赖冲突，避免判定自引用）。"""
+    return not (p.platform_compatible and p.version_compatible and p.api_compatible)
+
+
+def _pick_deps_winner(plugins: Dict[str, PluginInfo], a: str, b: str) -> tuple:
+    """冲突对裁决：返回 (保留方, 让出方)。
+
+    优先级 system > claude > user：内置插件是 app 功能的一部分，用户插件是扩展。
+    同类型按名字字典序，保证每次启动裁决结果一致（不随扫描顺序漂移）。
+    """
+    rank = {"system": 0, "claude": 1, "user": 2}
+
+    def key(name: str) -> tuple:
+        p = plugins.get(name)
+        return (rank.get(getattr(p, "plugin_type", "user"), 2), name)
+
+    return (a, b) if key(a) <= key(b) else (b, a)
+
+
 # ============================================================
 # 插件管理器（单例）
 # ============================================================
@@ -339,6 +393,8 @@ class PluginManager:
     _NON_DISABLEABLE = frozenset(
         {
             "system-tools",
+            "system-core",
+            "system-question",
             "system-serializers",
             "system-storages",
             "system-model-adapters",
@@ -403,11 +459,14 @@ class PluginManager:
         # [T26/H2] 插件发现缓存命中 → 跳过三连全扫（热态 -0.8~2.5s）。
         # 命中路径复用 _merge_discovered 合并语义 + 重放幂等副作用
         # （ensure_deps_on_path / _register_config_schema）；异常回退全扫。
-        if self._try_load_from_discovery_cache():
+        _probe("p3.cache_probe_start")
+        hit = self._try_load_from_discovery_cache()
+        _probe(f"p3.cache_probe_end(hit={hit})")
+        if hit:
             self._initialized = True
             self._restore_enabled_from_settings()
             try:
-                self._last_scan_signature = self._plugins_dir_signature()
+                self._last_scan_signature = self._plugins_dir_signature(include_mtime=False)
             except Exception:
                 self._last_scan_signature = None
             return
@@ -429,9 +488,10 @@ class PluginManager:
         self._restore_enabled_from_settings()
 
         # 记录首次扫描的目录签名：让启动期那次 rescan（ConfigSync 合并重载兜底）
-        # 能直接短路，省掉一次全量重扫（实测 ~450ms）
+        # 能直接短路，省掉一次全量重扫（实测 ~450ms）。口径与 ：919 rescan 短路
+        # 统一用弱签名（include_mtime=False），否则强签名≠弱签名永不命中（#F17）
         try:
-            self._last_scan_signature = self._plugins_dir_signature()
+            self._last_scan_signature = self._plugins_dir_signature(include_mtime=False)
         except Exception:
             self._last_scan_signature = None
 
@@ -484,6 +544,38 @@ class PluginManager:
     # 旧单体插件 config_schema（网页搜索 API Key）的承继插件
     _SPLIT_CONFIG_HEIR = "system-tools"
 
+    # 工具级禁用键迁移：`system-tools:tools:<tool>` → `<拆分后插件>:tools:<tool>`
+    # （拆分后工具分散到多个插件，旧禁用键不改写会让用户已禁用的工具重新出现）
+    _SPLIT_TOOL_PLUGINS = (
+        "system-core",
+        "system-web",
+        "system-question",
+        "system-team",
+        "system-diagnostics",
+    )
+    _SPLIT_TOOL_TO_PLUGIN = {
+        "read": "system-core",
+        "write": "system-core",
+        "edit": "system-core",
+        "multi_edit": "system-core",
+        "grep": "system-core",
+        "list": "system-core",
+        "glob": "system-core",
+        "scan_repo": "system-core",
+        "stage_files": "system-core",
+        "bash": "system-core",
+        "background_task": "system-core",
+        "todowrite": "system-core",
+        "todoread": "system-core",
+        "websearch": "system-web",
+        "webfetch": "system-web",
+        "question": "system-question",
+        "team_send_message": "system-team",
+        "team_manage": "system-team",
+        "get_diagnostics": "system-diagnostics",
+        "lsp": "system-diagnostics",
+    }
+
     def _migrate_split_system_states(self) -> None:
         """system 插件按类型拆分后的一次性状态迁移（幂等，无旧键时零写入）。
 
@@ -511,6 +603,19 @@ class PluginManager:
                         changed = True
                         continue
                 mapped.append(key)
+            # 1b. 工具级禁用键改写：system-tools:tools:<tool> → <拆分后插件>:tools:<tool>
+            remapped: List[str] = []
+            for key in mapped:
+                if isinstance(key, str) and key.startswith("system-tools:tools:"):
+                    tool = key[len("system-tools:tools:") :]
+                    owner = self._SPLIT_TOOL_TO_PLUGIN.get(tool)
+                    if owner:
+                        remapped.append(f"{owner}:tools:{tool}")
+                        changed = True
+                        continue
+                remapped.append(key)
+            mapped = remapped
+
             if changed:
                 cfg.set(cfg.disabled_plugin_components, mapped, save=True)
                 logger.info(f"[PluginManager] 迁移 system 拆分禁用键 {len(mapped)} 条")
@@ -527,6 +632,7 @@ class PluginManager:
                     changed = True
             enabled = list(cfg.enabled_plugins.value or [])
             missing = [n for n in self._SPLIT_COMPONENT_TO_PLUGIN.values() if n not in enabled]
+            missing += [n for n in self._SPLIT_TOOL_PLUGINS if n not in enabled]
             if missing:
                 cfg.set(cfg.enabled_plugins, enabled + missing, save=True)
                 changed = True
@@ -778,11 +884,15 @@ class PluginManager:
                 rebuilt["system"], rebuilt["claude"], rebuilt["user"], allow_user_override
             )
             self._plugins = new_plugins
+            # L2：先跑依赖冲突裁决，replay 注入循环会自然跳过被裁为让出方的插件
+            self._apply_deps_conflict_gate(new_plugins)
             # 副作用重放（幂等）：deps 注入仅门禁通过插件（G3 对齐）；config_schema 注册
+            _probe("p2.replay.start")
             for p in self._plugins.values():
                 if not p.load_blocked:
                     ensure_deps_on_path(p.path)
-                self._register_config_schema(p.name, p.manifest)
+                self._register_config_schema(p.name, p.manifest, self._manifest_file_for(p.path))
+            _probe("p2.replay.end")
             logger.info(
                 f"[PluginManager] 插件发现命中缓存 from cache: {len(self._plugins)} 个插件（跳过全扫）"
             )
@@ -858,6 +968,65 @@ class PluginManager:
             new_plugins[name] = p
         return new_plugins, changed
 
+    def _apply_deps_conflict_gate(self, plugins: Dict[str, PluginInfo]) -> None:
+        """L2：跨插件依赖冲突门禁（合并后统一判定，让出方不加载任何组件）
+
+        冲突判定需要全局视图：deps 注入是逐插件在扫描阶段完成的，而"两个插件
+        要了不可调和的版本"要等全部扫完才知道。此处执行时尚未 import 任何插件
+        组件，sys.modules 里没有第三方包，因此撤销注入是安全的（不会把已加载
+        模块扣在半路）。
+
+        让出方的 deps 路径从 sys.path 摘除并把原因写进 load_blocked，三个组件
+        loader（tool/provider/runtime）与 UI 挂载会一并跳过它，避免它静默跑在
+        对方版本的包上。
+
+        Args:
+            plugins: 合并后的完整插件集合（rescan 传 new_plugins，缓存路径传重建结果）
+        """
+        from app.plugins.deps_loader import (
+            find_deps_conflicts,
+            remove_deps_from_path,
+            resolve_pip_deps,
+        )
+
+        # 先清旧判定：热重载/卸载后冲突可能已消失，不清会永久拦截
+        live_map = getattr(self, "_plugins", None) or {}
+        for p in plugins.values():
+            p.deps_conflict_reason = ""
+            live = live_map.get(p.name)
+            # rescan 只把新增插件写回 _plugins，存量插件仍是旧实例：
+            # 不镜像的话，热重载路径上被裁为让出方的存量插件 load_blocked 不生效
+            if live is not None and live is not p:
+                live.deps_conflict_reason = ""
+
+        declarations: Dict[str, List[str]] = {}
+        for p in plugins.values():
+            if _hard_gate_blocked(p):
+                continue
+            specs = resolve_pip_deps(p.manifest)
+            if specs:
+                declarations[p.name] = specs
+        if len(declarations) < 2:
+            return
+
+        losers: Dict[str, List[str]] = {}
+        for pkg, a, b in find_deps_conflicts(declarations):
+            keep, drop = _pick_deps_winner(plugins, a, b)
+            losers.setdefault(drop, []).append(f"{pkg}（与 {keep} 要求不可调和）")
+        for name, reasons in losers.items():
+            p = plugins.get(name)
+            if p is None:
+                continue
+            p.deps_conflict_reason = "；".join(reasons)
+            live = live_map.get(name)
+            if live is not None and live is not p:
+                live.deps_conflict_reason = p.deps_conflict_reason
+            removed = remove_deps_from_path(p.path)
+            logger.warning(
+                f"[PluginManager] {name} 因依赖冲突被拦截（组件不加载）: {p.deps_conflict_reason}"
+                + (f"；已摘除 deps 注入 {removed}" if removed else "")
+            )
+
     def rescan(self, force: bool = False) -> dict:
         """运行时重新扫描插件目录，检测新增/移除的插件
 
@@ -919,6 +1088,8 @@ class PluginManager:
         new_plugins, changed_list = self._merge_discovered(
             current_system, current_claude, current_user, allow_user_override
         )
+        # L2：全量扫完后裁决跨插件依赖冲突（注入已在扫描阶段完成，此处撤销让出方）
+        self._apply_deps_conflict_gate(new_plugins)
         result["changed"] = changed_list
 
         new_names = set(new_plugins.keys())
@@ -1076,10 +1247,9 @@ class PluginManager:
             self.invalidate_mcp_cache()  # 启用插件可能带入新 MCP 配置
             logger.info(f"[PluginManager] Enabled plugin: {name}")
             state_changed = True
-        # 联动加载 UI 组件
-        self._load_plugin_ui(name)
-        # 对齐工具注册（该插件工具注册；watcher 未启动时跳过）
-        self._rescan_plugin_tools(name, enabled=True)
+        # 联动加载全部组件（与禁用路径对称）：只补 UI + 工具会让 providers /
+        # model_adapters / lsp / hooks 在「禁用→启用」后不再生效，直到重启。
+        self._load_plugin_components(name)
         # 状态实际变化才触发（幂等跳过重复启用）；置于末尾保证 diff 拿到注册后状态
         if state_changed:
             self._trigger_plugin_changed_hook("enabled", name)
@@ -1123,13 +1293,85 @@ class PluginManager:
             self.invalidate_mcp_cache()  # 禁用插件需剔除其 MCP 配置
             logger.info(f"[PluginManager] Disabled plugin: {name}")
             state_changed = True
-        # 联动卸载 UI 组件
-        self._unload_plugin_ui(name)
-        # 对齐工具注册（该插件工具注销；watcher 未启动时跳过）
-        self._rescan_plugin_tools(name, enabled=False)
+        # 联动卸载全部组件（不只是 UI/tools）：禁用语义 = 该插件的一切都不再生效。
+        # 历史实现只清 UI + tools + 贡献项，providers / model_adapters / storages /
+        # serializers / gateways / lsp / hooks / agents / commands 全部留在注册表里
+        # 继续生效——禁用后仍会被调用，且这类残留没有自愈轮询，只能重启进程。
+        self._unload_plugin_components(name)
         # 状态实际变化才触发（幂等跳过重复禁用）；置于末尾保证 diff 拿到注销后状态
         if state_changed:
             self._trigger_plugin_changed_hook("disabled", name)
+
+    def _load_plugin_components(self, name: str) -> None:
+        """启用路径：按 manifest 全组件加载（与 _unload_plugin_components 对称）。"""
+
+        def _run() -> None:
+            from app.core.services.plugin_host_service import PluginHostService
+
+            PluginHostService.get_instance()._reload_single_plugin(name, "__manifest__")
+
+        try:
+            import threading
+
+            from app.core.services.plugin_host_service import run_on_main_thread
+
+            # 同禁用路径：加载会碰 Qt（UI 注册 / 主题重载 / 命令快捷键重建）。
+            if threading.current_thread() is threading.main_thread():
+                _run()
+                return
+            if run_on_main_thread(_run):
+                return
+            logger.warning(f"[PluginManager] 启用插件组件加载未能投递主线程 ({name})，回退 UI+工具加载")
+        except Exception as e:
+            logger.warning(f"[PluginManager] 启用插件时全组件加载失败，回退 UI+工具加载 ({name}): {e}")
+        # 兜底：保持历史加载面
+        self._load_plugin_ui(name)
+        self._rescan_plugin_tools(name, enabled=True)
+
+    def _unload_plugin_components(self, name: str) -> None:
+        """禁用路径：按「插件已删除」语义卸载该插件全部组件 + 宿主级资源（幂等）。
+
+        复用 PluginHostService 的删除段（kernel reloader 分派），保证「禁用」与
+        「卸载」两条路径的清理面完全一致，不再各自维护一份子集。
+        """
+        plugin = self._plugins.get(name)
+        components = dict(plugin.components) if plugin is not None and isinstance(plugin.components, dict) else {}
+        manifest = (
+            dict(plugin.manifest)
+            if plugin is not None and isinstance(getattr(plugin, "manifest", None), dict)
+            else None
+        )
+
+        def _run() -> None:
+            from app.core.services.plugin_host_service import PluginHostService
+            from app.plugins.kernel import KNOWN_COMPONENTS
+
+            result = {k: (0 if k == "agents" else False) for k in KNOWN_COMPONENTS}
+            PluginHostService.get_instance()._cleanup_removed_plugin_components(
+                name, components, result, tuple(KNOWN_COMPONENTS), manifest=manifest
+            )
+
+        try:
+            import threading
+
+            from app.core.services.plugin_host_service import run_on_main_thread
+
+            # 组件卸载会碰 Qt：主题全量重载、命令快捷键重建、UI 实例销毁。
+            # 插件市场的启停在后台 worker 线程调用本方法（_set_managed_enabled），
+            # 直接执行就是跨线程操作 QShortcut/QWidget → 0xC0000005。
+            if threading.current_thread() is threading.main_thread():
+                _run()
+                return
+            if run_on_main_thread(_run):
+                return
+            logger.warning(
+                f"[PluginManager] 禁用插件组件卸载未能投递主线程 ({name})，回退 UI+工具清理"
+            )
+        except Exception as e:
+            logger.warning(f"[PluginManager] 禁用插件时全组件卸载失败，回退 UI+工具清理 ({name}): {e}")
+        # 兜底：至少保持历史清理面（UI + 工具），不让禁用整体失败
+        self._unload_plugin_ui(name)
+        self._rescan_plugin_tools(name, enabled=False)
 
     def _rescan_plugin_tools(self, name: str, enabled: bool) -> None:
         """插件启停后精准对齐工具注册（工具插件随启停热生效）。
@@ -1347,6 +1589,10 @@ class PluginManager:
         每个子目录如果包含 .drifox-plugin/plugin.json，即视为一个插件。
         """
         discovered = []
+        # 启动期逐条 Discovered DEBUG 最多 90+ 条，每条一次管道写入（10 个 enqueue
+        # sink 串行 put），管道满时会阻塞主线程（2026-11-06 实测 500ms）。改为循环
+        # 后聚合一次 emit：内容不变，管道往返从 N 次降到 1 次。
+        discovered_log_lines: list[str] = []
 
         if not base_dir.exists():
             return discovered
@@ -1410,7 +1656,7 @@ class PluginManager:
                     ensure_deps_on_path(item)
 
                 # —— E1 声明式插件配置：解析 config_schema 并注册（含自动设置卡）——
-                self._register_config_schema(plugin_name, manifest)
+                self._register_config_schema(plugin_name, manifest, manifest_path)
 
                 discovered.append(
                     PluginInfo(
@@ -1426,13 +1672,17 @@ class PluginManager:
                         manifest_warnings=schema_warnings,
                     )
                 )
-                logger.debug(
-                    f"[PluginManager] Discovered plugin: {plugin_name} "
-                    f"(type={plugin_type}, format={manifest_format}) at {item}"
+                discovered_log_lines.append(
+                    f"{plugin_name} (type={plugin_type}, format={manifest_format}) at {item}"
                 )
             except Exception as e:
                 logger.error(f"[PluginManager] Failed to load plugin at {item}: {e}")
 
+        if discovered_log_lines:
+            logger.debug(
+                f"[PluginManager] Discovered plugins ({len(discovered_log_lines)}):\n  "
+                + "\n  ".join(discovered_log_lines)
+            )
         return discovered
 
     def _scan_one_plugin_dir(self, plugin_dir: Path, plugin_type: str) -> Optional[PluginInfo]:
@@ -1490,7 +1740,7 @@ class PluginManager:
                 ensure_deps_on_path(plugin_dir)
 
             # —— E1 声明式插件配置：解析 config_schema 并注册（含自动设置卡）——
-            self._register_config_schema(plugin_name, manifest)
+            self._register_config_schema(plugin_name, manifest, manifest_path)
 
             info = PluginInfo(
                 name=plugin_name,
@@ -1512,18 +1762,61 @@ class PluginManager:
             logger.error(f"[PluginManager] Failed to rescan plugin at {plugin_dir}: {e}")
             return None
 
-    def _register_config_schema(self, plugin_name: str, manifest: dict) -> None:
+    @staticmethod
+    def _manifest_file_for(plugin_dir: Path) -> Optional[Path]:
+        """定位插件目录下的 manifest 文件（两路：.drifox-plugin / .claude-plugin）。
+
+        [T25] 为 config_schema 缓存提供 mtime/size 寻址材料。与 _scan_one_plugin_dir
+        （:1453-1458）的探测顺序保持一致，避免两处行为分叉。
+        """
+        for candidate in (
+            plugin_dir / ".drifox-plugin" / "plugin.json",
+            plugin_dir / ".claude-plugin" / "plugin.json",
+        ):
+            if candidate.exists():
+                return candidate
+        return None
+
+    def _config_schema_cache_key(
+        self, plugin_name: str, manifest_path: Optional[Path]
+    ) -> Optional[tuple]:
+        """config_schema 缓存 key；manifest_path 为空时返回 None（调用方按 miss 处理）。
+
+        取不到路径时不猜、不用 name 兜底：同一插件名在不同根（system/user/claude）
+        可能对应不同目录，用 name 做 key 会跨根串味。宁可不缓存也不缓存错。
+        """
+        if manifest_path is None:
+            return None
+        try:
+            st = manifest_path.stat()
+        except OSError:
+            return None
+        return (plugin_name, st.st_mtime_ns, st.st_size)
+
+    def _register_config_schema(
+        self, plugin_name: str, manifest: dict, manifest_path: Optional[Path] = None
+    ) -> None:
         """E1：解析 plugin.json config_schema 并注册到 PluginConfigRegistry + 自动设置卡。
 
         幂等：同名插件重复注册由 PluginConfigRegistry 与 UIPluginRegistry 内部
         覆盖（PluginManager 全量扫描天然幂等；热重载 rescan 同样无害）。
         任一异常均降级为 warning，不影响插件本体的扫描加载。
         """
-        # 解析阶段：非法 schema 走 parse_config_schema 内部 warning 兜底
-        from app.plugins.contracts.plugin_config import parse_config_schema
+        # 解析阶段：非法 schema 走 parse_config_schema 内部 warning 兜底。
+        # [T25] 结果只依赖 manifest 内容，按 manifest mtime+size 缓存解析结果：
+        # 命中则跳过 parse（72 插件 × 每次扫描/热重载都重跑一遍）；miss 才解析并回写。
+        # ⚠️ 只缓存 parse 结果，注册动作（PluginConfigRegistry.register /
+        # _pending_config_cards 登记）仍每次执行——注册表语义不变。
+        cache_key = self._config_schema_cache_key(plugin_name, manifest_path)
+        if cache_key is not None and cache_key in _CONFIG_SCHEMA_CACHE:
+            config_schema = _CONFIG_SCHEMA_CACHE[cache_key]
+        else:
+            from app.plugins.contracts.plugin_config import parse_config_schema
 
-        raw_schema = manifest.get("config_schema")
-        config_schema = parse_config_schema(plugin_name, raw_schema)
+            raw_schema = manifest.get("config_schema")
+            config_schema = parse_config_schema(plugin_name, raw_schema)
+            if cache_key is not None:
+                _CONFIG_SCHEMA_CACHE[cache_key] = config_schema
         if config_schema is None:
             # manifest 已无合法 schema：显式清掉历史注册（含自动设置卡），避免残留旧卡。
             # unload_plugin 已改为保留 auto_config_card，清理只能走这里（manifest 层职责）。
@@ -1597,6 +1890,12 @@ class PluginManager:
         已改为保留 auto_config_card——ui 组件热重载（unload→load）不能误杀
         rescan 刚注册的卡，清理收敛到本函数单一入口。
         """
+        # [T25] 清掉本插件所有 config_schema 解析缓存条目（key 含 mtime，可能多条）。
+        # 放在本函数而非各移除点：_unregister_config_schema 是「插件移除 / schema 删除」
+        # 两条路径的公共下沉点（rescan removed、manifest gone、schema 置空）。
+        if _CONFIG_SCHEMA_CACHE:
+            for _k in [k for k in _CONFIG_SCHEMA_CACHE if k[0] == plugin_name]:
+                _CONFIG_SCHEMA_CACHE.pop(_k, None)
         # 待回放队列必须先摘：否则「注册 → 卸载 → replay」会把已删插件的卡复活
         # （僵尸卡，扫描期失败后 pending 残留同样会这样）
         pending = getattr(self, "_pending_config_cards", None)
@@ -2000,7 +2299,7 @@ class PluginManager:
 
         for mcp_file in self.get_mcp_configs():
             try:
-                content = json.loads(mcp_file.read_text(encoding="utf-8"))
+                content = json.loads(mcp_file.read_text(encoding="utf-8-sig"))
 
                 # 判断格式：有 mcpServers 键 → DriFoxx 格式；否则 → .claude-plugin 格式
                 if "mcpServers" in content:

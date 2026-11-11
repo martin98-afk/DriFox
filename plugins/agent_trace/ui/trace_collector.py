@@ -34,7 +34,7 @@ import traceback
 from typing import Any, Dict, List, Optional
 
 from loguru import logger
-from PySide6.QtCore import QObject, Signal
+from PySide6.QtCore import QObject, QTimer, Signal
 
 from .trace_models import (
     GAP_CAP_S,
@@ -59,6 +59,9 @@ _TS_CACHE: Dict[str, float] = {}
 # 工具结果写入都发生在最后几条消息上。一轮工具调用可长达 user +
 # assistant(tool_calls) + tool×N + assistant，取 8 覆盖绝大多数轮次。
 _KEEP_TAIL = 8
+
+# messages_updated 节流窗口（ms）：流式期每 tick 全量投影 500ms+，合并为 400ms 一次
+_SYNC_INTERVAL_MS = 400
 
 
 class TraceCollector(QObject):
@@ -103,26 +106,22 @@ class TraceCollector(QObject):
 
     @staticmethod
     def _self_pool(main_widget: Any):
-        """未拿到 ctx 能力池时按插件名自建（仍走能力池，不绕过）。
+        """未拿到 ctx 能力池时按插件名取池（仍走统一入口，不绕过声明裁剪）。
 
         生产路径由主程序注入 ctx["capabilities"]；这里是给"窗口已在但 ctx 还没到"
         与测试直调 attach 的场景兜底。构建失败返回 None = 不订阅。
+
+        用 ``pool_for`` 而不是手写 ``build_pool``：后者要插件自己拼 ``declared``，
+        等于自己给自己发权限（本插件曾漏声明 ui.events，声明形同虚设）。
         """
         if main_widget is None:
             return None
         try:
-            from app.plugins.capabilities.bootstrap import ensure_registered
-            from app.plugins.capabilities.registry import CapabilityRegistry
+            from app.plugins.sdk import pool_for
 
-            ensure_registered("ui")
-            return CapabilityRegistry.get_instance().build_pool(
-                surface="ui",
-                host=main_widget,
-                plugin="agent_trace",
-                declared={"stream.subscribe", "window.list"},
-            )
+            return pool_for("agent_trace", surface="ui", host=main_widget)
         except Exception as e:
-            logger.warning(f"[agent_trace] 自建能力池失败: {e}")
+            logger.warning(f"[agent_trace] 取能力池失败: {e}")
             return None
 
     def attach(self, backend: Any, main_widget: Any, capabilities: Any = None) -> None:
@@ -235,6 +234,17 @@ class TraceCollector(QObject):
             return None
 
     def _on_messages_updated(self, *_args: Any) -> None:
+        # 节流：流式期 messages_updated 每 tick 触发，_sync 全量投影长会话实测
+        # 500ms+（watchdog 2026-11-02 统计 94 次主线程阻塞，全部来源）。合并
+        # 高频触发为 400ms 一次：timing 表由实时信号独立写入，节流只延迟
+        # 投影显示不丢数据；tail 收尾延迟 ≤400ms 面板无感。
+        if getattr(self, "_sync_pending", False):
+            return
+        self._sync_pending = True
+        QTimer.singleShot(_SYNC_INTERVAL_MS, self._sync_after_throttle)
+
+    def _sync_after_throttle(self) -> None:
+        self._sync_pending = False
         try:
             self._sync()
         except Exception as e:

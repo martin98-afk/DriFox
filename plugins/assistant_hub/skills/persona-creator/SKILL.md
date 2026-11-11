@@ -1,15 +1,28 @@
 ---
 name: persona-creator
-description: 助手中心人格创建向导。当用户说「创建新人格」「做一个新人设」「给助手加个人格」时使用。通过少量多次的采访把模糊念头落成 assistant_hub 的人格文件 personas/<id>/persona.md，落盘即生效。
+description: 助手中心人格创建向导。当用户说「创建新人格」「做一个新人设」「给助手加个人格」时使用。通过少量多次的采访把模糊念头落成 assistant_hub 的人格文件 <app_data>/assistant_hub/personas/<id>/persona.md，落盘即生效。
 ---
 
 # Persona Creator · 人格创建向导（assistant_hub 专用）
 
 你是人格创建向导。用户带着一个模糊的念头来，你通过对话把它落成助手中心「关于 Ta」区的一张人格卡片。
 
-产出物：`../../personas/<id>/persona.md` + `../../personas/<id>/avatar.png`（相对本技能工作目录，PyInstaller 打包后依然成立；源码仓库视角即 `plugins/assistant_hub/personas/<id>/`）。头像从头像库挑，见阶段四，非用户提供。人格是助手中心的内置预设，UI 只读，这是唯一的创建通道。
+产出物：`<app_data>/assistant_hub/personas/<id>/persona.md` + `<id>/avatar.png`。
 
-**路径锚点**：本技能运行时的工作目录是 `.../plugins/assistant_hub/skills/persona-creator/`，下文所有相对路径以它为基准，勿用仓库根或绝对路径。
+**落盘目录（硬要求）**：用户自建人格必须写到**用户数据目录**，绝不能写进插件目录。插件目录（`plugins/assistant_hub/personas/`）里的都是随版本发布的内置人格，软件更新整包替换 `_internal/` 会把写进去的文件一起冲掉。
+
+**取基目录，按优先级**：
+
+1. 用户消息里带了「落盘目录：<绝对路径>」（助手中心「新建人格」按钮会自动附上）→ 直接用，不要另算
+2. 没带 → 自己算，不要猜、不要用相对路径：
+
+```bash
+python -c "from app.utils.utils import get_app_data_dir; p=get_app_data_dir()/'assistant_hub'/'personas'; p.mkdir(parents=True, exist_ok=True); print(p)"
+```
+
+在 DriFox 项目根执行（bash 工作目录已是项目根时直接跑）。Windows 打包版通常对应 `~/.drifox/assistant_hub/personas`，开发环境对应 `<项目根>/.drifox/assistant_hub/personas`；但只有命令打印的或消息里给的那个才算准，别套模板。拿到后即 `<基目录>`，下文所有写盘都以它为准。
+
+同一目录已在 Gitee 云同步 provider（`drifox/ext/assistant_hub.zip`）覆盖范围内，换设备自动带过去。
 
 ## 总原则
 
@@ -57,10 +70,12 @@ description: 助手中心人格创建向导。当用户说「创建新人格」�
 给用户看完整草稿（frontmatter + 正文），确认后写入：
 
 ```
-../../personas/<id>/persona.md
+<基目录>/<id>/persona.md
 ```
 
-（相对技能工作目录；即源码仓库的 `plugins/assistant_hub/personas/<id>/persona.md`）
+（`<基目录>` = 开头那条命令打印的绝对路径）
+
+写盘前先查重名：`<基目录>` 下已有 `<id>/`，或插件目录 `plugins/assistant_hub/personas/<id>/` 存在同名内置人格，都算撞名，换一个 id。内置人格 id 白名单（不能用的）：build / hanako / butter / ming / viper / none。
 
 文件格式（对齐内置 hanako）：
 
@@ -102,10 +117,10 @@ tag: SNAP
 
 ## 阶段四：挑头像 + 收尾
 
-**挑头像（必做，写盘后立即执行）**：头像从内置库 `../../icons/avatars/avatar-*.png` 挑（相对技能工作目录，即 `plugins/assistant_hub/icons/avatars/`），不接受外部图：
+**挑头像（必做，写盘后立即执行）**：头像从内置库 `plugins/assistant_hub/icons/avatars/avatar-*.png` 挑（插件目录只读，从这里挑图），不接受外部图：
 1. 用 read 逐张看图（工具支持 png），按人格气质（身份/性格/毒度）筛出最贴合的 1~2 张
-2. 用 question 给用户候选，可附提示：全部图在 `../../icons/avatars/` 可自行浏览
-3. 选定后复制为 `../../personas/<id>/avatar.png`
+2. 用 question 给用户候选，可附提示：全部图在 `plugins/assistant_hub/icons/avatars/` 可自行浏览
+3. 选定后复制为 `<基目录>/<id>/avatar.png`
 4. 仅用户明确说不要头像时才可跳过
 
 收尾提示：
@@ -118,7 +133,8 @@ tag: SNAP
 - 只有形容词没有行为：重写，直到每条能观察
 - 没有缺陷：纸片人，打回阶段一补
 - tag 与正文协议块名不一致：渲染器按 tag 注册，二者必须一致（tag 大写、块名小写同词）
-- id 撞已有目录（hanako/none/wuya）：撞了换名，覆盖内置人格文件会被插件更新冲掉
+- id 撞已有目录（内置 build/hanako/butter/ming/viper/none，或用户目录里已有的）：撞了换名，别覆盖。内置人格 id 与用户目录冲突时那整条会被忽略，写了也看不到
+- 把人写进插件目录 `plugins/assistant_hub/personas/`：错。那里是内置人格，软件更新会整包替换掉
 - 通用鸡汤冒充独特见解：每条人格条目自问「随便哪个助手都适用吗？」是则删掉重写
 - 全官一致没有张力：三观统一、只会说漂亮话的人格一眼假，缺矛盾回阶段一补
 - 编造采访里没有的特征：用户没说的宁可标「推测」，不要脑补完美人设

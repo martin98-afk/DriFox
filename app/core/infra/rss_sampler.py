@@ -46,12 +46,21 @@ _DEFAULT_MAX_STALE_S = 10.0
 class _RssSample:
     """一次采样的结果快照（不可变语义，便于无锁读取）。"""
 
-    __slots__ = ("rss_mb", "web_rss_mb", "at")
+    __slots__ = ("rss_mb", "web_rss_mb", "at", "web_by_pid")
 
-    def __init__(self, rss_mb: float, web_rss_mb: float, at: float):
+    def __init__(
+        self,
+        rss_mb: float,
+        web_rss_mb: float,
+        at: float,
+        web_by_pid: Optional[dict] = None,
+    ):
         self.rss_mb = rss_mb
         self.web_rss_mb = web_rss_mb
         self.at = at
+        # T22 动态阈值闸门用：每个 WebEngine 子进程的 RSS（MB），{pid: mb}。
+        # 与 web_rss_mb 同一次遍历顺带记录，零额外采样成本；不可用时为 None。
+        self.web_by_pid = web_by_pid
 
 
 class RssSampler:
@@ -109,6 +118,18 @@ class RssSampler:
         s = self._current_sample()
         return s.web_rss_mb if s else 0.0
 
+    def web_rss_by_pid(self) -> dict:
+        """按 pid 的 WebEngine 子进程 RSS 映射（MB）。
+
+        T22 动态阈值闸门用：回收排序需要「重的 renderer 优先」。与
+        web_rss_mb 同一次采样产出，主线程读取零 psutil 开销。
+        不可用时返回空 dict（调用方退化为不按权重排序）。
+        """
+        s = self._current_sample()
+        if s and s.web_by_pid:
+            return dict(s.web_by_pid)
+        return {}
+
 
     # ── 内部实现 ──────────────────────────────────────────────
     def _current_sample(self) -> Optional[_RssSample]:
@@ -158,16 +179,19 @@ class RssSampler:
             rss_mb = self_proc.memory_info().rss / (1024 * 1024)
 
             web_total = 0.0
+            web_by_pid = {}
             for child in self_proc.children(recursive=True):
                 try:
                     name = (child.name() or "").lower()
                     if "qwebengine" in name or "webengine" in name or "chrome" in name:
-                        web_total += child.memory_info().rss / (1024 * 1024)
+                        mb = child.memory_info().rss / (1024 * 1024)
+                        web_total += mb
+                        web_by_pid[child.pid] = mb
                 except Exception:
                     continue
-            return _RssSample(rss_mb, web_total, now)
+            return _RssSample(rss_mb, web_total, now, web_by_pid)
         except Exception:
-            return _RssSample(0.0, 0.0, now)
+            return _RssSample(0.0, 0.0, now, {})
 
 
 # 进程级单例

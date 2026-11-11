@@ -158,14 +158,12 @@ class TestN3ResolveChain:
             result = mc.resolve_max_output_tokens({"最大Token": 200000, "模型名称": "m"})
             assert result == 8192, f"旧键不应被当输出上限，实际 {result}"
 
-    def test_history_compactor_gets_caps_value(self):
-        """N3：history_compactor.get_budget 经 resolve 链拿到 caps 值（预留随之变化）"""
-        from app.core.context.history_compactor import HistoryCompactor
+    def test_context_budget_gets_caps_value(self):
+        """N3：resolve_context_budget 经 resolve 链拿到 caps 值（预留随之变化）"""
+        from app.core.context.budget import resolve_context_budget
 
         with patch.object(mc, "resolve_max_output_tokens", return_value=524288):
-            compactor = HistoryCompactor.__new__(HistoryCompactor)
-            compactor._get_model_config = lambda: {"模型名称": "space-bunny"}
-            budget = compactor.get_budget({"模型名称": "space-bunny", "最大Token": 1000000})
+            budget = resolve_context_budget({"模型名称": "space-bunny", "最大Token": 1000000})
             # context_limit=1000000（L1 显式），reserved = min(800, 524288) = 800（非 o1/o3）
             assert budget == 1000000 - 800
 

@@ -2,7 +2,7 @@
 """tool surface 能力补齐：catalog 标 _BOTH 的能力在工具侧必须取得到。
 
 背景：tool_core 原先只注册 9 条，catalog 里 12 条 _BOTH 能力（model.* /
-session.* / agent.read / workdir.read / context.compact / tool.execute /
+session.* / agent.read / workdir.read / tool.execute /
 plugin.log）在工具侧一律 CapabilityDenied——插件声明了不报错，取用才炸。
 本测试锁死「登记即实现」，并按 surface 分别断言各 surface 的 provider 集合。
 
@@ -251,24 +251,6 @@ def test_workdir_read():
     assert pool["workdir.read"]() == "/tmp/wd"
 
 
-def test_context_compactor():
-    pool = _pool({"context.compact"})
-    assert pool["context.compact"] == "COMPACTOR"
-
-
-def test_context_compactor_none_without_engine():
-    from app.plugins.capabilities.bootstrap import ensure_registered
-    from app.plugins.capabilities.registry import CapabilityRegistry
-
-    ensure_registered("tool")
-    ex = _make_executor()
-    ex._backend.chat_engine = None
-    pool = CapabilityRegistry.get_instance().build_pool(
-        surface="tool", host=ex, plugin="demo", declared={"context.compact"}
-    )
-    assert pool["context.compact"] is None
-
-
 # ──────────────── tool.execute / plugin.log ────────────────
 
 
@@ -322,7 +304,6 @@ def test_undeclared_compat_grants_all_tool_caps():
         "session.read",
         "session.write",
         "workdir.read",
-        "context.compact",
         "tool.execute",
         "plugin.log",
     } <= set(pool.names())

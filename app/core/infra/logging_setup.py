@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 from collections.abc import Callable
 from pathlib import Path
@@ -74,7 +75,6 @@ LOG_ROUTES: list[tuple[str, tuple[str, ...], tuple[str, ...]]] = [
             "app.core.context.builder",
             "app.core.context.usage",
             "app.core.hooks.hook_manager",
-            "app.core.context.history_compactor",
             "app.core.conversation.memory_manager",
             "app.core.infra.token_estimator",
             "app.core.modelmeta.models_dev_sync",
@@ -169,14 +169,43 @@ def _install_stdlib_logging_bridge() -> None:
     root._drifox_loguru_bridge = True  # type: ignore[attr-defined]
 
 
+def _resolve_sink_level() -> str:
+    """解析 sink 落盘级别（打包版默认 INFO，源码版 DEBUG）。
+
+    动机（2026-10-31 运行日志实测）：主线程卡在建标签页链路时，栈顶落在
+    ``loguru._handler.emit → multiprocessing.queues.put → _send_bytes``，
+    阻塞 521ms。``enqueue=True`` 只把**写盘**转后台，入队这一步仍走
+    ``SimpleQueue``（底层匿名 pipe）——管道满时 put 会阻塞，阻塞的是主线程。
+    日志量越大，管道越容易满。
+
+    打包版面向终端用户：他们不需要 DEBUG，只需要出事时有 INFO 以上的上下文。
+    降到 INFO 后单条日志量大幅下降（实测本地某次会话 DEBUG 占 97%），
+    管道满的概率随之下降，顺带减少磁盘占用。源码版（开发/排障）保持 DEBUG。
+
+    覆盖方式：
+    - ``DRIFOX_LOG_LEVEL=DEBUG``：强制指定级别（打包版排障用）
+    - ``DRIFOX_LOG_LEVEL=TRACE``：需要更细粒度时
+    """
+    forced = os.environ.get("DRIFOX_LOG_LEVEL", "").strip().upper()
+    if forced:
+        return forced
+    return "INFO" if getattr(sys, "frozen", False) else "DEBUG"
+
+
 def setup_logging(log_dir: Path, mem_diag_enabled: bool = False) -> None:
     """配置全量日志 + 分系统日志 + 内存诊断日志。
 
     - ``all.log``：全量兜底，10 MB 轮转并保留历史，供跨系统时间线排查。
     - 分文件：每日 0 点轮转，仅保留近七天，方便跨周回溯崩溃前的日志链。
     - ``mem_diag.log``：内存诊断（消息含 ``[MEM]``），受 ``mem_diag_enabled`` 控制。
+
+    落盘级别由 ``_resolve_sink_level()`` 决定（打包版 INFO / 源码版 DEBUG）。
+    loguru 在遍历 handler 时对低于 handler.levelno 的记录直接 continue，
+    既不格式化也不入队，所以降级后高频 DEBUG 调用的成本基本只剩参数拼接。
     """
     log_dir.mkdir(parents=True, exist_ok=True)
+
+    sink_level = _resolve_sink_level()
 
     # 标准 logging 接管（第三方库/插件日志 → loguru，链路见函数注释）。
     # 必须在加 sink 前安装：转发器只做转投，落盘由下面的 sink 决定。
@@ -221,7 +250,7 @@ def setup_logging(log_dir: Path, mem_diag_enabled: bool = False) -> None:
         "all.log",
         sink=log_dir / "all.log",
         rotation="10 MB",
-        level="DEBUG",
+        level=sink_level,
         format=LOG_FORMAT,
         enqueue=True,
     )
@@ -233,7 +262,7 @@ def setup_logging(log_dir: Path, mem_diag_enabled: bool = False) -> None:
             sink=log_dir / file_name,
             rotation="00:00",
             retention="7 days",
-            level="DEBUG",
+            level=sink_level,
             format=LOG_FORMAT,
             filter=make_module_filter(include, exclude),
             enqueue=True,
@@ -245,7 +274,7 @@ def setup_logging(log_dir: Path, mem_diag_enabled: bool = False) -> None:
             "mem_diag.log",
             sink=log_dir / "mem_diag.log",
             rotation="10 MB",
-            level="DEBUG",
+            level=sink_level,
             format=LOG_FORMAT,
             filter=lambda r: "[MEM]" in r["message"],
             enqueue=True,

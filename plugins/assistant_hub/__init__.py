@@ -17,7 +17,7 @@ persona / pinned）"数据模型，并把 WorkBuddy 的双层记忆体系（全�
 
 2. **存储布局**
    每个助手存放在 ``<app_data_dir>/assistant_hub/<assistant_id>/``：
-   - assistant.yaml               — 元数据（name / yuan / color / 主助手标记 / model 覆盖）
+   - assistant.yaml               — 元数据（name / yuan / color / 主助手标记 / 工具档位 / 记忆开关）
    - AGENTS.public.md             — 对外人格（无须内部细节时使用）
    - pinned.md                    — 人工提示（手动添加，永不衰减）
    - MEMORY.md                    — 全局记忆（跨项目，模型经 memory_write 维护）
@@ -25,8 +25,9 @@ persona / pinned）"数据模型，并把 WorkBuddy 的双层记忆体系（全�
    - MEMORY.md                    — 项目长期笔记
    - YYYY-MM-DD.md                — 每日工作日志（append-only）
    - avatars/assistant.{png,jpg,…} — 头像（被 QSS 渲染为圆形）
-   人格（persona）只读内置，存 ``plugins/assistant_hub/personas/<id>/persona.md``，
-   新增人格走 persona-creator 技能，不做 UI 编辑。
+   人格（persona）分两层：内置人格存 ``plugins/assistant_hub/personas/<id>/persona.md``
+   （随版本发布，只读）；用户自建存 ``<app_data>/assistant_hub/personas/<id>/persona.md``
+   （跟云同步走，软件更新不会覆盖）。新增人格走 persona-creator 技能，不做 UI 编辑。
 
 3. **UI 入口**
    full 容器浮动卡 ``assistant_hub``（上方助手弧形卡片堆叠，下方单列分区：

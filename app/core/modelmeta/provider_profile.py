@@ -221,14 +221,36 @@ def resolve_extra_headers(
             if value is None:
                 continue
             # 可调用值 = 动态头：按当前请求的 llm_config 取值
-            # （如 CodeBuddy 按各配置的 refresh_token 换 access_token）
-            headers[str(name)] = str(value(llm_config)) if callable(value) else str(value)
+            # （如 CodeBuddy 按各配置的 refresh_token 换 access_token）。
+            # 求值后为 None = 本次请求不发送该头：OpenCode Go 无 workspace 时
+            # 空值 x-opencode-org-id 会被网关判 400 且响应体为空（2026-11-08 实测），
+            # 日志只剩 "Error response body:" 无法归因。空串仍照发（保留
+            # 「空 Authorization → 网关 401」的既有语义）。
+            resolved = value(llm_config) if callable(value) else value
+            if resolved is None:
+                continue
+            headers[str(name)] = str(resolved)
     if session_id:
         header = profile.get("session_header")
         if header:
             headers[str(header)] = session_id
     return headers
 
+
+def resolve_auth_error_hook(llm_config: Optional[Dict[str, Any]] = None) -> Optional[Any]:
+    """服务商插件声明的 401 自愈钩子（capabilities.auth_error_hook）；无声明返回 None。
+
+    钩子签名 ``hook(llm_config) -> bool``：True = 已换到新凭据，调用方可重试；
+    False = 无法自愈，调用方按原错误抛出。OAuth 类服务商的 access_token 可能
+    在本地过期时间之前被服务端吊销（OpenCode 实测），仅靠时间判定刷新永远
+    等不到，故由执行层在收到 401 时回调。
+    """
+    try:
+        profile = get_provider_profile(llm_config or {})
+    except Exception:
+        return None
+    hook = profile.get("auth_error_hook")
+    return hook if callable(hook) else None
 
 def resolve_token_ratio(llm_config: Optional[Dict[str, Any]] = None, model: Optional[str] = None) -> float:
     """解析本地 token 估算的模型校正系数（除数）。

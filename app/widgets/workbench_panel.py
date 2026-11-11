@@ -314,9 +314,31 @@ class WorkbenchPanel(QWidget):
         # 关页前收敛：slide 目标页可能就是被移除的这张卡
         self._slide.finish_now()
         widget = entry["widget"]
-        if self._stack.indexOf(widget) >= 0:
-            self._stack.removeWidget(widget)
-            widget.setParent(None)
+        # 🛡️ 热重载防崩（2026-11-03 crash_20261103_152810）：含 QWebEngineView 的
+        # 页面在可见态被 removeWidget 摘出栈，会同步触发 Chromium 绑定层销毁链
+        # （Qt5WebEngineWidgets.dll 经 ctypes/libffi 读 0x0 → ACCESS_VIOLATION）。
+        # 摘除前先 hide + 脱父树收敛可见性/父子链，再摘出栈；sip 已标记 deleted
+        # 的 wrapper 跳过全部 Qt 侧操作（C++ 析构时 QStackedLayout 自清条目）。
+        # 刻意不用 ui_helpers.is_widget_alive：其模块链会拉起 MessageCard/WebEngine，
+        # 此处只需 sip.isValid 一个判定，避免重依赖。
+        import shiboken6 as sip
+
+        try:
+            wrapper_deleted = not sip.isValid(widget)
+        except Exception:
+            wrapper_deleted = False
+
+        if not wrapper_deleted:
+            try:
+                if self._stack.indexOf(widget) >= 0:
+                    widget.hide()
+                    widget.setParent(None)
+                    # 脱父树后 QStackedLayout 通常已自清条目，此兜底防实现差异
+                    if self._stack.indexOf(widget) >= 0:
+                        self._stack.removeWidget(widget)
+            except RuntimeError:
+                # wrapper 已被并发析构：Qt 侧条目自清，只走下方簿记收尾
+                pass
         self._rebuild_tab_bar()
         # 当前页被移除时 QStackedWidget 已自动切到邻近页，这里同步按钮高亮；
         # 极端情况（空栈）回落产物页
@@ -877,8 +899,15 @@ class WorkbenchPanel(QWidget):
         self._page_owner[info.page_id] = getattr(info, "plugin_name", "") or ""
         # 挂载点补刷：页面构造可能早于主题应用（启动期插件加载先于 Colors 就绪），
         # 构造期固化的 QSS 是旧主题色；此后无人再通知它。
+        # 刷完记纪元，切页补刷时不会对同一页白刷第二遍。
         if hasattr(widget, "refresh_style"):
             widget.refresh_style()
+        try:
+            from app.utils.theme_style import stamp_theme_epoch
+
+            stamp_theme_epoch(widget)
+        except Exception:
+            pass
         # 通用信号接线（页面若定义 workingDirChanged 则转发为面板同名信号）
         self._wire_page_signals(widget)
 
@@ -939,6 +968,15 @@ class WorkbenchPanel(QWidget):
             self.current_tab_changed.emit(index)
         if changed and not switched:
             self.refresh_current_page_data()
+        # 切页补刷外观：目标页在主题切换期间是隐藏的（只置脏没刷），
+        # 这里补到当前纪元。用 widget(index) 取目标页而非 currentWidget()：
+        # 滑动段1 期间 stack 仍是旧页，取 currentWidget 会刷错页。
+        try:
+            from app.utils.theme_style import ensure_theme_fresh
+
+            ensure_theme_fresh(self._stack.widget(index))
+        except RuntimeError:
+            pass
 
     def current_tab(self) -> int:
         """当前页签索引（滑动段1 期间即目标页，跟随用户点击而非 stack 实际页）"""
@@ -966,31 +1004,32 @@ class WorkbenchPanel(QWidget):
         # 面板统一分发；无 refresh_style 的插件页跳过。
         # 分发后追加 replay_theme_qss 兜底：重放页面上登记过的 QSS 工厂，
         # 覆盖渲染期动态创建、refresh_style 未枚举到的控件（空态标签/分页按钮等）。
-        from app.utils.theme_style import replay_theme_qss
+        #
+        # [PERF] 可见性分流：只有当前页付整棵子树 repolish，隐藏页仅置脏
+        # （QStackedWidget 非当前页 isVisible() 为 False，判据可靠）。隐藏页
+        # 在 set_current_tab 切到时由 ensure_theme_fresh 补刷，正确性由外观
+        # 纪元比对保证——不再需要「全量刷」来兕住隐藏页不自愈的问题。
+        from app.utils.theme_style import ensure_theme_fresh, mark_theme_dirty
 
         for widget in self._plugin_widgets.values():
-            if hasattr(widget, "refresh_style"):
-                try:
-                    widget.refresh_style()
-                except Exception:  # noqa: BLE001
-                    logger.exception(f"[WorkbenchPanel] 插件页主题刷新失败: {type(widget).__name__}")
             try:
-                replay_theme_qss(widget)
-            except Exception:  # noqa: BLE001
-                logger.exception(f"[WorkbenchPanel] 插件页 QSS 重放失败: {type(widget).__name__}")
+                if widget.isVisible():
+                    ensure_theme_fresh(widget)
+                else:
+                    mark_theme_dirty(widget)
+            except RuntimeError:
+                continue  # C++ 对象已销毁
         for entry in self._card_tabs.values():
             widget = entry.get("widget")
             if widget is None:
                 continue
-            if hasattr(widget, "refresh_style"):
-                try:
-                    widget.refresh_style()
-                except Exception:  # noqa: BLE001
-                    logger.exception(f"[WorkbenchPanel] 卡片页主题刷新失败: {type(widget).__name__}")
             try:
-                replay_theme_qss(widget)
-            except Exception:  # noqa: BLE001
-                logger.exception(f"[WorkbenchPanel] 卡片页 QSS 重放失败: {type(widget).__name__}")
+                if widget.isVisible():
+                    ensure_theme_fresh(widget)
+                else:
+                    mark_theme_dirty(widget)
+            except RuntimeError:
+                continue
 
     def refresh_theme(self) -> None:
         """ThemeManager 协议入口（dispatch_refresh 只认 refresh_theme）

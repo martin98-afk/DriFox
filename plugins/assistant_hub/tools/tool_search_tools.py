@@ -388,11 +388,10 @@ _EXECUTE_SCHEMA = {
     "function": {
         "name": "tool_execute",
         "description": (
-            "中转执行工具：调用通过 tool_search 搜到、但不在你当前工具列表里的工具。"
-            "API 只允许调用本次请求 tools 列表里的工具，所以未注入 schema 的工具必须经本工具中转。"
-            "用法：tool_name 给精确工具名（含别名、MCP 全名 mcp__服务__工具），"
-            "arguments 给参数对象（按 tool_search 返回的 Parameters 传，无参传 {}）。"
-            "已在工具列表里的工具直接调用，不要经本工具。"
+            "中转执行工具：调用 tool_search 搜到但不在当前工具列表里的工具"
+            "(API 只允许调用本次请求 tools 列表里的工具，未注入 schema 的必须经此中转)。"
+            "tool_name 给精确名(含别名、MCP 全名 mcp__服务__工具)，arguments 按 schema 的 Parameters 传，无参传 {}。"
+            "已在列表里的工具直接调用，勿走中转。"
         ),
         "parameters": {
             "type": "object",
@@ -400,7 +399,7 @@ _EXECUTE_SCHEMA = {
                 "tool_name": {"type": "string", "description": "要执行的工具名（精确名，含别名；MCP 用全名）"},
                 "arguments": {
                     "type": "object",
-                    "description": "工具参数对象（按其 schema 的 Parameters 传，无参传 {}）",
+                    "description": "工具参数对象(按其 schema 的 Parameters 传，无参传 {})",
                 },
             },
             "required": ["tool_name"],
@@ -414,11 +413,9 @@ _SCHEMA = {
     "function": {
         "name": _SELF_NAME,
         "description": (
-            "按名称或描述搜索可用工具，返回工具的完整定义（schema）。"
-            "搜到后用 tool_execute(tool_name, arguments) 调用。"
-            "当需要的能力不在你当前的工具列表里（被权限档位裁剪、或 MCP 工具未列出）时，"
-            "先用本工具搜索：queries 给中英文关键词，tool_names 给精确工具名。"
-            "不确定存在哪些工具时用 mode=list 先列名录。"
+            "按名称或描述搜工具，返回完整定义(schema)。搜到后用 tool_execute(tool_name, arguments) 调用。"
+            "需要的能力不在当前工具列表(被权限档位裁剪或 MCP 未列出)时先用它：queries 给中英文关键词，tool_names 给精确名。"
+            "不确定有哪些工具时 mode=list 先列名录。"
         ),
         "parameters": {
             "type": "object",
@@ -426,19 +423,19 @@ _SCHEMA = {
                 "mode": {
                     "type": "string",
                     "enum": ["search", "list"],
-                    "description": "search=按条件搜索并返回完整定义（默认）；list=列出全部工具名录（分组+名称+一句话描述，不含参数定义）",
+                    "description": "search=按条件搜并返回完整定义(默认)；list=列全部工具名录(分组+名称+一句话描述)",
                 },
                 "queries": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": '关键词数组（建议中英文各写一份，如 ["文件搜索", "file search"]）；多词任一命中即返回',
+                    "description": '关键词数组(中英文各写一份，如 ["文件搜索", "file search"])；多词任一命中即返回',
                 },
                 "tool_names": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "精确工具名数组（含别名；MCP 用全名 mcp__服务__工具）",
+                    "description": "精确工具名数组(含别名；MCP 用全名 mcp__服务__工具)",
                 },
-                "top_k": {"type": "integer", "description": "返回完整定义的数量上限（默认 5，最大 20）"},
+                "top_k": {"type": "integer", "description": "返回完整定义的数量上限(默认 5，最大 20)"},
             },
         },
     },

@@ -12,7 +12,7 @@ import orjson as json
 from loguru import logger
 
 from app.tools.registry import DEFAULT_FALLBACK_ICON
-from app.utils.design_tokens import Colors, _get_global_font, scale_font_size
+from app.utils.design_tokens import _get_global_font, scale_font_size
 from app.utils.utils import get_font_family_css
 
 # 行内 diff 高亮子系统已抽取至 app/utils/diff_highlight（消除 utils→widgets 反向依赖）。
@@ -78,8 +78,6 @@ _CODE_BLOCK_FINAL_PATTERN = re.compile(r"```")
 _HTML_CODE_BLOCK_PATTERN = re.compile(r"<(pre|code)[^>]*>.*?</\1>", re.DOTALL | re.IGNORECASE)
 # HTML 标签清理正则（避免每次调用 re.sub）
 _HTML_TAG_PATTERN = re.compile(r"<[^>]+>")
-# UUID 模式（用于提取 task_id）
-_UUID_PATTERN = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.IGNORECASE)
 # Null 字符清理（编译一次，多次使用）
 _NULL_CHAR = "\x00"  # 避免 str.replace 被重复调用
 
@@ -281,34 +279,6 @@ def _format_unified_table(
         )
 
     return f'<div class="args-table">{"".join(rows)}</div>'
-
-
-def _parse_subagent_task_ids(result: str) -> str:
-    """
-    解析 result 中的 task_ids，返回逗号分隔的字符串。
-    """
-    if not result:
-        return ""
-
-    # 尝试解析 JSON
-    try:
-        data = json.loads(result)
-        if isinstance(data, dict):
-            task_ids = data.get("task_ids", [])
-            if task_ids:
-                return ",".join(task_ids)
-        elif isinstance(data, list):
-            return ",".join(data)
-    except (json.JSONDecodeError, TypeError):
-        pass
-
-    # 尝试从文本中提取 task_id（UUID 格式）
-    # 使用预编译的 _UUID_PATTERN
-    matches = _UUID_PATTERN.findall(result)
-    if matches:
-        return ",".join(matches)
-
-    return ""
 
 
 _HUNK_HEADER_RE = re.compile(r"^@@ -(\d+),?\d* \+(\d+),?\d* @@(.*)")
@@ -762,7 +732,7 @@ def _render_inline_tool(
             </span>
             <span style="white-space: nowrap; flex: 0 0 auto; color: #FFA500; font-size: {scale_font_size(13)}px; font-weight: 500;">{escape(cn_name)}</span>
         </span>
-        <span style="flex: 1 1 auto; min-width: 0; text-align: left; color: {Colors.TEXT_SECONDARY}; font-size: {scale_font_size(11)}px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-left: 12px;">
+        <span style="flex: 1 1 auto; min-width: 0; text-align: left; color: var(--text-secondary); font-size: {scale_font_size(11)}px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-left: 12px;">
             {escape(natural_preview)}
         </span>
     </div>"""
@@ -876,15 +846,25 @@ def render_tool_block(
     tool_call_id: str = None,
     diff: str = None,
     echarts: str = None,
+    lazy_body: bool = False,
+    body_only: bool = False,
 ) -> str:
-    """渲染工具块，参数横向表格展示（左列参数名，右列结果值）"""
+    """渲染工具块，参数横向表格展示（左列参数名，右列结果值）
+
+    lazy_body：折叠态 body 只留空占位，内容完全不构造。折叠只是
+        `.cm-collapsible__body{height:0}` 的视觉隐藏，节点照样进 DOM，而工具块
+        body 是 DOM 内存大头（pygments 高亮实测膨胀 12.7 倍：12KB diff → 154KB
+        HTML + 3200 个 span）。展开时由 viewer 从 markdown 反查该块重渲染后注入
+        （见 card_viewers 的 tool_body 通道 / window._fillToolBody）。
+    body_only：只返回 body 内部 HTML（不含外层块与 header），供懒注入取内容。
+    """
 
     _gf = _get_global_font()  # 用户主题全局字体
 
     # 检测是否为 MCP 工具（mcp__ 前缀，动态发现工具；固定工具走 registry 图标）
     is_mcp_tool = tool_name.startswith("mcp__")
 
-    # 子智能体任务检测：插件注册 metadata["subagent_task"]=True 声明（表格语义 + 日志按钮）
+    # 子智能体任务检测：插件注册 metadata["subagent_task"]=True 声明（表格语义 + 图标配色）
     # 历史消息中的旧名 task（现为 subagent_para 的 alias）经 to_native 归一化后命中
     try:
         from app.tools.registry import ToolRegistry
@@ -951,22 +931,6 @@ def render_tool_block(
                 <span class="tool-diff-stats__del" style="color: #f85149; font-weight: 600;">-{deleted}</span>
             </span>"""
 
-    # 子智能体日志查看按钮
-    subagent_log_btn_html = ""
-    if is_sub_agent_task:
-        # 解析 task_ids
-        task_ids_str = _parse_subagent_task_ids(result)
-        if task_ids_str:
-            subagent_log_btn_html = f'''
-        <span class="tool-subagent-log-btn" data-task-ids="{escape(task_ids_str)}"
-            role="button" tabindex="0"
-            style="display: inline-flex; align-items: center; justify-content: center; flex: 0 0 auto; background: transparent; cursor: pointer; padding: 4px; margin-left: 8px; border-radius: 4px; position: relative;"
-            onclick="event.stopPropagation(); window._requestSubAgentLog(this.dataset.taskIds)"
-            onkeydown="if(event.key === 'Enter' || event.key === ' '){{ event.preventDefault(); event.stopPropagation(); window._requestSubAgentLog(this.dataset.taskIds); }}"
-            data-tooltip="查看子智能体执行日志">
-            <img src="qrc:/icons/日志.svg" style="width: 16px; height: 16px;" />
-        </span>'''
-
     # 生成参数预览（折叠时显示）
     # 优先使用插件 preview 闭包（自然语言预览），无匹配时 fallback 到 key=value 格式
     natural = _format_natural_preview(tool_name, tool_args)
@@ -975,6 +939,53 @@ def render_tool_block(
     # 去重：自然语言预览开头如与工具名重复则省略
     if args_preview.startswith(cn_name):
         args_preview = args_preview[len(cn_name) :].lstrip()
+
+    # 生成哈希 key（折叠块懒注入的早返回也要用，故提前到内容构造之前）
+    block_seed = "|".join(
+        [
+            str(tool_name or ""),
+            json.dumps(tool_args or {}, option=json.OPT_SORT_KEYS).decode("utf-8"),
+            str(result or ""),
+            str(success),
+        ]
+    )
+    block_key = "tool-" + hashlib.sha1(block_seed.encode("utf-8")).hexdigest()[:12]
+
+    # ── 不可见工具块懒注入：内容一律不构造，body 只留空占位 ──
+    # 两种形态都懒：
+    #   折叠态（cm-collapsible，body 是 height:0 的隐藏层）→ 点击 summary 时注入；
+    #   无折叠态（render_mode="expand"，body 本应常展开）→ 工具区整体折叠时
+    #     用户同样看不到，展开工具区时批量注入（历史卡典型场景）。
+    # 无 tool_call_id 的块无法反查源文本，不懒化（否则展开后永久空白）。
+    if lazy_body and tool_call_id and (collapsed or no_collapse):
+        _keep_attr = ' data-keep-in-content="true"' if tool_name in _keep_in_content_tools() else ""
+        _head_spans = f"""<span style="display: inline-flex; align-items: center; gap: 14px; flex: 0 0 auto;">
+            <span style="position:relative;display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;flex:0 0 auto;">
+                {icon_html}
+                {badge_html}
+            </span>
+            <span style="white-space: nowrap; flex: 0 0 auto; {get_font_family_css()}">{escape(cn_name)}</span>
+        </span>
+        <span style="display: flex; align-items: center; gap: 8px; margin-left: 10px; min-width: 0; flex: 1 1 auto; justify-content: flex-start; overflow: hidden;">
+            <span style="color: var(--text-secondary); font-size: {scale_font_size(11)}px; text-align: left; word-break: break-all; white-space: normal; line-height: 1.4; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;">
+                {escape(args_preview)}
+            </span>
+            {diff_stats_html}
+        </span>"""
+        if no_collapse:
+            return f"""<div class="tool-block tool-block--no-collapse" data-block-key="{block_key}" data-lazy-body="1" data-tool-name="{escape(tool_name)}" data-tool-call-id="{escape(tool_call_id or "")}"{_keep_attr} style="margin: 4px 0; background: transparent; border-radius: 6px;">
+    <div class="tool-block__header" style="cursor: default; padding: 4px 8px; color: {title_color}; font-size: {scale_font_size(13)}px; font-weight: 500; display: flex; align-items: center; gap: 6px; width: 100%; background: transparent; border: none; text-align: left; box-sizing: border-box; {get_font_family_css()}">
+        {_head_spans}
+    </div>
+    <div class="tool-block__body" style="padding: 0 8px 4px;"></div>
+</div>"""
+        return f"""<div class="cm-collapsible tool-block" data-block-key="{block_key}" data-expanded="false" data-lazy-body="1" data-tool-name="{escape(tool_name)}" data-tool-call-id="{escape(tool_call_id or "")}"{_keep_attr} style="margin: 4px 0; background: transparent; border-radius: 6px;">
+    <button type="button" class="cm-collapsible__summary tool-block__summary" aria-expanded="false" style="cursor: pointer; padding: 4px 8px; color: {title_color}; font-size: {scale_font_size(13)}px; font-weight: 500; display: flex; align-items: center; gap: 6px; width: 100%; background: transparent; border: none; text-align: left; box-sizing: border-box; {get_font_family_css()}">
+        {_head_spans}
+        <span class="cm-collapsible__chevron" aria-hidden="true" style="flex: 0 0 auto; margin-left: auto;"></span>
+    </button>
+    <div class="cm-collapsible__body" style="height:0;opacity:0;overflow:hidden;"></div>
+</div>"""
 
     # ── inline diff 预览区（编辑类工具：全部由插件 render 闭包渲染） ──
     # 主程序不做任何 diff 渲染兜底：工具有 diff 时插件闭包负责输出（如 edit/
@@ -1071,18 +1082,12 @@ def render_tool_block(
             {diff_html}
         </div>"""
 
-    # 生成哈希 key
-    block_seed = "|".join(
-        [
-            str(tool_name or ""),
-            json.dumps(tool_args or {}, option=json.OPT_SORT_KEYS).decode("utf-8"),
-            str(result or ""),
-            str(success),
-        ]
-    )
-    block_key = "tool-" + hashlib.sha1(block_seed.encode("utf-8")).hexdigest()[:12]
     expanded_attr = "false" if collapsed else "true"
     body_style = "" if collapsed else ' style="height:auto; opacity:1;"'
+
+    # 只取 body 内容（懒注入通道用）：不含外层块与 header
+    if body_only:
+        return expanded_content
 
     if no_collapse:
         # 禁用折叠框渲染：无 cm-collapsible 交互，标题栏 + body 直接展示
@@ -1097,11 +1102,10 @@ def render_tool_block(
             <span style="white-space: nowrap; flex: 0 0 auto; {get_font_family_css()}">{escape(cn_name)}</span>
         </span>
         <span style="display: flex; align-items: center; gap: 8px; margin-left: 10px; min-width: 0; flex: 1 1 auto; justify-content: flex-start; overflow: hidden;">
-            <span style="color: {Colors.TEXT_SECONDARY}; font-size: {scale_font_size(11)}px; text-align: left; word-break: break-all; white-space: normal; line-height: 1.4; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;">
+            <span style="color: var(--text-secondary); font-size: {scale_font_size(11)}px; text-align: left; word-break: break-all; white-space: normal; line-height: 1.4; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;">
                 {escape(args_preview)}
             </span>
             {diff_stats_html}
-            {subagent_log_btn_html}
         </span>
     </div>
     <div class="tool-block__body" style="padding: 0 8px 4px;">
@@ -1120,11 +1124,10 @@ def render_tool_block(
             <span style="white-space: nowrap; flex: 0 0 auto; {get_font_family_css()}">{escape(cn_name)}</span>
         </span>
         <span style="display: flex; align-items: center; gap: 8px; margin-left: 10px; min-width: 0; flex: 1 1 auto; justify-content: flex-start; overflow: hidden;">
-            <span style="color: {Colors.TEXT_SECONDARY}; font-size: {scale_font_size(11)}px; text-align: left; word-break: break-all; white-space: normal; line-height: 1.4; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;">
+            <span style="color: var(--text-secondary); font-size: {scale_font_size(11)}px; text-align: left; word-break: break-all; white-space: normal; line-height: 1.4; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;">
                 {escape(args_preview)}
             </span>
             {diff_stats_html}
-            {subagent_log_btn_html}
         </span>
         <span class="cm-collapsible__chevron" aria-hidden="true" style="flex: 0 0 auto; margin-left: auto;"></span>
     </button>

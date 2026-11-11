@@ -62,30 +62,28 @@ def test_card_renders_and_styles_all_risk_levels(risk):
 def test_countdown_lifecycle():
     """倒计时启停：徽标显隐 + 文本随阈值降级"""
     card = _make_card("warn")
-    assert not card._countdown_label.isVisibleTo(card)
+    assert not card._countdown_chip.isVisibleTo(card)
 
     card.start_countdown(120)
-    assert card._countdown_label.isVisibleTo(card)
-    assert "120" in card._countdown_label.text()
-    assert card._countdown_label.property("level") == "normal"
+    assert card._countdown_chip.isVisibleTo(card)
+    assert card._countdown_chip._level() == "normal"
 
     card._countdown_left = 30
     card._render_countdown()
-    assert card._countdown_label.property("level") == "warn"
+    assert card._countdown_chip._level() == "warn"
 
     card._countdown_left = 5
     card._render_countdown()
-    assert card._countdown_label.property("level") == "danger"
-    assert "自动拒绝" in card._countdown_label.text()
+    assert card._countdown_chip._level() == "danger"
 
     # 减到 0 自动收起，不越界
     card._countdown_left = 1
     card._tick_countdown()
-    assert not card._countdown_label.isVisibleTo(card)
+    assert not card._countdown_chip.isVisibleTo(card)
 
     card.start_countdown(10)
     card.stop_countdown()
-    assert not card._countdown_label.isVisibleTo(card)
+    assert not card._countdown_chip.isVisibleTo(card)
 
 
 def test_start_countdown_rejects_non_positive():
@@ -93,7 +91,7 @@ def test_start_countdown_rejects_non_positive():
     card = _make_card("info")
     card.start_countdown(0)
     card.start_countdown(-5)
-    assert not card._countdown_label.isVisibleTo(card)
+    assert not card._countdown_chip.isVisibleTo(card)
 
 
 def test_review_note_row_visibility():

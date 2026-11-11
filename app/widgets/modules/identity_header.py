@@ -93,7 +93,7 @@ def _qcolor(spec: str, fallback: QColor) -> QColor:
                 red, green, blue = (int(float(parts[i])) for i in range(3))
                 alpha = int(float(parts[3])) if len(parts) > 3 else 255
                 return QColor(red, green, blue, alpha)
-            except ValueError, IndexError:
+            except (ValueError, IndexError):
                 pass
     return fallback
 

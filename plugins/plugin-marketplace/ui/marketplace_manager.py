@@ -171,6 +171,8 @@ def validate_marketplace_source(source: Any) -> Tuple[bool, str]:
       仓库内相对子目录（禁绝对路径与 .. 穿越）。注意：安装器本就支持
       git-subdir（DriFox 旧格式，drifox-plugins 市场全量在用），
       校验器必须与其能力面对齐，否则合法安装被误拦。
+    - tarball → url 同 url 规则（GitHub Release asset 直链）；sha256 若有必须是
+      64 位十六进制（下载后校验内容完整性，防篡改/传输损坏）
     - 其余类型与 file:///ssh:// 等一律拒绝
 
     Returns:
@@ -192,10 +194,14 @@ def validate_marketplace_source(source: Any) -> Tuple[bool, str]:
             ):
                 return True, ""
             return False, f"github repo 不合法: {repo!r}（须为 owner/name 形态，禁路径穿越）"
-        if src_type in ("url", "git-subdir"):
+        if src_type in ("url", "git-subdir", "tarball"):
             ok, reason = _validate_git_url_field(source.get("url"), allow_shorthand=(src_type == "git-subdir"))
             if not ok:
                 return False, reason
+            if src_type == "tarball":
+                sha = str(source.get("sha256") or "").strip()
+                if sha and not re.fullmatch(r"[0-9a-fA-F]{64}", sha):
+                    return False, f"tarball sha256 格式非法: {sha[:16]}…（须 64 位十六进制）"
             if src_type == "git-subdir":
                 subpath = str(source.get("path") or "").strip()
                 norm = subpath.replace("\\", "/")
@@ -466,26 +472,61 @@ class MarketplaceSourceManager:
             plugin.setdefault("_marketplace", name)
             plugin.setdefault("_marketplace_source", src)
 
-    def _http_get(self, url: str, **kwargs) -> "httpx.Response":
-        """应用代理发起 GET；代理失败回退直连
+    def _candidate_urls(self, url: str) -> List[str]:
+        """市场清单拉取候选（按序尝试，全部失败才报错）
 
-        - 未启用代理：直接请求原 URL（零开销）
-        - 启用代理：先请求改写 URL（或带 proxy 参数），失败后
-          换原 URL 直连重试一次，日志记录回退原因。
+        顺序：代理改写（若配置）→ 原 URL → jsDelivr 兜底。
+
+        为什么 jsDelivr 必须排最后：它对 ref（@main）引用做长缓存（官方策略
+        分支引用 12h+ 才失效，tag/commit 才即时）。实测仓库清单已含 tarball
+        字段，jsDelivr 仍返回数天前的旧版 → 客户端据此走 git-subdir 通道，
+        装出缺依赖的插件（2026-11 实证 gateway-feishu lark_oapi 缺失）。
+        它只在原 URL 完全不可达时作兜底（旧内容总比没有强）。
+        """
+        out: List[str] = []
+        proxy = get_proxy_config()
+        try:
+            rw = proxy.rewrite_url(url)
+            if rw and rw != url:
+                out.append(rw)
+        except Exception:
+            pass
+        out.append(url)
+        m = re.match(
+            r"https://raw\.githubusercontent\.com/([^/]+)/([^/]+)/([^/]+)/(.+)", url
+        )
+        if m:
+            owner, repo, ref, path = m.groups()
+            out.append(f"https://cdn.jsdelivr.net/gh/{owner}/{repo}@{ref}/{path}")
+        seen, uniq = set(), []
+        for u in out:
+            if u not in seen:
+                seen.add(u)
+                uniq.append(u)
+        return uniq
+
+    def _http_get(self, url: str, **kwargs) -> "httpx.Response":
+        """应用代理/镜像候选发起 GET；全部失败才抛最后一个异常
+
+        - 未启用代理：代理改写不产生候选，走镜像 → 原 URL
+        - 启用代理：改写 URL 优先，失败后换镜像/直连重试
         """
         proxy = get_proxy_config()
-        proxied_url = proxy.rewrite_url(url)
-        try:
-            resp = httpx.get(proxied_url, **kwargs, **proxy.httpx_kwargs())
-            resp.raise_for_status()
-            return resp
-        except Exception:
-            if proxied_url != url:
-                logger.warning(f"[Marketplace] proxy failed, fallback to direct: {url}")
-                resp = httpx.get(url, **kwargs)
+        last: Optional[Exception] = None
+        for cand in self._candidate_urls(url):
+            try:
+                resp = httpx.get(cand, **kwargs, **proxy.httpx_kwargs())
                 resp.raise_for_status()
+                if cand != url:
+                    logger.debug(f"[Marketplace] 清单拉取命中候选: {cand}")
                 return resp
-            raise
+            except Exception as e:
+                last = e
+                if cand != url:
+                    logger.warning(f"[Marketplace] 候选失败，换下一个: {cand} ({e})")
+        if last is not None:
+            raise last
+        raise RuntimeError(f"无可用拉取候选: {url}")
 
     def fetch_marketplace(self, source_def: Dict[str, Any], force: bool = False) -> Dict[str, Any]:
         """拉取单个市场的 marketplace.json 数据
@@ -691,6 +732,29 @@ def get_auto_update_enabled() -> bool:
         return False
 
 
+def _unload_plugin_ui_on_main(name: str) -> None:
+    """自动更新前在主线程卸载插件 UI（同步等待完成）
+
+    手动更新路径由 ``MarketplaceCard._async_update`` 在主线程先卸载；自动更新
+    跑在 ``threading.Thread`` 里，没有这一步。不卸载的后果：installer 替换目录
+    前会 purge ``ui_plugin_<name>`` 模块，但注册表旧条目（页脚按钮/浮动卡/渲染器）
+    仍持有旧模块闭包 → 点击回调时相对导入按模块名查已摘除的包 → 
+    ``No module named 'ui_plugin_xxx'``（2026-10-29 实测）。
+
+    超时/无 GUI 环境只记日志，不阻断更新（宁可报错也不让更新失败）。
+    """
+    try:
+        from app.core.services.plugin_host_service import run_on_main_thread
+        from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+
+        run_on_main_thread(
+            lambda: UIPluginRegistry.get_instance().unload_plugin(name),
+            wait=True,
+            timeout=10.0,
+        )
+    except Exception as e:  # noqa: BLE001 - 卸载失败不能阻断更新
+        logger.debug(f"[Marketplace] 自动更新前卸载 UI({name}) 失败（忽略）: {e}")
+
 def run_auto_update_check(progress=None, execute: bool = True) -> Dict[str, Any]:
     """后台检查插件更新（纯逻辑，供 worker 线程调用）
 
@@ -742,6 +806,7 @@ def run_auto_update_check(progress=None, execute: bool = True) -> Dict[str, Any]
         for i, (meta, remote) in enumerate(pending, 1):
             name = meta.get("name", "?")
             _report("update", f"({i}/{len(pending)}) {name} → v{remote}")
+            _unload_plugin_ui_on_main(name)
             try:
                 ok = inst.update(meta)
                 (updated if ok else failed).extend(
@@ -750,6 +815,23 @@ def run_auto_update_check(progress=None, execute: bool = True) -> Dict[str, Any]
             except Exception as e:
                 failed.append((name, str(e)))
             _time.sleep(0.3)  # 串行节流：连续替换目录留出文件句柄释放窗口
+
+    # 更新执行后重算待更新数：pending 是更新前的快照，原样返回会让侧栏
+    # 「插件市场 (N)」计数停在旧值（用户视角：自动更新完文字没动，要等下一次
+    # 30 分钟 tick 才纠正）。更新成功的插件版本已替换，重查 check_update 即
+    # False → 剔除；更新失败的保留在待更新集，供下次重试。
+    if execute and updated:
+        updated_set = set(updated)
+        still_pending: List[Tuple[dict, Optional[str]]] = []
+        for meta, remote in pending:
+            if meta.get("name") in updated_set:
+                try:
+                    if not inst.check_update(meta)[0]:
+                        continue
+                except Exception:
+                    pass  # 重查失败时保守保留，不误清计数
+            still_pending.append((meta, remote))
+        pending = still_pending
 
     phase = "done" if execute else "check"
     _report(phase, f"待更新 {len(pending)} 个" + (f"，已更新 {len(updated)} 个" if execute else ""))

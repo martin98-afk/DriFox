@@ -40,27 +40,14 @@ from app.plugins.sdk import get_font_family_css, get_icon
 
 
 def _caps(cap_id):
-    """取某能力（经能力池；无 ctx 时按插件名自建，与 agent_trace 同构）。"""
-    try:
-        from app.plugins.capabilities.bootstrap import ensure_registered
-        from app.plugins.capabilities.registry import CapabilityRegistry
+    """取某能力（无 ctx 场景统一走 sdk 的 caps_for，host 由宿主解析）。
 
-        ensure_registered("ui")
-        plugin = ""
-        try:
-            from pathlib import Path
+    原实现自建 ``host=None`` 池并自报 ``declared={cap_id, ...}``：等于插件给
+    自己发权限，manifest 声明永不生效，`window.*` 这类吃 host 的能力还恒为空。
+    """
+    from app.plugins.sdk import caps_for
 
-            parts = Path(__file__).resolve().parts
-            if "plugins" in parts:
-                plugin = parts[parts.index("plugins") + 1]
-        except Exception:
-            pass
-        pool = CapabilityRegistry.get_instance().build_pool(
-            surface="ui", host=None, plugin=plugin, declared={cap_id, "state.kv", "plugin.log"}
-        )
-        return pool[cap_id] if cap_id in pool else None
-    except Exception:
-        return None
+    return caps_for(cap_id)
 
 
 def _relative_time(created_at: str) -> str:
@@ -460,10 +447,11 @@ class SystemArtifactsPage(QWidget):
         """
         session = None
         try:
-            # 宿主 _build_ui_context 不注入 backend，需从 main_widget 兜底获取
-            backend = self._context.get("backend")
-            if backend is None:
-                backend = getattr(self._context.get("main_widget"), "backend", None)
+            # 走 window.current 快照拿 backend（context 里的 backend 可能缺失，
+            # 旧实现经 ctx["main_widget"] 摸宿主 widget，绕过了能力声明）
+            snap = _caps("window.current")
+            snap = snap() if snap is not None else None
+            backend = (snap or {}).get("backend") or self._context.get("backend")
             session = backend.get_current_session() if backend is not None else None
         except Exception:
             session = None

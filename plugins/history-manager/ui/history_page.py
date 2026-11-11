@@ -5,14 +5,17 @@
 ``history-manager`` 插件迁出：历史会话 / 归档 子页签 + 项目切换器 + 搜索框 +
 右端导入按钮，**自带** ``HistoryCard``（会话列表本体）。
 
-数据流（架构反转：数据服务化）：
-- 列表数据：本页自拉（``HistoryManager.get_instance()`` 全局单例，会话数据
-  全局只有一份），不再经宿主窗口方法注入
-- 纯数据写操作（置顶 / 移动项目）：插件直走数据服务，写后调窗口
-  ``_notify_history_data_changed()`` 做欢迎卡片失效 + 跨窗口联动
-- 窗口态操作保留信号转发：点击加载会话（``win._on_history_session_selected``）、
-  归档（含当前会话清场，``win._archive_history_session``）等
-- 当前会话高亮：只读活跃窗口 ``_current_session_id``（窗口态）
+数据流（能力池化）：
+- 列表数据：本页自拉，经 ``session.history`` 能力（``list`` / ``archived`` /
+  ``projects`` 等闭包）取持久化历史会话；不再直连 ``HistoryManager`` 单例
+- 纯数据写操作（置顶 / 移动项目 / 归档 / 恢复 / 删除 / 导入）：走
+  ``session.history.write``；该能力内部已含宿主联动通知（历史页刷新 +
+  欢迎卡片失效 + 跨窗口广播），插件不再自己调窗口方法
+- 会话切换：``session.manage``（``select(session_id)`` / ``new()``）
+- 项目面：读走 ``project.read``（当前项目 / 清单 / 元数据 / 根目录），写走
+  ``project.write``（切换 / 新建 / 提交 / 归档 / 导入导出 / 打开文件夹 / 拖拽）
+- 团队历史会话：``team.session``（恢复 / 归档 / 进入成员会话）
+- 当前会话高亮：只读 ``window.current`` 快照的 ``session_id``
 
 项目选择面板（可折叠，默认收起）：折叠头一行展示当前过滤目标（项目 icon +
 项目名），点开使用插件自包含的 ``ProjectSelectorCardContent``（项目选择卡片本体：
@@ -56,6 +59,7 @@ from loguru import logger
 from app.plugins.sdk import Animations, Colors, font_size_css, get_unified_scrollbar_style
 from app.plugins.sdk import alpha_tint as _alpha_tint, get_project_color
 from app.plugins.sdk import bind_theme_qss
+from app.plugins.sdk import card_container_surface_color
 from app.plugins.sdk import replay_theme_qss
 from app.plugins.sdk import get_font_family_css, get_icon
 from app.plugins.sdk import EmptyHint as _EmptyHint
@@ -90,27 +94,14 @@ _PANEL_SLIDE_IN_Y = 10
 
 
 def _caps(cap_id):
-    """取某能力（经能力池；无 ctx 时按插件名自建，与 agent_trace 同构）。"""
-    try:
-        from app.plugins.capabilities.bootstrap import ensure_registered
-        from app.plugins.capabilities.registry import CapabilityRegistry
+    """取某能力（无 ctx 场景统一走 sdk 的 caps_for，host 由宿主解析）。
 
-        ensure_registered("ui")
-        plugin = ""
-        try:
-            from pathlib import Path
+    原实现自建 ``host=None`` 池并自报 ``declared={cap_id, ...}``：等于插件给
+    自己发权限，manifest 声明永不生效，`window.*` 这类吃 host 的能力还恒为空。
+    """
+    from app.plugins.sdk import caps_for
 
-            parts = Path(__file__).resolve().parts
-            if "plugins" in parts:
-                plugin = parts[parts.index("plugins") + 1]
-        except Exception:
-            pass
-        pool = CapabilityRegistry.get_instance().build_pool(
-            surface="ui", host=None, plugin=plugin, declared={cap_id, "state.kv", "plugin.log"}
-        )
-        return pool[cap_id] if cap_id in pool else None
-    except Exception:
-        return None
+    return caps_for(cap_id)
 
 
 class _PanelHeightDriver(QObject):
@@ -359,29 +350,20 @@ class _ProjectSelectorHeader(QFrame):
         super().mousePressEvent(event)
 
 
-def _active_history_manager():
-    """会话数据全局唯一入口（HistoryManager 单例）；异常时返回 None"""
-    try:
-        from app.utils.history_manager import HistoryManager
+def _history_api():
+    """历史会话只读面（``session.history`` 能力）；未授权/未就绪时返回 None。
 
-        return HistoryManager.get_instance()
-    except Exception:
-        return None
-
-
-def _active_window() -> Optional[Any]:
-    """解析当前活跃聊天窗口（宿主 OpenAIChatToolWindow）；不可用时 None
-
-    返回的是**窗口对象**：9 个调用点都要调它的方法（_on_history_session_selected
-    等）。只想要语义字段（project/workdir/session）时用 window.current。
+    原实现直连 ``app.utils.history_manager.HistoryManager`` 单例，绕过了能力
+    声明与审计：插件能拿到多少历史数据，审核侧完全看不见。
     """
-    try:
-        active = _caps("window.active")
-        if active is None:
-            return None
-        return active()
-    except Exception:
-        return None
+    return _caps("session.history")
+
+
+def _history_write_api():
+    """历史会话写面（``session.history.write`` 能力）；未授权时返回 None。"""
+    return _caps("session.history.write")
+
+
 class HistoryPage(QWidget):
     """历史会话页（一级页签）：历史会话 / 归档 子页签 + 列表上方搜索框"""
 
@@ -575,15 +557,18 @@ class HistoryPage(QWidget):
         """
         panel = QFrame(host)
         panel.setObjectName("projectSelectorPanel")
-        # 面板容器轻底色 + 边框 + 圆角：展开后是一个明确的「下拉面板」块面，
+        # 面板容器实底 + 边框 + 圆角：展开后是一个明确的「下拉面板」块面，
         # 与折叠头/搜索框区分；走主题 QSS 登记随主题切换重放（面板默认收起，
-        # 宿主 refresh_style 派发时可能被跳过，同 _project_new_edit 的原因）
+        # 宿主 refresh_style 派发时可能被跳过，同 _project_new_edit 的原因）。
+        # ★ 背景必须用与列表 content 层同源的合成实底（card_container_surface_color），
+        #   不可用 CARD_BG_DIM（4% 白）这类轻底：本卡浮在壁纸上方，轻底直接
+        #   透出壁纸，行文字与花背景混在一起不可读（2026-10-30 用户反馈）。
         bind_theme_qss(
             panel,
             lambda c: (
                 f"""
             QFrame#projectSelectorPanel {{
-                background: {c.CARD_BG_DIM};
+                background: {card_container_surface_color(246).name()};
                 border: 1px solid {c.BORDER};
                 border-radius: 6px;
             }}
@@ -647,47 +632,67 @@ class HistoryPage(QWidget):
         self._project_folder_btn = TransparentToolButton(FluentIcon.FOLDER, body)
         self._project_folder_btn.setFixedSize(24, 24)
         self._project_folder_btn.setToolTip("选择文件夹作为项目根目录")
-        self._project_folder_btn.clicked.connect(lambda: self._call_window("_on_project_open_folder_btn"))
+        self._project_folder_btn.clicked.connect(lambda: self._project_action("pick_folder"))
         tools.addWidget(self._project_folder_btn, 0)
 
         self._project_import_btn = TransparentToolButton(get_icon("导入"), body)
         self._project_import_btn.setFixedSize(24, 24)
         self._project_import_btn.setToolTip("导入项目（从 .drifox_project 压缩包）")
-        self._project_import_btn.clicked.connect(lambda: self._call_window("_on_import_project"))
+        self._project_import_btn.clicked.connect(lambda: self._project_action("import_archive"))
         tools.addWidget(self._project_import_btn, 0)
         vbox.addLayout(tools)
 
         self._project_selector = ProjectSelectorCardContent(body)
         self._project_selector.allProjectsSelected.connect(self._on_all_projects_selected)
         self._project_selector.projectSelected.connect(self._on_project_row_selected)
-        self._project_selector.newProjectCreated.connect(
-            lambda name: self._call_window("_on_new_project_created", name)
-        )
-        self._project_selector.archiveProject.connect(lambda name: self._call_window("_on_archive_project", name))
-        self._project_selector.exportProject.connect(lambda name: self._call_window("_on_export_project", name))
-        self._project_selector.importProjectRequested.connect(lambda: self._call_window("_on_import_project"))
-        self._project_selector.projectFileDropped.connect(
-            lambda path: self._call_window("_on_project_file_dropped", path)
-        )
+        self._project_selector.newProjectCreated.connect(lambda name: self._project_action("create", name))
+        self._project_selector.archiveProject.connect(lambda name: self._project_action("archive", name))
+        self._project_selector.exportProject.connect(lambda name: self._project_action("export_archive", name))
+        self._project_selector.importProjectRequested.connect(lambda: self._project_action("import_archive"))
+        self._project_selector.projectFileDropped.connect(lambda path: self._project_action("drop_file", path))
         self._project_selector.openFolderRequested.connect(
-            lambda name, root: self._call_window("_on_open_project_folder", name, root)
+            lambda name, root: self._project_action("open_folder", name, root)
         )
         self._project_selector.newSessionRequested.connect(self._on_row_new_session)
-        self._project_selector.folderDropped.connect(lambda path: self._call_window("_on_project_folder_dropped", path))
+        self._project_selector.folderDropped.connect(lambda path: self._project_action("drop_folder", path))
         vbox.addWidget(self._project_selector, 1)
         shell.addWidget(body, 1)
         self._panel_pad_driver = _TopPadDriver(vbox)
         return panel
 
-    def _call_window(self, method_name: str, *args) -> None:
-        """调用活跃窗口方法（插件只承载 UI，项目数据操作仍在宿主窗口）"""
-        win = _active_window()
-        fn = getattr(win, method_name, None) if win is not None else None
-        if callable(fn):
-            try:
-                fn(*args)
-            except Exception:
-                logger.warning(f"[history-manager] 调用窗口方法 {method_name} 失败")
+    def _project_action(self, action: str, *args) -> None:
+        """调用项目写面能力（``project.write``）；未授权时静默降级
+
+        原实现用 ``_call_window("_on_xxx", ...)`` 反射活跃窗口的私有方法，
+        插件的真实依赖面在代码里不可见，宿主改名即静默失效。
+        """
+        api = _caps("project.write")
+        if api is None:
+            logger.warning(f"[history-manager] 项目能力 project.write 不可用，忽略动作 {action}")
+            return
+        fn = api.get(action)
+        if not callable(fn):
+            logger.warning(f"[history-manager] project.write 无动作 {action}")
+            return
+        try:
+            fn(*args)
+        except Exception as e:
+            logger.warning(f"[history-manager] 项目动作 {action} 失败: {e}")
+
+    def _session_action(self, action: str, *args) -> None:
+        """调用会话切换面能力（``session.manage``）；未授权时静默降级"""
+        api = _caps("session.manage")
+        if api is None:
+            logger.warning(f"[history-manager] 会话能力 session.manage 不可用，忽略动作 {action}")
+            return
+        fn = api.get(action)
+        if not callable(fn):
+            logger.warning(f"[history-manager] session.manage 无动作 {action}")
+            return
+        try:
+            fn(*args)
+        except Exception as e:
+            logger.warning(f"[history-manager] 会话动作 {action} 失败: {e}")
 
     def _sync_project_header(self) -> None:
         """折叠头显示当前过滤目标（「全部项目」/ 具体项目）
@@ -707,33 +712,39 @@ class HistoryPage(QWidget):
     def refresh_project_selector_data(self) -> None:
         """刷新项目选择面板数据（项目列表 / 会话数·工作目录数 / 根目录）
 
-        项目列表来自 ``HistoryManager``（全局单例），当前项目与元数据来自活跃窗口；
-        宿主新增 ``all_entry_label="全部项目"`` 聚合行（不过滤项目视图）。
+        数据一律经 ``project.read`` / ``session.history`` 能力取，不直连
+        ``HistoryManager`` 单例、不摸窗口私有字段（``_current_project`` /
+        ``_build_project_meta_map`` 这类字段的实现归宿主）。
         """
-        win = _active_window()
-        hm = _active_history_manager()
+        proj = _caps("project.read")
+        hist = _history_api()
         projects: List[str] = []
-        try:
-            projects = list(hm.get_project_list()) if hm is not None else []
-        except Exception:
-            projects = []
+        if hist is not None:
+            try:
+                projects = list(hist["projects"]())
+            except Exception:
+                projects = []
         if not projects and self._card is not None:
             projects = self._card.get_project_list()  # 兜底：从已加载列表聚合
-        current = getattr(win, "_current_project", "默认项目") if win is not None else "默认项目"
-        if current and current not in projects:
+        current = ""
+        if proj is not None:
+            try:
+                current = proj["current"]() or ""
+            except Exception:
+                current = ""
+        current = current or "默认项目"
+        if current not in projects:
             projects.insert(0, current)
 
         meta_map = {}
         root_dir_map = {}
-        if win is not None:
-            meta_builder = getattr(win, "_build_project_meta_map", None)
-            root_builder = getattr(win, "_build_project_root_dir_map", None)
+        if proj is not None:
             try:
-                meta_map = meta_builder(projects) if callable(meta_builder) else {}
+                meta_map = proj["meta"](projects) or {}
             except Exception:
                 meta_map = {}
             try:
-                root_dir_map = root_builder(projects) if callable(root_builder) else {}
+                root_dir_map = proj["root_dirs"](projects) or {}
             except Exception:
                 root_dir_map = {}
 
@@ -942,13 +953,13 @@ class HistoryPage(QWidget):
         registry 通道；切回该标签页不再自动恢复）。
         """
         target = self._get_tab_filter()
-        win = _active_window()
-        current = getattr(win, "_current_project", None) if win is not None else None
+        proj = _caps("project.read")
+        current = proj["current"]() if proj is not None else None
         if target and target not in (_PROJECT_ALL, _PROJECT_CURRENT) and target != current:
-            # 宿主 _on_project_selected 内含 close_history=True，切完自动让位
-            self._call_window("_on_project_selected", target)
+            # 宿主 switch 内含 close_history=True，切完自动让位
+            self._project_action("switch", target)
         else:
-            self._call_window("_create_new_session")
+            self._session_action("new")
         # 新建会话 = 真切换：隐藏历史会话卡片，让出左侧停靠区
         self.closed.emit()
 
@@ -962,13 +973,13 @@ class HistoryPage(QWidget):
         新建。收尾：项目选择跟随窗口新项目（折叠头/列表/勾选与新项目一致），
         并隐藏历史会话卡片——新建 = 真切换，卡片让位，用户可从历史入口重开。
         """
-        win = _active_window()
-        current = getattr(win, "_current_project", None) if win is not None else None
+        proj = _caps("project.read")
+        current = proj["current"]() if proj is not None else None
         if project_name and project_name != current:
-            # 宿主 _on_project_selected 内含切项目 + 工作目录 + 新建会话 + 团队广播
-            self._call_window("_on_project_selected", project_name)
+            # 宿主 switch 内含切项目 + 工作目录 + 新建会话 + 团队广播
+            self._project_action("switch", project_name)
         else:
-            self._call_window("_create_new_session")
+            self._session_action("new")
         # 项目选择跟随窗口新项目（窗口项目已切到行项目，折叠头/列表/勾选一致）
         self.follow_window_project()
         # 新建会话 = 真切换：隐藏历史会话卡片，让出左侧停靠区
@@ -981,7 +992,7 @@ class HistoryPage(QWidget):
             return
         self._project_new_edit.clear()
         self._set_project_panel_visible(False)
-        self._call_window("_on_header_new_project", name)
+        self._project_action("submit", name)
 
     # ── 对外：卡片引用 ──
 
@@ -1056,10 +1067,10 @@ class HistoryPage(QWidget):
             QTimer.singleShot(400, self.refresh_style)
         self.refresh()
 
-    # ── 数据自拉（架构反转：会话数据全局一份，经 HistoryManager 单例直接获取） ──
+    # ── 数据自拉（数据来自 ``session.history`` 能力，不再直连 HistoryManager） ──
 
     def refresh(self) -> None:
-        """自拉数据渲染（不再绕宿主窗口方法）"""
+        """自拉数据渲染（不绕宿主窗口方法，也不直连宿主单例）"""
         self._sync_project_header()
         if self._card is not None:
             self._card.set_show_project_labels(self._get_tab_filter() == _PROJECT_ALL)
@@ -1068,16 +1079,26 @@ class HistoryPage(QWidget):
             self._card.set_archived_sessions(self._enrich_archived_list())
         else:
             self._card.switch_tab("history")
-            hm = _active_history_manager()
-            history_list = hm.get_history_list(self._resolved_project_filter(), merge_team=True) if hm else []
+            hist = _history_api()
+            history_list = hist["list"](self._resolved_project_filter(), True) if hist is not None else []
             self._card.set_history(history_list, self._locate_current_index(history_list))
 
     # ── 项目筛选：按标签页独立（window_id 分桶）──
 
     def _active_window_id(self) -> Optional[str]:
-        """当前活跃标签页窗口 ID（分桶键）；不可用时 None"""
-        win = _active_window()
-        wid = getattr(win, "_window_id", None) if win is not None else None
+        """本页所在窗口的 id（分桶键）；不可用时 None
+
+        走 ``window.current`` 快照而非 ``window.active``：分桶键语义是「本页
+        所在的窗口」，宿主窗口优先就是正确口径（旧实现取活跃窗口，多标签
+        下页在 A 而活跃在 B 时会记错桶）。
+        """
+        snap = _caps("window.current")
+        if snap is None:
+            return None
+        try:
+            wid = (snap() or {}).get("window_id")
+        except Exception:
+            return None
         return str(wid) if wid else None
 
     def _get_tab_filter(self) -> str:
@@ -1128,19 +1149,29 @@ class HistoryPage(QWidget):
                 pass
 
     def _resolved_project_filter(self) -> Optional[str]:
-        """解析项目过滤器（「当前项目」跟随活跃窗口；「全部项目」→ None 不过滤）"""
+        """解析项目过滤器（「当前项目」跟随宿主窗口项目；「全部项目」→ None 不过滤）"""
         raw = self._get_tab_filter()
         if raw == _PROJECT_ALL:
             return None
         if raw == _PROJECT_CURRENT:
-            win = _active_window()
-            return getattr(win, "_current_project", "默认项目") if win else "默认项目"
+            proj = _caps("project.read")
+            if proj is not None:
+                try:
+                    return proj["current"]() or "默认项目"
+                except Exception:
+                    return "默认项目"
+            return "默认项目"
         return raw
 
     def _locate_current_index(self, history_list: List[dict]) -> Optional[int]:
-        """在列表中定位活跃窗口当前会话（团队合并条目按成员命中）"""
-        win = _active_window()
-        current_sid = getattr(win, "_current_session_id", None) if win else None
+        """在列表中定位宿主窗口当前会话（团队合并条目按成员命中）"""
+        snap = _caps("window.current")
+        if snap is None:
+            return None
+        try:
+            current_sid = (snap() or {}).get("session_id")
+        except Exception:
+            return None
         if not current_sid:
             return None
         for i, session in enumerate(history_list):
@@ -1159,10 +1190,10 @@ class HistoryPage(QWidget):
 
         from app.plugins.sdk import get_message_preview
 
-        hm = _active_history_manager()
-        if hm is None:
+        hist = _history_api()
+        if hist is None:
             return []
-        archived_list = hm.get_archived_sessions()
+        archived_list = hist["archived"]()
         # 注：归档记录只有 path/session_id/title（project 在文件正文里，轻量列表
         # 未读取），故归档子页签无法按项目过滤。两侧语义由 _sync_project_header
         # 在归档页签下显式标注「全部项目的归档」来对齐，避免头部写"项目X"、
@@ -1236,10 +1267,7 @@ class HistoryPage(QWidget):
         self.setVisible(True)
         self.refresh()
 
-    # ── 卡片信号 → 宿主窗口（会话管理逻辑仍由窗口实现） ──
-
-    def _win(self):
-        return _active_window()
+    # ── 卡片信号 → 能力面（会话/团队/导入逻辑归宿主，经能力调用） ──
 
     def _on_tab_changed(self, tab_id: str) -> None:
         if self._search_input is not None:
@@ -1248,92 +1276,124 @@ class HistoryPage(QWidget):
         self.refresh()
 
     def _on_session_selected(self, index: int) -> None:
-        win = self._win()
-        if win is not None:
-            win._on_history_session_selected(index)
+        """选中历史会话 → 加载到当前窗口（按 session_id 走能力，不传 index）"""
+        record = self._card.get_history_at_index(index) if self._card is not None else None
+        if record is None:
+            return
+        api = _caps("session.manage")
+        if api is None:
+            logger.warning("[history-manager] session.manage 不可用，无法加载会话")
+            return
+        sid = record.get("session_id")
+        if sid:
+            try:
+                api["select"](sid)
+            except Exception as e:
+                logger.warning(f"[history-manager] 加载会话失败: {e}")
 
     def _on_session_archived(self, index: int) -> None:
-        win = self._win()
-        if win is not None:
-            win._archive_history_session(index)
+        """归档会话（按 session_id 走写面）"""
+        record = self._card.get_history_at_index(index) if self._card is not None else None
+        if record is None or not record.get("session_id"):
+            return
+        api = _history_write_api()
+        if api is None:
+            logger.warning("[history-manager] session.history.write 不可用，无法归档会话")
+            return
+        try:
+            api["archive"](record["session_id"])
+        except Exception as e:
+            logger.warning(f"[history-manager] 归档会话失败: {e}")
 
     def _on_refresh_requested(self) -> None:
         self.refresh()
 
     def _on_session_imported(self, record: dict) -> None:
-        win = self._win()
-        if win is not None:
-            win._on_session_imported(record)
+        api = _history_write_api()
+        file_path = (record or {}).get("file_path")
+        if api is None or not file_path:
+            return
+        try:
+            api["import"](file_path)
+        except Exception as e:
+            logger.warning(f"[history-manager] 导入会话失败: {e}")
 
     def _on_session_restored(self, file_path: str) -> None:
-        win = self._win()
-        if win is not None:
-            win._on_archived_session_restored(file_path)
+        api = _history_write_api()
+        if api is None:
+            return
+        try:
+            api["restore"](file_path)
+        except Exception as e:
+            logger.warning(f"[history-manager] 恢复归档会话失败: {e}")
 
     def _on_session_deleted(self, file_path: str) -> None:
-        win = self._win()
-        if win is not None:
-            win._on_archived_session_deleted(file_path)
+        api = _history_write_api()
+        if api is None:
+            return
+        try:
+            api["delete_archived"](file_path)
+        except Exception as e:
+            logger.warning(f"[history-manager] 删除归档会话失败: {e}")
 
     def _on_team_restore(self, run_id: str) -> None:
-        win = self._win()
-        if win is not None:
-            win._on_team_restore_requested(run_id)
+        self._team_action("restore", run_id)
 
     def _on_team_archive(self, run_id: str) -> None:
-        win = self._win()
-        if win is not None:
-            win._on_team_archive_requested(run_id)
+        self._team_action("archive", run_id)
 
     def _on_member_selected(self, record: dict) -> None:
-        win = self._win()
-        if win is not None:
-            win._on_team_member_selected(record)
+        self._team_action("enter_member", record)
 
-    # ── 纯数据写操作（插件直走数据服务，写后通知窗口联动） ──
+    def _team_action(self, action: str, arg) -> None:
+        """团队历史会话动作（``team.session`` 能力）"""
+        api = _caps("team.session")
+        if api is None:
+            logger.warning(f"[history-manager] team.session 不可用，忽略动作 {action}")
+            return
+        fn = api.get(action)
+        if not callable(fn):
+            return
+        try:
+            fn(arg)
+        except Exception as e:
+            logger.warning(f"[history-manager] 团队动作 {action} 失败: {e}")
 
-    def _notify_windows_data_changed(self) -> None:
-        """数据变更后通知窗口联动（欢迎卡片失效 + 跨窗口广播；窗口方法本体不变）"""
-        win = self._win()
-        if win is not None and hasattr(win, "_notify_history_data_changed"):
-            win._notify_history_data_changed()
+    # ── 纯数据写操作（写面能力内部已包含库主联动通知） ──
 
     def _on_pin_toggled(self, index: int, pinned: bool) -> None:
-        """右键置顶/取消置顶（纯数据操作，不经窗口）"""
-        hm = _active_history_manager()
+        """右键置顶/取消置顶"""
         record = self._card.get_history_at_index(index) if self._card is not None else None
-        if hm is None or not record:
+        session_id = (record or {}).get("session_id")
+        api = _history_write_api()
+        if not session_id or api is None:
             return
-        session_id = record.get("session_id")
-        if not session_id:
-            return
-        hm.set_session_pinned(session_id, bool(pinned))
-        self._notify_windows_data_changed()
+        try:
+            api["set_pinned"](session_id, bool(pinned))
+        except Exception as e:
+            logger.warning(f"[history-manager] 置顶会话失败: {e}")
 
     def _on_move_to_project(self, index: int, project: str) -> None:
-        """右键移动到项目（纯数据操作，不经窗口）"""
-        hm = _active_history_manager()
+        """右键移动到项目"""
         record = self._card.get_history_at_index(index) if self._card is not None else None
-        if hm is None or not record or not project:
+        session_id = (record or {}).get("session_id")
+        api = _history_write_api()
+        if not session_id or not project or api is None:
             return
-        session_id = record.get("session_id")
-        if not session_id:
-            return
-        full_index = hm.find_index_by_session_id(session_id)
-        if full_index is None:
-            return
-        hm.move_to_project(full_index, project)
-        self._notify_windows_data_changed()
+        try:
+            api["move_to_project"](session_id, project)
+        except Exception as e:
+            logger.warning(f"[history-manager] 移动会话到项目失败: {e}")
         self.refresh()
 
     # ── 列表数据联动 ──
 
     def _on_card_data_changed(self) -> None:
         """列表数据渲染完成：注入右键菜单项目列表 + （面板展开时）刷新项目数据"""
-        hm = _active_history_manager()
-        if hm is not None and self._card is not None:
+        hist = _history_api()
+        if hist is not None and self._card is not None:
             try:
-                self._card.set_project_list(hm.get_project_list())
+                self._card.set_project_list(hist["projects"]())
             except Exception:
                 pass
         if self._project_panel_open:

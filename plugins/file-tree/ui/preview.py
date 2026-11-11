@@ -512,8 +512,8 @@ class FilePreviewPage(QWidget):
     def current_kind(self) -> str:
         return self._kind
 
-    def load(self, path: str) -> None:
-        """载入文件并进入对应视图；读取失败时显示错误提示页"""
+    def load(self, path: str) -> bool:
+        """载入文件并进入对应视图；返回是否载入成功（失败时显示错误提示页）"""
         self._path = path
         self._kind = detect_kind(path)
         name = os.path.basename(path) or path
@@ -526,21 +526,23 @@ class FilePreviewPage(QWidget):
                 pixmap, hint = read_image(path)
             except Exception as e:  # noqa: BLE001 — 磁盘/解码异常统一转提示
                 self._show_message(f"⚠️ {e}")
-                return
+                return False
             self._image_view.set_pixmap(pixmap)
             self._content.setCurrentIndex(0)
             self._set_hint(hint)
-        elif self._kind == "text":
+            return True
+        if self._kind == "text":
             try:
                 text, hint = read_text(path)
             except Exception as e:  # noqa: BLE001
                 self._show_message(f"⚠️ {e}")
-                return
+                return False
             self._code_view.set_content(text)
             self._content.setCurrentIndex(1)
             self._set_hint(hint)
-        else:
-            self._show_message("该文件类型不支持预览，请用默认程序打开")
+            return True
+        self._show_message("该文件类型不支持预览，请用默认程序打开")
+        return False
 
     def reload_current(self) -> bool:
         """文件被外部修改后重读（卡片刷新按钮在预览态走这里）"""

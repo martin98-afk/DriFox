@@ -108,9 +108,11 @@ def test_set_meta_info_both_survives_deleted_labels():
 
 
 def test_context_usage_indicator_guards_sip_deleted():
-    """AST：_refresh_context_usage_indicator 的 set_meta_info 调用前必须含 isdeleted 检查。
+    """AST：快照应用路径的 set_meta_info 调用前必须含 isdeleted 检查。
 
     对应修复 B 层（主防线）：即使 A 层漏清引用，此处也能拦截已销毁卡片。
+    快照计算后台化（A 优化）后，set_meta_info 已随应用逻辑迁入
+    `_on_ctx_usage_ready` 槽（信号桥接回主线程），防线断言同步迁移。
     """
     import ast
     import re
@@ -119,22 +121,24 @@ def test_context_usage_indicator_guards_sip_deleted():
     src_path = Path(__file__).resolve().parent.parent.parent / "app" / "main_widget.py"
     tree = ast.parse(src_path.read_text(encoding="utf-8"))
 
-    target = None
+    targets = {}
     for node in ast.walk(tree):
-        if isinstance(node, ast.FunctionDef) and node.name == "_refresh_context_usage_indicator":
-            target = node
-            break
-    assert target is not None, "未找到 _refresh_context_usage_indicator 方法"
+        if isinstance(node, ast.FunctionDef) and node.name in (
+            "_refresh_context_usage_indicator",
+            "_on_ctx_usage_ready",
+        ):
+            targets[node.name] = node
+    assert "_on_ctx_usage_ready" in targets, "未找到 _on_ctx_usage_ready 方法"
 
     import textwrap
 
-    func_src = textwrap.dedent(ast.unparse(target))
+    func_src = textwrap.dedent(ast.unparse(targets["_on_ctx_usage_ready"]))
 
     # set_meta_info 调用前必须检查 _is_sip_deleted
     assert re.search(r"_is_sip_deleted\s*\(", func_src), (
-        "_refresh_context_usage_indicator 必须调用 _is_sip_deleted 守卫（B 层防线）"
+        "_on_ctx_usage_ready 必须调用 _is_sip_deleted 守卫（B 层防线）"
     )
-    assert "set_meta_info" in func_src, "_refresh_context_usage_indicator 必须调用 set_meta_info"
+    assert "set_meta_info" in func_src, "_on_ctx_usage_ready 必须调用 set_meta_info"
 
 
 def test_send_fail_rollback_clears_current_card():

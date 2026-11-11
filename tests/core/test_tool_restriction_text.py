@@ -28,9 +28,9 @@ def gen():
 def test_wildcard_deny_with_allowed_list(gen):
     """leader.md 型：显式 allow + "*": deny → 转为白名单语义输出，不再输出字面 "*"。"""
     meta = {
-        "permission": {"question": "allow", "team_list_members": "allow", "team_send_message": "allow", "*": "deny"}
+        "permission": {"question": "allow", "team_manage": "allow", "team_send_message": "allow", "*": "deny"}
     }
-    assert gen(meta) == "[工具限制] 仅允许以下工具: question, team_list_members, team_send_message\n\n"
+    assert gen(meta) == "[工具限制] 仅允许以下工具: question, team_manage, team_send_message\n\n"
 
 
 def test_wildcard_deny_with_single_allow(gen):
@@ -109,9 +109,10 @@ def test_semantics_match_permission_resolver():
     from app.core.conversation.agent import PermissionResolver
 
     leader = PermissionResolver(
-        {"question": "allow", "team_list_members": "allow", "team_send_message": "allow", "*": "deny"}
+        {"question": "allow", "team_manage": "allow", "team_send_message": "allow", "*": "deny"}
     )
     assert leader.resolve("question") == "allow"
+    assert leader.resolve("team_manage") == "allow"
     assert leader.resolve("team_send_message") == "allow"
     assert leader.resolve("bash") == "deny"  # 通配符兜底禁用
 

@@ -15,19 +15,11 @@ from app.core.infra.token_estimator import per_message_tokens
 
 
 class _FakeCore:
-    class _Compactor:
-        def _make_state(self):
-            return {}
-
-        def get_budget(self, llm_config):
-            return 200000
-
     class _ContextBuilder:
         def get_context_budget(self, llm_config):
             return 200000
 
     def __init__(self):
-        self.compactor = self._Compactor()
         self.context_builder = self._ContextBuilder()
         self.permission_cache = None
 
@@ -51,6 +43,11 @@ def _engine(session, model="gpt-4o"):
     engine._callbacks = {}
     engine._api_mode = False
     engine._worker_callbacks = {}
+    engine._tools_snapshot = {
+        "key": (getattr(session, "session_id", ""), "build", False),
+        "tools": [],
+        "hash": "empty",
+    }
     engine._tools_schema_cache = {"timestamp": 0.0, "tools": [], "tokens": 0}
     return engine
 
@@ -72,43 +69,52 @@ def _session_with_long_tool(long_chars=30000):
 
 class TestSnapshotPruneProjection:
     def test_snapshot_uses_pruned_tokens(self):
-        """投影：used_tokens 应基于截断后的工具结果（≈实际发送）"""
+        """投影语义（诊#16 b 方案）：未超预算时有损层不介入 → pruned_tokens=0，
+        投影等于实际发送（工具结果原样计入）"""
         session = _session_with_long_tool()
         engine = _engine(session)
         snap = engine.get_context_usage_snapshot(session=session, llm_config={"model": "gpt-4o", "max_tokens": 8000})
-        # 计算「截断后」的期望：原始 messages 全部 pruned 后算 token
-        import copy
-
-        expected_msgs = copy.deepcopy(session.messages)
-        for m in expected_msgs:
-            if m.get("role") == "tool" and isinstance(m.get("content"), str):
-                m["content"] = prune_tool_result(m["content"])
-        expected_tool = sum(
-            per_message_tokens(m, "gpt-4o")
-            for m in expected_msgs
-            if m.get("role") == "tool"
-        )
-        # 快照里的 tool 占比应等于截断后的期望值（而非原始 30k 字符）
+        # 未超预算（7.5k token << budget）：不截断，投影 = 原始
+        assert snap["pruned_tokens"] == 0, "未超预算时不应截断"
         tool_entry = [b for b in snap["breakdown"] if b["key"] == "tool"]
         assert tool_entry, "应有工具结果占比"
-        # 容差：per_message_tokens 对同一消息应一致（用 < 原始值的严格断言）
         raw_tool = sum(
             per_message_tokens(m, "gpt-4o")
             for m in session.messages
             if m.get("role") == "tool"
         )
-        assert tool_entry[0]["tokens"] < raw_tool, "投影后工具结果 token 应小于原始"
-        assert tool_entry[0]["tokens"] == expected_tool, "投影应等于截断后实际发送值"
+        assert tool_entry[0]["tokens"] == raw_tool, "未超预算时投影应等于原始发送值"
 
     def test_pruned_tokens_reported(self):
-        """pruned_tokens：返回节省量（>0）"""
+        """pruned_tokens：超预算（小 context_limit）时有损层介入，报告节省量（>0）"""
         session = _session_with_long_tool(50000)
         engine = _engine(session)
-        snap = engine.get_context_usage_snapshot(session=session, llm_config={"model": "gpt-4o", "max_tokens": 8000})
-        assert snap["pruned_tokens"] > 0, "长工具结果应报告节省量"
+        snap = engine.get_context_usage_snapshot(
+            session=session,
+            llm_config={"model": "gpt-4o", "context_limit": 12000, "max_tokens": 8000},
+        )
+        assert snap["pruned_tokens"] > 0, "超预算时长工具结果应报告节省量"
         # 与 unit 量化口径一致：原始 tool token - 截断后 tool token
         raw_tool = sum(per_message_tokens(m, "gpt-4o") for m in session.messages if m.get("role") == "tool")
         assert snap["pruned_tokens"] < raw_tool
+
+    def test_snapshot_uses_pruned_tokens_when_over_budget(self):
+        """超预算：投影基于截断后的工具结果（< 原始）"""
+        session = _session_with_long_tool()
+        engine = _engine(session)
+        snap = engine.get_context_usage_snapshot(
+            session=session,
+            llm_config={"model": "gpt-4o", "context_limit": 12000, "max_tokens": 8000},
+        )
+        assert snap["pruned_tokens"] > 0, "超预算前提不成立"
+        tool_entry = [b for b in snap["breakdown"] if b["key"] == "tool"]
+        assert tool_entry, "应有工具结果占比"
+        raw_tool = sum(
+            per_message_tokens(m, "gpt-4o")
+            for m in session.messages
+            if m.get("role") == "tool"
+        )
+        assert tool_entry[0]["tokens"] < raw_tool, "超预算投影应小于原始"
 
     def test_session_messages_not_mutated(self):
         """原始存储不被修改（可追溯）"""
@@ -135,3 +141,24 @@ class TestSnapshotPruneProjection:
         snap = engine.get_context_usage_snapshot(session=None, llm_config=None)
         assert snap["pruned_tokens"] == 0
         assert snap["used_tokens"] == 0
+
+    def test_fallback_prompt_build_passes_session_id(self):
+        """兜底构建 system prompt 必须带 session_id（否则插件按主助手构建并污染缓存）"""
+        session = _FakeSession([{"role": "user", "content": "hi"}], system_prompt="")
+        engine = _engine(session)
+        seen = {}
+
+        class _Mgr:
+            def get_agent_system_prompt(self, agent_name, is_subagent_call=False, extra_context=None):
+                seen["agent"] = agent_name
+                seen["ctx"] = dict(extra_context or {})
+                return "SYS-OK"
+
+            def get_agent_tools_schema(self, *a, **k):
+                return []
+
+        engine._get_agent_manager = lambda: _Mgr()
+        snap = engine.get_context_usage_snapshot(session=session, llm_config={"model": "gpt-4o", "max_tokens": 8000})
+        assert seen["ctx"].get("session_id") == "s2-test"
+        assert session.system_prompt == "SYS-OK"
+        assert snap["used_tokens"] > 0

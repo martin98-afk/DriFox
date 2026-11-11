@@ -68,13 +68,14 @@
 - `wheel` 监听要**同步**置位上滚意图；`scroll` 监听必须检查 `_suppressScrollEvent`。
 - save/restore 前后要保存并恢复 `scrollTop`，用 `_progScroll` 标记程序性滚动。
 - 工具区 / 思考区（`#tool-content`）与正文（`#content-placeholder`）是两套滚动，改一处要同步另一处的模式。
+- **坞态只切工具区限高**（T44）：简洁模式下工具/思考区始终在卡片顶部，正文按自然高度在下方生长，全卡只有外层聊天列表一个滚动条。曾经的双层滚动（CSS `order` 沉底 + 正文 600px 限高内滚）已按用户诉求移除，不要再引入。
 
 ## 五、动画与揭示队列
 
 | 机制 | 要点 |
 |------|------|
 | typewriter | `_TYPEWRITER_JS` → `window._tw` / `_twPush/_twStep/_twFlush/_twReset`；`CATCHUP_MS=110`、`BURST_LEN=400`；高度上报节流 ≥80ms 防回环 |
-| FLIP | `_FLIP_JS` → `_animEnqueue(fn,dur)` 串行队列 + `_flipArm/_flipCapture/_flipFind/_flipPlay`；切坞态 arm 1200ms、流式结束前 `_flipArm(2000)`；渲染用 `data-flip-key="think-{flip_idx}"` |
+| FLIP | `_FLIP_JS` → `_animEnqueue(fn,dur)` 串行队列 + `_flipArm/_flipCapture/_flipFind/_flipPlay`；流式结束前 `_flipArm(2000)`；渲染用 `data-flip-key="think-{flip_idx}"`。坞态切换不再调换容器顺序（T44），故切换路径不 arm |
 
 多个动画同时开跑 = 跳变。新增动画一律进串行队列。
 

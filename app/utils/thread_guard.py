@@ -97,18 +97,49 @@ def install_guard() -> None:
             # 自愈：锚点 C++ 对象被外部环境（如测试组合污染）删除时就地重建。
             # QThread 构造不可失败——炸掉调用方只会把故障扩散到业务路径。
             _thread_anchor = QObject()
-        original_init(self, _thread_anchor)
+        # [诊 #22 修复第 2 条] anchor 重定向同步后移到 start：PyQt 对有 C++
+        # parent 的 QObject 在 C++ 侧保 wrapper 引用，__init__ 强设 anchor
+        # 会让未 start 的 worker wrapper 永久滞留（探针实证 setParent(None)
+        # 后 weakref 立即死亡）。未 start 的线程保持调用方原 parent——构造期
+        # widget 销毁级联删未运行线程属正确行为；运行期防级联由 start 时
+        # 重定向覆盖（见 _safe_start）。
+        original_init(self, parent)
 
         # ── 2. 全局强引用跟踪 ──
-        # 即使卡片代码执行 self._worker_thread = None，
-        # Python GC 也无法回收此 QThread，因为 _running_threads 持有引用
-        _running_threads.add(self)
+        # 入墓时点 = patched start（见下方 _safe_start）：真正 start 的 QThread
+        # 才需要防 GC 防护；未 start 的 worker（离线探针/测试构造后手动调方法、
+        # 构造后即丢弃）两门（finished/destroyed）都等不到，在 __init__ 入墓
+        # 会让它们永久滞留（诊 #22 根因：每 worker 携带 cache 级联滞留）。
+        # anchor parent 链保留：运行期防 widget 销毁级联的防护不受影响。
         self.finished.connect(lambda t=self: _on_thread_finished(t))
         self.destroyed.connect(lambda t=self: _on_thread_destroyed(t))
 
     QThread.__init__ = _safe_init
     # 标记已安装
     install_guard._patched = _safe_init  # type: ignore[attr-defined]
+
+    # ── 入墓时点：patched start ──
+    # 「真正 start 才需要防 GC 防护」：入墓动作从 __init__ 后移到这里。
+    # 与 init patch 同生命周期幂等（重复 install 不重复包裹）。
+    if getattr(QThread, "start", None) is not getattr(install_guard, "_patched_start", None):
+        original_start = QThread.start
+
+        def _safe_start(self, *a, **k):
+            # 语义等价于原 __init__ 入墓：start 后引用丢失时 GC 无法回收
+            # 运行中的线程（wrapper 被回收会 sip delete 运行中线程 → qFatal）
+            _running_threads.add(self)
+            # [诊 #22 修复第 2 条] 运行期防 widget 销毁级联：start 时才重定向
+            # anchor（原 __init__ 时点会让未 start worker 的 wrapper 被 sip
+            # parent 引用永久滞留）。未运行时改 parent 安全；affinity 同主线程。
+            try:
+                if _cpp_alive(_thread_anchor) and self.parent() is not _thread_anchor:
+                    self.setParent(_thread_anchor)
+            except Exception:  # noqa: BLE001 — 重定向失败不阻断启动
+                pass
+            return original_start(self, *a, **k)
+
+        QThread.start = _safe_start
+        install_guard._patched_start = _safe_start  # type: ignore[attr-defined]
 
     # ── 族① 根治：退出期 PyQt 不得销毁仍被引用的 C++ 对象 ──
     # 默认开启时，解释器 shutdown 阶段 PyQt 会 delete 所有仍被 Python 拥有的

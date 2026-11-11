@@ -86,7 +86,6 @@ class GlobalCardController:
         self._diff_viewer_card = None
         self._chart_viewer_card = None
         self._file_undo_card = None
-        self._sub_agent_session_card = None
         # Gitee 绑定提醒去重标记：仅 tab 管理器初始化后提示一次，不随每个对话窗口重复弹出
         self._gitee_reminder_shown = False
         # Gitee token 失效提醒去重标记：与 _gitee_reminder_shown 独立并存，
@@ -109,7 +108,14 @@ class GlobalCardController:
         一遍）。隐藏卡用户看不见，刷新纯属白付；置 _theme_needs_refresh
         后由其自身 showEvent 补刷自愈（LLMSettingsCard 已有该链路）。
         无补刷链路的卡（实现 _theme_needs_refresh 才是协议）保守照常刷。
+
+        [PERF] 跨链去重：设置弹窗同时挂在 main_widget 5a 的显式刷新列表里，
+        批处理路径下同一周期内会被刷两遍（实测 ~520ms 白付）。5a 刷完会在
+        卡上打 `_last_theme_refresh_cycle`，本层比对同周期号直接跳过。
         """
+        from app.utils.theme_refresh import ThemeRefreshCoordinator
+
+        _cycle = ThemeRefreshCoordinator.get_refresh_cycle()
         for card in (
             self._settings_popup,
             self._provider_edit_card,
@@ -119,7 +125,6 @@ class GlobalCardController:
             self._diff_viewer_card,
             self._chart_viewer_card,
             self._file_undo_card,
-            self._sub_agent_session_card,
         ):
             if card is None:
                 continue
@@ -129,12 +134,16 @@ class GlobalCardController:
             try:
                 if not hasattr(card, "refresh_style"):
                     continue
+                # 本周期已由别处刷过（含 5a 打标）→ 跳过
+                if getattr(card, "_last_theme_refresh_cycle", None) == _cycle:
+                    continue
                 # 仅对「有补刷链路」+ 隐藏的卡做门控，避免主题更新永久丢失
                 if hasattr(card, "_theme_needs_refresh"):
                     if not card.isVisible():
                         card._theme_needs_refresh = True
                         continue
                 card.refresh_style()
+                card._last_theme_refresh_cycle = _cycle
             except RuntimeError:
                 continue  # C++ 对象已销毁（本卡跳过，序列继续）
             except Exception as e:
@@ -516,6 +525,13 @@ class GlobalCardController:
         saved_providers = copy.deepcopy(self.cfg.llm_saved_providers.value) or {}
         from app.core.modelmeta.provider_profile import ProviderConfigCollision, apply_provider_save
 
+        # 编辑时改 (API_URL, API_KEY) → config_id 换成新 hash，旧条目被删除。
+        # 旧 id 必须在 apply_provider_save 覆盖 provider_info["config_id"] 前捕获：
+        # 窗口 _current_provider_name 与全局 llm_selected_model 存的都是旧 id，
+        # 不迁移的话紧随其后的 _load_model_configs 会判定「当前选择已失效」，
+        # 回退到服务商列表第一项（用户看到模型选择被重置）。
+        old_config_id = "" if is_new else str(provider_info.get("config_id", "") or "")
+
         try:
             new_config_id = apply_provider_save(saved_providers, provider_info, provider_name, is_new=is_new)
         except ProviderConfigCollision:
@@ -534,17 +550,19 @@ class GlobalCardController:
 
         self.cfg.set(self.cfg.llm_saved_providers, saved_providers, save=True)
 
-        # 各窗口选中服务商随 config_id 迁移
-        for win in self._all_windows():
-            try:
-                old = win._current_provider_name
-                if old and old != new_config_id and win._valid_configs.get(old):
-                    if saved_providers.get(new_config_id) is provider_info and old not in saved_providers:
+        # 各窗口选中服务商随 config_id 迁移。
+        # 判据只能是旧 id → 新 id 的映射本身：apply_provider_save 落盘时按
+        # merge 语义新建了 dict，不能用 `saved_providers.get(new_config_id)
+        # is provider_info` 判身份（该判定在 merge 改造后恒为 False，迁移静默失效）。
+        if old_config_id and old_config_id != new_config_id and old_config_id not in saved_providers:
+            if self.cfg.llm_selected_model.value == old_config_id:
+                self.cfg.set(self.cfg.llm_selected_model, new_config_id, save=True)
+            for win in self._all_windows():
+                try:
+                    if getattr(win, "_current_provider_name", "") == old_config_id:
                         win._current_provider_name = new_config_id
-                        if win.cfg.llm_selected_model.value == old:
-                            win.cfg.set(win.cfg.llm_selected_model, new_config_id, save=True)
-            except Exception:
-                pass
+                except Exception:
+                    pass
 
         # 隐藏服务商卡（同步移除 replace tab），显示设置卡
         self._close_edit_card("provider_picker")
@@ -970,55 +988,6 @@ class GlobalCardController:
         self._diff_viewer_card = None
 
     # ───────────────────────────────────────────────────────────
-    # 内嵌子智能体会话卡片（替代弹窗 SubAgentSessionDialog，覆盖对话区域）
-    # ───────────────────────────────────────────────────────────
-
-    def ensure_sub_agent_session(self):
-        """懒构建内嵌子智能体会话卡片（重型，隐藏构件），仅构建一次"""
-        if self._sub_agent_session_card is not None:
-            return
-        from app.widgets.cards.settings.sub_agent_session_card import SubAgentSessionCard
-
-        self._sub_agent_session_card = SubAgentSessionCard(self._tab_manager)
-        self._sub_agent_session_card.setVisible(False)
-        self._sub_agent_session_card.closed.connect(
-            lambda: self._card_manager.hide_card("sub_agent_session", GLOBAL_WINDOW_ID)
-        )
-
-        mgr = self._card_manager
-        mgr.register_card(
-            GLOBAL_WINDOW_ID,
-            ContainerType.TOP,
-            "sub_agent_session",
-            self._sub_agent_session_card,
-            system_card=True,
-        )
-        self._global_card_container.add_card("sub_agent_session", self._sub_agent_session_card)
-
-    def show_sub_agent_session(self, task_id, agent_name, logs, summary=None, logs_provider=None):
-        """内嵌显示子智能体会话面板
-
-        Args:
-            task_id: 任务ID
-            agent_name: 智能体名称
-            logs: 初始日志列表
-            summary: 任务摘要
-            logs_provider: 可选。获取最新日志的回调（运行中自动轮询刷新）
-        """
-        self.ensure_sub_agent_session()
-        card = self._sub_agent_session_card
-        card.load(task_id, agent_name, logs, summary, logs_provider)
-        # 隐藏其他全局系统卡片（如设置），避免覆盖层堆叠
-        self._card_manager.hide_card("settings", GLOBAL_WINDOW_ID)
-        self._card_manager.show_card("sub_agent_session", GLOBAL_WINDOW_ID)
-
-    def hide_sub_agent_session(self):
-        """隐藏内嵌子智能体会话面板"""
-        if self._sub_agent_session_card is None:
-            return
-        self._card_manager.hide_card("sub_agent_session", GLOBAL_WINDOW_ID)
-
-    # ───────────────────────────────────────────────────────────
     # 列表变更广播（Hook/MCP/Gateway 开关 → 刷新全局列表 + 各窗口后端）
     # ───────────────────────────────────────────────────────────
 
@@ -1065,12 +1034,11 @@ class GlobalCardController:
         """
         if self._gitee_reminder_shown:
             return
-        if self._settings_popup is None:
-            # 设置弹窗改为按需构建（不再 3500ms 预构建）——此处兜底构建，
-            # 保证 gitee 绑定提醒不被延迟构建策略影响（两处必须同改）。
-            self.ensure_settings_popup()
-        if self._settings_popup is None:
-            return
+        # 先做零成本短路判断再考虑构建设置弹窗：已绑定/已关提醒的用户
+        # 启动期不该为弹不出的提醒垫付 LLMSettingsCard 的 ~500ms 构建开销
+        # （MainThreadWatchdog 实证 2026-10-30，已绑定用户启动 idle 期被
+        # 白构一次完整设置大卡）。提醒本体是 InfoBar，不依赖设置弹窗；
+        # 点「立即绑定」走 open_settings() 内部懒构建，语义不变。
         if self.cfg.gitee_bound.value:
             return
         if not self.cfg.gitee_sync_remind.value:
@@ -1127,8 +1095,10 @@ class GlobalCardController:
         """
         if self._gitee_token_invalid_reminder_shown:
             return
-        if self._settings_popup is None:
-            return
+        # 不做设置弹窗存在性门槛：提醒本体是 InfoBar（不依赖弹窗），
+        # 点「重新绑定」走 open_settings() 内部懒构建。原 None 即静默
+        # return 会让「启动后从未打开过设置卡」的用户收不到失效提醒
+        # （check_gitee_sync_reminder 不再启动期预构建后此场景成为常态）。
         if not self.cfg.gitee_sync_remind.value:
             return
 

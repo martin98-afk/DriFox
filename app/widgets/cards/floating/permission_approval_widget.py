@@ -17,11 +17,19 @@ from loguru import logger
 from PySide6.QtCore import QEvent, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QKeySequence
 from PySide6.QtGui import QShortcut
+from app.widgets.cards.floating.countdown_chip import CountdownChip
 from PySide6.QtWidgets import (QHBoxLayout, QInputDialog, QLabel, QPushButton, QScrollArea, QSizePolicy, QVBoxLayout, QWidget)
 
 from qfluentwidgets import Action, CheckableMenu, MenuAnimationType
 
-from app.utils.design_tokens import BorderRadius, CardStyles, Colors, font_size_css, scale_font_size
+from app.utils.design_tokens import (
+    BorderRadius,
+    CardStyles,
+    Colors,
+    font_size_css,
+    readable_text_on,
+    scale_font_size,
+)
 from app.utils.utils import get_font_family_css, get_unified_font
 from app.widgets.cards.card_container import CardContainer
 
@@ -194,7 +202,7 @@ class PermissionApprovalWidget(QWidget):
             self._countdown_timer = QTimer(self)
             self._countdown_timer.setInterval(_COUNTDOWN_TICK_MS)
             self._countdown_timer.timeout.connect(self._tick_countdown)
-        self._render_countdown()
+        self._countdown_chip.start(self._countdown_left)
         self._countdown_timer.start()
 
     def stop_countdown(self) -> None:
@@ -202,7 +210,7 @@ class PermissionApprovalWidget(QWidget):
         if self._countdown_timer is not None:
             self._countdown_timer.stop()
         self._countdown_left = None
-        self._countdown_label.setVisible(False)
+        self._countdown_chip.stop()
 
     def _tick_countdown(self) -> None:
         if self._countdown_left is None:
@@ -217,20 +225,12 @@ class PermissionApprovalWidget(QWidget):
     def _render_countdown(self) -> None:
         left = self._countdown_left
         if left is None:
-            self._countdown_label.setVisible(False)
+            self._countdown_chip.stop()
             return
-        if left < _COUNTDOWN_DANGER_SEC:
-            text, level = f"⏳ {left}s 后自动拒绝", "danger"
-        elif left < _COUNTDOWN_WARN_SEC:
-            text, level = f"⏳ 还剩 {left}s", "warn"
-        else:
-            text, level = f"⏳ 还剩 {left}s", "normal"
-        self._countdown_label.setText(text)
-        self._countdown_label.setProperty("level", level)
-        self._countdown_label.setVisible(True)
-        # 属性驱动配色：样式表按 [level="..."] 匹配，避免每次重设整段 QSS
-        self._countdown_label.style().unpolish(self._countdown_label)
-        self._countdown_label.style().polish(self._countdown_label)
+        self._countdown_chip.set_left(int(left))
+        # 超时行为（拒绝/允许/AI 审核）由「安全中心 → 审核处理」配置决定，
+        # 徽标只显示剩余时间，不再写死「自动拒绝」文案
+        self._countdown_chip.setToolTip("超时未决将按「安全中心 → 审核处理」配置自动处理")
 
     # ══════════════════ UI 构建 ══════════════════
 
@@ -286,12 +286,9 @@ class PermissionApprovalWidget(QWidget):
 
         lay.addStretch()
 
-        # 倒计时徽标（右上角）：宿主 start_countdown 后才可见
-        self._countdown_label = QLabel("")
-        self._countdown_label.setObjectName("papCountdown")
-        self._countdown_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
-        self._countdown_label.setVisible(False)
-        lay.addWidget(self._countdown_label)
+        # 倒计时徽标（右上角）：宿主 start_countdown 后才可见（与提问卡共用环形徽标）
+        self._countdown_chip = CountdownChip(self)
+        lay.addWidget(self._countdown_chip)
 
         w.setFixedHeight(24)
         return w
@@ -550,17 +547,6 @@ class PermissionApprovalWidget(QWidget):
             f" border-radius:{BorderRadius.XS}; padding:1px 6px; {font_size_css(10)}"
             f" {get_font_family_css()} }}"
         )
-        # 倒计时徽标：三级配色由 dynamic property `level` 驱动（normal/warn/danger）
-        # unpolish/polish 后重新匹配，无需每次重设整段 QSS
-        self._countdown_label.setStyleSheet(
-            f"QLabel#papCountdown {{ color:{Colors.TEXT_SECONDARY}; background:transparent;"
-            f" border-radius:{BorderRadius.XS}; padding:1px 6px; {font_size_css(10)}"
-            f" {get_font_family_css()} }}"
-            f' QLabel#papCountdown[level="warn"] {{ color:{Colors.WARNING};'
-            f" background:{Colors.REALTIME_TAG_BG}; }}"
-            f' QLabel#papCountdown[level="danger"] {{ color:{Colors.REALTIME_ERROR};'
-            f" background:{Colors.REALTIME_TAG_BG}; font-weight:bold; }}"
-        )
         # AI 审核失败提示行：警告色文字 + 同色系淡底，与来源说明（次要文字）分层
         self._review_note_label.setStyleSheet(
             f"QLabel#papReviewNote {{ color:{Colors.WARNING};"
@@ -614,10 +600,11 @@ class PermissionApprovalWidget(QWidget):
                 f" QPushButton#papSecondary:hover {{ background:{Colors.HOVER_BG}; }}"
             )
         self._allow_btn.setStyleSheet(
-            f"QPushButton#papAllow {{ background:{Colors.REALTIME_ACCENT}; color:#ffffff;"
+            f"QPushButton#papAllow {{ background:{Colors.REALTIME_ACCENT}; color:{readable_text_on(Colors.REALTIME_ACCENT)};"
             f" border:none; border-radius:{BorderRadius.SM}; padding:0 16px; font-weight:bold;"
             f" {font_size_css(12)} {get_font_family_css()} }}"
-            f" QPushButton#papAllow:hover {{ background:{Colors.REALTIME_ACCENT_WARM}; }}"
+            f" QPushButton#papAllow:hover {{ background:{Colors.REALTIME_ACCENT_WARM};"
+            f" color:{readable_text_on(Colors.REALTIME_ACCENT_WARM)}; }}"
             f" QPushButton#papAllow:disabled {{ background:{Colors.HOVER_BG}; color:{Colors.TEXT_SECONDARY}; }}"
         )
 

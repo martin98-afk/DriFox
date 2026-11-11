@@ -4,6 +4,9 @@
     "dark": "icon_dark.svg"
   },
   "name": "system-themes",
+  "display_name": {
+      "zh": "内置主题"
+  },
   "description": "DriFox 内置主题：17 款浅色/深色配色",
   "version": "1.0.0",
   "author": {

@@ -6,12 +6,13 @@ description: Gateways（消息网关平台适配器）开发指南——文件�
 
 接入新通讯平台（钉钉/QQ/Telegram…）。三段式：依赖检测 + Adapter 实现 + GatewayPlatformDef 注册。
 
+平台 SDK 等第三方依赖写 manifest `dependencies.pip`（CI 打包自动进 tarball，仓库不放 deps/）；`check_requirements()` 只做 import 探测。本地开发把依赖装到插件 `deps/<platform>/` 自测可以，勿提交。
+
 ### 文件位置
 
 ```
 your-plugin/
-├── .drifox-plugin/plugin.json   ← components.gateways: true + config_schema
-├── deps/                        # 平台 SDK（loader 自动注入 sys.path）
+├── .drifox-plugin/plugin.json   ← components.gateways: true + config_schema + dependencies.pip
 └── gateways/*.py
 ```
 

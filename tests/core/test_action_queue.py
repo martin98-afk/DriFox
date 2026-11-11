@@ -95,3 +95,36 @@ def test_enqueue_rejected_while_draining():
     result = q.drain("w1", handlers={"send": lambda p: accepted.append(q.enqueue("w1", "send", {"text": "b"}))})
     assert result == 1
     assert accepted == [False]  # 执行期间拒绝入队
+
+def test_submit_immediate_routes_by_window_id():
+    """实时动作：多窗口各注册处理器，只有匹配 window_id 的处理器消费。"""
+    from app.core.conversation.action_queue import (
+        register_immediate_handler,
+        submit_immediate,
+        unregister_immediate_handler,
+    )
+
+    hits = []
+
+    def make_handler(own_wid):
+        def _h(wid, payload):
+            if wid != own_wid:
+                return False
+            hits.append((own_wid, payload.get("n")))
+            return True
+
+        return _h
+
+    h1, h2 = make_handler("w1"), make_handler("w2")
+    register_immediate_handler("team_spawn", h1)
+    register_immediate_handler("team_spawn", h2)
+    try:
+        assert submit_immediate("w2", "team_spawn", {"n": 7}) is True
+        assert hits == [("w2", 7)]
+        assert submit_immediate("w3", "team_spawn", {"n": 9}) is False  # 无命中 → 回退入队
+        unregister_immediate_handler("team_spawn", h2)
+        assert submit_immediate("w2", "team_spawn", {"n": 8}) is False
+        assert submit_immediate("w1", "team_spawn", {"n": 1}) is True
+    finally:
+        unregister_immediate_handler("team_spawn", h1)
+        unregister_immediate_handler("team_spawn", h2)

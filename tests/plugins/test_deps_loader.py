@@ -172,3 +172,108 @@ class TestMissingPipDeps:
         # json 为标准库，find_spec 可找到
         m = {"dependencies": {"pip": {"default": ["json"]}}}
         assert missing_pip_deps(tmp_path, m) == []
+
+
+# ============================================================
+# L1：版本校验 / 注入登记与摘除　L2：区间冲突判定
+# ============================================================
+
+def _make_dist_info(deps_dir: Path, dist: str, version: str) -> None:
+    """在 deps 目录下造一个带 METADATA 的 dist-info。"""
+    d = deps_dir / f"{dist}-{version}.dist-info"
+    d.mkdir(parents=True)
+    (d / "METADATA").write_text(
+        f"Metadata-Version: 2.1\nName: {dist}\nVersion: {version}\n", encoding="utf-8"
+    )
+
+
+class TestDepsVersionGate:
+    def test_unsatisfied_version_counts_missing(self, tmp_path: Path):
+        plat = tmp_path / "deps" / current_platform_key()
+        plat.mkdir(parents=True)
+        _make_dist_info(plat, "httpx", "0.20.0")
+        m = {"dependencies": {"pip": {"default": ["httpx>=0.28"]}}}
+        assert missing_pip_deps(tmp_path, m) == ["httpx>=0.28"]
+
+    def test_satisfied_version_ready(self, tmp_path: Path):
+        plat = tmp_path / "deps" / current_platform_key()
+        plat.mkdir(parents=True)
+        _make_dist_info(plat, "httpx", "0.28.1")
+        m = {"dependencies": {"pip": {"default": ["httpx>=0.28"]}}}
+        assert missing_pip_deps(tmp_path, m) == []
+
+    def test_platform_dir_version_wins(self, tmp_path: Path):
+        """平台目录版不满足、公共目录满足 → 按平台版判缺失（实际生效的是它）"""
+        plat = tmp_path / "deps" / current_platform_key()
+        plat.mkdir(parents=True)
+        _make_dist_info(plat, "httpx", "0.20.0")
+        _make_dist_info(tmp_path / "deps", "httpx", "0.28.1")
+        m = {"dependencies": {"pip": {"default": ["httpx>=0.28"]}}}
+        assert missing_pip_deps(tmp_path, m) == ["httpx>=0.28"]
+
+    def test_loose_name_without_version_still_ready(self, tmp_path: Path):
+        """vendor/源码形态（无 dist-info）沿用按名判定，不因无版本号误报"""
+        (tmp_path / "deps" / "httpx").mkdir(parents=True)
+        m = {"dependencies": {"pip": {"default": ["httpx>=0.28"]}}}
+        assert missing_pip_deps(tmp_path, m) == []
+
+
+class TestRemoveDepsFromPath:
+    def test_remove_is_idempotent(self, plugin_tree: Path):
+        injected = ensure_deps_on_path(plugin_tree)
+        assert injected
+        removed = deps_loader.remove_deps_from_path(plugin_tree)
+        assert sorted(removed) == sorted(injected)
+        for p in injected:
+            assert p not in sys.path
+        assert deps_loader.remove_deps_from_path(plugin_tree) == []
+
+    def test_remove_does_not_touch_sibling_prefix(self, tmp_path: Path):
+        """foo 的摘除不能命中 foobar（前缀必须按分隔符断开）"""
+        a = tmp_path / "foo"
+        b = tmp_path / "foobar"
+        keep: list = []
+        try:
+            for p in (a, b):
+                (p / "deps").mkdir(parents=True)
+                (p / "deps" / "m.py").write_text("", encoding="utf-8")
+            ensure_deps_on_path(a)
+            keep = ensure_deps_on_path(b)
+            deps_loader.remove_deps_from_path(a)
+            for p in keep:
+                assert p in sys.path
+        finally:
+            for p in keep:
+                while p in sys.path:
+                    sys.path.remove(p)
+            deps_loader.remove_deps_from_path(a)
+            deps_loader.remove_deps_from_path(b)
+
+
+class TestSpecConflict:
+    @pytest.mark.parametrize(
+        "a,b,expected",
+        [
+            ("pkg==1.0", "pkg==2.0", True),
+            ("pkg>=2", "pkg<2", True),
+            ("pkg>2", "pkg<=2", True),
+            ("pkg>=3", "pkg<3", True),
+            ("pkg>=2", "pkg<=2", False),  # 2 同时满足
+            ("pkg>=1", "pkg<2", False),
+            ("pkg>=1.0", "pkg>=2.0", False),  # 两个下界必有交集
+            ("pkg", "pkg==1", False),  # 裸包名
+            ("pkg>=1.0", "other<1.0", False),  # 不同包
+            ("PyYAML>=6", "pyyaml<6", True),  # 名字归一后同包
+        ],
+    )
+    def test_pairs(self, a: str, b: str, expected: bool):
+        assert deps_loader.specs_conflict(a, b) is expected
+
+    def test_find_conflicts_cross_plugin(self):
+        decl = {"a": ["httpx>=0.28"], "b": ["httpx<0.24"], "c": ["httpx>=0.28.1"]}
+        out = deps_loader.find_deps_conflicts(decl)
+        assert ("httpx", "a", "b") in out
+        assert not [pair for pair in out if {pair[1], pair[2]} == {"a", "c"}]
+
+    def test_same_plugin_not_reported(self):
+        assert deps_loader.find_deps_conflicts({"a": ["httpx==1", "httpx==2"]}) == []

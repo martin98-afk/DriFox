@@ -39,6 +39,8 @@ allowed-tools: Read, Glob, Grep, Write, Edit, Bash(python:*), question
 | "配置 MCP 服务器" | MCP | references/components/mcp.md |
 | "配置 LSP 语言服务器" | LSP | references/components/lsp.md |
 | "做个主题""改配色" | Themes | references/components/themes.md |
+| "换个区域放视频背景""视频挂侧栏" | Themes | references/components/themes.md |
+| "主题带音乐""切主题放歌""主题背景音" | Themes | references/components/themes.md |
 | "做 UI 卡片""浮动卡" | UI | → 调用 ui-plugin-creator 技能 |
 | "加个工具""做个 AI 工具" | Tools | references/components/tools.md |
 | "加个服务商""接新模型厂商" | Providers | references/components/providers.md |
@@ -94,11 +96,13 @@ your-plugin/
 ├── storages/*.py                ← 会话存储引擎（register(registry)）
 ├── serializers/*.py             ← 消息序列化器（register(registry)）
 ├── engines/*.py                 ← 对话引擎替换（进阶）
-├── gateways/*.py + deps/        ← 消息网关平台适配器
+├── gateways/*.py                ← 消息网关平台适配器
 ├── model_adapters/*.py          ← 模型协议适配器
 ├── .mcp.json / .lsp.json        ← MCP / LSP（插件根）
 └── README.md / __init__.py      ← 说明 / 包标记（可选）
 ```
+
+> 第三方 pip 依赖一律写在 manifest `dependencies.pip`，仓库不放 `deps/` 目录：市场 CI 打包时按声明自动构建进按平台分发的 tarball（详见 references/manifest.md、publishing.md）。本地开发装依赖到 `deps/<platform>/` 仅用于自测。
 
 18 类组件速查（字段细节、代码模板 → references/components.md）：
 

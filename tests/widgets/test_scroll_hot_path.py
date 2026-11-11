@@ -40,6 +40,7 @@ def _make_scroll_window(maximum=1000):
     win._is_destroyed = False
     win._programmatic_scroll_depth = 0
     win._scroll_max_cache = None
+    win._batch_placeholders = {}  # [MEM] 占位死区段（_sync_visible_cards_on_scroll 尾部）在 __new__ 桩上会抛 RuntimeError
     scroll_area = QScrollArea()
     container = QWidget()
     container.resize(400, 5000)  # sizeHint 的底气：真实高度
@@ -131,6 +132,7 @@ def test_visible_set_skips_already_visible_cards(qapp):
     win._last_visible_card_ids = set()
     win._restore_queue = []
     win._log_render_quota = MagicMock()
+    win._batch_placeholders = {}  # [MEM] 占位死区段在 __new__ 桩上会抛 RuntimeError
 
     scroll_area = QScrollArea()
     container = QWidget()
@@ -198,6 +200,7 @@ def test_new_card_with_recycled_id_is_resynced(qapp):
     win._is_destroyed = False
     win._restore_queue = []
     win._log_render_quota = MagicMock()
+    win._batch_placeholders = {}  # [MEM] 占位死区段在 __new__ 桩上会抛 RuntimeError
 
     scroll_area = QScrollArea()
     container = QWidget()
@@ -227,3 +230,117 @@ def test_new_card_with_recycled_id_is_resynced(qapp):
     win._last_visible_card_ids = set()
     win._sync_visible_cards_on_scroll()
     assert len(synced) == 1, "清空可视集后，同一张卡必须重新同步宽度（T36 P1 锁死点）"
+
+
+# ─── away 守卫：sticky 逐拍锚定不得拽回已滚离的视口 ───────────────────
+
+def test_maintain_bottom_anchor_respects_away(qapp, monkeypatch):
+    """[MEM] away 守卫：sticky 窗口内滚离底部（`_should_follow_bottom=False`）
+    → `_maintain_bottom_anchor` 清 deadline、停 timer、不再 setValue。
+
+    回归「用户滚到顶被贴底链拽回」：sticky 期间 `_scroll_bottom_timer` 被
+    停但 `_bottom_anchor_timer` 不停，逐拍 setValue(landed_bottom) 把视口
+    拽回底部。与 `_do_scroll_to_bottom` 的 away 守卫对齐。
+    """
+    import time as _time
+    from PySide6.QtCore import QObject, QTimer
+
+    win = OpenAIChatToolWindow.__new__(OpenAIChatToolWindow)
+    QObject.__init__(win)
+    win._is_destroyed = False
+    win._is_jump_scroll_locked = lambda: False
+    win._should_follow_bottom = lambda: False  # away=True（用户滚离）
+    win._bottom_anchor_deadline = _time.monotonic() + 10.0  # sticky 窗口内
+    timer = QTimer()
+    timer.start(10000)
+    win._bottom_anchor_timer = timer
+    win._scroll_diag = MagicMock()
+    win.chat_scroll_area = MagicMock()
+    scroll_bar = MagicMock()
+    win.chat_scroll_area.verticalScrollBar.return_value = scroll_bar
+    win._sync_scroll_maximum = MagicMock()
+    win._landed_bottom_value = MagicMock(return_value=999)
+
+    win._maintain_bottom_anchor()
+
+    scroll_bar.setValue.assert_not_called()
+    assert win._bottom_anchor_deadline == 0.0
+    assert not timer.isActive(), "away 守卫必须停掉逐拍锚定 timer"
+    win._scroll_diag.assert_any_call("anchor-away", throttle=1.0)
+
+
+def test_maintain_bottom_anchor_still_anchors_when_following(qapp, monkeypatch):
+    """对照：away=False（跟随态）→ 逐拍锚定照常（setValue + timer 重启）。
+
+    防止 away 守卫误伤正常锚定路径。
+    """
+    import time as _time
+    from PySide6.QtCore import QObject, QTimer
+
+    win = OpenAIChatToolWindow.__new__(OpenAIChatToolWindow)
+    QObject.__init__(win)
+    win._is_destroyed = False
+    win._is_jump_scroll_locked = lambda: False
+    win._should_follow_bottom = lambda: True  # 跟随态
+    win._bottom_anchor_deadline = _time.monotonic() + 10.0
+    timer = QTimer()
+    timer.start(10000)
+    win._bottom_anchor_timer = timer
+    win._scroll_diag = MagicMock()
+    win.chat_scroll_area = MagicMock()
+    scroll_bar = MagicMock()
+    win.chat_scroll_area.verticalScrollBar.return_value = scroll_bar
+    win._programmatic_scroll_depth = 0
+    win._sync_scroll_maximum = MagicMock()
+    win._landed_bottom_value = MagicMock(return_value=999)
+
+    win._maintain_bottom_anchor()
+
+    scroll_bar.setValue.assert_called()
+    assert timer.isActive(), "跟随态 timer 必须重启（逐拍驱动继续）"
+    win._scroll_diag.assert_any_call("anchor")
+
+
+# ─── [JUMP] _snap_bottom_queued 跳转锁单点收紧（#64 / #45）───
+
+def test_snap_bottom_queued_blocked_by_jump_lock(qapp):
+    """跳转锁真（尾巴过期但 in_flight）→ 不 setValue。
+
+    回归 #45：`_should_follow_bottom()` 只认 until 未过期，跳转 t≈3.1s 起
+    本槽投递撞锁空窗被放行，`setValue(landed)` 把落点拽回底部。单点收紧
+    后锁判据由 `_is_jump_scroll_locked()`（含 in_flight 检查 + 10s hard cap）兜住。
+    """
+    win = OpenAIChatToolWindow.__new__(OpenAIChatToolWindow)
+    win._is_destroyed = False
+    win._bottom_snap_queued = True
+    win._programmatic_scroll_depth = 0
+    win._should_follow_bottom = lambda: True  # 公共判据放行（空窗场景）
+    win._is_jump_scroll_locked = lambda: True  # 锁仍真（in_flight）
+    win.chat_scroll_area = MagicMock()
+    scroll_bar = MagicMock()
+    win.chat_scroll_area.verticalScrollBar.return_value = scroll_bar
+    win._landed_bottom_value = MagicMock(return_value=999)
+
+    win._snap_bottom_queued()
+
+    assert win._bottom_snap_queued is False, "队列标志必须先清，防止锁期内反复重投"
+    assert not scroll_bar.setValue.called, "跳转锁期内 queued snap 不得贴底（#45 拉回根因）"
+
+
+def test_snap_bottom_queued_follow_state_still_snaps(qapp):
+    """对照：锁假 + 跟随态 → setValue 照常执行（既有行为不回归）"""
+    win = OpenAIChatToolWindow.__new__(OpenAIChatToolWindow)
+    win._is_destroyed = False
+    win._bottom_snap_queued = True
+    win._programmatic_scroll_depth = 0
+    win._should_follow_bottom = lambda: True
+    win._is_jump_scroll_locked = lambda: False
+    win.chat_scroll_area = MagicMock()
+    scroll_bar = MagicMock()
+    win.chat_scroll_area.verticalScrollBar.return_value = scroll_bar
+    win._landed_bottom_value = MagicMock(return_value=999)
+
+    win._snap_bottom_queued()
+
+    scroll_bar.setValue.assert_called_once_with(999)
+

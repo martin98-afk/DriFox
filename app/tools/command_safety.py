@@ -16,6 +16,8 @@ from typing import Optional
 
 from loguru import logger
 
+from app.tools.sandbox import wrap_os_sandbox
+
 # ============================================================
 # Shell 元字符检测
 # ============================================================
@@ -606,9 +608,14 @@ def run_safe(command: str, job=None, **kwargs) -> "subprocess.Popen":
     （kill-on-close 时连同子进程树一起杀灭）。非 Windows / assign 失败
     不阻断执行，仅记日志。
 
+    OS 级沙箱：macOS 且安全中心启用 OS 沙箱时，命令包进 sandbox-exec
+    （use_shell=False：argv 直执行，不引入 shell 解释）。
+
     Windows 特殊处理：如果命令找不到（FileNotFoundError），自动回退到
     cmd /c 包装，以支持 PATHEXT 解析（如 pip → pip.exe、tsc → tsc.cmd）。
     """
+    # OS 级沙箱注入（非 darwin / 未启用时原样返回）
+    command = wrap_os_sandbox(command, kwargs.get("cwd"), use_shell=False)
     args = split_command(command)
     if not args:
         raise ValueError(f"Cannot split command: {command}")
@@ -639,7 +646,12 @@ def run_with_shell(command: str, job=None, **kwargs) -> "subprocess.Popen":
     调用方必须确保命令已通过用户审批。
 
     job: 可选 ProcessJob，同 run_safe。
+
+    OS 级沙箱：macOS 且安全中心启用 OS 沙箱时，命令包进
+    sandbox-exec ... /bin/bash -c（use_shell=True，quote 防二次解释）。
     """
+    # OS 级沙箱注入（非 darwin / 未启用时原样返回）
+    command = wrap_os_sandbox(command, kwargs.get("cwd"), use_shell=True)
     proc = subprocess.Popen(
         command,
         shell=True,

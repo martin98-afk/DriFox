@@ -1,227 +1,145 @@
 # -*- coding: utf-8 -*-
 """
-回归测试：子智能体流式注入链路
+回归测试：子智能体结果注入链路（插件所有物）
+
+迁移说明：注入逻辑原为 main_widget._inject_subagent_completion_into_stream
+（已删），现归 plugins/system-subagent/tools/subagent_tools.py 的
+_inject_subagent_result（经 ToolRegistry metadata["subagent_result_injector"]
+被发现，主程序只做接线）。
 
 测试目标：
-1. _inject_subagent_completion_into_stream 把消息正确放入 backend._hook_message_queue
-2. 消息格式包含 <system-reminder><sub-agent-finished-hook>...</sub-agent-finished-hook></system-reminder>
-3. _format_hook_output("SubAgentFinished", content) 被正确调用
-4. 不重复 emit _hook_messages_updated（由 backend.py:380 的 on_hook_finished 处理）
+1. 文案构建：任务编号/状态图标/agent 名/执行结果齐全，4096 截断
+2. __batch_summary__ 汇总内容原样透传
+3. send 调用参数：mode 透传、hook_event="SubAgentFinished"
+4. register 的 metadata 注册注入器（主程序发现机制）
 """
+import importlib.util
 import queue
 import sys
 from pathlib import Path
-from unittest.mock import MagicMock
 
 # 仓库根目录
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from app.core.conversation.backend import _format_hook_output
+_PLUGIN_TOOLS = _REPO_ROOT / "plugins" / "system-subagent" / "tools"
 
+def _load_subagent_tools():
+    """直载插件模块（幂等：已加载返回缓存，先例 test_team_capability.py）"""
+    mod_name = "_subagent_stream_injection_subagent_tools"
+    if mod_name in sys.modules:
+        return sys.modules[mod_name]
+    spec = importlib.util.spec_from_file_location(mod_name, _PLUGIN_TOOLS / "subagent_tools.py")
+    assert spec is not None and spec.loader is not None
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[mod_name] = mod
+    spec.loader.exec_module(mod)
+    return mod
 
-class TestSubAgentStreamInjection:
-    """子智能体流式注入链路测试"""
+class _SendRecorder:
+    """session.send 裸 callable 替身：捕获 (text, kwargs) 并记录"""
 
-    # =====================================================================
-    # 辅助：构造一个极简 mock MainWidget，足够调用 _inject_subagent_completion_into_stream
-    # =====================================================================
-    @staticmethod
-    def _make_mock_widget(hook_queue: queue.Queue) -> MagicMock:
-        """返回一个只有 backend._hook_message_queue 的 mock MainWidget"""
-        mock_backend = MagicMock()
-        mock_backend._hook_message_queue = hook_queue
-        # 不配置 _hook_messages_updated，这样如果代码误触 emit 会 AttributeError
+    def __init__(self, return_value=True):
+        self.calls = []
+        self.return_value = return_value
 
-        mock_widget = MagicMock()
-        mock_widget.backend = mock_backend
-        return mock_widget
+    def __call__(self, text, **kwargs):
+        self.calls.append((text, kwargs))
+        return self.return_value
 
-    # =====================================================================
-    # 直接测试 _format_hook_output（独立函数，无 Qt 依赖）
-    # =====================================================================
-    def test_format_hook_output_subagent_finished(self):
-        """验证 _format_hook_output 正确生成 SubAgentFinished 标签"""
-        content = "子智能体任务完成: ✅ [TestAgent] 写代码 (id: abc123)"
-        result = _format_hook_output("SubAgentFinished", content)
+def _drain(q: queue.Queue) -> list:
+    out = []
+    while True:
+        try:
+            out.append(q.get_nowait())
+        except queue.Empty:
+            break
+    return out
 
-        # 外层必须是 system-reminder
-        assert result.startswith(
-            "<system-reminder>"
-        ), f"应以 <system-reminder> 开头，实际: {result}"
-        assert result.endswith(
-            "</system-reminder>"
-        ), f"应以 </system-reminder> 结尾，实际: {result}"
+def test_format_hook_output_subagent_finished():
+    """验证 _format_hook_output 正确生成 SubAgentFinished 标签"""
+    from app.core.conversation.backend import _format_hook_output
 
-        # 内层必须是 sub-agent-finished-hook（kebab-case: SubAgentFinished → sub-agent-finished）
-        assert (
-            "<sub-agent-finished-hook>" in result
-        ), f"应包含 <sub-agent-finished-hook>，实际: {result}"
-        assert (
-            "</sub-agent-finished-hook>" in result
-        ), f"应包含 </sub-agent-finished-hook>，实际: {result}"
+    content = "子智能体任务完成: ✅ [TestAgent] 写代码 (id: abc123)"
+    result = _format_hook_output("SubAgentFinished", content)
 
-        # 内容必须原样保留
-        assert content in result, f"原始内容应出现在结果中，实际: {result}"
+    assert result.startswith("<system-reminder>"), f"应以 <system-reminder> 开头，实际: {result}"
+    assert result.endswith("</system-reminder>"), f"应以 </system-reminder> 结尾，实际: {result}"
+    assert "<sub-agent-finished-hook>" in result, f"应包含 sub-agent-finished-hook 标签，实际: {result}"
+    assert content in result, f"原始内容应出现在结果中，实际: {result}"
 
-    # =====================================================================
-    # 通过模块级 __getattr__ 动态派发，测试完整注入链路
-    # =====================================================================
-    def test_inject_message_into_queue(self):
-        """验证消息被正确放入 backend._hook_message_queue"""
-        q = queue.Queue()
-        mock_widget = self._make_mock_widget(q)
+def test_inject_single_task_content_and_send_args():
+    """单任务：文案齐全 + mode/hook_event 正确传给 send"""
+    mod = _load_subagent_tools()
+    rec = _SendRecorder()
+    ok = mod._inject_subagent_result(
+        rec, task_id="task_abc123", result="完成", success=True,
+        agent_name="TestAgent", task_description="写代码", mode="hook",
+    )
+    assert ok is True
+    assert len(rec.calls) == 1
+    text, kwargs = rec.calls[0]
 
-        # _inject_subagent_completion_into_stream 是 OpenAIChatToolWindow 的方法
-        import app.main_widget as mw
-        inject_fn = mw.OpenAIChatToolWindow._inject_subagent_completion_into_stream
+    assert kwargs["mode"] == "hook"
+    assert kwargs["hook_event"] == "SubAgentFinished"
+    assert "task_abc123" in text
+    assert "✅" in text and "[TestAgent]" in text
+    assert "执行结果" in text and "完成" in text
 
-        inject_fn(
-            mock_widget,
-            task_id="task_abc123",
-            result="完成",
-            success=True,
-            agent_name="TestAgent",
-            task_description="写代码",
-        )
+def test_inject_failure_task_icon():
+    mod = _load_subagent_tools()
+    rec = _SendRecorder()
+    mod._inject_subagent_result(
+        rec, task_id="task_fail_xyz", result="错误", success=False,
+        agent_name="FailAgent", task_description="会失败的任务",
+    )
+    text, kwargs = rec.calls[0]
+    assert "❌" in text
+    assert "task_fail_xyz" in text and "[FailAgent]" in text
+    assert kwargs["mode"] == "hook"  # 缺省 mode
 
-        # 验证消息进入队列
-        assert not q.empty(), "队列不应为空"
-        msg = q.get_nowait()
+def test_inject_batch_summary_passthrough():
+    """__batch_summary__：汇总内容原样作为 text，不拼任务模板"""
+    mod = _load_subagent_tools()
+    rec = _SendRecorder()
+    summary = "已完成 2 个子任务，1 个失败。本次完成的任务：..."
+    mod._inject_subagent_result(
+        rec, task_id="__batch_summary__", result=summary, success=False,
+        agent_name="", task_description="",
+    )
+    text, _kwargs = rec.calls[0]
+    assert text == summary, f"汇总应原样透传，实际: {text}"
 
-        assert msg["role"] == "system", f"role 应为 system，实际: {msg['role']}"
-        assert "_hook_event" in msg, "消息应包含 _hook_event"
-        assert (
-            msg["_hook_event"] == "SubAgentFinished"
-        ), f"_hook_event 应为 SubAgentFinished，实际: {msg['_hook_event']}"
+def test_inject_truncates_long_result():
+    """结果超 4096 字符：截断 + 省略标记，不含尾部内容"""
+    mod = _load_subagent_tools()
+    rec = _SendRecorder()
+    long_result = "B" * 6000
+    mod._inject_subagent_result(
+        rec, task_id="task_long", result=long_result, success=True,
+        agent_name="A", task_description="d",
+    )
+    text, _kwargs = rec.calls[0]
+    assert "已省略" in text
+    assert "B" * 5000 not in text, "截断后不应包含完整超长尾部"
+    assert "B" * 100 in text  # 前缀保留
 
-        # 验证 hook 内容格式
-        hook_content = msg["content"]
-        assert "<system-reminder>" in hook_content
-        assert "<sub-agent-finished-hook>" in hook_content
-        assert "</sub-agent-finished-hook>" in hook_content
-        assert "</system-reminder>" in hook_content
+def test_register_metadata_exposes_injector():
+    """register 时 metadata 带注入器 callable（主程序发现机制）"""
 
-        # 验证任务信息包含在内容中
-        assert (
-            "task_abc123" in hook_content
-        ), f"task_id 应出现在 hook 内容中，实际: {hook_content}"
-        assert "✅" in hook_content, f"成功状态图标 ✅ 应出现，实际: {hook_content}"
-        assert (
-            "[TestAgent]" in hook_content
-        ), f"agent_name 应出现，实际: {hook_content}"
+    class _Registry:
+        def __init__(self):
+            self.registered = []
 
-    def test_inject_failure_task(self):
-        """验证失败任务也正确注入"""
-        q = queue.Queue()
-        mock_widget = self._make_mock_widget(q)
+        def register(self, name, schema, **meta):
+            self.registered.append((name, meta))
 
-        import app.main_widget as mw
-        inject_fn = mw.OpenAIChatToolWindow._inject_subagent_completion_into_stream
-
-        inject_fn(
-            mock_widget,
-            task_id="task_fail_xyz",
-            result="错误",
-            success=False,
-            agent_name="FailAgent",
-            task_description="会失败的任务",
-        )
-
-        assert not q.empty()
-        msg = q.get_nowait()
-
-        # 失败时应该是 ❌ 图标
-        assert "❌" in msg["content"], f"失败任务应包含 ❌，实际: {msg['content']}"
-        assert "task_fail_xyz" in msg["content"]
-        assert "[FailAgent]" in msg["content"]
-
-    def test_batch_summary_message(self):
-        """验证 __batch_summary__ 任务 ID 走汇总分支"""
-        q = queue.Queue()
-        mock_widget = self._make_mock_widget(q)
-
-        import app.main_widget as mw
-        inject_fn = mw.OpenAIChatToolWindow._inject_subagent_completion_into_stream
-
-        summary_content = "已完成 2 个子任务，1 个失败"
-        inject_fn(
-            mock_widget,
-            task_id="__batch_summary__",
-            result=summary_content,
-            success=False,
-            agent_name="",
-            task_description="",
-        )
-
-        assert not q.empty()
-        msg = q.get_nowait()
-
-        # 汇总内容应原样出现在 hook 中
-        assert (
-            summary_content in msg["content"]
-        ), f"汇总内容应出现，实际: {msg['content']}"
-        # 汇总消息不应出现 agent/desc 预览
-        assert "[FailAgent]" not in msg["content"]
-        assert "✅" not in msg["content"] and "❌" not in msg["content"]
-
-    def test_no_duplicate_emit(self):
-        """验证注入方法体内不再调用 backend._hook_messages_updated.emit
-
-        该信号应由 backend.py:380 的 on_hook_finished 回调在 put 后统一发射，
-        不应在 _inject_subagent_completion_into_stream 中重复发射。
-        """
-        q = queue.Queue()
-        mock_backend = MagicMock()
-        mock_backend._hook_message_queue = q
-        # _hook_messages_updated 存在但配置为抛出——若代码调用了 emit 则测试失败
-        mock_backend._hook_messages_updated.emit.side_effect = AssertionError(
-            "emit 不应在 _inject_subagent_completion_into_stream 中被调用"
-        )
-
-        mock_widget = MagicMock()
-        mock_widget.backend = mock_backend
-
-        import app.main_widget as mw
-        inject_fn = mw.OpenAIChatToolWindow._inject_subagent_completion_into_stream
-
-        # 执行注入——如果内部调用 emit，side_effect 会抛出 AssertionError
-        inject_fn(
-            mock_widget,
-            task_id="task_no_emit",
-            result="测试",
-            success=True,
-            agent_name="EmitTest",
-            task_description="验证不重复 emit",
-        )
-
-        # 确保 emit 没有被调用
-        mock_backend._hook_messages_updated.emit.assert_not_called()
-
-    def test_description_truncation(self):
-        """验证超长任务描述被截断到 80 字符"""
-        q = queue.Queue()
-        mock_widget = self._make_mock_widget(q)
-
-        import app.main_widget as mw
-        inject_fn = mw.OpenAIChatToolWindow._inject_subagent_completion_into_stream
-
-        long_desc = "A" * 200  # 200 字符
-        inject_fn(
-            mock_widget,
-            task_id="task_truncate",
-            result="完成",
-            success=True,
-            agent_name="TruncAgent",
-            task_description=long_desc,
-        )
-
-        assert not q.empty()
-        msg = q.get_nowait()
-
-        # 截断后应包含 "..." 和原始 task_id
-        assert "..." in msg["content"], f"超长描述应被截断为 ...，实际: {msg['content']}"
-        assert "task_truncate" in msg["content"]
-        # 不应包含完整 200 个 A
-        assert "A" * 100 not in msg["content"]
+    mod = _load_subagent_tools()
+    reg = _Registry()
+    mod.register(reg)
+    by_name = dict(reg.registered)
+    meta = by_name["subagent_para"]["metadata"]
+    injector = meta.get("subagent_result_injector")
+    assert callable(injector), f"metadata 应注册注入器，实际: {meta}"
+    assert injector is mod._inject_subagent_result

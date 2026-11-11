@@ -1,0 +1,65 @@
+{
+  "icon": {
+    "light": "icon.svg",
+    "dark": "icon_dark.svg"
+  },
+  "name": "system-question",
+  "display_name": {
+      "zh": "内置提问工具"
+  },
+  "description": "DriFox 内置提问工具：向用户提问（选项/多选/自定义），支持超时跳过与超时 AI 代答",
+  "version": "1.0.0",
+  "author": {
+    "name": "DriFoxx Team"
+  },
+  "homepage": "https://github.com/martin98-afk/DriFox",
+  "license": "GPL-3.0-or-later",
+  "type": "system",
+  "api_version": 2,
+  "capabilities": [
+    "question.control",
+    "model.config",
+    "model.config_for",
+    "provider.list",
+    "model.enumerate",
+    "session.read"
+  ],
+  "components": {
+    "tools": true,
+    "ui": true
+  },
+  "config_schema": {
+    "title": "提问工具设置",
+    "fields": [
+      {
+        "key": "question_timeout_action",
+        "label": "提问超时处理",
+        "type": "select",
+        "options": {
+          "none": "不设置超时",
+          "skip": "超时跳过",
+          "ai": "超时 AI 判断"
+        },
+        "default": "none",
+        "description": "提问卡等待用户回答超时后的处理方式：跳过 = 未答题标记已跳过；AI 判断 = 由模型代用户作答"
+      },
+      {
+        "key": "question_timeout_sec",
+        "label": "提问超时时间",
+        "type": "number",
+        "min": 10,
+        "max": 3600,
+        "step": 10,
+        "default": 120,
+        "description": "单位秒，每题独立计时（翻到下一题重新计时）；仅「不设置超时」以外的模式生效"
+      },
+      {
+        "key": "question_timeout_model",
+        "label": "超时判断模型",
+        "type": "model",
+        "default": "",
+        "description": "「超时 AI 判断」使用的模型；留空跟随当前会话模型"
+      }
+    ]
+  }
+}

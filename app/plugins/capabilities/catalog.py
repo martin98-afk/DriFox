@@ -8,6 +8,7 @@
 - ID 形如 ``<group>.<name>``，group 必须等于首段
 - level 是审核语义，不参与运行时裁剪
 - surfaces 声明该能力在哪些上下文可用（ui = 浮动卡/工作台页，tool = 工具插件）
+- 新增能力必须显式核对 value_style；value 形态（pool 值即终值）若漏标，调用侧 `x()` 会在运行时炸 'dict' object is not callable（不会静默，tests/plugins/test_capability_value_style_ast.py 兜静态检查）
 """
 
 from __future__ import annotations
@@ -33,6 +34,7 @@ def _spec(
     summary: str,
     surfaces: FrozenSet[str],
     legacy: Iterable[str] = (),
+    value_style: str = "factory",
 ) -> CapabilitySpec:
     return CapabilitySpec(
         id=cid,
@@ -41,6 +43,7 @@ def _spec(
         summary=summary,
         surfaces=surfaces,
         legacy_keys=tuple(legacy),
+        value_style=value_style,
     )
 
 
@@ -58,6 +61,18 @@ CATALOG: Dict[str, CapabilitySpec] = {
             ["get_model_config", "get_provider_config"],
         ),
         _spec(
+            "model.config_for",
+            _H,
+            "按 query（模型名 / 服务商 / 服务商:模型名）解析出可执行的完整模型配置（含明文 key）",
+            _BOTH,
+        ),
+        _spec(
+            "model.set",
+            _H,
+            "设置窗口的服务商与模型（只改窗口实例态，不写全局默认；可按 window_id 定向指定窗口）",
+            _UI,
+        ),
+        _spec(
             "provider.list",
             _L,
             "已配置服务商清单（id/名称/模型数，不含密钥与 URL）",
@@ -70,10 +85,33 @@ CATALOG: Dict[str, CapabilitySpec] = {
             _BOTH,
         ),
         # ── 会话 ──
-        _spec("session.read", _M, "当前 session_id 与消息列表", _BOTH),
-        _spec("session.write", _M, "消息写回当前会话（入库 + 刷 UI + 发事件）", _BOTH, ["save_messages_to_session"]),
+        _spec("session.read", _M, "当前 session_id 与消息列表（可按 window_id 定向到指定窗口）", _BOTH),
+        _spec(
+            "session.write",
+            _M,
+            "消息写回当前会话（入库 + 刷 UI + 发事件；可按 window_id 定向）",
+            _BOTH,
+            ["save_messages_to_session"],
+        ),
         _spec("session.list", _M, "历史会话列表与元数据", _UI),
-        _spec("session.manage", _H, "新建/切换/删除会话（破坏性）", _UI),
+        _spec(
+            "session.history",
+            _M,
+            "持久化历史会话只读面（列表/归档/项目聚合/按 session_id 定位；经 HistoryManager）",
+            _UI,
+        ),
+        _spec(
+            "session.history.write",
+            _H,
+            "改写持久化历史（置顶/移动项目/归档/恢复/删除/导入，破坏性）",
+            _UI,
+        ),
+        _spec(
+            "session.manage",
+            _H,
+            "切换/新建当前会话（加载历史会话、清空开新会话；破坏性）",
+            _UI,
+        ),
         _spec(
             "session.invalidate",
             _M,
@@ -82,13 +120,13 @@ CATALOG: Dict[str, CapabilitySpec] = {
         ),
         _spec("session.interrupt", _M, "停止当前流式输出（入队，本轮结束后执行）", _BOTH),
         _spec("session.new", _M, "新建会话（入队，停流后执行）", _BOTH),
-        _spec("session.send", _M, "发消息驱动一轮对话（入队；ephemeral 不写会话不渲染）", _BOTH),
+        _spec("session.send", _M, "发消息驱动一轮对话（入队；ephemeral 不写会话不渲染；可按 window_id 定向）", _BOTH),
         # ── 输入框 ──
         _spec("input.read", _M, "输入框文本与附件列表", _UI),
         _spec("input.write", _M, "写入输入框文本", _UI),
         # ── 智能体 ──
         _spec("agent.read", _L, "agent 列表/提示词/管理器", _BOTH, ["get_agent_manager", "get_agent_prompt"]),
-        _spec("subagent.run", _H, "派生子智能体", _TOOL, ["subagent"]),
+        _spec("subagent.run", _H, "派生子智能体（ui 面返 manager 实例，tool 面返工具侧 manager）", _BOTH, ["subagent"]),
         # ── 工作目录 ──
         _spec("workdir.read", _L, "当前工作目录", _BOTH, ["get_workdir"]),
         _spec(
@@ -98,14 +136,37 @@ CATALOG: Dict[str, CapabilitySpec] = {
             _UI,
             ["set_workdir", "sync_working_directory"],
         ),
+        # ── 项目 ──
+        _spec(
+            "project.read",
+            _L,
+            "当前项目与项目清单/元数据（会话数、工作目录数、根目录，不含密钥）",
+            _UI,
+        ),
+        _spec(
+            "project.write",
+            _H,
+            "切换/新建/归档/导入导出项目与根目录绑定（破坏性，含团队广播）",
+            _UI,
+        ),
+        _spec(
+            "project.workdir",
+            _M,
+            "写库式持久化项目工作目录（project_workdir 表，与 workdir.write 的会话内切换互补）",
+            _UI,
+        ),
+        _spec(
+            "branch.refresh",
+            _M,
+            "失效分支检测缓存并刷新标题栏分支标签（git 分支名变更后调用）",
+            _UI,
+        ),
         # ── 外观 ──
         _spec("theme.read", _L, "主题 id/名称/配色/字体/字号", _UI),
-        # ── 上下文 ──
-        _spec("context.compact", _M, "上下文压缩器", _BOTH, ["get_compactor"]),
         # ── 工具 ──
         _spec("tool.read", _L, "工具注册表元数据查询", _BOTH),
         _spec("tool.inject", _H, "向 LLM 注入工具（改变模型可见行为）", _UI),
-        _spec("tool.execute", _H, "执行任意工具", _BOTH, ["get_tool_executor"]),
+        _spec("tool.execute", _H, "执行任意工具", _BOTH, ["get_tool_executor"], value_style="value"),
         # ── 对话引擎 ──
         _spec("engine.session", _H, "创建对话引擎会话（消耗 token）", _UI, ["create_engine_session"]),
         _spec("engine.stack", _H, "对话执行栈工厂", _UI, ["conversation_stack"]),
@@ -114,6 +175,7 @@ CATALOG: Dict[str, CapabilitySpec] = {
         _spec("platform.read", _M, "平台与会话列表", _UI, ["list_platform_sessions", "list_platforms"]),
         # ── 内部资源 ──
         _spec("mcp.call", _H, "MCP 工具调用", _TOOL, ["mcp"]),
+        _spec("mcp.register", _M, "注册进程内 MCP server 工具处理器（工具调用在本机执行）", _UI),
         _spec("lsp.query", _M, "LSP 查询", _TOOL, ["lsp"]),
         _spec("net.upload", _H, "Gitee 上传（数据外发）", _TOOL, ["gitee"]),
         _spec("net.download", _M, "从 Gitee 绑定仓库下载文件到本地路径", _BOTH),
@@ -125,12 +187,19 @@ CATALOG: Dict[str, CapabilitySpec] = {
         ),
 
         # ── 界面 ──
-        _spec("ui.notify", _L, "弹 InfoBar 通知", _UI, ["notify"]),
+        _spec("ui.notify", _L, "弹 InfoBar 通知（kind=success/warning/error/info，duration 毫秒）", _UI, ["notify"]),
         _spec("ui.card.show", _L, "显示浮动卡", _UI),
         _spec("ui.card.hide", _L, "隐藏浮动卡", _UI, ["hide_card"]),
         _spec("ui.exclusive", _M, "独占 UI 模式", _UI, ["enter_exclusive_ui_mode", "exit_exclusive_ui_mode"]),
         _spec("ui.dialog", _L, "文件/目录选择、确认框、单行输入（跟随主题）", _UI),
-        _spec("ui.events", _L, "订阅/发布 UI 事件总线（主题切换/欢迎页刷新等）", _UI),
+        _spec("ui.events", _L, "订阅/发布 UI 事件总线（主题切换/欢迎页刷新/全局对话报错 conversation_error 等）", _UI),
+        _spec(
+            "question.control",
+            _M,
+            "提问卡控制：订阅提问生命周期、读取当前题目/已答、驱动倒计时、代用户提交答案",
+            _UI,
+            value_style="value",
+        ),
         _spec(
             "ui.artifacts.show",
             _M,
@@ -139,6 +208,12 @@ CATALOG: Dict[str, CapabilitySpec] = {
         ),
         # ── 对话流 ──
         _spec("stream.subscribe", _M, "订阅对话流事件（工具/流/错误/上下文/会话切换）", _UI),
+        _spec(
+            "stream.errors",
+            _M,
+            "订阅窗口对话报错事件（结构化：窗口/服务商/模型/错误类型）",
+            _UI,
+        ),
         # ── 窗口 ──
         _spec("window.active", _L, "当前活跃聊天窗口", _UI),
         _spec("window.current", _L, "当前窗口的语义快照（backend/session/project/workdir）", _UI),
@@ -162,8 +237,23 @@ CATALOG: Dict[str, CapabilitySpec] = {
         # ── 团队 ──
         _spec("team.read", _L, "团队成员/角色/运行状态", _BOTH),
         _spec("team.send", _M, "向团队成员派发任务邮件（写对方邮箱）", _TOOL),
+        _spec("team.manage", _H, "管理团队：建队/退出/加人/踢人/群发", _TOOL),
+        _spec("team.spawn", _H, "为团队拉起成员窗口（UI 副作用）", _BOTH, value_style="value"),
+        _spec("action.queue", _L, "窗口动作队列只读（peek 待执行动作）", _TOOL),
+        _spec(
+            "team.session",
+            _H,
+            "团队历史会话的恢复/归档/成员会话进入（跨窗口开标签页，破坏性）",
+            _UI,
+        ),
         # ── 存储 ──
         _spec("storage.data_dir", _L, "插件持久化数据根目录（插件自拼 plugin_data/<name>/）", _BOTH),
+        _spec(
+            "storage.db",
+            _H,
+            "通用数据库执行权限（受限代理：表名须 plugin_<name>_ 前缀，禁 ATTACH/PRAGMA 等库级语句）",
+            _BOTH,
+        ),
         # ── 基础（恒放行） ──
         _spec("plugin.log", _N, "带 plugin=<name> 前缀的 logger", _BOTH),
         _spec("state.kv", _N, "窗口级 KV 存储（无系统权限）", _BOTH, ["window_state"]),
@@ -177,6 +267,12 @@ CATALOG: Dict[str, CapabilitySpec] = {
             "按 key 读主程序配置项（非敏感标量；不含密钥，密钥走 model.config）",
             _UI,
             ["get_setting"],
+        ),
+        _spec(
+            "config.write",
+            _M,
+            "按 key 写主程序配置项（仅已声明项；密钥类字段一律拒绝）",
+            _UI,
         ),
         # ── 逃生舱 ──
         _spec("host.raw", _H, "裸 main_widget / backend 对象引用", _UI),

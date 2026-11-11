@@ -24,7 +24,7 @@ import threading
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, List, Optional
 
 from app.plugins.sdk import ToolResult
 
@@ -35,6 +35,9 @@ _GROUP = "助手记忆"
 
 # 写并发保护：同 (进程内) 文件锁在 store 层；这里加一层短退避重试兜 Windows 句柄
 _WRITE_RETRY = 3
+
+# 单条记忆的软阈值：超过只提醒不拒写（碎片化条目才好压缩和重定位）
+_ENTRY_HINT_CHARS = 150
 
 # 窗口期桥接缓存（不写 sys.modules：AST 安全网限制；注册在 hooks 文件内完成）
 _bridge_mod: Optional[Any] = None
@@ -90,6 +93,32 @@ def _get_manager():
         return None
 
 
+def _over_quota_hint(mgr, aid: str, scope: str, section: str, over: int, lim: int) -> str:
+    """超限拒绝时的可执行指弱：点名最长的几条 + 给出删条命令。
+
+    模型对整篇字数不敏感，对「删第 3 条」这种具体动作才一次做对；
+    只给「超了 120 字」会引发反复重写整篇。
+    """
+    lines = [f"写入被拒绝：超出 {over} 字（上限 {lim}）。"]
+    if scope == "global" and section:
+        try:
+            entries = mgr.memory_section_entries(aid, section)
+        except Exception:
+            entries = []
+        if entries:
+            longest = sorted(entries, key=lambda e: -int(e.get("chars") or 0))[:3]
+            lines.append(f"「{section}」现有 {len(entries)} 条，最长的几条：")
+            for e in longest:
+                lines.append(f"  #{e['index']}·{e['chars']}字：{e['preview']}")
+            lines.append(
+                "不必重写全文：先腾空间再一次写好就行。\n"
+                "  a) 删一条：memory_write(scope=global, mode=delete, section=<分区>, index=<序号>)\n"
+                "  b) 合并语义重复的两条（合并本身也能省字数），用整体替换写回该区"
+            )
+    if len(lines) == 1:
+        lines.append("先 memory_read 读全文，合并去重、删过时条目后再写。")
+    return "\n".join(lines)
+
 def _paused() -> ToolResult:
     return ToolResult(True, content="记忆功能已暂停。已有内容会保留，但现在不能写入。请在助手中心开启记忆开关。")
 
@@ -132,7 +161,7 @@ def _enabled_or_reload(mgr, aid: str, a) -> bool:
 def _to_int(v, default: int) -> int:
     try:
         return int(v)
-    except TypeError, ValueError:
+    except (TypeError, ValueError):
         return default
 
 
@@ -163,6 +192,49 @@ def _read_impl(tool_ctx, **kw) -> ToolResult:
     wd = _workdir(tool_ctx)
 
     try:
+        if scope == "sections":
+            sections = mgr.memory_sections(aid)
+            if not sections:
+                return ToolResult(
+                    True,
+                    content="当前没有定义分区：全局记忆为自由格式，内容直接按 ## 标题组织即可。",
+                )
+            quotas = mgr.memory_section_quotas(aid)
+            ratio = mgr.memory_tone_ratio(aid)
+            total = mgr.memory_max_chars(aid)["global"]
+            emo = total * ratio // 100
+            lines = [
+                f"全局记忆分区（感性占 {ratio}%：感性池 {emo} 字 / 理性池 {total - emo} 字，同侧各区平分）",
+                "",
+            ]
+            for s in sections:
+                name = str(s.get("name") or "")
+                tone = "感性" if str(s.get("tone") or "") == "emotional" else "理性"
+                detail = str(s.get("detail") or s.get("hint") or "").strip()
+                lines.append(f"- {name}（{tone}区，配额 {quotas.get(name, 0)}）")
+                if detail:
+                    lines.append(f"  {detail}")
+                # 逐条账目：让「超限删哪条」成为可执行动作，而不是让模型去数行
+                try:
+                    entries = mgr.memory_section_entries(aid, name)
+                except Exception:
+                    entries = []
+                if entries:
+                    chips = "；".join(f"#{e['index']}·{e['chars']}字" for e in entries[:12])
+                    if len(entries) > 12:
+                        chips += f"；…共 {len(entries)} 条"
+                    lines.append(f"  现有 {len(entries)} 条：{chips}")
+            over = mgr.memory_section_usage(aid)
+            if over:
+                lines.append("")
+                lines.append(
+                    "⚠ 已超配额："
+                    + "、".join(f"{o['name']} {o['chars']}/{o['quota']}" for o in over)
+                )
+            lines.append("")
+            lines.append("归属判定：改变做事方式进理性区，改变我对这个人或对自己位置的看法进感性区。")
+            lines.append("配额是上限不是任务：写不满就空着；超配额先合并同义条目再删过时内容。")
+            return ToolResult(True, content="\n".join(lines))
         if scope == "global":
             text = mgr.read_global_memory(aid).strip()
             lim = mgr.memory_max_chars(aid)["global"]
@@ -173,7 +245,9 @@ def _read_impl(tool_ctx, **kw) -> ToolResult:
                     "再用 memory_write(scope=global) 整体写回精简版。）"
                 )
             fp = mgr.memory_fingerprint(aid, "global")
-            return ToolResult(True, content=((text or "（全局记忆为空）") + f"\n(base: {fp})"))
+            used = len(text)
+            budget = f"（上限 {lim}，已用 {used}，剩 {max(0, lim - used)} 字）"
+            return ToolResult(True, content=((text or "（全局记忆为空）") + f"\n{budget}\n(base: {fp})"))
         if scope == "project":
             if not wd:
                 return ToolResult(True, content="当前没有设置工作目录，无法读取项目记忆。")
@@ -364,8 +438,29 @@ def _write_impl(tool_ctx, **kw) -> ToolResult:
             lim = mgr.memory_max_chars(aid)[scope]
             label = "全局" if scope == "global" else "项目"
             mode = str(kw.get("mode") or "replace").strip().lower()
-            if mode not in ("replace", "append"):
-                return ToolResult(False, error="mode 必须是 replace（整体替换）/ append（末尾追加）")
+            if mode not in ("replace", "append", "delete"):
+                return ToolResult(
+                    False,
+                    error="mode 必须是 replace（整体替换）/ append（末尾追加）/ delete（删一条）",
+                )
+            if mode == "delete":
+                del_section = str(kw.get("section") or "").strip()
+                if scope != "global" or not del_section:
+                    return ToolResult(False, error="delete 只支持 scope=global 且必须带 section")
+                del_index = int(kw.get("index") or 0)
+                r = mgr.delete_memory_entry(aid, del_section, del_index)
+                if not r.get("ok"):
+                    return ToolResult(
+                        False,
+                        error=(
+                            f"删除失败：{r.get('error')}（「{del_section}」共 {r.get('count', 0)} 条，index 从 1 起）。"
+                            "先 memory_read(scope=global) 确认序号。"
+                        ),
+                    )
+                return ToolResult(
+                    True,
+                    content=f"已删除「{del_section}」第 {del_index} 条：{r.get('removed')}（现 {r.get('chars')} 字）。",
+                )
             # 全局记忆分区：schema 非空时强制归属（空 = 自由格式，全部跳过）
             sections = mgr.memory_sections(aid) if scope == "global" else []
             section = str(kw.get("section") or "").strip()
@@ -415,23 +510,42 @@ def _write_impl(tool_ctx, **kw) -> ToolResult:
                 if new_total > lim:
                     return ToolResult(
                         False,
-                        error=(
-                            f"追加被拒绝：追加后 {new_total}/{lim} 字符超上限。"
-                            f"先 memory_read(scope={scope}) 读全文，合并去重后用整体替换（mode 缺省）写回精简版。"
+                        error=_over_quota_hint(
+                            mgr, aid, scope, section, new_total - lim, lim
                         ),
                     )
                 r = _retry(lambda: mgr.append_memory(aid, scope, content, workdir=wd, section=section))
                 if not r.get("ok"):
                     return ToolResult(False, error=f"追加失败: {r.get('error')}")
                 where = f"「{section}」分区" if section else ""
-                return ToolResult(True, content=f"已追加到{label}记忆{where}（现 {r.get('chars')} 字）。已有内容不受影响。")
+                note = ""
+                if len(content) > _ENTRY_HINT_CHARS:
+                    note = (
+                        f"\n（提醒：这条 {len(content)} 字偏长，碎片化记忆建议 ≤{_ENTRY_HINT_CHARS} 字，"
+                        "下次可拆成两条）"
+                    )
+                return ToolResult(
+                    True,
+                    content=f"已追加到{label}记忆{where}（现 {r.get('chars')} 字）。已有内容不受影响。{note}",
+                )
             # ── 整体替换：超限预检 → 乐观锁 + 收缩确认 → 锁内快照落盘 ──
             if len(content) > lim:
+                # 按区统计超出量，把「删哪条」说具体（整篇重写对模型是不可控动作）
+                first_sec = ""
+                try:
+                    heavy = [
+                        (n, int(sum(e["chars"] for e in mgr.memory_section_entries(aid, n))))
+                        for n in [str(s.get("name") or "") for s in mgr.memory_sections(aid)]
+                        if n
+                    ]
+                    if heavy:
+                        first_sec = max(heavy, key=lambda x: x[1])[0]
+                except Exception:
+                    first_sec = ""
                 return ToolResult(
                     False,
-                    error=(
-                        f"写入被拒绝：{label}记忆超上限（{len(content)}/{lim} 字符）。"
-                        f"处理原则：先 memory_read(scope={scope}) 读全文，合并去重、删过时条目、压缩表述后再整体写回。"
+                    error=_over_quota_hint(
+                        mgr, aid, scope, first_sec, len(content) - lim, lim
                     ),
                 )
             base = str(kw.get("base") or "").strip()
@@ -566,48 +680,49 @@ _READ_SCHEMA = {
     "function": {
         "name": "memory_read",
         "description": (
-            "读长期记忆。scope=global/project：返回对应 MEMORY.md 全文（超上限时截断并附整理原则，整理后用 memory_write 写回精简版）；"
-            "scope=daily 带 date 读某天日志全文（长日志自动分页，翻页加 page）；不带 date 列近期索引（limit 控制条数）；"
-            "scope=daily 带 level/from_date/to_date/search/summary_only 任一参数进入查询模式：按等级/日期范围/正则过滤，"
-            "summary_only=true 只看「时刻|等级|摘要」，跨天条目流按时间线正序分页（date 收窄为单日过滤，与 from_date/to_date 互斥）；"
-            "不传 scope 返回概览。已蒸馏日志（.distilled）仍可读。"
-            "用户提到过去工作、旧决策、项目约定而当前上下文没有时，先来这里查。"
+            "读长期记忆。scope=global/project：返回 MEMORY.md 全文(超上限截断并附整理原则，整理后用 memory_write 写回)；"
+            "scope=daily 带 date 读某天日志(长日志分页，翻页加 page)；不带 date 列近期索引(limit 控条数)；"
+            "scope=daily 带 level/from_date/to_date/search/summary_only 进查询模式(按等级/日期/正则过滤，"
+            "summary_only 只出「时刻|等级|摘要」，跨天条目按时间正序分页；date 与 from_date/to_date 互斥)；"
+            "scope=sections 返回全局记忆的分区定义（每区收什么/不收什么、基调、配额、已超限的区）："
+            "首次往某区写入或要整理全局记忆前先读它（system prompt 只列分区名，完整规则在这里）；"
+            "不传 scope 给概览。已蒸馏日志仍可读。用户提到过去工作/旧决策/项目约定而上下文没有时先查这里。"
         ),
         "parameters": {
             "type": "object",
             "properties": {
-                "scope": {"type": "string", "description": "global / project / daily；缺省返回概览"},
+                "scope": {"type": "string", "description": "global / project / daily / sections；缺省返回概览"},
                 "date": {
                     "type": "string",
                     "description": "scope=daily 时的日期 YYYY-MM-DD；缺省列出近期索引；与 from_date/to_date 互斥",
                 },
                 "page": {
                     "type": "integer",
-                    "description": "scope=daily 且带 date 时：条目分页页码（每页 20 条），缺省第 1 页",
+                    "description": "scope=daily 且带 date：条目分页页码(每页 20 条)，缺省第 1 页",
                 },
                 "level": {
                     "type": "string",
-                    "description": "scope=daily 查询模式：按等级过滤，逗号分隔多值，如 WARNING 或 info,error",
+                    "description": "按等级过滤，逗号分隔多值，如 WARNING 或 info,error",
                 },
                 "from_date": {
                     "type": "string",
-                    "description": "scope=daily 查询模式：起始日期 YYYY-MM-DD（含），缺省不限；与 date 互斥",
+                    "description": "起始日期 YYYY-MM-DD（含），缺省不限",
                 },
                 "to_date": {
                     "type": "string",
-                    "description": "scope=daily 查询模式：结束日期 YYYY-MM-DD（含），缺省今天；与 date 互斥",
+                    "description": "结束日期 YYYY-MM-DD（含），缺省今天",
                 },
                 "search": {
                     "type": "string",
-                    "description": "scope=daily 查询模式：按正则（忽略大小写）过滤条目，编译失败自动回落子串",
+                    "description": "按正则过滤(忽略大小写，编译失败回退子串)",
                 },
                 "summary_only": {
                     "type": "boolean",
-                    "description": "scope=daily 查询模式：true 只输出「时刻 | 等级 | 摘要」一行，不含正文",
+                    "description": "true 只输出「时刻 | 等级 | 摘要」一行，不含正文",
                 },
                 "limit": {
                     "type": "integer",
-                    "description": "scope=daily 不带 date 时：索引条数上限（默认 7，最大 90）",
+                    "description": "scope=daily 不带 date：索引条数上限(默认 7，最大 90)",
                 },
             },
         },
@@ -619,54 +734,53 @@ _WRITE_SCHEMA = {
     "function": {
         "name": "memory_write",
         "description": (
-            "写长期记忆。最简写法：一条一行，只写结论/关键数字/坑与修法，不写过程。\n"
-            "scope=daily：追加当日工作日志。**门槛高**：只有产出跨会话仍有用的结论时才记（定案、踩坑与修法、量化基线、"
-            "用户明确要求）；同一任务多轮打磨只记最终结论一次；探路、试错、中途状态、待办一律不记。"
-            "正文硬上限 400 字符，超限拒写。禁止：过程叙述、复述需求、推理链、代码/日志粘贴、"
-            "分节小标题（## 现象/## 根因）。summary=一句话结论（≤30 字），level=INFO/WARNING/ERROR。"
-            "新一天首条 daily 若存在未蒸馏旧日志会被拒，按返回指令蒸馏并打标后重试。\n"
-            "scope=project：项目 MEMORY.md。记一条增量内容用 mode=append（末尾追加，不碰已有行）；"
-            "整体替换（mode 缺省）必须先读后写，带 memory_read 返回末尾的 base 做版本校验，"
-            "新内容比现有缩水超 60% 需 consolidate=true 确认是有意整理。"
-            "只记 AGENTS.md 没有的动态沉淀（坑、决策理由、易错点、用户偏好），"
-            "一条一碎片、禁散文；AGENTS.md 静态规范（构建/测试/目录/风格/提交/EOL）禁止抄入；超上限拒写（默认 3000 字符）。\n"
-            "scope=global：全局 MEMORY.md。记一条用 mode=append；整体替换规则同 project（先读拿 base，大幅精简带 consolidate）。"
-            "准入极严：仅用户显式要求的跨项目规则、蒸馏筛出的最珍贵且与项目无关经验；"
-            "超上限拒写（默认 4000 字符）。除用户明确要求，不存密钥。"
-            "若已定义记忆分区（系统提示列了分区清单）：append 必须带 section，整体替换必须按 ## 分区名 组织，"
-            "出现清单外标题/分区块内 # 小节/分区外 - 条目会被拒写并返回诊断；"
-            "不确定能否通过时先 dry_run=true 只校验不落盘。"
+            "写长期记忆。一条一行，只写结论/关键数字/坑与修法，不写过程。\n"
+            "scope=daily：追加当日日志。门槛高：只记跨会话有用的结论(定案、坑与修法、量化基线、用户明确要求)；"
+            "同一任务多轮打磨只记最终结论一次；探路/试错/中途状态/待办不记。"
+            "正文 ≤400 字符，超限拒写。禁过程叙述、复述需求、推理链、代码/日志粘贴、分节小标题。"
+            "summary=一句话结论(≤30 字)，level=INFO/WARNING/ERROR。新一天首条若存在未蒸馏旧日志会被拒，按返回指令蒸馏打标后重试。\n"
+            "scope=project：项目 MEMORY.md。记一条用 mode=append；整体替换先读后写，带 memory_read 末尾 base 做版本校验，"
+            "缩水超 60% 需 consolidate=true。只记 AGENTS.md 没有的动态沉淀(坑/决策理由/易错点/偏好)，一条一碎片禁散文；"
+            "静态规范禁抄；超上限拒写(默认 3000 字符)。\n"
+            "scope=global：全局 MEMORY.md。记一条用 mode=append；整体替换同 project。"
+            "准入极严：仅用户显式要求的跨项目规则、蒸馏出的与项目无关经验；超上限拒写(默认 4000 字符)。不存密钥。"
+            "既有分区时 append 必带 section(照抄分区名)，整体替换按 ## 分区名 组织；越界会被拒并返诊断，不确定先 dry_run=true。"
+            "超上限时优先用 mode=delete 删一条腾空间(比整篇重写可控)，再追加；不要为凑字数反复重写全文。"
         ),
         "parameters": {
             "type": "object",
             "properties": {
                 "scope": {
                     "type": "string",
-                    "description": "daily（日志追加）/ project（项目 MEMORY.md）/ global（全局 MEMORY.md）",
+                    "description": "daily(日志追加)/project(项目 MEMORY.md)/global(全局 MEMORY.md)",
                 },
                 "content": {
                     "type": "string",
-                    "description": "daily=细节正文（≤400 字符，超出拒写）；project/global=完整新文件内容（replace）或一条新内容（append）",
+                    "description": "daily=正文(≤400 字符，超出拒写)；project/global=完整新内容(replace)或单条(append)",
                 },
                 "mode": {
                     "type": "string",
-                    "description": "scope=global/project 时：replace（缺省，整体替换）/ append（末尾追加一条，高频记一条用这个，不会覆盖已有内容）",
+                    "description": "scope=global/project：replace(缺省，整体替换)/append(追加一条，高频记一条用这个)/delete(删一条腾空间，需配 section+index)",
+                },
+                "index": {
+                    "type": "integer",
+                    "description": "mode=delete 时必填：该分区内条目的序号(从 1 起，按 memory_read 的顺序)",
                 },
                 "section": {
                     "type": "string",
-                    "description": "scope=global 且 mode=append 时必填（已定义分区时）：目标分区名，逐字照抄系统提示的分区清单；内容插到该分区块末尾",
+                    "description": "scope=global 且 append 必填(有分区时)：分区名，照抄系统提示的分区清单",
                 },
                 "dry_run": {
                     "type": "boolean",
-                    "description": "只跑校验不落盘（不写快照、不校验乐观锁）：scope=global 且 mode=replace 时用于预检分区合规，通过后再真写",
+                    "description": "只校验不落盘：global 且 replace 时预检分区合规，通过后再真写",
                 },
                 "base": {
                     "type": "string",
-                    "description": "整体替换的乐观锁：memory_read 返回末尾 (base: ...) 的值；磁盘版本与它不一致时拒写（防多会话覆盖）",
+                    "description": "乐观锁：memory_read 末尾 (base: ...) 值，不一致拒写(防多会话覆盖)",
                 },
                 "consolidate": {
                     "type": "boolean",
-                    "description": "整体替换时新内容比现有缩水超 60% 必须为 true（确认是有意整理而非误写）",
+                    "description": "替换内容缩水超 60% 必须 true(确认有意整理)",
                 },
                 "level": {
                     "type": "string",
@@ -678,7 +792,7 @@ _WRITE_SCHEMA = {
                 },
                 "mark_distilled": {
                     "type": "boolean",
-                    "description": "daily 蒸馏完成打标：true 时给 date 指定日志打 .distilled 标（保留可查，蒸馏/门禁均忽略），content 可空",
+                    "description": "给 date 指定日志打 .distilled 标(保留可查，蒸馏/门禁忽略)，content 可空",
                 },
             },
             "required": ["scope"],

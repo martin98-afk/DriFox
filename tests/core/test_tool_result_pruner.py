@@ -138,14 +138,6 @@ class _FakeAgentManager:
         return "system prompt"
 
 
-class _FakeCompactor:
-    def compact(self, history, budget, **k):
-        return history, {"state": "ok"}, {}
-
-    def get_budget(self, llm_config):
-        return 200000
-
-
 class _FakeSession:
     system_prompt = ""
     _system_prompt_agent = None
@@ -165,7 +157,7 @@ class _FakeSession:
 
 
 def _allocator():
-    return ContextBudgetAllocator(_FakeAgentManager(), compactor=_FakeCompactor())
+    return ContextBudgetAllocator(_FakeAgentManager())
 
 
 def _tool_history(long_content: str):

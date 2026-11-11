@@ -159,6 +159,23 @@ PARAM_SCHEMA = {
         "ui_type": "checkbox",
         "hide_in_card": True,  # 配置卡里不显示，启用技能在别处控制
     },
+    "协议入口": {
+        "display_name": "接口入口",
+        "ui_type": "combobox",
+        # 声明式动态枚举：按 options_source 从 TransportRegistry 实时取已注册
+        # transport（不缓存，热重载后自动刷新）。当前消费方是模型能力编辑弹窗
+        # （model_capability_edit_dialog.py），参数卡不渲染该键。
+        "options_source": "transport_registry",
+        # 选 auto = 删键，回退自动识别
+        "delete_on": "auto",
+        "order": 160,
+        # 2026-11-07 用户决策：参数卡不渲染（渲染是配置驱动的，键不存在就整行
+        # 不出现，而三条注入链都不产出该键 → 死循环）。编辑入口统一收口到
+        # 「服务商 → 模型列表 → 齿轮 → 接口入口」，落盘 ModelOverrides 同条目。
+        "hide_in_card": True,
+        # 内部路由键：无 api_param，中文键名不匹配 _VALID_IDENTIFIER_PATTERN，
+        # 请求组装天然跳过；transport 侧 _CONFIG_ONLY_KEYS 另有显式兜底
+    },
     "API_KEY": {
         "ui_type": "password",
     },
@@ -177,7 +194,8 @@ MODEL_LEVEL_KEYS = frozenset(
     "温度 temp 最大Token 上下文长度 max_new_tokens "
     "top_p frequency_penalty presence_penalty "
     "思考模式 思考预算 思考等级 启用技能 "
-    "声明_支持思考 声明_支持图像 声明_上下文长度 声明_最大输出 声明_思考参数 声明_思考强度".split()
+    "声明_支持思考 声明_支持图像 声明_上下文长度 声明_最大输出 声明_思考参数 声明_思考强度 "
+    "协议入口".split()
 )
 
 # ============================================================
@@ -204,6 +222,24 @@ PROVIDER_MANAGED_KEYS = frozenset({
     "健康检查",
     "上次模型刷新",
     "模型刷新状态",
+})
+
+# 用量查询字段永久黑名单。
+#
+# 这类字段本由 providers 插件的 extra_quota_fields 动态声明、经
+# provider_quota_exclude_keys() 排除，但插件改版删掉声明后，老配置里残留的
+# 同名键就脱离覆盖范围，会顺着「未知英文键原样直发」通配分支进 extra_body
+# 打到网关。实测（2026-11-07）：OpenCode Go 配置残留 server_id/cookie/
+# workspace_id 空串，经 OpenAI→anthropic-messages 转换的网关报
+# 400 "server_id: cannot be represented by anthropic-messages"。
+# 消费方（transport / subagent_worker / 模型参数卡）一律走
+# provider_quota_exclude_keys()，本集合在其中取并集，不依赖插件当前声明。
+LEGACY_QUOTA_KEYS = frozenset({
+    "server_id",
+    "cookie",
+    "workspace_id",
+    "csrf_token",
+    "x_web_id",
 })
 
 # ──────────────────────────────────────────────────────────────
@@ -259,7 +295,7 @@ def provider_quota_exclude_keys() -> "frozenset[str]":
     from app.plugins.registries.provider_registry import ProviderRegistry
 
     try:
-        return ProviderRegistry.get_instance().quota_exclude_keys()
+        return ProviderRegistry.get_instance().quota_exclude_keys() | LEGACY_QUOTA_KEYS
     except Exception:
-        # 注册表未初始化：保守返回空集（调用方通常已提前加载插件）
-        return frozenset()
+        # 注册表未初始化：只剩永久黑名单（调用方通常已提前加载插件）
+        return LEGACY_QUOTA_KEYS

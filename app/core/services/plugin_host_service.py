@@ -19,7 +19,7 @@ PluginHostService — 应用级插件宿主服务（一个应用一个实例）
 import os
 import threading
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from loguru import logger
 from PySide6.QtCore import QObject, QTimer, Signal
@@ -43,6 +43,10 @@ _READ_THROUGH_COMPONENTS = frozenset({"hooks", "team_templates"})
 # 截止时间戳仅作旧调用方（config_sync 直接写）的兼容叠加。操作方应使用
 # 下方模块级函数（线程安全），不要直接写类属性。
 _watcher_suppress_lock = threading.Lock()
+
+# resume 归零后的宽限期（秒）：覆盖 watchfiles flight 批次的最晚 yield 时刻
+# （debounce 2000ms + step 2000ms = 4s），取 6s 留余量。
+_WATCHER_RESUME_GRACE_S = 6.0
 
 
 def suppress_plugin_watcher(duration: float = 180.0) -> None:
@@ -71,10 +75,74 @@ def resume_plugin_watcher() -> None:
         with _watcher_suppress_lock:
             PluginHostService._watcher_suppress_refs = max(0, PluginHostService._watcher_suppress_refs - 1)
             if PluginHostService._watcher_suppress_refs == 0:
-                PluginHostService._suppress_watcher_until = 0.0
+                # 归零不立即清零，留短宽限期：watchfiles 的飞行中批次（debounce 2s +
+                # step 2s 聚合，落盘尾声的事件最晚在 resume 后 ~4s 才 yield）在解除
+                # 抑制后到达会穿透窗口，对刚被 reload_plugin_targeted 精准重载过的
+                # 插件再触发 1~2 轮重复重载（2026-11-05 bili-scroll 实测：主动重载
+                # 后 watcher 又触发 manifest-changed 全组件重载 + root fallback，
+                # 主线程三轮 import bilibili_api + 插件 control_server.shutdown
+                # 阻塞主线程 2.7s，UI 冻结十余秒）。
+                # 宽限期内批次照旧转 pending（不 emit）；窗口结束后由既有 pending
+                # 合并路径兜底（幂等，rescan diff 对已注册插件为空操作）。
+                PluginHostService._suppress_watcher_until = time.time() + _WATCHER_RESUME_GRACE_S
     except Exception as e:  # pragma: no cover - 防御极端 import 时序
         logger.debug(f"[PluginHost] resume_plugin_watcher 失败（不影响调用方）: {e}")
 
+
+def run_on_main_thread(fn: Callable[[], Any], wait: bool = False, timeout: float = 5.0) -> bool:
+    """在 Qt 主线程执行 fn（跨线程安全，纯 threading 线程可用）
+
+    纯 ``threading.Thread`` 没有 Qt 事件循环：``QTimer.singleShot`` 在这种
+    线程里既不抛异常也不触发，投递静默丢失。实测 2026-10-29：市场自动更新
+    在 ``threading.Thread`` 里跑，installer 用 ``QTimer.singleShot(0, reload)``
+    投递重载 → 从未执行 → 插件目录已被替换且 sys.modules 已 purge，旧 UI 注册
+    仍指向旧模块，点击页脚按钮报 ``No module named 'ui_plugin_voice_reply'``。
+    本函数走 QObject 信号桥（``post_to_main``），跨线程 emit 由 Qt 排队到主线程
+    事件循环，不依赖调用线程自身有无循环。
+
+    Args:
+        fn: 待执行回调
+        wait: True 阻塞当前线程直到主线程执行完（或超时）
+        timeout: wait=True 时的最长等待秒数
+
+    Returns:
+        True 表示已执行或已投递；False 表示投递桥不可用（无 QApplication /
+        桥未预热）或等待超时，调用方需自行降级。
+    """
+    from PySide6.QtCore import QThread
+    from PySide6.QtWidgets import QApplication
+
+    app = QApplication.instance()
+    if app is None or QThread.currentThread() is app.thread():
+        fn()
+        return True
+
+    # 回调异常必须在此吞掉：信号槽里的未捕获异常会走 excepthook（PyQt5 默认
+    # 打印后 abort），不能让一个插件重载错误带走整个进程。
+    box: Dict[str, Any] = {}
+    done = threading.Event()
+
+    def _safe() -> None:
+        try:
+            box["result"] = fn()
+        except Exception as e:  # noqa: BLE001 - 异常留待调用线程按需回抛
+            box["error"] = e
+            logger.warning(f"[PluginHost] 主线程投递的回调异常: {e}")
+        finally:
+            done.set()
+
+    from app.utils.info_bar_guard import post_to_main
+
+    if not post_to_main(_safe):
+        return False
+    if not wait:
+        return True
+    if not done.wait(timeout):
+        logger.warning(f"[PluginHost] 主线程投递超时（{timeout}s），已放弃等待")
+        return False
+    if "error" in box:
+        raise box["error"]
+    return True
 
 class PluginHostService(QObject):
     """插件宿主服务（应用级单例，主线程创建）"""
@@ -134,6 +202,27 @@ class PluginHostService(QObject):
         self._started = True
         self._init_plugin_system()
 
+    def pause_deferred(self, reason: str = "", only=None) -> None:
+        """挂起延迟队列（幂等）。UI 插件装载期与后台预热错峰用。
+
+        Args:
+            only: 只挂起这些任务名（None = 全部）。装载期应只点名会与主线程
+                import 争锁的 runtime_components / net_preheat；整体挂起会把
+                provider 预热也推后，随后被读路径在主线程同步拉起，更慢。
+
+        两段都 import 插件模块：后台线程持 import 锁时，主线程的 load_plugin
+        会整段阻塞。实测让帧后等 3.3s，且恢复时刻精确等于后台 warmup 结束。
+        """
+        queue = getattr(self, "_deferred_queue", None)
+        if queue is not None:
+            queue.pause(reason, only=only)
+
+    def resume_deferred(self, reason: str = "") -> None:
+        """恢复延迟队列（幂等；重复调用无副作用）"""
+        queue = getattr(self, "_deferred_queue", None)
+        if queue is not None:
+            queue.resume(reason)
+
     def stop(self) -> None:
         """停止 watcher 线程 + 延迟队列（应用退出时由 TabManagerWindow.cleanup 调用）"""
         # [T31 改动4] 先停延迟队列：未执行的 idle 任务静默丢弃，避免退出期
@@ -145,7 +234,11 @@ class PluginHostService(QObject):
             except Exception as e:
                 logger.warning(f"[PluginHost] 延迟队列 stop failed: {e}")
         try:
-            self._stop_plugin_watcher()
+            # wait=False：应用退出路径。watchfiles 的 rust 侧要等当前
+            # debounce/step 窗口结束才检出 stop_event（实测主线程 join 阻塞
+            # 535ms，看门狗日志 4 次），而线程是 daemon、进程马上就要退出，
+            # 在主线程干等只换来关软件那半秒卡顿。
+            self._stop_plugin_watcher(wait=False)
         except Exception as e:
             logger.warning(f"[PluginHost] stop failed: {e}")
 
@@ -221,8 +314,17 @@ class PluginHostService(QObject):
         queue.register("themes", self._deferred_reload_themes, delay_ms=2000)
         queue.register("watcher", self._deferred_start_watcher, delay_ms=2000)
         queue.register("plugin_tools_rescan", self._deferred_rescan_plugin_tools, delay_ms=2000)
-        queue.register("provider_warmup", self._deferred_warmup_providers, delay_ms=2000)
-        queue.register("runtime_components", self._deferred_warmup_runtime_components, delay_ms=2000)
+        # register_async：服务商模块 import（openai 等重依赖）+ AST 审计实测
+        # 1.1s，同步跑会占主线程一个整段；与 runtime_components 同模式挪后台。
+        # 消费方经 ProviderRegistry.ensure_loaded 的加载中等待语义兜底，
+        # 不会读到半成品注册表。
+        queue.register_async("provider_warmup", self._deferred_warmup_providers, delay_ms=2000)
+        # runtime_components：11 组件全量扫描实测 7.4s（transports/openai_chat.py
+        # 单文件就 2.5s，其中 httpx 首次导入连带 click/pygments/urllib.request 1.6s）。
+        # 同步执行时整段无 yield，主线程硬冻结——改后台线程，主线程只投递。
+        queue.register_async("runtime_components", self._deferred_warmup_runtime_components, delay_ms=2000)
+        # 网络栈预热：与 warmup 无依赖，越早越好；httpx 首次导入从同步段挤出来
+        queue.register_async("net_preheat", self._deferred_preheat_http, delay_ms=0)
         queue.register("gateway_sync", self._deferred_sync_gateway_platforms, delay_ms=2000)
         queue.register("lsp_init", self._deferred_init_lsp, delay_ms=2000)
         queue.register("mcp_discover", self._deferred_discover_mcp, delay_ms=2000)
@@ -323,13 +425,30 @@ class PluginHostService(QObject):
 
     def _deferred_warmup_runtime_components(self):
         """运行时组件（model_adapters / loop_policies / storages）：
-        内置实现先注册，插件目录可覆盖内置"""
+        内置实现先注册，插件目录可覆盖内置
+
+        以 register_async 投递：本函数在后台线程执行（组件模块 import 与 registry
+        注册均不碰 Qt widget），完成后由队列回主线程放行 gateway_sync。
+        """
         try:
             from app.plugins.loaders.runtime_component_loader import warmup_runtime_components
 
             warmup_runtime_components()
         except Exception as e:
             logger.error(f"[PluginHost] 运行时组件 warmup 失败: {e}")
+
+    def _deferred_preheat_http(self):
+        """后台预热 HTTP 栈（httpx 及其依赖）。
+
+        httpx 首次导入实测 1.6s（连带 click/pygments/urllib.request/http.client）。
+        它最终一定要导入（chat_worker 发请求、config_sync），放在启动同步段会
+        直接冻结 UI；放后台线程则与插件装载并行。失败不影响功能（各调用点仍
+        会自行惰性导入）。
+        """
+        try:
+            import app.utils.http_client  # noqa: F401
+        except Exception as e:
+            logger.warning(f"[PluginHost] HTTP 栈预热失败（不影响功能）: {e}")
 
     def _deferred_sync_gateway_platforms(self):
         """gateway 平台此时才注册进 registry（warmup 晚于 GatewayService
@@ -355,22 +474,28 @@ class PluginHostService(QObject):
         幂等保护，进程内只执行一次 → **当前无重复初始化风险**。
         为防未来新增调用点（窗口重开路径等）踩坑，此处加类级一次性标志兜底。
         """
-        pm = self._pm_for_deferred
-        if pm is None:  # 防御：绕过 _defer_non_critical_plugin_init 的直接调用（正常路径必已赋值）
-            logger.warning("[PluginHost] LSP 延迟初始化缺少 PluginManager 引用，跳过")
-            return
-        with self._deferred_once_lock:
-            if self._lsp_initialized_once:
-                logger.debug("[PluginHost] LSP 已初始化过（类级标志），跳过")
-                return
-            self._lsp_initialized_once = True
         try:
-            from app.core.lsp.lsp_manager import get_lsp_manager
-
-            lsp_mgr = get_lsp_manager()
+            pm = self._pm_for_deferred
+            if pm is None:  # 防御：绕过 _defer_non_critical_plugin_init 的直接调用（正常路径必已赋值）
+                logger.warning("[PluginHost] LSP 延迟初始化缺少 PluginManager 引用，跳过")
+                return
+            with self._deferred_once_lock:
+                if self._lsp_initialized_once:
+                    logger.debug("[PluginHost] LSP 已初始化过（类级标志），跳过")
+                    return
+                self._lsp_initialized_once = True
+            # [PERF #36] 配置守卫前置：lsp_manager 顶层拉起 lsprotocol/pygls 重链
+            # （~255ms）。无 LSP 配置时跳过 import 与空初始化（原空配置路径仅置
+            # _initialized 标志，无实质消费差异；消费接口 _ensure_started 按需拉起）。
             lsp_configs = pm.get_lsp_configs()
             # P2：消费端过滤 load_blocked 插件的 LSP 配置（被门禁拦截的插件不注册 LSP）
             lsp_configs = self._filter_blocked_lsp_configs(pm, lsp_configs)
+            if not lsp_configs:
+                logger.debug("[PluginHost] 无 LSP 配置，跳过 LSP 延迟初始化")
+                return
+            from app.core.lsp.lsp_manager import get_lsp_manager
+
+            lsp_mgr = get_lsp_manager()
             workdir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
             lsp_mgr.initialize(workdir, lsp_configs)
             logger.info(f"[PluginHost] LspManager 延迟初始化完成，已注册 {len(lsp_mgr._clients)} 个 LSP 服务器")
@@ -526,6 +651,16 @@ class PluginHostService(QObject):
                 ".ruff_cache",
                 "tmp",
                 "temp",
+                # 插件运行期产物目录：写图片/导出文件等，非源码，
+                # 变更不触发组件重载，只会在日志里刷「跳过重载」噪音
+                "generated",
+                "output",
+                "outputs",
+                "exports",
+                "downloads",
+                "uploads",
+                "cache",
+                "logs",
             }
             # 额外排除的产物 / 缓存文件
             _EXTRA_SKIP_EXTS = (
@@ -611,14 +746,20 @@ class PluginHostService(QObject):
         # watchfiles 每 ~8s 对每个组件 emit 一次重载（防抖 2s + 触发间隙），
         # 3s 窗口拦不住 → 放宽到 10s 覆盖组件重载间隔，同插件+组件 10s 内重复请求只执行一次
         _DEDUP_INTERVAL = 10.0
+        # 去重表的读写跨线程：watcher 线程在 _is_duplicate 里写，主线程在插件删除段
+        # 遍历清键。不加锁时上侧清键可能撞上「dict changed size during iteration」，
+        # 异常会一路抛到清理段的大 try 外部→中断整场卸载。
+        _dedup_lock = threading.Lock()
+        self._watcher_dedup_lock = _dedup_lock
 
         def _is_duplicate(plugin_name: str, component: str) -> bool:
             now = time.time()
             key = (plugin_name, component)
-            last = _dedup_cache.get(key, 0.0)
-            if now - last < _DEDUP_INTERVAL:
-                return True
-            _dedup_cache[key] = now
+            with _dedup_lock:
+                last = _dedup_cache.get(key, 0.0)
+                if now - last < _DEDUP_INTERVAL:
+                    return True
+                _dedup_cache[key] = now
             return False
 
         # 用可变容器包装 plugin_prefixes，闭包内可更新
@@ -726,7 +867,8 @@ class PluginHostService(QObject):
                 for changes in watch(
                     *watch_paths,
                     recursive=True,
-                    debounce=2000,  # 2秒防抖
+                    debounce=2000,  # 聚合上限：到点即 yield（不是静默期）
+                    step=2000,  # 静默阈值：距最后一次变更 2s 才成批 yield
                     yield_on_timeout=False,
                     stop_event=self._plugin_watcher_stop,
                     watch_filter=watch_filter,  # 排除 deps/node_modules 等易变目录
@@ -991,7 +1133,7 @@ class PluginHostService(QObject):
             # 被反复重启/插件被重载（实际无任何行为）
             self._watcher_baseline_until = 0.0
 
-    def _stop_plugin_watcher(self):
+    def _stop_plugin_watcher(self, wait: bool = True):
         """backend 关闭时递减 watcher 引用计数；归零时停止 watchfiles 线程。
 
         泄漏修复（P1）：watcher 闭包持有启动它的第一个 backend 实例引用
@@ -1002,6 +1144,12 @@ class PluginHostService(QObject):
         - refcount == 0：设置 stop_event → watch() 生成器退出 → join 等待线程结束
           → 闭包释放 → 首个 backend 实例可回收；同时复位标志，允许新窗口
           重新启动 watcher（stop_event 在 _start_plugin_watcher 中重建），热更新不丢失。
+
+        Args:
+            wait: 归零时是否在调用线程（通常是主线程）等 watcher 线程退出。
+                默认 True——窗口关闭但进程存活（托盘驻留）时必须等，否则闭包
+                引用不释放、且新窗口重开 watcher 会与旧线程监听同一批目录。
+                应用退出路径传 False：daemon 线程随进程死亡，主线程干等只是白掉帧。
         """
         self._plugin_watcher_refcount = max(0, self._plugin_watcher_refcount - 1)
         if self._plugin_watcher_refcount > 0:
@@ -1010,7 +1158,7 @@ class PluginHostService(QObject):
         if stop is not None:
             stop.set()
         t = self._plugin_watcher_thread
-        if t is not None and t.is_alive():
+        if wait and t is not None and t.is_alive():
             try:
                 t.join(timeout=2.0)
             except Exception:
@@ -1258,7 +1406,11 @@ class PluginHostService(QObject):
         last = getattr(self, "_last_reload_at", 0.0)
         if now - last < 0.3:
             # 去抖窗口内：不立即重载，改为计划一次合并兜底（仅执行一次）
-            self._schedule_debounced_reload()
+            # 精准请求保真（2026-11-01）：携带 (plugin, component) 攒入待重载集合，
+            # 到期后逐个精准重载；原实现丢弃组件信息一律全量，
+            # 而 reload_plugin_subsystems 的 rescan 门禁对系统插件内部文件变更恒空，
+            # 导致 agents/hooks/commands 等修改被静默跳过、永不生效
+            self._schedule_debounced_reload(plugin_name, component)
             return
         self._last_reload_at = now
         try:
@@ -1276,6 +1428,35 @@ class PluginHostService(QObject):
             # 重载完成后重建 watchfiles 路径索引（finally 保证异常路径也更新，
             # 否则已注册插件会被反复识别为"新插件"，触发 bridge.json 自触发循环）
             self._rebuild_watcher_prefixes()
+
+    @staticmethod
+    def _replay_pending_config_cards() -> int:
+        """把 rescan 期间登记的 config_schema 自动设置卡回放到 UI 注册表
+
+        PluginManager 扫描期只把 schema 写进 _pending_config_cards（零 UI import），
+        真正的 register_settings_card 由 replay_config_cards 回放；该方法原先只在
+        启动 _after_plugins_loaded 调一次。运行期热重载/安装/启停同样会经 rescan
+        重新登记 pending，却无人回放——UIPluginRegistry 里仍是旧卡（或没有卡），
+        已打开的系统配置重建也读不到新增配置项，只能新开窗口/标签页（新 backend
+        走启动回放）才出现。
+
+        放在插件变更广播前执行：各窗口收到 plugin_changed 后会重建插件设置卡，
+        回放必须先落地，UI 才能拿到最新卡清单。幂等（pending 为空即返回 0），
+        UI 栈不可用（headless）时 replay 内部降级为 0。
+        """
+        try:
+            from app.plugins.managers.plugin_manager import PluginManager
+
+            pm = PluginManager.get_instance()
+            if not pm.is_initialized():
+                return 0
+            count = pm.replay_config_cards()
+            if count:
+                logger.debug(f"[PluginHost] 插件变更前回放设置卡 {count} 张")
+            return count
+        except Exception as e:
+            logger.warning(f"[PluginHost] 回放插件设置卡失败: {e}")
+            return 0
 
     def emit_plugin_changed(self, result: dict, plugin_name: str = "", action: Optional[str] = None) -> None:
         """广播插件变更结果到全部活跃 backend 的 plugin_changed 信号
@@ -1296,6 +1477,9 @@ class PluginHostService(QObject):
                 其余（热重载/全量/更新）→ updated。市场路径传精确值
                 （installed/updated/uninstalled/enabled/disabled）
         """
+        # 设置卡回放：热重载/安装/启停都经 rescan 重新登记 pending，启动期那次
+        # replay 覆盖不到。先落地，随后的 UI 重建才能读到最新卡清单。
+        self._replay_pending_config_cards()
         # PluginChanged hook 触发（广播前，result 尚未被 _event_seq 污染）
         try:
             self._trigger_plugin_changed_hook(result, plugin_name, action)
@@ -1379,6 +1563,9 @@ class PluginHostService(QObject):
         if diff:
             context["diff"] = diff
             context["sub_actions"] = _sub_actions_from_diff(diff)
+            # 工具快照不因插件工具增删改而换代：tools 定义会话内冻结（prompt 缓存保护），
+            # 新增工具经 PluginChanged hook 注入 schema + tool_execute 中转调用，
+            # 移除工具调用时由 ToolExecutor 返 Unknown tool。
         # 广播：全部活跃 backend 的 hook_manager 各自触发（hook 输出进各自队列）。
         # 服务自身的 _host_hook_manager 仅作 AgentManager 重载时的注册目标
         # （_hooks 类级共享，注册即全局可见），无对话队列、不作为触发目标。
@@ -1393,24 +1580,61 @@ class PluginHostService(QObject):
             except RuntimeError:
                 pass  # 窗口关闭竞态：backend 已 deleteLater 但未 cleanup
 
-    def _schedule_debounced_reload(self):
-        """风暴期合并重载：300ms 后执行一次全量 reload_plugin_subsystems（仅触发一次）
+    def _schedule_debounced_reload(self, plugin_name: str = "", component: str = ""):
+        """风暴期合并重载：300ms 后执行一次合并重载（仅触发一次）
 
         修 #2 timer：改用 QTimer.singleShot 静态方法，不持有 QTimer 实例
         （PyQt5 下即便 stop+deleteLater 仍残留 +1 QTimer，singleShot 零实例）。
         用 _reload_pending 守卫保留"风暴期合并"语义：多次调用只在首个 300ms 后触发一次。
+
+        精准请求保真（2026-11-01）：窗口内被合并的 (plugin_name, component)
+        攒入 _pending_reload_targets，到期逐个精准重载。原实现丢弃组件信息、
+        一律全量 reload_plugin_subsystems，而其 rescan 门禁（added/removed/changed）
+        对系统插件内部文件变更恒空 → agents/hooks/commands 等修改被静默跳过、
+        永不生效（实测：改 system-agents/agents/leader.md 热重载无效）。
         """
+        targets = getattr(self, "_pending_reload_targets", None)
+        if targets is None:
+            targets = self._pending_reload_targets = set()
+        targets.add((plugin_name, component))
         if getattr(self, "_reload_pending", False):
             return
         self._reload_pending = True
         QTimer.singleShot(300, self._do_debounced_reload)
 
     def _do_debounced_reload(self):
-        """去抖到期：合并执行一次全量重载（已内部对 added/changed/removed 增量处理）"""
+        """去抖到期：合并执行一次重载
+
+        精准目标（带插件名）逐个 _do_single_reload（幂等，内部自做 rescan_plugin）
+        后合并广播；含空名目标（"", ""，全量语义）或无目标时回退全量
+        reload_plugin_subsystems（已内部对 added/changed/removed 增量处理）。
+        """
         self._reload_pending = False
         self._last_reload_at = time.time()
+        targets = getattr(self, "_pending_reload_targets", set())
+        self._pending_reload_targets = set()
         try:
-            result = self.reload_plugin_subsystems()
+            # 精准目标与全量目标共存时，精准目标不能被丢弃：全量路径的 rescan diff
+            # 对「仅组件内部文件变更」恒为空（目录签名短路），兜底探测只覆盖
+            # tools/providers/ui —— agents/hooks/commands/themes/skills 的改动
+            # 在同批混合场景下会被整批吞掉。此处先逐个精准执行，再补一次全量。
+            # 排序：targets 是 set，遍历序不定会让「同插件多组件」的执行顺序随机
+            # （root 分支与具体组件分支互相覆盖 result）。
+            global_full = ("", "") in targets
+            precise = sorted(t for t in targets if t != ("", ""))
+            result: dict = {}
+            for plugin_name, component in precise:
+                sub = self._do_single_reload(plugin_name, component)
+                if not result:
+                    result = sub
+                else:
+                    self._merge_reload_result(result, sub, tuple(sub.keys()))
+            if global_full or not targets:
+                full = self.reload_plugin_subsystems()
+                if not result:
+                    result = full
+                else:
+                    self._merge_reload_result(result, full, tuple(full.keys()))
             self.emit_plugin_changed(result)
         except Exception as e:
             logger.error(f"[PluginHost] 插件热更新失败: {e}")
@@ -1468,6 +1692,18 @@ class PluginHostService(QObject):
                 return result
 
             # 1. 只重新扫描这一个插件目录（不走全量 rescan）
+            # 重装快照：「先删后装」/「装同名前先有旧版」时，旧注册必须先清。
+            _legacy = pm.get_plugin(plugin_name)
+            legacy_components = (
+                dict(_legacy.components)
+                if _legacy is not None and isinstance(getattr(_legacy, "components", None), dict)
+                else {}
+            )
+            legacy_manifest = (
+                dict(_legacy.manifest)
+                if _legacy is not None and isinstance(getattr(_legacy, "manifest", None), dict)
+                else None
+            )
             pm.rescan_plugin(plugin_name)
 
             plugin = pm.get_plugin(plugin_name)
@@ -1477,9 +1713,24 @@ class PluginHostService(QObject):
 
             # P1/P2：版本/平台门禁闸口——被拦截的插件不进任何组件分派
             if not self._load_gate(plugin):
+                # 主题是纯文件数据（YAML + 资源），不执行插件代码，ThemeManager 的
+                # 目录直扫本就不过门禁。此处直接 return 会让 themes reloader 不跑 →
+                # UI 收不到 on_reload → 装纯主题插件时主题列表不刷新（要等下一次
+                # 别的插件热重载才突然出现）。故拦截后仍补一次主题源刷新。
+                if self._refresh_gated_plugin_theme_sources(plugin):
+                    result["themes"] = True
                 return result
 
             comps = plugin.components
+            # 重装清理（同名插件此前已注册）：按「插件已删除」语义把旧注册清干净再加载。
+            # 不清理则 hooks/agents/commands/lsp 沿用旧注册（旧模块闭包），
+            # 重装后仍能被旧代码执行，且新代码的 hooks 可能被去重跳过。
+            if legacy_components:
+                _scratch = {k: (0 if k == "agents" else False) for k in _KC}
+                self._cleanup_removed_plugin_components(
+                    plugin_name, legacy_components, _scratch, tuple(_KC), manifest=legacy_manifest
+                )
+                logger.info(f"[PluginHost] 新插件「{plugin_name}」存在旧注册，已先执行完整卸载")
             logger.info(f"[PluginHost] 检测到新插件「{plugin_name}」，执行增量加载")
 
             # 2. 智能体 + hooks
@@ -1626,6 +1877,34 @@ class PluginHostService(QObject):
         return True
 
     @staticmethod
+    def _refresh_gated_plugin_theme_sources(plugin) -> bool:
+        """门禁拦截后的兜底刷新：重扫主题源，返回是否执行了刷新。
+
+        门禁拦的是「执行插件代码」的组件（tools/hooks/ui/...）。主题是纯文件
+        数据（YAML + 图片/音频资源），既不 import 插件模块也不注册回调，
+        ThemeManager 的目录直扫本就不看门禁——被拦插件的主题已被加载。
+        但列表刷新依赖 theme_manager.reload() 触发的 on_reload 回调链，
+        拦截分支早退会把它一并跳过。
+
+        插件未声明 themes 时跳过（避免每次拦截都白跑一次指纹计算）。
+        plugin 为 None（扫描失败）或组件表不可读时保守刷新：目录直扫可能
+        已经捡到该插件下的 themes/。
+        """
+        comps = getattr(plugin, "components", None)
+        if isinstance(comps, dict) and not comps.get("themes"):
+            return False
+        try:
+            from app.utils.config import update_theme_options
+            from app.utils.theme_manager import theme_manager
+
+            theme_manager.reload()
+            update_theme_options()
+            return True
+        except Exception as e:
+            logger.warning(f"[PluginHost] 门禁拦截后刷新主题源失败: {e}")
+            return False
+
+    @staticmethod
     def _filter_blocked_lsp_configs(pm, lsp_configs: list) -> list:
         """过滤掉被门禁拦截的插件的 LSP 配置（P2 消费端防御）。
 
@@ -1677,12 +1956,81 @@ class PluginHostService(QObject):
         auto = [plugin_name] if plugin_name.isidentifier() else []
         return list(dict.fromkeys(list(declared_prefixes or []) + auto))
 
+    @staticmethod
+    def _release_plugin_host_resources(plugin_name: str) -> None:
+        """回收插件在宿主级单例里留下的资源（删除/禁用路径共用，全部幂等）。
+
+        与组件 reloader 的分工：reloader 管「某一组件类型的注册表」；本方法管
+        「不属于任何组件、但以插件名记账」的宿主资源——后台子进程台账、贡献注册表
+        （技能源/命令/智能体闭包）、能力池订阅、UI 事件总线订阅。
+
+        漏掉任一项的后果都不是「少清一点」：插件代码已从磁盘删除，却仍被
+        宿主单例引用，甚至继续被调用执行。历史上四项分散在 disable_plugin 与
+        UI unload 里，走「删目录 / 市场卸载」的插件全部漏过。
+        """
+        if not plugin_name:
+            return
+        # 1) 后台子进程：可执行文件可能就在被删目录里，不回收即孤儿进程。
+        # kill_plugin 内部 proc.wait(timeout=5) 等进程退出——删除插件发生在主线程
+        # （watchfiles 链路），同步跑最长卡 UI 5s，必须丢后台线程。
+        try:
+            from app.plugins.capabilities.process_registry import ProcessRegistry
+
+            def _kill_processes() -> None:
+                try:
+                    killed = ProcessRegistry.get_instance().kill_plugin(plugin_name)
+                    if killed:
+                        logger.info(f"[PluginHost] 已回收插件 '{plugin_name}' 后台进程 {killed} 个")
+                except Exception as e:
+                    logger.warning(f"[PluginHost] 回收插件后台进程失败 ({plugin_name}): {e}")
+
+            if threading.current_thread() is threading.main_thread():
+                threading.Thread(
+                    target=_kill_processes, name=f"plugin-proc-kill-{plugin_name}", daemon=True
+                ).start()
+            else:
+                _kill_processes()
+        except Exception as e:
+            logger.warning(f"[PluginHost] 回收插件后台进程失败 ({plugin_name}): {e}")
+        # 2) 贡献注册表：技能源/命令/智能体都是插件模块里的闭包
+        try:
+            from app.plugins.registries.contribution_registry import ContributionRegistry
+
+            ContributionRegistry.get_instance().unregister_source(plugin_name)
+        except Exception as e:
+            logger.warning(f"[PluginHost] 注销插件贡献失败 ({plugin_name}): {e}")
+        # 3) 能力池订阅（事件/流订阅闭包）
+        try:
+            from app.plugins.capabilities.registry import CapabilityRegistry
+
+            CapabilityRegistry.get_instance().release_plugin(plugin_name)
+        except Exception as e:
+            logger.warning(f"[PluginHost] 释放插件能力订阅失败 ({plugin_name}): {e}")
+        # 4) UI 事件总线订阅
+        try:
+            from app.core.infra.ui_event_bus import UIEventBus
+
+            UIEventBus.get_instance().unsubscribe_plugin(plugin_name)
+        except Exception as e:
+            logger.warning(f"[PluginHost] 退订插件事件失败 ({plugin_name}): {e}")
+        # 5) 窗口级服务槽：以前只有插件自己在 unload_ui 里清，宿主不兜底，
+        #    删除/禁用后 WindowServiceRegistry 仍指向已删插件的实例（按窗口取用会拿到幽灵对象）
+        try:
+            from app.plugins.registries.window_services import get_window_services
+
+            drained = get_window_services().unregister_plugin(plugin_name)
+            if drained:
+                logger.info(f"[PluginHost] 已摘除插件 '{plugin_name}' 窗口服务 {len(drained)} 个")
+        except Exception as e:
+            logger.warning(f"[PluginHost] 摘除插件窗口服务失败 ({plugin_name}): {e}")
+
     def _cleanup_removed_plugin_components(
         self,
         plugin_name: str,
         removed_components: dict,
         result: dict,
         result_keys: tuple,
+        manifest: Optional[dict] = None,
     ) -> dict:
         """精准清理已移除插件的全部组件（删除段核心，供两处复用）
 
@@ -1692,22 +2040,53 @@ class PluginHostService(QObject):
 
         只处理该插件实际含有的组件：agents→cleanup_plugin_artifacts、hooks-only→unregister、
         commands→reload_all、themes→reload、skills→invalidate、ui→unload、lsp→remove_only。
+
+        快照为空（插件从未成功注册，但其 tools/providers 已由独立扫描器注册）时回退全组件清理；
+        manifest 用于删除后仍需清理声明式模块前缀（module_prefixes）的场景。
         """
         # 清空该插件的 watcher 去重缓存键（review B3）：
         # 防止"删除 → 3s 内重装"被 _is_duplicate 误判为重复而吞掉重装加载
-        dedup_cache = getattr(self, "_watcher_dedup_cache", None)
+        # 实例字典直查：QObject 未初始化桩（测试 / __new__ 构造）上 getattr 缺失属性
+        # 会落到 C++ 描述符抛 RuntimeError，把整场清理打断。
+        dedup_cache = self.__dict__.get("_watcher_dedup_cache")
         if dedup_cache is not None:
-            stale_keys = [k for k in dedup_cache.keys() if k[0] == plugin_name]
-            for k in stale_keys:
-                dedup_cache.pop(k, None)
+            from contextlib import nullcontext
+
+            stale_keys: list = []
+            with (self.__dict__.get("_watcher_dedup_lock") or nullcontext()):
+                stale_keys = [k for k in list(dedup_cache.keys()) if k[0] == plugin_name]
+                for k in stale_keys:
+                    dedup_cache.pop(k, None)
             if stale_keys:
                 logger.debug(f"[PluginHost] 插件 [{plugin_name}] 移除，清空 {len(stale_keys)} 个 watcher 去重键")
+
+        from app.plugins.kernel import COMPONENT_ORDER, ReloadContext, get_reloader_registry
+
+        # 快照缺失兜底：插件可能从未成功注册到 PluginManager（manifest 损坏、启动扫描
+        # 遗漏），而 tools/providers/runtime 是独立扫目录注册的——此时 components 全空
+        # 却确有注册项。清理动作全部按 source 幂等，宁可全跑也不能漏。
+        if not any(removed_components.get(c) for c in COMPONENT_ORDER):
+            logger.info(f"[PluginHost] 插件 [{plugin_name}] 组件快照为空，回退全组件清理")
+            removed_components = {c: True for c in COMPONENT_ORDER}
+
+        # 宿主级资源回收（子进程 / 贡献项 / 能力订阅 / 事件订阅）
+        self._release_plugin_host_resources(plugin_name)
+
+        # 声明式模块前缀清理：重载路径在 _reload_single_plugin 前置清过，删除路径
+        # 此前没有清理点（rescan 后 manifest 已取不到声明，只能靠调用方传快照）。
+        # 只清显式声明的前缀：_resolve_purge_prefixes 的「插件名同名包」是裸前缀匹配，
+        # 删除路径上让它对任意插件名生效会误伤标准库同名模块（如插件名 time/json）。
+        try:
+            declared = list((manifest or {}).get("module_prefixes") or [])
+            purged = self._purge_module_prefixes([str(p) for p in declared if p])
+            if purged:
+                logger.info(f"[PluginHost] 已清理插件 '{plugin_name}' 模块缓存 {len(purged)} 个: {purged[:5]}")
+        except Exception as e:
+            logger.warning(f"[PluginHost] 清理插件 '{plugin_name}' 模块缓存失败: {e}")
 
         # 表分派：遍历该插件原有组件 → registry.reload(plugin=None) 走清理语义
         # 遍历序按 COMPONENT_ORDER（tuple）— KNOWN_COMPONENTS 是 set 序不确定，
         # 漏遍历会跳过某组件的清理。agents 置首：先于 hooks/commands 处理以保留其联动标记语义。
-        from app.plugins.kernel import COMPONENT_ORDER, ReloadContext, get_reloader_registry
-
         registry = get_reloader_registry()
         for comp in COMPONENT_ORDER:
             if not removed_components.get(comp):
@@ -1819,7 +2198,9 @@ class PluginHostService(QObject):
         # 注册期过滤：重载该插件的这一类组件（内部会重新走一遍细项过滤）
         return self._reload_single_plugin(plugin_name, component)
 
-    def _reload_single_plugin(self, plugin_name: str, component: str = "") -> dict:
+    def _reload_single_plugin(
+        self, plugin_name: str, component: str = "", previous_components: Optional[dict] = None
+    ) -> dict:
         """增量重载单个插件（不清除其他插件的数据）
 
         根据变更的组件名精确重载，不触发无关子系统：
@@ -1837,6 +2218,8 @@ class PluginHostService(QObject):
         Args:
             plugin_name: 插件名称
             component: 变更的组件名
+            previous_components: 调用方在外层 rescan 前拍下的组件快照（识别「已删组件」差集）；
+                缺省用本函数 rescan 前的索引对象
 
         Returns:
             dict: 各组件重载结果；key 集合基于 kernel.KNOWN_COMPONENTS 动态生成，
@@ -1858,8 +2241,22 @@ class PluginHostService(QObject):
                 return result
 
             # 1. 捕获移除前的插件组件信息，用于精确清理
+            # previous_components：调用方在外层 rescan 之前拍下的组件快照。
+            # reload_plugin_subsystems 的 changed 分支外层已 rescan 过（索引里的对象已换新），
+            # 此时再读 get_plugin 只能拿到「新组件表」，被删组件的差集会丢失 → 旧注册永久残留。
             plugin_before = pm.get_plugin(plugin_name)
-            removed_components = dict(plugin_before.components) if plugin_before else {}
+            # 合并而非二选一：reload_plugin_subsystems 的 changed 分支外层已 rescan 过，
+            # 这里 get_plugin 拿到的是**新**组件表，只用它会丢掉「上一次声明过」的差集；
+            # 只用 previous_components 又会让 watcher 直呼路径（无 previous）失去快照。
+            removed_components = dict(previous_components or {})
+            if plugin_before is not None and isinstance(plugin_before.components, dict):
+                removed_components.update(plugin_before.components)
+            # manifest 快照同理：删除后取不到 module_prefixes 声明
+            removed_manifest = (
+                dict(plugin_before.manifest)
+                if plugin_before is not None and isinstance(getattr(plugin_before, "manifest", None), dict)
+                else None
+            )
 
             pm.rescan_plugin(plugin_name)
 
@@ -1887,11 +2284,17 @@ class PluginHostService(QObject):
                     f"components={ {k for k, v in removed_components.items() if v} or {'(unknown)'} }, "
                     f"cleaning up artifacts..."
                 )
-                return self._cleanup_removed_plugin_components(plugin_name, removed_components, result, result_keys)
+                return self._cleanup_removed_plugin_components(
+                    plugin_name, removed_components, result, result_keys, manifest=removed_manifest
+                )
 
             # P1/P2：版本/平台门禁闸口——被拦截的插件不进任何组件分派；
             # 清理路径已在上方处理完毕，本处只挡「插件对象存在但不该加载」情形。
             if not self._load_gate(plugin):
+                # 同 _reload_new_plugin：主题是纯数据组件，拦截后仍须刷新主题源，
+                # 否则列表停留在旧快照（详见上方同款注释）。
+                if self._refresh_gated_plugin_theme_sources(plugin):
+                    result["themes"] = True
                 return result
 
             # 2-N. 组件分派：查 kernel reloader 注册表（原 8 分支 if 已迁 builtin_reloaders）
@@ -1924,14 +2327,61 @@ class PluginHostService(QObject):
                     if comp == "agents":
                         result["hooks"] = True
                         result["commands"] = True
+                # 「此前声明过、现在没有」= 组件被删（目录删除或 manifest 删掉声明）。
+                # 只重载现存组件会让旧注册永久残留：典型如插件更新后移除 ui 组件，
+                # 卡片/输入区按钮/设置卡仍在界面上，直到进程重启。
+                # 这些卸载不进 result —— 它们是「删除」而非「重载」，窗口侧无需重建。
+                for comp in COMPONENT_ORDER:
+                    if not removed_components.get(comp) or plugin.has_component(comp):
+                        continue
+                    try:
+                        purged = registry.reload(
+                            ReloadContext(
+                                plugin_name=plugin_name,
+                                plugin=None,
+                                component=comp,
+                                is_new_plugin=False,
+                            )
+                        )
+                        logger.info(
+                            f"[PluginHost] Plugin [{plugin_name}] component '{comp}' 已从声明中移除，"
+                            f"执行卸载清理: outcome={purged}"
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            f"[PluginHost] Plugin [{plugin_name}] 清理已移除组件 '{comp}' 失败: {e}"
+                        )
                 logger.info(
                     f"[PluginHost] Plugin '{plugin_name}' manifest changed, reloaded all components: "
                     f"{ {k: result[k] for k in result_keys} }"
                 )
             elif component:
-                # 统一守卫层：plugin 缺失或无该组件时跳过（对齐原 commands/ui 分支的 has_component 前置）
+                # 组件不在当前声明里 = 「刚被删掉」或「本就没有」。前者必须卸载：
+                # 旧实现直接 skip，删掉 ui/ 目录或从 components 移除声明后，热重载
+                # 会把「组件已删除」当成「无需重载」，旧注册永久留在注册表里。
+                # 卸载路径对「本就没有」的组件是幂等空操作，不产生副作用。
                 if plugin is not None and not plugin.has_component(component):
-                    logger.debug(f"[PluginHost] Plugin '{plugin_name}' has no '{component}' component, skip")
+                    # 未在 kernel 登记的组件名不派发：那是脏数据/插件写错名字，
+                    # reloader 不应被调用（保持未知组件静默跳过的安全边界）。
+                    if component not in _KC:
+                        logger.debug(
+                            f"[PluginHost] Plugin '{plugin_name}' has unknown component '{component}', skip"
+                        )
+                    else:
+                        purged = registry.reload(
+                            ReloadContext(
+                                plugin_name=plugin_name,
+                                plugin=None,
+                                component=component,
+                                is_new_plugin=False,
+                            )
+                        )
+                        if component in result_keys:
+                            result[component] = purged if purged is not None else False
+                        logger.info(
+                            f"[PluginHost] Plugin [{plugin_name}] component '{component}' 不在声明中，"
+                            f"执行卸载清理: outcome={purged}"
+                        )
                 else:
                     reloaded = registry.reload(
                         ReloadContext(
@@ -2056,7 +2506,7 @@ class PluginHostService(QObject):
         并触发一次重复组件重载。预写去重键使残留事件被 _is_duplicate 跳过，
         避免「市场装一个插件 → 组件被全量重载两次」的主线程重复开销。
         """
-        dedup = getattr(self, "_watcher_dedup_cache", None)
+        dedup = self.__dict__.get("_watcher_dedup_cache")
         if (
             dedup is None
             or not plugin_name
@@ -2064,11 +2514,30 @@ class PluginHostService(QObject):
             or not isinstance(result, dict)
         ):
             return
-        window_end = time.time() + 10.0
-        for comp, ok in result.items():
-            if comp.startswith("_") or not ok:
-                continue
-            dedup[(plugin_name, comp)] = window_end
+        # 插件已不在索引（卸载/禁用移走目录）：绝不能 stamp。
+        # 删除段刚清掉该插件的全部去重键，stamp 会把键写回，使「删除 → 10s 内重装」
+        # 的残留事件被判重复而吞掉 —— 清键动作被自己覆盖。
+        try:
+            from app.plugins.managers.plugin_manager import PluginManager
+
+            pm = PluginManager.get_instance()
+            # 只在「注册表已就绪且确实查无此插件」时判定为已删除：
+            # PM 未初始化（启动早期 / 测试）不作为插件已删除的依据。
+            if pm.is_initialized() and pm.get_plugin(plugin_name) is None:
+                return
+        except Exception:
+            pass
+        # 时间戳必须是「当前时刻」：判定式是 now - last < 10s（过去时语义），
+        # 写 time.time() + 10 会让 now - last 为负值恒命中，抑制窗口翻倍成 20s
+        # （市场装/更新后 20s 内的真实修改事件全被丢弃，改文件永不生效）。
+        now = time.time()
+        from contextlib import nullcontext
+
+        with (self.__dict__.get("_watcher_dedup_lock") or nullcontext()):
+            for comp, ok in result.items():
+                if comp.startswith("_") or not ok:
+                    continue
+                dedup[(plugin_name, comp)] = now
 
     def reload_plugin_subsystems(self, force_full: bool = False) -> dict:
         """重载插件子系统（默认 diff 精准；force_full=True 走全量）
@@ -2112,6 +2581,12 @@ class PluginHostService(QObject):
                 return result
 
             # 1. 重新扫描插件目录，获取变更详情
+            # 组件差集快照：rescan 会把索引里的 PluginInfo 换成新对象，
+            # 「被删组件」的声明只存在这份快照里（新对象的 components 已经不含它）。
+            before_components = {
+                p.name: dict(p.components) if isinstance(p.components, dict) else {}
+                for p in pm.list_plugins()
+            }
             # force_full（设置面板显式「重载插件」）时绕过目录签名短路，强制全量重扫
             diff = pm.rescan(force=force_full)
             added = diff.get("added", [])
@@ -2150,11 +2625,17 @@ class PluginHostService(QObject):
             #    组件信息必须取自 rescan 返回的 Plugin 对象（get_plugin 已反查不到，
             #    否则 removed_components 为空 → 卸载不干净）。
             for plugin in removed:
-                self._cleanup_removed_plugin_components(plugin.name, dict(plugin.components), result, result_keys)
+                _manifest = dict(plugin.manifest) if isinstance(getattr(plugin, "manifest", None), dict) else None
+                self._cleanup_removed_plugin_components(
+                    plugin.name, dict(plugin.components), result, result_keys, manifest=_manifest
+                )
 
             # 3. added/changed：逐插件精准加载全部组件（__manifest__ 语义）
+            # previous_components 用于识别「上一次声明过、本次已删」的组件并卸载。
             for plugin in list(added) + list(changed):
-                sub = self._reload_single_plugin(plugin.name, "__manifest__")
+                sub = self._reload_single_plugin(
+                    plugin.name, "__manifest__", previous_components=before_components.get(plugin.name)
+                )
                 self._merge_reload_result(result, sub, result_keys)
 
             logger.info(f"[PluginHost] 插件精准重载完成: { {k: result[k] for k in result_keys} }")
@@ -2350,24 +2831,26 @@ class PluginHostService(QObject):
         from app.plugins.managers.plugin_manager import PluginManager
         from app.utils.config import Settings
 
+        cfg = Settings.get_instance()
+        # [PERF #36] 守卫前置：mcp_tools 顶层拉起整个 mcp SDK（冷导入 ~550ms/569
+        # 模块）。原实现 import 在开关/配置检查之前，未配置 MCP 的用户也全额付费。
+        # 配置读内存值幂等（deferred 2000ms 时 Settings/PluginManager 早已就绪）。
+        # 行为保真：已配置用户走到的分支不变，仅未配置用户提前短路。
+        if not cfg.mcp_enabled.value:
+            logger.info("[PluginHost] MCP 全局开关已关闭，跳过连接")
+            return
+        pm = PluginManager.get_instance()
+        servers = pm.get_mcp_servers()
+        if not servers:
+            logger.info("[PluginHost] 无 MCP 服务器配置，跳过连接")
+            return
+
         from app.tools.mcp_tools import MCPClientManager
 
         mcp_manager = MCPClientManager.get_instance()
 
         if mcp_manager.is_connected:
             logger.info("[PluginHost] MCP 已连接，复用现有连接")
-            return
-
-        cfg = Settings.get_instance()
-        if not cfg.mcp_enabled.value:
-            logger.info("[PluginHost] MCP 全局开关已关闭，跳过连接")
-            return
-
-        # 从 PluginManager 获取 MCP 服务器列表
-        pm = PluginManager.get_instance()
-        servers = pm.get_mcp_servers()
-        if not servers:
-            logger.info("[PluginHost] 无 MCP 服务器配置，跳过连接")
             return
 
         mcp_manager.connect_all_background(

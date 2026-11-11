@@ -12,6 +12,8 @@
 3. 门面只暴露白名单内的名字，名单外（尤其写操作）访问得到 AttributeError
 """
 
+import inspect
+
 import pytest
 from unittest.mock import MagicMock
 
@@ -61,9 +63,12 @@ def test_facet_methods_exist_on_target():
     for facet_id, spec in FACETS.items():
         module_name, _, cls_name = spec.target.partition(":")
         module = __import__(module_name, fromlist=[cls_name])
-        target_cls = getattr(module, cls_name)
+        target_obj = getattr(module, cls_name)
+        if inspect.isfunction(target_obj):
+            # 模块级工厂函数形态（如 action_queue:get_action_queue）：先取实例再验方法
+            target_obj = target_obj()
         for name in spec.methods:
-            if not callable(getattr(target_cls, name, None)):
+            if not callable(getattr(target_obj, name, None)):
                 missing.append(f"{facet_id} -> {cls_name}.{name}")
     assert not missing, "facet 声明了不存在的宿主方法:\n" + "\n".join(missing)
 
@@ -118,3 +123,22 @@ def test_facade_degrades_when_target_lacks_method():
     facade = ReadOnlyFacade(_Partial(), ("get_members", "get_member_agent_name"), "probe")
     assert getattr(facade, "get_member_agent_name", None) is None
     assert facade.get_members() == []
+
+
+def test_facet_resolve_supports_module_factory():
+    """#4：FacetSpec.resolve 支持模块级工厂函数形态（inspect.isfunction 显式分支）。"""
+    from app.plugins.capabilities.facets import FACETS
+
+    spec = FACETS["action.queue"]
+    obj = spec.resolve()
+    assert callable(obj.peek)  # get_action_queue() 返回 WindowActionQueue 单例
+
+
+def test_facet_resolve_class_without_get_instance_raises():
+    """#4：类无 get_instance 时保持历史 AttributeError 快速失败（不得静默构造实例）。"""
+    from app.plugins.capabilities.facets import FacetSpec
+
+    # builtins.dict：类、非 function、无 get_instance —— 三种形态判定均命中「原路径」
+    spec = FacetSpec(target="builtins:dict", methods=())
+    with pytest.raises(AttributeError):
+        spec.resolve()

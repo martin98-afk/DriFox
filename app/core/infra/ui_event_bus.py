@@ -21,12 +21,18 @@ EV_WELCOME_TAB_REFRESHED = "welcome_tab_refreshed"
 # 欢迎卡片插件 tab 数据已更新（异步 fetcher 完成 / 数据源刷新等），
 # 通知主程序对指定 mode_key 触发重渲染（不重建 QWebEngineView）。
 # payload: mode_key, plugin_name, window_id（可选；缺省 = 全窗口）
+
 EV_PROJECT_CHANGED = "project_changed"  # payload: project, workdir, window_id
+# 对话报错（backend conversation_error 同步广播；能力池 ui.events 订阅）。
+# payload: window_id, session_id, provider, model, message, error_type, timestamp。
+# 全局监听插件（如自动换模型）按 window_id 定向操作目标窗口。
+EV_CONVERSATION_ERROR = "conversation_error"
 # 工作台页签徽标条目已变化（插件 register_slot_entry 到 "workbench:tab" region 后
 # 由注册表发布，WorkbenchPanel 订阅并重挂徽标）。payload: 无（消费方全量重读 region）
 EV_WORKBENCH_BADGES_CHANGED = "workbench.badges_changed"
 # 工作台页签集合已变化（register_workbench_tab 后发布，WorkbenchPanel 订阅并
 # 重跑 sync_plugin_pages reconcile——热加载新插件页时无需重启即可见）。payload: 无
+
 EV_WORKBENCH_TABS_CHANGED = "workbench.tabs_changed"
 # 项目 / 工作目录已变更（MainWidget._sync_working_directory 收尾处发布，按
 # (project, workdir) 去重）。UI 插件实现可选协议 on_project_changed 即接收：
@@ -81,12 +87,26 @@ class UIEventBus:
                 del self._subs[event]
 
     def publish(self, event: str, **payload: Any) -> None:
-        """发布事件；订阅回调异常隔离（吞掉记 warning）"""
+        """发布事件；订阅回调异常隔离（吞掉记 warning）
+
+        [PERF] 慢订阅者打点（>=50ms 记 WARNING）：publish 是**同步直调**，
+        任一订阅者慢都会阻塞整条调用链（主题切换实测出现过 ev_publish 段
+        秒级）。日志给出事件名 + plugin_name + 回调限定名 + 耗时，可直接
+        定位是哪个订阅者吃掉了时间，不用逐个插件猜。
+        """
+        from time import perf_counter
+
         for plugin_name, callback in list(self._subs.get(event, [])):
+            _t0 = perf_counter()
             try:
                 callback(payload)
             except Exception as e:
                 logger.warning(f"[UIEventBus] {event} 订阅回调异常 ({plugin_name}): {e}")
+            finally:
+                _ms = (perf_counter() - _t0) * 1000
+                if _ms >= 50:
+                    owner = getattr(callback, "__qualname__", None) or getattr(callback, "__name__", "?")
+                    logger.warning(f"[UIEventBus] 慢订阅者 {event}: {plugin_name or 'main'} {owner} = {_ms:.0f}ms")
 
     def subscriptions(self) -> Dict[str, int]:
         """当前各事件订阅数（调试/测试）"""

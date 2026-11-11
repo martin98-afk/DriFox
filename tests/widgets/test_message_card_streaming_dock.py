@@ -8,7 +8,6 @@
 """
 
 import inspect
-import re
 import sys
 
 from PySide6.QtWidgets import QApplication
@@ -23,33 +22,31 @@ def _ensure_qapp():
 
 
 def test_streaming_dock_css_content():
-    """坞态 CSS 必须包含：flex 调换、order 沉底、限高。"""
+    """坞态 CSS 必须包含：工具区限高 + 空正文折叠；不得再有位置调换/正文限高。"""
     css = crc._STREAMING_DOCK_CSS
     assert "body.streaming-dock" in css
-    assert "flex-direction: column" in css
-    assert "body.streaming-dock #tool-section" in css
-    assert "order: 2" in css
     assert "body.streaming-dock #tool-content" in css
-    # 工具区限高：110→220（原 3-4 行看不见进度，放宽到 ≈8 行）
-    assert "max-height: 220px" in css
-    # 正文限高：330→450→600（流式长回复展示更多正文）
-    assert "max-height: 600px" in css
+    # 工具区限高：264px（≈9-10 行，与 Qt 通道 _DOCK_LOG_MAX 同值）
+    assert "max-height: 264px" in css
+    # [T44] 工具区始终居顶、正文自然高度：不得再有 flex order 沉底与正文限高
+    assert "order: 2" not in css, "坞态不得再把工具区沉底"
+    assert "flex-direction: column" not in css, "坞态不得再改 body 布局方向"
+    assert "max-height: 600px" not in css, "坞态不得再给正文限高（双层滚动）"
 
 
-def test_streaming_dock_content_no_horizontal_scrollbar():
-    """回归：坞态正文容器不得出现横向滚动条。
+def test_streaming_dock_content_has_no_content_max_height():
+    """[T44] 坞态不得给正文限高：工具区始终居顶、正文按自然高度在下方生长。
 
-    单轴 overflow-y:auto 时另一轴 visible 被计算为 auto → 长行（URL/无空格
-    长 token）超宽出现容器级横向滚动条。必须 overflow-x:hidden +
-    overflow-wrap:break-word（强制换行，避免 hidden 只裁切看不到尾巴）。
+    历史背景：旧实现给 #content-placeholder max-height:600px + overflow-y:auto
+    做「正文内滚」，配合 CSS order 把工具区沉到底部 → 双层滚动 + 工具区先从
+    底部弹回顶部。用户诉求「一开始就在上面」后整体移除。若将来恢复限高，
+    必须同时补回 overflow-x:hidden + overflow-wrap:break-word 防横向滚动条。
     """
     css = crc._STREAMING_DOCK_CSS
-    # 提取坞态正文容器规则块
-    m = re.search(r"body\.streaming-dock #content-placeholder \{(.*?)\}", css, re.S)
-    assert m, "坞态正文容器规则必须存在"
-    rule = m.group(1)
-    assert "overflow-x: hidden" in rule, "坞态正文容器必须禁横向滚动"
-    assert "overflow-wrap: break-word" in rule, "坞态正文容器必须强制换行（超宽长词断行）"
+    assert "body.streaming-dock #content-placeholder {" not in css, (
+        "坞态不得再给正文容器加规则（唯一例外是 body.streaming-dock.cp-blank）"
+    )
+    assert "overflow-y: auto" not in css
 
 
 def test_streaming_dock_js_content():
@@ -348,7 +345,7 @@ def test_s1_dock_returns_after_last_tool_result():
 
     #F3 回归（#R1 P1）：F2 归位兜底条件用 `not getattr(self.viewer, "_streaming")`，
     但 append_tool_result 中段「就近恢复 viewer 流式模式」把 viewer._streaming 无条件
-    置 True → 归位条件恒 False → QTimer 永不注册 → 会话末轮 dock 永久沉底。
+    置 True → 归位条件恒 False → QTimer 永不注册 → 会话末轮 dock 永久限高。
     修复：改用 MessageCard 层 self._streaming（stop_streaming_anim 置 False）判据。
     """
     from PySide6.QtCore import QTimer
@@ -463,7 +460,7 @@ def test_update_content_preserves_content_scroll():
 #
 # 根因：打断路径（手动停止/自动压缩/引擎错误）worker 已终止，活跃工具结果
 # 永不到达 → append_tool_result 的 F2 兜底归位永不触发；若仍按 S1 语义
-# keep_dock=True，坞态永久沉底、正文限矮（卡片保持流式结构）。
+# keep_dock=True，工具区永久停在流式限高态（卡片保持流式结构）。
 # 引擎错误路径还有一层：update_content 在 _streaming=False 时经
 # start_streaming_anim 重开流式态与坞态，收尾必须在其后强制关坞。
 # ──────────────────────────────────────────────
@@ -549,7 +546,7 @@ def test_finish_streaming_force_dock_off_no_tools_still_docks_off():
 # 本轮已结束对话 _is_history=False → 新建 viewer 的 _streaming=True 初始值
 # 残留（池化实例经 reset_for_reuse 已置 False，两路径行为不一致）→ 渲染走
 # 流式分支，且 _on_js_ready 旧兜底 `_setStreamingDock(!!_act||!_co)` 因新骨架
-# 无 data-collapsed 属性（_co=false）误开坞态 → 工具区沉底 + 正文限矮。
+# 无 data-collapsed 属性（_co=false）误开坞态 → 工具区限高 + 正文被挤压。
 # ──────────────────────────────────────────────
 
 
@@ -569,3 +566,131 @@ def test_on_js_ready_dock_sync_uses_python_streaming_flag():
     code = "\n".join(ln.split("#")[0] for ln in src.splitlines())
     assert "!!_act||!_co" not in code, "不得保留 !_co（未折叠）开坞推导：新骨架无 data-collapsed 会误开坞态"
     assert "_dock_on" in code, "必须用 Python 端 _streaming 真值参与坞态判定"
+
+
+# ──────────────────────────────────────────────
+# 结束态折叠：终渲染串行 + 过渡期上报节流 + 高度快跟随
+#
+# 现象（用户真机）：流式结束时工具区「瞬收」，卡片底部先冒空白再慢慢收回。
+# 三条链：① 折叠过渡与终渲染同帧派发，终渲染的渲染进程长任务把 200ms 过渡
+# 连同高度上报一起压住 → 过渡按时间戳直接跳终值；② 上报延后到任务之后，
+# 内容已收、卡片高度未收 → 底部空白；③ FINISH 慢 factor（τ≈255ms）追 264px
+# 要 ~1s。对策见 card_render_core 常量注释。
+# ──────────────────────────────────────────────
+
+
+def _make_finish_stub(md: str = "", finished_ids=None):
+    """CodeWebViewer.finish_streaming 桩：补齐串行化路径依赖的属性/定时器。"""
+    from PySide6.QtCore import QTimer
+
+    stub = _ViewerStub()
+    # 实例属性覆盖：_ViewerStub 不是 CodeWebViewer 子类，不会触发 property
+    stub._tool_compact_mode = True
+    stub._should_incremental_finalize = lambda: False
+    stub._final_render_seq = 0
+    stub._final_render_inflight = False
+    stub._render_pending = None
+    stub._dock_sync_requested = False
+    stub._injected_pending_tools = None
+    stub._markdown_text = md
+    stub._restore_finished_ids = finished_ids
+    stub._finish_defer_immediate = True
+    stub._will_collapse_tool_section = lambda: CodeWebViewer._will_collapse_tool_section(stub)
+    stub._finish_defer_timer = QTimer()
+    stub._finish_defer_timer.setSingleShot(True)
+    stub._finish_defer_timer.timeout.connect(lambda: stub._schedule_render(immediate=stub._finish_defer_immediate))
+    return stub
+
+
+def test_finish_streaming_defers_final_render_until_collapse_settled():
+    """本次结束会折叠工具区时，终渲染必须延后到折叠过渡+上报完成之后。"""
+    _ensure_qapp()
+    stub = _make_finish_stub(md="正文", finished_ids={"t1"})
+    stub.finish_streaming()
+    assert stub.render_calls == 0, "折叠过渡期间不得派发终渲染（长任务会把过渡压成瞬跳）"
+    assert stub._finish_defer_timer.isActive(), "必须启动延后派发定时器"
+    # 定时器到点后照常派发
+    stub._finish_defer_timer.timeout.emit()
+    assert stub.render_calls == 1, "延后到点后必须派发终渲染"
+
+
+def test_finish_streaming_renders_immediately_when_no_collapse():
+    """不折叠的卡（无工具/无思考）照旧立即派发终渲染，不引入多余延迟。"""
+    _ensure_qapp()
+    stub = _make_finish_stub(md="纯文本正文", finished_ids=None)
+    stub.finish_streaming()
+    assert stub.render_calls == 1
+    assert not stub._finish_defer_timer.isActive()
+
+
+def test_will_collapse_tool_section_judgement():
+    """折叠判定：已完成工具或 <think> 块 → 折叠；非简洁模式/欢迎卡 → 不折叠。"""
+    stub = _make_finish_stub(md="纯文本", finished_ids={"t1"})
+    assert CodeWebViewer._will_collapse_tool_section(stub) is True, "有已完成工具必须判定折叠"
+    stub._restore_finished_ids = None
+    stub._markdown_text = "<think>推理</think>正文"
+    assert CodeWebViewer._will_collapse_tool_section(stub) is True, "含思考块必须判定折叠"
+    stub._markdown_text = "纯文本"
+    assert CodeWebViewer._will_collapse_tool_section(stub) is False
+    stub._light_skeleton = True
+    stub._restore_finished_ids = {"t1"}
+    assert CodeWebViewer._will_collapse_tool_section(stub) is False, "欢迎卡不折叠"
+
+
+def test_tool_section_transition_reports_mid_heights():
+    """折叠过渡期间必须按拍上报中间高度（否则 Qt 侧卡片高度原地不动 → 底部空白）。"""
+    src = inspect.getsource(CodeWebViewer._load_skeleton)
+    assert "TOOL_SECTION_REPORT_MS" in src, "过渡期上报间隔必须走常量（与 Qt 追踪拍对齐）"
+    assert "_tsTransitionMidTimer" in src, "过渡期必须启节流上报定时器"
+    assert "clearInterval(_tsTransitionMidTimer)" in src, "终值单报路径必须清掉节流定时器"
+
+
+def test_dock_collapse_window_speeds_up_height_track():
+    """折叠窗口内高度追踪用流式口径快跟随（慢 factor 会让卡片底边远落后于内容）。
+
+    不实例化 MessageCard（无 WebEngine 的测试环境下建卡直接崩，存量基线），
+    只把真实 tick 方法绑到最小桩上验证 factor 选择。
+    """
+    import time as _time
+
+    from app.widgets.card_render_core import (
+        FINISH_HEIGHT_TRACK_FACTOR,
+        STREAM_HEIGHT_TRACK_FACTOR,
+    )
+
+    class _V:
+        def height(self):
+            return 100
+
+        def minimumHeight(self):
+            return 40
+
+    class _TickStub:
+        def __init__(self):
+            self.viewer = _V()
+            self._height_track_factor = FINISH_HEIGHT_TRACK_FACTOR
+            self._dock_collapse_until = 0.0
+            self._target_viewer_height = 300
+            self.applied: list[int] = []
+
+        def _apply_viewer_height(self, h):
+            self.applied.append(int(h))
+
+        def _stop_stream_height_track(self):
+            raise AssertionError("diff=200 不应落定停拍")
+
+    step = MessageCard._stream_height_tick_step
+
+    slow_stub = _TickStub()
+    step(slow_stub)
+    slow = slow_stub.applied[-1]
+
+    fast_stub = _TickStub()
+    fast_stub._dock_collapse_until = _time.monotonic() + 10.0
+    step(fast_stub)
+    fast = fast_stub.applied[-1]
+
+    assert fast > slow, f"折叠窗口内必须更快逼近（slow={slow} fast={fast}）"
+    # 200px 差值：慢档 ~0.378 → 175；快档 ~0.90 → 280
+    assert fast - slow >= 50, f"快跟随幅度不足（slow={slow} fast={fast}）"
+    assert STREAM_HEIGHT_TRACK_FACTOR >= FINISH_HEIGHT_TRACK_FACTOR

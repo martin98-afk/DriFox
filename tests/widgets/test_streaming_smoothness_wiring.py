@@ -6,9 +6,9 @@
 1. 流式输出没有打字机效果：正文按**网络 chunk**整块塞进 DOM（上游 80ms 批处理，
    中文长段落还常因无 ``\\n\\n`` 闭合段落到 150~500ms 安全定时器），观感是
    "一块一块蹦出来"。
-2. 流式结束时"最后的工具与思考弹到最顶上"且卡顿：简洁模式下流式期间工具区沉底
-   （``body.streaming-dock`` 纯 CSS order 调换），结束时**归位 + 最终全量重排 +
-   自动折叠**三个动作叠加，各自带 200ms 过渡 → 瞬移 + 三动画抢帧。
+2. 流式结束时"最后的工具与思考弹到最顶上"且卡顿：结束时**最终全量重排 +
+   自动折叠**两个动作叠加，各自带 200ms 过渡 → 瞬移 + 动画抢帧。
+   （当时的归位/沉底 order 调换已按用户诉求移除，见 [T44]。）
 
 方案（apps/widgets/message_card.py 骨架资产）
 --------------------------------------------
@@ -17,7 +17,7 @@
   （updateContent / updateTailHtml / updateContentAppend 会整体替换增量节点，
   且 Python 侧 markdown 已含全部文本，丢弃缓冲不会丢字）。
 * ``_FLIP_JS``：``_flipCapture`` / ``_flipPlay`` 把位置突变补间成位移动画，
-  ``_animEnqueue`` 把「归位 → 重排 → 折叠」串成一条时间线。
+  ``_animEnqueue`` 把「重排 → 折叠」串成一条时间线。
 
 本测试是**源码级接线校验**（不启动 Chromium）：断言这些调用点真实存在于
 生成的 JS 中。JS 资产本身的语法由 ``node --check`` 在改动时人工校验。
@@ -205,13 +205,18 @@ class TestFinishHeightTransition:
 class TestFlipTransitions:
     """结束态 FLIP 遮盖与动画串行"""
 
-    def test_dock_toggle_wrapped_by_flip(self, src_text: str):
-        """_setStreamingDock 的 order 换位是瞬移，必须用 FLIP 补间"""
+    def test_dock_toggle_has_no_position_swap(self, src_text: str):
+        """[T44] 坞态切换只切 class（工具区限高），不得再有位置调换/FLIP 补间。
+
+        历史：旧实现用 CSS order 把工具区沉到底部再归位顶部，靠 FLIP 补间遮盖
+        瞬移。用户诉求「工具与思考一开始就在上面」后，位置调换整体移除 →
+        坞态切换不再引起块位置变化，FLIP 也就没有配对对象。
+        """
         start = src_text.find("function _setStreamingDock(active, collapseAfter)")
         assert start != -1
         body = src_text[start : src_text.find("\n                function ", start)]
-        assert "_flipCapture" in body, "坞态切换前必须记录位置"
-        assert "_flipPlay" in body, "坞态切换后必须播放位移动画"
+        assert "_flipCapture" not in body, "坞态切换不得再做 FLIP 位置采集"
+        assert "order:" not in body, "坞态切换不得再调换容器顺序"
 
     def test_update_content_wrapped_by_flip(self, src_text: str):
         """最终全量重排（reorganizeContent 搬移工具/思考块）同样需要 FLIP"""

@@ -6,7 +6,12 @@
     与 reload_agents，阻塞首屏。第一批尚未延迟该同步链（记录当前现象，作为基线）。
 
 (b) 本测试未修改任何业务代码，仅静态分析：用 pathlib 读取 app/main_widget.py 与
-    app/core/backend.py 源码文本 + re 匹配，不 import PyQt5、不实例化任何 GUI 对象。
+    app/core/services/plugin_host_service.py 源码文本 + re 匹配，不 import PyQt5、
+    不实例化任何 GUI 对象。
+
+    [T22] 扫描目标变更：`_init_plugin_system` / `reload_agents` 已从
+    app/core/backend.py 迁移到 app/core/services/plugin_host_service.py
+    （PluginHostService，应用级单例；backend.py 已无这两个符号）。
 
 (c) 环境要求：pytest>=7 / Python3 / 对 app/ 源码有读权限 / 无需显示器 /
     无新三方依赖 / 跨平台 Windows 优先。
@@ -18,7 +23,9 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SRC_MAIN = REPO_ROOT / "app" / "main_widget.py"
-SRC_BACKEND = REPO_ROOT / "app" / "core" / "backend.py"
+# [T22] 原 app/core/backend.py 中已无 _init_plugin_system / reload_agents，
+# 二者现位于应用级服务 PluginHostService。
+SRC_BACKEND = REPO_ROOT / "app" / "core" / "services" / "plugin_host_service.py"
 
 
 @pytest.fixture(scope="module")

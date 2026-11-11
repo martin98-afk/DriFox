@@ -86,6 +86,17 @@ def _same_path(a: str, b: str) -> bool:
 # ── 主题色辅助 ────────────────────────────────────────────
 
 
+def _on_solid(bg: str) -> str:
+    """实心底上的前景文字色：亮底用深字，暗底用白字。
+
+    真黑类主题（true-black / amoled-black 等）把 accent 定为纯白，
+    按钮再写死白字就是白底白字。由主程序 token 统一判定，插件不自己拍阈值。
+    """
+    from app.plugins.sdk import readable_text_on
+
+    return readable_text_on(bg, "#ffffff")
+
+
 def _text_color(secondary: bool = False) -> str:
     if isDarkTheme():
         return "rgba(255,255,255,0.55)" if secondary else "rgba(255,255,255,0.9)"
@@ -102,13 +113,18 @@ def _ctx_text_color(ctx: dict, secondary: bool = False) -> str:
 def _parse_theme_color(color_str: str) -> QColor:
     if not color_str:
         return QColor(33, 33, 38)
-    m = re.match(r"rgba\s*\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\)", color_str)
+    # alpha 兼容小数（CSS 风格 rgba(...,0.66)，主题 YAML 常用）与整数（rgba(...,160)）两种写法；
+    # 小数 alpha 不匹配会落到 QColor() 兜底，而 QColor 不认 CSS 函数格式 → invalid 纯黑
+    m = re.match(r"rgba\s*\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*([\d.]+)\s*\)", color_str)
     if m:
-        return QColor(int(m.group(1)), int(m.group(2)), int(m.group(3)), int(m.group(4)))
+        a = float(m.group(4))
+        alpha = int(round(a * 255)) if a <= 1 else int(a)
+        return QColor(int(m.group(1)), int(m.group(2)), int(m.group(3)), min(255, max(0, alpha)))
     m = re.match(r"rgb\s*\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\)", color_str)
     if m:
         return QColor(int(m.group(1)), int(m.group(2)), int(m.group(3)))
-    return QColor(color_str)
+    c = QColor(color_str)
+    return c if c.isValid() else QColor(150, 150, 150)
 
 
 def _make_colors_from_context(ctx: dict) -> dict:
@@ -232,7 +248,7 @@ def _styled_message_box(
                 if is_primary:
                     btn.setStyleSheet(
                         f"QPushButton {{"
-                        f"  background-color: {accent.name()}; color: #ffffff;"
+                        f"  background-color: {accent.name()}; color: {_on_solid(accent.name())};"
                         f"  border: none; border-radius: 8px; padding: 4px 28px;"
                         f"  font-family: '{ff}'; font-size: {font_size - 1}px; font-weight: bold;"
                         f"}}"
@@ -1610,7 +1626,7 @@ class FileTreeCard(QWidget):
     # ── 预览 ──
 
     def _open_preview(self, path: str) -> None:
-        """卡片内预览（双击 / 右键菜单入口）；不支持的类型回退到默认程序"""
+        """卡片内预览（双击 / 右键菜单入口）；预览不了回退到默认程序"""
         if not path or not os.path.isfile(path):
             self._show_error(f"文件不存在: {path}")
             return
@@ -1623,7 +1639,11 @@ class FileTreeCard(QWidget):
             font_size=self._colors.get("font_size", 0),
             scrollbar_qss=self._scrollbar_qss,
         )
-        self._preview_page.load(path)
+        if not self._preview_page.load(path):
+            # 预览失败（超大 / 损坏 / 含二进制内容）→ 回树页并交系统默认程序
+            self._close_preview()
+            self._open_file(path)
+            return
         self._stack.setCurrentIndex(_PAGE_PREVIEW)
 
     def _close_preview(self) -> None:

@@ -141,14 +141,15 @@ class TestRegistry:
 
 
 class TestSystemPluginTools:
-    """系统插件工具（plugins/system-tools/tools/）"""
+    """系统插件工具（plugins/system-*/tools/，2026-11 由 system-tools 拆分）"""
 
     def test_all_30_tools_registered(self):
         reg = ToolRegistry.get_instance()
         load_plugin_tools(registry=reg)
         names = set(reg.names())
-        # 系统插件固定 30 个工具；codegraph_explore 来自社区插件 codegraph-tools
-        # （引擎插件化后迁出系统插件，未安装时不注册），单独按可用性断言。
+        # 系统插件固定 28 个工具（bg_start/bg_stop/bg_logs/bg_list 已合并为
+        # background_task，旧四名不再注册）；codegraph_explore 来自社区插件
+        # codegraph-tools（引擎插件化后迁出系统插件，未安装时不注册），单独按可用性断言。
         expected = {
             "read",
             "write",
@@ -162,10 +163,7 @@ class TestSystemPluginTools:
             "websearch",
             "webfetch",
             "bash",
-            "bg_start",
-            "bg_stop",
-            "bg_logs",
-            "bg_list",
+            "background_task",
             "todowrite",
             "todoread",
             "get_diagnostics",
@@ -173,7 +171,7 @@ class TestSystemPluginTools:
             "subagent_para",
             "subagent_status",
             "team_send_message",
-            "team_list_members",
+            "team_manage",
             "question",
             "skill",
             "manage_skill",
@@ -507,7 +505,7 @@ def register(registry):
         watcher.scan_now()
         r = reg.get("read")
         assert r is not None, "read 不应丢失"
-        assert r.source == "plugin:system-tools", f"system 应恢复，实际: {r.source}"
+        assert r.source == "plugin:system-core", f"system 应恢复，实际: {r.source}"
         assert r.cn_name != "读取（用户覆盖）", "cn_name 应为 system 原始值"
 
     def test_unload_plugin_precise_no_other_plugin_touched(self, tmp_path, monkeypatch):
@@ -553,7 +551,7 @@ def register(registry):
         assert "write" not in unregistered, "system 工具 write 不应被 unregister"
         # 3) 跨根覆盖恢复：read 恢复为 system
         r = reg.get("read")
-        assert r is not None and r.source == "plugin:system-tools", f"system 应恢复，实际: {r.source if r else None}"
+        assert r is not None and r.source == "plugin:system-core", f"system 应恢复，实际: {r.source if r else None}"
         # 4) watcher._loaded 已移除该插件记录
         assert "user-override-plug" not in watcher._loaded
 
@@ -654,7 +652,7 @@ def register(registry):
         cfg.enabled_plugins.value = [p for p in old if p != "user-override-plug"]
         watcher.scan_now()
         r = reg.get("read")
-        assert r is not None and r.source == "plugin:system-tools", f"禁用后 system 应恢复，实际: {r.source if r else None}"
+        assert r is not None and r.source == "plugin:system-core", f"禁用后 system 应恢复，实际: {r.source if r else None}"
         cfg.enabled_plugins.value = old
 
 
@@ -1545,7 +1543,7 @@ class TestWebToolsEnvKey:
         """按插件加载器同款方式动态加载 web_tools 模块"""
         import importlib.util
 
-        path = Path(__file__).parent.parent.parent / "plugins" / "system-tools" / "tools" / "web_tools.py"
+        path = Path(__file__).parent.parent.parent / "plugins" / "system-web" / "tools" / "web_tools.py"
         spec = importlib.util.spec_from_file_location("_test_web_tools", path)
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
@@ -1560,7 +1558,7 @@ class TestWebToolsEnvKey:
         import json
 
         manifest = json.loads(
-            (Path(__file__).parent.parent.parent / "plugins" / "system-tools" / ".drifox-plugin" / "plugin.json").read_text(
+            (Path(__file__).parent.parent.parent / "plugins" / "system-web" / ".drifox-plugin" / "plugin.json").read_text(
                 encoding="utf-8"
             )
         )
@@ -1573,7 +1571,7 @@ class TestWebToolsEnvKey:
         assert defaults["tavily_api_key"]
         assert defaults["tinyfish_api_key"]
         # E1 契约：_api_key 调用前需注册 schema（模块级常量已迁出）。
-        # 注册名必须是 _api_key 内查询的 "system-tools"（曾误写 "system" 导致
+        # 注册名必须是 _api_key 内查询的 "system-web"（曾误写 "system" 导致
         # schema 不生效、env 优先级分支死路）；同时隔离本机 plugin_data 残留
         # config.json（存储值优先级高于 default，不清会污染回退断言）。
         from app.plugins.contracts.plugin_config import parse_config_schema
@@ -1584,7 +1582,7 @@ class TestWebToolsEnvKey:
         reg = PluginConfigRegistry.get_instance()
         reg.register(
             parse_config_schema(
-                "system-tools",
+                "system-web",
                 {
                     "title": "T",
                     "fields": [
@@ -1621,7 +1619,95 @@ class TestWebToolsEnvKey:
             monkeypatch.delenv("TINYFISH_API_KEY")
             assert mod._api_key({}, "TINYFISH_API_KEY") == defaults["tinyfish_api_key"]
         finally:
-            reg.unregister_plugin("system-tools")
+            reg.unregister_plugin("system-web")
+
+
+class TestWebFetchTinyFishFallback:
+    """webfetch TinyFish 优先抓取 + 失败回退本地实现"""
+
+    @staticmethod
+    def _make_resp(status_code=200, payload=None, text=""):
+        class _Resp:
+            def raise_for_status(self):
+                assert status_code < 400, f"HTTP {status_code}"
+
+            def json(self):
+                return payload
+
+        resp = _Resp()
+        resp.status_code = status_code
+        resp.text = text
+        return resp
+
+    @staticmethod
+    def _make_client(post_resp=None, get_resp=None):
+        class _Client:
+            def __init__(self):
+                self.post_calls = []
+                self.get_calls = []
+
+            def post(self, url, **kw):
+                self.post_calls.append(url)
+                if isinstance(post_resp, Exception):
+                    raise post_resp
+                return post_resp
+
+            def get(self, url, **kw):
+                self.get_calls.append(url)
+                return get_resp
+
+        return _Client()
+
+    def _load(self):
+        return TestWebToolsEnvKey._load_web_tools()
+
+    def test_tinyfish_preferred_over_local(self, monkeypatch):
+        mod = self._load()
+        client = self._make_client(
+            post_resp=self._make_resp(payload={"results": [{"url": "u", "text": "# tinyfish md"}], "errors": []}),
+            get_resp=self._make_resp(text="<html><body>local</body></html>"),
+        )
+        monkeypatch.setattr(mod, "_api_key", lambda ctx, name: "tf-key")
+        monkeypatch.setattr(mod, "_get_client", lambda: client)
+        result = mod._webfetch_impl({}, url="https://example.com", format="markdown")
+        assert result.success and "tinyfish md" in result.content
+        assert client.post_calls == ["https://api.fetch.tinyfish.ai"]
+        assert client.get_calls == []  # 本地实现未执行
+
+    def test_fallback_to_local_on_tinyfish_failure(self, monkeypatch):
+        mod = self._load()
+        client = self._make_client(
+            post_resp=RuntimeError("network down"),
+            get_resp=self._make_resp(text="<html><body><p>local content</p></body></html>"),
+        )
+        monkeypatch.setattr(mod, "_api_key", lambda ctx, name: "tf-key")
+        monkeypatch.setattr(mod, "_get_client", lambda: client)
+        result = mod._webfetch_impl({}, url="https://example.com", format="markdown")
+        assert result.success and "local content" in result.content
+        assert client.get_calls == ["https://example.com"]
+
+    def test_no_key_skips_tinyfish(self, monkeypatch):
+        mod = self._load()
+        client = self._make_client(
+            get_resp=self._make_resp(text="<html><body><p>local only</p></body></html>"),
+        )
+        monkeypatch.setattr(mod, "_api_key", lambda ctx, name: "")
+        monkeypatch.setattr(mod, "_get_client", lambda: client)
+        result = mod._webfetch_impl({}, url="https://example.com", format="markdown")
+        assert result.success and "local only" in result.content
+        assert client.post_calls == []
+
+    def test_text_format_skips_tinyfish(self, monkeypatch):
+        mod = self._load()
+        client = self._make_client(
+            post_resp=self._make_resp(payload={"results": [{"url": "u", "text": "should not happen"}]}),
+            get_resp=self._make_resp(text="<html><body><p>plain text</p></body></html>"),
+        )
+        monkeypatch.setattr(mod, "_api_key", lambda ctx, name: "tf-key")
+        monkeypatch.setattr(mod, "_get_client", lambda: client)
+        result = mod._webfetch_impl({}, url="https://example.com", format="text")
+        assert result.success and "plain text" in result.content
+        assert client.post_calls == []
 
 
 class TestSelfContained:
@@ -1639,7 +1725,7 @@ class TestSelfContained:
             'tool_ctx.get("builtin_tools")',
         ]
         # 只检查 import 行 + builtin_tools 访问（docstring 说明文字不受限）
-        for py in glob.glob("plugins/system-tools/tools/*.py"):
+        for py in sorted(glob.glob("plugins/system-*/tools/*.py")):
             src = open(py, encoding="utf-8").read()
             import_lines = [l for l in src.splitlines() if l.strip().startswith(("import ", "from "))]
             for kw in forbidden:
@@ -1818,8 +1904,9 @@ class TestSelfContained:
         assert result.todos and result.todos[0]["content"] == "t1"
         result = reg.get("todoread").impl(tool_ctx=ctx)
         assert result.success
-        # 团队工具：无窗口上下文 → 优雅失败（不崩溃）
-        result = reg.get("team_list_members").impl(tool_ctx=ctx)
+        # 团队工具：无窗口上下文 → 优雅失败（不崩溃）。
+        # action=list 已改为非成员友好文案（success=True），故用 add 验证失败语义
+        result = reg.get("team_manage").impl(tool_ctx=ctx, action="add", agent_name="plan", role="规划")
         assert not result.success
 
 

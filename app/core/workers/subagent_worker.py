@@ -6,16 +6,17 @@
 import re
 import threading
 import time
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 import orjson
 import orjson as json
 from loguru import logger
-from PySide6.QtCore import QObject, QThread, QTimer, Signal
+from PySide6.QtCore import QThread, Signal
 
 from app.constants import PARAM_SCHEMA
 from app.constants import PROVIDER_MANAGED_KEYS
 from app.constants import provider_quota_exclude_keys as QUOTA_EXCLUDE_KEYS
+from app.core.conversation.message_content import extract_reasoning_delta
 from app.core.modelmeta.model_capabilities import (
     ABSOLUTE_FALLBACK_CEILING,
     get_caps_max_output_tokens,
@@ -31,6 +32,9 @@ from app.tools.result import ToolResult
 
 # ========== 性能优化：预编译正则表达式 ==========
 _THINKING_PATTERN = re.compile(r"<think>[\s\S]*?</think>")  # 过滤完整思考块
+# 与 plugins/system-model-adapters/model_adapters/_detectors.py 的判定保持同步
+# （Phase 3 搬迁进 adapter flags 时统一，消除重复实现）
+_GPT_VERSIONED_RE = re.compile(r"^gpt-(\d+)")
 _TOOL_TAG_PATTERN = re.compile(r"<tool>[\s\S]*?</tool>")  # 过滤工具调用标签
 _VALID_IDENTIFIER_PATTERN = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")  # 验证标识符格式
 
@@ -42,25 +46,6 @@ _CONTEXT_WINDOW_ONLY_KEYS = frozenset({"最大Token", "上下文长度"})
 # ========== 上下文注入预算常量 ==========
 CHARS_PER_TOKEN = 4  # 与 HistoryCompactor 保持一致
 _CONTEXT_INJECTION_RATIO = 0.6  # 上下文注入最多占 budget 的 60%
-
-
-class _BoundedTaskDict(dict):
-    """有界字典（H1）：超过容量上限时弹出最旧条目，防止 _finished_tasks 无限增长。
-
-    重写 __setitem__，使全部 12+ 处 `self._finished_tasks[task_id] = {...}` 写入点
-    自动受容量约束，无需逐个改写。读取（get/items/in/setdefault-on-value）行为不变。
-    """
-
-    def __init__(self, maxlen: int = 200):
-        super().__init__()
-        self._maxlen = maxlen
-
-    def __setitem__(self, key, value):
-        super().__setitem__(key, value)
-        while len(self) > self._maxlen:
-            oldest = next(iter(self))  # dict 保序：首个即最旧
-            super().__delitem__(oldest)
-
 # 最终总结提示词兕底文案（激活策略无 final_summary_prompt 时使用，内容与原硬编码等价）
 _FALLBACK_FINAL_SUMMARY_PROMPT = """
 
@@ -103,6 +88,40 @@ def _compute_context_budget(llm_config: Dict) -> int:
 
     return max(500, context_limit - reserved)
 
+
+# [H5] tool_result 日志预览上限。UI 完整视图本就只渲染前 2000 字符
+# （session_card._format_content_full 同值截断），全文驻留 logs 无任何消费方，
+# 却是任务日志内存膨胀主因（T13 实测重度 200 条 793MB/窗口，静置不回落）。
+_LOG_RESULT_PREVIEW_CHARS = 2000
+
+# [H5-2 补漏] ai_response/thinking 的 UI 完整视图上限（session_card.py 同值 10000）；
+# tool_call.args 序列化字符串的 UI 上限（session_card 同值 3000）。日志侧先截，
+# UI 显示逐字不变（UI 自己的截断分支不再触发，内容一致）。
+_LOG_TEXT_PREVIEW_CHARS = 10000
+_LOG_ARGS_PREVIEW_CHARS = 3000
+
+
+def _cap_str(value, limit, tag):
+    """超长字符串截断并附原长标记（非字符串原样返回）。"""
+    if isinstance(value, str) and len(value) > limit:
+        return value[:limit] + f"\n…（{tag}已截断，全文 {len(value)} 字符）"
+    return value
+
+
+def _cap_args_tree(obj, limit, depth=0):
+    """递归截断 args（dict/list）中的超长字符串值，保持容器类型不变
+    （UI 读侧对 args 做 orjson.dumps，类型契约不可破坏）。"""
+    if depth > 4:
+        return obj
+    if isinstance(obj, str):
+        if len(obj) > limit:
+            return obj[:limit] + f"…（参数已截断，全文 {len(obj)} 字符）"
+        return obj
+    if isinstance(obj, dict):
+        return {k: _cap_args_tree(v, limit, depth + 1) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_cap_args_tree(v, limit, depth + 1) for v in obj]
+    return obj
 
 class SubAgentExecutor(QThread):
     """子智能体执行器 - 独立线程运行子智能体任务"""
@@ -301,13 +320,45 @@ class SubAgentExecutor(QThread):
         import time
 
         now = time.time()
+        # [H5-2 补漏] ai_response/thinking 截 10000、tool_call 参数截 3000：
+        # 与 session_card.py UI 显示上限逐字对齐，用户看到的内容不变；
+        # 日志驻留从「全文」降为「预览」，与 tool_result 同语义。
+        if log_type in ("thinking", "ai_response"):
+            content = _cap_str(content, _LOG_TEXT_PREVIEW_CHARS, "内容")
         log_entry = {
             "type": log_type,
             "content": content,
             "timestamp": now,
         }
         if extra:
+            if log_type == "tool_call" and isinstance(extra.get("args"), dict):
+                capped = _cap_args_tree(extra["args"], _LOG_ARGS_PREVIEW_CHARS)
+                # [T25] 单值截 3000 不够：multi_edit.edits 20 项 / subagent_para.tasks[]
+                # 等多项容器叠加仍可几十 KB。总量判定：序列化超 2×3000 则整体替换
+                # 为占位 dict（保持 JSON 可序列化，UI orjson.dumps 契约不破）。
+                try:
+                    if len(orjson.dumps(capped).decode()) > _LOG_ARGS_PREVIEW_CHARS * 2:
+                        capped = {
+                            "_truncated": True,
+                            "_original_len": len(orjson.dumps(extra["args"]).decode()),
+                            "_preview": orjson.dumps(capped).decode()[:_LOG_ARGS_PREVIEW_CHARS],
+                        }
+                except Exception:
+                    pass  # 序列化兜底：极端不可序列化值保持逐值截断结果
+                extra["args"] = capped
             log_entry.update(extra)
+        # [H5] tool_result 全文驻留是日志膨胀主因：日志侧只存 2KB 级预览 +
+        # 原始长度字段（便于定位最重工具）。执行链消息（raw_result）与此独立，
+        # 模型拿到的仍是全文，子智能体行为不变；UI 完整视图本就只显示前
+        # 2000 字符（session_card._format_content_full），显示内容不变。
+        if log_type == "tool_result":
+            _raw = log_entry.get("result")
+            if isinstance(_raw, str) and len(_raw) > _LOG_RESULT_PREVIEW_CHARS:
+                log_entry["result_original_len"] = len(_raw)
+                log_entry["result"] = (
+                    _raw[:_LOG_RESULT_PREVIEW_CHARS]
+                    + f"\n…（结果过长，已截断；全文 {len(_raw)} 字符）"
+                )
         self._logs.append(log_entry)
         # 每次输出日志都刷新活跃时间（供外部 stall 检测）
         self._last_activity_time = now
@@ -378,7 +429,10 @@ class SubAgentExecutor(QThread):
 
             agent = self.agent_manager.get_agent(self.agent_name)
             if not agent:
-                self.error_occurred.emit(self.task_id, f"Agent not found: {self.agent_name}")
+                # 必须发 error_occurred：裸 return 会让完成链（批次计数/汇总
+                # 注入）永远等不到该任务的终态，批次通知永久缺席
+                self._execution_error = f"Agent not found: {self.agent_name}"
+                self.error_occurred.emit(self.task_id, self._execution_error)
                 return
 
             # 子智能体被调用时 is_subagent_call=True，此时应该使用 subagent_constraints
@@ -521,6 +575,9 @@ class SubAgentExecutor(QThread):
     def _execute_agent_loop(self, messages: List[Dict], tools: List[Dict], llm_config: Dict) -> str:
         """执行子智能体对话循环"""
         current_messages = messages.copy()
+        # [方案 A] 继承历史的 image_ref 块携带真实落盘 session_id（revive 后丢失），
+        # 在首次 serialize 前收集作为 revoke 的候选目录
+        self._vision_session_ids = self._collect_vision_session_ids(current_messages)
         response_content = ""
         current_reasoning = ""  # DeepSeek V4 thinking mode
         iteration_count = 0
@@ -548,6 +605,8 @@ class SubAgentExecutor(QThread):
                     # 强制续命前也触发 PreAssistantMessage（与正常轮次一致）
                     self._trigger_hook_sync("PreAssistantMessage", current_messages)
                     response_content, _, _ = self._make_api_call(current_messages, None, llm_config)
+                    # [方案 A] 强制总结轮收尾：迭代间回收 data URI，下轮 serialize 幂等读回
+                    self._revoke_vision_after_send(current_messages)
                     return self._filter_thinking_content(response_content)
 
             # ====== PreAssistantMessage hook：每次 API 调用前触发 ======
@@ -555,6 +614,8 @@ class SubAgentExecutor(QThread):
             self._trigger_hook_sync("PreAssistantMessage", current_messages)
 
             response_content, tool_calls, reasoning_content = self._make_api_call(current_messages, tools, llm_config)
+            # [方案 A] 每轮发送收尾：回收 data URI（迭代间不驻留），下轮 revive 幂等读回
+            self._revoke_vision_after_send(current_messages)
             current_reasoning = reasoning_content
 
             # ====== PostAssistantMessage hook：assistant 响应后触发 ======
@@ -982,24 +1043,69 @@ class SubAgentExecutor(QThread):
                         msgs.append(q.get_nowait())
                     except Exception:
                         break
+            # PluginChanged 净零合并：连续开关插件（中间无消费）时整批不注入
+            try:
+                from app.core.hooks.hook_manager import filter_net_zero_plugin_messages
+
+                msgs = filter_net_zero_plugin_messages(msgs)
+            except Exception as e:
+                logger.debug(f"[SubAgent] 净零合并判定跳过: {e}")
         except Exception as e:
             logger.debug(f"[SubAgent] drain hook queues failed: {e}")
         return msgs
 
+    def _collect_vision_session_ids(self, messages: List[Dict]) -> List[str]:
+        """[方案 A] 收集消息中 image_ref 块的真实落盘 session_id（revive 前调用）。"""
+        ids = []
+        for msg in messages:
+            if not isinstance(msg, dict):
+                continue
+            content = msg.get("content")
+            if not isinstance(content, list):
+                continue
+            for b in content:
+                if isinstance(b, dict) and b.get("type") == "image_ref":
+                    ref = b.get("image_ref") or {}
+                    sid = str(ref.get("session_id") or "")
+                    if sid and sid not in ids:
+                        ids.append(sid)
+        return ids
+
+    def _revoke_vision_after_send(self, messages: List[Dict]) -> None:
+        """[方案 A] 子代理发送收尾：data URI 还原为 image_ref（对称 chat_worker）。
+
+        current_messages 跨迭代常驻，revive 每轮就地升级为 data URI，迭代间
+        由本方法回收；下一轮 _serialize_for_api 经 revive 幂等读回。
+        """
+        try:
+            from app.utils.image_utils import revoke_vision_blocks
+
+            restored = revoke_vision_blocks(
+                messages,
+                getattr(self, "_vision_session_ids", None) or "",
+            )
+            if restored:
+                logger.debug(f"[Memory] 子代理发送后回收 {restored} 张图片")
+        except Exception as e:  # noqa: BLE001 — 回收失败保留 data URI
+            logger.warning(f"[SubAgentWorker] vision revoke 失败（保留 data URI）: {e}")
 
     def _make_api_call(self, messages: List[Dict], tools: List[Dict] = None, llm_config: Dict = None) -> tuple:
-        """调用 LLM API（流式发起 + 聚合，子智能体后台执行无需逐字渲染）"""
+        """调用 LLM API（流式发起 + 事件聚合，子智能体后台执行无需逐字渲染）。
+
+        Phase 3（2026-11-07）：协议差异全部交给 transport 插件（chat/completions
+        与 responses 共用 StreamEvent 接口），本方法只做认证头、序列化与事件聚合。
+        """
         # 使用传入的 llm_config 或回退到 self.llm_config
         config = llm_config if llm_config is not None else self.llm_config
         # 防御：确保 config 是 dict（传递给子智能体的配置可能被意外覆盖为字符串）
         if not isinstance(config, dict):
             logger.warning(
-                f"[SubAgentExecutor] _make_api_call received non-dict config: {type(config).__name__}={config!r}, falling back to empty config"
+                f"[SubAgentExecutor] _make_api_call received non-dict config: "
+                f"{type(config).__name__}={config!r}, falling back to empty config"
             )
             config = {}
-        api_key = config.get("API_KEY", "").strip()
+        api_key = str(config.get("API_KEY", "") or "").strip()
         base_url = config.get("API_URL") or None
-        model = str(config.get("模型名称", "gpt-4o"))
 
         # Code Assist 原生协议暂不支持子代理链路（非流式分支未实现 generateContent 形态），
         # 显式拦截避免错误格式的 OpenAI 请求打到该端点产生难排查的 400
@@ -1008,243 +1114,131 @@ class SubAgentExecutor(QThread):
                 "子代理暂不支持 Gemini OAuth（Code Assist）协议：请在团队/子代理配置中改用 OpenAI 兼容模型"
             )
 
-        # chat/completions 分支同样必须过序列化单入口：inherit_history 继承的主智能体
-        # 历史是内部格式（assistant.content 可含 tool_result block、image_ref 等），
-        # 裸发给 API 会被严格校验的 provider 拒绝
-        # （实测 GLM 400 code=1214 "messages[N].content[M].type类型错误"）
-        messages = self._serialize_for_api(messages, config).messages
-
-        req_kwargs = {
-            "model": model,
-            "messages": messages,
-            "stream": False,
-        }
-        # 添加会话标识（帮助服务商区分不同会话的缓存 key / 用量监控）
-        task_session_id = getattr(self, "_task_session_id", None)
-        if task_session_id:
-            req_kwargs["user"] = task_session_id
-
-        extra_body = {}
-
-        for cn_key, value in config.items():
-            if cn_key in {
-                "API_KEY",
-                "API_URL",
-                "API_BASE",
-                "认证方式",
-                "模型名称",
-                "系统提示",
-                "启用技能",
-                "name",
-                "provider_name",
-                "config_id",
-                "display_name",
-                "_suffix_index",
-                "备注",
-                "获取地址",
-            }:
-                continue
-            if cn_key in PROVIDER_MANAGED_KEYS:
-                continue
-            if cn_key in QUOTA_EXCLUDE_KEYS():
-                continue
-
-            meta = PARAM_SCHEMA.get(cn_key, {})
-            en_key = meta.get("api_param")
-            if not en_key and _VALID_IDENTIFIER_PATTERN.match(cn_key):
-                en_key = cn_key
-            if not en_key:
-                continue
-            # P1-21 语义拆分收尾：四个键共享 api_param="max_tokens"（最大Token /
-            # 最大输出 / 上下文长度 / max_new_tokens），通配分支按 dict 迭代序赋值
-            # → 后迭代者覆盖先者，窗口值（最大Token/上下文长度）会顶掉输出值。
-            # 这里跳过窗口语义的两个键，只让「最大输出」（及英文同义键）进 max_tokens。
-            if cn_key in _CONTEXT_WINDOW_ONLY_KEYS:
-                continue
-            elif en_key in ["temperature", "max_tokens", "top_p"]:
-                req_kwargs[en_key] = value
-            else:
-                extra_body[en_key] = value
-
-        if "max_tokens" in req_kwargs:
-            req_kwargs["max_tokens"] = self._cap_max_output_tokens(model, req_kwargs["max_tokens"], config)
-
-        # 处理思考模式（P1-9 批 d：能力查询走 resolve 链——声明_思考参数/
-        # 声明_思考强度非空时压制 caps/family 自动链；profile 兜底保留）
-        thinking_mode = config.get("思考模式")
-        if thinking_mode is not None:
-            caps = resolve_model_capabilities(config)
-            t_param = None
-            enable_value = "enabled"
-            if caps:
-                t_param = caps.get("thinking_param")
-                enable_value = caps.get("thinking_enable_value", "enabled")
-            if not t_param:
-                profile = get_provider_profile(config)
-                t_param = profile.get("thinking_param")
-
-            if thinking_mode is True:
-                if t_param == "thinking":
-                    extra_body["thinking"] = {"type": enable_value}
-                    extra_body.pop("reasoning_effort", None)
-                    extra_body.pop("thinking_budget", None)
-                elif t_param == "thinking_budget":
-                    budget = config.get("思考预算", 4096)
-                    extra_body["thinking_budget"] = budget
-                    extra_body.pop("reasoning_effort", None)
-                    extra_body.pop("thinking", None)
-                elif t_param == "reasoning_effort":
-                    if "reasoning_effort" not in extra_body:
-                        # 等级经 normalize 强制校验：保存值不在该模型可选值中时
-                        # 回退中间配置，防止无效值发到 API
-                        extra_body["reasoning_effort"] = normalize_reasoning_effort(
-                            config.get("思考等级", "medium"), caps.get("reasoning_effort_values")
-                        )
-                    extra_body.pop("thinking", None)
-                    extra_body.pop("thinking_budget", None)
-            else:  # False - 关闭思考
-                extra_body["thinking"] = {"type": "disabled"}
-                extra_body.pop("thinking_budget", None)
-                extra_body.pop("reasoning_effort", None)
-
-        if extra_body:
-            req_kwargs["extra_body"] = extra_body
-
-        # 服务商插件声明的请求头（伪装 UA / X-Product / 动态 access_token）必须注入，
-        # 否则仅流式端点（CodeBuddy）在身份校验阶段即被拒。与 chat_worker 同源走
-        # provider_profile.resolve_extra_headers，避免两份实现漂移。
-        provider_headers = resolve_extra_headers(config, getattr(self, "_task_session_id", None) or "")
-        if provider_headers:
-            req_kwargs["extra_headers"] = provider_headers
-
-        # 固定流式发起：部分服务商端点（如 CodeBuddy）非流式请求直接 400
-        # （code 11101 "Non-stream chat request is currently not supported"），
-        # 且该错误确定性不可重试。子智能体在后台执行、无需逐字渲染，故流式
-        # 发起后在 _aggregate_stream 内聚合为完整结果（含 tool_calls / reasoning）。
-        req_kwargs["stream"] = True
-
-        from app.utils.http_client import build_openai_client
-
-        client = build_openai_client(
-            api_key=api_key,
-            base_url=base_url,
-            timeout=120.0,
-        )
-
-        # GPT-5.x 系列走 Responses API（chat/completions 不透传 reasoning，思考在
-        # /v1/responses 的 reasoning item 中返回）
-        if self._use_responses_api(config):
-            try:
-                return self._make_responses_api_call(client, messages, tools, config)
-            except Exception as e:
-                # 网关不支持 responses 时回退 chat/completions
-                logger.warning(f"[SubAgentWorker] Responses API 调用失败，回退 chat/completions: {e}")
-                if self._is_cancelled:
-                    return "", [], ""
+        # chat 形态消息：chat transport 直接用它发请求；responses transport 忽略它，
+        # 从内部格式 messages 自行序列化 input_items
+        api_messages = self._serialize_for_api(messages, config).messages
 
         from app.core.workers.error_handler import create_api_call_with_retry
+        from app.core.workers.protocol_dispatch import resolve_transport_target
+        from app.plugins.registries.transport_registry import TransportRegistry
+        from app.utils.http_client import build_openai_client
 
-        def create_completion():
-            return client.chat.completions.create(**req_kwargs, tools=tools)
+        target = resolve_transport_target(config, self._protocol_flags(config))
+        if isinstance(target, str):
+            transport = TransportRegistry.get_instance().resolve(target)
+        elif target is not None:
+            transport = target
+        else:
+            transport = TransportRegistry.get_instance().resolve()
+        if transport is None:
+            raise RuntimeError("未注册协议传输器（system-transports 插件未启用），子智能体无法发起请求")
 
-        stream = create_api_call_with_retry(
+        client = build_openai_client(api_key=api_key, base_url=base_url, timeout=120.0)
+        auth_headers = resolve_extra_headers(config, getattr(self, "_task_session_id", None) or "")
+
+        def create_stream():
+            return transport.create_stream(
+                config,
+                messages,
+                tools=tools,
+                auth_headers=auth_headers or None,
+                api_messages=api_messages,
+                client=client,
+                cap_max_tokens=lambda m, v: self._cap_max_output_tokens(m, v, config),
+            )
+
+        events = create_api_call_with_retry(
             client,
-            create_completion,
+            create_stream,
             cancel_check=lambda: self._is_cancelled,
         )
+        return self._aggregate_events(events)
 
-        return self._aggregate_stream(stream)
+    def _aggregate_events(self, events) -> tuple:
+        """StreamEvent 流 → (content, tool_calls, reasoning)（协议无关聚合）。
 
-    def _aggregate_stream(self, stream) -> tuple:
-        """聚合 chat/completions 流式响应 → (content, tool_calls, reasoning)。
-
-        与 `http_client.chat_completion_text` 的区别：该函数只聚合 content，
-        子智能体循环依赖工具调用（以及 DeepSeek 系的 reasoning_content），
-        故在此单独实现并按内部 tool_calls 结构还原。
-
-        tool_calls 分片规则（OpenAI SDK）：首片带 id + name（arguments 可能为空），
-        后续片仅 index + arguments 增量。按 index 聚合后一次性输出完整参数串，
-        与上游非流式 message.tool_calls 的形状一致。
-
-        usage：部分模型只在流末尾独立 chunk 携带（choices 为空列表），单独记账。
-
-        取消：迭代中检测到 _is_cancelled 即中断，抛 CancelledError 由上层收尾。
+        工具调用差异：chat/completions 只发 begin + args 增量（参数靠累积），
+        responses 还会发 done（完整参数）。这里两者都收：id 缺失时按 index 兜底，
+        参数在结束时统一补齐，避免下游拿空 arguments 解析失败。
         """
         content_parts: List[str] = []
         reasoning_parts: List[str] = []
-        # index -> {"id","name","args"}（保序，按 index 而非 id 聚合：部分网关
-        # 只在首片给 id，后续片 id 为空）
-        tool_buffers: Dict[int, Dict[str, str]] = {}
+        tool_calls: List[Dict] = []
+        by_id: Dict[str, Dict] = {}
+        index_to_id: Dict[Any, str] = {}
 
-        for chunk in stream:
+        def _ensure(tc_id: str, name: str = "") -> Dict:
+            tc = by_id.get(tc_id)
+            if tc is None:
+                tc = {
+                    "id": tc_id,
+                    "type": "function",
+                    "function": {"name": name or "", "arguments": ""},
+                }
+                by_id[tc_id] = tc
+                tool_calls.append(tc)
+            return tc
+
+        for ev in events:
             if self._is_cancelled:
                 logger.info("[SubAgentWorker] 流式聚合被取消")
                 raise RuntimeError("cancelled")
+            etype = getattr(ev, "type", "")
+            if etype == "content_delta":
+                if ev.text:
+                    content_parts.append(ev.text)
+            elif etype == "reasoning_delta":
+                if ev.text:
+                    reasoning_parts.append(ev.text)
+            elif etype == "tool_call_begin":
+                tc_id = ev.tool_call_id or ""
+                if not tc_id:
+                    tc_id = f"subagent_{len(tool_calls)}"
+                if ev.index != -1:
+                    index_to_id[ev.index] = tc_id
+                tc = _ensure(tc_id, ev.name or "")
+                if ev.name:
+                    tc["function"]["name"] = ev.name
+            elif etype == "tool_args_delta":
+                tc_id = ev.tool_call_id or index_to_id.get(ev.index, "")
+                if tc_id and ev.text:
+                    _ensure(tc_id)["function"]["arguments"] += ev.text
+            elif etype == "tool_call_done":
+                tc_id = ev.tool_call_id or index_to_id.get(ev.index, "")
+                if tc_id:
+                    tc = _ensure(tc_id, ev.name or "")
+                    if ev.name:
+                        tc["function"]["name"] = ev.name
+                    if ev.arguments:
+                        tc["function"]["arguments"] = ev.arguments
+            elif etype == "usage":
+                if ev.usage:
+                    self._record_usage(ev.usage)
 
-            choices = getattr(chunk, "choices", None) or []
-            usage = getattr(chunk, "usage", None)
-            if not choices:
-                if usage:
-                    self._record_usage(usage)
-                continue
-
-            choice = choices[0]
-            delta = getattr(choice, "delta", None)
-            if delta is not None:
-                piece = getattr(delta, "content", None)
-                if piece:
-                    content_parts.append(piece)
-                reasoning = getattr(delta, "reasoning_content", None)
-                if reasoning:
-                    reasoning_parts.append(reasoning)
-
-                for tc in getattr(delta, "tool_calls", None) or []:
-                    tc_index = getattr(tc, "index", None)
-                    index = int(tc_index) if isinstance(tc_index, int) else -1
-                    if index == -1:
-                        index = len(tool_buffers)
-                    buf = tool_buffers.setdefault(index, {"id": "", "name": "", "args": ""})
-                    tc_id = getattr(tc, "id", "") or ""
-                    if tc_id:
-                        buf["id"] = tc_id
-                    func = getattr(tc, "function", None)
-                    if func is not None:
-                        name = getattr(func, "name", "") or ""
-                        if name:
-                            buf["name"] = name
-                        args = getattr(func, "arguments", "") or ""
-                        if args:
-                            buf["args"] += args
-
-            if usage:
-                self._record_usage(usage)
+        for tc in tool_calls:
+            if not tc["function"]["arguments"]:
+                tc["function"]["arguments"] = "{}"
+        # 无名工具调用无法执行，丢弃（与旧聚合器同口径）
+        tool_calls = [tc for tc in tool_calls if tc["function"]["name"]]
 
         response_content = self._filter_thinking_content("".join(content_parts))
         reasoning_content = "".join(reasoning_parts)
+        if not content_parts and not tool_calls and not reasoning_parts:
+            logger.warning("[SubAgentWorker] 流式响应未产出内容、思考或工具调用")
 
-        tool_calls_found = []
-        for buf in tool_buffers.values():
-            if not buf["name"]:
-                continue
-            tool_calls_found.append(
-                {
-                    "id": buf["id"] or f"subagent_{len(tool_calls_found)}",
-                    "type": "function",
-                    "function": {"name": buf["name"], "arguments": buf["args"]},
-                }
-            )
-
-        if not content_parts and not tool_calls_found:
-            logger.warning("[SubAgentWorker] 流式响应未产出内容或工具调用")
-
-        return response_content, tool_calls_found, reasoning_content
+        return response_content, tool_calls, reasoning_content
 
     def _record_usage(self, usage) -> None:
-        """流式 usage chunk → token 用量记账与信号发射（chunk / 非流式两路共用）。"""
+        """usage → token 用量记账与信号发射（transport 统一给 dict）。"""
         try:
-            pt = getattr(usage, "prompt_tokens", 0) or 0
-            ct = getattr(usage, "completion_tokens", 0) or 0
-            tt = getattr(usage, "total_tokens", 0) or 0
+            if isinstance(usage, dict):
+                pt = usage.get("prompt_tokens", 0) or 0
+                ct = usage.get("completion_tokens", 0) or 0
+                tt = usage.get("total_tokens", 0) or 0
+            else:
+                pt = getattr(usage, "prompt_tokens", 0) or 0
+                ct = getattr(usage, "completion_tokens", 0) or 0
+                tt = getattr(usage, "total_tokens", 0) or 0
             self._total_prompt_tokens += pt
             self._total_completion_tokens += ct
             self._total_tokens += tt
@@ -1253,154 +1247,6 @@ class SubAgentExecutor(QThread):
             self.token_usage_updated.emit(self.task_id, pt, ct, tt)
         except Exception:
             pass
-
-    # ========== Responses API（GPT-5.x 系列）==========
-
-    def _use_responses_api(self, llm_config: Dict = None) -> bool:
-        """GPT-5.x 系列走 Responses API（chat/completions 不透传 reasoning）。"""
-        config = llm_config if llm_config is not None else self.llm_config
-        try:
-            if not isinstance(config, dict):
-                return False
-            override = config.get("使用ResponsesAPI")
-            if override is not None:
-                return bool(override)
-            model = str(config.get("模型名称", "") or "").lower()
-            return model.startswith("gpt-5")
-        except Exception:
-            return False
-
-    @staticmethod
-    def _responses_tools(tools: List[Dict]) -> List[Dict]:
-        """chat/completions 工具格式 → Responses API 扁平格式。"""
-        out: List[Dict] = []
-        for t in tools or []:
-            if not isinstance(t, dict):
-                continue
-            func = t.get("function") or {}
-            if not isinstance(func, dict) or not func.get("name"):
-                continue
-            out.append(
-                {
-                    "type": "function",
-                    "name": func.get("name"),
-                    "description": func.get("description", ""),
-                    "parameters": func.get("parameters") or {"type": "object", "properties": {}},
-                }
-            )
-        return out
-
-    def _make_responses_api_call(self, client, messages, tools, config) -> tuple:
-        """非流式 Responses API 调用：解析 output 数组 → (content, tool_calls, reasoning)。"""
-        result = self._serialize_for_api(messages, config)
-        input_items, instructions = result.input_items, result.instructions
-        model = str(config.get("模型名称", "") or "")
-        kwargs: Dict[str, Any] = {
-            "model": model,
-            "input": input_items,
-            "stream": False,
-        }
-        # 服务商请求头（伪装身份 / 动态 token / 会话标识）：与 chat/completions
-        # 分支同源走 resolve_extra_headers，勿在两分支重复实现
-        provider_headers = resolve_extra_headers(config, getattr(self, "_task_session_id", None) or "")
-        if provider_headers:
-            kwargs["extra_headers"] = provider_headers
-        if instructions:
-            kwargs["instructions"] = instructions
-        if tools:
-            kwargs["tools"] = self._responses_tools(tools)
-
-        thinking_mode = config.get("思考模式")
-        if thinking_mode is True:
-            kwargs["reasoning"] = {"effort": config.get("思考等级", "medium")}
-        elif thinking_mode is False:
-            kwargs["reasoning"] = {"effort": "none"}
-
-        # P1-21：「最大输出」为唯一输出上限键（与 chat_worker responses 分支同源）
-        max_output = config.get("最大输出")
-        if max_output is not None:
-            kwargs["max_output_tokens"] = self._cap_max_output_tokens(model, max_output, config)
-
-        task_session_id = getattr(self, "_task_session_id", None)
-        if task_session_id:
-            kwargs["user"] = task_session_id
-
-        logger.info(f"[SubAgentWorker][ResponsesAPI] model={model} 使用 Responses API")
-        response = client.responses.create(**kwargs)
-        return self._parse_responses_output(response)
-
-    def _parse_responses_output(self, response) -> tuple:
-        """解析非流式 Responses 对象 output 数组。
-
-        Returns:
-            (content, tool_calls, reasoning)
-        """
-        reasoning_parts: List[str] = []
-        content_parts: List[str] = []
-        tool_calls: List[Dict] = []
-
-        def _item_get(item, key, default=None):
-            if isinstance(item, dict):
-                return item.get(key, default)
-            return getattr(item, key, default)
-
-        for item in getattr(response, "output", None) or []:
-            itype = _item_get(item, "type", "")
-            if itype == "reasoning":
-                # summary 数组：OpenCode Go 网关提供思考摘要
-                summary = _item_get(item, "summary", None) or []
-                for s in summary:
-                    if isinstance(s, dict):
-                        text = s.get("text", "")
-                    else:
-                        text = getattr(s, "text", "") or ""
-                    if text:
-                        reasoning_parts.append(text)
-                # 兜底：完整思考内容（部分网关放 content/raw）
-                raw = _item_get(item, "content", None) or _item_get(item, "raw", None)
-                if isinstance(raw, str) and raw:
-                    reasoning_parts.append(raw)
-            elif itype == "message":
-                for part in _item_get(item, "content", None) or []:
-                    if _item_get(part, "type", "") == "output_text":
-                        text = _item_get(part, "text", "") or ""
-                        if text:
-                            content_parts.append(text)
-            elif itype == "function_call":
-                call_id = _item_get(item, "call_id", "") or _item_get(item, "id", "")
-                name = _item_get(item, "name", "") or ""
-                arguments = _item_get(item, "arguments", "") or "{}"
-                if call_id and name:
-                    tool_calls.append(
-                        {
-                            "id": call_id,
-                            "type": "function",
-                            "function": {"name": name, "arguments": arguments},
-                        }
-                    )
-
-        content = "".join(content_parts)
-        reasoning = "".join(reasoning_parts)
-        if content:
-            content = self._filter_thinking_content(content)
-
-        # 追踪 token 用量
-        try:
-            usage = getattr(response, "usage", None)
-            if usage:
-                pt = getattr(usage, "input_tokens", 0) or 0
-                ct = getattr(usage, "output_tokens", 0) or 0
-                tt = getattr(usage, "total_tokens", 0) or 0
-                self._total_prompt_tokens += pt
-                self._total_completion_tokens += ct
-                self._total_tokens += tt
-                if tt > self._peak_total_tokens:
-                    self._peak_total_tokens = tt
-                self.token_usage_updated.emit(self.task_id, pt, ct, tt)
-        except Exception:
-            pass
-
-        return content, tool_calls, reasoning
 
     def _cap_max_output_tokens(self, model: str, requested: int, llm_config: Dict = None) -> int:
         """
@@ -1759,833 +1605,13 @@ class SubAgentExecutor(QThread):
                     msgs.append(q.get_nowait())
                 except Exception:
                     break
+            # PluginChanged 净零合并：连续开关插件（中间无消费）时整批不注入
+            try:
+                from app.core.hooks.hook_manager import filter_net_zero_plugin_messages
+
+                msgs = filter_net_zero_plugin_messages(msgs)
+            except Exception as e:
+                logger.debug(f"[SubAgent] 净零合并判定跳过: {e}")
         except Exception as e:
             logger.debug(f"[SubAgent] drain posttool queue failed: {e}")
         return msgs
-
-
-class SubAgentManager(QObject):
-    """子智能体管理器 - 管理子智能体任务分发"""
-
-    task_started = Signal(str, str, str)  # task_id, agent_name, task_description
-    task_finished = Signal(str, str)  # task_id, result
-    batch_finished = Signal()  # 批次内所有任务都完成时触发
-    # ★ T24：子智能体 ask 权限请求转发（window_id, task_id, tool_name, arguments）→ 主线程弹窗
-    permission_requested = Signal(str, str, str, dict)
-
-    def __init__(self, agent_manager, tool_executor, get_llm_config: Callable):
-        super().__init__()
-        self._agent_manager = agent_manager
-        self._tool_executor = tool_executor
-        self._get_llm_config = get_llm_config
-        self._running_tasks: Dict[str, SubAgentExecutor] = {}
-        # H1：有界字典，防止 _finished_tasks 无限增长（进程生命周期内巨漏）；上限 200，超出弹最旧
-        self._finished_tasks = _BoundedTaskDict(maxlen=200)  # task_id -> {"result": str, "error": str, "session_id": str}
-        self._session_store = None  # 使用 SessionStore 替代 SubAgentLogStore
-        # 批次计数：本次启动的任务总数
-        self._batch_total = 0
-        self._batch_completed = 0
-        # 当前批次的任务ID集合，用于回调时只通知本批次完成的任务
-        self._batch_task_ids: set = set()
-        # 已查询过的任务ID集合（按 session 隔离），避免重复返回结果浪费上下文
-        # Dict[session_id, Set[task_id]]
-        self._queried_tasks: Dict[str, set] = {}
-        # 获取主智能体历史消息的回调（由外部设置）
-        self._get_history_messages: Optional[Callable[[], List[Dict]]] = None
-        # 当前会话 ID（用于隔离不同会话的子智能体任务）
-        self._current_session_id: str = ""
-
-        # ========== 日志活力度 Stall 检测 ==========
-        self._stall_timeout: int = 300  # 日志静默超时秒数（默认 5 分钟）
-        self._stall_timer = QTimer(self)
-        self._stall_timer.setInterval(10000)  # 每 10 秒检查一次
-        self._stall_timer.timeout.connect(self._check_stalled_tasks)
-
-    def set_current_session_id(self, session_id: str):
-        """设置当前会话 ID，用于会话隔离"""
-        self._current_session_id = session_id
-
-    def set_history_getter(self, getter: Callable[[], List[Dict]]):
-        """设置获取主智能体历史消息的回调"""
-        self._get_history_messages = getter
-
-    def set_session_store(self, session_store):
-        """设置会话存储（使用 SessionStore 统一管理）"""
-        self._session_store = session_store
-
-    def _save_task_to_store(
-        self,
-        task_id: str,
-        agent_name: str,
-        task_description: str,
-        status: str = "running",
-        result: str = None,
-        error: str = None,
-        logs: List[Dict] = None,
-        summary: Dict = None,
-        session_id: str = "",
-    ):
-        """保存任务到数据库（通过 SessionStore），携带会话 ID 以实现会话隔离"""
-        if not self._session_store:
-            return
-        try:
-            if logs is None or summary is None:
-                executor = self._running_tasks.get(task_id)
-                if executor and hasattr(executor, "get_logs"):
-                    logs = executor.get_logs()
-                if executor and hasattr(executor, "get_summary"):
-                    summary = executor.get_summary()
-            self._session_store.save_subagent_task(
-                task_id,
-                agent_name,
-                task_description,
-                status,
-                result,
-                error,
-                logs or [],
-                summary or {},
-                session_id=session_id or self._current_session_id,
-            )
-        except Exception as e:
-            logger.error(f"[SubAgentManager] 保存任务到数据库失败: {e}")
-
-    # ========== 日志活力度 Stall 检测 ==========
-
-    def start_stall_detector(self):
-        """启动 stall 检测定时器（默认在 SubAgentManager 初始化时未启动，由外部调用）"""
-        if not self._stall_timer.isActive():
-            self._stall_timer.start()
-            logger.info("[SubAgentManager] Stall 检测器已启动")
-
-    def stop_stall_detector(self):
-        """停止 stall 检测定时器"""
-        if self._stall_timer.isActive():
-            self._stall_timer.stop()
-            logger.info("[SubAgentManager] Stall 检测器已停止")
-
-
-    def _check_stalled_tasks(self):
-        """
-        检查所有运行中任务的最后活跃时间，如果日志静默超过 stall_timeout 则 cancel。
-        由 QTimer 定时触发（默认每 10 秒）。
-        """
-        import time
-
-        now = time.time()
-        for task_id in list(self._running_tasks.keys()):
-            executor = self._running_tasks.get(task_id)
-            if not executor or not executor.isRunning():
-                continue
-
-            last_activity = executor.get_last_activity_time()
-            if not last_activity:
-                continue
-
-            idle_time = now - last_activity
-            if idle_time <= self._stall_timeout:
-                continue
-
-            # 检测到 stall（日志静默超时）
-            error_msg = f"Task stalled: no log activity for {int(idle_time)}s (timeout={self._stall_timeout}s)"
-            logger.warning(
-                f"[SubAgentManager] ⚠️ Task {task_id[:8]} ({executor.agent_name}) "
-                f"stalled for {int(idle_time)}s, cancelling"
-            )
-
-            # 1. Cancel executor
-            executor.cancel()
-
-            # 2. 写入 finished_tasks
-            agent_name = executor.agent_name
-            task_description = executor.task_description
-            logs = executor.get_logs()
-            task_session_id = getattr(executor, "_task_session_id", self._current_session_id)
-            self._finished_tasks[task_id] = {
-                "result": "",
-                "error": error_msg,
-                "agent_name": agent_name,
-                "task_description": task_description,
-                "session_id": task_session_id,
-                "logs": logs,
-            }
-
-            # 3. 保存数据库（status="stalled"）
-            self._save_task_to_store(
-                task_id,
-                agent_name,
-                task_description,
-                "stalled",
-                "",
-                error_msg,
-                logs,
-                session_id=task_session_id,
-            )
-
-            # 4. 通知 UI
-            try:
-                self.task_finished.emit(task_id, "")
-            except Exception as e:
-                logger.error(f"[SubAgentManager] task_finished.emit 失败 (stalled path): {e}")
-
-            # 5. 从 running_tasks 移除（避免 get_finished_tasks 再处理一次）
-            #    注意：executor 线程可能还在运行（卡在 API 调用中），
-            #    但已经从管理器角度"移除"了，后续 finished_with_result 回调
-            #    会因 task_id 不在 running_tasks 而被安全忽略。
-            if task_id in self._running_tasks:
-                del self._running_tasks[task_id]
-
-    @staticmethod
-    def _connect_cb(signal, callback, connection_type: int = None):
-        """连接回调；connection_type 为 None 时沿用 Qt 默认（AutoConnection）。
-
-        抽成方法是为了让「同步等待型」调用方能显式指定 DirectConnection——
-        详见 execute_task 的 connection_type 文档。
-        """
-        if connection_type is None:
-            signal.connect(callback)
-        else:
-            signal.connect(callback, connection_type)
-
-    def execute_task(
-        self,
-        task_id: str,
-        agent_name: str,
-        task_description: str,
-        parent_context: str = "",
-        on_finished: Callable[[str], None] = None,
-        on_error: Callable[[str], None] = None,
-        on_progress: Callable[[str], None] = None,
-        executor_ref: Dict = None,
-        share_context: bool = False,  # 是否共享主智能体上下文
-        session_id: str = "",  # 所属会话 ID（任务创建时锁定，避免跨会话覆盖）
-        llm_config: Dict = None,  # 可选：预解析的 LLM 配置（支持覆盖模型）
-        connection_type: int = None,  # 回调连接方式；None=沿用默认 AutoConnection
-    ) -> bool:
-        """执行子智能体任务
-
-        Args:
-            session_id: 所属会话 ID。任务创建时即锁定该值，
-                        后续回调不再读取全局 _current_session_id，
-                        避免同一窗口内切换会话后异步回调用错 session_id。
-            llm_config: 预解析的 LLM 配置（可选）。传入时跳过内部 _get_llm_config() 调用，
-                        用于 --model=xxx 覆盖模型/服务商的场景。
-            connection_type: on_finished/on_error/on_progress 的连接方式（Qt.ConnectionType）。
-                默认 None 表示沿用 Qt 默认（AutoConnection）。
-
-                ★ 调用方若要在回调里做「同步等待」（典型：workflow 插件 agent() 派发后
-                用 threading.Event.wait() 阻塞等结果），必须显式传 Qt.DirectConnection(1)：
-                AutoConnection 会把回调排进**发起连接那个线程**的事件循环，而该线程此刻正
-                阻塞在 wait() 上——若它是普通 Python 线程（无 Qt 事件循环）更永不会投递，
-                结果是子任务早已跑完、回调永不触发的**永久死锁**（无超时则永远不返回）。
-                DirectConnection 让回调直接在 executor 线程里执行，等待方即可被唤醒。
-        """
-        # 在任务创建时即锁定 session_id，不依赖后续的全局状态
-        task_session_id = session_id or self._current_session_id
-
-        # 验证 agent 是否存在且是有效的子智能体类型
-        agent = self._agent_manager.get_agent(agent_name)
-        if not agent:
-            error_msg = f"Agent not found: {agent_name}"
-            logger.error(f"[SubAgentManager] {error_msg}")
-            # 立即触发完成信号，让任务不卡在 running 状态
-            self._finished_tasks[task_id] = {
-                "result": "",
-                "error": error_msg,
-                "agent_name": agent_name,
-                "session_id": task_session_id,
-            }
-            if on_error:
-                on_error(error_msg)
-            return False
-
-        # 只允许 mode 为 subagent 或 all 的 agent 作为子智能体
-        if not agent.is_subagent():
-            error_msg = f"Agent '{agent_name}' cannot be used as subagent (mode: {agent.mode})"
-            logger.error(f"[SubAgentManager] {error_msg}")
-            self._finished_tasks[task_id] = {
-                "result": "",
-                "error": error_msg,
-                "agent_name": agent_name,
-                "session_id": task_session_id,
-            }
-            if on_error:
-                on_error(error_msg)
-            return False
-
-        try:
-            if llm_config is None:
-                llm_config = self._get_llm_config()
-            elif not isinstance(llm_config, dict):
-                # 防御：非 dict 的 llm_config（可能从 main_widget 传入的异常值）
-                logger.warning(
-                    f"[SubAgentManager] execute_task llm_config is not a dict: {type(llm_config).__name__}={llm_config!r}, falling back to default"
-                )
-                llm_config = self._get_llm_config()
-            if not llm_config:
-                if on_error:
-                    on_error("No LLM config available")
-                return False
-
-            # 如果启用共享上下文，将获取完整的上下文信息
-            full_context = parent_context
-            if share_context and self._get_history_messages:
-                try:
-                    history_messages = self._get_history_messages() or []
-                    if history_messages:
-                        # 格式化历史消息
-                        history_lines = []
-                        max_chars = 1000  # 完整上下文字符限制
-                        for msg in history_messages:
-                            role = msg.get("role", "user")
-                            content = msg.get("content", "")
-                            if isinstance(content, list):
-                                content = "".join(c.get("text", "") for c in content if isinstance(c, dict))
-                            if content:
-                                truncated = content[:max_chars] + ("..." if len(content) > max_chars else "")
-                                history_lines.append(f"**{role}**: {truncated}")
-
-                        if history_lines:
-                            history_section = "\n\n## 主智能体完整上下文\n" + "\n".join(history_lines)
-                            if parent_context:
-                                full_context = f"{parent_context}{history_section}"
-                            else:
-                                full_context = history_section.lstrip("\n\n")
-                except Exception as e:
-                    logger.warning(f"[SubAgentManager] 获取上下文失败: {e}")
-
-            # 轮数上限：agent.steps 显式声明优先（None=激活策略兜底，默认 subagent 策略 30）
-            max_iterations = agent.steps
-
-            executor = SubAgentExecutor(
-                task_id=task_id,
-                agent_name=agent_name,
-                task_description=task_description,
-                llm_config=llm_config,
-                agent_manager=self._agent_manager,
-                tool_executor=self._tool_executor,
-                parent_context=full_context,
-                is_subagent_call=True,  # 标记为被主智能体调用
-                max_iterations=max_iterations,  # 传递最大迭代次数限制
-            )
-            # 在 executor 上存储 session_id，供后续回调使用
-            executor._task_session_id = task_session_id
-
-            # 设置日志存储回调（用 lambda 默认参数在定义时锁定 session_id，避免闭包 late-binding）
-            if self._session_store:
-                executor.set_log_store_callback(
-                    lambda *args, _sid=task_session_id: self._save_task_to_store(*args, session_id=_sid)
-                )
-
-            # 【新增】设置历史消息获取回调
-            if self._get_history_messages:
-                executor.set_history_getter(self._get_history_messages)
-
-            if executor_ref is not None:
-                executor_ref["executor"] = executor
-
-            if on_finished:
-                self._connect_cb(executor.finished_with_result, on_finished, connection_type)
-            if on_error:
-                self._connect_cb(executor.error_occurred, on_error, connection_type)
-            if on_progress:
-                self._connect_cb(executor.progress_updated, on_progress, connection_type)
-
-            # ★ T24：转发子智能体 ask 权限请求到主线程（带 window_id 供多窗口定位弹窗）
-            executor.permission_requested.connect(self._forward_permission_request)
-
-            self._running_tasks[task_id] = executor
-            executor.start()
-
-            # 批次计数：本次启动的任务数
-            self._batch_total += 1
-            self._batch_task_ids.add(task_id)
-
-            # 保存到数据库（传入锁定的 task_session_id）
-            self._save_task_to_store(task_id, agent_name, task_description, "running", session_id=task_session_id)
-
-            try:
-                self.task_started.emit(task_id, agent_name, task_description)
-            except Exception as e:
-                logger.error(f"[SubAgentManager] task_started.emit failed: {e}", exc_info=True)
-
-            logger.info(f"[SubAgentManager] Started task {task_id} with agent {agent_name}")
-            return True
-
-        except Exception as e:
-            logger.error(f"[SubAgentManager] Failed to execute task: {e}")
-            if on_error:
-                on_error(str(e))
-            return False
-
-    def _forward_permission_request(self, task_id: str, tool_name: str, arguments: dict):
-        """转发 executor 的权限请求到主线程（SubAgentManager → main_widget）。
-
-        携带 window_id（来自 executor 所在窗口的 backend），供多窗口场景
-        精确定位弹窗归属。
-        """
-        executor = self._running_tasks.get(task_id)
-        window_id = ""
-        if executor is not None and executor.tool_executor is not None:
-            backend = getattr(executor.tool_executor, "_backend", None)
-            if backend is not None:
-                window_id = getattr(backend, "_window_id", "") or ""
-        self.permission_requested.emit(window_id, task_id, tool_name, arguments)
-
-    def respond_permission(self, task_id: str, allow: bool):
-        """主线程响应用户决策 → 转交 executor（ask 分支继续/拒绝）。"""
-        executor = self._running_tasks.get(task_id)
-        if executor is not None:
-            executor.respond_permission(allow)
-        else:
-            logger.warning(f"[SubAgentManager] respond_permission: task {task_id} 不存在")
-
-    def cancel_task(self, task_id: str) -> bool:
-        """取消子智能体任务"""
-        if task_id in self._running_tasks:
-            self._running_tasks[task_id].cancel()
-            del self._running_tasks[task_id]
-            return True
-        return False
-
-    def get_running_tasks(self) -> List[str]:
-        """获取正在运行的任务ID列表"""
-        return list(self._running_tasks.keys())
-
-    def _prune_queried_tasks(self) -> None:
-        """惰性清理 _queried_tasks（原只增不删：session 键 + task_id 集合无界）。
-
-        对账规则：queried 集合仅对 finished 任务标记，task_id 不在
-        _finished_tasks（被 _BoundedTaskDict maxlen=200 挤出）即视为已消费
-        → 移除；集合空则删除 session 键。与 _finished_tasks 同生命周期，
-        无新线程/定时器。挂载点 get_finished_tasks 覆盖高频路径；判据与
-        get_all_active_tasks_with_details 遍历源同一字典，对两个入口都安全。
-        """
-        for sid in list(self._queried_tasks.keys()):
-            queried = self._queried_tasks.get(sid)
-            if not queried:
-                self._queried_tasks.pop(sid, None)
-                continue
-            # 对账：不在 _finished_tasks 的 task_id 已被挤出上限 → 移除
-            for tid in [t for t in queried if t not in self._finished_tasks]:
-                queried.discard(tid)
-            if not queried:
-                self._queried_tasks.pop(sid, None)
-
-    def get_finished_tasks(self) -> List[str]:
-        """获取已完成的任务ID列表（清理已完成的从running列表）"""
-        self._prune_queried_tasks()
-        finished = []
-        for task_id in list(self._running_tasks.keys()):
-            executor = self._running_tasks[task_id]
-            if executor.isFinished():
-                # 通过公共属性获取结果
-                result = executor.last_result or ""
-                error = executor.execution_error or ""
-                agent_name = executor.agent_name
-                task_description = executor.task_description
-                logs = executor.get_logs()
-                tool_call_count = executor.tool_call_count
-                elapsed = int(time.time() - executor.start_time) if executor.start_time else 0
-
-                task_session_id = getattr(executor, "_task_session_id", self._current_session_id)
-                # 如果 _on_sub_agent_task_finished 已经写入过，避免覆盖已有字段
-                if task_id not in self._finished_tasks:
-                    self._finished_tasks[task_id] = {
-                        "result": result,
-                        "error": error,
-                        "agent_name": agent_name,
-                        "task_description": task_description,
-                        "session_id": task_session_id,
-                        "logs": logs,
-                        "tool_call_count": tool_call_count,
-                        "elapsed_seconds": elapsed,
-                    }
-                else:
-                    # 更新关键字段，保留 session_id 等已有数据
-                    self._finished_tasks[task_id].setdefault("session_id", task_session_id)
-                    self._finished_tasks[task_id].setdefault("logs", logs)
-                    self._finished_tasks[task_id].setdefault("tool_call_count", tool_call_count)
-                    self._finished_tasks[task_id].setdefault("elapsed_seconds", elapsed)
-                    # 总是更新 result/error（_on_sub_agent_task_finished 可能拿到更准的数据）
-                    if result is not None:
-                        self._finished_tasks[task_id]["result"] = result
-                    if error is not None:
-                        self._finished_tasks[task_id]["error"] = error
-
-                # 更新数据库（传入锁定的 session_id）
-                self._save_task_to_store(
-                    task_id, agent_name, task_description, "finished", result, error, session_id=task_session_id
-                )
-
-                del self._running_tasks[task_id]
-                finished.append(task_id)
-        return finished
-
-
-    def cancel_all(self):
-        """取消所有运行中的子智能体任务 + 停止 Stall 检测器
-
-        用于窗口关闭时清理当前窗口的所有子智能体任务，防止线程泄漏。
-        """
-        # 先停止 stall 检测器，避免在取消过程中触发额外的回调
-        self.stop_stall_detector()
-
-        # 取消所有运行中的任务
-        for task_id in list(self._running_tasks.keys()):
-            try:
-                executor = self._running_tasks[task_id]
-                agent_name = executor.agent_name
-                task_description = executor.task_description
-                logs = executor.get_logs()
-                task_session_id = getattr(executor, "_task_session_id", self._current_session_id)
-
-                # 标记取消（设置 _is_cancelled 标志，线程在下一次检查点退出）
-                executor.cancel()
-
-                # 写入 finished_tasks（与 _check_stalled_tasks / cancel_task 一致）
-                error_msg = "Task cancelled: window closed"
-                self._finished_tasks[task_id] = {
-                    "result": "",
-                    "error": error_msg,
-                    "agent_name": agent_name,
-                    "task_description": task_description,
-                    "session_id": task_session_id,
-                    "logs": logs,
-                }
-                # 保存到数据库
-                self._save_task_to_store(
-                    task_id,
-                    agent_name,
-                    task_description,
-                    "cancelled",
-                    "",
-                    error_msg,
-                    logs,
-                    session_id=task_session_id,
-                )
-                # 发送完成信号让 UI 知道
-                try:
-                    self.task_finished.emit(task_id, "")
-                except Exception:
-                    pass
-            except Exception as e:
-                logger.warning(f"[SubAgentManager] cancel_all: 取消任务 {task_id} 时出错: {e}")
-
-        self._running_tasks.clear()
-
-
-    def mark_task_finished(self, task_id: str, result: str, error: str = "") -> Dict:
-        """任务完成归档：写入内存 _finished_tasks，并把数据库状态推进到 finished。
-
-        数据库在运行期间由 executor 实时日志回调持续写 running 状态；本方法是
-        正常完成路径上唯一把 DB 推进到 finished 的入口。若缺失，get_task_logs
-        查库命中 running 即返回，会话卡片（SubAgentSessionCard）会永远显示
-        「执行中」，工具数/耗时冻结在最后一条日志时刻。
-
-        Returns:
-            Dict: {agent_name, task_description, session_id} 供批次汇总/流式注入使用
-        """
-        executor = self._running_tasks.pop(task_id, None)
-        if executor is not None:
-            agent_name = executor.agent_name
-            task_description = executor.task_description
-            task_session_id = getattr(executor, "_task_session_id", self._current_session_id)
-            logs = executor.get_logs()
-            summary = executor.get_summary()
-            final_error = error or ""
-        else:
-            # executor 已被其他路径归档（get_finished_tasks / DAG 提前删除），
-            # 从已有条目恢复字段；条目可能已带更准的 error（如 DAG 跳过信息），不覆盖
-            existing = self._finished_tasks.get(task_id, {})
-            agent_name = existing.get("agent_name", "")
-            task_description = existing.get("task_description", "")
-            task_session_id = existing.get("session_id", "")
-            logs = existing.get("logs")
-            summary = None
-            final_error = existing.get("error") or (error or "")
-
-        if task_id in self._finished_tasks:
-            entry = self._finished_tasks[task_id]
-            entry["result"] = result
-            if not entry.get("error"):
-                entry["error"] = final_error
-            entry.setdefault("agent_name", agent_name)
-            entry.setdefault("task_description", task_description)
-            entry.setdefault("session_id", task_session_id)
-            if logs:
-                entry.setdefault("logs", logs)
-        else:
-            self._finished_tasks[task_id] = {
-                "result": result,
-                "error": final_error,
-                "agent_name": agent_name,
-                "task_description": task_description,
-                "session_id": task_session_id,
-                "logs": logs or [],
-                "tool_call_count": (summary or {}).get("tool_call_count", 0),
-                "elapsed_seconds": (summary or {}).get("elapsed_seconds", 0),
-            }
-
-        # 落库用部分更新语义（None 字段不覆盖）：executor 缺席时 summary 传 None，
-        # 保留运行期最后写入的 tool_call_count/elapsed_seconds，避免被清空
-        if self._session_store:
-            try:
-                self._session_store.update_subagent_task_status(task_id, "finished", result, final_error, logs, summary)
-            except Exception as e:
-                logger.warning(f"[SubAgentManager] mark_task_finished 落库失败: {e}")
-
-        return {
-            "agent_name": agent_name,
-            "task_description": task_description,
-            "session_id": task_session_id,
-        }
-
-    def get_task_logs(self, task_id: str) -> Dict:
-        """
-        获取指定任务的完整日志和摘要。
-
-        Returns:
-            Dict: {
-                "summary": {...},  # 任务摘要
-                "logs": [...],      # 日志列表
-                "found": bool       # 是否找到任务
-            }
-        """
-        # 先归档已完成的任务（会同步把 DB 状态推进到 finished），再查库。
-        # 顺序很关键：executor 运行期间实时日志回调持续写 DB running 状态，
-        # 若先查库命中即返回，get_finished_tasks 永不执行，DB 状态永挂 running，
-        # 会话卡片（SubAgentSessionCard）会永远显示「执行中」且工具数/时间冻结。
-        self.get_finished_tasks()
-
-        # 从数据库获取
-        if self._session_store:
-            db_task = self._session_store.get_subagent_task(task_id)
-            if db_task:
-                summary = db_task.get("summary", {})
-                # 确保 task_description 在 summary 中
-                if not summary.get("task_description"):
-                    summary["task_description"] = db_task.get("task_description", "")
-                # 确保 task_id 在 summary 中
-                if not summary.get("task_id"):
-                    summary["task_id"] = task_id
-                return {
-                    "task_id": task_id,
-                    "summary": summary,
-                    "logs": db_task.get("logs", []),
-                    "found": True,
-                    "status": db_task.get("status", "unknown"),
-                    "agent_name": db_task.get("agent_name", ""),
-                    "task_description": db_task.get("task_description", ""),
-                    "session_id": db_task.get("session_id", ""),
-                    "result": db_task.get("result", ""),
-                    "error": db_task.get("error", ""),
-                }
-
-        # 检查运行中的任务
-        if task_id in self._running_tasks:
-            executor = self._running_tasks[task_id]
-            return {
-                "summary": executor.get_summary(),
-                "logs": executor.get_logs(),
-                "found": True,
-                "status": "running",
-                "session_id": getattr(executor, "_task_session_id", ""),
-            }
-
-        # 检查已完成的任务（内存）
-        if task_id in self._finished_tasks:
-            task_info = self._finished_tasks[task_id]
-            return {
-                "summary": {
-                    "task_id": task_id,
-                    "agent_name": task_info.get("agent_name", ""),
-                    "task_description": task_info.get("task_description", ""),
-                    "result": task_info.get("result", ""),
-                    "error": task_info.get("error", ""),
-                    "tool_call_count": task_info.get("tool_call_count", 0),
-                    "elapsed_seconds": task_info.get("elapsed_seconds", 0),
-                },
-                "logs": task_info.get("logs", []),
-                "found": True,
-                "status": "finished",
-                "session_id": task_info.get("session_id", ""),
-            }
-
-        return {"summary": {}, "logs": [], "found": False, "status": "unknown"}
-
-
-
-    def get_tasks_status_with_details(
-        self, task_ids: List[str], with_log: bool = False, with_result: bool = True, session_id: str = None
-    ) -> ToolResult:
-        """获取指定任务的详细状态（按 task_id 精确查询，无会话限制）
-
-        与 get_all_active_tasks_with_details 不同，本方法用于按 explicit task_id
-        查询特定任务，因此不执行会话隔离。只要 task_id 存在就能查到结果。
-
-        Args:
-            session_id: 保留参数（不再用于会话隔离），兼容历史调用方
-        """
-        tasks_info = []
-        for tid in task_ids:
-            task_data = self.get_task_logs(tid)
-            if not task_data.get("found"):
-                tasks_info.append(
-                    {
-                        "task_id": tid,
-                        "status": "unknown",
-                        "agent": "",
-                    }
-                )
-                continue
-
-            status = task_data.get("status", "unknown")
-            task_info = {
-                "task_id": tid,
-                "status": status,
-                "agent": task_data.get("summary", {}).get("agent_name", task_data.get("agent_name", "")),
-            }
-
-            # 显式按 ID 查询始终返回完整结果（不应用 _already_queried 限制）
-            # _already_queried 仅在 get_all_active_tasks_with_details 无条件返回时生效
-
-            # running / finishing：任务还没结束，注入 _hint 提醒调用方不要重复查询
-            if status in ("running"):
-                summary = task_data.get("summary", {}) or {}
-                elapsed = summary.get("elapsed_seconds", 0) or 0
-                tool_calls = summary.get("tool_call_count", 0) or 0
-                task_info["tool_call_count"] = tool_calls
-                task_info["_hint"] = (
-                    f"⏳ 该任务还在后台运行中（已用时 {elapsed}s，已调用 {tool_calls} 次工具）。"
-                    "**请勿重复调用 subagent_status 等待结果**——"
-                    "任务完成后系统会自动通过 `[后台任务状态]` 用户消息通知，"
-                    "届时再调用本工具获取详细结果。"
-                )
-
-            # 是否包含结果
-            if with_result:
-                result = task_data.get("result") or task_data.get("summary", {}).get("result", "")
-                error = task_data.get("error") or task_data.get("summary", {}).get("error", "")
-                if result:
-                    task_info["result"] = result
-                if error:
-                    task_info["error"] = error
-
-            # 是否包含日志
-            if with_log:
-                logs = task_data.get("logs", [])
-                if logs:
-                    task_info["logs"] = logs
-
-            tasks_info.append(task_info)
-
-        return ToolResult(True, content={"tasks": tasks_info})
-
-    def get_all_active_tasks_with_details(
-        self, with_log: bool = False, with_result: bool = True, session_id: str = None
-    ) -> ToolResult:
-        """获取当前会话任务的详细状态（会话隔离），同时包含运行中与已完成。
-
-        Args:
-            with_log: 是否包含执行日志
-            with_result: 是否包含执行结果
-            session_id: 会话 ID，None 时使用 _current_session_id
-
-        Returns:
-            ToolResult: content={"tasks": [...]}
-                - finished 任务：按"会话内只查一次"策略返回完整 result/error
-                - running/finishing 任务：附带 _hint 提醒调用方不要重复查询
-        """
-        target_session = session_id or self._current_session_id
-        tasks_info = []
-
-        for task_id, task_info in self._finished_tasks.items():
-            # 会话隔离：只返回当前会话的任务
-            task_session = task_info.get("session_id", "")
-            # 注意: 当 task_session 为空（旧记录/边缘情况）时，也视为不属于当前会话
-            if target_session and task_session != target_session:
-                continue
-
-            # 跳过当前正在运行的任务（它们应该由 _running_tasks 处理）
-            if task_id in self._running_tasks:
-                continue
-
-            task_entry = {
-                "task_id": task_id,
-                "session_id": task_session,
-                "status": "finished",
-                "agent": task_info.get("agent_name", ""),
-                "task_description": task_info.get("task_description", ""),
-            }
-
-            # 完成或失败只能查一次（按 session 隔离）
-            session_queried = self._queried_tasks.get(target_session, set())
-            if task_id in session_queried:
-                task_entry["_already_queried"] = True
-                task_entry["_message"] = "已查询过结果，可通过 id 再次查询"
-                tasks_info.append(task_entry)
-                continue
-
-            session_queried.add(task_id)
-            self._queried_tasks[target_session] = session_queried
-
-            if with_result:
-                result = task_info.get("result", "") or ""
-                error = task_info.get("error", "") or ""
-                if result:
-                    task_entry["result"] = result
-                if error:
-                    task_entry["error"] = error
-            if with_log:
-                logs = task_info.get("logs", [])
-                if logs:
-                    task_entry["logs"] = logs
-
-            tasks_info.append(task_entry)
-
-        # 补充：运行中的任务也一并返回，附带 _hint 提醒调用方不要重复轮询
-        for task_id, executor in self._running_tasks.items():
-            # 会话隔离
-            if target_session:
-                task_session = getattr(executor, "_task_session_id", "")
-                if task_session != target_session:
-                    continue
-
-            try:
-                summary = executor.get_summary() or {}
-            except Exception:
-                summary = {}
-            elapsed = summary.get("elapsed_seconds", 0) or 0
-            tool_calls = summary.get("tool_call_count", 0) or 0
-            status = "running" if executor.isRunning() else "finishing"
-
-            task_entry = {
-                "task_id": task_id,
-                "session_id": getattr(executor, "_task_session_id", ""),
-                "status": status,
-                "agent": summary.get("agent_name", ""),
-                "task_description": summary.get("task_description", ""),
-                "elapsed_seconds": elapsed,
-                "tool_call_count": tool_calls,
-                "_hint": (
-                    f"⏳ 该任务还在后台运行中（已用时 {elapsed}s，已调用 {tool_calls} 次工具）。"
-                    "**请勿重复调用 subagent_status 等待结果**——"
-                    "任务完成后系统会自动通过 `[后台任务状态]` 用户消息通知，"
-                    "届时再调用本工具获取详细结果。"
-                )
-                if status == "running"
-                else "",
-            }
-
-            if with_log:
-                try:
-                    logs = executor.get_logs()
-                except Exception:
-                    logs = []
-                if logs:
-                    task_entry["logs"] = logs
-
-            tasks_info.append(task_entry)
-
-        return ToolResult(True, content={"tasks": tasks_info})
-

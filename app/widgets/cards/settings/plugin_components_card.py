@@ -552,6 +552,10 @@ class ComponentRow(CardWidget):
         self._building = True
         self.switch.setChecked(checked)
         self._building = False
+        # 静默回写也要更新内部状态：空态文案用它区分「组件已关闭」与「本就没有
+        # 细项」。打开设置页时 _apply_state 走的就是这条路径，不回写会错报
+        # 「该组件没有可单独配置的细项」（开关明明是关的）。
+        self._component_on = checked
 
     def refresh_style(self):
         Colors.refresh()

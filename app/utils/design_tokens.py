@@ -36,6 +36,14 @@ def invalidate_font_cache() -> None:
     _cached_font_size_key = None
     _cached_font_size_delta = 0
     _cached_font_size_base = 14
+    # markdown 渲染结果缓存：工具块的 <pre> 内联了全局字体（render_helpers）
+    # 与字号，缓存 key 不含这两项 → 不清则切字体后工具输出仍是旧字体。
+    try:
+        from app.widgets.card_render_core import _render_markdown_to_html_cached_impl
+
+        _render_markdown_to_html_cached_impl.cache_clear()
+    except Exception:
+        pass
     try:
         from app.widgets.markdown_block_viewer import _HTML_PREFIX_CACHE, _TEXT_BLOCK_CACHE
 
@@ -411,6 +419,12 @@ class Colors:
     TOOLBAR_STRIP_BG = "rgba(24, 31, 45, 150)"
     TOOLBAR_STRIP_BORDER = "#2B3850"
 
+    # 标题栏雾化遮罩（scrim）：标题栏透明、直接叠在壁纸上，前景色只跟主题明暗走，
+    # 壁纸局部亮暗与主题相反时（浅色主题撞上深色天空）对比度会跌到 1:1 附近。
+    # 留空 = 按明暗自动取默认（浅色白雾 / 深色黑雾）；主题可写
+    # `titlebar_scrim: rgba(...)` 覆盖，alpha 建议 ≥ 0.5。
+    TITLEBAR_SCRIM = ""
+
     # 实时卡片色
     REALTIME_BORDER = "#4a90d9"
     REALTIME_ACCENT = "#7dd3fc"
@@ -426,6 +440,11 @@ class Colors:
     # 系统卡片色
     SYSTEM_BORDER = "#3d4a60"
     SYSTEM_ACCENT = "#66c6ff"
+
+    # 搜索高亮 / 命令参数名强调色（文字色，必须与所在背景高对比）
+    # 独立语义 token：禁止挪用 SEND_BTN_START（按钮渐变底色，受按钮上白色 icon
+    # 约束，深色主题会被调暗成深灰 → 黑底黑字不可读，true-black 曾踩此坑）
+    SEARCH_HIGHLIGHT = "#C9A85C"
 
     # 发送按钮
     SEND_BTN_START = "#C9A85C"
@@ -586,6 +605,15 @@ class Colors:
         for attr, yaml_key in cls._COLOR_ALIASES.items():
             if yaml_key in theme:
                 setattr(cls, attr, theme[yaml_key])
+
+        # 3.5 老主题缺 search_highlight 键的回退：按主题深浅模式选缺省高亮色
+        # （深色 → 亮金黑底约 9:1；浅色 → 深金白底约 4.7:1）。判定复用
+        # theme_manager.is_light_theme（mode 显式声明优先，缺省按 text_primary 亮度）。
+        # 键语义与缺省规则见 docs/plugins/themes.md
+        if "search_highlight" not in theme:
+            from app.utils.theme_manager import theme_manager
+
+            cls.SEARCH_HIGHLIGHT = "#B45309" if theme_manager.is_light_theme() else "#C9A85C"
 
         # 4. 发光预设（最后执行，会覆盖已设置的单个发光 token）
         preset_name = theme.get("input_glow_preset")
@@ -1104,6 +1132,8 @@ class ComboBoxStyles:
     @staticmethod
     def dark_combo_dropdown() -> str:
         """深色主题下拉框弹出列表样式"""
+        # 选中项：TEXT_ACCENT 实心底，前景按底亮度自适应（真黑主题 accent 是纯白）
+        selected_fg = readable_text_on(Colors.TEXT_ACCENT)
         return f"""
             QAbstractItemView {{
                 color: {Colors.TEXT_PRIMARY};
@@ -1124,7 +1154,7 @@ class ComboBoxStyles:
             }}
             QAbstractItemView::item:selected {{
                 background-color: {Colors.TEXT_ACCENT};
-                color: white;
+                color: {selected_fg};
             }}
             QScrollBar:vertical {{
                 background: {Colors.CONTENT_BG};
@@ -1232,6 +1262,20 @@ def fade_in_widget(widget, duration: int = Animations.NORMAL_MS):
     anim.setDuration(duration)
     anim.setStartValue(0.0)
     anim.setEndValue(1.0)
+
+    def _drop_effect():
+        # 动画结束立即摘除 effect：带 effect 的 widget 走 Qt 离屏合成路径，
+        # macOS 上后台标签页期间积累的绘制欠账在重新可见时不被补画
+        # （表现为气泡底色缺失、露出场景背景图，resize 才恢复）。
+        # 摘除后卡片回到常规绘制路径，也消除「父级常驻 effect + 子级 effect
+        # 合成不可靠」这一历史坑的前提（2026-09-16「先显示随后消失」同因）。
+        try:
+            widget.setGraphicsEffect(None)
+        except RuntimeError:
+            return
+        widget._fade_anim = None
+
+    anim.finished.connect(_drop_effect)
     anim.start()
     # 保持引用防止被回收
     widget._fade_anim = anim
@@ -1278,6 +1322,74 @@ def _rgba_to_qcolor(value: str) -> "QColor":
 #: 新代码请用这个名字，不要自己写解析，也不要直接 ``QColor(Colors.X)``
 #: （对 rgba() 会得到一个 invalid 的 QColor，渲染时表现为颜色不生效）。
 qcolor_from_token = _rgba_to_qcolor
+
+
+# ── 实心强调色底上的前景文字（可读性保障） ──────────────
+#: 底色过亮时的深色前景候选。
+#: 不拿 Colors.BUTTON_TEXT_ON_ACCENT 兜底：该 token 可被主题设成纯白
+#: （true-black / amoled-black），当深色候选用会再次落到「白底白字」。
+_ON_COLOR_DARK = "#1A1F2B"
+_ON_COLOR_LIGHT = "#FFFFFF"
+
+
+def _srgb_luminance(color: "QColor") -> float:
+    """WCAG 2.1 相对亮度：sRGB 分量线性化后按 0.2126/0.7152/0.0722 加权。"""
+
+    def _lin(v: int) -> float:
+        v /= 255.0
+        return v / 12.92 if v <= 0.04045 else ((v + 0.055) / 1.055) ** 2.4
+
+    return 0.2126 * _lin(color.red()) + 0.7152 * _lin(color.green()) + 0.0722 * _lin(color.blue())
+
+
+def _contrast_ratio(fg: "QColor", bg: "QColor") -> float:
+    """WCAG 对比度，取值 1（同色）~ 21（纯黑对纯白）。"""
+    l1, l2 = _srgb_luminance(fg), _srgb_luminance(bg)
+    hi, lo = (l1, l2) if l1 >= l2 else (l2, l1)
+    return (hi + 0.05) / (lo + 0.05)
+
+
+def readable_text_on(bg_spec: str, preferred: str | None = None, min_ratio: float = 3.0) -> str:
+    """按底色实际亮度选前景文字色，用于「主题色实心底 + 文字」的按钮/选中项。
+
+    主题的 accent / realtime_accent 可能是纯白（true-black、amoled-black、
+    slinky-grey 等），此时硬编码的 ``color: #ffffff`` 会变成白底白字、
+    完全不可见（2026-11-02 真黑主题提问卡「提交」按钮实锤）。
+
+    判定用 WCAG 对比度而不是「亮度大于 0.5 就用黑字」的拍脑袋阈值：
+    主题自带的前景色对比度达标就沿用（保留主题性格），不达标才在
+    深色 / 白色之间取对比度更高者。半透明底按 RGB 直接比较（alpha 忽略），
+    按钮底色 alpha 普遍为 255，误差可忽略。
+
+    Args:
+        bg_spec: 底色，支持 ``#rrggbb`` 与主题 YAML 常用的 ``rgba()`` / ``rgb()``。
+        preferred: 优先采用的前景色（通常是 Colors.BUTTON_TEXT_ON_ACCENT）。
+        min_ratio: 可读下限。按钮字号偏小但加粗，按 WCAG AA 大字标准取 3.0。
+
+    Returns:
+        ``#rrggbb`` 前景色；底色解析失败时返回 preferred 或白色。
+    """
+    from PySide6.QtGui import QColor
+
+    bg = _rgba_to_qcolor(bg_spec) if bg_spec else None
+    if bg is None or not bg.isValid():
+        return preferred or _ON_COLOR_LIGHT
+
+    if preferred:
+        pref = _rgba_to_qcolor(preferred)
+        if pref.isValid() and _contrast_ratio(pref, bg) >= min_ratio:
+            return preferred
+
+    # 白色优先：深色底配白字是全项目按钮的默认设计语言，主题把底色设成深色
+    # 就是为配白字（azure #3b82f6 白字 3.68 已达标），不要因为深色字对比度
+    # 略高就反转，那会把深蓝底染成脏灰。只有白字确实看不清时才反转。
+    dark, light = QColor(_ON_COLOR_DARK), QColor(_ON_COLOR_LIGHT)
+    if _contrast_ratio(light, bg) >= min_ratio:
+        return _ON_COLOR_LIGHT
+    if _contrast_ratio(dark, bg) >= min_ratio:
+        return _ON_COLOR_DARK
+    # 两头都不达标（中间灰调）→ 取对比度更高者，总比继续用原色强
+    return _ON_COLOR_DARK if _contrast_ratio(dark, bg) >= _contrast_ratio(light, bg) else _ON_COLOR_LIGHT
 
 
 # 模块级状态：供 monkey-patched qfluentwidgets ToolTip.showEvent 读取当前主题色

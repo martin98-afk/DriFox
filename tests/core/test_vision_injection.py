@@ -341,3 +341,101 @@ class TestVisionNoticeSuppression:
         w = self._make_worker("gpt-4o")
         result = w._build_result_dict("call-1", "read", {}, "Tool execution error: x", False, 1, None)
         assert "Vision Notice" not in result["content"]
+
+
+class TestMcpImageInjection:
+    """MCP 工具（不在 provides_image 白名单）携带 image_data 也应注入。"""
+
+    def _mcp_result(self, count=2):
+        return {
+            "name": "mcp__bili__bili_frames",
+            "success": True,
+            "content": "2 帧已取得",
+            "image_data": [
+                {"mime": "image/jpeg", "data": "aGk="},
+                {"mime": "image/jpeg", "data": "eA=="},
+            ][:count],
+        }
+
+    def test_mcp_tool_with_image_list_injects_all(self):
+        w = _make_vision_worker("gpt-4o")
+        current_messages = [{"role": "user", "content": "看画面"}]
+        ok = w._try_inject_vision_content([self._mcp_result()], current_messages, session_messages=[])
+        assert ok
+        blocks = [b for b in current_messages[-1]["content"] if b.get("type") == "image_url"]
+        assert len(blocks) == 2
+        assert blocks[0]["image_url"]["url"] == "data:image/jpeg;base64,aGk="
+        assert blocks[1]["image_url"]["url"] == "data:image/jpeg;base64,eA=="
+
+    def test_mcp_non_vision_gets_hint(self):
+        w = _make_vision_worker("minimax-m2.5")
+        # 名称必须与 tool_results 里的 name 一致：提示按工具名回写到 tool 消息
+        tool_msg = {"role": "tool", "name": "mcp__bili__bili_frames", "content": "封面已取"}
+        current_messages = [{"role": "user", "content": "看封面"}, tool_msg]
+        w._try_inject_vision_content([self._mcp_result(1)], current_messages, session_messages=[])
+        assert "does not support vision" in tool_msg["content"]
+
+    def test_protocol_a_still_requires_whitelist(self):
+        """普通工具 content 里出现图片路径，不得被误读成本地图注入。"""
+        import tempfile
+
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+            tmp.write(b"\x89PNG\r\n\x1a\nfake")
+            path = tmp.name
+        try:
+            w = _make_vision_worker("gpt-4o")
+            current_messages = [{"role": "user", "content": "x"}]
+            result = {
+                "name": "mcp__other__fetch",  # 不在白名单
+                "success": True,
+                "content": f"路径：{path}",
+            }
+            ok = w._try_inject_vision_content([result], current_messages, session_messages=[])
+            assert not ok
+        finally:
+            os.unlink(path)
+
+    def test_vision_notice_for_mcp_image(self, monkeypatch):
+        """_build_result_dict 对非白名单 MCP 工具的图片结果也追加 Vision Notice。"""
+        from app.tools.result import ToolResult
+
+        from app.core.workers.chat_worker import OpenAIChatWorker
+
+        w = OpenAIChatWorker.__new__(OpenAIChatWorker)
+        w.llm_config = {"模型名称": "gpt-4o"}
+        w._take_tool_phases = lambda call_id: {}
+        monkeypatch.setattr(
+            "app.tools.registry.ToolRegistry.get_instance",
+            lambda: type("FakeReg", (), {"provides_image_tools": lambda self: frozenset({"read"})})(),
+        )
+        import app.core.modelmeta.model_capabilities as mc
+
+        monkeypatch.setattr(mc, "resolve_model_capabilities",
+                            lambda cfg, provider_name="", sources=None: {"supports_vision": True})
+        obj = ToolResult(True, content="封面", image_data={"mime": "image/jpeg", "data": "aGk="})
+        result = w._build_result_dict("c1", "mcp__bili__bili_cover", {}, "封面", True, 1, obj)
+        assert "Vision Notice" in result["content"]
+
+
+class TestVisionTotalBudget:
+    """多图总量超 8MB 时压缩后丢末尾，文本写明省略数。"""
+
+    def test_budget_drops_tail_and_annotates(self, monkeypatch):
+        import app.core.workers.chat_worker as cw
+
+        # 压缩体返回原 URI（模拟压不动），触发丢末尾分支
+        monkeypatch.setattr(cw, "compress_data_uri", lambda du: du)
+        big = "A" * (5 * 1024 * 1024)  # 单张 5MB base64
+        w = _make_vision_worker("gpt-4o")
+        current_messages = [{"role": "user", "content": "看画面"}]
+        tool_results = [{
+            "name": "mcp__bili__bili_frames", "success": True, "content": "3 帧",
+            "image_data": [{"mime": "image/jpeg", "data": big} for _ in range(3)],
+        }]
+        ok = w._try_inject_vision_content(tool_results, current_messages, session_messages=[])
+        assert ok
+        content = current_messages[-1]["content"]
+        blocks = [b for b in content if b.get("type") == "image_url"]
+        text = "".join(b.get("text", "") for b in content if b.get("type") == "text")
+        assert len(blocks) == 1  # 8MB 预算只容 1 张 5MB
+        assert "已省略 2 张" in text

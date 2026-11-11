@@ -87,7 +87,7 @@ def _parse_declared_value(field: str, value: Any) -> Any:
     if field in ("context_limit", "max_output_tokens"):
         try:
             parsed = int(value)
-        except ValueError, TypeError:
+        except (ValueError, TypeError):
             return None
         return parsed if parsed > 0 else None
     if field in ("supports_vision", "supports_thinking"):
@@ -106,13 +106,19 @@ def _parse_declared_value(field: str, value: Any) -> Any:
         text = str(value).strip()
         return text or None
     if field == "reasoning_effort_values":
+        # list 与 str 统一走分隔符拆分：弹窗回显用 / 连接（_fmt_effort），用户
+        # 原样保存或手动输 low/ultra/max 都会塌成单元素 ["low/ultra/max"]，
+        # 下拉/胶囊只剩一个非法档（实测 2026-11-06 hy4free）。
         if isinstance(value, (list, tuple)):
-            items = [str(v).strip() for v in value]
+            raws = [str(v) for v in value]
         else:
-            raw = (
-                str(value).replace("，", ",").replace("、", ",").replace("；", ";").replace(";", ",").replace("/", ",")
+            raws = [str(value)]
+        items = []
+        for raw in raws:
+            normalized = (
+                raw.replace("，", ",").replace("、", ",").replace("；", ";").replace(";", ",").replace("/", ",")
             )
-            items = [p.strip() for p in raw.split(",")]
+            items.extend(p.strip() for p in normalized.split(","))
         return [p for p in items if p] or None
     return None
 
@@ -591,7 +597,7 @@ def resolve_context_limit(llm_config: Dict[str, Any], default: int = 128000) -> 
         if value not in (None, ""):
             try:
                 return max(1, int(value))
-            except ValueError, TypeError:
+            except (ValueError, TypeError):
                 continue
 
     # L2: 模型名查表（带 provider 走分区精确查，防同名模型跨服务商串味）
@@ -601,7 +607,7 @@ def resolve_context_limit(llm_config: Dict[str, Any], default: int = 128000) -> 
     if caps.get("context_limit"):
         try:
             return max(1, int(caps["context_limit"]))
-        except ValueError, TypeError:
+        except (ValueError, TypeError):
             pass
 
     # L3: 服务商默认
@@ -613,14 +619,14 @@ def resolve_context_limit(llm_config: Dict[str, Any], default: int = 128000) -> 
             if v not in (None, ""):
                 try:
                     return max(1, int(v))
-                except ValueError, TypeError:
+                except (ValueError, TypeError):
                     pass
 
     # L4: family 兜底
     profile = get_provider_profile(llm_config)
     try:
         return max(1, int(profile.get("context_limit", default)))
-    except ValueError, TypeError:
+    except (ValueError, TypeError):
         return max(1, int(default))
 
 
@@ -645,7 +651,7 @@ def resolve_max_output_tokens(llm_config: Dict[str, Any], default: int = 4096) -
         if value not in (None, ""):
             try:
                 return max(1, int(value))
-            except ValueError, TypeError:
+            except (ValueError, TypeError):
                 continue
 
     # L2: 模型真实输出上限（models.dev per-model，带 provider 走分区精确查）
@@ -656,13 +662,13 @@ def resolve_max_output_tokens(llm_config: Dict[str, Any], default: int = 4096) -
     if caps_max not in (None, ""):
         try:
             return max(1, int(caps_max))
-        except ValueError, TypeError:
+        except (ValueError, TypeError):
             pass
 
     profile = get_provider_profile(llm_config)
     try:
         return max(1, int(profile.get("max_output_tokens", default)))
-    except ValueError, TypeError:
+    except (ValueError, TypeError):
         return max(1, int(default))
 
 
@@ -688,7 +694,7 @@ def get_caps_max_output_tokens(model: str, llm_config: Optional[Dict[str, Any]] 
         return None
     try:
         parsed = int(value)
-    except ValueError, TypeError:
+    except (ValueError, TypeError):
         return None
     return parsed if parsed > 0 else None
 
@@ -731,6 +737,21 @@ def apply_model_defaults(
     if declared:
         declared_thinking = declared.get("声明_支持思考")
         declared_present = declared_thinking not in (None, "")
+    # 声明了强度档位（声明_思考强度非空）→ effort 型思考是用户的显式意图，
+    # 需补「思考模式/思考等级」默认值：否则参数卡 config 无「思考等级」键
+    # 整行不渲染、思考胶囊 raw_effort 为空恒隐藏（实测 hy4free 2026-11-06）。
+    # 「批 b 不补」针对的是声明_支持思考（能力声明），档位声明自带参数语义，
+    # 与 L3 自动链 effort 型补值规则对称。
+    if declared and declared.get("声明_支持思考") is not False:
+        # 声明 False（不支持思考）优先：档位与 False 并存同属矛盾组合，尊重显式否定
+        declared_effort = _parse_declared_value("reasoning_effort_values", declared.get("声明_思考强度"))
+        if declared_effort:
+            if "思考模式" not in result:
+                result["思考模式"] = True
+            if "思考等级" not in result:
+                # 默认取第一个"非关闭"档位（对齐 L3 自动链同款规则）
+                default_effort = next((v for v in declared_effort if str(v).lower() not in _EFFORT_OFF_VALUES), None)
+                result["思考等级"] = default_effort or (declared_effort[0] if declared_effort else "medium")
     # L3: 模型能力（覆盖前两层，之后 model_overrides 还会覆盖回来）
     # provider 走 L-1 插件 per-model 层：私有模型 ID 在 models.dev 不存在，
     # 不带 provider 查 caps 全链落空 → 思考字段默认值整段跳过（参数卡无思考配置）
@@ -834,6 +855,12 @@ def resolve_model_capabilities(
     # （如 MiniMax 系 "adaptive"），思考发送链（_apply_thinking）与 caps 同构消费
     if "thinking_enable_value" in caps and caps["thinking_enable_value"] not in (None, ""):
         out.setdefault("thinking_enable_value", caps["thinking_enable_value"])
+    # 展示性字段透传（cost / note 等）：本函数契约是「caps 同构 dict」，只返回六键
+    # 会让消费方（模型列表价格列 / 选择卡金额）整块变空
+    for key, value in caps.items():
+        if key in out or key in fields:
+            continue
+        out[key] = value
 
     # L3：family 能力（providers 插件按 family 聚合声明）
     if any(src.get(f) is None for f in fields):
@@ -856,7 +883,53 @@ def resolve_model_capabilities(
             out["context_limit"] = fallback
             src["context_limit"] = "default"
 
+    # 一致性归一：档位列表存在 → thinking_param 必为 reasoning_effort。
+    # 声明层 L0 逐键独立解析，用户可声明出 thinking + effort_values 并存的
+    # 自相矛盾组合（实测 hy4free：UI 参数卡/思考胶囊全隐藏、发送链只发
+    # thinking 布尔而强度不生效）。models_dev_sync 自动链已有同规则
+    # （effort 型优先，见其 reasoning_options 解析段），此处对最终合并结果
+    # 收口，声明/能力/族三层来源一视同仁。
+    if (
+        out.get("reasoning_effort_values")
+        and out.get("thinking_param") != "reasoning_effort"
+        and cfg.get("声明_支持思考") is not False  # 显式声明不支持思考 → 档位视为误填，不归一
+    ):
+        out["thinking_param"] = "reasoning_effort"
+        # 生效层跟随档位来源：归一由档位声明触发，弹窗来源列与档位一致
+        src["thinking_param"] = src.get("reasoning_effort_values") or "declared"
+
     return out
+
+
+def resolve_capabilities_for_model(
+    model: str,
+    provider: str = "",
+    sources: Optional[Dict[str, str]] = None,
+) -> Dict[str, Any]:
+    """UI 展示统一入口：用户声明（ModelOverrides 六键）+ resolve 链合成。
+
+    展示点（服务商模型列表 / 模型选择卡 / 模型按钮 tooltip / 思考强度胶囊）
+    必须走本函数。只用 ``get_model_capabilities`` 会让用户在能力面板里声明的
+    多模态 / 思考 / 上下文「看起来没生效」（2026-10-30 用户实测）。
+
+    Args:
+        model: 模型名
+        provider: ``ProviderDef.name``（与 ModelOverrides 的键前缀一致）
+        sources: 可选输出参数，透传给 ``resolve_model_capabilities``
+    """
+    declared: Dict[str, Any] = {}
+    try:
+        # 延迟导入：model_declarations 顶层依赖本模块的六键表，避免循环 import
+        from app.core.modelmeta.model_declarations import read_declarations
+        from app.utils.config import Settings
+
+        overrides = Settings.llm_model_overrides.value or {}
+        declared = read_declarations(overrides, provider, model)
+    except Exception:
+        declared = {}
+    cfg: Dict[str, Any] = {"模型名称": model, "provider_name": provider}
+    cfg.update(declared)
+    return resolve_model_capabilities(cfg, provider, sources)
 
 
 def get_model_capability_sources(model: str, provider: str = "") -> Dict[str, str]:

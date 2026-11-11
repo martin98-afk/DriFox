@@ -6,6 +6,9 @@ UI 对话引擎 — 处理桌面 LLM 对话的核心逻辑
 保留 ChatEngine 别名在 __init__.py 中提供向后兼容。
 """
 
+import copy
+import hashlib
+import json
 import os
 import threading
 from typing import Any, Callable, Dict, List, Optional
@@ -20,6 +23,7 @@ from app.core.conversation.chat_session import (
 )
 from app.core.conversation.adapters import UIConversationAdapter
 from app.core.conversation.config import ConversationConfig, PermissionStrategy
+from app.core.context.budget import empty_compaction_state
 from app.core.conversation.core import ConversationCore
 from app.core.engines.base import BaseEngine
 from app.core.conversation.message_content import content_to_text
@@ -31,6 +35,15 @@ from app.core.infra.token_estimator import (
 )
 from app.core.modelmeta.provider_profile import resolve_token_ratio
 from app.tools import get_builtin_tools_schema
+
+
+def _tools_schema_hash(tools: List[Dict]) -> str:
+    """工具 schema 内容指纹（日志对账用，方便定位「哪一轮前缀变了」）"""
+    try:
+        blob = json.dumps(tools, sort_keys=True, ensure_ascii=False)
+    except (TypeError, ValueError):
+        blob = repr(tools)
+    return hashlib.md5(blob.encode("utf-8")).hexdigest()[:8]
 
 
 class UIEngine(BaseEngine):
@@ -92,13 +105,19 @@ class UIEngine(BaseEngine):
             executor=self._conversation_executor,
         )
 
-        # ===== 工具 schema token 缓存：避免 get_context_usage_snapshot 频繁触发 get_builtin_tools_schema =====
-        # tools/init.py 虽有 5 秒 TTL，但工具执行间隔常超 5 秒（6~11s），缓存频繁失效。
-        # 此处加一层 30 秒独立缓存，get_context_usage_snapshot 直接复用 tools 列表和已算好的 tools_tokens。
+        # ===== 工具 schema 会话级快照：会话内完全冻结，保证 tools 前缀稳定 =====
+        # 动机：tools 在请求前缀最外层，服务端 prompt cache 按前缀匹配；
+        # 每轮从活注册表聚合 → 工具热重载即击穿整段缓存。
+        # 冻结粒度：换会话 / 换 agent / 进出团队才换代（见 _tools_snapshot_key）。
+        # 插件工具增删改、MCP 启停一律不换代：新增工具由 PluginChanged hook
+        # 注入 schema + tool_execute 中转调用，移除工具调用时返 Unknown tool。
+        self._tools_snapshot: Optional[Dict[str, Any]] = None
+        self._tools_snapshot_lock = threading.Lock()
+        # token 计算缓存（count_tools_tokens 要跑分词）：键 = (快照指纹, 模型, 校正比)
         self._tools_schema_cache: Dict[str, Any] = {
+            "key": None,
             "timestamp": 0.0,
-            "tools": None,
-            "tokens": 0,
+            "tokens": None,
         }
 
         # ===== Adapter 信号 → UIEngine 回调 =====
@@ -127,19 +146,9 @@ class UIEngine(BaseEngine):
     # ========== 向后兼容属性 ==========
 
     @property
-    def compactor(self):
-        """暴露压缩器供外部使用（如工具迭代中压缩）"""
-        return self._conversation_core.compactor
-
-    @property
     def _permission_cache(self):
         """向后兼容：权限缓存已移至 ConversationCore"""
         return self._conversation_core.permission_cache
-
-    @property
-    def _compactor(self):
-        """向后兼容：压缩器已移至 ConversationCore"""
-        return self._conversation_core.compactor
 
     @property
     def _current_worker(self):
@@ -376,6 +385,74 @@ class UIEngine(BaseEngine):
         except Exception as e:
             logger.warning(f"[ChatEngine] Failed to invalidate system_prompt cache: {e}")
 
+    # ========== 工具 schema 快照（会话内冻结）==========
+
+    def _tools_snapshot_key(self, session_id: str) -> tuple:
+        """快照键：只含用户显式切换的状态，**故意不含 registry 版本**。
+
+        冻结语义（见 get_session_tools_schema）：插件工具增删改、热重载、
+        MCP 启停一律不换代，保证 tools 前缀稳定、服务端 KV 缓存可复用。
+        新工具经 PluginChanged hook 注入 schema + tool_execute 中转调用。
+        换会话 / 换 agent / 进出团队属显式动作，换代可接受（system prompt
+        本身也变了，缓存段本来就会断）。
+        """
+        in_team = False
+        builtin_tools = getattr(self._tool_executor, "_builtin_tools", None) if self._tool_executor else None
+        window_id = getattr(builtin_tools, "_team_window_id", "") if builtin_tools else ""
+        if window_id:
+            try:
+                from app.core.team.team_manager import TeamManager
+
+                in_team = TeamManager.get_instance().is_team_member(window_id)
+            except Exception:
+                pass
+        return (session_id, self._current_agent or "", bool(in_team))
+
+    def _aggregate_tools(self, session_id: str) -> List[Dict]:
+        """聚合工具 schema（含 MCP/LSP/subagent 动态注入 + schema 过滤器）"""
+        builtin_tools = getattr(self._tool_executor, "_builtin_tools", None) if self._tool_executor else None
+        agent_manager = self._get_agent_manager()
+        if self._current_agent:
+            return agent_manager.get_agent_tools_schema(
+                self._current_agent,
+                builtin_tools=builtin_tools,
+                session_id=session_id,
+            )
+        return get_builtin_tools_schema(agent_manager, builtin_tools=builtin_tools, session_id=session_id)
+
+    def _get_tools_snapshot(self, session_id: str) -> Dict[str, Any]:
+        """取（或建立）当前会话的工具 schema 快照，返回快照字典（调用方只读）"""
+        key = self._tools_snapshot_key(session_id)
+        snap = getattr(self, "_tools_snapshot", None)
+        if snap is not None and snap.get("key") == key:
+            return snap
+        lock = getattr(self, "_tools_snapshot_lock", None)
+        if lock is None:
+            self._tools_snapshot_lock = lock = threading.Lock()
+        with lock:
+            snap = getattr(self, "_tools_snapshot", None)
+            if snap is not None and snap.get("key") == key:
+                return snap
+            tools = self._aggregate_tools(session_id)
+            snap = {"key": key, "tools": tools, "hash": _tools_schema_hash(tools)}
+            self._tools_snapshot = snap
+            logger.info(
+                f"[ToolsSchema] 快照建立 snap={snap['hash']} tools={len(tools)} "
+                f"agent={self._current_agent or '(default)'} session={session_id[:8] or '(none)'}"
+            )
+            return snap
+
+    def get_session_tools_schema(self, session_id: str = "") -> List[Dict]:
+        """本轮发送用工具 schema（会话内冻结）。
+
+        冻结动机：tools 是请求前缀最外层，任何变动都会击穿服务端 prompt cache。
+        插件工具增删改、热重载、MCP 启停均不影响快照——新工具经 PluginChanged
+        hook 注入 schema 后用 tool_execute 中转调用，调用时按注入的最新 schema 传参。
+        唯一例外：切会话 / 切 agent / 进出团队（_tools_snapshot_key）。
+        """
+        snap = self._get_tools_snapshot(session_id)
+        return copy.deepcopy(snap["tools"])
+
     # ========== 消息发送 ==========
 
     def send_message(self, user_text: str, *args, **kwargs) -> bool:
@@ -435,11 +512,6 @@ class UIEngine(BaseEngine):
             try:
                 if self._backend:
                     worktree_ctx = self._backend._build_worktree_context_dict() or {}
-                    # 临时会话无项目语义：跳过关键文档注入。_current_project 继承自源窗口，
-                    # 按它查 DB 会把原项目关键文档泄进临时页（is_temp 落盘/workdir 已隔离，
-                    # 项目上下文未隔离，此处为注入侧最后防线）
-                    if not getattr(session, "is_temp", False):
-                        worktree_ctx.update(self._backend.build_key_documents_context() or {})
             except Exception:
                 pass
             # ⚠️ metadata.pop 必须在主线程（避免与 worker 线程竞态）
@@ -476,6 +548,7 @@ class UIEngine(BaseEngine):
             window_workdir=_window_workdir,
             agent_manager=self._get_agent_manager(),
             tool_executor=self._tool_executor,
+            tools_provider=self.get_session_tools_schema,
             hook_event=hook_event,
             image_attachments=_image_attachments,
             input_attachments=_input_attachments,
@@ -526,13 +599,11 @@ class UIEngine(BaseEngine):
         self,
         session: ChatSession,
         llm_config: Dict,
-        allow_llm_summary: bool = False,
     ) -> List[Dict]:
         """委托给 ContextBudgetAllocator 构建消息"""
         messages = self._conversation_core.context_builder.build_messages(
             session=session,
             llm_config=llm_config,
-            allow_llm_summary=allow_llm_summary,
             current_agent=self._current_agent,
         )
 
@@ -560,7 +631,7 @@ class UIEngine(BaseEngine):
                 "used_tokens": 0,
                 "budget_tokens": 0,
                 "percent": 0,
-                "compaction": self._conversation_core.compactor._make_state(),
+                "compaction": empty_compaction_state(),
                 "normal_tokens": 0,
                 "compacted_tokens": 0,
                 "breakdown": [],
@@ -588,6 +659,12 @@ class UIEngine(BaseEngine):
                             extra_context["project_root"] = self._tool_executor.get_workdir() or ""
                         if self._backend and hasattr(self._backend, "current_project"):
                             extra_context["project_name"] = self._backend.current_project or ""
+                        # session_id 必须透传：assistant_hub 等插件按它解析会话级助手，
+                        # 缺了会按主助手构建；而本方法会把结果缓存回 session.system_prompt，
+                        # 后续 build_messages 命中缓存 → 选中的助手身份被主助手顶掉。
+                        sid = str(getattr(session, "session_id", "") or "")
+                        if sid:
+                            extra_context["session_id"] = sid
                     except Exception:
                         pass
                     system_prompt = (
@@ -651,49 +728,53 @@ class UIEngine(BaseEngine):
             approx_messages.append({"role": "system", "content": system_prompt})
         approx_messages.extend(_projected)
 
-        # 获取工具 schema（与实际 API 请求一致），必须计入上下文占用
+        # 获取工具 schema（与实际 API 请求同一份会话快照），必须计入上下文占用
         # ⚠️ 旧实现此处漏传 tools，导致工具定义（35+ 工具）的 token 完全未计入，
         # 是本地估算与 API 返回的 prompt_tokens 差异巨大的主因之一。
         #
-        # 🚀 性能优化：30 秒缓存 tools 列表和 tools_tokens，避免每次工具执行后
-        # 的上下文刷新都触发 get_agent_tools_schema → get_builtin_tools_schema
-        # （后者做 deepcopy + MCP/LSP/subagent 动态注入，即使 5 秒 TTL 也常因
-        # 工具执行间隔 >5 秒而失效浪费）。
+        # 🚀 tools_tokens 缓存：count_tools_tokens 要逐工具跑分词，此处按
+        # （快照指纹, 模型, 校正比）缓存——快照换代或切模型才重算，其余直接复用。
+        # 快照本身冻结，故不再需要 TTL：指纹不变即内容不变。
         import time as _time
 
+        _tools_snap = self._get_tools_snapshot(str(getattr(session, "session_id", "") or ""))
+        available_tools = _tools_snap["tools"]
         _cache = self._tools_schema_cache
-        _now = _time.monotonic()
-        _CACHE_TTL = 30.0
-        if _now - _cache["timestamp"] < _CACHE_TTL and _cache["tools"] is not None:
-            available_tools = _cache["tools"]
+        _token_key = (_tools_snap["hash"], model, ratio)
+        if _cache.get("key") == _token_key and _cache.get("tokens") is not None:
             tools_tokens = _cache["tokens"]
         else:
-            if self._current_agent:
-                available_tools = self._get_agent_manager().get_agent_tools_schema(
-                    self._current_agent,
-                    builtin_tools=self._tool_executor._builtin_tools if self._tool_executor else None,
-                    session_id=str(getattr(session, "session_id", "") or ""),
-                )
-            else:
-                available_tools = get_builtin_tools_schema(
-                    self._get_agent_manager(),
-                    builtin_tools=self._tool_executor._builtin_tools if self._tool_executor else None,
-                )
-            # 更新缓存
-            tools_tokens = (
-                int(count_tools_tokens(available_tools, model, ratio)) if available_tools else 0
-            )
-            _cache["timestamp"] = _now
-            _cache["tools"] = available_tools
-            _cache["tokens"] = tools_tokens
+            tools_tokens = int(count_tools_tokens(available_tools, model, ratio)) if available_tools else 0
+            _cache.update({"key": _token_key, "tokens": tools_tokens, "timestamp": _time.monotonic()})
 
         budget_tokens = max(1, self._conversation_core.context_builder.get_context_budget(llm_config))
         # 估算总量：系统提示 + 全部消息 + 工具定义（含模型分词校正系数）
-        # 性能优化（O-01）：用 per_message_tokens 累加替代 count_messages_tokens(messages)，
-        # 避免内部 is 身份缓存的 [msg] 临时列表构造与查找开销。
         # est_total = sum(per_message_tokens) + tools_tokens，保证与下方 breakdown 之和
         # 内部自洽（scale 等比缩放基线准确）。
-        est_raw = sum(per_message_tokens(m, model, ratio) for m in approx_messages) + tools_tokens
+        # 单遍遍历同时完成角色拆分（原 O-01 优化保留）：此前 est_raw 与 breakdown
+        # 对同一组投影消息各跑一遍 per_message_tokens，长会话每次快照多一遍 hash 全扫。
+        system_tokens = 0
+        user_tokens = assistant_tokens = tool_tokens = hook_tokens = 0
+        est_raw = tools_tokens
+        _body = approx_messages
+        if system_prompt and approx_messages and approx_messages[0].get("role") == "system":
+            system_tokens = per_message_tokens(approx_messages[0], model, ratio)
+            est_raw += system_tokens
+            _body = approx_messages[1:]
+        for msg in _body:
+            t = per_message_tokens(msg, model, ratio)
+            est_raw += t
+            if msg.get("_hook_event"):
+                hook_tokens += t
+            elif msg.get("role") == "user":
+                user_tokens += t
+            elif msg.get("role") == "assistant":
+                assistant_tokens += t
+            elif msg.get("role") == "tool":
+                tool_tokens += t
+            else:
+                # 其它角色（如内联 system 消息）兜底归入用户侧
+                user_tokens += t
         # 本地估算 → 真实占用：用 API usage 反推的自适应校准因子修正。
         # 本地 cl100k_base/快估对中文会话常比真实值高 1.5~3 倍（中文模型分词更
         # 高效），静态 ratio 表已统一为 1.0 无法覆盖各厂商差异，故按会话自适应。
@@ -703,35 +784,6 @@ class UIEngine(BaseEngine):
             model,
         )
         est_total = int(est_raw * calibration)
-
-        # ---- 各类型上下文占比（按角色拆分，用于 WorkBuddy 风格占比条）----
-        system_tokens = per_message_tokens({"role": "system", "content": system_prompt}, model, ratio) if system_prompt else 0
-
-        # 按消息角色拆分：用户消息 / 助手消息 / 工具结果 / Hook 注入
-        # 每条消息独立计 token，且不含工具 schema 开销（工具定义单独计在 tools_tokens），
-        # 避免与下面的 工具定义 重复计入。
-        # 带 _hook_event 标记的消息是 hook 注入的动态上下文（如长期记忆、系统时间等），
-        # 独立统计以便用户直观了解 hook 机制对上下文的占用。
-        # 性能优化（O-01）：用 per_message_tokens 替代 count_messages_tokens([msg])，
-        # 消除 [msg] 临时列表分配 + 4-entry is 缓存必然 MISS 的开销，
-        # 100 条消息场景从 ~102 次 count_messages_tokens 降至 ~N+1 次 per_message_tokens。
-        user_tokens = assistant_tokens = tool_tokens = hook_tokens = 0
-        # 用 ui stage 的投影结果统计（已含 cascade 截断效果），不再逐条手工截断
-        for msg in _projected:
-            role = msg.get("role", "")
-            t = per_message_tokens(msg, model, ratio)
-            # 分离 hook 注入消息（带 _hook_event 标记），独立统计
-            if msg.get("_hook_event"):
-                hook_tokens += t
-            elif role == "user":
-                user_tokens += t
-            elif role == "assistant":
-                assistant_tokens += t
-            elif role == "tool":
-                tool_tokens += t
-            else:
-                # 其它角色（如内联 system 消息）兜底归入用户侧
-                user_tokens += t
 
         breakdown = [
             {"key": "tools", "label": "工具定义", "tokens": tools_tokens, "color": "#f472b6"},
@@ -1035,6 +1087,7 @@ class _PreSendWorker(QThread):
         window_workdir: str,
         agent_manager,
         tool_executor,
+        tools_provider=None,
         hook_event: str | None = None,
         image_attachments: list | None = None,
         input_attachments: list | None = None,
@@ -1055,6 +1108,9 @@ class _PreSendWorker(QThread):
         self._window_workdir = window_workdir
         self._agent_manager = agent_manager
         self._tool_executor = tool_executor
+        # 工具 schema 提供方：优先走引擎的会话级快照（会话内冻结，
+        # 插件热重载不换代）；未传时回退到自聚合（子智能体等旧调用点）。
+        self._tools_provider = tools_provider
         self._hook_event = hook_event
         self._image_attachments = image_attachments
         self._input_attachments = input_attachments
@@ -1149,7 +1205,12 @@ class _PreSendWorker(QThread):
 
         # ---- 6. 获取 tool schema ----
         session_id = str(getattr(self._session, "session_id", "") or "")
-        if self._current_agent:
+        # 防御式取值：__new__ 构造的测试桩不经过 __init__
+        _tools_provider = getattr(self, "_tools_provider", None)
+        if _tools_provider is not None:
+            # 引擎会话级快照：会话内冻结，保证 tools 前缀稳定（不随热重载漂移）
+            self._available_tools = _tools_provider(session_id)
+        elif self._current_agent:
             self._available_tools = self._agent_manager.get_agent_tools_schema(
                 self._current_agent,
                 builtin_tools=self._tool_executor._builtin_tools if self._tool_executor else None,

@@ -25,6 +25,8 @@ if str(_REPO_ROOT) not in sys.path:
 
 import httpx
 
+from tests.core.protocol_test_helpers import install_fake_chat_plugins
+
 
 class FakeEmptyResp:
     """空 choices 流式响应：迭代结束返回 (False, False)（无工具调用）"""
@@ -77,8 +79,14 @@ def test_network_read_error_retries_instead_of_silent_return(monkeypatch):
     w = _make_worker()
     client = FakeClient()
     w._http_client = client
+    # transport 重构后 w._http_client 不再被读：经注册表注入假 transport/sink。
+    # 本文件只验证重试次数与异常传播，不校验流内容 → helper 的预设结果 sink 足够。
+    guard = install_fake_chat_plugins(client, response_result=(False, False))
 
-    result = w._make_api_call([{"role": "user", "content": "hi"}], use_cache=False)
+    try:
+        result = w._make_api_call([{"role": "user", "content": "hi"}], use_cache=False)
+    finally:
+        guard.restore()
 
     assert client.calls >= 2, f"ReadError 后应重试，实际 create 调用 {client.calls} 次"
     # 已重试成功（调用次数证明未被静默吞掉），空响应正常完成（无工具调用）
@@ -106,9 +114,13 @@ def test_network_read_error_raises_when_retries_exhausted(monkeypatch):
 
     w = _make_worker()
     w._http_client = AlwaysFailClient()
+    guard = install_fake_chat_plugins(w._http_client, response_result=(False, False))
 
-    with pytest_raises(httpx.ReadError):
-        w._make_api_call([{"role": "user", "content": "hi"}], use_cache=False)
+    try:
+        with pytest_raises(httpx.ReadError):
+            w._make_api_call([{"role": "user", "content": "hi"}], use_cache=False)
+    finally:
+        guard.restore()
 
 
 def test_cancelled_read_error_returns_silently(monkeypatch):
@@ -134,8 +146,12 @@ def test_cancelled_read_error_returns_silently(monkeypatch):
     w = _make_worker()
     w._is_cancelled = True  # 模拟用户已点击取消
     w._http_client = CancelClient()
+    guard = install_fake_chat_plugins(w._http_client, response_result=(False, False))
 
-    result = w._make_api_call([{"role": "user", "content": "hi"}], use_cache=False)
+    try:
+        result = w._make_api_call([{"role": "user", "content": "hi"}], use_cache=False)
+    finally:
+        guard.restore()
     # 取消态：循环顶部即返回 (None, None)（静默，不发错误弹窗），由 run() 取消路径处理
     assert result == (None, None), f"取消态应静默返回 (None, None)，实际 {result}"
 

@@ -65,7 +65,9 @@ class ChatAreaModule(UIModule):
         host.chat_scroll_area.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Ignored)
         host.chat_scroll_area.setStyleSheet(CHAT_SCROLL_STYLE)
         host.chat_scroll_area.setWidgetResizable(True)
-        host.chat_scroll_area.setViewportMargins(2, 2, 10, 2)
+        # 右保留 6 = qfluent 浮层滚动条等宽（原 10 使文字区右缘比左缘宽 8px，
+        # 用户反馈「右侧多一点」后收敛）
+        host.chat_scroll_area.setViewportMargins(2, 2, 6, 2)
         host.chat_scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
 
         host.chat_container = QWidget()
@@ -76,7 +78,9 @@ class ChatAreaModule(UIModule):
         except Exception:
             pass
         host.chat_layout = QVBoxLayout(host.chat_container)
-        host.chat_layout.setContentsMargins(6, 6, 6, 6)
+        # 底 2：贴底滚动时与输入区顶部留白（容器 top 3 + 主 margin 1）合计 ≈8，
+        # 原 6 使 footer 行上贴卡 10 / 下离输入框 23 明显失衡
+        host.chat_layout.setContentsMargins(6, 6, 6, 2)
         host.chat_layout.setSpacing(6)  # 消息间距（2026-09-23 收敛：8→6，配合卡片内边距收紧）
         host.chat_layout.setAlignment(Qt.AlignBottom)
         host.chat_scroll_area.setWidget(host.chat_container)
@@ -134,8 +138,24 @@ class ChatAreaModule(UIModule):
         # [P1 步骤6] chat_scroll_area 就绪后接 rangeChanged 事件驱动贴底
         host._wire_scroll_range_changed()
 
+        # 视口尺寸/滚动变化 → 重算装饰件
+        # 装饰件现在按滚动区 viewport 定位（不随内容高度跳动），但视口本身的
+        # 尺寸变化（窗口缩放、侧栏开合、上下卡片显隐）不会触发 chat_container
+        # 的 Resize，必须显式订阅，否则装饰件会停在旧位置。
+        try:
+            _vp = host.chat_scroll_area.viewport()
+            _vp.installEventFilter(host._decoration_layer)
+            host._decoration_layer.observe_widget(_vp)
+        except Exception:
+            pass
+
         # 初始加载（延迟到首帧后，避免阻塞 setup_ui 关键路径）
         QTimer.singleShot(0, host._apply_decorations)
+        # 首刷时机兜底：singleShot(0) 时 QScrollArea 的 viewport 往往还没完成
+        # 布局（实测仍是 98x28 默认尺寸），装饰件会按错误尺寸定位，用户侧
+        # 表现为「装了插件装饰层没显示/位置歪」。布局落定后再刷一次，
+        # 位置与缩放即恢复正常。两次 apply 幂等（_clear 会先隐藏旧件）。
+        QTimer.singleShot(120, host._apply_decorations)
 
 
 def _make_apply(host) -> callable:

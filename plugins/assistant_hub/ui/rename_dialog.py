@@ -6,7 +6,7 @@ from PySide6.QtGui import QColor
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QVBoxLayout
 from qfluentwidgets import BodyLabel, LineEdit, MaskDialogBase
 
-from app.plugins.sdk import Colors, font_size_css
+from app.plugins.sdk import Colors, font_size_css, readable_text_on
 from app.plugins.sdk import get_font_family_css
 
 
@@ -95,7 +95,7 @@ class RenameDialog(MaskDialogBase):
             f"""
             QPushButton {{
                 background: {Colors.TEXT_ACCENT};
-                color: #ffffff;
+                color: {readable_text_on(Colors.TEXT_ACCENT, "#ffffff")};
                 border: none;
                 border-radius: 8px;
                 padding: 4px 26px;

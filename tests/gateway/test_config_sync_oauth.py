@@ -50,61 +50,33 @@ def svc_and_mocks(monkeypatch):
 
 
 class TestRefreshAfterDownload:
-    def test_first_refresh_succeeds_then_upload(self, svc_and_mocks):
-        """下载后第 1 次刷新成功 → 立即强制上传，且解除上传抑制窗口"""
+    def test_reloads_local_token_only(self, svc_and_mocks):
+        """下载后只从磁盘恢复本地 token：不刷新、不上传
+
+        token 是设备本地独立凭证，云端 app.config 不含 token 段。历史版本
+        「用云端 RT 刷新并回传」会让多设备共享同一份 refresh_token 互相旋转作废，
+        已废止。
+        """
         svc, backend, cfg = svc_and_mocks
-        backend.is_bound.return_value = True
-        backend._ensure_valid_token.return_value = ("new_access", "")
+        cfg.gitee_bound = MagicMock(value=True)
 
         svc._refresh_and_upload_after_download()
 
-        backend._ensure_valid_token.assert_called_once()
-        svc._do_upload.assert_called_once_with(initial_sync=True)
-        assert svc._config_dirty is True
-        assert svc._suppress_until == 0.0  # 抑制窗口已解除，确保立即上传
+        svc._load_gitee_token_from_disk.assert_called_once_with(cfg)
+        backend._ensure_valid_token.assert_not_called()
+        svc._do_upload.assert_not_called()
+        svc._do_download.assert_not_called()
+        assert svc._suppress_until == 999.0  # 抑制窗口原样保留，不解除
 
-    def test_closed_loop_retry_then_succeed(self, svc_and_mocks):
-        """刷新失败（被其他机器旋转作废）→ 重拉云端再刷 → 成功上传"""
+    def test_unbound_skips_reload(self, svc_and_mocks):
+        """未绑定：直接返回，不去读磁盘 token"""
         svc, backend, cfg = svc_and_mocks
-        backend.is_bound.return_value = True
-        # 第 1 次失败，重拉云端后第 2 次成功
-        backend._ensure_valid_token.side_effect = [("", "TOKEN_REVOKED::invalid_grant"), ("new_access", "")]
+        cfg.gitee_bound = MagicMock(value=False)
 
         svc._refresh_and_upload_after_download()
 
-        # 失败触发一次重拉，成功后上传
-        assert svc._do_download.call_count >= 1
-        svc._do_upload.assert_called_once_with(initial_sync=True)
-        assert backend._ensure_valid_token.call_count == 2
-
-    def test_all_fail_revoked_clears_binding(self, svc_and_mocks):
-        """多次刷新失败且确为 invalid_grant → 清除绑定并提示重新授权"""
-        svc, backend, cfg = svc_and_mocks
-        backend.is_bound.return_value = True
-        backend._ensure_valid_token.return_value = ("", "TOKEN_REVOKED::invalid_grant")
-
-        svc._refresh_and_upload_after_download()
-
-        assert cfg.gitee_bound.value is False
-        assert svc._do_upload.called is False
-        assert svc.syncDone.emit.called
-        args, _ = svc.syncDone.emit.call_args
-        assert args[0] is False
-
-    def test_all_fail_transport_keeps_binding(self, svc_and_mocks):
-        """多次刷新失败但仅为网络异常 → 保留绑定，提示稍后重试，不清绑"""
-        svc, backend, cfg = svc_and_mocks
-        backend.is_bound.return_value = True
-        backend._ensure_valid_token.return_value = ("", "刷新 Token 网络异常：HTTPSConnectionPool 读取超时")
-
-        svc._refresh_and_upload_after_download()
-
-        # 关键：网络异常不得清除绑定
-        assert cfg.gitee_bound.value is not False
-        assert svc._do_upload.called is False
-        assert svc.syncDone.emit.called
-        args, _ = svc.syncDone.emit.call_args
-        assert args[0] is False  # 仍报告失败，但保留绑定
+        svc._load_gitee_token_from_disk.assert_not_called()
+        svc._do_upload.assert_not_called()
 
 
 class TestInitialSyncOrdering:
@@ -139,11 +111,12 @@ class TestInitialSyncOrdering:
         svc._refresh_and_upload_after_download = MagicMock()
         svc._refresh_local_and_upload = MagicMock()
         svc._do_upload = MagicMock(return_value=True)
+        svc._mark_dir_meta_migration = MagicMock(return_value=False)
 
         return svc, mock_backend, mock_cfg
 
-    def test_valid_token_downloads_then_refreshes(self, svc_initial):
-        """token 有效 + 远端有配置：先下载（不刷新）→ 再用云端 RT 刷新上传"""
+    def test_valid_token_downloads_without_refresh(self, svc_initial):
+        """token 有效 + 远端有配置：直接下载，下载前绝不刷新 refresh_token"""
         svc, backend, cfg = svc_initial
 
         svc._initial_sync()

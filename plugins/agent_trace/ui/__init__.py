@@ -47,7 +47,10 @@ _STREAM_ACC_MAX = 256
 
 
 def _acc_key(ctx) -> tuple:
-    return (ctx.get("round_index"), ctx.get("message_index"))
+    # window_id 必须进 key：多窗口同时流式时 (round_index, message_index) 会撞，
+    # 两个窗口互相累加 / 用对方的 gen_s 触发「新一轮」重置 → token 归零，
+    # 页脚在该卡片上整段消失（且数值可能被另一窗口带偏）。
+    return (ctx.get("window_id"), ctx.get("round_index"), ctx.get("message_index"))
 
 
 def _stream_token_acc(ctx) -> int:
@@ -159,6 +162,12 @@ def _aggregate_records(ctx):
     （有真实 usage 取 output，否则文本估算），耗时用 ``rec.meta["elapsed_ms"]``
     （单次 LLM 调用）减 ``rec.meta["ttft_ms"]``。两者都由 worker 逐条落盘在
     assistant 消息上（历史会话同样具备），不存在跨调用串口径。
+
+    ⚠️ 缺 ``ttft_ms`` 的记录**整条不计入**（2026-11-01 真实 bug）：
+    ``elapsed_ms`` 包含首 token 到达前的 prefill/排队，长上下文下可达 8~35s。
+    早期把缺失当 ttft=0，于是 29 tok / 35s 被算成 0.8 tok/s，一条就把会话
+    均值从 40+ 拉到个位数；纯工具调用尤其容易命中（模型不吐正文/思考，
+    sink 曾只在 content/reasoning 打 TTFT）。少一个样本好过贡献错误数值。
     """
     from .trace_collector import TraceCollectorHub
     from .trace_models import EntryKind
@@ -181,6 +190,24 @@ def _aggregate_records(ctx):
     # 窗口期内只试一次，失败就退化成不显示（下次节拍再试）。
     cur_sid = str(getattr(mw, "_current_session_id", "") or "")
     if cur_sid and str(getattr(collector, "_active_session_id", "") or "") != cur_sid:
+        # ⚠️ 先确认 backend 真的切到目标会话：卡片构建早于 set_current_session 时
+        # 投影只会拿旧会话重算一遍（40~115ms 白烧），而且旧实现会写 5s 守卫，
+        # 把之后会话已就位时的 1s 补刷也挡在窗口外 → 该卡片页脚永久空白。
+        # get_current_session() 只是取引用（微秒级），每次刷新都可以放心探一次。
+        be_sid = ""
+        try:
+            be = getattr(collector, "_bound_backend", None)
+            be_sess = be.get_current_session() if be is not None else None
+            be_sid = str(getattr(be_sess, "session_id", "") or "")
+        except Exception:
+            be_sid = ""
+        if be_sid != cur_sid:
+            # 会话还没就位：不投影、不记守卫，下一次刷新（1s/3s 补刷）自然重试。
+            logger.debug(
+                f"[agent_trace] footer 聚合跳过：backend 会话未就位 "
+                f"(be={be_sid[:8] or '空'} != cur={cur_sid[:8]})，等下一拍重试"
+            )
+            return None
         wid = str(ctx.get("window_id") or "")
         guard_key = (wid, cur_sid)
         now = time.time()
@@ -194,8 +221,10 @@ def _aggregate_records(ctx):
             collector.refresh()
         except Exception as e:  # noqa: BLE001 — 重投影失败只能退化，不影响渲染
             logger.debug(f"[agent_trace] footer 重投影失败: {e}")
-        if cur_sid and str(getattr(collector, "_active_session_id", "") or "") != cur_sid:
+        if str(getattr(collector, "_active_session_id", "") or "") != cur_sid:
             return None
+        # 对齐成功：清掉守卫，避免同窗口后续真实切换被残留时间戳挡住。
+        _REPROJECT_GUARD.pop(guard_key, None)
     total_tokens = 0
     total_gen_s = 0.0
     rounds = 0
@@ -207,14 +236,22 @@ def _aggregate_records(ctx):
             continue
         total_ms = rec.duration_ms if rec.duration_ms > 0 else int(rec.meta.get("elapsed_ms") or 0)
         ttft = rec.meta.get("ttft_ms")
-        ttft_ms = int(ttft) if isinstance(ttft, (int, float)) and ttft > 0 else 0
-        gen_ms = total_ms - ttft_ms
+        if not (isinstance(ttft, (int, float)) and ttft > 0):
+            # 缺 TTFT：elapsed 含首 token 前的 prefill/排队，不能当生成时间（见函数注释）。
+            continue
+        gen_ms = total_ms - int(ttft)
         if gen_ms <= 200:
             continue
         total_tokens += tokens
         total_gen_s += gen_ms / 1000.0
         rounds += 1
     if total_gen_s <= 0 or total_tokens <= 0:
+        # 常见命中：纯工具轮（无 content/reasoning delta）缺 ttft_ms 被口径整条跳过，
+        # 新会话仅此一条时聚合为空 → 页脚不显示 tps。留 DEBUG 便于定位「不显示」。
+        logger.debug(
+            f"[agent_trace] footer 聚合为空：rounds={rounds} tokens={total_tokens} "
+            f"gen_s={total_gen_s:.1f}（多为缺 ttft_ms 的纯工具轮被口径跳过）"
+        )
         return None
     return total_tokens, total_gen_s, rounds
 

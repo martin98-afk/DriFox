@@ -11,6 +11,7 @@ from __future__ import annotations
 import importlib.util
 import sys
 import threading
+import time
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 
@@ -340,8 +341,25 @@ class RuntimeComponentLoader:
             removed_items = self._unload_source(plugin_name)
             if removed_items:
                 logger.info(f"[RuntimeLoader] 注销插件组件: {plugin_name}（{removed_items} 项）")
+            # 摘除该组件的插件模块引用（与 tools/providers 对齐）：reload_plugin 靠
+            # _load_module 内部 pop+exec 自然换新，但删除/禁用路径不再加载——不 pop
+            # 则旧模块（含模块级单例/QThread/定时器）永久驻留在 sys.modules。
+            self._purge_plugin_modules(plugin_name)
             # 跨根覆盖恢复：仅重扫比目标根更低等级的根（被覆盖方）
             self._rescan_roots_below(removed_rank)
+
+    def _purge_plugin_modules(self, plugin_name: str) -> int:
+        """从 sys.modules 摘除本组件类型的插件模块（前缀精确到 _ 分隔，防误伤同前缀插件）"""
+        head = f"drifox_rt_{self._comp_dir}_{plugin_name}"
+        removed = [m for m in list(sys.modules.keys()) if m == head or m.startswith(head + "_") or m.startswith(head + ".")]
+        for m in removed:
+            sys.modules.pop(m, None)
+        if removed:
+            import importlib
+
+            importlib.invalidate_caches()
+            logger.debug(f"[RuntimeLoader] 已清理模块 {len(removed)} 个: {self._comp_dir}/{plugin_name}")
+        return len(removed)
 
     def reload_plugin(self, plugin_name: str) -> None:
         """精准重载单个插件的运行时组件（安装/更新/启用路径），不波及他插件
@@ -590,6 +608,7 @@ _budget_resolver_loader: Optional[RuntimeComponentLoader] = None
 # 替换时会重建 loader（见 _persistent_loader），id 变化即重扫；裸布尔会让换
 # registry 后的调用永远返回 {}，测试里 monkeypatch get_instance 直接拿空表。
 _warmup_stamp: Optional[tuple] = None
+_warmup_component_stamps: Dict[str, int] = {}  # comp -> 已扫过的 loader id（组件级幂等）
 _warmup_once_lock = threading.Lock()
 _adapters_watcher: Optional[_RuntimeWatcher] = None
 _loop_watcher: Optional[_RuntimeWatcher] = None
@@ -889,6 +908,31 @@ def ensure_context_watcher() -> Optional[_RuntimeWatcher]:
         return _context_watcher
 
 
+def warmup_component(comp: str) -> Optional[Set[str]]:
+    """单个运行时组件的 warmup（组件级幂等）。
+
+    拆到组件粒度是为了让调用方能在后台线程/分片里逐个预热（原先 11 组件
+    一次扫完 7.4s，主线程无 yield 直接冻结）。返回本次扫到的插件名集合；
+    该组件已用同一 loader 扫过时返回 None（纯重复轮次，跳过）。
+
+    并发语义：判定在 _warmup_once_lock 内，扫描在锁外（scan_roots 自带
+    _scan_lock，锁内调用会与 ensure_*_watcher 的 _watchers_lock 嵌套）。
+    """
+    if comp not in _LOADER_SPECS:
+        raise KeyError(f"未知运行时组件: {comp}")
+    loader = _persistent_loader(comp)
+    with _warmup_once_lock:
+        if _warmup_component_stamps.get(comp) == id(loader):
+            return None
+        _warmup_component_stamps[comp] = id(loader)
+    t0 = time.perf_counter()
+    loaded = loader.scan_roots()
+    cost_ms = (time.perf_counter() - t0) * 1000
+    if cost_ms >= 100:
+        logger.debug(f"[RuntimeLoader] warmup {comp} = {cost_ms:.0f}ms (plugins={len(loaded)})")
+    return loaded
+
+
 def warmup_runtime_components() -> Dict[str, Set[str]]:
     """启动期一次性加载五类运行时组件（系统插件 plugins/system 提供默认实现）。
 
@@ -905,20 +949,12 @@ def warmup_runtime_components() -> Dict[str, Set[str]]:
     返回空 dict 不代表未加载——可能是其他线程已完成本轮扫描（调用方不应以
     返回值判定组件是否就绪，需查询对应 registry）。
     """
-    global _warmup_stamp
-
-    # 先取 11 个持久 loader（registry 单例被替换时会重建，见 _persistent_loader），
-    # 再以它们的 id 元组做幂等判定：戳记一致 → 本轮无新 loader → 纯重复轮次，跳过。
-    loaders = {comp: _persistent_loader(comp) for comp in _LOADER_SPECS}
-    stamp = tuple(id(loaders[comp]) for comp in _LOADER_SPECS)
-    with _warmup_once_lock:
-        if _warmup_stamp == stamp:
-            return {}
-        _warmup_stamp = stamp
-
-    # 锁外执行：scan_roots 持自身 _scan_lock，本锁内调用会与 ensure_*_watcher 的
-    # _watchers_lock 嵌套（watcher 内亦调 scan_roots）。
     result: Dict[str, Set[str]] = {}
-    for comp, loader in loaders.items():
-        result[comp] = loader.scan_roots()
+    for comp in _LOADER_SPECS:
+        loaded = warmup_component(comp)
+        if loaded is not None:
+            result[comp] = loaded
+        # 组件之间让出 GIL：即使被同步调用（测试/冷启动防御路径），主线程也能在
+        # 相邻组件的 import 之间推进事件循环，而不是被整段 import 连续占满。
+        time.sleep(0)
     return result

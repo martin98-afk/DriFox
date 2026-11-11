@@ -53,10 +53,13 @@ class InputCardModule(UIModule):
         host._bottom_input_container.setObjectName("bottomContainer")
         bottom_layout = QVBoxLayout(host._bottom_input_container)
         host._bottom_input_layout = bottom_layout
-        # 呼吸感：输入区四周留出边距（左右 10 / 顶 6 / 底 7，叠加主布局 1px），
-        # 工具栏条 _position_bottom_toolbar 的绝对定位与这套 margins 严格对齐，
-        # 改这里必须同步改那边，否则输入卡与工具栏不等宽
-        bottom_layout.setContentsMargins(10, 6, 10, 7)
+        # 呼吸感：输入区四周留出边距（左右 10 / 顶 3 / 底 4，叠加主布局 1px）。
+        # 顶/底从 6/7 收敛：像素实测 footer 行到输入框 23px、输入框到窗口底 21px，
+        # 均比上方间隔大近一倍，视觉沉坠；收敛后 footer↔输入框 ≈16、输入框↔底 ≈15。
+        # 工具栏条 _position_bottom_toolbar 的绝对定位与这套 margins 严格对齐
+        # （底抬高 = 主布局 1px + 本容器底边距 4 = 5px），改这里必须同步改那边，
+        # 否则输入卡与工具栏不等宽
+        bottom_layout.setContentsMargins(10, 3, 10, 4)
         bottom_layout.setSpacing(0)
 
         # ===== 输入卡片（上方圆角 + 渐变 + 边框，border-bottom: none）=====
@@ -136,7 +139,7 @@ class InputCardModule(UIModule):
         host._load_input_history()
 
         # 命令卡片（必须是输入框创建后）
-        host._command_card = CommandCard(host._bottom_input_container)
+        host._command_card = CommandCard(host._bottom_input_container, host=host)
         host._command_card.setVisible(False)
         host.input_area.set_command_card(host._command_card)
         mgr = host._card_manager
@@ -236,10 +239,10 @@ class InputCardModule(UIModule):
         host._pending_send_user_text = None  # 截断后发送的用户消息文本（用于指纹比对）
 
         # （内置命令已在上方注册）更新命令 --model= 参数描述
-        host._update_subagents_param_description()
+        # /subagents 的描述由 system-subagent 插件在注册 handler 时自己回填
         host._update_title_gen_param_description()
 
         # 监听配置变更，配置同步时自动刷新命令卡参数描述和 UI
+        # （子智能体默认模型的描述刷新由插件监听，主程序不持有该业务）
         _cfg = _Cfg.get_instance()
-        _cfg.llm_subagent_default_model.valueChanged.connect(host._on_subagent_model_config_changed)
         _cfg.llm_title_gen_default_model.valueChanged.connect(host._on_title_gen_model_config_changed)

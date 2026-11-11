@@ -6,7 +6,7 @@
 故不设二次确认，底部以固定提示说明。
 """
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QListWidget, QPlainTextEdit, QVBoxLayout

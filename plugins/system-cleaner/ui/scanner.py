@@ -6,10 +6,14 @@
 - 所有文件操作通过 os/shutil/stdlib 完成
 """
 
+import csv
+import ctypes
+import locale
 import os
 import re
 import shutil
 import stat
+import subprocess
 import sys
 import traceback
 from pathlib import Path
@@ -17,6 +21,8 @@ from typing import Dict, List, NamedTuple, Optional
 
 from PySide6.QtCore import QObject, Signal
 
+# Windows 下从 GUI 进程调用控制台程序会弹黑框，需显式隐藏子进程控制台窗口
+_CREATE_NO_WINDOW = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
 
 # ── 路径常量 ──────────────────────────────────────────────
 
@@ -82,9 +88,9 @@ CACHE_DEFS: List[CleanerItem] = [
         False,
         "AI 删除文件前的自动备份（垃圾箱），误删后唯一恢复手段，建议保留",
     ),
-    CleanerItem("logs", "file", "日志文件", "logs", False, False, "运行日志，排查问题时有用"),
-    CleanerItem("cache", "database", "应用缓存", "cache", True, True, "可重建的离线缓存"),
-    CleanerItem("screenshots", "camera", "截图文件", "screenshots", False, False),
+    CleanerItem("logs", "file", "日志文件", "logs", False, True, "运行日志，排查问题时有用"),
+    CleanerItem("cache", "database", "应用缓存", "cache", True, False, "可重建的离线缓存"),
+    CleanerItem("screenshots", "camera", "截图文件", "screenshots", False, True),
     CleanerItem("archived", "archive", "归档会话", "archived", False, False),
     CleanerItem("share_sessions", "upload", "分享会话文件", "share/sessions", False, False),
     # 工具执行结果缓存:app/core/tool_result_persister.py 写入
@@ -145,12 +151,82 @@ def _walk_dir_size(path: Path) -> int:
     return total
 
 
+# macOS libproc 句柄与 rusage_info_v4 结构（仅 darwin 使用，懒加载缓存）
+_LIBPROC: Optional[ctypes.CDLL] = None
+
+
+class _RUsageInfoV4(ctypes.Structure):
+    """macOS proc_pid_rusage(RUSAGE_INFO_V4) 返回结构（字段布局来自 libproc.h）"""
+
+    _fields_ = [
+        ("ri_uuid", ctypes.c_uint8 * 16),
+        ("ri_user_time", ctypes.c_uint64),
+        ("ri_system_time", ctypes.c_uint64),
+        ("ri_pkg_idle_wkups", ctypes.c_uint64),
+        ("ri_interrupt_wkups", ctypes.c_uint64),
+        ("ri_pageins", ctypes.c_uint64),
+        ("ri_wired_size", ctypes.c_uint64),
+        ("ri_resident_size", ctypes.c_uint64),
+        ("ri_phys_footprint", ctypes.c_uint64),
+        ("ri_user_time_max", ctypes.c_uint64),
+        ("ri_system_time_max", ctypes.c_uint64),
+        ("ri_pkg_idle_wkups_max", ctypes.c_uint64),
+        ("ri_interrupt_wkups_max", ctypes.c_uint64),
+        ("ri_pageins_max", ctypes.c_uint64),
+        ("ri_wired_size_max", ctypes.c_uint64),
+        ("ri_resident_size_max", ctypes.c_uint64),
+        ("ri_phys_footprint_max", ctypes.c_uint64),
+        ("ri_proc_flags", ctypes.c_uint64),
+        ("ri_average_dram_purgeable", ctypes.c_uint64),
+        ("ri_average_compressed", ctypes.c_uint64),
+        ("ri_diskio_bytesread", ctypes.c_uint64),
+        ("ri_diskio_byteswritten", ctypes.c_uint64),
+        ("ri_idle_wkups", ctypes.c_uint64),
+        ("ri_idle_wkups_max", ctypes.c_uint64),
+        ("ri_counters", ctypes.c_uint64 * 6),
+        # 实测(2026-11-09)：现代 macOS 内核对 RUSAGE_INFO_V4 实际写入 >208 字节，
+        # 按旧 libproc.h 布局给足 208B 会被越界写坏堆(调用即返回正常、之后
+        # 任意 gc/free 段错误)。加尾垫到 512B，读取字段(off 72)不受影响。
+        ("_tail_pad", ctypes.c_uint64 * 32),
+    ]
+
+
 def _get_process_memory() -> Optional[int]:
-    """获取当前进程 RSS 内存（字节）"""
+    """获取当前进程内存占用（字节）。
+
+    macOS 返回 phys_footprint（与活动监视器「内存」列同口径），
+    Windows/Linux 返回 RSS。
+
+    为什么 macOS 不能用 RSS（2026-11-09 实测）：libmalloc 释放内存走
+    madvise(MADV_FREE_REUSABLE) 惰性回收，归还的页面进入内核 FREE 池后
+    仍计入 resident_size——分配 200MB 再全部释放，footprint 从 212.9MB
+    落回 9.8MB，而 RSS 恒为 224.0MB 纹丝不动。「释放内存」按钮的前后
+    数字都基于本函数，读 RSS 用户永远看不到下降，误以为清理无效。
+    """
+    if sys.platform == "darwin":
+        mem = _mac_phys_footprint()
+        if mem is not None:
+            return mem
     try:
         import psutil
 
         return psutil.Process(os.getpid()).memory_info().rss
+    except Exception:
+        return None
+
+
+def _mac_phys_footprint() -> Optional[int]:
+    """macOS：proc_pid_rusage 读 phys_footprint（真实物理占用，字节）。失败返 None。"""
+    global _LIBPROC
+    try:
+        if _LIBPROC is None:
+            _LIBPROC = ctypes.CDLL("/usr/lib/libproc.dylib")
+            _LIBPROC.proc_pid_rusage.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_void_p]
+            _LIBPROC.proc_pid_rusage.restype = ctypes.c_int
+        ri = _RUsageInfoV4()
+        if _LIBPROC.proc_pid_rusage(os.getpid(), 4, ctypes.byref(ri)) != 0:
+            return None
+        return int(ri.ri_phys_footprint)
     except Exception:
         return None
 
@@ -198,21 +274,21 @@ def _delete_cache(path: Path, dir_mode: bool):
                     _rmtree_force(entry)
                 else:
                     entry.unlink()
-            except OSError, PermissionError:
+            except (OSError, PermissionError):
                 pass
-    except OSError, PermissionError:
+    except (OSError, PermissionError):
         pass
 
 
 def _kill_qwebengine_processes() -> int:
-    """终止残留的 QtWebEngine(Chromium) 子进程，归还其占用的内存。
+    """终止残留的 QtWebEngine(Chromium) 孤儿子进程，归还其占用的内存。
 
-    只清理与当前 DriFox 相关的进程，避免误杀其它应用：
-
-    1. 当前进程的全部后代中名称含 qwebengine 的进程
-       （renderer / GPU / network service 等，通常各占数百 MB 内存）；
-    2. 全系统中名称含 qwebengine、但父进程已消失的孤儿进程
-       （DriFox 退出/崩溃后残留的"僵尸" Chromium 进程）。
+    只清理「父进程已消失」的孤儿进程（DriFox 退出/崩溃后残留的"僵尸"
+    Chromium 进程）。**绝不杀当前进程的后代**（2026-11-06）：主进程存活时，
+    其 WebEngine renderer/GPU/network 子进程是正在渲染消息页面的活动资源，
+    一并杀掉会把在途渲染内容直接清空。正常退出由 Qt 生命周期回收子进程；
+    异常残留会变孤儿，由下方兜底捕获。误杀在途渲染的代价远大于漏杀几个
+    孤儿的收益，取舍明确。
 
     先发 terminate 优雅退出，超时未退的再强杀（kill）。
 
@@ -224,39 +300,91 @@ def _kill_qwebengine_processes() -> int:
     except Exception:
         return 0
 
-    pattern = re.compile(r"qwebengine", re.IGNORECASE)
+    pattern = re.compile(r"qtwebengine", re.IGNORECASE)
     self_pid = os.getpid()
     procs = []
     seen = set()
 
-    # ── 1. 当前进程的子孙进程 ──
-    try:
-        for p in psutil.Process(self_pid).children(recursive=True):
-            try:
-                if pattern.search(p.name() or ""):
-                    procs.append(p)
-                    seen.add(p.pid)
-            except Exception:
-                pass
-    except Exception:
-        pass
+    # ── 全系统孤儿兜底（父进程已不存在的残留；父存活的进程一律不碰） ──
+    def _fallback_iter_orphans():
+        """tasklist/pgrep 失败或超时的回落：process_iter 全表迭代（慢，保底不劣化）。"""
+        try:
+            for p in psutil.process_iter(["pid", "name", "ppid"]):
+                try:
+                    if p.info["pid"] in seen:
+                        continue
+                    if not pattern.search(p.info["name"] or ""):
+                        continue
+                    ppid = p.info["ppid"]
+                    if ppid in (0, 1) or not psutil.pid_exists(ppid):
+                        procs.append(p)
+                        seen.add(p.info["pid"])
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
-    # ── 2. 全系统孤儿兜底（父进程已不存在的残留） ──
-    try:
-        for p in psutil.process_iter(["pid", "name", "ppid"]):
-            try:
-                if p.info["pid"] in seen:
+    # Windows：tasklist 子进程枚举（psutil.process_iter 全表迭代长持 GIL，
+    # 打包版 watchdog 543ms / 源码版 9025ms 实证）。CSV 只取列 0（映像名）/
+    # 列 1（PID），不依赖列数；候选（通常几十个）再 psutil.Process(pid)
+    # 定点校验孤儿身份与 kill，不再全表迭代。
+    # macOS：tasklist 是 Windows 命令必抛 FileNotFoundError，原实现每次
+    # 回落 process_iter 全表（实测 9 秒）。pgrep -if 毫秒级出候选 pid。
+    if sys.platform == "darwin":
+        try:
+            out = subprocess.run(
+                ["pgrep", "-if", "qtwebengine"],
+                capture_output=True,
+                timeout=10,
+            ).stdout
+            for line in out.decode(errors="replace").splitlines():
+                try:
+                    pid = int(line.strip())
+                except ValueError:
                     continue
-                if not pattern.search(p.info["name"] or ""):
+                if pid in seen or pid == self_pid:
                     continue
-                ppid = p.info["ppid"]
+                try:
+                    p = psutil.Process(pid)
+                    ppid = p.ppid()
+                except Exception:
+                    continue
                 if ppid in (0, 1) or not psutil.pid_exists(ppid):
                     procs.append(p)
-                    seen.add(p.info["pid"])
-            except Exception:
-                pass
-    except Exception:
-        pass
+                    seen.add(pid)
+        except Exception:
+            _fallback_iter_orphans()  # pgrep 失败 → 回落全表路径
+    else:
+        try:
+            raw = subprocess.run(
+                ["tasklist", "/FO", "CSV", "/NH"],
+                capture_output=True,
+                timeout=10,
+                creationflags=_CREATE_NO_WINDOW,
+            ).stdout
+            text = raw.decode(locale.getpreferredencoding(False), errors="replace")
+            for row in csv.reader(text.splitlines()):
+                if len(row) < 2:
+                    continue
+                if not pattern.search(row[0] or ""):
+                    continue
+                try:
+                    pid = int(row[1].strip())
+                except ValueError:
+                    continue
+                if pid in seen or pid == self_pid:
+                    continue
+                try:
+                    p = psutil.Process(pid)
+                    ppid = p.ppid()
+                except Exception:
+                    continue
+                if ppid in (0, 1) or not psutil.pid_exists(ppid):
+                    procs.append(p)
+                    seen.add(pid)
+        except Exception:
+            # tasklist 失败/超时 → 回落原 process_iter 全表路径（保底不劣化）
+            _fallback_iter_orphans()
 
     if not procs:
         return 0
@@ -336,7 +464,7 @@ def _release_memory_light():
 
 
 def _release_memory_deep():
-    """第二阶段：全代 GC + 工作集归还 OS + 清理 WebEngine 子进程（高危原生操作）。
+    """第二阶段：全代 GC + 工作集归还 OS + 清理孤儿 WebEngine 子进程（高危原生操作）。
 
     注意：调用前必须让主线程事件循环排干在途回调（见 cards._on_memory_release 的
     分拍设计）：本阶段的 gc.collect(2) 可能连带析构 Python 独占的 QObject，
@@ -371,13 +499,62 @@ def _release_memory_deep():
         elif _sys.platform == "linux":
             libc = ctypes.CDLL("libc.so.6", use_last_error=True)
             libc.malloc_trim(0)
+        elif _sys.platform == "darwin":
+            # macOS：把滞留在 malloc zone free list 的空闲页推入内核 FREE 池。
+            # libmalloc 在 free() 时已自动 madvise(MADV_FREE_REUSABLE)，footprint
+            # 随对象释放自动下降（实测 relief 前后一致），本调用是 free list 兜底，
+            # 与 win/linux 分支保持语义对齐。
+            libc = ctypes.CDLL(None)
+            libc.malloc_default_zone.restype = ctypes.c_void_p
+            libc.malloc_zone_pressure_relief.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
+            libc.malloc_zone_pressure_relief(libc.malloc_default_zone(), 0)
     except Exception:
         pass
 
-    # ── 7. 终止残留 QtWebEngine(Chromium) 子进程，归还其内存 ──
+    # ── 7. 终止残留 QtWebEngine(Chromium) 孤儿子进程，归还其内存 ──
     killed_procs = _kill_qwebengine_processes()
 
     return collected, killed_procs
+
+def _release_memory_deep_core() -> int:
+    """第二阶段的可主线程部分：GS 全代回收 + 工作集归还 OS。
+
+    从 ``_release_memory_deep`` 拆出来，供「GC 留主线程、psutil 进后台」的分拍
+    调用（见 cards._on_memory_release）。
+
+    为什么 GC 不放后台：``gc.collect(2)`` 回收期间会暂停**全部**线程（含主线程）
+    直到回收完成，换到后台线程只是把停顿换个地方发生，主线程照样卡。真正的
+    收益来自把 psutil 的全系统进程遍历（逐个 OpenProcess 取 pid/name/ppid，
+    2026-10-31 实测主线程阻塞 501ms）挪到后台——那部分是真实的阻塞式 IO。
+
+    Returns:
+        gc.collect(2) 回收的对象数
+    """
+    import ctypes
+    import gc
+    import sys as _sys
+
+    collected = gc.collect(2)
+
+    # 工作集修剪（崩溃修复见 _release_memory_deep 的步骤 6 注释）
+    try:
+        if _sys.platform == "win32":
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            h = kernel32.GetCurrentProcess()
+            kernel32.SetProcessWorkingSetSize(h, ctypes.c_size_t(-1).value, ctypes.c_size_t(-1).value)
+        elif _sys.platform == "linux":
+            libc = ctypes.CDLL("libc.so.6", use_last_error=True)
+            libc.malloc_trim(0)
+        elif _sys.platform == "darwin":
+            # macOS free list 兜底（原理见 _release_memory_deep 步骤 6 注释）
+            libc = ctypes.CDLL(None)
+            libc.malloc_default_zone.restype = ctypes.c_void_p
+            libc.malloc_zone_pressure_relief.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
+            libc.malloc_zone_pressure_relief(libc.malloc_default_zone(), 0)
+    except Exception:
+        pass
+
+    return collected
 
 
 def _release_memory():

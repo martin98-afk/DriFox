@@ -119,8 +119,11 @@ def _on_mention_selected(entry: dict, ctx: dict) -> None:
         from assistant_hub_manager import AssistantManager
 
         mgr = AssistantManager.get_instance()
-        if mgr.set_session_override(sid, aid):
-            mgr._invalidate_session_prompt(sid)
+        changed = mgr.set_session_override(sid, aid)
+        # 选中即失效缓存：即使 override 数值未变，缓存也可能被上下文统计等
+        # 旁路重建为主助手身份（本轮发送将复用旧 prompt）。
+        mgr._invalidate_session_prompt(sid)
+        if changed:
             a = mgr.get(aid)
             logger.info(f"[assistant_hub] 会话 {sid[:8]} 临时切换助手: {a.name if a else aid}")
     except Exception as e:
@@ -715,7 +718,7 @@ def register_ui(registry) -> None:
     for k in stale:
         del sys.modules[k]
 
-    # 延迟 import — 卡片依赖 qfluentwidgets / PyQt5
+    # 延迟 import — 卡片依赖 qfluentwidgets / PySide6
     from .assistant_card import AssistantCardWidget
 
     icons_dir = _plugin_icons_dir()
@@ -770,9 +773,6 @@ def register_ui(registry) -> None:
 
     # ── 欢迎卡片「助手」tab + 点击填 @助手名 ──
     _register_welcome_tab()
-
-    # ── BuildSystemPrompt hook 顺序提升（先于系统身份注入）──
-    _promote_build_system_prompt_hook()
 
     logger.info(
         f"[assistant_hub] UI 组件已注册：floating_card(assistant_hub/full"

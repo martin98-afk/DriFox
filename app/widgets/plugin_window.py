@@ -20,13 +20,13 @@ from qframelesswindow import FramelessWindow
 from loguru import logger
 
 from app.utils.utils import get_icon
-from app.widgets.custom_title_bar import CustomTitleBar
+from app.widgets.custom_title_bar import CustomTitleBar, _MacTrafficLightCenterMixin
 
 #: 窗口壳默认窗口标题（未提供 title 时）
 _DEFAULT_TITLE = "插件窗口"
 
 
-class PluginWindow(FramelessWindow):
+class PluginWindow(_MacTrafficLightCenterMixin, FramelessWindow):
     """插件独立弹窗壳：CustomTitleBar(minimal=True) + 内容页填满客户区"""
 
     def __init__(self, window_info, context: Optional[Dict[str, Any]] = None, registry=None):
@@ -151,10 +151,23 @@ class PluginWindow(FramelessWindow):
                 show_card()
             except Exception as e:
                 logger.warning(f"[PluginWindow] 内容页 show_card 失败: {e}")
+        # 内容页此刻已是当前外观（show_card 内通常会 _apply_latest_theme）：
+        # 记纪元，避免首次 showEvent 再白刷一遍。
+        try:
+            from app.utils.theme_style import stamp_theme_epoch
+
+            stamp_theme_epoch(page)
+        except Exception:
+            pass
         return page
 
     def refresh_theme(self) -> None:
-        """主题切换刷新（ThemeManager.register_refresh_target 契约）"""
+        """主题切换刷新（ThemeManager.register_refresh_target 契约）
+
+        [PERF] 分流：窗口不可见时只置脏（内容页整树 repolish 白付），
+        下次 showEvent 由 ``ensure_theme_fresh`` 补刷。标题栏与窗口底色
+        成本极低且是本窗口 QSS，照常刷——它们不依赖插件页结构。
+        """
         try:
             from app.utils.design_tokens import Colors
 
@@ -166,14 +179,31 @@ class PluginWindow(FramelessWindow):
         except Exception:
             pass
         self._apply_window_style()
-        # 主题级联到内容页（插件页若实现 refresh_theme 则同步刷新）
         content = getattr(self, "_content", None)
-        refresh_theme = getattr(content, "refresh_theme", None)
-        if callable(refresh_theme):
-            try:
-                refresh_theme()
-            except Exception:
-                pass
+        if content is None:
+            return
+        try:
+            from app.utils.theme_style import ensure_theme_fresh, mark_theme_dirty
+
+            if content.isVisible():
+                ensure_theme_fresh(content)
+            else:
+                mark_theme_dirty(content)
+        except RuntimeError:
+            pass
+
+    def showEvent(self, event) -> None:
+        """显示补刷：隐藏期主题变更只置脏，这里补到当前外观纪元"""
+        super().showEvent(event)
+        content = getattr(self, "_content", None)
+        if content is None:
+            return
+        try:
+            from app.utils.theme_style import ensure_theme_fresh
+
+            ensure_theme_fresh(content)
+        except RuntimeError:
+            pass
 
     def closeEvent(self, event) -> None:
         """手动关闭：从 registry 摘除实例（与 close_window 幂等）"""

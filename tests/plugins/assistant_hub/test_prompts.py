@@ -51,11 +51,5 @@ def test_build_distill_gate():
     assert "/proj/MEMORY.md" in c and "/data/MEMORY.md" in c
 
 
-def test_reflect():
-    c = _roles_ok(m.build_reflect("人格", "记忆", "经验"))
-    assert "JSON" in c and "category" in c
 
 
-def test_consolidate():
-    c = _roles_ok(m.build_consolidate([{"category": "测试", "content": "一条经验"}]))
-    assert "JSON" in c and "测试" in c and "一条经验" in c

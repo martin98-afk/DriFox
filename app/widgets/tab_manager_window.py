@@ -30,10 +30,12 @@ from PySide6.QtWidgets import (
 
 from qframelesswindow import FramelessWindow
 
+from app.utils._startup_probe import mark as _probe
 from app.utils.config import Settings
 from app.utils.design_tokens import Animations, Colors, font_size_css
 from app.utils.theme_manager import theme_manager
 from app.utils.utils import get_font_family_css, get_unified_font
+from app.widgets.custom_title_bar import _MacTrafficLightCenterMixin
 
 # ── 对话区限宽档位（px）：窗口过宽时限制对话内容宽度并居中，两侧留白 ──
 # 避免聊天内容在超宽屏幕上被拉得难以阅读。档位可在 设置-外观 切换。
@@ -333,8 +335,17 @@ class EmptyStateWidget(QWidget):
         layout.addWidget(self._text_label)
 
     def refresh_style(self):
-        """主题/字体变更后刷新样式"""
+        """主题/字体变更后刷新样式
+
+        原 QSS 含 Colors.TEXT_MUTED（构造时定格），只 setFont 不重建
+        QSS 的话文字色不随主题切换。
+        """
+        Colors.refresh()
         self._text_label.setFont(get_unified_font(14))
+        self._text_label.setStyleSheet(
+            f"color: {Colors.TEXT_MUTED}; background: transparent;"
+            f" {get_font_family_css()} {font_size_css(14)}"
+        )
         self._text_label.setStyleSheet(
             f"color: {Colors.TEXT_MUTED}; background: transparent; {get_font_family_css()} {font_size_css(14)}"
         )
@@ -682,7 +693,78 @@ class _DockSideWrapper(QWidget):
         self._partner_saved_size = 0
 
 
-class _WorkbenchFrame(QFrame):
+class _ThemedPanel(QFrame):
+    """自绘主题面板：圆角半透明底 + 1px 边框，颜色实时取 Colors
+
+    为什么要自绘（2026-10-30）：三个顶层容器的主题色原先写在 QSS 串里，
+    主题一变串就变 → `setStyleSheet` 触发**整子树 repolish**（三容器合计
+    实测 1.5s 级，见 ThemeRefresh-SLOW 的 tm_qss 段）。改成 paintEvent 自绘后
+    主题切换只需 `update()`（重绘一个矩形），QSS 只剩 margin/radius 这类静态
+    属性，串恒定 → 同串短路天然命中。
+
+    观感等价性：背景色/边框色/圆角值与原 QSS 逐项相同（CARD_BG alpha=150、
+    BORDER 1px、8px 圆角），不引入新的视觉差异。
+    """
+
+    # 主题刷新协议：ThemeManager 派发时优先调 refresh_style
+    _theme_needs_refresh: bool = False
+
+    def __init__(self, parent=None, *, radius: int = 8, bg_alpha: int = 150, border: bool = True):
+        super().__init__(parent)
+        self._panel_radius = radius
+        self._panel_bg_alpha = bg_alpha
+        self._panel_border = border
+
+    def refresh_style(self) -> None:
+        """主题切换入口：只重绘（不碰 QSS，零 repolish）"""
+        self.update()
+
+    def paintEvent(self, event):  # noqa: N802 (Qt 命名)
+        from PySide6.QtCore import QRectF
+        from PySide6.QtGui import QPainter, QPen
+
+        from app.utils.design_tokens import Colors, _rgba_to_qcolor
+
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        # 内缩 0.5px：1px 描边落在像素中心，避免抗锯齿把边框糊成 2px 虚边
+        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        painter.setBrush(_rgba_to_qcolor(Colors.CARD_BG.format(alpha=self._panel_bg_alpha)))
+        if self._panel_border:
+            painter.setPen(QPen(_rgba_to_qcolor(Colors.BORDER), 1))
+        else:
+            painter.setPen(Qt.NoPen)
+        painter.drawRoundedRect(rect, self._panel_radius, self._panel_radius)
+
+
+class _WindowBaseLayer(QWidget):
+    """窗口本体底色层（替代 #tabManagerWindow 的 QSS 背景）
+
+    QSS 里写窗口底色会让主题切换触发**整窗** repolish（实测 600~800ms）；
+    改由铺满窗口的底层控件自绘，主题切换只 update()。层级必须在所有内容
+    之下（lower），且鼠标穿透，不参与任何交互。
+    """
+
+    _theme_needs_refresh: bool = False
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self.setObjectName("windowBaseLayer")
+
+    def refresh_style(self) -> None:
+        self.update()
+
+    def paintEvent(self, event):  # noqa: N802 (Qt 命名)
+        from PySide6.QtGui import QPainter
+
+        from app.utils.design_tokens import Colors, _rgba_to_qcolor
+
+        painter = QPainter(self)
+        painter.fillRect(self.rect(), _rgba_to_qcolor(Colors.CONTENT_BG))
+
+
+class _WorkbenchFrame(_ThemedPanel):
     """工作台外框：动画期间可临时把 minimumSizeHint 归零
 
     QSplitter 经 QWidgetItemV2::minimumSize() 取窗格下限：显式 minimum 为
@@ -700,7 +782,7 @@ class _WorkbenchFrame(QFrame):
     _theme_needs_refresh: bool = False
 
     def __init__(self, parent: Optional[QWidget] = None):
-        super().__init__(parent)
+        super().__init__(parent, radius=8)
         self._min_hint_disabled = False
 
     def set_min_hint_disabled(self, disabled: bool) -> None:
@@ -1038,7 +1120,7 @@ class _ContentStack(QWidget):
         return w.minimumSizeHint() if w is not None else QSize(0, 0)
 
 
-class TabManagerWindow(FramelessWindow):
+class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
     """Tab 管理器宿主窗口（单例）"""
 
     _instance: Optional["TabManagerWindow"] = None
@@ -1199,8 +1281,10 @@ class TabManagerWindow(FramelessWindow):
         self._tab_switch_queue: list = []
         self._tab_switch_timer: Optional[QTimer] = None
 
+        _probe("p4.setup_ui.start")
         self._setup_ui()
         self._setup_signals()
+        _probe("p4.setup_ui.end")
         # 不在 __init__ 设位置，等第一次 showEvent 时再设
 
         # ── 应用级服务启动已挪至 main.py（壳显示后、首窗构造前）──
@@ -1237,7 +1321,9 @@ class TabManagerWindow(FramelessWindow):
         get_global_card_controller()
 
         # 刷新 Tab 面板内嵌的 UI 插件列表
+        _probe("p4.refresh_ui_plugins.start")
         self._tab_panel.refresh_ui_plugins()
+        _probe("p4.refresh_ui_plugins.end")
         # 注册到 TrayManager
         _sm_t2 = _sm_time.perf_counter()
         logger.debug(f"[TabManager] __init__ API 会话/全局卡段耗时 {(_sm_t2 - _sm_t1) * 1000:.0f}ms")
@@ -1431,7 +1517,16 @@ class TabManagerWindow(FramelessWindow):
         ThemeRefreshCoordinator.timer_start("tab_manager")
 
         # 重建样式表
+        ThemeRefreshCoordinator.timer_start("tm_qss")
         self._apply_theme_stylesheet()
+        # 窗口底色层自绘：串恒定短路后靠 update() 换色
+        _base_layer = getattr(self, "_window_base_layer", None)
+        if _base_layer is not None:
+            try:
+                _base_layer.refresh_style()
+            except RuntimeError:
+                self._window_base_layer = None
+        ThemeRefreshCoordinator.timer_end("tm_qss")
 
         # 刷新右侧工作台面板（页签条 / 任务区 / 内置页 / 插件页签 / 卡片 tab
         # 全在 workbench_panel.refresh_style 内逐页分发，独立于本窗口 QSS）
@@ -1444,33 +1539,48 @@ class TabManagerWindow(FramelessWindow):
         #   dispatch 路径下 panel 另有独立注册，此处会重复刷新——低频云同步/
         #   主题热重载路径，refresh_style 幂等，双刷可接受。
         try:
+            ThemeRefreshCoordinator.timer_start("tm_wb")
             panel = getattr(self, "workbench_panel", None)
             if panel is not None:
                 panel.refresh_style()
+            ThemeRefreshCoordinator.timer_end("tm_wb")
         except Exception:
             logger.exception("[TabManagerWindow] workbench panel theme refresh failed")
 
         # hover 预览浮层是独立顶层窗口，不继承本窗口 QSS，需单独刷新；
         # 预览中的 frame 带内联样式（脱离 QSS 作用域），同步刷新
         overlay = getattr(self, "_wb_overlay", None)
+        ThemeRefreshCoordinator.timer_start("tm_overlay")
         if overlay is not None:
             overlay.refresh_style()
+        ThemeRefreshCoordinator.timer_end("tm_overlay")
         if getattr(self, "_wb_in_preview", False):
             self._workbench_frame.setStyleSheet(self._wb_frame_inline_qss())
 
         # 刷新自绘顶栏（tab 胶囊/按钮样式随主题；Colors 已由调用方 refresh）
+        ThemeRefreshCoordinator.timer_start("tm_titlebar")
         if hasattr(self.titleBar, "refresh_style"):
             self.titleBar.refresh_style()
+        ThemeRefreshCoordinator.timer_end("tm_titlebar")
         # 刷新空状态页（字体/颜色随主题或字号刷新）
+        ThemeRefreshCoordinator.timer_start("tm_empty")
         if hasattr(self, "_empty_state"):
             self._empty_state.refresh_style()
+        ThemeRefreshCoordinator.timer_end("tm_empty")
         # 刷新所有 Tab 项（标题颜色/字体/图标尺寸随主题或字号刷新）
         # refresh_style 内部已执行 repaint，此处不再重复
         try:
-            self._tab_panel.refresh_style()
+            ThemeRefreshCoordinator.timer_start("tm_tabs")
+            _tab_panel = getattr(self, "_tab_panel", None)
+            if _tab_panel is not None:
+                _tab_panel.refresh_style()
         except Exception:
-            pass
+            # 不能静默：此前 except pass 吞掉异常 → tm_tabs 计时缺失且侧栏停留旧主题
+            logger.exception("[TabManagerWindow] tab panel theme refresh failed")
+        finally:
+            ThemeRefreshCoordinator.timer_end("tm_tabs")
         # 刷新全局卡片容器背景（主题色/边框随主题切换）
+        ThemeRefreshCoordinator.timer_start("tm_containers")
         for _c in (
             getattr(self, "_global_top_container", None),
             getattr(self, "_global_bottom_container", None),
@@ -1481,14 +1591,17 @@ class TabManagerWindow(FramelessWindow):
                     _c.refresh_style()
                 except Exception:
                     pass
+        ThemeRefreshCoordinator.timer_end("tm_containers")
         # 刷新全局卡片本体（系统设置/服务商/Hook/MCP 编辑等挂在本窗口层，
         # 不在 main_widget widget 树内，主题/字号刷新链扫不到，需显式触发）
         try:
             from app.widgets.cards.global_card_controller import get_global_card_controller
 
+            ThemeRefreshCoordinator.timer_start("tm_cards")
             _controller = get_global_card_controller()
             if _controller is not None:
                 _controller.refresh_theme_styles()
+            ThemeRefreshCoordinator.timer_end("tm_cards")
         except Exception:
             logger.exception("[TabManagerWindow] global cards theme refresh failed")
         # 重画所有 tab 的项目图标：仅在 scale_icon_size 变化时才需重建
@@ -1507,13 +1620,14 @@ class TabManagerWindow(FramelessWindow):
                     pass
 
         # 刷新全局背景图
+        ThemeRefreshCoordinator.timer_start("tm_bg")
         self._apply_bg_from_theme()
+        ThemeRefreshCoordinator.timer_end("tm_bg")
 
-        # 刷新标题栏（含 full 卡片 tab 与插件常驻 tab 样式）
-        try:
-            self.titleBar.refresh_style()
-        except Exception:
-            pass
+        # [PERF] 此处原有第二次无条件 self.titleBar.refresh_style()：本方法前部
+        # 已刷过同一个顶栏，中间几步（tm_tabs/tm_cards/tm_bg）均不涉及顶栏
+        # 控件，属纯重复（顶栏内部多次 setStyleSheet，实测几十 ms 级）。
+        # 若未来把前部那次调用移走，记得在这里补回。
 
         ThemeRefreshCoordinator.timer_end("tab_manager")
 
@@ -2082,7 +2196,7 @@ class TabManagerWindow(FramelessWindow):
         按钮等场景都走这里。置顶记忆在助手中心管理，不再有记忆页。
 
         Args:
-            sub_tab: 兼容旧签名；任何取值都落「工作树」页（关键文档+工作树）
+            sub_tab: 兼容旧签名；任何取值都落「工作树」页
         """
         panel = getattr(self, "workbench_panel", None)
         if panel is None:
@@ -2325,58 +2439,65 @@ class TabManagerWindow(FramelessWindow):
         # wb_hidden 路径独立成串重设窗口串即可，无需触碰色值容器串）。
         # 只拆**顶层三兄弟**的原因：子树重叠容器（chatFrame/chatManagerContent
         # 各含 1400+ 控件）逐个设反而更慢（拆分合计 1245ms vs 整窗 320ms，实测）。
-        qss = f"""
-            #tabManagerWindow {{
-                /* [T30-P0fix] 窗口本体底色：无独立承载链，窗口串是唯一挂点。
-                   f-string 动态色值——CONTENT_BG 变则串变，同串短路语义不受影响
-                   （字号/同主题场景色值不变，仍走短路）。
+        qss = """
+            #tabManagerWindow {
+                /* [2026-10-30] 窗口本体底色改由 _WindowBaseLayer 自绘承载：
+                   原先这里写 f-string 色值 → 主题一变整串变 → setStyleSheet
+                   触发整窗 1500+ 控件 repolish（实测 600~800ms）。改为
+                   transparent 后本串恒定（同串短路直接命中），底色由铺满
+                   窗口的底层控件绘制，主题切换只 update()。
                    ★ 顶层窗口不要设 border-radius：Qt 只会把"背景绘制"裁成圆角，
                    圆角外侧三角区不会被绘制，底层透出系统默认窗口色。窗口圆角
                    由 DWM 负责（_apply_win11_dwm_chrome）。 */
-                background: {Colors.CONTENT_BG};
-            }}
-            #tabFrame {{
+                background: transparent;
+            }
+            #tabFrame {
                 /* 左侧圆角矩形容器，与右侧 #chatFrame 对称，提升呼吸感 */
                 border-radius: 8px;
                 margin: 4px 0 4px 4px;  /* 四边与窗口 4px 边距，右 0 让位 splitter handle */
-            }}
-            #chatFrame {{
+            }
+            #chatFrame {
                 border-radius: 8px;
                 /* 左右 margin 均 0，让位给 splitter handle：三窗格布局下
                    中间窗格两侧各有一个 4px handle，若此处保留右 4px margin，
                    右间距会变成 8px 而左间距只有 4px，两侧不对称。 */
                 margin: 4px 0 4px 0;
-            }}
+            }
             /* 工作台隐藏后右侧 handle 消失，需补回窗口右边距，
                否则对话区圆角矩形贴死窗口边框 */
-            #chatFrame[wbHidden="true"] {{
+            #chatFrame[wbHidden="true"] {
                 margin: 4px 4px 4px 0;
-            }}
-            #tabManagerContent {{
+            }
+            #tabManagerContent {
                 background: transparent;
                 border-radius: 8px;
-            }}
-            #contentArea {{
+            }
+            #contentArea {
                 background: transparent;
-            }}
-            #contentStack {{
+            }
+            #contentStack {
                 background: transparent;
-            }}
-            #globalOverlay {{
+            }
+            #globalOverlay {
                 /* 覆盖层页面透明：面板底由内部 CardContainer 按卡片状态自绘
                    （transparentOverlay 卡片 → 容器透明，透出 #chatFrame 半透明
                    面板与对话区无缝衔接；普通卡片 → 容器自画 alpha=246 面板底）。 */
                 background: transparent;
                 border-radius: 8px;
-            }}
+            }
         """
+        from app.utils.theme_refresh import ThemeRefreshCoordinator as _TRC
+
+        _TRC.timer_start("tm_qss_win")
         if qss != self.styleSheet():
             self.setStyleSheet(qss)
+        _TRC.timer_end("tm_qss_win")
         # [T30] 顶层三兄弟：可见者即时刷色值串并清脏；不可见者置脏跳过
         #（repolish 留到可见性恢复点 _refresh_theme_dirty_frames）
         # [T30-P0] getattr 防御：本方法在构造期（_setup_ui）即被调用，
         # 此时 frame 属性可能尚未创建——未创建属正常态，跳过即可，
         # 后续主题切换 / showEvent / 动画结束等补刷点会兜住。
+        _TRC.timer_start("tm_qss_frames")
         for frame, qss_method in (
             (getattr(self, "_tab_frame", None), self._qss_tab_frame),
             (getattr(self, "_chat_frame", None), self._qss_chat_frame),
@@ -2389,11 +2510,15 @@ class TabManagerWindow(FramelessWindow):
                 if frame.isVisible():
                     if frame_qss != frame.styleSheet():
                         frame.setStyleSheet(frame_qss)
+                    # 自绘容器（_ThemedPanel）：颜色不在 QSS 里，靠 update() 重绘
+                    if hasattr(frame, "refresh_style"):
+                        frame.refresh_style()
                     frame._theme_needs_refresh = False
                 else:
                     frame._theme_needs_refresh = True
             except RuntimeError:
                 continue  # C++ 对象已销毁
+        _TRC.timer_end("tm_qss_frames")
         # ── splitter handle 样式：下沉到 QSplitterHandle 自身（性能关键）──
         # [PERF] QSplitter.setStyleSheet 会让 QStyleSheetStyle 重建并 repolish
         # **整棵子树**（本窗口三个 splitter 分别挂 431/1470/1462 个子控件）。
@@ -2409,39 +2534,37 @@ class TabManagerWindow(FramelessWindow):
         #   （裸属性写法与 `*:hover` 均无法触发 hover 态）；
         # - handle 由 splitter 在 addWidget / setOrientation 时按需创建，
         #   故需 _reapply_splitter_handle_styles 在布局变化后补刷。
+        _TRC.timer_start("tm_qss_handles")
         self._reapply_splitter_handle_styles()
+        _TRC.timer_end("tm_qss_handles")
 
     def _qss_tab_frame(self) -> str:
-        """#tabPanel/#tabFrame 主题色值串（[T30] 静态串拆出的色值组）"""
-        return f"""
-            #tabPanel {{
-                background: {Colors.CARD_BG.format(alpha=150)};
-                border-radius: 8px;
-            }}
-            #tabFrame {{
-                background: {Colors.CARD_BG.format(alpha=150)};
-                border: 1px solid {Colors.BORDER};
-            }}
+        """#tabFrame 串：色值已改 paintEvent 自绘（tabFrame + tabPanel 双层），此处恒为空
+
+        tabPanel 的背景同步改为 TabPanel.paintEvent 自绘；两层 alpha=150 叠加
+        关系与原 QSS 一致。串恒为空 → 同串短路命中，主题切换零 repolish。
         """
+        return ""
 
     def _qss_chat_frame(self) -> str:
-        """#chatFrame 主题色值串"""
-        return f"""
-            #chatFrame {{
-                background: {Colors.CARD_BG.format(alpha=150)};
-                border: 1px solid {Colors.BORDER};
-            }}
+        """#chatFrame 串：色值已改 paintEvent 自绘，此处恒为空
+
+        返回空串时调用点会跳过 setStyleSheet（空串会触发一次无意义 repolish）。
+        margin/圆角在静态窗口串里，不依赖本串。
         """
+        return ""
 
     def _qss_workbench_frame(self) -> str:
-        """#workbenchFrame 主题色值串（radius/margin 一并在此：静态串无此规则）"""
-        return f"""
-            #workbenchFrame {{
-                background: {Colors.CARD_BG.format(alpha=150)};
-                border: 1px solid {Colors.BORDER};
+        """#workbenchFrame 串：只剩静态的 radius/margin（色值已自绘）
+
+        串与主题无关 → 始终同串 → 同串短路命中，主题切换零 repolish。
+        margin 必须留在这里：静态窗口串不含 #workbenchFrame 规则。
+        """
+        return """
+            #workbenchFrame {
                 border-radius: 8px;
                 margin: 4px 4px 4px 0;
-            }}
+            }
         """
 
     def _refresh_theme_dirty_frames(self) -> None:
@@ -2473,6 +2596,10 @@ class TabManagerWindow(FramelessWindow):
                     frame_qss = qss_method()
                     if frame_qss != frame.styleSheet():
                         frame.setStyleSheet(frame_qss)
+                    # 自绘容器（_ThemedPanel）：颜色已不在 QSS 里，必须 update()
+                    # 重绘才会换色；无 refresh_style 的普通 QFrame 自动跳过。
+                    if hasattr(frame, "refresh_style"):
+                        frame.refresh_style()
                     frame._theme_needs_refresh = False
                 else:
                     frame._theme_needs_refresh = True
@@ -2496,8 +2623,40 @@ class TabManagerWindow(FramelessWindow):
             self._apply_area_bg("sidebar", getattr(self, "_tab_frame", None), bgs["sidebar"])
             self._apply_area_bg("chat_area", getattr(self, "_chat_frame", None), bgs["chat_area"])
             self._apply_scene_layer(bgs["scene"])
+            self._apply_region_animation("window", self, bgs["window"])
+            self._apply_region_animation(
+                "sidebar", getattr(self, "_tab_frame", None), bgs["sidebar"]
+            )
+            self._apply_video_overlay(bgs.get("overlay"))
+            # 主题切换后回收不再被任何区域订阅的动画源（旧素材不占内存）
+            from app.widgets.anim_background import AnimationRegistry
+
+            AnimationRegistry.instance().prune()
+            self._apply_theme_music(bgs.get("music"))
         except Exception as e:
             logger.warning(f"[TabManagerWindow] 应用主题背景失败: {e}")
+
+    def _apply_theme_music(self, music_cfg):
+        """应用 backgrounds.music 到主窗口级播放器
+
+        播放器是主窗口级单例：多个 TabManagerWindow 不叠音。无配置（None）
+        或 enabled=False 时停止播放并清空列表身份。
+        """
+        try:
+            from app.utils import theme_music_store
+            from app.widgets.theme_music_player import ThemeMusicPlayer
+
+            player = ThemeMusicPlayer.instance()
+            # 单曲开关按主题存（plugin_data/<插件>/theme_music.json），
+            # 只影响播放子集，不改变列表身份
+            disabled = (
+                theme_music_store.load_disabled(theme_manager.get_current_theme_id())
+                if music_cfg
+                else ()
+            )
+            player.apply_config(music_cfg, self._resolve_theme_image, disabled=disabled)
+        except Exception as e:
+            logger.warning(f"[TabManagerWindow] 应用主题音乐失败: {e}")
 
     def _apply_scene_layer(self, scene_cfg):
         """应用 scene 配置到 _scene_layer（撑满整个右侧 _chat_frame 圆角矩形）
@@ -2511,8 +2670,210 @@ class TabManagerWindow(FramelessWindow):
         # image 解析：复用 _resolve_theme_image（已在文件内）
         try:
             self._scene_layer.apply_config(scene_cfg, self._resolve_theme_image)
+            anim = (scene_cfg or {}).get("animation")
+            if anim and anim.get("canvas") == "shared":
+                self._scene_layer.set_canvas_provider(
+                    self._make_canvas_provider(getattr(self, "_chat_frame", None))
+                )
+            else:
+                self._scene_layer.set_canvas_provider(None)
         except Exception as e:
             logger.warning(f"[TabManagerWindow] 应用 scene 背景失败: {e}")
+
+    def _make_canvas_provider(self, region_widget):
+        """共享画布求值函数：画布=整窗，返回区域左缘在窗口中的 x 偏移
+
+        多个区域用同一张动画时，各自按画布尺寸绘制一块，父控件裁剪后只显示
+        自己那段，左右分栏的接缝处图案严格连续（不用各自 cover 重排）。
+        垂直方向以区域自身高度为画布高，与窗口层差一个标题栏高度，渐变动画
+        里看不出来。
+        """
+
+        def provider():
+            if region_widget is None:
+                return None
+            try:
+                from PySide6.QtCore import QPoint
+
+                origin = region_widget.mapTo(self, QPoint(0, 0))
+                return (self.width(), region_widget.height(), max(0, origin.x()), 0)
+            except RuntimeError:
+                return None
+
+        return provider
+
+    # overlay.target 合法值 → 宿主属性名（window 特判为 self）
+    _OVERLAY_TARGETS = {
+        "window": "_window_base_layer",
+        "sidebar": "_tab_frame",
+        "chat_area": "_chat_frame",
+        "scene": "_chat_frame",
+    }
+
+    def _apply_region_animation(self, area, parent_widget, cfg):
+        """给 window/sidebar 挂动画背景层
+
+        静态图/纯色仍由 _apply_area_bg 的 QLabel 负责（路径不变、开销更低），
+        动画另叠一个透明 SceneLayer：素材是动画 WebP，Qt 内置解码，
+        不依赖系统媒体栈。同一区域重复应用时按 src+fps 去重。
+        """
+        if parent_widget is None:
+            return
+        anim = (cfg or {}).get("animation")
+        src = (anim or {}).get("src") or "__none__"
+        # 去重键必须用解析后的绝对路径：各主题普遍写相同的相对路径
+        # （../../assets/chat.webp），用原串会让不同插件的不同素材命中同一
+        # key，切换主题时直接 return，动画背景停在旧素材上。
+        if src != "__none__":
+            src = self._resolve_theme_image(src)
+        key = (
+            f"{src}:{(anim or {}).get('fps', 12)}:"
+            f"{(anim or {}).get('canvas') or 'independent'}:"
+            f"{(anim or {}).get('opacity', 1.0)}"
+        )
+        attr = f"_{area}_anim_layer"
+        key_attr = f"_last_{area}_anim_key"
+        old = getattr(self, attr, None)
+        if getattr(self, key_attr, None) == key and old is not None:
+            return
+        setattr(self, key_attr, key)
+
+        if old is not None:
+            try:
+                old.clear()
+                old.hide()
+                old.deleteLater()
+            except RuntimeError:
+                pass
+            setattr(self, attr, None)
+
+        if not anim or not anim.get("enabled", True) or not anim.get("src"):
+            return
+
+        try:
+            from app.widgets.scene_layer import SceneLayer
+
+            layer = SceneLayer(parent_widget, radius=0 if area == "window" else 8)
+            layer.apply_config({"animation": anim}, self._resolve_theme_image)
+            if anim.get("canvas") == "shared":
+                layer.set_canvas_provider(self._make_canvas_provider(parent_widget))
+            layer.setGeometry(parent_widget.rect())
+            # parent resize → SceneLayer.eventFilter 同步几何。动画层是绝对
+            # 定位子控件、不参与布局，漏装 filter 时窗口/侧栏 resize 后动画
+            # 背景停在创建时的尺寸（静态图走 _AutoGeometryLabel 有同步，
+            # 动画层此前漏了，表现为 webp 背景不同步缩放）。
+            parent_widget.installEventFilter(layer)
+            layer.lower()
+            if area == "window":
+                base = getattr(self, "_window_base_layer", None)
+                if base is not None:
+                    base.stackUnder(layer)
+            # 静态图（QLabel）垫在动画层之下，否则 image+animation 同时配置时
+            # 动画会被静态图完全盖住
+            static_label = getattr(self, f"_{area}_bg_label", None)
+            if static_label is not None:
+                try:
+                    static_label.stackUnder(layer)
+                except RuntimeError:
+                    pass
+            layer.show()
+            setattr(self, attr, layer)
+        except Exception as e:
+            logger.warning(f"[TabManagerWindow] 应用 {area} 动画背景失败: {e}")
+
+
+    def _overlay_target_widget(self, target: str):
+        """按 target 取视频层挂载父 widget；window 挂窗口自身"""
+        if target == "window":
+            return self
+        return getattr(self, self._OVERLAY_TARGETS.get(target, "_chat_frame"), None)
+
+    def _apply_video_overlay(self, overlay_cfg):
+        """应用 backgrounds.overlay 到 target 指定区域（scene 之上、UI 之下）
+
+        target 决定挂载区域（window/sidebar/chat_area/scene，缺省 chat_area，
+        非法值回落 chat_area）。一个主题只允许一处视频：切 target 时先停掉
+        其它 target 的层，但保留下层实例不销毁（避免重复 installEventFilter）。
+
+        懒创建：首次出现该 target 的 overlay 配置才构造；配置消失时停止播放并
+        隐藏，不销毁 widget。Z 序：layer.lower() 后 scene_layer.stackUnder(layer)，
+        最终 SceneLayer < VideoOverlayLayer < UI 控件。
+        """
+        layers = self.__dict__.setdefault("_video_overlay_layers", {})
+        active = bool(overlay_cfg) and overlay_cfg.get("enabled", True) and overlay_cfg.get("video")
+
+        if not active:
+            for layer in layers.values():
+                try:
+                    layer.stop_video()
+                    layer.hide()
+                except RuntimeError:
+                    pass  # C++ 对象已销毁
+            return
+
+        # Qt5 的 QMediaPlayer 只是壳，解码委托系统媒体栈：同一素材在不同机器上
+        # 能不能播取决于系统装了什么解码器（实测 MediaFoundation 注册缺失时报
+        # InvalidMedia 且 errorString 为空）。统一改用 animation.webp，视频层
+        # 保留给 Qt6 复活（QtMultimedia 自带 ffmpeg 后端）。
+        from PySide6.QtCore import qVersion
+
+        if int(qVersion().split(".")[0]) < 6:
+            logger.info(
+                "[TabManagerWindow] 跳过视频 overlay：Qt5 无内置解码器，"
+                "请把素材转成 animation.webp（见 wallpaper-to-theme 技能）"
+            )
+            return
+
+        target = str(overlay_cfg.get("target") or "chat_area").lower()
+        if target not in self._OVERLAY_TARGETS:
+            target = "chat_area"
+
+        # 一个主题只允许一处视频：其它 target 的层停掉并隐藏
+        for name, layer in layers.items():
+            if name == target:
+                continue
+            try:
+                layer.stop_video()
+                layer.hide()
+            except RuntimeError:
+                pass
+
+        parent = self._overlay_target_widget(target)
+        if parent is None:
+            logger.warning(f"[TabManagerWindow] overlay.target={target} 无挂载点，跳过")
+            return
+
+        try:
+            layer = layers.get(target)
+            # 同 target 但父 widget 变了（窗口重建等）：弃旧建新
+            if layer is not None and layer.parent() is not parent:
+                try:
+                    layer.stop_video()
+                    layer.hide()
+                    layer.deleteLater()
+                except RuntimeError:
+                    pass
+                layer = None
+
+            if layer is None:
+                from app.widgets.video_overlay_layer import VideoOverlayLayer
+
+                layer = VideoOverlayLayer(parent)
+                parent.installEventFilter(layer)
+                layers[target] = layer
+
+            layer.apply_config(overlay_cfg, self._resolve_theme_image)
+            layer.show()
+            layer.sync_geometry()
+            layer.lower()
+            scene = getattr(self, "_scene_layer", None)
+            if scene is not None and scene.parent() is parent:
+                try:
+                    scene.stackUnder(layer)
+                except RuntimeError:
+                    pass  # scene 层已销毁
+        except Exception as e:
+            logger.warning(f"[TabManagerWindow] 应用动态背景失败: {e}")
 
     def _apply_area_bg(self, area, parent_widget, bg_cfg):
         """统一区域背景加载器（window/sidebar/chat_area 共用）
@@ -2533,9 +2894,12 @@ class TabManagerWindow(FramelessWindow):
         image = bg_cfg.get("image")
         opacity = bg_cfg.get("opacity", 1.0)
         color = bg_cfg.get("color")
+        # 先解析成绝对路径：不同主题常用同名相对路径（sidebar.jpg），用原串
+        # 作缓存键会跨主题误命中，切主题后背景图不换。
+        resolved_image = self._resolve_theme_image(image) if image else None
 
         # 缓存键：image + opacity + color 共同决定唯一性
-        bg_key = f"{(image or '__none__')}:{opacity:.3f}:{(color or '__none__')}"
+        bg_key = f"{(resolved_image or '__none__')}:{opacity:.3f}:{(color or '__none__')}"
         if getattr(self, key_attr, None) == bg_key and getattr(self, label_attr, None) is not None:
             return
         setattr(self, key_attr, bg_key)
@@ -2557,8 +2921,7 @@ class TabManagerWindow(FramelessWindow):
 
         # 1. 图片
         if image:
-            resolved = self._resolve_theme_image(image)
-            pix = QPixmap(resolved)
+            pix = QPixmap(resolved_image)
             if not pix.isNull():
                 label.setPixmap(pix)
                 label.setScaledContents(True)
@@ -2576,6 +2939,18 @@ class TabManagerWindow(FramelessWindow):
 
         # Z 序：放到 parent 最底层
         label.lower()
+        # ★ 窗口区域：背景 label 必须垫在 _WindowBaseLayer **之上**。
+        # base layer 用不透明 CONTENT_BG 填充整窗（替代原 QSS 底色），
+        # label.lower() 会把它压到 base 之下 → 背景图/底色被完全盖住
+        # （实测 2026-10-30：窗口背景不显示，侧栏/对话区不受影响——
+        # 它们的背景 label 挂在各自 frame 上，与此层不同父，Z 序无关）。
+        if area == "window":
+            base = getattr(self, "_window_base_layer", None)
+            if base is not None:
+                try:
+                    base.stackUnder(label)
+                except RuntimeError:
+                    pass  # 底色层已销毁
         # 尺寸：撑满 parent
         label.setGeometry(parent_widget.rect())
         label.show()
@@ -2604,13 +2979,22 @@ class TabManagerWindow(FramelessWindow):
             return image
         theme_dir = theme_manager.get_theme_dir(theme_manager.get_current_theme_id())
         if theme_dir:
-            abs_path = str(theme_dir / image)
+            # normpath 清掉 `../` 段：跨主题共享资源（../shared/x.mp3）拼出的
+            # 原始字符串带 "demo/../shared"，exists 能过，但 QUrl.fromLocalFile
+            # 会把它原样带进 file:// URL，媒体后端不保证能解析
+            abs_path = _os.path.normpath(str(theme_dir / image))
             if _os.path.exists(abs_path):
                 return abs_path
         return image  # fallback 原值
 
     def _resize_bg_labels(self):
-        """同步 3 个区域背景 label 的尺寸跟随 parent（resize 阶段一/阶段二都用）"""
+        """同步背景 label 与窗口底色层的尺寸（resize 阶段一/阶段二都用）"""
+        base = getattr(self, "_window_base_layer", None)
+        if base is not None:
+            try:
+                base.setGeometry(self.rect())
+            except Exception:
+                pass
         for attr in ("_bg_label", "_sidebar_bg_label", "_chat_area_bg_label"):
             lbl = getattr(self, attr, None)
             if lbl is None:
@@ -2621,13 +3005,32 @@ class TabManagerWindow(FramelessWindow):
                     lbl.resize(parent.size())
             except Exception:
                 pass
+        # 动画层与场景层：resize 阶段二跳过布局传播，子控件不会收到 resize，
+        # eventFilter 不触发，必须手动同步。sync_geometry = 自身撑满 parent +
+        # 内容层重算画布几何（覆盖原 refresh_canvas_geometry 的语义），否则
+        # 缩放过程中侧栏/对话区动画会错位
+        for attr in ("_window_anim_layer", "_sidebar_anim_layer", "_scene_layer"):
+            layer = getattr(self, attr, None)
+            if layer is None or not hasattr(layer, "sync_geometry"):
+                continue
+            try:
+                layer.sync_geometry()
+            except RuntimeError:
+                pass
 
     def _setup_ui(self):
         # ── 外层纵向布局：直接放内容区（顶部让位自绘无边框标题栏） ──
         main_layout = QVBoxLayout(self)
-        # 顶部让位自绘无边框标题栏；mac 上标题栏只有 28（与系统交通灯配套）
+        # 顶部让位自绘无边框标题栏（mac 与 Win/Linux 统一 38，交通灯由 mixin 居中）
         main_layout.setContentsMargins(0, self.titleBar.height(), 0, 0)
         main_layout.setSpacing(0)
+
+        # ── 窗口本体底色层（承载原 #tabManagerWindow 的 background）──
+        # 必须先于内容创建并 lower() 到底层；几何由 resizeEvent 同步。
+        self._window_base_layer = _WindowBaseLayer(self)
+        self._window_base_layer.setGeometry(self.rect())
+        self._window_base_layer.lower()
+        self._window_base_layer.show()
 
         # ── 内容区（水平：TabPanel + QStackedWidget） ──
         content_widget = QWidget(self)
@@ -2649,7 +3052,7 @@ class TabManagerWindow(FramelessWindow):
         # ── 左侧 Tab 区域圆角矩形包裹框架（与右侧 #chatFrame 对称，提升呼吸感） ──
         # 在 splitter 里直接给 #tabPanel 设 border 会被 splitter handle 子控件
         # 绘制顺序吞掉，所以再包一层 QFrame 用 objectName 给样式。
-        self._tab_frame = QFrame(content_widget)
+        self._tab_frame = _ThemedPanel(content_widget, radius=8)
         self._tab_frame.setObjectName("tabFrame")
         # QSplitter 控制的 child 是 _tab_frame 而非 _tab_panel，因此
         # _tab_frame 必须显式设最大/最小宽度，否则 splitter 拖拽会绕过
@@ -2700,7 +3103,7 @@ class TabManagerWindow(FramelessWindow):
         ResizeOrchestrator.get_instance().register_stack(self._content_area)
 
         # ── 右侧对话区域圆角矩形包裹框架 ──
-        self._chat_frame = QFrame(content_widget)
+        self._chat_frame = _ThemedPanel(content_widget, radius=8)
         self._chat_frame.setObjectName("chatFrame")
         # 工作台默认隐藏：对话区先按“右侧无边距”以外的隐藏态样式渲染，
         # 首次展开时由 set_workbench_visible 切回三窗格 margin
@@ -2962,9 +3365,13 @@ class TabManagerWindow(FramelessWindow):
         if hasattr(self, "_splitter"):
             self._splitter.splitterMoved.connect(self._on_splitter_manually_moved)
 
+        # 应用焦点变化 → 主题音乐失焦暂停（所有平台）
+        _app_inst = QApplication.instance()
+        if _app_inst is not None:
+            _app_inst.applicationStateChanged.connect(self._on_application_focus_changed)
         # macOS 软置顶：应用激活时补抬升（详见 _on_app_state_changed）
-        if _IS_MAC:
-            QApplication.instance().applicationStateChanged.connect(self._on_app_state_changed)
+        if _IS_MAC and _app_inst is not None:
+            _app_inst.applicationStateChanged.connect(self._on_app_state_changed)
 
         # 对话区限宽档位变更（设置-外观）→ 立即重算 wrapper margins，
         # 无需等窗口 resize；同时通知已存在的消息卡按新宽度重新折行。
@@ -3120,18 +3527,11 @@ class TabManagerWindow(FramelessWindow):
                 target = getattr(self, "_left_card_saved_panel_frame_w", 0) or max(
                     _EXPANDED_MIN_FRAME_WIDTH, _DEFAULT_PANEL_WIDTH + _FRAME_PADDING_X
                 )
-                # ★ 切页投影触发的卡片关闭：当前活跃页有独立宽度记忆
-                #   （per-tab）时以它为准——_left_card_saved_panel_frame_w 是
-                #   卡片打开那页的无卡宽，拿它落位别的页会把该页宽度打回
-                #   打开页基准（实测：A 开卡（201）→ 切到记忆 500 的 B 页，
-                #   卡片投影关闭用 201 覆盖 B 的 500）。
-                try:
-                    _cur_win = self.get_current_window()
-                    _win_mem = getattr(_cur_win, "_tab_sidebar_frame_w", None) if _cur_win is not None else None
-                    if _win_mem and int(_win_mem) > _COLLAPSED_PANEL_WIDTH + _FRAME_PADDING_X:
-                        target = max(_EXPANDED_MIN_FRAME_WIDTH, int(_win_mem))
-                except Exception:
-                    pass
+                # ★ 全局统一宽度（2026-11-02）：恢复基准以全局 saved 优先——
+                #   所有页共享同一宽度真源，无 per-tab 读取；卡片打开期记忆的
+                #   无卡宽兜底（saved 缺省时保持旧回落行为）。
+                if int(getattr(self, "_saved_panel_frame_width", 0) or 0) > 0:
+                    target = max(_EXPANDED_MIN_FRAME_WIDTH, int(self._saved_panel_frame_width))
             # 2) 收回 frame max（回到无卡片时的静态上限）后落位
             self._tab_frame.setMaximumWidth(_TAB_PANEL_MAX_CONTENT_WIDTH + _FRAME_PADDING_X)
             if abs(tab_w - target) > 1:
@@ -3257,12 +3657,6 @@ class TabManagerWindow(FramelessWindow):
                         ) + _FRAME_PADDING_X
                 else:
                     self._saved_panel_frame_width = cur_frame_w
-                # 手动折叠（非挤压）：清当前活跃窗口的 per-tab 宽度记忆——
-                # 用户显式收起是意图，切页不得按旧记忆展开回拖拽宽度
-                if not self._tab_panel._collapsed_by_squeeze:
-                    _cur_win = self.get_current_window()
-                    if _cur_win is not None:
-                        _cur_win._tab_sidebar_frame_w = None
                 logger.debug(
                     f"[TSW] 折叠存意图 cur_frame_w={sizes[0]} saved->{self._saved_panel_frame_width}"
                 )
@@ -3377,6 +3771,13 @@ class TabManagerWindow(FramelessWindow):
             # ★ 三值 setSizes：保留工作台宽度，否则折叠左侧会连带清掉右侧
             if self._sidebar_anim_collapsing:
                 target_w = self._tab_panel._collapsed_min_width + _FRAME_PADDING_X
+                # ★ 折叠收尾态必须与落位宽度一致：动画期间 _collapsed 可能被
+                #   外部编排（启动恢复 / 切页 restore / 卡片让位）改写为 False，
+                #   只按 _sidebar_anim_collapsing 落位会留下「宽度=图标条、
+                #   状态=展开」的矛盾态；此后切页按展开态恢复，宽度先跳变再
+                #   被 resizeEvent 折回（用户可见"先弹一下再缩回"）。
+                if not self._tab_panel._collapsed:
+                    self._tab_panel._collapsed = True
             else:
                 # ★ 同 _on_sidebar_toggled：展开下限必须明显高于折叠线，
                 #   否则落位宽度骑在折叠线上会被 resizeEvent 再次判折叠。
@@ -3516,20 +3917,6 @@ class TabManagerWindow(FramelessWindow):
         self._wb_collapsed_by_squeeze = True
         self.set_workbench_visible(False, animate=False)
 
-    @staticmethod
-    def _tab_switch_win_memory_baseline(prev_left_w: int, prev_collapsed: bool, win_mem) -> tuple | None:
-        """per-tab 宽度记忆基准（全局折叠态语义）
-
-        返回 (left_w, collapsed, snapshot) 或 None（无有效记忆，走 saved 基准）。
-        展开态：应用记忆宽（每页记住自己拖出的宽度）；
-        折叠态：保持折叠与折叠宽——记忆宽留给下次展开，切页不静默展开。
-        """
-        if win_mem and int(win_mem) > _COLLAPSED_PANEL_WIDTH + _FRAME_PADDING_X:
-            if prev_collapsed:
-                return int(prev_left_w), True, ("win", int(win_mem))
-            return int(win_mem), False, ("win", int(win_mem))
-        return None
-
     def _tab_switch_baseline_width(self, cur_left_w: int, collapsed: bool) -> int:
         """切页保宽的恢复基准宽
 
@@ -3566,15 +3953,11 @@ class TabManagerWindow(FramelessWindow):
             pass
         _snapshot = getattr(self, "_tab_switch_saved_snapshot", None)
         if _snapshot is not None:
-            _kind, _val = _snapshot
-            if _kind == "win":
-                _win = self.get_current_window()
-                _cur = getattr(_win, "_tab_sidebar_frame_w", None) if _win is not None else None
-            else:
-                _cur = getattr(self, "_saved_panel_frame_width", None)
+            _val = _snapshot[1]
+            _cur = getattr(self, "_saved_panel_frame_width", None)
             if _cur is not None and (_val is None or int(_cur) != int(_val)):
                 logger.debug(
-                    f"[TSW] restore 放弃 prev={prev_left_w} 基准已变 {_val}->{_cur} ({_kind})"
+                    f"[TSW] restore 放弃 prev={prev_left_w} 基准已变 {_val}->{_cur} (saved)"
                 )
                 return  # 切页后有新的宽度编排（含 saved 从无到有）：快照过时，不覆盖
         # ★ 卡片态守卫：left 卡片显隐是 per-tab 的，切页投影会让卡片态翻转
@@ -3617,6 +4000,20 @@ class TabManagerWindow(FramelessWindow):
             return
         if abs(sizes[0] - prev_left_w) <= 1 and bool(panel._collapsed) == prev_collapsed:
             return  # 未被挤压：零操作
+        # ★ 空间守卫：当前已折叠、目标却是展开态时，若几何放不下「目标宽 +
+        #   聊天最小宽 + 工作台」（或目标宽本身落在折叠区），放弃恢复。
+        #   否则 setSizes 会被 QSplitter 钳回折叠区，TabPanel.resizeEvent
+        #   同步折叠并启动一次 200ms 收起动画——用户可见「切页/新建先弹一下
+        #   再缩回」（右侧工作台挤压折叠常驻时必现）。保持折叠与挤压标记，
+        #   空间恢复后由 _maybe_auto_expand_after_squeeze 统一展开。
+        if not prev_collapsed and panel._collapsed:
+            _collapse_frame_w = panel._auto_collapse_width + _FRAME_PADDING_X
+            _wb_w = sizes[2] if len(sizes) >= 3 else 0
+            if prev_left_w <= _collapse_frame_w or sum(sizes) < prev_left_w + _MIN_CHAT_WIDTH + _wb_w:
+                logger.debug(
+                    f"[TSW] restore 放弃(空间不足) prev={prev_left_w} total={sum(sizes)} wb={_wb_w}"
+                )
+                return
         # 还原切前折叠态并清挤压标记（切页挤压痕迹一并抹掉，防后续
         # _maybe_auto_expand_after_squeeze 误触发自动展开）
         if bool(panel._collapsed) != prev_collapsed:
@@ -3630,17 +4027,8 @@ class TabManagerWindow(FramelessWindow):
             f"[TSW] restore 执行 prev={prev_left_w} collapsed={prev_collapsed} {_before}->{_after}"
         )
         if not prev_collapsed:
-            # 展开态恢复值即意图宽：回写全局 saved + 目标窗口 per-tab 记忆
+            # 展开态恢复值即意图宽：回写全局 saved（宽度全局单份，无 per-tab）
             self._saved_panel_frame_width = prev_left_w
-            _cur_win = self.get_current_window()
-            if _cur_win is not None:
-                _cur_win._tab_sidebar_frame_w = int(prev_left_w)
-
-    def _write_tab_sidebar_memory(self, w: int) -> None:
-        """把拖拽落定的宽度写进当前活跃对话窗口的 per-tab 宽度记忆"""
-        win = self.get_current_window()
-        if win is not None:
-            win._tab_sidebar_frame_w = int(w)
 
     def _maybe_auto_expand_after_squeeze(self, growth_required: bool = True, _retried: bool = False):
         """挤压折叠后空间恢复：自动展开回常规宽度（含工作台反向恢复）
@@ -3687,7 +4075,13 @@ class TabManagerWindow(FramelessWindow):
                     lambda: self._maybe_auto_expand_after_squeeze(growth_required=growth_required, _retried=True),
                 )
             return
-        total = sum(self._splitter.sizes()) if hasattr(self, "_splitter") else self.width()
+        _sizes = self._splitter.sizes() if hasattr(self, "_splitter") else []
+        total = sum(_sizes) if _sizes else self.width()
+        # ★ 工作台窗格当前占位必须计入空间判定（同 _evaluate_squeeze_collapse
+        #   的 `needed + _MIN_CHAT_WIDTH + wb_w` 口径）：漏扣时右栏开着但
+        #   chat 已被挤到最小宽以下的布局会被误判为"放得下"，展开请求随即
+        #   被打回折叠（用户可见弹动）。
+        _wb_w = _sizes[2] if len(_sizes) >= 3 else 0
         # ★ 展开目标下限须明显高于折叠线（同 _on_sidebar_toggled 注释）
         _min_expand_w = max(_EXPANDED_MIN_FRAME_WIDTH, _DEFAULT_PANEL_WIDTH + _FRAME_PADDING_X)
         target_w = max(_min_expand_w, getattr(self, "_saved_panel_frame_width", _min_expand_w))
@@ -3698,8 +4092,8 @@ class TabManagerWindow(FramelessWindow):
             if base is not None and total < base + _AUTO_EXPAND_GROWTH:
                 return  # 窗口未比折叠时更宽，不自动展开
         # 条件2：绝对下限
-        if total - (self._tab_panel._collapsed_min_width + _FRAME_PADDING_X) < target_w + chat_min:
-            return  # 空间不足，保持折叠
+        if total - (self._tab_panel._collapsed_min_width + _FRAME_PADDING_X) < target_w + chat_min + _wb_w:
+            return  # 空间不足，保持折叠（含工作台占位）
         # 空间足够：自动展开（先清标记防重入）
         panel._collapsed_by_squeeze = False
         panel.set_collapsed(False)
@@ -3783,6 +4177,15 @@ class TabManagerWindow(FramelessWindow):
         # 实时读 cfg：补射跟随用户最新折叠意图（启动后用户已操作的，
         # 按最新值落位；不用启动快照——它会把 0.7s 内的新操作静默翻回）
         saved_collapsed = bool(Settings.get_instance().ui_sidebar_collapsed.value)
+        # ★ 先对齐存档折叠态再动 splitter（顺序不可对调）：setSizes 会同步
+        #   触发 TabPanel.resizeEvent，若此刻 _collapsed 仍是展开态而宽度跌到
+        #   折叠线以下（且抑制已解除），会走自动折叠分支误置
+        #   _collapsed_by_squeeze=True——把"程序化恢复折叠"标成"被挤压"。
+        #   残留的挤压标记让下一次切页/新建会话命中"挤压折叠非用户意图 →
+        #   恢复展开"分支，侧边栏被弹开（实测：存档折叠启动 → 新建会话自动
+        #   展开）。先 set_collapsed 再 setSizes，resizeEvent 看到的已是折叠态。
+        if self._tab_panel._collapsed != saved_collapsed:
+            self._tab_panel.set_collapsed(saved_collapsed)
         frame_w = (
             (self._tab_panel._collapsed_min_width + _FRAME_PADDING_X)
             if saved_collapsed
@@ -3797,9 +4200,6 @@ class TabManagerWindow(FramelessWindow):
             return
         frame_w = min(frame_w, total)
         self._splitter.setSizes([frame_w, max(0, total - frame_w)])
-        # 对齐存档折叠态（set_collapsed 不发信号，避免与启动期动画互打断）
-        if self._tab_panel._collapsed != saved_collapsed:
-            self._tab_panel.set_collapsed(saved_collapsed)
         self._tab_panel.sync_collapsed_ui()
 
     # ── 覆盖层状态切换 ──
@@ -3893,6 +4293,10 @@ class TabManagerWindow(FramelessWindow):
             if card_id not in open_dict:
                 open_dict[card_id] = title
                 self.titleBar.add_tab(card_id, title, closable=True)
+            elif open_dict[card_id] != title:
+                # 卡片隐藏期间注册表 title 变过（如侧栏计数「插件市场 (N)」）
+                open_dict[card_id] = title
+                self.titleBar.set_tab_text(card_id, title)
             self._set_replace_active(card_id)
             # 覆盖层内互斥切换（页已在前台且无在途切换动画）：整页按 tab 位置差
             # 方向滑入（助手→左侧的轨迹 tab = 从左滑出），无事件时兜底右滑。
@@ -4431,13 +4835,11 @@ class TabManagerWindow(FramelessWindow):
                     panel._collapsed = False
                     panel._update_toggle_button(switch_ui=True)
                     self._saved_panel_frame_width = cur_frame_w
-                    self._write_tab_sidebar_memory(cur_frame_w)
                     self._on_sidebar_toggled(False)
                 else:
                     # 本来就展开：记录用户拖出的意图宽（切页保宽恢复基准）
                     # + 同步 UI（拖拽期可能已按阈值切过紧凑态）
                     self._saved_panel_frame_width = cur_frame_w
-                    self._write_tab_sidebar_memory(cur_frame_w)
                     logger.debug(f"[TSW] 拖拽落定(已展开) left={cur_frame_w} saved->{cur_frame_w}")
                     panel.sync_collapsed_ui()
         # 规则 4：拖拽把手属用户明确意图，松手落最终折叠态（值不变不写盘）
@@ -4903,6 +5305,20 @@ class TabManagerWindow(FramelessWindow):
                 self._content_area.widget(0).show()
             except Exception:
                 pass
+            # [R2 清池] 全部标签页已关闭：池中 ≤4 个常驻 viewer（每桶
+            # MAX_IDLE_PER_BUCKET=2）的 renderer（实测单个 65~217MB）已无
+            # 复用前景，清池回收，避免全关页后 renderer 常驻（T8a 实测依据）。
+            # 行为变化：仅「关最后一个 tab 后再新开」首帧多一次 renderer
+            # 初始化（webview_pool.py 模块头记录 100~500ms 量级）；保留
+            # ≥1 窗口的日常开关不受影响。回退方式：删除本 try 段即可，
+            # WebViewPool.clear() 只对池中对象 setParent(None)+deleteLater，
+            # 无残留状态，不触碰活跃卡片。
+            try:
+                from app.widgets.webview_pool import WebViewPool
+
+                WebViewPool.get_instance().clear()
+            except Exception:
+                pass
         self.tabCountChanged.emit(len(self._windows))
 
     def get_current_window(self):
@@ -4968,31 +5384,19 @@ class TabManagerWindow(FramelessWindow):
                 #   saved），切回后应恢复展开，而非停留在挤压折叠的图标条。
                 if _prev_collapsed and getattr(self._tab_panel, "_collapsed_by_squeeze", False):
                     _prev_collapsed = False
-                # ★ per-tab 宽度：目标窗口有独立宽度记忆时优先（每页记住自己
-                #   拖出的宽度，互不串扰）；无记忆回落到全局意图宽逻辑。
-                #   ★ 全局折叠态语义：折叠是窗口级状态，切页不得改变它——
-                #   折叠态下即使目标页有宽度记忆也不得静默展开（旧实现强制
-                #   _prev_collapsed=False，B 折叠后切回有记忆的 A 被静默拉开，
-                #   随后 relayout 压窄触发 resizeEvent 折叠动画，来回切反复横跳）。
-                _win_mem = None
-                try:
-                    _win_mem = getattr(self._windows[index], "_tab_sidebar_frame_w", None)
-                except Exception:
-                    pass
-                _mem_base = self._tab_switch_win_memory_baseline(_prev_left_w, _prev_collapsed, _win_mem)
-                if _mem_base is not None:
-                    _prev_left_w, _prev_collapsed, self._tab_switch_saved_snapshot = _mem_base
-                else:
-                    # ★ 展开态以用户意图宽为恢复基准：即时宽度可能已被其他标签页
-                    #   的工作台挤压污染（切回后空间释放，意图宽仍有效且可达）。
-                    #   saved 缺省（从未拖拽）时退化为即时宽，行为不变。
-                    _prev_left_w = self._tab_switch_baseline_width(_prev_left_w, _prev_collapsed)
-                    # 快照切页时刻的意图宽：restore 执行时（含 250ms 动画重试）若
-                    # 基准已变（中间发生了新拖拽/挤压恢复/卡片编排），放弃恢复
-                    self._tab_switch_saved_snapshot = (
-                        "saved",
-                        getattr(self, "_saved_panel_frame_width", None),
-                    )
+                # ★ 全局统一宽度（2026-11-02 语义定案，替代 per-tab 记忆）：
+                #   所有标签页共享同一宽度真源 _saved_panel_frame_width，
+                #   最后一次拖拽对每页生效，切页宽度恒定。
+                #   展开态以意图宽为恢复基准：即时宽度可能已被工作台挤压
+                #   污染（切回后空间释放，意图宽仍有效且可达）；saved 缺省
+                #   （从未拖拽）时退化为即时宽。
+                _prev_left_w = self._tab_switch_baseline_width(_prev_left_w, _prev_collapsed)
+                # 快照切页时刻的意图宽：restore 执行时（含 250ms 动画重试）若
+                # 基准已变（中间发生了新拖拽/挤压恢复/卡片编排），放弃恢复
+                self._tab_switch_saved_snapshot = (
+                    "saved",
+                    getattr(self, "_saved_panel_frame_width", None),
+                )
                 logger.debug(
                     f"[TSW] 切页 idx={index} raw={_sizes[0] if _sizes else 0} collapsed={_prev_collapsed} "
                     f"baseline={_prev_left_w} saved={self._tab_switch_saved_snapshot}"
@@ -5780,9 +6184,40 @@ class TabManagerWindow(FramelessWindow):
         """兼容旧调用方（main_widget.py 热重载和模式切换）并刷新内嵌列表"""
         self._tab_panel.refresh_ui_plugins()
         self._sync_plugin_titlebar_tabs()
+        self._sync_replace_tab_titles()
         # 工作区页面刷新（Phase G）：注册集变化后重建 sidebar 入口 + 销毁被卸载页面
         if hasattr(self, "_workspace_page_host"):
             self._workspace_page_host.refresh_pages()
+
+    def _sync_replace_tab_titles(self) -> None:
+        """把注册表里最新的卡片标题同步到已挂的标题栏 tab
+
+        replace 卡（插件 full 卡）的标题会随运行状态变化：插件市场把待更新数
+        写进 title（「插件市场 (N)」↔「插件市场」）。tab 文字在 add_tab 时
+        固化，注册表变化不会自己传过去（用户视角：更新完插件 tab 文字没变）。
+        这里按注册表现状逐个纠正，open 集合里存的标题同步更新，供后续
+        ``_refresh_titlebar_cards`` 重建时复用。
+        """
+        replace_open = getattr(self, "_replace_open", None)
+        if not replace_open:
+            return
+        try:
+            from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+
+            cards = UIPluginRegistry.get_instance().get_floating_cards()
+        except Exception:
+            return
+        for open_dict in replace_open.values():
+            for card_id, old_title in list(open_dict.items()):
+                info = cards.get(card_id)
+                if info is not None:
+                    new_title = (info.title or "").strip() or card_id
+                else:
+                    new_title = GLOBAL_REPLACE_TITLES.get(card_id, card_id)
+                if new_title == old_title:
+                    continue
+                open_dict[card_id] = new_title
+                self.titleBar.set_tab_text(card_id, new_title)
 
     @staticmethod
     def _create_fake_page():
@@ -5901,6 +6336,11 @@ class TabManagerWindow(FramelessWindow):
         # 插件常驻标题栏 tab 同步补刷（同 refresh_ui_plugins 的可见性门控根因）
         try:
             self._sync_plugin_titlebar_tabs()
+        except Exception:
+            pass
+        # replace 卡 tab 文案补刷：隐藏期间注册表 title 变化（如侧栏计数）不丢
+        try:
+            self._sync_replace_tab_titles()
         except Exception:
             pass
         # macOS：close→show 循环后修复标题栏错位（见 _refresh_mac_fullsize_content）
@@ -6309,6 +6749,18 @@ class TabManagerWindow(FramelessWindow):
         if panel is not None:
             panel.set_auto_collapse_suppressed(False)
 
+    def _on_application_focus_changed(self, state):
+        """应用激活态变化 → 转发给主题音乐播放器（失焦暂停 / 回焦续播）
+
+        只在状态真正切换时同步音量，避免每次焦点变化都写一次 setVolume。
+        """
+        try:
+            from app.widgets.theme_music_player import ThemeMusicPlayer
+
+            ThemeMusicPlayer.instance().set_app_active(state == Qt.ApplicationActive)
+        except Exception as e:
+            logger.debug(f"[TabManagerWindow] 同步主题音乐焦点状态失败: {e}")
+
     def _on_app_state_changed(self, state):
         """macOS 软置顶：应用激活时若开启置顶配置则抬升主窗口
 
@@ -6558,6 +7010,8 @@ class TabManagerWindow(FramelessWindow):
             # FramelessWindow.__init__ 内部 resize(500,500) 同步触发的首个 Resize：
             # 本类节流状态尚未初始化，直接走基类布局（含顶栏宽度同步）并返回
             super().resizeEvent(event)
+            if getattr(self, "_window_base_layer", None) is not None:
+                self._window_base_layer.setGeometry(self.rect())
             self._sync_wb_overlay_geometry()
             return
 
@@ -6656,7 +7110,10 @@ class TabManagerWindow(FramelessWindow):
         try:
             from app.core.sync.config_sync import ConfigSyncService
 
-            ConfigSyncService.get_instance().disable()
+            # clear_state=False：进程退出只停监听，保留磁盘上的 SHA 缓存与合并基准。
+            # 传默认 True 会把它们当成解绑清掉，下次启动就误判为「新机首次同步」，
+            # 本地配置整份交给云端裁决（实测：切好的主题重启后被云端旧值刷回）。
+            ConfigSyncService.get_instance().disable(clear_state=False)
         except Exception as e:
             logger.warning(f"[TabManager] cleanup ConfigSyncService.disable 失败: {e}")
         for w in list(self._windows):

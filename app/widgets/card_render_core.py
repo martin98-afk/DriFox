@@ -16,7 +16,7 @@ import threading
 from collections import OrderedDict
 from functools import lru_cache
 from html import escape, unescape
-from typing import Any, Dict, List, Optional
+from typing import Any, List, Optional
 import orjson as json
 from loguru import logger
 from markdown import Markdown
@@ -140,6 +140,7 @@ from app.widgets.render_helpers import (
     _get_tool_icon,
     _get_tool_icon_html,
     _reg_metadata_flag,
+    _render_inline_tool,
     get_tool_qrc_prefix,
     render_tool_block,
 )
@@ -215,6 +216,9 @@ _CODE_BLOCK_REMOVE_PATTERN = re.compile(r"```[\s\S]*?```", re.DOTALL)
 _MULTIPLE_SPACES_PATTERN = re.compile(r" +")
 _PRE_CONTENT_PATTERN = re.compile(r"<pre[^>]*>(.*?)</pre>", re.DOTALL)
 _TOOL_NAME_PATTERN = re.compile(r"^name:\s*(.+?)\s*$", re.MULTILINE)
+# 未闭合 `<tool>` 是否真的是协议块：真实块由 content_to_markdown 生成，恒以
+# `name:` 行起首；模型正文里的字面 `<tool>` 后面接普通句子。判据只认首个非空行。
+_TOOL_PROTOCOL_HEAD_RE = re.compile(r"^name:\s*\S", re.MULTILINE)
 _TOOL_ARGS_LINE_PATTERN = re.compile(r"args:\s*(\{[^}]*\})")
 _TOOL_SUCCESS_PATTERN = re.compile(r"^success:\s*(.+?)\s*$", re.MULTILINE)
 _TOOL_ID_PATTERN = re.compile(r"^tool_call_id:\s*(.+?)\s*$", re.MULTILINE)
@@ -231,6 +235,11 @@ _LEXER_CACHE_MAX = 64
 _TEXT_LEXER = TextLexer()
 # formatter 含动态字号，缓存当前字号对应的实例
 _FORMATTER_CACHE: dict = {"font_size": None, "formatter": None}
+# Pygments 主题 CSS 缓存：style 名 → 样式块（只随主题变，与字号无关）
+_PYGMENTS_CSS_CACHE: dict = {}
+# 代码块高亮 CSS 的作用域根。HTML 结构是 .code-content > pre > span.k，
+# 生成时带上 pre 才能同时命中 pre 自身（前景/背景）与内部 span。
+_PYGMENTS_CSS_SCOPE = ".code-content pre"
 
 # ======== 流式态单色 tint（替代原彩虹循环色板）========
 # 旧 _RAINBOW_NORMAL 为 10 色高饱和绕卡循环，色相跳变（青→紫→粉→橙→绿）
@@ -319,23 +328,79 @@ def set_pygments_style(style_name: str):
 
 
 def _get_formatter_cached():
-    """HtmlFormatter 单例，字号或风格变化时重建"""
+    """HtmlFormatter 单例，字号或风格变化时重建
+
+    **noclasses=False**（2026-10-30 主题切换重构）：高亮色改由 class + 主题 CSS
+    决定，不再内联进 span 的 style。此前 noclasses=True 把颜色固化在 HTML 里，
+    主题一变整份 HTML 就过期，只能逐卡重跑 markdown + Pygments（单卡 40~120ms）。
+    改为 class 化后同一份 HTML 在深浅主题间通用，切主题只需替换一段 CSS。
+
+    pre 上仍保留 inline 的字体/背景，但**不写 color**：前景色交给
+    ``get_pygments_css()`` 生成的作用域规则，随主题切换（inline 会盖住 CSS）。
+    """
     fs = scale_font_size(13)
     style = _current_pygments_style
     cache_key = (fs, style)
     if _FORMATTER_CACHE.get("cache_key") != cache_key:
-        # 浅色风格用深色默认文字
-        pre_color = "#1a1a1a" if style != "dracula" else "#D4D4D4"
         _FORMATTER_CACHE["cache_key"] = cache_key
         _FORMATTER_CACHE["font_size"] = fs
         _FORMATTER_CACHE["formatter"] = HtmlFormatter(
             style=style,
             linenos=False,
-            noclasses=True,
+            noclasses=False,
             cssclass="code-block",
-            prestyles=f"margin:0; padding:0; background:transparent; font-family: Consolas, monospace; font-size:{fs}px; color:{pre_color};",
+            prestyles=f"margin:0; padding:0; background:transparent; font-family: Consolas, monospace; font-size:{fs}px;",
         )
     return _FORMATTER_CACHE["formatter"]
+
+
+def _keep_token_rules(css: str, scope: str) -> list[str]:
+    """从 Pygments 输出里只挑 token 规则（``<scope> .k`` 一类）
+
+    Pygments 的 ``get_style_defs`` 除 token 规则外还会输出三条会坏事的裸规则：
+    ``pre { line-height: 125% }``（影响全部 pre）、``<scope> { background/color }``
+    （会把代码块/diff 行的底色盖掉）、``td.linenos``/``span.linenos``（本项目不用行号列）。
+    只保留 token 级规则，主题色就只作用于高亮字词，不碰容器。
+    """
+    keep: list[str] = []
+    prefix = scope + " "
+    for line in css.splitlines():
+        s = line.strip()
+        if not s or "{" not in s:
+            continue
+        selector = s.split("{", 1)[0].strip()
+        if not selector.startswith(prefix):
+            continue
+        keep.append(s)
+    return keep
+
+
+def get_pygments_css(style_name: str | None = None) -> str:
+    """生成当前（或指定）Pygments 风格的 CSS 规则块
+
+    由骨架注入到 ``<style id="hl-css">``，主题切换时整段替换，因此代码块颜色
+    跟随主题而 HTML 产物保持不变。
+
+    覆盖两个作用域：通用代码块（``.code-content pre``）与工具块行内 diff
+    （``.line-code``）。两者都是 Pygments token，同一套风格。
+
+    Args:
+        style_name: Pygments 风格名；None=当前风格（深色 dracula / 浅色 friendly）
+    """
+    style = style_name or _current_pygments_style
+    cached = _PYGMENTS_CSS_CACHE.get(style)
+    if cached is None:
+        try:
+            formatter = HtmlFormatter(style=style)
+            rules = _keep_token_rules(formatter.get_style_defs(_PYGMENTS_CSS_SCOPE), _PYGMENTS_CSS_SCOPE)
+            rules += _keep_token_rules(formatter.get_style_defs(".line-code"), ".line-code")
+            css = "\n".join(rules)
+        except Exception as e:  # 风格名拼错 → 降级为空块（代码块退化为无色，不崩）
+            logger.warning(f"[pygments] 生成主题 CSS 失败 style={style}: {e}")
+            css = ""
+        cached = css
+        _PYGMENTS_CSS_CACHE[style] = cached
+    return cached
 
 
 # ======== 滚动行为常量 ========
@@ -362,12 +427,27 @@ FINISH_HEIGHT_ANIM_MIN_DELTA = 16  # 小于该变化不值得动画（避免噪�
 FINISH_HEIGHT_ANIM_WINDOW_S = 2.0  # 结束态窗口：只覆盖结束后的高度收敛
 FINISH_HEIGHT_ANIM_MAX_USES = 2  # 窗口内最多缓动几次（归位+重排、随后折叠）
 
+# ======== 结束态坞态折叠：上报节流 / 终渲染串行 / 高度快跟随 ========
+# 现象：流式结束时工具区「瞬收」、卡片底部先冒空白再慢慢收回。
+# 成因三件：
+#   ① 折叠过渡与终渲染同帧派发，终渲染的渲染进程长任务（长内容实测
+#      0.7~2.1s）把 200ms 的 max-height 过渡连同高度上报一起压住，任务结束
+#      时过渡按时间戳直接跳到终值（无过程），上报才发出；
+#   ② 那一刻内容已短了工具区高度，卡片高度还是旧值 → 底部露空白；
+#   ③ Qt 侧 FINISH 态追踪 factor 0.178@50ms（τ≈255ms）追 264px 要 ~1s。
+# 对策：过渡期间按 TOOL_SECTION_REPORT_MS 节流上报中间高度（与 Qt 追踪同拍），
+# 终渲染延后到 DOCK_COLLAPSE_SETTLE_MS 之后派发，折叠后
+# DOCK_COLLAPSE_TRACK_WINDOW_S 内用流式口径 factor 快跟随。
+TOOL_SECTION_REPORT_MS = 50
+DOCK_COLLAPSE_SETTLE_MS = 280  # 200ms 过渡 + 260ms 兜底上报 + 余量
+DOCK_COLLAPSE_TRACK_WINDOW_S = 0.5
+
 # ======== 流式期「坞态预算」高度上限（起步跳变兜底）========
-# [T36] 已废弃：原兜底场景 = 坞态把正文限高 600px，渲染路径抢在坞态 CSS 落地前
+# [T44] 已废弃：原兜底场景 = 坞态把正文限高 600px，渲染路径抢在坞态 CSS 落地前
 # 完成时正文按自然高度排版、坞态到达再压回 → 起步「先胀大再缩回」。
-# T36 去掉坞态正文限高后，坞态生效前后正文都是自然高度（坞态只影响工具区
-# 沉底/限高，高度扰动 ~几十 px），竞态窗口不复存在。常量保留仅供回滚参考，
-# 使用点已移除（message_card._update_height）。
+# T44 移除坞态正文限高（工具区始终居顶、正文自然高度）后，坞态生效前后正文
+# 都是自然高度（只影响工具区 264px 限高），竞态窗口不复存在。常量保留仅供
+# 回滚参考，使用点已移除（message_card._update_height）。
 STREAM_DOCK_BUDGET_PX = 900
 
 # ======== 流式期高度追踪（默认开，出问题可一键关）========
@@ -608,6 +688,15 @@ _HTML_WIDGET_HEAD_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+# ```svg 围栏可前置 <style>/注释（visualization skill 的 svg-guide 规范要求），
+# 剥掉这些前导块后仍须以 <svg 元素开头，且含闭合标签，才算完整 SVG 结构。
+# 教学片段（仅提到 <svg> 字样）与流式半截（缺 </svg>）都不该被误吞。
+_SVG_LEADING_STRIP_PATTERN = re.compile(
+    r"^(?:\s|<!--[\s\S]*?-->|<style\b[^>]*>[\s\S]*?</style\s*>)*",
+    re.IGNORECASE,
+)
+_SVG_CLOSE_PATTERN = re.compile(r"</svg\s*>", re.IGNORECASE)
+
 
 def _sanitize_widget_html(raw_html: str, max_len: int = 200_000) -> str:
     """净化 ```html fence 内容，产出可直接内联的静态 HTML 片段。
@@ -702,6 +791,149 @@ def _plugin_fence_placeholder(info, code_content_raw: str) -> str:
     return _CHART_SKELETON_HTML
 
 
+def _render_render_fence(lang: str, code_content_raw: str) -> Optional[str]:
+    """渲染型 fence → 图表/卡片容器 HTML；非渲染型返回 None。
+
+    None 的语义是「交给调用方的普通代码块处理」（高亮 + 复制按钮），不是失败。
+
+    分发只此一份：``_wrap_code_blocks_with_copy_button_web``（常规路径）与
+    ``_promote_render_fences_html``（超长 tail 降级路径）共用。两处各写一份会
+    漂移，漂移后果是同一份 echarts 围栏一条路径出容器、另一条出代码块
+    （用户可见「图表回退成代码」）。
+    """
+    # ===== 流式中的半截图表：骨架占位 =====
+    # _sanitize_incomplete_markdown 把末尾未闭合的图表 fence 改标为
+    # <lang>-streaming。这里必须在此之前拦截：残缺 JSON 若照常包成
+    # .echarts-container，其 b64 每轮随内容增长而变化 → vault key 每轮都不同，
+    # 节点被反复塞进 vault 迅速膨胀（多图白屏的次因）。骨架不入 vault、不 init。
+    if lang in ("echarts-streaming", "mermaid-streaming", "html-streaming", "widget-streaming"):
+        return _CHART_SKELETON_HTML
+    # 插件注册的 fence 在流式期同样降级为占位：半截源码交给 render_func
+    # 必然产出残缺节点，且内容每轮变化会让产物反复变更、高度抖动。
+    if lang.endswith("-streaming"):
+        _streaming_info = _get_plugin_fence_renderer(lang[: -len("-streaming")])
+        if _streaming_info is not None:
+            return _plugin_fence_placeholder(_streaming_info, code_content_raw)
+
+    # ===== 插件 fence 渲染器（架构档）：先查注册表 =====
+    # 命中 → 插件路径（产物带 data-fence-renderer 标记，供后续按需注入
+    #        插件 assets）；未命中 → 走下方内置硬编码链。
+    # 注册表禁止注册与内置同名的 lang，故不会影响 echarts/mermaid 行为。
+    _fence_info = _get_plugin_fence_renderer(lang)
+    if _fence_info is not None:
+        _plugin_html = _render_plugin_fence(_fence_info, code_content_raw)
+        if _plugin_html:
+            return _plugin_html
+
+    # ===== ECharts 代码块：渲染为交互式图表 =====
+    if lang == "echarts":
+        try:
+            # 解码 HTML 实体（&quot; → " 等），确保 JSON 可解析
+            json_text = _unescape_html(code_content_raw)
+            json.loads(json_text)  # 校验：非法 JSON 降级为普通代码块，不留空洞容器
+            # base64 编码防止 HTML 属性转义问题
+            b64_json = base64.b64encode(json_text.encode("utf-8")).decode("ascii")
+            chart_id = "echart-" + hashlib.sha1(json_text.encode("utf-8")).hexdigest()[:12]
+            return f'''
+                <div id="{chart_id}" class="echarts-container" data-echarts-json="{b64_json}" style="width: 100%; height: 400px; margin: 12px 0; border-radius: 10px; overflow: hidden;"></div>
+                '''
+        except Exception:
+            # JSON 解析失败，降级为普通代码块
+            return None
+
+    # ===== Mermaid 代码块：渲染为矢量图表 =====
+    # 这里只产出占位容器，真正的 vendor（polyfill + mermaid 10.9.1）
+    # 由 JS 侧首次遇到 .mermaid-block 时才动态加载，避免所有卡片都背上 3.3MB。
+    # 背景：Chromium 83 缺 structuredClone，mermaid 10 在模块顶层就炸、
+    #       window.mermaid 直接 undefined，必须先打 polyfill。见 docs/mermaid-chromium83.md。
+    if lang == "mermaid":
+        try:
+            mmd_text = _unescape_html(code_content_raw)
+            if mmd_text.strip():
+                b64_mmd = base64.b64encode(mmd_text.encode("utf-8")).decode("ascii")
+                mmd_id = "mmd-" + hashlib.sha1(mmd_text.encode("utf-8")).hexdigest()[:12]
+                return (
+                    f'<div id="{mmd_id}" class="mermaid-block" '
+                    f'data-mermaid-src="{b64_mmd}" style="margin: 12px 0;"></div>'
+                )
+        except Exception:
+            pass
+        return None
+
+    # ===== SVG 代码块：透传 raw HTML，浏览器直渲 =====
+    # 协议上 SVG 应内联正文（visualization skill），但模型习惯性输出 ```svg 围栏，
+    # 且 svg-guide 要求在 <svg> 前放一段标准 <style>。这里兜底：剥掉前导
+    # style/注释/空白后以 <svg 开头且含闭合标签时按 raw HTML 透传，与正文内联
+    # <svg>（markdown safe=False）走同一条渲染路径。教学片段与流式半截保持
+    # 普通代码块渲染，避免误吞或撕碎后续 DOM。
+    if lang == "svg":
+        svg_html = _unescape_html(code_content_raw)
+        head = _SVG_LEADING_STRIP_PATTERN.sub("", svg_html, count=1)
+        if head.lstrip().lower().startswith("<svg") and _SVG_CLOSE_PATTERN.search(head):
+            return svg_html
+        return None
+
+    # ===== HTML 代码块：净化后内联（UI 效果稿 / 指标卡）=====
+    # 与 svg 同层：内容不以 "<" 开头（教学代码、配置片段等）保持普通代码块，
+    # 避免把讲 HTML 语法的示例代码误吞成真实 DOM。
+    if lang == "html":
+        try:
+            raw_widget = _unescape_html(code_content_raw)
+        except Exception:
+            raw_widget = code_content_raw
+        if _HTML_WIDGET_HEAD_PATTERN.match(raw_widget):
+            widget_html = _sanitize_widget_html(raw_widget)
+            # 净化后为空（内容全是脚本 / 超长 / 无实质内容）→ 降级普通代码块，
+            # 不留空洞容器
+            if widget_html:
+                return (
+                    f'<div class="html-widget" data-fence-renderer="html" '
+                    f'style="margin: 12px 0;">{widget_html}</div>'
+                )
+        return None
+
+    # ===== 可交互 widget 围栏：沙箱 iframe + 白名单桥 =====
+    # 与 ```html 的分工：html 走 _sanitize_widget_html（脚本被剥离、纯静态），
+    # widget 保留脚本并放进沙箱 iframe。内容**不**内联进主文档，只以 base64
+    # 存在 data 属性里，由 JS 侧装配 —— 主文档开了 file:// 互访，脚本内联
+    # 等于任意本地文件读取 + 外传，必须隔离。桥权限与插件 fence 同款。
+    if lang == "widget":
+        try:
+            raw_widget = _unescape_html(code_content_raw)
+        except Exception:
+            raw_widget = code_content_raw
+        if _HTML_WIDGET_HEAD_PATTERN.match(raw_widget) and len(raw_widget) <= 200_000:
+            b64_widget = base64.b64encode(raw_widget.encode("utf-8")).decode("ascii")
+            widget_id = "wgt-" + hashlib.sha1(raw_widget.encode("utf-8")).hexdigest()[:12]
+            return (
+                f'<div id="{widget_id}" class="drifox-widget" data-fence-renderer="widget" '
+                f'data-widget-src="{b64_widget}" style="margin: 12px 0;"></div>'
+            )
+        return None
+
+    return None
+
+
+def _promote_render_fences_html(html: str) -> str:
+    """只把渲染型 fence 代码块升成容器，普通代码块原样保留。
+
+    背景：``_render_inline_tail`` 对超长 tail 跳过整页代码块包装（避免 pygments
+    全量高亮的成本），但渲染型 fence 一并跳过就会把已闭合的 echarts / mermaid
+    降级成 ``<pre><code>`` 代码块（用户可见「图表回退成代码」），未闭合的图表
+    fence 更是直接裸露半截 JSON。此处只对渲染型 lang 做转换，成本与图表数量
+    成正比，不触碰普通代码块（高亮口径与现状一致）。
+    """
+
+    def _sub(match):
+        lang = (match.group(1) or "").replace("language-", "").strip()
+        if not lang:
+            return match.group(0)
+        rendered = _render_render_fence(lang, match.group(2) or "")
+        return rendered if rendered is not None else match.group(0)
+
+    return _CODE_BLOCK_WITH_LANG_PATTERN.sub(_sub, html)
+
+
 # ======== 核心逻辑：保留你的原始代码块样式 ========
 def _wrap_code_blocks_with_copy_button_web(
     html: str,
@@ -713,121 +945,24 @@ def _wrap_code_blocks_with_copy_button_web(
 
     Args:
         html: markdown 渲染后的 HTML
-        icon_prefix: 图标前缀（None=用当前主题缓存，主线程默认；见 current_icon_prefix）
+        icon_prefix: 已废弃占位参数（保留签名兼容线程池快照）；图标已改 CSS mask，
+                  不再写主题相关的 qrc 前缀进 HTML
         font_size: 代码字号（None=用全局 _CODE_FONT_SIZE，主线程默认）
         formatter: Pygments formatter（None=用全局缓存 formatter，主线程默认；
                    B3 线程池 worker 必须传入线程局部 formatter，避免跨线程共享）
     """
-    _icon_prefix = icon_prefix if icon_prefix is not None else current_icon_prefix()
     _font_size = font_size if font_size is not None else _CODE_FONT_SIZE
 
     def replacer(match):
         lang = (match.group(1) or "").replace("language-", "").strip()
         code_content_raw = match.group(2) or ""
 
-        # ===== 流式中的半截图表：骨架占位 =====
-        # _sanitize_incomplete_markdown 把末尾未闭合的图表 fence 改标为
-        # <lang>-streaming。这里必须在此之前拦截：残缺 JSON 若照常包成
-        # .echarts-container，其 b64 每轮随内容增长而变化 → vault key 每轮都不同，
-        # 节点被反复塞进 vault 迅速膨胀（多图白屏的次因）。骨架不入 vault、不 init。
-        if lang in ("echarts-streaming", "mermaid-streaming", "html-streaming", "widget-streaming"):
-            return _CHART_SKELETON_HTML
-        # 插件注册的 fence 在流式期同样降级为占位：半截源码交给 render_func
-        # 必然产出残缺节点，且内容每轮变化会让产物反复变更、高度抖动。
-        if lang.endswith("-streaming"):
-            _streaming_info = _get_plugin_fence_renderer(lang[: -len("-streaming")])
-            if _streaming_info is not None:
-                return _plugin_fence_placeholder(_streaming_info, code_content_raw)
-
-        # ===== 插件 fence 渲染器（架构档）：先查注册表 =====
-        # 命中 → 插件路径（产物带 data-fence-renderer 标记，供后续按需注入
-        #        插件 assets）；未命中 → 走下方内置硬编码链。
-        # 注册表禁止注册与内置同名的 lang，故不会影响 echarts/mermaid 行为。
-        _fence_info = _get_plugin_fence_renderer(lang)
-        if _fence_info is not None:
-            _plugin_html = _render_plugin_fence(_fence_info, code_content_raw)
-            if _plugin_html:
-                return _plugin_html
-
-        # ===== ECharts 代码块：渲染为交互式图表 =====
-        if lang == "echarts":
-            try:
-                # 解码 HTML 实体（&quot; → " 等），确保 JSON 可解析
-                json_text = _unescape_html(code_content_raw)
-                json.loads(json_text)  # 校验：非法 JSON 降级为普通代码块，不留空洞容器
-                # base64 编码防止 HTML 属性转义问题
-                b64_json = base64.b64encode(json_text.encode("utf-8")).decode("ascii")
-                chart_id = "echart-" + hashlib.sha1(json_text.encode("utf-8")).hexdigest()[:12]
-                return f'''
-                <div id="{chart_id}" class="echarts-container" data-echarts-json="{b64_json}" style="width: 100%; height: 400px; margin: 12px 0; border-radius: 10px; overflow: hidden;"></div>
-                '''
-            except Exception:
-                # JSON 解析失败，降级为普通代码块
-                pass
-
-        # ===== Mermaid 代码块：渲染为矢量图表 =====
-        # 这里只产出占位容器，真正的 vendor（polyfill + mermaid 10.9.1）
-        # 由 JS 侧首次遇到 .mermaid-block 时才动态加载，避免所有卡片都背上 3.3MB。
-        # 背景：Chromium 83 缺 structuredClone，mermaid 10 在模块顶层就炸、
-        #       window.mermaid 直接 undefined，必须先打 polyfill。见 docs/mermaid-chromium83.md。
-        if lang == "mermaid":
-            try:
-                mmd_text = _unescape_html(code_content_raw)
-                if mmd_text.strip():
-                    b64_mmd = base64.b64encode(mmd_text.encode("utf-8")).decode("ascii")
-                    mmd_id = "mmd-" + hashlib.sha1(mmd_text.encode("utf-8")).hexdigest()[:12]
-                    return (
-                        f'<div id="{mmd_id}" class="mermaid-block" '
-                        f'data-mermaid-src="{b64_mmd}" style="margin: 12px 0;"></div>'
-                    )
-            except Exception:
-                pass
-
-        # ===== SVG 代码块：透传 raw HTML，浏览器直渲 =====
-        # 协议上 SVG 应内联正文（visualization skill），但模型习惯性输出 ```svg 围栏，
-        # 这里兜底：语言为 svg 且内容以 <svg 开头时按 raw HTML 透传，
-        # 与正文内联 <svg>（markdown safe=False）走同一条渲染路径。
-        # 内容不以 <svg 开头（教学代码等）保持普通代码块渲染，避免误吞。
-        if lang == "svg":
-            svg_html = _unescape_html(code_content_raw)
-            if svg_html.lstrip().lower().startswith("<svg"):
-                return svg_html
-
-        # ===== HTML 代码块：净化后内联（UI 效果稿 / 指标卡）=====
-        # 与 svg 同层：内容不以 "<" 开头（教学代码、配置片段等）保持普通代码块，
-        # 避免把讲 HTML 语法的示例代码误吞成真实 DOM。
-        if lang == "html":
-            try:
-                raw_widget = _unescape_html(code_content_raw)
-            except Exception:
-                raw_widget = code_content_raw
-            if _HTML_WIDGET_HEAD_PATTERN.match(raw_widget):
-                widget_html = _sanitize_widget_html(raw_widget)
-                # 净化后为空（内容全是脚本 / 超长 / 无实质内容）→ 降级普通代码块，
-                # 不留空洞容器
-                if widget_html:
-                    return (
-                        f'<div class="html-widget" data-fence-renderer="html" '
-                        f'style="margin: 12px 0;">{widget_html}</div>'
-                    )
-
-        # ===== 可交互 widget 围栏：沙箱 iframe + 白名单桥 =====
-        # 与 ```html 的分工：html 走 _sanitize_widget_html（脚本被剥离、纯静态），
-        # widget 保留脚本并放进沙箱 iframe。内容**不**内联进主文档，只以 base64
-        # 存在 data 属性里，由 JS 侧装配 —— 主文档开了 file:// 互访，脚本内联
-        # 等于任意本地文件读取 + 外传，必须隔离。桥权限与插件 fence 同款。
-        if lang == "widget":
-            try:
-                raw_widget = _unescape_html(code_content_raw)
-            except Exception:
-                raw_widget = code_content_raw
-            if _HTML_WIDGET_HEAD_PATTERN.match(raw_widget) and len(raw_widget) <= 200_000:
-                b64_widget = base64.b64encode(raw_widget.encode("utf-8")).decode("ascii")
-                widget_id = "wgt-" + hashlib.sha1(raw_widget.encode("utf-8")).hexdigest()[:12]
-                return (
-                    f'<div id="{widget_id}" class="drifox-widget" data-fence-renderer="widget" '
-                    f'data-widget-src="{b64_widget}" style="margin: 12px 0;"></div>'
-                )
+        # 渲染型 fence（图表 / 卡片 / 插件）统一分发：与 _render_inline_tail
+        # 的超长降级路径共用 _render_render_fence 一份实现，避免两处漂移
+        # （漂移后果：同一份 echarts 围栏一条路径出容器、另一条出代码块）。
+        _rendered = _render_render_fence(lang, code_content_raw)
+        if _rendered is not None:
+            return _rendered
 
         # --- 普通代码块处理 ---
         try:
@@ -887,10 +1022,10 @@ def _wrap_code_blocks_with_copy_button_web(
                 {f'<span style="color: var(--accent-warm, #FFA500); font-size: {_font_size}px; font-weight: bold;">{lang}</span>' if lang else '<span style="color: var(--text-muted, #888);">Plain Text</span>'}
                 <div style="display: flex; gap: 12px; align-items: center; padding-right: 4px;">
                     <button type="button" data-action="save_file" data-lang="{lang}" data-copy="{b64_copy}" class="code-btn" data-tooltip="保存本地文件" style="width: 30px; height: 30px; background: transparent; border: none; cursor: pointer; display: flex; align-items: center; justify-content: center; padding: 0; border-radius: 6px;">
-                        <img src="{_icon_prefix}/导入.svg" style="width:22px; height:22px; pointer-events: none;" />
+                        <span class="ci ci-save"></span>
                     </button>
                     <button type="button" data-action="copy" data-copy="{b64_copy}" class="code-btn" data-tooltip="复制代码" style="width: 30px; height: 30px; background: transparent; border: none; cursor: pointer; display: flex; align-items: center; justify-content: center; padding: 0; border-radius: 6px;">
-                        <img src="{_icon_prefix}/复制.svg" style="width:22px; height:22px; pointer-events: none;" />
+                        <span class="ci ci-copy"></span>
                     </button>
                 </div>
             </div>
@@ -990,10 +1125,13 @@ def _protect_inline_svg_blocks(md_text: str) -> str:
 
 
 def _get_think_icon_html(size: int = 18) -> str:
-    """生成思考过程图标的 HTML <img> 标签（主题感知，自动适配深色/浅色模式）"""
-    prefix = get_tool_qrc_prefix()
-    style = f"width:{size}px;height:{size}px;vertical-align:middle;pointer-events:none;"
-    return f'<img src="{prefix}/思考过程.svg" style="{style}" />'
+    """生成思考过程图标的 HTML 片段
+
+    图标走 CSS mask（``.ci-think``，颜色取 ``--text-muted``），不再拼主题相关的
+    qrc 前缀进 HTML —— 同一份 HTML 在深浅主题间通用，主题切换只需换 CSS。
+    """
+    style = f"width:{size}px;height:{size}px;"
+    return f'<span class="ci ci-think" style="{style}"></span>'
 
 
 def _get_think_block_styles() -> str:
@@ -1001,17 +1139,42 @@ def _get_think_block_styles() -> str:
     return f"{get_font_family_css()} font-size: {scale_font_size(13)}px;"
 
 
-def _get_think_preview(content: str, max_length: int = 160) -> str:
-    """智能生成思考内容折叠框的预览文本
+# 预览采样目标长度：未达此值则继续拼接下一句（上限仍是 max_length）
+_PREVIEW_TARGET_LEN: int = 60
+# 结论标记之后的正文最小长度：短于此说明标记紧贴文末，不构成摘要，退回开头采样
+_PREVIEW_MIN_CONCLUSION_BODY: int = 8
 
-    新策略（结论优先）：
-      1. 检测结论标记 → 优先展示结论后的内容
-      2. 无结论时三段式采样：
-         - 首句（跳过过短 <10 字的）
-         - 中间代表性句（~40% 位置）
-         - 尾句（往往含总结性内容）
-      3. 保证最少 40 字，不够时向后扩展
-      4. 未到文本结尾时追加省略号
+# Responses 思考摘要的小节标题：summary_text 首行的 `**标题**`。
+# 服务端没有独立 title 字段（事件只带 delta / summary_index），ChatGPT 与
+# Codex 客户端那个分段标题就是这一行加粗文本（2026-11-07 实测 OpenCode Go）。
+_THINK_TITLE_RE = re.compile(r"^\s*\*\*(.+?)\*\*\s*$")
+
+
+def _split_think_title(content: str) -> tuple:
+    """拆出思考摘要的小节标题：返回 (title, body)。
+
+    无标题时（chat/completions 的 reasoning_content 常见形态）title 为空、
+    body 原样返回，调用方按旧逻辑走预览采样。
+    """
+    if not content:
+        return "", ""
+    head, sep, rest = content.partition("\n")
+    match = _THINK_TITLE_RE.match(head)
+    if not match:
+        return "", content
+    return match.group(1).strip(), (rest.lstrip("\n") if sep else "")
+
+
+def _get_think_preview(content: str, max_length: int = 160) -> str:
+    """生成思考内容折叠框的预览文本
+
+    策略（连贯优先）：
+      1. 结论标记 → 展示从该标记起的连续内容（取文中**最早**出现的标记）
+      2. 无结论（或结论片段过短）→ 从开头取连续句，拼到 60 字或 max_length 为止
+      3. 末尾未覆盖全文时追加省略号
+
+    刻意不做跳跃采样：预览是单行 ellipsis 显示，中间插 " ... " 的三段式
+    采样读起来是三句不相干的话，信息量低于等长的连续开头片段。
     """
     if not content:
         return ""
@@ -1020,73 +1183,59 @@ def _get_think_preview(content: str, max_length: int = 160) -> str:
     if not text:
         return ""
 
-    def _is_full(preview_len: int) -> bool:
-        """预览长度是否已覆盖完整内容（忽略空白、换行差异）"""
-        norm_text = len(text.replace(" ", "").replace("\n", ""))
-        return preview_len >= norm_text
-
-    # ── 策略1: 优先检测结论，展示结论内容 ──
-    for marker in _CONCLUSION_MARKERS:
-        idx = text.find(marker)
-        if idx != -1:
-            conclusion_text = text[idx:].replace("\n", " ").strip()
-            if len(conclusion_text) <= max_length:
-                return conclusion_text if _is_full(len(conclusion_text)) else conclusion_text + "..."
-            # 结论太长，截取到 max_length
-            for i in range(min(max_length, len(conclusion_text)), 0, -1):
-                if conclusion_text[i - 1] in "。！？.!?；;":
-                    return conclusion_text[:i]
-            return conclusion_text[:max_length] + "..."
-
-    # ── 策略2: 三段式采样 ──
-    # 展平文本
+    # 预览单行显示（CSS nowrap），换行塌成空格
     flat = text.replace("\n", " ")
+    norm_len = len(flat.replace(" ", ""))
 
-    # ── 检测是否英文为主（中文占比 < 30%） ──
-    cjk_count = sum(1 for c in text if "\u4e00" <= c <= "\u9fff")
-    is_english_heavy = cjk_count < len(text) * 0.3
+    def _is_full(preview_len: int) -> bool:
+        """预览是否已覆盖完整内容（忽略空白、换行差异）"""
+        return preview_len >= norm_len
 
+    def _finish(preview: str) -> str:
+        """收尾：超长则从句边界回退截断，未覆盖全文则补省略号"""
+        if len(preview) > max_length:
+            for i in range(max_length, 0, -1):
+                if preview[i - 1] in "。！？.!?；;":
+                    preview = preview[:i]
+                    break
+            else:
+                preview = preview[:max_length]
+        return preview if _is_full(len(preview)) else preview + "..."
+
+    # ── 策略1: 结论优先（按文中最早出现的标记，而非 markers 元组顺序）──
+    best_idx = -1
+    best_marker = ""
+    for marker in _CONCLUSION_MARKERS:
+        idx = flat.find(marker)
+        if idx != -1 and (best_idx == -1 or idx < best_idx):
+            best_idx, best_marker = idx, marker
+    if best_idx != -1:
+        conclusion = flat[best_idx:].strip()
+        # 标记后必须有实质内容才认（排除「…最终。」这类紧贴文末的退化命中）
+        if len(conclusion) - len(best_marker) >= _PREVIEW_MIN_CONCLUSION_BODY:
+            return _finish(conclusion)
+
+    # ── 策略2: 从开头取连续句 ──
+    # 中文按句末标点切；英文为主时按「标点 + 空格 + 大写」切，避免 1. / U.S. / v2.5
+    # 被误判成句子边界
+    cjk_count = sum(1 for c in flat if "\u4e00" <= c <= "\u9fff")
+    is_english_heavy = cjk_count < len(flat) * 0.3
     if is_english_heavy:
-        # 英文为主的策略：按句尾标点+空格+大写字母分句
-        # 避免 1. / 2. / U.S. / v2.5 等被误判为句子边界
-        raw_sentences = re.split(r"(?<=[.!?])\s+(?=[A-Z])", flat)
-        # 清理空串和过短片段（纯粹的数字编号如 "1." 直接丢弃）
-        raw_sentences = [s.strip() for s in raw_sentences if s.strip() and len(s.strip()) >= 4]
+        sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+(?=[A-Z])", flat) if s.strip()]
     else:
-        raw_sentences: List[str] = []
+        sentences = []
         current = ""
         for ch in flat:
             current += ch
             if ch in "。！？.!?；;":
-                s = current.strip()
-                if s:
-                    raw_sentences.append(s)
+                if current.strip():
+                    sentences.append(current.strip())
                 current = ""
         if current.strip():
-            raw_sentences.append(current.strip())
-
-    # 合并连续短句（<8 字）到前一句或后一句
-    sentences: List[str] = []
-    buf = ""
-    for s in raw_sentences:
-        if not s:
-            continue
-        if len(s) < 8:
-            buf += s
-        else:
-            if buf:
-                sentences.append(buf + s)
-                buf = ""
-            else:
-                sentences.append(s)
-    if buf:
-        if sentences:
-            sentences[-1] += buf
-        else:
-            sentences.append(buf)
+            sentences.append(current.strip())
 
     if not sentences:
-        # 没有有效句子，回退到简单截断
+        # 无句边界（纯短语 / 列表式思考）：直接按字符截断
         if len(flat) <= max_length:
             return flat
         for i in range(max_length, 0, -1):
@@ -1094,263 +1243,16 @@ def _get_think_preview(content: str, max_length: int = 160) -> str:
                 return flat[:i].rstrip(" ，,、.") + "..."
         return flat[:max_length] + "..."
 
-    # 选首句 + 中间句(~40%) + 尾句（相邻句子直接拼接，不加 ...）
-    selected_indices: List[int] = []
-    n = len(sentences)
+    preview = ""
+    for s in sentences:
+        # 英文句子的分隔符（空格）已被 strip 吃掉，拼回来否则 "a.B" 粘连
+        preview += (s if not preview else (s if not is_english_heavy else " " + s))
+        if len(preview) >= _PREVIEW_TARGET_LEN or len(preview) >= max_length:
+            break
 
-    # 首句
-    selected_indices.append(0)
-
-    # 中间句（40% 位置，确保不与首尾重复）
-    mid_idx = max(1, int(n * 0.4))
-    if mid_idx < n - 1:  # 不在最后一句话
-        selected_indices.append(mid_idx)
-
-    # 尾句
-    last_idx = n - 1
-    if n > 1 and last_idx not in selected_indices:
-        selected_indices.append(last_idx)
-
-    # 按原始顺序排序
-    selected_indices.sort()
-
-    # 构建预览：相邻句子直接拼接，非相邻用 ...
-    preview_groups: List[str] = []
-    current_group = sentences[selected_indices[0]]
-    for i in range(1, len(selected_indices)):
-        idx = selected_indices[i]
-        prev_idx = selected_indices[i - 1]
-        if idx == prev_idx + 1:
-            # 与上一个句子相邻，直接拼接
-            current_group += sentences[idx]
-        else:
-            preview_groups.append(current_group)
-            current_group = sentences[idx]
-    preview_groups.append(current_group)
-
-    preview = " ... ".join(preview_groups)
-
-    # ── 保证最少 40 字 ──
-    if len(preview) < 40:
-        # 只有一句时直接展示全部（或截断到 max_length）
-        if n == 1:
-            full = sentences[0]
-            if len(full) <= max_length:
-                return full if _is_full(len(full)) else full + "..."
-            else:
-                preview = full[:max_length] + "..."
-        else:
-            # 向后扩展：直接取连续句子直到 ≥40 字（不插入 ...）
-            extended = ""
-            for s in sentences:
-                if len(extended) >= 40:
-                    break
-                extended += s
-            preview = extended
-
-    # 截断到 max_length
-    if len(preview) > max_length:
-        for i in range(max_length, 0, -1):
-            if preview[i - 1] in "。！？.!?；;":
-                preview = preview[:i]
-                break
-        else:
-            preview = preview[:max_length]
-
-    if _is_full(len(preview)):
-        return preview
-    return preview + "..."
+    return _finish(preview)
 
 
-# ── 思考折叠框标签分类系统（加权） ──
-# 标签定义：tag=显示名, priority=平局优先级, cn=中文模式, en=英文模式
-# 权重规则：短语(≥4中字/含空格)权值3, 3字权值2, 常见普通词权值0.5, 其他1
-_THINK_TAGS = [
-    {
-        "tag": "分析",
-        "priority": 3,
-        "cn": (
-            "问题出在",
-            "原因在于",
-            "关键问题",
-            "核心问题",
-            "需要分析",
-            "需要理解",
-            "需要考虑",
-            "问题",
-            "分析",
-            "理解",
-            "排查",
-        ),
-        "en": ("problem", "issue", "analyze", "understand", "root cause", "what went wrong", "why"),
-    },
-    {
-        "tag": "设计",
-        "priority": 2,
-        "cn": ("设计方案", "实现方案", "架构设计", "方案", "设计", "架构", "策略", "规划"),
-        "en": ("solution", "design", "approach", "strategy", "architecture", "plan to", "propose to"),
-    },
-    {
-        "tag": "探索",
-        "priority": 2,
-        "cn": (
-            "探索",
-            "研究",
-            "了解",
-            "学习",
-            "查阅",
-            "参考",
-            "知识",
-            "概念",
-            "原理",
-            "定义",
-            "资料",
-            "文献",
-            "查询",
-            "搜索",
-            "调查",
-        ),
-        "en": (
-            "explore",
-            "research",
-            "learn",
-            "study",
-            "concept",
-            "definition",
-            "principle",
-            "reference",
-            "knowledge",
-            "investigate",
-        ),
-    },
-    {
-        "tag": "验证",
-        "priority": 2,
-        "cn": (
-            "验证",
-            "测试",
-            "检测",
-            "调试",
-            "断言",
-            "校验",
-            "用例",
-            "覆盖",
-            "回归",
-            "边界条件",
-            "测试用例",
-            "单元测试",
-            "集成测试",
-        ),
-        "en": (
-            "test",
-            "verify",
-            "validate",
-            "debug",
-            "assert",
-            "coverage",
-            "regression",
-            "unit test",
-            "integration test",
-            "test case",
-        ),
-    },
-    {
-        "tag": "版本",
-        "priority": 3,
-        "cn": (
-            "版本控制",
-            "仓库",
-            "回滚",
-            "PR",
-            "rebase",
-            "stash",
-            "cherry-pick",
-            "git bisect",
-            "git blame",
-            "git log",
-        ),
-        "en": (
-            "rebase",
-            "cherry-pick",
-            "checkout",
-            "git bisect",
-            "git blame",
-            "git log",
-            "version control",
-            "source control",
-        ),
-    },
-    {
-        "tag": "实现",
-        "priority": 2,
-        "cn": ("具体实现", "代码片段", "接口定义", "类型定义", "模块结构", "类设计", "方法签名", "API设计"),
-        "en": (
-            "implement the",
-            "define the",
-            "interface",
-            "method signature",
-            "API design",
-            "class definition",
-            "module structure",
-        ),
-    },
-    {
-        "tag": "修复",
-        "priority": 2,
-        "cn": ("错误", "异常", "报错", "修复", "崩溃", "排查错误", "错误原因", "调试日志"),
-        "en": ("bug", "crash", "fix the", "broken", "stack trace", "traceback", "debugging the error"),
-    },
-    {
-        "tag": "优化",
-        "priority": 2,
-        "cn": ("性能", "优化", "速度", "效率", "延迟", "瓶颈"),
-        "en": ("performance", "optimize", "speed", "efficiency", "latency", "bottleneck", "slow"),
-    },
-    {
-        "tag": "安全",
-        "priority": 2,
-        "cn": ("安全", "权限", "漏洞", "风险", "加密", "认证"),
-        "en": ("security", "permission", "auth", "vulnerability", "encrypt", "risk", "compliance"),
-    },
-    {
-        "tag": "重构",
-        "priority": 2,
-        "cn": ("重构", "重写", "清理代码", "消除重复", "简化代码", "代码整理", "提取方法", "模块拆分", "内联函数"),
-        "en": ("refactor", "cleanup", "simplify", "extract method", "inline", "split into", "restructure"),
-    },
-    {
-        "tag": "配置",
-        "priority": 2,
-        "cn": (
-            "配置",
-            "参数设置",
-            "环境变量",
-            "开关",
-            "配置文件",
-            "config",
-            "设置项",
-            "调整参数",
-            "初始化配置",
-            "dotenv",
-        ),
-        "en": (
-            "configuration",
-            "env var",
-            "environment variable",
-            "setting",
-            "parameter",
-            "config file",
-            "dotenv",
-            ".env",
-        ),
-    },
-    {
-        "tag": "审查",
-        "priority": 2,
-        "cn": ("审查", "review代码", "代码检查", "风格检查", "lint", "代码质量", "检查规范", "静态分析"),
-        "en": ("code review", "lint", "code quality", "inspect", "check style", "static analysis"),
-    },
-]
 # 结论标记（中英文，优先级最高）
 _CONCLUSION_MARKERS = (
     "因此",
@@ -1375,163 +1277,6 @@ _CONCLUSION_MARKERS = (
     "i suggest",
     "so the answer",
 )
-# 常见高频词（权值0.5，避免误触）
-_COMMON_WORDS = frozenset(
-    (
-        "问题",
-        "分析",
-        "代码",
-        "方案",
-        "设计",
-        "安全",
-        "性能",
-        "实现",
-        "错误",
-        "优化",
-        "检查",
-        "考虑",
-        "需要",
-        "处理",
-        "解决",
-        "使用",
-        "支持",
-        "提供",
-        "操作",
-    )
-)
-
-
-def _pattern_weight(p: str, position: float = 0.5) -> float:
-    """计算模式的权重：越长越具体→权重越高，结尾区加权
-
-    Args:
-        p: 匹配到的模式字符串
-        position: 关键词在全文中的相对位置 (0.0=开头, 1.0=结尾)
-                  结尾 30% 区域 (≥0.7) 权重 ×1.5
-    """
-    base = 1.0
-
-    if " " in p:  # 多词短语（英文短语或中文带空格）
-        base = 3.0
-    else:
-        has_cjk = any("\u4e00" <= c <= "\u9fff" for c in p)
-        if has_cjk:
-            if len(p) >= 4:
-                base = 3.0
-            elif len(p) == 3:
-                base = 2.0
-            elif p in _COMMON_WORDS:
-                base = 0.5
-        else:
-            # 英文权重
-            if len(p) >= 6:
-                base = 2.0
-            elif len(p) >= 4:
-                base = 1.5
-
-    # 位置加权：结尾 30% 区域权重 ×1.5
-    if position >= 0.7:
-        base *= 1.5
-
-    return base
-
-
-def _classify_think_tag(content: str) -> str:
-    """对思考内容进行分类，返回预定义标签名，空=不显示
-
-    改进要点：
-    - 分析窗口扩展为前 1500 + 尾部 500（覆盖结论区）
-    - 位置加权：结尾 30% 区域关键词权重 ×1.5
-    - 排他性：同词命中多标签时权重减半
-    - 阈值 3.0（关键词已清洗，阈值可提高）
-    """
-    content = content.strip()
-    if not content:
-        return ""
-
-    # ── 扩展分析窗口：前 1500 + 尾部 500 ──
-    head = content[:1500]
-    tail = content[-500:] if len(content) > 1500 else ""
-    # 合并去重：尾部可能与前部重叠
-    if tail and len(content) > 1500:
-        window = head + "\n" + tail
-    else:
-        window = head
-    window_lower = window.lower()
-
-    # ── 结论优先检测（全文中搜索） ──
-    full_lower = content.lower()
-    for marker in _CONCLUSION_MARKERS:
-        if marker in content or marker in full_lower:
-            return "结论"
-
-    # ── 计算每个关键词在窗口中的最佳位置 ──
-    def _find_position(pattern: str, text: str, text_lower: str) -> float:
-        """返回关键词在文本中的相对位置 (0~1)，找不到返回 -1"""
-        if any("\u4e00" <= c <= "\u9fff" for c in pattern):
-            idx = text.find(pattern)
-        else:
-            idx = text_lower.find(pattern)
-        if idx == -1:
-            return -1.0
-        total = max(len(text), 1)
-        return idx / total
-
-    # ── 统计所有标签命中（用于排他性计算） ──
-    all_matches: Dict[str, List[tuple]] = {}  # pattern -> [(tag_index, position)]
-
-    for ti, tag_def in enumerate(_THINK_TAGS):
-        for p in tag_def["cn"]:
-            pos = _find_position(p, window, window_lower)
-            if pos >= 0:
-                if p not in all_matches:
-                    all_matches[p] = []
-                all_matches[p].append((ti, pos))
-        for p in tag_def["en"]:
-            pos = _find_position(p, window, window_lower)
-            if pos >= 0:
-                if p not in all_matches:
-                    all_matches[p] = []
-                all_matches[p].append((ti, pos))
-
-    # ── 计算排他性权重 ──
-    def _exclusivity_multiplier(pattern: str) -> float:
-        """同词被多个标签匹配时减半"""
-        tags_hit = all_matches.get(pattern, [])
-        unique_tags = len(set(t for t, _ in tags_hit))
-        return 0.5 if unique_tags > 1 else 1.0
-
-    # ── 标签加权计分（去重 + 排他性） ──
-    best_tag = ""
-    best_score = 0.0
-    best_priority = -1
-
-    for tag_def in _THINK_TAGS:
-        matches_cn = [(p, _find_position(p, window, window_lower)) for p in tag_def["cn"]]
-        matches_en = [(p, _find_position(p, window, window_lower)) for p in tag_def["en"]]
-        matches_cn = [(p, pos) for p, pos in matches_cn if pos >= 0]
-        matches_en = [(p, pos) for p, pos in matches_en if pos >= 0]
-        all_hits = matches_cn + matches_en
-
-        if not all_hits:
-            continue
-
-        # 去重：长模式优先，子串不计；每个关键词取最佳位置
-        uniq: Dict[str, float] = {}
-        for p, pos in sorted(all_hits, key=lambda x: len(x[0]), reverse=True):
-            if not any(p in u for u in uniq):
-                if p not in uniq or pos > uniq[p]:
-                    uniq[p] = pos
-
-        # 加权计分：权重 × 排他性
-        score = sum(_pattern_weight(p, position=pos) * _exclusivity_multiplier(p) for p, pos in uniq.items())
-
-        if score > best_score or (score == best_score and tag_def["priority"] > best_priority):
-            best_score = score
-            best_tag = tag_def["tag"]
-            best_priority = tag_def["priority"]
-
-    return best_tag if best_score >= 3.0 else ""
 
 
 _THINK_SNAKE_SIZE: int = scale_icon_size(12)
@@ -1744,19 +1489,28 @@ def _render_think_block(content: str, completed: bool = True, compact: bool = Fa
     _flip_attr = f' data-flip-key="think-{flip_idx}"' if flip_idx >= 0 else ""
     if completed:
         # ── 完成态 ──
-        tag = _classify_think_tag(content)
+        # Responses 摘要自带小节标题（首行 **标题**）：标题进 summary 行、正文去掉该行，
+        # 避免展开后重复一行带星号的标题。无标题时回到旧行为（预览采样）。
+        think_title, think_body = _split_think_title(content)
+        body_source = think_body or content
         think_icon = _get_think_icon_html()
-        bulb = f'<span class="think-bulb">{think_icon}</span>'
-        status_text = f"{bulb} {escape(tag)}" if tag else bulb
-        preview = _get_think_preview(content)
+        status_text = f'<span class="think-bulb">{think_icon}</span>'
         font_style = _get_think_block_styles()
 
         # ── 简洁模式：纯文本行，不走折叠框（避免 save/restore 导致的消失→重现闪烁）──
+        # 带标题特例（Responses API）必须拼「标题 · 正文片段」：单行形态正文无处可见，
+        # 只显示标题会让思考内容彻底不可见（088c365e 回归）。无标题保持原预览采样。
         if compact:
+            if think_title:
+                body_sample = _get_think_preview(think_body) if think_body.strip() else ""
+                preview = f"{think_title} · {body_sample}" if body_sample else think_title
+            else:
+                preview = _get_think_preview(content)
+            preview_weight = "500" if think_title else "normal"
             block_seed = f"{content}|1"
             block_key = "think-" + hashlib.sha1(block_seed.encode("utf-8")).hexdigest()[:12]
             preview_right = (
-                f'<span style="color: var(--text-secondary); font-weight: normal; margin-left: 8px; font-size: {scale_font_size(11)}px;">'
+                f'<span style="color: var(--text-secondary); font-weight: {preview_weight}; margin-left: 8px; font-size: {scale_font_size(11)}px;">'
                 f"{escape(preview)}</span>"
             )
             return f"""<div class="think-compact" data-block-key="{block_key}"{_flip_attr} style="margin: 2px 0; padding: 4px 8px; {font_style} display: flex; align-items: baseline; gap: 6px; border-radius: 4px;">
@@ -1765,11 +1519,17 @@ def _render_think_block(content: str, completed: bool = True, compact: bool = Fa
 </div>"""
 
         # ── 非简洁模式：完整折叠框UI（图标标签 + 预览 + 可展开全文）──
-        content_escaped = escape(_strip_code_blocks(content))
+        # 标题进 summary 行、正文在展开区完整可见，preview 用标题（无标题退回采样）。
+        preview = think_title or _get_think_preview(body_source)
+        preview_weight = '500' if think_title else 'normal'
+        content_escaped = escape(_strip_code_blocks(body_source))
         block_seed = f"{content}|1"
         block_key = "think-" + hashlib.sha1(block_seed.encode("utf-8")).hexdigest()[:12]
+        # 预览文字单行省略：长预览不再折行撑高 summary 行（视觉升级）
         summary_right = (
-            f'<span style="color: var(--text-secondary); font-weight: normal; margin-left: 12px; font-size: {scale_font_size(11)}px;">'
+            f'<span style="color: var(--text-secondary); font-weight: {preview_weight}; margin-left: 12px; '
+            f'font-size: {scale_font_size(11)}px; flex: 1 1 auto; min-width: 0; '
+            f'overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">'
             f"{escape(preview)}</span>"
         )
         body_html = f'<div class="think-content loading" style="white-space: normal; word-break: break-word; line-height: 1.6; {font_style}">{content_escaped}</div>'
@@ -1784,16 +1544,15 @@ def _render_think_block(content: str, completed: bool = True, compact: bool = Fa
     </div>
 </div>"""
 
-    # ── 流式态：无折叠UI，显示金色圆环 + "深度思考中"文字 ──
-    # 字号与折叠框正文 _get_think_block_styles() 对齐（13px），避免 spinner 旁的提示文字
-    # 在消息正文中显得过粗过大。
+    # ── 流式态：无 spinner 头部行，直接展示实时思考文字（live 区）──
+    # live 区由 append_reasoning 节流推送增量文本（textNode append，不重建 DOM），
+    # 高度封顶不撑卡片，不触发外部滚动。文字为空时 CSS :empty 占位提示。
+    # 样式见 card_viewers.py 骨架 CSS。
     font_style_inline = f"{get_font_family_css()} font-size: {scale_font_size(13)}px;"
-    spinner_html = f'<span class="tool-streaming-spinner">{_THINK_SNAKE_SVG}</span>'
     return f"""<div class="think-streaming"{_flip_attr} data-streaming="true" style="margin: 4px 0; padding: 6px 10px; border: none; border-radius: 6px;">
-    <span style="display: inline-flex; align-items: center; gap: 6px; color: var(--text-secondary); {font_style_inline}">
-        {spinner_html}
-        <span>深度思考中...</span>
-    </span>
+    <div class="think-streaming-live" style="{font_style_inline}">
+        <div class="think-streaming-live-text"></div>
+    </div>
 </div>"""
 
 
@@ -1805,16 +1564,20 @@ def _render_think_block_lightweight(content: str, completed: bool = True) -> str
     2. 不生成 block_key hash（节省计算）
     """
     if completed:
-        # ── 完成态：可折叠UI（图标标签 + 预览 + 可展开全文） ──
-        tag = _classify_think_tag(content)
+        # ── 完成态：可折叠UI（图标 + 预览 + 可展开全文） ──
+        think_title, think_body = _split_think_title(content)
+        body_source = think_body or content
         think_icon = _get_think_icon_html()
-        bulb = f'<span class="think-bulb">{think_icon}</span>'
-        status_text = f"{bulb} {escape(tag)}" if tag else bulb
-        content_escaped = escape(content)
+        status_text = f'<span class="think-bulb">{think_icon}</span>'
+        content_escaped = escape(body_source)
         font_style = _get_think_block_styles()
-        preview = _get_think_preview(content)
+        preview = think_title or _get_think_preview(body_source)
+        preview_weight = '500' if think_title else 'normal' 
+        # 预览文字单行省略：与 _render_think_block 同款（视觉升级）
         summary_right = (
-            f'<span style="color: var(--text-secondary); font-weight: normal; margin-left: 12px; font-size: {scale_font_size(11)}px;">'
+            f'<span style="color: var(--text-secondary); font-weight: {preview_weight}; margin-left: 12px; '
+            f'font-size: {scale_font_size(11)}px; flex: 1 1 auto; min-width: 0; '
+            f'overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">'
             f"{escape(preview)}</span>"
         )
         body_html = f'<div class="think-content loading" style="white-space: normal; word-break: break-word; line-height: 1.6; {font_style}">{content_escaped}</div>'
@@ -1829,16 +1592,12 @@ def _render_think_block_lightweight(content: str, completed: bool = True) -> str
     </div>
 </div>"""
 
-    # ── 流式态：无折叠UI，显示金色圆环 + "深度思考中"文字 ──
-    # 字号与折叠框正文 _get_think_block_styles() 对齐（13px），避免 spinner 旁的提示文字
-    # 在消息正文中显得过粗过大。
+    # ── 流式态：同 _render_think_block，直接展示实时思考文字 ──
     font_style_inline = f"{get_font_family_css()} font-size: {scale_font_size(13)}px;"
-    spinner_html = f'<span class="tool-streaming-spinner">{_THINK_SNAKE_SVG}</span>'
     return f"""<div class="think-streaming" data-streaming="true" style="margin: 4px 0; padding: 6px 10px; border: none; border-radius: 6px;">
-    <span style="display: inline-flex; align-items: center; gap: 6px; color: var(--text-secondary); {font_style_inline}">
-        {spinner_html}
-        <span>深度思考中...</span>
-    </span>
+    <div class="think-streaming-live" style="{font_style_inline}">
+        <div class="think-streaming-live-text"></div>
+    </div>
 </div>"""
 
 
@@ -2039,7 +1798,14 @@ def _content_needs_webengine(content: Any) -> bool:
     if content is None:
         return True
     if isinstance(content, list):
-        # content blocks：图片块在 blocks 里有独立类型标记，仅取文本会丢语义 → 保守
+        # content blocks：只认得 text 块的降级判定——list 中出现任何「非 text」
+        # 元素（图片/自定义/思考/工具结果/落盘图片引用，乃至未来新增类型）即保守
+        # 返 True。枚举永远会漏新类型，「认不全就走 WebEngine」对未来自动保守。
+        # 注：image_ref 本应由 revive_vision_image_refs 恢复成 data:image 才进渲染，
+        # 原样进 content_to_markdown 会落空；此处返 True 是冗余保护而非渲染必需。
+        for block in content:
+            if not (isinstance(block, dict) and block.get("type") == "text"):
+                return True
         try:
             from app.core.conversation.message_content import content_to_text
 
@@ -2048,13 +1814,17 @@ def _content_needs_webengine(content: Any) -> bool:
             return True
         if not isinstance(text, str):
             return True
+        if not text:
+            # list 非空但仅取文本为空（tool_result 等块被丢弃）→ 仍有可渲染内容，
+            # 保守走 WebEngine；空列表无内容可降级，与空 str 同语义走 Qt
+            return bool(content)
     elif isinstance(content, str):
         text = content
     else:
         return True
 
     if not text:
-        # 空内容没有可降级的东西
+        # 空内容没有可降级的东西（仅 str 路径能到这里）
         return False
 
     # 插件注册的 fence lang：拿不到表 → 保守
@@ -2261,6 +2031,60 @@ def _last_para_break_outside_fence(md: str) -> int:
     return last
 
 
+# 图表 / 公式容器 id（内容指纹派生）：差量重复守卫的比对口径
+_CHART_CONTAINER_ID_RE = re.compile(r'id="((?:echart|mmd|ktx)-[0-9a-zA-Z_-]+)"')
+
+def _chart_ids_in(html: str) -> frozenset[str]:
+    """提取 HTML 内图表/公式容器 id 集合（差量重复守卫用）。
+
+    id 由内容 sha1 派生（`echart-<hash>` / `mmd-<hash>` / `ktx-<hash>` /
+    `echart-tool-<hash>`），内容相同即同 id。差量产物与稳定区已渲染产物
+    出现同 id 时，说明同一图表将在 DOM 里存在两份。
+    """
+    if not html or "id=" not in html:
+        return frozenset()
+    return frozenset(m.group(1) for m in _CHART_CONTAINER_ID_RE.finditer(html))
+
+def _last_closed_fence_end(md: str) -> int:
+    """最后一个**已闭合**代码 fence 的结束偏移（闭合行换行之后；无 → -1）。
+
+    用途：差量基线推进点下限。fence 是原子块——闭合即内容定型，渲染一次
+    就不该再作为"新闭合段"产出。
+
+    为什么必须越过它：`_last_para_break_outside_fence` 为保证推进点不落进
+    fence 内部，只能停在**最后一个 fence 外空行**。当 md 尾部正好是闭合
+    fence（`...\\n\\n````echarts ... ``` ``，fence 后暂无空行）时，该空行在
+    fence 起点之前 → 基线停在 fence 前 → 下一轮差量把**已渲染过的** fence
+    当新段再产出一遍：DOM 里旧图表节点（非增量节点，append 不会移除）与新
+    图表节点并存，用户可见「流式期间图表出现两遍，结束全量渲染才变一个」。
+    """
+    if "```" not in md and "~~~" not in md:
+        return -1
+    inside = False
+    marker = ""
+    last_end = -1
+    i = 0
+    n = len(md)
+    while i < n:
+        if i == 0 or md[i - 1] == "\n":
+            j = i
+            while j < n and md[j] in " \t":
+                j += 1
+            tok = md[j : j + 3]
+            if tok in ("```", "~~~"):
+                if not inside:
+                    inside = True
+                    marker = tok
+                elif tok == marker:
+                    inside = False
+                    # 闭合行可能带语言/说明后缀（```js），结束点取该行换行之后
+                    _eol = md.find("\n", j)
+                    last_end = (_eol + 1) if _eol != -1 else n
+                i = j + 3
+                continue
+        i += 1
+    return last_end
+
 def _last_closed_proto_tag_end(md: str) -> int:
     """最后一个**已闭合**协议标签（``</tool>`` / ``</think>``）结束之后的偏移（无 → -1）。
 
@@ -2298,7 +2122,11 @@ def _compute_stream_stable_len(md: str) -> int:
     _last_break = _last_para_break_outside_fence(md)
     _candidate = _last_break + 2 if _last_break != -1 else 0
     _proto_end = _last_closed_proto_tag_end(md)
-    return _proto_end if _proto_end > _candidate else _candidate
+    if _proto_end > _candidate:
+        _candidate = _proto_end
+    # 已闭合 fence 也是稳定区：不越过它 → 下一轮差量重复产出（图表两份）
+    _fence_end = _last_closed_fence_end(md)
+    return _fence_end if _fence_end > _candidate else _candidate
 
 
 # ── 方案 D：data-order 统一排序 ──────────────────────────────────
@@ -2403,7 +2231,14 @@ def _inject_think_cards(md_text: str, completed: bool = True, compact: bool = Fa
             # 未闭合：内容截取到边界处，避免吞掉后续 <think>
             content = md_text[think_start:search_end]
             if content.strip():
-                parts.append(_render_think_block(content, completed=False, flip_idx=think_ordinal))
+                # 🐛 completed=True（历史 / 已完结消息）时未闭合段必须按完成态
+                # 折叠渲染：流式态产物带 data-streaming="true"，会触发
+                # _updateToolSectionHeader 的「流式新工具自动展开」把历史卡
+                # 刚折叠的工具区永久翻开（历史序列化截断出未闭合 <think>
+                # 很常见，2026-10-29「历史卡不自动折叠」根因之一）。
+                parts.append(
+                    _render_think_block(content, completed=completed, compact=compact, flip_idx=think_ordinal)
+                )
                 think_ordinal += 1
             # 空且未闭合也跳过
             i = search_end
@@ -2484,15 +2319,49 @@ def _inject_tag_cards(md_text: str, completed: bool = True, compact: bool = Fals
 # 2026-09-09 内存治理：大会话卡 HTML 达 120~473KB，大头是工具块 diff/echarts。
 _HISTORY_TOOL_CAPS = (800, 3000, 8000)
 
+def find_tool_segment_by_call_id(md_text: str, tool_call_id: str) -> str | None:
+    """从渲染源 markdown 中定位指定 tool_call_id 的 <tool> 协议段。
+
+    折叠块懒注入用：折叠态 body 只留空占位（见 render_helpers.render_tool_block
+    的 lazy_body），展开时用本函数找回该块的原始协议文本，重新渲染出内容注入。
+
+    fence 内的 <tool> 是代码示例，先经哨兵摘除再扫，避免命中假块；
+    tool_call_id 取段内最后一个字段行匹配（与 _render_tool_block_content 的
+    "字段行取最后匹配"口径一致）。
+    """
+    if not md_text or not tool_call_id:
+        return None
+    try:
+        _fences, safe_md = _extract_fenced_code(md_text)
+    except Exception:
+        safe_md = md_text
+    i = 0
+    while True:
+        start = safe_md.find("<tool>", i)
+        if start == -1:
+            return None
+        end = safe_md.find("</tool>", start + len("<tool>"))
+        if end == -1:
+            return None
+        seg = safe_md[start : end + len("</tool>")]
+        _ids = _TOOL_ID_PATTERN.findall(seg)
+        if _ids and _ids[-1].strip() == tool_call_id:
+            return seg
+        i = end + len("</tool>")
+
 
 @lru_cache(maxsize=128)
-def _render_tool_block_content(content: str, compact: bool = False, heavy_caps=None) -> str:
+def _render_tool_block_content(
+    content: str, compact: bool = False, heavy_caps=None, lazy_body: bool = False, body_only: bool = False
+) -> str:
     """
     渲染工具块内容为HTML。
 
     Args:
         content: 原始 tool 块标记文本
         compact: 简洁模式标志，True 则工具块默认折叠，False 默认展开
+        lazy_body: 折叠态 body 只输出空占位（内容不构造，省 DOM 内存）
+        body_only: 只返回 body 内部 HTML（懒注入时取展开内容用）
 
     解析格式：
     <tool>
@@ -2596,6 +2465,40 @@ def _render_tool_block_content(content: str, compact: bool = False, heavy_caps=N
         _id_match = _im
     if _id_match:
         tool_call_id = _id_match.group(1).strip()
+
+    # ── 形态短路（inline / none）：无 body、不渲染结果，result/diff/echarts 免解析 ──
+    # read/glob/list 这类 render_mode="inline" 的块只出单行 header（无折叠、无 body、
+    # 无结果内容），"none" 干脆不渲染。旧流程仍要先把 result / diff(几十 KB) /
+    # echarts 全解析一遍才在 render_tool_block 里发现形态，这段解析纯浪费。
+    try:
+        from app.tools.registry import ToolRegistry
+
+        _render_mode_fast = ToolRegistry.get_instance().get_render_mode(tool_name)
+    except Exception:
+        _render_mode_fast = ""
+    if _render_mode_fast == "none":
+        return ""
+    if _render_mode_fast == "inline":
+        _quick_args = {}
+        if tool_args_str:
+            try:
+                _quick_args = json.loads(tool_args_str)
+                if not isinstance(_quick_args, dict):
+                    _quick_args = {}
+            except json.JSONDecodeError:
+                _quick_args = _extract_args_by_regex(tool_args_str)
+        else:
+            _quick_args = _extract_args_by_regex(content)
+        # 预览是单行文案：参数里的换行转字面量，避免撑破单行布局
+        for _k, _v in list(_quick_args.items()):
+            if isinstance(_v, str):
+                _quick_args[_k] = _v.replace("\r\n", "\n").replace("\r", "\n").replace("\n", "\\n")
+        return _render_inline_tool(
+            tool_name=tool_name,
+            tool_args=_quick_args,
+            success=tool_success,
+            tool_call_id=tool_call_id,
+        )
 
     # ========== 解析 result（定位从 args JSON 闭合之后开始） ==========
     # result 终点 = 各字段最后匹配位置的最小值（须在 result 之后）；
@@ -2709,6 +2612,8 @@ def _render_tool_block_content(content: str, compact: bool = False, heavy_caps=N
         tool_call_id=tool_call_id,
         diff=diff_content,
         echarts=echarts_content,
+        lazy_body=lazy_body,
+        body_only=body_only,
     )
 
 
@@ -2968,6 +2873,7 @@ def _inject_tool_blocks(
     compact: bool = False,
     heavy_caps=None,
     suppress: frozenset = None,
+    lazy_body: bool = False,
 ) -> str:
     """注入工具块HTML，类似think块
 
@@ -2975,6 +2881,8 @@ def _inject_tool_blocks(
         suppress: 已完成工具指纹集合（_tool_fingerprint 产物）。未闭合协议段
             指纹命中时静默丢弃（模型对已完成调用的照抄，渲染出来只会与真实
             完成块重复）。仅流式渲染路径传入。
+        lazy_body: 折叠态工具块 body 只留空占位，内容展开时按需注入
+            （见 render_helpers.render_tool_block 的 lazy_body）。
     """
     if not md_text:
         return md_text
@@ -2991,6 +2899,7 @@ def _inject_tool_blocks(
             break
         parts.append(md_text[i:start_idx])
         end_idx = md_text.find("</tool>", start_idx + len("<tool>"))
+        content_head = md_text[start_idx + len("<tool>") :].lstrip("\n")
         if end_idx != -1:
             content = md_text[start_idx + len("<tool>") : end_idx]
             # 🐛 协议段防重复（2026-10-25）：无 tool_call_id 字段的闭合块 = 模型
@@ -2998,8 +2907,22 @@ def _inject_tool_blocks(
             # 渲染成卡会与真实完成块内容重复，且空 id 使去重/清理判据失效、
             # 每次全量渲染累积一张（probe4 实证终态 3 块）。一律丢弃。
             if _TOOL_ID_PATTERN.search(content):
-                parts.append(_render_tool_block_content(content, compact=compact, heavy_caps=heavy_caps))
+                parts.append(
+                    _render_tool_block_content(
+                        content, compact=compact, heavy_caps=heavy_caps, lazy_body=lazy_body
+                    )
+                )
             i = end_idx + len("</tool>")
+        elif not _TOOL_PROTOCOL_HEAD_RE.match(content_head):
+            # 🐛 修复（字面 `<tool>` 吞掉正文，2026-10-29）：正文里提到协议标签
+            # （讨论格式 / 贴日志 / 写 XML 片段）时，`<tool>` 之后既无 `</tool>`
+            # 也无 `name:` 字段行——旧实现把 content 取到 md 末尾并整段丢弃
+            # （终态）或转成「接收中」假框（流式），用户可见「正文从这一句起
+            # 整段消失，只剩工具完成框」（实测历史消息 md 16186 字 → 渲染后
+            # 正文 37 字）。此处按字面文本转义，并从中点继续扫描后续正文。
+            parts.append("&lt;tool&gt;")
+            i = start_idx + len("<tool>")
+            continue
         else:
             # 🐛 修复（工具源码泄漏）：未闭合块此前原样保留 → md.convert 把
             # <tool> 当未知 HTML 元素（标签本身不可见），内部 name:/args:/result:
@@ -3034,7 +2957,11 @@ def _inject_tool_blocks(
                         )
                     )
             if _rest:
-                parts.append(_inject_tool_blocks(_rest, completed, compact, heavy_caps, suppress))
+                parts.append(
+                    _inject_tool_blocks(
+                        _rest, completed, compact, heavy_caps, suppress, lazy_body=lazy_body
+                    )
+                )
             break
     return "".join(parts)
 
@@ -3186,6 +3113,29 @@ def _extract_formulas(md_text: str) -> str:
     return "\n".join(seg if is_fence else _extract_formulas_in_plain(seg) for is_fence, seg in segments)
 
 
+def _line_tag_pending(line: str, tag: str, pending: bool) -> bool:
+    """单行内按出现顺序推进某注册标签的「未闭合」状态。
+
+    等价于 ``_has_unclosed_registered_tag`` 的 rfind 语义（即「全文前缀里该标签
+    最后一个事件是否为 open」）。**不能用 open/close 计数比较**：``</mood><mood>``
+    两者计数相等但 rfind 判为未闭合。
+    """
+    open_tag = f"<{tag}>"
+    close_tag = f"</{tag}>"
+    i = 0
+    while True:
+        o = line.find(open_tag, i)
+        c = line.find(close_tag, i)
+        if o == -1 and c == -1:
+            return pending
+        if o != -1 and (c == -1 or o < c):
+            pending = True
+            i = o + len(open_tag)
+        else:
+            pending = False
+            i = c + len(close_tag)
+
+
 def _extract_fenced_code(md_text: str) -> tuple[list[str], str]:
     """提取完整 fenced code 块为 \x00F<i>\x00 哨兵（inject 免疫保护）。
 
@@ -3199,15 +3149,36 @@ def _extract_fenced_code(md_text: str) -> tuple[list[str], str]:
     前放回原文，fenced_code 正常渲染代码内容（协议标签转义为字面文本）。
     fence 状态机与 _extract_formulas 同款语义；未闭合 fence（流式中间态，
     _sanitize_incomplete_markdown 已补闭合，此处兜底）原样放回不提取。
+
+    [PERF] 单遍增量判定：原实现对每个 fence 开栏各调一次
+    ``_has_unclosed_think_or_tool(md_text[:offset])``，内含 4 次全文 str.count
+    + 每注册标签一次全文 rfind + 一次前缀切片拷贝 → O(fences × n) 二次复杂度。
+    实测 1.5MB 文本：60 fence 13ms、200 fence 86ms；而工具块展开
+    （_serve_tool_body → find_tool_segment_by_call_id）每次都要重跑一遍。
+    现改为随行扫描增量维护协议块状态，单次判定降为 O(1)，总复杂度 O(n)。
+
+    状态语义与 ``_has_unclosed_think_or_tool`` 逐项对齐：
+    - think/tool：原实现用 count 比较 → 净计数差分等价；
+    - 注册标签：原实现用 rfind（「最后一个事件是 open」）→ 布尔 pending 等价；
+    - 半截标签：原实现只看前缀尾 _PARTIAL_TAG_TAIL_WINDOW 字符 → 直接切窗口，
+      O(1)，不必构造前缀。
+    状态按「含 fence 内文本的原文前缀」推进（原实现的前缀就是 md_text[:offset]，
+    同样不跳过已提取的 fence），故 fence 内的协议标签也计入。
     """
     if "```" not in md_text and "~~~" not in md_text:
         return [], md_text
+
+    tag_names = _registered_tag_names_safe()
+    tag_pending: dict[str, bool] = dict.fromkeys(tag_names, False)
+    tag_open_count = 0
+    think_net = 0
+    tool_net = 0
 
     fences: list[str] = []
     out_lines: list[str] = []
     buf: list[str] | None = None
     fence_marker = ""
-    offset = 0  # 当前行之前累计的字符数（供协议块未闭合判定取样前缀）
+    offset = 0  # 当前行之前累计的字符数（协议块状态取样用）
     for line in md_text.split("\n"):
         stripped = line.lstrip()
         if buf is None:
@@ -3220,7 +3191,12 @@ def _extract_fenced_code(md_text: str) -> tuple[list[str], str]:
             # _restore_fenced_code 找不回哨兵 → 从 fence 到文末的全部内容
             # 永久丢失（历史会话重开同样丢失，"偶尔内容显示不全"根因）。
             # 放行后 fence 原文留在协议块内，由 think/tool 卡自身处理。
-            if m and not _has_unclosed_think_or_tool(md_text[:offset]):
+            if m and not (
+                think_net > 0
+                or tool_net > 0
+                or tag_open_count > 0
+                or _PARTIAL_TAG_TAIL_RE.search(md_text[max(0, offset - _PARTIAL_TAG_TAIL_WINDOW) : offset])
+            ):
                 fence_marker = m.group(1)
                 buf = [line]
             else:
@@ -3231,6 +3207,22 @@ def _extract_fenced_code(md_text: str) -> tuple[list[str], str]:
                 fences.append("\n".join(buf))
                 out_lines.append(f"\x00F{len(fences) - 1}\x00")
                 buf = None
+
+        # 协议块状态推进（放在 fence 判定之后：原实现取样的是「不含当前行」的
+        # 前缀 md_text[:offset]，与上面判定用的状态口径必须一致）
+        if "<" in line:
+            if "<think>" in line or "</think>" in line:
+                think_net += line.count("<think>") - line.count("</think>")
+            if "<tool>" in line or "</tool>" in line:
+                tool_net += line.count("<tool>") - line.count("</tool>")
+            for tag in tag_names:
+                if f"<{tag}>" in line or f"</{tag}>" in line:
+                    was = tag_pending[tag]
+                    now = _line_tag_pending(line, tag, was)
+                    if now != was:
+                        tag_pending[tag] = now
+                        tag_open_count += 1 if now else -1
+
         offset += len(line) + 1
     if buf is not None:
         # 未闭合 fence：原样放回（流式中间态兜底，语义与 _extract_formulas 一致）
@@ -3253,7 +3245,7 @@ _LRU_CACHE_SIZE_THRESHOLD = 200 * 1024  # 200KB
     maxsize=32
 )  # 16→32（T16）：key 加 theme_ver 尾参后深浅两版各占一份；>200KB 大文本已走 __wrapped__ 绕过缓存
 def _render_markdown_to_html_cached_impl(
-    raw_md: str, compact: bool = False, heavy_caps=None, theme_ver: int = 0
+    raw_md: str, compact: bool = False, heavy_caps=None, theme_ver: int = 0, lazy_body: bool = False
 ) -> str:
     """
     Markdown 转 HTML 的核心渲染函数（带 LRU 缓存）。
@@ -3262,6 +3254,7 @@ def _render_markdown_to_html_cached_impl(
     同一 markdown 在深/浅主题下各存一份渲染结果，来回切换直接命中。
     默认值 0 供直接调用（历史测试/无主题上下文场景）与 __wrapped__ 绕过分支
     保持旧签名兼容；生产路径由 _render_markdown_to_html_cached 显式传入。
+    lazy_body：折叠态工具块 body 只出空占位（影响产物 → 必须进缓存 key）。
     """
     safe_md = _sanitize_incomplete_markdown(raw_md)
     safe_md = _protect_inline_svg_blocks(safe_md)
@@ -3271,7 +3264,9 @@ def _render_markdown_to_html_cached_impl(
     # fence 内容保护：代码块内协议标签不被 inject 抽出渲染成假卡片
     _fences, safe_md = _extract_fenced_code(safe_md)
     processed_md = _inject_think_cards(safe_md, True, compact=compact)
-    processed_md = _inject_tool_blocks(processed_md, True, compact=compact, heavy_caps=heavy_caps)
+    processed_md = _inject_tool_blocks(
+        processed_md, True, compact=compact, heavy_caps=heavy_caps, lazy_body=lazy_body
+    )
     processed_md = _inject_hook_blocks(processed_md, True)
     processed_md = _inject_tag_cards(processed_md, True, compact=compact)
     processed_md = _restore_fenced_code(processed_md, _fences)
@@ -3286,7 +3281,9 @@ def _render_markdown_to_html_cached_impl(
         return f"<pre>{escape(raw_md)}</pre>"
 
 
-def _render_markdown_to_html_cached(raw_md: str, compact: bool = False, heavy_caps=None) -> str:
+def _render_markdown_to_html_cached(
+    raw_md: str, compact: bool = False, heavy_caps=None, lazy_body: bool = False
+) -> str:
     """
     带内存保护的 Markdown 渲染函数。
     - 对于超过阈值的文本，跳过缓存直接渲染
@@ -3299,14 +3296,18 @@ def _render_markdown_to_html_cached(raw_md: str, compact: bool = False, heavy_ca
     # 大文本跳过缓存，防止内存膨胀 — 用 __wrapped__ 绕过 LRU，不清空缓存
     text_size = len(raw_md.encode("utf-8"))
     if text_size > _LRU_CACHE_SIZE_THRESHOLD:
-        return _render_markdown_to_html_cached_impl.__wrapped__(raw_md, compact=compact, heavy_caps=heavy_caps)
+        return _render_markdown_to_html_cached_impl.__wrapped__(
+            raw_md, compact=compact, heavy_caps=heavy_caps, lazy_body=lazy_body
+        )
 
     # [T16] 主题版本入 key：按 (theme_ver, raw_md, compact, heavy_caps) 分桶，
     # 深浅主题各自缓存各自的渲染结果（get_version 内部有锁，线程安全）
     from app.utils.theme_refresh import ThemeRefreshCoordinator
 
     theme_ver = ThemeRefreshCoordinator.get_version()
-    return _render_markdown_to_html_cached_impl(raw_md, compact=compact, heavy_caps=heavy_caps, theme_ver=theme_ver)
+    return _render_markdown_to_html_cached_impl(
+        raw_md, compact=compact, heavy_caps=heavy_caps, theme_ver=theme_ver, lazy_body=lazy_body
+    )
 
 
 # ============================================================
@@ -3373,6 +3374,7 @@ def _render_markdown_to_html_worker(snapshot: dict) -> str:
     compact = snapshot["compact"]
     icon_prefix = snapshot["icon_prefix"]
     heavy_caps = snapshot.get("heavy_caps")  # 历史卡重负载上限（None=不限）
+    lazy_body = snapshot.get("lazy_body", False)  # 折叠块 body 懒注入
 
     if not streaming:
         # 非流式分支（历史加载 / 流式结束调用方已切非流式）
@@ -3383,7 +3385,9 @@ def _render_markdown_to_html_worker(snapshot: dict) -> str:
         # fence 内容保护：代码块内协议标签不被 inject 抽出渲染成假卡片
         _fences, safe_md = _extract_fenced_code(safe_md)
         processed_md = _inject_think_cards(safe_md, True, compact=compact)
-        processed_md = _inject_tool_blocks(processed_md, True, compact=compact, heavy_caps=heavy_caps)
+        processed_md = _inject_tool_blocks(
+            processed_md, True, compact=compact, heavy_caps=heavy_caps, lazy_body=lazy_body
+        )
         processed_md = _inject_hook_blocks(processed_md, True)
         processed_md = _inject_tag_cards(processed_md, True, compact=compact)
         processed_md = _restore_fenced_code(processed_md, _fences)
@@ -3412,7 +3416,11 @@ def _render_markdown_to_html_worker(snapshot: dict) -> str:
     _fences, safe_md = _extract_fenced_code(safe_md)
     processed_md = _inject_think_cards(safe_md, False, compact=compact)
     processed_md = _inject_tool_blocks(
-        processed_md, False, compact=compact, suppress=snapshot.get("tool_fingerprints")
+        processed_md,
+        False,
+        compact=compact,
+        suppress=snapshot.get("tool_fingerprints"),
+        lazy_body=lazy_body,
     )
     processed_md = _inject_hook_blocks(processed_md, False)
     processed_md = _inject_tag_cards(processed_md, False, compact=compact)
@@ -3593,7 +3601,101 @@ _SKELETON_CACHE_MAX = 48
 # _SKELETON_CACHE_VERSION +1（v47）：移除预览文字打字机（_PREVIEW_TYPEWRITER_JS：
 # window._pt/_ptType/_ptPlay + 全部 [data-dfx-preview] 标记 + 三处渲染路径调用）。
 # 预览/思考预览行改为渲染落地即全显，不再逐字。旧骨架仍带 _pt 资产与调用必须失效。
-_SKELETON_CACHE_VERSION = 53
+# _SKELETON_CACHE_VERSION +1（v50）：工具块 body 懒注入通道——新增
+# window._requestToolBodyFor / _requestLazyToolBodiesIn / _fillToolBody，
+# summary 点击分支与 _toggleToolSection 展开、restoreCollapsibleStates 接入。
+# 不可见工具块 body 只留空占位（render_tool_block 的 lazy_body），旧骨架无注入
+# 函数 → 占位块展开后永久空白，必须靠版本号让旧缓存失效。
+# _SKELETON_CACHE_VERSION +1（v51）：块级补丁通道——新增 window.patchBlocks /
+# _blockNodes / _applyBlockMeta（app/widgets/render 的接线前置）。旧骨架缺
+# patchBlocks → 新渲染路径调用时 JS 报错、卡片停在流式形态，必须失效缓存。
+# _SKELETON_CACHE_VERSION +1（v52）：patchBlocks 删除段接图表 dispose +
+# 折叠态恢复；新增 window._v2AfterPatch（v2 渲染通道收尾：运行框去重 /
+# 工具区显隐 / 内部滚底）。旧骨架无这些函数 → v2 收尾静默失效。
+# _SKELETON_CACHE_VERSION +1（v53）：B5.2 流式纯文本尾态——新增
+# window._v2LiveNode / _v2LiveAppend 与 .v2-live-text 样式。旧骨架缺追加
+# 函数 → 活动块增量静默丢弃（只显示首帧纯文本），必须失效缓存。
+# _SKELETON_CACHE_VERSION +1（v54）：[T43] _v2AfterPatch 非流式收尾补卡内 body
+# 滚底（跟随态）——旧骨架 v2 通道无此逻辑，历史会话超长卡片首帧停在最上面。
+# _SKELETON_CACHE_VERSION +1（v55）：v2 通道「正式块」判据改 data-block-wrapper
+# （原按 data-block-key 判定，而 JS 注入的完成框也带该属性 → 去重不生效、splice
+# 索引把它算进块序列）。旧骨架里流式结束后编辑类工具完成框沉底残留两份。
+# _SKELETON_CACHE_VERSION +1（v56）：v2 通道滚动位置保全（_v2ScrollSave /
+# _v2ScrollRestore——force_full 清空容器后还原正文/工具区/body 的阅读位置）、
+# 折叠态改用稳定身份键（_collapseKeyOf：data-flip-key / data-tool-call-id 优先，
+# 内容指纹回退）、patchBlocks 新节点注入前冻结折叠框 transition。旧骨架缺这些
+# 函数 → 流式中用户上滚被弹回顶部、已展开的折叠框重放展开动画。
+# _SKELETON_CACHE_VERSION +1（v57）：滚轮「内层可滚」判据补 #content-placeholder
+# （reportHeight 第 6 字段 + _BODY_GEOM_READ_JS 两处）。坞态下正文 600px 限高
+# 内滚，它才是唯一可滚容器；漏掉它 → Python 判「卡内无人消费」→ 点击正文后
+# 滚轮全交外层（「点击后优先滚 HTML 内部」失效）。旧骨架 ins 恒 0，必须失效缓存。
+# _SKELETON_CACHE_VERSION +1（v58）：折叠态身份键优先级改为 tool-call-id 优先
+# （工具块真身份），flip-key 次之。v57 的 flip-key 优先会让工具卡在 think 序号
+# 重排后错配到别的块（用户实测「展开的不是原来那个」）。
+# _SKELETON_CACHE_VERSION +1（v59）：v2 局部 patch 的滚动锚点保持
+# （_v2ScrollHost / _v2AnchorCapture / _v2AnchorRestore）——替换块在视口上方且
+# 高度变化时补偿阅读位置；只在容器所属视口已离开底部时介入。旧骨架缺这些函数
+# → 流式中展开/折叠块后正文位置漂移。
+# _SKELETON_CACHE_VERSION +1（v60）：[T44] 坞态不再沉底——移除 body.streaming-dock
+# 的 flex/order 调换与正文 600px 限高内滚（工具区始终在上、正文自然高度在下），
+# _setStreamingDock 只剩「工具区限高 264px」+「归位同帧折叠」+ 高度报告。
+# 旧骨架仍把工具区沉到底部、正文限矮，必须靠版本号让旧缓存失效。
+# _SKELETON_CACHE_VERSION +1（v61）：#tool-section 加圆角细边框围栏
+# （border var(--border) + radius 8 + padding 2x8），简洁模式下工具/思考区与正文
+# 视觉分区。旧骨架无边框，必须失效缓存。
+# _SKELETON_CACHE_VERSION +1（v62）：[T45] 围栏改「左对齐进程条」——v61 的外框与
+# 标题左右横线造成卡中卡双圆角 + 标题居中破阅读轴；改为去外框、标题左对齐正文轴、
+# 计数独立 pill（.ts-count）、#tool-content 左侧 1.5px 竖线缩进。旧骨架的标题
+# textContent 仍拼「· N 项」，须失效缓存避免新旧结构混用。
+# _SKELETON_CACHE_VERSION +1（v64）：_updateToolSectionHeader 的自动展开加
+# window._streamingActive 守卫——流式结束的终渲染会再跑一次该函数，DOM 里残留的
+# data-streaming="true"（注入运行框未转型 / 思考块未正式化）会把同帧折叠好的工具区
+# 重新顶开；[T44] 工具区在正文上方，一收一放 = 正文上下抖动。旧骨架无守卫，须失效缓存。
+# _SKELETON_CACHE_VERSION +1（v65）：_fillToolBody 空 html 分支清 lazyBody——
+# Python 反查源不可用时（cleanup 清 _markdown_text 后的窗口）回空 html，旧逻辑
+# 留着 lazyBody 无限重试空请求（请求→空→return，2s 兜底被 lazyLoading 删除杀死）
+# → 完成框点击永远展不开。清标记后下次点击走普通展开路径。旧骨架无此行为。
+# _SKELETON_CACHE_VERSION +1（v66）：_v2AfterPatch 紧凑模式搬移改「身份复用」——
+# 原实现每批把工具区搬入节点全删再从正文重放（活动块 live 尾态期间正文无协议卡 →
+# 工具区清空、正式化后又搬回），完成框/思考卡每批一删一加 → 内容与高度抖动、
+# 外层滚动条乱跳。旧骨架每批重建，必须失效缓存。
+# _SKELETON_CACHE_VERSION +1（v67）：同身份搬移改「保壳换瓤」——v66 用 replaceChild
+# 换思考块，节点身份虽按 flip-key 复用但整块被替换，折叠态/展开 body 每批丢失，
+# 用户展开思考/工具卡后仍每批闪一次（2026-10-30 复测）。旧骨架须失效缓存。
+# _SKELETON_CACHE_VERSION +1（v68）：patchBlocks 删除段捕获折叠态 + 已加载 body，
+# 插入后按稳定身份（flip-key / tool-call-id）回填并清 lazy-body——流式思考块 key
+# 含内容指纹、内容每涨一批就整块替换，新节点带默认折叠态与空 body，restore 走
+# 懒注入重请求（body 先清空再回灌），表现为展开的卡每批「折叠→展开」一次。
+# _SKELETON_CACHE_VERSION +1（v69）：折叠态/body 携带抽成 _carryCollapseState /
+# _restoreCarriedCollapse，patchBlocks 与 force_full 整页清空共用——后者清空两个
+# 容器后重建，新节点同样丢展开态与 body。旧骨架无这对函数，须失效缓存。
+# _SKELETON_CACHE_VERSION +1（v70）：patchBlocks 插入锚点与搬移插入点改「按存活
+# wrapper 定位」——工具区末尾挂着 JS 注入的运行框（非 wrapper），原 append 兜底会把
+# 新块/搬入卡排到运行框之后，运行框看起来「跑到思考上面」，下一批又移回 = 位置跳。
+# _SKELETON_CACHE_VERSION +1（v72）：v2 流式帧级揭示——新增 window._v2tw 队列
+# （_v2LiveStep rAF 指数追赶 / _v2LiveFlush / _v2LiveDrop / _v2LiveAppendNow）与
+# 前缀切片结算 _v2LiveSplit + .v2-live-part 样式。旧骨架只在批边界整段 append
+# （文字一块块蹦）、且无切片通道。缺这些函数 → 新调用全部静默失效。
+# _SKELETON_CACHE_VERSION +1（v73）：_v2LiveSplit 插入切片段后就地初始化图表/
+# 公式/插件 fence（与 patchBlocks / updateTailHtml 同款五连）。缺它时切片段里的
+# echarts 容器插进 DOM 却没人 init，一直空白到下一次整块正式化（图表区空一块）。
+# _SKELETON_CACHE_VERSION +1（v74）：字体族/等宽族改走 :root CSS 变量
+# （--dfx-font-family / --dfx-font-mono / --dfx-font-size），供 CodeWebViewer.refresh_font
+# 运行时注入。旧骨架把字体值写死在 <style> 里且池化复用保留骨架 → 切字体后
+# 已存在的卡片永远不跟随（"要重建几次会话才刷出来"）。
+# _SKELETON_CACHE_VERSION +1（v75）：思考 v2 尾态加限高窗口
+# （#content-placeholder/#tool-content 的 .v2-live-text.think-compact max-height:96px
+# + 顶部渐隐，_v2LiveAppendNow / _v2LiveSplit 追加后滚底，_v2AfterPatch 首帧滚底，
+# _v2LiveSplit 新增 reasoning 参数保持 think-compact 类）。旧骨架无此规则 →
+# 长思考切标签页返回后整段全高显示（2026-11-02 用户实测）。
+# _SKELETON_CACHE_VERSION +1（v76）：v2 揭示追加复用尾部文本节点
+# （_v2LiveAppendNow 的 `lastChild.appendData` 替代每帧 createTextNode）。
+# 旧骨架逐帧新建文本节点，长回答下同一 live 容器积累上千兄弟节点，
+# Chromium 每次重排/选择都要线性遍历，是流式掉帧的一分子。
+# _SKELETON_CACHE_VERSION +1（v77）：ECharts vendor 加载失败兜底——
+# _echLoadScript 的 onerror 清 _echLibLoading/_echLibQueue、给容器打失败标记，
+# _echartsEnsure 加 _echLibFailed 熔断。旧骨架 CDN 断时容器永久停在 400px 空框。
+_SKELETON_CACHE_VERSION = 77
 
 
 def _js_literal(value) -> str:
@@ -3900,7 +4002,7 @@ def _extract_closed_segments(md: str):
     return stable_len, segments
 
 
-def _render_stable_segment(md_seg: str, compact: bool = False) -> str:
+def _render_stable_segment(md_seg: str, compact: bool = False, lazy_body: bool = False) -> str:
     """B1: 渲染单个闭合段为 HTML（差量增量渲染的段落级快速路径）。
 
     与 _render_markdown_to_html_worker 管线一致（sanitize→inject→md.convert→
@@ -3926,7 +4028,7 @@ def _render_stable_segment(md_seg: str, compact: bool = False) -> str:
     # fence 内容保护：代码块内协议标签不被 inject 抽出渲染成假卡片
     _fences, safe_md = _extract_fenced_code(safe_md)
     processed_md = _inject_think_cards(safe_md, True, compact=compact)
-    processed_md = _inject_tool_blocks(processed_md, True, compact=compact)
+    processed_md = _inject_tool_blocks(processed_md, True, compact=compact, lazy_body=lazy_body)
     processed_md = _inject_hook_blocks(processed_md, True)
     processed_md = _inject_tag_cards(processed_md, True, compact=compact)
     processed_md = _restore_fenced_code(processed_md, _fences)
@@ -4045,65 +4147,43 @@ def _render_inline_tail(md_text: str, compact: bool = False) -> str:
     # [T35] 与全量/差量段渲染对齐：补代码块包装（pygments 高亮 + copy 按钮 +
     # 语言标签）。缺它时流式期间代码块是素色 <pre>，结束全量渲染才变样 ——
     # 每轮回答结束一次的可见「代码块变脸」，且让差量收尾产物与全量不一致。
-    # 规模保护：超大 tail 退回素色（成本说明见 _TAIL_CODE_WRAP_MAX_CHARS）。
+    # 规模保护：超大 tail 不做整页高亮（成本说明见 _TAIL_CODE_WRAP_MAX_CHARS），
+    # 但渲染型 fence 必须单独升级 —— 整页跳过会把已闭合的 echarts / mermaid
+    # 降级成 <pre><code>（用户可见「图表回退成代码」），未闭合的图表 fence
+    # 更是直接裸露半截 JSON。普通代码块仍保持素色（口径与跳过时一致）。
     if len(md_text) <= _TAIL_CODE_WRAP_MAX_CHARS:
         try:
             html = _wrap_code_blocks_with_copy_button_web(html)
         except Exception:  # 包装失败绝不能让正文消失：保留未包装的 HTML
+            pass
+    else:
+        try:
+            html = _promote_render_fences_html(html)
+        except Exception:  # 同上：降级失败保留原 HTML
             pass
     html = _resolve_image_src(html)
     return html
 
 
 # ── 流式活动坞（Streaming Dock）骨架资产 ──
-# 简洁模式下流式期间：#tool-section 从卡片顶部沉到底部并限高 ~3-4 行，
-# 让用户实时看到正在执行的工具/思考；流式结束后归位顶部恢复现状。
+# [T44] 坞态不再沉底：简洁模式下工具/思考区**始终在卡片顶部**，正文按自然
+# 高度跟在下面，只保留「流式期间工具区限高内滚」+「结束时同帧折叠」两件事。
+# 历史：原设计用 CSS order 把工具区沉到底部、正文 600px 限高内滚（双层滚动），
+# 用户诉求「一开始就在上面」→ order 调换与正文限高全部移除（沉底没有意义）。
 # 由 Python 在流式开始/结束时注入 _setStreamingDock(true/false) 切换。
 _STREAMING_DOCK_CSS = """
-                /* ── 流式活动坞：简洁模式流式期间工具区沉底 + 限高 ──
-                   纯 CSS order 调换，不搬移 DOM，避免闪烁。 */
-                body.streaming-dock {
-                    display: flex;
-                    flex-direction: column;
-                    overflow-anchor: auto;
-                }
-                body.streaming-dock #content-placeholder {
-                    order: 1;
-                    /* [T39] 恢复正文限高 + 容器内滚（[T36] 反转）：用户诉求「工具区
-                       别跟着正文一路下滑」。卡片高度 = 正文 + 工具区，正文按自然
-                       高度长高时工具区被一路推动；给正文一个上限后卡片高度钳停，
-                       工具区位置固定，正文在容器内跟滚（JS 侧
-                       _autoScrollStreamingBody 的坞态分支早已就绪，此前限高被移除
-                       后一直是空转）。代价：流式期间正文只显示最近一屏、结束后
-                       卡片回到自然高度（一次性长高，由既有高度跟踪动画收敛）。
-                       保留横向裁剪（原 🐛 修复依然需要）。 */
-                    max-height: 600px;
-                    overflow-y: auto;
-                    overflow-x: hidden;
-                    overflow-wrap: break-word;
-                }
-                body.streaming-dock #tool-section {
-                    order: 2;
-                    margin: 8px 0 0 0;
-                }
-                /* 坞态限高：流式期间工具区保持内滚，但需能看到足够多的实时条目。
-                   原值 110px 仅 ≈3-4 行，工具/思考稍多就只能看到一小截，
-                   视觉上与"折叠"难区分 —— 用户反馈误以为工具区默认收起了。
-                   放宽到 220px（≈8 行）后，常规工具序列可完整看到实时进度，
-                   同时仍为 max-height（非无限增长），保持"卡片总高不随流式膨胀"
-                   的坞态设计意图。
-                   [T36] 220 → 264px：正文不限高后，坞态唯一职责就是工具区可见，
-                   再压着它没有意义；264 ≈ 9-10 行，配合正文自然生长消除"拥挤"感。 */
+                /* ── 坞态：工具区限高内滚（位置不动，仍在本就居顶的 #tool-section） ──
+                   流式期间工具/思考条目数量不可控，不限高会把正文一路顶出视口；
+                   264px ≈ 9-10 行，常规工具序列可看到实时进度，且卡片总高不随
+                   流式膨胀。 */
                 body.streaming-dock #tool-content {
                     max-height: 264px;
                 }
                 /* ── [T38] 空正文折叠 ──
                    长工具循环期间（LLM 连续调工具、尚未输出正文）正文区没有任何
-                   可见内容，但仍占着 padding/min-height 的一块空白 —— 真机截图里
-                   表现为「卡片顶部一块约 45px 的纯白空白」，用户直接读作"白屏"。
-                   判据由 reportHeight 维护（body.cp-blank）：正文无可见文本且无
-                   图片/公式/表格等实体内容时置位，有内容即摘除。
-                   仅坞态生效：非坞态工具区在顶部，正文为空本来就不占视觉主体。 */
+                   可见内容，仍会占一段空白；判据由 reportHeight 维护
+                   （body.cp-blank）：正文无可见文本且无图片/公式/表格等实体内容时
+                   置位，有内容即摘除。 */
                 body.streaming-dock.cp-blank #content-placeholder {
                     display: none;
                 }
@@ -4111,6 +4191,9 @@ _STREAMING_DOCK_CSS = """
 
 _STREAMING_DOCK_JS = """
                 // ===== 流式活动坞（Streaming Dock）=====
+                // [T44] 只切工具区限高，**不做位置调换**：工具/思考区始终在卡片
+                // 顶部、正文在其下方自然生长（原 order 沉底 + 正文 600px 限高内滚
+                // 的双层滚动已移除）。
                 window._streamingActive = false;
                 function _setStreamingDock(active, collapseAfter) {
                     // 仅简洁模式启用坞态
@@ -4119,20 +4202,13 @@ _STREAMING_DOCK_JS = """
                     window._streamingActive = !!active;
                     if (on === wasOn) return;
                     var ts = document.getElementById('tool-section');
-                    // 切换前记录工具区高度与用户是否在底部，用于阅读位置补偿
-                    var _dockH = ts ? ts.offsetHeight : 0;
-                    var _atBottom = Math.abs(document.body.scrollHeight - document.body.scrollTop - document.body.clientHeight) < 40;
-                    // FLIP：工具区在「沉底 ↔ 顶部」之间换位（CSS order 调换）是瞬移，
-                    // 记录切换前位置，切换后补间成平滑位移。
-                    if (typeof window._flipArm === 'function') window._flipArm(1200);
-                    var _flipPrev = (typeof window._flipCapture === 'function') ? window._flipCapture() : null;
                     document.body.classList.toggle('streaming-dock', on);
-                    // [T30] 归位同帧折叠：坞态归位本会让 #tool-content 从 220px 限高
+                    // [T30] 归位同帧折叠：坞态归位会让 #tool-content 从 264px 限高
                     // 展开到自然高度（工具多时暴涨数百 px），随后 finish 流程又立刻
                     // 把它折叠回 0 —— 「先胀后缩」的往返峰是结束态剧烈抖动的主因，
                     // 而终态本来就是折叠，中间那次全展开纯属浪费。collapseAfter=true
                     // 时在同一同步块内连置折叠属性：两个 max-height 变化合并为一帧，
-                    // 浏览器只算一条 220px→0 的过渡曲线，自然高度峰值从不进布局。
+                    // 浏览器只算一条 264px→0 的过渡曲线，自然高度峰值从不进布局。
                     // 折叠的 transitionend 终值单报由函数尾部统一的
                     // _beginToolSectionTransition 承接（本帧内开启抑制，无漏报窗口）。
                     if (on === false && wasOn && collapseAfter && (window._toolCompactMode !== false) && ts) {
@@ -4141,45 +4217,14 @@ _STREAMING_DOCK_JS = """
                         if (_sepC) _sepC.setAttribute('aria-expanded', 'false');
                     }
                     if (!on && wasOn) {
-                        // 🐛 修复（坞态归位正文置顶）：坞态下正文容器限高内滚，用户
-                        // 阅读位置在 #content-placeholder.scrollTop。归位移除
-                        // max-height 后 clientHeight 骤增至全高，浏览器把该值钳到 0
-                        // → 正文跳顶、阅读位置丢失（坞态内展开工具完成框阅读时必现）。
-                        // 切 class 前先读出位置，切换后迁移到新滚动容器 document.body；
-                        // 归位后正文起点在工具区下方，迁移值需加工具区实际高度。
-                        var _cpDock = document.getElementById('content-placeholder');
-                        var _cpReading = _cpDock ? _cpDock.scrollTop : 0;
-                        if (_cpReading > 0 && _cpDock) {
-                            _cpDock.scrollTop = 0;
-                            var _tsDocked = ts ? ts.offsetHeight : 0;
-                            var _cpMigrated = _cpReading + (_tsDocked > 0 ? _tsDocked : 0);
-                            var _bodyMax = Math.max(0, document.body.scrollHeight - document.body.clientHeight);
-                            document.body.scrollTop = Math.min(_cpMigrated, _bodyMax);
-                        }
-                        // 坞态 → 归位顶部：正文整体下移 ≈ 工具区高度，
-                        // 用户上滚阅读时补偿 scrollTop，避免阅读位置跳动
-                        if (!_atBottom && _dockH > 0) {
-                            document.body.scrollTop = document.body.scrollTop + _dockH;
-                        }
                         // 归位后滚到底部展示最新条目——仅当用户未在上方阅读时；
-                        // 用户上滚查看中则保持其位置（内容未更新，不打扰阅读）
+                        // 用户上滚查看中则保持其位置（内容未更新，不打扰阅读）。
+                        // 注：工具区高度变化引起的正文位移由外层聊天列表的
+                        // HeightCommitBatch 锚点补偿承接（卡片自身不做 scrollTop 调整）。
                         var tc = document.getElementById('tool-content');
                         if (tc && !tc._userScrolledUp) { _progScroll(tc, tc.scrollHeight); }
-                    } else if (on && !wasOn) {
-                        // 顶部 → 坞态：正文上移，做对称补偿
-                        if (!_atBottom && _dockH > 0) {
-                            document.body.scrollTop = Math.max(0, document.body.scrollTop - _dockH);
-                        }
-                        // 🐛 修复：进入坞态时正文容器开始限高内滚，切换瞬间内容溢出
-                        // 会触发一次程序性 scroll 事件；重置正文容器用户滚动标志并程序
-                        // 置底跟随，避免遗留状态/切换抖动误判为正文上滚而卡在顶部。
-                        var _cp = document.getElementById('content-placeholder');
-                        if (_cp) {
-                            _cp._userScrolledUp = false;
-                            _progScroll(_cp, _cp.scrollHeight);
-                        }
                     }
-                    // 高度变化（110px ↔ 600px max-height）后报告文档高度。
+                    // 高度变化（工具区自然高度 ↔ 264px 限高）后报告文档高度。
                     // 切换会触发 #tool-content 的 max-height 200ms 过渡 →
                     // 用过渡感知报告（抑制中间态，终值单报），无内容时退回 debounced。
                     var _tsHasContent = ts && ts.style.display !== 'none' && ts.offsetHeight > 0;
@@ -4188,8 +4233,6 @@ _STREAMING_DOCK_JS = """
                     } else if (typeof reportHeightDebounced === 'function') {
                         reportHeightDebounced();
                     }
-                    // FLIP Play（入队串行：不会与后续重排/折叠动画同时开跑）
-                    if (_flipPrev && typeof window._flipPlay === 'function') window._flipPlay(_flipPrev, 220);
                 }
 """
 
@@ -4626,10 +4669,9 @@ _STREAM_APPEND_HELPERS_JS = f"""
 
 
 # ── FLIP 位移动画 + 动画串行队列骨架资产 ──
-# 解决"流式结束时工具与思考弹到最顶上"：
-# 简洁模式下流式期间工具区沉底（body.streaming-dock 纯 CSS order 调换），
-# 结束时归位顶部 + 最终全量重排（innerHTML 整体替换）+ 自动折叠三个动作叠加，
-# 每个都带 200ms 过渡 → 视觉上是一次生硬跳变 + 三动画互相抢帧的卡顿。
+# 背景：流式结束时「最终全量重排（innerHTML 整体替换）+ 自动折叠」两个动作叠加，
+# 每个都带 200ms 过渡 → 视觉上是一次生硬跳变 + 动画互相抢帧的卡顿。
+# [T44] 工具区沉底 ↔ 归位的 order 调换已移除，FLIP 仍用于重排/折叠的位移补间。
 #
 # 对策：
 # 1) FLIP（First-Last-Invert-Play）：动作前记录关键容器/块的视口位置，
@@ -4938,8 +4980,9 @@ _CONTENT_AUTOSCROLL_JS = """
                     // 完成块替换/高度回调），正文内容未变 → 严禁触碰正文容器
                     // 滚动位置（否则跟随态下正文被拉到固定底部）。
                     if (bodyOnly) return;
-                    // 坞态（流式中）：#content-placeholder 自身限高滚动 → 跟滚正文容器
-                    // 保持最新输出可见；body 高度被钳不溢出，滚动赋值无害。
+                    // [T44] 坞态不再给正文限高，正文容器通常无溢出（scrollTop
+                    // 赋值退化为 no-op）；保留该分支仅为兼容「正文里嵌入的超宽
+                    // 代码块/图表」等仍可能内滚的容器状态，不做位置调换。
                     var _cp = document.getElementById('content-placeholder');
                     if (document.body.classList.contains('streaming-dock') && _cp) {
                         if (!_cp._userScrolledUp) {

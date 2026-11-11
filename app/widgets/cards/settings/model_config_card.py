@@ -148,9 +148,9 @@ class ModelConfigCard(QWidget):
             # 可选值（reasoning_effort_values）才显示——无 values = 不支持调整强度，
             # toggle/budget 型思考模型也没有"强度"概念，一并隐藏该配置项
             if key == "思考等级" and self.current_model_name:
-                from app.core.modelmeta.model_capabilities import get_model_capabilities
+                from app.core.modelmeta.model_capabilities import resolve_capabilities_for_model
 
-                caps = get_model_capabilities(self.current_model_name, self.current_provider)
+                caps = resolve_capabilities_for_model(self.current_model_name, self.current_provider)
                 if caps.get("thinking_param") != "reasoning_effort" or not caps.get("reasoning_effort_values"):
                     continue
             display_name = meta.get("display_name", key)
@@ -341,9 +341,9 @@ class ModelConfigCard(QWidget):
             # reasoning_options 中 effort 的 values（如 ["high", "max"]）；
             # models.dev 无数据时回退 PARAM_SCHEMA 固定默认。
             if key == "思考等级" and self.current_model_name:
-                from app.core.modelmeta.model_capabilities import get_model_capabilities
+                from app.core.modelmeta.model_capabilities import resolve_capabilities_for_model
 
-                caps = get_model_capabilities(self.current_model_name, self.current_provider)
+                caps = resolve_capabilities_for_model(self.current_model_name, self.current_provider)
                 dyn_values = caps.get("reasoning_effort_values")
                 if dyn_values:
                     options = list(dyn_values)
@@ -399,7 +399,15 @@ class ModelConfigCard(QWidget):
                 else:
                     result[actual_key] = text
             elif isinstance(widget, ComboBox):
-                if PARAM_SCHEMA.get(key, {}).get("ui_type") == "tri_state":
+                schema_meta = PARAM_SCHEMA.get(key, {})
+                if schema_meta.get("options_source"):
+                    # 动态枚举键：取 userData（显示文案不落盘）；delete_on 命中即删键
+                    data = widget.currentData()
+                    if not data or data == schema_meta.get("delete_on"):
+                        result.pop(actual_key, None)
+                    else:
+                        result[actual_key] = data
+                elif schema_meta.get("ui_type") == "tri_state":
                     # 声明三态：「自动」= 未声明 → 删键（最关键一行，防 copy 残留）
                     if widget.currentText() == "自动":
                         result.pop(actual_key, None)

@@ -101,12 +101,31 @@ def _asst_rec(ui_mod, tokens: int, elapsed_ms: float, ttft_ms: float = 0.0, pend
     )
 
 
+class _FakeBackend:
+    """模拟 backend.get_current_session()：切会话是否真的就位。"""
+
+    def __init__(self, sid: str):
+        self._sid = sid
+
+    def get_current_session(self):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(session_id=self._sid)
+
 class _FakeCollector:
-    def __init__(self, sid: str, records: list, refresh_sid: str | None = None):
+    def __init__(
+        self,
+        sid: str,
+        records: list,
+        refresh_sid: str | None = None,
+        backend_sid: str | None = None,
+    ):
         self._active_session_id = sid
         self._records = records
         # 非 None 时：refresh() 会把 active_session_id 换成它（模拟重投影追上会话切换）
         self._refresh_sid = refresh_sid
+        # backend 当前会话（缺省与投影同 sid = 已就位）
+        self._bound_backend = _FakeBackend(backend_sid if backend_sid is not None else sid)
         self.refresh_calls = 0
 
     @property
@@ -122,8 +141,14 @@ class _FakeCollector:
 class _FakeHub:
     """collector_for 返回固定投影的 stub hub（替代真 TraceCollectorHub）。"""
 
-    def __init__(self, sid: str, records: list, refresh_sid: str | None = None):
-        self._collector = _FakeCollector(sid, records, refresh_sid)
+    def __init__(
+        self,
+        sid: str,
+        records: list,
+        refresh_sid: str | None = None,
+        backend_sid: str | None = None,
+    ):
+        self._collector = _FakeCollector(sid, records, refresh_sid, backend_sid)
 
     def collector_for(self, mw):
         return self._collector
@@ -191,13 +216,13 @@ def test_history_load_ignores_round_wallclock_and_last_call_output(ui_mod, monke
 
 
 def test_history_load_stale_projection_shows_nothing(ui_mod, monkeypatch):
-    """投影未跟上会话切换 → 先驱动一次重投影。
+    """backend 已切到目标会话、但投影还停在旧会话 → 驱动一次重投影。
 
     切会话路径（_load_session_from_record → set_current_session）不发任何 backend
     信号，collector 不会自己感知；不 refresh 页脚会一直空白到用户下次发消息。
     重投影后仍对不上（refresh 无效）→ 返回 None（不串旧会话数字）。
     """
-    hub = _FakeHub("sessA", [_asst_rec(ui_mod, 500, 2000.0)])
+    hub = _FakeHub("sessA", [_asst_rec(ui_mod, 500, 2000.0, 0.0)], backend_sid="sessB")
     monkeypatch.setattr(ui_mod, "_FOOTER_HUB", hub)
     assert ui_mod._footer_avg_throughput(_ctx(main_widget=_Host("sessB"))) is None
     assert hub._collector.refresh_calls == 1, "应驱动一次重投影"
@@ -205,11 +230,32 @@ def test_history_load_stale_projection_shows_nothing(ui_mod, monkeypatch):
 
 def test_history_load_reprojects_and_shows(ui_mod, monkeypatch):
     """重投影追上会话切换后 → 立即出正确值（不必等下一次 backend 信号）。"""
-    records = [_asst_rec(ui_mod, 2000, 4000.0)]  # 2000 / 4s = 500 tok/s
-    hub = _FakeHub("sessA", records, refresh_sid="sessB")
+    records = [_asst_rec(ui_mod, 2000, 4000.0, 1000.0)]  # 2000 / (4s−1s) ≈ 667 tok/s
+    hub = _FakeHub("sessA", records, refresh_sid="sessB", backend_sid="sessB")
     monkeypatch.setattr(ui_mod, "_FOOTER_HUB", hub)
     val = ui_mod._footer_avg_throughput(_ctx(main_widget=_Host("sessB")))
-    assert val is not None and val["text"] == "500 tok/s"
+    assert val is not None and val["text"] == "667 tok/s"
+
+
+def test_reproject_waits_for_backend_session_switch(ui_mod, monkeypatch):
+    """卡片构建早于 set_current_session：backend 还没切 → 不投影、也不记 5s 守卫。
+
+    旧实现直接投影（拿旧会话白烧 40~115ms）并写守卫，把之后会话已就位的
+    1s 补刷也挡在窗口外 → 该卡片页脚永久空白。
+    """
+    hub = _FakeHub("sessA", [_asst_rec(ui_mod, 2000, 4000.0, 1000.0)], backend_sid="sessA")
+    monkeypatch.setattr(ui_mod, "_FOOTER_HUB", hub)
+    host = _Host("sessB")
+    for _ in range(3):
+        assert ui_mod._footer_avg_throughput(_ctx(main_widget=host)) is None
+    assert hub._collector.refresh_calls == 0, "backend 未就位不应烧一次全量投影"
+    assert not ui_mod._REPROJECT_GUARD, "backend 未就位不得写守卫（会挡掉会话就位后的补刷）"
+
+    # backend 切到位后，下一次刷新必须能立刻投影并出值（不受守卫阻挡）
+    hub._collector._bound_backend = _FakeBackend("sessB")
+    hub._collector._refresh_sid = "sessB"
+    val = ui_mod._footer_avg_throughput(_ctx(main_widget=host))
+    assert val is not None and val["text"] == "667 tok/s"
 
 
 def test_reproject_is_throttled(ui_mod, monkeypatch):
@@ -217,7 +263,7 @@ def test_reproject_is_throttled(ui_mod, monkeypatch):
 
     不节流就每张卡各跑一次全量投影（实测 200+ 消息会话单次 40~115ms，主线程）。
     """
-    hub = _FakeHub("sessA", [_asst_rec(ui_mod, 500, 2000.0)])  # refresh 不改变 sid
+    hub = _FakeHub("sessA", [_asst_rec(ui_mod, 500, 2000.0, 0.0)], backend_sid="sessB")
     monkeypatch.setattr(ui_mod, "_FOOTER_HUB", hub)
     host = _Host("sessB")
     for _ in range(5):
@@ -225,16 +271,33 @@ def test_reproject_is_throttled(ui_mod, monkeypatch):
     assert hub._collector.refresh_calls == 1, "窗口期内只允许尝试一次"
 
 
-def test_pending_and_short_gen_excluded(ui_mod, monkeypatch):
-    """in-flight 尾巴与生成段 ≤200ms 的条目不参与（防 tps 虚高 / 时长走动）。"""
+def test_missing_ttft_excluded(ui_mod, monkeypatch):
+    """回归（2026-11-01）：缺 ttft 的记录不得把 elapsed 全当生成时间。
+
+    真实样本：29 tok / 35s（缺 ttft，elapsed 含 prefill/排队）= 0.8 tok/s。
+    计入后会把同会话 40+ tok/s 的均值拉到个位数 —— 用户看到「非常低」。
+    无 ttft 数据 → 整条跳过，只统计 1000 tok / (10s−2s) = 125 tok/s。
+    """
     records = [
-        _asst_rec(ui_mod, 1000, 10000.0, 0.0),  # 计
+        _asst_rec(ui_mod, 29, 35341.5, 0.0),  # 缺 ttft → 排除
+        _asst_rec(ui_mod, 1000, 10000.0, 2000.0),  # 计
+    ]
+    monkeypatch.setattr(ui_mod, "_FOOTER_HUB", _FakeHub("sessA", records))
+    val = ui_mod._footer_avg_throughput(_ctx(main_widget=_Host("sessA")))
+    assert val["text"] == "125 tok/s"
+    assert "1 次调用" in val["tooltip"]
+
+
+def test_pending_and_short_gen_excluded(ui_mod, monkeypatch):
+    """in-flight 尾巴、生成段 ≤200ms 与缺 ttft 的条目不参与。"""
+    records = [
+        _asst_rec(ui_mod, 1000, 10000.0, 2000.0),  # 计：1000 / 8s
         _asst_rec(ui_mod, 999, 300.0, 200.0),  # 生成 100ms → 排除
         _asst_rec(ui_mod, 999, 10000.0, 0.0, pending=True),  # pending → 排除
     ]
     monkeypatch.setattr(ui_mod, "_FOOTER_HUB", _FakeHub("sessA", records))
     val = ui_mod._footer_avg_throughput(_ctx(main_widget=_Host("sessA")))
-    assert val["text"] == "100 tok/s"  # 1000 / 10s
+    assert val["text"] == "125 tok/s"  # 1000 / 8s
 
 
 def test_no_records_returns_none(ui_mod):
@@ -249,7 +312,8 @@ def test_color_thresholds(ui_mod, monkeypatch):
     """<30 红 / <60 黄 / 其余绿。"""
 
     def _one(sid: str, tokens: int, gen_s: float):
-        records = [_asst_rec(ui_mod, tokens, gen_s * 1000.0)]
+        # ttft 固定 1s：_aggregate_records 只接受有 TTFT 的样本（缺=跳过）
+        records = [_asst_rec(ui_mod, tokens, (gen_s + 1.0) * 1000.0, 1000.0)]
         monkeypatch.setattr(ui_mod, "_FOOTER_HUB", _FakeHub(sid, records))
         return ui_mod._footer_avg_throughput(_ctx(main_widget=_Host(sid)))
 

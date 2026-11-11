@@ -39,10 +39,9 @@ def _make_engine_with_session(messages, system_prompt=""):
     # _conversation_core.context_builder.get_context_budget
     core = MagicMock()
     core.context_builder.get_context_budget.return_value = 8000
-    core.compactor = MagicMock()
-    core.compactor._make_state.return_value = {"active": False}
     engine._conversation_core = core
-    # tools schema 缓存预填
+    # tools schema 缓存预填（会话快照冻结，_aggregate_tools 不再触达 agent_manager）
+    engine._tools_snapshot = {"key": ("", "build", False), "tools": [], "hash": "empty"}
     engine._tools_schema_cache = {"timestamp": 1e18, "tools": [], "tokens": 0}
     engine._tool_executor = None
     engine._backend = None
@@ -156,9 +155,8 @@ def test_snapshot_with_summary_message():
     engine._session_manager.get_current_session.return_value = session
     core = MagicMock()
     core.context_builder.get_context_budget.return_value = 8000
-    core.compactor = MagicMock()
-    core.compactor._make_state.return_value = {"active": True}
     engine._conversation_core = core
+    engine._tools_snapshot = {"key": ("", "build", False), "tools": [], "hash": "empty"}
     engine._tools_schema_cache = {"timestamp": 1e18, "tools": ["x"], "tokens": 100}
     engine._tool_executor = None
     engine._backend = None

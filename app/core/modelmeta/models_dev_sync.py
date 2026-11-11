@@ -201,7 +201,7 @@ def _transform_model(provider_id: str, model_id: str, model_info: Dict[str, Any]
 
     try:
         context_limit = int(context_limit)
-    except ValueError, TypeError:
+    except (ValueError, TypeError):
         return None
     if context_limit <= 0:
         return None
@@ -246,7 +246,7 @@ def _transform_model(provider_id: str, model_id: str, model_info: Dict[str, Any]
             max_output_tokens = int(max_output_tokens)
             if max_output_tokens <= 0:
                 max_output_tokens = None
-        except ValueError, TypeError:
+        except (ValueError, TypeError):
             max_output_tokens = None
 
     # cost（$/M tokens，原样保留不换算；缺失字段为 None）
@@ -447,7 +447,7 @@ def load_dynamic_models(
                 logger.warning("[models.dev] 远程拉取失败且无缓存，返回空动态数据")
 
     if cache is not None:
-        logger.info(
+        logger.debug(
             f"[models.dev] 使用本地缓存 (content_version={cache.get('_content_version')}, code={CACHE_CONTENT_VERSION})"
         )
         return DynamicModelsResult(

@@ -88,6 +88,9 @@ class FakeRow:
     def update_search_highlight(self, query):
         pass
 
+    def clear_progress(self):
+        pass
+
 
 def test_restore_only_active_and_queued():
     """行重建后：只恢复运行中/排队中任务的行 busy，已完成任务的行不恢复"""

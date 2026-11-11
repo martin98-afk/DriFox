@@ -37,15 +37,23 @@ def test_watchdog_tolerates_deleted_cpp_thread(qapp):
     """
     import shiboken6 as sip
     from PySide6.QtCore import QThread
+    from PySide6.QtWidgets import QApplication
 
     from app.utils import thread_guard as tg
 
     tg.install_guard()
     t = QThread()
-    assert t in tg._running_threads, "install_guard 应已把新线程登记进墓地"
+    # [诊 #22 修复] 入墓时点后移：未 start 的线程不入墓（否则两门都等不到，永久滞留）
+    assert t not in tg._running_threads, "未 start 的 QThread 不应入墓（入墓时点 = patched start）"
+    t.start()
+    assert t in tg._running_threads, "start 后应入墓（运行期防 GC 防护）"
+    t.quit()  # 裸 QThread.run() = exec() 事件循环，quit 使其结束并发出 finished
+    t.wait(500)
+    QApplication.processEvents()  # finished 的出狱回调排队在主线程循环，需驱动派发
+    assert t not in tg._running_threads, "finished 后应出狱"
     # 模拟 Qt 主线程销毁 C++ 对象、但集合里条目未被 destroyed 回调清掉
     sip.delete(t)
-    assert shiboken6.isValid(t)
+    assert not sip.isValid(t)
     try:
         tg._scan_stuck_threads()  # 修复前：此处抛 RuntimeError 打断整个看门狗线程
     finally:

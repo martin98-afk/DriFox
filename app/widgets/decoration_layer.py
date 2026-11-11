@@ -18,9 +18,16 @@
   - offset    : [int, int] 偏移像素 [x, y]
   - stretch_x : bool 是否水平拉伸（仅 anchor='scene' 有效）
   - opacity   : float 0.0~1.0
+  - fit_width : bool 宽度超过 ref 容器时等比缩小（只缩不放，默认 False）
+  - fit_height: bool 高度超过 ref 容器时等比缩小（只缩不放，默认 False）
+
+不写 fit_* 时按图片原尺寸摆放（历史行为）。超出容器的装饰件在旧行为下
+会溢出到可视区域外，大图必须显式开启 fit。
 """
 
 from typing import Optional
+
+import logging
 
 from PySide6.QtCore import QEvent, QPoint, Qt
 from PySide6.QtGui import QPixmap
@@ -29,6 +36,8 @@ from PySide6.QtWidgets import (
     QLabel,
     QWidget,
 )
+
+logger = logging.getLogger(__name__)
 
 
 # anchor 字符串 → (reference attr name, vertical_alignment, horizontal_alignment)
@@ -51,6 +60,7 @@ class DecorationLayer(QWidget):
         self.setAttribute(Qt.WA_NoSystemBackground, True)
         self._ref_resolver = ref_resolver or (lambda attr: getattr(host, attr, None))
         self._items: list[dict] = []
+        self._observed: list = []  # 额外需监听 Resize 的 widget（滚动区 viewport 等）
         self._host = host
         # 默认撑满 host
         self.setGeometry(host.rect())
@@ -77,15 +87,21 @@ class DecorationLayer(QWidget):
             anchor = dec.get("anchor", "scene")
             spec = ANCHOR_MAP.get(anchor)
             if spec is None:
+                logger.warning(f"[Decoration] 未知 anchor={anchor!r}，已跳过（id={dec.get('id')}）")
                 continue
             ref_attr, _valign, _halign = spec
             ref_widget = self._ref_resolver(ref_attr)
             if ref_widget is None:
+                logger.warning(
+                    f"[Decoration] 锚点 {anchor} 需要 host.{ref_attr}，但宿主没有该控件，"
+                    f"已跳过（id={dec.get('id')}）"
+                )
                 continue
 
             resolved = image_resolver(image)
             pix = QPixmap(resolved)
             if pix.isNull():
+                logger.warning(f"[Decoration] 图片加载失败 {image!r} -> {resolved!r}，已跳过（id={dec.get('id')}）")
                 continue
 
             label = QLabel(self)
@@ -117,15 +133,56 @@ class DecorationLayer(QWidget):
         self._sync_all()
 
     def _clear(self) -> None:
-        """清除所有装饰件"""
+        """清除所有装饰件
+
+        deleteLater 只是排队销毁，控件在事件循环处理前仍然可见。若同一轮
+        里连续 apply_config（切页/主题刷新连发），旧装饰件会与新装饰件叠在
+        一起，用户侧表现为「切会话装饰层残留」。这里先 hide 断开可见性，
+        再 deleteLater 释放。
+        """
         for item in self._items:
-            item["label"].deleteLater()
+            label = item["label"]
+            try:
+                label.hide()
+            except RuntimeError:
+                pass  # C++ 对象已销毁
+            label.deleteLater()
         self._items.clear()
 
     def _sync_all(self) -> None:
         """同步所有装饰件几何"""
         for item in self._items:
             self._position_item(item)
+
+    def _scene_ref_rect(self, ref):
+        """取 scene 类锚点应使用的参考矩形（视口语义）
+
+        `chat_container` 是 QScrollArea 的内容 widget：消息越多它越高，
+        滚动时它相对 host 还会位移。直接拿它当参考，装饰件会随内容高度
+        跑出屏幕、随滚动上下跳（用户侧：「人物老是乱跳」）。
+
+        因此 scene/​scene_top/scene_bottom 统一改用滚动区的 **viewport**：
+        尺寸取视口大小，位置取视口在 host 坐标系下的左上角。
+        """
+        area = getattr(self._host, "chat_scroll_area", None)
+        if area is not None and ref is getattr(self._host, "chat_container", None):
+            vp = area.viewport()
+            # ⚠️ 用 isVisibleTo 而非 isVisible：isVisible 在「宿主未 show」
+            # （首刷早于首帧）与「切页后旧窗口 hide」时为 False，会退回
+            # chat_container（高度随消息增长），装饰件被摆到几千像素外。
+            # isVisibleTo 只看自身相对父级的可见性，hide 期间布局尺寸仍有效。
+            if vp is not None and vp.isVisibleTo(area):
+                vp_w, vp_h = vp.width(), vp.height()
+                # 布局尚未完成时 viewport 还是默认小尺寸（实测 98x28），
+                # 与 QScrollArea 自身尺寸严重不符。此时尺寸改用 contentsRect
+                # （已扣除边框，未 show 时也是正确的 598x398），位置仍取视口
+                # 左上角——两者左上角在 QScrollArea 内一致。
+                cr = area.contentsRect()
+                if vp_w * 2 < cr.width() or vp_h * 2 < cr.height():
+                    vp_w, vp_h = cr.width(), cr.height()
+                if vp_w > 0 and vp_h > 0:
+                    return vp.mapTo(self._host, QPoint(0, 0)), vp_w, vp_h
+        return ref.mapTo(self._host, QPoint(0, 0)), ref.width(), ref.height()
 
     def _position_item(self, item: dict) -> None:
         """按 anchor 计算单个装饰件的位置"""
@@ -143,30 +200,42 @@ class DecorationLayer(QWidget):
             return
         pix_w, pix_h = pixmap.width(), pixmap.height()
 
-        # anchor='scene' 撑满 ref_widget
+        # scene 类锚点用视口矩形（不随内容高度/滚动偏移跳动），
+        # input_* 锚点仍直接取 input_card 自身。
+        ref_topleft, ref_w, ref_h = self._scene_ref_rect(ref)
+
+        # fit_width / fit_height：按参考容器等比缩放，只缩不放。
+        # 不写这两个字段时保持历史行为（原尺寸摆放），避免改变已有主题外观。
+        scale = 1.0
+        if dec.get("fit_width") and pix_w > 0 and ref_w > 0:
+            scale = min(scale, ref_w / pix_w)
+        if dec.get("fit_height") and pix_h > 0 and ref_h > 0:
+            scale = min(scale, ref_h / pix_h)
+        if scale < 1.0:
+            pix_w = max(1, int(pix_w * scale))
+            pix_h = max(1, int(pix_h * scale))
+
+        # anchor='scene' 撑满参考矩形（视口）
         if anchor == "scene":
             stretch_x = dec.get("stretch_x", False)
             if stretch_x:
                 # 拉伸水平方向，高度按图片比例
-                ref_w = ref.width()
                 if ref_w > 0 and pix_w > 0:
                     scaled_h = int(pix_h * ref_w / pix_w)
                     label.setFixedSize(ref_w, scaled_h)
                 else:
                     label.setFixedSize(ref_w, pix_h)
-                label.move(0, 0)
+                label.move(ref_topleft.x(), ref_topleft.y())
             else:
-                label.setFixedSize(ref.size())
-                label.move(0, 0)
+                label.setFixedSize(ref_w, ref_h)
+                label.move(ref_topleft.x(), ref_topleft.y())
             return
 
-        # ref 相对 host 的 topleft（DecorationLayer 撑满 host，两者坐标系一致）。
+        # 坐标已由 _scene_ref_rect 换算到 host 坐标系（与 DecorationLayer 一致）。
         # ⚠️ 不能用 ref.mapTo(self)：mapTo 契约要求 target 是 ref 的祖先，而 self
         # 与 ref（chat_container/_input_card）是兄弟节点（同为 host 子 widget），
         # 非法参数在 Qt 5.15 会 access violation 直接闪退（aurora 主题启用
         # decorations 后新建会话即崩的根因）。
-        ref_topleft = ref.mapTo(self._host, QPoint(0, 0))
-        ref_w, ref_h = ref.width(), ref.height()
 
         offset_x, offset_y = dec.get("offset", [0, 0])
 
@@ -187,13 +256,36 @@ class DecorationLayer(QWidget):
         label.move(x, y)
         label.setFixedSize(pix_w, pix_h)
 
+    def sync_now(self) -> None:
+        """立即重算所有装饰件几何（供滚动/动画等外部事件调用）"""
+        self._sync_all()
+
+    def observe_widget(self, widget) -> None:
+        """把额外 widget 的 Resize 纳入同步范围
+
+        典型用法：滚动区 viewport。装饰件按 viewport 定位，但 viewport 的
+        Resize 不会冒泡成 chat_container 的 Resize，需显式订阅。
+        """
+        if widget is None:
+            return
+        self._observed.append(widget)
+        try:
+            widget.installEventFilter(self)
+        except Exception:
+            pass
+
     def eventFilter(self, watched, event) -> bool:
-        """监听 host.resize 和各 ref_widget.resize → 同步装饰件几何"""
+        """监听 host / ref_widget / observed widget 的 Resize → 同步装饰件几何"""
         if event.type() != QEvent.Resize:
             return super().eventFilter(watched, event)
         if watched is self._host:
             # host resize → 同步 DecorationLayer 本身
             self.setGeometry(self._host.rect())
+            self._sync_all()
+            return super().eventFilter(watched, event)
+        if any(watched is w for w in self._observed):
+            self._sync_all()
+            return super().eventFilter(watched, event)
         for item in self._items:
             if item["ref_widget"] is watched:
                 self._position_item(item)

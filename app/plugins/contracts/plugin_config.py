@@ -24,6 +24,10 @@
               声明式工具编排：点击 → 调注册工具（args）→ image_data 弹窗展示 +
               content 作状态文案 → 可选 poll 声明按模板轮询至终止条件。通用机制，
               宿主不含任何平台/插件专属逻辑。
+    model     模型选择下拉（ComboBox，首项「跟随当前会话模型」= 空值）。
+              选项由宿主经 provider.list × model.enumerate 能力动态填充，
+              存储值「display_name:模型名」（与 model.config_for 同语义）；
+              插件需在 capabilities 声明这两个能力。
 
 类型别名（向前兼容，社区插件可能误用：解析时归一化后再校验）：
     int / integer  →  number
@@ -61,7 +65,7 @@ _CONFIG_MAX_DESC = 2048  # 字段 description ≤ 2KB
 _CONFIG_MAX_DEFAULT_BYTES = 8192  # 字段 default 序列化后 ≤ 8KB
 
 # 支持的字段类型（渲染映射见 plugin_config_card.py）
-FIELD_TYPES = ("text", "password", "bool", "select", "number", "textarea", "link", "action")
+FIELD_TYPES = ("text", "password", "bool", "select", "number", "textarea", "link", "action", "model")
 
 # 类型别名：非标准写法 → 标准 type（解析时归一化，老插件不被打回整个 schema）
 # 仅做容错；新插件仍应按 FIELD_TYPES 书写
@@ -92,6 +96,8 @@ class PluginConfigField:
         rows: textarea 专用，显示行数（默认 3）
         url: link 专用，点击跳转的外部地址（必填）
         action: action 专用，ToolActionSpec 声明（必填；tool+args+可选 poll）
+        required: 必填标记（默认 False）。true 时设置表单显示星号，
+            当前生效值为空即计入「待配置」（插件条目置顶 + 导航提示）。
     """
 
     key: str
@@ -108,6 +114,7 @@ class PluginConfigField:
     rows: int = 3
     url: str = ""
     action: Optional["ToolActionSpec"] = None
+    required: bool = False
 
 
 @dataclass(frozen=True)
@@ -290,6 +297,8 @@ def parse_config_schema(plugin_name: str, raw: Optional[dict]) -> Optional[Plugi
                 rows=_parse_optional_int(item.get("rows"), 3) if ftype == "textarea" else 3,
                 url=url,
                 action=action_spec,
+                # 非布尔真值按 bool() 归一化：社区插件常写 "true"/1
+                required=bool(item.get("required", False)),
             )
         )
     return PluginConfigSchema(plugin_name=plugin_name, title=title, fields=fields)

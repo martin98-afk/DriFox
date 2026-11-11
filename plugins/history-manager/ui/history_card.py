@@ -43,27 +43,14 @@ _PROJECT_ALL = "__all__"  # 全部项目混合视图
 
 
 def _caps(cap_id):
-    """取某能力（经能力池；无 ctx 时按插件名自建，与 agent_trace 同构）。"""
-    try:
-        from app.plugins.capabilities.bootstrap import ensure_registered
-        from app.plugins.capabilities.registry import CapabilityRegistry
+    """取某能力（无 ctx 场景统一走 sdk 的 caps_for，host 由宿主解析）。
 
-        ensure_registered("ui")
-        plugin = ""
-        try:
-            from pathlib import Path
+    原实现自建 ``host=None`` 池并自报 ``declared={cap_id, ...}``：等于插件给
+    自己发权限，manifest 声明永不生效，`window.*` 这类吃 host 的能力还恒为空。
+    """
+    from app.plugins.sdk import caps_for
 
-            parts = Path(__file__).resolve().parts
-            if "plugins" in parts:
-                plugin = parts[parts.index("plugins") + 1]
-        except Exception:
-            pass
-        pool = CapabilityRegistry.get_instance().build_pool(
-            surface="ui", host=None, plugin=plugin, declared={cap_id, "state.kv", "plugin.log"}
-        )
-        return pool[cap_id] if cap_id in pool else None
-    except Exception:
-        return None
+    return caps_for(cap_id)
 
 
 def split_pinned_entries(entries: List[tuple], exclude_index: Optional[int] = None) -> tuple:
@@ -1135,7 +1122,7 @@ class HistoryCard(QWidget):
 
             menu_style = f"""
                 QMenu {{
-                    background: {Colors.CARD_BG};
+                    background: {Colors.CARD_BG.format(alpha=180)};
                     border: 1px solid {Colors.BORDER};
                     border-radius: 6px;
                     padding: 4px;
@@ -2348,7 +2335,7 @@ class HistoryCard(QWidget):
             dialog = ImportOptionDialog(parent=self.window())
             dialog.fileImportRequested.connect(self._on_import_from_file)
             dialog.urlImportRequested.connect(self._on_import_from_url)
-            dialog.exec_()
+            dialog.exec()
 
         return handle_import
 
@@ -2374,7 +2361,7 @@ class HistoryCard(QWidget):
             parent=self.window(),
         )
         dialog.confirmed.connect(self._on_url_import_confirmed)
-        dialog.exec_()
+        dialog.exec()
 
     def _on_url_import_confirmed(self, url: str):
         """URL确认后的导入处理（请求在后台线程执行，不阻塞 UI）"""

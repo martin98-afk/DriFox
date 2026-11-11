@@ -238,7 +238,7 @@ class ProjectItem(QWidget):
         menu = QMenu(self)
         menu.setStyleSheet(f"""
             QMenu {{
-                background: {Colors.CARD_BG};
+                background: {Colors.CARD_BG.format(alpha=180)};
                 border: 1px solid {Colors.BORDER};
                 border-radius: 6px;
                 padding: 4px;
@@ -702,6 +702,6 @@ class ProjectSelectorCardContent(QWidget):
             parent=self.window(),
         )
         _dialog.confirmed.connect(_on_archive_confirm)
-        _dialog.exec_()
+        _dialog.exec()
         if _confirmed[0]:
             self.archiveProject.emit(project_name)

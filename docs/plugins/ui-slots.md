@@ -102,6 +102,31 @@ def register_ui(registry):
         group="plugin", priority=0, metadata=None, section="plugins",
     )
 
+    # 设置面板独立大 tab（插件完整自定义配置页，适合复杂配置界面）
+    registry.register_settings_tab(
+        plugin_name, tab_id, title, widget_class,
+        icon=None, priority=0, metadata=None,
+    )  # 导航项插在「插件」项之后（priority 降序）；页面懒实例化（首次进入才构造）
+       # widget_class(parent)；页面自主布局/滚动/主题，宿主只负责导航挂载与生命周期
+       # tab_id 插件内唯一（注册表 key = {plugin_name}:{tab_id}，防跨插件冲突；禁含 ":"）
+
+    # 消息卡内嵌面板（assistant 气泡末尾的通用槽位：正文/任务看板之后、页脚之前）
+    # 与浮动卡互补——无独立容器/标题/命令，生命周期跟随卡片，宿主在「新卡出现」时
+    # 迁卡（旧卡摘除、新卡接管，语义同任务看板）。非独立可触发界面，不联动命令。
+    registry.register_card_inline_panel(
+        plugin_name, panel_id, widget_class,
+        order=100, metadata=None,
+    )  # widget_class(parent)；面板定义 heightChanged 信号即自动接卡片高度锚定
+       # 契约：必须上报「实际占高」（max(sizeHint, height) 口径），隐藏态按 0 记账
+       # 宿主侧：MessageCard.ensure_inline_panel / get_inline_panel / remove_inline_panel
+       # 取用：registry.attach_card_inline_panel(panel_id, main_widget=mw) → 实例
+       #        registry.detach_card_inline_panel(panel_id)（卸载路径，按窗口分桶）
+
+    # 服务实现反置（主程序只留门面，业务实现在插件里）
+    registry.register_service(
+        name, instance, plugin_name="",
+    )  # 主程序经 UIPluginRegistry.get_service(name) 取（history / worktree / subagent_session 先例）
+
     # 标题栏常驻 tab（无 × 关闭钮；点击走 on_click 回调自展示，主程序不接管内容区）
     registry.register_titlebar_tab(
         plugin_name, tab_id, label, icon_path="",
@@ -147,9 +172,11 @@ def register_ui(registry):
 
 **刻意不联动命令**的扩展点（非独立可触发界面，或需上下文）：
 `register_context_menu_action`（依赖右键目标上下文）、`register_settings_card`
-（设置面板内的分区卡，属导航而非独立界面）、`register_welcome_tab` /
+（设置面板内的分区卡，属导航而非独立界面）、`register_settings_tab`
+（设置面板导航项，入口统一走设置面板）、`register_welcome_tab` /
 `register_welcome_action`（欢迎卡片内部 tab / HTML 点击动作，需欢迎卡片在场
-且携带内容参数）、`register_content_renderer` / `register_tag_renderer` /
+且携带内容参数）、`register_card_inline_panel`（挂进消息卡内部，无独立界面）、
+`register_content_renderer` / `register_tag_renderer` /
 `register_fence_renderer` / `register_message_factory` / `register_mention_provider` /
 `register_ui_module`（渲染/装配类，无用户可触发界面）。
 
@@ -417,6 +444,27 @@ registry.register_settings_card(
 ```
 
 挂载到对应设置面板分区。
+
+### 独立大 tab（settings_tab）
+
+```python
+def register_ui(registry):
+    class AdvancedPage(QWidget):
+        def __init__(self, parent=None):
+            super().__init__(parent)
+            # 自主布局/滚动/主题；宿主只给一个滚动分页容器位
+
+    registry.register_settings_tab(
+        "my-plugin", "advanced", "高级配置", AdvancedPage,
+        icon="工具",       # 资源名或 FluentIcon 枚举；None 用默认应用图标
+        priority=0,
+    )
+```
+
+与 `register_settings_card` 的区别：card 挂进已有分区的卡片流；tab 是系统设置
+左侧导航一级分页（插在「插件」项之后），插件页面自主布局，适合复杂配置界面。
+页面懒实例化：首次进入该页才构造；插件卸载/停用后导航项与页面随 `unload_plugin`
+自动移除，热重载后按新 widget_class 重建。
 
 ### `target`（context_menu_action）
 

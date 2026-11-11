@@ -326,13 +326,36 @@ def test_daily_flow_survives_step_failure(cb, monkeypatch):
     assert [c[1] for c in fake.calls if c[0] == "claim"] == ["template_5"]
 
 
-def test_daily_tasks_disabled_by_env(cb, monkeypatch):
-    """DRIFOX_CODEBUDDY_TASKS=0 时整条链短路（连 uid 都不解析）。"""
-    monkeypatch.setattr(cb, "_AUTO_TASK_DISABLED", True)
+def test_daily_tasks_disabled_by_default(cb):
+    """默认关闭：无 PluginConfigRegistry 注册（单测直接 exec 模块）时按停用处理。"""
+    assert cb._auto_task_disabled() is True
     called = []
-    monkeypatch.setattr(cb, "_run_daily_tasks", lambda *a, **k: called.append(1))
-    cb._run_daily_for_entry(object(), "at", {"refresh_token": "rt"})
+    cb._run_daily_tasks = lambda *a, **k: called.append(1)
+    try:
+        cb._run_daily_for_entry(object(), "at", {"refresh_token": "rt"})
+    finally:
+        del cb._run_daily_tasks
     assert called == []
+
+def test_plugin_manifest_declares_auto_tasks_off():
+    """manifest 契约：auto_daily_tasks 必须声明为 bool 且默认 false（防回退成默认开）。"""
+    import json as _json
+
+    manifest = _json.loads(
+        (Path("plugins/system-providers/.drifox-plugin/plugin.json")).read_text(encoding="utf-8")
+    )
+    fields = {f["key"]: f for f in manifest["config_schema"]["fields"]}
+    field = fields["auto_daily_tasks"]
+    assert field["type"] == "bool"
+    assert field["default"] is False
+    assert field["env"] == "DRIFOX_CODEBUDDY_TASKS"
+
+def test_daily_tasks_enabled_when_config_true(cb, monkeypatch):
+    """配置开为 true 后放行（开关不再缓存，每轮重新读）。"""
+    from app.plugins.managers.plugin_config_store import PluginConfigStore
+
+    monkeypatch.setattr(PluginConfigStore, "get", lambda self, p, k: True)
+    assert cb._auto_task_disabled() is False
 
 
 # ── 回归：专家定位按 id 而非名字 ──────────────────────────

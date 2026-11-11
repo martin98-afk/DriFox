@@ -1277,7 +1277,7 @@ class TestTeamRestoreIndependence:
 
     def test_restore_applies_member_last_model(self):
         """需求 2：恢复时还原成员最后使用的模型——从该成员最新会话消息
-        提取 assistant 的 model_name/provider_name 传给 _apply_model_selection_to_window"""
+        提取 assistant 的 model_name/provider_name/config_id 传给 _apply_model_selection_to_window"""
         _ensure_qapp()
         from unittest.mock import MagicMock, patch
 
@@ -1293,7 +1293,7 @@ class TestTeamRestoreIndependence:
         win.history_manager.get_session_messages.side_effect = lambda sid: [
             {"role": "user", "content": "q"},
             {"role": "assistant", "content": "a1", "model_name": "old-model", "provider_name": "Old"},
-            {"role": "assistant", "content": "a2", "model_name": "gpt-4o", "provider_name": "Provider A"},
+            {"role": "assistant", "content": "a2", "model_name": "gpt-4o", "provider_name": "Provider A", "config_id": "prov-a"},
         ]
         win._get_team_manager = MagicMock()
         tm = MagicMock()
@@ -1329,6 +1329,7 @@ class TestTeamRestoreIndependence:
             args = call.args
             assert args[1] == "gpt-4o", f"应传最后使用的 model_name，实际: {args[1]!r}"
             assert args[2] == "Provider A", f"应传最后使用的 provider_name，实际: {args[2]!r}"
+            assert args[3] == "prov-a", f"应透传 config_id（最精确匹配键），实际: {args[3]!r}"
 
     def test_restore_applies_model_fallback_when_no_assistant(self):
         """恢复窗口消息无 assistant（空会话）→ 模型参数为空串（构建者继承兜底）"""
@@ -1608,6 +1609,28 @@ class TestTeamJoinRetryAndCount:
         cls._join_new_window_for_template(main_win, win, "build", "w1")
         assert main_win._pending_arrange_count == 1
         win._refresh_team_ui.assert_called_once_with("build")
+
+    def test_join_continues_after_ensure_brings_backend_ready(self):
+        """补建成功后必须继续切角色（回归：原实现 pass 后无条件 return，
+        靠 ensure_deferred_components 补齐 chat_engine 的窗口会跳过
+        _on_agent_changed / 权限注入 / UI 刷新，永久停在默认 build）。"""
+        from unittest.mock import MagicMock
+
+        cls, win, tm, main_win = self._make_join_ctx(backend_ready=False)
+        win.backend.chat_engine = None
+
+        def _ensure():
+            win.backend.agent_manager = MagicMock()
+            win.backend.chat_engine = MagicMock()
+
+        win.backend.ensure_deferred_components = MagicMock(side_effect=_ensure)
+        cls._join_new_window_for_template(main_win, win, "review", "w1")
+
+        win._on_agent_changed.assert_called_once_with("review")
+        win._apply_agent_command_permissions.assert_called_once_with("review")
+        win._refresh_team_ui.assert_called_once_with("review")
+        win._start_team_watcher.assert_called_once()
+        assert main_win._pending_arrange_count == 1, "补建路径同样要收口计数"
 
     def test_join_retry_exhausted_decrements(self):
         """D-T1b/E-T3：重试耗尽 → 放弃并递减计数（不垛死排列回调）。"""

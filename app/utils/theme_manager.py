@@ -9,7 +9,9 @@
 """
 
 import logging
+import os
 import re
+import time
 import weakref
 from functools import lru_cache
 from pathlib import Path
@@ -22,6 +24,15 @@ logger = logging.getLogger(__name__)
 # 内置主题目录（打包在 exe 中，只读）
 # 指向系统插件 themes 目录，不再依赖 app/themes/
 _BUILTIN_THEMES_DIR = Path(__file__).parent.parent.parent / "plugins" / "system-themes" / "themes"
+
+# 指纹全量扫描窗口（秒）：窗口内只要主题根目录 mtime 未变，就复用上次指纹
+# 而不做逐文件扫描。插件/主题目录增删会改父目录 mtime，必被捕获；
+# 仅「已存在 yaml 就地改内容」会延迟到本窗口之后（或显式 reload(force=True)）。
+_FINGERPRINT_FULL_WINDOW_S = 10.0
+
+# 动画背景帧率上限：素材按 12fps 制作，主题写再高也没有帧可用，
+# 且解码成本随时长线性上升（640x360 单帧约 3ms），必须 clamp。
+_ANIM_FPS_CAP = 15
 
 
 class ThemeManager:
@@ -44,6 +55,16 @@ class ThemeManager:
         self._themes_loaded = False
         # 🚀 P5c：主题源目录 mtime 指纹缓存（reload 短路用，None=未计算）
         self._themes_fingerprint: Optional[str] = None
+        # [PERF] 指纹计算的根目录预检缓存：Windows + 杀软环境实测单次目录枚举
+        # ~26ms、单次 stat ~6ms，旧实现两轮 rglob 全树扫（17 个主题 yaml）要
+        # 550~1050ms 主线程阻塞。改为「根目录 mtime 预检 + 单层 scandir」：
+        # 根目录未变且全量扫描窗口未过期时直接复用上次指纹（仅 6 次 stat）。
+        self._fingerprint_value: Optional[str] = None
+        self._fingerprint_root_sig: Optional[tuple] = None
+        self._fingerprint_full_checked_at: float = 0.0
+        # [PERF] 插件 themes 目录收集缓存（plugins 根目录 mtime 未变则复用）
+        self._plugin_theme_dirs_cache: Optional[list] = None
+        self._plugin_theme_dirs_sig: Optional[tuple] = None
 
     # ── 扫描加载 ──────────────────────────────────────────
 
@@ -213,8 +234,15 @@ class ThemeManager:
           - scene       : 右侧 _chat_frame 图片/场景化背景（撑满整个右侧圆角矩形，
                           含 replace_tab_bar / 对话区 / 输入框 / LEFT/RIGHT/BOTTOM
                           停靠区 / UI 插件槽位等所有 _chat_frame 内的内容）
+                          可嵌套 foreground 子对象放全画布前景层（壁纸拆出的人物等）：
+                          {image, opacity, enabled}，与 image 同矩形同拉伸，逐像素对齐
           - decorations : 装饰件数组（多张 PNG，按 anchor 摆放；anchor 坐标系以
                           OpenAIChatToolWindow 为基准，定位在对话区/输入框附近）
+          - overlay     : 动态光影视频覆盖层（循环视频帧压暗混合，scene 之上、
+                          UI 之下；字段 video/target/opacity/brightness_boost/
+                          position/enabled）
+          - music       : 主题背景音乐播放列表（字段 tracks/volume/loop/
+                          fade_ms/enabled）
 
         旧字段兼容（避免破坏现有 17 套内置主题）：
           - background.window_bg → backgrounds.window
@@ -230,6 +258,8 @@ class ThemeManager:
             "chat_area": dict | None,
             "scene": dict | None,
             "decorations": list[dict],
+            "overlay": dict | None,
+            "music": dict | None,
           }
         """
         self._ensure_loaded()
@@ -237,6 +267,55 @@ class ThemeManager:
 
         new_bg = theme.get("backgrounds") or {}
         legacy_bg = theme.get("background") or {}
+
+        def _normalize_animation(d) -> Optional[dict]:
+            """动画背景归一化（backgrounds.<region>.animation）
+
+            动画素材为动画 WebP（也兼容 GIF），由 Qt 内置解码器逐帧读取，
+            不依赖系统媒体栈。字段：
+              - src      : str  主题目录相对路径或绝对路径
+              - canvas   : shared | independent（默认 independent）
+                           shared = 多区域共用同一张动画，各区域取自己的矩形，
+                           接缝连续且只解码一次
+              - fps      : int  1~15（上限 clamp，防止主题写出高帧率吃满 CPU）
+              - blend    : normal | overlay（overlay=黑底+alpha 压暗，光影遮罩）
+              - fit      : cover | contain | tile
+              - position : cover 裁切对齐 top/center/bottom
+              - opacity  : float 0.0~1.0
+              - enabled  : bool
+            """
+            if not isinstance(d, dict):
+                return None
+            src = d.get("src")
+            if not src:
+                return None
+
+            def _f(v, default, lo, hi):
+                try:
+                    return max(lo, min(hi, float(v)))
+                except (TypeError, ValueError):
+                    return default
+
+            fps = int(_f(d.get("fps", 12), 12, 1, _ANIM_FPS_CAP))
+            blend = str(d.get("blend") or "normal").lower()
+            if blend not in ("normal", "overlay"):
+                blend = "normal"
+            fit = str(d.get("fit") or "cover").lower()
+            if fit not in ("cover", "contain", "tile"):
+                fit = "cover"
+            position = str(d.get("position") or "center").lower()
+            if position not in ("top", "center", "bottom"):
+                position = "center"
+            return {
+                "src": str(src),
+                "canvas": "shared" if str(d.get("canvas") or "").lower() == "shared" else "independent",
+                "fps": fps,
+                "blend": blend,
+                "fit": fit,
+                "position": position,
+                "opacity": _f(d.get("opacity", 1.0), 1.0, 0.0, 1.0),
+                "enabled": bool(d.get("enabled", True)),
+            }
 
         def _normalize(d: Optional[dict]) -> Optional[dict]:
             """统一区域字段：补默认值 + 兼容旧字段"""
@@ -249,7 +328,56 @@ class ThemeManager:
                 "blur": d.get("blur", 0),
                 "dim": d.get("dim"),
                 "enabled": d.get("enabled", True),
+                "animation": _normalize_animation(d.get("animation")),
+                # overlay 区块专用：视频路径、亮度补偿色与挂载区域，其余区块恒 None
+                "video": d.get("video"),
+                "brightness_boost": d.get("brightness_boost"),
+                "position": d.get("position"),
+                "target": d.get("target"),
             }
+
+        def _normalize_music(d: Optional[dict]) -> Optional[dict]:
+            """music 区块字段集与区域背景不同，单独归一（不套 _normalize）"""
+            if not d:
+                return None
+            tracks = d.get("tracks") or []
+            if isinstance(tracks, str):
+                tracks = [tracks]
+            return {
+                "tracks": [str(t) for t in tracks],
+                "volume": float(d.get("volume", 0.6)),
+                "loop": bool(d.get("loop", True)),
+                "fade_ms": int(d.get("fade_ms", 300)),
+                "enabled": d.get("enabled", True),
+            }
+
+        def _normalize_scene(d: Optional[dict]) -> Optional[dict]:
+            """scene 专用归一化：在通用区域字段之外保留 foreground 子对象
+
+            foreground 是壁纸拆出的全画布前景图层（如人物），字段集与 image/
+            opacity 相同。它是嵌套 dict，不能被 _normalize 的白名单拍平。
+            """
+            normalized = _normalize(d)
+            if normalized is None:
+                return None
+            fg = d.get("foreground")
+            if isinstance(fg, dict):
+                normalized["foreground"] = {
+                    "image": fg.get("image"),
+                    "opacity": fg.get("opacity", 1.0),
+                    "enabled": fg.get("enabled", True),
+                }
+            else:
+                normalized["foreground"] = None
+            return normalized
+
+        # scene 与 chat 是同一块（右侧整个 _chat_frame）：chat 为新区块名，
+        # 与 scene 同时存在时逐字段覆盖，便于新主题只用 chat。
+        scene_cfg = dict(new_bg.get("scene") or {})
+        chat_cfg = new_bg.get("chat")
+        if isinstance(chat_cfg, dict):
+            scene_cfg.update(chat_cfg)
+        scene_normalized = _normalize_scene(scene_cfg)
 
         return {
             "window": (
@@ -259,8 +387,11 @@ class ThemeManager:
             ),
             "sidebar": _normalize(new_bg.get("sidebar")),
             "chat_area": _normalize(new_bg.get("chat_area")),
-            "scene": _normalize(new_bg.get("scene")),
+            "scene": scene_normalized,
+            "chat": scene_normalized,  # 新区块名，与 scene 同一对象
             "decorations": new_bg.get("decorations") or [],
+            "overlay": _normalize(new_bg.get("overlay")),
+            "music": _normalize_music(new_bg.get("music")),
         }
 
     def get_theme_dir(self, theme_id: str) -> Optional[Path]:
@@ -356,9 +487,34 @@ class ThemeManager:
         return self.get_theme(theme_id) or {}
 
     def get_current_colors(self) -> dict:
-        """获取当前主题的 colors 部分"""
+        """获取当前主题的 colors 部分（保证完整，供 UI 直接硬索引）
+
+        启动期竞态：ui_theme_style 可能指向尚未加载（或版本门禁下永久不可用）
+        的插件主题，此时 get_current_theme() 返回空 dict。旧实现静默返回 {}，
+        current_theme() 的下游按完整字典硬索引（card_viewers._load_skeleton 的
+        theme["card_bg_solid"]、chart_viewer_card 的 theme["accent"]）即抛
+        KeyError。这里按生效深浅回退到内置默认主题，保证 colors 始终完整；
+        插件主题刷新完成后自然切回真实主题，仅影响这一帧的取色。
+        """
         theme = self.get_current_theme()
-        return theme.get("colors", {})
+        colors = theme.get("colors", {})
+        if colors:
+            return colors
+        try:
+            from app.utils.config import DEFAULT_DARK_THEME, DEFAULT_LIGHT_THEME, Settings
+
+            light = bool(Settings.get_instance().ui_light_mode.value)
+            fallback_id = DEFAULT_LIGHT_THEME if light else DEFAULT_DARK_THEME
+        except Exception:
+            fallback_id = None
+        if fallback_id:
+            fallback = self.get_theme(fallback_id) or {}
+            colors = fallback.get("colors", {})
+            if colors:
+                return colors
+        # 极端：连默认主题文件都缺失，取任意已加载主题，仍不返回空集合
+        first = next(iter(self._themes.values()), {})
+        return first.get("colors", {}) or {}
 
     # ── 主题管理 ──────────────────────────────────────────
 
@@ -396,8 +552,20 @@ class ThemeManager:
 
         图标适配由 _ThemeIconEngine 自动处理（QIconEngine.key 随主题变化），
         无需手动清图标缓存。
+
+        另：推进一次外观纪元（``ThemeRefreshCoordinator.bump_appearance_epoch``）。
+        这是"一次外观变更 = 一个纪元"的唯一定义点——batched 路径每次主题/字体/
+        字号变更都无条件调本方法一次，插件页据此判定自己是否落后（隐藏期只置脏，
+        显示时 ``ensure_theme_fresh`` 补刷）。放这里而不是 ``begin_refresh_cycle``：
+        后者每窗口进一次，会在一轮内推进 N 次，先把可见页刷新再判它落后。
         """
         self._cached_light_check = (None, None)
+        try:
+            from app.utils.theme_refresh import ThemeRefreshCoordinator
+
+            ThemeRefreshCoordinator.bump_appearance_epoch()
+        except Exception:
+            pass
         # 🐛 推进 ThemeRefreshCoordinator 版本号：使消息卡正文 CSS 变量注入
         # 的幂等短路失效。此前 should_skip / on_theme_changed 从未被调用，
         # 版本号恒为 0，导致 CodeWebViewer.refresh_theme 只在首次切换注入一次
@@ -441,6 +609,23 @@ class ThemeManager:
         from app.utils.design_tokens import Colors
 
         Colors.refresh()
+
+        # 🐛 先同步 qfluentwidgets 全局主题再分发（与 main_widget
+        # _execute_batched_theme_refresh 全局段同款：清缓存 → setTheme → EV）。
+        # 此前 setTheme 只存在于 OpenAIChatToolWindow._apply_runtime_ui_settings
+        # 的 is_color 块内，而本方法按注册顺序分发 target：TabPanel /
+        # TabManagerWindow / WorkbenchPanel 排在 main_widget 之前，刷新时全局
+        # 主题还是旧值，其中的 FluentIcon 按旧主题渲染后无人补刷 → gitee 弹窗
+        # 兜底切换后侧栏/标题区 icon 反色。
+        # 清缓存必须在 setTheme 之前：reload() 热改主题 mode 时 theme_id 未变，
+        # is_light_theme() 会命中旧缓存。
+        self._cached_light_check = (None, None)
+        try:
+            from qfluentwidgets import Theme, setTheme
+
+            setTheme(Theme.LIGHT if self.is_light_theme() else Theme.DARK, lazy=True)
+        except Exception:
+            pass
 
         self.on_theme_changed()
 
@@ -518,7 +703,8 @@ class ThemeManager:
         首次加载（_themes 为空）不短路，保证数据就绪。
         """
         # 指纹未变化且已有主题数据 → 直接复用，跳过重扫与 UI 刷新
-        if not force and self._themes and self._compute_fingerprint() == self._themes_fingerprint:
+        fp = self._compute_fingerprint()
+        if not force and self._themes and fp == self._themes_fingerprint:
             logger.debug("[ThemeManager] reload: 主题指纹未变化，跳过重扫与 UI 刷新")
             return
 
@@ -528,8 +714,10 @@ class ThemeManager:
 
         self._themes.clear()
         self._load_themes()
-        # 记录本次重载后的指纹，供下次 reload 比对
-        self._themes_fingerprint = self._compute_fingerprint()
+        # 记录本次重载后的指纹，供下次 reload 比对。直接复用入口处算出的 fp：
+        # 重扫本身不写文件，指纹不会因重扫而变化；旧实现在这里再算一遍，
+        # 等于把全目录扫描成本翻倍（实测 550ms × 2）。
+        self._themes_fingerprint = fp
         # 清除浅色检测缓存
         self._cached_light_check = (None, None)
 
@@ -556,8 +744,8 @@ class ThemeManager:
             except Exception as e:
                 logger.warning(f"[ThemeManager] reload callback error: {e}")
 
-    def _compute_fingerprint(self) -> str:
-        """计算主题源目录指纹：所有主题 YAML 的 (路径, mtime_ns) 排序哈希
+    def _plugin_theme_dirs(self) -> list:
+        """扫描插件目录下所有 themes/ 子目录（按 plugins 根目录 mtime 缓存）
 
         与 _load_themes 的 4 个来源一一对应：
         1. 内置主题目录（plugins/system/themes）
@@ -567,45 +755,136 @@ class ThemeManager:
 
         mtime_ns 纳秒精度：主题文件任何真实改动（增/删/改）都会改变指纹；
         仅重扫 stat 不读文件内容，比 YAML 解析快两个数量级。
+        [PERF] 收集本身要 iterdir 两个 plugins 根 + 每个 entry 两次 is_dir，
+        实测 200~300ms（单目录枚举 26ms 起）。根目录 mtime 未变说明插件目录
+        增删未发生，直接复用上次结果。
         """
-        import hashlib
-
         from app.utils.utils import get_app_data_dir
 
-        h = hashlib.md5()
-        theme_dirs = {_BUILTIN_THEMES_DIR}
+        roots = (Path(__file__).parent.parent.parent / "plugins", get_app_data_dir() / "plugins")
+        sig_parts = []
+        for root in roots:
+            try:
+                sig_parts.append(root.stat().st_mtime_ns)
+            except OSError:
+                sig_parts.append(None)
+        sig = tuple(sig_parts)
+        if self._plugin_theme_dirs_cache is not None and sig == self._plugin_theme_dirs_sig:
+            return list(self._plugin_theme_dirs_cache)
 
-        # 2. 插件主题直扫：系统 + 用户插件目录下所有插件子目录的 themes/
-        for base in (Path(__file__).parent.parent.parent / "plugins", get_app_data_dir() / "plugins"):
-            if base.is_dir():
-                for entry in sorted(base.iterdir()):
+        dirs: list = []
+        for root in roots:
+            if not root.is_dir():
+                continue
+            try:
+                for entry in sorted(root.iterdir()):
                     if entry.is_dir():
                         td = entry / "themes"
                         if td.is_dir():
-                            theme_dirs.add(td)
+                            dirs.append(td)
+            except OSError:
+                continue
+        self._plugin_theme_dirs_cache = dirs
+        self._plugin_theme_dirs_sig = sig
+        return list(dirs)
 
-        # 3. PluginManager 已启用插件主题路径
+    def _theme_source_dirs(self) -> list:
+        """主题源根目录全集（与 _load_themes 的 4 个来源一一对应）"""
+        from app.utils.utils import get_app_data_dir
+
+        dirs = [_BUILTIN_THEMES_DIR]
+        dirs.extend(self._plugin_theme_dirs())
+
+        # 3. PluginManager 已启用插件主题路径（内存查询，无 I/O）
         try:
             from app.plugins.managers.plugin_manager import PluginManager
 
             pm = PluginManager.get_instance()
             if pm.is_initialized():
-                theme_dirs.update(Path(p) for p in pm.get_theme_paths())
+                dirs.extend(Path(p) for p in pm.get_theme_paths())
         except Exception:
             pass
 
         # 4. 用户主题目录
-        theme_dirs.add(get_app_data_dir() / "themes")
+        dirs.append(get_app_data_dir() / "themes")
 
-        for base in sorted(theme_dirs, key=str):
-            if not base.is_dir():
+        # 去重保序（同一目录可能同时来自直扫与 PluginManager）
+        seen = set()
+        out = []
+        for d in dirs:
+            key = str(d)
+            if key in seen:
                 continue
-            for yaml_file in sorted(base.rglob("*.yaml")) + sorted(base.rglob("*.yml")):
+            seen.add(key)
+            out.append(d)
+        return out
+
+    def _compute_fingerprint(self) -> str:
+        """计算主题源目录指纹：所有主题 YAML 的 (路径, mtime_ns) 排序哈希
+
+        与 _load_themes 的 4 个来源一一对应（见 _theme_source_dirs）。
+
+        [PERF] 两级策略（旧实现单次 rglob 双后缀全树扫实测 550~1050ms）：
+        1. 快路径：主题根目录 mtime 未变且距上次全量扫描不足
+           _FINGERPRINT_FULL_WINDOW_S → 直接复用上次指纹（仅 6~8 次 stat，
+           约 40ms）。插件/主题目录的增删都会改父目录 mtime，必被捕获。
+        2. 全量路径：窗口过期或根目录 mtime 变化 → 单层 scandir 扫描
+           （与 _load_from_dir 的目录约定一致：<themes>/<id>/<id>.yaml 或
+           <themes>/<id>.yaml），用 DirEntry 自带 stat 数据，不再每文件单独
+           stat，也不再同一棵树扫两遍（旧实现 .yaml 与 .yml 各一遍）。
+        """
+        import hashlib
+
+        theme_dirs = self._theme_source_dirs()
+
+        # ── 快路径：根目录 mtime 预检 ──
+        root_sig_parts = []
+        for base in theme_dirs:
+            try:
+                st = base.stat()
+                root_sig_parts.append((str(base), st.st_mtime_ns))
+            except OSError:
+                root_sig_parts.append((str(base), None))
+        root_sig = tuple(root_sig_parts)
+
+        now = time.monotonic()
+        if (
+            self._fingerprint_value is not None
+            and root_sig == self._fingerprint_root_sig
+            and now - self._fingerprint_full_checked_at < _FINGERPRINT_FULL_WINDOW_S
+        ):
+            return self._fingerprint_value
+
+        # ── 全量路径：单层扫描 ──
+        h = hashlib.md5()
+        for base in sorted(theme_dirs, key=str):
+            try:
+                entries = sorted(os.scandir(base), key=lambda e: e.name)
+            except OSError:
+                continue
+            for entry in entries:
                 try:
-                    h.update(f"{yaml_file}:{yaml_file.stat().st_mtime_ns}".encode("utf-8"))
+                    if entry.is_dir():
+                        # 目录形式：只看同名 yaml（与 _load_from_dir 一致）
+                        for suffix in (".yaml", ".yml"):
+                            path = os.path.join(entry.path, entry.name + suffix)
+                            try:
+                                mtime_ns = os.stat(path).st_mtime_ns
+                            except OSError:
+                                continue
+                            h.update(f"{path}:{mtime_ns}".encode("utf-8"))
+                            break
+                    elif entry.name.endswith((".yaml", ".yml")):
+                        st = entry.stat()
+                        h.update(f"{entry.path}:{st.st_mtime_ns}".encode("utf-8"))
                 except OSError:
-                    pass  # 文件被并发删除等竞态 → 跳过，指纹可能含噪，重扫兜底
-        return h.hexdigest()
+                    continue  # 文件被并发删除等竞态 → 跳过，重扫兜底
+
+        value = h.hexdigest()
+        self._fingerprint_value = value
+        self._fingerprint_root_sig = root_sig
+        self._fingerprint_full_checked_at = now
+        return value
 
 
 

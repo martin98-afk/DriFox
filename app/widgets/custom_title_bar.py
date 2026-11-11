@@ -36,14 +36,15 @@ from PySide6.QtCore import (
     QVariantAnimation,
     Signal,
 )
-from PySide6.QtGui import QColor, QCursor, QIcon, QPainter, QPainterPath
+from PySide6.QtGui import QColor, QCursor, QIcon, QLinearGradient, QPainter, QPainterPath
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QWidget
 
 from loguru import logger
 from qframelesswindow.titlebar import TitleBarBase
 from qframelesswindow.titlebar.title_bar_buttons import TitleBarButton, TitleBarButtonState
 
-from app.utils.design_tokens import Animations, Colors, font_size_css
+from app.utils.design_tokens import Animations, Colors, font_size_css, readable_text_on
+from app.utils.main_thread_watchdog import resume_reporting, suspend_reporting
 from app.utils.utils import get_font_family_css, get_icon
 
 # ── Windows 原生消息常量（仅 win32 分支使用，模块级常量避免热路径重复定义）──
@@ -314,9 +315,8 @@ class CustomTabButton(QWidget):
     clicked = Signal(str)  # tab_id（整卡点击）
     close_clicked = Signal(str)  # tab_id（× 关闭钮）
 
-    HEIGHT = 28  # Windows / Linux（标题栏 38，容器上下各留 5）
-    #: macOS 用 22：标题栏只有 28pt，tab 加容器 3px 内边距正好铺满
-    MAC_HEIGHT = 22
+    HEIGHT = 28  # 标题栏 38，tab 容器上下各留 5
+    MAC_HEIGHT = HEIGHT  # macOS 标题栏同为 38，tab 与 Win 统一
 
     #: 圆角取 BorderRadius.SM(6px)：窗口圆角是 8px，但那是相对整窗尺寸的；
     #: 放在 28px 高的 tab 上 8px 会显得过圆。6px 是"和窗口同一弧度语言、
@@ -486,6 +486,18 @@ class CustomTabButton(QWidget):
         self._label_css_key = None
         self._apply_label_color()
 
+    def set_text(self, text: str) -> None:
+        """更新文案（宿主把外部状态同步到已挂 tab 时调用，幂等）
+
+        宽度由 label 的 sizeHint 驱动，改完布局自行收敛；胶囊指示器由
+        TabIndicatorController 监听 LayoutRequest 自动重钉，这里不碰几何。
+        """
+        text = str(text or "")
+        if self._label.text() == text:
+            return
+        self._label.setText(text)
+        self.updateGeometry()
+
     def set_hover(self, hovered: bool) -> None:
         """设置悬浮态（幂等；进度卡在中途会自动补一次收尾）"""
         target = 1.0 if hovered else 0.0
@@ -595,7 +607,8 @@ class CustomTabButton(QWidget):
         if self._badge_label is None:
             return
         self._badge_label.setStyleSheet(
-            f"QLabel {{ color: {Colors.BUTTON_TEXT_ON_ACCENT}; background: {Colors.TEXT_ACCENT};"
+            f"QLabel {{ color: {readable_text_on(Colors.TEXT_ACCENT, Colors.BUTTON_TEXT_ON_ACCENT)};"
+            f" background: {Colors.TEXT_ACCENT};"
             " border-radius: 6px; font-size: 9px; font-weight: 600;"
             " padding: 0 4px; min-height: 12px; }"
         )
@@ -848,6 +861,23 @@ class TabIndicatorController(QObject):
         self._anim.start()
 
 
+class _MacTrafficLightCenterMixin:
+    """macOS：把系统交通灯垂直居中到自定义标题栏高度
+
+    qframelesswindow 的 ``_updateSystemButtonRect`` 以系统标准标题栏容器
+    （~28pt）居中交通灯；自定义栏高超过它时交通灯会偏上。库每次重算
+    （Resize / 窗口状态变化 / 显示）都会回调宿主的 ``systemTitleBarRect``，
+    在此返回 MAC_HEIGHT 高的矩形即可让交通灯持续居中于自定义栏。
+    非 mac 平台转发基类默认实现（win/linux 该方法本就仅 mac 生效）。
+    """
+
+    def systemTitleBarRect(self, size: QSize) -> QRect:  # noqa: N802
+        if _IS_MAC:
+            # 宽 75 沿用库默认（交通灯组宽 + 边距）；高度决定垂直居中位置
+            return QRect(0, 0, 75, CustomTitleBar.MAC_HEIGHT)
+        return super().systemTitleBarRect(size)
+
+
 class CustomTitleBar(TitleBarBase):
     """无边框窗口自定义标题栏（现代化自绘版）
 
@@ -859,11 +889,11 @@ class CustomTitleBar(TitleBarBase):
     外部（含基类的 ``eventFilter``）无需改动。
     """
 
-    HEIGHT = 38  # Windows / Linux
-    #: macOS 用 28 —— 与 NSWindow 标题栏容器同高。系统交通灯由 AppKit 绘制，
-    #: 尺寸固定（约 12pt），放进 38pt 高的栏里比例会明显偏小；设为 28 才是
-    #: macOS 的标准观感。
-    MAC_HEIGHT = 28
+    HEIGHT = 38  # Windows / Linux / macOS（三平台统一）
+    #: macOS 同为 38：旧版 28 对齐系统 NSWindow 标题栏但过于局促；抬高后
+    #: 系统交通灯（AppKit 绘制）由宿主窗口挂 _MacTrafficLightCenterMixin
+    #: 重定位到栏内垂直居中。
+    MAC_HEIGHT = 38
     MAC_TRAFFIC_LIGHT_PAD = 70  # macOS 系统交通灯左侧留白
 
     tab_clicked = Signal(str)
@@ -872,6 +902,11 @@ class CustomTitleBar(TitleBarBase):
     workbench_toggle_requested = Signal()  # 右侧工作台浮层开关（按钮在最小化左侧）
     sidebar_hover_changed = Signal(bool)  # 左按钮：True=进入 False=离开
     workbench_hover_changed = Signal(bool)  # 右按钮：True=进入 False=离开
+
+    #: 标题栏雾化遮罩纵向 alpha 系数（顶 / 中 / 底），以基色 alpha 为 1.0。
+    #: 中段落在文字基线附近，决定最终对比度；底缘衰减保留与内容区的过渡，
+    #: 避免顶栏像一条切开的实心带。
+    SCRIM_ALPHA_STOPS = ((0.0, 1.15), (0.55, 1.0), (1.0, 0.5))
 
     def __init__(self, parent, minimal: bool = False):
         """自定义标题栏
@@ -1173,6 +1208,11 @@ class CustomTitleBar(TitleBarBase):
             return
 
         _system_move_active = True
+        # 模态移动循环期间暂停看门狗上报：SendMessageW 阻塞是 Windows 拖动的
+        # 固有形态（循环内系统在泵消息、窗口正常跟随鼠标），心跳 QTimer 在
+        # 循环内派发延迟会把拖动误报成 ≥500ms 阻塞（2026-10-30 实证 4 条中
+        # 1 条）。finally 恢复，异常路径不漏。
+        suspend_reporting()
         try:
             try:
                 import ctypes
@@ -1203,6 +1243,7 @@ class CustomTitleBar(TitleBarBase):
         finally:
             # SendMessageW 返回 = 模态循环结束（正常松手或被系统取消），必须复位
             _system_move_active = False
+            resume_reporting()
 
     def _fallback_system_move(self, global_pos) -> None:
         """兜底：走 qframelesswindow 内置实现（无 snap，但保证能拖动）"""
@@ -1254,6 +1295,17 @@ class CustomTitleBar(TitleBarBase):
         # 新增 tab 会让后面的 tab 右移；若光标正好落在某个新位置上，
         # Qt 不会补发 enter/leave
         self._schedule_tab_hover_sync()
+
+    def set_tab_text(self, tab_id: str, text: str) -> None:
+        """更新已挂 tab 的文案（tab 不存在时静默跳过；新增仍走 add_tab）
+
+        场景：插件市场把待更新数写进卡片 title（「插件市场 (N)」↔「插件市场」），
+        已打开 tab 的文字在 add_tab 时固化，不跟随注册表变化。
+        """
+        btn = self._tabs.get(tab_id)
+        if btn is None:
+            return
+        btn.set_text(text)
 
     def remove_tab(self, tab_id: str, *, reactivate: bool = True) -> None:
         """移除 tab；reactivate=True 且移除的是激活 tab 时自动激活剩余第一个
@@ -1379,6 +1431,46 @@ class CustomTitleBar(TitleBarBase):
             " background: transparent; border: none; padding: 0 6px;"
         )
 
+    def _scrim_base_color(self) -> QColor:
+        """标题栏雾化遮罩基色：主题 token 优先，缺省按明暗取白 / 黑雾。
+
+        默认 alpha 按「最坏壁纸」标定：浅色主题白雾 0.60 叠纯黑壁纸仍有
+        5.2:1，深色主题黑雾 0.58 叠纯白壁纸仍有 4.8:1，过 WCAG AA 正文线。
+        """
+        raw = (Colors.TITLEBAR_SCRIM or "").strip()
+        # 只接受 CSS 颜色字面量：_qcolor 解析失败会静默返回不透明深灰，
+        # 主题写坏时整条顶栏会直接变灰块，比不加雾更糟。
+        if raw.lower().startswith(("#", "rgb")):
+            c = _qcolor(raw, "")
+            if c.alphaF() > 0.05:
+                return c
+        from app.utils.theme_manager import theme_manager
+
+        light = theme_manager.is_light_theme()
+        c = QColor(250, 251, 252) if light else QColor(14, 16, 20)
+        c.setAlphaF(0.60 if light else 0.58)
+        return c
+
+    def paintEvent(self, e) -> None:
+        """在子控件之下铺一层纵向渐变雾化底。
+
+        标题栏自身透明、直接叠在窗口壁纸上；前景色只跟主题明暗走，壁纸局部
+        亮暗与主题相反时（浅色主题 + 深色天空）对比度会跌到 1:1 附近。父 widget
+        先于子控件绘制，这层雾天然垫在 tab 文字/图标之下，不改变壁纸层逻辑。
+        """
+        super().paintEvent(e)
+        if getattr(self, "_minimal", False):
+            return  # 插件独立弹窗无壁纸，避免整条发灰
+        base = self._scrim_base_color()
+        grad = QLinearGradient(0, 0, 0, self.height())
+        for pos, factor in self.SCRIM_ALPHA_STOPS:
+            c = QColor(base)
+            c.setAlphaF(min(1.0, base.alphaF() * factor))
+            grad.setColorAt(pos, c)
+        painter = QPainter(self)
+        painter.fillRect(self.rect(), grad)
+        painter.end()
+
     def refresh_style(self) -> None:
         """主题切换后刷新样式（Colors.refresh() 由调用方先执行）"""
         for b in self._tabs.values():
@@ -1409,6 +1501,8 @@ class CustomTitleBar(TitleBarBase):
         if self._minimal:
             self._apply_plugin_title_style()
         # 品牌（DriFox + 版本号）已按极简要求移除，顶栏只留功能控件。
+        # 雾化底色实时取 token / 主题明暗，切换主题后主动重绘一次
+        self.update()
 
     # ── 内部 ──
 

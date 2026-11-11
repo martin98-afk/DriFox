@@ -53,30 +53,20 @@ def test_deferred_create_engines_idempotent(monkeypatch):
     assert len(created) == 1, f"ChatEngine 被创建了 {len(created)} 次（应为 1 次）"
 
 
-def test_deferred_create_sub_agent_idempotent(monkeypatch):
-    """重复调用 _deferred_create_sub_agent_and_misc 不得覆盖 SubAgentManager。"""
-    backend = _make_backend("win_dup_subagent_1")
+def test_backend_holds_no_sub_agent_state(monkeypatch):
+    """主程序不再持有子智能体任何状态（管理器归 system-subagent 插件）。"""
+    backend = _make_backend("win_no_subagent_1")
 
-    created = []
-    subagent_cls = MagicMock()
+    for name in (
+        "sub_agent_manager",
+        "_sub_agent_manager",
+        "sub_agent_ready",
+        "set_subagent_model_resolver",
+        "set_sub_agent_history_getter",
+        "ensure_sub_agent_manager",
+    ):
+        assert not hasattr(backend, name), f"backend 仍暴露子智能体字段/方法: {name}"
 
-    monkeypatch.setattr(
-        "app.core.workers.subagent_worker.SubAgentManager",
-        subagent_cls,
-    )
-
-    def fake_cls_factory(**kwargs):
-        inst = MagicMock()
-        created.append(inst)
-        return inst
-
-    subagent_cls.side_effect = fake_cls_factory
-
-    backend._deferred_create_sub_agent_and_misc()
-    first = backend._sub_agent_manager
-    assert first is created[0]
-
-    backend._deferred_create_sub_agent_and_misc()
-
-    assert backend._sub_agent_manager is first, "重复创建覆盖了 _sub_agent_manager"
-    assert len(created) == 1, f"SubAgentManager 被创建了 {len(created)} 次（应为 1 次）"
+    # 600ms 批只剩 git 缓存预热，不再创建管理器
+    backend._deferred_warm_git_cache()
+    assert not hasattr(backend, "_sub_agent_manager")

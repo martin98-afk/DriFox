@@ -382,41 +382,84 @@ class AgentManager:
         self._system_prompt_cache: Dict[tuple, str] = {}
         self._load_agents()
 
-    def _load_agents(self, force: bool = False):
-        """加载智能体：插件路径优先，后备路径兜底
-
-        Args:
-            force: 为 True 时强制重新加载 hooks（reload_agents 时调用）
-        """
-        # 1. 从所有已启用插件加载（PluginManager 已初始化时）
-        self._load_agents_from_plugins()
+    def _load_agents(self):
+        """加载智能体与插件 hooks：插件路径优先，后备路径兜底"""
+        # 1. 单次遍历所有已启用插件，同时加载智能体与 hooks（PluginManager 已初始化时）
+        self._load_agents_and_hooks_from_plugins()
 
         # 2. 从后备目录加载（兼容旧配置）
         if self.agents_dir and self.agents_dir.exists():
             self._load_agents_from_dir(self.agents_dir)
 
-        # 3. 加载 hooks
-        if self._hook_manager is not None:
-            # 3a. 插件 hooks 目录（顶层 hooks/）
-            self._load_plugin_hooks()
+        # 3. [已移除] 旧技能 hooks 加载路径，hooks 全部来自插件 hooks/
 
-            # 3b. [已移除] 旧技能 hooks 加载路径，hooks 全部来自插件 hooks/
+    def _load_agents_and_hooks_from_plugins(self):
+        """单次遍历已启用插件，同时加载智能体与 hooks。
 
-    def _load_agents_from_plugins(self):
-        """从所有已启用插件加载智能体（跟踪每个智能体的来源插件）"""
+        原实现是 `_load_agents_from_plugins` 与 `_load_plugin_hooks` 各自完整
+        遍历一遍启用插件（两次遍历、两次 PluginManager 查询）。两者语义互不
+        耦合（agents 按 agents 目录寻址，hooks 用 skill_name=plugin.name 独立
+        寻址），故合并为单次遍历。
+
+        ⚠️ agents 与 hooks 各自独立 try：原实现下任一方抛异常不影响另一方，
+        合并后必须保持该隔离（否则 agents 目录解析失败会连带吞掉全部 hooks）。
+        """
         try:
             from app.plugins.managers.plugin_manager import PluginManager
 
             pm = PluginManager.get_instance()
             if pm.is_initialized():
                 for plugin in pm.get_enabled_plugins():
-                    # D9：agents 组件被整类停用的插件不加载其智能体
-                    # （运行时 toggle 靠卸载生效，这里兜住重启后的场景）
-                    if not pm.is_component_enabled(plugin.name, "agents"):
-                        continue
-                    agent_dir = plugin.path / "agents"
-                    if agent_dir.exists():
-                        self._load_agents_from_dir(agent_dir, source_plugin=plugin.name)
+                    self._load_one_plugin_agents(pm, plugin)
+                    self._load_one_plugin_hooks(pm, plugin)
+        except (ImportError, Exception):
+            pass
+
+    def _load_one_plugin_agents(self, pm, plugin) -> None:
+        """加载单个插件的 agents（组件启用判定详见 D9 注释）"""
+        try:
+            # D9：agents 组件被整类停用的插件不加载其智能体
+            # （运行时 toggle 靠卸载生效，这里兜住重启后的场景）
+            if not pm.is_component_enabled(plugin.name, "agents"):
+                return
+            agent_dir = plugin.path / "agents"
+            if agent_dir.exists():
+                self._load_agents_from_dir(agent_dir, source_plugin=plugin.name)
+        except (ImportError, Exception):
+            pass
+
+    def _load_one_plugin_hooks(self, pm, plugin) -> None:
+        """加载单个插件的 hooks（无 hook_manager 时静默跳过）"""
+        if self._hook_manager is None:
+            return
+        try:
+            # D9：hooks 组件被整类停用的插件不注册其 hooks
+            if not pm.is_component_enabled(plugin.name, "hooks"):
+                return
+            hooks_dir = plugin.path / "hooks"
+            if not hooks_dir.exists() or not hooks_dir.is_dir():
+                return
+            # 使用插件名作为 skill_name，确保每个插件的 hooks 独立可寻址
+            # is_system_plugin 用于标记系统内置插件的 hook，在 UI 上禁止删除
+            self._hook_manager.load_hooks_from_directory_flat(
+                hooks_dir, skill_name=plugin.name, is_system_plugin=plugin.is_system
+            )
+        except (ImportError, Exception):
+            pass
+
+    def _load_agents_from_plugins(self):
+        """从所有已启用插件加载智能体（跟踪每个智能体的来源插件）
+
+        保留入口：增量重载路径与既有测试直接调用本方法。
+        _load_agents 走单次遍历版 `_load_agents_and_hooks_from_plugins`。
+        """
+        try:
+            from app.plugins.managers.plugin_manager import PluginManager
+
+            pm = PluginManager.get_instance()
+            if pm.is_initialized():
+                for plugin in pm.get_enabled_plugins():
+                    self._load_one_plugin_agents(pm, plugin)
         except (ImportError, Exception):
             pass
 
@@ -425,11 +468,12 @@ class AgentManager:
         self._agents.clear()
         self._hidden_agents.clear()
 
-        # 先注销所有插件级 hooks，再重新加载（force=True 确保全量刷新）
+        # 先注销所有插件级 hooks，再重新加载（全量刷新靠上方 clear() + 本处注销，
+        # 而非 _load_agents 的入参：新的加载总会重新走一遍启用插件遍历）
         if self._hook_manager is not None:
             self._unload_plugin_hooks()
 
-        self._load_agents(force=True)
+        self._load_agents()
         logger.info(f"[AgentManager] Reloaded agents: {len(self._agents)} visible, {len(self._hidden_agents)} hidden")
 
     def reload_plugin_agents(self, plugin_name: str) -> int:
@@ -613,24 +657,18 @@ class AgentManager:
         logger.info(f"[AgentManager] Cleaned up artifacts for removed plugin: {plugin_name}")
 
     def _load_plugin_hooks(self):
-        """加载插件顶层 hooks/ 目录中的 hooks（使用插件名作为 skill key）"""
+        """加载插件顶层 hooks/ 目录中的 hooks（使用插件名作为 skill key）
+
+        保留入口：只加载 hooks 的场景。_load_agents 走单次遍历版
+        `_load_agents_and_hooks_from_plugins`，插件只遍历一次。
+        """
         try:
             from app.plugins.managers.plugin_manager import PluginManager
 
             pm = PluginManager.get_instance()
             if pm.is_initialized():
                 for plugin in pm.get_enabled_plugins():
-                    # D9：hooks 组件被整类停用的插件不注册其 hooks
-                    if not pm.is_component_enabled(plugin.name, "hooks"):
-                        continue
-                    hooks_dir = plugin.path / "hooks"
-                    if not hooks_dir.exists() or not hooks_dir.is_dir():
-                        continue
-                    # 使用插件名作为 skill_name，确保每个插件的 hooks 独立可寻址
-                    # is_system_plugin 用于标记系统内置插件的 hook，在 UI 上禁止删除
-                    self._hook_manager.load_hooks_from_directory_flat(
-                        hooks_dir, skill_name=plugin.name, is_system_plugin=plugin.is_system
-                    )
+                    self._load_one_plugin_hooks(pm, plugin)
         except (ImportError, Exception):
             pass
 
@@ -651,6 +689,11 @@ class AgentManager:
         cache_key = source_plugin or str(agents_dir)
         file_cache = _agent_file_cache.setdefault(cache_key, {})
 
+        # 逐条 Loaded DEBUG 在冷启动首扫可达 50+ 条，每条一次管道写入（10 个
+        # enqueue sink 串行 put），管道满时阻塞主线程（2026-11-06 实测 500ms）。
+        # 改为循环后聚合一次 emit：内容不变，管道往返从 N 次降到 1 次。
+        loaded_log_lines: list[str] = []
+
         for md_file in agents_dir.glob("*.md"):
             try:
                 fpath = str(md_file)
@@ -666,8 +709,8 @@ class AgentManager:
                     agent = self._parse_markdown_agent(md_file)
                     if agent:
                         file_cache[fpath] = (mtime, agent)
-                        logger.info(
-                            f"[AgentManager] Loaded agent: {agent.name} (mode={agent.mode}, hidden={agent.hidden})"
+                        loaded_log_lines.append(
+                            f"{agent.name} (mode={agent.mode}, hidden={agent.hidden})"
                         )
                 if agent:
                     # 同名智能体去重：先加载的（系统插件优先）保留，后续的跳过
@@ -687,6 +730,12 @@ class AgentManager:
                     target_dict[agent.name] = agent
             except Exception as e:
                 logger.error(f"[AgentManager] Failed to load {md_file}: {e}")
+
+        if loaded_log_lines:
+            logger.debug(
+                f"[AgentManager] Loaded agents ({len(loaded_log_lines)}):\n  "
+                + "\n  ".join(loaded_log_lines)
+            )
 
         for yaml_file in agents_dir.glob("*.yaml"):
             try:
@@ -764,7 +813,19 @@ class AgentManager:
         return Agent.from_dict(data)
 
     def get_agent(self, name: str) -> Optional[Agent]:
-        return self._agents.get(name) or self._hidden_agents.get(name)
+        agent = self._agents.get(name) or self._hidden_agents.get(name)
+        if agent is not None:
+            return agent
+        # 贡献回落：插件注入的动态智能体（能力池 agent 定义）
+        try:
+            from app.plugins.registries.contribution_registry import ContributionRegistry
+
+            d = ContributionRegistry.get_instance().get_agent_def(name)
+            if d:
+                return Agent.from_dict({k: v for k, v in d.items() if not k.startswith("_")})
+        except Exception:
+            pass
+        return None
 
     def list_agents(self, include_hidden: bool = False) -> List[Agent]:
         if include_hidden:
@@ -976,15 +1037,16 @@ Use the tools available to you based on your permissions."""
             # 合并外部上下文（由 context_builder 传入 project_root/project_name）
             if extra_context:
                 hook_ctx.update(extra_context)
-            # 技能内容
+            # 技能内容（project_root 贯穿：动态技能源按会话所属项目求值）
             try:
                 from app.utils.config import Settings
 
                 enabled_skills = Settings.get_instance().llm_enabled_skills.value
-                if enabled_skills:
-                    sk_content = self.get_enabled_skills_content(enabled_skills)
-                    if sk_content:
-                        hook_ctx["enabled_skills_content"] = sk_content
+                sk_content = self.get_enabled_skills_content(
+                    enabled_skills, project_dir=hook_ctx.get("project_root") or None
+                )
+                if sk_content:
+                    hook_ctx["enabled_skills_content"] = sk_content
             except Exception:
                 pass
             # 子智能体列表（仅主智能体需要）
@@ -1001,26 +1063,47 @@ Use the tools available to you based on your permissions."""
                 current_message="",
                 trigger_async=False,
             )
-            contributions = [r.output.strip() for r in results if r.success and r.output.strip()]
+            contributions = []
+            for r in results:
+                if not (r.success and r.output.strip()):
+                    continue
+                out = r.output.strip()
+                # 兜底：插件漏加分区标签时自动包裹，避免 system prompt 出现裸段
+                # （每块内容都要有 <xxx> 边界，否则相邻插件的内容会粘在一起，
+                # 模型分不清哪段属于哪个系统。插件应自己带标签，这里只兜底。）
+                if not out.startswith("<"):
+                    logger.warning(
+                        "[agent] BuildSystemPrompt 输出缺少分区标签，已兜底包裹为 "
+                        f"<hook_context>（{len(out)} 字符）"
+                    )
+                    out = "<hook_context>\n" + out + "\n</hook_context>"
+                contributions.append(out)
             if contributions:
                 base = base + "\n\n" + "\n\n".join(contributions)
 
         return base
 
-    def get_enabled_skills_content(self, enabled_skills: List[str]) -> str:
-        """获取已启用的技能内容"""
+    def get_enabled_skills_content(
+        self, enabled_skills: List[str], project_dir: Optional[str] = None
+    ) -> str:
+        """获取已启用技能内容（project_dir 非空时含贡献动态技能源）
+
+        两类进「偏好技能」段：
+        - enabled_skills 名单内的技能（现有语义）
+        - auto_enable=True 的贡献条目（如项目技能，无需手动启用）
+        """
         from app.utils.utils import get_local_skills
 
-        if not enabled_skills:
+        all_skills = get_local_skills(project_dir)
+        if not all_skills:
             return ""
-
-        all_skills = get_local_skills()
+        enabled_set = set(enabled_skills or [])
         result_parts = [
             "\n\n## 偏好技能\n凡用户请求命中以下技能 description 描述的场景，必须先调用 `skill` 工具加载对应技能再回答，禁止跳过直接作答；以下技能无法满足时用 `manage_skill(action=\"list\")` 查看完整列表：\n"
         ]
 
         for skill in all_skills:
-            if skill["name"] in enabled_skills:
+            if skill["name"] in enabled_set or skill.get("auto_enable"):
                 display_name = skill.get("qualified_name", skill["name"])
                 result_parts.append(f"\n### {display_name}\n{skill.get('description', '')}\n")
 

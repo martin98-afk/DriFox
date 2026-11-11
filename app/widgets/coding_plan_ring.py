@@ -205,8 +205,34 @@ class CodingPlanTooltip(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent, Qt.ToolTip | Qt.FramelessWindowHint)
         self.setAttribute(Qt.WA_TranslucentBackground, True)
+        self._theme_version = self._current_theme_version()
         self._load_theme_colors()
         self._build_ui()
+
+    @staticmethod
+    def _current_theme_version() -> int:
+        try:
+            from app.utils.theme_refresh import ThemeRefreshCoordinator
+
+            return ThemeRefreshCoordinator.get_version()
+        except Exception:
+            return -1
+
+    def _apply_theme(self):
+        """重读主题色并重建样式表 + 进度条轨道色"""
+        self._theme_version = self._current_theme_version()
+        self._load_theme_colors()
+        self._apply_sheet()
+        for _, _, _, bar in self._layer_rows:
+            bar.refresh_theme()
+        self.update()
+
+    def _sync_theme(self) -> bool:
+        """主题版本变化时才重建样式（set_data 每 60s 被轮询驱动，避免重复 repolish）"""
+        if self._current_theme_version() == self._theme_version:
+            return False
+        self._apply_theme()
+        return True
 
     def _load_theme_colors(self):
         """从当前主题读取卡片背景/边框/文字色"""
@@ -271,7 +297,7 @@ class CodingPlanTooltip(QWidget):
 
     def set_data(self, layers: dict):
         """layers: {"rolling": {"percent": int, "reset_sec": int}, ...}"""
-        self._load_theme_colors()
+        self._sync_theme()
 
         has_any = False
         for i, cfg in enumerate(LAYER_CONFIG):
@@ -311,9 +337,8 @@ class CodingPlanTooltip(QWidget):
         )
 
     def refresh_theme(self):
-        """主题切换时刷新配色（原 set_data 内顺带刷样式的显式接口）"""
-        self._load_theme_colors()
-        self._apply_sheet()
+        """主题切换时刷新配色（调用方已确认主题变化，无条件重建）"""
+        self._apply_theme()
 
     # ---------- 绘制卡片背景 ----------
 
@@ -429,6 +454,8 @@ class CodingPlanRing(QWidget):
     def refresh_theme(self):
         """主题切换后刷新轨道颜色及 tooltip 主题色"""
         self._track_color = self._compute_track_color()
+        # 显式强刷浮层样式：不依赖 ThemeRefreshCoordinator 版本号的推进时序
+        self._tooltip.refresh_theme()
         self._rebuild_tooltip()
         self.update()
 

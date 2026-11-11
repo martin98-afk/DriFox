@@ -2,14 +2,14 @@
 """发送前处理缓存契约测试（PERF T33）
 
 背景：ContextBudgetAllocator.build_messages 的发送前处理
-（consolidate_messages + HistoryCompactor.compact 内含 token 估算）在长会话
+（consolidate_messages + ContextPipeline 的 tier 链）在长会话
 （数百条消息）下是 100-300ms 级开销，且一次发送会经多次调用
 （主发送 + 工具迭代回环）。T33 引入 session 级 prep 缓存：
-prep_key 8 元组全等时直接复用 history/state/cache，两步全归零。
+prep_key 7 元组全等时直接复用 history/state/cache，两步全归零。
 
 本测试锁定其失效契约——任何会让结果变化的输入都必须 miss：
 - 消息追加 / set_messages（含截断变短）/ hook 注入后 miss
-- budget / model / 截断阈值 / allow_llm_summary 变化后 miss
+- budget / model / 截断阈值变化后 miss
 - 同长度同首尾时间戳但内容指纹不同 → 靠 version 兜住 miss
 - 线程读写 smoke
 
@@ -33,11 +33,10 @@ from app.core.context.builder import ContextBudgetAllocator  # noqa: E402
 
 
 class _CountingCompactor:
-    """compact / get_budget 调用计数（验证缓存命中时零调用）"""
+    """compact 调用计数（验证缓存命中时零调用）"""
 
     def __init__(self, budget=200000):
         self.compact_calls = 0
-        self.budget_calls = 0
         self._budget = budget
 
     def compact(self, history, budget, existing_cache=None, allow_llm_summary=True, prenormalized=None):
@@ -45,10 +44,6 @@ class _CountingCompactor:
         # 模拟真实 compact 语义：传了 prenormalized 就不再自己 consolidate
         normalized = prenormalized if prenormalized is not None else history
         return list(normalized), {"calls": self.compact_calls}, {}
-
-    def get_budget(self, llm_config):
-        self.budget_calls += 1
-        return self._budget
 
 
 class _FakeAgentManager:
@@ -72,14 +67,14 @@ def _history(n=4):
 
 
 def _allocator(compactor):
-    """注入 compactor 与包它的 pipeline 桩。
+    """把计数桩包成单 tier 注入 pipeline。
 
-    压缩现在由 tier 链上的 tail_retain/llm_summary 执行（用户插件 context-compaction）。
-    为让本测试继续锁定「_send_prep_cache 缓存失效契约」，把假 compactor 包成
-    单 tier 注入 pipeline —— compact_calls 计数语义保持不变。
+    压缩器已退役，build_messages 只接 pipeline（不接 compactor）。
+    为让本测试继续锁定「_send_prep_cache 缓存失效契约」，把假 compactor
+    包成单 tier —— compact_calls 计数语义保持不变。
     """
     from app.core.context.pipeline import ContextPipeline
-    from app.plugins.contracts.context_policy import CACHE_INVALIDATE, STAGE_SEND, TierOutcome
+    from app.plugins.contracts.context_policy import CACHE_NONE, STAGE_SEND, TierOutcome
     from app.plugins.registries.context_policy_registry import ContextPolicyRegistry
 
     class _CompactorTier:
@@ -87,7 +82,9 @@ def _allocator(compactor):
         label = "压缩（测试桩）"
         order = 70
         stages = frozenset({STAGE_SEND})
-        cache_impact = CACHE_INVALIDATE
+        # 前缀安全层：pipeline 的 _allow 门控只对 CACHE_INVALIDATE 层要求超预算。
+        # 本测试只验证 _send_prep_cache 失效，不涉缓存影响，用 NONE 保证每次都跑。
+        cache_impact = CACHE_NONE
 
         def should_apply(self, view):
             return True
@@ -106,7 +103,7 @@ def _allocator(compactor):
 
     reg = ContextPolicyRegistry()
     reg.register_tier(_CompactorTier(), "test")
-    return ContextBudgetAllocator(_FakeAgentManager(), compactor=compactor, pipeline=ContextPipeline(reg))
+    return ContextBudgetAllocator(_FakeAgentManager(), pipeline=ContextPipeline(reg))
 
 
 class TestCacheHit:
@@ -209,16 +206,16 @@ class TestInvalidationOnHookInjection:
 
 
 class TestInvalidationOnParamsChange:
-    """budget / model / 阈值 / summary 开关变化必须 miss"""
+    """budget / model / 阈值变化必须 miss"""
 
     def test_budget_change_misses(self):
-        compactor = _CountingCompactor(budget=200000)
+        compactor = _CountingCompactor()
         alloc = _allocator(compactor)
         session = _session_with(_history())
-        alloc.build_messages(session, {"model": "m1"}, current_agent="build")
+        alloc.build_messages(session, {"model": "m1", "最大输出": 100}, current_agent="build")
 
-        compactor._budget = 50000  # 预算变化 → budget 入 key → miss
-        alloc.build_messages(session, {"model": "m1"}, current_agent="build")
+        # 输出预留从 100 → 700，预算随之变（预算入 key）→ miss
+        alloc.build_messages(session, {"model": "m1", "最大输出": 700}, current_agent="build")
         assert compactor.compact_calls == 2, "budget 变化后应 miss"
 
     def test_model_change_misses(self):
@@ -239,15 +236,6 @@ class TestInvalidationOnParamsChange:
 
         alloc.build_messages(session, {"model": "m1", "上下文长度": 128000}, current_agent="build")
         assert compactor.compact_calls == 2, "工具截断阈值变化后应 miss"
-
-    def test_allow_llm_summary_change_misses(self):
-        compactor = _CountingCompactor()
-        alloc = _allocator(compactor)
-        session = _session_with(_history())
-        alloc.build_messages(session, {"model": "m1"}, current_agent="build", allow_llm_summary=False)
-
-        alloc.build_messages(session, {"model": "m1"}, current_agent="build", allow_llm_summary=True)
-        assert compactor.compact_calls == 2, "allow_llm_summary 变化后应 miss"
 
 
 class TestFingerprintSafety:
@@ -290,20 +278,6 @@ class TestFingerprintSafety:
         session.bump_messages_version()
         alloc.build_messages(session, {"model": "m1"}, current_agent="build")
         assert compactor.compact_calls == 2, "手动 bump 后应 miss"
-
-    def test_prenormalized_passed_to_compactor(self):
-        """miss 路径必须把已 consolidate 的 history 作为 prenormalized 传给 compact"""
-        seen = {}
-
-        class _SpyCompactor(_CountingCompactor):
-            def compact(self, history, budget, existing_cache=None, allow_llm_summary=True, prenormalized=None):
-                seen["prenormalized_is_history"] = prenormalized is history
-                return super().compact(history, budget, existing_cache, allow_llm_summary, prenormalized)
-
-        alloc = _allocator(_SpyCompactor())
-        session = _session_with(_history())
-        alloc.build_messages(session, {"model": "m1"}, current_agent="build")
-        assert seen.get("prenormalized_is_history") is True, "compact 应收到 prenormalized（跳过重复 consolidate）"
 
 
 class TestThreadSmoke:

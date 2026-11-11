@@ -88,6 +88,17 @@ def reset_sync_service(tmp_path):
     svc._suppress_until = 0.0
     svc._suppress_retry_scheduled = False
     svc._debounce_timer = None
+    svc._merge_bases = set()
+    # 双开互斥锁落测试临时目录，避免在真实 .drifox/ 留下锁文件；
+    # 上一用例若抢过锁先释放，防止同一进程持有导致后续用例误判
+    svc._owner_lock.release()
+    from app.core.sync.config_sync import _SyncOwnerLock
+
+    svc._owner_lock = _SyncOwnerLock(tmp_path / ".sync_owner.lock")
+    svc._owner_blocked_logged = False
+    if svc._enable_retry_timer is not None:
+        svc._enable_retry_timer.stop()
+        svc._enable_retry_timer = None
     # 同步状态与合并基准必须落在测试临时目录，否则会写脏真实 .drifox/
     # （_commit_unit_state / _backup_local_unit 都按这两个路径落盘）
     svc._sha_cache_path = tmp_path / ".sync_shas.json"
@@ -715,6 +726,28 @@ class TestInitialSync:
 # =============================================================================
 
 
+class TestPluginReloadWindow:
+    """app.config 单下不触发插件重载链（避免陈旧 pending 触发全量 rescan）"""
+
+    def test_no_window_means_skip(self):
+        from app.core.sync.config_sync import _should_reload_plugins
+
+        assert _should_reload_plugins(0.0) is False
+        assert _should_reload_plugins(0.0, now=time.time()) is False
+
+    def test_inside_window_schedules(self):
+        from app.core.sync.config_sync import _should_reload_plugins
+
+        now = time.time()
+        assert _should_reload_plugins(now + 5, now=now) is True
+
+    def test_expired_window_skips(self):
+        from app.core.sync.config_sync import _should_reload_plugins
+
+        now = time.time()
+        assert _should_reload_plugins(now - 1, now=now) is False
+
+
 class TestSuppressionWindow:
     """抑制窗口期间不丢失配置修改"""
 
@@ -1062,6 +1095,68 @@ class TestShaCache:
         assert data.get("custom_sha") is None
         assert data.get("records_sha") is None
 
+    def test_exit_keeps_state_on_disk(self, svc, tmp_path):
+        """进程退出走 disable(clear_state=False)：SHA 缓存与合并基准留在磁盘
+
+        回归：退出路径曾用默认 disable()，把 .sync_shas.json 与 sync_base 当解绑
+        清掉。下次启动因「无合并基准」被判成新机首次同步，本地条目一律压到 t=0
+        交给云端裁决，本地刚改的配置被云端旧内容覆盖（主题被刷回旧值）。
+        """
+        svc._sha_cache_path = tmp_path / ".sync_shas.json"
+        svc._sync_base_dir = tmp_path / "cache" / "sync_base"
+        svc._config_remote_sha = "abc123"
+        svc._merge_bases = {"app.config"}
+        svc._save_sha_cache()
+        svc._sync_base_dir.mkdir(parents=True, exist_ok=True)
+        (svc._sync_base_dir / "user-custom.dir.json").write_text("{}", encoding="utf-8")
+
+        svc.disable(clear_state=False)
+
+        assert svc._sha_cache_path.exists()
+        assert svc._sync_base_dir.exists()
+        data = json.loads(svc._sha_cache_path.read_text(encoding="utf-8"))
+        assert data["config_sha"] == "abc123"
+        assert data["merge_bases"] == ["app.config"]
+
+    def test_unbind_clears_state(self, svc, tmp_path):
+        """解绑走默认 disable()：缓存与基准必须清干净（防止重绑误用旧基准）"""
+        svc._sha_cache_path = tmp_path / ".sync_shas.json"
+        svc._sync_base_dir = tmp_path / "cache" / "sync_base"
+        svc._config_remote_sha = "abc123"
+        svc._merge_bases = {"app.config"}
+        svc._save_sha_cache()
+        svc._sync_base_dir.mkdir(parents=True, exist_ok=True)
+
+        svc.disable()
+
+        assert not svc._sha_cache_path.exists()
+        assert not svc._sync_base_dir.exists()
+        assert svc._merge_bases == set()
+
+    def test_merge_base_persisted_and_loaded(self, svc, tmp_path):
+        """merge_bases 随状态文件持久化：重启后仍认得出「本机同步过」"""
+        svc._sha_cache_path = tmp_path / ".sync_shas.json"
+        svc._config_remote_sha = None
+        svc._merge_bases = set()
+        svc._commit_unit_state("app.config", "sha1", None)
+        assert "app.config" in svc._merge_bases
+
+        svc._merge_bases = set()
+        svc._config_remote_sha = None
+        svc._load_sha_cache()
+
+        assert "app.config" in svc._merge_bases
+        assert svc._has_merge_base("app.config") is True
+
+    def test_no_merge_base_means_remote_authority(self, svc):
+        """从没同步过（新机/解绑重绑）→ 无合并基准，合并按云端权威"""
+        svc._merge_bases = set()
+        svc._config_remote_sha = None
+        assert svc._has_merge_base("app.config") is False
+
+        svc._config_remote_sha = "sha1"
+        assert svc._has_merge_base("app.config") is True
+
 
 # =============================================================================
 # 7. 主题同步时序 — 自定义主题不被静默回退为默认
@@ -1312,7 +1407,16 @@ class TestThemeModeSync:
 
         # 捕获 150ms 延迟回调（真实链：lambda 闭包携带 tm_diff），手动执行模拟到期
         captured = []
-        monkeypatch.setattr(cs.QTimer, "singleShot", staticmethod(lambda ms, cb: captured.append(cb)))
+
+        class _StubQTimer:
+            """最小 QTimer 替身：只捕获 singleShot，避免替换 PyQt5 QTimer 类本体
+            （影响进程内所有调用方）"""
+
+            @staticmethod
+            def singleShot(ms, cb):
+                captured.append(cb)
+
+        monkeypatch.setattr(cs, "QTimer", _StubQTimer)
         svc.settingsRestored.connect(lambda: None)  # 占位，避免空连接告警
         try:
             svc._reload_settings_on_main_thread()
@@ -1336,6 +1440,99 @@ class TestThemeModeSync:
         dispatch_mock, fake = self._run_reload(reset_sync_service, tmp_path, monkeypatch, cloud_mode="Dark")
         assert fake.themeMode.value == Theme.DARK
         dispatch_mock.assert_not_called(), "深浅模式未变化不应触发全量刷新"
+
+
+class TestFontSyncFallback:
+    """回归：Gitee 同步写回字体/字号后 UI 不刷新（2026-10-31）。
+
+    根因：LLMSettingsCard 懒构建（窗口可见 3500ms 后），同步写回发生在其构建前
+    时 llm_font_family/ui_font_size 的 valueChanged 无监听者，只更新配置值不刷 UI；
+    主题有 _delayed_theme_refresh 兜底，字体/字号没有。修复：写回前记录旧值，
+    150ms 延迟分片按变更项驱动窗口 _apply_runtime_ui_settings。
+    """
+
+    class _FakeSettings:
+        """替身：主题 + 字体族 + 字号三项真实 ConfigItem"""
+
+        ui_theme_style = OptionsConfigItem("UI", "ThemeStyle", "lumia", OptionsValidator(["lumia"]))
+        ui_font_size = OptionsConfigItem("UI", "FontSize", "2", OptionsValidator([str(d) for d in range(-5, 11)]))
+        llm_font_family = ConfigItem("LLM", "FontFamily", "楷体")
+        # 写回循环读 secret_mode（密钥回填判定）；缺失会走 except 打 warning 噪声
+        secret_mode = ConfigItem("Secret", "Mode", "")
+
+        def __init__(self):
+            self.file = Path("")
+            # ConfigItem 挂在类上跨测试共享，逐实例重置回默认防前序用例污染
+            type(self).ui_theme_style.value = "lumia"
+            type(self).ui_font_size.value = "2"
+            type(self).llm_font_family.value = "楷体"
+
+        def get_instance(self):
+            return self
+
+    def _run(self, svc, tmp_path, monkeypatch, cloud: dict):
+        """执行 _reload_settings_on_main_thread 并手动触发 150ms 延迟回调。
+
+        返回 (dispatch_mock, wins, fake)：wins 为假窗口 MagicMock 列表。
+        """
+        from app.core.sync import config_sync as cs
+
+        cfg_path = tmp_path / "app.config"
+        cfg_path.write_text(json.dumps(cloud), encoding="utf-8")
+
+        fake = self._FakeSettings()
+        fake.file = cfg_path
+
+        monkeypatch.setattr("app.utils.config.update_theme_options", lambda: None)
+        monkeypatch.setattr("app.utils.theme_manager.ThemeManager.reload", lambda self: None)
+        monkeypatch.setattr(cs, "Settings", fake)
+        dispatch_mock = MagicMock()
+        monkeypatch.setattr("app.utils.theme_manager.ThemeManager.dispatch_refresh", dispatch_mock)
+
+        win = MagicMock()
+        win._is_destroyed = False
+        monkeypatch.setattr("app.core.infra.window_registry.alive_window_instances", lambda: [win])
+
+        captured = []
+        monkeypatch.setattr(cs.QTimer, "singleShot", staticmethod(lambda ms, cb: captured.append(cb)))
+        svc._reload_settings_on_main_thread()
+        for cb in captured:
+            cb()
+        return dispatch_mock, [win], fake
+
+    def test_font_and_size_changed_triggers_full_refresh(self, reset_sync_service, tmp_path, monkeypatch):
+        """字体族+字号都变（主题不变）→ 全量刷新窗口、不触发主题 dispatch"""
+        dispatch_mock, wins, fake = self._run(
+            reset_sync_service,
+            tmp_path,
+            monkeypatch,
+            cloud={"UI": {"ThemeStyle": "lumia", "FontSize": "5"}, "LLM": {"FontFamily": "微软雅黑"}},
+        )
+        assert fake.llm_font_family.value == "微软雅黑"
+        assert fake.ui_font_size.value == "5"
+        dispatch_mock.assert_not_called(), "主题未变不应触发 dispatch_refresh"
+        wins[0]._apply_runtime_ui_settings.assert_called_once_with(scope=None), "字体字号同变 → scope=None 全量"
+
+    def test_font_size_only_changed_uses_precise_scope(self, reset_sync_service, tmp_path, monkeypatch):
+        """仅字号变 → scope="font_size" 精确刷新"""
+        dispatch_mock, wins, fake = self._run(
+            reset_sync_service, tmp_path, monkeypatch, cloud={"UI": {"ThemeStyle": "lumia", "FontSize": "7"}}
+        )
+        assert fake.ui_font_size.value == "7"
+        assert fake.llm_font_family.value == "楷体"
+        dispatch_mock.assert_not_called()
+        wins[0]._apply_runtime_ui_settings.assert_called_once_with(scope="font_size")
+
+    def test_no_appearance_change_skips_refresh(self, reset_sync_service, tmp_path, monkeypatch):
+        """外观三项全未变 → 不 dispatch、不驱动窗口刷新"""
+        dispatch_mock, wins, _ = self._run(
+            reset_sync_service,
+            tmp_path,
+            monkeypatch,
+            cloud={"UI": {"ThemeStyle": "lumia", "FontSize": "2"}, "LLM": {"FontFamily": "楷体"}},
+        )
+        dispatch_mock.assert_not_called()
+        wins[0]._apply_runtime_ui_settings.assert_not_called()
 
 
 class TestSetThemeAfterSkip:
@@ -1584,3 +1781,323 @@ class TestSecretReloadOnSync:
         assert saved["prov_new"]["API_KEY"] == "", "新增密文条目无密码：保持空"
         assert fake._secrets_locked is True, "写回后判定：新增密文解不开应置 locked 提示解锁"
         assert fake._cipher_backup, "locked 期间备份必须保留"
+
+
+# =============================================================================
+# N. dirty 悬空兜底重试 — 墓碑上传丢失修复（2026-11-06）
+# =============================================================================
+
+class TestDirtyRetryScheduling:
+    """上传 dirty 悬空兜底：被抑制/初始同步未完成/网络失败后必须安排重试。
+
+    背景：用户启用插件组件写下的墓碑（LWW 删除标记）在防抖上传被拦截或
+    上传失败后滞留本地，云端旧 live 条目在多设备 LWW 合并时胜出，插件
+    组件「启动后被自动禁用」反复复发。修复要求三类悬空都有重试出口。
+    """
+
+    @pytest.fixture
+    def svc(self, reset_sync_service):
+        svc = reset_sync_service
+        svc._token = "valid_token"
+        svc._owner = "test_user"
+        svc._upload_retry_failures = 0
+        svc._initial_sync_retry_count = 0
+        for attr in ("_upload_retry_timer", "_initial_sync_retry_timer"):
+            t = getattr(svc, attr, None)
+            if t is not None:
+                t.stop()
+            setattr(svc, attr, None)
+        return svc
+
+    def test_suppressed_debounce_schedules_upload_retry(self, svc):
+        """抑制窗口内防抖到期 → 调度上传重试（修复前直接丢弃 dirty）"""
+        svc._state = "idle"
+        svc._suppress_until = time.time() + 60
+        svc._config_dirty = True
+        svc._on_debounce_timeout()
+        assert svc._upload_retry_timer is not None and svc._upload_retry_timer.isActive()
+
+    def test_initial_incomplete_schedules_initial_sync_retry(self, svc):
+        """初始同步未完成时防抖到期 → 调度初始同步重试（修复前丢弃 dirty）"""
+        svc._state = "idle"
+        svc._initial_sync_completed = False
+        svc._suppress_until = 0.0
+        svc._config_dirty = True
+        svc._on_debounce_timeout()
+        assert svc._initial_sync_retry_timer is not None and svc._initial_sync_retry_timer.isActive()
+
+    def test_upload_failure_reschedules_retry(self, svc):
+        """_do_upload 部分失败 → dirty 回滚 + 失败计数递增 + 安排重试"""
+        svc._state = "idle"
+        svc._initial_sync_completed = True
+        svc._config_dirty = True
+        with patch.object(svc, "_sync_token", return_value=True), patch(
+            "app.core.sync.config_sync.httpx.Client"
+        ) as mock_client_cls, patch.object(svc, "_upload_unit", return_value=False):
+            mock_client = MagicMock()
+            mock_client_cls.return_value.__enter__.return_value = mock_client
+            assert svc._do_upload() is False
+        assert svc._config_dirty is True
+        assert svc._upload_retry_failures == 1
+        assert svc._upload_retry_timer is not None and svc._upload_retry_timer.isActive()
+
+    def test_upload_exception_restores_dirty(self, svc):
+        """上传抛超时异常 → dirty 恢复（修复前异常路径 dirty 直接丢失）"""
+        svc._state = "idle"
+        svc._initial_sync_completed = True
+        svc._config_dirty = True
+        svc._custom_dirty = True
+        with patch.object(svc, "_sync_token", return_value=True), patch(
+            "app.core.sync.config_sync.httpx.Client"
+        ) as mock_client_cls, patch.object(svc, "_upload_unit", side_effect=httpx.TimeoutException("t")):
+            mock_client = MagicMock()
+            mock_client_cls.return_value.__enter__.return_value = mock_client
+            assert svc._do_upload() is False
+        assert svc._config_dirty is True
+        assert svc._custom_dirty is True
+        assert svc._upload_retry_failures == 1
+        assert svc._upload_retry_timer is not None and svc._upload_retry_timer.isActive()
+
+    def test_upload_success_resets_failures(self, svc):
+        """上传全部成功 → 失败计数归零（退避复位）"""
+        svc._state = "idle"
+        svc._initial_sync_completed = True
+        svc._config_dirty = True
+        svc._upload_retry_failures = 2
+        with patch.object(svc, "_sync_token", return_value=True), patch(
+            "app.core.sync.config_sync.httpx.Client"
+        ) as mock_client_cls, patch.object(svc, "_upload_unit", return_value=True):
+            mock_client = MagicMock()
+            mock_client_cls.return_value.__enter__.return_value = mock_client
+            assert svc._do_upload() is True
+        assert svc._upload_retry_failures == 0
+
+    def test_fire_upload_retry_without_dirty_resets_failures(self, svc):
+        """重试触发时已无脏标记 → 清零失败计数且不再上传"""
+        svc._state = "idle"
+        svc._config_dirty = False
+        svc._custom_dirty = False
+        svc._records_dirty = False
+        svc._ext_dirty = {}
+        svc._upload_retry_failures = 3
+        svc._fire_upload_retry()
+        assert svc._upload_retry_failures == 0
+
+    def test_fire_upload_retry_disabled_noop(self, svc):
+        """disabled 状态下重试触发 → 空操作不启动上传"""
+        svc._state = "disabled"
+        svc._config_dirty = True
+        svc._fire_upload_retry()
+        assert svc._state == "disabled"
+
+    def test_initial_sync_retry_bounded(self, svc):
+        """初始同步重试计数达上限后不再调度新计时"""
+        from app.core.sync.config_sync import _INITIAL_SYNC_RETRY_MAX
+
+        svc._state = "idle"
+        svc._initial_sync_completed = False
+        svc._initial_sync_retry_count = _INITIAL_SYNC_RETRY_MAX
+        svc._schedule_initial_sync_retry()
+        assert svc._initial_sync_retry_timer is None or not svc._initial_sync_retry_timer.isActive()
+
+    def test_initial_sync_retry_tick_dedup_while_active(self, svc):
+        """重试等待期间重复调度 → 不重启计时器、不重复消耗计数"""
+        svc._state = "idle"
+        svc._initial_sync_completed = False
+        svc._schedule_initial_sync_retry()
+        assert svc._initial_sync_retry_count == 1
+        svc._schedule_initial_sync_retry()
+        assert svc._initial_sync_retry_count == 1  # 等待中不递增
+
+
+# =============================================================================
+# 孤儿种子 vs 墓碑：_apply_config_merge 端到端重放（2026-11-06 污染场景）
+# =============================================================================
+
+class TestOrphanSeedTombstoneDefense:
+    """完整合并链路重放：本地孤儿元素（数组有、条目表无）+ 抬钟 seed，
+    不得压过远端显式墓碑。
+
+    重放 2026-11-02 污染：mading 墓碑 t=1917 已在云端，另一实例以
+    SyncMeta 为空的状态合并，seed_missing 在 observe_clock 之后打
+    t=1949 的种子 live → 修复前种子胜 → system-tools:tools 复活并被
+    上传，全网工具组件被禁。
+    """
+
+    def test_orphan_seed_loses_to_tombstone(self, reset_sync_service, tmp_path):
+        svc = reset_sync_service
+        svc._state = "idle"
+        svc._config_path = tmp_path / "app.config"
+        svc._backup_path = tmp_path / "app.config.pre_bind"
+        # 合并尾部回写记账器：置空避免污染全局 recorder 单例状态
+        svc._meta_recorder = None
+        svc._backup_local_unit = lambda *_a, **_k: None
+        # 合并尾部会 emit 主线程重载：断开防真实 Settings 被测试数据覆盖
+        svc._reloadSettings.disconnect()
+        try:
+            local = {
+                "Plugin": {"DisabledComponents": ["system-tools:tools"]},
+                "System": {"SyncMeta": json.dumps({"version": 1, "clock": 700, "entries": {}})},
+            }
+            svc._config_path.write_text(json.dumps(local), encoding="utf-8")
+            remote_entry_key = 'Plugin.DisabledComponents."system-tools:tools"'
+            remote = {
+                "Plugin": {"DisabledComponents": []},
+                "System": {"SyncMeta": json.dumps({
+                    "version": 1,
+                    "clock": 1948,
+                    "entries": {remote_entry_key: {"h": "elem", "t": 1917, "d": True}},
+                })},
+            }
+            svc._apply_config_merge(json.dumps(remote).encode("utf-8"))
+            merged = json.loads(svc._config_path.read_text(encoding="utf-8"))
+            assert "system-tools:tools" not in merged["Plugin"]["DisabledComponents"], (
+                "孤儿元素不得在合并后复活"
+            )
+            meta = json.loads(merged["System"]["SyncMeta"])
+            entry = meta["entries"].get(remote_entry_key)
+            assert entry is not None and entry.get("d") is True, "墓碑必须保留在条目表"
+        finally:
+            svc._reloadSettings.connect(svc._reload_settings_on_main_thread)
+
+
+# =============================================================================
+# 13. 双开互斥 + 记账抑制 — 多实例共用同一数据目录的防护
+# =============================================================================
+
+class TestSyncOwnerLock:
+    """同一数据目录只允许一个进程启用云同步（OS 级文件锁）"""
+
+    def test_second_owner_cannot_acquire(self, tmp_path):
+        from app.core.sync.config_sync import _SyncOwnerLock
+
+        first = _SyncOwnerLock(tmp_path / "owner.lock")
+        second = _SyncOwnerLock(tmp_path / "owner.lock")
+        try:
+            assert first.acquire() is True
+            assert second.acquire() is False, "另一持有者存在时不得重复抢锁"
+        finally:
+            first.release()
+            second.release()
+
+    def test_release_allows_takeover(self, tmp_path):
+        from app.core.sync.config_sync import _SyncOwnerLock
+
+        first = _SyncOwnerLock(tmp_path / "owner.lock")
+        second = _SyncOwnerLock(tmp_path / "owner.lock")
+        try:
+            assert first.acquire() is True
+            assert second.acquire() is False
+            first.release()
+            assert second.acquire() is True, "主实例退场后必须能接棒"
+        finally:
+            first.release()
+            second.release()
+
+    def test_acquire_is_idempotent(self, tmp_path):
+        from app.core.sync.config_sync import _SyncOwnerLock
+
+        lock = _SyncOwnerLock(tmp_path / "owner.lock")
+        try:
+            assert lock.acquire() is True
+            assert lock.acquire() is True, "本进程重复 enable 不应被判成他人占用"
+        finally:
+            lock.release()
+
+
+class TestEnableOwnerGuard:
+    """enable() 被其他实例占着时不启动任何同步链路"""
+
+    @pytest.fixture
+    def svc(self, reset_sync_service):
+        return reset_sync_service
+
+    def test_enable_refused_when_other_instance_owns(self, svc, tmp_path):
+        from app.core.sync.config_sync import _SyncOwnerLock
+
+        other = _SyncOwnerLock(tmp_path / "oauth-owner.lock")
+        assert other.acquire() is True
+        svc._owner_lock = _SyncOwnerLock(tmp_path / "oauth-owner.lock")
+        try:
+            with patch.object(svc, "_start_watching") as mock_watch, patch.object(
+                svc, "_start_polling"
+            ) as mock_poll, patch.object(svc, "_schedule_enable_retry") as mock_retry:
+                svc.enable("token", "owner")
+            assert svc._state == "disabled"
+            assert mock_watch.called is False
+            assert mock_poll.called is False
+            assert mock_retry.called is True, "被占用时必须安排接管重试"
+        finally:
+            other.release()
+
+    def test_enable_acquires_and_disable_releases(self, svc):
+        with patch.object(svc, "_start_watching"), patch.object(
+            svc, "_start_polling"
+        ), patch.object(svc, "_initial_sync"):
+            svc.enable("token", "owner")
+            assert svc._owner_lock._fd is not None, "enable 成功后必须持有同步锁"
+            svc.disable()
+            assert svc._owner_lock._fd is None, "disable 必须释放同步锁"
+
+    def test_retry_waits_while_owned(self, svc, tmp_path):
+        from app.core.sync.config_sync import _SyncOwnerLock
+
+        other = _SyncOwnerLock(tmp_path / "oauth-owner.lock")
+        assert other.acquire() is True
+        svc._owner_lock = _SyncOwnerLock(tmp_path / "oauth-owner.lock")
+        try:
+            with patch.object(svc, "_schedule_enable_retry") as mock_retry, patch.object(
+                svc, "resume_if_bound"
+            ) as mock_resume:
+                svc._retry_enable()
+            assert mock_retry.called is True, "主实例仍持锁时必须继续排队"
+            assert mock_resume.called is False, "持锁期间不得去刷 token"
+        finally:
+            other.release()
+
+    def test_retry_hands_over_when_free(self, svc):
+        with patch.object(svc, "resume_if_bound") as mock_resume:
+            svc._retry_enable()
+        assert mock_resume.called is True, "锁空出来后必须重新取 token 接管"
+
+
+class TestRecorderSuppression:
+    """同步应用链的写入不能被记账成本机用户改动"""
+
+    @pytest.fixture
+    def svc(self, reset_sync_service):
+        return reset_sync_service
+
+    def test_suppress_recorder_blocks_touch(self, svc):
+        from app.core.sync.meta_recorder import SyncMetaRecorder
+
+        rec = SyncMetaRecorder("dev")
+        svc._meta_recorder = rec
+        with svc._suppress_recorder():
+            rec.on_item_changed("UI.ThemeStyle", "lumia", "cyberpunk")
+        assert rec.session_touched() == set()
+        assert rec.entries().get("UI.ThemeStyle") is None
+
+    def test_suppress_recorder_noop_without_recorder(self, svc):
+        svc._meta_recorder = None
+        with svc._suppress_recorder():
+            pass  # 不抛异常即可
+
+    def test_upload_commit_clears_session_touched(self, svc):
+        from app.core.sync.meta_recorder import SyncMetaRecorder
+
+        rec = SyncMetaRecorder("dev")
+        rec.on_item_changed("UI.ThemeStyle", "lumia", "cyberpunk")
+        assert rec.session_touched() == {"UI.ThemeStyle"}
+        svc._meta_recorder = rec
+        svc._commit_unit_state("app.config", "sha1", "hash1")
+        assert rec.session_touched() == set(), "上传成功后不得继续抬高同一批条目"
+
+    def test_other_unit_commit_keeps_session_touched(self, svc):
+        from app.core.sync.meta_recorder import SyncMetaRecorder
+
+        rec = SyncMetaRecorder("dev")
+        rec.on_item_changed("UI.ThemeStyle", "lumia", "cyberpunk")
+        svc._meta_recorder = rec
+        svc._commit_unit_state("user-custom", "sha1", "hash1")
+        assert rec.session_touched() == {"UI.ThemeStyle"}

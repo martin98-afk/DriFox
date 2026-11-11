@@ -81,8 +81,8 @@ class SqliteStorageEngine:
     def get_sessions(self, limit: int = 100, offset: int = 0):
         return self._store.get_sessions(limit=limit, offset=offset)
 
-    def get_sessions_lightweight(self, limit: int = 100, offset: int = 0):
-        return self._store.get_sessions_lightweight(limit=limit, offset=offset)
+    def get_sessions_lightweight(self, limit: int = 100, offset: int = 0, project: str | None = None):
+        return self._store.get_sessions_lightweight(limit=limit, offset=offset, project=project)
 
     def get_sessions_by_team_run_id(self, run_id: str):
         return self._store.get_sessions_by_team_run_id(run_id)

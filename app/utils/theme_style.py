@@ -33,7 +33,7 @@
 """
 
 import inspect
-from typing import Any, Callable
+from typing import Any, Callable, Optional
 
 from PySide6.QtWidgets import QWidget
 from loguru import logger
@@ -130,6 +130,11 @@ def apply_theme_qss(widget: Any, *, ensure_colors: bool = True) -> bool:
     if not qss:
         return False
     try:
+        # 同串短路：Qt5 对完全相同的串也会重建 QStyleSheetStyle 并 repolish 整棵
+        # 子树。主题派发会对插件卡全树 BFS 重放，其中大量控件的 QSS 并不含主题色
+        # （固定几何/字号），同串重写纯属浪费；多标签时这条链随标签数线性增长。
+        if qss == widget.styleSheet():
+            return False
         widget.setStyleSheet(qss)
     except RuntimeError:
         return False  # C++ 对象已销毁
@@ -173,6 +178,128 @@ def replay_theme_qss(root: Any) -> int:
         except (RuntimeError, AttributeError):
             continue  # C++ 对象已销毁 / 非 QWidget
     return count
+
+
+# ── 外观纪元脏标记（隐藏期不刷、显示时补刷）──────────────────────
+# 登记位：控件上的 Python 属性，值是「该控件最后一次刷到哪个外观纪元」。
+# None / 缺失 = 从未刷过或已置脏。随 C++ 对象销毁自然消失，无全局表。
+_THEME_EPOCH_ATTR = "_drifox_theme_epoch"
+# 每个控件应调用的样式刷新方法名，按优先级探测（插件约定 refresh_style 优先；
+# refresh_theme 排最后——它是宿主窗口的 ThemeManager 协议名，插件内容页历史上
+# 也用过，放末尾兼容但不抢占插件自己的约定）
+_STYLE_METHODS = ("refresh_style", "_apply_latest_theme", "_apply_theme", "_retheme", "refresh_theme")
+
+
+def mark_theme_dirty(widget: Any) -> None:
+    """标记控件外观已落后（隐藏期用）：不刷，只让纪元落空
+
+    同时挂上「显示即补刷」事件过滤器——补刷不再依赖每个宿主记得在
+    显示/切页/挂载点手动调 ``ensure_theme_fresh``。宿主该调的照调（更早，
+    在布局完成前就换好色），这里只是兜底网。
+    """
+    if widget is None:
+        return
+    try:
+        setattr(widget, _THEME_EPOCH_ATTR, None)
+    except Exception:
+        return
+    try:
+        widget.installEventFilter(_show_refresh_filter())
+    except (RuntimeError, AttributeError, TypeError):
+        pass
+
+
+_SHOW_REFRESH_FILTER: Any = None
+
+
+def _show_refresh_filter():
+    """模块级单例事件过滤器：只在 Show 时对「纪元落后」的控件补刷
+
+    为什么单例而不是每个控件建一个：PyQt 的 installEventFilter 不转移所有权，
+    过滤器对象由本模块持有即可，控件销毁时 Qt 自动摘除，无需清理表。
+    """
+    global _SHOW_REFRESH_FILTER
+    if _SHOW_REFRESH_FILTER is not None:
+        return _SHOW_REFRESH_FILTER
+    from PySide6.QtCore import QEvent, QObject
+
+    class _ShowRefreshFilter(QObject):
+        def eventFilter(self, obj, event):  # noqa: N802 - Qt 命名
+            if event.type() == QEvent.Show:
+                try:
+                    # 纪元落后才真刷；已是最新时只是一次属性比对
+                    ensure_theme_fresh(obj)
+                except RuntimeError:
+                    pass  # C++ 对象已销毁
+            return False  # 不拦截，事件照常投递
+
+    _SHOW_REFRESH_FILTER = _ShowRefreshFilter()
+    return _SHOW_REFRESH_FILTER
+
+
+def _style_method(widget: Any) -> Optional[Callable[..., Any]]:
+    """探测控件的样式刷新方法（PyQt5 已销毁 wrapper 上 getattr 也抛 RuntimeError）"""
+    for name in _STYLE_METHODS:
+        try:
+            method = getattr(widget, name, None)
+        except RuntimeError:
+            return None  # C++ 对象已销毁
+        if callable(method):
+            return method
+    return None
+
+
+def ensure_theme_fresh(widget: Any) -> bool:
+    """确保控件已刷到当前外观纪元（显示 / 切页 / 挂载补刷唯一入口）
+
+    与 ``mark_theme_dirty`` 成对：主题切换时隐藏的页面只置脏，等真正可见时
+    走这里补一次。这既避免隐藏页白刷（主题切换成本从「全部插件页」降到
+    「可见插件页」），又保证打开时 100% 是新主题（不再依赖插件自己在
+    ``show_card()`` 里记得刷）。
+
+    Returns:
+        True 表示本次确实执行了刷新；False 表示已是最新 / 无刷新方法 / 已销毁。
+    """
+    if widget is None:
+        return False
+    try:
+        from app.utils.theme_refresh import ThemeRefreshCoordinator
+
+        epoch = ThemeRefreshCoordinator.get_appearance_epoch()
+    except Exception:
+        return False
+    try:
+        if getattr(widget, _THEME_EPOCH_ATTR, None) == epoch:
+            return False
+    except RuntimeError:
+        return False  # C++ 对象已销毁
+    method = _style_method(widget)
+    try:
+        if callable(method):
+            method()
+        replay_theme_qss(widget)
+    except RuntimeError:
+        return False
+    except Exception as e:
+        logger.warning(f"[theme_style] 补刷失败 {type(widget).__name__}: {e}")
+        return False
+    try:
+        setattr(widget, _THEME_EPOCH_ATTR, epoch)
+    except Exception:
+        pass
+    return True
+
+
+def stamp_theme_epoch(widget: Any) -> None:
+    """把控件标记为「已是当前外观」（可见页面刷完后调用）"""
+    if widget is None:
+        return
+    try:
+        from app.utils.theme_refresh import ThemeRefreshCoordinator
+
+        setattr(widget, _THEME_EPOCH_ATTR, ThemeRefreshCoordinator.get_appearance_epoch())
+    except Exception:
+        pass
 
 
 class ThemeStyleBinder:

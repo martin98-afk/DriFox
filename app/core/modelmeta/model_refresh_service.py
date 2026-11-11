@@ -29,14 +29,19 @@ import threading
 import time
 from copy import deepcopy
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple, Tuple
 
 from loguru import logger
 from PySide6.QtCore import QObject, Qt, QTimer, Signal
 
 # 刷新周期（秒）与 tick 粒度（毫秒）
 REFRESH_INTERVAL_S = 24 * 3600
+# 健康检查周期（秒）：聊天端点 ping 兕底探测，1h 一次（列表刷新仍是 24h）
+HEALTH_INTERVAL_S = 3600
 TICK_MS = 5 * 60 * 1000
+# 探活候选模型数：最便宜的模型偶发不可用（下线 / 限流 / 网关路由缺失），
+# 只试一个会把整家误判成红灯；按价格升序备 3 个，命中一个即停
+PROBE_MODEL_LIMIT = 3
 
 # 配置键（与服务商配置同键名，随 saved_providers 落盘）
 KEY_AUTO_REFRESH = "自动刷新模型"
@@ -44,6 +49,8 @@ KEY_HEALTH_CHECK = "健康检查"
 KEY_MODELS = "模型列表"
 KEY_LAST_REFRESH = "上次模型刷新"
 KEY_REFRESH_STATUS = "模型刷新状态"
+KEY_HEALTH_TS = "上次健康检查"
+KEY_STATUS_TS = "状态更新时间"
 
 # 状态取值（供 UI 状态点映射）
 STATUS_OK = "ok"
@@ -91,8 +98,11 @@ def now_ts_str() -> str:
 class ModelRefreshService(QObject):
     """模型列表定时刷新（进程级单例，风格对齐 UsageService）。"""
 
-    # (config_id, ok, status, models) — 刷新完成（主线程发射；models 供落盘合并）
-    refresh_finished = Signal(str, bool, str, list)
+    # (config_id, 最终状态, 列表抓取状态, models) — 主线程发射
+    # status_models 非空表示本轮拉了列表（落盘侧据此写「上次模型刷新」）
+    refresh_finished = Signal(str, str, str, list)
+    # (config_id, status) — 实时校准（chat_worker 后台线程回写请求结果）
+    health_reported = Signal(str, str)
 
     _instance: Optional["ModelRefreshService"] = None
 
@@ -119,6 +129,8 @@ class ModelRefreshService(QObject):
         # 默认 AutoConnection 在同线程时是直连（会变成后台线程里落盘），故显式声明
         # QueuedConnection 保证落盘恒在主线程（QConfig/qfluentwidgets 非线程安全）。
         self.refresh_finished.connect(self._on_refresh_result, Qt.QueuedConnection)
+        # 实时校准：chat_worker 后台线程回写请求结果（queued → 主线程落盘）
+        self.health_reported.connect(self._on_health_reported, Qt.QueuedConnection)
 
     # ══════════════════════════════════════════════════════════
     # 注册 / 生命周期（主线程）
@@ -198,6 +210,18 @@ class ModelRefreshService(QObject):
             return True
         return (now - last) >= interval_s
 
+    @staticmethod
+    def is_health_due(info: Dict[str, Any], now: Optional[float] = None, interval_s: int = HEALTH_INTERVAL_S) -> bool:
+        """健康检查是否到期（独立计时键「上次健康检查」，1h 周期）。
+
+        与「上次模型刷新」解耦：手动拉列表不再推迟健康探测。
+        """
+        now = time.time() if now is None else now
+        last = parse_refresh_ts((info or {}).get(KEY_HEALTH_TS))
+        if last <= 0:
+            return True
+        return (now - last) >= interval_s
+
     # ══════════════════════════════════════════════════════════
     # tick 链（主线程）
     # ══════════════════════════════════════════════════════════
@@ -213,7 +237,7 @@ class ModelRefreshService(QObject):
             self._timer.start(TICK_MS)
 
     def _on_tick(self) -> None:
-        """tick：把到期条目派给后台线程，然后续下一次 tick。"""
+        """tick：把到期条目派给后台线程（列表/健康双通道），然后续下一次 tick。"""
         if self._stopped:
             return
         now = time.time()
@@ -222,14 +246,16 @@ class ModelRefreshService(QObject):
             if info is None:
                 self._active.discard(config_id)
                 continue
-            if not self.is_due(info, now):
+            do_models = bool(info.get(KEY_AUTO_REFRESH)) and self.is_due(info, now)
+            do_health = bool(info.get(KEY_HEALTH_CHECK)) and self.is_health_due(info, now)
+            if not (do_models or do_health):
                 continue
             if config_id in self._in_flight:
                 continue  # 并发去重：上一轮还没回来
             self._in_flight.add(config_id)
             threading.Thread(
                 target=self._fetch_one,
-                args=(config_id, dict(info)),
+                args=(config_id, dict(info), do_models, do_health),
                 daemon=True,
                 name=f"model-refresh-{config_id}",
             ).start()
@@ -239,44 +265,249 @@ class ModelRefreshService(QObject):
     # 后台线程（⚠ 只做 HTTP + 内存 + emit，禁碰 cfg / QTimer / QWidget）
     # ══════════════════════════════════════════════════════════
 
-    def _fetch_one(self, config_id: str, info: Dict[str, Any]) -> None:
-        """后台抓取单条：hook 优先 → REST 兜底；结果经信号回主线程。"""
+    def _fetch_one(self, config_id: str, info: Dict[str, Any], do_models: bool = False, do_health: bool = False) -> None:
+        """后台抓取单条：按需执行列表抓取与健康探测；结果经信号回主线程。"""
         models: List[str] = []
-        status = STATUS_UNREACHABLE
+        status_models = ""
+        status_final = ""
         try:
-            provider_name = str(info.get("provider_name", "") or "")
-            hook = self._resolve_models_hook(provider_name)
-            if hook is not None:
-                try:
-                    result = hook(dict(info)) or []
-                    models = [str(m) for m in result if m]
-                    status = STATUS_OK if models else STATUS_EMPTY
-                except Exception as e:
-                    logger.info(f"[ModelRefresh] models_hook 失败 config_id={config_id}: {e}")
-                    status = STATUS_UNREACHABLE
-            else:
-                from app.widgets.cards.settings.provider_edit_card import fetch_provider_models
-
-                api_url = str(info.get("API_URL", "") or "")
-                api_key = str(info.get("API_KEY", "") or "")
-                if not api_url:
-                    status = STATUS_UNREACHABLE
-                else:
-                    filtered, _removed, status = fetch_provider_models(
-                        api_url,
-                        api_key,
-                        provider_name,
-                        str(info.get("认证方式", "") or "bearer"),
-                    )
-                    models = list(filtered)
+            if do_models:
+                models, status_models = self._fetch_models(info, config_id)
+            if do_health:
+                status_final = self._probe_health(info, config_id)
         except Exception as e:
             logger.warning(f"[ModelRefresh] 刷新异常 config_id={config_id}: {e}")
-            status = STATUS_UNREACHABLE
+            if do_models and not status_models:
+                status_models = STATUS_UNREACHABLE
+            if do_health and not status_final:
+                status_final = STATUS_UNREACHABLE
         finally:
             self._in_flight.discard(config_id)
+        if not status_final:
+            status_final = status_models or STATUS_UNREACHABLE
+        self.refresh_finished.emit(config_id, status_final, status_models, list(models))
 
-        ok = status in (STATUS_OK, STATUS_EMPTY)
-        self.refresh_finished.emit(config_id, ok, status, list(models))
+    def _fetch_models(self, info: Dict[str, Any], config_id: str) -> Tuple[List[str], str]:
+        """拉模型列表（hook 优先 → REST 兜底），返回 (models, status)。"""
+        provider_name = str(info.get("provider_name", "") or "")
+        hook = self._resolve_models_hook(provider_name)
+        if hook is not None:
+            try:
+                result = hook(dict(info)) or []
+                models = [str(m) for m in result if m]
+                return models, (STATUS_OK if models else STATUS_EMPTY)
+            except Exception as e:
+                logger.info(f"[ModelRefresh] models_hook 失败 config_id={config_id}: {e}")
+                return [], STATUS_UNREACHABLE
+        from app.widgets.cards.settings.provider_edit_card import fetch_provider_models
+
+        api_url = str(info.get("API_URL", "") or "")
+        if not api_url:
+            return [], STATUS_UNREACHABLE
+        filtered, _removed, status = fetch_provider_models(
+            api_url,
+            str(info.get("API_KEY", "") or ""),
+            provider_name,
+            str(info.get("认证方式", "") or "bearer"),
+        )
+        return list(filtered), status
+
+    @staticmethod
+    def _status_from_http(code: int) -> str:
+        """HTTP 状态码 → 健康状态。402 计入鉴权失败（余额属凭据层）。"""
+        if code in (401, 403, 402):
+            return STATUS_AUTH_FAILED
+        return STATUS_UNREACHABLE
+
+    @staticmethod
+    def _pick_probe_models(info: Dict[str, Any], limit: int = PROBE_MODEL_LIMIT) -> List[str]:
+        """探活候选模型：「模型列表」中输入价（$/M，models.dev cost.input）升序取前 limit 个。
+
+        ping 只需验证凭据/端点/路由通，用最便宜的模型把探测成本压到最低；
+        免费（input=0）天然胜出。单个最便宜模型偶发不可用（下线 / 限流 /
+        网关路由缺失）会把整家误判红，故按价格升序多备几个候选，探测侧
+        依次回退、命中即停。候选必须来自「模型列表」（网关按模型路由，
+        列表外模型会 404 误报）。无价格数据 / 插件未声明 models_dev_id /
+        无列表 → 回退「模型名称」（行为不变）。只读 models.dev 本地缓存
+        （allow_network=False，毫秒级，任意线程安全）。
+        """
+        current = str(info.get("模型名称", "") or "").strip()
+        models = info.get(KEY_MODELS)
+        if not isinstance(models, list) or not models:
+            return [current] if current else []
+        try:
+            from app.core.modelmeta.models_dev_sync import load_dynamic_models
+            from app.plugins.registries.provider_registry import ProviderRegistry
+
+            p = ProviderRegistry.get_instance().get(str(info.get("provider_name", "") or ""))
+            dev_id = str(getattr(p, "models_dev_id", "") or "") if p is not None else ""
+            if not dev_id:
+                return [current] if current else []
+            result = load_dynamic_models(allow_network=False)
+            partitioned = getattr(result, "model_capabilities_partitioned", None) or {}
+            per_provider = partitioned.get(dev_id) or {}
+            priced: List[Tuple[float, int, str]] = []
+            for order, m in enumerate(models):
+                name = str(m or "").strip()
+                if not name:
+                    continue
+                caps = per_provider.get(name) or {}
+                price = (caps.get("cost") or {}).get("input")
+                if not isinstance(price, (int, float)):
+                    continue  # 无价格数据：不参与排序（None 不误当 0 价）
+                priced.append((float(price), order, name))
+            if not priced:
+                return [current] if current else []
+            priced.sort(key=lambda item: (item[0], item[1]))
+            picked: List[str] = []
+            for _price, _order, name in priced:
+                if name not in picked:
+                    picked.append(name)
+                if len(picked) >= max(1, int(limit)):
+                    break
+            return picked
+        except Exception:
+            return [current] if current else []
+
+    def _probe_health(self, info: Dict[str, Any], config_id: str) -> str:
+        """对聊天端点发 max_tokens=1 真实请求探测连通性。
+
+        探测优先级：health_probe（插件内换凭据真探测）→ models_hook（列表
+        语义降级）→ REST（bearer/anthropic/none 直连）。
+        探活模型按「模型列表」输入价升序取前 PROBE_MODEL_LIMIT 个
+        （_pick_probe_models），逐个探测：任一返回 ok 即停、不再试剩余；
+        auth_failed 也立即停（凭据/余额问题换模型无意义）。
+        钩子分支以「探活模型」键逐个注入 config 供插件消费。
+        bce 签名类无法本地构造签名 → 直接 unreachable。
+        """
+        provider_name = str(info.get("provider_name", "") or "")
+        probe_models = self._pick_probe_models(info)
+        probe_hook = self._resolve_health_probe_hook(provider_name)
+        if probe_hook is not None:
+            return self._probe_with_hook(probe_hook, info, probe_models, config_id)
+        hook = self._resolve_models_hook(provider_name)
+        if hook is not None:
+            try:
+                result = hook(dict(info)) or []
+                return STATUS_OK if result else STATUS_EMPTY
+            except Exception as e:
+                logger.info(f"[ModelRefresh] hook 健康探测失败 config_id={config_id}: {e}")
+                return STATUS_UNREACHABLE
+
+        auth = str(info.get("认证方式", "") or "bearer").lower()
+        if auth == "bce":
+            return STATUS_UNREACHABLE
+        api_url = str(info.get("API_URL", "") or "").rstrip("/")
+        api_key = str(info.get("API_KEY", "") or "")
+        if not api_url or not probe_models:
+            return STATUS_UNREACHABLE
+        if not api_key and auth != "none":
+            return STATUS_UNREACHABLE
+        return self._probe_rest(api_url, api_key, auth, probe_models)
+
+    def _probe_with_hook(
+        self, probe_hook, info: Dict[str, Any], probe_models: List[str], config_id: str
+    ) -> str:
+        """逐个候选模型调插件 health_probe：ok 即停，auth_failed 亦停（凭据问题换模型无意义）。"""
+        last_status = STATUS_UNREACHABLE
+        for model in probe_models or [""]:
+            probe_info = dict(info)
+            if model:
+                probe_info["探活模型"] = model
+            try:
+                status = str(probe_hook(probe_info) or "").strip()
+            except Exception as e:
+                logger.info(f"[ModelRefresh] health_probe 钩子失败 config_id={config_id}: {e}")
+                return STATUS_UNREACHABLE
+            if status not in (STATUS_OK, STATUS_EMPTY, STATUS_AUTH_FAILED, STATUS_UNREACHABLE):
+                status = STATUS_UNREACHABLE
+            if status == STATUS_OK:
+                return STATUS_OK
+            if status == STATUS_AUTH_FAILED:
+                return STATUS_AUTH_FAILED
+            last_status = status
+        return last_status
+
+    def _probe_rest(self, api_url: str, api_key: str, auth: str, probe_models: List[str]) -> str:
+        """逐个候选模型打聊天端点：ok 即停，auth_failed 亦停。"""
+        import requests
+
+        headers: Dict[str, str] = {}
+        if auth == "bearer":
+            headers["Authorization"] = f"Bearer {api_key}"
+        elif auth == "anthropic":
+            headers["x-api-key"] = api_key
+            headers["anthropic-version"] = "2023-06-01"
+
+        last_status = STATUS_UNREACHABLE
+        for model in probe_models:
+            status = self._probe_rest_model(api_url, auth, headers, model)
+            if status == STATUS_OK:
+                return STATUS_OK
+            if status == STATUS_AUTH_FAILED:
+                return STATUS_AUTH_FAILED
+            last_status = status
+        return last_status
+
+    def _probe_rest_model(self, api_url: str, auth: str, headers: Dict[str, str], model: str) -> str:
+        """单模型探测（双候选路径 + max_completion_tokens 兼容重试），返回四态之一。"""
+        import requests
+
+        body: Dict[str, Any] = {
+            "model": model,
+            "messages": [{"role": "user", "content": "ping"}],
+            "max_tokens": 1,
+            "stream": False,
+        }
+        if auth == "anthropic":
+            urls = [f"{api_url}/v1/messages" if not api_url.endswith("/v1") else f"{api_url}/messages"]
+        else:
+            urls = [f"{api_url}/chat/completions"]
+            if not api_url.endswith("/v1"):
+                urls.append(f"{api_url}/v1/chat/completions")
+
+        for url in urls:
+            try:
+                resp = requests.post(url, headers=headers, json=body, timeout=15)
+                if resp.status_code == 200:
+                    return STATUS_OK
+                if resp.status_code == 400 and "max_completion_tokens" in (resp.text or ""):
+                    retry_body = dict(body)
+                    retry_body.pop("max_tokens", None)
+                    retry_body["max_completion_tokens"] = 1
+                    try:
+                        resp2 = requests.post(url, headers=headers, json=retry_body, timeout=15)
+                        if resp2.status_code == 200:
+                            return STATUS_OK
+                        return self._status_from_http(resp2.status_code)
+                    except Exception:
+                        return STATUS_UNREACHABLE
+                if resp.status_code in (401, 403, 402):
+                    return self._status_from_http(resp.status_code)  # 鉴权失败换路径无意义
+                continue  # 404/5xx 等：试下一个候选路径
+            except Exception:
+                continue
+        return STATUS_UNREACHABLE
+
+    @staticmethod
+    def _resolve_health_probe_hook(provider_name: str):
+        """取插件的 capabilities["health_probe"]（签名 (config) -> status，无则 None）。
+
+        OAuth 插件类用它在插件内换短效凭据后对聊天端点发真探测；
+        优先级高于 models_hook（后者只能验证列表可达性）。
+        """
+        if not provider_name:
+            return None
+        try:
+            from app.plugins.registries.provider_registry import ProviderRegistry
+
+            p = ProviderRegistry.get_instance().get(provider_name)
+            if p is None:
+                return None
+            hook = p.capabilities.get("health_probe")
+            return hook if callable(hook) else None
+        except Exception:
+            return None
 
     @staticmethod
     def _resolve_models_hook(provider_name: str):
@@ -308,11 +539,12 @@ class ModelRefreshService(QObject):
             return False
         return is_default_model_safe(str(info.get("模型名称", "") or ""), models)
 
-    def _on_refresh_result(self, config_id: str, ok: bool, status: str, models: List[str]) -> None:
+    def _on_refresh_result(self, config_id: str, status_final: str, status_models: str, models: List[str]) -> None:
         """主线程槽：写状态 / 静默合并 / 落盘 / 通知窗口重载。
 
-        本方法必须在主线程（`refresh_finished` 用 QueuedConnection 投递，
-        见 `__init__`）。
+        「上次模型刷新」只在真拉了列表时写（status_models 非空），
+        健康探测不再混用列表计时键。
+        本方法必须在主线程（refresh_finished 用 QueuedConnection 投递）。
         """
         info = self._configs.get(config_id)
         if info is None:
@@ -330,11 +562,15 @@ class ModelRefreshService(QObject):
 
             updated = deepcopy(saved)
             entry = updated[config_id]
-            entry[KEY_LAST_REFRESH] = now_ts_str()
-            entry[KEY_REFRESH_STATUS] = status if not ok else (STATUS_OK if models else STATUS_EMPTY)
-            if ok and models and self._should_merge(current, models):
-                entry[KEY_MODELS] = list(models)
-                logger.info(f"[ModelRefresh] 静默合并模型列表 config_id={config_id}（{len(models)} 个）")
+            if status_models:  # 本轮拉了列表：更新列表计时 + 按需合并
+                entry[KEY_LAST_REFRESH] = now_ts_str()
+                if models and self._should_merge(current, models):
+                    entry[KEY_MODELS] = list(models)
+                    logger.info(f"[ModelRefresh] 静默合并模型列表 config_id={config_id}（{len(models)} 个）")
+            if status_final:  # 本轮有探测结果：更新状态两键 + 健康计时
+                entry[KEY_REFRESH_STATUS] = status_final
+                entry[KEY_STATUS_TS] = now_ts_str()
+                entry[KEY_HEALTH_TS] = now_ts_str()
 
             cfg.set(cfg.llm_saved_providers, updated, save=True)
             # 同步进程内快照，下一轮到期判定读到新时间戳
@@ -344,6 +580,41 @@ class ModelRefreshService(QObject):
             self._notify_windows()
         except Exception as e:
             logger.warning(f"[ModelRefresh] 落盘失败 config_id={config_id}: {e}")
+
+    def report_result(self, config_id: str, status: str) -> None:
+        """实时校准入口（chat_worker 后台线程可调）：queued 投递主线程落盘。"""
+        if config_id and status:
+            self.health_reported.emit(str(config_id), str(status))
+
+    def _on_health_reported(self, config_id: str, status: str) -> None:
+        """实时校准落盘（主线程槽）：只写状态两键；状态未变跳过写盘。
+
+        与「健康检查」开关解耦：真实聊天结果是最可信的联通证据，
+        条目存在即写（没开开关的服务商也能点亮状态点）。
+        不碰 KEY_LAST_REFRESH / KEY_HEALTH_TS / KEY_MODELS。
+        """
+        if not config_id or not status:
+            return
+        try:
+            from app.utils.config import Settings
+
+            cfg = Settings.get_instance()
+            saved = cfg.llm_saved_providers.value
+            if not isinstance(saved, dict):
+                return
+            current = saved.get(config_id)
+            if not isinstance(current, dict):
+                return
+            if str(current.get(KEY_REFRESH_STATUS, "") or "") == status:
+                return  # 状态未变：跳过 deepcopy+落盘（多轮对话写放大防线）
+            updated = deepcopy(saved)
+            entry = updated[config_id]
+            entry[KEY_REFRESH_STATUS] = status
+            entry[KEY_STATUS_TS] = now_ts_str()
+            cfg.set(cfg.llm_saved_providers, updated, save=True)
+            self._notify_windows()
+        except Exception as e:
+            logger.warning(f"[ModelRefresh] 实时校准落盘失败 config_id={config_id}: {e}")
 
     def _notify_windows(self) -> None:
         """通知各窗口重载模型配置（刷新列表行副标题 / 选择器）。

@@ -10,10 +10,14 @@ DriFox 的 MCP stdio 连接此前对 command 不做任何校验，直接 spawn �
 本测试锁定 _validate_stdio_config 返回空串=通过、非空串=拒绝原因。
 """
 
+import shutil
+
 import pytest
+
 
 from app.tools.mcp_tools import (
     _normalize_stdio_command_name,
+    _resolve_stdio_command,
     _validate_stdio_config,
 )
 
@@ -149,3 +153,93 @@ class TestRejectedConfigs:
     def test_command_not_str_rejected(self):
         cfg = {"command": 42}
         assert _validate_stdio_config(cfg) != ""
+
+# ═══════════════════════════════════════════════════════════
+# _resolve_stdio_command 跨平台回落
+# ═══════════════════════════════════════════════════════════
+class TestResolveStdioCommand:
+    """`py` 是 Windows Python launcher 专属命令。
+
+    macOS / Linux 上 shutil.which("py") 返回 None，子进程直接
+    [Errno 2] No such file or directory: 'py'（bili-scroll 实测）。
+    回落逻辑只在原命令不可用时介入。
+    """
+
+    def test_non_python_command_untouched(self, monkeypatch):
+        """非 python 家族命令不替用户做主"""
+        assert _resolve_stdio_command("npx", ["-y", "pkg"]) == ("npx", ["-y", "pkg"])
+        assert _resolve_stdio_command("uvx", ["srv"]) == ("uvx", ["srv"])
+
+    def test_empty_command_untouched(self):
+        assert _resolve_stdio_command("", []) == ("", [])
+
+    def test_py_falls_back_and_drops_launcher_version_arg(self, monkeypatch):
+        """py 不存在 → 回落 python3，并剔除 -3"""
+        monkeypatch.setattr(shutil, "which", lambda c: "/usr/bin/python3" if c == "python3" else None)
+        monkeypatch.setattr("app.tools.mcp_tools._is_usable_python", lambda c: True)
+        cmd, args = _resolve_stdio_command("py", ["-3", "server.py"])
+        assert cmd == "python3"
+        assert args == ["server.py"]
+
+    def test_py_falls_back_with_versioned_launcher_arg(self, monkeypatch):
+        monkeypatch.setattr(shutil, "which", lambda c: "/usr/bin/python3" if c == "python3" else None)
+        monkeypatch.setattr("app.tools.mcp_tools._is_usable_python", lambda c: True)
+        assert _resolve_stdio_command("py", ["-3.11", "s.py"]) == ("python3", ["s.py"])
+
+    def test_py_keeps_non_version_first_arg(self, monkeypatch):
+        """首个参数不是 -3/-3.x 时不能误删"""
+        monkeypatch.setattr(shutil, "which", lambda c: "/usr/bin/python3" if c == "python3" else None)
+        monkeypatch.setattr("app.tools.mcp_tools._is_usable_python", lambda c: True)
+        assert _resolve_stdio_command("py", ["server.py"]) == ("python3", ["server.py"])
+
+    def test_usable_command_kept_as_is(self, monkeypatch):
+        """命令存在且能跑 → 原样不动"""
+        monkeypatch.setattr(shutil, "which", lambda c: f"/usr/bin/{c}")
+        monkeypatch.setattr("app.tools.mcp_tools._is_usable_python", lambda c: True)
+        assert _resolve_stdio_command("python3", ["a.py"]) == ("python3", ["a.py"])
+
+    def test_store_stub_skipped(self, monkeypatch):
+        """Windows Store 占位 stub：which 能找到但跑不起来 → 继续回落"""
+        monkeypatch.setattr(shutil, "which", lambda c: f"/usr/bin/{c}")
+        monkeypatch.setattr(
+            "app.tools.mcp_tools._is_usable_python",
+            lambda c: c == "python",
+        )
+        assert _resolve_stdio_command("python3", ["a.py"]) == ("python", ["a.py"])
+
+    def test_no_fallback_available_returns_original(self, monkeypatch):
+        """别名全都不可用 → 原样返回，让上层报出真实错误"""
+        monkeypatch.setattr(shutil, "which", lambda c: None)
+        assert _resolve_stdio_command("py", ["-3", "s.py"]) == ("py", ["-3", "s.py"])
+
+    def test_windows_py_launcher_untouched(self, monkeypatch):
+        """Windows 上 py 存在且可用 → 命令和 -3 都原样保留（Windows 零变化）"""
+        monkeypatch.setattr(shutil, "which", lambda c: f"/usr/bin/{c}")
+        monkeypatch.setattr("app.tools.mcp_tools._is_usable_python", lambda c: True)
+        assert _resolve_stdio_command("py", ["-3", "s.py"]) == ("py", ["-3", "s.py"])
+
+    def test_store_stub_detected_without_executing(self, monkeypatch):
+        """Store 占位 stub 按路径判否，绝不试跑（试跑会弹应用商店）"""
+        from app.tools.mcp_tools import _is_store_stub
+
+        # macOS 上构造 WindowsPath 会抛 UnsupportedOperation，用轻量替身绕开
+        stub = type("P", (), {"__str__": lambda s: "C:/Users/x/AppData/Local/Microsoft/WindowsApps/python3.exe"})()
+        monkeypatch.setattr("app.tools.mcp_tools.os.name", "nt")
+        monkeypatch.setattr("app.tools.mcp_tools.Path.resolve", lambda self: stub)
+        assert _is_store_stub("python3") is True
+
+    def test_non_stub_path_not_flagged(self, monkeypatch):
+        """普通安装路径不应被误判为 stub"""
+        from app.tools.mcp_tools import _is_store_stub
+
+        real = type("P", (), {"__str__": lambda s: "C:/Python314/python.exe"})()
+        monkeypatch.setattr("app.tools.mcp_tools.os.name", "nt")
+        monkeypatch.setattr("app.tools.mcp_tools.Path.resolve", lambda self: real)
+        assert _is_store_stub("python") is False
+
+    def test_store_stub_not_probed_on_macos(self, monkeypatch):
+        """非 Windows 平台不做 stub 判定，避免误伤"""
+        from app.tools.mcp_tools import _is_store_stub
+
+        monkeypatch.setattr("app.tools.mcp_tools.os.name", "posix")
+        assert _is_store_stub("/usr/bin/python3") is False

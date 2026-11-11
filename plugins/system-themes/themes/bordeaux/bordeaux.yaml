@@ -18,6 +18,7 @@ colors:
   text_secondary: rgba(240, 224, 218, 0.72)
   text_muted: '#b08070'
   accent: '#c0392b'
+  search_highlight: '#F5A21E'
   accent_warm: '#f0a030'
   hover_bg: rgba(192, 57, 43, 0.13)
   selected_bg: rgba(192, 57, 43, 0.32)

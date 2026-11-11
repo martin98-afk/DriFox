@@ -163,10 +163,14 @@ def test_coding_plan_fetcher_registration_and_resolution():
 
 
 def test_system_providers_loaded_from_plugins():
-    """system 插件 14 家服务商全部加载，关键数据完整"""
+    """system-providers 插件 14 家服务商全部加载，关键数据完整
+
+    注：测试环境 enabled_plugins 白名单只启用 system-providers，
+    Anthropic/OpenAI/Groq/Ollama 由各自 source 插件提供，不在此断言范围。
+    """
     reg = _fresh_registry()
     loaded = load_providers(registry=reg)
-    assert "system" in loaded
+    assert "system-providers" in loaded
     names = reg.names()
     assert len(names) == 14
 
@@ -175,16 +179,16 @@ def test_system_providers_loaded_from_plugins():
         "SiliconFlow (硅基流动)",
         "MiniMax",
         "智谱AI",
-        "OpenAI",
-        "Anthropic (Claude)",
         "Google Gemini",
-        "Groq",
-        "Ollama",
         "百度千帆",
         "阿里云 (DashScope)",
         "火山方舟",
         "OpenCode Zen",
         "OpenCode Go",
+        "OpenCode Zen (OAuth)",
+        "OpenCode Go (OAuth)",
+        "CodeBuddy",
+        "GitHub Copilot",
     ]:
         assert expect in names, f"缺少服务商 {expect}"
 
@@ -196,12 +200,16 @@ def test_system_providers_loaded_from_plugins():
     assert reg.family_capabilities("deepseek")["context_limit"] == 320000
     # SiliconFlow 余额
     assert reg.has_balance_support("SiliconFlow (硅基流动)") is True
-    # 用量 fetcher：火山方舟 / MiniMax / 智谱AI / OpenAI / OpenCode
-    for name in ["火山方舟", "MiniMax", "智谱AI", "OpenAI", "OpenCode Zen", "OpenCode Go"]:
+    # 用量 fetcher：火山方舟 / MiniMax / 智谱AI / OpenCode Go
+    # （OpenCode Zen 是按量 API 型，2026-11-07 起不提供套餐用量查询；
+    #   OpenAI 的 fetcher 由 openai source 插件提供，测试环境未启用不在此断言）
+    for name in ["火山方舟", "MiniMax", "智谱AI", "OpenCode Go"]:
         assert reg.has_coding_plan_support(name), f"{name} 应有套餐用量 fetcher"
-    # 用量额外字段：5 个 key 全由插件聚合
+    assert not reg.has_coding_plan_support("OpenCode Zen"), "OpenCode Zen 不应有套餐用量 fetcher"
+    # 用量额外字段：火山方舟的 3 个 key（OpenCode 改官方接口后无额外字段）
     quota_keys = reg.quota_exclude_keys()
-    assert {"server_id", "cookie", "workspace_id", "csrf_token", "x_web_id"} <= quota_keys
+    assert {"cookie", "csrf_token", "x_web_id"} <= quota_keys
+    assert not {"server_id", "workspace_id"} & quota_keys
     # models.dev 白名单
     dev_map = reg.models_dev_map()
     assert dev_map["DeepSeek"] == "deepseek"
@@ -220,10 +228,11 @@ def test_provider_icon_dirs_injected_from_plugin():
     assert deepseek.icon_dir
     assert Path(deepseek.icon_dir).name == "icons"
     assert (Path(deepseek.icon_dir) / f"{deepseek.icon}.svg").exists()
-    # Groq 有浅色版本（icons_light/groq.svg 原样保留）
-    groq = reg.get("Groq")
-    assert groq.icon_dir_light
-    assert (Path(groq.icon_dir_light) / f"{groq.icon}.svg").exists()
+    # OpenCode 有浅色版本（icons_light/opencode.svg；测试环境白名单只含
+    # system-providers，Groq 等其他 source 插件的服务商不加载）
+    opencode = reg.get("OpenCode Zen")
+    assert opencode.icon_dir_light
+    assert (Path(opencode.icon_dir_light) / f"{opencode.icon}.svg").exists()
     # DeepSeek 无浅色版：icons_light 下不存在 deepseek.svg（深浅回退到深色图标）
     assert not (Path(deepseek.icon_dir_light) / f"{deepseek.icon}.svg").exists()
 

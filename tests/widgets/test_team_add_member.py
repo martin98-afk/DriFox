@@ -858,8 +858,12 @@ def test_handle_team_new_task_rotates_run_id(qapp):
     # PyQt 未初始化实例访问属性会抛 RuntimeError。保存原列表，测试后恢复）
     from app.main_widget import OpenAIChatToolWindow
 
+    import weakref as _weakref
+
     orig_instances = list(window_registry.window_instances)
-    window_registry.window_instances = [win1, win2]
+    # window_instances 存的是弱引用（见 window_registry.register_window），
+    # 直接塞强引用会被 alive_window_instances 的 r() 二次调用成 MagicMock。
+    window_registry.window_instances = [_weakref.ref(win1), _weakref.ref(win2)]
 
     # mock TabManagerWindow.get_instance（刷新分组）
     with (
@@ -880,9 +884,11 @@ def test_handle_team_new_task_rotates_run_id(qapp):
         finally:
             window_registry.window_instances = orig_instances
 
-    # 1) 全员先 _create_new_session（保存旧历史到旧 run_id）
-    win1._create_new_session.assert_called_once_with()
-    win2._create_new_session.assert_called_once_with()
+    # 1) 全员先 _create_new_session（保存旧历史到旧 run_id）。
+    #    force_in_place=True：流式中不得走 spawn_tab，否则每个成员都在团队外
+    #    新建普通标签页（回归：团队框「新建任务」冒出 N 个团队外标签）。
+    win1._create_new_session.assert_called_once_with(force_in_place=True)
+    win2._create_new_session.assert_called_once_with(force_in_place=True)
     # 2) force 生成新 run_id
     fake_tm.start_team_run.assert_called_once_with(force=True)
     # 3) 窗口 _team_run_id 更新为新值
@@ -1142,3 +1148,40 @@ def test_apply_model_selection_no_match_falls_back_to_builder(qapp):
 
     assert fake_win._current_provider_name == "prov-1"
     assert fake_win._current_model_name == "gpt-4o"
+
+
+def test_apply_model_selection_uses_config_id_first(qapp):
+    """config_id 直查优先：模型名在多个配置重复 + display 映射未构建（团队恢复实况）
+
+    实测本机配置里 glm-5.3-flash / deepseek-v4.1-flash 各命中两份配置，
+    按模型名兜底必然"多匹配不明确"而放弃 → 全团队回退构建者模型。
+    """
+    inst = _make_main_widget_instance()
+    _make_builder_with_model(inst)
+    # 追加一份与 prov-2 同模型名的配置（模拟 CodeBuddy 两个配置同名模型）
+    inst._valid_configs["prov-3"] = {"provider_name": "Provider C", "模型名称": "claude-3.5"}
+    inst._display_to_config_id = {}  # 未打开过模型选择卡片 → 映射为空
+    fake_win = MagicMock()
+    fake_win._is_destroyed = False
+
+    inst._apply_model_selection_to_window(
+        fake_win, model_name="claude-3.5", provider_name="Provider B", config_id="prov-2"
+    )
+
+    assert fake_win._current_provider_name == "prov-2"
+    assert fake_win._current_model_name == "claude-3.5"
+    assert fake_win._user_manually_selected_model is True
+
+
+def test_apply_model_selection_matches_provider_field_without_map(qapp):
+    """display 映射为空且无 config_id → 按 _valid_configs 的 provider_name 字段命中"""
+    inst = _make_main_widget_instance()
+    _make_builder_with_model(inst)
+    inst._display_to_config_id = {}
+    fake_win = MagicMock()
+    fake_win._is_destroyed = False
+
+    inst._apply_model_selection_to_window(fake_win, model_name="claude-3.5", provider_name="Provider B")
+
+    assert fake_win._current_provider_name == "prov-2"
+    assert fake_win._current_model_name == "claude-3.5"

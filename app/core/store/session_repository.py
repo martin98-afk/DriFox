@@ -762,18 +762,33 @@ class SessionRepository:
             logger.error(f"[SessionRepository] get_sessions 异常: {e}")
             return []
 
-    def get_all_lightweight(self, limit: int = 100, offset: int = 0) -> List[Dict]:
+    def get_all_lightweight(self, limit: int = 100, offset: int = 0, project: Optional[str] = None) -> List[Dict]:
         """获取所有会话的轻量列表（不含 messages），用于启动加载和历史列表展示。
 
         避免 SELECT * 一次性反序列化全部 messages JSON（可达数十 MB），
         仅在用户点击某个会话时按需加载 messages。
+
+        Args:
+            project: 非空时只取该项目的会话（首屏快速路径用，走 SQL 过滤
+                避免先取全局再在内存里筛）。
+
+        Returns:
+            成功返回轻量列表（空库 = []）；查询失败（未初始化 / SQL 失败 /
+            异常）返回 None——调用方（HistoryManager 懒加载）据此保持未加载
+            态重试。不得把失败伪装成空列表：启动瞬时 disk I/O error 曾因此
+            把空列表固化成「已加载」，整个会话期历史列表为空。
         """
         if not self.is_initialized:
-            return []
+            return None
 
         try:
             # 🚀 只选轻量列表展示所需的字段，跳过 compaction_state/cache
             # 等重量级 BLOB 列，减少 SQLite I/O 和传输开销。
+            where_sql = ""
+            params: list = []
+            if project:
+                where_sql = "WHERE project = ? "
+                params.append(project)
             success, rows = self._execute(
                 # 内存优化：不再 SELECT system_prompt。该列均值约 10KB/条，
                 # 5000 条常驻内存约 50MB，而会话列表渲染完全用不到它。
@@ -785,15 +800,16 @@ class SessionRepository:
                 f"token_calibration, token_calibration_model, "
                 f"team_run_id, team_name, agent_name, team_members, "
                 f"pinned "
-                f"FROM {self.TABLE_NAME} ORDER BY updated_at DESC LIMIT ? OFFSET ?",
-                (limit, offset),
+                f"FROM {self.TABLE_NAME} {where_sql}ORDER BY updated_at DESC LIMIT ? OFFSET ?",
+                (*params, limit, offset),
             )
             if success:
                 return [self._row_to_session_lightweight(row) for row in rows]
-            return []
+            logger.warning(f"[SessionRepository] get_all_lightweight SQL 失败: {rows}")
+            return None
         except Exception as e:
             logger.error(f"[SessionRepository] get_all_lightweight 异常: {e}")
-            return []
+            return None
 
     def get_system_prompt(self, session_id: str) -> str:
         """单列取 system_prompt（轻量列表不再 SELECT 该列后的按需回查入口）。
@@ -958,11 +974,10 @@ class SessionRepository:
             return []
 
     def get_projects(self) -> List[str]:
-        """获取所有项目名称列表（含无会话但有关键文档的项目）
+        """获取所有项目名称列表（含只有工作目录、尚无会话的项目）
 
-        关键修复：与归档清理配合使用——归档时必须同时清理 sessions、
-        key_documents 两张表，否则已归档项目会从
-        key_documents "复活"。
+        新建项目只写 project_workdir（工作目录），首轮对话后才落 sessions，
+        故项目清单必须并入该表，否则「刚建好还没聊过」的项目不显示。
         """
         if not self.is_initialized:
             return ["默认项目"]
@@ -973,7 +988,7 @@ class SessionRepository:
                 SELECT DISTINCT project FROM (
                     SELECT project FROM {self.TABLE_NAME}
                     UNION
-                    SELECT project FROM key_documents
+                    SELECT project FROM project_workdir
                 ) ORDER BY project
                 """
             )

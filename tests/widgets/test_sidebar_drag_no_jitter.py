@@ -157,7 +157,7 @@ def _install_sidebar_toggled_capture(tm_window) -> list:
     records: list[bool] = []
     try:
         tm_window._tab_panel.sidebarToggled.disconnect(tm_window._on_sidebar_toggled)
-    except TypeError, RuntimeError:
+    except (TypeError, RuntimeError):
         pass
     tm_window._tab_panel.sidebarToggled.connect(lambda c: records.append(c))
     return records

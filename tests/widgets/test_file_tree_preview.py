@@ -233,6 +233,34 @@ class TestPreviewPage:
         finally:
             page.deleteLater()
 
+    def test_load_reports_success(self, tmp_path):
+        p = tmp_path / "ok.txt"
+        p.write_text("hi", encoding="utf-8")
+        page = FilePreviewPage()
+        try:
+            page.set_colors(_colors())
+            assert page.load(str(p)) is True
+        finally:
+            page.deleteLater()
+
+    def test_load_false_when_unpreviewable(self, tmp_path):
+        """预览失败返回 False（卡片侧据此回退系统默认程序）"""
+        cases = {
+            "unsupported.exe": b"MZ",
+            "binary.txt": b"abc\x00def",
+            "broken.png": b"not a real png",
+        }
+        for name, payload in cases.items():
+            p = tmp_path / name
+            p.write_bytes(payload)
+            page = FilePreviewPage()
+            try:
+                page.set_colors(_colors())
+                assert page.load(str(p)) is False, name
+                assert page._content.currentIndex() == 2, name
+            finally:
+                page.deleteLater()
+
     def test_reload_current_rereads(self, tmp_path):
         p = tmp_path / "a.txt"
         p.write_text("v1", encoding="utf-8")

@@ -59,7 +59,7 @@ def setArmed(value: bool) -> None:  # noqa: N802 — 对外 API 名按 S1 设计
     global _ARMED
     _ARMED = bool(value)
     _ensure_audit_sink()
-    logger.info(f"[ui-driver] armed={_ARMED}")
+    logger.debug(f"[ui-driver] armed={_ARMED}")
 
 
 def is_armed() -> bool:

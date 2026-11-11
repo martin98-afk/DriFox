@@ -23,134 +23,47 @@ from typing import Any, Dict, Optional
 
 from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtGui import QIcon, QPixmap
-from PySide6.QtWidgets import QDialog, QHBoxLayout, QLabel, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QDialog, QHBoxLayout, QLabel, QVBoxLayout
 from qfluentwidgets import (
     BodyLabel,
-    CaptionLabel,
-    ComboBox,
     ExpandSettingCard,
     FluentIcon,
-    HyperlinkButton,
     IndeterminateProgressBar,
-    LineEdit,
-    PasswordLineEdit,
-    PrimaryPushButton,
-    SpinBox,
-    SwitchButton,
-    TextEdit,
     isDarkTheme,
 )
 
 from loguru import logger
 
-from app.plugins.managers.plugin_config_store import PluginConfigStore
 from app.plugins.registries.plugin_config_registry import PluginConfigRegistry
 from app.widgets.cards.settings.expand_height_mixin import DynamicHeightExpandCardMixin
 
 
-class _PlainEdit(TextEdit):
-    """带 editingFinished 信号的多行输入（focus 离开时触发，与 LineEdit 语义一致）。
-
-    继承 qfluentwidgets TextEdit（QSS 随深浅主题），而非 Qt 原生 QPlainTextEdit。
-    """
-
-    editingFinished = Signal()
-
-    def focusOutEvent(self, e):
-        super().focusOutEvent(e)
-        self.editingFinished.emit()
-
-
-class SelectComboRow(QWidget):
-    """select 字段下拉选择控件（qfluentwidgets ComboBox，随主题自适配）。
-
-    API 兼容旧版胶囊/单选实现：currentData()/setCurrentData() 读写当前值，
-    valueChanged 信号仅在用户切换时发射；setCurrentData 内部阻断信号，
-    回显不会造成循环写盘。
-    """
-
-    valueChanged = Signal(object)
-
-    def __init__(self, options, parent=None):
-        """options: List[(value, label)]，保持 schema 声明顺序"""
-        super().__init__(parent)
-        self._options = list(options or [])
-        self._values = [v for v, _ in self._options]
-        self._current = None
-
-        self._combo = ComboBox(self)
-        for value, label in self._options:
-            self._combo.addItem(text=str(label), userData=value)
-        self._combo.currentIndexChanged.connect(self._on_index_changed)
-
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.addWidget(self._combo)
-        layout.addStretch(1)
-
-    def _on_index_changed(self, index: int) -> None:
-        value = self._combo.itemData(index)
-        if value != self._current:
-            self._current = value
-            self.valueChanged.emit(value)
-
-    def currentData(self):
-        return self._current
-
-    def setCurrentData(self, value) -> None:
-        if value not in self._values and self._values:
-            value = self._values[0]
-        self._current = value
-        self._combo.blockSignals(True)
-        self._combo.setCurrentIndex(self._values.index(value))
-        self._combo.blockSignals(False)
-
-
-class _FieldRow(QWidget):
-    """字段行：左侧定宽 label，右侧控件撑满剩余宽度。
-
-    控件不固定宽度也不右对齐：长值（AppSecret / WebSocket 地址 / 包名）
-    在窄窗口下保持完整可见，各行左边缘也对齐。
-    """
-
-    def __init__(self, label_text: str, control: QWidget, parent=None):
-        super().__init__(parent)
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(0, 4, 0, 4)
-        layout.setSpacing(12)
-
-        self._label = BodyLabel(label_text, self)
-        self._label.setObjectName("fieldLabel")
-        self._label.setMinimumWidth(120)
-        layout.addWidget(self._label, 0, Qt.AlignLeft | Qt.AlignVCenter)
-        layout.addWidget(control, 1)
+from app.widgets.cards.settings.plugin_config_form import (  # noqa: F401 - 兼容旧导入路径
+    PluginConfigForm,
+    SelectComboRow,
+    _FieldRow,
+    _PlainEdit,
+)
 
 
 class PluginConfigCard(DynamicHeightExpandCardMixin, ExpandSettingCard):
-    """schema 驱动的折叠式插件配置卡（无 schema 时渲染为空，不报错）。
+    """schema 驱动的折叠式插件配置卡（表单实现见 PluginConfigForm）。
 
-    高度交给 DynamicHeightExpandCardMixin：基类用「spaceWidget 等高占位 + 滚条动画」
-    做折叠，而本卡内容有多行字段与说明行，sizeHint 在展开瞬间不准，直接套基类
-    会有「展开后底部一大段空白」。Mixin 停用占位、改走高度动画 + 收敛校正，
-    既保留折叠动画也不留空白。
+    标题 = schema.title；副标题 = 插件归属 + 字段数 + 配置状态（待填 N 项 / 未配置）。
+    字段渲染、回显、即时保存全部委托给 PluginConfigForm，与插件详情页共用一套逻辑。
     """
 
     def __init__(self, plugin_name: str, parent=None):
         self._plugin_name = plugin_name
-        self._rows: Dict[str, QWidget] = {}  # key → 输入控件（兼容旧测试）
-        self._bool_switches: Dict[str, SwitchButton] = {}  # key → switch 实例
-        # 文本字段回显基线：记录最近一次 setText 的值，用于判断"内容是否真正变化"
-        self._echoed: Dict[str, str] = {}
-        # 回显/程序化设值期间置位，阻断信号触发 _on_field_changed（防循环写盘）
-        self._echoing = False
-
-        schema = PluginConfigRegistry.get_instance().get(self._plugin_name)
+        schema = PluginConfigRegistry.get_instance().get(plugin_name)
         title_text = schema.title if schema else "插件配置"
-        # 副标题：字段数概览（无 schema 时给空串，避免占位）
+        # 副标题：归属 + 字段数（不同插件的 schema.title 可能重名，归属是扫视关键）
+        plugin_label = self._plugin_display_name()
         if schema and schema.fields:
-            content_text = f"共 {len(schema.fields)} 项配置，点开展开"
+            content_text = f"{plugin_label} · {len(schema.fields)} 项配置"
         else:
-            content_text = ""
+            content_text = plugin_label
+        self._base_content_text = content_text
 
         icon = self._resolve_plugin_icon() or FluentIcon.SETTING
         super().__init__(icon, title_text, content_text, parent)
@@ -158,100 +71,10 @@ class PluginConfigCard(DynamicHeightExpandCardMixin, ExpandSettingCard):
         self.viewLayout.setContentsMargins(48, 8, 48, 8)
         self.viewLayout.setSpacing(4)
 
-        if schema is None:
-            return
-
-        for f in schema.fields:
-            if f.type == "bool":
-                switch = SwitchButton(self.card)
-                self._bool_switches[f.key] = switch
-                self._rows[f.key] = switch
-                self.card.addWidget(switch)
-                switch.setOnText(f.label)
-                switch.setOffText(f.label)
-                switch.checkedChanged.connect(lambda _checked, _k=f.key: self._on_field_changed(_k))
-            elif f.type == "select":
-                # 下拉选择：点击选中即保存（SelectComboRow）
-                combo = SelectComboRow(f.options, self.view)
-                combo.valueChanged.connect(lambda _v, _k=f.key: self._on_field_changed(_k))
-                row = _FieldRow(f.label, combo, self.view)
-                self._rows[f.key] = combo
-                self._add_field_row(f, row)
-            elif f.type == "number":
-                spin = SpinBox(self.view)
-                spin.setRange(f.min if f.min is not None else 0, f.max if f.max is not None else 2147483647)
-                spin.setSingleStep(max(1, f.step))
-                spin.valueChanged.connect(lambda *_a, _k=f.key: self._on_field_changed(_k))
-                row = _FieldRow(f.label, spin, self.view)
-                self._rows[f.key] = spin
-                self._add_field_row(f, row)
-            elif f.type == "link":
-                # 外链按钮：HyperlinkButton（主题色 + 链接图标），点击用系统浏览器打开。
-                # 按钮自身是居中对齐文本，撑满整行会飘到右边，用 stretch 尾巴把它钉在左侧
-                link_text = f.placeholder or f.url
-                link = HyperlinkButton(f.url, link_text, self.view, FluentIcon.LINK)
-                holder = QWidget(self.view)
-                holder_layout = QHBoxLayout(holder)
-                holder_layout.setContentsMargins(0, 0, 0, 0)
-                holder_layout.addWidget(link)
-                holder_layout.addStretch(1)
-                row = _FieldRow(f.label, holder, self.view)
-                self._add_field_row(f, row)
-            elif f.type == "action":
-                # 动作按钮：点击弹窗执行声明式工具编排（通用机制，见 ToolActionDialog），
-                # 无存储值不参与保存/回显
-                btn = PrimaryPushButton(f.placeholder or f.label, self.view)
-                btn.clicked.connect(
-                    lambda _c, _f=f, _p=self._plugin_name, _card=self: ToolActionDialog.open_for(
-                        _card.view, _p, _f.label, _f.action, config_card=_card
-                    )
-                )
-                # 按钮不自撑满（撑满后文字居中、显得像主操作按钮），包一层靠左
-                holder = QWidget(self.view)
-                holder_layout = QHBoxLayout(holder)
-                holder_layout.setContentsMargins(0, 0, 0, 0)
-                holder_layout.addWidget(btn)
-                holder_layout.addStretch(1)
-                row = _FieldRow(f.label, holder, self.view)
-                self._add_field_row(f, row)
-            elif f.type == "textarea":
-                edit = _PlainEdit(self.view)
-                if f.placeholder:
-                    edit.setPlaceholderText(f.placeholder)
-                edit.setFixedHeight(max(2, f.rows) * 22 + 8)
-                edit.editingFinished.connect(lambda _k=f.key: self._on_field_changed(_k))
-                row = _FieldRow(f.label, edit, self.view)
-                self._rows[f.key] = edit
-                self._add_field_row(f, row)
-            else:
-                edit = PasswordLineEdit() if f.type == "password" else LineEdit()
-                edit.setClearButtonEnabled(True)
-                if f.placeholder:
-                    edit.setPlaceholderText(f.placeholder)
-                row = _FieldRow(f.label, edit, self.view)
-                self._rows[f.key] = edit
-                edit.editingFinished.connect(lambda _k=f.key: self._on_field_changed(_k))
-                self._add_field_row(f, row)
-
-        self._echo()
-
-    def _add_field_row(self, f, row: QWidget) -> None:
-        """添加字段行；schema 带 description 时补一行小号说明（与控件列对齐）。
-
-        说明文字用 CaptionLabel 而不自设颜色：设计令牌的 TEXT_SECONDARY 是
-        深色主题值（白色半透明），浅色主题下写了就等于隐形；CaptionLabel 自带
-        随主题变化的次要文字样式。
-        说明行也走 _FieldRow（空 label 占位），对齐由布局保证：label 列宽度随
-        字段名长短浮动，固定 indent 对不齐控件左边缘。
-        """
-        self.viewLayout.addWidget(row)
-        if not f.description:
-            return
-        hint = CaptionLabel(f.description, self.view)
-        hint.setWordWrap(True)
-        self.viewLayout.addWidget(_FieldRow("", hint, self.view))
-
-    # ── 内容高度变化后触发重算（字段行/说明行已一次性建好，保留入口供回显后调用） ──
+        self._form = PluginConfigForm(plugin_name, self.view)
+        self.viewLayout.addWidget(self._form)
+        self._rows = self._form._rows  # 兼容既有测试/调用方
+        self._refresh_header_hint()
 
     def _resync_height(self) -> None:
         """内容尺寸变了（如回显后长文本换行数变化）后重新定格高度。"""
@@ -281,149 +104,54 @@ class PluginConfigCard(DynamicHeightExpandCardMixin, ExpandSettingCard):
         except Exception:
             return None
 
-    def _echo(self):
-        """回显当前生效值（默认兜底可见）；程序化设值期间置 _echoing 阻断信号循环"""
-        store = PluginConfigStore()
-        schema = PluginConfigRegistry.get_instance().get(self._plugin_name)
-        if schema is None:
-            return
-        self._echoing = True
-        try:
-            for f in schema.fields:
-                control = self._rows.get(f.key)
-                if control is None:
-                    continue
-                val = store.get(self._plugin_name, f.key)
-                self._apply_value(control, f, val)
-        finally:
-            self._echoing = False
+    def _plugin_display_name(self) -> str:
+        """插件显示名：manifest display_name → name → 目录名
 
-    def _apply_value(self, control: QWidget, f, val) -> None:
-        """按字段类型把存储值设置到控件 + 记录回显基线（_echoing 置位期间调用）"""
-        if f.type == "bool":
-            control.setChecked(bool(val))
-        elif f.type == "select":
-            control.setCurrentData(val)
-            self._echoed[f.key] = control.currentData()
-        elif f.type == "number":
-            try:
-                control.setValue(int(val))
-            except (TypeError, ValueError):
-                control.setValue(f.min if f.min is not None else 0)
-            self._echoed[f.key] = str(control.value())
-        elif f.type == "textarea":
-            text = str(val if val is not None else "")
-            control.setPlainText(text)
-            self._echoed[f.key] = text
-        else:
-            text = str(val if val is not None else "")
-            control.setText(text)
-            self._echoed[f.key] = text
-
-    def _on_field_changed(self, key: str):
-        """单字段即时保存：空文本=清除（回默认），保存后刷新回显。
-
-        用 editingFinished / checkedChanged / currentIndexChanged / valueChanged 触发，
-        自动持久化，无需底部"保存配置"按钮。
-        仅当内容真正变化时才写盘：editingFinished 在聚焦→失焦（未修改）时
-        也会触发，若此时无脑写回输入框回显值，会覆盖用户手动编辑 config.json
-        或其他实例的修改（双实例共享配置场景）。
+        卡片标题是配置块名（schema.title），归属只能靠副标题表达；插件名缺失时
+        回退目录名，保证任何情况下副标题都有内容。
         """
-        if self._echoing:
-            return
-        store = PluginConfigStore()
-        schema = PluginConfigRegistry.get_instance().get(self._plugin_name)
-        if schema is None:
-            return
-        target_field = next((f for f in schema.fields if f.key == key), None)
-        if target_field is None:
-            return
-        control = self._rows.get(key)
-        if control is None:
-            return
-        if target_field.type == "bool":
-            value: object = control.isChecked()
-        elif target_field.type == "select":
-            value = control.currentData()
-        elif target_field.type == "number":
-            value = str(control.value())
-        elif target_field.type == "textarea":
-            value = control.toPlainText().strip()
-        else:
-            value = control.text().strip()
-            # 无变化 → 跳过写盘：editingFinished 在聚焦→失焦（未修改）时也会触发，
-            # 若输入框内容与回显基线一致（用户没真正编辑），写回会覆盖
-            # 外部/其他实例对 config.json 的手动修改（双实例共享配置场景）。
-            if value == self._echoed.get(key, ""):
-                return
-        store.set_values(self._plugin_name, {key: value})
-        # 非 bool 字段保存后回显（清除 → 默认值显式可见）
-        if target_field.type != "bool":
-            self._echo_field(key)
-        # 网关插件 enabled 开关：切换即触发平台连接启停（Phase E 删 GatewaySettingCard
-        # 后补回交互——旧卡开关联动 manager.start/stop_platform，通用卡只写配置会导致
-        # “开启没反应”）。仅对该插件注册的网关平台生效；manager 未初始化时交由启动期
-        # start_all_async 读取最新配置兜底。
-        if target_field.type == "bool" and self._is_gateway_plugin():
-            self._apply_gateway_toggle(bool(value))
-
-    def _is_gateway_plugin(self) -> bool:
-        """本插件是否注册了 gateway 平台（按 def.source == 'plugin:<name>' 判定）"""
         try:
-            from app.plugins.registries.gateway_platform_registry import (
-                GatewayPlatformRegistry,
-            )
+            from app.plugins.managers.plugin_manager import PluginManager
 
-            src = f"plugin:{self._plugin_name}"
-            return any(d.source == src for d in GatewayPlatformRegistry.get_instance().list_platforms())
+            pm = PluginManager.get_instance()
+            if pm.is_initialized():
+                plugin = pm.get_plugin(self._plugin_name)
+                if plugin is not None:
+                    name = str(plugin.manifest.get("display_name") or plugin.name or "").strip()
+                    if name:
+                        return name
         except Exception:
-            return False
+            pass
+        return self._plugin_name
 
-    def _apply_gateway_toggle(self, enabled: bool) -> None:
-        """enabled 切换 → 对插件注册的每个网关平台启停连接。
+    def _refresh_header_hint(self) -> None:
+        """副标题追加配置状态（待填 N 项 / 未配置），无状态时保持归属文案"""
+        text = getattr(self, "_base_content_text", "")
+        state, missing = self.config_status()
+        if state == "missing":
+            hint = f"待填 {len(missing)} 项"
+        elif state == "unconfigured":
+            hint = "未配置"
+        else:
+            hint = ""
+        if hint:
+            text = f"{text} · {hint}" if text else hint
+        label = getattr(self, "contentLabel", None)
+        if label is not None and text:
+            label.setText(text)
 
-        manager 未初始化（网关后台线程尚未建单例）时静默跳过：启动期
-        start_all_async 会读最新配置自动连接。
-        """
-        try:
-            from app.gateway.manager import get_platform_manager
-            from app.plugins.registries.gateway_platform_registry import (
-                GatewayPlatformRegistry,
-            )
+    def _echo(self):
+        """回显当前生效值（表单实现，供 action 弹窗完成后刷新使用）"""
+        self._form.echo()
+        self._refresh_header_hint()
 
-            mgr = get_platform_manager()
-            if mgr is None:
-                return
-            src = f"plugin:{self._plugin_name}"
-            for d in GatewayPlatformRegistry.get_instance().list_platforms():
-                if d.source != src:
-                    continue
-                if enabled:
-                    mgr.start_platform_async(d.platform_id)
-                else:
-                    mgr.stop_platform(d.platform_id)
-        except Exception as e:
-            logger.warning(f"[PluginConfigCard] 网关启停失败 {self._plugin_name}: {e}")
+    def config_status(self):
+        """配置完整度判定（委托表单，与详情页同一口径）"""
+        return self._form.config_status()
 
-    def _echo_field(self, key: str):
-        """单字段回显（保存后刷新显示；_echoing 阻断信号循环）"""
-        store = PluginConfigStore()
-        schema = PluginConfigRegistry.get_instance().get(self._plugin_name)
-        if schema is None:
-            return
-        target_field = next((f for f in schema.fields if f.key == key), None)
-        if target_field is None or target_field.type == "bool":
-            return
-        control = self._rows.get(key)
-        if control is None:
-            return
-        val = store.get(self._plugin_name, key)
-        self._echoing = True
-        try:
-            self._apply_value(control, target_field, val)
-        finally:
-            self._echoing = False
-
+    def matches(self, keyword: str) -> bool:
+        """搜索命中（委托表单：插件名 / 配置块标题 / 字段 label、key、说明）"""
+        return self._form.matches(keyword)
 
 def make_card_class(plugin_name: str) -> type:
     """生成绑定 plugin_name 的无参构造卡片类（register_settings_card 的 widget_class 约定）"""
@@ -620,8 +348,11 @@ class ToolActionDialog(QDialog):
 
     def _on_result(self, result) -> None:
         """每轮结果：图片刷新展示 + content 刷新状态文案"""
-        img = getattr(result, "image_data", None)
-        if img and img.get("data"):
+        from app.tools.result import as_image_list
+
+        images = as_image_list(getattr(result, "image_data", None))
+        img = images[0] if images else None
+        if img:
             try:
                 pm = QPixmap()
                 if pm.loadFromData(base64.b64decode(img["data"])):

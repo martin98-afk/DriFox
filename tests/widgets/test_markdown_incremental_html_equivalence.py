@@ -317,7 +317,7 @@ def test_text_block_cache_lru_not_clear_all():
     import app.widgets.markdown_block_viewer as mbv
 
     limit = mbv._TEXT_BLOCK_CACHE_MAX
-    assert limit >= 128, f"上限过小（{limit}）会在真实段数下频繁触顶"
+    assert limit >= 512, f"上限过小（{limit}）会在真实段数下频繁触顶"
 
     texts = [f"段{i}内容。" for i in range(limit + 20)]
     for t in texts:

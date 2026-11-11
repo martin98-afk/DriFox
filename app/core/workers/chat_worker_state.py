@@ -128,7 +128,6 @@ class ChatWorkerState:
 
     # === 工具执行器引用 ===
     tool_executor: Any = None
-    compactor: Any = None
 
     @classmethod
     def from_constructor_args(
@@ -140,7 +139,6 @@ class ChatWorkerState:
         permission_cache: Any,
         event_bus: Any,
         tool_executor: Any,
-        compactor: Any,
         initial_compaction_cache: Dict,
     ) -> "ChatWorkerState":
         """从构造函数参数构建状态"""
@@ -176,7 +174,6 @@ class ChatWorkerState:
             permission_cache=permission_cache,
             event_bus=event_bus,
             tool_executor=tool_executor,
-            compactor=compactor,
         )
 
     def reset_pending_response_state(self):

@@ -94,8 +94,11 @@ class ToolPruneTier:
         base = self._limit(view)
         mult = self._error_mult()
         skip = prune_skip_tools()
+        # 能力面在循环外取一次：_tool_api 每次都要经能力池 + 调用方插件名推断，
+        # 按「每条 tool 消息」调用时长会话会累积成主线程数百 ms 阻塞。
+        api = _tool_api("read")
         for m in view.messages:
-            if m.get("role") != "tool" or self._skip(m.get("name", ""), skip):
+            if m.get("role") != "tool" or self._skip(m.get("name", ""), skip, api):
                 continue
             c = m.get("content")
             if isinstance(c, str) and len(c) > self._limit_for(m, base, mult):
@@ -106,13 +109,14 @@ class ToolPruneTier:
         base = self._limit(view)
         mult = self._error_mult()
         skip = prune_skip_tools()
+        api = _tool_api("read")
         result: List[Dict[str, Any]] = []
         changed = 0
         pruned_errors = 0
         for m in view.messages:
             if m.get("role") == "tool" and isinstance(m.get("content"), str):
                 name = m.get("name", "")
-                if self._skip(name, skip):
+                if self._skip(name, skip, api):
                     result.append(m)
                     continue
                 new_content = prune_tool_result(m["content"], max_len=self._limit_for(m, base, mult), tool_name=name)
@@ -154,13 +158,17 @@ class ToolPruneTier:
         return base * mult if cls._is_error(m) else base
 
     @staticmethod
-    def _skip(name: str, skip: frozenset = frozenset()) -> bool:
-        """免裁剪判定：工具自声明（metadata["no_prune"]）∪ 插件配置名单。"""
+    def _skip(name: str, skip: frozenset = frozenset(), api=None) -> bool:
+        """免裁剪判定：工具自声明（metadata["no_prune"]）∪ 插件配置名单。
+
+        api: 已取到的工具注册表只读面。批量判定时由调用方在循环外取一次传入，
+        避免按条重建能力池；省略则就地取（单条调用 / 测试路径）。
+        """
         if not name:
             return False
         try:
-            api = _tool_api("read")
-
+            if api is None:
+                api = _tool_api("read")
             if api and api["is_no_prune"](name):
                 return True
         except Exception:

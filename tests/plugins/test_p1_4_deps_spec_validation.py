@@ -49,3 +49,15 @@ def test_extras_form_passes():
     """extras 合法形态（包名[extras]+版本约束）放行。"""
     assert _resolve(["requests[socks]>=2.31.0"]) == ["requests[socks]>=2.31.0"]
     assert _resolve(["pydantic[email]>=2.5"]) == ["pydantic[email]>=2.5"]
+
+
+def test_multi_constraint_passes():
+    """PEP 440 区间多约束（逗号叠加）放行。
+
+    回归：bilibili-api-python>=17.4.1,<18 曾被白名单拒收（旧正则只允许单约束），
+    插件依赖被静默丢弃，装完跑起来才报 ImportError。
+    """
+    assert _resolve(["bilibili-api-python>=17.4.1,<18"]) == ["bilibili-api-python>=17.4.1,<18"]
+    assert _resolve(["pkg>=1.0,<2.0,!=1.5"]) == ["pkg>=1.0,<2.0,!=1.5"]
+    # 非法叠加仍拒：逗号后接非版本约束
+    assert _resolve(["pkg>=1.0,--evil"]) == []

@@ -99,6 +99,12 @@ mkdir -p ~/.drifox/plugins/user-custom/agents/
 > - 若 watchfile 未触发（罕见），重启 DriFox 后可用
 > - 当前会话内不能用 `subagent_para` 调起新角色
 
+## 轨道判定（本命令的两条路径）
+
+- **默认轨道（一句话组队）**：用户描述的是「组一个团队干活」（未要求保存/复用模板）→ 按 `<!-- section:create -->` 内「默认轨道」执行：直接 `team_manage(action=create)`，不落 yaml、不弹窗。
+- **模板轨道（显式要求模板）**：用户明确要求「创建模板 / 保存为 yaml / 复用团队配置」，或默认轨道创建失败需补角色 → 按 `<!-- section:create -->` 原有 A-F 流程生成模板 yaml。
+- 两轨道互斥；判定不了时用 question 问用户一句，最多 1 轮。
+
 <!-- section:create -->
 ## 任务：创建 DriFox 团队模板
 
@@ -108,6 +114,20 @@ mkdir -p ~/.drifox/plugins/user-custom/agents/
 $ARGUMENTS
 
 ### 输出要求
+
+### 默认轨道：一句话组队
+
+> 本轨道不生成 yaml、不弹 question、不输出交付表格；原 A~F 流程仅在模板轨道执行。
+
+1. **解析角色**：从用户原话提炼成员角色与职责（leader 由 `team_manage` 自动承担，不占 members 名额），总数 2~5。
+2. **比对 Available Subagents**：角色不存在时就近替换（如「美术」→ technical-artist）；无法替换的角色直接丢弃，不为它新建 .md。
+3. **提炼 team_role**：从用户原话浓缩一句（团队职责与目标）。
+4. **直接调用** `team_manage(action="create", team_name=<kebab-case 短名>, team_role=<一句职责>, members=[{agent_name, description}...])`。
+5. **时序纪律**：create 成功仅表示 leader 入队；members 的开窗请求本轮结束后拉起。返回体含 `queued/pending_window` 即成功；下一轮先 `team_manage(action="list")` 确认成员就位再派单；add 返回「能力未就绪」不要当成功。
+
+### 模板轨道（仅以下情形进入）
+
+仅在用户显式要求「模板/yaml/保存复用」，或默认轨道创建失败需补角色时，执行下方 A~F 流程（生成团队模板 yaml 并提示 `/team --load=<name>`）。默认一句话组队需求禁止进入本轨道。
 
 #### A. 角色检测总则
 

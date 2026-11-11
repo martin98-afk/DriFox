@@ -78,10 +78,48 @@ def _migrate_remove_opencode_free_provider_entry(instance) -> bool:
     return Settings._migrate_remove_opencode_free_provider(instance)
 
 
+def _migrate_theme_mode(instance) -> bool:
+    """外观模式：旧版只有布尔 LightMode，升级时按当前值固化 ThemeMode。
+
+    全新安装（配置文件里没有 UI.LightMode）不迁移，保留默认 auto —— 新用户
+    开箱跟随系统；老用户则保持升级前的深浅，不会突然变色。
+    """
+    path = getattr(instance, "file", None)
+    if path is None or not path.exists():
+        return False
+    try:
+        import orjson as json
+
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return False
+    ui = raw.get("UI") or {}
+    if "ThemeMode" in ui or "LightMode" not in ui:
+        return False
+    mode = "light" if ui.get("LightMode") else "dark"
+    instance.ui_theme_mode.value = mode
+    instance.save()
+    logger.info(f"[配置迁移] 外观模式：LightMode={ui.get('LightMode')} → ThemeMode={mode}")
+    return True
+
+
+def _migrate_theme_mode_entry(instance) -> bool:
+    """注册表末项：布尔深浅 → 三态外观模式（默认 auto 仅对新安装生效）"""
+    return _migrate_theme_mode(instance)
+
+
 _MIGRATIONS: List[Callable[[Any], bool]] = [
     _migrate_saved_providers_entry,
     _migrate_remove_opencode_free_provider_entry,
+    _migrate_theme_mode_entry,
 ]
+
+
+# 各深浅模式的默认主题（切模式且该模式没有用户记忆时的落点）。
+# 这是全仓唯一的主题名字面量来源：ui_theme_style 的默认值、theme_mode 的
+# 模式切换都引用这里，别再散落到各处。
+DEFAULT_LIGHT_THEME = "lumia"
+DEFAULT_DARK_THEME = "true-black"
 
 
 class Settings(QConfig):
@@ -144,7 +182,28 @@ class Settings(QConfig):
                 qconfig._cfg = cls._instance
             except Exception:
                 pass
+            # 立即绑定同步记账器：晚绑会产生「配置改了但没打 t」的窗口，
+            # 期间云端更高 t 的旧内容会把这期间用户的改动整份回滚。
+            # 必须在 load 之后（拿到磁盘条目表）、qconfig 接管之后（信号链就绪）。
+            try:
+                cls._bind_sync_recorder(cls._instance)
+            except Exception:
+                logger.debug("同步记账器绑定失败，云同步将退化为纯 union 合并", exc_info=True)
         return cls._instance
+
+    @classmethod
+    def _bind_sync_recorder(cls, instance) -> None:
+        """把云同步的条目记账器接到 Settings 上（进程启动早期，早于 ConfigSync.enable）。
+
+        不绑的后果：enable() 之前用户改的每一项配置都只落盘、不打 Lamport 时间戳，
+        条目在 SyncMeta 里仍指向旧值指纹。随后合并时云端上次会话上传的那份
+        「更高 t 的旧内容」会赢得 LWW，本地改动被静默回滚（实测：切好的主题被刷回）。
+
+        记账器是全局单例，此处绑定后 enable() 里的 bind_settings 直接复用。
+        """
+        from app.core.sync.meta_recorder import bind_settings
+
+        bind_settings(instance)
 
     # ── 配置迁移基建（P0-7） ────────────────────────────────
     #
@@ -349,6 +408,33 @@ class Settings(QConfig):
             # toDict() 内层值与 item.value 共享引用，必须深拷贝后剥钥，
             # 否则会污染内存态导致 UI 回显 / API 请求丢 key
             data = deepcopy(self.toDict())
+            # 本机模型选择不进 app.config：真源在 cache/app_state.json
+            # （LLM.SelectedModel 只表示本机上次选的服务商，不该随云同步跨设备）
+            try:
+                from app.utils.app_state import set as _state_set
+
+                _state_set("selected_model", str(self.llm_selected_model.value or ""))
+            except Exception:
+                logger.debug("[Settings] 本机模型选择写缓存失败", exc_info=True)
+            _llm = data.get("LLM")
+            if isinstance(_llm, dict):
+                _llm.pop("SelectedModel", None)
+            # 同步元数据以记账器为准：内存里的 System.SyncMeta 是启动时快照，
+            # 记账器每次 tick 只更新自身状态、不回写 ConfigItem，直接用 toDict()
+            # 落盘会把条目表回滚到旧版本（本地刚改的值仍配着旧 t，下一次合并必
+            # 被远端更高 t 的旧内容覆盖，表现为「改完过一阵自己变回去」）。
+            try:
+                from app.core.sync.meta_recorder import get_bound_recorder
+
+                _rec = get_bound_recorder()
+                if _rec is not None:
+                    _sys = data.get("System")
+                    if not isinstance(_sys, dict):
+                        _sys = {}
+                        data["System"] = _sys
+                    _sys["SyncMeta"] = _rec.dump()
+            except Exception:
+                logger.debug("[Settings] 同步元数据落盘失败，沿用内存值", exc_info=True)
             mode = str(self.secret_mode.value or MODE_KEYRING)
             if mode != MODE_NONE:
                 try:
@@ -379,6 +465,28 @@ class Settings(QConfig):
             self._apply_secret_mode()
         except Exception:
             logger.exception("[SecretStore] 密钥回填失败，按文件值继续")
+        self._load_local_state_items()
+
+    def _load_local_state_items(self) -> None:
+        """设备本地态配置项：真源在缓存目录，app.config 里的值只用于首次迁移。
+
+        迁移规则：缓存里还没有该 key 时，取 app.config 的旧值一次性迁入
+        （升级前的选择不丢）；此后一律以缓存为准，忽略配置文件里的残留值。
+        """
+        try:
+            from app.utils.app_state import get as _state_get, set as _state_set
+        except Exception:
+            return
+        item = self.llm_selected_model
+        try:
+            saved = _state_get("selected_model", None)
+            if saved is None:
+                saved = str(item.value or "")
+                if saved:
+                    _state_set("selected_model", saved)
+            item.value = str(saved or "")
+        except Exception:
+            logger.debug("[Settings] 本机模型选择读缓存失败，沿用配置文件值", exc_info=True)
 
     def _recover_flat_secrets_from_keyring(self):
         """一次性回迁：v0.5.11 keyring 化误剥的扁平 token 从凭证库迁回 app.config。
@@ -618,7 +726,7 @@ class Settings(QConfig):
     auto_start = ConfigItem("General", "AutoStart", False, BoolValidator())
 
     # 版本信息
-    current_version = "v0.6.12"
+    current_version = "v0.7.1"
     # 构建变体：pyqt5 | pyside6。同一 Release 同时挂两套安装包，更新器据此选包，
     # 插件市场据此选官方插件库分支（pyqt5 → main，pyside6 → pyside6）。
     # CI 构建期由 release.yml 的 Inject build_variant 步骤按 matrix 覆写，缺省取本分支值。
@@ -626,6 +734,8 @@ class Settings(QConfig):
     build_variant = "pyside6"
     # 通用设置
     auto_check_update = ConfigItem("General", "AutoCheckUpdate", True, BoolValidator())
+    # 接收 Beta 更新：开启后检查更新拉 releases 列表（含 prerelease），否则仅走正式版 latest
+    allow_beta_update = ConfigItem("General", "AllowBetaUpdate", False, BoolValidator())
     # 进入时崩溃通知：检测到上次崩溃 dump 后是否弹 InfoBar 提示用户。
     # 关闭后仍会扫描日志目录并把 .reported 标记已读（不重复扫描），
     # 仅不展示横幅；用户可手动到日志目录查看 dump 文件。
@@ -752,13 +862,25 @@ class Settings(QConfig):
     ui_theme_style = OptionsConfigItem(
         "UI",
         "ThemeStyle",
-        "lumia",
-        OptionsValidator(["lumia"]),  # 运行时动态补充
+        DEFAULT_LIGHT_THEME,
+        OptionsValidator([DEFAULT_LIGHT_THEME]),  # 运行时动态补充
+    )
+    # 外观模式真源：auto=跟随系统 / light / dark。ui_light_mode 是「生效值」，
+    # 既有主题过滤与主题卡读取点保持不变（见 app/utils/theme_mode.py）
+    ui_theme_mode = OptionsConfigItem(
+        "UI",
+        "ThemeMode",
+        "auto",
+        OptionsValidator(["auto", "light", "dark"]),
     )
     ui_light_mode = ConfigItem("UI", "LightMode", True, BoolValidator())
 
     # 工具区折叠显示（简洁模式）：工具调用/思考块集中在卡片顶部可滚动容器
     ui_compact_tool_area = ConfigItem("UI", "CompactToolArea", True, BoolValidator())
+
+    # 主题背景音乐音量（0~100）；用户调过之后恒优先于主题推荐音量。
+    # 只作用于 backgrounds.music，视频覆盖层恒静音不受影响。
+    ui_music_volume = RangeConfigItem("UI", "MusicVolume", 60, RangeValidator(0, 100))
 
     # 对话区限宽档位：窗口过宽时限制对话内容宽度并居中留白
     # narrow=720 / standard=900 / wide=1200 / full=不限宽（铺满）
@@ -791,6 +913,13 @@ class Settings(QConfig):
     # ========== LLM API 服务配置 ==========
     llm_api_enabled = ConfigItem("LLM", "APIEnabled", False, BoolValidator())
     llm_api_port = RangeConfigItem("LLM", "APIPort", 8765, RangeValidator(1024, 65535))
+
+    # ========== 云同步元数据 ==========
+    # 存 JSON 字符串：{"version": 1, "clock": <lamport>, "entries": {路径: {h,t,d}}}
+    # 由 app/core/sync/meta_recorder.py 维护，UI 不展示、不提供编辑入口。
+    # 放在 System 分组是为了随 app.config 一次 PUT 原子上云（Gitee 文件 API
+    # 一次只能写一个文件，独立元数据文件会引入两文件不一致的窗口）。
+    sync_meta = ConfigItem("System", "SyncMeta", "{}")
 
     # ========== MCP 服务器配置 ==========
     mcp_servers = ConfigItem("MCP", "Servers", [], ListDictValidator())

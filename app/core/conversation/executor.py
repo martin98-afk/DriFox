@@ -107,7 +107,6 @@ class ConversationExecutor:
             "tool_start_callback": callbacks.get("tool_call_sync_requested"),
             "permission_check_callback": self._make_permission_checker(),
             "permission_cache": self._core.permission_cache,
-            "compactor": self._core.compactor,
             "initial_compaction_cache": getattr(session, "compaction_cache", None),
             "session_id": session_id,
             # Hook 参与级别：引擎经 ConversationConfig 声明，消息级 hook 拦截 +
