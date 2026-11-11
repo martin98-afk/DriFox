@@ -187,5 +187,6 @@ def register(registry):
             default_model="seed-tts-2.0-standard",
             models=["seed-tts-2.0-standard"],
             capability_type="speech_generation",
+            register_url="https://console.volcengine.com/ark/region:ark+cn-beijing/apiKey",
         )
     )
