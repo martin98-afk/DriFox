@@ -52,13 +52,12 @@ CATALOG: Dict[str, CapabilitySpec] = {
     for s in (
         # ── 模型 ──
         _spec("model.metadata", _L, "当前模型的 provider/名称/上下文长度/能力元数据", _BOTH),
-        _spec("model.schema", _L, "指定 agent 视角的工具 schema", _BOTH, ["get_tools_schema"]),
+        _spec("model.schema", _L, "指定 agent 视角的工具 schema", _BOTH),
         _spec(
             "model.config",
             _H,
             "完整模型配置（含已解密明文 API key）",
             _BOTH,
-            ["get_model_config", "get_provider_config"],
         ),
         _spec(
             "model.config_for",
@@ -285,17 +284,6 @@ for _sid, _s in CATALOG.items():
     for _legacy in _s.legacy_keys:
         LEGACY_MAP[_legacy] = _sid
 
-# 存量 manifest 里可能出现的扁平能力名（A3 时代的写法）→ 命名空间 ID
-ALIASES: Dict[str, str] = {
-    "lsp": "lsp.query",
-    "mcp": "mcp.call",
-    "gitee": "net.upload",
-    "subagent": "subagent.run",
-    "window_state": "state.kv",
-    "notify": "ui.notify",
-    "hide_card": "ui.card.hide",
-}
-
 # ui 投影可用的旧键
 UI_LEGACY_KEYS = tuple(k for k, v in LEGACY_MAP.items() if "ui" in CATALOG[v].surfaces)
 
@@ -314,7 +302,7 @@ def in_group(group: str) -> Set[str]:
 
 
 def expand(ids: Iterable[str]) -> FrozenSet[str]:
-    """把 manifest 声明展开为能力 ID 集合（处理别名与通配）。
+    """把 manifest 声明展开为能力 ID 集合（处理通配）。
 
     未知 ID 原样保留（注册表里没有对应 provider，构建池时自然不可用）。
     """
@@ -323,7 +311,6 @@ def expand(ids: Iterable[str]) -> FrozenSet[str]:
         token = str(raw).strip()
         if not token:
             continue
-        token = ALIASES.get(token, token)
         if token == "*":
             out.update(CATALOG)
         elif token.endswith(".*"):
@@ -341,7 +328,7 @@ def unknown_declared(raw: object) -> List[str]:
     这类声明在加载期挑出来，由 PluginManager 记入 manifest_warnings。
 
     判定口径与 expand 严格一致：``*`` 合法；``group.*`` 检查 group 存在；
-    其余 token 过 ALIASES 后必须命中 CATALOG。
+    其余 token 必须命中 CATALOG。
     """
     if not isinstance(raw, list):
         return []
@@ -350,7 +337,6 @@ def unknown_declared(raw: object) -> List[str]:
         token = str(item).strip()
         if not token or token == "*":
             continue
-        token = ALIASES.get(token, token)
         if token.endswith(".*"):
             if token[:-2] not in groups():
                 out.append(token)

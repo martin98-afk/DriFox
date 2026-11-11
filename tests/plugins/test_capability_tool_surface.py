@@ -84,7 +84,7 @@ def test_undeclared_full_grant(tmp_path, monkeypatch, log_capture):
 
 
 def test_declared_trims_legacy_services(tmp_path, monkeypatch):
-    _fake_pm(monkeypatch, {"capabilities": ["lsp"]})
+    _fake_pm(monkeypatch, {"capabilities": ["lsp.query"]})
     ex = _make_executor(tmp_path)
     captured = []
     _run(ex, "plugin:cap-plug", captured)

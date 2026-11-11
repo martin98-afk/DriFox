@@ -79,15 +79,6 @@ def test_engine_host_contract_declares_get_provider_config():
     assert "get_provider_config" in dir(EngineHost)
 
 
-def test_legacy_map_contains_get_provider_config():
-    """get_provider_config 是插件拿「已解锁明文 API_KEY」的唯一通道，必须留在投影里。
-
-    插件直读 app.config 在 password 模式下拿到 enc:v2: 密文、keyring 模式下
-    拿到空串，都会 401。
-    """
-    from app.plugins.capabilities.catalog import LEGACY_MAP
-
-    assert LEGACY_MAP.get("get_provider_config") == "model.config"
 def test_resolve_provider_config_returns_memory_plaintext():
     """_resolve_provider_config 从内存态 _valid_configs 取配置（不碰磁盘文件）
 

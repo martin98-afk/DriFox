@@ -104,8 +104,8 @@ def test_default_injects_all_services_and_audits(tmp_path, log_capture):
 
 
 def test_declared_capabilities_trim_services(tmp_path, log_capture, monkeypatch):
-    """声明 ["lsp"] → services 裁到 lsp+window_state，sub_agent_manager 置 None。"""
-    _fake_pm(monkeypatch, {"capabilities": ["lsp"]})
+    """声明 ["lsp.query"] → services 裁到 lsp+window_state，sub_agent_manager 置 None。"""
+    _fake_pm(monkeypatch, {"capabilities": ["lsp.query"]})
     executor = _make_executor(tmp_path)
     captured = []
     ctx, _ = _run_tool(executor, "plugin:cap-plug", captured)
