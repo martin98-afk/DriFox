@@ -7868,47 +7868,21 @@ class OpenAIChatToolWindow(ToolWindow):
         # 兜底：延迟构建未完成（800ms 未到 / P2 懒加载 pending / 构建失败）时
         # 立即构建内容，避免 _model_selector_card_content 为 None 崩溃
         self._ensure_model_selector_card_content()
-        provider_models_data = []
+        from app.core.modelmeta.selector_data import build_selector_provider_data
+
         merged_provider_models = get_merged_provider_models()
-        # 维护 display_name → config_id 映射，用于 model_selector 回调时反查
-        self._display_to_config_id: dict[str, str] = {}
-        # 维护 display_name → provider_name 映射，用于 model_selector 找 icon
+        provider_models_data, self._display_to_config_id = build_selector_provider_data(
+            self._valid_configs,
+            self._current_provider_name,
+            merged_provider_models,
+        )
+        # 维护 display_name → provider_name 映射，用于 model_selector 找 icon（只收 chat 实例）
         self._display_to_provider_name: dict[str, str] = {}
         for config_id, config in self._valid_configs.items():
+            if str(config.get("capability_type", "chat") or "chat") != "chat":
+                continue
             display_name = config.get("display_name", config.get("provider_name", config_id))
-            pname = config.get("provider_name", config_id)
-            self._display_to_config_id[display_name] = config_id
-            self._display_to_provider_name[display_name] = pname
-            model_list = []
-            if "模型列表" in config:
-                saved_models = config["模型列表"]
-                if isinstance(saved_models, str):
-                    try:
-                        import ast
-
-                        saved_models = ast.literal_eval(saved_models)
-                    except Exception:
-                        saved_models = []
-                if isinstance(saved_models, list) and saved_models:
-                    model_list = list(saved_models)
-                # 模型列表存在但为空（[]）→ 回退到 merged_provider_models，
-                # 避免刚注入默认配置时模型选择器一片空白
-                if not model_list and pname in merged_provider_models:
-                    model_list = list(merged_provider_models[pname])
-            elif pname in merged_provider_models:
-                model_list = list(merged_provider_models[pname])
-            # 关闭的模型不在选择卡片显示（P1-9 OpenCode 风格清单；仍在「模型列表」）
-            from app.core.modelmeta.provider_save_plan import filter_disabled_models
-
-            model_list = filter_disabled_models(model_list, config)
-            cur_model = config.get("模型名称", "")
-            if cur_model and cur_model not in model_list:
-                model_list.insert(0, cur_model)
-            if not model_list and cur_model:
-                model_list = [cur_model]
-            is_current = config_id == self._current_provider_name
-            # 传给 model_selector 用 display_name（用户看到的名），不要传 config_id
-            provider_models_data.append((display_name, model_list, is_current))
+            self._display_to_provider_name[display_name] = config.get("provider_name", config_id)
 
         # 找当前选中服务商的 display_name
         current_display = ""
