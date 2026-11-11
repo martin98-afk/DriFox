@@ -1,0 +1,27 @@
+{
+  "icon": {
+    "light": "icon.svg",
+    "dark": "icon_dark.svg"
+  },
+  "name": "sample-video",
+  "display_name": {
+    "zh": "样例·视频生成"
+  },
+  "description": "演示插件：经能力池按 capability_type=video_generation 取配置并调用 OpenAI 兼容 /videos/generations 端点，非生产质量",
+  "version": "0.1.0",
+  "author": {
+    "name": "DriFoxx Team"
+  },
+  "license": "GPL-3.0-or-later",
+  "type": "user",
+  "api_version": 2,
+  "components": {
+    "commands": true,
+    "ui": true
+  },
+  "capabilities": [
+    "provider.list",
+    "model.config_for",
+    "ui.notify"
+  ]
+}
