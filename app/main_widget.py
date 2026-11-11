@@ -7117,7 +7117,9 @@ class OpenAIChatToolWindow(ToolWindow):
                 return cid
         return None
 
-    def _resolve_model_config_by_query(self, model_value: str, show_error: bool = True) -> Optional[Dict]:
+    def _resolve_model_config_by_query(
+        self, model_value: str, show_error: bool = True, capability_type: str = "chat"
+    ) -> Optional[Dict]:
         """解析 --model=xxx 参数，返回覆盖后的 LLM 配置
 
         支持三种格式：
@@ -7132,7 +7134,14 @@ class OpenAIChatToolWindow(ToolWindow):
                 如 /subagents --model=、/title-gen --model= 命令）；
                 False 时静默返回 None（后台自动流程，如标题生成、子智能体
                 默认模型解析——解析失败应静默回退主模型，避免打扰用户）。
+            capability_type: 语义过滤，只放行该类型的实例（"chat" 聊天 / "generation"
+                生成类）；缺省 "chat"，既有调用方不传参时行为不变。
         """
+
+        def _allowed(cid: str) -> bool:
+            info = self._valid_configs.get(cid, {})
+            return str(info.get("capability_type", "chat") or "chat") == capability_type
+
         if not model_value:
             return None  # 使用默认配置
 
@@ -7149,6 +7158,8 @@ class OpenAIChatToolWindow(ToolWindow):
                         position=InfoBarPosition.BOTTOM,
                     )
                 return None
+            if config_id is not None and not _allowed(config_id):
+                return None
             model_query_lower = model_query.lower()
             matched = self._fuzzy_match_model_name(
                 config_id,
@@ -7158,6 +7169,7 @@ class OpenAIChatToolWindow(ToolWindow):
             if matched is not None:
                 config = self._valid_configs[config_id].copy()
                 config["模型名称"] = matched
+                config["capability_type"] = capability_type
                 return config
             else:
                 available = self._get_model_list_for_provider(config_id)
@@ -7171,11 +7183,15 @@ class OpenAIChatToolWindow(ToolWindow):
                 return None
         # 格式: "服务商名" — 切换到该服务商（取默认模型）
         config_id = self._resolve_service_provider(model_value)
-        if config_id is not None:
-            return self._valid_configs[config_id].copy()
+        if config_id is not None and _allowed(config_id):
+            config = self._valid_configs[config_id].copy()
+            config["capability_type"] = capability_type
+            return config
         # 格式: "模型名" — 在当前服务商模糊匹配
         config = self._get_current_model_config()
         provider = self._current_provider_name
+        if not _allowed(provider):
+            return None
         model_query_lower = model_value.lower()
         matched = self._fuzzy_match_model_name(
             provider,
@@ -7185,6 +7201,7 @@ class OpenAIChatToolWindow(ToolWindow):
         if matched is not None:
             config = dict(config)
             config["模型名称"] = matched
+            config["capability_type"] = capability_type
             return config
         else:
             available = self._get_model_list_for_provider(provider)

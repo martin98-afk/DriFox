@@ -1389,9 +1389,11 @@ def _model_config_for(host: Any):
     模型名（当前服务商模糊匹配）/ 服务商名（config_id、display_name、provider_name
     皆可）/ ``服务商:模型名``。解析逻辑留在宿主窗口（`_resolve_model_config_by_query`）：
     它依赖窗口内的 ``_valid_configs`` 与模型列表缓存，插件侧没有等价数据源。
+
+    capability_type 由调用方按意图传入（缺省 chat）；宿主解析器据此过滤候选集。
     """
 
-    def config_for(query: str) -> Any:
+    def config_for(query: str, capability_type: str = "chat") -> Any:
         if not query:
             return None
         resolver = getattr(host, "_resolve_model_config_by_query", None)
@@ -1399,7 +1401,17 @@ def _model_config_for(host: Any):
             logger.debug("[Capability] model.config_for 宿主无模型解析器")
             return None
         try:
-            return resolver(query, show_error=False)
+            config = resolver(query, show_error=False, capability_type=capability_type)
+            if isinstance(config, dict):
+                config.setdefault("capability_type", capability_type)
+            return config
+        except TypeError:
+            # 旧宿主解析器不接受新参数：退回原签名，避免能力池整体不可用
+            try:
+                return resolver(query, show_error=False)
+            except Exception as e:
+                logger.warning(f"[Capability] model.config_for 解析失败 {query!r}: {e}")
+                return None
         except Exception as e:
             logger.warning(f"[Capability] model.config_for 解析失败 {query!r}: {e}")
             return None

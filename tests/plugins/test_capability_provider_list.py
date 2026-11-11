@@ -249,3 +249,21 @@ def test_tool_surface_callable_from_tool_pool():
     pool = _pool("tool", {"provider.list", "model.enumerate"}, SimpleNamespace(_valid_configs=None))
     assert pool["provider.list"]() == []
     assert pool["model.enumerate"]() == []
+
+
+def test_config_for_passes_capability_type():
+    """能力池调用解析器时带目标类型，生成类实例可被解析。"""
+    from app.plugins.capabilities.providers import ui_core
+
+    sentinel = object()
+    seen = {}
+
+    def resolver(query, show_error=False, capability_type=sentinel):
+        # capability_type 缺省哨兵：只有 config_for 显式传参，返回值才是 "chat"
+        seen["args"] = (query, capability_type)
+        return {"API_KEY": "plain", "capability_type": capability_type}
+
+    host = SimpleNamespace(_resolve_model_config_by_query=resolver)
+    cfg = ui_core._model_config_for(host)("豆包语音合成:seed-tts-2.0")
+    assert seen["args"][0] == "豆包语音合成:seed-tts-2.0"
+    assert cfg["capability_type"] == "chat"
