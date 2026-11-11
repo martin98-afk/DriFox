@@ -330,6 +330,7 @@ class ProviderRegistry:
 
     def capability_types(self) -> List[str]:
         """已注册的非 chat 能力类型，去重排序。用于服务商墙动态分组与编辑卡下拉。"""
+        self.ensure_loaded()
         with self._lock:
             values = {str(p.capability_type or "chat").strip() for p in self._providers.values()}
         values.discard("chat")
