@@ -407,6 +407,7 @@ class LLMSettingsCard(SystemCardFrame):
         "appearance": "_build_appearance_page",
         "update": "_build_update_page",
         "mcp": "_build_mcp_page",
+        "hooks": "_build_hooks_page",
     }
     closed = pyqtSignal()
     configChanged = pyqtSignal()
@@ -415,6 +416,13 @@ class LLMSettingsCard(SystemCardFrame):
     # _build_mcp_page 构建时把自身信号转发到主卡信号——懒态不炸 + 进页后信号链通
     showAddCard = pyqtSignal()
     showEditCard = pyqtSignal(str, dict)
+    # Hooks 页懒态信号转发（#39b）：hookListCard 同为懒构造，controller 的
+    # 四条接线（添加/编辑/变更/单项开关）全部改连主卡转发信号；卡片在
+    # _build_hooks_page 构建时把自身信号转发到主卡信号
+    showAddHookCard = pyqtSignal()
+    showEditHookCard = pyqtSignal(str, dict)
+    hooksChanged = pyqtSignal()
+    hookToggled = pyqtSignal(str, bool)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -539,24 +547,10 @@ class LLMSettingsCard(SystemCardFrame):
         provider_layout.addStretch(1)
 
         # ════ Hooks 页 ════
-        hooks_layout = self._page_layouts["hooks"]
-
-        from app.widgets.cards.settings.hook_setting_card import HookListSettingCard
-
-        hook_manager = getattr(self.parent(), "backend", None)
-        if hook_manager:
-            hook_manager = hook_manager.hook_manager
-
-        self.hookListCard = HookListSettingCard(
-            icon=get_icon("hooks"),
-            title="Hooks 管理",
-            content="管理全局 Hooks",
-            parent=self,
-            home=self,
-            hook_manager=hook_manager,
-        )
-        hooks_layout.addWidget(self.hookListCard)
-        hooks_layout.addStretch(1)
+        # [PERF L3/#34] Hooks 页整体下沉懒构造（同 MCP 页模式）：hook_setting_card
+        # 模块首次加载 + HookListSettingCard 构造实测 ~400ms，随主卡构造启动纯属
+        # 浪费（用户可能整场会话不进 Hooks 页）。首次进页时才构建。
+        self.hookListCard = None
 
         # ════ MCP 页 ════
         # [PERF L3] MCP 页整体下沉懒构造：mcp_setting_card 顶层 import app.tools.mcp_tools
@@ -657,12 +651,12 @@ class LLMSettingsCard(SystemCardFrame):
         self.cfg.llm_api_port.valueChanged.connect(self._on_llm_api_port_changed)
 
         # 列表形式配置卡片手风琴：展开一个时自动收起其他
-        # getattr 防御：懒构造分页（mcp 等）首开时卡片未建，进页后再补入
+        # getattr 防御：懒构造分页（mcp/hooks 等）首开时卡片未建，进页后再补入
         self._list_cards = [
             c
             for c in (
                 self.llmProviderCard,
-                self.hookListCard,
+                getattr(self, "hookListCard", None),
                 getattr(self, "mcpListCard", None),
                 self.pluginToolCard,
                 self.pluginAgentCard,
@@ -1062,6 +1056,46 @@ class LLMSettingsCard(SystemCardFrame):
         # ensure_settings_popup 接线期连的是主卡信号（懒态安全），进页后链路接通
         self.mcpListCard.showAddCard.connect(self.showAddCard)
         self.mcpListCard.showEditCard.connect(self.showEditCard)
+
+    def _build_hooks_page(self):
+        """Hooks 页懒构造（首次进入时才拉 hook_setting_card 模块 + HookListSettingCard）。
+
+        [PERF L3/#34] 原构造期建卡（模块加载 + 实例化实测 ~400ms）。
+        含原 hooks 分支的 HookManager 注入与首刷（原 _ensure_page_ready elif
+        hooks 逻辑并入）：构造期 parent 无 backend 时注入空 HookManager。
+        """
+        from app.widgets.cards.settings.hook_setting_card import HookListSettingCard
+
+        hooks_layout = self._page_layouts["hooks"]
+
+        hook_manager = getattr(self.parent(), "backend", None)
+        if hook_manager:
+            hook_manager = hook_manager.hook_manager
+
+        self.hookListCard = HookListSettingCard(
+            icon=get_icon("hooks"),
+            title="Hooks 管理",
+            content="管理全局 Hooks",
+            parent=self,
+            home=self,
+            hook_manager=hook_manager,
+        )
+        hooks_layout.addWidget(self.hookListCard)
+        hooks_layout.addStretch(1)
+        self._list_cards.append(self.hookListCard)
+        self._wrap_list_card_accordion(self.hookListCard)
+        # 信号链补接（#39b）：构建时把卡片四条信号转发到主卡信号（controller
+        # 接线期连主卡信号永存在，进 Hooks 页后链路接通——同 #35 MCP 模式）
+        self.hookListCard.showAddHookCard.connect(self.showAddHookCard)
+        self.hookListCard.showEditHookCard.connect(self.showEditHookCard)
+        self.hookListCard.hooksChanged.connect(self.hooksChanged)
+        self.hookListCard.hookToggled.connect(self.hookToggled)
+        # 原 hooks 懒分支：构造期 hook_manager 为 None 时注入空 HookManager + 首刷
+        if getattr(self.hookListCard, "_hook_manager", None) is None:
+            from app.core.hooks.hook_manager import HookManager
+
+            self.hookListCard._hook_manager = HookManager()
+        self.hookListCard._refresh(reload=True)
 
     def _apply_list_accordion(self):
         """为列表形式配置卡片应用手风琴效果
@@ -1505,14 +1539,6 @@ class LLMSettingsCard(SystemCardFrame):
             if builder is not None:
                 getattr(self, builder)()
                 self._apply_appearance_to_page(tab_id)
-            elif tab_id == "hooks":
-                # 构造期 hook_manager 为 None（parent 无 backend），原实现在
-                # controller 里构造完立刻注入并全量重渲染一次（实测 ~0.7s）
-                if getattr(self.hookListCard, "_hook_manager", None) is None:
-                    from app.core.hooks.hook_manager import HookManager
-
-                    self.hookListCard._hook_manager = HookManager()
-                self.hookListCard._refresh(reload=True)
             elif tab_id in ("tools", "agents", "context"):
                 card = getattr(
                     self,

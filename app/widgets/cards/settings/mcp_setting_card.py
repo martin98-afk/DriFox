@@ -30,7 +30,6 @@ from PyQt5.QtWidgets import (
 from qfluentwidgets import (
     BodyLabel,
     CardWidget,
-    ComboBox,
     ExpandSettingCard,
     FluentIcon,
     InfoBar,
@@ -63,13 +62,7 @@ from app.utils.design_tokens import (
 from app.utils.utils import get_font_family_css
 from app.widgets.elided_label import _ElidedLabel
 from app.widgets.status_dot import StatusDot
-
-
-class NoWheelComboBox(ComboBox):
-    """禁用滚轮切换的普通下拉框（防止误触）"""
-
-    def wheelEvent(self, event):
-        event.ignore()
+from app.widgets.cards.settings.settings_form_widgets import NoWheelComboBox, _make_row
 
 
 # ═══════════════════════════════════════════════════════════
@@ -181,18 +174,6 @@ def _resolve_mcp_server_icon(server_data: dict):
         return QIcon(str(icon_path)) if icon_path else None
     except Exception:
         return None
-
-
-def _make_row(label_text: str, widget: QWidget, label_width: int = 70) -> QHBoxLayout:
-    """构造一行：右对齐标签 + 输入控件"""
-    row = QHBoxLayout()
-    row.setSpacing(8)
-    label = BodyLabel(label_text)
-    label.setFixedWidth(label_width)
-    label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-    row.addWidget(label)
-    row.addWidget(widget, 1)
-    return row, label
 
 
 # ═══════════════════════════════════════════════════════════

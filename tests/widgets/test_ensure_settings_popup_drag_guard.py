@@ -72,6 +72,12 @@ def _make_controller(monkeypatch, instances):
             self.hookListCard = _SignalStub()
             self.llmProviderCard = _SignalStub()
             self.mcpListCard = _SignalStub()
+            self.showAddCard = _SignalStub()
+            self.showEditCard = _SignalStub()
+            self.showAddHookCard = _SignalStub()
+            self.showEditHookCard = _SignalStub()
+            self.hooksChanged = _SignalStub()
+            self.hookToggled = _SignalStub()
 
         def setVisible(self, v):
             pass

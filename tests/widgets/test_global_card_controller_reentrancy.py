@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """GlobalCardController.ensure_settings_popup 重入防护回归测试
 
 背景（P024）：LLMSettingsCard 构造链中 HookListSettingCard._refresh()
@@ -91,6 +91,10 @@ def test_ensure_settings_popup_no_duplicate_on_reentry(qtbot, monkeypatch):
             self.mcpListCard = _SignalStub()
             self.showAddCard = _SignalStub()
             self.showEditCard = _SignalStub()
+            self.showAddHookCard = _SignalStub()
+            self.showEditHookCard = _SignalStub()
+            self.hooksChanged = _SignalStub()
+            self.hookToggled = _SignalStub()
 
         def setVisible(self, v):
             pass
@@ -152,6 +156,10 @@ def test_ensure_settings_popup_reentry_after_build_is_noop(qtbot, monkeypatch):
 
             self.showAddCard = _SignalStub()
             self.showEditCard = _SignalStub()
+            self.showAddHookCard = _SignalStub()
+            self.showEditHookCard = _SignalStub()
+            self.hooksChanged = _SignalStub()
+            self.hookToggled = _SignalStub()
         def setVisible(self, v):
             pass
 

@@ -41,7 +41,10 @@ from app.utils.design_tokens import (
     scale_font_size,
 )
 from app.utils.utils import get_app_data_dir, get_font_family_css
-from app.widgets.cards.settings.mcp_setting_card import NoWheelComboBox, _make_row
+# [PERF L3/#34] 顶层 import 曾指向 mcp_setting_card（NoWheelComboBox/_make_row 的旧居所）
+# → 构造 hooks 卡连带拉起 mcp_setting_card → app.tools.mcp_tools = mcp SDK 全家桶
+# （cum ~600ms + mcp-eventloop 常驻线程），主卡构造期即付。改引公共控件模块解耦。
+from app.widgets.cards.settings.settings_form_widgets import NoWheelComboBox, _make_row
 from app.widgets.elided_label import _ElidedLabel
 
 # 事件顺序定义（按实际会话触发先后排列）
