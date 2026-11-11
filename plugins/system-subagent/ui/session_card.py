@@ -245,7 +245,13 @@ class SubAgentSessionCard(BaseSettingsCard):
         if facade is None:
             return
         if self._task_id and self._bound_session_id == session_id:
-            return  # 已绑定同一会话的任务，不打扰
+            # 已绑定同一会话的任务，不打扰；但 hideEvent 可能已硬释放 WebView
+            # （系统卡互斥隐藏后重开），须重建再渲染，否则日志区永久空白
+            # （摘要栏在、日志区空）。_logs/_summary 内存态仍在，全量重灌即可。
+            if self._web_view is None:
+                self._ensure_web_view()
+                self._render_logs()
+            return
         try:
             data = facade.latest_task()
         except Exception as e:  # noqa: BLE001 - 恢复失败保持现状

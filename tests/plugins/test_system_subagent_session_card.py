@@ -208,6 +208,38 @@ def test_recover_skips_when_same_session_already_bound(card, monkeypatch):
 
     assert card._task_id == "t1"
 
+def test_recover_rebuilds_webview_after_hard_release(card, monkeypatch):
+    """守卫命中且 _web_view 已被 hideEvent 硬释放：重建并重渲染（二次显示空白回归）。
+
+    触发路径：卡片同会话恢复过一次（_bound_session_id 已赋）→ 打开另一系统卡
+    互斥隐藏（hideEvent deleteLater WebView）→ 再点开。守卫命中只跳过数据重灌，
+    不得跳过 WebView 重建，否则摘要栏在、日志区永久空白。
+    """
+    card.load(
+        "t1",
+        "coder",
+        [{"type": "progress", "content": "开始", "timestamp": 0}],
+        {"status": "finished"},
+    )
+    card._bound_session_id = "sess-1"
+    card.hideEvent(None)  # 互斥隐藏：硬释放 WebView（QHideEvent 不可手工构造，签名允许 None）
+    assert card._web_view is None
+
+    facade = _FakeFacade({"found": True, "task_id": "t9", "agent_name": "x", "logs": [], "summary": {}})
+    monkeypatch.setattr(_session_card_mod, "_current_facade", lambda: (facade, "sess-1"))
+    card._recover_for_current_session()
+
+    # 守卫命中：不重灌数据（仍绑定原任务）
+    assert card._task_id == "t1"
+    # 但 WebView 必须重建且渲染链已执行（_load_html 写临时文件为渲染发生物证）
+    assert card._web_view is not None
+    assert card._tmp_files, "守卫命中分支应触发 _render_logs 重灌日志区"
+
+    # _web_view 存活时再次恢复：不重复创建（不闪屏不重载）
+    kept = card._web_view
+    card._recover_for_current_session()
+    assert card._web_view is kept
+
 
 def test_recover_noop_without_facade(card, monkeypatch):
     monkeypatch.setattr(_session_card_mod, "_current_facade", lambda: (None, ""))
