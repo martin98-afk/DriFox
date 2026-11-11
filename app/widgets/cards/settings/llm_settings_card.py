@@ -53,9 +53,7 @@ from app.utils.startup_manager import (
 )
 from app.utils.theme_mode import apply_light
 from app.utils.utils import get_font_family_css, get_icon, invalidate_font_family_css_cache
-from app.widgets.cards.settings.gitee_card import GiteeCard
 from app.widgets.cards.settings.list_setting_card import SkillListSettingCard
-from app.widgets.cards.settings.mcp_setting_card import MCPListSettingCard
 from app.widgets.cards.settings.plugin_components_card import PluginComponentsCard
 from app.widgets.cards.settings.plugin_settings_page import PluginSettingsPage
 from app.widgets.cards.settings.provider_setting_card import ProviderListSettingCard
@@ -408,9 +406,15 @@ class LLMSettingsCard(SystemCardFrame):
         "security": "_build_security_page",
         "appearance": "_build_appearance_page",
         "update": "_build_update_page",
+        "mcp": "_build_mcp_page",
     }
     closed = pyqtSignal()
     configChanged = pyqtSignal()
+    # MCP 页懒态信号转发（#35）：主卡构造期 mcpListCard=None（MCP 页懒构造），
+    # controller（ensure_settings_popup）接线时连主卡信号永存在；卡片在
+    # _build_mcp_page 构建时把自身信号转发到主卡信号——懒态不炸 + 进页后信号链通
+    showAddCard = pyqtSignal()
+    showEditCard = pyqtSignal(str, dict)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -510,6 +514,11 @@ class LLMSettingsCard(SystemCardFrame):
         provider_layout = self._page_layouts["provider"]
 
         # Gitee 账号绑定（保持原默认页顶部位置）
+        # [PERF L3] GiteeCard 链（gateway.auth + requests ~155ms）下沉到构造期局部
+        # import：顶层 import 曾在「点设置同步 import 主卡」时拉链（plan #29 实测
+        # import 909ms 大头之一）。构造时才拉，点开设置的 import 段变快。
+        from app.widgets.cards.settings.gitee_card import GiteeCard
+
         self.giteeCard = GiteeCard(self)
         provider_layout.addWidget(self.giteeCard)
 
@@ -550,15 +559,11 @@ class LLMSettingsCard(SystemCardFrame):
         hooks_layout.addStretch(1)
 
         # ════ MCP 页 ════
-        mcp_layout = self._page_layouts["mcp"]
-        self.mcpListCard = MCPListSettingCard(
-            icon=get_icon("MCP"),
-            title="MCP 服务器",
-            content="管理 MCP Server 连接",
-            parent=self,
-        )
-        mcp_layout.addWidget(self.mcpListCard)
-        mcp_layout.addStretch(1)
+        # [PERF L3] MCP 页整体下沉懒构造：mcp_setting_card 顶层 import app.tools.mcp_tools
+        # = mcp SDK 全家桶（plan #29 实测 cum 598.9ms，含 mcp-eventloop 常驻线程），
+        # 随主卡构造启动纯属浪费。改首次进入 MCP 页时才构建（_ensure_page_ready），
+        # ConfigSync/mcp-eventloop 等常驻资源同步推迟到进入页后。
+        self.mcpListCard = None
 
         # ════ LSP 页 ════
         lsp_layout = self._page_layouts["lsp"]
@@ -652,14 +657,19 @@ class LLMSettingsCard(SystemCardFrame):
         self.cfg.llm_api_port.valueChanged.connect(self._on_llm_api_port_changed)
 
         # 列表形式配置卡片手风琴：展开一个时自动收起其他
+        # getattr 防御：懒构造分页（mcp 等）首开时卡片未建，进页后再补入
         self._list_cards = [
-            self.llmProviderCard,
-            self.hookListCard,
-            self.mcpListCard,
-            self.pluginToolCard,
-            self.pluginAgentCard,
-            self.llmSkillsCard,
-            self.lspListCard,
+            c
+            for c in (
+                self.llmProviderCard,
+                self.hookListCard,
+                getattr(self, "mcpListCard", None),
+                self.pluginToolCard,
+                self.pluginAgentCard,
+                self.llmSkillsCard,
+                self.lspListCard,
+            )
+            if c is not None
         ]
         self._apply_list_accordion()
 
@@ -1028,6 +1038,31 @@ class LLMSettingsCard(SystemCardFrame):
         except Exception as e:
             logger.warning(f"[LLMSettingsCard] 插件设置页刷新失败: {e}")
 
+    def _build_mcp_page(self):
+        """MCP 页懒构造（首次进入时才拉 mcp_setting_card 模块 = mcp SDK 全家桶）。
+
+        下沉收益：主卡 import/构造不再拉 mcp SDK（cum 598.9ms）与 mcp-eventloop
+        常驻线程——用户可能整场会话不进 MCP 页。构造后补入手风琴列表（单卡增量
+        包装，防 _apply_list_accordion 整表重跑造成 setExpand 套娃）。
+        """
+        from app.widgets.cards.settings.mcp_setting_card import MCPListSettingCard
+
+        mcp_layout = self._page_layouts["mcp"]
+        self.mcpListCard = MCPListSettingCard(
+            icon=get_icon("MCP"),
+            title="MCP 服务器",
+            content="管理 MCP Server 连接",
+            parent=self,
+        )
+        mcp_layout.addWidget(self.mcpListCard)
+        mcp_layout.addStretch(1)
+        self._list_cards.append(self.mcpListCard)
+        self._wrap_list_card_accordion(self.mcpListCard)
+        # 信号链补接（#35）：卡片构建时把自身信号转发到主卡信号——controller 在
+        # ensure_settings_popup 接线期连的是主卡信号（懒态安全），进页后链路接通
+        self.mcpListCard.showAddCard.connect(self.showAddCard)
+        self.mcpListCard.showEditCard.connect(self.showEditCard)
+
     def _apply_list_accordion(self):
         """为列表形式配置卡片应用手风琴效果
 
@@ -1036,23 +1071,27 @@ class LLMSettingsCard(SystemCardFrame):
         点击已展开卡片头部仍可正常收起。
         """
         for card in self._list_cards:
-            original_set_expand = card.setExpand
-            # 通过闭包捕获当前 card 和其他兄弟卡片
-            siblings = [c for c in self._list_cards if c is not card]
+            self._wrap_list_card_accordion(card)
 
-            def _wrapped_set_expand(is_expand, _orig=original_set_expand, _sibs=siblings, _card=card):
-                if is_expand:
-                    for sib in _sibs:
-                        if sib.isExpand:
-                            sib.setExpand(False)
-                _orig(is_expand)
-                # 展开后等动画/布局稳定，再把卡片内的「焦点 item」滚到弹窗顶部
-                # 例如：ProviderListSettingCard 滚到默认 provider；其他卡片 fallback 到第一项
-                if is_expand:
-                    # qfluentwidgets 展开动画通常 200ms+，等动画结束再算坐标
-                    QTimer.singleShot(350, lambda c=_card: self._scroll_focus_item_to_top(c))
+    def _wrap_list_card_accordion(self, card):
+        """单卡手风琴包装（增量入口：懒构造分页补建时只包新卡，防套娃）"""
+        original_set_expand = card.setExpand
+        # 通过闭包捕获当前 card 和其他兄弟卡片
+        siblings = [c for c in self._list_cards if c is not card]
 
-            card.setExpand = _wrapped_set_expand
+        def _wrapped_set_expand(is_expand, _orig=original_set_expand, _sibs=siblings, _card=card):
+            if is_expand:
+                for sib in _sibs:
+                    if sib.isExpand:
+                        sib.setExpand(False)
+            _orig(is_expand)
+            # 展开后等动画/布局稳定，再把卡片内的「焦点 item」滚到弹窗顶部
+            # 例如：ProviderListSettingCard 滚到默认 provider；其他卡片 fallback 到第一项
+            if is_expand:
+                # qfluentwidgets 展开动画通常 200ms+，等动画结束再算坐标
+                QTimer.singleShot(350, lambda c=_card: self._scroll_focus_item_to_top(c))
+
+        card.setExpand = _wrapped_set_expand
 
         # 两张开关卡都保持折叠（用户要求），点标题展开即可。
         # 若以后要恢复默认展开，必须在包装完成之后调用 setExpand——
