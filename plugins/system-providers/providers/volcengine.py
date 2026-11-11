@@ -190,3 +190,31 @@ def register(registry):
             register_url="https://console.volcengine.com/ark/region:ark+cn-beijing/apiKey",
         )
     )
+
+    # 图像生成样例：与 chat 同域但走通用 api/v3 端点，register_url 与 chat 同页
+    registry.register(
+        ProviderDef(
+            name="火山方舟图像",
+            icon="火山引擎",
+            api_url="https://ark.cn-beijing.volces.com/api/v3",
+            auth_type="bearer",
+            default_model="doubao-seedream-4-0-250828",
+            models=["doubao-seedream-4-0-250828"],
+            capability_type="image_generation",
+            register_url="https://console.volcengine.com/ark/region:ark+cn-beijing/apiKey",
+        )
+    )
+
+    # 语音识别样例：豆包家族 openspeech 域 v3 asr 端点
+    registry.register(
+        ProviderDef(
+            name="豆包录音识别",
+            icon="火山引擎",
+            api_url="https://openspeech.bytedance.com/api/v3/asr",
+            auth_type="bearer",
+            default_model="seed-asr",
+            models=["seed-asr"],
+            capability_type="speech_recognition",
+            register_url="https://console.volcengine.com/speech/app",
+        )
+    )
