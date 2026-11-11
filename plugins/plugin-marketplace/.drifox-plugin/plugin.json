@@ -21,7 +21,8 @@
     ],
     "capabilities": [
         "config.read",
-        "input.write"
+        "input.write",
+        "plugin.reload_components"
     ],
     "components": {
         "ui": true,

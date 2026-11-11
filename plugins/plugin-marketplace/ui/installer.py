@@ -550,9 +550,13 @@ class PluginInstaller:
                 logger.warning(f"[Installer] PluginManager 中不存在插件，无法{'启用' if enabled else '禁用'}: {name}")
                 return False
             if enabled:
-                pm.enable_plugin(name)
+                # [双通道拆除] load_components=False：worker 只写配置；组件加载与
+                # plugin_changed 由主线程补载链（cards._on_manage_done → 全组件
+                # 口径）完成。原 worker 完整加载 + 主线程补载 = UI 组件被完整
+                # exec 两轮。
+                pm.enable_plugin(name, load_components=False)
             else:
-                pm.disable_plugin(name)
+                pm.disable_plugin(name, load_components=False)
             self.invalidate_installed_cache()
             logger.info(f"[Installer] {'Enabled' if enabled else 'Disabled'} builtin plugin {name} (settings)")
             return True

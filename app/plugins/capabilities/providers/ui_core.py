@@ -12,7 +12,7 @@ from typing import Any
 
 from loguru import logger
 
-from app.plugins.capabilities.providers import model_meta, net_sync, process_core
+from app.plugins.capabilities.providers import model_meta, net_sync, plugin_host, process_core
 from app.utils.info_bar_guard import post_to_main
 
 
@@ -1540,6 +1540,8 @@ def register(registry) -> None:
     reg.register("command.reload", _command_reload, surface="ui", owner="core:ui")
     reg.register("plugin.read", _plugin_read, surface="ui", owner="core:ui")
     reg.register("plugin.control", _plugin_control, surface="ui", owner="core:ui")
+    # B 项双通道拆除：启停补载/补卸载收口能力池（插件侧禁直接 import 主程序包）
+    reg.register("plugin.reload_components", plugin_host.reload_components, surface="ui", owner="core:plugin_host")
     reg.register("ui.exclusive", _ui_exclusive, surface="ui", owner="core:ui")
     reg.register("ui.exclusive", _enter_exclusive, surface="ui", owner="core:ui", legacy_key="enter_exclusive_ui_mode")
     reg.register("ui.exclusive", _exit_exclusive, surface="ui", owner="core:ui", legacy_key="exit_exclusive_ui_mode")

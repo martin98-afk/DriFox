@@ -223,6 +223,12 @@ CATALOG: Dict[str, CapabilitySpec] = {
         # ── 插件管理 ──
         _spec("plugin.read", _L, "已安装插件列表/元数据", _UI),
         _spec("plugin.control", _H, "重载/启停其他插件", _UI),
+        _spec(
+            "plugin.reload_components",
+            _H,
+            "插件启停后的全组件补载/补卸载（含 plugin_changed 广播，宿主侧封装）",
+            _UI,
+        ),
         # ── 命令 ──
         _spec("command.read", _L, "命令列表", _UI),
         _spec("command.reload", _M, "命令热重载", _UI),
