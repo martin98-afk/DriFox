@@ -69,6 +69,33 @@ def test_card_loads_logs_and_summary(card):
     assert card._agent_name == "coder"
     assert len(card._logs) == 1
 
+def test_lazy_webview_lifecycle(card):
+    """懒创建 + 隐藏硬释放：构造 None → load 建成 → hideEvent 释放 → load 重建。"""
+    assert card._web_view is None  # 构造即建是旧盲区，现在必须懒
+    card.load(
+        "t1",
+        "coder",
+        [{"type": "progress", "content": "开始", "timestamp": 0}],
+        {"status": "finished"},
+    )
+    assert card._web_view is not None  # load 懒创建
+    old = card._web_view
+    card.hideEvent(None)  # 互斥隐藏派发（QHideEvent 不可手工构造，签名允许 None）
+    assert card._web_view is None  # 硬释放（renderer 进程随页面销毁收敛）
+    card.load("t1", "coder", [], {"status": "finished"})
+    assert card._web_view is not None and card._web_view is not old  # 重建为全新实例
+
+def test_runJavaScript_guards_after_release(card):
+    """释放后轮询消费点早退不崩（_check_and_update / _apply_update 路径）。"""
+    card.load("t1", "coder", [], {"status": "running"})
+    card._web_view = None  # 模拟释放后的轮询竞态
+    card._logs_provider = lambda: {
+        "found": True,
+        "logs": [{"type": "progress", "content": "新日志", "timestamp": 1}],
+        "summary": {"status": "running"},
+    }
+    card._poll_update()  # 不抛异常即守卫生效
+
 
 class _FakeWidget:
     def __init__(self, visible: bool = False):

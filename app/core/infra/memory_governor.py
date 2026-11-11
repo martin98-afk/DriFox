@@ -82,7 +82,7 @@ _MIN_RENDERED_CARDS_PER_WINDOW_FLOOR = 3
 # 让子进程涨 216MB、主进程只涨 4MB —— 并发对话的内存主体全在 renderer 子进程，
 # 拿主进程 RSS 当门槛等于永远够不着，强回收永不触发 → 子进程一路涨到 4GB。
 _WEB_MEM_THRESHOLD_MB = 600  # 非活跃窗口：WebEngine 子进程 RSS 触发阈值
-_WEB_MEM_THRESHOLD_MB_ACTIVE = 1000  # 活跃窗口：阈值更高，避免滚动回看时重建抖动
+_WEB_MEM_THRESHOLD_MB_ACTIVE = 800  # 活跃窗口：阈值更高，避免滚动回看时重建抖动
 # 兜底：子进程采样不可用时（无 psutil / 尚未创建 view）退回主进程 RSS 判据
 _MEM_THRESHOLD_TOTAL_MB = 900
 _LRU_RENDERER_KEEP = 8  # 强回收后保留最近活跃 renderer 数

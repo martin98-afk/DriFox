@@ -14159,10 +14159,10 @@ class OpenAIChatToolWindow(ToolWindow):
         # - T30：改成**只看子进程** → 反而漏掉另一半：软件档（--disable-gpu）
         #   下 Chromium 把合成表面留在**主进程**（实测 8 个可见 view：主进程
         #   +404MB、子进程 +0MB），hardware 档才落 renderer 子进程。
-        #   实测现场：主进程 1968MB + 子进程 854MB，而活跃窗口阈值 1000MB 只
+        #   实测现场：主进程 1968MB + 子进程 854MB，而活跃窗口阈值 800MB 只
         #   管子进程 → 差 146MB 不到阈值 → 单窗口活跃场景内存单调涨到 2.8GB。
         # - 现在：两边都看。合计阈值沿用既有常量（活跃 1400 / 非活跃 900），
-        #   子进程单项阈值（1000 / 600）保留为更敏感的那一路。
+        #   子进程单项阈值（800 / 600）保留为更敏感的那一路。
         # 「不因 Python 堆高就误杀 renderer」的原意仍受保护：强回收只 kill
         # 距可视区 ≥ N 批的离屏 renderer，且 LRU 保留最近 8/14 个。
         try:
@@ -20701,23 +20701,41 @@ class OpenAIChatToolWindow(ToolWindow):
         self._ensure_tool_control_card()
         self._tool_control_card.refresh()
 
-    @staticmethod
-    def _encode_image_attachments_to_multimodal(user_text: str, image_paths: list, model_name: str) -> list | None:
+    def _encode_image_attachments_to_multimodal(self, user_text: str, image_paths: list, model_name: str) -> list | None:
         """把图片附件编码为 OpenAI multimodal 格式的 user content
 
         同步执行，但只在 _on_send_clicked 的 QTimer 推迟闭包内调用，
         此时 UI 已渲染、用户看到"等待 AI"状态，不会感知主线程短暂阻塞。
 
+        [A2] 图片不再 base64 常驻 content：读原图 → data URI → 立即走
+        _persist_vision_image_blocks_impl 单块路径落盘（sha1 去重 + 原子写），
+        content 直接构造 type=image_ref 引用块。data URI 只在本函数栈内瞬态
+        存在（persist 失败时降级保留原 image_url 块，行为同旧版）；发送时由
+        _materialize_for_send 物化、出口 revoke 还原。
+
         Returns:
-            multimodal content 列表（[text, image_url, image_url, ...]），
+            multimodal content 列表（[text, image_url|image_ref, ...]），
             或 None（编码失败/无图片）。
         """
+        sid = getattr(self, "_current_session_id", "") or ""
         image_blocks = []
         for img_path in image_paths:
             data_uri = _image_path_to_data_uri(img_path)
             if data_uri is None:
                 continue
-            image_blocks.append({"type": "image_url", "image_url": {"url": data_uri}})
+            block = {"type": "image_url", "image_url": {"url": data_uri}}
+            try:
+                from app.core.store.session_repository import _persist_vision_image_blocks_impl
+                from app.utils.utils import get_app_data_dir
+
+                # persist 是「列表槽位替换」（content[bi] = 新 dict），不改原块对象；
+                # 必须从包装列表取回替换后的 image_ref 块
+                holder = [{"role": "user", "content": [block]}]
+                _persist_vision_image_blocks_impl(holder, sid, get_app_data_dir())
+                block = holder[0]["content"][0]
+            except Exception as e:
+                logger.warning(f"[ImageAttach] 图片落盘失败，降级 data URI 常驻 {img_path}: {e}")
+            image_blocks.append(block)
         if not image_blocks:
             return None
         logger.info(

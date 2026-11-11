@@ -843,10 +843,17 @@ class SubAgentExecutor(QThread):
             return content
         return _THINKING_PATTERN.sub("", content)
 
-    def _serialize_for_api(self, messages: List[Dict], llm_config: Dict = None):
+    def _serialize_for_api(
+        self, messages: List[Dict], llm_config: Dict = None, revoke_after: bool = True
+    ):
         """序列化单入口（Phase C）：adapter flags → serializer_id → 序列化器 → SerializeResult。
 
         与 chat_worker._serialize_for_api 对称；supports_vision 默认 True（subagent 无视觉注入）。
+
+        [方案 A] 出口即回收（revoke_after=True 默认）：revive 产出的 data:image 块
+        在返回前还原为 image_ref 引用块（与 chat_worker 出口回收口径一致）。
+        落盘 session_id 用 _vision_session_ids 候选集合（继承历史的真实 sid，
+        revoke 侧逐目录存在性探测，全部不命中安全降级保留）。
         """
         from app.plugins.contracts.message_serializer import SerializeContext
         from app.plugins.registries.serializer_registry import SerializerRegistry
@@ -865,7 +872,27 @@ class SubAgentExecutor(QThread):
         config = llm_config if llm_config is not None else getattr(self, "llm_config", None)
         flags = self._protocol_flags(config)
         serializer = SerializerRegistry.get_instance().resolve(flags.serializer_id)
-        return serializer.serialize(messages, SerializeContext(flags=flags))
+        result = serializer.serialize(messages, SerializeContext(flags=flags))
+        if revoke_after:
+            # [方案 A] 产出即回收：产物与入参双扫（passthrough 直通二者同引用，
+            # 幂等重复扫零害；拷贝型序列化器两份都可能持有 data URI）
+            try:
+                from app.utils.image_utils import revoke_vision_blocks
+
+                restored = revoke_vision_blocks(
+                    result.messages, getattr(self, "_vision_session_ids", None) or ""
+                )
+                if result.messages is not messages:
+                    restored += revoke_vision_blocks(
+                        messages, getattr(self, "_vision_session_ids", None) or ""
+                    )
+                if restored:
+                    logger.debug(
+                        f"[Memory] 子代理 serialize 出口回收 {restored} 张图片（data URI → image_ref）"
+                    )
+            except Exception as e:  # noqa: BLE001 — 回收失败保留 data URI，不阻断
+                logger.warning(f"[SubAgentWorker] serialize vision revoke 失败（保留 data URI）: {e}")
+        return result
 
     def _protocol_flags(self, llm_config: Dict = None):
         """经 ModelAdapterRegistry 解析完整协议开关（含 serializer_id，冷启动防御同 Task 1）"""

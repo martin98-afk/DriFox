@@ -3,9 +3,22 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### ⚡ 性能优化 (Performance)
+
+- **强回收活跃窗口阈值 1000→800** (`app/core/infra/memory_governor.py`): `_WEB_MEM_THRESHOLD_MB_ACTIVE` 下调后，活跃窗口下 WebEngine 子进程 RSS 合计 ≥800MB 即触发离屏 renderer 强回收（比旧阈值更早介入）；回收护栏不变（距可视区 ≥12 批、LRU 保留最近 14、每轮 ≤12、60s 冷却）。
+- **主题预览缓存读侧缩放** (`app/widgets/cards/settings/theme_style_card.py`): `_IMAGE_CACHE` 不再缓存全分辨率 QImage（1920×1080 ≈8.3MB/张），写缓存前缩到 tile 尺寸×dpr（320×120 逻辑上限，KeepAspectRatioByExpanding + SmoothTransformation）；深浅两模式 41 个主题源实测缓存 211.6MB → 9.05MB（-95.7%）。缺图主题仍写 None 防重复探盘，`_ThemeTile` 绘制二次缩放与交互不变。
+- **subagent serialize 出口回收补齐** (`app/core/workers/subagent_worker.py`): `_serialize_for_api` 补 `revoke_after=True`（与 chat_worker 出口回收同构：产物+入参双扫、失败仅 warning 不阻断），子代理继承含图历史时 revive 物化的 data URI 在返回前还原为 image_ref，不再驻留到主 worker 下轮扫描兜底。
+- **粘贴图片立即落盘为 image_ref** (`app/main_widget.py`): 图片附件编码复用 persist 单块路径（sha1 去重 + 原子写），content 直接产出 `image_ref` 引用块，data URI 内存驻留从「粘贴起到首次发送」缩为「仅发送瞬间物化副本」；persist 失败降级保留旧 data URI 行为，>20MB 降采样与 8-20MB 强压分支保留。
+- **image_ref 块渲染分支** (`app/widgets/message_card.py`): 增量 markdown 构建识别 `image_ref` 落盘引用块，按 persist 文件路径拼 `file:///` 绝对 URL 渲染与点击预览（对齐既有 file:// 解析与加载口径），缺 file 字段回退 `[图片]` 占位。
+- **子代理会话卡 WebView 懒创建 + 互斥隐藏硬释放** (`plugins/system-subagent/ui/session_card.py`): QWebEngineView 改为首次 load 懒创建（无任务时不再实例化）；卡片被其他系统卡互斥隐藏时 deleteLater 硬释放（隐藏期不再常驻 QtWebEngineProcess，单卡约 20-50MB）；再次显示按当前会话全量重灌恢复，运行中任务轮询续接。
+
 ### ♻️ 代码重构 (Refactoring)
 
 - **多模态服务商迁出为可安装插件** (`plugins/system-providers/providers/volcengine.py`, `plugins/system-providers/providers/minimax_video.py` 删除): 豆包语音合成 / 火山方舟图像 / 豆包录音识别 / 海螺视频四个非 chat 能力服务商定义移入插件市场仓库 `drifox-plugins2` 的 `multimodal-providers` 插件（声明 `min_host_version 0.7.1`，依赖 `ProviderDef.capability_type`），主程序不再内置多模态样例。`system-providers` 回到 14 家 chat 服务商，`tests/core/test_provider_registry.py::test_system_providers_loaded_from_plugins` 的 14 家断言重新成立（此前随样例定义落地失效）。
+
+### 🐛 问题修复 (Bug Fixes)
+
+- **移除 UI 插件 ui 目录的 sys.path 注入** (`app/plugins/registries/ui_plugin_registry.py`): `load_plugin` 曾把每个 UI 插件的 `ui/` 目录 `sys.path.insert(0, ...)` 且卸载不回收，24 个带 `ui/__init__.py` 的插件共存时 `import ui` 的解析随加载顺序漂移——晚加载插件顶掉先加载插件的包名，引发 `No module named 'ui.speakup_ui'` 类跨插件污染（speak-up 演练/真发按钮实爆）。删除该注入：相对导入走 `ui_plugin_{name}` 包的 `__package__` 解析，本就不依赖 sys.path；全生态运行时代码仅 speak-up 一家依赖此行为（已改走自有顶层包 `speakup_core.runtime`）。配套在 ui-plugin-creator 架构文档固化跨模块导入规则（ui/ 内相对导入、共享单例放自有顶层包或 `ui_plugin_{safe}` 显式导入、禁裸 `from ui.`）。实测 38 个 UI 插件全量加载零 ModuleNotFoundError。
 
 ## [v0.7.1] - 2026-11-11
 

@@ -114,6 +114,8 @@ class SubAgentSessionCard(BaseSettingsCard):
         self._result_appended = False
         self._poll_timer: Optional[QTimer] = None
         self._tmp_files: List[str] = []
+        # 懒创建：构造不建 WebView（隐藏互斥后硬释放，renderer 是进程级开销）
+        self._web_view: Optional[QWebEngineView] = None
 
         self._setup_ui()
 
@@ -125,7 +127,12 @@ class SubAgentSessionCard(BaseSettingsCard):
         summary_bar = self._build_summary_bar()
         self.content_layout.addWidget(summary_bar)
 
-        # ── 日志内容 WebView ──
+        # ── 日志内容 WebView：懒创建（首次 load 时 _ensure_web_view）──
+
+    def _ensure_web_view(self):
+        """懒创建日志 WebView（幂等）：首次 load 才建，隐藏硬释放后重建。"""
+        if self._web_view is not None:
+            return
         self._web_view = QWebEngineView(self)
         self._web_view.setMinimumHeight(200)
         self._web_view.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
@@ -157,6 +164,7 @@ class SubAgentSessionCard(BaseSettingsCard):
         """
         # 重置状态（卡片复用：可能切换到另一个任务）
         self._stop_polling()
+        self._ensure_web_view()
         self._task_id = task_id
         self._agent_name = agent_name
         self._logs = logs
@@ -193,10 +201,11 @@ class SubAgentSessionCard(BaseSettingsCard):
         self._logs_provider = None
         self._last_log_count = 0
         self._result_appended = False
-        try:
-            self._web_view.setHtml("")
-        except RuntimeError:
-            pass
+        if self._web_view is not None:
+            try:
+                self._web_view.setHtml("")
+            except RuntimeError:
+                pass
         _cleanup_temp_files(self._tmp_files)
 
     # ── 生命周期 ──
@@ -207,8 +216,16 @@ class SubAgentSessionCard(BaseSettingsCard):
         super()._on_close()
 
     def hideEvent(self, event):
-        """隐藏时停止轮询（经 CardManager hide_card / 系统卡片互斥隐藏时）"""
+        """隐藏时停止轮询 + 硬释放 WebView（经 CardManager hide_card / 系统卡片互斥隐藏时）。
+
+        硬释放而非 setHtml 空页：renderer 是进程级开销（about:blank 仍占
+        20-50MB）。恢复链（showEvent → _recover_for_current_session → load）
+        全量重灌不依赖内存态，runJavaScript 三处消费点均有 None 早退守卫。
+        """
         self._stop_polling()
+        if self._web_view is not None:
+            self._web_view.deleteLater()
+            self._web_view = None
         super().hideEvent(event)
 
     def showEvent(self, event):
@@ -294,6 +311,8 @@ class SubAgentSessionCard(BaseSettingsCard):
     def _check_and_update(self, logs, summary, status):
         """检查用户滚动位置后执行更新"""
         # 先用 JS 检查用户是否在底部区域
+        if self._web_view is None:
+            return
         try:
             self._web_view.page().runJavaScript(
                 """(function() {
@@ -356,6 +375,8 @@ class SubAgentSessionCard(BaseSettingsCard):
             nav_json = _json.dumps(combined_nav)
             content_json = _json.dumps(combined_content)
             js = f"window._appendLogs({nav_json}, {content_json}, {total_count});"
+            if self._web_view is None:
+                return
             try:
                 self._web_view.page().runJavaScript(js)
             except RuntimeError:
@@ -374,9 +395,11 @@ class SubAgentSessionCard(BaseSettingsCard):
 
     def _auto_scroll_latest(self):
         """增量更新后自动滚动到最底部（最新日志）"""
+        if self._web_view is None:
+            return
         QTimer.singleShot(
             100,
-            lambda: self._web_view.page().runJavaScript(
+            lambda: self._web_view and self._web_view.page().runJavaScript(
                 """(function() {
                 var m = document.getElementById('mainContent');
                 if (m) m.scrollTop = m.scrollHeight;

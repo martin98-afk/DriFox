@@ -22,6 +22,7 @@ from PyQt5.QtGui import (
     QColor,
     QFont,
     QFontMetrics,
+    QGuiApplication,
     QImage,
     QLinearGradient,
     QPainter,
@@ -47,6 +48,8 @@ _NAME_PAD_V = 5  # 名称条上下留白
 _RADIUS = 8
 _MARGIN_L = 48  # 与 ExpandSettingCard 的展开区左缩进（对齐单选项历史缩进）
 _MARGIN_R = 24
+_PREVIEW_CACHE_TILE_W = 320  # 单格逻辑宽保守上限（4 列最坏布局+余量）
+_PREVIEW_CACHE_TILE_H = 120  # _tile_height() 上界（72+名称条 35+余量）
 
 # 名称字体与其撑出的条高按 (字族, 像素) 缓存：paint 每次都要用，
 # 字族/字号变化时 key 自然失效重建（design_tokens 侧缓存同步失效）
@@ -189,7 +192,13 @@ def _load_next_theme_image() -> None:
     source = _load_queue.pop(0)
     callbacks = _pending_cbs.pop(source, [])
     image = QImage(source)
-    result = None if image.isNull() else image
+    if image.isNull():
+        result = None  # 缺图也写 None 防重复探盘
+    else:
+        dpr = max(1.0, QGuiApplication.primaryScreen().devicePixelRatio())
+        target = QSize(round(_PREVIEW_CACHE_TILE_W * dpr), round(_PREVIEW_CACHE_TILE_H * dpr))
+        scaled = image.scaled(target, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
+        result = scaled if not scaled.isNull() else image  # 极端小源图兜底
     _IMAGE_CACHE[source] = result
     for callback in callbacks:
         callback(result)

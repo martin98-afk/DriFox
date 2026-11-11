@@ -4418,6 +4418,33 @@ class MessageCard(SimpleCardWidget):
                 else:
                     parts.append("[图片]")
 
+            elif bt == "image_ref":
+                # [A2] 落盘引用块：解析 persist 文件路径拼 file:/// 绝对 URL。
+                # 拼接与加载口径对齐既有 file:// 预览路径（card_viewers
+                # _decode_image_url_to_pixmap: file:// → toLocalFile；卡片
+                # 页面 file:// 白名单直载），缺 file 字段回退占位。
+                ref = block.get("image_ref", {}) or {}
+                fname = str(ref.get("file", "") or "")
+                if fname:
+                    from pathlib import Path as _Path
+
+                    from app.utils.utils import get_app_data_dir
+
+                    # resolve() 锚定 cwd 成绝对路径：get_app_data_dir() 可能返回
+                    # 相对路径（.drifox），fromLocalFile 吃相对路径产出的 file: URL
+                    # 缺 authority，QWebEngineView/预览解析都不认
+                    fpath = (
+                        _Path(get_app_data_dir())
+                        .resolve()
+                        / "screenshots"
+                        / "persisted"
+                        / str(ref.get("session_id", "") or "")
+                        / fname
+                    )
+                    parts.append(f"![image]({QUrl.fromLocalFile(str(fpath)).toString()})")
+                else:
+                    parts.append("[图片]")
+
             else:
                 # 未知類型（含 tool_streaming / custom）→ 全量回退
                 return content_to_markdown(content)
