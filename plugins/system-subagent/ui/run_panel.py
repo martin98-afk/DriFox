@@ -92,8 +92,19 @@ class SubAgentRunPanel(QWidget):
 
     # ── 数据入口 ──
 
-    def add_task(self, task_id: str, agent_name: str, task_description: str, model_name: str = "") -> None:
-        """添加运行中任务行；已存在则只补模型名（保留已有统计，重开不重置）。"""
+    def add_task(
+        self,
+        task_id: str,
+        agent_name: str,
+        task_description: str,
+        model_name: str = "",
+        elapsed_seconds: int = 0,
+    ) -> None:
+        """添加运行中任务行；已存在则只补模型名（保留已有统计，重开不重置）。
+
+        elapsed_seconds：迁卡补投影时传任务已运行秒数，新行回拨计时起点，
+        保证「跟最新卡」后耗时连续不归零（与 show_completed_task 同语义）。
+        """
         existing = self._rows.get(task_id)
         if existing is not None:
             if model_name:
@@ -107,6 +118,15 @@ class SubAgentRunPanel(QWidget):
         row.stop_requested.connect(self._on_row_stop)
         self._rows[task_id] = row
         self._body_layout.addWidget(row)
+
+        if elapsed_seconds > 0:
+            import time as _time
+
+            row._start_time = _time.time() - elapsed_seconds
+            mins, secs = divmod(int(elapsed_seconds), 60)
+            row.time_label.setText(f"⏱{mins:02d}:{secs:02d}")
+            if row._elapsed_label_detail is not None:
+                row._elapsed_label_detail.setText(f"{mins:02d}:{secs:02d}")
 
         ctx_info = self._resolve_context_info(model_name)
         if ctx_info:

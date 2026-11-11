@@ -304,6 +304,17 @@ def test_bridge_finishes_task_with_error_state(bridge_env):
     assert hasattr(row, "_error_label")
 
 
+def test_panel_add_task_accepts_elapsed_baseline(panel):
+    """add_task 支持 elapsed_seconds 基线：迁卡新行从原起点续算不归零。"""
+    import time as _time
+
+    panel.add_task("t1", "coder", "任务", elapsed_seconds=120)
+    row = panel._rows["t1"]
+
+    elapsed = _time.time() - row._start_time
+    assert 110 <= elapsed <= 140, f"迁卡新行计时必须从原起点续算，实际 {elapsed}s"
+    assert "02:00" in row._elapsed_label_detail.text()
+
 def test_bridge_migrates_rows_to_new_card(bridge_env, qapp):
     bridge, reg, host, manager, card = bridge_env
     manager._running_tasks["t1"] = _FakeExecutor("coder", "写代码")
@@ -322,6 +333,27 @@ def test_bridge_migrates_rows_to_new_card(bridge_env, qapp):
     assert new_panel is not None
     assert new_panel.has_task("t1") is True
     assert new_panel._rows["t1"]._tool_count == 1
+    new_card.deleteLater()
+
+def test_bridge_migrated_row_keeps_elapsed_baseline(bridge_env, qapp):
+    """运行中迁卡：新行必须从原任务起点续计时，工具数与耗时都连续。"""
+    import time as _time
+
+    bridge, reg, host, manager, card = bridge_env
+    executor = _FakeExecutor("coder", "写代码")
+    executor.start_time = _time.time() - 120  # 任务已跑 2 分钟
+    manager._running_tasks["t1"] = executor
+    manager.task_started.emit("t1", "coder", "写代码")
+
+    from app.widgets.message_card import MessageCard
+
+    new_card = MessageCard(role="assistant")
+    host._current_assistant_card = new_card
+    bridge._on_tool_call("w1", "t1")
+
+    row = new_card.get_inline_panel(PANEL_ID)._rows["t1"]
+    elapsed = _time.time() - row._start_time
+    assert 110 <= elapsed <= 145, f"迁卡后计时必须续算不归零，实际 {elapsed}s"
     new_card.deleteLater()
 
 
