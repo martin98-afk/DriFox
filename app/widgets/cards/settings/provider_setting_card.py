@@ -324,7 +324,8 @@ def capability_sections_for_wall() -> list:
     """
     try:
         types = ProviderRegistry.get_instance().capability_types()
-    except Exception:
+    except Exception as e:
+        logger.warning(f"capability_sections_for_wall 异常，能力组降级为空: {e}")
         return []
     return [(t, _CAPABILITY_LABELS.get(t, t)) for t in types]
 
