@@ -175,6 +175,182 @@ def test_missing_persist_file_degrades_to_text(capture_client, monkeypatch, tmp_
     assert "图片已失效" in all_text, "缺失 persist 文件应降级为 text 占位（字符串或块形态均可）"
 
 
+# ═══════════════════════════════════════════════════════════════
+# responses 路径回归（P1 修复第二路：transport 忽略 api_messages，
+# 从内部格式 messages 重新序列化 —— image_ref 在该路会静默丢图）
+# ═══════════════════════════════════════════════════════════════
+
+from app.plugins.sdk import messages_to_responses_input  # noqa: E402 — 与 openai_responses transport 同源
+
+
+class _FakeResponsesTransport:
+    """responses transport 桩：create_stream 内执行真实 messages_to_responses_input，
+    断言打在真实转换链（serializer → _extract_responses_content）上。"""
+
+    id = "openai_responses"
+
+    def __init__(self):
+        self.calls = []  # 每次 create_stream 的 (messages, api_messages)
+        self.input_items = None
+
+    def create_stream(
+        self, llm_config, messages, tools=None, auth_headers=None, api_messages=None, client=None, cap_max_tokens=None
+    ):
+        self.calls.append({"messages": messages, "api_messages": api_messages})
+        self.input_items, _instructions = messages_to_responses_input(messages, True)
+        return iter([])
+
+
+def _with_responses_transport(monkeypatch, transport: _FakeResponsesTransport):
+    """让 _make_api_call 解析到 fake responses transport（函数内 import 拿模块属性）"""
+    monkeypatch.setattr(
+        "app.core.workers.protocol_dispatch.resolve_transport_target",
+        lambda cfg, flags: transport,
+    )
+
+
+def _image_parts_in_input_items(input_items):
+    """从 responses input_items 收集 input_image part"""
+    parts = []
+    for item in input_items or []:
+        content = item.get("content") if isinstance(item, dict) else None
+        if not isinstance(content, list):
+            continue
+        for p in content:
+            if isinstance(p, dict) and p.get("type") == "input_image":
+                parts.append(p)
+    return parts
+
+
+def test_responses_path_input_items_carry_data_uri(monkeypatch, persist_env):
+    """responses 主用例：input_items 必须含 input_image+data URI，image_ref 零外泄。
+
+    修复前：transport 收到的内部 messages 已被出口回收为 image_ref，
+    messages_to_responses_input 只认 image_url/input_image/image → 静默丢图。
+    """
+    _ensure_plugins_loaded()
+    transport = _FakeResponsesTransport()
+    _with_responses_transport(monkeypatch, transport)
+    executor = _build_executor()
+    executor._vision_session_ids = ["sid_mat"]
+    executor._make_api_call(_fresh_messages(), llm_config=dict(executor.llm_config))
+
+    assert transport.calls, "responses transport 必须收到 create_stream 调用"
+    # messages 与 api_messages 两路同源（物化副本），均不得外泄 image_ref
+    for call in transport.calls:
+        for key in ("messages", "api_messages"):
+            for msg in call[key]:
+                content = msg.get("content")
+                if not isinstance(content, list):
+                    continue
+                for b in content:
+                    assert not (isinstance(b, dict) and b.get("type") == "image_ref"), (
+                        f"responses 路径 {key} 外泄 image_ref: {b}"
+                    )
+    # 真实转换链产物：input_image + data URI
+    parts = _image_parts_in_input_items(transport.input_items)
+    assert parts, "responses input_items 应含 input_image part（image_ref 形态会被静默丢图）"
+    url = parts[0].get("image_url", "")
+    assert url.startswith("data:image/png;base64,"), f"input_image 形态异常: {str(url)[:60]}"
+
+
+def test_responses_path_same_image_two_blocks_restored(monkeypatch, persist_env):
+    """同图多块：两块引用同一 persist 文件，物化后均还原，互不丢。"""
+    _ensure_plugins_loaded()
+    transport = _FakeResponsesTransport()
+    _with_responses_transport(monkeypatch, transport)
+    executor = _build_executor()
+    executor._vision_session_ids = ["sid_mat"]
+
+    ref = dict(_IMAGE_REF_BLOCK)
+    messages = [
+        {"role": "user", "content": [{"type": "text", "text": "两张同图"}, dict(ref), dict(ref)]},
+    ]
+    executor._make_api_call(messages, llm_config=dict(executor.llm_config))
+
+    parts = _image_parts_in_input_items(transport.input_items)
+    assert len(parts) == 2, f"两块同图必须都出现在 input_items（实际 {len(parts)} 块）"
+    assert parts[0].get("image_url") == parts[1].get("image_url"), "同源两块的 data URI 应一致"
+    # 原件两块都保持 image_ref（出口回收不被破坏）
+    kept = [b for b in messages[0]["content"] if isinstance(b, dict) and b.get("type") == "image_ref"]
+    assert len(kept) == 2, "原件两块 image_ref 应原样保留"
+
+
+def test_responses_path_retry_keeps_materialized_copy(monkeypatch, persist_env):
+    """重试链：首次请求失败重试后，闭包捕获的物化副本仍含 data URI（不重建不退化）。"""
+    _ensure_plugins_loaded()
+    transport = _FakeResponsesTransport()
+    _with_responses_transport(monkeypatch, transport)
+    executor = _build_executor()
+    executor._vision_session_ids = ["sid_mat"]
+
+    def _fake_retry(client, create_stream, cancel_check=None):
+        # 模拟重试语义：第一次调用后请求失败，第二次成功
+        first = create_stream()
+        _ = list(first)  # 消费首试事件流（惰性迭代器）
+        second = create_stream()
+        return second
+
+    monkeypatch.setattr("app.core.workers.error_handler.create_api_call_with_retry", _fake_retry)
+    executor._make_api_call(_fresh_messages(), llm_config=dict(executor.llm_config))
+
+    assert len(transport.calls) == 2, f"应恰好两次尝试（实际 {len(transport.calls)}）"
+    first_msgs = transport.calls[0]["messages"]
+    second_msgs = transport.calls[1]["messages"]
+    # 闭包捕获同一物化副本：重试不重建（同一 list 对象），data URI 不退化
+    assert first_msgs is second_msgs, "重试应复用同一物化副本（闭包捕获），不得重建"
+    for msg in second_msgs:
+        content = msg.get("content")
+        if not isinstance(content, list):
+            continue
+        for b in content:
+            if isinstance(b, dict) and b.get("type") == "image_url":
+                assert b["image_url"]["url"].startswith("data:image/png;base64,"), (
+                    "重试时物化副本的 data URI 应原样可用"
+                )
+
+
+def test_materialize_mixed_str_content_messages():
+    """纯字符串 content 消息混在多模态列表：materialize 不崩、str 原样保持。"""
+    executor = _build_executor()
+    payload = [
+        {"role": "system", "content": "sys-str"},
+        {"role": "user", "content": [{"type": "text", "text": "带图"}, dict(_IMAGE_REF_BLOCK)]},
+        {"role": "user", "content": "纯文本消息"},
+        {"role": "assistant", "content": None},
+    ]
+    out = executor._materialize_for_send(copy.deepcopy(payload))
+
+    assert len(out) == len(payload), "消息条数不得变化"
+    assert isinstance(out[0]["content"], str) and out[0]["content"] == "sys-str", "str content 必须原样保持"
+    assert out[2]["content"] == "纯文本消息", "纯文本消息必须原样保持"
+    assert out[3]["content"] is None, "None content 必须原样保持"
+    # 多模态消息正常处理（未挂 persist_env：revive 找不到文件 → 降级 text 占位，不抛错）
+    blocks = out[1]["content"]
+    assert isinstance(blocks, list)
+    assert all(not (isinstance(b, dict) and b.get("type") == "image_ref") for b in blocks), "不得外泄 image_ref"
+
+
+def test_materialize_skips_already_url_blocks(monkeypatch, persist_env):
+    """原件已含 image_url（未回收形态）：revive 幂等跳过，url 不变（不重复编码）。"""
+    _ensure_plugins_loaded()
+    executor = _build_executor()
+
+    data_uri = f"data:image/png;base64,{base64.b64encode(_PNG_1PX).decode('ascii')}"
+    original_block = {"type": "image_url", "image_url": {"url": data_uri}}
+    payload = [{"role": "user", "content": [{"type": "text", "text": "已物化"}, dict(original_block)]}]
+
+    out = executor._materialize_for_send(copy.deepcopy(payload))
+
+    kept = [b for b in out[0]["content"] if isinstance(b, dict)]
+    assert kept[1].get("type") == "image_url", "已是 image_url 的块必须原样保留"
+    assert kept[1]["image_url"]["url"] == data_uri, "revive 幂等：url 不得被二次编码/改写"
+    # 转换链 sanity：该块可正常转 input_image（不因幂等跳过而丢失）
+    items, _ = messages_to_responses_input(out, True)
+    parts = _image_parts_in_input_items(items)
+    assert parts and parts[0].get("image_url") == data_uri, "image_url 块应正常转换为 input_image"
+
+
 if __name__ == "__main__":
     import sys
 

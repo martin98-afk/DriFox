@@ -150,7 +150,6 @@ class _RecordItem(QFrame):
 
     deleted = pyqtSignal(int)  # 删除请求，携带 record id
     downloaded = pyqtSignal(int, str)  # 下载完成，携带 record id 与本地路径
-    imported = pyqtSignal(int, str)  # 导入请求，携带 record id 与本地路径（父卡片经能力池调宿主导入）
 
     def __init__(
         self,
@@ -175,12 +174,9 @@ class _RecordItem(QFrame):
         self._copy_btn: Optional[QPushButton] = None
         self._missing_btn: Optional[QPushButton] = None
         self._download_btn: Optional[QPushButton] = None
-        self._import_btn: Optional[QPushButton] = None
         self._delete_btn: Optional[TransparentToolButton] = None
-        # 操作行（可整体重建：下载/导入完成后行内刷新，不重载列表）
+        # 操作行（可整体重建：下载完成后行内刷新，不重载列表）
         self._action_row: Optional[QHBoxLayout] = None
-        # 本次下载的意图：download = 落盘即可；import = 落盘后交给父卡片导入
-        self._download_mode = "download"
 
         # 下载线程/worker 引用（防止局部变量被 GC 导致线程信号丢失）
         self._download_thread: Optional[QThread] = None
@@ -269,7 +265,7 @@ class _RecordItem(QFrame):
     def _build_action_row(self):
         """构建/重建第三行操作按钮
 
-        下载/导入完成后行内重建（file_path 变真 → 「下载/导入」换成「打开」），
+        下载完成后行内重建（file_path 变真 → 「下载」换成「打开」），
         不再通知父卡片全量重载列表——全量重载会清空滚动区，滚动位置归零。
         """
         # 旧行清理：先摘布局再 deleteLater 子控件，引用置空防悬垂 C++ 对象
@@ -284,12 +280,9 @@ class _RecordItem(QFrame):
         self._copy_btn = None
         self._missing_btn = None
         self._download_btn = None
-        self._import_btn = None
         self._delete_btn = None
 
         rec = self._record
-        rtype = rec.get("type", "session")
-        fmt = str(rec.get("format", "") or "").lower()
         file_path = rec.get("file_path", "") or ""
         upload_url = rec.get("upload_url", "") or ""
 
@@ -299,11 +292,6 @@ class _RecordItem(QFrame):
 
         has_file = bool(file_path) and Path(file_path).exists()
         has_url = bool(upload_url)
-        # 可导入：json 会话（宿主 import_from_json 只认 json）/ 项目压缩包
-        can_import = has_url and (
-            (rtype == "session" and fmt == "json")
-            or (rtype == "project" and fmt == "drifox_project")
-        )
 
         if has_file:
             self._open_btn = TransparentPushButton("打开", None, FluentIcon.FOLDER)
@@ -317,14 +305,6 @@ class _RecordItem(QFrame):
             self._download_btn.setCursor(Qt.PointingHandCursor)
             self._download_btn.clicked.connect(lambda: self._download_file(upload_url))
             row.addWidget(self._download_btn)
-
-            if can_import:
-                self._import_btn = TransparentPushButton("导入", None, FluentIcon.ADD)
-                self._import_btn.setFixedHeight(26)
-                self._import_btn.setCursor(Qt.PointingHandCursor)
-                self._import_btn.setToolTip("下载并导入到当前项目（会话入历史 / 项目恢复）")
-                self._import_btn.clicked.connect(lambda: self._download_file(upload_url, mode="import"))
-                row.addWidget(self._import_btn)
         else:
             self._missing_btn = TransparentPushButton("文件缺失", None, FluentIcon.DOCUMENT)
             self._missing_btn.setFixedHeight(26)
@@ -465,10 +445,9 @@ class _RecordItem(QFrame):
                 }}
             """)
 
-        # 下载/导入按钮（同款样式）
-        for btn in (self._download_btn, self._import_btn):
-            if btn:
-                btn.setStyleSheet(f"""
+        # 下载按钮样式
+        if self._download_btn:
+            self._download_btn.setStyleSheet(f"""
                     QPushButton {{
                         background: {t["btn_bg"]};
                         border: 1px solid {t["btn_border"]};
@@ -533,13 +512,8 @@ class _RecordItem(QFrame):
                     parent=parent,
                 )
 
-    def _download_file(self, url: str, mode: str = "download"):
-        """后台下载分享文件到本地（QThread + signals，不卡 UI）
-
-        mode: download = 落盘即结束；import = 落盘后发 imported 信号由父卡片
-        经能力池调宿主导入（会话入历史 / 项目恢复）
-        """
-        self._download_mode = mode
+    def _download_file(self, url: str):
+        """后台下载分享文件到本地（QThread + signals，不卡 UI）"""
         rec = self._record
         record_id = rec.get("id")
         rtype = rec.get("type", "session")
@@ -571,8 +545,6 @@ class _RecordItem(QFrame):
         if self._download_btn:
             self._download_btn.setText("下载中…")
             self._download_btn.setEnabled(False)
-        if self._import_btn:
-            self._import_btn.setEnabled(False)
 
         # ── QThread 方式：和 DownloadThread 同模式 ──
         # 注意：必须保存为实例变量，防止 Python GC 在线程启动前回收 worker/thread
@@ -596,40 +568,32 @@ class _RecordItem(QFrame):
         self._download_thread = None
 
     def _on_download_done(self, file_path: str, record_id: int):
-        """下载成功回调（主线程）：按点击时的 mode 分派，行内刷新不重载列表"""
-        mode = self._download_mode or "download"
+        """下载成功回调（主线程），行内刷新不重载列表"""
         self._cleanup_download()
         update_record_file_path(record_id, file_path)
         self._record["file_path"] = file_path
 
-        if mode == "import":
-            # 成功提示由宿主导入流程负责（session.history.write.import /
-            # project.write.drop_file 内部都弹 InfoBar），这里只发请求
-            self.imported.emit(record_id, file_path)
-        else:
-            self.downloaded.emit(record_id, file_path)
-            parent = self.window()
-            if parent:
-                InfoBar.success(
-                    title="",
-                    content=f"已下载到 {Path(file_path).name}",
-                    duration=3000,
-                    parent=parent,
-                )
+        self.downloaded.emit(record_id, file_path)
+        parent = self.window()
+        if parent:
+            InfoBar.success(
+                title="",
+                content=f"已下载到 {Path(file_path).name}",
+                duration=3000,
+                parent=parent,
+            )
 
-        # 行内刷新：本行 has_file 变真，「下载/导入」就地换成「打开」
+        # 行内刷新：本行 has_file 变真，「下载」就地换成「打开」
         self._build_action_row()
         self._apply_theme()
 
     def _on_download_error(self, err: str):
-        """下载失败回调（主线程）：按本次 mode 恢复按钮文案"""
+        """下载失败回调（主线程）：恢复按钮文案"""
         logger.warning(f"[ShareHistory] 下载失败: {err}")
         self._cleanup_download()
         if self._download_btn:
-            self._download_btn.setText("重试" if (self._download_mode or "download") == "download" else "下载")
+            self._download_btn.setText("重试")
             self._download_btn.setEnabled(True)
-        if self._import_btn:
-            self._import_btn.setEnabled(True)
 
         parent = self.window()
         if parent:
@@ -1062,7 +1026,6 @@ class ShareHistoryCard(QWidget):
             item = _RecordItem(rec, theme=self._theme)
             item.deleted.connect(self._on_item_deleted)
             item.downloaded.connect(self._on_item_downloaded)
-            item.imported.connect(self._on_item_imported)
             self._content_layout.addWidget(item)
 
         self._content_layout.addStretch()
@@ -1127,48 +1090,6 @@ class ShareHistoryCard(QWidget):
             if r.get("id") == record_id:
                 r["file_path"] = file_path
                 break
-
-    def _on_item_imported(self, record_id: int, file_path: str):
-        """导入：同步缓存并经能力池调宿主（会话入历史 / 项目恢复）。
-
-        成功/失败提示由宿主导入流程内部弹 InfoBar，这里不重复。
-        """
-        rec = None
-        for r in self._all_records:
-            if r.get("id") == record_id:
-                r["file_path"] = file_path
-                rec = r
-                break
-        rtype = rec.get("type", "session") if rec else "session"
-        cap_id = "session.history.write" if rtype == "session" else "project.write"
-        action = "import" if rtype == "session" else "drop_file"
-
-        face = self._capability(cap_id)
-        fn = face.get(action) if isinstance(face, dict) else None
-        if not callable(fn):
-            parent = self.window()
-            if parent:
-                InfoBar.warning(
-                    title="",
-                    content="宿主导入能力不可用，文件已下载到本地，可在历史页手动导入",
-                    duration=4000,
-                    parent=parent,
-                )
-            return
-        fn(file_path)
-
-    def _capability(self, cap_id: str):
-        """按能力 ID 取能力面（factory 调用返回闭包 dict）；不可用返回 None"""
-        if self._context_provider is None:
-            return None
-        try:
-            caps = (self._context_provider() or {}).get("capabilities")
-            if caps is None or cap_id not in caps:
-                return None
-            return caps[cap_id]()
-        except Exception as e:
-            logger.warning(f"[ShareHistory] 取能力 {cap_id} 失败: {e}")
-            return None
 
     def _on_clear_all(self):
         """清空全部记录"""

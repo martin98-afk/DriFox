@@ -3198,8 +3198,10 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 🛡️ 与 _create_new_session 对齐：切换前先保存被分支的旧会话，
         # 否则旧会话可能未落库，历史面板刷新后仍缺失该条目。
+        # [PERF H1] flush_mode="async"：主线程同步 flush 大会话 700ms+，
+        # 后台非 daemon 线程写盘（退出 join + aboutToQuit sync flush 兑底）。
         try:
-            self._auto_save_current_session()
+            self._auto_save_current_session(flush_mode="async")
         except Exception:
             logger.exception("Failed to auto-save current session before creating a branched session")
 
@@ -12233,7 +12235,9 @@ class OpenAIChatToolWindow(ToolWindow):
         self._clear_pending_message_queue()
 
         try:
-            self._auto_save_current_session()
+            # [PERF H1] flush_mode="async"：主线程同步 flush 大会话 700ms+，
+            # 后台非 daemon 线程写盘（退出 join + aboutToQuit sync flush 兑底）。
+            self._auto_save_current_session(flush_mode="async")
         except Exception:
             logger.exception("Failed to auto-save current session before creating a new session")
         _t1 = _time.perf_counter()
@@ -16515,7 +16519,9 @@ class OpenAIChatToolWindow(ToolWindow):
                 logger.warning(f"[MainWidget] 加载历史前同步 finalize 失败: {e}")
 
         try:
-            self._auto_save_current_session()
+            # [PERF H1] flush_mode="async"：主线程同步 flush 大会话 700ms+，
+            # 后台非 daemon 线程写盘（退出 join + aboutToQuit sync flush 兑底）。
+            self._auto_save_current_session(flush_mode="async")
         except Exception:
             logger.exception("Failed to auto-save current session before loading history")
 
@@ -20374,9 +20380,15 @@ class OpenAIChatToolWindow(ToolWindow):
         # 🛡️ 切换前保存当前会话：防止流式刚结束时用户立即切换会话，
         # _do_post_stream_cleanup 的延迟保存尚未触发导致 AI 回复丢失。
         # （此时已应用中断消息，保存的是完整会话）
+        # [PERF H1] flush()→flush_async()：主线程同步 flush 是 serialize+zstd+SQL
+        # 大会话 700ms+，是切会话卡顿主因（T33 P95 634ms 基线）。改异步后写盘转
+        # 后台线程（非 daemon，退出 join 保证写完）；失败自动回填 pending，
+        # 退出路径仍由 aboutToQuit 的同步 flush 兜底（_on_app_about_to_quit）。
+        # 下方 get_session_by_session_id 读的是目标会话，与本次 save 的当前会话
+        # 无读写竞态。
         if self.history_manager:
             self._save_current_session_to_history()
-            self.history_manager.flush()
+            self.history_manager.flush_async()
 
         # 🛡️ 标记会话切换：stop_streaming 后 old worker 的 finished_with_messages
         # 信号虽已断开再连接，但 Qt 事件队列中可能仍有已投递的旧回调。
