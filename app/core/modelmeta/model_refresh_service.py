@@ -309,6 +309,8 @@ class ModelRefreshService(QObject):
             str(info.get("API_KEY", "") or ""),
             provider_name,
             str(info.get("认证方式", "") or "bearer"),
+            # 能力类型决定过滤分流：非 chat 全量放行（生成类模型不被文本规则误滤）
+            str(info.get("capability_type", "chat") or "chat"),
         )
         return list(filtered), status
 

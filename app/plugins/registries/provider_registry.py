@@ -63,6 +63,9 @@ class ProviderDef:
     # 取值统一走 app.utils.provider_ui_meta.get_preset_urls）
     preset_urls: List[str] = field(default_factory=list)
     auth_type: str = "bearer"  # 认证方式：bearer / bce / none / anthropic
+    capability_type: str = "chat"  # 能力类型：chat / image_generation / video_generation /
+    # speech_generation / speech_recognition …；插件自由标注。
+    # 约定全小写，比较为精确匹配（无 lower 归一），大小写不同即视为不同能力
     default_model: str = ""  # 默认模型名（"模型名称"）
     default_params: Dict[str, Any] = field(default_factory=dict)  # 其他默认参数（温度/最大Token/思考模式…）
     register_url: str = ""  # 获取 API Key 的地址（"获取地址"）
@@ -325,6 +328,15 @@ class ProviderRegistry:
             return list(self._providers.values())
 
     # ── 聚合视图（替代 constants 硬编码）────────────────────
+
+    def capability_types(self) -> List[str]:
+        """已注册的非 chat 能力类型，去重排序。用于服务商墙动态分组与编辑卡下拉。"""
+        self.ensure_loaded()
+        with self._lock:
+            values = {str(p.capability_type or "chat").strip() for p in self._providers.values()}
+        values.discard("chat")
+        values.discard("")
+        return sorted(values)
 
     def provider_models(self) -> Dict[str, List[str]]:
         """所有服务商的模型列表（PROVIDER_MODELS 替代）"""

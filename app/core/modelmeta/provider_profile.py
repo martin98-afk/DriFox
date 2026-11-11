@@ -281,3 +281,45 @@ def resolve_token_ratio(llm_config: Optional[Dict[str, Any]] = None, model: Opti
     from app.core.infra.token_estimator import _get_model_token_ratio
 
     return _get_model_token_ratio(model or str(llm_config.get("模型名称", "gpt-4") or "gpt-4"))
+
+
+def resolve_capability_type(provider_info: Dict[str, Any]) -> str:
+    """配置 dict → 能力类型。两级解析：
+    1. provider_name 反查 ProviderDef.capability_type 命中 → 声明优先
+       （预置实例的权威来源；UI 禁止手改，插件升级改声明后跟随新声明）
+    2. 反查 miss（自定义实例）→ 磁盘键 capability_type（编辑卡下拉落盘的权威来源）
+    3. 均未命中（老配置无键 + 未注册）→ 兜底 chat
+    """
+    info = provider_info or {}
+    name = str(info.get("provider_name", "") or "").strip()
+    if name:
+        try:
+            # 函数内延迟 import：测试 monkeypatch 的是 provider_registry 模块属性，
+            # 顶层 import 会绕过补丁；同时避免 provider_profile ↔ provider_registry 顶层环
+            from app.plugins.registries.provider_registry import ProviderRegistry
+
+            definition = ProviderRegistry.get_instance().get(name)
+            if definition is not None:
+                return str(getattr(definition, "capability_type", "chat") or "chat").strip() or "chat"
+        except Exception:
+            pass
+    disk_value = str(info.get("capability_type", "") or "").strip()
+    if disk_value:
+        return disk_value
+    return "chat"
+
+
+def chat_fallback_candidate(valid_configs: Dict[str, Dict[str, Any]]) -> str:
+    """当前选择失效时，从 chat 实例里取首个 config_id；无 chat 返回空串。
+
+    「首个」依赖 valid_configs 的 dict 插入序（即配置列表构建顺序）；
+    未来重构若换容器或重排键，回退目标会随之静默漂移，需重新确认确定性。
+    """
+    for config_id, info in (valid_configs or {}).items():
+        if str((info or {}).get("capability_type", "chat") or "chat") == "chat":
+            return str(config_id)
+    return ""
+
+
+# re-export：selector_data 属 provider_profile 同链既有导入入口，测试与调用方从此处取
+from app.core.modelmeta.selector_data import build_selector_provider_data  # noqa: E402,F401

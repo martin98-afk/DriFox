@@ -94,6 +94,7 @@ from app.core.modelmeta.model_capabilities import (
     resolve_capabilities_for_model,
     resolve_model_capabilities,
 )
+from app.core.modelmeta.provider_profile import chat_fallback_candidate, resolve_capability_type
 from app.core.infra import memory_governor
 from app.core.infra.memory_governor import (
     _MAX_GLOBAL_RENDERED_PAGES,
@@ -2665,7 +2666,7 @@ class OpenAIChatToolWindow(ToolWindow):
         selected_name = (
             self._current_provider_name
             if self._current_provider_name
-            else (list(self._valid_configs.keys())[0] if self._valid_configs else "")
+            else (chat_fallback_candidate(self._valid_configs))
         )
 
         # 优先从 _valid_configs 获取（已合并默认配置）
@@ -4420,10 +4421,11 @@ class OpenAIChatToolWindow(ToolWindow):
             - font_size:    UI 基础字号（px）
             - colors:       主题色字典，可直接用: colors["card_bg"]、colors["accent"]、colors["text_primary"] 等
             - main_widget:  本窗口 MainWidget 引用（与输入区按钮 context 一致）
-            - services:     对话服务门面（get_model_config / get_tools_schema /
-                            save_messages_to_session / enter_exclusive_ui_mode 等，
+            - services:     对话服务门面（save_messages_to_session /
+                            enter_exclusive_ui_mode 等，
                             见 _build_ui_services；供 autoloop 等对话类插件驱动
-                            自建 ConversationCore 执行栈）
+                            自建 ConversationCore 执行栈；模型/工具数据类服务
+                            已迁能力池 model.config / model.schema）
         """
         # ── 工作目录取值优先级 ──
         # 1. tool_executor.get_workdir() — 用户显式设置的项目根目录（最优先）
@@ -7116,7 +7118,9 @@ class OpenAIChatToolWindow(ToolWindow):
                 return cid
         return None
 
-    def _resolve_model_config_by_query(self, model_value: str, show_error: bool = True) -> Optional[Dict]:
+    def _resolve_model_config_by_query(
+        self, model_value: str, show_error: bool = True, capability_type: str = "chat"
+    ) -> Optional[Dict]:
         """解析 --model=xxx 参数，返回覆盖后的 LLM 配置
 
         支持三种格式：
@@ -7131,7 +7135,17 @@ class OpenAIChatToolWindow(ToolWindow):
                 如 /subagents --model=、/title-gen --model= 命令）；
                 False 时静默返回 None（后台自动流程，如标题生成、子智能体
                 默认模型解析——解析失败应静默回退主模型，避免打扰用户）。
+            capability_type: 语义过滤，只放行该类型的实例，值域与
+                ProviderDef.capability_type 同值域（"chat" / "image_generation" /
+                "video_generation" / "speech_generation" / "speech_recognition" …，
+                插件自由标注，无粗类 "generation"）；缺省 "chat"，既有调用方
+                不传参时行为不变。
         """
+
+        def _allowed(cid: str) -> bool:
+            info = self._valid_configs.get(cid, {})
+            return str(info.get("capability_type", "chat") or "chat") == capability_type
+
         if not model_value:
             return None  # 使用默认配置
 
@@ -7148,6 +7162,8 @@ class OpenAIChatToolWindow(ToolWindow):
                         position=InfoBarPosition.BOTTOM,
                     )
                 return None
+            if config_id is not None and not _allowed(config_id):
+                return None
             model_query_lower = model_query.lower()
             matched = self._fuzzy_match_model_name(
                 config_id,
@@ -7157,6 +7173,7 @@ class OpenAIChatToolWindow(ToolWindow):
             if matched is not None:
                 config = self._valid_configs[config_id].copy()
                 config["模型名称"] = matched
+                config["capability_type"] = capability_type
                 return config
             else:
                 available = self._get_model_list_for_provider(config_id)
@@ -7170,11 +7187,15 @@ class OpenAIChatToolWindow(ToolWindow):
                 return None
         # 格式: "服务商名" — 切换到该服务商（取默认模型）
         config_id = self._resolve_service_provider(model_value)
-        if config_id is not None:
-            return self._valid_configs[config_id].copy()
+        if config_id is not None and _allowed(config_id):
+            config = self._valid_configs[config_id].copy()
+            config["capability_type"] = capability_type
+            return config
         # 格式: "模型名" — 在当前服务商模糊匹配
         config = self._get_current_model_config()
         provider = self._current_provider_name
+        if not _allowed(provider):
+            return None
         model_query_lower = model_value.lower()
         matched = self._fuzzy_match_model_name(
             provider,
@@ -7184,6 +7205,7 @@ class OpenAIChatToolWindow(ToolWindow):
         if matched is not None:
             config = dict(config)
             config["模型名称"] = matched
+            config["capability_type"] = capability_type
             return config
         else:
             available = self._get_model_list_for_provider(provider)
@@ -7867,53 +7889,20 @@ class OpenAIChatToolWindow(ToolWindow):
         # 兜底：延迟构建未完成（800ms 未到 / P2 懒加载 pending / 构建失败）时
         # 立即构建内容，避免 _model_selector_card_content 为 None 崩溃
         self._ensure_model_selector_card_content()
-        provider_models_data = []
+        from app.core.modelmeta.selector_data import build_selector_provider_data
+
         merged_provider_models = get_merged_provider_models()
-        # 维护 display_name → config_id 映射，用于 model_selector 回调时反查
-        self._display_to_config_id: dict[str, str] = {}
-        # 维护 display_name → provider_name 映射，用于 model_selector 找 icon
-        self._display_to_provider_name: dict[str, str] = {}
-        for config_id, config in self._valid_configs.items():
-            display_name = config.get("display_name", config.get("provider_name", config_id))
-            pname = config.get("provider_name", config_id)
-            self._display_to_config_id[display_name] = config_id
-            self._display_to_provider_name[display_name] = pname
-            model_list = []
-            if "模型列表" in config:
-                saved_models = config["模型列表"]
-                if isinstance(saved_models, str):
-                    try:
-                        import ast
+        provider_models_data, self._display_to_config_id, self._display_to_provider_name = (
+            build_selector_provider_data(self._valid_configs, self._current_provider_name, merged_provider_models)
+        )
+        # display_name → provider_name 映射（model_selector 找 icon 用）与 rows 同源产出，口径一致
 
-                        saved_models = ast.literal_eval(saved_models)
-                    except Exception:
-                        saved_models = []
-                if isinstance(saved_models, list) and saved_models:
-                    model_list = list(saved_models)
-                # 模型列表存在但为空（[]）→ 回退到 merged_provider_models，
-                # 避免刚注入默认配置时模型选择器一片空白
-                if not model_list and pname in merged_provider_models:
-                    model_list = list(merged_provider_models[pname])
-            elif pname in merged_provider_models:
-                model_list = list(merged_provider_models[pname])
-            # 关闭的模型不在选择卡片显示（P1-9 OpenCode 风格清单；仍在「模型列表」）
-            from app.core.modelmeta.provider_save_plan import filter_disabled_models
-
-            model_list = filter_disabled_models(model_list, config)
-            cur_model = config.get("模型名称", "")
-            if cur_model and cur_model not in model_list:
-                model_list.insert(0, cur_model)
-            if not model_list and cur_model:
-                model_list = [cur_model]
-            is_current = config_id == self._current_provider_name
-            # 传给 model_selector 用 display_name（用户看到的名），不要传 config_id
-            provider_models_data.append((display_name, model_list, is_current))
-
-        # 找当前选中服务商的 display_name
+        # 找当前选中服务商的 display_name（与 selector 同口径 or 链：display_name → provider_name → current 本身）
         current_display = ""
         if self._current_provider_name in self._valid_configs:
-            current_display = self._valid_configs[self._current_provider_name].get(
-                "display_name", self._current_provider_name
+            config = self._valid_configs[self._current_provider_name]
+            current_display = (
+                config.get("display_name") or config.get("provider_name") or self._current_provider_name
             )
 
         # 收集模型描述（来自 models.dev / 硬编码能力字典）
@@ -11901,6 +11890,10 @@ class OpenAIChatToolWindow(ToolWindow):
             base_name = config.get("name", "") or pname
             idx = suffix_map.get(config_id, 0)
             config["display_name"] = base_name if idx == 0 else f"{base_name} #{idx + 1}"
+            # 内存态能力类型回填：resolve_capability_type 两级解析（磁盘键优先，老配置反查声明）。
+            # 注意：Task 9 后 capability_type 经 FORM_KEYS 恒写入磁盘（spec §7 例外），
+            # 此处重复回填是为老配置（未保存过、无磁盘键）补齐派生值。回退候选按 chat 过滤依赖此键
+            config["capability_type"] = resolve_capability_type(config)
             self._valid_configs[config_id] = config
 
         # 恢复或设置当前选中的服务商和模型
@@ -11926,7 +11919,7 @@ class OpenAIChatToolWindow(ToolWindow):
             elif saved_model and saved_model in self._valid_configs:
                 self._current_provider_name = saved_model
             else:
-                self._current_provider_name = list(self._valid_configs.keys())[0] if self._valid_configs else ""
+                self._current_provider_name = chat_fallback_candidate(self._valid_configs)
 
             # 回退时从配置中获取默认模型名称
             if self._current_provider_name:
@@ -27110,8 +27103,9 @@ class OpenAIChatToolWindow(ToolWindow):
         实现唯一真相在 app/plugins/capabilities/providers/；本方法只做投影，
         不得再写服务实现（新增能力去 catalog 登记 + provider 注册）。
 
-        get_provider_config 是插件取「任意服务商配置」的唯一正确入口：密钥模式下
+        插件取「任意服务商配置」走能力池 model.config / model.config_for：密钥模式下
         磁盘 API_KEY 为密文/空串，插件直读 app.config 会拿到不可用的 key。
+        本方法只做 LEGACY_MAP 投影（get_provider_config 旧键已随兼容层退役删除）。
         """
         from app.plugins.capabilities.registry import CapabilityRegistry
         from app.plugins.registries.ui_plugin_registry import project_services

@@ -61,12 +61,14 @@ def _project(declared):
 def test_full_projection_covers_engine_host_keys():
     from app.plugins.contracts.engine_host import EngineHost
 
+    # 已退役键：自家插件已全部迁移到命名空间能力，LEGACY_MAP 不再提供投影
+    retired = {"get_model_config", "get_provider_config", "get_tools_schema"}
     projected = _project(None)
     contract = {
         name
         for name in dir(EngineHost)
         if not name.startswith("_") and callable(getattr(EngineHost, name, None))
-    }
+    } - retired
     assert contract <= set(projected), f"缺键: {contract - set(projected)}"
 
 

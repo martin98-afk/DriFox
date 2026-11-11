@@ -357,6 +357,8 @@ def _model_config(host: Any):
 
 
 def _provider_config(host: Any):
+    """[已退役] get_provider_config 旧通道专属实现（兼容层清理时删除注册）。
+    保留定义备查；能力面统一走 model.config / model.config_for。"""
     real = _resolve_active_host(host)
 
     def resolve(provider: str = "", model: str = "") -> dict:
@@ -1389,9 +1391,11 @@ def _model_config_for(host: Any):
     模型名（当前服务商模糊匹配）/ 服务商名（config_id、display_name、provider_name
     皆可）/ ``服务商:模型名``。解析逻辑留在宿主窗口（`_resolve_model_config_by_query`）：
     它依赖窗口内的 ``_valid_configs`` 与模型列表缓存，插件侧没有等价数据源。
+
+    capability_type 由调用方按意图传入（缺省 chat）；宿主解析器据此过滤候选集。
     """
 
-    def config_for(query: str) -> Any:
+    def config_for(query: str, capability_type: str = "chat") -> Any:
         if not query:
             return None
         resolver = getattr(host, "_resolve_model_config_by_query", None)
@@ -1399,7 +1403,17 @@ def _model_config_for(host: Any):
             logger.debug("[Capability] model.config_for 宿主无模型解析器")
             return None
         try:
-            return resolver(query, show_error=False)
+            config = resolver(query, show_error=False, capability_type=capability_type)
+            if isinstance(config, dict):
+                config.setdefault("capability_type", capability_type)
+            return config
+        except TypeError:
+            # 旧宿主解析器不接受新参数：退回原签名，避免能力池整体不可用
+            try:
+                return resolver(query, show_error=False)
+            except Exception as e:
+                logger.warning(f"[Capability] model.config_for 解析失败 {query!r}: {e}")
+                return None
         except Exception as e:
             logger.warning(f"[Capability] model.config_for 解析失败 {query!r}: {e}")
             return None
@@ -1478,8 +1492,9 @@ def register(registry) -> None:
     reg.register("window.workbench", _window_workbench, surface="ui", owner="core:ui")
     reg.register("window.events", _window_events, surface="ui", owner="core:ui")
     # 模型 / 智能体
+    # _provider_config（get_provider_config 旧通道的专属实现）已随兼容层退役删除注册：
+    # LEGACY_MAP 不再有该键，投影循环永不触达；能力面统一走 model.config / model.config_for。
     reg.register("model.config", _model_config, surface="ui", owner="core:ui")
-    reg.register("model.config", _provider_config, surface="ui", owner="core:ui", legacy_key="get_provider_config")
     reg.register("model.config_for", _model_config_for, surface="ui", owner="core:ui")
     reg.register("model.set", _model_set, surface="ui", owner="core:ui")
     reg.register("model.schema", _model_schema, surface="ui", owner="core:ui")

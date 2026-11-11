@@ -32,9 +32,10 @@ def test_declared_list(reg, monkeypatch, tmp_path):
     }
 
 
-def test_declared_alias_flat_name(reg, monkeypatch, tmp_path):
+def test_declared_flat_name_not_expanded(reg, monkeypatch, tmp_path):
+    """A3 扁平名别名已退役：声明 ["lsp"] 不再展开为 lsp.query（池构建时不可用）。"""
     _fake_pm(monkeypatch, "demo", {"capabilities": ["lsp"]}, str(tmp_path))
-    assert reg.resolve_declared("demo") == {"lsp.query"}
+    assert reg.resolve_declared("demo") == {"lsp"}
 
 
 def test_declared_empty_list(reg, monkeypatch, tmp_path):
