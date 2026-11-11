@@ -3,6 +3,10 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### ♻️ 代码重构 (Refactoring)
+
+- **多模态服务商迁出为可安装插件** (`plugins/system-providers/providers/volcengine.py`, `plugins/system-providers/providers/minimax_video.py` 删除): 豆包语音合成 / 火山方舟图像 / 豆包录音识别 / 海螺视频四个非 chat 能力服务商定义移入插件市场仓库 `drifox-plugins2` 的 `multimodal-providers` 插件（声明 `min_host_version 0.7.1`，依赖 `ProviderDef.capability_type`），主程序不再内置多模态样例。`system-providers` 回到 14 家 chat 服务商，`tests/core/test_provider_registry.py::test_system_providers_loaded_from_plugins` 的 14 家断言重新成立（此前随样例定义落地失效）。
+
 ## [v0.7.1] - 2026-11-11
 
 自 v0.7.0 以来的变更 | 提交数：28 · 文件变更：44 · +3827/-315 | 贡献者：dingma, drifox-bot, martin98-afk
