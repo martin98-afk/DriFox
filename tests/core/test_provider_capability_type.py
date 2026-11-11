@@ -46,3 +46,32 @@ def test_resolve_capability_type_reads_registered_def(monkeypatch):
 
     monkeypatch.setattr(mod, "ProviderRegistry", _R)
     assert resolve_capability_type({"provider_name": "豆包语音合成"}) == "speech_generation"
+
+
+from app.core.modelmeta.provider_profile import (
+    ProviderConfigCollision,
+    apply_provider_save,
+    compute_provider_config_id,
+)
+import pytest
+
+
+def test_same_url_and_key_collides():
+    """spec 3.1：不同能力共用同一 (URL, KEY) 会被拒，靠插件声明不同默认 URL 规避。"""
+    saved = {}
+    a = {"API_URL": "https://api.example.com/v1", "API_KEY": "sk-same"}
+    cid = apply_provider_save(saved, a, "示例", is_new=True)
+    b = {"API_URL": "https://api.example.com/v1", "API_KEY": "sk-same"}
+    with pytest.raises(ProviderConfigCollision):
+        apply_provider_save(saved, b, "示例图像", is_new=True)
+    assert cid in saved
+
+
+def test_different_url_no_collision():
+    saved = {}
+    a = {"API_URL": "https://api.example.com/v1", "API_KEY": "sk-same"}
+    c1 = apply_provider_save(saved, a, "示例Chat", is_new=True)
+    b = {"API_URL": "https://api.example.com/v1/images", "API_KEY": "sk-same"}
+    c2 = apply_provider_save(saved, b, "示例图像", is_new=True)
+    assert c1 != c2
+    assert compute_provider_config_id(a) != compute_provider_config_id(b)
