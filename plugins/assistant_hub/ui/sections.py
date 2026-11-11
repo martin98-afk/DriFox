@@ -1950,9 +1950,13 @@ class MemorySection(_Section):
             chip.editRequested.connect(lambda i=idx: self._edit_section(i))
             chip.deleteRequested.connect(lambda i=idx: self._delete_section(i))
             self._chips_row.addWidget(chip)
+            # 布局激活前新 chip 是 hidden（布局 item 对 hidden widget 返回空 sizeHint，
+            # heightForWidth=0 钉高守卫跳过）：与 ExperienceSection.reload_categories 同根因，显式 show
+            chip.show()
         new_chip = _NewSectionChip()
         new_chip.clicked.connect(self._on_add_section)
         self._chips_row.addWidget(new_chip)
+        new_chip.show()
         self._sec_head.set_desc("" if not self._sections else f"{len(self._sections)} 个 · 指导蒸馏关注点")
         # 显隐切换后布局项高度会滞留旧值（实测 empty_row 隐藏后仍占 480px），
         # invalidate 强制父链重算；notify 让外层滚动区同步收缩。
@@ -1970,9 +1974,11 @@ class MemorySection(_Section):
         if w <= 1:
             w = max(1, self._chips_host.sizeHint().width())
         rows_h = self._chips_row.heightForWidth(w)
-        if rows_h > 0 and rows_h != self._chips_host.height():
+        if rows_h != self._chips_host.height():
             # 不用 setFixedHeight：那会把高度锁死，后续宽度变化时 heightForWidth
             # 算出的新行高无法生效（一开始宽度为 0，被钉成单行后永远只显一行）。
+            # 守卫只判「与当前高度不等」：rows_h=0（分类清空）同样需要钉 0，
+            # 否则 min/max 滞留旧值撑出空白
             self._chips_host.setMinimumHeight(rows_h)
             self._chips_host.setMaximumHeight(rows_h)
             self._chips_host.updateGeometry()
@@ -2145,6 +2151,14 @@ class ExperienceSection(_Section):
             chip.clicked.connect(lambda c=cat: self.viewCategory.emit(c))
             chip.deleteRequested.connect(lambda c=cat: self.deleteCategoryRequested.emit(c))
             self._chips_row.addWidget(chip)
+            # 布局激活前新 chip 处于 hidden（WA_WState_Hidden）：布局 item 对 hidden
+            # widget 返回空 sizeHint → heightForWidth=0 → 钉高守卫跳过，容器 min/max
+            # 滞留旧值，外层滚动区留大片空白。show() 让 item 立即可算。
+            chip.show()
+        # 显隐切换/换卡后布局项 geometry 与父链 sizeHint 缓存滞留（同 MemorySection：
+        # 实测隐藏行滞留 480px 撑出空白），invalidate 强制重算
+        self._wrap_v.invalidate()
+        self._chips_row.invalidate()
         self._sync_chips_height()
 
     def _sync_chips_height(self) -> None:
@@ -2153,7 +2167,8 @@ class ExperienceSection(_Section):
         if w <= 1:
             w = max(1, self._chips_host.sizeHint().width())
         rows_h = self._chips_row.heightForWidth(w)
-        if rows_h > 0 and rows_h != self._chips_host.height():
+        if rows_h != self._chips_host.height():
+            # rows_h=0（分类清空）也要钉 0：只判不等，否则 min/max 滞留旧值撑出空白
             self._chips_host.setMinimumHeight(rows_h)
             self._chips_host.setMaximumHeight(rows_h)
             self._chips_host.updateGeometry()

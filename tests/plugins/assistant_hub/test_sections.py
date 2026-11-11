@@ -12,7 +12,7 @@ import pytest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 pytest.importorskip("PyQt5.QtWidgets")
 
-from PyQt5.QtWidgets import QApplication, QWidget  # noqa: E402
+from PyQt5.QtWidgets import QApplication, QVBoxLayout, QWidget  # noqa: E402
 
 _APP = QApplication.instance() or QApplication([])
 
@@ -123,6 +123,43 @@ def test_experience_section_reload(qtbot=None):
     assert chip._name.text() == "工作流"
     chip.clicked.emit()
     assert opened == ["工作流"]
+
+def test_experience_reload_shrinks_height_without_resize(qtbot=None):
+    """回归：分类减少后钉高立即收缩，不依赖后续 resize 事件。
+
+    根因：新 chip addWidget 后处于 hidden（WA_WState_Hidden，布局激活才 show），
+    布局 item 对 hidden widget 返回空 sizeHint → heightForWidth=0 → 钉高守卫
+    跳过，容器 min/max 滞留旧值，外层滚动区留大片空白。修法=addWidget 后立即
+    show() + invalidate 父链（同 MemorySection.set_sections）。
+    """
+    s = sections.ExperienceSection()
+    # 宿主里点刷新时布局已激活、宽度已定：测试用激活布局的 host 模拟该状态
+    W = 900
+    host = QWidget()
+    host.resize(W, 400)
+    lay = QVBoxLayout(host)
+    lay.setContentsMargins(0, 0, 0, 0)
+    lay.addWidget(s)
+    lay.activate()
+    real_w = max(1, s._chips_host.width())
+    many = [{"category": f"分类{i:02d}", "count": 1} for i in range(31)]
+    few = [{"category": f"分类{i:02d}", "count": 1} for i in range(5)]
+    s.reload_categories(many)
+    hfw_many = s._chips_row.heightForWidth(real_w)
+    assert hfw_many > 0
+    assert s._chips_host.minimumHeight() == hfw_many
+
+    s.reload_categories(few)
+    hfw_few = s._chips_row.heightForWidth(real_w)
+    assert 0 < hfw_few < hfw_many
+    # 修复前：sync 因 rows_h=0 跳过钉高，host 的 min/max 滞留 hfw_many
+    assert s._chips_host.minimumHeight() == hfw_few
+    assert s._chips_host.maximumHeight() == hfw_few
+
+    # 清空后高度归零（empty 提示行接手，不留滞留高度）
+    s.reload_categories([])
+    assert s._chips_host.minimumHeight() <= 1
+
 
 
 def test_experience_section_delete_signal(qtbot=None):
