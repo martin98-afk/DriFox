@@ -584,9 +584,19 @@ class _RuntimeWatcher:
             return ""
 
     def start(self) -> None:
-        if self._thread is None:
-            self._thread = threading.Thread(target=self._loop, daemon=True, name=f"rt-watcher-{self._name}")
-            self._thread.start()
+        """[已退役] 轮询线程不再启动。
+
+        runtime 组件（model_adapters/storages/serializers 等）变更改由 backend
+        watchfiles 主链驱动：kernel KNOWN_COMPONENTS 已含全部组件目录名 →
+        _identify_all_components_from_changes 识别 → builtin_reloaders._reload_*
+        调 ensure_*_watcher().reload_plugin/unload_plugin 精准处理。本方法保留
+        是为向后兼容旧调用点，空转即可。scan_now() 语义不变。
+
+        退役原因（原双通道）：轮询线程与主链双通道重载同一变更（主链重载不
+        更新 _sigs，轮询 ≤5s 后 snapshot diff 再重载第二遍），且线程常驻无
+        stop 出口。对齐 provider_loader.ProviderWatcher.start() 退役先例。
+        """
+        return
 
 
 _adapters_loader: Optional[RuntimeComponentLoader] = None
@@ -791,7 +801,6 @@ def ensure_model_adapter_watcher() -> Optional[_RuntimeWatcher]:
         _adapters_loader = _adapters_loader or _make_adapters_loader()
         _adapters_watcher = _RuntimeWatcher(_adapters_loader, "model_adapters")
         _adapters_watcher.scan_now()
-        _adapters_watcher.start()
         return _adapters_watcher
 
 
@@ -803,7 +812,6 @@ def ensure_loop_policy_watcher() -> Optional[_RuntimeWatcher]:
         _loop_loader = _loop_loader or _make_loop_loader()
         _loop_watcher = _RuntimeWatcher(_loop_loader, "loop_policies")
         _loop_watcher.scan_now()
-        _loop_watcher.start()
         return _loop_watcher
 
 
@@ -815,7 +823,6 @@ def ensure_hook_policy_watcher() -> Optional[_RuntimeWatcher]:
         _hook_loader = _hook_loader or _make_hook_loader()
         _hook_watcher = _RuntimeWatcher(_hook_loader, "hook_policies")
         _hook_watcher.scan_now()
-        _hook_watcher.start()
         return _hook_watcher
 
 
@@ -827,7 +834,6 @@ def ensure_storage_watcher() -> Optional[_RuntimeWatcher]:
         _storage_loader = _storage_loader or _make_storage_loader()
         _storage_watcher = _RuntimeWatcher(_storage_loader, "storages")
         _storage_watcher.scan_now()
-        _storage_watcher.start()
         return _storage_watcher
 
 
@@ -839,7 +845,6 @@ def ensure_serializer_watcher() -> Optional[_RuntimeWatcher]:
         _serializer_loader = _serializer_loader or _make_serializer_loader()
         _serializer_watcher = _RuntimeWatcher(_serializer_loader, "serializers")
         _serializer_watcher.scan_now()
-        _serializer_watcher.start()
         return _serializer_watcher
 
 
@@ -851,7 +856,6 @@ def ensure_transport_watcher() -> Optional[_RuntimeWatcher]:
         _transport_loader = _transport_loader or _make_transport_loader()
         _transport_watcher = _RuntimeWatcher(_transport_loader, "transports")
         _transport_watcher.scan_now()
-        _transport_watcher.start()
         return _transport_watcher
 
 
@@ -863,7 +867,6 @@ def ensure_stream_sink_watcher() -> Optional[_RuntimeWatcher]:
         _stream_sink_loader = _stream_sink_loader or _make_stream_sink_loader()
         _stream_sink_watcher = _RuntimeWatcher(_stream_sink_loader, "stream_sinks")
         _stream_sink_watcher.scan_now()
-        _stream_sink_watcher.start()
         return _stream_sink_watcher
 
 
@@ -875,7 +878,6 @@ def ensure_gateway_watcher() -> Optional[_RuntimeWatcher]:
         _gateway_loader = _gateway_loader or _make_gateway_loader()
         _gateway_watcher = _RuntimeWatcher(_gateway_loader, "gateways")
         _gateway_watcher.scan_now()
-        _gateway_watcher.start()
         return _gateway_watcher
 
 
@@ -887,7 +889,6 @@ def ensure_engine_watcher() -> Optional[_RuntimeWatcher]:
         _engine_loader = _engine_loader or _make_engine_loader()
         _engine_watcher = _RuntimeWatcher(_engine_loader, "engines")
         _engine_watcher.scan_now()
-        _engine_watcher.start()
         return _engine_watcher
 
 
@@ -904,7 +905,6 @@ def ensure_context_watcher() -> Optional[_RuntimeWatcher]:
         _context_tier_loader = _context_tier_loader or _make_context_tier_loader()
         _context_watcher = _RuntimeWatcher(_context_tier_loader, "context_tiers")
         _context_watcher.scan_now()
-        _context_watcher.start()
         return _context_watcher
 
 
