@@ -104,7 +104,6 @@ from app.widgets.card_render_core import (
     _BORDER_RADIUS_CSS_VARS,
     _BUILTIN_FENCE_PERMS,
     _CHAR_COUNT_HTML,
-    _CODE_FONT_SIZE,
     _CONTENT_AUTOSCROLL_JS,
     _FLIP_JS,
     _HISTORY_TOOL_CAPS,
@@ -113,6 +112,8 @@ from app.widgets.card_render_core import (
     _RENDER_POOL,
     _RESET_CONTENT_FOR_REUSE_JS,
     _SENTENCE_END_CHARS,
+    _code_font_size,
+    _refresh_code_font_size,
     _SKELETON_CACHE_MAX,
     _SKELETON_CACHE_VERSION,
     _STREAM_APPEND_HELPERS_JS,
@@ -7458,9 +7459,9 @@ class CodeWebViewer(QWebEngineView):
             set_pygments_style(_style)
             set_diff_highlight_style(_style)
             # 同步缓存图标前缀，避免每次渲染都重新检测主题
+            # [PERF L1] 字号缓存已惰性化：刷新失效（下渲染取新档位）
             _update_icon_prefix()
-            global _CODE_FONT_SIZE
-            _CODE_FONT_SIZE = scale_font_size(13)
+            _refresh_code_font_size()
         except Exception:
             pass
 
@@ -8296,8 +8297,8 @@ class CodeWebViewer(QWebEngineView):
         except Exception:
             style = "dracula"
         _update_icon_prefix()
-        global _CODE_FONT_SIZE
-        _CODE_FONT_SIZE = scale_font_size(13)
+        # [PERF L1] 字号缓存已惰性化：刷新失效后立即读取（下同原重绑定语义）
+        _refresh_code_font_size()
         return RenderCtx(
             streaming=self._streaming,
             compact=self._tool_compact_mode,
@@ -8306,7 +8307,7 @@ class CodeWebViewer(QWebEngineView):
             tool_fingerprints=frozenset(getattr(self, "_finished_tool_fingerprints", ()) or ()),
             pygments_style=style,
             icon_prefix=current_icon_prefix(),
-            code_font_size=_CODE_FONT_SIZE,
+            code_font_size=_code_font_size(),
         )
 
     # ── [B5.2] 流式活动块纯文本尾态 ─────────────────────────────────────
@@ -9092,7 +9093,7 @@ class CodeWebViewer(QWebEngineView):
             "icon_prefix": current_icon_prefix(),
             "heavy_caps": _HISTORY_TOOL_CAPS if getattr(self, "_is_history", False) else None,
             "lazy_body": self._tool_lazy_body,
-            "code_font_size": _CODE_FONT_SIZE,
+            "code_font_size": _code_font_size(),
             # 协议段指纹去重（frozenset 快照，worker 线程只读安全）：
             # 流式渲染时未闭合协议段指纹命中已完成工具后不渲染占位框（防与真实完成块重复）
             "tool_fingerprints": frozenset(getattr(self, "_finished_tool_fingerprints", ()) or ()),
