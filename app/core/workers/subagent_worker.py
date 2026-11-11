@@ -1167,6 +1167,36 @@ class SubAgentExecutor(QThread):
         except Exception as e:  # noqa: BLE001 — 回收失败保留 data URI
             logger.warning(f"[SubAgentWorker] vision revoke 失败（保留 data URI）: {e}")
 
+    def _materialize_for_send(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """[方案 A] 发送前物化（对称 chat_worker._materialize_for_send）。
+
+        _serialize_for_api 出口回收把产物图片块还原为 image_ref；直接外发会
+        触发 OpenAI 协议 400（type=image_ref 非法），responses transport 从内部
+        格式 messages 重新序列化时同样只认 image_url 形态（不识别即丢图）。
+
+        浅拷贝消息骨架（msg dict + content list + 块 dict 三层）后 revive 幂等
+        读回，data URI 只在本请求作用域存在；已回收的原 messages 不被二次污染。
+        副本随请求结束 GC。
+        """
+        out: List[Dict[str, Any]] = []
+        for msg in messages:
+            if not isinstance(msg, dict):
+                out.append(msg)
+                continue
+            m2 = dict(msg)
+            content = msg.get("content")
+            if isinstance(content, list):
+                # content 必须拷贝：revive 就地按索引替换块，会污染共享列表
+                m2["content"] = [dict(b) if isinstance(b, dict) else b for b in content]
+            out.append(m2)
+        try:
+            from app.core.store.session_repository import revive_vision_image_refs
+
+            return revive_vision_image_refs(out)
+        except Exception as e:  # noqa: BLE001 — 物化失败按副本发送（image_ref 会被 provider 拒，走重试/报错链路）
+            logger.warning(f"[SubAgentWorker] materialize revive 失败（按副本发送）: {e}")
+            return out
+
     @_in_flight
     def _make_api_call(self, messages: List[Dict], tools: List[Dict] = None, llm_config: Dict = None) -> tuple:
         """调用 LLM API（流式发起 + 事件聚合，子智能体后台执行无需逐字渲染）。
@@ -1196,6 +1226,12 @@ class SubAgentExecutor(QThread):
         # chat 形态消息：chat transport 直接用它发请求；responses transport 忽略它，
         # 从内部格式 messages 自行序列化 input_items
         api_messages = self._serialize_for_api(messages, config).messages
+        # [方案 A] 发送前物化（对称 chat_worker）：出口回收后 api_messages 的图片块
+        # 是 image_ref 形态，chat transport 原样外发必触发 400；responses transport
+        # 忽略 api_messages、从内部格式 messages 重新序列化，同样只认 image_url ——
+        # 因此两路统一改传物化副本（data URI 只在本请求作用域存在，已回收的原
+        # current_messages 不被二次污染，副本随请求结束 GC）。
+        materialized = self._materialize_for_send(api_messages)
 
         from app.core.workers.error_handler import create_api_call_with_retry
         from app.core.workers.protocol_dispatch import resolve_transport_target
@@ -1218,10 +1254,10 @@ class SubAgentExecutor(QThread):
         def create_stream():
             return transport.create_stream(
                 config,
-                messages,
+                materialized,
                 tools=tools,
                 auth_headers=auth_headers or None,
-                api_messages=api_messages,
+                api_messages=materialized,
                 client=client,
                 cap_max_tokens=lambda m, v: self._cap_max_output_tokens(m, v, config),
             )
