@@ -4421,10 +4421,11 @@ class OpenAIChatToolWindow(ToolWindow):
             - font_size:    UI 基础字号（px）
             - colors:       主题色字典，可直接用: colors["card_bg"]、colors["accent"]、colors["text_primary"] 等
             - main_widget:  本窗口 MainWidget 引用（与输入区按钮 context 一致）
-            - services:     对话服务门面（get_model_config / get_tools_schema /
-                            save_messages_to_session / enter_exclusive_ui_mode 等，
+            - services:     对话服务门面（save_messages_to_session /
+                            enter_exclusive_ui_mode 等，
                             见 _build_ui_services；供 autoloop 等对话类插件驱动
-                            自建 ConversationCore 执行栈）
+                            自建 ConversationCore 执行栈；模型/工具数据类服务
+                            已迁能力池 model.config / model.schema）
         """
         # ── 工作目录取值优先级 ──
         # 1. tool_executor.get_workdir() — 用户显式设置的项目根目录（最优先）
@@ -27100,8 +27101,9 @@ class OpenAIChatToolWindow(ToolWindow):
         实现唯一真相在 app/plugins/capabilities/providers/；本方法只做投影，
         不得再写服务实现（新增能力去 catalog 登记 + provider 注册）。
 
-        get_provider_config 是插件取「任意服务商配置」的唯一正确入口：密钥模式下
+        插件取「任意服务商配置」走能力池 model.config / model.config_for：密钥模式下
         磁盘 API_KEY 为密文/空串，插件直读 app.config 会拿到不可用的 key。
+        本方法只做 LEGACY_MAP 投影（get_provider_config 旧键已随兼容层退役删除）。
         """
         from app.plugins.capabilities.registry import CapabilityRegistry
         from app.plugins.registries.ui_plugin_registry import project_services

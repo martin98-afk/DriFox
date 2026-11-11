@@ -1490,8 +1490,9 @@ def register(registry) -> None:
     reg.register("window.workbench", _window_workbench, surface="ui", owner="core:ui")
     reg.register("window.events", _window_events, surface="ui", owner="core:ui")
     # 模型 / 智能体
+    # _provider_config（get_provider_config 旧通道的专属实现）已随兼容层退役删除注册：
+    # LEGACY_MAP 不再有该键，投影循环永不触达；能力面统一走 model.config / model.config_for。
     reg.register("model.config", _model_config, surface="ui", owner="core:ui")
-    reg.register("model.config", _provider_config, surface="ui", owner="core:ui", legacy_key="get_provider_config")
     reg.register("model.config_for", _model_config_for, surface="ui", owner="core:ui")
     reg.register("model.set", _model_set, surface="ui", owner="core:ui")
     reg.register("model.schema", _model_schema, surface="ui", owner="core:ui")
