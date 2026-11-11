@@ -3148,7 +3148,8 @@ class MarketplaceCard(QWidget):
 
         # 一键更新 + 诊断 + 刷新 + 关闭（一键更新在最左）
         # 一键更新：待更新 >1 时出现图标，右上角 badge 显示数量（归零即隐藏）
-        self._update_all_btn = TransparentToolButton(FluentIcon.UPDATE, header)
+        # 图标用 DOWNLOAD（向下载入）：UPDATE 画成 ⟲ 时钟样，与旁边 ⟳ 刷新易混
+        self._update_all_btn = TransparentToolButton(FluentIcon.DOWNLOAD, header)
         self._update_all_btn.setFixedSize(24, 24)
         self._update_all_btn.setToolTip("一键更新")
         self._update_all_btn.clicked.connect(self._on_update_all)
@@ -3157,16 +3158,29 @@ class MarketplaceCard(QWidget):
 
         self._update_all_badge = None
         try:
-            from qfluentwidgets import InfoBadge, InfoBadgePosition
+            from qfluentwidgets import InfoBadge
+            from PyQt5.QtCore import QPoint
+            from qfluentwidgets.components.widgets.info_badge import InfoBadgeManager
+
+            class _SnugBadgeManager(InfoBadgeManager):
+                """badge 叠在按钮右上角内侧：默认 TOP_RIGHT 中心锚在角上，半悬空易被视为漂浮"""
+
+                def position(self):
+                    g = self.target.geometry()
+                    return QPoint(
+                        g.x() + g.width() - self.badge.width() + 5,
+                        g.y() - self.badge.height() // 2 + 6,
+                    )
 
             self._update_all_badge = InfoBadge.custom(
                 "0",
                 QColor(255, 193, 7),
                 QColor(255, 213, 79),
                 parent=header,
-                target=self._update_all_btn,
-                position=InfoBadgePosition.TOP_RIGHT,
             )
+            manager = _SnugBadgeManager(self._update_all_btn, self._update_all_badge)
+            self._update_all_badge.manager = manager
+            self._update_all_badge.move(manager.position())
             self._update_all_badge.setObjectName("updateAllBadge")
             # 同「待更新」tab badge：注销主题自动重放，固定黑字保证亮黄底可读
             from qfluentwidgets.common.style_sheet import styleSheetManager
@@ -6307,6 +6321,10 @@ class MarketplaceCard(QWidget):
             if self._update_all_badge is not None:
                 if show:
                     self._update_all_badge.setText(str(n))
+                    # 数字变宽后重算尺寸并贴回按钮角（manager 只监听按钮 Resize/Move）
+                    self._update_all_badge.adjustSize()
+                    if self._update_all_badge.manager is not None:
+                        self._update_all_badge.move(self._update_all_badge.manager.position())
                     self._update_all_badge.setVisible(True)
                 else:
                     self._update_all_badge.setText("0")

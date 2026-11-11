@@ -55,6 +55,8 @@ from app.widgets.cards.settings.plugin_components_card import _component_display
 
 _SEARCH_DEBOUNCE_MS = 180
 _LIST_WIDTH = 236
+# 类型下拉最多直接可见的档位数，超出滚动（默认 -1 会按屏幕高度撑满）
+_TYPE_COMBO_MAX_VISIBLE_ITEMS = 10
 _STATE_RANK = {"missing": 0, "unconfigured": 1, "ok": 2, "none": 3}
 _LEVEL_CN = {"low": "低", "medium": "中", "high": "高", "none": "无"}
 
@@ -744,6 +746,7 @@ class PluginSettingsPage(QWidget):
         self._type_combo = ComboBox(self)
         self._type_combo.setFixedHeight(32)
         self._type_combo.setMinimumWidth(132)
+        self._type_combo.setMaxVisibleItems(_TYPE_COMBO_MAX_VISIBLE_ITEMS)
         self._type_combo.addItem("全部类型")
         self._type_combo.currentIndexChanged.connect(self._on_type_changed)
         search_row = QHBoxLayout()
