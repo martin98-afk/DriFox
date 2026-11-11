@@ -813,19 +813,17 @@ class TraceCardWidget(QWidget):
             self._detail.set_tools_schema(schemas)
 
     def _fetch_tools_schema(self) -> List[Dict[str, Any]]:
-        """优先走 ``ctx.services.get_tools_schema(agent)``（带 deny 过滤），
-        失败回退全局 ``ToolRegistry.schemas()``。"""
-        services = self._ctx.get("services") or {}
-        getter = services.get("get_tools_schema")
-        if callable(getter):
-            try:
+        """走 ``model.schema`` 能力（带 deny 过滤），失败回退全局 ``ToolRegistry.schemas()``。"""
+        try:
+            schema_fn = _caps("model.schema")
+            if callable(schema_fn):
                 mw = self._ctx.get("main_widget")
                 agent = getattr(mw, "_current_agent", "") if mw is not None else ""
-                schemas = getter(agent or "build")
+                schemas = schema_fn(agent or "build")
                 if schemas:
                     return list(schemas)
-            except Exception as e:
-                logger.debug(f"[agent_trace] services.get_tools_schema 失败: {e}")
+        except Exception as e:
+            logger.debug(f"[agent_trace] model.schema 能力取工具 schema 失败: {e}")
         try:
             api = _tool_api("read")
             return list(api["schemas"]()) if api else []
