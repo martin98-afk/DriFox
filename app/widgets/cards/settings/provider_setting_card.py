@@ -662,6 +662,15 @@ class ProviderListSettingCard(DynamicHeightExpandCardMixin, ExpandSettingCard):
             self._adjust_view_size()
             # 同步清理该条目的凭证库残留（历史上只删配置，keyring 条目永久驻留）
             self._purge_credentials(item.config_id)
+            # [长跑 #40] 删除配置后把该 config_id 从 UsageService 活跃轮询退出：
+            # _active_plan_keys/_active_balance_keys 只在 invalidate 时清理，
+            # 保存/删除路径漏调会让已删配置每 60s 继续抓用量/余额（残留轮询）
+            try:
+                from app.core.infra.usage_service import UsageService
+
+                UsageService.get_instance().invalidate(item.config_id)
+            except Exception as e:
+                logger.warning(f"[ProviderList] UsageService 失效失败 config_id={item.config_id}: {e}")
             self.providerChanged.emit(self.providers)
             # 如果删除的是默认服务商，则更新默认服务商
             if self.default_provider == item.config_id or self.default_provider == item.provider_name:

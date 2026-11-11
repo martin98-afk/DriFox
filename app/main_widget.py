@@ -11135,14 +11135,16 @@ class OpenAIChatToolWindow(ToolWindow):
                 try:
                     if not hasattr(win, "_settings_popup") or not win._settings_popup:
                         continue
-                    if not hasattr(win._settings_popup, "hookListCard"):
+                    card = getattr(win._settings_popup, "hookListCard", None)
+                    if card is None:
+                        # 懒态守卫（#40）：hooks 页未进入时卡片未构建，跳过本窗口，
+                        # 不靠 except AttributeError 吞错（异常兜底只留给窗口销毁竞态）
                         continue
-                    card = win._settings_popup.hookListCard
                     if card._hook_manager:
                         card._hook_manager.reload_global_hooks(str(card._hooks_config_file))
                     card._refresh(reload=True)
                     break
-                except (RuntimeError, AttributeError):
+                except RuntimeError:
                     # 多窗口竞态：窗口已被销毁
                     pass
             logger.debug("[HotReload] hooks card refreshed")
@@ -11185,9 +11187,10 @@ class OpenAIChatToolWindow(ToolWindow):
                 try:
                     if not hasattr(win, "_settings_popup") or not win._settings_popup:
                         continue
-                    if not hasattr(win._settings_popup, "mcpListCard"):
+                    mcp_card = getattr(win._settings_popup, "mcpListCard", None)
+                    if mcp_card is None:
+                        # 懒态守卫（#40）：MCP 页未进入时卡片未构建，跳过本窗口
                         continue
-                    mcp_card = win._settings_popup.mcpListCard
                     # 自触发（开关操作）→ consume 返回 True → 跳过刷新（避免整卡闪烁）；
                     # 外部修改 .mcp.json / 插件被热重载 / 插件被删除 → consume 返回 False → 刷新一次。
                     if mcp_card.consume_hot_reload():
