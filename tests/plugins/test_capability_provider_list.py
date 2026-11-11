@@ -123,6 +123,8 @@ def test_provider_list_includes_capability_type():
     rows = _pool("ui", {"provider.list"}, w)["provider.list"]()
     assert any(r.get("capability_type") == "image_generation" for r in rows)
     assert any(r.get("capability_type") == "chat" for r in rows)
+    rows_by_id = {r["id"]: r for r in rows}
+    assert rows_by_id["img-1"]["capability_type"] == "image_generation"
 
 
 # ── model.enumerate ──
@@ -169,6 +171,21 @@ def test_enumerate_second_instance_uses_its_own_current_model():
     out = _pool("ui", {"model.enumerate"}, _widget())["model.enumerate"]("cid-2")
     assert [m["name"] for m in out] == ["MiniMax-M2.7"]
     assert out[0]["is_current"] is True
+
+
+def test_enumerate_capability_type_marks_generation_instance():
+    """生成类实例的枚举行带实例 capability_type（照 provider.list 同款注入法）"""
+    w = _widget()
+    w._valid_configs["img-1"] = {
+        "provider_name": "示例图像",
+        "display_name": "示例图像",
+        "capability_type": "image_generation",
+        "模型名称": "dall-e-3",
+        "模型列表": ["dall-e-3"],
+    }
+    w._resolve_service_provider = lambda name: {"img-1": "img-1"}.get(str(name or "").strip())
+    out = _pool("ui", {"model.enumerate"}, w)["model.enumerate"]("img-1")
+    assert out and all(item["capability_type"] == "image_generation" for item in out)
 
 
 # ── 能力标记：声明层优先（L0）──

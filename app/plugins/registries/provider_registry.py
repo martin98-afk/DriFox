@@ -64,7 +64,8 @@ class ProviderDef:
     preset_urls: List[str] = field(default_factory=list)
     auth_type: str = "bearer"  # 认证方式：bearer / bce / none / anthropic
     capability_type: str = "chat"  # 能力类型：chat / image_generation / video_generation /
-    # speech_generation / speech_recognition …；插件自由标注
+    # speech_generation / speech_recognition …；插件自由标注。
+    # 约定全小写，比较为精确匹配（无 lower 归一），大小写不同即视为不同能力
     default_model: str = ""  # 默认模型名（"模型名称"）
     default_params: Dict[str, Any] = field(default_factory=dict)  # 其他默认参数（温度/最大Token/思考模式…）
     register_url: str = ""  # 获取 API Key 的地址（"获取地址"）

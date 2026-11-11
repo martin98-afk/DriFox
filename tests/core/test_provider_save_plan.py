@@ -3,7 +3,7 @@
 
 覆盖 build_provider_save_plan 与 collect_extra_fields 的规则：
 - confirm_clear 触发 / 不触发
-- payload 五键恒存在（含空串）
+- payload 六键恒存在（含空串）
 - extra_fields 透传（空串覆盖）
 - config_id 保留 / 新建态不写
 - 模型列表空串（显式清空）
@@ -61,8 +61,8 @@ def test_confirm_clear_when_old_info_lacks_models_key():
 # ══════════════════════════════════════════════════════════════════
 
 
-def test_payload_five_keys_always_present_even_empty():
-    """五键恒存在：表单值全空也要写出空串（显式清空），不得省略键
+def test_payload_six_keys_always_present_even_empty():
+    """六键恒存在：表单值全空也要写出空串（显式清空），不得省略键
 
     P1-9：「模型名称」由 plan 自动维护——空 model + 非空启用列表会补首项，
     故纯空场景需同时传 models=[]（启用列表空才保持空串）。
@@ -74,7 +74,7 @@ def test_payload_five_keys_always_present_even_empty():
     )
     payload = plan["payload"]
     for key in FORM_KEYS:
-        assert key in payload, f"五键必须恒存在，缺 {key}"
+        assert key in payload, f"六键必须恒存在，缺 {key}"
         # capability_type 有非空缺省：未选类型 = 显式 "chat"（非空串同样是显式值）
         expected = "chat" if key == "capability_type" else ""
         assert payload[key] == expected

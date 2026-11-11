@@ -457,6 +457,8 @@ class TestCapabilityGroupRendering:
         )
         card = ProviderPickerCard()
         labels = [label.text() for _anchor, label, _color in card._headers]
-        assert "图像生成（1）" in labels, f"未生成能力组头，实际: {labels}"
+        # ensure_loaded 会带上真实插件的能力服务商（样例「火山方舟图像」等），
+        # 图像生成计数随注册表现状浮动，只断言组头存在、不锁数量
+        assert any(lb.startswith("图像生成（") for lb in labels), f"未生成能力组头，实际: {labels}"
         # reg 经 all() 的 ensure_loaded 会带上真实插件服务商，只断言凭据组仍在、不数数量
         assert any(lb.startswith("API（") for lb in labels), "chat 服务商仍应保留既有凭据组"

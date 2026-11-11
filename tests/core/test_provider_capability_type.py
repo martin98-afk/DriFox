@@ -1,6 +1,15 @@
 # -*- coding: utf-8 -*-
 """能力类型：ProviderDef 字段与注册表动态收集。"""
 
+import pytest
+
+from app.core.modelmeta.provider_profile import (
+    ProviderConfigCollision,
+    apply_provider_save,
+    chat_fallback_candidate,
+    compute_provider_config_id,
+    resolve_capability_type,
+)
 from app.plugins.registries.provider_registry import ProviderDef, ProviderRegistry
 
 
@@ -16,9 +25,6 @@ def test_capability_types_collects_distinct_sorted():
     reg._providers["c"] = ProviderDef(name="C", capability_type="image_generation")
     reg._providers["d"] = ProviderDef(name="D", capability_type="video_generation")
     assert reg.capability_types() == ["image_generation", "video_generation"]
-
-
-from app.core.modelmeta.provider_profile import resolve_capability_type
 
 
 def test_resolve_capability_type_unknown_provider_defaults_chat():
@@ -48,14 +54,6 @@ def test_resolve_capability_type_reads_registered_def(monkeypatch):
     assert resolve_capability_type({"provider_name": "豆包语音合成"}) == "speech_generation"
 
 
-from app.core.modelmeta.provider_profile import (
-    ProviderConfigCollision,
-    apply_provider_save,
-    compute_provider_config_id,
-)
-import pytest
-
-
 def test_same_url_and_key_collides():
     """spec 3.1：不同能力共用同一 (URL, KEY) 会被拒，靠插件声明不同默认 URL 规避。"""
     saved = {}
@@ -77,9 +75,6 @@ def test_different_url_no_collision():
     assert compute_provider_config_id(a) != compute_provider_config_id(b)
 
 
-from app.core.modelmeta.provider_profile import chat_fallback_candidate
-
-
 def test_chat_fallback_candidate_only_chat():
     configs = {
         "img-1": {"provider_name": "示例图像", "capability_type": "image_generation"},
@@ -92,6 +87,11 @@ def test_chat_fallback_candidate_empty_when_no_chat():
     assert chat_fallback_candidate({"img-1": {"capability_type": "image_generation"}}) == ""
 
 
+def test_chat_fallback_candidate_missing_key_defaults_chat():
+    """无 capability_type 键 → 默认按 chat，可被选为回退目标"""
+    assert chat_fallback_candidate({"a": {"provider_name": "x"}}) == "a"
+
+
 def test_resolve_capability_type_prefers_disk_key_for_custom_provider():
     """自定义服务商（无 ProviderDef）：磁盘 capability_type 键是权威来源，反查失败不得回退 chat。"""
     assert resolve_capability_type({
@@ -100,12 +100,30 @@ def test_resolve_capability_type_prefers_disk_key_for_custom_provider():
     }) == "image_generation"
 
 
-def test_resolve_capability_type_disk_key_overrides_registry():
-    """自定义服务商（反查 miss）：磁盘 capability_type 键是权威来源（编辑卡下拉落盘）。"""
-    # 该 provider_name 反查不到定义（未注册），磁盘键生效
+def test_resolve_capability_type_blank_disk_key_falls_back_to_lookup(monkeypatch):
+    """磁盘键空白（如 "  "）不生效 → 走 provider_name 反查命中声明。
+
+    resolve_capability_type 对磁盘键 strip 后判空，空白视同未标注；
+    provider_name 已注册声明时声明生效（空白不压死反查）。
+    """
+    from app.plugins.registries import provider_registry as mod
+
+    class _P:
+        capability_type = "video_generation"
+
+    class _R:
+        @staticmethod
+        def get_instance():
+            return _R()
+
+        @staticmethod
+        def get(name):
+            return _P() if name == "某视频服务商" else None
+
+    monkeypatch.setattr(mod, "ProviderRegistry", _R)
     assert resolve_capability_type({
-        "provider_name": "未知服务商",
-        "capability_type": "video_generation",
+        "provider_name": "某视频服务商",
+        "capability_type": "  ",
     }) == "video_generation"
 
 

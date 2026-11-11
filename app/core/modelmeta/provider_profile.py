@@ -310,7 +310,11 @@ def resolve_capability_type(provider_info: Dict[str, Any]) -> str:
 
 
 def chat_fallback_candidate(valid_configs: Dict[str, Dict[str, Any]]) -> str:
-    """当前选择失效时，从 chat 实例里取首个 config_id；无 chat 返回空串。"""
+    """当前选择失效时，从 chat 实例里取首个 config_id；无 chat 返回空串。
+
+    「首个」依赖 valid_configs 的 dict 插入序（即配置列表构建顺序）；
+    未来重构若换容器或重排键，回退目标会随之静默漂移，需重新确认确定性。
+    """
     for config_id, info in (valid_configs or {}).items():
         if str((info or {}).get("capability_type", "chat") or "chat") == "chat":
             return str(config_id)
