@@ -123,6 +123,80 @@ def test_panel_show_completed_task_is_idempotent(panel):
     assert first.time_label.text() == "⏱01:15"
 
 
+# ──────────────────── 完成行 FIFO 淘汰（#20）────────────────────
+
+def test_fifo_evicts_oldest_finished_rows(panel):
+    """构造 >MAX_FINISHED_ROWS 完成行 → 最老被清理，计数封顶，清理链完整。"""
+    from tests.plugins.test_system_subagent_run_panel import _run_panel_mod
+
+    limit = _run_panel_mod.MAX_FINISHED_ROWS
+    assert limit == 50, "上限常量锚定（139KB×50≈7MB 封顶口径）"
+
+    total = limit + 5
+    for i in range(total):
+        panel.show_completed_task(f"t{i:03d}", "coder", f"任务{i}")
+
+    finished_ids = panel.task_ids()
+    assert len(finished_ids) == limit, f"完成行计数必须封顶 {limit}（实际 {len(finished_ids)}）"
+    # 最老 5 行被淘汰、最新在册（FIFO 顺序正确）
+    for i in range(5):
+        assert f"t{i:03d}" not in panel._rows, f"最老行 t{i:03d} 应被淘汰"
+    assert f"t{total - 1:03d}" in panel._rows, "最新行必须在册"
+
+def test_fifo_preserves_running_rows(panel):
+    """进行中行永不参与淘汰：50 完成行 + 1 进行中，再补完成行 → running 仍在。"""
+    from tests.plugins.test_system_subagent_run_panel import _run_panel_mod
+
+    limit = _run_panel_mod.MAX_FINISHED_ROWS
+    panel.add_task("running-1", "coder", "还在跑")
+    for i in range(limit):
+        panel.show_completed_task(f"f{i:03d}", "coder", f"历史{i}")
+
+    panel.show_completed_task(f"f{limit:03d}", "coder", "新完成")
+
+    assert panel.has_task("running-1"), "进行中行不得被 FIFO 淘汰"
+    assert len([tid for tid in panel.task_ids() if tid.startswith("f")]) == limit, (
+        "完成行计数封顶"
+    )
+
+def test_finished_rows_frozen_from_tick(panel, monkeypatch):
+    """完成行不再参与每秒 setText：_tick_elapsed 只触达进行中行。"""
+    panel.add_task("run-1", "coder", "进行中")
+    panel.show_completed_task("done-1", "coder", "已完成")
+
+    run_row = panel._rows["run-1"]
+    done_row = panel._rows["done-1"]
+    run_calls, done_calls = [], []
+    monkeypatch.setattr(run_row, "update_elapsed", lambda: run_calls.append(1))
+    monkeypatch.setattr(done_row, "update_elapsed", lambda: done_calls.append(1))
+
+    panel._tick_elapsed()
+
+    assert run_calls and not done_calls, (
+        "完成行必须被 _tick_elapsed 跳过（文本完成后永不变，消除每秒无效遍历）"
+    )
+
+def test_fifo_order_oldest_first(panel):
+    """淘汰顺序 FIFO：按完成时刻序，最早完成的先出（与插入序无关）。"""
+    from tests.plugins.test_system_subagent_run_panel import _run_panel_mod
+
+    limit = _run_panel_mod.MAX_FINISHED_ROWS
+    # old-1 最早完成；running 行最先插入但未完成（不参与排序）；填充行后完成
+    panel.show_completed_task("old-1", "coder", "最早完成")
+    panel.add_task("slow", "coder", "还在跑")
+    for i in range(limit - 1):
+        panel.show_completed_task(f"b{i:03d}", "coder", f"填充{i}")
+    assert panel.has_task("old-1") and panel.has_task("slow")
+
+    # 第 51 个完成行触发淘汰：完成时刻最早的 old-1 先出
+    panel.show_completed_task("new-1", "coder", "压线新行")
+
+    assert "old-1" not in panel._rows, "完成时刻最早的行应最先被淘汰"
+    assert panel.has_task("slow"), "进行中行不受 FIFO 影响"
+    assert panel.has_task("new-1"), "最新完成行应在册"
+    assert "b000" in panel._rows, "次早完成行应在册"
+
+
 def test_panel_emits_height_on_data_change(panel):
     hits = []
     panel.heightChanged.connect(lambda: hits.append(1))

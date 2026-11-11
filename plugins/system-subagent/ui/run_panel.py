@@ -30,6 +30,11 @@ from .agent_row import AgentTaskRow
 
 _ROTATION_TICK_MS = 60
 
+# 完成行 FIFO 上限：单行 ≈139KB（QWidget+标签实测，plan #10），50 行 ≈7MB 封顶；
+# 超限淘汰最老完成行（进行中行永不参与）。历史回填（restore_items 批量补几十行）
+# 是无上限增长的主通道。
+MAX_FINISHED_ROWS = 50
+
 
 class SubAgentRunPanel(QWidget):
     """子智能体运行态面板：一行一任务，全部完成后折叠收起。"""
@@ -44,6 +49,8 @@ class SubAgentRunPanel(QWidget):
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
         self._rows: Dict[str, AgentTaskRow] = {}
+        # 完成行 FIFO 序（完成时刻序，非插入序）：超 MAX_FINISHED_ROWS 淘汰最老
+        self._finished_order: List[str] = []
         self._collapsed = False
         self._rotation_angle = 0
 
@@ -144,6 +151,9 @@ class SubAgentRunPanel(QWidget):
         if row is None:
             return
         row.finish(success)
+        if task_id not in self._finished_order:
+            self._finished_order.append(task_id)
+        self._enforce_finished_fifo()
         self._update_stats()
         if all(not r.is_running for r in self._rows.values()):
             self._set_collapsed(True)
@@ -174,16 +184,25 @@ class SubAgentRunPanel(QWidget):
             row.set_model_name(model_name)
 
     def remove_task(self, task_id: str) -> None:
-        """移除单行（新批次清理已完成任务时用）。"""
+        """移除单行（FIFO 淘汰 / 新批次清理已完成任务时用，全链清理）。"""
         row = self._rows.pop(task_id, None)
         if row is None:
             return
+        self._finished_order = [tid for tid in self._finished_order if tid != task_id]
         self._body_layout.removeWidget(row)
         row.setParent(None)
         row.deleteLater()
         self._sync_visibility()
         self._update_stats()
         self._emit_height()
+
+    def _enforce_finished_fifo(self) -> None:
+        """完成行 FIFO 淘汰：超 MAX_FINISHED_ROWS 时清最老完成行（remove_task 全链）。"""
+        overflow = len(self._finished_order) - MAX_FINISHED_ROWS
+        if overflow <= 0:
+            return
+        for task_id in self._finished_order[:overflow]:
+            self.remove_task(task_id)
 
     def clear(self) -> None:
         """清空全部行并隐藏面板（会话切换 / 插件卸载）。"""
@@ -192,6 +211,7 @@ class SubAgentRunPanel(QWidget):
             row.setParent(None)
             row.deleteLater()
         self._rows.clear()
+        self._finished_order.clear()
         self._rotation_angle = 0
         self._stop_ticks()
         self._update_stats()
@@ -272,6 +292,9 @@ class SubAgentRunPanel(QWidget):
         if context_usage:
             row.set_context_info(context_usage)
         row.finish(success=success)
+        if task_id not in self._finished_order:
+            self._finished_order.append(task_id)
+        self._enforce_finished_fifo()
 
         self._ensure_expanded()
         self._sync_visibility()
@@ -363,8 +386,11 @@ class SubAgentRunPanel(QWidget):
             row.set_rotation_angle(self._rotation_angle)
 
     def _tick_elapsed(self) -> None:
+        # 完成行冻结：文本完成后永不变（row.update_elapsed 内部亦有 _is_finished
+        # 早退），此处跳过遍历调用，消除每秒对几十个完成行的无效轮询。
         for row in self._rows.values():
-            row.update_elapsed()
+            if row.is_running:
+                row.update_elapsed()
 
     # ── 内部：行信号 ──
 
