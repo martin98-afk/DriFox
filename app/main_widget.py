@@ -7134,8 +7134,11 @@ class OpenAIChatToolWindow(ToolWindow):
                 如 /subagents --model=、/title-gen --model= 命令）；
                 False 时静默返回 None（后台自动流程，如标题生成、子智能体
                 默认模型解析——解析失败应静默回退主模型，避免打扰用户）。
-            capability_type: 语义过滤，只放行该类型的实例（"chat" 聊天 / "generation"
-                生成类）；缺省 "chat"，既有调用方不传参时行为不变。
+            capability_type: 语义过滤，只放行该类型的实例，值域与
+                ProviderDef.capability_type 同值域（"chat" / "image_generation" /
+                "video_generation" / "speech_generation" / "speech_recognition" …，
+                插件自由标注，无粗类 "generation"）；缺省 "chat"，既有调用方
+                不传参时行为不变。
         """
 
         def _allowed(cid: str) -> bool:
