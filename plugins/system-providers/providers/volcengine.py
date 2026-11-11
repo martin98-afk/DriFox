@@ -175,3 +175,17 @@ def register(registry):
             coding_plan_fetcher=_fetch_volcengine_coding_plan,
         )
     )
+
+    # 按能力拆分（spec 5.1）：豆包语音合成为独立 ProviderDef，
+    # api_url 与 chat 端点不同域，规避 config_id (URL, KEY) hash 撞车
+    registry.register(
+        ProviderDef(
+            name="豆包语音合成",
+            icon="火山引擎",
+            api_url="https://openspeech.bytedance.com/api/v1/tts",
+            auth_type="bearer",
+            default_model="seed-tts-2.0-standard",
+            models=["seed-tts-2.0-standard"],
+            capability_type="speech_generation",
+        )
+    )
