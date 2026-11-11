@@ -48,8 +48,34 @@ _NAME_PAD_V = 5  # 名称条上下留白
 _RADIUS = 8
 _MARGIN_L = 48  # 与 ExpandSettingCard 的展开区左缩进（对齐单选项历史缩进）
 _MARGIN_R = 24
-_PREVIEW_CACHE_TILE_W = 320  # 单格逻辑宽保守上限（4 列最坏布局+余量）
-_PREVIEW_CACHE_TILE_H = 120  # _tile_height() 上界（72+名称条 35+余量）
+_PREVIEW_CACHE_TILE_W = 480  # 单格逻辑宽上限：_relayout 最坏推导——4 列宽弹窗单格随弹窗宽增长（宽屏可达 ~400+），取 400 最坏 ×1.2 余量；禁回全分辨率无界缓存
+_PREVIEW_CACHE_TILE_H = 140  # tile 总高上界：_PREVIEW_MIN_H 72 + 名称条极档字号（~35）+ 余量
+
+def _preview_cache_target_size(dpr: float) -> QSize:
+    """预览缓存条目目标像素尺寸（公式化，可测）。
+
+    宽 = 单格最坏逻辑宽 × dpr；高 = tile 总高上界 × dpr。
+
+    内存上限公式：W_px × H_px × 4 字节（QImage ARGB32）
+    - 最坏条目（dpr=3.0）：480×3 × 140×3 × 4B ≈ 2.42MB
+    - 主流 dpr=2 屏：960×280 × 4B ≈ 1.07MB/条
+    - 条目数 = 已加载预览图的主题数（典型 ≤40）→ 缓存总量有界可控
+      （dpr=3 全量 ≈ 97MB 上界、dpr=2 ≈ 43MB；禁回全分辨率无界缓存）
+    """
+    d = max(1.0, float(dpr))
+    return QSize(round(_PREVIEW_CACHE_TILE_W * d), round(_PREVIEW_CACHE_TILE_H * d))
+
+def _max_screen_dpr() -> float:
+    """全部屏幕的最大 dpr（缓存按 source 单条目，无法按 tile 所在屏分键）。
+
+    取 max 保证任意屏上的 tile 绘制都足够清晰（_draw_cover 按 tile 所在屏 dpr
+    再缩放，缓存不足会小图放大模糊——ff17da1a0 画质回归根因之一：原实现只取
+    primaryScreen，副屏 dpr 更高时整屏预览都糊）。无屏（离屏测试）回退 1.0。
+    """
+    screens = QGuiApplication.screens()
+    if not screens:
+        return 1.0
+    return max(1.0, max(s.devicePixelRatio() for s in screens))
 
 # 名称字体与其撑出的条高按 (字族, 像素) 缓存：paint 每次都要用，
 # 字族/字号变化时 key 自然失效重建（design_tokens 侧缓存同步失效）
@@ -195,8 +221,7 @@ def _load_next_theme_image() -> None:
     if image.isNull():
         result = None  # 缺图也写 None 防重复探盘
     else:
-        dpr = max(1.0, QGuiApplication.primaryScreen().devicePixelRatio())
-        target = QSize(round(_PREVIEW_CACHE_TILE_W * dpr), round(_PREVIEW_CACHE_TILE_H * dpr))
+        target = _preview_cache_target_size(_max_screen_dpr())
         scaled = image.scaled(target, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
         result = scaled if not scaled.isNull() else image  # 极端小源图兜底
     _IMAGE_CACHE[source] = result
