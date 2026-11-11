@@ -281,3 +281,24 @@ def resolve_token_ratio(llm_config: Optional[Dict[str, Any]] = None, model: Opti
     from app.core.infra.token_estimator import _get_model_token_ratio
 
     return _get_model_token_ratio(model or str(llm_config.get("模型名称", "gpt-4") or "gpt-4"))
+
+
+def resolve_capability_type(provider_info: Dict[str, Any]) -> str:
+    """配置 dict → 能力类型。provider_name 反查 ProviderDef，缺失一律按 chat 兼容老配置。
+
+    磁盘不落该字段：与 display_name 同属运行时派生值，避免云同步指纹判变与迁移。
+    """
+    name = str((provider_info or {}).get("provider_name", "") or "").strip()
+    if not name:
+        return "chat"
+    try:
+        # 函数内延迟 import：测试 monkeypatch 的是 provider_registry 模块属性，
+        # 顶层 import 会绕过补丁；同时避免 provider_profile ↔ provider_registry 顶层环
+        from app.plugins.registries.provider_registry import ProviderRegistry
+
+        definition = ProviderRegistry.get_instance().get(name)
+        if definition is not None:
+            return str(getattr(definition, "capability_type", "chat") or "chat").strip() or "chat"
+    except Exception:
+        pass
+    return "chat"
