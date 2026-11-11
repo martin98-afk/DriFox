@@ -3,9 +3,11 @@
 子智能体执行器 - 独立运行子智能体任务，避免共享超长上下文
 """
 
+import functools
 import re
 import threading
 import time
+from contextlib import contextmanager
 from typing import Any, Dict, List, Optional
 
 import orjson
@@ -123,6 +125,20 @@ def _cap_args_tree(obj, limit, depth=0):
         return [_cap_args_tree(v, limit, depth + 1) for v in obj]
     return obj
 
+def _in_flight(method):
+    """标记「有阻塞操作在途」：期间 stall 看门狗不得按日志静默误杀。
+
+    长思考流式聚合、API 重试退避、长工具执行都是合法静默；退出时刷新活跃
+    时间，避免用进入前的旧时间戳被下一拍判超时。装饰器保留可重入语义。
+    """
+
+    @functools.wraps(method)
+    def wrapper(self, *args, **kwargs):
+        with self._in_flight_phase():
+            return method(self, *args, **kwargs)
+
+    return wrapper
+
 class SubAgentExecutor(QThread):
     """子智能体执行器 - 独立线程运行子智能体任务"""
 
@@ -166,9 +182,13 @@ class SubAgentExecutor(QThread):
         self._hook_policy_id = hook_policy_id
         self._hook_policy_obj = None  # 懒解析缓存
         self._is_cancelled = False
+        self._cancel_reason = "Task cancelled"
         self._pending_answer = None
         self._last_result = None
         self._execution_error = None
+        # 在途阶段（API/工具）计数：>0 表示阻塞操作正在执行，stall 看门狗豁免
+        self._in_flight_depth = 0
+        self._in_flight_since: Optional[float] = None
         # ★ T24：ask 权限等待（主线程弹窗响应后 set event，超时按拒绝）
         self._permission_event = threading.Event()
         self._permission_allow = False
@@ -215,6 +235,26 @@ class SubAgentExecutor(QThread):
         """获取最后活跃时间戳（供 SubAgentManager stall 检测使用）"""
         return self._last_activity_time
 
+    def get_in_flight_duration(self) -> Optional[float]:
+        """当前在途操作已持续秒数；不在途返回 None（stall 看门狗据此豁免）。"""
+        if self._in_flight_depth <= 0 or self._in_flight_since is None:
+            return None
+        return time.time() - self._in_flight_since
+
+    @contextmanager
+    def _in_flight_phase(self):
+        """可重入在途区间。最外层进入记起点，最外层退出刷新活跃时间。"""
+        self._in_flight_depth += 1
+        if self._in_flight_depth == 1:
+            self._in_flight_since = time.time()
+        try:
+            yield
+        finally:
+            self._in_flight_depth -= 1
+            if self._in_flight_depth == 0:
+                self._in_flight_since = None
+                self._last_activity_time = time.time()
+
     def set_log_store_callback(self, callback):
         """设置日志存储回调"""
         self._log_store_callback = callback
@@ -228,7 +268,14 @@ class SubAgentExecutor(QThread):
         """
         self._get_history_messages = getter
 
-    def cancel(self):
+    def cancel(self, reason: str = "Task cancelled"):
+        """置取消标志并记录真因；worker 终态归档/信号统一读 _cancel_reason。
+
+        旧调用方（cancel_task / stop_task）不传参，行为与改前一致。
+        """
+        # 仅首次置位写真因：stall 后窗口关闭等二次 cancel() 不得覆盖
+        if not self._is_cancelled:
+            self._cancel_reason = reason or "Task cancelled"
         self._is_cancelled = True
 
     def provide_answer(self, answer: str):
@@ -509,10 +556,14 @@ class SubAgentExecutor(QThread):
                 result = f"执行出错: {str(e)}"
 
             if self._is_cancelled:
-                # 被取消时也要发射错误信号，让管理器知道任务已结束
-                self._execution_error = "Task cancelled"
+                # 被取消时也要发射错误信号，让管理器知道任务已结束。
+                # 真因来自 cancel(reason)：stall / 窗口关闭 / 手动中止各有文案，
+                # 不得再统一覆写成 "Task cancelled"，否则会话卡只剩笼统失败。
+                cancel_error = getattr(self, "_cancel_reason", None) or "Task cancelled"
+                self._execution_error = cancel_error
                 logger.warning(
-                    f"[SubAgentExecutor] Task {self.task_id} ({self.agent_name}) cancelled, emitting error_occurred"
+                    f"[SubAgentExecutor] Task {self.task_id} ({self.agent_name}) cancelled "
+                    f"({cancel_error}), emitting error_occurred"
                 )
                 if self._log_store_callback:
                     try:
@@ -522,13 +573,13 @@ class SubAgentExecutor(QThread):
                             self.task_description,
                             "cancelled",
                             "",
-                            "Task cancelled",
+                            cancel_error,
                             self._logs,
                             self.get_summary(),
                         )
                     except Exception as e:
                         logger.warning(f"[SubAgentExecutor] 保存取消状态失败: {e}")
-                self.error_occurred.emit(self.task_id, "Task cancelled")
+                self.error_occurred.emit(self.task_id, cancel_error)
                 return
 
             # 直接使用执行结果（迭代结束时已自动总结）
@@ -1089,6 +1140,7 @@ class SubAgentExecutor(QThread):
         except Exception as e:  # noqa: BLE001 — 回收失败保留 data URI
             logger.warning(f"[SubAgentWorker] vision revoke 失败（保留 data URI）: {e}")
 
+    @_in_flight
     def _make_api_call(self, messages: List[Dict], tools: List[Dict] = None, llm_config: Dict = None) -> tuple:
         """调用 LLM API（流式发起 + 事件聚合，子智能体后台执行无需逐字渲染）。
 
@@ -1307,6 +1359,7 @@ class SubAgentExecutor(QThread):
         # 4. 只做绝对上限保护（避免明显错误的极值）
         return min(requested_int, absolute_limit)
 
+    @_in_flight
     def _execute_tools(self, tool_calls: List[Dict]) -> tuple:
         """执行工具调用
 

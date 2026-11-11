@@ -254,8 +254,12 @@ class SubAgentHost(QObject):
             return
         agent_name = executor.agent_name
         description = getattr(executor, "task_description", "")
-        executor.cancel()
-        executor._execution_error = "用户已手动中止子智能体"
+        manual_error = "用户已手动中止子智能体"
+        try:
+            executor.cancel(manual_error)
+        except TypeError:
+            executor.cancel()
+        executor._execution_error = manual_error
         try:
             manager.task_finished.emit(task_id, "")
         except Exception as e:  # noqa: BLE001

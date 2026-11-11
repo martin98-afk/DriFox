@@ -306,6 +306,8 @@ class SubAgentManager(QObject):
 
         # ========== 日志活力度 Stall 检测 ==========
         self._stall_timeout: int = 300  # 日志静默超时秒数（默认 5 分钟）
+        # 单次 API/工具在途硬上限：超过即真死锁，避免豁免变成永久泄漏
+        self.IN_FLIGHT_MAX_SECONDS = 1800
         self._stall_timer = QTimer(self)
         self._stall_timer.setInterval(10000)  # 每 10 秒检查一次
         self._stall_timer.timeout.connect(self._check_stalled_tasks)
@@ -376,6 +378,10 @@ class SubAgentManager(QObject):
         """
         检查所有运行中任务的最后活跃时间，如果日志静默超过 stall_timeout 则 cancel。
         由 QTimer 定时触发（默认每 10 秒）。
+
+        「日志静默」不等于卡死：长思考流式聚合、API 重试退避、长工具执行期间
+        都不产日志。executor 暴露在途阶段（get_in_flight_duration），在途且未超
+        单次硬上限时豁免；超过硬上限才按真死锁杀，防豁免变成永久线程泄漏。
         """
         import time
 
@@ -393,15 +399,33 @@ class SubAgentManager(QObject):
             if idle_time <= self._stall_timeout:
                 continue
 
-            # 检测到 stall（日志静默超时）
-            error_msg = f"Task stalled: no log activity for {int(idle_time)}s (timeout={self._stall_timeout}s)"
+            # 在途判定：有阻塞 API/工具在跑 → 合法静默，除非已超硬上限
+            get_in_flight = getattr(executor, "get_in_flight_duration", None)
+            inflight = get_in_flight() if callable(get_in_flight) else None
+            if inflight is not None and inflight <= self.IN_FLIGHT_MAX_SECONDS:
+                logger.debug(
+                    f"[SubAgentManager] Task {task_id[:8]} 静默 {int(idle_time)}s "
+                    f"但操作在途 {int(inflight)}s，豁免 stall"
+                )
+                continue
+
+            if inflight is not None:
+                error_msg = (
+                    f"Task stalled: in-flight operation exceeded "
+                    f"{self.IN_FLIGHT_MAX_SECONDS}s (no log activity for {int(idle_time)}s)"
+                )
+            else:
+                error_msg = f"Task stalled: no log activity for {int(idle_time)}s (timeout={self._stall_timeout}s)"
             logger.warning(
                 f"[SubAgentManager] ⚠️ Task {task_id[:8]} ({executor.agent_name}) "
-                f"stalled for {int(idle_time)}s, cancelling"
+                f"stalled for {int(idle_time)}s, cancelling ({error_msg})"
             )
 
-            # 1. Cancel executor
-            executor.cancel()
+            # 1. Cancel executor（透传真因，供 worker 终态归档/信号使用）
+            try:
+                executor.cancel(error_msg)
+            except TypeError:  # 兼容旧签名调用方（无 reason 参数）
+                executor.cancel()
 
             # 2. 写入 finished_tasks
             agent_name = executor.agent_name
@@ -966,11 +990,13 @@ class SubAgentManager(QObject):
                 logs = executor.get_logs()
                 task_session_id = getattr(executor, "_task_session_id", self._current_session_id)
 
-                # 标记取消（设置 _is_cancelled 标志，线程在下一次检查点退出）
-                executor.cancel()
-
                 # 写入 finished_tasks（与 _check_stalled_tasks / cancel_task 一致）
                 error_msg = "Task cancelled: window closed"
+                # 标记取消并透传真因（线程在下一次检查点退出）
+                try:
+                    executor.cancel(error_msg)
+                except TypeError:
+                    executor.cancel()
                 self._finished_tasks[task_id] = {
                     "result": "",
                     "error": error_msg,
