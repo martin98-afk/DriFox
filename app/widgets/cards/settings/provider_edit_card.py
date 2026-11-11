@@ -91,8 +91,9 @@ def filter_fetched_models(all_models: list, capability_type: str = "chat") -> tu
     all_models = [m for m in (all_models or []) if m]
     if str(capability_type or "chat") != "chat":
         return all_models, []
-    kept = [m for m in all_models if _is_text_chat_model(m)]
-    removed = [m for m in all_models if not _is_text_chat_model(m)]
+    kept, removed = [], []
+    for m in all_models:
+        (kept if _is_text_chat_model(m) else removed).append(m)
     return kept, removed
 
 
@@ -960,16 +961,15 @@ class ProviderEditCard(QWidget):
         self.fetchBtn.setEnabled(False)
         InfoBar.info("获取中", "正在获取模型列表...", parent=parent, duration=3000, position=InfoBarPosition.BOTTOM)
 
+        # 两个参数必须在主线程求值成局部变量：do_fetch 在 daemon 子线程执行，
+        # 闭包内再调 self._current_capability_type()（读 capabilityCombo）属 Qt 跨线程违规
+        # 认证方式问插件声明（百度千帆是 bce），写死 bearer 会让签名走错分支
+        fetch_auth = get_auth_type(provider_name, self.provider_info.get("认证方式", ""))
+        # 能力类型决定过滤分流：非 chat 全量放行（生成类模型不被文本规则误滤）
+        fetch_capability = self._current_capability_type()
+
         def do_fetch():
-            return fetch_provider_models(
-                api_url,
-                api_key,
-                provider_name,
-                # 认证方式问插件声明（百度千帆是 bce），写死 bearer 会让签名走错分支
-                get_auth_type(provider_name, self.provider_info.get("认证方式", "")),
-                # 能力类型决定过滤分流：非 chat 全量放行（生成类模型不被文本规则误滤）
-                self._current_capability_type(),
-            )
+            return fetch_provider_models(api_url, api_key, provider_name, fetch_auth, fetch_capability)
 
         thread = threading.Thread(target=self._do_fetch_thread, args=(do_fetch,))
         thread.daemon = True

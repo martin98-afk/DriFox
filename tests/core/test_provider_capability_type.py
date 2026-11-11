@@ -101,9 +101,33 @@ def test_resolve_capability_type_prefers_disk_key_for_custom_provider():
 
 
 def test_resolve_capability_type_disk_key_overrides_registry():
-    """磁盘键存在时优先于反查（预置实例保存后磁盘值=声明值，两者应一致）。"""
+    """自定义服务商（反查 miss）：磁盘 capability_type 键是权威来源（编辑卡下拉落盘）。"""
     # 该 provider_name 反查不到定义（未注册），磁盘键生效
     assert resolve_capability_type({
         "provider_name": "未知服务商",
         "capability_type": "video_generation",
+    }) == "video_generation"
+
+
+def test_resolve_capability_type_declaration_wins_over_stale_disk_snapshot(monkeypatch):
+    """已注册实例声明优先于磁盘快照：插件升级改声明后，旧落盘快照不得压死新声明。"""
+    from app.plugins.registries import provider_registry as mod
+
+    class _P:
+        capability_type = "video_generation"
+
+    class _R:
+        @staticmethod
+        def get_instance():
+            return _R()
+
+        @staticmethod
+        def get(name):
+            return _P() if name == "某视频服务商" else None
+
+    monkeypatch.setattr(mod, "ProviderRegistry", _R)
+    # 磁盘键是 preset 实例保存时落的旧快照（image_generation），新声明已改为 video_generation
+    assert resolve_capability_type({
+        "provider_name": "某视频服务商",
+        "capability_type": "image_generation",
     }) == "video_generation"

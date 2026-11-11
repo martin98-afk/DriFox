@@ -285,27 +285,27 @@ def resolve_token_ratio(llm_config: Optional[Dict[str, Any]] = None, model: Opti
 
 def resolve_capability_type(provider_info: Dict[str, Any]) -> str:
     """配置 dict → 能力类型。两级解析：
-    1. 磁盘键 capability_type（自定义实例的权威来源，编辑卡下拉落盘，恒写入）
-    2. provider_name 反查 ProviderDef.capability_type（预置实例的声明来源；
-       老配置无磁盘键时走此路，缺失一律按 chat 兼容）
+    1. provider_name 反查 ProviderDef.capability_type 命中 → 声明优先
+       （预置实例的权威来源；UI 禁止手改，插件升级改声明后跟随新声明）
+    2. 反查 miss（自定义实例）→ 磁盘键 capability_type（编辑卡下拉落盘的权威来源）
+    3. 均未命中（老配置无键 + 未注册）→ 兜底 chat
     """
     info = provider_info or {}
+    name = str(info.get("provider_name", "") or "").strip()
+    if name:
+        try:
+            # 函数内延迟 import：测试 monkeypatch 的是 provider_registry 模块属性，
+            # 顶层 import 会绕过补丁；同时避免 provider_profile ↔ provider_registry 顶层环
+            from app.plugins.registries.provider_registry import ProviderRegistry
+
+            definition = ProviderRegistry.get_instance().get(name)
+            if definition is not None:
+                return str(getattr(definition, "capability_type", "chat") or "chat").strip() or "chat"
+        except Exception:
+            pass
     disk_value = str(info.get("capability_type", "") or "").strip()
     if disk_value:
         return disk_value
-    name = str(info.get("provider_name", "") or "").strip()
-    if not name:
-        return "chat"
-    try:
-        # 函数内延迟 import：测试 monkeypatch 的是 provider_registry 模块属性，
-        # 顶层 import 会绕过补丁；同时避免 provider_profile ↔ provider_registry 顶层环
-        from app.plugins.registries.provider_registry import ProviderRegistry
-
-        definition = ProviderRegistry.get_instance().get(name)
-        if definition is not None:
-            return str(getattr(definition, "capability_type", "chat") or "chat").strip() or "chat"
-    except Exception:
-        pass
     return "chat"
 
 
