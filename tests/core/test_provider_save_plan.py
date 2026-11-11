@@ -75,7 +75,9 @@ def test_payload_five_keys_always_present_even_empty():
     payload = plan["payload"]
     for key in FORM_KEYS:
         assert key in payload, f"五键必须恒存在，缺 {key}"
-        assert payload[key] == ""
+        # capability_type 有非空缺省：未选类型 = 显式 "chat"（非空串同样是显式值）
+        expected = "chat" if key == "capability_type" else ""
+        assert payload[key] == expected
 
 
 def test_payload_disabled_models_always_written_and_model_name_maintained():

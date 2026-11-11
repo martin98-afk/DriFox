@@ -86,7 +86,19 @@ def _is_text_chat_model(model_id: str) -> bool:
     return True
 
 
-def fetch_provider_models(api_url: str, api_key: str, provider_name: str, auth_type: str = "bearer") -> tuple:
+def filter_fetched_models(all_models: list, capability_type: str = "chat") -> tuple:
+    """(保留, 被过滤)。chat 走既有文本模型关键词规则；其它能力全量放行。"""
+    all_models = [m for m in (all_models or []) if m]
+    if str(capability_type or "chat") != "chat":
+        return all_models, []
+    kept = [m for m in all_models if _is_text_chat_model(m)]
+    removed = [m for m in all_models if not _is_text_chat_model(m)]
+    return kept, removed
+
+
+def fetch_provider_models(
+    api_url: str, api_key: str, provider_name: str, auth_type: str = "bearer", capability_type: str = "chat"
+) -> tuple:
     """Fetch model list from provider API.
 
     Returns ``(text_chat_models, filtered_out_models, status)``：
@@ -139,8 +151,7 @@ def fetch_provider_models(api_url: str, api_key: str, provider_name: str, auth_t
                 else:
                     all_models = []
 
-                filtered = [m for m in all_models if m and _is_text_chat_model(m)]
-                removed = [m for m in all_models if m and not _is_text_chat_model(m)]
+                filtered, removed = filter_fetched_models(all_models, capability_type)
                 return filtered, removed, ("ok" if (filtered or removed) else "empty")
 
             last_error = f"HTTP {response.status_code}"
@@ -421,6 +432,24 @@ class ProviderEditCard(QWidget):
         self.loginBtn.setVisible(False)
         key_row.addWidget(self.loginBtn)
         main_layout.addLayout(key_row)
+
+        # 能力类型行（仅自定义服务商可见；预置服务商的类型由插件 ProviderDef 锁定）。
+        # 候选 = chat 内置 + 注册表动态收集（开放枚举：插件新声明的能力自动入列）
+        cap_types = ["chat"] + ProviderRegistry.get_instance().capability_types()
+        cap_row = QHBoxLayout()
+        cap_label = BodyLabel("能力类型:")
+        cap_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        cap_label.setFixedWidth(88)
+        cap_row.addWidget(cap_label)
+        self.capabilityCombo = SearchableEditableComboBox()
+        self.capabilityCombo.addItems(cap_types)
+        saved_cap = str(self.provider_info.get("capability_type", "") or "")
+        self.capabilityCombo.setCurrentText(saved_cap or "chat")
+        cap_row.addWidget(self.capabilityCombo, 1)
+        cap_row_widget = QWidget()
+        cap_row_widget.setLayout(cap_row)
+        cap_row_widget.setVisible(not self.preset_provider)
+        main_layout.addWidget(cap_row_widget)
 
         # ── 套餐用量查询额外配置（可选）— 由 providers 插件声明（ProviderDef.extra_quota_fields）。
         # 默认折叠（节头点击展开）；放在基础连接末尾，模型节前不据版面（用户要求）
@@ -879,6 +908,18 @@ class ProviderEditCard(QWidget):
             if url:
                 webbrowser.open(url)
 
+    def _current_capability_type(self) -> str:
+        """当前生效的能力类型（保存与拉取共用同一取值策略）。
+
+        预置服务商（preset_provider 非空）无下拉，类型由插件声明 ProviderDef.capability_type
+        锁定；自定义服务商取下拉文本，空回落 "chat"。
+        """
+        if self.preset_provider:
+            p = ProviderRegistry.get_instance().get(self.preset_provider)
+            return str((p.capability_type if p else "") or "chat").strip()
+        combo = getattr(self, "capabilityCombo", None)
+        return (combo.currentText().strip() if combo is not None else "") or "chat"
+
     def _on_fetch_models(self):
         """获取模型列表"""
         from qfluentwidgets import InfoBar
@@ -920,7 +961,15 @@ class ProviderEditCard(QWidget):
         InfoBar.info("获取中", "正在获取模型列表...", parent=parent, duration=3000, position=InfoBarPosition.BOTTOM)
 
         def do_fetch():
-            return fetch_provider_models(api_url, api_key, provider_name)
+            return fetch_provider_models(
+                api_url,
+                api_key,
+                provider_name,
+                # 认证方式问插件声明（百度千帆是 bce），写死 bearer 会让签名走错分支
+                get_auth_type(provider_name, self.provider_info.get("认证方式", "")),
+                # 能力类型决定过滤分流：非 chat 全量放行（生成类模型不被文本规则误滤）
+                self._current_capability_type(),
+            )
 
         thread = threading.Thread(target=self._do_fetch_thread, args=(do_fetch,))
         thread.daemon = True
@@ -1076,6 +1125,8 @@ class ProviderEditCard(QWidget):
                 # 认证方式问插件声明（bce/none/anthropic…）；未注册的服务商回落到
                 # 存档值，再兜底 bearer——写死 bearer 会覆盖百度千帆的 bce 签名
                 "auth_type": get_auth_type(provider_name, self.provider_info.get("认证方式", "")),
+                # 能力类型恒写入（含缺省 "chat"）：磁盘老配置首次保存后即带上该键
+                "capability_type": self._current_capability_type(),
                 "name": self.configNameEdit.text(),
                 "models": current_models,
                 # 双开关（bool 直传；红线：绝不进 extra_fields —— SwitchButton 无 .text()）
