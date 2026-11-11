@@ -357,6 +357,8 @@ def _model_config(host: Any):
 
 
 def _provider_config(host: Any):
+    """[已退役] get_provider_config 旧通道专属实现（兼容层清理时删除注册）。
+    保留定义备查；能力面统一走 model.config / model.config_for。"""
     real = _resolve_active_host(host)
 
     def resolve(provider: str = "", model: str = "") -> dict:

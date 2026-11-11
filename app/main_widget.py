@@ -11890,7 +11890,9 @@ class OpenAIChatToolWindow(ToolWindow):
             base_name = config.get("name", "") or pname
             idx = suffix_map.get(config_id, 0)
             config["display_name"] = base_name if idx == 0 else f"{base_name} #{idx + 1}"
-            # 内存态能力类型：磁盘不落该字段（运行时派生），回退候选按 chat 过滤依赖此键
+            # 内存态能力类型回填：resolve_capability_type 两级解析（磁盘键优先，老配置反查声明）。
+            # 注意：Task 9 后 capability_type 经 FORM_KEYS 恒写入磁盘（spec §7 例外），
+            # 此处重复回填是为老配置（未保存过、无磁盘键）补齐派生值。回退候选按 chat 过滤依赖此键
             config["capability_type"] = resolve_capability_type(config)
             self._valid_configs[config_id] = config
 
