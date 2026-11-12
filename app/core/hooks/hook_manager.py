@@ -727,6 +727,8 @@ class HookWorker(QRunnable):
         timeout: int = 300,
         stdin_data: Optional[str] = None,
         extra_env: Optional[Dict[str, str]] = None,
+        event_name: Optional[str] = None,
+        plugin: Optional[str] = None,
     ) -> tuple:
         """
         统一的命令同步执行方法（公共提取，避免代码重复）。
@@ -734,6 +736,7 @@ class HookWorker(QRunnable):
         处理 echo 快捷方式、Windows 编码回退、路径分隔符转换。
         stdin_data: 可选的 stdin 输入（传递给脚本的 JSON 上下文）
         extra_env: 额外环境变量，合并到当前环境后传递给子进程
+        event_name/plugin: 可选观测上下文（慢执行 WARNING 日志用，T7-obs）
         """
         # echo 快捷方式 — 仅对纯单行 echo 有效，无任何命令分隔符
         # 排除换行/&&/||/;/&/| 等，避免截胡多命令（如 echo "msg"\nexit 2）
@@ -788,6 +791,7 @@ class HookWorker(QRunnable):
         else:
             subprocess_kwargs["stdin"] = subprocess.DEVNULL
 
+        t0 = time.monotonic()
         if os.name == "nt":
             import locale
 
@@ -803,15 +807,20 @@ class HookWorker(QRunnable):
             except (UnicodeDecodeError, LookupError):
                 # 解码失败时回退到 UTF-8 with errors='replace'
                 result = subprocess.run(command, encoding="utf-8", **subprocess_kwargs)
-            exit_code = result.returncode
-            if exit_code != 0:
-                # exit code 2: Claude Code BLOCK 约定，用 stdout 作为 output
-                if exit_code == 2:
-                    return result.stdout or "", False, exit_code
-                return result.stderr or f"Command failed with exit code {exit_code}", False, exit_code
-            return result.stdout or "", True, exit_code
         else:
             result = subprocess.run(command, encoding="utf-8", **subprocess_kwargs)
+
+        # T7-obs：慢 hook 可观测先行（数据驱动是否立项异步化）。
+        # >2s 的 COMMAND 执行打 WARNING：event/plugin/耗时/离 timeout 上限的接近度。
+        elapsed_ms = (time.monotonic() - t0) * 1000
+        if elapsed_ms > 2000:
+            limit_ms = max(float(timeout), 0.001) * 1000
+            ratio = elapsed_ms / limit_ms
+            proximity = "，接近 timeout 上限" if ratio >= 0.8 else ""
+            logger.warning(
+                f"[HookSlowCommand] plugin={plugin or 'unknown'} event={event_name or 'unknown'} "
+                f"耗时 {elapsed_ms:.0f}ms (timeout {timeout}s，占 {ratio:.0%}){proximity} cmd={command[:80]!r}"
+            )
 
         exit_code = result.returncode
         if exit_code != 0:
@@ -881,6 +890,8 @@ class HookWorker(QRunnable):
             self.hook.timeout,
             stdin_data=stdin_data,
             extra_env=extra_env,
+            event_name=self.event_name,
+            plugin=_hook_owner_name(self.hook),
         )
         return output, success
 
@@ -2255,6 +2266,8 @@ class HookManager:
                         hook.timeout,
                         stdin_data=json.dumps(context),
                         extra_env=extra_env,
+                        event_name=context.get("event_name"),
+                        plugin=_hook_owner_name(hook),
                     )
                     _exit2_skip = exit_code == 2
 
