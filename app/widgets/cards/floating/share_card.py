@@ -57,7 +57,7 @@ def _content_to_plain(content: Any) -> str:
                 t = block.get("type", "")
                 if t == "text":
                     texts.append(str(block.get("text", "")))
-                elif t in ("image_url", "input_image", "image"):
+                elif t in ("image_url", "input_image", "image", "image_ref"):
                     texts.append("[图片]")
                 elif t == "reasoning":
                     texts.append(f"【思考过程】\n{block.get('content', '')}")
@@ -210,7 +210,7 @@ def _render_message_body(blocks: List[Dict]) -> str:
                 f'<div class="reasoning-body md">{_md_to_html(content)}</div>'
                 "</details>"
             )
-        elif bt in ("image_url", "input_image", "image"):
+        elif bt in ("image_url", "input_image", "image", "image_ref"):
             parts.append('<div class="image-block">🖼️ 图片内容</div>')
         elif bt == "tool_result":
             name = block.get("name", "tool")
