@@ -35,7 +35,10 @@ from app.utils.utils import get_font_family_css
 from app.widgets.elided_label import _ElidedLabel
 
 ITEM_HEIGHT = 36
-MAX_VISIBLE_ITEMS = 8
+MAX_VISIBLE_ITEMS = 14
+
+# 面包屑路径条高度（顶部「工作区 > a > b」导航，可点击跳上级目录）
+BREADCRUMB_HEIGHT = 32
 
 # 初始渲染量：卡片一屏只可见 MAX_VISIBLE_ITEMS 行，首次弹出时渲染「可见行 × 3」
 # 即可填满视口并留出一屏滚动缓冲。
@@ -336,6 +339,18 @@ def _mention_icon_pixmap(icon_path: str) -> Optional[QPixmap]:
         return None
 
 
+class _CrumbLabel(QLabel):
+    """面包屑可点击路径段（点击跳转到该层级目录）"""
+
+    clicked = pyqtSignal()
+
+    def mousePressEvent(self, event: QMouseEvent):
+        if event.button() == Qt.LeftButton:
+            self.clicked.emit()
+        else:
+            super().mousePressEvent(event)
+
+
 class FileMentionItemWidget(QWidget):
     """文件列表单项"""
 
@@ -500,8 +515,38 @@ class FileMentionItemWidget(QWidget):
         self._desc_label.hide()
         layout.addWidget(self._desc_label, 0, Qt.AlignRight)
 
+        # 目录项专属：右侧「进入目录 Tab ›」提示（进入下级目录时显示）
+        self._hint_label = QLabel("")
+        self._hint_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self._hint_label.setStyleSheet(f"""
+            QLabel {{
+                color: {Colors.REALTIME_TEXT_SECONDARY};
+                {get_font_family_css()} {font_size_css(11)};
+                background: transparent;
+            }}
+        """)
+        self._hint_label.hide()
+        layout.addWidget(self._hint_label, 0, Qt.AlignRight)
+
         self._apply_bg()
         self._update_display()
+
+    @staticmethod
+    def _is_special_type(item_type: str) -> bool:
+        """非文件类条目（插件提及 / 历史会话 / 分组标题）"""
+        return item_type in ("mention", "session", "section_title")
+
+    def _apply_path_style(self, section: bool):
+        """路径/标题标签样式：普通条目主色 13px；分组标题次色 12px"""
+        color = Colors.TEXT_SECONDARY if section else Colors.TEXT_PRIMARY
+        size = 12 if section else 13
+        self._path_label.setStyleSheet(f"""
+            QLabel {{
+                color: {color};
+                {get_font_family_css()} {font_size_css(size)};
+                background: transparent;
+            }}
+        """)
 
     def _apply_mention_icon(self) -> None:
         """mention 条目图标：有头像用 pixmap，否则 🤖 emoji"""
@@ -592,7 +637,43 @@ class FileMentionItemWidget(QWidget):
     def _update_display(self):
         """更新路径显示（_ElidedLabel 自动处理省略，含多关键字高亮）"""
         rel = self._data.get("relative_path", "")
-        self._path_label.setText(rel)
+        item_type = self._data.get("type", "")
+
+        # 分组标题行（智能体 / 会话 / 文件）：次色小字，无图标无交互
+        if item_type == "section_title":
+            self._icon_label.setText("")
+            self._icon_label.setPixmap(QPixmap())
+            self._apply_path_style(section=True)
+            self._path_label.setText(self._data.get("name", ""))
+            self._desc_label.setVisible(False)
+            self._hint_label.setVisible(False)
+            return
+
+        # 历史会话条目：💬 + 会话标题，右侧显示更新时间
+        if item_type == "session":
+            self._icon_label.setPixmap(QPixmap())
+            self._icon_label.setText("💬")
+            self._apply_path_style(section=False)
+            self._path_label.setText(self._data.get("name", rel))
+            desc = self._data.get("description", "").strip()
+            self._desc_label.setText(desc)
+            self._desc_label.setVisible(bool(desc))
+            self._hint_label.setVisible(False)
+            return
+
+        self._apply_path_style(section=False)
+        self._desc_label.setVisible(False)
+
+        # 目录进入提示：仅浏览模式（enterable 由 load_items 对当前层目录标记）
+        if item_type == "dir" and self._data.get("enterable"):
+            self._hint_label.setText("进入目录 Tab ›")
+            self._hint_label.setVisible(True)
+        else:
+            self._hint_label.setVisible(False)
+
+        # 浏览模式下列表只显示本级名称（display_name），搜索模式显示完整相对路径
+        display = self._data.get("display_name") or rel
+        self._path_label.setText(display)
         if self._data.get("type") == "mention":
             # mention 条目：名称 + 右侧「描述 · 来源插件」，无路径高亮
             self._path_label.setText(self._data.get("name", rel))
@@ -607,11 +688,11 @@ class FileMentionItemWidget(QWidget):
                 rich = desc
             self._desc_label.setText(rich)
             self._desc_label.setVisible(bool(rich))
+            self._hint_label.setVisible(False)
             self._apply_mention_icon()
             return
-        self._desc_label.setVisible(False)
         if self._query:
-            hls = self._all_highlight_queries(rel, self._query)
+            hls = self._all_highlight_queries(display, self._query)
             if hls:
                 self._path_label.setHighlights(hls, Colors.SEARCH_HIGHLIGHT)
 
@@ -622,8 +703,8 @@ class FileMentionItemWidget(QWidget):
         """
         self._data = file_data
         self._query = query
-        # 更新 emoji（类型可能变化；mention 条目由 _update_display 切头像）
-        if file_data.get("type") != "mention":
+        # 更新图标（类型可能变化；mention/session/section 由 _update_display 处理）
+        if not self._is_special_type(file_data.get("type", "")):
             emoji = self._get_file_emoji(file_data["path"], file_data.get("type", ""))
             self._icon_label.setPixmap(QPixmap())
             self._icon_label.setText(emoji)
@@ -652,6 +733,9 @@ class FileMentionItemWidget(QWidget):
         self._apply_bg()
 
     def enterEvent(self, event):
+        # 分组标题行不可交互：不响应 hover/选中
+        if self._data.get("type") == "section_title":
+            return
         self._hovered = True
         # hover 即选中：通知父卡片同步选中索引到此 widget
         self.hovered.emit(self)
@@ -678,6 +762,7 @@ class FileMentionCard(QWidget):
 
     fileSelected = pyqtSignal(str)  # file path
     mentionSelected = pyqtSignal(dict)  # 插件提及条目（含 provider_id）
+    sessionSelected = pyqtSignal(dict)  # 历史会话引用条目（含 session_id）
     dismissed = pyqtSignal()
     # 后台扫描完成信号（跨线程发射，队列连接回主线程应用结果）
     _scanFinished = pyqtSignal(object)
@@ -704,6 +789,16 @@ class FileMentionCard(QWidget):
         self._last_query = ""  # 上次过滤的 query，用于增量剪枝
         self._scan_generation = 0  # 扫描代次：根目录切换时递增，用于丢弃过期后台扫描结果
         self._rendered_count = 0  # 当前已渲染的 widget 数量（懒加载，滚动/键盘向下时递增）
+        # 目录浏览层（DSH 式）：空串 = 根目录；Tab 进入子目录后为其相对路径。
+        # 仅在无 query（浏览模式）时生效；有 query 时始终全局搜索。
+        self._browse_rel = ""
+        # ---- 历史会话列表缓存：load_items 每次按键都会触发，SQLite get_all
+        #      是磁盘 I/O，不能每次按键同步查库（实测为输入卡顿主因）。
+        #      TTL 内直接复用内存缓存；切换根目录时失效。
+        self._session_items_cache: List[Dict[str, str]] = []
+        self._session_cache_at: float = 0.0
+        self._SESSION_CACHE_TTL = 5.0  # 秒
+        self._breadcrumb_sig = None  # 面包屑当前段签名（避免每次按键重建控件）
 
         # ---- 文件系统监视器：本地新增/删除文件时自动标记缓存失效 ----
         self._fs_watcher = QFileSystemWatcher(self)
@@ -761,6 +856,19 @@ class FileMentionCard(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
+
+        # ---- 面包屑路径条：工作区 > a > b，段可点击跳转到对应层级 ----
+        self._breadcrumb_bar = QWidget(self)
+        self._breadcrumb_bar.setAttribute(Qt.WA_StyledBackground, True)
+        self._breadcrumb_bar.setFixedHeight(BREADCRUMB_HEIGHT)
+        self._breadcrumb_bar.setStyleSheet("background: transparent; border: none;")
+        crumb_layout = QHBoxLayout(self._breadcrumb_bar)
+        crumb_layout.setContentsMargins(12, 0, 12, 0)
+        crumb_layout.setSpacing(4)
+        crumb_layout.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        self._crumb_layout = crumb_layout
+        self._crumb_labels: List[QWidget] = []
+        layout.addWidget(self._breadcrumb_bar)
 
         # 滚动区域
         self._scroll_area = ScrollArea(self)
@@ -824,6 +932,8 @@ class FileMentionCard(QWidget):
                 w.refresh_theme()
             except RuntimeError:
                 continue
+        # 面包屑路径条颜色随主题重建
+        self._update_breadcrumb()
 
     def set_root_dir(self, root_dir: str):
         """设置根目录（自动归一化路径，避免 Windows 上混合斜杠）"""
@@ -1425,13 +1535,8 @@ class FileMentionCard(QWidget):
             if idx != i:
                 self._scroll_layout.insertWidget(i, w)
 
-        # 计算卡片高度
-        item_count = len(self._item_widgets)
-        if item_count == 0:
-            self.setFixedHeight(0)
-        else:
-            visible = min(item_count, MAX_VISIBLE_ITEMS)
-            self.setFixedHeight(visible * ITEM_HEIGHT)
+        # 计算卡片高度（含面包屑路径条）
+        self.setFixedHeight(self._card_height(len(self._item_widgets)))
         # 渲染重建后强制滚动回顶部，防止 Qt 在布局变化期间自动调整
         # 滚动位置导致 _update_selection 的 ensureWidgetVisible 滚动到中间
         self._scroll_area.verticalScrollBar().setValue(0)
@@ -1528,51 +1633,227 @@ class FileMentionCard(QWidget):
                 )
         return items
 
+    # ================= 面包屑 / 目录浏览（DSH 式层级导航） =================
+
+    def _update_breadcrumb(self):
+        """重建面包屑路径条：根段「工作区」+ 当前浏览层各级段
+
+        点击任一段跳转到该层级（根段回根目录）。每次 load_items 后调用。
+
+        [PERF] 段签名未变化时直接跳过：load_items 随每次按键触发，
+        全量 deleteLater + 新建 QLabel 是无谓的布局抖动。
+        """
+        root_name = os.path.basename(self._root_dir) if self._root_dir else "工作区"
+        sig = (root_name, self._browse_rel)
+        if sig == self._breadcrumb_sig:
+            return
+        self._breadcrumb_sig = sig
+        # 清空旧段
+        while self._crumb_layout.count():
+            item = self._crumb_layout.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.deleteLater()
+        self._crumb_labels.clear()
+
+        root_name = os.path.basename(self._root_dir) if self._root_dir else "工作区"
+        segments: List[tuple] = [("", root_name or "工作区")]
+        if self._browse_rel:
+            acc = ""
+            for part in self._browse_rel.split("/"):
+                acc = f"{acc}/{part}" if acc else part
+                segments.append((acc, part))
+
+        for i, (rel, name) in enumerate(segments):
+            if i > 0:
+                sep = QLabel("›")
+                sep.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+                sep.setStyleSheet(
+                    f"QLabel {{ color: {Colors.TEXT_SECONDARY}; {get_font_family_css()} {font_size_css(12)}; background: transparent; }}"
+                )
+                self._crumb_layout.addWidget(sep)
+                self._crumb_labels.append(sep)
+            is_last = i == len(segments) - 1
+            lbl = _CrumbLabel(name)
+            color = Colors.TEXT_PRIMARY if is_last else Colors.REALTIME_TEXT_SECONDARY
+            lbl.setStyleSheet(
+                f"QLabel {{ color: {color}; {get_font_family_css()} {font_size_css(12)}; background: transparent; }}"
+            )
+            lbl.setCursor(Qt.PointingHandCursor)
+            try:
+                lbl.clicked.connect(lambda rel=rel: self._enter_dir(rel))
+            except RuntimeError:
+                continue
+            self._crumb_layout.addWidget(lbl)
+            self._crumb_labels.append(lbl)
+
+    def _enter_dir(self, rel_dir: str):
+        """进入（或返回）某一级目录：仅浏览模式下生效，重新加载本级列表"""
+        rel_dir = rel_dir.strip("/")
+        if rel_dir == self._browse_rel:
+            # 同层 → 仅刷新
+            self.load_items(self._current_query)
+            return
+        self._browse_rel = rel_dir
+        self._selected_index = 0
+        self._last_selected_index = -1
+        self.load_items("")  # 进入目录即离开搜索模式，展示本级列表
+
+    def enter_selected_dir(self) -> bool:
+        """Tab 触发：当前选中项为目录 → 进入其下一层列表
+
+        返回 True 表示已进入（按键被消费）；False 表示当前项不是
+        可进入目录（按键走原有 select_current 语义）。
+        """
+        idx = self._selected_index
+        if not (0 <= idx < len(self._filtered_items)):
+            return False
+        item = self._filtered_items[idx]
+        if item.get("type") == "dir":
+            self._enter_dir(item["relative_path"])
+            return True
+        return False
+
+    def _collect_session_items(self) -> List[Dict[str, str]]:
+        """拉取历史会话列表（@ 卡片「会话」分类）
+
+        走 ChatBackend.get_session_storage() 门面；引擎不可用/加载失败
+        返回空列表，不影响文件区展示。
+
+        [PERF] 带 TTL 缓存：load_items 随每次按键触发，SQLite get_all 是
+        磁盘 I/O，逐键同步查库会造成输入卡顿；TTL 内复用内存缓存，
+        切换根目录/超时后在下一次取用时刷新。
+        """
+        import time as _time
+
+        now = _time.monotonic()
+        if not self._cache_dirty and (now - self._session_cache_at) < self._SESSION_CACHE_TTL:
+            return self._session_items_cache
+        items: List[Dict[str, str]] = []
+        try:
+            from app.core.conversation.backend import get_session_storage
+
+            storage = get_session_storage()
+            sessions = None
+            # [PERF] 优先走轻量列表（不含 messages 大 JSON 反序列化，
+            # 引擎能力用 isinstance 探测对齐仓库约定）；
+            # 失败返回 None（≠ 空库），此时回落全量 get_all。
+            light = getattr(storage, "get_sessions_lightweight", None)
+            if callable(light):
+                try:
+                    sessions = light(limit=30)
+                except Exception as e:  # noqa: BLE001
+                    logger.debug(f"[FileMentionCard] 轻量会话列表失败，回落全量: {e}")
+                    sessions = None
+            if sessions is None:
+                sessions = storage.get_all(limit=30) or []
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"[FileMentionCard] 历史会话拉取失败: {e}")
+            sessions = []
+        for s in sessions:
+            if not isinstance(s, dict):
+                continue
+            sid = str(s.get("session_id", ""))
+            if not sid:
+                continue
+            title = str(s.get("title", "") or "").strip() or "未命名会话"
+            updated = str(s.get("updated_at", "") or s.get("timestamp", "") or "").strip()
+            items.append(
+                {
+                    "type": "session",
+                    "session_id": sid,
+                    "name": title,
+                    "description": updated,
+                    # 兼容字段：widget 复用映射与过滤评分都吃这两个键
+                    "path": f"session://{sid}",
+                    "relative_path": title,
+                }
+            )
+        self._session_items_cache = items
+        self._session_cache_at = now
+        return items
+
+    def _card_height(self, rows: int) -> int:
+        """按可见行数计算卡片总高（含面包屑条）"""
+        if rows <= 0:
+            return 0
+        return min(rows, MAX_VISIBLE_ITEMS) * ITEM_HEIGHT + BREADCRUMB_HEIGHT
+
     def load_items(self, query: str = ""):
         """根据 query 即时筛选并防抖渲染（多关键字 + fuzzy）
 
-        _filtered_items 始终包含**全量匹配结果**，搜索永不丢失文件。
-        视觉上的 widget 由 _render_incremental 懒加载（初始 RENDER_CHUNK 项，
-        滚动/键盘向下时逐批追加，上限 MAX_RENDERED_ITEMS）。
-
-        无 query 时按「目录深度浅→深 + 目录优先 → 同名不区分大小写」排序，
-        保证各个文件夹的文件都能出现在列表前端，不会出现一个文件夹霸占全部显示。
+        两种模式：
+        - 浏览模式（query 为空）：只列出当前浏览层（_browse_rel）的直接子项，
+          目录右侧带「进入目录 Tab」提示；根层顶部依次为「智能体 / 会话 / 文件」
+          三个分组标题，子层只有「文件」分组。
+        - 搜索模式（query 非空）：仍对全量文件缓存递归全局搜索（不局限于当前
+          浏览层），同时匹配智能体与会话标题，按「智能体 / 会话 / 文件」分组。
         """
         query = query.strip().lower()
         self._current_query = query
 
-        # 插件提及条目（智能体等）置顶：无 query 全量展示，
-        # 有 query 按 name/description 包含匹配
+        # 插件提及条目（智能体）：无 query 全量展示，有 query 按 name/description 匹配
         mention_items = self._collect_mention_items()
         if query:
             mention_items = [
                 m for m in mention_items if query in m["name"].lower() or query in m.get("description", "").lower()
             ]
 
-        if not query:
-            # 按目录深度排序（浅的在前），同深度目录优先，再按名不区分大小写
-            file_items = sorted(
-                self._file_cache,
-                key=lambda x: (
-                    x["relative_path"].count("/"),  # 深度，浅在前
-                    0 if x["type"] == "dir" else 1,  # 目录优先
-                    x["name"].lower(),  # 不区分大小写
-                ),
-            )
-        else:
-            q_lower = query.lower()
+        # 历史会话条目：按标题匹配 query
+        session_items = self._collect_session_items()
+        if query:
+            session_items = [s for s in session_items if query in s["name"].lower()]
 
+        if query:
+            # ---- 搜索模式：全局递归搜索（不局限于当前浏览层）----
             if "|" in query or "&" in query:
                 # 多关键字模式：布尔匹配
                 file_items = [item for item in self._file_cache if self._matches_multi(item, query)]
             else:
                 # 单关键字模式：全量评分 + 全排序
+                q_lower = query.lower()
                 scored = [(self._score_item(item, q_lower), item) for item in self._file_cache]
                 scored = [(s, item) for s, item in scored if s > 0]
                 scored.sort(key=lambda x: -x[0])
                 file_items = [item for _, item in scored]
+        else:
+            # ---- 浏览模式：只列当前浏览层的直接子项（不铺开递归）----
+            prefix = f"{self._browse_rel}/" if self._browse_rel else ""
+            file_items = [
+                item
+                for item in self._file_cache
+                if item["relative_path"].startswith(prefix) and "/" not in item["relative_path"][len(prefix) :]
+            ]
+            file_items.sort(key=lambda x: (0 if x["type"] == "dir" else 1, x["name"].lower()))
+            # 本级目录标记「可进入」→ 行右侧显示「进入目录 Tab ›」；浏览层显示本级名称
+            file_items = [
+                dict(item, display_name=item["name"], enterable=(item["type"] == "dir")) for item in file_items
+            ]
 
-        self._filtered_items = mention_items + file_items
+        # ---- 组装分组（标题行 + 各组条目，空组不显示标题）----
+        sections: List[tuple] = []
+        if not query and self._browse_rel:
+            # 子目录浏览层：只有文件分组
+            sections = [("文件", file_items)]
+        else:
+            sections = [("助手", mention_items), ("文件", file_items), ("会话", session_items)]
+        combined: List[Dict[str, str]] = []
+        for title, entries in sections:
+            if not entries:
+                continue
+            combined.append(
+                {
+                    "type": "section_title",
+                    "name": title,
+                    "path": f"section://{title}",
+                    "relative_path": title,
+                }
+            )
+            combined.extend(entries)
+        self._filtered_items = combined
+
+        # 面包屑随浏览层刷新
+        self._update_breadcrumb()
 
         # 防抖调度渲染
         self._filter_timer.stop()
@@ -1589,6 +1870,9 @@ class FileMentionCard(QWidget):
             self._last_selected_index = -1
             self._selected_index = 0
             self._update_selection()
+            # 首项是分组标题行时跳到第一个可选条目
+            if self._is_section_index(0):
+                self.select_next()
         # 无匹配项时清除残留 widget
         elif self._item_widgets:
             self._render_incremental()
@@ -1616,6 +1900,8 @@ class FileMentionCard(QWidget):
         sender = self.sender()
         if sender in self._item_widgets:
             idx = self._item_widgets.index(sender)
+            if self._is_section_index(idx):
+                return  # 分组标题行不可交互
             self._selected_index = idx
             self._update_selection()
             self.select_current()
@@ -1652,33 +1938,52 @@ class FileMentionCard(QWidget):
         if 0 <= self._selected_index < len(self._item_widgets):
             self._scroll_area.ensureWidgetVisible(self._item_widgets[self._selected_index], 0, 0)
 
+    def _is_section_index(self, idx: int) -> bool:
+        """该索引是否为分组标题行（不可选中项）"""
+        return 0 <= idx < len(self._filtered_items) and self._filtered_items[idx].get("type") == "section_title"
+
     def select_next(self) -> bool:
-        """选择下一项（懒加载：到已渲染末尾时先追加下一批，让键盘可继续向下）"""
+        """选择下一项（跳过分组标题行；懒加载：到已渲染末尾时先追加下一批）"""
         if not self._item_widgets:
             return False
-        # 到已渲染末尾且还有更多 → 先追加，让键盘能继续向下
-        if self._selected_index >= len(self._item_widgets) - 1 and len(self._item_widgets) < len(self._filtered_items):
-            self._extend_render()
-        if self._selected_index < len(self._item_widgets) - 1:
-            self._selected_index += 1
-            self._update_selection()
-            return True
-        return False
+        idx = self._selected_index
+        while True:
+            # 到已渲染末尾且还有更多 → 先追加，让键盘能继续向下
+            if idx >= len(self._item_widgets) - 1 and len(self._item_widgets) < len(self._filtered_items):
+                self._extend_render()
+            if idx < len(self._item_widgets) - 1:
+                idx += 1
+                if self._is_section_index(idx):
+                    continue
+                self._selected_index = idx
+                self._update_selection()
+                return True
+            return False
 
     def select_prev(self) -> bool:
-        """选择上一项"""
-        if self._item_widgets and self._selected_index > 0:
-            self._selected_index -= 1
+        """选择上一项（跳过分组标题行）"""
+        idx = self._selected_index
+        while idx > 0:
+            idx -= 1
+            if self._is_section_index(idx):
+                continue
+            self._selected_index = idx
             self._update_selection()
             return True
         return False
 
     def select_current(self):
-        """确认选中当前项（文件 → fileSelected；插件提及 → mentionSelected）"""
-        if 0 <= self._selected_index < len(self._filtered_items):
-            item = self._filtered_items[self._selected_index]
+        """确认选中当前项（文件 → fileSelected；插件提及 → mentionSelected；
+        历史会话 → sessionSelected）"""
+        idx = self._selected_index
+        if 0 <= idx < len(self._filtered_items):
+            item = self._filtered_items[idx]
             if item.get("type") == "mention":
                 self.mentionSelected.emit(item)
+            elif item.get("type") == "session":
+                self.sessionSelected.emit(item)
+            elif item.get("type") == "section_title":
+                return  # 分组标题行不可确认
             else:
                 self.fileSelected.emit(item["path"])
             self.dismiss()
@@ -1722,11 +2027,14 @@ class FileMentionCard(QWidget):
             # + 重置文件系统监视器。此前直接赋值漏掉了这三者。
             self.set_root_dir(root_dir)
         self._current_query = query  # root_dir 有值时始终更新 query
+        # 新一轮 @ 触发（无 query）重置目录浏览层到根；带 query 的刷新保留浏览层
+        if not query:
+            self._browse_rel = ""
 
         if self._cache_dirty and not self._async_pending:
             # 🚀 立即显示卡片（占位高度），异步扫描
             # 设占位高度确保容器 _do_expand 不会读到 natural_h ≈ 0
-            self.setFixedHeight(ITEM_HEIGHT)
+            self.setFixedHeight(BREADCRUMB_HEIGHT + ITEM_HEIGHT)
             self._visible = True
             self.setVisible(True)
             self.updateGeometry()
@@ -1741,8 +2049,7 @@ class FileMentionCard(QWidget):
         # 🎯 立即设置高度，不等防抖定时器
         # 第一次打开时无旧 widget 残留，不立即 setFixedHeight 则高度为 0
         if has_items:
-            visible = min(len(self._filtered_items), MAX_VISIBLE_ITEMS)
-            self.setFixedHeight(visible * ITEM_HEIGHT)
+            self.setFixedHeight(self._card_height(len(self._filtered_items)))
         else:
             self.setFixedHeight(0)
         self._visible = has_items
@@ -1770,6 +2077,7 @@ class FileMentionCard(QWidget):
         self._visible = False
         self.setVisible(False)
         self._current_query = ""  # 重置陈旧 query，防止下次 @ 触发时泄漏
+        self._browse_rel = ""  # 重置目录浏览层
         self.dismissed.emit()
 
     @property

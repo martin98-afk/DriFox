@@ -2091,6 +2091,11 @@ class SendableTextEdit(TextEdit):
                     event.accept()
                     return
             elif event.key() in (Qt.Key_Return, Qt.Key_Enter, Qt.Key_Tab):
+                # Tab 优先用于「进入目录」：当前选中目录项 → 进入其下一层列表
+                # （DSH 式目录导航，仅浏览模式目录项可进入）
+                if event.key() == Qt.Key_Tab and file_card.enter_selected_dir():
+                    event.accept()
+                    return
                 file_card.select_current()
                 event.accept()
                 return

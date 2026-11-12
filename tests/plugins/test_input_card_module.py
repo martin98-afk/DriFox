@@ -79,6 +79,7 @@ def test_compose_builds_input_card(fresh_registry, qapp):
                 "_on_attachments_removed_from_text",
                 "_on_file_mention_selected",
                 "_on_mention_selected",
+                "_on_session_selected",
                 "_rebuild_attachment_chips",
                 "_restore_deleted_message",
                 "_on_undo_dismiss_requested",

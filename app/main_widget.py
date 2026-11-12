@@ -7796,6 +7796,35 @@ class OpenAIChatToolWindow(ToolWindow):
 
         self.input_area.setFocus(Qt.OtherFocusReason)
 
+    def _on_session_selected(self, entry: dict):
+        """历史会话条目被选中（@ 卡片「会话」分类）
+
+        行为：登记待引用会话（发送时由 backend 以 hook 消息注入上下文，
+        只保留用户问题与助手正式回答）+ 在输入框插入会话标题胶囊作视觉反馈。
+        """
+        if not hasattr(self, "_file_mention_card"):
+            return
+        self._file_mention_card.dismiss()
+        self._card_manager.hide_card("file_mention", self._window_id)
+
+        session_id = str(entry.get("session_id", ""))
+        title = str(entry.get("name", "") or "历史会话")
+        if session_id:
+            session = self.session_manager.get_current_session() if self.session_manager else None
+            if session is None and self.backend:
+                session = self.backend.get_current_session()
+            if session is not None:
+                # 与 _pending_command（命令注入）同款 metadata pending 机制：
+                # 发送时由 engine 读取并 pop → inject_session_reference hook 注入
+                pending = list(session.metadata.get("_pending_session_refs") or [])
+                if session_id not in pending:
+                    pending.append(session_id)
+                session.metadata["_pending_session_refs"] = pending
+            # 视觉反馈：@会话标题 胶囊（与智能体提及同款机制）
+            self.input_area.insert_assistant_mention(title)
+
+        self.input_area.setFocus(Qt.OtherFocusReason)
+
     def _get_all_model_options_flat(self) -> list:
         """平展所有服务商:模型名选项列表（带描述）
 
@@ -21433,10 +21462,13 @@ class OpenAIChatToolWindow(ToolWindow):
             if _session is not None and getattr(_session, "metadata", None) is not None:
                 _pending_cmd = _session.metadata.pop("_pending_command", None)
                 _pending_skill = _session.metadata.pop("_pending_skill", None)
+                _pending_refs = _session.metadata.pop("_pending_session_refs", None)
                 if _pending_cmd:
                     _pending_ctx["pending_command"] = _pending_cmd
                 if _pending_skill:
                     _pending_ctx["pending_skill"] = _pending_skill
+                if _pending_refs:
+                    _pending_ctx["pending_session_refs"] = _pending_refs
         except Exception as e:  # noqa: BLE001 — pending 提取失败不阻断插话主流程
             logger.debug(f"[Interject] pending 提取失败（按无命令插话发送）: {e}")
         if _pending_ctx:

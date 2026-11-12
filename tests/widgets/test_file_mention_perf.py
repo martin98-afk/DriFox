@@ -216,7 +216,11 @@ class TestScanTreeEquivalence:
 
 
 class TestLazyRender:
-    """初始渲染量下调后，搜索结果与懒加载行为不受影响"""
+    """初始渲染量下调后，搜索结果与懒加载行为不受影响
+
+    注：无 query 时卡片为「目录浏览模式」（只列当前层直接子项 + 分组标题行），
+    全量列表断言改用搜索模式（query 命中全部条目，含 1 条分组标题）。
+    """
 
     @staticmethod
     def _make_card(n, prefix="pkg/mod"):
@@ -233,32 +237,34 @@ class TestLazyRender:
         card._cache_dirty = False
         return card
 
+    @staticmethod
+    def _search_all(card, n):
+        """搜索模式加载全量（"f" 命中所有 f*.py 名称，额外 +1 分组标题行）"""
+        card.load_items("f")
+        card._filter_timer.stop()
+        card._do_filter_and_render()
+        return n + 1
+
     def test_initial_render_count_is_visible_rows(self):
         """初始只渲染 INITIAL_RENDER_COUNT 个 widget（旧值为 200）"""
         _ensure_qapp()
         card = self._make_card(1000)
-        card.load_items("")
-        card._filter_timer.stop()
-        card._do_filter_and_render()
+        self._search_all(card, 1000)
         assert len(card._item_widgets) == INITIAL_RENDER_COUNT
 
     def test_filtered_items_keep_full_result_set(self):
         """少建 widget 不得减少匹配结果：_filtered_items 仍是全量"""
         _ensure_qapp()
         card = self._make_card(1000)
-        card.load_items("")
-        card._filter_timer.stop()
-        card._do_filter_and_render()
-        assert len(card._filtered_items) == 1000
+        expected = self._search_all(card, 1000)
+        assert len(card._filtered_items) == expected
         assert card._rendered_count == INITIAL_RENDER_COUNT
 
     def test_keyboard_navigation_extends_render(self):
         """键盘一路向下时可持续追加，最终能浏览到全量（旧行为保持）"""
         _ensure_qapp()
         card = self._make_card(300)
-        card.load_items("")
-        card._filter_timer.stop()
-        card._do_filter_and_render()
+        expected = self._search_all(card, 300)
 
         steps = 0
         while card._rendered_count < len(card._filtered_items) and steps < 100:
@@ -267,7 +273,7 @@ class TestLazyRender:
                 card._extend_render()
             steps += 1
 
-        assert len(card._item_widgets) == 300
+        assert len(card._item_widgets) == expected
         assert len(card._item_widgets) <= MAX_RENDERED_ITEMS
 
     def test_precise_search_renders_hit(self):
@@ -277,8 +283,9 @@ class TestLazyRender:
         card.load_items("f2999")
         card._filter_timer.stop()
         card._do_filter_and_render()
-        assert len(card._filtered_items) == 1
-        assert len(card._item_widgets) == 1
+        # 全局搜索仍递归命中深层文件；「文件」分组标题行 + 命中项 = 2
+        assert len(card._filtered_items) == 2
+        assert len(card._item_widgets) == 2
 
     def test_no_match_clears_widgets(self):
         _ensure_qapp()
@@ -288,6 +295,67 @@ class TestLazyRender:
         card._do_filter_and_render()
         assert len(card._filtered_items) == 0
         assert len(card._item_widgets) == 0
+
+
+class TestBrowseMode:
+    """目录浏览模式（DSH 式层级导航）：无 query 只列当前层直接子项"""
+
+    @staticmethod
+    def _make_card():
+        card = FileMentionCard()
+        card._file_cache = [
+            {"name": "src", "path": "/tmp/src", "relative_path": "src", "type": "dir"},
+            {"name": "README.md", "path": "/tmp/README.md", "relative_path": "README.md", "type": "file"},
+            {"name": "a.py", "path": "/tmp/src/a.py", "relative_path": "src/a.py", "type": "file"},
+            {"name": "sub", "path": "/tmp/src/sub", "relative_path": "src/sub", "type": "dir"},
+            {"name": "b.py", "path": "/tmp/src/sub/b.py", "relative_path": "src/sub/b.py", "type": "file"},
+        ]
+        card._cache_dirty = False
+        return card
+
+    def test_root_lists_only_direct_children(self):
+        """根层只列直接子项，不递归铺开"""
+        _ensure_qapp()
+        card = self._make_card()
+        card.load_items("")
+        card._filter_timer.stop()
+        card._do_filter_and_render()
+        # 「文件」标题 + src + README.md（孙辈不出现）
+        entries = [i for i in card._filtered_items if i.get("type") not in ("section_title",)]
+        assert sorted(i["relative_path"] for i in entries) == ["README.md", "src"]
+        # 目录项带进入标记（右侧「进入目录 Tab ›」提示）
+        src = next(i for i in entries if i["relative_path"] == "src")
+        assert src.get("enterable") is True
+
+    def test_enter_dir_lists_next_level(self):
+        """Tab 进入目录后列出该层直接子项"""
+        _ensure_qapp()
+        card = self._make_card()
+        card.load_items("")
+        card._filter_timer.stop()
+        card._do_filter_and_render()
+        assert card.enter_selected_dir() is True  # 首个可选条目是 src 目录
+        card._filter_timer.stop()
+        card._do_filter_and_render()
+        entries = [i for i in card._filtered_items if i.get("type") not in ("section_title",)]
+        # relative_path 保持缓存中的全路径（显示层用 display_name 只显示本级名）
+        assert sorted(i["relative_path"] for i in entries) == ["src/a.py", "src/sub"]
+        assert sorted(i["display_name"] for i in entries) == ["a.py", "sub"]
+        # 面包屑出现 src 段
+        crumbs = [l.text() for l in card._crumb_labels if isinstance(l.text(), str) and l.text()]
+        assert "src" in crumbs
+
+    def test_search_is_global_across_levels(self):
+        """搜索时仍为全局递归搜索，不受当前浏览层限制"""
+        _ensure_qapp()
+        card = self._make_card()
+        card.load_items("")
+        card.enter_selected_dir()
+        card.load_items("b.py")
+        card._filter_timer.stop()
+        card._do_filter_and_render()
+        entries = [i for i in card._filtered_items if i.get("type") not in ("section_title",)]
+        assert [i["relative_path"] for i in entries] == ["src/sub/b.py"]
 
 
 if __name__ == "__main__":

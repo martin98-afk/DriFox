@@ -164,6 +164,7 @@ class InputCardModule(UIModule):
         host.input_area.set_file_mention_card(host._file_mention_card)
         host._file_mention_card.fileSelected.connect(host._on_file_mention_selected)
         host._file_mention_card.mentionSelected.connect(host._on_mention_selected)
+        host._file_mention_card.sessionSelected.connect(host._on_session_selected)
         mgr.register_card(
             host._window_id,
             ContainerType.COMPLETION,
