@@ -29,6 +29,8 @@ def test_declared_list(reg, monkeypatch, tmp_path):
         "tool.read",
         "tool.inject",
         "tool.execute",
+        "tool.register",
+        "tool.unregister",
     }
 
 

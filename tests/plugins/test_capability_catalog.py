@@ -8,7 +8,7 @@ import pytest
 def test_catalog_size_and_ids():
     from app.plugins.capabilities import catalog
 
-    assert len(catalog.CATALOG) == 79
+    assert len(catalog.CATALOG) == 88
     for cid, spec in catalog.CATALOG.items():
         assert spec.id == cid
         assert re.fullmatch(r"[a-z]+(\.[a-z][a-z_]*)+", cid), cid
@@ -57,6 +57,11 @@ def test_high_level_set_is_stable():
         # 2026-11-09 补登记：此前 catalog 已有但守护测试漏登的既有高危项
         "team.manage",
         "team.spawn",
+        # 2026-11-12 能力池补件：通用 HTTP 请求（数据外发），及此前漏登的 reload_components
+        "net.http",
+        "plugin.reload_components",
+        # 2026-11-12 运行时工具注册：等于让 LLM 能调插件代码
+        "tool.register",
     }
 
 
@@ -103,6 +108,8 @@ def test_expand_wildcards_and_aliases():
         "tool.read",
         "tool.inject",
         "tool.execute",
+        "tool.register",
+        "tool.unregister",
     }
     assert catalog.expand(["*"]) == set(catalog.CATALOG)
     # A3 时代扁平名别名已退役：不再自动展开，原样保留（池构建时不可用）

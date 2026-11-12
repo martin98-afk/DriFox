@@ -906,4 +906,44 @@ QScrollBar::add-page:vertical, ::sub-page:vertical { background:none; }
 **验证**：深浅色各截一张图对比滑块宽度与 hover 色；滚动条出现在 `QScrollArea` 内部时，样式要设在内层 scroll 控件上，设到外层容器无效。
 
 ---
+
+## 35. 刷新重建列表/图表后旧内容重影
+
+**症状**：数据刷新时旧数字没消失，和新数字叠在同一行（截图放大能看到双重文字），滚动或切 tab 后依然在。
+
+**原因**：清布局只处理了 `item.widget()`：
+
+```python
+while layout.count():
+    item = layout.takeAt(0)
+    widget = item.widget() if item else None
+    if widget is not None:
+        widget.deleteLater()
+```
+
+两个缺陷叠加：① `addLayout()` 加进去的**子布局**，`item.widget()` 是 None，整段被跳过，子布局里的数值控件从此没人回收，每刷新一次多一层；② widget 只 `deleteLater()`，事件循环处理前仍在原位置绘制，流式刷新时新旧数字叠字。
+
+**修法**：递归子布局 + 先脱离显示再延时删除：
+
+```python
+def clear_layout(layout) -> None:
+    while layout.count():
+        item = layout.takeAt(0)
+        if item is None:
+            continue
+        widget = item.widget()
+        if widget is not None:
+            widget.hide()
+            widget.setParent(None)
+            widget.deleteLater()
+            continue
+        child = item.layout()
+        if child is not None:
+            clear_layout(child)
+            child.deleteLater()
+```
+
+**验证**（离屏可跑）：同一控件连续 `set_xxx()` 两次，比较 `findChildren` 数量是否持平。旧写法实测 `15 → 25`（且全部 `isVisible()`），修复后稳定 `15`。
+
+---
 > 新坑写回格式：`## N. 标题` + **症状/原因/修法** 三段 + 可运行代码片段。

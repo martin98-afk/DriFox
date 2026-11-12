@@ -241,6 +241,8 @@ cfg = caps.legacy("get_provider_config", "model.config")(
 | ID | level | 说明 |
 |---|---|---|
 | `tool.read` | low | 工具注册表元数据查询 |
+| `tool.register` | **high** | 运行时注册插件工具（source 强制 `plugin:<name>`，卸载时按来源清理） |
+| `tool.unregister` | medium | 注销本插件注册的工具（仅限 source 为自己的） |
 | `tool.inject` | **high** | 向 LLM 注入工具（改变模型可见行为） |
 | `tool.execute` | **high** | 执行任意工具 |
 
@@ -266,6 +268,8 @@ cfg = caps.legacy("get_provider_config", "model.config")(
 | `mcp.register` | medium | 注册进程内 MCP server 工具处理器（见下） |
 | `lsp.query` | medium | LSP 查询 |
 | `net.upload` | **high** | Gitee 上传（数据外发） |
+| `net.http` | **high** | 通用 HTTP(S) 请求（数据外发）。宿主统一超时 / 重定向 / 系统证书链，仅 `http(s)`，响应体上限 10MB |
+| `task.background` | medium | 在宿主线程池跑插件后台任务，返回 handle（`cancelled()` / `progress()`），`on_done`/`on_error` 词回主线程 |
 
 `mcp.register` 是注册型能力，池值是一个注册函数，插件经 `caps_for("mcp.register", surface="ui")` 取来调用，把工具 handler 登记进宿主进程内的 `LocalMcpGateway`：
 
@@ -361,6 +365,9 @@ caps["stream.subscribe"]({
 | ID | level | 说明 |
 |---|---|---|
 | `plugin.read` | low | 已安装插件列表 / 元数据 |
+| `plugin.config.read` | low | 读本插件自己的配置（env → 存储值 → `config_schema` 默认） |
+| `plugin.config.write` | medium | 写本插件自己的配置（仅 `config_schema` 已声明字段） |
+| `plugin.deps` | low | 查询本插件依赖安装状态（缺失清单 / 环境问题；安装仍由市场流程负责） |
 | `plugin.control` | **high** | 重载 / 启停其他插件 |
 | `command.read` | low | 命令列表 |
 | `command.reload` | medium | 命令热重载 |
@@ -374,6 +381,8 @@ caps["stream.subscribe"]({
 | ID | level | 说明 |
 |---|---|---|
 | `storage.data_dir` | low | 插件持久化数据根目录 `<app_data>`（插件自拼 `plugin_data/<name>/` 自用） |
+| `secret.read` | medium | 读本插件自己的凭据（系统密钥库，account 自动带 `plugin:<name>:` 前缀） |
+| `secret.write` | medium | 写本插件自己的凭据（空串 = 删除；密钥库不可用时返回 False，不落明文盘） |
 | `storage.db` | **high** | 通用数据库执行权限（受限代理：表名须 `plugin_<name>_` 前缀，禁 ATTACH/PRAGMA/VACUUM） |
 
 只给根目录：CapabilityPool 的 provider 全局共享、调用不传插件名，per-plugin

@@ -329,6 +329,42 @@ def register(registry) -> None:
 
         return get_app_data_dir()
 
+    def _secret_read(host: Any, ctx: Any):
+        """tool 面凭据读取：与 ui 面同一实现（不依赖窗口）。"""
+        from app.plugins.capabilities.providers.ui_core import _secret_read as _impl
+
+        return _impl(host, ctx)
+
+    def _secret_write(host: Any, ctx: Any):
+        from app.plugins.capabilities.providers.ui_core import _secret_write as _impl
+
+        return _impl(host, ctx)
+
+    def _net_http(host: Any, ctx: Any):
+        from app.plugins.capabilities.providers.ui_core import _net_http as _impl
+
+        return _impl(host, ctx)
+
+    def _task_background(host: Any, ctx: Any):
+        from app.plugins.capabilities.providers.ui_core import _task_background as _impl
+
+        return _impl(host, ctx)
+
+    def _tool_register(host: Any, ctx: Any):
+        from app.plugins.capabilities.providers.ui_core import _tool_register as _impl
+
+        return _impl(host, ctx)
+
+    def _tool_unregister(host: Any, ctx: Any):
+        from app.plugins.capabilities.providers.ui_core import _tool_unregister as _impl
+
+        return _impl(host, ctx)
+
+    def _plugin_deps(host: Any, ctx: Any):
+        from app.plugins.capabilities.providers.ui_core import _plugin_deps as _impl
+
+        return _impl(host, ctx)
+
     def _plugin_log(host: Any, ctx: Any):
         """带 plugin=<name> 前缀的 logger（与 ui_core 同实现）。"""
         from loguru import logger
@@ -599,11 +635,18 @@ def register(registry) -> None:
     registry.register("session.send", _session_send, surface="tool", owner="core:tool")
     registry.register("workdir.read", _workdir_read, surface="tool", owner="core:tool")
     registry.register("storage.data_dir", _storage_data_dir, surface="tool", owner="core:tool")
+    registry.register("secret.read", _secret_read, surface="tool", owner="core:tool")
+    registry.register("secret.write", _secret_write, surface="tool", owner="core:tool")
+    registry.register("net.http", _net_http, surface="tool", owner="core:tool")
+    registry.register("task.background", _task_background, surface="tool", owner="core:tool")
     registry.register("storage.db", _storage_db, surface="tool", owner="core:tool")
     registry.register("tool.execute", _tool_execute, surface="tool", owner="core:tool")
     registry.register("provider.list", model_meta.provider_list, surface="tool", owner="core:tool")
     registry.register("model.enumerate", model_meta.model_enumerate, surface="tool", owner="core:tool")
     registry.register("tool.read", _tool_read, surface="tool", owner="core:tool")
+    registry.register("tool.register", _tool_register, surface="tool", owner="core:tool")
+    registry.register("tool.unregister", _tool_unregister, surface="tool", owner="core:tool")
+    registry.register("plugin.deps", _plugin_deps, surface="tool", owner="core:tool")
     registry.register("tool.inject", _tool_inject, surface="tool", owner="core:tool")
     registry.register("team.read", _team_read, surface="tool", owner="core:tool")
     registry.register("team.send", _team_send, surface="tool", owner="core:tool")

@@ -249,11 +249,16 @@ _STABLE: frozenset[str] = frozenset(
         "extract_reasoning_delta",
         "messages_to_responses_input",
         "tools_to_responses",
-        "build_openai_client",
         "clear_cache",
         "provider_quota_exclude_keys",
     }
 )
+
+# 注：build_openai_client / chat_completion_text 刻意留在 stable 之外（provisional）。
+# 它们只负责「构造裸 client」——服务商动态请求头（OpenCode 的 x-opencode-session、
+# CodeBuddy 的 OAuth token、BCE Basic）由 worker 侧 resolve_extra_headers 注入，
+# 插件自建 client 拿不到这一层，缺头即 400（system-question 代答实测）。
+# 插件要「一次补全」走能力池 model.complete；只有服务商 adapter 实现才该直接用它。
 
 
 def sdk_stability(name: str) -> str:
