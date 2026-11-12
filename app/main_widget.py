@@ -1642,6 +1642,10 @@ class OpenAIChatToolWindow(ToolWindow):
         # 常驻视口内的卡片（读取历史时占大多数）无需每拍重跑 sync_width
         # （1.4ms/张：setMin/MaxWidth 布局失效 + runJavaScript IPC）。
         self._last_visible_card_ids: set = set()
+        # [#viewport-scan] 滚动拍扫描快照：仅 `_sync_visible_cards_on_scroll`
+        # 调用期间非 None（同拍内 `_viewport_batch_range` 复用），拍结束即置
+        # None——布局传播是异步的，快照只在同拍内可信，拍外一律实时遍历。
+        self._last_layout_scan: Optional[dict] = None
         # [A3-C] 方案 C：非活动标签卡片延迟销毁（DRIFOX_TAB_KEEP_SECS，默认 0）。
         # 0 = 现状（切走即走 _clear_chat_area 销毁链，本槽恒 None 无任何副作用）；
         # >0 = 切走时保留最近一个会话的卡片（单名额），快速切回零重建。
@@ -10454,6 +10458,108 @@ class OpenAIChatToolWindow(ToolWindow):
         except RuntimeError:
             pass
 
+    def _scan_chat_layout_once(self) -> Optional[dict]:
+        """滚动拍单次全量扫描：一次遍历 chat_layout 产出本拍全部视口判定。
+
+        [#viewport-scan] 收口：原实现里 `_sync_visible_cards_on_scroll` 的卡
+        遍历（±200px 缓冲、preview 恢复、宽度同步）与占位死区里
+        `_viewport_batch_range` 的批遍历（严格相交、degenerate 探测）在同一
+        拍内各扫一遍布局，长对话同拍双 O(N)。本函数把两套口径合并进单次遍历：
+
+        - 卡口径：±200px 缓冲内的 MessageCard → ``visible_ids``（id 集合）、
+          ``near_cards``（对象列表，供宽度同步）、``preview_cards``（待就地
+          恢复的占位态卡）。
+        - 批口径：与视口**严格相交**（无缓冲）的批次闭区间 → ``rng``；全部
+          零高（degenerate）或无交集时为 None。批次 idx 取占位映射优先、卡片
+          ``_message_index`` 兜底；spacer 无 ``_message_index`` 且无占位映射 →
+          跳过（与原 `_viewport_batch_range` 特判一致，不参与 rng 与
+          degenerate 判定）。
+        - 占位死区：``ph_in_view`` / ``ph_near`` 按批区间与缓冲批数判定；
+          ``rng`` 为 None（几何不可用）时两者恒 False，消费方本拍不动作。
+
+        纯读，无副作用：preview 恢复、宽度同步、占位重建等动作全部留给消费方。
+        布局传播是异步的（insertWidget / setFixedHeight 后立即读 geometry 是
+        旧值），因此**禁止**基于本结果做增量索引维护——只在滚动拍入口做单次
+        全量扫描，结果快照存 `self._last_layout_scan` 供同拍内
+        `_viewport_batch_range` 复用（拍结束即失效）。
+
+        Returns:
+            扫描结果 dict；chat_scroll_area 不可用或遍历异常时 None（调用方
+            直接放弃本拍，不更新可视集——对齐原实现几何异常时
+            `_viewport_batch_range` 返回 None、占位分支不动作的行为）。
+        """
+        scroll_area = getattr(self, "chat_scroll_area", None)
+        if not scroll_area:
+            return None
+        try:
+            viewport_rect = scroll_area.viewport().rect()
+            viewport_top = scroll_area.verticalScrollBar().value()
+            viewport_bottom = viewport_top + viewport_rect.height()
+        except Exception:
+            return None
+
+        ph_by_widget = {}
+        for idx, widget in (self._batch_placeholders or {}).items():
+            ph_by_widget[id(widget)] = idx
+
+        visible_ids: set = set()
+        near_cards: list = []
+        preview_cards: list = []
+        visible_batches: List[int] = []
+        degenerate = True
+        try:
+            for i in range(self.chat_layout.count()):
+                item = self.chat_layout.itemAt(i)
+                widget = item.widget() if item else None
+                if widget is None:
+                    continue
+                rect = widget.geometry()
+                # 批口径（严格相交，无缓冲）：占位映射优先、_message_index 兜底
+                idx = ph_by_widget.get(id(widget))
+                if idx is None:
+                    idx = getattr(widget, "_message_index", None)
+                if idx is not None:
+                    if rect.height() > 0:
+                        degenerate = False
+                    if rect.bottom() >= viewport_top and rect.top() <= viewport_bottom:
+                        visible_batches.append(int(idx))
+                # 卡口径（±200px 缓冲）：只有 MessageCard 参与
+                if isinstance(widget, MessageCard):
+                    if rect.bottom() < viewport_top - 200 or rect.top() > viewport_bottom + 200:
+                        continue
+                    visible_ids.add(id(widget))
+                    near_cards.append(widget)
+                    if getattr(widget, "_resize_preview_mode", False):
+                        preview_cards.append(widget)
+        except Exception:
+            return None
+
+        rng = None
+        if visible_batches and not degenerate:
+            rng = (min(visible_batches), max(visible_batches))
+        ph_in_view = False
+        ph_near = False
+        if self._batch_placeholders and rng is not None:
+            try:
+                buf = int(self._incremental_visible_batch_count) * int(self._virtual_scroll_buffer)
+            except (AttributeError, RuntimeError, TypeError, ValueError):
+                buf = 0
+            vp_start, vp_end = rng
+            for ph_idx in self._batch_placeholders:
+                if vp_start <= ph_idx <= vp_end:
+                    ph_in_view = True
+                    break
+                if vp_start - buf <= ph_idx <= vp_end + buf:
+                    ph_near = True
+        return {
+            "visible_ids": visible_ids,
+            "near_cards": near_cards,
+            "preview_cards": preview_cards,
+            "ph_in_view": ph_in_view,
+            "ph_near": ph_near,
+            "rng": rng,
+        }
+
     def _sync_visible_cards_on_scroll(self):
         """滚动时更新新进入可见区域的卡片
 
@@ -10461,79 +10567,55 @@ class OpenAIChatToolWindow(ToolWindow):
         常驻视口内的卡片在上一拍已同步过，宽度不变时重复同步纯属浪费
         （1.4ms/张）。集合每拍整体替换，离开视口的卡自然从集合消失，下次
         再滚入时会再次同步（保证宽度正确）。
+
+        [#viewport-scan] 收口：本拍全部判定（可视集 / preview 恢复 / 占位
+        死区分派）由 `_scan_chat_layout_once` 单次遍历产出，消除与
+        `_viewport_batch_range` 的同拍双遍历；快照存 `self._last_layout_scan`
+        供同拍内嵌套调用（`_restore_placeholders_in_viewport`）复用，拍结束
+        即置 None——拍外消费方（timer 路径、回收链）一律走实时遍历兜底。
         """
-        scroll_area = getattr(self, "chat_scroll_area", None)
-        if not scroll_area:
+        scan = self._scan_chat_layout_once()
+        if scan is None:
             return
         # 观测：稳态下的并发渲染页 / 复用池占用（内部自带 2s 节流）
         self._log_render_quota("scroll")
+        self._last_layout_scan = scan
 
-        viewport_rect = scroll_area.viewport().rect()
-        viewport_top = scroll_area.verticalScrollBar().value()
-        viewport_bottom = viewport_top + viewport_rect.height()
-
-        _synced = 0
         prev_visible = self._last_visible_card_ids
-        visible_ids: set = set()
-        for i in range(self.chat_layout.count()):
-            item = self.chat_layout.itemAt(i)
-            if not (item and item.widget() and isinstance(item.widget(), MessageCard)):
+
+        # [PERF] 恢复链改为时间预算分批后，离屏卡就位比旧「20 张/30ms」慢。
+        # 滚动进入视口的卡片若还停在 preview 占位态，就地立即恢复并从队列
+        # 摘除，避免用户滚过去看到一片空白（分批换来的平滑不该由可见区买单）。
+        # [#resize-long-list] 不再要求 _restore_queue 非空：离屏占位卡在
+        # 收口（_end_resize_cycle）后仍存在，是唯一的恢复通道。
+        for card in scan["preview_cards"]:
+            self._restore_card_now(card)
+
+        # [T23] 已在上一拍视口内的卡片：宽度已同步且未发生 resize，跳过。
+        # 🐛 修复：必须用 viewport 宽度直接推算 target（_sync_single_card_width），
+        # 不能走 card.sync_width()（内部用 parent.width()）——
+        # chat_container 会被偏大的卡片最小宽撑宽，parent 返回旧大值 → 循环。
+        # 滚动入视口时用 parent 推算会持续覆盖掉 resize 已修正的正确宽度。
+        for card in scan["near_cards"]:
+            if id(card) in prev_visible:
                 continue
-
-            card = item.widget()
-            card_rect = card.geometry()
-            card_top = card_rect.top()
-            card_bottom = card_rect.bottom()
-
-            # 只更新可见区域附近（缓冲200px）的卡片
-            if card_bottom < viewport_top - 200 or card_top > viewport_bottom + 200:
-                continue
-
-            cid = id(card)
-            visible_ids.add(cid)
-
-            # [PERF] 恢复链改为时间预算分批后，离屏卡就位比旧「20 张/30ms」慢。
-            # 滚动进入视口的卡片若还停在 preview 占位态，就地立即恢复并从队列
-            # 摘除，避免用户滚过去看到一片空白（分批换来的平滑不该由可见区买单）。
-            # [#resize-long-list] 不再要求 _restore_queue 非空：离屏占位卡在
-            # 收口（_end_resize_cycle）后仍存在，是唯一的恢复通道。
-            if getattr(card, "_resize_preview_mode", False):
-                self._restore_card_now(card)
-
-            # [T23] 已在上一拍视口内的卡片：宽度已同步且未发生 resize，跳过
-            if cid in prev_visible:
-                continue
-
-            # 🐛 修复：必须用 viewport 宽度直接推算 target，
-            # 不能走 card.sync_width()（内部用 parent.width()）——
-            # chat_container 会被偏大的卡片最小宽撑宽，parent 返回旧大值 → 循环。
-            # 滚动入视口时用 parent 推算会持续覆盖掉 resize 已修正的正确宽度。
             self._sync_single_card_width(card)
-            _synced += 1
+
+        self._last_visible_card_ids = scan["visible_ids"]
 
         # [占位死区] 滚动停在/经过已回收批次的占位区时：
         # - 视口直接落在占位上 → 同步原位重建（本回调已在 100ms 防抖后，
         #   视口立刻有卡片骨架，不再叠加 500ms 定时器等待）
         # - 占位只在邻域（±缓冲）→ 提前启动防抖 timer，缩短停手等待
-        if self._batch_placeholders:
-            rng = self._viewport_batch_range()
-            if rng is not None:
-                _vp_start, _vp_end = rng
-                _buf = self._incremental_visible_batch_count * self._virtual_scroll_buffer
-                _in_view = False
-                _near = False
-                for _idx in self._batch_placeholders:
-                    if _vp_start <= _idx <= _vp_end:
-                        _in_view = True
-                        break
-                    if _vp_start - _buf <= _idx <= _vp_end + _buf:
-                        _near = True
-                if _in_view:
-                    self._restore_placeholders_in_viewport()
-                elif _near:
-                    self._virtual_scroll_timer.start()
+        # （判定在扫描内完成：rng=None → in_view/near 均 False，不动作）
+        if scan["ph_in_view"]:
+            self._restore_placeholders_in_viewport()
+        elif scan["ph_near"]:
+            self._virtual_scroll_timer.start()
 
-        self._last_visible_card_ids = visible_ids
+        # 拍结束：快照失效。拍外的 `_viewport_batch_range` 消费方（占位重建
+        # 的 timer 路径、`_resolve_viewport_range` 回收链）一律实时遍历。
+        self._last_layout_scan = None
 
     def _restore_card_now(self, card):
         """把卡片从恢复队列摘除并就地退出 preview（滚动即时命中路径）。
@@ -13600,7 +13682,20 @@ class OpenAIChatToolWindow(ToolWindow):
 
         占位（已卸载批次留的等高空白）也参与扫描：它同样占据视口高度，只看
         存活卡片会漏掉「批次已卸载但仍在屏幕上」的位置。
+
+        [#viewport-scan] 薄包装：滚动拍内优先复用 `_scan_chat_layout_once` 的
+        快照（``self._last_layout_scan``，仅在 `_sync_visible_cards_on_scroll`
+        调用期间存在，同拍有效）；快照缺位（拍外 timer / 回收链路径、未跑
+        ``__init__`` 的测试桩）时自行遍历兜底，四个消费方语义不变。
         """
+        try:
+            scan = self._last_layout_scan
+        except (AttributeError, RuntimeError):
+            # 未跑 __init__ 的 PyQt `__new__` 桩：未初始化属性访问抛 RuntimeError
+            scan = None
+        if scan is not None:
+            return scan["rng"]
+
         try:
             scroll_area = self.chat_scroll_area
             if scroll_area is None:
