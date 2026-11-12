@@ -146,12 +146,46 @@ def slope(xs: list, ys: list) -> tuple:
 
 
 def save_result(name: str, data: dict):
-    """结果落盘 benchmarks/results/<name>.json。"""
+    """结果落盘 benchmarks/results/<name>_<标签>.json。
+
+    [Y2] 防同名覆盖：标签取 set_result_tag 设置的 --tag 可选举；未传时
+    自动加时间戳后缀（YYYYmmdd_HHMMSS），同一天多次跑不再互相覆盖。
+    """
     data.setdefault("_env", env_info())
-    path = RESULTS_DIR / f"{name}.json"
+    suffix = _RESULT_TAG or time.strftime("%Y%m%d_%H%M%S")
+    path = RESULTS_DIR / f"{name}_{suffix}.json"
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"[bench] 结果已写入 {path}")
     return path
+
+_RESULT_TAG: str | None = None
+
+def set_result_tag(tag: str | None) -> None:
+    """[Y2] 设置结果文件可选举名（来自 --tag）；None 则 save_result 用时间戳。"""
+    global _RESULT_TAG
+    _RESULT_TAG = tag
+
+def warn_if_drifox_running(tag: str) -> None:
+    """[Y1] 已有 Drifox 实例在跑时告警（不改行为，仅提示数字可能失真）。
+
+    匹配模式：cmdline 含 main.py + PROJECT_ROOT，或进程名含 drifox（大小写
+    不敏感，覆盖打包版 Drifox.app / Drifox.exe）。
+    """
+    import psutil
+    me = os.getpid()
+    hits: list[int] = []
+    root_s = str(PROJECT_ROOT)
+    for p in psutil.process_iter(["pid", "name", "cmdline"]):
+        if p.info["pid"] == me:
+            continue
+        cl = " ".join(p.info["cmdline"] or [])
+        nm = (p.info["name"] or "").lower()
+        if ("main.py" in cl and root_s in cl) or "drifox" in nm:
+            hits.append(p.info["pid"])
+    if hits:
+        print(f"[WARN] 检测到 {len(hits)} 个疑似 Drifox 实例在跑 (pids={hits})："
+              "基线数字可能受资源竞争/共享 .drifox 干扰，建议关闭实例或确认隔离后"
+              "再采信本次结果", flush=True)
 
 
 def spin_qt_events(qapp, total_ms: int, step_ms: int = 50):
