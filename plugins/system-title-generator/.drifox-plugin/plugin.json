@@ -1,0 +1,35 @@
+{
+  "icon": {"light": "icon.svg", "dark": "icon_dark.svg"},
+  "name": "system-title-generator",
+  "display_name": {"zh": "会话标题生成"},
+  "description": "根据首轮对话自动生成会话标题，可在插件设置中指定使用的模型",
+  "version": "1.0.0",
+  "author": {"name": "DriFoxx Team"},
+  "homepage": "https://github.com/martin98-afk/DriFox",
+  "license": "GPL-3.0-or-later",
+  "type": "system",
+  "api_version": 2,
+  "min_host_version": "0.7.2",
+  "capabilities": [
+    "plugin.config.read",
+    "model.complete",
+    "provider.list",
+    "model.enumerate",
+    "session.read",
+    "ui.events",
+    "session.title.commit"
+  ],
+  "components": {"ui": true},
+  "config_schema": {
+    "title": "标题生成设置",
+    "fields": [
+      {
+        "key": "title_model",
+        "label": "标题生成模型",
+        "type": "model",
+        "default": "",
+        "description": "生成会话标题使用的模型；留空跟随当前会话模型"
+      }
+    ]
+  }
+}
