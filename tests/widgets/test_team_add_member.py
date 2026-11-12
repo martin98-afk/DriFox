@@ -858,8 +858,12 @@ def test_handle_team_new_task_rotates_run_id(qapp):
     # PyQt 未初始化实例访问属性会抛 RuntimeError。保存原列表，测试后恢复）
     from app.main_widget import OpenAIChatToolWindow
 
+    import weakref as _weakref
+
     orig_instances = list(window_registry.window_instances)
-    window_registry.window_instances = [win1, win2]
+    # window_instances 存的是弱引用（见 window_registry.register_window），
+    # 直接塞强引用会被 alive_window_instances 的 r() 二次调用成 MagicMock。
+    window_registry.window_instances = [_weakref.ref(win1), _weakref.ref(win2)]
 
     # mock TabManagerWindow.get_instance（刷新分组）
     with (
@@ -880,9 +884,11 @@ def test_handle_team_new_task_rotates_run_id(qapp):
         finally:
             window_registry.window_instances = orig_instances
 
-    # 1) 全员先 _create_new_session（保存旧历史到旧 run_id）
-    win1._create_new_session.assert_called_once_with()
-    win2._create_new_session.assert_called_once_with()
+    # 1) 全员先 _create_new_session（保存旧历史到旧 run_id）。
+    #    force_in_place=True：流式中不得走 spawn_tab，否则每个成员都在团队外
+    #    新建普通标签页（回归：团队框「新建任务」冒出 N 个团队外标签）。
+    win1._create_new_session.assert_called_once_with(force_in_place=True)
+    win2._create_new_session.assert_called_once_with(force_in_place=True)
     # 2) force 生成新 run_id
     fake_tm.start_team_run.assert_called_once_with(force=True)
     # 3) 窗口 _team_run_id 更新为新值

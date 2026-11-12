@@ -27,6 +27,7 @@ from PyQt5.QtCore import QFile, QEasingCurve, QPropertyAnimation, QRectF, QSize,
 
 # [X1] 四级派发间隔：常量权威定义在 card_render_core（模块级导出）。
 # 本模块由 message_card 懒导入，彼时 card_render_core 已在 sys.modules，零额外成本。
+from app.widgets._bounded_caches import _BoundedToolMdCache
 from app.widgets.card_render_core import (
     ADAPTIVE_FAST_MS,
     ADAPTIVE_SAFETY_MS,
@@ -2308,7 +2309,7 @@ class MarkdownBlockViewer(QWidget):
         self._needs_full_render = True
         self._stable_html = ""
         self._stable_md_len = 0
-        self._tool_md_cache: Dict[str, str] = {}  # MessageCard 直接 .clear()；Qt 渲染不消费
+        self._tool_md_cache: Dict[str, str] = _BoundedToolMdCache()  # [B2] 有界化（MessageCard 直接 .clear()；懒写入经 getattr 打到本 viewer）
         self._tool_target_id = "tool-content"  # 非编辑工具的分区目标（对齐 WebEngine DOM id）
         self._thinking_finalized = False
         self._think_text_streaming_started = False

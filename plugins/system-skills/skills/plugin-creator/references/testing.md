@@ -42,7 +42,7 @@ DriFox 使用 **watchfiles** 实现插件热更新：
 
 | 级 | 手段 | 它只证明 |
 |----|------|---------|
-| ① 语法级 | `python -m py_compile`（见 §3） | 能编译，仅此而已 |
+| ① 语法级 | `python -m py_compile` + `scripts/check_plugin_imports.py`（见 §3） | 能编译；插件内相对 import 的符号真实存在 |
 | ② 契约级 | `validate_plugins.py` + `check_sdk_imports.py` + `capability_report.py`（见 §2/§3） | 结构与 import 在契约面内，能力声明与实际使用一致 |
 | ③ 行为级 | 真实触发一次（上面 ③ 的对应方式） | 组件按真实触发路径工作 |
 
@@ -54,7 +54,7 @@ DriFox 使用 **watchfiles** 实现插件热更新：
 |----------|---------|---------|
 | 文件写入成功 | 磁盘上有内容 | 插件能被加载 |
 | 热更新日志出现 | watcher 扫到了文件 | 注册成功、工具可调用 |
-| `py_compile` 通过 | 语法合法 | `register(registry)` 契约正确、SDK 符号真实存在 |
+| `py_compile` 通过 | 语法合法 | `register(registry)` 契约正确、SDK 符号真实存在、**函数体内延迟 import 指向的符号还在** |
 | JSON Schema 校验过 | manifest 字段合法 | 行为正确、能力池够用 |
 | UI 卡片渲染出来 | 加载链通 | 交互事件、卸载清理正常 |
 | 调用没报错 | 调用链没抛异常 | 结果正确（ToolResult 必须 `to_dict()`，`str()` 只给前端对象地址） |
@@ -122,6 +122,19 @@ python -m py_compile plugins/<name>/hooks/<name>_hook.py
 
 > 注意：py_compile 会在同目录生成 `__pycache__/`，提交插件前删掉它。
 
+### 跨模块 import 符号自检（py_compile 的盲区）
+
+插件大量用延迟 import（`register_ui` 里 `from .store import x`）。重构把 `store.py` 的函数删了、import 行还在时，`py_compile` 与 `validate_plugins.py` 全绿，宿主加载那一刻才报 `ImportError: cannot import name 'x' from 'ui_plugin_<plugin>.store'`，表现为整个 UI 组件注册失败（2026-11 context-insight v1.0.0 实际踩过，已发布坏包）。
+
+```bash
+python plugins/system-skills/skills/plugin-creator/scripts/check_plugin_imports.py ~/.drifox/plugins/<name>
+# [OK] <name>: 相对 import 符号全部可解析
+# [FAIL] <name>: 1 处 import 指向不存在的符号
+#   - ui/__init__.py:51 from .store import get_plugin_data_dir → store.py 顶层没有该名字
+```
+
+它只查插件内部相对 import（宿主 SDK / 第三方不管），不依赖宿主启动。改动涉及删函数、改模块名、拆文件时必跑。
+
 ### SDK 越界 import 自检（在 DriFox 主仓库内）
 
 插件只准依赖 `app.plugins.sdk` 与 `ctx["capabilities"]`，直连 `app.core.*` / `app.widgets.*` 属越界（主程序一重构插件就炸）：
@@ -133,6 +146,37 @@ python tools/check_sdk_imports.py
 ```
 
 用户级插件（`~/.drifox/plugins/`）不在主仓库 git 改动范围内，可临时复制进仓库再查。
+
+---
+
+## 3.5 UI 插件的最小验证集（三个无头冒烟 + 一次出图）
+
+UI 插件光靠 `py_compile` 与 `validate_plugins.py` 证明不了「卡片能活」：导入错误、控件不存在、布局崩溃、主题切换异常都藏在运行时。交付前至少跑这三类冒烟，全部放在插件 `tests/` 下、不依赖宿主：
+
+| 冒烟 | 验什么 | 关键断言 |
+|------|--------|---------|
+| `smoke_ui_card.py` | 注册参数 + 卡片实例化 + 渲染 | `register_floating_card` 的 `container/title/metadata` 对；`show_card()` 后能重建出转写/列表行；深浅色 ctx 各切一次不崩 |
+| `smoke_config_card.py` | 自绘设置卡能构造 | 下拉项数、回填值、提示词预填长度 |
+| `smoke_dialogs.py` | 确认弹窗构造与尺寸 | 按钮文案是中文、卡片宽度 420、高度 > 80 |
+
+三个都要做的隔离：
+
+```python
+pkg = type(sys)("xxx_ui"); pkg.__path__ = [UI_DIR]      # 插件目录名含连字符，不能直接 import
+sys.modules["xxx_ui"] = pkg
+store = importlib.import_module("xxx_ui.store")
+store.data_root = lambda: tmp        # 数据目录指到临时目录，别污染真实 plugin_data
+```
+
+### 出图自检：自己看，别让用户当眼睛
+
+布局/字号/层次这类问题，断言查不出来。写一个 `render_preview.py`：造一份假数据 → 渲染卡片 → `card.grab().save("preview.png")`，然后**自己读这张图**判断。
+
+- **不要用 `QT_QPA_PLATFORM=offscreen`**：该平台没有字体库，grab 出来只有色块没有文字，会误判成「文字没渲染」。
+- 用默认平台 + `card.show()` + `processEvents()` 再 grab。
+- 深浅色各出一张；出图文件看完删掉，别提交进仓库。
+
+> 这套办法在本轮开发里抓到了「标题字号被 Qt 内置 heading 格式盖掉」「纪要首行被裁」「输入框与标签重叠」三个纯视觉问题。
 
 ---
 

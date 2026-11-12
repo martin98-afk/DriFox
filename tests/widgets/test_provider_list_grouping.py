@@ -184,3 +184,43 @@ class TestGroupedRendering:
             [],
         )
         assert _headers(card) == ["API（1）"]
+
+
+def test_capability_group_appears_for_declared_type(monkeypatch):
+    """注册表声明了非 chat 能力类型 → 服务商墙出现对应能力组（文案映射 + 未知值原样）"""
+    from app.widgets.cards.settings import provider_setting_card as mod
+
+    class _FakeRegistry:
+        @staticmethod
+        def capability_types():
+            return ["image_generation"]
+
+    class _Holder:
+        @staticmethod
+        def get_instance():
+            return _FakeRegistry()
+
+    # provider_setting_card 模块级已 import ProviderRegistry，patch 模块属性
+    monkeypatch.setattr(mod, "ProviderRegistry", _Holder)
+    assert mod.capability_sections_for_wall() == [("image_generation", "图像生成")]
+
+
+class TestCapabilityGroupRendering:
+    """能力组走真实渲染路径（_rebuild_rows）"""
+
+    def test_capability_group_header_no_keyerror(self, card_factory):
+        """回归锁：能力组组头文案不在凭据颜色表 _GROUP_COLORS 内，
+        _rebuild_rows 不得因此 KeyError 中断（此前用户实测设置页打开即崩）"""
+        card = card_factory(
+            {
+                "cid_tts": {
+                    "provider_name": "TTS云",
+                    "API_URL": "https://tts.example.com/v1",
+                    "API_KEY": "sk-test",
+                },
+            },
+            [ProviderDef(name="TTS云", capability_type="speech_generation")],
+        )
+        card._rebuild_rows({})  # 修复前：KeyError: '语音合成'
+        texts = [label.text() for label in card._group_headers]
+        assert any("语音合成" in t for t in texts)

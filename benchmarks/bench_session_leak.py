@@ -162,8 +162,11 @@ def run(rounds: int, msgs_per_round: int) -> dict:
 
 
 if __name__ == "__main__":
+    bc.warn_if_drifox_running("session_leak")
     ap = argparse.ArgumentParser()
     ap.add_argument("--rounds", type=int, default=40)
     ap.add_argument("--msgs", type=int, default=20)
+    ap.add_argument("--tag", default=None, help="[Y2] 结果文件可选举名；未传自动加时间戳后缀")
     args = ap.parse_args()
+    bc.set_result_tag(args.tag)
     run(args.rounds, args.msgs)

@@ -37,6 +37,7 @@ def mgr():
     m._loop = None
     m._thread = None
     m._ephemeral = set()
+    m._probes = {}  # 探活结果缓存（get_status 合并）
     # get_status 会合并配置侧全集；固定为空以隔离本机真实 .mcp.json
     m._configured_servers = lambda: []
 

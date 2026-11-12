@@ -12,7 +12,7 @@ from typing import Any
 
 from loguru import logger
 
-from app.plugins.capabilities.providers import model_meta, net_sync, process_core
+from app.plugins.capabilities.providers import model_meta, net_sync, plugin_host, process_core
 from app.utils.info_bar_guard import post_to_main
 
 
@@ -357,6 +357,8 @@ def _model_config(host: Any):
 
 
 def _provider_config(host: Any):
+    """[已退役] get_provider_config 旧通道专属实现（兼容层清理时删除注册）。
+    保留定义备查；能力面统一走 model.config / model.config_for。"""
     real = _resolve_active_host(host)
 
     def resolve(provider: str = "", model: str = "") -> dict:
@@ -1248,6 +1250,101 @@ def _tool_read(host: Any):
     return api
 
 
+def _tool_register(host: Any, ctx: Any):
+    """运行时注册插件工具。
+
+    source 强制 ``plugin:<name>``（不能冒充 builtin），danger 必须由插件显式
+    声明；卸载/热重载时 PluginToolLoader 按 source 兜底清理，插件也可主动
+    调 tool.unregister。
+    """
+    plugin_name = _plugin_name_of(ctx)
+
+    def register(
+        name: str,
+        schema: Any,
+        impl: Any = None,
+        danger: str = "safe",
+        description: str = "",
+        group: str = "",
+        cn_name: str = "",
+        icon: str = "",
+        icon_dir: str = "",
+        aliases: Any = None,
+    ) -> bool:
+        if not plugin_name or not name or not isinstance(schema, dict):
+            return False
+        try:
+            from app.tools.registry import ToolRegistry
+
+            return bool(
+                ToolRegistry.get_instance().register(
+                    name=str(name),
+                    schema=schema,
+                    impl=impl,
+                    danger=danger,
+                    description=description,
+                    group=group or plugin_name,
+                    cn_name=cn_name,
+                    icon=icon,
+                    icon_dir=icon_dir,
+                    source=f"plugin:{plugin_name}",
+                    aliases=list(aliases) if aliases else None,
+                )
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[Capability] tool.register 失败 {name}（{plugin_name}）: {e}")
+            return False
+
+    return register
+
+def _tool_unregister(host: Any, ctx: Any):
+    """注销本插件注册的工具（只认 source 为自己）。"""
+    plugin_name = _plugin_name_of(ctx)
+
+    def unregister(name: str) -> bool:
+        if not plugin_name or not name:
+            return False
+        try:
+            from app.tools.registry import ToolRegistry
+
+            reg = ToolRegistry.get_instance()
+            entry = reg.get(name)
+            if entry is None or entry.source != f"plugin:{plugin_name}":
+                return False
+            return bool(reg.unregister(name))
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[Capability] tool.unregister 失败 {name}（{plugin_name}）: {e}")
+            return False
+
+    return unregister
+
+def _plugin_deps(host: Any, ctx: Any):
+    """查询本插件依赖安装状态（只读；安装仍由插件市场流程负责）。"""
+    plugin_name = _plugin_name_of(ctx)
+
+    def status() -> dict:
+        if not plugin_name:
+            return {"ok": False, "missing": [], "issues": []}
+        try:
+            from pathlib import Path
+
+            from app.plugins.deps_loader import describe_dep_issues, missing_pip_deps
+            from app.plugins.managers.plugin_manager import PluginManager
+
+            info = PluginManager.get_instance().get_plugin(plugin_name)
+            if info is None:
+                return {"ok": False, "missing": [], "issues": ["插件未安装"]}
+            plugin_dir = Path(str(getattr(info, "path", "") or ""))
+            manifest = dict(getattr(info, "manifest", {}) or {})
+            missing = list(missing_pip_deps(plugin_dir, manifest) or [])
+            issues = list(describe_dep_issues(plugin_dir, manifest) or [])
+            return {"ok": not missing and not issues, "missing": missing, "issues": issues}
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[Capability] plugin.deps 查询失败（{plugin_name}）: {e}")
+            return {"ok": False, "missing": [], "issues": [str(e)]}
+
+    return status
+
 def _tool_inject(host: Any):
     """向工具注册表注入 schema 过滤器（改变 LLM 可见工具集）。"""
 
@@ -1389,9 +1486,11 @@ def _model_config_for(host: Any):
     模型名（当前服务商模糊匹配）/ 服务商名（config_id、display_name、provider_name
     皆可）/ ``服务商:模型名``。解析逻辑留在宿主窗口（`_resolve_model_config_by_query`）：
     它依赖窗口内的 ``_valid_configs`` 与模型列表缓存，插件侧没有等价数据源。
+
+    capability_type 由调用方按意图传入（缺省 chat）；宿主解析器据此过滤候选集。
     """
 
-    def config_for(query: str) -> Any:
+    def config_for(query: str, capability_type: str = "chat") -> Any:
         if not query:
             return None
         resolver = getattr(host, "_resolve_model_config_by_query", None)
@@ -1399,12 +1498,93 @@ def _model_config_for(host: Any):
             logger.debug("[Capability] model.config_for 宿主无模型解析器")
             return None
         try:
-            return resolver(query, show_error=False)
+            config = resolver(query, show_error=False, capability_type=capability_type)
+            if isinstance(config, dict):
+                config.setdefault("capability_type", capability_type)
+            return config
+        except TypeError:
+            # 旧宿主解析器不接受新参数：退回原签名，避免能力池整体不可用
+            try:
+                return resolver(query, show_error=False)
+            except Exception as e:
+                logger.warning(f"[Capability] model.config_for 解析失败 {query!r}: {e}")
+                return None
         except Exception as e:
             logger.warning(f"[Capability] model.config_for 解析失败 {query!r}: {e}")
             return None
 
     return config_for
+
+def _model_complete(host: Any):
+    """model.complete：用当前/指定模型做一次性补全，返回完整文本。
+
+    不带工具与历史上下文，供插件做「要一段模型输出、不需要完整对话栈」的
+    轻量调用（超时代答 / 文本改写等），免去自己拼 client。
+
+    请求头经 resolve_extra_headers 统一组装：OpenCode 等网关要求每个请求
+    携带会话标识（x-opencode-session），缺头即 400 MissingSessionID。插件
+    自建 client 拿不到这一层（sdk 只暴露裸的 build_openai_client），故收口
+    到能力面。失败只记日志并返回空串，不向插件抛异常（能力面统一语义）。
+    """
+    real = _resolve_active_host(host)
+
+    def complete(
+        prompt: str,
+        model_query: str = "",
+        system: str = "",
+        temperature: float = 0.3,
+        max_tokens: int = 2000,
+        timeout: float = 60.0,
+    ) -> str:
+        text = str(prompt or "").strip()
+        if real is None or not text:
+            return ""
+        try:
+            if model_query:
+                cfg = dict(_model_config_for(real)(model_query) or {})
+            else:
+                cfg = dict(real._get_current_model_config() or {})
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[Capability] model.complete 取模型配置失败: {e}")
+            return ""
+        model_name = str(cfg.get("模型名称") or cfg.get("model") or "")
+        base_url = str(cfg.get("API_URL") or "")
+        if not model_name or not base_url:
+            logger.warning("[Capability] model.complete 模型配置不完整（缺模型名或 API_URL）")
+            return ""
+        session_id = ""
+        try:
+            backend = getattr(real, "backend", None)
+            session = backend.get_current_session() if backend is not None else None
+            session_id = str(getattr(session, "session_id", "") or "")
+        except Exception:  # noqa: BLE001 - 会话不可用则不注入会话头
+            session_id = ""
+        messages = []
+        if system:
+            messages.append({"role": "system", "content": str(system)})
+        messages.append({"role": "user", "content": text})
+        try:
+            from app.core.modelmeta.provider_profile import resolve_extra_headers
+            from app.utils.http_client import build_openai_client, chat_completion_text
+
+            client = build_openai_client(
+                api_key=str(cfg.get("API_KEY", "") or ""),
+                base_url=base_url,
+                timeout=timeout,
+                extra_headers=resolve_extra_headers(cfg, session_id),
+            )
+            return chat_completion_text(
+                client,
+                model=model_name,
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
+        except Exception as e:  # noqa: BLE001 - 代答失败由调用方降级
+            logger.warning(f"[Capability] model.complete 调用失败（{model_name}）: {e}")
+            return ""
+
+    return complete
 
 def _model_set(host: Any):
     """model.set：设置当前窗口的服务商与模型（只改窗口实例态，不写全局默认）。
@@ -1465,6 +1645,257 @@ def _storage_data_dir(host: Any):
 
     return get_app_data_dir()
 
+# ── 插件自有配置 / 凭据 / 通用 HTTP / 后台任务 ──────────────────
+# 这四条的共同点：以前插件只能直连宿主内部模块（PluginConfigStore /
+# SecretStore / httpx / threading），审计看不见、卸载收不干净、各写一套。
+
+def _plugin_name_of(ctx: Any) -> str:
+    return str(getattr(ctx, "plugin", "") or "")
+
+def _plugin_config_read(host: Any, ctx: Any):
+    """读本插件自己的配置（环境变量 → 存储值 → config_schema 默认）。"""
+    plugin_name = _plugin_name_of(ctx)
+
+    def read(key: str = "", default: Any = None) -> Any:
+        if not plugin_name:
+            return {} if not key else default
+        try:
+            from app.plugins.managers.plugin_config_store import PluginConfigStore
+
+            store = PluginConfigStore()
+            if key:
+                value = store.get(plugin_name, key)
+                return default if value is None else value
+            return store.effective_values(plugin_name)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[Capability] plugin.config.read 失败（{plugin_name}）: {e}")
+            return {} if not key else default
+
+    return read
+
+def _plugin_config_write(host: Any, ctx: Any):
+    """写本插件自己的配置。只允许 config_schema 已声明字段（防写垃圾键）。"""
+    plugin_name = _plugin_name_of(ctx)
+
+    def write(key: str, value: Any) -> bool:
+        if not plugin_name or not key:
+            return False
+        try:
+            from app.plugins.managers.plugin_config_store import PluginConfigStore
+
+            store = PluginConfigStore()
+            if key not in store.effective_values(plugin_name):
+                logger.warning(f"[Capability] plugin.config.write 拒绝未声明字段 {plugin_name}.{key}")
+                return False
+            return bool(store.set_values(plugin_name, {key: value}))
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[Capability] plugin.config.write 失败（{plugin_name}）: {e}")
+            return False
+
+    return write
+
+def _secret_account(plugin_name: str, key: str) -> str:
+    """系统密钥库 account：强制 plugin:<name>: 前缀，插件间不可互读。"""
+    k = str(key or "").strip()
+    if not plugin_name or not k:
+        return ""
+    return f"plugin:{plugin_name}:{k}"
+
+def _secret_read(host: Any, ctx: Any):
+    """读本插件自己的凭据（系统密钥库）。"""
+    plugin_name = _plugin_name_of(ctx)
+
+    def read(key: str, default: str = "") -> str:
+        account = _secret_account(plugin_name, key)
+        if not account:
+            return default
+        try:
+            from app.utils.secret_store import SecretStore
+
+            return SecretStore().get(account) or default
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[Capability] secret.read 失败（{plugin_name}）: {e}")
+            return default
+
+    return read
+
+def _secret_write(host: Any, ctx: Any):
+    """写本插件自己的凭据；value 为空串 = 删除。密钥库不可用时不落明文。"""
+    plugin_name = _plugin_name_of(ctx)
+
+    def write(key: str, value: str = "") -> bool:
+        account = _secret_account(plugin_name, key)
+        if not account:
+            return False
+        try:
+            from app.utils.secret_store import SecretStore
+
+            store = SecretStore()
+            if not str(value or ""):
+                store.delete(account)
+                return True
+            return bool(store.set(account, str(value)))
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[Capability] secret.write 失败（{plugin_name}）: {e}")
+            return False
+
+    return write
+
+_NET_HTTP_MAX_BYTES = 10 * 1024 * 1024
+
+def _net_http(host: Any, ctx: Any):
+    """通用 HTTP(S) 请求（数据外发）。
+
+    宿主统一超时 / 重定向 / 证书链 / 响应上限：插件自建 httpx 各写一套，
+    代理与系统证书信任只有这一层修得动。
+    """
+
+    def request(
+        url: str,
+        method: str = "GET",
+        headers: Any = None,
+        params: Any = None,
+        json_body: Any = None,
+        data: Any = None,
+        timeout: float = 30.0,
+        max_bytes: int = _NET_HTTP_MAX_BYTES,
+    ) -> dict:
+        target = str(url or "").strip()
+        if not target.lower().startswith(("http://", "https://")):
+            return {"ok": False, "error": "仅支持 http/https"}
+        try:
+            import httpx
+
+            from app.utils.tls_trust import system_ssl_context
+
+            limit = max(1024, min(int(max_bytes or _NET_HTTP_MAX_BYTES), _NET_HTTP_MAX_BYTES))
+            ssl_ctx = system_ssl_context()
+            with httpx.Client(
+                timeout=float(timeout or 30.0),
+                follow_redirects=True,
+                verify=ssl_ctx if ssl_ctx is not None else True,
+            ) as client:
+                with client.stream(
+                    str(method or "GET").upper(),
+                    target,
+                    headers=headers or None,
+                    params=params or None,
+                    json=json_body,
+                    data=data,
+                ) as resp:
+                    buf = bytearray()
+                    for chunk in resp.iter_bytes():
+                        buf.extend(chunk)
+                        if len(buf) >= limit:
+                            break
+                    text = bytes(buf[:limit]).decode(resp.encoding or "utf-8", errors="replace")
+                    return {
+                        "ok": True,
+                        "status": resp.status_code,
+                        "headers": dict(resp.headers),
+                        "text": text,
+                        "truncated": len(buf) >= limit,
+                    }
+        except Exception as e:  # noqa: BLE001 - 网络失败由调用方降级
+            logger.warning(f"[Capability] net.http 请求失败 {target}: {e}")
+            return {"ok": False, "error": str(e)}
+
+    return request
+
+_BG_POOL: Any = None
+_BG_TASKS: Dict[str, Any] = {}
+_BG_LOCK = threading.Lock()
+_BG_MAX_KEPT = 32
+
+class _PluginBackgroundTask:
+    """插件后台任务句柄：工作线程读状态，主线程建/取消。"""
+
+    __slots__ = ("task_id", "name", "plugin", "_cancel", "_state", "_future")
+
+    def __init__(self, task_id: str, name: str, plugin: str):
+        self.task_id = task_id
+        self.name = name
+        self.plugin = plugin
+        self._cancel = threading.Event()
+        self._state: Dict[str, Any] = {"status": "running", "progress": "", "error": ""}
+        self._future: Any = None
+
+    def cancelled(self) -> bool:
+        """工作线程内检查是否已请求取消（协作式，宿主不杀线程）。"""
+        return self._cancel.is_set()
+
+    def progress(self, value: Any) -> None:
+        """记录进度文本（工作线程安全，不碰 UI）。"""
+        self._state["progress"] = str(value)
+
+    def cancel(self) -> bool:
+        self._cancel.set()
+        future = self._future
+        # 任务还在队列里没开跑时能直接取消掉，此时不会进 _work，状态得在这里落
+        if future is not None and future.cancel():
+            self._state["status"] = "cancelled"
+        return True
+
+    def snapshot(self) -> dict:
+        out = dict(self._state)
+        out.update({"task_id": self.task_id, "name": self.name, "plugin": self.plugin})
+        return out
+
+def _bg_pool() -> Any:
+    global _BG_POOL
+    if _BG_POOL is None:
+        from concurrent.futures import ThreadPoolExecutor
+
+        _BG_POOL = ThreadPoolExecutor(max_workers=4, thread_name_prefix="plugin-task")
+    return _BG_POOL
+
+def _bg_prune_locked() -> None:
+    """超出保留上限时先丢最老的已完成任务（防任务表无界增长）。"""
+    if len(_BG_TASKS) <= _BG_MAX_KEPT:
+        return
+    finished = [tid for tid, t in _BG_TASKS.items() if t._state["status"] != "running"]
+    for tid in finished[: max(0, len(_BG_TASKS) - _BG_MAX_KEPT)]:
+        _BG_TASKS.pop(tid, None)
+
+def _task_background(host: Any, ctx: Any):
+    """在宿主线程池跑插件后台任务。
+
+    fn 接收任务句柄（可查 cancelled / 报 progress）；on_done / on_error
+    由宿主派回主线程执行，插件不必自己碰 Qt 线程。
+    """
+    plugin_name = _plugin_name_of(ctx)
+
+    def run(fn: Any, name: str = "", on_done: Any = None, on_error: Any = None) -> Any:
+        if not callable(fn):
+            return None
+        import uuid
+
+        task = _PluginBackgroundTask(uuid.uuid4().hex[:12], str(name or "")[:60], plugin_name)
+        with _BG_LOCK:
+            _BG_TASKS[task.task_id] = task
+            _bg_prune_locked()
+
+        def _work() -> None:
+            try:
+                result = fn(task)
+            except Exception as e:  # noqa: BLE001 - 任务异常不拖垮线程池
+                task._state.update(status="error", error=str(e))
+                logger.warning(f"[Capability] 后台任务失败 {task.task_id}（{plugin_name}）: {e}")
+                if callable(on_error):
+                    post_to_main(lambda: on_error(e))
+                return
+            if task.cancelled():
+                task._state["status"] = "cancelled"
+                return
+            task._state["status"] = "done"
+            if callable(on_done):
+                post_to_main(lambda: on_done(result))
+
+        task._future = _bg_pool().submit(_work)
+        return task
+
+    return run
+
 
 def register(registry) -> None:
     reg = registry
@@ -1478,9 +1909,11 @@ def register(registry) -> None:
     reg.register("window.workbench", _window_workbench, surface="ui", owner="core:ui")
     reg.register("window.events", _window_events, surface="ui", owner="core:ui")
     # 模型 / 智能体
+    # _provider_config（get_provider_config 旧通道的专属实现）已随兼容层退役删除注册：
+    # LEGACY_MAP 不再有该键，投影循环永不触达；能力面统一走 model.config / model.config_for。
     reg.register("model.config", _model_config, surface="ui", owner="core:ui")
-    reg.register("model.config", _provider_config, surface="ui", owner="core:ui", legacy_key="get_provider_config")
     reg.register("model.config_for", _model_config_for, surface="ui", owner="core:ui")
+    reg.register("model.complete", _model_complete, surface="ui", owner="core:ui")
     reg.register("model.set", _model_set, surface="ui", owner="core:ui")
     reg.register("model.schema", _model_schema, surface="ui", owner="core:ui")
     reg.register("model.metadata", _model_metadata, surface="ui", owner="core:ui")
@@ -1499,6 +1932,12 @@ def register(registry) -> None:
     )
     # 存储
     reg.register("storage.data_dir", _storage_data_dir, surface="ui", owner="core:ui")
+    reg.register("secret.read", _secret_read, surface="ui", owner="core:ui")
+    reg.register("secret.write", _secret_write, surface="ui", owner="core:ui")
+    reg.register("net.http", _net_http, surface="ui", owner="core:ui")
+    reg.register("task.background", _task_background, surface="ui", owner="core:ui")
+    reg.register("plugin.config.read", _plugin_config_read, surface="ui", owner="core:ui")
+    reg.register("plugin.config.write", _plugin_config_write, surface="ui", owner="core:ui")
     reg.register("storage.db", _storage_db, surface="ui", owner="core:ui")
     # 上下文 / 引擎
     reg.register("theme.read", _theme_read, surface="ui", owner="core:ui")
@@ -1525,12 +1964,17 @@ def register(registry) -> None:
     reg.register("command.reload", _command_reload, surface="ui", owner="core:ui")
     reg.register("plugin.read", _plugin_read, surface="ui", owner="core:ui")
     reg.register("plugin.control", _plugin_control, surface="ui", owner="core:ui")
+    # B 项双通道拆除：启停补载/补卸载收口能力池（插件侧禁直接 import 主程序包）
+    reg.register("plugin.reload_components", plugin_host.reload_components, surface="ui", owner="core:plugin_host")
     reg.register("ui.exclusive", _ui_exclusive, surface="ui", owner="core:ui")
     reg.register("ui.exclusive", _enter_exclusive, surface="ui", owner="core:ui", legacy_key="enter_exclusive_ui_mode")
     reg.register("ui.exclusive", _exit_exclusive, surface="ui", owner="core:ui", legacy_key="exit_exclusive_ui_mode")
     # 工具
     reg.register("tool.execute", _tool_execute, surface="ui", owner="core:ui")
     reg.register("tool.read", _tool_read, surface="ui", owner="core:ui")
+    reg.register("tool.register", _tool_register, surface="ui", owner="core:ui")
+    reg.register("tool.unregister", _tool_unregister, surface="ui", owner="core:ui")
+    reg.register("plugin.deps", _plugin_deps, surface="ui", owner="core:ui")
     reg.register("tool.inject", _tool_inject, surface="ui", owner="core:ui")
     # 基础
     reg.register("state.kv", _state_kv, surface="ui", owner="core:ui")

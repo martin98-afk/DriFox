@@ -205,7 +205,8 @@ def _extract_content_for_api(content: Any, supports_vision: bool = True) -> Any:
     if isinstance(content, list):
         # 是否有图片块？
         has_image = any(
-            isinstance(b, dict) and b.get("type") in ("image_url", "input_image", "image")
+            isinstance(b, dict)
+            and b.get("type") in ("image_url", "input_image", "image", "image_ref")
             for b in content
         )
         if not has_image:
@@ -222,7 +223,8 @@ def _extract_content_for_api(content: Any, supports_vision: bool = True) -> Any:
 def _strip_image_blocks(content: list) -> str:
     """将含图片块的内容列表转为纯文本，图片块替换为 [图片] 占位符。
 
-    用于不支持视觉输入的模型：发送请求前过滤掉 image_url/input_image/image 块。
+    用于不支持视觉输入的模型：发送请求前过滤掉
+    image_url/input_image/image/image_ref 块。
     """
     parts: List[str] = []
     for block in content:
@@ -233,7 +235,7 @@ def _strip_image_blocks(content: list) -> str:
             text = str(block.get("text", ""))
             if text:
                 parts.append(text)
-        elif btype in ("image_url", "input_image", "image"):
+        elif btype in ("image_url", "input_image", "image", "image_ref"):
             parts.append("[图片]")
     return "\n".join(parts) if parts else ""
 
@@ -412,7 +414,7 @@ def ensure_content_blocks(content: Any) -> List[Dict[str, Any]]:
     """
     将任意格式的内容转换为标准 blocks 列表。
 
-    支持类型：text, reasoning, tool_result, image_url, input_image, image
+    支持类型：text, reasoning, tool_result, image_url, input_image, image, image_ref
 
     性能优化：简化类型检查逻辑，减少重复代码。
     """
@@ -428,8 +430,8 @@ def ensure_content_blocks(content: Any) -> List[Dict[str, Any]]:
                     text = str(item.get("text", ""))
                     if text:
                         blocks.append({"type": "text", "text": text})
-                elif item_type in ("image_url", "input_image", "image"):
-                    # 图片块直接透传
+                elif item_type in ("image_url", "input_image", "image", "image_ref"):
+                    # 图片块直接透传（含方案 1 落盘引用块，导出链不丢图）
                     blocks.append(dict(item))
                 elif item_type == "reasoning":
                     reasoning_content = str(item.get("content", "") or "")
@@ -525,8 +527,8 @@ def content_to_text(content: Any, include_tool_results: bool = False) -> str:
             if text:
                 texts.append(text)
         elif block_type in ("image_url", "input_image", "image", "image_ref"):
-            # 图片块转为文本占位符
-            continue
+            # 图片块输出占位符（导出/纯文本视图不丢图）
+            texts.append("[图片]")
         elif include_tool_results and block_type == "tool_result":
             name = str(block.get("name", "tool"))
             result = str(block.get("result", ""))
@@ -574,8 +576,8 @@ def content_to_markdown(content: Any) -> str:
             reasoning_content = str(block.get("content", "") or "")
             if reasoning_content:
                 parts.append(f"<think>{reasoning_content}</think>")
-        elif block_type in ("image_url", "input_image", "image"):
-            # 图片块转为 markdown 图片引用
+        elif block_type in ("image_url", "input_image", "image", "image_ref"):
+            # 图片块转为 markdown 图片引用（image_ref 无 url 走 [图片] 占位）
             image_url = ""
             if block_type == "image_url":
                 image_data = block.get("image_url", {}) or {}

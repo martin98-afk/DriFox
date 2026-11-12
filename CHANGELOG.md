@@ -3,9 +3,72 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
-## [v0.7.0] - 2026-11-09 (重新发布 #6)
+### ⚡ 性能优化 (Performance)
 
-自 v0.7.0-beta 以来的变更 | 提交数：62 · 文件变更：203 · +10431/-1433 | 贡献者：dingma, martin98-afk
+- **强回收活跃窗口阈值 1000→800** (`app/core/infra/memory_governor.py`): `_WEB_MEM_THRESHOLD_MB_ACTIVE` 下调后，活跃窗口下 WebEngine 子进程 RSS 合计 ≥800MB 即触发离屏 renderer 强回收（比旧阈值更早介入）；回收护栏不变（距可视区 ≥12 批、LRU 保留最近 14、每轮 ≤12、60s 冷却）。
+- **主题预览缓存读侧缩放** (`app/widgets/cards/settings/theme_style_card.py`): `_IMAGE_CACHE` 不再缓存全分辨率 QImage（1920×1080 ≈8.3MB/张），写缓存前缩到 tile 尺寸×dpr（320×120 逻辑上限，KeepAspectRatioByExpanding + SmoothTransformation）；深浅两模式 41 个主题源实测缓存 211.6MB → 9.05MB（-95.7%）。缺图主题仍写 None 防重复探盘，`_ThemeTile` 绘制二次缩放与交互不变。
+- **subagent serialize 出口回收补齐** (`app/core/workers/subagent_worker.py`): `_serialize_for_api` 补 `revoke_after=True`（与 chat_worker 出口回收同构：产物+入参双扫、失败仅 warning 不阻断），子代理继承含图历史时 revive 物化的 data URI 在返回前还原为 image_ref，不再驻留到主 worker 下轮扫描兜底。
+- **粘贴图片立即落盘为 image_ref** (`app/main_widget.py`): 图片附件编码复用 persist 单块路径（sha1 去重 + 原子写），content 直接产出 `image_ref` 引用块，data URI 内存驻留从「粘贴起到首次发送」缩为「仅发送瞬间物化副本」；persist 失败降级保留旧 data URI 行为，>20MB 降采样与 8-20MB 强压分支保留。
+- **image_ref 块渲染分支** (`app/widgets/message_card.py`): 增量 markdown 构建识别 `image_ref` 落盘引用块，按 persist 文件路径拼 `file:///` 绝对 URL 渲染与点击预览（对齐既有 file:// 解析与加载口径），缺 file 字段回退 `[图片]` 占位。
+- **子代理会话卡 WebView 懒创建 + 互斥隐藏硬释放** (`plugins/system-subagent/ui/session_card.py`): QWebEngineView 改为首次 load 懒创建（无任务时不再实例化）；卡片被其他系统卡互斥隐藏时 deleteLater 硬释放（隐藏期不再常驻 QtWebEngineProcess，单卡约 20-50MB）；再次显示按当前会话全量重灌恢复，运行中任务轮询续接。
+
+### ♻️ 代码重构 (Refactoring)
+
+- **多模态服务商迁出为可安装插件** (`plugins/system-providers/providers/volcengine.py`, `plugins/system-providers/providers/minimax_video.py` 删除): 豆包语音合成 / 火山方舟图像 / 豆包录音识别 / 海螺视频四个非 chat 能力服务商定义移入插件市场仓库 `drifox-plugins2` 的 `multimodal-providers` 插件（声明 `min_host_version 0.7.1`，依赖 `ProviderDef.capability_type`），主程序不再内置多模态样例。`system-providers` 回到 14 家 chat 服务商，`tests/core/test_provider_registry.py::test_system_providers_loaded_from_plugins` 的 14 家断言重新成立（此前随样例定义落地失效）。
+
+### 🐛 问题修复 (Bug Fixes)
+
+- **移除 UI 插件 ui 目录的 sys.path 注入** (`app/plugins/registries/ui_plugin_registry.py`): `load_plugin` 曾把每个 UI 插件的 `ui/` 目录 `sys.path.insert(0, ...)` 且卸载不回收，24 个带 `ui/__init__.py` 的插件共存时 `import ui` 的解析随加载顺序漂移——晚加载插件顶掉先加载插件的包名，引发 `No module named 'ui.speakup_ui'` 类跨插件污染（speak-up 演练/真发按钮实爆）。删除该注入：相对导入走 `ui_plugin_{name}` 包的 `__package__` 解析，本就不依赖 sys.path；全生态运行时代码仅 speak-up 一家依赖此行为（已改走自有顶层包 `speakup_core.runtime`）。配套在 ui-plugin-creator 架构文档固化跨模块导入规则（ui/ 内相对导入、共享单例放自有顶层包或 `ui_plugin_{safe}` 显式导入、禁裸 `from ui.`）。实测 38 个 UI 插件全量加载零 ModuleNotFoundError。
+
+## [v0.7.1] - 2026-11-11
+
+自 v0.7.0 以来的变更 | 提交数：28 · 文件变更：44 · +3827/-315 | 贡献者：dingma, drifox-bot, martin98-afk
+
+### ✨ 新功能 (New Features)
+
+- **非活动标签卡片延迟销毁开关化（内存方案 C，默认关闭）** (`app/main_widget.py`, `app/widgets/webview_pool.py`): 非活动标签页的卡片不再随切换立即销毁，改由保留窗口延迟回收，为后续默认启用留灰度通道；默认关闭，避免影响切换手感。
+- **MCP 图片内容透传到视觉模型** (`app/tools/mcp_tools.py`, `app/tools/result.py`, `app/core/workers/chat_worker.py`, `app/core/services/local_mcp_gateway.py`, `app/widgets/cards/settings/plugin_config_card.py`, `tests/core/test_mcp_image_content.py` 新增): MCP server 按规范返回的 `ImageContent` 此前四处被丢——客户端 `_call_tool` 只收 `TextContent`（`ImageContent` 无 `.text` 被静默跳过）、`ToolResult.image_data` 只容单张、视觉注入只认 `ToolRegistry` 白名单而 MCP schema 从不进 registry、内嵌 gateway 把 handler 结果硬编码成 text 块。修复：`_split_tool_content` 按 `type` 字符串分派收图片（兼容 SDK 小版本与 dict 块）；`image_data` 放宽为单 dict 或列表并新增 `as_image_list` 归一化；视觉注入改为按载荷判定，协议 A 本地路径提取仍留白名单防误伤；gateway 支持 handler 返回规范 content 块，旧 `{"text"}` handler 零改动。新增 8MB 多图总量预算，超限压缩后丢末尾并在提示文本写明省略数。末端 `_extract_content_for_api` 已支持 `image_url`，无需改动。附 53 个相关测试全过。
+- **MCP 授权探活：关掉的服务也能看见授权失效** (`app/tools/mcp_tools.py`, `app/core/mcp_oauth/provider.py`, `app/core/mcp_oauth/token_store.py`, `app/widgets/cards/settings/mcp_setting_card.py`, `tests/core/test_mcp_probe.py` 新增): 新增第五态 `MCPState.AUTH_EXPIRED`（红点「授权失效」，区别于启动失败）。设置卡展开可见时触发一次探活，覆盖 `type` 为 http/sse 的**全部**服务（含 `enabled=false`，此前它们在连接表里没有条目、状态恒为「已关闭」，而 figma / notion / tencent-docs 这类 OAuth 服务的 token 过期或被撤销完全无从感知）。判定两级：本地读 `expires_at`（token 存储里早就有，UI 从未用过），已过期且无 `refresh_token` 直接判死、零网络；其余发一次 `initialize`，OAuth 型走 SDK 的 `async_auth_flow` 让 token 自动续期，一旦需要交互授权即判失效、不弹浏览器。结果按服务名缓存在内存（TTL 10 分钟，并发 3、单服务 8 秒超时），`get_status()` 统一合并后设置卡与 `mcp_manage` 两处同时受益；`connected`/`connecting` 仍以连接事实为准，`stdio` 类型不探（等于重新拉起 npx/uvx 子进程）。
+- **服务商支持能力类型** (`app/core/modelmeta/provider_profile.py`, `app/core/modelmeta/provider_save_plan.py`, `app/plugins/registries/provider_registry.py`, `app/widgets/cards/settings/provider_edit_card.py`, `provider_setting_card.py`, `provider_picker_card.py`, `app/plugins/capabilities/providers/`, `plugins/system-providers/providers/volcengine.py` 新增, `minimax_video.py` 新增): 服务商支持能力类型（chat/图像/视频/语音等，服务商墙动态分组；插件经能力池按类型取配置；豆包/海螺样例定义落地）。
+
+### ⚡ 性能优化 (Performance)
+
+- **壁纸场景层 pixmap 跨窗口共享** (`app/core/infra/scene_pixmap_cache.py`, `app/widgets/scene_layer.py`): 同场景只保留一份解码结果、各窗口按引用复用，10 窗口实测省约 930MB。
+- **renderer 终止异步收敛** (`app/main_widget.py`): 同步等待终止改为异步收敛，消除主线程最长 6s 阻塞。
+- **离屏 renderer 全生命周期回收** (`app/core/infra/memory_governor.py`, `app/core/infra/rss_sampler.py`, `app/main_widget.py`): 空闲 10 分钟主动退场、关窗延后回收、新增主进程/renderer RSS 动态闸门，避免后台进程长期驻留。
+- **全关标签页清空 WebView 复用池** (`app/widgets/tab_manager_window.py`): 此前 ≤4 个 renderer 会常驻（实测 260-870MB），关空后即释放。
+- **subagent 任务日志/归档/注入全链路截断** (`app/core/workers/subagent_worker.py`, `plugins/system-subagent/manager.py`): 200 任务场景 793MB 常驻消除（T13 实测）。
+- **池容量参数化** (`app/widgets/webview_pool.py`): 空闲池上限可用 `DRIFOX_POOL_MAX_IDLE` 调整。
+
+### 🐛 问题修复 (Bug Fixes)
+
+- **三处无界缓存残留** (`app/widgets/_bounded_caches.py`, `app/widgets/card_viewers.py`, `app/widgets/markdown_block_viewer.py`, `app/widgets/inline_artifact_panel.py`): Qt 渲染通道同名缓存、工具渲染缓存、`_tool_card_map` 均补条目上限与 LRU 淘汰，长时间会话不再单调增长。`_tool_card_map` 提升到 `__init__`，修掉未流式窗口切会话时的 AttributeError。
+- **场景 pixmap 缓存引用计数释放 + baked 组内 LRU 上限** (`app/core/infra/scene_pixmap_cache.py`): 窗口销毁时正确减引用，baked 组不再无限堆积。
+- **快速切换标签崩溃** (`app/main_widget.py`): renderer 异步收尸在多标签高频切换下会崩，改为默认关闭，保留开关供手动验证。
+- **subagent 批次汇总永不触发** (`app/core/workers/subagent_worker.py`, `plugins/system-subagent/manager.py`): error/stall 出口绕过完成链，导致该批次结算点永不命中；现在所有出口汇入同一结算点并加幂等标记。
+- **团队框「新建任务」外冒普通标签** (`app/main_widget.py`): 成员流式输出时点新建，每个成员都命中流式保护改走 `spawn_tab`，冒出 N 个游离标签；`_create_new_session` 新增 `force_in_place` 参数供团队入口绕过保护，窗口归属与分组不再错位。
+- **file_tools 大文件卡顿与 BOM 处理** (`plugins/system-core/tools/file_tools.py`): Python 语法检查改走子进程并对大文件跳过全量 AST，避免 GIL 拖住主线程；BOM 前缀不再破坏 multi-edit 匹配，顺带清理死 import。
+- **MCP 连接改用单例** (`app/plugins/capabilities/providers/tool_core.py`): 多实例并发连接导致的重复建连与状态错乱。
+- **ui_session 返回完整 session_id** (`tools/ui_test_server/server.py`): `new → switch` 序列此前恒失败。
+- **团队框「新建任务」在团队外冒出等量普通标签** (`app/main_widget.py`: `_create_new_session` / `_handle_team_new_task`, `tests/widgets/test_create_new_session_interrupt_save.py`, `tests/widgets/test_team_add_member.py`): 成员窗口正在流式输出时点「新建任务」，每个成员调用的 `_create_new_session` 都命中流式保护、被改写成 `TabManagerWindow.spawn_tab` 开新标签页 → 团队分组外冒出 N 个普通标签（N = 成员数），而新 run_id 只回写到旧窗口，成员表与标签分组错位。修复：`_create_new_session` 新增 `force_in_place` 参数，团队「新建任务」传 `True` 跳过 spawn_tab（就地停流 → 清空 → 新建会话，窗口与团队归属保留）；用户级新建入口默认行为不变。新增回归用例（`force_in_place=True` 不得调用 `spawn_tab`），并同步修正 `test_handle_team_new_task_rotates_run_id` 的窗口注册 —— `window_instances` 早已改为弱引用，测试仍塞强引用，`alive_window_instances()` 把 MagicMock 二次调用后成员收集恒为空。
+- **插件市场工具「搜得到装不了」：搜索输出展示名、安装只认标识名** (`plugins/plugin-marketplace/tools/marketplace_tools.py`, `tests/plugins/test_marketplace_tools.py`): 市场条目 `name` 是英文 slug 主键（如 `experts-engineering`），`display_name.zh` 是中文展示名（如「技术工程专家包」）；`marketplace_search` 输出行头只给展示名且提示「原样传」，而 `_find_market_plugin` 与全部本地状态查询只认 slug，AI 按提示传中文名必然报「没有名为 X 的插件」。修复：`_find_market_plugin` slug 精确匹配优先、未命中回退展示名精确匹配（多个同名取下载量最高，与搜索排序口径一致）；新增 `_resolve_local_name` 把输入名解析成已装插件 slug，`uninstall/update/set_enabled/detail` 四处接入；`install` 先解析 meta 规范化成 slug 再查本地状态与去重；`search` 输出行补括号标识名（`演示插件 (demo-a)`），`installed` 关键词过滤与输出行同步支持展示名。新增 7 个回归用例（15 全过），与既有失败基线比对失败数不变。
+- **服务商状态灯被单个最便宜模型的偶发故障误判红灯** (`app/core/modelmeta/model_refresh_service.py`, `tests/core/test_model_refresh_service.py`): 健康检查此前只挑「模型列表」内输入价最低的 1 个模型打一次 ping，该模型下线 / 被限流 / 网关路由缺失就让整家服务商显示红灯，实际换个模型就能通。改为按输入价升序取前 3 个候选（`PROBE_MODEL_LIMIT`），逐个探测、任一返回 ok 即停且不再消耗剩余候选；`auth_failed`（401/402/403，凭据或余额问题）同样立即停，换模型无意义。REST 与插件 `health_probe` 两条分支都走这套回退；无价格数据 / 无模型列表仍回退「模型名称」，行为不变。测试覆盖前 3 排序、404 回退、首个即通早停、鉴权即停、钩子回退。
+
+### 🧪 测试与诊断 (Tests & Diagnostics)
+
+- **内存基线采样与 RPC 驱动脚本** (`scripts/mem_baseline.py`, `scripts/mem_drive_rpc.py` 新增): 支持修复前后同口径对比，采样 CSV 落 `.perf_out/`。
+- **虚拟滚动容器无泄漏断言** (`tests/widgets/test_virtual_scroll_recycle_rebuild_loop.py`): 回收重建循环后容器无残留。
+- **团队新建任务 force_in_place 回归用例** (`tests/widgets/test_create_new_session_interrupt_save.py`): 断言 `force_in_place=True` 不调用 `spawn_tab`；同时修掉测试里 MagicMock 强引用导致的成员收集恒空。
+- **修复两个存量失败测试** (`tests/widgets/test_identity_header.py`, `tests/widgets/test_message_card_image_attachments.py`)。
+
+### 🔧 其他 (Chores & Build)
+
+- **`.perf_out` 加入 `.gitignore`** (`.gitignore`): 内存实测产物只留本地。
+- **marketplace.json 自动再生** (`marketplace.json`): plugin.json 变更后自动重生成 `[skip ci]`。
+
+## [v0.7.0] - 2026-11-09 (重新发布 #7)
+
+自 v0.7.0-beta 以来的变更 | 提交数：71 · 文件变更：230 · +11800/-1636 | 贡献者：dingma, drifox-bot, martin98-afk
 
 ### ✨ 新功能 (New Features)
 - **宿主进程内 MCP gateway** (`app/core/services/local_mcp_gateway.py`, `app/plugins/capabilities/providers/mcp_core.py`, `app/tools/mcp_tools.py`): 插件可声明 `mcp.register` 能力，经 `caps_for` 取注册函数把工具 handler 登记进宿主进程内的 `ThreadingHTTPServer`（端口 `:0`）；`.mcp.json` 用 `type: http` + `url: ${LOCAL_MCP}/<name>`，连接前由 `_resolve_plugin_paths` 替换成 gateway 实际地址，复用 `streamablehttp_client` 纯 JSON 分支。MCP server 不再需要外部 python 子进程，打包版不依赖系统解释器安装 `mcp`/`httpx`；现有 stdio/sse/http 连接路径与设置页零改动。附 gateway 握手、能力注册、占位符解析 9 个单测，并用真实 SDK 客户端验证 `initialize → list_tools → call_tool` 三步。
@@ -92,6 +155,16 @@ All notable changes to this project will be documented in this file.
 
 ### 🔧 其他 (Chores & Build) (重新发布 #6 追加)
 - **回滚无关格式化** (`38a9b869a`): 回滚 ruff format 对既有代码区域的无关格式化（项目约定禁 ruff format）。
+
+### ✨ 新功能 (New Features) (重新发布 #7 追加)
+- **MCP 图片内容透传到视觉模型** (`b34d6a44`, `f15d16be`, `007c0305`, `0109a010`, `9ef6c248`): MCP server 按规范返回的 `ImageContent` 此前四处被丢——客户端 `_call_tool` 只收 `TextContent`（`ImageContent` 无 `.text` 被静默跳过）、`ToolResult.image_data` 只容单张、视觉注入只认 `ToolRegistry` 白名单而 MCP schema 从不进 registry、内嵌 gateway 把 handler 结果硬编码成 text 块。修复：`_split_tool_content` 按 `type` 字符串分派收图片（兼容 SDK 小版本与 dict 块）；`image_data` 放宽为单 dict 或列表并新增 `as_image_list` 归一化；视觉注入改为按载荷判定，协议 A 本地路径提取仍留白名单防误伤；gateway 支持 handler 返回规范 content 块，旧 `{"text"}` handler 零改动。新增 8MB 多图总量预算，超限压缩后丢末尾并在提示文本写明省略数。工具动作弹窗同步兼容多图 `image_data`。附 53 个相关测试全过。
+- **MCP 授权探活：关掉的服务也能看见授权失效** (`d9fb05ea`): 新增第五态 `MCPState.AUTH_EXPIRED`（红点「授权失效」，区别于启动失败）。设置卡展开可见时触发一次探活，覆盖 `type` 为 http/sse 的**全部**服务（含 `enabled=false`，此前它们在连接表里没有条目、状态恒为「已关闭」，而 figma / notion / tencent-docs 这类 OAuth 服务的 token 过期或被撤销完全无从感知）。判定两级：本地读 `expires_at`（token 存储里早就有，UI 从未用过），已过期且无 `refresh_token` 直接判死、零网络；其余发一次 `initialize`，OAuth 型走 SDK 的 `async_auth_flow` 让 token 自动续期，一旦需要交互授权即判失效、不弹浏览器。结果按服务名缓存在内存（TTL 10 分钟，并发 3、单服务 8 秒超时），`get_status()` 统一合并后设置卡与 `mcp_manage` 两处同时受益；`connected`/`connecting` 仍以连接事实为准，`stdio` 类型不探（等于重新拉起 npx/uvx 子进程）。
+
+### 📚 文档 (Docs) (重新发布 #7 追加)
+- **plugin-creator 发布前置清单与双仓副本说明** (`91d569a8`)；**MCP 图片透传能力文档** (`a42b1cf3`)。
+
+### 🔧 其他 (Chores & Build) (重新发布 #7 追加)
+- **插件市场 README 自动再生** (`a07b2d01`)。
 
 ## [v0.7.0-beta] - 2026-11-08
 

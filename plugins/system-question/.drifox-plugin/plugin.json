@@ -18,8 +18,8 @@
   "api_version": 2,
   "capabilities": [
     "question.control",
-    "model.config",
-    "model.config_for",
+    "model.complete",
+    "plugin.config.read",
     "provider.list",
     "model.enumerate",
     "session.read"

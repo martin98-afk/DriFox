@@ -824,7 +824,14 @@ class PluginManager:
             return None
 
     def _save_discovery_cache(self) -> None:
-        """原子回写发现缓存（tmp + replace）；写失败吞异常（缓存永不致命）。"""
+        """原子回写发现缓存（tmp + replace）；写失败吞异常（缓存永不致命）。
+
+        [T10g] 空插件守卫：_plugins 为空时（如测试隔离目录实例）直接不写，
+        避免空缓存文件落盘污染——真实路径靠 key 不匹配兜底，但空缓存文件
+        本身不应存在。
+        """
+        if not self._plugins:
+            return
         try:
             groups: Dict[str, list] = {"system": [], "claude": [], "user": []}
             for p in self._plugins.values():
@@ -1229,8 +1236,16 @@ class PluginManager:
         """检查插件是否启用"""
         return name in self._get_enabled_set()
 
-    def enable_plugin(self, name: str):
-        """启用插件（配置持久化，调用方需触发各子系统 reload）"""
+    def enable_plugin(self, name: str, load_components: bool = True):
+        """启用插件（配置持久化，调用方需触发各子系统 reload）
+
+        Args:
+            load_components: True（默认）= 联动加载全部组件并触发 plugin_changed
+                hook（完整语义，user-custom 自动创建等路径依赖）；False = 只写
+                配置，组件加载与 hook 由主线程补载链完成（plugin-marketplace
+                cards._on_manage_done）——worker 线程完整加载与主线程补载曾形成
+                双通道（UI 组件被完整 exec 两轮），False 口径消除之。
+        """
         if name not in self._plugins:
             logger.warning(f"[PluginManager] Plugin not found: {name}")
             return
@@ -1249,12 +1264,15 @@ class PluginManager:
             state_changed = True
         # 联动加载全部组件（与禁用路径对称）：只补 UI + 工具会让 providers /
         # model_adapters / lsp / hooks 在「禁用→启用」后不再生效，直到重启。
-        self._load_plugin_components(name)
-        # 状态实际变化才触发（幂等跳过重复启用）；置于末尾保证 diff 拿到注册后状态
-        if state_changed:
-            self._trigger_plugin_changed_hook("enabled", name)
+        # 🔴 历史 bug 防回归：严禁只补 UI 单组件，必须全组件口径。
+        # [双通道拆除] load_components=False：组件加载由主线程补载链完成。
+        if load_components:
+            self._load_plugin_components(name)
+            # 状态实际变化才触发（幂等跳过重复启用）；置于末尾保证 diff 拿到注册后状态
+            if state_changed:
+                self._trigger_plugin_changed_hook("enabled", name)
 
-    def disable_plugin(self, name: str):
+    def disable_plugin(self, name: str, load_components: bool = True):
         """禁用插件（配置持久化，调用方需触发各子系统 reload）
 
         系统插件保护改为名单制：仅 _NON_DISABLEABLE（system / plugin-marketplace）
@@ -1266,6 +1284,10 @@ class PluginManager:
         判定依据是插件名名单而非 manifest type / PluginInfo.is_system（plugin_type）：
         项目根 plugins/ 下所有插件在扫描时 plugin_type 均为 "system"（目录位置
         判定），用 is_system 会把内置插件全部拒绝；type 字段回归纯元数据语义。
+
+        Args:
+            load_components: 语义同 enable_plugin（False = 只写配置，组件卸载与
+                hook 由主线程补载链完成，消除 worker/主线程双通道）。
         """
         p = self._plugins.get(name)
         if p is None:
@@ -1297,10 +1319,13 @@ class PluginManager:
         # 历史实现只清 UI + tools + 贡献项，providers / model_adapters / storages /
         # serializers / gateways / lsp / hooks / agents / commands 全部留在注册表里
         # 继续生效——禁用后仍会被调用，且这类残留没有自愈轮询，只能重启进程。
-        self._unload_plugin_components(name)
-        # 状态实际变化才触发（幂等跳过重复禁用）；置于末尾保证 diff 拿到注销后状态
-        if state_changed:
-            self._trigger_plugin_changed_hook("disabled", name)
+        # 🔴 历史 bug 防回归：严禁只清 UI 单组件，必须全组件口径。
+        # [双通道拆除] load_components=False：组件卸载由主线程补载链完成。
+        if load_components:
+            self._unload_plugin_components(name)
+            # 状态实际变化才触发（幂等跳过重复禁用）；置于末尾保证 diff 拿到注销后状态
+            if state_changed:
+                self._trigger_plugin_changed_hook("disabled", name)
 
     def _load_plugin_components(self, name: str) -> None:
         """启用路径：按 manifest 全组件加载（与 _unload_plugin_components 对称）。"""

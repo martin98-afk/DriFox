@@ -43,8 +43,17 @@ def register(registry) -> None:
         return getattr(bt, "_lsp_tools", None) if bt is not None else None
 
     def _mcp(host: Any):
-        bt = getattr(host, "_builtin_tools", None)
-        return getattr(bt, "_mcp_manager", None) if bt is not None else None
+        # MCP 连接与 schema 是全局单例（多窗口共享；BuiltinTools._mcp_manager
+        # 也指向它）。后台 pool_for / hook 路径的 host 是窗口，没有 _builtin_tools
+        # 属性，经 host 链取会恒 None（值班轮「MCP 未连接」误报的根因）。
+        # 直接取单例：未连接时 _connections 为空，get_tool_schemas_by_server
+        # 自然返回空 dict，无需守卫配置开关。
+        try:
+            from app.tools.mcp_tools import MCPClientManager
+
+            return MCPClientManager.get_instance()
+        except Exception:
+            return None
 
     def _gitee(host: Any):
         bt = getattr(host, "_builtin_tools", None)
@@ -81,6 +90,25 @@ def register(registry) -> None:
         if real is None:
             return lambda query: None
         from app.plugins.capabilities.providers.ui_core import _model_config_for as _impl
+
+        return _impl(real)
+
+    def _model_complete(host: Any):
+        """tool 面的 model.complete：委托 ui_core 实现。
+
+        ToolExecutor 自身没窗口的模型配置与后端会话，取不到窗口时返回恒空实现
+        （后台工具无窗口是正常态，非错误）。
+        """
+        real = None
+        try:
+            from app.plugins.capabilities.resolve import active_main_widget
+
+            real = active_main_widget()
+        except Exception:  # noqa: BLE001 - 无窗口场景退化为空实现
+            real = None
+        if real is None:
+            return lambda *args, **kwargs: ""
+        from app.plugins.capabilities.providers.ui_core import _model_complete as _impl
 
         return _impl(real)
 
@@ -300,6 +328,48 @@ def register(registry) -> None:
         from app.utils.utils import get_app_data_dir
 
         return get_app_data_dir()
+
+    def _secret_read(host: Any, ctx: Any):
+        """tool 面凭据读取：与 ui 面同一实现（不依赖窗口）。"""
+        from app.plugins.capabilities.providers.ui_core import _secret_read as _impl
+
+        return _impl(host, ctx)
+
+    def _secret_write(host: Any, ctx: Any):
+        from app.plugins.capabilities.providers.ui_core import _secret_write as _impl
+
+        return _impl(host, ctx)
+
+    def _net_http(host: Any, ctx: Any):
+        from app.plugins.capabilities.providers.ui_core import _net_http as _impl
+
+        return _impl(host, ctx)
+
+    def _task_background(host: Any, ctx: Any):
+        from app.plugins.capabilities.providers.ui_core import _task_background as _impl
+
+        return _impl(host, ctx)
+
+    def _tool_register(host: Any, ctx: Any):
+        from app.plugins.capabilities.providers.ui_core import _tool_register as _impl
+
+        return _impl(host, ctx)
+
+    def _tool_unregister(host: Any, ctx: Any):
+        from app.plugins.capabilities.providers.ui_core import _tool_unregister as _impl
+
+        return _impl(host, ctx)
+
+    def _plugin_deps(host: Any, ctx: Any):
+        from app.plugins.capabilities.providers.ui_core import _plugin_deps as _impl
+
+        return _impl(host, ctx)
+
+    def _plugin_config_read(host: Any, ctx: Any):
+        """tool 面读配置：工具执行时要拿插件自己的 key（system-web 典型）。"""
+        from app.plugins.capabilities.providers.ui_core import _plugin_config_read as _impl
+
+        return _impl(host, ctx)
 
     def _plugin_log(host: Any, ctx: Any):
         """带 plugin=<name> 前缀的 logger（与 ui_core 同实现）。"""
@@ -559,6 +629,7 @@ def register(registry) -> None:
     registry.register("model.schema", _model_schema, surface="tool", owner="core:tool")
     registry.register("model.config", _model_config, surface="tool", owner="core:tool")
     registry.register("model.config_for", _model_config_for, surface="tool", owner="core:tool")
+    registry.register("model.complete", _model_complete, surface="tool", owner="core:tool")
     registry.register("agent.read", _agent_read, surface="tool", owner="core:tool")
     registry.register(
         "agent.read", _agent_prompt, surface="tool", owner="core:tool", legacy_key="get_agent_prompt"
@@ -570,11 +641,19 @@ def register(registry) -> None:
     registry.register("session.send", _session_send, surface="tool", owner="core:tool")
     registry.register("workdir.read", _workdir_read, surface="tool", owner="core:tool")
     registry.register("storage.data_dir", _storage_data_dir, surface="tool", owner="core:tool")
+    registry.register("secret.read", _secret_read, surface="tool", owner="core:tool")
+    registry.register("secret.write", _secret_write, surface="tool", owner="core:tool")
+    registry.register("net.http", _net_http, surface="tool", owner="core:tool")
+    registry.register("task.background", _task_background, surface="tool", owner="core:tool")
     registry.register("storage.db", _storage_db, surface="tool", owner="core:tool")
     registry.register("tool.execute", _tool_execute, surface="tool", owner="core:tool")
     registry.register("provider.list", model_meta.provider_list, surface="tool", owner="core:tool")
     registry.register("model.enumerate", model_meta.model_enumerate, surface="tool", owner="core:tool")
     registry.register("tool.read", _tool_read, surface="tool", owner="core:tool")
+    registry.register("tool.register", _tool_register, surface="tool", owner="core:tool")
+    registry.register("tool.unregister", _tool_unregister, surface="tool", owner="core:tool")
+    registry.register("plugin.deps", _plugin_deps, surface="tool", owner="core:tool")
+    registry.register("plugin.config.read", _plugin_config_read, surface="tool", owner="core:tool")
     registry.register("tool.inject", _tool_inject, surface="tool", owner="core:tool")
     registry.register("team.read", _team_read, surface="tool", owner="core:tool")
     registry.register("team.send", _team_send, surface="tool", owner="core:tool")

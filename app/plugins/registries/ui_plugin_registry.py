@@ -3812,9 +3812,6 @@ class UIPluginRegistry:
             import sys
 
             ui_path = str(plugin_path / "ui")
-            # 添加 ui 目录到 sys.path 以支持 from .renderers 等相对导入
-            if ui_path not in sys.path:
-                sys.path.insert(0, ui_path)
 
             # 清理字节码缓存（__pycache__），确保修改后的 .py 文件被重新编译，
             # 而不是使用旧的 .pyc 缓存（Python 的 mtime 检查在同一秒内可能失效）

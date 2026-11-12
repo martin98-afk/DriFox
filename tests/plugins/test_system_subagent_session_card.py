@@ -69,6 +69,33 @@ def test_card_loads_logs_and_summary(card):
     assert card._agent_name == "coder"
     assert len(card._logs) == 1
 
+def test_lazy_webview_lifecycle(card):
+    """懒创建 + 隐藏硬释放：构造 None → load 建成 → hideEvent 释放 → load 重建。"""
+    assert card._web_view is None  # 构造即建是旧盲区，现在必须懒
+    card.load(
+        "t1",
+        "coder",
+        [{"type": "progress", "content": "开始", "timestamp": 0}],
+        {"status": "finished"},
+    )
+    assert card._web_view is not None  # load 懒创建
+    old = card._web_view
+    card.hideEvent(None)  # 互斥隐藏派发（QHideEvent 不可手工构造，签名允许 None）
+    assert card._web_view is None  # 硬释放（renderer 进程随页面销毁收敛）
+    card.load("t1", "coder", [], {"status": "finished"})
+    assert card._web_view is not None and card._web_view is not old  # 重建为全新实例
+
+def test_runJavaScript_guards_after_release(card):
+    """释放后轮询消费点早退不崩（_check_and_update / _apply_update 路径）。"""
+    card.load("t1", "coder", [], {"status": "running"})
+    card._web_view = None  # 模拟释放后的轮询竞态
+    card._logs_provider = lambda: {
+        "found": True,
+        "logs": [{"type": "progress", "content": "新日志", "timestamp": 1}],
+        "summary": {"status": "running"},
+    }
+    card._poll_update()  # 不抛异常即守卫生效
+
 
 class _FakeWidget:
     def __init__(self, visible: bool = False):
@@ -180,6 +207,38 @@ def test_recover_skips_when_same_session_already_bound(card, monkeypatch):
     card._recover_for_current_session()
 
     assert card._task_id == "t1"
+
+def test_recover_rebuilds_webview_after_hard_release(card, monkeypatch):
+    """守卫命中且 _web_view 已被 hideEvent 硬释放：重建并重渲染（二次显示空白回归）。
+
+    触发路径：卡片同会话恢复过一次（_bound_session_id 已赋）→ 打开另一系统卡
+    互斥隐藏（hideEvent deleteLater WebView）→ 再点开。守卫命中只跳过数据重灌，
+    不得跳过 WebView 重建，否则摘要栏在、日志区永久空白。
+    """
+    card.load(
+        "t1",
+        "coder",
+        [{"type": "progress", "content": "开始", "timestamp": 0}],
+        {"status": "finished"},
+    )
+    card._bound_session_id = "sess-1"
+    card.hideEvent(None)  # 互斥隐藏：硬释放 WebView（QHideEvent 不可手工构造，签名允许 None）
+    assert card._web_view is None
+
+    facade = _FakeFacade({"found": True, "task_id": "t9", "agent_name": "x", "logs": [], "summary": {}})
+    monkeypatch.setattr(_session_card_mod, "_current_facade", lambda: (facade, "sess-1"))
+    card._recover_for_current_session()
+
+    # 守卫命中：不重灌数据（仍绑定原任务）
+    assert card._task_id == "t1"
+    # 但 WebView 必须重建且渲染链已执行（_load_html 写临时文件为渲染发生物证）
+    assert card._web_view is not None
+    assert card._tmp_files, "守卫命中分支应触发 _render_logs 重灌日志区"
+
+    # _web_view 存活时再次恢复：不重复创建（不闪屏不重载）
+    kept = card._web_view
+    card._recover_for_current_session()
+    assert card._web_view is kept
 
 
 def test_recover_noop_without_facade(card, monkeypatch):

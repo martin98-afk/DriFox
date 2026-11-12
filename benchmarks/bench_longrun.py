@@ -184,9 +184,12 @@ def run(cards: int, switch_sessions: int, switches: int) -> dict:
 
 
 if __name__ == "__main__":
+    bc.warn_if_drifox_running("longrun")
     ap = argparse.ArgumentParser()
     ap.add_argument("--cards", type=int, default=60)
     ap.add_argument("--sessions", type=int, default=8)
     ap.add_argument("--switches", type=int, default=40)
+    ap.add_argument("--tag", default=None, help="[Y2] 结果文件可选举名；未传自动加时间戳后缀")
     args = ap.parse_args()
+    bc.set_result_tag(args.tag)
     run(args.cards, args.sessions, args.switches)

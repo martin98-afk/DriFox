@@ -8,7 +8,7 @@ import pytest
 def test_catalog_size_and_ids():
     from app.plugins.capabilities import catalog
 
-    assert len(catalog.CATALOG) == 77
+    assert len(catalog.CATALOG) == 88
     for cid, spec in catalog.CATALOG.items():
         assert spec.id == cid
         assert re.fullmatch(r"[a-z]+(\.[a-z][a-z_]*)+", cid), cid
@@ -57,6 +57,11 @@ def test_high_level_set_is_stable():
         # 2026-11-09 补登记：此前 catalog 已有但守护测试漏登的既有高危项
         "team.manage",
         "team.spawn",
+        # 2026-11-12 能力池补件：通用 HTTP 请求（数据外发），及此前漏登的 reload_components
+        "net.http",
+        "plugin.reload_components",
+        # 2026-11-12 运行时工具注册：等于让 LLM 能调插件代码
+        "tool.register",
     }
 
 
@@ -68,16 +73,17 @@ def test_legacy_map_targets_exist():
 
 
 def test_legacy_map_covers_engine_host_keys():
-    """EngineHost 契约的服务键全部有旧键映射（P3 投影的前提）。"""
+    """EngineHost 契约仍受支持的服务键全部有旧键映射（P3 投影的前提）。
+
+    get_model_config / get_provider_config / get_tools_schema 已退役：自家插件
+    已全部迁移到命名空间能力（model.config / model.schema），投影不再提供。
+    """
     from app.plugins.capabilities import catalog
 
     expected = {
-        "get_model_config",
-        "get_provider_config",
         "get_tool_executor",
         "get_agent_manager",
         "get_agent_prompt",
-        "get_tools_schema",
         "set_workdir",
         "get_workdir",
         "conversation_stack",
@@ -102,10 +108,12 @@ def test_expand_wildcards_and_aliases():
         "tool.read",
         "tool.inject",
         "tool.execute",
+        "tool.register",
+        "tool.unregister",
     }
     assert catalog.expand(["*"]) == set(catalog.CATALOG)
-    # 旧扁平名当别名：存量插件写 ["lsp"] 仍可用
-    assert catalog.expand(["lsp"]) == {"lsp.query"}
+    # A3 时代扁平名别名已退役：不再自动展开，原样保留（池构建时不可用）
+    assert catalog.expand(["lsp"]) == {"lsp"}
     assert catalog.expand([]) == frozenset()
     assert catalog.expand(["session.read", "session.read"]) == {"session.read"}
 
@@ -121,12 +129,13 @@ def test_unknown_declared_flags_typos_and_stale_ids():
     """加载期语义校验：typo / 已删除能力 / 不存在的组通配被挑出。"""
     from app.plugins.capabilities import catalog
 
-    # 正常 ID + 别名 + 通配 + 组通配全部放行
-    assert catalog.unknown_declared(["model.config", "lsp", "*", "ui.*"]) == []
-    # typo 与已删除能力（ui.control 已从 catalog 移除）
-    assert catalog.unknown_declared(["session.Read", "ui.control"]) == [
+    # 正常 ID + 通配 + 组通配全部放行（A3 扁平名别名已退役，lsp 不再放行）
+    assert catalog.unknown_declared(["model.config", "*", "ui.*"]) == []
+    # typo、已删除能力（ui.control 已从 catalog 移除）与已退役扁平名
+    assert catalog.unknown_declared(["session.Read", "ui.control", "lsp"]) == [
         "session.Read",
         "ui.control",
+        "lsp",
     ]
     # 不存在的组
     assert catalog.unknown_declared(["badgroup.*"]) == ["badgroup.*"]

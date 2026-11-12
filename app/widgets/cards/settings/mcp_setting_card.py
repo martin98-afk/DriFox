@@ -30,7 +30,6 @@ from PyQt5.QtWidgets import (
 from qfluentwidgets import (
     BodyLabel,
     CardWidget,
-    ComboBox,
     ExpandSettingCard,
     FluentIcon,
     InfoBar,
@@ -63,13 +62,7 @@ from app.utils.design_tokens import (
 from app.utils.utils import get_font_family_css
 from app.widgets.elided_label import _ElidedLabel
 from app.widgets.status_dot import StatusDot
-
-
-class NoWheelComboBox(ComboBox):
-    """禁用滚轮切换的普通下拉框（防止误触）"""
-
-    def wheelEvent(self, event):
-        event.ignore()
+from app.widgets.cards.settings.settings_form_widgets import NoWheelComboBox, _make_row
 
 
 # ═══════════════════════════════════════════════════════════
@@ -80,13 +73,14 @@ EDIT_CARD_STYLE = CardStyles.edit_card_style()
 
 
 # ═══════════════════════════════════════════════════════════
-# 连接状态指示灯配色（四态）
+# 连接状态指示灯配色（五态：探活可把已关闭的服务标成「授权失效」）
 # ═══════════════════════════════════════════════════════════
 
 _STATUS_STYLE = {
     MCPState.CONNECTING: ("#f59e0b", "正在启动..."),
     MCPState.CONNECTED: ("#22c55e", "已连接"),
     MCPState.FAILED: ("#ef4444", "启动失败"),
+    MCPState.AUTH_EXPIRED: ("#ef4444", "授权失效"),
     MCPState.DISABLED: ("#000000", "已关闭"),
 }
 
@@ -180,18 +174,6 @@ def _resolve_mcp_server_icon(server_data: dict):
         return QIcon(str(icon_path)) if icon_path else None
     except Exception:
         return None
-
-
-def _make_row(label_text: str, widget: QWidget, label_width: int = 70) -> QHBoxLayout:
-    """构造一行：右对齐标签 + 输入控件"""
-    row = QHBoxLayout()
-    row.setSpacing(8)
-    label = BodyLabel(label_text)
-    label.setFixedWidth(label_width)
-    label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-    row.addWidget(label)
-    row.addWidget(widget, 1)
-    return row, label
 
 
 # ═══════════════════════════════════════════════════════════
@@ -836,12 +818,12 @@ class MCPServerRow(CardWidget):
             self.authorizeRequested.emit(self._name)
 
     def set_status(self, state: str, error: str = "", tool_count: int = 0):
-        """更新连接状态指示灯（四态）
+        """更新连接状态指示灯（五态）
 
-        启动中 → 黄色，启动失败 → 红色，已关闭 → 黑色，成功 → 绿色。
+        启动中 → 黄色，启动失败 / 授权失效 → 红色，已关闭 → 黑色，成功 → 绿色。
 
         Args:
-            state: MCPState 之一（connecting / connected / failed / disabled）
+            state: MCPState 之一（connecting / connected / failed / auth_expired / disabled）
             error: 失败原因（作为 tooltip 展示）
             tool_count: 已发现的工具数量
         """
@@ -850,7 +832,7 @@ class MCPServerRow(CardWidget):
             color = _disabled_dot_color()
         elif state == MCPState.CONNECTED and tool_count:
             tip = f"已连接 · {tool_count} 个工具"
-        elif state == MCPState.FAILED and error:
+        elif state in (MCPState.FAILED, MCPState.AUTH_EXPIRED) and error:
             tip = error if len(error) <= 400 else error[:400] + "..."
 
         self._current_state = state
@@ -1346,6 +1328,9 @@ class MCPListSettingCard(ExpandSettingCard):
 
     def _on_authorize_done(self, name: str, ok: bool, error: str, cancelled: bool = False):
         """授权完成回调（主线程）：更新按钮态 + 提示 + 触发热连接"""
+        if ok:
+            # 刚授权的服务不能再挂着上一轮的「授权失效」，否则红点要等 TTL 到期才消
+            self._clear_probe(name)
         row = self._server_rows.get(name)
         if row is not None:
             row.set_authorized(ok)
@@ -1437,6 +1422,9 @@ class MCPListSettingCard(ExpandSettingCard):
 
     def _on_unbind_done(self, name: str, ok: bool, error: str):
         """解绑完成回调（主线程）：更新按钮态 + 提示"""
+        if ok:
+            # 凭证已清除，旧的「曾是授权失效」结论过期，等下一轮探活重判
+            self._clear_probe(name)
         row = self._server_rows.get(name)
         if row is not None:
             row.set_authorized(False)
@@ -1750,11 +1738,15 @@ class MCPListSettingCard(ExpandSettingCard):
                     continue
                 try:
                     st = status_map.get(name)
-                    if not global_on or not cfg_enabled.get(name, True):
-                        # 用户主动关闭（全局或单个）→ 黑色
+                    if not global_on or st is None:
+                        # 全局关 / 管理器无记录 → 黑色
                         row.set_status(MCPState.DISABLED)
-                    elif st is None:
-                        # 已启用但管理器还没有任何记录 → 尚未开始启动
+                    elif st.get("state") == MCPState.AUTH_EXPIRED:
+                        # 授权失效优先于「已关闭」：用户关掉的 OAuth 服务也可能
+                        # token 早已过期，必须在打开前就看见，否则一开就连不上
+                        row.set_status(MCPState.AUTH_EXPIRED, st.get("error", ""))
+                    elif not cfg_enabled.get(name, True):
+                        # 用户主动关闭 → 黑色
                         row.set_status(MCPState.DISABLED)
                     else:
                         row.set_status(
@@ -1864,8 +1856,30 @@ class MCPListSettingCard(ExpandSettingCard):
         """
         if self.isExpand and not self.isHidden():
             self._status_timer.start()
+            self._kick_probe()
         else:
             self._status_timer.stop()
+
+    def _kick_probe(self):
+        """展开可见时触发一次授权探活。
+
+        管理器内部按 TTL（10 分钟）与「已有批次在跑」去重，所以本方法可以
+        被展开/显示事件反复调用，不会重复发请求。全局 MCP 关闭时不探。
+        """
+        try:
+            if not self.cfg.mcp_enabled.value:
+                return
+            self._get_mcp_manager().probe_servers_background()
+        except Exception as e:
+            logger.debug(f"[MCP] 触发探活失败: {e}")
+
+    def _clear_probe(self, name: str):
+        """清掉某个服务的探活结论（重新授权/解绑后立即失效，不等 TTL）。"""
+        try:
+            self._get_mcp_manager().clear_probe(name)
+            self._refresh_status_dots()
+        except Exception as e:
+            logger.debug(f"[MCP] 清除探活结果失败 {name}: {e}")
 
     def setExpand(self, isExpand: bool):
         super().setExpand(isExpand)

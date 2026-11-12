@@ -149,9 +149,16 @@ your-plugin/
 ```bash
 # 本包自检（结构/引用/evals 完整性）
 python scripts/check_skill_package.py .
+# manifest 字段表是否落后于宿主 schema（文档漂移检测）
+python scripts/check_manifest_fields.py
+
+# 插件自身验证（不依赖宿主启动；删过函数/改过模块名必跑）
+python scripts/check_plugin_imports.py ~/.drifox/plugins/<name>
+python -m py_compile ~/.drifox/plugins/<name>/ui/*.py
 
 # 插件完整验证（在 drifox-plugins clone 中，发布前必做）
-python tools/validate_plugins.py && python tools/generate_marketplace.py
+python tools/validate_plugins.py plugins/<name> --strict
+# marketplace.json 交给 CI 生成，不要手改提交（详见 references/publishing.md）
 ```
 
 细节（热更新延迟表、检查项清单、除错流程）→ references/testing.md。

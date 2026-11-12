@@ -953,6 +953,9 @@ class PluginHostService(QObject):
                             relevant_changes, current_prefixes, plugin_name
                         )
                         if all_components:
+                            # __manifest__ 覆盖全组件：同批再派发 ui/agents 等具体组件等于白跑
+                            # 一遍（ui 会被完整 import 两次），见 _coalesce_manifest_dispatch。
+                            all_components = self._coalesce_manifest_dispatch(all_components, plugin_name)
                             # 按优先级排序（agents 先于 commands 先于 skills 等）
                             ordered = sorted(all_components, key=lambda c: self._COMPONENT_ORDER.get(c, 99))
                             for component in ordered:
@@ -1004,6 +1007,8 @@ class PluginHostService(QObject):
                                         new_name, relevant_changes
                                     )
                                     if _identified:
+                                        # 同批含 __manifest__ → 全量分支已覆盖，丢弃其余组件
+                                        _identified = self._coalesce_manifest_dispatch(_identified, new_name)
                                         for _comp in _identified:
                                             if _is_duplicate(new_name, _comp):
                                                 continue
@@ -1063,6 +1068,8 @@ class PluginHostService(QObject):
                                         new_name, relevant_changes
                                     )
                                     if _identified:
+                                        # 同批含 __manifest__ → 全量分支已覆盖，丢弃其余组件
+                                        _identified = self._coalesce_manifest_dispatch(_identified, new_name)
                                         for _comp in _identified:
                                             if _is_duplicate(new_name, _comp):
                                                 continue
@@ -1382,6 +1389,27 @@ class PluginHostService(QObject):
             return []
         return sorted(components, key=lambda c: self._COMPONENT_ORDER.get(c, 99))
 
+    @staticmethod
+    def _coalesce_manifest_dispatch(components, plugin_name: str = ""):
+        """同批变更含 __manifest__ 时归并为一次全量派发
+
+        __manifest__ 分支会遍历该插件**全部**已声明组件逐个重载（见
+        _reload_single_plugin），同批再派发 ui/agents 等具体组件等于白跑一遍。
+        实测 29 文件批量保存同时命中 ui+__manifest__：ui 被完整 import 两次
+        （rmtree __pycache__ + exec 整个 ui 包），主线程双倍占用。
+
+        Returns:
+            与入参同类型（set 或 list）；含 __manifest__ 时只保留它
+        """
+        if "__manifest__" not in components or len(components) <= 1:
+            return components
+        if plugin_name:
+            logger.debug(
+                f"[PluginHost] 插件 [{plugin_name}] 同批含 __manifest__，"
+                f"归并派发（丢弃 {sorted(c for c in components if c != '__manifest__')}）"
+            )
+        return ["__manifest__"] if isinstance(components, list) else {"__manifest__"}
+
     def _on_hot_reload_requested(self, plugin_name: str, component: str):
         """主线程中执行的插件热更新
 
@@ -1639,18 +1667,29 @@ class PluginHostService(QObject):
 
     def _do_single_reload(self, plugin_name: str, component: str) -> dict:
         """执行单条增量重载（不含 emit / 广播 / 索引重建，由 _flush_reload_intents 统一处理）"""
-        if plugin_name == self._NEW_PLUGIN_SENTINEL:
-            # 新增插件：只扫描这一个插件目录，增量加载其组件。
-            # 不再"已注册则降级为空组件跳过"——watch 线程可能在 emit 前
-            # 对全新安装的插件做过 rescan 注册（组件尚未加载），此时
-            # 降级为空组件（""）会全 False 跳过，导致重装后的插件组件
-            # 永不生效。_reload_new_plugin 对已注册插件幂等（组件错重载，
-            # UI/LSP 先卸载后加载），可直接复用。
-            return self._reload_new_plugin(component)
-        elif plugin_name:
-            return self._reload_single_plugin(plugin_name, component)
-        else:
-            return self.reload_plugin_subsystems()
+        t0 = time.perf_counter()
+        try:
+            if plugin_name == self._NEW_PLUGIN_SENTINEL:
+                # 新增插件：只扫描这一个插件目录，增量加载其组件。
+                # 不再"已注册则降级为空组件跳过"——watch 线程可能在 emit 前
+                # 对全新安装的插件做过 rescan 注册（组件尚未加载），此时
+                # 降级为空组件（""）会全 False 跳过，导致重装后的插件组件
+                # 永不生效。_reload_new_plugin 对已注册插件幂等（组件错重载，
+                # UI/LSP 先卸载后加载），可直接复用。
+                return self._reload_new_plugin(component)
+            elif plugin_name:
+                return self._reload_single_plugin(plugin_name, component)
+            else:
+                return self.reload_plugin_subsystems()
+        finally:
+            # 热重载性能定位：主线程同步执行的整段后端耗时（模块 import / 解析 /
+            # 注册表重建），是热重载卡顿的第一段；广播段另见 main_widget。
+            elapsed_ms = (time.perf_counter() - t0) * 1000
+            if elapsed_ms >= 20.0:
+                logger.info(
+                    f"[HotReload-Perf] 后端重载 {plugin_name or '(全量)'}"
+                    f" / {component or '(全部组件)'} 耗时 {elapsed_ms:.0f}ms"
+                )
 
     def _rebuild_watcher_prefixes(self):
         """重建 watchfiles 线程的插件路径索引（主线程调用）"""
@@ -2227,6 +2266,11 @@ class PluginHostService(QObject):
         # result / result_keys 基于 KNOWN_COMPONENTS 动态生成：新增组件类型零改动（Task 7）
         result: dict = {k: (0 if k == "agents" else False) for k in _KC}
         result_keys = tuple(_KC)
+        # 热重载性能定位：rescan（磁盘扫描/manifest 解析）与 purge（模块缓存清理）
+        # 都跑在主线程，与组件分派一起构成后端耗时；异常路径也保留已采集值。
+        _t_start = time.perf_counter()
+        _t_rescan_done = _t_start
+        _t_purge_done = _t_start
 
         try:
             from app.plugins.managers.plugin_manager import PluginManager
@@ -2255,6 +2299,7 @@ class PluginHostService(QObject):
             )
 
             pm.rescan_plugin(plugin_name)
+            _t_rescan_done = time.perf_counter()
 
             # 1.5 通用模块缓存清理（热重载机制通用化）：插件可在 plugin.json 声明
             # "module_prefixes"（如 assistant_hub 手动 importlib 注册的 assistant_hub_core.*），
@@ -2272,6 +2317,7 @@ class PluginHostService(QObject):
                     )
 
             plugin = pm.get_plugin(plugin_name)
+            _t_purge_done = time.perf_counter()
             if not plugin:
                 # 插件已被删除（目录或 manifest 已不存在）—— 删除清理段并入 reloader 分派
                 # 仅清理该插件实际含有的组件（按 kernel.KNOWN_COMPONENTS 优先级遍历）
@@ -2450,6 +2496,15 @@ class PluginHostService(QObject):
                 f"providers={result.get('providers', False)}, "
                 f"team_templates={result.get('team_templates', False)}"
             )
+            _t_end = time.perf_counter()
+            if (_t_end - _t_start) * 1000 >= 20.0:
+                logger.info(
+                    f"[HotReload-Perf] {plugin_name} 后端分段: "
+                    f"rescan={(_t_rescan_done - _t_start) * 1000:.0f}ms "
+                    f"purge={(_t_purge_done - _t_rescan_done) * 1000:.0f}ms "
+                    f"组件分派={(_t_end - _t_purge_done) * 1000:.0f}ms "
+                    f"合计={(_t_end - _t_start) * 1000:.0f}ms"
+                )
         except Exception as e:
             logger.error(f"[PluginHost] Failed to reload plugin '{plugin_name}': {e}")
 

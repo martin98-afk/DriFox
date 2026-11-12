@@ -308,10 +308,13 @@ def run_outer(runs: int) -> dict:
 
 
 if __name__ == "__main__":
+    bc.warn_if_drifox_running("startup")
     parser = argparse.ArgumentParser()
     parser.add_argument("--inner", action="store_true")
     parser.add_argument("--runs", type=int, default=3)
+    parser.add_argument("--tag", default=None, help="[Y2] 结果文件可选举名；未传自动加时间戳后缀")
     args = parser.parse_args()
+    bc.set_result_tag(args.tag)
     if args.inner:
         run_inner()
     else:

@@ -13,6 +13,8 @@
 
 from typing import Any, Dict, List, Optional, Tuple
 
+import time
+
 from loguru import logger
 from PyQt5.QtCore import QObject, QTimer
 
@@ -174,6 +176,8 @@ class SubAgentRunBridge(QObject):
             "context": "",
             "finished": False,
             "success": True,
+            # 计时基线（优先 executor 真起点）：迁卡后新行按此回拨，耗时连续不归零
+            "started_at": float(getattr(executor, "start_time", None) or time.time()),
         }
 
         # 执行器实时信号：工具计数与上下文用量（连接随执行器销毁自动失效）
@@ -286,7 +290,9 @@ class SubAgentRunBridge(QObject):
         if panel is None:
             return None
         try:
-            panel.add_task(task_id, rec["agent_name"], rec["description"], rec["model_name"])
+            started_at = rec.get("started_at")
+            elapsed_seconds = max(0, int(time.time() - started_at)) if started_at else 0
+            panel.add_task(task_id, rec["agent_name"], rec["description"], rec["model_name"], elapsed_seconds)
             if rec["tool_count"]:
                 panel.set_task_tool_count(task_id, rec["tool_count"])
             if rec["context"]:

@@ -180,9 +180,16 @@ def run(rounds: int, chunks: int, render: bool = True) -> dict:
 
 
 if __name__ == "__main__":
+    bc.warn_if_drifox_running("chat_pipeline")
     ap = argparse.ArgumentParser()
     ap.add_argument("--rounds", type=int, default=30)
     ap.add_argument("--chunks", type=int, default=40)
     ap.add_argument("--no-render", action="store_true", help="对照组：只建 MessageCard 不走 CodeWebViewer 渲染管线")
+    ap.add_argument("--tag", default=None, help="[Y2] 结果文件可选举名；未传自动加时间戳后缀")
     args = ap.parse_args()
+    bc.set_result_tag(args.tag)
+    if args.rounds < 10:
+        # [Y3] 采样节奏 (i+1)%5==0 or i==0：rounds<10 时只有 1-2 个采样点，
+        # 线性回归斜率/R² 统计不可信
+        print("[WARN] rounds<10：采样点不足，斜率/R² 统计不可信，仅验证跑通", flush=True)
     run(args.rounds, args.chunks, render=not args.no_render)

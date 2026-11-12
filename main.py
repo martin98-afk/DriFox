@@ -170,6 +170,54 @@ if os.name == "nt":
         pass  # 捕获器失败绝不阻塞启动
 
 
+def _maybe_create_webengine_preheat(app) -> None:
+    """[PERF L4] 首帧后缓拉 WebEngine 预热视图（与真实渲染互斥）。
+
+    原行为：_deferred_startup 启动期立即创建隐藏 QWebEngineView——Chromium
+    子进程拉起 + GPU 上下文 + 15-30MB 空白 renderer，启动内存峰值直接垫高
+    （-60~90MB 量级）且与首帧渲染争 CPU。
+    新行为：首窗 show 后 1.5s 才创建。互斥规则：
+    - 真实渲染（欢迎卡/首条消息）先发生：任意 QWebEngineView 实例已存在 →
+      Chromium 基础设施已就绪，预热目的已达成 → 跳过创建
+    - 预热先创建：真实渲染复用同一 Chromium 基础设施（browser process 级
+      共享），两者互不冲突
+    保底语义不变：空闲时仍预热，消除首次 WebEngine 卡顿的目的保留。5s 后仍
+    销毁空白 renderer（无保留价值），释放时机从创建时刻顺延。
+    """
+    try:
+        from loguru import logger
+
+        from PyQt5.QtCore import QTimer
+        from PyQt5.QtWebEngineWidgets import QWebEngineView
+        from PyQt5.QtWidgets import QApplication
+
+        # 互斥检测：真实渲染已发生（任意 WebEngineView 实例在册）→ 跳过
+        if any(isinstance(w, QWebEngineView) for w in QApplication.allWidgets()):
+            logger.info("[DeferredStartup] 检测到真实 WebEngine 视图已存在，预热跳过（互斥）")
+            return
+
+        _preheat_view = QWebEngineView()
+        _preheat_view.setHtml("<html><body></body></html>")
+        _preheat_view.hide()
+        # 保持引用，防止 GC 回收导致进程退出
+        app._preheat_webengine = _preheat_view
+
+        # [MEM] 预热完成后销毁视图本身：Chromium 基础设施（browser process /
+        # profile）此时已初始化完毕且随 app 级 profile 常驻，空白 renderer
+        # 约占 15-30MB 无保留价值。延时 5s（自创建时刻起）。
+        def _release_preheat():
+            try:
+                _preheat_view.deleteLater()
+                app._preheat_webengine = None
+            except Exception:
+                pass
+
+        QTimer.singleShot(5000, _release_preheat)
+        logger.debug("[DeferredStartup] WebEngine 预热视图已创建（首帧后 1.5s 缓拉，5s 后释放）")
+    except Exception:
+        logger.exception("[DeferredStartup] WebEngine 预热失败（非致命）")
+
+
 def main():
     """启动 LLM Chatter"""
 
@@ -457,34 +505,14 @@ def main():
         except Exception:
             logger.exception("[DeferredStartup] prewarm_markdown_block_viewer 失败")
 
-        # [PERF] 预热 WebEngine Chromium 进程：创建隐藏 QWebEngineView 并加载空白页，
-        # 让 Chromium 浏览器进程/GPU 进程提前初始化。欢迎卡片创建 QWebEngineView 时
-        # 可复用已就绪的进程基础设施，避免首帧后突发 200-500ms 主线程阻塞。
-        try:
-            from PyQt5.QtWebEngineWidgets import QWebEngineView
-
-            _preheat_view = QWebEngineView()
-            _preheat_view.setHtml("<html><body></body></html>")
-            _preheat_view.hide()
-            # 保持引用，防止 GC 回收导致进程退出
-            app._preheat_webengine = _preheat_view
-
-            # [MEM] 预热完成后销毁视图本身：Chromium 基础设施（browser process /
-            # profile）此时已初始化完毕且随 app 级 profile 常驻，空白 renderer
-            # 约占 15-30MB 无保留价值。延时 5s：覆盖启动窗口，之后首张真实卡片
-            # 的 renderer 已就位，销毁无副作用。
-            def _release_preheat():
-                try:
-                    _preheat_view.deleteLater()
-                    app._preheat_webengine = None
-                except Exception:
-                    pass
-
-            QTimer.singleShot(5000, _release_preheat)
-            logger.debug("[DeferredStartup] WebEngine 预热视图已创建（5s 后释放）")
-        except Exception:
-            logger.exception("[DeferredStartup] WebEngine 预热失败（非致命）")
-        _mark("webengine_preheat")
+        # [PERF L4] 预热 WebEngine Chromium 进程：原实现启动期即创建隐藏
+        # QWebEngineView（Chromium 子进程拉起 + GPU 上下文 + 15-30MB 空白
+        # renderer），启动内存峰值直接垫高且与首帧渲染争 CPU。改首窗 show 后
+        # 1.5s 缓拉；真实渲染（欢迎卡/首条消息）先行则跳过（互斥——预热目的
+        # 已达成），预热先创建时真实渲染复用同一 Chromium 基础设施，互不冲突。
+        # 保底语义不变：空闲时仍预热，消除首次 WebEngine 卡顿的目的保留。
+        QTimer.singleShot(1500, lambda: _maybe_create_webengine_preheat(app))
+        _mark("webengine_preheat(deferred 1.5s)")
 
         # 后台同步 models.dev 最新模型元数据（不阻塞 UI）
         def _sync_models_dev():
@@ -797,6 +825,16 @@ def main():
             except Exception:
                 logger.exception("[Startup] skills 索引预热失败（非致命）")
 
+            # [T11] card_viewers/markdown 级联预热：import 级联下沉后该树退出
+            # 启动路径，首卡渲染（首个 ChatWindow 的 markdown 渲染链）时才冷导入。
+            # 后台线程预填充 sys.modules，首卡渲染时全命中，不把下沉转嫁为首卡卡顿
+            # （照本函数 mcp/skills 预热先例；与主线程 import 在锁上互让，时序上
+            # 预热先跑）。
+            try:
+                import app.widgets.card_viewers  # noqa: F401
+                import markdown  # noqa: F401
+            except Exception:
+                logger.exception("[Startup] card_viewers/markdown 预导入失败（非致命）")
         QTimer.singleShot(0, lambda: threading.Thread(target=_preload_heavy_imports, daemon=True, name="heavy-import-preload").start())
         # [T24 R2] 窗口就绪 → 登记到共享状态；若 import 窗口期已有二次启动请求
         # （_on_show_requested 记了 pending），此处立即补激活，不再静默丢失。
@@ -888,6 +926,19 @@ def main():
     # 调度：主窗口先创建 → 再弹窗 → 最后执行延迟启动
     QTimer.singleShot(0, _show_popup)
     QTimer.singleShot(0, _deferred_startup)
+    # [PERF #37 条 3 分支 B] 已配置同步的用户「进软件就开始同步」：首帧稳定后
+    # 8s 自动启用 ConfigSyncService（原唯一入口是点设置才构造的 GiteeCard，
+    # 冷启动不点设置永不自动同步）。未绑定零网络；与卡片 _auto_enable_sync
+    # 共用 auto_enable_if_bound 幂等（_state 判重），绝不双拉线程。
+    def _auto_start_config_sync():
+        try:
+            from app.core.sync.config_sync import auto_enable_if_bound
+
+            auto_enable_if_bound()
+        except Exception as e:
+            logger.warning(f"[DeferredStartup] 自动启用配置同步失败（非致命）: {e}")
+
+    QTimer.singleShot(8000, _auto_start_config_sync)
 
     # ── UI 测试服务（默认关）：DRIFOX_UI_TEST_SERVER=host:port 开启（M2）──
     # 开启时 daemon 线程起 JSON-RPC 服务并置 ARM 总闸；打包产物无 tools/，

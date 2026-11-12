@@ -39,6 +39,9 @@ REFRESH_INTERVAL_S = 24 * 3600
 # 健康检查周期（秒）：聊天端点 ping 兕底探测，1h 一次（列表刷新仍是 24h）
 HEALTH_INTERVAL_S = 3600
 TICK_MS = 5 * 60 * 1000
+# 探活候选模型数：最便宜的模型偶发不可用（下线 / 限流 / 网关路由缺失），
+# 只试一个会把整家误判成红灯；按价格升序备 3 个，命中一个即停
+PROBE_MODEL_LIMIT = 3
 
 # 配置键（与服务商配置同键名，随 saved_providers 落盘）
 KEY_AUTO_REFRESH = "自动刷新模型"
@@ -306,6 +309,8 @@ class ModelRefreshService(QObject):
             str(info.get("API_KEY", "") or ""),
             provider_name,
             str(info.get("认证方式", "") or "bearer"),
+            # 能力类型决定过滤分流：非 chat 全量放行（生成类模型不被文本规则误滤）
+            str(info.get("capability_type", "chat") or "chat"),
         )
         return list(filtered), status
 
@@ -317,11 +322,13 @@ class ModelRefreshService(QObject):
         return STATUS_UNREACHABLE
 
     @staticmethod
-    def _pick_probe_model(info: Dict[str, Any]) -> str:
-        """探活模型选择：「模型列表」中输入价（$/M，models.dev cost.input）最低者优先。
+    def _pick_probe_models(info: Dict[str, Any], limit: int = PROBE_MODEL_LIMIT) -> List[str]:
+        """探活候选模型：「模型列表」中输入价（$/M，models.dev cost.input）升序取前 limit 个。
 
         ping 只需验证凭据/端点/路由通，用最便宜的模型把探测成本压到最低；
-        免费（input=0）天然胜出。候选必须来自「模型列表」（网关按模型路由，
+        免费（input=0）天然胜出。单个最便宜模型偶发不可用（下线 / 限流 /
+        网关路由缺失）会把整家误判红，故按价格升序多备几个候选，探测侧
+        依次回退、命中即停。候选必须来自「模型列表」（网关按模型路由，
         列表外模型会 404 误报）。无价格数据 / 插件未声明 models_dev_id /
         无列表 → 回退「模型名称」（行为不变）。只读 models.dev 本地缓存
         （allow_network=False，毫秒级，任意线程安全）。
@@ -329,7 +336,7 @@ class ModelRefreshService(QObject):
         current = str(info.get("模型名称", "") or "").strip()
         models = info.get(KEY_MODELS)
         if not isinstance(models, list) or not models:
-            return current
+            return [current] if current else []
         try:
             from app.core.modelmeta.models_dev_sync import load_dynamic_models
             from app.plugins.registries.provider_registry import ProviderRegistry
@@ -337,12 +344,12 @@ class ModelRefreshService(QObject):
             p = ProviderRegistry.get_instance().get(str(info.get("provider_name", "") or ""))
             dev_id = str(getattr(p, "models_dev_id", "") or "") if p is not None else ""
             if not dev_id:
-                return current
+                return [current] if current else []
             result = load_dynamic_models(allow_network=False)
             partitioned = getattr(result, "model_capabilities_partitioned", None) or {}
             per_provider = partitioned.get(dev_id) or {}
-            best_model, best_price = "", None
-            for m in models:
+            priced: List[Tuple[float, int, str]] = []
+            for order, m in enumerate(models):
                 name = str(m or "").strip()
                 if not name:
                     continue
@@ -350,38 +357,36 @@ class ModelRefreshService(QObject):
                 price = (caps.get("cost") or {}).get("input")
                 if not isinstance(price, (int, float)):
                     continue  # 无价格数据：不参与排序（None 不误当 0 价）
-                if best_price is None or price < best_price:
-                    best_model, best_price = name, price
-            return best_model or current
+                priced.append((float(price), order, name))
+            if not priced:
+                return [current] if current else []
+            priced.sort(key=lambda item: (item[0], item[1]))
+            picked: List[str] = []
+            for _price, _order, name in priced:
+                if name not in picked:
+                    picked.append(name)
+                if len(picked) >= max(1, int(limit)):
+                    break
+            return picked
         except Exception:
-            return current
+            return [current] if current else []
 
     def _probe_health(self, info: Dict[str, Any], config_id: str) -> str:
         """对聊天端点发 max_tokens=1 真实请求探测连通性。
 
         探测优先级：health_probe（插件内换凭据真探测）→ models_hook（列表
         语义降级）→ REST（bearer/anthropic/none 直连）。
-        探活模型自动挑「模型列表」内输入价最低者（_pick_probe_model），
-        并以「探活模型」键注入钩子 config 供插件消费。
+        探活模型按「模型列表」输入价升序取前 PROBE_MODEL_LIMIT 个
+        （_pick_probe_models），逐个探测：任一返回 ok 即停、不再试剩余；
+        auth_failed 也立即停（凭据/余额问题换模型无意义）。
+        钩子分支以「探活模型」键逐个注入 config 供插件消费。
         bce 签名类无法本地构造签名 → 直接 unreachable。
         """
         provider_name = str(info.get("provider_name", "") or "")
-        probe_model = self._pick_probe_model(info)
+        probe_models = self._pick_probe_models(info)
         probe_hook = self._resolve_health_probe_hook(provider_name)
         if probe_hook is not None:
-            probe_info = dict(info)
-            if probe_model:
-                probe_info["探活模型"] = probe_model
-            try:
-                status = str(probe_hook(probe_info) or "").strip()
-            except Exception as e:
-                logger.info(f"[ModelRefresh] health_probe 钩子失败 config_id={config_id}: {e}")
-                return STATUS_UNREACHABLE
-            return (
-                status
-                if status in (STATUS_OK, STATUS_EMPTY, STATUS_AUTH_FAILED, STATUS_UNREACHABLE)
-                else STATUS_UNREACHABLE
-            )
+            return self._probe_with_hook(probe_hook, info, probe_models, config_id)
         hook = self._resolve_models_hook(provider_name)
         if hook is not None:
             try:
@@ -396,12 +401,37 @@ class ModelRefreshService(QObject):
             return STATUS_UNREACHABLE
         api_url = str(info.get("API_URL", "") or "").rstrip("/")
         api_key = str(info.get("API_KEY", "") or "")
-        model = probe_model or str(info.get("模型名称", "") or "").strip()
-        if not api_url or not model:
+        if not api_url or not probe_models:
             return STATUS_UNREACHABLE
         if not api_key and auth != "none":
             return STATUS_UNREACHABLE
+        return self._probe_rest(api_url, api_key, auth, probe_models)
 
+    def _probe_with_hook(
+        self, probe_hook, info: Dict[str, Any], probe_models: List[str], config_id: str
+    ) -> str:
+        """逐个候选模型调插件 health_probe：ok 即停，auth_failed 亦停（凭据问题换模型无意义）。"""
+        last_status = STATUS_UNREACHABLE
+        for model in probe_models or [""]:
+            probe_info = dict(info)
+            if model:
+                probe_info["探活模型"] = model
+            try:
+                status = str(probe_hook(probe_info) or "").strip()
+            except Exception as e:
+                logger.info(f"[ModelRefresh] health_probe 钩子失败 config_id={config_id}: {e}")
+                return STATUS_UNREACHABLE
+            if status not in (STATUS_OK, STATUS_EMPTY, STATUS_AUTH_FAILED, STATUS_UNREACHABLE):
+                status = STATUS_UNREACHABLE
+            if status == STATUS_OK:
+                return STATUS_OK
+            if status == STATUS_AUTH_FAILED:
+                return STATUS_AUTH_FAILED
+            last_status = status
+        return last_status
+
+    def _probe_rest(self, api_url: str, api_key: str, auth: str, probe_models: List[str]) -> str:
+        """逐个候选模型打聊天端点：ok 即停，auth_failed 亦停。"""
         import requests
 
         headers: Dict[str, str] = {}
@@ -410,6 +440,20 @@ class ModelRefreshService(QObject):
         elif auth == "anthropic":
             headers["x-api-key"] = api_key
             headers["anthropic-version"] = "2023-06-01"
+
+        last_status = STATUS_UNREACHABLE
+        for model in probe_models:
+            status = self._probe_rest_model(api_url, auth, headers, model)
+            if status == STATUS_OK:
+                return STATUS_OK
+            if status == STATUS_AUTH_FAILED:
+                return STATUS_AUTH_FAILED
+            last_status = status
+        return last_status
+
+    def _probe_rest_model(self, api_url: str, auth: str, headers: Dict[str, str], model: str) -> str:
+        """单模型探测（双候选路径 + max_completion_tokens 兼容重试），返回四态之一。"""
+        import requests
 
         body: Dict[str, Any] = {
             "model": model,

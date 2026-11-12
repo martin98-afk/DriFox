@@ -246,10 +246,13 @@ def setup_logging(log_dir: Path, mem_diag_enabled: bool = False) -> None:
     # enqueue=True：写盘转 loguru 内部后台线程，调用线程只格式化入队。
     # 背景：主线程槽内高频 logger.info（工具结果/流式节拍）同步写 all.log，
     # DEBUG 全量 + 10MB 轮转下每条都摊文件 IO，累积成可感卡顿。
+    # retention 判定线（与分系统日志对齐 7 days）：10MB 轮转 × 7 天留存，
+    # 目录总量 ≤50MB 有界（dev 基线 13.7MB）——长跑无上限累积的最后一道。
     _add_sink(
         "all.log",
         sink=log_dir / "all.log",
         rotation="10 MB",
+        retention="7 days",
         level=sink_level,
         format=LOG_FORMAT,
         enqueue=True,
@@ -269,11 +272,14 @@ def setup_logging(log_dir: Path, mem_diag_enabled: bool = False) -> None:
         )
 
     # 单独的内存诊断日志文件
+    # retention 同 all.log：7 days 对齐分系统日志，防止长跑 mem_diag 轮转
+    # 文件无限累积（目录总量判定线 ≤50MB，dev 基线 13.7MB）
     if mem_diag_enabled:
         _add_sink(
             "mem_diag.log",
             sink=log_dir / "mem_diag.log",
             rotation="10 MB",
+            retention="7 days",
             level=sink_level,
             format=LOG_FORMAT,
             filter=lambda r: "[MEM]" in r["message"],

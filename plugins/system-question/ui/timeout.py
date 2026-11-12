@@ -158,19 +158,23 @@ class QuestionTimeoutController(QObject):
     # ── 配置 ──
 
     @staticmethod
-    def _read_policy() -> Dict[str, Any]:
-        """读本插件自己的配置（action / sec / model）。"""
-        try:
-            from app.plugins.managers.plugin_config_store import PluginConfigStore
+    def _read_policy(pool: Any = None) -> Dict[str, Any]:
+        """读本插件自己的配置（action / sec / model）。
 
-            store = PluginConfigStore()
-            action = str(store.get(_CONFIG_PLUGIN, "question_timeout_action") or "none").strip()
-            raw_sec = store.get(_CONFIG_PLUGIN, "question_timeout_sec")
+        走插件配置能力（plugin.config.read）：取值优先级（env → 存储值 → schema
+        默认）与设置卡回显由宿主统一，插件不再直连 PluginConfigStore。
+        """
+        read = pool.get("plugin.config.read") if hasattr(pool, "get") else None
+        if not callable(read):
+            logger.warning("[system-question] 能力池缺少 plugin.config.read，按不超时处理")
+            return {"action": "none", "sec": 120, "model": ""}
+        try:
+            action = str(read("question_timeout_action", "none") or "none").strip()
             try:
-                sec = int(float(raw_sec))
+                sec = int(float(read("question_timeout_sec", 120)))
             except (TypeError, ValueError):
                 sec = 120
-            model = str(store.get(_CONFIG_PLUGIN, "question_timeout_model") or "").strip()
+            model = str(read("question_timeout_model", "") or "").strip()
         except Exception as e:  # noqa: BLE001 - 配置读取失败按不超时处理
             logger.debug(f"[system-question] 配置读取失败，按不超时处理: {e}")
             return {"action": "none", "sec": 120, "model": ""}
@@ -186,7 +190,7 @@ class QuestionTimeoutController(QObject):
         if session is None:
             return
         if event == "asked":
-            policy = self._read_policy()
+            policy = self._read_policy(session.pool)
             session.action = policy["action"]
             session.sec = policy["sec"]
             session.model_query = policy["model"]
@@ -345,11 +349,14 @@ class QuestionTimeoutController(QObject):
             return ""
 
     def _ask_model(self, snap: dict, model_query: str, pool: Any) -> str:
-        """调模型为未答问题作答，返回模型原始输出（JSON 文本）。"""
-        from app.plugins.sdk import build_openai_client, chat_completion_text
+        """调模型为未答问题作答，返回模型原始输出（JSON 文本）。
 
-        cfg = self._resolve_model_config(model_query, pool)
-        if not cfg:
+        走宿主的 model.complete 能力：请求头（OpenCode 的 x-opencode-session、
+        服务商伪装头）由宿主 resolve_extra_headers 统一组装，插件不再自建 client。
+        """
+        complete = pool.get("model.complete") if hasattr(pool, "get") else None
+        if not callable(complete):
+            logger.warning("[system-question] 能力池缺少 model.complete，AI 代答不可用")
             return ""
         questions = snap.get("questions") or []
         answers = snap.get("answers") or {}
@@ -381,40 +388,7 @@ class QuestionTimeoutController(QObject):
             "有选项时优先输出选项 label；answer 不超过 100 字；任何解释性文字都会导致解析失败。"
         )
 
-        client = build_openai_client(
-            api_key=cfg.get("API_KEY", ""),
-            base_url=cfg.get("API_URL"),
-            timeout=60,
-        )
-        return chat_completion_text(
-            client,
-            model=cfg.get("模型名称", "gpt-4o"),
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.3,
-            max_tokens=2000,
-        )
-
-    def _resolve_model_config(self, model_query: str, pool: Any = None) -> dict:
-        """配置指定了模型就走 model.config_for；否则跟随当前会话模型。"""
-        if pool is None:
-            for session in self._sessions.values():
-                pool = session.pool
-                break
-        if pool is None:
-            return {}
-        try:
-            if model_query and "model.config_for" in pool:
-                resolved = pool["model.config_for"](model_query)
-                if resolved:
-                    return dict(resolved)
-        except Exception as e:  # noqa: BLE001
-            logger.debug(f"[system-question] 指定模型解析失败 {model_query!r}: {e}")
-        try:
-            if "model.config" in pool:
-                return dict(pool["model.config"]() or {})
-        except Exception as e:  # noqa: BLE001
-            logger.debug(f"[system-question] 当前模型配置读取失败: {e}")
-        return {}
+        return str(complete(prompt, model_query=model_query or "") or "")
 
     @staticmethod
     def _build_ai_text(snap: dict, raw: str, sec: int = 0) -> str:

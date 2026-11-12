@@ -124,6 +124,27 @@ class APIHistoryManager:
             self._session_store.save_session(session_record)
 
     @staticmethod
+    def _materialize_session_messages(record_src: Dict) -> Dict:
+        """读侧副本化：浅拷 record + messages 三层边界（record/消息/块）。
+
+        revive 唯一写动作是 content[bi] slot 整块替换，不深改块内字段，
+        因此浅拷三层足够隔离常驻对象；_api_sessions 保持 image_ref 轻量形态。
+        """
+        result = dict(record_src)
+        out: List[Any] = []
+        for m in record_src.get("messages") or []:
+            if isinstance(m, dict):
+                mm = dict(m)
+                c = mm.get("content")
+                if isinstance(c, list):
+                    mm["content"] = [dict(b) if isinstance(b, dict) else b for b in c]
+                out.append(mm)
+            else:
+                out.append(m)
+        result["messages"] = out
+        return result
+
+    @staticmethod
     def _revive_session_images(session_record: Dict) -> None:
         """[方案 1 读侧] image_ref → data:image（就地恢复 messages 里的图片块）。"""
         if not session_record:
@@ -160,8 +181,9 @@ class APIHistoryManager:
                         # system_prompt 轻量列表不加载（None 哨兵），借全量查询回填
                         if s.get("system_prompt") is None:
                             s["system_prompt"] = full.get("system_prompt", "")
-                self._revive_session_images(s)
-                return s
+                result = self._materialize_session_messages(s)
+                self._revive_session_images(result)
+                return result
         if self._session_store and self._session_store.is_initialized:
             s = self._session_store.get_session(session_id)
             if s is not None:
@@ -179,13 +201,14 @@ class APIHistoryManager:
                     full_session = self.get_session_by_session_id(session_id)
                     if full_session:
                         session = full_session
-            msgs = session.get("messages", [])
             from app.core.store.session_repository import revive_vision_image_refs
 
             try:
-                msgs = revive_vision_image_refs(msgs)
+                record = self._materialize_session_messages(session)
+                msgs = revive_vision_image_refs(record["messages"])
             except Exception as e:  # noqa: BLE001 — revive 失败按原消息
                 logger.warning(f"[APIHistoryManager] revive 失败: {e}")
+                msgs = session.get("messages", [])
             return msgs
         return None
 

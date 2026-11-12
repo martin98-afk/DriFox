@@ -452,3 +452,39 @@ def test_reload_plugin_precise_no_other_plugin_touched(tmp_path, monkeypatch, pl
     assert reg.policies()["minimal"].tag == "v2", "热更新后 tag 应生效"
     assert "second" in reg.policies(), "新增实现应注册"
     restore()
+
+
+def test_ensure_watcher_starts_no_polling_thread():
+    """[双通道拆除回归] ensure_*_watcher 只做 scan_now，不再起 5s 轮询线程。
+
+    原双通道：watchfiles 主链精准重载一次后，轮询线程 ≤5s 内 snapshot diff
+    再重载第二遍（主链不更新 _sigs）；且 11 个 daemon 线程常驻无 stop 出口。
+    退役后（对齐 ProviderWatcher.start 先例）冷启动不得残留 rt-watcher 线程。
+    """
+    from app.plugins.loaders.runtime_component_loader import (
+        ensure_model_adapter_watcher,
+        ensure_transport_watcher,
+    )
+
+    before = {t.name for t in threading.enumerate() if t.name.startswith("rt-watcher-")}
+    assert not before, f"进入测试前不应存在 rt-watcher 线程（残留: {before}）"
+
+    for ensure in (ensure_model_adapter_watcher, ensure_transport_watcher):
+        watcher = ensure()
+        assert watcher is not None, f"{ensure.__name__} 应返回 watcher 实例"
+        # scan_now 仍可用（重载链与冷启动预热依赖）
+        watcher.scan_now()
+
+    after = {t.name for t in threading.enumerate() if t.name.startswith("rt-watcher-")}
+    assert not after, f"ensure 调用后不得创建轮询线程（发现: {after}）"
+
+
+def test_watcher_start_retired_noop():
+    """[双通道拆除回归] _RuntimeWatcher.start() 已退役：显式调用也不创建线程。"""
+    from app.plugins.loaders.runtime_component_loader import _RuntimeWatcher, _make_transport_loader
+
+    watcher = _RuntimeWatcher(_make_transport_loader(), "transports")
+    watcher.start()  # 旧调用点兼容：空转
+    assert watcher._thread is None, "退役后 start() 不得创建轮询线程"
+    rt = [t for t in threading.enumerate() if t.name.startswith("rt-watcher-")]
+    assert not rt, f"start() 调用后不得出现 rt-watcher 线程（发现: {[t.name for t in rt]}）"

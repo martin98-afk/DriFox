@@ -52,13 +52,12 @@ CATALOG: Dict[str, CapabilitySpec] = {
     for s in (
         # ── 模型 ──
         _spec("model.metadata", _L, "当前模型的 provider/名称/上下文长度/能力元数据", _BOTH),
-        _spec("model.schema", _L, "指定 agent 视角的工具 schema", _BOTH, ["get_tools_schema"]),
+        _spec("model.schema", _L, "指定 agent 视角的工具 schema", _BOTH),
         _spec(
             "model.config",
             _H,
             "完整模型配置（含已解密明文 API key）",
             _BOTH,
-            ["get_model_config", "get_provider_config"],
         ),
         _spec(
             "model.config_for",
@@ -82,6 +81,12 @@ CATALOG: Dict[str, CapabilitySpec] = {
             "model.enumerate",
             _L,
             "指定服务商的可选模型列表（含视觉/思考能力标记）",
+            _BOTH,
+        ),
+        _spec(
+            "model.complete",
+            _M,
+            "用当前/指定模型做一次性补全（不带工具与历史上下文，消耗 token），返回完整文本",
             _BOTH,
         ),
         # ── 会话 ──
@@ -165,6 +170,18 @@ CATALOG: Dict[str, CapabilitySpec] = {
         _spec("theme.read", _L, "主题 id/名称/配色/字体/字号", _UI),
         # ── 工具 ──
         _spec("tool.read", _L, "工具注册表元数据查询", _BOTH),
+        _spec(
+            "tool.register",
+            _H,
+            "运行时注册插件工具（source 强制 plugin:<name>，插件卸载时按来源自动清理）",
+            _BOTH,
+        ),
+        _spec(
+            "tool.unregister",
+            _M,
+            "注销本插件注册的工具（仅限 source 为自己的工具）",
+            _BOTH,
+        ),
         _spec("tool.inject", _H, "向 LLM 注入工具（改变模型可见行为）", _UI),
         _spec("tool.execute", _H, "执行任意工具", _BOTH, ["get_tool_executor"], value_style="value"),
         # ── 对话引擎 ──
@@ -179,6 +196,12 @@ CATALOG: Dict[str, CapabilitySpec] = {
         _spec("lsp.query", _M, "LSP 查询", _TOOL, ["lsp"]),
         _spec("net.upload", _H, "Gitee 上传（数据外发）", _TOOL, ["gitee"]),
         _spec("net.download", _M, "从 Gitee 绑定仓库下载文件到本地路径", _BOTH),
+        _spec(
+            "net.http",
+            _H,
+            "通用 HTTP(S) 请求（数据外发）：宿主统一超时/代理/证书/UA，仅 http(s) 协议，响应体限 10MB",
+            _BOTH,
+        ),
         _spec(
             "net.avatar",
             _L,
@@ -223,7 +246,31 @@ CATALOG: Dict[str, CapabilitySpec] = {
         _spec("window.workbench", _M, "打开/刷新右侧工作台页", _UI),
         # ── 插件管理 ──
         _spec("plugin.read", _L, "已安装插件列表/元数据", _UI),
+        _spec(
+            "plugin.config.read",
+            _L,
+            "读本插件自己的配置项（manifest config_schema 声明值；不传 key 返回全部）",
+            _BOTH,
+        ),
+        _spec(
+            "plugin.config.write",
+            _M,
+            "写本插件自己的配置项（仅 config_schema 已声明字段，容器重建由宿主广播）",
+            _UI,
+        ),
         _spec("plugin.control", _H, "重载/启停其他插件", _UI),
+        _spec(
+            "plugin.reload_components",
+            _H,
+            "插件启停后的全组件补载/补卸载（含 plugin_changed 广播，宿主侧封装）",
+            _UI,
+        ),
+        _spec(
+            "plugin.deps",
+            _L,
+            "查询本插件依赖安装状态（缺失清单/环境问题；安装由插件市场流程负责）",
+            _BOTH,
+        ),
         # ── 命令 ──
         _spec("command.read", _L, "命令列表", _UI),
         _spec("command.reload", _M, "命令热重载", _UI),
@@ -254,11 +301,29 @@ CATALOG: Dict[str, CapabilitySpec] = {
             "通用数据库执行权限（受限代理：表名须 plugin_<name>_ 前缀，禁 ATTACH/PRAGMA 等库级语句）",
             _BOTH,
         ),
+        _spec(
+            "secret.read",
+            _M,
+            "读本插件自己的凭据（系统密钥库，account 自动带 plugin:<name>: 前缀，跨插件不可读）",
+            _BOTH,
+        ),
+        _spec(
+            "secret.write",
+            _M,
+            "写本插件自己的凭据（系统密钥库；不可用时返回 False，不落明文磁盘）",
+            _BOTH,
+        ),
         # ── 基础（恒放行） ──
         _spec("plugin.log", _N, "带 plugin=<name> 前缀的 logger", _BOTH),
         _spec("state.kv", _N, "窗口级 KV 存储（无系统权限）", _BOTH, ["window_state"]),
         # ── 进程级 ──
         _spec("cache.purge", _L, "清理主程序进程内 LRU 缓存（内存释放）", _UI),
+        _spec(
+            "task.background",
+            _M,
+            "在宿主线程池跑插件后台任务（返回 handle：cancelled/progress；完成回调回主线程）",
+            _BOTH,
+        ),
         _spec("process.start", _H, "启动后台进程（argv 数组、无 shell；独立于宿主生命周期）", _BOTH),
         # ── 配置（按 key 读非敏感标量，不给整个 Settings 对象） ──
         _spec(
@@ -285,17 +350,6 @@ for _sid, _s in CATALOG.items():
     for _legacy in _s.legacy_keys:
         LEGACY_MAP[_legacy] = _sid
 
-# 存量 manifest 里可能出现的扁平能力名（A3 时代的写法）→ 命名空间 ID
-ALIASES: Dict[str, str] = {
-    "lsp": "lsp.query",
-    "mcp": "mcp.call",
-    "gitee": "net.upload",
-    "subagent": "subagent.run",
-    "window_state": "state.kv",
-    "notify": "ui.notify",
-    "hide_card": "ui.card.hide",
-}
-
 # ui 投影可用的旧键
 UI_LEGACY_KEYS = tuple(k for k, v in LEGACY_MAP.items() if "ui" in CATALOG[v].surfaces)
 
@@ -314,7 +368,7 @@ def in_group(group: str) -> Set[str]:
 
 
 def expand(ids: Iterable[str]) -> FrozenSet[str]:
-    """把 manifest 声明展开为能力 ID 集合（处理别名与通配）。
+    """把 manifest 声明展开为能力 ID 集合（处理通配）。
 
     未知 ID 原样保留（注册表里没有对应 provider，构建池时自然不可用）。
     """
@@ -323,7 +377,6 @@ def expand(ids: Iterable[str]) -> FrozenSet[str]:
         token = str(raw).strip()
         if not token:
             continue
-        token = ALIASES.get(token, token)
         if token == "*":
             out.update(CATALOG)
         elif token.endswith(".*"):
@@ -341,7 +394,7 @@ def unknown_declared(raw: object) -> List[str]:
     这类声明在加载期挑出来，由 PluginManager 记入 manifest_warnings。
 
     判定口径与 expand 严格一致：``*`` 合法；``group.*`` 检查 group 存在；
-    其余 token 过 ALIASES 后必须命中 CATALOG。
+    其余 token 必须命中 CATALOG。
     """
     if not isinstance(raw, list):
         return []
@@ -350,7 +403,6 @@ def unknown_declared(raw: object) -> List[str]:
         token = str(item).strip()
         if not token or token == "*":
             continue
-        token = ALIASES.get(token, token)
         if token.endswith(".*"):
             if token[:-2] not in groups():
                 out.append(token)

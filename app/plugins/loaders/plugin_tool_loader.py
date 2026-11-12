@@ -513,6 +513,14 @@ def unload_plugin_tools(
             if root_tracker is not None:
                 root_tracker.pop(name, None)
             logger.debug(f"[PluginToolLoader] 注销插件工具: {name} ({plugin_name})")
+    # 兜底：运行时经能力池 tool.register 注册的工具不在 tool_names 清单里，
+    # 只能按 source 反查清掉，否则会残留指向已卸载插件代码的工具。
+    try:
+        extra = registry.unregister_by_source(f"plugin:{plugin_name}")
+        if extra:
+            logger.debug(f"[PluginToolLoader] 按来源清理能力池注册工具 {extra} 个: {plugin_name}")
+    except Exception as e:  # noqa: BLE001 - 清理失败不阻断卸载
+        logger.warning(f"[PluginToolLoader] 按来源清理工具失败: {plugin_name} {e}")
     # 记账同步清理：本插件已不再持有任何工具，其覆盖关系随之失效
     _CROSS_ROOT_OVERRIDES.pop(plugin_name, None)
 

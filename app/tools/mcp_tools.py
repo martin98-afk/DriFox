@@ -36,12 +36,14 @@ class MCPState:
     CONNECTING → 黄色：正在启动（进程拉起、握手、list_tools 全过程）
     CONNECTED  → 绿色：握手成功且工具已发现
     FAILED     → 红色：启动失败（超时 / 进程崩溃 / 协议错误）
+    AUTH_EXPIRED → 红色：服务可达但凭据 / 授权失效（401/403），需重新授权
     """
 
     DISABLED = "disabled"
     CONNECTING = "connecting"
     CONNECTED = "connected"
     FAILED = "failed"
+    AUTH_EXPIRED = "auth_expired"
 
 
 def _extract_real_error(exc: Exception) -> Exception:
@@ -611,6 +613,32 @@ def _get_oauth_provider(config: dict):
     )
 
 
+async def _probe_http(url: str, headers: Optional[dict], timeout: float = 8.0) -> tuple:
+    """无 OAuth 的 HTTP 探活：发一次 initialize，只判可达与鉴权。
+
+    Returns:
+        ("ok" | "auth_expired" | "unreachable", detail)
+    """
+    import httpx
+
+    from app.core.mcp_oauth.provider import _build_probe_request
+
+    request = _build_probe_request(url)
+    if headers:
+        request.headers.update({str(k): str(v) for k, v in headers.items()})
+    try:
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+            response = await client.send(request)
+    except Exception as e:
+        msg = str(e).strip()
+        return "unreachable", f"{type(e).__name__}: {msg}" if msg else type(e).__name__
+    if response.status_code in (200, 202):
+        return "ok", ""
+    if response.status_code in (401, 403):
+        return "auth_expired", f"HTTP {response.status_code}（凭据无效）"
+    return "unreachable", f"HTTP {response.status_code}"
+
+
 class MCPServerConnection:
     """单个 MCP Server 的连接管理"""
 
@@ -751,6 +779,13 @@ class MCPClientManager:
 
         # 保护 _connections / _connected 多线程访问（UI 线程 + 事件循环线程）
         self._lock = threading.Lock()
+
+        # 探活结果（仅内存）：name → {"state": ok/auth_expired/unreachable,
+        # "detail": str, "probed_at": float}。不进 _connections，避免污染
+        # 连接事实与孤儿清理；_probe_last_at 控制批次 TTL。
+        self._probes: Dict[str, dict] = {}
+        self._probe_last_at = 0.0
+        self._probe_thread: Optional[threading.Thread] = None
 
         # 专用后台线程 + 持久事件循环
         self._loop: Optional[asyncio.AbstractEventLoop] = None
@@ -1297,6 +1332,8 @@ class MCPClientManager:
                 self._connections[name] = conn
             conn.config = config
             conn.set_state(MCPState.CONNECTING)
+            # 手动连接一开始，旧的探活结论就过期了（配置可能已改）
+            self._probes.pop(name, None)
 
         def _worker():
             success = False
@@ -1694,19 +1731,11 @@ class MCPClientManager:
         # 中转一次，让真正的 session.call_tool 落到 lifespan Task 上执行。
         async def _do_call():
             result = await conn.session.call_tool(tool_name, arguments)
-
-            text_parts = []
-            for content in result.content or []:
-                if isinstance(content, mcp_types.TextContent):
-                    text_parts.append(content.text)
-                elif hasattr(content, "text"):
-                    text_parts.append(str(content.text))
-
-            output = "\n".join(text_parts) if text_parts else str(result)
+            output, images = self._split_tool_content(result)
 
             if result.isError:
                 return ToolResult(False, error=output)
-            return ToolResult(True, content=output)
+            return ToolResult(True, content=output, image_data=images or None)
 
         try:
             # 已在后台事件循环内（call_tool_sync 用 run_coroutine_threadsafe 送进来），
@@ -1723,6 +1752,33 @@ class MCPClientManager:
             return ToolResult(False, error=f"MCP 工具调用失败: {e}")
 
     # ── 辅助方法 ──────────────────────────────────────
+
+    @staticmethod
+    def _split_tool_content(result) -> tuple:
+        """把 CallToolResult.content 拆成 (文本, 图片载荷列表)。
+
+        用 type 字符串分派而非 isinstance，兼容不同 mcp SDK 小版本的类定义
+        与 dict 形态内容块；Audio/ResourceLink/EmbeddedResource 本期不收。
+        """
+        text_parts: List[str] = []
+        images: List[dict] = []
+        for content in getattr(result, "content", None) or []:
+            btype = content.get("type") if isinstance(content, dict) else getattr(content, "type", "")
+            if btype == "text":
+                val = content.get("text") if isinstance(content, dict) else getattr(content, "text", "")
+                if val:
+                    text_parts.append(str(val))
+            elif btype == "image":
+                data = content.get("data") if isinstance(content, dict) else getattr(content, "data", "")
+                mime = (
+                    content.get("mimeType")
+                    if isinstance(content, dict)
+                    else getattr(content, "mimeType", "image/png")
+                )
+                if data:
+                    images.append({"mime": mime or "image/png", "data": data})
+        output = "\n".join(text_parts) if text_parts else str(result)
+        return output, images
 
     def _parse_tool_name(self, prefixed_name: str) -> Optional[tuple]:
         if not prefixed_name.startswith(self.TOOL_PREFIX):
@@ -1863,6 +1919,102 @@ class MCPClientManager:
             logger.debug(f"[MCP] 读取配置侧服务器列表失败: {e}")
             return []
 
+    # ── 探活（授权有效性）───────────────────────────────
+    # 打开设置卡时对 http/sse 型服务（含 enabled=false）各发一次 initialize：
+    # 关闭的服务同样是「已授权但 token 可能已烂」的重灾区，连接表里根本没有
+    # 它们的条目，只能靠探活补上这个盲区。stdio 一律不探——那等于重新拉起
+    # npx/uvx 子进程，冷启动代价不可接受。
+
+    PROBE_TTL = 600.0
+    PROBE_TIMEOUT = 8.0
+    PROBE_CONCURRENCY = 3
+
+    def clear_probe(self, name: str) -> None:
+        """丢弃某个服务的探活结论（重新授权/解绑/配置变更后调用）。"""
+        with self._lock:
+            self._probes.pop(name, None)
+
+    def probe_servers_background(self, force: bool = False) -> None:
+        """后台探活一批服务。TTL 内或已有批次在跑时直接返回。"""
+        if self._probe_thread is not None and self._probe_thread.is_alive():
+            return
+        now = time.time()
+        with self._lock:
+            if not force and now - self._probe_last_at < self.PROBE_TTL:
+                return
+            self._probe_last_at = now
+
+        def _worker():
+            try:
+                self._run_async(self._probe_all(), timeout=None)
+            except Exception as e:
+                logger.warning(f"[MCP] 探活批次失败: {e}")
+
+        self._probe_thread = threading.Thread(target=_worker, name="mcp-probe", daemon=True)
+        self._probe_thread.start()
+
+    @staticmethod
+    def _is_probeable(cfg: dict) -> bool:
+        if cfg.get("type") not in ("http", "sse"):
+            return False
+        config = _resolve_mcp_credentials(_resolve_plugin_paths(dict(cfg)))
+        return bool(str(config.get("url") or "").strip())
+
+    async def _probe_all(self) -> None:
+        sem = asyncio.Semaphore(self.PROBE_CONCURRENCY)
+
+        async def _one(cfg):
+            async with sem:
+                name = cfg.get("name", "")
+                with self._busy_lock:
+                    if name in self._busy_names:
+                        return  # 正在连接/断开，连接态本身就是最新事实
+                with self._lock:
+                    conn = self._connections.get(name)
+                if conn is not None and conn.state == MCPState.CONNECTED:
+                    return  # 已连上就是活的，再探一遍纯属重复请求
+                state, detail = await self._probe_one(cfg)
+                with self._lock:
+                    self._probes[name] = {
+                        "state": state,
+                        "detail": detail,
+                        "probed_at": time.time(),
+                    }
+                logger.debug(f"[MCP] 探活 {name}: {state} {detail}")
+
+        targets = [c for c in self._configured_servers() if self._is_probeable(c)]
+        if not targets:
+            return
+        await asyncio.gather(*[_one(c) for c in targets], return_exceptions=True)
+
+    async def _probe_one(self, cfg: dict) -> tuple:
+        """单个服务探活，返回 (ok|auth_expired|unreachable, detail)。"""
+        name = cfg.get("name", "")
+        config = _resolve_mcp_credentials(_resolve_plugin_paths(dict(cfg)))
+        url = str(config.get("url") or "").strip()
+        if "${" in url:
+            return "auth_expired", "未填写访问凭据"
+
+        auth = config.get("auth") if isinstance(config.get("auth"), dict) else {}
+        if auth.get("type") == "oauth":
+            plugin = _plugin_name_from_source(config)
+            if not plugin:
+                return "unreachable", "OAuth 服务器缺少插件来源"
+            from app.core.mcp_oauth import McpOAuthManager
+            from app.core.mcp_oauth.provider import probe_authorized
+
+            oauth = McpOAuthManager.get_instance()
+            has_token, expires_at, has_refresh = oauth.peek_expiry(plugin, name)
+            if not has_token:
+                return "auth_expired", "未授权"
+            if expires_at is not None and expires_at <= time.time() and not has_refresh:
+                return "auth_expired", "授权已过期"
+            provider = oauth.get_provider(plugin, name, url, auth)
+            return await probe_authorized(url, provider, self.PROBE_TIMEOUT)
+
+        headers = config.get("headers") if isinstance(config.get("headers"), dict) else {}
+        return await _probe_http(url, headers, self.PROBE_TIMEOUT)
+
     def get_status(self) -> List[Dict]:
         # 注意：返回的 tools 必须带 mcp__{server}__ 前缀，与 get_tool_schemas() 保持一致，
         # 避免 LLM 从 mcp_manage 看到裸名后误用导致调用失败。
@@ -1913,6 +2065,23 @@ class MCPClientManager:
                     "tools": [],
                 }
             )
+        # 探活结果合并：授权失效优先于「已关闭」——关闭的 OAuth 服务也可能
+        # token 早已过期，用户必须在打开前就看见；已连接/连接中仍以连接事实为准。
+        with self._lock:
+            probes = dict(self._probes)
+        for item in status:
+            probe = probes.get(item["name"]) or {}
+            item["probe_state"] = probe.get("state", "")
+            item["probe_error"] = probe.get("detail", "")
+            item["probed_at"] = probe.get("probed_at", 0.0)
+            if item["state"] in (MCPState.CONNECTED, MCPState.CONNECTING):
+                continue
+            if probe.get("state") == "auth_expired":
+                item["state"] = MCPState.AUTH_EXPIRED
+                item["error"] = probe.get("detail", "")
+            elif probe.get("state") == "unreachable" and item["enabled"]:
+                item["state"] = MCPState.FAILED
+                item["error"] = probe.get("detail", "")
         return status
 
     # ── 引用计数（多窗口生命周期）──────────────────────

@@ -3148,7 +3148,8 @@ class MarketplaceCard(QWidget):
 
         # 一键更新 + 诊断 + 刷新 + 关闭（一键更新在最左）
         # 一键更新：待更新 >1 时出现图标，右上角 badge 显示数量（归零即隐藏）
-        self._update_all_btn = TransparentToolButton(FluentIcon.UPDATE, header)
+        # 图标用 DOWNLOAD（向下载入）：UPDATE 画成 ⟲ 时钟样，与旁边 ⟳ 刷新易混
+        self._update_all_btn = TransparentToolButton(FluentIcon.DOWNLOAD, header)
         self._update_all_btn.setFixedSize(24, 24)
         self._update_all_btn.setToolTip("一键更新")
         self._update_all_btn.clicked.connect(self._on_update_all)
@@ -3157,16 +3158,29 @@ class MarketplaceCard(QWidget):
 
         self._update_all_badge = None
         try:
-            from qfluentwidgets import InfoBadge, InfoBadgePosition
+            from qfluentwidgets import InfoBadge
+            from PyQt5.QtCore import QPoint
+            from qfluentwidgets.components.widgets.info_badge import InfoBadgeManager
+
+            class _SnugBadgeManager(InfoBadgeManager):
+                """badge 叠在按钮右上角内侧：默认 TOP_RIGHT 中心锚在角上，半悬空易被视为漂浮"""
+
+                def position(self):
+                    g = self.target.geometry()
+                    return QPoint(
+                        g.x() + g.width() - self.badge.width() + 5,
+                        g.y() - self.badge.height() // 2 + 6,
+                    )
 
             self._update_all_badge = InfoBadge.custom(
                 "0",
                 QColor(255, 193, 7),
                 QColor(255, 213, 79),
                 parent=header,
-                target=self._update_all_btn,
-                position=InfoBadgePosition.TOP_RIGHT,
             )
+            manager = _SnugBadgeManager(self._update_all_btn, self._update_all_badge)
+            self._update_all_badge.manager = manager
+            self._update_all_badge.move(manager.position())
             self._update_all_badge.setObjectName("updateAllBadge")
             # 同「待更新」tab badge：注销主题自动重放，固定黑字保证亮黄底可读
             from qfluentwidgets.common.style_sheet import styleSheetManager
@@ -5213,6 +5227,30 @@ class MarketplaceCard(QWidget):
         except Exception as e:
             logger.debug(f"[Marketplace] 更新后重载插件 UI({name}) 失败（忽略）: {e}")
 
+    def _reload_plugin_components_on_gui(self, name: str, enabled: bool):
+        """主线程全组件口径补载/补卸载（能力池 plugin.reload_components 通道）。
+
+        🔴 历史 bug 防回归：必须全组件口径，严禁只补 UI 单组件（9 类非 UI 组件
+        残留/缺失只能重启）。plugin_changed 由宿主封装在补载完成后 emit（无中间态）。
+        通道合规：宿主在 ui_core 注册（owner=core:plugin_host），插件侧禁止直接
+        import 主程序内部包（架构红线）；manifest capabilities 已声明本键。
+
+        竞态说明：worker 写 enabled 集到本补载之间若恰有其他变更触发全量
+        rescan，最坏情况组件被幂等双载，最终态一致，不加锁。
+        """
+        try:
+            from app.plugins.sdk import caps_for
+
+            reload_components = caps_for("plugin.reload_components")
+            if reload_components is None:
+                logger.warning(
+                    f"[Marketplace] plugin.reload_components 能力不可用，跳过全组件补载 ({name}, enabled={enabled})"
+                )
+                return
+            reload_components(name, enabled)
+        except Exception as e:
+            logger.warning(f"[Marketplace] 全组件补载失败 ({name}, enabled={enabled}): {e}")
+
     def _unload_plugin_ui_on_gui(self, name: str):
         """主线程：卸载插件 UI 组件（含显示中卡片的自动关闭）
 
@@ -5235,10 +5273,10 @@ class MarketplaceCard(QWidget):
     def _async_enable(self, plugin_meta: dict):
         """启用已禁用的插件（入串行队列）"""
         name = plugin_meta.get("name", "")
-        # 内置插件（builtin_disabled）启用：worker 线程仅写配置；UI 组件加载由
-        # 主线程在完成后补做（reload_ui=True）。PluginManager.enable_plugin 内部
-        # _load_plugin_ui 在 worker 线程执行有 Qt 跨线程风险——与 disable 路径
-        # 主线程先行卸载对称，此处后行重载（_on_manage_done 主线程补加载）。
+        # 内置插件（builtin_disabled）启用：worker 线程仅写配置（load_components=False），
+        # 全组件补载由主线程在完成后补做（reload_ui=True）。PluginManager.enable_plugin
+        # 内部 _load_plugin_components 在 worker 线程执行有 Qt 跨线程风险且与主线程
+        # 补载形成双通道（UI 组件被完整 exec 两轮）——与 disable 路径对称。
         was_builtin = (getattr(self, "_status_map", None) or {}).get(name) == "builtin_disabled"
         self._submit_task(
             kind="enable",
@@ -5253,9 +5291,11 @@ class MarketplaceCard(QWidget):
     def _async_disable(self, plugin_meta: dict):
         """禁用已启用的插件（入串行队列）"""
         name = plugin_meta.get("name", "")
-        # 主线程先卸载 UI 组件（显示中卡片自动关闭），再后台 move 目录
+        # 主线程先卸载 UI 组件（显示中卡片自动关闭，防后台删目录/写配置时崩溃引用），
+        # 再后台执行；全组件补卸载由主线程在完成后补做（reload_ui=True）。
         self._unload_plugin_ui_on_gui(name)
 
+        was_builtin = (getattr(self, "_status_map", None) or {}).get(name) == "builtin_enabled"
         self._submit_task(
             kind="disable",
             name=name,
@@ -5263,6 +5303,7 @@ class MarketplaceCard(QWidget):
             busy_text="禁用中…",
             status_text="禁用中…",
             status_color="#FF9800",
+            reload_ui=was_builtin,
         )
 
     def _async_uninstall(self, plugin_meta: dict):
@@ -5317,11 +5358,17 @@ class MarketplaceCard(QWidget):
         self._status_label.setText("")
         bar_parent = _host_parent(self)
         if success:
-            # 内置插件启用：主线程补加载 UI 组件（对称 _async_disable 主线程先行卸载；
-            # worker 线程 enable_plugin 已注册的元数据被主线程 unload+load 覆盖，
-            # 最终 UI 处于主线程语义）。load_plugin 幂等，重复调用无副作用。
-            if kind == "enable" and task.get("reload_ui"):
-                self._reload_plugin_ui_on_gui(name)
+            # [双通道拆除] 内置插件启停：worker 只写配置，主线程补载全组件口径。
+            # 🔴 历史 bug 防回归：严禁只补/清 UI 单组件——plugin_manager.py
+            # enable/disable 注释记载只清 UI+tools 时 providers/model_adapters/
+            # lsp/hooks/agents/commands 等 9 类非 UI 组件残留或缺失，且无自愈
+            # 只能重启。plugin_changed 在补载完成后 emit（避免消费方看到
+            # 「已启用但组件未就绪」的中间态）。
+            # 窗口期竞态说明：worker 写 enabled 集到本补载之间若恰有其他变更
+            # 触发全量 rescan，最坏情况组件被幂等双载（load 先卸后装/清理段幂
+            # 等），最终态一致，不加锁。
+            if kind in ("enable", "disable") and task.get("reload_ui"):
+                self._reload_plugin_components_on_gui(name, enabled=(kind == "enable"))
             # 启用/禁用后刷新侧栏启动器按钮：disable 后 UI 组件已卸载、
             # floating_cards 已清空，不刷新则按钮残留点不开；enable 同理补新按钮。
             # 走 UIPluginRegistry 的公开刷新入口，不碰主窗口私有方法。
@@ -6307,6 +6354,10 @@ class MarketplaceCard(QWidget):
             if self._update_all_badge is not None:
                 if show:
                     self._update_all_badge.setText(str(n))
+                    # 数字变宽后重算尺寸并贴回按钮角（manager 只监听按钮 Resize/Move）
+                    self._update_all_badge.adjustSize()
+                    if self._update_all_badge.manager is not None:
+                        self._update_all_badge.move(self._update_all_badge.manager.position())
                     self._update_all_badge.setVisible(True)
                 else:
                     self._update_all_badge.setText("0")

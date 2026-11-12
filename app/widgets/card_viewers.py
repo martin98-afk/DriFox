@@ -19,7 +19,6 @@ from typing import Any, Dict, List, Optional
 import orjson as json
 import sip
 from loguru import logger
-from markdown import Markdown
 from PyQt5.QtCore import (
     QByteArray,
     QEasingCurve,
@@ -48,6 +47,9 @@ from PyQt5.QtGui import (
     QTextDocument,
     QWheelEvent,
 )
+# [T11] WebEngine 顶层 import 保留：ConsoleMonitorPage/CodeWebViewer 类继承基类
+# 必须在类定义时可用（无法函数内下沉）；main.py QApp 创建前已强制 import
+# QtWebEngineWidgets（架构硬约束），此处 import 实为 sys.modules 字典查找 <1μs
 from PyQt5.QtWebEngineWidgets import QWebEnginePage, QWebEngineSettings, QWebEngineView
 from PyQt5.QtWidgets import (
     QApplication,
@@ -104,7 +106,6 @@ from app.widgets.card_render_core import (
     _BORDER_RADIUS_CSS_VARS,
     _BUILTIN_FENCE_PERMS,
     _CHAR_COUNT_HTML,
-    _CODE_FONT_SIZE,
     _CONTENT_AUTOSCROLL_JS,
     _FLIP_JS,
     _HISTORY_TOOL_CAPS,
@@ -113,6 +114,8 @@ from app.widgets.card_render_core import (
     _RENDER_POOL,
     _RESET_CONTENT_FOR_REUSE_JS,
     _SENTENCE_END_CHARS,
+    _code_font_size,
+    _refresh_code_font_size,
     _SKELETON_CACHE_MAX,
     _SKELETON_CACHE_VERSION,
     _STREAM_APPEND_HELPERS_JS,
@@ -893,7 +896,9 @@ class CodeWebViewer(QWebEngineView):
         # [PERF] 工具结果 markdown 缓存：tool_call_id → <tool>...</tool> markdown 字符串
         # 已完成的工具块的 markdown 只計算一次，後續增量渲染跳過昂貴的
         # _sanitize_result + sorted() + JSON 序列化，直接拼接緩存結果。
-        self._tool_md_cache: Dict[str, str] = {}
+        # [B2] 有界化（_BoundedToolMdCache）：写入点在 MessageCard（禁区文件），
+        # 只能在此侧换实现收敛上限。
+        self._tool_md_cache: Dict[str, str] = _BoundedToolMdCache()
         # [B2] 工具 DOM 脏标记：MessageCard 层 JS 增量注入工具块（_inject_tool_streaming_html /
         # append_tool_result）时置 True，_perform_update 则必须走 save/restore 保护（否则
         # updateContent 整块替换会被 JS 注入的运行框/完成框抹掉）；无工具 DOM 注入时走裸
@@ -7456,9 +7461,9 @@ class CodeWebViewer(QWebEngineView):
             set_pygments_style(_style)
             set_diff_highlight_style(_style)
             # 同步缓存图标前缀，避免每次渲染都重新检测主题
+            # [PERF L1] 字号缓存已惰性化：刷新失效（下渲染取新档位）
             _update_icon_prefix()
-            global _CODE_FONT_SIZE
-            _CODE_FONT_SIZE = scale_font_size(13)
+            _refresh_code_font_size()
         except Exception:
             pass
 
@@ -8294,8 +8299,8 @@ class CodeWebViewer(QWebEngineView):
         except Exception:
             style = "dracula"
         _update_icon_prefix()
-        global _CODE_FONT_SIZE
-        _CODE_FONT_SIZE = scale_font_size(13)
+        # [PERF L1] 字号缓存已惰性化：刷新失效后立即读取（下同原重绑定语义）
+        _refresh_code_font_size()
         return RenderCtx(
             streaming=self._streaming,
             compact=self._tool_compact_mode,
@@ -8304,7 +8309,7 @@ class CodeWebViewer(QWebEngineView):
             tool_fingerprints=frozenset(getattr(self, "_finished_tool_fingerprints", ()) or ()),
             pygments_style=style,
             icon_prefix=current_icon_prefix(),
-            code_font_size=_CODE_FONT_SIZE,
+            code_font_size=_code_font_size(),
         )
 
     # ── [B5.2] 流式活动块纯文本尾态 ─────────────────────────────────────
@@ -9090,7 +9095,7 @@ class CodeWebViewer(QWebEngineView):
             "icon_prefix": current_icon_prefix(),
             "heavy_caps": _HISTORY_TOOL_CAPS if getattr(self, "_is_history", False) else None,
             "lazy_body": self._tool_lazy_body,
-            "code_font_size": _CODE_FONT_SIZE,
+            "code_font_size": _code_font_size(),
             # 协议段指纹去重（frozenset 快照，worker 线程只读安全）：
             # 流式渲染时未闭合协议段指纹命中已完成工具后不渲染占位框（防与真实完成块重复）
             "tool_fingerprints": frozenset(getattr(self, "_finished_tool_fingerprints", ()) or ()),
@@ -11189,6 +11194,12 @@ class _ThemeRerenderQueue:
 _theme_rerender_queue = _ThemeRerenderQueue()
 
 
+# [B2] 有界工具 markdown 缓存已搬至 app/widgets/_bounded_caches.py
+# （qt 渲染通道 markdown_block_viewer 也要用；从本模块 import 会把
+# QWebEngineWidgets 链拉进 Qt 通道，故独立成无依赖模块。命名空间保持兼容。）
+from app.widgets._bounded_caches import _BoundedToolMdCache, _MAX_TOOL_MD_ENTRIES  # noqa: F401
+
+
 class PlainTextViewer(QWidget):
     contentHeightChanged = pyqtSignal(int)
 
@@ -11212,6 +11223,9 @@ class PlainTextViewer(QWidget):
         # 可直接 O(1) 判定 (cap, MAX_HEIGHT)，跳过全文档重排——消除超大用户消息的 resize 卡顿。
         # 文本替换（set_text）使缓存失效；append_chunk 只增不减，无需失效。
         self._tall_cap = 0
+        # [PERF P0] 流式增量高度基线：最后一次全量测量 setFixedSize 定型的宽度。
+        # None = 宽度尚未定型（懒创建后未全量测量过），增量路径回退全量。
+        self._stream_base_w = None
         self._init_ui()
         # 性能优化：添加 resize 防抖定时器
         self._resize_debounce_timer = QTimer(self)
@@ -11276,15 +11290,23 @@ class PlainTextViewer(QWidget):
         self._apply_text_style()
         # [PERF] 字体/字号可能随主题设置变化 → 行数结论失效，清除“超高”缓存待重测
         self._tall_cap = 0
+        self._stream_base_w = None  # 字体变化 → 折行/宽度结论失效，增量基线作废
 
     def append_chunk(self, text: str):
         self._text += text
+        # [PERF P0] setPlainText 稳定形态 + 增量高度跳过二次独立测量（显示文档
+        # O(1) 读 documentSize，见 _try_incremental_height）；insertText O(1) 路线
+        # 因 offscreen 段错误搁置（证据链封存 .perf_out/，真机复现性未验证）。
         self.text_edit.setPlainText(self._text)
-        # 设置文档宽度以确保正确计算换行
+        # [PERF P0] 文档排版宽无条件同步（原版行为，保留）：hide/滚动条翻转期间
+        # QTextEdit 不自动刷新排版宽，停留旧值会让增量高度读到错位排版
+        # （fuzz seed60/61 复现 h=216 vs need=101）。实测它不是大文档重排放大
+        # 元凶——缺失同步才是（insertText 实验后半段 27ms 的真因是缺失同步下的
+        # documentSize 强制排版）。
         vp_width = self.text_edit.viewport().width()
         if vp_width > 0:
             self.text_edit.document().setTextWidth(vp_width)
-        self._schedule_update_height()
+        self._schedule_update_height(incremental=True)
 
     def finish_streaming(self, keep_dock: bool = False, immediate: bool = True):
         """流式结束收尾。
@@ -11300,15 +11322,17 @@ class PlainTextViewer(QWidget):
         """
         self._schedule_update_height()
 
-    def _schedule_update_height(self):
+    def _schedule_update_height(self, incremental: bool = False):
         """🛡️ 安全的延迟高度更新
 
         使用 lambda 包装 + try/except 保护，防止 PlainTextViewer 被 deleteLater()
         销毁后定时器回调仍访问已释放的 C++ 对象（text_edit）导致段错误。
+        incremental=True 时走流式增量高度路径（_update_height 内判定），失败自动
+        回退全量测量。
         """
-        QTimer.singleShot(10, lambda: self._safe_update_height())
+        QTimer.singleShot(10, lambda: self._safe_update_height(incremental))
 
-    def _safe_update_height(self):
+    def _safe_update_height(self, incremental: bool = False):
         """带存活性检查的 _update_height"""
         try:
             # 检查 C++ 对象是否已被销毁（text_edit 可能在懒创建前为 None）
@@ -11316,7 +11340,7 @@ class PlainTextViewer(QWidget):
                 return
             if sip.isdeleted(self.text_edit):
                 return
-            self._update_height()
+            self._update_height(incremental)
         except RuntimeError:
             pass
 
@@ -11327,6 +11351,7 @@ class PlainTextViewer(QWidget):
         self._text = text
         # [PERF] 文本被整体替换（可能变短）→ “超高”结论不再必然成立，失效单调缓存
         self._tall_cap = 0
+        self._stream_base_w = None  # 宽度自适应语义随文本重置，待全量重定基线
         self.text_edit.setPlainText(text)
         # 设置文档宽度以确保正确计算换行
         vp_width = self.text_edit.viewport().width()
@@ -11369,8 +11394,50 @@ class PlainTextViewer(QWidget):
         doc.setDocumentMargin(src.documentMargin())
         return doc
 
-    def _update_height(self):
+    def _try_incremental_height(self) -> bool:
+        """[PERF P0] 流式增量高度：直接读显示文档真实排版高度，O(1) 上报。
+
+        依据（offscreen 实测）：append 后 documentLayout().documentSize() 立即
+        正确（无需 processEvents，与独立文档全量测量逐像素一致），读缓存为
+        O(1)。比行数估算方案零误差，无需基线/行高状态。
+
+        边界回退全量（返回 False）：未 sync_width 初始态（宽度自适应语义未定）、
+        viewport/气泡未定型（隐藏/未布局）、估算撞 MAX_HEIGHT（需全量路径确认
+        并写 _tall_cap，此后由既有 O(1) 快速路径接管）。宽度自适应与 _tall_cap
+        确认始终由全量路径负责；流式中宽度稳定，增量路径只更新高度不移动宽度。
+        """
+        cap = self._width_cap
+        if cap >= 100000:  # 初始未限宽态，几何不代表真实窗口
+            return False
+        base_w = self._stream_base_w
+        if base_w is None or self.width() != base_w:
+            return False  # 宽度尚未由全量路径定型（懒创建/被外部改宽）→ 回退全量
+        if not self.isVisible():
+            return False
+        # 🛡️ 隐藏态 viewport().width() 是陈旧值（fuzz seed60 实测：widget 宽 154
+        # 而 viewport 停 64），显示文档按陈旧窄宽排版 → documentSize 严重虚高。
+        # 隐藏态一律回退全量（独立文档按当前 cap 测量，与原版口径一致）。
+        vp_w = self.text_edit.viewport().width()
+        if vp_w <= 20:
+            return False  # 未布局/隐藏态，显示文档排版宽不可信
+        doc_h = self.text_edit.document().documentLayout().documentSize().height()
+        if doc_h <= 0:
+            return False
+        h = int(math.ceil(doc_h)) + 12  # 上下边距（与全量路径同式）
+        if h >= self.MAX_HEIGHT:
+            return False  # 撞限 → 全量确认 + 写 _tall_cap
+        h = max(40, h)
+        if self.height() != h:
+            self.setFixedSize(base_w, h)
+            self.contentHeightChanged.emit(h)
+        return True
+
+    def _update_height(self, incremental: bool = False):
         """宽度自适应 + 高度重算：气泡按未换行理想宽度收缩，不占满整行"""
+        # [PERF P0] 流式增量快速路径：append_chunk 后只更新高度（显示文档真实排版
+        # 高度已增量就绪），跳过独立文档全量测量。失败自动落到下方全量主体。
+        if incremental and self._try_incremental_height():
+            return
         # [PERF] 超大文本快速路径：跳过全文档布局，O(1) 判定 (cap, MAX_HEIGHT)。
         # 依据一（单调缓存）：曾实测高度撞上限的宽度 _tall_cap，更窄只会更高；
         # 依据二（字符阈值）：字符数达“必然超高”阈值，最乐观排版也撞上限。
@@ -11459,6 +11526,7 @@ class PlainTextViewer(QWidget):
         # 默认 sizeHint(272px) 分配宽度，气泡实际展不开（AlignRight 下尤甚）
         if self.width() != bubble_w or self.height() != h:
             self.setFixedSize(bubble_w, h)
+            self._stream_base_w = bubble_w  # 宽度定型 → 流式增量高度基线就绪
             self.contentHeightChanged.emit(h)
 
     def resizeEvent(self, event):

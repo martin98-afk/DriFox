@@ -2,7 +2,7 @@
 """欢迎卡片「更新」tab — GitHub Releases 后台拉取 + 异步刷新派发。
 
 线程模型：
-- ``ChangelogFetcher`` 继承 ``QThread``，在子线程跑 ``httpx`` 拉取；
+- ``ChangelogFetcher`` 继承 ``QThread``，在子线程经能力池 ``net.http`` 拉取；
 - 完成后 ``emit finished`` / ``error`` 到 ``_Bridge``（主线程 QObject），
   PyQt 跨线程自动 ``QueuedConnection``，所有缓存写与 ``UIEventBus.publish``
   都在**主线程**执行，避免 MessageCard 子线程触碰 PyQt 控件。
@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import json
 import threading
 import time
 from html import escape
@@ -200,12 +201,25 @@ class ChangelogFetcher(QThread):
     def __init__(self, etag: str = "", parent=None):
         super().__init__(parent)
         self._etag = etag
+        # 能力函数在主线程取好，子线程只做调用（池构建会解析宿主窗口）
+        try:
+            self._request = _caps("net.http")
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[welcome_changelog] 取 net.http 能力失败: {e}")
+            self._request = None
+
+    @staticmethod
+    def _header(resp_headers: dict, name: str) -> str:
+        """不区分大小写取响应头（能力层返回的是普通 dict）。"""
+        wanted = name.lower()
+        for key, value in (resp_headers or {}).items():
+            if str(key).lower() == wanted:
+                return str(value)
+        return ""
 
     def run(self) -> None:
-        try:
-            import httpx
-        except ImportError:
-            self.error.emit("缺少 httpx 依赖")
+        if not callable(self._request):
+            self.error.emit("缺少 net.http 能力")
             return
         headers = {
             "Accept": "application/vnd.github+json",
@@ -215,23 +229,26 @@ class ChangelogFetcher(QThread):
             headers["If-None-Match"] = self._etag
         url = f"https://api.github.com/repos/{_REPO}/releases?per_page=5"
         try:
-            with httpx.Client(timeout=httpx.Timeout(8.0)) as client:
-                resp = client.get(url, headers=headers)
+            out = self._request(url, headers=headers, timeout=8.0)
         except Exception as e:
             self.error.emit(f"网络错误：{e}")
             return
-        if resp.status_code == 304:
+        if not out.get("ok"):
+            self.error.emit(f"网络错误：{out.get('error', '')}")
+            return
+        status = int(out.get("status") or 0)
+        if status == 304:
             self.finished.emit([])
             return
-        if resp.status_code != 200:
-            self.error.emit(f"GitHub API {resp.status_code}：{resp.text[:120]}")
+        if status != 200:
+            self.error.emit(f"GitHub API {status}：{str(out.get('text') or '')[:120]}")
             return
         try:
-            data = resp.json()
+            data = json.loads(out.get("text") or "[]")
         except Exception as e:
             self.error.emit(f"解析失败：{e}")
             return
-        new_etag = resp.headers.get("ETag", "")
+        new_etag = self._header(out.get("headers") or {}, "ETag")
         releases: List[dict] = []
         # 线程私有 markdown 实例（与 message_card 同源经验：全局 md 非线程安全，
         # 共享会偶发 0.4% 表格串扰 / 渲染失败）

@@ -365,7 +365,7 @@ class TestProbeHealth:
 
 
 class TestProbeModelPick:
-    """探活模型选择：模型列表中输入价最低者优先，无价格数据回退当前模型"""
+    """探活候选：模型列表中输入价升序前 3 个，命中一个即停；无价格数据回退当前模型"""
 
     def _stub_models_dev(self, monkeypatch, per_provider):
         from app.core.modelmeta import models_dev_sync as mds
@@ -396,32 +396,53 @@ class TestProbeModelPick:
             },
         )
         self._stub_registry(monkeypatch)
-        picked = service._pick_probe_model(
+        picked = service._pick_probe_models(
             {"provider_name": "价P", "模型名称": "expensive", KEY_MODELS: ["expensive", "cheap", "free"]}
         )
-        assert picked == "free", "输入价 0 的免费模型是探测成本最低选择"
+        assert picked[0] == "free", "输入价 0 的免费模型是探测成本最低选择"
+
+    def test_picks_top3_by_price(self, service, monkeypatch):
+        """候选只要价格最低的 3 个，升序排列（第 4 名及以后不试）"""
+        self._stub_models_dev(
+            monkeypatch,
+            {
+                "free": {"cost": {"input": 0.0}},
+                "cheap": {"cost": {"input": 0.3}},
+                "mid": {"cost": {"input": 1.2}},
+                "pricey": {"cost": {"input": 9.0}},
+            },
+        )
+        self._stub_registry(monkeypatch)
+        picked = service._pick_probe_models(
+            {
+                "provider_name": "价P",
+                "模型名称": "pricey",
+                KEY_MODELS: ["pricey", "mid", "cheap", "free"],
+            }
+        )
+        assert picked == ["free", "cheap", "mid"], "按输入价升序取前 3，超出 3 个不入选"
 
     def test_fallback_to_current_when_no_pricing(self, service, monkeypatch):
         """列表内模型全部无价格数据 → 回退「模型名称」（行为不变）"""
         mds = self._stub_models_dev(monkeypatch, {"m1": {"cost": {"input": None}}, "m2": {}})
         self._stub_registry(monkeypatch)
-        picked = service._pick_probe_model(
+        picked = service._pick_probe_models(
             {"provider_name": "价P", "模型名称": "m1", KEY_MODELS: ["m1", "m2"]}
         )
-        assert picked == "m1"
+        assert picked == ["m1"]
 
     def test_fallback_when_no_models_dev_id(self, service, monkeypatch):
         """插件未声明 models_dev_id（自定义网关）→ 回退「模型名称」"""
         self._stub_registry(monkeypatch, dev_id="")
-        picked = service._pick_probe_model(
+        picked = service._pick_probe_models(
             {"provider_name": "价P", "模型名称": "m1", KEY_MODELS: ["a", "b"]}
         )
-        assert picked == "m1"
+        assert picked == ["m1"]
 
     def test_fallback_when_models_key_missing(self, service):
         """无「模型列表」键 → 回退「模型名称」，不碰 models.dev"""
-        picked = service._pick_probe_model({"provider_name": "价P", "模型名称": "m1"})
-        assert picked == "m1"
+        picked = service._pick_probe_models({"provider_name": "价P", "模型名称": "m1"})
+        assert picked == ["m1"]
 
     def test_rest_ping_uses_picked_model(self, service, monkeypatch):
         """REST 探测的 body.model 用探活模型（最便宜），非配置当前模型"""
@@ -448,6 +469,126 @@ class TestProbeModelPick:
         )
         assert status == STATUS_OK
         assert bodies and bodies[0]["model"] == "cheap", "探活应用列表内最便宜的模型"
+
+    def _stub_four_models(self, monkeypatch):
+        self._stub_models_dev(
+            monkeypatch,
+            {
+                "free": {"cost": {"input": 0.0}},
+                "cheap": {"cost": {"input": 0.3}},
+                "mid": {"cost": {"input": 1.2}},
+                "pricey": {"cost": {"input": 9.0}},
+            },
+        )
+        self._stub_registry(monkeypatch)
+
+    def test_rest_falls_back_to_next_model(self, service, monkeypatch):
+        """最便宜模型 404（下线/路由缺失）→ 换下一个候选，第二个调通即绿"""
+        import requests as _requests
+
+        self._stub_four_models(monkeypatch)
+        seen = []
+
+        def responder(url, **k):
+            model = (k.get("json") or {}).get("model")
+            seen.append(model)
+            if model == "free":
+                return SimpleNamespace(status_code=404, text='{"error":"model not found"}')
+            return SimpleNamespace(status_code=200, text="{}")
+
+        monkeypatch.setattr(_requests, "post", responder)
+        status = service._probe_health(
+            {
+                "provider_name": "价P",
+                "API_URL": "https://api.x.com/v1",
+                "API_KEY": "k",
+                "模型名称": "pricey",
+                KEY_MODELS: ["free", "cheap", "mid"],
+            },
+            "c1",
+        )
+        assert status == STATUS_OK
+        assert seen == ["free", "cheap"], "free 404 后换 cheap 调通即停，mid 不再探测"
+
+    def test_rest_stops_at_first_ok(self, service, monkeypatch):
+        """第一个候选就调通 → 只发一次请求，剩余候选不浪费额度"""
+        import requests as _requests
+
+        self._stub_four_models(monkeypatch)
+        seen = []
+
+        def responder(url, **k):
+            seen.append((k.get("json") or {}).get("model"))
+            return SimpleNamespace(status_code=200, text="{}")
+
+        monkeypatch.setattr(_requests, "post", responder)
+        status = service._probe_health(
+            {
+                "provider_name": "价P",
+                "API_URL": "https://api.x.com/v1",
+                "API_KEY": "k",
+                "模型名称": "pricey",
+                KEY_MODELS: ["free", "cheap", "mid"],
+            },
+            "c1",
+        )
+        assert status == STATUS_OK
+        assert seen == ["free"]
+
+    def test_rest_auth_failed_stops_all_candidates(self, service, monkeypatch):
+        """401 属凭据/余额层，换模型无意义 → 立即停并返回 auth_failed"""
+        import requests as _requests
+
+        self._stub_four_models(monkeypatch)
+        seen = []
+
+        def responder(url, **k):
+            seen.append((k.get("json") or {}).get("model"))
+            return SimpleNamespace(status_code=401, text="unauthorized")
+
+        monkeypatch.setattr(_requests, "post", responder)
+        status = service._probe_health(
+            {
+                "provider_name": "价P",
+                "API_URL": "https://api.x.com/v1",
+                "API_KEY": "k",
+                "模型名称": "pricey",
+                KEY_MODELS: ["free", "cheap", "mid"],
+            },
+            "c1",
+        )
+        assert status == STATUS_AUTH_FAILED
+        assert seen == ["free"], "鉴权失败不换模型重试"
+
+    def test_hook_falls_back_to_next_model(self, service, monkeypatch):
+        """health_probe 钩子返回 unreachable → 换下一个候选；ok 即停"""
+        from app.plugins.registries.provider_registry import ProviderDef, ProviderRegistry
+
+        self._stub_four_models(monkeypatch)
+        seen = []
+
+        def probe(cfg):
+            seen.append(cfg.get("探活模型"))
+            return STATUS_UNREACHABLE if cfg.get("探活模型") == "free" else STATUS_OK
+
+        reg = ProviderRegistry()
+        reg.register(
+            ProviderDef(name="价P", models_dev_id="devprov", capabilities={"health_probe": probe}),
+            source="plugin:test",
+        )
+        monkeypatch.setattr(ProviderRegistry, "_instance", reg)
+        monkeypatch.setattr(ProviderRegistry, "get_instance", classmethod(lambda cls: reg))
+        status = service._probe_health(
+            {
+                "provider_name": "价P",
+                "API_KEY": "k",
+                "模型名称": "pricey",
+                KEY_MODELS: ["free", "cheap", "mid"],
+            },
+            "c1",
+        )
+        assert status == STATUS_OK
+        assert seen == ["free", "cheap"]
 
     def test_hook_receives_probe_model_key(self, service, monkeypatch):
         """health_probe 钩子收到的 config 带「探活模型」键（插件可选消费）"""

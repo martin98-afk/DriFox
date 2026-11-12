@@ -69,7 +69,8 @@ from PyQt5.QtGui import (
     QWheelEvent,
 )
 from PyQt5.QtSvg import QSvgRenderer
-from PyQt5.QtWebEngineWidgets import QWebEnginePage, QWebEngineSettings, QWebEngineView
+# [T11] 顶层三类 WebEngine import 已删除：全文件零代码使用（仅注释提及），
+# QtWebEngineWidgets 由 main.py QApp 创建前强制加载 + card_viewers 类继承链维持
 from PyQt5.QtWidgets import (
     QApplication,
     QFrame,
@@ -145,11 +146,11 @@ from app.widgets.card_render_core import (
     MessageBubble,
     TabHoverSyncHost,
     TabIndicatorController,
-    _CODE_FONT_SIZE,
     _FILE_EDIT_TOOLS_FALLBACK_TEXT,
     _MAX_CHART_PAYLOAD_B64,
-    _PLACEHOLDER_QSS,
+    _placeholder_qss,
     _QWIDGETSIZE_MAX,
+    _refresh_code_font_size,
     _RESIZE_GHOST_QSS,
     _STREAM_BAND_BOTTOM,
     _STREAM_BAND_H,
@@ -166,7 +167,6 @@ from app.widgets.card_render_core import (
     STREAM_HEIGHT_TRACK_FACTOR,
     STREAM_HEIGHT_TRACK_FAR_PX,
     STREAM_HEIGHT_TRACK_MAX_FACTOR,
-    _THINK_SNAKE_SVG,
     _count_think_tool_prefix,
     _edit_tools,
     _extract_closed_segments,
@@ -664,9 +664,9 @@ class MessageCard(SimpleCardWidget):
         # 版本号），主题切换无需清空——旧版本条目永不命中，深浅来回切换
         # 直接命中各自版本桶，无需逐卡 clear。
         # 同步全局性能缓存（图标前缀和字号），确保下次渲染使用新主题
+        # [PERF L1] 字号缓存已惰性化：刷新失效（下渲染取新档位）
         _update_icon_prefix()
-        global _CODE_FONT_SIZE
-        _CODE_FONT_SIZE = scale_font_size(13)
+        _refresh_code_font_size()
         # 刷新主题颜色
         self._theme = self._build_theme(self.role, self.error)
         self._base_bg = self._theme["bg"]
@@ -2234,7 +2234,7 @@ class MessageCard(SimpleCardWidget):
             # 欢迎卡片使用懒渲染：占位符，不立即创建 QWebEngine
             # 避免首帧 Chromium 进程创建阻塞主线程（优化前首帧卡顿 200-500ms 的根因）
             placeholder = QLabel("加载中...", self)
-            placeholder.setStyleSheet(_PLACEHOLDER_QSS)
+            placeholder.setStyleSheet(_placeholder_qss())
             placeholder.setAlignment(Qt.AlignCenter)
             self._viewer_layout.addWidget(placeholder)
             main.addWidget(self._viewer_container)
@@ -2248,7 +2248,7 @@ class MessageCard(SimpleCardWidget):
         elif self.role != "user":  # user 已在 _setup_user_bubble 创建，不再进入懒渲染
             # 懒渲染：占位符，不立即创建QWebEngine，进入可视区域再创建
             placeholder = QLabel("加载中...", self)
-            placeholder.setStyleSheet(_PLACEHOLDER_QSS)
+            placeholder.setStyleSheet(_placeholder_qss())
             placeholder.setAlignment(Qt.AlignCenter)
             self._viewer_layout.addWidget(placeholder)
             if self.role == "assistant":
@@ -4415,6 +4415,33 @@ class MessageCard(SimpleCardWidget):
                     parts.append("![image](uploaded_image)")
                 elif image_url:
                     parts.append(f"![image]({image_url})")
+                else:
+                    parts.append("[图片]")
+
+            elif bt == "image_ref":
+                # [A2] 落盘引用块：解析 persist 文件路径拼 file:/// 绝对 URL。
+                # 拼接与加载口径对齐既有 file:// 预览路径（card_viewers
+                # _decode_image_url_to_pixmap: file:// → toLocalFile；卡片
+                # 页面 file:// 白名单直载），缺 file 字段回退占位。
+                ref = block.get("image_ref", {}) or {}
+                fname = str(ref.get("file", "") or "")
+                if fname:
+                    from pathlib import Path as _Path
+
+                    from app.utils.utils import get_app_data_dir
+
+                    # resolve() 锚定 cwd 成绝对路径：get_app_data_dir() 可能返回
+                    # 相对路径（.drifox），fromLocalFile 吃相对路径产出的 file: URL
+                    # 缺 authority，QWebEngineView/预览解析都不认
+                    fpath = (
+                        _Path(get_app_data_dir())
+                        .resolve()
+                        / "screenshots"
+                        / "persisted"
+                        / str(ref.get("session_id", "") or "")
+                        / fname
+                    )
+                    parts.append(f"![image]({QUrl.fromLocalFile(str(fpath)).toString()})")
                 else:
                     parts.append("[图片]")
 

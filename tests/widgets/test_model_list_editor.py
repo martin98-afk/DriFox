@@ -711,3 +711,15 @@ class TestSaveEmptyConfirm:
         card.saved.connect(lambda name, info: saved.update(info=info))
         card._on_save()
         assert saved.get("info", {}).get("模型名称") == ""
+
+
+def test_non_chat_models_are_not_text_filtered():
+    from app.widgets.cards.settings.provider_edit_card import filter_fetched_models
+
+    all_models = ["gpt-4o", "dall-e-3", "whisper-1", "cogvideo-5b", "text-embedding-3"]
+    chat, filtered = filter_fetched_models(all_models, "chat")
+    assert "gpt-4o" in chat
+    assert "dall-e-3" not in chat
+    gen, gen_filtered = filter_fetched_models(all_models, "image_generation")
+    assert gen == all_models
+    assert gen_filtered == []

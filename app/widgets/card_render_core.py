@@ -74,8 +74,16 @@ from app.widgets.flow_layout import FlowLayout
 from app.widgets.modules.message_bubble import MessageBubble, ensure_bubble_contrast
 
 # 懒渲染占位 QSS（welcome / assistant 两条路径共用，T35 去重）：
-# 依赖 scale_font_size / get_font_family_css，故在 import 之后求值。
-_PLACEHOLDER_QSS = f"color: #888888; font-size: {scale_font_size(14)}px; padding: 8px; {get_font_family_css()}"
+# [PERF L1] 惰性化：原模块级 f-string 在 import 期求值，级联触发 scale_font_size /
+# get_font_family_css → design_tokens → config.Settings → 主题校验器 → theme_manager
+# 全量解析 70 个主题 YAML（cProfile 1.036s，无 profile 口径 350-400ms），
+# 占 import main_widget 的一半——启动关键路径为一条 placeholder 颜色字符串
+# 付出整个主题系统冷加载。改首次调用时求值并缓存（首帧渲染期，时机后移、
+# 功能不变）。
+@lru_cache(maxsize=1)
+def _placeholder_qss() -> str:
+    return f"color: #888888; font-size: {scale_font_size(14)}px; padding: 8px; {get_font_family_css()}"
+
 # resize 占位幽灵框 QSS（两处共用）
 _RESIZE_GHOST_QSS = """
                 QFrame {
@@ -265,7 +273,23 @@ _STREAM_BAND_REPAINT_PAD = 1
 # `_update_icon_prefix()` 换成 `qrc:/icons_light`，**且只能经 `current_icon_prefix()`
 # 读**——见其 docstring 的导入陷阱。
 _ICON_PREFIX_CACHE: str = "qrc:/icons"
-_CODE_FONT_SIZE: int = scale_font_size(13)
+
+@lru_cache(maxsize=1)
+def _code_font_size() -> int:
+    """代码块字号（用户字号档位缩放，基线 13）。
+
+    [PERF L1] 惰性化：原模块级 ``_CODE_FONT_SIZE = scale_font_size(13)`` 在
+    import 期触发 config.Settings 装配 → 主题校验 → 70 主题 YAML 全量解析
+    （cProfile 0.918s）。改首次调用求值；字号/主题切换链经
+    ``_refresh_code_font_size()`` 失效后新值立即生效（语义等价原 global 重绑定）。
+    """
+    return scale_font_size(13)
+
+
+def _refresh_code_font_size() -> None:
+    """字号/主题切换后失效代码字号缓存并立即重算（切换后新值立即可读）。"""
+    _code_font_size.cache_clear()
+    _code_font_size()
 
 
 def _update_icon_prefix():
@@ -947,11 +971,11 @@ def _wrap_code_blocks_with_copy_button_web(
         html: markdown 渲染后的 HTML
         icon_prefix: 已废弃占位参数（保留签名兼容线程池快照）；图标已改 CSS mask，
                   不再写主题相关的 qrc 前缀进 HTML
-        font_size: 代码字号（None=用全局 _CODE_FONT_SIZE，主线程默认）
+        font_size: 代码字号（None=用全局代码字号缓存，主线程默认）
         formatter: Pygments formatter（None=用全局缓存 formatter，主线程默认；
                    B3 线程池 worker 必须传入线程局部 formatter，避免跨线程共享）
     """
-    _font_size = font_size if font_size is not None else _CODE_FONT_SIZE
+    _font_size = font_size if font_size is not None else _code_font_size()
 
     def replacer(match):
         lang = (match.group(1) or "").replace("language-", "").strip()
@@ -1279,21 +1303,27 @@ _CONCLUSION_MARKERS = (
 )
 
 
-_THINK_SNAKE_SIZE: int = scale_icon_size(12)
 # ★ 着色用 #RRGGBB + stroke-opacity：QtSvg（QSvgRenderer）不支持 CSS rgba() 函数——
 # 解析失败后 stroke 无效，整个图标渲染成 0 像素全透明（原生 spinner 全空白）。
 # WebEngine 两种写法等价；stroke-opacity 对浏览器与 QtSvg 双兼容。
-_THINK_SNAKE_SVG = (
-    f'<svg xmlns="http://www.w3.org/2000/svg" width="{_THINK_SNAKE_SIZE}" height="{_THINK_SNAKE_SIZE}" viewBox="0 0 24 24">'
-    '<circle cx="12" cy="12" r="8" fill="none" stroke="#ffc832" stroke-opacity="0.06" stroke-width="2.5" />'
-    '<circle cx="12" cy="12" r="8" fill="none" stroke="#ffc832" stroke-opacity="0.2" stroke-width="2.5"'
-    ' stroke-linecap="round" stroke-dasharray="20 30" class="think-snake-arc" />'
-    '<circle cx="12" cy="12" r="8" fill="none" stroke="#ffc832" stroke-opacity="0.55" stroke-width="2.5"'
-    ' stroke-linecap="round" stroke-dasharray="12 38" class="think-snake-arc think-snake-body" />'
-    '<circle cx="12" cy="12" r="8" fill="none" stroke="#ffc832" stroke-opacity="1" stroke-width="2.5"'
-    ' stroke-linecap="round" stroke-dasharray="6 44" class="think-snake-arc think-snake-head" />'
-    "</svg>"
-)
+# [PERF L1] 惰性化：原模块级链 _THINK_SNAKE_SIZE = scale_icon_size(12) → SVG f-string
+# 在 import 期触发 config.Settings 装配 → 70 主题 YAML 全量解析（与 _CODE_FONT_SIZE
+# 同构，第三触发点）。改首次调用求值并缓存；缓存语义与原「模块级冻结值」等价
+#（不随字号切换更新，为既有行为，非本次变更引入）。
+@lru_cache(maxsize=1)
+def _think_snake_svg() -> str:
+    size = scale_icon_size(12)
+    return (
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{size}" height="{size}" viewBox="0 0 24 24">'
+        '<circle cx="12" cy="12" r="8" fill="none" stroke="#ffc832" stroke-opacity="0.06" stroke-width="2.5" />'
+        '<circle cx="12" cy="12" r="8" fill="none" stroke="#ffc832" stroke-opacity="0.2" stroke-width="2.5"'
+        ' stroke-linecap="round" stroke-dasharray="20 30" class="think-snake-arc" />'
+        '<circle cx="12" cy="12" r="8" fill="none" stroke="#ffc832" stroke-opacity="0.55" stroke-width="2.5"'
+        ' stroke-linecap="round" stroke-dasharray="12 38" class="think-snake-arc think-snake-body" />'
+        '<circle cx="12" cy="12" r="8" fill="none" stroke="#ffc832" stroke-opacity="1" stroke-width="2.5"'
+        ' stroke-linecap="round" stroke-dasharray="6 44" class="think-snake-arc think-snake-head" />'
+        "</svg>"
+    )
 
 
 # 页脚 Review 按钮 SVG：放大镜 + 对勾，象征"审查"。
@@ -1440,7 +1470,7 @@ def _render_tool_streaming_block(
     cn_name = _get_tool_cn_name(tool_name) if not is_mcp else display_name
 
     # spinner
-    spinner_html = f'<span class="tool-streaming-spinner">{_THINK_SNAKE_SVG}</span>'
+    spinner_html = f'<span class="tool-streaming-spinner">{_think_snake_svg()}</span>'
 
     # 预览文本（右侧徽标是独立兄弟节点，避免长文本 ellipsis 把徽标裁掉）
     preview_display = escape(preview) if preview else "准备中..."

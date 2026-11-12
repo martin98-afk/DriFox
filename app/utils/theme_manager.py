@@ -8,9 +8,12 @@
 - 参考技能加载模式设计（多层搜索 + 合并）
 """
 
+import hashlib
 import logging
 import os
+import pickle
 import re
+import threading
 import time
 import weakref
 from functools import lru_cache
@@ -162,21 +165,118 @@ class ThemeManager:
 
     @staticmethod
     @lru_cache(maxsize=256)
-    def _parse_yaml_cached(path_str: str, mtime_ns: int) -> dict:
-        """按 (路径, mtime_ns) 缓存 YAML 解析结果（文件变化自动失效）。
+    def _parse_yaml_cached(path_str: str, mtime_ns: int, size: int) -> dict:
+        """按 (路径, mtime_ns, size) 缓存 YAML 解析结果（文件变化自动失效）。
 
         缓存 key 含 mtime：主题文件被编辑保存后 mtime 变化 → 自动重新解析，
         reload() 无需手动清缓存即可拿到新内容。只缓存纯净的解析结果，
         元信息（_path/_dir/_is_builtin/_source）由调用方写入拷贝，不污染缓存。
+
+        [PERF L2] 跨启动持久层：解析产物 pickle 到聚合文件
+        <app_data>/cache/theme_yaml/aggregate.pickle，
+        条目键 = sha1(路径|mtime_ns|size) 弱签名——文件变化即新签名 → miss →
+        重解析（旧条目自然废弃，聚合表尾部无界增长极慢：单条 KB 级 × 变更频率，
+        不做主动 GC，注释说明即可）。二次冷启动单次反序列化命中，免磁盘 IO +
+        PyYAML 全量解析（70 主题 ~350-400ms → 实测 <100ms）。
+        - pickle 安全边界：缓存文件仅本程序写入（app_data 内），读侧全量
+          try/except（损坏/缺文件/任何异常 → 当空表 → 静默回退正常解析，
+          缓存问题绝不阻塞/崩溃主题加载）
+        - 写入：解析后标 dirty + 0.5s 去抖 Timer 后台合并写（临时文件 +
+          os.replace 原子替换），不占启动路径、首启批量不重复写
         """
+        sig = ThemeManager._yaml_cache_sig(path_str, mtime_ns, size)
+        agg = ThemeManager._load_yaml_agg()
+        cached = agg.get(sig)
+        if cached is not None:
+            return cached
         with open(path_str, "r", encoding="utf-8") as f:
-            return yaml.safe_load(f)
+            parsed = yaml.safe_load(f)
+        if isinstance(parsed, dict):
+            ThemeManager._store_yaml_agg_entry(sig, parsed)
+        return parsed
+
+    # 跨启动聚合缓存：进程内态（聚合表/去抖 Timer/dirty 集），锁内更新锁外 IO
+    _yaml_agg_cache: Optional[dict] = None
+    _yaml_agg_loaded = False
+    _yaml_agg_dirty: set = set()
+    _yaml_agg_timer: Optional[threading.Timer] = None
+    _yaml_agg_lock = threading.Lock()
+
+    @staticmethod
+    def _yaml_cache_sig(path_str: str, mtime_ns: int, size: int) -> str:
+        """条目弱签名：sha1(路径|mtime_ns|size)。文件变化即新签名 → 天然失效。"""
+        return hashlib.sha1(f"{path_str}|{mtime_ns}|{size}".encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _yaml_agg_path() -> Path:
+        from app.utils.utils import get_app_data_dir
+
+        return get_app_data_dir() / "cache" / "theme_yaml" / "aggregate.pickle"
+
+    @staticmethod
+    def _load_yaml_agg() -> dict:
+        """进程内懒加载聚合表（每进程只读盘一次）；损坏/缺文件 → 当空表。"""
+        if ThemeManager._yaml_agg_loaded:
+            return ThemeManager._yaml_agg_cache or {}
+        with ThemeManager._yaml_agg_lock:
+            if ThemeManager._yaml_agg_loaded:
+                return ThemeManager._yaml_agg_cache or {}
+            data: dict = {}
+            try:
+                p = ThemeManager._yaml_agg_path()
+                if p.exists():
+                    with open(p, "rb") as f:
+                        loaded = pickle.load(f)
+                    if isinstance(loaded, dict) and isinstance(loaded.get("entries"), dict):
+                        data = loaded["entries"]
+            except Exception:
+                data = {}  # 损坏/任何异常 → 当空表（静默回退正常解析）
+            ThemeManager._yaml_agg_cache = data
+            ThemeManager._yaml_agg_loaded = True
+            return data
+
+    @staticmethod
+    def _store_yaml_agg_entry(sig: str, parsed: dict) -> None:
+        """内存表入条目 + 标 dirty + 0.5s 去抖后台合并写（首启 70 条只写一次）。"""
+        with ThemeManager._yaml_agg_lock:
+            ThemeManager._yaml_agg_loaded = True
+            if ThemeManager._yaml_agg_cache is None:
+                ThemeManager._yaml_agg_cache = {}
+            ThemeManager._yaml_agg_cache[sig] = parsed
+            ThemeManager._yaml_agg_dirty.add(sig)
+            if ThemeManager._yaml_agg_timer is None:
+                timer = threading.Timer(0.5, ThemeManager._flush_yaml_agg)
+                timer.daemon = True
+                ThemeManager._yaml_agg_timer = timer
+                timer.start()
+
+    @staticmethod
+    def _flush_yaml_agg() -> None:
+        """把 dirty 条目合并写聚合文件（临时文件 + os.replace 原子替换）；失败静默。"""
+        with ThemeManager._yaml_agg_lock:
+            dirty = set(ThemeManager._yaml_agg_dirty)
+            ThemeManager._yaml_agg_dirty.clear()
+            if ThemeManager._yaml_agg_timer is not None:
+                ThemeManager._yaml_agg_timer.cancel()
+                ThemeManager._yaml_agg_timer = None
+            if not dirty:
+                return
+            snapshot = dict(ThemeManager._yaml_agg_cache or {})
+        try:
+            p = ThemeManager._yaml_agg_path()
+            p.parent.mkdir(parents=True, exist_ok=True)
+            tmp = p.with_suffix(".tmp")
+            with open(tmp, "wb") as f:
+                pickle.dump({"version": 1, "entries": snapshot}, f, protocol=pickle.HIGHEST_PROTOCOL)
+            os.replace(tmp, p)
+        except Exception:
+            pass  # 缓存写失败静默（不占启动路径、不崩溃）
 
     def _load_yaml(self, yaml_path: Path, theme_dir: Optional[Path], is_builtin: bool):
         """加载单个主题 YAML（带 mtime 缓存，同文件未变化不重复解析）"""
         try:
-            mtime_ns = yaml_path.stat().st_mtime_ns
-            parsed = self._parse_yaml_cached(str(yaml_path), mtime_ns)
+            st = yaml_path.stat()
+            parsed = self._parse_yaml_cached(str(yaml_path), st.st_mtime_ns, st.st_size)
             if not parsed or not parsed.get("id"):
                 return
             # 浅拷贝：下方写入 _path/_dir/_is_builtin/_source 元信息及

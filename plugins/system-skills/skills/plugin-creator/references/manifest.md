@@ -52,12 +52,16 @@ python tools/validate_plugins.py
 | `license` | string | 无强制默认 | SPDX 标识符（现有用户插件 GPL-3.0-or-later 与 MIT 均有） |
 | `type` | enum | `"user"` | `"user"`（用户插件）\| `"system"`（系统级，需签名） |
 | `keywords` | string[] | 无 | 检索关键词 |
+| `display_name` | object | 无 | 语言码 → 展示名，如 `{"zh": "上下文洞察"}`。市场卡片名称取它，缺了英文 slug 直接顶到用户面前 |
+| `platforms` | string[] | 无 | 平台白名单 `"windows"` / `"linux"` / `"darwin"`。**不声明 = 全平台**；声明后不匹配的平台装不上（市场置灰 + 加载期拒载） |
+| `min_host_version` | string | 无 | 宿主最低版本（SemVer）。**不声明 = 恒兼容**；声明后低于该版本的宿主市场置灰、加载拒载 |
 | `drifox` | object | 无 | DriFox 兼容性声明 |
 | `dependencies` | object | 无 | 插件间依赖 + 第三方 pip 依赖声明（见下节） |
 | `icon` | object | 无 | `{"light": "icon.svg", "dark": "icon_dark.svg"}` |
 | `config_schema` | object | 无 | E1 配置契约，见下节 |
 | `api_version` | int | `1` | 插件 API 契约版本。`>= 2` 时 `capabilities` 缺失按空清单处理（从严） |
 | `capabilities` | string[] | 无 | 能力池声明，见下节 |
+| `module_prefixes` | string[] | 无（默认用目录名） | 热重载/卸载时要摘除的模块前缀。插件自己往 `sys.modules` 塞过与目录名不同名的一级包时才需声明 |
 
 ### `components` 子字段
 
@@ -88,6 +92,33 @@ python tools/validate_plugins.py
   "events": ["SessionStart", "PostToolUse"]
 }
 ```
+
+> `drifox.min_version` 是历史字段：宿主**不读**它，真正生效的是下面的 `min_host_version`。新插件别写 `drifox` 块。
+
+### `min_host_version` 该写多少
+
+判据是「**这个插件用到的最晚引入的那条宿主能力，从哪个版本开始有**」，不是「我开发时的宿主版本」，也不是「随手填个保守值」。填高了白丢用户，填低了装完静默缺能力。
+
+定位步骤（在 DriFox 主仓库执行）：
+
+```bash
+# 1. 对每条声明的能力，找它进入源码的提交
+git log -S'"session.history"' --oneline -- app/plugins/capabilities | tail -1
+
+# 2. 把提交锚到版本号（锚点可能是 -beta）
+git describe --tags <commit> --always
+
+# 3. 用 CHANGELOG 的人工描述交叉验证
+awk 'NR<=<行号> && /^## /{h=$0} END{print h}' CHANGELOG.md
+```
+
+取所有能力的**上界**：一条 0.6.13 才有、另一条 0.6.9 就有，写 `0.6.13`。可复查口径：`session.history` 自 v0.6.13 起，`ui.card.hide` 自 v0.6.9 起，`api_version: 2` 契约自 v0.6.10 起。
+
+`api_version: 2` 的插件几乎都有下限，漏写 `min_host_version` 会让老宿主装上注定静默缺能力的插件。
+
+### `platforms` 与 pip 平台键是两套
+
+`platforms` 是**插件整体**能不能装（声明 darwin-only 会让 Windows 用户看不到它）；`dependencies.pip` 里的 `win32`/`linux`/`darwin` 是**依赖按平台分发**。两者独立，声明了 `platforms: ["darwin"]` 就不必再写其他平台的 pip 依赖。
 
 ### `dependencies` 依赖
 

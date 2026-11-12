@@ -102,13 +102,15 @@ class _StripAuthTransport(httpx.HTTPTransport):
         return super().handle_request(request)
 
 
-def build_openai_client(api_key: str, base_url: str, timeout=None):
+def build_openai_client(api_key: str, base_url: str, timeout=None, extra_headers=None):
     """构造 OpenAI client。
 
     参数：
         api_key: 配置中的 API_KEY（可能为空）
         base_url: API 端点
         timeout: SDK 超时（float / httpx.Timeout），None 表示不覆盖默认
+        extra_headers: client 级默认请求头（如 OpenCode 的 x-opencode-session、
+            服务商伪装头）；由 resolve_extra_headers 解析后传入
 
     返回：
         openai.OpenAI 实例。api_key 为空时不发送 Authorization 头。
@@ -119,9 +121,11 @@ def build_openai_client(api_key: str, base_url: str, timeout=None):
     preload_openai_resources()
 
     api_key = (api_key or "").strip()
-    kwargs = {"api_key": api_key or _PLACEHOLDER_API_KEY, "base_url": base_url}
+    kwargs: dict = {"api_key": api_key or _PLACEHOLDER_API_KEY, "base_url": base_url}
     if timeout is not None:
         kwargs["timeout"] = timeout
+    if extra_headers:
+        kwargs["default_headers"] = {str(k): str(v) for k, v in dict(extra_headers).items()}
     if not api_key:
         # 免 key 调用：自定义 transport 剥离 authorization 头；
         # verify 传系统证书链 context（None 时 httpx 走默认 certifi 验证）

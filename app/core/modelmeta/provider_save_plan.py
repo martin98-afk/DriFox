@@ -19,7 +19,7 @@
 from typing import Any, Callable, Dict, Iterable, List, Tuple
 
 # payload 中恒写入的表单键（名称保持历史键名，勿改：它们是磁盘配置的实际字段）
-FORM_KEYS = ("API_URL", "API_KEY", "模型名称", "认证方式", "name")
+FORM_KEYS = ("API_URL", "API_KEY", "模型名称", "认证方式", "name", "capability_type")
 
 
 def filter_disabled_models(models: Iterable[Any], provider_info: Dict[str, Any]) -> List[str]:
@@ -53,9 +53,10 @@ def build_provider_save_plan(
 
     Args:
         form_values: 表单当前值，键为 ``api_url`` / ``api_key`` / ``model`` /
-            ``auth_type`` / ``name`` / ``models``（models 为模型名列表）/
-            ``auto_refresh`` / ``health_check``（bool，双开关；缺省视作 False）/
-            ``fetch_meta``（可选，``{"ts": str, "status": str}`` 手动刷新结果）
+            ``auth_type`` / ``name`` / ``capability_type``（能力类型，缺省 "chat"）/
+            ``models``（models 为模型名列表）/ ``auto_refresh`` / ``health_check``
+            （bool，双开关；缺省视作 False）/ ``fetch_meta``（可选，
+            ``{"ts": str, "status": str}`` 手动刷新结果）
         old_info: 编辑前的 provider_info（用于取 ``config_id`` 与 ``模型列表``）
         extra_fields: 套餐用量等额外字段的当前值（**含空串**；空串是显式清空）
         disabled_models: 「模型关闭列表」（P1-9 OpenCode 风格清单：行内启停开关，
@@ -65,7 +66,7 @@ def build_provider_save_plan(
         ``{"confirm_clear": bool, "payload": dict}``
 
         - ``confirm_clear``：用户清空了模型列表而旧列表非空 → 调用方需弹确认框。
-        - ``payload``：交给 ``apply_provider_save`` 的 provider_info。五键恒存在
+        - ``payload``：交给 ``apply_provider_save`` 的 provider_info。六键恒存在
           （含空串 = 显式清空）；``config_id`` 仅在旧配置有时写入；``模型列表``
           恒写入（空列表同样是显式值）；``模型关闭列表`` 恒写入（含空列表）；
           **两个开关恒写 bool（含 False = 显式关）**；
@@ -92,6 +93,9 @@ def build_provider_save_plan(
         "模型名称": model_value,
         "认证方式": str(form_values.get("auth_type", "") or "").strip(),
         "name": str(form_values.get("name", "") or "").strip(),
+        # 能力类型恒写入（含缺省 "chat"）：apply_provider_save 的 merge 语义是
+        # 显式含键才覆盖，恒写入才能让磁盘老配置（无此键）首次保存后带上
+        "capability_type": str(form_values.get("capability_type", "chat") or "chat").strip(),
     }
 
     # 编辑场景下保留旧 config_id，让 apply_provider_save 能据此判断 (URL, KEY) 是否被改过

@@ -37,6 +37,37 @@
   - 6.6 注意点 — L864–L870
 - **七、依赖关系** — L871–L880
 - **八、注意事项** — L881–L888
+## 〇、轴线与标签的五条硬规则（先读这条，再看具体图表）
+
+图表显得专不专业，不取决于配色，而取决于**文字有没有被裁、留白稳不稳**。下面五条把“看着专业”变成可执行、可验收的约束，下面的模板代码已按此实现。
+
+**1. 左边距按实测宽度算，不准写死。**
+刻度文本宽度随数值位数、字号、字体变化：固定 44px 的框只有 36px 可用，`148.8M`、`1234567` 这类值直接从左侧溢出可视区，截图里只剩后半截。
+
+```python
+def _margin_left(self) -> int:
+    """按最宽刻度文本算左边距，固定值会把大数值裁掉。"""
+    colors = self._colors
+    size = max(round(colors.get("font_size", 14) * 8 / 14), 7)
+    fm = QFontMetrics(QFont(colors.get("font_family", "Microsoft YaHei"), size))
+    top = max([v for _, v in self._data] or [1]) or 1
+    texts = [str(int(top * i / 4)) for i in range(5)]          # 与绘制的刻度文本一致
+    widest = max(fm.horizontalAdvance(t) for t in texts)
+    return max(52 if self.width() >= 420 else 44, widest + 10)  # 旧固定值只当下限
+```
+
+**2. 绘制与命中测试必须用同一个边距。** 两处各写一份 `margin_left = ...` 是 hover 错位的经典原因：改一处忘另一处，点击命中的列和看到的高亮错一格。抽一个 `_margin_left()`，两边都调它。
+
+**3. 大数值给单位，不给完整位数。** 刻度用 `fmt_k`（`1.2k` / `37.2M` / `1.1B`）而不是 `123456789`；hover 再给完整值（悬停显示 `≈ 148,800,000 tokens`，刻度只显示 `148.8M`）。
+
+**4. 悬停说明别用原生 `QToolTip`（深色主题读不清）。** 用插件自绘实底浮层，定位前 `adjustSize()`，`show()` 后同帧再校一次尺寸（否则首帧 0 尺寸会飘到左上角）。详见 `pitfalls.md` §12。
+
+**5. 空态与极端值要有专门分支。** 全零 → 刻度仍画 `0`；单点 → 柱宽不撑满整宽、也不细成一条线；超大值 → 走第 1 条；空列表 → 居中显示“暂无数据”，不是一片空白画布。
+
+> 交验方式：把最大值改成 `148_800_000`、项数改成 1、再全零跑一遍，每轮截图。文字贴边、截断、重叠都算没过。
+
+---
+
 ## 一、柱状图 `_BarChartWidget`
 
 ### 1.1 用途
@@ -59,7 +90,7 @@ from datetime import datetime
 from typing import List, Tuple
 
 from PyQt5.QtCore import QPointF, QRectF, Qt
-from PyQt5.QtGui import QFont, QPainter, QPainterPath, QPen
+from PyQt5.QtGui import QFont, QFontMetrics, QPainter, QPainterPath, QPen
 from PyQt5.QtWidgets import QSizePolicy, QWidget
 
 
@@ -86,6 +117,15 @@ class _BarChartWidget(QWidget):
         self._colors = colors
         self.update()
 
+    def _margin_left(self) -> int:
+        """按最宽刻度文本算左边距（见 §〇 硬规则 1）。"""
+        colors = self._colors
+        size = max(round(colors.get("font_size", 14) * 8 / 14), 7)
+        fm = QFontMetrics(QFont(colors.get("font_family", "Microsoft YaHei"), size))
+        top = max([v for _, v in self._data] or [1]) or 1
+        widest = max(fm.horizontalAdvance(str(int(top * i / 4))) for i in range(5))
+        return max(52 if self.width() >= 420 else 44, widest + 10)
+
     def mouseMoveEvent(self, event):
         """鼠标悬停检测：高亮对应柱体并显示 tooltip"""
         if not self._data:
@@ -95,7 +135,7 @@ class _BarChartWidget(QWidget):
             return
 
         w = self.width()
-        margin_left = 52 if w >= 420 else 44
+        margin_left = self._margin_left()
         chart_w = w - margin_left - (12 if w >= 400 else 8)
 
         if chart_w < 10:
@@ -155,8 +195,8 @@ class _BarChartWidget(QWidget):
         w = self.width()
         h = self.height()
 
-        # ── 自适应边距：窄宽度时缩小边距 ──
-        margin_left = 52 if w >= 420 else 44
+        # ── 自适应边距：轴留白按实测宽度（见 §〇 硬规则 1）──
+        margin_left = self._margin_left()
         margin_right = 12 if w >= 400 else 8
         margin_top = 34
         margin_bottom = 48 if w >= 400 else 40
@@ -341,6 +381,15 @@ class _LineChartWidget(QWidget):
         self._colors = colors
         self.update()
 
+    def _margin_left(self) -> int:
+        """按最宽刻度文本算左边距（见 §〇 硬规则 1）。"""
+        colors = self._colors
+        size = max(round(colors.get("font_size", 14) * 8 / 14), 7)
+        fm = QFontMetrics(QFont(colors.get("font_family", "Microsoft YaHei"), size))
+        top = max([v for _, v in self._data] or [1]) or 1
+        widest = max(fm.horizontalAdvance(str(int(top * i / 4))) for i in range(5))
+        return max(52 if self.width() >= 420 else 44, widest + 10)
+
     def mouseMoveEvent(self, event):
         """鼠标悬停检测：高亮最近的数据点并显示 tooltip"""
         if not self._data or len(self._data) < 1:
@@ -350,7 +399,7 @@ class _LineChartWidget(QWidget):
             return
 
         w = self.width()
-        margin_left = 52 if w >= 420 else 44
+        margin_left = self._margin_left()
         margin_right = 12 if w >= 400 else 8
         chart_w = w - margin_left - margin_right
 
@@ -411,8 +460,8 @@ class _LineChartWidget(QWidget):
         w = self.width()
         h = self.height()
 
-        # 自适应边距（同 _BarChartWidget）
-        margin_left = 52 if w >= 420 else 44
+        # 自适应边距（同 _BarChartWidget，轴留白按实测）
+        margin_left = self._margin_left()
         margin_right = 12 if w >= 400 else 8
         margin_top = 34
         margin_bottom = 48 if w >= 400 else 40

@@ -206,7 +206,7 @@ def test_session_read_empty_without_backend():
     pool = CapabilityRegistry.get_instance().build_pool(
         surface="tool", host=ex, plugin="demo", declared={"session.read"}
     )
-    assert pool["session.read"]() == {"session_id": "", "messages": [], "system_prompt": ""}
+    assert pool["session.read"]() == {"session_id": "", "name": "", "messages": [], "system_prompt": ""}
 
 
 def test_session_write_returns_count():

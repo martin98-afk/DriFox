@@ -123,6 +123,80 @@ def test_panel_show_completed_task_is_idempotent(panel):
     assert first.time_label.text() == "⏱01:15"
 
 
+# ──────────────────── 完成行 FIFO 淘汰（#20）────────────────────
+
+def test_fifo_evicts_oldest_finished_rows(panel):
+    """构造 >MAX_FINISHED_ROWS 完成行 → 最老被清理，计数封顶，清理链完整。"""
+    from tests.plugins.test_system_subagent_run_panel import _run_panel_mod
+
+    limit = _run_panel_mod.MAX_FINISHED_ROWS
+    assert limit == 50, "上限常量锚定（139KB×50≈7MB 封顶口径）"
+
+    total = limit + 5
+    for i in range(total):
+        panel.show_completed_task(f"t{i:03d}", "coder", f"任务{i}")
+
+    finished_ids = panel.task_ids()
+    assert len(finished_ids) == limit, f"完成行计数必须封顶 {limit}（实际 {len(finished_ids)}）"
+    # 最老 5 行被淘汰、最新在册（FIFO 顺序正确）
+    for i in range(5):
+        assert f"t{i:03d}" not in panel._rows, f"最老行 t{i:03d} 应被淘汰"
+    assert f"t{total - 1:03d}" in panel._rows, "最新行必须在册"
+
+def test_fifo_preserves_running_rows(panel):
+    """进行中行永不参与淘汰：50 完成行 + 1 进行中，再补完成行 → running 仍在。"""
+    from tests.plugins.test_system_subagent_run_panel import _run_panel_mod
+
+    limit = _run_panel_mod.MAX_FINISHED_ROWS
+    panel.add_task("running-1", "coder", "还在跑")
+    for i in range(limit):
+        panel.show_completed_task(f"f{i:03d}", "coder", f"历史{i}")
+
+    panel.show_completed_task(f"f{limit:03d}", "coder", "新完成")
+
+    assert panel.has_task("running-1"), "进行中行不得被 FIFO 淘汰"
+    assert len([tid for tid in panel.task_ids() if tid.startswith("f")]) == limit, (
+        "完成行计数封顶"
+    )
+
+def test_finished_rows_frozen_from_tick(panel, monkeypatch):
+    """完成行不再参与每秒 setText：_tick_elapsed 只触达进行中行。"""
+    panel.add_task("run-1", "coder", "进行中")
+    panel.show_completed_task("done-1", "coder", "已完成")
+
+    run_row = panel._rows["run-1"]
+    done_row = panel._rows["done-1"]
+    run_calls, done_calls = [], []
+    monkeypatch.setattr(run_row, "update_elapsed", lambda: run_calls.append(1))
+    monkeypatch.setattr(done_row, "update_elapsed", lambda: done_calls.append(1))
+
+    panel._tick_elapsed()
+
+    assert run_calls and not done_calls, (
+        "完成行必须被 _tick_elapsed 跳过（文本完成后永不变，消除每秒无效遍历）"
+    )
+
+def test_fifo_order_oldest_first(panel):
+    """淘汰顺序 FIFO：按完成时刻序，最早完成的先出（与插入序无关）。"""
+    from tests.plugins.test_system_subagent_run_panel import _run_panel_mod
+
+    limit = _run_panel_mod.MAX_FINISHED_ROWS
+    # old-1 最早完成；running 行最先插入但未完成（不参与排序）；填充行后完成
+    panel.show_completed_task("old-1", "coder", "最早完成")
+    panel.add_task("slow", "coder", "还在跑")
+    for i in range(limit - 1):
+        panel.show_completed_task(f"b{i:03d}", "coder", f"填充{i}")
+    assert panel.has_task("old-1") and panel.has_task("slow")
+
+    # 第 51 个完成行触发淘汰：完成时刻最早的 old-1 先出
+    panel.show_completed_task("new-1", "coder", "压线新行")
+
+    assert "old-1" not in panel._rows, "完成时刻最早的行应最先被淘汰"
+    assert panel.has_task("slow"), "进行中行不受 FIFO 影响"
+    assert panel.has_task("new-1"), "最新完成行应在册"
+    assert "b000" in panel._rows, "次早完成行应在册"
+
+
 def test_panel_emits_height_on_data_change(panel):
     hits = []
     panel.heightChanged.connect(lambda: hits.append(1))
@@ -304,6 +378,17 @@ def test_bridge_finishes_task_with_error_state(bridge_env):
     assert hasattr(row, "_error_label")
 
 
+def test_panel_add_task_accepts_elapsed_baseline(panel):
+    """add_task 支持 elapsed_seconds 基线：迁卡新行从原起点续算不归零。"""
+    import time as _time
+
+    panel.add_task("t1", "coder", "任务", elapsed_seconds=120)
+    row = panel._rows["t1"]
+
+    elapsed = _time.time() - row._start_time
+    assert 110 <= elapsed <= 140, f"迁卡新行计时必须从原起点续算，实际 {elapsed}s"
+    assert "02:00" in row._elapsed_label_detail.text()
+
 def test_bridge_migrates_rows_to_new_card(bridge_env, qapp):
     bridge, reg, host, manager, card = bridge_env
     manager._running_tasks["t1"] = _FakeExecutor("coder", "写代码")
@@ -322,6 +407,27 @@ def test_bridge_migrates_rows_to_new_card(bridge_env, qapp):
     assert new_panel is not None
     assert new_panel.has_task("t1") is True
     assert new_panel._rows["t1"]._tool_count == 1
+    new_card.deleteLater()
+
+def test_bridge_migrated_row_keeps_elapsed_baseline(bridge_env, qapp):
+    """运行中迁卡：新行必须从原任务起点续计时，工具数与耗时都连续。"""
+    import time as _time
+
+    bridge, reg, host, manager, card = bridge_env
+    executor = _FakeExecutor("coder", "写代码")
+    executor.start_time = _time.time() - 120  # 任务已跑 2 分钟
+    manager._running_tasks["t1"] = executor
+    manager.task_started.emit("t1", "coder", "写代码")
+
+    from app.widgets.message_card import MessageCard
+
+    new_card = MessageCard(role="assistant")
+    host._current_assistant_card = new_card
+    bridge._on_tool_call("w1", "t1")
+
+    row = new_card.get_inline_panel(PANEL_ID)._rows["t1"]
+    elapsed = _time.time() - row._start_time
+    assert 110 <= elapsed <= 145, f"迁卡后计时必须续算不归零，实际 {elapsed}s"
     new_card.deleteLater()
 
 

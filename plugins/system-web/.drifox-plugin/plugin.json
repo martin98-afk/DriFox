@@ -19,7 +19,9 @@
   "components": {
     "tools": true
   },
-  "capabilities": [],
+  "capabilities": [
+    "plugin.config.read"
+  ],
   "config_schema": {
     "title": "网页搜索 API Key",
     "fields": [

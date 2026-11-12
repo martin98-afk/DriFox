@@ -98,7 +98,7 @@ class LocalMcpGateway:
 
     def register(self, server_name: str, handler: Callable[[dict], dict],
                  *, plugin: str = "", tools: Optional[List[dict]] = None) -> bool:
-        """handler(req_dict) -> {'text': str} 或 {'text': str, 'isError': bool}。"""
+        """handler(req_dict) -> {'text': str} 或 {'content': [MCP 块]}（可含 isError）。"""
         try:
             with self._lock:
                 self._handlers[server_name] = _Entry(plugin, handler, tools or [])
@@ -133,10 +133,14 @@ class LocalMcpGateway:
         if method == "tools/call":
             try:
                 out = entry.handler(req.get("params") or {})
-                text = out.get("text", "") if isinstance(out, dict) else str(out)
+                if isinstance(out, dict) and isinstance(out.get("content"), list):
+                    blocks = out["content"]
+                else:
+                    text = out.get("text", "") if isinstance(out, dict) else str(out)
+                    blocks = [{"type": "text", "text": text}]
                 is_error = bool(out.get("isError")) if isinstance(out, dict) else False
                 return {"jsonrpc": "2.0", "id": rid, "result": {
-                    "content": [{"type": "text", "text": text}], "isError": is_error}}
+                    "content": blocks, "isError": is_error}}
             except Exception as e:
                 return {"jsonrpc": "2.0", "id": rid, "result": {
                     "content": [{"type": "text", "text": f"工具执行异常: {e}"}],

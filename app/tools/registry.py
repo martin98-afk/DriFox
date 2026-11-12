@@ -300,6 +300,22 @@ class ToolRegistry:
         self._notify_change()
         return True
 
+    def unregister_by_source(self, source: str) -> int:
+        """按来源批量注销（插件卸载/热重载清理，幂等）。返回注销数量。
+
+        运行时经能力池注册的工具不经过 PluginToolLoader 的工具名清单，
+        卸载时只能按 source 反查，否则会留下指向已卸载插件代码的残留工具。
+        """
+        with self._lock:
+            names = [n for n, reg in self._tools.items() if reg.source == source]
+            for name in names:
+                del self._tools[name]
+            if names:
+                self._version += 1
+        if names:
+            self._notify_change()
+        return len(names)
+
     def clear(self) -> None:
         """清空全部注册（测试用）"""
         with self._lock:

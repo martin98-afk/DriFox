@@ -198,6 +198,15 @@ PluginManager.initialize()
   → 其余清理按既有链路
 ```
 
+### 跨模块导入规则
+
+宿主不把插件的 `ui/` 目录注入 sys.path（曾因各插件 `ui/` 互相顶替 `import ui` 导致
+`No module named 'ui.speakup_ui'` 类事故）。插件运行时代码：
+
+- `ui/` 内部互引：用相对导入（`from .xxx import ...`）。宿主以 `ui_plugin_{name}` 包名加载，相对导入走 `__package__` 解析，不依赖 sys.path。
+- 与 hook / tool / 设置页共享单例或常量：放插件自有顶层包（如 `speakup_core/runtime.py`），或 `importlib.import_module("ui_plugin_{safe}.<mod>")`。
+- 禁止裸 `from ui.xxx import ...` 这类依赖宿主注入的顶层绝对导入（插件自带 tests 不受限）。
+
 ---
 
 ## 六、现有插件参考

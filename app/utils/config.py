@@ -408,6 +408,17 @@ class Settings(QConfig):
             # toDict() 内层值与 item.value 共享引用，必须深拷贝后剥钥，
             # 否则会污染内存态导致 UI 回显 / API 请求丢 key
             data = deepcopy(self.toDict())
+            # 本机模型选择不进 app.config：真源在 cache/app_state.json
+            # （LLM.SelectedModel 只表示本机上次选的服务商，不该随云同步跨设备）
+            try:
+                from app.utils.app_state import set as _state_set
+
+                _state_set("selected_model", str(self.llm_selected_model.value or ""))
+            except Exception:
+                logger.debug("[Settings] 本机模型选择写缓存失败", exc_info=True)
+            _llm = data.get("LLM")
+            if isinstance(_llm, dict):
+                _llm.pop("SelectedModel", None)
             # 同步元数据以记账器为准：内存里的 System.SyncMeta 是启动时快照，
             # 记账器每次 tick 只更新自身状态、不回写 ConfigItem，直接用 toDict()
             # 落盘会把条目表回滚到旧版本（本地刚改的值仍配着旧 t，下一次合并必
@@ -454,6 +465,28 @@ class Settings(QConfig):
             self._apply_secret_mode()
         except Exception:
             logger.exception("[SecretStore] 密钥回填失败，按文件值继续")
+        self._load_local_state_items()
+
+    def _load_local_state_items(self) -> None:
+        """设备本地态配置项：真源在缓存目录，app.config 里的值只用于首次迁移。
+
+        迁移规则：缓存里还没有该 key 时，取 app.config 的旧值一次性迁入
+        （升级前的选择不丢）；此后一律以缓存为准，忽略配置文件里的残留值。
+        """
+        try:
+            from app.utils.app_state import get as _state_get, set as _state_set
+        except Exception:
+            return
+        item = self.llm_selected_model
+        try:
+            saved = _state_get("selected_model", None)
+            if saved is None:
+                saved = str(item.value or "")
+                if saved:
+                    _state_set("selected_model", saved)
+            item.value = str(saved or "")
+        except Exception:
+            logger.debug("[Settings] 本机模型选择读缓存失败，沿用配置文件值", exc_info=True)
 
     def _recover_flat_secrets_from_keyring(self):
         """一次性回迁：v0.5.11 keyring 化误剥的扁平 token 从凭证库迁回 app.config。
@@ -693,7 +726,7 @@ class Settings(QConfig):
     auto_start = ConfigItem("General", "AutoStart", False, BoolValidator())
 
     # 版本信息
-    current_version = "v0.7.0"
+    current_version = "v0.7.1"
     # 构建变体：pyqt5 | pyside6。同一 Release 同时挂两套安装包，更新器据此选包，
     # 插件市场据此选官方插件库分支（pyqt5 → main，pyside6 → pyside6）。
     # CI 构建期由 release.yml 的 Inject build_variant 步骤按 matrix 覆写，缺省取本分支值。

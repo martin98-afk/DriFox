@@ -3809,6 +3809,12 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
             # 重新抑制），则交由其 _on_sidebar_anim_finished 恢复，此处跳过。
             if not (self._sidebar_anim is not None and self._sidebar_anim.state() == QVariantAnimation.Running):
                 self._set_windows_resize_preview_suppressed(False)
+                # ★ 拖拽跨折叠阈值触发动画时，_finish_splitter_idle 因「动画在跑」
+                # 跳过了会话收尾，解冻只能由这里补。漏掉则 _content_area 永久停在
+                # setUpdatesEnabled(False)：右侧全部控件不再绘制，表现为拖一下
+                # splitter 后对话区一片空白（切页/再拖一次才恢复）。
+                if hasattr(self, "_content_area"):
+                    self._content_area.setUpdatesEnabled(True)
 
     def _post_expand_squeeze_check(self):
         """展开动画收尾后的重排挤压复检（见 _on_sidebar_anim_finished 展开分支）"""
@@ -5304,6 +5310,20 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
         if not self._windows:
             try:
                 self._content_area.widget(0).show()
+            except Exception:
+                pass
+            # [R2 清池] 全部标签页已关闭：池中 ≤4 个常驻 viewer（每桶
+            # MAX_IDLE_PER_BUCKET=2）的 renderer（实测单个 65~217MB）已无
+            # 复用前景，清池回收，避免全关页后 renderer 常驻（T8a 实测依据）。
+            # 行为变化：仅「关最后一个 tab 后再新开」首帧多一次 renderer
+            # 初始化（webview_pool.py 模块头记录 100~500ms 量级）；保留
+            # ≥1 窗口的日常开关不受影响。回退方式：删除本 try 段即可，
+            # WebViewPool.clear() 只对池中对象 setParent(None)+deleteLater，
+            # 无残留状态，不触碰活跃卡片。
+            try:
+                from app.widgets.webview_pool import WebViewPool
+
+                WebViewPool.get_instance().clear()
             except Exception:
                 pass
         self.tabCountChanged.emit(len(self._windows))

@@ -53,5 +53,20 @@ def unregister_window(win: "OpenAIChatToolWindow") -> None:
 
 
 def alive_window_instances() -> List["OpenAIChatToolWindow"]:
-    """返回当前存活窗口实例列表（剔除已回收的弱引用）。"""
-    return [r() for r in window_instances if r() is not None]
+    """返回当前存活窗口实例列表（剔除并压实已回收的弱引用）。
+
+    T8 压实：死 weakref 原先只增不减（仅 unregister 按清除）；现在
+    命中死引用时顺手从容器剔除，长会话反复开关 tab 后表长收敛到存活数。
+    """
+    alive = []
+    has_dead = False
+    for r in window_instances:
+        w = r()
+        if w is None:
+            has_dead = True
+        else:
+            alive.append(w)
+    if has_dead:
+        # 遍历已结束再切片赋值，避免遍历中变更容器的安全写法
+        window_instances[:] = [r for r in window_instances if r() is not None]
+    return alive

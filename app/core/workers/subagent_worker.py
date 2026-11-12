@@ -3,9 +3,11 @@
 子智能体执行器 - 独立运行子智能体任务，避免共享超长上下文
 """
 
+import functools
 import re
 import threading
 import time
+from contextlib import contextmanager
 from typing import Any, Dict, List, Optional
 
 import orjson
@@ -89,6 +91,54 @@ def _compute_context_budget(llm_config: Dict) -> int:
     return max(500, context_limit - reserved)
 
 
+# [H5] tool_result 日志预览上限。UI 完整视图本就只渲染前 2000 字符
+# （session_card._format_content_full 同值截断），全文驻留 logs 无任何消费方，
+# 却是任务日志内存膨胀主因（T13 实测重度 200 条 793MB/窗口，静置不回落）。
+_LOG_RESULT_PREVIEW_CHARS = 2000
+
+# [H5-2 补漏] ai_response/thinking 的 UI 完整视图上限（session_card.py 同值 10000）；
+# tool_call.args 序列化字符串的 UI 上限（session_card 同值 3000）。日志侧先截，
+# UI 显示逐字不变（UI 自己的截断分支不再触发，内容一致）。
+_LOG_TEXT_PREVIEW_CHARS = 10000
+_LOG_ARGS_PREVIEW_CHARS = 3000
+
+
+def _cap_str(value, limit, tag):
+    """超长字符串截断并附原长标记（非字符串原样返回）。"""
+    if isinstance(value, str) and len(value) > limit:
+        return value[:limit] + f"\n…（{tag}已截断，全文 {len(value)} 字符）"
+    return value
+
+
+def _cap_args_tree(obj, limit, depth=0):
+    """递归截断 args（dict/list）中的超长字符串值，保持容器类型不变
+    （UI 读侧对 args 做 orjson.dumps，类型契约不可破坏）。"""
+    if depth > 4:
+        return obj
+    if isinstance(obj, str):
+        if len(obj) > limit:
+            return obj[:limit] + f"…（参数已截断，全文 {len(obj)} 字符）"
+        return obj
+    if isinstance(obj, dict):
+        return {k: _cap_args_tree(v, limit, depth + 1) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_cap_args_tree(v, limit, depth + 1) for v in obj]
+    return obj
+
+def _in_flight(method):
+    """标记「有阻塞操作在途」：期间 stall 看门狗不得按日志静默误杀。
+
+    长思考流式聚合、API 重试退避、长工具执行都是合法静默；退出时刷新活跃
+    时间，避免用进入前的旧时间戳被下一拍判超时。装饰器保留可重入语义。
+    """
+
+    @functools.wraps(method)
+    def wrapper(self, *args, **kwargs):
+        with self._in_flight_phase():
+            return method(self, *args, **kwargs)
+
+    return wrapper
+
 class SubAgentExecutor(QThread):
     """子智能体执行器 - 独立线程运行子智能体任务"""
 
@@ -132,9 +182,13 @@ class SubAgentExecutor(QThread):
         self._hook_policy_id = hook_policy_id
         self._hook_policy_obj = None  # 懒解析缓存
         self._is_cancelled = False
+        self._cancel_reason = "Task cancelled"
         self._pending_answer = None
         self._last_result = None
         self._execution_error = None
+        # 在途阶段（API/工具）计数：>0 表示阻塞操作正在执行，stall 看门狗豁免
+        self._in_flight_depth = 0
+        self._in_flight_since: Optional[float] = None
         # ★ T24：ask 权限等待（主线程弹窗响应后 set event，超时按拒绝）
         self._permission_event = threading.Event()
         self._permission_allow = False
@@ -181,6 +235,26 @@ class SubAgentExecutor(QThread):
         """获取最后活跃时间戳（供 SubAgentManager stall 检测使用）"""
         return self._last_activity_time
 
+    def get_in_flight_duration(self) -> Optional[float]:
+        """当前在途操作已持续秒数；不在途返回 None（stall 看门狗据此豁免）。"""
+        if self._in_flight_depth <= 0 or self._in_flight_since is None:
+            return None
+        return time.time() - self._in_flight_since
+
+    @contextmanager
+    def _in_flight_phase(self):
+        """可重入在途区间。最外层进入记起点，最外层退出刷新活跃时间。"""
+        self._in_flight_depth += 1
+        if self._in_flight_depth == 1:
+            self._in_flight_since = time.time()
+        try:
+            yield
+        finally:
+            self._in_flight_depth -= 1
+            if self._in_flight_depth == 0:
+                self._in_flight_since = None
+                self._last_activity_time = time.time()
+
     def set_log_store_callback(self, callback):
         """设置日志存储回调"""
         self._log_store_callback = callback
@@ -194,7 +268,14 @@ class SubAgentExecutor(QThread):
         """
         self._get_history_messages = getter
 
-    def cancel(self):
+    def cancel(self, reason: str = "Task cancelled"):
+        """置取消标志并记录真因；worker 终态归档/信号统一读 _cancel_reason。
+
+        旧调用方（cancel_task / stop_task）不传参，行为与改前一致。
+        """
+        # 仅首次置位写真因：stall 后窗口关闭等二次 cancel() 不得覆盖
+        if not self._is_cancelled:
+            self._cancel_reason = reason or "Task cancelled"
         self._is_cancelled = True
 
     def provide_answer(self, answer: str):
@@ -286,13 +367,45 @@ class SubAgentExecutor(QThread):
         import time
 
         now = time.time()
+        # [H5-2 补漏] ai_response/thinking 截 10000、tool_call 参数截 3000：
+        # 与 session_card.py UI 显示上限逐字对齐，用户看到的内容不变；
+        # 日志驻留从「全文」降为「预览」，与 tool_result 同语义。
+        if log_type in ("thinking", "ai_response"):
+            content = _cap_str(content, _LOG_TEXT_PREVIEW_CHARS, "内容")
         log_entry = {
             "type": log_type,
             "content": content,
             "timestamp": now,
         }
         if extra:
+            if log_type == "tool_call" and isinstance(extra.get("args"), dict):
+                capped = _cap_args_tree(extra["args"], _LOG_ARGS_PREVIEW_CHARS)
+                # [T25] 单值截 3000 不够：multi_edit.edits 20 项 / subagent_para.tasks[]
+                # 等多项容器叠加仍可几十 KB。总量判定：序列化超 2×3000 则整体替换
+                # 为占位 dict（保持 JSON 可序列化，UI orjson.dumps 契约不破）。
+                try:
+                    if len(orjson.dumps(capped).decode()) > _LOG_ARGS_PREVIEW_CHARS * 2:
+                        capped = {
+                            "_truncated": True,
+                            "_original_len": len(orjson.dumps(extra["args"]).decode()),
+                            "_preview": orjson.dumps(capped).decode()[:_LOG_ARGS_PREVIEW_CHARS],
+                        }
+                except Exception:
+                    pass  # 序列化兜底：极端不可序列化值保持逐值截断结果
+                extra["args"] = capped
             log_entry.update(extra)
+        # [H5] tool_result 全文驻留是日志膨胀主因：日志侧只存 2KB 级预览 +
+        # 原始长度字段（便于定位最重工具）。执行链消息（raw_result）与此独立，
+        # 模型拿到的仍是全文，子智能体行为不变；UI 完整视图本就只显示前
+        # 2000 字符（session_card._format_content_full），显示内容不变。
+        if log_type == "tool_result":
+            _raw = log_entry.get("result")
+            if isinstance(_raw, str) and len(_raw) > _LOG_RESULT_PREVIEW_CHARS:
+                log_entry["result_original_len"] = len(_raw)
+                log_entry["result"] = (
+                    _raw[:_LOG_RESULT_PREVIEW_CHARS]
+                    + f"\n…（结果过长，已截断；全文 {len(_raw)} 字符）"
+                )
         self._logs.append(log_entry)
         # 每次输出日志都刷新活跃时间（供外部 stall 检测）
         self._last_activity_time = now
@@ -363,7 +476,10 @@ class SubAgentExecutor(QThread):
 
             agent = self.agent_manager.get_agent(self.agent_name)
             if not agent:
-                self.error_occurred.emit(self.task_id, f"Agent not found: {self.agent_name}")
+                # 必须发 error_occurred：裸 return 会让完成链（批次计数/汇总
+                # 注入）永远等不到该任务的终态，批次通知永久缺席
+                self._execution_error = f"Agent not found: {self.agent_name}"
+                self.error_occurred.emit(self.task_id, self._execution_error)
                 return
 
             # 子智能体被调用时 is_subagent_call=True，此时应该使用 subagent_constraints
@@ -440,10 +556,14 @@ class SubAgentExecutor(QThread):
                 result = f"执行出错: {str(e)}"
 
             if self._is_cancelled:
-                # 被取消时也要发射错误信号，让管理器知道任务已结束
-                self._execution_error = "Task cancelled"
+                # 被取消时也要发射错误信号，让管理器知道任务已结束。
+                # 真因来自 cancel(reason)：stall / 窗口关闭 / 手动中止各有文案，
+                # 不得再统一覆写成 "Task cancelled"，否则会话卡只剩笼统失败。
+                cancel_error = getattr(self, "_cancel_reason", None) or "Task cancelled"
+                self._execution_error = cancel_error
                 logger.warning(
-                    f"[SubAgentExecutor] Task {self.task_id} ({self.agent_name}) cancelled, emitting error_occurred"
+                    f"[SubAgentExecutor] Task {self.task_id} ({self.agent_name}) cancelled "
+                    f"({cancel_error}), emitting error_occurred"
                 )
                 if self._log_store_callback:
                     try:
@@ -453,13 +573,13 @@ class SubAgentExecutor(QThread):
                             self.task_description,
                             "cancelled",
                             "",
-                            "Task cancelled",
+                            cancel_error,
                             self._logs,
                             self.get_summary(),
                         )
                     except Exception as e:
                         logger.warning(f"[SubAgentExecutor] 保存取消状态失败: {e}")
-                self.error_occurred.emit(self.task_id, "Task cancelled")
+                self.error_occurred.emit(self.task_id, cancel_error)
                 return
 
             # 直接使用执行结果（迭代结束时已自动总结）
@@ -723,10 +843,17 @@ class SubAgentExecutor(QThread):
             return content
         return _THINKING_PATTERN.sub("", content)
 
-    def _serialize_for_api(self, messages: List[Dict], llm_config: Dict = None):
+    def _serialize_for_api(
+        self, messages: List[Dict], llm_config: Dict = None, revoke_after: bool = True
+    ):
         """序列化单入口（Phase C）：adapter flags → serializer_id → 序列化器 → SerializeResult。
 
         与 chat_worker._serialize_for_api 对称；supports_vision 默认 True（subagent 无视觉注入）。
+
+        [方案 A] 出口即回收（revoke_after=True 默认）：revive 产出的 data:image 块
+        在返回前还原为 image_ref 引用块（与 chat_worker 出口回收口径一致）。
+        落盘 session_id 用 _vision_session_ids 候选集合（继承历史的真实 sid，
+        revoke 侧逐目录存在性探测，全部不命中安全降级保留）。
         """
         from app.plugins.contracts.message_serializer import SerializeContext
         from app.plugins.registries.serializer_registry import SerializerRegistry
@@ -745,7 +872,27 @@ class SubAgentExecutor(QThread):
         config = llm_config if llm_config is not None else getattr(self, "llm_config", None)
         flags = self._protocol_flags(config)
         serializer = SerializerRegistry.get_instance().resolve(flags.serializer_id)
-        return serializer.serialize(messages, SerializeContext(flags=flags))
+        result = serializer.serialize(messages, SerializeContext(flags=flags))
+        if revoke_after:
+            # [方案 A] 产出即回收：产物与入参双扫（passthrough 直通二者同引用，
+            # 幂等重复扫零害；拷贝型序列化器两份都可能持有 data URI）
+            try:
+                from app.utils.image_utils import revoke_vision_blocks
+
+                restored = revoke_vision_blocks(
+                    result.messages, getattr(self, "_vision_session_ids", None) or ""
+                )
+                if result.messages is not messages:
+                    restored += revoke_vision_blocks(
+                        messages, getattr(self, "_vision_session_ids", None) or ""
+                    )
+                if restored:
+                    logger.debug(
+                        f"[Memory] 子代理 serialize 出口回收 {restored} 张图片（data URI → image_ref）"
+                    )
+            except Exception as e:  # noqa: BLE001 — 回收失败保留 data URI，不阻断
+                logger.warning(f"[SubAgentWorker] serialize vision revoke 失败（保留 data URI）: {e}")
+        return result
 
     def _protocol_flags(self, llm_config: Dict = None):
         """经 ModelAdapterRegistry 解析完整协议开关（含 serializer_id，冷启动防御同 Task 1）"""
@@ -1020,6 +1167,37 @@ class SubAgentExecutor(QThread):
         except Exception as e:  # noqa: BLE001 — 回收失败保留 data URI
             logger.warning(f"[SubAgentWorker] vision revoke 失败（保留 data URI）: {e}")
 
+    def _materialize_for_send(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """[方案 A] 发送前物化（对称 chat_worker._materialize_for_send）。
+
+        _serialize_for_api 出口回收把产物图片块还原为 image_ref；直接外发会
+        触发 OpenAI 协议 400（type=image_ref 非法），responses transport 从内部
+        格式 messages 重新序列化时同样只认 image_url 形态（不识别即丢图）。
+
+        浅拷贝消息骨架（msg dict + content list + 块 dict 三层）后 revive 幂等
+        读回，data URI 只在本请求作用域存在；已回收的原 messages 不被二次污染。
+        副本随请求结束 GC。
+        """
+        out: List[Dict[str, Any]] = []
+        for msg in messages:
+            if not isinstance(msg, dict):
+                out.append(msg)
+                continue
+            m2 = dict(msg)
+            content = msg.get("content")
+            if isinstance(content, list):
+                # content 必须拷贝：revive 就地按索引替换块，会污染共享列表
+                m2["content"] = [dict(b) if isinstance(b, dict) else b for b in content]
+            out.append(m2)
+        try:
+            from app.core.store.session_repository import revive_vision_image_refs
+
+            return revive_vision_image_refs(out)
+        except Exception as e:  # noqa: BLE001 — 物化失败按副本发送（image_ref 会被 provider 拒，走重试/报错链路）
+            logger.warning(f"[SubAgentWorker] materialize revive 失败（按副本发送）: {e}")
+            return out
+
+    @_in_flight
     def _make_api_call(self, messages: List[Dict], tools: List[Dict] = None, llm_config: Dict = None) -> tuple:
         """调用 LLM API（流式发起 + 事件聚合，子智能体后台执行无需逐字渲染）。
 
@@ -1048,6 +1226,12 @@ class SubAgentExecutor(QThread):
         # chat 形态消息：chat transport 直接用它发请求；responses transport 忽略它，
         # 从内部格式 messages 自行序列化 input_items
         api_messages = self._serialize_for_api(messages, config).messages
+        # [方案 A] 发送前物化（对称 chat_worker）：出口回收后 api_messages 的图片块
+        # 是 image_ref 形态，chat transport 原样外发必触发 400；responses transport
+        # 忽略 api_messages、从内部格式 messages 重新序列化，同样只认 image_url ——
+        # 因此两路统一改传物化副本（data URI 只在本请求作用域存在，已回收的原
+        # current_messages 不被二次污染，副本随请求结束 GC）。
+        materialized = self._materialize_for_send(api_messages)
 
         from app.core.workers.error_handler import create_api_call_with_retry
         from app.core.workers.protocol_dispatch import resolve_transport_target
@@ -1070,10 +1254,10 @@ class SubAgentExecutor(QThread):
         def create_stream():
             return transport.create_stream(
                 config,
-                messages,
+                materialized,
                 tools=tools,
                 auth_headers=auth_headers or None,
-                api_messages=api_messages,
+                api_messages=materialized,
                 client=client,
                 cap_max_tokens=lambda m, v: self._cap_max_output_tokens(m, v, config),
             )
@@ -1238,6 +1422,7 @@ class SubAgentExecutor(QThread):
         # 4. 只做绝对上限保护（避免明显错误的极值）
         return min(requested_int, absolute_limit)
 
+    @_in_flight
     def _execute_tools(self, tool_calls: List[Dict]) -> tuple:
         """执行工具调用
 

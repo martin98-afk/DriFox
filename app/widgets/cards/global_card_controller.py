@@ -233,14 +233,18 @@ class GlobalCardController:
             # 连接服务商添加/编辑信号
             self._settings_popup.llmProviderCard.showAddProviderCard.connect(self._show_provider_add_card)
             self._settings_popup.llmProviderCard.showEditProviderCard.connect(self._show_provider_edit_card)
-            # 连接 Hook 添加/编辑信号
-            self._settings_popup.hookListCard.showAddHookCard.connect(self._show_hook_add_card)
-            self._settings_popup.hookListCard.showEditHookCard.connect(self._show_hook_edit_card)
-            self._settings_popup.hookListCard.hooksChanged.connect(self._on_hook_toggled)
-            self._settings_popup.hookListCard.hookToggled.connect(self._on_hook_toggled_light)
-            # 连接 MCP 添加/编辑信号
-            self._settings_popup.mcpListCard.showAddCard.connect(self._show_mcp_add_card)
-            self._settings_popup.mcpListCard.showEditCard.connect(self._show_mcp_edit_card)
+            # 连接 Hook 添加/编辑信号（#39b）：hooks 页懒构造（主卡构造期
+            # hookListCard=None），改连主卡转发信号（永存在）；卡片在
+            # _build_hooks_page 构建时把自身信号转发到主卡——懒态不炸 + 进页后链路接通
+            self._settings_popup.showAddHookCard.connect(self._show_hook_add_card)
+            self._settings_popup.showEditHookCard.connect(self._show_hook_edit_card)
+            self._settings_popup.hooksChanged.connect(self._on_hook_toggled)
+            self._settings_popup.hookToggled.connect(self._on_hook_toggled_light)
+            # 连接 MCP 添加/编辑信号（#35）：MCP 页懒构造（主卡构造期 mcpListCard=None），
+            # 改连主卡转发信号（永存在）；卡片在 _build_mcp_page 构建时把自身信号
+            # 转发到主卡——懒态不炸 + 进 MCP 页后信号链接通（点「添加/编辑」可达）
+            self._settings_popup.showAddCard.connect(self._show_mcp_add_card)
+            self._settings_popup.showEditCard.connect(self._show_mcp_edit_card)
             # 注意：MCP 服务器开关/增删改均在各操作点（MCPListSettingCard）内自行完成 UI
             # 更新（开关=行级更新，增删改=局部 _refresh），此处不再把 serversChanged 接到
             # _on_mcp_servers_toggled 做全量重建，否则开关 MCP 时整卡闪烁/列表重建。
@@ -626,7 +630,11 @@ class GlobalCardController:
         self._hook_edit_card.set_title("添加 Hook", icon_svg="hooks")
         hm = None
         if self._settings_popup is not None:
-            hm = self._settings_popup.hookListCard._hook_manager
+            # [懒态守卫 #39b] hooks 页未进入时 hookListCard=None，此时编辑卡无
+            # hook_manager 可用（HookEditCard 自带空管理器降级）
+            hook_card = self._settings_popup.hookListCard
+            if hook_card is not None:
+                hm = hook_card._hook_manager
         self._hook_edit_popup = HookEditCard(parent=self._hook_edit_card, hook_manager=hm)
         self._hook_edit_popup.saved.connect(self._on_hook_edit_saved)
         self._hook_edit_popup.closed.connect(self._on_hook_edit_closed)
@@ -648,7 +656,10 @@ class GlobalCardController:
         self._hook_edit_card.set_title("编辑 Hook", icon_svg="hooks")
         hm = None
         if self._settings_popup is not None:
-            hm = self._settings_popup.hookListCard._hook_manager
+            # [懒态守卫 #39b] 同添加编辑路径
+            hook_card = self._settings_popup.hookListCard
+            if hook_card is not None:
+                hm = hook_card._hook_manager
         self._hook_edit_popup = HookEditCard(hook_data=hook_data, parent=self._hook_edit_card, hook_manager=hm)
         self._hook_edit_popup.saved.connect(self._on_hook_edit_saved)
         self._hook_edit_popup.closed.connect(self._on_hook_edit_closed)
@@ -668,6 +679,10 @@ class GlobalCardController:
         if self._settings_popup is None:
             return
         hook_card = self._settings_popup.hookListCard
+        if hook_card is None:
+            # [懒态守卫 #39b] hooks 页未进入 → 编辑卡无从打开 → 残留回调安全早退
+            self._close_edit_card("hook_edit")
+            return
         original = self._hook_edit_popup.get_original_data()
         hook_id = original.get("id", "") if original else ""
         hm = hook_card._hook_manager
@@ -822,6 +837,10 @@ class GlobalCardController:
         if self._settings_popup is None:
             return
         mcp_card = self._settings_popup.mcpListCard
+        if mcp_card is None:
+            # MCP 页懒态守卫（#35）：编辑卡只能从 MCP 页打开，懒态下本回调
+            # 无从触发；防御时序（进页前收到残留回调）不炸
+            return
         from app.plugins.managers.plugin_manager import PluginManager
 
         pm = PluginManager.get_instance()
@@ -842,8 +861,13 @@ class GlobalCardController:
     def _on_mcp_edit_closed(self):
         """MCP 编辑关闭回调"""
         self._close_edit_card("mcp_edit")
-        if self._settings_popup is not None:
-            self._settings_popup.mcpListCard.refresh_connections()
+        if self._settings_popup is None:
+            return
+        mcp_card = self._settings_popup.mcpListCard
+        if mcp_card is None:
+            # MCP 页懒态守卫（#35）：同 _on_mcp_edit_saved
+            return
+        mcp_card.refresh_connections()
 
     def _on_mcp_edit_card_closed(self):
         """MCP 编辑卡片（SystemCardFrame）关闭回调 → 回到设置面板"""
@@ -996,6 +1020,9 @@ class GlobalCardController:
         if self._settings_popup is None:
             return
         hook_card = self._settings_popup.hookListCard
+        if hook_card is None:
+            # [懒态守卫 #39b] hooks 页未进入 → 无列表可刷新，安全早退
+            return
         hm = hook_card._hook_manager
         hooks_file = str(hook_card._hooks_config_file)
         if hm:
@@ -1010,8 +1037,13 @@ class GlobalCardController:
 
     def _on_hook_toggled_light(self, hook_id: str, enabled: bool):
         """Hook 单项开关同步 → 仅更新全局列表 Switch 状态"""
-        if self._settings_popup is not None:
-            self._settings_popup.hookListCard.update_toggle_state(hook_id, enabled)
+        if self._settings_popup is None:
+            return
+        hook_card = self._settings_popup.hookListCard
+        if hook_card is None:
+            # [懒态守卫 #39b] hooks 页未进入 → 无 Switch 可同步，安全早退
+            return
+        hook_card.update_toggle_state(hook_id, enabled)
 
     def _on_mcp_servers_toggled(self):
         """MCP 服务器开关变更 → 刷新全局列表
