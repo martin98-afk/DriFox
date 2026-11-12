@@ -3,7 +3,7 @@
 
 覆盖范围承接自旧 test_topic_summary_fallback.py：跳过 _hook_event 非 TeamMail、
 跳过未打标任务邮件、跳过 assistant、首条真实用户消息、15 字截断。
-旧实现这些规则在 TopicSummaryTask._fallback_user_question，收口后移到宿主。
+旧实现这些规则在已删除的旧 worker 回退函数里，收口后移到宿主。
 """
 import types
 

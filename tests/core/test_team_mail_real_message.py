@@ -10,15 +10,15 @@ R6 修复：4 处过滤条件改为"跳过非 TeamMail 的 hook 事件"，邮件
 （_hook_event="TeamMail"）视为真实用户问题。
 
 本测试覆盖：
-- ① mail-only session 的 user_msg_count==1 → 触发 _maybe_generate_topic_summary
-- ② _maybe_generate_topic_summary 对 mail 会话不提前 return（user_messages 非空）
+- ① mail-only session 的 user_msg_count==1 → 触发标题生成
+- ② 标题生成守卫对 mail 会话不提前 return（user_messages 非空）
 - ③ 历史问题卡片包含 TeamMail 邮件
 - ④ 非邮件 hook（SessionStart 等）仍跳过
 - ⑤ 徽章计数含邮件
 
 测试风格参考 test_team_mail_hook_event.py（mock 风格 + 过滤逻辑直接验证）。
 
-注：4 处过滤逻辑的"内容"（_on_send_clicked / _maybe_generate_topic_summary /
+注：4 处过滤逻辑的"内容"（_on_send_clicked / 标题生成守卫 /
 _toggle_history_questions_popup / _update_history_questions_badge）在 main_widget.py
 中被各种 GUI / 业务逻辑包裹。本测试聚焦过滤条件本身（核心修复点），避免依赖
 重型 main_widget 初始化（OpenAIChatToolWindow.__init__ 涉及 PyQt5 C++ + 重依赖）。
@@ -111,11 +111,11 @@ class TestOnSendClickedMailCount:
         assert user_msg_count == 2
 
 
-# ── ② _maybe_generate_topic_summary：mail 会话 user_messages 非空 ─────
+# ── ② 标题生成守卫：mail 会话 user_messages 非空 ─────
 
 
 class TestMaybeGenerateTopicSummaryMailPath:
-    """_maybe_generate_topic_summary 对 mail-only 会话：user_messages 非空（不提前 return）"""
+    """标题生成守卫对 mail-only 会话：user_messages 非空（不提前 return）"""
 
     def test_mail_only_yields_user_messages(self):
         """mail-only 会话 → user_messages 应非空（避免'No user messages found, skipping'）"""
