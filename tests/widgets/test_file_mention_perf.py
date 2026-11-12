@@ -469,6 +469,7 @@ class TestScrollAndFlashRegression:
         class FakeStorage:
             def get_sessions_lightweight(self, limit=100, offset=0, project=None):
                 calls.append(project)
+                assert limit >= 1000, "搜索池应覆盖历史全量而非最近 30 条"
                 return [
                     {"session_id": "s1", "title": "项目内会话", "project": project or "", "updated_at": "t"},
                     {"session_id": "s2", "title": "他项目会话", "project": "Other", "updated_at": "t"},
@@ -604,6 +605,23 @@ class TestBrowseUX:
         assert FileMentionCard._is_ignored("build", True, ["build/"]) is True
         # always-ignore 扩展名对文件依旧生效
         assert FileMentionCard._is_ignored("a/mod.pyc", False, []) is True
+
+    def test_session_search_pool_and_browse_slice(self):
+        """搜索池覆盖历史全量（非最近 30 条）；浏览模式只展示最近 N 条"""
+        _ensure_qapp()
+        card = self._make_card()
+        n = 200  # 覆盖 _SESSION_BROWSE_LIMIT(30) 之外的深部条目
+        card._collect_session_items = lambda: [
+            {"type": "session", "name": f"会话{i}", "path": f"session://{i}", "relative_path": f"会话{i}"}
+            for i in range(n)
+        ]
+        self._load(card)
+        browse_sessions = [i for i in card._filtered_items if i.get("type") == "session"]
+        assert len(browse_sessions) == card._SESSION_BROWSE_LIMIT
+        # 搜索：老会话（不在前 30）也能命中
+        self._load(card, "会话199")
+        hits = [i for i in card._filtered_items if i.get("type") == "session"]
+        assert len(hits) == 1 and hits[0]["name"] == "会话199"
 
 
 if __name__ == "__main__":

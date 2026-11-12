@@ -49,9 +49,11 @@ BREADCRUMB_HEIGHT = 32
 INITIAL_RENDER_COUNT = 24
 
 # 滚动/键盘向下时每批追加的 widget 数（懒加载）。
-# [PERF] 旧值 200 会在一次滚动事件里同步创建 200 个 widget（≈33ms 掉帧尖峰）；
-#        降到 60 后单批 ≈10ms，滚动仍流畅且不易触发可见卡顿。
-RENDER_CHUNK = 60
+# [PERF] 旧值 200 会在一次滚动事件里同步创建 200 个 widget（≈33ms 掉帧尖峰）。
+# 60→20：单批创建（含 5 次 QSS 解析/widget ≈ 3~8ms）控制在一帧预算（16ms）内，
+# 避免滚动初期第一批追加时出现可感知的短闪烁；触发阈值是滚动到底前 3 行，
+# 多触发几次无感。
+RENDER_CHUNK = 20
 
 # 渲染软上限：最多创建的 widget 数。超过后不再追加，避免海量 QWidget 内存爆炸。
 # 相比旧实现（硬截断 300 且永不追加），此值只限制「浏览到列表末端」的极端场景；
@@ -812,7 +814,14 @@ class FileMentionCard(QWidget):
         #      TTL 内直接复用内存缓存；切换根目录时失效。
         self._session_items_cache: List[Dict[str, str]] = []
         self._session_cache_at: float = 0.0
-        self._SESSION_CACHE_TTL = 5.0  # 秒
+        # 会话池 TTL：30s。搜索池扩到 2000 条后单次拉取 ~50ms（实测，含行映射），
+        # 不能随 5s TTL 每次过期都打主线程；会话标题低频变，30s 陈旧可接受，
+        # 切换项目/根目录立即失效（show_card 置零）。
+        self._SESSION_CACHE_TTL = 30.0
+        # 会话量级口径：搜索池要覆盖历史全量（曾用 limit=30 导致只能搜到最近 30 条），
+        # 浏览模式展示量保持卡片有限高度内的合理值
+        self._SESSION_SEARCH_LIMIT = 2000
+        self._SESSION_BROWSE_LIMIT = 30
         # 会话搜索的项目归属：show_card 由 main_widget 传入当前项目名，
         # 非空时只列该项目的会话（SQL project 过滤 + 回落路径内存过滤）
         self._session_project = ""
@@ -1535,6 +1544,23 @@ class FileMentionCard(QWidget):
 
         old_widgets = list(self._item_widgets)  # 复制
 
+        viewport = self._scroll_area.viewport()
+        # 重建期间挂起重绘：批量销毁/复用/新建的中间帧（hide 后的重排、
+        # 新 widget 未着色）会闪现，搜索逐键重建时尤为明显
+        viewport.setUpdatesEnabled(False)
+        try:
+            self._rebuild_widgets(old_widgets, new_items)
+        finally:
+            viewport.setUpdatesEnabled(True)
+
+        # 计算卡片高度（含面包屑路径条）
+        self.setFixedHeight(self._card_height(len(self._item_widgets)))
+        # 渲染重建后强制滚动回顶部，防止 Qt 在布局变化期间自动调整
+        # 滚动位置导致 _update_selection 的 ensureWidgetVisible 滚动到中间
+        self._scroll_area.verticalScrollBar().setValue(0)
+
+    def _rebuild_widgets(self, old_widgets: List["FileMentionItemWidget"], new_items: List[Dict[str, str]]):
+        """全量重建 widget 列表（复用同 path 旧项；调用方负责挂起重绘）"""
         # 构建旧 widget 的 path→widget 映射
         old_by_key = {}
         for w in old_widgets:
@@ -1580,12 +1606,6 @@ class FileMentionCard(QWidget):
             if idx != i:
                 self._scroll_layout.insertWidget(i, w)
 
-        # 计算卡片高度（含面包屑路径条）
-        self.setFixedHeight(self._card_height(len(self._item_widgets)))
-        # 渲染重建后强制滚动回顶部，防止 Qt 在布局变化期间自动调整
-        # 滚动位置导致 _update_selection 的 ensureWidgetVisible 滚动到中间
-        self._scroll_area.verticalScrollBar().setValue(0)
-
     def _extend_render(self):
         """懒加载：追加下一批 widget（仅新建，不复用/重排已有项）
 
@@ -1596,12 +1616,19 @@ class FileMentionCard(QWidget):
         if self._rendered_count >= total or self._rendered_count >= MAX_RENDERED_ITEMS:
             return
         end = min(self._rendered_count + RENDER_CHUNK, total, MAX_RENDERED_ITEMS)
-        for item in self._filtered_items[self._rendered_count : end]:
-            w = FileMentionItemWidget(item, self._current_query, self._scroll_content)
-            w.clicked.connect(self._on_item_clicked)
-            w.hovered.connect(self._on_item_hovered)
-            self._item_widgets.append(w)
-            self._scroll_layout.addWidget(w)
+        viewport = self._scroll_area.viewport()
+        # 批量创建期间挂起重绘：新 widget 已挂布局但尚未布局/着色的半成品帧
+        # 会以透明/错位形态闪现一帧，滚动初期第一批追加时最为明显
+        viewport.setUpdatesEnabled(False)
+        try:
+            for item in self._filtered_items[self._rendered_count : end]:
+                w = FileMentionItemWidget(item, self._current_query, self._scroll_content)
+                w.clicked.connect(self._on_item_clicked)
+                w.hovered.connect(self._on_item_hovered)
+                self._item_widgets.append(w)
+                self._scroll_layout.addWidget(w)
+        finally:
+            viewport.setUpdatesEnabled(True)
         self._rendered_count = end
 
     def _on_scroll(self, value: int):
@@ -1789,6 +1816,10 @@ class FileMentionCard(QWidget):
         project 过滤；回落 get_all 后按条目 project 字段内存过滤，幂等）。
         空串 = 未注入项目，保持旧行为全局展示。
 
+        量级口径：拉取池 _SESSION_SEARCH_LIMIT 条（搜索需覆盖历史全量，
+        曾用 limit=30 导致「只能搜到最近 30 条」）；浏览模式展示量由
+        load_items 切 _SESSION_BROWSE_LIMIT，与旧体验一致。
+
         [PERF] 带 TTL 缓存：load_items 随每次按键触发，SQLite get_all 是
         磁盘 I/O，逐键同步查库会造成输入卡顿；TTL 内复用内存缓存，
         切换根目录/项目/超时后在下一次取用时刷新。
@@ -1811,15 +1842,19 @@ class FileMentionCard(QWidget):
             light = getattr(storage, "get_sessions_lightweight", None)
             if callable(light):
                 try:
-                    sessions = light(limit=30, project=project or None)
+                    sessions = light(limit=self._SESSION_SEARCH_LIMIT, project=project or None)
                 except Exception as e:  # noqa: BLE001
                     logger.debug(f"[FileMentionCard] 轻量会话列表失败，回落全量: {e}")
                     sessions = None
             if sessions is None:
-                sessions = storage.get_all(limit=30) or []
+                sessions = storage.get_all(limit=self._SESSION_SEARCH_LIMIT) or []
             # 项目过滤（轻量路径已在 SQL 过滤，此处幂等；回落全量路径必需）
             if project:
                 sessions = [s for s in sessions if isinstance(s, dict) and s.get("project") == project]
+            if len(sessions) >= self._SESSION_SEARCH_LIMIT:
+                logger.warning(
+                    f"[FileMentionCard] 会话拉取达到上限 {self._SESSION_SEARCH_LIMIT}，更早的会话不参与搜索"
+                )
         except Exception as e:  # noqa: BLE001
             logger.debug(f"[FileMentionCard] 历史会话拉取失败: {e}")
             sessions = []
@@ -1872,10 +1907,12 @@ class FileMentionCard(QWidget):
                 m for m in mention_items if query in m["name"].lower() or query in m.get("description", "").lower()
             ]
 
-        # 历史会话条目：按标题匹配 query
+        # 历史会话条目：搜索按标题在近期全量池内匹配；浏览模式只展示最近 N 条
         session_items = self._collect_session_items()
         if query:
             session_items = [s for s in session_items if query in s["name"].lower()]
+        else:
+            session_items = session_items[: self._SESSION_BROWSE_LIMIT]
 
         if query:
             # ---- 搜索模式：全局递归搜索（不局限于当前浏览层）----
