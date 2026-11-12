@@ -7,7 +7,7 @@
 
 from datetime import datetime
 from pathlib import Path
-from threading import RLock
+from threading import RLock, Thread
 from typing import Any, Dict, List, Optional, Tuple
 
 from loguru import logger
@@ -113,6 +113,27 @@ def _persist_vision_image_blocks_impl(messages: List[Any], session_id: str, root
                 continue
     return messages
 
+
+def _has_inline_data_image_blocks(messages: List[Any]) -> bool:
+    """块级快筛：是否存在未迁移的 data:image 内嵌块（与 persist 链命中条件一致）。
+
+    注：不能用 blob 字符串快筛——serialize 走 zstd 压缩，DB 里的 blob 是
+    压缩 bytes，b"data:image/" in blob 永不命中（实测踩坑）。
+    """
+    for msg in messages or []:
+        if not isinstance(msg, dict):
+            continue
+        content = msg.get("content")
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if not isinstance(block, dict) or block.get("type") != "image_url":
+                continue
+            img = block.get("image_url")
+            url = img.get("url") if isinstance(img, dict) else None
+            if isinstance(url, str) and url.startswith("data:image"):
+                return True
+    return False
 
 def revive_vision_image_refs(messages: List[Any], root_dir=None) -> List[Any]:
     """把 image_ref 引用块还原为 data:image 块（发送 / API 读侧）。
@@ -723,11 +744,58 @@ class SessionRepository:
         if not sess:
             return []
         msgs = sess.get("messages", [])
+        # [T3] 旧 blob 防御迁移：persist 链引入前的存量 / persist 失败降级残留
+        # 仍内嵌 data:image，后台线程堵洞（快筛不命中零开销）
+        self._schedule_legacy_image_blob_migration(session_id, msgs)
         extras = self.load_extras_for_session(session_id)
         if extras is None:
             logger.warning(f"[SessionRepository] get_full_messages: {session_id} extras 读取失败，降级返回轻量消息")
             return msgs
         return merge_extras_into(msgs, extras)
+
+    def _schedule_legacy_image_blob_migration(self, session_id: str, msgs: List[Any]) -> None:
+        """读侧防御迁移：blob 内嵌 data:image → 后台落盘图并回写 ref 形态 blob。
+
+        persist 链引入前的存量 blob、persist 单块失败降级残留，在每次全量读时
+        触发一次后台迁移（复用 _persist_vision_image_blocks_impl 幂等链：sha1
+        去重 + 原子写，已落盘则跳过）。
+
+        - 快筛：块级扫描（与 persist 链命中条件一致）不命中直接返回（零开销）
+        - 传 blob 快照而非活对象：调用方主线程随后 merge_extras_into 就地改 msgs
+        - CAS 回写：UPDATE 带 WHERE messages = 旧快照，blob 已被 worker save 覆盖
+          即放弃本轮（防旧快照回写吞新保存）；失败降级保留原 blob 下次重试；
+          UPDATE 失败但图已落盘时 sha1 同名覆盖无害
+        - 内存侧不就地换 ref：读路径原样返回，UI 链由既有出口 revoke 兜底
+        """
+        try:
+            if not _has_inline_data_image_blocks(msgs):
+                return
+            # 快筛命中才 serialize：传 blob 快照而非活对象（调用方主线程随后
+            # merge_extras_into 会就地改 msgs，线程内 deserialize 出独立对象）
+            blob = serialize(msgs)
+        except Exception:  # noqa: BLE001 — 快筛失败按无需迁移
+            return
+
+        def _migrate(blob: bytes = blob) -> None:
+            try:
+                from app.utils.utils import get_app_data_dir
+
+                work = deserialize(blob)
+                _persist_vision_image_blocks_impl(work, session_id, get_app_data_dir())
+                new_blob = serialize(work)
+                if new_blob == blob:
+                    return  # 无 data:image 块（快筛误命中），避免无谓写
+                # CAS：blob 已被 worker save 覆盖即放弃（防旧快照回写吞新保存），
+                # 未命中即放弃本轮，下次读时快筛自然再触发
+                self._execute(
+                    f"UPDATE {self.TABLE_NAME} SET messages = ? "
+                    f"WHERE session_id = ? AND messages = ?",
+                    (new_blob, session_id, blob),
+                )
+            except Exception as e:  # noqa: BLE001 — 迁移失败保留原 blob 下次重试
+                logger.warning(f"[SessionRepository] 旧图 blob 迁移失败 {session_id}: {e}")
+
+        Thread(target=_migrate, daemon=True, name=f"migrate-img-blob-{session_id[:8]}").start()
 
     def get(self, session_id: str) -> Optional[Dict]:
         """根据 ID 获取单个会话（同时失效内容 hash 缓存）"""
