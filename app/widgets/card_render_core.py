@@ -4286,6 +4286,10 @@ _RESET_CONTENT_FOR_REUSE_JS = """
                     if (c) { c.innerHTML = ''; c.removeAttribute('data-pending-break'); c.scrollTop = 0; }
                     var t = document.getElementById('tool-content');
                     if (t) { t.innerHTML = ''; t.scrollTop = 0; }
+                    // 计数药丸复位：清空工具区不等于清空头部文本，不复位会让
+                    // 复用卡在新内容到达前顶着上一张卡的「N 次思考 · N 次操作」
+                    var _tsc = document.querySelector('#tool-separator > .ts-count');
+                    if (_tsc) { _tsc.textContent = ''; _tsc.style.display = 'none'; }
                     var ts = document.getElementById('tool-section');
                     if (ts) { ts.removeAttribute('data-collapsed'); ts.style.display = ''; }
                     // 坞态/滚动跟随等易失标志复位（避免沿用上一张卡片的阅读状态）

@@ -2,6 +2,8 @@
 All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
+### ✨ 新功能 (New Features)
+- **「工具与思考」头部计数拆三项** (`app/widgets/card_viewers.py` · `app/widgets/render_helpers.py` · `app/widgets/markdown_block_viewer.py`): 头部单一「N 项」改为「N 次思考 · N 次操作 · N 次失败操作」，0 值段隐藏。失败判据为工具块根节点 `data-tool-success="false"`——渲染期 `success is False` 才打标（运行中 / 未知不标，避免失败数虚高），覆盖折叠 / 展开 / 懒注入 / 无折叠 / inline 五个渲染分支，流式块原地转完成态时同步属性；池化复用重置一并清空计数文本。WebEngine 与 Qt 两条渲染器同口径。骨架版本 v79。
 ### 🐛 问题修复 (Bug Fixes)
 - **子智能体执行失败被伪装成成功** (`app/core/workers/subagent_worker.py` · `plugins/system-subagent/manager.py` · `plugins/system-subagent/ui/session_card.py`): 三处叠加导致「❌ 失败」全面显示成「✅ 成功」。① `_execute_agent_loop` 的异常被就地转成 `result="执行出错: xxx"`，`_execution_error` 保持为空 → 完成链判 `success=True`、DB 落 finished、外部注入 ✅；异常改为一律上抛走 `error_occurred` 出口。② stall 路径先删 `running_tasks` 再进完成链，executor 缺席使 `success` 恒真；失败判定改为 executor → `_finished_tasks` 归档的 error 双源，注入正文改带错误原因（原来是「(无输出)」）。③ 会话卡结果区只看 result 是否为空，存在 error 也渲染绿色「✅ 执行结果」；改为 error/失败终态/历史「执行出错:」正文三判据统一走 ❌。**读超时不再直接判死**：流式重试此前只包住建流，SSE 读超时发生在迭代期，重试从未触发；现建流+消费一体纳入重试并显式 close 旧流，client 读超时 120s 对齐主对话 600s（connect 60s；真死锁仍由 stall 的 1800s 在途硬上限兜底）。
 - **子智能体结果被同批最慢任务扣住** (`plugins/system-subagent/manager.py`): 完成链此前只在流式中逐条注入，空闲态整批攒到末尾一次性交付——并行任务里一个 stall 就能把已完成结果压最长 300s。改为任务完成即注入（空闲时 hook 自动降级为 send 开新轮），交付延迟不再由最慢任务决定；批次汇总相应只补失败任务的错误正文，成功正文不重复灌上下文。
