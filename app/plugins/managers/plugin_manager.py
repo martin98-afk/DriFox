@@ -824,7 +824,14 @@ class PluginManager:
             return None
 
     def _save_discovery_cache(self) -> None:
-        """原子回写发现缓存（tmp + replace）；写失败吞异常（缓存永不致命）。"""
+        """原子回写发现缓存（tmp + replace）；写失败吞异常（缓存永不致命）。
+
+        [T10g] 空插件守卫：_plugins 为空时（如测试隔离目录实例）直接不写，
+        避免空缓存文件落盘污染——真实路径靠 key 不匹配兜底，但空缓存文件
+        本身不应存在。
+        """
+        if not self._plugins:
+            return
         try:
             groups: Dict[str, list] = {"system": [], "claude": [], "user": []}
             for p in self._plugins.values():
