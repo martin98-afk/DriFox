@@ -126,6 +126,12 @@ CATALOG: Dict[str, CapabilitySpec] = {
         _spec("session.interrupt", _M, "停止当前流式输出（入队，本轮结束后执行）", _BOTH),
         _spec("session.new", _M, "新建会话（入队，停流后执行）", _BOTH),
         _spec("session.send", _M, "发消息驱动一轮对话（入队；ephemeral 不写会话不渲染；可按 window_id 定向）", _BOTH),
+        _spec(
+            "session.title.commit",
+            _H,
+            "带守卫地提交会话标题（落库 + 首存团队元数据 + 跨窗口 UI 刷新）",
+            _UI,
+        ),
         # ── 输入框 ──
         _spec("input.read", _M, "输入框文本与附件列表", _UI),
         _spec("input.write", _M, "写入输入框文本", _UI),
