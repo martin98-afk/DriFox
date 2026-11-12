@@ -3809,6 +3809,12 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
             # 重新抑制），则交由其 _on_sidebar_anim_finished 恢复，此处跳过。
             if not (self._sidebar_anim is not None and self._sidebar_anim.state() == QVariantAnimation.Running):
                 self._set_windows_resize_preview_suppressed(False)
+                # ★ 拖拽跨折叠阈值触发动画时，_finish_splitter_idle 因「动画在跑」
+                # 跳过了会话收尾，解冻只能由这里补。漏掉则 _content_area 永久停在
+                # setUpdatesEnabled(False)：右侧全部控件不再绘制，表现为拖一下
+                # splitter 后对话区一片空白（切页/再拖一次才恢复）。
+                if hasattr(self, "_content_area"):
+                    self._content_area.setUpdatesEnabled(True)
 
     def _post_expand_squeeze_check(self):
         """展开动画收尾后的重排挤压复检（见 _on_sidebar_anim_finished 展开分支）"""
