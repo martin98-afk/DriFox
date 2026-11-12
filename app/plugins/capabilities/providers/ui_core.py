@@ -1519,7 +1519,8 @@ def _model_complete(host: Any):
     """model.complete：用当前/指定模型做一次性补全，返回完整文本。
 
     不带工具与历史上下文，供插件做「要一段模型输出、不需要完整对话栈」的
-    轻量调用（超时代答 / 文本改写等），免去自己拼 client。
+    轻量调用（超时代答 / 文本改写 / 看图问答），免去自己拼 client。
+    ``prompt`` 支持纯文本与 OpenAI content blocks（多模态）两种形态。
 
     请求头经 resolve_extra_headers 统一组装：OpenCode 等网关要求每个请求
     携带会话标识（x-opencode-session），缺头即 400 MissingSessionID。插件
@@ -1529,15 +1530,34 @@ def _model_complete(host: Any):
     real = _resolve_active_host(host)
 
     def complete(
-        prompt: str,
+        prompt: Any,
         model_query: str = "",
         system: str = "",
         temperature: float = 0.3,
         max_tokens: int = 2000,
         timeout: float = 60.0,
     ) -> str:
-        text = str(prompt or "").strip()
-        if real is None or not text:
+        """prompt 两种形态：
+
+        - ``str``：纯文本，内部包成单条 text content
+        - ``list``：OpenAI content blocks 原样透传（多模态：text + image_url）。
+          图片由调用方自己转 data URL / 公网 URL，宿主不代转。
+        """
+        if real is None:
+            return ""
+        if isinstance(prompt, str):
+            text = prompt.strip()
+            if not text:
+                return ""
+            user_content: Any = text
+        elif isinstance(prompt, (list, tuple)):
+            user_content = list(prompt)
+            if not user_content:
+                return ""
+        else:
+            logger.warning(
+                f"[Capability] model.complete prompt 需为 str 或 content blocks 列表，收到 {type(prompt).__name__}"
+            )
             return ""
         try:
             if model_query:
@@ -1562,7 +1582,7 @@ def _model_complete(host: Any):
         messages = []
         if system:
             messages.append({"role": "system", "content": str(system)})
-        messages.append({"role": "user", "content": text})
+        messages.append({"role": "user", "content": user_content})
         try:
             from app.core.modelmeta.provider_profile import resolve_extra_headers
             from app.utils.http_client import build_openai_client, chat_completion_text
@@ -1702,17 +1722,42 @@ def _secret_account(plugin_name: str, key: str) -> str:
     return f"plugin:{plugin_name}:{k}"
 
 def _secret_read(host: Any, ctx: Any):
-    """读本插件自己的凭据（系统密钥库）。"""
+    """读本插件自己的凭据（系统密钥库）。
+
+    可选 ``fallback_config_key``：密钥库未命中时回退读旧的插件配置项（明文
+    时代的存量数据）。命中且密钥库可用时做一次懒迁移——写进密钥库并把配置
+    里的明文清空。密钥库不可用（如无 keyring 的 Linux）时只回退不迁移，
+    否则用户已配置的 key 会凭空消失。
+    """
     plugin_name = _plugin_name_of(ctx)
 
-    def read(key: str, default: str = "") -> str:
+    def read(key: str, default: str = "", fallback_config_key: str = "") -> str:
         account = _secret_account(plugin_name, key)
         if not account:
             return default
         try:
             from app.utils.secret_store import SecretStore
 
-            return SecretStore().get(account) or default
+            store = SecretStore()
+            value = store.get(account)
+            if value:
+                return value
+            if not fallback_config_key:
+                return default
+            legacy = str(_plugin_config_read(host, ctx)(fallback_config_key, "") or "")
+            if not legacy:
+                return default
+            if store.available and store.set(account, legacy):
+                try:
+                    from app.plugins.managers.plugin_config_store import PluginConfigStore
+
+                    PluginConfigStore().set_values(plugin_name, {fallback_config_key: ""})
+                    logger.info(
+                        f"[Capability] secret.read 已将 {plugin_name}.{fallback_config_key} 迁移进密钥库"
+                    )
+                except Exception:  # noqa: BLE001 - 迁移失败不影响本次读取
+                    pass
+            return legacy
         except Exception as e:  # noqa: BLE001
             logger.warning(f"[Capability] secret.read 失败（{plugin_name}）: {e}")
             return default

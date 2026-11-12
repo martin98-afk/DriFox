@@ -304,7 +304,7 @@ CATALOG: Dict[str, CapabilitySpec] = {
         _spec(
             "secret.read",
             _M,
-            "读本插件自己的凭据（系统密钥库，account 自动带 plugin:<name>: 前缀，跨插件不可读）",
+            "读本插件自己的凭据（系统密钥库，account 自动带 plugin:<name>: 前缀）；可传 fallback_config_key 兼容旧明文配置并懒迁移",
             _BOTH,
         ),
         _spec(

@@ -193,7 +193,12 @@ manifest 加 `api_version: 2`，必须同时把用到的能力全部列上。** 
 ### 能力目录全集
 
 唯一真相是主程序 `app/plugins/capabilities/catalog.py`（`CATALOG`）。快照
-（新增能力以主程序为准，本表可能滞后）：
+（2026-11-12 对齐 88 条；新增能力以主程序为准）：
+
+> **能替代直连的三条优先用**：读自己的配置走 `plugin.config.read`（别 import
+> `PluginConfigStore`）、要一段模型输出走 `model.complete`（别自建 openai
+> client）、发 HTTP 走 `net.http`（别自己拉 httpx）。直连宿主内部模块的插件
+> 会在宿主重构时静默碎掉，且不进能力审计。
 
 | 能力 ID | 说明 | surfaces |
 |---|---|---|
@@ -201,6 +206,7 @@ manifest 加 `api_version: 2`，必须同时把用到的能力全部列上。** 
 | `model.schema` | 指定 agent 视角的工具 schema | ui, tool |
 | `model.config` | **完整模型配置（含已解密明文 API key）** | ui, tool |
 | `model.config_for` / `model.set` | 按 query 解析可执行配置（含明文 key）/ 设置窗口服务商与模型（只改窗口实例态，`window_id` 可定向） | ui, tool / **ui** |
+| `model.complete` | 用当前/指定模型做**一次性补全**（不带工具与历史上下文，消耗 token），返回完整文本；`prompt` 可为纯文本或 content blocks 列表（多模态看图）；请求头由宿主统一组装 | ui, tool |
 | `provider.list` / `model.enumerate` | 服务商清单（**不含密钥与 URL**）/ 服务商可选模型列表（含视觉/思考标记） | ui, tool |
 | `session.read` / `session.write` | 会话读写（write 写库 + 刷 UI + 发事件；两者 `window_id` 可定向到指定窗口） | ui, tool |
 | `session.list` | 窗口内存会话列表（`host.session_manager.sessions`） | ui |
@@ -217,11 +223,13 @@ manifest 加 `api_version: 2`，必须同时把用到的能力全部列上。** 
 | `branch.refresh` | 失效分支检测缓存并刷新标题栏分支标签 | ui |
 | `theme.read` | 主题 id/名称/配色/字体/字号 | ui |
 | `tool.read` / `tool.execute` | 工具元信息 / 执行任意工具 | ui, tool |
+| `tool.register` / `tool.unregister` | **运行时**注册/注销插件工具（`source` 强制 `plugin:<name>`、`danger` 必填；卸载/重载时宿主按 source 兜底清理） | ui, tool |
 | `tool.inject` | 向 LLM 注入工具（改变模型可见行为） | **ui** |
 | `engine.session` / `engine.stack` | 创建引擎会话（消耗 token）/ 执行栈工厂 | ui |
 | `platform.send` / `platform.read` | 通讯平台收发 | ui |
 | `mcp.call` / `mcp.register` / `lsp.query` | MCP 调用 / 注册进程内 MCP server（gateway，接入方式见 components/mcp.md）/ LSP 查询 | tool / **ui** |
 | `net.upload` / `net.download` / `net.avatar` | Gitee 上传 / 下载文件到本地路径 / 账户头像（avatar 须后台线程） | tool / ui, tool / **ui** |
+| `net.http` | 通用 HTTP(S) 请求（数据外发）：宿主统一超时 / 重定向 / 系统证书链，仅 `http(s)`，响应体限 10MB；自带代理或镜像重试的请求不要用它 | ui, tool |
 | `ui.notify` `ui.card.show` `ui.card.hide` | 弹 InfoBar / 显示浮动卡 / 隐藏浮动卡 | ui |
 | `ui.artifacts.show` | 向消息卡片成果栏推成果条目（image/video/html/text/file）；工具侧常规通道是 `ToolResult.artifacts` 免声明字段 | ui, tool |
 | `ui.exclusive` `ui.dialog` `ui.events` | 独占 UI 模式 / 文件与确认对话框 / UI 事件总线；`ui.events` 含全局对话报错 `conversation_error` 事件（payload: window_id/session_id/provider/model/message/error_type/timestamp），全局监听插件用它收所有窗口的事件 | ui |
@@ -231,6 +239,8 @@ manifest 加 `api_version: 2`，必须同时把用到的能力全部列上。** 
 | `window.active` `window.current` `window.host` | 活跃窗口 / 窗口语义快照 / 宿主顶层窗口 | ui |
 | `window.list` `window.events` `window.workbench` | 窗口 id 集 / tab 切换事件 / 右侧工作台页 | ui |
 | `plugin.read` / `plugin.control` | 已安装插件列表 / 重载启停其他插件 | ui |
+| `plugin.config.read` / `plugin.config.write` | 读写**本插件自己**的配置项（取值链 env → 存储值 → schema 默认由宿主实现；write 仅 `config_schema` 已声明字段） | ui, tool |
+| `plugin.deps` | 查询本插件依赖安装状态（缺失清单 / 环境问题）；装依赖仍由市场流程负责 | ui, tool |
 | `command.read` / `command.reload` | 命令列表 / 命令热重载 | ui |
 | `sync.register` | 注册本地目录进入云同步监控（目录内容打包备份到云端，数据外发） | ui |
 | `team.read` / `team.send` | 团队成员与运行状态 / 派发任务邮件（send 仅 tool） | ui, tool / **tool** |
@@ -238,7 +248,9 @@ manifest 加 `api_version: 2`，必须同时把用到的能力全部列上。** 
 | `team.session` | 团队历史会话恢复 / 归档 / 进入成员会话（跨窗口开标签页） | ui |
 | `cache.purge` | 清理主程序进程内 LRU 缓存 | ui |
 | `process.start` | 启动后台进程（argv 数组、无 shell，独立于宿主生命周期） | ui, tool |
+| `task.background` | 宿主线程池跑插件后台任务，返回句柄（`cancelled()` / `progress()` / `cancel()`）；`on_done` / `on_error` 由宿主派回主线程 | ui, tool |
 | `storage.data_dir` / `storage.db` | 插件数据根目录 / 通用数据库执行（受限代理：表名须 `plugin_<name>_` 前缀，禁 ATTACH/PRAGMA） | ui, tool |
+| `secret.read` / `secret.write` | 本插件凭据读写（系统密钥库；account 自动带 `plugin:<name>:` 前缀，跨插件不可读；write 传空串 = 删除，密钥库不可用时返回空/False，不落明文盘） | ui, tool |
 | `config.read` / `config.write` | 按 key 读写主程序配置项（**不含密钥**，密钥走 `model.config`；write 仅已声明项） | ui |
 | `host.raw` | 裸 `main_widget` / `backend` 对象引用（逃生舱） | ui |
 | `plugin.log` / `state.kv` | 带前缀的 logger / 窗口级 KV（**恒放行，无需声明**） | - |
@@ -272,6 +284,11 @@ manifest 加 `api_version: 2`，必须同时把用到的能力全部列上。** 
 ## E1 配置契约（config_schema）
 
 在 manifest 里声明 `config_schema`，主程序自动在「设置 → 插件」的插件详情页渲染配置表单；用户保存后值写入 `PluginConfigStore`，插件代码随时读取。没声明 `config_schema` 的插件同样会出现在插件列表里，可以在详情页查看权限与关于信息。
+
+> 读值一律走能力 `plugin.config.read`（`caps_for("plugin.config.read")` 或
+> `ctx["capabilities"]["plugin.config.read"]`）：env → 存储值 → schema 默认
+> 三级链由宿主实现，插件不 import `PluginConfigStore`。工具执行时读配置同样
+> 可用（该能力 ui / tool 两面都开）。
 
 ### 结构
 

@@ -67,6 +67,8 @@ def test_plugin_config_write_without_plugin_name(monkeypatch):
 # ── secret ─────────────────────────────────────────────────
 
 class _FakeSecret:
+    available = True
+
     def __init__(self):
         self.data = {}
 
@@ -325,3 +327,28 @@ def test_system_web_reads_config_via_capability():
     ).read_text(encoding="utf-8")
 
     assert 'caps_for("plugin.config.read")' in src
+
+
+def test_secret_read_falls_back_to_legacy_config_and_migrates(keyring, store):
+    """老数据在明文配置里：读得到、并顺手迁进密钥库后清空配置明文。"""
+    store.values = {"api_key": "legacy-key"}
+    read = ui_core._secret_read(None, CTX)
+
+    assert read("third_party", fallback_config_key="api_key") == "legacy-key"
+    assert keyring.data == {"plugin:demo:third_party": "legacy-key"}
+    assert store.writes[-1] == ("demo", {"api_key": ""})
+
+
+def test_secret_read_does_not_migrate_when_keyring_unavailable(monkeypatch, store):
+    class _Unavailable(_FakeSecret):
+        available = False
+
+    fake = _Unavailable()
+    monkeypatch.setattr("app.utils.secret_store.SecretStore", lambda: fake)
+    store.values = {"api_key": "legacy-key"}
+    store.writes.clear()
+    read = ui_core._secret_read(None, CTX)
+
+    assert read("third_party", fallback_config_key="api_key") == "legacy-key"
+    assert fake.data == {}
+    assert store.writes == []  # 密钥库不可用时不删明文，否则数据丢失
