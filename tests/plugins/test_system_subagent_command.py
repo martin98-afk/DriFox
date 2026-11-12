@@ -53,7 +53,7 @@ def env(monkeypatch):
         return state["model_cfg"]
 
     pool["ui.notify"] = _notify
-    pool["config.write"] = _write
+    pool["plugin.config.write"] = _write
     pool["model.config_for"] = _config_for
     pool["subagent.run"] = None
 
@@ -91,7 +91,7 @@ def test_reset_writes_empty_value(env):
 
     _handler.handle_command("--reset")
 
-    assert state["writes"] == [("llm_subagent_default_model", "")]
+    assert state["writes"] == [("subagent_model", "")]
     assert state["notifies"][0][0] == "已重置"
 
 
@@ -120,7 +120,7 @@ def test_model_writes_provider_prefixed_display(env):
 
     _handler.handle_command("--model=gpt-4o")
 
-    assert state["writes"] == [("llm_subagent_default_model", "OpenAI 主号:gpt-4o")]
+    assert state["writes"] == [("subagent_model", "OpenAI 主号:gpt-4o")]
     assert state["notifies"][0] == ("子智能体模型设置", "OpenAI 主号:gpt-4o", "success")
 
 

@@ -1453,10 +1453,12 @@ def create_manager(backend: Any, caps: Any = None) -> SubAgentManager:
     """
 
     def _get_llm_config() -> Dict:
-        from app.utils.config import Settings
-
-        cfg = Settings.get_instance()
-        saved = cfg.llm_subagent_default_model.value
+        saved = ""
+        if caps is not None and "plugin.config.read" in caps:
+            try:
+                saved = str(caps["plugin.config.read"]("subagent_model", "") or "")
+            except Exception as e:  # noqa: BLE001 - 配置读取失败回退当前模型
+                logger.warning(f"[SubAgentManager] 插件默认模型读取失败: {e}")
         if caps is not None:
             if saved and "model.config_for" in caps:
                 try:

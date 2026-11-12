@@ -49,9 +49,13 @@ def _notify(pool: Any, title: str, message: str, kind: str = "success", duration
 
 
 def _handle_reset(pool: Any) -> None:
-    ok = bool(pool["config.write"]("llm_subagent_default_model", ""))
+    if not pool or "plugin.config.write" not in pool:
+        _notify(pool, "重置失败", "插件配置写入能力不可用", "warning")
+        return
+    ok = bool(pool["plugin.config.write"]("subagent_model", ""))
     if ok:
         _notify(pool, "已重置", "子智能体默认模型已清空，将使用主智能体模型")
+        _refresh_after_change()
     else:
         _notify(pool, "重置失败", "写入默认模型配置失败，详见日志", "warning")
 
@@ -68,10 +72,14 @@ def _handle_model(pool: Any, model_value: str) -> None:
     provider_display = llm_config.get("display_name") or llm_config.get("provider_name") or ""
     model_display = llm_config.get("模型名称") or model_value
     display_value = f"{provider_display}:{model_display}" if provider_display else model_display
-    if not bool(pool["config.write"]("llm_subagent_default_model", display_value)):
+    if not pool or "plugin.config.write" not in pool:
+        _notify(pool, "设置失败", "插件配置写入能力不可用", "warning")
+        return
+    if not bool(pool["plugin.config.write"]("subagent_model", display_value)):
         _notify(pool, "设置失败", "写入默认模型配置失败，详见日志", "warning")
         return
     _notify(pool, "子智能体模型设置", display_value)
+    _refresh_after_change()
 
 
 def _subagent_facade(mw: Any) -> Optional[Any]:
@@ -150,8 +158,8 @@ def register_commands() -> None:
     from app.core.commands.builtin_commands import FunctionCommandHandlers
 
     FunctionCommandHandlers.register(COMMAND_NAME, handle_command)
+    _migrate_legacy_default_model()
     refresh_model_param_description()
-    _watch_default_model()
 
 
 def refresh_model_param_description() -> None:
@@ -162,9 +170,8 @@ def refresh_model_param_description() -> None:
     """
     try:
         from app.core.commands.command_manager import CommandManager
-        from app.utils.config import Settings
 
-        saved = Settings.get_instance().llm_subagent_default_model.value or ""
+        saved = _read_default_model()
         entries = CommandManager.get_instance()._commands.get(COMMAND_NAME, {})
         for cmd_def in entries.values():
             for param in cmd_def.parameters:
@@ -175,18 +182,51 @@ def refresh_model_param_description() -> None:
         logger.debug(f"[system-subagent] 命令参数描述刷新失败: {e}")
 
 
-def _watch_default_model() -> None:
-    """监听默认模型配置变更：刷新命令卡参数描述。"""
+def _config_pool() -> Any:
+    """无窗口 ctx 时取本插件 ui 能力池（默认模型读写统一经此）。"""
     try:
-        from app.utils.config import Settings
+        from app.plugins.capabilities.resolve import pool_for
 
-        cfg = Settings.get_instance()
-        cfg.llm_subagent_default_model.valueChanged.connect(_on_default_model_changed)
+        return pool_for(_PLUGIN_NAME, surface="ui")
     except Exception as e:  # noqa: BLE001
-        logger.debug(f"[system-subagent] 默认模型监听失败: {e}")
+        logger.debug(f"[system-subagent] 配置能力池不可用: {e}")
+        return None
 
 
-def _on_default_model_changed(*_args) -> None:
+def _read_default_model() -> str:
+    """经能力池读插件数据目录 config.json 里的默认模型。"""
+    pool = _config_pool()
+    if pool is None or "plugin.config.read" not in pool:
+        return ""
+    try:
+        return str(pool["plugin.config.read"]("subagent_model", "") or "").strip()
+    except Exception as e:  # noqa: BLE001
+        logger.debug(f"[system-subagent] 默认模型读取失败: {e}")
+        return ""
+
+
+def _migrate_legacy_default_model() -> None:
+    """一次性把旧全局配置搬进插件数据目录（值格式一致，无需转换）。"""
+    pool = _config_pool()
+    needed = ("plugin.config.read", "plugin.config.write", "config.read", "config.write")
+    if pool is None or not all(cap in pool for cap in needed):
+        return
+    try:
+        if str(pool["plugin.config.read"]("subagent_model", "") or "").strip():
+            return
+        legacy = str(pool["config.read"]("llm_subagent_default_model", "") or "").strip()
+        if not legacy:
+            return
+        if not bool(pool["plugin.config.write"]("subagent_model", legacy)):
+            return
+        pool["config.write"]("llm_subagent_default_model", "")
+        logger.info("[system-subagent] 默认模型已迁移到插件设置")
+    except Exception as e:  # noqa: BLE001
+        logger.debug(f"[system-subagent] 默认模型迁移跳过: {e}")
+
+
+def _refresh_after_change() -> None:
+    """命令改完模型后刷新命令参数描述与命令卡详情。"""
     refresh_model_param_description()
     try:
         from app.plugins.capabilities.resolve import active_main_widget
