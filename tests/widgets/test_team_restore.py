@@ -586,7 +586,6 @@ class TestTeamRestoreLogic:
         win = MagicMock()
         win._is_destroyed = False
         win._is_streaming = False
-        win._topic_summary_cancelled = False
         win.backend = MagicMock()
         win.backend.chat_engine = MagicMock()
         win.backend.tool_executor = MagicMock()
@@ -643,7 +642,6 @@ class TestTeamRestoreLogic:
             win = MagicMock()
             win._is_destroyed = False
             win._is_streaming = False
-            win._topic_summary_cancelled = False
             win._team_run_id = team_run_id
             win._session_dirty = False
             win.backend = MagicMock()

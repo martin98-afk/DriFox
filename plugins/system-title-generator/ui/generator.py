@@ -26,7 +26,7 @@ class _SignalBridge(QObject):
 class _TitleController:
     def __init__(self, pool: Any):
         self._pool = pool
-        self._inflight: set = set()
+        self._inflight: set[str] = set()
         self._lock = threading.Lock()
 
     # ── 生命周期 ──
@@ -34,7 +34,13 @@ class _TitleController:
         global _BRIDGE
         if _BRIDGE is None:
             _BRIDGE = _SignalBridge()
-            _BRIDGE.resultReady.connect(self._on_result)
+        # 无条件重连：同进程内 destroy→create 不重新 import 时，旧桥已断连但
+        # 模块级 _BRIDGE 仍非 None，只判 None 会漏连导致结果无人接收。
+        try:
+            _BRIDGE.resultReady.disconnect(self._on_result)
+        except (TypeError, RuntimeError):
+            pass
+        _BRIDGE.resultReady.connect(self._on_result)
         events = self._pool["ui.events"]()
         events["subscribe"]("title.request", self._on_title_request)
 
@@ -74,6 +80,8 @@ class _TitleController:
             '- 如："生成PPT"、"调试bug"、"咨询问题"\n\n'
         )
         if previous_summary:
+            # 预留分支：当前宿主守卫 topic_summary 非空即不发请求，本分支不可达；
+            # 未来放开「主题变更时更新标题」时无需再补 prompt。
             safe = previous_summary.replace("\\", "\\\\").replace('"', '\\"')
             return (
                 head
@@ -150,7 +158,7 @@ class _TitleController:
             title = str((parsed or {}).get("topic_summary", "") or "").strip()
         except Exception as e:  # noqa: BLE001
             logger.warning(f"[system-title-generator] 生成失败: {e}")
-        title = title or fallback
+        title = " ".join((title or fallback).split())
         if not title:
             return
         self._emit(window_id, session_id, title)
@@ -165,7 +173,8 @@ class _TitleController:
         with self._lock:
             self._inflight.discard(window_id)
         try:
-            current = self._pool["session.read"]() or {}
+            # 定向到发起窗口：无参会解析到全局活跃窗口，多窗口下切窗后误杀结果。
+            current = self._pool["session.read"](window_id) or {}
         except Exception:
             return
         if str(current.get("session_id") or "") != session_id:

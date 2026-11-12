@@ -384,7 +384,6 @@ class TestSignals:
         "createResponse",
         "contextActionRequested",
         "skillExecutionRequested",
-        "_topic_summary_ready",
         "_interrupt_complete",
         "userInterventionRequested",
         "executionResultProduced",

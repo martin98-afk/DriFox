@@ -2,6 +2,8 @@
 All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
+### ✨ 新功能 (New Features)
+- **标题生成抽成系统插件，模型选择迁入插件设置** (`plugins/system-title-generator/` · `app/main_widget.py` · `app/plugins/capabilities/providers/title_core.py`): 新增 `system-title-generator` 系统插件（`_NON_DISABLEABLE`），订阅宿主 `title.request` 事件后调 `model.complete` 生成会话标题，失败回退首条真实用户问题前 15 字；提交经唯一新能力 `session.title.commit`（HIGH），原 `_on_topic_summary_generated` 全部守卫（改名跳过 / 临时会话 / 50 字校验 / 首存团队元数据与项目 fallback）沉入 provider，窗口私有状态不出宿主。模型由插件设置 `title_model`（`type: model` 下拉，空值跟随当前会话模型）驱动；旧全局 `LLM/TitleGenDefaultModel` 启动时一次性迁入插件配置并清空。宿主三处触发收敛为 `_publish_title_request()`（守卫 + 首问判据），删除 `app/core/workers/topic_summary.py`、`/title-gen` 命令与 `_topic_summary_ready` 信号链；插件缺席或长输入生成失败时标题退回 `session.name`，短输入仍由宿主直提。已知取舍：`model.complete` 无取消参数，切会话后晚归结果靠提交前 `session_id` 复查丢弃，不中断在途 HTTP。
 ### 🐛 问题修复 (Bug Fixes)
 - **子智能体结果被同批最慢任务扣住** (`plugins/system-subagent/manager.py`): 完成链此前只在流式中逐条注入，空闲态整批攒到末尾一次性交付——并行任务里一个 stall 就能把已完成结果压最长 300s。改为任务完成即注入（空闲时 hook 自动降级为 send 开新轮），交付延迟不再由最慢任务决定；批次汇总相应只补失败任务的错误正文，成功正文不重复灌上下文。
 ### ♻️ 代码重构 (Refactoring)

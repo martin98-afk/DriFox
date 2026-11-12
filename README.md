@@ -328,7 +328,7 @@ plugins/<功能插件>/        # 10 个内置功能插件
 
 **20 个内置技能**：brainstorming / diagnose / tdd / writing-plans / plugin-creator / ui-plugin-creator / skill-creator / drifox-dev / github-ops / find-skills / grill-me / visualization 等
 
-**34 个内置命令**：`/team`、`/theme`、`/compact`、`/branch`、`/worktree`、`/subagents`、`/subagent_dag`、`/wordcloud`、`/webresearch`、`/release`、`/verify`、`/remember`、`/todos`、`/share`、`/title-gen`、`/lsp-install`、`/receive-review` 等
+**33 个内置命令**：`/team`、`/theme`、`/compact`、`/branch`、`/worktree`、`/subagents`、`/subagent_dag`、`/wordcloud`、`/webresearch`、`/release`、`/verify`、`/remember`、`/todos`、`/share`、`/lsp-install`、`/receive-review` 等
 
 ---
 

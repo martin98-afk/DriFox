@@ -205,7 +205,6 @@ PLACEHOLDER_TIPS = [
     "/theme 主题配色 /compact 压缩上下文",
     "/subagents 启动子智能体任务",
     "/team 团队协作模式启动",
-    "/title-gen 自动生成会话标题",
     "/receive-review 接收外部审查意见",
     "/finish-branch 完成分支并合并",
     "/webresearch 联网搜索研究",

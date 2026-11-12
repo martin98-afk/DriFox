@@ -45,7 +45,7 @@ def _pool(*, config="", session_id="s-1", complete="", commits=None, events=None
     sink = commits if commits is not None else []
     return {
         "plugin.config.read": lambda key, default="": config if key == "title_model" else default,
-        "session.read": lambda: {"session_id": session_id},
+        "session.read": lambda window_id="": {"session_id": session_id},
         "model.complete": lambda prompt, **kw: complete,
         "session.title.commit": lambda wid, title: (sink.append((wid, title)) or True),
         "ui.events": lambda: {
@@ -120,3 +120,41 @@ def test_session_changed_discards_result():
     ctrl = module._TitleController(pool)
     ctrl._on_result("w-1", "s-1", "季度报表分析")
     assert calls == []
+
+
+def test_session_read_targets_origin_window():
+    module = _load_generator()
+    seen = []
+    calls = []
+
+    def read(window_id=""):
+        seen.append(window_id)
+        return {"session_id": "s-1"}
+
+    pool = _pool(commits=calls)
+    pool["session.read"] = read
+    ctrl = module._TitleController(pool)
+    ctrl._on_result("w-1", "s-1", "季度报表分析")
+    assert seen == ["w-1"]
+    assert calls == [("w-1", "季度报表分析")]
+
+
+def test_controller_restart_reconnects_bridge(monkeypatch):
+    """同进程 destroy→create 不重新 import 时仍能收到结果。"""
+    module = _load_generator()
+    subscribed = {}
+    pool = _pool(events=subscribed)
+    committed = []
+    pool["session.title.commit"] = lambda wid, title: committed.append((wid, title))
+
+    first = module._TitleController(pool)
+    first.start()
+    first.stop()
+    second = module._TitleController(pool)
+    second.start()
+
+    bridge = module._BRIDGE
+    assert bridge is not None
+    bridge.resultReady.emit("w-1", "s-1", "标题")
+    assert committed == [("w-1", "标题")]
+    second.stop()
