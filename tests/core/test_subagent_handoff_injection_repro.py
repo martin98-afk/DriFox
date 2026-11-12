@@ -7,7 +7,8 @@
 任何执行结果；subagent_status 无参还被会话隔离挡住，查不到旧任务。
 
 两条修复：
-- A：非流式批次汇总自带每个任务的 result/error 正文（流式保持精简，单任务已逐条注入）。
+- A：单任务结果完成即注入（含空闲态）——交接后新会话窗口靠这条拿到正文；
+  批次汇总只补失败任务的错误正文，不再重复成功正文。
 - B：get_all_active_tasks_with_details 在当前会话无任务时回退到最近派发任务的会话。
 
 本测试不启动真实 executor/LLM，只驱动 manager 的完成链与状态查询。
@@ -104,7 +105,7 @@ def _seed(mgr, task_id="t1", session_id="sess-A"):
 
 
 def test_idle_after_handoff_batch_carries_results():
-    """A：引擎空闲时单任务 hook 注入不触发，但批次汇总必须自带结果正文"""
+    """A：引擎空闲时结果仍逐条注入，正文经单条进新会话（不再靠汇总承载）"""
     mgr = _make_manager(_IdleBackend())
     _seed(mgr)
 
@@ -115,11 +116,11 @@ def test_idle_after_handoff_batch_carries_results():
 
     mgr._on_executor_finished("t1", _RESULT)
 
-    assert injected == [], "空闲态不开 hook 注入：正文改由批次汇总承载"
-    assert batch_messages, "批次兜底应触发"
-    callback = batch_messages[0]
-    assert _RESULT in callback, "非流式汇总必须带结果正文，否则新会话看不到结果"
-    assert "各任务执行结果" in callback
+    assert len(injected) == 1, "空闲态也要逐条注入，不能攒到批次末尾"
+    # 签名: (task_id, result, success, agent_name, description)
+    assert injected[0][0][1] == _RESULT, "结果正文必须随单条注入送到新会话"
+    assert batch_messages, "批次汇总仍触发（任务清单）"
+    assert "t1" in batch_messages[0], "汇总列出任务 id"
 
 
 def test_streaming_after_handoff_summary_stays_lean():
