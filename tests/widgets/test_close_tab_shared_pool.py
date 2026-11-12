@@ -119,30 +119,31 @@ class TestSharedPool:
 
 
 class TestLateCallbackGuard:
-    @pytest.mark.skipif(
-        not pytest.importorskip("PyQt5", reason="需要 PyQt5"),
-        reason="需要 PyQt5",
-    )
-    def test_on_topic_summary_generated_destroyed_guard(self):
-        """已销毁窗口收到晚归标题回调 → 守卫直接 return（不触达 UI 属性）"""
-        from PyQt5.QtWidgets import QApplication
+    def test_commit_dead_window_returns_false(self):
+        """关页后晚归标题提交 → window_id 解析失败即静默返回，不触达 UI。"""
+        from app.plugins.capabilities.providers import title_core
 
-        QApplication.instance() or QApplication([])
-        from app.main_widget import OpenAIChatToolWindow
+        original = title_core._resolve_window_by_id
+        title_core._resolve_window_by_id = lambda wid: None
+        try:
+            commit = title_core._session_title_commit(object())
+            assert commit("gone", "晚归标题") is False
+        finally:
+            title_core._resolve_window_by_id = original
 
-        inst = OpenAIChatToolWindow.__new__(OpenAIChatToolWindow)
-        inst._is_destroyed = True
-        # 裸实例访问其它属性会抛 RuntimeError（Qt 保护）；守卫在属性访问之前
-        # return 即通过 —— 若守卫缺失，下方调用会抛 RuntimeError
-        inst._on_topic_summary_generated({"topic_summary": "晚归标题"}, None)
+    def test_plugin_result_checks_session_id_before_commit(self):
+        """插件提交前复查 session_id：切会话 / 关页的晚归结果被丢弃。"""
+        import importlib.util
 
-    def test_thread_safe_callback_has_destroyed_guard_ast(self):
-        """_maybe_generate_topic_summary 内的回调包装含 _is_destroyed 守卫"""
-        cls = _get_class("OpenAIChatToolWindow")
-        method = _get_method(cls, "_maybe_generate_topic_summary")
-        body_src = ast.unparse(method)
-        assert "_is_destroyed" in body_src, (
-            "标题生成回调包装缺 _is_destroyed 守卫：任务在共享池上比窗口活得久，"
-            "关页后回调对已销毁 QObject emit 会抛 RuntimeError（池线程内）。"
-        )
-        assert "RuntimeError" in body_src, "回调包装应捕获 emit 的 RuntimeError"
+        path = _REPO_ROOT / "plugins" / "system-title-generator" / "ui" / "generator.py"
+        spec = importlib.util.spec_from_file_location("_tg_late_guard", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        committed = []
+        pool = {
+            "session.read": lambda window_id="": {"session_id": "other-session"},
+            "session.title.commit": lambda wid, title: committed.append((wid, title)),
+        }
+        ctrl = module._TitleController(pool)
+        ctrl._on_result("w-1", "s-1", "晚归标题")
+        assert committed == []

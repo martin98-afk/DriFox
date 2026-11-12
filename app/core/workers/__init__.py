@@ -20,7 +20,6 @@ _LAZY_IMPORTS: dict[str, tuple[str, tuple[str, ...]]] = {
     ),
     "chat_worker": ("app.core.workers.chat_worker", ("OpenAIChatWorker",)),
     "subagent_worker": ("app.core.workers.subagent_worker", ("SubAgentExecutor",)),
-    "topic_summary": ("app.core.workers.topic_summary", ("TopicSummaryTask",)),
 }
 
 # 符号级映射：{导出符号 -> (模块路径, 符号名)}，供 from-import 击穿时解析
@@ -57,8 +56,6 @@ __all__ = [
     # Workers
     "OpenAIChatWorker",
     "SubAgentExecutor",
-    # Tasks
-    "TopicSummaryTask",
     # Cache Tracker
     "CacheHitRateTracker",
     "CacheStats",

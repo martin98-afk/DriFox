@@ -1,10 +1,9 @@
-"""回归测试：subagent/title 默认模型保存的服务商标识歧义
+"""回归测试：默认模型保存的服务商标识歧义
 
 Bug 背景：
-    用户通过命令卡枚举选择「服务商名 + 模型名」配置 subagent / title 默认模型。
+    用户通过命令卡枚举选择「服务商名 + 模型名」配置默认模型。
     枚举选项 value 使用 display_name（唯一，如 'opencode免费模型 #2'），但旧保存
-    逻辑 _handle_subagents_command / _handle_title_gen_command 却取 config 的
-    provider_name（如 'OpenCode Zen'）写入 SubagentDefaultModel / TitleGenDefaultModel。
+    逻辑却取 config 的 provider_name（如 'OpenCode Zen'）写入默认模型配置。
 
     重新解析时 _resolve_service_provider 优先按 display_name 匹配，当存在两个同
     provider_name 的配置（df810bab 的 display_name='OpenCode Zen' 与 68ea6d92 的

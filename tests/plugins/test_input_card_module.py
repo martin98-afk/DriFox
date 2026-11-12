@@ -61,7 +61,6 @@ def test_compose_builds_input_card(fresh_registry, qapp):
             for _m in (
                 "_load_input_history",
                 "_update_subagents_param_description",
-                "_update_title_gen_param_description",
                 "_ensure_file_mention_cache",
                 "_on_send_clicked",
                 "_on_send_clicked_inverse",
@@ -88,7 +87,6 @@ def test_compose_builds_input_card(fresh_registry, qapp):
                 "_on_queue_remove_requested",
                 "_on_queue_edit_requested",
                 "_on_subagent_model_config_changed",
-                "_on_title_gen_model_config_changed",
             ):
                 setattr(self, _m, lambda *a, **k: None)
 

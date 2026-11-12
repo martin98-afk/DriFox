@@ -406,6 +406,7 @@ class PluginManager:
             "system-agents",
             "system-transports",
             "system-stream-sinks",
+            "system-title-generator",
             "plugin-marketplace",
         }
     )

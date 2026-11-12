@@ -78,7 +78,6 @@ from app.constants import (
 from app.core import (
     ChatBackend,
     ChatSession,
-    TopicSummaryTask,
     consolidate_messages,
     content_to_text,
     get_user_round_ranges,
@@ -938,7 +937,7 @@ def _image_path_to_data_uri(img_path: str) -> "str | None":
 # 随窗口回收时析构会再次同步等待任务跑完（实测按任务剩余时长阻塞）。标题
 # 生成是 LLM HTTP 往返（常 3-10s），"刚对话完就关页"必然撞上 → 关闭卡 1s+。
 # 改为应用级共享池：任务生命周期脱离窗口，窗口销毁不再等待、池析构不再
-# 拖累关页（任务取消走 _topic_summary_cancelled 标志 + 回调侧 RuntimeError 守卫）。
+# 拖累关页（任务取消由各调用方自行处理）。
 _gen_thread_pool_shared: Optional[QThreadPool] = None
 
 
@@ -1090,7 +1089,6 @@ class OpenAIChatToolWindow(ToolWindow):
     # 查找顺序：实例 dict（动态）→ 本类级表（getattr 解析）→ FunctionCommandHandlers 全局 → 硬编码
     _BUILTIN_COMMAND_HANDLER_NAMES: Dict[str, str] = {
         # subagents 已迁 system-subagent 插件（handler 走 FunctionCommandHandlers 全局表）
-        "title-gen": "_handle_title_gen_command",
         "compact": "_handle_compact_command",
         "todos": "_handle_todos_command",
         "team": "_handle_team_command",
@@ -1109,8 +1107,6 @@ class OpenAIChatToolWindow(ToolWindow):
     createResponse = pyqtSignal(str)
     contextActionRequested = pyqtSignal(str, str)
     skillExecutionRequested = pyqtSignal(str, dict)
-    # 线程安全桥接信号：从后台线程发射，主线程槽函数自动执行
-    _topic_summary_ready = pyqtSignal(object, object)
     # AI 审核结果桥接（后台线程 → 主线程）：tool_call_id, result(dict|None), error
     _approval_review_ready = pyqtSignal(str, object, str)
     # 上下文占用快照后台化桥接（A 优化）：快照线程池 → 主线程画圆环
@@ -1439,14 +1435,11 @@ class OpenAIChatToolWindow(ToolWindow):
         self._virtual_scroll_timer.setInterval(500)  # 滚动停止 500ms 后再回收，避免连续滚动反复重建
         self._virtual_scroll_timer.timeout.connect(self._recycle_out_of_view_batches)
         self._suspend_auto_scroll = False
-        # 后台任务池：应用级共享（标题生成等）。不再每窗口自建——窗口私有池
-        # 在关页时会双重等待（closeEvent waitForDone + 池析构等任务跑完），
-        # 标题任务是 LLM HTTP 往返，"刚对话完就关页"会卡 1s+（实测）。
+        # 后台任务池：应用级共享（上下文快照 / AI 审核等）。不再每窗口自建——窗口私有池
+        # 在关页时会双重等待（closeEvent waitForDone + 池析构等任务跑完）。
         # 属性名保留 _gen_thread_pool：插件仓有 getattr(main_widget, "_gen_thread_pool")
         # 兼容读取（chinese-chess / git-panel / prompt-enhancer），测试也注入此属性。
         self._gen_thread_pool = _get_gen_thread_pool()
-        # 线程安全桥接：后台线程发射信号 → 主线程执行 _on_topic_summary_generated
-        self._topic_summary_ready.connect(self._on_topic_summary_generated)
         # AI 审核结果桥接：审核任务后台线程 → 主线程落决策
         self._approval_review_ready.connect(self._on_approval_review_ready)
         # 上下文占用快照桥接：快照后台线程 → 主线程画圆环（A 优化）
@@ -1663,7 +1656,6 @@ class OpenAIChatToolWindow(ToolWindow):
         self.toolStartUiSyncRequested.connect(self._handle_tool_start_ui_sync, type=Qt.QueuedConnection)
         self._is_streaming = False
         self._ai_state = "idle"  # 当前 AI 状态（驱动 Tab 边框动画）
-        self._topic_summary_cancelled = False  # 用于取消正在进行的标题生成任务
         self._response_start_time = None
         self._stop_elapsed = None  # 手动停止时暂存的耗时
         # 🛡️ 流式中途周期落盘（P1）：流式期间正文只活在 worker 私有状态和卡片 DOM 里，
@@ -3213,7 +3205,6 @@ class OpenAIChatToolWindow(ToolWindow):
         if self._is_streaming and self.backend.chat_engine:
             self.backend.stop_streaming(timeout_ms=500)
             self._is_streaming = False
-            self._topic_summary_cancelled = True  # 🛡️ 取消标题生成重试
             self._toggle_send_stop(False)
         elif self.backend.chat_engine:
             # 即使不在流式输出，也要清理 worker
@@ -3791,7 +3782,6 @@ class OpenAIChatToolWindow(ToolWindow):
         self._register_command_shortcuts()
         # ⚠️ register_all_commands() 清空并重建了所有命令定义，
         # 各插件命令的参数描述由插件在注册时自行回填（/subagents 在 system-subagent 内）。
-        self._update_title_gen_param_description()
 
         # ── 全局热键同步 ──
         # TrayManager.__init__() 在命令加载前已调用 _setup_global_hotkey()，
@@ -7138,7 +7128,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
         Args:
             show_error: True 时解析失败弹出 InfoBar 警告（用户手动输入场景，
-                如 /subagents --model=、/title-gen --model= 命令）；
+                如 /subagents --model= 命令）；
                 False 时静默返回 None（后台自动流程，如标题生成、子智能体
                 默认模型解析——解析失败应静默回退主模型，避免打扰用户）。
             capability_type: 语义过滤，只放行该类型的实例，值域与
@@ -12314,7 +12304,6 @@ class OpenAIChatToolWindow(ToolWindow):
         self._session_switched = True
 
         self._is_streaming = False
-        self._topic_summary_cancelled = True  # 🛡️ 取消标题生成重试
         self._toggle_send_stop(False)
         # 繁忙时排队消息：切会话即失效（内存态不跨会话），同步隐藏排队卡片
         self._clear_pending_message_queue()
@@ -20471,7 +20460,6 @@ class OpenAIChatToolWindow(ToolWindow):
             except Exception as e:
                 logger.warning(f"[MainWidget] 切换会话停止流式失败: {e}")
             self._is_streaming = False
-            self._topic_summary_cancelled = True  # 🛡️ 取消标题生成重试
         elif self.backend.chat_engine:
             self.backend.cleanup_worker()
 
@@ -21328,19 +21316,10 @@ class OpenAIChatToolWindow(ToolWindow):
         # （团队成员自动压缩后回复不可见 bug 修复核心点之一）
         self._send_epoch += 1
 
-        # 🛡️ 只在新会话的第一个问题时触发标题生成，避免每次对话都重复生成
+        # 标题生成决策（该不该生成）由宿主统一判定后通知插件
         if session is None:
             session = self.session_manager.get_current_session()
-        if session:
-            # 🛡️ R6 修复：team 邮件（_hook_event="TeamMail"）视为真实用户问题
-            # → mail-only 会话也能触发标题生成（之前被误伤跳过）
-            user_msg_count = sum(
-                1
-                for m in session.messages
-                if m.get("role") == "user" and (not m.get("_hook_event") or m.get("_hook_event") == "TeamMail")
-            )
-            if user_msg_count == 1:
-                self._maybe_generate_topic_summary()
+        self._publish_title_request()
         # 用户问题已写入 session，立即刷新徽章（无需等流式结束）
         self._update_history_questions_badge()
 
@@ -21692,15 +21671,8 @@ class OpenAIChatToolWindow(ToolWindow):
             self._advance_visible_batch_window()
             self._register_new_cards_into_batches()
             self._send_epoch += 1
-            # 标题生成（TeamMail 同口径：排队消息视为真实用户问题）
-            if session:
-                user_msg_count = sum(
-                    1
-                    for m in session.messages
-                    if m.get("role") == "user" and (not m.get("_hook_event") or m.get("_hook_event") == "TeamMail")
-                )
-                if user_msg_count == 1:
-                    self._maybe_generate_topic_summary()
+            # 标题生成（TeamMail 排队消息同口径）
+            self._publish_title_request()
             self._update_history_questions_badge()
 
         QTimer.singleShot(0, _do_deferred_send)
@@ -21945,97 +21917,6 @@ class OpenAIChatToolWindow(ToolWindow):
                 position=InfoBarPosition.BOTTOM,
             )
 
-    def _handle_title_gen_command(self, args: str):
-        """/title-gen 命令：切换标题生成使用的默认模型
-
-        参数：
-          --model=X  → 设置标题生成默认模型
-          --reset    → 清空标题生成默认模型设置
-        """
-        import re
-
-        from qfluentwidgets import InfoBar, InfoBarPosition
-
-        from app.utils.config import Settings
-
-        args = (args or "").strip()
-
-        # ---- --reset：清空默认模型设置 ----
-        if args == "--reset":
-            cfg = Settings.get_instance()
-            cfg.set(cfg.llm_title_gen_default_model, "", save=True)
-            InfoBar.success(
-                title="已重置",
-                content="标题生成默认模型已清空，将使用主模型",
-                parent=TabManagerWindow.get_instance() or self.window(),
-                duration=3000,
-                position=InfoBarPosition.BOTTOM,
-            )
-            self._update_title_gen_param_description()
-            return
-
-        # ---- --model=xxx：设置默认模型 ----
-        model_match = re.match(r"^--model=(.+)$", args)
-        if model_match:
-            model_value = model_match.group(1).strip().strip("\"'")
-            if not model_value:
-                InfoBar.warning(
-                    title="参数错误",
-                    content="--model= 后需要指定模型名或服务商:模型名",
-                    parent=TabManagerWindow.get_instance() or self.window(),
-                    duration=3000,
-                    position=InfoBarPosition.BOTTOM,
-                )
-                return
-
-            llm_config = self._resolve_model_config_by_query(model_value)
-            if llm_config is None:
-                return
-
-            # 用 display_name 作为保存的服务商标识（与命令卡枚举 value 一致且唯一），
-            # 避免同 provider_name 多个配置时歧义匹配到错误的 config
-            provider_display = llm_config.get("display_name", llm_config.get("provider_name", ""))
-            model_display = llm_config.get("模型名称", model_value)
-            display_value = f"{provider_display}:{model_display}" if provider_display else model_display
-
-            cfg = Settings.get_instance()
-            cfg.set(cfg.llm_title_gen_default_model, display_value, save=True)
-
-            if provider_display:
-                info_text = f"{provider_display} - {model_display}"
-            else:
-                info_text = model_display
-
-            InfoBar.success(
-                title="标题生成模型设置",
-                content=f"{info_text}",
-                parent=TabManagerWindow.get_instance() or self.window(),
-                duration=2000,
-                position=InfoBarPosition.BOTTOM,
-            )
-            self._update_title_gen_param_description()
-            return
-
-        # ---- 无参数：显示当前设置 ----
-        cfg = Settings.get_instance()
-        saved = cfg.llm_title_gen_default_model.value or ""
-        if saved:
-            InfoBar.info(
-                title="当前标题生成模型",
-                content=saved,
-                parent=TabManagerWindow.get_instance() or self.window(),
-                duration=3000,
-                position=InfoBarPosition.BOTTOM,
-            )
-        else:
-            InfoBar.info(
-                title="当前标题生成模型",
-                content="未设置，将使用主模型",
-                parent=TabManagerWindow.get_instance() or self.window(),
-                duration=3000,
-                position=InfoBarPosition.BOTTOM,
-            )
-
     def _handle_toggle_window_command(self, args: str):
         """/toggle-window 命令：一键隐藏/显示所有窗口"""
         from app.tray_manager import TrayManager
@@ -22057,30 +21938,6 @@ class OpenAIChatToolWindow(ToolWindow):
     def _handle_clear_command(self, args: str):
         """/clear 命令：清空当前会话的所有消息（重新显示欢迎页）"""
         self._on_clear_shortcut()
-
-    def _update_title_gen_param_description(self):
-        """更新 /title_gen 命令的 --model= 参数描述，反映当前默认值"""
-        from app.core.commands.command_manager import CommandManager
-        from app.utils.config import Settings
-
-        cfg = Settings.get_instance()
-        saved = cfg.llm_title_gen_default_model.value or ""
-
-        cmd_mgr = CommandManager.get_instance()
-        entries = cmd_mgr._commands.get("title-gen", {})
-        for cmd_type, cmd_def in entries.items():
-            for param in cmd_def.parameters:
-                if param.name == "--model=":
-                    if saved:
-                        param.description = f"当前标题生成默认模型: {saved}"
-                    else:
-                        param.description = "设置标题生成默认模型"
-                    break
-
-    def _on_title_gen_model_config_changed(self):
-        """标题生成默认模型配置变更时：更新命令描述 + 刷新命令卡 UI"""
-        self._update_title_gen_param_description()
-        self._refresh_command_card_detail("title-gen")
 
     def _refresh_command_card_detail(self, cmd_name: str):
         """强制刷新命令卡的 detail 模式参数视图"""
@@ -24341,186 +24198,59 @@ class OpenAIChatToolWindow(ToolWindow):
             logger.error(f"[Permission] 超时决策回传异常 id={tool_call_id}: {e}")
         self._restore_after_permission_close()
 
-    def _maybe_generate_topic_summary(self):
-        # 🛡️ 每次启动新的标题生成任务时重置取消标记
-        self._topic_summary_cancelled = False
+    def _publish_title_request(self):
+        """判定该不该生成标题；短输入直接提交，其余发事件让插件生成。
 
-        # 检查是否有标题生成专用模型配置
-        from app.utils.config import Settings
+        宿主拥有全部守卫：user_edited_title / topic_summary / is_temp /
+        首条真实用户消息 / ≤10 字短输入。插件只负责生成文本。
+        """
+        from app.core.infra.ui_event_bus import UIEventBus
 
-        cfg = Settings.get_instance()
-        saved = cfg.llm_title_gen_default_model.value
-        if saved:
-            # 标题生成是后台自动流程：解析失败静默回退主模型，不弹 InfoBar 警告
-            resolved = self._resolve_model_config_by_query(saved, show_error=False)
-            if resolved:
-                llm_config = resolved
-            else:
-                # 解析失败，回退到主模型
-                selected_name = self._current_provider_name if self._current_provider_name else "系统默认配置"
-                llm_config = self._valid_configs.get(selected_name)
-        else:
-            selected_name = self._current_provider_name if self._current_provider_name else "系统默认配置"
-            llm_config = self._valid_configs.get(selected_name)
-
-        if not llm_config:
-            logger.warning("[Topic Summary] No LLM config found, skipping")
-            return
         session = self.session_manager.get_current_session()
-        if not session:
-            logger.warning("[Topic Summary] No session found, skipping")
+        if session is None or getattr(session, "user_edited_title", False):
             return
-
-        # 🛡️ 如果用户已手动编辑过标题，跳过自动生成
-        if getattr(session, "user_edited_title", False):
-            logger.info("[Topic Summary] User edited title, skipping auto generation")
+        if getattr(session, "topic_summary", "") or getattr(session, "is_temp", False):
             return
-
-        # 🛡️ R6 修复：team 邮件（_hook_event="TeamMail"）视为真实用户问题
-        # → mail-only 会话也能完成标题生成（之前 _hook_event 全过滤误伤）
         user_messages = [
-            m
-            for m in session.messages
-            if m.get("role") == "user" and (not m.get("_hook_event") or m.get("_hook_event") == "TeamMail")
+            m for m in session.messages
+            if m.get("role") == "user"
+            and (not m.get("_hook_event") or m.get("_hook_event") == "TeamMail")
         ]
-        if not user_messages:
-            logger.warning("[Topic Summary] No user messages found, skipping")
+        # 只在首条真实用户消息触发：标题生成是异步的，完成前 topic_summary 仍为空，
+        # 少这个判据会让第二、三条消息重复发起生成。
+        if len(user_messages) != 1:
             return
-
-        # 短输入守卫：首条用户输入 ≤10 字时无总结价值，直接用原文当标题，
-        # 不再起 LLM 任务（>10 字才走总结）。提取逻辑与 TopicSummaryTask
-        # _fallback_user_question 对齐（多模态取 text 段、跳过未打标任务邮件）。
         first_text = ""
         for m in user_messages:
             content = m.get("content", "")
             if isinstance(content, list):
-                texts = [item.get("text", "") for item in content if item.get("type") == "text"]
-                content = "\n".join(texts)
-            content = str(content).strip()
-            if not content or content.startswith("📨 **来自"):
+                content = "\n".join(
+                    str(b.get("text", "")) for b in content
+                    if isinstance(b, dict) and b.get("type") == "text"
+                )
+            text = str(content).strip()
+            if not text or text.startswith("📨 **来自"):
                 continue
-            first_text = content
+            first_text = text
             break
-        if first_text and len(first_text) <= 10:
-            logger.info(f"[Topic Summary] 首条输入仅{len(first_text)}字，直接用作标题")
-            self._on_topic_summary_generated(first_text)
+        if not first_text:
             return
+        window_id = str(getattr(self, "_window_id", "") or "")
+        if len(first_text) <= 10:
+            from app.plugins.capabilities.resolve import pool_for
 
-        previous_summary = ""
-        if self._current_session_id is not None:
-            idx = self.history_manager.find_index_by_session_id(self._current_session_id)
-            if idx is not None:
-                previous_summary = self.history_manager.get_topic_summary(idx)
-
-        # 线程安全包装：QRunnable 在后台线程直接调用 callback，
-        # 通过 pyqtSignal emit 桥接到主线程，避免 GUI 操作崩溃
-        def _thread_safe_callback(result, error=None):
-            # 🛡️ 关页后任务才返回的丢弃守卫：任务跑在应用级共享池上，
-            # 生命周期不再与窗口绑定——窗口销毁后任务仍会跑完并回调。
-            # 对已销毁 QObject emit 会抛 RuntimeError（旧窗口池路径靠
-            # waitForDone 等待规避；现改用守卫显式丢弃，防池线程异常）。
-            if getattr(self, "_is_destroyed", False):
-                return
-            try:
-                self._topic_summary_ready.emit(result, error)
-            except RuntimeError:
-                pass
-
-        task = TopicSummaryTask(
-            messages=session.messages,
-            llm_config=llm_config,
-            callback=_thread_safe_callback,
-            previous_summary=previous_summary if previous_summary else None,
-            cancel_check=lambda: self._topic_summary_cancelled,
+            pool = pool_for("system-title-generator", surface="ui", host=self)
+            commit = pool.get("session.title.commit") if pool else None
+            if callable(commit):
+                commit(window_id, first_text)
+            return
+        UIEventBus.get_instance().publish(
+            "title.request",
+            window_id=window_id,
+            session_id=str(getattr(session, "session_id", "") or ""),
+            messages=list(session.messages),
+            fallback=first_text[:15],
         )
-        self._gen_thread_pool.start(task)
-
-    def _on_topic_summary_generated(self, result, error: str = None):
-        # 🛡️ 关页守卫：任务在共享池上跑，窗口销毁后才返回的回调直接丢弃
-        # （信号已由 _thread_safe_callback 拦截，此处兜底防其它 emit 路径）
-        if getattr(self, "_is_destroyed", False):
-            return
-        if error:
-            logger.error(f"[Topic Summary] Failed to generate: {error}")
-            return
-        if not result:
-            return
-
-        # 🛡️ 如果用户已手动编辑过标题，跳过自动生成结果的更新
-        session = self.session_manager.get_current_session()
-        if session and getattr(session, "user_edited_title", False):
-            logger.info("[Topic Summary] User edited title, skipping result update")
-            return
-
-        if isinstance(result, dict):
-            summary = result.get("topic_summary", "")
-        else:
-            summary = result
-
-        if not summary:
-            return
-
-        clean_summary = summary.strip()
-
-        # 临时对话页守卫：页内会话不落库，标题仅更新 UI（跳过 history_manager 首存）
-        session = self.session_manager.get_current_session()
-        if getattr(session, "is_temp", False):
-            if session:
-                session.set_topic_summary(clean_summary)
-            self.title_edit.setText(clean_summary)
-            self._sync_dialog_title()
-            return
-
-        # 校验标题长度，超长说明解析异常或LLM输出异常，跳过更新
-        MAX_TITLE_LENGTH = 50
-        if len(clean_summary) > MAX_TITLE_LENGTH:
-            logger.warning(f"[Topic Summary] 标题过长({len(clean_summary)}字)，跳过更新")
-            return
-
-        session = self.session_manager.get_current_session()
-
-        # 先设置 session 的 topic_summary，避免 save_session 时 title 为空
-        if session:
-            session.set_topic_summary(clean_summary)
-
-        if self._current_session_id is None and session and session.messages:
-            worktree_path = self._get_current_worktree_path()
-            worktree_kwargs = {"worktree_path": worktree_path or ""}
-            # 🛡️ 团队元数据：标题生成时的首次落库同样携带团队字段，
-            # 防御"标题生成先于首条消息保存"时团队会话元数据丢失。
-            team_kwargs = {}
-            if getattr(self, "_team_run_id", None):
-                team_kwargs = {
-                    "team_run_id": self._team_run_id,
-                    "team_name": getattr(self, "_team_name", "") or "",
-                    "agent_name": getattr(self, "_team_agent_name", "") or "",
-                }
-            # 🛡️ 新会话首存：使用 originating_project 优先的 fallback 链，
-            # 避免"标题生成完成时用户已切到其他项目"导致会话错存。
-            resolved_project = self._resolve_session_project_fallback(
-                session.session_id, self._current_project, session=session
-            )
-            self.history_manager.save_session(
-                session.messages if session else [],
-                title=clean_summary,  # 使用生成的摘要作为标题
-                session_id=session.session_id if session else None,
-                compaction_state=getattr(session, "compaction_state", {}),
-                compaction_cache=getattr(session, "compaction_cache", {}),
-                project=resolved_project,
-                **self._api_usage_kwargs(session),
-                **worktree_kwargs,
-                **team_kwargs,
-            )
-            self._current_session_id = session.session_id if session else None
-
-        if self._current_session_id is not None:
-            idx = self.history_manager.find_index_by_session_id(self._current_session_id)
-            if idx is not None:
-                self.history_manager.update_topic_summary(idx, clean_summary)
-
-        self.title_edit.setText(clean_summary)
-        # 同步对话框窗口标题（便于 Windows 任务栏区分各窗口）
-        self._sync_dialog_title()
 
     def _on_project_label_clicked(self, event):
         """项目标签点击 — 打开历史会话插件卡并展开项目选择面板"""
@@ -26624,8 +26354,6 @@ class OpenAIChatToolWindow(ToolWindow):
         # 后台任务池：应用级共享，窗口关闭不再同步等待。
         # 历史：此处 waitForDone(1000) 等标题生成任务（LLM HTTP 往返常 3-10s），
         # 实测同步段 1000.2ms 占关页耗时 94%（"刚对话完关页卡 1 秒"的主因）。
-        # 任务取消由 _topic_summary_cancelled 标志 + 回调侧 _is_destroyed 守卫
-        # 兜底（_on_topic_summary_generated 访问已销毁 UI 的路径已有防护），
         # 共享池的生命周期不再与窗口绑定，析构等待亦不落在关页路径上。
 
         # 从全局实例列表中移除
@@ -26703,7 +26431,6 @@ class OpenAIChatToolWindow(ToolWindow):
             # - 取消 worker（非阻塞，不等待）
             try:
                 self.backend.cancel_streaming()
-                self._topic_summary_cancelled = True  # 🛡️ 取消标题生成重试
             except Exception:
                 pass
 
@@ -26883,7 +26610,6 @@ class OpenAIChatToolWindow(ToolWindow):
         if getattr(self, "_is_destroyed", False):
             return
         # 🛡️ 取消正在进行的标题生成任务，防止停止后仍继续重试
-        self._topic_summary_cancelled = True
 
         # 缺陷 3：停止时收起残留的待输入浮动卡（审批/提问等待中被取消，
         # 否则卡继续显示、输入区继续隐藏，界面卡在失效请求上）
@@ -27382,10 +27108,9 @@ class OpenAIChatToolWindow(ToolWindow):
 
         logger.info(f"[PluginSession] 保存 {len(auto_loop_messages)} 条消息到会话: {self._current_project}")
 
-        # 触发 topic_summary 生成标题（如果还没有标题）
+        # 标题生成决策由宿主统一判定
         session = self.session_manager.get_current_session()
-        if session and not session.topic_summary:
-            self._maybe_generate_topic_summary()
+        self._publish_title_request()
 
         # 同步保存到历史记录
         self._save_current_session_to_history()
