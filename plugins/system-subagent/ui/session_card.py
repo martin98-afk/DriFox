@@ -71,6 +71,21 @@ LOG_TYPE_LABELS = {
 }
 
 
+# 终态里属于「失败」的 DB status
+_FAILED_STATUSES = frozenset({"error", "failed", "cancelled", "stalled", "timeout"})
+
+# 历史数据兼容：旧版 worker 把执行异常降级成结果字符串（result="执行出错: xxx"），
+# DB 状态仍是 finished、error 为空，只靠状态判不出来，必须看正文前缀。
+_FAILED_RESULT_PREFIXES = ("执行出错:", "执行失败:", "SubAgent execution error:")
+
+def _result_is_failure(result: Any, error: Any, status: str = "") -> bool:
+    """结果区是否按失败渲染：error 非空 / 终态为失败 / 正文是历史错误字符串。"""
+    if str(error or "").strip():
+        return True
+    if str(status or "").strip().lower() in _FAILED_STATUSES:
+        return True
+    return str(result or "").lstrip().startswith(_FAILED_RESULT_PREFIXES)
+
 def _current_facade():
     """取当前活跃窗口的子智能体门面与当前会话 id（插件未加载返回 (None, "")）。"""
     try:
@@ -359,12 +374,12 @@ class SubAgentSessionCard(BaseSettingsCard):
         result_content = ""
         if just_finished and (bool(result) or bool(error)):
             self._result_appended = True
-            if result:
-                result_nav = self._build_result_nav_item("✅ 执行结果", len(logs))
-                result_content = self._build_result_section("✅ 执行结果", result, "#4CAF50", len(logs))
-            elif error:
-                result_nav = self._build_result_nav_item("❌ 执行失败", len(logs))
-                result_content = self._build_result_section("❌ 执行失败", error, "#F44336", len(logs))
+            failed = _result_is_failure(result, error, status)
+            title = "❌ 执行失败" if failed else "✅ 执行结果"
+            body = (error or result) if failed else result
+            color = "#F44336" if failed else "#4CAF50"
+            result_nav = self._build_result_nav_item(title, len(logs))
+            result_content = self._build_result_section(title, body, color, len(logs))
 
         # 更新内存状态
         self._logs = logs
@@ -572,12 +587,13 @@ class SubAgentSessionCard(BaseSettingsCard):
         error = self._summary.get("error", "")
         has_result = bool(result) or bool(error)
 
-        if result:
-            nav_items_html += self._build_result_nav_item("✅ 执行结果", log_count)
-            content_sections_html += self._build_result_section("✅ 执行结果", result, "#4CAF50", log_count)
-        elif error:
-            nav_items_html += self._build_result_nav_item("❌ 执行失败", log_count)
-            content_sections_html += self._build_result_section("❌ 执行失败", error, "#F44336", log_count)
+        if has_result:
+            failed = _result_is_failure(result, error, self._summary.get("status", ""))
+            title = "❌ 执行失败" if failed else "✅ 执行结果"
+            body = (error or result) if failed else result
+            color = "#F44336" if failed else "#4CAF50"
+            nav_items_html += self._build_result_nav_item(title, log_count)
+            content_sections_html += self._build_result_section(title, body, color, log_count)
 
         # ── 主题色变量 ──
         bg_color = Colors.REALTIME_BG

@@ -549,11 +549,11 @@ class SubAgentExecutor(QThread):
             self._add_log("progress", f"开始执行子任务: {self.agent_name}")
             self.progress_updated.emit(self.task_id, f"开始执行子任务: {self.agent_name}")
 
-            try:
-                result = self._execute_agent_loop(messages, tools, self.llm_config)
-            except Exception as e:
-                logger.error(f"[SubAgentExecutor] _execute_agent_loop error: {e}")
-                result = f"执行出错: {str(e)}"
+            # 执行异常不得伪装成结果字符串：那会让 _execution_error 保持为空，
+            # 完成链据此判 success=True，会话卡显示绿色「✅ 执行结果」而正文是
+            # 「执行出错: xxx」，主智能体也收到 ✅ 的完成通知。异常一律上抛给
+            # run() 最外层 except，由 error_occurred 出口统一结算（DB 落 error 态）。
+            result = self._execute_agent_loop(messages, tools, self.llm_config)
 
             if self._is_cancelled:
                 # 被取消时也要发射错误信号，让管理器知道任务已结束。
@@ -605,7 +605,9 @@ class SubAgentExecutor(QThread):
 
         except Exception as e:
             logger.exception(f"[SubAgentExecutor] run() error: {e}")
-            self._execution_error = str(e)
+            # 与旧文案保持一致（会话卡/注入链路的历史识别口径含该前缀），
+            # 同时作为 _execution_error 唯一真值：完成链靠它判失败。
+            self._execution_error = f"执行出错: {e}"
             # 任务出错，保存错误状态
             if self._log_store_callback:
                 try:
@@ -621,7 +623,7 @@ class SubAgentExecutor(QThread):
                     )
                 except Exception as e:
                     logger.warning(f"[SubAgentExecutor] 保存错误状态失败: {e}")
-            self.error_occurred.emit(self.task_id, f"SubAgent execution error: {str(e)}")
+            self.error_occurred.emit(self.task_id, self._execution_error)
 
     def _execute_agent_loop(self, messages: List[Dict], tools: List[Dict], llm_config: Dict) -> str:
         """执行子智能体对话循环"""
@@ -1248,11 +1250,22 @@ class SubAgentExecutor(QThread):
         if transport is None:
             raise RuntimeError("未注册协议传输器（system-transports 插件未启用），子智能体无法发起请求")
 
-        client = build_openai_client(api_key=api_key, base_url=base_url, timeout=120.0)
+        # 超时口径与主对话一致（chat_worker 600s/connect 60s）：
+        # 子智能体任务通常更长（读大文件、跑命令、长工具链），120s 读超时会让
+        # 正常的慢响应（长思考 / 首 token 慢）直接判失败。真死锁由 stall 看门狗
+        # 的 IN_FLIGHT_MAX_SECONDS(1800s) 兜底，不靠读超时兜。
+        import httpx
+
+        client = build_openai_client(
+            api_key=api_key,
+            base_url=base_url,
+            timeout=httpx.Timeout(600.0, connect=60.0),
+        )
         auth_headers = resolve_extra_headers(config, getattr(self, "_task_session_id", None) or "")
 
-        def create_stream():
-            return transport.create_stream(
+        def create_and_consume():
+            """建流 + 消费流一体：SSE 读超时/断流发生在迭代期，只包住建流等于没重试。"""
+            stream = transport.create_stream(
                 config,
                 materialized,
                 tools=tools,
@@ -1261,13 +1274,22 @@ class SubAgentExecutor(QThread):
                 client=client,
                 cap_max_tokens=lambda m, v: self._cap_max_output_tokens(m, v, config),
             )
+            try:
+                return self._aggregate_events(stream)
+            finally:
+                # 重试会重建连接，旧流必须显式关闭，否则泄漏 socket
+                close = getattr(stream, "close", None)
+                if callable(close):
+                    try:
+                        close()
+                    except Exception:
+                        pass
 
-        events = create_api_call_with_retry(
+        return create_api_call_with_retry(
             client,
-            create_stream,
+            create_and_consume,
             cancel_check=lambda: self._is_cancelled,
         )
-        return self._aggregate_events(events)
 
     def _aggregate_events(self, events) -> tuple:
         """StreamEvent 流 → (content, tool_calls, reasoning)（协议无关聚合）。

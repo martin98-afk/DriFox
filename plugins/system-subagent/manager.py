@@ -581,9 +581,20 @@ class SubAgentManager(QObject):
         while len(self._settled_tasks) > 512:  # uuid 全局唯一，有界防涨
             self._settled_tasks.discard(next(iter(self._settled_tasks)))
         executor = self._running_tasks.get(task_id)
-        success = not (getattr(executor, "_execution_error", None) or "")
-        agent_name = getattr(executor, "agent_name", "") if executor else ""
-        task_description = getattr(executor, "task_description", "") if executor else ""
+        # 失败判定以 error 为唯一真值源：executor 还在就读它的 _execution_error，
+        # 已从 running_tasks 移除（stall / 宿主提前归档）则回退 _finished_tasks
+        # 归档的 error。此前只用 executor 判定，stall 路径先删 running_tasks
+        # 再进完成链，executor 为 None → 一律 success=True，失败任务被注入成 ✅。
+        archived = self._finished_tasks.get(task_id) or {}
+        error_text = str(getattr(executor, "_execution_error", "") or "") or str(archived.get("error") or "")
+        success = not error_text
+        agent_name = (getattr(executor, "agent_name", "") if executor else "") or archived.get("agent_name", "")
+        task_description = (getattr(executor, "task_description", "") if executor else "") or archived.get(
+            "task_description", ""
+        )
+        # 失败任务没有 result，正文用错误原因：否则注入出去的是「(无输出)」，
+        # 主智能体只看到 ❌ 却不知道死在哪，等于把失败信息又吞了一层。
+        inject_body = result if success else (error_text or result)
 
         try:
             self.task_finished.emit(task_id, result)
@@ -594,7 +605,7 @@ class SubAgentManager(QObject):
         # 当前轮上下文；空闲时 hook 降级为 send 开新轮，交付延迟不再由最慢任务
         # 决定（此前空闲态整批攒到末尾，一个 stall 就扣住全部已完成结果）。
         # 单条注入与批次汇总由此解耦，streaming 只决定汇总走哪条通道。
-        self._dispatch_result_injection(task_id, result, success, agent_name, task_description)
+        self._dispatch_result_injection(task_id, inject_body, success, agent_name, task_description)
 
         streaming = self._is_engine_streaming()
 
