@@ -1,23 +1,8 @@
-# Changelog
-All notable changes to this project will be documented in this file.
-
 ## [Unreleased]
-### ✨ 新功能 (New Features)
-- **@ 卡目录浏览三向联动** (`app/widgets/cards/floating/file_mention_card.py` · `app/widgets/bottom_input_area.py`): Tab 进/退目录时输入框 @ 后文本同步为浏览层路径（如 `@src/sub/`），尾缀 `/` 的 query 语义＝浏览该层（大小写不敏感解析），继续输入即切全局搜索，退格逐层返回；新增 `browseChanged` 信号驱动 `set_at_query` 回填
-- **「工具与思考」头部计数拆三项** (`app/widgets/card_viewers.py` · `app/widgets/render_helpers.py` · `app/widgets/markdown_block_viewer.py`): 头部单一「N 项」改为「N 次思考 · N 次操作 · N 次失败操作」，0 值段隐藏。失败判据为工具块根节点 `data-tool-success="false"`——渲染期 `success is False` 才打标（运行中 / 未知不标，避免失败数虚高），覆盖折叠 / 展开 / 懒注入 / 无折叠 / inline 五个渲染分支，流式块原地转完成态时同步属性；池化复用重置一并清空计数文本。WebEngine 与 Qt 两条渲染器同口径。骨架版本 v79。
-- **标题生成抽成系统插件，模型选择迁入插件设置** (`plugins/system-title-generator/` · `app/main_widget.py` · `app/plugins/capabilities/providers/title_core.py`): 新增 `system-title-generator` 系统插件（`_NON_DISABLEABLE`），订阅宿主 `title.request` 事件后调 `model.complete` 生成会话标题，失败回退首条真实用户问题前 15 字；提交经唯一新能力 `session.title.commit`（HIGH），原 `_on_topic_summary_generated` 全部守卫（改名跳过 / 临时会话 / 50 字校验 / 首存团队元数据与项目 fallback）沉入 provider，窗口私有状态不出宿主。模型由插件设置 `title_model`（`type: model` 下拉，空值跟随当前会话模型）驱动；旧全局 `LLM/TitleGenDefaultModel` 启动时一次性迁入插件配置并清空。宿主三处触发收敛为 `_publish_title_request()`（守卫 + 首问判据），删除 `app/core/workers/topic_summary.py`、`/title-gen` 命令与 `_topic_summary_ready` 信号链；插件缺席或长输入生成失败时标题退回 `session.name`，短输入仍由宿主直提。已知取舍：`model.complete` 无取消参数，切会话后晚归结果靠提交前 `session_id` 复查丢弃，不中断在途 HTTP。
-### 🐛 问题修复 (Bug Fixes)
-- **@ 卡文件列表缺内容与空目录困局** (`app/widgets/cards/floating/file_mention_card.py`): 文件不再套用 gitignore 文件级规则（`*.json` 等曾把 config/config.json、pyright.json 全滤掉，config/_tools 进去是空），目录级规则（build/、dist）保留递归剪枝；空目录/无结果改为显示「此目录为空/无匹配结果」提示行而非隐藏整卡——此前困在空目录连面包屑返回都点不到
-- **@ 卡滚动极卡与闪现** (`app/widgets/cards/floating/file_mention_card.py`): 滚动↔hover 反馈循环（逐行 enterEvent→ensureWidgetVisible 再滚动）加 150ms 抑制窗 + hover 不再拖动视口；删除 widget 补 `hide()` 防 deleteLater 前重叠绘制闪现；懒加载渲染量在 FS 增量重入时不再被重置回初始值（曾致整卡重建+跳顶）
-- **会话搜索限定当前项目** (`app/widgets/cards/floating/file_mention_card.py` · `app/main_widget.py`): `show_card(project=)` 接主窗口 `_current_project`，存储层走 SQL project 过滤，回落路径内存过滤，项目切换作废 TTL 缓存；会话名高亮搜索词（此前 session 分支提前 return 跳过高亮）；搜索池 30→2000 条覆盖历史全量（此前只能搜到最近 30 条），浏览模式仍展示最近 30 条，池 TTL 5s→30s 摊薄 2000 行拉取的 ~50ms 尖峰（实测），内存净增约 1MB
-- **标题生成插件装了但标题不刷新（占位标题被当成「已有标题」拦掉）** (`app/main_widget.py` · `app/core/conversation/chat_session.py` · `tests/plugins/test_title_request_fallback.py`): `ChatSession.__init__` 把 `topic_summary` 初始化成 `name` 占位（`"对话 11-12 22:30"`），而 `_publish_title_request` 的守卫写作「`topic_summary` 为真即已有标题」，于是每个新会话都在第一道守卫 return，`title.request` 从不发布，`system-title-generator` 订阅了也永远收不到事件。修复：`chat_session` 新增 `DEFAULT_TITLE_PREFIX` 与 `is_default_title()`（空串或 `"对话 "` 前缀即视为未生成），`__init__` / `set_topic_summary` / 宿主守卫三处共用同一口径；宿主改为 `not is_default_title(topic_summary)` 才跳过。对照实测：修复前真实新会话 published=[]，修复后正常发布 `title.request`；端到端（真实 UIEventBus + 真实控制器 + fake `model.complete`）落到 `session.title.commit("排查登录500")`。
-- **子智能体执行失败被伪装成成功** (`app/core/workers/subagent_worker.py` · `plugins/system-subagent/manager.py` · `plugins/system-subagent/ui/session_card.py`): 三处叠加导致「❌ 失败」全面显示成「✅ 成功」。① `_execute_agent_loop` 的异常被就地转成 `result="执行出错: xxx"`，`_execution_error` 保持为空 → 完成链判 `success=True`、DB 落 finished、外部注入 ✅；异常改为一律上抛走 `error_occurred` 出口。② stall 路径先删 `running_tasks` 再进完成链，executor 缺席使 `success` 恒真；失败判定改为 executor → `_finished_tasks` 归档的 error 双源，注入正文改带错误原因（原来是「(无输出)」）。③ 会话卡结果区只看 result 是否为空，存在 error 也渲染绿色「✅ 执行结果」；改为 error/失败终态/历史「执行出错:」正文三判据统一走 ❌。**读超时不再直接判死**：流式重试此前只包住建流，SSE 读超时发生在迭代期，重试从未触发；现建流+消费一体纳入重试并显式 close 旧流，client 读超时 120s 对齐主对话 600s（connect 60s；真死锁仍由 stall 的 1800s 在途硬上限兜底）。
-- **子智能体结果被同批最慢任务扣住** (`plugins/system-subagent/manager.py`): 完成链此前只在流式中逐条注入，空闲态整批攒到末尾一次性交付——并行任务里一个 stall 就能把已完成结果压最长 300s。改为任务完成即注入（空闲时 hook 自动降级为 send 开新轮），交付延迟不再由最慢任务决定；批次汇总相应只补失败任务的错误正文，成功正文不重复灌上下文。
-- **模型不通时子智能体永久停在「正在运行中」** (`app/core/workers/error_handler/retry_helper.py` · `app/core/workers/subagent_worker.py` · `plugins/system-subagent/ui/`): `create_api_call_with_retry` 的退避 `base * 2**attempt` 无上限，15 次累计 81915s（约 22.7 小时），重试期又只写日志不报 UI，面板只剩计时器在动，观感等同卡死。退避单次封顶 30s，子智能体重试收敛到 5 次（不可达模型约 48s 即失败）；新增 `on_retry` 回调把「第 N/5 次重试，Ns 后继续」经 `progress_updated` 投影到面板行状态位，任务完成即清空。
-### ♻️ 代码重构 (Refactoring)
-- **`system-tools` 更名 `system-interact`** (`plugins/system-interact/` · `app/plugins/managers/plugin_manager.py` · `marketplace.json`): 拆分后该插件只剩技能加载/MCP 管理/Gitee 上传等交互类工具，插件名与展示名「内置交互工具」对齐。`_NON_DISABLEABLE` 与组件锚点 `_SPLIT_COMPONENT_TO_PLUGIN["tools"]` 同步改写；旧 `system-tools:tools:<tool>` 禁用键迁移表补录留守工具（skill/manage_skill/upload_file/mcp_manage/mcp_list_servers），避免更名后已禁用工具回魂；`_SPLIT_CONFIG_HEIR` 保持历史名 `system-tools`（system-web 旧配置承继链锚点，与现插件名无关）。
 
-## [v0.7.2] - 2026-11-12
+## [v0.7.2] - 2026-11-13
+
+自 v0.7.1 以来的变更 | 提交数：98 · 文件变更：291 · +15978/-6043 | 贡献者：dingma, drifox-bot, mading, martin98-afk
 
 ### ✨ 新功能 (New Features)
 
@@ -26,18 +11,27 @@ All notable changes to this project will be documented in this file.
 - **提问卡超时代答跟随当前模型可用** (`plugins/system-question/ui/timeout.py`): 改走 `model.complete`，请求头由宿主统一组装，修复走 OpenCode 网关的模型必然 400 `MissingSessionID`、超时后只会「直接跳过」的问题；该插件配置读取同时改走 `plugin.config.read`。
 - **欢迎页更新日志改走 `net.http`** (`plugins/welcome_changelog/ui/_fetcher.py`): 不再自建 httpx client，证书链与超时由宿主统一。
 - **system-web 搜索 Key 读取改走 `plugin.config.read`** (`plugins/system-web/tools/web_tools.py`)。
+- **@ 卡目录浏览三向联动** (`app/widgets/cards/floating/file_mention_card.py` · `app/widgets/bottom_input_area.py`): Tab 进/退目录时输入框 @ 后文本同步为浏览层路径（如 `@src/sub/`），尾缀 `/` 的 query 语义＝浏览该层（大小写不敏感解析），继续输入即切全局搜索，退格逐层返回；新增 `browseChanged` 信号驱动 `set_at_query` 回填
+- **「工具与思考」头部计数拆三项** (`app/widgets/card_viewers.py` · `app/widgets/render_helpers.py` · `app/widgets/markdown_block_viewer.py`): 头部单一「N 项」改为「N 次思考 · N 次操作 · N 次失败操作」，0 值段隐藏。失败判据为工具块根节点 `data-tool-success="false"`——渲染期 `success is False` 才打标（运行中 / 未知不标，避免失败数虚高），覆盖折叠 / 展开 / 懒注入 / 无折叠 / inline 五个渲染分支，流式块原地转完成态时同步属性；池化复用重置一并清空计数文本。WebEngine 与 Qt 两条渲染器同口径。骨架版本 v79。
+- **标题生成抽成系统插件，模型选择迁入插件设置** (`plugins/system-title-generator/` · `app/main_widget.py` · `app/plugins/capabilities/providers/title_core.py`): 新增 `system-title-generator` 系统插件（`_NON_DISABLEABLE`），订阅宿主 `title.request` 事件后调 `model.complete` 生成会话标题，失败回退首条真实用户问题前 15 字；提交经唯一新能力 `session.title.commit`（HIGH），原 `_on_topic_summary_generated` 全部守卫（改名跳过 / 临时会话 / 50 字校验 / 首存团队元数据与项目 fallback）沉入 provider，窗口私有状态不出宿主。模型由插件设置 `title_model`（`type: model` 下拉，空值跟随当前会话模型）驱动；旧全局 `LLM/TitleGenDefaultModel` 启动时一次性迁入插件配置并清空。宿主三处触发收敛为 `_publish_title_request()`（守卫 + 首问判据），删除 `app/core/workers/topic_summary.py`、`/title-gen` 命令与 `_topic_summary_ready` 信号链；插件缺席或长输入生成失败时标题退回 `session.name`，短输入仍由宿主直提。已知取舍：`model.complete` 无取消参数，切会话后晚归结果靠提交前 `session_id` 复查丢弃，不中断在途 HTTP。
 
 ### 🐛 问题修复 (Bug Fixes)
 
 - **插件运行时注册的工具在卸载后残留**: `ToolRegistry.unregister_by_source()` 按来源批量注销，`PluginToolLoader.unload_plugin_tools()` 在卸载/热重载时兜底清理——运行时注册的工具不在 manifest 工具清单里，不兜底会留下指向已卸载插件代码的悬空工具。
+- **@ 卡文件列表缺内容与空目录困局** (`app/widgets/cards/floating/file_mention_card.py`): 文件不再套用 gitignore 文件级规则（`*.json` 等曾把 config/config.json、pyright.json 全滤掉，config/_tools 进去是空），目录级规则（build/、dist）保留递归剪枝；空目录/无结果改为显示「此目录为空/无匹配结果」提示行而非隐藏整卡——此前困在空目录连面包屑返回都点不到
+- **@ 卡滚动极卡与闪现** (`app/widgets/cards/floating/file_mention_card.py`): 滚动↔hover 反馈循环（逐行 enterEvent→ensureWidgetVisible 再滚动）加 150ms 抑制窗 + hover 不再拖动视口；删除 widget 补 `hide()` 防 deleteLater 前重叠绘制闪现；懒加载渲染量在 FS 增量重入时不再被重置回初始值（曾致整卡重建+跳顶）
+- **会话搜索限定当前项目** (`app/widgets/cards/floating/file_mention_card.py` · `app/main_widget.py`): `show_card(project=)` 接主窗口 `_current_project`，存储层走 SQL project 过滤，回落路径内存过滤，项目切换作废 TTL 缓存；会话名高亮搜索词（此前 session 分支提前 return 跳过高亮）；搜索池 30→2000 条覆盖历史全量（此前只能搜到最近 30 条），浏览模式仍展示最近 30 条，池 TTL 5s→30s 摊薄 2000 行拉取的 ~50ms 尖峰（实测），内存净增约 1MB
+- **标题生成插件装了但标题不刷新（占位标题被当成「已有标题」拦掉）** (`app/main_widget.py` · `app/core/conversation/chat_session.py` · `tests/plugins/test_title_request_fallback.py`): `ChatSession.__init__` 把 `topic_summary` 初始化成 `name` 占位（`"对话 11-12 22:30"`），而 `_publish_title_request` 的守卫写作「`topic_summary` 为真即已有标题」，于是每个新会话都在第一道守卫 return，`title.request` 从不发布，`system-title-generator` 订阅了也永远收不到事件。修复：`chat_session` 新增 `DEFAULT_TITLE_PREFIX` 与 `is_default_title()`（空串或 `"对话 "` 前缀即视为未生成），`__init__` / `set_topic_summary` / 宿主守卫三处共用同一口径；宿主改为 `not is_default_title(topic_summary)` 才跳过。对照实测：修复前真实新会话 published=[]，修复后正常发布 `title.request`；端到端（真实 UIEventBus + 真实控制器 + fake `model.complete`）落到 `session.title.commit("排查登录500")`。
+- **子智能体执行失败被伪装成成功** (`app/core/workers/subagent_worker.py` · `plugins/system-subagent/manager.py` · `plugins/system-subagent/ui/session_card.py`): 三处叠加导致「❌ 失败」全面显示成「✅ 成功」。① `_execute_agent_loop` 的异常被就地转成 `result="执行出错: xxx"`，`_execution_error` 保持为空 → 完成链判 `success=True`、DB 落 finished、外部注入 ✅；异常改为一律上抛走 `error_occurred` 出口。② stall 路径先删 `running_tasks` 再进完成链，executor 缺席使 `success` 恒真；失败判定改为 executor → `_finished_tasks` 归档的 error 双源，注入正文改带错误原因（原来是「(无输出)」）。③ 会话卡结果区只看 result 是否为空，存在 error 也渲染绿色「✅ 执行结果」；改为 error/失败终态/历史「执行出错:」正文三判据统一走 ❌。**读超时不再直接判死**：流式重试此前只包住建流，SSE 读超时发生在迭代期，重试从未触发；现建流+消费一体纳入重试并显式 close 旧流，client 读超时 120s 对齐主对话 600s（connect 60s；真死锁仍由 stall 的 1800s 在途硬上限兜底）。
+- **子智能体结果被同批最慢任务扣住** (`plugins/system-subagent/manager.py`): 完成链此前只在流式中逐条注入，空闲态整批攒到末尾一次性交付——并行任务里一个 stall 就能把已完成结果压最长 300s。改为任务完成即注入（空闲时 hook 自动降级为 send 开新轮），交付延迟不再由最慢任务决定；批次汇总相应只补失败任务的错误正文，成功正文不重复灌上下文。
+- **模型不通时子智能体永久停在「正在运行中」** (`app/core/workers/error_handler/retry_helper.py` · `app/core/workers/subagent_worker.py` · `plugins/system-subagent/ui/`): `create_api_call_with_retry` 的退避 `base * 2**attempt` 无上限，15 次累计 81915s（约 22.7 小时），重试期又只写日志不报 UI，面板只剩计时器在动，观感等同卡死。退避单次封顶 30s，子智能体重试收敛到 5 次（不可达模型约 48s 即失败）；新增 `on_retry` 回调把「第 N/5 次重试，Ns 后继续」经 `progress_updated` 投影到面板行状态位，任务完成即清空。
+- **移除 UI 插件 ui 目录的 sys.path 注入** (`app/plugins/registries/ui_plugin_registry.py`): `load_plugin` 曾把每个 UI 插件的 `ui/` 目录 `sys.path.insert(0, ...)` 且卸载不回收，24 个带 `ui/__init__.py` 的插件共存时 `import ui` 的解析随加载顺序漂移——晚加载插件顶掉先加载插件的包名，引发 `No module named 'ui.speakup_ui'` 类跨插件污染（speak-up 演练/真发按钮实爆）。删除该注入：相对导入走 `ui_plugin_{name}` 包的 `__package__` 解析，本就不依赖 sys.path；全生态运行时代码仅 speak-up 一家依赖此行为（已改走自有顶层包 `speakup_core.runtime`）。配套在 ui-plugin-creator 架构文档固化跨模块导入规则（ui/ 内相对导入、共享单例放自有顶层包或 `ui_plugin_{safe}` 显式导入、禁裸 `from ui.`）。实测 38 个 UI 插件全量加载零 ModuleNotFoundError。
 
 ### ♻️ 代码重构 (Refactoring)
 
 - **`build_openai_client` / `chat_completion_text` 移出 SDK 稳定名单** (`app/plugins/sdk.py`): 二者只构造裸 client，服务商动态请求头（OpenCode 会话头、CodeBuddy OAuth、BCE Basic）由 worker 侧 `resolve_extra_headers` 注入，插件自建 client 必然漏头。插件要一次补全改走 `model.complete`。
-
-### 📚 文档 (Docs)
-
-- `docs/plugins/capabilities.md` 与 `plugin-creator` 技能能力表（`references/manifest.md`）对齐 88 条能力，补「能替代直连的三条优先用」指引与 `password` 字段自动加密说明。
+- **`system-tools` 更名 `system-interact`** (`plugins/system-interact/` · `app/plugins/managers/plugin_manager.py` · `marketplace.json`): 拆分后该插件只剩技能加载/MCP 管理/Gitee 上传等交互类工具，插件名与展示名「内置交互工具」对齐。`_NON_DISABLEABLE` 与组件锚点 `_SPLIT_COMPONENT_TO_PLUGIN["tools"]` 同步改写；旧 `system-tools:tools:<tool>` 禁用键迁移表补录留守工具（skill/manage_skill/upload_file/mcp_manage/mcp_list_servers），避免更名后已禁用工具回魂；`_SPLIT_CONFIG_HEIR` 保持历史名 `system-tools`（system-web 旧配置承继链锚点，与现插件名无关）。
+- **多模态服务商迁出为可安装插件** (`plugins/system-providers/providers/volcengine.py`, `plugins/system-providers/providers/minimax_video.py` 删除): 豆包语音合成 / 火山方舟图像 / 豆包录音识别 / 海螺视频四个非 chat 能力服务商定义移入插件市场仓库 `drifox-plugins2` 的 `multimodal-providers` 插件（声明 `min_host_version 0.7.1`，依赖 `ProviderDef.capability_type`），主程序不再内置多模态样例。`system-providers` 回到 14 家 chat 服务商，`tests/core/test_provider_registry.py::test_system_providers_loaded_from_plugins` 的 14 家断言重新成立（此前随样例定义落地失效）。
 
 ### ⚡ 性能优化 (Performance)
 
@@ -48,13 +42,9 @@ All notable changes to this project will be documented in this file.
 - **image_ref 块渲染分支** (`app/widgets/message_card.py`): 增量 markdown 构建识别 `image_ref` 落盘引用块，按 persist 文件路径拼 `file:///` 绝对 URL 渲染与点击预览（对齐既有 file:// 解析与加载口径），缺 file 字段回退 `[图片]` 占位。
 - **子代理会话卡 WebView 懒创建 + 互斥隐藏硬释放** (`plugins/system-subagent/ui/session_card.py`): QWebEngineView 改为首次 load 懒创建（无任务时不再实例化）；卡片被其他系统卡互斥隐藏时 deleteLater 硬释放（隐藏期不再常驻 QtWebEngineProcess，单卡约 20-50MB）；再次显示按当前会话全量重灌恢复，运行中任务轮询续接。
 
-### ♻️ 代码重构 (Refactoring)
+### 📚 文档 (Docs)
 
-- **多模态服务商迁出为可安装插件** (`plugins/system-providers/providers/volcengine.py`, `plugins/system-providers/providers/minimax_video.py` 删除): 豆包语音合成 / 火山方舟图像 / 豆包录音识别 / 海螺视频四个非 chat 能力服务商定义移入插件市场仓库 `drifox-plugins2` 的 `multimodal-providers` 插件（声明 `min_host_version 0.7.1`，依赖 `ProviderDef.capability_type`），主程序不再内置多模态样例。`system-providers` 回到 14 家 chat 服务商，`tests/core/test_provider_registry.py::test_system_providers_loaded_from_plugins` 的 14 家断言重新成立（此前随样例定义落地失效）。
-
-### 🐛 问题修复 (Bug Fixes)
-
-- **移除 UI 插件 ui 目录的 sys.path 注入** (`app/plugins/registries/ui_plugin_registry.py`): `load_plugin` 曾把每个 UI 插件的 `ui/` 目录 `sys.path.insert(0, ...)` 且卸载不回收，24 个带 `ui/__init__.py` 的插件共存时 `import ui` 的解析随加载顺序漂移——晚加载插件顶掉先加载插件的包名，引发 `No module named 'ui.speakup_ui'` 类跨插件污染（speak-up 演练/真发按钮实爆）。删除该注入：相对导入走 `ui_plugin_{name}` 包的 `__package__` 解析，本就不依赖 sys.path；全生态运行时代码仅 speak-up 一家依赖此行为（已改走自有顶层包 `speakup_core.runtime`）。配套在 ui-plugin-creator 架构文档固化跨模块导入规则（ui/ 内相对导入、共享单例放自有顶层包或 `ui_plugin_{safe}` 显式导入、禁裸 `from ui.`）。实测 38 个 UI 插件全量加载零 ModuleNotFoundError。
+- `docs/plugins/capabilities.md` 与 `plugin-creator` 技能能力表（`references/manifest.md`）对齐 88 条能力，补「能替代直连的三条优先用」指引与 `password` 字段自动加密说明。
 
 ## [v0.7.1] - 2026-11-11
 
