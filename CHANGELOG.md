@@ -3,6 +3,28 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [v0.7.2] - 2026-11-12
+
+### ✨ 新功能 (New Features)
+
+- **能力池补齐 9 条** (`app/plugins/capabilities/catalog.py`, 79→88): `model.complete`（一次性补全，`prompt` 支持纯文本或 content blocks 多模态）/ `net.http`（宿主统一超时·证书·10MB 响应上限）/ `task.background`（线程池 + 取消/进度，回调回主线程）/ `plugin.config.read·write`（读本插件配置）/ `secret.read·write`（系统密钥库）/ `tool.register·unregister`（运行时注册工具）/ `plugin.deps`（依赖状态查询）。`net.http`、`tool.register` 定为 high（数据外发 / 让 LLM 能调插件代码）。
+- **`password` 类型配置字段透明走系统密钥库** (`app/plugins/managers/plugin_config_store.py`): `get` / `effective_values` / `set_values` 三条路径分流，密钥不再落 `config.json`；老明文首次读取时懒迁移进密钥库并清掉 JSON 那份；密钥库不可用（无 keyring 的 Linux）回退明文，避免凭据丢失。插件与设置卡零代码改动——8 个 gateway 插件的 app_secret/token 与 magpie、meeting-notes、system-web 的 API Key 自动加密。
+- **提问卡超时代答跟随当前模型可用** (`plugins/system-question/ui/timeout.py`): 改走 `model.complete`，请求头由宿主统一组装，修复走 OpenCode 网关的模型必然 400 `MissingSessionID`、超时后只会「直接跳过」的问题；该插件配置读取同时改走 `plugin.config.read`。
+- **欢迎页更新日志改走 `net.http`** (`plugins/welcome_changelog/ui/_fetcher.py`): 不再自建 httpx client，证书链与超时由宿主统一。
+- **system-web 搜索 Key 读取改走 `plugin.config.read`** (`plugins/system-web/tools/web_tools.py`)。
+
+### 🐛 问题修复 (Bug Fixes)
+
+- **插件运行时注册的工具在卸载后残留**: `ToolRegistry.unregister_by_source()` 按来源批量注销，`PluginToolLoader.unload_plugin_tools()` 在卸载/热重载时兜底清理——运行时注册的工具不在 manifest 工具清单里，不兜底会留下指向已卸载插件代码的悬空工具。
+
+### ♻️ 代码重构 (Refactoring)
+
+- **`build_openai_client` / `chat_completion_text` 移出 SDK 稳定名单** (`app/plugins/sdk.py`): 二者只构造裸 client，服务商动态请求头（OpenCode 会话头、CodeBuddy OAuth、BCE Basic）由 worker 侧 `resolve_extra_headers` 注入，插件自建 client 必然漏头。插件要一次补全改走 `model.complete`。
+
+### 📚 文档 (Docs)
+
+- `docs/plugins/capabilities.md` 与 `plugin-creator` 技能能力表（`references/manifest.md`）对齐 88 条能力，补「能替代直连的三条优先用」指引与 `password` 字段自动加密说明。
+
 ### ⚡ 性能优化 (Performance)
 
 - **强回收活跃窗口阈值 1000→800** (`app/core/infra/memory_governor.py`): `_WEB_MEM_THRESHOLD_MB_ACTIVE` 下调后，活跃窗口下 WebEngine 子进程 RSS 合计 ≥800MB 即触发离屏 renderer 强回收（比旧阈值更早介入）；回收护栏不变（距可视区 ≥12 批、LRU 保留最近 14、每轮 ≤12、60s 冷却）。

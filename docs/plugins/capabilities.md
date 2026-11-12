@@ -381,8 +381,12 @@ caps["stream.subscribe"]({
 | ID | level | 说明 |
 |---|---|---|
 | `storage.data_dir` | low | 插件持久化数据根目录 `<app_data>`（插件自拼 `plugin_data/<name>/` 自用） |
-| `secret.read` | medium | 读本插件自己的凭据（系统密钥库，account 自动带 `plugin:<name>:` 前缀） |
+| `secret.read` | medium | 读本插件自己的凭据（系统密钥库，account 自动带 `plugin:<name>:` 前缀）；`fallback_config_key` 可兼容旧明文配置并懒迁移 |
 | `secret.write` | medium | 写本插件自己的凭据（空串 = 删除；密钥库不可用时返回 False，不落明文盘） |
+
+> **大部分插件不需要直接用这两条**：`config_schema` 里 `"type": "password"` 的字段已由
+> `PluginConfigStore` 透明加密（写密钥库、读密钥库、老数据首次读取自动迁移，插件与
+> 设置卡都零改动）。`secret.*` 只给「凭据不属于任何 config 字段」的场景用。
 | `storage.db` | **high** | 通用数据库执行权限（受限代理：表名须 `plugin_<name>_` 前缀，禁 ATTACH/PRAGMA/VACUUM） |
 
 只给根目录：CapabilityPool 的 provider 全局共享、调用不传插件名，per-plugin

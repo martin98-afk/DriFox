@@ -109,10 +109,38 @@ class PluginConfigStore:
             logger.warning(f"[PluginConfigStore] {plugin_name} 配置写入失败: {e}")
             return False
 
+    # ── 密钥字段（type=password）透明走系统密钥库 ──────────
+    #
+    # 声明了 `"type": "password"` 的字段不进 config.json 明文：取值时先读
+    # SecretStore，写入时直接落密钥库。插件代码与设置卡都不用改（两边都经
+    # 本类），老数据首次读取时自动迁移。
+    # 密钥库不可用（无 keyring 的 Linux）时整条链路回退明文 JSON，否则用户
+    # 已配置的凭据会凭空消失。
+
+    @staticmethod
+    def _secret_account(plugin_name: str, key: str) -> str:
+        return f"plugin:{plugin_name}:{key}"
+
+    def _secret_store(self):
+        try:
+            from app.utils.secret_store import SecretStore
+
+            return SecretStore()
+        except Exception as e:  # noqa: BLE001 - 密钥库不可用按明文回退
+            logger.warning(f"[PluginConfigStore] 密钥库不可用，password 字段回退明文: {e}")
+            return None
+
+    @staticmethod
+    def _is_secret_field(field: Any) -> bool:
+        return str(getattr(field, "type", "") or "") == "password"
+
     # ── 读 ──────────────────────────────────────────────
 
     def get(self, plugin_name: str, key: str) -> Any:
-        """当前生效值：环境变量 → 存储值 → schema 默认"""
+        """当前生效值：环境变量 → 存储值 → schema 默认
+
+        password 字段额外多一层：密钥库优先，命中旧明文时懒迁移并清掉 JSON。
+        """
         schema = self._schema(plugin_name)
         f = schema.get_field(key) if schema else None
         if f is not None and f.env:
@@ -120,6 +148,32 @@ class PluginConfigStore:
             if env_val:
                 return self._normalize(f, env_val)
         raw = self._read_raw(plugin_name)
+        if self._is_secret_field(f):
+            store = self._secret_store()
+            if store is not None and store.available:
+                try:
+                    stored = store.get(self._secret_account(plugin_name, key))
+                except Exception:  # noqa: BLE001 - 密钥库读失败按未配置处理
+                    stored = ""
+                if stored:
+                    return self._normalize(f, stored)
+                legacy = raw.get(key)
+                if isinstance(legacy, str) and legacy:
+                    # 老数据：明文在 JSON 里，迁进密钥库后清掉 JSON 那一份
+                    try:
+                        if store.set(self._secret_account(plugin_name, key), legacy):
+                            with _IO_LOCK:
+                                data = self._read_raw(plugin_name)
+                                if key in data:
+                                    data.pop(key, None)
+                                    self._write_raw(plugin_name, data)
+                            logger.info(
+                                f"[PluginConfigStore] {plugin_name}.{key} 已迁移进密钥库"
+                            )
+                    except Exception as e:  # noqa: BLE001 - 迁移失败不影响本次读取
+                        logger.warning(f"[PluginConfigStore] {plugin_name}.{key} 迁移失败: {e}")
+                    return self._normalize(f, legacy)
+                return f.default
         if key in raw and raw[key] not in ("", None):
             return self._normalize(f, raw[key]) if f is not None else raw[key]
         return f.default if f is not None else None
@@ -138,11 +192,23 @@ class PluginConfigStore:
         if schema is None:
             return {}
         raw = self._read_raw(plugin_name)
+        store = self._secret_store() if any(self._is_secret_field(f) for f in schema.fields) else None
         values: Dict[str, Any] = {}
         for f in schema.fields:
             env_val = os.environ.get(f.env) if f.env else None
             if env_val:
                 values[f.key] = self._normalize(f, env_val)
+            elif self._is_secret_field(f):
+                stored = ""
+                if store is not None and store.available:
+                    try:
+                        stored = store.get(self._secret_account(plugin_name, f.key)) or ""
+                    except Exception:  # noqa: BLE001 - 读失败按未配置处理
+                        stored = ""
+                legacy = raw.get(f.key)
+                if not stored and isinstance(legacy, str) and legacy:
+                    stored = legacy
+                values[f.key] = self._normalize(f, stored) if stored else f.default
             elif f.key in raw and raw[f.key] not in ("", None):
                 values[f.key] = self._normalize(f, raw[f.key])
             else:
@@ -162,14 +228,52 @@ class PluginConfigStore:
     # ── 写 ──────────────────────────────────────────────
 
     def set_values(self, plugin_name: str, values: Dict[str, Any]) -> bool:
-        """合并写；空串/None = 清除该键（回退默认）。只落 values 出现的键。"""
+        """合并写；空串/None = 清除该键（回退默认）。只落 values 出现的键。
+
+        password 字段单独分流：写系统密钥库，JSON 里不再保留明文。密钥库
+        不可用或写入失败时回退明文，避免用户凭据丢失。
+        """
+        schema = self._schema(plugin_name)
+        secret_vals: Dict[str, Any] = {}
+        plain_vals: Dict[str, Any] = {}
+        for key, val in values.items():
+            field = schema.get_field(key) if schema else None
+            if self._is_secret_field(field):
+                secret_vals[key] = val
+            else:
+                plain_vals[key] = val
+
+        store = self._secret_store() if secret_vals else None
+        secret_ok = True
+        if store is not None and store.available:
+            for key, val in secret_vals.items():
+                cleared = val is None or val == ""
+                try:
+                    if cleared:
+                        store.delete(self._secret_account(plugin_name, key))
+                        continue
+                    if not store.set(self._secret_account(plugin_name, key), str(val)):
+                        secret_ok = False
+                        plain_vals[key] = val
+                except Exception as e:  # noqa: BLE001 - 写失败回退明文
+                    logger.warning(f"[PluginConfigStore] {plugin_name}.{key} 写密钥库失败: {e}")
+                    secret_ok = False
+                    plain_vals[key] = val
+        elif secret_vals:
+            # 密钥库不可用：整条链路回退明文，保证配置仍然生效
+            plain_vals.update(secret_vals)
+
         with _IO_LOCK:  # read-modify-write 整体互斥，防并发互相覆盖
             raw = self._read_raw(plugin_name)
-            for key, val in values.items():
+            for key, val in plain_vals.items():
                 if val is None or val == "":
                     raw.pop(key, None)
                 else:
                     raw[key] = val
+            # 全部密钥项都进了密钥库，历史明文可以清掉
+            if secret_ok and store is not None and store.available:
+                for key in secret_vals:
+                    raw.pop(key, None)
             return self._write_raw(plugin_name, raw)
 
     def reset(self, plugin_name: str) -> bool:

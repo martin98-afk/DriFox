@@ -323,7 +323,7 @@ manifest 加 `api_version: 2`，必须同时把用到的能力全部列上。** 
 | type | 控件 | default 示例 |
 |------|------|-------------|
 | `text` | 单行文本 | `"wss://example.com/ws"` |
-| `password` | 密文输入（不明文回显） | `""` |
+| `password` | 密文输入（不明文回显）。**值不落 `config.json`**：存储层自动写系统密钥库（macOS Keychain / Windows 凭据管理器），读取时也自动从密钥库取；密钥库不可用的平台回退明文 | `""` |
 | `bool` | 开关 | `false` |
 | `select` | 下拉选择，配 `options` | `"auto"` |
 | `number` | 数字输入（别名 `int`/`integer` 自动归一为 `number`） | `30` |
