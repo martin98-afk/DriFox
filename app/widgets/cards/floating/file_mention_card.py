@@ -12,6 +12,7 @@ import fnmatch
 import os
 import re
 import threading
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Dict, List, Optional, Set, Tuple
 
@@ -250,8 +251,13 @@ def _scan_tree(root_dir: str, rules: "IgnoreRules", max_items: int):
                         for ext in ignored_ext:
                             if name_lower.endswith(ext):
                                 skip = True
+                            if skip:
                                 break
-                    if not skip and rules.matches(name, rel, parts, is_dir):
+                    # 目录才走 gitignore 判定（目录规则决定递归剪枝：build/、dist 等）；
+                    # 文件级 gitignore 规则（如 *.json）不再过滤——@ 卡的场景是把文件
+                    # 喂给 AI，config.json 这类被 gitignore 的文件恰恰是高频需求，
+                    # 照搬 gitignore 会让大半内容在列表中消失（实测 config/_tools 全空）
+                    if not skip and is_dir and rules.matches(name, rel, parts, True):
                         skip = True
                     if skip:
                         continue
@@ -533,8 +539,8 @@ class FileMentionItemWidget(QWidget):
 
     @staticmethod
     def _is_special_type(item_type: str) -> bool:
-        """非文件类条目（插件提及 / 历史会话 / 分组标题）"""
-        return item_type in ("mention", "session", "section_title")
+        """非文件类条目（插件提及 / 历史会话 / 分组标题 / 空态提示）"""
+        return item_type in ("mention", "session", "section_title", "empty_hint")
 
     def _apply_path_style(self, section: bool):
         """路径/标题标签样式：普通条目主色 13px；分组标题次色 12px"""
@@ -640,7 +646,7 @@ class FileMentionItemWidget(QWidget):
         item_type = self._data.get("type", "")
 
         # 分组标题行（智能体 / 会话 / 文件）：次色小字，无图标无交互
-        if item_type == "section_title":
+        if item_type in ("section_title", "empty_hint"):
             self._icon_label.setText("")
             self._icon_label.setPixmap(QPixmap())
             self._apply_path_style(section=True)
@@ -649,12 +655,17 @@ class FileMentionItemWidget(QWidget):
             self._hint_label.setVisible(False)
             return
 
-        # 历史会话条目：💬 + 会话标题，右侧显示更新时间
+        # 历史会话条目：💬 + 会话标题（带搜索高亮），右侧显示更新时间
         if item_type == "session":
             self._icon_label.setPixmap(QPixmap())
             self._icon_label.setText("💬")
             self._apply_path_style(section=False)
-            self._path_label.setText(self._data.get("name", rel))
+            name = self._data.get("name", rel)
+            self._path_label.setText(name)
+            if self._query:
+                hls = self._all_highlight_queries(name, self._query)
+                if hls:
+                    self._path_label.setHighlights(hls, Colors.SEARCH_HIGHLIGHT)
             desc = self._data.get("description", "").strip()
             self._desc_label.setText(desc)
             self._desc_label.setVisible(bool(desc))
@@ -729,12 +740,14 @@ class FileMentionItemWidget(QWidget):
         leaveEvent 只清 _hovered，保持 _selected，确保鼠标离开后键盘仍可继续导航。
         """
         self._selected = selected
+        if self._data.get("type") == "empty_hint":
+            return  # 空态提示行无选中态
         # 不再在 selected 时清空 _hovered —— hover 即选中，两者共存
         self._apply_bg()
 
     def enterEvent(self, event):
-        # 分组标题行不可交互：不响应 hover/选中
-        if self._data.get("type") == "section_title":
+        # 分组标题/空态提示行不可交互：不响应 hover/选中
+        if self._data.get("type") in ("section_title", "empty_hint"):
             return
         self._hovered = True
         # hover 即选中：通知父卡片同步选中索引到此 widget
@@ -764,6 +777,8 @@ class FileMentionCard(QWidget):
     mentionSelected = pyqtSignal(dict)  # 插件提及条目（含 provider_id）
     sessionSelected = pyqtSignal(dict)  # 历史会话引用条目（含 session_id）
     dismissed = pyqtSignal()
+    # 目录浏览层变化（进/退目录）→ 参数为 "rel/path/" 形式；输入框据此同步 @ 后文本
+    browseChanged = pyqtSignal(str)
     # 后台扫描完成信号（跨线程发射，队列连接回主线程应用结果）
     _scanFinished = pyqtSignal(object)
 
@@ -798,7 +813,14 @@ class FileMentionCard(QWidget):
         self._session_items_cache: List[Dict[str, str]] = []
         self._session_cache_at: float = 0.0
         self._SESSION_CACHE_TTL = 5.0  # 秒
+        # 会话搜索的项目归属：show_card 由 main_widget 传入当前项目名，
+        # 非空时只列该项目的会话（SQL project 过滤 + 回落路径内存过滤）
+        self._session_project = ""
         self._breadcrumb_sig = None  # 面包屑当前段签名（避免每次按键重建控件）
+        # 滚动后短窗内抑制 hover→选中同步：滚轮滚动时内容掠过静止鼠标，
+        # 逐行触发 enterEvent→hovered→ensureWidgetVisible→再滚动，
+        # 形成反馈循环（滚动拉扯 + 每行一次 unpolish/polish，快速滚动时整卡抖动卡顿）。
+        self._hover_suppress_until = 0.0  # time.monotonic() 时刻
 
         # ---- 文件系统监视器：本地新增/删除文件时自动标记缓存失效 ----
         self._fs_watcher = QFileSystemWatcher(self)
@@ -1269,8 +1291,7 @@ class FileMentionCard(QWidget):
           80  = 文件名前缀匹配
           60  = 文件名子串匹配
           55  = 路径子串匹配（优先级低于文件名子串）
-          40  = 文件名 fuzzy 匹配
-          35  = 路径 fuzzy 匹配
+          40  = 文件名 fuzzy 匹配（query ≥3 字符才启用）
           0   = 不匹配
         """
         name_lower = item["name"].lower()
@@ -1287,11 +1308,11 @@ class FileMentionCard(QWidget):
             return 60
         if query in rel_lower:
             return 55
-        # fuzzy 匹配
-        if FileMentionCard._fuzzy_match(name_lower, query):
+        # fuzzy 匹配（收紧：仅文件名子序列，且 query ≥3 字符才启用。
+        # 路径子序列几乎永不失手——任意 2 字符都能在数千路径中按序命中，
+        # 曾致搜索结果过宽；文件名短 query 同理）
+        if len(query) >= 3 and FileMentionCard._fuzzy_match(name_lower, query):
             return 40
-        if FileMentionCard._fuzzy_match(rel_lower, query):
-            return 35
         return 0
 
     @staticmethod
@@ -1330,7 +1351,8 @@ class FileMentionCard(QWidget):
         1. 检查是否命中 always-ignored 目录名（精确匹配）
         2. 检查是否命中 always-ignored 目录模式（fnmatch 通配符匹配）
         3. 检查是否命中 always-ignored 扩展名
-        4. 检查 .gitignore 模式
+        4. gitignore 模式仅对目录生效（与 _scan_tree 内联判定一致；
+           文件级 gitignore 规则不再过滤，见 _scan_tree 内注释）
 
         [PERF] 全量扫描热路径已改为 _scan_tree 内联判定 + IgnoreRules 预编译规则；
         本方法保留给增量扫描等低频调用点，内部复用同一套规则对象，
@@ -1360,8 +1382,8 @@ class FileMentionCard(QWidget):
                 if name.lower().endswith(ext):
                     return True
 
-        # 3. .gitignore 模式（预编译，语义：按序匹配，最后一条生效）
-        return IgnoreRules.compile(gitignore_patterns).matches(name, rel_norm, parts_lower, is_dir)
+        # 3. .gitignore 模式（仅目录；预编译，语义：按序匹配，最后一条生效）
+        return is_dir and IgnoreRules.compile(gitignore_patterns).matches(name, rel_norm, parts_lower, True)
 
     @staticmethod
     def invalidate_ignore_cache():
@@ -1473,22 +1495,43 @@ class FileMentionCard(QWidget):
         由 _extend_render 逐批追加，最多到 MAX_RENDERED_ITEMS 软上限。
         精确搜索不受渲染上限影响——_filtered_items 始终保留全量匹配结果。
 
-        快速路径：新旧 items 完全相同则跳过全量重建，仅刷新 query 高亮。
+        快速路径：前 keep 项（keep=min(已渲染数, 全量数)）与已渲染 widget 逐一同
+        path 时只 update_data，保留懒加载已渲染量——文件系统增量更新重入时
+        不再销毁重建、不回顶。path 序列变化（query 变化等）才走全量重建。
         """
+        # ---- 快速路径：前 keep 项与已渲染 widget 逐一同 path → 只 update_data ----
+        # keep = min(已渲染数, 全量数)。懒加载渲染到深处（如 84 项）后，文件系统
+        # 增量更新会触发 load_items 重入本函数：若把 _rendered_count 强制重置回
+        # INITIAL_RENDER_COUNT，长度不等会跌入全量重建（84 个 widget 销毁重建 +
+        # 滚动回顶）——用户浏览中表现为整卡闪烁、位置跳顶、明显卡顿。
+        old_count = len(self._item_widgets)
+        keep = min(old_count, len(self._filtered_items))
+        if keep and all(
+            self._item_widgets[i].item_data["path"] == self._filtered_items[i]["path"] for i in range(keep)
+        ):
+            for w, item in zip(self._item_widgets[:keep], self._filtered_items[:keep]):
+                w.update_data(item, self._current_query)
+            self._rendered_count = keep
+            # 全量结果变短 → 删除多余 widget（hide 立即生效，deleteLater 下一拍才析构，
+            # 不 hide 会与新布局重叠绘制造成闪现）
+            if old_count > keep:
+                for w in self._item_widgets[keep:]:
+                    try:
+                        self._scroll_layout.removeWidget(w)
+                        w.hide()
+                        w.deleteLater()
+                    except RuntimeError:
+                        pass
+                del self._item_widgets[keep:]
+                self.setFixedHeight(self._card_height(len(self._item_widgets)))
+            return
+
         # 懒加载：初始只渲染 INITIAL_RENDER_COUNT 项（可见行 + 缓冲），
         # 其余由 _extend_render 在滚动/键盘向下时按需追加。
         # [PERF] 这里曾是 RENDER_CHUNK(200)，首屏为此多创建近 190 个用户看不见的
         #        QWidget（≈33ms），而卡片一屏只显示 MAX_VISIBLE_ITEMS(8) 行。
         self._rendered_count = min(INITIAL_RENDER_COUNT, len(self._filtered_items))
         new_items = self._filtered_items[: self._rendered_count]
-
-        # ---- 快速路径：新旧 items 完全一致，仅更新高亮 ----
-        if len(self._item_widgets) == len(new_items):
-            same = all(self._item_widgets[i].item_data["path"] == new_items[i]["path"] for i in range(len(new_items)))
-            if same:
-                for w, item in zip(self._item_widgets, new_items):
-                    w.update_data(item, self._current_query)
-                return
 
         old_widgets = list(self._item_widgets)  # 复制
 
@@ -1521,10 +1564,12 @@ class FileMentionCard(QWidget):
 
         self._item_widgets = new_widgets
 
-        # 删除不再需要的旧 widget
+        # 删除不再需要的旧 widget（hide 立即生效：deleteLater 要到下一拍事件循环，
+        # 期间 widget 仍挂在父级可见、保持旧几何，与新 widget 重叠绘制 → 闪现）
         for w in leftover.values():
             try:
                 self._scroll_layout.removeWidget(w)
+                w.hide()
                 w.deleteLater()
             except RuntimeError:
                 pass
@@ -1561,6 +1606,8 @@ class FileMentionCard(QWidget):
 
     def _on_scroll(self, value: int):
         """滚动条接近底部时追加下一批 widget（懒加载）"""
+        # 抑制窗口：滚动期间/刚结束 150ms 内忽略 hover 同步（见 __init__ 注释）
+        self._hover_suppress_until = time.monotonic() + 0.15
         if self._rendered_count >= len(self._filtered_items):
             return
         sb = self._scroll_area.verticalScrollBar()
@@ -1653,6 +1700,7 @@ class FileMentionCard(QWidget):
             item = self._crumb_layout.takeAt(0)
             w = item.widget()
             if w is not None:
+                w.hide()
                 w.deleteLater()
         self._crumb_labels.clear()
 
@@ -1687,6 +1735,20 @@ class FileMentionCard(QWidget):
             self._crumb_layout.addWidget(lbl)
             self._crumb_labels.append(lbl)
 
+    def _resolve_browse_rel(self, rel_no_slash: str) -> str:
+        """把输入框回填的浏览层路径解析到缓存中的真实目录 relative_path
+
+        Windows 习惯：大小写不敏感匹配；未命中返回根层（空串）。
+        """
+        rel_no_slash = (rel_no_slash or "").strip("/")
+        if not rel_no_slash:
+            return ""
+        low = rel_no_slash.lower()
+        for item in self._file_cache:
+            if item["type"] == "dir" and item["relative_path"].lower() == low:
+                return item["relative_path"]
+        return ""
+
     def _enter_dir(self, rel_dir: str):
         """进入（或返回）某一级目录：仅浏览模式下生效，重新加载本级列表"""
         rel_dir = rel_dir.strip("/")
@@ -1698,6 +1760,9 @@ class FileMentionCard(QWidget):
         self._selected_index = 0
         self._last_selected_index = -1
         self.load_items("")  # 进入目录即离开搜索模式，展示本级列表
+        # 通知输入框同步 @ 后文本（如 "src/sub/"），用户所见与浏览层一致；
+        # 文本变化经 atTriggered 闭环回 show_card（尾缀 / → 同层幂等），无死循环
+        self.browseChanged.emit(self._browse_rel + "/" if self._browse_rel else "")
 
     def enter_selected_dir(self) -> bool:
         """Tab 触发：当前选中项为目录 → 进入其下一层列表
@@ -1720,12 +1785,17 @@ class FileMentionCard(QWidget):
         走 ChatBackend.get_session_storage() 门面；引擎不可用/加载失败
         返回空列表，不影响文件区展示。
 
+        项目归属：self._session_project 非空时只取该项目（轻量路径走 SQL
+        project 过滤；回落 get_all 后按条目 project 字段内存过滤，幂等）。
+        空串 = 未注入项目，保持旧行为全局展示。
+
         [PERF] 带 TTL 缓存：load_items 随每次按键触发，SQLite get_all 是
         磁盘 I/O，逐键同步查库会造成输入卡顿；TTL 内复用内存缓存，
-        切换根目录/超时后在下一次取用时刷新。
+        切换根目录/项目/超时后在下一次取用时刷新。
         """
         import time as _time
 
+        project = self._session_project
         now = _time.monotonic()
         if not self._cache_dirty and (now - self._session_cache_at) < self._SESSION_CACHE_TTL:
             return self._session_items_cache
@@ -1741,12 +1811,15 @@ class FileMentionCard(QWidget):
             light = getattr(storage, "get_sessions_lightweight", None)
             if callable(light):
                 try:
-                    sessions = light(limit=30)
+                    sessions = light(limit=30, project=project or None)
                 except Exception as e:  # noqa: BLE001
                     logger.debug(f"[FileMentionCard] 轻量会话列表失败，回落全量: {e}")
                     sessions = None
             if sessions is None:
                 sessions = storage.get_all(limit=30) or []
+            # 项目过滤（轻量路径已在 SQL 过滤，此处幂等；回落全量路径必需）
+            if project:
+                sessions = [s for s in sessions if isinstance(s, dict) and s.get("project") == project]
         except Exception as e:  # noqa: BLE001
             logger.debug(f"[FileMentionCard] 历史会话拉取失败: {e}")
             sessions = []
@@ -1850,6 +1923,18 @@ class FileMentionCard(QWidget):
                 }
             )
             combined.extend(entries)
+        # 空态提示行：浏览空目录/搜索无结果时不再隐藏整张卡片——
+        # 否则用户困在空目录里连面包屑返回都点不到（无法退出）
+        if not combined:
+            hint = "此目录为空" if not query else "无匹配结果"
+            combined.append(
+                {
+                    "type": "empty_hint",
+                    "name": hint,
+                    "path": "empty://hint",
+                    "relative_path": hint,
+                }
+            )
         self._filtered_items = combined
 
         # 面包屑随浏览层刷新
@@ -1901,7 +1986,7 @@ class FileMentionCard(QWidget):
         if sender in self._item_widgets:
             idx = self._item_widgets.index(sender)
             if self._is_section_index(idx):
-                return  # 分组标题行不可交互
+                return  # 分组标题/空态提示行不可交互
             self._selected_index = idx
             self._update_selection()
             self.select_current()
@@ -1911,6 +1996,10 @@ class FileMentionCard(QWidget):
 
         实现 hover 即选中：鼠标悬停到哪个 item，键盘导航的起始位置就跟随到哪。
         """
+        # 滚动引发的程序性 hover（内容掠过静止鼠标）不同步选中：
+        # 否则高亮逐行跳动 + ensureWidgetVisible 拉扯滚动位置形成循环
+        if time.monotonic() < self._hover_suppress_until:
+            return
         try:
             idx = self._item_widgets.index(widget)
         except ValueError:
@@ -1919,10 +2008,14 @@ class FileMentionCard(QWidget):
         if idx == self._selected_index:
             return
         self._selected_index = idx
-        self._update_selection()
+        self._update_selection(scroll_into_view=False)
 
-    def _update_selection(self):
-        """更新选中高亮"""
+    def _update_selection(self, scroll_into_view: bool = True):
+        """更新选中高亮
+
+        scroll_into_view=False 用于 hover 同步：鼠标悬停不应拖动视口，
+        只有键盘导航/初始化才需要 ensureWidgetVisible。
+        """
         old_idx = self._last_selected_index
         new_idx = self._selected_index
 
@@ -1934,13 +2027,16 @@ class FileMentionCard(QWidget):
 
         self._last_selected_index = new_idx
 
-        # 滚动到可见
-        if 0 <= self._selected_index < len(self._item_widgets):
+        # 滚动到可见（键盘导航/初始化；hover 同步不拖动视口）
+        if scroll_into_view and 0 <= self._selected_index < len(self._item_widgets):
             self._scroll_area.ensureWidgetVisible(self._item_widgets[self._selected_index], 0, 0)
 
     def _is_section_index(self, idx: int) -> bool:
-        """该索引是否为分组标题行（不可选中项）"""
-        return 0 <= idx < len(self._filtered_items) and self._filtered_items[idx].get("type") == "section_title"
+        """该索引是否为不可选中行（分组标题/空态提示）"""
+        return (
+            0 <= idx < len(self._filtered_items)
+            and self._filtered_items[idx].get("type") in ("section_title", "empty_hint")
+        )
 
     def select_next(self) -> bool:
         """选择下一项（跳过分组标题行；懒加载：到已渲染末尾时先追加下一批）"""
@@ -1978,17 +2074,17 @@ class FileMentionCard(QWidget):
         idx = self._selected_index
         if 0 <= idx < len(self._filtered_items):
             item = self._filtered_items[idx]
-            if item.get("type") == "mention":
+            if item.get("type") in ("mention",):
                 self.mentionSelected.emit(item)
             elif item.get("type") == "session":
                 self.sessionSelected.emit(item)
-            elif item.get("type") == "section_title":
-                return  # 分组标题行不可确认
+            elif item.get("type") in ("section_title", "empty_hint"):
+                return  # 分组标题/空态提示行不可确认
             else:
                 self.fileSelected.emit(item["path"])
             self.dismiss()
 
-    def show_card(self, root_dir: str = "", query: str = ""):
+    def show_card(self, root_dir: str = "", query: str = "", project: str = ""):
         """加载并显示卡片（始终不阻塞 UI）
 
         无参调用（被 CardManager 调用）：仅使卡片可见，不做任何 I/O。
@@ -2026,10 +2122,21 @@ class FileMentionCard(QWidget):
             # 走 set_root_dir：归一化路径 + 根变化时递增扫描代次（使在途后台扫描作废）
             # + 重置文件系统监视器。此前直接赋值漏掉了这三者。
             self.set_root_dir(root_dir)
-        self._current_query = query  # root_dir 有值时始终更新 query
-        # 新一轮 @ 触发（无 query）重置目录浏览层到根；带 query 的刷新保留浏览层
-        if not query:
+            # 项目切换 → 会话缓存立即失效（TTL 内也重拉，避免串项目）
+            if project != self._session_project:
+                self._session_project = project
+                self._session_cache_at = 0.0
+        # 尾缀 "/" 的 query = 目录浏览层路径（输入框联动写入，如 "src/sub/"）：
+        # 解析到缓存真实目录（大小写不敏感，Windows 习惯），未命中回落根层。
+        # 此后 query 置空 → 浏览模式该层。
+        if query.endswith("/"):
+            self._browse_rel = self._resolve_browse_rel(query[:-1])
+            query = ""
+        elif not query:
+            # 新一轮 @ 触发（无 query）重置目录浏览层到根；带 query 的刷新保留浏览层
             self._browse_rel = ""
+
+        self._current_query = query  # root_dir 有值时始终更新 query
 
         if self._cache_dirty and not self._async_pending:
             # 🚀 立即显示卡片（占位高度），异步扫描

@@ -488,10 +488,30 @@ class SendableTextEdit(TextEdit):
         """注入文件提及卡片引用（由 main_widget 创建并注册）"""
         self._file_mention_card_ref = card
         card.dismissed.connect(self._on_card_dismissed)
+        # 目录进/退联动：卡片浏览层变化 → 同步输入框 @ 后文本（如 "src/sub/"）
+        card.browseChanged.connect(self.set_at_query)
 
     def _get_file_mention_card(self):
         """获取文件提及卡片引用"""
         return self._file_mention_card_ref
+
+    def set_at_query(self, text: str):
+        """@ 卡片目录浏览联动：把 @ 后到光标的文本替换为指定值
+
+        FileMentionCard 进入/退出目录时经 browseChanged 驱动（参数如 "src/sub/"；
+        退回根层为 ""）。文本变化经 textChanged → _on_at_trigger_check →
+        atTriggered 闭环回卡片（尾缀 / 语义 = 浏览该层），双向同步且幂等。
+        """
+        if self._at_trigger_pos < 0:
+            return
+        at_pos = self._at_trigger_pos
+        cursor = self.textCursor()
+        end = max(cursor.position(), at_pos + 1)
+        cursor.setPosition(at_pos + 1)
+        cursor.setPosition(end, QTextCursor.KeepAnchor)
+        cursor.insertText(text)
+        # insertText 后光标已停在插入文本之后，与 @ 卡片高亮区间保持一致
+        self.setTextCursor(cursor)
 
     def _on_slash_trigger_check(self):
         """检测 / 触发——仅在开头（位置0）的 / 触发命令卡片，支持节流

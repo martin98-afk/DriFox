@@ -21,6 +21,7 @@ from app.widgets.cards.floating.file_mention_card import (
     MAX_RENDERED_ITEMS,
     _scan_tree,
     FileMentionCard,
+    FileMentionItemWidget,
     IgnoreRules,
 )
 
@@ -54,7 +55,9 @@ def _ref_is_ignored(rel_path: str, is_dir: bool, patterns) -> bool:
             if name_lower.endswith(ext):
                 return True
 
-    if not patterns:
+    if not patterns or not is_dir:
+        # 文件级 gitignore 规则不再过滤文件（与 _scan_tree 内联判定同步，
+        # config.json 等被 gitignore 的文件在 @ 卡中可见）；目录才判 gitignore
         return False
 
     ignored = False
@@ -106,9 +109,12 @@ class TestIgnoreRulesEquivalence:
             rules = IgnoreRules.compile([pattern])
             parts = [p.lower() for p in rel.split("/")]
             got = rules.matches(rel.split("/")[-1], rel, parts, is_dir)
-            ref = _ref_is_ignored(rel, is_dir, [pattern])
             assert got == expected, f"pattern={pattern!r} rel={rel!r}: 期望 {expected}, 实际 {got}"
-            assert got == ref, f"pattern={pattern!r} rel={rel!r}: 与旧实现不一致（旧={ref}, 新={got}）"
+            if is_dir:
+                # 目录级规则仍与旧 fnmatch 引擎逐条一致；文件级规则的「不再应用」
+                # 门控在调用层（_scan_tree/_is_ignored），不在 IgnoreRules 引擎内
+                ref = _ref_is_ignored(rel, is_dir, [pattern])
+                assert got == ref, f"pattern={pattern!r} rel={rel!r}: 与旧实现不一致（旧={ref}, 新={got}）"
 
     def test_negate_ordering_semantics(self):
         """gitignore 语义：按序匹配，最后一条生效"""
@@ -288,13 +294,14 @@ class TestLazyRender:
         assert len(card._item_widgets) == 2
 
     def test_no_match_clears_widgets(self):
+        """无匹配 → 只剩 empty_hint 提示行（新语义：不隐藏整卡，保留退出路径）"""
         _ensure_qapp()
         card = self._make_card(50)
         card.load_items("definitely_not_exists_xyz")
         card._filter_timer.stop()
         card._do_filter_and_render()
-        assert len(card._filtered_items) == 0
-        assert len(card._item_widgets) == 0
+        assert [i["type"] for i in card._filtered_items] == ["empty_hint"]
+        assert len(card._item_widgets) == 1
 
 
 class TestBrowseMode:
@@ -311,6 +318,10 @@ class TestBrowseMode:
             {"name": "b.py", "path": "/tmp/src/sub/b.py", "relative_path": "src/sub/b.py", "type": "file"},
         ]
         card._cache_dirty = False
+        # 隔离环境依赖：会话/插件提及走真实后端（SQLite/注册表），
+        # 本机数据非空会污染「浏览模式条目集」断言
+        card._collect_session_items = lambda: []
+        card._collect_mention_items = lambda: []
         return card
 
     def test_root_lists_only_direct_children(self):
@@ -356,6 +367,243 @@ class TestBrowseMode:
         card._do_filter_and_render()
         entries = [i for i in card._filtered_items if i.get("type") not in ("section_title",)]
         assert [i["relative_path"] for i in entries] == ["src/sub/b.py"]
+
+
+class TestScrollAndFlashRegression:
+    """滚动卡顿与闪现修复的回归测试
+
+    1. 懒加载渲染到深处后，FS 增量更新重入 _render_incremental：
+       不得销毁重建已渲染 widget（闪现+跳顶+卡顿），不得重置 _rendered_count。
+    2. 滚动置 hover 抑制窗：窗内 hovered 不同步选中（滚动↔hover 反馈循环）；
+       hover 同步不调 ensureWidgetVisible，键盘导航仍调。
+    3. fuzzy 收紧：路径子序列档删除；文件名子序列档 query≥3 才启用。
+    4. 会话条目名高亮搜索词。
+    """
+
+    @staticmethod
+    def _make_card(n_items=200):
+        card = FileMentionCard()
+        card._file_cache = [
+            {"name": f"f{i}.py", "path": f"/tmp/f{i}.py", "relative_path": f"f{i}.py", "type": "file"}
+            for i in range(n_items)
+        ]
+        card._cache_dirty = False
+        card._collect_mention_items = lambda: []
+        card._collect_session_items = lambda: []
+        return card
+
+    def _load_and_render(self, card, query="f"):
+        card.load_items(query)
+        card._filter_timer.stop()
+        card._do_filter_and_render()
+
+    def test_incremental_render_preserves_lazy_count(self):
+        _ensure_qapp()
+        card = self._make_card()
+        self._load_and_render(card)
+        assert len(card._item_widgets) == INITIAL_RENDER_COUNT
+
+        # 模拟滚动懒加载两批
+        card._extend_render()
+        card._extend_render()
+        deep = len(card._item_widgets)
+        assert deep > INITIAL_RENDER_COUNT
+
+        # FS 增量更新重入：同 query 再次过滤渲染（条目集不变）
+        self._load_and_render(card, "f")
+
+        assert len(card._item_widgets) == deep, "已渲染 widget 不应被销毁重建"
+        assert card._rendered_count == deep, "懒加载渲染量不应被重置回初始值"
+
+    def test_scroll_suppresses_hover_selection(self):
+        _ensure_qapp()
+        card = self._make_card(50)
+        self._load_and_render(card)
+
+        calls = []
+        card._scroll_area.ensureWidgetVisible = lambda *a, **k: calls.append(1)
+
+        # 正常 hover：同步选中，但不拖动视口
+        card._on_item_hovered(card._item_widgets[3])
+        assert card._selected_index == 3
+        assert not calls, "hover 同步不应触发 ensureWidgetVisible"
+
+        # 滚动后的抑制窗内：hover 不改选中
+        card._on_scroll(0)
+        card._on_item_hovered(card._item_widgets[6])
+        assert card._selected_index == 3, "滚动抑制窗内 hover 不应同步选中"
+
+        # 键盘导航仍滚动到可见
+        card.select_next()
+        assert card._selected_index == 4
+        assert calls, "键盘导航应触发 ensureWidgetVisible"
+
+    def test_fuzzy_gating(self):
+        score = FileMentionCard._score_item
+        item = {"name": "requirements.txt", "relative_path": "docs/requirements.txt"}
+        # ≤2 字符 query：即使子序列命中也不给 fuzzy 分
+        assert score(item, "rq") == 0
+        # ≥3 字符：文件名子序列命中 → 40
+        assert score(item, "rqrmnts") == 40
+        # ≥3 字符但仅路径子序列、文件名不命中 → 路径 fuzzy 档已删，不给分
+        item2 = {"name": "readme.md", "relative_path": "x/require/readme.md"}
+        assert score(item2, "rqirm") == 0
+        # 子串匹配不受影响
+        assert score(item, "quire") == 60
+        assert score(item, "docs") == 55
+
+    def test_session_name_highlight(self):
+        _ensure_qapp()
+        data = {"type": "session", "name": "修复滚动卡顿的会话", "path": "session://1", "relative_path": "修复滚动卡顿的会话"}
+        w = FileMentionItemWidget(dict(data), "滚动")
+        assert w._path_label._hl_queries, "会话名应高亮搜索词"
+        # 无 query：不高亮
+        w2 = FileMentionItemWidget(dict(data), "")
+        assert not w2._path_label._hl_queries
+
+    def test_session_items_filtered_by_project(self, monkeypatch):
+        """会话搜索只显示当前项目：project 透传存储层，切换项目缓存立即失效"""
+        _ensure_qapp()
+        calls = []
+
+        class FakeStorage:
+            def get_sessions_lightweight(self, limit=100, offset=0, project=None):
+                calls.append(project)
+                return [
+                    {"session_id": "s1", "title": "项目内会话", "project": project or "", "updated_at": "t"},
+                    {"session_id": "s2", "title": "他项目会话", "project": "Other", "updated_at": "t"},
+                ]
+
+            def get_all(self, limit=100):
+                return []
+
+        import app.core.conversation.backend as backend_mod
+
+        monkeypatch.setattr(backend_mod, "get_session_storage", lambda: FakeStorage())
+
+        card = self._make_card(10)
+        del card._collect_session_items  # 摘除 _make_card 的 mock，走真实方法验证 project 透传
+        card.show_card("/tmp", "", project="ProjA")
+        # show_card 对新 root_dir 走异步扫描分支（QTimer 延迟加载），
+        # 测试环境无事件循环，手动置缓存就绪后同步加载
+        card._cache_dirty = False
+        card.load_items("")
+        card._filter_timer.stop()
+        card._do_filter_and_render()
+
+        assert calls and calls[-1] == "ProjA", "project 应透传到存储层"
+        entries = [i for i in card._filtered_items if i.get("type") == "session"]
+        assert [i["name"] for i in entries] == ["项目内会话"], "应只保留当前项目会话"
+
+        # 切换项目：TTL 内也必须重拉且传新值
+        card.show_card("/tmp", "", project="ProjB")
+        card._filter_timer.stop()
+        card._do_filter_and_render()
+        assert calls[-1] == "ProjB"
+        assert len(calls) >= 2, "项目切换后不得命中旧缓存"
+
+        # 未注入项目（空串）→ None → 全局，旧行为兼容
+        card.show_card("/tmp", "", project="")
+        card._filter_timer.stop()
+        card._do_filter_and_render()
+        assert calls[-1] is None
+
+
+class TestBrowseUX:
+    """目录浏览 UX：空态保留卡片、浏览↔输入框联动、文件级 gitignore 不再过滤"""
+
+    @staticmethod
+    def _make_card():
+        card = FileMentionCard()
+        card._file_cache = [
+            {"name": "src", "path": "/tmp/src", "relative_path": "src", "type": "dir"},
+            {"name": "config", "path": "/tmp/config", "relative_path": "config", "type": "dir"},
+            {"name": "config.json", "path": "/tmp/config/config.json", "relative_path": "config/config.json", "type": "file"},
+            {"name": "empty_dir", "path": "/tmp/empty_dir", "relative_path": "empty_dir", "type": "dir"},
+            {"name": "README.md", "path": "/tmp/README.md", "relative_path": "README.md", "type": "file"},
+        ]
+        card._cache_dirty = False
+        card._collect_mention_items = lambda: []
+        card._collect_session_items = lambda: []
+        return card
+
+    def _load(self, card, query=""):
+        card.load_items(query)
+        card._filter_timer.stop()
+        card._do_filter_and_render()
+
+    def test_empty_dir_keeps_hint_row(self):
+        """进入空目录 → empty_hint 提示行渲染，卡片不再消失，Enter 不误发"""
+        _ensure_qapp()
+        card = self._make_card()
+        card._browse_rel = "empty_dir"
+        self._load(card)
+        types = [i["type"] for i in card._filtered_items]
+        assert types == ["empty_hint"], f"空目录应只剩提示行，实际 {types}"
+        assert len(card._item_widgets) == 1
+        # 卡片可见性口径：filtered 含提示行恒非空 → show_card 不会隐藏
+        assert len(card._filtered_items) > 0
+        # Enter/点击不发射
+        fired = []
+        card.fileSelected.connect(fired.append)
+        card.select_current()
+        assert not fired
+        # 可见性：模拟卡片已显示 → 重入渲染后保持可见（filtered 含提示行恒非空，
+        # show_card/_on_scan_finished 的 has_items 判定不会再隐藏）
+        card._visible = True
+        card.setVisible(True)
+        self._load(card)
+        assert card.is_card_visible
+
+    def test_search_no_result_keeps_hint_row(self):
+        _ensure_qapp()
+        card = self._make_card()
+        self._load(card, "zzz不存在的词")
+        assert [i["type"] for i in card._filtered_items] == ["empty_hint"]
+        assert card._filtered_items[0]["name"] == "无匹配结果"
+
+    def test_browse_changed_signal_emitted(self):
+        """Tab 进入/面包屑返回目录 → browseChanged 发射 "rel/" 形式供输入框联动"""
+        _ensure_qapp()
+        card = self._make_card()
+        got = []
+        card.browseChanged.connect(got.append)
+        self._load(card)
+        idxs = [i for i, it in enumerate(card._filtered_items) if it.get("type") == "dir"]
+        card._selected_index = idxs[0]
+        target = card._filtered_items[idxs[0]]["relative_path"]
+        assert card.enter_selected_dir() is True
+        assert card._browse_rel == target
+        assert got[-1] == target + "/"
+
+    def test_show_card_suffix_slash_resolves_browse_level(self):
+        """输入框回填的尾缀 "/" query 解析为浏览层；未命中回落根层；无 query 回根层"""
+        _ensure_qapp()
+        card = self._make_card()
+        # 大小写不敏感解析到真实目录名
+        card.show_card("/tmp", "SRC/", project="p")
+        assert card._browse_rel == "src"
+        # 未命中 → 根层
+        card.show_card("/tmp", "nope/", project="p")
+        assert card._browse_rel == ""
+        # 无 query → 根层（原语义）
+        card._browse_rel = "src"
+        card.show_card("/tmp", "", project="p")
+        assert card._browse_rel == ""
+        # 非尾缀 query → 搜索模式，保留浏览层（原语义）
+        card._browse_rel = "src"
+        card.show_card("/tmp", "config", project="p")
+        assert card._browse_rel == "src"
+
+    def test_file_level_gitignore_not_applied(self):
+        """文件级 gitignore 规则不再过滤文件：config.json 等必须在列表中可见"""
+        assert FileMentionCard._is_ignored("config/config.json", False, ["*.json"]) is False
+        assert FileMentionCard._is_ignored("x/app.log", False, ["*.log"]) is False
+        # 目录规则仍生效（递归剪枝）
+        assert FileMentionCard._is_ignored("build/x.py", True, ["build/"]) is True
+        assert FileMentionCard._is_ignored("build", True, ["build/"]) is True
+        # always-ignore 扩展名对文件依旧生效
+        assert FileMentionCard._is_ignored("a/mod.pyc", False, []) is True
 
 
 if __name__ == "__main__":

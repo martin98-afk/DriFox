@@ -7727,7 +7727,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # 若顺序反转（先 CardManager 后 show_card），_do_expand 会在卡片
         # fixedHeight 尚未设置时读取 QScrollArea 默认 sizeHint（≈72px=2 item），
         # 导致容器动画到错误高度且因动画钳制 maximumHeight 不触发 Resize 修正。
-        card.show_card(workdir, query)
+        card.show_card(workdir, query, project=getattr(self, "_current_project", ""))
         self._card_manager.show_card("file_mention", self._window_id)
         # 把焦点还给输入框
         self.input_area.setFocus(Qt.OtherFocusReason)
