@@ -166,10 +166,3 @@ def test_migrate_skips_when_legacy_value_empty(monkeypatch):
     handler._migrate_legacy_default_model()
 
     assert state["writes"] == []
-
-
-def test_read_default_model_goes_through_capability_pool(monkeypatch):
-    handler, state = _migration_env(monkeypatch, plugin_value="MiniMax:MiniMax-M2.7")
-
-    assert handler._read_default_model() == "MiniMax:MiniMax-M2.7"
-    assert ("plugin", "subagent_model") in state["reads"]

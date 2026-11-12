@@ -37,24 +37,15 @@ class _Pool(dict):
 
 @pytest.fixture()
 def env(monkeypatch):
-    """装配：假窗口 + 假能力池 + 记录型 notify/config.write/model.config_for。"""
-    state = {"notifies": [], "writes": [], "model_cfg": None, "panel": None, "attached": []}
+    """装配：假窗口 + 假能力池 + 记录型 notify。"""
+    state = {"notifies": [], "panel": None, "attached": []}
 
     pool = _Pool()
 
     def _notify(title, message, kind="success", duration=5000):
         state["notifies"].append((title, message, kind))
 
-    def _write(key, value, save=True):
-        state["writes"].append((key, value))
-        return True
-
-    def _config_for(query):
-        return state["model_cfg"]
-
     pool["ui.notify"] = _notify
-    pool["plugin.config.write"] = _write
-    pool["model.config_for"] = _config_for
     pool["subagent.run"] = None
 
     host = object()
@@ -84,44 +75,6 @@ def test_no_active_window_is_noop(env, monkeypatch):
     _handler.handle_command("")
 
     assert state["notifies"] == []
-
-
-def test_reset_writes_empty_value(env):
-    state, _pool = env
-
-    _handler.handle_command("--reset")
-
-    assert state["writes"] == [("subagent_model", "")]
-    assert state["notifies"][0][0] == "已重置"
-
-
-def test_model_requires_value(env):
-    state, _pool = env
-
-    _handler.handle_command("--model=")
-
-    assert state["writes"] == []
-    assert state["notifies"][0][2] == "warning"
-
-
-def test_model_unknown_warns(env):
-    state, _pool = env
-    state["model_cfg"] = None
-
-    _handler.handle_command("--model=gpt-4o")
-
-    assert state["writes"] == []
-    assert state["notifies"][0][0] == "无法解析模型"
-
-
-def test_model_writes_provider_prefixed_display(env):
-    state, _pool = env
-    state["model_cfg"] = {"display_name": "OpenAI 主号", "模型名称": "gpt-4o"}
-
-    _handler.handle_command("--model=gpt-4o")
-
-    assert state["writes"] == [("subagent_model", "OpenAI 主号:gpt-4o")]
-    assert state["notifies"][0] == ("子智能体模型设置", "OpenAI 主号:gpt-4o", "success")
 
 
 def test_no_args_without_running_tasks_warns(env):
