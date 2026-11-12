@@ -2180,7 +2180,7 @@ class ToolSectionWidget(QWidget):
     def exit_dock(self) -> None:
         """退出坞态：解除限高并折叠（对齐 WebEngine 版简洁模式行为）。
 
-        简洁模式语义：流式结束后工具与思考区收起为「工具与思考 · N 项」
+        简洁模式语义：流式结束后工具与思考区收起为「工具与思考 · 分项计数」
         标题栏（WebEngine 版 MessageCard._auto_collapse_tool_section 同行为）。
         本渲染器 _tool_compact_mode 恒为 True（坞态仅简洁模式启用），
         结束即折叠；流式期间由 enter_dock 保持展开可见。
@@ -2425,7 +2425,7 @@ class MarkdownBlockViewer(QWidget):
 
         [T44] 不再做位置调换：工具/思考区**始终在卡片顶部**（构造序即
         tool_section → body_box），坞态只负责两件事——流式期间卡片区限高内滚
-        保证实时进度可见，流式结束解除限高并折叠成「工具与思考 · N 项」。
+        保证实时进度可见，流式结束解除限高并折叠成「工具与思考 · 分项计数」。
         正文按自然高度在下方生长，全卡只有外层聊天列表一个滚动条。
         """
         # 仅简洁模式启用坞态；欢迎卡片（light 骨架语义）不进坞态

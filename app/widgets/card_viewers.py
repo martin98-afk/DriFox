@@ -9858,7 +9858,7 @@ class CodeWebViewer(QWebEngineView):
             self._schedule_render(immediate=True)
         else:
             self._schedule_render(immediate=False)
-        # 简洁模式：流式结束后自动折叠工具与思考区（收起为"工具与思考 · N 项"
+        # 简洁模式：流式结束后自动折叠工具与思考区（收起为"工具与思考 · 分项计数"
         # 标题栏）。坞态归位 + 折叠由 MessageCard.finish_streaming 统一触发
         # （需 Python 端 _streaming/_has_active_tools 判据，viewer 侧无此状态，
         # 故不在此处调用）；非简洁模式保持流式结束后的展开态不变。
