@@ -14,6 +14,7 @@ import re
 import urllib.parse
 import weakref
 from datetime import datetime
+from functools import lru_cache
 from html import escape, unescape
 from typing import Any, Dict, List, Optional
 import orjson as json
@@ -197,6 +198,52 @@ def _render_v2_enabled() -> bool:
     """
     return os.environ.get("DRIFOX_RENDER_V2", "1").strip().lower() not in ("0", "false", "no")
 
+
+@lru_cache(maxsize=16)
+def _code_icon_mask_uri(icon_file: str) -> str:
+    """把 qrc 图标转成 data URI，供骨架 CSS 的 mask-image 使用。
+
+    WebEngine 把 ``qrc:`` 当非白名单 scheme：file:// 源页面加载它会被
+    CORS 拦截（"Cross origin requests are only supported for protocol
+    schemes: http, data, ..."），CSS mask 取图失败 → 元素不绘制，代码块
+    右上角按钮变成两个空白热区（用户报「看不到 icon」）。``data:`` 在
+    白名单里，故把图标字节内联进样式，颜色仍由 CSS 变量控制。
+
+    读不到资源时返回空串，调用方需跳过 mask 声明（宁可无图标也不要
+    一个实心方块）。
+    """
+    if not icon_file:
+        return ""
+    try:
+        try:  # qrc 资源注册（幂等）：部分单测入口不经过主程序启动链
+            from app.utils import icons_rc as _icons_rc  # noqa: F401
+        except Exception:
+            pass
+        from PyQt5.QtCore import QFile, QIODevice
+
+        f = QFile(f":/icons/{icon_file}")
+        if not f.open(QIODevice.ReadOnly):
+            logger.warning(f"[code-icon] qrc 缺少图标 {icon_file}，mask 降级为无图标")
+            return ""
+        data = bytes(f.readAll())
+        f.close()
+        if not data:
+            return ""
+        return "data:image/svg+xml;base64," + base64.b64encode(data).decode("ascii")
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"[code-icon] 读取 qrc 图标 {icon_file} 失败：{e}")
+        return ""
+
+def _code_icon_mask_css(icon_file: str, prop: str = "mask-image") -> str:
+    """生成 ``mask-image`` 声明（webkit 前缀 + 标准）。
+
+    资源缺失时返回 ``display: none``：mask 为 none 会让 span 按
+    ``background-color`` 铺成实心方块，比没有图标更糟。
+    """
+    uri = _code_icon_mask_uri(icon_file)
+    if not uri:
+        return "display: none;"
+    return f'-webkit-{prop}: url("{uri}"); {prop}: url("{uri}");'
 
 def _seg_has_protocol_block(seg: str) -> bool:
     """差量段是否含流式协议块（think / tool / 插件注册 tag）。
@@ -2402,6 +2449,12 @@ class CodeWebViewer(QWebEngineView):
             """
         _is_light_diff = _is_light
         mono_font = f"{font_family_global}, Consolas, monospace"
+        # 代码块工具栏 / 思考图标：mask 图统一内联为 data URI（qrc: 会被
+        # WebEngine 的 CORS 策略拦掉，图标整片不绘制，见 _code_icon_mask_uri）
+        _ci_mask_save = _code_icon_mask_css("导入.svg")
+        _ci_mask_copy = _code_icon_mask_css("复制.svg")
+        _ci_mask_max = _code_icon_mask_css("最大化.svg")
+        _ci_mask_think = _code_icon_mask_css("思考过程.svg")
 
         html = f"""
         <!DOCTYPE html>
@@ -3000,7 +3053,9 @@ class CodeWebViewer(QWebEngineView):
 
                 /* 主题图标：单色 SVG 走 mask，颜色取 CSS 变量。
                    一份 HTML 在深浅主题下通用，切主题无需重渲（原先按
-                   qrc:/icons vs qrc:/icons_light 前缀固化在 <img src> 里）。 */
+                   qrc:/icons vs qrc:/icons_light 前缀固化在 <img src> 里）。
+                   mask 图必须内联为 data URI：WebEngine 对 qrc: 做 CORS 拦截，
+                   直接 url("qrc:/...") 取不到图 → 遮罩全透明，图标整个不可见。 */
                 .ci {{
                     display: inline-block;
                     width: 22px;
@@ -3015,20 +3070,16 @@ class CodeWebViewer(QWebEngineView):
                     pointer-events: none;
                 }}
                 .ci-save {{
-                    -webkit-mask-image: url("qrc:/icons/导入.svg");
-                    mask-image: url("qrc:/icons/导入.svg");
+                    {_ci_mask_save}
                 }}
                 .ci-copy {{
-                    -webkit-mask-image: url("qrc:/icons/复制.svg");
-                    mask-image: url("qrc:/icons/复制.svg");
+                    {_ci_mask_copy}
                 }}
                 .ci-max {{
-                    -webkit-mask-image: url("qrc:/icons/最大化.svg");
-                    mask-image: url("qrc:/icons/最大化.svg");
+                    {_ci_mask_max}
                 }}
                 .ci-think {{
-                    -webkit-mask-image: url("qrc:/icons/思考过程.svg");
-                    mask-image: url("qrc:/icons/思考过程.svg");
+                    {_ci_mask_think}
                     background-color: var(--text-muted, #8b949e);
                     vertical-align: middle;
                 }}

@@ -3725,7 +3725,12 @@ _SKELETON_CACHE_MAX = 48
 # _SKELETON_CACHE_VERSION +1（v77）：ECharts vendor 加载失败兜底——
 # _echLoadScript 的 onerror 清 _echLibLoading/_echLibQueue、给容器打失败标记，
 # _echartsEnsure 加 _echLibFailed 熔断。旧骨架 CDN 断时容器永久停在 400px 空框。
-_SKELETON_CACHE_VERSION = 77
+# _SKELETON_CACHE_VERSION +1（v78）：图标 mask 改内联 data URI——
+# `.ci-save/.ci-copy/.ci-max/.ci-think` 原写 qrc: 路径，WebEngine 对该 scheme
+# 做 CORS 拦截（只放行 http/data/chrome/https），取图失败 → 遮罩全透明，
+# 代码块右上角两个按钮只剩空白热区。改由 `_code_icon_mask_css` 从 qrc 读字节
+# 内联为 data:image/svg+xml，颜色仍由 --text-muted 控制。
+_SKELETON_CACHE_VERSION = 78
 
 
 def _js_literal(value) -> str:
