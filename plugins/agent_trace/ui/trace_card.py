@@ -339,7 +339,7 @@ class TraceCardWidget(QWidget):
         if main_widget is not None:
             self._switch_collector(main_widget)
         else:
-            self._pull_records()
+            self._pull_records(keep_selection=False)
 
     def _subscribe_events(self) -> None:
         """订阅 EV_TAB_SWITCHED（幂等；weakref 防悬挂回调引用已销毁卡片）。"""
@@ -561,7 +561,7 @@ class TraceCardWidget(QWidget):
             # 都不发**。而 _active_sid 此刻已更新为新值 → 心跳判据变假 →
             # UI 永久停在上一个会话（用户报「轨迹面板整个不对」，实测卡片
             # 停在刚新建的空会话上：2 条 0 轮、SYSTEM 显示无提示词）。
-            self._pull_records()
+            self._pull_records(keep_selection=False)
             return
 
         self._unbind_collector_signals()
@@ -577,17 +577,17 @@ class TraceCardWidget(QWidget):
             except Exception as e:  # noqa: BLE001 — 同上，退化重试
                 logger.warning(f"[agent_trace] 切换 collector 后重投影失败（等心跳重试）: {e}")
                 self._active_sid = ""
-                self._pull_records()
+                self._pull_records(keep_selection=False)
                 return
             self._active_sid = sid
             self._bind_collector_signals(self._collector)
             self._bind_backend_stats_signals(main_widget)
-            self._pull_records()
+            self._pull_records(keep_selection=False)
             self._hub.cleanup_closed(self._active_window_ids())
         else:
             # backend 未就绪：清空展示，等下次 show/tab 切换重试
             self._active_sid = ""
-            self._pull_records()
+            self._pull_records(keep_selection=False)
 
     @staticmethod
     def _session_id_of(main_widget: Any) -> str:
@@ -689,8 +689,21 @@ class TraceCardWidget(QWidget):
             return []
         return self._collector.records
 
-    def _pull_records(self) -> None:
-        """全量推送（首次显示 / reset / 切换标签页）。"""
+    def _pull_records(self, keep_selection: bool = True) -> None:
+        """全量推送（首次显示 / reset / 切换标签页）。
+
+        ``keep_selection=True``（默认）时按**记录身份**保住当前详情：
+        ``recordsReset`` 大多来自上下文压缩 / hook 注入改写头部，用户正在读
+        的条目没变，没有理由把详情面板关掉（旧实现不分青红皂白 ``_hide_detail``
+        导致「看着详情跑着跑着面板自动消失」）。会话真的切了就传 False。
+        """
+        # 身份必须在任何重建之前取：clear_time_range / set_records 都会重建
+        # items，旧索引那时的含义已经变了。
+        ident = self._turn_list.selected_identity() if keep_selection else None
+        # 旧索引在新投影里可能指向另一条记录 → 先摘掉选中，重建后按身份恢复
+        # （否则 _restore_selection 会把「A 的索引」当成「A」重选到 B 上）。
+        self._turn_list.clear_selection()
+
         # 全量重置（切会话 / 切标签页 / 清除）时丢掉时间选区：旧区间在新会话里没意义。
         # 两处都直接设空值、不 emit，避免互相回环。
         # ⚠️ 必须在 set_records **之前**清：否则列表先按旧选区过滤建一遍、
@@ -703,12 +716,15 @@ class TraceCardWidget(QWidget):
         self._timeline.set_records(vis)
         self._turn_list.set_records(stable)
         self._sync_bounds(vis)
-        # ⚠️ 先 clear 再 set_records：clear() 会把 _records 清空并回到 idle 态，
-        # 反过来写等于把刚推入的数据抹掉（详情面板恒显示"未选中条目"）。
         # 详情用 vis（含 tail）：列表 idx 是 stable = vis 的前缀，直接对齐。
-        self._detail.clear()
+        # ⚠️ clear() 会把 _current_idx 抹掉并回到 idle 态，只能在确认要收起时调；
+        # 保留场景直接 set_records + 重选，否则用户会看到面板闪一下"未选中条目"。
         self._detail.set_records(vis)
-        self._hide_detail()  # 全量重置后回到无选中态 → 详情收起
+        idx = self._turn_list.index_of_identity(ident)
+        # 记录不在新投影里（真被压缩掉 / 截断掉）或被当前筛选挡住 → 才收起
+        if idx is None or not self._turn_list.select_record(idx):
+            self._detail.clear()
+            self._hide_detail()  # 全量重置后回到无选中态 → 详情收起
         self._refresh_stats(vis)
         self._maybe_refresh_schema(force=self._schema_ts <= 0)
         self._refresh_system_sections()
