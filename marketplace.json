@@ -465,6 +465,33 @@
             }
         },
         {
+            "name": "system-interact",
+            "description": "DriFox 内置交互工具：技能加载/管理、MCP 服务器管理、Gitee 文件上传（文件/终端/搜索/诊断/团队/提问已拆分为独立插件）",
+            "version": "2.1.0",
+            "author": "DriFoxx Team",
+            "license": "GPL-3.0-or-later",
+            "categories": [
+                "tool"
+            ],
+            "source": {
+                "type": "git-subdir",
+                "url": "https://github.com/martin98-afk/DriFox",
+                "path": "plugins/system-interact",
+                "ref": "master"
+            },
+            "components": {
+                "tools": true
+            },
+            "display_name": {
+                "zh": "内置交互工具"
+            },
+            "homepage": "https://github.com/martin98-afk/DriFox",
+            "icon": {
+                "light": "icon.svg",
+                "dark": "icon_dark.svg"
+            }
+        },
+        {
             "name": "system-loop-policies",
             "description": "DriFox 内置循环策略：default / minimal / subagent",
             "version": "1.0.0",
@@ -836,25 +863,25 @@
             }
         },
         {
-            "name": "system-interact",
-            "description": "DriFox 内置交互工具：技能加载/管理、MCP 服务器管理、Gitee 文件上传（文件/终端/搜索/诊断/团队/提问已拆分为独立插件）",
-            "version": "2.1.0",
+            "name": "system-title-generator",
+            "description": "根据首轮对话自动生成会话标题，可在插件设置中指定使用的模型",
+            "version": "1.0.0",
             "author": "DriFoxx Team",
             "license": "GPL-3.0-or-later",
             "categories": [
-                "tool"
+                "ui"
             ],
             "source": {
                 "type": "git-subdir",
                 "url": "https://github.com/martin98-afk/DriFox",
-                "path": "plugins/system-interact",
+                "path": "plugins/system-title-generator",
                 "ref": "master"
             },
             "components": {
-                "tools": true
+                "ui": true
             },
             "display_name": {
-                "zh": "内置交互工具"
+                "zh": "会话标题生成"
             },
             "homepage": "https://github.com/martin98-afk/DriFox",
             "icon": {
