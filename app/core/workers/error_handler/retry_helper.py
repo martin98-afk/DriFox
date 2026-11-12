@@ -122,10 +122,15 @@ def get_error_type_name(e: Exception) -> str:
     return "Unknown"
 
 
+# 单次退避上限。指数退避（base * 2**attempt）不设上限时，15 次重试累计
+# 可达 22 小时（5*2^14），调用方视角等同于永久卡死；封顶后最坏总时长可控。
+MAX_RETRY_DELAY_SECONDS = 30.0
+
 def get_retry_delay(
         e: Exception,
         attempt: int,
         base_delay: float = 5.0,
+        max_delay: float = MAX_RETRY_DELAY_SECONDS,
 ) -> float:
     """
     根据错误类型和重试次数计算延迟
@@ -134,6 +139,7 @@ def get_retry_delay(
         e: 异常
         attempt: 当前重试次数 (从 0 开始)
         base_delay: 基础延迟
+        max_delay: 单次等待上限（秒）；计费类错误返回 inf，不受此限
 
     Returns:
         延迟秒数
@@ -151,7 +157,7 @@ def get_retry_delay(
             elif classified.reason == FailoverReason.billing:
                 return float("inf")  # 计费问题不重试
 
-    return base_delay * (2 ** attempt)
+    return min(base_delay * (2 ** attempt), max_delay)
 
 
 def retry_on_api_error(
@@ -239,6 +245,7 @@ def create_api_call_with_retry(
         retry_delay: float = 5.0,
         enable_smart_retry: bool = True,
         cancel_check: Optional[Callable[[], bool]] = None,
+        on_retry: Optional[Callable[[Exception, int, int, float], None]] = None,
 ) -> Any:
     """
     执行带重试的API调用
@@ -250,6 +257,8 @@ def create_api_call_with_retry(
         retry_delay: 基础重试延迟（秒）
         enable_smart_retry: 是否使用智能重试
         cancel_check: 取消检查回调（返回 True 表示应取消重试）
+        on_retry: 重试通知回调 (error, attempt, max_retries, wait_time)，
+            attempt 为 1-based；用于把重试状态上报给 UI。回调异常不影响重试。
 
     Returns:
         API响应对象
@@ -296,6 +305,11 @@ def create_api_call_with_retry(
                     f"[API] {error_type} error, "
                     f"retrying in {wait_time:.1f}s (attempt {attempt + 1}/{max_retries})"
                 )
+                if on_retry is not None:
+                    try:
+                        on_retry(e, attempt + 1, max_retries, wait_time)
+                    except Exception as cb_err:  # noqa: BLE001 - 上报失败不得中断重试
+                        logger.warning(f"[API] on_retry 回调失败: {cb_err}")
                 # 🛡️ 可取消的 sleep
                 elapsed = 0.0
                 step = 0.5

@@ -177,6 +177,12 @@ class SubAgentRunPanel(QWidget):
         if row is not None:
             row.set_context_info(info)
 
+    def set_task_status(self, task_id: str, text: str) -> None:
+        """设置运行期提示（如 API 重试进度）；空串清除。"""
+        row = self._rows.get(task_id)
+        if row is not None:
+            row.set_status_hint(text)
+
     def set_task_model(self, task_id: str, model_name: str) -> None:
         """运行中补设模型名（派发时还拿不到配置的场景）。"""
         row = self._rows.get(task_id)

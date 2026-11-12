@@ -15,6 +15,7 @@ from app.core.workers.error_handler.error_classifier import (
     get_error_classifier,
 )
 from app.core.workers.error_handler.retry_helper import (
+    MAX_RETRY_DELAY_SECONDS,
     classify_error,
     create_api_call_with_retry,
     get_error_type_name,
@@ -43,6 +44,7 @@ __all__ = [
     "classify_error",
     "get_error_type_name",
     "get_retry_delay",
+    "MAX_RETRY_DELAY_SECONDS",
     # Smart Retry
     "RetryConfig",
     "RetryResult",
