@@ -15,7 +15,8 @@ description: 发布插件到 drifox-plugins 官方市场的完整流程
 ② Clone 你的 fork → git clone https://github.com/<你的帐号>/drifox-plugins.git
 ③ 把你的插件复制到仓库中 → cp -r ~/.drifox/plugins/<name> plugins/<name>
    （不带 deps/：第三方依赖只写在 plugin.json 的 dependencies.pip）
-④ 跑验证 → python tools/validate_plugins.py + generate_marketplace.py
+④ 跑验证 → python tools/validate_plugins.py
+   （generate_marketplace.py 只用于本地预览条目长什么样，产物不提交）
 ⑤ Commit & Push 到你的 fork
 ⑥ 在 GitHub 提交 PR（你的 fork → martin98-afk/drifox-plugins main）
 ⑦ CI 自动校验；合并后 CI 自动按 dependencies.pip 打包 tarball → 你的插件上架 🎉
@@ -54,11 +55,13 @@ rm -rf plugins/<plugin-name>/deps
 
 # 7. 跑验证
 python tools/validate_plugins.py
-python tools/generate_marketplace.py
-#    marketplace.json 由 generate 脚本自动生成，无需手动编辑
+#    只想要本地预览条目格式时才跑下面这条（它写 marketplace.json）：
+#    python tools/generate_marketplace.py
+#    ⚠ 不要把 marketplace.json 的改动一起提交：CONTRIBUTING 明确要求它由 CI
+#      的 auto-fix-marketplace job 生成，手改会在 push 时和 bot 提交打架
 
-# 8. commit 并推送
-git add plugins/<plugin-name>/ marketplace.json
+# 8. commit 并推送（只加插件目录）
+git add plugins/<plugin-name>/
 git commit -m "feat(<plugin-name>): 添加 xx 插件"
 git push origin feat/<plugin-name>
 
@@ -68,6 +71,41 @@ git push origin feat/<plugin-name>
 ```
 
 > ⚠️ 第 7 步验证未通过 → 禁止进入第 8 步推送（SKILL.md 硬停止第 6 条）。
+> 唯一例外：报错只剩「marketplace.json 中 <name> 的 version/条目与 plugin.json 不一致」，那是待 CI 回填项，可继续推送并在 PR 里注明。
+
+---
+
+## 在多任务共用的 clone 里发版（别带入别人的改动）
+
+常见场景：`drifox-plugins` clone 里已经有别人（或你上一轮）的未完成插件未被跟踪，`git status` 一屏红。直接 `git add -A` 会把它们一起推进 PR。
+
+做法：不碰现有工作区，用 worktree 从远端基线拉一份干净、只含目标插件的分支。
+
+```bash
+cd <drifox-plugins clone>
+git fetch origin main
+git worktree add /tmp/dp-<plugin> -b feat/<plugin> origin/main
+cd /tmp/dp-<plugin>
+cp -R ~/.drifox/plugins/<plugin> plugins/<plugin>   # 只加这一个目录
+python tools/validate_plugins.py plugins/<plugin> --strict
+```
+
+为什么用 `origin/main` 而不是本地 `main`：本地 main 可能攒着没推的提交，基于它开分支会把那些提交一起拉进 PR。
+
+**本地验证的噪声**：工作区里存在未跟踪插件时，不带参数的 `validate_plugins.py` 会报「插件 X 未收录到 marketplace.json」。那不是你的问题，也不是 PR 会失败的理由（那些目录不会进提交）。带上插件路径跑（`validate_plugins.py plugins/<name>`）只看自己的。
+
+---
+
+## PR 首轮 CI 必红一次（预期，不要手改清单救它）
+
+新插件 PR 的第一次 validate 一定失败，报「插件 <name> 未收录到 marketplace.json」。紧接着 `auto-fix-marketplace` job 会向 PR 分支补一个 `[skip ci]` 提交，把清单补齐，PR 转为 clean。
+
+因此：
+
+- 首轮红 ≠ 你写错了，先看是不是只有这同一条
+- 不要为了把它变绿去手改 `marketplace.json` 提交（会与 bot 提交冲突，且下一次 bot 提交照样覆盖你）
+- 不要因为首轮红就关 PR
+- bot 提交带 `[skip ci]`，不会再触发第二轮校验；看到 PR `mergeable` 变 clean 即可人工合入
 
 ---
 

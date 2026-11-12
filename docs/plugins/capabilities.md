@@ -127,6 +127,9 @@ app.plugins.capabilities.pool.CapabilityDenied:
 | `model.set` | **high** | 设置当前窗口的服务商与模型（只改窗口实例态，不写全局默认）；`window_id` 参数可定向到指定窗口 |
 | `provider.list` | low | 已配置服务商清单（id / 名称 / 模型数，**不含密钥与 URL**） |
 | `model.enumerate` | low | 指定服务商的可选模型列表（含视觉 / 思考能力标记） |
+| `model.complete` | medium | 用当前 / 指定模型做一次性补全（不带工具与历史上下文，消耗 token），返回完整文本 |
+
+> `model.complete` 是插件「要一段模型输出、不需要完整对话栈」的唯一正确入口：请求头由宿主 `resolve_extra_headers` 统一组装（OpenCode 的 `x-opencode-session`、服务商伪装头）。插件自建 client 会漏掉这层，OpenCode 网关直接 400 `MissingSessionID`。
 
 ### 服务商
 

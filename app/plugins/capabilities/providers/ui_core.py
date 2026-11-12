@@ -1420,6 +1420,77 @@ def _model_config_for(host: Any):
 
     return config_for
 
+def _model_complete(host: Any):
+    """model.complete：用当前/指定模型做一次性补全，返回完整文本。
+
+    不带工具与历史上下文，供插件做「要一段模型输出、不需要完整对话栈」的
+    轻量调用（超时代答 / 文本改写等），免去自己拼 client。
+
+    请求头经 resolve_extra_headers 统一组装：OpenCode 等网关要求每个请求
+    携带会话标识（x-opencode-session），缺头即 400 MissingSessionID。插件
+    自建 client 拿不到这一层（sdk 只暴露裸的 build_openai_client），故收口
+    到能力面。失败只记日志并返回空串，不向插件抛异常（能力面统一语义）。
+    """
+    real = _resolve_active_host(host)
+
+    def complete(
+        prompt: str,
+        model_query: str = "",
+        system: str = "",
+        temperature: float = 0.3,
+        max_tokens: int = 2000,
+        timeout: float = 60.0,
+    ) -> str:
+        text = str(prompt or "").strip()
+        if real is None or not text:
+            return ""
+        try:
+            if model_query:
+                cfg = dict(_model_config_for(real)(model_query) or {})
+            else:
+                cfg = dict(real._get_current_model_config() or {})
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[Capability] model.complete 取模型配置失败: {e}")
+            return ""
+        model_name = str(cfg.get("模型名称") or cfg.get("model") or "")
+        base_url = str(cfg.get("API_URL") or "")
+        if not model_name or not base_url:
+            logger.warning("[Capability] model.complete 模型配置不完整（缺模型名或 API_URL）")
+            return ""
+        session_id = ""
+        try:
+            backend = getattr(real, "backend", None)
+            session = backend.get_current_session() if backend is not None else None
+            session_id = str(getattr(session, "session_id", "") or "")
+        except Exception:  # noqa: BLE001 - 会话不可用则不注入会话头
+            session_id = ""
+        messages = []
+        if system:
+            messages.append({"role": "system", "content": str(system)})
+        messages.append({"role": "user", "content": text})
+        try:
+            from app.core.modelmeta.provider_profile import resolve_extra_headers
+            from app.utils.http_client import build_openai_client, chat_completion_text
+
+            client = build_openai_client(
+                api_key=str(cfg.get("API_KEY", "") or ""),
+                base_url=base_url,
+                timeout=timeout,
+                extra_headers=resolve_extra_headers(cfg, session_id),
+            )
+            return chat_completion_text(
+                client,
+                model=model_name,
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
+        except Exception as e:  # noqa: BLE001 - 代答失败由调用方降级
+            logger.warning(f"[Capability] model.complete 调用失败（{model_name}）: {e}")
+            return ""
+
+    return complete
+
 def _model_set(host: Any):
     """model.set：设置当前窗口的服务商与模型（只改窗口实例态，不写全局默认）。
 
@@ -1496,6 +1567,7 @@ def register(registry) -> None:
     # LEGACY_MAP 不再有该键，投影循环永不触达；能力面统一走 model.config / model.config_for。
     reg.register("model.config", _model_config, surface="ui", owner="core:ui")
     reg.register("model.config_for", _model_config_for, surface="ui", owner="core:ui")
+    reg.register("model.complete", _model_complete, surface="ui", owner="core:ui")
     reg.register("model.set", _model_set, surface="ui", owner="core:ui")
     reg.register("model.schema", _model_schema, surface="ui", owner="core:ui")
     reg.register("model.metadata", _model_metadata, surface="ui", owner="core:ui")

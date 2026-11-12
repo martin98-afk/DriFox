@@ -42,7 +42,7 @@ b) 跳过设计稿直接实现，但动手前必须用 question 确认三要素�
 | 用户说 | 组件类型 | 必读 references |
 |--------|---------|-----------------|
 | "加个卡片""设置界面""统计面板""管理界面" | **浮动卡片** | `templates-cards.md` |
-| "加个图表""柱状图""折线图""水平条形图" | **图表控件** | `widgets-charts.md` |
+| "加个图表""柱状图""折线图""水平条形图" | **图表控件** | `widgets-charts.md`（先读 §〇 硬规则；快起用 `assets/charts_refined.py`） |
 | "统计卡片""数字指标""KPI 卡" | **统计卡片** | `widgets-statcard.md` |
 | "读 SQLite""查 14 天数据""字段 fallback" | **SQLite 读取** | `widgets-sqlite.md` |
 | "主题色跟着变""深浅色适配" | **主题色映射** | `widgets-theme.md` |
@@ -76,6 +76,7 @@ b) 跳过设计稿直接实现，但动手前必须用 question 确认三要素�
 | 2 开发流程 | workflow.md | scaffold→迭代→验证 |
 | 3 卡片骨架 | templates-cards.md | 浮动卡片 |
 | 3 卡片快起 | assets/card_template.py | 单文件骨架直接复制 |
+| 3 图表快起 | assets/charts_refined.py | 柱/折线开箱即用（实测轴留白/自绘 tooltip/空态），可直接复制或 `python charts_refined.py` 看效果 |
 | 3 核心模式 | patterns.md | 上下文/比例高度/异步/热重载/信号链/_vendor/全屏覆盖窗 |
 | 3 渲染器 | templates-renderers.md | 内容渲染器/消息工厂 |
 | 3 欢迎 tab | templates-welcome-tab.md | 欢迎 tab/echarts |

@@ -244,6 +244,8 @@ class _NativeTooltipFilter(QObject):
 widget.setToolTip("说明文字")
 widget.installEventFilter(_NativeTooltipFilter(widget))
 ```
+**例外（深色主题 + macOS 实测）**：原生 `QToolTip` 走系统外观，深色底 + 透明背景时会出现「白字贴深底/黑字贴深底」读不清（图表悬停说明尤其明显）。
+需要保证可读的地方用**插件自绘实底浮层**：无边框 `QWidget`（`Qt.ToolTip | Qt.FramelessWindowHint`）+ 主题色背景 `border-radius`，内容 `QLabel` 带 padding；悬停坐标定位前先 `adjustSize()`，并在 `show()` 后同帧校正一次尺寸，否则首帧尺寸为 0 会跑到屏幕左上角。自绘浮层不依赖主程序 patch，也不吃平台外观。
 
 ## 13. QPlainTextEdit 没有 setText：回调链静默中断
 
@@ -875,6 +877,33 @@ queue.submit(wav, offset, meeting_id=m.id)
 def _on_result(self, task):
     target = self._current if self._current.id == task["meeting_id"] else store.load(task["meeting_id"])
 ```
+
+---
+
+## 34. 滚动条：先用 sdk 的统一样式，自绘时照抄它的结构
+
+**症状**：插件里的 `QScrollArea` / `QTextEdit` 滚动条和宿主其他地方长得不一样（宽度、圆角、hover 颜色都对不上），深色主题下尤其明显。
+
+**原因**：宿主统一滚动条样式来自 `app.utils.design_tokens.get_unified_scrollbar_style(width=6)`，插件可以直接用（`from app.plugins.sdk import get_unified_scrollbar_style`，属 sdk 契约面，不是越界 import）。自己临时拼一段 QSS 就会走形。
+
+**修法**：默认直接用宿主函数：
+
+```python
+from app.plugins.sdk import get_unified_scrollbar_style
+scroll.setStyleSheet(get_unified_scrollbar_style())
+```
+
+只有两种情况下自绘：① 需要非 6px 宽度；② 需要跟插件自己的 `Palette` 明暗走（而不是全局主题）。自绘时照抄宿主 QSS 的子控件结构，缺一条就会露出默认箭头：
+
+```
+QScrollBar:vertical        /* 底色 + 宽度 */
+QScrollBar::handle:vertical /* 圆角滑块 */
+QScrollBar::handle:vertical:hover, ::pressed
+QScrollBar::add-line:vertical, ::sub-line:vertical { height:0; border:none; }
+QScrollBar::add-page:vertical, ::sub-page:vertical { background:none; }
+```
+
+**验证**：深浅色各截一张图对比滑块宽度与 hover 色；滚动条出现在 `QScrollArea` 内部时，样式要设在内层 scroll 控件上，设到外层容器无效。
 
 ---
 > 新坑写回格式：`## N. 标题` + **症状/原因/修法** 三段 + 可运行代码片段。

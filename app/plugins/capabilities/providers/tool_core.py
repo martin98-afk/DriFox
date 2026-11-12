@@ -93,6 +93,25 @@ def register(registry) -> None:
 
         return _impl(real)
 
+    def _model_complete(host: Any):
+        """tool 面的 model.complete：委托 ui_core 实现。
+
+        ToolExecutor 自身没窗口的模型配置与后端会话，取不到窗口时返回恒空实现
+        （后台工具无窗口是正常态，非错误）。
+        """
+        real = None
+        try:
+            from app.plugins.capabilities.resolve import active_main_widget
+
+            real = active_main_widget()
+        except Exception:  # noqa: BLE001 - 无窗口场景退化为空实现
+            real = None
+        if real is None:
+            return lambda *args, **kwargs: ""
+        from app.plugins.capabilities.providers.ui_core import _model_complete as _impl
+
+        return _impl(real)
+
     def _storage_db(host: Any, ctx: Any):
         """通用数据库执行权限（与 ui_core 同一受限代理实现）。"""
         from app.plugins.capabilities.providers.db_guard import PluginDBProxy
@@ -568,6 +587,7 @@ def register(registry) -> None:
     registry.register("model.schema", _model_schema, surface="tool", owner="core:tool")
     registry.register("model.config", _model_config, surface="tool", owner="core:tool")
     registry.register("model.config_for", _model_config_for, surface="tool", owner="core:tool")
+    registry.register("model.complete", _model_complete, surface="tool", owner="core:tool")
     registry.register("agent.read", _agent_read, surface="tool", owner="core:tool")
     registry.register(
         "agent.read", _agent_prompt, surface="tool", owner="core:tool", legacy_key="get_agent_prompt"

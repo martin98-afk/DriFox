@@ -345,11 +345,14 @@ class QuestionTimeoutController(QObject):
             return ""
 
     def _ask_model(self, snap: dict, model_query: str, pool: Any) -> str:
-        """调模型为未答问题作答，返回模型原始输出（JSON 文本）。"""
-        from app.plugins.sdk import build_openai_client, chat_completion_text
+        """调模型为未答问题作答，返回模型原始输出（JSON 文本）。
 
-        cfg = self._resolve_model_config(model_query, pool)
-        if not cfg:
+        走宿主的 model.complete 能力：请求头（OpenCode 的 x-opencode-session、
+        服务商伪装头）由宿主 resolve_extra_headers 统一组装，插件不再自建 client。
+        """
+        complete = pool.get("model.complete") if hasattr(pool, "get") else None
+        if not callable(complete):
+            logger.warning("[system-question] 能力池缺少 model.complete，AI 代答不可用")
             return ""
         questions = snap.get("questions") or []
         answers = snap.get("answers") or {}
@@ -381,40 +384,7 @@ class QuestionTimeoutController(QObject):
             "有选项时优先输出选项 label；answer 不超过 100 字；任何解释性文字都会导致解析失败。"
         )
 
-        client = build_openai_client(
-            api_key=cfg.get("API_KEY", ""),
-            base_url=cfg.get("API_URL"),
-            timeout=60,
-        )
-        return chat_completion_text(
-            client,
-            model=cfg.get("模型名称", "gpt-4o"),
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.3,
-            max_tokens=2000,
-        )
-
-    def _resolve_model_config(self, model_query: str, pool: Any = None) -> dict:
-        """配置指定了模型就走 model.config_for；否则跟随当前会话模型。"""
-        if pool is None:
-            for session in self._sessions.values():
-                pool = session.pool
-                break
-        if pool is None:
-            return {}
-        try:
-            if model_query and "model.config_for" in pool:
-                resolved = pool["model.config_for"](model_query)
-                if resolved:
-                    return dict(resolved)
-        except Exception as e:  # noqa: BLE001
-            logger.debug(f"[system-question] 指定模型解析失败 {model_query!r}: {e}")
-        try:
-            if "model.config" in pool:
-                return dict(pool["model.config"]() or {})
-        except Exception as e:  # noqa: BLE001
-            logger.debug(f"[system-question] 当前模型配置读取失败: {e}")
-        return {}
+        return str(complete(prompt, model_query=model_query or "") or "")
 
     @staticmethod
     def _build_ai_text(snap: dict, raw: str, sec: int = 0) -> str:

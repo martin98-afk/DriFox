@@ -83,6 +83,12 @@ CATALOG: Dict[str, CapabilitySpec] = {
             "指定服务商的可选模型列表（含视觉/思考能力标记）",
             _BOTH,
         ),
+        _spec(
+            "model.complete",
+            _M,
+            "用当前/指定模型做一次性补全（不带工具与历史上下文，消耗 token），返回完整文本",
+            _BOTH,
+        ),
         # ── 会话 ──
         _spec("session.read", _M, "当前 session_id 与消息列表（可按 window_id 定向到指定窗口）", _BOTH),
         _spec(
