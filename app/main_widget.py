@@ -24201,15 +24201,21 @@ class OpenAIChatToolWindow(ToolWindow):
     def _publish_title_request(self):
         """判定该不该生成标题；短输入直接提交，其余发事件让插件生成。
 
-        宿主拥有全部守卫：user_edited_title / topic_summary / is_temp /
+        宿主拥有全部守卫：user_edited_title / 已有真实标题 / is_temp /
         首条真实用户消息 / ≤10 字短输入。插件只负责生成文本。
         """
+        from app.core.conversation.chat_session import is_default_title
         from app.core.infra.ui_event_bus import UIEventBus
 
         session = self.session_manager.get_current_session()
         if session is None or getattr(session, "user_edited_title", False):
             return
-        if getattr(session, "topic_summary", "") or getattr(session, "is_temp", False):
+        # ⚠️ 不能用「topic_summary 非空」判已有标题：新建会话的 topic_summary
+        # 初始化为 name 占位（"对话 MM-DD HH:MM"），非空判据会把每个新会话都
+        # 当成已有标题直接 return，标题生成永不触发。
+        if not is_default_title(getattr(session, "topic_summary", "")):
+            return
+        if getattr(session, "is_temp", False):
             return
         user_messages = [
             m for m in session.messages

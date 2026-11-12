@@ -165,3 +165,42 @@ def test_multimodal_content_takes_text_blocks(monkeypatch):
     events, _ = _capture(monkeypatch, _host(messages))
     assert len(events) == 1
     assert events[0][1]["fallback"] == "帮我看看这张架构图有什么问题"
+
+
+# ═══════════════════════════════════════════════════════════════
+# 占位标题判据：新建会话 topic_summary 非空但只是 "对话 MM-DD HH:MM"
+# ═══════════════════════════════════════════════════════════════
+
+
+def test_placeholder_title_still_publishes(monkeypatch):
+    """真实 ChatSession 的默认占位标题不得被当成「已有标题」拦掉。
+
+    回归：ChatSession.__init__ 把 topic_summary 初始化为 name（"对话 11-12 22:30"），
+    旧守卫用「topic_summary 非空」判已有标题 → 每个新会话都直接 return，
+    title.request 永不发布，标题永远不刷新。
+    """
+    from app.core.conversation.chat_session import ChatSession
+
+    session = ChatSession()
+    session.messages.append(
+        {"role": "user", "content": "帮我排查登录接口 500 报错的原因并给出修复方案"}
+    )
+    assert session.topic_summary  # 占位标题非空，正是回归触发条件
+    events, _ = _capture(monkeypatch, _host(session.messages, topic_summary=session.topic_summary))
+    assert len(events) == 1
+    assert events[0][0] == "title.request"
+
+
+@pytest.mark.parametrize("title", ["", "对话 11-12 22:30"])
+def test_is_default_title_true(title):
+    from app.core.conversation.chat_session import is_default_title
+
+    assert is_default_title(title) is True
+
+
+@pytest.mark.parametrize("title", ["排查登录接口 500", "对话历史整理方案", "对话"])
+def test_is_default_title_false(title):
+    from app.core.conversation.chat_session import is_default_title
+
+    assert is_default_title(title) is False
+
