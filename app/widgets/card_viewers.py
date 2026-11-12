@@ -19,7 +19,6 @@ from typing import Any, Dict, List, Optional
 import orjson as json
 import sip
 from loguru import logger
-from markdown import Markdown
 from PyQt5.QtCore import (
     QByteArray,
     QEasingCurve,
@@ -48,6 +47,9 @@ from PyQt5.QtGui import (
     QTextDocument,
     QWheelEvent,
 )
+# [T11] WebEngine 顶层 import 保留：ConsoleMonitorPage/CodeWebViewer 类继承基类
+# 必须在类定义时可用（无法函数内下沉）；main.py QApp 创建前已强制 import
+# QtWebEngineWidgets（架构硬约束），此处 import 实为 sys.modules 字典查找 <1μs
 from PyQt5.QtWebEngineWidgets import QWebEnginePage, QWebEngineSettings, QWebEngineView
 from PyQt5.QtWidgets import (
     QApplication,

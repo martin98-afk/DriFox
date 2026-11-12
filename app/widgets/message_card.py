@@ -69,7 +69,8 @@ from PyQt5.QtGui import (
     QWheelEvent,
 )
 from PyQt5.QtSvg import QSvgRenderer
-from PyQt5.QtWebEngineWidgets import QWebEnginePage, QWebEngineSettings, QWebEngineView
+# [T11] 顶层三类 WebEngine import 已删除：全文件零代码使用（仅注释提及），
+# QtWebEngineWidgets 由 main.py QApp 创建前强制加载 + card_viewers 类继承链维持
 from PyQt5.QtWidgets import (
     QApplication,
     QFrame,

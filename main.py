@@ -825,6 +825,16 @@ def main():
             except Exception:
                 logger.exception("[Startup] skills 索引预热失败（非致命）")
 
+            # [T11] card_viewers/markdown 级联预热：import 级联下沉后该树退出
+            # 启动路径，首卡渲染（首个 ChatWindow 的 markdown 渲染链）时才冷导入。
+            # 后台线程预填充 sys.modules，首卡渲染时全命中，不把下沉转嫁为首卡卡顿
+            # （照本函数 mcp/skills 预热先例；与主线程 import 在锁上互让，时序上
+            # 预热先跑）。
+            try:
+                import app.widgets.card_viewers  # noqa: F401
+                import markdown  # noqa: F401
+            except Exception:
+                logger.exception("[Startup] card_viewers/markdown 预导入失败（非致命）")
         QTimer.singleShot(0, lambda: threading.Thread(target=_preload_heavy_imports, daemon=True, name="heavy-import-preload").start())
         # [T24 R2] 窗口就绪 → 登记到共享状态；若 import 窗口期已有二次启动请求
         # （_on_show_requested 记了 pending），此处立即补激活，不再静默丢失。
