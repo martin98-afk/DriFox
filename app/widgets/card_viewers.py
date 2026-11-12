@@ -813,6 +813,25 @@ def _logical_height_cap(dpr, physical_limit: int = _PHYSICAL_TEXTURE_LIMIT) -> i
     return max(2000, int(physical_limit / dpr))
 
 
+def _show_export_info_bar(widget, ok: bool, title: str, msg: str) -> None:
+    """导出结果 InfoBar 提示（CodeWebViewer/PlainTextViewer 共用）。"""
+    try:
+        from qfluentwidgets import InfoBar, InfoBarPosition
+
+        main_window = widget.window()
+        if main_window:
+            shower = InfoBar.success if ok else InfoBar.error
+            shower(
+                title,
+                msg,
+                duration=3000,
+                parent=main_window,
+                position=InfoBarPosition.BOTTOM,
+            )
+    except Exception:
+        pass
+
+
 class CodeWebViewer(QWebEngineView):
     contentHeightChanged = pyqtSignal(int)
     codeActionRequested = pyqtSignal(str, str)
@@ -10316,27 +10335,27 @@ class CodeWebViewer(QWebEngineView):
                 html_content = self.get_html()
                 if not html_content:
                     logger.warning("导出 HTML 失败：无法获取消息内容")
-                    self._show_save_error("无法获取消息内容")
+                    _show_export_info_bar(self, False, "导出失败", "无法获取消息内容")
                     return
                 with open(file_path, "w", encoding="utf-8") as f:
                     f.write(html_content)
                 logger.info(f"消息已导出到: {file_path}")
-                self._show_save_success(file_path)
+                _show_export_info_bar(self, True, "文件已导出", file_path)
             else:
                 if not file_path.lower().endswith(".md"):
                     file_path += ".md"
                 md_content = self.get_plain_text()
                 if not md_content:
                     logger.warning("导出 Markdown 失败：无法获取消息内容")
-                    self._show_save_error("无法获取消息内容")
+                    _show_export_info_bar(self, False, "导出失败", "无法获取消息内容")
                     return
                 with open(file_path, "w", encoding="utf-8") as f:
                     f.write(md_content)
                 logger.info(f"消息已导出到: {file_path}")
-                self._show_save_success(file_path)
+                _show_export_info_bar(self, True, "文件已导出", file_path)
         except Exception as e:
             logger.error(f"导出失败: {e}")
-            self._show_save_error(str(e))
+            _show_export_info_bar(self, False, "导出失败", str(e))
 
     def _run_js_sync(self, js_code: str, timeout_ms: int = 2000) -> str:
         """同步执行 JavaScript 并返回结果"""
@@ -10786,7 +10805,7 @@ class CodeWebViewer(QWebEngineView):
 
         result.save(file_path, "PNG")
         logger.info(f"消息已导出为图片: {file_path}")
-        self._show_save_success(file_path)
+        _show_export_info_bar(self, True, "文件已导出", file_path)
 
     def _convert_md_to_html(self, markdown_text: str) -> str:
         """将 Markdown 文本转换为独立 HTML 页面"""
@@ -10816,40 +10835,6 @@ class CodeWebViewer(QWebEngineView):
 {body_html}
 </body>
 </html>"""
-
-    def _show_save_success(self, file_path: str):
-        """显示保存成功提示"""
-        try:
-            from qfluentwidgets import InfoBar, InfoBarPosition
-
-            main_window = self.window()
-            if main_window:
-                InfoBar.success(
-                    "文件已导出",
-                    file_path,
-                    duration=3000,
-                    parent=main_window,
-                    position=InfoBarPosition.BOTTOM,
-                )
-        except Exception:
-            pass
-
-    def _show_save_error(self, error_msg: str):
-        """显示保存失败提示"""
-        try:
-            from qfluentwidgets import InfoBar, InfoBarPosition
-
-            main_window = self.window()
-            if main_window:
-                InfoBar.error(
-                    "导出失败",
-                    error_msg,
-                    duration=3000,
-                    parent=main_window,
-                    position=InfoBarPosition.BOTTOM,
-                )
-        except Exception:
-            pass
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -11747,40 +11732,6 @@ class PlainTextViewer(QWidget):
 <pre>{escaped}</pre>
 </body>
 </html>"""
-
-    def _show_save_success(self, file_path: str):
-        """显示保存成功提示"""
-        try:
-            from qfluentwidgets import InfoBar, InfoBarPosition
-
-            main_window = self.window()
-            if main_window:
-                InfoBar.success(
-                    "文件已导出",
-                    file_path,
-                    duration=3000,
-                    parent=main_window,
-                    position=InfoBarPosition.BOTTOM,
-                )
-        except Exception:
-            pass
-
-    def _show_save_error(self, error_msg: str):
-        """显示保存失败提示"""
-        try:
-            from qfluentwidgets import InfoBar, InfoBarPosition
-
-            main_window = self.window()
-            if main_window:
-                InfoBar.error(
-                    "导出失败",
-                    error_msg,
-                    duration=3000,
-                    parent=main_window,
-                    position=InfoBarPosition.BOTTOM,
-                )
-        except Exception:
-            pass
 
     def _request_undo(self):
         """请求撤销 - 通知父组件"""

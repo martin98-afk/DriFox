@@ -253,20 +253,6 @@ def _remove_quoted(text: str) -> str:
 # - 危险由**选项**决定的形态（`git clean` 需 `-f`、`git push` 需 `-f`/`--force`、
 #   `git branch` 需 `-D`）：按选项组合判定，避免误伤 `git clean -n`（dry-run）、
 #   `git branch --list`（只读）
-_GIT_DESTRUCTIVE_SUBCOMMANDS = frozenset(
-    {
-        "rm",  # 删工作区+索引文件
-        "reset",  # 配合 --hard 才破坏，见下
-        "restore",  # 覆盖工作区改动，见下
-        "checkout",  # 配合 -- . 才破坏，见下
-        "revert",  # 生成反向提交，可控，但可能冲突丢改动
-        "filter-branch",  # 重写历史
-        "filter-repo",
-        "update-ref",  # 直接改 ref
-    }
-)
-
-
 def _git_subcommand_verdict(parts: list) -> Optional[str]:
     """分析 `git <子命令> [args]` 的破坏性，返回判定值或 None（表示"无特殊判定"）
 

@@ -17,58 +17,22 @@ from typing import Dict, List, Optional, Set, Tuple
 
 from loguru import logger
 
-# 插件根等级：system < user（对齐 provider_loader._ROOT_KIND_PRIORITY）
-_ROOT_KIND_SYSTEM = "system"
-_ROOT_KIND_USER = "user"
-_ROOT_KIND_PRIORITY: Dict[str, int] = {_ROOT_KIND_SYSTEM: 0, _ROOT_KIND_USER: 1}
-
-
-def _plugin_roots() -> List[Path]:
-    """扫描根：项目 plugins/（含 system）+ 用户插件目录（同 provider_loader）"""
-    roots = [Path(__file__).resolve().parent.parent.parent.parent / "plugins"]
-    try:
-        from app.utils.utils import get_app_data_dir
-
-        roots.append(get_app_data_dir() / "plugins")
-    except Exception:
-        pass
-    return roots
-
-
-def _root_kind(root: Optional[Path]) -> str:
-    """识别 root 等级：项目工作树 → system；app_data/plugins → user"""
-    if root is None:
-        return _ROOT_KIND_SYSTEM
-    try:
-        from app.utils.utils import get_app_data_dir
-
-        user_root = get_app_data_dir() / "plugins"
-        if root == user_root:
-            return _ROOT_KIND_USER
-    except Exception:
-        pass
-    return _ROOT_KIND_SYSTEM
+from app.plugins.loaders._roots import (
+    _ROOT_KIND_PRIORITY,
+    _ROOT_KIND_SYSTEM,
+    _ROOT_KIND_USER,
+    _plugin_roots,
+    _root_kind,
+)
+from app.plugins.loaders._roots import _is_plugin_load_blocked as _roots_load_blocked
 
 
 def _is_plugin_load_blocked(plugin_name: str) -> bool:
     """P1/P2：检查插件是否被版本/平台门禁拦截（load_blocked）。
 
-    仅在 PluginManager 已初始化且能查到插件时检查；否则视为不拦截（放行）。
     拦截的插件其运行时组件不进 registry——已注册过的会在后续重扫中被清理。
     """
-    try:
-        from app.plugins.managers.plugin_manager import PluginManager
-
-        pm = PluginManager.get_instance()
-        if not pm.is_initialized():
-            return False
-        plugin = pm.get_plugin(plugin_name)
-        if plugin is None:
-            return False
-        return bool(getattr(plugin, "load_blocked", False))
-    except Exception as e:
-        logger.warning(f"[RuntimeLoader] 门禁检查失败，默认放行 {plugin_name}: {e}")
-        return False
+    return _roots_load_blocked(plugin_name, log_tag="[RuntimeLoader]")
 
 
 def _is_plugin_enabled(plugin_name: str) -> bool:
@@ -614,10 +578,6 @@ _budget_resolver_loader: Optional[RuntimeComponentLoader] = None
 # 首轮之后是 11 次全量 scan_roots 的纯浪费（实测每轮 ~460ms）。
 # 锁内置位、锁外执行——scan_roots 自带 _scan_lock，持本锁调用会与
 # ensure_*_watcher 的 _watchers_lock 形成嵌套（watcher 内也调 scan_roots）。
-# 戳记 = 本次实际使用的 11 个 loader 的 id 元组，而非裸布尔：registry 单例被
-# 替换时会重建 loader（见 _persistent_loader），id 变化即重扫；裸布尔会让换
-# registry 后的调用永远返回 {}，测试里 monkeypatch get_instance 直接拿空表。
-_warmup_stamp: Optional[tuple] = None
 _warmup_component_stamps: Dict[str, int] = {}  # comp -> 已扫过的 loader id（组件级幂等）
 _warmup_once_lock = threading.Lock()
 _adapters_watcher: Optional[_RuntimeWatcher] = None

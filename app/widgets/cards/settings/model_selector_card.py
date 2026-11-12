@@ -74,10 +74,7 @@ def _measure_name_width(names) -> int:
 
 
 # item 高度常量
-_ITEM_HEIGHT = 34  # ModelItem 高度
 _HEADER_HEIGHT = 36  # ProviderHeader 高度
-_MIN_ITEMS = 3  # 最少显示 item 数
-_MAX_ITEMS = 10  # 最多显示 item 数
 
 # 成本金额：完整显示三项价格（不可裁剪）。等宽字体 + 名称等宽对齐实现起点一致，
 # 金额自身不设窄固定宽（Minimum 自适应），保证 in/out/cache · $/M 全部可见。

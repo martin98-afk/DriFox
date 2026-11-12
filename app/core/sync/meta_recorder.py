@@ -320,10 +320,6 @@ def merge_clock(local: object, remote: object) -> int:
     return max(a, b)
 
 
-def is_tombstone_entry(entry: Optional[Entry]) -> bool:
-    return is_tombstone(entry)
-
-
 # ── Settings 接线 ───────────────────────────────────────
 
 _recorder_singleton: Optional[SyncMetaRecorder] = None

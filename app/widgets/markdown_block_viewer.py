@@ -1410,11 +1410,54 @@ class CodeBlockWidget(QFrame):
         QApplication.clipboard().setText(self._raw_code)
 
 
-class ThinkCard(QFrame):
-    """思考折叠卡：头部(图标+标签+预览+chevron) + 可动画展开的正文区。"""
+class _CollapsibleHeightAnimMixin:
+    """折叠卡高度展开/收起动画共用逻辑（ThinkCard / ToolCardWidget）。
+
+    约定宿主已具备：_expanded/_anim 状态与 _body_wrap/_chevron 控件。
+    """
 
     CHEVRON_DOWN = "▾"
     CHEVRON_RIGHT = "▸"
+
+    def _toggle_expanded(self) -> None:
+        # 两头都从"当前实际渲染高度"起步：展开完成时限高已放开(16777215)，
+        # 直接拿 maximumHeight 当起点会导致大半动画时长无视觉变化、末尾骤缩；
+        # 展开侧硬编 0 则会在「收起动画中途再点展开」时先跳回 0 再长出来。
+        if not self._expanded:
+            target = max(_measure_expanded_height(self._body_wrap), 1)
+            start = max(self._body_wrap.height(), 0)
+            self._expanded = True
+        else:
+            start = max(self._body_wrap.height(), 1)
+            self._body_wrap.setMaximumHeight(start)  # 先钳到实际高度再动画
+            target = 0
+            self._expanded = False
+        self._chevron.setText(self.CHEVRON_DOWN if self._expanded else self.CHEVRON_RIGHT)
+        if not Animations.motion_enabled():
+            # reduced-motion：跳过补间，直接落终值（收尾回调幂等）
+            self._body_wrap.setMaximumHeight(_QWIDGETSIZE_MAX if self._expanded else 0)
+            self._on_anim_done()
+            return
+        if self._anim is not None:
+            self._anim.stop()
+        self._anim = QPropertyAnimation(self._body_wrap, b"maximumHeight", self)
+        # 时长/曲线按方向分离（走全局 token）：展开 ENTER_MS + EASE_ENTER，
+        # 收起 EXIT_MS + EASE_EXIT（OutCubic 在收起的尾段拖尾明显）
+        self._anim.setDuration(Animations.ENTER_MS if self._expanded else Animations.EXIT_MS)
+        self._anim.setEasingCurve(QEasingCurve(Animations.EASE_ENTER if self._expanded else Animations.EASE_EXIT))
+        self._anim.setStartValue(start)
+        self._anim.setEndValue(target)
+        self._anim.finished.connect(self._on_anim_done)
+        self._anim.start()
+
+    def _on_anim_done(self) -> None:
+        if self._expanded:
+            # 展开终点经 heightForWidth 精确测量，放开限高不会二次跳变
+            self._body_wrap.setMaximumHeight(_QWIDGETSIZE_MAX)
+
+
+class ThinkCard(_CollapsibleHeightAnimMixin, QFrame):
+    """思考折叠卡：头部(图标+标签+预览+chevron) + 可动画展开的正文区。"""
 
     def __init__(self, content: str, completed: bool = True, parent: Optional[QWidget] = None):
         super().__init__(parent)
@@ -1526,40 +1569,7 @@ class ThinkCard(QFrame):
             self.apply_streaming(False)
 
     def toggle(self) -> None:
-        # 两头都从"当前实际渲染高度"起步：展开完成时限高已放开(16777215)，
-        # 直接拿 maximumHeight 当起点会导致大半动画时长无视觉变化、末尾骤缩；
-        # 展开侧硬编 0 则会在「收起动画中途再点展开」时先跳回 0 再长出来。
-        if not self._expanded:
-            target = max(_measure_expanded_height(self._body_wrap), 1)
-            start = max(self._body_wrap.height(), 0)
-            self._expanded = True
-        else:
-            start = max(self._body_wrap.height(), 1)
-            self._body_wrap.setMaximumHeight(start)  # 先钳到实际高度再动画
-            target = 0
-            self._expanded = False
-        self._chevron.setText(self.CHEVRON_DOWN if self._expanded else self.CHEVRON_RIGHT)
-        if not Animations.motion_enabled():
-            # reduced-motion：跳过补间，直接落终值（收尾回调幂等）
-            self._body_wrap.setMaximumHeight(_QWIDGETSIZE_MAX if self._expanded else 0)
-            self._on_anim_done()
-            return
-        if self._anim is not None:
-            self._anim.stop()
-        self._anim = QPropertyAnimation(self._body_wrap, b"maximumHeight", self)
-        # 时长/曲线按方向分离（走全局 token）：展开 ENTER_MS + EASE_ENTER，
-        # 收起 EXIT_MS + EASE_EXIT（OutCubic 在收起的尾段拖尾明显）
-        self._anim.setDuration(Animations.ENTER_MS if self._expanded else Animations.EXIT_MS)
-        self._anim.setEasingCurve(QEasingCurve(Animations.EASE_ENTER if self._expanded else Animations.EASE_EXIT))
-        self._anim.setStartValue(start)
-        self._anim.setEndValue(target)
-        self._anim.finished.connect(self._on_anim_done)
-        self._anim.start()
-
-    def _on_anim_done(self) -> None:
-        if self._expanded:
-            # 展开终点经 heightForWidth 精确测量，放开限高不会二次跳变
-            self._body_wrap.setMaximumHeight(_QWIDGETSIZE_MAX)
+        self._toggle_expanded()
 
 
 class DiffViewWidget(QTextEdit):
@@ -1691,11 +1701,8 @@ def _format_args_preview_safe(args_raw: str, max_len: int = 80) -> str:
         return ""
 
 
-class ToolCardWidget(QFrame):
+class ToolCardWidget(_CollapsibleHeightAnimMixin, QFrame):
     """工具调用卡：头部(名称+状态徽章+chevron)，展开显示 args/result。"""
-
-    CHEVRON_DOWN = "▾"
-    CHEVRON_RIGHT = "▸"
 
     def __init__(self, block: Dict[str, Any], parent: Optional[QWidget] = None):
         super().__init__(parent)
@@ -1920,37 +1927,7 @@ class ToolCardWidget(QFrame):
             )
 
     def toggle(self) -> None:
-        # 收起从"当前实际渲染高度"起步（ThinkCard 同策略），避免从 16777215 起步；
-        # 展开同理取当前高度，保证收起中途反向不会先跳回 0
-        if not self._expanded:
-            target = max(_measure_expanded_height(self._body_wrap), 1)
-            start = max(self._body_wrap.height(), 0)
-            self._expanded = True
-        else:
-            start = max(self._body_wrap.height(), 1)
-            self._body_wrap.setMaximumHeight(start)
-            target = 0
-            self._expanded = False
-        self._chevron.setText(self.CHEVRON_DOWN if self._expanded else self.CHEVRON_RIGHT)
-        if not Animations.motion_enabled():
-            # reduced-motion：跳过补间，直接落终值（收尾回调幂等）
-            self._body_wrap.setMaximumHeight(_QWIDGETSIZE_MAX if self._expanded else 0)
-            self._on_anim_done()
-            return
-        if self._anim is not None:
-            self._anim.stop()
-        self._anim = QPropertyAnimation(self._body_wrap, b"maximumHeight", self)
-        # 时长/曲线按方向分离（走全局 token）
-        self._anim.setDuration(Animations.ENTER_MS if self._expanded else Animations.EXIT_MS)
-        self._anim.setEasingCurve(QEasingCurve(Animations.EASE_ENTER if self._expanded else Animations.EASE_EXIT))
-        self._anim.setStartValue(start)
-        self._anim.setEndValue(target)
-        self._anim.finished.connect(self._on_anim_done)
-        self._anim.start()
-
-    def _on_anim_done(self) -> None:
-        if self._expanded:
-            self._body_wrap.setMaximumHeight(_QWIDGETSIZE_MAX)
+        self._toggle_expanded()
 
 
 # ── 「工具与思考」分区 + 任务列表面板 ─────────────────────────────

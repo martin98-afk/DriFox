@@ -31,8 +31,8 @@ from typing import Any
 
 # ---------- 路径定位 ----------
 
-# 本文件位置：plugins/system/skills/drifox-dev/scripts/state_manager.py
-# 技能根目录 = parents[3]
+# 本文件位置：plugins/system-skills/skills/drifox-dev/scripts/state_manager.py
+# 技能根目录 = parents[1]
 SKILL_DIR = Path(__file__).resolve().parents[1]
 STATE_DIR = SKILL_DIR / "state"
 STATE_FILE = STATE_DIR / "state.json"

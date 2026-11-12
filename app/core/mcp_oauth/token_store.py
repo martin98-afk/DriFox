@@ -23,9 +23,6 @@ from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
 # token 键前缀。server_name 由调用方清洗后拼接。
 _TOKEN_KEY_PREFIX = "_mcp_oauth_"
 
-# 早于该时间戳的 token 视为已过期（秒）。与 SDK 的 is_token_valid 口径一致。
-_EXPIRY_SKEW = 0
-
 
 def oauth_storage_key(server_name: str) -> str:
     """生成该 server 在插件 config.json 中的 token 存储键。"""

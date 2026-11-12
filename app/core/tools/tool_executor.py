@@ -47,30 +47,6 @@ def _plugin_label_from_source(source: str) -> str:
     return source or "builtin"
 
 
-def _get_declared_capabilities(reg) -> Optional[set]:
-    """读插件 manifest 的可选 "capabilities" 声明。
-
-    返回 None = 未声明 / 查询失败 / 非插件源 → services 全量注入（现状不变）；
-    返回集合 = 按清单裁剪（空数组即全裁高权限服务）。
-    """
-    try:
-        source = reg.source or ""
-        if not source.startswith("plugin:"):
-            return None
-        plugin_name = source.split(":", 1)[1].strip()
-        if not plugin_name:
-            return None
-        from app.plugins.managers.plugin_manager import PluginManager
-
-        plugin = PluginManager.get_instance().get_plugin(plugin_name)
-        caps = (getattr(plugin, "manifest", None) or {}).get("capabilities")
-        if isinstance(caps, list):
-            return {str(c) for c in caps}
-    except Exception:
-        pass
-    return None
-
-
 class _AuditedService:
     """高权限服务审计代理：属性/调用透传，首次触达记一行 [ServiceAudit]。
 

@@ -20,8 +20,6 @@ logger = logging.getLogger(__name__)
 
 # ── 常量 ──
 _VERSION_MAX: int = 2**30  # 版本号上界（≈10亿，wrap 保护）
-_MAX_BG_CACHE: int = 10  # 背景缓存最大条目数
-_BG_OPACITY_PRECISION: int = 3  # 缓存 key 中 opacity 的小数精度
 
 
 def _perf_enabled() -> bool:

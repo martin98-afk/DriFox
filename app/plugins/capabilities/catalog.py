@@ -356,10 +356,6 @@ for _sid, _s in CATALOG.items():
     for _legacy in _s.legacy_keys:
         LEGACY_MAP[_legacy] = _sid
 
-# ui 投影可用的旧键
-UI_LEGACY_KEYS = tuple(k for k, v in LEGACY_MAP.items() if "ui" in CATALOG[v].surfaces)
-
-
 def get(cap_id: str) -> Optional[CapabilitySpec]:
     """按 ID 取能力定义；未登记返回 None。"""
     return CATALOG.get(cap_id)

@@ -3379,7 +3379,9 @@ class OpenAIChatWorker(QThread):
                 if tc_id:
                     valid_tool_call_ids.add(tc_id)
 
-        logger.warning(f"[ToolCall修复] 有效 tool_call_ids: {len(valid_tool_call_ids)} 个")
+        # 正常路径每轮都会走到这里，warning 会在健康会话里刷屏；细节降 debug，
+        # 异常场景（中断/重复/孤儿）的 warning 保留在下方各分支
+        logger.debug(f"[ToolCall修复] 有效 tool_call_ids: {len(valid_tool_call_ids)} 个")
 
         # 如果没有任何 tool 消息，说明是用户中断场景，但没有累积的工具结果
         # 这种情况下直接返回无需修复

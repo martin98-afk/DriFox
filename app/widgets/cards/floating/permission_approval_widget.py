@@ -67,9 +67,6 @@ _DANGER_SESSION_HINT = "⚠ 删除类命令不支持会话级豁免"
 # 用户明确反馈"字体太多太杂乱"，收敛为 3 项核心快捷键。
 _HINT_TEXT = "Enter 允许 · Esc 拒绝 · Ctrl+P 预览"
 
-# 倒计时徽标配色阈值（秒）：>60 中性、10~60 警告、<10 错误
-_COUNTDOWN_WARN_SEC = 60
-_COUNTDOWN_DANGER_SEC = 10
 # 倒计时刷新周期（ms）
 _COUNTDOWN_TICK_MS = 1000
 

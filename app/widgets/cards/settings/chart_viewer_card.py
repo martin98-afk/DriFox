@@ -85,7 +85,6 @@ _END_HTML = _close("html")
 _END_STYLE = _close("style")
 _END_HEAD = _close("head")
 _SCRIPT_OPEN = "<" + "script" + ">"
-_DIV_OPEN = "<" + "div" + ">"
 
 
 _EXPORT_JS = """

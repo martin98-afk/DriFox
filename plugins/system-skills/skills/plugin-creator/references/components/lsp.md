@@ -12,9 +12,10 @@ description: LSP（语言服务器）开发指南——文件位置、真实 sch
 
 ### 真实 schema
 
-**顶层直接是 `{服务器名: 配置}`，没有 `servers` 包装层。** 宿主解析器
-（`app/core/lsp/lsp_config.py` 的 `load_lsp_configs`）遍历顶层 dict：
-`for name, data in data.items()`。写成 `{"servers": [...]}` 会在
+**顶层直接是 `{服务器名: 配置}`，没有 `servers` 包装层。** 宿主解析在
+`app/core/lsp/lsp_manager.py`：全量走 `LspManager.initialize`，单插件增量
+热重载走 `LspManager.add_plugin_servers`。两者均遍历顶层 dict，逐服务器
+走 `LspServerConfig.from_dict`。写成 `{"servers": [...]}` 会在
 `LspManager` 报 `'list' object has no attribute 'get'`，LSP 列表为空。
 
 ```json

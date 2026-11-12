@@ -142,14 +142,6 @@ _TREE_INDENT_SESSION = 42
 _TREE_MAX_SESSIONS = 50
 
 
-# 顶部标题文案随模式切换（列表模式=「对话页」/树模式=「工作区」）
-# 顶栏改版后暂无消费方（「新建对话」行替代标题），保留常量供模式语义参考
-_PANEL_MODE_TITLES = {
-    PANEL_MODE_LIST: "对话页",
-    PANEL_MODE_TREE: "工作区",
-}
-
-
 # 项目头像（缩写 + 稳定色）缓存：颜色由 crc32(name) 决定，与会话无关，可安全缓存。
 # 纯函数已拆至 app/utils/project_meta.py（轻模块，无 Qt/重依赖）。
 _PROJECT_ICON_CACHE: dict = {}

@@ -548,7 +548,3 @@ class CacheHitRateTracker:
         self._last_model = model
 
 
-
-_global_tracker: Optional[CacheHitRateTracker] = None
-
-

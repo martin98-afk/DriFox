@@ -63,7 +63,6 @@ INITIAL_SYNC_DELAY_MS = 8000
 _WATCH_JOIN_TIMEOUT = 1.0
 
 GITEE_FILE_API = "https://gitee.com/api/v5/repos/{owner}/{repo}/contents/{path}"
-GITEE_REPO_API = "https://gitee.com/api/v5/repos/{owner}/{repo}"
 
 
 def _get_config_path() -> Path:
@@ -254,15 +253,6 @@ def register_sync_content_provider(
     _sync_content_providers[provider_id] = provider
     logger.info(f"[ConfigSync] 注册同步内容: {provider_id} ({provider.label}) → {provider.remote_path}")
     return True
-
-
-def unregister_sync_content_provider(provider_id: str) -> bool:
-    """注销一个同步内容 provider"""
-    if provider_id in _sync_content_providers:
-        del _sync_content_providers[provider_id]
-        logger.info(f"[ConfigSync] 注销同步内容: {provider_id}")
-        return True
-    return False
 
 
 def list_sync_content_providers() -> List[SyncContentProvider]:

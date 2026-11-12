@@ -155,12 +155,6 @@ def insert_record(
         return ok
 
 
-def get_records(limit: int = 500) -> List[Dict[str, Any]]:
-    """获取分享记录列表，按时间倒序"""
-    records = _load_records()
-    return records[:limit]
-
-
 def delete_record(record_id: int) -> bool:
     """删除单条分享记录"""
     with _lock:
@@ -171,15 +165,6 @@ def delete_record(record_id: int) -> bool:
         ok = _save_records(new_records)
         if ok:
             logger.debug(f"[ShareRecords] 删除记录 id={record_id}")
-        return ok
-
-
-def clear_all_records() -> bool:
-    """清空全部分享记录"""
-    with _lock:
-        ok = _save_records([])
-        if ok:
-            logger.debug("[ShareRecords] 已清空所有记录")
         return ok
 
 

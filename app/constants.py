@@ -276,16 +276,6 @@ def provider_default_config(name: str) -> Optional[Dict[str, Any]]:
         return None
 
 
-def provider_icon_map() -> Dict[str, str]:
-    """服务商 → 图标 key（PROVIDER_ICONS 委托）"""
-    from app.plugins.registries.provider_registry import ProviderRegistry
-
-    try:
-        return ProviderRegistry.get_instance().icon_map()
-    except Exception:
-        return {}
-
-
 def provider_quota_exclude_keys() -> "frozenset[str]":
     """全部服务商用量查询额外字段 key（QUOTA_EXCLUDE_KEYS 委托）。
 

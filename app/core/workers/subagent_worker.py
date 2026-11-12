@@ -34,9 +34,6 @@ from app.tools.result import ToolResult
 
 # ========== 性能优化：预编译正则表达式 ==========
 _THINKING_PATTERN = re.compile(r"<think>[\s\S]*?</think>")  # 过滤完整思考块
-# 与 plugins/system-model-adapters/model_adapters/_detectors.py 的判定保持同步
-# （Phase 3 搬迁进 adapter flags 时统一，消除重复实现）
-_GPT_VERSIONED_RE = re.compile(r"^gpt-(\d+)")
 _TOOL_TAG_PATTERN = re.compile(r"<tool>[\s\S]*?</tool>")  # 过滤工具调用标签
 _VALID_IDENTIFIER_PATTERN = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")  # 验证标识符格式
 

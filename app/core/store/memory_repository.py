@@ -185,8 +185,10 @@ class MemoryRepository:
             cursor.execute(f"SELECT id FROM {self.TABLE_NAME}")
             existing_ids = {row[0] for row in cursor.fetchall()}
 
-            # 逐条 upsert（INSERT OR REPLACE），仅新增/变更项写入
+            # 逐条 upsert（INSERT OR REPLACE），仅新增/变更项写入；
+            # 参数行先收集再 executemany 一次下发，省 N 次 Python↔SQLite 往返
             new_ids = set()
+            rows = []
             for memory in memories:
                 existing_id = memory.get("id") or memory.get("memory_id")
                 if existing_id:
@@ -196,11 +198,7 @@ class MemoryRepository:
                     memory_id = f"{datetime.now().strftime('%Y%m%d%H%M%S')}_{content_hash}"
                 new_ids.add(memory_id)
 
-                cursor.execute(f'''
-                    INSERT OR REPLACE INTO {self.TABLE_NAME}
-                    (id, content, enabled, confidence, source, created_at, updated_at, last_accessed)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                ''', (
+                rows.append((
                     memory_id,
                     memory.get("content", ""),
                     1 if memory.get("enabled", True) else 0,
@@ -210,6 +208,13 @@ class MemoryRepository:
                     now,
                     now,
                 ))
+
+            if rows:
+                cursor.executemany(f'''
+                    INSERT OR REPLACE INTO {self.TABLE_NAME}
+                    (id, content, enabled, confidence, source, created_at, updated_at, last_accessed)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ''', rows)
 
             # 清理不再存在的记忆（避免全量 DELETE 再 INSERT 导致碎片+WAL 膨胀）
             removed_ids = existing_ids - new_ids

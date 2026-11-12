@@ -430,11 +430,6 @@ def _shadowing_entries(dep_dir: Path) -> List[str]:
 _INJECTED: List[Tuple[str, str]] = []
 
 
-def injected_deps_map() -> Dict[str, str]:
-    """当前已注入的 deps 路径 → 插件名（诊断与测试用）。"""
-    return {path: plugin for path, plugin in _INJECTED}
-
-
 def remove_deps_from_path(plugin_dir: Path) -> List[str]:
     """摘除插件注入过的 deps 路径（卸载/禁用后调用，幂等）。
 

@@ -181,9 +181,9 @@ UI 逻辑离线实测（不依赖 DriFox 运行时）：`D:\work\DriFox\.venv\Sc
 **症状**：插件带 `.lsp.json`，设置 → LSP 列表为空；`logs/lsp.log` 报
 `解析 xxx 配置失败: 'list' object has no attribute 'get'`。
 
-**原因**：`.lsp.json` 写成了 `{"servers": [...]}`（旧模板格式）。宿主解析器
-（`lsp_config.load_lsp_configs`）遍历顶层 dict，没有 `servers` 包装层，
-对 list 调 `.get` 即炸，注册失败且无明确指引。
+**原因**：`.lsp.json` 写成了 `{"servers": [...]}`（旧模板格式）。宿主解析
+（`LspManager.initialize` 逐服务器走 `LspServerConfig.from_dict`）遍历顶层
+dict，没有 `servers` 包装层，对 list 调 `.get` 即炸，注册失败且无明确指引。
 
 **修法**：顶层直接写 `{服务器名: {command, args, extensionToLanguage, installHint}}`，
 字段全集见 [components/lsp.md](components/lsp.md)。另注意 Windows 下 npm
