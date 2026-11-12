@@ -267,39 +267,20 @@ for i in range(20):
 if "--with-title-task" in os.sys.argv:
     import gc
 
-    _wb_ref = wB  # 保留引用供第三层验证（del 后仍要测晚归回调）
-    log("释放 wB 本地强引用 + gc.collect()（模拟真实场景窗口树回收）")
-    t = time.perf_counter()
-    del wB
-    gc.collect()
-    dt = (time.perf_counter() - t) * 1000
-    log(f"  ⏱ gc.collect() 段", f"{dt:.1f}ms（含池析构等待）")
-    for i in range(10):
-        t0 = time.perf_counter()
-        pump(50)
-        dt = (time.perf_counter() - t0 - 0.05) * 1000
-        if dt > 20:
-            log(f"  gc 后第 {i} 跳卡顿", f"extra {dt:.1f}ms")
-else:
-    _wb_ref = wB
-
-# ── 第三层验证：关窗后任务晚归，回调守卫必须静默丢弃（无异常）──
-log("关窗后晚归回调安全性验证——直接调用已销毁窗口的槽")
+# ── 第三层验证：关窗后任务晚归，提交守卫必须静默丢弃（无异常）──
+log("关窗后晚归回调安全性验证——对已消失窗口提交标题")
 try:
-    # wB 已 close + _is_destroyed=True；此处直接调用主线程槽
-    _wb_ref._on_topic_summary_generated({"topic_summary": "晚归标题"}, None)
-    log("  ✓ _on_topic_summary_generated 静默返回（守卫生效）")
+    # 新架构：晚归提交走 session.title.commit，window_id 解析失败即返回 False
+    from app.plugins.capabilities.providers.title_core import _session_title_commit
+
+    commit = _session_title_commit(_wb_ref)
+    ok = commit("gone-window", "晚归标题")
+    if ok is False:
+        log("  ✓ 死窗口提交返回 False（守卫生效）")
+    else:
+        log(f"  ✗ 死窗口提交意外成功: {ok}")
 except Exception as e:
     log(f"  ✗ 守卫失效: {type(e).__name__}: {e}")
-
-# 模拟共享池任务晚归：直接对已销毁窗口的 pyqtSignal emit
-try:
-    _wb_ref._topic_summary_ready.emit({"topic_summary": "信号晚归"}, None)
-    log("  ✓ _topic_summary_ready.emit 直接发射（信号层不崩）")
-except RuntimeError as e:
-    log(f"  ⚠ emit 抛 RuntimeError（_thread_safe_callback 的 try/except 已覆盖）: {e}")
-except Exception as e:
-    log(f"  ✗ 意外异常: {type(e).__name__}: {e}")
 
 log("探针结束")
 
