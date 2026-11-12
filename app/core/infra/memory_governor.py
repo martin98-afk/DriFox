@@ -16,6 +16,8 @@ import contextlib
 import gc
 import time
 
+from loguru import logger
+
 import sip
 
 
@@ -242,6 +244,7 @@ RENDERER_RSS_GATE_HARD_MB = 1200  # renderer 硬阈：kill 重且离屏远的 re
 # 每轮上限/离屏护栏/冷却沿用既有常量（_KILL_BATCH_MAX=12、8/12 批、60s）。
 RENDERER_RSS_GATE_MIN_OFFSCREEN = _OFFSCREEN_BATCHES_FOR_KILL            # 8
 RENDERER_RSS_GATE_MIN_OFFSCREEN_ACTIVE = _OFFSCREEN_BATCHES_FOR_KILL_ACTIVE  # 12
+_T6_DEFICIT_KILL_MB = 300  # T6 差额升级：软阈超出 ≥300MB（≈2 个 renderer）才追加 kill，防抖动下限
 # 活跃视口 ±2 批豁免：min_offscreen(8/12) ≥ 2 已完全覆盖「视口 ±2 批绝不回收」。
 
 def _pid_used_by_alive_windows(pid: int, exclude=None) -> bool:
@@ -410,7 +413,33 @@ def enforce_renderer_rss_gate(host) -> str:
             if web_mb >= RENDERER_RSS_GATE_HARD_MB:
                 actions.append(f"kill({_gate_kill_heavy(host, active)})")
             else:
-                actions.append(f"soft-unload({_gate_soft_unload(host, active)})")
+                # T6 差额升级：deficit ≥300MB 时 soft-unload 之外追加 LRU kill
+                # （单 renderer 均值 170MB，多杀 floor(deficit/170) 个）；
+                # <300 维持纯温和卸载防抖动。记账空（全活跃）时 kill 返回 0 属设计边界。
+                deficit = web_mb - RENDERER_RSS_GATE_SOFT_MB
+                killed = 0
+                if deficit >= _T6_DEFICIT_KILL_MB:
+                    keep = max(
+                        2,
+                        len(getattr(host, "_unloaded_pids", None) or [])
+                        - int(deficit // 170),
+                    )
+                    try:
+                        killed = int(
+                            host._kill_lru_unloaded_renderers(
+                                keep=keep, min_offscreen=_gate_min_offscreen(active)
+                            )
+                            or 0
+                        )
+                        if killed > 0:
+                            # Y1: 写冷却戳，否则 gate 入口冷却检查对本路径永不生效
+                            host._last_kill_at = time.time()
+                    except Exception as e:
+                        # Y2: 不静默吞错，对齐 _kill_lru 本体日志惯例
+                        logger.warning(f"[T6] deficit-kill 调用失败: {e}")
+                        killed = 0
+                tag = f"soft-unload({_gate_soft_unload(host, active)})"
+                actions.append(tag + (f"+deficit-kill({killed})" if killed else ""))
         return "+".join(actions) if actions else "idle"
     except Exception:
         return "error"
