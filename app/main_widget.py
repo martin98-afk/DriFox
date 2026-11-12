@@ -21328,19 +21328,10 @@ class OpenAIChatToolWindow(ToolWindow):
         # （团队成员自动压缩后回复不可见 bug 修复核心点之一）
         self._send_epoch += 1
 
-        # 🛡️ 只在新会话的第一个问题时触发标题生成，避免每次对话都重复生成
+        # 标题生成决策（该不该生成）由宿主统一判定后通知插件
         if session is None:
             session = self.session_manager.get_current_session()
-        if session:
-            # 🛡️ R6 修复：team 邮件（_hook_event="TeamMail"）视为真实用户问题
-            # → mail-only 会话也能触发标题生成（之前被误伤跳过）
-            user_msg_count = sum(
-                1
-                for m in session.messages
-                if m.get("role") == "user" and (not m.get("_hook_event") or m.get("_hook_event") == "TeamMail")
-            )
-            if user_msg_count == 1:
-                self._maybe_generate_topic_summary()
+        self._publish_title_request()
         # 用户问题已写入 session，立即刷新徽章（无需等流式结束）
         self._update_history_questions_badge()
 
@@ -21692,15 +21683,8 @@ class OpenAIChatToolWindow(ToolWindow):
             self._advance_visible_batch_window()
             self._register_new_cards_into_batches()
             self._send_epoch += 1
-            # 标题生成（TeamMail 同口径：排队消息视为真实用户问题）
-            if session:
-                user_msg_count = sum(
-                    1
-                    for m in session.messages
-                    if m.get("role") == "user" and (not m.get("_hook_event") or m.get("_hook_event") == "TeamMail")
-                )
-                if user_msg_count == 1:
-                    self._maybe_generate_topic_summary()
+            # 标题生成（TeamMail 排队消息同口径）
+            self._publish_title_request()
             self._update_history_questions_badge()
 
         QTimer.singleShot(0, _do_deferred_send)
@@ -24340,6 +24324,58 @@ class OpenAIChatToolWindow(ToolWindow):
         except Exception as e:  # noqa: BLE001
             logger.error(f"[Permission] 超时决策回传异常 id={tool_call_id}: {e}")
         self._restore_after_permission_close()
+
+    def _publish_title_request(self):
+        """判定该不该生成标题；短输入直接提交，其余发事件让插件生成。
+
+        宿主拥有全部守卫：user_edited_title / topic_summary / is_temp /
+        首条真实用户消息 / ≤10 字短输入。插件只负责生成文本。
+        """
+        from app.core.infra.ui_event_bus import UIEventBus
+
+        session = self.session_manager.get_current_session()
+        if session is None or getattr(session, "user_edited_title", False):
+            return
+        if getattr(session, "topic_summary", "") or getattr(session, "is_temp", False):
+            return
+        user_messages = [
+            m for m in session.messages
+            if m.get("role") == "user"
+            and (not m.get("_hook_event") or m.get("_hook_event") == "TeamMail")
+        ]
+        if not user_messages:
+            return
+        first_text = ""
+        for m in user_messages:
+            content = m.get("content", "")
+            if isinstance(content, list):
+                content = "\n".join(
+                    str(b.get("text", "")) for b in content
+                    if isinstance(b, dict) and b.get("type") == "text"
+                )
+            text = str(content).strip()
+            if not text or text.startswith("📨 **来自"):
+                continue
+            first_text = text
+            break
+        if not first_text:
+            return
+        window_id = str(getattr(self, "_window_id", "") or "")
+        if len(first_text) <= 10:
+            from app.plugins.capabilities.resolve import pool_for
+
+            pool = pool_for("system-title-generator", surface="ui", host=self)
+            commit = pool.get("session.title.commit") if pool else None
+            if callable(commit):
+                commit(window_id, first_text)
+            return
+        UIEventBus.get_instance().publish(
+            "title.request",
+            window_id=window_id,
+            session_id=str(getattr(session, "session_id", "") or ""),
+            messages=list(session.messages),
+            fallback=first_text[:15],
+        )
 
     def _maybe_generate_topic_summary(self):
         # 🛡️ 每次启动新的标题生成任务时重置取消标记
@@ -27382,10 +27418,9 @@ class OpenAIChatToolWindow(ToolWindow):
 
         logger.info(f"[PluginSession] 保存 {len(auto_loop_messages)} 条消息到会话: {self._current_project}")
 
-        # 触发 topic_summary 生成标题（如果还没有标题）
+        # 标题生成决策由宿主统一判定
         session = self.session_manager.get_current_session()
-        if session and not session.topic_summary:
-            self._maybe_generate_topic_summary()
+        self._publish_title_request()
 
         # 同步保存到历史记录
         self._save_current_session_to_history()
