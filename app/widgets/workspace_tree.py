@@ -42,6 +42,7 @@ from PyQt5.QtWidgets import QFrame, QHBoxLayout, QLabel, QSizePolicy, QVBoxLayou
 from qfluentwidgets import FluentIcon as FIF
 from qfluentwidgets import TransparentToolButton, isDarkTheme
 
+from app.utils.color_parse import parse_color as _parse_color_shared
 from app.utils.design_tokens import Animations, Colors, font_size_css, scale_icon_size
 from app.utils.motion import retarget
 from app.utils.utils import get_font_family_css, get_icon, get_unified_font
@@ -143,23 +144,10 @@ def _parse_rgba(rgba_str: str) -> QColor:
     """解析 'rgba(r,g,b,a)' / '#rrggbb' / 颜色名 → QColor。
 
     Qt 的 QColor 构造函数不认 CSS 的 rgba() 语法，会静默返回黑色；主题色里
-    大量使用 rgba() 字符串，必须自己拆。alpha 语义混用（0-255 与 0.0-1.0），
-    按是否含小数点判定。
+    大量使用 rgba() 字符串，必须自己拆。实现已收敛到
+    app.utils.color_parse.parse_color（语义并集，含 hsl 分支与双派 alpha）。
     """
-    try:
-        text = (rgba_str or "").strip()
-        if text.startswith("rgba(") or text.startswith("rgb("):
-            parts = text.strip("rgba() ").split(",")
-            r, g, b = int(float(parts[0])), int(float(parts[1])), int(float(parts[2]))
-            if len(parts) > 3:
-                a_raw = parts[3].strip()
-                a = int(float(a_raw) * 255) if float(a_raw) <= 1 else int(float(a_raw))
-            else:
-                a = 255
-            return QColor(r, g, b, a)
-    except Exception:
-        pass
-    return QColor(rgba_str)
+    return _parse_color_shared(rgba_str, fallback="#808080")
 
 
 @dataclass

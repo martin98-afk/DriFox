@@ -24,6 +24,7 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
+from app.utils.color_parse import parse_color as _parse_color_shared
 from app.utils.design_tokens import _get_global_font, font_size_css, scale_font_size
 from app.utils.utils import get_font_family_css
 
@@ -33,39 +34,10 @@ def _parse_color(value, fallback: str = "#212126") -> QColor:
 
     QColor 的字符串构造函数只认 #rrggbb / #aarrggbb / 具名色，
     不认 CSS 的 rgba()/rgb() 写法；主题里大量使用 rgba(r,g,b,a)，
-    直接丢给 QColor 会解析失败退化为黑色。此处手动解析。
+    直接丢给 QColor 会解析失败退化为黑色。已收敛到
+    app.utils.color_parse.parse_color（语义并集）。
     """
-    if isinstance(value, QColor):
-        return value
-    s = str(value or "").strip()
-    try:
-        if s.startswith("#"):
-            c = QColor(s)
-            if c.isValid():
-                return c
-        elif s.lower().startswith(("rgba(", "rgb(")):
-            inner = s[s.index("(") + 1 : s.rindex(")")]
-            parts = [p.strip() for p in inner.split(",")]
-            if len(parts) >= 3:
-                r, g, b = (int(round(float(parts[i]))) for i in range(3))
-                a = 255
-                if len(parts) >= 4:
-                    av = float(parts[3])
-                    a = int(round(av * 255)) if av <= 1 else int(round(av))
-                return QColor(
-                    max(0, min(255, r)),
-                    max(0, min(255, g)),
-                    max(0, min(255, b)),
-                    max(0, min(255, a)),
-                )
-        else:
-            c = QColor(s)
-            if c.isValid():
-                return c
-    except Exception:
-        pass
-    fc = QColor(fallback)
-    return fc if fc.isValid() else QColor(33, 33, 38, 246)
+    return _parse_color_shared(value, fallback)
 
 
 class _StackedBar(QWidget):

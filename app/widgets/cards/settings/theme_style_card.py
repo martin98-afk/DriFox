@@ -32,6 +32,7 @@ from PyQt5.QtGui import (
 from PyQt5.QtWidgets import QGridLayout, QLabel, QSizePolicy, QWidget
 from qfluentwidgets import ExpandSettingCard, FluentIcon
 
+from app.utils.color_parse import parse_color as _parse_color_shared
 from app.utils.design_tokens import Colors, _get_global_font, scale_font_size
 from app.utils import theme_mode
 from app.utils.theme_manager import theme_manager
@@ -113,39 +114,10 @@ def _parse_color(value, fallback: str = "#2a2a2e") -> QColor:
     """解析主题色串为 QColor。
 
     QColor 只认 #rrggbb / #aarrggbb，主题 yaml 里大量是 CSS 的 rgba(r,g,b,a)
-    （有时还带引号），直接丢给 QColor 会退化成黑色。
+    （有时还带引号），直接丢给 QColor 会退化成黑色。已收敛到
+    app.utils.color_parse.parse_color（语义并集，含引号剥离）。
     """
-    if isinstance(value, QColor):
-        return value
-    s = str(value or "").strip().strip("'\"")
-    try:
-        if s.startswith("#"):
-            color = QColor(s)
-            if color.isValid():
-                return color
-        elif s.lower().startswith(("rgba(", "rgb(")):
-            inner = s[s.index("(") + 1 : s.rindex(")")]
-            parts = [p.strip() for p in inner.split(",")]
-            if len(parts) >= 3:
-                r, g, b = (int(round(float(parts[i]))) for i in range(3))
-                a = 255
-                if len(parts) >= 4:
-                    av = float(parts[3])
-                    a = int(round(av * 255)) if av <= 1 else int(round(av))
-                return QColor(
-                    max(0, min(255, r)),
-                    max(0, min(255, g)),
-                    max(0, min(255, b)),
-                    max(0, min(255, a)),
-                )
-        else:
-            color = QColor(s)
-            if color.isValid():
-                return color
-    except Exception:
-        pass
-    fallback_color = QColor(fallback)
-    return fallback_color if fallback_color.isValid() else QColor(42, 42, 46)
+    return _parse_color_shared(value, fallback)
 
 
 def _luminance(color: QColor) -> float:

@@ -21,6 +21,7 @@ from PyQt5.QtGui import (
 )
 from PyQt5.QtWidgets import QApplication, QHBoxLayout, QLabel, QVBoxLayout, QWidget
 
+from app.utils.color_parse import parse_color as _parse_color_shared
 from app.utils.design_tokens import _get_global_font, font_size_css
 from app.utils.utils import get_font_family_css
 
@@ -66,38 +67,8 @@ def _format_reset(sec: int) -> str:
 
 
 def _parse_color(value, fallback: str = "#212126") -> QColor:
-    """将主题色字符串解析为 QColor。"""
-    if isinstance(value, QColor):
-        return value
-    s = str(value or "").strip()
-    try:
-        if s.startswith("#"):
-            c = QColor(s)
-            if c.isValid():
-                return c
-        elif s.lower().startswith(("rgba(", "rgb(")):
-            inner = s[s.index("(") + 1 : s.rindex(")")]
-            parts = [p.strip() for p in inner.split(",")]
-            if len(parts) >= 3:
-                r, g, b = (int(round(float(parts[i]))) for i in range(3))
-                a = 255
-                if len(parts) >= 4:
-                    av = float(parts[3])
-                    a = int(round(av * 255)) if av <= 1 else int(round(av))
-                return QColor(
-                    max(0, min(255, r)),
-                    max(0, min(255, g)),
-                    max(0, min(255, b)),
-                    max(0, min(255, a)),
-                )
-        else:
-            c = QColor(s)
-            if c.isValid():
-                return c
-    except Exception:
-        pass
-    fc = QColor(fallback)
-    return fc if fc.isValid() else QColor(33, 33, 38, 246)
+    """将主题色字符串解析为 QColor（已收敛到 color_parse.parse_color）。"""
+    return _parse_color_shared(value, fallback)
 
 
 # ─── 进度条组件 ─────────────────────────────────
