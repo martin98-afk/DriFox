@@ -25,7 +25,7 @@
 registry 驱动 LLM schema / 图标 / 分组 / 别名映射，**增删改热生效**，不要在应用层硬编码工具清单。
 
 新增工具三步：
-1. 在 `plugins/<name>/tools/<模块>.py` 写实现 + `register(registry)`；系统工具放 `plugins/system-tools/tools/`。
+1. 在 `plugins/<name>/tools/<模块>.py` 写实现 + `register(registry)`；系统工具放 `plugins/system-interact/tools/`。
 2. 校验 schema 与 danger 分级（走 `tool_classifier`）。
 3. 更新 Agent 的 `tools:` 权限（`.drifox/plugins/<p>/agents/*.md` 或 `plugins/system-agents/agents/`）。
 

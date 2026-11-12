@@ -20,7 +20,7 @@ from app.plugins.capabilities.providers import net_sync
 
 
 # ── 加载 interaction_tools（与 test_system_tools_mcp_render 同款按路径加载）──
-_TOOLS_MODULE = _ROOT / "plugins" / "system-tools" / "tools" / "interaction_tools.py"
+_TOOLS_MODULE = _ROOT / "plugins" / "system-interact" / "tools" / "interaction_tools.py"
 _spec = importlib.util.spec_from_file_location("test_net_sync_interaction_mod", str(_TOOLS_MODULE))
 _tools = importlib.util.module_from_spec(_spec)
 sys.modules.setdefault("test_net_sync_interaction_mod", _tools)

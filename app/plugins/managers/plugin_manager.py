@@ -392,7 +392,7 @@ class PluginManager:
     # plugin-marketplace/ui/installer.py 状态分类与本名单保持单一数据源。
     _NON_DISABLEABLE = frozenset(
         {
-            "system-tools",
+            "system-interact",
             "system-core",
             "system-question",
             "system-serializers",
@@ -533,7 +533,7 @@ class PluginManager:
         "serializers": "system-serializers",
         "transports": "system-transports",
         "stream_sinks": "system-stream-sinks",
-        "tools": "system-tools",
+        "tools": "system-interact",  # 2026-11-12 由 system-tools 更名
         "context_tiers": "system-context",
         "budget_resolvers": "system-context",
         # 「ui」组件的系统插件锚点：产物页（工作树/历史已拆分为独立插件）
@@ -541,7 +541,9 @@ class PluginManager:
         "team_templates": "system-team-templates",
         "mcp": "system-mcp",
     }
-    # 旧单体插件 config_schema（网页搜索 API Key）的承继插件
+    # 旧单体插件 config_schema（网页搜索 API Key）的承继插件。
+    # 保持历史名 "system-tools"：system-web 的 _ensure_migrated 也按该历史路径读，
+    # 与现插件名 system-interact 无关，改名不能动这个锚点。
     _SPLIT_CONFIG_HEIR = "system-tools"
 
     # 工具级禁用键迁移：`system-tools:tools:<tool>` → `<拆分后插件>:tools:<tool>`
@@ -574,6 +576,13 @@ class PluginManager:
         "team_manage": "system-team",
         "get_diagnostics": "system-diagnostics",
         "lsp": "system-diagnostics",
+        # 拆分时留守在 system-tools（2026-11-12 更名 system-interact）的工具：
+        # 旧禁用键不改写会在更名后指向不存在的插件，已禁用工具回魂
+        "skill": "system-interact",
+        "manage_skill": "system-interact",
+        "upload_file": "system-interact",
+        "mcp_manage": "system-interact",
+        "mcp_list_servers": "system-interact",  # mcp_manage 更名前的旧工具名
     }
 
     def _migrate_split_system_states(self) -> None:

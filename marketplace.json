@@ -836,9 +836,9 @@
             }
         },
         {
-            "name": "system-tools",
+            "name": "system-interact",
             "description": "DriFox 内置交互工具：技能加载/管理、MCP 服务器管理、Gitee 文件上传（文件/终端/搜索/诊断/团队/提问已拆分为独立插件）",
-            "version": "2.0.0",
+            "version": "2.1.0",
             "author": "DriFoxx Team",
             "license": "GPL-3.0-or-later",
             "categories": [
@@ -847,7 +847,7 @@
             "source": {
                 "type": "git-subdir",
                 "url": "https://github.com/martin98-afk/DriFox",
-                "path": "plugins/system-tools",
+                "path": "plugins/system-interact",
                 "ref": "master"
             },
             "components": {

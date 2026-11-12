@@ -18,7 +18,7 @@ import pytest
 from app.core.tools.mcp_lsp_safety import gate_server_launch
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
-_SYS_PLUGIN_LSP = _REPO_ROOT / "plugins" / "system-tools" / ".lsp.json"
+_SYS_PLUGIN_LSP = _REPO_ROOT / "plugins" / "system-interact" / ".lsp.json"
 _USER_LSP = Path("C:/Users/someone/.drifox/plugins/pyright-lsp/.lsp.json")
 
 
@@ -28,7 +28,7 @@ _USER_LSP = Path("C:/Users/someone/.drifox/plugins/pyright-lsp/.lsp.json")
 def test_builtin_lsp_source_proceeds():
     """系统插件根下的 source → proceed（核心回归）"""
     verdict = gate_server_launch(
-        "lsp", "system-tools", "pyright", ["pyright-langserver", "--stdio"], source=str(_SYS_PLUGIN_LSP)
+        "lsp", "system-interact", "pyright", ["pyright-langserver", "--stdio"], source=str(_SYS_PLUGIN_LSP)
     )
     assert verdict == "proceed", f"系统插件源应放行，实际 {verdict}"
 
@@ -72,7 +72,7 @@ def test_lsp_client_passes_source_from_config(monkeypatch):
     cfg = LspServerConfig.from_dict(
         "pyright",
         {"command": "pyright-langserver", "args": ["--stdio"]},
-        "system-tools",
+        "system-interact",
         source_path=str(_SYS_PLUGIN_LSP),
     )
     client = lc_mod.LspClient(cfg, str(_REPO_ROOT))
@@ -146,7 +146,7 @@ def test_lsp_manager_passes_source_to_from_dict(monkeypatch):
 
     mgr.initialize(
         str(_REPO_ROOT),
-        [{"plugin": "system-tools", "config": {"s1": {"command": "c"}}, "source": "/p/.lsp.json"}],
+        [{"plugin": "system-interact", "config": {"s1": {"command": "c"}}, "source": "/p/.lsp.json"}],
     )
     assert captured == ["/p/.lsp.json"], f"source 未传入 from_dict: {captured}"
 

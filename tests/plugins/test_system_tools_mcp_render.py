@@ -11,7 +11,7 @@ import sys
 from pathlib import Path
 
 _ROOT = Path(__file__).resolve().parents[2]
-_MODULE = _ROOT / "plugins" / "system-tools" / "tools" / "interaction_tools.py"
+_MODULE = _ROOT / "plugins" / "system-interact" / "tools" / "interaction_tools.py"
 
 spec = importlib.util.spec_from_file_location("test_system_tools_interaction_mod", str(_MODULE))
 m = importlib.util.module_from_spec(spec)

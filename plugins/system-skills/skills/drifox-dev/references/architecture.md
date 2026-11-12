@@ -98,7 +98,7 @@ app/tools/
 
 | 插件 | 提供组件 |
 |------|---------|
-| `system-tools` | `tools/` |
+| `system-interact` | `tools/` |
 | `artifacts-manager` | `ui/`（工作台产物页，`register_workbench_tab` 通道） |
 | `system-hooks` | `hooks/` |
 | `system-hook-policies` | `hook_policies/` |

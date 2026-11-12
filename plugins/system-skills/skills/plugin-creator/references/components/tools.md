@@ -67,7 +67,7 @@ def register(registry):
 ### 渲染三闭包（主程序零工具名硬编码）
 
 > 工具的**渲染完全由插件声明**：主程序 `render_helpers` 只做闭包路由 + 通用兜底。
-> 参考 `plugins/system-tools/tools/`（bash 终端块、question 弹窗、screenshot 图片、
+> 参考 `plugins/system-interact/tools/`（bash 终端块、question 弹窗、screenshot 图片、
 > codegraph 结构化、edit diff 均为插件闭包实现）。
 
 ```python
@@ -165,7 +165,7 @@ kind ∈ image/video/html/text/file；空列表不改变已有成果。推送按
 
 ### 参考
 
-- `plugins/system-tools/tools/`（33 个系统工具真实案例）
+- `plugins/system-interact/tools/`（33 个系统工具真实案例）
 - `app/tools/registry.py`（ToolRegistration 字段定义）
 - `app/tools/plugin_tool_loader.py`（扫描/热重载实现）
 - 最小可运行样例：本技能 `examples/tool-plugin/`

@@ -2,6 +2,8 @@
 All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
+### ♻️ 代码重构 (Refactoring)
+- **`system-tools` 更名 `system-interact`** (`plugins/system-interact/` · `app/plugins/managers/plugin_manager.py` · `marketplace.json`): 拆分后该插件只剩技能加载/MCP 管理/Gitee 上传等交互类工具，插件名与展示名「内置交互工具」对齐。`_NON_DISABLEABLE` 与组件锚点 `_SPLIT_COMPONENT_TO_PLUGIN["tools"]` 同步改写；旧 `system-tools:tools:<tool>` 禁用键迁移表补录留守工具（skill/manage_skill/upload_file/mcp_manage/mcp_list_servers），避免更名后已禁用工具回魂；`_SPLIT_CONFIG_HEIR` 保持历史名 `system-tools`（system-web 旧配置承继链锚点，与现插件名无关）。
 
 ## [v0.7.2] - 2026-11-12
 
