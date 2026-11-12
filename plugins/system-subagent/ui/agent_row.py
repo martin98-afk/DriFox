@@ -152,6 +152,10 @@ class AgentTaskRow(QFrame):
                 color: {Colors.REALTIME_TEXT_SECONDARY};
                 background: transparent;
             }}
+            QLabel#agentStatusHint {{
+                color: {Colors.REALTIME_ACCENT_WARM};
+                background: transparent;
+            }}
             QLabel#agentTaskSuccessLabel {{
                 background: transparent;
                 border: none;
@@ -221,6 +225,13 @@ class AgentTaskRow(QFrame):
         self.desc_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
         self.desc_label.setMinimumWidth(20)
         header_layout.addWidget(self.desc_label, 1)
+        # 运行期提示（API 重试等异常进度；默认隐藏，不让常规任务多占宽度）
+        self.status_label = QLabel("", self._header_widget)
+        self.status_label.setObjectName("agentStatusHint")
+        self.status_label.setFont(get_unified_font(9))
+        self.status_label.setWordWrap(False)
+        self.status_label.setVisible(False)
+        header_layout.addWidget(self.status_label)
 
         # 工具调用次数
         self.tool_count_label = QLabel("🔧0", self._header_widget)
@@ -403,12 +414,24 @@ class AgentTaskRow(QFrame):
         if self._ctx_label_detail:
             self._ctx_label_detail.setText(info)
 
+    def set_status_hint(self, text: str):
+        """设置运行期提示文案（如 API 重试进度）；空串隐藏。"""
+        if self._is_finished:
+            return
+        text = (text or "").replace("\r", " ").replace("\n", " ").strip()
+        if len(text) > 42:
+            text = text[:42] + "..."
+        self.status_label.setText(text)
+        self.status_label.setVisible(bool(text))
+
     def finish(self, success: bool = True):
         """标记任务完成（正常完成或中止）"""
         if self._is_finished:
             return
         self.is_running = False
         self._is_finished = True
+        self.status_label.setText("")
+        self.status_label.setVisible(False)
         self.update_elapsed()
         self._rotating_icon.setVisible(False)
 

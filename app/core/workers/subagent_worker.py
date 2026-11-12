@@ -45,6 +45,11 @@ _VALID_IDENTIFIER_PATTERN = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")  # 验证标
 # 与「最大输出」抢同一个 req_kwargs["max_tokens"]（按 dict 迭代序覆盖）。
 _CONTEXT_WINDOW_ONLY_KEYS = frozenset({"最大Token", "上下文长度"})
 
+# 子智能体单次 API 调用的重试次数。子任务在后台执行，失败要尽快回到主流程：
+# 5 次 × 退避上限 30s，总等待最坏约 65s（此前 15 次指数退避累计远超一小时，
+# 面板无任何反馈，观感等同于卡死）。
+_SUBAGENT_API_MAX_RETRIES = 5
+
 # ========== 上下文注入预算常量 ==========
 CHARS_PER_TOKEN = 4  # 与 HistoryCompactor 保持一致
 _CONTEXT_INJECTION_RATIO = 0.6  # 上下文注入最多占 budget 的 60%
@@ -149,6 +154,9 @@ class SubAgentExecutor(QThread):
     tool_result_received = pyqtSignal(str, str, str, bool)  # task_id, tool_name, result, success
     token_usage_updated = pyqtSignal(str, int, int, int)  # task_id, prompt_tokens, completion_tokens, total_tokens
     thinking_received = pyqtSignal(str, str)  # task_id, reasoning_content
+    # 重试状态（task_id, 文案）：API 失败进入退避时发射，供面板显示「第 N/M 次重试」。
+    # 与 progress_updated 分开：后者是任务阶段播报，不能当状态位用。
+    retry_status = pyqtSignal(str, str)
     # ★ T24：ask 行为权限请求（task_id, tool_name, arguments）→ 主线程弹窗
     permission_requested = pyqtSignal(str, str, dict)
 
@@ -1265,9 +1273,24 @@ class SubAgentExecutor(QThread):
         events = create_api_call_with_retry(
             client,
             create_stream,
+            max_retries=_SUBAGENT_API_MAX_RETRIES,
+            retry_delay=5.0,
             cancel_check=lambda: self._is_cancelled,
+            on_retry=self._notify_api_retry,
         )
         return self._aggregate_events(events)
+
+    def _notify_api_retry(self, err: Exception, attempt: int, max_retries: int, wait_time: float) -> None:
+        """重试状态上报：进任务日志 + 推面板行，避免重试期面板只有计时器在动。"""
+        msg = (
+            f"模型请求失败（{type(err).__name__}），"
+            f"第 {attempt}/{max_retries} 次重试，{wait_time:.0f}s 后继续"
+        )
+        self._add_log("progress", msg)
+        try:
+            self.retry_status.emit(self.task_id, msg)
+        except Exception as e:  # noqa: BLE001 - 信号失败不得影响重试
+            logger.warning(f"[SubAgentWorker] 重试状态上报失败: {e}")
 
     def _aggregate_events(self, events) -> tuple:
         """StreamEvent 流 → (content, tool_calls, reasoning)（协议无关聚合）。
