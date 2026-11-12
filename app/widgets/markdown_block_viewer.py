@@ -2140,8 +2140,18 @@ class ToolSectionWidget(QWidget):
         self._widgets, self._keys = reconcile_widgets(
             self._cards_layout, self._widgets, self._keys, items, self._build, streaming
         )
-        total = len(items)
-        self._separator.set_extra(f"{total} 项" if total else "")
+        # 分项计数（对齐 WebEngine 版 .ts-count）：思考 / 操作 / 失败操作
+        think_n = sum(1 for _, b in items if b.get("type") == "think")
+        tool_items = [b for _, b in items if b.get("type") == "tool"]
+        fail_n = sum(1 for b in tool_items if b.get("success") is False)
+        parts = []
+        if think_n:
+            parts.append(f"{think_n} 次思考")
+        if tool_items:
+            parts.append(f"{len(tool_items)} 次操作")
+        if fail_n:
+            parts.append(f"{fail_n} 次失败操作")
+        self._separator.set_extra(" · ".join(parts))
         if not self._collapsed and not self._content_wrap.isVisible():
             self._apply_expand_state()
         self.setVisible(bool(items))

@@ -3730,7 +3730,11 @@ _SKELETON_CACHE_MAX = 48
 # 做 CORS 拦截（只放行 http/data/chrome/https），取图失败 → 遮罩全透明，
 # 代码块右上角两个按钮只剩空白热区。改由 `_code_icon_mask_css` 从 qrc 读字节
 # 内联为 data:image/svg+xml，颜色仍由 --text-muted 控制。
-_SKELETON_CACHE_VERSION = 78
+# _SKELETON_CACHE_VERSION +1（v79）：「工具与思考」头部计数拆分——
+# 单一「N 项」改为「N 次思考 · N 次操作 · N 次失败操作」三段（0 值段隐藏），
+# 失败数按工具块根节点 data-tool-success="false" 统计（render_helpers 渲染时打标）。
+# 旧骨架仍是合并计数，须失效缓存。
+_SKELETON_CACHE_VERSION = 79
 
 
 def _js_literal(value) -> str:

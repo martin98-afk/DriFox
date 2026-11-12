@@ -4774,6 +4774,8 @@ class MessageCard(SimpleCardWidget):
             # 提取 block_key（用于设置 data-block-key 属性）
             _key_match = re.search(r'data-block-key="([^"]*)"', block_html)
             block_key = _key_match.group(1) if _key_match else ""
+            # 失败标记（「工具与思考」头部分项计数依赖）
+            _succ_false_js = "true" if 'data-tool-success="false"' in block_html else "false"
 
             # ── 增量更新解析：将 inner_html 拆分为 button 和 body 两部分 ──
             # 避免 existing.innerHTML = safe_inner 整体替换导致的子节点空窗期
@@ -4877,6 +4879,10 @@ class MessageCard(SimpleCardWidget):
                         existing.setAttribute('data-expanded', 'false');
                         existing.removeAttribute('data-streaming');
                         existing.removeAttribute('data-tool-injected');
+                        // 失败标记同步：流式块转完成态时属性不随 innerHTML 走，
+                        // 头部「失败操作」计数靠这个属性，漏同步会永远显示 0
+                        if ({_succ_false_js}) existing.setAttribute('data-tool-success', 'false');
+                        else existing.removeAttribute('data-tool-success');
                         existing.setAttribute('style', {safe_outer_style});
                         // 🆕 方案 D：原地更新保留原 data-order；缺失时注入（兜底）
                         if (!existing.getAttribute('data-order')) {{

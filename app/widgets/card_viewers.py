@@ -3953,8 +3953,10 @@ class CodeWebViewer(QWebEngineView):
                     background: var(--row-hover);
                     color: var(--text);
                 }}
-                /* 计项药丸：与标题拆成独立 span，项数变化不再改写标题字符串
-                   （旧实现把「· N 项」拼进标题 textContent，1→10 项时整行重新量宽） */
+                /* 计项药丸：与标题拆成独立 span，计数变化不再改写标题字符串
+                   （旧实现把「· N 项」拼进标题 textContent，1→10 项时整行重新量宽）。
+                   nowrap：分项计数（3 次思考 · 5 次操作 · 1 次失败操作）文字更长，
+                   窄卡片下不允许换行把标题行撑成两行。 */
                 #tool-separator .ts-count {{
                     font-size: 10.5px;
                     font-weight: 600;
@@ -3964,6 +3966,7 @@ class CodeWebViewer(QWebEngineView):
                     background: var(--row-hover);
                     color: var(--text-muted);
                     font-variant-numeric: tabular-nums;
+                    white-space: nowrap;
                 }}
                 /* 自绘 tooltip：hover 时在分隔条下方显示说明 */
                 #tool-separator {{
@@ -6209,17 +6212,34 @@ class CodeWebViewer(QWebEngineView):
                 // JS 不再硬编码工具名。
                 var _EDIT_TOOLS_SELECTOR = ':not([data-keep-in-content="true"])';
 
-                // 更新"工具与思考"标题（总项数）
+                // 更新"工具与思考"标题（分项计数：思考 / 操作 / 失败操作）
                 function _updateToolSectionHeader() {{
                     var toolContent = document.getElementById('tool-content');
                     var separator = document.getElementById('tool-separator');
                     if (!separator) return;
-                    var total = toolContent ? toolContent.children.length : 0;
-                    // 计数独立成 pill：标题字符串恒定，项数变化只改药丸内容与显隐
+                    // 三类分别计数（后代查询：块可能裹在 data-block-wrapper 里）
+                    // 思考：折叠思考块 / 流式思考尾 / 简洁模式思考行
+                    // 操作：工具块（含运行中的 tool-streaming-block）
+                    // 失败操作：Python 渲染时在根节点打了 data-tool-success="false"
+                    //   （见 render_helpers._tool_success_attr），运行中块没有该属性
+                    var thinkN = 0, toolN = 0, failN = 0;
+                    if (toolContent) {{
+                        thinkN = toolContent.querySelectorAll(
+                            '.think-block, .think-streaming, .think-compact').length;
+                        toolN = toolContent.querySelectorAll('.tool-block').length;
+                        failN = toolContent.querySelectorAll(
+                            '.tool-block[data-tool-success="false"]').length;
+                    }}
+                    // 计数独立成 pill：标题字符串恒定，计数变化只改药丸内容与显隐
                     var countEl = separator.querySelector(':scope > .ts-count');
                     if (countEl) {{
-                        countEl.textContent = total > 0 ? total + ' 项' : '';
-                        countEl.style.display = total > 0 ? '' : 'none';
+                        var parts = [];
+                        if (thinkN > 0) parts.push(thinkN + ' 次思考');
+                        if (toolN > 0) parts.push(toolN + ' 次操作');
+                        if (failN > 0) parts.push(failN + ' 次失败操作');
+                        var txt = parts.join(' · ');
+                        countEl.textContent = txt;
+                        countEl.style.display = txt ? '' : 'none';
                     }}
                     // ── 自动展开：流式时有新工具且当前折叠 → 展开 ──
                     // ⚠️ 必须同时满足 window._streamingActive（流式进行中）：流式结束的

@@ -703,6 +703,14 @@ def _render_tool_status_badge(success: bool) -> str:
     return f'<span class="tool-status-badge" style="position:absolute;top:-2px;right:-2px;width:7px;height:7px;border-radius:50%;background:{bg};z-index:2;box-shadow:0 1px 2px rgba(0,0,0,0.35);"></span>'
 
 
+def _tool_success_attr(success) -> str:
+    """失败标记：JS「工具与思考」头部按此统计「失败操作」数。
+
+    只在 success is False 时输出；None（运行中/未知）与 True 都不输出，
+    避免运行中块被算成失败。
+    """
+    return ' data-tool-success="false"' if success is False else ""
+
 def _render_inline_tool(
     tool_name: str,
     tool_args: dict,
@@ -724,7 +732,8 @@ def _render_inline_tool(
     tc_id_attr = f' data-tool-call-id="{escape(tool_call_id)}"' if tool_call_id else ""
     # 编辑/子智能体/提问类工具标记 data-keep-in-content：JS 正文分区据此保留在正文（registry 派生）
     _keep_attr = ' data-keep-in-content="true"' if tool_name in _keep_in_content_tools() else ""
-    return f"""<div class="tool-block" data-tool-name="{escape(tool_name)}"{tc_id_attr}{_keep_attr} style="margin: 4px 0; background: transparent; border: none; border-radius: 6px; box-shadow: none; display: flex; align-items: center; padding: 5px 10px; {get_font_family_css()}">
+    _succ_attr = _tool_success_attr(success)
+    return f"""<div class="tool-block" data-tool-name="{escape(tool_name)}"{tc_id_attr}{_keep_attr}{_succ_attr} style="margin: 4px 0; background: transparent; border: none; border-radius: 6px; box-shadow: none; display: flex; align-items: center; padding: 5px 10px; {get_font_family_css()}">
         <span style="display: inline-flex; align-items: center; gap: 14px; flex: 0 0 auto;">
             <span style="position:relative;display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;flex:0 0 auto;">
                 {icon_html}
@@ -889,6 +898,7 @@ def render_tool_block(
 
     # 状态徽章（图标右上角）
     badge_html = _render_tool_status_badge(success)
+    _succ_attr = _tool_success_attr(success)
     icon_html = _get_tool_icon_html(icon_name, tool_name=tool_name)
     cn_name = _get_tool_cn_name(tool_name)
 
@@ -973,13 +983,13 @@ def render_tool_block(
             {diff_stats_html}
         </span>"""
         if no_collapse:
-            return f"""<div class="tool-block tool-block--no-collapse" data-block-key="{block_key}" data-lazy-body="1" data-tool-name="{escape(tool_name)}" data-tool-call-id="{escape(tool_call_id or "")}"{_keep_attr} style="margin: 4px 0; background: transparent; border-radius: 6px;">
+            return f"""<div class="tool-block tool-block--no-collapse" data-block-key="{block_key}" data-lazy-body="1" data-tool-name="{escape(tool_name)}" data-tool-call-id="{escape(tool_call_id or "")}"{_keep_attr}{_succ_attr} style="margin: 4px 0; background: transparent; border-radius: 6px;">
     <div class="tool-block__header" style="cursor: default; padding: 4px 8px; color: {title_color}; font-size: {scale_font_size(13)}px; font-weight: 500; display: flex; align-items: center; gap: 6px; width: 100%; background: transparent; border: none; text-align: left; box-sizing: border-box; {get_font_family_css()}">
         {_head_spans}
     </div>
     <div class="tool-block__body" style="padding: 0 8px 4px;"></div>
 </div>"""
-        return f"""<div class="cm-collapsible tool-block" data-block-key="{block_key}" data-expanded="false" data-lazy-body="1" data-tool-name="{escape(tool_name)}" data-tool-call-id="{escape(tool_call_id or "")}"{_keep_attr} style="margin: 4px 0; background: transparent; border-radius: 6px;">
+        return f"""<div class="cm-collapsible tool-block" data-block-key="{block_key}" data-expanded="false" data-lazy-body="1" data-tool-name="{escape(tool_name)}" data-tool-call-id="{escape(tool_call_id or "")}"{_keep_attr}{_succ_attr} style="margin: 4px 0; background: transparent; border-radius: 6px;">
     <button type="button" class="cm-collapsible__summary tool-block__summary" aria-expanded="false" style="cursor: pointer; padding: 4px 8px; color: {title_color}; font-size: {scale_font_size(13)}px; font-weight: 500; display: flex; align-items: center; gap: 6px; width: 100%; background: transparent; border: none; text-align: left; box-sizing: border-box; {get_font_family_css()}">
         {_head_spans}
         <span class="cm-collapsible__chevron" aria-hidden="true" style="flex: 0 0 auto; margin-left: auto;"></span>
@@ -1092,7 +1102,7 @@ def render_tool_block(
     if no_collapse:
         # 禁用折叠框渲染：无 cm-collapsible 交互，标题栏 + body 直接展示
         _keep_attr = ' data-keep-in-content="true"' if tool_name in _keep_in_content_tools() else ""
-        return f"""<div class="tool-block tool-block--no-collapse" data-tool-name="{escape(tool_name)}" data-tool-call-id="{escape(tool_call_id or "")}"{_keep_attr} style="margin: 4px 0; background: transparent; border-radius: 6px;">
+        return f"""<div class="tool-block tool-block--no-collapse" data-tool-name="{escape(tool_name)}" data-tool-call-id="{escape(tool_call_id or "")}"{_keep_attr}{_succ_attr} style="margin: 4px 0; background: transparent; border-radius: 6px;">
     <div class="tool-block__header" style="cursor: default; padding: 4px 8px; color: {title_color}; font-size: {scale_font_size(13)}px; font-weight: 500; display: flex; align-items: center; gap: 6px; width: 100%; background: transparent; border: none; text-align: left; box-sizing: border-box; {get_font_family_css()}">
         <span style="display: inline-flex; align-items: center; gap: 14px; flex: 0 0 auto;">
             <span style="position:relative;display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;flex:0 0 auto;">
@@ -1114,7 +1124,7 @@ def render_tool_block(
 </div>"""
 
     _keep_attr = ' data-keep-in-content="true"' if tool_name in _keep_in_content_tools() else ""
-    return f"""<div class="cm-collapsible tool-block" data-block-key="{block_key}" data-expanded="{expanded_attr}" data-tool-name="{escape(tool_name)}" data-tool-call-id="{escape(tool_call_id or "")}"{_keep_attr} style="margin: 4px 0; background: transparent; border-radius: 6px;">
+    return f"""<div class="cm-collapsible tool-block" data-block-key="{block_key}" data-expanded="{expanded_attr}" data-tool-name="{escape(tool_name)}" data-tool-call-id="{escape(tool_call_id or "")}"{_keep_attr}{_succ_attr} style="margin: 4px 0; background: transparent; border-radius: 6px;">
     <button type="button" class="cm-collapsible__summary tool-block__summary" aria-expanded="{expanded_attr}" style="cursor: pointer; padding: 4px 8px; color: {title_color}; font-size: {scale_font_size(13)}px; font-weight: 500; display: flex; align-items: center; gap: 6px; width: 100%; background: transparent; border: none; text-align: left; box-sizing: border-box; {get_font_family_css()}">
         <span style="display: inline-flex; align-items: center; gap: 14px; flex: 0 0 auto;">
             <span style="position:relative;display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;flex:0 0 auto;">
