@@ -19,6 +19,7 @@
   "capabilities": [
     "question.control",
     "model.complete",
+    "plugin.config.read",
     "provider.list",
     "model.enumerate",
     "session.read"

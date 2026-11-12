@@ -100,14 +100,21 @@ def _api_key(tool_ctx, name: str) -> str:
     """读取搜索服务 API key：环境变量 → 插件配置 → schema 默认（E1 三级链）
 
     - 环境变量：TAVILY_API_KEY / TINYFISH_API_KEY（最高优先级）
-    - 插件配置：PluginConfigStore（plugin.json config_schema 声明，设置面板自动渲染）
+    - 插件配置：plugin.config.read 能力（plugin.json config_schema 声明）
     - 默认值：plugin.json config_schema.default（内置兜底）
+
+    取值链由宿主 PluginConfigStore 实现，插件不直连该模块。
     """
     _ensure_migrated()
-    from app.plugins.managers.plugin_config_store import PluginConfigStore
+    from app.plugins.sdk import caps_for
 
     key = "tavily_api_key" if name == "TAVILY_API_KEY" else "tinyfish_api_key"
-    val = PluginConfigStore().get(_PLUGIN_NAME, key)
+    try:
+        read = caps_for("plugin.config.read")
+        val = read(key, "")
+    except Exception as e:  # noqa: BLE001 - 能力不可用时按未配置处理
+        logger.warning(f"[system-web] 读取插件配置失败: {e}")
+        return ""
     return str(val or "")
 
 

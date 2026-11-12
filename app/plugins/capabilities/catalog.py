@@ -250,7 +250,7 @@ CATALOG: Dict[str, CapabilitySpec] = {
             "plugin.config.read",
             _L,
             "读本插件自己的配置项（manifest config_schema 声明值；不传 key 返回全部）",
-            _UI,
+            _BOTH,
         ),
         _spec(
             "plugin.config.write",

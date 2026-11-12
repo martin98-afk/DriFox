@@ -298,3 +298,30 @@ def test_plugin_deps_reports_missing_plugin(monkeypatch):
     )
     out = ui_core._plugin_deps(None, CTX)()
     assert out == {"ok": False, "missing": [], "issues": ["插件未安装"]}
+
+
+# ── 插件接入守卫 ────────────────────────────────────────────
+
+def test_welcome_changelog_fetches_via_net_http():
+    """欢迎页更新日志走能力池 net.http，不再自建 httpx client。"""
+    from pathlib import Path
+
+    src = (
+        Path(__file__).resolve().parent.parent.parent
+        / "plugins" / "welcome_changelog" / "ui" / "_fetcher.py"
+    ).read_text(encoding="utf-8")
+
+    assert '_caps("net.http")' in src
+    assert "import httpx" not in src
+
+
+def test_system_web_reads_config_via_capability():
+    """搜索 Key 读取走 plugin.config.read，迁移逻辑除外（一次性历史搬移仍直连存储）。"""
+    from pathlib import Path
+
+    src = (
+        Path(__file__).resolve().parent.parent.parent
+        / "plugins" / "system-web" / "tools" / "web_tools.py"
+    ).read_text(encoding="utf-8")
+
+    assert 'caps_for("plugin.config.read")' in src

@@ -158,19 +158,23 @@ class QuestionTimeoutController(QObject):
     # ── 配置 ──
 
     @staticmethod
-    def _read_policy() -> Dict[str, Any]:
-        """读本插件自己的配置（action / sec / model）。"""
-        try:
-            from app.plugins.managers.plugin_config_store import PluginConfigStore
+    def _read_policy(pool: Any = None) -> Dict[str, Any]:
+        """读本插件自己的配置（action / sec / model）。
 
-            store = PluginConfigStore()
-            action = str(store.get(_CONFIG_PLUGIN, "question_timeout_action") or "none").strip()
-            raw_sec = store.get(_CONFIG_PLUGIN, "question_timeout_sec")
+        走插件配置能力（plugin.config.read）：取值优先级（env → 存储值 → schema
+        默认）与设置卡回显由宿主统一，插件不再直连 PluginConfigStore。
+        """
+        read = pool.get("plugin.config.read") if hasattr(pool, "get") else None
+        if not callable(read):
+            logger.warning("[system-question] 能力池缺少 plugin.config.read，按不超时处理")
+            return {"action": "none", "sec": 120, "model": ""}
+        try:
+            action = str(read("question_timeout_action", "none") or "none").strip()
             try:
-                sec = int(float(raw_sec))
+                sec = int(float(read("question_timeout_sec", 120)))
             except (TypeError, ValueError):
                 sec = 120
-            model = str(store.get(_CONFIG_PLUGIN, "question_timeout_model") or "").strip()
+            model = str(read("question_timeout_model", "") or "").strip()
         except Exception as e:  # noqa: BLE001 - 配置读取失败按不超时处理
             logger.debug(f"[system-question] 配置读取失败，按不超时处理: {e}")
             return {"action": "none", "sec": 120, "model": ""}
@@ -186,7 +190,7 @@ class QuestionTimeoutController(QObject):
         if session is None:
             return
         if event == "asked":
-            policy = self._read_policy()
+            policy = self._read_policy(session.pool)
             session.action = policy["action"]
             session.sec = policy["sec"]
             session.model_query = policy["model"]

@@ -365,6 +365,12 @@ def register(registry) -> None:
 
         return _impl(host, ctx)
 
+    def _plugin_config_read(host: Any, ctx: Any):
+        """tool 面读配置：工具执行时要拿插件自己的 key（system-web 典型）。"""
+        from app.plugins.capabilities.providers.ui_core import _plugin_config_read as _impl
+
+        return _impl(host, ctx)
+
     def _plugin_log(host: Any, ctx: Any):
         """带 plugin=<name> 前缀的 logger（与 ui_core 同实现）。"""
         from loguru import logger
@@ -647,6 +653,7 @@ def register(registry) -> None:
     registry.register("tool.register", _tool_register, surface="tool", owner="core:tool")
     registry.register("tool.unregister", _tool_unregister, surface="tool", owner="core:tool")
     registry.register("plugin.deps", _plugin_deps, surface="tool", owner="core:tool")
+    registry.register("plugin.config.read", _plugin_config_read, surface="tool", owner="core:tool")
     registry.register("tool.inject", _tool_inject, surface="tool", owner="core:tool")
     registry.register("team.read", _team_read, surface="tool", owner="core:tool")
     registry.register("team.send", _team_send, surface="tool", owner="core:tool")

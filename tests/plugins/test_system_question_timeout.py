@@ -79,7 +79,7 @@ class _Controller:
         # 没有对应主窗口的 session 当作已关窗口清理掉
         mod.QuestionTimeoutController._ensure_subscriptions = lambda self: None
         mod.QuestionTimeoutController._read_policy = staticmethod(
-            lambda: {"action": self.action, "sec": self.sec, "model": self.model}
+            lambda pool=None: {"action": self.action, "sec": self.sec, "model": self.model}
         )
 
     def open_question(self, window_id="w1", snapshot=None, pool=None):
@@ -255,3 +255,25 @@ def test_ensure_subscriptions_skips_host_without_question_control(monkeypatch):
     # 真实对话窗口仍正常订阅
     assert attempted == ["w1"]
     assert "w1" in ctrl._sessions
+
+
+def test_read_policy_uses_capability_pool():
+    """配置读取走 plugin.config.read，本地只做归一化（sec 钳制 / action 白名单）。"""
+    mod = _load_timeout_module()
+    values = {
+        "question_timeout_action": "ai",
+        "question_timeout_sec": "8",
+        "question_timeout_model": " glm-5 ",
+    }
+
+    policy = mod.QuestionTimeoutController._read_policy(
+        {"plugin.config.read": lambda key, default=None: values.get(key, default)}
+    )
+
+    assert policy == {"action": "ai", "sec": 10, "model": "glm-5"}
+
+
+def test_read_policy_without_capability_disables_timeout():
+    mod = _load_timeout_module()
+
+    assert mod.QuestionTimeoutController._read_policy({}) == {"action": "none", "sec": 120, "model": ""}
