@@ -44,6 +44,10 @@ class GatewayService(QObject):
 
     # 平台线程 → 主线程（与原 backend 相同的信号机制）
     gateway_input_received = pyqtSignal(object)  # dict: {text, chat_id, user_id, platform, future}
+    # worker 线程的 question_asked 转主线程处理（QTimer/状态字典都在主线程）
+    question_asked_received = pyqtSignal(object)  # dict: {platform, chat_id, payload}
+    # 流收尾清理待答状态：回调可能在 worker 线程，QTimer.stop 只能在主线程做
+    question_state_cleared = pyqtSignal(str)  # key
 
     @classmethod
     def get_instance(cls) -> "GatewayService":
@@ -67,8 +71,13 @@ class GatewayService(QObject):
         # [PERF T34] 后台预热线程与主线程消息路径的 _ensure_components 竞争保护。
         # 不用 RLock：构造段在锁内是纯 CPU/import，无需重入。
         self._components_lock = threading.Lock()
+        # 待答提问：key=f"{platform}:{chat_id}" → {tool_call_id, questions, index, answers, timer}
+        # Gateway 是纯文本通道，question 工具的按钮语义改成「发一条选项消息 + 等下一条回复」。
+        self._pending_questions: Dict[str, Dict[str, Any]] = {}
 
         self.gateway_input_received.connect(self._on_gateway_input)
+        self.question_asked_received.connect(self._on_question_asked)
+        self.question_state_cleared.connect(self._clear_question_state)
         # 创建/停止均由 TabManagerWindow（应用生命周期容器）驱动：
         # __init__ → ensure_started()；cleanup() → stop()
 
@@ -501,6 +510,151 @@ class GatewayService(QObject):
             if not (result and getattr(result, "success", False)):
                 await _fallback_link(path, "文件")
 
+    # ==================== 交互提问（IM 内作答） ====================
+
+    _QUESTION_TIMEOUT_SEC = 300  # 超过这个时间没有回复，自动跳过（用户可能去忙别的了）
+
+    def _question_key(self, platform: Any, chat_id: str) -> str:
+        return f"{_gw_str_platform(platform)}:{chat_id}"
+
+    def _on_question_asked(self, data: dict) -> None:
+        """worker 发起 question → 发选项消息到平台，记下待答状态（主线程）。"""
+        from app.gateway.interaction import format_question
+
+        platform = data.get("platform")
+        chat_id = str(data.get("chat_id") or "")
+        payload = data.get("payload") or {}
+        questions = list(payload.get("questions") or [])
+        if not questions:
+            return
+        tool_call_id = str(payload.get("tool_call_id") or "")
+        key = self._question_key(platform, chat_id)
+        # 同一会话不应有两题并发（单 worker 串行）；旧状态残留时先作废，避免答错题
+        self._pending_questions.pop(key, None)
+        state = {
+            "tool_call_id": tool_call_id,
+            "questions": questions,
+            "index": 0,
+            "answers": [],
+        }
+        self._pending_questions[key] = state
+        self._send_question_text(platform, chat_id, format_question(questions, 0, len(questions)))
+        self._arm_question_timeout(key)
+
+    def _send_question_text(self, platform: Any, chat_id: str, text: str) -> None:
+        """把问题文本推到平台（走 manager 事件循环，任意线程安全）。"""
+        _ev_loop = getattr(self._manager, "_loop", None) if self._manager else None
+        if not _ev_loop:
+            logger.warning("[Gateway] 提问消息无法发送：事件循环不可用")
+            return
+        try:
+            asyncio.run_coroutine_threadsafe(
+                self._send_message(_gw_str_platform(platform), chat_id, text), _ev_loop
+            )
+        except Exception as e:
+            logger.error(f"[Gateway] 提问消息发送失败: {e}")
+
+    def _arm_question_timeout(self, key: str) -> None:
+        """为待答提问装超时：到点没回复就按"跳过"收尾，避免 worker 永久阻塞。
+
+        多题时会重复调用：旧 timer 必须先停，否则它到期会按旧 answer 列表提前收尾。
+        """
+        state = self._pending_questions.get(key)
+        if state is None:
+            return
+        old = state.get("timer")
+        if old is not None:
+            try:
+                old.stop()
+                old.deleteLater()
+            except Exception:
+                pass
+        timer = QTimer(self)
+        timer.setSingleShot(True)
+        timer.timeout.connect(lambda: self._on_question_timeout(key, timer))
+        state["timer"] = timer
+        timer.start(self._QUESTION_TIMEOUT_SEC * 1000)
+
+    def _on_question_timeout(self, key: str, timer: "QTimer") -> None:
+        state = self._pending_questions.get(key)
+        if state is None or state.get("timer") is not timer:
+            # 已被后续题目换表 / 已收尾：这个 timer 的到期属于陈旧信号
+            try:
+                timer.deleteLater()
+            except Exception:
+                pass
+            return
+        logger.warning(f"[Gateway] 提问超时未回答，按跳过处理: {key}")
+        self._finish_question(key, state, skipped=True)
+
+    def _consume_pending_question(self, platform: Any, chat_id: str, user_id: str, text: str) -> bool:
+        """把这条消息当作对未答提问的回复处理。
+
+        Returns:
+            True 表示已消费（调用方不要再走 AI 对话）。
+        """
+        key = self._question_key(platform, chat_id)
+        state = self._pending_questions.get(key)
+        if state is None:
+            return False
+        # 命令不当作答案：/stop 之类应正常生效，顺带作废待答状态
+        if text.strip().startswith("/"):
+            return False
+        from app.gateway.interaction import format_question, parse_answer
+
+        questions = state["questions"]
+        index = state["index"]
+        state["answers"].append(parse_answer(questions[index], text))
+        state["index"] = index + 1
+        if state["index"] < len(questions):
+            # 还有下一题：先问完再一次性交给 worker
+            self._send_question_text(
+                platform, chat_id, format_question(questions, state["index"], len(questions))
+            )
+            self._arm_question_timeout(key)
+            return True
+        self._finish_question(key, state)
+        return True
+
+    def _finish_question(self, key: str, state: dict, skipped: bool = False) -> None:
+        """收尾：拼答案回填 worker，清状态与定时器。"""
+        from app.gateway.interaction import build_answer_payload
+
+        self._pending_questions.pop(key, None)
+        timer = state.get("timer")
+        if timer is not None:
+            try:
+                timer.stop()
+                timer.deleteLater()
+            except Exception:
+                pass
+        questions = state["questions"]
+        answers = list(state["answers"])
+        if skipped:
+            while len(answers) < len(questions):
+                answers.append(f"（用户 {self._QUESTION_TIMEOUT_SEC} 秒内未回答，已跳过）")
+        payload = build_answer_payload(questions, answers)
+        engine = self._engine
+        if engine is None or not hasattr(engine, "provide_question_answer"):
+            logger.warning("[Gateway] 引擎不可用，提问答案无法回填")
+            return
+        try:
+            engine.provide_question_answer(payload)
+        except Exception as e:
+            logger.error(f"[Gateway] 提问答案回填失败: {e}")
+
+    def _clear_question_state(self, key: str) -> None:
+        state = self._pending_questions.pop(key, None)
+        if state is None:
+            return
+        timer = state.get("timer")
+        if timer is not None:
+            try:
+                timer.stop()
+                timer.deleteLater()
+            except Exception:
+                pass
+
     # ==================== 主线程消息处理 ====================
 
     def _on_gateway_input(self, data: dict):
@@ -516,6 +670,18 @@ class GatewayService(QObject):
         logger.info(
             f"[Gateway] Main thread processing: {text[:50]}... (media={len(media_urls)})"
         )
+
+        # ===== 待答提问拦截：这条消息可能是对上一个 question 的回答 =====
+        # 命令（/stop 等）不当答案：作废待答状态，让命令正常生效
+        if text.strip().startswith("/"):
+            self._clear_question_state(self._question_key(platform, chat_id))
+        elif self._consume_pending_question(platform, chat_id, user_id, text):
+            try:
+                if not future.done():
+                    future.set_result("")
+            except Exception:
+                pass
+            return
 
         # ===== 入口守卫 + 自愈 =====
         # 服务永不销毁，但引擎可能因历史 cleanup 处于不可用状态：先尝试同步重建
@@ -688,6 +854,7 @@ class GatewayService(QObject):
                 # 回复已在上方送达（流式卡片 finish_stream / 兜底 _push_to_platform），
                 # future 仅作完成信号置空串——若回传 final，MessageHandler.handle
                 # 会把同一份结果再发一遍（历史 bug：Gateway 结果发两次）。
+                self.question_state_cleared.emit(self._question_key(gw_platform, chat_id))
                 try:
                     if not future.done():
                         future.set_result("")
@@ -698,6 +865,7 @@ class GatewayService(QObject):
                 logger.error(f"[Gateway] AI error: {error}")
                 _push_to_platform(f"❌ {error}")
                 # 错误文案已推送，future 置空串防 handle 二次发送（同上）
+                self.question_state_cleared.emit(self._question_key(gw_platform, chat_id))
                 try:
                     if not future.done():
                         future.set_result("")
@@ -710,6 +878,9 @@ class GatewayService(QObject):
                 "tool_result_received": on_tool_result,
                 "stream_finished": on_stream_finished,
                 "error": on_error,
+                "question_asked": lambda payload: self.question_asked_received.emit(
+                    {"platform": gw_platform, "chat_id": chat_id, "payload": payload}
+                ),
             }
 
             self._engine.process(

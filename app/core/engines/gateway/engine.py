@@ -446,6 +446,21 @@ class GatewayEngine(QObject, BaseEngine):
         suffix = f"（另有 {queued} 条排队消息将继续处理）" if queued else ""
         return f"🛑 已停止当前回复{suffix}"
 
+    def provide_question_answer(self, answer: str) -> bool:
+        """把 IM 里收到的回答交给阻塞中的 worker。
+
+        question 工具在 worker 侧是阻塞语义：``_execute_all_tools`` 返回 None 后
+        worker 自旋等 ``_answer_event``，只有 ``provide_answer`` 能唤醒它。
+        返回 False 表示当前没有等待中的提问（例如已被 /stop 或超时收掉）。
+        """
+        worker = getattr(self._conversation_executor, "_current_worker", None)
+        if worker is not None and hasattr(worker, "provide_answer"):
+            worker.provide_answer(answer)
+            logger.info("[GatewayEngine] 已回填 question 答案（len=%d）", len(answer or ""))
+            return True
+        logger.warning("[GatewayEngine] 无等待中的 worker，question 答案丢弃")
+        return False
+
     def _cmd_status(self, session: ChatSession) -> str:
         """处理 /status 命令：当前会话状态总览"""
         cfg = Settings.get_instance()
@@ -642,6 +657,11 @@ class GatewayEngine(QObject, BaseEngine):
             result["tool_call_started"] = lambda i, n, a, r: cb_tool_call({"tool_name": n, "arguments": a})
         if cb_tool_result:
             result["tool_result_received"] = lambda i, n, a, r: cb_tool_result({"tool_name": n, "result": r})
+        cb_question = callbacks.get("question_asked")
+        if cb_question:
+            result["question_asked"] = lambda i, qs, e=None: cb_question(
+                {"tool_call_id": i, "questions": qs or []}
+            )
 
         def on_messages_updated(messages):
             if messages:
@@ -700,8 +720,10 @@ class GatewayEngine(QObject, BaseEngine):
 你正在通过 Gateway 对外提供 AI 服务（当前平台可能为钉钉/企业微信等）。
 以下是必须遵守的规则：
 
-### 【禁止使用的工具】
-- ❌ **禁止** 使用 `question` 工具
+### 【可用与禁用的工具】
+- ✅ **可以** 使用 `question` 工具向用户确认需求/偏好（问题会转成 IM 选项消息，用户回一条消息作答）
+  - 每题给 2-4 个选项，label 简短、description 说明差别
+  - 一次最多问 2 题，能不问就不问（用户看不到按钮，回复成本高于桌面端）
 - ❌ **禁止** 使用 `subagent_para` 和 `subagent_status` 工具
 - ❌ **禁止** 使用 `todowrite` 工具
 
@@ -749,9 +771,23 @@ class GatewayEngine(QObject, BaseEngine):
                 session_id=str(getattr(session, "session_id", "") or "") if session else "",
             )
 
-        from app.core.conversation.config import PermissionStrategy, filter_interactive_tools
+        from app.core.conversation.config import INTERACTIVE_ONLY_TOOLS, PermissionStrategy
 
-        return filter_interactive_tools(tools, PermissionStrategy.AGENT_CONFIG)
+        # Gateway 保留 question（宿主会把它转成 IM 选项消息并等用户下一条回复），
+        # 其余交互类工具（子智能体、待办）在纯文本通道里没有落点，仍按策略过滤。
+        blocked = INTERACTIVE_ONLY_TOOLS - {"question"}
+        filtered = [
+            t
+            for t in tools
+            if t.get("function", {}).get("name") not in blocked
+            and t.get("name") not in blocked
+        ]
+        if len(filtered) != len(tools):
+            logger.debug(
+                f"[GatewayEngine] filtered {len(tools) - len(filtered)} interactive tool(s) "
+                f"(strategy={PermissionStrategy.AGENT_CONFIG.value})"
+            )
+        return filtered
 
     # ==================== 持久化 ====================
 
