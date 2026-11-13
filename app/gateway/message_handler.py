@@ -69,6 +69,7 @@ class MessageHandler:
                 chat_id=event.chat_id,
                 user_id=event.user_id,
                 chat_type=event.chat_type,
+                message_id=event.message_id,
                 media_urls=event.media_urls,
             )
 

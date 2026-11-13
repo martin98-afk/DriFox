@@ -341,6 +341,7 @@ class GatewayService(QObject):
         chat_id: str,
         user_id: str,
         chat_type: str = "dm",
+        message_id: str = "",
         **kwargs,
     ) -> str:
         """处理平台消息（manager 事件循环线程）→ 转主线程
@@ -367,6 +368,7 @@ class GatewayService(QObject):
                 "chat_id": chat_id,
                 "user_id": user_id,
                 "chat_type": chat_type,
+                "message_id": message_id,
                 "platform": _pid,
                 "media_urls": list(kwargs.get("media_urls") or []),
                 "media_types": list(kwargs.get("media_types") or []),
@@ -695,6 +697,7 @@ class GatewayService(QObject):
         chat_id = data["chat_id"]
         user_id = data["user_id"]
         chat_type = data.get("chat_type") or "dm"
+        message_id = data.get("message_id") or ""
         platform = data["platform"]
         future = data["future"]
         media_urls = data.get("media_urls") or []
@@ -738,6 +741,25 @@ class GatewayService(QObject):
             from app.gateway.base import MessageEvent, MessageType
 
             gw_platform = _gw_str_platform(platform)
+
+            # 群聊背景：群里未 @机器人 的消息也进了存档（插件侧写入），
+            # 当前消息前拼一段最近群消息，让模型知道被叫住之前在聊什么。
+            # 命令不注入，否则 "/model" 之类会被前綴打断。
+            if chat_type == "group" and text.strip() and not text.lstrip().startswith("/"):
+                try:
+                    from app.gateway.group_history import (
+                        format_group_context,
+                        get_group_history_store,
+                    )
+
+                    _rows = get_group_history_store().recent(
+                        platform, chat_id, limit=20, exclude_message_id=message_id
+                    )
+                    _prefix = format_group_context(_rows)
+                    if _prefix:
+                        text = f"{_prefix}\n\n[当前消息]\n{text}"
+                except Exception as e:
+                    logger.debug(f"[Gateway] 群历史读取失败: {e}")
 
             # 1. 获取或创建 GatewaySession（平台用户映射）
             gw_session = self._manager.session_manager.get_or_create_session(
