@@ -136,10 +136,13 @@ class PluginConfigStore:
 
     # ── 读 ──────────────────────────────────────────────
 
-    def get(self, plugin_name: str, key: str) -> Any:
-        """当前生效值：环境变量 → 存储值 → schema 默认
+    def get(self, plugin_name: str, key: str, default: Any = None) -> Any:
+        """当前生效值：环境变量 → 存储值 → schema 默认 → 调用方兜底
 
         password 字段额外多一层：密钥库优先，命中旧明文时懒迁移并清掉 JSON。
+        ``default`` 只在「无 schema 或字段未在 schema 声明」时兜底——插件作者按
+        ``store.get(name, key, True)`` 写类型化默认值是常见形态（gateway-feishu
+        的 require_mention 即如此），签名不收会直接 TypeError。
         """
         schema = self._schema(plugin_name)
         f = schema.get_field(key) if schema else None
@@ -176,7 +179,7 @@ class PluginConfigStore:
                 return f.default
         if key in raw and raw[key] not in ("", None):
             return self._normalize(f, raw[key]) if f is not None else raw[key]
-        return f.default if f is not None else None
+        return f.default if f is not None else default
 
     def get_all(self, plugin_name: str) -> Dict[str, Any]:
         """全部字段当前生效值（渲染卡回显用；无 schema 返回空 dict）"""

@@ -36,6 +36,20 @@ def store(tmp_path, monkeypatch, isolated_secret_store):
     return PluginConfigStore(), tmp_path, isolated_secret_store
 
 
+def test_get_accepts_caller_default(store, monkeypatch):
+    """``get(plugin, key, default)`` 三参形态是插件作者常见写法，必须收。
+
+    gateway-feishu 的 config_builder 用 ``store.get(plugin, "require_mention", True)``，
+    旧签名只收两参 → manager.get_status() 抛 TypeError → 设置卡状态整片读不出来。
+    无 schema 字段（或字段未声明）时返回调用方默认值。
+    """
+    s, _tmp, _keyring = store
+    assert s.get("gw", "require_mention", True) is True
+    assert s.get("gw", "label", "默认") == "默认"
+    # schema 声明的字段仍以 schema 默认值优先
+    assert s.get("gw", "name") == ""
+
+
 def test_password_field_goes_to_secret_store(store):
     s, tmp_path, keyring = store
 
