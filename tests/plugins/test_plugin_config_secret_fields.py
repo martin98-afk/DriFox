@@ -36,6 +36,20 @@ def store(tmp_path, monkeypatch, isolated_secret_store):
     return PluginConfigStore(), tmp_path, isolated_secret_store
 
 
+def test_stored_values_readable_without_schema(store, monkeypatch):
+    """schema 未注册时仍能读出用户已写入的原始配置。
+
+    网关插件加载时序可能早于 PluginManager 注册 config_schema；此时
+    ``effective_values`` 返回空，消费方（plugin.config.read 无 key 形态）
+    若照此判「未配置」会静默不连接。``stored_values`` 提供原始兜底。
+    """
+    s, tmp_path, _keyring = store
+    s.set_values("gw", {"enabled": True, "name": "x"})
+    monkeypatch.setattr(PluginConfigStore, "_schema", lambda self, name: None)
+    assert s.effective_values("gw") == {}
+    assert s.stored_values("gw") == {"enabled": True, "name": "x"}
+
+
 def test_get_accepts_caller_default(store, monkeypatch):
     """``get(plugin, key, default)`` 三参形态是插件作者常见写法，必须收。
 

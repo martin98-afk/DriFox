@@ -185,6 +185,14 @@ class PluginConfigStore:
         """全部字段当前生效值（渲染卡回显用；无 schema 返回空 dict）"""
         return self.effective_values(plugin_name)
 
+    def stored_values(self, plugin_name: str) -> Dict[str, Any]:
+        """存储里的原始键值（不做 schema 归一/默认填充）。
+
+        用途：schema 尚未注册时（插件刚装、加载时序早于 PluginManager 注册）
+        仍需读出用户已写入的配置，避免消费方把「schema 缺失」误判成「未配置」。
+        """
+        return dict(self._read_raw(plugin_name))
+
     def effective_values(self, plugin_name: str) -> Dict[str, Any]:
         """全部字段当前生效值，一次读盘（语义同 get：env → 存储 → schema 默认）。
 

@@ -1716,7 +1716,12 @@ def _plugin_config_read(host: Any, ctx: Any):
             if key:
                 value = store.get(plugin_name, key)
                 return default if value is None else value
-            return store.effective_values(plugin_name)
+            values = store.effective_values(plugin_name)
+            if not values:
+                # schema 未注册（插件刚装/加载时序早于 PluginManager 注册）：
+                # 退回存储原始值，别让消费方把「读不到 schema」当成「用户没配置」
+                values = store.stored_values(plugin_name)
+            return values
         except Exception as e:  # noqa: BLE001
             logger.warning(f"[Capability] plugin.config.read 失败（{plugin_name}）: {e}")
             return {} if not key else default
