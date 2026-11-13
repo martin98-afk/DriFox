@@ -141,6 +141,17 @@ def _truncate_value(v, max_len: int = 80) -> str:
         return s[:max_len] + "..." if len(s) > max_len else s
 
 
+def _shorten_path(path: str, max_len: int = 56) -> str:
+    """折叠头右侧的路径缩短：保留开头目录与末尾文件名，中间省略。
+    绝对路径动辄上百字符，原样塞进单行会被 CSS 从尾部裁掉——文件名正好是
+    最该看见的部分，所以在 Python 侧先做首尾截断。
+    """
+    if not path or len(path) <= max_len:
+        return path
+    half = (max_len - 1) // 2
+    return f"{path[:half]}…{path[-half:]}"
+
+
 def _format_args_preview(tool_args: dict, max_total_len: int = 80) -> str:
     """
     格式化参数预览为 '参数1=值1; 参数2=值2' 格式。
@@ -960,10 +971,14 @@ def render_tool_block(
     # 描述不截断：宁可右侧路径被挤掉，也要把「这一步做什么」完整摆出来
     preview_text = args_preview
     if desc_text and isinstance(tool_args, dict):
-        preview_text = str(tool_args.get("path") or tool_args.get("file_path") or "").strip()
+        preview_text = _shorten_path(str(tool_args.get("path") or tool_args.get("file_path") or "").strip())
+    elif len(preview_text) > 80:
+        # 无描述时保持原预览，只对超长串做首尾缩短（尾部通常是文件名）
+        preview_text = _shorten_path(preview_text, 80)
     preview_span = ""
     if preview_text:
-        preview_span = f'''<span style="color: var(--text-secondary); font-size: {scale_font_size(11)}px; text-align: left; word-break: break-all; white-space: normal; line-height: 1.4; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;">
+        # 右侧必须单行：路径换行会撑破 header 行高，和下一块工具卡叠在一起
+        preview_span = f'''<span style="color: var(--text-secondary); font-size: {scale_font_size(11)}px; text-align: left; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">
                 {escape(preview_text)}
             </span>'''
 

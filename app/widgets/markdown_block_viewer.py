@@ -693,12 +693,18 @@ def _tool_desc_from_block(block: Dict[str, Any]) -> str:
     return str(args.get("description") or "").strip() if args else ""
 
 
-def _tool_path_from_block(block: Dict[str, Any]) -> str:
-    """取参数里的文件路径（描述进标题后，右侧继续显示它）"""
+def _tool_path_from_block(block: Dict[str, Any], max_len: int = 56) -> str:
+    """取参数里的文件路径（描述进标题后，右侧继续显示它）
+    超长路径做首尾缩短：保留开头目录与末尾文件名，与 WebEngine 版一致。
+    """
     args = _tool_args_from_block(block)
     if not args:
         return ""
-    return str(args.get("path") or args.get("file_path") or "").strip()
+    path = str(args.get("path") or args.get("file_path") or "").strip()
+    if len(path) <= max_len:
+        return path
+    half = (max_len - 1) // 2
+    return f"{path[:half]}…{path[-half:]}"
 
 
 def _tool_args_from_block(block: Dict[str, Any]) -> Dict[str, Any]:

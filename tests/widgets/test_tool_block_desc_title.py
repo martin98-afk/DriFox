@@ -85,3 +85,16 @@ class TestTitleColorToken:
         monkeypatch.setattr(Colors, "TOOL_TITLE_MCP", "#654321")
         html = render_tool_block("mcp__srv__tool", {}, "ok", True, tool_call_id="tc2")
         assert "#654321" in _header(html)
+
+
+class TestLongPathLayout:
+    def test_long_path_shortened_single_line(self):
+        """绝对长路径首尾缩短保留文件名，且右侧是单行（换行会撑破行高与下一块重叠）。"""
+        long_path = (
+            "/Users/dingma/.drifox/workspaces/DriFoxPlugins/plugins/"
+            "gateway-telegram/gateways/telegram.py"
+        )
+        head = _header(_render(path=long_path, description="加编辑消息流式"))
+        assert "telegram.py" in head
+        assert "…" in head
+        assert "-webkit-line-clamp" not in head
