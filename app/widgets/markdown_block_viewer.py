@@ -687,18 +687,30 @@ def _is_edit_tool_name(name: str) -> bool:
 
 def _tool_desc_from_block(block: Dict[str, Any]) -> str:
     """取模型填在参数里的 description（意图说明）；无/非法 JSON 时返回空串。
-    有说明时折叠头用它当标题，工具名与参数预览让位（对齐 WebEngine 版）。
+    有说明时折叠头用它当标题，工具名让位（对齐 WebEngine 版）。
     """
+    args = _tool_args_from_block(block)
+    return str(args.get("description") or "").strip() if args else ""
+
+
+def _tool_path_from_block(block: Dict[str, Any]) -> str:
+    """取参数里的文件路径（描述进标题后，右侧继续显示它）"""
+    args = _tool_args_from_block(block)
+    if not args:
+        return ""
+    return str(args.get("path") or args.get("file_path") or "").strip()
+
+
+def _tool_args_from_block(block: Dict[str, Any]) -> Dict[str, Any]:
+    """解析 block 的 args_raw 为 dict；无/非法 JSON 返回空 dict"""
     raw = block.get("args_raw") or ""
     if not raw:
-        return ""
+        return {}
     try:
         args = json.loads(raw)
     except Exception:
-        return ""
-    if not isinstance(args, dict):
-        return ""
-    return str(args.get("description") or "").strip()
+        return {}
+    return args if isinstance(args, dict) else {}
 
 
 def _parse_tool_block(content: str) -> Dict[str, Any]:
@@ -1792,6 +1804,8 @@ class ToolCardWidget(_CollapsibleHeightAnimMixin, QFrame):
         self._chevron.setStyleSheet(
             f"color:{Colors.ASSISTANT_CARD_MUTED}; font-size:{scale_font_size(12)}px; background:transparent;"
         )
+        self._name_label.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Preferred)
+        self._preview_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         for w in (gear, self._name_label, self._preview_label, self._status_label):
             hl.addWidget(w)
         self._apply_title(block)
@@ -1871,14 +1885,15 @@ class ToolCardWidget(_CollapsibleHeightAnimMixin, QFrame):
                 self._body_kind, self._body_label_ref = "result", result_label
 
     def _apply_title(self, block: Dict[str, Any]) -> None:
-        """标题位：有 description 就显它（超 48 字截断），工具名与预览让位；否则原名+预览。
-        对齐 WebEngine 版 render_tool_block：说明与路径挤一行会把两者都挤掉。
+        """标题位：有 description 就显它（不截断，宁可右侧路径让位），右侧继续显文件路径；
+        无 description 维持「工具名 + 参数预览」。对齐 WebEngine 版 render_tool_block。
         """
         desc = _tool_desc_from_block(block)
         if desc:
-            self._name_label.setText(desc if len(desc) <= 48 else desc[:47] + "…")
-            self._preview_label.setText("")
-            self._preview_label.setVisible(False)
+            # 不截断：宁可右侧路径被挤掉，也要把左侧意图说明完整摆出来
+            self._name_label.setText(desc)
+            self._preview_label.setVisible(True)
+            self._preview_label.setText(_tool_path_from_block(block))
             return
         self._name_label.setText(block.get("cn_name") or block.get("name") or "工具调用")
         self._preview_label.setVisible(True)

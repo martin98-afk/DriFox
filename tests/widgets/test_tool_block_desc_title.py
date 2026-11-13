@@ -1,6 +1,6 @@
-"""工具块折叠头：有 description 时用它当标题，工具名与右侧参数预览让位。
+"""工具块折叠头：有 description 时用它当标题，工具名让位，右侧继续显文件路径。
 背景：编辑类工具必填 description 后，折叠头原本是「编辑 描述 (路径)」三段挤一行，
-说明被截断、路径也看不清。约定改为：有说明就用说明当标题，右侧不再重复预览；
+说明被截断、路径也看不清。约定改为：有说明就用说明当标题，右侧只留路径；
 无说明维持「工具名 + 参数预览」。
 """
 import re
@@ -8,10 +8,7 @@ import re
 from app.widgets.render_helpers import render_tool_block, _get_tool_cn_name
 from app.utils.design_tokens import Colors
 
-_TITLE_RE = re.compile(
-    r"white-space: nowrap; flex: 0 1 auto; min-width: 0; overflow: hidden; "
-    r"text-overflow: ellipsis;[^>]*>([^<]*)</span>"
-)
+_TITLE_RE = re.compile(r"white-space: nowrap; flex: 0 0 auto;[^>]*>([^<]*)</span>")
 
 
 def _header(html: str) -> str:
@@ -30,8 +27,8 @@ def _render(**args):
 
 
 class TestDescAsTitle:
-    def test_desc_replaces_cn_name_and_hides_preview(self):
-        """有 description：标题是描述，路径预览不出现在头部。"""
+    def test_desc_replaces_cn_name_and_keeps_path(self):
+        """有 description：标题是描述，右侧仍显文件路径。"""
         html = render_tool_block(
             "edit",
             {"path": "a.py", "description": "同步共享模块的必填语义说明"},
@@ -40,7 +37,7 @@ class TestDescAsTitle:
             tool_call_id="tc1",
         )
         assert _title(html) == "同步共享模块的必填语义说明"
-        assert "a.py" not in _header(html)
+        assert "a.py" in _header(html)
 
     def test_no_desc_keeps_cn_name_and_preview(self):
         """无 description：维持原名与参数预览。"""
@@ -54,13 +51,12 @@ class TestDescAsTitle:
         assert _title(html) == _get_tool_cn_name("edit")
         assert "a.py" in _header(html)
 
-    def test_long_desc_truncated(self):
-        """超长描述截断到 48 字以内，避免标题单行溢出。"""
+    def test_long_desc_shown_in_full(self):
+        """描述不截断（宁可右侧路径让位），长描述整段出现在头部。"""
         long_desc = "很长" * 40
-        title = _title(_render(path="a.py", description=long_desc))
-        assert long_desc not in title
-        assert title.endswith("…")
-        assert len(title) <= 48
+        head = _header(_render(path="a.py", description=long_desc))
+        assert long_desc in head
+        assert "a.py" in head
 
     def test_diff_stats_survive_desc_title(self):
         """有 description 时右侧 +N/-N 仍要显示（只有参数预览让位）。"""

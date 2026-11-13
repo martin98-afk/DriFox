@@ -950,18 +950,21 @@ def render_tool_block(
     if args_preview.startswith(cn_name):
         args_preview = args_preview[len(cn_name) :].lstrip()
 
-    # 有 description（模型填的意图说明）时：它就是这一步的标题，工具名与右侧
-    # 参数预览一并让位——三位挤在一行会把说明截断、路径也看不清。无说明维持原样。
+    # 有 description（模型填的意图说明）时：描述进标题位替换工具名，
+    # 右侧继续显示被它挤掉的事实信息（文件路径）。描述与路径挤在同一行
+    # 会把两者都压扁，故分居两侧；路径缺了不知道这一步改的是哪个文件。
     desc_text = ""
     if isinstance(tool_args, dict):
         desc_text = str(tool_args.get("description") or "").strip()
     title_text = desc_text or cn_name
-    if len(title_text) > 48:
-        title_text = title_text[:47] + "…"
+    # 描述不截断：宁可右侧路径被挤掉，也要把「这一步做什么」完整摆出来
+    preview_text = args_preview
+    if desc_text and isinstance(tool_args, dict):
+        preview_text = str(tool_args.get("path") or tool_args.get("file_path") or "").strip()
     preview_span = ""
-    if not desc_text:
+    if preview_text:
         preview_span = f'''<span style="color: var(--text-secondary); font-size: {scale_font_size(11)}px; text-align: left; word-break: break-all; white-space: normal; line-height: 1.4; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;">
-                {escape(args_preview)}
+                {escape(preview_text)}
             </span>'''
 
     # 生成哈希 key（折叠块懒注入的早返回也要用，故提前到内容构造之前）
@@ -988,20 +991,20 @@ def render_tool_block(
                 {icon_html}
                 {badge_html}
             </span>
-            <span style="white-space: nowrap; flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; {get_font_family_css()}">{escape(title_text)}</span>
+            <span style="white-space: nowrap; flex: 0 0 auto; {get_font_family_css()}" title="{escape(title_text)}">{escape(title_text)}</span>
         </span>
         <span style="display: flex; align-items: center; gap: 8px; margin-left: 10px; min-width: 0; flex: 1 1 auto; justify-content: flex-start; overflow: hidden;">
             {preview_span}{diff_stats_html}
         </span>"""
         if no_collapse:
             return f"""<div class="tool-block tool-block--no-collapse" data-block-key="{block_key}" data-lazy-body="1" data-tool-name="{escape(tool_name)}" data-tool-call-id="{escape(tool_call_id or "")}"{_keep_attr}{_succ_attr} style="margin: 4px 0; background: transparent; border-radius: 6px;">
-    <div class="tool-block__header" style="cursor: default; padding: 4px 8px; color: {title_color}; font-size: {scale_font_size(13)}px; font-weight: 500; display: flex; align-items: center; gap: 6px; width: 100%; background: transparent; border: none; text-align: left; box-sizing: border-box; {get_font_family_css()}">
+    <div class="tool-block__header" style="cursor: default; padding: 4px 8px; color: {title_color}; font-size: {scale_font_size(13)}px; font-weight: 500; display: flex; align-items: center; gap: 6px; width: 100%; overflow: hidden; background: transparent; border: none; text-align: left; box-sizing: border-box; {get_font_family_css()}">
         {_head_spans}
     </div>
     <div class="tool-block__body" style="padding: 0 8px 4px;"></div>
 </div>"""
         return f"""<div class="cm-collapsible tool-block" data-block-key="{block_key}" data-expanded="false" data-lazy-body="1" data-tool-name="{escape(tool_name)}" data-tool-call-id="{escape(tool_call_id or "")}"{_keep_attr}{_succ_attr} style="margin: 4px 0; background: transparent; border-radius: 6px;">
-    <button type="button" class="cm-collapsible__summary tool-block__summary" aria-expanded="false" style="cursor: pointer; padding: 4px 8px; color: {title_color}; font-size: {scale_font_size(13)}px; font-weight: 500; display: flex; align-items: center; gap: 6px; width: 100%; background: transparent; border: none; text-align: left; box-sizing: border-box; {get_font_family_css()}">
+    <button type="button" class="cm-collapsible__summary tool-block__summary" aria-expanded="false" style="cursor: pointer; padding: 4px 8px; color: {title_color}; font-size: {scale_font_size(13)}px; font-weight: 500; display: flex; align-items: center; gap: 6px; width: 100%; overflow: hidden; background: transparent; border: none; text-align: left; box-sizing: border-box; {get_font_family_css()}">
         {_head_spans}
         <span class="cm-collapsible__chevron" aria-hidden="true" style="flex: 0 0 auto; margin-left: auto;"></span>
     </button>
@@ -1114,13 +1117,13 @@ def render_tool_block(
         # 禁用折叠框渲染：无 cm-collapsible 交互，标题栏 + body 直接展示
         _keep_attr = ' data-keep-in-content="true"' if tool_name in _keep_in_content_tools() else ""
         return f"""<div class="tool-block tool-block--no-collapse" data-tool-name="{escape(tool_name)}" data-tool-call-id="{escape(tool_call_id or "")}"{_keep_attr}{_succ_attr} style="margin: 4px 0; background: transparent; border-radius: 6px;">
-    <div class="tool-block__header" style="cursor: default; padding: 4px 8px; color: {title_color}; font-size: {scale_font_size(13)}px; font-weight: 500; display: flex; align-items: center; gap: 6px; width: 100%; background: transparent; border: none; text-align: left; box-sizing: border-box; {get_font_family_css()}">
+    <div class="tool-block__header" style="cursor: default; padding: 4px 8px; color: {title_color}; font-size: {scale_font_size(13)}px; font-weight: 500; display: flex; align-items: center; gap: 6px; width: 100%; overflow: hidden; background: transparent; border: none; text-align: left; box-sizing: border-box; {get_font_family_css()}">
         <span style="display: inline-flex; align-items: center; gap: 14px; flex: 0 1 auto; min-width: 0;">
             <span style="position:relative;display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;flex:0 0 auto;">
                 {icon_html}
                 {badge_html}
             </span>
-            <span style="white-space: nowrap; flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; {get_font_family_css()}">{escape(title_text)}</span>
+            <span style="white-space: nowrap; flex: 0 0 auto; {get_font_family_css()}" title="{escape(title_text)}">{escape(title_text)}</span>
         </span>
         <span style="display: flex; align-items: center; gap: 8px; margin-left: 10px; min-width: 0; flex: 1 1 auto; justify-content: flex-start; overflow: hidden;">
             {preview_span}{diff_stats_html}
@@ -1133,13 +1136,13 @@ def render_tool_block(
 
     _keep_attr = ' data-keep-in-content="true"' if tool_name in _keep_in_content_tools() else ""
     return f"""<div class="cm-collapsible tool-block" data-block-key="{block_key}" data-expanded="{expanded_attr}" data-tool-name="{escape(tool_name)}" data-tool-call-id="{escape(tool_call_id or "")}"{_keep_attr}{_succ_attr} style="margin: 4px 0; background: transparent; border-radius: 6px;">
-    <button type="button" class="cm-collapsible__summary tool-block__summary" aria-expanded="{expanded_attr}" style="cursor: pointer; padding: 4px 8px; color: {title_color}; font-size: {scale_font_size(13)}px; font-weight: 500; display: flex; align-items: center; gap: 6px; width: 100%; background: transparent; border: none; text-align: left; box-sizing: border-box; {get_font_family_css()}">
+    <button type="button" class="cm-collapsible__summary tool-block__summary" aria-expanded="{expanded_attr}" style="cursor: pointer; padding: 4px 8px; color: {title_color}; font-size: {scale_font_size(13)}px; font-weight: 500; display: flex; align-items: center; gap: 6px; width: 100%; overflow: hidden; background: transparent; border: none; text-align: left; box-sizing: border-box; {get_font_family_css()}">
         <span style="display: inline-flex; align-items: center; gap: 14px; flex: 0 1 auto; min-width: 0;">
             <span style="position:relative;display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;flex:0 0 auto;">
                 {icon_html}
                 {badge_html}
             </span>
-            <span style="white-space: nowrap; flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; {get_font_family_css()}">{escape(title_text)}</span>
+            <span style="white-space: nowrap; flex: 0 0 auto; {get_font_family_css()}" title="{escape(title_text)}">{escape(title_text)}</span>
         </span>
         <span style="display: flex; align-items: center; gap: 8px; margin-left: 10px; min-width: 0; flex: 1 1 auto; justify-content: flex-start; overflow: hidden;">
             {preview_span}{diff_stats_html}
