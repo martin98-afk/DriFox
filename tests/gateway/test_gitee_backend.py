@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Gitee OAuth 后端测试（app.gateway.auth.gitee）
+Gitee OAuth 后端测试（app.core.auth.gitee）
 
 覆盖:
   - ensure_repo（仓库检查/创建）
@@ -15,7 +15,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-pytest.importorskip("app.gateway.auth.gitee")
+pytest.importorskip("app.core.auth.gitee")
 
 from pytest import MonkeyPatch
 
@@ -55,10 +55,10 @@ class TestEnsureRepo:
 
     def test_repo_exists(self):
         """仓库已存在时应返回成功"""
-        from app.gateway.auth.gitee import ensure_repo
+        from app.core.auth.gitee import ensure_repo
 
-        with patch("app.gateway.auth.gitee.requests.get") as mock_get, \
-             patch("app.gateway.auth.gitee.requests.patch") as mock_patch:
+        with patch("app.core.auth.gitee.requests.get") as mock_get, \
+             patch("app.core.auth.gitee.requests.patch") as mock_patch:
             mock_get.return_value.status_code = 200
             mock_get.return_value.json.return_value = {
                 "name": "DriFox_uploads", "private": False
@@ -70,10 +70,10 @@ class TestEnsureRepo:
 
     def test_repo_exists_private_mismatch(self):
         """仓库可见性与请求不匹配时应更新可见性"""
-        from app.gateway.auth.gitee import ensure_repo
+        from app.core.auth.gitee import ensure_repo
 
-        with patch("app.gateway.auth.gitee.requests.get") as mock_get, \
-             patch("app.gateway.auth.gitee.requests.patch") as mock_patch:
+        with patch("app.core.auth.gitee.requests.get") as mock_get, \
+             patch("app.core.auth.gitee.requests.patch") as mock_patch:
             mock_get.return_value.status_code = 200
             mock_get.return_value.json.return_value = {
                 "name": "DriFox_uploads", "private": False
@@ -86,11 +86,11 @@ class TestEnsureRepo:
 
     def test_repo_created(self):
         """仓库不存在时应创建"""
-        from app.gateway.auth.gitee import ensure_repo
+        from app.core.auth.gitee import ensure_repo
 
-        with patch("app.gateway.auth.gitee.requests.get") as mock_get, \
-             patch("app.gateway.auth.gitee.requests.post") as mock_post, \
-             patch("app.gateway.auth.gitee.requests.patch") as mock_patch:
+        with patch("app.core.auth.gitee.requests.get") as mock_get, \
+             patch("app.core.auth.gitee.requests.post") as mock_post, \
+             patch("app.core.auth.gitee.requests.patch") as mock_patch:
 
             mock_get.return_value.status_code = 404
             mock_post.return_value.status_code = 201
@@ -108,11 +108,11 @@ class TestEnsureRepo:
 
     def test_repo_create_failed(self):
         """仓库创建失败应返回错误"""
-        from app.gateway.auth.gitee import ensure_repo
+        from app.core.auth.gitee import ensure_repo
 
-        with patch("app.gateway.auth.gitee.requests.get") as mock_get, \
-             patch("app.gateway.auth.gitee.requests.post") as mock_post, \
-             patch("app.gateway.auth.gitee.requests.patch") as mock_patch:
+        with patch("app.core.auth.gitee.requests.get") as mock_get, \
+             patch("app.core.auth.gitee.requests.post") as mock_post, \
+             patch("app.core.auth.gitee.requests.patch") as mock_patch:
 
             mock_get.return_value.status_code = 404
             mock_post.return_value.status_code = 422
@@ -125,9 +125,9 @@ class TestEnsureRepo:
 
     def test_repo_check_network_error(self):
         """检查仓库时网络错误应向上传播（ensure_repo 无 try/except）"""
-        from app.gateway.auth.gitee import ensure_repo
+        from app.core.auth.gitee import ensure_repo
 
-        with patch("app.gateway.auth.gitee.requests.get") as mock_get:
+        with patch("app.core.auth.gitee.requests.get") as mock_get:
             mock_get.side_effect = Exception("Network error")
 
             with pytest.raises(Exception, match="Network error"):
@@ -135,10 +135,10 @@ class TestEnsureRepo:
 
     def test_repo_create_network_error(self):
         """创建仓库时网络错误应向上传播"""
-        from app.gateway.auth.gitee import ensure_repo
+        from app.core.auth.gitee import ensure_repo
 
-        with patch("app.gateway.auth.gitee.requests.get") as mock_get, \
-             patch("app.gateway.auth.gitee.requests.post") as mock_post:
+        with patch("app.core.auth.gitee.requests.get") as mock_get, \
+             patch("app.core.auth.gitee.requests.post") as mock_post:
 
             mock_get.return_value.status_code = 404
             mock_post.side_effect = Exception("Timeout")
@@ -148,11 +148,11 @@ class TestEnsureRepo:
 
     def test_repo_patch_failed(self):
         """创建后设置可见性失败应返回错误"""
-        from app.gateway.auth.gitee import ensure_repo
+        from app.core.auth.gitee import ensure_repo
 
-        with patch("app.gateway.auth.gitee.requests.get") as mock_get, \
-             patch("app.gateway.auth.gitee.requests.post") as mock_post, \
-             patch("app.gateway.auth.gitee.requests.patch") as mock_patch:
+        with patch("app.core.auth.gitee.requests.get") as mock_get, \
+             patch("app.core.auth.gitee.requests.post") as mock_post, \
+             patch("app.core.auth.gitee.requests.patch") as mock_patch:
 
             mock_get.return_value.status_code = 404
             mock_post.return_value.status_code = 201
@@ -169,10 +169,10 @@ class TestEnsureRepo:
 
     def test_repo_exists_patch_failed(self):
         """已存在仓库更新可见性失败应返回错误"""
-        from app.gateway.auth.gitee import ensure_repo
+        from app.core.auth.gitee import ensure_repo
 
-        with patch("app.gateway.auth.gitee.requests.get") as mock_get, \
-             patch("app.gateway.auth.gitee.requests.patch") as mock_patch:
+        with patch("app.core.auth.gitee.requests.get") as mock_get, \
+             patch("app.core.auth.gitee.requests.patch") as mock_patch:
 
             mock_get.return_value.status_code = 200
             mock_get.return_value.json.return_value = {
@@ -198,7 +198,7 @@ class TestGiteeBackendUnbind:
 
     def test_unbind_clears_config(self, _mock_settings_config):
         """解绑应清除 token/owner/bound, 保留 repo 默认值"""
-        from app.gateway.auth import get_oauth_backend
+        from app.core.auth import get_oauth_backend
 
         cfg = _mock_settings_config
         ok, msg = get_oauth_backend("gitee").unbind()
@@ -213,7 +213,7 @@ class TestGiteeBackendUnbind:
 
     def test_unbind_saves_config(self, _mock_settings_config):
         """解绑应调用 cfg.save()"""
-        from app.gateway.auth import get_oauth_backend
+        from app.core.auth import get_oauth_backend
 
         get_oauth_backend("gitee").unbind()
         _mock_settings_config.save.assert_called_once()
@@ -229,7 +229,7 @@ class TestGiteeBackendBoundInfo:
 
     def test_get_bound_info_when_bound(self, _mock_settings_config):
         """已绑定时应返回 owner/repo/token"""
-        from app.gateway.auth import get_oauth_backend
+        from app.core.auth import get_oauth_backend
 
         _mock_settings_config.gitee_bound.value = True
         _mock_settings_config.gitee_user_owner.value = "test_user"
@@ -247,7 +247,7 @@ class TestGiteeBackendBoundInfo:
 
     def test_get_bound_info_when_not_bound(self, _mock_settings_config):
         """未绑定时应返回 None"""
-        from app.gateway.auth import get_oauth_backend
+        from app.core.auth import get_oauth_backend
 
         _mock_settings_config.gitee_bound.value = False
         info = get_oauth_backend("gitee").get_bound_info()
@@ -255,7 +255,7 @@ class TestGiteeBackendBoundInfo:
 
     def test_get_bound_info_uses_property_access(self, _mock_settings_config):
         """验证 get_bound_info 通过 .value 访问配置"""
-        from app.gateway.auth import get_oauth_backend
+        from app.core.auth import get_oauth_backend
 
         _mock_settings_config.gitee_bound.value = True
         _mock_settings_config.gitee_user_owner.value = "owner_name"
@@ -274,13 +274,13 @@ class TestGiteeBackendIsBound:
     """查询绑定状态"""
 
     def test_is_bound_true(self, _mock_settings_config):
-        from app.gateway.auth import get_oauth_backend
+        from app.core.auth import get_oauth_backend
 
         _mock_settings_config.gitee_bound.value = True
         assert get_oauth_backend("gitee").is_bound() is True
 
     def test_is_bound_false(self, _mock_settings_config):
-        from app.gateway.auth import get_oauth_backend
+        from app.core.auth import get_oauth_backend
 
         _mock_settings_config.gitee_bound.value = False
         assert get_oauth_backend("gitee").is_bound() is False
@@ -299,9 +299,9 @@ class TestGiteeBackendBind:
     打开浏览器、等待授权码并换取 token；再执行 Gitee 特有的
     fetch_user_login / ensure_repo / 写配置。
 
-    token 换取的 POST 发生在 base 层（patch app.gateway.auth.base.requests.post）；
+    token 换取的 POST 发生在 base 层（patch app.core.auth.base.requests.post）；
     fetch_user_login / ensure_repo 的 GET/PATCH 发生在 gitee 层
-    （patch app.gateway.auth.gitee.requests.get / .patch）。
+    （patch app.core.auth.gitee.requests.get / .patch）。
 
     通过 preset mock server.auth_code / server.auth_error 触发不同分支，
     patch threading.Event.wait 让等待循环快速跑完。
@@ -323,7 +323,7 @@ class TestGiteeBackendBind:
 
     def test_no_oauth_credentials(self, _mock_settings_config):
         """OAuth 凭证未配置时应返回错误"""
-        from app.gateway.auth import get_oauth_backend
+        from app.core.auth import get_oauth_backend
 
         _mock_settings_config.gitee_oauth_client_id.value = ""
         _mock_settings_config.gitee_oauth_client_secret.value = ""
@@ -334,23 +334,23 @@ class TestGiteeBackendBind:
 
     def test_callback_server_failed(self, _mock_settings_config):
         """回调服务器启动失败应返回错误"""
-        from app.gateway.auth import get_oauth_backend
+        from app.core.auth import get_oauth_backend
 
-        with patch("app.gateway.auth.base.start_callback_server", return_value=None):
+        with patch("app.core.auth.base.start_callback_server", return_value=None):
             ok, msg = get_oauth_backend("gitee").bind()
             assert ok is False
             assert "端口" in msg
 
     def test_oauth_timeout(self, _mock_settings_config):
         """授权超时应返回错误"""
-        from app.gateway.auth import get_oauth_backend
+        from app.core.auth import get_oauth_backend
 
         mock_server = self._mock_server_with_code()
         mock_server.auth_code = None  # 清除，模拟无人授权
-        with patch("app.gateway.auth.base.start_callback_server", return_value=mock_server), \
-             patch("app.gateway.auth.base.webbrowser.open"), \
-             patch("app.gateway.auth.base.stop_callback_server") as mock_stop, \
-             patch("app.gateway.auth.base.threading.Event.wait", return_value=None):
+        with patch("app.core.auth.base.start_callback_server", return_value=mock_server), \
+             patch("app.core.auth.base.webbrowser.open"), \
+             patch("app.core.auth.base.stop_callback_server") as mock_stop, \
+             patch("app.core.auth.base.threading.Event.wait", return_value=None):
 
             ok, msg = get_oauth_backend("gitee").bind()
             assert ok is False
@@ -359,12 +359,12 @@ class TestGiteeBackendBind:
 
     def test_oauth_user_error(self, _mock_settings_config):
         """用户拒绝授权应返回错误"""
-        from app.gateway.auth import get_oauth_backend
+        from app.core.auth import get_oauth_backend
 
         mock_server = self._mock_server_with_error("user denied")
-        with patch("app.gateway.auth.base.start_callback_server", return_value=mock_server), \
-             patch("app.gateway.auth.base.webbrowser.open"), \
-             patch("app.gateway.auth.base.stop_callback_server"):
+        with patch("app.core.auth.base.start_callback_server", return_value=mock_server), \
+             patch("app.core.auth.base.webbrowser.open"), \
+             patch("app.core.auth.base.stop_callback_server"):
 
             ok, msg = get_oauth_backend("gitee").bind()
             assert ok is False
@@ -372,18 +372,18 @@ class TestGiteeBackendBind:
 
     def test_token_exchange_failed(self, _mock_settings_config):
         """换取 access_token 失败应返回错误"""
-        from app.gateway.auth import get_oauth_backend
+        from app.core.auth import get_oauth_backend
 
         mock_server = self._mock_server_with_code()
         token_resp = MagicMock()
         token_resp.status_code = 401
         token_resp.json.return_value = {"message": "invalid code"}
-        with patch("app.gateway.auth.base.start_callback_server", return_value=mock_server), \
-             patch("app.gateway.auth.base.webbrowser.open"), \
-             patch("app.gateway.auth.base.stop_callback_server"), \
-             patch("app.gateway.auth.base.threading.Event.wait", return_value=None), \
-             patch("app.gateway.auth.base.requests.post", return_value=token_resp), \
-             patch("app.gateway.auth.gitee.requests.patch") as mock_patch:
+        with patch("app.core.auth.base.start_callback_server", return_value=mock_server), \
+             patch("app.core.auth.base.webbrowser.open"), \
+             patch("app.core.auth.base.stop_callback_server"), \
+             patch("app.core.auth.base.threading.Event.wait", return_value=None), \
+             patch("app.core.auth.base.requests.post", return_value=token_resp), \
+             patch("app.core.auth.gitee.requests.patch") as mock_patch:
 
             mock_patch.return_value = MagicMock(status_code=200)
             ok, msg = get_oauth_backend("gitee").bind()
@@ -392,17 +392,17 @@ class TestGiteeBackendBind:
 
     def test_token_response_missing_token(self, _mock_settings_config):
         """Token 响应缺少 access_token 应返回错误"""
-        from app.gateway.auth import get_oauth_backend
+        from app.core.auth import get_oauth_backend
 
         mock_server = self._mock_server_with_code()
         token_resp = MagicMock()
         token_resp.status_code = 200
         token_resp.json.return_value = {"no_token_here": "true"}
-        with patch("app.gateway.auth.base.start_callback_server", return_value=mock_server), \
-             patch("app.gateway.auth.base.webbrowser.open"), \
-             patch("app.gateway.auth.base.stop_callback_server"), \
-             patch("app.gateway.auth.base.threading.Event.wait", return_value=None), \
-             patch("app.gateway.auth.base.requests.post", return_value=token_resp):
+        with patch("app.core.auth.base.start_callback_server", return_value=mock_server), \
+             patch("app.core.auth.base.webbrowser.open"), \
+             patch("app.core.auth.base.stop_callback_server"), \
+             patch("app.core.auth.base.threading.Event.wait", return_value=None), \
+             patch("app.core.auth.base.requests.post", return_value=token_resp):
 
             ok, msg = get_oauth_backend("gitee").bind()
             assert ok is False
@@ -410,7 +410,7 @@ class TestGiteeBackendBind:
 
     def test_user_info_failed(self, _mock_settings_config):
         """获取用户信息失败应返回错误"""
-        from app.gateway.auth import get_oauth_backend
+        from app.core.auth import get_oauth_backend
 
         mock_server = self._mock_server_with_code()
         token_resp = MagicMock()
@@ -420,13 +420,13 @@ class TestGiteeBackendBind:
         get_resp = MagicMock()
         get_resp.status_code = 403
         get_resp.json.return_value = {"message": "forbidden"}
-        with patch("app.gateway.auth.base.start_callback_server", return_value=mock_server), \
-             patch("app.gateway.auth.base.webbrowser.open"), \
-             patch("app.gateway.auth.base.stop_callback_server"), \
-             patch("app.gateway.auth.base.threading.Event.wait", return_value=None), \
-             patch("app.gateway.auth.base.requests.post", return_value=token_resp), \
-             patch("app.gateway.auth.gitee.requests.get") as mock_get, \
-             patch("app.gateway.auth.gitee.requests.patch") as mock_patch:
+        with patch("app.core.auth.base.start_callback_server", return_value=mock_server), \
+             patch("app.core.auth.base.webbrowser.open"), \
+             patch("app.core.auth.base.stop_callback_server"), \
+             patch("app.core.auth.base.threading.Event.wait", return_value=None), \
+             patch("app.core.auth.base.requests.post", return_value=token_resp), \
+             patch("app.core.auth.gitee.requests.get") as mock_get, \
+             patch("app.core.auth.gitee.requests.patch") as mock_patch:
 
             # GET 分别用于用户信息、主仓库检查、配置仓库检查
             mock_get.side_effect = [get_resp, MagicMock(status_code=200), MagicMock(status_code=200)]
@@ -438,19 +438,19 @@ class TestGiteeBackendBind:
 
     def test_user_info_missing_login(self, _mock_settings_config):
         """用户信息缺少 login 字段应返回错误"""
-        from app.gateway.auth import get_oauth_backend
+        from app.core.auth import get_oauth_backend
 
         mock_server = self._mock_server_with_code()
         token_resp = MagicMock()
         token_resp.status_code = 200
         token_resp.json.return_value = {"access_token": "token_abc"}
 
-        with patch("app.gateway.auth.base.start_callback_server", return_value=mock_server), \
-             patch("app.gateway.auth.base.webbrowser.open"), \
-             patch("app.gateway.auth.base.stop_callback_server"), \
-             patch("app.gateway.auth.base.threading.Event.wait", return_value=None), \
-             patch("app.gateway.auth.base.requests.post", return_value=token_resp), \
-             patch("app.gateway.auth.gitee.requests.get") as mock_get:
+        with patch("app.core.auth.base.start_callback_server", return_value=mock_server), \
+             patch("app.core.auth.base.webbrowser.open"), \
+             patch("app.core.auth.base.stop_callback_server"), \
+             patch("app.core.auth.base.threading.Event.wait", return_value=None), \
+             patch("app.core.auth.base.requests.post", return_value=token_resp), \
+             patch("app.core.auth.gitee.requests.get") as mock_get:
 
             mock_get.return_value.status_code = 200
             mock_get.return_value.json.return_value = {"name": "No Login"}
@@ -461,20 +461,20 @@ class TestGiteeBackendBind:
 
     def test_full_oauth_success(self, _mock_settings_config):
         """完整的 OAuth 绑定成功流程"""
-        from app.gateway.auth import get_oauth_backend
+        from app.core.auth import get_oauth_backend
 
         mock_server = self._mock_server_with_code("valid_auth_code")
         token_resp = MagicMock()
         token_resp.status_code = 200
         token_resp.json.return_value = {"access_token": "final_token_xyz"}
 
-        with patch("app.gateway.auth.base.start_callback_server", return_value=mock_server), \
-             patch("app.gateway.auth.base.webbrowser.open"), \
-             patch("app.gateway.auth.base.stop_callback_server") as mock_stop, \
-             patch("app.gateway.auth.base.threading.Event.wait", return_value=None), \
-             patch("app.gateway.auth.base.requests.post", return_value=token_resp), \
-             patch("app.gateway.auth.gitee.requests.get") as mock_get, \
-             patch("app.gateway.auth.gitee.requests.patch") as mock_patch:
+        with patch("app.core.auth.base.start_callback_server", return_value=mock_server), \
+             patch("app.core.auth.base.webbrowser.open"), \
+             patch("app.core.auth.base.stop_callback_server") as mock_stop, \
+             patch("app.core.auth.base.threading.Event.wait", return_value=None), \
+             patch("app.core.auth.base.requests.post", return_value=token_resp), \
+             patch("app.core.auth.gitee.requests.get") as mock_get, \
+             patch("app.core.auth.gitee.requests.patch") as mock_patch:
 
             mock_patch.return_value = MagicMock(status_code=200)
 
@@ -498,7 +498,7 @@ class TestGiteeBackendBind:
 
     def test_oauth_sets_repo_private(self, _mock_settings_config):
         """repo_private=True 时应创建私有仓库"""
-        from app.gateway.auth import get_oauth_backend
+        from app.core.auth import get_oauth_backend
 
         mock_server = self._mock_server_with_code("code")
         token_resp = MagicMock()
@@ -507,13 +507,13 @@ class TestGiteeBackendBind:
 
         # 注意：base 与 gitee 共享同一个 requests 模块，
         # 故只 patch 一次 requests.post，用 URL 区分 token 换取与建仓库。
-        with patch("app.gateway.auth.base.start_callback_server", return_value=mock_server), \
-             patch("app.gateway.auth.base.webbrowser.open"), \
-             patch("app.gateway.auth.base.stop_callback_server"), \
-             patch("app.gateway.auth.base.threading.Event.wait", return_value=None), \
-             patch("app.gateway.auth.gitee.requests.get") as mock_get, \
-             patch("app.gateway.auth.gitee.requests.patch") as mock_patch, \
-             patch("app.gateway.auth.gitee.requests.post") as mock_post:
+        with patch("app.core.auth.base.start_callback_server", return_value=mock_server), \
+             patch("app.core.auth.base.webbrowser.open"), \
+             patch("app.core.auth.base.stop_callback_server"), \
+             patch("app.core.auth.base.threading.Event.wait", return_value=None), \
+             patch("app.core.auth.gitee.requests.get") as mock_get, \
+             patch("app.core.auth.gitee.requests.patch") as mock_patch, \
+             patch("app.core.auth.gitee.requests.post") as mock_post:
 
             def _post_side_effect(url: str, **kwargs):
                 if "oauth/token" in url:

@@ -147,7 +147,7 @@ class BuiltinTools(QObject):
 
     def gitee_upload(self, local_path: str) -> ToolResult:
         """将本地文件上传至 Gitee 仓库，返回公开下载链接（平台能力，供 upload_file 工具服务调用）"""
-        from app.gateway.utils.gitee_uploader import GiteeUploader
+        from app.core.net.gitee_uploader import GiteeUploader
         from app.utils.utils import resolve_path
 
         full_path = resolve_path(self.workdir, local_path)

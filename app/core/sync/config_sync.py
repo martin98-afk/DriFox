@@ -421,7 +421,7 @@ class ConfigSyncService(QObject):
         token = ""
         owner = ""
         try:
-            from app.gateway.auth import get_oauth_backend
+            from app.core.auth import get_oauth_backend
 
             info = get_oauth_backend("gitee").get_bound_info() or {}
             token = str(info.get("token") or "")
@@ -1388,7 +1388,7 @@ class ConfigSyncService(QObject):
         防止下游流程使用过期 token 导致误判远端状态。
         """
         try:
-            from app.gateway.auth.gitee import GiteeOAuthBackend
+            from app.core.auth.gitee import GiteeOAuthBackend
 
             backend = GiteeOAuthBackend()
             if not backend.is_bound():
@@ -1525,7 +1525,7 @@ class ConfigSyncService(QObject):
             True: 已从本地重载 token 并刷新成功
             False: 未绑定 / 重载后刷新仍失败
         """
-        from app.gateway.auth.gitee import GiteeOAuthBackend
+        from app.core.auth.gitee import GiteeOAuthBackend
         from app.utils.config import Settings
 
         backend = GiteeOAuthBackend()
@@ -1549,7 +1549,7 @@ class ConfigSyncService(QObject):
         - invalid_grant（RT 真被吊销）：本地重载重试，仍失败才清除绑定；
         - 传输错误（网络）：保留绑定，提示稍后重试，不清绑。
         """
-        from app.gateway.auth.gitee import GiteeOAuthBackend
+        from app.core.auth.gitee import GiteeOAuthBackend
         from app.utils.config import Settings
 
         backend = GiteeOAuthBackend()
@@ -3419,7 +3419,7 @@ def auto_enable_if_bound(svc=None) -> bool:
         svc = svc or ConfigSyncService.get_instance()
         if svc._state != "disabled":
             return False  # 幂等：已启动不重复拉线程
-        from app.gateway.auth import get_oauth_backend
+        from app.core.auth import get_oauth_backend
 
         bound = get_oauth_backend("gitee").get_bound_info()
         if not bound or not bound.get("token") or not bound.get("owner"):

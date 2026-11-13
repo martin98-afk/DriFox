@@ -151,7 +151,7 @@ def test_deliver_falls_back_to_link_when_unsupported(tmp_path, monkeypatch):
         async def upload_file_async(path):
             return "https://example.com/x.pdf", None
 
-    import app.gateway.utils.gitee_uploader as gitee_mod
+    import app.core.net.gitee_uploader as gitee_mod
 
     monkeypatch.setattr(gitee_mod, "GiteeUploader", _FakeUploader)
     asyncio.run(svc._deliver_attachments("qq", "chat1", [], [str(doc)]))
@@ -174,7 +174,7 @@ def test_deliver_falls_back_to_local_path_when_upload_unconfigured(tmp_path, mon
         def is_configured():
             return False
 
-    import app.gateway.utils.gitee_uploader as gitee_mod
+    import app.core.net.gitee_uploader as gitee_mod
 
     monkeypatch.setattr(gitee_mod, "GiteeUploader", _FakeUploader)
     asyncio.run(svc._deliver_attachments("qq", "chat1", [], [str(doc)]))

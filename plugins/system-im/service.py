@@ -194,18 +194,12 @@ class GatewayService(QObject):
                 get_model_config=self._get_model_config,
                 tool_executor=self._tool_executor,
                 agent_manager=self._agent_manager,
-                session_store=self._get_session_store(),
+                # 落库走 session.persist 能力（engine 内），不再注入宿主 SessionStore
             )
             logger.info("[GatewayService] GatewayEngine 就绪")
         except Exception as e:
             logger.error(f"[GatewayService] GatewayEngine 创建失败: {e}", exc_info=True)
         return self._engine is not None and getattr(self._engine, "is_active", True)
-
-    @staticmethod
-    def _get_session_store():
-        from app.core.store import SessionStore
-
-        return SessionStore.get_instance()
 
     # ==================== 生命周期 ====================
 
@@ -596,7 +590,7 @@ class GatewayService(QObject):
         async def _fallback_link(path: str, label: str) -> None:
             url = path
             try:
-                from app.gateway.utils.gitee_uploader import GiteeUploader
+                from app.core.net.gitee_uploader import GiteeUploader
 
                 uploader = GiteeUploader.get_instance()
                 if uploader.is_configured():

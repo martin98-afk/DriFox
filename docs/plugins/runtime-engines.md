@@ -288,7 +288,7 @@ def register(registry):
 | `app/plugins/builtin_reloaders.py` | `_reload_engines`（删除/更新路径） |
 | `app/core/engines/ui/engine.py` | 内置 `ChatEngine`（替换类的基类） |
 | `app/core/backend.py` | `ChatBackend._deferred_create_engines`（工厂化创建点之一） |
-| `app/gateway/local_service/isolated_context.py` | `IsolatedContext.create_chat_engine`（工厂化创建点之二） |
+| `app/core/local_service/isolated_context.py` | `IsolatedContext.create_chat_engine`（工厂化创建点之二） |
 | `app/core/engines/gateway/engine.py` | 内置 `GatewayEngine`（gateway 槽位替换类的基类 + 单例工厂化入口） |
 | `app/utils/config.py` | 引擎槽位相关 `ConfigItem` 预留（当前无选择 UI，见 §7） |
 | `app/plugins/kernel.py` | `KNOWN_COMPONENTS` / `COMPONENT_ORDER` 含 `engines` 登记 |

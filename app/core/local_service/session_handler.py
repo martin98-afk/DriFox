@@ -278,7 +278,7 @@ class APISessionHandler:
         self._lock = threading.Lock()
         self._api_callbacks: Dict[str, Callable] = {}
         self._active_streams: Dict[str, StreamContext] = {}
-        from app.gateway.local_service.isolated_context import IsolatedContextRegistry
+        from app.core.local_service.isolated_context import IsolatedContextRegistry
         self._context_registry = IsolatedContextRegistry.get_instance()
         # APIHistoryManager 独立 SQLite，与 UI history_manager 解耦；首次访问时再包装。
         self._api_history_manager: Optional[APIHistoryManager] = None
@@ -348,7 +348,7 @@ class APISessionHandler:
 
 
     def _create_isolated_chat_engine(self, worker_callbacks=None, api_mode=False, target_session=None, context_id=None):
-        from app.gateway.local_service.isolated_context import IsolatedChatContext
+        from app.core.local_service.isolated_context import IsolatedChatContext
 
         widget = self._current_widget()
         ctx_id = context_id or str(uuid.uuid4())

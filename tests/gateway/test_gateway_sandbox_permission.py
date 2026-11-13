@@ -24,7 +24,7 @@ from pathlib import Path
 import pytest
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
-_HANDLER = _REPO_ROOT / "app" / "gateway" / "local_service" / "session_handler.py"
+_HANDLER = _REPO_ROOT / "app" / "core" / "local_service" / "session_handler.py"
 
 
 def _src() -> str:

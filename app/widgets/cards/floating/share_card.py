@@ -996,7 +996,7 @@ class ShareCardContent(QWidget):
             return
 
         try:
-            from app.gateway.utils.gitee_uploader import GiteeUploader
+            from app.core.net.gitee_uploader import GiteeUploader
 
             uploader = GiteeUploader.get_instance()
             if not uploader.is_configured():
@@ -1181,7 +1181,7 @@ class _EdgeOneDeployThread(QThread):
 
     def run(self):
         try:
-            from app.gateway.utils.edgeone_deployer import EdgeOneDeployer
+            from app.core.net.edgeone_deployer import EdgeOneDeployer
 
             self._result = EdgeOneDeployer.get_instance().deploy_html(self._html_text, self._title)
         except Exception as e:

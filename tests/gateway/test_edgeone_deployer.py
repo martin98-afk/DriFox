@@ -20,9 +20,9 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-pytest.importorskip("app.gateway.utils.edgeone_deployer")
+pytest.importorskip("app.core.net.edgeone_deployer")
 
-from app.gateway.utils.edgeone_deployer import (  # noqa: E402
+from app.core.net.edgeone_deployer import (  # noqa: E402
     EdgeOneDeployer,
     EdgeOneDeployError,
     deploy_html_to_edgeone,
@@ -176,7 +176,7 @@ def test_deploy_html_full_success(deployer):
             _resp(200, _describe_body("Success", site)),
         ]
         session.put.return_value = _resp(200)
-        with patch("app.gateway.utils.edgeone_deployer.time.sleep") as mock_sleep:
+        with patch("app.core.net.edgeone_deployer.time.sleep") as mock_sleep:
             url, err = deployer.deploy_html("<html>hi</html>", "测试标题")
 
     assert err is None
@@ -285,7 +285,7 @@ def test_deployment_poll_timeout(deployer):
         session.post.side_effect = [_resp(200, _temp_token_body()), _resp(200, _create_deployment_body())]
         session.put.return_value = _resp(200)
         # 把超时窗口设为负值，第一轮即到期，避免真等 90 秒
-        with patch.object(deployer, "POLL_TIMEOUT_S", -1), patch("app.gateway.utils.edgeone_deployer.time.sleep"):
+        with patch.object(deployer, "POLL_TIMEOUT_S", -1), patch("app.core.net.edgeone_deployer.time.sleep"):
             url, err = deployer.deploy_html("<html></html>")
     assert url is None
     assert "部署超时" in err

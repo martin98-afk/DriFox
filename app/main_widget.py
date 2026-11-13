@@ -387,7 +387,7 @@ class _ProjectUploadThread(QThread):
 
     def run(self):
         try:
-            from app.gateway.utils.gitee_uploader import GiteeUploader
+            from app.core.net.gitee_uploader import GiteeUploader
 
             uploader = GiteeUploader.get_instance()
             if not uploader.is_configured():
@@ -25076,7 +25076,7 @@ class OpenAIChatToolWindow(ToolWindow):
     def _on_export_upload(self, zip_path: str, project_name: str):
         """导出并上传到 Gitee，复制分享链接（异步，不卡 UI）"""
         # 先检查 Gitee 是否配置（快速检查，不涉及网络请求）
-        from app.gateway.utils.gitee_uploader import GiteeUploader
+        from app.core.net.gitee_uploader import GiteeUploader
 
         uploader = GiteeUploader.get_instance()
         if not uploader.is_configured():

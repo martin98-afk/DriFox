@@ -14,8 +14,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 from loguru import logger
 
-from app.gateway.base import MessageEvent, Platform
-from app.utils.utils import get_app_data_dir
+from app.gateway.base import MessageEvent, Platform, get_gateway_data_dir
 
 
 @dataclass
@@ -59,7 +58,7 @@ class GatewaySessionManager:
             data_dir: 数据目录，默认为 ~/.drifox/gateway
         """
         if data_dir is None:
-            data_dir = get_app_data_dir() / "gateway"
+            data_dir = get_gateway_data_dir()
         self._data_dir = data_dir
         self._data_dir.mkdir(parents=True, exist_ok=True)
 

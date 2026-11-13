@@ -2,8 +2,12 @@
 """
 OAuth 平台抽象层 — 注册表与工厂
 
+原 ``app.gateway.auth``，与 IM 无关（Gitee 账户绑定、云同步授权共用），
+故从 gateway 契约包里移出；新增平台仍在下方 ``_BACKENDS`` 登记。
+
+
 对外入口：
-    from app.gateway.auth import get_oauth_backend
+    from app.core.auth import get_oauth_backend
 
     backend = get_oauth_backend("gitee")   # 显式指定平台
     backend = get_oauth_backend()          # 自动探测已绑定的平台
@@ -15,8 +19,8 @@ OAuth 平台抽象层 — 注册表与工厂
 
 from typing import Dict, Type
 
-from app.gateway.auth.base import OAuthAppConfig, OAuthBackend, run_authorization_code_flow
-from app.gateway.auth.gitee import GiteeOAuthBackend
+from app.core.auth.base import OAuthAppConfig, OAuthBackend, run_authorization_code_flow
+from app.core.auth.gitee import GiteeOAuthBackend
 
 __all__ = [
     "OAuthAppConfig",

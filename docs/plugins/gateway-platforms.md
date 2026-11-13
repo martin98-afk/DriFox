@@ -322,8 +322,8 @@ default/env），主程序自动渲染设置卡 + `PluginConfigStore` 统一存�
 
 - `app/plugins/contracts/gateway_platform.py` — `GatewayPlatformDef` 定义
 - `app/plugins/registries/gateway_platform_registry.py` — 进程级单例
-- `app/gateway/manager.py::_load_adapters` — registry 唯一消费方
-- `app/gateway/config.py::GatewayConfigHelper` — 4 方法 registry 分派
+- `plugins/system-im/core/manager.py::_load_adapters` — registry 唯一消费方
+- `plugins/system-im/core/config.py::GatewayConfigHelper` — 4 方法 registry 分派
 - `app/plugins/contracts/plugin_config.py` — E1 config_schema 解析
 
 社区仓参考实现：

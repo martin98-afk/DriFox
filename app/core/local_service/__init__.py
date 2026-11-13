@@ -9,7 +9,7 @@ Gateway 本地微服务模块 - 提供 HTTP API 接口
 - 并发请求支持
 """
 
-from app.gateway.local_service.api_server import (
+from app.core.local_service.api_server import (
     LLMAPIService,
     ensure_service_running,
     get_llm_api_service,
@@ -18,11 +18,11 @@ from app.gateway.local_service.api_server import (
     start_llm_api_service,
     stop_llm_api_service,
 )
-from app.gateway.local_service.isolated_context import (
+from app.core.local_service.isolated_context import (
     IsolatedChatContext,
     IsolatedContextRegistry,
 )
-from app.gateway.local_service.session_handler import (
+from app.core.local_service.session_handler import (
     APIHistoryManager,
     APISessionHandler,
     StreamContext,

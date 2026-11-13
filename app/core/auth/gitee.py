@@ -17,7 +17,7 @@ from typing import Optional, Tuple
 import requests
 from loguru import logger
 
-from app.gateway.auth.base import OAuthAppConfig, OAuthBackend, parse_error, run_authorization_code_flow
+from app.core.auth.base import OAuthAppConfig, OAuthBackend, parse_error, run_authorization_code_flow
 
 # ── Gitee 端点常量 ────────────────────────────────────────
 GITEE_AUTHORIZE_URL = "https://gitee.com/oauth/authorize"

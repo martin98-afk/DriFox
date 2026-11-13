@@ -1299,8 +1299,8 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
         # 修复多 tab 下后建窗口静默覆盖先建窗口的问题（之前由 MainWidget
         # 在 _init_llm_api_service 注册 handler，绑死后建窗口的 widget；现改为
         # 每次调用实时查 _tab_panel.active_index 对应的活跃 ChatWindow）
-        from app.gateway.local_service.session_handler import APISessionHandler
-        from app.gateway import LLMAPIService
+        from app.core.local_service.session_handler import APISessionHandler
+        from app.core.local_service import LLMAPIService
 
         def _active_main_widget():
             idx = self._tab_panel.active_index if self._tab_panel is not None else -1
@@ -7108,7 +7108,7 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
         except Exception as e:
             logger.warning(f"[TabManager] cleanup LspManager.shutdown 失败: {e}")
         try:
-            from app.gateway import stop_llm_api_service
+            from app.core.local_service import stop_llm_api_service
 
             stop_llm_api_service()
         except Exception as e:

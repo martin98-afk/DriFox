@@ -46,7 +46,7 @@ def test_deploy_thread_is_background_qthread(share_src: str):
 
 def test_deploy_thread_calls_edgeone_deployer(share_src: str):
     """线程内调用 EdgeOneDeployer.deploy_html"""
-    assert "from app.gateway.utils.edgeone_deployer import EdgeOneDeployer" in share_src
+    assert "from app.core.net.edgeone_deployer import EdgeOneDeployer" in share_src
     assert "EdgeOneDeployer.get_instance().deploy_html(" in share_src
 
 

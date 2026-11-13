@@ -7,7 +7,7 @@ IM 内交互提问、主动投递。**平台适配器不在本插件内**，由�
 
 | 归属 | 内容 |
 |------|------|
-| 宿主（契约层） | `app/gateway/base.py`（`MessageEvent` / `BasePlatformAdapter` / `SendResult` / `Platform` / `PlatformConfig` / `get_cache_dir`）、`app/gateway/group_history.py`、`GatewayPlatformRegistry`、能力池 |
+| 宿主（契约层） | `app/gateway/base.py`（`MessageEvent` / `BasePlatformAdapter` / `SendResult` / `Platform` / `PlatformConfig` / `get_cache_dir` / `get_gateway_data_dir`）、`app/gateway/group_history.py`、`GatewayPlatformRegistry`、能力池 |
 | 本插件 | 平台管理器、会话映射、消息路由、媒体、文本分片、交互提问、网关服务（Qt 信号） |
 | 各 `gateway-*` 插件 | 单个 IM 平台的 SDK 接入与协议收发，注册 `GatewayPlatformDef` |
 
@@ -57,6 +57,30 @@ manifest 声明的宿主能力：`engine.session`、`engine.session.resume`、
 `im_gateway`）：宿主侧统一走 `app/core/services/gateway_access.py`，
 其他插件走能力池 `platform.control`（`start` / `stop` / `status` /
 `set_platform_enabled` / `restart_platform`），都不 import 插件内部模块。
+
+## 宿主依赖边界
+
+三类 import，前两类合规，第三类是待还的债：
+
+| 类别 | 例子 | 说明 |
+|------|------|------|
+| 契约层（合规） | `app.gateway.base`、`group_history`、`plugins/contracts/*`、`plugins/registries/*`、`plugins/managers/plugin_config_store` | 宿主为插件刻意稳定的公开面，跨版本保证兼容 |
+| 能力池（合规） | `session.persist`（会话落库）、`net.upload`（待接）、`platform.control`（对外提供） | 有副作用/宿主运行时状态的动作用能力，不 import 实现 |
+| 宿主内部实现（欠债） | `app.core.conversation.*`、`app.core.tools.tool_executor`、`app.tools`、`app.utils.config.Settings`、`app.core.modelmeta`、`app.core.context.budget` | 见下 |
+
+已知欠债与去向：
+
+1. **`app.core.conversation.*` + `ToolExecutor` + `app.tools`（engine.py）**：
+   引擎自建 `ConversationCore` 驱动一轮对话。能力池已有 `engine.session` /
+   `engine.session.resume`，但改造要把流式/工具/命令三条链路整体换到宿主会话
+   门面，属独立一轮工作。**这是唯一的大头**。
+2. **`app.utils.config.Settings`（engine/service）**：读应用级默认模型
+   （`llm_selected_model` + `llm_saved_providers`）。`model.config` 是窗口语义
+   （跟随最后活跃窗口），IM 需要应用级默认，能力池暂无对应面；硬套
+   `config.read` 会把「非敏感标量」语义撑变形。待补 `model.config_default`。
+3. **`app.core.modelmeta.model_capabilities` / `app.core.context.budget`（engine）**：
+   纯函数（上下文长度/用量计算），无状态、无宿主运行时依赖，保留成本低。
+4. **`app.constants.IMAGE_EXTENSIONS`**：常量表。
 
 ## 设置卡
 

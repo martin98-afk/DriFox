@@ -27,7 +27,7 @@ def test_bound_user_enables_on_startup(fake_sync, monkeypatch):
     """已配置用户：启动链调用 → enable(token, owner) 一次"""
     bound = {"token": "tk-123", "owner": "alice"}
     get_info = MagicMock(return_value=bound)
-    monkeypatch.setattr("app.gateway.auth.get_oauth_backend", lambda p: SimpleNamespace(get_bound_info=get_info))
+    monkeypatch.setattr("app.core.auth.get_oauth_backend", lambda p: SimpleNamespace(get_bound_info=get_info))
     assert cs.auto_enable_if_bound() is True
     fake_sync.enable.assert_called_once_with("tk-123", "alice")
 
@@ -36,7 +36,7 @@ def test_already_enabled_is_idempotent(fake_sync, monkeypatch):
     """幂等：_state 非 disabled → 不重复 enable、连 get_bound_info 都不调"""
     fake_sync._state = "idle"
     get_backend = MagicMock()
-    monkeypatch.setattr("app.gateway.auth.get_oauth_backend", get_backend)
+    monkeypatch.setattr("app.core.auth.get_oauth_backend", get_backend)
     assert cs.auto_enable_if_bound() is False
     get_backend.assert_not_called()
     fake_sync.enable.assert_not_called()
@@ -45,7 +45,7 @@ def test_already_enabled_is_idempotent(fake_sync, monkeypatch):
 def test_unbound_user_zero_network(fake_sync, monkeypatch):
     """未配置用户：get_bound_info 首行守卫返回 None → 零 enable（零网络）"""
     get_info = MagicMock(return_value=None)
-    monkeypatch.setattr("app.gateway.auth.get_oauth_backend", lambda p: SimpleNamespace(get_bound_info=get_info))
+    monkeypatch.setattr("app.core.auth.get_oauth_backend", lambda p: SimpleNamespace(get_bound_info=get_info))
     assert cs.auto_enable_if_bound() is False
     get_info.assert_called_once()
     fake_sync.enable.assert_not_called()
@@ -82,7 +82,7 @@ def test_startup_hook_exception_is_nonfatal(fake_sync, monkeypatch):
     def _boom(p):
         raise RuntimeError("oauth backend unavailable")
 
-    monkeypatch.setattr("app.gateway.auth.get_oauth_backend", _boom)
+    monkeypatch.setattr("app.core.auth.get_oauth_backend", _boom)
     assert cs.auto_enable_if_bound() is False
     fake_sync.enable.assert_not_called()
 

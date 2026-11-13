@@ -33,7 +33,7 @@ def svc_and_mocks(monkeypatch):
     mock_cfg = MagicMock()
 
     monkeypatch.setattr(
-        "app.gateway.auth.gitee.GiteeOAuthBackend",
+        "app.core.auth.gitee.GiteeOAuthBackend",
         lambda: mock_backend,
     )
     monkeypatch.setattr(
@@ -100,7 +100,7 @@ class TestInitialSyncOrdering:
         mock_cfg.gitee_user_owner = MagicMock(value="owner")
         mock_cfg.gitee_token_expires_at = MagicMock(value=9999999999.0)  # 有效
 
-        monkeypatch.setattr("app.gateway.auth.gitee.GiteeOAuthBackend", lambda: mock_backend)
+        monkeypatch.setattr("app.core.auth.gitee.GiteeOAuthBackend", lambda: mock_backend)
         monkeypatch.setattr("app.utils.config.Settings.get_instance", lambda: mock_cfg)
 
         # 记录 _sync_token 是否被调用（下载前刷新是本次要根治的误清绑根因）
@@ -183,22 +183,22 @@ class TestTokenRevokedDetection:
 
 class TestRefreshAccessTokenErrors:
     def test_invalid_grant_marked_revoked(self, monkeypatch):
-        import app.gateway.auth.gitee as g
+        import app.core.auth.gitee as g
 
         fake_resp = MagicMock()
         fake_resp.status_code = 400
         fake_resp.json.return_value = {"error": "invalid_grant", "error_description": "bad"}
 
-        with patch("app.gateway.auth.gitee.requests.post", return_value=fake_resp):
+        with patch("app.core.auth.gitee.requests.post", return_value=fake_resp):
             data, err = g.refresh_access_token("rt", "cid", "sec")
 
         assert data is None
         assert "TOKEN_REVOKED::" in err
 
     def test_network_error_not_marked_revoked(self, monkeypatch):
-        import app.gateway.auth.gitee as g
+        import app.core.auth.gitee as g
 
-        with patch("app.gateway.auth.gitee.requests.post", side_effect=Exception("network down")):
+        with patch("app.core.auth.gitee.requests.post", side_effect=Exception("network down")):
             data, err = g.refresh_access_token("rt", "cid", "sec")
 
         assert data is None

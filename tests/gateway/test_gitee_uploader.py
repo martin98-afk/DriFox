@@ -22,7 +22,7 @@ import time
 
 import pytest
 
-pytest.importorskip("app.gateway.utils.gitee_uploader")
+pytest.importorskip("app.core.net.gitee_uploader")
 
 
 # =============================================================================
@@ -33,7 +33,7 @@ pytest.importorskip("app.gateway.utils.gitee_uploader")
 @pytest.fixture(autouse=True)
 def _reset_singleton():
     """每个测试前重置 GiteeUploader 单例"""
-    from app.gateway.utils.gitee_uploader import GiteeUploader
+    from app.core.net.gitee_uploader import GiteeUploader
 
     old = GiteeUploader._instance
     GiteeUploader._instance = None
@@ -44,7 +44,7 @@ def _reset_singleton():
 @pytest.fixture
 def uploader():
     """获取干净的 GiteeUploader 实例"""
-    from app.gateway.utils.gitee_uploader import GiteeUploader
+    from app.core.net.gitee_uploader import GiteeUploader
 
     return GiteeUploader.get_instance()
 
@@ -126,7 +126,7 @@ class TestSingleton:
     """单例模式"""
 
     def test_get_instance_returns_same(self):
-        from app.gateway.utils.gitee_uploader import GiteeUploader
+        from app.core.net.gitee_uploader import GiteeUploader
 
         u1 = GiteeUploader.get_instance()
         u2 = GiteeUploader.get_instance()
@@ -134,7 +134,7 @@ class TestSingleton:
 
     def test_can_instantiate_directly(self):
         """GiteeUploader 允许直接 __init__（无单例保护）"""
-        from app.gateway.utils.gitee_uploader import GiteeUploader
+        from app.core.net.gitee_uploader import GiteeUploader
 
         u = GiteeUploader()
         assert u is not None
@@ -423,7 +423,7 @@ class TestParseError:
 
     def test_parse_error_json(self, uploader):
         """JSON 响应应提取 message"""
-        from app.gateway.utils.gitee_uploader import GiteeContentBackend
+        from app.core.net.gitee_uploader import GiteeContentBackend
 
         resp = MagicMock()
         resp.json.return_value = {"message": "Not Found"}
@@ -431,7 +431,7 @@ class TestParseError:
 
     def test_parse_error_fallback(self, uploader):
         """非 JSON 响应回退到 text"""
-        from app.gateway.utils.gitee_uploader import GiteeContentBackend
+        from app.core.net.gitee_uploader import GiteeContentBackend
 
         resp = MagicMock()
         resp.json.side_effect = Exception("bad json")
@@ -448,17 +448,17 @@ class TestConvenienceFunctions:
     """get_gitee_uploader / upload_to_gitee"""
 
     def test_get_gitee_uploader_returns_singleton(self):
-        from app.gateway.utils.gitee_uploader import GiteeUploader, get_gitee_uploader
+        from app.core.net.gitee_uploader import GiteeUploader, get_gitee_uploader
 
         u = get_gitee_uploader()
         assert isinstance(u, GiteeUploader)
         assert u is GiteeUploader.get_instance()
 
     def test_upload_to_gitee_delegates(self, mock_settings_bound, temp_file):
-        from app.gateway.utils.gitee_uploader import upload_to_gitee
+        from app.core.net.gitee_uploader import upload_to_gitee
 
         # mock 后台上传
-        with patch("app.gateway.utils.gitee_uploader.GiteeUploader.upload_file") as mock_uf:
+        with patch("app.core.net.gitee_uploader.GiteeUploader.upload_file") as mock_uf:
             mock_uf.return_value = ("https://dl", None)
             url, err = upload_to_gitee(temp_file)
             assert url == "https://dl"
@@ -489,7 +489,7 @@ class TestDownloadFile:
     def test_success_writes_file_and_token_in_url(self, uploader, mock_settings_bound, tmp_path):
         target = tmp_path / "sub" / "out.png"
         resp = MagicMock(status_code=200, content=b"png-bytes")
-        with patch("app.gateway.utils.gitee_uploader.requests.get", return_value=resp) as mock_get:
+        with patch("app.core.net.gitee_uploader.requests.get", return_value=resp) as mock_get:
             local, err = uploader.download_file("drifox/foo.png", str(target))
         assert err is None
         assert local == str(target)
@@ -501,7 +501,7 @@ class TestDownloadFile:
 
     def test_http_error(self, uploader, mock_settings_bound, tmp_path):
         resp = MagicMock(status_code=404, content=b"")
-        with patch("app.gateway.utils.gitee_uploader.requests.get", return_value=resp):
+        with patch("app.core.net.gitee_uploader.requests.get", return_value=resp):
             local, err = uploader.download_file("drifox/missing.png", str(tmp_path / "x.png"))
         assert local is None
         assert "404" in err
@@ -509,7 +509,7 @@ class TestDownloadFile:
     def test_timeout(self, uploader, mock_settings_bound, tmp_path):
         import requests as _rq
 
-        with patch("app.gateway.utils.gitee_uploader.requests.get", side_effect=_rq.exceptions.Timeout()):
+        with patch("app.core.net.gitee_uploader.requests.get", side_effect=_rq.exceptions.Timeout()):
             local, err = uploader.download_file("drifox/foo.png", str(tmp_path / "x.png"))
         assert local is None
         assert "超时" in err

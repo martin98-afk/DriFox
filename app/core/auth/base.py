@@ -6,7 +6,7 @@ OAuth 平台抽象层 — 基类与通用授权码流程
   - 将「本地回调服务器 → 打开浏览器 → 等待授权码 → 换取 token」这一
     标准 Authorization Code 流程沉淀为通用实现；
   - 平台差异（端点、scope、授权后的初始化动作、凭证存储）由子类实现；
-  - 新增平台时只需继承 OAuthBackend 并在 app/gateway/auth/__init__.py 注册。
+  - 新增平台时只需继承 OAuthBackend 并在 app/core/auth/__init__.py 注册。
 
 新增平台步骤（示例见 gitee.py 与 docs/adr 说明文档）：
   1. 定义 OAuthAppConfig（authorize_url / token_url / scope / 回调端口等）

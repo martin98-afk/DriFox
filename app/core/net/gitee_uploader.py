@@ -104,7 +104,7 @@ class GiteeUploader(QObject):
         """
         # OAuth 模式：每次都从后端获取最新 token（支持自动过期刷新）
         try:
-            from app.gateway.auth import get_oauth_backend
+            from app.core.auth import get_oauth_backend
 
             backend = get_oauth_backend("gitee")
             bound_info = backend.get_bound_info()

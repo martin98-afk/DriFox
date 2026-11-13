@@ -14,9 +14,9 @@ from unittest.mock import MagicMock
 
 import pytest
 
-pytest.importorskip("app.gateway.auth")
-pytest.importorskip("app.gateway.auth.base")
-pytest.importorskip("app.gateway.auth.gitee")
+pytest.importorskip("app.core.auth")
+pytest.importorskip("app.core.auth.base")
+pytest.importorskip("app.core.auth.gitee")
 
 
 # =============================================================================
@@ -49,8 +49,8 @@ class TestGetOAuthBackend:
 
     def test_returns_gitee_by_name(self):
         """指定 name='gitee' 应返回 GiteeOAuthBackend"""
-        from app.gateway.auth import get_oauth_backend
-        from app.gateway.auth.gitee import GiteeOAuthBackend
+        from app.core.auth import get_oauth_backend
+        from app.core.auth.gitee import GiteeOAuthBackend
 
         backend = get_oauth_backend("gitee")
         assert isinstance(backend, GiteeOAuthBackend)
@@ -58,15 +58,15 @@ class TestGetOAuthBackend:
 
     def test_raises_for_unknown_name(self):
         """不存在的平台名应抛出 ValueError"""
-        from app.gateway.auth import get_oauth_backend
+        from app.core.auth import get_oauth_backend
 
         with pytest.raises(ValueError, match="未知的 OAuth 平台"):
             get_oauth_backend("unknown_platform")
 
     def test_returns_first_bound_backend(self, _mock_cfg):
         """name='' 时遍历已注册平台，返回第一个 is_bound()==True 的后端"""
-        from app.gateway.auth import get_oauth_backend
-        from app.gateway.auth.gitee import GiteeOAuthBackend
+        from app.core.auth import get_oauth_backend
+        from app.core.auth.gitee import GiteeOAuthBackend
 
         _mock_cfg.gitee_bound.value = True
         backend = get_oauth_backend()
@@ -75,7 +75,7 @@ class TestGetOAuthBackend:
 
     def test_raises_when_nothing_bound(self, _mock_cfg):
         """未绑定任何平台时应抛出 ValueError"""
-        from app.gateway.auth import get_oauth_backend
+        from app.core.auth import get_oauth_backend
 
         _mock_cfg.gitee_bound.value = False
         with pytest.raises(ValueError, match="未绑定"):

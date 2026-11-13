@@ -806,10 +806,23 @@ class GatewayEngine(QObject, BaseEngine):
             return False
 
     def _save_to_store(self, session: ChatSession) -> None:
-        """保存 Gateway 会话到 SQLite"""
+        """会话落库：优先 ``session.persist`` 能力，再回退注入的 SessionStore。
+
+        插件不直接 import 宿主存储实现；``session.persist`` 就是给 headless
+        会话准备的能力面（不依赖窗口）。注入 store 仅保留给测试桩与兼容路径。
+        """
+        snapshot = session.to_dict()
+        try:
+            from app.plugins.sdk import caps_for
+
+            persist = caps_for("session.persist", plugin="system-im", surface="ui")
+            if persist is not None and persist(snapshot):
+                return
+        except Exception as e:  # noqa: BLE001 - 能力不可用时走回退
+            logger.debug(f"[GatewayEngine] session.persist 不可用，回退 SessionStore: {e}")
         if not self._session_store:
             return
         try:
-            self._session_store.save_session(session.to_dict())
+            self._session_store.save_session(snapshot)
         except Exception as e:
             logger.warning(f"[GatewayEngine] Failed to save session: {e}")

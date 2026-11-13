@@ -133,7 +133,7 @@ class TestProviderLoginCancel:
 class TestAuthorizationCodeFlowCancel:
     def test_cancel_returns_immediately(self):
         """置位后 0.5s 内返回「授权已中止」，不必等满 timeout"""
-        from app.gateway.auth.base import CANCEL_MESSAGE, OAuthAppConfig, run_authorization_code_flow
+        from app.core.auth.base import CANCEL_MESSAGE, OAuthAppConfig, run_authorization_code_flow
 
         app_cfg = OAuthAppConfig(
             client_id="cid",
@@ -145,7 +145,7 @@ class TestAuthorizationCodeFlowCancel:
         cancel = threading.Event()
         cancel.set()
 
-        with patch("app.gateway.auth.base.webbrowser.open"):
+        with patch("app.core.auth.base.webbrowser.open"):
             started = time.monotonic()
             token_data, err = run_authorization_code_flow(app_cfg, timeout=60, cancel_event=cancel)
             elapsed = time.monotonic() - started

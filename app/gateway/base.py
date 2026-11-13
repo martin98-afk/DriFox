@@ -199,7 +199,7 @@ class BasePlatformAdapter(ABC):
             下载链接（成功时）或原始路径（失败/未配置时）
         """
         try:
-            from app.gateway.utils.gitee_uploader import GiteeUploader
+            from app.core.net.gitee_uploader import GiteeUploader
 
             uploader = GiteeUploader.get_instance()
             if not uploader.is_configured():
@@ -408,11 +408,18 @@ class BasePlatformAdapter(ABC):
             if session_key in self._pending_messages:
                 pending = self._pending_messages.pop(session_key)
                 # 去重检查：排队的消息是否与刚处理完的消息相同
-                if (event.message_id and pending.message_id
-                        and event.message_id == pending.message_id):
-                    logger.info(f"[{self.name}] Dropping pending duplicate {pending.message_id[:12]} after session completed: {session_key}")
-                    return
-                await self.handle_message(pending)
+                duplicate = bool(
+                    event.message_id
+                    and pending.message_id
+                    and event.message_id == pending.message_id
+                )
+                if duplicate:
+                    logger.info(
+                        f"[{self.name}] Dropping pending duplicate {pending.message_id[:12]} "
+                        f"after session completed: {session_key}"
+                    )
+                else:
+                    await self.handle_message(pending)
 
     def _get_session_key(self, event: MessageEvent) -> str:
         """获取会话键（platform 兼容 str 直通：第三方平台 id 不经 Platform 枚举）"""
@@ -472,6 +479,17 @@ class BasePlatformAdapter(ABC):
         self._pending_messages.clear()
         self._active_message_ids.clear()
         logger.info(f"[{self.name}] Stopped")
+
+
+def get_gateway_data_dir() -> Path:
+    """网关数据目录（``<app_data>/gateway``）。
+
+    契约层提供：插件与平台适配器都要落会话映射/群消息留档，直接 import
+    ``app.utils.utils`` 属宿主内部依赖；路径在此固定，存量数据零迁移。
+    """
+    data_dir = get_app_data_dir() / "gateway"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    return data_dir
 
 
 def get_cache_dir(name: str) -> Path:
