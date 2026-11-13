@@ -334,9 +334,20 @@ class GatewayService(QObject):
     # ==================== 平台消息入口 ====================
 
     async def _process_message(
-        self, session_id: str, text: str, platform: Any, chat_id: str, user_id: str, **kwargs
+        self,
+        session_id: str,
+        text: str,
+        platform: Any,
+        chat_id: str,
+        user_id: str,
+        chat_type: str = "dm",
+        **kwargs,
     ) -> str:
-        """处理平台消息（manager 事件循环线程）→ 转主线程"""
+        """处理平台消息（manager 事件循环线程）→ 转主线程
+
+        chat_type（dm/group）随消息下发主线程：群聊会话按 chat_id 共享，
+        _on_gateway_input 重建 MessageEvent 时必须带上同一口径。
+        """
         _pid = _gw_str_platform(platform)
         logger.info(f"[Gateway] Processing message from {_pid}:{user_id}: {text[:50]}...")
 
@@ -355,6 +366,7 @@ class GatewayService(QObject):
                 "text": text,
                 "chat_id": chat_id,
                 "user_id": user_id,
+                "chat_type": chat_type,
                 "platform": _pid,
                 "media_urls": list(kwargs.get("media_urls") or []),
                 "media_types": list(kwargs.get("media_types") or []),
@@ -682,6 +694,7 @@ class GatewayService(QObject):
         text = data["text"]
         chat_id = data["chat_id"]
         user_id = data["user_id"]
+        chat_type = data.get("chat_type") or "dm"
         platform = data["platform"]
         future = data["future"]
         media_urls = data.get("media_urls") or []
@@ -734,6 +747,7 @@ class GatewayService(QObject):
                     message_id=user_id,
                     chat_id=chat_id,
                     user_id=user_id,
+                    chat_type=chat_type,
                     platform=gw_platform,
                 )
             )

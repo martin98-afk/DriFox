@@ -25,6 +25,7 @@ class GatewaySession:
     platform: Platform
     user_id: str
     chat_id: str
+    chat_type: str = "dm"  # dm / group
     user_name: str = ""
     created_at: datetime = field(default_factory=datetime.now)
     last_active: datetime = field(default_factory=datetime.now)
@@ -65,8 +66,9 @@ class GatewaySessionManager:
         # 内存中的会话: session_id -> GatewaySession
         self._sessions: Dict[str, GatewaySession] = {}
 
-        # 平台用户索引: platform -> user_id -> session_id
-        self._user_sessions: Dict[Platform, Dict[str, str]] = {
+        # 会话索引: platform -> index_key -> session_id
+        # index_key 私聊为 user_id，群聊为 "group:<chat_id>"（见 _index_key）
+        self._session_index: Dict[Platform, Dict[str, str]] = {
             Platform.WECOM: {},
             Platform.DINGTALK: {},
         }
@@ -97,6 +99,7 @@ class GatewaySessionManager:
                         platform=platform,
                         user_id=info["user_id"],
                         chat_id=info["chat_id"],
+                        chat_type=info.get("chat_type", "dm"),
                         user_name=info.get("user_name", ""),
                         created_at=datetime.fromisoformat(info.get("created_at", datetime.now().isoformat())),
                         last_active=datetime.fromisoformat(info.get("last_active", datetime.now().isoformat())),
@@ -104,10 +107,11 @@ class GatewaySessionManager:
                     )
                     self._sessions[session_id] = session
 
-                    # 建立索引
-                    user_sessions = self._user_sessions.get(session.platform)
-                    if user_sessions is not None:
-                        user_sessions[session.user_id] = session_id
+                    # 建立索引（第三方平台的 str 平台同样恢复，否则重启后会话全丢）
+                    index = self._session_index.setdefault(session.platform, {})
+                    index[
+                        self._index_key(session.chat_type, session.user_id, session.chat_id)
+                    ] = session_id
 
             except Exception as e:
                 logger.warning(f"[GatewaySession] Failed to load sessions: {e}")
@@ -123,6 +127,7 @@ class GatewaySessionManager:
                     "platform": getattr(session.platform, "value", session.platform),
                     "user_id": session.user_id,
                     "chat_id": session.chat_id,
+                    "chat_type": session.chat_type,
                     "user_name": session.user_name,
                     "created_at": session.created_at.isoformat(),
                     "last_active": session.last_active.isoformat(),
@@ -134,11 +139,17 @@ class GatewaySessionManager:
         except Exception as e:
             logger.warning(f"[GatewaySession] Failed to save sessions: {e}")
 
-    def _generate_session_id(self, platform: Platform, user_id: str) -> str:
+    def _index_key(self, chat_type: str, user_id: str, chat_id: str) -> str:
+        """会话索引键：群聊按 chat_id（群内所有成员共享一条会话），私聊按 user_id。"""
+        if chat_type == "group" and chat_id:
+            return f"group:{chat_id}"
+        return user_id
+
+    def _generate_session_id(self, platform: Platform, index_key: str) -> str:
         """生成会话 ID（platform 兼容 str 直通）"""
         import hashlib
         timestamp = str(int(time.time() * 1000))
-        raw = f"{getattr(platform, 'value', platform)}:{user_id}:{timestamp}"
+        raw = f"{getattr(platform, 'value', platform)}:{index_key}:{timestamp}"
         return hashlib.md5(raw.encode()).hexdigest()[:16]
 
     def get_or_create_session(self, event: MessageEvent) -> GatewaySession:
@@ -154,10 +165,12 @@ class GatewaySessionManager:
         platform = event.platform
         user_id = event.user_id
         chat_id = event.chat_id
+        chat_type = event.chat_type or "dm"
+        index_key = self._index_key(chat_type, user_id, chat_id)
 
         # 查找现有会话
-        user_sessions = self._user_sessions.get(platform, {})
-        session_id = user_sessions.get(user_id)
+        session_index = self._session_index.setdefault(platform, {})
+        session_id = session_index.get(index_key)
 
         if session_id and session_id in self._sessions:
             session = self._sessions[session_id]
@@ -168,21 +181,20 @@ class GatewaySessionManager:
             return session
 
         # 创建新会话
-        session_id = self._generate_session_id(platform, user_id)
+        session_id = self._generate_session_id(platform, index_key)
         session = GatewaySession(
             session_id=session_id,
             platform=platform,
             user_id=user_id,
             chat_id=chat_id,
+            chat_type=chat_type,
             user_name=event.user_name or "",
         )
 
         self._sessions[session_id] = session
 
         # 建立索引
-        if platform not in self._user_sessions:
-            self._user_sessions[platform] = {}
-        self._user_sessions[platform][user_id] = session_id
+        self._session_index.setdefault(platform, {})[index_key] = session_id
 
         # 保存
         self._save_sessions()
@@ -194,7 +206,10 @@ class GatewaySessionManager:
             except Exception as e:
                 logger.warning(f"[GatewaySession] Create callback error: {e}")
 
-        logger.info(f"[GatewaySession] Created session {session_id} for {user_id} on {getattr(platform, 'value', platform)}")
+        logger.info(
+            f"[GatewaySession] Created session {session_id} for {index_key} "
+            f"({chat_type}) on {getattr(platform, 'value', platform)}"
+        )
 
         return session
 
@@ -216,9 +231,11 @@ class GatewaySessionManager:
         session = self._sessions[session_id]
 
         # 移除索引
-        user_sessions = self._user_sessions.get(session.platform)
-        if user_sessions:
-            user_sessions.pop(session.user_id, None)
+        session_index = self._session_index.get(session.platform)
+        if session_index:
+            session_index.pop(
+                self._index_key(session.chat_type, session.user_id, session.chat_id), None
+            )
 
         # 删除会话文件
         session_file = self._data_dir / f"{session_id}.json"
