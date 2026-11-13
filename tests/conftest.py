@@ -85,6 +85,7 @@ def _ensure_split_system_plugins_enabled():
             "system-handoff",
             "system-subagent",
             "system-timer",
+            "system-im",
             "worktree-manager",
         )
         missing = [
