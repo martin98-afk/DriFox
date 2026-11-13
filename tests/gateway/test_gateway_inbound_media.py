@@ -50,6 +50,14 @@ def test_split_zero_limit_returns_original():
     assert split_message("abc", 0) == ["abc"]
 
 
+def test_split_prefers_paragraph_boundary():
+    body = "第一段" * 120 + "\n\n" + "第二段" * 120
+    chunks = split_message(body, 500, prefer_paragraph=True)
+    assert len(chunks) == 2
+    assert chunks[0].startswith("第一段")
+    assert chunks[1].startswith("第二段")
+
+
 # ==================== 入站图片 ====================
 
 @pytest.fixture()
