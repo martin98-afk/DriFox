@@ -82,3 +82,24 @@ def test_key_modules_routed():
             if make_module_filter(include, exclude)({"name": module_name})
         ]
         assert expected_file in routed, f"{module_name} 未命中 {expected_file}（实际: {routed}）"
+
+
+def test_match_prefix_underscore_literal():
+    """尾下划线前缀字面匹配：插件运行时模块名（下划线拼接）可被路由。"""
+    assert _match_prefix(
+        "drifox_rt_gateways_gateway-feishu_feishu", ("drifox_rt_gateways_",)
+    )
+    # 不带尾下划线的普通前缀仍按点号分段，不误吞同前缀兄弟模块
+    assert not _match_prefix("app.gateway_manager", ("app.gateway",))
+
+
+def test_plugin_gateway_modules_routed_to_gateway_log():
+    """插件网关组件日志须落 gateway.log（否则平台启动/消息日志只在 all.log）。"""
+    routed = [
+        file_name
+        for file_name, include, exclude in LOG_ROUTES
+        if make_module_filter(include, exclude)(
+            {"name": "drifox_rt_gateways_gateway-wechat_wechat"}
+        )
+    ]
+    assert "gateway.log" in routed

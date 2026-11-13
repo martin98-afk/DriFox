@@ -26,7 +26,10 @@ LOG_FORMAT = "{time:YYYY-MM-DD HH:mm:ss} | {level} | {message}"
 # 排查场景见各条目注释；后续增删子系统只需调整本表。
 LOG_ROUTES: list[tuple[str, tuple[str, ...], tuple[str, ...]]] = [
     # 平台消息收发（QQ/微信/钉钉等网关）
-    ("gateway.log", ("app.gateway", "app.core.services.gateway_service"), ()),
+    # drifox_rt_gateways：插件网关组件模块名（runtime_component_loader 拼成
+    # drifox_rt_<comp_dir>_<plugin>_<stem>，下划线分段）。不纳入此路由时，
+    # 飞书/微信等插件内的连接与消息日志只落 all.log，排查时误判"平台没启动"。
+    ("gateway.log", ("app.gateway", "app.core.services.gateway_service", "drifox_rt_gateways_"), ()),
     # MCP 连接与工具调用
     ("mcp.log", ("app.tools.mcp_tools",), ()),
     # 语言服务（LSP）
@@ -93,8 +96,17 @@ def _match_prefix(name: str, prefixes: tuple[str, ...]) -> bool:
     """按路径段匹配模块名前缀：精确相等，或以 ``prefix + "."`` 开头。
 
     避免子串误匹配（如 ``app.core.services.gateway_service`` 不应命中 ``app.core.gateway``）。
+
+    例外：以 ``_`` 结尾的前缀视为字面前缀（用于插件运行时模块名，如
+    ``drifox_rt_gateways_``——插件模块名用下划线拼接，点号分段匹配不到）。
+    显式书写尾下划线，避免 ``app.gateway`` 误吞 ``app.gateway_x``。
     """
-    return any(name == p or name.startswith(p + ".") for p in prefixes)
+    return any(
+        name == p
+        or name.startswith(p + ".")
+        or (p.endswith("_") and name.startswith(p))
+        for p in prefixes
+    )
 
 
 def make_module_filter(include: tuple[str, ...], exclude: tuple[str, ...] = ()) -> Callable[[Any], bool]:

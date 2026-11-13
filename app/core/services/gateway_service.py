@@ -28,7 +28,11 @@ from typing import Any, Dict, Optional
 from loguru import logger
 from PyQt5.QtCore import QObject, QTimer, pyqtSignal
 
-from app.core.conversation.backend import _extract_markdown_images, _gw_str_platform
+from app.core.conversation.backend import (
+    _extract_markdown_files,
+    _extract_markdown_images,
+    _gw_str_platform,
+)
 
 _AUTO_RESTART_COOLDOWN = 5.0  # 引擎不可用时的自愈重建最小间隔（秒）
 
@@ -440,17 +444,62 @@ class GatewayService(QObject):
             logger.warning(f"[Gateway] list_platforms 失败: {e}")
             return []
 
-    async def _send_image(self, platform: Any, chat_id: str, image_path: str, **kwargs) -> Any:
-        from app.gateway.base import SendResult
+    async def _deliver_attachments(
+        self,
+        platform: Any,
+        chat_id: str,
+        image_paths: list,
+        file_paths: list,
+    ) -> None:
+        """把模型产出的本地附件发回平台。
+
+        优先原生发送（send_image / send_file）；平台未实现或发送失败时回退
+        Gitee 公网链接文本（与历史行为一致，保证文件总能送到）。
+        在平台事件循环上调度执行，不阻塞主线程收尾。
+        """
+        import os as _os
 
         adapter = self._manager.get_adapter(platform) if self._manager else None
-        if adapter:
+        if adapter is None:
+            return
+
+        async def _fallback_link(path: str, label: str) -> None:
+            url = path
             try:
-                return await adapter.send_image(chat_id, image_path)
+                from app.gateway.utils.gitee_uploader import GiteeUploader
+
+                uploader = GiteeUploader.get_instance()
+                if uploader.is_configured():
+                    uploaded, err = await uploader.upload_file_async(path)
+                    if uploaded:
+                        url = uploaded
+                    else:
+                        logger.debug(f"[Gateway] {label} 回退上传失败: {err}")
             except Exception as e:
-                logger.error(f"[Gateway] Send image failed: {e}")
-                return SendResult(success=False, error=str(e))
-        return SendResult(success=False, error="No adapter")
+                logger.debug(f"[Gateway] {label} 回退上传异常: {e}")
+            try:
+                await adapter.send(
+                    chat_id, f"📎 文件下载链接: [{_os.path.basename(path)}]({url})"
+                )
+            except Exception as e:
+                logger.warning(f"[Gateway] {label} 链接回退发送失败: {e}")
+
+        for path in image_paths:
+            try:
+                result = await adapter.send_image(chat_id, path)
+            except Exception as e:
+                logger.error(f"[Gateway] Image send error: {e}")
+                result = None
+            if not (result and getattr(result, "success", False)):
+                await _fallback_link(path, "图片")
+        for path in file_paths:
+            try:
+                result = await adapter.send_file(chat_id, path)
+            except Exception as e:
+                logger.error(f"[Gateway] File send error: {e}")
+                result = None
+            if not (result and getattr(result, "success", False)):
+                await _fallback_link(path, "文件")
 
     # ==================== 主线程消息处理 ====================
 
@@ -603,12 +652,21 @@ class GatewayService(QObject):
 
                 logger.info(f"[Gateway] AI completed, response_len={len(response)}, final_len={len(final)}")
 
+                # 本地附件提取：图片走 send_image，其余文件走 send_file。
+                # 原生发送失败时 _deliver_attachments 内部回退 Gitee 链接，
+                # 所以正文里不再保留本地路径（否则用户看到裸路径）。
                 clean_content, image_paths = _extract_markdown_images(final)
-                for img_path in image_paths:
+                clean_content, file_paths = _extract_markdown_files(clean_content)
+                if image_paths or file_paths:
                     try:
-                        asyncio.run_coroutine_threadsafe(self._send_image(gw_platform, chat_id, img_path), _ev_loop)
+                        asyncio.run_coroutine_threadsafe(
+                            self._deliver_attachments(
+                                gw_platform, chat_id, image_paths, file_paths
+                            ),
+                            _ev_loop,
+                        )
                     except Exception as e:
-                        logger.error(f"[Gateway] Image send error: {e}")
+                        logger.error(f"[Gateway] Attachment delivery error: {e}")
 
                 text_to_send = clean_content.strip()
                 if use_stream and adapter:
@@ -624,7 +682,7 @@ class GatewayService(QObject):
                         _push_to_platform(text_to_send or final)
                 elif text_to_send:
                     _push_to_platform(text_to_send)
-                elif not image_paths:
+                elif not (image_paths or file_paths):
                     _push_to_platform(final)
 
                 # 回复已在上方送达（流式卡片 finish_stream / 兜底 _push_to_platform），
