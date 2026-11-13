@@ -147,3 +147,62 @@ class TestOpenFileMessage:
         assert stub.paths == [], "emit 仍发生在 Chromium 回调栈内（未延迟）"
         self._pump_once()
         assert stub.paths == [raw]
+
+
+class TestLinkifyRelativizedPath:
+    """插件 preview 用 to_rel_path 把绝对路径相对化后，显示文本里只剩
+    ``app/main.py``，而传入的是完整绝对路径。精确子串匹配在这类场景必然
+    失配 → 完成框里的路径变纯文本、点击无反应。data-open-path 必须始终
+    携带完整原始路径（宿主按会话 workdir 解析）。
+    """
+
+    ABS = "D:/work/DriFox/app/main.py"
+
+    def test_relativized_preview_still_clickable(self):
+        html = _linkify_path('读取 "app/main.py" 前 500 行', self.ABS)
+        m = _LINK_RE.search(html)
+        assert m is not None, "相对化预览丢失可点标记"
+        assert m.group(1) == self.ABS, "属性必须是完整原始路径"
+        assert ">app/main.py</span>" in html, "显示仍应是相对路径原文"
+
+    def test_windows_backslash_path(self):
+        html = _linkify_path('读取 "app/main.py"', r"D:\work\DriFox\app\main.py")
+        assert r'data-open-path="D:\work\DriFox\app\main.py"' in html
+        assert ">app/main.py</span>" in html
+
+    def test_separator_normalized_preview(self):
+        """显示文本带反斜杠、参数混用时也能命中。"""
+        html = _linkify_path(r'编辑 "app\main.py"', "D:/work/DriFox/app/main.py")
+        assert f'data-open-path="{self.ABS}"' in html
+
+    def test_relative_path_exact_match_unchanged(self):
+        html = _linkify_path("读取 app/main.py", "app/main.py")
+        assert 'data-open-path="app/main.py"' in html
+
+    def test_no_path_in_text_returns_empty(self):
+        assert _linkify_path("没有路径信息", self.ABS) == ""
+
+    def test_render_inline_abs_path_clickable(self, monkeypatch):
+        """inline 卡（read）+ 插件相对化预览：绝对路径参数也必须可点。"""
+        from app.tools.registry import ToolRegistry
+
+        inst = ToolRegistry.get_instance()
+        monkeypatch.setattr(inst, "get_render_mode", lambda _name: "inline")
+        monkeypatch.setattr(
+            inst, "get_preview", lambda _name: (lambda args: '读取 "app/main.py"')
+        )
+        html = render_tool_block("read", {"path": self.ABS}, "x", True, tool_call_id="tc3")
+        assert f'data-open-path="{self.ABS}"' in html
+
+    def test_dir_path_relativized_to_single_segment(self):
+        """grep/list/glob/scan_repo 的目录路径相对化后只剩末段（如 app），同样要可点。"""
+        abs_dir = "D:/work/DriFox/app"
+        html = _linkify_path('搜索 "foo" (app)', abs_dir)
+        assert f'data-open-path="{abs_dir}"' in html
+        assert ">app</span>" in html
+        assert _linkify_path("app", abs_dir) != ""
+
+    def test_no_false_positive_on_unrelated_word(self):
+        """路径末段没出现在文本里时不得硬凑：返回空串。"""
+        assert _linkify_path("搜索完成", "D:/work/DriFox/app") == ""
+

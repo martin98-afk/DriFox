@@ -174,17 +174,44 @@ def _render_path_link(display: str, path: str) -> str:
     )
 
 def _linkify_path(text: str, path: str) -> str:
-    """把纯文本里的 path 子串替换成可点元素
+    """把纯文本里的路径片段替换成可点元素，属性始终携带完整原始 ``path``
 
-    未命中返回空串（调用方自行 escape 整段文本）。只做精确子串匹配：
-    插件 preview 可能把路径相对化/改写，匹配不上就保持纯文本，不猜。
+    插件 preview 会用 to_rel_path 把绝对路径相对化后再显示（如
+    ``D:/work/DriFox/app/main.py`` 显示成 ``app/main.py``），且 Windows 下
+    分隔符可能混用。此时精确子串匹配必然失配，完成框里的路径就变纯文本、
+    点击无反应。回退策略：取原始路径的**尾部若干段**（含末段目录名），
+    归一化分隔符后在文本里找最长命中，命中片段可点但仍指向完整原路径。
+    未命中返回空串（调用方自行 escape 整段文本），不猜、不编造路径。
     """
     if not text or not path:
         return ""
+
+    def _norm(s: str) -> str:
+        return s.replace("\\", "/")
+
     idx = text.find(path)
-    if idx < 0:
+    if idx >= 0:
+        return escape(text[:idx]) + _render_path_link(path, path) + escape(text[idx + len(path) :])
+
+    # 精确未命中：按「原始路径的尾部片段」在归一化文本里找最长匹配。
+    # 从最长后缀逐段缩短（含末段）；目录型工具（grep/list/glob）的 path 相对化后
+    # 只剩 "app" 这类单段，也必须可点。长尾优先命中，单段仅在前缀都不在文本里
+    # 时才发生，此时文本里本就只有这一段，不会把更长路径截半。
+    parts = [p for p in _norm(path).split("/") if p]
+    if not parts:
         return ""
-    return escape(text[:idx]) + _render_path_link(path, path) + escape(text[idx + len(path) :])
+    norm_text = _norm(text)
+    for start in range(0, len(parts)):  # start 越小 tail 越长：最长后缀优先
+        tail = "/".join(parts[start:])
+        hit = norm_text.find(tail)
+        if hit >= 0:
+            # 命中区间按归一化坐标定位；text 中的反斜杠与归一串等长（1:1 替换）
+            return (
+                escape(text[:hit])
+                + _render_path_link(text[hit : hit + len(tail)], path)
+                + escape(text[hit + len(tail) :])
+            )
+    return ""
 
 def _format_args_preview(tool_args: dict, max_total_len: int = 80) -> str:
     """
