@@ -1013,6 +1013,8 @@ class FileTreeCard(QWidget):
         model_root = self._source_model.project_root()
         if _same_path(scan_dir, model_root):
             self._source_model.refresh_root(entries)
+            if self._stack.currentIndex() == _PAGE_PREVIEW:
+                return  # 同根刷新不抢页面（预览中保留当前阅读内容）
         else:
             self._live_expanded.clear()  # 旧根的实时展开路径不写进新根条目
             self._stash_view_state(model_root)  # 必须先存：reset 后旧状态已不可取
@@ -1020,8 +1022,8 @@ class FileTreeCard(QWidget):
             cached = self._view_state_cache.get(os.path.normcase(os.path.normpath(scan_dir)))
             if cached:
                 self._restore_view_state(cached)
-        if self._stack.currentIndex() == _PAGE_PREVIEW:
-            return  # 预览态不抢页面（换项目时保留当前阅读内容）
+            # 换根（切对话标签页 / 换项目）：旧预览已不属于当前上下文，
+            # 必须退出预览态，否则每个标签页都停在同一个旧预览（串台）
         self._stack.setCurrentIndex(0 if entries else 1)
         if not entries:
             self._placeholder.setText("项目目录为空")

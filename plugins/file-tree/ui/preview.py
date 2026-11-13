@@ -16,8 +16,20 @@ import os
 from typing import Optional, Tuple
 
 from loguru import logger
-from PyQt5.QtCore import QPoint, QPointF, QRect, QRectF, QSize, Qt, QTimer, pyqtSignal
-from PyQt5.QtGui import QColor, QFont, QIcon, QImageReader, QPainter, QPen, QPixmap, QTextCursor
+from PyQt5.QtCore import QPoint, QPointF, QRect, QRectF, QSize, Qt, QTimer, QUrl, pyqtSignal
+from PyQt5.QtGui import (
+    QBrush,
+    QColor,
+    QFont,
+    QIcon,
+    QImageReader,
+    QPainter,
+    QPalette,
+    QPen,
+    QPixmap,
+    QTextCursor,
+    QTextDocument,
+)
 from PyQt5.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -26,6 +38,7 @@ from PyQt5.QtWidgets import (
     QPlainTextEdit,
     QSizePolicy,
     QStackedWidget,
+    QTextBrowser,
     QToolButton,
     QVBoxLayout,
     QWidget,
@@ -67,6 +80,14 @@ _TEXT_NAMES = {
 }
 
 
+# markdown：渲染态 + 三态循环（渲染 / 源码高亮 / 源码纯文本）
+_MD_EXTS = {".md", ".markdown"}
+_MD_CYCLE = {"render": "source_hl", "source_hl": "source_plain", "source_plain": "render"}
+
+# 预览页 _content 页索引
+_PAGE_TEXT = 1
+_PAGE_MD = 3
+
 def _image_exts() -> frozenset:
     """Qt 实际支持的图片后缀（不硬编码，平台差异自动跟随）"""
     try:
@@ -93,7 +114,7 @@ _IMAGE_EXTS = _image_exts()
 
 
 def detect_kind(path: str) -> str:
-    """判定预览类型：``"image"`` / ``"text"`` / ``""``（不支持）"""
+    """判定预览类型：``"image"`` / ``"markdown"`` / ``"text"`` / ``""``（不支持）"""
     try:
         if not path or not os.path.isfile(path):
             return ""
@@ -103,6 +124,8 @@ def detect_kind(path: str) -> str:
     ext = os.path.splitext(name)[1].lower()
     if ext in _IMAGE_EXTS:
         return "image"
+    if ext in _MD_EXTS:
+        return "markdown"
     if ext in _TEXT_EXTS or name in _TEXT_NAMES:
         return "text"
     return ""
@@ -723,6 +746,12 @@ class FilePreviewPage(QWidget):
         super().__init__(parent)
         self._path = ""
         self._kind = ""
+        self._md_mode = "render"  # markdown 三态：render / source_hl / source_plain
+        self._md_text = ""
+        self._md_skipped = ""
+        self._md_source_loaded = False
+        self._md_render_key: Tuple = ()
+        self._md_token = 0
         self._font_size = 14
         self._text_color = QColor(220, 220, 220)
         self._secondary_color = QColor(150, 150, 150)
@@ -743,12 +772,17 @@ class FilePreviewPage(QWidget):
         """载入文件并进入对应视图；返回是否载入成功（失败时显示错误提示页）"""
         self._path = path
         self._kind = detect_kind(path)
+        self._md_mode = "render"
+        self._md_text = ""
+        self._md_skipped = ""
+        self._md_source_loaded = False
+        text_like = self._kind in ("text", "markdown")
         name = os.path.basename(path) or path
         self._name_label.setText(name)
         self._name_label.setToolTip(path)
         self._set_hint("")
         self._set_zoom_visible(self._kind == "image")
-        self._set_text_controls_visible(self._kind == "text")
+        self._set_text_controls_visible(text_like)
         # 诊断：右上角按钮消失问题取证（定位后移除）
         logger.info(
             f"[FilePreview] load {name!r} kind={self._kind} header_w={self._header.width()} "
@@ -768,15 +802,26 @@ class FilePreviewPage(QWidget):
             self._content.setCurrentIndex(0)
             self._set_hint(hint)
             return True
-        if self._kind == "text":
+        if self._kind in ("text", "markdown"):
             try:
                 text, hint = read_text(path)
             except Exception as e:  # noqa: BLE001
                 self._show_message(f"⚠️ {e}")
                 return False
-            language, skipped = self._code_view.set_source(path, text)
-            self._content.setCurrentIndex(1)
             self._base_hint = hint
+            if self._kind == "markdown":
+                # 渲染放下一拍：布局 18k 字符的文档要 ~120ms，先让点击有响应。
+                # 源码态内容懒加载（切到源码才跑语法分析）。
+                self._md_text = text
+                self._content.setCurrentIndex(_PAGE_MD)
+                self._wrap_btn.setVisible(False)
+                self._md_view.setDocument(QTextDocument(self._md_view))
+                self._refresh_control_icons()
+                self._md_token += 1
+                QTimer.singleShot(0, lambda t=self._md_token: self._render_md_async(t))
+                return True
+            language, skipped = self._code_view.set_source(path, text)
+            self._content.setCurrentIndex(_PAGE_TEXT)
             self._sync_highlight_button(language, skipped)
             self._set_hint(self._compose_hint(hint, skipped))
             return True
@@ -896,6 +941,25 @@ class FilePreviewPage(QWidget):
             extra_qss=scrollbar_qss,
             is_dark=is_dark,
         )
+        # markdown 渲染视图：字体/颜色跟主题；文档内联字体是 setMarkdown 时固化的，
+        # 主题切换需要重渲染才算真正生效
+        self._md_view.setStyleSheet(
+            f"QTextBrowser {{ background: transparent; border: none;"
+            f"  color: {text_color.name()};"
+            f"  font-family: '{family}'; font-size: {self._font_size}px; }}"
+            f"{scrollbar_qss}"
+        )
+        md_palette = self._md_view.palette()
+        md_palette.setColor(QPalette.Text, text_color)
+        md_palette.setColor(QPalette.WindowText, text_color)
+        self._md_view.setPalette(md_palette)
+        md_font = QFont(family, self._font_size)
+        self._md_view.setFont(md_font)
+        self._md_view.document().setDefaultFont(md_font)
+        # 只有主题/字体真的变了才重渲染：打开新预览时 set_colors 也会走这里，
+        # 不加这道判据会把上一个文件白渲染一遍（实测 240ms）
+        if self._kind == "markdown" and self._md_text and self._md_render_key != self._theme_key():
+            self._render_markdown(self._path, self._md_text)
         self._refresh_control_icons()
 
     def _refresh_control_icons(self) -> None:
@@ -907,9 +971,22 @@ class FilePreviewPage(QWidget):
         except Exception:
             pass
         try:
-            self._highlight_btn.setIcon(
-                FluentIcon.CODE.icon(color=accent if self._code_view.highlight_enabled() else inactive)
-            )
+            if self._kind == "markdown":
+                mode = self._md_mode
+                icon = FluentIcon.VIEW if mode == "render" else FluentIcon.CODE
+                self._highlight_btn.setIcon(icon.icon(color=inactive if mode == "source_plain" else accent))
+                self._highlight_btn.setToolTip(
+                    {
+                        "render": "Markdown 渲染（点击看源码）",
+                        "source_hl": "源码 · 高亮开（点击切纯文本）",
+                        "source_plain": "源码 · 纯文本（点击回渲染）",
+                    }[mode]
+                )
+                self._highlight_btn.setEnabled(True)
+            else:
+                self._highlight_btn.setIcon(
+                    FluentIcon.CODE.icon(color=accent if self._code_view.highlight_enabled() else inactive)
+                )
             self._reload_btn.setIcon(FluentIcon.SYNC.icon(color=inactive))
             self._open_with_btn.set_icon_color(inactive)
             if not self._has_opener_icon:
@@ -966,7 +1043,7 @@ class FilePreviewPage(QWidget):
         self._highlight_btn = TransparentToolButton(FluentIcon.CODE, self._header)
         self._highlight_btn.setFixedSize(26, 26)
         self._highlight_btn.setToolTip("语法高亮：开（点击切换）")
-        self._highlight_btn.clicked.connect(self._on_toggle_highlight)
+        self._highlight_btn.clicked.connect(self._on_code_button)
 
         # ── 两种视图共用 ──
         self._reload_btn = TransparentToolButton(FluentIcon.SYNC, self._header)
@@ -999,6 +1076,14 @@ class FilePreviewPage(QWidget):
         self._code_view.context_menu_requested.connect(self.context_menu_requested.emit)
         self._code_view.highlight_ready.connect(self._on_highlight_ready)
 
+        # markdown 渲染视图：QTextBrowser（只读、无边框、背景交给主题）
+        self._md_view = QTextBrowser(self)
+        self._md_view.setObjectName("file-preview-md")
+        self._md_view.setFrameShape(QFrame.NoFrame)
+        self._md_view.setOpenExternalLinks(True)
+        self._md_view.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self._md_view.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+
         self._msg_label = QLabel("", self)
         self._msg_label.setAlignment(Qt.AlignCenter)
         self._msg_label.setWordWrap(True)
@@ -1011,6 +1096,7 @@ class FilePreviewPage(QWidget):
         self._content.addWidget(self._image_view)  # 0: 图片
         self._content.addWidget(self._code_view)  # 1: 文本
         self._content.addWidget(self._msg_page)  # 2: 提示
+        self._content.addWidget(self._md_view)  # 3: markdown 渲染
 
         layout.addWidget(self._header)
         layout.addWidget(self._hint)
@@ -1051,7 +1137,7 @@ class FilePreviewPage(QWidget):
         self._on_toggle_wrap()
 
     def toggle_highlight(self) -> None:
-        self._on_toggle_highlight()
+        self._on_code_button()
 
     # ── 视图开关 ──
 
@@ -1067,8 +1153,123 @@ class FilePreviewPage(QWidget):
         self._sync_highlight_button(language, skipped)
         self._refresh_control_icons()
 
+    # ── markdown 三态 ──
+
+    def _on_code_button(self) -> None:
+        """顶栏 CODE 按钮：markdown 循环三态，其余文件仍是高亮开关"""
+        if self._kind == "markdown":
+            self._md_mode = _MD_CYCLE[self._md_mode]
+            self._apply_md_mode()
+            return
+        self._on_toggle_highlight()
+
+    def _apply_md_mode(self) -> None:
+        """按三态切换内容页：渲染 / 源码高亮 / 源码纯文本"""
+        if self._kind != "markdown":
+            return
+        if self._md_mode == "render":
+            self._content.setCurrentIndex(_PAGE_MD)
+            self._wrap_btn.setVisible(False)
+            self._set_hint(getattr(self, "_base_hint", ""))
+        else:
+            # 源码内容懒加载：渲染态不预先跑语法分析（打开 md 常是看文档）
+            if not self._md_source_loaded:
+                language, skipped = self._code_view.set_source(self._path, self._md_text)
+                self._md_skipped = skipped
+                self._md_source_loaded = True
+            self._code_view.set_highlight_enabled(self._md_mode == "source_hl")
+            self._content.setCurrentIndex(_PAGE_TEXT)
+            self._wrap_btn.setVisible(True)
+            self._wrap_btn.setToolTip(
+                f"自动换行：{'开' if self._code_view.wrap_enabled() else '关'}（点击切换）"
+            )
+            self._set_hint(self._compose_hint(getattr(self, "_base_hint", ""), self._md_skipped))
+        self._refresh_control_icons()
+
+    def _render_md_async(self, token: int) -> None:
+        """下一拍执行的实际渲染（token 防快速切文件时旧任务覆盖新内容）"""
+        if token != self._md_token or self._kind != "markdown" or not self._md_text:
+            return
+        self._render_markdown(self._path, self._md_text)
+        self._apply_md_mode()
+
+    def _theme_key(self) -> Tuple:
+        """影响渲染产出外观的主题要素（判断是否需要重渲染）"""
+        return (
+            bool(self._is_dark),
+            self._text_color.name(),
+            self._font_size,
+            self._md_view.font().family(),
+        )
+
+    def _render_markdown(self, path: str, text: str) -> None:
+        """setMarkdown 渲染，并补 Qt 不生成的代码块/引用底色
+
+        ★ 先在未挂到视图上的 QTextDocument 里渲染完、改完块格式，最后
+        setDocument 一次挂载。直接在 QTextBrowser.document() 上逐块
+        setBlockFormat，每次修改都会触发一次重排（实测 424 块的 30KB
+        文档 3.7ms → 243ms），差了两个量级。
+        """
+        self._md_text = text
+        doc = QTextDocument(self._md_view)
+        doc.setDefaultFont(self._md_view.font())
+        # 相对路径图片靠 baseUrl 解析（QTextBrowser 的资源查找起点）
+        doc.setBaseUrl(QUrl.fromLocalFile(os.path.dirname(path) + os.sep))
+        doc.setMarkdown(text)
+        self._apply_md_block_style(doc)
+        self._md_view.setDocument(doc)
+        self._md_render_key = self._theme_key()
+
+    def _apply_md_block_style(self, doc: QTextDocument) -> None:
+        """给等宽块（代码）与缩进块（引用）加底色
+
+        QTextMarkdownImporter 不生成 ``<pre>`` / ``<blockquote>``：代码块只有
+        Courier 字体，引用只有左右 40px 缩进，深色主题下与正文完全糊在一起。
+        QTextBlockFormat 不支持边框，因此只加底色（代码块额外缩进一档）。
+        """
+        code_bg = QColor(255, 255, 255, 20) if self._is_dark else QColor(0, 0, 0, 14)
+        quote_bg = QColor(255, 255, 255, 12) if self._is_dark else QColor(0, 0, 0, 8)
+        cursor = QTextCursor(doc)
+        cursor.beginEditBlock()
+        block = doc.begin()
+        while block.isValid():
+            fmt = block.blockFormat()
+            if self._block_is_code(block):
+                fmt.setBackground(QBrush(code_bg))
+                if int(fmt.leftMargin()) < 8:
+                    fmt.setLeftMargin(8)
+                    fmt.setRightMargin(max(8, int(fmt.rightMargin())))
+                cursor.setPosition(block.position())
+                cursor.setBlockFormat(fmt)
+            elif int(fmt.leftMargin()) >= 30:
+                fmt.setBackground(QBrush(quote_bg))
+                cursor.setPosition(block.position())
+                cursor.setBlockFormat(fmt)
+            block = block.next()
+        cursor.endEditBlock()
+
+    @staticmethod
+    def _block_is_code(block) -> bool:
+        """块内全部非空 fragment 都是等宽字体 → 代码块"""
+        seen = False
+        it = block.begin()
+        while not it.atEnd():
+            frag = it.fragment()
+            if frag.isValid() and frag.text().strip():
+                seen = True
+                family = (frag.charFormat().fontFamily() or "").lower()
+                if "courier" not in family and "mono" not in family:
+                    return False
+            it += 1
+        return seen
+
     def _on_highlight_ready(self, language: str, skipped: str) -> None:
-        """异步上色完成：补上语言名与降级提示"""
+        """异步上色完成：补上语言名与降级提示（markdown 渲染态不抢提示位）"""
+        if self._kind == "markdown":
+            self._md_skipped = skipped
+            if self._md_mode != "render":
+                self._set_hint(self._compose_hint(getattr(self, "_base_hint", ""), skipped))
+            return
         self._sync_highlight_button(language, skipped)
         self._set_hint(self._compose_hint(getattr(self, "_base_hint", ""), skipped))
 
