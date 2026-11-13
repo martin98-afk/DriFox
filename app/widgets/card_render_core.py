@@ -1379,16 +1379,16 @@ def _render_tool_streaming_block(
     if not display_name:
         display_name = "工具调用中"
 
-    # 图标与颜色：与 render_tool_block 保持一致
+    # 图标与颜色：与 render_tool_block 保持一致（颜色走主题 token）
     if is_mcp:
         icon_name = "websearch"
-        title_color = "#00BCD4"
+        title_color = Colors.TOOL_TITLE_MCP
     elif is_sub_agent_task:
         icon_name = "设置-subagent"
-        title_color = "#9C27B0"
+        title_color = Colors.TOOL_TITLE_SUBAGENT
     else:
         icon_name = _get_tool_icon(tool_name)
-        title_color = "#FFA500"
+        title_color = Colors.TOOL_TITLE
 
     icon_html = _get_tool_icon_html(icon_name, tool_name=tool_name if not is_mcp else None)
     cn_name = _get_tool_cn_name(tool_name) if not is_mcp else display_name

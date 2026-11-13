@@ -5,6 +5,8 @@
 - **文件胶囊 Backspace 解封回卡片态** (`app/widgets/bottom_input_area.py`): 光标紧贴文件胶囊按 Backspace/Delete 第一次只解封为 `@相对路径`（工作区外用绝对路径），不再整枚删除；解封触发的 textChanged 重开文件卡片并让附件反向同步移除 chip，回到「已选未确认」状态，再按才逐字删除。@ 前不是单词边界（中文紧邻）时自动补一个空格，否则 @ 检测不成立导致卡片不弹
 
 ### 🐛 修复 (Bug Fixes)
+- **工具卡标题三色收敛为主题 token** (`app/utils/design_tokens.py` · `app/widgets/render_helpers.py` · `app/widgets/card_render_core.py` · `app/widgets/markdown_block_viewer.py`): 工具折叠头标题色此前写死三处（工具 `#FFA500` / MCP `#00BCD4` / 子智能体 `#9C27B0`），现下沉为 `Colors.TOOL_TITLE` / `TOOL_TITLE_MCP` / `TOOL_TITLE_SUBAGENT`，主题 YAML 用同名小写键（`tool_title` 等）即可覆盖。WebEngine 完成态、流式态与纯 Qt 路径全部改读 token
+- **工具折叠头描述优先** (`app/widgets/render_helpers.py` · `app/widgets/markdown_block_viewer.py`): 模型填了 `description` 时，折叠头直接用它当标题，工具名与右侧参数预览不再重复占位（说明与路径挤一行会把两者都截断）；无说明维持「工具名 + 参数预览」，diff 统计 `+N/-N` 始终保留。超 48 字截断。WebEngine 与纯 Qt（MarkdownBlockViewer）两条渲染路径同步
 - **编辑类工具 description 改为必填** (`plugins/system-core/tools/file_tools.py` · `plugins/system-core/tools/_tool_desc.py`): write / edit / multi_edit 的 `description` 此前是可选参数且未进 `required`，模型会成批省略（实测 deepseek 系 edit 18 次全空），折叠头退回原始文件路径，看不出这一步在做什么。现固定 `required=True` 并把 `description` 补进三个工具的 `required` 数组（共享模块缺失时自动跳过，不产生悬空 required）
 
 ## [v0.7.2] - 2026-11-13

@@ -494,6 +494,13 @@ class Colors:
     ARCHIVED_CARD_BG = "rgba(255, 180, 100, 0.08)"
     ARCHIVED_CARD_BORDER = "rgba(255, 150, 80, 0.2)"
 
+    # ── 工具调用卡标题色（三态语义） ──────────────────
+    # 折叠头标题（工具名/意图说明）的颜色，可经主题 YAML 同名小写键覆盖：
+    # tool_title / tool_title_mcp / tool_title_subagent
+    TOOL_TITLE = "#FFA500"  # 普通工具
+    TOOL_TITLE_MCP = "#00BCD4"  # MCP 工具
+    TOOL_TITLE_SUBAGENT = "#9C27B0"  # 子智能体任务
+
     # ── 语法高亮色 ────────────────────────────────────
     SYNTAX_STEP = "#4EC9B0"
     SYNTAX_TOOL = "#DCDCAA"

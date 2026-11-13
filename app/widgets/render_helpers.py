@@ -12,7 +12,7 @@ import orjson as json
 from loguru import logger
 
 from app.tools.registry import DEFAULT_FALLBACK_ICON
-from app.utils.design_tokens import _get_global_font, scale_font_size
+from app.utils.design_tokens import Colors, _get_global_font, scale_font_size
 from app.utils.utils import get_font_family_css
 
 # 行内 diff 高亮子系统已抽取至 app/utils/diff_highlight（消除 utils→widgets 反向依赖）。
@@ -739,7 +739,7 @@ def _render_inline_tool(
                 {icon_html}
                 {badge_html}
             </span>
-            <span style="white-space: nowrap; flex: 0 0 auto; color: #FFA500; font-size: {scale_font_size(13)}px; font-weight: 500;">{escape(cn_name)}</span>
+            <span style="white-space: nowrap; flex: 0 0 auto; color: {Colors.TOOL_TITLE_MCP if tool_name.startswith('mcp__') else Colors.TOOL_TITLE}; font-size: {scale_font_size(13)}px; font-weight: 500;">{escape(cn_name)}</span>
         </span>
         <span style="flex: 1 1 auto; min-width: 0; text-align: left; color: var(--text-secondary); font-size: {scale_font_size(11)}px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-left: 12px;">
             {escape(natural_preview)}
@@ -885,16 +885,16 @@ def render_tool_block(
     except Exception:
         is_sub_agent_task = False
 
-    # 图标与颜色按类型区分
+    # 图标与颜色按类型区分（颜色走主题 token，禁止再写死）
     if is_mcp_tool:
         icon_name = "websearch"
-        title_color = "#00BCD4"
+        title_color = Colors.TOOL_TITLE_MCP
     elif is_sub_agent_task:
         icon_name = "设置-subagent"
-        title_color = "#9C27B0"
+        title_color = Colors.TOOL_TITLE_SUBAGENT
     else:
         icon_name = _get_tool_icon_name(tool_name, tool_args)
-        title_color = "#FFA500"
+        title_color = Colors.TOOL_TITLE
 
     # 状态徽章（图标右上角）
     badge_html = _render_tool_status_badge(success)
@@ -950,6 +950,20 @@ def render_tool_block(
     if args_preview.startswith(cn_name):
         args_preview = args_preview[len(cn_name) :].lstrip()
 
+    # 有 description（模型填的意图说明）时：它就是这一步的标题，工具名与右侧
+    # 参数预览一并让位——三位挤在一行会把说明截断、路径也看不清。无说明维持原样。
+    desc_text = ""
+    if isinstance(tool_args, dict):
+        desc_text = str(tool_args.get("description") or "").strip()
+    title_text = desc_text or cn_name
+    if len(title_text) > 48:
+        title_text = title_text[:47] + "…"
+    preview_span = ""
+    if not desc_text:
+        preview_span = f'''<span style="color: var(--text-secondary); font-size: {scale_font_size(11)}px; text-align: left; word-break: break-all; white-space: normal; line-height: 1.4; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;">
+                {escape(args_preview)}
+            </span>'''
+
     # 生成哈希 key（折叠块懒注入的早返回也要用，故提前到内容构造之前）
     block_seed = "|".join(
         [
@@ -969,18 +983,15 @@ def render_tool_block(
     # 无 tool_call_id 的块无法反查源文本，不懒化（否则展开后永久空白）。
     if lazy_body and tool_call_id and (collapsed or no_collapse):
         _keep_attr = ' data-keep-in-content="true"' if tool_name in _keep_in_content_tools() else ""
-        _head_spans = f"""<span style="display: inline-flex; align-items: center; gap: 14px; flex: 0 0 auto;">
+        _head_spans = f"""<span style="display: inline-flex; align-items: center; gap: 14px; flex: 0 1 auto; min-width: 0;">
             <span style="position:relative;display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;flex:0 0 auto;">
                 {icon_html}
                 {badge_html}
             </span>
-            <span style="white-space: nowrap; flex: 0 0 auto; {get_font_family_css()}">{escape(cn_name)}</span>
+            <span style="white-space: nowrap; flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; {get_font_family_css()}">{escape(title_text)}</span>
         </span>
         <span style="display: flex; align-items: center; gap: 8px; margin-left: 10px; min-width: 0; flex: 1 1 auto; justify-content: flex-start; overflow: hidden;">
-            <span style="color: var(--text-secondary); font-size: {scale_font_size(11)}px; text-align: left; word-break: break-all; white-space: normal; line-height: 1.4; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;">
-                {escape(args_preview)}
-            </span>
-            {diff_stats_html}
+            {preview_span}{diff_stats_html}
         </span>"""
         if no_collapse:
             return f"""<div class="tool-block tool-block--no-collapse" data-block-key="{block_key}" data-lazy-body="1" data-tool-name="{escape(tool_name)}" data-tool-call-id="{escape(tool_call_id or "")}"{_keep_attr}{_succ_attr} style="margin: 4px 0; background: transparent; border-radius: 6px;">
@@ -1104,18 +1115,15 @@ def render_tool_block(
         _keep_attr = ' data-keep-in-content="true"' if tool_name in _keep_in_content_tools() else ""
         return f"""<div class="tool-block tool-block--no-collapse" data-tool-name="{escape(tool_name)}" data-tool-call-id="{escape(tool_call_id or "")}"{_keep_attr}{_succ_attr} style="margin: 4px 0; background: transparent; border-radius: 6px;">
     <div class="tool-block__header" style="cursor: default; padding: 4px 8px; color: {title_color}; font-size: {scale_font_size(13)}px; font-weight: 500; display: flex; align-items: center; gap: 6px; width: 100%; background: transparent; border: none; text-align: left; box-sizing: border-box; {get_font_family_css()}">
-        <span style="display: inline-flex; align-items: center; gap: 14px; flex: 0 0 auto;">
+        <span style="display: inline-flex; align-items: center; gap: 14px; flex: 0 1 auto; min-width: 0;">
             <span style="position:relative;display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;flex:0 0 auto;">
                 {icon_html}
                 {badge_html}
             </span>
-            <span style="white-space: nowrap; flex: 0 0 auto; {get_font_family_css()}">{escape(cn_name)}</span>
+            <span style="white-space: nowrap; flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; {get_font_family_css()}">{escape(title_text)}</span>
         </span>
         <span style="display: flex; align-items: center; gap: 8px; margin-left: 10px; min-width: 0; flex: 1 1 auto; justify-content: flex-start; overflow: hidden;">
-            <span style="color: var(--text-secondary); font-size: {scale_font_size(11)}px; text-align: left; word-break: break-all; white-space: normal; line-height: 1.4; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;">
-                {escape(args_preview)}
-            </span>
-            {diff_stats_html}
+            {preview_span}{diff_stats_html}
         </span>
     </div>
     <div class="tool-block__body" style="padding: 0 8px 4px;">
@@ -1126,18 +1134,15 @@ def render_tool_block(
     _keep_attr = ' data-keep-in-content="true"' if tool_name in _keep_in_content_tools() else ""
     return f"""<div class="cm-collapsible tool-block" data-block-key="{block_key}" data-expanded="{expanded_attr}" data-tool-name="{escape(tool_name)}" data-tool-call-id="{escape(tool_call_id or "")}"{_keep_attr}{_succ_attr} style="margin: 4px 0; background: transparent; border-radius: 6px;">
     <button type="button" class="cm-collapsible__summary tool-block__summary" aria-expanded="{expanded_attr}" style="cursor: pointer; padding: 4px 8px; color: {title_color}; font-size: {scale_font_size(13)}px; font-weight: 500; display: flex; align-items: center; gap: 6px; width: 100%; background: transparent; border: none; text-align: left; box-sizing: border-box; {get_font_family_css()}">
-        <span style="display: inline-flex; align-items: center; gap: 14px; flex: 0 0 auto;">
+        <span style="display: inline-flex; align-items: center; gap: 14px; flex: 0 1 auto; min-width: 0;">
             <span style="position:relative;display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;flex:0 0 auto;">
                 {icon_html}
                 {badge_html}
             </span>
-            <span style="white-space: nowrap; flex: 0 0 auto; {get_font_family_css()}">{escape(cn_name)}</span>
+            <span style="white-space: nowrap; flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; {get_font_family_css()}">{escape(title_text)}</span>
         </span>
         <span style="display: flex; align-items: center; gap: 8px; margin-left: 10px; min-width: 0; flex: 1 1 auto; justify-content: flex-start; overflow: hidden;">
-            <span style="color: var(--text-secondary); font-size: {scale_font_size(11)}px; text-align: left; word-break: break-all; white-space: normal; line-height: 1.4; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;">
-                {escape(args_preview)}
-            </span>
-            {diff_stats_html}
+            {preview_span}{diff_stats_html}
         </span>
         <span class="cm-collapsible__chevron" aria-hidden="true" style="flex: 0 0 auto; margin-left: auto;"></span>
     </button>

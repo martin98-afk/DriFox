@@ -654,6 +654,25 @@ def _extract_balanced_braces(text: str, start: int) -> Optional[str]:
     return None
 
 
+def _tool_title_color(name: str) -> str:
+    """工具卡标题色（MCP / 子智能体 / 普通工具三态），走主题 token。
+    对齐 WebEngine 版 render_tool_block 的 title_color 分流。
+    """
+    if name and name.startswith("mcp__"):
+        return Colors.TOOL_TITLE_MCP
+    if name:
+        try:
+            from app.tools.registry import ToolRegistry
+            from app.tools.tool_name_mapper import ToolNameMapper
+
+            reg = ToolRegistry.get_instance().get(ToolNameMapper.to_native(name))
+            if reg and reg.metadata and reg.metadata.get("subagent_task"):
+                return Colors.TOOL_TITLE_SUBAGENT
+        except Exception:
+            pass
+    return Colors.TOOL_TITLE
+
+
 def _is_edit_tool_name(name: str) -> bool:
     """延迟判断编辑类工具（结果展示在正文而非工具折叠区，对齐 WebEngine 版规则）。"""
     if not name:
@@ -664,6 +683,22 @@ def _is_edit_tool_name(name: str) -> bool:
         return name in _edit_tools()
     except Exception:
         return False
+
+
+def _tool_desc_from_block(block: Dict[str, Any]) -> str:
+    """取模型填在参数里的 description（意图说明）；无/非法 JSON 时返回空串。
+    有说明时折叠头用它当标题，工具名与参数预览让位（对齐 WebEngine 版）。
+    """
+    raw = block.get("args_raw") or ""
+    if not raw:
+        return ""
+    try:
+        args = json.loads(raw)
+    except Exception:
+        return ""
+    if not isinstance(args, dict):
+        return ""
+    return str(args.get("description") or "").strip()
 
 
 def _parse_tool_block(content: str) -> Dict[str, Any]:
@@ -1734,9 +1769,9 @@ class ToolCardWidget(_CollapsibleHeightAnimMixin, QFrame):
         gear.setAlignment(Qt.AlignCenter)
         self._gear_label = gear
         self._name_label = QLabel(block.get("cn_name") or block.get("name") or "工具调用", header)
-        # 标题色对齐 WebEngine 版 title_color=#FFA500
+        # 标题色走主题 token（MCP 蓝 / 子智能体紫 / 普通工具黄）
         self._name_label.setStyleSheet(
-            f"{get_font_family_css()} color:{_LANG_COLOR};"
+            f"{get_font_family_css()} color:{_tool_title_color(block.get('name') or '')};"
             f" font-size:{_CODE_FONT_SIZE}px; font-weight:600; background:transparent;"
         )
         # 参数单行预览（对齐 WebEngine 版 _format_args_preview：k=v; k2=v2 截断）
@@ -1759,6 +1794,7 @@ class ToolCardWidget(_CollapsibleHeightAnimMixin, QFrame):
         )
         for w in (gear, self._name_label, self._preview_label, self._status_label):
             hl.addWidget(w)
+        self._apply_title(block)
         self._update_diff_stats()
         hl.addStretch()
         # diff 统计靠右（stretch 之后），避免与长工具名挤压重叠
@@ -1834,12 +1870,26 @@ class ToolCardWidget(_CollapsibleHeightAnimMixin, QFrame):
             if self._body_kind == "":
                 self._body_kind, self._body_label_ref = "result", result_label
 
+    def _apply_title(self, block: Dict[str, Any]) -> None:
+        """标题位：有 description 就显它（超 48 字截断），工具名与预览让位；否则原名+预览。
+        对齐 WebEngine 版 render_tool_block：说明与路径挤一行会把两者都挤掉。
+        """
+        desc = _tool_desc_from_block(block)
+        if desc:
+            self._name_label.setText(desc if len(desc) <= 48 else desc[:47] + "…")
+            self._preview_label.setText("")
+            self._preview_label.setVisible(False)
+            return
+        self._name_label.setText(block.get("cn_name") or block.get("name") or "工具调用")
+        self._preview_label.setVisible(True)
+        self._preview_label.setText(_format_args_preview_safe(block.get("args_raw") or ""))
+
     def update_content(self, b: Dict[str, Any]) -> None:
         """流式原位更新：头部预览/徽章/diff 统计 + body 分支原位或重建（不重建卡片，
         保留用户展开态与动画）。"""
         old = self._block
         self._block = b
-        self._preview_label.setText(_format_args_preview_safe(b.get("args_raw") or ""))
+        self._apply_title(b)
         new_icon_pm = _tool_icon_pixmap(b.get("name") or "", b.get("args_raw") or "")
         if self._icon_is_pixmap and new_icon_pm is not None:
             self._gear_label.setPixmap(new_icon_pm)
