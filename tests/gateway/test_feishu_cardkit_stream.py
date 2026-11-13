@@ -145,7 +145,9 @@ def test_start_stream_happy_path():
     sent = calls[1][2]
     assert sent["msg_type"] == "interactive"
     assert json.loads(sent["content"]) == {"type": "card", "data": {"card_id": "card123"}}
-    assert calls[2][2]["settings"] == {"streaming_mode": True}
+    assert json.loads(calls[2][2]["settings"]) == {
+        "config": {"streaming_mode": True, "update_multi": True}
+    }
 
 
 def test_start_stream_failure_returns_none():
@@ -165,21 +167,27 @@ def test_update_and_finish_stream():
     bodies = []
 
     async def fake_req(method, endpoint, payload):
-        bodies.append((endpoint, payload))
+        bodies.append((method, endpoint, payload))
         return {"code": 0}
 
     a._api_request = fake_req
     assert asyncio.run(a.update_stream("c1", "部分内容")) is True
-    assert bodies[-1][0].endswith("/elements/stream_md/content")
-    assert bodies[-1][1]["content"] == "部分内容"
-    assert bodies[-1][1]["sequence"] == 2
+    assert bodies[-1][0] == "PUT"  # 元素内容接口只收 PUT（POST 返回 404）
+    assert bodies[-1][1].endswith("/elements/stream_md/content")
+    assert bodies[-1][2]["content"] == "部分内容"
+    assert bodies[-1][2]["sequence"] == 2
 
     result = asyncio.run(a.finish_stream("c1", "# 标题\n最终全文"))
     assert result.success is True
-    assert bodies[-2][1]["content"].startswith("# 标题")
-    assert bodies[-1][0].endswith("/settings")
-    assert bodies[-1][1]["settings"] == {"streaming_mode": False}
-    assert bodies[-1][1]["sequence"] == 4
+    assert bodies[-2][0] == "PUT"
+    assert bodies[-2][2]["content"].startswith("# 标题")
+    assert bodies[-1][0] == "PATCH"
+    assert bodies[-1][1].endswith("/settings")
+    # settings 必须是 JSON 字符串且内容包在 config 段（传裸对象报 9499）
+    assert json.loads(bodies[-1][2]["settings"]) == {
+        "config": {"streaming_mode": False, "update_multi": True}
+    }
+    assert bodies[-1][2]["sequence"] == 4
     assert "c1" not in a._stream_states  # 状态已清理
 
 

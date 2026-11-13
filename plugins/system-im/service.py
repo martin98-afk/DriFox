@@ -808,6 +808,9 @@ class GatewayService(QObject):
         future = data["future"]
         media_urls = data.get("media_urls") or []
         media_types = data.get("media_types") or []
+        # 命令响应是静态文本（/model 列表等），必须走 adapter.send 的命令卡片
+        # 分支：流式卡片只有 markdown 元素，按钮与交互会丢
+        is_command = text.lstrip().startswith("/")
 
         logger.info(
             f"[Gateway] Main thread processing: {text[:50]}... (media={len(media_urls)})"
@@ -910,7 +913,12 @@ class GatewayService(QObject):
             # 3.5 流式（打字机）通道：平台适配器支持时走 update_stream/finish_stream
             try:
                 adapter = self._manager.get_adapter(platform)
-                stream_capable = bool(adapter and adapter.supports_streaming(chat_id) and _ev_loop)
+                stream_capable = bool(
+                    adapter
+                    and adapter.supports_streaming(chat_id)
+                    and _ev_loop
+                    and not is_command
+                )
             except Exception:
                 adapter, stream_capable = None, False
 
