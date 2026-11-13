@@ -54,13 +54,10 @@ from PyQt5.QtWidgets import (
 from qfluentwidgets import (
     BodyLabel,
     FluentIcon,
-    IconWidget,
     MaskDialogBase,
     ScrollArea,
     SmoothScrollDelegate,
-    StrongBodyLabel,
     TransparentPushButton,
-    TransparentToolButton,
     isDarkTheme,
 )
 
@@ -422,29 +419,6 @@ class FileTreeCard(QWidget):
         self._vbox.setContentsMargins(0, 0, 0, 0)
         self._vbox.setSpacing(0)
 
-        # ── 顶栏 ──
-        self._top_bar = QFrame(self)
-        self._top_bar.setObjectName("file-tree-top-bar")
-        self._top_bar.setFixedHeight(48)
-        top_layout = QHBoxLayout(self._top_bar)
-        top_layout.setContentsMargins(16, 0, 12, 0)
-        top_layout.setSpacing(8)
-
-        self._icon_widget = IconWidget(FluentIcon.FOLDER, self._top_bar)
-        self._icon_widget.setFixedSize(20, 20)
-
-        self._title_label = StrongBodyLabel("文件树", self._top_bar)
-        self._title_label.setObjectName("file-tree-title")
-
-        self._refresh_btn = TransparentToolButton(FluentIcon.SYNC, self._top_bar)
-        self._refresh_btn.setFixedSize(32, 32)
-        self._refresh_btn.setToolTip("刷新文件树")
-
-        top_layout.addWidget(self._icon_widget)
-        top_layout.addWidget(self._title_label)
-        top_layout.addStretch()
-        top_layout.addWidget(self._refresh_btn)
-
         # ── 树控件区域 ──
         self._scroll_area = ScrollArea(self)
         self._scroll_area.setObjectName("file-tree-scroll")
@@ -484,7 +458,6 @@ class FileTreeCard(QWidget):
         self._stack.setCurrentIndex(1)
 
         self._scroll_area.setWidget(self._tree_view)
-        self._vbox.addWidget(self._top_bar)
         self._vbox.addWidget(self._stack, 1)
 
     def _setup_model(self):
@@ -503,9 +476,6 @@ class FileTreeCard(QWidget):
         self._watcher.dir_changed.connect(self._on_dir_changed_externally)
 
     def _setup_connections(self):
-        # 顶栏按钮
-        self._refresh_btn.clicked.connect(self._on_refresh)
-
         # Model 信号
         self._source_model.need_scan.connect(self._on_lazy_scan)
 
@@ -551,7 +521,6 @@ class FileTreeCard(QWidget):
 
     def show_card(self):
         self._apply_latest_theme()
-        self._apply_plugin_icon()
         self._async_load_tree()
         self.setVisible(True)
 
@@ -726,19 +695,6 @@ class FileTreeCard(QWidget):
             self._context = ctx
             self._context_provider = lambda _ctx=ctx: _ctx
 
-    def _apply_plugin_icon(self):
-        if self._context_provider is None or self._icon_widget is None:
-            return
-        try:
-            ctx = self._context_provider()
-            icon_info = ctx.get("plugin_icon", {})
-            theme = "dark" if isDarkTheme() else "light"
-            icon_path = icon_info.get(theme, "")
-            if icon_path:
-                self._icon_widget.setIcon(QIcon(icon_path))
-        except Exception:
-            pass
-
     # ── 主题色 ──
 
     def _apply_latest_theme(self):
@@ -755,7 +711,6 @@ class FileTreeCard(QWidget):
         self._watcher.set_root(self._project_root)
 
         tc = _ctx_text_color(ctx)
-        border_c = self._colors.get("border", QColor(255, 255, 255, 30))
         font_family = ctx.get("font_family", "Microsoft YaHei")
         font_size = ctx.get("font_size", 14)
 
@@ -771,20 +726,6 @@ class FileTreeCard(QWidget):
             scrollbar_style = ""
         self._scrollbar_qss = scrollbar_style
 
-        title_style = (
-            f"color: {tc}; background: transparent; "
-            f"font-family: '{font_family}'; font-size: {font_size}px; font-weight: bold;"
-        )
-        top_bar_style = (
-            f"#file-tree-top-bar {{"
-            f"  background: transparent;"
-            # ★ QSS/QColor 的 8 位 hex 是 #AARRGGBB（实测 #ffffff1e → rgb(255,255,30)），
-            # 直接 name()+alpha 拼接会把 alpha 写进蓝通道 → 分隔线变黄/洋红亮线。
-            # 主题 border 本身不透明（如 #bcc7d6），压到 ~35% 才不抢眼。
-            f"  border-bottom: 1px solid "
-            f"rgba({border_c.red()},{border_c.green()},{border_c.blue()},90);"
-            f"}}"
-        )
         accent_tint = (
             f"rgba({self._colors['accent'].red()},{self._colors['accent'].green()},"
             f"{self._colors['accent'].blue()},64)"
@@ -812,13 +753,11 @@ class FileTreeCard(QWidget):
         # setStyleSheet + setFont 会触发整树 unpolish/polish + 全量重绘
         # （树 2000+ 行时单次 40-130ms，实测），而主题 / 字体 / 颜色未变时
         # 产出必然不变 —— 跳过后切页路径零成本。
-        signature = (title_style, top_bar_style, tree_style, placeholder_style, font_family, font_size)
+        signature = (tree_style, placeholder_style, font_family, font_size)
         if signature == self._theme_signature:
             return
         self._theme_signature = signature
 
-        self._title_label.setStyleSheet(title_style)
-        self._top_bar.setStyleSheet(top_bar_style)
         self._tree_view.setStyleSheet(tree_style)
 
         self._scroll_area.setStyleSheet("#file-tree-scroll { background: transparent; border: none;}")
@@ -1612,11 +1551,8 @@ class FileTreeCard(QWidget):
 
         menu.addSeparator()
 
-        # 刷新
-        if item_path and is_dir:
-            _act(FluentIcon.SYNC, "刷新").triggered.connect(
-                lambda: self._refresh_dir_in_model(item_path)
-            )
+        # 刷新（原顶栏刷新按钮入口，顶栏已移除）
+        _act(FluentIcon.SYNC, "刷新").triggered.connect(self._on_refresh)
 
         menu.adjustSize()
         self._round_menu(menu)

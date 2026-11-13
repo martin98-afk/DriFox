@@ -67,6 +67,18 @@ for _env_key in ("QSG_RHI", "QSG_RHI_BACKEND"):
     os.environ.pop(_env_key, None)
 
 
+# ========== qfluentwidgets RoundMenu 缺陷补丁 ==========
+# 上游 removeAction 只清 item 属性、不断开 changed 信号，退出清理期偶发
+# AttributeError（menu.py:764 item 为 None）。必须早于任何菜单实例化，
+# 机理与调用时机见 app/core/infra/qfluentwidgets_compat.py。
+try:
+    from app.core.infra.qfluentwidgets_compat import patch_qfluentwidgets_menu
+
+    patch_qfluentwidgets_menu()
+except Exception:
+    pass
+
+
 # ========== 全局异常钩子（T44 提前安装）==========
 # 原版安装在 _deferred_startup（主窗就绪后），启动早期（巨型 import / QApplication
 # 创建 / 首窗构造期）存在未兜窗口：PyQt5.15 槽内裸异常默认 fastfail（T42 实测），

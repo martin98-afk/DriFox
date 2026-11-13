@@ -15,6 +15,7 @@
 import os
 from typing import Optional, Tuple
 
+from loguru import logger
 from PyQt5.QtCore import QPoint, QPointF, QRect, QRectF, QSize, Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QColor, QFont, QIcon, QImageReader, QPainter, QPen, QPixmap, QTextCursor
 from PyQt5.QtWidgets import (
@@ -748,6 +749,12 @@ class FilePreviewPage(QWidget):
         self._set_hint("")
         self._set_zoom_visible(self._kind == "image")
         self._set_text_controls_visible(self._kind == "text")
+        # 诊断：右上角按钮消失问题取证（定位后移除）
+        logger.info(
+            f"[FilePreview] load {name!r} kind={self._kind} header_w={self._header.width()} "
+            f"wrap={self._wrap_btn.isVisible()} hl={self._highlight_btn.isVisible()} "
+            f"reload={self._reload_btn.isVisible()} open_with={self._open_with_btn.isVisible()}"
+        )
         # 默认程序图标延迟到下一拍：读注册表 + 取 exe 图标不能堵在首帧渲染上
         QTimer.singleShot(0, lambda p=path: self._refresh_opener_icon(p))
 
