@@ -1498,7 +1498,7 @@ class FileTreeCard(QWidget):
                 padding: 6px;
             }}
             QMenu::item {{
-                padding: 7px 26px 7px 30px;
+                padding: 7px 26px 7px 10px;
                 margin: 1px 3px;
                 border-radius: 8px;
                 color: {tc.name()};
