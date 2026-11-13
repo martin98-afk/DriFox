@@ -21171,7 +21171,7 @@ class OpenAIChatToolWindow(ToolWindow):
             # 收尾阶段领先于 worker（worker 已退出、finished_with_content 尚未派发），
             # 此时按「繁忙」入队即孤儿——插话进 hook 队列无人消费、排队等不到
             # _on_stream_finished 的续发调度，表现为「发了消息 AI 无响应」。
-            self._schedule_busy_send(user_text, _image_paths, behavior, preserve_input)
+            self._schedule_busy_send(user_text, _image_paths, behavior, preserve_input, hook_event)
             return
 
         # 🛡️ 不清除截断哨兵！若此前发生过截断（撤销/删除），哨兵仍然有效，
@@ -21253,6 +21253,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     "raw_input_text": _raw_input_text,
                     "session_id": session.session_id if session else None,
                     "assistant_card": assistant_card,
+                    "user_card": user_card,
                     "ephemeral": ephemeral,
                 }
 
@@ -21278,6 +21279,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 raw_input_text=_raw_input_text,
                 session=session,
                 assistant_card=assistant_card,
+                user_card=user_card,
                 user_content=None,
                 ephemeral=ephemeral,
             )
@@ -21294,6 +21296,7 @@ class OpenAIChatToolWindow(ToolWindow):
             raw_input_text=ctx.get("raw_input_text"),
             session=None,  # 下方按 session_id 重新解析（编码期间可能已切会话）
             assistant_card=ctx.get("assistant_card"),
+            user_card=ctx.get("user_card"),
             user_content=ctx.get("user_content"),
             expect_session_id=ctx.get("session_id"),
             ephemeral=bool(ctx.get("ephemeral")),
@@ -21309,6 +21312,7 @@ class OpenAIChatToolWindow(ToolWindow):
         session,
         assistant_card,
         user_content,
+        user_card=None,
         expect_session_id: Optional[str] = None,
         ephemeral: bool = False,
     ):
@@ -21321,19 +21325,53 @@ class OpenAIChatToolWindow(ToolWindow):
         if getattr(self, "_is_destroyed", False):
             return
 
-        # ephemeral（自动继续）不进排队队列：撞上繁忙说明时序异常，
-        # 放弃本轮，避免退化成一条会渲染的真实用户消息
-        if ephemeral and self._worker_actually_busy():
-            logger.warning("[Session] ephemeral 发送撞上繁忙 worker，放弃本次自动继续")
-            self._is_streaming = False
-            self._toggle_send_stop(False)
-            # 已经建好的空回复卡必须摘掉，否则界面上留一张永远停在等待态的空卡
-            if assistant_card is not None:
+        def _rollback_cards():
+            """摘除本轮占位卡（写 session 之前调用，无副作用）"""
+            for _card in (user_card, assistant_card):
+                if _card is None:
+                    continue
                 try:
-                    assistant_card.deleteLater()
+                    _card.deleteLater()
                 except RuntimeError:
                     pass
-                self._current_assistant_card = None
+            self._current_assistant_card = None
+
+        # 🛡️ 写 session 之前复核 worker 真实状态（2026-11-13 子智能体注入半死态）：
+        # 本方法到 send_message 之间隔着一次事件循环 tick，worker 可能已被其它
+        # send 动作（auto_compact 补写 / 并发的系统注入）抢先启动。send_message
+        # 的 execute() 那时才拒绝（"Already streaming"），而且是在 PreSendWorker
+        # **已经写进 session.messages 之后**才发现——回滚只能摘下卡片：
+        #   - _current_assistant_card=None → _on_content_received 直接丢正文
+        #   - _on_tool_call_started 却 fallback 到最近一张卡 → 工具运行框照旧更新
+        #   - 按钮回到发送态，但真实 worker 还在跑
+        # 用户看到的就是「没有流式状态、卡片只动工具框、按钮不是停止」。
+        # 在写 session 之前拦下，非 ephemeral 消息按繁忙策略重投，语义干净。
+        #
+        # ⚠️ 判据只认 engine 真实状态，不走 _worker_actually_busy()：后者在
+        # engine 缺失时回退 ``self._is_streaming``，而本方法就在 _on_send_clicked
+        # 把该标志置 True 之后执行（延迟组件未建的首条消息必踩），回退值恒 True
+        # → 每次正常发送都被误判成「撞忙」重投。
+        _engine = getattr(getattr(self, "backend", None), "chat_engine", None)
+        _other_worker_busy = False
+        if _engine is not None:
+            try:
+                _other_worker_busy = bool(_engine.is_streaming)
+            except Exception:  # noqa: BLE001 - 状态读取失败按空闲处理，维持原直发路径
+                _other_worker_busy = False
+        if _other_worker_busy:
+            _rollback_cards()
+            self._is_streaming = False
+            self._toggle_send_stop(False)
+            if ephemeral:
+                # 自动继续（交接/压缩补写）不进排队队列：撞上繁忙说明时序
+                # 异常，放弃本轮，避免退化成一条会渲染的真实用户消息
+                logger.warning("[Session] ephemeral 发送撞上繁忙 worker，放弃本次自动继续")
+                return
+            from app.utils.config import Settings
+
+            _behavior = resolve_busy_behavior(Settings.get_instance().busy_enter_behavior.value, False)
+            logger.info(f"[Session] 发送撞上繁忙 worker，按 {_behavior} 重投（避免 Already streaming 半死态）")
+            self._schedule_busy_send(user_text, list(image_paths or []), _behavior, True, hook_event)
             return
 
         if expect_session_id is not None:
@@ -21343,12 +21381,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 logger.warning("[ImageAttach] 编码期间会话已切换，放弃本次发送并回滚 UI")
                 self._is_streaming = False
                 self._toggle_send_stop(False)
-                if assistant_card is not None:
-                    try:
-                        assistant_card.deleteLater()
-                    except RuntimeError:
-                        pass
-                    self._current_assistant_card = None
+                _rollback_cards()
                 return
             # 编码期间间隔较长，重设 tool_executor 的 session 上下文（同步路径
             # 在 _do_deferred_send 开头已设；此处对齐该行为）
@@ -21435,15 +21468,26 @@ class OpenAIChatToolWindow(ToolWindow):
         except Exception:
             return self._is_streaming
 
-    def _schedule_busy_send(self, user_text: str, image_paths: list, behavior: str, preserve_input: bool) -> None:
+    def _schedule_busy_send(
+        self, user_text: str, image_paths: list, behavior: str, preserve_input: bool, hook_event: Optional[str] = None
+    ) -> None:
         """延迟一 tick 派发繁忙发送（供 _dispatch_busy_send 复核 worker 真实状态）
 
         ⚠️ QTimer.singleShot 只接受 (msec, receiver, callable) 位置参数，业务参数
         直接跟在 callable 后面会抛 “expected at most 4 arguments”，必须用 lambda 包一层。
         """
-        QTimer.singleShot(0, lambda: self._dispatch_busy_send(user_text, image_paths, behavior, preserve_input))
+        QTimer.singleShot(
+            0, lambda: self._dispatch_busy_send(user_text, image_paths, behavior, preserve_input, hook_event)
+        )
 
-    def _dispatch_busy_send(self, user_text: str, image_paths: list, behavior: str, preserve_input: bool):
+    def _dispatch_busy_send(
+        self,
+        user_text: str,
+        image_paths: list,
+        behavior: str,
+        preserve_input: bool,
+        hook_event: Optional[str] = None,
+    ):
         """繁忙发送的延迟派发：复核 worker 真实状态后决定入队还是立即开新一轮
 
         worker 已退出（UI 标志滞后）时不再入队，直接按新一轮发送，避免消息
@@ -21453,7 +21497,7 @@ class OpenAIChatToolWindow(ToolWindow):
             return
         if self._worker_actually_busy():
             if behavior == "queue":
-                self._enqueue_pending_message(user_text, image_paths)
+                self._enqueue_pending_message(user_text, image_paths, hook_event)
             else:
                 self._interject_message(user_text, image_paths)
             if not preserve_input:
@@ -21464,9 +21508,9 @@ class OpenAIChatToolWindow(ToolWindow):
         logger.info("[BusySend] worker 已结束（UI 流式标志滞后），改走新一轮发送")
         self._is_streaming = False
         self._toggle_send_stop(False)
-        self._continue_from_entry({"text": user_text, "image_paths": list(image_paths)})
+        self._continue_from_entry({"text": user_text, "image_paths": list(image_paths), "hook_event": hook_event})
 
-    def _enqueue_pending_message(self, user_text: str, image_paths: list):
+    def _enqueue_pending_message(self, user_text: str, image_paths: list, hook_event: Optional[str] = None):
         """繁忙时排队发送：消息进 UI 队列 + 排队卡片；worker 自然结束后自动续发。
 
         🚫 不提前创建用户气泡：消息尚未进入对话流，用户卡片在实际发送时
@@ -21474,7 +21518,12 @@ class OpenAIChatToolWindow(ToolWindow):
         """
         self._pending_message_seq += 1
         self._pending_message_queue.append(
-            {"id": f"q{self._pending_message_seq}", "text": user_text, "image_paths": list(image_paths)}
+            {
+                "id": f"q{self._pending_message_seq}",
+                "text": user_text,
+                "image_paths": list(image_paths),
+                "hook_event": hook_event,
+            }
         )
         self._refresh_queue_card()
 
@@ -21712,6 +21761,7 @@ class OpenAIChatToolWindow(ToolWindow):
         """把一条排队消息作为新一轮发送（此刻才创建用户气泡 + 新回复卡）"""
         user_text = str(entry.get("text", ""))
         image_paths = entry.get("image_paths") or []
+        hook_event = entry.get("hook_event") or None
         llm_config = self._get_current_model_config() or {}
         _user_content = None
         if image_paths:
@@ -21721,7 +21771,11 @@ class OpenAIChatToolWindow(ToolWindow):
                 model_name=str(llm_config.get("模型名称", "") or ""),
             )
         # 用户气泡在实际发送时才进入消息列表（排队时未显示）
-        self._append_user_message(user_text, image_attachments=image_paths or None)
+        self._append_user_message(
+            user_text,
+            image_attachments=image_paths or None,
+            source_message={"role": "user", "content": user_text, "_hook_event": hook_event} if hook_event else None,
+        )
         if self._should_follow_bottom():
             self._scroll_to_bottom()
         assistant_card = self._append_assistant_message(
@@ -21743,6 +21797,10 @@ class OpenAIChatToolWindow(ToolWindow):
             engine_kwargs = {}
             if _user_content is not None:
                 engine_kwargs["_user_content"] = _user_content
+            # 系统注入消息（SubAgentFinished / TeamMail 等）保留身份标记，
+            # 否则落库后被当成用户亲口说的话（用户气泡 + 进标题/历史指纹）
+            if hook_event:
+                engine_kwargs["_hook_event"] = hook_event
             self._session_dirty = True
             if not self.backend.send_message_to_engine(user_text, **engine_kwargs):
                 self._is_streaming = False
@@ -22377,6 +22435,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 "new": self._handle_action_new,
                 "send": lambda p: self._on_send_clicked(
                     str(p.get("text") or ""),
+                    hook_event=p.get("hook_event"),
                     preserve_input=True,
                     ephemeral=bool(p.get("ephemeral", True)),
                 ),

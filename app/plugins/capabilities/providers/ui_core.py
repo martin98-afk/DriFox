@@ -832,7 +832,14 @@ def _send_with_mode(
                     logging.getLogger(__name__).warning(f"[session.send] hook 注入失败，退化排队: {e}")
         elif mode == "skip":
             pass  # 空闲：skip 与 queue 同路径
-    return queue.enqueue(wid, "send", {"text": text, "ephemeral": bool(ephemeral)})
+    # hook_event 必须随队列入参一起带过去：空闲降级为普通发送时，主窗口
+    # 经 _on_send_clicked 重建这条消息，标记丢了就会被当成真实用户发言
+    # （用户气泡 + 参与标题/历史指纹）。流式分支已直接写进 _hook_event。
+    return queue.enqueue(
+        wid,
+        "send",
+        {"text": text, "ephemeral": bool(ephemeral), "hook_event": hook_event},
+    )
 
 
 def _session_control(host: Any):

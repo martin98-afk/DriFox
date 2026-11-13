@@ -211,7 +211,6 @@ def test_stall_path_injects_failure_with_reason(monkeypatch):
             task_id=tid, result=result, success=success, agent=agent
         ),
     )
-    monkeypatch.setattr(mgr, "_is_engine_streaming", lambda: False)
 
     mgr._on_executor_finished(task_id, "")
 

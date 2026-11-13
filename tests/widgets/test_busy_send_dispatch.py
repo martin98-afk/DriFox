@@ -87,15 +87,16 @@ class TestDispatchBusySend:
         assert w._is_streaming is False
 
     def test_busy_worker_keeps_queue_route(self):
-        """worker 真忙：按设置项路由（queue → 排队）"""
+        """worker 真忙：按设置项路由（queue → 排队），注入标记随条目保留"""
         w = _make_widget(ui_streaming=True, engine_streaming=True)
         calls: dict = {}
         w._continue_from_entry = lambda entry: calls.setdefault("entry", entry)
-        w._enqueue_pending_message = lambda t, i: calls.setdefault("queue", (t, i))
+        w._enqueue_pending_message = lambda t, i, h=None: calls.setdefault("queue", (t, i, h))
 
-        OpenAIChatToolWindow._dispatch_busy_send(w, "排队消息", [], "queue", False)
+        OpenAIChatToolWindow._dispatch_busy_send(w, "排队消息", [], "queue", False, "SubAgentFinished")
 
         assert calls["queue"][0] == "排队消息"
+        assert calls["queue"][2] == "SubAgentFinished"
         assert "entry" not in calls
 
     def test_busy_worker_keeps_interject_route(self):

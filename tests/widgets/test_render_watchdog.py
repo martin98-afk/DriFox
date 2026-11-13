@@ -140,3 +140,27 @@ class TestRenderWatchdog:
         w = self._make_stub()
         CodeWebViewer._on_live_probe_result(w, -1, "0|0|0|0|47")
         assert w.calls == []
+
+    def test_skeleton_load_reasserts_transparency_before_navigation(self):
+        """骨架导航前必须重申透明合成。
+
+        看门狗二级自愈直接走 `_load_skeleton`：若重申落在 setHtml 之后，
+        对「合成面已丢透明」的半死页面无效（Chromium 以默认白底重新初始化），
+        此后内容全走 JS 注入无导航 → HTML 区白底固化到 viewer 重建。
+        """
+        import inspect
+
+        src = inspect.getsource(CodeWebViewer._load_skeleton)
+        assert src.index("ensure_transparent_composition()") < src.index("setHtml(")
+
+    def test_show_and_js_ready_reassert_transparency(self):
+        """首帧白底两条入口都要补重申。
+
+        用户 2026-11-13 实测：HTML 区整块白底、滚动或切 tab 后自愈。
+        对应「合成面首帧用默认白底 + 没人标脏」，修复点在显示事件与
+        JS 就绪（导航落地）两个时点各补一次透明重申。
+        """
+        import inspect
+
+        assert "ensure_transparent_composition()" in inspect.getsource(CodeWebViewer.showEvent)
+        assert "ensure_transparent_composition()" in inspect.getsource(CodeWebViewer._on_js_ready)
