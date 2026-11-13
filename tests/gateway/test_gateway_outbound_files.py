@@ -9,7 +9,7 @@ import asyncio
 
 import pytest
 
-from app.core.conversation.backend import _extract_markdown_files, _extract_markdown_images
+from system_im_core.attachments import _extract_markdown_files, _extract_markdown_images
 
 
 # ==================== 文件提取 ====================
@@ -111,7 +111,7 @@ class _FakeManager:
 
 def _service_with(adapter):
     """构造最小 GatewayService 桩：只保留 _manager 与待测方法。"""
-    from app.core.services import gateway_service as mod
+    import system_im_service as mod
 
     svc = mod.GatewayService.__new__(mod.GatewayService)
     svc._manager = _FakeManager(adapter)

@@ -14,7 +14,7 @@ stop → poll task 残留 → 重复开关后同平台多实例长轮询同一�
 import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from app.gateway.manager import PlatformManager
+from system_im_core.manager import PlatformManager
 
 
 def _make_manager() -> PlatformManager:

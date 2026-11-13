@@ -18,9 +18,9 @@ from app.gateway.base import (
     Platform,
     SendResult,
 )
-from app.gateway.config import get_gateway_config
-from app.gateway.message_handler import MessageHandler
-from app.gateway.session_manager import GatewaySession, GatewaySessionManager
+from .config import get_gateway_config
+from .message_handler import MessageHandler
+from .session_manager import GatewaySession, GatewaySessionManager
 
 
 class PlatformManager:
@@ -377,6 +377,18 @@ class PlatformManager:
         from app.gateway.base import _platform_key
 
         self._schedule_coro(self._stop_platform_async(_platform_key(platform)))
+
+    def restart_platform_async(self, platform: Platform) -> None:
+        """先断后连（同一事件循环内顺序执行，避免 stop/start 竞态）。"""
+        from app.gateway.base import _platform_key
+
+        pid = _platform_key(platform)
+
+        async def _restart() -> None:
+            await self._stop_platform_async(pid)
+            await self._start_platform_async(pid)
+
+        self._schedule_coro(_restart())
 
     def stop_plugin_platforms(self, plugin_name: str, wait: bool = False) -> None:
         """停止并移除某插件注册的全部 gateway 平台（卸载/热更新清理前置）

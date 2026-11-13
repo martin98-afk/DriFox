@@ -20,7 +20,7 @@ import pytest
 from app.gateway.base import BasePlatformAdapter, PlatformConfig, SendResult
 from app.plugins.contracts.gateway_platform import GatewayPlatformDef
 from app.plugins.registries.gateway_platform_registry import GatewayPlatformRegistry
-import app.gateway.manager as mgr_mod
+import system_im_core.manager as mgr_mod
 
 
 @pytest.fixture

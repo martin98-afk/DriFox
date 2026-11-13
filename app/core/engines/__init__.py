@@ -11,7 +11,6 @@ _LAZY_IMPORTS: dict[str, tuple[str, str | None]] = {
     "BaseEngine": ("app.core.engines.base", "BaseEngine"),
     "UIEngine": ("app.core.engines.ui", "UIEngine"),
     "ChatEngine": ("app.core.engines.ui", "ChatEngine"),
-    "GatewayEngine": ("app.core.engines.gateway", "GatewayEngine"),
 }
 
 __all__ = list(_LAZY_IMPORTS.keys())

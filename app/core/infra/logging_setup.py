@@ -29,7 +29,16 @@ LOG_ROUTES: list[tuple[str, tuple[str, ...], tuple[str, ...]]] = [
     # drifox_rt_gateways：插件网关组件模块名（runtime_component_loader 拼成
     # drifox_rt_<comp_dir>_<plugin>_<stem>，下划线分段）。不纳入此路由时，
     # 飞书/微信等插件内的连接与消息日志只落 all.log，排查时误判"平台没启动"。
-    ("gateway.log", ("app.gateway", "app.core.services.gateway_service", "drifox_rt_gateways_"), ()),
+    (
+        "gateway.log",
+        (
+            "app.gateway",
+            "app.core.services.gateway_access",
+            "system_im_",
+            "drifox_rt_gateways_",
+        ),
+        (),
+    ),
     # MCP 连接与工具调用
     ("mcp.log", ("app.tools.mcp_tools",), ()),
     # 语言服务（LSP）

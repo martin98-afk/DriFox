@@ -2,14 +2,14 @@
 """IM 内交互提问：文本协议与 GatewayService 状态机单测。
 
 覆盖：
-- ``app.gateway.interaction``：问题渲染、答案解析（序号/label/多选/自定义）
+- ``system_im_core.interaction``：问题渲染、答案解析（序号/label/多选/自定义）
 - ``GatewayService`` 待答状态：多题推进、超时跳过、命令打断、答案回填 worker
 """
 import asyncio
 
 import pytest
 
-from app.gateway.interaction import (
+from system_im_core.interaction import (
     build_answer_payload,
     format_question,
     parse_answer,
@@ -118,7 +118,7 @@ class _FakeEngine:
 @pytest.fixture
 def service(qapp_stub=None, monkeypatch=None):
     """构造最小 GatewayService 桩：只留待答状态相关方法所需字段。"""
-    from app.core.services import gateway_service as mod
+    import system_im_service as mod
 
     svc = mod.GatewayService.__new__(mod.GatewayService)
     from PyQt5.QtCore import QObject
@@ -281,7 +281,7 @@ def test_engine_forwards_question_asked():
     """engine 的 callback 包装层要把 question_asked 透传给 GatewayService。"""
     from PyQt5.QtCore import QObject
 
-    from app.core.engines.gateway import engine as engine_mod
+    import system_im_engine as engine_mod
 
     # 只验证纯映射逻辑：直接构造 _make_gateway_callbacks 的输出字典
     class _Stub(engine_mod.GatewayEngine):
@@ -328,7 +328,7 @@ class _CardAdapter:
 
 
 def _service_with_manager(adapter):
-    from app.core.services import gateway_service as mod
+    import system_im_service as mod
 
     svc = mod.GatewayService.__new__(mod.GatewayService)
     from PyQt5.QtCore import QObject

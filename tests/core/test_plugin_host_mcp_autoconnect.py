@@ -73,7 +73,7 @@ def deferred_spied(monkeypatch):
     import app.plugins.loaders.provider_loader as pl
     import app.plugins.loaders.runtime_component_loader as rcl
     import app.plugins.registries.provider_registry as pr
-    import app.core.services.gateway_service as gs
+    import system_im_service as gs
     import app.core.lsp.lsp_manager as lm
 
     monkeypatch.setattr(br, "bind_runtime", lambda *a, **k: None)

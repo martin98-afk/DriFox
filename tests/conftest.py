@@ -23,6 +23,44 @@ os.environ.setdefault(
 )
 
 
+def _bootstrap_system_im_modules() -> None:
+    """system-im 插件模块预注册（收集期生效）。
+
+    IM 网关实现已从 ``app/gateway/{manager,session_manager,...}``、
+    ``app/core/services/gateway_service.py``、``app/core/engines/gateway``
+    迁入 ``plugins/system-im``。测试按固定模块名 import 插件实现
+    （``system_im_core.*`` / ``system_im_service`` / ``system_im_engine``），
+    必须在测试模块 import 之前完成注册，故放在 conftest 模块级。
+    加载失败不影响其余测试（相关用例会自行报 import 错误）。
+    """
+    import importlib.util
+    import sys
+
+    loader_path = (
+        Path(__file__).resolve().parent.parent / "plugins" / "system-im" / "ui" / "core_loader.py"
+    )
+    try:
+        spec = importlib.util.spec_from_file_location("_system_im_core_loader", str(loader_path))
+        if spec is None or spec.loader is None:
+            return
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+        for name in ("core", "engine", "service"):
+            if name == "core":
+                module.load_core()
+            else:
+                try:
+                    module.load_root_module(name)
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+
+_bootstrap_system_im_modules()
+
+
 @pytest.fixture(scope="session", autouse=True)
 def _ensure_split_system_plugins_enabled():
     """system 单体拆分为 system-* 系列后的测试环境白名单补录（内存态，不落盘）。

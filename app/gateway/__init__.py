@@ -4,27 +4,10 @@ Gateway 模块 - 企业微信/钉钉等通讯平台接入
 
 DriFox Gateway 使 AI 能够通过企业微信、钉钉等平台与用户交互。
 
-基本用法:
-
-    from app.gateway import PlatformManager, get_gateway_config, Platform
-
-    # 创建管理器
-    config = get_gateway_config()
-    manager = PlatformManager(config)
-
-    # 设置回调
-    async def process_message(session_id, text, platform, ...):
-        # 调用 AI 处理
-        return await ai.process(text)
-
-    async def send_message(platform, chat_id, content, ...):
-        adapter = manager.get_adapter(platform)
-        return await adapter.send(chat_id, content)
-
-    manager.set_process_callback(process_message, send_message)
-
-    # 启动
-    await manager.start_all()
+本包只保留**契约层**：平台适配器接口、消息事件、平台枚举、配置结构、
+群消息留档，以及 Gitee/OAuth/本地微服务等与 IM 无关的通用能力。
+平台管理器与会话/媒体/交互提问等 IM 业务实现在 ``plugins/system-im`` 插件，
+经 ``WindowServiceRegistry``（key = ``im_gateway``）对外暴露。
 """
 
 from app.gateway.base import (
@@ -38,9 +21,6 @@ from app.gateway.base import (
 )
 import typing as _typing
 
-from app.gateway.config import (
-    get_gateway_config,
-)
 
 # [PERF] 本地微服务（原 app.api）改为 PEP 562 按需导入。
 #
@@ -80,17 +60,6 @@ def __dir__() -> list[str]:
     return sorted(set(list(globals()) + list(_LAZY_IMPORTS)))
 
 
-from app.gateway.manager import (
-    PlatformManager,
-    create_platform_manager,
-    get_platform_manager,
-)
-from app.gateway.message_handler import MessageHandler
-from app.gateway.session_manager import (
-    GatewaySession,
-    GatewaySessionManager,
-)
-
 __all__ = [
     # 基础
     "Platform",
@@ -100,17 +69,6 @@ __all__ = [
     "ChatInfo",
     "PlatformConfig",
     "BasePlatformAdapter",
-    # 管理器
-    "PlatformManager",
-    "create_platform_manager",
-    "get_platform_manager",
-    # 配置
-    "get_gateway_config",
-    # 会话
-    "GatewaySession",
-    "GatewaySessionManager",
-    # 消息处理
-    "MessageHandler",
     # 本地微服务
     "LLMAPIService",
     "get_llm_api_service",

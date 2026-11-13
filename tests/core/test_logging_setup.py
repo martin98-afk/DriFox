@@ -13,13 +13,14 @@ def test_match_prefix_exact():
 
 
 def test_match_prefix_submodule():
-    """子模块按路径段命中。"""
+    """子模块按路径段命中；尾下划线字面前缀（插件网关模块名）同样生效。"""
     assert _match_prefix("app.gateway.manager", ("app.gateway",))
+    assert _match_prefix("system_im_core.manager", ("system_im_",))
 
 
 def test_match_prefix_no_substring_false_positive():
     """子串不误命中：gateway_service 不是 gateway 子模块。"""
-    assert not _match_prefix("app.core.services.gateway_service", ("app.core.gateway",))
+    assert not _match_prefix("system_im_service", ("app.core.gateway",))
 
 
 def test_match_prefix_multiple_prefixes():
@@ -66,7 +67,7 @@ def test_key_modules_routed():
     """关键子系统模块均应命中对应分文件。"""
     expectations = {
         "app.core.conversation.backend": "llm.log",
-        "app.gateway.manager": "gateway.log",
+        "system_im_core.manager": "gateway.log",
         "app.tools.mcp_tools": "mcp.log",
         "app.core.lsp.lsp_client": "lsp.log",
         "app.core.tools.tool_executor": "tools.log",

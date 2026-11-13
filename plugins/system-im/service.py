@@ -28,12 +28,12 @@ from typing import Any, Dict, Optional
 from loguru import logger
 from PyQt5.QtCore import QObject, QTimer, pyqtSignal
 
-from app.core.conversation.backend import (
+from system_im_core.attachments import (
     _extract_markdown_files,
     _extract_markdown_images,
     _gw_str_platform,
 )
-from app.gateway.interaction import build_answer_payload, format_question, parse_answer
+from system_im_core.interaction import build_answer_payload, format_question, parse_answer
 
 _AUTO_RESTART_COOLDOWN = 5.0  # 引擎不可用时的自愈重建最小间隔（秒）
 
@@ -157,7 +157,7 @@ class GatewayService(QObject):
         if not self._ensure_components():
             return False
         try:
-            from app.core.engines.gateway import GatewayEngine
+            from system_im_engine import GatewayEngine
 
             self._engine = GatewayEngine.get_instance(
                 get_model_config=self._get_model_config,
@@ -183,7 +183,7 @@ class GatewayService(QObject):
         if self._initialized:
             return
         try:
-            from app.gateway.manager import create_platform_manager
+            from system_im_core.manager import create_platform_manager
 
             async def process_message(
                 session_id: str, text: str, platform: Any, chat_id: str, user_id: str, **kwargs
@@ -233,7 +233,7 @@ class GatewayService(QObject):
         检查点调用一次，遍历成本可忽略。
         """
         try:
-            from app.gateway.config import GatewayConfigHelper
+            from system_im_core.config import GatewayConfigHelper
             from app.plugins.registries.gateway_platform_registry import GatewayPlatformRegistry
 
             for d in GatewayPlatformRegistry.get_instance().list_platforms():
@@ -271,7 +271,7 @@ class GatewayService(QObject):
             ok = False
             try:
                 # GatewayEngine import 链预热（模块级 import 含 mcp SDK，冷启动最重）
-                import app.core.engines.gateway  # noqa: F401
+                import system_im_engine  # noqa: F401
 
                 # 组件构造（含 ToolExecutor）在后台线程完成；_ensure_components
                 # 内部双检锁保证与主线程消息路径竞争安全
@@ -330,6 +330,81 @@ class GatewayService(QObject):
                 logger.info("[GatewayService] 已停止")
             except Exception as e:
                 logger.warning(f"[GatewayService] 停止失败: {e}")
+
+    # ==================== 控制面（设置卡 / platform.control 能力） ====================
+
+    def get_manager(self) -> Optional[Any]:
+        """平台管理器（宿主/能力池只读引用；未启动返回 None）。"""
+        return self._manager
+
+    def shutdown(self) -> None:
+        """退出清理：停连接 → 关事件循环线程 → 释放引擎（幂等）。"""
+        manager, self._manager = self._manager, None
+        if manager is not None:
+            try:
+                manager.shutdown()
+            except Exception as e:  # noqa: BLE001 - 退出路径不抛
+                logger.warning(f"[GatewayService] PlatformManager 关闭失败: {e}")
+        engine, self._engine = self._engine, None
+        if engine is not None:
+            try:
+                engine.cleanup()
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"[GatewayService] GatewayEngine 清理失败: {e}")
+        self._initialized = False
+
+    def start(self) -> bool:
+        """启动（或重新连接）网关服务，返回 manager 是否就绪。
+
+        与 ``ensure_started`` 的区别：那个是进程启动期的一次性初始化（内部已
+        投递 start_all），本方法是用户可见的总开关——初始化过但已停下的服务
+        要能重新连上。首次初始化时不重复投递，避免 "Already running" 噪音。
+        """
+        already_initialized = self._initialized
+        self.ensure_started()
+        manager = self._manager
+        if manager is None:
+            return False
+        if not already_initialized:
+            return True
+        try:
+            if not manager.get_status().get("running"):
+                manager.start_all_async()
+        except Exception as e:  # noqa: BLE001 - 状态查询失败按未运行处理
+            logger.warning(f"[GatewayService] 启动平台失败: {e}")
+            return False
+        return True
+
+    def set_platform_enabled(self, platform_id: str, enabled: bool) -> bool:
+        """切换单个平台的启用状态并即时连接/断开（继承原配置其余字段）。"""
+        from app.gateway.base import PlatformConfig
+        from system_im_core.config import GatewayConfigHelper
+
+        cfg = GatewayConfigHelper.get_platform_config(platform_id)
+        if not isinstance(cfg, PlatformConfig):
+            cfg = PlatformConfig(enabled=bool(enabled), platform=platform_id)
+        cfg.enabled = bool(enabled)
+        GatewayConfigHelper.set_platform_config(platform_id, cfg)
+        if self._manager is None:
+            return True
+        try:
+            if enabled:
+                self._manager.start_platform_async(platform_id)
+            else:
+                self._manager.stop_platform(platform_id)
+        except Exception as e:  # noqa: BLE001 - 单平台连接失败不拖垮 UI
+            logger.warning(f"[GatewayService] {platform_id} 连接切换失败: {e}")
+            return False
+        return True
+
+    def restart_platform(self, platform_id: str) -> None:
+        """断开后重连单个平台（掉线自愈入口）。"""
+        if self._manager is None:
+            return
+        try:
+            self._manager.restart_platform_async(platform_id)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[GatewayService] {platform_id} 重连失败: {e}")
 
     # ==================== 平台消息入口 ====================
 

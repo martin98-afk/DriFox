@@ -203,6 +203,12 @@ CATALOG: Dict[str, CapabilitySpec] = {
         # ── 通讯平台 ──
         _spec("platform.send", _H, "向通讯平台发送消息（数据外发）", _UI, ["send_to_platform"]),
         _spec("platform.read", _M, "平台与会话列表", _UI, ["list_platform_sessions", "list_platforms"]),
+        _spec(
+            "platform.control",
+            _H,
+            "启停 IM 网关服务或单个平台连接（含重连、启用状态切换）",
+            _UI,
+        ),
         # ── 内部资源 ──
         _spec("mcp.call", _H, "MCP 工具调用", _TOOL, ["mcp"]),
         _spec("mcp.register", _M, "注册进程内 MCP server 工具处理器（工具调用在本机执行）", _UI),

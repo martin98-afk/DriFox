@@ -103,8 +103,8 @@ class TestThirdPartyFullChain:
 
     def test_manager_picks_up_third_party_adapter(self, third_party_plugin):
         """PlatformManager._load_adapters 拾取 → adapter 实例持有 builder 提供的 token。"""
-        from app.gateway.config import GatewayConfigHelper
-        from app.gateway.manager import PlatformManager
+        from system_im_core.config import GatewayConfigHelper
+        from system_im_core.manager import PlatformManager
         from app.plugins.registries.gateway_platform_registry import GatewayPlatformRegistry
 
         # 1) 扫临时插件目录 → 注册 def

@@ -5,7 +5,7 @@
 """
 import pytest
 
-from app.core.engines.gateway.engine import GatewayEngine
+from system_im_engine import GatewayEngine
 
 
 @pytest.fixture()

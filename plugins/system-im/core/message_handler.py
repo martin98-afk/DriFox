@@ -17,7 +17,7 @@ from app.gateway.base import (
     Platform,
     SendResult,
 )
-from app.gateway.session_manager import GatewaySessionManager
+from .session_manager import GatewaySessionManager
 
 
 class MessageHandler:

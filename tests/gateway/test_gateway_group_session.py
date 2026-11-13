@@ -11,8 +11,8 @@ import asyncio
 from types import SimpleNamespace
 
 from app.gateway.base import MessageEvent, Platform, SendResult
-from app.gateway.message_handler import MessageHandler
-from app.gateway.session_manager import GatewaySessionManager
+from system_im_core.message_handler import MessageHandler
+from system_im_core.session_manager import GatewaySessionManager
 
 
 def _event(user_id, chat_id, chat_type="dm", platform=Platform.WECOM, text="hi"):
@@ -110,7 +110,7 @@ class _FakeSignal:
 
 def test_process_message_emits_group_chat_type():
     """worker 线程 emit 的 dict 必须带 chat_type，否则主线程重建事件时降级为 dm。"""
-    from app.core.services.gateway_service import GatewayService
+    from system_im_service import GatewayService
 
     sent = []
 

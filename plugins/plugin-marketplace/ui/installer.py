@@ -1793,7 +1793,7 @@ class PluginInstaller:
                 避免随后 rmtree 时 deps 的 .pyd/.dll 仍被占用）
         """
         try:
-            from app.gateway.manager import get_platform_manager
+            from app.core.services.gateway_access import get_platform_manager
 
             pm = get_platform_manager()
             if pm is not None:

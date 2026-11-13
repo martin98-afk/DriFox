@@ -35,15 +35,15 @@ class TestGatewaySubpackageLoading:
     """主程序 gateway 子包加载链路在缺平台插件时也应工作"""
 
     def test_gateway_config_importable(self):
-        """app.gateway.config 可加载（无 platform 适配器时仍正常）"""
-        sys.modules.pop("app.gateway.config", None)
-        config = importlib.import_module("app.gateway.config")
+        """system_im_core.config 可加载（无 platform 适配器时仍正常）"""
+        sys.modules.pop("system_im_core.config", None)
+        config = importlib.import_module("system_im_core.config")
         assert hasattr(config, "get_gateway_config")
 
     def test_gateway_manager_importable(self):
-        """app.gateway.manager 可加载（无 platform 适配器时仍正常）"""
-        sys.modules.pop("app.gateway.manager", None)
-        manager = importlib.import_module("app.gateway.manager")
+        """system_im_core.manager 可加载（无 platform 适配器时仍正常）"""
+        sys.modules.pop("system_im_core.manager", None)
+        manager = importlib.import_module("system_im_core.manager")
         assert hasattr(manager, "create_platform_manager")
 
 

@@ -1,0 +1,35 @@
+{
+    "icon": {
+        "light": "icon.svg",
+        "dark": "icon_dark.svg"
+    },
+    "name": "system-im",
+    "display_name": {
+        "zh": "即时通讯网关"
+    },
+    "description": "IM 网关 — 把 DriFox 接入微信/企微/钉钉/飞书/Telegram 等即时通讯平台：消息接收、会话映射、媒体上传、交互提问与主动投递。平台适配器由各 gateway-* 插件提供并经 GatewayPlatformRegistry 注册，本插件不含任何具体平台实现",
+    "version": "0.1.0",
+    "author": {
+        "name": "DriFox Contributors"
+    },
+    "homepage": "https://github.com/martin98-afk/DriFox",
+    "license": "GPL-3.0-or-later",
+    "type": "system",
+    "api_version": 2,
+    "components": {
+        "ui": true
+    },
+    "capabilities": [
+        "engine.session",
+        "engine.session.resume",
+        "session.persist",
+        "model.config",
+        "net.upload",
+        "ui.notify"
+    ],
+    "module_prefixes": [
+        "system_im_core",
+        "system_im_engine",
+        "system_im_service"
+    ]
+}

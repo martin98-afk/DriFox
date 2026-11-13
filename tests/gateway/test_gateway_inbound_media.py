@@ -2,16 +2,16 @@
 """Gateway 入站图片与文本切分单测。
 
 覆盖两处新增逻辑：
-- ``app.gateway.text_split.split_message``：自然边界优先、不切出孤片
-- ``app.gateway.media.build_user_content``：多模态构造与不支持视觉时的降级
+- ``system_im_core.text_split.split_message``：自然边界优先、不切出孤片
+- ``system_im_core.media.build_user_content``：多模态构造与不支持视觉时的降级
 """
 import base64
 import os
 
 import pytest
 
-from app.gateway.media import VISION_FALLBACK_HEADER, build_user_content
-from app.gateway.text_split import split_message
+from system_im_core.media import VISION_FALLBACK_HEADER, build_user_content
+from system_im_core.text_split import split_message
 
 
 # ==================== 文本切分 ====================

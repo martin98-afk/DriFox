@@ -14,7 +14,7 @@ import time
 
 import pytest
 
-from app.gateway.manager import PlatformManager
+from system_im_core.manager import PlatformManager
 from app.plugins import builtin_reloaders
 from app.plugins.contracts.gateway_platform import GatewayPlatformDef
 from app.plugins.registries.gateway_platform_registry import GatewayPlatformRegistry

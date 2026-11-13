@@ -257,7 +257,7 @@ def test_delete_gateways_path_stops_and_unregisters(monkeypatch):
     不触发 rebuild（删除路径用旧 def 无法重建）。"""
     mgr = _FakeGatewayManager()
     watcher = _FakeGatewayWatcher()
-    monkeypatch.setattr("app.gateway.manager.get_platform_manager", lambda: mgr)
+    monkeypatch.setattr("app.core.services.gateway_access.get_platform_manager", lambda: mgr)
     monkeypatch.setattr(
         "app.plugins.loaders.runtime_component_loader.ensure_gateway_watcher",
         lambda: watcher,
@@ -282,7 +282,7 @@ def test_update_gateways_path_stops_and_rebuilds(monkeypatch):
     """gateways 更新分支：先 stop + 清 module + reload_plugin(精准重载) + 用新 def 重建 adapter。"""
     mgr = _FakeGatewayManager()
     watcher = _FakeGatewayWatcher()
-    monkeypatch.setattr("app.gateway.manager.get_platform_manager", lambda: mgr)
+    monkeypatch.setattr("app.core.services.gateway_access.get_platform_manager", lambda: mgr)
     monkeypatch.setattr(
         "app.plugins.loaders.runtime_component_loader.ensure_gateway_watcher",
         lambda: watcher,

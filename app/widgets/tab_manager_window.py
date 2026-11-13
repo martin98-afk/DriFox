@@ -7090,10 +7090,11 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
         TabManagerWindow._instance = None
         # ★ 停止应用级服务（Gateway 平台 WebSocket 断连 + 插件 watcher 线程）
         try:
-            from app.core.services.gateway_service import GatewayService
+            from app.core.services.gateway_access import shutdown_gateway_service
             from app.core.services.plugin_host_service import PluginHostService
 
-            GatewayService.get_instance().stop()
+            # 网关实现归 system-im 插件：停平台连接 + 关事件循环线程 + 释放引擎
+            shutdown_gateway_service()
             PluginHostService.get_instance().stop()
         except Exception:
             pass
@@ -7106,14 +7107,6 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
             get_lsp_manager().shutdown()
         except Exception as e:
             logger.warning(f"[TabManager] cleanup LspManager.shutdown 失败: {e}")
-        try:
-            from app.gateway.manager import get_platform_manager
-
-            mgr = get_platform_manager()
-            if mgr is not None:
-                mgr.shutdown()
-        except Exception as e:
-            logger.warning(f"[TabManager] cleanup PlatformManager.shutdown 失败: {e}")
         try:
             from app.gateway import stop_llm_api_service
 

@@ -136,7 +136,7 @@ def main():
     tm.show_boot_placeholder()
     pump(300)
 
-    from app.core.services.gateway_service import GatewayService
+    from system_im_service import GatewayService
     from app.core.services.plugin_host_service import PluginHostService
 
     GatewayService.get_instance().ensure_started()

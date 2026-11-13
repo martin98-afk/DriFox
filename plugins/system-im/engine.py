@@ -690,7 +690,7 @@ class GatewayEngine(QObject, BaseEngine):
         except Exception as e:
             logger.warning(f"[GatewayEngine] 视觉能力判定失败，按不支持处理: {e}")
             supports_vision = False
-        from app.gateway.media import build_user_content
+        from system_im_core.media import build_user_content
 
         return build_user_content(
             text, media_paths, supports_vision=supports_vision, kinds=media_types
