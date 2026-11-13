@@ -329,12 +329,17 @@ class PlatformManager:
                 results[platform] = success
 
                 if success:
+                    adapter._last_error = None
                     logger.info(f"[PlatformManager] {platform} started")
                 else:
+                    if not getattr(adapter, "_last_error", None):
+                        # 适配器自己没说原因也要让 UI 看到「错误」而不是无限「连接中」
+                        adapter._last_error = "启动失败（详见网关日志）"
                     logger.warning(f"[PlatformManager] {platform} failed to start")
 
             except Exception as e:
                 logger.error(f"[PlatformManager] {platform} start error: {e}")
+                adapter._last_error = f"{type(e).__name__}: {e}"
                 results[platform] = False
 
         self._notify_status()
@@ -505,13 +510,16 @@ class PlatformManager:
             success = await adapter.start()
         except Exception as e:
             logger.error(f"[PlatformManager] {platform} start 异常: {e}", exc_info=True)
+            adapter._last_error = f"{type(e).__name__}: {e}"
             self._notify_status()
             return False
-        if not success:
-            logger.warning(
-                f"[PlatformManager] {platform} 启动失败: "
-                f"{adapter.last_error or '未知原因（见适配器日志）'}"
-            )
+        if success:
+            adapter._last_error = None
+        else:
+            if not getattr(adapter, "_last_error", None):
+                # 无原因的 start 失败以前只落日志，UI 恒显示「连接中」
+                adapter._last_error = "启动失败（详见网关日志）"
+            logger.warning(f"[PlatformManager] {platform} 启动失败: {adapter.last_error}")
         self._notify_status()
         return success
 

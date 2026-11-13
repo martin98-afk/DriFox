@@ -21,8 +21,11 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import importlib.util
+import sys
 import threading
 import time as time_module
+from pathlib import Path
 from typing import Any, Dict, Optional
 
 from loguru import logger
@@ -36,6 +39,34 @@ from system_im_core.attachments import (
 from system_im_core.interaction import build_answer_payload, format_question, parse_answer
 
 _AUTO_RESTART_COOLDOWN = 5.0  # 引擎不可用时的自愈重建最小间隔（秒）
+
+_ENGINE_MODULE = "system_im_engine"
+
+
+def _load_engine_module():
+    """加载（或复用）插件根的 ``engine.py``，模块名固定为 ``system_im_engine``。
+
+    ``ui/__init__.py`` 只负责注册 service，engine 不在 ``sys.modules`` 里；
+    本模块作为顶层模块也 import 不到 ``ui/`` 下的 core_loader，故在此按文件
+    路径兜底加载。后台预热线程与主线程建引擎都走它。
+    """
+    cached = sys.modules.get(_ENGINE_MODULE)
+    if cached is not None:
+        return cached
+    path = Path(__file__).resolve().parent / "engine.py"
+    if not path.exists():
+        raise RuntimeError(f"引擎模块不存在: {path}")
+    spec = importlib.util.spec_from_file_location(_ENGINE_MODULE, str(path))
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"无法创建引擎模块 spec: {path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[_ENGINE_MODULE] = module
+    try:
+        spec.loader.exec_module(module)
+    except Exception:
+        sys.modules.pop(_ENGINE_MODULE, None)
+        raise
+    return module
 
 
 class GatewayService(QObject):
@@ -157,7 +188,7 @@ class GatewayService(QObject):
         if not self._ensure_components():
             return False
         try:
-            from system_im_engine import GatewayEngine
+            GatewayEngine = _load_engine_module().GatewayEngine
 
             self._engine = GatewayEngine.get_instance(
                 get_model_config=self._get_model_config,
@@ -271,7 +302,7 @@ class GatewayService(QObject):
             ok = False
             try:
                 # GatewayEngine import 链预热（模块级 import 含 mcp SDK，冷启动最重）
-                import system_im_engine  # noqa: F401
+                _load_engine_module()
 
                 # 组件构造（含 ToolExecutor）在后台线程完成；_ensure_components
                 # 内部双检锁保证与主线程消息路径竞争安全

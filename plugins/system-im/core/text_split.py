@@ -1,9 +1,12 @@
 # -*- coding: utf-8 -*-
-"""IM 文本切分：按自然边界切片，供各平台适配器复用。
+"""IM 文本切分：按自然边界切片，规则规格与单测对象。
 
 规则对齐 dsh-im（``editable-message-stream.mjs::splitMessageText``）：
 优先在换行处切，其次空格，都不行才硬切；切点不早于 ``min_ratio`` 比例，
 避免切出只有一两个字的孤片。平台只需给出自己的单条上限。
+
+各 ``gateway-*`` 插件按此规则自带实现（E2 平台迁出方向：插件不跨层 import
+本模块），改这里的规则要同步飞书 / 微信 / 企业微信等插件的本地副本。
 """
 from __future__ import annotations
 
