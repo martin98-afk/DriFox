@@ -232,35 +232,25 @@ class TrayManager(QObject):
         app/widgets/modules/tray_menu.py 模块注释。
         """
         # 延迟导入：qfluentwidgets 较重，不占用启动关键路径
-        from qfluentwidgets import Action, FluentIcon
+        from qfluentwidgets import FluentIcon
 
         from app.widgets.modules.tray_menu import TrayContextMenu
 
         menu = TrayContextMenu()
 
-        main_action = Action(FluentIcon.HOME, "打开主界面", menu)
-        main_action.triggered.connect(self._show_main_window)
-        menu.addAction(main_action)
+        menu.add_icon_action(FluentIcon.HOME, "打开主界面", self._show_main_window)
 
         menu.addSeparator()
 
         # 右侧显示当前版本号，点击走手动检查更新
         menu.add_hint_action(FluentIcon.UPDATE, "检查更新", self._current_version(), self._check_update)
-        log_action = Action(FluentIcon.DOCUMENT, "打开日志", menu)
-        log_action.triggered.connect(self._open_current_log)
-        menu.addAction(log_action)
-        log_dir_action = Action(FluentIcon.FOLDER, "打开日志文件夹", menu)
-        log_dir_action.triggered.connect(self._open_log_folder)
-        menu.addAction(log_dir_action)
+        menu.add_icon_action(FluentIcon.DOCUMENT, "打开日志", self._open_current_log)
+        menu.add_icon_action(FluentIcon.FOLDER, "打开日志文件夹", self._open_log_folder)
 
         menu.addSeparator()
 
-        restart_action = Action(FluentIcon.SYNC, "重启", menu)
-        restart_action.triggered.connect(self._restart_application)
-        menu.addAction(restart_action)
-        quit_action = Action(FluentIcon.POWER_BUTTON, "退出", menu)
-        quit_action.triggered.connect(self._quit_application)
-        menu.addAction(quit_action)
+        menu.add_icon_action(FluentIcon.SYNC, "重启", self._restart_application)
+        menu.add_icon_action(FluentIcon.POWER_BUTTON, "退出", self._quit_application)
 
         return menu
 

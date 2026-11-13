@@ -1,7 +1,7 @@
 ## [Unreleased]
-## [v0.7.2] - 2026-11-13 (重新发布 #2)
+## [v0.7.2] - 2026-11-13 (重新发布 #3)
 
-自 v0.7.1 以来的变更 | 提交数：123 · 文件变更：508 · +23254/-8707 | 贡献者：dingma, drifox-bot, mading, martin98-afk
+自 v0.7.1 以来的变更 | 提交数：125 · 文件变更：522 · +23621/-8899 | 贡献者：dingma, drifox-bot, mading, martin98-afk
 
 ### ✨ 新功能 (New Features)
 
@@ -59,6 +59,16 @@
 ### 📚 文档 (Docs)
 
 - `docs/plugins/capabilities.md` 与 `plugin-creator` 技能能力表（`references/manifest.md`）对齐 88 条能力，补「能替代直连的三条优先用」指引与 `password` 字段自动加密说明。
+
+### ✨ 新功能 (New Features) (重新发布 #3 追加)
+
+- **托盘菜单按原生菜单明暗取色** (`app/widgets/modules/tray_menu.py` · `app/tray_manager.py`): macOS 的 `QSystemTrayIcon` 菜单被 Qt 桥接成原生 NSMenu（`QCocoaSystemTrayIcon::statusItemClicked` → `popUpStatusItemMenu:`），背景与文字由系统按 NSApp 外观绘制、与 App 主题无关，而菜单图标是我们的位图、按 App 主题取色，于是「App 深色 + 系统菜单浅色」时白图标贴浅底不可见。新增 `_native_menu_icon_theme()` 经 `NSApplication.effectiveAppearance()` 探测原生菜单明暗并在弹出时重设图标，非 macOS 平台返回 `None` 走原逻辑；菜单项创建收敛为 `_make_action`，`tray_manager` 内重复构造逻辑随之删除。
+- **子代理结果逐条注入，取消批次汇总** (`plugins/system-subagent/manager.py`): 删除批次汇总通知与 `_MAX_BATCH_RESULT_CHARS` 4096 截断，任务完成即单独注入结果，错误场景同样逐条注入（此前走汇总路径会在出错时丢结果）；`_is_engine_streaming` 随汇总链一并移除，流式判定统一由注入器负责。
+- **排队发送保留 hook 来源与用户卡** (`app/main_widget.py` · `app/plugins/capabilities/providers/ui_core.py`): `_schedule_busy_send` 补传 `hook_event`，空闲降级为普通发送时不再把 hook 消息误标成真实用户发言（用户气泡 + 参与标题/历史指纹）；`user_card` 提前写入发送上下文并贯通编码与续发路径，配合新增 `tests/widgets/test_deferred_send_busy_guard.py` 锁住「繁忙期发出但无人消费」的孤儿消息。
+
+### 🐛 问题修复 (Bug Fixes) (重新发布 #3 追加)
+
+- **HTML 卡首帧白底** (`app/widgets/card_viewers.py`): 池化复用、tab 切回、隐藏期尺寸变化后再映射时，Chromium 合成面可能以默认白底重建，表现为 HTML 区整块白底、文字色正常、滚动或切 tab 后消失（合成面首帧白 + 无人标脏）；另外 renderer 崩溃 / 表面重建后若在 `setHtml` 之后才重申透明，新导航仍以白底初始化且后续内容全走 JS 注入（无导航）→ 白底固化到 viewer 重建。修复：导航**前**前置一次透明重申，`showEvent` 与 `loadFinished` 各补一次幂等重申加整卡标脏，覆盖池化补载 / 看门狗重载骨架 / 崩溃自愈三条路径。
 
 ## [v0.7.1] - 2026-11-11
 

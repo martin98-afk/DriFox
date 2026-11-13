@@ -105,7 +105,7 @@ def _seed(mgr, task_id="t1", session_id="sess-A"):
 
 
 def test_idle_after_handoff_batch_carries_results():
-    """A：引擎空闲时结果仍逐条注入，正文经单条进新会话（不再靠汇总承载）"""
+    """A：引擎空闲时结果仍逐条注入，正文经单条进新会话（汇总已停发）"""
     mgr = _make_manager(_IdleBackend())
     _seed(mgr)
 
@@ -116,15 +116,14 @@ def test_idle_after_handoff_batch_carries_results():
 
     mgr._on_executor_finished("t1", _RESULT)
 
-    assert len(injected) == 1, "空闲态也要逐条注入，不能攒到批次末尾"
+    assert len(injected) == 1, "空闲态逐条注入，不攒到批次末尾"
     # 签名: (task_id, result, success, agent_name, description)
     assert injected[0][0][1] == _RESULT, "结果正文必须随单条注入送到新会话"
-    assert batch_messages, "批次汇总仍触发（任务清单）"
-    assert "t1" in batch_messages[0], "汇总列出任务 id"
+    assert batch_messages == [], "批次汇总已停发，不再开新轮"
 
 
-def test_streaming_after_handoff_summary_stays_lean():
-    """对照：流式中单任务已逐条注入，汇总保持精简不带全文"""
+def test_streaming_after_handoff_injects_single_task_only():
+    """对照：流式中单任务逐条注入，全完成不再追加汇总"""
     mgr = _make_manager(_BusyBackend())
     _seed(mgr)
 
@@ -135,10 +134,9 @@ def test_streaming_after_handoff_summary_stays_lean():
 
     mgr._on_executor_finished("t1", _RESULT)
 
-    assert len(injected) == 2, "流式：单任务 + 批次汇总各注入一次"
-    assert injected[0][0][0] == "t1", "单任务结果应逐条注入"
-    # _dispatch_result_injection 签名: (task_id, result, success, agent_name, description)
-    assert _RESULT not in injected[1][0][1], "流式汇总不重复带结果全文"
+    assert len(injected) == 1, "只有单任务注入，无汇总"
+    assert injected[0][0][0] == "t1"
+    assert injected[0][0][1] == _RESULT
     assert batch_messages == [], "流式路径不开新轮"
 
 

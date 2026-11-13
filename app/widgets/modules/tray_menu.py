@@ -21,22 +21,48 @@
 （``popup()``）与 ``exec()`` 均会触发 ``aboutToShow``，弹出前完成刷新。
 """
 
+import sys
 from typing import Callable
 
 from PyQt5.QtCore import QModelIndex, QSize, Qt
 from PyQt5.QtGui import QColor, QFont, QFontMetrics, QPainter
 from PyQt5.QtWidgets import QAction, QStyle, QStyleOptionViewItem
-from qfluentwidgets import Action, FluentIconBase, SystemTrayMenu, isDarkTheme
+from qfluentwidgets import Action, FluentIconBase, SystemTrayMenu, Theme, isDarkTheme
 from qfluentwidgets.components.widgets.menu import ShortcutMenuItemDelegate
 
 # 提示文本存放在 action 的动态属性里（Qt 原生无「右侧说明文本」概念）
 HINT_PROPERTY = "hintText"
+
+# 菜单项图标的 FluentIconBase 原体（弹出时按原生菜单明暗重设需要用）
+SOURCE_ICON_PROPERTY = "sourceIcon"
 
 _HINT_RIGHT_MARGIN = 20
 
 # 菜单文字基础字号（与 qfluentwidgets menu.qss 的 font: 14px 对齐，并叠加
 # DriFox 用户字号档位 delta）
 _MENU_BASE_FONT_SIZE = 14
+
+
+def _native_menu_icon_theme():
+    """菜单项图标的取色主题；``None`` = 沿用 App 主题（原行为）
+
+    macOS 上 ``QSystemTrayIcon`` 的菜单被 Qt 桥接成原生 NSMenu
+    （``QCocoaSystemTrayIcon::statusItemClicked`` → ``popUpStatusItemMenu:``），
+    背景与文字由系统按 NSApp 外观绘制，与 App 主题无关；图标却是我们传进去的
+    位图，按 App 主题取色就会出现「App 深色 + 系统菜单浅色 → 白图标贴浅底」的
+    不可见问题。故 macOS 单独探测原生菜单明暗，其余平台返回 None 走原逻辑。
+    """
+    if sys.platform != "darwin":
+        return None
+    try:
+        from AppKit import NSAppearanceNameDarkAqua, NSApplication
+
+        appearance = NSApplication.sharedApplication().effectiveAppearance()
+        if appearance is None:
+            return None
+        return Theme.DARK if appearance.name() == NSAppearanceNameDarkAqua else Theme.LIGHT
+    except Exception:
+        return None
 
 
 def _menu_font_sig() -> tuple:
@@ -108,8 +134,11 @@ class TrayContextMenu(SystemTrayMenu):
         self.view.setItemDelegate(HintMenuItemDelegate(self.view))
         # 上次应用的字体签名（family, 像素字号）；None = 尚未应用过
         self._applied_font_sig: tuple | None = None
-        # 弹出时自检字体（系统托盘右键 popup() / exec() 均触发 aboutToShow）
+        # 上次应用的图标取色主题；None = 尚未应用过
+        self._applied_icon_theme = None
+        # 弹出时自检字体与图标（系统托盘右键 popup() / exec() 均触发 aboutToShow）
         self.aboutToShow.connect(self._refresh_font_if_changed)
+        self.aboutToShow.connect(self._refresh_icons_if_needed)
 
     # ========== 字体刷新（弹出时自检） ==========
 
@@ -172,10 +201,44 @@ class TrayContextMenu(SystemTrayMenu):
     ) -> Action:
         """添加右侧带提示文本的菜单项（如「检查更新        v0.6.1」）"""
         action = Action(icon, text, self)
+        action.setProperty(SOURCE_ICON_PROPERTY, icon)
         action.setProperty(HINT_PROPERTY, hint)
         action.triggered.connect(callback)
         self.addAction(action)
         return action
+
+    def add_icon_action(
+        self,
+        icon: FluentIconBase,
+        text: str,
+        callback: Callable[[], None],
+    ) -> Action:
+        """添加带图标的菜单项（macOS 上图标颜色由弹出前按原生菜单外观重设）"""
+        action = Action(icon, text, self)
+        action.setProperty(SOURCE_ICON_PROPERTY, icon)
+        action.triggered.connect(callback)
+        self.addAction(action)
+        return action
+
+    def _refresh_icons_if_needed(self) -> None:
+        """按原生菜单的实际明暗重设菜单项图标（幂等）
+
+        非 macOS 或外观未变 -> 直接返回，零开销。macOS 必须在每次弹出前重设：
+        用户可能在会话中途切了系统外观，而菜单是构建一次、长期复用的对象。
+        """
+        theme = _native_menu_icon_theme()
+        if theme is None or theme == self._applied_icon_theme:
+            return
+
+        for action in self.menuActions():
+            source = action.property(SOURCE_ICON_PROPERTY)
+            if source is not None:
+                # 必须清掉 fluentIcon：Action.icon() 有它就走 FluentIconEngine，
+                # 绘制时按 App 主题重算颜色，setIcon 传进去的颜色会被覆盖。
+                action.fluentIcon = None
+                action.setIcon(source.icon(theme))
+
+        self._applied_icon_theme = theme
 
     def _longestShortcutWidth(self) -> int:
         """右侧留白取「快捷键文本」与「提示文本」的较宽者，避免文字重叠

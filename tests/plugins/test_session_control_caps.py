@@ -45,8 +45,20 @@ def test_send_payload_keeps_ephemeral_flag():
     api = _session_control(_ui_window("w-test2"))
     api["send"]("补写", ephemeral=False)
     payload = q.peek("w-test2")[0]["payload"]
-    assert payload == {"text": "补写", "ephemeral": False}
+    assert payload == {"text": "补写", "ephemeral": False, "hook_event": "SessionSend"}
     q.clear("w-test2")
+
+
+def test_idle_enqueue_keeps_custom_hook_event():
+    """空闲降级为普通发送时也必须带上 hook_event，否则注入消息被当成用户发言"""
+    q = get_action_queue()
+    q.clear("w-event-idle")
+    win, backend = _busy_window("w-event-idle", busy=False)
+    api = _session_control(win)
+    assert api["send"]("子智能体结果", mode="hook", hook_event="SubAgentFinished") is True
+    payload = q.peek("w-event-idle")[0]["payload"]
+    assert payload["hook_event"] == "SubAgentFinished"
+    q.clear("w-event-idle")
 
 
 def test_ui_provider_rejects_without_window():
