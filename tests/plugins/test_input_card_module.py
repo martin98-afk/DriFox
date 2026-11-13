@@ -73,6 +73,7 @@ def test_compose_builds_input_card(fresh_registry, qapp):
                 "_on_at_triggered",
                 "_on_at_dismissed",
                 "_on_files_dropped",
+                "_on_file_mention_confirmed",
                 "_on_entering_history_mode",
                 "_on_history_attachments_restored",
                 "_on_history_mode_exited",

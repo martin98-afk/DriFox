@@ -20646,6 +20646,15 @@ class OpenAIChatToolWindow(ToolWindow):
         if added:
             self._rebuild_attachment_chips()
 
+    def _on_file_mention_confirmed(self, path: str):
+        """@路径 + 空格确认：路径已由输入框折叠成胶囊，这里只登记附件
+
+        与 _on_file_mention_selected 的区别：那条链路（卡片选中）由 main_widget
+        负责把 @query 替换成胶囊；本路径的文本替换已在输入框内部完成，
+        重复调用 insert_file_mention 会把胶囊连带空格一起吞掉。
+        """
+        self._on_files_dropped([path])
+
     def _add_attachment(self, path: str) -> bool:
         """登记一个附件（去重）。返回是否实际新增
 

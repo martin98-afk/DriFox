@@ -32,8 +32,8 @@ def description_param(example: str, required: bool = True) -> dict:
 
     Args:
         example: 给大模型的示例描述，用于校准粒度（应是"做什么"而非"怎么做"）
-        required: 是否必填。编辑类工具传 False（缺失时渲染端回退原预览，
-            不强制模型每次填写）；终端类默认 True。
+        required: 是否必填，默认 True。编辑类工具同样必填——参数标成可选后模型会
+            成批省略（实测 deepseek 系编辑调用近乎全空），折叠头只剩文件路径。
     """
     prefix = "必填。" if required else "可选。"
     return {

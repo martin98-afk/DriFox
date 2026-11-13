@@ -79,12 +79,21 @@ def _tool_desc_loader():
     return _tool_desc_module
 
 
-def _desc_param(example: str, required: bool = False) -> dict:
-    """生成 description 参数的 schema 片段（模块缺失时返回空 dict，schema 退化为原样）"""
+def _desc_param(example: str) -> dict:
+    """生成 description 参数的 schema 片段（模块缺失时返回空 dict，schema 退化为原样）
+    编辑类工具一律 required=True：参数可选时模型会成批省略（实测 deepseek 系
+    编辑调用近乎全空），折叠头退回原始文件路径，用户看不出这一步在做什么。
+    """
     mod = _tool_desc_loader()
     if not mod:
         return {}
-    return mod.description_param(example, required=required)
+    return mod.description_param(example, required=True)
+
+
+def _desc_required(base: list) -> list:
+    """required 数组按 description 参数是否真的注入来决定是否追加
+    （共享模块缺失时 schema 里没有该参数，required 里就不能点名它）"""
+    return [*base, "description"] if _tool_desc_loader() else list(base)
 
 
 def _desc_preview(preview_fn, tail_fn=None):
@@ -382,7 +391,7 @@ _WRITE_SCHEMA = {
                 "content": {"type": "string", "description": "完整的文件内容"},
                 **_desc_param("新增 token 估算缓存模块"),
             },
-            "required": ["path", "content"],
+            "required": _desc_required(["path", "content"]),
         },
     },
 }
@@ -463,7 +472,7 @@ _EDIT_SCHEMA = {
                 "replaceAll": {"type": "boolean", "description": "替换全部匹配(默认 False)。oldString 重复时用", "default": False},
                 **_desc_param("修掉空列表导致的崩溃"),
             },
-            "required": ["path", "oldString", "newString"],
+            "required": _desc_required(["path", "oldString", "newString"]),
         },
     },
 }
@@ -540,7 +549,7 @@ _MULTI_EDIT_SCHEMA = {
                 },
                 **_desc_param("把 token 估算抽成独立函数并加缓存"),
             },
-            "required": ["path", "edits"],
+            "required": _desc_required(["path", "edits"]),
         },
     },
 }

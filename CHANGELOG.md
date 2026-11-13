@@ -1,4 +1,11 @@
 ## [Unreleased]
+### ✨ 新功能 (New Features)
+- **@ 路径空格确认折叠** (`app/widgets/bottom_input_area.py` · `app/widgets/cards/floating/file_mention_card.py` · `app/main_widget.py` · `app/widgets/modules/input_card_module.py`): 手敲 `@相对路径` + 空格时按卡片根目录解析，真实存在则整段折叠成文件胶囊并登记附件（与 `/cmd` 空格折叠对称），不存在保持字面文本、只关卡片——不做模糊匹配，避免把「@请你分析」这类正文误折叠成附件。新增 `fileMentionConfirmed` 信号：正文替换由输入框完成，上层只登记附件，避免重复插入吞掉空格；折叠期间 `_collapsing_mention` 守卫阻住 textChanged 重入
+- **@ 卡键盘补全** (`app/widgets/bottom_input_area.py` · `app/widgets/cards/floating/file_mention_card.py`): 四项此前只能鼠标的操作改为键盘可达——Esc 两层退出（浏览态深层先回上一层并经 `browseChanged` 回写 `@父路径/`，根层或搜索态才关卡片）、PageUp/PageDown 按卡片可视行数跨页、Home/End 跳首/尾可选条目（跳过分组标题）、Ctrl+↑↓ 跳「助手/文件/会话」分组首项。Home/End 在卡片可见期间归卡片，Ctrl 修饰仍归输入框；跨页/首尾跳转前经 `_ensure_rendered` 补懒加载渲染，避免选中落在未渲染区
+- **文件胶囊 Backspace 解封回卡片态** (`app/widgets/bottom_input_area.py`): 光标紧贴文件胶囊按 Backspace/Delete 第一次只解封为 `@相对路径`（工作区外用绝对路径），不再整枚删除；解封触发的 textChanged 重开文件卡片并让附件反向同步移除 chip，回到「已选未确认」状态，再按才逐字删除。@ 前不是单词边界（中文紧邻）时自动补一个空格，否则 @ 检测不成立导致卡片不弹
+
+### 🐛 修复 (Bug Fixes)
+- **编辑类工具 description 改为必填** (`plugins/system-core/tools/file_tools.py` · `plugins/system-core/tools/_tool_desc.py`): write / edit / multi_edit 的 `description` 此前是可选参数且未进 `required`，模型会成批省略（实测 deepseek 系 edit 18 次全空），折叠头退回原始文件路径，看不出这一步在做什么。现固定 `required=True` 并把 `description` 补进三个工具的 `required` 数组（共享模块缺失时自动跳过，不产生悬空 required）
 
 ## [v0.7.2] - 2026-11-13
 

@@ -125,6 +125,8 @@ class InputCardModule(UIModule):
         host.input_area.atTriggered.connect(host._on_at_triggered)
         host.input_area.atDismissed.connect(host._on_at_dismissed)
         host.input_area.files_dropped.connect(host._on_files_dropped)
+        # @路径 + 空格确认折叠 → 只登记附件（正文胶囊已由输入框自行插入）
+        host.input_area.fileMentionConfirmed.connect(host._on_file_mention_confirmed)
         # 粘贴图片异步落盘完成 → 重建芯片（芯片创建早于文件写入，避免"文件不存在"误报）
         host.input_area.paste_image_saved.connect(host._rebuild_attachment_chips)
         host.input_area.enteringHistoryMode.connect(host._on_entering_history_mode)

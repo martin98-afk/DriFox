@@ -1806,6 +1806,101 @@ class FileMentionCard(QWidget):
             return True
         return False
 
+    @property
+    def root_dir(self) -> str:
+        """当前扫描根目录（输入框校验 @ 路径存在性时作相对路径基准）"""
+        return self._root_dir
+
+    def go_up(self) -> bool:
+        """Esc 触发：浏览态返回上一层目录
+
+        仅浏览态（无过滤词）且有父层时消费按键；搜索态与根层返回 False，
+        由输入框走「关闭卡片」语义。
+        """
+        if self._current_query or not self._browse_rel:
+            return False
+        parent = self._browse_rel.rsplit("/", 1)[0] if "/" in self._browse_rel else ""
+        self._enter_dir(parent)
+        return True
+
+    def _ensure_rendered(self, idx: int) -> bool:
+        """确保懒加载 widget 覆盖到 idx（跨页/首尾跳转前补渲染）
+
+        返回 idx 是否已渲染。渲染上限 MAX_RENDERED_ITEMS 之外的位置
+        不可达（_filtered_items 仍保留全量，选中不可视）。
+        """
+        while idx >= self._rendered_count and self._rendered_count < len(self._filtered_items):
+            before = self._rendered_count
+            self._extend_render()
+            if self._rendered_count == before:
+                break
+        return idx < len(self._item_widgets)
+
+    def _commit_selection(self, idx: int) -> bool:
+        """跳转到 idx 并刷新高亮（不可选行拒绝）"""
+        if not (0 <= idx < len(self._filtered_items)) or self._is_section_index(idx):
+            return False
+        if not self._ensure_rendered(idx):
+            return False
+        self._selected_index = idx
+        self._update_selection()
+        return True
+
+    def select_page(self, delta: int) -> bool:
+        """PageUp/PageDown：按可视行数跨页移动（越过分组标题）"""
+        if not self._filtered_items:
+            return False
+        viewport_h = self._scroll_area.viewport().height()
+        step = max(1, viewport_h // ITEM_HEIGHT)
+        n = len(self._filtered_items)
+        idx = min(max(self._selected_index + delta * step, 0), n - 1)
+        if self._is_section_index(idx):
+            rng = range(idx, n) if delta > 0 else range(idx, -1, -1)
+            for cand in rng:
+                if not self._is_section_index(cand):
+                    idx = cand
+                    break
+        self._commit_selection(idx)
+        # 列表非空即消费按键：到边界后继续按不应落到输入框滚动
+        return True
+
+    def select_edge(self, first: bool) -> bool:
+        """Home/End：跳到第一个/最后一个可选条目（跳过分组标题）"""
+        n = len(self._filtered_items)
+        if not n:
+            return False
+        idx = 0 if first else n - 1
+        if self._is_section_index(idx):
+            rng = range(0, n) if first else range(n - 1, -1, -1)
+            for cand in rng:
+                if not self._is_section_index(cand):
+                    idx = cand
+                    break
+        self._commit_selection(idx)
+        return True
+
+    def select_group(self, delta: int) -> bool:
+        """Ctrl+↑/↓：跳到上/下一个分组首项
+
+        组首 = section_title 之后第一个可选项。当前已在该组组首时，
+        Ctrl+↑ 继续回上一组（与 IDE「上一个方法」惯例一致）。
+        """
+        starts: List[int] = []
+        n = len(self._filtered_items)
+        for i, item in enumerate(self._filtered_items):
+            if item.get("type") == "section_title" and i + 1 < n and not self._is_section_index(i + 1):
+                starts.append(i + 1)
+        if not starts:
+            return False
+        cur = self._selected_index
+        if delta > 0:
+            target = next((s for s in starts if s > cur), None)
+        else:
+            target = next((s for s in reversed(starts) if s < cur), None)
+        if target is None:
+            return False
+        return self._commit_selection(target)
+
     def _collect_session_items(self) -> List[Dict[str, str]]:
         """拉取历史会话列表（@ 卡片「会话」分类）
 

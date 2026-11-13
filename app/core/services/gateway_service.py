@@ -342,6 +342,8 @@ class GatewayService(QObject):
                 "chat_id": chat_id,
                 "user_id": user_id,
                 "platform": _pid,
+                "media_urls": list(kwargs.get("media_urls") or []),
+                "media_types": list(kwargs.get("media_types") or []),
                 "future": future,
             }
         )
@@ -459,8 +461,11 @@ class GatewayService(QObject):
         user_id = data["user_id"]
         platform = data["platform"]
         future = data["future"]
+        media_urls = data.get("media_urls") or []
 
-        logger.info(f"[Gateway] Main thread processing: {text[:50]}...")
+        logger.info(
+            f"[Gateway] Main thread processing: {text[:50]}... (media={len(media_urls)})"
+        )
 
         # ===== 入口守卫 + 自愈 =====
         # 服务永不销毁，但引擎可能因历史 cleanup 处于不可用状态：先尝试同步重建
@@ -527,17 +532,23 @@ class GatewayService(QObject):
             # 3.5 流式（打字机）通道：平台适配器支持时走 update_stream/finish_stream
             try:
                 adapter = self._manager.get_adapter(platform)
-                use_stream = bool(adapter and adapter.supports_streaming(chat_id) and _ev_loop)
+                stream_capable = bool(adapter and adapter.supports_streaming(chat_id) and _ev_loop)
             except Exception:
-                adapter, use_stream = None, False
+                adapter, stream_capable = None, False
 
+            use_stream = stream_capable
+            stream_key = None
             if use_stream:
                 try:
                     sf = asyncio.run_coroutine_threadsafe(adapter.start_stream(chat_id), _ev_loop)
-                    use_stream = bool(sf.result(timeout=10))
+                    stream_key = sf.result(timeout=10)
+                    use_stream = bool(stream_key)
                 except Exception as e:
                     logger.warning(f"[Gateway] start_stream failed, fallback: {e}")
                     use_stream = False
+            if stream_capable and not use_stream:
+                # 入口已按“支持流式”跳过占位提示，实际开流失败时补一条，避免静默等待
+                _push_to_platform("🤔 正在思考，请稍候...")
 
             _visible: list = []
             _last_stream_push = [0.0]
@@ -555,7 +566,7 @@ class GatewayService(QObject):
                 if not snapshot.strip():
                     return
                 try:
-                    asyncio.run_coroutine_threadsafe(adapter.update_stream(chat_id, snapshot), _ev_loop)
+                    asyncio.run_coroutine_threadsafe(adapter.update_stream(stream_key, snapshot), _ev_loop)
                 except Exception as e:
                     logger.debug(f"[Gateway] stream update skipped: {e}")
 
@@ -602,7 +613,7 @@ class GatewayService(QObject):
                 if use_stream and adapter:
                     try:
                         fut = asyncio.run_coroutine_threadsafe(
-                            adapter.finish_stream(chat_id, text_to_send or final), _ev_loop
+                            adapter.finish_stream(stream_key, text_to_send or final), _ev_loop
                         )
                         result = fut.result(timeout=15)
                     except Exception as e:
@@ -642,7 +653,12 @@ class GatewayService(QObject):
                 "error": on_error,
             }
 
-            self._engine.process(session=chat_session, text=text, callbacks=callbacks)
+            self._engine.process(
+                session=chat_session,
+                text=text,
+                callbacks=callbacks,
+                images=media_urls,
+            )
 
         except Exception as e:
             import traceback
