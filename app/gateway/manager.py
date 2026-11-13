@@ -91,8 +91,25 @@ class PlatformManager:
             return False
 
     def _schedule_coro(self, coro) -> None:
-        """在后台事件循环上调度协程，不等待结果"""
-        asyncio.run_coroutine_threadsafe(coro, self._loop)
+        """在后台事件循环上调度协程，不等待结果。
+
+        loop 已停/已关时 run_coroutine_threadsafe 不会执行协程，也不报错，
+        调用方以为「已启动」但平台永远连不上（启动后平台没起来、开关插件
+        无反应的根因之一）。这里显式检查并留痕。
+        """
+        loop = self._loop
+        if loop is None or loop.is_closed() or not loop.is_running():
+            logger.error(
+                "[PlatformManager] 后台事件循环不可用（closed={} running={}），任务丢弃",
+                None if loop is None else loop.is_closed(),
+                None if loop is None else loop.is_running(),
+            )
+            try:
+                coro.close()
+            except Exception:
+                pass
+            return
+        asyncio.run_coroutine_threadsafe(coro, loop)
 
     def _load_adapters(self) -> None:
         """加载平台适配器（Phase E / E2 Task 5：纯 registry 分派，无内置回退段）"""
@@ -447,6 +464,7 @@ class PlatformManager:
 
     async def _start_platform_async(self, platform: str) -> bool:
         """在后台事件循环上启动平台（registry 驱动，无平台 if-elif）"""
+        logger.info(f"[PlatformManager] 开始启动平台 {platform}")
         adapter = self._ensure_adapter(platform)
         if adapter is None:
             logger.error(f"[PlatformManager] No adapter for {platform}")
@@ -471,7 +489,17 @@ class PlatformManager:
         if self._message_handler:
             adapter.set_message_handler(self._message_handler.handle)
 
-        success = await adapter.start()
+        try:
+            success = await adapter.start()
+        except Exception as e:
+            logger.error(f"[PlatformManager] {platform} start 异常: {e}", exc_info=True)
+            self._notify_status()
+            return False
+        if not success:
+            logger.warning(
+                f"[PlatformManager] {platform} 启动失败: "
+                f"{adapter.last_error or '未知原因（见适配器日志）'}"
+            )
         self._notify_status()
         return success
 
