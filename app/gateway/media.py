@@ -1,12 +1,13 @@
 # -*- coding: utf-8 -*-
-"""Gateway 入站图片处理：压缩、data URI 编码、多模态内容构造。
+"""Gateway 入站媒体处理：图片压缩、文件清单、多模态内容构造。
 
-分工：平台适配器只负责把图片下载到本地缓存并塞进 ``MessageEvent.media_urls``；
-本模块统一决定哪些图片能以多模态块交给模型、哪些降级为文件路径提示。
+分工：平台适配器只负责把图片/文件下载到本地缓存并塞进
+``MessageEvent.media_urls``（``media_types`` 标注 image / file）；
+本模块统一决定哪些内容直接交给模型、哪些降级为文件路径提示。
 
-策略对齐 dsh-im：原图留在磁盘，模型侧用压缩副本（长边 ≤2048、单张 ≤5MB、
-总量 ≤20MB）；超限或模型不支持视觉时降级为文本清单，让模型用文件工具读取，
-而不是让用户重发。
+策略对齐 dsh-im：原文件留在磁盘，图片用压缩副本（长边 ≤2048、单张 ≤5MB、
+总量 ≤20MB）；文本文件按预算内嵌原文，其余给路径让模型用文件工具读；
+模型不支持视觉时图片也降级为路径提示，而不是让用户重发。
 """
 from __future__ import annotations
 
@@ -24,6 +25,19 @@ MAX_IMAGES = 10
 MAX_SIDE = 2048
 _JPEG_QUALITIES = (85, 70, 55, 40)
 
+# 文本文件内嵌预算（超出只给路径，避免一次消息撑爆上下文）
+MAX_TEXT_FILE_BYTES = 32 * 1024
+MAX_TEXT_TOTAL_BYTES = 64 * 1024
+
+TEXT_FILE_EXTENSIONS = {
+    ".txt", ".md", ".markdown", ".rst", ".log", ".csv", ".tsv",
+    ".json", ".jsonl", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".conf", ".env",
+    ".py", ".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx", ".vue", ".svelte",
+    ".html", ".htm", ".css", ".scss", ".less", ".sql", ".sh", ".bash", ".zsh",
+    ".bat", ".ps1", ".xml", ".java", ".go", ".rs", ".c", ".h", ".cpp", ".hpp",
+    ".rb", ".php", ".swift", ".kt", ".lua", ".r", ".m", ".tex", ".srt", ".vtt",
+}
+
 _MIME_BY_EXT = {
     ".png": "image/png",
     ".jpg": "image/jpeg",
@@ -32,6 +46,8 @@ _MIME_BY_EXT = {
     ".gif": "image/gif",
     ".bmp": "image/bmp",
 }
+
+IMAGE_EXTENSIONS = set(_MIME_BY_EXT)
 
 VISION_FALLBACK_HEADER = (
     "[用户随消息发送了图片，原图已保存在本机，路径见下。"
@@ -155,10 +171,67 @@ def _to_data_uri(raw: bytes, mime: str) -> str:
     return f"data:{mime};base64,{base64.b64encode(raw).decode('ascii')}"
 
 
-def _vision_fallback(text: str, paths: List[str]) -> str:
-    listing = "\n".join(f"- {p}" for p in paths)
-    body = f"{VISION_FALLBACK_HEADER}\n{listing}"
-    return f"{text}\n\n{body}" if text else body
+def _normalize_kinds(paths: List[str], kinds: Optional[List[str]]) -> List[str]:
+    """把 media_types 规整成与 paths 对齐的 image/file 序列。
+
+    平台侧历来把 mime、文件名、自定义串塞进 media_types，这里按扩展名兜底：
+    图片扩展名 → image，其余 → file。
+    """
+    result: List[str] = []
+    for index, path in enumerate(paths):
+        kind = str(kinds[index]).lower() if kinds and index < len(kinds) else ""
+        if kind.startswith("image"):
+            result.append("image")
+        elif kind == "file":
+            result.append("file")
+        elif os.path.splitext(path)[1].lower() in IMAGE_EXTENSIONS:
+            result.append("image")
+        else:
+            result.append("file")
+    return result
+
+
+def _read_text_excerpt(path: str, limit: int) -> Optional[str]:
+    """读取文本文件片段；二进制（含 NUL）或读失败返回 None。"""
+    try:
+        with open(path, "rb") as f:
+            raw = f.read(limit)
+    except OSError as e:
+        logger.debug(f"[GatewayMedia] 读取文件失败 {path}: {e}")
+        return None
+    if not raw or b"\x00" in raw:
+        return None
+    return raw.decode("utf-8", errors="replace")
+
+
+def _build_files_text(files: List[str], unreadable_images: List[str]) -> str:
+    """文件段落：清单 + 文本文件内嵌原文；图片失败项单列路径提示。"""
+    sections: List[str] = []
+    if files:
+        sections.append("[用户随消息发送了以下文件]")
+        for path in files:
+            name = os.path.basename(path)
+            try:
+                size = os.path.getsize(path)
+            except OSError:
+                size = 0
+            sections.append(f"- {name}（{size} 字节，本地路径：{path}）")
+        remaining = MAX_TEXT_TOTAL_BYTES
+        for path in files:
+            if remaining <= 0:
+                break
+            if os.path.splitext(path)[1].lower() not in TEXT_FILE_EXTENSIONS:
+                continue
+            excerpt = _read_text_excerpt(path, min(MAX_TEXT_FILE_BYTES, remaining))
+            if excerpt is None:
+                continue
+            name = os.path.basename(path)
+            sections.append(f"----- {name} 内容开始 -----\n{excerpt}\n----- {name} 内容结束 -----")
+            remaining -= len(excerpt.encode("utf-8", "ignore"))
+    if unreadable_images:
+        sections.append(VISION_FALLBACK_HEADER)
+        sections.extend(f"- {path}" for path in unreadable_images)
+    return "\n".join(sections)
 
 
 def build_user_content(
@@ -166,42 +239,57 @@ def build_user_content(
     paths: Optional[List[str]],
     *,
     supports_vision: bool,
+    kinds: Optional[List[str]] = None,
 ) -> Union[str, List[Dict[str, Any]]]:
     """构造 user 消息 content：纯文本，或 [text, image_url...] 多模态列表。
 
     Args:
         text: 用户文本（可能为空）
-        paths: 本地图片路径（适配器下载后的缓存文件）
+        paths: 本地媒体路径（适配器下载后的缓存文件）
         supports_vision: 当前模型是否支持图像输入（resolve_model_capabilities 判定）
+        kinds: 与 paths 对齐的类型标注（image / file），缺省按扩展名推断
 
     Returns:
-        str（无图 / 不支持视觉 / 全部失败时）或 list（multimodal content）
+        str（无图可发时）或 list（multimodal content）
     """
     valid = [p for p in (paths or []) if isinstance(p, str) and p and os.path.isfile(p)]
     if not valid:
         return text
-    if not supports_vision:
-        return _vision_fallback(text, valid)
 
-    blocks: List[Dict[str, Any]] = [{"type": "text", "text": text or "请分析这张图片。"}]
-    used = 0
-    skipped: List[str] = []
-    for path in valid[:MAX_IMAGES]:
-        budget = min(MAX_IMAGE_BYTES, MAX_TOTAL_BYTES - used)
-        if budget <= 0:
-            skipped.append(path)
-            continue
-        got = _load_for_model(path, budget)
-        if not got:
-            skipped.append(path)
-            continue
-        raw, mime = got
-        used += len(raw)
-        blocks.append({"type": "image_url", "image_url": {"url": _to_data_uri(raw, mime)}})
+    kinds_norm = _normalize_kinds(valid, kinds)
+    images = [p for p, k in zip(valid, kinds_norm) if k == "image"]
+    files = [p for p, k in zip(valid, kinds_norm) if k == "file"]
 
-    if len(blocks) == 1:
-        # 一张都没能编码成功：退回文本，保证消息不丢
-        return _vision_fallback(text, valid)
-    if skipped:
-        blocks.append({"type": "text", "text": _vision_fallback("", skipped)})
-    return blocks
+    image_blocks: List[Dict[str, Any]] = []
+    unreadable_images: List[str] = []
+    if images and supports_vision:
+        used = 0
+        for path in images[:MAX_IMAGES]:
+            budget = min(MAX_IMAGE_BYTES, MAX_TOTAL_BYTES - used)
+            if budget <= 0:
+                unreadable_images.append(path)
+                continue
+            got = _load_for_model(path, budget)
+            if not got:
+                unreadable_images.append(path)
+                continue
+            raw, mime = got
+            used += len(raw)
+            image_blocks.append(
+                {"type": "image_url", "image_url": {"url": _to_data_uri(raw, mime)}}
+            )
+    elif images:
+        unreadable_images = list(images)
+
+    lead = text or ("请分析这张图片。" if image_blocks else "")
+    files_text = _build_files_text(files, unreadable_images)
+
+    if image_blocks:
+        blocks: List[Dict[str, Any]] = [{"type": "text", "text": lead}]
+        blocks.extend(image_blocks)
+        if files_text:
+            blocks.append({"type": "text", "text": files_text})
+        return blocks
+
+    combined = "\n\n".join(part for part in (lead, files_text) if part)
+    return combined or text

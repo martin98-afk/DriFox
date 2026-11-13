@@ -228,7 +228,8 @@ class GatewayEngine(QObject, BaseEngine):
         session: ChatSession,
         text: str,
         callbacks: Optional[Dict[str, Callable]] = None,
-        images: Optional[List[str]] = None,
+        media_paths: Optional[List[str]] = None,
+        media_types: Optional[List[str]] = None,
     ) -> bool:
         """
         处理 Gateway 消息
@@ -237,8 +238,8 @@ class GatewayEngine(QObject, BaseEngine):
             session: ChatSession（Gateway 自己的）
             text: 消息文本
             callbacks: 回调字典
-            images: 入站图片的本地路径（已下载到缓存）；模型支持视觉时
-                以多模态块提交，否则降级为文件路径提示
+            media_paths: 入站媒体的本地路径（已下载到缓存）
+            media_types: 与 media_paths 对齐的类型标注（image / file）
 
         Returns:
             True 如果消息已被处理
@@ -256,7 +257,7 @@ class GatewayEngine(QObject, BaseEngine):
                 self._save_to_store(session)
                 return True
 
-        return self._send_to_ai(session, text, callbacks, images)
+        return self._send_to_ai(session, text, callbacks, media_paths, media_types)
 
     # ==================== 命令处理 ====================
 
@@ -519,11 +520,12 @@ class GatewayEngine(QObject, BaseEngine):
         session: ChatSession,
         text: str,
         callbacks: Dict[str, Callable],
-        images: Optional[List[str]] = None,
+        media_paths: Optional[List[str]] = None,
+        media_types: Optional[List[str]] = None,
     ) -> bool:
         """发送消息到 AI（使用 ConversationExecutor）"""
         if self._conversation_executor.is_streaming:
-            self._pending_queue.append((session, text, callbacks, images))
+            self._pending_queue.append((session, text, callbacks, media_paths, media_types))
             logger.info(f"[GatewayEngine] Message queued ({len(self._pending_queue)} pending)")
             return True
 
@@ -563,8 +565,10 @@ class GatewayEngine(QObject, BaseEngine):
             elif isinstance(session_model_meta, str) and session_model_meta:
                 llm_config = {**llm_config, "model": session_model_meta}
 
-        # 添加用户消息（带图片时构造 multimodal content，视觉能力按最终生效模型判定）
-        session.add_user_message(content=self._build_user_content(text, images, llm_config))
+        # 添加用户消息（带媒体时构造 multimodal content / 文件段落，视觉能力按最终生效模型判定）
+        session.add_user_message(
+            content=self._build_user_content(text, media_paths, media_types, llm_config)
+        )
 
         # 构建消息
         messages = self._build_messages(session, llm_config)
@@ -651,11 +655,12 @@ class GatewayEngine(QObject, BaseEngine):
     def _build_user_content(
         self,
         text: str,
-        images: Optional[List[str]],
+        media_paths: Optional[List[str]],
+        media_types: Optional[List[str]],
         llm_config: Dict,
     ) -> Any:
-        """用户消息 content：无图返回 str，有图返回 multimodal 列表或降级文本。"""
-        if not images:
+        """用户消息 content：无媒体返回 str，有图片返回 multimodal 列表，文件走文本段落。"""
+        if not media_paths:
             return text
         try:
             from app.core.modelmeta.model_capabilities import resolve_model_capabilities
@@ -667,15 +672,17 @@ class GatewayEngine(QObject, BaseEngine):
             supports_vision = False
         from app.gateway.media import build_user_content
 
-        return build_user_content(text, images, supports_vision=supports_vision)
+        return build_user_content(
+            text, media_paths, supports_vision=supports_vision, kinds=media_types
+        )
 
     def _process_next(self) -> None:
         """从队列中取出下一条消息处理"""
         if not self._pending_queue:
             return
-        session, text, callbacks, images = self._pending_queue.pop(0)
+        session, text, callbacks, media_paths, media_types = self._pending_queue.pop(0)
         logger.info(f"[GatewayEngine] Processing queued message ({len(self._pending_queue)} remaining)")
-        self._send_to_ai(session, text, callbacks, images)
+        self._send_to_ai(session, text, callbacks, media_paths, media_types)
 
     def _build_messages(self, session: ChatSession, llm_config: Dict) -> List[Dict]:
         """构建消息列表"""

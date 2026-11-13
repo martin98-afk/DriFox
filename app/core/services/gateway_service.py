@@ -462,6 +462,7 @@ class GatewayService(QObject):
         platform = data["platform"]
         future = data["future"]
         media_urls = data.get("media_urls") or []
+        media_types = data.get("media_types") or []
 
         logger.info(
             f"[Gateway] Main thread processing: {text[:50]}... (media={len(media_urls)})"
@@ -657,7 +658,8 @@ class GatewayService(QObject):
                 session=chat_session,
                 text=text,
                 callbacks=callbacks,
-                images=media_urls,
+                media_paths=media_urls,
+                media_types=media_types,
             )
 
         except Exception as e:
