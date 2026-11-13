@@ -22,12 +22,14 @@ def register_ui(registry):
     from .cards import FileTreeCard
 
     # 注册工作台页签（右侧边栏常驻；自动注册对应命令 /file-tree）
+    # order_hint=15 只决定页签排列位置（排在最后）；default_landing=True 才是
+    # “初次打开工作台默认展示本页”的声明（消费点见 WorkbenchPanel.sync_plugin_pages）。
     registry.register_workbench_tab(
         plugin_name="file-tree",
         page_id="file-tree",
         label="文件树",
         widget_class=FileTreeCard,
         priority=10,
-        metadata={"source": "system", "order_hint": 15},
+        metadata={"source": "system", "order_hint": 15, "default_landing": True},
     )
     logger.info("[file-tree] UI components registered")

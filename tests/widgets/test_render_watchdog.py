@@ -84,6 +84,34 @@ class TestRenderWatchdog:
         assert ("render", True) not in w.calls
         assert w._live_watch_attempts == 2
 
+    def test_skeleton_reload_reasserts_transparency_before_navigation(self):
+        """看门狗重载骨架走 setHtml 导航，透明重申必须在导航之前。
+
+        renderer 被 T31 误杀后 Chromium 合成面回退默认白底；若重申落在
+        setHtml 之后，本次导航不生效 → HTML 区白底固化（2026-11-13 截图实证）。
+        直接读生产源码顺序，避免测试桩自证。
+        """
+        import inspect
+
+        src = inspect.getsource(CodeWebViewer._load_skeleton)
+        i_ensure = src.find("self.ensure_transparent_composition()")
+        i_sethtml = src.find("self.setHtml(")
+        assert i_ensure != -1, "_load_skeleton 必须前置透明重申"
+        assert i_sethtml != -1
+        assert i_ensure < i_sethtml, "透明重申必须先于首个 setHtml 导航"
+
+        w = self._make_stub()
+        CodeWebViewer._reload_skeleton_for_heal(w)
+        assert ("skeleton",) in w.calls
+        assert w._is_js_ready is False
+
+    def test_probe_timeout_heal_reloads_skeleton(self):
+        """探针无回音分支同样汇聚到统一前置重申的 _load_skeleton。"""
+        w = self._make_stub()
+        CodeWebViewer._on_live_probe_timeout(w)
+        assert ("skeleton",) in w.calls
+        assert w._live_watch_attempts == 1
+
     def test_third_attempt_requests_recreate(self):
         w = self._make_stub()
         w._live_watch_attempts = 2

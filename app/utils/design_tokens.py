@@ -189,6 +189,7 @@ def apply_font_size_to_widget(widget, base_size: int = 14):
     from qfluentwidgets.components.settings.setting_card import SettingCard
     from qfluentwidgets.components.settings.expand_setting_card import ExpandSettingCard
     from qfluentwidgets.components.widgets.switch_button import SwitchButton
+    from qfluentwidgets.components.widgets.info_badge import InfoBadge
 
     setting_cards = []
     switches = []
@@ -203,6 +204,16 @@ def apply_font_size_to_widget(widget, base_size: int = 14):
         if id(child) in _seen:
             continue
         _seen.add(id(child))
+        # 角标不跟随正文字号：InfoBadge 是图标级微排版，qfluentwidgets 构造时固定
+        # setFont(11)，其 qss 只有 padding/color（无 font-size），一旦被下面统一
+        # setFont 覆盖，胶囊会按正文字号撑大（UI.FontSize=5 时 11px→19px，宽度
+        # 44px 挂到 28px 按钮上盖住相邻图标）。这里钉回 11px，幂等。
+        if isinstance(child, InfoBadge):
+            bf = child.font()
+            if bf.pixelSize() != 11:
+                bf.setPixelSize(11)
+                child.setFont(bf)
+            continue
         # setFont 覆盖递归字体
         # [PERF] 仅当像素大小/字族与目标不一致时才 setFont：
         # 全树可达数千控件（长会话消息卡），无变化时 setFont 仍触发

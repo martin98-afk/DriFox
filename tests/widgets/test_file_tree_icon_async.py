@@ -273,6 +273,64 @@ class TestAsyncLanding:
         assert events, "图标落地须发 dataChanged（否则视图不重绘）"
         assert any(Qt.DecorationRole in roles for roles in events)
 
+    def test_batch_refresh_reaches_proxy_view(self, monkeypatch, tmp_path):
+        """图标批量刷新必须能穿过 QSortFilterProxyModel 让视图重绘
+
+        2026-11-14 实锤：``_on_icons_ready`` 曾发
+        ``dataChanged.emit(QModelIndex(), QModelIndex(), ...)`` —— 两个无效
+        索引对。真实视图挂在 ``FileTreeFilterProxy`` 上，proxy 对无效索引对
+        直接丢弃，结果：后台图标查到了、进了缓存，视图却收不到任何刷新，
+        只有 hover/选中触发的局部重绘才让个别行露出真图标。
+
+        ★ 测试缝必须挂 proxy：旧测试只连 source，源码发什么都能收到，
+          因此 12 个全绿仍漏掉这个 bug。
+        """
+        img = QImage(16, 16, QImage.Format_ARGB32)
+        img.fill(QColor(9, 8, 7))
+        monkeypatch.setattr(tree_widget_mod, "_query_shell_icon", _fake_query(img))
+        model = _make_model(tmp_path, n_files=3)
+        proxy = tree_widget_mod.FileTreeFilterProxy()
+        proxy.setSourceModel(model)
+        # 真实视图绘制会逐个访问 proxy 行，触发 source→proxy 映射建立
+        for row in range(proxy.rowCount()):
+            proxy.index(row, 0)
+
+        proxy_events = []
+        proxy.dataChanged.connect(
+            lambda tl, br, roles: proxy_events.append((tl.isValid(), br.isValid(), list(roles or [])))
+        )
+        for row in range(model.rowCount()):
+            model.data(model.index(row, 0), Qt.DecorationRole)  # 三个都排后台任务
+        _pump(600)
+
+        assert proxy_events, "刷新信号未穿透 proxy，视图永远不会重绘图标"
+        assert all(tl and br for tl, br, _ in proxy_events), "topLeft/bottomRight 必须都是有效索引"
+        assert any(Qt.DecorationRole in roles for _, _, roles in proxy_events)
+
+
+# ── 真实路径形态 ──────────────────────────────────────────
+
+@pytest.mark.skipif(sys.platform != "win32", reason="仅 Windows 走 SHGetFileInfoW")
+def test_mixed_separator_path_yields_icon(tmp_path):
+    """scanner 拼出的混合斜杠路径不得返回空图标
+
+    真机日志（2026-11-14 01:29）：``D:/work/DriFox\\uv.lock`` 查询回传
+    ``fast=False elapsed=0.002 image=None`` —— 项目根用正斜杠、文件名用
+    反斜杠拼接，SHGetFileInfoW 真实路径查询对混合斜杠返回 0 / 空 HICON。
+
+    ★ 不 mock：必须真调 _query_shell_icon，才能锁住 normpath 与
+      按扩展名兜底这两层。mock 掉查询函数的测试测不到本 bug。
+    """
+    f = tmp_path / "probe.py"
+    f.write_text("x = 1", encoding="utf-8")
+    mixed = str(tmp_path).replace("\\", "/") + "\\probe.py"  # 真机同款混合斜杠
+
+    for fast in (False, True):
+        img = tree_widget_mod._query_shell_icon(mixed, fast)
+        assert img is not None and not img.isNull(), (
+            f"fast={fast} 混合斜杠路径返回空图标，会退化成白色占位符"
+        )
+
 
 # ── 热重载安全 ────────────────────────────────────────────
 

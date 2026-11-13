@@ -29,6 +29,7 @@
 
 import contextlib
 import os
+import time
 from typing import Dict, List, Optional, Set
 
 from PyQt5.QtCore import Qt
@@ -148,6 +149,9 @@ class WebViewPool:
                 return False
             viewer.setParent(host)
             viewer.setUpdatesEnabled(False)
+            # T31 空闲回收的判据（_idle_pool_pids 读它）。不打点会让兜底把刚
+            # 归还的 viewer 判成「已空闲 421s」→ 池内 renderer 立即被误杀。
+            viewer._pool_idle_since = time.time()
             # 复位为"干净实例"：清空文档与卡片相关状态，避免复用时残留旧内容
             viewer.reset_for_reuse()
         except RuntimeError:

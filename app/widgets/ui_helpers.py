@@ -2064,6 +2064,7 @@ def create_assistant_card_widget(
     on_action=None,
     on_context_action=None,
     on_tool_diff=None,
+    on_open_file=None,
     on_card_diff=None,
     on_save_file=None,
     on_review=None,
@@ -2118,6 +2119,8 @@ def create_assistant_card_widget(
         card.contextActionRequested.connect(on_context_action)
     if on_tool_diff:
         card.toolDiffRequested.connect(on_tool_diff)
+    if on_open_file:
+        card.openFileRequested.connect(on_open_file)
     if on_card_diff:
         card.cardDiffRequested.connect(on_card_diff)
     if on_save_file:

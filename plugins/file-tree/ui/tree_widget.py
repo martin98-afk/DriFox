@@ -243,22 +243,31 @@ if _IS_WIN:
         文件关联 Shell 扩展）；False 走真实路径（可能触发 WPS 一类
         扩展，最坏数秒）。
         """
-        sfi = _SHFILEINFOW()
-        flags = _SHGFI_ICON | _SHGFI_SMALLICON
-        if fast:
-            flags |= _SHGFI_USEFILEATTRIBUTES
-            lookup = "x" + os.path.splitext(path)[1]
-            attrs = _FILE_ATTRIBUTE_NORMAL
-        else:
-            lookup = path
-            attrs = 0
-        ret = _SHGetFileInfoW(lookup, attrs, ctypes.byref(sfi), ctypes.sizeof(sfi), flags)
-        if not ret or not sfi.hIcon:
-            return None
-        try:
-            return _hicon_to_qimage(sfi.hIcon)
-        finally:
-            _DestroyIcon(sfi.hIcon)
+        # fast 请求只查扩展名；真实查询失败则按扩展名兜底，避免退化成白色占位符
+        modes = (True,) if fast else (False, True)
+        for use_ext in modes:
+            sfi = _SHFILEINFOW()
+            flags = _SHGFI_ICON | _SHGFI_SMALLICON
+            if use_ext:
+                flags |= _SHGFI_USEFILEATTRIBUTES
+                lookup = "x" + os.path.splitext(path)[1]
+                attrs = _FILE_ATTRIBUTE_NORMAL
+            else:
+                # scanner 产出的路径是「项目根(正斜杠) + 文件名(反斜杠)」拼接，
+                # 形如 D:/work/DriFox\uv.lock。SHGetFileInfoW 的真实路径查询不认
+                # 混合斜杠，返回 0 / 空 HICON，2ms 就退化成白色占位图标。
+                lookup = os.path.normpath(path)
+                attrs = 0
+            ret = _SHGetFileInfoW(lookup, attrs, ctypes.byref(sfi), ctypes.sizeof(sfi), flags)
+            if not ret or not sfi.hIcon:
+                continue
+            try:
+                image = _hicon_to_qimage(sfi.hIcon)
+                if image is not None and not image.isNull():
+                    return image
+            finally:
+                _DestroyIcon(sfi.hIcon)
+        return None
 
 else:
 
@@ -485,8 +494,11 @@ def _placeholder_file_icon() -> QIcon:
 
 
 def _store_icon(path: str, icon: QIcon) -> None:
-    if len(_ICON_CACHE) >= _ICON_CACHE_MAX:
-        _ICON_CACHE.clear()  # 简单上限保护：全清重冷一次，避免无界增长
+    if len(_ICON_CACHE) >= _ICON_CACHE_MAX and path not in _ICON_CACHE:
+        # 淘汰一半而非全清：全清会让所有已解析图标瞬间回退占位符并重新
+        # 排队，大项目里表现为「整树图标周期性地集体变白」。
+        for stale in list(_ICON_CACHE)[: _ICON_CACHE_MAX // 2]:
+            _ICON_CACHE.pop(stale, None)
     _ICON_CACHE[path] = icon
 
 
@@ -815,13 +827,21 @@ class FileTreeModel(QAbstractItemModel):
     def _on_icons_ready(self):
         """一批后台图标入缓存（主线程槽，已防抖合并）
 
-        ★ 发全量 dataChanged（无效索引对）而非逐行：data() 现在为纯缓存
-          查表（微秒级），全量广播的成本落在视口可见行；逐行定位反而
-          要做全树递归查找，大项目下更慢。
+        ★ topLeft/bottomRight 必须都是有效索引：真实视图挂在
+          ``QSortFilterProxyModel`` 上，无效索引对会被 proxy 直接丢弃，
+          视图收不到任何刷新。曾因此出现「图标查到了、进了缓存，却全树
+          停在白色占位符，只有选中/hover 局部重绘的行露出真图标」。
+        ★ 只发顶层整段一次，不做逐行全树递归查找：data() 是纯缓存查表，
+          Qt 只重绘该区间内的可见行（含已展开的深层文件），成本微秒级。
         """
-        if not self._root_entries:
+        top = self.rowCount(QModelIndex())
+        if top == 0:
             return
-        self.dataChanged.emit(QModelIndex(), QModelIndex(), [Qt.DecorationRole])
+        self.dataChanged.emit(
+            self.index(0, 0),
+            self.index(top - 1, 0),
+            [Qt.DecorationRole],
+        )
 
     def flags(self, index: QModelIndex) -> Qt.ItemFlags:
         if not index.isValid():

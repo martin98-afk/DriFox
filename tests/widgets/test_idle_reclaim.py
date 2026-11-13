@@ -60,6 +60,10 @@ class _FakeWindow:
         self.killed.append(pid)
         return True
 
+    def _pid_used_by_cards(self, pid):
+        """不含池护栏的卡片共享判据（T31 池候选专用）。"""
+        return pid in self.busy_pids
+
 
 def _fresh_pids(spec):
     """(pid, ts偏移秒, idx) → 记账条目（ts 相对当前时间回退）。"""
@@ -209,11 +213,44 @@ def test_pool_keep_tab_pid_not_reclaimed(monkeypatch):
     assert host.killed == []
 
 
+def test_pool_candidate_shared_with_visible_card_not_reclaimed(monkeypatch):
+    """池内 pid 与在用卡共享时绝不 kill（T31 误杀白卡根因）。
+
+    renderer-process-limit 下多张卡共享 pid；池路径刻意绕过 _pid_still_in_use，
+    但可见卡/流式卡的共享检查必须保留，否则 kill(n) 同秒崩 n 张卡。
+    """
+    now = time.time()
+    monkeypatch.setattr(
+        memory_governor, "_idle_pool_pids",
+        lambda: [(now - RENDERER_IDLE_RECLAIM_S - 10, 904)],
+    )
+    host = _FakeWindow(unloaded_pids=[], batch_cards=[["c"]], distances={0: 50},
+                       busy_pids={904})
+    assert reclaim_idle_renderers(host) == 0
+    assert host.killed == []
+
+
 def test_pool_lru_keep_fresh_pid_not_reclaimed(monkeypatch):
     """条 1 保底：LRU keep 新鲜期（_idle_pool_pids 不返回刚归还项）"""
     monkeypatch.setattr(memory_governor, "_idle_pool_pids", lambda: [])
     host = _FakeWindow(unloaded_pids=[], batch_cards=[["c"]], distances={0: 50})
     assert reclaim_idle_renderers(host) == 0
+
+
+def test_pool_candidate_without_timestamp_is_skipped():
+    """无 _pool_idle_since 打点的池内 viewer 不得被当成「已空闲 421s」。"""
+    from types import SimpleNamespace
+
+    from app.widgets.webview_pool import WebViewPool
+
+    pool = WebViewPool.get_instance()
+    pool.clear()
+    pool._idle[False] = [SimpleNamespace(_renderer_pid=905)]
+    try:
+        assert memory_governor._idle_pool_pids() == []
+        assert reclaim_idle_renderers(_FakeWindow()) == 0
+    finally:
+        pool.clear()
 
 
 def test_pool_candidate_blocked_by_other_window(monkeypatch):

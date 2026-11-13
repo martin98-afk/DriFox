@@ -345,6 +345,7 @@ class ConsoleMonitorPage(QWebEnginePage):
     saveChartPngRequested = pyqtSignal(str, str)  # (name_b64, png_b64) — 图表 PNG 导出回传
     saveWidgetFileRequested = pyqtSignal(str, str)  # (wtype, content_b64) — svg widget 源码保存回传
     previewImageRequested = pyqtSignal(str)  # (image_url) — 正文图片点击 → 内置预览
+    openFileRequested = pyqtSignal(str)  # (path) — 工具卡路径点击 → 宿主用系统程序打开
     renderCrashed = pyqtSignal()  # renderer 进程崩溃（GPU OOM/崩溃），宿主卡片自愈
 
     def __init__(self, profile=None, parent=None):
@@ -482,24 +483,14 @@ class ConsoleMonitorPage(QWebEnginePage):
                 except Exception:
                     pass
             elif "open_file:" in msg:
-                # 处理打开文件/文件夹请求
+                # 工具完成框中的文件地址点击 → 交由宿主解析（相对路径以会话
+                # workdir 为基准）并用系统程序打开。路径经 encodeURIComponent
+                # 传输：Windows 盘符冒号 / 空格 / 中文 / 换行都不会破消息格式。
                 try:
-                    file_path = msg.split("open_file:", 1)[1]
-
-                    import os
-                    import subprocess
-
-                    if os.name == "nt":
-                        if os.path.isdir(file_path):
-                            # 文件夹：直接在资源管理器中打开
-                            subprocess.Popen(["explorer", file_path])
-                        else:
-                            # 文件：使用系统默认程序打开
-                            os.startfile(file_path)
-                    else:
-                        # macOS/Linux
-                        cmd = "open" if os.uname().sysname == "Darwin" else "xdg-open"
-                        subprocess.Popen([cmd, file_path])
+                    file_path = urllib.parse.unquote(msg.split("open_file:", 1)[1]).strip()
+                    if file_path:
+                        # [T43] 延迟派发（族⑤）
+                        _defer_emit(self, lambda p=file_path: self.openFileRequested.emit(p))
                 except Exception:
                     pass
             elif "tool_diff:" in msg:
@@ -843,6 +834,7 @@ class CodeWebViewer(QWebEngineView):
     saveChartPngRequested = pyqtSignal(str, str)  # (name_b64, png_b64) — 图表 PNG 导出回传
     saveWidgetFileRequested = pyqtSignal(str, str)  # (wtype, content_b64) — svg widget 源码保存回传
     previewImageRequested = pyqtSignal(str)  # (image_url) — 正文图片点击 → 内置预览
+    openFileRequested = pyqtSignal(str)  # (path) — 工具卡路径点击 → 系统程序打开
     # WebEngine 上下文丢失信号
     contextLost = pyqtSignal()
     contextRestored = pyqtSignal()
@@ -1197,6 +1189,7 @@ class CodeWebViewer(QWebEngineView):
         self._page.saveChartPngRequested.connect(self.saveChartPngRequested)
         self._page.saveWidgetFileRequested.connect(self.saveWidgetFileRequested)
         self._page.previewImageRequested.connect(self.previewImageRequested)
+        self._page.openFileRequested.connect(self.openFileRequested)
         self._page.renderCrashed.connect(self._on_render_crashed)
 
         self._load_skeleton()
@@ -2253,6 +2246,7 @@ class CodeWebViewer(QWebEngineView):
         try:
             self._live_probe_gen += 1
             self._is_js_ready = False
+            # _load_skeleton 开头统一前置透明重申（先于 setHtml 导航），见其注释
             self._load_skeleton()
         except Exception:
             logger.exception("[render-watchdog] 重载骨架失败")
@@ -3357,6 +3351,17 @@ class CodeWebViewer(QWebEngineView):
                 }}
                 .cm-collapsible__summary:focus-visible {{
                     box-shadow: inset 0 0 0 1px rgba(102, 198, 255, 0.28);
+                }}
+                /* 工具卡里的文件地址：点击→系统程序打开。默认不加装饰（虚下划线
+                   在密集工具卡里太吵）；hover 变主题强调色 + 实线下划线，与正文
+                   链接（a）同色系，可点语义直接。 */
+                .tool-path-link {{
+                    cursor: pointer;
+                    text-decoration: none;
+                }}
+                .tool-path-link:hover {{
+                    color: var(--accent);
+                    text-decoration: underline;
                 }}
                 .cm-collapsible__chevron {{
                     flex: 0 0 auto;
@@ -6859,6 +6864,19 @@ class CodeWebViewer(QWebEngineView):
                         const lang = btn.getAttribute('data-lang') || '';
                         if (act === 'copy') try {{ navigator.clipboard.writeText(atob(b64)); }} catch(e) {{}}
                         console.log('pywebview_action:' + act + ':' + b64 + ':' + lang);
+                        return;
+                    }}
+                    // 工具卡里的文件地址：点击打开（相对路径由宿主按会话 workdir 解析）。
+                    // 必须先于 .cm-collapsible__summary：路径在折叠头 button 内部，
+                    // 不抢断就会同时触发展开。
+                    const openTarget = e.target.closest('[data-open-path]');
+                    if (openTarget) {{
+                        e.stopPropagation();
+                        e.preventDefault();
+                        console.log(
+                            'pywebview_action:open_file:' +
+                                encodeURIComponent(openTarget.getAttribute('data-open-path') || '')
+                        );
                         return;
                     }}
                     const summary = e.target.closest('.cm-collapsible__summary');

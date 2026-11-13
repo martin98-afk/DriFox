@@ -2108,6 +2108,17 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
             )
         except Exception:
             pass
+        # ★ 初次打开：该窗口尚未主动切过工作台页签（无 per-window 记忆）→ 落到
+        #   插件声明的默认落点页（metadata["default_landing"]，缺省顺序第一页）。
+        #   必须在 reconcile 之后按 tab_id 定位：插件分批注册会让 stack 当前索引
+        #   漂移，直接沿用 currentIndex 会落到非预期页（曾表现为默认「产物」）。
+        #   user=False 不写记忆，用户主动切页后才锁定其选择。
+        try:
+            win = self.get_current_window()
+            if win is not None and getattr(win, "_workbench_tab_memory", None) is None:
+                panel.apply_default_landing()
+        except Exception:
+            pass
         # 当前页数据刷新：页面自拉（插件页可选协议 refresh_data()）。
         # ★ 宿主不再为具体页面推送数据（原 update_project / update_artifacts），
         #   页面自己从 context / 活跃窗口取数，面板保持零页面语义。

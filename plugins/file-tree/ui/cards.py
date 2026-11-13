@@ -24,8 +24,19 @@ from pathlib import Path
 from typing import Callable, List, Optional, Tuple
 
 from loguru import logger
-from PyQt5.QtCore import QEvent, QItemSelectionModel, QModelIndex, QSize, Qt, QThread, QTimer, pyqtSignal
-from PyQt5.QtGui import QColor, QFont, QIcon
+from PyQt5.QtCore import (
+    QEvent,
+    QItemSelectionModel,
+    QModelIndex,
+    QPoint,
+    QRectF,
+    QSize,
+    Qt,
+    QThread,
+    QTimer,
+    pyqtSignal,
+)
+from PyQt5.QtGui import QColor, QCursor, QFont, QIcon
 from PyQt5.QtWidgets import (
     QApplication,
     QFrame,
@@ -34,24 +45,31 @@ from PyQt5.QtWidgets import (
     QLabel,
     QMenu,
     QMessageBox,
+    QProxyStyle,
     QStackedWidget,
+    QStyle,
     QVBoxLayout,
     QWidget,
 )
 from qfluentwidgets import (
     BodyLabel,
     FluentIcon,
-    IconWidget,
     MaskDialogBase,
     ScrollArea,
     SmoothScrollDelegate,
-    StrongBodyLabel,
     TransparentPushButton,
     TransparentToolButton,
     isDarkTheme,
 )
 
-from .preview import FilePreviewPage, detect_kind
+from .openwith import (
+    DEFAULT_SUFFIX,
+    icon_for_exe,
+    launch,
+    list_folder_openers,
+    list_openers,
+)
+from .preview import FilePreviewPage, _ElidedLabel, _SplitButton, _wrap_icon, detect_kind
 from .scanner import _DirEntry, _TreeScanner
 from .tree_widget import (
     FileTreeFilterProxy,
@@ -70,6 +88,14 @@ _EXPAND_WAIT_TIMEOUT_S = 3.0
 _PAGE_TREE = 0
 _PAGE_PLACEHOLDER = 1
 _PAGE_PREVIEW = 2
+
+# 系统文件管理器叫法（菜单 / 提示文案；mac 是访达）
+if os.name == "nt":
+    _FILE_MANAGER = "资源管理器"
+elif sys.platform == "darwin":
+    _FILE_MANAGER = "访达"
+else:
+    _FILE_MANAGER = "文件管理器"
 
 
 def _same_path(a: str, b: str) -> bool:
@@ -153,6 +179,31 @@ def _make_colors_from_context(ctx: dict) -> dict:
     }
 
 
+class _MenuIconStyle(QProxyStyle):
+    """菜单样式代理：图标尺寸 + 禁画原生面板
+
+    1. QMenu 没有 setIconSize，只能改 PM_SmallIconSize。默认值随系统 DPI 放大
+       （150% 屏上 16→24），菜单项会被图标和行高一起撑胖。
+    2. ★ 原生 PE_PanelMenu 会先画一块**矩形底板**，QSS 的 border-radius 只裁
+       内容、裁不掉底板，四角就留方角（暗色主题下是黑角）。拦掉面板绘制后，
+       圆角完全由 QSS 背景决定，配合透明窗口四角才真透明。
+    """
+
+    def __init__(self, icon_size: int = 16):
+        super().__init__()
+        self._icon_size = int(icon_size)
+
+    def pixelMetric(self, metric, option=None, widget=None):  # noqa: N802 (Qt 命名)
+        if metric == QStyle.PM_SmallIconSize:
+            return self._icon_size
+        return super().pixelMetric(metric, option, widget)
+
+    def drawPrimitive(self, element, option, painter, widget=None):  # noqa: N802
+        if element == QStyle.PE_PanelMenu:
+            return
+        super().drawPrimitive(element, option, painter, widget)
+
+
 def _menu_icon(icon: FluentIcon, color: QColor) -> QIcon:
     """按主题文字色给菜单图标着色（菜单项用 icon 代替 emoji）
 
@@ -163,7 +214,6 @@ def _menu_icon(icon: FluentIcon, color: QColor) -> QIcon:
         return icon.icon(color=color)
     except Exception:
         return icon.icon()
-
 
 # ══════════════════════════════════════════════════════════
 # 主题对话框辅助
@@ -384,29 +434,6 @@ class FileTreeCard(QWidget):
         self._vbox.setContentsMargins(0, 0, 0, 0)
         self._vbox.setSpacing(0)
 
-        # ── 顶栏 ──
-        self._top_bar = QFrame(self)
-        self._top_bar.setObjectName("file-tree-top-bar")
-        self._top_bar.setFixedHeight(48)
-        top_layout = QHBoxLayout(self._top_bar)
-        top_layout.setContentsMargins(16, 0, 12, 0)
-        top_layout.setSpacing(8)
-
-        self._icon_widget = IconWidget(FluentIcon.FOLDER, self._top_bar)
-        self._icon_widget.setFixedSize(20, 20)
-
-        self._title_label = StrongBodyLabel("文件树", self._top_bar)
-        self._title_label.setObjectName("file-tree-title")
-
-        self._refresh_btn = TransparentToolButton(FluentIcon.SYNC, self._top_bar)
-        self._refresh_btn.setFixedSize(32, 32)
-        self._refresh_btn.setToolTip("刷新文件树")
-
-        top_layout.addWidget(self._icon_widget)
-        top_layout.addWidget(self._title_label)
-        top_layout.addStretch()
-        top_layout.addWidget(self._refresh_btn)
-
         # ── 树控件区域 ──
         self._scroll_area = ScrollArea(self)
         self._scroll_area.setObjectName("file-tree-scroll")
@@ -438,13 +465,51 @@ class FileTreeCard(QWidget):
 
         self._preview_page = FilePreviewPage(self)
         self._preview_page.back_requested.connect(self._close_preview)
+        self._preview_page.open_with_requested.connect(self._show_open_with_menu)
+        self._preview_page.open_default_requested.connect(self._open_file)
+        self._preview_page.context_menu_requested.connect(self._on_preview_context_menu)
         self._stack.addWidget(self._preview_page)  # index 2: 文件预览页
         # 初始显示占位页，等待扫描完成
         self._stack.setCurrentIndex(1)
+        # 预览页自带顶栏（返回 + 文件名 + 视图开关）；切页时树顶栏让位。
+        # 用 currentChanged 统一控制可见性，所有切页入口（预览 / 返回 / 占位）都覆盖。
+        self._stack.currentChanged.connect(self._on_page_changed)
+
+        # ── 树模式顶栏（路径 + 刷新 + 打开方式）──
+        # 高度/底色/分隔线与预览页顶栏同口径，两页切换时观感连续。
+        self._tree_header = QFrame(self)
+        self._tree_header.setObjectName("file-tree-header")
+        self._tree_header.setFixedHeight(38)
+        head = QHBoxLayout(self._tree_header)
+        head.setContentsMargins(10, 0, 6, 0)
+        head.setSpacing(2)
+
+        self._root_label = _ElidedLabel("", self._tree_header)
+        self._root_label.setMinimumWidth(36)
+
+        self._refresh_btn = TransparentToolButton(FluentIcon.SYNC, self._tree_header)
+        self._refresh_btn.setFixedSize(26, 26)
+        self._refresh_btn.setToolTip("刷新文件树")
+        self._refresh_btn.clicked.connect(self._on_refresh)
+
+        # 分裂按钮：左半直接交给系统默认程序，右半拉候选列表
+        self._folder_btn = _SplitButton(self._tree_header)
+        self._folder_btn.set_icon(FluentIcon.FOLDER.icon())
+        self._folder_btn.set_tooltip(f"在{_FILE_MANAGER}中打开")
+        self._folder_btn.default_clicked.connect(self._open_root_folder)
+        self._folder_btn.menu_clicked.connect(self._show_root_open_with_menu)
+
+        head.addWidget(self._root_label, 1)
+        head.addWidget(self._refresh_btn)
+        head.addWidget(self._folder_btn)
 
         self._scroll_area.setWidget(self._tree_view)
-        self._vbox.addWidget(self._top_bar)
+        self._vbox.addWidget(self._tree_header)
         self._vbox.addWidget(self._stack, 1)
+
+    def _on_page_changed(self, index: int) -> None:
+        """树顶栏只在树/占位页显示：预览页自带顶栏，不重复占一行"""
+        self._tree_header.setVisible(index != _PAGE_PREVIEW)
 
     def _setup_model(self):
         """创建 Model → Proxy → View 链路"""
@@ -462,9 +527,6 @@ class FileTreeCard(QWidget):
         self._watcher.dir_changed.connect(self._on_dir_changed_externally)
 
     def _setup_connections(self):
-        # 顶栏按钮
-        self._refresh_btn.clicked.connect(self._on_refresh)
-
         # Model 信号
         self._source_model.need_scan.connect(self._on_lazy_scan)
 
@@ -510,7 +572,6 @@ class FileTreeCard(QWidget):
 
     def show_card(self):
         self._apply_latest_theme()
-        self._apply_plugin_icon()
         self._async_load_tree()
         self.setVisible(True)
 
@@ -685,19 +746,6 @@ class FileTreeCard(QWidget):
             self._context = ctx
             self._context_provider = lambda _ctx=ctx: _ctx
 
-    def _apply_plugin_icon(self):
-        if self._context_provider is None or self._icon_widget is None:
-            return
-        try:
-            ctx = self._context_provider()
-            icon_info = ctx.get("plugin_icon", {})
-            theme = "dark" if isDarkTheme() else "light"
-            icon_path = icon_info.get(theme, "")
-            if icon_path:
-                self._icon_widget.setIcon(QIcon(icon_path))
-        except Exception:
-            pass
-
     # ── 主题色 ──
 
     def _apply_latest_theme(self):
@@ -710,11 +758,11 @@ class FileTreeCard(QWidget):
 
         self._colors = _make_colors_from_context(ctx)
         self._project_root = ctx.get("project_root", "")
+        self._root_label.setText(self._project_root)
         self._tree_view.project_root = self._project_root
         self._watcher.set_root(self._project_root)
 
         tc = _ctx_text_color(ctx)
-        border_c = self._colors.get("border", QColor(255, 255, 255, 30))
         font_family = ctx.get("font_family", "Microsoft YaHei")
         font_size = ctx.get("font_size", 14)
 
@@ -730,20 +778,6 @@ class FileTreeCard(QWidget):
             scrollbar_style = ""
         self._scrollbar_qss = scrollbar_style
 
-        title_style = (
-            f"color: {tc}; background: transparent; "
-            f"font-family: '{font_family}'; font-size: {font_size}px; font-weight: bold;"
-        )
-        top_bar_style = (
-            f"#file-tree-top-bar {{"
-            f"  background: transparent;"
-            # ★ QSS/QColor 的 8 位 hex 是 #AARRGGBB（实测 #ffffff1e → rgb(255,255,30)），
-            # 直接 name()+alpha 拼接会把 alpha 写进蓝通道 → 分隔线变黄/洋红亮线。
-            # 主题 border 本身不透明（如 #bcc7d6），压到 ~35% 才不抢眼。
-            f"  border-bottom: 1px solid "
-            f"rgba({border_c.red()},{border_c.green()},{border_c.blue()},90);"
-            f"}}"
-        )
         accent_tint = (
             f"rgba({self._colors['accent'].red()},{self._colors['accent'].green()},"
             f"{self._colors['accent'].blue()},64)"
@@ -766,19 +800,36 @@ class FileTreeCard(QWidget):
             f"color: {ph_color}; background: transparent; font-family: '{font_family}'; font-size: {font_size}px;"
         )
 
+        # 树顶栏：与预览页顶栏同口径（透明底 + 1px 分隔线）
+        border = self._colors["border"]
+        header_style = (
+            f"#file-tree-header {{ background: transparent;"
+            f"  border-bottom: 1px solid rgba({border.red()},{border.green()},{border.blue()},90); }}"
+        )
+        root_style = (
+            f"color: {tc_hex}; background: transparent;"
+            f"  font-family: '{font_family}'; font-size: {font_size}px;"
+        )
+
         # ★ 签名缓存：产出（全部样式串 + 字体）与上次全等时跳过所有 set。
         # 切工作台页 / 项目联动高频走这里，对整棵 QTreeView 重复
         # setStyleSheet + setFont 会触发整树 unpolish/polish + 全量重绘
         # （树 2000+ 行时单次 40-130ms，实测），而主题 / 字体 / 颜色未变时
         # 产出必然不变 —— 跳过后切页路径零成本。
-        signature = (title_style, top_bar_style, tree_style, placeholder_style, font_family, font_size)
+        signature = (tree_style, placeholder_style, header_style, root_style, font_family, font_size)
         if signature == self._theme_signature:
             return
         self._theme_signature = signature
 
-        self._title_label.setStyleSheet(title_style)
-        self._top_bar.setStyleSheet(top_bar_style)
         self._tree_view.setStyleSheet(tree_style)
+        self._tree_header.setStyleSheet(header_style)
+        self._root_label.setStyleSheet(root_style)
+        secondary = self._colors.get("text_secondary", QColor(150, 150, 150))
+        self._refresh_btn.setIcon(FluentIcon.SYNC.icon(color=secondary))
+        self._folder_btn.set_icon_color(secondary)
+        self._folder_btn.set_hover_color(
+            QColor(255, 255, 255, 26) if is_dark else QColor(0, 0, 0, 18)
+        )
 
         self._scroll_area.setStyleSheet("#file-tree-scroll { background: transparent; border: none;}")
         self._scroll_area.viewport().setStyleSheet("background: transparent; border: none;")
@@ -962,6 +1013,8 @@ class FileTreeCard(QWidget):
         model_root = self._source_model.project_root()
         if _same_path(scan_dir, model_root):
             self._source_model.refresh_root(entries)
+            if self._stack.currentIndex() == _PAGE_PREVIEW:
+                return  # 同根刷新不抢页面（预览中保留当前阅读内容）
         else:
             self._live_expanded.clear()  # 旧根的实时展开路径不写进新根条目
             self._stash_view_state(model_root)  # 必须先存：reset 后旧状态已不可取
@@ -969,8 +1022,8 @@ class FileTreeCard(QWidget):
             cached = self._view_state_cache.get(os.path.normcase(os.path.normpath(scan_dir)))
             if cached:
                 self._restore_view_state(cached)
-        if self._stack.currentIndex() == _PAGE_PREVIEW:
-            return  # 预览态不抢页面（换项目时保留当前阅读内容）
+            # 换根（切对话标签页 / 换项目）：旧预览已不属于当前上下文，
+            # 必须退出预览态，否则每个标签页都停在同一个旧预览（串台）
         self._stack.setCurrentIndex(0 if entries else 1)
         if not entries:
             self._placeholder.setText("项目目录为空")
@@ -1419,43 +1472,71 @@ class FileTreeCard(QWidget):
         except Exception as e:
             logger.error(f"[FileTree] 刷新目录失败: {e}")
 
-    # ── 右键菜单 ──
+    # ── 菜单样式 ──
 
-    def _on_context_menu(self, src_idx: QModelIndex, global_pos):
-        menu = QMenu(self)
-        # 应用统一字体和主题样式
+    def _style_menu(self, menu: QMenu) -> None:
+        """右键 / 打开方式菜单统一主题样式
+
+        ★ 原生 QMenu 默认度量很难看：图标按 style 的 PM_SmallIconSize 放大到 20-32px、
+        行高跟字体一起膨胀、圆角吃不到窗口层。这里把字号收敛到 12-14px、图标固定
+        16px、item 加圆角悬浮块，并开透明窗口让 10px 圆角真生效。
+        """
         ff = self._colors.get("font_family", "Microsoft YaHei")
         fs = self._colors.get("font_size", 14)
         bg = self._colors.get("card_bg", QColor(33, 33, 38))
         tc = self._colors.get("text", QColor(255, 255, 255))
         border = self._colors.get("border", QColor(255, 255, 255, 30))
         is_dark = self._colors.get("is_dark", True)
-        hover_bg = bg.lighter(120) if is_dark else bg.darker(110)
-        sep_color = border.name()
+        # 菜单比卡片亮/暗一档，才能从内容区“浮”出来；悬浮块用中性色不抢强调色
+        menu_bg = bg.lighter(118) if is_dark else bg.darker(103)
+        hover_bg = bg.lighter(150) if is_dark else bg.darker(112)
+        disabled = tc.darker(190) if is_dark else tc.lighter(190)
+        sep = f"rgba({border.red()},{border.green()},{border.blue()},{110 if is_dark else 90})"
+        menu_fs = max(12, min(14, fs - 4))
 
+        # ★ QWidget.setStyle 不接管所有权：必须把 style 挂到菜单上，
+        # 否则 Python GC 后菜单持有已析构的 style 指针（悬空 → 绘制时崩）
+        icon_style = _MenuIconStyle(16)
+        icon_style.setParent(menu)
+        menu.setStyle(icon_style)
+        menu.setAttribute(Qt.WA_TranslucentBackground, True)
+        # 系统方角阴影会在透明圆角外画一圈黑灰边，直接关掉
+        menu.setWindowFlag(Qt.NoDropShadowWindowHint, True)
         menu.setStyleSheet(f"""
             QMenu {{
-                background-color: {bg.name()};
-                border: 1px solid {sep_color};
-                border-radius: 8px;
-                padding: 4px;
+                background-color: {menu_bg.name()};
+                border: 1px solid {sep};
+                border-radius: 12px;
+                padding: 6px;
             }}
             QMenu::item {{
-                padding: 6px 24px 6px 10px;
+                padding: 7px 26px 7px 10px;
+                margin: 1px 3px;
+                border-radius: 8px;
                 color: {tc.name()};
                 font-family: '{ff}';
-                font-size: {fs - 2}px;
+                font-size: {menu_fs}px;
             }}
             QMenu::item:selected {{
                 background-color: {hover_bg.name()};
-                border-radius: 4px;
+                color: {tc.name()};
+            }}
+            QMenu::item:disabled {{
+                color: {disabled.name()};
             }}
             QMenu::separator {{
                 height: 1px;
-                background-color: {sep_color};
-                margin: 4px 8px;
+                background-color: {sep};
+                margin: 4px 10px;
             }}
         """)
+
+    # ── 右键菜单 ──
+
+    def _on_context_menu(self, src_idx: QModelIndex, global_pos):
+        menu = QMenu(self)
+        self._style_menu(menu)
+        tc = self._colors.get("text", QColor(255, 255, 255))
 
         # 获取右键目标路径
         if src_idx.isValid():
@@ -1483,9 +1564,12 @@ class FileTreeCard(QWidget):
                 _act(FluentIcon.APPLICATION, "用默认程序打开").triggered.connect(
                     lambda: self._open_file(item_path)
                 )
+                _act(FluentIcon.LANGUAGE, "打开方式…").triggered.connect(
+                    lambda: self._show_open_with_menu(item_path)
+                )
             _act(
                 FluentIcon.FOLDER,
-                "在资源管理器中打开" if is_dir else "打开所在文件夹",
+                f"在{_FILE_MANAGER}中打开" if is_dir else "打开所在文件夹",
             ).triggered.connect(lambda: self._open_in_explorer(item_path))
             if not is_dir and detect_kind(item_path):
                 _act(FluentIcon.VIEW, "预览").triggered.connect(lambda: self._open_preview(item_path))
@@ -1540,12 +1624,11 @@ class FileTreeCard(QWidget):
 
         menu.addSeparator()
 
-        # 刷新
-        if item_path and is_dir:
-            _act(FluentIcon.SYNC, "刷新").triggered.connect(
-                lambda: self._refresh_dir_in_model(item_path)
-            )
+        # 刷新（原顶栏刷新按钮入口，顶栏已移除）
+        _act(FluentIcon.SYNC, "刷新").triggered.connect(self._on_refresh)
 
+        menu.adjustSize()
+        self._round_menu(menu)
         menu.exec_(global_pos)
 
     # ── 刷新与关闭 ──
@@ -1622,6 +1705,149 @@ class FileTreeCard(QWidget):
                 subprocess.Popen(["xdg-open", path])
         except Exception as e:
             logger.error(f"[FileTree] 打开文件失败: {e}")
+
+    # ── 打开方式 ──
+
+    def _show_open_with_menu(self, path: str, anchor: Optional[QPoint] = None) -> None:
+        """「打开方式」菜单：系统注册的程序 + 系统默认 + 显示位置
+
+        候选来自注册表（与资源管理器右键菜单同源）；非 Windows 或无关联时
+        只剩后两项，不会出现空菜单。
+        """
+        if not path:
+            return
+        if not os.path.exists(path):
+            self._show_error(f"文件不存在: {path}")
+            return
+        if anchor is None and self._stack.currentIndex() == _PAGE_PREVIEW:
+            anchor = self._preview_page.open_with_anchor()
+        menu = QMenu(self)
+        self._style_menu(menu)
+        icon_color = self._colors.get("text", QColor(255, 255, 255))
+
+        def _act(icon: FluentIcon, text: str):
+            return menu.addAction(_menu_icon(icon, icon_color), text)
+
+        is_dir = os.path.isdir(path)
+        openers = list_folder_openers(path) if is_dir else list_openers(path)
+        for opener in openers:
+            label = opener.label + (DEFAULT_SUFFIX if opener.is_default else "")
+            action = menu.addAction(icon_for_exe(opener.exe), label)
+            action.triggered.connect(lambda _checked=False, o=opener: self._launch_with(o, path))
+        if is_dir:
+            # 目录候选首项就是文件管理器（默认），再列通用项会重复
+            if not openers:
+                _act(FluentIcon.FOLDER, f"在{_FILE_MANAGER}中显示").triggered.connect(
+                    lambda: self._open_in_explorer(path)
+                )
+            menu.exec_(self._menu_position(menu, anchor))
+            return
+        if openers:
+            menu.addSeparator()
+
+        _act(FluentIcon.APPLICATION, "用系统默认程序打开").triggered.connect(
+            lambda: self._open_file(path)
+        )
+        _act(FluentIcon.FOLDER, f"在{_FILE_MANAGER}中显示").triggered.connect(
+            lambda: self._open_in_explorer(path)
+        )
+        menu.exec_(self._menu_position(menu, anchor))
+
+    # ── 树顶栏：根目录打开方式 ──
+
+    def _root_open_anchor(self) -> QPoint:
+        """分裂按钮右下角的全局坐标（菜单右对齐，不会向右溢出卡片）"""
+        btn = self._folder_btn
+        return btn.mapToGlobal(QPoint(btn.width(), btn.height()))
+
+    def _open_root_folder(self):
+        """左半：用系统默认程序（资源管理器）打开项目根目录"""
+        if self._project_root and os.path.isdir(self._project_root):
+            self._open_in_explorer(self._project_root)
+
+    def _show_root_open_with_menu(self):
+        """右半：根目录的候选程序列表"""
+        root = self._project_root
+        if not root or not os.path.isdir(root):
+            self._show_error("项目目录不存在，请先设置工作目录")
+            return
+        self._show_open_with_menu(root, self._root_open_anchor())
+
+    @staticmethod
+    def _round_menu(menu: QMenu, radius: int = 12) -> None:
+        """把菜单窗口本身裁成圆角
+
+        ★ Windows 下 QMenu 的 WA_TranslucentBackground 并不会让四角真透明：
+        窗口仍是矩形，四角由系统填成纯黑（实测 rgba(0,0,0,255)），QSS 的
+        border-radius 只影响绘制、遮不住窗口。setMask 直接把窗口形状裁圆，
+        四角连像素都不存在，才不会露黑边（代价是边缘 1px 锯齿）。
+        """
+        from PyQt5.QtGui import QPainterPath, QRegion
+
+        rect = menu.rect()
+        if rect.isEmpty():
+            return
+        path = QPainterPath()
+        path.addRoundedRect(QRectF(rect), radius, radius)
+        menu.setMask(QRegion(path.toFillPolygon().toPolygon()))
+
+    def _menu_position(self, menu: QMenu, anchor: Optional[QPoint] = None) -> QPoint:
+        """算出菜单左上角：右对齐锚点 + 夹在窗口与屏幕内
+
+        ★ 直接 ``QCursor.pos()`` 弹菜单，在窄卡片上会向右溢出到软件窗口之外。
+        这里以锚点为**右边界**反向对齐，再由窗口与屏幕边界夹回来。
+        """
+        menu.adjustSize()
+        self._round_menu(menu)
+        point = anchor or QCursor.pos()
+        x = point.x() - menu.width()
+        y = point.y() + 4
+        win = self.window()
+        if win is not None and win.isVisible():
+            tl = win.mapToGlobal(QPoint(0, 0))
+            x = max(tl.x() + 8, min(x, tl.x() + win.width() - menu.width() - 8))
+            y = max(tl.y() + 8, min(y, tl.y() + win.height() - menu.height() - 8))
+        screen = QApplication.screenAt(point) or QApplication.primaryScreen()
+        if screen is not None:
+            geo = screen.availableGeometry()
+            x = max(geo.left() + 4, min(x, geo.right() - menu.width() - 4))
+            y = max(geo.top() + 4, min(y, geo.bottom() - menu.height() - 4))
+        return QPoint(int(x), int(y))
+
+    def _launch_with(self, opener, path: str) -> None:
+        if not launch(opener, path):
+            logger.error(f"[FileTree] 用 {opener.label} 打开失败: {path}")
+
+    def _on_preview_context_menu(self, global_pos: QPoint) -> None:
+        """代码区右键：接管 QPlainTextEdit 自带的原生英文黑菜单"""
+        page = self._preview_page
+        if not page.current_path():
+            return
+        menu = QMenu(self)
+        self._style_menu(menu)
+        icon_color = self._colors.get("text", QColor(255, 255, 255))
+
+        def _act(icon: FluentIcon, text: str):
+            return menu.addAction(_menu_icon(icon, icon_color), text)
+
+        copy_act = _act(FluentIcon.COPY, "复制")
+        copy_act.setEnabled(page.has_selection())
+        copy_act.triggered.connect(page.copy_selection)
+        _act(FluentIcon.ACCEPT, "全选").triggered.connect(page.select_all_text)
+        menu.addSeparator()
+
+        wrap_act = menu.addAction(
+            _wrap_icon(self._colors.get("accent", icon_color) if page.wrap_enabled() else icon_color),
+            f"自动换行：{'开' if page.wrap_enabled() else '关'}",
+        )
+        wrap_act.triggered.connect(page.toggle_wrap)
+        highlight_text = f"语法高亮：{'开' if page.highlight_enabled() else '关'}"
+        highlight_act = menu.addAction(_menu_icon(FluentIcon.CODE, icon_color), highlight_text)
+        highlight_act.triggered.connect(page.toggle_highlight)
+        menu.addSeparator()
+
+        _act(FluentIcon.SYNC, "重新加载").triggered.connect(page.reload_current)
+        menu.exec_(self._menu_position(menu, global_pos))
 
     # ── 预览 ──
 

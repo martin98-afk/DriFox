@@ -1,7 +1,12 @@
 ## [Unreleased]
-## [v0.7.2] - 2026-11-13 (重新发布 #3)
 
-自 v0.7.1 以来的变更 | 提交数：125 · 文件变更：522 · +23621/-8899 | 贡献者：dingma, drifox-bot, mading, martin98-afk
+### ✨ 新功能 (New Features)
+
+- **工具完成框里的文件地址可点击打开** (`app/widgets/render_helpers.py` · `app/widgets/card_viewers.py` · `app/main_widget.py`): 折叠头右侧路径、以及 read/grep/list/glob 单行卡预览里的路径片段渲染为可点元素（默认无装饰，hover 变主题强调色 `--accent` + 实线下划线，悬停 title 显示完整路径），点击由骨架 click 委托在折叠头之前抢断，转 `open_file` 消息交宿主按会话 workdir 解析后用系统程序打开；路径不存在给 InfoBar 提示（原实现静默吞异常）。显示文本仍是首尾缩短版，`data-open-path` 存完整原始路径。骨架版本 v79 → v81。
+
+## [v0.7.2] - 2026-11-14 (重新发布 #4)
+
+自 v0.7.1 以来的变更 | 提交数：137 · 文件变更：560 · +27422/-9612 | 贡献者：dingma, drifox-bot, mading, martin98-afk
 
 ### ✨ 新功能 (New Features)
 
@@ -69,6 +74,35 @@
 ### 🐛 问题修复 (Bug Fixes) (重新发布 #3 追加)
 
 - **HTML 卡首帧白底** (`app/widgets/card_viewers.py`): 池化复用、tab 切回、隐藏期尺寸变化后再映射时，Chromium 合成面可能以默认白底重建，表现为 HTML 区整块白底、文字色正常、滚动或切 tab 后消失（合成面首帧白 + 无人标脏）；另外 renderer 崩溃 / 表面重建后若在 `setHtml` 之后才重申透明，新导航仍以白底初始化且后续内容全走 JS 注入（无导航）→ 白底固化到 viewer 重建。修复：导航**前**前置一次透明重申，`showEvent` 与 `loadFinished` 各补一次幂等重申加整卡标脏，覆盖池化补载 / 看门狗重载骨架 / 崩溃自愈三条路径。
+
+### ✨ 新功能 (New Features) (重新发布 #4 追加)
+
+- **文件树卡片支持 markdown 预览：渲染态 + 三态循环** (`plugins/file-tree/ui/preview.py` · `plugins/file-tree/ui/cards.py`): `detect_kind` 新增 `markdown` 类型（`.md` / `.markdown`），用 `QTextBrowser` + `QTextDocument.setMarkdown` 渲染，`baseUrl` 指向文件所在目录以解析相对路径图片。`QTextMarkdownImporter` 不生成 `<pre>` / `<blockquote>`，代码块只有 Courier 字体、引用只有缩进，深色主题下与正文糊成一片，故逐块补底色：先在未挂载的文档上渲染并改块格式，最后一次 `setDocument` 挂载——直接改写已挂载文档每块都触发一次重排，30KB / 424 块文档实测 3.7ms → 243ms。右上角按钮变三态循环「渲染 → 源码高亮 → 源码纯文本」，源码懒加载（渲染态不预跑语法分析）；渲染延后一拍并用 token 防快速切文件时旧任务覆盖新内容，主题 / 字体真变了才重渲染（打开预览时 `set_colors` 也会进来，无判据会白渲染 240ms）。
+- **文件树树模式顶栏 + 目录「打开方式」** (`plugins/file-tree/ui/cards.py` · `plugins/file-tree/ui/openwith.py`): 树模式新增 38px 顶栏（根路径 + 刷新 + 分裂按钮），与预览页顶栏同口径，切到预览页时经 `currentChanged` 统一让位，所有切页入口都覆盖。分裂按钮左半用系统默认程序打开项目根，右半拉候选列表。`openwith.py` 补目录候选：Windows 枚举 `HKEY_CLASSES_ROOT` 下的 shell 动词（`MUIVerb` / 键默认值为 `@dll,-id` 资源引用的取不到本地化名，一律跳过），macOS 扫 `/Applications` 等目录的 `Info.plist`，只认声明 `public.folder` / `public.directory` 的 bundle（IDE、终端），以 `open -a <bundle>` 启动；系统文件管理器叫法随平台（资源管理器 / 访达 / 文件管理器）。
+- **预览页右键菜单与默认程序图标** (`plugins/file-tree/ui/preview.py` · `plugins/file-tree/ui/openwith.py` · `plugins/file-tree/ui/cards.py`): 接管 `QPlainTextEdit` 自带右键菜单（原生英文黑菜单与卡片两张皮），统一为复制 / 全选 / 自动换行 / 语法高亮 / 打开方式；打开方式按钮显示系统默认程序图标，注册表解析与取 exe 图标延迟到下一拍（不堵首帧），已取到图标的按钮不被主题刷新回通用图标。新增 `_SplitButton`：整块 hover 底色由控件自己画，子按钮只负责点击与图标，避免 hover 时碎成两块；系统方角阴影会在透明圆角外画黑灰边，`drawPrimitive` 一并关掉。
+- **工具卡路径匹配支持相对化路径** (`app/widgets/render_helpers.py`): 插件 preview 用 `to_rel_path` 把绝对路径相对化后显示（`D:/work/DriFox/app/main.py` → `app/main.py`），Windows 下分隔符还混用，精确子串匹配必然失配，完成框里的路径退化成纯文本、点击无反应。改为回退策略：取原始路径尾部若干段（含末段目录名），分隔符归一化后在文本里找最长命中，命中片段可点但仍指向完整原路径；目录型工具（grep / list / glob）相对化后只剩 `app` 这类单段同样可点。不猜、不编造路径。
+- **工作台首次打开落默认声明页** (`app/widgets/workbench_panel.py` · `app/widgets/tab_manager_window.py` · `plugins/file-tree/ui/__init__.py` · `plugins/worktree-manager/ui/__init__.py`): `WorkbenchPanel` 新增 `apply_default_landing()`，按插件 `default_landing` 元数据里的 tab_id 定位，`user=False` 不写记忆不发射信号。宿主在窗口没有 `_workbench_tab_memory`（首次打开）时调用，置于 `reconcile` 之后——插件分批注册会让 `currentIndex` 漂移，落点跑到产物页。默认落点由 worktree-manager 改为 file-tree。
+
+### 🐛 问题修复 (Bug Fixes) (重新发布 #4 追加)
+
+- **qfluentwidgets `RoundMenu` 信号泄漏导致退出期偶发崩溃** (`app/core/infra/qfluentwidgets_compat.py` 新增 · `main.py` · `plugins/file-tree/ui/cards.py`): 上游 `removeAction` 只做 `action.setProperty('item', None)`，不断开 `action.changed → _onActionChanged`；此后该 action 任何属性变化（setText / setIcon / setEnabled / setVisible）都会进槽，拿到 None 直接 `AttributeError: 'NoneType' object has no attribute 'setIcon'`（实测触发于退出清理期，Qt C++ 层的析构清理同样触发，业务侧拦不住）。接管 `_onActionChanged`：item 为 None 时断开本次连接并直接返回，其余逻辑逐行对齐上游。`SystemTrayMenu` / `CheckableMenu` / `EditMenu` 等子类均未覆写该方法（已核对源码），patch 基类一处覆盖全部菜单；action 再被 add 回菜单时 `addAction` 会重新连接。由 `main.py` 在 import 段调用（早于任何菜单实例化），幂等。
+- **文件树图标退化成白色占位符** (`plugins/file-tree/ui/tree_widget.py` · `tests/widgets/test_file_tree_icon_async.py`): scanner 产出的路径是「项目根（正斜杠）+ 文件名（反斜杠）」拼接（`D:/work/DriFox\uv.lock`），`SHGetFileInfoW` 的真实路径查询不认混合斜杠，2ms 就返回空 HICON，整行退化成白占位。真实查询前 `os.path.normpath`，失败再按扩展名兜底。同一轮修掉两处伴生问题：图标缓存满时淘汰一半而非全清（全清会让整树图标周期性集体变白并重新排队）；`dataChanged` 改发有效索引区间（真实视图挂在 `QSortFilterProxyModel` 上，无效索引对会被 proxy 直接丢弃，曾出现「图标查到了、进了缓存，全树仍停在白占位，只有选中 / hover 的行露出真图标」）。
+
+### 🎨 样式改进 (Style) (重新发布 #4 追加)
+
+- **工具卡路径链接去掉常驻虚下划线** (`app/widgets/card_viewers.py` · `app/widgets/card_render_core.py`, 骨架 v81): 密集工具卡里点线是视觉噪音，改默认无装饰；hover 变主题强调色 `--accent` + 实线下划线，cursor 仍为 pointer。骨架版本 +1 使旧缓存失效。
+- **路径链接去掉 title 悬浮提示** (`app/widgets/render_helpers.py` · `tests/widgets/test_tool_block_open_path.py`): hover 弹浏览器原生 tooltip 会盖住正文（长绝对路径换行后尤甚），完整路径已在 `data-open-path`，点击即交给宿主打开。
+- **新增「余额」图标映射** (`app/utils/icon_name_map.py` · `app/utils/icon_name_map_light.py` · `icons/icons.qrc` · `icons/light/icons_light.qrc`)。
+
+### 🧪 测试与诊断 (Tests & Diagnostics) (重新发布 #4 追加)
+
+- **工具路径交互回归** (`tests/widgets/test_tool_block_open_path.py`): 相对化路径命中、混合分隔符、去掉 title 属性三类断言。
+- **工作台默认落点用例** (`tests/widgets/test_workbench_panel.py`): 覆盖 `apply_default_landing`。
+- **诊断脚本与池 / 看门狗用例** (`tests/debug/_probe_open_path_click.py`, `repro_subagent_overlap3.py`, `repro_subagent_overlap5.py`, `tests/widgets/test_idle_reclaim.py`, `tests/widgets/test_info_badge_font.py`, `tests/widgets/test_file_tree_preview_extras.py`, `tests/widgets/test_render_watchdog.py`, `tests/widgets/test_webview_pool.py`)。
+
+### 🔧 其他 (Chores & Build) (重新发布 #4 追加)
+
+- **插件市场索引自动重生成** (`marketplace.json`): GitHub Actions 按 plugin.json 重新生成（`[skip ci]`）。
 
 ## [v0.7.1] - 2026-11-11
 

@@ -464,8 +464,10 @@ def _idle_pool_pids() -> list:
 
     原候选域只有 _unloaded_pids；WebViewPool.pids() 的池内进程（8 个静置
     540MB 实测）不受空闲回收管辖。读池内 viewer 的归还时间戳
-    （_pool_idle_since，release 时打点；缺省按已空闲足够久处理，兼容老实例）。
+    （_pool_idle_since，release 时打点；无打点=老实例，跳过不回收）。
     keep-tab / 在用 pid 的排除在 reclaim_idle_renderers 统一护栏层完成。
+    ⚠️ 兜底不可写成「已空闲足够久」：release 漏打点时每个池内 viewer 一归还
+    即成 kill 候选，2026-11-13 实测每 90s 误杀共享 renderer 触发白底/空白卡。
     """
     try:
         from app.widgets.webview_pool import WebViewPool
@@ -485,9 +487,9 @@ def _idle_pool_pids() -> list:
             if pid <= 0 or pid in seen:
                 continue
             seen.add(pid)
-            ts = float(getattr(viewer, "_pool_idle_since", 0) or 0) or (
-                now - RENDERER_IDLE_RECLAIM_S - 1
-            )
+            ts = float(getattr(viewer, "_pool_idle_since", 0) or 0)
+            if not ts:
+                continue  # 无打点（升级前老实例）：宁可不回收，不误判为已超时
             if now - ts <= RENDERER_IDLE_RECLAIM_S:
                 continue  # 刚归还（LRU keep 新鲜期），不动
             out.append((ts, pid))
@@ -559,6 +561,15 @@ def reclaim_idle_renderers(host) -> int:
         for ts, pid in _idle_pool_pids():
             if pid in keep_pids:
                 continue  # keep-tab 保留期：活跃切回复用语义，绝不回收
+            # 🛡️ 池候选刻意绕过 _pid_still_in_use（它对池 pid 恒 True），但必须
+            # 保留其中「卡片共享」判据：renderer-process-limit 下 kill 一个池 pid
+            # 会同时打死用同一 renderer 的可见/流式卡（2026-11-13 kill(n) 同秒崩 n）。
+            # 单独方法只查卡片，不查池，避免自指恒真。
+            try:
+                if host._pid_used_by_cards(pid):
+                    continue
+            except Exception:
+                continue
             pool_victims.append((float(ts), pid))
         victims.extend(pool_victims)
         victims.sort()

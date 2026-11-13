@@ -91,6 +91,16 @@ class TestBorrowReturn:
         fresh_pool.release(v)
         assert v.reset_calls == 1
 
+    def test_release_stamps_idle_timestamp(self, fresh_pool, qapp):
+        """T31 空闲回收读 _pool_idle_since：release 必须打点，否则兜底语义反转。"""
+        import time
+
+        before = time.time()
+        v = _StubViewer()
+        assert not hasattr(v, "_pool_idle_since")
+        assert fresh_pool.release(v) is True
+        assert before <= v._pool_idle_since <= time.time()
+
     def test_host_is_offscreen(self, fresh_pool, qapp):
         """隐藏宿主必须 WA_DontShowOnScreen —— 否则会弹幽灵窗口"""
         v = _StubViewer()
@@ -203,6 +213,7 @@ class TestSignalPairing:
         "saveChartPngRequested",
         "saveWidgetFileRequested",
         "previewImageRequested",
+        "openFileRequested",
         "contextLost",
         "contextRestored",
         "needRecreate",

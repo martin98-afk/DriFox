@@ -11,11 +11,12 @@
 page_id 语义，全部页由插件通过
 ``UIPluginRegistry.register_workbench_tab(plugin_name, page_id, label, widget_class, metadata=...)``
 注册：
-- ``page_id="worktree-manager"``  → ``plugins/worktree-manager/ui/worktree_page.py``（order_hint=0，默认落点）
+- ``page_id="worktree-manager"``  → ``plugins/worktree-manager/ui/worktree_page.py``（order_hint=0）
 - ``page_id="artifacts-manager"`` → ``plugins/artifacts-manager/ui/artifacts_page.py``（order_hint=10）
-- ``page_id="history-manager"``   → ``plugins/history-manager/ui/history_page.py``（order_hint=20）
+- ``page_id="file-tree"``           → ``plugins/file-tree/ui/cards.py``（order_hint=15，default_landing）
+- ``page_id="history-manager"``  → 已迁浮动卡，不再注册工作台页
 页序 = ``(metadata["order_hint"], 注册序)``；默认落点页 = ``metadata["default_landing"]``
-标记页，缺省为顺序第一页；一个页都没注册时显示空态页。页签一律按 **tab_id**
+标记页，缺省为顺序第一页（仅首次挂载页集合时生效一次，之后保留用户当前页）一个页都没注册时显示空态页。页签一律按 **tab_id**
 定位（``set_current_tab_by_id`` / ``current_tab_id``），宿主不得假设 index。
 
 数据由页面**自拉**：面板只提供无参 ``refresh_current_page_data()``（切页 /
@@ -736,6 +737,21 @@ class WorkbenchPanel(QWidget):
     def default_page_id(self) -> Optional[str]:
         """默认落点页 id（工作台首次打开 / 无页签记忆时使用）"""
         return getattr(self, "_default_page_id", None)
+
+    def apply_default_landing(self) -> bool:
+        """切到默认落点页（幂等；未注册页/无此页时返回 False）
+
+        宿主在「当前对话窗口没有页签记忆」时调用：初次打开工作台应落插件声明的
+        默认页，而不是依赖 ``_stack.currentIndex()``——插件分批注册与 reconcile
+        重排会让当前索引漂移，曾导致首次打开落到产物页。
+
+        ★ user=False：不发射 current_tab_changed、不写 per-window 记忆，
+          用户主动切页后才锁定其选择。
+        """
+        pid = self._default_page_id
+        if pid is None:
+            return False
+        return self.set_current_tab_by_id(pid)
 
     def _sync_empty_page(self) -> None:
         """页集合为空时挂上空态页（无页签），非空时移除"""

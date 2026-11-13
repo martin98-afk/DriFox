@@ -302,6 +302,7 @@ class MessageCard(SimpleCardWidget):
     optionSelected = pyqtSignal(dict)
     interventionRequested = pyqtSignal(dict)
     toolDiffRequested = pyqtSignal(str)  # tool_call_id
+    openFileRequested = pyqtSignal(str)  # path — 工具卡路径点击 → 系统程序打开
     subAgentLogRequested = pyqtSignal(str)  # task_ids (comma-separated)
     cardDiffRequested = pyqtSignal(int, int)  # round_index, message_index（消息在 _message_batch 中的索引）
     reviewRequested = pyqtSignal(int, int)  # round_index, message_index — 用户点击页脚 Review 按钮时触发
@@ -2781,6 +2782,7 @@ class MessageCard(SimpleCardWidget):
         self.viewer.contextActionRequested.connect(self.contextActionRequested)
         self.viewer.contentHeightChanged.connect(self._update_height)
         self.viewer.toolDiffRequested.connect(self.toolDiffRequested)
+        self.viewer.openFileRequested.connect(self.openFileRequested)
         self.viewer.subAgentLogRequested.connect(self.subAgentLogRequested)
         self.viewer.saveFileRequested.connect(self.saveFileRequested)
         self.viewer.chartExpandRequested.connect(self._on_chart_expand)
@@ -4039,6 +4041,7 @@ class MessageCard(SimpleCardWidget):
         v.contextActionRequested.connect(self.contextActionRequested)
         v.contentHeightChanged.connect(self._update_height)
         v.toolDiffRequested.connect(self.toolDiffRequested)
+        v.openFileRequested.connect(self.openFileRequested)
         v.subAgentLogRequested.connect(self.subAgentLogRequested)
         v.saveFileRequested.connect(self.saveFileRequested)
         v.chartExpandRequested.connect(self._on_chart_expand)
@@ -4063,6 +4066,7 @@ class MessageCard(SimpleCardWidget):
             (v.contextActionRequested, self.contextActionRequested),
             (v.contentHeightChanged, self._update_height),
             (v.toolDiffRequested, self.toolDiffRequested),
+            (v.openFileRequested, self.openFileRequested),
             (v.subAgentLogRequested, self.subAgentLogRequested),
             (v.saveFileRequested, self.saveFileRequested),
             (v.chartExpandRequested, self._on_chart_expand),

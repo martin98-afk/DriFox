@@ -3645,7 +3645,15 @@ _SKELETON_CACHE_MAX = 48
 # 单一「N 项」改为「N 次思考 · N 次操作 · N 次失败操作」三段（0 值段隐藏），
 # 失败数按工具块根节点 data-tool-success="false" 统计（render_helpers 渲染时打标）。
 # 旧骨架仍是合并计数，须失效缓存。
-_SKELETON_CACHE_VERSION = 79
+# _SKELETON_CACHE_VERSION +1（v80）：工具完成框里的文件地址可点——render_helpers
+# 给路径打 data-open-path（折叠头右侧整段路径 / inline 卡预览里的路径片段），
+# 骨架 click 委托在 .cm-collapsible__summary 之前抢断，转
+# `pywebview_action:open_file:<encodeURIComponent(path)>` 交宿主按 workdir 打开。
+# 旧骨架没有该委托，须失效缓存。
+# _SKELETON_CACHE_VERSION +1（v81）：路径链接去掉常驻虚下划线——密集工具卡里
+# 点线是视觉噪音；改默认无装饰、hover 变主题强调色（--accent）+ 实线下划线，
+# cursor 仍为 pointer。
+_SKELETON_CACHE_VERSION = 81
 
 
 def _js_literal(value) -> str:
