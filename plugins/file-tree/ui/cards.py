@@ -215,6 +215,51 @@ def _menu_icon(icon: FluentIcon, color: QColor) -> QIcon:
     except Exception:
         return icon.icon()
 
+_OBJC_BRIDGE = None  # (objc_lib, msg, msg1) mac ObjC 桥接缓存
+
+def _objc_bridge():
+    global _OBJC_BRIDGE
+    if _OBJC_BRIDGE is None:
+        import ctypes
+        import ctypes.util
+        lib = ctypes.cdll.LoadLibrary(ctypes.util.find_library("objc"))
+        lib.objc_getClass.restype = ctypes.c_void_p
+        lib.sel_registerName.restype = ctypes.c_void_p
+        msg = ctypes.CFUNCTYPE(ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p)(
+            ("objc_msgSend", lib)
+        )
+        msg1 = ctypes.CFUNCTYPE(
+            ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p
+        )(("objc_msgSend", lib))
+        _OBJC_BRIDGE = (lib, msg, msg1)
+    return _OBJC_BRIDGE
+
+def _mac_clear_window_bg(widget) -> None:
+    """mac：把菜单窗口的 NSWindow.backgroundColor 设为 clearColor
+
+    ★ WA_TranslucentBackground 只把窗口标记为非 opaque，
+    backgroundColor 照旧填充默认窗底色（浅色外观=白灰），从 QSS 圆角外的
+    四角露出来 → 白角。必须显式 clearColor。渲染层与 isOpaque 都查不出：
+    menu.grab() 四角 alpha=0、isOpaque=False，白角在合成层。
+    实测（screencapture 像素统计）：四角白色 2% → 0%。仅 darwin 生效。
+
+    ★ 时机必须在外层菜单 Show 之后（Qt 已按 popup 路径建好原生窗口）：
+    提前用 winId() 强创窗口会绕开 Qt 的 popup 管理路径，菜单关闭后
+    grab 不释放，整个界面僵死（点击无响应、不重绘）。已踩坑。
+    """
+    if sys.platform != "darwin":
+        return
+    try:
+        import ctypes
+        lib, msg, msg1 = _objc_bridge()
+        view = ctypes.c_void_p(int(widget.winId()))
+        window = ctypes.c_void_p(msg(view, lib.sel_registerName(b"window")))
+        nscolor = ctypes.c_void_p(lib.objc_getClass(b"NSColor"))
+        clear = ctypes.c_void_p(msg(nscolor, lib.sel_registerName(b"clearColor")))
+        msg1(window, lib.sel_registerName(b"setBackgroundColor:"), clear)
+    except Exception as e:
+        logger.warning(f"[FileTree] 清除菜单窗口底色失败: {e}")
+
 # ══════════════════════════════════════════════════════════
 # 主题对话框辅助
 # ══════════════════════════════════════════════════════════
@@ -1533,6 +1578,11 @@ class FileTreeCard(QWidget):
                 margin: 4px 10px;
             }}
         """)
+        # mac：默认窗底色会从 QSS 圆角外四角露出（白角），设 clearColor 消除。
+        # 不能在这里直接调：winId() 提前强创原生窗口会绕开 Qt popup 管理，
+        # 菜单关闭后 grab 残留导致全界面僵死；挂 filter 等菜单 Show 时再设
+        if sys.platform == "darwin":
+            menu.installEventFilter(self)
 
     # ── 右键菜单 ──
 
@@ -1927,4 +1977,7 @@ class FileTreeCard(QWidget):
     def eventFilter(self, obj, event):
         if obj is self.window() and event.type() == QEvent.Resize:
             self.updateGeometry()
+        elif event.type() == QEvent.Show:
+            # 菜单原生窗口此刻已由 Qt 按 popup 路径正常创建，设底色不干扰其生命周期
+            _mac_clear_window_bg(obj)
         return super().eventFilter(obj, event)

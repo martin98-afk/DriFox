@@ -284,11 +284,19 @@ def list_openers(path: str) -> List[Opener]:
     结果按「默认 → 最近使用 → 其他推荐」排序，同一程序只保留一次。
     """
     if os.name != "nt":
-        # mac：扫 .app 的 Info.plist 声明（不碰 LaunchServices）；默认程序标不出，
-        # 菜单里另有「用系统默认程序打开」兜底入口
+        # mac：扫 .app 的 Info.plist 声明（不碰 LaunchServices API）；
+        # 默认程序从 launchservices.secure.plist 静态反查，查不到则菜单
+        # 退化靠「用系统默认程序打开」兜底入口
         if sys.platform == "darwin":
             ext = os.path.splitext(path or "")[1].lower().lstrip(".")
-            return _mac_file_openers(ext)
+            openers = _mac_file_openers(ext)
+            default = _mac_default_opener(ext)
+            if default is not None:
+                real = os.path.realpath(default.exe)
+                openers = [default] + [
+                    o for o in openers if os.path.realpath(o.exe) != real
+                ]
+            return openers
         return []
     ext = os.path.splitext(path or "")[1].lower()
     if not ext:
@@ -377,6 +385,8 @@ def _mac_app_dirs() -> List[str]:
     return [
         "/Applications",
         "/Applications/Utilities",
+        "/System/Applications",
+        "/System/Applications/Utilities",
         os.path.join(os.path.expanduser("~"), "Applications"),
     ]
 
@@ -475,6 +485,8 @@ _MAC_EXT_UTI: Dict[str, Tuple[str, ...]] = {
 
 # 一次扫描 /Applications 建立「应用 → 支持的扩展名全集」缓存，之后按扩展名过滤
 _MAC_FILE_APPS_CACHE: Optional[List[Tuple[Opener, frozenset]]] = None
+# 同一次扫描顺带记录 bundle id → bundle 路径，供 LaunchServices 默认程序反查
+_MAC_BUNDLE_BY_ID: Dict[str, str] = {}
 
 def _mac_supported_exts(info: dict) -> frozenset:
     """单个 .app 的 Info.plist 声明 → 它能处理的扩展名集合
@@ -522,6 +534,9 @@ def _mac_file_apps() -> List[Tuple[Opener, frozenset]]:
                 continue
             if not isinstance(info, dict):
                 continue
+            bundle_id = str(info.get("CFBundleIdentifier") or "").strip()
+            if bundle_id and bundle_id not in _MAC_BUNDLE_BY_ID:
+                _MAC_BUNDLE_BY_ID[bundle_id] = os.path.realpath(bundle)
             exts = _mac_supported_exts(info)
             if not exts:
                 continue
@@ -544,6 +559,116 @@ def _mac_file_openers(ext: str) -> List[Opener]:
     if not ext:
         return []
     return [opener for opener, exts in _mac_file_apps() if ext in exts]
+
+# ── mac 默认程序：静态解析 LaunchServices 配置 ─────────────
+
+_LS_DEFAULT_CACHE: Dict[str, Optional[Opener]] = {}
+
+def _mac_bundle_label_of(bundle: str) -> str:
+    """读 bundle 的 Info.plist 取展示名（读不到回退目录名）"""
+    import plistlib
+
+    try:
+        with open(os.path.join(bundle, "Contents", "Info.plist"), "rb") as fh:
+            info = plistlib.load(fh)
+        if isinstance(info, dict):
+            label = _mac_bundle_label(bundle, info)
+            if label:
+                return label
+    except Exception:
+        pass
+    return _mac_bundle_label(bundle, {})
+
+def _mac_default_via_ls(ext: str) -> Optional[Opener]:
+    """走 LaunchServices API 查系统默认程序（需要 pyobjc，可选依赖）
+
+    ``launchservices.secure.plist`` 只存用户显式改过的关联；常规默认在
+    LaunchServices 数据库里，只有走 API 能查到。实测单次 0-3ms，纯数据库
+    查询不走图标缓存，无 QFileIconProvider 那类冻窗风险。查询按文件 UTI
+    进行，需要一个真实存在的探针文件（空文件即可，UTI 按扩展名判定）。
+    """
+    try:
+        import tempfile
+
+        from CoreFoundation import CFURLCreateWithFileSystemPath, kCFURLPOSIXPathStyle
+        from CoreServices import LaunchServices
+
+        fd, probe = tempfile.mkstemp(suffix=f".{ext}", prefix="drifox_ls_probe_")
+        os.close(fd)
+        try:
+            url, _err = LaunchServices.LSCopyDefaultApplicationURLForURL(
+                CFURLCreateWithFileSystemPath(
+                    None, probe, kCFURLPOSIXPathStyle, False
+                ),
+                LaunchServices.kLSRolesAll,
+                None,
+            )
+        finally:
+            try:
+                os.remove(probe)
+            except OSError:
+                pass
+        bundle = url.path() if url else ""
+        if bundle and os.path.isdir(bundle):
+            return Opener(
+                label=_mac_bundle_label_of(bundle),
+                exe=bundle,
+                command='open "%1"',
+                is_default=True,
+            )
+    except Exception:  # 无 pyobjc / API 异常 → 降级为无默认标记
+        pass
+    return None
+
+def _mac_default_opener(ext: str) -> Optional[Opener]:
+    """反查该扩展名的系统默认程序，两层来源，都查不到维持无默认标记
+
+    第一层：静态读 ``launchservices.secure.plist`` 的 ``LSHandlers``（用户
+    显式设置过的关联，零依赖）；同一扩展名多条记录时后写覆盖先写，取最后
+    命中，bundle id 经应用扫描缓存反查路径。
+    第二层：第一层没拿到 bundle 路径时走 ``_mac_default_via_ls``（LaunchServices
+    API，需要 pyobjc）。
+    """
+    if ext in _LS_DEFAULT_CACHE:
+        return _LS_DEFAULT_CACHE[ext]
+    opener: Optional[Opener] = None
+    plist_path = os.path.expanduser(
+        "~/Library/Preferences/com.apple.LaunchServices/"
+        "com.apple.launchservices.secure.plist"
+    )
+    try:
+        import plistlib
+
+        with open(plist_path, "rb") as fh:
+            handlers = (plistlib.load(fh) or {}).get("LSHandlers") or []
+        utis = set(_MAC_EXT_UTI.get(ext, ()))
+        bundle_id = ""
+        for handler in handlers:
+            if not isinstance(handler, dict):
+                continue
+            role = handler.get("LSHandlerRoleAll") or handler.get("LSHandlerRoleViewer") or ""
+            if not role:
+                continue
+            tag = str(handler.get("LSHandlerContentTag") or "").lower()
+            if (
+                handler.get("LSHandlerContentTagClass") == "public.filename-extension"
+                and tag == ext
+            ) or str(handler.get("LSHandlerContentType") or "") in utis:
+                bundle_id = str(role)
+        bundle = _MAC_BUNDLE_BY_ID.get(bundle_id, "") if bundle_id else ""
+        if bundle:
+            opener = Opener(
+                label=_mac_bundle_label_of(bundle),
+                exe=bundle,
+                command='open "%1"',
+                is_default=True,
+            )
+    except Exception:  # 配置缺失/损坏时交给第二层
+        pass
+    if opener is None:
+        opener = _mac_default_via_ls(ext)
+    _LS_DEFAULT_CACHE[ext] = opener
+    return opener
 
 def _mac_finder_opener() -> Opener:
     return Opener(
