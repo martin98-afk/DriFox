@@ -185,6 +185,7 @@ def test_settings_card_refresh_reflects_service_status(monkeypatch):
         assert QApplication.instance() is not None
         card = card_mod.ImGatewaySettingsCard()
         card._timer.stop()
+        assert card._height_mode == "content", "详情页内嵌需要内容自然高度"
         card._rebuild_platform_rows()
         card._refresh()
         assert card._service_switch.isChecked() is True

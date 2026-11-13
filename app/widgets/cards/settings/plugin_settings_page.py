@@ -548,6 +548,10 @@ class _PluginDetailView(QWidget):
             except Exception:
                 pass
             layout.addWidget(card)
+            # SystemCardFrame 基类构造时 setVisible(False)（平时由 CardManager 管显隐）；
+            # 详情页内嵌没有 CardManager，不显式显示就会整页空白。
+            if not card.isVisible():
+                card.show()
         if layout.count() == 0:
             layout.addWidget(_EmptyHint("此插件的自定义设置卡加载失败", "可尝试重载插件或查看日志。"))
         layout.addStretch(1)

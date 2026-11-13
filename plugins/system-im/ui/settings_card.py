@@ -155,6 +155,8 @@ class ImGatewaySettingsCard(BaseSettingsCard):
 
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__("即时通讯网关", "", parent=parent)
+        # 详情页内嵌场景需要完整展示内容，不走「窗口高度 85%」的浮动卡口径
+        self.set_height_mode("content")
         self._rows: Dict[str, _PlatformRow] = {}
         self._syncing = False
         self._timer = QTimer(self)

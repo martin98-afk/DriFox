@@ -229,6 +229,32 @@ def test_detail_renders_plugin_custom_settings_card(env, qapp, fresh_ui_registry
     assert config_body.findChild(_CustomCard) is not None
 
 
+def test_detail_shows_system_card_frame_custom_card(env, qapp, fresh_ui_registry):
+    """SystemCardFrame 派生卡在详情页必须可见。
+
+    ``BaseSettingsCard`` 构造时 ``setVisible(False)``（平时由 CardManager 管
+    显隐），详情页内嵌没有 CardManager；宿主不显式 show 就会整页空白
+    （system-im 设置卡实测踩到）。
+    """
+    from app.widgets.cards.settings.base_settings_card import BaseSettingsCard
+
+    class _FrameCard(BaseSettingsCard):
+        def __init__(self, parent=None):
+            super().__init__("测试卡", "", parent=parent)
+            self.set_height_mode("content")
+
+    fresh_ui_registry.register_settings_card("browser", "browser-frame-card", "自定义卡", _FrameCard)
+    page = page_mod.PluginSettingsPage()
+    page.reload(force=True)
+    _pump(qapp)
+    page._select("browser", force=True)
+    _pump(qapp)
+    config_body = page._detail._pages["config"].widget()
+    card = config_body.findChild(_FrameCard)
+    assert card is not None
+    assert not card.isHidden(), "SystemCardFrame 派生卡在详情页被显式隐藏 → 配置页空白"
+
+
 def test_auto_config_card_not_rendered_twice(env, qapp, fresh_ui_registry):
     """config_schema 自动卡（metadata.auto_config_card）不进 custom_cards
 
