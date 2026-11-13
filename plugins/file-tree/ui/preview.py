@@ -15,19 +15,21 @@
 import os
 from typing import Optional, Tuple
 
-from PyQt5.QtCore import QPoint, QPointF, QRect, QRectF, QSize, Qt, pyqtSignal
+from PyQt5.QtCore import QPoint, QPointF, QRect, QRectF, QSize, Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QColor, QFont, QIcon, QImageReader, QPainter, QPen, QPixmap, QTextCursor
 from PyQt5.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
+    QMenu,
     QPlainTextEdit,
     QSizePolicy,
     QStackedWidget,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
-from qfluentwidgets import FluentIcon, TransparentDropDownToolButton, TransparentToolButton
+from qfluentwidgets import FluentIcon, TransparentToolButton
 
 from .highlight import CodeHighlighter, analyze
 
@@ -199,6 +201,99 @@ def _wrap_icon(color: QColor) -> QIcon:
     return QIcon(pixmap)
 
 
+class _SplitButton(QWidget):
+    """「默认程序图标 + 下拉箭头」分裂按钮（两个独立按钮拼成）
+
+    ★ 不用 QToolButton 的 MenuButtonPopup：``QToolButton::showMenu`` 不是虚函数，
+    C++ 点箭头时直接调自身实现去弹内置空菜单，Python 重写拦不住（表现为点了没反应），
+    且它自绘的 menu indicator 在透明背景上就是一块黑方块。
+    两个 TransparentToolButton 拼装后，行为全在 Python 侧，hover 也由组件自带。
+    """
+
+    default_clicked = pyqtSignal()
+    menu_clicked = pyqtSignal()
+
+    def __init__(self, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self.setFixedSize(46, 26)
+        self.setAttribute(Qt.WA_StyledBackground, False)
+        self.setMouseTracking(True)
+        self._hover_bg = QColor(255, 255, 255, 18)
+        self._hover = False
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        # 子按钮只负责点与图标，hover 底色统一由本控件画（整块亮，不碎成两块）
+        plain_qss = (
+            "QToolButton { background: transparent; border: none; }"
+            "QToolButton:hover { background: transparent; }"
+            "QToolButton:pressed { background: transparent; }"
+        )
+        self._icon_btn = QToolButton(self)
+        self._icon_btn.setAutoRaise(True)
+        self._icon_btn.setStyleSheet(plain_qss)
+        self._icon_btn.setFixedSize(28, 26)
+        self._icon_btn.setIconSize(QSize(16, 16))
+        self._icon_btn.setCursor(Qt.PointingHandCursor)
+        self._icon_btn.clicked.connect(self.default_clicked.emit)
+        self._icon_btn.setIcon(FluentIcon.APPLICATION.icon())
+
+        self._arrow_btn = QToolButton(self)
+        self._arrow_btn.setAutoRaise(True)
+        self._arrow_btn.setStyleSheet(plain_qss)
+        self._arrow_btn.setFixedSize(18, 26)
+        self._arrow_btn.setIconSize(QSize(10, 10))
+        self._arrow_btn.setCursor(Qt.PointingHandCursor)
+        self._arrow_btn.setIcon(FluentIcon.CARE_DOWN_SOLID.icon())
+        self._arrow_btn.clicked.connect(self.menu_clicked.emit)
+
+        layout.addWidget(self._icon_btn)
+        layout.addWidget(self._arrow_btn)
+
+    # ── 外观 ──
+
+    def set_hover_color(self, color: QColor) -> None:
+        self._hover_bg = QColor(color)
+        self.update()
+
+    def paintEvent(self, event):  # noqa: N802 (Qt 命名)
+        if not self._hover:
+            return
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(self._hover_bg)
+        painter.drawRoundedRect(self.rect().adjusted(0, 0, -1, -1), 5, 5)
+
+    def enterEvent(self, event):  # noqa: N802
+        self._hover = True
+        self.update()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):  # noqa: N802
+        # 鼠标移到子按钮上时也会收到 leave，用全局位置复核是否还在本控件内
+        rect = self.rect()
+        inside = rect.contains(self.mapFromGlobal(self.cursor().pos()))
+        self._hover = inside
+        self.update()
+        super().leaveEvent(event)
+
+    def set_icon(self, icon: QIcon) -> None:
+        self._icon_btn.setIcon(icon)
+
+    def icon(self) -> QIcon:
+        return self._icon_btn.icon()
+
+    def set_tooltip(self, text: str) -> None:
+        self._icon_btn.setToolTip(text)
+        self._arrow_btn.setToolTip(text)
+
+    def set_icon_color(self, color: QColor) -> None:
+        self._arrow_btn.setIcon(FluentIcon.CARE_DOWN_SOLID.icon(color=color))
+
+
 # ── 省略名标签 ────────────────────────────────────────────
 
 
@@ -249,6 +344,9 @@ class _LineNumberArea(QWidget):
 class _CodeView(QPlainTextEdit):
     """只读代码视图（行号 + 等宽字体 + 语法高亮 + 换行开关，跟随主题）"""
 
+    context_menu_requested = pyqtSignal(QPoint)  # 参数为全局坐标
+    highlight_ready = pyqtSignal(str, str)  # (语言名, 跳过原因) — 异步上色完成
+
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
         self.setReadOnly(True)
@@ -256,6 +354,9 @@ class _CodeView(QPlainTextEdit):
         self.setFrameShape(QFrame.NoFrame)
         self.setUndoRedoEnabled(False)
         self.setCursorWidth(1)
+        # 接管右键：QPlainTextEdit 自带的菜单是原生英文黑菜单，与卡片两张皮
+        self.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.customContextMenuRequested.connect(self._on_context_menu)
         self._font_px = 14
         self._highlight_on = True
         self._language = ""
@@ -296,6 +397,11 @@ class _CodeView(QPlainTextEdit):
             f"{extra_qss}"
         )
         self._gutter.update()
+
+    # ── 右键菜单 ──
+
+    def _on_context_menu(self, pos: QPoint) -> None:
+        self.context_menu_requested.emit(self.viewport().mapToGlobal(pos))
 
     # ── 行号区几何 ──
 
@@ -354,14 +460,39 @@ class _CodeView(QPlainTextEdit):
     # ── 内容 ──
 
     def set_source(self, path: str, text: str) -> Tuple[str, str]:
-        """载入文本并按后缀上色，返回 ``(语言名, 高亮跳过原因)``"""
+        """载入文本：先出字，语法高亮延后一拍（词法分析是同步 CPU 活）
+
+        实测 1800 行 Python：读取 0.5ms、pygments 176ms、格式化重绘 150ms。
+        串行做会让点开文件有 300ms+ 白屏，先 setPlainText 让内容立刻可读，
+        高亮补上后重绘一次，代价远小于首帧延迟。
+        """
         self._source_path = path
         self._source_text = text
         self._highlighter.clear()  # 先清旧 spans：setPlainText 会触发 rehighlight
         self.setPlainText(text)
         self.moveCursor(QTextCursor.Start)
         self._update_gutter_width()
-        return self._apply_highlight()
+        if self._highlight_on and text:
+            QTimer.singleShot(0, self._run_highlight_async)
+        else:
+            self._language = ""
+        return "", "" if self._highlight_on else "off"
+
+    def _run_highlight_async(self) -> None:
+        """下一拍事件循环里做词法分析（不堵首帧）"""
+        text = self._source_text
+        if not text or not self._highlight_on:
+            return
+        path = self._source_path
+        spans, language, skipped = analyze(path, text)
+        if text is not self._source_text or path != self._source_path:
+            return  # 期间换了文件，旧结果直接丢弃
+        if spans:
+            self._highlighter.set_spans(spans)
+        else:
+            self._highlighter.clear()
+        self._language = language
+        self.highlight_ready.emit(language, skipped)
 
     def _apply_highlight(self) -> Tuple[str, str]:
         if not self._highlight_on or not self._source_text:
@@ -583,7 +714,9 @@ class FilePreviewPage(QWidget):
     """卡片内预览页：顶栏（返回 + 文件名 + 视图开关 + 打开方式）+ 内容区"""
 
     back_requested = pyqtSignal()
-    open_with_requested = pyqtSignal(str)  # 参数为当前文件路径
+    open_with_requested = pyqtSignal(str)  # 展开程序列表（参数为当前文件路径）
+    open_default_requested = pyqtSignal(str)  # 用系统默认程序直接打开
+    context_menu_requested = pyqtSignal(QPoint)  # 代码区右键（全局坐标）
 
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
@@ -594,6 +727,7 @@ class FilePreviewPage(QWidget):
         self._secondary_color = QColor(150, 150, 150)
         self._accent_color = QColor(80, 150, 220)
         self._is_dark = True
+        self._has_opener_icon = False
         self._setup_ui()
 
     # ── 公开接口 ──
@@ -614,6 +748,8 @@ class FilePreviewPage(QWidget):
         self._set_hint("")
         self._set_zoom_visible(self._kind == "image")
         self._set_text_controls_visible(self._kind == "text")
+        # 默认程序图标延迟到下一拍：读注册表 + 取 exe 图标不能堵在首帧渲染上
+        QTimer.singleShot(0, lambda p=path: self._refresh_opener_icon(p))
 
         if self._kind == "image":
             try:
@@ -633,6 +769,7 @@ class FilePreviewPage(QWidget):
                 return False
             language, skipped = self._code_view.set_source(path, text)
             self._content.setCurrentIndex(1)
+            self._base_hint = hint
             self._sync_highlight_button(language, skipped)
             self._set_hint(self._compose_hint(hint, skipped))
             return True
@@ -655,6 +792,42 @@ class FilePreviewPage(QWidget):
             return False
         self.load(self._path)
         return True
+
+    # ── 打开方式（默认程序图标 + 下拉） ──
+
+    def open_with_anchor(self) -> QPoint:
+        """分裂按钮右下角的全局坐标（菜单以此右对齐，不会向右溢出窗口）"""
+        btn = self._open_with_btn
+        return btn.mapToGlobal(QPoint(btn.width(), btn.height()))
+
+    def _refresh_opener_icon(self, path: str) -> None:
+        """按系统关联刷新左半边的默认程序图标（载入后延迟一拍调）"""
+        if not path or path != self._path:
+            return
+        try:
+            from .openwith import icon_for_exe, list_openers
+
+            openers = list_openers(path)
+        except Exception:
+            openers = []
+        opener = next((o for o in openers if o.is_default), openers[0] if openers else None)
+        if opener is None:
+            self._has_opener_icon = False
+            self._open_with_btn.set_icon(
+                FluentIcon.APPLICATION.icon(color=self._secondary_color)
+            )
+            self._open_with_btn.set_tooltip("用默认程序打开")
+            return
+        icon = icon_for_exe(opener.exe)
+        if icon.isNull():
+            self._has_opener_icon = False
+            self._open_with_btn.set_icon(
+                FluentIcon.APPLICATION.icon(color=self._secondary_color)
+            )
+        else:
+            self._has_opener_icon = True
+            self._open_with_btn.set_icon(icon)
+        self._open_with_btn.set_tooltip(f"用 {opener.label} 打开")
 
     def set_colors(
         self,
@@ -688,6 +861,10 @@ class FilePreviewPage(QWidget):
         self._header.setStyleSheet(
             f"#file-preview-header {{ background: transparent;"
             f"  border-bottom: 1px solid {border_css}; }}"
+        )
+        # 分裂按钮整块 hover 底色：深色下用白 10%，亮色下用黑 7%
+        self._open_with_btn.set_hover_color(
+            QColor(255, 255, 255, 26) if is_dark else QColor(0, 0, 0, 18)
         )
         self._name_label.setStyleSheet(
             f"color: {text_color.name()}; background: transparent;"
@@ -727,7 +904,10 @@ class FilePreviewPage(QWidget):
                 FluentIcon.CODE.icon(color=accent if self._code_view.highlight_enabled() else inactive)
             )
             self._reload_btn.setIcon(FluentIcon.SYNC.icon(color=inactive))
-            self._open_with_btn.setIcon(FluentIcon.APPLICATION.icon(color=inactive))
+            self._open_with_btn.set_icon_color(inactive)
+            if not self._has_opener_icon:
+                # 已取到默认程序图标时不能被主题刷新回通用图标
+                self._open_with_btn.set_icon(FluentIcon.APPLICATION.icon(color=inactive))
         except Exception:
             pass
 
@@ -787,10 +967,10 @@ class FilePreviewPage(QWidget):
         self._reload_btn.setToolTip("重新加载（文件被外部修改后重读）")
         self._reload_btn.clicked.connect(self.reload_current)
 
-        self._open_with_btn = TransparentDropDownToolButton(FluentIcon.APPLICATION, self._header)
-        self._open_with_btn.setFixedSize(34, 26)
-        self._open_with_btn.setToolTip("用其他程序打开")
-        self._open_with_btn.clicked.connect(self._emit_open_with)
+        self._open_with_btn = _SplitButton(self._header)
+        self._open_with_btn.set_tooltip("用默认程序打开")
+        self._open_with_btn.default_clicked.connect(self._emit_open_default)
+        self._open_with_btn.menu_clicked.connect(self._emit_open_with)
 
         head.addWidget(self._back_btn)
         head.addWidget(self._name_label, 1)
@@ -809,6 +989,8 @@ class FilePreviewPage(QWidget):
 
         self._image_view = _ImageView(self)
         self._code_view = _CodeView(self)
+        self._code_view.context_menu_requested.connect(self.context_menu_requested.emit)
+        self._code_view.highlight_ready.connect(self._on_highlight_ready)
 
         self._msg_label = QLabel("", self)
         self._msg_label.setAlignment(Qt.AlignCenter)
@@ -843,6 +1025,27 @@ class FilePreviewPage(QWidget):
         if self._path:
             self.open_with_requested.emit(self._path)
 
+    def _emit_open_default(self) -> None:
+        if self._path:
+            self.open_default_requested.emit(self._path)
+
+    # ── 文本操作（右键菜单复用） ──
+
+    def has_selection(self) -> bool:
+        return self._code_view.textCursor().hasSelection()
+
+    def copy_selection(self) -> None:
+        self._code_view.copy()
+
+    def select_all_text(self) -> None:
+        self._code_view.selectAll()
+
+    def toggle_wrap(self) -> None:
+        self._on_toggle_wrap()
+
+    def toggle_highlight(self) -> None:
+        self._on_toggle_highlight()
+
     # ── 视图开关 ──
 
     def _on_toggle_wrap(self) -> None:
@@ -856,6 +1059,11 @@ class FilePreviewPage(QWidget):
         language, skipped = self._code_view.set_highlight_enabled(enabled)
         self._sync_highlight_button(language, skipped)
         self._refresh_control_icons()
+
+    def _on_highlight_ready(self, language: str, skipped: str) -> None:
+        """异步上色完成：补上语言名与降级提示"""
+        self._sync_highlight_button(language, skipped)
+        self._set_hint(self._compose_hint(getattr(self, "_base_hint", ""), skipped))
 
     def _sync_highlight_button(self, language: str, skipped: str) -> None:
         """高亮按钮的可用性与悬停说明：无词法器 / 被限流时置灰"""

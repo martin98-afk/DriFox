@@ -367,13 +367,68 @@ def launch(opener: Opener, path: str) -> bool:
 # ── 图标 ──────────────────────────────────────────────────
 
 
-def icon_for_exe(exe: str):
-    """取程序自身图标；取不到返回空 QIcon
+_ICON_API_CACHE = None
 
-    ★ QPixmap.fromWinHICON 是 Qt C++ / PySide 的 API，PyQt5 未暴露，
-    自己 ExtractIconExW 拿到 HICON 也换不成 QPixmap。这里直接走
-    QFileIconProvider（内部是 SHGetFileInfoW），对 exe 返回的就是程序图标。
+
+def _icon_api():
+    """一次性准备好 ExtractIconExW / DestroyIcon 的签名（模块级缓存）"""
+    global _ICON_API_CACHE
+    if _ICON_API_CACHE is not None:
+        return _ICON_API_CACHE
+    import ctypes
+    from ctypes import wintypes
+
+    shell32 = ctypes.WinDLL("shell32", use_last_error=True)
+    shell32.ExtractIconExW.argtypes = [
+        wintypes.LPCWSTR,
+        ctypes.c_int,
+        ctypes.POINTER(wintypes.HICON),
+        ctypes.POINTER(wintypes.HICON),
+        wintypes.UINT,
+    ]
+    shell32.ExtractIconExW.restype = wintypes.UINT
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    user32.DestroyIcon.argtypes = [wintypes.HICON]
+    user32.DestroyIcon.restype = wintypes.BOOL
+    _ICON_API_CACHE = (ctypes, wintypes, shell32, user32)
+    return _ICON_API_CACHE
+
+
+def _icon_from_exe(exe: str):
+    """直接读 exe 的图标资源，返回 QPixmap（失败返回 None）
+
+    ★ 绝不能用 QFileIconProvider / SHGetFileInfo：它们走 Shell 图标缓存，
+    某些 exe 会命中 Qt 的 5 秒超时（实测 pycharm64.exe、Typora.exe 各卡 5s，
+    qt_messages 日志留下 "SHGetFileInfo() timed out"）。在 UI 线程调用等于整窗冻住。
+    ExtractIconExW 只解析 PE 资源，实测 1-2ms。
     """
+    if os.name != "nt" or not exe or not os.path.exists(exe):
+        return None
+    try:
+        ctypes, wintypes, shell32, user32 = _icon_api()
+        from PyQt5 import QtWinExtras
+
+        large = wintypes.HICON()
+        small = wintypes.HICON()
+        count = shell32.ExtractIconExW(exe, 0, ctypes.byref(large), ctypes.byref(small), 1)
+        if not count:
+            return None
+        hicon = large.value or small.value
+        if not hicon:
+            return None
+        try:
+            pixmap = QtWinExtras.QtWin.fromHICON(hicon)
+        finally:
+            user32.DestroyIcon(hicon)
+        if pixmap is None or pixmap.isNull():
+            return None
+        return pixmap
+    except Exception:
+        return None
+
+
+def icon_for_exe(exe: str):
+    """取程序自身图标；取不到返回空 QIcon（调用方退通用图标）"""
     from PyQt5.QtGui import QIcon
 
     if not exe or not os.path.exists(exe):
@@ -382,17 +437,7 @@ def icon_for_exe(exe: str):
     cached = _ICON_CACHE.get(key)
     if cached is not None:
         return cached  # type: ignore[return-value]
-    icon = QIcon()
-    try:
-        from PyQt5.QtCore import QFileInfo
-        from PyQt5.QtWidgets import QFileIconProvider
-
-        provider = _ICON_CACHE.get("__provider__")
-        if provider is None:
-            provider = QFileIconProvider()
-            _ICON_CACHE["__provider__"] = provider
-        icon = provider.icon(QFileInfo(exe))  # type: ignore[union-attr]
-    except Exception:
-        icon = QIcon()
+    pixmap = _icon_from_exe(exe)
+    icon = QIcon(pixmap) if pixmap is not None else QIcon()
     _ICON_CACHE[key] = icon
     return icon

@@ -24,7 +24,18 @@ from pathlib import Path
 from typing import Callable, List, Optional, Tuple
 
 from loguru import logger
-from PyQt5.QtCore import QEvent, QItemSelectionModel, QModelIndex, QSize, Qt, QThread, QTimer, pyqtSignal
+from PyQt5.QtCore import (
+    QEvent,
+    QItemSelectionModel,
+    QModelIndex,
+    QPoint,
+    QRectF,
+    QSize,
+    Qt,
+    QThread,
+    QTimer,
+    pyqtSignal,
+)
 from PyQt5.QtGui import QColor, QCursor, QFont, QIcon
 from PyQt5.QtWidgets import (
     QApplication,
@@ -54,7 +65,7 @@ from qfluentwidgets import (
 )
 
 from .openwith import DEFAULT_SUFFIX, icon_for_exe, launch, list_openers
-from .preview import FilePreviewPage, detect_kind
+from .preview import FilePreviewPage, _wrap_icon, detect_kind
 from .scanner import _DirEntry, _TreeScanner
 from .tree_widget import (
     FileTreeFilterProxy,
@@ -157,10 +168,13 @@ def _make_colors_from_context(ctx: dict) -> dict:
 
 
 class _MenuIconStyle(QProxyStyle):
-    """菜单图标尺寸代理：QMenu 没有 setIconSize，只能改 PM_SmallIconSize
+    """菜单样式代理：图标尺寸 + 禁画原生面板
 
-    默认值随系统 DPI 放大（150% 屏上 16→24），菜单项会被图标和行高一起撑胖。
-    这里锁到固定逻辑像素，高 DPI 下由 Qt 自行缩放绘制。
+    1. QMenu 没有 setIconSize，只能改 PM_SmallIconSize。默认值随系统 DPI 放大
+       （150% 屏上 16→24），菜单项会被图标和行高一起撑胖。
+    2. ★ 原生 PE_PanelMenu 会先画一块**矩形底板**，QSS 的 border-radius 只裁
+       内容、裁不掉底板，四角就留方角（暗色主题下是黑角）。拦掉面板绘制后，
+       圆角完全由 QSS 背景决定，配合透明窗口四角才真透明。
     """
 
     def __init__(self, icon_size: int = 16):
@@ -171,6 +185,11 @@ class _MenuIconStyle(QProxyStyle):
         if metric == QStyle.PM_SmallIconSize:
             return self._icon_size
         return super().pixelMetric(metric, option, widget)
+
+    def drawPrimitive(self, element, option, painter, widget=None):  # noqa: N802
+        if element == QStyle.PE_PanelMenu:
+            return
+        super().drawPrimitive(element, option, painter, widget)
 
 
 def _menu_icon(icon: FluentIcon, color: QColor) -> QIcon:
@@ -458,6 +477,8 @@ class FileTreeCard(QWidget):
         self._preview_page = FilePreviewPage(self)
         self._preview_page.back_requested.connect(self._close_preview)
         self._preview_page.open_with_requested.connect(self._show_open_with_menu)
+        self._preview_page.open_default_requested.connect(self._open_file)
+        self._preview_page.context_menu_requested.connect(self._on_preview_context_menu)
         self._stack.addWidget(self._preview_page)  # index 2: 文件预览页
         # 初始显示占位页，等待扫描完成
         self._stack.setCurrentIndex(1)
@@ -1467,6 +1488,8 @@ class FileTreeCard(QWidget):
         icon_style.setParent(menu)
         menu.setStyle(icon_style)
         menu.setAttribute(Qt.WA_TranslucentBackground, True)
+        # 系统方角阴影会在透明圆角外画一圈黑灰边，直接关掉
+        menu.setWindowFlag(Qt.NoDropShadowWindowHint, True)
         menu.setStyleSheet(f"""
             QMenu {{
                 background-color: {menu_bg.name()};
@@ -1595,6 +1618,8 @@ class FileTreeCard(QWidget):
                 lambda: self._refresh_dir_in_model(item_path)
             )
 
+        menu.adjustSize()
+        self._round_menu(menu)
         menu.exec_(global_pos)
 
     # ── 刷新与关闭 ──
@@ -1674,7 +1699,7 @@ class FileTreeCard(QWidget):
 
     # ── 打开方式 ──
 
-    def _show_open_with_menu(self, path: str) -> None:
+    def _show_open_with_menu(self, path: str, anchor: Optional[QPoint] = None) -> None:
         """「打开方式」菜单：系统注册的程序 + 系统默认 + 显示位置
 
         候选来自注册表（与资源管理器右键菜单同源）；非 Windows 或无关联时
@@ -1685,6 +1710,8 @@ class FileTreeCard(QWidget):
         if not os.path.exists(path):
             self._show_error(f"文件不存在: {path}")
             return
+        if anchor is None and self._stack.currentIndex() == _PAGE_PREVIEW:
+            anchor = self._preview_page.open_with_anchor()
         menu = QMenu(self)
         self._style_menu(menu)
         icon_color = self._colors.get("text", QColor(255, 255, 255))
@@ -1706,11 +1733,83 @@ class FileTreeCard(QWidget):
         _act(FluentIcon.FOLDER, "在资源管理器中显示").triggered.connect(
             lambda: self._open_in_explorer(path)
         )
-        menu.exec_(QCursor.pos())
+        menu.exec_(self._menu_position(menu, anchor))
+
+    @staticmethod
+    def _round_menu(menu: QMenu, radius: int = 12) -> None:
+        """把菜单窗口本身裁成圆角
+
+        ★ Windows 下 QMenu 的 WA_TranslucentBackground 并不会让四角真透明：
+        窗口仍是矩形，四角由系统填成纯黑（实测 rgba(0,0,0,255)），QSS 的
+        border-radius 只影响绘制、遮不住窗口。setMask 直接把窗口形状裁圆，
+        四角连像素都不存在，才不会露黑边（代价是边缘 1px 锯齿）。
+        """
+        from PyQt5.QtGui import QPainterPath, QRegion
+
+        rect = menu.rect()
+        if rect.isEmpty():
+            return
+        path = QPainterPath()
+        path.addRoundedRect(QRectF(rect), radius, radius)
+        menu.setMask(QRegion(path.toFillPolygon().toPolygon()))
+
+    def _menu_position(self, menu: QMenu, anchor: Optional[QPoint] = None) -> QPoint:
+        """算出菜单左上角：右对齐锚点 + 夹在窗口与屏幕内
+
+        ★ 直接 ``QCursor.pos()`` 弹菜单，在窄卡片上会向右溢出到软件窗口之外。
+        这里以锚点为**右边界**反向对齐，再由窗口与屏幕边界夹回来。
+        """
+        menu.adjustSize()
+        self._round_menu(menu)
+        point = anchor or QCursor.pos()
+        x = point.x() - menu.width()
+        y = point.y() + 4
+        win = self.window()
+        if win is not None and win.isVisible():
+            tl = win.mapToGlobal(QPoint(0, 0))
+            x = max(tl.x() + 8, min(x, tl.x() + win.width() - menu.width() - 8))
+            y = max(tl.y() + 8, min(y, tl.y() + win.height() - menu.height() - 8))
+        screen = QApplication.screenAt(point) or QApplication.primaryScreen()
+        if screen is not None:
+            geo = screen.availableGeometry()
+            x = max(geo.left() + 4, min(x, geo.right() - menu.width() - 4))
+            y = max(geo.top() + 4, min(y, geo.bottom() - menu.height() - 4))
+        return QPoint(int(x), int(y))
 
     def _launch_with(self, opener, path: str) -> None:
         if not launch(opener, path):
             logger.error(f"[FileTree] 用 {opener.label} 打开失败: {path}")
+
+    def _on_preview_context_menu(self, global_pos: QPoint) -> None:
+        """代码区右键：接管 QPlainTextEdit 自带的原生英文黑菜单"""
+        page = self._preview_page
+        if not page.current_path():
+            return
+        menu = QMenu(self)
+        self._style_menu(menu)
+        icon_color = self._colors.get("text", QColor(255, 255, 255))
+
+        def _act(icon: FluentIcon, text: str):
+            return menu.addAction(_menu_icon(icon, icon_color), text)
+
+        copy_act = _act(FluentIcon.COPY, "复制")
+        copy_act.setEnabled(page.has_selection())
+        copy_act.triggered.connect(page.copy_selection)
+        _act(FluentIcon.ACCEPT, "全选").triggered.connect(page.select_all_text)
+        menu.addSeparator()
+
+        wrap_act = menu.addAction(
+            _wrap_icon(self._colors.get("accent", icon_color) if page.wrap_enabled() else icon_color),
+            f"自动换行：{'开' if page.wrap_enabled() else '关'}",
+        )
+        wrap_act.triggered.connect(page.toggle_wrap)
+        highlight_text = f"语法高亮：{'开' if page.highlight_enabled() else '关'}"
+        highlight_act = menu.addAction(_menu_icon(FluentIcon.CODE, icon_color), highlight_text)
+        highlight_act.triggered.connect(page.toggle_highlight)
+        menu.addSeparator()
+
+        _act(FluentIcon.SYNC, "重新加载").triggered.connect(page.reload_current)
+        menu.exec_(self._menu_position(menu, global_pos))
 
     # ── 预览 ──
 

@@ -117,6 +117,7 @@ class TestCodeViewToggles:
         try:
             _lang, skipped = view.set_source(str(p), text)
             assert skipped == ""
+            _QAPP.processEvents()  # 高亮在下一拍异步补上
             assert view._highlighter.has_spans()
             view.set_highlight_enabled(False)
             assert not view._highlighter.has_spans()
