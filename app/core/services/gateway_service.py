@@ -33,6 +33,7 @@ from app.core.conversation.backend import (
     _extract_markdown_images,
     _gw_str_platform,
 )
+from app.gateway.interaction import build_answer_payload, format_question, parse_answer
 
 _AUTO_RESTART_COOLDOWN = 5.0  # 引擎不可用时的自愈重建最小间隔（秒）
 
@@ -519,8 +520,6 @@ class GatewayService(QObject):
 
     def _on_question_asked(self, data: dict) -> None:
         """worker 发起 question → 发选项消息到平台，记下待答状态（主线程）。"""
-        from app.gateway.interaction import format_question
-
         platform = data.get("platform")
         chat_id = str(data.get("chat_id") or "")
         payload = data.get("payload") or {}
@@ -538,21 +537,48 @@ class GatewayService(QObject):
             "answers": [],
         }
         self._pending_questions[key] = state
-        self._send_question_text(platform, chat_id, format_question(questions, 0, len(questions)))
+        self._present_question(platform, chat_id, state)
         self._arm_question_timeout(key)
 
-    def _send_question_text(self, platform: Any, chat_id: str, text: str) -> None:
-        """把问题文本推到平台（走 manager 事件循环，任意线程安全）。"""
+    def _present_question(self, platform: Any, chat_id: str, state: dict) -> None:
+        """把当前这道题推到平台：优先原生提问卡，失败/不支持退回纯文本选项。"""
         _ev_loop = getattr(self._manager, "_loop", None) if self._manager else None
         if not _ev_loop:
             logger.warning("[Gateway] 提问消息无法发送：事件循环不可用")
             return
+        questions = state["questions"]
+        index = state["index"]
+        text = format_question(questions, index, len(questions))
+        coro = self._present_question_async(
+            _gw_str_platform(platform), chat_id, questions[index], index, len(questions), text
+        )
         try:
-            asyncio.run_coroutine_threadsafe(
-                self._send_message(_gw_str_platform(platform), chat_id, text), _ev_loop
-            )
+            asyncio.run_coroutine_threadsafe(coro, _ev_loop)
         except Exception as e:
             logger.error(f"[Gateway] 提问消息发送失败: {e}")
+
+    async def _present_question_async(
+        self,
+        platform: Any,
+        chat_id: str,
+        question: dict,
+        index: int,
+        total: int,
+        text: str,
+    ) -> None:
+        """原生提问卡优先；平台未实现或发送失败时退回文本选项消息。"""
+        adapter = self._manager.get_adapter(platform) if self._manager else None
+        if adapter is not None and hasattr(adapter, "send_question"):
+            try:
+                result = await adapter.send_question(chat_id, question, index, total)
+                if getattr(result, "success", False):
+                    return
+                logger.debug(
+                    f"[Gateway] {platform} 提问卡未发送（{getattr(result, 'error', '')}），退文本"
+                )
+            except Exception as e:
+                logger.warning(f"[Gateway] 提问卡发送异常，退文本: {e}")
+        await self._send_message(platform, chat_id, text)
 
     def _arm_question_timeout(self, key: str) -> None:
         """为待答提问装超时：到点没回复就按"跳过"收尾，避免 worker 永久阻塞。
@@ -600,17 +626,13 @@ class GatewayService(QObject):
         # 命令不当作答案：/stop 之类应正常生效，顺带作废待答状态
         if text.strip().startswith("/"):
             return False
-        from app.gateway.interaction import format_question, parse_answer
-
         questions = state["questions"]
         index = state["index"]
         state["answers"].append(parse_answer(questions[index], text))
         state["index"] = index + 1
         if state["index"] < len(questions):
             # 还有下一题：先问完再一次性交给 worker
-            self._send_question_text(
-                platform, chat_id, format_question(questions, state["index"], len(questions))
-            )
+            self._present_question(platform, chat_id, state)
             self._arm_question_timeout(key)
             return True
         self._finish_question(key, state)
@@ -618,8 +640,6 @@ class GatewayService(QObject):
 
     def _finish_question(self, key: str, state: dict, skipped: bool = False) -> None:
         """收尾：拼答案回填 worker，清状态与定时器。"""
-        from app.gateway.interaction import build_answer_payload
-
         self._pending_questions.pop(key, None)
         timer = state.get("timer")
         if timer is not None:

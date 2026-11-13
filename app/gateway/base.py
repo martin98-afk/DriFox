@@ -327,6 +327,17 @@ class BasePlatformAdapter(ABC):
             error="Platform does not support native image sending"
         )
 
+    async def send_question(
+        self, chat_id: str, question: dict, index: int, total: int
+    ) -> SendResult:
+        """发送交互提问（可选能力）。
+
+        平台有按钮/卡片能力时覆盖本方法，把 options 渲染成可点选项；
+        返回 success=False 时宿主退回纯文本选项消息（send_question_text 的默认路径）。
+        question 结构：{question, header?, detail?, options:[{label,description}], multiple?}
+        """
+        return SendResult(success=False, error="Platform does not support question card")
+
     async def send_file(self, chat_id: str, file_path: str, **kwargs) -> SendResult:
         """
         发送文件

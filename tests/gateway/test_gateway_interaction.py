@@ -130,9 +130,11 @@ def service(qapp_stub=None, monkeypatch=None):
     svc._manager = None  # 消息发送在测试里被拦截
     svc._pending_questions = {}
     svc._engine = None
-    # 拦截平台发送：只记录文本
+    # 拦截平台发送：只记录文本（原生卡优先逻辑由 _present_question 负责）
     svc.sent = []
-    svc._send_question_text = lambda platform, chat_id, text: svc.sent.append(text)
+    svc._present_question = lambda platform, chat_id, state: svc.sent.append(
+        format_question(state["questions"], state["index"], len(state["questions"]))
+    )
     return svc
 
 
@@ -300,3 +302,107 @@ def test_engine_forwards_question_asked():
     wrapped = stub._make_gateway_callbacks(None, callbacks, {})
     wrapped["question_asked"]("tc1", [{"question": "q?"}], {})
     assert got == [{"tool_call_id": "tc1", "questions": [{"question": "q?"}]}]
+
+
+# ==================== 原生提问卡优先 ====================
+
+class _CardAdapter:
+    """支持原生提问卡的适配器桩。"""
+
+    def __init__(self, ok=True):
+        self.ok = ok
+        self.calls = []
+        self.texts = []
+
+    async def send_question(self, chat_id, question, index, total):
+        from app.gateway.base import SendResult
+
+        self.calls.append((chat_id, question, index, total))
+        return SendResult(success=self.ok, error=None if self.ok else "not supported")
+
+    async def send(self, chat_id, content, **kwargs):
+        from app.gateway.base import SendResult
+
+        self.texts.append(content)
+        return SendResult(success=True)
+
+
+def _service_with_manager(adapter):
+    from app.core.services import gateway_service as mod
+
+    svc = mod.GatewayService.__new__(mod.GatewayService)
+    from PyQt5.QtCore import QObject
+
+    QObject.__init__(svc)
+    svc._pending_questions = {}
+    svc._engine = None
+
+    class _Mgr:
+        def get_adapter(self, platform):
+            return adapter
+
+    svc._manager = _Mgr()
+    return svc
+
+
+def test_present_question_prefers_native_card():
+    adapter = _CardAdapter(ok=True)
+    svc = _service_with_manager(adapter)
+    asyncio.run(
+        svc._present_question_async(
+            "feishu", "chat1", Q_SINGLE, 0, 1, format_question([Q_SINGLE], 0, 1)
+        )
+    )
+    assert len(adapter.calls) == 1
+    assert adapter.texts == []  # 卡片成功就不发文本
+
+
+def test_present_question_falls_back_to_text():
+    adapter = _CardAdapter(ok=False)
+    svc = _service_with_manager(adapter)
+    asyncio.run(
+        svc._present_question_async(
+            "wechat", "chat1", Q_SINGLE, 0, 1, format_question([Q_SINGLE], 0, 1)
+        )
+    )
+    assert len(adapter.calls) == 1
+    assert adapter.texts and "用哪个方案？" in adapter.texts[0]
+
+
+def test_present_question_falls_back_when_adapter_raises():
+    class _Boom(_CardAdapter):
+        async def send_question(self, *a, **kw):
+            raise RuntimeError("boom")
+
+    adapter = _Boom()
+    svc = _service_with_manager(adapter)
+    asyncio.run(
+        svc._present_question_async(
+            "feishu", "chat1", Q_SINGLE, 0, 1, format_question([Q_SINGLE], 0, 1)
+        )
+    )
+    assert adapter.texts and "用哪个方案？" in adapter.texts[0]
+
+
+def test_base_adapter_default_send_question_is_unsupported():
+    """基类默认返回失败，保证没实现的平台自动退文本。"""
+    from app.gateway.base import BasePlatformAdapter, PlatformConfig
+
+    class _Minimal(BasePlatformAdapter):
+        async def connect(self):
+            return True
+
+        async def disconnect(self):
+            pass
+
+        async def send(self, chat_id, content, **kwargs):
+            from app.gateway.base import SendResult
+
+            return SendResult(success=True)
+
+        async def get_chat_info(self, chat_id):
+            return {}
+
+    adapter = _Minimal(PlatformConfig())
+    result = asyncio.run(adapter.send_question("chat1", Q_SINGLE, 0, 1))
+    assert result.success is False
