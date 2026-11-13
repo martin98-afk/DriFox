@@ -4,9 +4,9 @@
 
 - **工具完成框里的文件地址可点击打开** (`app/widgets/render_helpers.py` · `app/widgets/card_viewers.py` · `app/main_widget.py`): 折叠头右侧路径、以及 read/grep/list/glob 单行卡预览里的路径片段渲染为可点元素（默认无装饰，hover 变主题强调色 `--accent` + 实线下划线，悬停 title 显示完整路径），点击由骨架 click 委托在折叠头之前抢断，转 `open_file` 消息交宿主按会话 workdir 解析后用系统程序打开；路径不存在给 InfoBar 提示（原实现静默吞异常）。显示文本仍是首尾缩短版，`data-open-path` 存完整原始路径。骨架版本 v79 → v81。
 
-## [v0.7.2] - 2026-11-14 (重新发布 #4)
+## [v0.7.2] - 2026-11-14 (重新发布 #5)
 
-自 v0.7.1 以来的变更 | 提交数：137 · 文件变更：560 · +27422/-9612 | 贡献者：dingma, drifox-bot, mading, martin98-afk
+自 v0.7.1 以来的变更 | 提交数：139 · 文件变更：561 · +27746/-9632 | 贡献者：dingma, drifox-bot, mading, martin98-afk
 
 ### ✨ 新功能 (New Features)
 
@@ -103,6 +103,19 @@
 ### 🔧 其他 (Chores & Build) (重新发布 #4 追加)
 
 - **插件市场索引自动重生成** (`marketplace.json`): GitHub Actions 按 plugin.json 重新生成（`[skip ci]`）。
+
+### ✨ 新功能 (New Features) (重新发布 #5 追加)
+
+- **文件树右键菜单精简，打开类动作置顶** (`plugins/file-tree/ui/cards.py`): 文件/目录的系统打开动作（「用默认程序打开」「在访达/资源管理器中打开」「打开所在文件夹」）提到菜单最上方，不再埋在底部；移除「打开方式…」与「预览」两个二级入口（双击分流与预览页自身的「打开方式」按钮仍在）；「新建文件」「新建文件夹」「刷新」收敛为仅目录节点与空白处（等价根目录）出现，文件右键不再显示无意义的目录操作。
+- **mac 文件「打开方式」能标出系统默认程序** (`plugins/file-tree/ui/openwith.py` · `plugins/file-tree/ui/preview.py`): 默认程序两级反查——静态读 `~/Library/Preferences/com.apple.LaunchServices/com.apple.launchservices.secure.plist` 的 `LSHandlers`（零依赖，按 `LSHandlerContentTag` 扩展名或 `LSHandlerContentType` UTI 匹配，bundle id 经应用扫描缓存反查路径），未命中再走 `LSCopyDefaultApplicationURLForURL`（pyobjc，按真实探针文件取 UTI）。默认项置顶并按 bundle 路径去重；预览页在无默认标记时不再拿候选首项冒充默认（此前会把任意程序当成默认显示图标）。应用扫描目录补齐 `/System/Applications` 与 `/System/Applications/Utilities`，系统自带应用（文本编辑、预览等）此前完全不在候选里。
+
+### 🎨 样式改进 (Style) (重新发布 #5 追加)
+
+- **mac 右键菜单四角白角** (`plugins/file-tree/ui/cards.py`): `WA_TranslucentBackground` 只把窗口标记为非 opaque，`NSWindow.backgroundColor` 照旧填默认窗底色（浅色外观≈白灰），从 QSS 圆角外的四角露出。`WA_NoSystemBackground` 与 `grab()` / `isOpaque` 都查不出（四角 alpha=0，白角在合成层）。修法：菜单 `installEventFilter`，`QEvent.Show` 时经 `objc_msgSend` 把 `NSWindow.backgroundColor` 设为 `NSColor.clearColor`（实测四角白色像素占比 2% → 0%）。时机是关键：不能提前用 `winId()` 强创原生窗口，那会绕开 Qt 的 popup 管理路径，菜单关闭后 grab 不释放导致整个界面僵死。
+
+### 📚 文档 (Docs) (重新发布 #5 追加)
+
+- **AGENTS.md 增加封面图 frontmatter** (`AGENTS.md`): 补 `cover` 元数据（image / actualRatio 16:9 / 2000×1125）。
 
 ## [v0.7.1] - 2026-11-11
 
