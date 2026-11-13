@@ -14,7 +14,6 @@ from pathlib import Path
 _ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_ROOT))
 os.environ.setdefault("DRIFOX_DATA_DIR", str(_ROOT / ".drifox-test"))
-os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 os.environ["DRIFOX_QT_RENDERER"] = "1"
 
 from PyQt5.QtCore import QCoreApplication, QEventLoop, Qt, QTimer  # noqa: E402
@@ -52,19 +51,19 @@ def main() -> int:
         return 1
 
     viewer = CodeWebViewer(light=False)
+    viewer.setAttribute(Qt.WA_DontShowOnScreen, True)
     viewer.resize(900, 500)
+    viewer.show()
     captured = []
     viewer.openFileRequested.connect(captured.append)
 
-    ready = []
-    viewer.contentReady.connect(lambda: ready.append(1))
     viewer._load_skeleton()
     deadline = 200
-    while not ready and deadline > 0:
+    while not viewer._is_js_ready and deadline > 0:
         _pump(100)
         deadline -= 1
-    if not ready:
-        print("[FAIL] 骨架未就绪（contentReady 超时）")
+    if not viewer._is_js_ready:
+        print("[FAIL] 骨架未就绪（_is_js_ready 超时）")
         return 1
     print("[ok] 骨架就绪")
 

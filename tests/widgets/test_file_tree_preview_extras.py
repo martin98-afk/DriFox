@@ -204,44 +204,6 @@ class TestPreviewControls:
         finally:
             page.deleteLater()
 
-    def test_split_button_default_click_emits(self, tmp_path):
-        """左半边（默认程序图标）点击走 open_default_requested，不是弹菜单"""
-        p = tmp_path / "f.txt"
-        p.write_text("x\n", encoding="utf-8")
-        page = self._page()
-        default_hits, menu_hits = [], []
-        page.open_default_requested.connect(default_hits.append)
-        page.open_with_requested.connect(menu_hits.append)
-        try:
-            page.load(str(p))
-            page._open_with_btn.default_clicked.emit()
-            page._open_with_btn.menu_clicked.emit()
-            assert default_hits == [str(p)]
-            assert menu_hits == [str(p)]
-        finally:
-            page.deleteLater()
-
-    def test_configure_open_with_tooltip(self, tmp_path):
-        from PyQt5.QtGui import QIcon
-
-        page = self._page()
-        try:
-            page.configure_open_with(QIcon(), "PyCharm")
-            assert page._open_with_btn.toolTip() == "用 PyCharm 打开"
-        finally:
-            page.deleteLater()
-
-    def test_open_with_anchor_is_below_button(self):
-        page = self._page()
-        try:
-            anchor = page.open_with_anchor()
-            bottom = page._open_with_btn.mapToGlobal(
-                preview_mod.QPoint(0, page._open_with_btn.height())
-            )
-            assert anchor == bottom
-        finally:
-            page.deleteLater()
-
 
 # ── 打开方式 ──
 

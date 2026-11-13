@@ -3650,7 +3650,10 @@ _SKELETON_CACHE_MAX = 48
 # 骨架 click 委托在 .cm-collapsible__summary 之前抢断，转
 # `pywebview_action:open_file:<encodeURIComponent(path)>` 交宿主按 workdir 打开。
 # 旧骨架没有该委托，须失效缓存。
-_SKELETON_CACHE_VERSION = 80
+# _SKELETON_CACHE_VERSION +1（v81）：路径链接去掉常驻虚下划线——密集工具卡里
+# 点线是视觉噪音；改默认无装饰、hover 变主题强调色（--accent）+ 实线下划线，
+# cursor 仍为 pointer。
+_SKELETON_CACHE_VERSION = 81
 
 
 def _js_literal(value) -> str:

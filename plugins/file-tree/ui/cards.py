@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Callable, List, Optional, Tuple
 
 from loguru import logger
-from PyQt5.QtCore import QEvent, QItemSelectionModel, QModelIndex, QPoint, QSize, Qt, QThread, QTimer, pyqtSignal
+from PyQt5.QtCore import QEvent, QItemSelectionModel, QModelIndex, QSize, Qt, QThread, QTimer, pyqtSignal
 from PyQt5.QtGui import QColor, QCursor, QFont, QIcon
 from PyQt5.QtWidgets import (
     QApplication,
@@ -41,12 +41,10 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 from qfluentwidgets import (
-    Action,
     BodyLabel,
     FluentIcon,
     IconWidget,
     MaskDialogBase,
-    RoundMenu,
     ScrollArea,
     SmoothScrollDelegate,
     StrongBodyLabel,
@@ -460,8 +458,6 @@ class FileTreeCard(QWidget):
         self._preview_page = FilePreviewPage(self)
         self._preview_page.back_requested.connect(self._close_preview)
         self._preview_page.open_with_requested.connect(self._show_open_with_menu)
-        self._preview_page.open_default_requested.connect(self._open_file)
-        self._preview_page.context_menu_requested.connect(self._on_preview_context_menu)
         self._stack.addWidget(self._preview_page)  # index 2: 文件预览页
         # 初始显示占位页，等待扫描完成
         self._stack.setCurrentIndex(1)
@@ -1678,137 +1674,39 @@ class FileTreeCard(QWidget):
 
     # ── 打开方式 ──
 
-    def _show_open_with_menu(self, path: str, anchor: Optional[QPoint] = None) -> None:
+    def _show_open_with_menu(self, path: str) -> None:
         """「打开方式」菜单：系统注册的程序 + 系统默认 + 显示位置
 
-        用 Fluent RoundMenu 而不是原生 QMenu：原生菜单的勾选列缩进、悬浮块、
-        阴影无论 QSS 怎么调都与卡片两张皮，换成 Fluent 组件后圆角/阴影/动画
-        全部由控件自带，观感才与参考图一致。
+        候选来自注册表（与资源管理器右键菜单同源）；非 Windows 或无关联时
+        只剩后两项，不会出现空菜单。
         """
         if not path:
             return
         if not os.path.exists(path):
             self._show_error(f"文件不存在: {path}")
             return
-        menu = self._new_menu()
+        menu = QMenu(self)
+        self._style_menu(menu)
+        icon_color = self._colors.get("text", QColor(255, 255, 255))
+
+        def _act(icon: FluentIcon, text: str):
+            return menu.addAction(_menu_icon(icon, icon_color), text)
+
         openers = [] if os.path.isdir(path) else list_openers(path)
         for opener in openers:
             label = opener.label + (DEFAULT_SUFFIX if opener.is_default else "")
-            icon = icon_for_exe(opener.exe)
-            if icon.isNull():
-                icon = FluentIcon.APPLICATION.icon()
-            action = Action(icon, label, menu)
+            action = menu.addAction(icon_for_exe(opener.exe), label)
             action.triggered.connect(lambda _checked=False, o=opener: self._launch_with(o, path))
-            menu.addAction(action)
         if openers:
             menu.addSeparator()
 
-        menu.addAction(
-            Action(
-                FluentIcon.FOLDER.icon(),
-                "在资源管理器中显示",
-                menu,
-                triggered=lambda: self._open_in_explorer(path),
-            )
+        _act(FluentIcon.APPLICATION, "用系统默认程序打开").triggered.connect(
+            lambda: self._open_file(path)
         )
-        self._popup_menu(menu, anchor)
-
-    # ── Fluent 菜单助手 ──
-
-    def _new_menu(self) -> RoundMenu:
-        """统一度量：行高 34（默认 28 偏挤）、图标 16（默认 14 偏糊）
-
-        阴影从默认 30px 模糊降到 12：桌面开动画壁纸时每帧都要全窗重绘，
-        大半径模糊是弹菜单卡顿的主要来源。
-        """
-        menu = RoundMenu(parent=self)
-        menu.setItemHeight(34)
-        menu.view.setIconSize(QSize(16, 16))
-        # 直接删阴影：QGraphicsDropShadowEffect 会让菜单走非原生绘制路径，
-        # 每帧软件模糊，在动画壁纸主题（全窗每帧重绘）上是弹菜单卡顿主因
-        menu.view.setGraphicsEffect(None)
-        return menu
-
-    def _popup_menu(self, menu: RoundMenu, anchor: Optional[QPoint] = None) -> None:
-        """右对齐锚点弹出，并钳制在窗口与屏幕内
-
-        ★ 直接 ``QCursor.pos()`` 弹菜单，在窄卡片上会向右溢出到软件窗口之外。
-        这里以锚点为右边界反向对齐，再由窗口与屏幕边界夹回来。
-        关闭弹入动画（ani=False）：250ms 动画在动画壁纸主题下每帧都要重绘
-        整个窗口，代价远大于那点过渡效果。
-        """
-        menu.exec(self._menu_position(menu, anchor), False)
-
-    def _menu_position(self, menu: RoundMenu, anchor: Optional[QPoint] = None) -> QPoint:
-        """算出菜单左上角：右对齐锚点 + 夹在窗口与屏幕内（溢出即被拉回）"""
-        menu.adjustSize()
-        point = anchor or QCursor.pos()
-        x = point.x() - menu.width() + 8
-        y = point.y() + 4
-        win = self.window()
-        if win is not None and win.isVisible():
-            tl = win.mapToGlobal(QPoint(0, 0))
-            x = max(tl.x() + 10, min(x, tl.x() + win.width() - menu.width() - 10))
-            y = max(tl.y() + 10, min(y, tl.y() + win.height() - menu.height() - 10))
-        screen = QApplication.screenAt(point) or QApplication.primaryScreen()
-        if screen is not None:
-            geo = screen.availableGeometry()
-            x = max(geo.left() + 4, min(x, geo.right() - menu.width() - 4))
-            y = max(geo.top() + 4, min(y, geo.bottom() - menu.height() - 4))
-        return QPoint(int(x), int(y))
-
-    # ── 预览区右键菜单 ──
-
-    def _on_preview_context_menu(self, global_pos: QPoint) -> None:
-        """代码区右键：接管 QPlainTextEdit 自带的原生黑菜单"""
-        page = self._preview_page
-        path = page.current_path()
-        if not path:
-            return
-        menu = self._new_menu()
-
-        copy_action = Action(FluentIcon.COPY.icon(), "复制", menu, triggered=page.copy_selection)
-        copy_action.setEnabled(page.has_selection())
-        menu.addAction(copy_action)
-        menu.addAction(Action(FluentIcon.EDIT.icon(), "全选", menu, triggered=page.select_all_text))
-
-        if page.current_kind() == "text":
-            menu.addSeparator()
-            menu.addAction(
-                Action(
-                    FluentIcon.SYNC.icon(),
-                    f"自动换行：{'开' if page.wrap_enabled() else '关'}",
-                    menu,
-                    triggered=page.toggle_wrap,
-                )
-            )
-            menu.addAction(
-                Action(
-                    FluentIcon.CODE.icon(),
-                    f"语法高亮：{'开' if page.highlight_enabled() else '关'}",
-                    menu,
-                    triggered=page.toggle_highlight,
-                )
-            )
-
-        menu.addSeparator()
-        menu.addAction(
-            Action(
-                FluentIcon.SYNC.icon(),
-                "重新加载",
-                menu,
-                triggered=lambda: page.reload_current(),
-            )
+        _act(FluentIcon.FOLDER, "在资源管理器中显示").triggered.connect(
+            lambda: self._open_in_explorer(path)
         )
-        menu.addAction(
-            Action(
-                FluentIcon.LANGUAGE.icon(),
-                "打开方式…",
-                menu,
-                triggered=lambda: self._show_open_with_menu(path, global_pos),
-            )
-        )
-        self._popup_menu(menu, global_pos)
+        menu.exec_(QCursor.pos())
 
     def _launch_with(self, opener, path: str) -> None:
         if not launch(opener, path):
@@ -1818,7 +1716,6 @@ class FileTreeCard(QWidget):
 
     def _open_preview(self, path: str) -> None:
         """卡片内预览（双击 / 右键菜单入口）；预览不了回退到默认程序"""
-        t_start = time.perf_counter()
         if not path or not os.path.isfile(path):
             self._show_error(f"文件不存在: {path}")
             return
@@ -1837,10 +1734,6 @@ class FileTreeCard(QWidget):
             self._open_file(path)
             return
         self._stack.setCurrentIndex(_PAGE_PREVIEW)
-        logger.info(
-            f"[FileTree] 预览打开 {os.path.basename(path)} 耗时 "
-            f"{(time.perf_counter() - t_start) * 1000:.0f}ms"
-        )
 
     def _close_preview(self) -> None:
         """返回文件树（树页未销毁，展开 / 选中 / 滚动原样保留）"""

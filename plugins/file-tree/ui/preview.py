@@ -13,10 +13,7 @@
 """
 
 import os
-import time
 from typing import Optional, Tuple
-
-from loguru import logger
 
 from PyQt5.QtCore import QPoint, QPointF, QRect, QRectF, QSize, Qt, pyqtSignal
 from PyQt5.QtGui import QColor, QFont, QIcon, QImageReader, QPainter, QPen, QPixmap, QTextCursor
@@ -30,7 +27,7 @@ from PyQt5.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-from qfluentwidgets import FluentIcon, TransparentToolButton
+from qfluentwidgets import FluentIcon, TransparentDropDownToolButton, TransparentToolButton
 
 from .highlight import CodeHighlighter, analyze
 
@@ -178,139 +175,6 @@ def _mono_font(pixel_size: int) -> QFont:
         font.setFamily("Consolas")
     font.setPixelSize(max(11, int(pixel_size)))
     return font
-
-class _OpenWithButton(QWidget):
-    """「默认程序图标 + 下拉箭头」分裂按钮（纯自绘）
-
-    为什么不用 qfluentwidgets 的 SplitToolButton：它把图标绘制托管给内部
-    ToolButton，程序图标（QIcon）在部分版本/打包环境下整块不显示，而且
-    无法在本机验证打包环境的具体版本。自绘只依赖 QPainter，画什么是什么。
-    """
-
-    default_clicked = pyqtSignal()
-    menu_clicked = pyqtSignal()
-
-    ICON_ZONE = 36  # 左半（图标区）宽度
-    ICON_SIZE = 16
-
-    def __init__(self, parent: Optional[QWidget] = None):
-        super().__init__(parent)
-        self._icon = QIcon()
-        self._pixmap = QPixmap()
-        self._pixmap_dpr = 0.0
-        self._fg = QColor(150, 150, 150)
-        self._hover_bg = QColor(255, 255, 255, 20)
-        self._hover_zone = 0  # 0=无 / 1=左半 / 2=右半
-        self.setFixedSize(58, 26)
-        self.setMouseTracking(True)
-        self.setCursor(Qt.ArrowCursor)
-
-    # ── 外部接口 ──
-
-    def set_icon(self, icon: QIcon) -> None:
-        """外部图标一次性转成 pixmap
-
-        ★ paintEvent 里绝不能直接调 ``QIcon.pixmap()``：QFileIconProvider 返回的
-        QIcon 每次都可能重新走一次 shell 图标提取。动画壁纸主题下按钮每帧重绘，
-        实测主线程被单次 5199ms 阻塞卡死（watchdog 栈顶就在这行）。
-        """
-        self._icon = icon or QIcon()
-        self._pixmap_dpr = 0.0  # 强制按当前 DPR 重建
-        self._rebuild_pixmap()
-        self.update()
-
-    def icon(self) -> QIcon:
-        return self._icon
-
-    def has_icon(self) -> bool:
-        return not self._pixmap.isNull()
-
-    def set_colors(self, fg: QColor, hover_bg: QColor) -> None:
-        self._fg = QColor(fg)
-        self._hover_bg = QColor(hover_bg)
-        self.update()
-
-    def _rebuild_pixmap(self) -> None:
-        self._pixmap = QPixmap()
-        if self._icon.isNull():
-            return
-        dpr = self.devicePixelRatioF() or 1.0
-        size = max(1, int(round(self.ICON_SIZE * dpr)))
-        pixmap = self._icon.pixmap(QSize(size, size))
-        if pixmap.isNull():
-            return
-        pixmap.setDevicePixelRatio(dpr)
-        self._pixmap = pixmap
-        self._pixmap_dpr = dpr
-
-    # ── 绘制 ──
-
-    def _zone_at(self, pos: QPoint) -> int:
-        return 1 if pos.x() < self.ICON_ZONE else 2
-
-    def paintEvent(self, event):  # noqa: N802 (Qt 命名)
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.Antialiasing, True)
-        rect = self.rect().adjusted(0, 0, -1, -1)
-        if self._hover_zone:
-            painter.setPen(Qt.NoPen)
-            painter.setBrush(self._hover_bg)
-            painter.drawRoundedRect(rect, 5, 5)
-
-        # 左半：默认程序图标（预渲染的 pixmap，绘制期零 QIcon 调用）
-        dpr = self.devicePixelRatioF() or 1.0
-        if not self._icon.isNull() and abs(dpr - self._pixmap_dpr) > 1e-3:
-            self._rebuild_pixmap()  # 窗口搬去另一块屏（DPR 变化）时补一次
-        if not self._pixmap.isNull():
-            ratio = self._pixmap.devicePixelRatio() or 1.0
-            draw_w = self._pixmap.width() / ratio
-            draw_h = self._pixmap.height() / ratio
-            x = (self.ICON_ZONE - draw_w) / 2.0
-            y = (self.height() - draw_h) / 2.0
-            painter.drawPixmap(QPointF(x, y), self._pixmap)
-
-        # 分隔线
-        pen = QPen(self._fg)
-        pen.setWidthF(1.0)
-        painter.setPen(pen)
-        painter.drawLine(QPointF(self.ICON_ZONE, 6), QPointF(self.ICON_ZONE, self.height() - 6))
-
-        # 右半：下拉箭头
-        pen.setWidthF(1.6)
-        pen.setCapStyle(Qt.RoundCap)
-        pen.setJoinStyle(Qt.RoundJoin)
-        painter.setPen(pen)
-        cx = self.ICON_ZONE + (self.width() - self.ICON_ZONE) / 2.0
-        cy = self.height() / 2.0
-        painter.drawLine(QPointF(cx - 3.2, cy - 1.5), QPointF(cx, cy + 1.7))
-        painter.drawLine(QPointF(cx + 3.2, cy - 1.5), QPointF(cx, cy + 1.7))
-        painter.end()
-
-    # ── 交互 ──
-
-    def mousePressEvent(self, event):  # noqa: N802 (Qt 命名)
-        if event.button() == Qt.LeftButton:
-            if self._zone_at(event.pos()) == 1:
-                self.default_clicked.emit()
-            else:
-                self.menu_clicked.emit()
-            event.accept()
-            return
-        super().mousePressEvent(event)
-
-    def mouseMoveEvent(self, event):  # noqa: N802 (Qt 命名)
-        zone = self._zone_at(event.pos())
-        if zone != self._hover_zone:
-            self._hover_zone = zone
-            self.update()
-        super().mouseMoveEvent(event)
-
-    def leaveEvent(self, event):  # noqa: N802 (Qt 命名)
-        if self._hover_zone:
-            self._hover_zone = 0
-            self.update()
-        super().leaveEvent(event)
-
 
 def _wrap_icon(color: QColor) -> QIcon:
     """自绘「自动换行」图标（折返箭头）—— FluentIcon 里没有对应资源"""
@@ -719,9 +583,7 @@ class FilePreviewPage(QWidget):
     """卡片内预览页：顶栏（返回 + 文件名 + 视图开关 + 打开方式）+ 内容区"""
 
     back_requested = pyqtSignal()
-    open_with_requested = pyqtSignal(str)  # 展开程序列表（参数为当前文件路径）
-    open_default_requested = pyqtSignal(str)  # 直接用默认程序打开
-    context_menu_requested = pyqtSignal(QPoint)  # 代码区右键（全局坐标）
+    open_with_requested = pyqtSignal(str)  # 参数为当前文件路径
 
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
@@ -732,8 +594,6 @@ class FilePreviewPage(QWidget):
         self._secondary_color = QColor(150, 150, 150)
         self._accent_color = QColor(80, 150, 220)
         self._is_dark = True
-        self._icon_cache: dict = {}
-        self._colors_signature = None
         self._setup_ui()
 
     # ── 公开接口 ──
@@ -764,25 +624,17 @@ class FilePreviewPage(QWidget):
             self._image_view.set_pixmap(pixmap)
             self._content.setCurrentIndex(0)
             self._set_hint(hint)
-            self._update_default_opener_icon(path)
             return True
         if self._kind == "text":
-            t0 = time.perf_counter()
             try:
                 text, hint = read_text(path)
             except Exception as e:  # noqa: BLE001
                 self._show_message(f"⚠️ {e}")
                 return False
-            t_read = time.perf_counter()
             language, skipped = self._code_view.set_source(path, text)
-            logger.debug(
-                f"[FileTree] 读 {os.path.basename(path)} "
-                f"read {(t_read - t0) * 1000:.0f}ms / 高亮 {(time.perf_counter() - t_read) * 1000:.0f}ms"
-            )
             self._content.setCurrentIndex(1)
             self._sync_highlight_button(language, skipped)
             self._set_hint(self._compose_hint(hint, skipped))
-            self._update_default_opener_icon(path)
             return True
         self._show_message("该文件类型不支持预览，请用默认程序打开")
         return False
@@ -813,20 +665,6 @@ class FilePreviewPage(QWidget):
     ) -> None:
         """应用卡片主题色（字体 / 边框 / 行号 / 选区 / 提示条）"""
         colors = colors or {}
-        # 签名去重：主题未变时跳过整套 setStyleSheet（会触发全窗重排与重绘，
-        # 动画壁纸主题下每次打开预览都白跑一遍）
-        signature = (
-            font_family,
-            font_size,
-            scrollbar_qss,
-            tuple(
-                (key, value.name() if isinstance(value, QColor) else str(value))
-                for key, value in sorted(colors.items())
-            ),
-        )
-        if signature == self._colors_signature:
-            return
-        self._colors_signature = signature
         family = font_family or colors.get("font_family", "Microsoft YaHei")
         self._font_size = int(font_size or colors.get("font_size", 14))
         text_color = colors.get("text", QColor(220, 220, 220))
@@ -877,64 +715,21 @@ class FilePreviewPage(QWidget):
         self._refresh_control_icons()
 
     def _refresh_control_icons(self) -> None:
-        """顶栏按钮图标按主题着色；开关类按钮用强调色表示「已开启」
-
-        ★ 图标按（资源, 颜色）缓存：FluentIcon.icon(color=) 每次都重新渲染 SVG，
-        在动画主题（每帧全窗重绘）下反复重建是纯浪费。
-        """
+        """顶栏按钮图标按主题着色；开关类按钮用强调色表示「已开启」"""
         accent = self._accent_color
         inactive = self._secondary_color
         try:
-            self._wrap_btn.setIcon(
-                self._cached_wrap_icon(accent if self._code_view.wrap_enabled() else inactive)
-            )
+            self._wrap_btn.setIcon(_wrap_icon(accent if self._code_view.wrap_enabled() else inactive))
         except Exception:
             pass
         try:
             self._highlight_btn.setIcon(
-                self._tool_icon(FluentIcon.CODE, accent if self._code_view.highlight_enabled() else inactive)
+                FluentIcon.CODE.icon(color=accent if self._code_view.highlight_enabled() else inactive)
             )
-            self._reload_btn.setIcon(self._tool_icon(FluentIcon.SYNC, inactive))
-            hover_bg = QColor(255, 255, 255, 26) if self._is_dark else QColor(0, 0, 0, 18)
-            self._open_with_btn.set_colors(inactive, hover_bg)
+            self._reload_btn.setIcon(FluentIcon.SYNC.icon(color=inactive))
+            self._open_with_btn.setIcon(FluentIcon.APPLICATION.icon(color=inactive))
         except Exception:
             pass
-
-    def _tool_icon(self, icon: FluentIcon, color: QColor) -> QIcon:
-        """FluentIcon → 预渲染 pixmap（按当前 DPR），并缓存
-
-        直接给按钮 QIcon 的话，每次重绘都会请求 pixmap，动画壁纸主题下
-        就是每帧一次图标引擎调用；转成 pixmap 后重绘只是 blit。
-        """
-        dpr = self.devicePixelRatioF() or 1.0
-        key = (str(getattr(icon, "name", icon)), color.name(), round(dpr, 2))
-        cached = self._icon_cache.get(key)
-        if cached is not None:
-            return cached
-        base = icon.icon(color=color)
-        size = max(1, int(round(20 * dpr)))
-        pixmap = base.pixmap(QSize(size, size))
-        if pixmap.isNull():
-            cached = base
-        else:
-            pixmap.setDevicePixelRatio(dpr)
-            cached = QIcon(pixmap)
-        self._icon_cache[key] = cached
-        return cached
-
-    def _cached_wrap_icon(self, color: QColor) -> QIcon:
-        dpr = self.devicePixelRatioF() or 1.0
-        key = ("wrap", color.name(), round(dpr, 2))
-        cached = self._icon_cache.get(key)
-        if cached is not None:
-            return cached
-        icon = _wrap_icon(color)
-        pixmap = icon.pixmap(QSize(max(1, int(round(20 * dpr))), max(1, int(round(20 * dpr)))))
-        if not pixmap.isNull():
-            pixmap.setDevicePixelRatio(dpr)
-            icon = QIcon(pixmap)
-        self._icon_cache[key] = icon
-        return icon
 
     # ── UI ──
 
@@ -992,10 +787,10 @@ class FilePreviewPage(QWidget):
         self._reload_btn.setToolTip("重新加载（文件被外部修改后重读）")
         self._reload_btn.clicked.connect(self.reload_current)
 
-        self._open_with_btn = _OpenWithButton(self._header)
-        self._open_with_btn.setToolTip("打开方式")
-        self._open_with_btn.default_clicked.connect(self._emit_open_default)
-        self._open_with_btn.menu_clicked.connect(self._emit_open_with)
+        self._open_with_btn = TransparentDropDownToolButton(FluentIcon.APPLICATION, self._header)
+        self._open_with_btn.setFixedSize(34, 26)
+        self._open_with_btn.setToolTip("用其他程序打开")
+        self._open_with_btn.clicked.connect(self._emit_open_with)
 
         head.addWidget(self._back_btn)
         head.addWidget(self._name_label, 1)
@@ -1014,9 +809,6 @@ class FilePreviewPage(QWidget):
 
         self._image_view = _ImageView(self)
         self._code_view = _CodeView(self)
-        # 右键菜单必须接管：QPlainTextEdit 自带的是原生黑菜单，与卡片主题两张皮
-        self._code_view.setContextMenuPolicy(Qt.CustomContextMenu)
-        self._code_view.customContextMenuRequested.connect(self._emit_context_menu)
 
         self._msg_label = QLabel("", self)
         self._msg_label.setAlignment(Qt.AlignCenter)
@@ -1050,82 +842,6 @@ class FilePreviewPage(QWidget):
     def _emit_open_with(self) -> None:
         if self._path:
             self.open_with_requested.emit(self._path)
-
-    def _emit_open_default(self) -> None:
-        if self._path:
-            self.open_default_requested.emit(self._path)
-
-    def _emit_context_menu(self, pos: QPoint) -> None:
-        self.context_menu_requested.emit(self._code_view.viewport().mapToGlobal(pos))
-
-    # ── 打开方式（左侧：默认程序图标） ──
-
-    def configure_open_with(self, icon: QIcon, label: str) -> None:
-        """设左半边的默认程序图标与悬停提示（图标缺失时退回通用应用图标）"""
-        if icon is None or icon.isNull():
-            icon = self._tool_icon(FluentIcon.APPLICATION, self._secondary_color)
-        self._open_with_btn.set_icon(icon)
-        self._open_with_btn.setToolTip(f"用 {label} 打开" if label else "用默认程序打开")
-
-    def open_with_anchor(self) -> QPoint:
-        """分裂按钮左下角的全局坐标（菜单右对齐到这里）"""
-        return self._open_with_btn.mapToGlobal(QPoint(0, self._open_with_btn.height()))
-
-    def _update_default_opener_icon(self, path: str) -> None:
-        """按当前文件的系统关联刷新左半边图标
-
-        ★ 由预览页自己负责而不是等外部调用：载入流程内部完成，「什么时候
-        显示了文件却没有默认程序图标」这类时序问题直接消失。
-        """
-        opener = None
-        try:
-            from .openwith import list_openers
-
-            openers = list_openers(path)
-        except Exception:
-            openers = []
-        for candidate in openers:
-            if candidate.is_default:
-                opener = candidate
-                break
-        if opener is None and openers:
-            opener = openers[0]
-        icon = QIcon()
-        if opener is not None:
-            try:
-                from .openwith import icon_for_exe
-
-                icon = icon_for_exe(opener.exe)
-            except Exception:
-                icon = QIcon()
-        self.configure_open_with(icon, opener.label if opener else "")
-
-    # ── 代码区能力（供右键菜单调用） ──
-
-    def code_view(self) -> "_CodeView":
-        return self._code_view
-
-    def copy_selection(self) -> None:
-        self._code_view.copy()
-
-    def select_all_text(self) -> None:
-        self._code_view.selectAll()
-
-    def has_selection(self) -> bool:
-        cursor = self._code_view.textCursor()
-        return cursor is not None and cursor.hasSelection()
-
-    def toggle_wrap(self) -> None:
-        self._on_toggle_wrap()
-
-    def toggle_highlight(self) -> None:
-        self._on_toggle_highlight()
-
-    def wrap_enabled(self) -> bool:
-        return self._code_view.wrap_enabled()
-
-    def highlight_enabled(self) -> bool:
-        return self._code_view.highlight_enabled()
 
     # ── 视图开关 ──
 

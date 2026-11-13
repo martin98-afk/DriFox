@@ -3340,15 +3340,15 @@ class CodeWebViewer(QWebEngineView):
                 .cm-collapsible__summary:focus-visible {{
                     box-shadow: inset 0 0 0 1px rgba(102, 198, 255, 0.28);
                 }}
-                /* 工具卡里的文件地址：点击→系统程序打开。点划线与正文文本区分；
-                   hover 高亮由本类直接命中（不依赖父级内联 color 的继承）。 */
+                /* 工具卡里的文件地址：点击→系统程序打开。默认不加装饰（虚下划线
+                   在密集工具卡里太吵）；hover 变主题强调色 + 实线下划线，与正文
+                   链接（a）同色系，可点语义直接。 */
                 .tool-path-link {{
                     cursor: pointer;
-                    text-decoration: underline dotted;
-                    text-underline-offset: 2px;
+                    text-decoration: none;
                 }}
                 .tool-path-link:hover {{
-                    color: var(--text);
+                    color: var(--accent);
                     text-decoration: underline;
                 }}
                 .cm-collapsible__chevron {{
