@@ -14114,16 +14114,12 @@ class OpenAIChatToolWindow(ToolWindow):
 
     # ── B4 强回收层：内存超阈值时 kill 离屏 renderer 进程（T13 蓝图） ──
 
-    def _pid_still_in_use(self, pid: int) -> bool:
-        """检查该 renderer PID 是否仍被任何「未卸载」的卡片占用。
+    def _pid_used_by_cards(self, pid: int) -> bool:
+        """PID 是否被本窗口「卡片」占用（不含池护栏，T31 池候选专用）。
 
-        🛡️ Chromium 进程复用护栏：main.py 现在设置了
-        `--renderer-process-limit=N`，达到上限后 Chromium 会让多张卡片共享
-        同一个 renderer 进程。这意味着卡片卸载时登记的 `_renderer_pid`
-        可能是**其他仍在使用中的卡片**的 PID —— 若直接 kill，会让那些卡片
-        正文瞬间变空白（用户可见的严重故障）。
-
-        因此 kill 前必须确认：没有任何仍挂在布局上的卡片依赖该 PID。
+        与 _pid_still_in_use 的差别：后者把 WebViewPool 池内 pid 也视为在用，
+        对池候选会自指恒真。T31 刻意要回收池内进程，故单独提供只查卡片的
+        判据，避免 kill 池 pid 时误伤共享同一 renderer 的可见/流式卡。
         """
         if pid <= 0:
             return False
@@ -14144,15 +14140,6 @@ class OpenAIChatToolWindow(ToolWindow):
                     return True
             except RuntimeError:
                 pass
-        # [池化] 复用池中 viewer 的 renderer 进程仍存活且随时会被取出复用，
-        # 必须视为「在用」——否则强回收 kill 掉它，复用时卡片直接白屏。
-        try:
-            from app.widgets.webview_pool import WebViewPool
-
-            if pid in WebViewPool.get_instance().pids():
-                return True
-        except Exception:
-            pass
         # [A3-C] 方案 C 保留期内的卡片：widget 已摘出布局、_batch_cards 已被
         # 新会话重建覆盖，但卡片活着且随时会被切回复用——kill 会让切回白屏。
         kept = getattr(self, "_kept_session_tab", None)
@@ -14163,6 +14150,32 @@ class OpenAIChatToolWindow(ToolWindow):
                         return True
                 except RuntimeError:
                     continue
+        return False
+
+    def _pid_still_in_use(self, pid: int) -> bool:
+        """检查该 renderer PID 是否仍被任何「未卸载」的卡片占用。
+
+        🛡️ Chromium 进程复用护栏：main.py 现在设置了
+        `--renderer-process-limit=N`，达到上限后 Chromium 会让多张卡片共享
+        同一个 renderer 进程。这意味着卡片卸载时登记的 `_renderer_pid`
+        可能是**其他仍在使用中的卡片**的 PID —— 若直接 kill，会让那些卡片
+        正文瞬间变空白（用户可见的严重故障）。
+
+        因此 kill 前必须确认：没有任何仍挂在布局上的卡片依赖该 PID。
+        """
+        if pid <= 0:
+            return False
+        if self._pid_used_by_cards(pid):
+            return True
+        # [池化] 复用池中 viewer 的 renderer 进程仍存活且随时会被取出复用，
+        # 必须视为「在用」——否则强回收 kill 掉它，复用时卡片直接白屏。
+        try:
+            from app.widgets.webview_pool import WebViewPool
+
+            if pid in WebViewPool.get_instance().pids():
+                return True
+        except Exception:
+            pass
         return False
 
     @staticmethod
@@ -16923,6 +16936,7 @@ class OpenAIChatToolWindow(ToolWindow):
             on_action=self._on_code_action,
             on_context_action=on_context_action,
             on_tool_diff=self._on_tool_diff_requested,
+            on_open_file=self._on_open_file_requested,
             on_card_diff=self._on_card_diff_requested,
             on_save_file=self._on_save_file_requested,
             on_review=self._on_review_requested,
@@ -18880,6 +18894,48 @@ class OpenAIChatToolWindow(ToolWindow):
                 parent=TabManagerWindow.get_instance() or self.window(),
                 duration=3000,
                 position=InfoBarPosition.BOTTOM,
+            )
+
+    def _on_open_file_requested(self, path: str):
+        """工具完成框里的文件地址点击：按会话 workdir 解析后交给系统程序打开
+
+        工具参数里的 path 可能是相对路径（工具执行时以 workdir 为基准解析），
+        渲染层原样携带完整路径；解析与存在性检查都在宿主做，失败给可见提示
+        （旧实现静默吞异常，点了没反应无从排查）。
+        """
+        raw = (path or "").strip()
+        if not raw:
+            return
+        try:
+            target = Path(os.path.expandvars(raw)).expanduser()
+            if not target.is_absolute():
+                workdir = ""
+                try:
+                    if self.backend is not None and self.backend.tool_executor is not None:
+                        workdir = self.backend.tool_executor.get_workdir() or ""
+                except Exception:
+                    workdir = ""
+                target = (Path(workdir) if workdir else Path.cwd()) / target
+            if not target.exists():
+                InfoBar.warning(
+                    title="文件不存在",
+                    content=str(target),
+                    orient=Qt.Horizontal,
+                    isClosable=True,
+                    duration=4000,
+                    parent=TabManagerWindow.get_instance() or self.window(),
+                )
+                return
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(target)))
+        except Exception as e:
+            logger.error(f"[MainWidget] 打开工具卡路径失败: {raw} -> {e}")
+            InfoBar.error(
+                title="打开失败",
+                content=str(e),
+                orient=Qt.Horizontal,
+                isClosable=True,
+                duration=3000,
+                parent=TabManagerWindow.get_instance() or self.window(),
             )
 
     def _on_tool_diff_requested(self, tool_call_id: str):

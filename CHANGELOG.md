@@ -1,4 +1,9 @@
 ## [Unreleased]
+
+### ✨ 新功能 (New Features)
+
+- **工具完成框里的文件地址可点击打开** (`app/widgets/render_helpers.py` · `app/widgets/card_viewers.py` · `app/main_widget.py`): 折叠头右侧路径、以及 read/grep/list/glob 单行卡预览里的路径片段渲染为可点元素（虚下划线 + hover 高亮，悬停 title 显示完整路径），点击由骨架 click 委托在折叠头之前抢断，转 `open_file` 消息交宿主按会话 workdir 解析后用系统程序打开；路径不存在给 InfoBar 提示（原实现静默吞异常）。显示文本仍是首尾缩短版，`data-open-path` 存完整原始路径。骨架版本 v79 → v80。
+
 ## [v0.7.2] - 2026-11-13 (重新发布 #2)
 
 自 v0.7.1 以来的变更 | 提交数：123 · 文件变更：508 · +23254/-8707 | 贡献者：dingma, drifox-bot, mading, martin98-afk

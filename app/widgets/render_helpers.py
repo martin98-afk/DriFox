@@ -152,6 +152,40 @@ def _shorten_path(path: str, max_len: int = 56) -> str:
     return f"{path[:half]}…{path[-half:]}"
 
 
+# ===== 工具卡路径可点（点击 → 宿主用系统程序打开该文件/目录） =====
+# 只覆盖工具完成框上显示的路径：header 右侧地址、inline 卡（read/grep/list/glob）
+# 自然语言预览里的路径片段。显示文本可能被 _shorten_path 截断，data-open-path
+# 始终携带原始完整路径；相对路径由宿主按会话 workdir 解析。
+def _tool_path_arg(tool_args) -> str:
+    """取工具参数里的主路径（单目标工具：read/write/edit/grep/list/glob 等）"""
+    if not isinstance(tool_args, dict):
+        return ""
+    for key in ("file_path", "path"):
+        value = tool_args.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+def _render_path_link(display: str, path: str) -> str:
+    """可点路径元素：显示 display（可为截断文本），携带完整原始路径"""
+    return (
+        f'<span class="tool-path-link" data-open-path="{escape(path)}" '
+        f'title="{escape(path)}">{escape(display)}</span>'
+    )
+
+def _linkify_path(text: str, path: str) -> str:
+    """把纯文本里的 path 子串替换成可点元素
+
+    未命中返回空串（调用方自行 escape 整段文本）。只做精确子串匹配：
+    插件 preview 可能把路径相对化/改写，匹配不上就保持纯文本，不猜。
+    """
+    if not text or not path:
+        return ""
+    idx = text.find(path)
+    if idx < 0:
+        return ""
+    return escape(text[:idx]) + _render_path_link(path, path) + escape(text[idx + len(path) :])
+
 def _format_args_preview(tool_args: dict, max_total_len: int = 80) -> str:
     """
     格式化参数预览为 '参数1=值1; 参数2=值2' 格式。
@@ -740,6 +774,8 @@ def _render_inline_tool(
     # 去重：自然语言预览开头如与工具名重复则省略
     if natural_preview.startswith(cn_name):
         natural_preview = natural_preview[len(cn_name) :].lstrip()
+    # 预览里的路径片段可点（read/grep/list/glob 这类单行卡只有 preview 承载路径）
+    preview_html = _linkify_path(natural_preview, _tool_path_arg(tool_args)) or escape(natural_preview)
     tc_id_attr = f' data-tool-call-id="{escape(tool_call_id)}"' if tool_call_id else ""
     # 编辑/子智能体/提问类工具标记 data-keep-in-content：JS 正文分区据此保留在正文（registry 派生）
     _keep_attr = ' data-keep-in-content="true"' if tool_name in _keep_in_content_tools() else ""
@@ -753,7 +789,7 @@ def _render_inline_tool(
             <span style="white-space: nowrap; flex: 0 0 auto; color: {Colors.TOOL_TITLE_MCP if tool_name.startswith('mcp__') else Colors.TOOL_TITLE}; font-size: {scale_font_size(13)}px; font-weight: 500;">{escape(cn_name)}</span>
         </span>
         <span style="flex: 1 1 auto; min-width: 0; text-align: left; color: var(--text-secondary); font-size: {scale_font_size(11)}px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-left: 12px;">
-            {escape(natural_preview)}
+            {preview_html}
         </span>
     </div>"""
 
@@ -969,17 +1005,25 @@ def render_tool_block(
         desc_text = str(tool_args.get("description") or "").strip()
     title_text = desc_text or cn_name
     # 描述不截断：宁可右侧路径被挤掉，也要把「这一步做什么」完整摆出来
+    path_arg = _tool_path_arg(tool_args)
     preview_text = args_preview
-    if desc_text and isinstance(tool_args, dict):
-        preview_text = _shorten_path(str(tool_args.get("path") or tool_args.get("file_path") or "").strip())
+    preview_is_path = False
+    if desc_text:
+        # 有描述时右侧专放文件路径（事实信息），整段可点
+        preview_text = _shorten_path(path_arg)
+        preview_is_path = bool(path_arg)
     elif len(preview_text) > 80:
         # 无描述时保持原预览，只对超长串做首尾缩短（尾部通常是文件名）
         preview_text = _shorten_path(preview_text, 80)
     preview_span = ""
     if preview_text:
         # 右侧必须单行：路径换行会撑破 header 行高，和下一块工具卡叠在一起
+        if preview_is_path:
+            preview_inner = _render_path_link(preview_text, path_arg)
+        else:
+            preview_inner = _linkify_path(preview_text, path_arg) or escape(preview_text)
         preview_span = f'''<span style="color: var(--text-secondary); font-size: {scale_font_size(11)}px; text-align: left; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">
-                {escape(preview_text)}
+                {preview_inner}
             </span>'''
 
     # 生成哈希 key（折叠块懒注入的早返回也要用，故提前到内容构造之前）
@@ -1001,7 +1045,7 @@ def render_tool_block(
     # 无 tool_call_id 的块无法反查源文本，不懒化（否则展开后永久空白）。
     if lazy_body and tool_call_id and (collapsed or no_collapse):
         _keep_attr = ' data-keep-in-content="true"' if tool_name in _keep_in_content_tools() else ""
-        _head_spans = f"""<span style="display: inline-flex; align-items: center; gap: 14px; flex: 0 1 auto; min-width: 0;">
+        _head_spans = f"""<span style="display: inline-flex; align-items: center; gap: 14px; flex: 0 0 auto;">
             <span style="position:relative;display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;flex:0 0 auto;">
                 {icon_html}
                 {badge_html}
@@ -1133,7 +1177,7 @@ def render_tool_block(
         _keep_attr = ' data-keep-in-content="true"' if tool_name in _keep_in_content_tools() else ""
         return f"""<div class="tool-block tool-block--no-collapse" data-tool-name="{escape(tool_name)}" data-tool-call-id="{escape(tool_call_id or "")}"{_keep_attr}{_succ_attr} style="margin: 4px 0; background: transparent; border-radius: 6px;">
     <div class="tool-block__header" style="cursor: default; padding: 4px 8px; color: {title_color}; font-size: {scale_font_size(13)}px; font-weight: 500; display: flex; align-items: center; gap: 6px; width: 100%; overflow: hidden; background: transparent; border: none; text-align: left; box-sizing: border-box; {get_font_family_css()}">
-        <span style="display: inline-flex; align-items: center; gap: 14px; flex: 0 1 auto; min-width: 0;">
+        <span style="display: inline-flex; align-items: center; gap: 14px; flex: 0 0 auto;">
             <span style="position:relative;display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;flex:0 0 auto;">
                 {icon_html}
                 {badge_html}
@@ -1152,7 +1196,7 @@ def render_tool_block(
     _keep_attr = ' data-keep-in-content="true"' if tool_name in _keep_in_content_tools() else ""
     return f"""<div class="cm-collapsible tool-block" data-block-key="{block_key}" data-expanded="{expanded_attr}" data-tool-name="{escape(tool_name)}" data-tool-call-id="{escape(tool_call_id or "")}"{_keep_attr}{_succ_attr} style="margin: 4px 0; background: transparent; border-radius: 6px;">
     <button type="button" class="cm-collapsible__summary tool-block__summary" aria-expanded="{expanded_attr}" style="cursor: pointer; padding: 4px 8px; color: {title_color}; font-size: {scale_font_size(13)}px; font-weight: 500; display: flex; align-items: center; gap: 6px; width: 100%; overflow: hidden; background: transparent; border: none; text-align: left; box-sizing: border-box; {get_font_family_css()}">
-        <span style="display: inline-flex; align-items: center; gap: 14px; flex: 0 1 auto; min-width: 0;">
+        <span style="display: inline-flex; align-items: center; gap: 14px; flex: 0 0 auto;">
             <span style="position:relative;display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;flex:0 0 auto;">
                 {icon_html}
                 {badge_html}
