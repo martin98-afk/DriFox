@@ -71,6 +71,24 @@ def _reg_names(root: int, path: str) -> List[str]:
     return names
 
 
+def _reg_subkeys(root: int, path: str) -> List[str]:
+    """列出键下的子键名（shell 动词都是子键，``_reg_names`` 只返回值名）"""
+    import winreg
+
+    names: List[str] = []
+    try:
+        with winreg.OpenKey(root, path, 0, winreg.KEY_READ) as key:
+            index = 0
+            while True:
+                try:
+                    names.append(winreg.EnumKey(key, index))
+                except OSError:
+                    break
+                index += 1
+    except OSError:
+        pass
+    return names
+
 def _file_exts_key(ext: str) -> str:
     return rf"Software\Microsoft\Windows\CurrentVersion\Explorer\FileExts\{ext}"
 
@@ -306,6 +324,150 @@ def list_openers(path: str) -> List[Opener]:
     return openers
 
 
+# ── 目录「打开方式」（资源管理器右键同源） ────────────────
+
+def _explorer_exe() -> str:
+    return os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "explorer.exe")
+
+def _shell_verbs(key_path: str) -> List[Tuple[str, str]]:
+    """枚举 ``<key_path>\\*`` 的 shell 动词 → [(显示名, 命令行)]
+
+    显示名依次取 ``MUIVerb`` / 键默认值；``@dll,-id`` 形式的资源引用取不到
+    本地化名（会把原始引用串直接显示出来），一律跳过。
+    """
+    import winreg
+
+    verbs: List[Tuple[str, str]] = []
+    for verb in _reg_subkeys(winreg.HKEY_CLASSES_ROOT, key_path):
+        base = key_path + "\\" + verb
+        label = (
+            _reg_read(winreg.HKEY_CLASSES_ROOT, base, "MUIVerb")
+            or _reg_read(winreg.HKEY_CLASSES_ROOT, base)
+        ).strip()
+        if not label or label.startswith("@"):
+            continue
+        command = _reg_read(winreg.HKEY_CLASSES_ROOT, base + r"\command") or _reg_read(
+            winreg.HKEY_CLASSES_ROOT, base + r"\shell\open\command"
+        )
+        if command:
+            verbs.append((label.replace("&", ""), command))
+    return verbs
+
+_FOLDER_OPENERS: Optional[List[Opener]] = None
+
+def _explorer_opener() -> Opener:
+    return Opener(
+        label="文件资源管理器",
+        exe=_explorer_exe(),
+        command='"explorer.exe" "%1"',
+        is_default=True,
+    )
+
+# ── macOS：目录候选（LaunchServices 声明的文件夹支持） ────
+
+# 声明这些 UTI 的应用才能“打开文件夹”（Finder 右键的「用 xx 打开」同源）
+_MAC_FOLDER_TYPES = ("public.folder", "public.directory")
+
+def _mac_app_dirs() -> List[str]:
+    return [
+        "/Applications",
+        "/Applications/Utilities",
+        os.path.join(os.path.expanduser("~"), "Applications"),
+    ]
+
+def _mac_bundle_label(bundle: str, info: dict) -> str:
+    for key in ("CFBundleDisplayName", "CFBundleName"):
+        value = str(info.get(key) or "").strip()
+        if value:
+            return value
+    return os.path.splitext(os.path.basename(bundle))[0]
+
+def _mac_folder_apps() -> List[Opener]:
+    """扫描 .app 的 Info.plist，挑出声明支持文件夹的应用（IDE / 终端等）
+
+    mac 没有注册表动词可枚举，权限信息在 bundle 的 ``CFBundleDocumentTypes``
+    里；只认 ``public.folder`` / ``public.directory``，避免把只能开文件的
+    应用也列进来。启动用 ``open -a <bundle> <path>``，复用通用命令行切分。
+    """
+    import plistlib
+
+    found: List[Opener] = []
+    seen = set()
+    for folder in _mac_app_dirs():
+        try:
+            names = os.listdir(folder)
+        except OSError:
+            continue
+        for name in names:
+            if not name.endswith(".app"):
+                continue
+            bundle = os.path.join(folder, name)
+            try:
+                with open(os.path.join(bundle, "Contents", "Info.plist"), "rb") as fh:
+                    info = plistlib.load(fh)
+            except Exception:  # 损坏/无权限的 bundle 跳过，不影响其它候选
+                continue
+            if not isinstance(info, dict):
+                continue
+            types: List[str] = []
+            for doc in info.get("CFBundleDocumentTypes") or []:
+                if isinstance(doc, dict):
+                    types.extend(doc.get("LSItemContentTypes") or [])
+            if not any(t in types for t in _MAC_FOLDER_TYPES):
+                continue
+            real = os.path.realpath(bundle)
+            if real in seen:
+                continue
+            seen.add(real)
+            found.append(
+                Opener(
+                    label=_mac_bundle_label(bundle, info),
+                    exe=bundle,
+                    command=f'open -a "{bundle}" "%1"',
+                )
+            )
+    found.sort(key=lambda o: o.label.lower())
+    return found
+
+def _mac_finder_opener() -> Opener:
+    return Opener(
+        label="访达",
+        exe="/System/Library/CoreServices/Finder.app",
+        command='open "%1"',
+        is_default=True,
+    )
+
+def list_folder_openers(path: str = "") -> List[Opener]:
+    """目录的「打开方式」候选（首项 = 系统文件管理器）
+
+    - Windows：枚举 ``HKCR\\Directory\\shell`` 与 ``Directory\\Background\\shell``
+      下注册的动词（与资源管理器右键菜单同源）
+    - macOS：访达 + 扫描 ``/Applications`` 各 bundle 的 ``CFBundleDocumentTypes``
+    - 其它平台：空列表（调用方退化为单一项）
+
+    结果按进程缓存；按 exe / bundle 去重。
+    """
+    global _FOLDER_OPENERS
+    if _FOLDER_OPENERS is not None:
+        return list(_FOLDER_OPENERS)
+    openers: List[Opener] = []
+    if os.name == "nt":
+        openers.append(_explorer_opener())
+        seen = {"explorer.exe"}
+        for key in (r"Directory\shell", r"Directory\Background\shell"):
+            for label, command in _shell_verbs(key):
+                exe = _resolve_exe(_exe_from_command(command))
+                key_name = (os.path.basename(exe) or label).lower()
+                if not key_name or key_name in seen:
+                    continue
+                seen.add(key_name)
+                openers.append(Opener(label=label, exe=exe, command=command))
+    elif sys.platform == "darwin":
+        openers.append(_mac_finder_opener())
+        openers.extend(_mac_folder_apps())
+    _FOLDER_OPENERS = list(openers)
+    return openers
+
 def _split_command(command: str) -> List[str]:
     """按 Windows 引号规则切分命令行（只处理双引号，足够覆盖 open 命令）"""
     parts: List[str] = []
@@ -366,6 +528,52 @@ def launch(opener: Opener, path: str) -> bool:
 
 # ── 图标 ──────────────────────────────────────────────────
 
+def _mac_icon_path(bundle: str) -> str:
+    """定位 .app 的 .icns 文件（读 Info.plist，不碰 LaunchServices）
+
+    ``CFBundleIconFile`` 可能带也可能不带 ``.icns`` 扩展；缺省时依次试
+    ``AppIcon.icns`` 与 Resources 下首个 icns（部分 app 不声明这个键）。
+    """
+    import plistlib
+
+    resources = os.path.join(bundle, "Contents", "Resources")
+    name = ""
+    try:
+        with open(os.path.join(bundle, "Contents", "Info.plist"), "rb") as fh:
+            info = plistlib.load(fh)
+        if isinstance(info, dict):
+            name = str(info.get("CFBundleIconFile") or "").strip()
+    except Exception:
+        name = ""
+    candidates: List[str] = []
+    if name:
+        candidates.append(name if name.lower().endswith(".icns") else name + ".icns")
+    candidates.append("AppIcon.icns")
+    for candidate in candidates:
+        path = os.path.join(resources, candidate)
+        if os.path.isfile(path):
+            return path
+    try:
+        for entry in sorted(os.listdir(resources)):
+            if entry.lower().endswith(".icns"):
+                return os.path.join(resources, entry)
+    except OSError:
+        pass
+    return ""
+
+def _mac_bundle_icon(bundle: str):
+    """读 bundle 内 icns 得到图标（Qt 自带 icns 读支持，无额外依赖）
+
+    不用 ``QFileIconProvider``：它走 LaunchServices / 图标缓存，与 Windows
+    上 SHGetFileInfo 同一类风险（未知耗时，UI 线程调用可能冻窗）。
+    """
+    from PyQt5.QtGui import QIcon, QPixmap
+
+    path = _mac_icon_path(bundle)
+    if not path:
+        return QIcon()
+    pixmap = QPixmap(path)
+    return QIcon(pixmap) if not pixmap.isNull() else QIcon()
 
 _ICON_API_CACHE = None
 
@@ -437,7 +645,12 @@ def icon_for_exe(exe: str):
     cached = _ICON_CACHE.get(key)
     if cached is not None:
         return cached  # type: ignore[return-value]
-    pixmap = _icon_from_exe(exe)
-    icon = QIcon(pixmap) if pixmap is not None else QIcon()
+    if os.name == "nt":
+        pixmap = _icon_from_exe(exe)
+        icon = QIcon(pixmap) if pixmap is not None else QIcon()
+    elif sys.platform == "darwin":
+        icon = _mac_bundle_icon(exe)
+    else:
+        icon = QIcon()
     _ICON_CACHE[key] = icon
     return icon

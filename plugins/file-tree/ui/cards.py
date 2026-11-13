@@ -58,11 +58,18 @@ from qfluentwidgets import (
     ScrollArea,
     SmoothScrollDelegate,
     TransparentPushButton,
+    TransparentToolButton,
     isDarkTheme,
 )
 
-from .openwith import DEFAULT_SUFFIX, icon_for_exe, launch, list_openers
-from .preview import FilePreviewPage, _wrap_icon, detect_kind
+from .openwith import (
+    DEFAULT_SUFFIX,
+    icon_for_exe,
+    launch,
+    list_folder_openers,
+    list_openers,
+)
+from .preview import FilePreviewPage, _ElidedLabel, _SplitButton, _wrap_icon, detect_kind
 from .scanner import _DirEntry, _TreeScanner
 from .tree_widget import (
     FileTreeFilterProxy,
@@ -81,6 +88,14 @@ _EXPAND_WAIT_TIMEOUT_S = 3.0
 _PAGE_TREE = 0
 _PAGE_PLACEHOLDER = 1
 _PAGE_PREVIEW = 2
+
+# 系统文件管理器叫法（菜单 / 提示文案；mac 是访达）
+if os.name == "nt":
+    _FILE_MANAGER = "资源管理器"
+elif sys.platform == "darwin":
+    _FILE_MANAGER = "访达"
+else:
+    _FILE_MANAGER = "文件管理器"
 
 
 def _same_path(a: str, b: str) -> bool:
@@ -456,9 +471,45 @@ class FileTreeCard(QWidget):
         self._stack.addWidget(self._preview_page)  # index 2: 文件预览页
         # 初始显示占位页，等待扫描完成
         self._stack.setCurrentIndex(1)
+        # 预览页自带顶栏（返回 + 文件名 + 视图开关）；切页时树顶栏让位。
+        # 用 currentChanged 统一控制可见性，所有切页入口（预览 / 返回 / 占位）都覆盖。
+        self._stack.currentChanged.connect(self._on_page_changed)
+
+        # ── 树模式顶栏（路径 + 刷新 + 打开方式）──
+        # 高度/底色/分隔线与预览页顶栏同口径，两页切换时观感连续。
+        self._tree_header = QFrame(self)
+        self._tree_header.setObjectName("file-tree-header")
+        self._tree_header.setFixedHeight(38)
+        head = QHBoxLayout(self._tree_header)
+        head.setContentsMargins(10, 0, 6, 0)
+        head.setSpacing(2)
+
+        self._root_label = _ElidedLabel("", self._tree_header)
+        self._root_label.setMinimumWidth(36)
+
+        self._refresh_btn = TransparentToolButton(FluentIcon.SYNC, self._tree_header)
+        self._refresh_btn.setFixedSize(26, 26)
+        self._refresh_btn.setToolTip("刷新文件树")
+        self._refresh_btn.clicked.connect(self._on_refresh)
+
+        # 分裂按钮：左半直接交给系统默认程序，右半拉候选列表
+        self._folder_btn = _SplitButton(self._tree_header)
+        self._folder_btn.set_icon(FluentIcon.FOLDER.icon())
+        self._folder_btn.set_tooltip(f"在{_FILE_MANAGER}中打开")
+        self._folder_btn.default_clicked.connect(self._open_root_folder)
+        self._folder_btn.menu_clicked.connect(self._show_root_open_with_menu)
+
+        head.addWidget(self._root_label, 1)
+        head.addWidget(self._refresh_btn)
+        head.addWidget(self._folder_btn)
 
         self._scroll_area.setWidget(self._tree_view)
+        self._vbox.addWidget(self._tree_header)
         self._vbox.addWidget(self._stack, 1)
+
+    def _on_page_changed(self, index: int) -> None:
+        """树顶栏只在树/占位页显示：预览页自带顶栏，不重复占一行"""
+        self._tree_header.setVisible(index != _PAGE_PREVIEW)
 
     def _setup_model(self):
         """创建 Model → Proxy → View 链路"""
@@ -707,6 +758,7 @@ class FileTreeCard(QWidget):
 
         self._colors = _make_colors_from_context(ctx)
         self._project_root = ctx.get("project_root", "")
+        self._root_label.setText(self._project_root)
         self._tree_view.project_root = self._project_root
         self._watcher.set_root(self._project_root)
 
@@ -748,17 +800,36 @@ class FileTreeCard(QWidget):
             f"color: {ph_color}; background: transparent; font-family: '{font_family}'; font-size: {font_size}px;"
         )
 
+        # 树顶栏：与预览页顶栏同口径（透明底 + 1px 分隔线）
+        border = self._colors["border"]
+        header_style = (
+            f"#file-tree-header {{ background: transparent;"
+            f"  border-bottom: 1px solid rgba({border.red()},{border.green()},{border.blue()},90); }}"
+        )
+        root_style = (
+            f"color: {tc_hex}; background: transparent;"
+            f"  font-family: '{font_family}'; font-size: {font_size}px;"
+        )
+
         # ★ 签名缓存：产出（全部样式串 + 字体）与上次全等时跳过所有 set。
         # 切工作台页 / 项目联动高频走这里，对整棵 QTreeView 重复
         # setStyleSheet + setFont 会触发整树 unpolish/polish + 全量重绘
         # （树 2000+ 行时单次 40-130ms，实测），而主题 / 字体 / 颜色未变时
         # 产出必然不变 —— 跳过后切页路径零成本。
-        signature = (tree_style, placeholder_style, font_family, font_size)
+        signature = (tree_style, placeholder_style, header_style, root_style, font_family, font_size)
         if signature == self._theme_signature:
             return
         self._theme_signature = signature
 
         self._tree_view.setStyleSheet(tree_style)
+        self._tree_header.setStyleSheet(header_style)
+        self._root_label.setStyleSheet(root_style)
+        secondary = self._colors.get("text_secondary", QColor(150, 150, 150))
+        self._refresh_btn.setIcon(FluentIcon.SYNC.icon(color=secondary))
+        self._folder_btn.set_icon_color(secondary)
+        self._folder_btn.set_hover_color(
+            QColor(255, 255, 255, 26) if is_dark else QColor(0, 0, 0, 18)
+        )
 
         self._scroll_area.setStyleSheet("#file-tree-scroll { background: transparent; border: none;}")
         self._scroll_area.viewport().setStyleSheet("background: transparent; border: none;")
@@ -1496,7 +1567,7 @@ class FileTreeCard(QWidget):
                 )
             _act(
                 FluentIcon.FOLDER,
-                "在资源管理器中打开" if is_dir else "打开所在文件夹",
+                f"在{_FILE_MANAGER}中打开" if is_dir else "打开所在文件夹",
             ).triggered.connect(lambda: self._open_in_explorer(item_path))
             if not is_dir and detect_kind(item_path):
                 _act(FluentIcon.VIEW, "预览").triggered.connect(lambda: self._open_preview(item_path))
@@ -1655,21 +1726,50 @@ class FileTreeCard(QWidget):
         def _act(icon: FluentIcon, text: str):
             return menu.addAction(_menu_icon(icon, icon_color), text)
 
-        openers = [] if os.path.isdir(path) else list_openers(path)
+        is_dir = os.path.isdir(path)
+        openers = list_folder_openers(path) if is_dir else list_openers(path)
         for opener in openers:
             label = opener.label + (DEFAULT_SUFFIX if opener.is_default else "")
             action = menu.addAction(icon_for_exe(opener.exe), label)
             action.triggered.connect(lambda _checked=False, o=opener: self._launch_with(o, path))
+        if is_dir:
+            # 目录候选首项就是文件管理器（默认），再列通用项会重复
+            if not openers:
+                _act(FluentIcon.FOLDER, f"在{_FILE_MANAGER}中显示").triggered.connect(
+                    lambda: self._open_in_explorer(path)
+                )
+            menu.exec_(self._menu_position(menu, anchor))
+            return
         if openers:
             menu.addSeparator()
 
         _act(FluentIcon.APPLICATION, "用系统默认程序打开").triggered.connect(
             lambda: self._open_file(path)
         )
-        _act(FluentIcon.FOLDER, "在资源管理器中显示").triggered.connect(
+        _act(FluentIcon.FOLDER, f"在{_FILE_MANAGER}中显示").triggered.connect(
             lambda: self._open_in_explorer(path)
         )
         menu.exec_(self._menu_position(menu, anchor))
+
+    # ── 树顶栏：根目录打开方式 ──
+
+    def _root_open_anchor(self) -> QPoint:
+        """分裂按钮右下角的全局坐标（菜单右对齐，不会向右溢出卡片）"""
+        btn = self._folder_btn
+        return btn.mapToGlobal(QPoint(btn.width(), btn.height()))
+
+    def _open_root_folder(self):
+        """左半：用系统默认程序（资源管理器）打开项目根目录"""
+        if self._project_root and os.path.isdir(self._project_root):
+            self._open_in_explorer(self._project_root)
+
+    def _show_root_open_with_menu(self):
+        """右半：根目录的候选程序列表"""
+        root = self._project_root
+        if not root or not os.path.isdir(root):
+            self._show_error("项目目录不存在，请先设置工作目录")
+            return
+        self._show_open_with_menu(root, self._root_open_anchor())
 
     @staticmethod
     def _round_menu(menu: QMenu, radius: int = 12) -> None:
