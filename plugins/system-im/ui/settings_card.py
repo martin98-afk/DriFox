@@ -157,6 +157,11 @@ class ImGatewaySettingsCard(BaseSettingsCard):
         super().__init__("即时通讯网关", "", parent=parent)
         # 详情页内嵌场景需要完整展示内容，不走「窗口高度 85%」的浮动卡口径
         self.set_height_mode("content")
+        # 设置页里的配置卡不可关闭：关掉后没有 CardManager 能再唤回，
+        # 用户会以为配置入口消失了。
+        close_btn = getattr(self, "close_btn", None)
+        if close_btn is not None:
+            close_btn.setVisible(False)
         self._rows: Dict[str, _PlatformRow] = {}
         self._syncing = False
         self._timer = QTimer(self)

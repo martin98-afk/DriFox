@@ -186,6 +186,8 @@ def test_settings_card_refresh_reflects_service_status(monkeypatch):
         card = card_mod.ImGatewaySettingsCard()
         card._timer.stop()
         assert card._height_mode == "content", "详情页内嵌需要内容自然高度"
+        # 设置页里的配置卡不可关闭（没有 CardManager 能再唤回）
+        assert card.close_btn.isHidden(), "设置详情页里的 IM 配置卡不应出现关闭按钮"
         card._rebuild_platform_rows()
         card._refresh()
         assert card._service_switch.isChecked() is True
