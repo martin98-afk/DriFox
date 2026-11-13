@@ -1500,6 +1500,9 @@ class FileTreeCard(QWidget):
         icon_style.setParent(menu)
         menu.setStyle(icon_style)
         menu.setAttribute(Qt.WA_TranslucentBackground, True)
+        # mac 上 popup 窗口透明未生效时，NSWindow 会拿默认底色（浅色外观=白）
+        # 从 QSS 圆角外的四角露出来；禁掉系统背景填充才不漏
+        menu.setAttribute(Qt.WA_NoSystemBackground, True)
         # 系统方角阴影会在透明圆角外画一圈黑灰边，直接关掉
         menu.setWindowFlag(Qt.NoDropShadowWindowHint, True)
         menu.setStyleSheet(f"""
@@ -1564,15 +1567,10 @@ class FileTreeCard(QWidget):
                 _act(FluentIcon.APPLICATION, "用默认程序打开").triggered.connect(
                     lambda: self._open_file(item_path)
                 )
-                _act(FluentIcon.LANGUAGE, "打开方式…").triggered.connect(
-                    lambda: self._show_open_with_menu(item_path)
-                )
             _act(
                 FluentIcon.FOLDER,
                 f"在{_FILE_MANAGER}中打开" if is_dir else "打开所在文件夹",
             ).triggered.connect(lambda: self._open_in_explorer(item_path))
-            if not is_dir and detect_kind(item_path):
-                _act(FluentIcon.VIEW, "预览").triggered.connect(lambda: self._open_preview(item_path))
             menu.addSeparator()
 
         # 信息类
@@ -1611,21 +1609,22 @@ class FileTreeCard(QWidget):
                 lambda: self._on_delete_requested([item_path])
             )
 
-        menu.addSeparator()
+        # 新建与刷新仅在目录（含空白→根目录）上出现，文件右键不显示
+        if is_dir:
+            menu.addSeparator()
 
-        # 新建（在目录内操作）
-        _act(FluentIcon.DOCUMENT, "新建文件...").triggered.connect(
-            lambda: self._create_new_file(parent_path)
-        )
+            _act(FluentIcon.DOCUMENT, "新建文件...").triggered.connect(
+                lambda: self._create_new_file(parent_path)
+            )
 
-        _act(FluentIcon.FOLDER_ADD, "新建文件夹...").triggered.connect(
-            lambda: self._create_new_dir(parent_path)
-        )
+            _act(FluentIcon.FOLDER_ADD, "新建文件夹...").triggered.connect(
+                lambda: self._create_new_dir(parent_path)
+            )
 
-        menu.addSeparator()
+            menu.addSeparator()
 
-        # 刷新（原顶栏刷新按钮入口，顶栏已移除）
-        _act(FluentIcon.SYNC, "刷新").triggered.connect(self._on_refresh)
+            # 刷新（原顶栏刷新按钮入口，顶栏已移除）
+            _act(FluentIcon.SYNC, "刷新").triggered.connect(self._on_refresh)
 
         menu.adjustSize()
         self._round_menu(menu)

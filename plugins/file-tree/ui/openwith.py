@@ -284,6 +284,11 @@ def list_openers(path: str) -> List[Opener]:
     结果按「默认 → 最近使用 → 其他推荐」排序，同一程序只保留一次。
     """
     if os.name != "nt":
+        # mac：扫 .app 的 Info.plist 声明（不碰 LaunchServices）；默认程序标不出，
+        # 菜单里另有「用系统默认程序打开」兜底入口
+        if sys.platform == "darwin":
+            ext = os.path.splitext(path or "")[1].lower().lstrip(".")
+            return _mac_file_openers(ext)
         return []
     ext = os.path.splitext(path or "")[1].lower()
     if not ext:
@@ -428,6 +433,117 @@ def _mac_folder_apps() -> List[Opener]:
             )
     found.sort(key=lambda o: o.label.lower())
     return found
+
+# ── 文件候选（mac） ──────────────────────────────────────
+
+# 常见扩展名 → 系统 UTI。mac 不碰 LaunchServices（同 QFileIconProvider 的
+# 冻结风险），只能静态匹配 Info.plist 声明：``CFBundleTypeExtensions`` 直接
+# 给扩展名；``LSItemContentTypes`` 是 UTI，经本表反查成扩展名。表外类型
+# （专用软件的私有 UTI）匹配不到，属已知边界。
+_MAC_EXT_UTI: Dict[str, Tuple[str, ...]] = {
+    "txt": ("public.plain-text",),
+    "text": ("public.plain-text",),
+    "log": ("public.plain-text",),
+    "md": ("net.daringfireball.markdown", "public.plain-text"),
+    "markdown": ("net.daringfireball.markdown", "public.plain-text"),
+    "csv": ("public.comma-separated-values-text", "public.plain-text"),
+    "py": ("public.python-script", "public.plain-text"),
+    "js": ("com.netscape.javascript-source", "public.plain-text"),
+    "json": ("public.json", "public.plain-text"),
+    "xml": ("public.xml", "public.plain-text"),
+    "yml": ("public.plain-text",),
+    "yaml": ("public.plain-text",),
+    "html": ("public.html",),
+    "htm": ("public.html",),
+    "css": ("public.css", "public.plain-text"),
+    "sh": ("public.shell-script", "public.plain-text"),
+    "png": ("public.png",),
+    "jpg": ("public.jpeg",),
+    "jpeg": ("public.jpeg",),
+    "gif": ("com.compuserve.gif",),
+    "svg": ("public.svg-image",),
+    "pdf": ("com.adobe.pdf",),
+    "zip": ("public.zip-archive",),
+    "mp3": ("public.mp3",),
+    "wav": ("com.microsoft.waveform-audio",),
+    "mp4": ("public.mpeg-4",),
+    "mov": ("com.apple.quicktime-movie",),
+    "docx": ("org.openxmlformats.wordprocessingml.document",),
+    "xlsx": ("org.openxmlformats.spreadsheetml.sheet",),
+    "pptx": ("org.openxmlformats.presentationml.presentation",),
+}
+
+# 一次扫描 /Applications 建立「应用 → 支持的扩展名全集」缓存，之后按扩展名过滤
+_MAC_FILE_APPS_CACHE: Optional[List[Tuple[Opener, frozenset]]] = None
+
+def _mac_supported_exts(info: dict) -> frozenset:
+    """单个 .app 的 Info.plist 声明 → 它能处理的扩展名集合
+
+    老式 ``CFBundleTypeExtensions`` 直接是扩展名列表（``*`` 跳过，否则
+    全应用匹配一切文件）；新式 ``LSItemContentTypes`` 是 UTI，按表反查。
+    """
+    exts = set()
+    utis = set()
+    for doc in info.get("CFBundleDocumentTypes") or []:
+        if not isinstance(doc, dict):
+            continue
+        for ext in doc.get("CFBundleTypeExtensions") or []:
+            if isinstance(ext, str) and ext and ext != "*":
+                exts.add(ext.lower())
+        for uti in doc.get("LSItemContentTypes") or []:
+            if isinstance(uti, str) and uti:
+                utis.add(uti)
+    for ext, mapped in _MAC_EXT_UTI.items():
+        if utis.intersection(mapped):
+            exts.add(ext)
+    return frozenset(exts)
+
+def _mac_file_apps() -> List[Tuple[Opener, frozenset]]:
+    """扫描应用目录，返回 (候选模板, 支持的扩展名集合) 列表（进程内缓存一次）"""
+    import plistlib
+
+    global _MAC_FILE_APPS_CACHE
+    if _MAC_FILE_APPS_CACHE is not None:
+        return _MAC_FILE_APPS_CACHE
+    found: List[Tuple[Opener, frozenset]] = []
+    for folder in _mac_app_dirs():
+        try:
+            names = os.listdir(folder)
+        except OSError:
+            continue
+        for name in names:
+            if not name.endswith(".app"):
+                continue
+            bundle = os.path.join(folder, name)
+            try:
+                with open(os.path.join(bundle, "Contents", "Info.plist"), "rb") as fh:
+                    info = plistlib.load(fh)
+            except Exception:  # 损坏/无权限的 bundle 跳过
+                continue
+            if not isinstance(info, dict):
+                continue
+            exts = _mac_supported_exts(info)
+            if not exts:
+                continue
+            found.append(
+                (
+                    Opener(
+                        label=_mac_bundle_label(bundle, info),
+                        exe=bundle,
+                        command=f'open -a "{bundle}" "%1"',
+                    ),
+                    exts,
+                )
+            )
+    found.sort(key=lambda pair: pair[0].label.lower())
+    _MAC_FILE_APPS_CACHE = found
+    return found
+
+def _mac_file_openers(ext: str) -> List[Opener]:
+    """按扩展名过滤出候选应用（缓存已建，过滤本身 O(apps)）"""
+    if not ext:
+        return []
+    return [opener for opener, exts in _mac_file_apps() if ext in exts]
 
 def _mac_finder_opener() -> Opener:
     return Opener(

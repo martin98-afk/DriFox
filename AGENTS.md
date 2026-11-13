@@ -1,3 +1,14 @@
+---
+cover:
+  image: attachments/AGENTS-cover-20261114-024204.jpg
+  actualRatio: '16:9'
+  pixelWidth: 2000
+  pixelHeight: 1125
+  displayWidth: 100
+  displayHeight: 320
+  positionX: 50
+  positionY: 50
+---
 # DriFox 项目笔记
 
 AI Agent 操作手册与约束。Python 3.14+ / PyQt5 桌面 LLM 聊天应用。
