@@ -14,7 +14,7 @@ stop → poll task 残留 → 重复开关后同平台多实例长轮询同一�
 import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from app.gateway.manager import PlatformManager
+from system_im_core.manager import PlatformManager
 
 
 def _make_manager() -> PlatformManager:
@@ -86,8 +86,8 @@ class TestEnsureAdapterRebuildStopsOld:
         mgr._schedule_coro = lambda coro: scheduled.append(coro)
 
         reg_def = MagicMock()
-        reg_def.validate_config = MagicMock(return_value=(True, None))
-        reg_def.config_builder = None
+        reg_def.validate = MagicMock(return_value=(True, None))
+        reg_def.is_enabled = MagicMock(return_value=True)
         reg_def.adapter_factory = MagicMock(return_value=MagicMock())
         reg_def.check_requirements = MagicMock(return_value=True)
 

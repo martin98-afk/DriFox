@@ -487,7 +487,7 @@ class PluginConfigForm(QWidget):
         start_all_async 会读最新配置自动连接。
         """
         try:
-            from app.gateway.manager import get_platform_manager
+            from app.core.services.gateway_access import get_platform_manager
             from app.plugins.registries.gateway_platform_registry import (
                 GatewayPlatformRegistry,
             )

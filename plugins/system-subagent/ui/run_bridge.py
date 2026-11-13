@@ -194,6 +194,12 @@ class SubAgentRunBridge(QObject):
                 )
             except (RuntimeError, TypeError):
                 pass
+            try:
+                executor.retry_status.connect(
+                    lambda tid, msg, _wid=window_id: self._on_retry_status(_wid, tid, msg)
+                )
+            except (RuntimeError, TypeError):
+                pass
 
         self._project(window_id, task_id)
 
@@ -219,6 +225,19 @@ class SubAgentRunBridge(QObject):
         if panel is not None:
             try:
                 panel.set_task_context(task_id, rec["context"])
+            except (RuntimeError, AttributeError):
+                pass
+
+    def _on_retry_status(self, window_id: str, task_id: str, message: str) -> None:
+        """API 重试状态 → 面板行提示位。
+
+        重试期间主线程收不到其他事件，行内只剩计时器在动；把状态写出来
+        才能区分「真在跑」和「在退避等待」。
+        """
+        panel = self._panel_or_project(window_id, task_id)
+        if panel is not None:
+            try:
+                panel.set_task_status(task_id, message)
             except (RuntimeError, AttributeError):
                 pass
 

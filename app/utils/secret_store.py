@@ -46,7 +46,6 @@ _PROVIDER_ACCOUNT_PREFIX = "provider/"
 MODE_KEYRING = "keyring"
 MODE_PASSWORD = "password"
 MODE_NONE = "none"
-SECRET_MODES = (MODE_KEYRING, MODE_PASSWORD, MODE_NONE)
 
 # 「记住本机密码」在 keyring 中的 account 名（仅 password 模式使用）
 MASTER_PASSWORD_ACCOUNT = "secret/master_password"

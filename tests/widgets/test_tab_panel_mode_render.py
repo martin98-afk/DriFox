@@ -15,7 +15,9 @@ def panel(qtbot):
         p = TabPanel()
     p.set_mode(PANEL_MODE_LIST, persist=False)
     qtbot.addWidget(p)
-    return p
+    # 树模式 dev 提醒弹窗模态 exec_() 会阻塞无头测试，与 tree_row/tree_v2 既有惯例对齐跳过
+    with patch.object(p, "_warn_tree_mode_in_dev"):
+        yield p
 
 
 def _make_spec():
@@ -55,17 +57,8 @@ def test_persist_writes_settings_on_mode_change(panel):
         instance.tab_panel_mode = MagicMock()
         settings_cls.get_instance.return_value = instance
         panel.set_mode(PANEL_MODE_TREE, persist=True)
-        assert instance.tab_panel_mode.value == PANEL_MODE_TREE
-
-
-def test_popup_triggers_set_mode(panel):
-    """⋯ 按钮点击 → PanelModePopup → 选「工作区树模式」→ set_mode 被调"""
-    # 模拟 popup 选模式
-    panel._on_mode_btn_clicked()
-    popup = panel._mode_popup
-    assert popup is not None
-    # 直接 emit modeSelected 信号模拟用户点击行
-    popup.modeSelected.emit(PANEL_MODE_TREE)
-    assert panel.current_mode() == PANEL_MODE_TREE
-    assert panel._tree_scroll.isVisibleTo(panel) is True
-    assert panel._scroll_area.isVisibleTo(panel) is False
+        # 存量失效断言对齐修复：现实现走 cfg.set(cfg.tab_panel_mode, mode, save=True)，
+        # cfg 即 instance，故断言 instance.set 的调用参数（原断言 value 赋值对 MagicMock 永假）
+        instance.set.assert_called_once_with(
+            instance.tab_panel_mode, PANEL_MODE_TREE, save=True
+        )

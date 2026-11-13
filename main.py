@@ -746,11 +746,11 @@ def main():
         # [T29 C1] 关键分界点：壳可见 + 日志/崩溃捕获已就绪（import 盲窗已消除）。
         # info 级别：普通用户日志即可看到「壳可见 → 首窗就绪」的耗时分布。
         _smark("shell_visible_after_logging", level="info")
-        from app.core.services.gateway_service import GatewayService
         from app.core.services.plugin_host_service import PluginHostService
 
         _smark("import_services", level="info")
-        GatewayService.get_instance().ensure_started()
+        # IM 网关服务由 system-im 插件在其 ui 组件加载时自行启动（受设置卡总开关约束），
+        # 宿主不再直接拉取。
         PluginHostService.get_instance().ensure_started()
         _smark("app_services_start")
         from app.utils.preheat import preheat_process_level

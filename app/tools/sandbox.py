@@ -1841,9 +1841,6 @@ def read_approval_policy(cfg: Optional[SandboxConfig] = None) -> dict:
 # 仅 darwin 生效；sandbox-exec 缺失 / 未启用 / 包装异常一律原样直通，绝不阻断执行。
 
 _SEATBELT_BIN = "/usr/bin/sandbox-exec"
-# SBPL 里 deny 过滤器的 require-not 排除区：系统临时/缓存与设备文件。
-# /private/var/folders 是 macOS per-user 临时区（Python 缓存、剪贴板服务等依赖它）。
-_OS_SB_BASE_WRITABLE = ("/tmp", "/private/tmp", "/var/folders", "/private/var/folders", "/dev")
 _os_sb_profile_cache: dict = {}  # (workdir_real, level) -> profile 文件路径
 
 

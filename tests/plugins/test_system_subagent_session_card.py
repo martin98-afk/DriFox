@@ -247,3 +247,33 @@ def test_recover_noop_without_facade(card, monkeypatch):
     card._recover_for_current_session()
 
     assert card._task_id == ""
+
+def test_result_is_failure_distinguishes_states():
+    """失败判定：error 非空 / 失败终态 / 历史「执行出错:」正文都算失败。"""
+    f = _session_card_mod._result_is_failure
+    assert f("", "Task stalled: no log activity", "stalled") is True
+    assert f("完成", "SubAgent execution error: boom", "error") is True
+    # 修复前的伪成功数据：DB 状态 finished、error 为空，正文是异常字符串
+    assert f("执行出错: The read operation timed out", "", "finished") is True
+    assert f("正常结果", "", "finished") is False
+    assert f("", "", "running") is False
+
+def test_build_html_renders_failure_when_result_is_error_string(card):
+    """历史伪成功数据在会话卡不再显示 ✅（截图场景回归）。"""
+    card.load(
+        "t1",
+        "code-reviewer",
+        [],
+        {"status": "finished", "result": "执行出错: The read operation timed out", "error": ""},
+    )
+    html = card._build_html()
+    assert "❌ 执行失败" in html
+    assert "✅ 执行结果" not in html
+    assert "#F44336" in html
+
+def test_build_html_renders_success_for_normal_result(card):
+    """正常结果仍走绿色成功态（防矫枉过正）。"""
+    card.load("t2", "explore", [], {"status": "finished", "result": "一切正常", "error": ""})
+    html = card._build_html()
+    assert "✅ 执行结果" in html
+    assert "❌ 执行失败" not in html

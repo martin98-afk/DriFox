@@ -14,12 +14,9 @@ LSP 配置模型 — 解析 .lsp.json 文件
 """
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
-
-from loguru import logger
 
 
 @dataclass
@@ -85,34 +82,3 @@ class LspServerConfig:
             trigger_diagnostics=data.get("triggerDiagnostics"),
             cli_fallback=data.get("cliFallback"),
         )
-
-
-def load_lsp_configs(plugin_dir: Path) -> Dict[str, LspServerConfig]:
-    """从插件目录加载 .lsp.json
-
-    Args:
-        plugin_dir: 插件根目录
-
-    Returns:
-        {server_name: LspServerConfig}，文件不存在则返回空
-    """
-    lsp_file = plugin_dir / ".lsp.json"
-    if not lsp_file.exists():
-        return {}
-
-    try:
-        with open(lsp_file, "r", encoding="utf-8") as f:
-            data = json.load(f)
-
-        configs: Dict[str, LspServerConfig] = {}
-        for server_name, server_data in data.items():
-            configs[server_name] = LspServerConfig.from_dict(
-                name=server_name, data=server_data, plugin_name=plugin_dir.name
-            )
-
-        logger.debug(f"[LSP] 从 {plugin_dir.name} 加载了 {len(configs)} 个 LSP 服务器")
-        return configs
-
-    except Exception as e:
-        logger.error(f"[LSP] 解析 {lsp_file} 失败: {e}")
-        return {}

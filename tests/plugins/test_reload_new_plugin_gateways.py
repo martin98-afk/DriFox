@@ -61,7 +61,7 @@ def _install_pm(monkeypatch, components: dict, plugin_name: str):
 def gateway_reload_spies(monkeypatch):
     """替换 _reload_gateways 依赖的两个平台句柄为 spy，捕获调用"""
     mgr = MagicMock()
-    monkeypatch.setattr("app.gateway.manager.get_platform_manager", lambda: mgr)
+    monkeypatch.setattr("app.core.services.gateway_access.get_platform_manager", lambda: mgr)
 
     watcher = MagicMock()
     monkeypatch.setattr(

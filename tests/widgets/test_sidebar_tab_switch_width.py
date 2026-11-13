@@ -350,6 +350,34 @@ def test_frame_target_chat_absolute_floor(qapp):
     assert target - _BASE_FRAME_W < _MIN_CHAT_WIDTH  # 确属妥协路径
 
 
+# ── Bug 3：挤压折叠右侧工作台后卡片未展开到应有宽度 ──
+# 场景：窄窗口开 left 卡片 → 协调收工作台（hide 已调）→ QSplitter sizes()
+# 在布局激活前仍报隐藏前旧占位宽 → cap 照抄旧值把卡片钳成窄条，工作台
+# 让出的空间全落对话区。修复：工作台不可见即按 0 占宽参与 cap。
+class _StubWBFrame:
+    """工作台 frame 替身：isVisible 模拟 hide 已调用但布局未刷新的瞬态"""
+    def __init__(self, visible):
+        self._visible = visible
+    def isVisible(self):
+        return self._visible
+
+
+def test_frame_target_ignores_stale_workbench_sizes(qapp):
+    """工作台不可见但 sizes 仍报旧占位宽（494）：cap 按 wb=0，卡片满宽"""
+    win = _StubTargetWindow([60, 546, 494])  # 总宽 1100，494 为 hide 前旧值
+    win._workbench_frame = _StubWBFrame(visible=False)
+    # 旧实现：free=606 → cap=300 → target=300（窄条）；修复后 free=1100 → 不钳
+    assert TabManagerWindow._left_card_frame_target(win, 360) == _BASE_FRAME_W + 360
+
+
+def test_frame_target_counts_visible_workbench(qapp):
+    """对照：工作台可见时旧值参与 cap，钳制语义不变"""
+    win = _StubTargetWindow([60, 546, 494])
+    win._workbench_frame = _StubWBFrame(visible=True)
+    # free=606，cap=max(300, 606-400)=300 → target=300
+    assert TabManagerWindow._left_card_frame_target(win, 360) == 300
+
+
 def test_restore_aborts_when_card_deactivates(qapp):
     """卡片态翻转（开→关）：宽度归卡片编排，restore 不迁移卡片槽总宽
 

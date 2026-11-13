@@ -28,7 +28,7 @@ from PyQt5.QtWidgets import (
 from qfluentwidgets import FluentIcon, InfoBar, InfoBarPosition, MaskDialogBase, SettingCard, SwitchButton
 
 from app.core.infra import window_registry
-from app.gateway.auth.base import CANCEL_MESSAGE
+from app.core.auth.base import CANCEL_MESSAGE
 from app.utils import theme_mode
 from app.utils.config import Settings
 from app.utils.design_tokens import Colors, font_size_css, scale_font_size
@@ -105,8 +105,8 @@ def _fetch_avatar_bytes() -> bytes | None:
     绝不能进主线程。账户行与设置卡共用，避免两套拉取逻辑漂移。
     """
     try:
-        from app.gateway.auth import get_oauth_backend
-        from app.gateway.auth.gitee import fetch_user_avatar_url
+        from app.core.auth import get_oauth_backend
+        from app.core.auth.gitee import fetch_user_avatar_url
 
         info = get_oauth_backend("gitee").get_bound_info()
         if not info:
@@ -552,7 +552,7 @@ class GiteeAccountRow(QFrame):
     def _connect_uploader_signals(self):
         """监听 GiteeUploader.tokenInvalid：上传 401 重试失败 → 失效标识"""
         try:
-            from app.gateway.utils.gitee_uploader import GiteeUploader
+            from app.core.net.gitee_uploader import GiteeUploader
 
             uploader = GiteeUploader.get_instance()
             try:
@@ -741,7 +741,7 @@ class GiteeAccountRow(QFrame):
 
     def _do_oauth(self, repo_private: bool, cancel_event=None):
         try:
-            from app.gateway.auth import get_oauth_backend
+            from app.core.auth import get_oauth_backend
 
             success, message = get_oauth_backend("gitee").bind(
                 repo_private=repo_private, cancel_event=cancel_event
@@ -755,7 +755,7 @@ class GiteeAccountRow(QFrame):
         self._binding = False
         self._bind_cancel = None
         if success:
-            from app.gateway.utils.gitee_uploader import GiteeUploader
+            from app.core.net.gitee_uploader import GiteeUploader
 
             GiteeUploader.get_instance().reset_config()
             self._refresh_ui()
@@ -813,8 +813,8 @@ class GiteeAccountRow(QFrame):
 
     def _do_unbind(self):
         try:
-            from app.gateway.auth import get_oauth_backend
-            from app.gateway.utils.gitee_uploader import GiteeUploader
+            from app.core.auth import get_oauth_backend
+            from app.core.net.gitee_uploader import GiteeUploader
 
             self._sync_svc.disable()
             success, message = get_oauth_backend("gitee").unbind()
@@ -1728,7 +1728,7 @@ class GiteeCard(SettingCard):
         # （refresh_token 被吊销）→ 公共函数返 False，此处主动失效处理，
         # 否则 ConfigSync 永不启动、syncDone 永不发（历史缺陷回归防护）
         if self._sync_svc._state == "disabled" and bool(self.cfg.gitee_bound.value):
-            from app.gateway.auth import get_oauth_backend
+            from app.core.auth import get_oauth_backend
 
             if get_oauth_backend("gitee").get_bound_info() is None:
                 logger.warning("[GiteeCard] 绑定已失效（token 无法刷新），清除绑定并提示重新绑定")
@@ -1901,7 +1901,7 @@ class GiteeCard(SettingCard):
 
     def _do_oauth(self, repo_private: bool, cancel_event=None):
         try:
-            from app.gateway.auth import get_oauth_backend
+            from app.core.auth import get_oauth_backend
 
             success, msg = get_oauth_backend("gitee").bind(
                 repo_private=repo_private, cancel_event=cancel_event
@@ -1918,7 +1918,7 @@ class GiteeCard(SettingCard):
         self._bind_btn.setToolTip("")
 
         if success:
-            from app.gateway.utils.gitee_uploader import GiteeUploader
+            from app.core.net.gitee_uploader import GiteeUploader
 
             GiteeUploader.get_instance().reset_config()
             self._refresh_ui()
@@ -1967,8 +1967,8 @@ class GiteeCard(SettingCard):
 
     def _do_unbind(self):
         try:
-            from app.gateway.auth import get_oauth_backend
-            from app.gateway.utils.gitee_uploader import GiteeUploader
+            from app.core.auth import get_oauth_backend
+            from app.core.net.gitee_uploader import GiteeUploader
 
             # 先停止同步，再解绑
             self._sync_svc.disable()

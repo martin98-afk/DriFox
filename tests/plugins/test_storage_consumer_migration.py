@@ -133,7 +133,7 @@ def test_consumer_migration_uses_facade(monkeypatch):
     import inspect
     import app.utils.history_manager as hm_mod
     import app.core.conversation.memory_manager as mm_mod
-    import app.gateway.local_service.session_handler as sh_mod
+    import app.core.local_service.session_handler as sh_mod
 
     for mod in (hm_mod, mm_mod, sh_mod):
         src = inspect.getsource(mod)

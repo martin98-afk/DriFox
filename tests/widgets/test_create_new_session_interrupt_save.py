@@ -176,7 +176,6 @@ def _make_stub(streaming: bool, interrupted_messages=None):
     inst._is_streaming = streaming
     inst._exclusive_ui_modes = set()
     inst._is_destroyed = False
-    inst._topic_summary_cancelled = False
     inst._session_dirty = True  # 发送消息时已置脏
     # 排队消息链路（_clear_pending_message_queue → _refresh_queue_card）：
     # 裸实例 getattr 任意属性即触发 Qt 保护 RuntimeError，必须显式给 None 短路

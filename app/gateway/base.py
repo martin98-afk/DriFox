@@ -5,7 +5,6 @@ Gateway 基础模块 - 抽象基类和数据结构
 from __future__ import annotations
 
 import asyncio
-import os
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -18,28 +17,6 @@ from loguru import logger
 from app.utils.utils import get_app_data_dir
 
 T = TypeVar("T")
-
-
-class Platform(str, Enum):
-    """支持的通讯平台（str-mixin：第三方平台 id 可不经枚举直接以 str 互通）。"""
-    WECOM = "wecom"
-    DINGTALK = "dingtalk"
-    TELEGRAM = "telegram"
-    DISCORD = "discord"
-    WHATSAPP = "whatsapp"
-    FEISHU = "feishu"
-    SLACK = "slack"
-
-
-def _platform_key(platform) -> str:
-    """统一平台入参为字符串 id（兼容 Platform 枚举与第三方 str 直传）。
-
-    Phase E 引入：manager / config 走 registry 查表时，第三方平台 id 不一定在
-    Platform 枚举闭集内，故统一以 .value / str(p) 转 str 作为 registry.get 的 key。
-    """
-    if isinstance(platform, Platform):
-        return platform.value
-    return str(platform)
 
 
 class MessageType(Enum):
@@ -68,7 +45,7 @@ class MessageEvent:
     chat_id: str = ""
     user_id: str = ""
     user_name: str = ""
-    platform: Platform = Platform.WECOM
+    platform: str = ""  # 平台 id（GatewayPlatformRegistry 键）
     chat_type: str = "dm"  # dm / group
 
     # 媒体附件
@@ -119,47 +96,6 @@ class ChatInfo:
     avatar: Optional[str] = None
 
 
-@dataclass
-class PlatformConfig:
-    """平台配置"""
-    enabled: bool = False
-    platform: Platform = Platform.WECOM
-
-    # 企业微信配置
-    bot_id: Optional[str] = None
-    secret: Optional[str] = None
-    websocket_url: Optional[str] = None
-
-    # 钉钉配置
-    client_id: Optional[str] = None
-    client_secret: Optional[str] = None
-
-    # 通用配置（适用于 Telegram、Discord 等）
-    token: Optional[str] = None
-
-    # 通用配置
-    extra: Dict[str, Any] = field(default_factory=dict)
-
-    @classmethod
-    def from_dict(cls, data: Dict[str, Any], platform: Platform) -> "PlatformConfig":
-        """从字典创建配置"""
-        config = cls(enabled=data.get("enabled", False), platform=platform)
-
-        if platform == Platform.WECOM:
-            config.bot_id = data.get("bot_id") or os.getenv("WECOM_BOT_ID")
-            config.secret = data.get("secret") or os.getenv("WECOM_SECRET")
-            config.websocket_url = data.get("websocket_url") or os.getenv(
-                "WECOM_WEBSOCKET_URL",
-                "wss://openws.work.weixin.qq.com"
-            )
-        elif platform == Platform.DINGTALK:
-            config.client_id = data.get("client_id") or os.getenv("DINGTALK_CLIENT_ID")
-            config.client_secret = data.get("client_secret") or os.getenv("DINGTALK_CLIENT_SECRET")
-
-        config.extra = data.get("extra", {})
-        return config
-
-
 # 消息处理器类型
 MessageHandler = Callable[[MessageEvent], Any]
 
@@ -176,8 +112,8 @@ class BasePlatformAdapter(ABC):
     4. 管理连接状态
     """
 
-    # 子类应设置这些类属性；实例级标识由 __init__ 写入 _platform_id
-    platform: Platform = Platform.WECOM
+    # 子类必须声明 platform_id（GatewayPlatformRegistry 的键）；name 供日志展示
+    platform_id: str = ""
     name: str = "Base Platform"
 
     # 最大消息长度（子平台可覆盖）
@@ -199,7 +135,7 @@ class BasePlatformAdapter(ABC):
             下载链接（成功时）或原始路径（失败/未配置时）
         """
         try:
-            from app.gateway.utils.gitee_uploader import GiteeUploader
+            from app.core.net.gitee_uploader import GiteeUploader
 
             uploader = GiteeUploader.get_instance()
             if not uploader.is_configured():
@@ -226,40 +162,16 @@ class BasePlatformAdapter(ABC):
             error="Platform does not support native voice sending"
         )
 
-    def __init__(self, config: PlatformConfig, message_handler: Optional[MessageHandler] = None):
+    def __init__(self) -> None:
+        """初始化适配器。
+
+        配置由平台插件自己读（`PluginConfigStore` / config_schema），宿主契约
+        不承载任何平台字段；平台标识由子类类属性 ``platform_id`` 声明。
         """
-        初始化适配器
-        
-        Args:
-            config: 平台配置
-            message_handler: 消息处理回调
-        """
-        self.config = config
         self._running = False
         self._connected = False
         self._last_error: Optional[str] = None
-
-        # 第二位置参数兼容三种历史写法：
-        #   子类调 super().__init__(config) → message_handler=None
-        #   子类调 super().__init__(config, Platform.XXX) → 平台标识
-        #   子类调 super().__init__(config, handler) → 消息处理器
-        # 早期实现把它当 message_handler 直接存，平台标识被静默丢弃，
-        # 导致 adapter.platform 永远是类属性默认值 Platform.WECOM，
-        # 按平台查适配器（gateway_service._send_message）恒失败。
-        #
-        # 判定用鸭子类型（handler 有 handle 方法），不做 isinstance——
-        # MessageHandler 是泛型别名，isinstance 会抛 TypeError。
-        if message_handler is None or hasattr(message_handler, "handle"):
-            self._message_handler = message_handler
-            _pid = None
-        else:
-            self._message_handler = None
-            _pid = message_handler
-
-        self._platform_id = _platform_key(_pid if _pid is not None else type(self).platform)
-        if _pid is not None:
-            self.platform = _pid
-
+        self._message_handler: Optional[MessageHandler] = None
         # 会话活跃状态
         self._active_sessions: Dict[str, asyncio.Event] = {}
         self._pending_messages: Dict[str, MessageEvent] = {}
@@ -268,9 +180,9 @@ class BasePlatformAdapter(ABC):
         self._active_message_ids: Dict[str, str] = {}  # session_key -> message_id
 
     @property
-    def platform_id(self) -> str:
-        """平台 id 字符串（registry 键；第三方平台不经 Platform 枚举）"""
-        return self._platform_id
+    def platform(self) -> str:
+        """平台 id（兼容旧读法：adapter.platform）"""
+        return type(self).platform_id
 
     @property
     def is_connected(self) -> bool:
@@ -326,6 +238,17 @@ class BasePlatformAdapter(ABC):
             success=False,
             error="Platform does not support native image sending"
         )
+
+    async def send_question(
+        self, chat_id: str, question: dict, index: int, total: int
+    ) -> SendResult:
+        """发送交互提问（可选能力）。
+
+        平台有按钮/卡片能力时覆盖本方法，把 options 渲染成可点选项；
+        返回 success=False 时宿主退回纯文本选项消息（send_question_text 的默认路径）。
+        question 结构：{question, header?, detail?, options:[{label,description}], multiple?}
+        """
+        return SendResult(success=False, error="Platform does not support question card")
 
     async def send_file(self, chat_id: str, file_path: str, **kwargs) -> SendResult:
         """
@@ -397,16 +320,22 @@ class BasePlatformAdapter(ABC):
             if session_key in self._pending_messages:
                 pending = self._pending_messages.pop(session_key)
                 # 去重检查：排队的消息是否与刚处理完的消息相同
-                if (event.message_id and pending.message_id
-                        and event.message_id == pending.message_id):
-                    logger.info(f"[{self.name}] Dropping pending duplicate {pending.message_id[:12]} after session completed: {session_key}")
-                    return
-                await self.handle_message(pending)
+                duplicate = bool(
+                    event.message_id
+                    and pending.message_id
+                    and event.message_id == pending.message_id
+                )
+                if duplicate:
+                    logger.info(
+                        f"[{self.name}] Dropping pending duplicate {pending.message_id[:12]} "
+                        f"after session completed: {session_key}"
+                    )
+                else:
+                    await self.handle_message(pending)
 
     def _get_session_key(self, event: MessageEvent) -> str:
         """获取会话键（platform 兼容 str 直通：第三方平台 id 不经 Platform 枚举）"""
-        p = getattr(event.platform, "value", event.platform)
-        return f"{p}:{event.chat_id}"
+        return f"{event.platform}:{event.chat_id}"
 
     # ── 可选流式回复钩子（平台支持打字机式输出时覆写） ──
 
@@ -461,6 +390,17 @@ class BasePlatformAdapter(ABC):
         self._pending_messages.clear()
         self._active_message_ids.clear()
         logger.info(f"[{self.name}] Stopped")
+
+
+def get_gateway_data_dir() -> Path:
+    """网关数据目录（``<app_data>/gateway``）。
+
+    契约层提供：插件与平台适配器都要落会话映射/群消息留档，直接 import
+    ``app.utils.utils`` 属宿主内部依赖；路径在此固定，存量数据零迁移。
+    """
+    data_dir = get_app_data_dir() / "gateway"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    return data_dir
 
 
 def get_cache_dir(name: str) -> Path:

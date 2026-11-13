@@ -369,7 +369,7 @@ def _reload_gateways(ctx: ReloadContext) -> Any:
     4. 更新路径：用新 def 重建 adapter（热更新生效）
     """
     try:
-        from app.gateway.manager import get_platform_manager
+        from app.core.services.gateway_access import get_platform_manager
         from app.plugins.loaders.runtime_component_loader import ensure_gateway_watcher
 
         # 1. 先关闭该插件的 gateway（卸载/热更新都应先断连）

@@ -1,0 +1,273 @@
+# -*- coding: utf-8 -*-
+"""
+Gateway 会话管理器
+
+管理企业微信/钉钉的独立会话，与桌面端会话隔离。
+"""
+from __future__ import annotations
+
+import time
+from dataclasses import dataclass, field
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Callable, Dict, List, Optional
+
+from loguru import logger
+
+from app.gateway.base import MessageEvent, get_gateway_data_dir
+
+
+@dataclass
+class GatewaySession:
+    """Gateway 会话"""
+    session_id: str
+    platform: str  # 平台 id（registry 键）
+    user_id: str
+    chat_id: str
+    chat_type: str = "dm"  # dm / group
+    user_name: str = ""
+    created_at: datetime = field(default_factory=datetime.now)
+    last_active: datetime = field(default_factory=datetime.now)
+    message_count: int = 0
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def display_name(self) -> str:
+        """显示名称（platform 兼容 str 直通：第三方平台 id）"""
+        p = getattr(self.platform, "value", self.platform)
+        if self.user_name:
+            return f"{self.user_name} ({p})"
+        return f"{self.user_id[:8]}... ({p})"
+
+
+class GatewaySessionManager:
+    """
+    Gateway 会话管理器
+    
+    管理企业微信/钉钉的独立会话：
+    - 每个用户创建一个会话
+    - 会话与桌面端完全隔离
+    - 支持 /new, /reset 等命令
+    """
+
+    def __init__(self, data_dir: Optional[Path] = None):
+        """
+        初始化会话管理器
+        
+        Args:
+            data_dir: 数据目录，默认为 ~/.drifox/gateway
+        """
+        if data_dir is None:
+            data_dir = get_gateway_data_dir()
+        self._data_dir = data_dir
+        self._data_dir.mkdir(parents=True, exist_ok=True)
+
+        # 内存中的会话: session_id -> GatewaySession
+        self._sessions: Dict[str, GatewaySession] = {}
+
+        # 会话索引: platform -> index_key -> session_id
+        # index_key 私聊为 user_id，群聊为 "group:<chat_id>"（见 _index_key）
+        # 平台 id → 索引键 → session_id（平台不设闭集，按需建桶）
+        self._session_index: Dict[str, Dict[str, str]] = {}
+
+        # 回调: 创建新会话时调用
+        self._on_create_session: Optional[Callable[[GatewaySession], None]] = None
+
+        # 加载现有会话
+        self._load_sessions()
+
+    def _load_sessions(self) -> None:
+        """加载会话列表"""
+        sessions_file = self._data_dir / "sessions.json"
+        if sessions_file.exists():
+            try:
+                import json
+                with open(sessions_file, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+
+                for session_id, info in data.items():
+                    platform = str(info["platform"])
+                    session = GatewaySession(
+                        session_id=session_id,
+                        platform=platform,
+                        user_id=info["user_id"],
+                        chat_id=info["chat_id"],
+                        chat_type=info.get("chat_type", "dm"),
+                        user_name=info.get("user_name", ""),
+                        created_at=datetime.fromisoformat(info.get("created_at", datetime.now().isoformat())),
+                        last_active=datetime.fromisoformat(info.get("last_active", datetime.now().isoformat())),
+                        message_count=info.get("message_count", 0),
+                    )
+                    self._sessions[session_id] = session
+
+                    # 建立索引（第三方平台的 str 平台同样恢复，否则重启后会话全丢）
+                    index = self._session_index.setdefault(session.platform, {})
+                    index[
+                        self._index_key(session.chat_type, session.user_id, session.chat_id)
+                    ] = session_id
+
+            except Exception as e:
+                logger.warning(f"[GatewaySession] Failed to load sessions: {e}")
+
+    def _save_sessions(self) -> None:
+        """保存会话列表"""
+        sessions_file = self._data_dir / "sessions.json"
+        try:
+            import json
+            data = {}
+            for session_id, session in self._sessions.items():
+                data[session_id] = {
+                    "platform": getattr(session.platform, "value", session.platform),
+                    "user_id": session.user_id,
+                    "chat_id": session.chat_id,
+                    "chat_type": session.chat_type,
+                    "user_name": session.user_name,
+                    "created_at": session.created_at.isoformat(),
+                    "last_active": session.last_active.isoformat(),
+                    "message_count": session.message_count,
+                }
+
+            with open(sessions_file, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            logger.warning(f"[GatewaySession] Failed to save sessions: {e}")
+
+    def _index_key(self, chat_type: str, user_id: str, chat_id: str) -> str:
+        """会话索引键：群聊按 chat_id（群内所有成员共享一条会话），私聊按 user_id。"""
+        if chat_type == "group" and chat_id:
+            return f"group:{chat_id}"
+        return user_id
+
+    def _generate_session_id(self, platform: str, index_key: str) -> str:
+        """生成会话 ID（平台 id 一律 str）"""
+        import hashlib
+        timestamp = str(int(time.time() * 1000))
+        raw = f"{platform}:{index_key}:{timestamp}"
+        return hashlib.md5(raw.encode()).hexdigest()[:16]
+
+    def get_or_create_session(self, event: MessageEvent) -> GatewaySession:
+        """
+        获取或创建会话
+        
+        Args:
+            event: 消息事件
+            
+        Returns:
+            GatewaySession
+        """
+        platform = event.platform
+        user_id = event.user_id
+        chat_id = event.chat_id
+        chat_type = event.chat_type or "dm"
+        index_key = self._index_key(chat_type, user_id, chat_id)
+
+        # 查找现有会话
+        session_index = self._session_index.setdefault(platform, {})
+        session_id = session_index.get(index_key)
+
+        if session_id and session_id in self._sessions:
+            session = self._sessions[session_id]
+            session.last_active = datetime.now()
+            session.message_count += 1
+            if event.user_name and not session.user_name:
+                session.user_name = event.user_name
+            return session
+
+        # 创建新会话
+        session_id = self._generate_session_id(platform, index_key)
+        session = GatewaySession(
+            session_id=session_id,
+            platform=platform,
+            user_id=user_id,
+            chat_id=chat_id,
+            chat_type=chat_type,
+            user_name=event.user_name or "",
+        )
+
+        self._sessions[session_id] = session
+
+        # 建立索引
+        self._session_index.setdefault(platform, {})[index_key] = session_id
+
+        # 保存
+        self._save_sessions()
+
+        # 回调
+        if self._on_create_session:
+            try:
+                self._on_create_session(session)
+            except Exception as e:
+                logger.warning(f"[GatewaySession] Create callback error: {e}")
+
+        logger.info(
+            f"[GatewaySession] Created session {session_id} for {index_key} "
+            f"({chat_type}) on {getattr(platform, 'value', platform)}"
+        )
+
+        return session
+
+    def get_session(self, session_id: str) -> Optional[GatewaySession]:
+        """获取会话"""
+        return self._sessions.get(session_id)
+
+
+    def delete_session(self, session_id: str) -> bool:
+        """
+        删除会话
+        
+        Returns:
+            True 如果删除成功
+        """
+        if session_id not in self._sessions:
+            return False
+
+        session = self._sessions[session_id]
+
+        # 移除索引
+        session_index = self._session_index.get(session.platform)
+        if session_index:
+            session_index.pop(
+                self._index_key(session.chat_type, session.user_id, session.chat_id), None
+            )
+
+        # 删除会话文件
+        session_file = self._data_dir / f"{session_id}.json"
+        if session_file.exists():
+            session_file.unlink()
+
+        # 移除会话
+        del self._sessions[session_id]
+
+        # 保存
+        self._save_sessions()
+
+        logger.info(f"[GatewaySession] Deleted session {session_id}")
+        return True
+
+
+    def list_sessions(self, platform: Optional[str] = None) -> List[GatewaySession]:
+        """
+        列出会话
+        
+        Args:
+            platform: 可选，按平台过滤
+            
+        Returns:
+            会话列表
+        """
+        sessions = list(self._sessions.values())
+
+        if platform:
+            sessions = [s for s in sessions if s.platform == platform]
+
+        # 按最后活跃时间排序
+        sessions.sort(key=lambda s: s.last_active, reverse=True)
+
+        return sessions
+
+
+
+    @property
+    def session_count(self) -> int:
+        """会话数量"""
+        return len(self._sessions)

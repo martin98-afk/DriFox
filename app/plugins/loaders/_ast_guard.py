@@ -458,7 +458,7 @@ class GuardResult(NamedTuple):
 
 # guard_plugin_module_once 结果缓存：键 = (path, mtime_ns, size)。
 # 同一模块在启动对齐/热重载/差异补载链路中会被重复审计（实测启动期
-# system-tools 的 subprocess 告警重复打 3 遍，每遍都重新 ast.parse），
+# system-interact（更名前 system-tools）的 subprocess 告警重复打 3 遍，每遍都重新 ast.parse），
 # 文件未变时直接复用上次判定，顺带消除重复告警日志。
 _GUARD_CACHE_MAX = 512
 _guard_cache: Dict[tuple, "GuardResult"] = {}

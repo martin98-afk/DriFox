@@ -8,7 +8,7 @@ import pytest
 def test_catalog_size_and_ids():
     from app.plugins.capabilities import catalog
 
-    assert len(catalog.CATALOG) == 88
+    assert len(catalog.CATALOG) == 92
     for cid, spec in catalog.CATALOG.items():
         assert spec.id == cid
         assert re.fullmatch(r"[a-z]+(\.[a-z][a-z_]*)+", cid), cid
@@ -37,6 +37,9 @@ def test_high_level_set_is_stable():
         "tool.execute",
         "subagent.run",
         "engine.session",
+        "engine.session.resume",
+        # 既有漏登（HIGH 但先前未进守护集合），随本次能力补件一并登记
+        "session.title.commit",
         "engine.stack",
         "platform.send",
         "mcp.call",
@@ -62,6 +65,8 @@ def test_high_level_set_is_stable():
         "plugin.reload_components",
         # 2026-11-12 运行时工具注册：等于让 LLM 能调插件代码
         "tool.register",
+        # 2026-11-13 IM 网关插件化：服务/平台连接控制面
+        "platform.control",
     }
 
 

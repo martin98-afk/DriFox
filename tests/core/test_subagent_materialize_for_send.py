@@ -284,7 +284,7 @@ def test_responses_path_retry_keeps_materialized_copy(monkeypatch, persist_env):
     executor = _build_executor()
     executor._vision_session_ids = ["sid_mat"]
 
-    def _fake_retry(client, create_stream, cancel_check=None):
+    def _fake_retry(client, create_stream, cancel_check=None, **_kwargs):
         # 模拟重试语义：第一次调用后请求失败，第二次成功
         first = create_stream()
         _ = list(first)  # 消费首试事件流（惰性迭代器）

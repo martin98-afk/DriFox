@@ -12,7 +12,7 @@ import orjson as json
 from loguru import logger
 
 from app.tools.registry import DEFAULT_FALLBACK_ICON
-from app.utils.design_tokens import _get_global_font, scale_font_size
+from app.utils.design_tokens import Colors, _get_global_font, scale_font_size
 from app.utils.utils import get_font_family_css
 
 # 行内 diff 高亮子系统已抽取至 app/utils/diff_highlight（消除 utils→widgets 反向依赖）。
@@ -139,6 +139,17 @@ def _truncate_value(v, max_len: int = 80) -> str:
     else:
         s = str(v)
         return s[:max_len] + "..." if len(s) > max_len else s
+
+
+def _shorten_path(path: str, max_len: int = 56) -> str:
+    """折叠头右侧的路径缩短：保留开头目录与末尾文件名，中间省略。
+    绝对路径动辄上百字符，原样塞进单行会被 CSS 从尾部裁掉——文件名正好是
+    最该看见的部分，所以在 Python 侧先做首尾截断。
+    """
+    if not path or len(path) <= max_len:
+        return path
+    half = (max_len - 1) // 2
+    return f"{path[:half]}…{path[-half:]}"
 
 
 def _format_args_preview(tool_args: dict, max_total_len: int = 80) -> str:
@@ -703,6 +714,14 @@ def _render_tool_status_badge(success: bool) -> str:
     return f'<span class="tool-status-badge" style="position:absolute;top:-2px;right:-2px;width:7px;height:7px;border-radius:50%;background:{bg};z-index:2;box-shadow:0 1px 2px rgba(0,0,0,0.35);"></span>'
 
 
+def _tool_success_attr(success) -> str:
+    """失败标记：JS「工具与思考」头部按此统计「失败操作」数。
+
+    只在 success is False 时输出；None（运行中/未知）与 True 都不输出，
+    避免运行中块被算成失败。
+    """
+    return ' data-tool-success="false"' if success is False else ""
+
 def _render_inline_tool(
     tool_name: str,
     tool_args: dict,
@@ -724,13 +743,14 @@ def _render_inline_tool(
     tc_id_attr = f' data-tool-call-id="{escape(tool_call_id)}"' if tool_call_id else ""
     # 编辑/子智能体/提问类工具标记 data-keep-in-content：JS 正文分区据此保留在正文（registry 派生）
     _keep_attr = ' data-keep-in-content="true"' if tool_name in _keep_in_content_tools() else ""
-    return f"""<div class="tool-block" data-tool-name="{escape(tool_name)}"{tc_id_attr}{_keep_attr} style="margin: 4px 0; background: transparent; border: none; border-radius: 6px; box-shadow: none; display: flex; align-items: center; padding: 5px 10px; {get_font_family_css()}">
+    _succ_attr = _tool_success_attr(success)
+    return f"""<div class="tool-block" data-tool-name="{escape(tool_name)}"{tc_id_attr}{_keep_attr}{_succ_attr} style="margin: 4px 0; background: transparent; border: none; border-radius: 6px; box-shadow: none; display: flex; align-items: center; padding: 5px 10px; {get_font_family_css()}">
         <span style="display: inline-flex; align-items: center; gap: 14px; flex: 0 0 auto;">
             <span style="position:relative;display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;flex:0 0 auto;">
                 {icon_html}
                 {badge_html}
             </span>
-            <span style="white-space: nowrap; flex: 0 0 auto; color: #FFA500; font-size: {scale_font_size(13)}px; font-weight: 500;">{escape(cn_name)}</span>
+            <span style="white-space: nowrap; flex: 0 0 auto; color: {Colors.TOOL_TITLE_MCP if tool_name.startswith('mcp__') else Colors.TOOL_TITLE}; font-size: {scale_font_size(13)}px; font-weight: 500;">{escape(cn_name)}</span>
         </span>
         <span style="flex: 1 1 auto; min-width: 0; text-align: left; color: var(--text-secondary); font-size: {scale_font_size(11)}px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-left: 12px;">
             {escape(natural_preview)}
@@ -876,19 +896,20 @@ def render_tool_block(
     except Exception:
         is_sub_agent_task = False
 
-    # 图标与颜色按类型区分
+    # 图标与颜色按类型区分（颜色走主题 token，禁止再写死）
     if is_mcp_tool:
         icon_name = "websearch"
-        title_color = "#00BCD4"
+        title_color = Colors.TOOL_TITLE_MCP
     elif is_sub_agent_task:
         icon_name = "设置-subagent"
-        title_color = "#9C27B0"
+        title_color = Colors.TOOL_TITLE_SUBAGENT
     else:
         icon_name = _get_tool_icon_name(tool_name, tool_args)
-        title_color = "#FFA500"
+        title_color = Colors.TOOL_TITLE
 
     # 状态徽章（图标右上角）
     badge_html = _render_tool_status_badge(success)
+    _succ_attr = _tool_success_attr(success)
     icon_html = _get_tool_icon_html(icon_name, tool_name=tool_name)
     cn_name = _get_tool_cn_name(tool_name)
 
@@ -940,6 +961,27 @@ def render_tool_block(
     if args_preview.startswith(cn_name):
         args_preview = args_preview[len(cn_name) :].lstrip()
 
+    # 有 description（模型填的意图说明）时：描述进标题位替换工具名，
+    # 右侧继续显示被它挤掉的事实信息（文件路径）。描述与路径挤在同一行
+    # 会把两者都压扁，故分居两侧；路径缺了不知道这一步改的是哪个文件。
+    desc_text = ""
+    if isinstance(tool_args, dict):
+        desc_text = str(tool_args.get("description") or "").strip()
+    title_text = desc_text or cn_name
+    # 描述不截断：宁可右侧路径被挤掉，也要把「这一步做什么」完整摆出来
+    preview_text = args_preview
+    if desc_text and isinstance(tool_args, dict):
+        preview_text = _shorten_path(str(tool_args.get("path") or tool_args.get("file_path") or "").strip())
+    elif len(preview_text) > 80:
+        # 无描述时保持原预览，只对超长串做首尾缩短（尾部通常是文件名）
+        preview_text = _shorten_path(preview_text, 80)
+    preview_span = ""
+    if preview_text:
+        # 右侧必须单行：路径换行会撑破 header 行高，和下一块工具卡叠在一起
+        preview_span = f'''<span style="color: var(--text-secondary); font-size: {scale_font_size(11)}px; text-align: left; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">
+                {escape(preview_text)}
+            </span>'''
+
     # 生成哈希 key（折叠块懒注入的早返回也要用，故提前到内容构造之前）
     block_seed = "|".join(
         [
@@ -959,28 +1001,25 @@ def render_tool_block(
     # 无 tool_call_id 的块无法反查源文本，不懒化（否则展开后永久空白）。
     if lazy_body and tool_call_id and (collapsed or no_collapse):
         _keep_attr = ' data-keep-in-content="true"' if tool_name in _keep_in_content_tools() else ""
-        _head_spans = f"""<span style="display: inline-flex; align-items: center; gap: 14px; flex: 0 0 auto;">
+        _head_spans = f"""<span style="display: inline-flex; align-items: center; gap: 14px; flex: 0 1 auto; min-width: 0;">
             <span style="position:relative;display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;flex:0 0 auto;">
                 {icon_html}
                 {badge_html}
             </span>
-            <span style="white-space: nowrap; flex: 0 0 auto; {get_font_family_css()}">{escape(cn_name)}</span>
+            <span style="white-space: nowrap; flex: 0 0 auto; {get_font_family_css()}" title="{escape(title_text)}">{escape(title_text)}</span>
         </span>
         <span style="display: flex; align-items: center; gap: 8px; margin-left: 10px; min-width: 0; flex: 1 1 auto; justify-content: flex-start; overflow: hidden;">
-            <span style="color: var(--text-secondary); font-size: {scale_font_size(11)}px; text-align: left; word-break: break-all; white-space: normal; line-height: 1.4; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;">
-                {escape(args_preview)}
-            </span>
-            {diff_stats_html}
+            {preview_span}{diff_stats_html}
         </span>"""
         if no_collapse:
-            return f"""<div class="tool-block tool-block--no-collapse" data-block-key="{block_key}" data-lazy-body="1" data-tool-name="{escape(tool_name)}" data-tool-call-id="{escape(tool_call_id or "")}"{_keep_attr} style="margin: 4px 0; background: transparent; border-radius: 6px;">
-    <div class="tool-block__header" style="cursor: default; padding: 4px 8px; color: {title_color}; font-size: {scale_font_size(13)}px; font-weight: 500; display: flex; align-items: center; gap: 6px; width: 100%; background: transparent; border: none; text-align: left; box-sizing: border-box; {get_font_family_css()}">
+            return f"""<div class="tool-block tool-block--no-collapse" data-block-key="{block_key}" data-lazy-body="1" data-tool-name="{escape(tool_name)}" data-tool-call-id="{escape(tool_call_id or "")}"{_keep_attr}{_succ_attr} style="margin: 4px 0; background: transparent; border-radius: 6px;">
+    <div class="tool-block__header" style="cursor: default; padding: 4px 8px; color: {title_color}; font-size: {scale_font_size(13)}px; font-weight: 500; display: flex; align-items: center; gap: 6px; width: 100%; overflow: hidden; background: transparent; border: none; text-align: left; box-sizing: border-box; {get_font_family_css()}">
         {_head_spans}
     </div>
     <div class="tool-block__body" style="padding: 0 8px 4px;"></div>
 </div>"""
-        return f"""<div class="cm-collapsible tool-block" data-block-key="{block_key}" data-expanded="false" data-lazy-body="1" data-tool-name="{escape(tool_name)}" data-tool-call-id="{escape(tool_call_id or "")}"{_keep_attr} style="margin: 4px 0; background: transparent; border-radius: 6px;">
-    <button type="button" class="cm-collapsible__summary tool-block__summary" aria-expanded="false" style="cursor: pointer; padding: 4px 8px; color: {title_color}; font-size: {scale_font_size(13)}px; font-weight: 500; display: flex; align-items: center; gap: 6px; width: 100%; background: transparent; border: none; text-align: left; box-sizing: border-box; {get_font_family_css()}">
+        return f"""<div class="cm-collapsible tool-block" data-block-key="{block_key}" data-expanded="false" data-lazy-body="1" data-tool-name="{escape(tool_name)}" data-tool-call-id="{escape(tool_call_id or "")}"{_keep_attr}{_succ_attr} style="margin: 4px 0; background: transparent; border-radius: 6px;">
+    <button type="button" class="cm-collapsible__summary tool-block__summary" aria-expanded="false" style="cursor: pointer; padding: 4px 8px; color: {title_color}; font-size: {scale_font_size(13)}px; font-weight: 500; display: flex; align-items: center; gap: 6px; width: 100%; overflow: hidden; background: transparent; border: none; text-align: left; box-sizing: border-box; {get_font_family_css()}">
         {_head_spans}
         <span class="cm-collapsible__chevron" aria-hidden="true" style="flex: 0 0 auto; margin-left: auto;"></span>
     </button>
@@ -1092,20 +1131,17 @@ def render_tool_block(
     if no_collapse:
         # 禁用折叠框渲染：无 cm-collapsible 交互，标题栏 + body 直接展示
         _keep_attr = ' data-keep-in-content="true"' if tool_name in _keep_in_content_tools() else ""
-        return f"""<div class="tool-block tool-block--no-collapse" data-tool-name="{escape(tool_name)}" data-tool-call-id="{escape(tool_call_id or "")}"{_keep_attr} style="margin: 4px 0; background: transparent; border-radius: 6px;">
-    <div class="tool-block__header" style="cursor: default; padding: 4px 8px; color: {title_color}; font-size: {scale_font_size(13)}px; font-weight: 500; display: flex; align-items: center; gap: 6px; width: 100%; background: transparent; border: none; text-align: left; box-sizing: border-box; {get_font_family_css()}">
-        <span style="display: inline-flex; align-items: center; gap: 14px; flex: 0 0 auto;">
+        return f"""<div class="tool-block tool-block--no-collapse" data-tool-name="{escape(tool_name)}" data-tool-call-id="{escape(tool_call_id or "")}"{_keep_attr}{_succ_attr} style="margin: 4px 0; background: transparent; border-radius: 6px;">
+    <div class="tool-block__header" style="cursor: default; padding: 4px 8px; color: {title_color}; font-size: {scale_font_size(13)}px; font-weight: 500; display: flex; align-items: center; gap: 6px; width: 100%; overflow: hidden; background: transparent; border: none; text-align: left; box-sizing: border-box; {get_font_family_css()}">
+        <span style="display: inline-flex; align-items: center; gap: 14px; flex: 0 1 auto; min-width: 0;">
             <span style="position:relative;display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;flex:0 0 auto;">
                 {icon_html}
                 {badge_html}
             </span>
-            <span style="white-space: nowrap; flex: 0 0 auto; {get_font_family_css()}">{escape(cn_name)}</span>
+            <span style="white-space: nowrap; flex: 0 0 auto; {get_font_family_css()}" title="{escape(title_text)}">{escape(title_text)}</span>
         </span>
         <span style="display: flex; align-items: center; gap: 8px; margin-left: 10px; min-width: 0; flex: 1 1 auto; justify-content: flex-start; overflow: hidden;">
-            <span style="color: var(--text-secondary); font-size: {scale_font_size(11)}px; text-align: left; word-break: break-all; white-space: normal; line-height: 1.4; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;">
-                {escape(args_preview)}
-            </span>
-            {diff_stats_html}
+            {preview_span}{diff_stats_html}
         </span>
     </div>
     <div class="tool-block__body" style="padding: 0 8px 4px;">
@@ -1114,20 +1150,17 @@ def render_tool_block(
 </div>"""
 
     _keep_attr = ' data-keep-in-content="true"' if tool_name in _keep_in_content_tools() else ""
-    return f"""<div class="cm-collapsible tool-block" data-block-key="{block_key}" data-expanded="{expanded_attr}" data-tool-name="{escape(tool_name)}" data-tool-call-id="{escape(tool_call_id or "")}"{_keep_attr} style="margin: 4px 0; background: transparent; border-radius: 6px;">
-    <button type="button" class="cm-collapsible__summary tool-block__summary" aria-expanded="{expanded_attr}" style="cursor: pointer; padding: 4px 8px; color: {title_color}; font-size: {scale_font_size(13)}px; font-weight: 500; display: flex; align-items: center; gap: 6px; width: 100%; background: transparent; border: none; text-align: left; box-sizing: border-box; {get_font_family_css()}">
-        <span style="display: inline-flex; align-items: center; gap: 14px; flex: 0 0 auto;">
+    return f"""<div class="cm-collapsible tool-block" data-block-key="{block_key}" data-expanded="{expanded_attr}" data-tool-name="{escape(tool_name)}" data-tool-call-id="{escape(tool_call_id or "")}"{_keep_attr}{_succ_attr} style="margin: 4px 0; background: transparent; border-radius: 6px;">
+    <button type="button" class="cm-collapsible__summary tool-block__summary" aria-expanded="{expanded_attr}" style="cursor: pointer; padding: 4px 8px; color: {title_color}; font-size: {scale_font_size(13)}px; font-weight: 500; display: flex; align-items: center; gap: 6px; width: 100%; overflow: hidden; background: transparent; border: none; text-align: left; box-sizing: border-box; {get_font_family_css()}">
+        <span style="display: inline-flex; align-items: center; gap: 14px; flex: 0 1 auto; min-width: 0;">
             <span style="position:relative;display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;flex:0 0 auto;">
                 {icon_html}
                 {badge_html}
             </span>
-            <span style="white-space: nowrap; flex: 0 0 auto; {get_font_family_css()}">{escape(cn_name)}</span>
+            <span style="white-space: nowrap; flex: 0 0 auto; {get_font_family_css()}" title="{escape(title_text)}">{escape(title_text)}</span>
         </span>
         <span style="display: flex; align-items: center; gap: 8px; margin-left: 10px; min-width: 0; flex: 1 1 auto; justify-content: flex-start; overflow: hidden;">
-            <span style="color: var(--text-secondary); font-size: {scale_font_size(11)}px; text-align: left; word-break: break-all; white-space: normal; line-height: 1.4; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;">
-                {escape(args_preview)}
-            </span>
-            {diff_stats_html}
+            {preview_span}{diff_stats_html}
         </span>
         <span class="cm-collapsible__chevron" aria-hidden="true" style="flex: 0 0 auto; margin-left: auto;"></span>
     </button>

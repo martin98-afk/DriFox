@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import pytest
 
-from app.gateway.local_service.session_handler import APIHistoryManager, APISessionHandler
+from app.core.local_service.session_handler import APIHistoryManager, APISessionHandler
 from app.core.store.session_store import SessionStore
 from app.utils.db_manager import DatabaseManager
 

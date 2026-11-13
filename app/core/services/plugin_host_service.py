@@ -453,9 +453,11 @@ class PluginHostService(QObject):
         同步：对"已注册 + 已启用 + 未连接"的平台补启连接（幂等）。
         修复：初始化时已启用的 gateway 插件必须手动关闭/打开才连接。"""
         try:
-            from app.core.services.gateway_service import GatewayService
+            from app.core.services.gateway_access import get_gateway_service
 
-            GatewayService.get_instance().sync_platforms()
+            svc = get_gateway_service()
+            if svc is not None:
+                svc.sync_platforms()
         except Exception as e:
             logger.error(f"[PluginHost] gateway 平台补启失败: {e}")
 

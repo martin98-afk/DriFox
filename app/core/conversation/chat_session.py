@@ -38,11 +38,22 @@ DEFAULT_MAX_CACHED_SESSIONS = 15
 # 保留 3 个常驻 → 稳态约 55-60MB，省 ~70MB，且会话对象与索引结构不变。
 DEFAULT_KEEP_MESSAGES = 3
 
+# 未生成真实标题时 name / topic_summary 的占位形态（"对话 MM-DD HH:MM"）。
+# 唯一真相：ChatSession 初始化与 set_topic_summary 都按此前缀判定，
+# 外部（标题生成守卫）也必须用同一口径，否则「非空」会把占位标题误当已有标题。
+DEFAULT_TITLE_PREFIX = "对话 "
+
+
+def is_default_title(text: str) -> bool:
+    """标题是否为占位值（空串或 "对话 MM-DD HH:MM" 形态，即尚未生成真实标题）。"""
+    value = str(text or "")
+    return not value or value.startswith(DEFAULT_TITLE_PREFIX)
+
 
 class ChatSession:
     def __init__(self, name: str = None, messages: Optional[List[Dict]] = None):
         self.session_id: str = uuid.uuid4().hex
-        self.name = name or f"对话 {datetime.now().strftime('%m-%d %H:%M')}"
+        self.name = name or f"{DEFAULT_TITLE_PREFIX}{datetime.now().strftime('%m-%d %H:%M')}"
         # 消息体惰性重载器：由 SessionManager 注入（按 session_id 从 SQLite 重读）
         self._messages_loader: Optional[Callable[[str], Optional[List[Dict]]]] = None
         self._messages_released: bool = False
@@ -251,7 +262,7 @@ class ChatSession:
     def set_topic_summary(self, summary: str):
         self.topic_summary = summary
         # 同步更新 name，使 DB 保存时 title 字段一致
-        if summary and not summary.startswith("对话 "):
+        if summary and not summary.startswith(DEFAULT_TITLE_PREFIX):
             self.name = summary
 
     def set_compaction_state(self, state: Optional[Dict] = None):

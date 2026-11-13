@@ -43,8 +43,8 @@ def net_avatar(host: Any):
 
     def fetch() -> Optional[str]:
         try:
-            from app.gateway.auth import get_oauth_backend
-            from app.gateway.auth.gitee import fetch_user_avatar_url
+            from app.core.auth import get_oauth_backend
+            from app.core.auth.gitee import fetch_user_avatar_url
 
             info = get_oauth_backend("gitee").get_bound_info()
             if not info:
@@ -96,7 +96,7 @@ def net_download(host: Any):
     """
 
     def download(remote_path: str, local_path: str) -> Tuple[Optional[str], Optional[str]]:
-        from app.gateway.utils.gitee_uploader import get_gitee_uploader
+        from app.core.net.gitee_uploader import get_gitee_uploader
 
         return get_gitee_uploader().download_file(remote_path, local_path)
 

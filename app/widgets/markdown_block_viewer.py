@@ -654,6 +654,25 @@ def _extract_balanced_braces(text: str, start: int) -> Optional[str]:
     return None
 
 
+def _tool_title_color(name: str) -> str:
+    """工具卡标题色（MCP / 子智能体 / 普通工具三态），走主题 token。
+    对齐 WebEngine 版 render_tool_block 的 title_color 分流。
+    """
+    if name and name.startswith("mcp__"):
+        return Colors.TOOL_TITLE_MCP
+    if name:
+        try:
+            from app.tools.registry import ToolRegistry
+            from app.tools.tool_name_mapper import ToolNameMapper
+
+            reg = ToolRegistry.get_instance().get(ToolNameMapper.to_native(name))
+            if reg and reg.metadata and reg.metadata.get("subagent_task"):
+                return Colors.TOOL_TITLE_SUBAGENT
+        except Exception:
+            pass
+    return Colors.TOOL_TITLE
+
+
 def _is_edit_tool_name(name: str) -> bool:
     """延迟判断编辑类工具（结果展示在正文而非工具折叠区，对齐 WebEngine 版规则）。"""
     if not name:
@@ -664,6 +683,40 @@ def _is_edit_tool_name(name: str) -> bool:
         return name in _edit_tools()
     except Exception:
         return False
+
+
+def _tool_desc_from_block(block: Dict[str, Any]) -> str:
+    """取模型填在参数里的 description（意图说明）；无/非法 JSON 时返回空串。
+    有说明时折叠头用它当标题，工具名让位（对齐 WebEngine 版）。
+    """
+    args = _tool_args_from_block(block)
+    return str(args.get("description") or "").strip() if args else ""
+
+
+def _tool_path_from_block(block: Dict[str, Any], max_len: int = 56) -> str:
+    """取参数里的文件路径（描述进标题后，右侧继续显示它）
+    超长路径做首尾缩短：保留开头目录与末尾文件名，与 WebEngine 版一致。
+    """
+    args = _tool_args_from_block(block)
+    if not args:
+        return ""
+    path = str(args.get("path") or args.get("file_path") or "").strip()
+    if len(path) <= max_len:
+        return path
+    half = (max_len - 1) // 2
+    return f"{path[:half]}…{path[-half:]}"
+
+
+def _tool_args_from_block(block: Dict[str, Any]) -> Dict[str, Any]:
+    """解析 block 的 args_raw 为 dict；无/非法 JSON 返回空 dict"""
+    raw = block.get("args_raw") or ""
+    if not raw:
+        return {}
+    try:
+        args = json.loads(raw)
+    except Exception:
+        return {}
+    return args if isinstance(args, dict) else {}
 
 
 def _parse_tool_block(content: str) -> Dict[str, Any]:
@@ -1410,11 +1463,54 @@ class CodeBlockWidget(QFrame):
         QApplication.clipboard().setText(self._raw_code)
 
 
-class ThinkCard(QFrame):
-    """思考折叠卡：头部(图标+标签+预览+chevron) + 可动画展开的正文区。"""
+class _CollapsibleHeightAnimMixin:
+    """折叠卡高度展开/收起动画共用逻辑（ThinkCard / ToolCardWidget）。
+
+    约定宿主已具备：_expanded/_anim 状态与 _body_wrap/_chevron 控件。
+    """
 
     CHEVRON_DOWN = "▾"
     CHEVRON_RIGHT = "▸"
+
+    def _toggle_expanded(self) -> None:
+        # 两头都从"当前实际渲染高度"起步：展开完成时限高已放开(16777215)，
+        # 直接拿 maximumHeight 当起点会导致大半动画时长无视觉变化、末尾骤缩；
+        # 展开侧硬编 0 则会在「收起动画中途再点展开」时先跳回 0 再长出来。
+        if not self._expanded:
+            target = max(_measure_expanded_height(self._body_wrap), 1)
+            start = max(self._body_wrap.height(), 0)
+            self._expanded = True
+        else:
+            start = max(self._body_wrap.height(), 1)
+            self._body_wrap.setMaximumHeight(start)  # 先钳到实际高度再动画
+            target = 0
+            self._expanded = False
+        self._chevron.setText(self.CHEVRON_DOWN if self._expanded else self.CHEVRON_RIGHT)
+        if not Animations.motion_enabled():
+            # reduced-motion：跳过补间，直接落终值（收尾回调幂等）
+            self._body_wrap.setMaximumHeight(_QWIDGETSIZE_MAX if self._expanded else 0)
+            self._on_anim_done()
+            return
+        if self._anim is not None:
+            self._anim.stop()
+        self._anim = QPropertyAnimation(self._body_wrap, b"maximumHeight", self)
+        # 时长/曲线按方向分离（走全局 token）：展开 ENTER_MS + EASE_ENTER，
+        # 收起 EXIT_MS + EASE_EXIT（OutCubic 在收起的尾段拖尾明显）
+        self._anim.setDuration(Animations.ENTER_MS if self._expanded else Animations.EXIT_MS)
+        self._anim.setEasingCurve(QEasingCurve(Animations.EASE_ENTER if self._expanded else Animations.EASE_EXIT))
+        self._anim.setStartValue(start)
+        self._anim.setEndValue(target)
+        self._anim.finished.connect(self._on_anim_done)
+        self._anim.start()
+
+    def _on_anim_done(self) -> None:
+        if self._expanded:
+            # 展开终点经 heightForWidth 精确测量，放开限高不会二次跳变
+            self._body_wrap.setMaximumHeight(_QWIDGETSIZE_MAX)
+
+
+class ThinkCard(_CollapsibleHeightAnimMixin, QFrame):
+    """思考折叠卡：头部(图标+标签+预览+chevron) + 可动画展开的正文区。"""
 
     def __init__(self, content: str, completed: bool = True, parent: Optional[QWidget] = None):
         super().__init__(parent)
@@ -1526,40 +1622,7 @@ class ThinkCard(QFrame):
             self.apply_streaming(False)
 
     def toggle(self) -> None:
-        # 两头都从"当前实际渲染高度"起步：展开完成时限高已放开(16777215)，
-        # 直接拿 maximumHeight 当起点会导致大半动画时长无视觉变化、末尾骤缩；
-        # 展开侧硬编 0 则会在「收起动画中途再点展开」时先跳回 0 再长出来。
-        if not self._expanded:
-            target = max(_measure_expanded_height(self._body_wrap), 1)
-            start = max(self._body_wrap.height(), 0)
-            self._expanded = True
-        else:
-            start = max(self._body_wrap.height(), 1)
-            self._body_wrap.setMaximumHeight(start)  # 先钳到实际高度再动画
-            target = 0
-            self._expanded = False
-        self._chevron.setText(self.CHEVRON_DOWN if self._expanded else self.CHEVRON_RIGHT)
-        if not Animations.motion_enabled():
-            # reduced-motion：跳过补间，直接落终值（收尾回调幂等）
-            self._body_wrap.setMaximumHeight(_QWIDGETSIZE_MAX if self._expanded else 0)
-            self._on_anim_done()
-            return
-        if self._anim is not None:
-            self._anim.stop()
-        self._anim = QPropertyAnimation(self._body_wrap, b"maximumHeight", self)
-        # 时长/曲线按方向分离（走全局 token）：展开 ENTER_MS + EASE_ENTER，
-        # 收起 EXIT_MS + EASE_EXIT（OutCubic 在收起的尾段拖尾明显）
-        self._anim.setDuration(Animations.ENTER_MS if self._expanded else Animations.EXIT_MS)
-        self._anim.setEasingCurve(QEasingCurve(Animations.EASE_ENTER if self._expanded else Animations.EASE_EXIT))
-        self._anim.setStartValue(start)
-        self._anim.setEndValue(target)
-        self._anim.finished.connect(self._on_anim_done)
-        self._anim.start()
-
-    def _on_anim_done(self) -> None:
-        if self._expanded:
-            # 展开终点经 heightForWidth 精确测量，放开限高不会二次跳变
-            self._body_wrap.setMaximumHeight(_QWIDGETSIZE_MAX)
+        self._toggle_expanded()
 
 
 class DiffViewWidget(QTextEdit):
@@ -1691,11 +1754,8 @@ def _format_args_preview_safe(args_raw: str, max_len: int = 80) -> str:
         return ""
 
 
-class ToolCardWidget(QFrame):
+class ToolCardWidget(_CollapsibleHeightAnimMixin, QFrame):
     """工具调用卡：头部(名称+状态徽章+chevron)，展开显示 args/result。"""
-
-    CHEVRON_DOWN = "▾"
-    CHEVRON_RIGHT = "▸"
 
     def __init__(self, block: Dict[str, Any], parent: Optional[QWidget] = None):
         super().__init__(parent)
@@ -1727,9 +1787,9 @@ class ToolCardWidget(QFrame):
         gear.setAlignment(Qt.AlignCenter)
         self._gear_label = gear
         self._name_label = QLabel(block.get("cn_name") or block.get("name") or "工具调用", header)
-        # 标题色对齐 WebEngine 版 title_color=#FFA500
+        # 标题色走主题 token（MCP 蓝 / 子智能体紫 / 普通工具黄）
         self._name_label.setStyleSheet(
-            f"{get_font_family_css()} color:{_LANG_COLOR};"
+            f"{get_font_family_css()} color:{_tool_title_color(block.get('name') or '')};"
             f" font-size:{_CODE_FONT_SIZE}px; font-weight:600; background:transparent;"
         )
         # 参数单行预览（对齐 WebEngine 版 _format_args_preview：k=v; k2=v2 截断）
@@ -1750,8 +1810,11 @@ class ToolCardWidget(QFrame):
         self._chevron.setStyleSheet(
             f"color:{Colors.ASSISTANT_CARD_MUTED}; font-size:{scale_font_size(12)}px; background:transparent;"
         )
+        self._name_label.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Preferred)
+        self._preview_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         for w in (gear, self._name_label, self._preview_label, self._status_label):
             hl.addWidget(w)
+        self._apply_title(block)
         self._update_diff_stats()
         hl.addStretch()
         # diff 统计靠右（stretch 之后），避免与长工具名挤压重叠
@@ -1827,12 +1890,27 @@ class ToolCardWidget(QFrame):
             if self._body_kind == "":
                 self._body_kind, self._body_label_ref = "result", result_label
 
+    def _apply_title(self, block: Dict[str, Any]) -> None:
+        """标题位：有 description 就显它（不截断，宁可右侧路径让位），右侧继续显文件路径；
+        无 description 维持「工具名 + 参数预览」。对齐 WebEngine 版 render_tool_block。
+        """
+        desc = _tool_desc_from_block(block)
+        if desc:
+            # 不截断：宁可右侧路径被挤掉，也要把左侧意图说明完整摆出来
+            self._name_label.setText(desc)
+            self._preview_label.setVisible(True)
+            self._preview_label.setText(_tool_path_from_block(block))
+            return
+        self._name_label.setText(block.get("cn_name") or block.get("name") or "工具调用")
+        self._preview_label.setVisible(True)
+        self._preview_label.setText(_format_args_preview_safe(block.get("args_raw") or ""))
+
     def update_content(self, b: Dict[str, Any]) -> None:
         """流式原位更新：头部预览/徽章/diff 统计 + body 分支原位或重建（不重建卡片，
         保留用户展开态与动画）。"""
         old = self._block
         self._block = b
-        self._preview_label.setText(_format_args_preview_safe(b.get("args_raw") or ""))
+        self._apply_title(b)
         new_icon_pm = _tool_icon_pixmap(b.get("name") or "", b.get("args_raw") or "")
         if self._icon_is_pixmap and new_icon_pm is not None:
             self._gear_label.setPixmap(new_icon_pm)
@@ -1920,37 +1998,7 @@ class ToolCardWidget(QFrame):
             )
 
     def toggle(self) -> None:
-        # 收起从"当前实际渲染高度"起步（ThinkCard 同策略），避免从 16777215 起步；
-        # 展开同理取当前高度，保证收起中途反向不会先跳回 0
-        if not self._expanded:
-            target = max(_measure_expanded_height(self._body_wrap), 1)
-            start = max(self._body_wrap.height(), 0)
-            self._expanded = True
-        else:
-            start = max(self._body_wrap.height(), 1)
-            self._body_wrap.setMaximumHeight(start)
-            target = 0
-            self._expanded = False
-        self._chevron.setText(self.CHEVRON_DOWN if self._expanded else self.CHEVRON_RIGHT)
-        if not Animations.motion_enabled():
-            # reduced-motion：跳过补间，直接落终值（收尾回调幂等）
-            self._body_wrap.setMaximumHeight(_QWIDGETSIZE_MAX if self._expanded else 0)
-            self._on_anim_done()
-            return
-        if self._anim is not None:
-            self._anim.stop()
-        self._anim = QPropertyAnimation(self._body_wrap, b"maximumHeight", self)
-        # 时长/曲线按方向分离（走全局 token）
-        self._anim.setDuration(Animations.ENTER_MS if self._expanded else Animations.EXIT_MS)
-        self._anim.setEasingCurve(QEasingCurve(Animations.EASE_ENTER if self._expanded else Animations.EASE_EXIT))
-        self._anim.setStartValue(start)
-        self._anim.setEndValue(target)
-        self._anim.finished.connect(self._on_anim_done)
-        self._anim.start()
-
-    def _on_anim_done(self) -> None:
-        if self._expanded:
-            self._body_wrap.setMaximumHeight(_QWIDGETSIZE_MAX)
+        self._toggle_expanded()
 
 
 # ── 「工具与思考」分区 + 任务列表面板 ─────────────────────────────
@@ -2140,8 +2188,18 @@ class ToolSectionWidget(QWidget):
         self._widgets, self._keys = reconcile_widgets(
             self._cards_layout, self._widgets, self._keys, items, self._build, streaming
         )
-        total = len(items)
-        self._separator.set_extra(f"{total} 项" if total else "")
+        # 分项计数（对齐 WebEngine 版 .ts-count）：思考 / 操作 / 失败操作
+        think_n = sum(1 for _, b in items if b.get("type") == "think")
+        tool_items = [b for _, b in items if b.get("type") == "tool"]
+        fail_n = sum(1 for b in tool_items if b.get("success") is False)
+        parts = []
+        if think_n:
+            parts.append(f"{think_n} 次思考")
+        if tool_items:
+            parts.append(f"{len(tool_items)} 次操作")
+        if fail_n:
+            parts.append(f"{fail_n} 次失败操作")
+        self._separator.set_extra(" · ".join(parts))
         if not self._collapsed and not self._content_wrap.isVisible():
             self._apply_expand_state()
         self.setVisible(bool(items))
@@ -2170,7 +2228,7 @@ class ToolSectionWidget(QWidget):
     def exit_dock(self) -> None:
         """退出坞态：解除限高并折叠（对齐 WebEngine 版简洁模式行为）。
 
-        简洁模式语义：流式结束后工具与思考区收起为「工具与思考 · N 项」
+        简洁模式语义：流式结束后工具与思考区收起为「工具与思考 · 分项计数」
         标题栏（WebEngine 版 MessageCard._auto_collapse_tool_section 同行为）。
         本渲染器 _tool_compact_mode 恒为 True（坞态仅简洁模式启用），
         结束即折叠；流式期间由 enter_dock 保持展开可见。
@@ -2415,7 +2473,7 @@ class MarkdownBlockViewer(QWidget):
 
         [T44] 不再做位置调换：工具/思考区**始终在卡片顶部**（构造序即
         tool_section → body_box），坞态只负责两件事——流式期间卡片区限高内滚
-        保证实时进度可见，流式结束解除限高并折叠成「工具与思考 · N 项」。
+        保证实时进度可见，流式结束解除限高并折叠成「工具与思考 · 分项计数」。
         正文按自然高度在下方生长，全卡只有外层聊天列表一个滚动条。
         """
         # 仅简洁模式启用坞态；欢迎卡片（light 骨架语义）不进坞态

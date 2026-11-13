@@ -31,7 +31,6 @@ from PyQt5.QtCore import (
     QRect,
     QSize,
     QThread,
-    Qt,
     QTimer,
     QTimerEvent,
     QUrl,
@@ -40,17 +39,13 @@ from PyQt5.QtCore import (
 )
 from PyQt5.QtGui import (
     QBrush,
-    QColor,
     QFontMetrics,
     QLinearGradient,
-    QPainter,
     QPainterPath,
     QPen,
-    QPixmap,
     QTextDocument,
     QWheelEvent,
 )
-from PyQt5.QtSvg import QSvgRenderer
 from app.utils.design_tokens import (
     Animations,
     BorderRadius,
@@ -161,7 +156,6 @@ _md_instance = None
 ACTION_COLOR_MAP = {
     "ask": "#FF6347",
 }
-DEFAULT_COLOR = "#888888"
 
 # ======== B3: 渲染线程池（md.convert 等纯计算移出主线程） ========
 # 线程池 worker 只做纯 CPU 渲染（sanitize→inject→md.convert→wrap→resolve），
@@ -215,8 +209,6 @@ _ASK_MAX_ITEMS = 4
 # 追问模板占位词：stop 追问预测 hook 的提示词里出现过「<ask>原话</ask>」这类示例，
 # 模型偶尔照抄字面输出成一个假追问项。渲染阶段兜底丢弃，历史消息同样受益。
 _ASK_PLACEHOLDER_TEXTS = frozenset({"原话", "追问", "问题", "xxx", "某问题"})
-_CODE_BLOCK_CODE_PATTERN = re.compile(r"```[\w]*\n")
-_CODE_BLOCK_END_PATTERN = re.compile(r"```\n")
 _CODE_BLOCK_FINAL_PATTERN = re.compile(r"```")
 # 预编译常用正则
 _LINK_DETECTION_PATTERN = re.compile(r"\[[^\[\]]+\]\([^)\s]+\)")
@@ -227,14 +219,10 @@ _TOOL_NAME_PATTERN = re.compile(r"^name:\s*(.+?)\s*$", re.MULTILINE)
 # 未闭合 `<tool>` 是否真的是协议块：真实块由 content_to_markdown 生成，恒以
 # `name:` 行起首；模型正文里的字面 `<tool>` 后面接普通句子。判据只认首个非空行。
 _TOOL_PROTOCOL_HEAD_RE = re.compile(r"^name:\s*\S", re.MULTILINE)
-_TOOL_ARGS_LINE_PATTERN = re.compile(r"args:\s*(\{[^}]*\})")
 _TOOL_SUCCESS_PATTERN = re.compile(r"^success:\s*(.+?)\s*$", re.MULTILINE)
 _TOOL_ID_PATTERN = re.compile(r"^tool_call_id:\s*(.+?)\s*$", re.MULTILINE)
-_TOOL_RESULT_PATTERN = re.compile(r"^result:\s*(.*)$", re.MULTILINE)
 # 只匹配实际字段名，避免日志内容中的“状态: running”等屏蔽结果
 _NEXT_FIELD_PATTERN = re.compile(r"\n(?:success|tool_call_id|diff|echarts):")
-# 性能优化：正则提取后备方案使用的预编译模式
-_EXTRACT_KEY_VALUE_PATTERN = re.compile(r'"([^"\\]+)"\s*:\s*"([^"]*)"', re.DOTALL)
 
 # ===== Pygments lexer/formatter 缓存（避免每个代码块每周期重建） =====
 _LEXER_CACHE: dict = {}
@@ -428,14 +416,7 @@ def get_pygments_css(style_name: str | None = None) -> str:
 
 
 # ======== 滚动行为常量 ========
-SCROLL_BOUNDARY_TOLERANCE = 5.0  # 滚动边界判定容差(px)，用于判断是否到达顶部/底部
 AUTO_SCROLL_THRESHOLD = 80  # "接近底部"判定阈值(px)：仅真接近底部才恢复自动跟随；过大会把用户阅读位置反复拉回底部
-# 🐛 滚动自愈：内部被判定为"可滚"却始终滚不动时，连续多少次后强制转发外部。
-# 兜底所有几何缓存滞后场景，消除"怎么滚都没反应"的粘性失效。
-WHEEL_STUCK_LIMIT = 4
-# 两次滚轮间隔小于该值时不计入 stuck（Chromium 滚动与 reportHeight 上报均有
-# 帧级延迟，密集滚动期间 scrollTop 未刷新属正常，不得误判为卡死）。
-WHEEL_STUCK_MIN_INTERVAL = 0.1
 
 # ======== 结束态卡片高度过渡（默认开，出问题可一键关）========
 # 背景：流式结束时卡片高度会从"坞态限高"收敛到自然高度（常是数百 px 的突变），
@@ -465,14 +446,6 @@ FINISH_HEIGHT_ANIM_MAX_USES = 2  # 窗口内最多缓动几次（归位+重排�
 TOOL_SECTION_REPORT_MS = 50
 DOCK_COLLAPSE_SETTLE_MS = 280  # 200ms 过渡 + 260ms 兜底上报 + 余量
 DOCK_COLLAPSE_TRACK_WINDOW_S = 0.5
-
-# ======== 流式期「坞态预算」高度上限（起步跳变兜底）========
-# [T44] 已废弃：原兜底场景 = 坞态把正文限高 600px，渲染路径抢在坞态 CSS 落地前
-# 完成时正文按自然高度排版、坞态到达再压回 → 起步「先胀大再缩回」。
-# T44 移除坞态正文限高（工具区始终居顶、正文自然高度）后，坞态生效前后正文
-# 都是自然高度（只影响工具区 264px 限高），竞态窗口不复存在。常量保留仅供
-# 回滚参考，使用点已移除（message_card._update_height）。
-STREAM_DOCK_BUDGET_PX = 900
 
 # ======== 流式期高度追踪（默认开，出问题可一键关）========
 # 背景：流式期间卡片高度是「台阶式落地」——上报延迟（打字机节流 + Python 侧
@@ -1326,55 +1299,6 @@ def _think_snake_svg() -> str:
     )
 
 
-# 页脚 Review 按钮 SVG：放大镜 + 对勾，象征"审查"。
-# 使用 currentColor 让 QPainter 在渲染时统一着色以匹配主题。
-_REVIEW_SVG = (
-    '<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" '
-    'fill="none" stroke="currentColor" stroke-width="2.2" '
-    'stroke-linecap="round" stroke-linejoin="round">'
-    '<circle cx="11" cy="11" r="6.5"/>'
-    '<line x1="20" y1="20" x2="15.8" y2="15.8"/>'
-    '<polyline points="8.2 11.2 10.4 13.4 13.8 9.6"/>'
-    "</svg>"
-)
-
-
-def _render_svg_pixmap(
-    svg_str: str,
-    size: int,
-    color: str,
-    dpr: float = 1.0,
-) -> "QPixmap":
-    """把内嵌 SVG 渲染为指定颜色的 QPixmap（用于 QLabel 显示）。
-
-    Args:
-        svg_str: 完整 SVG 字符串（内部使用 stroke="currentColor"）
-        size: 逻辑像素尺寸（正方形）
-        color: 应用颜色（与 _theme["accent"] 保持一致）
-        dpr: devicePixelRatio（HiDPI 屏上 >1.0）。默认 1.0。
-
-    Returns:
-        已着色的 QPixmap，背景透明。物理像素 = size*dpr，已 setDevicePixelRatio(dpr)。
-    """
-    dpr = dpr if dpr > 0 else 1.0
-    physical = max(1, int(round(size * dpr)))
-    pixmap = QPixmap(physical, physical)
-    pixmap.setDevicePixelRatio(dpr)
-    pixmap.fill(Qt.transparent)
-    renderer = QSvgRenderer(svg_str.encode("utf-8"))
-    painter = QPainter(pixmap)
-    try:
-        painter.setRenderHint(QPainter.Antialiasing)
-        painter.setRenderHint(QPainter.SmoothPixmapTransform)
-        renderer.render(painter)
-        # 用 SourceIn 模式把 currentColor 替换为目标颜色
-        painter.setCompositionMode(QPainter.CompositionMode_SourceIn)
-        painter.fillRect(pixmap.rect(), QColor(color))
-    finally:
-        painter.end()
-    return pixmap
-
-
 # 编辑类工具在 progress 阶段（path 尚未到达）的兜底文案：避免运行框空窗成「准备中...」
 _FILE_EDIT_TOOLS_FALLBACK_TEXT = {
     "write": "写入文件",
@@ -1455,16 +1379,16 @@ def _render_tool_streaming_block(
     if not display_name:
         display_name = "工具调用中"
 
-    # 图标与颜色：与 render_tool_block 保持一致
+    # 图标与颜色：与 render_tool_block 保持一致（颜色走主题 token）
     if is_mcp:
         icon_name = "websearch"
-        title_color = "#00BCD4"
+        title_color = Colors.TOOL_TITLE_MCP
     elif is_sub_agent_task:
         icon_name = "设置-subagent"
-        title_color = "#9C27B0"
+        title_color = Colors.TOOL_TITLE_SUBAGENT
     else:
         icon_name = _get_tool_icon(tool_name)
-        title_color = "#FFA500"
+        title_color = Colors.TOOL_TITLE
 
     icon_html = _get_tool_icon_html(icon_name, tool_name=tool_name if not is_mcp else None)
     cn_name = _get_tool_cn_name(tool_name) if not is_mcp else display_name
@@ -2859,19 +2783,6 @@ def _extract_args_by_regex(content: str) -> dict:
     return args if args else {}
 
 
-def _extract_by_regex_fallback(content: str) -> dict:
-    """正则提取后备方案 - 很少使用（使用预编译正则）"""
-    args = {}
-    for match in _EXTRACT_KEY_VALUE_PATTERN.finditer(content):
-        key = match.group(1)
-        value = match.group(2)
-        quote_count = value.count('"')
-        if quote_count % 2 != 0:
-            continue
-        args[key] = value
-    return args
-
-
 def _tool_fingerprint(name: str, args: dict) -> str:
     """工具调用指纹：sha1(name + 规范化 args)。用于协议段与真实已完成工具对账去重。"""
     try:
@@ -3725,7 +3636,16 @@ _SKELETON_CACHE_MAX = 48
 # _SKELETON_CACHE_VERSION +1（v77）：ECharts vendor 加载失败兜底——
 # _echLoadScript 的 onerror 清 _echLibLoading/_echLibQueue、给容器打失败标记，
 # _echartsEnsure 加 _echLibFailed 熔断。旧骨架 CDN 断时容器永久停在 400px 空框。
-_SKELETON_CACHE_VERSION = 77
+# _SKELETON_CACHE_VERSION +1（v78）：图标 mask 改内联 data URI——
+# `.ci-save/.ci-copy/.ci-max/.ci-think` 原写 qrc: 路径，WebEngine 对该 scheme
+# 做 CORS 拦截（只放行 http/data/chrome/https），取图失败 → 遮罩全透明，
+# 代码块右上角两个按钮只剩空白热区。改由 `_code_icon_mask_css` 从 qrc 读字节
+# 内联为 data:image/svg+xml，颜色仍由 --text-muted 控制。
+# _SKELETON_CACHE_VERSION +1（v79）：「工具与思考」头部计数拆分——
+# 单一「N 项」改为「N 次思考 · N 次操作 · N 次失败操作」三段（0 值段隐藏），
+# 失败数按工具块根节点 data-tool-success="false" 统计（render_helpers 渲染时打标）。
+# 旧骨架仍是合并计数，须失效缓存。
+_SKELETON_CACHE_VERSION = 79
 
 
 def _js_literal(value) -> str:
@@ -4277,6 +4197,10 @@ _RESET_CONTENT_FOR_REUSE_JS = """
                     if (c) { c.innerHTML = ''; c.removeAttribute('data-pending-break'); c.scrollTop = 0; }
                     var t = document.getElementById('tool-content');
                     if (t) { t.innerHTML = ''; t.scrollTop = 0; }
+                    // 计数药丸复位：清空工具区不等于清空头部文本，不复位会让
+                    // 复用卡在新内容到达前顶着上一张卡的「N 次思考 · N 次操作」
+                    var _tsc = document.querySelector('#tool-separator > .ts-count');
+                    if (_tsc) { _tsc.textContent = ''; _tsc.style.display = 'none'; }
                     var ts = document.getElementById('tool-section');
                     if (ts) { ts.removeAttribute('data-collapsed'); ts.style.display = ''; }
                     // 坞态/滚动跟随等易失标志复位（避免沿用上一张卡片的阅读状态）

@@ -13,6 +13,7 @@ from typing import Any
 from loguru import logger
 
 from app.plugins.capabilities.providers import model_meta, net_sync, plugin_host, process_core
+from app.plugins.capabilities.providers._shared_policy import tool_policy_api as _tool_policy_api
 from app.utils.info_bar_guard import post_to_main
 
 
@@ -567,6 +568,62 @@ def _engine_session(host: Any):
         )
 
     return create
+
+
+def _engine_session_resume(host: Any):
+    """按 session_id 恢复已有会话（IM 等 headless 会话跨轮/跨进程续用）。
+
+    EngineSessionImpl 默认自建 SessionManager + 一个 ``plugin:<name>`` 会话；
+    恢复路径把目标 ChatSession 换进去，后续 turn() 直接续写这份历史。
+    会话落库由调用方经 ``session.persist`` 负责（宿主不猜持久化时机）。
+    """
+
+    def resume(session_id: str, engine_name: str = "im", **kwargs):
+        from app.core.conversation.chat_session import ChatSession
+        from app.core.conversation.engine_session import EngineSessionImpl
+        from app.core.store import SessionStore
+
+        data = SessionStore.get_instance().get_session(str(session_id))
+        if not data:
+            raise KeyError(f"session {session_id} not found")
+        session = ChatSession.from_dict(data)
+        backend = getattr(host, "backend", None)
+        impl = EngineSessionImpl(
+            engine_name=engine_name,
+            get_model_config=host._get_current_model_config,
+            tool_executor=getattr(backend, "tool_executor", None) if backend else None,
+            agent_manager=getattr(backend, "agent_manager", None) if backend else None,
+            backend=backend,
+            **kwargs,
+        )
+        sm = impl.core.session_manager
+        sm.sessions.clear()
+        sm.sessions.append(session)
+        sm.current_index = 0
+        sm._touch_session(session.session_id)
+        return impl
+
+    return resume
+
+
+def _session_persist(host: Any):
+    """把会话快照落库（不依赖窗口；IM 等 headless 会话每轮结束调用）。
+
+    snapshot 为 ``ChatSession.to_dict()`` 形态；返回是否写入成功。
+    """
+
+    def persist(snapshot: Dict[str, Any]) -> bool:
+        if not isinstance(snapshot, dict) or not snapshot.get("session_id"):
+            return False
+        try:
+            from app.core.store import SessionStore
+
+            return bool(SessionStore.get_instance().save_session(snapshot))
+        except Exception as e:  # noqa: BLE001 — 落库失败不抛给插件
+            logger.warning(f"[Capability] session.persist 失败: {e}")
+            return False
+
+    return persist
 
 
 def _session_read(host: Any):
@@ -1199,33 +1256,6 @@ def _plugin_read(host: Any):
     return api
 
 
-def _tool_policy_api():
-    """工具权限策略只读面（toggles / policy / off_behavior 的判定）。"""
-
-    def api() -> dict:
-        from app.core.tools.tool_permission_controller import resolve_tool_off_policy
-        from app.utils.config import Settings
-
-        def off_policy(name: str) -> str:
-            s = Settings.get_instance()
-            toggles = dict(s.tool_toggles.value or {})
-            if toggles.get(name, True) is not False:
-                return "allow"
-            policies = dict(s.tool_permission_policy.value or {})
-            behavior = s.tool_off_behavior.value or "deny"
-            try:
-                return str(resolve_tool_off_policy(name, None, policies, behavior) or "")
-            except Exception:
-                return ""
-
-        def toggles() -> dict:
-            return dict(Settings.get_instance().tool_toggles.value or {})
-
-        return {"off_policy": off_policy, "toggles": toggles}
-
-    return api
-
-
 def _tool_read(host: Any):
     """工具注册表的只读查询面（不含注册/修改，那是 tool.inject）。"""
 
@@ -1519,7 +1549,8 @@ def _model_complete(host: Any):
     """model.complete：用当前/指定模型做一次性补全，返回完整文本。
 
     不带工具与历史上下文，供插件做「要一段模型输出、不需要完整对话栈」的
-    轻量调用（超时代答 / 文本改写等），免去自己拼 client。
+    轻量调用（超时代答 / 文本改写 / 看图问答），免去自己拼 client。
+    ``prompt`` 支持纯文本与 OpenAI content blocks（多模态）两种形态。
 
     请求头经 resolve_extra_headers 统一组装：OpenCode 等网关要求每个请求
     携带会话标识（x-opencode-session），缺头即 400 MissingSessionID。插件
@@ -1529,15 +1560,34 @@ def _model_complete(host: Any):
     real = _resolve_active_host(host)
 
     def complete(
-        prompt: str,
+        prompt: Any,
         model_query: str = "",
         system: str = "",
         temperature: float = 0.3,
         max_tokens: int = 2000,
         timeout: float = 60.0,
     ) -> str:
-        text = str(prompt or "").strip()
-        if real is None or not text:
+        """prompt 两种形态：
+
+        - ``str``：纯文本，内部包成单条 text content
+        - ``list``：OpenAI content blocks 原样透传（多模态：text + image_url）。
+          图片由调用方自己转 data URL / 公网 URL，宿主不代转。
+        """
+        if real is None:
+            return ""
+        if isinstance(prompt, str):
+            text = prompt.strip()
+            if not text:
+                return ""
+            user_content: Any = text
+        elif isinstance(prompt, (list, tuple)):
+            user_content = list(prompt)
+            if not user_content:
+                return ""
+        else:
+            logger.warning(
+                f"[Capability] model.complete prompt 需为 str 或 content blocks 列表，收到 {type(prompt).__name__}"
+            )
             return ""
         try:
             if model_query:
@@ -1562,7 +1612,7 @@ def _model_complete(host: Any):
         messages = []
         if system:
             messages.append({"role": "system", "content": str(system)})
-        messages.append({"role": "user", "content": text})
+        messages.append({"role": "user", "content": user_content})
         try:
             from app.core.modelmeta.provider_profile import resolve_extra_headers
             from app.utils.http_client import build_openai_client, chat_completion_text
@@ -1666,7 +1716,12 @@ def _plugin_config_read(host: Any, ctx: Any):
             if key:
                 value = store.get(plugin_name, key)
                 return default if value is None else value
-            return store.effective_values(plugin_name)
+            values = store.effective_values(plugin_name)
+            if not values:
+                # schema 未注册（插件刚装/加载时序早于 PluginManager 注册）：
+                # 退回存储原始值，别让消费方把「读不到 schema」当成「用户没配置」
+                values = store.stored_values(plugin_name)
+            return values
         except Exception as e:  # noqa: BLE001
             logger.warning(f"[Capability] plugin.config.read 失败（{plugin_name}）: {e}")
             return {} if not key else default
@@ -1702,17 +1757,42 @@ def _secret_account(plugin_name: str, key: str) -> str:
     return f"plugin:{plugin_name}:{k}"
 
 def _secret_read(host: Any, ctx: Any):
-    """读本插件自己的凭据（系统密钥库）。"""
+    """读本插件自己的凭据（系统密钥库）。
+
+    可选 ``fallback_config_key``：密钥库未命中时回退读旧的插件配置项（明文
+    时代的存量数据）。命中且密钥库可用时做一次懒迁移——写进密钥库并把配置
+    里的明文清空。密钥库不可用（如无 keyring 的 Linux）时只回退不迁移，
+    否则用户已配置的 key 会凭空消失。
+    """
     plugin_name = _plugin_name_of(ctx)
 
-    def read(key: str, default: str = "") -> str:
+    def read(key: str, default: str = "", fallback_config_key: str = "") -> str:
         account = _secret_account(plugin_name, key)
         if not account:
             return default
         try:
             from app.utils.secret_store import SecretStore
 
-            return SecretStore().get(account) or default
+            store = SecretStore()
+            value = store.get(account)
+            if value:
+                return value
+            if not fallback_config_key:
+                return default
+            legacy = str(_plugin_config_read(host, ctx)(fallback_config_key, "") or "")
+            if not legacy:
+                return default
+            if store.available and store.set(account, legacy):
+                try:
+                    from app.plugins.managers.plugin_config_store import PluginConfigStore
+
+                    PluginConfigStore().set_values(plugin_name, {fallback_config_key: ""})
+                    logger.info(
+                        f"[Capability] secret.read 已将 {plugin_name}.{fallback_config_key} 迁移进密钥库"
+                    )
+                except Exception:  # noqa: BLE001 - 迁移失败不影响本次读取
+                    pass
+            return legacy
         except Exception as e:  # noqa: BLE001
             logger.warning(f"[Capability] secret.read 失败（{plugin_name}）: {e}")
             return default
@@ -1943,10 +2023,14 @@ def register(registry) -> None:
     reg.register("theme.read", _theme_read, surface="ui", owner="core:ui")
     reg.register("engine.stack", _engine_stack, surface="ui", owner="core:ui")
     reg.register("engine.session", _engine_session, surface="ui", owner="core:ui")
+    reg.register(
+        "engine.session.resume", _engine_session_resume, surface="ui", owner="core:ui"
+    )
     reg.register("session.read", _session_read, surface="ui", owner="core:ui")
     reg.register("session.list", _session_list, surface="ui", owner="core:ui")
     reg.register("session.invalidate", _session_invalidate, surface="ui", owner="core:ui")
     reg.register("session.write", _session_write, surface="ui", owner="core:ui")
+    reg.register("session.persist", _session_persist, surface="ui", owner="core:ui")
     reg.register("session.interrupt", _session_interrupt, surface="ui", owner="core:ui")
     reg.register("session.new", _session_new, surface="ui", owner="core:ui")
     reg.register("session.send", _session_send, surface="ui", owner="core:ui")

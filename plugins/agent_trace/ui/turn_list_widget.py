@@ -18,7 +18,7 @@
 
 from __future__ import annotations
 
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 from PyQt5.QtCore import QRect, QRectF, QSize, Qt, pyqtSignal
 from PyQt5.QtGui import QColor, QFont, QFontMetrics, QPainter, QPen
@@ -481,6 +481,15 @@ def _copy(text: str) -> None:
         cb.setText(str(text))
 
 
+def _content_key(rec: TraceRecord) -> str:
+    """身份二次确认用的内容指纹（label + 预览前缀）。
+
+    只用于「同一条记录」的判定，不做唯一性约束：同名的两次工具调用可能指纹
+    相同，调用方会在多命中时放弃恢复。预览本身会被截断到 140 字符，这里再
+    收紧到 120，避免尾部差异（timing/状态）影响指纹稳定性。
+    """
+    return f"{rec.label}\x00{(rec.preview or '')[:120]}"
+
 def _turn_badge_geometry(rec: TraceRecord, row_y: int, row_h: int, pad_l: int, font: QFont) -> Optional[QRect]:
     """行首 ``T{n}`` 徽章的命中矩形（绘制与点击共用，保证像素级一致）。
 
@@ -791,6 +800,38 @@ class TurnListWidget(QWidget):
     def selected_record_idx(self) -> Optional[int]:
         return self._selected_rec_idx
 
+    def selected_identity(self) -> Optional[Tuple[EntryKind, int, str]]:
+        """当前选中记录的稳定身份 ``(kind, msg_index, 内容指纹)``。
+
+        全量重置后不能按索引找回：reset 的索引空间是重新投影出来的，压缩 /
+        截断 / 头部改写都会让同一条消息整体前移。``meta["msg_index"]`` 是
+        messages 里的绝对序号，只要消息位置没动就找得回来；内容指纹用于确认
+        「这个序号现在还是不是同一条」，并给整体前移的场景做兜底。
+        """
+        rec = self._selected_record()
+        if rec is None:
+            return None
+        mi = rec.meta.get("msg_index")
+        if not isinstance(mi, int):
+            return None
+        return (rec.kind, mi, _content_key(rec))
+
+    def index_of_identity(self, ident: Optional[Tuple[EntryKind, int, str]]) -> Optional[int]:
+        """把身份键换回当前 ``_records`` 索引（找不到返回 None）。
+
+        两步：序号 + 内容双命中（最可信）；否则按内容指纹唯一命中（上下文
+        压缩把前面的消息换成 summary，序号整体前移）。多条内容相同则不认，
+        宁可收起详情也不能显示成另一条。
+        """
+        if ident is None:
+            return None
+        kind, mi, key = ident
+        for i, rec in enumerate(self._records):
+            if rec.kind == kind and rec.meta.get("msg_index") == mi and _content_key(rec) == key:
+                return i
+        hits = [i for i, rec in enumerate(self._records) if rec.kind == kind and _content_key(rec) == key]
+        return hits[0] if len(hits) == 1 else None
+
     def clear(self) -> None:
         self._records = []
         self._tail = []
@@ -802,10 +843,13 @@ class TurnListWidget(QWidget):
         self._list.clear()
         self._update_empty()
 
-    def select_record(self, idx: int) -> None:
+    def select_record(self, idx: int) -> bool:
+        """选中指定记录；该记录被当前筛选挡住时返回 False（调用方需回退）。"""
         row = self._row_of_record(idx)
-        if row is not None:
-            self._list.setCurrentRow(row)
+        if row is None:
+            return False
+        self._list.setCurrentRow(row)
+        return True
 
     @property
     def shown_count(self) -> int:

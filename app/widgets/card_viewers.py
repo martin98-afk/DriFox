@@ -14,6 +14,7 @@ import re
 import urllib.parse
 import weakref
 from datetime import datetime
+from functools import lru_cache
 from html import escape, unescape
 from typing import Any, Dict, List, Optional
 import orjson as json
@@ -197,6 +198,52 @@ def _render_v2_enabled() -> bool:
     """
     return os.environ.get("DRIFOX_RENDER_V2", "1").strip().lower() not in ("0", "false", "no")
 
+
+@lru_cache(maxsize=16)
+def _code_icon_mask_uri(icon_file: str) -> str:
+    """把 qrc 图标转成 data URI，供骨架 CSS 的 mask-image 使用。
+
+    WebEngine 把 ``qrc:`` 当非白名单 scheme：file:// 源页面加载它会被
+    CORS 拦截（"Cross origin requests are only supported for protocol
+    schemes: http, data, ..."），CSS mask 取图失败 → 元素不绘制，代码块
+    右上角按钮变成两个空白热区（用户报「看不到 icon」）。``data:`` 在
+    白名单里，故把图标字节内联进样式，颜色仍由 CSS 变量控制。
+
+    读不到资源时返回空串，调用方需跳过 mask 声明（宁可无图标也不要
+    一个实心方块）。
+    """
+    if not icon_file:
+        return ""
+    try:
+        try:  # qrc 资源注册（幂等）：部分单测入口不经过主程序启动链
+            from app.utils import icons_rc as _icons_rc  # noqa: F401
+        except Exception:
+            pass
+        from PyQt5.QtCore import QFile, QIODevice
+
+        f = QFile(f":/icons/{icon_file}")
+        if not f.open(QIODevice.ReadOnly):
+            logger.warning(f"[code-icon] qrc 缺少图标 {icon_file}，mask 降级为无图标")
+            return ""
+        data = bytes(f.readAll())
+        f.close()
+        if not data:
+            return ""
+        return "data:image/svg+xml;base64," + base64.b64encode(data).decode("ascii")
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"[code-icon] 读取 qrc 图标 {icon_file} 失败：{e}")
+        return ""
+
+def _code_icon_mask_css(icon_file: str, prop: str = "mask-image") -> str:
+    """生成 ``mask-image`` 声明（webkit 前缀 + 标准）。
+
+    资源缺失时返回 ``display: none``：mask 为 none 会让 span 按
+    ``background-color`` 铺成实心方块，比没有图标更糟。
+    """
+    uri = _code_icon_mask_uri(icon_file)
+    if not uri:
+        return "display: none;"
+    return f'-webkit-{prop}: url("{uri}"); {prop}: url("{uri}");'
 
 def _seg_has_protocol_block(seg: str) -> bool:
     """差量段是否含流式协议块（think / tool / 插件注册 tag）。
@@ -766,6 +813,25 @@ def _logical_height_cap(dpr, physical_limit: int = _PHYSICAL_TEXTURE_LIMIT) -> i
     return max(2000, int(physical_limit / dpr))
 
 
+def _show_export_info_bar(widget, ok: bool, title: str, msg: str) -> None:
+    """导出结果 InfoBar 提示（CodeWebViewer/PlainTextViewer 共用）。"""
+    try:
+        from qfluentwidgets import InfoBar, InfoBarPosition
+
+        main_window = widget.window()
+        if main_window:
+            shower = InfoBar.success if ok else InfoBar.error
+            shower(
+                title,
+                msg,
+                duration=3000,
+                parent=main_window,
+                position=InfoBarPosition.BOTTOM,
+            )
+    except Exception:
+        pass
+
+
 class CodeWebViewer(QWebEngineView):
     contentHeightChanged = pyqtSignal(int)
     codeActionRequested = pyqtSignal(str, str)
@@ -1067,6 +1133,23 @@ class CodeWebViewer(QWebEngineView):
         self._finish_defer_timer.timeout.connect(self._on_finish_defer_timeout)
         self._finish_defer_immediate = True
 
+        # 1c. 渲染落地看门狗：每次派发渲染后延时巡检，发现「有内容但文档为空」
+        # 就分级自愈（全量重渲 → 重载骨架 → 重建卡片）。
+        # 为什么必须独立于 content-sentinel：那个哨兵以 reportHeight 的高频
+        # 回传为驱动，且首行 `if not self._streaming: return`——非流式卡（历史
+        # 加载、流式结束后的终渲染）完全在它的盲区里；页面/JS 已死时连
+        # reportHeight 都不来，哨兵连触发机会都没有。看门狗是 Python 侧定时器，
+        # 两条都不依赖。
+        self._live_watch_timer = QTimer(self)
+        self._live_watch_timer.setSingleShot(True)
+        self._live_watch_timer.timeout.connect(self._check_render_landed)
+        self._live_watch_attempts = 0
+        # 上一轮渲染产物字节数（-1 = 未知，不参与判空；0 = 内容本身就是空渲染）
+        self._last_render_output_bytes = -1
+        self._live_probe_gen = 0
+        self._live_probe_timer = QTimer(self)
+        self._live_probe_timer.setSingleShot(True)
+        self._live_probe_timer.timeout.connect(self._on_live_probe_timeout)
         # 2. Resize 定时器
         # （原 _resize_timer(100ms → _safe_report_height) 从未 start()，死代码已移除；
         #   resize 期高度上报统一由 _resize_unlock_timer(150ms) 兜底。）
@@ -1721,6 +1804,12 @@ class CodeWebViewer(QWebEngineView):
         self._render_deferred = False
         # [perf-fix] 作废在途异步渲染：复用后旧任务结果不得落到新卡片
         self._render_seq += 1
+        # [render-watchdog] 复用后从零开始计数：池中 viewer 的空文档不是故障
+        self._live_watch_timer.stop()
+        self._live_probe_timer.stop()
+        self._live_probe_gen += 1
+        self._live_watch_attempts = 0
+        self._last_render_output_bytes = -1
         self._render_inflight = False
         self._render_pending = None
         # [PERF-final-async] 同步作废在途终渲染（复用后旧终态不得落到新卡片）
@@ -1796,6 +1885,14 @@ class CodeWebViewer(QWebEngineView):
     def _on_height_reported(self, h):
         # delegate wheel 抢断补装：高频回报时仅一次 is 比较，崩溃重建后自然重装
         self._ensure_wheel_filter_installed()
+        # [render-watchdog] 文档已有高度 = 内容确实落地，清空自愈计数并停表
+        # （__dict__ 容错：单测用 __new__ 造的无 init 桩对象，getattr 会被
+        #  PyQt 的 __getattr__ 抛 RuntimeError 而不是 AttributeError）
+        if h >= 40 and self.__dict__.get("_live_watch_attempts", 0):
+            self._live_watch_attempts = 0
+            _wt = self.__dict__.get("_live_watch_timer")
+            if _wt is not None:
+                _wt.stop()
         # 🐛 打点：结束这一拍的"JS 落地 + 布局"耗时 = 渲染派发 → 首个 reportHeight。
         if getattr(self, "_finish_t0", 0.0) > 0.0:
             _el = (time.perf_counter() - self._finish_t0) * 1000
@@ -1982,6 +2079,183 @@ class CodeWebViewer(QWebEngineView):
         self._stable_md_len = 0
         self._last_rendered_markdown = ""
         self._schedule_render(immediate=True)
+
+    # ── [render-watchdog] 渲染落地巡检（非流式盲区 + 死页面的唯一兜底） ──
+    _LIVE_WATCH_DELAY_MS = 5000
+    _LIVE_WATCH_PROBE_TIMEOUT_MS = 2500
+    _LIVE_WATCH_MAX_ATTEMPTS = 3
+    _LIVE_WATCH_MIN_MD = 80  # 短于一行不判空（空卡病态只发生在长消息上）
+    _LIVE_WATCH_PROBE_JS = (
+        "(function(){"
+        "var c=document.getElementById('content-placeholder');"
+        "var t=document.getElementById('tool-content');"
+        # children：图片/图表/fence 这类块正文文本为 0 但有子节点，不能算空；
+        # textContent 而非 innerText：折叠/隐藏的块也要算内容（innerText 返回空）
+        "return [c?c.children.length:-1,"
+        "t?t.children.length:-1,"
+        "c?c.textContent.length:-1,"
+        "t?t.textContent.length:-1,"
+        "document.body?document.body.scrollHeight:-1].join('|');})()"
+    )
+
+    def _arm_render_watchdog(self, restart: bool = False) -> None:
+        """派发渲染后启动落地巡检（restart=False 时已激活则不重启）。"""
+        try:
+            _wt = self.__dict__.get("_live_watch_timer")
+            if _wt is not None and (restart or not _wt.isActive()):
+                _wt.start(self._LIVE_WATCH_DELAY_MS)
+        except RuntimeError:
+            pass
+
+    def _content_md_len(self) -> int:
+        """当前内容长度；md 还没生成时向懒回调要一次（只读，不消费引用）。"""
+        n = len(self.__dict__.get("_markdown_text", "") or "")
+        if n >= self._LIVE_WATCH_MIN_MD or self.__dict__.get("_lazy_markdown_cb") is None:
+            return n
+        try:
+            return len(self._lazy_markdown_cb() or "")
+        except Exception:
+            return n
+
+    def _check_render_landed(self) -> None:
+        """巡检：文档是否真的有内容。
+
+        真机症状（用户 2026-11-13）：偶发个别卡片永久空白，重新加载会话 /
+        重新发起对话才恢复。链路里存在多条「静默丢渲染」分支（JS 未就绪时
+        deferred、异步结果 seq 过期、updateContent 抛错、页面已死），任何一条
+        命中后都没有第二个人负责发现「内容没落地」——non-streaming 卡连
+        content-sentinel 都不覆盖（它首行就以 _streaming 为门）。这里用 Python
+        侧定时器 + 一次极小的 JS 探针拿真相，分三级自愈。
+        """
+        # 欢迎卡（light 骨架）语义不同：空内容不算故障
+        if self.__dict__.get("_light_skeleton", False):
+            return
+        try:
+            if sip.isdeleted(self) or not self.page():
+                return
+        except Exception:
+            return
+        if self._content_md_len() < self._LIVE_WATCH_MIN_MD:
+            self._live_watch_attempts = 0
+            return
+        if not self.isVisible():
+            # 不可见期间渲染被 V1 门控挂起（_render_deferred 是设计行为），
+            # 显示后由 showEvent 补渲。这里不重排队：重排队会在整段隐藏期
+            # 每 5s 空转一次；showEvent 补渲走 _perform_update，自会重新布防。
+            return
+        if self._render_deferred and self._is_js_ready:
+            # 可见 + JS 就绪却还挂着 deferred = 唤醒丢了（showEvent 已错过）
+            logger.info("[render-watchdog] 可见卡仍挂 deferred → 补一次补渲")
+            self._render_deferred = False
+            self._schedule_render(immediate=True)
+            self._arm_render_watchdog()
+            return
+        gen = self._live_probe_gen
+        try:
+            self.page().runJavaScript(
+                self._LIVE_WATCH_PROBE_JS,
+                lambda r, _g=gen: self._on_live_probe_result(_g, r),
+            )
+        except RuntimeError:
+            return
+        self._live_probe_timer.start(self._LIVE_WATCH_PROBE_TIMEOUT_MS)
+
+    def _on_live_probe_timeout(self) -> None:
+        """探针无回音 = 页面/JS 已死（runJavaScript 回调永不投递）→ 重载骨架。"""
+        logger.warning(
+            f"[render-watchdog] 探针无回音（页面已死？）md={self._content_md_len()} "
+            f"js_ready={self._is_js_ready} attempts={self._live_watch_attempts}"
+        )
+        self._live_probe_gen += 1  # 作废迟到回调
+        self._live_watch_attempts += 1
+        if self._live_watch_attempts >= self._LIVE_WATCH_MAX_ATTEMPTS:
+            self._live_watch_attempts = 0
+            logger.error("[render-watchdog] 重载骨架后仍无响应 → 请求重建 viewer")
+            self.needRecreate.emit()
+            return
+        self._reload_skeleton_for_heal()
+        self._arm_render_watchdog()
+
+    def _watch_state_text(self, cp_kids, tc_kids, cp_text, tc_text, scroll_h) -> str:
+        """看门狗日志用的状态快照（任何一种取值失败都不得影响自愈）。"""
+        try:
+            _p = self.parent()
+            while _p is not None and not hasattr(_p, "role"):
+                _p = _p.parent()  # viewer 直接父级是正文容器，身份在卡片上
+            _who = getattr(_p, "role", "?")
+            _idx = getattr(_p, "_message_index", "?")
+            _d = self.__dict__
+            return (
+                f"role={_who} idx={_idx} md={self._content_md_len()} "
+                f"text={cp_text}/{tc_text} kids={cp_kids}/{tc_kids} h={scroll_h} "
+                f"streaming={_d.get('_streaming')} history={_d.get('_is_history')} "
+                f"js_ready={_d.get('_is_js_ready')} deferred={_d.get('_render_deferred')} "
+                f"inflight={_d.get('_render_inflight')} "
+                f"v2_last={'set' if _d.get('_v2_last') else 'None'} "
+                f"stable={_d.get('_stable_md_len')} "
+                f"last_r={len(_d.get('_last_rendered_markdown') or '')}"
+            )
+        except Exception:
+            return f"<state unavailable> text={cp_text}/{tc_text} kids={cp_kids}/{tc_kids}"
+
+    def _on_live_probe_result(self, gen: int, result) -> None:
+        """探针回音：按真实 DOM 判空，命中则分级自愈。"""
+        if gen != self._live_probe_gen:
+            return
+        self._live_probe_timer.stop()
+        try:
+            cp_kids, tc_kids, cp_text, tc_text, scroll_h = (int(x) for x in str(result).split("|"))
+        except Exception:
+            return
+        if cp_kids > 0 or tc_kids > 0 or cp_text > 0 or tc_text > 0:
+            # 任一容器有子节点/文本就算落地。两条判据都要：scrollHeight 靠不住
+            # （空文档也有骨架 chrome 的 40~50px，实测 h=47），而纯图片/图表
+            # 卡片的正文文本为 0 但子节点数 > 0。
+            self._live_watch_attempts = 0
+            return
+        if self._last_render_output_bytes == 0:
+            # 内容本身就是空渲染（插件自定义块渲染为 '' 等），不是渲染丢失
+            self._live_watch_attempts = 0
+            return
+        _state = self._watch_state_text(cp_kids, tc_kids, cp_text, tc_text, scroll_h)
+        self._live_watch_attempts += 1
+        if self._live_watch_attempts >= self._LIVE_WATCH_MAX_ATTEMPTS:
+            self._live_watch_attempts = 0
+            logger.error(f"[render-watchdog] 三次自愈无效，重建 viewer：{_state}")
+            self.needRecreate.emit()
+            return
+        if self._live_watch_attempts == 1:
+            logger.warning(f"[render-watchdog] 有内容但文档为空 → 强制全量重渲：{_state}")
+            # 全量重渲必须复位一切"已渲染"基线，否则差量/v2 都会判定无事可做
+            self._render_deferred = False
+            self._needs_full_render = True
+            self._stable_html = ""
+            self._stable_md_len = 0
+            self._last_rendered_markdown = ""
+            self._v2_last = None
+            self._schedule_render(immediate=True)
+        else:
+            logger.warning(f"[render-watchdog] 全量重渲未生效 → 重载骨架：{_state}")
+            self._reload_skeleton_for_heal()
+        self._arm_render_watchdog()
+
+    def _reload_skeleton_for_heal(self) -> None:
+        """重载骨架（治「页面活着但 JS 半死 / runJavaScript 静默丢弃」）。
+
+        与崩溃自愈同一条路：骨架重建后 _on_js_ready 会拿 _markdown_text /
+        懒回调补渲一次，所以这里不额外派发渲染。
+        """
+        try:
+            if self._lazy_markdown_cb is not None and not self._markdown_text:
+                self._markdown_text = self._lazy_markdown_cb() or ""
+        except Exception:
+            pass
+        try:
+            self._live_probe_gen += 1
+            self._is_js_ready = False
+            self._load_skeleton()
+        except Exception:
+            logger.exception("[render-watchdog] 重载骨架失败")
 
     def _on_body_geometry_reported(self, scroll_height: int, scroll_top: int, client_height: int):
         """缓存 body 的真实滚动几何（reportHeight 顺带回传）。
@@ -2177,6 +2451,8 @@ class CodeWebViewer(QWebEngineView):
 
     def _on_js_ready(self):
         self._is_js_ready = True
+        # [render-watchdog] 骨架就绪后必有补渲，从这一刻起盯落地
+        self._arm_render_watchdog()
         # 同步简洁模式标志到 JS（统一走 sync_compact_mode_to_js）
         self.sync_compact_mode_to_js()
         # 简洁模式下工具与思考区放正文下方（用户 2026-11-02 诉求，取代吸顶）
@@ -2402,6 +2678,12 @@ class CodeWebViewer(QWebEngineView):
             """
         _is_light_diff = _is_light
         mono_font = f"{font_family_global}, Consolas, monospace"
+        # 代码块工具栏 / 思考图标：mask 图统一内联为 data URI（qrc: 会被
+        # WebEngine 的 CORS 策略拦掉，图标整片不绘制，见 _code_icon_mask_uri）
+        _ci_mask_save = _code_icon_mask_css("导入.svg")
+        _ci_mask_copy = _code_icon_mask_css("复制.svg")
+        _ci_mask_max = _code_icon_mask_css("最大化.svg")
+        _ci_mask_think = _code_icon_mask_css("思考过程.svg")
 
         html = f"""
         <!DOCTYPE html>
@@ -3000,7 +3282,9 @@ class CodeWebViewer(QWebEngineView):
 
                 /* 主题图标：单色 SVG 走 mask，颜色取 CSS 变量。
                    一份 HTML 在深浅主题下通用，切主题无需重渲（原先按
-                   qrc:/icons vs qrc:/icons_light 前缀固化在 <img src> 里）。 */
+                   qrc:/icons vs qrc:/icons_light 前缀固化在 <img src> 里）。
+                   mask 图必须内联为 data URI：WebEngine 对 qrc: 做 CORS 拦截，
+                   直接 url("qrc:/...") 取不到图 → 遮罩全透明，图标整个不可见。 */
                 .ci {{
                     display: inline-block;
                     width: 22px;
@@ -3015,20 +3299,16 @@ class CodeWebViewer(QWebEngineView):
                     pointer-events: none;
                 }}
                 .ci-save {{
-                    -webkit-mask-image: url("qrc:/icons/导入.svg");
-                    mask-image: url("qrc:/icons/导入.svg");
+                    {_ci_mask_save}
                 }}
                 .ci-copy {{
-                    -webkit-mask-image: url("qrc:/icons/复制.svg");
-                    mask-image: url("qrc:/icons/复制.svg");
+                    {_ci_mask_copy}
                 }}
                 .ci-max {{
-                    -webkit-mask-image: url("qrc:/icons/最大化.svg");
-                    mask-image: url("qrc:/icons/最大化.svg");
+                    {_ci_mask_max}
                 }}
                 .ci-think {{
-                    -webkit-mask-image: url("qrc:/icons/思考过程.svg");
-                    mask-image: url("qrc:/icons/思考过程.svg");
+                    {_ci_mask_think}
                     background-color: var(--text-muted, #8b949e);
                     vertical-align: middle;
                 }}
@@ -3902,8 +4182,10 @@ class CodeWebViewer(QWebEngineView):
                     background: var(--row-hover);
                     color: var(--text);
                 }}
-                /* 计项药丸：与标题拆成独立 span，项数变化不再改写标题字符串
-                   （旧实现把「· N 项」拼进标题 textContent，1→10 项时整行重新量宽） */
+                /* 计项药丸：与标题拆成独立 span，计数变化不再改写标题字符串
+                   （旧实现把「· N 项」拼进标题 textContent，1→10 项时整行重新量宽）。
+                   nowrap：分项计数（3 次思考 · 5 次操作 · 1 次失败操作）文字更长，
+                   窄卡片下不允许换行把标题行撑成两行。 */
                 #tool-separator .ts-count {{
                     font-size: 10.5px;
                     font-weight: 600;
@@ -3913,6 +4195,7 @@ class CodeWebViewer(QWebEngineView):
                     background: var(--row-hover);
                     color: var(--text-muted);
                     font-variant-numeric: tabular-nums;
+                    white-space: nowrap;
                 }}
                 /* 自绘 tooltip：hover 时在分隔条下方显示说明 */
                 #tool-separator {{
@@ -6158,17 +6441,34 @@ class CodeWebViewer(QWebEngineView):
                 // JS 不再硬编码工具名。
                 var _EDIT_TOOLS_SELECTOR = ':not([data-keep-in-content="true"])';
 
-                // 更新"工具与思考"标题（总项数）
+                // 更新"工具与思考"标题（分项计数：思考 / 操作 / 失败操作）
                 function _updateToolSectionHeader() {{
                     var toolContent = document.getElementById('tool-content');
                     var separator = document.getElementById('tool-separator');
                     if (!separator) return;
-                    var total = toolContent ? toolContent.children.length : 0;
-                    // 计数独立成 pill：标题字符串恒定，项数变化只改药丸内容与显隐
+                    // 三类分别计数（后代查询：块可能裹在 data-block-wrapper 里）
+                    // 思考：折叠思考块 / 流式思考尾 / 简洁模式思考行
+                    // 操作：工具块（含运行中的 tool-streaming-block）
+                    // 失败操作：Python 渲染时在根节点打了 data-tool-success="false"
+                    //   （见 render_helpers._tool_success_attr），运行中块没有该属性
+                    var thinkN = 0, toolN = 0, failN = 0;
+                    if (toolContent) {{
+                        thinkN = toolContent.querySelectorAll(
+                            '.think-block, .think-streaming, .think-compact').length;
+                        toolN = toolContent.querySelectorAll('.tool-block').length;
+                        failN = toolContent.querySelectorAll(
+                            '.tool-block[data-tool-success="false"]').length;
+                    }}
+                    // 计数独立成 pill：标题字符串恒定，计数变化只改药丸内容与显隐
                     var countEl = separator.querySelector(':scope > .ts-count');
                     if (countEl) {{
-                        countEl.textContent = total > 0 ? total + ' 项' : '';
-                        countEl.style.display = total > 0 ? '' : 'none';
+                        var parts = [];
+                        if (thinkN > 0) parts.push(thinkN + ' 次思考');
+                        if (toolN > 0) parts.push(toolN + ' 次操作');
+                        if (failN > 0) parts.push(failN + ' 次失败操作');
+                        var txt = parts.join(' · ');
+                        countEl.textContent = txt;
+                        countEl.style.display = txt ? '' : 'none';
                     }}
                     // ── 自动展开：流式时有新工具且当前折叠 → 展开 ──
                     // ⚠️ 必须同时满足 window._streamingActive（流式进行中）：流式结束的
@@ -7904,6 +8204,11 @@ class CodeWebViewer(QWebEngineView):
                 self._render_deferred = True
                 return
 
+            # [render-watchdog] 可见性门控已放行 = 本轮一定会派发渲染，
+            # 从这一刻起盯「内容是否真的落到 DOM」（下面任何一条静默 return
+            # 都可能让这次派发白费，而没有任何人负责发现）。
+            self._arm_render_watchdog()
+
             # ── [B5] block 级渲染通道（DRIFOX_RENDER_V2）：接管 DOM 更新 ──
             # 与旧路径互斥：v2 接管时 updateContent / 差量 / save-restore 全部
             # 跳过。未接管（无块源）或异常时复位 v2 状态并回退旧全量路径
@@ -8009,6 +8314,7 @@ class CodeWebViewer(QWebEngineView):
                         self._sequence_final_render(self._markdown_text)
                         return
                     html_content = self._render_markdown_to_html(self._markdown_text)
+                    self._last_render_output_bytes = len(html_content or "")
                 self._final_render_pending = False
                 self._last_rendered_markdown = self._markdown_text
                 self._height_report_pending = True
@@ -8839,6 +9145,14 @@ class CodeWebViewer(QWebEngineView):
             return True
         js: List[str] = []
         _has_patch_ops = (not content_ops.is_empty) or (not tool_ops.is_empty)
+        # [render-watchdog] 记录本轮产物体量：产物本身为 0 字节说明内容就是
+        # 空渲染（插件自定义块等），看门狗不得把它当"渲染丢失"反复自愈。
+        # 仅在真有 patch / 全量落地时更新——纯 live 尾态帧不改变 DOM 块，
+        # 沿用上一轮值才能反映「最后一次真正写块」的产物。
+        if _has_patch_ops or force_full:
+            self._last_render_output_bytes = sum(
+                len(it.html or "") for it in (*content_ops.items, *tool_ops.items)
+            )
         # 帧级揭示缓冲结算：必须早于本批任何 DOM 操作。
         # - force_full / 正式化：本批 html 已含全量文本，且会替换/清空 live 节点
         #   → 丢弃缓冲（补回去就是重复文本）。
@@ -9190,6 +9504,9 @@ class CodeWebViewer(QWebEngineView):
         if sip.isdeleted(self) or not self.page():
             return
         self._final_render_pending = False
+        # [render-watchdog] 终渲染落地拍：从这一刻计时
+        self._arm_render_watchdog(restart=True)
+        self._last_render_output_bytes = len(html or "")
         # [T24] 终态全量产物入图检测（只置不清）
         self._mark_has_charts(html)
         # save/restore 判定与同步路径一致（字段 cleanup 不清）：工具 DOM 被 JS
@@ -9242,6 +9559,9 @@ class CodeWebViewer(QWebEngineView):
         - seq 守卫：过期结果（新渲染已提交）直接丢弃
         - 成功后检查 pending 续派（在途期间积压的最新快照）
         """
+        # [render-watchdog] 异步结果落地 = DOM 写入就在这一拍，从此刻重新计时
+        self._arm_render_watchdog(restart=True)
+        # [render-watchdog] 异步结果落地 = DOM 写入就在这一拍，从此刻重新计时
         try:
             if seq != self._render_seq:
                 # 过期结果：丢弃（新渲染已提交或已失效）
@@ -9251,6 +9571,8 @@ class CodeWebViewer(QWebEngineView):
                 return
             if sip.isdeleted(self) or not self.page():
                 return
+            self._arm_render_watchdog(restart=True)
+            self._last_render_output_bytes = len(html or "")
             self._last_rendered_html = html
             self._height_report_pending = True
             self._rdiag_hit("apply_ok")
@@ -9787,7 +10109,7 @@ class CodeWebViewer(QWebEngineView):
             self._schedule_render(immediate=True)
         else:
             self._schedule_render(immediate=False)
-        # 简洁模式：流式结束后自动折叠工具与思考区（收起为"工具与思考 · N 项"
+        # 简洁模式：流式结束后自动折叠工具与思考区（收起为"工具与思考 · 分项计数"
         # 标题栏）。坞态归位 + 折叠由 MessageCard.finish_streaming 统一触发
         # （需 Python 端 _streaming/_has_active_tools 判据，viewer 侧无此状态，
         # 故不在此处调用）；非简洁模式保持流式结束后的展开态不变。
@@ -10245,27 +10567,27 @@ class CodeWebViewer(QWebEngineView):
                 html_content = self.get_html()
                 if not html_content:
                     logger.warning("导出 HTML 失败：无法获取消息内容")
-                    self._show_save_error("无法获取消息内容")
+                    _show_export_info_bar(self, False, "导出失败", "无法获取消息内容")
                     return
                 with open(file_path, "w", encoding="utf-8") as f:
                     f.write(html_content)
                 logger.info(f"消息已导出到: {file_path}")
-                self._show_save_success(file_path)
+                _show_export_info_bar(self, True, "文件已导出", file_path)
             else:
                 if not file_path.lower().endswith(".md"):
                     file_path += ".md"
                 md_content = self.get_plain_text()
                 if not md_content:
                     logger.warning("导出 Markdown 失败：无法获取消息内容")
-                    self._show_save_error("无法获取消息内容")
+                    _show_export_info_bar(self, False, "导出失败", "无法获取消息内容")
                     return
                 with open(file_path, "w", encoding="utf-8") as f:
                     f.write(md_content)
                 logger.info(f"消息已导出到: {file_path}")
-                self._show_save_success(file_path)
+                _show_export_info_bar(self, True, "文件已导出", file_path)
         except Exception as e:
             logger.error(f"导出失败: {e}")
-            self._show_save_error(str(e))
+            _show_export_info_bar(self, False, "导出失败", str(e))
 
     def _run_js_sync(self, js_code: str, timeout_ms: int = 2000) -> str:
         """同步执行 JavaScript 并返回结果"""
@@ -10715,7 +11037,7 @@ class CodeWebViewer(QWebEngineView):
 
         result.save(file_path, "PNG")
         logger.info(f"消息已导出为图片: {file_path}")
-        self._show_save_success(file_path)
+        _show_export_info_bar(self, True, "文件已导出", file_path)
 
     def _convert_md_to_html(self, markdown_text: str) -> str:
         """将 Markdown 文本转换为独立 HTML 页面"""
@@ -10745,40 +11067,6 @@ class CodeWebViewer(QWebEngineView):
 {body_html}
 </body>
 </html>"""
-
-    def _show_save_success(self, file_path: str):
-        """显示保存成功提示"""
-        try:
-            from qfluentwidgets import InfoBar, InfoBarPosition
-
-            main_window = self.window()
-            if main_window:
-                InfoBar.success(
-                    "文件已导出",
-                    file_path,
-                    duration=3000,
-                    parent=main_window,
-                    position=InfoBarPosition.BOTTOM,
-                )
-        except Exception:
-            pass
-
-    def _show_save_error(self, error_msg: str):
-        """显示保存失败提示"""
-        try:
-            from qfluentwidgets import InfoBar, InfoBarPosition
-
-            main_window = self.window()
-            if main_window:
-                InfoBar.error(
-                    "导出失败",
-                    error_msg,
-                    duration=3000,
-                    parent=main_window,
-                    position=InfoBarPosition.BOTTOM,
-                )
-        except Exception:
-            pass
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -11676,40 +11964,6 @@ class PlainTextViewer(QWidget):
 <pre>{escaped}</pre>
 </body>
 </html>"""
-
-    def _show_save_success(self, file_path: str):
-        """显示保存成功提示"""
-        try:
-            from qfluentwidgets import InfoBar, InfoBarPosition
-
-            main_window = self.window()
-            if main_window:
-                InfoBar.success(
-                    "文件已导出",
-                    file_path,
-                    duration=3000,
-                    parent=main_window,
-                    position=InfoBarPosition.BOTTOM,
-                )
-        except Exception:
-            pass
-
-    def _show_save_error(self, error_msg: str):
-        """显示保存失败提示"""
-        try:
-            from qfluentwidgets import InfoBar, InfoBarPosition
-
-            main_window = self.window()
-            if main_window:
-                InfoBar.error(
-                    "导出失败",
-                    error_msg,
-                    duration=3000,
-                    parent=main_window,
-                    position=InfoBarPosition.BOTTOM,
-                )
-        except Exception:
-            pass
 
     def _request_undo(self):
         """请求撤销 - 通知父组件"""

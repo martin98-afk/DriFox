@@ -61,7 +61,6 @@ def test_compose_builds_input_card(fresh_registry, qapp):
             for _m in (
                 "_load_input_history",
                 "_update_subagents_param_description",
-                "_update_title_gen_param_description",
                 "_ensure_file_mention_cache",
                 "_on_send_clicked",
                 "_on_send_clicked_inverse",
@@ -74,12 +73,14 @@ def test_compose_builds_input_card(fresh_registry, qapp):
                 "_on_at_triggered",
                 "_on_at_dismissed",
                 "_on_files_dropped",
+                "_on_file_mention_confirmed",
                 "_on_entering_history_mode",
                 "_on_history_attachments_restored",
                 "_on_history_mode_exited",
                 "_on_attachments_removed_from_text",
                 "_on_file_mention_selected",
                 "_on_mention_selected",
+                "_on_session_selected",
                 "_rebuild_attachment_chips",
                 "_restore_deleted_message",
                 "_on_undo_dismiss_requested",
@@ -88,7 +89,6 @@ def test_compose_builds_input_card(fresh_registry, qapp):
                 "_on_queue_remove_requested",
                 "_on_queue_edit_requested",
                 "_on_subagent_model_config_changed",
-                "_on_title_gen_model_config_changed",
             ):
                 setattr(self, _m, lambda *a, **k: None)
 

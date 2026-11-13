@@ -22,9 +22,14 @@
         "ui": true
     },
     "capabilities": [
+        "config.read",
         "config.write",
         "model.config",
         "model.config_for",
+        "plugin.config.read",
+        "plugin.config.write",
+        "provider.list",
+        "model.enumerate",
         "session.read",
         "session.send",
         "storage.db",
@@ -32,6 +37,18 @@
         "ui.notify",
         "ui.card.show"
     ],
+    "config_schema": {
+        "title": "子智能体默认模型",
+        "fields": [
+            {
+                "key": "subagent_model",
+                "label": "默认模型",
+                "type": "model",
+                "default": "",
+                "description": "所有子智能体任务共用的模型；留空跟随当前会话模型。也可通过 /subagents --model= 修改"
+            }
+        ]
+    },
     "module_prefixes": [
         "system_subagent_manager"
     ]

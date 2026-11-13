@@ -18,9 +18,9 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-pytest.importorskip("app.gateway.auth.base")
+pytest.importorskip("app.core.auth.base")
 
-from app.gateway.auth.base import (  # noqa: E402
+from app.core.auth.base import (  # noqa: E402
     OAuthAppConfig,
     _CallbackHandler,
     parse_error,
@@ -134,14 +134,14 @@ class TestCallbackServer:
 
     def test_start_callback_server_port_busy(self):
         """端口被占用（OSError）时返回 None"""
-        with patch("app.gateway.auth.base._CallbackHTTPServer") as mock_cls:
+        with patch("app.core.auth.base._CallbackHTTPServer") as mock_cls:
             mock_cls.side_effect = OSError("Address already in use")
             server = start_callback_server(18999)
             assert server is None
 
     def test_start_callback_server_generic_error(self):
         """非 OSError 异常应向上传播"""
-        with patch("app.gateway.auth.base._CallbackHTTPServer") as mock_cls:
+        with patch("app.core.auth.base._CallbackHTTPServer") as mock_cls:
             mock_cls.side_effect = RuntimeError("unexpected error")
             with pytest.raises(RuntimeError):
                 start_callback_server(18999)
@@ -196,11 +196,11 @@ class TestRunAuthorizationCodeFlow:
         token_resp.status_code = 200
         token_resp.json.return_value = {"access_token": "tok_xyz", "token_type": "bearer"}
 
-        with patch("app.gateway.auth.base.start_callback_server", return_value=mock_server), \
-             patch("app.gateway.auth.base.webbrowser.open"), \
-             patch("app.gateway.auth.base.stop_callback_server") as mock_stop, \
-             patch("app.gateway.auth.base.threading.Event.wait", return_value=None), \
-             patch("app.gateway.auth.base.requests.post", return_value=token_resp):
+        with patch("app.core.auth.base.start_callback_server", return_value=mock_server), \
+             patch("app.core.auth.base.webbrowser.open"), \
+             patch("app.core.auth.base.stop_callback_server") as mock_stop, \
+             patch("app.core.auth.base.threading.Event.wait", return_value=None), \
+             patch("app.core.auth.base.requests.post", return_value=token_resp):
             token_data, err = run_authorization_code_flow(self._app())
             assert token_data is not None
             assert token_data["access_token"] == "tok_xyz"
@@ -213,10 +213,10 @@ class TestRunAuthorizationCodeFlow:
         mock_server.auth_code = None
         mock_server.auth_error = None
 
-        with patch("app.gateway.auth.base.start_callback_server", return_value=mock_server), \
-             patch("app.gateway.auth.base.webbrowser.open"), \
-             patch("app.gateway.auth.base.stop_callback_server"), \
-             patch("app.gateway.auth.base.threading.Event.wait", return_value=None):
+        with patch("app.core.auth.base.start_callback_server", return_value=mock_server), \
+             patch("app.core.auth.base.webbrowser.open"), \
+             patch("app.core.auth.base.stop_callback_server"), \
+             patch("app.core.auth.base.threading.Event.wait", return_value=None):
             token_data, err = run_authorization_code_flow(self._app(), timeout=1)
             assert token_data is None
             assert "超时" in err
@@ -227,10 +227,10 @@ class TestRunAuthorizationCodeFlow:
         mock_server.auth_code = None
         mock_server.auth_error = "user denied"
 
-        with patch("app.gateway.auth.base.start_callback_server", return_value=mock_server), \
-             patch("app.gateway.auth.base.webbrowser.open"), \
-             patch("app.gateway.auth.base.stop_callback_server"), \
-             patch("app.gateway.auth.base.threading.Event.wait", return_value=None):
+        with patch("app.core.auth.base.start_callback_server", return_value=mock_server), \
+             patch("app.core.auth.base.webbrowser.open"), \
+             patch("app.core.auth.base.stop_callback_server"), \
+             patch("app.core.auth.base.threading.Event.wait", return_value=None):
             token_data, err = run_authorization_code_flow(self._app())
             assert token_data is None
             assert "授权失败" in err

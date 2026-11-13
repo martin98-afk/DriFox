@@ -17,26 +17,51 @@ your-plugin/
 ```
 
 ### 最小模板
-
 ```python
 # gateways/mygw.py
-from app.gateway.base import (
-    BasePlatformAdapter, MessageEvent, Platform, PlatformConfig, SendResult, ChatInfo,
-)
+from app.gateway.base import BasePlatformAdapter, ChatInfo, MessageEvent, SendResult
 
-def check_requirements() -> bool:
-    try:
-        import some_sdk  # noqa
-        return True
-    except ImportError:
-        return False
+PLUGIN_NAME = "my-gateway"
+_CAPS: dict = {}
+
+
+def _cap(cap_id: str):
+    """取宿主能力（按 manifest capabilities 裁剪；后台线程无 ctx 也可用）。"""
+    cap = _CAPS.get(cap_id)
+    if cap is None:
+        from app.plugins.sdk import caps_for
+
+        cap = caps_for(cap_id, plugin=PLUGIN_NAME, surface="ui")
+        if cap is None:
+            return None
+        _CAPS[cap_id] = cap
+    return cap
+
+
+def _config() -> dict:
+    reader = _cap("plugin.config.read")
+    values = (reader() if reader else {}) or {}
+    return {"enabled": bool(values.get("enabled")), "token": values.get("token") or ""}
+
+
+def _set_enabled(enabled: bool) -> None:
+    writer = _cap("plugin.config.write")
+    if writer is not None:
+        writer("enabled", bool(enabled))
+
+
+def _validate() -> tuple:
+    return bool(_config()["token"]), "Token 未配置"
+
 
 class MyAdapter(BasePlatformAdapter):
+    platform_id = "mygw"          # registry 键，子类声明
+    name = "MyGW"
     MAX_MESSAGE_LENGTH = 4096
 
-    def __init__(self, config: PlatformConfig):
-        super().__init__(config)              # 平台标识经 platform_id= 或类属性
-        self._token = (config.extra or {}).get("token") or ""
+    def __init__(self) -> None:
+        super().__init__()         # 无参：配置由插件自己读
+        self._token = _config()["token"]
 
     async def connect(self) -> bool: ...
     async def disconnect(self) -> None: ...
@@ -45,21 +70,29 @@ class MyAdapter(BasePlatformAdapter):
     async def get_chat_info(self, chat_id) -> ChatInfo:
         return ChatInfo(chat_id=chat_id)
 
+
 def register(registry):
     from app.plugins.contracts.gateway_platform import GatewayPlatformDef
+
     registry.register(GatewayPlatformDef(
         platform_id="mygw", display_name="MyGW",
-        adapter_factory=lambda cfg: MyAdapter(cfg),
-        check_requirements=check_requirements,
+        adapter_factory=MyAdapter,
+        is_enabled=lambda: _config()["enabled"],
+        set_enabled=_set_enabled,
+        validate=_validate,
         ui_order=80,
     ))
 ```
+manifest 至少声明 `components.gateways` 与
+`capabilities: ["plugin.config.read", "plugin.config.write"]`。
 
 ### 关键约束
-
-- `BasePlatformAdapter.__init__` 第二参数已修：None / 有 `.handle()` 的 handler / 平台标识三种语义鸭子类型分流（旧写法 `super().__init__(config, Platform.XXX)` 会把平台标识当 handler 丢弃 → `adapter.platform` 恒为 WECOM）
-- 收发闭环：入站消息经 `MessageHandler.handle`（session 定位 → process_message_callback → 回发）；出站主动投递走 `GatewayService.send_to_platform`（插件从 services 拿，别 import 模块级单例）
-- 配置走 `config_schema` + `PluginConfigStore`（E1 契约，设置卡自动渲染）；变更经 `build_config_values` 热重建 adapter
+- **宿主契约不承载配置**：`PlatformConfig` / `Platform` 枚举均已删除，`MessageEvent.platform`
+  与 `BasePlatformAdapter.platform_id` 都是 `str`（第三方平台与内置平台同构）
+- `BasePlatformAdapter.__init__()` 无参；平台标识由子类类属性 `platform_id` 声明
+- 配置统一走 `config_schema` + `plugin.config.read/write` 能力（设置卡自动渲染，插件自己读同一份存储）
+- 宿主只问三个问题：`is_enabled()`（要不要连）、`validate()`（配置能不能用）、`adapter_factory()`（造哪个实例）
+- 收发闭环：入站消息经 `MessageHandler.handle`；出站主动投递走 `platform.send` 能力
 
 ### 参考
 

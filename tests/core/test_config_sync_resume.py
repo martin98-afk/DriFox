@@ -72,7 +72,7 @@ def test_fetch_emits_token(svc, monkeypatch):
     svc._resumeTokenReady.connect(lambda t, o: got.append((t, o)))
     backend = MagicMock()
     backend.get_bound_info.return_value = {"token": "tok", "owner": "own"}
-    monkeypatch.setattr("app.gateway.auth.get_oauth_backend", lambda _name: backend)
+    monkeypatch.setattr("app.core.auth.get_oauth_backend", lambda _name: backend)
 
     svc._resume_fetch_token()
 

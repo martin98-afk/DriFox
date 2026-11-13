@@ -225,19 +225,9 @@ class MCPEditCard(QWidget):
     @staticmethod
     def _parse_placeholder_color() -> "QColor":
         """解析 Colors.INPUT_PLACEHOLDER 为 QColor（兼容 rgba/css 格式）"""
-        from PyQt5.QtGui import QColor
+        from app.utils.color_parse import parse_color
 
-        s = Colors.INPUT_PLACEHOLDER.strip()
-        if s.startswith("rgba("):
-            parts = s[5:-1].split(",")
-            r, g, b = int(parts[0].strip()), int(parts[1].strip()), int(parts[2].strip())
-            a = int(float(parts[3].strip()) * 255)
-            return QColor(r, g, b, a)
-        if s.startswith("rgb("):
-            parts = s[4:-1].split(",")
-            r, g, b = int(parts[0].strip()), int(parts[1].strip()), int(parts[2].strip())
-            return QColor(r, g, b)
-        return QColor(s)
+        return parse_color(Colors.INPUT_PLACEHOLDER)
 
     def refresh_style(self):
         """主题切换时刷新编辑卡片的所有样式"""

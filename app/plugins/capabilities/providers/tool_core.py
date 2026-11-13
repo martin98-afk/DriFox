@@ -16,6 +16,7 @@ from __future__ import annotations
 from typing import Any
 
 from app.plugins.capabilities.providers import model_meta, net_sync, process_core
+from app.plugins.capabilities.providers._shared_policy import tool_policy_api as _tool_policy_api
 
 
 def register(registry) -> None:
@@ -558,32 +559,6 @@ def register(registry) -> None:
             "sync_caller_context": sync_caller_context,
             "clear_caller_context": clear_caller_context,
         }
-
-    def _tool_policy_api():
-        """工具权限策略只读面（与 ui_core 同构）。"""
-
-        def api() -> dict:
-            from app.core.tools.tool_permission_controller import resolve_tool_off_policy
-            from app.utils.config import Settings
-
-            def off_policy(name: str) -> str:
-                s = Settings.get_instance()
-                toggles = dict(s.tool_toggles.value or {})
-                if toggles.get(name, True) is not False:
-                    return "allow"
-                policies = dict(s.tool_permission_policy.value or {})
-                behavior = s.tool_off_behavior.value or "deny"
-                try:
-                    return str(resolve_tool_off_policy(name, None, policies, behavior) or "")
-                except Exception:
-                    return ""
-
-            def toggles() -> dict:
-                return dict(Settings.get_instance().tool_toggles.value or {})
-
-            return {"off_policy": off_policy, "toggles": toggles}
-
-        return api
 
     def _tool_read(host: Any):
         """工具注册表只读面（与 ui_core 的同名能力语义一致）。"""

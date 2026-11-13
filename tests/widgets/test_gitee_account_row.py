@@ -59,7 +59,7 @@ def row_factory(qtbot):
             ),
             # 头像拉取是后台真线程：测试内必须断网（否则真请求 gitee）
             patch(
-                "app.gateway.auth.gitee.fetch_user_avatar_url",
+                "app.core.auth.gitee.fetch_user_avatar_url",
                 return_value=(None, "test-skip"),
             ),
         ):
@@ -169,9 +169,9 @@ def test_do_unbind_stops_sync_and_resets_state(row_factory):
     sync_service.restore_local.return_value = True
 
     with (
-        patch("app.gateway.auth.get_oauth_backend", return_value=backend),
+        patch("app.core.auth.get_oauth_backend", return_value=backend),
         patch(
-            "app.gateway.utils.gitee_uploader.GiteeUploader.get_instance",
+            "app.core.net.gitee_uploader.GiteeUploader.get_instance",
             return_value=uploader,
         ),
         patch("app.widgets.cards.settings.gitee_card.InfoBar.success"),
@@ -205,9 +205,9 @@ def test_bound_render_does_not_start_remote_sync(qtbot):
             "app.core.sync.config_sync.ConfigSyncService.get_instance",
             return_value=sync_service,
         ),
-        patch("app.gateway.auth.get_oauth_backend", return_value=backend),
+        patch("app.core.auth.get_oauth_backend", return_value=backend),
         patch(
-            "app.gateway.auth.gitee.fetch_user_avatar_url",
+            "app.core.auth.gitee.fetch_user_avatar_url",
             return_value=(None, "test-skip"),
         ),
     ):
@@ -235,9 +235,9 @@ def test_oauth_success_enables_sync(row_factory):
     uploader = MagicMock()
 
     with (
-        patch("app.gateway.auth.get_oauth_backend", return_value=backend),
+        patch("app.core.auth.get_oauth_backend", return_value=backend),
         patch(
-            "app.gateway.utils.gitee_uploader.GiteeUploader.get_instance",
+            "app.core.net.gitee_uploader.GiteeUploader.get_instance",
             return_value=uploader,
         ),
         patch("app.widgets.cards.settings.gitee_card.InfoBar.success"),
@@ -254,7 +254,7 @@ def test_unbind_failure_preserves_bound_state(row_factory):
     backend.unbind.return_value = False, "配置保存失败"
 
     with (
-        patch("app.gateway.auth.get_oauth_backend", return_value=backend),
+        patch("app.core.auth.get_oauth_backend", return_value=backend),
         patch("app.widgets.cards.settings.gitee_card.InfoBar.error") as show_error,
     ):
         row._do_unbind()
@@ -304,10 +304,10 @@ def gitee_card_factory(qtbot):
                 return_value=sync_service,
             ),
             patch(
-                "app.gateway.utils.gitee_uploader.GiteeUploader.get_instance",
+                "app.core.net.gitee_uploader.GiteeUploader.get_instance",
                 return_value=uploader,
             ),
-            patch("app.gateway.auth.get_oauth_backend", return_value=backend),
+            patch("app.core.auth.get_oauth_backend", return_value=backend),
         ):
             from app.widgets.cards.settings.gitee_card import GiteeCard
 
@@ -336,7 +336,7 @@ def test_auto_enable_sync_bound_info_none_with_bound_true_triggers_invalid(gitee
     ctrl = MagicMock()
 
     with (
-        patch("app.gateway.auth.get_oauth_backend", return_value=backend),
+        patch("app.core.auth.get_oauth_backend", return_value=backend),
         patch(
             "app.widgets.tab_manager_window.TabManagerWindow.get_instance",
             return_value=tm,
@@ -367,7 +367,7 @@ def test_auto_enable_sync_never_bound_skips_invalid(gitee_card_factory):
     ctrl = MagicMock()
 
     with (
-        patch("app.gateway.auth.get_oauth_backend", return_value=backend),
+        patch("app.core.auth.get_oauth_backend", return_value=backend),
         patch(
             "app.widgets.cards.global_card_controller.get_global_card_controller",
             return_value=ctrl,
@@ -390,7 +390,7 @@ def test_auto_enable_sync_bound_info_valid_starts_sync(gitee_card_factory):
     ctrl = MagicMock()
 
     with (
-        patch("app.gateway.auth.get_oauth_backend", return_value=backend),
+        patch("app.core.auth.get_oauth_backend", return_value=backend),
         patch(
             "app.widgets.cards.global_card_controller.get_global_card_controller",
             return_value=ctrl,
@@ -468,7 +468,7 @@ def test_gitee_card_button_refreshes_on_clear_binding_path(gitee_card_factory):
     ctrl = MagicMock()
 
     with (
-        patch("app.gateway.auth.get_oauth_backend", return_value=backend),
+        patch("app.core.auth.get_oauth_backend", return_value=backend),
         patch(
             "app.widgets.tab_manager_window.TabManagerWindow.get_instance",
             return_value=tm,

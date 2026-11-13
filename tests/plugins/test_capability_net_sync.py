@@ -20,7 +20,7 @@ from app.plugins.capabilities.providers import net_sync
 
 
 # ── 加载 interaction_tools（与 test_system_tools_mcp_render 同款按路径加载）──
-_TOOLS_MODULE = _ROOT / "plugins" / "system-tools" / "tools" / "interaction_tools.py"
+_TOOLS_MODULE = _ROOT / "plugins" / "system-interact" / "tools" / "interaction_tools.py"
 _spec = importlib.util.spec_from_file_location("test_net_sync_interaction_mod", str(_TOOLS_MODULE))
 _tools = importlib.util.module_from_spec(_spec)
 sys.modules.setdefault("test_net_sync_interaction_mod", _tools)
@@ -46,7 +46,7 @@ class TestNetAvatar:
         assert all(callable(v) for v in avatar.values())
 
     def test_fetch_unbound_returns_none(self, _avatar_cache_root):
-        with patch("app.gateway.auth.get_oauth_backend", return_value=MagicMock(get_bound_info=lambda: None)):
+        with patch("app.core.auth.get_oauth_backend", return_value=MagicMock(get_bound_info=lambda: None)):
             assert net_sync.net_avatar(None)["fetch"]() is None
 
     def test_fetch_cache_hit_no_network(self, _avatar_cache_root):
@@ -54,8 +54,8 @@ class TestNetAvatar:
         cache.parent.mkdir(parents=True)
         cache.write_bytes(b"png")
         backend = MagicMock(get_bound_info=lambda: {"owner": "me", "token": "t"})
-        with patch("app.gateway.auth.get_oauth_backend", return_value=backend), patch(
-            "app.gateway.auth.gitee.fetch_user_avatar_url"
+        with patch("app.core.auth.get_oauth_backend", return_value=backend), patch(
+            "app.core.auth.gitee.fetch_user_avatar_url"
         ) as mock_fetch, patch("requests.get") as mock_get:
             got = net_sync.net_avatar(None)["fetch"]()
         assert got == str(cache)
@@ -65,8 +65,8 @@ class TestNetAvatar:
     def test_fetch_miss_downloads_and_caches(self, _avatar_cache_root):
         resp = MagicMock(status_code=200, content=b"avatar-bytes")
         backend = MagicMock(get_bound_info=lambda: {"owner": "me", "token": "t"})
-        with patch("app.gateway.auth.get_oauth_backend", return_value=backend), patch(
-            "app.gateway.auth.gitee.fetch_user_avatar_url", return_value=("https://av/me.png", "")
+        with patch("app.core.auth.get_oauth_backend", return_value=backend), patch(
+            "app.core.auth.gitee.fetch_user_avatar_url", return_value=("https://av/me.png", "")
         ), patch("requests.get", return_value=resp):
             got = net_sync.net_avatar(None)["fetch"]()
         cache = _avatar_cache_root / "cache" / "gitee_avatar_me.png"
@@ -76,8 +76,8 @@ class TestNetAvatar:
     def test_fetch_download_failure_returns_none(self, _avatar_cache_root):
         resp = MagicMock(status_code=500, content=b"")
         backend = MagicMock(get_bound_info=lambda: {"owner": "me", "token": "t"})
-        with patch("app.gateway.auth.get_oauth_backend", return_value=backend), patch(
-            "app.gateway.auth.gitee.fetch_user_avatar_url", return_value=("https://av/me.png", "")
+        with patch("app.core.auth.get_oauth_backend", return_value=backend), patch(
+            "app.core.auth.gitee.fetch_user_avatar_url", return_value=("https://av/me.png", "")
         ), patch("requests.get", return_value=resp):
             assert net_sync.net_avatar(None)["fetch"]() is None
 
@@ -105,7 +105,7 @@ class TestNetAvatar:
 
 class TestNetDownloadAndSyncRegister:
     def test_download_delegates_to_uploader(self):
-        with patch("app.gateway.utils.gitee_uploader.get_gitee_uploader") as mock_get:
+        with patch("app.core.net.gitee_uploader.get_gitee_uploader") as mock_get:
             mock_get.return_value.download_file.return_value = (r"C:\out\x.png", None)
             local, err = net_sync.net_download(None)("drifox/x.png", r"C:\out\x.png")
         assert local == r"C:\out\x.png" and err is None

@@ -99,6 +99,7 @@ _TEAM_READ = FacetSpec(
         "get_member_busy_status",
         "get_running_tasks",
         "get_pending_tasks",
+        "get_mailbox_mails",
         "get_template",
         "get_template_for_run_id",
         "get_team_run_ids",

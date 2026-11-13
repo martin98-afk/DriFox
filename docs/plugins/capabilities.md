@@ -127,7 +127,7 @@ app.plugins.capabilities.pool.CapabilityDenied:
 | `model.set` | **high** | 设置当前窗口的服务商与模型（只改窗口实例态，不写全局默认）；`window_id` 参数可定向到指定窗口 |
 | `provider.list` | low | 已配置服务商清单（id / 名称 / 模型数，**不含密钥与 URL**） |
 | `model.enumerate` | low | 指定服务商的可选模型列表（含视觉 / 思考能力标记） |
-| `model.complete` | medium | 用当前 / 指定模型做一次性补全（不带工具与历史上下文，消耗 token），返回完整文本 |
+| `model.complete` | medium | 用当前 / 指定模型做一次性补全（不带工具与历史上下文，消耗 token），返回完整文本；`prompt` 支持纯文本或 content blocks（多模态） |
 
 > `model.complete` 是插件「要一段模型输出、不需要完整对话栈」的唯一正确入口：请求头由宿主 `resolve_extra_headers` 统一组装（OpenCode 的 `x-opencode-session`、服务商伪装头）。插件自建 client 会漏掉这层，OpenCode 网关直接 400 `MissingSessionID`。
 
@@ -381,8 +381,12 @@ caps["stream.subscribe"]({
 | ID | level | 说明 |
 |---|---|---|
 | `storage.data_dir` | low | 插件持久化数据根目录 `<app_data>`（插件自拼 `plugin_data/<name>/` 自用） |
-| `secret.read` | medium | 读本插件自己的凭据（系统密钥库，account 自动带 `plugin:<name>:` 前缀） |
+| `secret.read` | medium | 读本插件自己的凭据（系统密钥库，account 自动带 `plugin:<name>:` 前缀）；`fallback_config_key` 可兼容旧明文配置并懒迁移 |
 | `secret.write` | medium | 写本插件自己的凭据（空串 = 删除；密钥库不可用时返回 False，不落明文盘） |
+
+> **大部分插件不需要直接用这两条**：`config_schema` 里 `"type": "password"` 的字段已由
+> `PluginConfigStore` 透明加密（写密钥库、读密钥库、老数据首次读取自动迁移，插件与
+> 设置卡都零改动）。`secret.*` 只给「凭据不属于任何 config 字段」的场景用。
 | `storage.db` | **high** | 通用数据库执行权限（受限代理：表名须 `plugin_<name>_` 前缀，禁 ATTACH/PRAGMA/VACUUM） |
 
 只给根目录：CapabilityPool 的 provider 全局共享、调用不传插件名，per-plugin

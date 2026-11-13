@@ -7,15 +7,14 @@
 import io
 import sys
 
-from app.core.services.gateway_service import GatewayService, _gw_str_platform
+from system_im_service import GatewayService, _gw_str_platform
 
 
 def test_gw_str_platform():
-    from app.gateway.base import Platform
 
-    # 枚举内平台 → Platform 枚举；第三方 str 平台 id 原样直通（Phase E 契约）
-    assert _gw_str_platform(Platform.FEISHU) == Platform.FEISHU
-    assert _gw_str_platform("dingtalk") == "dingtalk"
+    # 平台入参一律归一成 str（平台 id 即 registry 键，不设闭集）
+    assert _gw_str_platform("feishu") == "feishu"
+    assert _gw_str_platform("pt-awesome") == "pt-awesome"
 
 
 def test_model_config_reads_global_settings():

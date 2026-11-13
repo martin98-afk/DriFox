@@ -102,7 +102,7 @@ def _seed_bound_state(fake: _FakeSettings, *, expired: bool = True):
 
 def test_concurrent_refresh_only_one_gitee_call(tmp_settings):
     """N 个线程同时调 _ensure_valid_token，refresh_access_token 只该被调一次。"""
-    from app.gateway.auth import gitee as gitee_mod
+    from app.core.auth import gitee as gitee_mod
 
     fake, _ = tmp_settings
     _seed_bound_state(fake, expired=True)
@@ -154,7 +154,7 @@ def test_concurrent_refresh_only_one_gitee_call(tmp_settings):
 
 def test_refresh_persists_new_refresh_token_to_disk(tmp_settings):
     """刷新后磁盘 app.config 必须包含新的 refresh_token（下次冷启动能继续用）"""
-    from app.gateway.auth import gitee as gitee_mod
+    from app.core.auth import gitee as gitee_mod
 
     fake, cfg_file = tmp_settings
     _seed_bound_state(fake, expired=True)
@@ -194,7 +194,7 @@ def test_config_sync_uses_backend_ensure_valid_token(tmp_settings):
     """ConfigSyncService._sync_token 必须复用 _ensure_valid_token，
     不能自己再调 refresh_access_token（否则双入口 bug 复发）。"""
     from app.core.sync import config_sync as cs_mod
-    from app.gateway.auth import gitee as gitee_mod
+    from app.core.auth import gitee as gitee_mod
 
     fake, cfg_file = tmp_settings
     _seed_bound_state(fake, expired=True)

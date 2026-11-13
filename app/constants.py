@@ -222,6 +222,12 @@ PROVIDER_MANAGED_KEYS = frozenset({
     "健康检查",
     "上次模型刷新",
     "模型刷新状态",
+    # 模型刷新/健康检查写入的运行时状态键：不属于可调模型参数，必须过滤，
+    # 否则会渲染到「其他」分组并随用户拖动被污染。
+    "状态更新时间",
+    "上次健康检查",
+    # 能力类型是服务商实例的元数据，由 ProviderDef / 编辑卡决定，不应在模型参数卡出现。
+    "capability_type",
 })
 
 # 用量查询字段永久黑名单。
@@ -274,16 +280,6 @@ def provider_default_config(name: str) -> Optional[Dict[str, Any]]:
         return ProviderRegistry.get_instance().default_config(name)
     except Exception:
         return None
-
-
-def provider_icon_map() -> Dict[str, str]:
-    """服务商 → 图标 key（PROVIDER_ICONS 委托）"""
-    from app.plugins.registries.provider_registry import ProviderRegistry
-
-    try:
-        return ProviderRegistry.get_instance().icon_map()
-    except Exception:
-        return {}
 
 
 def provider_quota_exclude_keys() -> "frozenset[str]":

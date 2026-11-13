@@ -34,3 +34,32 @@ def fresh_registry(monkeypatch):
     monkeypatch.setattr(UIPluginRegistry, "_instance", reg)
     monkeypatch.setattr(UIPluginRegistry, "get_instance", classmethod(lambda cls: reg))
     return reg
+
+
+@pytest.fixture(autouse=True)
+def isolated_secret_store(monkeypatch):
+    """密钥库隔离：password 类型字段会写系统密钥库（macOS Keychain / Windows
+    凭据管理器），测试必须拦在内存里——否则用例互相污染，还会往开发机真实
+    钥匙串里塞测试数据。
+    """
+
+    class _MemorySecretStore:
+        available = True
+        data: dict = {}
+
+        def __init__(self):
+            pass
+
+        def get(self, account):
+            return self.data.get(account, "")
+
+        def set(self, account, value):
+            self.data[account] = value
+            return True
+
+        def delete(self, account):
+            self.data.pop(account, None)
+
+    _MemorySecretStore.data = {}
+    monkeypatch.setattr("app.utils.secret_store.SecretStore", _MemorySecretStore)
+    return _MemorySecretStore

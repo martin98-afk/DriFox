@@ -34,9 +34,6 @@ from app.tools.result import ToolResult
 
 # ========== 性能优化：预编译正则表达式 ==========
 _THINKING_PATTERN = re.compile(r"<think>[\s\S]*?</think>")  # 过滤完整思考块
-# 与 plugins/system-model-adapters/model_adapters/_detectors.py 的判定保持同步
-# （Phase 3 搬迁进 adapter flags 时统一，消除重复实现）
-_GPT_VERSIONED_RE = re.compile(r"^gpt-(\d+)")
 _TOOL_TAG_PATTERN = re.compile(r"<tool>[\s\S]*?</tool>")  # 过滤工具调用标签
 _VALID_IDENTIFIER_PATTERN = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")  # 验证标识符格式
 
@@ -44,6 +41,11 @@ _VALID_IDENTIFIER_PATTERN = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")  # 验证标
 # 这些键的 api_param 也是 "max_tokens"（历史字段名），若不排除会在通配分支里
 # 与「最大输出」抢同一个 req_kwargs["max_tokens"]（按 dict 迭代序覆盖）。
 _CONTEXT_WINDOW_ONLY_KEYS = frozenset({"最大Token", "上下文长度"})
+
+# 子智能体单次 API 调用的重试次数。子任务在后台执行，失败要尽快回到主流程：
+# 5 次 × 退避上限 30s，总等待最坏约 65s（此前 15 次指数退避累计远超一小时，
+# 面板无任何反馈，观感等同于卡死）。
+_SUBAGENT_API_MAX_RETRIES = 5
 
 # ========== 上下文注入预算常量 ==========
 CHARS_PER_TOKEN = 4  # 与 HistoryCompactor 保持一致
@@ -149,6 +151,9 @@ class SubAgentExecutor(QThread):
     tool_result_received = pyqtSignal(str, str, str, bool)  # task_id, tool_name, result, success
     token_usage_updated = pyqtSignal(str, int, int, int)  # task_id, prompt_tokens, completion_tokens, total_tokens
     thinking_received = pyqtSignal(str, str)  # task_id, reasoning_content
+    # 重试状态（task_id, 文案）：API 失败进入退避时发射，供面板显示「第 N/M 次重试」。
+    # 与 progress_updated 分开：后者是任务阶段播报，不能当状态位用。
+    retry_status = pyqtSignal(str, str)
     # ★ T24：ask 行为权限请求（task_id, tool_name, arguments）→ 主线程弹窗
     permission_requested = pyqtSignal(str, str, dict)
 
@@ -549,11 +554,11 @@ class SubAgentExecutor(QThread):
             self._add_log("progress", f"开始执行子任务: {self.agent_name}")
             self.progress_updated.emit(self.task_id, f"开始执行子任务: {self.agent_name}")
 
-            try:
-                result = self._execute_agent_loop(messages, tools, self.llm_config)
-            except Exception as e:
-                logger.error(f"[SubAgentExecutor] _execute_agent_loop error: {e}")
-                result = f"执行出错: {str(e)}"
+            # 执行异常不得伪装成结果字符串：那会让 _execution_error 保持为空，
+            # 完成链据此判 success=True，会话卡显示绿色「✅ 执行结果」而正文是
+            # 「执行出错: xxx」，主智能体也收到 ✅ 的完成通知。异常一律上抛给
+            # run() 最外层 except，由 error_occurred 出口统一结算（DB 落 error 态）。
+            result = self._execute_agent_loop(messages, tools, self.llm_config)
 
             if self._is_cancelled:
                 # 被取消时也要发射错误信号，让管理器知道任务已结束。
@@ -605,7 +610,9 @@ class SubAgentExecutor(QThread):
 
         except Exception as e:
             logger.exception(f"[SubAgentExecutor] run() error: {e}")
-            self._execution_error = str(e)
+            # 与旧文案保持一致（会话卡/注入链路的历史识别口径含该前缀），
+            # 同时作为 _execution_error 唯一真值：完成链靠它判失败。
+            self._execution_error = f"执行出错: {e}"
             # 任务出错，保存错误状态
             if self._log_store_callback:
                 try:
@@ -621,7 +628,7 @@ class SubAgentExecutor(QThread):
                     )
                 except Exception as e:
                     logger.warning(f"[SubAgentExecutor] 保存错误状态失败: {e}")
-            self.error_occurred.emit(self.task_id, f"SubAgent execution error: {str(e)}")
+            self.error_occurred.emit(self.task_id, self._execution_error)
 
     def _execute_agent_loop(self, messages: List[Dict], tools: List[Dict], llm_config: Dict) -> str:
         """执行子智能体对话循环"""
@@ -1248,11 +1255,22 @@ class SubAgentExecutor(QThread):
         if transport is None:
             raise RuntimeError("未注册协议传输器（system-transports 插件未启用），子智能体无法发起请求")
 
-        client = build_openai_client(api_key=api_key, base_url=base_url, timeout=120.0)
+        # 超时口径与主对话一致（chat_worker 600s/connect 60s）：
+        # 子智能体任务通常更长（读大文件、跑命令、长工具链），120s 读超时会让
+        # 正常的慢响应（长思考 / 首 token 慢）直接判失败。真死锁由 stall 看门狗
+        # 的 IN_FLIGHT_MAX_SECONDS(1800s) 兜底，不靠读超时兜。
+        import httpx
+
+        client = build_openai_client(
+            api_key=api_key,
+            base_url=base_url,
+            timeout=httpx.Timeout(600.0, connect=60.0),
+        )
         auth_headers = resolve_extra_headers(config, getattr(self, "_task_session_id", None) or "")
 
-        def create_stream():
-            return transport.create_stream(
+        def create_and_consume():
+            """建流 + 消费流一体：SSE 读超时/断流发生在迭代期，只包住建流等于没重试。"""
+            stream = transport.create_stream(
                 config,
                 materialized,
                 tools=tools,
@@ -1261,13 +1279,37 @@ class SubAgentExecutor(QThread):
                 client=client,
                 cap_max_tokens=lambda m, v: self._cap_max_output_tokens(m, v, config),
             )
+            try:
+                return self._aggregate_events(stream)
+            finally:
+                # 重试会重建连接，旧流必须显式关闭，否则泄漏 socket
+                close = getattr(stream, "close", None)
+                if callable(close):
+                    try:
+                        close()
+                    except Exception:
+                        pass
 
-        events = create_api_call_with_retry(
+        return create_api_call_with_retry(
             client,
-            create_stream,
+            create_and_consume,
+            max_retries=_SUBAGENT_API_MAX_RETRIES,
+            retry_delay=5.0,
             cancel_check=lambda: self._is_cancelled,
+            on_retry=self._notify_api_retry,
         )
-        return self._aggregate_events(events)
+
+    def _notify_api_retry(self, err: Exception, attempt: int, max_retries: int, wait_time: float) -> None:
+        """重试状态上报：进任务日志 + 推面板行，避免重试期面板只有计时器在动。"""
+        msg = (
+            f"模型请求失败（{type(err).__name__}），"
+            f"第 {attempt}/{max_retries} 次重试，{wait_time:.0f}s 后继续"
+        )
+        self._add_log("progress", msg)
+        try:
+            self.retry_status.emit(self.task_id, msg)
+        except Exception as e:  # noqa: BLE001 - 信号失败不得影响重试
+            logger.warning(f"[SubAgentWorker] 重试状态上报失败: {e}")
 
     def _aggregate_events(self, events) -> tuple:
         """StreamEvent 流 → (content, tool_calls, reasoning)（协议无关聚合）。

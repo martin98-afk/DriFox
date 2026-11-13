@@ -83,12 +83,11 @@ gateway-teams/
 |---|---|---|---|
 | `platform_id` | `str` | ✅ | 平台唯一 ID（任意字符串，建议 `kebab-case`，与内置平台不冲突） |
 | `display_name` | `str` | ✅ | **仅作日志 tag**（`[PlatformManager] xxx adapter loaded`）；设置卡标题走 `config_schema.title` |
-| `adapter_factory` | `(PlatformConfig) -> BasePlatformAdapter` | ✅ | 适配器工厂：构造实例时调用一次（`config_builder` 为 None 时以 `None` 入参调用） |
+| `adapter_factory` | `() -> BasePlatformAdapter` | ✅ | 适配器工厂：无参调用，适配器在 `__init__` 里自己读插件配置 |
 | `check_requirements` | `() -> bool` | ⬜ | 缺省 `lambda: True`；SDK 缺失时返回 False 让 manager 跳过 |
-| `config_builder` | `() -> PlatformConfig` | ⬜ | 构造 PlatformConfig；建议从 `PluginConfigStore` 读。缺省 None → `adapter_factory(None)` |
-| `config_writer` | `(PlatformConfig) -> None` | ⬜ | 持久化配置（建议写 `PluginConfigStore`）。缺省 None 时调用方只 warning 不抛错 |
-| `build_config_values` | `(dict, PlatformConfig?) -> Any` | ⬜ | **保留字段，当前全工程无读取方**（设置面板回显走 PluginConfigCard + PluginConfigStore，勿依赖） |
-| `validate_config` | `(PlatformConfig) -> (bool, str)` | ⬜ | **adapter 加载/重建前**校验（manager 启动装配与配置更新重建分支），非保存前校验 |
+| `is_enabled` | `() -> bool` | ⬜ | 缺省 False。`start_all` / `get_status` 据此决定该平台是否参与连接 |
+| `set_enabled` | `(bool) -> None` | ⬜ | 写回启用状态（设置卡开关、`platform.control` 能力调它）；缺省 None 表示只读 |
+| `validate` | `() -> (bool, str)` | ⬜ | **adapter 加载/重建前**校验配置可用性（manager 启动装配与配置更新重建分支），非保存前校验 |
 | `ui_order` | `int` | ⬜ | 仅影响 `GatewayPlatformRegistry.list_platforms()` 排序（缺省 100）；**不影响设置卡顺序** |
 | `icon_hint` | `str` | ⬜ | **保留字段，当前无消费方**。图标按插件根 `icon.svg`/`icon_dark.svg` 文件约定自动选，无字段参与 |
 | `source` | `str` | ⬜ | 注册来源（loader 自动填 `plugin:<name>`，手写注册可省略） |
@@ -99,83 +98,76 @@ gateway-teams/
 
 ## 3. 最小可工作模板
 
-`gateways/teams.py`（用户级 SDK）：
-
 ```python
-# -*- coding: utf-8 -*-
-"""Teams 平台适配器（第三方插件示例）。"""
+# plugins/my-gateway/gateways/my_platform.py
+PLUGIN_NAME = "my-gateway"
 
-# ── 插件自包含依赖注入：优先加载本插件 deps/ 目录 ────────────────
-# 平台 SDK（含传递依赖）vendor 到 plugins/<name>/deps/，
-# 主程序打包时已排除 SDK；模块顶层只注入路径，SDK 本体仍在函数内延迟导入。
-import os as _os, sys as _sys
-_deps = _os.path.abspath(_os.path.join(_os.path.dirname(__file__), "..", "deps"))
-if _deps not in _sys.path:
-    _sys.path.insert(0, _deps)
-
-from loguru import logger
-from app.gateway.base import BasePlatformAdapter, MessageEvent, PlatformConfig, SendResult
-from app.plugins.contracts.gateway_platform import GatewayPlatformDef
+_CAPS: dict = {}
 
 
-def _check_requirements() -> bool:
-    """SDK 缺失检测（顶层不导入 SDK，仅 try/except 探测）。"""
-    try:
-        import teams_sdk  # noqa: F401  vendor 在 deps/
-        return True
-    except Exception:
-        return False
+def _cap(cap_id: str):
+    """取宿主能力（按 manifest capabilities 裁剪；后台线程无 ctx 也可用）。"""
+    cap = _CAPS.get(cap_id)
+    if cap is None:
+        from app.plugins.sdk import caps_for
+
+        cap = caps_for(cap_id, plugin=PLUGIN_NAME, surface="ui")
+        if cap is None:
+            return None
+        _CAPS[cap_id] = cap
+    return cap
 
 
-def _build_config() -> PlatformConfig:
-    """从 PluginConfigStore 读用户配置（E1 三级链：env → 存储 → schema 默认）。"""
-    from app.plugins.managers.plugin_config_store import PluginConfigStore
-
-    store = PluginConfigStore()
-    return PlatformConfig(
-        enabled=bool(store.get("gateway-teams", "enabled")),
-        platform="teams",
-        token=store.get("gateway-teams", "bot_app_secret") or "",
-    )
+def _config() -> dict:
+    """读本插件配置（plugin.config.read 能力，一次取全量）。"""
+    reader = _cap("plugin.config.read")
+    values = (reader() if reader else {}) or {}
+    return {"enabled": bool(values.get("enabled")), "token": values.get("token") or ""}
 
 
-class TeamsAdapter(BasePlatformAdapter):
-    platform = "teams"
+def _set_enabled(enabled: bool) -> None:
+    writer = _cap("plugin.config.write")
+    if writer is not None:
+        writer("enabled", bool(enabled))
 
-    def __init__(self, config: PlatformConfig):
-        super().__init__(config)
-        # SDK 函数内延迟导入（顶层不 eager import，避免污染 gateway 包）
-        from teams_sdk import BotFramework  # noqa
 
-        self._client = BotFramework(
-            app_id=config.token or "",
-            # ...其它字段
-        )
+def _validate() -> tuple:
+    return bool(_config()["token"]), "Token 未配置"
 
-    async def connect(self) -> bool:
-        # 实现 Teams Bot Framework 启动逻辑
-        ...
 
-    async def send_message(self, chat_id: str, text: str) -> SendResult:
-        ...
+class MyAdapter(BasePlatformAdapter):
+    platform_id = "my-platform"   # registry 键
+    name = "My Platform"
 
-    async def disconnect(self) -> None:
-        ...
+    def __init__(self) -> None:
+        super().__init__()
+        self._token = _config()["token"]
+
+    async def connect(self) -> bool: ...
+    async def disconnect(self) -> None: ...
+    async def send(self, chat_id, content, **kwargs): ...
+    async def get_chat_info(self, chat_id): ...
 
 
 def register(registry) -> None:
-    registry.register(GatewayPlatformDef(
-        platform_id="teams",
-        display_name="Microsoft Teams",
-        adapter_factory=lambda cfg: TeamsAdapter(cfg),
-        check_requirements=_check_requirements,
-        config_builder=_build_config,
-        config_writer=lambda cfg: None,  # 自动卡接管写路径，可留空
-        ui_order=50,
-    ))
+    from app.plugins.contracts.gateway_platform import GatewayPlatformDef
+
+    registry.register(
+        GatewayPlatformDef(
+            platform_id="my-platform",
+            display_name="My Platform",
+            adapter_factory=MyAdapter,
+            check_requirements=lambda: True,
+            is_enabled=lambda: _config()["enabled"],
+            set_enabled=_set_enabled,
+            validate=_validate,
+            ui_order=99,
+        )
+    )
 ```
 
----
+manifest 至少声明 `components.gateways` 与 `capabilities: ["plugin.config.read", "plugin.config.write"]`，
+配置字段写 `config_schema`（宿主渲染设置卡，插件自己也从同一份存储读）。
 
 ## 4. SDK deps 自包含指引
 
@@ -213,7 +205,7 @@ if _deps not in _sys.path:
 ### 4.3 SDK 本体延迟导入（历史教训：2026-06-16）
 
 **`gateways/<id>.py` 模块顶层绝不 `import teams_sdk`**。原因：
-- 主程序任意位置 `from app.gateway.base import PlatformConfig` 触发 `app.gateway`
+- 主程序任意位置 `from app.gateway.base import MessageEvent` 触发 `app.gateway`
   包初始化，若包内某适配器顶层 import SDK，SDK 缺失即导致整个 gateway 包加载失败。
 - 第三方插件目录扫描在 `runtime_component_loader` 阶段逐文件 `exec_module`，
   顶层 import 异常即整个根扫描失败。
@@ -311,7 +303,7 @@ default/env），主程序自动渲染设置卡 + `PluginConfigStore` 统一存�
 - [ ] 临时 user 插件根扫到 `teams` def 且 `source == "plugin:gateway-teams"`
 - [ ] `PlatformManager._load_adapters` 注入 `mgr._adapters["teams"]`
 - [ ] 设置面板出现 Teams 卡片，字段与 `config_schema` 一致
-- [ ] 写入 `bot_app_secret` → 重启 → `config_builder()` 读出同值
+- [ ] 写入 `bot_app_secret` → 重启 → `_config()["bot_app_secret"]` 读出同值
 - [ ] SDK 缺失（`deps/` 删除）→ `check_requirements()` 返回 False → manager 跳过且日志记录
 
 ---
@@ -322,8 +314,8 @@ default/env），主程序自动渲染设置卡 + `PluginConfigStore` 统一存�
 
 - `app/plugins/contracts/gateway_platform.py` — `GatewayPlatformDef` 定义
 - `app/plugins/registries/gateway_platform_registry.py` — 进程级单例
-- `app/gateway/manager.py::_load_adapters` — registry 唯一消费方
-- `app/gateway/config.py::GatewayConfigHelper` — 4 方法 registry 分派
+- `plugins/system-im/core/manager.py::_load_adapters` — registry 唯一消费方
+- `plugins/system-im/core/manager.py` — 启用/校验/装载全部走 def 回调（无配置结构）
 - `app/plugins/contracts/plugin_config.py` — E1 config_schema 解析
 
 社区仓参考实现：

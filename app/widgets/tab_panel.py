@@ -50,6 +50,7 @@ from qfluentwidgets import (
 
 from app.utils.app_state import get as _state_get
 from app.utils.app_state import set as _state_set
+from app.utils.color_parse import parse_color as _parse_color_shared
 from app.utils.config import Settings
 from app.utils.design_tokens import (
     Animations,
@@ -87,10 +88,7 @@ def _stable_text_hue(text: str) -> int:
 
 
 # hsl 串（角色胶囊色 ``hsl(204, 65%, 50%)``）：QSS 认，QColor(str) 不认，
-# 必须自己换算成 fromHsl 的 0-359 / 0-255 / 0-255 整数口径。
-_HSL_RE = re.compile(r"hsla?\s*\(\s*([\d.]+)\s*,\s*([\d.]+)%\s*,\s*([\d.]+)%", re.IGNORECASE)
-
-
+# 统一解析已收敛到 app.utils.color_parse.parse_color（语义并集，含 hsl 分支）。
 def _parse_rgba(rgba_str: str) -> _QColor:
     """将 'rgba(r,g,b,a)' / 'hsl(h, s%, l%)' / '#rgb' 字符串解析为 QColor
 
@@ -98,25 +96,7 @@ def _parse_rgba(rgba_str: str) -> _QColor:
     QColor 会退成黑色；QSS 能解析 hsl 而 QPainter 不能，这是两套解析器。
     之前缺这条分支，折叠态团队角色块全部退成灰色兜底（128,128,128）。
     """
-    if not isinstance(rgba_str, str):
-        return _QColor(128, 128, 128)
-    try:
-        if rgba_str.startswith("rgba("):
-            parts = rgba_str.strip("rgba() ").split(",")
-            r, g, b = int(parts[0]), int(parts[1]), int(parts[2])
-            a_raw = parts[3].strip()
-            a = int(float(a_raw) * 255) if float(a_raw) <= 1 else int(a_raw)
-            return _QColor(r, g, b, a)
-        if rgba_str.lstrip().lower().startswith("hsl"):
-            m = _HSL_RE.match(rgba_str.strip())
-            if m:
-                h = int(round(float(m.group(1)))) % 360
-                s = int(round(float(m.group(2)) * 255 / 100))
-                light = int(round(float(m.group(3)) * 255 / 100))
-                return _QColor.fromHsl(h, max(0, min(255, s)), max(0, min(255, light)))
-    except Exception:
-        pass
-    return _QColor(rgba_str)
+    return _parse_color_shared(rgba_str, fallback="#808080")
 
 
 # 预解析常用颜色（首次导入时计算一次，后续通过 _invalidate_cached_colors() 刷新）
@@ -140,14 +120,6 @@ _TREE_INDENT_TAB = 14
 _TREE_INDENT_SESSION = 42
 # 单个项目下最多渲染的非置顶历史会话条数（侧栏窄，防止一次性构建上百行；置顶不受限）
 _TREE_MAX_SESSIONS = 50
-
-
-# 顶部标题文案随模式切换（列表模式=「对话页」/树模式=「工作区」）
-# 顶栏改版后暂无消费方（「新建对话」行替代标题），保留常量供模式语义参考
-_PANEL_MODE_TITLES = {
-    PANEL_MODE_LIST: "对话页",
-    PANEL_MODE_TREE: "工作区",
-}
 
 
 # 项目头像（缩写 + 稳定色）缓存：颜色由 crc32(name) 决定，与会话无关，可安全缓存。

@@ -517,6 +517,10 @@ class UIEngine(BaseEngine):
             # ⚠️ metadata.pop 必须在主线程（避免与 worker 线程竞态）
             pending_cmd = session.metadata.pop("_pending_command", None) if session else None
             pending_skill = session.metadata.pop("_pending_skill", None) if session else None
+            # 引用历史会话（@ 卡片「会话」分类）：同款 metadata pending 机制，
+            # 由 inject_session_reference hook 加载并浓缩注入（只保留用户问题
+            # 与助手正式回答，剔除工具/思考内容）
+            pending_session_refs = session.metadata.pop("_pending_session_refs", None) if session else None
 
             pre_user_ctx = {
                 "message": user_text,
@@ -528,6 +532,8 @@ class UIEngine(BaseEngine):
                 pre_user_ctx["pending_command"] = pending_cmd
             if pending_skill:
                 pre_user_ctx["pending_skill"] = pending_skill
+            if pending_session_refs:
+                pre_user_ctx["pending_session_refs"] = pending_session_refs
 
         post_user_ctx = {"message": user_text, "session_id": _session_id} if hook_mgr else None
         if post_user_ctx and _user_content is not None and _user_content != user_text:

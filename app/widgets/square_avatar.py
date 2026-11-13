@@ -10,6 +10,7 @@ from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QColor, QPainter
 from PyQt5.QtWidgets import QWidget
 
+from app.utils.color_parse import parse_color as _parse_color_shared
 from app.utils.design_tokens import scale_font_size
 from app.utils.project_meta import extract_project_initials
 from app.utils.utils import get_unified_font
@@ -39,19 +40,7 @@ class _SquareAvatar(QWidget):
     @staticmethod
     def _parse_rgba(rgba_str: str) -> QColor:
         """解析 "rgba(r,g,b,a)" 字符串为 QColor，失败时返回灰色"""
-        if rgba_str.startswith("#"):
-            return QColor(rgba_str)
-        try:
-            import re
-
-            m = re.match(r"rgba?\s*\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)(?:\s*,\s*(\d+))?\s*\)", rgba_str)
-            if m:
-                r, g, b = int(m.group(1)), int(m.group(2)), int(m.group(3))
-                a = int(m.group(4)) if m.group(4) else 255
-                return QColor(r, g, b, a)
-        except Exception:
-            pass
-        return QColor(128, 128, 128)  # fallback 灰色
+        return _parse_color_shared(rgba_str, fallback="#808080")
 
     def set_project(self, name: str, color: str):
         """更新项目名和颜色（用于面包屑等动态场景）；字色恒白，见 __init__ 注释"""

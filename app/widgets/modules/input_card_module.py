@@ -33,7 +33,6 @@ class InputCardModule(UIModule):
         from PyQt5.QtWidgets import QSizePolicy, QVBoxLayout, QWidget
         from qfluentwidgets import setFont
 
-        from app.utils.config import Settings as _Cfg
         from app.utils.design_tokens import scale_font_size
         from app.widgets.bottom_input_area import SendableTextEdit
         from app.widgets.cards import ContainerType
@@ -126,6 +125,8 @@ class InputCardModule(UIModule):
         host.input_area.atTriggered.connect(host._on_at_triggered)
         host.input_area.atDismissed.connect(host._on_at_dismissed)
         host.input_area.files_dropped.connect(host._on_files_dropped)
+        # @路径 + 空格确认折叠 → 只登记附件（正文胶囊已由输入框自行插入）
+        host.input_area.fileMentionConfirmed.connect(host._on_file_mention_confirmed)
         # 粘贴图片异步落盘完成 → 重建芯片（芯片创建早于文件写入，避免"文件不存在"误报）
         host.input_area.paste_image_saved.connect(host._rebuild_attachment_chips)
         host.input_area.enteringHistoryMode.connect(host._on_entering_history_mode)
@@ -165,6 +166,7 @@ class InputCardModule(UIModule):
         host.input_area.set_file_mention_card(host._file_mention_card)
         host._file_mention_card.fileSelected.connect(host._on_file_mention_selected)
         host._file_mention_card.mentionSelected.connect(host._on_mention_selected)
+        host._file_mention_card.sessionSelected.connect(host._on_session_selected)
         mgr.register_card(
             host._window_id,
             ContainerType.COMPLETION,
@@ -238,11 +240,4 @@ class InputCardModule(UIModule):
         host._pending_send_after_truncation = False
         host._pending_send_user_text = None  # 截断后发送的用户消息文本（用于指纹比对）
 
-        # （内置命令已在上方注册）更新命令 --model= 参数描述
-        # /subagents 的描述由 system-subagent 插件在注册 handler 时自己回填
-        host._update_title_gen_param_description()
-
-        # 监听配置变更，配置同步时自动刷新命令卡参数描述和 UI
-        # （子智能体默认模型的描述刷新由插件监听，主程序不持有该业务）
-        _cfg = _Cfg.get_instance()
-        _cfg.llm_title_gen_default_model.valueChanged.connect(host._on_title_gen_model_config_changed)
+        # （内置命令已在上方注册）命令 --model= 参数描述由各插件在注册 handler 时自回填

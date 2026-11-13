@@ -1215,14 +1215,12 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
         self._resize_timer.setInterval(100)
         self._resize_timer.timeout.connect(self._on_resize_finished)
 
-        # ── splitter 拖拽/动画防抖：松手后 ~120ms 恢复 _content_area 绘制 ──
-        # 超时回调合并 _content_area.setUpdatesEnabled(True) + _tab_panel.set_resizing(False)。
+        # ── splitter 拖拽/动画防抖：松手后 ~120ms 落定折叠态 + 恢复节流 ──
+        # 超时回调合并折叠态落定 + _tab_panel.set_resizing(False)。
         self._splitter_idle_timer = QTimer(self)
         self._splitter_idle_timer.setSingleShot(True)
         self._splitter_idle_timer.setInterval(120)
         self._splitter_idle_timer.timeout.connect(self._on_splitter_idle)
-        # 拖拽首帧冻结标记：本次拖拽会话仅冻结一次，松手(device idle)后复位
-        self._splitter_dragging: bool = False
 
         # ── 侧边栏内 left 卡片区（嵌入 sidebarSplitter）──
         # 卡片打开前的 TabPanel frame 宽（卡片关闭时恢复）与「卡片占位期间」标记
@@ -1301,8 +1299,8 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
         # 修复多 tab 下后建窗口静默覆盖先建窗口的问题（之前由 MainWidget
         # 在 _init_llm_api_service 注册 handler，绑死后建窗口的 widget；现改为
         # 每次调用实时查 _tab_panel.active_index 对应的活跃 ChatWindow）
-        from app.gateway.local_service.session_handler import APISessionHandler
-        from app.gateway import LLMAPIService
+        from app.core.local_service.session_handler import APISessionHandler
+        from app.core.local_service import LLMAPIService
 
         def _active_main_widget():
             idx = self._tab_panel.active_index if self._tab_panel is not None else -1
@@ -3480,6 +3478,11 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
                 _sizes_now = self._splitter.sizes()
                 _total_now = sum(_sizes_now)
                 _wb_now = _sizes_now[2] if len(_sizes_now) >= 3 else 0
+                # 工作台不可见（刚收/本就收着但布局未刷新）时 sizes 报旧值，
+                # 按 0 参与：判定「收完还放不放得下」而非「虚高的重复触发」
+                _wb_frame = getattr(self, "_workbench_frame", None)
+                if _wb_frame is not None and not _wb_frame.isVisible():
+                    _wb_now = 0
                 if _wb_now > 0 and _total_now - _wb_now - _MIN_CHAT_WIDTH < (
                     _COLLAPSED_PANEL_WIDTH + _FRAME_PADDING_X + card_w
                 ):
@@ -3557,6 +3560,14 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
         try:
             sizes = self._splitter.sizes()
             wb_w = sizes[2] if len(sizes) >= 3 else 0
+            # ★ 工作台不可见即不占宽（含刚被挤压折叠、布局未刷新的瞬态）：
+            #   hide 后 QSplitter 的 sizes() 在下一轮布局激活前仍报隐藏前
+            #   旧值，照抄会把卡片 cap 钳在旧工作台占位上，让出的空间全落
+            #   对话区——表现为「挤压折叠右侧工作台后，卡片没有展开到
+            #   应有宽度而是停留在窄条」。
+            _wb_frame = getattr(self, "_workbench_frame", None)
+            if _wb_frame is not None and not _wb_frame.isVisible():
+                wb_w = 0
             total = sum(sizes) if sizes else self.width()
             free = total - wb_w
             cap = max(base + _LEFT_CARD_MIN_VISIBLE_WIDTH, free - _MIN_CHAT_WIDTH)
@@ -4772,10 +4783,8 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
           2. 按松手时的真实宽度决定目标态——低于折叠线则动画收到收起宽，
              否则动画恢复到当前拖出的宽度。用动画而非瞬切，保持与按钮切换
              一致的手感。
-        合并恢复 _content_area.setUpdatesEnabled(True) 与
-        _tab_panel.set_resizing(False)，复位拖拽首帧标记供下次拖拽重新冻结。
+        合并恢复 _tab_panel.set_resizing(False) 与卡片 WebView 预览复位。
         """
-        self._splitter_dragging = False
         panel = getattr(self, "_tab_panel", None)
         # ── 卡片打开期拖主把手：增量全部转入卡片区（TabPanel 锁定收起宽）──
         # 用户拖出的 frame 宽 pos 已在 _on_splitter_manually_moved 登记
@@ -4855,15 +4864,13 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
         _cfg = Settings.get_instance()
         if panel is not None and _cfg.ui_sidebar_collapsed.value != panel._collapsed:
             _cfg.ui_sidebar_collapsed.value = panel._collapsed
-        # ── #14 收尾：折叠/展开动画仍运行则跳过解冻，交 #4 动画 finally 统一恢复 ──
-        # 防「拖拽跨折叠阈值触发动画 + 120ms idle timer 提前解冻」极端路径尾段
-        # 额外 WebView 重绘。动画收尾由 _on_sidebar_anim_finished(try/finally) 恢复
+        # ── #14 收尾：折叠/展开动画仍运行则跳过恢复，交 #4 动画 finally 统一恢复 ──
+        # 动画收尾由 _on_sidebar_anim_finished(try/finally) 恢复
         # _content_area(setUpdatesEnabled True) 与 _set_cards_resize_preview_mode(False)。
-        # _splitter_dragging 已先行复位，后续 splitterMoved 可重新冻结下一拖拽会话。
         self._finish_splitter_idle()
 
     def _finish_splitter_idle(self):
-        """splitter 拖拽会话收尾：动画运行则跳过，否则解冻绘制 + 复位节流"""
+        """splitter 拖拽会话收尾：动画运行则跳过，否则恢复绘制兜底 + 复位节流"""
         if self._sidebar_anim is not None and self._sidebar_anim.state() == QVariantAnimation.Running:
             return
         if hasattr(self, "_content_area"):
@@ -4923,14 +4930,13 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
             self._left_card_frame_target_w = max(_COLLAPSED_PANEL_WIDTH + _FRAME_PADDING_X, int(pos))
         # ★ 开启拖拽会话：拖拽期 resizeEvent 只跟随 UI 形态，不 emit 折叠信号
         panel.set_dragging_splitter(True)
-        # ── P0 性能优化 OPT-2：拖拽首帧冻结 _content_area 重绘，防抖 timer 松手恢复 ──
-        # 仅首帧冻结一次（_splitter_dragging 未置位时）；_tab_panel 全程保持启用，
-        # 侧栏 UI 切换/展开逻辑仍须响应。每次 splitterMoved 重置 ~120ms 防抖 timer，
-        # 松手后由 _on_splitter_idle 统一恢复绘制，抑制每帧全量重绘/reflow 致卡顿。
-        if not self._splitter_dragging:
-            self._splitter_dragging = True
-            if hasattr(self, "_content_area"):
-                self._content_area.setUpdatesEnabled(False)
+        # ── 视觉修复：拖拽期不再冻结 _content_area 重绘（与 #31 动画期实时显示对齐）──
+        # 旧 OPT-2 首帧冻结已移除：拖动中 layout 每帧重排使全区域失效，
+        # 冻结期间失效区域只显示背景色，用户看到「对话区控件消失」。
+        # WebView 重排已由 resize 预览模式（MainWidget.resizeEvent）兑底，
+        # 剩余 QWidget 实时重绘成本可控，可见性优先。
+        # 每次 splitterMoved 重置 ~120ms 防抖 timer，松手后由
+        # _on_splitter_idle 统一落定折叠态。
         if hasattr(self, "_splitter_idle_timer"):
             self._splitter_idle_timer.start()
 
@@ -7084,10 +7090,11 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
         TabManagerWindow._instance = None
         # ★ 停止应用级服务（Gateway 平台 WebSocket 断连 + 插件 watcher 线程）
         try:
-            from app.core.services.gateway_service import GatewayService
+            from app.core.services.gateway_access import shutdown_gateway_service
             from app.core.services.plugin_host_service import PluginHostService
 
-            GatewayService.get_instance().stop()
+            # 网关实现归 system-im 插件：停平台连接 + 关事件循环线程 + 释放引擎
+            shutdown_gateway_service()
             PluginHostService.get_instance().stop()
         except Exception:
             pass
@@ -7101,15 +7108,7 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
         except Exception as e:
             logger.warning(f"[TabManager] cleanup LspManager.shutdown 失败: {e}")
         try:
-            from app.gateway.manager import get_platform_manager
-
-            mgr = get_platform_manager()
-            if mgr is not None:
-                mgr.shutdown()
-        except Exception as e:
-            logger.warning(f"[TabManager] cleanup PlatformManager.shutdown 失败: {e}")
-        try:
-            from app.gateway import stop_llm_api_service
+            from app.core.local_service import stop_llm_api_service
 
             stop_llm_api_service()
         except Exception as e:

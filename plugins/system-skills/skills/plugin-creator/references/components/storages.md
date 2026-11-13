@@ -23,5 +23,5 @@ your-plugin/
 ### 参考
 
 - 完整案例：`drifox-plugins2` 仓库 `plugins/jsonl-storage/`（逐方法对齐 sqlite 的活例）
-- 消费方接线：`app/utils/history_manager.py` / `app/core/memory_manager.py` / `app/gateway/local_service/session_handler.py`
+- 消费方接线：`app/utils/history_manager.py` / `app/core/memory_manager.py` / `app/core/local_service/session_handler.py`
 - 注册表：`app/plugins/registries/storage_registry.py`

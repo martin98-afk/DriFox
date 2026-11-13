@@ -486,22 +486,6 @@ def _parse_command_type(type_str: str) -> CommandType:
     return mapping.get(type_str, CommandType.PROMPT)
 
 
-def _load_commands_from_dir(commands_dir: Path) -> list:
-    """从目录加载所有命令文件"""
-    if not commands_dir.exists():
-        logger.warning(f"[BuiltinCommands] Commands directory not found: {commands_dir}")
-        return []
-
-    commands = []
-    for md_file in commands_dir.glob("*.md"):
-        cmd = _load_command_file(md_file)
-        if cmd:
-            commands.append(cmd)
-            logger.info(f"[BuiltinCommands] Loaded command: /{cmd['name']} (type={cmd['type']})")
-
-    return commands
-
-
 # ============================================================
 # 注册主入口
 # ============================================================

@@ -94,11 +94,12 @@ app/tools/
 | `bottom_input_area.py` | 输入区 |
 | `cards/` `modules/` | 卡片组件 / 主窗口拆分模块 |
 
-## 六、`plugins/` 插件族（24 个）
+## 六、`plugins/` 插件族（25 个）
 
 | 插件 | 提供组件 |
 |------|---------|
-| `system-tools` | `tools/` |
+| `system-interact` | `tools/` |
+| `system-title-generator` | `ui/`（订阅 title.request 事件，调 model.complete 生成会话标题，模型可在插件设置选） |
 | `artifacts-manager` | `ui/`（工作台产物页，`register_workbench_tab` 通道） |
 | `system-hooks` | `hooks/` |
 | `system-hook-policies` | `hook_policies/` |
@@ -114,6 +115,8 @@ app/tools/
 | `system-team-templates` | `team_templates/` |
 | `system-mcp` | `.mcp.json` |
 | `system-cleaner` | `ui/`（缓存清理） |
+
+> 标题面能力 `session.title.commit` 的 provider 在 `app/plugins/capabilities/providers/title_core.py`；`title.request` 事件由宿主 `_publish_title_request()` 发布。
 | `assistant_hub` | 人格 / 记忆 / Dream 编译（独立大插件） |
 | `agent_trace` `context-usage-stats` `file-tree` `plugin-marketplace` `share-history` `shortcut-manager` `welcome_changelog` | 功能插件 |
 

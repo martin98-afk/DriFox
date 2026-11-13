@@ -118,3 +118,24 @@ def test_complete_swallows_call_error(calls, monkeypatch):
     host = _Host(cfg={"模型名称": "m", "API_URL": "https://x"})
 
     assert ui_core._model_complete(host)("q") == ""
+
+
+def test_complete_passes_content_blocks_through(calls, monkeypatch):
+    """多模态：content blocks 列表原样透传，不被 str() 拍平成字面量。"""
+    monkeypatch.setattr("app.core.modelmeta.provider_profile.resolve_extra_headers", lambda *a, **k: {})
+    host = _Host(cfg={"模型名称": "vision-model", "API_URL": "https://x"})
+    blocks = [
+        {"type": "text", "text": "这张图里是什么"},
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}},
+    ]
+
+    assert ui_core._model_complete(host)(blocks) == '{"answers": []}'
+    assert calls["text"]["messages"][-1] == {"role": "user", "content": blocks}
+
+
+def test_complete_rejects_unsupported_prompt_type(calls):
+    host = _Host(cfg={"模型名称": "m", "API_URL": "https://x"})
+
+    assert ui_core._model_complete(host)({"not": "content blocks"}) == ""
+    assert ui_core._model_complete(host)([]) == ""
+    assert "client" not in calls

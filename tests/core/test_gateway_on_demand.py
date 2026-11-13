@@ -31,7 +31,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from app.core.services.gateway_service import GatewayService  # noqa: E402
+from system_im_service import GatewayService  # noqa: E402
 
 
 @pytest.fixture()
@@ -132,7 +132,7 @@ class TestEnabledPlatform:
             def start(self):
                 captured["started"] = True
 
-        import app.core.services.gateway_service as gs_mod
+        import system_im_service as gs_mod
 
         monkeypatch.setattr(gs_mod.threading, "Thread", _FakeThread)
         fresh_service._prebuild_components_background()
@@ -155,7 +155,7 @@ class TestSelfHealPath:
         fresh_service._tool_executor = fake_executor
         fresh_service._agent_manager = fake_am
 
-        import app.core.engines.gateway as gw_mod
+        import system_im_engine as gw_mod
 
         monkeypatch.setattr(
             gw_mod.GatewayEngine,

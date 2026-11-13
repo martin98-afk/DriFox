@@ -108,10 +108,47 @@ def _migrate_theme_mode_entry(instance) -> bool:
     return _migrate_theme_mode(instance)
 
 
+_LEGACY_TITLE_GEN_CONFIG_KEY = ("LLM", "TitleGenDefaultModel")
+_TITLE_GEN_PLUGIN_NAME = "system-title-generator"
+_TITLE_GEN_MODEL_KEY = "title_model"
+
+
+def _migrate_title_gen_default_model(instance) -> bool:
+    """旧全局标题生成模型 → system-title-generator 插件设置（一次性）。
+
+    值为空或插件已配置时不迁移；写入成功后由 instance.save() 全量回写，
+    旧键因不再是 ConfigItem 而自然消失。迁移失败不阻断启动。
+    """
+    path = getattr(instance, "file", None)
+    if path is None or not path.exists():
+        return False
+    try:
+        import orjson as json
+
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        legacy = str((raw.get("LLM") or {}).get("TitleGenDefaultModel") or "").strip()
+        if not legacy:
+            return False
+        from app.plugins.managers.plugin_config_store import PluginConfigStore
+
+        store = PluginConfigStore()
+        if str(store.get(_TITLE_GEN_PLUGIN_NAME, _TITLE_GEN_MODEL_KEY) or "").strip():
+            return False
+        if not store.set_values(_TITLE_GEN_PLUGIN_NAME, {_TITLE_GEN_MODEL_KEY: legacy}):
+            return False
+        instance.save()
+        logger.info(f"[配置迁移] 标题生成默认模型已迁入 {_TITLE_GEN_PLUGIN_NAME}.{_TITLE_GEN_MODEL_KEY}")
+        return True
+    except Exception:
+        logger.exception("[配置迁移] 标题生成默认模型迁移失败（已跳过）")
+        return False
+
+
 _MIGRATIONS: List[Callable[[Any], bool]] = [
     _migrate_saved_providers_entry,
     _migrate_remove_opencode_free_provider_entry,
     _migrate_theme_mode_entry,
+    _migrate_title_gen_default_model,
 ]
 
 
@@ -726,7 +763,7 @@ class Settings(QConfig):
     auto_start = ConfigItem("General", "AutoStart", False, BoolValidator())
 
     # 版本信息
-    current_version = "v0.7.1"
+    current_version = "v0.7.2"
     # 构建变体：pyqt5 | pyside6。同一 Release 同时挂两套安装包，更新器据此选包，
     # 插件市场据此选官方插件库分支（pyqt5 → main，pyside6 → pyside6）。
     # CI 构建期由 release.yml 的 Inject build_variant 步骤按 matrix 覆写，缺省取本分支值。
@@ -799,8 +836,6 @@ class Settings(QConfig):
     llm_selected_model = ConfigItem("LLM", "SelectedModel", "")
     # 子智能体默认模型（用于 subagent_para，空字符串表示使用主模型）
     llm_subagent_default_model = ConfigItem("LLM", "SubagentDefaultModel", "")
-    # 标题生成默认模型（用于 topic_summary，空字符串表示使用主模型）
-    llm_title_gen_default_model = ConfigItem("LLM", "TitleGenDefaultModel", "")
     # 启用的技能列表
     llm_enabled_skills = ConfigItem(
         "LLM",

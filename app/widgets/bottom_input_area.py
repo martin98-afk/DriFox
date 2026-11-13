@@ -205,7 +205,6 @@ PLACEHOLDER_TIPS = [
     "/theme 主题配色 /compact 压缩上下文",
     "/subagents 启动子智能体任务",
     "/team 团队协作模式启动",
-    "/title-gen 自动生成会话标题",
     "/receive-review 接收外部审查意见",
     "/finish-branch 完成分支并合并",
     "/webresearch 联网搜索研究",
@@ -235,6 +234,7 @@ class SendableTextEdit(TextEdit):
     slashShowHint = pyqtSignal(str, str)  # cmd_name, selected_display_type
     atTriggered = pyqtSignal(str)  # 检测到 @ 触发，携带查询文本
     atDismissed = pyqtSignal()  # @ 触发结束
+    fileMentionConfirmed = pyqtSignal(str)  # @路径 + 空格确认：携带绝对路径，供上层登记附件
     files_dropped = pyqtSignal(list)  # list[str] 拖入/粘贴的文件路径
     paste_image_saved = pyqtSignal(str)  # 粘贴图片后台落盘完成（跨线程刷新附件芯片用）
     enteringHistoryMode = pyqtSignal()  # 即将进入历史浏览模式（main_widget 需保存当前附件）
@@ -259,6 +259,7 @@ class SendableTextEdit(TextEdit):
         self._ime_composing = False  # IME 输入法组合状态
         self._slash_trigger_pos = -1  # / 触发位置
         self._at_trigger_pos = -1  # @ 触发位置
+        self._collapsing_mention = False  # 正在把 @路径 折叠为胶囊（阻止 textChanged 重入）
         self._setting_history_text = False  # 正在 _set_history_text 中，阻止 _on_text_changed 误触发 reset
         self._suppress_slash_trigger = False  # 切换历史时临时阻止 / 触发
         # 文本 → 附件 反向同步（详见 _sync_placeholder_removals）
@@ -489,10 +490,30 @@ class SendableTextEdit(TextEdit):
         """注入文件提及卡片引用（由 main_widget 创建并注册）"""
         self._file_mention_card_ref = card
         card.dismissed.connect(self._on_card_dismissed)
+        # 目录进/退联动：卡片浏览层变化 → 同步输入框 @ 后文本（如 "src/sub/"）
+        card.browseChanged.connect(self.set_at_query)
 
     def _get_file_mention_card(self):
         """获取文件提及卡片引用"""
         return self._file_mention_card_ref
+
+    def set_at_query(self, text: str):
+        """@ 卡片目录浏览联动：把 @ 后到光标的文本替换为指定值
+
+        FileMentionCard 进入/退出目录时经 browseChanged 驱动（参数如 "src/sub/"；
+        退回根层为 ""）。文本变化经 textChanged → _on_at_trigger_check →
+        atTriggered 闭环回卡片（尾缀 / 语义 = 浏览该层），双向同步且幂等。
+        """
+        if self._at_trigger_pos < 0:
+            return
+        at_pos = self._at_trigger_pos
+        cursor = self.textCursor()
+        end = max(cursor.position(), at_pos + 1)
+        cursor.setPosition(at_pos + 1)
+        cursor.setPosition(end, QTextCursor.KeepAnchor)
+        cursor.insertText(text)
+        # insertText 后光标已停在插入文本之后，与 @ 卡片高亮区间保持一致
+        self.setTextCursor(cursor)
 
     def _on_slash_trigger_check(self):
         """检测 / 触发——仅在开头（位置0）的 / 触发命令卡片，支持节流
@@ -707,6 +728,9 @@ class SendableTextEdit(TextEdit):
         """
         if self._ime_composing:
             return
+        if self._collapsing_mention:
+            # 折叠自身引发的 textChanged：此时 @ 已被胶囊替换，重扫只会误判
+            return
 
         try:
             # ⚠ 必须用原始文档文本（胶囊=U+FFFC 占 1 字符），与 textCursor 坐标
@@ -763,6 +787,9 @@ class SendableTextEdit(TextEdit):
             # 空白终止：@ 后的过滤词不允许包含空白。已完成的提及
             # （如胶囊展开的 "@助手名 "）之后的正文不应再触发补全
             if any(ch in query for ch in (" ", "\t", "\u3000")):
+                # 空格即确认：@ 后文本是真实存在的路径时折叠成胶囊并登记附件
+                # （与 /cmd 空格的 _collapse_command_token 对称），否则保持字面
+                self._collapse_file_mention_token(at_pos, cursor_pos)
                 self._cancel_at_throttle()
                 self._at_trigger_pos = -1
                 if file_card and file_card.is_card_visible:
@@ -882,6 +909,50 @@ class SendableTextEdit(TextEdit):
         self._cancel_at_throttle()
         self._at_trigger_pos = -1
         self.setFocus(Qt.OtherFocusReason)
+
+    def _collapse_file_mention_token(self, at_pos: int, cursor_pos: int) -> bool:
+        """「@相对路径 + 空白」空格确认 → 折叠为一枚文件胶囊
+
+        触发时机：_on_at_trigger_check 检测到 @ 后出现空白。路径按卡片
+        root_dir 解析，真实存在才折叠并 emit ``fileMentionConfirmed``
+        （上层登记附件）；不存在保持字面文本，只关卡片——不做模糊匹配，
+        避免把「@请你分析」这类正文误折叠成附件。
+
+        与 /cmd 的 _collapse_command_token 对称：手敲确认走这里；卡片选中
+        走 insert_file_mention（直接插入，不经过本方法）。
+
+        at_pos / cursor_pos 均为文档域位置（胶囊占 1 字符）。
+        """
+        if self._collapsing_mention or at_pos < 0:
+            return False
+        file_card = self._get_file_mention_card()
+        root_dir = getattr(file_card, "root_dir", "") if file_card is not None else ""
+        if not root_dir:
+            return False
+        raw = TextEdit.toPlainText(self)[at_pos + 1 : cursor_pos]
+        token = raw.rstrip(" \t\u3000")
+        if not token:
+            return False
+        path = token if os.path.isabs(token) else os.path.join(root_dir, token)
+        path = os.path.normpath(path)
+        if not os.path.exists(path):
+            return False
+
+        end = at_pos + 1 + len(token)  # @ 后路径的结束位置（尾随空白之前）
+        self._collapsing_mention = True
+        try:
+            ins = QTextCursor(self.document())
+            ins.setPosition(at_pos)
+            ins.setPosition(end, QTextCursor.KeepAnchor)
+            ins.insertText(_OBJECT_REPLACEMENT, self._make_mention_format(path))
+            # 光标原位：区间由 len(token)+1 字符缩成 1 字符，整体左移 len(token)
+            cursor = self.textCursor()
+            cursor.setPosition(cursor_pos - len(token))
+            self.setTextCursor(cursor)
+        finally:
+            self._collapsing_mention = False
+        self.fileMentionConfirmed.emit(path)
+        return True
 
     # ==================== 命令文本插入 ====================
 
@@ -1085,6 +1156,78 @@ class SendableTextEdit(TextEdit):
         if not name:
             return False
         full = f"/{name}"
+        ins = QTextCursor(self.document())
+        ins.setPosition(check_pos)
+        ins.setPosition(check_pos + 1, QTextCursor.KeepAnchor)
+        # 干净 charFormat：防胶囊格式残留污染解封后的文本
+        ins.insertText(full, QTextCharFormat())
+        new_pos = check_pos + len(full) if backspace else check_pos
+        cursor.setPosition(new_pos)
+        self.setTextCursor(cursor)
+        return True
+
+    def _file_mention_at(self, doc_pos: int) -> Optional[str]:
+        """doc_pos 所在 fragment 是文件胶囊时返回绝对路径，否则 None"""
+        if doc_pos < 0:
+            return None
+        block = self.document().begin()
+        while block.isValid():
+            if block.position() > doc_pos:
+                break
+            it = block.begin()
+            while not it.atEnd():
+                frag = it.fragment()
+                if not frag.isValid():
+                    it += 1
+                    continue
+                if frag.position() <= doc_pos < frag.position() + frag.length():
+                    if self._is_mention_frag(frag):
+                        fmt = frag.charFormat()
+                        if fmt.objectType() == _FILE_MENTION_TYPE:
+                            return fmt.stringProperty(_FILE_MENTION_PATH_PROP) or ""
+                    return None
+                it += 1
+            block = block.next()
+        return None
+
+    def _unfold_file_mention_if_at_cursor(self, backspace: bool) -> bool:
+        """光标紧贴文件胶囊按 Backspace/Delete 时解封为 "@相对路径"
+
+        与命令胶囊解封同构：第一次只解封（胶囊 → 纯文本，不删字），再按才
+        逐字删除。解封后的 textChanged 会走 _on_at_trigger_check 重开文件卡片，
+        同时附件反向同步移除 chip —— 回到「已选但未确认」的状态。
+
+        回填相对路径（相对卡片 root_dir），让卡片能按路径精确定位到该文件；
+        工作区外路径回填绝对路径，盘符不同（Windows）也走绝对路径。
+
+        backspace=True：光标在胶囊后，解封后光标落在文本尾；
+        backspace=False：光标在胶囊前（Delete），解封后光标原地。
+        """
+        cursor = self.textCursor()
+        if cursor.hasSelection():
+            return False  # 用户明确选了一段，交给默认删除行为
+        check_pos = cursor.position() - 1 if backspace else cursor.position()
+        path = self._file_mention_at(check_pos)
+        if not path:
+            return False
+        file_card = self._get_file_mention_card()
+        root_dir = getattr(file_card, "root_dir", "") if file_card is not None else ""
+        rel = ""
+        if root_dir:
+            try:
+                rel = os.path.relpath(path, root_dir)
+            except ValueError:
+                rel = path  # Windows 跨盘
+            if rel.startswith(".."):
+                rel = path  # 工作区外：相对路径回不到根，用绝对路径
+        else:
+            rel = path
+        full = "@" + rel.replace("\\", "/")
+        # @ 前不是单词边界（中文紧邻、句读）时补一个空格：否则
+        # _on_at_trigger_check 的边界判定拒绝这个 @，卡片不会重开
+        text = TextEdit.toPlainText(self)
+        if check_pos > 0 and text[check_pos - 1] not in (" ", "\n", "\t", "\r"):
+            full = " " + full
         ins = QTextCursor(self.document())
         ins.setPosition(check_pos)
         ins.setPosition(check_pos + 1, QTextCursor.KeepAnchor)
@@ -2037,10 +2180,15 @@ class SendableTextEdit(TextEdit):
                 event.accept()
                 return
 
-        # 命令胶囊解封：Backspace/Delete 第一次只解封为纯文本（不删字），
-        # 再按才逐字删除；无胶囊紧贴光标时返回 False 走默认行为
+        # 胶囊解封：Backspace/Delete 第一次只解封为纯文本（不删字），
+        # 再按才逐字删除；无胶囊紧贴光标时返回 False 走默认行为。
+        # 命令 → "/cmd" 回命令列表；文件 → "@相对路径" 回文件卡片
         if event.key() in (Qt.Key_Backspace, Qt.Key_Delete) and not event.modifiers():
-            if self._unfold_command_if_at_cursor(backspace=event.key() == Qt.Key_Backspace):
+            backspace = event.key() == Qt.Key_Backspace
+            if self._unfold_command_if_at_cursor(backspace=backspace):
+                event.accept()
+                return
+            if self._unfold_file_mention_if_at_cursor(backspace=backspace):
                 event.accept()
                 return
 
@@ -2083,19 +2231,48 @@ class SendableTextEdit(TextEdit):
         # 文件提及卡片可见时，优先处理导航
         file_card = self._get_file_mention_card()
         if file_card and file_card.is_card_visible and not in_history_mode:
-            if event.key() == Qt.Key_Down:
-                if file_card.select_next():
+            mods = event.modifiers()
+            key = event.key()
+            handled = False
+            if key in (Qt.Key_Up, Qt.Key_Down) and mods & Qt.ControlModifier:
+                # 分组跳转：无论是否跨到新组都消费按键，否则会漏到输入框的
+                # Ctrl+↑↓（历史会话切换）分支
+                file_card.select_group(1 if key == Qt.Key_Down else -1)
+                event.accept()
+                return
+            if key == Qt.Key_Down:
+                handled = file_card.select_next()
+            elif key == Qt.Key_Up:
+                handled = file_card.select_prev()
+            elif key == Qt.Key_PageDown and not mods:
+                # 跨页：按卡片可视行数前进（大目录/搜索结果里替掉拖滚动条）
+                handled = file_card.select_page(1)
+            elif key == Qt.Key_PageUp and not mods:
+                handled = file_card.select_page(-1)
+            elif key == Qt.Key_Home and not mods:
+                # Home/End 在卡片可见期间归卡片（@ 选文件时输入框内容很短，
+                # 行首/行尾编辑需求让位于列表导航）；无修饰才抢，Ctrl+Home 仍归输入框
+                handled = file_card.select_edge(first=True)
+            elif key == Qt.Key_End and not mods:
+                handled = file_card.select_edge(first=False)
+            if handled:
+                event.accept()
+                return
+            if key in (Qt.Key_Return, Qt.Key_Enter, Qt.Key_Tab):
+                # Tab 优先用于「进入目录」：当前选中目录项 → 进入其下一层列表
+                # （DSH 式目录导航，仅浏览模式目录项可进入）
+                if key == Qt.Key_Tab and file_card.enter_selected_dir():
                     event.accept()
                     return
-            elif event.key() == Qt.Key_Up:
-                if file_card.select_prev():
-                    event.accept()
-                    return
-            elif event.key() in (Qt.Key_Return, Qt.Key_Enter, Qt.Key_Tab):
                 file_card.select_current()
                 event.accept()
                 return
-            elif event.key() == Qt.Key_Escape:
+            if key == Qt.Key_Escape:
+                # 两层退出：浏览态深层先回上一层（输入框 @ 后文本随 browseChanged
+                # 回写），根层或搜索态才关卡片
+                if file_card.go_up():
+                    event.accept()
+                    return
                 file_card.dismiss()
                 self.atDismissed.emit()
                 event.accept()

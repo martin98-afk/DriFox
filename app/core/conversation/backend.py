@@ -18,7 +18,6 @@ import orjson as json
 from loguru import logger
 from PyQt5.QtCore import QObject, QThreadPool, pyqtSignal, QTimer
 
-from app.constants import IMAGE_EXTENSIONS
 
 # Auto-compact 防重复触发冷却（秒）
 _AUTO_COMPACT_COOLDOWN = 30.0
@@ -141,46 +140,6 @@ def _inject_hook_to_session(session, event_name: str, output: str, status_messag
     # [PERF T33] 唯一绕过 ChatSession 写方法的消息追加点，需手动失效发送前缓存
     session.bump_messages_version()
     session._update_timestamp()
-
-
-def _extract_markdown_images(content: str) -> tuple[str, list[str]]:
-    """
-    从 Markdown 内容中提取本地图片文件路径。
-
-    检测 ![alt](path) 语法，只提取本地存在的图片文件。
-    对远程 URL、不存在的文件、非图片文件均不提取。
-
-    Args:
-        content: Markdown 文本内容
-
-    Returns:
-        (clean_content, image_paths) - 清理后的文本和本地图片路径列表
-    """
-    image_paths: list[str] = []
-
-    def _replace_img(match: re.Match) -> str:
-        path = match.group(1).strip()
-        if os.path.isfile(path):
-            ext = os.path.splitext(path)[1].lower()
-            if ext in IMAGE_EXTENSIONS:
-                image_paths.append(path)
-                return ""  # 移除图片标记
-        return match.group(0)  # 保留原样
-
-    cleaned = re.sub(r"!\[.*?\]\((.+?)\)", _replace_img, content)
-    return cleaned, image_paths
-
-
-def _gw_str_platform(platform: Any):
-    """Gateway 平台入参归一：枚举内平台转 Platform；第三方 str 平台 id 原样直通（Phase E 契约）。"""
-    from app.gateway.base import Platform as GatewayPlatform
-
-    if isinstance(platform, GatewayPlatform):
-        return platform
-    try:
-        return GatewayPlatform(platform)
-    except ValueError:
-        return platform
 
 
 # 报错文本 → 粗分类（conversation_error.error_type 字段）。

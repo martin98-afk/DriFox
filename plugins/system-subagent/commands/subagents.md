@@ -1,14 +1,12 @@
 ---
-description: 管理子智能体任务和默认模型
+description: 管理子智能体任务
 type: function
 shortcut: Ctrl+Shift+A
 argument-hint:
   "[--detail]": "显示子智能体详细日志面板"
-  "[--model=]": "设置子智能体默认模型"
-  "[--reset]": "清空子智能体默认模型设置"
   "[--create=]": "进入创建子智能体工作流，根据描述自动生成智能体 md 文件"
 mutex_groups:
-  mode: ["--detail", "--model=", "--reset", "--create="]
+  mode: ["--detail", "--create="]
 prompt_sections:
   --create=: "create"
 ---

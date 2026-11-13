@@ -22,6 +22,7 @@ from app.utils.config import Settings
 from app.utils.design_tokens import Colors, font_size_css
 from app.utils.secret_store import MODE_KEYRING, MODE_NONE, MODE_PASSWORD, SecretStore
 from app.utils.utils import get_font_family_css, get_icon
+from app.widgets.cards.settings.base_settings_card import _selected_row_qss
 from app.widgets.cards.settings.expand_height_mixin import DynamicHeightExpandCardMixin
 from app.widgets.common_dialogs import ConfirmDialog
 from app.widgets.secret_unlock_dialog import SecretPasswordSetupDialog, SecretUnlockDialog
@@ -109,22 +110,7 @@ class _ModeRow(QFrame):
         self._apply_style()
 
     def _apply_style(self):
-        border = Colors.BORDER_ACCENT if self._selected else Colors.BORDER
-        bg = Colors.HOVER_BG if self._selected else "transparent"
-        self.setStyleSheet(f"""
-            QFrame {{
-                background-color: {bg};
-                border: 1px solid {border};
-                border-radius: 6px;
-            }}
-            QFrame:hover {{
-                border-color: {Colors.BORDER_ACCENT};
-            }}
-            QLabel {{
-                border: none;
-                background: transparent;
-            }}
-        """)
+        self.setStyleSheet(_selected_row_qss(self._selected))
 
     def mouseReleaseEvent(self, e):
         if e.button() == Qt.LeftButton:

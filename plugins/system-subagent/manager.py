@@ -566,7 +566,7 @@ class SubAgentManager(QObject):
     def _on_executor_finished(self, task_id: str, result: str):
         """executor 完成回调（manager 内部接线，AutoConnection 落主线程）。
 
-        职责：广播完成（面板收尾 + 归档）→ 单任务流式注入 → 批次计数 →
+        职责：广播完成（面板收尾 + 归档）→ 单任务注入 → 批次计数 →
         全完成时汇总注入（流式）或广播 batch_finished（非流式，由 UI 层开新轮）。
 
         ``task_finished`` 必须在正常完成路径发射：面板行靠它打完成标记、
@@ -581,22 +581,33 @@ class SubAgentManager(QObject):
         while len(self._settled_tasks) > 512:  # uuid 全局唯一，有界防涨
             self._settled_tasks.discard(next(iter(self._settled_tasks)))
         executor = self._running_tasks.get(task_id)
-        success = not (getattr(executor, "_execution_error", None) or "")
-        agent_name = getattr(executor, "agent_name", "") if executor else ""
-        task_description = getattr(executor, "task_description", "") if executor else ""
+        # 失败判定以 error 为唯一真值源：executor 还在就读它的 _execution_error，
+        # 已从 running_tasks 移除（stall / 宿主提前归档）则回退 _finished_tasks
+        # 归档的 error。此前只用 executor 判定，stall 路径先删 running_tasks
+        # 再进完成链，executor 为 None → 一律 success=True，失败任务被注入成 ✅。
+        archived = self._finished_tasks.get(task_id) or {}
+        error_text = str(getattr(executor, "_execution_error", "") or "") or str(archived.get("error") or "")
+        success = not error_text
+        agent_name = (getattr(executor, "agent_name", "") if executor else "") or archived.get("agent_name", "")
+        task_description = (getattr(executor, "task_description", "") if executor else "") or archived.get(
+            "task_description", ""
+        )
+        # 失败任务没有 result，正文用错误原因：否则注入出去的是「(无输出)」，
+        # 主智能体只看到 ❌ 却不知道死在哪，等于把失败信息又吞了一层。
+        inject_body = result if success else (error_text or result)
 
         try:
             self.task_finished.emit(task_id, result)
         except Exception as e:  # noqa: BLE001 - 广播失败不阻断注入/批次汇总
             logger.error(f"[SubAgentManager] task_finished.emit 失败 (finished path): {e}")
 
-        # 引擎状态在整条完成链内只判一次：单任务注入与批次汇总必须用同一口径，
-        # 否则极端时序下会既逐条注入又带全文汇总，重复灌上下文。
+        # 逐条交付：任务一完成就注入，不等同批其他任务。流式中经 hook 静默进
+        # 当前轮上下文；空闲时 hook 降级为 send 开新轮，交付延迟不再由最慢任务
+        # 决定（此前空闲态整批攒到末尾，一个 stall 就扣住全部已完成结果）。
+        # 单条注入与批次汇总由此解耦，streaming 只决定汇总走哪条通道。
+        self._dispatch_result_injection(task_id, inject_body, success, agent_name, task_description)
+
         streaming = self._is_engine_streaming()
-        # 流式中逐条静默注入；空闲时不逐条注入（避免 N 个任务开 N 轮对话），
-        # 结果正文统一由下面的批次汇总承载。
-        if streaming:
-            self._dispatch_result_injection(task_id, result, success, agent_name, task_description)
 
         # 批次计数与全完成判定
         self._batch_completed += 1
@@ -630,21 +641,22 @@ class SubAgentManager(QObject):
             f"共 {total} 个，成功 {total - failed} 个，失败 {failed} 个。\n"
             f"本次完成的任务：\n{task_list_text}"
         )
-        if streaming:
-            # 流式：单任务已逐条注入，汇总保持精简
-            callback_content += "\n可使用 subagent_status 查询详细结果。"
+        # 成功任务的正文已在完成时逐条注入，汇总再塞一遍等于重复灌上下文；
+        # 只补失败任务的错误正文（失败详情是决策依据，且不占多少地方）。
+        error_lines = []
+        for t in batch_tasks:
+            if t["success"]:
+                continue
+            body = t["error"] or "(无错误信息)"
+            if len(body) > _MAX_BATCH_RESULT_CHARS:
+                body = body[:_MAX_BATCH_RESULT_CHARS] + "\n[... 已省略 ...]"
+            error_lines.append(
+                f"### [{t['agent_name']}] {t['task_description'][:50]} (id: {t['task_id']})\n{body}"
+            )
+        if error_lines:
+            callback_content += "\n\n失败任务错误详情：\n" + "\n\n".join(error_lines)
         else:
-            # 非流式（含交接切会话后的空闲窗口）：单任务 hook 注入未触发，
-            # 结果正文必须随汇总这一轮带过去，否则新会话只看到任务清单。
-            result_lines = []
-            for t in batch_tasks:
-                body = t["error"] if not t["success"] and t["error"] else t["result"]
-                if len(body) > _MAX_BATCH_RESULT_CHARS:
-                    body = body[:_MAX_BATCH_RESULT_CHARS] + "\n[... 已省略 ...]"
-                result_lines.append(
-                    f"### [{t['agent_name']}] {t['task_description'][:50]} (id: {t['task_id']})\n{body}"
-                )
-            callback_content += "\n\n各任务执行结果：\n" + "\n\n".join(result_lines)
+            callback_content += "\n可使用 subagent_status 查询详细结果。"
 
         self._batch_total = 0
         self._batch_completed = 0
@@ -1441,10 +1453,12 @@ def create_manager(backend: Any, caps: Any = None) -> SubAgentManager:
     """
 
     def _get_llm_config() -> Dict:
-        from app.utils.config import Settings
-
-        cfg = Settings.get_instance()
-        saved = cfg.llm_subagent_default_model.value
+        saved = ""
+        if caps is not None and "plugin.config.read" in caps:
+            try:
+                saved = str(caps["plugin.config.read"]("subagent_model", "") or "")
+            except Exception as e:  # noqa: BLE001 - 配置读取失败回退当前模型
+                logger.warning(f"[SubAgentManager] 插件默认模型读取失败: {e}")
         if caps is not None:
             if saved and "model.config_for" in caps:
                 try:

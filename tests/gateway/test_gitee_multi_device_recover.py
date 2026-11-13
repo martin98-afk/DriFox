@@ -66,7 +66,7 @@ def _seed(fake: _FakeSettings, *, local_rt: str = "R_local"):
 def test_recover_token_from_cloud_unbound_returns_false(tmp_settings):
     """未绑定：直接返回 False，不去重载磁盘 token"""
     from app.core.sync import config_sync as cs_mod
-    from app.gateway.auth import gitee as gitee_mod
+    from app.core.auth import gitee as gitee_mod
 
     svc = cs_mod.ConfigSyncService.get_instance()
     with (
@@ -79,7 +79,7 @@ def test_recover_token_from_cloud_unbound_returns_false(tmp_settings):
 def test_recover_token_from_cloud_reload_then_refresh_ok(tmp_settings):
     """已绑定：重载磁盘 token 后刷新成功 → True"""
     from app.core.sync import config_sync as cs_mod
-    from app.gateway.auth import gitee as gitee_mod
+    from app.core.auth import gitee as gitee_mod
 
     fake, _ = tmp_settings
     _seed(fake)
@@ -98,7 +98,7 @@ def test_recover_token_from_cloud_reload_then_refresh_ok(tmp_settings):
 def test_recover_token_from_cloud_reload_then_refresh_fail(tmp_settings):
     """已绑定但重载后刷新仍失败（官网撤权）→ False，交由调用方清绑"""
     from app.core.sync import config_sync as cs_mod
-    from app.gateway.auth import gitee as gitee_mod
+    from app.core.auth import gitee as gitee_mod
 
     fake, _ = tmp_settings
     _seed(fake)
@@ -121,7 +121,7 @@ def test_recover_token_from_cloud_reload_then_refresh_fail(tmp_settings):
 def test_refresh_local_and_upload_revoked_recovers(tmp_settings):
     """本地刷新 TOKEN_REVOKED 且本地重载恢复成功 → 不清绑，syncDone(True)"""
     from app.core.sync import config_sync as cs_mod
-    from app.gateway.auth import gitee as gitee_mod
+    from app.core.auth import gitee as gitee_mod
 
     fake, _ = tmp_settings
     _seed(fake, local_rt="R_local")
@@ -157,7 +157,7 @@ def test_refresh_local_and_upload_revoked_recovers(tmp_settings):
 def test_refresh_local_and_upload_revoked_clears_when_no_cloud(tmp_settings):
     """本地刷新 TOKEN_REVOKED 且本地恢复也失败 → 清绑 + syncDone(False, 已失效)"""
     from app.core.sync import config_sync as cs_mod
-    from app.gateway.auth import gitee as gitee_mod
+    from app.core.auth import gitee as gitee_mod
 
     fake, _ = tmp_settings
     _seed(fake, local_rt="R_local")
@@ -192,7 +192,7 @@ def test_refresh_local_and_upload_revoked_clears_when_no_cloud(tmp_settings):
 def test_refresh_local_and_upload_network_error_keeps_binding(tmp_settings):
     """网络异常（非 TOKEN_REVOKED）→ 保留绑定，不触发恢复"""
     from app.core.sync import config_sync as cs_mod
-    from app.gateway.auth import gitee as gitee_mod
+    from app.core.auth import gitee as gitee_mod
 
     fake, _ = tmp_settings
     _seed(fake, local_rt="R_local")

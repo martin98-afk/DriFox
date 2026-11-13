@@ -32,15 +32,14 @@ class TestNoHardcodedPlatformBranches:
 
     def test_manager_no_platform_if_chain(self):
         """manager.py 不再硬编码 'if/elif platform == Platform.<X>' 段"""
-        src = inspect.getsource(__import__("app.gateway.manager", fromlist=["x"]))
+        src = inspect.getsource(__import__("system_im_core.manager", fromlist=["x"]))
         assert "if platform == Platform." not in src, "manager.py 仍存在 'if platform == Platform.X' 硬编码分支"
         assert "elif platform == Platform." not in src, "manager.py 仍存在 'elif platform == Platform.X' 硬编码分支"
 
-    def test_config_no_platform_if_chain(self):
-        """config.py 不再硬编码 'if/elif platform == Platform.<X>' 段"""
-        src = inspect.getsource(__import__("app.gateway.config", fromlist=["x"]))
-        assert "if platform == Platform." not in src, "config.py 仍存在 'if platform == Platform.X' 硬编码分支"
-        assert "elif platform == Platform." not in src, "config.py 仍存在 'elif platform == Platform.X' 硬编码分支"
+    def test_config_module_removed(self):
+        """GatewayConfigHelper 已删（平台配置由插件自管，宿主无配置结构）"""
+        with pytest.raises(ModuleNotFoundError):
+            __import__("system_im_core.config", fromlist=["x"])
 
 
 class TestAdaptersPackageDeleted:

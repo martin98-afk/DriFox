@@ -239,6 +239,14 @@ from app.widgets.card_viewers import (
     plan_image_attachment_sources,
 )
 
+# 工具完成块 HTML 解析正则（append_tool_result 每次工具完成都会跑，预编译避免重复 compile）
+_TOOL_BLOCK_INNER_RE = re.compile(r"^<div[^>]*>(.*)</div>$", re.DOTALL)
+_TOOL_BLOCK_OUTER_STYLE_RE = re.compile(r'<div[^>]*\sstyle="([^"]*)"')
+_TOOL_BLOCK_KEY_RE = re.compile(r'data-block-key="([^"]*)"')
+_TOOL_BLOCK_BUTTON_RE = re.compile(r"<button[^>]*>(.*?)</button>", re.DOTALL)
+_TOOL_COLLAPSIBLE_BODY_RE = re.compile(r'<div[^>]*class="cm-collapsible__body"[^>]*>(.*)</div>$', re.DOTALL)
+_TOOL_COLLAPSIBLE_BODY_STYLE_RE = re.compile(r'<div[^>]*class="cm-collapsible__body"[^>]*style="([^"]*)"')
+
 
 def user_bubble_target_width(container_width: int) -> int:
     """用户气泡卡片的落定目标宽度（**全链唯一口径**）。
@@ -412,6 +420,10 @@ class MessageCard(SimpleCardWidget):
         self._footer_right_items: List[Tuple[Optional[QLabel], QLabel]] = []
         # 插件注册的页脚信息项（footer_stat 槽位）：{stat_id: QLabel}
         self._footer_stat_labels: Dict[str, QLabel] = {}
+        # footer_stat provider 映射缓存：200ms 节拍下仅插件注册变更时重建
+        # （见 _refresh_footer_stats，按 stat_id 序列 tuple 作 key 比对）
+        self._footer_stats_key: Optional[tuple] = None
+        self._footer_stats_info: Dict[str, Any] = {}
         # 耗时实时计时器
         self._elapsed_timer = QTimer(self)
         self._elapsed_timer.timeout.connect(self._update_elapsed_display)
@@ -1261,9 +1273,16 @@ class MessageCard(SimpleCardWidget):
         try:
             from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
 
-            infos = {i.stat_id: i for i in UIPluginRegistry.get_instance().get_footer_stats()}
+            stat_list = UIPluginRegistry.get_instance().get_footer_stats()
         except Exception:
             return
+        # 注册列表仅插件装载/卸载时变化；按 stat_id 序列 tuple 比对命中则
+        # 复用上次映射，避免 200ms 节拍每拍重建 dict
+        stat_key = tuple(i.stat_id for i in stat_list)
+        if stat_key != self._footer_stats_key:
+            self._footer_stats_key = stat_key
+            self._footer_stats_info = {i.stat_id: i for i in stat_list}
+        infos = self._footer_stats_info
         ctx = self._footer_stat_context(streaming=streaming, elapsed=elapsed, token_usage=token_usage)
         for stat_id, label in self._footer_stat_labels.items():
             try:
@@ -2772,6 +2791,18 @@ class MessageCard(SimpleCardWidget):
         self.viewer.contextRestored.connect(self._on_webengine_context_restored)
         self.viewer.needRecreate.connect(self._on_webengine_need_recreate)
         self.viewer._install_dialog_filter()
+        # 🐛 重建后的语义同步（与 ensure_rendered 同口径）：新建 viewer 默认
+        # _streaming=True / _is_history=False，不补这两项会让历史卡重建成
+        # 「流式形态」（字数统计、工具区坞态限高、思考不折叠），而渲染看门狗的
+        # 三级自愈正是走这条重建路径。restore 集合同样必须补，否则已完成的
+        # 工具运行框会被重渲染成"运行中"。
+        if self.role == "assistant":
+            self.viewer._is_history = not (self._streaming or self._streaming_finished)
+            if not self._streaming:
+                self.viewer._streaming = False
+            # setattr 而非赋值：_restore_finished_ids 的直接赋值语句是
+            # tests/widgets/test_history_collapse_pool_reuse.py 的池化路径锚点
+            setattr(self.viewer, "_restore_finished_ids", self._finished_streaming_ids)
 
         self._viewer_layout.addWidget(self.viewer)
 
@@ -4758,7 +4789,7 @@ class MessageCard(SimpleCardWidget):
             # outerHTML 替换会销毁旧元素再创建新元素，在 WebEngine 渲染管线中
             # 可能形成"旧元素消失 → 新元素出现"的跨帧闪烁。
             # 原地更新保持同一 DOM 节点，消除闪烁。
-            _inner_match = re.match(r"^<div[^>]*>(.*)</div>$", block_html, re.DOTALL)
+            _inner_match = _TOOL_BLOCK_INNER_RE.match(block_html)
             if _inner_match:
                 inner_html = _inner_match.group(1).strip()
             else:
@@ -4767,24 +4798,26 @@ class MessageCard(SimpleCardWidget):
 
             # 提取外层 <div> 的 style 属性（如 display: flex; align-items: center;）
             # 用于 INLINE_TOOLS 原地转换时应用到现有元素，保持 flex 布局
-            _outer_style_match = re.search(r'<div[^>]*\sstyle="([^"]*)"', block_html)
+            _outer_style_match = _TOOL_BLOCK_OUTER_STYLE_RE.search(block_html)
             outer_style = _outer_style_match.group(1) if _outer_style_match else ""
             safe_outer_style = json.dumps(outer_style).decode("utf-8")
 
             # 提取 block_key（用于设置 data-block-key 属性）
-            _key_match = re.search(r'data-block-key="([^"]*)"', block_html)
+            _key_match = _TOOL_BLOCK_KEY_RE.search(block_html)
             block_key = _key_match.group(1) if _key_match else ""
+            # 失败标记（「工具与思考」头部分项计数依赖）
+            _succ_false_js = "true" if 'data-tool-success="false"' in block_html else "false"
 
             # ── 增量更新解析：将 inner_html 拆分为 button 和 body 两部分 ──
             # 避免 existing.innerHTML = safe_inner 整体替换导致的子节点空窗期
             # （外层 div 子节点清空瞬间 margin 暴露为可见间距，详见 #间距修复）
-            _btn_match = re.match(r"<button[^>]*>(.*?)</button>", inner_html, re.DOTALL)
-            _body_match = re.search(r'<div[^>]*class="cm-collapsible__body"[^>]*>(.*)</div>$', inner_html, re.DOTALL)
+            _btn_match = _TOOL_BLOCK_BUTTON_RE.match(inner_html)
+            _body_match = _TOOL_COLLAPSIBLE_BODY_RE.search(inner_html)
             if _btn_match and _body_match:
                 btn_inner = _btn_match.group(1)
                 body_inner = _body_match.group(1)
                 # 提取 body div 上可能携带的 style（如 expanded: height:auto）
-                _body_style_match = re.search(r'<div[^>]*class="cm-collapsible__body"[^>]*style="([^"]*)"', inner_html)
+                _body_style_match = _TOOL_COLLAPSIBLE_BODY_STYLE_RE.search(inner_html)
                 body_style = _body_style_match.group(1) if _body_style_match else ""
                 safe_btn_inner = json.dumps(btn_inner).decode("utf-8")
                 safe_body_inner = json.dumps(body_inner).decode("utf-8")
@@ -4877,6 +4910,10 @@ class MessageCard(SimpleCardWidget):
                         existing.setAttribute('data-expanded', 'false');
                         existing.removeAttribute('data-streaming');
                         existing.removeAttribute('data-tool-injected');
+                        // 失败标记同步：流式块转完成态时属性不随 innerHTML 走，
+                        // 头部「失败操作」计数靠这个属性，漏同步会永远显示 0
+                        if ({_succ_false_js}) existing.setAttribute('data-tool-success', 'false');
+                        else existing.removeAttribute('data-tool-success');
                         existing.setAttribute('style', {safe_outer_style});
                         // 🆕 方案 D：原地更新保留原 data-order；缺失时注入（兜底）
                         if (!existing.getAttribute('data-order')) {{

@@ -24,7 +24,7 @@ from app.core.store.session_repository import (
     SessionRepository,
     _persist_vision_image_blocks_impl,
 )
-from app.gateway.local_service.session_handler import APIHistoryManager
+from app.core.local_service.session_handler import APIHistoryManager
 
 SESSION_ID = "t_materialize"
 

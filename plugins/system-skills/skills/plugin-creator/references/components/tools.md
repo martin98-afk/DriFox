@@ -67,7 +67,7 @@ def register(registry):
 ### 渲染三闭包（主程序零工具名硬编码）
 
 > 工具的**渲染完全由插件声明**：主程序 `render_helpers` 只做闭包路由 + 通用兜底。
-> 参考 `plugins/system-tools/tools/`（bash 终端块、question 弹窗、screenshot 图片、
+> 参考 `plugins/system-interact/tools/`（bash 终端块、question 弹窗、screenshot 图片、
 > codegraph 结构化、edit diff 均为插件闭包实现）。
 
 ```python
@@ -120,6 +120,22 @@ def _impl(tool_ctx, **kwargs):
 
 - 纯逻辑工具（文件/网络/桌面）：impl 用标准库/第三方库独立实现，不依赖主程序
 - 平台工具：通过 `tool_ctx["services"]` 调用平台能力，不直接访问主程序内部
+- 要读插件自己的配置 / 发 HTTP / 起后台任务：走能力池，别直连宿主模块
+
+| 需求 | 能力 | 别用什么 |
+|------|------|---------|
+| 读自己插件的配置（如搜索 API key） | `plugin.config.read`（ui / tool 两面都开） | `PluginConfigStore` |
+| 发一次 HTTP 请求 | `net.http`（宿主统一证书/超时/10MB 上限） | 自己拉 `httpx` |
+| 要一段模型输出 | `model.complete`（请求头由宿主组装） | 自建 openai client |
+| 长任务 | `task.background`（句柄可取消/报进度，回调回主线程） | 裸 `threading.Thread` |
+| 存第三方密钥 | `secret.read` / `secret.write`（系统密钥库） | 明文写 `plugin_data/*.json` |
+
+```python
+from app.plugins.sdk import caps_for
+
+read_cfg = caps_for("plugin.config.read")   # 工具执行时同样可用
+api_key = read_cfg("tavily_api_key", "")
+```
 
 ### 成果栏（ToolResult.artifacts，免声明）
 
@@ -149,7 +165,7 @@ kind ∈ image/video/html/text/file；空列表不改变已有成果。推送按
 
 ### 参考
 
-- `plugins/system-tools/tools/`（33 个系统工具真实案例）
+- `plugins/system-interact/tools/`（33 个系统工具真实案例）
 - `app/tools/registry.py`（ToolRegistration 字段定义）
 - `app/tools/plugin_tool_loader.py`（扫描/热重载实现）
 - 最小可运行样例：本技能 `examples/tool-plugin/`

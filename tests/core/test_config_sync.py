@@ -226,7 +226,7 @@ class TestSyncToken:
 
     def test_returns_true_on_valid_token(self, svc):
         """有效 token → 更新 self._token 并返回 True"""
-        with patch("app.gateway.auth.gitee.GiteeOAuthBackend") as mock_backend_cls:
+        with patch("app.core.auth.gitee.GiteeOAuthBackend") as mock_backend_cls:
             mock_backend = MagicMock()
             mock_backend_cls.return_value = mock_backend
             mock_backend.is_bound.return_value = True
@@ -239,7 +239,7 @@ class TestSyncToken:
     def test_clears_token_on_refresh_failure(self, svc):
         """刷新失败 → 清空 self._token 并返回 False"""
         svc._token = "old_expired_token"
-        with patch("app.gateway.auth.gitee.GiteeOAuthBackend") as mock_backend_cls:
+        with patch("app.core.auth.gitee.GiteeOAuthBackend") as mock_backend_cls:
             mock_backend = MagicMock()
             mock_backend_cls.return_value = mock_backend
             mock_backend.is_bound.return_value = True
@@ -251,7 +251,7 @@ class TestSyncToken:
 
     def test_returns_false_when_not_bound(self, svc):
         """未绑定 → 返回 False"""
-        with patch("app.gateway.auth.gitee.GiteeOAuthBackend") as mock_backend_cls:
+        with patch("app.core.auth.gitee.GiteeOAuthBackend") as mock_backend_cls:
             mock_backend = MagicMock()
             mock_backend_cls.return_value = mock_backend
             mock_backend.is_bound.return_value = False
@@ -263,7 +263,7 @@ class TestSyncToken:
     def test_clears_token_on_exception(self, svc):
         """异常时清空 token（不保留过期 token）"""
         svc._token = "old_token"
-        with patch("app.gateway.auth.gitee.GiteeOAuthBackend") as mock_backend_cls:
+        with patch("app.core.auth.gitee.GiteeOAuthBackend") as mock_backend_cls:
             mock_backend = MagicMock()
             mock_backend_cls.return_value = mock_backend
             mock_backend.is_bound.side_effect = RuntimeError("unexpected error")
@@ -557,7 +557,7 @@ class TestInitialSync:
 
             # 下载失败 → 降级 _refresh_local_and_upload（路径 B），本地刷新也失败 → 不标记完成
             with patch(
-                "app.gateway.auth.gitee.GiteeOAuthBackend._ensure_valid_token",
+                "app.core.auth.gitee.GiteeOAuthBackend._ensure_valid_token",
                 return_value=(None, "network timeout"),
             ):
                 svc._initial_sync()
@@ -644,7 +644,7 @@ class TestInitialSync:
             with (
                 patch.object(svc, "_sync_token", return_value=False),
                 patch(
-                    "app.gateway.auth.gitee.GiteeOAuthBackend._ensure_valid_token",
+                    "app.core.auth.gitee.GiteeOAuthBackend._ensure_valid_token",
                     return_value=(None, "TOKEN_REVOKED::invalid_grant"),
                 ),
                 patch.object(svc, "recover_token_from_cloud", return_value=False),

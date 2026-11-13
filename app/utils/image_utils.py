@@ -135,10 +135,6 @@ def compress_data_uri(data_uri: str, max_bytes: int = 5 * 1024 * 1024) -> str:
     return compressed
 
 
-# 设计卡 §2 命名（revive 链路语义等价别名：压缩体已内置 LRU）
-compress_data_uri_cached = compress_data_uri
-
-
 def revoke_vision_blocks(
     messages: List[Any],
     session_id: Any,

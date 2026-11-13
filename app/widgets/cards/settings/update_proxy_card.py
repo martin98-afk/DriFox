@@ -41,6 +41,7 @@ from app.utils import update_proxy
 from app.utils.config import Settings
 from app.utils.design_tokens import Colors, font_size_css, scale_font_size
 from app.utils.utils import get_font_family_css
+from app.widgets.cards.settings.base_settings_card import _selected_row_qss
 from app.widgets.cards.settings.expand_height_mixin import DynamicHeightExpandCardMixin
 from app.widgets.elided_label import _ElidedLabel
 
@@ -160,22 +161,7 @@ class _ModeRow(QFrame):
         self._apply_style()
 
     def _apply_style(self):
-        border = Colors.BORDER_ACCENT if self._selected else Colors.BORDER
-        bg = Colors.HOVER_BG if self._selected else "transparent"
-        self.setStyleSheet(f"""
-            QFrame {{
-                background-color: {bg};
-                border: 1px solid {border};
-                border-radius: 6px;
-            }}
-            QFrame:hover {{
-                border-color: {Colors.BORDER_ACCENT};
-            }}
-            QLabel {{
-                border: none;
-                background: transparent;
-            }}
-        """)
+        self.setStyleSheet(_selected_row_qss(self._selected))
 
     def mouseReleaseEvent(self, e):
         if e.button() == Qt.LeftButton:

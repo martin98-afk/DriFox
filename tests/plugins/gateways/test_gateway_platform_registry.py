@@ -33,7 +33,8 @@ class TestDefDefaults:
     def test_defaults(self):
         d = _make_def()
         assert d.check_requirements() is True
-        assert d.config_builder is None
+        assert d.is_enabled() is False
+        assert d.set_enabled is None and d.validate is None
         assert d.ui_order == 100
 
     def test_frozen(self):
