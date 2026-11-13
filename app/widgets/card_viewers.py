@@ -2375,6 +2375,13 @@ class CodeWebViewer(QWebEngineView):
         调度机制补渲，保证流式输出/工具结果的最终完整性。
         """
         super().showEvent(event)
+        # 🛡️ 首帧透明（2026-11-13 白底卡）：池化复用 / tab 切回 / 隐藏期尺寸
+        # 变化后，viewer 重新映射时底层合成面可能以默认白底重建。macOS 实测
+        # 表现为 HTML 区整块白底、文字色正常，滚动或切 tab 触发重绘后消失
+        # ——典型「合成面首帧白 + 无人标脏」。显示事件里补一次透明重申并
+        # 整卡标脏，把白底纠正在首帧合成之前（幂等，仅两条属性写入）。
+        self.ensure_transparent_composition()
+        self.update()
         # [PERF] 主题刷新期间不可见 → 跳过 JS 注入，恢复可见时补注入
         # CSS 变量（updateContent 不重载骨架，旧主题色会残留）
         if getattr(self, "_theme_css_pending", False):
@@ -2451,6 +2458,10 @@ class CodeWebViewer(QWebEngineView):
 
     def _on_js_ready(self):
         self._is_js_ready = True
+        # 🛡️ 导航已落地：白底的另一条入口是「setHtml 时合成的首帧先用了默认
+        # 白底，后续透明属性没再回推」。就绪事件是本次导航的第一个稳定时点，
+        # 在这里补一次重申，覆盖池化补载 / 看门狗重载骨架 / 崩溃自愈。
+        self.ensure_transparent_composition()
         # [render-watchdog] 骨架就绪后必有补渲，从这一刻起盯落地
         self._arm_render_watchdog()
         # 同步简洁模式标志到 JS（统一走 sync_compact_mode_to_js）
@@ -2505,6 +2516,13 @@ class CodeWebViewer(QWebEngineView):
             self._renderer_pid = 0
 
     def _load_skeleton(self):
+        # 🛡️ 透明合成必须在导航前重申（2026-11-13）：Chromium 合成面一旦丢失
+        # （renderer 崩溃 / 表面重建 / reparent），setHtml 之后再重申的话，
+        # 新的一次导航仍以默认白底初始化，此后内容全部走 JS 注入（无导航）
+        # → HTML 区白底固化到 viewer 重建（2026-10-17 实证，同 _try_restore_context
+        # 的口径）。崩溃自愈、看门狗二级自愈、池化补载都收敛到本方法，
+        # 故统一在此前置一次；末尾那条重申保留作幂等兜底。
+        self.ensure_transparent_composition()
         # [B5] 骨架重载 = DOM 整体重建：v2 落地基线（_v2_last）失效，必须复位。
         # 否则崩溃恢复 / 池化补载后 diff 判"无变化" → 不重灌内容 → 空白卡。
         self._v2_last = None

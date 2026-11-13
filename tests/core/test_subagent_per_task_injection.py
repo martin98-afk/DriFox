@@ -8,8 +8,10 @@
 修复语义：
 1. 空闲态：任务一完成就调注入器（hook 降级为 send 开新轮），不等批次。
 2. 流式态：仍逐条静默注入（原行为，回归保护）。
-3. 批次汇总只补失败任务的错误正文；成功正文已逐条注入，不重复灌上下文。
+3. 批次汇总（「子智能体全部完成。共 N 个…」）2026-11-13 停发：
+   每条结果已逐条注入，末尾汇总只是重复通知，还要为它多开一轮对话。
 """
+
 import importlib.util
 from pathlib import Path
 
@@ -59,6 +61,7 @@ def _make_manager(streaming=False):
         get_llm_config=lambda: {},
     )
     injected = []
+
     # 注入器替身：记录 (task_id, result, success) 并吞掉 send
     mgr._resolve_result_injector = lambda: (
         lambda send, task_id, result, success, agent_name, task_description, mode="hook": injected.append(
@@ -102,7 +105,7 @@ def test_idle_task_injects_immediately_without_waiting_batch():
 
 
 def test_streaming_still_injects_each_task():
-    """流式态逐条静默注入（原行为不回退）。"""
+    """流式态逐条静默注入（原行为不回退），全完成不再追加汇总。"""
     mgr, injected = _make_manager(streaming=True)
     _seed_batch(mgr, ["t1", "t2"])
 
@@ -110,13 +113,12 @@ def test_streaming_still_injects_each_task():
     assert [item[0] for item in injected] == ["t1"]
 
     mgr._on_executor_finished("t2", _RESULT_T2)
-    # 全完成后流式路径还会静默注入一条批次汇总，只断言单条结果
-    task_items = [item[0] for item in injected if item[0] != "__batch_summary__"]
-    assert task_items == ["t1", "t2"]
+
+    assert [item[0] for item in injected] == ["t1", "t2"]
 
 
-def test_batch_summary_omits_success_body():
-    """汇总不重复成功正文（已逐条交付），只保留清单。"""
+def test_batch_summary_not_emitted_when_all_done():
+    """全部完成不再广播汇总（2026-11-13 停发决策）。"""
     mgr, _injected = _make_manager(streaming=False)
     _seed_batch(mgr, ["t1", "t2"])
     summaries = []
@@ -125,15 +127,24 @@ def test_batch_summary_omits_success_body():
     mgr._on_executor_finished("t1", _RESULT_T1)
     mgr._on_executor_finished("t2", _RESULT_T2)
 
-    assert summaries, "批次汇总照常触发"
-    content, failed = summaries[0]
-    assert failed == 0
-    assert "t1" in content and "t2" in content, "清单仍列出全部任务"
-    assert _RESULT_T1 not in content and _RESULT_T2 not in content, "成功正文不重复进汇总"
+    assert summaries == [], "批次汇总已停发，不得再广播"
 
 
-def test_batch_summary_keeps_error_detail():
-    """失败任务的错误正文仍随汇总带过去（决策依据，不重复）。"""
+def test_batch_counters_reset_after_all_done():
+    """汇总停发但批次记账仍要复位，否则下一批任务永远凑不齐。"""
+    mgr, _injected = _make_manager(streaming=False)
+    _seed_batch(mgr, ["t1", "t2"])
+
+    mgr._on_executor_finished("t1", _RESULT_T1)
+    mgr._on_executor_finished("t2", _RESULT_T2)
+
+    assert mgr._batch_total == 0
+    assert mgr._batch_completed == 0
+    assert mgr._batch_task_ids == set()
+
+
+def test_failed_task_still_injected_individually():
+    """失败任务逐条注入仍带失败标记（汇总停发后这是唯一交付出口）。"""
     mgr, injected = _make_manager(streaming=False)
     _seed_batch(mgr, ["t1", "t2"])
     mgr._running_tasks["t1"]._execution_error = _ERR_MSG
@@ -144,8 +155,6 @@ def test_batch_summary_keeps_error_detail():
     mgr._on_executor_finished("t1", "")
     mgr._on_executor_finished("t2", _RESULT_T2)
 
-    assert injected[0][2] is False, "失败任务也逐条注入（带失败标记）"
-    content, failed = summaries[0]
-    assert failed == 1
-    assert _ERR_MSG in content, "错误正文必须在汇总里可见"
-    assert _RESULT_T2 not in content
+    assert injected[0][0] == "t1" and injected[0][2] is False
+    assert injected[1][0] == "t2" and injected[1][2] is True
+    assert summaries == []
