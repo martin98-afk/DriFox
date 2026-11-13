@@ -243,22 +243,31 @@ if _IS_WIN:
         文件关联 Shell 扩展）；False 走真实路径（可能触发 WPS 一类
         扩展，最坏数秒）。
         """
-        sfi = _SHFILEINFOW()
-        flags = _SHGFI_ICON | _SHGFI_SMALLICON
-        if fast:
-            flags |= _SHGFI_USEFILEATTRIBUTES
-            lookup = "x" + os.path.splitext(path)[1]
-            attrs = _FILE_ATTRIBUTE_NORMAL
-        else:
-            lookup = path
-            attrs = 0
-        ret = _SHGetFileInfoW(lookup, attrs, ctypes.byref(sfi), ctypes.sizeof(sfi), flags)
-        if not ret or not sfi.hIcon:
-            return None
-        try:
-            return _hicon_to_qimage(sfi.hIcon)
-        finally:
-            _DestroyIcon(sfi.hIcon)
+        # fast 请求只查扩展名；真实查询失败则按扩展名兜底，避免退化成白色占位符
+        modes = (True,) if fast else (False, True)
+        for use_ext in modes:
+            sfi = _SHFILEINFOW()
+            flags = _SHGFI_ICON | _SHGFI_SMALLICON
+            if use_ext:
+                flags |= _SHGFI_USEFILEATTRIBUTES
+                lookup = "x" + os.path.splitext(path)[1]
+                attrs = _FILE_ATTRIBUTE_NORMAL
+            else:
+                # scanner 产出的路径是「项目根(正斜杠) + 文件名(反斜杠)」拼接，
+                # 形如 D:/work/DriFox\uv.lock。SHGetFileInfoW 的真实路径查询不认
+                # 混合斜杠，返回 0 / 空 HICON，2ms 就退化成白色占位图标。
+                lookup = os.path.normpath(path)
+                attrs = 0
+            ret = _SHGetFileInfoW(lookup, attrs, ctypes.byref(sfi), ctypes.sizeof(sfi), flags)
+            if not ret or not sfi.hIcon:
+                continue
+            try:
+                image = _hicon_to_qimage(sfi.hIcon)
+                if image is not None and not image.isNull():
+                    return image
+            finally:
+                _DestroyIcon(sfi.hIcon)
+        return None
 
 else:
 

@@ -308,6 +308,30 @@ class TestAsyncLanding:
         assert any(Qt.DecorationRole in roles for _, _, roles in proxy_events)
 
 
+# ── 真实路径形态 ──────────────────────────────────────────
+
+@pytest.mark.skipif(sys.platform != "win32", reason="仅 Windows 走 SHGetFileInfoW")
+def test_mixed_separator_path_yields_icon(tmp_path):
+    """scanner 拼出的混合斜杠路径不得返回空图标
+
+    真机日志（2026-11-14 01:29）：``D:/work/DriFox\\uv.lock`` 查询回传
+    ``fast=False elapsed=0.002 image=None`` —— 项目根用正斜杠、文件名用
+    反斜杠拼接，SHGetFileInfoW 真实路径查询对混合斜杠返回 0 / 空 HICON。
+
+    ★ 不 mock：必须真调 _query_shell_icon，才能锁住 normpath 与
+      按扩展名兜底这两层。mock 掉查询函数的测试测不到本 bug。
+    """
+    f = tmp_path / "probe.py"
+    f.write_text("x = 1", encoding="utf-8")
+    mixed = str(tmp_path).replace("\\", "/") + "\\probe.py"  # 真机同款混合斜杠
+
+    for fast in (False, True):
+        img = tree_widget_mod._query_shell_icon(mixed, fast)
+        assert img is not None and not img.isNull(), (
+            f"fast={fast} 混合斜杠路径返回空图标，会退化成白色占位符"
+        )
+
+
 # ── 热重载安全 ────────────────────────────────────────────
 
 
