@@ -44,6 +44,10 @@ def _polluted_config(**overrides):
         "健康检查": True,
         "上次模型刷新": "2026-10-09 23:16:58",
         "模型刷新状态": "unreachable",
+        # 运行时状态/元数据键：曾泄漏到「其他」分组渲染成 LineEdit
+        "状态更新时间": "2026-11-13 13:29:51",
+        "上次健康检查": "2026-11-13 13:29:51",
+        "capability_type": "chat",
     }
     base.update(overrides)
     return base

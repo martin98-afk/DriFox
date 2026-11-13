@@ -23,6 +23,8 @@
 | P028 | 用户气泡 resize 后高度不变 | 守卫条件误伤（本意只保护 CodeWebViewer） | 加守卫时明确保护对象，别用宽泛条件 |
 | P008 | 流式卡片「生长中回缩」（缩了再长回）；静态卡片底边几像素跳变 | save/restore、reorganizeContent 的 DOM 事务存在**跨帧 scrollHeight 塌缩窗口**（P052 自证），塌缩读数穿透 rAF 合并 + 80ms 防抖后：追踪中 target 无方向守卫被直接改小（tick 朝小值滑）；非追踪下调 ≥40px 立即应用；非流式 <10px 双向立即 snap 形成噪声振荡 | 追踪中上报分方向：上调 retarget、下调挂 500ms 稳定窗（`_schedule_pending_shrink`）；流式收拢统一挂起；非流式 ±2px 噪声死区。回归 `tests/widgets/test_stream_height_noise_guard.py` |
 
+| P054 | 偶发个别消息卡片**永久空白**，重新加载会话 / 重新发起对话才恢复 | 链路存在多条「静默丢渲染」分支（JS 未就绪时 deferred、线程池结果 seq 过期、`updateContent` 抛错、页面已死导致 `runJavaScript` 静默丢弃），命中后没有任何环节负责发现「内容没落地」。既有 `content-sentinel` 首行以 `_streaming` 为门 + 依赖 reportHeight 回传，非流式卡（历史加载 / 终渲染）与页面已死两种场景都在盲区 | 加 Python 侧渲染落地看门狗：派发后 5s 用极小 JS 探针查「两容器 children 数 + textContent 长度」（`scrollHeight` 不可用，空文档也有 40~50px 骨架高），判空后分级自愈 = 复位全部已渲染基线全量重渲 → 重载骨架 → 三次无效才 `needRecreate`；探针 2.5s 无回音直接判页面已死。回归 `tests/widgets/test_render_watchdog.py` |
+
 > 模式总结：**渲染链路的 bug 80% 出在「状态由启发式推断」**。改成显式状态机 / 显式标记，是反复验证有效的解法。
 
 ## 二、卡顿与性能

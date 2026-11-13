@@ -2791,6 +2791,18 @@ class MessageCard(SimpleCardWidget):
         self.viewer.contextRestored.connect(self._on_webengine_context_restored)
         self.viewer.needRecreate.connect(self._on_webengine_need_recreate)
         self.viewer._install_dialog_filter()
+        # 🐛 重建后的语义同步（与 ensure_rendered 同口径）：新建 viewer 默认
+        # _streaming=True / _is_history=False，不补这两项会让历史卡重建成
+        # 「流式形态」（字数统计、工具区坞态限高、思考不折叠），而渲染看门狗的
+        # 三级自愈正是走这条重建路径。restore 集合同样必须补，否则已完成的
+        # 工具运行框会被重渲染成"运行中"。
+        if self.role == "assistant":
+            self.viewer._is_history = not (self._streaming or self._streaming_finished)
+            if not self._streaming:
+                self.viewer._streaming = False
+            # setattr 而非赋值：_restore_finished_ids 的直接赋值语句是
+            # tests/widgets/test_history_collapse_pool_reuse.py 的池化路径锚点
+            setattr(self.viewer, "_restore_finished_ids", self._finished_streaming_ids)
 
         self._viewer_layout.addWidget(self.viewer)
 

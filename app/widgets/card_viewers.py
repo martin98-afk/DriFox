@@ -1133,6 +1133,23 @@ class CodeWebViewer(QWebEngineView):
         self._finish_defer_timer.timeout.connect(self._on_finish_defer_timeout)
         self._finish_defer_immediate = True
 
+        # 1c. 渲染落地看门狗：每次派发渲染后延时巡检，发现「有内容但文档为空」
+        # 就分级自愈（全量重渲 → 重载骨架 → 重建卡片）。
+        # 为什么必须独立于 content-sentinel：那个哨兵以 reportHeight 的高频
+        # 回传为驱动，且首行 `if not self._streaming: return`——非流式卡（历史
+        # 加载、流式结束后的终渲染）完全在它的盲区里；页面/JS 已死时连
+        # reportHeight 都不来，哨兵连触发机会都没有。看门狗是 Python 侧定时器，
+        # 两条都不依赖。
+        self._live_watch_timer = QTimer(self)
+        self._live_watch_timer.setSingleShot(True)
+        self._live_watch_timer.timeout.connect(self._check_render_landed)
+        self._live_watch_attempts = 0
+        # 上一轮渲染产物字节数（-1 = 未知，不参与判空；0 = 内容本身就是空渲染）
+        self._last_render_output_bytes = -1
+        self._live_probe_gen = 0
+        self._live_probe_timer = QTimer(self)
+        self._live_probe_timer.setSingleShot(True)
+        self._live_probe_timer.timeout.connect(self._on_live_probe_timeout)
         # 2. Resize 定时器
         # （原 _resize_timer(100ms → _safe_report_height) 从未 start()，死代码已移除；
         #   resize 期高度上报统一由 _resize_unlock_timer(150ms) 兜底。）
@@ -1787,6 +1804,12 @@ class CodeWebViewer(QWebEngineView):
         self._render_deferred = False
         # [perf-fix] 作废在途异步渲染：复用后旧任务结果不得落到新卡片
         self._render_seq += 1
+        # [render-watchdog] 复用后从零开始计数：池中 viewer 的空文档不是故障
+        self._live_watch_timer.stop()
+        self._live_probe_timer.stop()
+        self._live_probe_gen += 1
+        self._live_watch_attempts = 0
+        self._last_render_output_bytes = -1
         self._render_inflight = False
         self._render_pending = None
         # [PERF-final-async] 同步作废在途终渲染（复用后旧终态不得落到新卡片）
@@ -1862,6 +1885,14 @@ class CodeWebViewer(QWebEngineView):
     def _on_height_reported(self, h):
         # delegate wheel 抢断补装：高频回报时仅一次 is 比较，崩溃重建后自然重装
         self._ensure_wheel_filter_installed()
+        # [render-watchdog] 文档已有高度 = 内容确实落地，清空自愈计数并停表
+        # （__dict__ 容错：单测用 __new__ 造的无 init 桩对象，getattr 会被
+        #  PyQt 的 __getattr__ 抛 RuntimeError 而不是 AttributeError）
+        if h >= 40 and self.__dict__.get("_live_watch_attempts", 0):
+            self._live_watch_attempts = 0
+            _wt = self.__dict__.get("_live_watch_timer")
+            if _wt is not None:
+                _wt.stop()
         # 🐛 打点：结束这一拍的"JS 落地 + 布局"耗时 = 渲染派发 → 首个 reportHeight。
         if getattr(self, "_finish_t0", 0.0) > 0.0:
             _el = (time.perf_counter() - self._finish_t0) * 1000
@@ -2048,6 +2079,183 @@ class CodeWebViewer(QWebEngineView):
         self._stable_md_len = 0
         self._last_rendered_markdown = ""
         self._schedule_render(immediate=True)
+
+    # ── [render-watchdog] 渲染落地巡检（非流式盲区 + 死页面的唯一兜底） ──
+    _LIVE_WATCH_DELAY_MS = 5000
+    _LIVE_WATCH_PROBE_TIMEOUT_MS = 2500
+    _LIVE_WATCH_MAX_ATTEMPTS = 3
+    _LIVE_WATCH_MIN_MD = 80  # 短于一行不判空（空卡病态只发生在长消息上）
+    _LIVE_WATCH_PROBE_JS = (
+        "(function(){"
+        "var c=document.getElementById('content-placeholder');"
+        "var t=document.getElementById('tool-content');"
+        # children：图片/图表/fence 这类块正文文本为 0 但有子节点，不能算空；
+        # textContent 而非 innerText：折叠/隐藏的块也要算内容（innerText 返回空）
+        "return [c?c.children.length:-1,"
+        "t?t.children.length:-1,"
+        "c?c.textContent.length:-1,"
+        "t?t.textContent.length:-1,"
+        "document.body?document.body.scrollHeight:-1].join('|');})()"
+    )
+
+    def _arm_render_watchdog(self, restart: bool = False) -> None:
+        """派发渲染后启动落地巡检（restart=False 时已激活则不重启）。"""
+        try:
+            _wt = self.__dict__.get("_live_watch_timer")
+            if _wt is not None and (restart or not _wt.isActive()):
+                _wt.start(self._LIVE_WATCH_DELAY_MS)
+        except RuntimeError:
+            pass
+
+    def _content_md_len(self) -> int:
+        """当前内容长度；md 还没生成时向懒回调要一次（只读，不消费引用）。"""
+        n = len(self.__dict__.get("_markdown_text", "") or "")
+        if n >= self._LIVE_WATCH_MIN_MD or self.__dict__.get("_lazy_markdown_cb") is None:
+            return n
+        try:
+            return len(self._lazy_markdown_cb() or "")
+        except Exception:
+            return n
+
+    def _check_render_landed(self) -> None:
+        """巡检：文档是否真的有内容。
+
+        真机症状（用户 2026-11-13）：偶发个别卡片永久空白，重新加载会话 /
+        重新发起对话才恢复。链路里存在多条「静默丢渲染」分支（JS 未就绪时
+        deferred、异步结果 seq 过期、updateContent 抛错、页面已死），任何一条
+        命中后都没有第二个人负责发现「内容没落地」——non-streaming 卡连
+        content-sentinel 都不覆盖（它首行就以 _streaming 为门）。这里用 Python
+        侧定时器 + 一次极小的 JS 探针拿真相，分三级自愈。
+        """
+        # 欢迎卡（light 骨架）语义不同：空内容不算故障
+        if self.__dict__.get("_light_skeleton", False):
+            return
+        try:
+            if sip.isdeleted(self) or not self.page():
+                return
+        except Exception:
+            return
+        if self._content_md_len() < self._LIVE_WATCH_MIN_MD:
+            self._live_watch_attempts = 0
+            return
+        if not self.isVisible():
+            # 不可见期间渲染被 V1 门控挂起（_render_deferred 是设计行为），
+            # 显示后由 showEvent 补渲。这里不重排队：重排队会在整段隐藏期
+            # 每 5s 空转一次；showEvent 补渲走 _perform_update，自会重新布防。
+            return
+        if self._render_deferred and self._is_js_ready:
+            # 可见 + JS 就绪却还挂着 deferred = 唤醒丢了（showEvent 已错过）
+            logger.info("[render-watchdog] 可见卡仍挂 deferred → 补一次补渲")
+            self._render_deferred = False
+            self._schedule_render(immediate=True)
+            self._arm_render_watchdog()
+            return
+        gen = self._live_probe_gen
+        try:
+            self.page().runJavaScript(
+                self._LIVE_WATCH_PROBE_JS,
+                lambda r, _g=gen: self._on_live_probe_result(_g, r),
+            )
+        except RuntimeError:
+            return
+        self._live_probe_timer.start(self._LIVE_WATCH_PROBE_TIMEOUT_MS)
+
+    def _on_live_probe_timeout(self) -> None:
+        """探针无回音 = 页面/JS 已死（runJavaScript 回调永不投递）→ 重载骨架。"""
+        logger.warning(
+            f"[render-watchdog] 探针无回音（页面已死？）md={self._content_md_len()} "
+            f"js_ready={self._is_js_ready} attempts={self._live_watch_attempts}"
+        )
+        self._live_probe_gen += 1  # 作废迟到回调
+        self._live_watch_attempts += 1
+        if self._live_watch_attempts >= self._LIVE_WATCH_MAX_ATTEMPTS:
+            self._live_watch_attempts = 0
+            logger.error("[render-watchdog] 重载骨架后仍无响应 → 请求重建 viewer")
+            self.needRecreate.emit()
+            return
+        self._reload_skeleton_for_heal()
+        self._arm_render_watchdog()
+
+    def _watch_state_text(self, cp_kids, tc_kids, cp_text, tc_text, scroll_h) -> str:
+        """看门狗日志用的状态快照（任何一种取值失败都不得影响自愈）。"""
+        try:
+            _p = self.parent()
+            while _p is not None and not hasattr(_p, "role"):
+                _p = _p.parent()  # viewer 直接父级是正文容器，身份在卡片上
+            _who = getattr(_p, "role", "?")
+            _idx = getattr(_p, "_message_index", "?")
+            _d = self.__dict__
+            return (
+                f"role={_who} idx={_idx} md={self._content_md_len()} "
+                f"text={cp_text}/{tc_text} kids={cp_kids}/{tc_kids} h={scroll_h} "
+                f"streaming={_d.get('_streaming')} history={_d.get('_is_history')} "
+                f"js_ready={_d.get('_is_js_ready')} deferred={_d.get('_render_deferred')} "
+                f"inflight={_d.get('_render_inflight')} "
+                f"v2_last={'set' if _d.get('_v2_last') else 'None'} "
+                f"stable={_d.get('_stable_md_len')} "
+                f"last_r={len(_d.get('_last_rendered_markdown') or '')}"
+            )
+        except Exception:
+            return f"<state unavailable> text={cp_text}/{tc_text} kids={cp_kids}/{tc_kids}"
+
+    def _on_live_probe_result(self, gen: int, result) -> None:
+        """探针回音：按真实 DOM 判空，命中则分级自愈。"""
+        if gen != self._live_probe_gen:
+            return
+        self._live_probe_timer.stop()
+        try:
+            cp_kids, tc_kids, cp_text, tc_text, scroll_h = (int(x) for x in str(result).split("|"))
+        except Exception:
+            return
+        if cp_kids > 0 or tc_kids > 0 or cp_text > 0 or tc_text > 0:
+            # 任一容器有子节点/文本就算落地。两条判据都要：scrollHeight 靠不住
+            # （空文档也有骨架 chrome 的 40~50px，实测 h=47），而纯图片/图表
+            # 卡片的正文文本为 0 但子节点数 > 0。
+            self._live_watch_attempts = 0
+            return
+        if self._last_render_output_bytes == 0:
+            # 内容本身就是空渲染（插件自定义块渲染为 '' 等），不是渲染丢失
+            self._live_watch_attempts = 0
+            return
+        _state = self._watch_state_text(cp_kids, tc_kids, cp_text, tc_text, scroll_h)
+        self._live_watch_attempts += 1
+        if self._live_watch_attempts >= self._LIVE_WATCH_MAX_ATTEMPTS:
+            self._live_watch_attempts = 0
+            logger.error(f"[render-watchdog] 三次自愈无效，重建 viewer：{_state}")
+            self.needRecreate.emit()
+            return
+        if self._live_watch_attempts == 1:
+            logger.warning(f"[render-watchdog] 有内容但文档为空 → 强制全量重渲：{_state}")
+            # 全量重渲必须复位一切"已渲染"基线，否则差量/v2 都会判定无事可做
+            self._render_deferred = False
+            self._needs_full_render = True
+            self._stable_html = ""
+            self._stable_md_len = 0
+            self._last_rendered_markdown = ""
+            self._v2_last = None
+            self._schedule_render(immediate=True)
+        else:
+            logger.warning(f"[render-watchdog] 全量重渲未生效 → 重载骨架：{_state}")
+            self._reload_skeleton_for_heal()
+        self._arm_render_watchdog()
+
+    def _reload_skeleton_for_heal(self) -> None:
+        """重载骨架（治「页面活着但 JS 半死 / runJavaScript 静默丢弃」）。
+
+        与崩溃自愈同一条路：骨架重建后 _on_js_ready 会拿 _markdown_text /
+        懒回调补渲一次，所以这里不额外派发渲染。
+        """
+        try:
+            if self._lazy_markdown_cb is not None and not self._markdown_text:
+                self._markdown_text = self._lazy_markdown_cb() or ""
+        except Exception:
+            pass
+        try:
+            self._live_probe_gen += 1
+            self._is_js_ready = False
+            self._load_skeleton()
+        except Exception:
+            logger.exception("[render-watchdog] 重载骨架失败")
 
     def _on_body_geometry_reported(self, scroll_height: int, scroll_top: int, client_height: int):
         """缓存 body 的真实滚动几何（reportHeight 顺带回传）。
@@ -2243,6 +2451,8 @@ class CodeWebViewer(QWebEngineView):
 
     def _on_js_ready(self):
         self._is_js_ready = True
+        # [render-watchdog] 骨架就绪后必有补渲，从这一刻起盯落地
+        self._arm_render_watchdog()
         # 同步简洁模式标志到 JS（统一走 sync_compact_mode_to_js）
         self.sync_compact_mode_to_js()
         # 简洁模式下工具与思考区放正文下方（用户 2026-11-02 诉求，取代吸顶）
@@ -7994,6 +8204,11 @@ class CodeWebViewer(QWebEngineView):
                 self._render_deferred = True
                 return
 
+            # [render-watchdog] 可见性门控已放行 = 本轮一定会派发渲染，
+            # 从这一刻起盯「内容是否真的落到 DOM」（下面任何一条静默 return
+            # 都可能让这次派发白费，而没有任何人负责发现）。
+            self._arm_render_watchdog()
+
             # ── [B5] block 级渲染通道（DRIFOX_RENDER_V2）：接管 DOM 更新 ──
             # 与旧路径互斥：v2 接管时 updateContent / 差量 / save-restore 全部
             # 跳过。未接管（无块源）或异常时复位 v2 状态并回退旧全量路径
@@ -8099,6 +8314,7 @@ class CodeWebViewer(QWebEngineView):
                         self._sequence_final_render(self._markdown_text)
                         return
                     html_content = self._render_markdown_to_html(self._markdown_text)
+                    self._last_render_output_bytes = len(html_content or "")
                 self._final_render_pending = False
                 self._last_rendered_markdown = self._markdown_text
                 self._height_report_pending = True
@@ -8929,6 +9145,14 @@ class CodeWebViewer(QWebEngineView):
             return True
         js: List[str] = []
         _has_patch_ops = (not content_ops.is_empty) or (not tool_ops.is_empty)
+        # [render-watchdog] 记录本轮产物体量：产物本身为 0 字节说明内容就是
+        # 空渲染（插件自定义块等），看门狗不得把它当"渲染丢失"反复自愈。
+        # 仅在真有 patch / 全量落地时更新——纯 live 尾态帧不改变 DOM 块，
+        # 沿用上一轮值才能反映「最后一次真正写块」的产物。
+        if _has_patch_ops or force_full:
+            self._last_render_output_bytes = sum(
+                len(it.html or "") for it in (*content_ops.items, *tool_ops.items)
+            )
         # 帧级揭示缓冲结算：必须早于本批任何 DOM 操作。
         # - force_full / 正式化：本批 html 已含全量文本，且会替换/清空 live 节点
         #   → 丢弃缓冲（补回去就是重复文本）。
@@ -9280,6 +9504,9 @@ class CodeWebViewer(QWebEngineView):
         if sip.isdeleted(self) or not self.page():
             return
         self._final_render_pending = False
+        # [render-watchdog] 终渲染落地拍：从这一刻计时
+        self._arm_render_watchdog(restart=True)
+        self._last_render_output_bytes = len(html or "")
         # [T24] 终态全量产物入图检测（只置不清）
         self._mark_has_charts(html)
         # save/restore 判定与同步路径一致（字段 cleanup 不清）：工具 DOM 被 JS
@@ -9332,6 +9559,9 @@ class CodeWebViewer(QWebEngineView):
         - seq 守卫：过期结果（新渲染已提交）直接丢弃
         - 成功后检查 pending 续派（在途期间积压的最新快照）
         """
+        # [render-watchdog] 异步结果落地 = DOM 写入就在这一拍，从此刻重新计时
+        self._arm_render_watchdog(restart=True)
+        # [render-watchdog] 异步结果落地 = DOM 写入就在这一拍，从此刻重新计时
         try:
             if seq != self._render_seq:
                 # 过期结果：丢弃（新渲染已提交或已失效）
@@ -9341,6 +9571,8 @@ class CodeWebViewer(QWebEngineView):
                 return
             if sip.isdeleted(self) or not self.page():
                 return
+            self._arm_render_watchdog(restart=True)
+            self._last_render_output_bytes = len(html or "")
             self._last_rendered_html = html
             self._height_report_pending = True
             self._rdiag_hit("apply_ok")
