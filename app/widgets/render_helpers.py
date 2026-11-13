@@ -167,10 +167,14 @@ def _tool_path_arg(tool_args) -> str:
     return ""
 
 def _render_path_link(display: str, path: str) -> str:
-    """可点路径元素：显示 display（可为截断文本），携带完整原始路径"""
+    """可点路径元素：显示 display（可为截断文本），携带完整原始路径
+
+    不设 title：hover 会弹浏览器原生 tooltip 盖住正文（长绝对路径换行后尤甚）。
+    完整路径已在 data-open-path，点击即交给宿主打开，无需悬浮预览。
+    """
     return (
-        f'<span class="tool-path-link" data-open-path="{escape(path)}" '
-        f'title="{escape(path)}">{escape(display)}</span>'
+        f'<span class="tool-path-link" data-open-path="{escape(path)}">'
+        f'{escape(display)}</span>'
     )
 
 def _linkify_path(text: str, path: str) -> str:

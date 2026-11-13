@@ -49,6 +49,20 @@ class TestFoldableHeaderPath:
         html = render_tool_block("bash", {"command": "ls -la"}, "ok", True, tool_call_id="tc9")
         assert "data-open-path" not in html
 
+    def test_path_link_no_title_tooltip(self):
+        """可点路径不设 title：hover 弹原生 tooltip 会盖住正文。"""
+        html = render_tool_block(
+            "edit",
+            {"path": "a/very/long/path/to/the/file.py", "description": "改点东西"},
+            "已编辑",
+            True,
+            tool_call_id="tc1",
+        )
+        m = _LINK_RE.search(_head(html))
+        assert m is not None
+        tag = html[html.find('<span class="tool-path-link"'):]
+        assert "title=" not in tag[: tag.find(">") + 1]
+
 
 class TestInlinePreviewPath:
     def test_inline_preview_path_clickable(self, monkeypatch):
