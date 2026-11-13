@@ -126,6 +126,7 @@ CATALOG: Dict[str, CapabilitySpec] = {
         _spec("session.interrupt", _M, "停止当前流式输出（入队，本轮结束后执行）", _BOTH),
         _spec("session.new", _M, "新建会话（入队，停流后执行）", _BOTH),
         _spec("session.send", _M, "发消息驱动一轮对话（入队；ephemeral 不写会话不渲染；可按 window_id 定向）", _BOTH),
+        _spec("session.persist", _M, "把会话快照落库（不依赖窗口，headless 会话用）", _UI),
         _spec(
             "session.title.commit",
             _H,
@@ -192,6 +193,12 @@ CATALOG: Dict[str, CapabilitySpec] = {
         _spec("tool.execute", _H, "执行任意工具", _BOTH, ["get_tool_executor"], value_style="value"),
         # ── 对话引擎 ──
         _spec("engine.session", _H, "创建对话引擎会话（消耗 token）", _UI, ["create_engine_session"]),
+        _spec(
+            "engine.session.resume",
+            _H,
+            "按 session_id 恢复已有会话的对话引擎（IM 等 headless 会话续用）",
+            _UI,
+        ),
         _spec("engine.stack", _H, "对话执行栈工厂", _UI, ["conversation_stack"]),
         # ── 通讯平台 ──
         _spec("platform.send", _H, "向通讯平台发送消息（数据外发）", _UI, ["send_to_platform"]),

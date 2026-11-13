@@ -570,6 +570,62 @@ def _engine_session(host: Any):
     return create
 
 
+def _engine_session_resume(host: Any):
+    """按 session_id 恢复已有会话（IM 等 headless 会话跨轮/跨进程续用）。
+
+    EngineSessionImpl 默认自建 SessionManager + 一个 ``plugin:<name>`` 会话；
+    恢复路径把目标 ChatSession 换进去，后续 turn() 直接续写这份历史。
+    会话落库由调用方经 ``session.persist`` 负责（宿主不猜持久化时机）。
+    """
+
+    def resume(session_id: str, engine_name: str = "im", **kwargs):
+        from app.core.conversation.chat_session import ChatSession
+        from app.core.conversation.engine_session import EngineSessionImpl
+        from app.core.store import SessionStore
+
+        data = SessionStore.get_instance().get_session(str(session_id))
+        if not data:
+            raise KeyError(f"session {session_id} not found")
+        session = ChatSession.from_dict(data)
+        backend = getattr(host, "backend", None)
+        impl = EngineSessionImpl(
+            engine_name=engine_name,
+            get_model_config=host._get_current_model_config,
+            tool_executor=getattr(backend, "tool_executor", None) if backend else None,
+            agent_manager=getattr(backend, "agent_manager", None) if backend else None,
+            backend=backend,
+            **kwargs,
+        )
+        sm = impl.core.session_manager
+        sm.sessions.clear()
+        sm.sessions.append(session)
+        sm.current_index = 0
+        sm._touch_session(session.session_id)
+        return impl
+
+    return resume
+
+
+def _session_persist(host: Any):
+    """把会话快照落库（不依赖窗口；IM 等 headless 会话每轮结束调用）。
+
+    snapshot 为 ``ChatSession.to_dict()`` 形态；返回是否写入成功。
+    """
+
+    def persist(snapshot: Dict[str, Any]) -> bool:
+        if not isinstance(snapshot, dict) or not snapshot.get("session_id"):
+            return False
+        try:
+            from app.core.store import SessionStore
+
+            return bool(SessionStore.get_instance().save_session(snapshot))
+        except Exception as e:  # noqa: BLE001 — 落库失败不抛给插件
+            logger.warning(f"[Capability] session.persist 失败: {e}")
+            return False
+
+    return persist
+
+
 def _session_read(host: Any):
     """当前会话的只读快照（插件拿消息内容，不拿会话对象）。
 
@@ -1962,10 +2018,14 @@ def register(registry) -> None:
     reg.register("theme.read", _theme_read, surface="ui", owner="core:ui")
     reg.register("engine.stack", _engine_stack, surface="ui", owner="core:ui")
     reg.register("engine.session", _engine_session, surface="ui", owner="core:ui")
+    reg.register(
+        "engine.session.resume", _engine_session_resume, surface="ui", owner="core:ui"
+    )
     reg.register("session.read", _session_read, surface="ui", owner="core:ui")
     reg.register("session.list", _session_list, surface="ui", owner="core:ui")
     reg.register("session.invalidate", _session_invalidate, surface="ui", owner="core:ui")
     reg.register("session.write", _session_write, surface="ui", owner="core:ui")
+    reg.register("session.persist", _session_persist, surface="ui", owner="core:ui")
     reg.register("session.interrupt", _session_interrupt, surface="ui", owner="core:ui")
     reg.register("session.new", _session_new, surface="ui", owner="core:ui")
     reg.register("session.send", _session_send, surface="ui", owner="core:ui")
