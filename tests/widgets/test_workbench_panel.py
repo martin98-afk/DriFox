@@ -141,6 +141,24 @@ def test_default_landing_prefers_flag_then_first(panel):
     panel.sync_plugin_pages([_info("a", "A页", order_hint=0), _info("b", "B页", order_hint=10)])
     assert panel.default_page_id() == "a"
 
+def test_apply_default_landing_switches_to_flagged_page(panel):
+    """初次打开：default_landing 标记页即使排在末位也是实际落点"""
+    panel.sync_plugin_pages(
+        [
+            _info("a", "A页", order_hint=0),
+            _info("b", "B页", order_hint=10),
+            _info("c", "C页", order_hint=15, default=True),
+        ]
+    )
+    panel.set_current_tab(0)  # 模拟 reconcile 后 stack 索引漂移停在首页
+    assert panel.apply_default_landing() is True
+    assert panel.current_tab_id() == "c"
+    assert panel._stack.currentWidget() is panel._plugin_widgets["c"]
+
+def test_apply_default_landing_noop_without_pages(panel):
+    assert panel.apply_default_landing() is False
+    assert panel.current_tab_id() is None
+
 
 def test_plugin_page_mount_and_unmount(panel):
     panel.sync_plugin_pages([_info("plug1", "插件页", order_hint=0)])
