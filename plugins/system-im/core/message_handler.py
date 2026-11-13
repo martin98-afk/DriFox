@@ -14,7 +14,6 @@ from loguru import logger
 
 from app.gateway.base import (
     MessageEvent,
-    Platform,
     SendResult,
 )
 from .session_manager import GatewaySessionManager
@@ -35,7 +34,7 @@ class MessageHandler:
         self,
         session_manager: GatewaySessionManager,
         process_message_callback: Callable,
-        send_message_callback: Callable[[Platform, str, str, Any], SendResult],
+        send_message_callback: Callable[[str, str, str, Any], SendResult],
     ):
         """
         初始化消息处理器

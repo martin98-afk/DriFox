@@ -10,12 +10,12 @@
 import asyncio
 from types import SimpleNamespace
 
-from app.gateway.base import MessageEvent, Platform, SendResult
+from app.gateway.base import MessageEvent, SendResult
 from system_im_core.message_handler import MessageHandler
 from system_im_core.session_manager import GatewaySessionManager
 
 
-def _event(user_id, chat_id, chat_type="dm", platform=Platform.WECOM, text="hi"):
+def _event(user_id, chat_id, chat_type="dm", platform="wecom", text="hi"):
     return MessageEvent(
         text=text,
         chat_id=chat_id,
@@ -125,7 +125,7 @@ def test_process_message_emits_group_chat_type():
     )
     out = asyncio.run(
         GatewayService._process_message(
-            svc, "sid", "hi", Platform.WECOM, "group_1", "u_a", chat_type="group"
+            svc, "sid", "hi", "wecom", "group_1", "u_a", chat_type="group"
         )
     )
 

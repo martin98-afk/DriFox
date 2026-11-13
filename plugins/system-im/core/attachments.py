@@ -3,8 +3,7 @@
 
 - ``_extract_markdown_images`` / ``_extract_markdown_files``：从模型回复的
   Markdown 里摘出本地图片/附件路径并清掉标记，交给平台适配器原生发送；
-- ``_gw_str_platform``：平台入参归一（枚举内平台转 ``Platform``，第三方
-  ``str`` 平台 id 原样直通，Phase E 契约）。
+- ``_gw_str_platform``：平台入参归一（一律转 ``str``，平台 id 即 registry 键）。
 
 宿主侧不再使用这些函数，保留在插件内避免主程序背负 IM 语义。
 """
@@ -15,7 +14,6 @@ import re
 from typing import Any
 
 from app.constants import IMAGE_EXTENSIONS
-from app.gateway.base import Platform as GatewayPlatform
 
 
 def _extract_markdown_images(content: str) -> tuple[str, list[str]]:
@@ -67,11 +65,6 @@ def _extract_markdown_files(content: str) -> tuple[str, list[str]]:
     return cleaned, file_paths
 
 
-def _gw_str_platform(platform: Any):
-    """Gateway 平台入参归一：枚举内平台转 Platform；第三方 str 平台 id 原样直通。"""
-    if isinstance(platform, GatewayPlatform):
-        return platform
-    try:
-        return GatewayPlatform(platform)
-    except ValueError:
-        return platform
+def _gw_str_platform(platform: Any) -> str:
+    """平台入参归一：一律转 str（平台 id 即 registry 键，不设闭集）。"""
+    return str(platform)

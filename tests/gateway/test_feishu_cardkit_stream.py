@@ -61,7 +61,7 @@ def load_adapter_cls():
         chat_id: str = ""
         user_id: str = ""
         user_name: str = ""
-        platform: Platform = Platform.FEISHU
+        platform: Platform = "feishu"
         chat_type: str = "dm"
         media_urls: List[str] = field(default_factory=list)
         media_types: List[str] = field(default_factory=list)
@@ -78,7 +78,7 @@ def load_adapter_cls():
     @dataclass
     class PlatformConfig:
         enabled: bool = False
-        platform: Platform = Platform.FEISHU
+        platform: Platform = "feishu"
         extra: Dict[str, Any] = field(default_factory=dict)
 
     class BasePlatformAdapter:

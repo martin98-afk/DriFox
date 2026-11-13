@@ -86,8 +86,8 @@ class TestEnsureAdapterRebuildStopsOld:
         mgr._schedule_coro = lambda coro: scheduled.append(coro)
 
         reg_def = MagicMock()
-        reg_def.validate_config = MagicMock(return_value=(True, None))
-        reg_def.config_builder = None
+        reg_def.validate = MagicMock(return_value=(True, None))
+        reg_def.is_enabled = MagicMock(return_value=True)
         reg_def.adapter_factory = MagicMock(return_value=MagicMock())
         reg_def.check_requirements = MagicMock(return_value=True)
 

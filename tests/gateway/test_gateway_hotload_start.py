@@ -17,7 +17,7 @@
 
 import pytest
 
-from app.gateway.base import BasePlatformAdapter, PlatformConfig, SendResult
+from app.gateway.base import BasePlatformAdapter, SendResult
 from app.plugins.contracts.gateway_platform import GatewayPlatformDef
 from app.plugins.registries.gateway_platform_registry import GatewayPlatformRegistry
 import system_im_core.manager as mgr_mod
@@ -36,8 +36,10 @@ def isolated_singletons(monkeypatch):
 
 
 class _FakeAdapter(BasePlatformAdapter):
-    def __init__(self, config):
-        super().__init__(config)
+    platform_id = "testgw"
+
+    def __init__(self) -> None:
+        super().__init__()
         self.started = False
 
     async def start(self):
@@ -64,19 +66,15 @@ class _FakeAdapter(BasePlatformAdapter):
 
 
 def _make_def(platform_id: str = "testgw", source: str = "plugin:testgw"):
-    def factory(cfg):
-        return _FakeAdapter(cfg)
 
-    def cfg_builder():
-        return PlatformConfig(enabled=True, platform=platform_id)
 
     return (
         GatewayPlatformDef(
             platform_id=platform_id,
             display_name="TestGW",
-            adapter_factory=factory,
+            adapter_factory=_FakeAdapter,
             check_requirements=lambda: True,
-            config_builder=cfg_builder,
+            is_enabled=lambda: True,
             ui_order=10,
         ),
         source,

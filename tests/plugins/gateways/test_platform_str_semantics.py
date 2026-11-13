@@ -1,31 +1,36 @@
 # -*- coding: utf-8 -*-
-"""Platform str-mixin 语义验证：第三方平台 id 打通的前提。"""
+"""平台 id 语义验证：平台不设闭集，一律以 str 作 registry 键。
 
-from app.gateway.base import Platform
+历史背景：``Platform(str, Enum)`` 曾把内置 7 平台写死，第三方 id 传给
+``Platform(...)`` 直接 ValueError，且 ``str(Platform.WECOM)`` 得到
+``"Platform.WECOM"`` 而非 ``"wecom"``。枚举删除后，宿主契约只剩
+``MessageEvent.platform: str``，第三方平台与内置平台同构。
+"""
+from app.gateway.base import MessageEvent
+from app.plugins.contracts.gateway_platform import GatewayPlatformDef
 
 
-class TestStrMixinSemantics:
-    def test_value_equality(self):
-        assert Platform.WECOM == "wecom"
-        assert "wecom" == Platform.WECOM
-        assert Platform.TELEGRAM != "telegram "  # 无空格容错
+class TestPlatformIdSemantics:
+    def test_message_event_platform_is_str(self):
+        event = MessageEvent(platform="wecom")
+        assert event.platform == "wecom"
+        assert f"{event.platform}:chat" == "wecom:chat"
 
-    def test_value_attribute_unchanged(self):
-        assert Platform.FEISHU.value == "feishu"
+    def test_third_party_id_accepted(self):
+        # 第三方平台 id 与内置平台无差别
+        event = MessageEvent(platform="pt-awesome")
+        assert event.platform == "pt-awesome"
 
-    def test_dict_key_interop(self):
-        # manager._adapters 等内部 dict 的 key 混用安全前提
-        d = {Platform.WECOM: 1}
-        assert d["wecom"] == 1
-        d2 = {"slack": 2}
-        assert d2[Platform.SLACK] == 2
+    def test_registry_key_is_plain_str(self):
+        # registry 以 platform_id 字符串为键：内置与第三方同构
+        builtin = GatewayPlatformDef(platform_id="feishu", display_name="飞书", adapter_factory=lambda: None)
+        third = GatewayPlatformDef(platform_id="teams", display_name="Teams", adapter_factory=lambda: None)
+        assert builtin.platform_id == "feishu"
+        assert third.platform_id == "teams"
+        assert builtin.id == third.id.replace("teams", "feishu")
 
-    def test_membership(self):
-        assert Platform.DINGTALK in {"dingtalk"}
-        assert "feishu" in {Platform.FEISHU}
-
-    def test_unknown_id_still_plain_str(self):
-        # 第三方平台 id 无枚举成员，消费方直接以 str 使用
-        third_party = "teams"
-        assert third_party not in {p.value for p in Platform}
-        assert Platform.WECOM != third_party
+    def test_def_has_no_config_structure(self):
+        """契约只留行为回调，不再承载任何配置字段。"""
+        fields = set(GatewayPlatformDef.__dataclass_fields__)
+        assert not fields & {"config_builder", "config_writer", "build_config_values", "validate_config"}
+        assert {"is_enabled", "set_enabled", "validate", "adapter_factory"} <= fields

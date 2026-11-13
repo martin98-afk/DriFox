@@ -14,14 +14,14 @@ from typing import Any, Callable, Dict, List, Optional
 
 from loguru import logger
 
-from app.gateway.base import MessageEvent, Platform, get_gateway_data_dir
+from app.gateway.base import MessageEvent, get_gateway_data_dir
 
 
 @dataclass
 class GatewaySession:
     """Gateway 会话"""
     session_id: str
-    platform: Platform
+    platform: str  # 平台 id（registry 键）
     user_id: str
     chat_id: str
     chat_type: str = "dm"  # dm / group
@@ -67,10 +67,8 @@ class GatewaySessionManager:
 
         # 会话索引: platform -> index_key -> session_id
         # index_key 私聊为 user_id，群聊为 "group:<chat_id>"（见 _index_key）
-        self._session_index: Dict[Platform, Dict[str, str]] = {
-            Platform.WECOM: {},
-            Platform.DINGTALK: {},
-        }
+        # 平台 id → 索引键 → session_id（平台不设闭集，按需建桶）
+        self._session_index: Dict[str, Dict[str, str]] = {}
 
         # 回调: 创建新会话时调用
         self._on_create_session: Optional[Callable[[GatewaySession], None]] = None
@@ -88,11 +86,7 @@ class GatewaySessionManager:
                     data = json.load(f)
 
                 for session_id, info in data.items():
-                    raw_platform = info["platform"]
-                    try:
-                        platform = Platform(raw_platform)  # 枚举内平台（wecom/dingtalk…）
-                    except ValueError:
-                        platform = raw_platform  # 第三方平台 id（str 直通，Phase E 契约）
+                    platform = str(info["platform"])
                     session = GatewaySession(
                         session_id=session_id,
                         platform=platform,
@@ -144,11 +138,11 @@ class GatewaySessionManager:
             return f"group:{chat_id}"
         return user_id
 
-    def _generate_session_id(self, platform: Platform, index_key: str) -> str:
-        """生成会话 ID（platform 兼容 str 直通）"""
+    def _generate_session_id(self, platform: str, index_key: str) -> str:
+        """生成会话 ID（平台 id 一律 str）"""
         import hashlib
         timestamp = str(int(time.time() * 1000))
-        raw = f"{getattr(platform, 'value', platform)}:{index_key}:{timestamp}"
+        raw = f"{platform}:{index_key}:{timestamp}"
         return hashlib.md5(raw.encode()).hexdigest()[:16]
 
     def get_or_create_session(self, event: MessageEvent) -> GatewaySession:
@@ -251,7 +245,7 @@ class GatewaySessionManager:
         return True
 
 
-    def list_sessions(self, platform: Optional[Platform] = None) -> List[GatewaySession]:
+    def list_sessions(self, platform: Optional[str] = None) -> List[GatewaySession]:
         """
         列出会话
         

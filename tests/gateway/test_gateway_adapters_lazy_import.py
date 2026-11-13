@@ -34,11 +34,11 @@ import pytest
 class TestGatewaySubpackageLoading:
     """主程序 gateway 子包加载链路在缺平台插件时也应工作"""
 
-    def test_gateway_config_importable(self):
-        """system_im_core.config 可加载（无 platform 适配器时仍正常）"""
+    def test_gateway_config_module_removed(self):
+        """GatewayConfigHelper 已随 PlatformConfig 一起删除（配置由插件自管）"""
         sys.modules.pop("system_im_core.config", None)
-        config = importlib.import_module("system_im_core.config")
-        assert hasattr(config, "get_gateway_config")
+        with pytest.raises(ModuleNotFoundError):
+            importlib.import_module("system_im_core.config")
 
     def test_gateway_manager_importable(self):
         """system_im_core.manager 可加载（无 platform 适配器时仍正常）"""

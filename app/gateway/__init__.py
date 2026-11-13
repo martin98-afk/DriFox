@@ -3,8 +3,8 @@
 
 本包只放**平台插件与网关实现共用的接口**：
 
-- ``base``：``Platform`` / ``MessageEvent`` / ``SendResult`` / ``ChatInfo`` /
-  ``PlatformConfig`` / ``BasePlatformAdapter`` / ``get_cache_dir``
+- ``base``：``MessageEvent`` / ``SendResult`` / ``ChatInfo`` /
+  ``BasePlatformAdapter`` / ``get_cache_dir`` / ``get_gateway_data_dir``
 - ``group_history``：群消息留档（平台插件直接 import）
 
 IM 业务实现（管理器、会话映射、媒体、交互提问、引擎、服务）在
@@ -17,20 +17,16 @@ from app.gateway.base import (
     ChatInfo,
     MessageEvent,
     MessageType,
-    Platform,
-    PlatformConfig,
     SendResult,
     get_cache_dir,
     get_gateway_data_dir,
 )
 
 __all__ = [
-    "Platform",
     "MessageType",
     "MessageEvent",
     "SendResult",
     "ChatInfo",
-    "PlatformConfig",
     "BasePlatformAdapter",
     "get_cache_dir",
     "get_gateway_data_dir",

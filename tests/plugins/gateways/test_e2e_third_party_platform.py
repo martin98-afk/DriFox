@@ -37,20 +37,30 @@ def third_party_plugin(tmp_path, monkeypatch):
     # 平台模块：注册 GatewayPlatformDef
     (plug / "pt_awesome.py").write_text(
         "# -*- coding: utf-8 -*-\n"
+        "from app.gateway.base import BasePlatformAdapter\n"
         "from app.plugins.contracts.gateway_platform import GatewayPlatformDef\n"
-        "from app.gateway.base import PlatformConfig\n"
         "\n"
-        "class PtAwesomeAdapter:\n"
-        "    platform = 'pt-awesome'\n"
-        "    def __init__(self, config):\n"
-        "        self.config = config\n"
+        "class PtAwesomeAdapter(BasePlatformAdapter):\n"
+        "    platform_id = 'pt-awesome'\n"
+        "    name = 'PT Awesome'\n"
+        "\n"
+        "    async def connect(self):\n"
+        "        return True\n"
+        "\n"
+        "    async def disconnect(self):\n"
+        "        return None\n"
+        "\n"
+        "    async def send(self, chat_id, content, **kwargs):\n"
+        "        return SendResult(success=True)\n"
+        "\n"
+        "    async def get_chat_info(self, chat_id):\n"
+        "        return ChatInfo(chat_id=chat_id)\n"
         "\n"
         "def register(registry):\n"
         "    registry.register(GatewayPlatformDef(\n"
         "        platform_id='pt-awesome', display_name='PT Awesome',\n"
-        "        adapter_factory=lambda cfg: PtAwesomeAdapter(cfg),\n"
-        "        config_builder=lambda: PlatformConfig(enabled=True, platform='pt-awesome',\n"
-        "                                               token='e2e-token'),\n"
+        "        adapter_factory=PtAwesomeAdapter,\n"
+        "        is_enabled=lambda: True,\n"
         "    ))\n",
         encoding="utf-8",
     )
@@ -102,8 +112,7 @@ class TestThirdPartyFullChain:
         assert d.display_name == "PT Awesome"
 
     def test_manager_picks_up_third_party_adapter(self, third_party_plugin):
-        """PlatformManager._load_adapters 拾取 → adapter 实例持有 builder 提供的 token。"""
-        from system_im_core.config import GatewayConfigHelper
+        """PlatformManager._load_adapters 拾取第三方平台，adapter 自报 platform_id。"""
         from system_im_core.manager import PlatformManager
         from app.plugins.registries.gateway_platform_registry import GatewayPlatformRegistry
 
@@ -112,16 +121,15 @@ class TestThirdPartyFullChain:
         assert GatewayPlatformRegistry.get_instance().get("pt-awesome") is not None
 
         # 2) 绕过 PlatformManager.__init__（避免启线程/事件循环/session_manager）
-        #    仅补齐 _load_adapters 依赖：_adapters 容器 + _config（get_platform_config 静态门面）
         mgr = PlatformManager.__new__(PlatformManager)
         mgr._adapters = {}
-        mgr._config = GatewayConfigHelper
         PlatformManager._load_adapters(mgr)
 
-        # 3) 断言：第三方平台已注入，且 builder 提供的 token 透传到 adapter
+        # 3) 断言：第三方平台已注入，平台标识由适配器自报（宿主不传配置）
         assert "pt-awesome" in mgr._adapters, "PlatformManager 未拾取第三方平台 adapter"
         adapter = mgr._adapters["pt-awesome"]
-        assert adapter.config.token == "e2e-token", "config_builder 提供的 token 未透传"
+        assert adapter.platform_id == "pt-awesome"
+        assert adapter.platform == "pt-awesome"
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -165,23 +173,21 @@ class TestThirdPartyConfigChain:
         )
         PluginConfigRegistry.get_instance().register(schema)
         try:
-            # 2) 第三方插件 def：builder 从 PluginConfigStore 读
+            # 2) 第三方插件 def：配置自管（闭包读本插件存储）
             from app.plugins.loaders import runtime_component_loader as rcl
 
             rcl._plugin_roots()  # sanity: fixture 已 monkeypatch
 
-            from app.gateway.base import PlatformConfig
             from app.plugins.contracts.gateway_platform import GatewayPlatformDef
 
-            def _config_builder():
+            def _values() -> dict:
                 from app.plugins.managers.plugin_config_store import PluginConfigStore
 
                 store = PluginConfigStore()
-                return PlatformConfig(
-                    enabled=True,
-                    platform="pt-awesome",
-                    token=store.get("pt-awesome", "bot_token") or "e2e-fallback",
-                )
+                return {"bot_token": store.get("pt-awesome", "bot_token") or ""}
+
+            def _validate() -> tuple:
+                return bool(_values()["bot_token"]), "Bot Token 未配置"
 
             # 3) 写入用户配置（模拟设置面板保存）
             from app.plugins.managers.plugin_config_store import PluginConfigStore
@@ -194,17 +200,18 @@ class TestThirdPartyConfigChain:
                 GatewayPlatformDef(
                     platform_id="pt-awesome",
                     display_name="PT Awesome",
-                    adapter_factory=lambda cfg: object(),
-                    config_builder=_config_builder,
+                    adapter_factory=lambda: object(),
+                    is_enabled=lambda: True,
+                    validate=_validate,
                 ),
                 source="plugin:pt-awesome",
             )
-            # 5) builder 读出写入值（builder 经 store 三级链：env→存储→默认）
+            # 5) def 的校验回调读出写入值（插件自管配置 → 宿主只问「能不能启」）
             d = reg.get("pt-awesome")
             assert d is not None
-            cfg = d.config_builder()
-            assert cfg.token == "e2e-user-token", "builder 未从 PluginConfigStore 读取写入值"
-            assert cfg.enabled is True
+            ok, err = d.validate()
+            assert ok, f"写入配置后仍判未配置: {err}"
+            assert _values()["bot_token"] == "e2e-user-token", "插件未从 PluginConfigStore 读出写入值"
         finally:
             PluginConfigRegistry.get_instance().unregister_plugin("pt-awesome")
 

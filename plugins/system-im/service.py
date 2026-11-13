@@ -258,11 +258,10 @@ class GatewayService(QObject):
         检查点调用一次，遍历成本可忽略。
         """
         try:
-            from system_im_core.config import GatewayConfigHelper
             from app.plugins.registries.gateway_platform_registry import GatewayPlatformRegistry
 
             for d in GatewayPlatformRegistry.get_instance().list_platforms():
-                if GatewayConfigHelper.is_platform_enabled(d.platform_id):
+                if d.is_enabled():
                     return True
             return False
         except Exception as e:
@@ -334,8 +333,7 @@ class GatewayService(QObject):
 
             for d in GatewayPlatformRegistry.get_instance().list_platforms():
                 try:
-                    cfg = self._manager._config.get_platform_config(d.platform_id)
-                    if not cfg or not getattr(cfg, "enabled", False):
+                    if not d.is_enabled():
                         continue
                     adapter = self._manager._adapters.get(d.platform_id)
                     if adapter is not None and adapter.is_connected:
@@ -401,15 +399,19 @@ class GatewayService(QObject):
         return True
 
     def set_platform_enabled(self, platform_id: str, enabled: bool) -> bool:
-        """切换单个平台的启用状态并即时连接/断开（继承原配置其余字段）。"""
-        from app.gateway.base import PlatformConfig
-        from system_im_core.config import GatewayConfigHelper
+        """切换单个平台的启用状态并即时连接/断开（写回平台插件自己的配置）。"""
+        from app.plugins.registries.gateway_platform_registry import GatewayPlatformRegistry
 
-        cfg = GatewayConfigHelper.get_platform_config(platform_id)
-        if not isinstance(cfg, PlatformConfig):
-            cfg = PlatformConfig(enabled=bool(enabled), platform=platform_id)
-        cfg.enabled = bool(enabled)
-        GatewayConfigHelper.set_platform_config(platform_id, cfg)
+        d = GatewayPlatformRegistry.get_instance().get(platform_id)
+        if d is None:
+            logger.warning(f"[GatewayService] 未注册平台: {platform_id}")
+            return False
+        if d.set_enabled is not None:
+            try:
+                d.set_enabled(bool(enabled))
+            except Exception as e:  # noqa: BLE001 - 配置写失败不拖垮开关
+                logger.warning(f"[GatewayService] {platform_id} 启用状态写入失败: {e}")
+                return False
         if self._manager is None:
             return True
         try:
@@ -505,7 +507,7 @@ class GatewayService(QObject):
         无需插件自行 import asyncio / 持有 manager 单例引用。
 
         Args:
-            platform: 平台标识（`Platform` 枚举或 str 平台 id，如 "feishu"）
+            platform: 平台 id（str，如 "feishu"；registry 键）
             chat_id: 目标会话 id（gateway 会话的 chat_id）
             content: 消息文本
             timeout: 等待发送结果的秒数

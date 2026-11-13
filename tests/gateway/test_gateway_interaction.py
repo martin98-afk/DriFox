@@ -139,83 +139,77 @@ def service(qapp_stub=None, monkeypatch=None):
 
 
 def test_question_asked_registers_state(service):
-    from app.gateway.base import Platform
 
     engine_worker = _FakeWorker()
     service._engine = _FakeEngine(engine_worker)
     service._on_question_asked(
         {
-            "platform": Platform.FEISHU,
+            "platform": "feishu",
             "chat_id": "chat1",
             "payload": {"tool_call_id": "t1", "questions": [Q_SINGLE]},
         }
     )
-    key = service._question_key(Platform.FEISHU, "chat1")
+    key = service._question_key("feishu", "chat1")
     assert key in service._pending_questions
     assert service.sent and "用哪个方案？" in service.sent[0]
 
 
 def test_single_question_answer_fills_worker(service):
-    from app.gateway.base import Platform
 
     worker = _FakeWorker()
     service._engine = _FakeEngine(worker)
     service._on_question_asked(
         {
-            "platform": Platform.FEISHU,
+            "platform": "feishu",
             "chat_id": "chat1",
             "payload": {"tool_call_id": "t1", "questions": [Q_SINGLE]},
         }
     )
-    consumed = service._consume_pending_question(Platform.FEISHU, "chat1", "u1", "1")
+    consumed = service._consume_pending_question("feishu", "chat1", "u1", "1")
     assert consumed is True
     assert worker.answers == ["问题「用哪个方案？」的回答：\n【方案A】"]
     assert service._pending_questions == {}
 
 
 def test_multi_question_advances_then_fills_once(service):
-    from app.gateway.base import Platform
 
     worker = _FakeWorker()
     service._engine = _FakeEngine(worker)
     q2 = {"question": "第二个问题？", "options": [{"label": "X"}, {"label": "Y"}]}
     service._on_question_asked(
         {
-            "platform": Platform.FEISHU,
+            "platform": "feishu",
             "chat_id": "chat1",
             "payload": {"tool_call_id": "t1", "questions": [Q_SINGLE, q2]},
         }
     )
-    assert service._consume_pending_question(Platform.FEISHU, "chat1", "u1", "2") is True
+    assert service._consume_pending_question("feishu", "chat1", "u1", "2") is True
     assert worker.answers == []  # 还有一题，先不交
     assert "第二个问题？" in service.sent[-1]
-    assert service._consume_pending_question(Platform.FEISHU, "chat1", "u1", "X") is True
+    assert service._consume_pending_question("feishu", "chat1", "u1", "X") is True
     assert len(worker.answers) == 1
     assert "【方案B】" in worker.answers[0] and "【X】" in worker.answers[0]
 
 
 def test_unknown_chat_not_consumed(service):
-    from app.gateway.base import Platform
 
-    assert service._consume_pending_question(Platform.FEISHU, "other", "u1", "1") is False
+    assert service._consume_pending_question("feishu", "other", "u1", "1") is False
 
 
 def test_slash_command_not_consumed(service):
-    from app.gateway.base import Platform
 
     service._engine = _FakeEngine(_FakeWorker())
     service._on_question_asked(
         {
-            "platform": Platform.FEISHU,
+            "platform": "feishu",
             "chat_id": "chat1",
             "payload": {"tool_call_id": "t1", "questions": [Q_SINGLE]},
         }
     )
-    assert service._consume_pending_question(Platform.FEISHU, "chat1", "u1", "/stop") is False
+    assert service._consume_pending_question("feishu", "chat1", "u1", "/stop") is False
 
 
 def test_timeout_skips_remaining(service, monkeypatch):
-    from app.gateway.base import Platform
 
     worker = _FakeWorker()
     service._engine = _FakeEngine(worker)
@@ -223,13 +217,13 @@ def test_timeout_skips_remaining(service, monkeypatch):
     q2 = {"question": "第二个？"}
     service._on_question_asked(
         {
-            "platform": Platform.FEISHU,
+            "platform": "feishu",
             "chat_id": "chat1",
             "payload": {"tool_call_id": "t1", "questions": [Q_SINGLE, q2]},
         }
     )
-    service._consume_pending_question(Platform.FEISHU, "chat1", "u1", "1")
-    key = service._question_key(Platform.FEISHU, "chat1")
+    service._consume_pending_question("feishu", "chat1", "u1", "1")
+    key = service._question_key("feishu", "chat1")
     service._finish_question(key, service._pending_questions[key], skipped=True)
     assert len(worker.answers) == 1
     assert "第二个？" in worker.answers[0]
@@ -238,18 +232,17 @@ def test_timeout_skips_remaining(service, monkeypatch):
 
 def test_stale_timer_ignored(service):
     """多题换表后旧 timer 到期不应提前收尾。"""
-    from app.gateway.base import Platform
 
     worker = _FakeWorker()
     service._engine = _FakeEngine(worker)
     service._on_question_asked(
         {
-            "platform": Platform.FEISHU,
+            "platform": "feishu",
             "chat_id": "chat1",
             "payload": {"tool_call_id": "t1", "questions": [Q_SINGLE]},
         }
     )
-    key = service._question_key(Platform.FEISHU, "chat1")
+    key = service._question_key("feishu", "chat1")
     old_timer = service._pending_questions[key]["timer"]
     service._arm_question_timeout(key)  # 换表
     service._on_question_timeout(key, old_timer)
@@ -386,7 +379,7 @@ def test_present_question_falls_back_when_adapter_raises():
 
 def test_base_adapter_default_send_question_is_unsupported():
     """基类默认返回失败，保证没实现的平台自动退文本。"""
-    from app.gateway.base import BasePlatformAdapter, PlatformConfig
+    from app.gateway.base import BasePlatformAdapter
 
     class _Minimal(BasePlatformAdapter):
         async def connect(self):
@@ -403,6 +396,6 @@ def test_base_adapter_default_send_question_is_unsupported():
         async def get_chat_info(self, chat_id):
             return {}
 
-    adapter = _Minimal(PlatformConfig())
+    adapter = _Minimal()
     result = asyncio.run(adapter.send_question("chat1", Q_SINGLE, 0, 1))
     assert result.success is False

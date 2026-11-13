@@ -15,10 +15,8 @@ from loguru import logger
 
 from app.gateway.base import (
     BasePlatformAdapter,
-    Platform,
     SendResult,
 )
-from .config import get_gateway_config
 from .message_handler import MessageHandler
 from .session_manager import GatewaySession, GatewaySessionManager
 
@@ -35,7 +33,6 @@ class PlatformManager:
 
     def __init__(
         self,
-        config: "GatewayConfigHelper",
         process_message_callback: Optional[Callable] = None,
         send_message_callback: Optional[Callable] = None,
     ):
@@ -43,11 +40,9 @@ class PlatformManager:
         初始化平台管理器
 
         Args:
-            config: Gateway 配置
             process_message_callback: 处理消息回调
             send_message_callback: 发送消息回调
         """
-        self._config = config
         self._adapters: Dict[str, BasePlatformAdapter] = {}
         self._running = False
 
@@ -120,8 +115,7 @@ class PlatformManager:
                 if not d.check_requirements():
                     logger.info(f"[PlatformManager] {d.display_name} adapter skipped (missing dependencies)")
                     continue
-                cfg = d.config_builder() if d.config_builder else None
-                self._adapters[d.platform_id] = d.adapter_factory(cfg)
+                self._adapters[d.platform_id] = d.adapter_factory()
                 logger.info(f"[PlatformManager] {d.display_name} adapter loaded (plugin)")
             except Exception as e:
                 logger.warning(f"[PlatformManager] {d.display_name} 插件加载失败: {e}")
@@ -148,9 +142,8 @@ class PlatformManager:
                     )
 
                     d0 = _Reg.get_instance().get(platform)
-                    if d0 is not None and d0.validate_config is not None:
-                        cfg0 = d0.config_builder() if d0.config_builder else None
-                        ok0, _ = d0.validate_config(cfg0)
+                    if d0 is not None and d0.validate is not None:
+                        ok0, _ = d0.validate()
                         if ok0 and existing._last_error:
                             # 配置已补齐：丢弃旧实例走重建（先停旧实例，防
                             # poll/listen task 泄漏导致同平台双收重发）
@@ -175,9 +168,8 @@ class PlatformManager:
         if not d.check_requirements():
             logger.warning(f"[PlatformManager] {platform} 依赖不满足，跳过加载")
             return None
-        cfg = d.config_builder() if d.config_builder else None
         try:
-            adapter = d.adapter_factory(cfg)
+            adapter = d.adapter_factory()
         except Exception as e:  # noqa: BLE001
             logger.warning(f"[PlatformManager] {platform} adapter 动态加载失败: {e}")
             return None
@@ -187,16 +179,9 @@ class PlatformManager:
         logger.info(f"[PlatformManager] {platform} adapter 已动态加载（热注册自愈）")
         return adapter
 
-    def get_adapter(self, platform: Platform) -> Optional[BasePlatformAdapter]:
-        """获取平台适配器。
-
-        registry 键是平台 id 字符串；`Platform.FEISHU` 直接 str() 会得到
-        "Platform.FEISHU"（Enum 未继承 str 时），故统一走 `_platform_key`
-        取 `.value`。第三方 str 平台 id 原样直通。
-        """
-        from app.gateway.base import _platform_key
-
-        adapter = self._adapters.get(_platform_key(platform))
+    def get_adapter(self, platform: Any) -> Optional[BasePlatformAdapter]:
+        """获取平台适配器（平台 id 一律 str，registry 键）。"""
+        adapter = self._adapters.get(str(platform))
         if adapter is not None:
             return adapter
         # 兜底：调用方可能传入已实例化的 adapter 自身
@@ -217,7 +202,7 @@ class PlatformManager:
     def set_process_callback(
         self,
         process_message: Callable,
-        send_message: Callable[[Platform, str, str, Any], SendResult],
+        send_message: Callable[[str, str, str, Any], SendResult],
     ) -> None:
         """设置消息处理回调"""
         self._message_handler = MessageHandler(
@@ -230,7 +215,7 @@ class PlatformManager:
         for adapter in self._adapters.values():
             adapter.set_message_handler(self._message_handler.handle)
 
-    def start_all(self) -> Dict[Platform, bool]:
+    def start_all(self) -> Dict[str, bool]:
         """
         启动所有启用的平台（同步，等待结果）
 
@@ -280,14 +265,14 @@ class PlatformManager:
         self._loop = None
         self._running = False
 
-    async def _start_all_async(self) -> Dict[Platform, bool]:
+    async def _start_all_async(self) -> Dict[str, bool]:
         """后台启动所有启用的平台（registry 驱动，无平台 if-elif）"""
         if self._running:
             logger.warning("[PlatformManager] Already running")
             return {p: True for p in self._adapters}
 
         self._running = True
-        results: Dict[Platform, bool] = {}
+        results: Dict[str, bool] = {}
 
         # 设置消息处理器
         if self._message_handler:
@@ -305,19 +290,17 @@ class PlatformManager:
                 results[platform] = False
                 continue
 
-            config = self._config.get_platform_config(platform)
-            if not config.enabled:
-                logger.info(f"[PlatformManager] {platform} not enabled, skipping")
-                continue
-
-            # 配置校验：各 adapter 自带 validate_config（registry 分派，无平台分支）
+            # 启用判定与配置校验都交给平台 def（宿主不认识任何平台字段）
             from app.plugins.registries.gateway_platform_registry import (
                 GatewayPlatformRegistry as _Reg,
             )
 
             d = _Reg.get_instance().get(platform)
-            if d is not None and d.validate_config is not None:
-                ok, err = d.validate_config(config)
+            if d is None or not d.is_enabled():
+                logger.info(f"[PlatformManager] {platform} not enabled, skipping")
+                continue
+            if d.validate is not None:
+                ok, err = d.validate()
                 if not ok:
                     logger.error(f"[PlatformManager] {platform} 配置校验失败: {err}")
                     adapter._last_error = err
@@ -365,29 +348,21 @@ class PlatformManager:
 
         self._notify_status()
 
-    def start_platform(self, platform: Platform) -> bool:
+    def start_platform(self, platform: Any) -> bool:
         """启动指定平台（同步，等待结果）"""
-        from app.gateway.base import _platform_key
+        return self._run_coro(self._start_platform_async(str(platform)))
 
-        return self._run_coro(self._start_platform_async(_platform_key(platform)))
-
-    def start_platform_async(self, platform: Platform) -> None:
+    def start_platform_async(self, platform: Any) -> None:
         """启动指定平台（异步，不等待结果）"""
-        from app.gateway.base import _platform_key
+        self._schedule_coro(self._start_platform_async(str(platform)))
 
-        self._schedule_coro(self._start_platform_async(_platform_key(platform)))
-
-    def stop_platform(self, platform: Platform) -> None:
+    def stop_platform(self, platform: Any) -> None:
         """停止指定平台"""
-        from app.gateway.base import _platform_key
+        self._schedule_coro(self._stop_platform_async(str(platform)))
 
-        self._schedule_coro(self._stop_platform_async(_platform_key(platform)))
-
-    def restart_platform_async(self, platform: Platform) -> None:
+    def restart_platform_async(self, platform: Any) -> None:
         """先断后连（同一事件循环内顺序执行，避免 stop/start 竞态）。"""
-        from app.gateway.base import _platform_key
-
-        pid = _platform_key(platform)
+        pid = str(platform)
 
         async def _restart() -> None:
             await self._stop_platform_async(pid)
@@ -464,18 +439,15 @@ class PlatformManager:
             if d is None or not d.check_requirements():
                 logger.info(f"[PlatformManager] {pid} 重建跳过（def 缺失/依赖不满足）")
                 continue
-            cfg = d.config_builder() if d.config_builder else None
             try:
-                self._adapters[pid] = d.adapter_factory(cfg)
+                self._adapters[pid] = d.adapter_factory()
             except Exception as e:  # noqa: BLE001
                 logger.warning(f"[PlatformManager] {pid} adapter 重建失败: {e}")
                 continue
             if self._message_handler:
                 self._adapters[pid].set_message_handler(self._message_handler.handle)
-            if restart_if_running and self._running:
-                config = self._config.get_platform_config(pid)
-                if config and getattr(config, "enabled", False):
-                    self._schedule_coro(self._start_platform_async(pid))
+            if restart_if_running and self._running and d.is_enabled():
+                self._schedule_coro(self._start_platform_async(pid))
         if pids:
             logger.info(f"[PlatformManager] 已重建插件 [{plugin_name}] 的 {len(pids)} 个平台: {pids}")
 
@@ -487,16 +459,14 @@ class PlatformManager:
             logger.error(f"[PlatformManager] No adapter for {platform}")
             return False
 
-        config = self._config.get_platform_config(platform)
-
-        # 配置校验：registry def.validate_config（无则跳过）
+        # 配置校验：registry def.validate()（无则跳过）
         from app.plugins.registries.gateway_platform_registry import (
             GatewayPlatformRegistry as _Reg,
         )
 
         d = _Reg.get_instance().get(platform)
-        if d is not None and d.validate_config is not None:
-            ok, err = d.validate_config(config)
+        if d is not None and d.validate is not None:
+            ok, err = d.validate()
             if not ok:
                 logger.error(f"[PlatformManager] {platform} 配置校验失败: {err}")
                 adapter._last_error = err
@@ -552,10 +522,9 @@ class PlatformManager:
 
         for platform in all_platforms:
             adapter = self._adapters.get(platform)
-            config = self._config.get_platform_config(platform)
-
+            d = GatewayPlatformRegistry.get_instance().get(platform)
             platforms[platform] = {
-                "enabled": config.enabled,
+                "enabled": bool(d.is_enabled()) if d is not None else False,
                 "connected": adapter.is_connected if adapter else False,
                 "error": adapter.last_error if adapter else None,
                 "available": platform in self._adapters,
@@ -567,7 +536,7 @@ class PlatformManager:
             "session_count": self._session_manager.session_count,
         }
 
-    def get_sessions(self, platform: Optional[Platform] = None) -> List[GatewaySession]:
+    def get_sessions(self, platform: Optional[str] = None) -> List[GatewaySession]:
         """获取会话列表"""
         return self._session_manager.list_sessions(platform)
 
@@ -595,7 +564,7 @@ _manager_instance: Optional[PlatformManager] = None
 
 def create_platform_manager(
     process_message: Callable,
-    send_message: Callable[[Platform, str, str, Any], SendResult],
+    send_message: Callable[[str, str, str, Any], SendResult],
 ) -> PlatformManager:
     """
     创建或获取平台管理器（全局单例）
@@ -612,10 +581,8 @@ def create_platform_manager(
     if _manager_instance is not None:
         return _manager_instance
 
-    # 使用全局单例，确保 UI 保存的配置能被读取
-    config = get_gateway_config()
+    # 全局单例：平台配置由各插件自管，manager 不再持有配置
     _manager_instance = PlatformManager(
-        config=config,
         process_message_callback=process_message,
         send_message_callback=send_message,
     )
