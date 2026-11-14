@@ -447,10 +447,13 @@ class ProviderEditCard(QWidget):
         saved_cap = str(self.provider_info.get("capability_type", "") or "")
         self.capabilityCombo.setCurrentText(saved_cap or "chat")
         cap_row.addWidget(self.capabilityCombo, 1)
-        cap_row_widget = QWidget()
+        # ★ 必须带父构造：无父 QWidget 在入布局前 isWindow()=True，
+        # setVisible(True) 会把它当成独立顶层窗口显示，出现一闪而过的空窗（幽灵弹窗）。
+        # 且可见性须在 addWidget 之后设置（先入布局再显隐）。
+        cap_row_widget = QWidget(self)
         cap_row_widget.setLayout(cap_row)
-        cap_row_widget.setVisible(not self.preset_provider)
         main_layout.addWidget(cap_row_widget)
+        cap_row_widget.setVisible(not self.preset_provider)
 
         # ── 套餐用量查询额外配置（可选）— 由 providers 插件声明（ProviderDef.extra_quota_fields）。
         # 默认折叠（节头点击展开）；放在基础连接末尾，模型节前不据版面（用户要求）
