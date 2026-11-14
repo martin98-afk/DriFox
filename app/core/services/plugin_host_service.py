@@ -287,14 +287,12 @@ class PluginHostService(QObject):
             # 首次初始化时才需要全量重载智能体
             # 后续窗口复用已有的 PluginManager/AgentManager 单例数据
             if not was_initialized:
-                # AgentManager 重新从已启用插件加载智能体（关键路径）
-                if self._agent_manager:
-                    # perf: 子打点 reload_agents——智能体全量重载段耗时
-                    _agents_t0 = time.perf_counter()
-                    self._agent_manager.reload_agents()
-                    logger.debug(
-                        f"[StartupMark] reload_agents 耗时 {(time.perf_counter() - _agents_t0) * 1000:.0f}ms"
-                    )
+                # perf: [S1-B] reload_agents 延迟化（#36）：原同步段实测 172ms
+                # （#35 归因：首 agent 解析隐式触发插件工具全量冷加载，C 步已归位）。
+                # 挪入 deferred 队列（idle, 2s）后启动直减；消费方（欢迎页/命令
+                # 面板 agent 列表）由「计划一次」重载链与单例读时兜底补刷
+                # （先例 ：1452 主线程重载改计划一次）
+                self._reload_agents_deferred = True
 
                 # ── 非关键路径：延迟到窗口就绪后执行 ──
                 # 主题刷新、插件热更新监听、LSP 初始化不需要阻塞首帧显示
@@ -340,6 +338,11 @@ class PluginHostService(QObject):
         queue = DeferredTaskQueue()
         self._deferred_queue = queue
         queue.register("reloader", self._deferred_register_reloaders, delay_ms=2000)
+        # perf: [S1-B] reload_agents 延迟任务（#36）：agents/hooks 全量重载挪出启动段；
+        # 放在 reloader 之后执行无强依赖（bind_runtime 只绑实例不读注册表），
+        # 但排在其后可保证重载器注册表先就绪（热更新链一致）
+        queue.register("reload_agents", self._deferred_reload_agents, delay_ms=2000)
+        queue.add_order_constraint("reloader", "reload_agents")
         queue.register("themes", self._deferred_reload_themes, delay_ms=2000)
         queue.register("watcher", self._deferred_start_watcher, delay_ms=2000)
         queue.register("plugin_tools_rescan", self._deferred_rescan_plugin_tools, delay_ms=2000)
@@ -407,6 +410,21 @@ class PluginHostService(QObject):
             register_builtin_reloaders(get_reloader_registry())
         except Exception as e:
             logger.error(f"[PluginHost] 内置 reloader 注册失败: {e}")
+
+    def _deferred_reload_agents(self):
+        """[S1-B] 延迟执行 agents/hooks 全量重载（原 _init_plugin_system 同步段）。
+
+        幂等性：reload_agents 全量刷新（clear + 重装），mtime 缓存命中时 ~1ms。
+        """
+        try:
+            if self._agent_manager:
+                t0 = time.perf_counter()
+                self._agent_manager.reload_agents()
+                logger.debug(
+                    f"[StartupMark] reload_agents 耗时 {(time.perf_counter() - t0) * 1000:.0f}ms（deferred）"
+                )
+        except Exception as e:
+            logger.error(f"[PluginHost] 延迟 reload_agents 失败: {e}")
 
     def _deferred_reload_themes(self):
         """刷新主题"""
