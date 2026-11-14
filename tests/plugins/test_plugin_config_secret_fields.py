@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
-"""PluginConfigStore 对 type=password 字段透明走系统密钥库。
+"""PluginConfigStore 对 type=password 字段的明文存储行为。
 
-设计意图：插件与设置卡都经本类读写，密钥字段加密放这里做一次，插件代码
-零改动；gateway 这类拿不到能力池的插件也自动受益。
+用户决策（2026-11-14）：不要钥匙串，插件密码一律明文存 config.json。
+本组测试锁定三件事：明文写入读取、清空即删、钥匙串时代旧值读时迁回。
 """
 import json
 from types import SimpleNamespace
@@ -11,14 +11,12 @@ import pytest
 
 from app.plugins.managers.plugin_config_store import PluginConfigStore
 
-
 class _Field:
     def __init__(self, key, type="text", default="", env=""):
         self.key = key
         self.type = type
         self.default = default
         self.env = env
-
 
 class _Schema:
     def __init__(self, fields):
@@ -27,14 +25,12 @@ class _Schema:
     def get_field(self, key):
         return next((f for f in self.fields if f.key == key), None)
 
-
 @pytest.fixture()
 def store(tmp_path, monkeypatch, isolated_secret_store):
     monkeypatch.setattr("app.utils.utils.get_app_data_dir", lambda: str(tmp_path))
     schema = _Schema([_Field("name"), _Field("api_key", type="password")])
     monkeypatch.setattr(PluginConfigStore, "_schema", lambda self, name: schema)
     return PluginConfigStore(), tmp_path, isolated_secret_store
-
 
 def test_stored_values_readable_without_schema(store, monkeypatch):
     """schema 未注册时仍能读出用户已写入的原始配置。
@@ -49,7 +45,6 @@ def test_stored_values_readable_without_schema(store, monkeypatch):
     assert s.effective_values("gw") == {}
     assert s.stored_values("gw") == {"enabled": True, "name": "x"}
 
-
 def test_get_accepts_caller_default(store, monkeypatch):
     """``get(plugin, key, default)`` 三参形态是插件作者常见写法，必须收。
 
@@ -63,54 +58,62 @@ def test_get_accepts_caller_default(store, monkeypatch):
     # schema 声明的字段仍以 schema 默认值优先
     assert s.get("gw", "name") == ""
 
-
-def test_password_field_goes_to_secret_store(store):
+def test_password_field_stored_plaintext(store):
+    """password 字段一律明文落 config.json，不写钥匙串"""
     s, tmp_path, keyring = store
 
     assert s.set_values("demo", {"name": "n", "api_key": "sk-123"}) is True
 
-    assert keyring.data == {"plugin:demo:api_key": "sk-123"}
     raw = json.loads((tmp_path / "plugin_data" / "demo" / "config.json").read_text(encoding="utf-8"))
-    assert raw == {"name": "n"}  # 明文不落盘
+    assert raw == {"name": "n", "api_key": "sk-123"}
+    assert keyring.data == {}  # 不进钥匙串
     assert s.get("demo", "api_key") == "sk-123"
+    assert s.effective_values("demo")["api_key"] == "sk-123"
 
-
-def test_password_field_reads_back_from_secret_store(store):
-    s, _tmp_path, keyring = store
-    keyring.data["plugin:demo:api_key"] = "from-keyring"
-
-    assert s.get("demo", "api_key") == "from-keyring"
-    assert s.effective_values("demo")["api_key"] == "from-keyring"
-
-
-def test_legacy_plaintext_migrates_on_read(store):
+def test_legacy_plaintext_stays_in_json(store):
+    """历史明文保持明文，不再迁进钥匙串"""
     s, tmp_path, keyring = store
     path = tmp_path / "plugin_data" / "demo" / "config.json"
     path.parent.mkdir(parents=True)
     path.write_text(json.dumps({"name": "n", "api_key": "legacy"}), encoding="utf-8")
 
     assert s.get("demo", "api_key") == "legacy"
-    assert keyring.data["plugin:demo:api_key"] == "legacy"
+    assert keyring.data == {}  # 不迁移进密钥库
     raw = json.loads(path.read_text(encoding="utf-8"))
-    assert "api_key" not in raw  # 迁移后清掉明文
+    assert raw["api_key"] == "legacy"  # 明文留在原地
 
-
-def test_clearing_password_deletes_secret(store):
-    s, _tmp_path, keyring = store
-
-    s.set_values("demo", {"api_key": "sk-123"})
-    s.set_values("demo", {"api_key": ""})
-
-    assert keyring.data.get("plugin:demo:api_key") is None
-    assert s.get("demo", "api_key") == ""
-
-
-def test_falls_back_to_plaintext_when_keyring_unavailable(store):
+def test_keyring_legacy_migrates_back_on_read(store):
+    """钥匙串时代的旧值首次读取时迁回 JSON 并删钥匙串条目"""
     s, tmp_path, keyring = store
-    keyring.available = False
+    keyring.data["plugin:demo:api_key"] = "from-keyring"
 
-    assert s.set_values("demo", {"api_key": "sk-123"}) is True
+    assert s.get("demo", "api_key") == "from-keyring"
 
     raw = json.loads((tmp_path / "plugin_data" / "demo" / "config.json").read_text(encoding="utf-8"))
-    assert raw["api_key"] == "sk-123"  # 不可用时回退明文，凭据不能丢
-    assert s.get("demo", "api_key") == "sk-123"
+    assert raw["api_key"] == "from-keyring"  # 已回迁明文
+    assert keyring.data == {}  # 钥匙串条目已清
+    # 再读走纯明文路径
+    assert s.get("demo", "api_key") == "from-keyring"
+
+def test_keyring_legacy_migrates_back_via_effective_values(store):
+    """effective_values 同样触发钥匙串旧值回迁"""
+    s, tmp_path, keyring = store
+    keyring.data["plugin:demo:api_key"] = "old-secret"
+
+    assert s.effective_values("demo")["api_key"] == "old-secret"
+
+    raw = json.loads((tmp_path / "plugin_data" / "demo" / "config.json").read_text(encoding="utf-8"))
+    assert raw["api_key"] == "old-secret"
+    assert keyring.data == {}
+
+def test_clearing_password_removes_key_and_keyring_legacy(store):
+    """空串/None 清除明文键，同时清掉钥匙串时代残留条目"""
+    s, tmp_path, keyring = store
+    keyring.data["plugin:demo:api_key"] = "old-secret"
+
+    s.set_values("demo", {"api_key": ""})
+
+    raw = json.loads((tmp_path / "plugin_data" / "demo" / "config.json").read_text(encoding="utf-8"))
+    assert "api_key" not in raw
+    assert keyring.data == {}
+    assert s.get("demo", "api_key") == ""
