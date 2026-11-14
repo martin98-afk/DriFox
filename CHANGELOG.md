@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### 🐛 Bug 修复 (Bug Fixes)
+
+- **正常对话跑到 1 小时被强制中断（worker 总寿命默认 3600s）** (`app/core/workers/chat_worker.py`, `tests/core/test_chat_worker_lifetime.py`): 单次 worker 总寿命上限原默认 3600s，到点后 `run()` 主循环顶部判定超限、走正常完成路径结束本轮，长重构/连续编码任务被硬切断。改为默认 **0（关闭）**：墙钟不该截断正常对话，防挂死改由 `MAX_CONTINUATIONS`（默认 8）独立承担，它只拦 Stop hook / hook 队列反复 `continue` 这条异常路径，正常对话到不了触发点。需要硬上限时仍可用 `DRIFOX_WORKER_MAX_LIFETIME_S=<秒>` 打开。同时把 `_worker_lifetime_reason()` 非法值回退目标从硬编码 `3600.0` 改为新常量 `DEFAULT_WORKER_LIFETIME_S`，否则默认关闭时用户填一个非法值会反向打开一小时截断。
+
 ### ✨ 新功能 (New Features)
 
 - **工具完成框里的文件地址可点击打开** (`app/widgets/render_helpers.py` · `app/widgets/card_viewers.py` · `app/main_widget.py`): 折叠头右侧路径、以及 read/grep/list/glob 单行卡预览里的路径片段渲染为可点元素（默认无装饰，hover 变主题强调色 `--accent` + 实线下划线，悬停 title 显示完整路径），点击由骨架 click 委托在折叠头之前抢断，转 `open_file` 消息交宿主按会话 workdir 解析后用系统程序打开；路径不存在给 InfoBar 提示（原实现静默吞异常）。显示文本仍是首尾缩短版，`data-open-path` 存完整原始路径。骨架版本 v79 → v81。

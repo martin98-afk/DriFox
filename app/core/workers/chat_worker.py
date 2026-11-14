@@ -226,11 +226,14 @@ class OpenAIChatWorker(QThread):
     # finished 不发、T6-A 收尾（executor.py）与残留回收（engine_session）不触发，
     # 实测单 worker 最长存活 4511s。超限必须走正常完成路径（emit finished 两组
     # 信号 + _clear_pending_response_state），禁止直接 return 跳过收尾。
-    # 环境变量可覆盖。默认值依据：正常 agent 任务（几十次工具调用、长上下文）
-    # 常超 15 分钟，900s 会截断合法长任务；3600s 仍能截断 4511s 的异常。
+    # 总寿命默认**关闭**（0）：墙钟不该截断正常对话，多小时的重构/编码任务是
+    # 正当场景（原 3600s 默认值实测把用户的连续对话切断）。防挂死改由
+    # MAX_CONTINUATIONS 独立承担——它只拦「hook 反复续命」这条异常路径，正常
+    # 对话天然到不了 8 次。需要硬上限时用 DRIFOX_WORKER_MAX_LIFETIME_S=<秒> 打开。
     # 两个参数统一三条语义：0=显式关闭；正数=生效；负数 / 非数字 / nan / inf =
     # 非法，回退默认并告警。（此处的 0 只涉及寿命/续轮，与权限审批路径的 0 语义无关）
-    MAX_WORKER_LIFETIME_S = _env_float("DRIFOX_WORKER_MAX_LIFETIME_S", 3600.0)
+    DEFAULT_WORKER_LIFETIME_S = 0.0
+    MAX_WORKER_LIFETIME_S = _env_float("DRIFOX_WORKER_MAX_LIFETIME_S", DEFAULT_WORKER_LIFETIME_S)
     MAX_CONTINUATIONS = _env_int("DRIFOX_WORKER_MAX_CONTINUATIONS", 8)
 
     # ========== 客户端主动循环检测（防止触发 Qwen 服务端 Repetitive tool calls 拒绝）==========
@@ -3688,18 +3691,22 @@ class OpenAIChatWorker(QThread):
         **两个开关互不干扰、各自独立判定**：阈值 0 = 关闭该限制；负数 = 非法回退默认。
         属性缺失（__new__ 测试桩未跑 run）视为未超限。
         """
+        default_lifetime = self.DEFAULT_WORKER_LIFETIME_S
         try:
             lifetime_s = float(self.MAX_WORKER_LIFETIME_S)
         except Exception as exc:
-            logger.warning(f"[WorkerLifetime] MAX_WORKER_LIFETIME_S 读取异常（{exc!r}），回退 3600.0")
-            lifetime_s = 3600.0
-        if lifetime_s == 0:
-            lifetime_s = None  # 0 = 显式关闭寿命检查（None 与「关闭」区分开，便于条件包裹）
-        elif not math.isfinite(lifetime_s) or lifetime_s < 0:
             logger.warning(
-                f"[WorkerLifetime] MAX_WORKER_LIFETIME_S={lifetime_s!r} 非法（0=关闭，正数=秒数），回退 3600.0"
+                f"[WorkerLifetime] MAX_WORKER_LIFETIME_S 读取异常（{exc!r}），回退默认 {default_lifetime}"
             )
-            lifetime_s = 3600.0
+            lifetime_s = default_lifetime
+        if not math.isfinite(lifetime_s) or lifetime_s < 0:
+            logger.warning(
+                f"[WorkerLifetime] MAX_WORKER_LIFETIME_S={lifetime_s!r} 非法（0=关闭，正数=秒数），"
+                f"回退默认 {default_lifetime}"
+            )
+            lifetime_s = default_lifetime
+        if lifetime_s == 0:
+            lifetime_s = None  # 0（含回退到默认 0）= 显式关闭寿命检查，None 与「关闭」区分开便于条件包裹
         started = getattr(self, "_run_started_at", None)
         if started is None:
             # run() 里初始化紧邻 while 之前，正常不可达；真出现说明守卫输入缺失

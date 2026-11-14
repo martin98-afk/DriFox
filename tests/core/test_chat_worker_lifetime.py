@@ -13,6 +13,10 @@ finished_with_content），禁止直接 return 跳过收尾。
 ``0`` = 显式关闭限制；正数 = 生效；负数 / 非数字 / nan / inf = 非法，回退默认并
 WARNING。此处的 ``0`` 只涉及寿命/续轮，与权限审批路径的 ``0`` 语义无关。
 
+默认取值：总寿命默认 **0（关闭）**，续轮默认 8。墙钟截断会切断正常的多小时任务
+（用户实测连续对话在 3600s 被中断），防挂死改由续轮上限独立承担——正常对话到不了
+8 次续命，只有 hook 反复 CONTINUE 这条异常路径会触顶。
+
 范围说明：question / 权限两处等待本轮确认**保持无上限**（原始无限轮询，见
 ``test_wiring_question_and_permission_wait_unlimited``）。寿命守卫位于 run()
 主循环顶部，卡在嵌套等待循环时回不到顶部——守卫管「持续续命」，管不了
@@ -122,12 +126,14 @@ def test_zero_continuation_keeps_lifetime_guard(monkeypatch):
     assert reason
     assert "总寿命" in reason
 
-def test_reason_negative_threshold_falls_back_and_guards(monkeypatch):
-    """负数阈值 = 非法 → 回退默认 3600 并正常守卫（不是关闭）。
+def test_reason_negative_threshold_falls_back_to_default(monkeypatch):
+    """负数阈值 = 非法 → 回退 DEFAULT_WORKER_LIFETIME_S 并留痕。
 
-    确定性时间源：elapsed 固定 4000s > 回退后的 3600s → 必须报超限。
+    默认已改为 0（关闭），故这里显式把回退目标设为 3600，验证「非法 → 回退到默认」
+    这条路径本身仍然成立，不随默认值取值而变。确定性时间源：elapsed 固定 4000s。
     """
     w = _make_worker()
+    w.DEFAULT_WORKER_LIFETIME_S = 3600.0
     w.MAX_WORKER_LIFETIME_S = -5.0
     w._run_started_at = 1000.0
     monkeypatch.setattr("time.monotonic", lambda: 5000.0)
@@ -136,10 +142,11 @@ def test_reason_negative_threshold_falls_back_and_guards(monkeypatch):
     assert reason
     assert "总寿命" in reason
 
-def test_reason_nan_inf_threshold_falls_back_and_guards(monkeypatch):
-    """nan / inf 阈值 = 非法 → 回退默认 3600 并正常守卫（不能静默失效）。"""
+def test_reason_nan_inf_threshold_falls_back_to_default(monkeypatch):
+    """nan / inf 阈值 = 非法 → 回退默认（不能静默失效）。"""
     for bad in (float("nan"), float("inf")):
         w = _make_worker()
+        w.DEFAULT_WORKER_LIFETIME_S = 3600.0
         w.MAX_WORKER_LIFETIME_S = bad
         w._run_started_at = 1000.0
         monkeypatch.setattr("time.monotonic", lambda: 5000.0)
@@ -147,6 +154,20 @@ def test_reason_nan_inf_threshold_falls_back_and_guards(monkeypatch):
         reason = w._worker_lifetime_reason()
         assert reason, bad
         assert "总寿命" in reason, bad
+
+def test_reason_illegal_falls_back_to_disabled_default(monkeypatch):
+    """默认关闭（DEFAULT=0）时，非法值回退后也是关闭，不得意外启用 3600 截断。
+
+    回归背景：默认值从 3600 改为 0 后，若回退分支仍硬编码 3600.0，用户填一个
+    非法值反而会重新打开一小时截断——与默认意图相反。
+    """
+    for bad in (-5.0, float("nan"), float("inf")):
+        w = _make_worker()
+        w.MAX_WORKER_LIFETIME_S = bad
+        w._run_started_at = 1000.0
+        monkeypatch.setattr("time.monotonic", lambda: 10**6)
+        w._continuation_count = 0
+        assert w._worker_lifetime_reason() == "", bad
 
 def test_reason_lifetime_takes_priority():
     """寿命与续轮同时超限 → 报寿命（先查寿命）。"""
@@ -160,9 +181,14 @@ def test_reason_lifetime_takes_priority():
 # ── 常量与环境变量 ────────────────────────────────────────────────────
 
 def test_default_constants():
-    """默认值：总寿命 3600s、续轮上限 8（两者默认生效；无 deadline 类参数）。"""
+    """默认值：总寿命关闭（0 = 不截断）、续轮上限 8（防挂死主守卫仍生效）。
+
+    寿命默认关闭的原因：墙钟截断会切断正常的多小时重构任务（用户实测被切断）。
+    防挂死由 MAX_CONTINUATIONS 独立承担：正常对话到不了 8 次续命。
+    """
     worker_cls = pytest.importorskip("app.core.workers.chat_worker").OpenAIChatWorker
-    assert worker_cls.MAX_WORKER_LIFETIME_S == 3600.0
+    assert worker_cls.MAX_WORKER_LIFETIME_S == 0.0
+    assert worker_cls.DEFAULT_WORKER_LIFETIME_S == 0.0
     assert worker_cls.MAX_CONTINUATIONS == 8
 
 def test_env_override_and_invalid_fallback(monkeypatch):
@@ -170,11 +196,11 @@ def test_env_override_and_invalid_fallback(monkeypatch):
     worker_cls = pytest.importorskip("app.core.workers.chat_worker")
     monkeypatch.setenv("DRIFOX_WORKER_MAX_LIFETIME_S", "120")
     monkeypatch.setenv("DRIFOX_WORKER_MAX_CONTINUATIONS", "2")
-    assert worker_cls._env_float("DRIFOX_WORKER_MAX_LIFETIME_S", 3600.0) == 120.0
+    assert worker_cls._env_float("DRIFOX_WORKER_MAX_LIFETIME_S", 0.0) == 120.0
     assert worker_cls._env_int("DRIFOX_WORKER_MAX_CONTINUATIONS", 8) == 2
     monkeypatch.delenv("DRIFOX_WORKER_MAX_LIFETIME_S", raising=False)
     monkeypatch.delenv("DRIFOX_WORKER_MAX_CONTINUATIONS", raising=False)
-    assert worker_cls._env_float("DRIFOX_WORKER_MAX_LIFETIME_S", 3600.0) == 3600.0
+    assert worker_cls._env_float("DRIFOX_WORKER_MAX_LIFETIME_S", 0.0) == 0.0
     assert worker_cls._env_int("DRIFOX_WORKER_MAX_CONTINUATIONS", 8) == 8
 
 def test_env_float_zero_means_disabled_negative_falls_back(monkeypatch):
@@ -185,7 +211,7 @@ def test_env_float_zero_means_disabled_negative_falls_back(monkeypatch):
     """
     worker_cls = pytest.importorskip("app.core.workers.chat_worker")
     monkeypatch.setenv("DRIFOX_WORKER_MAX_LIFETIME_S", "0")
-    assert worker_cls._env_float("DRIFOX_WORKER_MAX_LIFETIME_S", 3600.0) == 0.0
+    assert worker_cls._env_float("DRIFOX_WORKER_MAX_LIFETIME_S", 0.0) == 0.0
     monkeypatch.setenv("DRIFOX_WORKER_MAX_LIFETIME_S", "-5")
     assert worker_cls._env_float("DRIFOX_WORKER_MAX_LIFETIME_S", 3600.0) == 3600.0
 
