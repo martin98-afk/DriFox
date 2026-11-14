@@ -4052,7 +4052,33 @@ def _render_plain_tail(text: str) -> str:
     return "".join(parts)
 
 
+# [P0-候选7] 单槽结果缓存：同输入（len + 首尾 16 字节抽样 + compact）同输出，
+# 纯函数结果缓存天然等价。命中场景：resize 重渲 / 同拍多处调用 / tail 未变的
+# 重复渲染。流式每帧 tail 增长 → 天然 miss，正常转换不受影响。
+# ⚠️ 完整「行内块边界增量缓存」与 _md_to_html_incremental 同族复杂度（需
+# 数百组 fuzz 等价论证），建议二期；现调用侧已有 _TAIL_INLINE_MIN_DELTA(512)
+# + 1.5s 旁路降载（card_viewers），本 memo 补齐重复输入路径。
+_INLINE_TAIL_MEMO: dict = {'key': None, 'out': ''}
+
+
 def _render_inline_tail(md_text: str, compact: bool = False) -> str:
+    # [审计建议4] 键用全文 sha256：len+首尾抽样对「同长度同首尾、中间不同」
+    # 的输入会结构性假命中（渲染旧内容），hash 后键唯一。O(len) C 级，
+    # 相对 tail convert（markdown 全管线）成本可忽略。
+    key = (
+        compact,
+        hashlib.sha256(md_text.encode('utf-8')).hexdigest() if md_text else '',
+    )
+    memo = _INLINE_TAIL_MEMO
+    if memo['key'] == key:
+        return memo['out']
+    out = _render_inline_tail_uncached(md_text, compact)
+    memo['key'] = key
+    memo['out'] = out
+    return out
+
+
+def _render_inline_tail_uncached(md_text: str, compact: bool = False) -> str:
     """渲染流式未闭合尾部为行内 HTML（差量渲染的即时格式化路径）。
 
     解决：无空行分隔的长段落（大模型常见输出，尤其中文）在流式期间

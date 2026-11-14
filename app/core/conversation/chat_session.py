@@ -58,7 +58,8 @@ class ChatSession:
         self._messages_loader: Optional[Callable[[str], Optional[List[Dict]]]] = None
         self._messages_released: bool = False
         # 赋值走 property setter（不加类型注解，避免与 property 声明冲突）
-        self.messages = consolidate_messages(messages or [])
+        # [B1] owner=self：缓存条目挂本会话弱引用探针，会话释放后条目自动失效
+        self.messages = consolidate_messages(messages or [], owner=self)
         # topic_summary 初始化为 name 的副本，确保首次保存时 title 字段不为空
         self.topic_summary: str = self.name
         self.user_edited_title: bool = False  # 用户是否手动编辑过标题
@@ -159,7 +160,7 @@ class ChatSession:
             # 重载器暂不可用（如 HistoryManager 尚未就绪）：保持已释放状态，
             # 不写成空消息（空消息一旦被 save 覆盖 SQLite 就是丢历史）。
             return
-        self._messages = consolidate_messages(loaded)
+        self._messages = consolidate_messages(loaded, owner=self)
         self._messages_released = False
         self.bump_messages_version()
 
@@ -187,11 +188,12 @@ class ChatSession:
         return released
 
     def get_context_messages(self) -> List[Dict[str, str]]:
-        return consolidate_messages(self.messages)
+        return consolidate_messages(self.messages, owner=self)
 
     def set_messages(self, messages: List[Dict], preserve_compaction: bool = False):
         # 赋值经 property setter，已自带 bump_messages_version（T33）
-        self.messages = consolidate_messages(messages or [])
+        # [B1] owner=self 同步挂探针（高频发送路径）
+        self.messages = consolidate_messages(messages or [], owner=self)
         if not preserve_compaction:
             self.reset_compaction_cache()
             self.reset_compaction_state()
@@ -305,7 +307,8 @@ class ChatSession:
             consolidated: 是否在导出时调用 consolidate_messages。
                           save 路径传 True，临时读取传 False 以节省性能。
         """
-        msgs = consolidate_messages(self.messages) if consolidated else self.messages
+        # [B1] owner=self：save 路径投影同样挂探针
+        msgs = consolidate_messages(self.messages, owner=self) if consolidated else self.messages
         return {
             "session_id": self.session_id,
             "name": self.name,

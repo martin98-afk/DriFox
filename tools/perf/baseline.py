@@ -50,10 +50,12 @@ if ROOT not in sys.path:
 # ============================================================
 def run_once(mode, entry="main", duration_ms=3000, frame_ms=16,
              mem_interval_ms=100, ops=0, op_interval_ms=20,
-             sample_every=50, synthetic=False, enable_tracemalloc=True):
+             sample_every=50, synthetic=False, enable_tracemalloc=True,
+             fixture="none"):
     """
     在独立进程内运行一次采集，返回指标 dict。
     mode: timing | mem | fps | longevity
+    fixture: none | synthetic-tabs[:N]（仅 synthetic 模式，锁定负载规模口径）
     """
     import PyQt5.QtCore as QtCore
     from PyQt5.QtCore import QTimer, QMetaObject, Qt
@@ -63,6 +65,11 @@ def run_once(mode, entry="main", duration_ms=3000, frame_ms=16,
 
     proc = psutil.Process(os.getpid())
     t0 = time.monotonic()
+    # 真实 app + longevity：app teardown 完成后再跑 tracemalloc compare_to 会
+    # 触发原生断点崩溃（rc=0x80000003，实测连续复现；watchdog 栈顶=snap.compare_to）。
+    # 该维度已有 RSS/对象数序列，trace_top 收益低，直接禁用换稳定退出。
+    if mode == "longevity" and not synthetic:
+        enable_tracemalloc = False
 
     # ---- patch 首屏可见（首个 top-level 窗口 showEvent）----
     orig_show = qw.QWidget.showEvent
@@ -80,6 +87,9 @@ def run_once(mode, entry="main", duration_ms=3000, frame_ms=16,
         "rss_visible": None,
         "obj_visible": None,
         "snap_visible": None,
+        "cpu_series": [],        # B1/B2：cpu_percent 序列（相对单核，100=占满一核）
+        "web_rss_series": [],    # A2：[t, main_rss_mb, web_rss_mb]（rss_sampler 口径）
+        "wall_t0": datetime.now(),  # A7：日志行过滤起点（wall clock）
     }
     _last_frame = [None]
     _last_mem = [t0]
@@ -103,6 +113,11 @@ def run_once(mode, entry="main", duration_ms=3000, frame_ms=16,
     def on_visible():
         app = QApplication.instance()
         tv = state["t_visible"]
+        # B1/B2 CPU 口径初始化：首次 cpu_percent(interval=None) 建立测量基线（非阻塞）
+        try:
+            proc.cpu_percent(interval=None)
+        except Exception:
+            pass
         # 内存快照：首屏可见瞬间
         if enable_tracemalloc:
             state["snap_visible"] = tracemalloc.take_snapshot()
@@ -118,11 +133,23 @@ def run_once(mode, entry="main", duration_ms=3000, frame_ms=16,
                 try:
                     rss = proc.memory_info().rss
                     obj = len(gc.get_objects())
+                    cpu = proc.cpu_percent(interval=None)
+                    state["cpu_series"].append(cpu)
                 except Exception:
                     return
                 state["mem_series"].append(
                     [round(time.monotonic() - tv, 3), rss, obj]
                 )
+                # A2/A4：读 rss_sampler 最近快照（真实 app 模式下可用；synthetic 无 WebEngine）
+                try:
+                    from app.core.infra.rss_sampler import rss_sampler
+                    state["web_rss_series"].append([
+                        round(time.monotonic() - tv, 3),
+                        rss_sampler.rss_mb(),
+                        rss_sampler.web_rss_mb(),
+                    ])
+                except Exception:
+                    pass
             mt = QTimer()
             mt.setInterval(mem_interval_ms)
             mt.timeout.connect(mem_tick)
@@ -146,28 +173,55 @@ def run_once(mode, entry="main", duration_ms=3000, frame_ms=16,
             _timers.append(ft)
 
         if mode == "longevity" and ops > 0:
-            from PyQt5.QtWidgets import QWidget, QLabel
-            # 长时运行：模拟定时操作 ops 次，记录 RSS/对象数增长
-            def op_tick():
-                # 模拟一次定时操作：创建并销毁临时控件 + 周期 gc
-                _op_counter[0] += 1
-                w = QLabel("op")
-                w.setText("x" * 64)
-                w.deleteLater()
-                if _op_counter[0] % 200 == 0:
-                    gc.collect()
-                if _op_counter[0] % sample_every == 0 or _op_counter[0] == ops:
+            if not synthetic:
+                # 真实 app 模式：密集创建/销毁临时控件会与 app 全局事件钩子/样式
+                # 系统在退出阶段竞态 → 原生崩溃（实测 0x80000003 连续 3 次复现）。
+                # 改为无副作用周期任务：语义=「app 挂机跑 N 拍，观察内存漂移与
+                # 回收动作（A7 口径）」，不再模拟 UI 操作。
+                def op_tick():
+                    _op_counter[0] += 1
                     try:
-                        rss = proc.memory_info().rss
-                        obj = len(gc.get_objects())
+                        from app.core.infra.rss_sampler import rss_sampler
+                        rss_sampler.rss_mb()  # 无副作用触碰：顺带驱动采样器新鲜度
                     except Exception:
-                        rss = obj = 0
-                    state["longevity_series"].append(
-                        [_op_counter[0], rss, obj]
-                    )
-                if _op_counter[0] >= ops:
-                    state["ops_done"] = _op_counter[0]
-                    QMetaObject.invokeMethod(app, "quit", Qt.QueuedConnection)
+                        pass
+                    if _op_counter[0] % 200 == 0:
+                        gc.collect()
+                    if _op_counter[0] % sample_every == 0 or _op_counter[0] == ops:
+                        try:
+                            rss = proc.memory_info().rss
+                            obj = len(gc.get_objects())
+                        except Exception:
+                            rss = obj = 0
+                        state["longevity_series"].append(
+                            [_op_counter[0], rss, obj]
+                        )
+                    if _op_counter[0] >= ops:
+                        state["ops_done"] = _op_counter[0]
+                        QMetaObject.invokeMethod(app, "quit", Qt.QueuedConnection)
+            else:
+                from PyQt5.QtWidgets import QWidget, QLabel
+                # 长时运行：模拟定时操作 ops 次，记录 RSS/对象数增长
+                def op_tick():
+                    # 模拟一次定时操作：创建并销毁临时控件 + 周期 gc
+                    _op_counter[0] += 1
+                    w = QLabel("op")
+                    w.setText("x" * 64)
+                    w.deleteLater()
+                    if _op_counter[0] % 200 == 0:
+                        gc.collect()
+                    if _op_counter[0] % sample_every == 0 or _op_counter[0] == ops:
+                        try:
+                            rss = proc.memory_info().rss
+                            obj = len(gc.get_objects())
+                        except Exception:
+                            rss = obj = 0
+                        state["longevity_series"].append(
+                            [_op_counter[0], rss, obj]
+                        )
+                    if _op_counter[0] >= ops:
+                        state["ops_done"] = _op_counter[0]
+                        QMetaObject.invokeMethod(app, "quit", Qt.QueuedConnection)
             lt = QTimer()
             lt.setInterval(op_interval_ms)
             lt.timeout.connect(op_tick)
@@ -203,12 +257,18 @@ def run_once(mode, entry="main", duration_ms=3000, frame_ms=16,
         win = QMainWindow()
         win.setWindowTitle("DriFox-baseline-synthetic")
         win.resize(800, 600)
+        _apply_fixture(win, fixture)
         win.show()
         app.exec_()
         # 立即退出，跳过 Qt 原生拆卸（offscreen 下拆卸会触发原生层崩溃）
         _emit_and_exit(state, mode, entry, synthetic, enable_tracemalloc, proc)
 
     mod = __import__(entry, fromlist=["main"])
+    if fixture not in (None, "", "none"):
+        # 真实 app 模式暂无会话注入 API；synthetic-tabs 仅 synthetic 模式有意义。
+        # 明确失败好过静默忽略（口径必须可复现）。
+        raise SystemExit(
+            f"--fixture-scenario {fixture} 仅支持 --synthetic 模式（真实 app 会话注入待接入）")
     state["t_import_done"] = time.monotonic()
 
     if enable_tracemalloc and not tracemalloc.is_tracing():
@@ -224,6 +284,77 @@ def run_once(mode, entry="main", duration_ms=3000, frame_ms=16,
     sys.stdout.write(json.dumps(res, ensure_ascii=False) + "\n")
     sys.stdout.flush()
     os._exit(0)
+
+
+def _apply_fixture(win, fixture):
+    """按 --fixture-scenario 给合成窗口加载固定负载（锁定规模口径）。
+
+    - none: 空主窗（默认）
+    - synthetic-tabs[:N]: QTabWidget × N 页，每页 20 行 QLabel（默认 N=30）
+    """
+    if fixture in (None, "", "none"):
+        return
+    if fixture.startswith("synthetic-tabs"):
+        n = int(fixture.split(":", 1)[1]) if ":" in fixture else 30
+        from PyQt5.QtWidgets import QTabWidget, QLabel, QVBoxLayout, QWidget
+        tabs = QTabWidget()
+        for i in range(n):
+            page = QWidget()
+            lay = QVBoxLayout(page)
+            for r in range(20):
+                lay.addWidget(QLabel(f"tab{i}-row{r}-" + "x" * 64))
+            tabs.addTab(page, f"tab{i}")
+        win.setCentralWidget(tabs)
+        return
+    raise SystemExit(f"未知 fixture-scenario: {fixture}（支持 none / synthetic-tabs[:N]）")
+
+
+def _count_recycle_actions(wall_t0):
+    """A7 口径：扫描 DriFox 日志（all*.log），统计本进程启动后的回收动作。
+
+    匹配标记：[B4-2] strong-recycle / [T31] idle-kill / 闸门动作
+    （main-soft/main-hard/kill(n)/soft-unload(n)）。纯读文件，日志缺失返回 {}。
+    """
+    import re
+    out = {}
+    try:
+        try:
+            from app.utils.utils import get_app_data_dir
+        except ImportError:
+            from app.utils import get_app_data_dir
+        log_dir = get_app_data_dir() / "logs"
+    except Exception:
+        return out
+    if not log_dir.is_dir():
+        return out
+    t0_str = wall_t0.strftime("%Y-%m-%d %H:%M:%S")
+    pats = {
+        "strong_recycle": re.compile(r"\[B4-2\] strong-recycle kill (\d+)"),
+        "idle_kill": re.compile(r"\[T31\] idle-kill\((\d+)\)"),
+        "gate_kill": re.compile(r"kill\((\d+)\)"),
+        "gate_soft_unload": re.compile(r"soft-unload\((\d+)\)"),
+        "gate_main_pressure": re.compile(r"\bmain-(?:soft|hard)\("),
+    }
+    try:
+        for fp in sorted(log_dir.glob("all*.log")):
+            try:
+                with open(fp, encoding="utf-8", errors="replace") as f:
+                    for line in f:
+                        # loguru 行首时间戳 YYYY-MM-DD HH:MM:SS：字典序=时间序，
+                        # 只统计本进程启动之后的行（多实例共存时不污染他进程计数）
+                        if line[:19] < t0_str:
+                            continue
+                        for name, pat in pats.items():
+                            m = pat.search(line)
+                            if not m:
+                                continue
+                            inc = 1 if name == "gate_main_pressure" else int(m.group(1))
+                            out[name] = out.get(name, 0) + inc
+            except OSError:
+                continue
+    except Exception:
+        return out
+    return out
 
 
 def _pct(sorted_vals, p):
@@ -304,6 +435,50 @@ def _build_result(state, mode, entry, synthetic, enable_tracemalloc, proc):
         except Exception:
             pass
 
+    # ---- B1/B2 CPU 统计 ----
+    if state["cpu_series"]:
+        cs = sorted(state["cpu_series"])
+        res["cpu_mean"] = round(sum(cs) / len(cs), 2)
+        res["cpu_p95"] = round(_pct(cs, 95), 2)
+        res["cpu_max"] = round(cs[-1], 2)
+
+    # ---- A2/A4 WebEngine RSS 时序统计 + 进程级快照（A3/A4）----
+    if state["web_rss_series"]:
+        webs = [w for _, _, w in state["web_rss_series"] if w]
+        mains = [m for _, m, _ in state["web_rss_series"] if m]
+        if webs:
+            res["web_rss_peak_mb"] = round(max(webs), 2)
+            res["web_rss_end_mb"] = round(webs[-1], 2)
+        if mains:
+            res["main_rss_sampler_end_mb"] = round(mains[-1], 2)
+    try:
+        from app.core.infra.rss_sampler import rss_sampler
+        by_pid = rss_sampler.web_rss_by_pid()
+        snap = {
+            "main_rss_mb": round(rss_sampler.rss_mb(), 2),
+            "web_rss_mb": round(rss_sampler.web_rss_mb(), 2),
+            "web_by_pid_count": len(by_pid),
+            "web_pid_max_mb": round(max(by_pid.values()), 2) if by_pid else None,
+            "web_pid_median_mb": (round(sorted(by_pid.values())[len(by_pid) // 2], 2)
+                                  if by_pid else None),
+        }
+        res["rss_sampler_snapshot"] = snap
+    except Exception:
+        pass
+
+    # ---- A5/A6 governor 计数器快照 ----
+    try:
+        from app.core.infra import memory_governor as _mg
+        res["governor_snapshot"] = {
+            "global_rendered_pages": int(getattr(_mg, "_global_rendered_pages", 0) or 0),
+            "max_global_rendered_pages": int(getattr(_mg, "_MAX_GLOBAL_RENDERED_PAGES", 32)),
+        }
+    except Exception:
+        pass
+
+    # ---- A7 回收动作计数（本进程启动后的日志行）----
+    res["recycle_actions"] = _count_recycle_actions(state["wall_t0"])
+
     # 仅当未被前面维度（如 longevity 的采样末值）设置时才用脚本退出时进程 RSS 兜底
     res.setdefault("rss_end_mb", round(proc.memory_info().rss / 1024 / 1024, 2))
     return res
@@ -346,6 +521,22 @@ def spawn_once(mode, entry, platform, retries=3, **kw):
             last_err = f"timeout: {e}"
             continue
         if p.returncode != 0:
+            # 降级容错：真实 app 退出阶段存在概率性原生崩溃（WebEngine teardown
+            # 竞态，实测 0x80000003），但测量 JSON 可能在崩溃前已完整输出。
+            # stdout 有合法 JSON 时接受结果并标注异常退出码，避免整维度报废。
+            out = p.stdout.strip() if p.stdout else ""
+            parsed = None
+            for line in reversed(out.splitlines()):
+                line = line.strip()
+                if line.startswith("{"):
+                    try:
+                        parsed = json.loads(line)
+                        break
+                    except Exception:
+                        continue
+            if parsed is not None:
+                parsed["_crashed_exit"] = p.returncode
+                return parsed
             last_err = f"rc={p.returncode}\nSTDERR: {p.stderr[-1500:]}"
             continue
         out = p.stdout.strip()
@@ -364,11 +555,13 @@ def spawn_once(mode, entry, platform, retries=3, **kw):
     raise RuntimeError(f"_once({mode}) 重试 {retries} 次仍失败: {last_err}")
 
 
-def collect_startup(repeats, entry, platform, duration_ms, synthetic=False, retries=3):
+def collect_startup(repeats, entry, platform, duration_ms, synthetic=False, retries=3,
+                    fixture="none"):
     samples = []
     for _ in range(repeats):
         r = spawn_once("timing", entry, platform, retries=retries,
-                       synthetic=synthetic, duration_ms=duration_ms)
+                       synthetic=synthetic, duration_ms=duration_ms,
+                       fixture_scenario=fixture)
         samples.append({
             "import_s": r.get("import_s"),
             "to_visible_s": r.get("to_visible_s"),
@@ -422,20 +615,24 @@ def cmd_all(args):
     dims = {
         "startup": lambda: collect_startup(
             args.repeats, args.entry, args.platform, args.duration_ms,
-            synthetic=args.synthetic, retries=args.retries),
+            synthetic=args.synthetic, retries=args.retries,
+            fixture=args.fixture_scenario),
         "memory": lambda: spawn_once(
             "mem", args.entry, args.platform, retries=args.retries,
             synthetic=args.synthetic, duration_ms=args.duration_ms,
-            mem_interval_ms=args.mem_interval_ms),
+            mem_interval_ms=args.mem_interval_ms,
+            fixture_scenario=args.fixture_scenario),
         "fps": lambda: spawn_once(
             "fps", args.entry, args.platform, retries=args.retries,
             synthetic=args.synthetic, duration_ms=args.duration_ms,
-            frame_ms=args.frame_ms),
+            frame_ms=args.frame_ms,
+            fixture_scenario=args.fixture_scenario),
         "longevity": lambda: spawn_once(
             "longevity", args.entry, args.platform, retries=args.retries,
             synthetic=args.synthetic, ops=args.ops,
             op_interval_ms=args.op_interval_ms, sample_every=args.sample_every,
-            duration_ms=args.duration_ms),
+            duration_ms=args.duration_ms,
+            fixture_scenario=args.fixture_scenario),
     }
     for name, fn in dims.items():
         try:
@@ -457,6 +654,8 @@ def main():
         p.add_argument("--synthetic", action="store_true",
                        help="合成轻量窗口（不含 WebEngine），用于无显示/无 WebEngine 环境")
         p.add_argument("--retries", type=int, default=3, help="子进程崩溃重试次数")
+        p.add_argument("--fixture-scenario", default="none",
+                       help="负载口径：none / synthetic-tabs[:N]（仅 --synthetic 模式）")
 
     p_startup = sub.add_parser("startup"); add_common(p_startup)
     p_mem = sub.add_parser("mem"); add_common(p_mem)
@@ -490,6 +689,7 @@ def main():
     once.add_argument("--sample-every", type=int, default=50)
     once.add_argument("--synthetic", action="store_true")
     once.add_argument("--no-tracemalloc", action="store_true")
+    once.add_argument("--fixture-scenario", default="none")
 
     args = ap.parse_args()
     if args.cmd is None:
@@ -502,13 +702,15 @@ def main():
             frame_ms=args.frame_ms, mem_interval_ms=args.mem_interval_ms,
             ops=args.ops, op_interval_ms=args.op_interval_ms,
             sample_every=args.sample_every, synthetic=args.synthetic,
-            enable_tracemalloc=not args.no_tracemalloc)
+            enable_tracemalloc=not args.no_tracemalloc,
+            fixture=args.fixture_scenario)
 
     if args.cmd == "startup":
         rep = {"meta": build_meta(args.entry, args.platform),
                "dimensions": {"startup": collect_startup(
                    args.repeats, args.entry, args.platform, args.duration_ms,
-                   synthetic=args.synthetic, retries=args.retries)}}
+                   synthetic=args.synthetic, retries=args.retries,
+                   fixture=args.fixture_scenario)}}
         print(json.dumps(rep, ensure_ascii=False, indent=2))
         return
 
@@ -517,7 +719,8 @@ def main():
                "dimensions": {"memory": spawn_once(
                    "mem", args.entry, args.platform, retries=args.retries,
                    synthetic=args.synthetic, duration_ms=args.duration_ms,
-                   mem_interval_ms=args.mem_interval_ms)}}
+                   mem_interval_ms=args.mem_interval_ms,
+                   fixture_scenario=args.fixture_scenario)}}
         print(json.dumps(rep, ensure_ascii=False, indent=2))
         return
 
@@ -526,7 +729,8 @@ def main():
                "dimensions": {"fps": spawn_once(
                    "fps", args.entry, args.platform, retries=args.retries,
                    synthetic=args.synthetic, duration_ms=args.duration_ms,
-                   frame_ms=args.frame_ms)}}
+                   frame_ms=args.frame_ms,
+                   fixture_scenario=args.fixture_scenario)}}
         print(json.dumps(rep, ensure_ascii=False, indent=2))
         return
 
@@ -536,7 +740,8 @@ def main():
                    "longevity", args.entry, args.platform, retries=args.retries,
                    synthetic=args.synthetic, ops=args.ops,
                    op_interval_ms=args.op_interval_ms, sample_every=args.sample_every,
-                   duration_ms=args.duration_ms)}}
+                   duration_ms=args.duration_ms,
+                   fixture_scenario=args.fixture_scenario)}}
         print(json.dumps(rep, ensure_ascii=False, indent=2))
         return
 

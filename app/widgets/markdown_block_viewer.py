@@ -556,11 +556,15 @@ _FENCE_RE_CACHE = re.compile(r"^\s{0,3}```", re.M)
 _LEADING_HTML_LINE_RE = re.compile(r"^\s*<", re.M)
 
 
-def _split_tag_segments(md_text: str, open_tag: str, close_tag: str) -> List[Tuple[str, str, bool]]:
+def _split_tag_segments(md_text: str, open_tag: str, close_tag: str, spans: Optional[List[Tuple[int, int]]] = None) -> List[Tuple[str, str, bool]]:
     """切分 <tag>...</tag> 段。返回 [("text"|"tag", 内容, 是否闭合)]。
 
     与 CodeWebViewer._inject_think_cards 同策略：open 到「下一个 open 前
     的最后一个 close」为一个块；未闭合标记 closed=False（流式态）。
+
+    [P0] spans：传入 list 时同步收集每段的原文区间 (start, end)，供
+    parse_blocks(with_spans=True) 顶层段缓存增量复用。注意：无 open 时
+    rest 的 close_tag 剥除会缩短文本，但 span 始终标注原文区间。
     """
     segments: List[Tuple[str, str, bool]] = []
     i = 0
@@ -570,10 +574,14 @@ def _split_tag_segments(md_text: str, open_tag: str, close_tag: str) -> List[Tup
             rest = md_text[i:].replace(close_tag, "")
             if rest.strip():
                 segments.append(("text", rest, True))
+                if spans is not None:
+                    spans.append((i, len(md_text)))
             break
         pre = md_text[i:start]
         if pre.strip():
             segments.append(("text", pre, True))
+            if spans is not None:
+                spans.append((i, start))
         t0 = start + len(open_tag)
         nxt = md_text.find(open_tag, t0)
         search_end = nxt if nxt != -1 else len(md_text)
@@ -582,17 +590,24 @@ def _split_tag_segments(md_text: str, open_tag: str, close_tag: str) -> List[Tup
             content = md_text[t0:close]
             if content.strip():
                 segments.append(("tag", content, True))
+                if spans is not None:
+                    spans.append((start, close + len(close_tag)))
             i = close + len(close_tag)
         else:
             content = md_text[t0:search_end]
             if content.strip():
                 segments.append(("tag", content, False))
+                if spans is not None:
+                    spans.append((start, search_end))
             i = search_end
     return segments
 
 
-def _split_code_fences(text: str) -> List[Tuple[str, str, str, bool]]:
-    """在文本段内切分 fenced code。返回 [("text"|"code", 内容, lang, closed)]。"""
+def _split_code_fences(text: str, spans: Optional[List[Tuple[int, int]]] = None) -> List[Tuple[str, str, str, bool]]:
+    """在文本段内切分 fenced code。返回 [("text"|"code", 内容, lang, closed)]。
+
+    [P0] spans：与 _split_tag_segments 同款，标注段内相对区间。
+    """
     out: List[Tuple[str, str, str, bool]] = []
     pos = 0
     while pos < len(text):
@@ -601,10 +616,14 @@ def _split_code_fences(text: str) -> List[Tuple[str, str, str, bool]]:
             seg = text[pos:]
             if seg.strip():
                 out.append(("text", seg, "", True))
+                if spans is not None:
+                    spans.append((pos, len(text)))
             break
         head = text[pos : m.start()]
         if head.strip():
             out.append(("text", head, "", True))
+            if spans is not None:
+                spans.append((pos, m.start()))
         lang = (m.group(2) or "").strip()
         body_start = m.end()
         indent = m.group(1) or ""
@@ -613,10 +632,14 @@ def _split_code_fences(text: str) -> List[Tuple[str, str, str, bool]]:
         if cm is not None:
             code_body = text[body_start : cm.start()]
             out.append(("code", code_body, lang, True))
+            if spans is not None:
+                spans.append((m.start(), cm.end()))
             pos = cm.end()
         else:  # 未闭合（流式中）
             code_body = text[body_start:]
             out.append(("code", code_body, lang, False))
+            if spans is not None:
+                spans.append((m.start(), len(text)))
             pos = len(text)
     return out
 
@@ -803,24 +826,78 @@ def _split_block_elements(text: str) -> List[Tuple[str, str]]:
     return out
 
 
-def parse_blocks(md_text: str) -> List[Dict[str, Any]]:
-    """markdown 全文 → 块列表。type ∈ think/tool/code/html/tag/quote/table/hr。"""
+def parse_blocks(md_text: str, with_spans: bool = False):
+    """markdown 全文 → 块列表。type ∈ think/tool/code/html/tag/quote/table/hr。
+
+    [P0] with_spans=True 时返回 (blocks, top_segs)：top_segs 为顶层段元数据
+    [(kind, closed, seg_start, seg_end, seg_blocks)]（绝对坐标），供
+    _parse_blocks_incremental 流式增量复用。默认 False 返回纯 list，既有
+    调用方零影响。
+    """
     blocks: List[Dict[str, Any]] = []
-    for kind, content, closed in _split_tag_segments(md_text, _THINK_OPEN, _THINK_CLOSE):
+    think_spans: List[Tuple[int, int]] = [] if with_spans else None
+    top_segs: List[tuple] = [] if with_spans else None
+    for kind, content, closed in _split_tag_segments(md_text, _THINK_OPEN, _THINK_CLOSE, spans=think_spans):
+        seg_blocks: List[Dict[str, Any]] = []
         if kind == "tag":
-            blocks.append({"type": "think", "content": content, "completed": closed})
-            continue
-        for tkind, tbody, tclosed in _split_tag_segments(content, _TOOL_OPEN, _TOOL_CLOSE):
-            if tkind == "tag":
-                fields = _parse_tool_block(tbody)
-                blocks.append({"type": "tool", **fields, "closed": tclosed})
-                continue
-            for ckind, cbody, lang, fence_closed in _split_code_fences(tbody):
-                if ckind == "code":
-                    blocks.append({"type": "code", "lang": lang, "code": cbody, "closed": fence_closed})
-                else:
-                    blocks.extend(_split_plugin_tags(cbody))
+            seg_blocks.append({"type": "think", "content": content, "completed": closed})
+        else:
+            tool_spans: List[Tuple[int, int]] = [] if with_spans else None
+            for tkind, tbody, tclosed in _split_tag_segments(content, _TOOL_OPEN, _TOOL_CLOSE, spans=tool_spans):
+                if tkind == "tag":
+                    fields = _parse_tool_block(tbody)
+                    seg_blocks.append({"type": "tool", **fields, "closed": tclosed})
+                    continue
+                fence_spans: List[Tuple[int, int]] = [] if with_spans else None
+                for ckind, cbody, lang, fence_closed in _split_code_fences(tbody, spans=fence_spans):
+                    if ckind == "code":
+                        seg_blocks.append({"type": "code", "lang": lang, "code": cbody, "closed": fence_closed})
+                    else:
+                        seg_blocks.extend(_split_plugin_tags(cbody))
+        blocks.extend(seg_blocks)
+        if with_spans:
+            ts, te = think_spans[len(top_segs)]
+            top_segs.append((kind, closed, ts, te, seg_blocks))
+    if with_spans:
+        return blocks, top_segs
     return blocks
+
+
+# [P0] 顶层段缓存增量的等价性论证（供审查，勿删）：
+# 前提：流式追加满足 md.startswith(prev_md)（单调追加；内容替换/懒回调重设
+# 自动退回全量）。顶层段切分（_split_tag_segments）无后效：每个段的区间与
+# closed 判定只由「段起点到下一个 open（或文末）」的原文决定，已产出段的
+# 后追加不改变其切分结果；suffix 只可能：①并入末段（末段开放/未闭合）
+# ②另起新段（末段已闭合）③填入末段之后被 strip 丢弃的空白 rest。
+# 三种情形都等价于「复用全部闭合段 + 从切点 parse_blocks(md[cut:])」。
+# 嵌套层（tool/fence/tag）随所属顶层段整体复用或整体重解析，不跨段混合。
+# 已知漂移窗口：插件注册表热插拔发生在两次 reconcile 之间时，复用段的
+# tag 切分不重算（流式毫秒级窗口内注册表变化可忽略；与段级缓存同口径）。
+def _parse_blocks_incremental(md, prev_md, prev_top_segs):
+    """单调追加时的增量解析：复用已闭合顶层段，仅重解析尾部。
+
+    返回 (blocks, top_segs)，与 parse_blocks(md, with_spans=True) 同构。
+    """
+    if not prev_top_segs:
+        return parse_blocks(md, with_spans=True)
+    kind, closed, s, e, _blocks = prev_top_segs[-1]
+    if e < len(prev_md):
+        # 闭合段后原文还有被 strip 丢弃的空白 rest：suffix 填入该空白区
+        cut, reuse = e, prev_top_segs
+    elif kind == "text" or not closed:
+        # 末段开放（text 段 / 未闭合 think/tool/fence）：suffix 并入该段
+        cut, reuse = s, prev_top_segs[:-1]
+    else:
+        # 闭合段恰在文末：suffix 另起新段
+        cut, reuse = e, prev_top_segs
+    blocks, top_segs = parse_blocks(md[cut:], with_spans=True)
+    if cut:
+        top_segs = [(k2, c2, s2 + cut, e2 + cut, bs2) for (k2, c2, s2, e2, bs2) in top_segs]
+    merged = list(reuse) + top_segs
+    out: List[Dict[str, Any]] = []
+    for _k, _c, _s, _e, bs in merged:
+        out.extend(bs)
+    return out, merged
 
 
 def _split_plugin_tags(text: str) -> List[Dict[str, Any]]:
@@ -1053,7 +1130,15 @@ def _render_plugin_tag_html(tag: str, content: str, completed: bool) -> str:
 
 
 def _block_key(b: Dict[str, Any]) -> str:
-    """块内容指纹：reconcile 时跳过未变化的块。"""
+    """块内容指纹：reconcile 时跳过未变化的块。
+
+    [P0] 指纹驻留：增量路径复用的块 dict 引用跨帧稳定，首次计算后写入
+    "_fp" 键直读，避免已闭合长块每帧重算 sha1。复用前提是块内容不变，
+    缓存值恒正确；新解析块无 "_fp" 走原逻辑。
+    """
+    fp = b.get("_fp")
+    if fp:
+        return fp
     if b["type"] == "tool":
         raw = "tool:" + b.get("name", "") + "|" + b.get("args_raw", "") + "|" + b.get("result", "")
     else:
@@ -2350,6 +2435,8 @@ class MarkdownBlockViewer(QWidget):
         self._light = light
         self._md = ""
         self._streaming = True
+        # [P0] 顶层段解析缓存：(prev_md, top_segs)，_reconcile 增量复用用
+        self._parse_cache = (None, None)
         # ── [X1] 四级渲染派发状态：立即 / 100ms 合并 / 自适应 150-300-500 / 非流式 40ms ──
         self._render_timer = QTimer(self)
         self._render_timer.setSingleShot(True)
@@ -2647,7 +2734,21 @@ class MarkdownBlockViewer(QWidget):
 
     def _reconcile(self, force: bool = False) -> None:
 
-        blocks = parse_blocks(self._md)
+        md = self._md
+        prev_md, prev_segs = self._parse_cache
+        if prev_md is None or not md.startswith(prev_md):
+            # 内容替换 / 首帧：全量解析（同时产顶层段元数据供后续增量）
+            blocks, segs = parse_blocks(md, with_spans=True)
+        else:
+            # [P0] 单调追加：复用已闭合顶层段，仅重解析尾部（等价性论证见
+            # _parse_blocks_incremental docstring）。force 且 md==prev_md 时
+            # 增量路径自然退化为全复用+空尾，正确。
+            blocks, segs = _parse_blocks_incremental(md, prev_md, prev_segs)
+        self._parse_cache = (md, segs)
+        # 指纹驻留：复用块引用稳定，首帧算过 "_fp" 后直读（见 _block_key）
+        for b in blocks:
+            if "_fp" not in b:
+                b["_fp"] = _block_key(b)
 
         # 分区规则对齐 WebEngine 版：think + 非编辑工具进「工具与思考」折叠区；
 

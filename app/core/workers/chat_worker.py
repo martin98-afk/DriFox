@@ -5,6 +5,7 @@ Chat Worker - OpenAI 对话执行器
 
 import concurrent.futures
 import gc
+import hashlib
 import math
 import os
 import queue
@@ -12,6 +13,7 @@ import re
 import socket
 import threading
 import time
+import json as stdjson
 
 # 可选依赖：psutil 用于内存诊断（不强制）
 try:
@@ -200,6 +202,27 @@ def _build_deny_message(reason: str) -> str:
     if reason:
         msg += f". User feedback: {reason}"
     return msg
+
+
+# [PERF] tool_call args 规范化 memo（候选 6）：循环检测路径对同一 args 串
+# 反复 loads+dumps（大 JSON 10KB 级有感）。规范化是确定性纯函数，按
+# args 原串 memo 安全。上限 256 条，超限整表清空（防大串膨胀，放弃精细淘汰）。
+_TOOL_ARGS_NORM_CACHE: Dict[str, str] = {}
+_TOOL_ARGS_NORM_CACHE_MAX = 256
+
+
+def _normalize_json_whitespace(s: str) -> str:
+    """标准化 tool_call arguments 的装饰性空白（模块级私有辅助）。
+
+    注意：这里必须用标准库 json（stdjson），不能用模块级 orjson ——
+    orjson.dumps 无 ensure_ascii/separators 参数，且行为与 stdjson 不同。
+    """
+    try:
+        obj = stdjson.loads(s)
+        return stdjson.dumps(obj, ensure_ascii=False, separators=(",", ":"))
+    except Exception:
+        # 退化：去掉所有空白（包括换行/制表）
+        return re.sub(r"\s+", "", s)
 
 
 class OpenAIChatWorker(QThread):
@@ -1832,103 +1855,29 @@ class OpenAIChatWorker(QThread):
         arguments 是字符串，标准化空白后再用：
         - 去除 JSON token（`{}` `,` `:` `"`）周围的装饰性空格
         - 但保留字符串 value 内部的空格（如 "hello world"）
+
+        [PERF] 规范化走模块级 memo（候选 6）：同一 args 串重复签名计算
+        直接复用缓存，json.loads+dumps 仅首次执行。
         """
-        import hashlib
-        import re
-
-        def _normalize_json_whitespace(s: str) -> str:
-            # 去掉所有空白（包含换行）后重新插入：
-            # 1. JSON token 周围不留空格
-            # 2. 字符串 value 内部保留原始字符（只把连续空白压成单空格）
-            # 简化版：把所有空白压成单空格，再去掉 `,` `:` `{` `}` `[` `]` 前后的空格
-            # 用状态机判断是否在字符串内部太复杂，这里采用保守策略：
-            # 先尝试用 json 解析，解析成功则重 dump 规范化；失败则退到"压缩连续空白"。
-            try:
-                import json
-
-                obj = json.loads(s)
-                return json.dumps(obj, ensure_ascii=False, separators=(",", ":"))
-            except Exception:
-                # 退化：去掉所有空白（包括换行/制表）
-                return re.sub(r"\s+", "", s)
-
         parts = []
         for tc in tool_calls:
             func = tc.get("function") or {}
             name = (func.get("name") or "").strip()
             args = (func.get("arguments") or "").strip()
-            args = _normalize_json_whitespace(args)
-            parts.append(f"{name}|{args}")
+            cached = _TOOL_ARGS_NORM_CACHE.get(args)
+            if cached is None:
+                cached = _normalize_json_whitespace(args)
+                if len(_TOOL_ARGS_NORM_CACHE) >= _TOOL_ARGS_NORM_CACHE_MAX:
+                    _TOOL_ARGS_NORM_CACHE.clear()
+                _TOOL_ARGS_NORM_CACHE[args] = cached
+            parts.append(f"{name}|{cached}")
         parts.sort()
         canonical = "\n".join(parts)
         return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
-    @staticmethod
-    def _truncate_repetitive_tool_calls(messages: List[Dict], threshold: int) -> List[Dict]:
-        """
-        从消息列表中移除**所有**连续重复的工具调用轮次，只保留第 1 轮。
-
-        循环检测触发后调用，清理消息历史中的重复工具调用，
-        避免下次发消息时再次触发循环检测或被服务端拒绝。
-
-        策略：
-        1. 从末尾往前找所有含 tool_calls 的 assistant 消息，计算签名
-        2. 找出从末尾开始的**完整连续相同签名区间**（可能超过 threshold 轮）
-        3. 保留第 1 轮（assistant + tool 结果）作为正常调用记录
-        4. 移除第 2~N 轮的重复 assistant + tool 消息
-        5. **保留重复区间之后的所有消息**（如用户刚发的新消息）
-        6. 在清理点插入一条 assistant 终止提示（让模型下次换方法）
-
-        Args:
-            messages: 会话消息列表（含重复工具调用轮次）
-            threshold: 循环检测阈值（即至少重复了多少轮）
-
-        Returns:
-            清理后的消息列表（不再包含重复轮次，但保留后续消息）
-        """
-        # 1. 从后往前收集所有含 tool_calls 的 assistant 消息（index, signature）
-        assistants: List[tuple] = []  # [(index, signature), ...] 从后往前
-        for i in range(len(messages) - 1, -1, -1):
-            msg = messages[i]
-            if msg.get("role") == "assistant" and msg.get("tool_calls"):
-                sig = OpenAIChatWorker._compute_tool_call_signature(msg.get("tool_calls") or [])
-                assistants.append((i, sig))
-
-        if len(assistants) < threshold:
-            return messages  # 不足阈值，不需要清理
-
-        # 2. 找出从末尾开始的完整连续相同签名区间
-        last_sig = assistants[0][1]
-        run_length = 0
-        for _idx, sig in assistants:
-            if sig == last_sig:
-                run_length += 1
-            else:
-                break
-
-        if run_length < threshold:
-            return messages  # 连续相同轮次不足阈值
-
-        # 3. assistants[run_length - 1] 是第 1 个重复轮次（最靠前的那个）
-        first_round_assistant_idx = assistants[run_length - 1][0]
-
-        # 4. 找到第 1 轮的 tool 结果结束位置（即需要保留的前缀边界）
-        prefix_end = first_round_assistant_idx + 1
-        while prefix_end < len(messages) and messages[prefix_end].get("role") == "tool":
-            prefix_end += 1
-
-        # 5. 找到最后一个重复轮次的 tool 结果结束位置（即后续消息的起始点）
-        last_round_assistant_idx = assistants[0][0]
-        tail_start = last_round_assistant_idx + 1
-        while tail_start < len(messages) and messages[tail_start].get("role") == "tool":
-            tail_start += 1
-
-        # 6. 组装：[前缀含第1轮] + [后续消息（如用户的新消息）]
-        # 不插入任何提示消息，让模型自然地从清理后的历史继续
-        sanitized = list(messages[:prefix_end])
-        sanitized.extend(messages[tail_start:])
-
-        return sanitized
+    # [A34] _truncate_repetitive_tool_calls 已拆除：用户裁决「主程序不对上下文
+    # 做任何操作」，重复轮次自动裁剪（含插入终止提示）随静默清理路径一并退场；
+    # 循环终止由 LoopPolicy STOP 路径承担（_detect_repetitive_tool_loop 保留）。
 
     def _get_reasoning_content(self) -> str:
         """获取当前的 reasoning_content（从累积的 chunks 合成）"""
@@ -2359,11 +2308,12 @@ class OpenAIChatWorker(QThread):
                     session_count=len(current_session_messages),
                 )
 
-                # ⚠️ 客户端主动循环检测：避免触发 Qwen/DashScope 的 Repetitive tool calls 错误
-                # Qwen 服务端会拒绝"连续多轮相同 (name, args) 的工具调用"，返回 400。
-                # 同样的请求序列重试仍会被拒，必须在客户端主动中断。
-                # 策略：检查 current_messages 中最近 _TOOL_LOOP_THRESHOLD 轮 assistant 消息的
-                # tool_call 签名是否完全一致；连续达到阈值就主动终止并提示用户。
+                # ⚠️ 客户端循环检测（仅终止会话用，不改写历史）：避免触发 Qwen/DashScope
+                # 的 Repetitive tool calls 错误（服务端拒绝"连续多轮相同 (name, args)"）。
+                # 检测到循环时交 LoopPolicy 门控：STOP → 走完成路径终止会话（会话控制
+                # 而非历史裁剪）；CONTINUE → 历史完整保留继续。
+                # [A34] 用户裁决「主程序不对上下文做任何操作」：重复轮次自动裁剪已拆除，
+                # 死循环时历史膨胀/服务端拒绝的后果由用户的上下文管道插件接管。
                 loop_detected = OpenAIChatWorker._detect_repetitive_tool_loop(current_messages)
                 if loop_detected:
                     # LoopPolicy 门控：策略要求终止则走完成路径（默认 CONTINUE → 零变化）
@@ -2387,21 +2337,7 @@ class OpenAIChatWorker(QThread):
                         self._clear_pending_response_state()
                         self._emit_with_callback("finished_with_content", self.finished_with_content, final_response)
                         return
-                    # 静默清理：不报错、不退出，清掉重复轮次后让模型带着干净历史继续
-                    logger.warning(
-                        f"[ToolLoop] 检测到连续 {self._TOOL_LOOP_THRESHOLD} 轮重复工具调用，静默清理重复轮次后继续。"
-                    )
-                    current_session_messages = OpenAIChatWorker._truncate_repetitive_tool_calls(
-                        current_session_messages, self._TOOL_LOOP_THRESHOLD
-                    )
-                    current_messages = OpenAIChatWorker._truncate_repetitive_tool_calls(
-                        current_messages, self._TOOL_LOOP_THRESHOLD
-                    )
-                    self._current_session_messages = list(current_session_messages)
-                    # 作废 API 缓存，下一轮 _make_api_call 会从清理后的 current_messages 重建
-                    self._api_messages_cache = None
-                    self._api_messages_built = False
-                    continue
+                    # CONTINUE：历史完整保留，不裁剪不改写（[A34] 静默清理已拆除）
 
                 # 消费队列中的 PostToolUse 等 hook 消息（来自 tool_executor）
                 self._inject_pending_hook_messages(session_messages_target=current_session_messages)

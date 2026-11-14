@@ -44,8 +44,11 @@ class UsageService(QObject):
 
     # 轮询周期与缓存 TTL（秒）
     POLL_INTERVAL_MS = 60000
-    PLAN_TTL_S = 60.0
-    BALANCE_TTL_S = 60.0
+    # A2 惰性过期（可调）：缓存条目带时间戳，读取时判 TTL；过期且无活跃
+    # 注册者的条目在读取/unregister 时顺手 pop（不主动清扫）。5 分钟裁决
+    # 依据：用量数据变化粒度远大于 60s，拉长 TTL 减少重复抓取。
+    PLAN_TTL_S = 300.0
+    BALANCE_TTL_S = 300.0
 
     @classmethod
     def get_instance(cls) -> "UsageService":
@@ -110,6 +113,12 @@ class UsageService(QObject):
             self._ensure_poll_timer()
             return
 
+        # A2 惰性回收：条目已过 TTL 且无活跃注册者 → 读取时顺手丢弃，
+        # 防长会话/unregister 残留条目无限累积（有 active 的过期条目保留，
+        # 由 tick force 重拉覆盖）
+        if hit is not None and key not in self._active_plan_keys:
+            self._plan_cache.pop(key, None)
+
         if key in self._in_flight:
             # 并发去重：同一 key 已有一路在抓取，保持轮询 timer 存活等下一轮
             self._ensure_poll_timer()
@@ -163,6 +172,10 @@ class UsageService(QObject):
             self.balance_ready.emit(provider_name, config_id, hit[1])
             self._ensure_poll_timer()
             return
+
+        # A2 惰性回收：过期且无活跃注册者的条目丢弃（同 plan 路径语义）
+        if hit is not None and key not in self._active_balance_keys:
+            self._balance_cache.pop(key, None)
 
         if key in self._in_flight:
             # 并发去重：保持 timer 存活等抓取完成
@@ -240,6 +253,13 @@ class UsageService(QObject):
         for active in (self._active_plan_keys, self._active_balance_keys):
             for key in [k for k in active if k[1] == config_id]:
                 active.discard(key)
+        # A2 惰性回收：已过 TTL 的条目在他窗无复用价值，unregister 时直接
+        # 丢弃；未过期条目保留（他窗/重开窗口可复用，语义不变）
+        now = time.monotonic()
+        for cache, ttl in ((self._plan_cache, self.PLAN_TTL_S), (self._balance_cache, self.BALANCE_TTL_S)):
+            for key in [k for k in cache if k[1] == config_id]:
+                if now - cache[key][0] >= ttl:
+                    cache.pop(key, None)
         self._configs.pop(config_id, None)
 
     # ========== 轮询 ==========

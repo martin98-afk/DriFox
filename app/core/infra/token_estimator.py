@@ -77,8 +77,15 @@ _MODEL_TOKEN_RATIOS: Dict[str, float] = {
 }
 
 
+@lru_cache(maxsize=8)
 def _get_model_token_ratio(model: str) -> float:
-    """获取模型 token 校正系数"""
+    """获取模型 token 校正系数。
+
+    [PERF] lru_cache：纯函数（同输入恒同输出），每次调用做 11 项子串线性
+    扫描 + model.lower()；count_messages_tokens 每条消息、快照每 2N 个文本
+    各调一次，模型名会话内不变 → 缓存命中即免重复扫描。maxsize=8 覆盖
+    单会话常用模型数（一般 1~2 个）。
+    """
     model_lower = model.lower()
     for key, ratio in _MODEL_TOKEN_RATIOS.items():
         if key in model_lower:

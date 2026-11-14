@@ -1067,7 +1067,6 @@ class OpenAIChatToolWindow(ToolWindow):
     _history_preview_title: str = ""
 
     # 自动压缩
-    _auto_compact_in_progress: bool = False  # 防重入守卫
     # 发送纪元：每次成功发起新的引擎请求时 +1（含 _on_send_clicked 与
     # _do_trigger_callback 回调路径）。用于压缩守卫区分"清空前旧 worker
     # 延迟快照"与"清空后新启动 worker 的结果"（团队成员窗口自动压缩后
@@ -1089,7 +1088,6 @@ class OpenAIChatToolWindow(ToolWindow):
     # 查找顺序：实例 dict（动态）→ 本类级表（getattr 解析）→ FunctionCommandHandlers 全局 → 硬编码
     _BUILTIN_COMMAND_HANDLER_NAMES: Dict[str, str] = {
         # subagents 已迁 system-subagent 插件（handler 走 FunctionCommandHandlers 全局表）
-        "compact": "_handle_compact_command",
         "todos": "_handle_todos_command",
         "team": "_handle_team_command",
         "toggle-window": "_handle_toggle_window_command",
@@ -1554,7 +1552,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # 在 _on_send_clicked / _on_messages_updated / _on_finalize_complete
         # 等会修改会话内容的地方置 True；在成功保存后置 False。
         self._session_dirty: bool = False
-        # 🛡️ 会话钩子注入标记：_create_new_session / _clear_session / _on_compact_finished
+        # 🛡️ 会话钩子注入标记：_create_new_session / _clear_session 触发 SessionStart hook
         # 在触发 SessionStart hook 前置 True，让 _on_messages_updated 能识别出这是
         # 合法的新会话 hook 输出而非旧 worker 的过期回调，避免被 _session_switched 误拦截。
         self._pending_session_hook = False
@@ -6484,14 +6482,6 @@ class OpenAIChatToolWindow(ToolWindow):
         if self._team_processing:
             return  # 正在处理中，跳过
 
-        # 🛡️ F3a：自动压缩进行中暂缓 pending 邮件自动拉起。
-        # 压缩子智能体执行期间（可能长达数十秒），若把 pending 邮件拉起
-        # 自动重发，新一轮流式会与稍后的 _on_compact_clear_finished 清空
-        # 撞车：流式卡片被销毁 + 守卫吞掉新 worker 结果 → 成员"看得到
-        # 邮件提示、看不到大模型回复"。压缩清空完成后由 F3b 显式重启处理。
-        if getattr(self, "_auto_compact_in_progress", False):
-            logger.debug("[TeamMail] 自动压缩进行中，暂缓 pending 邮件自动处理")
-            return
 
         # 🛡️ 停止后冷却（F1 P1-3）：手动停止后 1s 内不自动拉起 pending 邮件。
         # 停止回滚（mark_mail_pending 写回邮箱 JSON）与 watcher 事件之间的
@@ -7282,117 +7272,6 @@ class OpenAIChatToolWindow(ToolWindow):
 
         return None
 
-    def _trigger_context_compaction(self, clear_after: bool = False, user_hint: str = ""):
-        """触发上下文压缩：调用 compaction 子智能体压缩当前对话
-
-        Args:
-            clear_after: 是否在子智能体执行成功后清空当前会话的所有历史消息
-            user_hint: 用户在 /compact 后提供的自由文本（已剥离 --clear 标记），
-                       会作为补充说明附加到子智能体的任务描述中
-        """
-        session = self.session_manager.get_current_session()
-        if not session or not session.messages:
-            InfoBar.warning(
-                "无法压缩",
-                "当前会话没有对话内容",
-                parent=TabManagerWindow.get_instance() or self.window(),
-                position=InfoBarPosition.BOTTOM,
-            )
-            return
-
-        sub_agent_mgr = self._subagent_service()
-        if not sub_agent_mgr:
-            InfoBar.error(
-                "未就绪",
-                "子智能体插件未加载",
-                parent=TabManagerWindow.get_instance() or self.window(),
-                position=InfoBarPosition.BOTTOM,
-            )
-            return
-
-        # 拼接子智能体任务描述：默认任务 + 用户补充说明（如果有）
-        base_task = "请压缩当前对话上下文，生成详细的工作摘要"
-        task_description = f"{base_task}。用户补充说明：{user_hint}" if user_hint else base_task
-
-        # 自动压缩时要求子智能体在摘要末尾输出用户最新提问，便于继续执行
-        if clear_after and not user_hint:
-            task_description += (
-                "\n\n## 重要：压缩完成后需继续执行\n"
-                "在标准的 5 段输出末尾，追加一节 ## Continue：\n"
-                "从对话上下文中找到用户最新的提问，原样输出（不要修改任何文字、不要翻译、不要总结）。\n"
-                "这是为了压缩完成后 AI 能紧接用户的提问继续执行，不要停下。"
-            )
-
-        # 🛡️ clear 模式（auto / 手动 --clear）统一置位防重入 + 邮件暂缓门槛。
-        # 幂等：auto 路径已置位；手动 --clear 借用同一标志获得 F3a 邮件暂缓保护。
-        # 复位闭环：_on_compact_clear_finished（含全部 early-return）/
-        # _on_compact_error / execute_task 启动失败 三处均复位 + 重启邮件处理
-        if clear_after:
-            self._auto_compact_in_progress = True
-
-        # 仅在需要清空时才挂接完成回调，避免污染正常 compact 流程
-        on_finished_cb = None
-        if clear_after:
-            on_finished_cb = lambda tid, result, _sid=session.session_id: self._on_compact_clear_finished(
-                tid, result, _sid
-            )
-        else:
-            # 普通 compact 完成后触发 SessionStart state="compact"
-            on_finished_cb = lambda tid, result, _sid=session.session_id: self._on_compact_finished(tid, result, _sid)
-
-        success = sub_agent_mgr.execute_task(
-            task_id=f"compact_{uuid.uuid4().hex[:8]}",
-            agent_name="compaction",
-            task_description=task_description,
-            parent_context="",
-            share_context=True,  # 接入主智能体完整上下文
-            on_finished=on_finished_cb,
-            on_error=self._on_compact_error,
-            session_id=session.session_id,  # 显式传 session_id，避免回退到管理器内部可能陈旧的值
-        )
-
-        if not success:
-            # execute_task 返回 False 时显示启动失败（agent 缺失 / LLM 未配置等）
-            InfoBar.error(
-                "压缩失败",
-                "无法启动压缩任务，请检查 LLM 配置",
-                parent=TabManagerWindow.get_instance() or self.window(),
-                position=InfoBarPosition.BOTTOM,
-            )
-            # 🛡️ 启动失败同样复位防重入标志并重启团队邮件处理，
-            # 否则 _auto_compact_in_progress 卡 True：自动压缩永久失效 +
-            # 团队成员 pending 邮件被 F3a 门槛永久阻塞
-            self._auto_compact_in_progress = False
-            self._safe_resume_team_mail_after_compact()
-
-    def _on_compact_error(self, err: str):
-        """压缩子智能体执行失败回调（on_error 信号路径）
-
-        必须复位 _auto_compact_in_progress（否则自动压缩永久失效），
-        并重启被 F3a 门槛暂缓的 pending 团队邮件处理（否则成员邮件死锁）。
-        """
-        InfoBar.error(
-            "压缩失败",
-            str(err)[:100],
-            parent=TabManagerWindow.get_instance() or self.window(),
-            position=InfoBarPosition.BOTTOM,
-        )
-        self._auto_compact_in_progress = False
-        self._safe_resume_team_mail_after_compact()
-
-    def _safe_resume_team_mail_after_compact(self):
-        """压缩结束（完成/失败）后安全重启团队邮件处理
-
-        压缩期间 pending 邮件被 _check_and_process_pending 的
-        _auto_compact_in_progress 门槛暂缓，压缩结束后必须在此重启，
-        否则成员的任务邮件永久滞留 pending。
-        非团队窗口无 pending 邮件，调用安全无副作用。
-        """
-        try:
-            QTimer.singleShot(0, self._check_and_process_pending)
-        except Exception as e:  # noqa: BLE001
-            logger.warning(f"[MainWidget] 压缩后重启团队邮件处理失败: {e}")
-
     def _stop_stream_for_actions(self):
         """动作队列的停流处理：否则 _create_new_session 会走 spawn_tab 另开标签页
 
@@ -7425,204 +7304,6 @@ class OpenAIChatToolWindow(ToolWindow):
             self._sync_team_mail_on_stop()
         except Exception as e:  # noqa: BLE001
             logger.warning(f"[ActionQueue] 收尾团队邮件失败: {e}")
-
-    def _on_compact_clear_finished(self, task_id: str, result: str, session_id: str):
-        """--clear 模式下，compaction 子智能体完成后的清空回调
-
-        仅在子智能体执行成功（无 _execution_error）时清空历史消息；
-        失败 / 取消时不清空，避免误删。
-
-        清空语义：**只清空触发压缩时的那个 session 的 messages，不创建新会话**。
-        - 保留 session 自身（session_id、name、topic_summary 均不变）
-        - 不展示欢迎卡片
-        - 不重置标题
-        - 即使用户在子智能体执行期间切换到了其他 session，原 session 仍会被清空；
-          UI 同步（清空聊天区域）仅在用户当前仍停留在原 session 时执行。
-
-        Args:
-            task_id: 子智能体任务 ID
-            result: 子智能体返回的摘要内容
-            session_id: 触发压缩时锁定的会话 ID（用于按 ID 找到原 session，不依赖 "current"）
-        """
-        # 重置自动压缩进度标志（即使 early return 也要重置，防止标志位卡死）
-        self._auto_compact_in_progress = False
-
-        if getattr(self, "_is_destroyed", False):
-            logger.info(f"[DEBUG-cc] _on_compact_clear_finished early-return: _is_destroyed (task={task_id[:8]})")
-            return
-        # 走到这里说明子智能体成功完成：本回调只接 executor 的 finished_with_result
-        # （成功路径）；失败/取消走 _on_compact_error，不触发清空。
-
-        # 按 ID 找到触发压缩时的那个 session（不依赖 session_manager.get_current_session，
-        # 避免用户在子智能体执行期间切换会话后误清空当前会话）
-        target_session = None
-        for s in self.session_manager.sessions:
-            if s.session_id == session_id:
-                target_session = s
-                break
-        if target_session is None:
-            logger.info(
-                f"[DEBUG-cc] early-return: session not found (task={task_id[:8]}, sid={session_id[:8]}, "
-                f"sessions={len(self.session_manager.sessions)})"
-            )
-            self._safe_resume_team_mail_after_compact()
-            return
-        # 🛡️ 不能用 `not target_session.messages` 判「无内容可清」：内存治理会
-        # 释放非活跃会话的消息体（_messages=[] + released=True），此时属性读取
-        # 依赖 loader 重载，而 loader 不可用时会**静默返回空列表**（见
-        # chat_session.ChatSession._reload_messages 的 loaded is None 分支：不写空
-        # 也不报错）。于是「已被释放」与「真的为空」在调用点不可区分 → 清空回调
-        # 被误杀（2026-10-11 19:37:32 `early-return: session missing/empty
-        # (target=True, msg_len=0)`）。释放态一律继续走清空：清空的目标状态就是
-        # 空列表，重复清空幂等且安全。
-        if not target_session.messages and not getattr(target_session, "messages_released", False):
-            logger.info(f"[DEBUG-cc] early-return: nothing to clear (task={task_id[:8]}, sid={session_id[:8]})")
-            self._safe_resume_team_mail_after_compact()
-            return
-
-        # 🛡️ F1：压缩执行期间若已开启新一轮流式（团队邮件自动重发 / 子智能体
-        # 完成回调 _do_trigger_callback / 用户手动发送），必须先停止再清空。
-        # 否则 set_messages([]) + _display_current_session() 会销毁在途流式
-        # 卡片（_current_assistant_card 失效）→ 后台 worker 继续产出但 UI
-        # 永远看不到（"只有自动发送的提示、看不到大模型流式卡片"根因）。
-        # 停流写法与手动停止路径保持一致。
-        if self._is_streaming and self.backend.chat_engine:
-            logger.info(f"[DEBUG-cc] 压缩清空前停止在途流式 (task={task_id[:8]}, sid={session_id[:8]})")
-            self._is_streaming = False
-            self._set_ai_state("idle")
-            self._toggle_send_stop(False)
-            if self._current_assistant_card:
-                self._current_assistant_card.stop_streaming_anim()
-                # 🐛 打断路径强制归位（同 _on_stop_clicked）。
-                self._current_assistant_card.finish_streaming(force_dock_off=True)
-            try:
-                # 清空语义下中断消息无需回写 session（即将整体清空），
-                # 旧 worker 延迟快照由下方 _post_compact_guard 拦截
-                self.backend.stop_streaming(timeout_ms=500)
-            except Exception as e:
-                logger.warning(f"[MainWidget] 压缩清空前停止流式失败: {e}")
-            # 停流后收尾团队邮件（对齐 _create_new_session 的成熟写法），
-            # 防止 _team_processing / _current_team_mail 卡住阻塞后续邮件处理
-            try:
-                self._sync_team_mail_on_stop()
-            except Exception as e:
-                logger.warning(f"[MainWidget] 压缩清空收尾团队邮件失败: {e}")
-
-        # 🛡️ F5：清空前捕获源消息数（原实现清空后才计算，恒为 0）
-        src_message_count = len(target_session.messages)
-        logger.info(
-            f"[DEBUG-cc] 即将清空 (task={task_id[:8]}, sid={session_id[:8]}, "
-            f"msg_len={src_message_count}, result_len={len(result) if result else 0})"
-        )
-
-        # 清空目标 session 的 messages（保留 session 自身，topic_summary / name 不变）
-        # 用 set_messages 而非 session.clear()，避免把 topic_summary 重置为 ""
-        target_session.set_messages([], preserve_compaction=False)
-        # 🛡️ P6：清空必须同步复位「API 权威上下文占用」字段。这三个字段是
-        # session 级跨轮缓存（_on_context_updated 每轮写入、随保存落库），
-        # 只清 messages 不动它们 → 快照的 API 权威值路径
-        # （api_prompt_tokens>0 且 from_api is not False）在
-        # len(messages) ≤ api_message_count 时直接沿用旧权威值，
-        # 于是清空后上下文虽已归零，ratio 仍高达 90% → 下一轮
-        # PostToolUse / PreAssistantMessage hook 再次触发自动压缩，
-        # 表现为「上下文很少还是反复压缩」。
-        # 复位后快照走本地估算（est_total），占用随 messages 真实回落。
-        target_session.last_api_prompt_tokens = 0
-        target_session.last_api_message_count = 0
-        target_session.last_api_prompt_from_usage = None
-        # 🛡️ 压缩守卫：清空后旧 worker 的 finished_with_messages（取消时 emit 的
-        # 旧消息快照）可能延迟到达主线程，_on_messages_updated 全量覆写会恢复
-        # 已清空的会话 → 压缩失效 + 反复触发。守卫拦截"消息数远多于当前 session"
-        # 的旧快照，新 worker（压缩后启动）消息数≈session 消息数，不受影响。
-        self._post_compact_guard = True
-        # 🛡️ F2：记录清空时刻的发送纪元快照。_on_messages_updated 据此精确区分：
-        # epoch 相等 → 清空前旧 worker 延迟快照（丢弃）；epoch 已变 → 清空后
-        # 新 worker 的结果（放行，避免团队成员压缩后大模型回复被误吞）
-        self._post_compact_epoch = self._send_epoch
-        # 🛡️ F2b：同时记录 wall-clock 切断点（毫秒）。epoch 判据有个致命弱点：
-        # _do_trigger_callback 会主动 +1 epoch，此后旧 worker 的延迟全量快照
-        # 也会因"epoch 已变"被放行 → 清空被复活。时间线判据不受此影响：
-        # 旧快照尾部时间戳 < 切断点（拦截），清空后新 worker ≥ 切断点（放行）。
-        self._post_compact_cutoff_ms = int(time.time() * 1000)
-        # 弹出卡片缓存，避免对已 deleteLater 的 widget 残留引用
-        self._session_card_cache.pop(target_session.session_id, None)
-
-        # 触发 SessionStart hook — state="clear"
-        # 标记 _pending_session_hook 避免 _session_switched 残留时误拦截
-        try:
-            self._pending_session_hook = True
-            self.backend.trigger_session_event("clear")
-        except Exception:
-            pass
-        finally:
-            self._pending_session_hook = False
-
-        # 仅在用户仍停留在原 session 时才同步更新 UI
-        if self._current_session_id == session_id:
-            self._display_current_session()
-
-        # 将压缩摘要存入 compaction_cache，供后续对话提供上下文
-        if target_session and result:
-            target_session.set_compaction_cache(
-                {
-                    "active": True,
-                    "kind": "auto_compact",
-                    "summary_message": {"role": "system", "content": str(result)},
-                    "generated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
-                    "source_message_count": src_message_count,
-                }
-            )
-
-        # 🛡️ 清空必须**立即落库**：清空不是「内存释放」，空列表 + 压缩缓存就是要
-        # 写进 SQLite 的结果状态。走常规保存链会被启发式吞掉 ——
-        # main_widget 高频保存路径有 `not saved_messages → return` 与
-        # `not has_user_message → return`（清空后正好两条都命中），
-        # history_manager 的延迟保存链也有空消息守卫。结果是清空只在内存生效、
-        # DB 仍保留旧消息 → 之后任何一次 ensure_messages 重载（切会话/重开/
-        # 重启）都会把旧消息读回来，用户看到的就是"清不掉"（2026-10-11 报障根因，
-        # DB 实证：成功清空的会话 compaction_cache.active=True 且 messages≈5 条，
-        # 失败的仍是 550 条旧消息 + active=False）。
-        # save_cleared_session 直连 session_store 同步写盘并穿透提交，不经过上述启发式。
-        try:
-            if self.history_manager.save_cleared_session(
-                target_session.session_id,
-                compaction_state=getattr(target_session, "compaction_state", None),
-                compaction_cache=getattr(target_session, "compaction_cache", None),
-                **self._api_usage_kwargs(target_session),
-            ):
-                # 已落库 → 清脏标记，避免后续无变更的重复全量保存
-                self._session_dirty = False
-        except Exception as e:  # noqa: BLE001
-            logger.warning(f"[MainWidget] 压缩清空后落库失败: {e}")
-
-        # 🛡️ F3b：压缩清空完成后，安全重启被暂缓的 pending 团队邮件处理。
-        # 此时会话已清空、守卫就位、_auto_compact_in_progress 已复位，
-        # 邮件重发走 _on_send_clicked 正常清守卫 + 正常流式显示。
-        # 非团队窗口无 pending 邮件，调用安全无副作用。
-        try:
-            self._check_and_process_pending()
-        except Exception as e:
-            logger.warning(f"[MainWidget] 压缩清空后重启团队邮件处理失败: {e}")
-
-    def _on_compact_finished(self, task_id: str, result: str, session_id: str):
-        """普通 compact 完成后触发 SessionStart state='compact'
-
-        Args:
-            task_id: 子智能体任务 ID
-            result: 子智能体返回的摘要内容
-            session_id: 触发压缩时锁定的会话 ID
-        """
-        # 重置自动压缩进度标志（与 _on_compact_clear_finished 一致）
-        self._auto_compact_in_progress = False
-
-        if getattr(self, "_is_destroyed", False):
-            return
-        # 成功路径专用（on_finished 只接 finished_with_result）：失败/取消走 _on_compact_error
-        try:
-            self._pending_session_hook = True
-            self.backend.trigger_session_event("compact")
-        except Exception:
-            pass
             # 刷新上下文使用率指示器（清空后会回到 0%）
             self._refresh_context_usage_indicator()
         finally:
@@ -22028,23 +21709,6 @@ class OpenAIChatToolWindow(ToolWindow):
             # 记录 tool_call_id 归属的卡片，确保工具结果落在与运行折叠框同一张卡片上
             self._tool_card_map[tool_call_id] = card
             card.update_tool_streaming(tool_call_id, tool_name, arguments)
-
-    def _handle_compact_command(self, args: str):
-        """/compact 命令：触发上下文压缩
-
-        支持参数：
-        - --clear：压缩完成后清空当前会话的所有历史消息
-        - 自由文本：附加给压缩智能体的补充说明（焦点 / 输出形态 / 分析诉求等）
-
-        Args:
-            args: 命令后的参数字符串
-        """
-        # 解析 --clear 标记（仅匹配独立 flag，不吞并后续内容）
-        clear_after = bool(re.search(r"(?:^|\s)--clear(?=\s|$)", args or ""))
-        # 剥离 --clear 标记后，剩余文本作为给子智能体的补充说明
-        user_hint = re.sub(r"(?:^|\s)--clear(?=\s|$)", "", args or "").strip()
-        self._trigger_context_compaction(clear_after=clear_after, user_hint=user_hint)
-
     def _handle_todos_command(self, args: str):
         """/todos 命令：在最新消息卡片刷新内嵌任务列表"""
         # 工具插件化：待办状态在工具插件内，主程序不读插件状态——
@@ -23302,7 +22966,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # 哨兵在 _on_send_clicked 发起新 AI 请求时清零。
         #
         # ⚠️ 例外：_pending_session_hook 标记表示当前正处在 _create_new_session /
-        # _clear_session / _on_compact_finished 中的 SessionStart hook 注入阶段，
+        # _clear_session 中的 SessionStart hook 注入阶段，
         # 这批消息是合法的新会话 hook 输出，放行不被丢弃。
         if getattr(self, "_session_switched", False):
             if not getattr(self, "_pending_session_hook", False):
