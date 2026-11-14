@@ -1,16 +1,12 @@
 ## [Unreleased]
 
-### 🐛 Bug 修复 (Bug Fixes)
-
-- **正常对话跑到 1 小时被强制中断（worker 总寿命默认 3600s）** (`app/core/workers/chat_worker.py`, `tests/core/test_chat_worker_lifetime.py`): 单次 worker 总寿命上限原默认 3600s，到点后 `run()` 主循环顶部判定超限、走正常完成路径结束本轮，长重构/连续编码任务被硬切断。改为默认 **0（关闭）**：墙钟不该截断正常对话，防挂死改由 `MAX_CONTINUATIONS`（默认 8）独立承担，它只拦 Stop hook / hook 队列反复 `continue` 这条异常路径，正常对话到不了触发点。需要硬上限时仍可用 `DRIFOX_WORKER_MAX_LIFETIME_S=<秒>` 打开。同时把 `_worker_lifetime_reason()` 非法值回退目标从硬编码 `3600.0` 改为新常量 `DEFAULT_WORKER_LIFETIME_S`，否则默认关闭时用户填一个非法值会反向打开一小时截断。
-
 ### ✨ 新功能 (New Features)
 
 - **工具完成框里的文件地址可点击打开** (`app/widgets/render_helpers.py` · `app/widgets/card_viewers.py` · `app/main_widget.py`): 折叠头右侧路径、以及 read/grep/list/glob 单行卡预览里的路径片段渲染为可点元素（默认无装饰，hover 变主题强调色 `--accent` + 实线下划线，悬停 title 显示完整路径），点击由骨架 click 委托在折叠头之前抢断，转 `open_file` 消息交宿主按会话 workdir 解析后用系统程序打开；路径不存在给 InfoBar 提示（原实现静默吞异常）。显示文本仍是首尾缩短版，`data-open-path` 存完整原始路径。骨架版本 v79 → v81。
 
-## [v0.7.2] - 2026-11-14 (重新发布 #7)
+## [v0.7.2] - 2026-11-14 (重新发布 #8)
 
-自 v0.7.1 以来的变更 | 提交数：147 · 文件变更：576 · +28520/-9786 | 贡献者：dingma, drifox-bot, mading, martin98-afk
+自 v0.7.1 以来的变更 | 提交数：150 · 文件变更：582 · +28735/-9824 | 贡献者：dingma, drifox-bot, mading, martin98-afk
 
 ### ✨ 新功能 (New Features)
 
@@ -129,6 +125,16 @@
 - **钥匙串写入 -25244 回退明文落盘** (`app/utils/secret_store.py`): macOS Keychain 报 errSecInvalidOwnerEdit——条目由其他签名身份创建（adhoc 重打包后 hash 变化、或开发环境 Python 先写入），`SecItemUpdate` 无所有权被拒，fail-open 降级成明文 config.json。`SecretStore.set` 捕获 -25244/-25293 删除旧条目重建（首次触发系统授权框，「始终允许」后所有权转移；拒绝则照旧明文回退）。
 ### ♻️ 代码重构 (Refactoring) (重新发布 #7 追加)
 - **插件密码硬切明文存储** (`app/plugins/managers/plugin_config_store.py`): 用户决策放弃插件字段走系统钥匙串——`config_schema` 声明 `type: password` 的字段一律明文落 `config.json`；钥匙串时代旧值首次读取时经 `_migrate_secret_back` 迁回 JSON 并删除密钥库条目，凭据不丢，`set_values` 顺手清理钥匙串残留。服务商 API Key 不受影响（`secret_mode` 三态照旧）。
+
+### 🐛 问题修复 (Bug Fixes) (重新发布 #8 追加)
+
+- **正常对话跑到 1 小时被强制中断（worker 总寿命默认 3600s）** (`app/core/workers/chat_worker.py`, `tests/core/test_chat_worker_lifetime.py`): 单次 worker 总寿命上限原默认 3600s，到点后 `run()` 主循环顶部判定超限、走正常完成路径结束本轮，长重构/连续编码任务被硬切断。改为默认 **0（关闭）**：墙钟不该截断正常对话，防挂死改由 `MAX_CONTINUATIONS`（默认 8）独立承担，它只拦 Stop hook / hook 队列反复 `continue` 这条异常路径，正常对话到不了触发点。需要硬上限时仍可用 `DRIFOX_WORKER_MAX_LIFETIME_S=<秒>` 打开。同时把 `_worker_lifetime_reason()` 非法值回退目标从硬编码 `3600.0` 改为新常量 `DEFAULT_WORKER_LIFETIME_S`，否则默认关闭时用户填一个非法值会反向打开一小时截断。
+- **服务商编辑卡闪现幽灵空窗** (`app/widgets/cards/settings/provider_edit_card.py`, `tests/widgets/test_provider_edit_card_no_ghost_window.py`): 能力类型行容器构造时无父对象，作为顶层窗口在屏幕上闪一下再被布局接管。改为带父构造 `QWidget(self)`，并把 `setVisible` 挪到 `addWidget` 之后（先入布局再显隐）。新增回归测试覆盖编辑已有 / 自定义添加 / 预置添加三条路径，断言无顶层幽灵 Show 事件。
+
+### 📚 文档 (Docs) (重新发布 #8 追加)
+
+- **贡献指南同步架构重构** (`CONTRIBUTING.md`): 技术栈更新为 Python 3.14+、依赖管理改 uv（`pyproject.toml`）；目录树反映 `core/conversation`、`core/context`、`hooks`、`plugins` 新结构；上下文说明由「LLM 压缩」改为「分层上下文管理，无损」。
+
 ## [v0.7.1] - 2026-11-11
 
 自 v0.7.0 以来的变更 | 提交数：28 · 文件变更：44 · +3827/-315 | 贡献者：dingma, drifox-bot, martin98-afk
