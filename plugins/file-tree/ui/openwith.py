@@ -820,12 +820,48 @@ _ICON_API_CACHE = None
 
 
 def _icon_api():
-    """一次性准备好 ExtractIconExW / DestroyIcon 的签名（模块级缓存）"""
+    """一次性准备好 ExtractIconExW 与 HICON→QImage 所需的全部 Win32 签名（模块级缓存）"""
     global _ICON_API_CACHE
     if _ICON_API_CACHE is not None:
         return _ICON_API_CACHE
     import ctypes
     from ctypes import wintypes
+    from types import SimpleNamespace
+
+    class ICONINFO(ctypes.Structure):
+        _fields_ = [
+            ("fIcon", wintypes.BOOL),
+            ("xHotspot", wintypes.DWORD),
+            ("yHotspot", wintypes.DWORD),
+            ("hbmMask", ctypes.c_void_p),
+            ("hbmColor", ctypes.c_void_p),
+        ]
+
+    class BITMAP(ctypes.Structure):
+        _fields_ = [
+            ("bmType", wintypes.LONG),
+            ("bmWidth", wintypes.LONG),
+            ("bmHeight", wintypes.LONG),
+            ("bmWidthBytes", wintypes.LONG),
+            ("bmPlanes", wintypes.WORD),
+            ("bmBitsPixel", wintypes.WORD),
+            ("bmBits", ctypes.c_void_p),
+        ]
+
+    class BITMAPINFOHEADER(ctypes.Structure):
+        _fields_ = [
+            ("biSize", wintypes.DWORD),
+            ("biWidth", wintypes.LONG),
+            ("biHeight", wintypes.LONG),
+            ("biPlanes", wintypes.WORD),
+            ("biBitCount", wintypes.WORD),
+            ("biCompression", wintypes.DWORD),
+            ("biSizeImage", wintypes.DWORD),
+            ("biXPelsPerMeter", wintypes.LONG),
+            ("biYPelsPerMeter", wintypes.LONG),
+            ("biClrUsed", wintypes.DWORD),
+            ("biClrImportant", wintypes.DWORD),
+        ]
 
     shell32 = ctypes.WinDLL("shell32", use_last_error=True)
     shell32.ExtractIconExW.argtypes = [
@@ -836,11 +872,97 @@ def _icon_api():
         wintypes.UINT,
     ]
     shell32.ExtractIconExW.restype = wintypes.UINT
+
     user32 = ctypes.WinDLL("user32", use_last_error=True)
     user32.DestroyIcon.argtypes = [wintypes.HICON]
     user32.DestroyIcon.restype = wintypes.BOOL
-    _ICON_API_CACHE = (ctypes, wintypes, shell32, user32)
+    # ★ 句柄参数一律 c_void_p：64 位下 ctypes 默认 c_int 会截断句柄
+    user32.GetIconInfo.restype = wintypes.BOOL
+    user32.GetIconInfo.argtypes = [ctypes.c_void_p, ctypes.POINTER(ICONINFO)]
+    user32.GetDC.restype = ctypes.c_void_p
+    user32.GetDC.argtypes = [ctypes.c_void_p]
+    user32.ReleaseDC.restype = ctypes.c_int
+    user32.ReleaseDC.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+
+    gdi32 = ctypes.WinDLL("gdi32", use_last_error=True)
+    gdi32.GetObjectW.restype = ctypes.c_int
+    gdi32.GetObjectW.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p]
+    gdi32.GetDIBits.restype = ctypes.c_int
+    gdi32.GetDIBits.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        wintypes.UINT,
+        wintypes.UINT,
+        ctypes.c_void_p,
+        ctypes.POINTER(BITMAPINFOHEADER),
+        wintypes.UINT,
+    ]
+    gdi32.DeleteObject.restype = wintypes.BOOL
+    gdi32.DeleteObject.argtypes = [ctypes.c_void_p]
+
+    _ICON_API_CACHE = SimpleNamespace(
+        ctypes=ctypes,
+        wintypes=wintypes,
+        shell32=shell32,
+        user32=user32,
+        gdi32=gdi32,
+        ICONINFO=ICONINFO,
+        BITMAP=BITMAP,
+        BITMAPINFOHEADER=BITMAPINFOHEADER,
+    )
     return _ICON_API_CACHE
+
+def _hicon_to_qimage(api, hicon):
+    """HICON → QImage（纯 ctypes：GetIconInfo + GetDIBits），失败返回 None
+
+    ★ 不用 PyQt5.QtWinExtras：Qt 废弃绑定（Qt6 已移除），且 PyInstaller 不分析
+    插件源文件，主代码零静态引用 → 打包版里 QtWinExtras.pyd / Qt5WinExtras.dll
+    双双缺席，import 即失败（与 tree_widget.py 同一约束，实现同源）。
+    """
+    ctypes = api.ctypes
+    info = api.ICONINFO()
+    if not api.user32.GetIconInfo(hicon, ctypes.byref(info)):
+        return None
+    hbm_color = info.hbmColor
+    hbm_mask = info.hbmMask
+    if not hbm_color:
+        if hbm_mask:
+            api.gdi32.DeleteObject(hbm_mask)
+        return None
+    try:
+        bm = api.BITMAP()
+        if not api.gdi32.GetObjectW(hbm_color, ctypes.sizeof(api.BITMAP), ctypes.byref(bm)):
+            return None
+        width, height = int(bm.bmWidth), int(bm.bmHeight)
+        if width <= 0 or height <= 0:
+            return None
+
+        header = api.BITMAPINFOHEADER()
+        header.biSize = ctypes.sizeof(api.BITMAPINFOHEADER)
+        header.biWidth = width
+        header.biHeight = -height  # 负值 = top-down，与 QImage 行序一致
+        header.biPlanes = 1
+        header.biBitCount = 32
+        header.biCompression = 0  # BI_RGB
+
+        buf = ctypes.create_string_buffer(width * height * 4)
+        hdc = api.user32.GetDC(None)
+        if not hdc:
+            return None
+        try:
+            if api.gdi32.GetDIBits(hdc, hbm_color, 0, height, buf, ctypes.byref(header), 0) == 0:
+                return None
+        finally:
+            api.user32.ReleaseDC(None, hdc)
+
+        from PyQt5.QtGui import QImage
+
+        # ARGB32 在小端机器上的内存布局即 GetDIBits 输出的 BGRA
+        return QImage(buf, width, height, QImage.Format_ARGB32).copy()
+    finally:
+        api.gdi32.DeleteObject(hbm_color)
+        if hbm_mask:
+            api.gdi32.DeleteObject(hbm_mask)
 
 
 def _icon_from_exe(exe: str):
@@ -849,29 +971,33 @@ def _icon_from_exe(exe: str):
     ★ 绝不能用 QFileIconProvider / SHGetFileInfo：它们走 Shell 图标缓存，
     某些 exe 会命中 Qt 的 5 秒超时（实测 pycharm64.exe、Typora.exe 各卡 5s，
     qt_messages 日志留下 "SHGetFileInfo() timed out"）。在 UI 线程调用等于整窗冻住。
-    ExtractIconExW 只解析 PE 资源，实测 1-2ms。
+    ExtractIconExW 只解析 PE 资源，实测 1-2ms。HICON→像素走纯 ctypes
+    （_hicon_to_qimage），不依赖 QtWinExtras（打包版未含该模块）。
     """
     if os.name != "nt" or not exe or not os.path.exists(exe):
         return None
     try:
-        ctypes, wintypes, shell32, user32 = _icon_api()
-        from PyQt5 import QtWinExtras
+        api = _icon_api()
+        ctypes = api.ctypes
+        wintypes = api.wintypes
 
         large = wintypes.HICON()
         small = wintypes.HICON()
-        count = shell32.ExtractIconExW(exe, 0, ctypes.byref(large), ctypes.byref(small), 1)
+        count = api.shell32.ExtractIconExW(exe, 0, ctypes.byref(large), ctypes.byref(small), 1)
         if not count:
             return None
         hicon = large.value or small.value
         if not hicon:
             return None
         try:
-            pixmap = QtWinExtras.QtWin.fromHICON(hicon)
+            qimage = _hicon_to_qimage(api, hicon)
         finally:
-            user32.DestroyIcon(hicon)
-        if pixmap is None or pixmap.isNull():
+            api.user32.DestroyIcon(hicon)
+        if qimage is None or qimage.isNull():
             return None
-        return pixmap
+        from PyQt5.QtGui import QPixmap
+
+        return QPixmap.fromImage(qimage)
     except Exception:
         return None
 
