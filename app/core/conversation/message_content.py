@@ -559,7 +559,9 @@ def append_text_block(content: Any, text: Any) -> List[Dict[str, Any]]:
     return blocks
 
 
-def content_to_text(content: Any, include_tool_results: bool = False) -> str:
+def content_to_text(
+    content: Any, include_tool_results: bool = False, include_image_placeholder: bool = True
+) -> str:
     if isinstance(content, str):
         return content
 
@@ -570,8 +572,10 @@ def content_to_text(content: Any, include_tool_results: bool = False) -> str:
             text = str(block.get("text", ""))
             if text:
                 texts.append(text)
-        elif block_type in ("image_url", "input_image", "image", "image_ref"):
-            # 图片块输出占位符（导出/纯文本视图不丢图）
+        elif include_image_placeholder and block_type in ("image_url", "input_image", "image", "image_ref"):
+            # 图片块输出占位符（导出/纯文本视图不丢图）。
+            # include_image_placeholder=False：语义消费者（如审批弹窗的
+            # user_goal）只要目标文本，占位符反而污染断言/展示（C2-3）。
             texts.append("[图片]")
         elif include_tool_results and block_type == "tool_result":
             name = str(block.get("name", "tool"))

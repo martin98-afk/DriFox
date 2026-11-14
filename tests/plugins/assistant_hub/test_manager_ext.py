@@ -194,9 +194,15 @@ def test_prompt_blocks_assemble_sections(tmp_path):
     assert "人工提示" in pinned and "回复保持简短" in pinned
 
     mem = mgr.memory_system_block(a.id, str(tmp_path / "proj"))
-    assert "memory_read" in mem and "memory_write" in mem  # 指针级说明书
-    assert "<global_memory>" in mem and "用户偏好简洁" in mem
-    assert "<project_memory>" in mem and "DriFox 重构中" in mem
+    # 新契约：system block 只含静态纪律（指针级说明书），记忆内容走 snapshot 通道
+    assert "memory_read" in mem and "memory_write" in mem
+    assert "<global_memory>" not in mem and "用户偏好简洁" not in mem
+    assert "<project_memory>" not in mem and "DriFox 重构中" not in mem
+
+    # 记忆内容在 SessionStart 快照（memory_snapshot_block）出现
+    snap = mgr.memory_snapshot_block(a.id, str(tmp_path / "proj"))
+    assert "<global_memory>" in snap and "用户偏好简洁" in snap
+    assert "<project_memory>" in snap and "DriFox 重构中" in snap
 
 
 def test_memory_system_block_memory_off(tmp_path):

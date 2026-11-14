@@ -4484,7 +4484,11 @@ class OpenAIChatWorker(QThread):
         try:
             for msg in reversed(self._current_session_messages or []):
                 if isinstance(msg, dict) and msg.get("role") == "user":
-                    user_goal = content_to_text(msg.get("content", ""))
+                    # 占位符关闭：user_goal 是「用户目标文本」，[图片] 占位属于
+                    # 导出视图语义，混进目标串污染审批弹窗与测试断言（C2-3）
+                    user_goal = content_to_text(
+                        msg.get("content", ""), include_image_placeholder=False
+                    )
                     break
         except Exception as e:  # noqa: BLE001 - 上下文是增强项，失败不得阻断
             logger.debug(f"[Permission] 审核上下文用户目标提取失败: {e}")

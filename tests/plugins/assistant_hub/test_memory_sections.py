@@ -174,16 +174,20 @@ def test_rename_section_title_only_exact_header():
 # ── prompt 注入 ──────────────────────────────────────────
 
 
-def test_memory_system_has_no_section_block_without_schema():
+def test_memory_system_has_no_section_list_without_schema():
+    # 新契约（分区段恒在）：无 schema 时分区强制纪律仍在，但分区清单条目不出现
     text = prompts.build_memory_system("/g/MEMORY.md", "/p", {"global": 4000, "project": 3000})
-    assert "全局记忆分区" not in text
+    assert "全局记忆分区（强制）" in text
+    assert "- 工程方法论" not in text
 
 
 def test_memory_system_injects_section_list():
     text = prompts.build_memory_system("/g/MEMORY.md", "/p", {"global": 4000}, SECTIONS)
+    # 新契约：分区清单**恒不进** system prompt（完全静态，动态部分走
+    # memory_read(scope=sections) 按需读），传 sections 也不改变输出形态
     assert "全局记忆分区（强制）" in text
-    assert "- 工程方法论：跨项目通用的做法、验证方法、纪律" in text
-    assert "禁出现清单外的 ## 标题" in text
+    assert "- 工程方法论" not in text
+    assert "跨项目通用的做法、验证方法、纪律" not in text
 
 
 def test_distill_gate_without_sections_keeps_freeform_step():
@@ -208,17 +212,17 @@ def test_distill_gate_with_sections_forces_reassign_rules():
 
 
 def test_default_sections_shape():
-    """默认三区按「内容成因」划分；hint 短标签（UI 单行），detail 含排除说明（prompt 用）。"""
+    """默认四区按「内容成因 + 理性感性」划分；hint 短标签，detail 含排除说明。"""
     ds = store.default_sections()
-    assert [s["name"] for s in ds] == ["工程方法论", "工具与环境", "用户偏好"]
+    assert [s["name"] for s in ds] == ["工程方法论", "工具与环境", "用户偏好", "身份定位"]
     assert all(s["hint"] for s in ds) and all(s["detail"] for s in ds)
-    # hint 必须短到能单行显示（UI 不折行）
     assert all(len(s["hint"]) <= 12 for s in ds), [s["hint"] for s in ds]
-    # detail 必须带排除说明，否则模型会往最宽松的分区塞
     assert "不写具体工具行为" in ds[0]["detail"]
     assert "不写本项目业务规则" in ds[1]["detail"]
-    assert "与具体项目无关" in ds[2]["detail"]
-    # 注入 prompt 用 detail（完整规则），不是短标签
+    # v2 用户偏好区：感性定位（硬性要求带原因，不再只记「他要求了什么」）
+    assert "换一个项目仍然成立" in ds[2]["detail"]
+    # v2 新增身份定位区（感性）：自己决定自己是谁
+    assert "自己决定自己是谁" in ds[3]["detail"]
     prompt_text = store.sections_prompt_text(ds)
     assert "不写具体工具行为" in prompt_text
 
@@ -232,7 +236,7 @@ def test_default_sections_returns_copy():
 def test_ensure_default_sections_writes_once(tmp_path):
     aid_dir = _aid_dir(tmp_path)
     first = store.ensure_default_sections(aid_dir)
-    assert [s["name"] for s in first] == ["工程方法论", "工具与环境", "用户偏好"]
+    assert [s["name"] for s in first] == ["工程方法论", "工具与环境", "用户偏好", "身份定位"]
     assert store.sections_path(aid_dir).exists()
     # 第二次读的是文件，不再重写
     mtime = store.sections_path(aid_dir).stat().st_mtime_ns
@@ -260,15 +264,18 @@ def test_ensure_default_sections_keeps_custom(tmp_path):
 
 def test_memory_system_documents_admission_rules():
     text = prompts.build_memory_system("/g/MEMORY.md", "/p", {"global": 4000})
-    # 四类该进
-    assert "用户的硬性要求" in text
+    # 理性两类（该进全局）
     assert "工具与平台的客观坑" in text
     assert "验证方法论" in text
-    assert "协作纪律" in text
-    # 三不写
+    # 感性两类（该进全局）
+    assert "这个人的样子" in text
+    assert "我自己" in text
+    # 不该进（写错层会误导其他项目）
     assert "项目架构知识" in text
     assert "具体业务规则" in text
     assert "过程与临时状态" in text
-    # 边界判据
+    assert "正确的废话" in text
+    # 边界判据与纪律
     assert "工具坑" in text and "业务规则" in text
     assert "离开当前项目后仍然成立" in text
+    assert "不存密钥" in text

@@ -266,6 +266,15 @@ class _StubCapRegistry:
     def get_instance(self):
         return self
 
+    def register(self, *a, **k):
+        """ensure_registered("tool") 链路的 no-op：桩不收真 provider。
+
+        ⚠️ 不能用 __getattr__ 兜底：那会让 ensure_registered 在桩上「成功」
+        置位 bootstrap._READY["tool"]，monkeypatch 还原后真单例永远拿不到
+        provider，污染后续真链路用例（需配 reset_bootstrap() 清标记）。
+        """
+        return None
+
     def build_pool(self, *, surface, host, plugin=""):
         self.hosts.append({"surface": surface, "wid": getattr(host, "_window_id", ""), "plugin": plugin})
         sentinel = self
@@ -286,6 +295,7 @@ class _StubCapRegistry:
 class TestWindowResolve:
     @pytest.fixture(autouse=True)
     def _isolated_registry(self):
+        from app.plugins.capabilities.bootstrap import reset_bootstrap
         from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
 
         # reset() 会置空单例（_instance=None）→ 必须重解析后再 mount，
@@ -294,6 +304,9 @@ class TestWindowResolve:
         self._reg = UIPluginRegistry.get_instance()
         yield
         UIPluginRegistry.get_instance().reset()
+        # 桩用例期间 ensure_registered 可能置位 bootstrap._READY["tool"]，
+        # teardown 清标记，避免污染后续真链路用例
+        reset_bootstrap()
 
     def _mount_window(self, wid: str, session_id: str):
         win = MagicMock()
@@ -483,7 +496,11 @@ class TestProviderRealChain:
         assert send("⏰ 定时任务触发：真链路") is True
         pending = q.peek(self.WID)
         assert [item["action"] for item in pending] == ["send"]
-        assert pending[0]["payload"] == {"text": "⏰ 定时任务触发：真链路", "ephemeral": False}
+        assert pending[0]["payload"] == {
+            "text": "⏰ 定时任务触发：真链路",
+            "ephemeral": False,
+            "hook_event": "SessionSend",
+        }
         q.clear(self.WID)
 
     def test_scheduler_send_real_chain_enqueues(self, timer_mod, monkeypatch):
@@ -577,8 +594,12 @@ class TestDrainSignalBridge:
         """空闲期入队：enqueue → 观察者 → 信号 → 槽 → drain → send handler"""
         wired.send("⏰ 定时任务触发：桥接链路")
         qapp.processEvents()
+        # session.send modes（a45e3cf5f）起 payload 带 hook_event，drain 侧透传给窗口
         wired.window._on_send_clicked.assert_called_once_with(
-            "⏰ 定时任务触发：桥接链路", preserve_input=True, ephemeral=False
+            "⏰ 定时任务触发：桥接链路",
+            preserve_input=True,
+            ephemeral=False,
+            hook_event="SessionSend",
         )
         assert wired.queue.peek(self.WID) == [], "drain 后队列应清空"
 

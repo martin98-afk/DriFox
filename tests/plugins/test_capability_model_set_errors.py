@@ -180,7 +180,10 @@ def test_session_send_redirects_to_window_id(qapp, monkeypatch):
     monkeypatch.setattr(aq, "get_action_queue", lambda: q)
     send = _pool(host_a, declared={"session.send"})["session.send"]
     assert send("继续", window_id="w-b") is True
-    assert q.enqueued == [("w-b", "send", {"text": "继续", "ephemeral": False})]
+    # session.send modes（a45e3cf5f）起 payload 携带 hook_event（默认 SessionSend）
+    assert q.enqueued == [
+        ("w-b", "send", {"text": "继续", "ephemeral": False, "hook_event": "SessionSend"})
+    ]
 
 
 def test_session_read_redirects_to_window_id(qapp, monkeypatch):

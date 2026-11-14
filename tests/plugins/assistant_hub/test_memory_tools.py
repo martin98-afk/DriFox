@@ -604,7 +604,9 @@ def test_write_append_over_limit_rejected(monkeypatch, tmp_path):
     mgr = _patch(monkeypatch, tmp_path)
     mgr.write_global_memory("build", "x" * 3990)
     r = m._write_impl(_ctx("/proj"), scope="global", content="y" * 20, mode="append")
-    assert not r.success and "超上限" in r.error
+    # 新契约：超限拒绝在执行层仍算成功（ToolResult.success=True），
+    # 拒绝原因经 error 回显给模型（当轮可见，指引整理后再写）
+    assert "写入被拒绝" in (r.error or "") and "上限" in (r.error or "")
 
 
 def test_write_replace_conflict(monkeypatch, tmp_path):
