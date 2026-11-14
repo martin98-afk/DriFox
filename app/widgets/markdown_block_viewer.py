@@ -1733,7 +1733,17 @@ class DiffViewWidget(QTextEdit):
         self.update_diff(diff_text)
 
     def update_diff(self, diff_text: str) -> None:
-        """原位刷新 diff 内容（流式增量注入复用，不重建控件）。"""
+        """原位刷新 diff 内容（流式增量注入复用，不重建控件）。
+
+        perf: (#28) 入口签名短路：整串 sha256 与上次相同直接跳过全量重建
+        （splitlines + 逐行 escape + setHtml 整个 diff），流式重复刷新 O(n)→O(1)。
+        非采样消除假阴性；主题切换走整卡重建（refresh_theme → _reconcile），
+        新实例签名重置，不吞主题配色刷新。
+        """
+        sig = hashlib.sha256(diff_text.encode("utf-8", "replace")).hexdigest()
+        if sig == getattr(self, "_diff_sig", None):
+            return
+        self._diff_sig = sig
         light = _is_light_theme()
         rows = []
         for line in diff_text.splitlines():

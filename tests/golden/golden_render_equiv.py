@@ -160,6 +160,12 @@ class StubHost:
         self._processed_md_hash = None
         self._cached_streaming_html = None
         self._cached_raw_md_hash = None
+        # [R2-H3] 采样判等状态（render 入口读取的字段，与 CodeWebViewer 对齐）
+        self._processed_md_len = 0
+        self._processed_md_s_head = ""
+        self._processed_md_s_mid1 = ""
+        self._processed_md_s_mid2 = ""
+        self._processed_md_s_tail = ""
 
     def _refresh_viewer_font_css(self):
         pass
@@ -171,6 +177,9 @@ class StubHost:
 def _bind_helpers():
     """类体不能引用后置导入名，import 后补绑定主题链方法到 StubHost。"""
     StubHost._ensure_theme_chain = cv.CodeWebViewer._ensure_theme_chain
+    # [R2-H3] 实例级采样判等方法随实现同步绑定
+    StubHost._processed_md_samples_match = cv.CodeWebViewer._processed_md_samples_match
+    StubHost._processed_md_samples_store = cv.CodeWebViewer._processed_md_samples_store
 
 
 _bind_helpers()

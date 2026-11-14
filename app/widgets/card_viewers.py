@@ -923,6 +923,12 @@ class CodeWebViewer(QWebEngineView):
         # 流式渲染哈希缓存：避免对相同 processed_md 重复跑 6 轮正则 + md.convert()
         self._processed_md_hash = None
         self._cached_streaming_html = None
+        # perf: processed_md 判等的 len+4 点采样状态（替代每帧内置 hash 全文）
+        self._processed_md_len = 0
+        self._processed_md_s_head = ""
+        self._processed_md_s_mid1 = ""
+        self._processed_md_s_mid2 = ""
+        self._processed_md_s_tail = ""
         self._cached_raw_md_hash = 0  # _raw_md_sha_hex() 在缓存时的快照，供 finish_streaming 验证缓存有效性
         # [P0-⑤] 滚动 sha256 状态：流式 _markdown_text 严格单调追加，
         # 每帧只 hash 新增段（旧版每帧内置 hash 全文 O(n)×2）
@@ -1036,7 +1042,12 @@ class CodeWebViewer(QWebEngineView):
         self._stable_html: str = ""
         self._stable_md_len: int = 0
         # [B1] 尾部行内渲染哈希缓存：安全定时器重复触发时 tail 未变则跳过渲染
+        # （[R2-H2] 值改存滚动 sha256 hex；int 0 = 未渲染哨兵）
         self._tail_html_hash: int = 0
+        # perf: 尾部窗口滚动 sha256 状态（stable 推进重建、追加只 update 新增段）
+        self._tail_sha = None
+        self._tail_sha_base = -1
+        self._tail_sha_len = 0
         self._needs_full_render: bool = True
         self._light_skeleton = light  # 轻量骨架标志（去掉 echarts CDN 等）
         # [PERF] 最小渲染间隔 80ms：降低 WebEngine setHtml 调用频率
@@ -7741,6 +7752,26 @@ class CodeWebViewer(QWebEngineView):
         return self._md_sha.copy().hexdigest()
 
 
+    def _tail_sha_hex(self) -> str:
+        """[R2-H2] 流式尾部窗口 _markdown_text[_stable_md_len:] 的滚动 sha256。
+
+        复用 _raw_md_sha_hex 的滚动模式：stable 基线推进（base 变化）或文本
+        回退时全量重建；正常追加只 update 新增段，替代旧版每帧对整个尾部
+        窗口做内置 hash 的 O(n)。"""
+        md = self._markdown_text
+        base = self._stable_md_len
+        sha_obj = self._tail_sha
+        if sha_obj is not None and self._tail_sha_base == base and len(md) >= self._tail_sha_len:
+            tail = md[self._tail_sha_len :]
+            if tail:
+                sha_obj.update(tail.encode("utf-8"))
+                self._tail_sha_len = len(md)
+            return sha_obj.copy().hexdigest()
+        self._tail_sha = hashlib.sha256(md[base:].encode("utf-8"))
+        self._tail_sha_base = base
+        self._tail_sha_len = len(md)
+        return self._tail_sha.copy().hexdigest()
+
     @staticmethod
     def _has_reached_clean_boundary(md_text: str) -> bool:
         """检测 markdown 文本是否在自然边界结束
@@ -7898,6 +7929,32 @@ class CodeWebViewer(QWebEngineView):
             pass
         CodeWebViewer._theme_chain_ver = ver
 
+    def _processed_md_samples_match(self, processed_md: str) -> bool:
+        """[R2-H3] processed_md 缓存命中判定：len + 首/三分一/三分二/尾 4 点
+        采样比对（口径同 _raw_md_sha_hex 的前缀校验），替代每帧内置 hash 全文
+        O(n)。漏检概率与旧 hash 判等同量级（4×16 字节比对）；采样失配 →
+        全量重渲，与旧 hash 不命中同语义。"""
+        n = self._processed_md_len
+        if n != len(processed_md) or self._cached_streaming_html is None:
+            return False
+        s = self._RAW_SHA_SAMPLE
+        return (
+            processed_md[:s] == self._processed_md_s_head
+            and (n < s or processed_md[n // 3 : n // 3 + s] == self._processed_md_s_mid1)
+            and (n < 2 * s or processed_md[(2 * n) // 3 : (2 * n) // 3 + s] == self._processed_md_s_mid2)
+            and processed_md[n - s : n] == self._processed_md_s_tail
+        )
+
+    def _processed_md_samples_store(self, processed_md: str) -> None:
+        """[R2-H3] 缓存写入时快照 len + 4 点采样。"""
+        n = len(processed_md)
+        s = self._RAW_SHA_SAMPLE
+        self._processed_md_len = n
+        self._processed_md_s_head = processed_md[:s]
+        self._processed_md_s_mid1 = processed_md[n // 3 : n // 3 + s] if n >= s else ""
+        self._processed_md_s_mid2 = processed_md[(2 * n) // 3 : (2 * n) // 3 + s] if n >= 2 * s else ""
+        self._processed_md_s_tail = processed_md[n - s :] if processed_md else ""
+
     def _render_markdown_to_html(self, raw_md: str) -> str:
         """渲染 markdown 到 HTML。
 
@@ -7952,10 +8009,9 @@ class CodeWebViewer(QWebEngineView):
         # 跳过 md.convert() + _wrap_code_blocks（最昂贵的步骤）。
         # 命中场景：resize 触发重复渲染、thinking_finalized 状态切换但内容未变、
         # finish_streaming 后的 immediate render 与随后 render 定时器重叠
-        # [P0-⑤] 判等封装走 _equiv_cache_hit（语义不变；processed_md 非单调
-        # 追加，保留内置 hash 一次性计算）。
-        processed_hash = hash(processed_md)
-        if CodeWebViewer._equiv_cache_hit(processed_md, self._processed_md_hash) and self._cached_streaming_html is not None:
+        # [R2-H3] 判等改 len+4 点采样（口径同 _raw_md_sha_hex 前缀校验）；
+        # 旧版每帧 hash(processed_md) 全文 O(n)，命中判定内再 hash 一次 = 双 O(n)。
+        if self._processed_md_samples_match(processed_md):
             return self._cached_streaming_html
 
         try:
@@ -7972,8 +8028,8 @@ class CodeWebViewer(QWebEngineView):
                 html_content = html_content + _CHAR_COUNT_HTML
 
             # 缓存渲染结果（只存一份，内存开销小）
-            self._processed_md_hash = processed_hash
             self._cached_streaming_html = html_content
+            self._processed_md_samples_store(processed_md)
             # [P0-⑤] 原版内置 hash 全文 O(n)；改滚动 sha256（每帧只 hash 新增段）
             self._cached_raw_md_hash = self._raw_md_sha_hex()
             return html_content
@@ -8589,10 +8645,49 @@ class CodeWebViewer(QWebEngineView):
                 # 含协议块的闭合段（think / tool / 插件注册 tag）仍让位全量：
                 # 这些块的 DOM 由 JS 增量注入维护，差量双写会出现重复框。
                 # 纯文本段占流式输出绝对多数，让位代价可忽略。
+                # [R1a] 让位范围缩小：首个协议段**之前**的纯文本闭合段照常差量
+                # 追加并推进基线（+2 与 _extract_closed_segments 的 stable_len
+                # 口径一致），协议段及其后保持整帧让位（DOM 由 JS 注入维护，
+                # 差量双写会重复框）。
                 if segs and any(_seg_has_protocol_block(seg) for seg in segs):
-                    self._refresh_viewer_font_css()
-                    self._last_rendered_markdown = self._markdown_text
-                    self._rdiag_hit("full_protocol_seg")
+                    _proto_idx = next((i for i, s in enumerate(segs) if _seg_has_protocol_block(s)), None)
+                    prefix_segs = segs[:_proto_idx] if _proto_idx else []
+                    if prefix_segs:
+                        # perf: 含协议块消息整帧放弃 → 前缀纯文本段差量追加，worker 全量整帧重建消除（86KB 帧 25.4ms）
+                        new_html = "".join(
+                            _render_stable_segment(seg, compact=self._tool_compact_mode, lazy_body=self._tool_lazy_body)
+                            for seg in prefix_segs
+                        )
+                        _advance = sum(len(s) + 2 for s in prefix_segs)
+                        _new_stable_len = self._stable_md_len + _advance
+                        # 防御（历史事故区）：基线推进不得越过本次切片可消费总量
+                        assert _new_stable_len <= self._stable_md_len + len(_rest_md), (
+                            f"[R1a] stable 越界: {_new_stable_len} > {self._stable_md_len}+{len(_rest_md)}"
+                        )
+                        self._stable_html += new_html
+                        self._stable_md_len = _new_stable_len
+                        # partial_prefix 口径 = 前缀段数（非调用次数）
+                        for _ in prefix_segs:
+                            self._rdiag_hit("partial_prefix")
+                        # 前缀段照常走差量追加（updateContentAppend，逻辑同上 方差量路径，
+                        # tail 交由紧随其后的整帧全量渲染处理）
+                        self._mark_has_charts(new_html)
+                        self.page().runJavaScript(
+                            "updateContentAppend("
+                            f"{json.dumps(new_html).decode('utf-8')},"
+                            '"");'
+                        )
+                        self._refresh_viewer_font_css()
+                        # 缩小后的让位：基线已推进，赋值同步截断（沿用差量成功路径
+                        # :8673 口径）。全文赋值会让 _equiv_baseline_ok 把协议段之后
+                        # 未差量内容误判为已渲染前缀。
+                        self._last_rendered_markdown = self._markdown_text[: self._stable_md_len]
+                        self._rdiag_hit("partial_protocol")
+                    else:
+                        # 整帧放弃（首个闭合段即协议段）：保持现有全文赋值口径
+                        self._refresh_viewer_font_css()
+                        self._last_rendered_markdown = self._markdown_text
+                        self._rdiag_hit("full_protocol_seg")
                     self._sequence_render(self._markdown_text, self._tool_compact_mode)
                     return
                 # 🐛 修复（流式重复/残留 —— 「同一张卡里出现两份 PLAN/两条工具框」根因）：
@@ -9455,7 +9550,8 @@ class CodeWebViewer(QWebEngineView):
         # 闭合后由全量渲染分发 chart-streaming 骨架/真图）
         if _has_unclosed_chart_fence(_tail):
             return
-        _h = hash(_tail)
+        # perf: 每帧 hash(_tail) 全文 O(n) → 滚动 sha256 只 update 新增段
+        _h = self._tail_sha_hex()
         if _h == self._tail_html_hash:
             # hash 命中：内容未变，刷新降载状态基准（与渲染完成处同口径）
             self._tail_last_rendered_len = len(_tail)

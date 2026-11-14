@@ -2316,7 +2316,9 @@ def find_tool_segment_by_call_id(md_text: str, tool_call_id: str) -> str | None:
         i = end + len("</tool>")
 
 
-@lru_cache(maxsize=128)
+# perf: maxsize 128→64（#21 裁决）：条目 40KB 级大 HTML 常驻内存减半；64 槽覆盖
+# 历史重绘/主题切换的 50 条 replay 全命中（16 槽会全 miss），现实占用 ~0.2MB
+@lru_cache(maxsize=64)
 def _render_tool_block_content(
     content: str, compact: bool = False, heavy_caps=None, lazy_body: bool = False, body_only: bool = False
 ) -> str:
@@ -2860,8 +2862,11 @@ def _inject_tool_blocks(
             # 渲染成卡会与真实完成块内容重复，且空 id 使去重/清理判据失效、
             # 每次全量渲染累积一张（probe4 实证终态 3 块）。一律丢弃。
             if _TOOL_ID_PATTERN.search(content):
+                # perf: 流式（completed=False）bypass lru：递增 content key 永不命中，
+                # 直算省 40KB 级 hash 与缓存槽污染（#6 实测启用 0.692s vs 禁用 0.029s）
+                _tool_fn = _render_tool_block_content if completed else _render_tool_block_content.__wrapped__
                 parts.append(
-                    _render_tool_block_content(
+                    _tool_fn(
                         content, compact=compact, heavy_caps=heavy_caps, lazy_body=lazy_body
                     )
                 )
@@ -3183,11 +3188,29 @@ def _extract_fenced_code(md_text: str) -> tuple[list[str], str]:
     return fences, "\n".join(out_lines)
 
 
+_FENCED_SENTINEL_RE = re.compile("\\x00F(\\d+)\\x00")
+
 def _restore_fenced_code(md_text: str, fences: list[str]) -> str:
-    """_extract_fenced_code 提取的 fence 原文放回（md.convert 前）。"""
-    for i, src in enumerate(fences):
-        md_text = md_text.replace(f"\x00F{i}\x00", src)
-    return md_text
+    """_extract_fenced_code 提取的 fence 原文放回（md.convert 前）。
+
+    [R2-H6] 单趟 find 循环切 parts 一次拼回（O(n)），替代逐哨兵全文 replace
+    （O(n·k)）。等价性：哨兵互不为子串（\x00F1\x00 不命中 \x00F11\x00），
+    逐哨兵替换相互独立 → 产出与旧实现逐字节一致；超范围伪哨兵（无对应
+    fence 下标）旧 replace 不消费，此处同样原样保留。"""
+    if not fences:
+        return md_text
+    # perf: 逐哨兵全文 replace O(n·k) → 单趟哨兵切段一次拼回 O(n)（[R2-H6]）
+    parts: list[str] = []
+    pos = 0
+    n_fences = len(fences)
+    for m in _FENCED_SENTINEL_RE.finditer(md_text):
+        idx = int(m.group(1))
+        if idx < n_fences:
+            parts.append(md_text[pos : m.start()])
+            parts.append(fences[idx])
+            pos = m.end()
+    parts.append(md_text[pos:])
+    return "".join(parts)
 
 
 # 缓存大小阈值（KB）：超过此大小的文本不缓存，防止内存膨胀
@@ -5293,6 +5316,11 @@ def _inject_context_links(md_text: str) -> str:
 
 # ===== _resolve_image_src 模块级常量（避免每次渲染重编译正则+重算路径） =====
 _IMG_SRC_PATTERN = re.compile(r'(<img\s[^>]*?src\s*=\s*["\'])([^"\']+)(["\'][^>]*?>)', re.IGNORECASE)
+
+# perf: [R2-H4] 图片存在性 memo（dict 超容量整体清空）——流式重渲免重复 isfile；
+# 键为 normpath 后的候选路径，渲染期同路径存在性不变（历史重渲不进 resolve）
+_IMG_EXISTS: dict = {}
+_IMG_EXISTS_CAP = 4096
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # 正文图片懒加载属性：http(s) 远程图在长会话里会随滚动/重渲染反复请求，
 # 一次性打开几十张卡会瞬间打出 N 个并发连接。loading=lazy 让浏览器只在图
@@ -5351,7 +5379,15 @@ def _resolve_image_src(html_content: str) -> str:
             # 相对路径：以项目根目录为基准拼接
             candidate = os.path.normpath(os.path.join(_PROJECT_ROOT, src))
 
-        if os.path.isfile(candidate):
+        # perf: memo 命中免重复 isfile（[R2-H4]，容量与键定义见模块头 _IMG_EXISTS）
+        if candidate in _IMG_EXISTS:
+            exists = _IMG_EXISTS[candidate]
+        else:
+            exists = os.path.isfile(candidate)
+            if len(_IMG_EXISTS) >= _IMG_EXISTS_CAP:
+                _IMG_EXISTS.clear()
+            _IMG_EXISTS[candidate] = exists
+        if exists:
             # 本地文件存在，转为 file:/// 路径
             file_url = QUrl.fromLocalFile(candidate).toString()
             return f"{prefix}{file_url}{new_suffix}"
