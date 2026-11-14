@@ -506,7 +506,10 @@ class TabItem(QFrame):
         # 树行化（列表模式复位）：28px / 无图标 / 淡靛蓝选中 / 关闭钮 hover 才显。
         # 单入口 set_tree_row 收敛，由 TabPanel 在树/列表两个重建点调用。
         self._tree_row = False
-        self._capsule_color = ""  # 胶囊颜色（紧凑态首字符图标用同色）
+        self._capsule_color = ""  # 胶囊颜色（无项目数据时兜底首字图标用同色）
+        self._member_time_text = ""  # 团队模式成员行右侧「最后活动时间」（替代标题）
+        self._role_text = ""  # 团队角色名原文（标签省略后 text() 不回原文，取首字/提示用这个）
+        self._unified_title = ""  # 团队统一任务标题（折叠态 tooltip / 成员行标题统一用）
         self._compact_saved = None  # 紧凑态恢复现场（展开时逐控件配对还原）
         self._panel = panel  # TabPanel 引用，用于读取 _anim_phase
         # ── 关闭按钮二次确认（内联确认，参照 worktree_section）──
@@ -545,11 +548,16 @@ class TabItem(QFrame):
         # 外框恒留状态环位（折叠/展开都画环），方块尺寸由 block_inset 恒定
         self._apply_compact_icon_box(False)
 
-        # ── 团队角色胶囊（默认隐藏）──
-        self._capsule_label = QLabel(self)
+        # ── 团队成员身份文字（默认隐藏）──
+        # 用 _ElidedLabel 而非 QLabel：角色名可长达 root-cause-analyst /
+        # regression-guard，QLabel(Minimum) 的 minimumSizeHint=完整文本宽，
+        # 会把行撑出面板可视区（时间/header hover 按钮被裁、按不到）。
+        # ElidedLabel(Ignored) 超宽自动省略，tooltip 保留全名。
+        # 角色名超宽省略保留**后缀**（…-analyst / …-guard）：团队角色的区分点
+        # 在尾段，中间/末尾省略会把差异最大的部分吃掉。
+        self._capsule_label = _ElidedLabel("", self, elide_mode=Qt.ElideLeft)
         self._capsule_label.setVisible(False)
         self._capsule_label.setFixedHeight(20)
-        self._capsule_label.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)
         layout.addWidget(self._capsule_label)
 
         # 文本区（两行式主体）：标题 / 副行（树行化时显示预览·时间）
@@ -580,6 +588,14 @@ class TabItem(QFrame):
         self._sub_row.setVisible(False)
         body_layout.addWidget(self._sub_row)
         layout.addWidget(self._body, 1)
+
+        # 团队模式成员行右侧时间（替代标题：整个团队只保留一个任务标题，
+        # 成员行用最后活动时间表达「谁刚干过活」，标题文本交给团队框 header）
+        self._member_time = QLabel("", self)
+        self._member_time.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)
+        self._member_time.setStyleSheet("background: transparent;")
+        self._member_time.setVisible(False)
+        layout.addWidget(self._member_time)
         self._apply_title_style()
 
         # 图钉（树行化才显示）：置顶后常显，否则 hover 才显；点击切置顶
@@ -641,6 +657,23 @@ class TabItem(QFrame):
             self._sub_time,
             f"color: {Colors.TEXT_MUTED}; background: transparent; {get_font_family_css()} {font_size_css(10)};",
         )
+        if self._member_time.font() != _sf:
+            self._member_time.setFont(_sf)
+        set_style_sheet_if_changed(
+            self._member_time,
+            f"color: {Colors.TEXT_MUTED}; background: transparent; {get_font_family_css()} {font_size_css(10)};",
+        )
+        # 团队身份文字（原彩色胶囊改为普通文字：角色名半透明，不抢标题/时间）
+        _role_font = get_unified_font(12)
+        if self._capsule_label.font() != _role_font:
+            self._capsule_label.setFont(_role_font)
+        set_style_sheet_if_changed(
+            self._capsule_label,
+            f"color: {Colors.TEXT_SECONDARY}; background: transparent; "
+            f"{get_font_family_css()} {font_size_css(12)};",
+        )
+        # 行尾文案按当前状态重新上色（主题刷新会抹掉状态色）
+        self._sync_member_tail()
 
     def refresh_style(self):
         """主题 / 字体变更后刷新样式，重新调整图标尺寸与文字字号/颜色"""
@@ -653,6 +686,7 @@ class TabItem(QFrame):
             self._apply_project_to_icon()
         self._refresh_tree_indent()
         self._apply_title_style()
+        self._sync_member_tail()
         # 紧凑态团队模式：字号缩放后幂等重刷首字符图标（补充点 3）
         if self._compact and self._team_mode:
             self._apply_compact_icon()
@@ -667,13 +701,15 @@ class TabItem(QFrame):
         self._stream_error = error
         self._sync_compact_ring()
         self._sync_icon_tooltip()
+        self._sync_member_tail()
         self.update()
 
     def set_question(self, question: bool):
-        """设置"提问等待回答"态：仅点亮橙色脉动指示条"""
+        """设置"提问等待回答"态：头像橙黄脉动 + 行尾状态字"""
         self._question = question
         self._sync_compact_ring()
         self._sync_icon_tooltip()
+        self._sync_member_tail()
         self.update()
 
     def set_title(self, title: str):
@@ -685,10 +721,16 @@ class TabItem(QFrame):
         """折叠态 icon tooltip = 标题 + 状态文案（hover 即确认状态，零视觉成本）
 
         折叠窄条只有方块可见，标题不可见；环只表达「有事在发生」，
-        具体是流式/待答/报错靠 tooltip 补全。展开态标题本身就可见，不重复。
+        具体是流式/待答/报错靠 tooltip 补全。团队模式下图标与普通 Tab 同为
+        项目 icon（成员不可由图标区分），tooltip 前置角色名 + 统一任务标题。
         """
+        title = self._unified_title or self._title
+        if self._team_mode:
+            role = self._role_text.strip()
+            if role:
+                title = f"{role} · {title}"
         if not self._compact:
-            self._icon_widget.setToolTip(self._title)
+            self._icon_widget.setToolTip(title)
             return
         if self._stream_error:
             state = "上次运行出错"
@@ -698,7 +740,7 @@ class TabItem(QFrame):
             state = "等待你的回答"
         else:
             state = ""
-        self._icon_widget.setToolTip(f"{self._title}\n{state}" if state else self._title)
+        self._icon_widget.setToolTip(f"{title}\n{state}" if state else title)
 
     def _apply_project_to_icon(self):
         """将项目信息交给 _TabProjectIcon 绘制；无项目数据时隐藏色块（对齐团队框惯例）"""
@@ -711,21 +753,24 @@ class TabItem(QFrame):
         """设置项目头像（缩写+颜色）；initials 为空时隐藏色块图标（如临时对话页）
 
         text_color：语义常量色的固定字色（如临时紫配白），空=按亮度自适应。
+        团队模式成员行不用项目 icon（显示角色单字母头像），数据照写不显。
         """
         self._project_initials = initials
         self._project_color = color_rgba
         self._project_text_color = text_color
         self._apply_project_to_icon()
-        # 树行化：无图标形态（归属由工作树节点表达），数据照常写入但色块保持隐藏
+        # 树行化无图标形态
         if self._tree_row:
             self._icon_widget.setVisible(False)
             return
-        # 有项目数据：确保色块可见（隐藏仅由空数据/团队模式触发）
-        if initials and color_rgba:
-            self._icon_widget.setVisible(True)
-        # 紧凑态非团队：保持图标显示（项目 icon 为折叠态唯一标识）
-        if self._compact and not self._team_mode and initials:
-            self._icon_widget.setVisible(True)
+        if self._team_mode:
+            # 团队行：头像由角色决定，项目数据变化只影响退出团队后的展示
+            self._apply_member_icon()
+        else:
+            self._icon_widget.setVisible(bool(initials and color_rgba))
+            if self._compact:
+                self._apply_compact_icon()
+        self._sync_team_row_visible()
 
     def set_icon(self, icon):
         """设置通用 icon（QPixmap/QIcon 兜底）"""
@@ -756,10 +801,15 @@ class TabItem(QFrame):
             self._sync_pin()
         else:
             self.layout().setContentsMargins(8, 4, 4, 4)
-            # 图标恢复现行语义：团队模式 / 无项目数据 → 隐藏
-            self._icon_widget.setVisible(bool(self._project_initials and self._project_color) and not self._team_mode)
             self._sub_row.setVisible(False)
             self._pin_btn.setVisible(False)
+            if self._team_mode:
+                # 团队行：角色单字母头像（与折叠态同一套）
+                self._apply_member_icon()
+            else:
+                self._icon_widget.setVisible(bool(self._project_initials and self._project_color))
+            # 标题/角色文字/时间按团队模式重新裁决
+            self._sync_team_row_visible()
         self._apply_title_style()
         self._refresh_row_height()
         self.update()
@@ -792,55 +842,140 @@ class TabItem(QFrame):
         self._pin_btn.setVisible(self._pinned or self._hovered)
 
     def set_capsule(self, text: str, color: str = ""):
-        """显示团队角色胶囊"""
+        """设置团队成员身份（角色名 + 角色色）
+
+        成员行不再显示彩色胶囊：角色名以普通文字显示，角色色只用于单字母
+        头像（展开/折叠同一套，流式/待答光效也画在这个头像上）。
+        """
         if not color:
             # 从 agent 名 hash 生成稳定色（md5 稳定 hash，跨进程恒定）
             h = _stable_text_hue(text)
             color = f"hsl({h}, 65%, 50%)"
-        self._capsule_color = color  # 紧凑态首字符图标用同色（矩阵 B4）
+        self._capsule_color = color
+        self._role_text = text
         self._capsule_label.setText(text)
-        self._capsule_label.setStyleSheet(f"""
-            QLabel {{
-                background: {color};
-                color: white;
-                border-radius: 4px;
-                padding: 1px 4px;
-                font-size: 11px;
-                font-weight: bold;
-            }}
-        """)
-        self._capsule_label.setVisible(True)
-        # 紧凑态：无条件隐藏胶囊（P1 修复——set_capsule 先于 set_team_mode(True)
-        # 执行时 _team_mode 仍为 False，旧条件会漏隐藏导致折叠态显示胶囊文字）；
-        # 团队模式再幂等重刷首字符图标，非团队模式不刷（无胶囊语义）。
-        if self._compact:
-            if self._team_mode:
-                self._apply_compact_icon()
-            self._capsule_label.setVisible(False)
+        self._apply_title_style()  # 角色文字样式随主题/字号刷新
+        self._sync_icon_tooltip()
+        # 团队模式：角色变了 → 单字母头像首字/颜色同步重绘
+        if self._team_mode:
+            if self._compact:
+                self._apply_member_icon()
+                self._capsule_label.setVisible(False)
+            else:
+                self._apply_member_icon()
+                self._sync_team_row_visible()
+        else:
+            # 非团队态保持旧 API 语义（update_tab_capsule 显示角色名），
+            # 紧凑态仍隐藏（窄条只留头像）
+            self._capsule_label.setVisible(not self._compact)
+
+    def set_unified_title(self, title: str):
+        """团队统一任务标题（整个团队共用一个标题：header 展示，成员行只进 tooltip）
+
+        空串回退成员自身会话标题（非团队 / 标题未生成场景）。
+        """
+        title = str(title or "").strip()
+        if self._unified_title == title:
+            return
+        self._unified_title = title
+        self._sync_icon_tooltip()
+
+    def set_member_time(self, text: str):
+        """团队成员行行尾文案的数据源（最后活动时间，相对时间字符串）
+
+        实际显示由 _sync_member_tail 决定：空闲时才显示时间，忙时行尾让
+        给状态文案（生成中/待回答/出错）。
+        """
+        text = str(text or "")
+        if self._member_time_text == text:
+            return
+        self._member_time_text = text
+        self._sync_member_tail()
+
+    def _sync_member_tail(self):
+        """成员行行尾语义：忙时显示状态文案，空闲显示最后活动时间
+
+        状态是扫列表时的注意力落点，行尾直接写「生成中…/待回答/出错」
+        比看头像外环快；状态文案配色与头像状态环同一套（青蓝/橙黄/红）。
+        忙时时间退到 tooltip，不丢信息。
+        """
+        if not (self._team_mode and not self._compact and not self._tree_row):
+            return
+        if self._stream_error:
+            text, state = "出错", "error"
+        elif self._streaming:
+            text, state = "生成中…", "streaming"
+        elif self._question:
+            text, state = "待回答", "question"
+        else:
+            text, state = self._member_time_text, ""
+        if not text:
+            self._member_time.setVisible(False)
+            return
+        if self._member_time.text() != text:
+            self._member_time.setText(text)
+        self._member_time.setVisible(True)
+        color = _status_ring_color(state, 0.0).name() if state else Colors.TEXT_MUTED
+        set_style_sheet_if_changed(
+            self._member_time,
+            f"color: {color}; background: transparent; {get_font_family_css()} {font_size_css(10)};",
+        )
+        self._member_time.setToolTip(
+            ("最后活动：" + self._member_time_text) if state and self._member_time_text else ""
+        )
+
+    def _sync_team_row_visible(self):
+        """团队模式成员行文字区：角色名（普通文字）+ 最后活动时间；标题让位
+
+        整个团队只显示一个任务标题（团队框 header），成员行改为
+        「角色单字母头像 + 角色名 + 最后活动时间」。角色名占剩余宽度并自动
+        省略（长名如 root-cause-analyst 不得撑破面板），body 让位给时间。
+        """
+        if self._tree_row or self._compact:
+            return
+        lay = self.layout()
+        self._title_label.setVisible(not self._team_mode)
+        has_role = bool(self._role_text.strip())
+        self._capsule_label.setVisible(bool(self._team_mode and has_role))
+        self._sync_member_tail()
+        # 团队行：角色名吃剩余宽度（超长省略），标题体让位；非团队相反
+        if self._team_mode:
+            lay.setStretchFactor(self._capsule_label, 1)
+            lay.setStretchFactor(self._body, 0)
+        else:
+            lay.setStretchFactor(self._capsule_label, 0)
+            lay.setStretchFactor(self._body, 1)
 
     def set_team_mode(self, team_mode: bool):
-        """设置团队模式：隐藏项目 icon（项目 icon 移到团队标题处显示）
+        """设置团队模式：成员行用角色单字母头像，不复用项目 icon
 
-        True：TabItem 只显示角色胶囊 + 标题 + 关闭按钮（项目 icon 隐藏）；
-        False：恢复显示项目 icon（非团队模式回归不变）。
-        与胶囊共存：团队模式下胶囊照常显示，二者互不干扰。
-        紧凑态（折叠）：仅切换图标内容——团队模式切角色首字符、非团队切项目
-        icon，不改变文字类控件可见性（矩阵 D3）。
+        True：角色单字母头像 + 角色名（普通文字）+ 最后活动时间；标题让位，
+              整个团队只显示一个任务标题（团队框 header 承担）；
+        False：恢复项目 icon + 标题（非团队模式回归不变）。
+        紧凑态（折叠）：同样用角色单字母头像（状态光效画在头像上）。
         """
         if self._team_mode == team_mode:
             return
         self._team_mode = team_mode
+        if not team_mode:
+            # 退出团队：清团队专属状态（统一标题 / 成员时间），避免非团队行残留
+            self._unified_title = ""
+            self._member_time_text = ""
+            if self._member_time.text():
+                self._member_time.setText("")
+                self._member_time.setVisible(False)
         if self._compact:
-            if team_mode:
-                self._apply_compact_icon()
-            else:
-                self._apply_project_to_icon()
-                self._icon_widget.setVisible(True)
+            self._apply_compact_icon()
             # 团队/非团队行高不同（32 / 40），紧凑态外框随之换档
             self._apply_compact_icon_box(True)
         else:
-            # 树行化：无图标形态，不因模式切换重新点亮色块
-            self._icon_widget.setVisible(not team_mode and not self._tree_row)
+            if team_mode:
+                self._apply_member_icon()
+            else:
+                # 退出团队：恢复项目 icon（旧行为：非团队行退出后必有可见色块）
+                self._apply_project_to_icon()
+                self._icon_widget.setVisible(True)
+            self._sync_team_row_visible()
         self._sync_compact_ring()
         # 行高分档跟随模式：团队模式（列表态）成员行 32px
         self._refresh_row_height()
@@ -894,14 +1029,15 @@ class TabItem(QFrame):
             self._icon_widget.setFixedSize(box, box)
         self._icon_widget.set_block_inset(max(0, (box - self._icon_size) // 2))
 
-    def _apply_compact_icon(self):
-        """紧凑态团队模式：用角色胶囊首字符 + 胶囊色绘制图标（折叠态成员可区分）
+    def _apply_member_icon(self):
+        """团队身份头像：角色首字母 + 角色色（折叠/展开同一套）
 
-        胶囊为空（异常时序）时回退标题首字，避免裸 "?" 无法区分成员。
-        非中文字符统一大写（leader→L / coder→C）：26px 方块里小写字母
-        只剩 x-height，视觉上明显偏小偏轻。
+        成员行唯一的身份/状态锚点：流式彩虹 / 待答呼吸 / 报错快闪都画在
+        这个头像外侧。胶囊为空（异常时序）回退标题首字，避免裸 "?"。
+        非中文字符统一大写（leader→L / coder→C）：方块里小写字母只剩
+        x-height，视觉上明显偏小偏轻。
         """
-        text = (self._capsule_label.text() or "").strip()
+        text = self._role_text.strip()
         if not text:
             text = (self._title or "").strip()
         ch = text[0].upper() if text else "?"
@@ -911,6 +1047,21 @@ class TabItem(QFrame):
             color = f"hsl({h}, 65%, 50%)"
         self._icon_widget.set_project(ch, color)
         self._icon_widget.setVisible(True)
+        self._sync_compact_ring()
+
+    def _apply_compact_icon(self):
+        """紧凑态图标：团队成员 = 角色单字母头像；非团队 = 项目 icon
+
+        项目数据缺失的非团队行隐藏色块（与普通 Tab 无项目惯例一致）。
+        """
+        if self._team_mode:
+            self._apply_member_icon()
+            return
+        if self._project_initials and self._project_color and not self._tree_row:
+            self._apply_project_to_icon()
+            self._icon_widget.setVisible(True)
+        else:
+            self._icon_widget.setVisible(False)
         self._sync_compact_ring()
 
     def _sync_compact_ring(self) -> None:
@@ -939,10 +1090,10 @@ class TabItem(QFrame):
         """切换紧凑模式（侧边栏折叠态）：仅保留图标 + 状态指示条
 
         compact=True：保存恢复现场（标题/胶囊/关闭/图标可见性 + margins），
-            隐藏 title/capsule/close，margin 收紧为 (4,4,4,4)；团队模式用角色
-            首字符图标（矩阵 B4），非团队保留项目 icon。
-        compact=False：按保存的现场逐控件配对恢复（矩阵 D1 对称性），
-            含团队模式 icon 恢复隐藏、margin 还原。
+            隐藏 title/capsule/time/close，margin 收紧；团队与非团队统一
+            用项目 icon（无数据时团队回退角色首字）。
+        compact=False：按当前语义恢复可见性（icon/标题/时间/胶囊），
+            margin 还原。
         幂等：相同状态重复调用直接返回。
         """
         if self._compact == compact:
@@ -962,6 +1113,7 @@ class TabItem(QFrame):
             # 隐藏文字类控件，仅留图标
             self._title_label.setVisible(False)
             self._sub_row.setVisible(False)
+            self._member_time.setVisible(False)
             # _body 以 stretch=1 占位（_setup_ui），只藏子控件会把 icon 推到
             # 最左侧：新建对话行/插件行无 stretch，QHBoxLayout 富余空间整体
             # 居中；TabItem 富余全被 _body 吃掉 → icon 中心 18 vs 面板中线 23
@@ -982,26 +1134,25 @@ class TabItem(QFrame):
             self._apply_compact_icon_box(True)
             # 行高下限跟随外框缩放（否则框装不下、icon 被挤离行中心与 hover 底错位）
             self._refresh_row_height()
-            if self._team_mode:
-                self._apply_compact_icon()
-            elif self._project_initials and self._project_color and not self._tree_row:
-                # 无项目数据（如临时对话页）保持色块隐藏；树行化无图标形态同样保持隐藏
-                self._icon_widget.setVisible(True)
+            # 团队与非团队统一：项目 icon 优先，无数据时团队回退角色首字
+            self._apply_compact_icon()
             self._sync_icon_tooltip()
         else:
             self._apply_compact_icon_box(False)
             saved = self._compact_saved or {}
-            # 团队模式 / 树行化：icon 恒隐藏；其余恢复原可见性
-            if self._team_mode or self._tree_row:
-                self._icon_widget.setVisible(False)
-            else:
-                self._icon_widget.setVisible(bool(saved.get("icon_visible", True)))
             # 还原图标数据（compact 期间可能被 set_project/set_icon 更新）
             self._apply_project_to_icon()
+            if self._tree_row:
+                self._icon_widget.setVisible(False)
+            elif self._team_mode:
+                # 团队行：角色单字母头像（与折叠态同一套）
+                self._apply_member_icon()
+            else:
+                self._icon_widget.setVisible(bool(saved.get("icon_visible", True)))
             # 展开态按当前语义恢复（非折叠前现场）：折叠期间可能加入团队/设置胶囊，
-            # 旧现场会漏显示——标题恒显、副行按树行化态、胶囊按团队模式+文本、close 恒隐（hover 再显）
+            # 旧现场会漏显示——标题/时间/图标可见性按团队模式重新裁决，
+            # 胶囊按团队模式+文本，close 恒隐（hover 再显）
             self._body.setVisible(True)
-            self._title_label.setVisible(True)
             self._sub_row.setVisible(bool(self._tree_row))
             has_capsule_text = bool((self._capsule_label.text() or "").strip())
             self._capsule_label.setVisible(self._team_mode and has_capsule_text)
@@ -1014,14 +1165,20 @@ class TabItem(QFrame):
             self.layout().setAlignment(self._icon_widget, Qt.Alignment())
             self._compact_saved = None
             self._refresh_row_height()
+            self._sync_team_row_visible()
             self._sync_compact_ring()
             self._sync_icon_tooltip()
         self.update()
 
     def clear_capsule(self):
-        """隐藏团队角色胶囊"""
+        """清空团队角色身份（文字 + 角色色），头像回退标题首字"""
         self._capsule_label.setVisible(False)
         self._capsule_label.setText("")
+        self._capsule_color = ""
+        self._role_text = ""
+        if self._team_mode and not self._tree_row:
+            self._apply_member_icon()
+        self._sync_icon_tooltip()
 
     def _on_close_btn_clicked(self):
         """关闭按钮点击：内联二次确认（参照 worktree_section 删除按钮）。
@@ -1152,17 +1309,8 @@ class TabItem(QFrame):
         #      是侧栏最显眼的视觉脏点，用户明确要求去掉；
         #   ③ 状态集中于 icon 一个锚点，扫视成本最低，且与选中底色互不干扰。
         # 选中态完全由圆角底色表达（见上方 fillPath）。
-
-        # ── 团队模式（列表态展开）：状态环画在角色胶囊外沿 ──
-        # 环唯一载体 _icon_widget 在团队模式下隐藏（胶囊是唯一角色标识），环改由
-        # 行层承担：以胶囊 geometry 外扩 3px 定位，内缘 1.5px 被后画的胶囊盖住，
-        # 可见环带宽约 1.5px 且不占布局——有环无环胶囊几何零跳变。
-        # 相位现取现用（_ring_spec 读 panel 帧相位），_on_anim_tick 的 item.update()
-        # 已覆盖重绘驱动，无需额外定时器。
-        capsule_ring = self._capsule_ring_spec()
-        if capsule_ring is not None:
-            rect, state, phase = capsule_ring
-            _paint_status_ring_on(painter, rect, state, phase, radius=6)
+        # 团队行同理只在角色头像上画环：行层不给角色名套框（视觉上会像
+        # 一个框套住全名，与头像环重复）。
 
         # ── 树行化：左侧从属引导竖线（最后画，不被选中底色盖住）──
         if self._tree_row:
@@ -1171,17 +1319,11 @@ class TabItem(QFrame):
         super().paintEvent(event)
 
     def _capsule_ring_spec(self):
-        """展开团队行胶囊环绘制决策：返回 (环 rect, state, phase) 或 None
+        """已停用：团队行不在行层给角色名套状态环（状态只由头像外侧环承担）
 
-        抽成纯决策方法便于单测（离屏 render 在跨文件测试环境下不稳，实测
-        access violation，见 tests/widgets 崩溃基线），paintEvent 只消费结果。
+        保留方法名返回 None，供旧测试/外部调用兼容；新代码不要再用。
         """
-        if not (self._team_mode and not self._compact and not self._capsule_label.isHidden()):
-            return None
-        state, phase = self._ring_spec()
-        if not state or not (self._capsule_label.text() or "").strip():
-            return None
-        return self._capsule_label.geometry().adjusted(-3, -3, 3, 3), state, phase
+        return None
 
 
 # ── 插入方位菜单图标：2x2 方块，黑=卡片显示位置，白=空白区域 ──
@@ -2848,14 +2990,15 @@ class TabPanel(QWidget):
         self._rebuild_layout()
 
     def set_team_label(self, team_id: str, name: str):
-        """设置指定 team 框 header 的团队名称
+        """设置指定 team 框 header 的团队统一任务标题
 
         Args:
             team_id: Tab 分组 key（与 set_tab_team 使用的 team_id 一致）
-            name: 团队显示名称（空串兜底为"团队"）
+            name: 统一任务标题（空串兜底为"团队"）
 
-        用法：TabManagerWindow 在 add_window / refresh_capsule_for_window 时
-        调用，传入窗口的 _team_name，确保团队框 header 与实际团队名同步。
+        用法：TabManagerWindow 在 add_window / refresh_capsule_for_window /
+        成员标题变化时调用，传入团队 run 内最早生成的真实标题（未生成时
+        回退团队名）。整个团队只在这里展示一个任务标题，成员行不再重复。
         """
         grp = self._team_groups.get(team_id)
         if grp is None:
@@ -2865,6 +3008,28 @@ class TabPanel(QWidget):
             return
         # 空名兜底（与 _get_or_create_team_group 中占位文本一致）
         label.setText(name.strip() if name and name.strip() else "团队")
+        # 折叠态：header 是本团队的唯一可见入口（tooltip / 无项目时的首字占位）
+        if getattr(grp, "_team_compact", False):
+            header = getattr(grp, "_team_header", None)
+            if header is not None:
+                header.setToolTip(label.text())
+            icon = getattr(grp, "_team_icon", None)
+            if icon is not None and not getattr(grp, "_team_icon_key", None):
+                ch = (label.text() or "?")[0]
+                icon.set_project(ch, Colors.INFO)
+
+    def set_team_unified_title(self, team_id: str, title: str):
+        """把统一任务标题下发给该团队全部成员行（折叠态 tooltip 用）
+
+        成员行标题已不显示（让位给最后活动时间），但折叠窄条只有图标方块，
+        hover 时需要「角色 · 任务标题」才能辨认；各成员会话标题仍是默认
+        占位，统一标题才能表达团队任务。
+        """
+        title = (title or "").strip()
+        for _i, _tid in list(self._item_team.items()):
+            if _tid != team_id or not (0 <= _i < len(self._items)):
+                continue
+            self._items[_i].set_unified_title(title)
 
     def set_team_project(self, team_id: str, initials: str, color: str):
         """设置团队框 header 的项目 icon（缩写 + 颜色，复用 _TabProjectIcon）
@@ -2901,7 +3066,7 @@ class TabPanel(QWidget):
         grp._team_icon_key = key
 
     def set_tab_team_mode(self, index: int, team_mode: bool):
-        """设置指定 Tab 的团队模式（隐藏/显示项目 icon）"""
+        """设置指定 Tab 的团队模式（成员行改用项目 icon + 胶囊 + 时间）"""
         if 0 <= index < len(self._items):
             self._items[index].set_team_mode(team_mode)
 
@@ -2961,7 +3126,7 @@ class TabPanel(QWidget):
         arrow.setToolTip("折叠/展开团队")
         header_layout.addWidget(arrow)
 
-        team_icon = _TabProjectIcon(header, size=16)
+        team_icon = _TabProjectIcon(header, size=scale_icon_size(20))
         team_icon.setVisible(False)
         # 高度恒定：隐藏时仍保留布局占位，项目 icon 异步加载完成显示后
         # header 不 reflow（否则 icon 计入/移出布局导致标题栏高度跳变）
@@ -2976,14 +3141,16 @@ class TabPanel(QWidget):
         name_label.setObjectName("teamGroupName")
         name_label.setText("团队")
 
-        # 聚合信息 badge：待答 WARNING > 运行 INFO > 空闲（成员数），语义态走动态属性。
-        # 位于团队名**左侧**（用户定案）：左侧元素（arrow/icon/badge）不参与 hover
+        # 聚合状态 badge：仅在待答 / 运行态出现（人数不展示——用户定案：
+        # 团队人数不需要，idle 态不占位）。语义态走动态属性。
+        # 位于团队名**左侧**：左侧元素（arrow/icon/badge）不参与 hover
         # 挤压→恒定不动；右侧全留给按钮区。宽度自适应（不加 setFixedSize）：
         # 「待答 N」「运行 N」文案完整不裁断，与 QSS padding 共同决定尺寸。
         badge = QLabel("0", header)
         badge.setObjectName("teamGroupBadge")
         badge.setProperty("state", "idle")
         badge.setAlignment(Qt.AlignCenter)
+        badge.setVisible(False)
         header_layout.addWidget(badge)
 
         header_layout.addWidget(name_label, 1)
@@ -3185,42 +3352,16 @@ class TabPanel(QWidget):
             pass
 
     def _update_team_badge(self, grp: "QFrame"):
-        """按 grp 增量计数刷新 header 聚合 badge（仅状态迁移分支调用）
+        """团队 header 聚合 badge 已停用（状态改由成员行行尾表达）
 
-        文案优先级：待回答（question，WARNING）> 运行中（streaming/error，INFO）
-        > 空闲（成员总数，muted）。error 并入运行口径、不单列文案（对齐
-        main_widget._sync_team_member_runtime_status：error 不覆盖 busy）。
-        三重守卫：文本/属性态/tooltip 变了才写，避免 repolish 进高频路径；
-        badge 数字静态不逐帧动画，减动效环境下天然可见。
+        人数不需要（用户定案）；待答/运行也已由成员行行尾「生成中…/待回答/
+        出错」直接表达，header 再放聚合 badge 只会挤压任务标题（窄栏下标题
+        只剩一个字）。保留方法名与计数属性（_team_streaming_count 等）供既有
+        调用点继续复用，badge 控件始终隐藏。
         """
         badge = getattr(grp, "_team_badge", None)
-        if badge is None:
-            return
-        q = getattr(grp, "_team_question_count", 0)
-        running = getattr(grp, "_team_streaming_count", 0) + getattr(grp, "_team_error_count", 0)
-        total = getattr(grp, "_team_total", 0)
-        if q > 0:
-            text, state, tooltip = f"{q} 待答", "warn", f"{total} 名成员，{q} 个待回答"
-        elif running > 0:
-            text, state, tooltip = f"{running} 运行", "run", f"{total} 名成员，{running} 个运行中"
-        else:
-            text, state, tooltip = str(total), "idle", f"{total} 名成员"
-        if badge.text() != text:
-            badge.setText(text)
-        if badge.property("state") != state:
-            badge.setProperty("state", state)
-            badge.style().unpolish(badge)
-            badge.style().polish(badge)
-        # #13：按当前文案同步最小宽（含 QSS padding 1px 6px）——窄栏 + hover 时
-        # 布局会压缩 badge（实测「12 运行」73→48 裁字），最小宽钉住后不被压缩；
-        # 挤压转嫁给团队名（_ElidedLabel 有 elide 保护，显示省略号属预期）。
-        # ⚠️ 必须放在 unpolish/polish 之后：repolish 会重新应用 QSS 的
-        # min-width 覆盖掉此处设置（实测放在前面 minW 被重置回 26）
-        needed = badge.fontMetrics().horizontalAdvance(text) + 12
-        if badge.minimumWidth() != needed:
-            badge.setMinimumWidth(needed)
-        if badge.toolTip() != tooltip:
-            badge.setToolTip(tooltip)
+        if badge is not None and not badge.isHidden():
+            badge.setVisible(False)
 
     def _on_team_close_clicked(self, team_id: str):
         """解散团队按钮：内联二次确认（TabItem._on_close_btn_clicked 同范式）
@@ -3382,10 +3523,10 @@ class TabPanel(QWidget):
         """团队框 header 紧凑模式（侧边栏折叠态）：仅保留团队 icon
 
         compact=True：
-          - 隐藏团队名 label 与 new_task/add/close 按钮；
-          - icon 无内容时用团队名首字 + 主题强调色绘制占位并显示（矩阵 C1）；
-          - header 设置 tooltip=团队名（矩阵 C2）。
-        compact=False：逐控件配对恢复——name 显示、new_task/add/close 恢复 hover 逻辑、
+          - 隐藏标题 label 与 new_task/add/close 按钮；
+          - icon 无内容时用团队标题首字 + 主题强调色绘制占位并显示（矩阵 C1）；
+          - header 设置 tooltip=团队标题（矩阵 C2）。
+        compact=False：逐控件配对恢复——标题显示、new_task/add/close 恢复 hover 逻辑、
           icon 恢复原可见性与原数据（矩阵 D1 对称性）、tooltip 清空。
         幂等：相同状态重复调用直接返回。
         """
@@ -3402,7 +3543,7 @@ class TabPanel(QWidget):
         team_icon = getattr(grp, "_team_icon", None)
         arrow = getattr(grp, "_team_arrow", None)
         badge = getattr(grp, "_team_badge", None)
-        team_name = (name_label.text() if name_label else "").strip() or "团队"
+        team_title = (name_label.text() if name_label else "").strip() or "团队"
 
         if compact:
             # 记录恢复现场（icon 可见性 + 数据；用 isHidden 逆，与父链显示无关）
@@ -3419,8 +3560,8 @@ class TabPanel(QWidget):
                     # icon，不替换为团队名首字母（折叠/展开 icon 统一为项目 icon）
                     team_icon.setVisible(True)
                 else:
-                    # 无项目数据 → 占位：团队名首字 + 主题强调色
-                    ch = team_name[0] if team_name else "?"
+                    # 无项目数据 → 占位：任务标题首字 + 主题强调色
+                    ch = team_title[0] if team_title else "?"
                     team_icon.set_project(ch, Colors.INFO)
                     team_icon.setVisible(True)
             if name_label is not None:
@@ -3440,7 +3581,7 @@ class TabPanel(QWidget):
             if btn_area is not None:
                 # 占位容器折叠态整体隐藏：窄条不放按钮区（C3），也避免 68px 空白
                 btn_area.setVisible(False)
-            header.setToolTip(team_name)
+            header.setToolTip(team_title)
             # 折叠态：团队框边距从 (6,4,6,4) 收紧到 (1,3,1,3)。46px 窄条下
             # 6+6 侧边距 + 列表 2+2 已吃掉 16px，成员块只能挤在 34px 里且整体
             # 偏右 3px（实测块中心 x=21 vs 面板中线 x=23）；收紧后右侧与顶栏
@@ -3464,7 +3605,8 @@ class TabPanel(QWidget):
             if arrow is not None:
                 arrow.setVisible(True)
             if badge is not None:
-                badge.setVisible(True)
+                # 聚合 badge 停用：展开/折叠都保持隐藏（状态由成员行行尾表达）
+                badge.setVisible(False)
             btn_area = getattr(grp, "_team_btn_area", None)
             if btn_area is not None:
                 btn_area.setVisible(True)
@@ -4259,6 +4401,11 @@ class TabPanel(QWidget):
             # 非 leader 变化的更新被 _layout_snapshot 快照拦截，开销可忽略。
             if (old == _LEADER_AGENT) != (text == _LEADER_AGENT):
                 self._rebuild_layout()
+
+    def update_tab_member_time(self, index: int, text: str):
+        """更新团队模式成员行右侧「最后活动时间」（非团队行无效果）"""
+        if 0 <= index < len(self._items):
+            self._items[index].set_member_time(text)
 
     def clear_tab_capsule(self, index: int):
         """隐藏团队角色胶囊"""

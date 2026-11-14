@@ -102,10 +102,10 @@ def test_tc_d5_roundtrip_three_times_symmetric(panel):
     expanded_round3 = [_item_visible_state(it) for it in panel._items]
 
     assert expanded_round3 == expanded_round1, f"展开态不对称: {expanded_round1} vs {expanded_round3}"
-    # 展开态标题可见、胶囊可见（团队成员）、close 隐藏（未 hover）
+    # 展开态标题可见（非团队）、团队行胶囊可见且标题让位给最后活动时间、close 隐藏（未 hover）
     assert expanded_round3[0]["title"] is True
     assert expanded_round3[1]["capsule"] is True
-    assert expanded_round3[1]["title"] is True
+    assert expanded_round3[1]["title"] is False
     # margins 还原为原始值
     assert expanded_round3[0]["margins"] == (8, 4, 4, 4)
 
@@ -408,10 +408,10 @@ def test_tc_p1_collapsed_set_capsule_before_team_mode(panel):
     assert _shown(item._capsule_label) is False, "set_team_mode 后胶囊必须保持隐藏（P1）"
     assert _shown(item._title_label) is False
 
-    # 展开后胶囊恢复（团队模式展开 → 显示胶囊）
+    # 展开后胶囊恢复（团队模式展开 → 显示胶囊，标题让位给最后活动时间）
     panel.set_collapsed(False)
     assert _shown(item._capsule_label) is True
-    assert _shown(item._title_label) is True
+    assert _shown(item._title_label) is False
 
 
 def test_tc_p1_2_reverse_order_capsule_after_team_mode(panel):
@@ -438,7 +438,8 @@ def test_tc_p1_3_expanded_regression_capsule_visible(panel):
     assert item._compact is False
     assert _shown(item._capsule_label) is True
     assert item._capsule_label.text() == "PM"
-    assert _shown(item._title_label) is True
+    # 团队成员行：项目 icon + 胶囊 + 最后活动时间，标题不重复（整个团队只留 header 标题）
+    assert _shown(item._title_label) is False
 
 
 def test_tc_p1_5_empty_capsule_fallback_title_initial(panel):
@@ -808,3 +809,78 @@ def test_compact_icon_horizontally_centered(panel, qtbot):
     # 往返对称：展开后 _body 恢复可见
     panel.set_collapsed(False)
     assert _shown(item._body) is True
+
+
+def test_team_row_expanded_shows_role_avatar_and_member_time(panel):
+    """团队模式展开行：角色单字母头像 + 角色名（普通文字）+ 最后活动时间
+
+    整个团队只显示一个任务标题（团队框 header），成员行不显示项目 icon、
+    不重复会话标题；角色名不再用彩色胶囊，改为普通文字。
+    """
+    panel.add_tab("会话A", project_initials="DF", project_color="#2E7D32")
+    panel.set_tab_team(0, "teamT")
+    panel.set_tab_team_mode(0, True)
+    panel.update_tab_capsule(0, "leader")
+    panel.update_tab_member_time(0, "3分钟前")
+    item = panel._items[0]
+
+    # 头像 = 角色首字母（不是项目缩写）
+    assert _shown(item._icon_widget) is True
+    assert item._icon_widget._initials == "L"
+    # 角色名以普通文字显示，无胶囊底色
+    assert _shown(item._capsule_label) is True
+    assert item._capsule_label.text() == "leader"
+    assert "background: transparent" in item._capsule_label.styleSheet()
+    # 时间可见，标题让位
+    assert _shown(item._member_time) is True
+    assert item._member_time.text() == "3分钟前"
+    assert _shown(item._title_label) is False
+
+
+def test_team_row_collapsed_uses_role_avatar_not_project_icon(panel):
+    """折叠态团队成员：用角色单字母头像（与展开态一致），不用项目 icon"""
+    panel.add_tab("会话A", project_initials="DF", project_color="#2E7D32")
+    panel.add_tab("会话B", project_initials="DF", project_color="#2E7D32")
+    panel.set_tab_team(0, "teamT")
+    panel.set_tab_team(1, "teamT")
+    panel.set_tab_team_mode(0, True)
+    panel.set_tab_team_mode(1, True)
+    panel.update_tab_capsule(0, "leader")
+    panel.update_tab_capsule(1, "plan")
+
+    panel.set_collapsed(True)
+    icon_a = panel._items[0]._icon_widget
+    icon_b = panel._items[1]._icon_widget
+    assert icon_a._initials == "L", "团队成员折叠态 = 角色单字母头像（L）"
+    assert icon_b._initials == "P", "团队成员折叠态 = 角色单字母头像（P）"
+
+
+def test_team_unified_title_feeds_collapsed_tooltip(panel):
+    """统一任务标题下发到成员 tooltip：角色 · 标题，折叠窄条 hover 可辨认"""
+    panel.add_tab("会话A")
+    panel.set_tab_team(0, "teamT")
+    panel.set_tab_team_mode(0, True)
+    panel.update_tab_capsule(0, "leader")
+    panel.set_team_unified_title("teamT", "优化智能表格渲染")
+    panel.set_collapsed(True)
+    tip = panel._items[0]._icon_widget.toolTip()
+    assert "leader" in tip and "优化智能表格渲染" in tip
+
+
+def test_team_row_tail_shows_state_when_busy(panel):
+    """行尾语义：空闲显时间，生成中/待回答显状态文案（状态色取自头像环同一套）"""
+    panel.add_tab("会话A")
+    panel.set_tab_team(0, "teamT")
+    panel.set_tab_team_mode(0, True)
+    panel.update_tab_capsule(0, "leader")
+    panel.update_tab_member_time(0, "3分钟前")
+    item = panel._items[0]
+
+    assert item._member_time.text() == "3分钟前"
+    panel.update_tab_streaming(0, True, False)
+    assert item._member_time.text() == "生成中…"
+    panel.update_tab_streaming(0, False, False)
+    panel.update_tab_question(0, True)
+    assert item._member_time.text() == "待回答"
+    panel.update_tab_question(0, False)
+    assert item._member_time.text() == "3分钟前"

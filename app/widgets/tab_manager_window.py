@@ -8,6 +8,7 @@ Windows 原生保留 Aero Snap / 摇动 / 任务栏预览 / DWM 阴影。
 """
 
 import platform
+import time
 from collections import OrderedDict
 from typing import Any, Callable, Dict, List, Optional
 
@@ -427,6 +428,9 @@ def _update_tab_icon(tab_idx: int, project: str):
                 if team_id:
                     initials, color = tm._team_project_icon_data(win, fallback=project)
                     tm._tab_panel.set_team_project(team_id, initials, color)
+                    # 成员行与普通 Tab 共用项目 icon（团队模式不再隐藏色块）
+                    if initials:
+                        tm._tab_panel.update_tab_project(tab_idx, initials, color)
                     return
 
         # 临时对话页：Tab 用固定隐身紫「临」图标（不用项目色），标题前缀由窗口标题携带
@@ -5046,6 +5050,9 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
                     )
                     self._tab_panel.update_tab_title(cur_idx, t)
                     self._tab_panel.update_tab_capsule(cur_idx, team_agent)
+                    # 成员会话标题可能就是团队首个真实标题 → 同步 header 统一标题
+                    self._sync_team_header_title(_win)
+                    self._tab_panel.update_tab_member_time(cur_idx, self._member_time_text(_win))
                 else:
                     # 非团队窗口：Tab 标题取窗口标题
                     t = _win.windowTitle() or getattr(_win, "_current_project", None) or "对话"
@@ -5084,6 +5091,9 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
                 else:  # idle
                     self._tab_panel.update_tab_streaming(cur_idx, False, False)
                     self._tab_panel.update_tab_question(cur_idx, False)
+                    # 一轮结束：成员行「最后活动时间」可能已变（会话保存后）
+                    if getattr(_win, "_team_agent_name", ""):
+                        self._tab_panel.update_tab_member_time(cur_idx, self._member_time_text(_win))
 
             window._tab_ai_state_slot = _on_ai_state_changed
             window.ai_state_changed.connect(_on_ai_state_changed)
@@ -5110,9 +5120,11 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
             panel.set_tab_team(tab_idx, team_id)
             # 同步团队框 header 名称（初次加入 Tab 时即同步）
             if team_id:
-                panel.set_team_label(team_id, getattr(window, "_team_name", "") or "")
-                # 团队模式：隐藏 Tab 项目 icon（项目 icon 移到团队标题处）
+                # 团队框 header = 统一任务标题（整个团队只显示一个）；成员行
+                # 改用项目 icon + 胶囊 + 最后活动时间
+                self._sync_team_header_title(window)
                 panel.set_tab_team_mode(tab_idx, True)
+                panel.update_tab_member_time(tab_idx, self._member_time_text(window))
                 # 团队标题 icon（团队级 project；团队框此时已创建，重新走
                 # _update_tab_icon 团队分支刷新 header）
                 _update_tab_icon(tab_idx, project)
@@ -5146,9 +5158,9 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
         同时同步团队分组（set_tab_team）：胶囊与分组框共同表达团队归属，
         胶囊显示角色名，分组框圈出同团队多个窗口。
 
-        同时同步团队框 header 名称（set_team_label）：窗口加入团队时把
-        窗口的 _team_name 注入团队框 header，离开团队时清空（set_tab_team
-        移除分组会自然触发 _maybe_remove_empty_group 清理）。
+        同时同步团队框 header 标题（set_team_label）：整个团队只展示一个
+        任务标题（run 内最早生成的真实标题，未生成时回退团队名），成员行
+        不再各自重复会话标题；离开团队时 set_tab_team 移除分组自然清理。
         """
         idx = self._window_to_index.get(id(window), -1)
         if idx < 0 or idx >= len(self._windows):
@@ -5163,12 +5175,13 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
         # 非团队窗口传 "" 留在独立区。胶囊仍显示角色名（team_agent）。
         team_id = self._resolve_tab_team_id(window)
         self._tab_panel.set_tab_team(idx, team_id)
-        # 团队模式切换：团队窗口隐藏 Tab 项目 icon（移到团队标题处显示）；
-        # 退出团队时恢复显示（检查点 2：清胶囊与恢复 icon 同时处理，勿漏）
+        # 团队模式切换：团队成员行改用项目 icon + 胶囊 + 最后活动时间；
+        # 退出团队时恢复标题显示（检查点 2：清胶囊与恢复行内容同时处理，勿漏）
         self._tab_panel.set_tab_team_mode(idx, bool(team_id))
-        # 同步团队框 header 名称 + 项目 icon（数据源=团队级 project）
+        # 同步团队框 header 标题 + 项目 icon（数据源=团队级 project）
         if team_id:
-            self._tab_panel.set_team_label(team_id, getattr(window, "_team_name", "") or "")
+            self._sync_team_header_title(window)
+            self._tab_panel.update_tab_member_time(idx, self._member_time_text(window))
             project = getattr(window, "_current_project", "") or ""
             self._tab_panel.set_team_project(team_id, *self._team_project_icon_data(window, fallback=project))
         else:
@@ -5177,6 +5190,99 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
             # 时的初值——review #11 问题 2：退出团队后 Tab 图标过时）
             project = getattr(window, "_current_project", "") or ""
             _update_tab_icon(idx, project)
+
+    def _sync_team_header_title(self, window) -> None:
+        """团队框 header 任务标题 + 成员行统一标题同步
+
+        整个团队只显示一个任务名：header 展示标题，成员行不重复（让位给
+        最后活动时间），但折叠态只有图标方块，tooltip 需要「角色 · 标题」。
+        """
+        team_id = self._resolve_tab_team_id(window)
+        if not team_id:
+            return
+        title = self._resolve_team_title(window)
+        self._tab_panel.set_team_label(team_id, title)
+        self._tab_panel.set_team_unified_title(team_id, title)
+
+    @staticmethod
+    def _member_time_text(win) -> str:
+        """团队成员行「最后活动时间」文本（会话最后更新时间 → 相对时间）"""
+        try:
+            from app.utils.session_preview import format_relative_time
+
+            sm = getattr(win, "session_manager", None)
+            session = sm.get_current_session() if sm is not None else None
+            ts = str(getattr(session, "last_updated", "") or "")
+            return format_relative_time(ts) if ts else ""
+        except Exception:
+            return ""
+
+    def _resolve_team_title(self, window) -> str:
+        """团队统一任务标题：run 内最早生成的真实标题，未生成时回退团队名
+
+        数据源优先级：
+        1. 已打开成员窗口的会话标题（实时，无需落库；按会话创建时间取最早）
+        2. 历史库该 run 的成员会话记录（成员窗口已关闭场景；saved_at=创建时间，
+           带 5s TTL 缓存：刚建团队标题未生成时 windowTitleChanged 会反复触发）
+        3. 团队名（标题未生成前用团队名占位——用户定案）
+        """
+        team_name = (getattr(window, "_team_name", "") or "").strip() or "default"
+        run_id = TabManagerWindow._resolve_tab_team_id(window)
+        if not run_id:
+            return team_name
+        try:
+            from app.core.conversation.chat_session import is_default_title
+        except Exception:
+
+            def is_default_title(_text: str) -> bool:  # noqa: ARG001
+                return False
+
+        best = None  # (created_at, title)；created_at 最早者胜
+        tm = TabManagerWindow.get_instance()
+        for w in tm._windows if tm is not None else []:
+            try:
+                if TabManagerWindow._resolve_tab_team_id(w) != run_id:
+                    continue
+                sm = getattr(w, "session_manager", None)
+                session = sm.get_current_session() if sm is not None else None
+                if session is None:
+                    continue
+                title = (getattr(session, "topic_summary", "") or "").strip()
+                if not title or is_default_title(title):
+                    continue
+                created = str(getattr(session, "created_at", "") or "")
+                if best is None or (created and created < best[0]):
+                    best = (created, title)
+            except Exception:
+                continue
+        if best is not None:
+            return best[1]
+        # 成员窗口已关闭：回查历史库（团队会话可能被挤出内存前 500 条，
+        # get_team_sessions_by_run_id 直查存储，不受内存上限影响）
+        cache = getattr(self, "_team_title_hist_cache", None)
+        if cache is None:
+            cache = self._team_title_hist_cache = {}
+        now = time.monotonic()
+        hit = cache.get(run_id)
+        if hit is not None and now - hit[0] < 5.0:
+            return hit[1] or team_name
+        try:
+            from app.utils.history_manager import HistoryManager
+
+            history = HistoryManager.get_instance()
+            sessions = history.get_team_sessions_by_run_id(run_id) if history is not None else []
+            for s in sessions:
+                title = (s.get("title") or "").strip()
+                if not title or is_default_title(title):
+                    continue
+                created = str(s.get("saved_at") or "")
+                if best is None or (created and created < best[0]):
+                    best = (created, title)
+        except Exception:
+            pass
+        resolved = best[1] if best is not None else ""
+        cache[run_id] = (now, resolved)
+        return resolved or team_name
 
     @staticmethod
     def _resolve_tab_team_id(window) -> str:

@@ -3,6 +3,7 @@
 ### ✨ 新功能 (New Features)
 
 - **工具完成框里的文件地址可点击打开** (`app/widgets/render_helpers.py` · `app/widgets/card_viewers.py` · `app/main_widget.py`): 折叠头右侧路径、以及 read/grep/list/glob 单行卡预览里的路径片段渲染为可点元素（默认无装饰，hover 变主题强调色 `--accent` + 实线下划线，悬停 title 显示完整路径），点击由骨架 click 委托在折叠头之前抢断，转 `open_file` 消息交宿主按会话 workdir 解析后用系统程序打开；路径不存在给 InfoBar 提示（原实现静默吞异常）。显示文本仍是首尾缩短版，`data-open-path` 存完整原始路径。骨架版本 v79 → v81。
+- **团队框统一任务标题 + 成员行身份头像** (`app/widgets/tab_panel.py` · `app/widgets/tab_manager_window.py` · `app/widgets/elided_label.py`): 团队框 header 不再显示团队名，改显示整个团队唯一的任务标题（run 内最早生成的真实标题，按 `created_at` 取最早；未生成时回退团队名，历史回查带 5s TTL 缓存），header 项目图标改为标准尺寸（与普通 Tab 同档 20px），header 聚合 badge 整体停用（人数不需要，状态也不再堆到 header）；成员行标题让位给行尾语义文案——空闲显示最后活动时间（`session.last_updated` 相对时间），生成中/待回答/出错显示状态文案且配色与头像状态环同一套，时间退到 tooltip；行内容为「角色单字母彩色头像 + 角色名（普通文字，彩色胶囊去掉）+ 行尾文案」，折叠态与展开态共用同一套单字母头像，流式/待答光效画在该头像外侧（行层不再给角色名套环——早期把环画在胶囊/角色名外沿，视觉上像一个框套住全名，与头像环重复）；折叠态 tooltip 补「角色 · 任务标题」以区分成员；长角色名（root-cause-analyst / regression-guard）用 `_ElidedLabel` 左省略保留尾段（…analyst / …guard）并占剩余宽度，不再把行撑出面板可视区（时间与 header hover 按钮恢复可达）；`_ElidedLabel` 新增 `elide_mode` 参数（默认 Middle 行为不变），角色名原文单独存 `_role_text`，避免省略后取首字母画头像。
 
 ## [v0.7.2] - 2026-11-14 (重新发布 #8)
 

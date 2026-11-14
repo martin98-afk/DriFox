@@ -44,9 +44,10 @@ class _ElidedLabel(QLabel):
     原文（tooltip 与 setText 回读语义不变）。
     """
 
-    def __init__(self, text: str = "", parent=None):
+    def __init__(self, text: str = "", parent=None, elide_mode=Qt.ElideMiddle):
         super().__init__(text, parent)
         self._full_text = text
+        self._elide_mode = elide_mode  # 省略方式（标题/预览用 Middle，角色名用 Right）
         self._hl_query = ""
         self._hl_queries: List[str] = []  # 多关键字高亮
         self._hl_color = ""
@@ -163,9 +164,9 @@ class _ElidedLabel(QLabel):
             super().setText(elided)
 
     def _plain_elide(self, width: int) -> str:
-        """标准 ElideMiddle 省略（输入先单行归一化，输出即无控制字符）"""
+        """标准省略（默认 ElideMiddle；角色名等前缀有辨识度的文本可改 ElideRight）"""
         fm = self.fontMetrics()
-        return fm.elidedText(_to_single_line(self._full_text), Qt.ElideMiddle, width)
+        return fm.elidedText(_to_single_line(self._full_text), self._elide_mode, width)
 
     def _elide_highlight_aware(self, width: int) -> str:
         """高亮感知的智能省略 — 确保匹配内容始终可见
