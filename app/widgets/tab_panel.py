@@ -527,7 +527,7 @@ class TabItem(QFrame):
         self._setup_ui()
 
     def _setup_ui(self):
-        self.setFixedHeight(40)  # 行高分档由 _refresh_row_height 决定（树行 28 / 团队列表态 32 / 其余 40）
+        self.setFixedHeight(40)  # 行高分档由 _refresh_row_height 决定（树行 44 / 团队行 32 / 其余 40，均随头像外框下限抬高）
         self.setCursor(Qt.PointingHandCursor)
 
         # 图标尺寸：跟随系统字体缩放
@@ -978,6 +978,10 @@ class TabItem(QFrame):
                 # 退出团队：恢复项目 icon（旧行为：非团队行退出后必有可见色块）
                 self._apply_project_to_icon()
                 self._icon_widget.setVisible(True)
+            # 团队/非团队外框档位不同（24 / 26），展开态同样要换档：
+            # 只在紧凑分支换会让展开态团队行沿用 26 档外框，行高按 24 档算不够，
+            # 首字母头像上下各溢出 1px（实测）。
+            self._apply_compact_icon_box(False)
             self._sync_team_row_visible()
         self._sync_compact_ring()
         # 行高分档跟随模式：团队模式（列表态）成员行 32px
@@ -985,24 +989,24 @@ class TabItem(QFrame):
         self.update()
 
     def _refresh_row_height(self):
-        """行高分档：树行 44px（两行式）/ 团队模式（列表态）成员行 32px / 其余 40px
+        """行高分档：树行 44px（两行式）/ 团队模式成员行 32px / 其余 40px
 
         paintEvent 缓存按 (w, h, _tree_row) 自适应，行高变化无需额外失效。
 
-        折叠态下限跟随缩放：icon 外框 scale_icon_size(24/26) 随字号档放大（+10 档
-        外框 34/36），行高若仍写死 32/40，内容区（高 - margin 4×2）装不下外框，
-        布局把 icon 挤离行中心 → hover 底 (2,2,w-4,h-4) 与方块错位（实测）。故折叠
-        行高取「分档基线与框+8margin 的较大者」，展开态 icon 隐藏/有富余不受益于此。
+        全档位取「分档基线与框+8margin 的较大者」：icon 外框 scale_icon_size(24/26)
+        随字号档放大（默认档团队行即 28），行高若写死 32/40，内容区（高 - margin 4×2）
+        装不下外框，头像顶出选中底/hover 底（(2,2,w-4,h-4) 与方块错位，实测）。
+        团队行首字母头像比项目 icon 更常驻可见，溢出尤其显眼，必须由外框撑开行高。
         """
         if self._tree_row:
             self.setFixedHeight(44)
             return
-        in_list = self._panel is None or getattr(self._panel, "_mode", PANEL_MODE_LIST) != PANEL_MODE_TREE
-        if self._compact:
-            box = scale_icon_size(self._ICON_BOX_TEAM if self._team_mode else self._ICON_BOX)
-            self.setFixedHeight(max(32 if self._team_mode else 40, box + 8))
-            return
-        self.setFixedHeight(32 if (self._team_mode and in_list) else 40)
+        # 紧凑态不分树/列表（折叠窄条只有头像，无树行两行式可言）
+        in_list = self._compact or self._panel is None or getattr(self._panel, "_mode", PANEL_MODE_LIST) != PANEL_MODE_TREE
+        # 取实际外框尺寸而非重算 scale_icon_size(...)：外框档位在 _apply_compact_icon_box
+        # 里按团队/紧凑档位决定，两处各算一次必然再踩「行高按 24 档、控件按 26 档」的偏差。
+        box = self._icon_widget.width()
+        self.setFixedHeight(max(32 if (self._team_mode and in_list) else 40, box + 8))
 
     def _refresh_tree_indent(self):
         """树行化内容左缩进随缩放档位重算（字号缩放后对齐点会变）"""
@@ -1014,7 +1018,7 @@ class TabItem(QFrame):
             self.layout().setContentsMargins(left, m[1], m[2], m[3])
 
     _ICON_BOX = 26  # 图标外框（方块 20px + 外环 3px + 间隙 1px）
-    _ICON_BOX_TEAM = 24  # 团队模式列表态成员行仅 32px 高，外框收一档
+    _ICON_BOX_TEAM = 24  # 团队模式成员行基线 32px 高，外框收一档（行高按框+8 抬高）
 
     def _apply_compact_icon_box(self, compact: bool) -> None:
         """图标容器给状态环留位：容器放大、方块尺寸恒定
