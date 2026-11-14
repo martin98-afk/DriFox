@@ -957,7 +957,10 @@ class TabItem(QFrame):
         if self._team_mode == team_mode:
             return
         self._team_mode = team_mode
-        if not team_mode:
+        if team_mode:
+            # 团队成员行不显示单个关闭按钮（右键菜单「关闭标签页」仍可关）
+            self._close_btn.setVisible(False)
+        else:
             # 退出团队：清团队专属状态（统一标题 / 成员时间），避免非团队行残留
             self._unified_title = ""
             self._member_time_text = ""
@@ -1236,8 +1239,9 @@ class TabItem(QFrame):
         self._close_btn.setToolTip("")
 
     def enterEvent(self, event):
-        # 紧凑态守卫：折叠态不弹关闭按钮/图钉，避免撑破小容器（矩阵 C3）
-        if not self._compact:
+        # 紧凑态 / 团队模式守卫：折叠态不弹关闭按钮（矩阵 C3），团队成员行
+        # 也不弹单个关闭按钮（右键菜单可关，悬停按钮破坏列表齐整）
+        if not self._compact and not self._team_mode:
             self._close_btn.setVisible(True)
         self._hovered = True
         self._sync_pin()
@@ -3182,18 +3186,8 @@ class TabPanel(QWidget):
         new_task_btn.clicked.connect(lambda *_args, _tid=team_id: self.teamNewTaskRequested.emit(_tid))
         btn_area_layout.addWidget(new_task_btn)
 
-        # 快速新建成员按钮：hover 显示（与 new_task/close 联动），点击 → teamAddMemberRequested(team_id)
-        # 🎨 图标：与子智能体卡片 title 一致的 设置-subagent.svg
-        add_btn = TransparentToolButton(btn_area)
-        add_btn.setObjectName("teamGroupAddBtn")
-        add_btn.setIcon(get_icon("设置-subagent"))
-        add_btn.setFixedSize(20, 20)
-        add_btn.setToolTip("快速新建成员（可重复角色）")
-        add_btn.setVisible(False)
-        add_btn.setAttribute(Qt.WA_NoMousePropagation, True)
-        # clicked 信号会带 bool 参数（checked 状态），用 *args 忽略
-        add_btn.clicked.connect(lambda *_args, _tid=team_id: self.teamAddMemberRequested.emit(_tid))
-        btn_area_layout.addWidget(add_btn)
+        # 快速新建成员入口只保留右键菜单（header 只留「新建任务」与「解散」两个
+        # 按钮：三按钮 hover 区在窄栏下拥挤且图标辨识差，用户定案去掉）
 
         close_btn = TransparentToolButton(btn_area)
         close_btn.setObjectName("teamGroupCloseBtn")
@@ -3228,7 +3222,6 @@ class TabPanel(QWidget):
         grp._team_name_label = name_label
         grp._team_close_btn = close_btn
         grp._team_new_task_btn = new_task_btn
-        grp._team_add_btn = add_btn
         grp._team_icon = team_icon
         grp._team_btn_area = btn_area  # 占位容器访问器（_apply_team_compact 折叠态隐藏用）
         grp._team_icon_key = None  # 值相等跳过缓存（initials, color）
@@ -3244,30 +3237,28 @@ class TabPanel(QWidget):
         grp._team_close_confirming = False  # 解散二次确认态（TabItem 同范式）
         grp._team_close_timer = None
 
-        # hover 控制 new_task/add/close 按钮可见性（紧凑态守卫：折叠态不弹按钮，矩阵 C3）
-        def _enter(_e, _h=header, _btn=close_btn, _add=add_btn, _task=new_task_btn):
+        # hover 控制 new_task/close 按钮可见性（紧凑态守卫：折叠态不弹按钮，矩阵 C3）
+        def _enter(_e, _h=header, _btn=close_btn, _task=new_task_btn):
             if not getattr(grp, "_team_compact", False):
                 _task.setVisible(True)
-                _add.setVisible(True)
                 _btn.setVisible(True)
-                # 🛡️ 问题A 修复：三按钮由隐藏→显示时，若鼠标已停在某按钮上方，
+                # 🛡️ 问题A 修复：按钮由隐藏→显示时，若鼠标已停在某按钮上方，
                 # Qt 不会为"显示后才在鼠标下"的控件补发 Enter → 该按钮的
                 # _HoverTooltipFilter 收不到 Enter，tooltip 计时不启动（hover
-                # 无提示）。手动查询鼠标所在控件，命中任一按钮则补发
+                # 无提示）。手动查询鼠标所在控件，命中按钮则补发
                 # QEnterEvent，让 tooltip 计时正常启动。
                 from PyQt5.QtCore import QPointF as _QPointF
                 from PyQt5.QtGui import QCursor as _QCursor, QEnterEvent as _QEnterEvent
                 from PyQt5.QtWidgets import QApplication as _QApp
 
                 _w = _QApp.widgetAt(_QCursor.pos())
-                if _w in (_task, _add, _btn):
+                if _w in (_task, _btn):
                     _lp = _w.mapFromGlobal(_QCursor.pos())
                     _gp = _QCursor.pos()
                     _QApp.sendEvent(_w, _QEnterEvent(_QPointF(_lp), _QPointF(_lp), _QPointF(_gp)))
 
-        def _leave(_e, _h=header, _btn=close_btn, _add=add_btn, _task=new_task_btn, _panel=self, _tid=team_id):
+        def _leave(_e, _h=header, _btn=close_btn, _task=new_task_btn, _panel=self, _tid=team_id):
             _btn.setVisible(False)
-            _add.setVisible(False)
             _task.setVisible(False)
             # 移出 header：取消解散确认态（防悬停残留误解散，同 TabItem.leaveEvent）
             _panel._cancel_team_close_confirm(_tid)

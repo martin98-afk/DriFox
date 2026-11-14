@@ -71,6 +71,15 @@ class TestTeamModeTabItem:
         assert panel._items[idx]._capsule_label.isHidden(), "退出团队应清角色文字"
         assert not panel._items[idx]._icon_widget.isHidden(), "退出团队应恢复 icon"
 
+    def test_team_mode_hides_close_btn_on_hover(self, panel):
+        """团队成员行不弹单个关闭按钮（右键菜单「关闭标签页」仍可关）"""
+        idx = panel.add_tab("会话A")
+        panel.set_tab_team(idx, "run_1")
+        panel.set_tab_team_mode(idx, True)
+        item = panel._items[idx]
+        item.enterEvent(None)
+        assert item._close_btn.isHidden(), "团队成员行 hover 不应显示关闭按钮"
+
     def test_refresh_style_keeps_team_role_avatar(self, panel):
         """检查点 4: refresh_style 后团队行角色头像保持（不重建为项目 icon）。"""
         idx = panel.add_tab("会话A", project_initials="DF", project_color="#2E7D32")

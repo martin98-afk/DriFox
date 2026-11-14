@@ -63,38 +63,21 @@ def test_tabpanel_has_team_new_task_signal(qapp):
 # ══════════════════════════════════════════════════════════
 
 
-def test_team_group_has_add_btn(qapp):
-    """team 框 header 必须包含 _team_add_btn 与 _team_new_task_btn 访问器"""
+def test_team_group_header_buttons(qapp):
+    """team 框 header：只留「新建任务」「解散」按钮（快速新建成员入口在右键菜单）"""
     from app.widgets.tab_panel import TabPanel
 
     panel = TabPanel()
     try:
         grp = panel._get_or_create_team_group("team-X")
-        assert hasattr(grp, "_team_add_btn")
         assert hasattr(grp, "_team_new_task_btn")
-        assert grp._team_add_btn.parent() is grp._team_header
-        assert grp._team_new_task_btn.parent() is grp._team_header
-        assert grp._team_close_btn.parent() is grp._team_header
+        assert grp._team_new_task_btn.parent() is grp._team_btn_area
+        assert grp._team_close_btn.parent() is grp._team_btn_area
+        # 用户定案：快速新建成员的 hover 按钮去掉，入口保留在团队框右键菜单
+        assert not hasattr(grp, "_team_add_btn")
     finally:
         panel.deleteLater()
 
-
-def test_team_add_btn_emits_team_id(qapp):
-    """点击快速新建成员按钮 → teamAddMemberRequested(team_id) 信号发射"""
-    from app.widgets.tab_panel import TabPanel
-
-    panel = TabPanel()
-    try:
-        panel._get_or_create_team_group("team-A")
-        captured = []
-        panel.teamAddMemberRequested.connect(lambda tid: captured.append(tid))
-
-        grp = panel._team_groups["team-A"]
-        grp._team_add_btn.click()
-
-        assert captured == ["team-A"]
-    finally:
-        panel.deleteLater()
 
 
 def test_team_new_task_btn_emits_team_id(qapp):
@@ -135,43 +118,38 @@ def test_team_close_btn_has_tooltip(qapp):
 
 
 def test_buttons_hidden_by_default(qapp):
-    """new_task/add/close 三按钮默认隐藏"""
+    """new_task/close 按钮默认隐藏"""
     from app.widgets.tab_panel import TabPanel
 
     panel = TabPanel()
     try:
         grp = panel._get_or_create_team_group("team-A")
         assert grp._team_new_task_btn.isVisibleTo(grp._team_header) is False
-        assert grp._team_add_btn.isVisibleTo(grp._team_header) is False
         assert grp._team_close_btn.isVisibleTo(grp._team_header) is False
     finally:
         panel.deleteLater()
 
 
 def test_buttons_visible_on_header_hover(qapp):
-    """鼠标进入 header → new_task/add/close 三按钮都显示；leave → 都隐藏"""
+    """鼠标进入 header → new_task/close 按钮显示；leave → 隐藏"""
     from app.widgets.tab_panel import TabPanel
 
     panel = TabPanel()
     try:
         grp = panel._get_or_create_team_group("team-A")
-        add_btn = grp._team_add_btn
         close_btn = grp._team_close_btn
         task_btn = grp._team_new_task_btn
         header = grp._team_header
 
-        add_calls, close_calls, task_calls = [], [], []
-        add_btn.setVisible = lambda v: (add_calls.append(v), MagicMock())[1]
+        close_calls, task_calls = [], []
         close_btn.setVisible = lambda v: (close_calls.append(v), MagicMock())[1]
         task_btn.setVisible = lambda v: (task_calls.append(v), MagicMock())[1]
 
         header.enterEvent(None)
-        assert add_calls[-1] is True
         assert close_calls[-1] is True
         assert task_calls[-1] is True
 
         header.leaveEvent(None)
-        assert add_calls[-1] is False
         assert close_calls[-1] is False
         assert task_calls[-1] is False
     finally:
@@ -285,19 +263,17 @@ def test_team_replayed_enter_starts_tooltip_timer(qapp):
 
 
 def test_buttons_hidden_in_compact_mode(qapp):
-    """折叠态（_apply_team_compact(True)）→ 三按钮隐藏；展开恢复 hover 逻辑"""
+    """折叠态（_apply_team_compact(True)）→ 按钮隐藏；展开恢复 hover 逻辑"""
     from app.widgets.tab_panel import TabPanel
 
     panel = TabPanel()
     try:
         grp = panel._get_or_create_team_group("team-A")
-        add_btn = grp._team_add_btn
         close_btn = grp._team_close_btn
         task_btn = grp._team_new_task_btn
 
         panel._apply_team_compact(grp, True)
         assert task_btn.isVisibleTo(grp._team_header) is False
-        assert add_btn.isVisibleTo(grp._team_header) is False
         assert close_btn.isVisibleTo(grp._team_header) is False
         # 折叠态 enter 不应弹按钮（紧凑态守卫）
         grp._team_header.enterEvent(None)
@@ -305,12 +281,10 @@ def test_buttons_hidden_in_compact_mode(qapp):
 
         panel._apply_team_compact(grp, False)
         assert task_btn.isVisibleTo(grp._team_header) is False
-        assert add_btn.isVisibleTo(grp._team_header) is False
         assert close_btn.isVisibleTo(grp._team_header) is False
         # 展开态 hover 可显示
         grp._team_header.enterEvent(None)
         assert task_btn.isVisibleTo(grp._team_header) is True
-        assert add_btn.isVisibleTo(grp._team_header) is True
     finally:
         panel.deleteLater()
 

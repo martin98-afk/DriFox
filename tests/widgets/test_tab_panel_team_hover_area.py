@@ -64,14 +64,12 @@ class TestTeamHoverButtonArea:
 
         # hover 进入：三按钮 hidden→visible
         grp._team_new_task_btn.setVisible(True)
-        grp._team_add_btn.setVisible(True)
         grp._team_close_btn.setVisible(True)
         QApplication.processEvents()
         assert name.geometry().x() == name_x_before, "hover 显示按钮后团队名不得横移"
 
         # hover 离开：三按钮恢复隐藏
         grp._team_new_task_btn.setVisible(False)
-        grp._team_add_btn.setVisible(False)
         grp._team_close_btn.setVisible(False)
         QApplication.processEvents()
         assert name.geometry().x() == name_x_before, "hover 隐藏按钮后团队名不得横移"
@@ -88,13 +86,11 @@ class TestTeamHoverButtonArea:
         assert h_before > 0, "布局生效后 header 应有实际高度"
 
         grp._team_new_task_btn.setVisible(True)
-        grp._team_add_btn.setVisible(True)
         grp._team_close_btn.setVisible(True)
         QApplication.processEvents()
         assert header.height() == h_before, "hover 显示按钮后 header 高度不得变化"
 
         grp._team_new_task_btn.setVisible(False)
-        grp._team_add_btn.setVisible(False)
         grp._team_close_btn.setVisible(False)
         QApplication.processEvents()
         assert header.height() == h_before, "hover 隐藏按钮后 header 高度不得变化"
@@ -171,7 +167,6 @@ class TestTeamHoverButtonArea:
         QApplication.processEvents()
 
         grp._team_new_task_btn.setVisible(True)
-        grp._team_add_btn.setVisible(True)
         grp._team_close_btn.setVisible(True)
         QApplication.processEvents()
         QApplication.processEvents()
