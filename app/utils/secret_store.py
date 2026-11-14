@@ -318,6 +318,23 @@ class SecretStore:
             self._kr.set_password(SERVICE, account, value)
             return True
         except Exception as e:
+            # -25244 errSecInvalidOwnerEdit / -25293 errSecAuthFailed：
+            # 条目已存在但当前进程身份无 ACL 所有权（adhoc 重打包后签名 hash
+            # 变化、或条目由开发环境 python 创建）。删除旧条目重建，所有权
+            # 归新身份。首次触发时系统弹钥匙串授权框，用户点「始终允许」后
+            # 后续读写静默放行；拒绝则照旧走明文回退。
+            if any(code in str(e) for code in ("-25244", "-25293")):
+                try:
+                    self.delete(account)
+                except Exception:
+                    pass
+                try:
+                    self._kr.set_password(SERVICE, account, value)
+                    logger.info(f"[SecretStore] 所有权冲突已重建条目 account={account}")
+                    return True
+                except Exception as e2:
+                    logger.warning(f"[SecretStore] 重建失败 account={account}: {e2}")
+                    return False
             logger.warning(f"[SecretStore] 写入失败 account={account}: {e}")
             return False
 
