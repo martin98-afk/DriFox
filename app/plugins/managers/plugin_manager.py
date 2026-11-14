@@ -477,6 +477,7 @@ class PluginManager:
                 QTimer.singleShot(2000, self._backfill_scan_signature)
             except Exception:
                 self._backfill_scan_signature()
+            self._preload_plugin_tools()
             return
 
         # 1. 扫描系统插件
@@ -505,6 +506,22 @@ class PluginManager:
 
         # [T26] 全扫成功 → 回写发现缓存（下次启动命中；含损坏自修复）
         self._save_discovery_cache()
+        self._preload_plugin_tools()
+
+    def _preload_plugin_tools(self):
+        """[S1-C] 插件工具加载归位：initialize 末尾预调一次（幂等）。
+
+        perf: 原 ToolNameMapper.is_known 的 _ensure_plugin_tools_loaded 保险丝
+        会在首个 agent md 解析时隐式同步加载全部插件工具模块（实测冷 188ms），
+        把这笔成本藏进 reload_agents 段（#35 归因）。预调后成本显形归位到
+        plugin_scan 段，agent 解析回归毫秒级；重复调用零开销。
+        """
+        try:
+            from app.tools import _ensure_plugin_tools_loaded
+
+            _ensure_plugin_tools_loaded()
+        except Exception as e:
+            logger.debug(f"[PluginManager] 插件工具预载失败（跳过，后续保险丝兑底）: {e}")
 
     def _backfill_scan_signature(self) -> None:
         """延迟补算目录签名（#31 命中路径专用）。
