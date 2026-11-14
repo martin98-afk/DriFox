@@ -32,7 +32,7 @@ import os
 import time
 from typing import Dict, List, Optional, Set
 
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import QTimer, Qt
 
 
 def _load_max_idle_per_bucket() -> int:
@@ -68,6 +68,31 @@ MAX_IDLE_PER_BUCKET = _load_max_idle_per_bucket()
 # 连续失败多少次后整池停用（防止在异常环境里反复做无效尝试）
 MAX_CONSECUTIVE_FAILURES = 3
 
+def _load_idle_gc_enabled() -> bool:
+    """[MEM #26] 池内 idle renderer 延迟清池总开关：DRIFOX_WEBVIEW_POOL_IDLE_GC。
+
+    背景：关 tab 后 viewer 入池保活，池内 renderer 进程（单个 65~217MB）
+    原本只有关闭最后一个 tab 才清池 → 「关闭对话后内存不回落」。开时，
+    release 入池后挂 60s 延迟单发 QTimer，到点仍无复用则 clear() 清池。
+
+    默认开；设 0/false/no（不分大小写）关闭 → 完全回现状（不清池）。
+    import 期读取固化，进程内不热变（实验按进程设 env 启动），
+    与 _load_max_idle_per_bucket 同一先例。
+    """
+    raw = os.environ.get("DRIFOX_WEBVIEW_POOL_IDLE_GC", "")
+    return raw.strip().lower() not in ("0", "false", "no")
+
+# import 期固化（与 MAX_IDLE_PER_BUCKET 同一先例）
+_IDLE_GC_ENABLED = _load_idle_gc_enabled()
+
+def _idle_gc_enabled() -> bool:
+    return _IDLE_GC_ENABLED
+
+# 延迟清池窗口：最后一次 release 后 60s 内无 acquire 命中才清。
+# 取 60s：用户「关掉再重开」的最常见间隔内保留复用收益，之后释放内存。
+_IDLE_GC_DELAY_MS = 60_000
+_IDLE_GC_DELAY_S = _IDLE_GC_DELAY_MS / 1000.0
+
 # 总开关：出现问题时可在运行时整体关闭，回退到"每次新建"的既有行为
 _ENABLED = True
 
@@ -81,6 +106,8 @@ class WebViewPool:
         self._idle: Dict[bool, List] = {True: [], False: []}
         self._host = None
         self._failures = 0
+        # perf: #26 延迟清池单发 QTimer（挂 host；本类非 QObject 勿 self 挂）
+        self._idle_gc_timer = None
         self._stats: Dict[str, int] = {
             "acquire": 0,
             "hit": 0,
@@ -131,6 +158,8 @@ class WebViewPool:
                 continue
             self._failures = 0
             self._stats["hit"] += 1
+            # perf: #26 60s 窗口内重开 tab 取走 viewer → 取消清池，保留复用收益
+            self._cancel_idle_gc()
             return viewer
         self._stats["miss"] += 1
         return None
@@ -169,6 +198,8 @@ class WebViewPool:
             self._stats["evicted"] += 1
             self._safe_delete(oldest)
         bucket.append(viewer)
+        # perf: #26 入池即挂延迟清池（多次 release 经 start() 重启天然合并）
+        self._schedule_idle_gc()
         self._stats["release"] += 1
         self._failures = 0
         return True
@@ -178,6 +209,51 @@ class WebViewPool:
         for bucket in self._idle.values():
             while bucket:
                 self._safe_delete(bucket.pop(0))
+
+    # ── [MEM #26] 池内 idle 延迟清池 ────────────────────────────
+
+    def _schedule_idle_gc(self) -> None:
+        """挂/重启延迟清池单发 QTimer（最后一次 release 后 60s 无复用即清）。
+
+        QTimer 挂 _ensure_host() 的 host：本类非 QObject，self 挂不了；
+        host 与池同生命周期，timer 随 host 销毁，无泄漏。已存在则 start()
+        重启 —— 多次关 tab 天然合并成一窗。
+        """
+        if not _idle_gc_enabled():
+            return
+        host = self._ensure_host()
+        if host is None:
+            return
+        timer = self._idle_gc_timer
+        if timer is None or not self._is_alive(timer):
+            timer = QTimer(host)
+            timer.setSingleShot(True)
+            timer.timeout.connect(self._idle_gc)
+            self._idle_gc_timer = timer
+        timer.start(_IDLE_GC_DELAY_MS)
+
+    def _cancel_idle_gc(self) -> None:
+        """acquire 命中池时取消待执行的清池（60s 内重开 tab 的场景）。"""
+        timer = self._idle_gc_timer
+        if timer is not None and self._is_alive(timer):
+            timer.stop()
+
+    def _idle_gc(self) -> None:
+        """到点检查：有任何池内成员未满 60s → 重排下一窗；全过期 → clear()。
+
+        重排防御 GC pending 期间归还的实例：release 会重启 timer，但
+        timeout 与事件队列的交错顺序不可依赖，这里按新鲜度兜底重排。
+        与 T31 正交自洽：清池先行则 _idle_pool_pids 候选消失；同拍竞态
+        无害（clear 销毁 viewer 对象，T31 kill pid，互不引用对方状态）。
+        """
+        now = time.time()
+        for bucket in self._idle.values():
+            for viewer in bucket:
+                ts = float(getattr(viewer, "_pool_idle_since", 0) or 0)
+                if now - ts < _IDLE_GC_DELAY_S:
+                    self._schedule_idle_gc()
+                    return
+        self.clear()
 
     # ── 与 B4 强回收护栏的协同 ──────────────────────────────────────
 

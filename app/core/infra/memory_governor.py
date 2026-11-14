@@ -451,12 +451,17 @@ def enforce_renderer_rss_gate(host) -> str:
 # 累计 +357MB 全部滞留；8 个合计 493MB 低于 RSS 软阈 800 → RSS 闸门不触发
 # （总量应急的设计边界）。本回收器与 enforce_renderer_rss_gate 互补：
 # 闸门管「总量超限」（症状驱动），本函数管「单页空闲」（时间驱动），判据正交。
-RENDERER_IDLE_RECLAIM_S = 420.0  # 空闲 7 分钟（#37 条 2，原 600s）
+RENDERER_IDLE_RECLAIM_S = 180.0  # 空闲 3 分钟（#37 条 2：420→180，2026-11-15）
                                   # 依据 t33 §6.2 静置实测：8 个 renderer 静置
-                                  # 合计 540MB 全滞留（池内 pid 占大头）。原注释反对
-                                  # 300s 的理由是「切回即回收」锯齿；现 keep-tab 保留期
-                                  # 与 LRU keep 两个兜底仍在（活跃视口 ±2 批豁免 +
-                                  # _kept_session_tab 切回复用），420s 安全且削 -180s 滞留窗
+                                  # 合计 540MB 全滞留（池内 pid 占大头）。keep-tab 保留期
+                                  # 与 LRU keep 兜底仍在（活跃视口 ±2 批豁免 +
+                                  # _kept_session_tab 切回复用）。
+                                  # perf: #26 下调 420→180——池侧已有 60s 延迟清池
+                                  # （DRIFOX_WEBVIEW_POOL_IDLE_GC）只清对象不 kill pid，
+                                  # 本参数是 kill pid 的另一层兜底；下调使池侧 env=关
+                                  # 的用户同样受益。两机制正交自洽：清池先行则
+                                  # _idle_pool_pids 候选消失；同拍竞态无害（clear
+                                  # 销毁 viewer 对象，T31 kill pid，互不引用对方状态）
 RENDERER_IDLE_RECLAIM_BATCH_MAX = 6  # 每拍 ≤6 个：常态动作宁慢勿抖（kill 上限 12 的一半）
 
 def _idle_pool_pids() -> list:
