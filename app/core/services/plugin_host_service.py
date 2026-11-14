@@ -255,14 +255,46 @@ class PluginHostService(QObject):
 
             # 记录初始化前的状态，用于判断是否为首次初始化
             was_initialized = pm.is_initialized()
-            pm.initialize(app_data_dir)
+            # perf: 插件启动段子打点——拆黑盒 app_services_start 为
+            # plugin_scan / dir_signature / reload_agents 三段（纯打点零行为），
+            # 供 S2 裁决；dir_signature 段用运行时包装计时（实现体在
+            # plugin_manager.py，所有权在 #31，此处不改其文件）
+            _scan_t0 = time.perf_counter()
+            _sig_total_ms = 0.0
+            _orig_sig = getattr(pm, "_plugins_dir_signature", None)
+            if _orig_sig is not None:
+
+                def _timed_dir_signature(*args, **kwargs):
+                    nonlocal _sig_total_ms
+                    _t0 = time.perf_counter()
+                    try:
+                        return _orig_sig(*args, **kwargs)
+                    finally:
+                        _sig_total_ms += (time.perf_counter() - _t0) * 1000
+
+                pm._plugins_dir_signature = _timed_dir_signature
+            try:
+                pm.initialize(app_data_dir)
+            finally:
+                if _orig_sig is not None:
+                    try:
+                        pm._plugins_dir_signature = _orig_sig
+                    except Exception:
+                        pass
+            logger.debug(f"[StartupMark] plugin_scan 耗时 {(time.perf_counter() - _scan_t0) * 1000:.0f}ms")
+            logger.debug(f"[StartupMark] dir_signature 耗时 {_sig_total_ms:.0f}ms")
 
             # 首次初始化时才需要全量重载智能体
             # 后续窗口复用已有的 PluginManager/AgentManager 单例数据
             if not was_initialized:
                 # AgentManager 重新从已启用插件加载智能体（关键路径）
                 if self._agent_manager:
+                    # perf: 子打点 reload_agents——智能体全量重载段耗时
+                    _agents_t0 = time.perf_counter()
                     self._agent_manager.reload_agents()
+                    logger.debug(
+                        f"[StartupMark] reload_agents 耗时 {(time.perf_counter() - _agents_t0) * 1000:.0f}ms"
+                    )
 
                 # ── 非关键路径：延迟到窗口就绪后执行 ──
                 # 主题刷新、插件热更新监听、LSP 初始化不需要阻塞首帧显示

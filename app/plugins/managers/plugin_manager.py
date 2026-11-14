@@ -466,10 +466,17 @@ class PluginManager:
         if hit:
             self._initialized = True
             self._restore_enabled_from_settings()
+            # perf: (#31) 命中路径不再同步算目录签名（67 插件 ≈134 stat，估
+            # 7-40ms 白占启动关键路径）：置 None 后延迟 2s 后台补算；签名唯一
+            # 用途是启动 3 秒后的 rescan 短路，补算前 rescan 入口现场算兜底
+            # （最坏打穿一次全扫，检测语义不变）
+            self._last_scan_signature = None
             try:
-                self._last_scan_signature = self._plugins_dir_signature(include_mtime=False)
+                from PyQt5.QtCore import QTimer
+
+                QTimer.singleShot(2000, self._backfill_scan_signature)
             except Exception:
-                self._last_scan_signature = None
+                self._backfill_scan_signature()
             return
 
         # 1. 扫描系统插件
@@ -498,6 +505,19 @@ class PluginManager:
 
         # [T26] 全扫成功 → 回写发现缓存（下次启动命中；含损坏自修复）
         self._save_discovery_cache()
+
+    def _backfill_scan_signature(self) -> None:
+        """延迟补算目录签名（#31 命中路径专用）。
+
+        rescan 若已先行写回（非 None）则跳过，幂等；异常静默置 None（rescan
+        入口现场算兜底，与命中路径改前行为一致）。
+        """
+        if self._last_scan_signature is not None:
+            return
+        try:
+            self._last_scan_signature = self._plugins_dir_signature(include_mtime=False)
+        except Exception:
+            self._last_scan_signature = None
 
     def _restore_enabled_from_settings(self):
         """从 Settings 恢复已启用插件状态，新发现的插件默认启用（D8：跳过禁用集）"""
