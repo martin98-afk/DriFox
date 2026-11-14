@@ -25,7 +25,6 @@ from PyQt5.QtWidgets import (
     QGraphicsOpacityEffect,
     QHBoxLayout,
     QLabel,
-    QStackedWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -38,6 +37,7 @@ from app.utils.design_tokens import Animations, Colors, font_size_css
 from app.utils.theme_manager import theme_manager
 from app.utils.utils import get_font_family_css, get_unified_font
 from app.widgets.custom_title_bar import _MacTrafficLightCenterMixin
+from app.widgets.deferred_paint_stack import DeferredPaintStack
 
 # ── 对话区限宽档位（px）：窗口过宽时限制对话内容宽度并居中，两侧留白 ──
 # 避免聊天内容在超宽屏幕上被拉得难以阅读。档位可在 设置-外观 切换。
@@ -3102,7 +3102,9 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
         tab_frame_layout.addWidget(self._sidebar_splitter)
 
         # 右侧内容区
-        self._content_area = QStackedWidget(content_widget)
+        # perf: (#25) DeferredPaintStack：切页首绘推迟下一拍合并（paint 61.8ms 实测），
+        # env DRIFOX_TAB_SWITCH_DEFERRED_PAINT=0 可回退原生 QStackedWidget 路径
+        self._content_area = DeferredPaintStack(content_widget)
         self._content_area.setObjectName("contentArea")
 
         # 空状态页（索引 0）
@@ -5447,6 +5449,19 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
                 from app.widgets.webview_pool import WebViewPool
 
                 WebViewPool.get_instance().clear()
+            except Exception:
+                pass
+            # perf: [P2 #21] 全关页后 renderer 池已清，渲染缓存一并放行：两个模块级
+            # lru 常驻大 HTML（tool 块 16 条 + 整页 32 条 65~163KB/条，最坏 ~5MB+），
+            # 无窗口复用前景时空占内存。
+            try:
+                from app.widgets.card_render_core import (
+                    _render_markdown_to_html_cached_impl,
+                    _render_tool_block_content,
+                )
+
+                _render_tool_block_content.cache_clear()
+                _render_markdown_to_html_cached_impl.cache_clear()
             except Exception:
                 pass
         self.tabCountChanged.emit(len(self._windows))
