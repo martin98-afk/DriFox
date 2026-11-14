@@ -1735,7 +1735,10 @@ class SendableTextEdit(TextEdit):
         self.clearRequested.emit()
 
     def _on_text_changed(self):
-        has_text = bool(self.toPlainText().strip())
+        # perf: 入口取一次 toPlainText 全函数复用（原实现 has_text/历史比对/
+        # placeholder 同步各取一次 = 3×O(n) 全量快照，粘贴大 prompt 白付 2 份拷贝）
+        text = self.toPlainText()
+        has_text = bool(text.strip())
         # 在停止模式下，按钮应该始终可用（用于停止正在进行的请求）
         # 只在发送模式下才根据文本内容决定是否启用
         if not getattr(self, "_is_stop_mode", False):
@@ -1747,10 +1750,10 @@ class SendableTextEdit(TextEdit):
         # 注意：_setting_history_text 为 True 时跳过，避免 setPlainText 期间误触发
         if self._history_index >= 0 and not self._setting_history_text:
             idx = self._history_index
-            if idx < len(self._history_list) and self._history_list[idx].get("text", "") != self.toPlainText():
+            if idx < len(self._history_list) and self._history_list[idx].get("text", "") != text:
                 self._reset_history_mode(clear_attachments=False)
         # 文本 → 附件 反向同步：正文里的 [[basename]] 被删掉时通知附件栏
-        self._sync_placeholder_removals()
+        self._sync_placeholder_removals(text)
         # detail 模式参数同步（防抖：合并快速敲键，参考 / 命令触发节流）
         # IME 组合进行中（打拼音）跳过同步，避免每次敲键重建值列表打断输入法；
         # 提交后（preedit 清空）textChanged 再次触发，走防抖后正常同步。
@@ -1758,7 +1761,7 @@ class SendableTextEdit(TextEdit):
 
     # ==================== 文本 → 附件 反向同步 ====================
 
-    def _sync_placeholder_removals(self):
+    def _sync_placeholder_removals(self, text: Optional[str] = None):
         """扫描正文中的 [[basename]]，与上一次快照做差集并上报被删除的引用
 
         这是「删除文字里的附件引用 → 附件栏同步删除」的实现。判定规则：
@@ -1769,11 +1772,19 @@ class SendableTextEdit(TextEdit):
           新增占位符不上报（附件只能由附件栏或拖放产生，正文打字不会凭空造附件）。
         - **基线校准**：程序化设置文本（历史浏览切换、附件→文本同步）时只更新
           快照不上报，否则「恢复历史文本」会被误判成「用户删光了引用」→ 附件被清空。
+
+        Args:
+            text: 调用方已取好的 toPlainText 结果（_on_text_changed 链路复用，
+                省 1×O(n)）；None 时自取。三重守卫（IME/_setting_history_text/
+                _syncing_attachments）语义不受参数化影响。
         """
         if not self._sync_attachments_enabled:
             return
 
-        current = _PLACEHOLDER_RE.findall(self.toPlainText())
+        # perf: 复用调用方传入的 text（None 时自取，其他调用点行为不变）
+        if text is None:
+            text = self.toPlainText()
+        current = _PLACEHOLDER_RE.findall(text)
         last = self._last_placeholder_names
 
         # 程序化改文本：只校准基线

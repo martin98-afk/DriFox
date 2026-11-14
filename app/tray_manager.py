@@ -163,6 +163,7 @@ class TrayManager(QObject):
         self._hotkey_failed_once = False
         self._hotkey_failed_hotkey = None
         self._registered_hotkey = None
+        self._hotkey_retrying = False  # 非Windows异步重试链进行中标志（与 5min 周期 timer 互斥）
         self._last_toggle_time = 0.0  # 防重复触发时间戳
         # Windows: 安装 WM_HOTKEY 原生事件过滤器（需在 QApplication 存在后）
         if platform.system() == "Windows":
@@ -1191,31 +1192,20 @@ class TrayManager(QObject):
                 self._ensure_listener_alive()
                 return
 
-            # 非 Windows：沿用 keyboard 库的重建逻辑
+            # 非 Windows：沿用 keyboard 库的重建逻辑。
+            # 重试链异步化（QTimer.singleShot 串行）：原同步 sleep(1)×2 最长阻塞
+            # 主线程 ~2s（槽挂 5min 周期主线程 timer）。终态语义不变：成功→移除
+            # old_handle 换新；全败→保留旧热键。
             self._ensure_listener_alive()
+
+            if self._hotkey_retrying:
+                logger.debug("[TrayManager] 热键异步重试进行中，跳过本轮健康检查")
+                return
 
             old_handle = self._hotkey_handle
             old_hotkey = self._registered_hotkey
 
-            new_handle = None
-            for attempt in range(3):
-                try:
-                    new_handle = keyboard.add_hotkey(
-                        hotkey_str,
-                        self._hotkey_bridge.toggle_all_windows.emit,
-                        suppress=True,
-                    )
-                    break  # 成功
-                except Exception as exc:
-                    if attempt < 2:
-                        logger.warning(f"[TrayManager] 热键注册失败（第{attempt + 1}次），1s后重试: {exc}")
-                        import time as _time
-
-                        _time.sleep(1)
-                    else:
-                        logger.warning(f"[TrayManager] 热键注册失败（已重试3次）: {exc}")
-
-            if new_handle is not None:
+            def _finalize_success(new_handle):
                 if old_handle is not None:
                     try:
                         keyboard.remove_hotkey(old_handle)
@@ -1223,12 +1213,35 @@ class TrayManager(QObject):
                         pass
                 self._hotkey_handle = new_handle
                 self._registered_hotkey = hotkey_str
+                self._hotkey_retrying = False
                 logger.debug(f"[TrayManager] 热键健康检查完成: {hotkey_str}")
-            else:
+
+            def _finalize_failure():
                 if self._hotkey_handle is None and old_handle is not None:
                     self._hotkey_handle = old_handle
                     self._registered_hotkey = old_hotkey
                     logger.debug("[TrayManager] 热键健康检查失败，保留旧热键")
+                self._hotkey_retrying = False
+
+            def _attempt(attempt):
+                try:
+                    new_handle = keyboard.add_hotkey(
+                        hotkey_str,
+                        self._hotkey_bridge.toggle_all_windows.emit,
+                        suppress=True,
+                    )
+                except Exception as exc:
+                    if attempt < 2:
+                        logger.warning(f"[TrayManager] 热键注册失败（第{attempt + 1}次），1s后重试: {exc}")
+                        QTimer.singleShot(1000, lambda: _attempt(attempt + 1))
+                        return
+                    logger.warning(f"[TrayManager] 热键注册失败（已重试3次）: {exc}")
+                    _finalize_failure()
+                    return
+                _finalize_success(new_handle)
+
+            self._hotkey_retrying = True
+            _attempt(0)
         except Exception as exc:
             logger.debug(f"[TrayManager] 健康检查异常（非致命）: {exc}")
 
