@@ -171,6 +171,9 @@ class _AnimRenderMixin:
         # 预缩放缓存：(_scaled 与 _frame 一一对应，几何变化时置空重算)
         self._scaled: Optional[QImage] = None
         self._scaled_key: Optional[tuple] = None
+        # perf: O1 解码线程预缩放成品（几何 key → 缩放图），随帧经
+        # on_animation_frame 下发；None/缺 key 时走同步兜底
+        self._pending_scaled: Optional[dict] = None
 
     def configure(self, fit: str, position: str) -> None:
         self._fit = fit or "cover"
@@ -210,6 +213,15 @@ class _AnimRenderMixin:
         iw, ih = img.width(), img.height()
         if iw <= 0 or ih <= 0:
             return None
+        # perf: O1 短路——解码线程预缩放成品（key 不含 id(img)，随帧到达），
+        # 命中即直取；快照空/几何过期/isNull 一律落下方同步兜底（原逻辑不动）
+        pending = self._pending_scaled
+        if pending:
+            hit = pending.get(
+                (iw, ih, target.width(), target.height(), self._fit, self._position)
+            )
+            if hit is not None and not hit.isNull():
+                return hit
         key = (id(img), iw, ih, target.width(), target.height(), self._fit, self._position)
         if self._scaled is not None and self._scaled_key == key:
             return self._scaled
@@ -217,11 +229,15 @@ class _AnimRenderMixin:
             scale = min(target.width() / iw, target.height() / ih)
             w = max(1, int(iw * scale))
             h = max(1, int(ih * scale))
+            # perf: O2 回退（2026-11-15 实测裁决）：该 upscale 场景 Fast 反比
+            # Smooth 慢 ~45%，O1 挪后台后 O2 性能动机不再成立；与线程预缩放
+            # 同口径统一 Smooth
             scaled = img.scaled(w, h, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
         else:
             # cover：先按可见段裁切，再缩放到目标尺寸（先裁后缩，省掉不可见
             # 区域的重采样；与 drawImage(target, img, src) 的最终像素一致）
             src = self.source_rect((iw, ih), (target.width(), target.height()))
+            # perf: O2 回退同上（Fast 实测反慢，统一 Smooth 口径）
             scaled = img.copy(src).scaled(
                 target.width(), target.height(), Qt.IgnoreAspectRatio, Qt.SmoothTransformation
             )
@@ -593,12 +609,21 @@ class SceneLayer(QWidget):
         view.set_frame(first_frame)
         self._sync_content_geometry()
         view.show()
+        # perf: O1 挂载即登记几何给解码线程（幂等；首挂时 _anim_source 尚未
+        # 赋值，真正生效点在 _apply_animation 末尾 _sync_content_geometry）
+        if self._anim_source is not None:
+            geo = self._content_geometry()
+            self._anim_source.register_geometry(
+                id(view), (geo[2], geo[3], view._fit, view._position)
+            )
 
-    def on_animation_frame(self, image) -> None:
+    def on_animation_frame(self, image, pending=None) -> None:
         """帧源回调（主线程，由全局时钟驱动）"""
         view = self._anim_view
         if view is None or image is None:
             return
+        if pending is not None:
+            view._pending_scaled = pending  # perf: O1 预缩放成品与帧同批下发
         view.set_frame(image)
 
     def clear(self) -> None:
@@ -610,6 +635,8 @@ class SceneLayer(QWidget):
         if self._anim_view is not None:
             if self._anim_source is not None:
                 self._anim_source.unsubscribe(self)
+                # perf: O1 注销解码线程的预缩放几何（快照只持数值不持引用）
+                self._anim_source.unregister_geometry(id(self._anim_view))
                 self._anim_source = None
             self._anim_view.hide()
             self._anim_view.deleteLater()
@@ -679,6 +706,12 @@ class SceneLayer(QWidget):
                 label.setGeometry(x, y, w, h)
         if self._anim_view is not None:
             self._anim_view.setGeometry(x, y, w, h)
+            # perf: O1 几何定版即登记预缩放目标（resize/configure 变更经此覆盖）
+            if self._anim_source is not None:
+                self._anim_source.register_geometry(
+                    id(self._anim_view),
+                    (w, h, self._anim_view._fit, self._anim_view._position),
+                )
         # 几何变化后 blur 烘焙结果尺寸不再匹配 → 防抖重烘
         self._schedule_image_bake()
 
