@@ -735,8 +735,14 @@ def _team_add_member(tool_ctx, agent_name: str, role: str) -> ToolResult:
         pass
 
     try:
+        # keep_current_active=True：拉人入队同样不抢当前焦点 tab——成员窗口在
+        # 后台拉起，调用方（leader 或其他成员）视角停在原会话。与 create 路径
+        # 对齐（原先默认 False 会切到新成员 tab）。
         receipt = facade["spawn_members"](
-            [{"agent_name": agent_name, "description": str(role or "").strip()}], run_id, team_label
+            [{"agent_name": agent_name, "description": str(role or "").strip()}],
+            run_id,
+            team_label,
+            keep_current_active=True,
         )
     except TypeError as e:
         # 只兜 provider 签名漂移；形态错误已在上方 isinstance 拦截并明示
