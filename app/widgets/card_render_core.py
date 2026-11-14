@@ -1044,9 +1044,22 @@ def _sanitize_incomplete_markdown(md_text: str) -> str:
         return ""
     # 只处理 markdown 代码块的不完整情况
     # 不再删除尾随的 <，因为它可能是 HTML/工具标签的一部分
-    if md_text.count("```") % 2 == 1:
+    # 行扫描判定末尾未闭合 fence（``` / ~~~，同 marker 闭合，行内标记不计数，
+    # 与 _last_para_break_outside_fence 同语义）。旧 count("```")%2 看不见 ~~~
+    # 围栏：未闭合 ~~~ 图表 fence 既不补闭合也不改标 → 开栏行以裸 <p> 显示、
+    # 半截 HTML 直接透传（<style> 污染主文档 DOM）。
+    fence_marker = ""
+    fence_open_line = -1
+    for _li, _line in enumerate(md_text.split("\n")):
+        _tok = _line.lstrip(" \t")[:3]
+        if fence_marker:
+            if _tok == fence_marker:
+                fence_marker = ""
+        elif _tok in ("```", "~~~"):
+            fence_marker = _tok
+            fence_open_line = _li
+    if fence_marker:
         # 流式中间态：末尾未闭合 fence 若是图表语言，改语言标记降级为骨架占位。
-        #
         # mermaid：半截源码必然 parse 失败，mermaid 10 失败时会向 body 追加 error
         #   bomb SVG（innerHTML 全量重建清不掉，且占位 id 随内容 hash 变化无法去重，
         #   逐轮累积成消息结尾一串「Syntax error in text」）。
@@ -1055,21 +1068,20 @@ def _sanitize_incomplete_markdown(md_text: str) -> str:
         #   每轮都变，未渲染节点被反复塞进 vault 快速膨胀（多图白屏次因）。
         # 两者统一改标为 <lang>-streaming，由 _wrap_code_blocks_with_copy_button_web
         # 产出等高骨架；fence 闭合后语言标记复原，自动切换为真实图表。
+        # html 同样需要骨架：半截 HTML 透传会因标签未闭合破坏页面结构。
+        # 插件注册的 fence 也要改标（否则半截源码会被当成品渲染）。
         lines = md_text.split("\n")
-        for i in range(len(lines) - 1, -1, -1):
-            stripped = lines[i].strip()
-            if stripped.startswith("```"):
-                lang_token = stripped[3:].strip()
-                # html 同样需要骨架：半截 HTML 透传会因标签未闭合破坏页面结构。
-                # 插件注册的 fence 也要改标（否则半截源码会被当成品渲染）。
-                if (
-                    lang_token.lower() in ("mermaid", "echarts", "html", "widget")
-                    or _get_plugin_fence_renderer(lang_token.lower()) is not None
-                ):
-                    lines[i] = lines[i].replace(lang_token, f"{lang_token}-streaming", 1)
-                    md_text = "\n".join(lines)
-                break
-        md_text += "\n```"
+        stripped = lines[fence_open_line].strip()
+        lang_token = stripped[3:].strip()
+        if (
+            lang_token.lower() in ("mermaid", "echarts", "html", "widget")
+            or _get_plugin_fence_renderer(lang_token.lower()) is not None
+        ):
+            lines[fence_open_line] = lines[fence_open_line].replace(
+                lang_token, f"{lang_token}-streaming", 1
+            )
+            md_text = "\n".join(lines)
+        md_text += "\n" + fence_marker
     return md_text
 
 
@@ -3897,7 +3909,8 @@ def _extract_closed_segments(md: str):
     stable_len = 0
     i = 0
     n = len(md)
-    fence_open = False  # 是否在 ``` 代码块内（跨段累计）
+    fence_open = False  # 是否在代码块内（跨段累计）
+    fence_marker = ""  # 开栏标记（``` / ~~~）：同 marker 才闭合
     fence_start = 0  # fence 开启段起点偏移（fence 跨 \n\n 时闭合段需回溯到此）
     while i < n:
         # 硬边界：空行 \n\n（markdown 段落分隔）——闭合段**唯一**切段边界。
@@ -3913,14 +3926,33 @@ def _extract_closed_segments(md: str):
             # 空段（连续空行 / 段首恰为分隔符）：跳过，不产出
             i = seg_end + boundary_len
             continue
-        fence_count = seg.count("```")
-
+        # fence 状态推进：段内逐行扫行首标记，与 _last_para_break_outside_fence /
+        # _has_unclosed_chart_fence 同语义（行首 ``` / ~~~ 开栏，同 marker 闭合，
+        # fence 内内容不计数）。fence 内源码也可能含空行（HTML 常态）→ 开栏后
+        # 仍需逐段推进状态。
+        # 🐛 旧实现 count("```") 奇偶：①看不见 ~~~ 围栏——图表 fence 用 ~~~
+        # 开栏（HTML 内容含 ``` 时模型常换 ~~~ 避冲突）时内容被当普通段落
+        # 逐段产出，_render_stable_segment 独立 convert 失去 fence 上下文 →
+        # CSS 生肉以裸文本泄露到正文（流式结束全量渲染才消失）；②行内 ```
+        # 也计数，与行首状态机口径漂移。
+        was_open = fence_open
+        if "`" in seg or "~" in seg:
+            for line in seg.split("\n"):
+                tok = line.lstrip(" \t")[:3]
+                if fence_open:
+                    if tok == fence_marker:
+                        fence_open = False
+                        fence_marker = ""
+                elif tok in ("```", "~~~"):
+                    fence_open = True
+                    fence_marker = tok
+                    fence_start = i
         if fence_open:
-            # 在 fence 内：偶数个 ``` → 仍在 fence 内（不切）；奇数个 → fence 闭合
-            if fence_count % 2 == 0:
-                i = seg_end + boundary_len
-                continue
-            fence_open = False
+            # fence 开启未闭合（本段开栏 / fence 内延续 / 闭后又开）→ 不产出，
+            # fence 状态延续到下一段
+            i = seg_end + boundary_len
+            continue
+        if was_open:
             # 🐛 修复（流式闪现孤立空代码块）：fence 跨 \n\n 时闭合段只是代码块
             # 尾部，若单独产出：①开启段/中间段落在 stable 内却从未追加
             # （updateContentAppend 删增量节点时连带删掉 tail 行内渲染的完整
@@ -3928,13 +3960,6 @@ def _extract_closed_segments(md: str):
             # 「半截正文 + 空 Plain Text 代码块」，全量渲染才恢复。
             # 回溯到 fence 开启段起点，把整个 fence 区间作为完整闭合段产出。
             seg = md[fence_start:seg_end]
-        else:
-            if fence_count % 2 == 1:
-                # 段内 fence 打开（未闭合）→ 不产出，fence 状态延续到下一段
-                fence_open = True
-                fence_start = i
-                i = seg_end + boundary_len
-                continue
 
         # fence 已闭合（或与 fence 无关）：检查 think/tool 配对是否闭合
         # think 配对守卫必须用真实标签 `<think>` / `</think>`（与 _build_incremental_md
