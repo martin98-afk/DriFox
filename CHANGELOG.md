@@ -4,9 +4,9 @@
 
 - **工具完成框里的文件地址可点击打开** (`app/widgets/render_helpers.py` · `app/widgets/card_viewers.py` · `app/main_widget.py`): 折叠头右侧路径、以及 read/grep/list/glob 单行卡预览里的路径片段渲染为可点元素（默认无装饰，hover 变主题强调色 `--accent` + 实线下划线，悬停 title 显示完整路径），点击由骨架 click 委托在折叠头之前抢断，转 `open_file` 消息交宿主按会话 workdir 解析后用系统程序打开；路径不存在给 InfoBar 提示（原实现静默吞异常）。显示文本仍是首尾缩短版，`data-open-path` 存完整原始路径。骨架版本 v79 → v81。
 
-## [v0.7.2] - 2026-11-14 (重新发布 #6)
+## [v0.7.2] - 2026-11-14 (重新发布 #7)
 
-自 v0.7.1 以来的变更 | 提交数：143 · 文件变更：569 · +28221/-9664 | 贡献者：dingma, drifox-bot, mading, martin98-afk
+自 v0.7.1 以来的变更 | 提交数：147 · 文件变更：576 · +28520/-9786 | 贡献者：dingma, drifox-bot, mading, martin98-afk
 
 ### ✨ 新功能 (New Features)
 
@@ -121,6 +121,10 @@
 
 - **打包版「打开方式」菜单图标全部消失** (`plugins/file-tree/ui/openwith.py`): 打包目录里 `QtWinExtras.pyd` / `Qt5WinExtras.dll` 双缺席——插件源文件不被 PyInstaller 分析，主代码零静态引用，hook 不收集该模块；`_icon_from_exe` 的 `except Exception` 把 ImportError 静默吞成空 QIcon。HICON→像素改纯 ctypes（GetIconInfo + GetDIBits，与 `tree_widget.py` 同源实现），不再依赖 Qt 废弃绑定（Qt6 已移除），仅走系统 shell32/gdi32/user32，打包版无需重配即可恢复图标。
 
+### 🐛 问题修复 (Bug Fixes) (重新发布 #7 追加)
+- **钥匙串写入 -25244 回退明文落盘** (`app/utils/secret_store.py`): macOS Keychain 报 errSecInvalidOwnerEdit——条目由其他签名身份创建（adhoc 重打包后 hash 变化、或开发环境 Python 先写入），`SecItemUpdate` 无所有权被拒，fail-open 降级成明文 config.json。`SecretStore.set` 捕获 -25244/-25293 删除旧条目重建（首次触发系统授权框，「始终允许」后所有权转移；拒绝则照旧明文回退）。
+### ♻️ 代码重构 (Refactoring) (重新发布 #7 追加)
+- **插件密码硬切明文存储** (`app/plugins/managers/plugin_config_store.py`): 用户决策放弃插件字段走系统钥匙串——`config_schema` 声明 `type: password` 的字段一律明文落 `config.json`；钥匙串时代旧值首次读取时经 `_migrate_secret_back` 迁回 JSON 并删除密钥库条目，凭据不丢，`set_values` 顺手清理钥匙串残留。服务商 API Key 不受影响（`secret_mode` 三态照旧）。
 ## [v0.7.1] - 2026-11-11
 
 自 v0.7.0 以来的变更 | 提交数：28 · 文件变更：44 · +3827/-315 | 贡献者：dingma, drifox-bot, martin98-afk
