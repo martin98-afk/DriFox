@@ -25,7 +25,7 @@ from collections import deque
 from loguru import logger
 from PyQt5.QtCore import QTimer
 
-from app.core.infra.perf_jsonl import append_event, env_flag
+from app.core.infra.telemetry.perf_jsonl import append_event, env_flag
 
 _HEARTBEAT_INTERVAL_MS = 200  # 心跳间隔：事件循环正常调度抖动远小于此
 _CHECK_INTERVAL_S = 0.05  # 监控线程检查粒度

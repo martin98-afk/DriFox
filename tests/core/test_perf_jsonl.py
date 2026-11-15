@@ -24,7 +24,7 @@ _ROOT = Path(__file__).resolve().parents[2]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from app.core.infra import perf_jsonl  # noqa: E402
+from app.core.infra.telemetry import perf_jsonl  # noqa: E402
 
 
 @pytest.fixture()
@@ -75,7 +75,7 @@ def test_append_survives_existing_corrupt_line(isolated_cwd):
 def test_import_only_creates_nothing(tmp_path):
     cwd = tmp_path / "cwd"
     cwd.mkdir()
-    code = "import app.core.infra.perf_jsonl as m; print(m.trace_path())"
+    code = "import app.core.infra.telemetry.perf_jsonl as m; print(m.trace_path())"
     env = dict(os.environ, PYTHONPATH=str(_ROOT), QT_QPA_PLATFORM="offscreen")
     proc = subprocess.run(
         [sys.executable, "-c", code],

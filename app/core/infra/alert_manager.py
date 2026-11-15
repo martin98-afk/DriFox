@@ -34,7 +34,7 @@ from typing import Callable, Deque, Dict, List, Optional, Tuple
 
 from loguru import logger
 
-from app.core.infra.perf_jsonl import append_event, env_flag
+from app.core.infra.telemetry.perf_jsonl import append_event, env_flag
 
 _TICK_S = 60.0
 _RSS_WINDOW_S = 2 * 3600.0          # L1 RSS 斜率评估窗

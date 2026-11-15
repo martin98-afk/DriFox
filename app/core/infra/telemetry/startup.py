@@ -20,7 +20,7 @@ def start_thread_dumper(interval_s: float = 60.0):
     线程状态。每 interval_s 落一行 thread_dump（线程名→栈深）到
     ``.perf_out/trace_events.jsonl``；任何异常吐在采集侧，不得反噬主功能。
     """
-    from app.core.infra import perf_jsonl as _perf_jsonl
+    from app.core.infra.telemetry import perf_jsonl as _perf_jsonl
 
     if not _perf_jsonl.env_flag("DRIFOX_CPU_TRACE"):
         return None
@@ -53,7 +53,7 @@ def start_gc_tracer():
     （value = 耗时 ms，tags 带 collected/uncollectable）。
     回调内异常必须全吞：gc 回调外泄会中断回收链。未开时返回 None。
     """
-    from app.core.infra import perf_jsonl as _perf_jsonl
+    from app.core.infra.telemetry import perf_jsonl as _perf_jsonl
 
     if not _perf_jsonl.env_flag("DRIFOX_GC_TRACE"):
         return None

@@ -35,7 +35,7 @@ import threading
 import time
 from typing import Optional
 
-from app.core.infra.perf_jsonl import append_event, env_flag
+from app.core.infra.telemetry.perf_jsonl import append_event, env_flag
 
 # ── GDI/USER 句柄采样（DRIFOX_HANDLE_TRACE=1 门控，默认关） ──────────
 # 首版只采主进程自身：GetGuiResources(GetCurrentProcess(), ...) 无需进程句柄，
