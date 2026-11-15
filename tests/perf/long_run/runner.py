@@ -65,7 +65,7 @@ def _ts() -> str:
 
 
 def _write_csv(samples: List[Sample], path: Path) -> None:
-    """落 CSV：列：scenario,elapsed_sec,loop_iter,rss_mb,qobject_count,biz_total,tm_current_mb,tm_peak_mb,timestamp"""
+    """落 CSV：列：scenario,elapsed_sec,loop_iter,rss_mb,qobject_count,biz_total,tm_current_mb,tm_peak_mb,gdi_count,timer_count,gap_p95,timestamp"""
     import csv
 
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -86,6 +86,9 @@ def _write_csv(samples: List[Sample], path: Path) -> None:
                 "tm_current_mb",
                 "tm_peak_mb",
                 "tm_ok",
+                "gdi_count",
+                "timer_count",
+                "gap_p95",
                 "timestamp",
             ]
         )
@@ -112,6 +115,9 @@ def _write_csv(samples: List[Sample], path: Path) -> None:
                     f"{s.tracemalloc_current_mb:.3f}",
                     f"{s.tracemalloc_peak_mb:.3f}",
                     s.tracemalloc_ok,
+                    s.gdi_count,
+                    s.timer_count,
+                    f"{s.gap_p95:.2f}",
                     f"{s.timestamp:.3f}",
                 ]
             )

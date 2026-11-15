@@ -59,6 +59,11 @@ class Sample:
     tracemalloc_current_mb: float
     tracemalloc_peak_mb: float
     tracemalloc_ok: bool
+    # [N1] 观测扩维：句柄数（Windows GDI）与 QTimer 实例数；gap_p95 本 runner
+    # 无主线程心跳，恒 0（契约：由主进程 G3 剧本单独验收）。非 Windows gdi=-1。
+    gdi_count: int = -1
+    timer_count: int = 0
+    gap_p95: float = 0.0
     timestamp: float = field(default_factory=time.time)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -192,6 +197,44 @@ def _count_biz_objects() -> tuple[Dict[str, int], bool]:
     return counts, True
 
 
+def _read_gdi_count() -> int:
+    """当前进程 GDI 对象数（Windows）；非 Windows / 调用失败返回 -1。
+
+    内嵌实现（不 import 产品 rss_sampler）：测试侧只读句柄数，不耦合生产路径。
+    """
+    if os.name != "nt":
+        return -1
+    try:
+        import ctypes
+
+        hproc = ctypes.windll.kernel32.GetCurrentProcess()  # type: ignore[attr-defined]
+        return int(ctypes.windll.user32.GetGuiResources(hproc, 0))  # type: ignore[attr-defined]
+    except Exception:
+        return -1
+
+
+def _count_qtimers() -> int:
+    """gc 扫描 QTimer 实例数（按类名过滤，不调用 Qt 方法，已删 wrapper 也安全）。
+
+    get_objects() 全量扫描较重，但只在采样拍（默认 60s）执行一次，可接受。
+    """
+    try:
+        import gc
+    except Exception:
+        return 0
+    count = 0
+    try:
+        for obj in gc.get_objects():
+            try:
+                if type(obj).__name__ == "QTimer":
+                    count += 1
+            except Exception:
+                continue
+    except Exception:
+        return count
+    return count
+
+
 def _capture_tracemalloc_top(n: int = 10) -> tuple[List[TracemallocEntry], float, float, bool]:
     """截取 tracemalloc top N 分配点 + 当前/峰值占用。"""
     if not tracemalloc.is_tracing():
@@ -226,6 +269,8 @@ def take_sample(scenario: str, loop_iter: int, start_time: float) -> Sample:
     rss_mb, rss_ok = _read_rss_mb()
     qobj_count, qobj_top, qobj_ok = _count_qobjects()
     biz_counts, biz_ok = _count_biz_objects()
+    gdi_count = _read_gdi_count()
+    timer_count = _count_qtimers()
     tm_top, tm_cur_mb, tm_peak_mb, tm_ok = _capture_tracemalloc_top(10)
 
     return Sample(
@@ -243,6 +288,9 @@ def take_sample(scenario: str, loop_iter: int, start_time: float) -> Sample:
         tracemalloc_current_mb=tm_cur_mb,
         tracemalloc_peak_mb=tm_peak_mb,
         tracemalloc_ok=tm_ok,
+        gdi_count=gdi_count,
+        timer_count=timer_count,
+        gap_p95=0.0,
     )
 
 
