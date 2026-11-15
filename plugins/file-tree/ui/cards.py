@@ -72,6 +72,7 @@ from .openwith import (
 )
 from .preview import FilePreviewPage, _ElidedLabel, _SplitButton, _wrap_icon, detect_kind
 from .scanner import _DirEntry, _TreeScanner
+from .sticky_scroll import StickyScrollOverlay
 from .tree_widget import (
     FileTreeFilterProxy,
     FileTreeModel,
@@ -497,6 +498,19 @@ class FileTreeCard(QWidget):
         # 滚轮实际落点是内层 QTreeView（外层 ScrollArea 不滚），平滑引擎必须挂在它身上
         SmoothScrollDelegate(self._tree_view)
 
+        # 吸顶滚动：顶部可见行的祖先链显示在树**上方一行区域**（真实占位，
+        # 不遮挡任何内容）。条高变化时由 StickyScrollOverlay 内部做双向对称
+        # 补偿（条高与滚动值同进同退），并在拖拽滚动条期间冻结刷新 —— 细节
+        # 见 sticky_scroll.py 的 _apply_height / _is_dragging。
+        self._tree_host = QWidget(self._scroll_area)
+        _tree_host_layout = QVBoxLayout(self._tree_host)
+        _tree_host_layout.setContentsMargins(0, 0, 0, 0)
+        _tree_host_layout.setSpacing(0)
+        self._sticky = StickyScrollOverlay(self._tree_view, self._tree_host)
+        self._sticky.context_menu_requested.connect(self._on_sticky_context_menu)
+        _tree_host_layout.addWidget(self._sticky)
+        _tree_host_layout.addWidget(self._tree_view, 1)
+
         # 占位页面（QStackedWidget 切换，避免子控件无布局时左上角残留）
         # ★ 外层 stack：0=树区（含 ScrollArea）/ 1=居中占位页 / 2=文件预览页。
         # 预览页不能放进 ScrollArea：图片自绘缩放与文本自身滚动都会被外层
@@ -554,7 +568,7 @@ class FileTreeCard(QWidget):
         head.addWidget(self._refresh_btn)
         head.addWidget(self._folder_btn)
 
-        self._scroll_area.setWidget(self._tree_view)
+        self._scroll_area.setWidget(self._tree_host)
         self._vbox.addWidget(self._tree_header)
         self._vbox.addWidget(self._stack, 1)
 
@@ -568,6 +582,7 @@ class FileTreeCard(QWidget):
         self._proxy_model = FileTreeFilterProxy(self)
         self._proxy_model.setSourceModel(self._source_model)
         self._tree_view.setModel(self._proxy_model)
+        self._sticky.bind_model(self._proxy_model)
 
         # RenameDelegate
         self._rename_delegate = RenameDelegate(self._tree_view)
@@ -894,6 +909,7 @@ class FileTreeCard(QWidget):
 
         # 通知 delegate 更新主题色
         self._rename_delegate.set_colors(self._colors)
+        self._sticky.apply_colors(self._colors)
         self._preview_page.set_colors(
             self._colors,
             font_family=font_family,
@@ -1612,6 +1628,11 @@ class FileTreeCard(QWidget):
             menu.installEventFilter(self)
 
     # ── 右键菜单 ──
+
+    def _on_sticky_context_menu(self, proxy_idx: QModelIndex, global_pos):
+        """吸顶条右键 → 复用树的右键菜单（映射 proxy → source 后走同一链路）"""
+        src_idx = self._proxy_model.mapToSource(proxy_idx)
+        self._on_context_menu(src_idx, global_pos)
 
     def _on_context_menu(self, src_idx: QModelIndex, global_pos):
         menu = QMenu(self)
