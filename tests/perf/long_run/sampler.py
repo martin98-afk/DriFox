@@ -295,7 +295,14 @@ def take_sample(scenario: str, loop_iter: int, start_time: float) -> Sample:
 
 
 def start_tracemalloc() -> None:
-    """启动 tracemalloc（最多追踪 25 帧栈，足以定位分配点）。"""
+    """启动 tracemalloc（默认关）：仅 PERF_TRACE_MALLOC=1 取证模式才开。
+
+    背景：tracemalloc.start(25) 常驻会拖慢启动/采样（栈帧分配开销），
+    且开启后的 snapshot 自身内存会污染 RSS 曲线。默认关闭后
+    _capture_tracemalloc_top 返回空 + ok=False，调用方落盘 null/空。
+    """
+    if not _TRACE_MALLOC_ENABLED:
+        return
     if not tracemalloc.is_tracing():
         tracemalloc.start(25)
 
@@ -314,6 +321,17 @@ def get_sample_interval() -> float:
         return 60.0
 
 
+def env_trace_malloc() -> bool:
+    """tracemalloc 取证开关：PERF_TRACE_MALLOC=1/true/on/yes 才开（默认 0=关）。"""
+    return os.environ.get("PERF_TRACE_MALLOC", "").strip().lower() in (
+        "1", "true", "on", "yes",
+    )
+
+
+# import 期固化（与 env_full_mode 同先例：进程内不热变）
+_TRACE_MALLOC_ENABLED = env_trace_malloc()
+
+
 def env_full_mode() -> bool:
     """全量模式：>=5万次操作循环；否则 demo 模式（<=2 分钟）。"""
     return os.environ.get("LONGRUN_FULL", "").strip().lower() in ("1", "true", "yes")
@@ -327,6 +345,7 @@ __all__ = [
     "stop_tracemalloc",
     "get_sample_interval",
     "env_full_mode",
+    "env_trace_malloc",
 ]
 
 
