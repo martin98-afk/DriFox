@@ -439,6 +439,12 @@ def _fmt(v, unit=""):
     return f"{v}{unit}"
 
 
+def _comparable_baseline(baseline: dict) -> bool:
+    """基线是否具备对比所需结构（O3：perf_baseline 的时间戳产物结构不同，需先判）。"""
+    s = baseline.get("summary") if isinstance(baseline, dict) else None
+    return isinstance(s, dict) and all(k in s for k in ("startup_s", "memory", "open_tab"))
+
+
 def _build_compare(baseline: dict, current: dict) -> list[dict]:
     """构造对比行：[指标, 优化前, 优化后, 变化]"""
     b_mem = baseline["summary"]["memory"]
@@ -635,12 +641,28 @@ def main(argv: list[str] | None = None) -> int:
         print(f"\n[result] 已保存 -> {args.output}", flush=True)
         print("\n===== 聚合摘要 =====", flush=True)
         print(json.dumps(summary, indent=2, ensure_ascii=False), flush=True)
-        if args.baseline and os.path.exists(args.baseline):
-            baseline = _load_json(args.baseline)
-            rows = _build_compare(baseline, result)
-            _print_table(rows)
+        baseline_path = args.baseline
+        if not baseline_path:
+            # O3: 未显式指定时取 baseline_index.jsonl 最新一条（perf_baseline 时间戳产物联动）
+            try:
+                from scripts.perf_baseline import latest_baseline_from_index
+
+                latest = latest_baseline_from_index()
+            except Exception:
+                latest = None
+            if latest is not None and os.path.exists(latest):
+                baseline_path = str(latest)
+                print(f"\n[baseline] 未指定 --baseline，取 index 最新基线: {latest}", flush=True)
+        if baseline_path and os.path.exists(baseline_path):
+            baseline = _load_json(baseline_path)
+            if _comparable_baseline(baseline):
+                rows = _build_compare(baseline, result)
+                _print_table(rows)
+            else:
+                print(f"\n[WARN] 基线 {baseline_path} 非 perf_regression 产物（缺 summary.memory/open_tab），"
+                      "跳过对比表；如用 perf_baseline 归档，请改用 --baseline 指定回归结果 JSON。", flush=True)
         else:
-            print("\n[提示] 未指定 --baseline，仅输出本次测量。", flush=True)
+            print("\n[提示] 未指定 --baseline 且无可用基线台账，仅输出本次测量。", flush=True)
             print("       对比用法: uv run python scripts/perf_regression.py --baseline <优化前>.json", flush=True)
         return 0
     finally:
