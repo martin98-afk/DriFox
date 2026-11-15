@@ -46,7 +46,10 @@ GDI_WINDOW_S = 600             # ⑤ 窗口宽度
 MIN_ROWS_RATIO = 0.95          # 完整性：行数 ≥ 理论值 95%
 SEG_EDGE_S = 3600.0            # ③ 首段 [0,3600) / 末段 (3600,7200]
 SEG_TAIL_S = 7200.0
-GATE_ACTION_RE = re.compile(r"soft-unload|kill\(")
+# 闸门动作串：soft-unload( 全库唯一产生点是 T22 闸门（memory_governor.py:448）。
+# 不能用 "kill("——[T31] idle-kill(n) 是 180s 空闲回收的正常动作，会误报；
+# 闸门 kill 无日志落盘，其发生必然伴随 webengine_mb 超阈，CSV max 判据已兜住。
+GATE_ACTION_RE = re.compile(r"soft-unload\(")
 MIN_ROWS_FOR_SEG = 2
 
 
@@ -385,7 +388,7 @@ def check_gate(data: Dict[str, Any]) -> Dict[str, Any]:
     note = "; ".join(action_hits[:3])
     return _criterion(
         "⑥", "软闸门未触发",
-        f"main<{MAIN_RSS_GATE_MB:g}MB 且 web<{WEBENGINE_GATE_MB:g}MB 且日志无 soft-unload/kill(",
+        f"main<{MAIN_RSS_GATE_MB:g}MB 且 web<{WEBENGINE_GATE_MB:g}MB 且日志无 soft-unload(",
         actual, passed, "mem_smoke.csv + 归档日志", note,
     )
 
