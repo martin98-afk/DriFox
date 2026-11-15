@@ -568,8 +568,10 @@ class TabItem(QFrame):
         body_layout.setSpacing(2)
         self._body_layout = body_layout
 
-        # 标题（使用 _ElidedLabel 自动省略，保证关闭按钮始终可见）
-        self._title_label = _ElidedLabel(self._title, self._body)
+        # 标题：超宽从尾部省略（会话名前段辨识度最高，尾部多是时间/编号等
+        # 可丢信息），保证关闭按钮始终可见；悬停时全文横向滚动播放，
+        # 不必再靠 tooltip 遮住行内容（全局开关 UI/HoverScrollText 可关）
+        self._title_label = _ElidedLabel(self._title, self._body, elide_mode=Qt.ElideRight, hover_scroll=True)
         body_layout.addWidget(self._title_label)
 
         # 副行（树行化才显示）：预览·工作树名 | 相对时间（右对齐）

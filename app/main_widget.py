@@ -12351,6 +12351,10 @@ class OpenAIChatToolWindow(ToolWindow):
             self._displayed_session_id = None
             self._add_chat_widget(welcome_card)
             self._welcome_rendered_once = True
+            # 🛡️ 渲染落地 = 排队中的重复渲染已过时，就地作废（否则新建会话时
+            # _create_new_session 排的去抖 timer 会在 600ms 后再渲染一次，
+            # 表现为欢迎卡片刷新两次）。详见 _cancel_pending_welcome_render。
+            self._cancel_pending_welcome_render()
             logger.debug(f"[OpenAIChatToolWindow] _show_initial_welcome OK: wid={self._window_id}")
         except Exception as e:  # noqa: BLE001
             logger.warning(f"[OpenAIChatToolWindow] _show_initial_welcome 渲染失败（wid={self._window_id}）: {e}")
@@ -12441,6 +12445,12 @@ class OpenAIChatToolWindow(ToolWindow):
             rendered_once = False
         if rendered_once and (now_m - first_t) < cls._WELCOME_STARTUP_MERGE_S:
             try:
+                # 🛡️ 去抖分支必须占用 pending 守卫（2026-11-15 双渲染修复）：
+                # 此前只 timer.start()，_notify_history_data_changed 读
+                # "not _welcome_render_pending" 看到 False 就同步渲染一次，
+                # 600ms 后 timer 再渲染一次 → 新建会话时欢迎卡刷新两次。
+                self._welcome_render_pending = True
+                self._welcome_render_pending_since = now_m
                 timer = getattr(self, "_welcome_startup_merge_timer", None)
                 if timer is None:
                     from PyQt5.QtCore import QTimer as _QTimer
@@ -12477,13 +12487,41 @@ class OpenAIChatToolWindow(ToolWindow):
         QTimer.singleShot(delay, lambda: self._safe_timer_call(self._on_welcome_render_slot))
 
     def _on_welcome_render_slot(self):
-        """交错调度槽位回调：清 pending 后实际渲染欢迎卡片"""
+        """交错调度槽位回调：清 pending 后实际渲染欢迎卡片
+
+        🛡️ 消费判定：pending 为 False 说明排队期间已有别的路径完成渲染
+        （_show_initial_welcome 成功即置 True 的凭证被消费掉），本次槽位
+        直接作废，避免欢迎卡片刷新两次。
+        """
         try:
+            consumed = not self._welcome_render_pending
             self._welcome_render_pending = False
         except (AttributeError, RuntimeError):
-            pass
+            consumed = False
         logger.debug(f"[OpenAIChatToolWindow] _on_welcome_render_slot fired: wid={self._window_id}")
+        if consumed:
+            logger.debug(
+                f"[OpenAIChatToolWindow] _on_welcome_render_slot: 排队期间已渲染，跳过（wid={self._window_id}）"
+            )
+            return
         self._show_initial_welcome()
+
+    def _cancel_pending_welcome_render(self):
+        """作废排队中的欢迎卡重复渲染（渲染已落地后调用）
+
+        _create_new_session / _notify_history_data_changed / _release_welcome_build_hold
+        等多个入口都会调度渲染，同一事件循环批次内可能排两次（去抖 timer +
+        立即渲染，或槽位 + 立即渲染）。渲染成功一次后，排队项渲染的内容必然
+        与刚渲染的等价（都读同一份最新缓存），直接作废即可。
+        """
+        try:
+            self._welcome_render_pending = False
+            self._welcome_render_pending_since = None
+            timer = getattr(self, "_welcome_startup_merge_timer", None)
+            if timer is not None:
+                timer.stop()
+        except (AttributeError, RuntimeError, TypeError):
+            pass
 
     def _hide_welcome_cards(self):
         """从布局中移除所有欢迎卡片（widget 不删除，由 _welcome_card_cache 管理）"""

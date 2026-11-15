@@ -635,6 +635,28 @@ class TestUIPluginRowPinMenu:
         assert labels == ["固定到常驻区"]
 
 
+class TestTabItemTitleHoverScroll:
+    """侧栏会话标题：超宽从右侧省略 + 悬停横向滚动播放全文"""
+
+    def test_title_label_right_elided(self, qtbot):
+        item = TabItem("超长会话标题" * 20)
+        qtbot.addWidget(item)
+        lbl = item._title_label
+        assert lbl._elide_mode == Qt.ElideRight, "会话标题应从尾部省略（前段辨识度最高）"
+        lbl.resize(60, 20)
+        lbl._update_elided()
+        assert lbl.text() != lbl._full_text
+        assert lbl.text().endswith("…"), f"右侧省略应以省略号收尾：{lbl.text()!r}"
+
+    def test_title_label_hover_scroll_enabled(self, qtbot):
+        item = TabItem("超长会话标题" * 20)
+        qtbot.addWidget(item)
+        lbl = item._title_label
+        assert lbl._hover_scroll is True, "会话标题应开启 hover 滚动播放"
+        lbl.resize(60, 20)
+        assert lbl._scroll_overflow_px() > 0, "超长标题应算得出可滚距离"
+
+
 class TestPluginPinFlow:
     """固定端到端：行信号（已连接）→ app_state 落盘 → 刷新分区 → 取消固定回落"""
 

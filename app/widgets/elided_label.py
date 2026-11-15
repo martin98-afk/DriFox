@@ -3,20 +3,32 @@
 ElidedLabel - 自动根据可用宽度省略文本的 QLabel（中间省略）
 
 从 mcp_setting_card._ElidedLabel 提取为共享模块，消除多处重复定义。
+
+可选 hover 滚动播放：``hover_scroll=True`` 的实例在鼠标悬停、且文本确实
+超宽时，暂不省略，改由自绘把全文横向来回滑动（详见类注释）。
 """
 
 import html
 import re
 from typing import List
 
-from PyQt5.QtCore import QSize, Qt
-from PyQt5.QtGui import QFontMetrics
-from PyQt5.QtWidgets import QLabel, QSizePolicy
+from PyQt5.QtCore import QElapsedTimer, QEvent, QPointF, QSize, Qt, QTimer
+from PyQt5.QtGui import QFontMetrics, QPainter
+from PyQt5.QtWidgets import QLabel, QSizePolicy, QToolTip
 
 # 控制字符 → 空格（单行归一化）。
 # 只处理换行/制表/回车这类**会引发换行或异常排版**的字符；不碰普通空格，
 # 也不做连续空白折叠（省略测量要跟字符数一一对应，折叠会改变长度）。
 _CONTROL_CHARS_PATTERN = re.compile(r"[\r\n\t\v\f]")
+
+# ── hover 滚动播放参数 ──────────────────────────────────
+# 悬停后先静置一小段再动：鼠标划过列表时不该满屏跑字
+_SCROLL_START_DELAY_MS = 350
+# ≈60fps。同一时刻只有鼠标下的那一个标签在滚，单帧只是一次 drawText
+_SCROLL_INTERVAL_MS = 16
+_SCROLL_SPEED_PX_S = 45.0  # 基准速度（px/s）
+_SCROLL_MAX_TRAVERSE_S = 8.0  # 超长文本提速，保证一趟不超过 8 秒
+_SCROLL_EDGE_PAUSE_S = 0.9  # 到两端各停一下，首尾读得清
 
 
 def _to_single_line(text: str) -> str:
@@ -42,16 +54,36 @@ class _ElidedLabel(QLabel):
     （实测 ``"a\\nb"`` 比 ``"a b"`` 窄 7px），测量与渲染不一致 → 省略结果仍含
     ``\\n`` → 文本被行高截断。因此渲染/测量统一走单行归一化；``_full_text`` 保留
     原文（tooltip 与 setText 回读语义不变）。
+
+    **hover 滚动播放**（``hover_scroll=True``）：鼠标悬停且
+    全文宽于可视宽时，省略号让位给自绘的横向滑动（0 → 尾部 → 0 来回），并在
+    端点停顿约 0.9s；移出即复位为常规省略。**滚动实例不挂 tooltip**：全文自己会
+    滚出来，而 tooltip 会盖住滚动行；另在起滚瞬间调 ``QToolTip.hideText()``
+    收掉起滚前就已弹出的那个（其延迟比 350ms 短时会发生）。带搜索高亮（富文本 span）
+    时不滚动，自绘纯文本会丢掉高亮区间。
     """
 
-    def __init__(self, text: str = "", parent=None, elide_mode=Qt.ElideMiddle):
+    def __init__(self, text: str = "", parent=None, elide_mode=Qt.ElideMiddle, hover_scroll: bool = False):
         super().__init__(text, parent)
         self._full_text = text
         self._elide_mode = elide_mode  # 省略方式（标题/预览用 Middle，角色名用 Right）
         self._hl_query = ""
         self._hl_queries: List[str] = []  # 多关键字高亮
         self._hl_color = ""
-        self.setToolTip(self._full_text)
+        # ── hover 滚动播放状态（定时器懒建：只有真正滚过的实例才持有）──
+        self._hover_scroll = hover_scroll
+        self._hovering = False
+        self._scroll_timer: QTimer | None = None
+        self._scroll_delay_timer: QTimer | None = None
+        self._scroll_clock = QElapsedTimer()
+        self._scroll_offset = 0.0  # 当前左移像素（>=0）
+        self._scroll_overflow = 0  # 可滚距离 = 全文宽 - 可视宽
+        self._scroll_speed = _SCROLL_SPEED_PX_S
+        self._scroll_dir = 1
+        self._scroll_pause_left = 0.0
+        self._scroll_last_time = 0.0
+        if not hover_scroll:  # 滚动实例不挂 tooltip：滚动本身就是全文提示
+            self.setToolTip(self._full_text)
         # 防止布局根据文本内容自动扩展宽度，确保宽度由父布局决定
         self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
 
@@ -61,7 +93,9 @@ class _ElidedLabel(QLabel):
         self._hl_query = ""
         self._hl_queries = []
         self._hl_color = ""
-        self.setToolTip(self._full_text)
+        if not self._hover_scroll:
+            self.setToolTip(self._full_text)
+        self._reset_scroll()  # 换文本后旧的滚动偏移没有意义
         self._update_elided()
 
     def sizeHint(self):
@@ -86,11 +120,146 @@ class _ElidedLabel(QLabel):
         self._hl_queries = list(queries)
         self._hl_query = queries[0] if queries else ""  # 主查询用于省略锚定
         self._hl_color = color
+        self._reset_scroll()  # 富文本高亮与自绘滚动互斥，进高亮态先停滚
         self._update_elided()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self._update_elided()
+        # 注意：不在这里停滚。hover 弹出关闭按钮等会让标题变窄 → 恰好是本控件
+        # resize；停掉就再也滚不起来。宽度变化由滚动 tick 重算可滚距离抵消。
+
+    # ── hover 滚动播放 ────────────────────────────────────
+
+    def enterEvent(self, event):
+        super().enterEvent(event)
+        self._hovering = True
+        if not self._hover_scroll_allowed():
+            return
+        self._ensure_scroll_timers()
+        self._scroll_delay_timer.start(_SCROLL_START_DELAY_MS)
+
+    def leaveEvent(self, event):
+        super().leaveEvent(event)
+        self._hovering = False
+        self._reset_scroll()
+
+    def hideEvent(self, event):
+        # 折叠/切页时可能收不到 leaveEvent，隐藏即复位，避免留下半截滚动偏移
+        super().hideEvent(event)
+        self._hovering = False
+        self._reset_scroll()
+
+    def event(self, event):
+        # 兜底：滚动中吞掉 tooltip 显示请求（外部仍可能给实例 setToolTip）
+        if event.type() == QEvent.ToolTip and self._is_scrolling():
+            return True
+        return super().event(event)
+
+    def _hover_scroll_allowed(self) -> bool:
+        """实例开关 + 不与高亮富文本冲突"""
+        return self._hover_scroll and not self._hl_queries
+
+    def _scroll_overflow_px(self) -> int:
+        """全文宽与可视宽之差（<=0 表示不需要滚动）"""
+        return self.fontMetrics().horizontalAdvance(_to_single_line(self._full_text)) - self.width()
+
+    def _is_scrolling(self) -> bool:
+        return self._scroll_timer is not None and self._scroll_timer.isActive()
+
+    def _ensure_scroll_timers(self) -> None:
+        if self._scroll_timer is not None:
+            return
+        self._scroll_timer = QTimer(self)
+        self._scroll_timer.setInterval(_SCROLL_INTERVAL_MS)
+        self._scroll_timer.timeout.connect(self._on_scroll_tick)
+        self._scroll_delay_timer = QTimer(self)
+        self._scroll_delay_timer.setSingleShot(True)
+        self._scroll_delay_timer.timeout.connect(self._begin_scroll)
+
+    def _reset_scroll(self) -> None:
+        """停止滚动并回到常规省略渲染（幂等，未初始化定时器时直接返回）"""
+        if self._scroll_delay_timer is not None:
+            self._scroll_delay_timer.stop()
+        was_scrolling = self._is_scrolling()
+        if self._scroll_timer is not None and was_scrolling:
+            self._scroll_timer.stop()
+        # 必须重绘：停在 offset=0 的暂停帧也是自绘全文（没有省略号），
+        # 只停定时器不重绘会留下这帧，直到别的事件碰巧触发重绘
+        if self._scroll_offset or was_scrolling:
+            self._scroll_offset = 0.0
+            self.update()
+
+    def _begin_scroll(self) -> None:
+        """延迟到期后确认确实超宽才起滚（延迟期间布局可能已变宽/变窄）"""
+        if not self._hovering or not self._hover_scroll_allowed():
+            return
+        overflow = self._scroll_overflow_px()
+        if overflow <= 0 or not _to_single_line(self._full_text):
+            return
+        self._scroll_overflow = overflow
+        self._scroll_speed = max(_SCROLL_SPEED_PX_S, overflow / _SCROLL_MAX_TRAVERSE_S)
+        self._scroll_offset = 0.0
+        self._scroll_dir = 1
+        self._scroll_pause_left = 0.0
+        self._scroll_last_time = 0.0
+        self._scroll_clock.restart()
+        # 系统 tooltip 延迟可能短于起滚延迟：已经弹出的那个不会自己消失，主动收掉
+        QToolTip.hideText()
+        self._scroll_timer.start()
+        self.update()
+
+    def _on_scroll_tick(self) -> None:
+        now = self._scroll_clock.elapsed() / 1000.0
+        dt = now - self._scroll_last_time
+        self._scroll_last_time = now
+        if dt <= 0.0 or dt > 0.5:  # 首帧 / 事件循环卡顿后不追帧，避免瞬移
+            return
+        if self._scroll_pause_left > 0.0:
+            self._scroll_pause_left -= dt
+            if self._scroll_pause_left > 0.0:
+                return
+            dt = -self._scroll_pause_left  # 用停顿时长溢出量继续推进，节奏不断档
+            self._scroll_pause_left = 0.0
+            self._scroll_dir = -self._scroll_dir
+
+        # 宽度可能在滚动中被改（hover 弹出关闭按钮、侧栏拖拽），随时重算
+        overflow = self._scroll_overflow_px()
+        if overflow != self._scroll_overflow:
+            self._scroll_overflow = overflow
+            if overflow <= 0:  # 变宽到不再超宽：直接收工
+                self._reset_scroll()
+                return
+            self._scroll_speed = max(_SCROLL_SPEED_PX_S, overflow / _SCROLL_MAX_TRAVERSE_S)
+            self._scroll_offset = min(self._scroll_offset, float(overflow))
+
+        self._scroll_offset += self._scroll_speed * dt * self._scroll_dir
+        if self._scroll_offset >= self._scroll_overflow:
+            self._scroll_offset = float(self._scroll_overflow)
+            self._scroll_pause_left = _SCROLL_EDGE_PAUSE_S
+        elif self._scroll_offset <= 0.0:
+            self._scroll_offset = 0.0
+            self._scroll_pause_left = _SCROLL_EDGE_PAUSE_S
+        self.update()
+
+    def paintEvent(self, event):
+        if not self._is_scrolling():
+            super().paintEvent(event)
+            return
+        text = _to_single_line(self._full_text)
+        if not text:
+            return
+        # 自绘滚动：取 palette 的 foreground 色，QSS 的 color 会落到 palette 上
+        # （实测 label.setStyleSheet("color: rgb(...)") 后 palette().windowText 即该色）
+        rect = self.contentsRect()
+        fm = self.fontMetrics()
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.TextAntialiasing, True)
+        painter.setClipRect(rect)
+        painter.setFont(self.font())
+        painter.setPen(self.palette().color(self.foregroundRole()))
+        baseline = rect.top() + (rect.height() - fm.height()) // 2 + fm.ascent()
+        painter.drawText(QPointF(rect.left() - self._scroll_offset, baseline), text)
 
     # ── 核心省略逻辑 ──────────────────────────────────────
 
