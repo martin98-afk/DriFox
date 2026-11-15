@@ -20,9 +20,9 @@ key 设计（七元组，见 get_pixmap）：
 同壁纸换主题但渲染参数未变时命中缓存恰是正确行为（显示本就该一致）。
 
 生命周期（引用计数）：每个活跃 SceneLayer 在构造时 acquire、析构时 release。
-计数归零（全部窗口关闭）不立刻丢弃，起 _GRACE_SECONDS 宽限定时器，到点 clear；
-宽限期内任一 acquire（重开窗口/切回主题）取消定时器并命中缓存，零重解码。
-窗口仍打开时计数 >0，任何路径都不会提前淘汰。
+计数归零（全部窗口关闭）立即 clear，不等宽限：托盘驻留（setQuitOnLastWindow-
+Closed(False)，关全部窗进程仍在）下缓存 103-127MB 不再滞留；代价是重开窗
+需重解码一次。窗口仍打开时计数 >0，任何路径都不会提前淘汰。
 """
 
 from __future__ import annotations
@@ -35,10 +35,6 @@ from typing import Callable, Optional
 # 一套全副本 ≈ 103-127MB（T40 核算），4K baked 由 _BAKED_BUDGET_BYTES
 # 降为 1 份（31.64 MiB）；1 组封顶 -103MB，代价仅切主题时重解码一次。
 _MAX_SETS = 1
-
-# 全部窗口关闭后的宽限秒数：到点才 clear。换来「快关快开」零重解码
-# （重解码一份含 blur 烘焙的壁纸是主线程同步操作，秒级耗时不可接受）。
-_GRACE_SECONDS = 30.0
 
 # 每组 baked 条目上限（M2）：blur 壁纸拖拽 resize 按 (w,h,blur,pad) 逐帧写入，
 # 实测 40 步拖拽堆 40 份/330MB（1080p）且相邻几何命中率 0/39。取 4 = 覆盖
@@ -74,20 +70,15 @@ class _ScenePixmapCache:
         self._max_sets = max_sets
         # group_key -> OrderedDict[sub_key -> QPixmap]
         self._groups: "OrderedDict[tuple, OrderedDict[tuple, object]]" = OrderedDict()
-        # 引用计数：活跃使用者（SceneLayer）数；归零后宽限期结束 clear
+        # 引用计数：活跃使用者（SceneLayer）数；归零即 clear
         self._users = 0
-        self._evict_timer = None  # QTimer，归零时起，acquire 取消
 
     def acquire(self) -> None:
-        """活跃使用者 +1（SceneLayer 构造时调用）。取消未到期的归零宽限。"""
+        """活跃使用者 +1（SceneLayer 构造时调用）。"""
         self._users += 1
-        if self._evict_timer is not None:
-            self._evict_timer.stop()
-            self._evict_timer.deleteLater()
-            self._evict_timer = None
 
     def release(self) -> None:
-        """活跃使用者 -1（SceneLayer 析构时调用）；归零起宽限定时器，到点 clear。
+        """活跃使用者 -1（SceneLayer 析构时调用）；归零立即 clear。
 
         幂等：计数已归零时忽略（destroyed 信号最多发一次，此保护使重复
         release 也不会把计数打负）。
@@ -96,29 +87,12 @@ class _ScenePixmapCache:
             return
         self._users -= 1
         if self._users == 0:
-            self._schedule_eviction()
-
-    def _schedule_eviction(self) -> None:
-        """归零后起一次性宽限定时器（幂等：已有 pending 不重复起）。"""
-        if self._evict_timer is not None:
-            return
-        try:
-            from PyQt5.QtCore import QTimer
-
-            timer = QTimer()
-            timer.setSingleShot(True)
-            timer.timeout.connect(self._evict)
-            timer.start(int(_GRACE_SECONDS * 1000))
-        except RuntimeError:
-            # QApplication 已销毁（teardown/解释器关闭）：QTimer 无法创建，
-            # 宽限释放丢失属可接受（进程退出由 OS 兜底），静默即可
-            return
-        self._evict_timer = timer
-
-    def _evict(self) -> None:
-        """宽限期到点：此时计数必为 0（acquire 会取消定时器），安全清空。"""
-        self._evict_timer = None
-        self._groups.clear()
+            try:
+                self._groups.clear()
+            except RuntimeError:
+                # QApplication 已销毁（teardown/解释器关闭）：QPixmap 析构不可用，
+                # 进程退出由 OS 兜底，静默即可
+                pass
 
     @staticmethod
     def _group_key(resolved_path: str):

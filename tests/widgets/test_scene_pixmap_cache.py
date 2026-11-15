@@ -10,10 +10,9 @@ offscreen 运行，无键鼠、无可见窗口（P0 约束）。
 ④ clear() 后重新创建
 ⑤ 接入层行为：同壁纸两个 SceneLayer 实例的预乘副本是同一对象（2 份→1 份）
 ⑥ 引用计数：两窗口共享只解码一次；⑦ 单窗口释放后另一窗口仍有效；
-⑧ 全关后宽限期到点释放；⑨ 重复开关窗口计数归零不泄漏
+⑧ 全关（计数归零）立即释放；⑨ 重复开关窗口计数归零不泄漏
 """
 import os
-import time
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -22,7 +21,6 @@ from PyQt5.QtCore import Qt
 
 import pytest
 
-from app.core.infra import scene_pixmap_cache as spc_mod
 from app.core.infra.scene_pixmap_cache import baked_cap, scene_pixmap_cache
 
 
@@ -31,10 +29,6 @@ def cache():
     scene_pixmap_cache.clear()
     # 引用计数状态一并复位（跨测试隔离；仅测试态直改私有成员）
     scene_pixmap_cache._users = 0
-    if scene_pixmap_cache._evict_timer is not None:
-        scene_pixmap_cache._evict_timer.stop()
-        scene_pixmap_cache._evict_timer.deleteLater()
-        scene_pixmap_cache._evict_timer = None
     yield scene_pixmap_cache
     scene_pixmap_cache.clear()
 
@@ -158,41 +152,30 @@ def test_two_windows_share_one_decode(cache, wallpaper):
 
 
 def test_one_closed_other_still_valid(cache, wallpaper):
-    """⑦ 关一窗口（release）后另一窗口取图仍有效：未归零不起宽限、缓存不动"""
+    """⑦ 关一窗口（release）后另一窗口取图仍有效：未归零不清缓存"""
     cache.acquire()
     cache.acquire()
     a = cache.get_pixmap("source", wallpaper, load=_load)
     cache.release()
     assert cache._users == 1
-    assert cache._evict_timer is None  # 计数未归零，不得起淘汰定时器
     b = cache.get_pixmap("source", wallpaper, load=_load)
     assert a is b  # 另一窗口拿到的仍是同一有效对象（无悬空、无重建）
     assert cache.stats()["entries"] == 1
 
 
-def test_all_closed_grace_then_evict(cache, wallpaper, qapp, monkeypatch):
-    """⑧ 全关后：宽限内重开取消定时器；宽限到点缓存被 clear"""
-    monkeypatch.setattr(spc_mod, "_GRACE_SECONDS", 0.05)
+def test_release_at_zero_clears_immediately(cache, wallpaper):
+    """⑧ 全关（计数归零）立即 clear，不等宽限；重开需重建（M-1b）"""
     cache.acquire()
     pix = cache.get_pixmap("source", wallpaper, load=_load)
     assert pix is not None
-    # 归零 → 宽限定时器挂起
     cache.release()
     assert cache._users == 0
-    assert cache._evict_timer is not None
-    # 宽限内重开窗口 → 取消定时器、命中缓存零重解码
+    assert cache.stats() == {"groups": 0, "entries": 0}, "归零后未立即释放（托盘駐留期驻留）"
+    # 重开窗口：缓存已清 → 重新构建（非同一对象）
     cache.acquire()
-    assert cache._evict_timer is None
-    assert cache.get_pixmap("source", wallpaper, load=_load) is pix
-    # 再归零 → 等宽限到点（事件循环驱动 QTimer）→ 缓存释放
-    cache.release()
-    assert cache._evict_timer is not None
-    deadline = time.monotonic() + 2.0
-    while cache._evict_timer is not None and time.monotonic() < deadline:
-        qapp.processEvents()
-        time.sleep(0.02)
-    assert cache._users == 0
-    assert cache.stats() == {"groups": 0, "entries": 0}
+    again = cache.get_pixmap("source", wallpaper, load=_load)
+    assert again is not pix
+    assert cache.stats()["entries"] == 1
 
 
 def test_reopen_cycles_refcount_returns_to_zero(cache, wallpaper):
@@ -208,33 +191,27 @@ def test_reopen_cycles_refcount_returns_to_zero(cache, wallpaper):
     assert cache._users == 0
 
 
-def test_scenelayer_destroyed_triggers_release(cache, wallpaper, qapp, monkeypatch):
+def test_scenelayer_destroyed_triggers_release(cache, wallpaper, qapp):
     """⑩ [E1] 接线测试：SceneLayer.destroyed 信号真实触发 release。
 
     直调 acquire/release 的用例验不住 connect 断裂（测试全绿但生产里
     _users 永久 >0、缓存永不释放）。本用例走真实析构链路：
     SceneLayer 构造 acquire → deleteLater + sendPostedEvents(DeferredDelete)
-    驱动 C++ 析构 → destroyed→release → 归零起宽限 → 到点 clear。
+    驱动 C++ 析构 → destroyed→release → 归零立即 clear。
     """
     from PyQt5.QtCore import QCoreApplication, QEvent
     from app.widgets.scene_layer import SceneLayer
 
-    monkeypatch.setattr(spc_mod, "_GRACE_SECONDS", 0.05)
     a, b = SceneLayer(), SceneLayer()
     assert cache._users == 2, "SceneLayer 构造未 acquire（接线断）"
+    cache.get_pixmap("source", wallpaper, load=_load)
+    assert cache.stats()["entries"] == 1
     a.deleteLater()
     b.deleteLater()
     # 裸 processEvents 不投递 DeferredDelete（Qt 语义），须强制投递
     QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
     assert cache._users == 0, "SceneLayer 析构未触发 release（destroyed 接线断）"
-    assert cache._evict_timer is not None, "归零后未起宽限定时器"
-    # 宽限到点缓存被清
-    cache.get_pixmap("source", wallpaper, load=_load)
-    deadline = time.monotonic() + 2.0
-    while cache._evict_timer is not None and time.monotonic() < deadline:
-        qapp.processEvents()
-        time.sleep(0.02)
-    assert cache.stats() == {"groups": 0, "entries": 0}, "宽限期到点缓存未被清"
+    assert cache.stats() == {"groups": 0, "entries": 0}, "归零后未立即清空缓存"
 
 
 # ── M2：baked 组内子键 LRU 上限 ─────────────────────────────
