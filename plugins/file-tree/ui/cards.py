@@ -454,6 +454,11 @@ class FileTreeCard(QWidget):
         self._pending_scroll: int = 0
         # 队首目录扫描请求发起时刻（monotonic）：超时跳过防单层拖死整队
         self._pending_expand_since: float = 0.0
+        # 外部投递预览的「待定位路径」：首次打开工作台时页刚构建、根扫描尚未
+        # 落地，此刻树里还没有该节点。记下来，根条目落地后补一次定位。
+        self._pending_reveal_path: str = ""
+        # 待定位链路已请求过扫描的目录（防 populate 失败时反复重扫 → 递归）
+        self._pending_reveal_scanned: set = set()
         # 主题签名缓存（_apply_latest_theme 产出全等时跳过全部 set，切页高频路径）
         self._theme_signature: Optional[tuple] = None
 
@@ -1064,6 +1069,7 @@ class FileTreeCard(QWidget):
         if _same_path(scan_dir, model_root):
             self._source_model.refresh_root(entries)
             if self._stack.currentIndex() == _PAGE_PREVIEW:
+                self._flush_pending_reveal()
                 return  # 同根刷新不抢页面（预览中保留当前阅读内容）
         else:
             self._live_expanded.clear()  # 旧根的实时展开路径不写进新根条目
@@ -1075,10 +1081,21 @@ class FileTreeCard(QWidget):
             # 换根（切对话标签页 / 换项目）：旧预览已不属于当前上下文，
             # 必须退出预览态，否则每个标签页都停在同一个旧预览（串台）
             if is_initial_load and self._stack.currentIndex() == _PAGE_PREVIEW:
+                self._flush_pending_reveal()
                 return  # 初始装载：保留外部投递的预览
         self._stack.setCurrentIndex(0 if entries else 1)
         if not entries:
             self._placeholder.setText("项目目录为空")
+        self._flush_pending_reveal()
+
+    def _flush_pending_reveal(self) -> None:
+        """根条目落地后补一次树内定位（外部投递预览早于根扫描的场景）
+
+        首次打开工作台点开文件时页刚构建、根扫描尚未落地，``_reveal_in_tree``
+        找不到节点只能跳过；不补这一步，用户点返回箭头回来会看到「树里没有
+        任何选中」，不知道刚才看的是哪个文件。
+        """
+        self._advance_pending_reveal()
 
     def _show_error(self, message: str):
         if self._stack.currentIndex() == _PAGE_PREVIEW:
@@ -1100,6 +1117,9 @@ class FileTreeCard(QWidget):
         dt = (time.perf_counter() - t0) * 1000
         if dt > 50:
             logger.warning(f"[FileTree] 子目录落地慢: {dir_path} populate+watch {dt:.0f}ms ({len(entries)} 条)")
+        # 外部投递的深层文件定位：每落一层就往前推一步（未投递时为零操作）
+        if self._pending_reveal_path:
+            self._advance_pending_reveal()
         self._process_expand_queue()  # 恢复队列：本层加载完成，展开下一层
 
     # ── 展开/折叠 ──
@@ -1914,10 +1934,10 @@ class FileTreeCard(QWidget):
         可预览的文件直接开在本页，不跳出应用。
 
         两条路径：
-        - 文件在**当前项目树内**（节点已加载）：展开祖先 → 选中 → 滚动到可见，
-          再进预览页。用户返回树页时能直接看到自己在哪。
-        - 不在树内 / 节点尚未加载：只进预览页，不动树的展开状态（避免为一个
-          目录外的临时文件把整棵树展开到无关分支）。
+        - 文件在**当前项目树内**：展开祖先 → 选中 → 滚动到可见，再进预览页。
+          用户返回树页时能直接看到自己在哪。
+        - 不在树内 / 项目外临时文件：只进预览页，不动树的展开状态（避免为
+          一个目录外的文件把整棵树展开到无关分支）。
 
         ★ 不做 ``detect_kind`` 判定以外的兜底：预览失败返回 False，由调用方
           决定是否降级（宿主会继续交系统默认程序）。
@@ -1926,16 +1946,78 @@ class FileTreeCard(QWidget):
             return False
         if not detect_kind(path):
             return False
-        self._reveal_in_tree(path)
+        self._pending_reveal_path = os.path.normpath(path)
+        self._pending_reveal_scanned.clear()
+        self._advance_pending_reveal()
         return self._render_preview(path)
 
-    def _reveal_in_tree(self, path: str) -> None:
-        """若目标在已加载的树内：展开祖先、选中并滚动到可见（否则静默跳过）"""
+    def _advance_pending_reveal(self) -> None:
+        """推进「待定位路径」：逐层展开未加载的祖先目录，就绪后定位选中
+
+        首次打开工作台时页面刚构建、根扫描尚未落地，树里连目标节点都还没有；
+        深层文件（``app/core/store/x.py``）更要逐层扫描才能建出节点。所以定位
+        是异步的：这里只推进一层（请求扫描最深未加载的祖先目录），由扫描回调
+        ``_on_lazy_scan_done`` 再次推进，直到 ``_reveal_in_tree`` 命中。
+
+        树外文件（项目根之外）直接放弃：树里本就没有它，定位无意义。
+        """
+        path = self._pending_reveal_path
+        if not path:
+            return
+        if self._reveal_in_tree(path):
+            self._pending_reveal_path = ""
+            self._pending_reveal_scanned.clear()
+            return
+        root = self._source_model.project_root()
+        if not root:
+            return  # 根尚未落地：等 _apply_root_entries 里的 flush 再推进
+        try:
+            rel = os.path.relpath(path, root)
+        except ValueError:
+            rel = ""
+        if not rel or rel.startswith(".."):
+            self._pending_reveal_path = ""  # 项目外文件：树里没有，放弃
+            self._pending_reveal_scanned.clear()
+            return
+        parts = rel.split(os.sep)
+        for depth in range(1, len(parts)):
+            dir_path = os.path.join(root, *parts[:depth])
+            if self._source_model.node_is_failed(dir_path):
+                self._pending_reveal_path = ""  # 目录扫描已熔断，不再重试
+                self._pending_reveal_scanned.clear()
+                return
+            node = self._source_model.find_node(dir_path)
+            if node is None:
+                return  # 父级还没建出子节点，等其扫描回调再推
+            if not node.is_dir:
+                self._pending_reveal_path = ""  # 路径中间是文件，树里不存在该目标
+                self._pending_reveal_scanned.clear()
+                return
+            if node.loaded:
+                continue
+            key = os.path.normcase(os.path.normpath(dir_path))
+            if key in self._pending_reveal_scanned:
+                return  # 该层已请求过（扫描失败/被过滤）：等下一次触发，不重排
+            self._pending_reveal_scanned.add(key)
+            self._request_scan(
+                dir_path, lambda entries, _d=dir_path: self._on_lazy_scan_done(entries, _d)
+            )
+            return
+        # 祖先全部已加载但目标仍不存在（已被删除 / 被过滤规则隐藏）
+        self._pending_reveal_path = ""
+        self._pending_reveal_scanned.clear()
+
+    def _reveal_in_tree(self, path: str) -> bool:
+        """若目标在已加载的树内：展开祖先、选中并滚动到可见
+
+        Returns:
+            True 已定位；False 节点尚未加载 / 定位失败（调用方可稍后重试）。
+        """
         try:
             target = os.path.normpath(path)
             node = self._source_model.find_node(target)
             if node is None:
-                return
+                return False
             # 祖先链自顶向下展开：父级未展开时子节点没有有效 proxy 索引
             ancestors: List[str] = []
             parent = getattr(node, "parent_node", None)
@@ -1954,14 +2036,16 @@ class FileTreeCard(QWidget):
                     self._tree_view.expand(proxy_idx)
             src_idx = self._source_model._index_for_node(node)
             if not src_idx.isValid():
-                return
+                return False
             proxy_idx = self._proxy_model.mapFromSource(src_idx)
             if not proxy_idx.isValid():
-                return
+                return False
             self._tree_view.setCurrentIndex(proxy_idx)
             self._tree_view.scrollTo(proxy_idx, QAbstractItemView.PositionAtCenter)
+            return True
         except Exception as e:  # 定位失败不影响预览本身
             logger.debug(f"[FileTree] 树内定位失败（忽略）: {path} -> {e}")
+            return False
 
     def _open_preview(self, path: str) -> None:
         """卡片内预览（双击 / 右键菜单入口）；预览不了回退到默认程序"""
@@ -1993,6 +2077,9 @@ class FileTreeCard(QWidget):
         """返回文件树（树页未销毁，展开 / 选中 / 滚动原样保留）"""
         self._stack.setCurrentIndex(_PAGE_TREE if self._source_model.rowCount(QModelIndex()) else _PAGE_PLACEHOLDER)
         self._tree_view.setFocus()
+        # 返回树页时补一次外部投递定位：用户可能在根扫描落地前就点了返回，
+        # 那次定位因节点尚不存在被跳过，这里立刻接上（无待办时为零操作）
+        self._advance_pending_reveal()
 
     def _on_file_activated(self, path: str) -> None:
         """双击分流：可预览类型进预览，其余仍交系统默认程序"""
