@@ -77,6 +77,20 @@ logger = logging.getLogger(__name__)
 # 二者由 SendableTextEdit.toPlainText() 双向对齐。
 _PLACEHOLDER_RE = re.compile(r"\[\[([^\]]*)\]\]")
 
+# 输入框「必然超过 maxHeight」的快速判据（见 _adjust_height_to_content）。
+# 输入框 maxHeight=300、上下 padding 14，即最多容纳 286px 正文；字号 15px。
+#
+# ① 硬换行数 blockCount：行高取**最小可能值** 15px（字号 15 时不会更小），
+#    286 / 15 ≈ 19 → 20 行 × 15px = 300px > 286px，必然溢出。
+# ② 字符数：应对「一大段无换行」的粘贴（blockCount 恒为 1）。按最乐观排版
+#    （窗口宽 4000px、单字符宽 0.35×15=5.25px）估算：每行最多 762 字符，
+#    填满 286px 需 15 行（行高按 19px）→ 11430 字符；向上取 15000 留余量。
+# 两条命中任一条即不再向 QTextDocument 要全量布局（doc.size() 对 50 万字符
+# 要 4.5 秒，是长文本粘贴卡死的主因）。阈值偏大只损失一点性能，偏小会把
+# 短短几行误钉到 300 高度（气泡下方大片空白）——宁可偏大。
+_TALL_BLOCK_THRESHOLD = 20
+_TALL_CHAR_THRESHOLD = 15000
+
 # ── inline 文件引用胶囊（QTextDocument 自定义对象）──────────────────
 # Qt 用 U+FFFC（object replacement character）在文档里代表一个 inline object。
 _FILE_MENTION_TYPE = QTextFormat.UserObject + 1
@@ -2071,7 +2085,21 @@ class SendableTextEdit(TextEdit):
         doc = self.document()
         # 14 = QSS 上下 padding (8 + 4) + 2px 余量；最小高度 44（单行时
         # 文字区 44-12=32px，完整容纳 15px 字号一行不裁切）
-        content_height = int(doc.size().height()) + 14
+        #
+        # [PERF] 超长文本 O(1) 快速路径：doc.size() 会强制 QTextDocument 对整篇
+        # 做一次全量布局，成本随字符数超线性增长（offscreen 实测：10 万字符
+        # 183ms / 30 万 1458ms / 50 万 4556ms）。粘贴几十万字符时 textChanged
+        # → 本方法一次全量布局就把主线程钉住数秒，表现即「整个软件卡死」。
+        # 两个 O(1) 判据（硬换行数 / 字符数）任一命中即说明内容必然溢出上限，
+        # 直接钉到 300，不问布局；与 PlainTextViewer 的
+        # _definitely_tall_chars 快速路径同一思路。
+        if (
+            doc.blockCount() > _TALL_BLOCK_THRESHOLD
+            or doc.characterCount() >= _TALL_CHAR_THRESHOLD
+        ):
+            content_height = 300
+        else:
+            content_height = int(doc.size().height()) + 14
         new_height = max(44, min(300, content_height))
 
         if self.height() != new_height:

@@ -70,7 +70,7 @@ from qfluentwidgets import (
     TransparentToolButton,
 )
 from qfluentwidgets.components.widgets.scroll_bar import SmoothScrollDelegate
-from app.core.infra import perf_jsonl
+from app.core.infra.telemetry import perf_jsonl
 from app.core.infra.webengine_profile import get_shared_web_profile
 from app.utils.design_tokens import (
     Animations,
@@ -12116,6 +12116,19 @@ class PlainTextViewer(QWidget):
                     self.setFixedSize(cap, self.MAX_HEIGHT)
                     self.contentHeightChanged.emit(self.MAX_HEIGHT)
                 return
+        elif len(self._text) >= self._definitely_tall_chars():
+            # [PERF] 宽度上限尚未注入（cap=初始未限宽态）时的超长文本快速路径。
+            # 真机链路里 MessageCard.update_content → finish_streaming 发生在
+            # _add_chat_widget → _sync_single_card_width 之前，此时 cap 仍是
+            # 16777215，上面那条 cap < 100000 的判据拦不到，于是落到下面的
+            # 独立文档全量测量（offscreen 实测 50 万字符 4362ms，发送长消息时
+            # 主线程直接冻住）。字符数达阈值即内容必然超高，先按 MAX_HEIGHT
+            # 定型；宽度沿用当前实测值，宽度定型仍由随后 sync_width →
+            # set_width_cap 走上面那条 cap < 100000 分支完成。
+            if self.height() != self.MAX_HEIGHT:
+                self.setFixedSize(max(self.width(), 60), self.MAX_HEIGHT)
+                self.contentHeightChanged.emit(self.MAX_HEIGHT)
+            return
 
         # 测量用独立同步文档：共享文档被 QTextEdit 钉在 viewport 宽且布局异步，
         # setTextWidth(w) 后立即读 size() 拿到旧宽缓存 → 短消息误判"多行"
