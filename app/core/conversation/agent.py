@@ -846,29 +846,6 @@ class AgentManager:
         agents = self.list_subagents(include_hidden=include_hidden)
         return [a.name for a in agents]
 
-    def get_available_subagents_for_prompt(self, include_hidden: bool = True) -> str:
-        """
-        获取可用于主智能体提示词中的子智能体列表（格式化文本）。
-
-        用于主智能体提示词动态注入可用子智能体信息，避免硬编码。
-
-        Returns:
-            格式化子智能体列表文本，格式：
-            ## Available Subagents
-            - name: description
-            - name: description
-            ...
-        """
-        agents = self.list_subagents(include_hidden=include_hidden)
-        if not agents:
-            return ""
-
-        lines = ["## Available Subagents\n可直接使用的子智能体列表(可供subagent_para使用)："]
-        for a in agents:
-            lines.append(f"- **{a.name}**: {a.description[:300]}")
-
-        return "\n".join(lines)
-
     def unload_skill(self, skill_name: str):
         """卸载一个技能，包括其 Hooks"""
         if skill_name in self._agents:
@@ -1026,8 +1003,9 @@ Use the tools available to you based on your permissions."""
 
         # Collect BuildSystemPrompt hook contributions
         if self._hook_manager:
-            # 预取智能体身份/技能内容/子智能体列表，通过 context 传递给 hooks
-            # （hooks 不能直接 import app 内部模块，所有数据必须从 context 读取）
+            # 预取智能体身份，通过 context 传递给 hooks
+            # （hooks 不能直接 import app 内部模块，宿主数据必须从 context 读取；
+            # 技能/子智能体清单不在此预取——它们由 system-hooks 插件经能力池自取）
             hook_ctx: Dict[str, Any] = {
                 "agent_name": agent_name,
                 "is_subagent_call": is_subagent_call,
@@ -1037,26 +1015,6 @@ Use the tools available to you based on your permissions."""
             # 合并外部上下文（由 context_builder 传入 project_root/project_name）
             if extra_context:
                 hook_ctx.update(extra_context)
-            # 技能内容（project_root 贯穿：动态技能源按会话所属项目求值）
-            try:
-                from app.utils.config import Settings
-
-                enabled_skills = Settings.get_instance().llm_enabled_skills.value
-                sk_content = self.get_enabled_skills_content(
-                    enabled_skills, project_dir=hook_ctx.get("project_root") or None
-                )
-                if sk_content:
-                    hook_ctx["enabled_skills_content"] = sk_content
-            except Exception:
-                pass
-            # 子智能体列表（仅主智能体需要）
-            if not is_subagent_call:
-                try:
-                    sub_info = self.get_available_subagents_for_prompt()
-                    if sub_info:
-                        hook_ctx["available_subagents_content"] = sub_info
-                except Exception:
-                    pass
             results = self._hook_manager.trigger_event(
                 "BuildSystemPrompt",
                 context=hook_ctx,
@@ -1082,32 +1040,6 @@ Use the tools available to you based on your permissions."""
                 base = base + "\n\n" + "\n\n".join(contributions)
 
         return base
-
-    def get_enabled_skills_content(
-        self, enabled_skills: List[str], project_dir: Optional[str] = None
-    ) -> str:
-        """获取已启用技能内容（project_dir 非空时含贡献动态技能源）
-
-        两类进「偏好技能」段：
-        - enabled_skills 名单内的技能（现有语义）
-        - auto_enable=True 的贡献条目（如项目技能，无需手动启用）
-        """
-        from app.utils.utils import get_local_skills
-
-        all_skills = get_local_skills(project_dir)
-        if not all_skills:
-            return ""
-        enabled_set = set(enabled_skills or [])
-        result_parts = [
-            "\n\n## 偏好技能\n凡用户请求命中以下技能 description 描述的场景，必须先调用 `skill` 工具加载对应技能再回答，禁止跳过直接作答；以下技能无法满足时用 `manage_skill(action=\"list\")` 查看完整列表：\n"
-        ]
-
-        for skill in all_skills:
-            if skill["name"] in enabled_set or skill.get("auto_enable"):
-                display_name = skill.get("qualified_name", skill["name"])
-                result_parts.append(f"\n### {display_name}\n{skill.get('description', '')}\n")
-
-        return "\n".join(result_parts) if len(result_parts) > 1 else ""
 
     def get_agent_config(self, agent_name: str) -> Dict[str, Any]:
         agent = self.get_agent(agent_name)

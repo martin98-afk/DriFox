@@ -75,30 +75,6 @@ def _spawn_facade() -> Optional[dict]:
     facade = sp
     return facade if isinstance(facade, dict) else None
 
-def _leader_gate(tm, window_id: str) -> Optional[ToolResult]:
-    """leader 门禁单点（仅 remove_member；群发已放开不限 leader；不进 PermissionResolver）。
-
-    Returns:
-        None=放行；否则返回 deny 结果。leader_window_id 为空（非
-        team_manage(action=create) 建团的老团队）同样拒绝，避免管理操作悬空。
-    """
-    try:
-        leader_wid = str(tm.get_leader_window_id() or "")
-    except Exception:
-        leader_wid = ""
-    if not leader_wid:
-        return ToolResult(False, error="当前团队未登记 leader（仅 team_manage(action=create) 建团支持管理操作），已拒绝")
-    if window_id == leader_wid:
-        return None
-    leader_label = leader_wid
-    try:
-        name = tm.get_member_agent_name(leader_wid)
-        if name:
-            leader_label = f"{name}@{leader_wid}"
-    except Exception:
-        pass
-    return ToolResult(False, error=f"仅团队 leader 可执行该操作（当前 leader: {leader_label}）")
-
 
 def _format_capability(cap: dict) -> str:
     """格式化能力摘要：如 `写✓/编✓/bash✓ | 标签: implement`。"""
@@ -764,7 +740,7 @@ def _team_add_member(tool_ctx, agent_name: str, role: str) -> ToolResult:
     return ToolResult(True, content="\n".join(lines))
 
 def _team_remove_member(tool_ctx, agent_name: str) -> ToolResult:
-    """按 agent_name 移除成员（leader 门禁；多同名全移并在返回里说明）"""
+    """按 agent_name 移除成员（任意团队成员可调；多同名全移并在返回里说明）"""
     window_id = tool_ctx.get("team_window_id", "")
     if not window_id:
         return ToolResult(False, error="当前不在团队上下文中，请先执行 /team --join=<agent> 加入团队")
@@ -773,9 +749,6 @@ def _team_remove_member(tool_ctx, agent_name: str) -> ToolResult:
         return ToolResult(False, error="agent_name 不能为空")
 
     tm = _get_team_manager()
-    gate = _leader_gate(tm, window_id)
-    if gate is not None:
-        return gate
     mg = _get_team_manage()
     if mg is None:
         return ToolResult(False, error="团队管理能力不可用（缺少 team.manage 能力声明）")
@@ -851,7 +824,7 @@ _TEAM_MANAGE_SCHEMA = {
             "list=查成员(任何窗口可用，非成员也可只读，返回 agent_name@window_id)；"
             "create=创建团队(任何窗口可用，team_name/team_role 必填，members 可选)，leader 与成员全新建窗口、当前窗口不切标签页；create 后即可用 team_send_message 派任务，成员自动执行；"
             "add=拉成员入队(提交开窗请求，本轮结束后开窗；须已在团队中，成员可调用；agent_name/role 必填，下一轮用 list 验证)；"
-            "remove=移出成员(仅 leader，agent_name 必填，同名全移除，不能移除自己)；"
+            "remove=移出成员(任意成员可调，agent_name 必填，同名全移除，不能移除自己)；"
             "leave=退出(须已在团队中，leader 退出自动移交)。"
         ),
         "parameters": {
@@ -940,7 +913,7 @@ def _team_manage_impl(tool_ctx, **kwargs):
 def register(registry):
     # team_manage：team_only=False —— 非团队窗口（主窗口）可 action=create/list
     # 发起「一句话组队」，否则会被 agent.py 的 team_only schema 过滤拦在第一步；
-    # 权限按 action 在 impl 内分层（add 须成员、remove 须 leader、leave 须成员）
+    # 权限按 action 在 impl 内分层（add 须成员、remove 须成员、leave 须成员）
     registry.register(
         "team_manage",
         _TEAM_MANAGE_SCHEMA,

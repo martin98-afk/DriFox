@@ -37,18 +37,6 @@
         ]
       },
       {
-        "matcher": "primary",
-        "hooks": [
-          {
-            "type": "python",
-            "function": ".inject_subagent_info:hook",
-            "add_output_to_context": true,
-            "statusMessage": "子智能体列表:",
-            "id": "builtin_inject_subagents"
-          }
-        ]
-      },
-      {
         "hooks": [
           {
             "type": "python",
@@ -72,6 +60,28 @@
       }
     ],
     "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "python",
+            "function": ".inject_subagent_info:hook",
+            "add_output_to_context": true,
+            "statusMessage": "子智能体列表:",
+            "id": "builtin_inject_subagents_session"
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "python",
+            "function": ".inject_skills_content:hook",
+            "add_output_to_context": true,
+            "statusMessage": "技能配置:",
+            "id": "builtin_inject_skills_session"
+          }
+        ]
+      },
       {
         "matcher": "#team_member",
         "hooks": [

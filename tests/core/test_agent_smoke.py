@@ -491,12 +491,6 @@ class TestAgentManager:
         assert mgr.list_subagent_names() == []
         assert mgr.list_subagent_names(include_hidden=True) == []
 
-    def test_get_available_subagents_for_prompt_empty(self, mod):
-        """Returns empty string when no subagents exist."""
-        mgr = mod.AgentManager.get_instance()
-        result = mgr.get_available_subagents_for_prompt()
-        assert result == ""
-
     def test_get_agent_config_unknown_returns_empty_dict(self, mod):
         mgr = mod.AgentManager.get_instance()
         assert mgr.get_agent_config("nonexistent") == {}
@@ -505,10 +499,6 @@ class TestAgentManager:
         """Unknown agent returns 'allow'."""
         mgr = mod.AgentManager.get_instance()
         assert mgr.check_permission("nonexistent", "bash") == "allow"
-
-    def test_get_enabled_skills_content_empty_list(self, mod):
-        mgr = mod.AgentManager.get_instance()
-        assert mgr.get_enabled_skills_content([]) == ""
 
     # ── No-crash operations on empty manager ──────────────────────────
 
@@ -724,14 +714,13 @@ class TestAgentManagerWithAgents:
         assert agent is not None
         assert agent.name == "hidden-agent"
 
-    # ── get_available_subagents_for_prompt ──
-    def test_get_available_subagents_formatted(self, mod, mgr_with_agents):
-        text = mgr_with_agents.get_available_subagents_for_prompt(include_hidden=False)
-        assert "## Available Subagents" in text
-        assert "**sub-agent**" in text
-        assert "**all-agent**" in text
-        assert "**primary-agent**" not in text
+    # ── list_subagents（清单渲染的数据源）──
+    def test_list_subagents_excludes_primary(self, mod, mgr_with_agents):
+        names = [a.name for a in mgr_with_agents.list_subagents(include_hidden=False)]
+        assert "sub-agent" in names
+        assert "all-agent" in names
+        assert "primary-agent" not in names
 
-    def test_get_available_subagents_include_hidden_in_prompt(self, mod, mgr_with_agents):
-        text = mgr_with_agents.get_available_subagents_for_prompt(include_hidden=True)
-        assert "**hidden-agent**" in text
+    def test_list_subagents_include_hidden(self, mod, mgr_with_agents):
+        names = [a.name for a in mgr_with_agents.list_subagents(include_hidden=True)]
+        assert "hidden-agent" in names

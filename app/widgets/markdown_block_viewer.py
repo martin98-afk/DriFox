@@ -1157,9 +1157,14 @@ def _md_to_html(md_fragment: str) -> str:
     """markdown 片段 → 注入行内样式的 HTML（Qt 富文本兼容）。"""
     try:
         get_markdown_instance, _, _ = _md_components()
+        from app.widgets.card_render_core import _escape_bare_hash_headers
+
         md = get_markdown_instance()
         md.reset()
-        html = md.convert(md_fragment)
+        # 裸井号编号（`#56 …`）会被 Python-Markdown 当成 ATX 标题：字号暴涨、
+        # `#` 消失。WebEngine 通道由 _sanitize_incomplete_markdown 统一处理，
+        # 本通道不走那套预处理，需在此单独转义（判据与实现同源）。
+        html = md.convert(_escape_bare_hash_headers(md_fragment))
     except Exception:
         html = "<p>" + _html_mod.escape(md_fragment) + "</p>"
     return _inject_qt_rich_styles(html)

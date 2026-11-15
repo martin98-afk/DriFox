@@ -257,3 +257,21 @@ def test_real_followups_still_collected_among_examples():
     assert "代码里的示例" in out
     assert "行内" in out
     assert out.index("真追问一") < out.index("真追问二")
+
+def test_inline_tag_name_does_not_swallow_followups():
+    """正文里写出来的标签名（行内代码里的 `` `<tool>` ``）不得当成未闭合协议块。
+
+    回归：表格里出现 `` `<tool>` `` 时，协议块正则把它当成 `<tool>` 开标签、
+    一路吞到文末，真正的追问落在「保护区」里被跳过 —— 表现为卡片底部原样
+    冒出 `- <ask>…</ask>` 字面量，收不到追问区块。
+    """
+    src = (
+        "| 项 | 判定 |\n|---|---|\n"
+        "| I-1 | content 截断到下一个 `<tool>` 开标签 |\n\n"
+        "正文结束。\n\n"
+        "- <ask>这轮改动可以提交了吗？</ask>\n"
+    )
+    out = _inject_context_links(src)
+    assert "<ask>" not in out, out
+    assert out.count('data-type="ask"') == 1
+    assert "这轮改动可以提交了吗？" in out

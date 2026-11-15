@@ -1107,9 +1107,54 @@ def _normalize_table_blocks(md_text: str) -> str:
     return "\n".join(out)
 
 
+# 「裸井号」编号：行首（含列表/引用标记之后）1-6 个 `#` 紧跟非空白字符。
+# Python-Markdown 的 ATX 标题规则不要求 `#` 后必须有空格（CommonMark 要求），
+# 于是 `#56 审计…`、`#T1 完成…`、`##状态盘点` 全被判成 `<h1>`/`<h2>`：
+# 字号暴涨、原始 `#` 消失、列表项里还嵌一层标题。真实语料统计行首裸井号
+# 1700+ 处（`#56` 编号 1511 / `#T1` 167 / `##状态盘点` 57），是主噪源。
+#
+# 判据只认「`#` 后不跟空白」这一条，天然放过真标题（`# 标题`、`## 二级`）
+# 与围栏内代码；转义而非删除，原文 `#` 得以保留。
+_BARE_HASH_HEADER_PATTERN = re.compile(
+    r"^(?P<pre>[ ]{0,3}(?:>[ ]?)*(?:(?:[-*+]|\d{1,9}[.)])[ ]+)?)(?P<hashes>#{1,6})(?=[^\s#])",
+    re.MULTILINE,
+)
+
+
+def _escape_bare_hash_headers(md_text: str) -> str:
+    """把「裸井号编号」转义成字面 `#`，避免被当成 ATX 标题。
+
+    `#56 审计判定` → `\\#56 审计判定`（渲染成正文 `#56 审计判定`）。
+    围栏（``` / ~~~）内原样不动：代码里的 `#include` 不能改。
+    幂等：已转义的行首是 `\\#`，不再匹配。
+    """
+    if "#" not in md_text:
+        return md_text
+    out: list = []
+    in_fence = False
+    for line in md_text.split("\n"):
+        if line.lstrip(" \t")[:3] in ("```", "~~~"):
+            in_fence = not in_fence
+            out.append(line)
+            continue
+        if in_fence:
+            out.append(line)
+            continue
+        out.append(
+            _BARE_HASH_HEADER_PATTERN.sub(
+                lambda m: m.group("pre") + "\\" + m.group("hashes"), line
+            )
+        )
+    return "\n".join(out)
+
+
 def _sanitize_incomplete_markdown(md_text: str) -> str:
     if not md_text:
         return ""
+    # 裸井号编号转义：`#56 …` 会被 Python-Markdown 当成 ATX 标题（它不要求
+    # `#` 后有空格），字号暴涨且 `#` 被吃掉。放在所有渲染管线（全量/差量/
+    # 尾部/worker/viewer/block）的共同入口做一次。
+    md_text = _escape_bare_hash_headers(md_text)
     # 表格补空行：模型常把表格紧贴在正文下一行，tables 扩展要求表格是独立块
     # （GFM 同样不允许表格打断段落），缺空行整张表退化成带 | 的普通文本。
     # 放在所有渲染管线（全量/差量/尾部/worker/viewer/block）的共同入口做一次。
@@ -5275,17 +5320,26 @@ def _collect_and_strip_asks(md_text: str) -> tuple[str, list[str]]:
     #   - 缩进代码块（4 空格 / Tab）：markdown 的另一种代码块形态
     #   - 行内代码：同理
     #   - 协议块（think/tool/hook/system-reminder/plan/mood/注册 tag）：块内不是正文
-    proto_pattern = _ask_proto_block_pattern()
-    protected = [
+    code_spans = [
         (m.start(), m.end())
         for p in (
             _CODE_BLOCK_PATTERN,
             _ASK_TILDE_FENCE_PATTERN,
             _ASK_INDENTED_CODE_PATTERN,
             _ASK_INLINE_CODE_PATTERN,
-            proto_pattern,
         )
         for m in p.finditer(md_text)
+    ]
+
+    def _in_code(pos: int) -> bool:
+        return any(s <= pos < e for s, e in code_spans)
+
+    # 协议块起点落在代码区间内 → 那是正文里写出来的标签名（如表格里的 `` `<tool>` ``），
+    # 不是真的协议块。否则它会被当成未闭合块一路吞到文末，把真正的提问也保护掉。
+    protected = code_spans + [
+        (m.start(), m.end())
+        for m in _ask_proto_block_pattern().finditer(md_text)
+        if not _in_code(m.start())
     ]
 
     def _in_protected(pos: int) -> bool:

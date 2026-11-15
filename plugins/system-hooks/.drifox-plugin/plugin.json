@@ -18,7 +18,10 @@
   "api_version": 2,
   "capabilities": [
     "team.read",
-    "tool.read"
+    "tool.read",
+    "agent.read",
+    "config.read",
+    "session.read"
   ],
   "components": {
     "hooks": true

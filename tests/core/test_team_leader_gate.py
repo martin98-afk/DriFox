@@ -59,11 +59,13 @@ def with_team_leader(tm):
         tm._save_team_data(tm.DEFAULT_TEAM)
 
 
-def test_remove_denied_for_non_leader(team_env):
-    tt = team_env["tt"]
+def test_remove_allowed_for_non_leader(team_env):
+    """remove 已不再做 leader 门禁：任意成员均可移除其他成员。"""
+    tt, tm = team_env["tt"], team_env["tm"]
     r = tt._team_manage_impl({"team_window_id": "win_91", "team_agent_name": "build"}, action="remove", agent_name="review")
-    assert not r.success
-    assert "leader" in r.error
+    assert r.success
+    assert "review" in r.content
+    assert "win_92" not in {m["window_id"] for m in tm.get_members()}
 
 
 def test_broadcast_allowed_for_any_member(team_env):
@@ -79,13 +81,14 @@ def test_broadcast_allowed_for_any_member(team_env):
     mails = tm.get_mailbox_mails("win_92")
     assert mails and mails[0]["from_window"] == "win_91"
 
-def test_remove_still_leader_gated(team_env):
-    """remove 的 leader 门禁保留：群发放开不影响移除权限。"""
+def test_remove_no_longer_leader_gated(team_env):
+    """remove 的 leader 门禁已完全去掉：非 leader 窗口可直接移除成员。"""
     tt = team_env["tt"]
     r = tt._team_manage_impl(
         {"team_window_id": "win_91", "team_agent_name": "build"}, action="remove", agent_name="review"
     )
-    assert not r.success and "leader" in r.error
+    assert r.success
+    assert "lead" not in (r.error or "")
 
 
 def test_remove_same_name_members_all(team_env):
@@ -96,6 +99,23 @@ def test_remove_same_name_members_all(team_env):
     assert "2" in r.content
     remaining = {m["window_id"] for m in tm.get_members()}
     assert "win_91" not in remaining and "win_93" not in remaining
+
+
+def test_remove_allowed_when_no_leader_registered(team_env):
+    """未登记 leader 的团队（预置模板/join 路径建团）：remove 不设卡，直接放行。
+
+    这种团队此前被「未登记 leader → 已拒绝」整条卡死，管理操作全部无法执行。
+    """
+    tt, tm = team_env["tt"], team_env["tm"]
+    with tm._data_lock:
+        data = tm._get_team_data(tm.DEFAULT_TEAM)
+        data["leader_window_id"] = ""
+        tm._save_team_data(tm.DEFAULT_TEAM)
+    r = tt._team_manage_impl(
+        {"team_window_id": "win_91", "team_agent_name": "build"}, action="remove", agent_name="review"
+    )
+    assert r.success
+    assert "review" in r.content
 
 
 def test_remove_cannot_remove_self(team_env):
