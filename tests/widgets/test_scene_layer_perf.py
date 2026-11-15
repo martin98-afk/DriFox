@@ -31,6 +31,16 @@ class _FakeSource:
         self.fps = 12
         self.current = QImage(4, 4, QImage.Format_ARGB32)
         self.subs = []
+        # O1 预缩放几何登记：生产 AnimationSource 的主线程接口同签名
+        self.geometries = {}
+        self.unregistered = []
+
+    def register_geometry(self, key, geo):
+        self.geometries[key] = geo
+
+    def unregister_geometry(self, key):
+        self.unregistered.append(key)
+        self.geometries.pop(key, None)
 
     def subscribe(self, layer):
         if layer not in self.subs:
