@@ -2563,6 +2563,8 @@ class CodeWebViewer(QWebEngineView):
             self._renderer_pid = 0
         if _RENDER_PROBE:
             try:
+                # [O5-FIX] 回填 page：renderer 终止时 ConsoleMonitorPage 记录真实旧 pid
+                self.page()._renderer_pid = self._renderer_pid
                 _probe_new_pid = int(self._renderer_pid or 0)
                 if _probe_new_pid and _probe_old_pid and _probe_new_pid != _probe_old_pid:
                     perf_jsonl.append_event(
