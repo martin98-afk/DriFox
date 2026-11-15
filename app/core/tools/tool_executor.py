@@ -37,6 +37,30 @@ from app.utils.file_operation_recorder import (
 # ============================================================
 
 
+# 旧 services 键的工具面投影键表：进程首次调用时按「tool ∈ spec.surfaces」
+# 过滤 LEGACY_MAP 后冻结为 tuple（顺序即 LEGACY_MAP 顺序）。只缓存 (old, cap)
+# 键对、不缓存任何能力值：pool.legacy(_old, _cap) 与 "cap in pool" 仍每次调用
+#（host 相关值随窗口变化，不可缓存）。惰性构建以避开模块加载期对 catalog 的
+# 顶层 import 耦合。
+_TOOL_LEGACY_PROJECTION = None
+
+
+def _tool_legacy_projection():
+    """返回工具面投影键表 (old, cap) 元组；首次调用冻结，之后复用。"""
+    global _TOOL_LEGACY_PROJECTION
+    if _TOOL_LEGACY_PROJECTION is None:
+        from app.plugins.capabilities.catalog import CATALOG as _CAP_CATALOG
+        from app.plugins.capabilities.catalog import LEGACY_MAP as _CAP_LEGACY
+
+        _TOOL_LEGACY_PROJECTION = tuple(
+            (_old, _cap)
+            for _old, _cap in _CAP_LEGACY.items()
+            if _CAP_CATALOG.get(_cap) is not None
+            and "tool" in _CAP_CATALOG[_cap].surfaces
+        )
+    return _TOOL_LEGACY_PROJECTION
+
+
 def _plugin_label_from_source(source: str) -> str:
     """从注册 source（plugin:<名>）提取插件名，非插件源返回原值。"""
     try:
@@ -1063,15 +1087,10 @@ class ToolExecutor:
             pass
 
         # 旧 services 键由能力池投影：只有一份实现（providers/tool_core.py）。
-        # 按 surface 过滤，避免把 ui-only 能力投影进工具上下文。
-        from app.plugins.capabilities.catalog import CATALOG as _CAP_CATALOG
-        from app.plugins.capabilities.catalog import LEGACY_MAP as _CAP_LEGACY
-
+        # 键表进程级冻结（_tool_legacy_projection），只消除重复的静态过滤；
+        # pool.legacy / "cap in pool" 仍每次调用，host 相关值不缓存。
         services = {}
-        for _old, _cap in _CAP_LEGACY.items():
-            _spec = _CAP_CATALOG.get(_cap)
-            if _spec is None or "tool" not in _spec.surfaces:
-                continue
+        for _old, _cap in _tool_legacy_projection():
             if _cap in pool:
                 # 用 pool.legacy 而非 pool[_cap]：一个能力可对应多个语义不同的
                 # 旧键（如 agent.read → get_agent_manager / get_agent_prompt），

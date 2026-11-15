@@ -2696,6 +2696,20 @@ class PluginHostService(QObject):
             removed = diff.get("removed", [])
             changed = diff.get("changed", [])
 
+            # S7：diff 点失效声明缓存——S1 去 stat 后 manifest 变更的唯一感知
+            # 通道（原靠 resolve_declared 每次取用 os.stat(path) 的 mtime 签名）。
+            # added/removed/changed 逐插件精细失效；_pool_specs 键含 declared
+            # 签名，签名不变则旧 spec 仍正确，无需全量失效。
+            if added or removed or changed:
+                try:
+                    from app.plugins.capabilities.registry import CapabilityRegistry
+
+                    _cap_reg = CapabilityRegistry.get_instance()
+                    for _p in list(added) + list(removed) + list(changed):
+                        _cap_reg.invalidate_declared(_p.name)
+                except Exception as e:
+                    logger.warning(f"[PluginHost] 能力池声明缓存失效失败: {e}")
+
             if force_full:
                 # ── 全量路径：设置面板「重载插件」显式语义 ──
                 return self._reload_all_subsystems(pm, result, result_keys)
@@ -2828,6 +2842,24 @@ class PluginHostService(QObject):
 
     def _reload_all_subsystems(self, pm, result: dict, result_keys: tuple) -> dict:
         """全量重载所有子系统（设置面板「重载插件」显式语义，force_full=True）"""
+        # S7：全量重载 = 能力池缓存与宿主绑定全面失效。invalidate_declared("")
+        # 清 declared/池规格/无 host 特例池三缓存并递增注册表版本戳；
+        # bootstrap 就绪标记复位（providers 等将随重载重新注册，原无产品调用点，
+        # 此处是 S7 补上的接线）；插件→窗口绑定登记随全量重载作废，
+        # 避免 _resolve_host 复用旧窗口死引用。
+        try:
+            from app.plugins.capabilities.bootstrap import reset_bootstrap
+            from app.plugins.capabilities.registry import CapabilityRegistry
+            from app.plugins.capabilities.resolve import forget_host
+
+            CapabilityRegistry.get_instance().invalidate_declared("")
+            reset_bootstrap()
+            for _p in pm.list_plugins():
+                forget_host(_p.name)
+            logger.info("[PluginHost] 全量重载：能力池三缓存已失效，bootstrap 已复位")
+        except Exception as e:
+            logger.warning(f"[PluginHost] 全量重载能力池失效失败: {e}")
+
         # 2. 重载 AgentManager（智能体 + hooks）
         if self._agent_manager:
             self._agent_manager.reload_agents()

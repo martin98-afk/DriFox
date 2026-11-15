@@ -3704,7 +3704,9 @@ _SKELETON_CACHE_MAX = 48
 # cursor 仍为 pointer。
 # +1（v82）：renderWidgetToolbars 穿透 <div data-block-wrapper>，v2 通道下
 # svg / .html-widget 右上角工具栏不再漏挂；旧骨架缓存须失效。
-_SKELETON_CACHE_VERSION = 82
+# +1（v83）：内嵌 echarts 的 ResizeObserver resize 合并到 rAF 一帧一次
+# （card_viewers._initOneEcharts JS 变更）；旧骨架缓存须失效。
+_SKELETON_CACHE_VERSION = 83
 
 
 def _js_literal(value) -> str:

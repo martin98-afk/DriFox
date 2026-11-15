@@ -1008,6 +1008,25 @@ class WorkbenchPanel(QWidget):
         """
         return self._tab_id_at(self.current_tab())
 
+    def get_plugin_page(self, page_id: str) -> Optional[QWidget]:
+        """按 page_id 取已挂载的插件页实例（未挂载 / 已销毁返回 None）
+
+        供宿主与其它插件定向投递（如把某文件交给文件树页预览）：调用前须
+        保证页已 reconcile（``refresh_workbench`` 或 ``sync_plugin_pages``），
+        否则页尚未构建。外部不要直接摸 ``_plugin_widgets``。
+        """
+        widget = self._plugin_widgets.get(page_id)
+        if widget is None:
+            return None
+        try:
+            from PyQt5 import sip
+
+            if sip.isdeleted(widget):
+                return None
+        except Exception:
+            pass
+        return widget
+
     # ── 主题 ──
 
     def refresh_style(self) -> None:

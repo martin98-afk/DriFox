@@ -1192,6 +1192,12 @@ class PluginManager:
         logger.info(f"[PluginManager] Rescan done: added={len(added_names)}, removed={len(removed_names)}")
         # MCP 配置可能因插件增删而变更，失效缓存（列表刷新/连接清理依赖最新数据）
         self.invalidate_mcp_cache()
+        # S7：diff 非空时失效能力池声明缓存（S1 去 stat 后的 manifest 变更感知
+        # 通道之一；热重载主通道在 plugin_host_service.reload_plugin_subsystems）
+        if added_names or removed_names or changed_list:
+            changed_names = {p.name for p in changed_list}
+            for _name in set(added_names) | set(removed_names) | changed_names:
+                self.invalidate_capability_declared(_name)
         # [T26] 全量重扫成功 → 回写发现缓存（短路路径不回写，缓存仍有效）
         self._save_discovery_cache()
         return result
@@ -1326,6 +1332,8 @@ class PluginManager:
                 disabled.discard(name)
                 self._save_disabled_set(disabled)
             self.invalidate_mcp_cache()  # 启用插件可能带入新 MCP 配置
+            # S7：启用后组件重载，该插件声明可见性变化，能力池声明缓存同步失效
+            self.invalidate_capability_declared(name)
             logger.info(f"[PluginManager] Enabled plugin: {name}")
             state_changed = True
         # 联动加载全部组件（与禁用路径对称）：只补 UI + 工具会让 providers /
@@ -1379,6 +1387,8 @@ class PluginManager:
             disabled.add(name)
             self._save_disabled_set(disabled)
             self.invalidate_mcp_cache()  # 禁用插件需剔除其 MCP 配置
+            # S7：禁用后组件卸载，该插件声明可见性变化，能力池声明缓存同步失效
+            self.invalidate_capability_declared(name)
             logger.info(f"[PluginManager] Disabled plugin: {name}")
             state_changed = True
         # 联动卸载全部组件（不只是 UI/tools）：禁用语义 = 该插件的一切都不再生效。
@@ -2045,6 +2055,18 @@ class PluginManager:
     # ============================================================
     # 插件查询
     # ============================================================
+
+    def invalidate_capability_declared(self, name: str) -> None:
+        """S7：启停/卸载路径的能力池声明缓存失效（委托 CapabilityRegistry）。
+
+        禁用后组件卸载、启用后重载，该插件的声明可见性变化，声明缓存同步失效。
+        """
+        try:
+            from app.plugins.capabilities.registry import CapabilityRegistry
+
+            CapabilityRegistry.get_instance().invalidate_declared(name)
+        except Exception as e:
+            logger.warning(f"[PluginManager] 能力池声明缓存失效失败 ({name}): {e}")
 
     def get_plugin(self, name: str) -> Optional[PluginInfo]:
         """获取指定插件"""

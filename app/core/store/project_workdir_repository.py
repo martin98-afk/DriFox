@@ -25,6 +25,10 @@ class ProjectWorkdirRepository:
 
     def __init__(self, db_manager):
         self._db = db_manager
+        # 优化点：原行为每次 get/set/clear/list_all 都重跑一次 CREATE TABLE IF NOT
+        # EXISTS（DDL 走即时同步 commit + 写锁），5 轮 set/get/list_all 触发 15 次。
+        # 新增实例级门控：首次建表成功后短路；force=True 留给外部 drop 表后复位。
+        self._table_ready = False
 
     @property
     def is_initialized(self) -> bool:
@@ -35,26 +39,39 @@ class ProjectWorkdirRepository:
             return False, "数据库未初始化"
         return self._db.execute_sql(sql, params)
 
-    def ensure_table(self) -> bool:
+    def ensure_table(self, force: bool = False) -> bool:
         """建表（幂等）+ 同步老 key_documents 里的工作目录
 
         迁移节流：同一进程内只跑一次全表同步（见 _sync_legacy_workdirs）。
+        force=True 时忽略进程内门控重跑一次（外部 drop 表后需重建的场景）。
         """
         if not self.is_initialized:
             return False
+        # 优化点：门控只拦「重复建表 DDL」——每次即发即 commit 拿写锁的那条
+        # CREATE TABLE IF NOT EXISTS；legacy 同步必须留在门控之外每次都走，
+        # 迟到的 legacy 行靠「重置类级标记后的下一次启动拾取」（docstring 的
+        # 回退旧版本场景，tests/test_project_workdir_repository.py::
+        # test_late_legacy_rows_are_picked_up_on_next_start 锁的就是这条），
+        # 若一并短路，用户回退旧版本新写的工作目录会永远丢。sync 自带类级
+        # 节流，非首次是零 SQL 的布尔短路，不回吐性能收益。
         try:
-            success, _ = self._execute(
-                f"""
-                CREATE TABLE IF NOT EXISTS {self.TABLE_NAME} (
-                    project TEXT PRIMARY KEY,
-                    path TEXT NOT NULL,
-                    updated_at TEXT
+            if not self._table_ready or force:
+                success, _ = self._execute(
+                    f"""
+                    CREATE TABLE IF NOT EXISTS {self.TABLE_NAME} (
+                        project TEXT PRIMARY KEY,
+                        path TEXT NOT NULL,
+                        updated_at TEXT
+                    )
+                    """
                 )
-                """
-            )
-            if success:
-                self._sync_legacy_workdirs()
-            return bool(success)
+                if not success:
+                    return False
+                # 仅建表成功才置门控；失败保留 False，下次 CRUD 自动重试，
+                # 对外返回值与异常表现不变（仍是 bool(success) / False）。
+                self._table_ready = True
+            self._sync_legacy_workdirs()
+            return True
         except Exception as e:
             logger.error(f"[ProjectWorkdir] 创建表失败: {e}")
             return False

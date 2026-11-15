@@ -655,7 +655,7 @@ class SessionRepository:
         （50KB~500KB）持续制造不可复用空闲页。用户截断/子任务清理等大型
         DELETE 操作一次性释放数千页，必须及时回收。
 
-        每次最多回收 reclaim_pages 页（≈2MB @ 4KB page），避免阻塞 UI。
+        每次最多回收 reclaim_pages 页（≈2MB @ 4KB page）。
         incremental_vacuum 仅在 auto_vacuum=INCREMENTAL 时实际回收，
         否则静默跳过。
 
@@ -663,16 +663,60 @@ class SessionRepository:
             threshold_pages: freelist 超过此页数才触发回收（默认 5000 页 ≈ 20MB）
             reclaim_pages:  单次回收最多页数（默认 500 页 ≈ 2MB）
         """
+        # 优化点：原行为=save 主路径同步 PRAGMA freelist_count，超阈值再同步
+        # incremental_vacuum（needs_clean_tx 先强制同步 flush 全部挂起写再全库
+        # 整理）——每次保存都付一次读锁查询，超阈值时保存直接被 vacuum 卡住；
+        # 新行为=主路径只登记 pending + 起 daemon 后台线程，攒批窗口落地后再
+        # 检查/回收（窗口常量从 db_manager 动态读取，不硬编码），保存热路径零
+        # SQL 零锁；根因=vacuum 全库整理属重活，不该卡在每次保存的热路径上。
+        # 回收机会不静默丢失：pending 标志 + worker 收尾复查（覆盖执行期间
+        # 的新 save）；进程退出丢的那次由退出链 mark_clean_shutdown 全量回收
+        # 兜底，且下一次 save 会重新触发。回收只整理空闲页，数据读回内容不变。
         try:
-            ok, rows = self._execute("PRAGMA freelist_count")
-            if not ok or not rows:
+            self._reclaim_pending = True
+            t = getattr(self, "_reclaim_thread", None)
+            if t is not None and t.is_alive():
                 return
-            freelist = list(rows[0].values())[0] if isinstance(rows[0], dict) else rows[0]
-            if freelist < threshold_pages:
-                return
-            self._execute(f"PRAGMA incremental_vacuum({reclaim_pages})")
+            t = Thread(
+                target=self._reclaim_freelist_worker,
+                args=(threshold_pages, reclaim_pages),
+                daemon=True,
+                name="session-repo-reclaim-freelist",
+            )
+            self._reclaim_thread = t
+            t.start()
         except Exception:
-            pass  # auto_vacuum 未启用时静默跳过，不阻塞保存流程
+            pass  # 调度失败不阻塞保存流程（与原静默跳过语义一致）
+
+    def _reclaim_freelist_worker(self, threshold_pages: int, reclaim_pages: int) -> None:
+        """后台攒批窗口侧的回收执行体（含「机会不丢失」的收尾复查循环）。
+
+        竞态说明：双 save 同时看到无存活线程会起双 worker——vacuum 幂等无害，
+        最坏多做一次检查；pending 由两 worker 交替消费，机会仍被覆盖。
+        """
+        try:
+            import time
+
+            # 等当前攒批窗口落地再查：避免 vacuum 触发 needs_clean_tx 把窗口内
+            # 挂起写提前 flush（破坏攒批合并收益）。窗口常量动态读取不硬编码。
+            delay = float(getattr(type(self._db), "COMMIT_DELAY_SECONDS", 0.5)) + 0.1
+            while True:
+                self._reclaim_pending = False
+                time.sleep(delay)
+                try:
+                    ok, rows = self._execute("PRAGMA freelist_count")
+                    if not ok or not rows:
+                        return
+                    freelist = list(rows[0].values())[0] if isinstance(rows[0], dict) else rows[0]
+                    if freelist >= threshold_pages:
+                        self._execute(f"PRAGMA incremental_vacuum({reclaim_pages})")
+                except Exception:
+                    return  # auto_vacuum 未启用等异常静默跳过，不重试（与原语义一致）
+                if not self._reclaim_pending:
+                    return  # 执行期间无新 save，本轮机会已覆盖
+        except Exception:
+            pass
+
 
     def _write_extras(self, session_id: str, extras: Dict[int, Dict[str, bytes]]) -> None:
         """全删全插该会话的剥离字段（失败不阻塞主保存，仅记日志）。"""
@@ -680,13 +724,50 @@ class SessionRepository:
             self._execute("DELETE FROM session_msg_extras WHERE session_id = ?", (session_id,))
             if not extras:
                 return
-            for i, fields in extras.items():
-                for f, v in fields.items():
-                    self._execute(
-                        "INSERT OR REPLACE INTO session_msg_extras (session_id, msg_idx, field, value) "
-                        "VALUES (?, ?, ?, ?)",
-                        (session_id, i, f, v),
-                    )
+            # 优化点：原行为=逐行 _execute(INSERT OR REPLACE)，每行一次
+            # Python↔SQLite 往返且每条都过 db_manager.execute_sql 的
+            # SAVEPOINT+攒批包装，SQL 次数=1 次 DELETE + N 次 INSERT；
+            # 新行为=保持 DELETE 全删（compaction 索引漂移自愈）与 dict
+            # 遍历顺序，收集参数行后在写锁内一次 cursor.executemany 下发
+            # （O(N)→O(1)），复用 _schedule_commit 攒批窗口、不自行 commit
+            # （避免提前提交主 blob 破坏时序）；根因=execute_sql 只有
+            # cursor.execute 无批量分支，本任务硬边界禁改 db_manager，故批量
+            # 落在仓储内（同 memory_repository.py 先例）。批量失败则回滚
+            # SAVEPOINT 并降级逐条，保持原「单条失败静默跳过、不冒泡」语义。
+            sql = (
+                "INSERT OR REPLACE INTO session_msg_extras (session_id, msg_idx, field, value) "
+                "VALUES (?, ?, ?, ?)"
+            )
+            rows = [
+                (session_id, i, f, v)
+                for i, fields in extras.items()
+                for f, v in fields.items()
+            ]
+            if not rows:
+                return
+            db = self._db
+            conn = getattr(db, "_conn", None)
+            done = False
+            if conn is not None:
+                try:
+                    with db._write_lock:
+                        cursor = conn.cursor()
+                        cursor.execute("SAVEPOINT sp_exec")
+                        try:
+                            cursor.executemany(sql, rows)
+                        except Exception:
+                            cursor.execute("ROLLBACK TO sp_exec")
+                            cursor.execute("RELEASE sp_exec")
+                        else:
+                            cursor.execute("RELEASE sp_exec")
+                            done = True
+                except Exception:
+                    done = False
+            if done:
+                db._schedule_commit()
+                return
+            for row in rows:
+                self._execute(sql, row)
         except Exception as e:
             logger.error(f"[SessionRepository] write_extras 异常: {e}")
 

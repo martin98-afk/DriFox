@@ -18663,6 +18663,10 @@ class OpenAIChatToolWindow(ToolWindow):
         工具参数里的 path 可能是相对路径（工具执行时以 workdir 为基准解析），
         渲染层原样携带完整路径；解析与存在性检查都在宿主做，失败给可见提示
         （旧实现静默吞异常，点了没反应无从排查）。
+
+        ★ 交系统程序之前先问插件接管方（``registry.try_open_local_file``）：
+          文件树等插件可把可预览的文件（代码 / md / json / 图片）直接开在自己的
+          预览页里，不跳出应用。无人接管（或接管失败）时行为与改动前完全一致。
         """
         raw = (path or "").strip()
         if not raw:
@@ -18687,6 +18691,14 @@ class OpenAIChatToolWindow(ToolWindow):
                     parent=TabManagerWindow.get_instance() or self.window(),
                 )
                 return
+            # 插件接管优先（内部已保证单插件异常不影响降级）
+            try:
+                from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+
+                if UIPluginRegistry.get_instance().try_open_local_file(str(target)):
+                    return
+            except Exception as e:
+                logger.debug(f"[MainWidget] 插件接管打开失败，回退系统程序: {e}")
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(target)))
         except Exception as e:
             logger.error(f"[MainWidget] 打开工具卡路径失败: {raw} -> {e}")

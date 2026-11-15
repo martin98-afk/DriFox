@@ -104,11 +104,12 @@ def test_query_failure_without_cache_is_strict(reg, monkeypatch):
     assert reg.resolve_declared("fresh") == frozenset()
 
 
-def test_manifest_change_invalidates_cache(reg, monkeypatch, tmp_path):
-    """manifest 变更（mtime 变）后重新解析。"""
-    import os
-    import time
+def test_manifest_change_without_wiring_keeps_stale_cache(reg, monkeypatch, tmp_path):
+    """S1 语义反转后的新契约：manifest 变更但未接线 invalidate → 仍命中旧缓存。
 
+    S1 去掉 stat 兜底后，「变更感知」唯一通道是 diff 点显式调 invalidate_declared；
+    此用例钉死「无接线不失效」，防止实现退回靠 stat 兼底的旧语义。
+    """
     from app.plugins.managers.plugin_manager import PluginManager
 
     info = SimpleNamespace(manifest={"capabilities": ["session.read"]}, path=str(tmp_path))
@@ -117,7 +118,106 @@ def test_manifest_change_invalidates_cache(reg, monkeypatch, tmp_path):
     )
     assert reg.resolve_declared("demo") == {"session.read"}
 
+    # 只改 manifest 内容，不 invalidate：签名 (path, repr(raw), api_version) 变了，
+    # 但缓存不感知（签名只在写入时计算，读取只比对），必须仍命中旧值。
     info.manifest = {"capabilities": ["ui.notify"]}
-    later = time.time() + 5
-    os.utime(tmp_path, (later, later))
+    assert reg.resolve_declared("demo") == {"session.read"}
+
+    # 显式 invalidate（S7 接线点的行为等价物）后才换新
+    reg.invalidate_declared("demo")
     assert reg.resolve_declared("demo") == {"ui.notify"}
+
+
+def test_invalidate_declared_plugin_clears_only_that_plugin(reg, monkeypatch):
+    """M1-D1：精细失效只清目标插件，不碰其他插件缓存条目。"""
+    from app.plugins.managers.plugin_manager import PluginManager
+
+    calls: list[str] = []
+    infos = {
+        "A": SimpleNamespace(manifest={"capabilities": ["session.read"]}, path=""),
+        "B": SimpleNamespace(manifest={"capabilities": ["model.config"]}, path=""),
+    }
+
+    def _get_plugin(name):
+        calls.append(name)
+        return infos.get(name)
+
+    monkeypatch.setattr(
+        PluginManager, "get_instance", classmethod(lambda cls: SimpleNamespace(get_plugin=_get_plugin))
+    )
+    assert reg.resolve_declared("A") == {"session.read"}
+    assert reg.resolve_declared("B") == {"model.config"}
+    b_entry = reg._declared_cache["B"]
+    assert calls == ["A", "B"]
+
+    reg.invalidate_declared("A")
+    # 精细路径只 pop A：B 条目原对象保留
+    assert "A" not in reg._declared_cache
+    assert reg._declared_cache["B"] is b_entry
+
+    # 再次 resolve A：重新解析（get_plugin 对 A 的调用计数 +1）；B 不被触碰
+    assert reg.resolve_declared("A") == {"session.read"}
+    assert calls.count("A") == 2
+    assert calls.count("B") == 1
+
+
+def test_invalidate_declared_empty_clears_all_and_bumps_version(reg, monkeypatch):
+    """M1-D2：空插件名全量失效——声明缓存/池规格清空且版本戳恰 +1。"""
+    from app.plugins.managers.plugin_manager import PluginManager
+
+    infos = {
+        name: SimpleNamespace(manifest={"capabilities": ["session.read"]}, path="")
+        for name in ("A", "B", "C")
+    }
+    monkeypatch.setattr(
+        PluginManager,
+        "get_instance",
+        classmethod(lambda cls: SimpleNamespace(get_plugin=lambda n: infos.get(n))),
+    )
+    for name in ("A", "B", "C"):
+        assert reg.resolve_declared(name) == {"session.read"}
+    # 预先制造 _pool_specs 条目，验证全清真的清到它
+    reg.build_pool(surface="ui", host="H", plugin="A", declared=None)
+    assert reg._pool_specs
+
+    version_before = reg._entries_version
+    reg.invalidate_declared("")
+    assert reg._declared_cache == {}
+    assert reg._pool_specs == {}
+    assert reg._entries_version == version_before + 1
+
+
+def test_manifest_change_rebuilds_without_stat(reg, monkeypatch, tmp_path):
+    """M1-F1（失效路径）：去 stat 后声明变更仍生效，且全程零 os.stat。
+
+    钉死 S1 契约：声明唯一数据源是 PluginManager 内存 manifest dict，
+    变更感知走 invalidate_declared，解析路径禁止回退成每次 os.stat(path)。
+    """
+    import os
+
+    from app.plugins.managers.plugin_manager import PluginManager
+
+    info = SimpleNamespace(manifest={"capabilities": ["session.read"]}, path=str(tmp_path))
+    monkeypatch.setattr(
+        PluginManager, "get_instance", classmethod(lambda cls: SimpleNamespace(get_plugin=lambda n: info))
+    )
+    stat_calls = []
+    real_stat = os.stat
+
+    def _counting_stat(path, *args, **kwargs):
+        stat_calls.append(path)
+        return real_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "stat", _counting_stat)
+
+    narrow = reg.resolve_declared("demo")
+    assert narrow == {"session.read"}
+
+    # 窄→宽：失效后重解析必须拿到宽清单
+    info.manifest = {"capabilities": ["session.read", "model.config", "ui.notify"]}
+    reg.invalidate_declared("demo")
+    wide = reg.resolve_declared("demo")
+    assert wide == {"session.read", "model.config", "ui.notify"}
+    assert "ui.notify" not in set(narrow)
+    assert os.stat is not real_stat  # 确认 monkeypatch 生效，计数才有意义
+    assert stat_calls == [], f"解析路径出现 os.stat 调用（回退成 stat 兑底）：{stat_calls}"

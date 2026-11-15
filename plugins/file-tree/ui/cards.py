@@ -38,6 +38,7 @@ from PyQt5.QtCore import (
 )
 from PyQt5.QtGui import QColor, QCursor, QFont, QIcon
 from PyQt5.QtWidgets import (
+    QAbstractItemView,
     QApplication,
     QFrame,
     QHBoxLayout,
@@ -1056,6 +1057,10 @@ class FileTreeCard(QWidget):
         回到该根时还原，故 A→B→A 来回切不丢用户展开的层级。
         """
         model_root = self._source_model.project_root()
+        # 页面首次拿到项目根（model_root 为空）时是**初始装载**而非换项目：
+        # 外部投递的预览（工具卡路径点击 → preview_path）可能先于根扫描结果
+        # 落地，此时不得把预览页抢回树页，否则「点开文件却看到文件树」。
+        is_initial_load = not model_root
         if _same_path(scan_dir, model_root):
             self._source_model.refresh_root(entries)
             if self._stack.currentIndex() == _PAGE_PREVIEW:
@@ -1069,6 +1074,8 @@ class FileTreeCard(QWidget):
                 self._restore_view_state(cached)
             # 换根（切对话标签页 / 换项目）：旧预览已不属于当前上下文，
             # 必须退出预览态，否则每个标签页都停在同一个旧预览（串台）
+            if is_initial_load and self._stack.currentIndex() == _PAGE_PREVIEW:
+                return  # 初始装载：保留外部投递的预览
         self._stack.setCurrentIndex(0 if entries else 1)
         if not entries:
             self._placeholder.setText("项目目录为空")
@@ -1900,6 +1907,62 @@ class FileTreeCard(QWidget):
 
     # ── 预览 ──
 
+    def preview_path(self, path: str) -> bool:
+        """外部投递（宿主 / 其它插件）预览指定文件，返回是否已展示
+
+        供主程序的「打开本地文件」接管链使用：点击工具卡里的文件地址时，
+        可预览的文件直接开在本页，不跳出应用。
+
+        两条路径：
+        - 文件在**当前项目树内**（节点已加载）：展开祖先 → 选中 → 滚动到可见，
+          再进预览页。用户返回树页时能直接看到自己在哪。
+        - 不在树内 / 节点尚未加载：只进预览页，不动树的展开状态（避免为一个
+          目录外的临时文件把整棵树展开到无关分支）。
+
+        ★ 不做 ``detect_kind`` 判定以外的兜底：预览失败返回 False，由调用方
+          决定是否降级（宿主会继续交系统默认程序）。
+        """
+        if not path or not os.path.isfile(path):
+            return False
+        if not detect_kind(path):
+            return False
+        self._reveal_in_tree(path)
+        return self._render_preview(path)
+
+    def _reveal_in_tree(self, path: str) -> None:
+        """若目标在已加载的树内：展开祖先、选中并滚动到可见（否则静默跳过）"""
+        try:
+            target = os.path.normpath(path)
+            node = self._source_model.find_node(target)
+            if node is None:
+                return
+            # 祖先链自顶向下展开：父级未展开时子节点没有有效 proxy 索引
+            ancestors: List[str] = []
+            parent = getattr(node, "parent_node", None)
+            while parent is not None and getattr(parent, "is_dir", False):
+                ancestors.append(parent.path)
+                parent = getattr(parent, "parent_node", None)
+            for dir_path in reversed(ancestors):
+                dir_node = self._source_model.find_node(dir_path)
+                if dir_node is None or not dir_node.loaded:
+                    continue
+                src_idx = self._source_model._index_for_node(dir_node)
+                if not src_idx.isValid():
+                    continue
+                proxy_idx = self._proxy_model.mapFromSource(src_idx)
+                if proxy_idx.isValid() and not self._tree_view.isExpanded(proxy_idx):
+                    self._tree_view.expand(proxy_idx)
+            src_idx = self._source_model._index_for_node(node)
+            if not src_idx.isValid():
+                return
+            proxy_idx = self._proxy_model.mapFromSource(src_idx)
+            if not proxy_idx.isValid():
+                return
+            self._tree_view.setCurrentIndex(proxy_idx)
+            self._tree_view.scrollTo(proxy_idx, QAbstractItemView.PositionAtCenter)
+        except Exception as e:  # 定位失败不影响预览本身
+            logger.debug(f"[FileTree] 树内定位失败（忽略）: {path} -> {e}")
+
     def _open_preview(self, path: str) -> None:
         """卡片内预览（双击 / 右键菜单入口）；预览不了回退到默认程序"""
         if not path or not os.path.isfile(path):
@@ -1908,6 +1971,13 @@ class FileTreeCard(QWidget):
         if not detect_kind(path):
             self._open_file(path)
             return
+        if not self._render_preview(path):
+            # 预览失败（超大 / 损坏 / 含二进制内容）→ 回树页并交系统默认程序
+            self._close_preview()
+            self._open_file(path)
+
+    def _render_preview(self, path: str) -> bool:
+        """把文件渲染进预览页并切到预览态；返回是否成功（不含任何降级动作）"""
         self._preview_page.set_colors(
             self._colors,
             font_family=self._colors.get("font_family", ""),
@@ -1915,11 +1985,9 @@ class FileTreeCard(QWidget):
             scrollbar_qss=self._scrollbar_qss,
         )
         if not self._preview_page.load(path):
-            # 预览失败（超大 / 损坏 / 含二进制内容）→ 回树页并交系统默认程序
-            self._close_preview()
-            self._open_file(path)
-            return
+            return False
         self._stack.setCurrentIndex(_PAGE_PREVIEW)
+        return True
 
     def _close_preview(self) -> None:
         """返回文件树（树页未销毁，展开 / 选中 / 滚动原样保留）"""

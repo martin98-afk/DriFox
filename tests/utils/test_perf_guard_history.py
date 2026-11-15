@@ -108,7 +108,7 @@ def test_get_archived_sessions_title_falls_back_to_filename_stem(hm):
     item = got[0]
     assert item["name"] == p_fallback.name
     assert item["session_id"] == ""
-    assert item["title"] == Path(p_fallback.stem)[:50].as_posix()[:50] or item["title"] == p_fallback.stem[:50]
+    assert item["title"] == p_fallback.stem[:50], "缺 title 时回退到文件名前 50 字符"
 
 
 def test_get_archived_sessions_empty_dir_and_missing_dir(hm, tmp_path):

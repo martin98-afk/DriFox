@@ -1,0 +1,20 @@
+2026-11-15 15:44:58.405 | INFO     | app.tray_manager:_install_hotkey_filter:1067 - [TrayManager] WM_HOTKEY 原生过滤器已安装
+2026-11-15 15:44:58.405 | INFO     | app.tray_manager:__init__:193 - TrayManager 初始化完成
+2026-11-15 15:44:58.423 | DEBUG    | app.utils.design_tokens:_apply_tooltip_style:1460 - [tooltip] apply: bg=rgba(26, 36, 26, 248) tc=#eceadf fs=16 ff=楷体
+2026-11-15 15:44:58.423 | DEBUG    | app.widgets.tab_manager_window:__init__:1319 - [TabManager] __init__ UI 构建段耗时 1ms
+2026-11-15 15:44:58.636 | DEBUG    | app.core.sync.config_sync:_load_sha_cache:3338 - [ConfigSync] 同步状态已加载: config=65623a631740...
+2026-11-15 15:44:58.669 | DEBUG    | app.widgets.tab_manager_window:complete_construction:1411 - [TabManager] complete_construction TrayManager 单例段耗时 0ms
+2026-11-15 15:44:58.684 | WARNING  | app.tray_manager:_win_register_hotkey:845 - [TrayManager] RegisterHotKey 注册失败(alt+z): 错误码 1409（组合键已被其它程序占用，自动回退到 keyboard 钩子兼容模式）
+2026-11-15 15:44:58.755 | INFO     | app.tray_manager:_kbd_register_hotkey:898 - [TrayManager] 兜底（keyboard 钩子）热键已注册: alt+z
+2026-11-15 15:44:58.984 | DEBUG    | app.widgets.tab_manager_window:_deferred_api_wiring:1370 - [TabManager] __init__ API 会话/全局卡段耗时（deferred 首拍） 0ms
+2026-11-15 15:44:59.193 | DEBUG    | app.core.commands.builtin_commands:register:63 - [FunctionHandlers] Registered handler: probe-tree
+
+[1;33m📢 Tips:[0m QFluentWidgets Pro is now released. Click [1;96mhttps://qfluentwidgets.com/pages/pro[0m to learn more about it.
+
+before: visible= False page= <__main__._PreviewPage object at 0x000002725918B1D0>
+after: taken= True
+  visible= True
+  page= True
+  previewed= ['D:/work/DriFox/app/main.py']
+  current_tab_id= probe-tree
+after unload: taken= False

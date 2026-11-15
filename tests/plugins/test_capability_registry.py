@@ -110,3 +110,58 @@ def test_reset_instance():
     b = CapabilityRegistry.get_instance()
     assert a is not b
     b.clear()
+
+# ── S2：_entries_version 三点递增 + clear 三缓存同清 ──
+
+def test_entries_version_increments_on_register_unregister_clear(reg):
+    """M2-D1：register/unregister/clear 三点各恰 +1（不是 +2 或不变）。"""
+    v0 = reg._entries_version
+    reg.register("session.read", lambda h: 1)
+    assert reg._entries_version == v0 + 1
+    reg.unregister("session.read")
+    assert reg._entries_version == v0 + 2
+    reg.clear()
+    assert reg._entries_version == v0 + 3
+
+
+def test_clear_purges_hostless_pools_audited_and_specs(reg):
+    """M2-D2：clear 后 hostless 池/全局审计/池规格/声明缓存四容器全空。
+
+    预先制造三类条目：host=None 显式声明产 _hostless_pools；pool[cap] 首触
+    产 registry 侧 _audited 键；host 非空 build_pool 产 _pool_specs。
+    """
+    reg.register("session.read", lambda h: 1)
+    pool_h = reg.build_pool(surface="ui", host=None, plugin="demo", declared={"session.read"})
+    assert reg._hostless_pools
+    pool_h["session.read"]  # 首触：registry 侧 _audited 记 (plugin,surface,cap)
+    assert ("demo", "ui", "session.read") in reg._audited
+    reg.build_pool(surface="ui", host="WIN", plugin="demo", declared={"session.read"})
+    assert reg._pool_specs
+
+    reg.clear()
+    assert not reg._hostless_pools
+    assert not reg._audited
+    assert not reg._pool_specs
+    assert not reg._declared_cache
+
+
+def test_stale_hostless_pool_not_served_after_clear(reg):
+    """M2-F1（失效路径）：clear 后同签名 build_pool 不得复用旧池，且审计重新记账。"""
+    key = ("demo", "ui", "session.read")
+    reg.register("session.read", lambda h: 1)
+    p1 = reg.build_pool(surface="ui", host=None, plugin="demo", declared={"session.read"})
+    p2 = reg.build_pool(surface="ui", host=None, plugin="demo", declared={"session.read"})
+    assert p1 is p2  # hostless 缓存命中
+    p1["session.read"]
+    assert key in reg._audited
+
+    reg.clear()
+    assert key not in reg._audited  # 去重集合真被清，非表面空 dict
+
+    # clear 后重建注册面再取池：必须是新实例，且首触审计重新记账
+    reg.register("session.read", lambda h: 1)
+    p3 = reg.build_pool(surface="ui", host=None, plugin="demo", declared={"session.read"})
+    assert p3 is not p1
+    assert key not in reg._audited
+    p3["session.read"]
+    assert key in reg._audited

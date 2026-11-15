@@ -81,7 +81,11 @@ def resolve_tool_result_max_len(llm_config: Optional[Dict] = None) -> int:
 
 def _is_line_indexed_result(content: str) -> bool:
     """识别行式条目结果（grep/list/glob）：首行带标记，后续按行输出条目。"""
-    for line in content.split("\n")[:4]:
+    # 优化点：原行为=split("\n") 全量构造 N 行列表、仅取前 4 行即丢弃，命中后
+    # _prune_line_indexed 对同一 content 再全量 split 一次，数 MB 工具结果会白分配
+    # 两份完整行列表；新行为=split("\n", 4) 最多切 4 刀，[:4] 只取前 4 段，第 5 段
+    # （剩余原文）明确丢弃，判定结果逐字符不变；根因=探测只需前 4 行却付全量切分开销。
+    for line in content.split("\n", 4)[:4]:
         stripped = line.strip()
         if not stripped:
             continue

@@ -5045,12 +5045,22 @@ class CodeWebViewer(QWebEngineView):
                         var chart = el._chartInstance;
                         if (!chart || chart.isDisposed()) {{
                             chart = echarts.init(el, _CHART_IS_DARK ? 'dark' : undefined);
+                            // 优化点：原行为 RO 每次触发同步 chart.resize()，拖动窗口/
+                            // 布局抖动时一帧内多次全量重排（与放大页已修的同源卡顿，
+                            // 单次 74~130ms）。合并到 rAF 一帧一次：同一帧内多次触发
+                            // 只跑一次 resize，最终尺寸不变（功能零变化），只消重复重排。
+                            var _resizePending = false;
+                            var _ro = new ResizeObserver(function() {{
+                                if (_resizePending) return;
+                                _resizePending = true;
+                                requestAnimationFrame(function() {{
+                                    _resizePending = false;
+                                    try {{ if (chart && !chart.isDisposed()) chart.resize(); }} catch (e) {{ }}
+                                }});
+                            }});
                             // RO 必须持引用：节点被 innerHTML 销毁时若不 disconnect，
                             // RO 连同 target 常驻（本卡历史上最大的泄漏源之一，见
                             // _disposeChartNode）。
-                            var _ro = new ResizeObserver(function() {{
-                                try {{ chart.resize(); }} catch (e) {{ }}
-                            }});
                             _ro.observe(el);
                             el._chartRO = _ro;
                         }}

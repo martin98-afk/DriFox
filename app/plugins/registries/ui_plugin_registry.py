@@ -68,16 +68,32 @@ def _services_for(plugin_name: str, win) -> dict:
         return {}
 
 
+# 各 surface 的投影键表：进程首次遇到某 surface 时按口径
+# CATALOG.get(cap) is not None and surface in CATALOG[cap].surfaces
+# 过滤 LEGACY_MAP 后冻结为 tuple（顺序即 LEGACY_MAP 顺序）。只缓存 (old, cap)
+# 键对、不缓存任何能力值：pool.legacy(old, cap) 与 "cap in pool" 仍每次调用。
+_UI_LEGACY_PROJECTION: Dict[str, tuple] = {}
+
+
 def project_services(pool, surface: str = "ui") -> dict:
     """把能力池投影成旧 services 字典（唯一投影实现，主程序各处共用）。"""
     from app.plugins.capabilities.catalog import CATALOG, LEGACY_MAP
 
+    keys = _UI_LEGACY_PROJECTION.get(surface)
+    if keys is None:
+        # 首次遇到该 surface 时冻结键表；同 surface 后续调用直接复用，
+        # 消除每次调用的重复静态过滤。键表口径与 tool_executor 同源。
+        keys = tuple(
+            (old, cap)
+            for old, cap in LEGACY_MAP.items()
+            if CATALOG.get(cap) is not None
+            and surface in CATALOG[cap].surfaces
+        )
+        _UI_LEGACY_PROJECTION[surface] = keys
     return {
         old: pool.legacy(old, cap)
-        for old, cap in LEGACY_MAP.items()
-        if CATALOG.get(cap) is not None
-        and surface in CATALOG[cap].surfaces
-        and cap in pool
+        for old, cap in keys
+        if cap in pool
     }
 
 
@@ -506,6 +522,31 @@ def _widget_alive(widget: Any) -> bool:
         return True
 
 @dataclass(frozen=True)
+class FileOpenerInfo:
+    """本地文件打开接管项
+
+    宿主在「用系统默认程序打开本地文件」之前先问一遍接管项：``can_open``
+    命中即调 ``open``，返回 True 表示已接管（宿主不再走系统程序），False
+    表示放弃接管、继续问下一家，最终全都没接才交系统默认程序。
+
+    Attributes:
+        plugin_name: 所属插件名
+        opener_id: 插件内唯一 ID
+        can_open: ``(path) -> bool``，能否接管该文件（须为纯判断，不产生副作用；
+                  不要在后台线程调用（接管判定常需碰 Qt），宿主入口在主线程）
+        open_file: ``(path) -> bool``，实际接管（主线程）；返回 True 表示已展示
+        priority: 同路径多插件可接管时高者优先（降序尝试）
+        metadata: 附加元数据
+    """
+
+    plugin_name: str
+    opener_id: str
+    can_open: Callable[[str], bool]
+    open_file: Callable[[str], bool]
+    priority: int = 0
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+@dataclass(frozen=True)
 class CardInlinePanelInfo:
     """消息卡片内嵌面板注册信息
 
@@ -884,6 +925,8 @@ class UIPluginRegistry:
         self._input_buttons: Dict[str, InputButtonInfo] = {}
         self._context_actions: Dict[str, ContextMenuActionInfo] = {}
         self._settings_cards: Dict[str, SettingsCardInfo] = {}
+        # 本地文件打开接管项：{key("{plugin}:{opener_id}"): FileOpenerInfo}
+        self._file_openers: Dict[str, FileOpenerInfo] = {}
         # 插件独立设置大 tab：{key("{plugin_name}:{tab_id}"): SettingsTabInfo}
         self._settings_tabs: Dict[str, SettingsTabInfo] = {}
         # 标题栏常驻 tab 槽位：{tab_id: TitlebarTabInfo}
@@ -2080,6 +2123,139 @@ class UIPluginRegistry:
     def get_workbench_tabs(self) -> List[WorkbenchTabInfo]:
         """获取全部工作台页签（按注册序返回）"""
         return list(self._workbench_tabs.values())
+
+    # ── 工作台页实例定向投递（插件向插件页送内容的统一出口） ──
+
+    def _workbench_panel(self):
+        """当前工作台面板单例（不可用时返回 None）"""
+        try:
+            from app.widgets.tab_manager_window import TabManagerWindow
+
+            tm = TabManagerWindow.get_instance()
+            return getattr(tm, "workbench_panel", None) if tm is not None else None
+        except Exception:
+            return None
+
+    def get_workbench_page(self, page_id: str) -> Optional[Any]:
+        """取**已挂载**的插件页实例（未展开过工作台时返回 None，不产生副作用）
+
+        面板只在其可见时 reconcile 页集合，故「工作台从未打开过」时页面尚未
+        构建。需要强制拿到实例时用 ``open_workbench_page``。
+        """
+        panel = self._workbench_panel()
+        if panel is None:
+            return None
+        try:
+            return panel.get_plugin_page(page_id)
+        except Exception:
+            return None
+
+    def open_workbench_page(self, page_id: str) -> Optional[Any]:
+        """展开右侧工作台、定位到指定插件页，返回该页实例（不可用返回 None）
+
+        与 ``open_workbench_tab`` 的差别：后者只做「展开 + 切页」，本方法额外
+        返回页面 widget，供插件向**别的插件的页**投递内容（如把文件交给文件树
+        页预览）。展开路径复用宿主既有入口，不做任何页面语义特判。
+
+        ★ 必须先 reconcile 再展开：``set_workbench_visible(True)`` 默认走 200ms
+          展开动画，而 ``sync_plugin_pages`` 挂在动画收尾才跑 —— 工作台首次
+          打开时页面此刻还没构建，调用方拿到 None 会静默降级成系统程序。
+          ``sync_plugin_pages`` 幂等（签名未变只重算页签条），提前调无副作用。
+        """
+        panel = self._workbench_panel()
+        if panel is None:
+            return None
+        try:
+            if panel.get_plugin_page(page_id) is None:
+                panel.sync_plugin_pages(self.get_workbench_tabs())
+        except Exception as e:
+            logger.warning(f"[UIPluginRegistry] 工作台页 reconcile 失败（{page_id}）: {e}")
+        try:
+            from app.widgets.tab_manager_window import TabManagerWindow
+
+            tm = TabManagerWindow.get_instance()
+            if tm is not None:
+                tm.open_workbench_tab(page_id)
+        except Exception as e:
+            logger.warning(f"[UIPluginRegistry] open_workbench_page({page_id}) 失败: {e}")
+        return self.get_workbench_page(page_id)
+
+    # ── 本地文件打开接管（系统默认程序之前的插件优先链） ──
+
+    def register_file_opener(
+        self,
+        plugin_name: str,
+        opener_id: str,
+        can_open: Callable[[str], bool],
+        open_file: Callable[[str], bool],
+        priority: int = 0,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """注册本地文件打开接管项
+
+        宿主在把文件交系统默认程序之前，按 priority 降序询问各接管项的
+        ``can_open``，命中即调其 ``open_file``；后者返回 False 视为放弃接管，
+        继续问下一家，全都没接才走系统默认程序。
+
+        Args:
+            plugin_name: 所属插件名
+            opener_id: 插件内唯一 ID（同 ID 重复注册即覆盖，热重载幂等）
+            can_open: ``(path) -> bool`` 是否接管（纯判断，无副作用）
+            open_file: ``(path) -> bool`` 实际接管（主线程，True=已展示）
+            priority: 高者优先
+            metadata: 附加元数据
+        """
+        key = f"{plugin_name}:{opener_id}"
+        self._file_openers[key] = FileOpenerInfo(
+            plugin_name=plugin_name,
+            opener_id=opener_id,
+            can_open=can_open,
+            open_file=open_file,
+            priority=priority,
+            metadata=metadata or {},
+        )
+
+    def unregister_file_openers(self, plugin_name: str) -> None:
+        """注销某插件的全部文件打开接管项（插件卸载时调用）"""
+        for key in [k for k, v in self._file_openers.items() if v.plugin_name == plugin_name]:
+            del self._file_openers[key]
+
+    def get_file_openers(self) -> List[FileOpenerInfo]:
+        """全部接管项（priority 降序 → 注册序），供诊断与降级排障"""
+        return sorted(self._file_openers.values(), key=lambda i: -i.priority)
+
+    def try_open_local_file(self, path: str) -> bool:
+        """按优先级尝试让插件接管打开本地文件
+
+        Returns:
+            True 表示已有接管方展示成功，调用方不要再交系统程序；
+            False 表示无人接管（调用方按原逻辑走 QDesktopServices）。
+
+        ★ 单个接管项抛异常只让它自己出局，不影响后续接管项，也不影响最终
+          降级 —— 插件 bug 不该把「点一下文件打不开」升级成完全失效。
+        """
+        if not path:
+            return False
+        for info in self.get_file_openers():
+            try:
+                if not info.can_open(path):
+                    continue
+            except Exception as e:
+                logger.warning(
+                    f"[UIPluginRegistry] file opener {info.plugin_name}:{info.opener_id} "
+                    f"can_open 异常，跳过: {e}"
+                )
+                continue
+            try:
+                if info.open_file(path):
+                    return True
+            except Exception as e:
+                logger.warning(
+                    f"[UIPluginRegistry] file opener {info.plugin_name}:{info.opener_id} "
+                    f"open 失败，继续降级: {e}"
+                )
+                continue
+        return False
 
     # ── 标题栏内嵌 widget 槽位 ──
 
@@ -4119,6 +4295,9 @@ class UIPluginRegistry:
         # 清理消息卡片页脚扩展点
         self._footer_stats = {k: v for k, v in self._footer_stats.items() if v.plugin_name != plugin_name}
         self._footer_actions = {k: v for k, v in self._footer_actions.items() if v.plugin_name != plugin_name}
+        # 清理本地文件打开接管项：插件卸载后其接管能力已不存在，
+        # 残留条目会让「打开文件」静默失败（open_file 里全是旧模块引用）
+        self.unregister_file_openers(plugin_name)
         # 清理插件独立弹窗：销毁已开实例 + 移除注册 + 注销联动命令（幂等）
         for wid in [k for k, v in self._windows.items() if v.plugin_name == plugin_name]:
             self.close_window(wid)
@@ -4825,6 +5004,8 @@ def _declare_builtin_slots() -> None:
     # 这些槽位目前没有对应的「热重载后必须重建」视图；若将来出现，补上 scopes 即可。
     declare_slot("titlebar_widget", lambda r: r._titlebar_widgets.items())
     declare_slot("context_menu", lambda r: r._context_actions.items())
+    # 本地文件打开接管：无独立界面（接管结果是其它视图），仅登记占位
+    declare_slot("file_opener", lambda r: r._file_openers.items())
     declare_slot("settings_card", lambda r: r._settings_cards.items())
     declare_slot("settings_tab", lambda r: r._settings_tabs.items())
     declare_slot("mention_provider", lambda r: r._mention_providers.items())

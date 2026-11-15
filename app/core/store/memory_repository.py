@@ -24,6 +24,10 @@ class MemoryRepository:
             db_manager: DatabaseManager 实例
         """
         self._db = db_manager
+        # 优化点：原行为每次 CRUD 都重跑「查旧表 + CREATE TABLE IF NOT EXISTS」，
+        # 新库下等价于 5 轮 save/get/load_all 触发 15 次即时提交 DDL。新增实例级
+        # 门控，首次建表/迁移成功后短路后续调用；force=True 留给外部 drop 表后复位。
+        self._table_ready = False
 
     @property
     def is_initialized(self) -> bool:
@@ -35,10 +39,17 @@ class MemoryRepository:
             return False, "数据库未初始化"
         return self._db.execute_sql(sql, params)
 
-    def _ensure_table(self) -> bool:
-        """确保表存在（迁移旧表或创建新表）"""
+    def _ensure_table(self, force: bool = False) -> bool:
+        """确保表存在（迁移旧表或创建新表）
+
+        force=True 时忽略进程内门控重跑一次（外部 drop 表后需重建的场景）。
+        """
         if not self.is_initialized:
             return False
+        # 优化点：门控只记「本实例已确认表就绪」，跨实例/跨库不共享，
+        # 避免临时库与真实库串用同一标记导致漏建表；force 显式放行。
+        if self._table_ready and not force:
+            return True
         try:
             # 检查旧表是否存在
             success, rows = self._execute(
@@ -77,6 +88,7 @@ class MemoryRepository:
                         SELECT memory_id, content, enabled, confidence, source, created_at, updated_at, last_accessed FROM memories
                     ''')
                     logger.info("[MemoryRepository] 已迁移旧记忆数据到新表")
+                    self._table_ready = True
                     return True
 
             # 直接创建新表
@@ -92,6 +104,10 @@ class MemoryRepository:
                     last_accessed TEXT
                 )
             ''')
+            # 优化点：仅建表成功才置门控；失败保留 False，下次 CRUD 自动重试，
+            # 对外返回值与异常表现不变（仍是 success / False）。
+            if success:
+                self._table_ready = True
             return success
 
         except Exception as e:
