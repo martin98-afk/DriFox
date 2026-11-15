@@ -633,19 +633,25 @@ def _register_scenarios() -> None:
     from .scenario_b_session_switch import run_session_switch_scenario
     from .scenario_c_plugin_hot_reload import run_plugin_hot_reload_scenario
     from .scenario_f_window_session import run_window_session_scenario
+    from .scenario_d_theme_switch import run_theme_switch_scenario
+    from .scenario_e_mcp_probe import run_mcp_probe_scenario
 
     SCENARIO_REGISTRY["a"] = run_message_stream_scenario
     SCENARIO_REGISTRY["b"] = run_session_switch_scenario
     SCENARIO_REGISTRY["c"] = run_plugin_hot_reload_scenario
     # SC-F：窗口级会话开关（纯 HTTP 驱动运行中实例，需 DRIFOX_UI_TEST_SERVER）
     SCENARIO_REGISTRY["f"] = run_window_session_scenario
+    # SC-D：主题切换（cfg.set + broadcast_theme_refresh + 活事件循环泵）
+    SCENARIO_REGISTRY["d"] = run_theme_switch_scenario
+    # SC-E：MCP 探活（本地 stub + probe_servers_background(force=True)）
+    SCENARIO_REGISTRY["e"] = run_mcp_probe_scenario
 
 
 def main(argv: List[str]) -> int:
     parser = argparse.ArgumentParser(description="DriFox 长时压测 runner")
     parser.add_argument(
         "--scenario",
-        choices=["a", "b", "c", "f", "all"],
+        choices=["a", "b", "c", "f", "d", "e", "all"],
         default="all",
         help="跑哪个场景（默认 all）",
     )
@@ -689,7 +695,7 @@ def main(argv: List[str]) -> int:
         print(f"[runner] tier={args.tier} 采样间隔 -> {tier_cfg['sample_interval_s']:.0f}s")
 
     if args.scenario == "all":
-        scenarios = ["a", "b", "c", "f"]
+        scenarios = ["a", "b", "c", "f", "d", "e"]
     else:
         scenarios = [args.scenario]
 
