@@ -166,6 +166,27 @@ def test_multimodal_content_takes_text_blocks(monkeypatch):
     assert len(events) == 1
     assert events[0][1]["fallback"] == "帮我看看这张架构图有什么问题"
 
+def test_slash_command_prefix_stripped_from_fallback(monkeypatch):
+    """斜杠命令只是触发词，不得占满 fallback。
+
+    回归：首条 "/plugin-creator 参考这个 https://... 做一个插件" 生成失败时
+    fallback = first_text[:15] = "/plugin-creator"，会话标题直接变成命令名。
+    """
+    events, _ = _capture(
+        monkeypatch,
+        _host([_user("/plugin-creator 参考这个插件做一个文件管理 ui 插件")]),
+    )
+    assert len(events) == 1
+    assert events[0][1]["fallback"] == "参考这个插件做一个文件管理 u"
+    assert "/plugin-creator" not in events[0][1]["fallback"]
+
+def test_bare_slash_command_uses_command_name(monkeypatch):
+    """纯命令无参数时用命令名（去斜杠）作为标题来源，不含斜杠。"""
+    events, commits = _capture(monkeypatch, _host([_user("/plugin-creator")]))
+    assert commits == []
+    assert len(events) == 1
+    assert events[0][1]["fallback"] == "plugin-creator"
+
 
 # ═══════════════════════════════════════════════════════════════
 # 占位标题判据：新建会话 topic_summary 非空但只是 "对话 MM-DD HH:MM"

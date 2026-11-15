@@ -321,18 +321,21 @@ def _window_events(host: Any, ctx: Any):
 
 
 def _resolve_active_host(host: Any):
-    """host 为空时（无窗口的调用点）解析一个活跃主窗口。
+    """host 可用则原样返回，否则解析一个活跃主窗口。
 
     工具/hook 类调用点没有 MainWidget，而模型配置只存在于主窗口内存态
     （密钥模式下磁盘 app.config 是密文）。
 
+    ★ host 已销毁时也必须回落：能力池把建池瞬间的 host 固化进闭包，窗口
+    重建后旧引用仍是具体对象（非 None），不判活就会用死对象取配置——实证为
+    标题生成抛 "OpenAIChatToolWindow has been deleted" 后回退成命令前缀。
     ★ 走 ``resolve.active_main_widget``：多标签下必须取用户此刻所在标签页。
     ``UIPluginRegistry._main_widget`` 是「最后构造的窗口」，切标签页不更新。
     """
-    if host is not None:
-        return host
-    from app.plugins.capabilities.resolve import active_main_widget
+    from app.plugins.capabilities.resolve import active_main_widget, host_alive
 
+    if host_alive(host):
+        return host
     return active_main_widget()
 
 
@@ -1526,11 +1529,12 @@ def _model_config_for(host: Any):
 
     capability_type 由调用方按意图传入（缺省 chat）；宿主解析器据此过滤候选集。
     """
+    real = _resolve_active_host(host)
 
     def config_for(query: str, capability_type: str = "chat") -> Any:
-        if not query:
+        if not query or real is None:
             return None
-        resolver = getattr(host, "_resolve_model_config_by_query", None)
+        resolver = getattr(real, "_resolve_model_config_by_query", None)
         if not callable(resolver):
             logger.debug("[Capability] model.config_for 宿主无模型解析器")
             return None

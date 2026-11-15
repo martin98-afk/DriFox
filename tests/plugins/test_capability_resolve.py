@@ -325,3 +325,64 @@ def test_declared_for_reports_manifest(reg, monkeypatch):
     _fake_pm(monkeypatch, ["window.current"])
     declared = resolve.declared_for(plugin="demo")
     assert declared is not None and "window.current" in declared
+
+def test_stale_bound_host_falls_back_to_active(reg, fake_tm, monkeypatch):
+    """绑定窗口已销毁时必须回落活跃窗口，并清掉失效登记。
+
+    实证 bug：标题生成控制器在插件加载时建池，host 固化；窗口重建后旧池
+    指向已删窗口，model.config_for 抛 "wrapped C/C++ object ... has been
+    deleted" → 标题回退成首条消息前 15 字（"/plugin-creator"）。
+    """
+    from app.plugins.capabilities import resolve
+    from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+
+    _fake_pm(monkeypatch, ["window.current"])
+    stale = _fake_window(workdir="/dead")
+    stale._is_destroyed = True
+    active = _fake_window(workdir="/alive")
+    fake_tm(SimpleNamespace(get_current_window=lambda: None))
+    real = UIPluginRegistry.get_instance()
+    prev_main = getattr(real, "_main_widget", None)
+    resolve.note_host("demo", stale)
+    real.set_main_widget(active)
+    try:
+        snap = resolve.caps_for("window.current", plugin="demo")()
+    finally:
+        real.set_main_widget(prev_main)
+    assert snap is not None and snap["workdir"] == "/alive"
+    assert resolve._plugin_hosts.get("demo") is None
+
+def test_resolve_active_host_falls_back_when_host_dead(reg, monkeypatch):
+    """model.config_for / model.complete 的 host 已销毁时回落活跃窗口。
+
+    回归：host 固化在能力池闭包里，窗口重建后 config_for 拿死对象解析，
+    抛 "OpenAIChatToolWindow has been deleted" → 标题生成拿不到模型配置。
+    """
+    from app.plugins.capabilities import resolve
+    from app.plugins.capabilities.providers import ui_core
+
+    alive = SimpleNamespace(_window_id="win-alive")
+    stale = SimpleNamespace(_is_destroyed=True)
+    monkeypatch.setattr(resolve, "active_main_widget", lambda: alive)
+    assert ui_core._resolve_active_host(stale) is alive
+    assert ui_core._resolve_active_host(alive) is alive
+
+def test_active_main_widget_skips_destroyed_cached(reg, fake_tm, monkeypatch):
+    """UIPluginRegistry 缓存的 _main_widget 已删时，遍历窗口表取存活者。"""
+    from app.plugins.capabilities import resolve
+    from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+
+    fake_tm(SimpleNamespace(get_current_window=lambda: None))
+    alive = _fake_window(workdir="/alive")
+    real = UIPluginRegistry.get_instance()
+    prev_main = getattr(real, "_main_widget", None)
+    prev_map = dict(getattr(real, "_window_main_widgets", {}) or {})
+    stale = _fake_window(workdir="/dead")
+    stale._is_destroyed = True
+    try:
+        real._main_widget = stale
+        real._window_main_widgets = {"win-dead": stale, "win-alive": alive}
+        assert resolve.active_main_widget() is alive
+    finally:
+        real._main_widget = prev_main
+        real._window_main_widgets = prev_map

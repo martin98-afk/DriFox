@@ -122,6 +122,23 @@ class _TitleController:
         return None
 
     # ── 事件与线程 ──
+    def _refresh_pool(self) -> None:
+        """重取能力池：host 按当前活跃窗口重新解析。
+
+        控制器在插件加载时建池，host 被固化进各能力闭包；用户重建窗口 / 新开
+        标签后旧 host 已销毁（C++ 对象已删），池里的 model.complete 会拿不到
+        模型配置而静默返回空串，标题就回退成首条消息前 15 字。
+        """
+        try:
+            from app.plugins.capabilities.resolve import pool_for
+
+            pool = pool_for("system-title-generator", surface="ui")
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"[system-title-generator] 能力池刷新失败，沿用旧池: {e}")
+            return
+        if pool is not None:
+            self._pool = pool
+
     def _on_title_request(self, payload: dict) -> None:
         window_id = str(payload.get("window_id") or "")
         session_id = str(payload.get("session_id") or "")
@@ -131,6 +148,7 @@ class _TitleController:
             if window_id in self._inflight:
                 return
             self._inflight.add(window_id)
+        self._refresh_pool()
         model_query = str(self._pool["plugin.config.read"]("title_model", "") or "")
         threading.Thread(
             target=self._generate,

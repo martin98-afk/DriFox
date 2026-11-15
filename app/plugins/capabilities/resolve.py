@@ -90,6 +90,31 @@ def _caller_plugin(skip: int = 1) -> str:
     return _caller_info(max(0, skip) + 1)[0]
 
 
+def host_alive(host: Any) -> bool:
+    """host 是否仍可用（None / 已销毁 wrapper 均视为失效）。
+
+    能力池在建池时把 host 固化进闭包：窗口销毁后 Python 引用仍在而 C++ 对象
+    已删，调用任何 Qt 成员都抛 RuntimeError("wrapped C/C++ object ... has been
+    deleted")，能力面表现为静默返回空值（实证：标题生成拿不到模型配置，
+    回退成首条消息前 15 字 "/plugin-creator"）。
+
+    ⚠️ 必须先 sip.isdeleted 再 getattr：PyQt5 对已删对象访问**任意**属性
+    （含不存在的 Python 属性）都抛 RuntimeError，getattr 的默认值兜不住。
+    """
+    if host is None:
+        return False
+    try:
+        import sip
+
+        if sip.isdeleted(host):
+            return False
+    except Exception:
+        pass
+    try:
+        return not bool(getattr(host, "_is_destroyed", False))
+    except Exception:
+        return False
+
 def note_host(plugin: str, host: Any) -> None:
     """登记某插件当前绑定的窗口（供无 ctx 的后台调用点解析 host）。"""
     if plugin and host is not None:
@@ -127,7 +152,7 @@ def active_main_widget() -> Any:
         tm = TabManagerWindow.get_instance()
         if tm is not None:
             win = tm.get_current_window()
-            if win is not None and not getattr(win, "_is_destroyed", False):
+            if host_alive(win):
                 return win
     except Exception:
         pass
@@ -135,18 +160,29 @@ def active_main_widget() -> Any:
         from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
 
         reg = UIPluginRegistry.get_instance()
-        return getattr(reg, "_main_widget", None) or next(
-            iter((getattr(reg, "_window_main_widgets", None) or {}).values()), None
-        )
+        cached = getattr(reg, "_main_widget", None)
+        if host_alive(cached):
+            return cached
+        # 缓存窗口已销毁时逐个探活：拿死引用比拿 None 更害人（能力静默失效）
+        for win in (getattr(reg, "_window_main_widgets", None) or {}).values():
+            if host_alive(win):
+                return win
+        return None
     except Exception:
         return None
 
 
 def _resolve_host(plugin: str, surface: str) -> Any:
-    """按插件名解析 host：绑定窗口 → 活跃窗口 → surface 默认 host。"""
+    """按插件名解析 host：绑定窗口 → 活跃窗口 → surface 默认 host。
+
+    绑定窗口可能已销毁（卡片所在窗口关闭后登记未清），失效即清登记并回落
+    活跃窗口；否则固化的僵死引用会让该插件全部 host 相关能力静默失败。
+    """
     host = _plugin_hosts.get(plugin)
     if host is not None:
-        return host
+        if host_alive(host):
+            return host
+        forget_host(plugin, host)
     return active_main_widget()
 
 

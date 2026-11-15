@@ -1101,6 +1101,9 @@ class OpenAIChatToolWindow(ToolWindow):
     _models_dev_cache: Optional[object] = None
     # 同上 inflight 守卫：避免并发重复发起；首请求完成后再被广播唤醒。
     _models_dev_fetch_inflight: bool = False
+    # perf: (#6a) provider 未就绪挂起标记：_load_model_configs 入口就绪门用，
+    # 回调/5s 兜底双保险消费（互斥置位，保证有限时间内完整执行一次）
+    _model_configs_waiting_provider: bool = False
     insertResponse = pyqtSignal(str)
     createResponse = pyqtSignal(str)
     contextActionRequested = pyqtSignal(str, str)
@@ -1133,6 +1136,9 @@ class OpenAIChatToolWindow(ToolWindow):
     _team_spawn_now = pyqtSignal(str, object)
     # 团队退出实时桥接：工具 leave 后主线程立即清胶囊/分组/权限（不等流结束）
     _team_leave_now = pyqtSignal(str)
+    # perf: (#6a) provider 就绪补刷桥接（registry 回调线程 → 主线程）：
+    # 未就绪挂起的 _load_model_configs 由就绪回调经此信号回主线程补刷
+    _providers_ready = pyqtSignal()
 
     def __init__(self, homepage, source_window=None):
         # 性能优化：标记是否为复制/分支窗口，必须在 super().__init__() 之前设置，
@@ -1216,6 +1222,25 @@ class OpenAIChatToolWindow(ToolWindow):
         from app.tools.registry import ToolRegistry
 
         ToolRegistry.get_instance().on_change(self._on_tool_registry_changed)
+
+        # perf: (#6a) provider 就绪监听：未就绪挂起的模型配置补刷由 registry
+        # 就绪 fire 触发。弱引用判活照抄 _enqueue_observer 模式：回调只做
+        # 判活 + 信号发射（fire 可能来自后台 warmup 线程，不可持锁直改 UI）
+        from app.plugins.registries.provider_registry import ProviderRegistry
+
+        _mw_weak2 = weakref.ref(self)
+
+        def _providers_ready_observer():
+            mw = _mw_weak2()
+            if mw is None or getattr(mw, "_is_destroyed", False):
+                return
+            mw._providers_ready.emit()
+
+        if not ProviderRegistry.get_instance().is_ready():
+            ProviderRegistry.get_instance().add_ready_listener(_providers_ready_observer)
+            self._providers_ready_observer = _providers_ready_observer  # 保活引用
+            self._providers_ready.connect(self._on_providers_ready)
+        # perf: (#6a) 已就绪则不注册（第二窗/晚启动窗口走原同步路径，零额外开销）
 
         # 动作队列观察者：enqueue 可能来自任意线程（工具 worker / 主线程定时器），
         # 回调里只做弱引用判活 + 信号发射（自动排队到主线程）；槽里 wid 匹配 +
@@ -4312,12 +4337,16 @@ class OpenAIChatToolWindow(ToolWindow):
             svc = PluginHostService.get_instance()
             # 上下文策略（context_tiers / budget_resolvers）是对话主链路依赖，
             # 必须早于任何一轮请求就绪；暂停队列会连它们一起推后，实测装载期
-            # 首次请求因此降级为「全量发送」。这两个组件合计约 0.5s，先同步扫掉。
+            # 首次请求因此降级为「全量发送」。
+            # perf: (#6b) 预热线程（heavy-import-preload）已提前预热这两组件，
+            # 此处 wait_done=True 等扫描完成：后台已完成则秒回；预热线程未跑成
+            # （stamp 未命中）则本线程同步自扫（兜底，与旧同步语义等价）；
+            # 最坏等 2s（后台被拖慢时）后继续，registry 随后台完成自动就绪。
             try:
                 from app.plugins.loaders.runtime_component_loader import warmup_component
 
-                warmup_component("context_tiers")
-                warmup_component("budget_resolvers")
+                warmup_component("context_tiers", wait_done=True, timeout=2.0)
+                warmup_component("budget_resolvers", wait_done=True, timeout=2.0)
             except Exception as e:
                 logger.warning(f"[MainWidget] 上下文策略预注册失败（继续装载）: {e}")
             # provider_warmup 一并挂起：它在后台 import 服务商模块，与装载链
@@ -11659,10 +11688,43 @@ class OpenAIChatToolWindow(ToolWindow):
         # request_coding_plan（缓存命中立即 emit），造成 [CodingPlan] 日志刷屏。
         self._refresh_context_usage_indicator()
 
+    def _on_providers_ready(self):
+        """perf: (#6a) provider 就绪回调槽（主线程）：清挂起标记并补刷模型配置"""
+        if getattr(self, "_is_destroyed", False):
+            return
+        if not self._model_configs_waiting_provider:
+            return
+        self._model_configs_waiting_provider = False
+        logger.debug("[_load_model_configs] provider 就绪补刷模型配置")
+        self._load_model_configs()
+
+    def _force_load_model_configs_if_pending(self):
+        """perf: (#6a) 5s 兜底：回调万一未触发（fire 前窗口异常等）也保证
+        _load_model_configs 有限时间内完整执行一次；此时读路径 ensure_loaded
+        原同步语义自然兜底（就绪则秒回，未就绪才会硬等，与旧行为一致）"""
+        if getattr(self, "_is_destroyed", False):
+            return
+        if not self._model_configs_waiting_provider:
+            return
+        self._model_configs_waiting_provider = False
+        logger.debug("[_load_model_configs] 5s 兜底触发模型配置补刷")
+        self._load_model_configs()
+
     def _load_model_configs(self, force_global: bool = False):
         # 检查窗口是否仍然有效，防止在初始化期间窗口被关闭后继续执行
         if getattr(self, "_is_destroyed", False):
             return
+
+        # perf: (#6a) provider 就绪门：未就绪时不再主线程硬等 ensure_loaded
+        # （wait 60s 冻结风险），挂回调 + 5s 兜底双保险，就绪后补刷
+        from app.plugins.registries.provider_registry import ProviderRegistry
+
+        if not self._model_configs_waiting_provider and not ProviderRegistry.get_instance().is_ready():
+            self._model_configs_waiting_provider = True
+            logger.debug("[_load_model_configs] provider 未就绪，挂回调补刷")
+            QTimer.singleShot(5000, self._force_load_model_configs_if_pending)
+            return
+        self._model_configs_waiting_provider = False
 
         # 保存当前窗口的实例级选择状态（多窗口隔离的关键：优先保持自身选择）
         old_provider = self._current_provider_name
@@ -24063,21 +24125,30 @@ class OpenAIChatToolWindow(ToolWindow):
             break
         if not first_text:
             return
+        # 斜杠命令/技能前缀只是触发词，不是对话主题：生成失败时 fallback 原样
+        # 进标题栏（实测出现标题 = "/plugin-creator"）。剥掉命令 token；纯命令
+        # 无参数时退回命令名本身（去斜杠）。消息本体保持原样传给插件。
+        title_source = first_text
+        if title_source.startswith("/"):
+            parts = title_source[1:].split(maxsplit=1)
+            title_source = (parts[1] if len(parts) > 1 else parts[0]).strip()
+        if not title_source:
+            return
         window_id = str(getattr(self, "_window_id", "") or "")
-        if len(first_text) <= 10:
+        if len(title_source) <= 10:
             from app.plugins.capabilities.resolve import pool_for
 
             pool = pool_for("system-title-generator", surface="ui", host=self)
             commit = pool.get("session.title.commit") if pool else None
             if callable(commit):
-                commit(window_id, first_text)
+                commit(window_id, title_source)
             return
         UIEventBus.get_instance().publish(
             "title.request",
             window_id=window_id,
             session_id=str(getattr(session, "session_id", "") or ""),
             messages=list(session.messages),
-            fallback=first_text[:15],
+            fallback=title_source[:15],
         )
 
     def _on_project_label_clicked(self, event):
