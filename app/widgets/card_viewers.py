@@ -7143,9 +7143,10 @@ class CodeWebViewer(QWebEngineView):
 
                 // ===== SVG widget 工具栏挂载 =====
                 // 渲染后扫描正文的自由 svg（排除 mermaid/echarts 内部）包 wrapper 挂工具栏。
-                // 目标形态两种：① 顶层裸 svg（```svg 围栏透传）；② svg-only 容器（内联 svg
-                // 经 _protect_inline_svg_blocks 包 <div> / markdown 段落包 <p>，svg 沉一层，
-                // 只扫顶层会漏挂）。尺寸阈值滤掉装饰小图标（欢迎卡图标、行内 icon）。
+                // 目标形态三种：① 顶层裸 svg（```svg 围栏透传）；② svg-only 容器（内联 svg
+                // 经 _protect_inline_svg_blocks 包 <div> / markdown 段落包 <p>）；③ v2
+                // block 级通道的 <div data-block-wrapper> 包装层（内容再沉一层）。
+                // 尺寸阈值滤掉装饰小图标（欢迎卡图标、行内 icon）。
                 // svg._widgetToolbar 防重挂（innerHTML 全量重建后 DOM 全新，标记自然失效，重扫重挂）。
                 window.renderWidgetToolbars = function(roots) {{
                     // [T28] 无参（全量路径）退化为 content-placeholder 顶层集合；
@@ -7155,7 +7156,20 @@ class CodeWebViewer(QWebEngineView):
                         if (!_cp) return;
                         roots = _cp.children;
                     }}
-                    var children = roots;
+                    // v2 block 级通道把每段内容包进 <div data-block-wrapper>，
+                    // svg / .html-widget 沉到 wrapper 内层。差量路径 roots 恰为
+                    // 这些 wrapper，只扫直接子节点会全部漏挂（右上角按钮消失）。
+                    // 先展开包装层再按原语义遍历；tool-content 与正文同口径。
+                    var children = [];
+                    for (var r = 0; r < roots.length; r++) {{
+                        var root = roots[r];
+                        if (!root) continue;
+                        if (root.hasAttribute && root.hasAttribute('data-block-wrapper')) {{
+                            for (var c = 0; c < root.children.length; c++) children.push(root.children[c]);
+                        }} else {{
+                            children.push(root);
+                        }}
+                    }}
                     for (var i = 0; i < children.length; i++) {{
                         var el = children[i];
                         var svg = null;

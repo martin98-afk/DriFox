@@ -3702,7 +3702,9 @@ _SKELETON_CACHE_MAX = 48
 # _SKELETON_CACHE_VERSION +1（v81）：路径链接去掉常驻虚下划线——密集工具卡里
 # 点线是视觉噪音；改默认无装饰、hover 变主题强调色（--accent）+ 实线下划线，
 # cursor 仍为 pointer。
-_SKELETON_CACHE_VERSION = 81
+# +1（v82）：renderWidgetToolbars 穿透 <div data-block-wrapper>，v2 通道下
+# svg / .html-widget 右上角工具栏不再漏挂；旧骨架缓存须失效。
+_SKELETON_CACHE_VERSION = 82
 
 
 def _js_literal(value) -> str:
