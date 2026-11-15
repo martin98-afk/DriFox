@@ -192,6 +192,15 @@ class ToolPermissionController(QObject):
         (例如 input box 显示的危险/安全总数比注册工具实际列表多)。
         这里统一过滤掉不在当前已注册工具集合里的工具。
         """
+        # perf: 插件工具未就绪（首窗构造段）时跳过补全/清理，原样返回——
+        # get_all_tools() 经 tool_classifier._registry 触发保险丝同步加载
+        # （取证 163.1ms 挂在首窗段）。语义=等价 T7 H1 热配置分支的初始态
+        # （已知集=已存开关键），完整补全由注册完成后的 on_change 补跑链
+        # （_sync_known_tools → main_widget _tool_registry_changed）负责。
+        import app.tools as _tools_pkg
+
+        if not _tools_pkg.plugin_tools_ready():
+            return dict(toggles)
         all_tools = get_all_tools()
         all_tools_set = set(all_tools)
         # 清理已删除工具的残留开关

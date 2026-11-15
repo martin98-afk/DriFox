@@ -579,6 +579,10 @@ _budget_resolver_loader: Optional[RuntimeComponentLoader] = None
 # 锁内置位、锁外执行——scan_roots 自带 _scan_lock，持本锁调用会与
 # ensure_*_watcher 的 _watchers_lock 形成嵌套（watcher 内也调 scan_roots）。
 _warmup_component_stamps: Dict[str, int] = {}  # comp -> 已扫过的 loader id（组件级幂等）
+# perf: (#6b) 组件扫描完成事件：预热线程后台扫、装载段主线程等（wait_done=True）。
+# Event 化顺带修复旧竞态：旧实现主线程拿到 stamp（幂等命中）即返回 None，
+# 可能后台扫描未完成、registry 还是空的，主线程拿空 registry 继续跑
+_warmup_component_done: Dict[str, threading.Event] = {}
 _warmup_once_lock = threading.Lock()
 _adapters_watcher: Optional[_RuntimeWatcher] = None
 _loop_watcher: Optional[_RuntimeWatcher] = None
@@ -868,7 +872,9 @@ def ensure_context_watcher() -> Optional[_RuntimeWatcher]:
         return _context_watcher
 
 
-def warmup_component(comp: str) -> Optional[Set[str]]:
+def warmup_component(
+    comp: str, wait_done: bool = False, timeout: float = 2.0
+) -> Optional[Set[str]]:
     """单个运行时组件的 warmup（组件级幂等）。
 
     拆到组件粒度是为了让调用方能在后台线程/分片里逐个预热（原先 11 组件
@@ -877,16 +883,36 @@ def warmup_component(comp: str) -> Optional[Set[str]]:
 
     并发语义：判定在 _warmup_once_lock 内，扫描在锁外（scan_roots 自带
     _scan_lock，锁内调用会与 ensure_*_watcher 的 _watchers_lock 嵌套）。
+
+    perf: (#6b) 新增 wait_done/timeout：预热线程提前预热后，装载段调用方传
+    wait_done=True 等待扫描真正完成（后台已完成则常态秒回）；stamp 未命中
+    （无人扫过）时自己同步扫（兜底自扫，与旧同步语义等价）。默认
+    wait_done=False，行为与旧版完全一致（register_async 后台路径不变）。
     """
     if comp not in _LOADER_SPECS:
         raise KeyError(f"未知运行时组件: {comp}")
     loader = _persistent_loader(comp)
+    need_scan = False
     with _warmup_once_lock:
         if _warmup_component_stamps.get(comp) == id(loader):
-            return None
-        _warmup_component_stamps[comp] = id(loader)
+            if not wait_done:
+                return None
+            ev = _warmup_component_done.setdefault(comp, threading.Event())
+        else:
+            _warmup_component_stamps[comp] = id(loader)
+            ev = _warmup_component_done.setdefault(comp, threading.Event())
+            ev.clear()
+            need_scan = True
+    if not need_scan:
+        if wait_done:
+            ev.wait(timeout)
+        return None
     t0 = time.perf_counter()
-    loaded = loader.scan_roots()
+    try:
+        loaded = loader.scan_roots()
+    finally:
+        # perf: (#6b) 异常也 set：等待方不能永久阻塞在 Event 上
+        ev.set()
     cost_ms = (time.perf_counter() - t0) * 1000
     if cost_ms >= 100:
         logger.debug(f"[RuntimeLoader] warmup {comp} = {cost_ms:.0f}ms (plugins={len(loaded)})")

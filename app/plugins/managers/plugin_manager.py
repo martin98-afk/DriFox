@@ -477,7 +477,9 @@ class PluginManager:
                 QTimer.singleShot(2000, self._backfill_scan_signature)
             except Exception:
                 self._backfill_scan_signature()
-            self._preload_plugin_tools()
+            # perf: 优化点（#5a）：工具预载后台化——同步段实测 161ms（T3c 弹着点），
+            # 照 _backfill_scan_signature 同款 QTimer 2s 延迟，启动段直减
+            self._schedule_preload_plugin_tools()
             return
 
         # 1. 扫描系统插件
@@ -506,7 +508,24 @@ class PluginManager:
 
         # [T26] 全扫成功 → 回写发现缓存（下次启动命中；含损坏自修复）
         self._save_discovery_cache()
-        self._preload_plugin_tools()
+        # perf: 优化点（#5a）：同命中路径，预载后台化
+        self._schedule_preload_plugin_tools()
+
+    def _schedule_preload_plugin_tools(self):
+        """[#5a] 工具预载后台化调度：QTimer 2s 后主线程执行（照 _backfill_scan_signature 模式）。
+
+        perf: T3c 实测同步预载 161ms 挡在 plugin_scan 段；延迟后启动段直减。
+        选主线程 QTimer 而非后台线程：插件工具 import 含 bs4 等重依赖，与
+        main_widget 级联 import 争 Python import 锁有负收益前科（实测拖慢主线程
+        26%），2s 时点级联早已完成。幂等互斥语义不变：2s 内保险丝先行触发则
+        本调度 0ms 短路；预载失败时保险丝仍可按 60s 节流重试兜底。
+        """
+        try:
+            from PyQt5.QtCore import QTimer
+
+            QTimer.singleShot(2000, self._preload_plugin_tools)
+        except Exception:
+            self._preload_plugin_tools()
 
     def _preload_plugin_tools(self):
         """[S1-C] 插件工具加载归位：initialize 末尾预调一次（幂等）。

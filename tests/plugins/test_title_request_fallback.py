@@ -141,7 +141,6 @@ def test_second_user_message_does_not_republish(monkeypatch):
     [
         {"user_edited": True},
         {"topic_summary": "已有标题"},
-        {"is_temp": True},
     ],
 )
 def test_guards_skip(monkeypatch, kwargs):
@@ -151,6 +150,19 @@ def test_guards_skip(monkeypatch, kwargs):
     assert events == []
     assert commits == []
 
+
+def test_temp_session_still_publishes(monkeypatch):
+    """临时对话页同样生成标题：落库与否由提交侧 is_temp 分支裁决。
+
+    回归：宿主收敛守卫时把 is_temp 一并拦掉（旧 _maybe_generate_topic_summary
+    无此守卫），临时会话标题永远停在占位「对话 MM-DD HH:MM」。
+    """
+    events, _ = _capture(
+        monkeypatch,
+        _host([_user("帮我排查登录接口 500 报错的原因并给出修复方案")], is_temp=True),
+    )
+    assert len(events) == 1
+    assert events[0][0] == "title.request"
 
 def test_multimodal_content_takes_text_blocks(monkeypatch):
     messages = [

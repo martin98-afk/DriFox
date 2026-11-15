@@ -590,13 +590,34 @@ class HistoryManager:
         # 首次打开历史面板又用数据库快照覆盖内存记录，导致延迟保存找不到目标。
         self._ensure_history_loaded()
 
+        # perf: 会话查询合并——原 team/pinned/usage/partial-hint 四分支各自调
+        # get_session_by_session_id，每轮保存最多重复 3~4 次全量扫描/SQLite 读。
+        # 四个查询点之间无任何写库动作，同一保存事务窗口内会话状态不变，
+        # 首次查询结果贯穿复用即可；None（无现有记录）语义在各分支照旧。
+        _existing_shared = None
+        _existing_queried = False
+        if session_id and (
+            team_run_id is None
+            or team_name is None
+            or agent_name is None
+            or team_members is None
+            or pinned is None
+            or last_api_prompt_tokens is None
+            or last_api_message_count is None
+            or last_api_prompt_from_usage is None
+            or token_calibration is None
+            or token_calibration_model is None
+        ):
+            _existing_shared = self.get_session_by_session_id(session_id)
+            _existing_queried = True
+
         # 🛡️ None→保留现值：与 update_session 语义对齐，避免 save 分支
         # （会话被挤出 _history_limit 后走 INSERT OR REPLACE）用空串覆盖
         # 团队元数据，导致团队会话从历史分组消失（数据损坏，不可逆）。
         if team_run_id is None or team_name is None or agent_name is None or team_members is None:
             existing = None
             if session_id:
-                existing = self.get_session_by_session_id(session_id)
+                existing = _existing_shared  # perf: 复用合并查询（原为重复查询）
             if existing:
                 if team_run_id is None:
                     team_run_id = existing.get("team_run_id", "") or ""
@@ -617,7 +638,7 @@ class HistoryManager:
         if pinned is None:
             existing_for_pin = None
             if session_id:
-                existing_for_pin = self.get_session_by_session_id(session_id)
+                existing_for_pin = _existing_shared  # perf: 复用合并查询（原为重复查询）
             pinned = bool(existing_for_pin.get("pinned", False)) if existing_for_pin else False
 
         # API 用量字段「None→保留现值」：高频保存路径不带这些字段时，沿用会话
@@ -631,7 +652,7 @@ class HistoryManager:
         }
         _existing_for_usage = None
         if any(v is None for v in _usage_provided.values()) and session_id:
-            _existing_for_usage = self.get_session_by_session_id(session_id)
+            _existing_for_usage = _existing_shared  # perf: 复用合并查询（原为重复查询）
         _usage = self._resolve_api_usage_fields(_usage_provided, _existing_for_usage)
 
         merged_messages = merge_session_messages(messages)
@@ -640,9 +661,13 @@ class HistoryManager:
         # 沿用库里现值，避免占用显示被清零。
         _ctx_hint = None
         if merged_messages and merged_messages[-1].get("_partial") and session_id:
-            _existing_for_hint = self.get_session_by_session_id(session_id)
-            if _existing_for_hint:
-                _ctx_hint = _existing_for_hint.get("context_usage", 0)
+            # perf: 复用合并查询；仅当开头判据未覆盖（全显式保存 + partial 尾巴）
+            # 才补查一次（原实现此处独立查询，查询次数不变）
+            if not _existing_queried:
+                _existing_shared = self.get_session_by_session_id(session_id)
+                _existing_queried = True
+            if _existing_shared:
+                _ctx_hint = _existing_shared.get("context_usage", 0)
         session_record = self._build_session_record(
             merged_messages,
             title,

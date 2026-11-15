@@ -830,6 +830,18 @@ def main():
                 ProviderRegistry.get_instance().ensure_loaded()
             except Exception:
                 logger.exception("[Startup] provider 插件预热失败（非致命）")
+            # perf: (#6b) 上下文组件预热：context_tiers / budget_resolvers 是对话
+            # 主链路依赖（tier 截断），原在 UI 装载段主线程同步扫（~0.5s，
+            # MainThreadWatchdog 实证）。迁到本预热线程提前扫，装载段改为
+            # wait_done 等待（常态秒回）；与装载段调用经 _warmup_component_done
+            # Event 互斥，谁先到谁扫。
+            try:
+                from app.plugins.loaders.runtime_component_loader import warmup_component
+
+                warmup_component("context_tiers")
+                warmup_component("budget_resolvers")
+            except Exception:
+                logger.exception("[Startup] 上下文组件预热失败（非致命）")
             # skills 索引预热仅在 PluginManager 已初始化时做：未初始化时
             # get_local_skills 只能扫到 fallback 路径，写入的残缺缓存会被
             # 后续 key（含插件目录）判 miss，预热白做还污染 key TTL。

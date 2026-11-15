@@ -1101,9 +1101,9 @@ class OpenAIChatToolWindow(ToolWindow):
     _models_dev_cache: Optional[object] = None
     # 同上 inflight 守卫：避免并发重复发起；首请求完成后再被广播唤醒。
     _models_dev_fetch_inflight: bool = False
-    # perf: (#6a) provider 未就绪挂起标记：_load_model_configs 入口就绪门用，
-    # 回调/5s 兜底双保险消费（互斥置位，保证有限时间内完整执行一次）
-    _model_configs_waiting_provider: bool = False
+    # perf: (#6a-fix2) waiting/force_pass 两标记已移入 __init__ 实例化：
+    # 类级作用域会让 A 窗的 pend 被 B 窗装配置抹掉（跨窗互踩，review #8c）
+    # 与 _valid_configs 的多窗口隔离口径对齐
     insertResponse = pyqtSignal(str)
     createResponse = pyqtSignal(str)
     contextActionRequested = pyqtSignal(str, str)
@@ -1151,6 +1151,12 @@ class OpenAIChatToolWindow(ToolWindow):
         # 临时对话页标记：页内新建会话不落盘、不进历史，工作目录指向独立临时目录，
         # 关闭时整页目录删除（由 TabManagerWindow.spawn_tab(temp_scope=True) 置位）
         self._is_temp_scope: bool = False
+        # perf: (#6a) provider 未就绪挂起/放行标记（实例级：多窗口隔离，review #8c）。
+        # waiting：_load_model_configs 入口就绪门用，回调/5s 兜底双保险消费；
+        # force_pass：fire/兜底触发路径置位，就绪门消费即清——异常路径 is_ready()
+        # 恒 False，无放行标记则补刷被门再次 re-pend → 永不执行 → 空表（#6a-fix）
+        self._model_configs_waiting_provider: bool = False
+        self._model_configs_force_pass: bool = False
         # 批4：per-window 延迟任务队列（必须在 super().__init__ 触发 setup_ui
         # 之前创建：setup_ui 内 N9/N10/N11 的注册依赖此实例）
         from app.core.infra.deferred_task_queue import DeferredTaskQueue
@@ -11695,6 +11701,9 @@ class OpenAIChatToolWindow(ToolWindow):
         if not self._model_configs_waiting_provider:
             return
         self._model_configs_waiting_provider = False
+        # perf: (#6a-fix) 置放行标记：异常路径 is_ready 恒 False，
+        # 不放行则门会再次 re-pend → 补刷永不执行
+        self._model_configs_force_pass = True
         logger.debug("[_load_model_configs] provider 就绪补刷模型配置")
         self._load_model_configs()
 
@@ -11707,6 +11716,8 @@ class OpenAIChatToolWindow(ToolWindow):
         if not self._model_configs_waiting_provider:
             return
         self._model_configs_waiting_provider = False
+        # perf: (#6a-fix) 同 _on_providers_ready：放行本次补刷
+        self._model_configs_force_pass = True
         logger.debug("[_load_model_configs] 5s 兜底触发模型配置补刷")
         self._load_model_configs()
 
@@ -11719,7 +11730,12 @@ class OpenAIChatToolWindow(ToolWindow):
         # （wait 60s 冻结风险），挂回调 + 5s 兜底双保险，就绪后补刷
         from app.plugins.registries.provider_registry import ProviderRegistry
 
-        if not self._model_configs_waiting_provider and not ProviderRegistry.get_instance().is_ready():
+        if self._model_configs_force_pass:
+            # perf: (#6a-fix) 补刷触发路径放行：fire/兜底已消费 pending，本次
+            # 必须完整执行（异常路径 is_ready 恒 False，否则 re-pend 死循环）；
+            # 用完即清，不影响后续普通调用（如手动选型）
+            self._model_configs_force_pass = False
+        elif not self._model_configs_waiting_provider and not ProviderRegistry.get_instance().is_ready():
             self._model_configs_waiting_provider = True
             logger.debug("[_load_model_configs] provider 未就绪，挂回调补刷")
             QTimer.singleShot(5000, self._force_load_model_configs_if_pending)

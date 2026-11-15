@@ -59,7 +59,13 @@ except Exception:  # pragma: no cover
 import html as _html_mod
 
 from qfluentwidgets import ScrollArea
-from app.utils.design_tokens import Animations, Colors, get_unified_scrollbar_style, scale_font_size
+from app.utils.design_tokens import (
+    Animations,
+    Colors,
+    get_unified_scrollbar_style,
+    scale_font_size,
+    set_style_sheet_if_changed,
+)
 from app.utils.utils import get_font_family_css, get_icon
 
 try:  # pygments 独立包，顶层安全导入
@@ -1237,9 +1243,12 @@ class RichTextLabel(QLabel):
 
     def set_html(self, html: str) -> None:
         t = _qt_theme()
-        self.setStyleSheet(
+        # perf: (#5b) 同串跳过：流式每批每段重复 setStyleSheet 会触发
+        # QStyleSheetStyle 重建 + 子树 repolish（同串也重建），是每批固定税
+        set_style_sheet_if_changed(
+            self,
             f"QLabel {{ {get_font_family_css()} font-size:{scale_font_size(14)}px;"
-            f" color:{t['text_secondary']}; background:transparent; }}"
+            f" color:{t['text_secondary']}; background:transparent; }}",
         )
         self.setText(html)
 
@@ -1674,6 +1683,13 @@ class ThinkCard(_CollapsibleHeightAnimMixin, QFrame):
 
     def apply_streaming(self, active: bool) -> None:
         """校正流式态标记（reconcile 复用控件时内容指纹不变但状态可能翻转）。"""
+        # perf: (#5b) 状态未翻转直接短路：reconcile 流式分支每批重复调用，
+        # 跳过重复的 spinner/徽章/标题更新开销；翻转入口（set_streaming /
+        # update_content completed 转态）键变化照常执行，视觉零变化
+        prev = getattr(self, "_streaming_active", None)
+        if prev is active:
+            return
+        self._streaming_active = active
         if active:
             self._title_label.setText("深度思考中...")
             self._preview_label.setText("")
@@ -2081,6 +2097,14 @@ class ToolCardWidget(_CollapsibleHeightAnimMixin, QFrame):
     def apply_streaming(self, active: bool) -> None:
         """校正运行态：未闭合→运行中；闭合→按 success 显示徽章（幂等）。"""
         b = self._block
+        # perf: (#5b) 状态键未翻转直接短路：reconcile 流式分支（:2217/:2219）
+        # 每批重复调用，跳过重复徽章/spinner 开销；键含 _expanded——用户手动
+        # 折叠/展开后强制恢复原行为（运行中自动展开），视觉零变化
+        state = (active, bool(b.get("closed")), bool(b.get("success")), self._expanded)
+        prev = getattr(self, "_stream_state", None)
+        if prev == state:
+            return
+        self._stream_state = state
         if active and not b.get("closed"):
             self._status_label.setText("<span style='color:#f59e0b;font-weight:600;'>⟳ 运行中</span>")
             if not self._expanded:

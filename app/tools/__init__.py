@@ -242,6 +242,15 @@ def _ensure_plugin_tools_loaded() -> None:
         logger.warning(f"[BuiltinTools] 插件工具加载失败（60s 后可重试）: {e}")
 
 
+def plugin_tools_ready() -> bool:
+    """只读判定：系统插件工具是否已加载（不触发加载，不碰保险丝本体）
+
+    [PERF #5f] 供启动期消费方（tool_permission_controller._complete_toggles）
+    短路同步加载：首窗构造段不付 163ms 保险丝成本，完整补全由注册完成后
+    的 on_change 补跑链负责。
+    """
+    return _plugin_tools_loaded
+
 def _invalidate_schema_cache(version: int) -> None:
     """ToolRegistry 变更监听：registry 版本变化时失效 get_builtin_tools_schema 缓存"""
     global _CACHE_RESULT
