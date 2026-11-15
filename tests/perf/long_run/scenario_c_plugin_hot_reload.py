@@ -2,19 +2,23 @@
 """场景 C：插件热重载压测（基于 watchfiles 热扫描触发 reload）。
 
 压测目标：
-- ChatBackend._on_hot_reload_requested 高频触发 → reload_plugin_subsystems 链路
+- PluginHostService._do_single_reload → emit_plugin_changed → plugin_changed 信号链路
 - 模拟 watchfiles 报告 (plugin_name, component) 变更事件
 - plugin_changed 信号槽连接是否随循环泄漏
-- PluginManager.rescan / _reload_single_plugin 内闭包与 dict 缓存
+- PluginHostService 重载路径上的闭包与 dict 缓存
+
+历史注：热重载入口原在 ``ChatBackend``（``reload_plugin_subsystems`` /
+``_on_hot_reload_requested``），已迁到 ``PluginHostService``；本场景跟迁。
 
 循环次数：
 - Demo 模式（默认）：30 秒 → ~1 千次 reload 调用（mock PluginManager 极快）
 - Full 模式（LONGRUN_FULL=1）：≥5 万次 reload 调用
 
 策略：
-- ChatBackend 实例化（仅 __init__ 级别，**不调用 initialize** 以避免真实磁盘/插件加载）
+- 直接驱动现役入口 ``PluginHostService._do_single_reload`` + ``emit_plugin_changed``
+  （不经 300ms 去抖，保证逐次计数与逐次信号广播）
 - Monkeypatch `PluginManager.get_instance` 返回 mock（含 rescan + is_initialized）
-- 反复 emit _hot_reload_requested → 触发 reload_plugin_subsystems 完整路径
+- 卡片回放与 PluginChanged hook diff 与本压测目标无关，patch 为空实现
 """
 
 from __future__ import annotations
@@ -67,7 +71,7 @@ def _build_mock_backend():
     """
     import gc
 
-    from app.core.conversation.backend import ChatBackend
+    from app.core.services.plugin_host_service import PluginHostService
     from PyQt5.QtWidgets import QApplication
 
     # 多路径找 QApplication
@@ -83,11 +87,9 @@ def _build_mock_backend():
                 except Exception:
                     continue
     if app is None:
-        # 没有 QApplication 时，ChatBackend.__init__ 会因 QObject parent 设置而崩；
+        # 没有 QApplication 时，QObject 单例构造可能因无 GUI 环境而崩；
         # 此处主动抛清晰错误
         raise RuntimeError("QApplication 必须已建（scenario runner 负责）")
-
-    backend = ChatBackend(parent=None, window_id="perf_long_run_c")
 
     # --- Monkeypatch PluginManager.get_instance ---
     from app.plugins.managers import plugin_manager as pm_module
@@ -100,21 +102,14 @@ def _build_mock_backend():
 
     pm_module.PluginManager.get_instance = staticmethod(_mock_get_instance)
 
-    # --- Monkeypatch reload_plugin_subsystems 与 _do_single_reload ---
-    # 真实链路要扫盘 / 加载 agents / hooks 等，开销大且与"内存增长基线"目标无关。
-    # 我们只保留"信号 → emit"的关键路径：每次 reload 调用自增计数器并 emit
-    # plugin_changed，量化信号链路的内存增长。
-    from app.core.conversation import backend as backend_module
+    from app.core.services.plugin_host_service import PluginHostService
 
-    _orig_reload_subsystems = backend_module.ChatBackend.reload_plugin_subsystems
-    _orig_do_single_reload = backend_module.ChatBackend._do_single_reload
+    svc = PluginHostService.get_instance()
+    _orig_do_single_reload = PluginHostService._do_single_reload
+    _orig_schedule_debounced = PluginHostService._schedule_debounced_reload
+    _orig_replay_cards = PluginHostService._replay_pending_config_cards
+    _orig_changed_hook = PluginHostService._trigger_plugin_changed_hook
     _signal_count = {"plugin_changed": 0, "reload_calls": 0}
-
-    def _mock_reload_subsystems(self, force_full: bool = False):
-        _signal_count["reload_calls"] += 1
-        from app.plugins.kernel import KNOWN_COMPONENTS as _KC
-
-        return {k: (0 if k == "agents" else False) for k in _KC}
 
     def _mock_do_single_reload(self, plugin_name: str, component: str):
         _signal_count["reload_calls"] += 1
@@ -122,22 +117,26 @@ def _build_mock_backend():
 
         return {k: (0 if k == "agents" else False) for k in _KC}
 
-    backend_module.ChatBackend.reload_plugin_subsystems = _mock_reload_subsystems
-    backend_module.ChatBackend._do_single_reload = _mock_do_single_reload
+    PluginHostService._do_single_reload = _mock_do_single_reload
+    # 只保留「reload → emit」关键路径：卡片回放与 hook diff 与压测目标无关
+    PluginHostService._replay_pending_config_cards = staticmethod(lambda: 0)
+    PluginHostService._trigger_plugin_changed_hook = lambda self, *a, **k: None
 
     # --- 信号槽计数（plugin_changed） ---
     def _on_plugin_changed(_result: dict) -> None:
         _signal_count["plugin_changed"] += 1
 
-    backend.plugin_changed.connect(_on_plugin_changed)
+    svc.plugin_changed.connect(_on_plugin_changed)
 
     # 清理辅助（供 finally）
     def _restore():
         pm_module.PluginManager.get_instance = _orig_get_instance
-        backend_module.ChatBackend.reload_plugin_subsystems = _orig_reload_subsystems
-        backend_module.ChatBackend._do_single_reload = _orig_do_single_reload
+        PluginHostService._do_single_reload = _orig_do_single_reload
+        PluginHostService._schedule_debounced_reload = _orig_schedule_debounced
+        PluginHostService._replay_pending_config_cards = staticmethod(_orig_replay_cards)
+        PluginHostService._trigger_plugin_changed_hook = _orig_changed_hook
 
-    return backend, _mock_pm, _signal_count, _restore
+    return svc, _mock_pm, _signal_count, _restore
 
 
 def run_plugin_hot_reload_scenario(
@@ -146,7 +145,7 @@ def run_plugin_hot_reload_scenario(
     duration_sec: float,
 ) -> dict:
     """执行插件热重载压测；返回基线摘要 dict。"""
-    backend, mock_pm, signal_count, restore = _build_mock_backend()
+    svc, mock_pm, signal_count, restore = _build_mock_backend()
 
     start_tracemalloc()
     t0 = time.time()
@@ -161,11 +160,12 @@ def run_plugin_hot_reload_scenario(
             if now - t0 >= duration_sec:
                 break
 
-            # 模拟 watchfiles 检测到 "agents" 组件变更 → 触发主线程 reload
+            # 模拟 watchfiles 检测到 "agents" 组件变更 → 驱动现役重载+广播入口
             try:
-                backend._on_hot_reload_requested("mock-plugin", "agents")
+                result = svc._do_single_reload("mock-plugin", "agents")
+                svc.emit_plugin_changed(result, "mock-plugin")
             except Exception as e:
-                # 容错：reload_plugin_subsystems 可能在 stub 不完整时抛错，记录但不中断
+                # 容错：mock 不完整时抛错，记录但不中断
                 print(f"  [warn] iter={iter_count} reload raised: {e}", file=sys.stderr)
 
             iter_count += 1
