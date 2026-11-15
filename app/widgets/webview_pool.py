@@ -33,6 +33,7 @@ import time
 from typing import Dict, List, Optional, Set
 
 from PyQt5.QtCore import QTimer, Qt
+from loguru import logger
 
 
 def _load_max_idle_per_bucket() -> int:
@@ -93,6 +94,23 @@ def _idle_gc_enabled() -> bool:
 _IDLE_GC_DELAY_MS = 60_000
 _IDLE_GC_DELAY_S = _IDLE_GC_DELAY_MS / 1000.0
 
+# [O4] 池命中率周期日志：60s 一行 INFO（字段与 stats() 一致 + hit_rate 派生值）。
+_STATS_LOG_INTERVAL_MS = 60_000
+
+
+def _load_stats_log_enabled() -> bool:
+    """[O4] 周期统计日志开关：DRIFOX_WEBVIEW_POOL_STATS=0/false/no 关闭（默认开）。
+
+    60s 一行的量级远低于日志轮转阈值，默认开以便线上直接观察池命中率；
+    需要安静时可即时用 env 关闭。与 _load_idle_gc_enabled 同一先例：
+    import 期读取固化，进程内不热变。
+    """
+    raw = os.environ.get("DRIFOX_WEBVIEW_POOL_STATS", "")
+    return raw.strip().lower() not in ("0", "false", "no")
+
+
+_STATS_LOG_ENABLED = _load_stats_log_enabled()
+
 # 总开关：出现问题时可在运行时整体关闭，回退到"每次新建"的既有行为
 _ENABLED = True
 
@@ -108,6 +126,8 @@ class WebViewPool:
         self._failures = 0
         # perf: #26 延迟清池单发 QTimer（挂 host；本类非 QObject 勿 self 挂）
         self._idle_gc_timer = None
+        # [O4] 池命中率周期日志 QTimer（挂 QCoreApplication，见 _ensure_stats_timer）
+        self._stats_timer = None
         self._stats: Dict[str, int] = {
             "acquire": 0,
             "hit": 0,
@@ -148,6 +168,7 @@ class WebViewPool:
         """从池里取一个可复用的 viewer；没有则返回 None（调用方新建）。"""
         if not self.enabled:
             return None
+        self._ensure_stats_timer()
         self._stats["acquire"] += 1
         bucket = self._idle.setdefault(bool(light), [])
         while bucket:
@@ -258,6 +279,47 @@ class WebViewPool:
                     self._schedule_idle_gc()
                     return
         self.clear()
+
+    # ── [O4] 池命中率周期日志 ──────────────────────────────────
+
+    def _ensure_stats_timer(self) -> None:
+        """首次使用时启动 60s 周期统计日志。
+
+        QTimer 挂 ``QCoreApplication.instance()``：本类非 QObject，self 挂不了；
+        app 与进程同生命周期，timer 随 app 销毁，无需显式 stop/deleteLater。
+        无事件循环（早于 QApplication / 纯脚本）时静默跳过，下次 acquire 再试。
+        """
+        if not _STATS_LOG_ENABLED or self._stats_timer is not None:
+            return
+        try:
+            from PyQt5.QtCore import QCoreApplication
+
+            app = QCoreApplication.instance()
+            if app is None:
+                return
+            timer = QTimer(app)
+            timer.setInterval(_STATS_LOG_INTERVAL_MS)  # >=60s，低频
+            timer.timeout.connect(self._log_stats)
+            timer.start()
+            self._stats_timer = timer
+        except Exception:
+            self._stats_timer = None
+
+    def _log_stats(self) -> None:
+        """落一行池统计：字段与 stats() 一致，附 hit_rate 派生值。"""
+        try:
+            st = self.stats
+            attempts = st["hit"] + st["miss"]
+            hit_rate = round(st["hit"] / attempts, 4) if attempts else 0.0
+            logger.info(
+                "[WebViewPool] acquire={} hit={} miss={} release={} rejected={} evicted={} "
+                "hit_rate={} idle_light={} idle_full={} enabled={} failures={}",
+                st["acquire"], st["hit"], st["miss"], st["release"],
+                st["rejected"], st["evicted"], hit_rate,
+                self.size(True), self.size(False), self.enabled, self._failures,
+            )
+        except Exception:
+            pass  # 观测日志不得反噬池主流程
 
     # ── 与 B4 强回收护栏的协同 ──────────────────────────────────────
 
