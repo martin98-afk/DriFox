@@ -6,7 +6,7 @@ offscreen 运行，无键鼠、无可见窗口（P0 约束）。
 覆盖：
 ① 同 key 二次请求返回同一对象（QPixmap.cacheKey() 断言，隐式共享零复制）
 ② 不同 opacity/blur/尺寸产生不同条目
-③ LRU 超 _MAX_SETS=2 组淘汰最旧组
+③ LRU 超 _MAX_SETS=1 组淘汰最旧组
 ④ clear() 后重新创建
 ⑤ 接入层行为：同壁纸两个 SceneLayer 实例的预乘副本是同一对象（2 份→1 份）
 ⑥ 引用计数：两窗口共享只解码一次；⑦ 单窗口释放后另一窗口仍有效；
@@ -83,20 +83,16 @@ def test_different_params_different_entries(cache, wallpaper):
 
 
 def test_lru_evicts_oldest_group(cache, tmp_path):
-    """③ 超 _MAX_SETS=2 组 → 淘汰最旧组（新壁纸进、旧壁纸出）"""
+    """③ 超 _MAX_SETS=1 组 → 淘汰最旧组（新壁纸进、旧壁纸出）"""
     w1 = str(tmp_path / "w1.png"); _make_png(w1, 100)
     w2 = str(tmp_path / "w2.png"); _make_png(w2, 150)
-    w3 = str(tmp_path / "w3.png"); _make_png(w3, 200)
-    cache.get_pixmap("source", w1, load=_load)
+    first = cache.get_pixmap("source", w1, load=_load)
     cache.get_pixmap("source", w2, load=_load)
-    assert cache.stats()["groups"] == 2
-    cache.get_pixmap("source", w3, load=_load)  # w1 组被淘汰
-    assert cache.stats()["groups"] == 2
-    # w1 再请求 → 缓存未命中重新构建（对象不同，验证旧组确实被淘汰）
+    assert cache.stats()["groups"] == 1, "第 2 组写入即淘汰最旧组（_MAX_SETS=1）"
+    # w1 旧组已淘汰：再请求是重新构建的新对象
     again = cache.get_pixmap("source", w1, load=_load)
-    # 淘汰后 w2 变最旧，但 w1 刚被触碰 → w3 被淘汰
-    keep = cache.get_pixmap("source", w2, load=_load)
-    assert cache.stats()["groups"] == 2
+    assert again is not first
+    assert cache.stats() == {"groups": 1, "entries": 1}
 
 
 def test_clear_then_rebuild(cache, wallpaper):
@@ -308,7 +304,7 @@ def test_baked_cap_not_affect_source_premult(cache, wallpaper):
 
 
 def test_baked_evicted_with_group(cache, wallpaper, tmp_path):
-    """M2-④ 3 组交替 → 最旧组整体淘汰，其 baked 一并释放"""
+    """M2-④ 切组 → 最旧组整体淘汰，其 baked 一并释放"""
     w1 = str(tmp_path / "w1.png"); _make_png(w1, 100)
     w2 = str(tmp_path / "w2.png"); _make_png(w2, 150)
     w3 = str(tmp_path / "w3.png"); _make_png(w3, 200)
@@ -317,8 +313,8 @@ def test_baked_evicted_with_group(cache, wallpaper, tmp_path):
                      width=100, height=50, blur_radius=8.0, pad=16)
     cache.get_pixmap("baked", w2, load=_baked_load(100, 50),
                      width=100, height=50, blur_radius=8.0, pad=16)
-    assert cache.stats()["groups"] == 2
+    assert cache.stats() == {"groups": 1, "entries": 1}  # w1 组整体出，baked 一并释放
     cache.get_pixmap("baked", w3, load=_baked_load(100, 50),
-                     width=100, height=50, blur_radius=8.0, pad=16)  # w1 组整体出
-    assert cache.stats()["groups"] == 2
-    assert cache.stats()["entries"] == 2  # 只剩 w2/w3 各 1 份 baked，w1 baked 全释放
+                     width=100, height=50, blur_radius=8.0, pad=16)  # w2 组整体出
+    assert cache.stats() == {"groups": 1, "entries": 1}
+
