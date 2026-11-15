@@ -10,6 +10,7 @@
 ### 🐛 问题修复 (Bug Fixes)
 
 - **表格紧贴正文时渲染成普通文本** (`app/widgets/card_render_core.py`): 模型常把表格紧接在段落下一行、不给空行，而 Python-Markdown 的 tables 扩展只在独立块上生效（GFM 同样不允许表格打断段落），整张表退化成一行行带 `|` 的文本加 `<br>`，表现为「表格渲染不出来」。新增 `_normalize_table_blocks`，在 `_sanitize_incomplete_markdown` 入口补表格前后空行——该函数是全量 / 差量段 / 尾部行内 / worker / viewer / block 六条渲染管线的共同入口，一处补齐全线生效；识别依赖 `_looks_like_table_separator`（分隔行字符集与列数判定，与 tables 扩展口径一致）。同时补上表格后紧跟正文的空行，避免正文被 tables 扩展当成缺列的数据行吞进表体。围栏内原样不动，输入已规范时零改动（幂等）。
+- **交接（update_handoff）新建的会话不生成标题** (`plugins/system-handoff/tools/update_handoff.py` · `app/main_widget.py` · `app/plugins/capabilities/providers/{ui_core,tool_core}.py`): 交接三连里的继续指令经 `session.send` 入队时默认带 `_hook_event="SessionSend"`，而宿主 `_publish_title_request` 的「首条真实用户消息」白名单只放 `TeamMail`，交接轮的 `len(user_messages)==0` 直接 return → `title.request` 永不发布，新会话停在占位名「对话 MM-DD HH:MM」；用户之后发的第一句真实消息反被当成首问，若 ≤10 字更会直接 commit 成标题（实测标题变成「顺便把测试也补上」这种跟原任务无关的句子）。修法双轨：① `session.new` 能力新增 `title` 参数，交接侧 `_handoff_title` 传源会话标题（占位形态「新对话」/「对话 MM-DD HH:MM」回退交接文档「任务目标」首行），宿主 `_handle_action_new` 走 `_apply_new_session_title` 直接落标题，不依赖模型；② 宿主白名单加入 `SessionSend`，并把「继续完成「…」会话的交接任务」固定句式剥成「」里的主题再判长短，兜住定时器触发等其它经 `session.send` 驱动的系统轮次。
 
 ## [v0.7.2] - 2026-11-14 (重新发布 #8)
 

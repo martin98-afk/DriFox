@@ -455,7 +455,8 @@ class HistoryManager:
 
         # === 异步归档扫描（性能优化）===
         # _archive_meta_cache：file_path → (mtime, info_dict)
-        # 仅在后台 _ArchiveScanTask 线程内访问，访问路径都用 _archive_cache_lock 保护。
+        # 后台 _ArchiveScanTask 与同步 get_archived_sessions 两处访问，均以
+        # _archive_cache_lock 保护（#41 接入同步缓存复用后语义已变）。
         self._archive_meta_cache: Dict[str, Tuple[float, Dict]] = {}
         self._archive_cache_lock = threading.Lock()
         # 每次发起扫描自增；主线程接收结果时对比 _current_scan_request_id 丢弃过期数据。
