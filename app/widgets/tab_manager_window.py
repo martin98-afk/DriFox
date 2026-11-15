@@ -1226,6 +1226,13 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
         self._splitter_idle_timer.setInterval(120)
         self._splitter_idle_timer.timeout.connect(self._on_splitter_idle)
 
+        # ── 团队成员行「最后活动时间」周期刷新：刷新点（标题变更/一轮结束/
+        # 加入 Tab）只在活动时刻触发，算出的「刚刚」随闲置僵死；30s 重算一次 ──
+        self._member_time_timer = QTimer(self)
+        self._member_time_timer.setInterval(30 * 1000)
+        self._member_time_timer.timeout.connect(self._refresh_member_times)
+        self._member_time_timer.start()
+
         # ── 侧边栏内 left 卡片区（嵌入 sidebarSplitter）──
         # 卡片打开前的 TabPanel frame 宽（卡片关闭时恢复）与「卡片占位期间」标记
         self._left_card_saved_panel_frame_w: int = 0
@@ -5284,6 +5291,18 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
         title = self._resolve_team_title(window)
         self._tab_panel.set_team_label(team_id, title)
         self._tab_panel.set_team_unified_title(team_id, title)
+
+    def _refresh_member_times(self):
+        """周期刷新团队成员行「最后活动时间」（闲置时「刚刚」僵死修复）"""
+        for w in self._windows:
+            if not getattr(w, "_team_agent_name", ""):
+                continue
+            if _sip.isdeleted(w):
+                continue
+            idx = self._window_to_index.get(id(w), -1)
+            if idx < 0:
+                continue
+            self._tab_panel.update_tab_member_time(idx, self._member_time_text(w))
 
     @staticmethod
     def _member_time_text(win) -> str:
