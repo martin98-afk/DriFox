@@ -306,6 +306,15 @@ _RESTORE_BATCH_SLOW_MS = 20  # 本批慢于此 → 下一批缩容
 _RESTORE_INTERVAL_VISIBLE_MS = 16  # 视口内未恢复完：让出一帧
 _RESTORE_INTERVAL_OFFSCREEN_MS = 30  # 已进入离屏段：沿用旧节奏
 
+# 参与「首条真实用户消息」判定的 _hook_event 白名单。
+# 这两类是系统代用户发出的真实需求，其余 hook 注入（SessionStart / vision_inject
+# / SubAgentFinished 等）是上下文补充，不算用户发言。
+_TITLE_TRIGGER_HOOK_EVENTS = frozenset({"TeamMail", "SessionSend"})
+
+# 交接自动继续的固定句式前缀（plugins/system-handoff 的 _continue_prompt）。
+# 模块级而非类属性：热重载新方法会被应用到旧实例上（见上面 _SYNC_WIDTH_BATCH）。
+_HANDOFF_CONTINUE_PREFIX = "继续完成「"
+
 
 class _ProjectUrlImportThread(QThread):
     """后台线程：从 URL 下载 .drifox_project 项目压缩包，避免 UI 冻结。
@@ -22348,6 +22357,24 @@ class OpenAIChatToolWindow(ToolWindow):
         if self._worker_actually_busy():
             raise RuntimeError("worker 未停止，放弃切换会话")
         self._create_new_session(close_history=True)
+        self._apply_new_session_title(str((payload or {}).get("title") or ""))
+
+    def _apply_new_session_title(self, title: str):
+        """新建会话直接落标题（交接沿用源会话主题）
+
+        交接轮的消息带 _hook_event="SessionSend"，不算首条真实用户消息，
+        标题生成守卫不会为它发布 title.request；不在这里显式落标题，新会话
+        会停在占位名，直到用户下一句话把它改写成跟原任务无关的标题。
+        """
+        clean = " ".join(str(title or "").split())
+        if not clean or getattr(self, "_is_destroyed", False):
+            return
+        session = self.session_manager.get_current_session() if self.session_manager else None
+        if session is None or getattr(session, "user_edited_title", False):
+            return
+        session.set_topic_summary(clean)
+        self.title_edit.setText(clean)
+        self._sync_dialog_title()
 
     def _do_post_stream_cleanup(self):
         """流式完成后延迟执行的清理和同步操作（不阻塞 UI 渲染流程）"""
@@ -24138,7 +24165,7 @@ class OpenAIChatToolWindow(ToolWindow):
         user_messages = [
             m for m in session.messages
             if m.get("role") == "user"
-            and (not m.get("_hook_event") or m.get("_hook_event") == "TeamMail")
+            and (not m.get("_hook_event") or m.get("_hook_event") in _TITLE_TRIGGER_HOOK_EVENTS)
         ]
         # 只在首条真实用户消息触发：标题生成是异步的，完成前 topic_summary 仍为空，
         # 少这个判据会让第二、三条消息重复发起生成。
@@ -24166,6 +24193,12 @@ class OpenAIChatToolWindow(ToolWindow):
         if title_source.startswith("/"):
             parts = title_source[1:].split(maxsplit=1)
             title_source = (parts[1] if len(parts) > 1 else parts[0]).strip()
+        # 交接自动继续的固定句式同样不是主题：拿「」里的源会话主题，拿不到就
+        # 保留原文交给模型（模型能从 SessionStart 注入的交接正文里读出任务）。
+        if title_source.startswith(_HANDOFF_CONTINUE_PREFIX):
+            matched = re.match(r"继续完成「(.+?)」会话的交接任务", title_source)
+            if matched:
+                title_source = matched.group(1).strip()
         if not title_source:
             return
         window_id = str(getattr(self, "_window_id", "") or "")

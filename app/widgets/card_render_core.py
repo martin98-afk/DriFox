@@ -1039,9 +1039,81 @@ def _wrap_code_blocks_with_copy_button_web(
     return _CODE_BLOCK_WITH_LANG_PATTERN.sub(replacer, html)
 
 
+# 表格分隔行：`|---|---|` / `| :--- | :---: |` / `---|---`（GFM 允许单横线，Python-Markdown
+# 的 tables 扩展接受 set('|:- ') 内的字符）。
+def _looks_like_table_separator(line: str) -> bool:
+    """判定一行是否是 markdown 表格的分隔行。"""
+    stripped = line.strip()
+    if "-" not in stripped or "|" not in stripped:
+        return False
+    if not set(stripped) <= set("|:- \t"):
+        return False
+    return len(stripped.strip("|").split("|")) >= 2
+
+
+def _normalize_table_blocks(md_text: str) -> str:
+    """给缺失空行的 markdown 表格补前后空行。
+
+    模型经常写成「段落文字下一行直接跟表格」，中间不给空行。Python-Markdown
+    的 tables 扩展只在**独立块**上生效（BlockProcessor.test 拿到的 block 必须
+    以表格头行开头），GFM 规范同样要求表格不能打断段落（只有 1-6 类 HTML 块
+    例外）。结果是整张表格退化成一行行带 `|` 的普通文本加 `<br>`，用户看到的
+    就是「表格渲染不出来」。
+
+    规则（保守，只填空行不删内容）：
+    - 行 i 含 `|` 且行 i+1 是分隔行 → 认定 i 起是表格；若 i 前面紧贴非空行，
+      插一个空行把表格从段落里切出来
+    - 表格体逐行吞掉后续含 `|` 的行，遇到第一行不含 `|` 的 → 在其前插空行，
+      避免正文被吞成表格行（`| 1 | 2 |` 后面直接跟「在途：#33」时，
+      后者会被 tables 扩展当成缺列的行）
+    - ``` / ~~~ 围栏内原样不动
+
+    幂等：已经有空行的输入不产生任何改动。
+    """
+    if "|" not in md_text:
+        return md_text
+    lines = md_text.split("\n")
+    out: list = []
+    in_fence = False
+    i = 0
+    n = len(lines)
+    while i < n:
+        line = lines[i]
+        if line.lstrip(" \t")[:3] in ("```", "~~~"):
+            in_fence = not in_fence
+            out.append(line)
+            i += 1
+            continue
+        if (
+            not in_fence
+            and "|" in line
+            and i + 1 < n
+            and _looks_like_table_separator(lines[i + 1])
+        ):
+            if out and out[-1].strip():
+                out.append("")
+            out.append(line)
+            out.append(lines[i + 1])
+            i += 2
+            while i < n and lines[i].strip() and "|" in lines[i]:
+                out.append(lines[i])
+                i += 1
+            # 表格后紧跟正文（无空行）→ 补空行，防止被当作表格行吞掉
+            if i < n and lines[i].strip():
+                out.append("")
+            continue
+        out.append(line)
+        i += 1
+    return "\n".join(out)
+
+
 def _sanitize_incomplete_markdown(md_text: str) -> str:
     if not md_text:
         return ""
+    # 表格补空行：模型常把表格紧贴在正文下一行，tables 扩展要求表格是独立块
+    # （GFM 同样不允许表格打断段落），缺空行整张表退化成带 | 的普通文本。
+    # 放在所有渲染管线（全量/差量/尾部/worker/viewer/block）的共同入口做一次。
+    md_text = _normalize_table_blocks(md_text)
     # 只处理 markdown 代码块的不完整情况
     # 不再删除尾随的 <，因为它可能是 HTML/工具标签的一部分
     # 行扫描判定末尾未闭合 fence（``` / ~~~，同 marker 闭合，行内标记不计数，
