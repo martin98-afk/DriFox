@@ -17,8 +17,10 @@
 
 from __future__ import annotations
 
+import sys
 import threading
 import time
+import types
 
 # 追问预测的最短回答长度（字符）：低于此长度的回答视为短确认，不追问
 _ASK_MIN_CHARS = 150
@@ -26,8 +28,24 @@ _ASK_MIN_CHARS = 150
 _DIRTY_TTL_S = 1800
 _DIRTY_MAX = 256
 
-_DIRTY_LOCK = threading.Lock()
-_DIRTY: dict[str, float] = {}  # session_id -> 最近一次写操作时间
+# 状态挂 sys.modules 固定键（见 _state 注释），不能用模块级 dict
+_STATE_KEY = "_drifox_stop_guidance_state"
+
+def _state():
+    """取跨模块实例共享的状态（DIRTY / LOCK）
+
+    HookWorker 以「函数路径」为键缓存函数对象，同一文件的 record_write /
+    reset_round / hook 会被各自 exec 成独立模块，模块级 dict 互不可见。
+    实测后果：PreToolUse 记了写操作，Stop 读到的却是空表 → 收尾指令永不注入。
+    sys.modules.setdefault 保证并发首建只留一份。
+    """
+    state = sys.modules.get(_STATE_KEY)
+    if state is not None:
+        return state
+    created = types.ModuleType(_STATE_KEY)
+    created.DIRTY = {}
+    created.LOCK = threading.Lock()
+    return sys.modules.setdefault(_STATE_KEY, created)
 
 def record_write(event: str, context: dict) -> str:
     """PreToolUse hook：记录本会话发生过写/命令操作
@@ -43,10 +61,11 @@ def record_write(event: str, context: dict) -> str:
     session_id = str(ctx.get("session_id") or "")
     if not session_id:
         return ""
-    with _DIRTY_LOCK:
-        _DIRTY[session_id] = time.time()
-        while len(_DIRTY) > _DIRTY_MAX:
-            _DIRTY.pop(next(iter(_DIRTY)), None)
+    state = _state()
+    with state.LOCK:
+        state.DIRTY[session_id] = time.time()
+        while len(state.DIRTY) > _DIRTY_MAX:
+            state.DIRTY.pop(next(iter(state.DIRTY)), None)
     return ""
 
 def reset_round(event: str, context: dict) -> str:
@@ -59,16 +78,18 @@ def reset_round(event: str, context: dict) -> str:
         return ""
     session_id = str((context or {}).get("session_id") or "")
     if session_id:
-        with _DIRTY_LOCK:
-            _DIRTY.pop(session_id, None)
+        state = _state()
+        with state.LOCK:
+            state.DIRTY.pop(session_id, None)
     return ""
 
 def _take_dirty(session_id: str) -> bool:
     """读取并清除写操作标记（一轮一清，避免下一轮纯问答被误判）"""
     if not session_id:
         return False
-    with _DIRTY_LOCK:
-        ts = _DIRTY.pop(session_id, 0.0)
+    state = _state()
+    with state.LOCK:
+        ts = state.DIRTY.pop(session_id, 0.0)
     return bool(ts) and (time.time() - ts) <= _DIRTY_TTL_S
 
 def hook(event: str, context: dict) -> str:
@@ -88,6 +109,6 @@ def hook(event: str, context: dict) -> str:
         parts.append("收尾：按契约检查未提交改动与未完成项，清理自己制造的临时垃圾。")
     if len(str(ctx.get("last_assistant_message") or "")) >= _ASK_MIN_CHARS:
         parts.append("追问预测：按契约在回复末尾输出（或「无需追问」）。")
-    if ctx.get("is_team_member"):
-        parts.append("回报告：非 leader 按团队指引 team_send_message 发完整结果，正文 1 行进度。")
+    if ctx.get("is_team_member") and not ctx.get("is_team_leader"):
+        parts.append("回报告：按团队指引 team_send_message 发完整结果，正文 1 行进度。")
     return "\n".join(parts)

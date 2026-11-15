@@ -180,6 +180,24 @@ def _check_team_member(backend) -> bool:
     return check_team_member(backend)
 
 
+def _check_team_leader(backend) -> bool:
+    """检查当前窗口是否是团队 leader（与 _check_team_member 同口径：默认团队）
+
+    Stop hook 用它跳过「回报告」指令：leader 的职责是收成员报告并汇总，
+    再要求它 team_send_message 回报告只会自己发给自己。
+    """
+    try:
+        window_id = getattr(backend, "_window_id", None)
+        if not window_id:
+            return False
+        from app.core.team.team_manager import TeamManager
+
+        tm = TeamManager.get_instance()
+        return bool(tm.is_team_member(window_id)) and tm.get_leader_window_id() == window_id
+    except Exception:
+        return False
+
+
 def compress_data_uri(data_uri: str, max_bytes: int = 5 * 1024 * 1024) -> str:
     """压缩 data URI 图片，确保 base64 数据不超过 max_bytes。
 
@@ -1272,6 +1290,8 @@ class OpenAIChatWorker(QThread):
                 "is_subagent_call": False,
                 # 团队上下文：当前窗口是否是团队成员
                 "is_team_member": _check_team_member(backend),
+                # 团队 leader 标记：Stop hook 据此跳过「回报告」指令（leader 只汇总）
+                "is_team_leader": _check_team_leader(backend),
             }
 
             # PreAssistantMessage / PostAssistantMessage：注入上下文使用量信息

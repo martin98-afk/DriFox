@@ -33,6 +33,7 @@ import subprocess
 import sys
 import threading
 import time
+import types
 from pathlib import Path
 from typing import Any, Dict
 
@@ -755,9 +756,26 @@ def _build_git_status_block(cwd: str) -> list[str] | None:
 # 相同的「## 项目上下文」消息（长会话 token 浪费的主因之一）。
 # 状态按 (session_id, project_root) 记指纹，仅进程内有效；进程重启或模块
 # 热重载后重新注入一次，代价可忽略。
-_CONTEXT_FP: Dict[str, str] = {}
 _CONTEXT_FP_MAX = 256
-_CONTEXT_FP_LOCK = threading.Lock()
+
+# 状态挂 sys.modules 固定键（见 _dedup_state 注释），不能用模块级 dict
+_DEDUP_STATE_KEY = "_drifox_project_notes_dedup_state"
+
+def _dedup_state():
+    """取跨模块实例共享的指纹表（FP / LOCK）
+
+    HookWorker 以「函数路径」为键缓存函数对象，同一文件的 hook_context 与
+    reset_context_dedup 会被各自 exec 成独立模块，模块级 dict 互不可见
+    （clear/compact 清的是另一份空表，等于没清）。
+    sys.modules.setdefault 保证并发首建只留一份。
+    """
+    state = sys.modules.get(_DEDUP_STATE_KEY)
+    if state is not None:
+        return state
+    created = types.ModuleType(_DEDUP_STATE_KEY)
+    created.FP = {}
+    created.LOCK = threading.Lock()
+    return sys.modules.setdefault(_DEDUP_STATE_KEY, created)
 
 # git 相对时间（`(4 minutes ago)` / `(4 分钟前)`）随真实时间漂移，不属实质变化，
 # 计算指纹前抹平，否则每分钟都会判定「变了」
@@ -771,14 +789,15 @@ def _context_fingerprint(text: str) -> str:
 def _should_inject(key: str, text: str) -> bool:
     """与上次注入内容比对：相同返回 False（跳过），不同记录并返回 True"""
     fp = _context_fingerprint(text)
-    with _CONTEXT_FP_LOCK:
-        if _CONTEXT_FP.get(key) == fp:
+    state = _dedup_state()
+    with state.LOCK:
+        if state.FP.get(key) == fp:
             return False
-        _CONTEXT_FP[key] = fp
-        overflow = len(_CONTEXT_FP) - _CONTEXT_FP_MAX
+        state.FP[key] = fp
+        overflow = len(state.FP) - _CONTEXT_FP_MAX
         if overflow > 0:
-            for stale in list(_CONTEXT_FP)[:overflow]:
-                _CONTEXT_FP.pop(stale, None)
+            for stale in list(state.FP)[:overflow]:
+                state.FP.pop(stale, None)
     return True
 
 def reset_context_dedup(event: str, context: dict) -> str:
@@ -787,8 +806,9 @@ def reset_context_dedup(event: str, context: dict) -> str:
     clear 后历史被清空、compact 后旧注入可能已被摘要掉，两种情况都必须允许
     下一轮重新注入，否则模型会丢失项目上下文。
     """
-    with _CONTEXT_FP_LOCK:
-        _CONTEXT_FP.clear()
+    state = _dedup_state()
+    with state.LOCK:
+        state.FP.clear()
     return ""
 
 def hook_context(event: str, context: dict) -> str:
