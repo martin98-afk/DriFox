@@ -230,6 +230,39 @@ def _maybe_create_webengine_preheat(app) -> None:
         logger.exception("[DeferredStartup] WebEngine 预热失败（非致命）")
 
 
+def _start_thread_dumper(interval_s: float = 60.0):
+    """DRIFOX_CPU_TRACE=1 时启动全线程周期 dump 线程；未开时返回 None（零行为）。
+
+    T12/G7：主线程阻塞若为原生/GIL 等待，主线程栈自证不出来，需同时抓其它
+    线程状态。每 interval_s 落一行 thread_dump（线程名→栈深）到
+    ``.perf_out/trace_events.jsonl``；任何异常吐在采集侧，不得反噬主功能。
+    """
+    from app.core.infra import perf_jsonl as _perf_jsonl
+
+    if not _perf_jsonl.env_flag("DRIFOX_CPU_TRACE"):
+        return None
+    import threading as _threading
+    import traceback as _traceback
+
+    def _loop():
+        while True:
+            time.sleep(interval_s)
+            try:
+                frames = sys._current_frames()
+                names = {t.ident: t.name for t in _threading.enumerate()}
+                _perf_jsonl.append_event(
+                    "thread_dump", len(frames),
+                    {"threads": {names.get(tid, str(tid)): len(_traceback.extract_stack(f))
+                                 for tid, f in frames.items()}},
+                )
+            except Exception:  # noqa: BLE001 - 观测不得反噬主功能
+                pass
+
+    thread = _threading.Thread(target=_loop, name="thread-dumper", daemon=True)
+    thread.start()
+    return thread
+
+
 def main():
     """启动 LLM Chatter"""
 
@@ -343,6 +376,13 @@ def main():
         from app.utils.main_thread_watchdog import install_watchdog as _install_watchdog
 
         _install_watchdog()
+
+    # 🧵 全线程周期 dump（T12/G7）：DRIFOX_CPU_TRACE=1 时每 60s 落一行
+    # thread_dump（线程名→栈深），供主线程原生/GIL 等待归因；默认零行为。
+    try:
+        _start_thread_dumper()
+    except Exception:  # noqa: BLE001 - 诊断设施绝不能阻断启动
+        pass
 
     # 🎡 SpinBox 滚轮守卫：数字框不再吃滚轮改值（误改要等失焦才落盘，
     # 用户几乎无感）。滚轮转交外层滚动容器，页面照常滚动；插件里的 SpinBox
