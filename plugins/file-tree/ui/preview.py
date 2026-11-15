@@ -1139,6 +1139,12 @@ class FilePreviewPage(QWidget):
     def toggle_highlight(self) -> None:
         self._on_code_button()
 
+    def wrap_enabled(self) -> bool:
+        return self._code_view.wrap_enabled()
+
+    def highlight_enabled(self) -> bool:
+        return self._code_view.highlight_enabled()
+
     # ── 视图开关 ──
 
     def _on_toggle_wrap(self) -> None:
