@@ -86,6 +86,20 @@ def _wait_streaming_end(host: str, port: int, timeout_s: float = STREAM_TIMEOUT_
     return False
 
 
+def _wait_window_ready(host: str, port: int, timeout_s: float = 15.0) -> bool:
+    """等被测实例的对话窗口就绪；超时不阻塞——ui_session new 会兜底重建窗口。
+
+    冷启动空窗期通常 30-60s；close 后对话窗口被移除且不会自动重建，
+    new 的兜底路径（TabManagerWindow.add_window + FakeHostPage）负责重建。
+    """
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        if _state(host, port).get("window_alive"):
+            return True
+        time.sleep(2.0)
+    return False
+
+
 def _sample_rows(host: str, port: int, elapsed: float, loop_iter: int, start: float) -> Sample:
     mem = _rpc(host, port, "ui_memory", {}) or {}
     private_mb = mem.get("main_private_mb")
@@ -149,6 +163,8 @@ def run_window_session_scenario(
 
     try:
         while time.time() - start < duration_sec:
+            # 冷启动空窗期：等被测实例完成首窗构造，避免 new 撞上无窗口
+            _wait_window_ready(host, port)
             rounds += 1
             round_start = time.time()
             # 1) 新建会话
@@ -167,16 +183,21 @@ def run_window_session_scenario(
                 if not _wait_streaming_end(host, port):
                     errors.append(f"streaming timeout round={rounds} msg={i + 1}")
                 _maybe_sample(time.time())
-            # 3) 关闭会话（走 UI 关闭链）并确认消失
-            close = _rpc(host, port, "ui_session", {"action": "close", "session_id": sid})
+            # 3) 关闭会话（走 UI 关闭链）。目标取 ui_state 的当前会话：
+            #    发送后真实链路可能重建会话，new 返回的旧 id 必然落空；
+            #    用户点关闭按钮关的也是眼前 tab 的会话。
+            cur_sid = str((_state(host, port) or {}).get("session_id") or "")
+            close = _rpc(host, port, "ui_session", {"action": "close", "session_id": cur_sid or sid})
             if close.get("ok"):
                 closes += 1
             else:
                 errors.append(f"close failed: {close.get('error')}")
             _maybe_sample(time.time(), force=True)
-            # 4) 轮间等待（保留剩余时长）
+            # 4) 轮间等待：保持「每 300s 一轮」节奏；剩余时长不足一轮则结束
             remain = ROUND_SEC - (time.time() - round_start)
-            if remain > 0 and time.time() - start + remain < duration_sec:
+            if remain > 0:
+                if time.time() - start + remain >= duration_sec:
+                    break
                 time.sleep(remain)
     except (urllib.error.URLError, OSError) as exc:
         errors.append(f"ui_test_server unreachable: {exc}")

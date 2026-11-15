@@ -65,6 +65,7 @@ def _split_chunks(text: str, chunks: int) -> list[str]:
 class _Handler(BaseHTTPRequestHandler):
     chunks: int = 30
     interval: float = 0.03
+    protocol_version = "HTTP/1.1"  # SSE 需显式控制连接关闭，避免客户端 read 阻塞
 
     def log_message(self, format: str, *args: Any) -> None:  # noqa: A002,N802
         pass
@@ -129,7 +130,8 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream; charset=utf-8")
         self.send_header("Cache-Control", "no-cache")
-        self.send_header("Connection", "keep-alive")
+        self.send_header("Connection", "close")
+        self.close_connection = True
         self.end_headers()
         base = {
             "id": "chatcmpl-fake",
