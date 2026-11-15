@@ -30,9 +30,43 @@ psutil 调用。采样间隔默认 3s：内存是慢变量，不会在 3s 内从
 
 from __future__ import annotations
 
+import os
 import threading
 import time
 from typing import Optional
+
+from app.core.infra.perf_jsonl import append_event, env_flag
+
+# ── GDI/USER 句柄采样（DRIFOX_HANDLE_TRACE=1 门控，默认关） ──────────
+# 首版只采主进程自身：GetGuiResources(GetCurrentProcess(), ...) 无需进程句柄，
+# 不引入 OpenProcess 与权限问题；renderer 侧句柄留给后续按需扩展。
+_HANDLE_API = None  # None=未探测 / False=不可用 / (user32, kernel32)
+
+
+def _sample_handles() -> "dict | None":
+    """读当前进程的 GDI/USER 对象数；非 Windows 或调用失败返回 None（不抛）。"""
+    global _HANDLE_API
+    if _HANDLE_API is None:
+        try:
+            import ctypes
+
+            _HANDLE_API = (
+                (ctypes.windll.user32, ctypes.windll.kernel32) if os.name == "nt" else False
+            )
+        except Exception:
+            _HANDLE_API = False
+    if not _HANDLE_API:
+        return None
+    try:
+        user32, kernel32 = _HANDLE_API
+        hproc = kernel32.GetCurrentProcess()
+        return {
+            "gdi": int(user32.GetGuiResources(hproc, 0)),  # GR_GDIOBJECTS
+            "user": int(user32.GetGuiResources(hproc, 1)),  # GR_USEROBJECTS
+        }
+    except Exception:
+        return None
+
 
 # 采样间隔（秒）。3s 兼顾「阈值判定新鲜度」与「后台 CPU 开销」。
 # 单次采样约 20-80ms，3s 周期下后台开销 < 3%。
@@ -189,6 +223,10 @@ class RssSampler:
                         web_by_pid[child.pid] = mb
                 except Exception:
                     continue
+            if env_flag("DRIFOX_HANDLE_TRACE"):
+                handles = _sample_handles()
+                if handles:
+                    append_event("gdi_handles", handles["gdi"], handles)
             return _RssSample(rss_mb, web_total, now, web_by_pid)
         except Exception:
             return _RssSample(0.0, 0.0, now, {})
