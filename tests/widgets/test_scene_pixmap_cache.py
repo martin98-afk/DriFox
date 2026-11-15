@@ -368,3 +368,46 @@ def test_premult_cached_only_without_blur(cache, qapp, tmp_path):
     finally:
         plain.deleteLater()
 
+
+def test_blur_scene_zero_geometry_waits_for_resize(cache, qapp, tmp_path):
+    """M3+ 早返回锚定：几何 0 → apply_config 不崩、label 无 pixmap、baked
+    未生成；把 source 直接挂 label 时早返回也不动它；resize 后重走烘焙恢复"""
+    from app.widgets.scene_layer import SceneLayer
+
+    bg = _write_bg(tmp_path)
+    layer = SceneLayer()  # 无父：_sync_geometry 直接返回，几何由 resize 控制
+    try:
+        layer.resize(0, 0)
+        layer.apply_config(
+            {
+                "image": bg,
+                "opacity": 0.5,
+                "blur": 8,
+                "animation": {"enabled": False},
+                "foreground": {"enabled": False},
+            },
+            lambda p: p,
+        )
+        label = layer._image_label
+        assert label is not None
+        pm = label.pixmap()
+        assert pm is None or pm.isNull(), "geo=0 早返回不得挂未预乘 source"
+        assert _cached_kinds(cache) == ["source"], "几何未定不得生成 baked"
+
+        # 早返回分支对「label 已被挂上 source」的旧状态必须安全：不动它、不崩
+        label.setPixmap(layer._image_source_pixmap)
+        layer._bake_image_now()
+        assert label.pixmap().cacheKey() == layer._image_source_pixmap.cacheKey()
+
+        # resize → _sync_content_geometry → 重走烘焙，baked 顶替
+        layer.resize(400, 300)
+        layer._sync_content_geometry()
+        layer._bake_image_now()  # 跳过 150ms 防抖
+        pm = label.pixmap()
+        assert pm is not None and not pm.isNull()
+        assert pm.width() == label.width() and pm.height() == label.height()
+        assert label.hasScaledContents() is False
+        assert _cached_kinds(cache) == ["baked", "source"]
+    finally:
+        layer.deleteLater()
+

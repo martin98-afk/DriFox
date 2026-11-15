@@ -471,23 +471,22 @@ class SceneLayer(QWidget):
                 self._image_source_pixmap = pix
                 self._image_source_path = resolved
                 # 整体透明度预乘进图片 alpha（QGraphicsOpacityEffect 等价物）。
-                # [M3] blur>0：本函数末尾同步烘 baked 并顶替，premult 只是过程
-                # 副本，本地构造不入共享缓存（烘焙后随 setPixmap 释放），省一份
-                # 驻留；blur==0：premult 是最终显示副本，仍走共享缓存。
-                if blur > 0:
-                    premult = QPixmap.fromImage(
-                        _premultiply_opacity(pix.toImage(), self._layer_opacity)
+                # [M3+] blur>0：本函数末尾同步烘 baked 并 setPixmap 顶替，premult
+                # 从不进入 paint（同一函数内无事件循环），故不构造也不挂未预乘
+                # source；几何未定导致烘焙早返回时 label 留空，resize 后
+                # _sync_content_geometry 重走烘焙。blur==0：premult 是最终显示
+                # 副本，仍走共享缓存。
+                if blur <= 0:
+                    self._image_label.setPixmap(
+                        scene_pixmap_cache.get_pixmap(
+                            "premult",
+                            resolved,
+                            load=lambda p, o=self._layer_opacity: SceneLayer._load_premult(
+                                p, "source", o
+                            ),
+                            opacity_255=int(round(self._layer_opacity * 255)),
+                        )
                     )
-                else:
-                    premult = scene_pixmap_cache.get_pixmap(
-                        "premult",
-                        resolved,
-                        load=lambda p, o=self._layer_opacity: SceneLayer._load_premult(
-                            p, "source", o
-                        ),
-                        opacity_255=int(round(self._layer_opacity * 255)),
-                    )
-                self._image_label.setPixmap(premult)
                 self._image_label.setScaledContents(True)
                 self._sync_content_geometry()
                 # 图片也设圆角（避免溢出到 _chat_frame 圆角外）
