@@ -12445,19 +12445,13 @@ class OpenAIChatToolWindow(ToolWindow):
             rendered_once = False
         if rendered_once and (now_m - first_t) < cls._WELCOME_STARTUP_MERGE_S:
             try:
-                # 🛡️ 去抖分支必须占用 pending 守卫（2026-11-15 双渲染修复）：
-                # 此前只 timer.start()，_notify_history_data_changed 读
-                # "not _welcome_render_pending" 看到 False 就同步渲染一次，
-                # 600ms 后 timer 再渲染一次 → 新建会话时欢迎卡刷新两次。
-                self._welcome_render_pending = True
-                self._welcome_render_pending_since = now_m
                 timer = getattr(self, "_welcome_startup_merge_timer", None)
                 if timer is None:
                     from PyQt5.QtCore import QTimer as _QTimer
 
                     timer = _QTimer(self)
                     timer.setSingleShot(True)
-                    timer.timeout.connect(lambda: self._safe_timer_call(self._on_welcome_render_slot))
+                    timer.timeout.connect(lambda: self._safe_timer_call(self._on_welcome_merge_timeout))
                     self._welcome_startup_merge_timer = timer
                 timer.start(cls._WELCOME_STARTUP_DEBOUNCE_MS)
                 logger.debug(
@@ -12504,6 +12498,15 @@ class OpenAIChatToolWindow(ToolWindow):
                 f"[OpenAIChatToolWindow] _on_welcome_render_slot: 排队期间已渲染，跳过（wid={self._window_id}）"
             )
             return
+        self._show_initial_welcome()
+
+    def _on_welcome_merge_timeout(self):
+        """启动窗口去抖 timer 到期：实际渲染
+
+        不能复用 _on_welcome_render_slot：去抖分支不占 pending 凭证，而槽位回
+        调带「消费判定」（pending=False 即跳过），会把自己误判成已被消费。
+        """
+        logger.debug(f"[OpenAIChatToolWindow] _on_welcome_merge_timeout fired: wid={self._window_id}")
         self._show_initial_welcome()
 
     def _cancel_pending_welcome_render(self):

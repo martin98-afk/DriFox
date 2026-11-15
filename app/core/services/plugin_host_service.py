@@ -284,6 +284,20 @@ class PluginHostService(QObject):
             logger.debug(f"[StartupMark] plugin_scan 耗时 {(time.perf_counter() - _scan_t0) * 1000:.0f}ms")
             logger.debug(f"[StartupMark] dir_signature 耗时 {_sig_total_ms:.0f}ms")
 
+            # 【关键路径】hooks 必须早于任何会话创建就绪。
+            # agents+hooks 的全量 reload 走 idle 延迟队列（delay 2s），而窗口
+            # showEvent 的 critical 任务立刻建会话并触发 SessionStart。顺序颠倒时
+            # trigger_event 在空注册表上首行 return []（无报错），会话消息里没有
+            # 技能/子智能体清单 → 首条消息退回 system prompt 兜底注入并持久化
+            # （症状：启动后首次对话的清单在系统提示词里，手动新建会话才正常）。
+            # hooks 注册只遍历 hooks 目录（实测 <5ms），与 agents 解析（172ms 级）
+            # 不同量级，同步段补这一步无感知；agents 仍留在延迟队列。
+            if self._agent_manager is not None:
+                try:
+                    self._agent_manager.load_plugin_hooks_only()
+                except Exception as e:
+                    logger.error(f"[PluginHost] 同步段注册插件 hooks 失败: {e}")
+
             # 首次初始化时才需要全量重载智能体
             # 后续窗口复用已有的 PluginManager/AgentManager 单例数据
             if not was_initialized:

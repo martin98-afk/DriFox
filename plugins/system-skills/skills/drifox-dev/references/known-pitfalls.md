@@ -80,6 +80,7 @@
 | P041/P040 | 卡片残留 / 常驻 tab 被删 | 恢复路径误调 `show()`；`remove_tab` 未排除常驻 id | 显示/删除前判断激活态与常驻集合 |
 | P032 | 用量刷新停更 | 关窗误杀共享 key；TTL == tick 周期导致每两轮才刷新 | 销毁前查同 key 存活窗口；`force` 强制重拉 |
 | P017 | 保存后面板 UI 停在旧快照 | 保存路径未触发 UI 刷新 | 保存入口统一追加刷新（内部判 `isVisible()`，不可见零开销） |
+| — | 新建会话时欢迎卡片刷新两次（同窗口 1s 内两次 `_show_initial_welcome OK`） | `_schedule_initial_welcome` 的启动窗口去抖分支只 `timer.start()`，没留任何「已有渲染在排」的可见凭证；`_notify_history_data_changed` 判 `not _welcome_render_pending` 为 True 就插队同步渲染一次，600ms 后去抖 timer 再渲染一次 | 排队的渲染必须有对调用方可读的凭证：渲染落地后调 `_cancel_pending_welcome_render()` 停 timer + 清 pending（单一出口作废），槽位回调加「pending 已被消费则跳过」的二次防线；去抖 timer 与槽位回调走不同入口，别让消费判定互斥 |
 
 ## 七、UI 组件与动画
 
