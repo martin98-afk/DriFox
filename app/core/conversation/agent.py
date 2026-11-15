@@ -382,42 +382,6 @@ class AgentManager:
         self._system_prompt_cache: Dict[tuple, str] = {}
         self._load_agents()
 
-    def load_plugin_hooks_only(self) -> int:
-        """只注册插件 hooks，跳过智能体解析（启动同步段专用）
-
-        为什么要单独拆一步：hooks 必须早于任何会话创建就绪。窗口 showEvent 的
-        critical 任务会立刻建会话并触发 SessionStart，而 agents+hooks 的全量
-        重载走的是 idle 队列（delay 2s）。两者顺序颠倒时 SessionStart 在空注册表
-        上空跑——``HookManager.trigger_event`` 首行
-        ``if event_name not in self._hooks: return []`` 静默返回空列表，会话消息
-        里永远没有技能/子智能体清单，只能在首条消息时退回 system prompt 兜底
-        注入并随 session.system_prompt 持久化（症状：启动后首次对话清单在系统
-        提示词里，手动新建一次会话才恢复正常）。
-
-        量级依据：hooks 注册只遍历 hooks 目录（全量实测 <5ms），与 agents 目录
-        解析（172ms 级，含工具 schema 冷加载）不同量级，放同步段无感知。
-
-        Returns:
-            成功处理的插件数（无 hook_manager 或 PM 未初始化返回 0）
-        """
-        if self._hook_manager is None:
-            return 0
-        try:
-            from app.plugins.managers.plugin_manager import PluginManager
-
-            pm = PluginManager.get_instance()
-            if not pm.is_initialized():
-                return 0
-            count = 0
-            for plugin in pm.get_enabled_plugins():
-                self._load_one_plugin_hooks(pm, plugin)
-                count += 1
-            logger.debug(f"[AgentManager] 启动同步段已注册插件 hooks：{count} 个插件")
-            return count
-        except Exception as e:
-            logger.warning(f"[AgentManager] 启动同步段注册插件 hooks 失败: {e}")
-            return 0
-
     def _load_agents(self):
         """加载智能体与插件 hooks：插件路径优先，后备路径兜底"""
         # 1. 单次遍历所有已启用插件，同时加载智能体与 hooks（PluginManager 已初始化时）
