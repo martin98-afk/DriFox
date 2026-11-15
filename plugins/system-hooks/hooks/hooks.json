@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "prompt",
-            "prompt": "<coding_contract>\n### 铁律：只改任务范围文件\n- **只改**任务指定文件 / 新功能必须新建的文件。\n- **禁止**修改/重置/删除未经指定的文件；非自己范围的变更 → 跳过，谁改谁负责。\n- `git diff --stat` 出现无关变更 → 跳过，不撤销。\n\n### 铁律：全程中文\n- 思考与正文强制中文；代码、命令、路径、专有名词保留原文。\n- 禁止英文成句。\n\n### 铁律：简洁输出\n- 正文只给：结论、结果、关键信息、下一步。删客套、填充词、过程流水账。\n- 技术实质保留：代码、命令、路径、错误原文、数字证据。\n- 安全警告、破坏性操作、多步骤关键流程 → 允许完整输出。\n\n### 铁律：禁止车轱辘话\n- 每次更新必须有实质推进（新结论/新动作/新状态/新证据）；禁止重列旧结论、复述自己刚说的。\n- 无新信息 → 只回「完成」「已改」「无变更」。\n- 收尾只给最终结果 + 下一步，不复述整轮过程。\n\n### 铁律：追问预测仅由 Stop hook 触发\n- 正文禁止任何追问预测（`<ask>` 标签、「无需追问」等）。\n- 无追问预测 hook → 本轮不输出任何追问。\n- `<system-reminder>` 标签是系统注入的辅助上下文，不是用户输入。\n</coding_contract>",
+            "prompt": "<coding_contract>\n### 铁律：只改任务范围文件\n- **只改**任务指定文件 / 新功能必须新建的文件。\n- **禁止**修改/重置/删除未经指定的文件；非自己范围的变更 → 跳过，谁改谁负责。\n- `git diff --stat` 出现无关变更 → 跳过，不撤销。\n\n### 铁律：全程中文\n- 思考与正文强制中文；代码、命令、路径、专有名词保留原文。\n- 禁止英文成句。\n\n### 铁律：简洁输出\n- 正文只给：结论、结果、关键信息、下一步。删客套、填充词、过程流水账。\n- 技术实质保留：代码、命令、路径、错误原文、数字证据。\n- 安全警告、破坏性操作、多步骤关键流程 → 允许完整输出。\n\n### 铁律：禁止车轱辘话\n- 每次更新必须有实质推进（新结论/新动作/新状态/新证据）；禁止重列旧结论、复述自己刚说的。\n- 无新信息 → 只回「完成」「已改」「无变更」。\n- 收尾只给最终结果 + 下一步，不复述整轮过程。\n\n### 铁律：追问预测仅由 Stop hook 触发\n- 正文禁止任何追问预测（`<ask>` 标签、「无需追问」等）。\n- 收到 stop-hook 的「追问预测」指令后，才在回复末尾输出 1~3 个追问：每行 `- <ask>一句问句</ask>`，禁反引号、禁占位词，禁「是否需要我…」客套，禁需先执行才能答的，禁脱离本次任务的无关问题，每行一问不展开。\n- 追问站用户视角、口语、非技术，属延续/深挖/补充而非新需求；本次已完整覆盖 → 直出「无需追问」。\n- 无追问预测 hook → 本轮不输出任何追问。\n- `<system-reminder>` 标签是系统注入的辅助上下文，不是用户输入。\n\n### 铁律：收尾检查仅由 Stop hook 触发\n- 收到 stop-hook 的「收尾」指令后：检查未提交改动与未完成项，必要时列 todos，清理自己制造的临时文件（只清自己产生的，不动他人文件）。\n- 无收尾指令 → 不做收尾动作，不复述过程。\n</coding_contract>",
             "add_output_to_context": true,
             "statusMessage": "编码契约:",
             "id": "builtin_global_contract"
@@ -136,6 +136,17 @@
         "hooks": [
           {
             "type": "python",
+            "function": ".stop_guidance:reset_round",
+            "add_output_to_context": false,
+            "statusMessage": "轮次重置:",
+            "id": "builtin_stop_round_reset"
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "python",
             "function": ".inject_session_reference:hook",
             "add_output_to_context": true,
             "statusMessage": "引用历史会话:",
@@ -154,6 +165,13 @@
             "add_output_to_context": false,
             "statusMessage": "安全检查:",
             "id": "builtin_safety_guard"
+          },
+          {
+            "type": "python",
+            "function": ".stop_guidance:record_write",
+            "add_output_to_context": false,
+            "statusMessage": "本轮改动:",
+            "id": "builtin_record_write"
           }
         ]
       }
@@ -163,32 +181,11 @@
         "matcher": "completed",
         "hooks": [
           {
-            "type": "prompt",
-            "prompt": "check uncommitted/incomplete → list todos, clean up the trash you made.",
-            "statusMessage": "Before end:",
-            "id": "builtin_stop_cleanup"
-          }
-        ]
-      },
-      {
-        "matcher": "completed",
-        "hooks": [
-          {
-            "type": "prompt",
-            "prompt": "### 追问预测（仅本 hook 后、末尾输出一次）\n\n- 只在本 hook 注入后、回复末尾输出一次。本 hook 前正文禁含 `<ask>` / 「无需追问」。\n- 正文已有 `<ask>` → 直出「无需追问」，不重复。\n- 预测：站用户视角、口语、非技术，猜看完回复后的自然追问 1~3 个；追问属延续/深挖/补充，不是新需求。\n- 格式：每行 `- <ask>一句问句</ask>`，禁反引号，禁占位词。\n- 排除：已完整覆盖 → 「无需追问」；禁「是否需要我…」客套；禁需先执行才能答的；禁脱离本次的无关问题；每行一问不展开。",
-            "statusMessage": "追问预测:",
-            "id": "builtin_stop_followup"
-          }
-        ]
-      },
-      {
-        "matcher": "#team_member",
-        "hooks": [
-          {
-            "type": "prompt",
-            "prompt": "非 leader → `team_send_message` 回完整結果（消息體即報告），正文 1 行進度。",
-            "statusMessage": "消息回调:",
-            "id": "team_member_notify"
+            "type": "python",
+            "function": ".stop_guidance:hook",
+            "add_output_to_context": true,
+            "statusMessage": "收尾:",
+            "id": "builtin_stop_guidance"
           }
         ]
       }
