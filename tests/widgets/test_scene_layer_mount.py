@@ -37,6 +37,10 @@ def tab_manager(qapp, monkeypatch):
         win.resize(1200, 800)
         win.show()
         QApplication.processEvents()
+        # 分阶段构造：_scene_layer 在阶段二 _complete_setup_ui 内创建，
+        # 生产路径由 main._show_popup 在壳可见后驱动，测试须显式补调
+        win.complete_construction()
+        QApplication.processEvents()
         yield win
     finally:
         try:
