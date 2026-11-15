@@ -116,9 +116,19 @@ def host_alive(host: Any) -> bool:
         return False
 
 def note_host(plugin: str, host: Any) -> None:
-    """登记某插件当前绑定的窗口（供无 ctx 的后台调用点解析 host）。"""
+    """登记某插件当前绑定的窗口（供无 ctx 的后台调用点解析 host）。
+
+    [P2-1] 防御性直连：host 若是 QObject，销毁时主动注销本登记，避免
+    ``_plugin_hosts`` 长期攥着已删 wrapper（能力面静默返回空值）。
+    测试假窗（SimpleNamespace 等）无 ``destroyed`` 信号，静默跳过；
+    同插件多窗覆盖登记时，旧窗口销毁只清「仍是它」的登记，不误删新窗口。
+    """
     if plugin and host is not None:
         _plugin_hosts[plugin] = host
+        try:
+            host.destroyed.connect(lambda *_: forget_host(plugin, host))
+        except (AttributeError, TypeError, RuntimeError):
+            pass
 
 
 def forget_host(plugin: str, host: Any = None) -> None:

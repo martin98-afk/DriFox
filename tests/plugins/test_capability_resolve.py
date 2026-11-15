@@ -386,3 +386,49 @@ def test_active_main_widget_skips_destroyed_cached(reg, fake_tm, monkeypatch):
     finally:
         real._main_widget = prev_main
         real._window_main_widgets = prev_map
+
+# ── P2-1：note_host 直连 destroyed，窗口销毁自动注销 ──────────
+
+def test_note_host_forgets_on_destroyed(reg, monkeypatch):
+    """A：真 QObject 登记后 emit destroyed → 绑定被清，caps_for 回落活跃窗口"""
+    from PyQt5.QtCore import QObject
+
+    from app.plugins.capabilities import resolve
+
+    _fake_pm(monkeypatch, ["window.current"])
+    active = _fake_window(workdir="/active")
+    monkeypatch.setattr(resolve, "active_main_widget", lambda: active)
+
+    host = QObject()
+    resolve.note_host("demo", host)
+    assert resolve._plugin_hosts.get("demo") is host
+
+    host.destroyed.emit()
+    assert resolve._plugin_hosts.get("demo") is None
+    snap = resolve.caps_for("window.current", plugin="demo")()
+    assert snap is not None and snap["workdir"] == "/active"
+
+
+def test_forget_after_destroyed_is_idempotent(reg):
+    """B：destroyed 已清后再 forget_host 不抛、不误删后来登记的其它窗口"""
+    from PyQt5.QtCore import QObject
+
+    from app.plugins.capabilities import resolve
+
+    h1, h2 = QObject(), QObject()
+    resolve.note_host("demo", h1)
+    h1.destroyed.emit()
+    resolve.forget_host("demo", h1)   # 幂等：已清，不抛
+    resolve.note_host("demo", h2)
+    resolve.forget_host("demo", h1)   # 身份比较：旧窗口不得误删 h2
+    assert resolve._plugin_hosts.get("demo") is h2
+    h2.destroyed.emit()
+
+
+def test_note_host_tolerates_signal_less_host(reg):
+    """C：SimpleNamespace 假窗无 destroyed 信号 → 登记仍生效且不抛"""
+    from app.plugins.capabilities import resolve
+
+    fake = _fake_window()
+    resolve.note_host("demo", fake)
+    assert resolve._plugin_hosts.get("demo") is fake
