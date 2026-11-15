@@ -11930,6 +11930,19 @@ class PlainTextViewer(QWidget):
             # 复现须整体回退本改动
             self.text_edit.setPlainText(self._text + text)
         self._text += text
+        # 🐛 内部滚动条「发送后默认置底」（2026-11-15 真机）：上面用 End 位置的
+        # QTextCursor 插入会让 QTextEdit 的可见光标落到文档末尾（共享
+        # QTextDocument），随后气泡定型 setFixedSize → QTextEdit 重排
+        # ensureCursorVisible → 内滚条被拉到末尾，长用户消息一出现就显示尾部。
+        # 用户气泡语义是从头读，插入后把可见光标归位到文档开头（只置滚动条
+        # value=0 无效：后续重排会按末尾光标再次 ensure 到底，实测值被拉回）。
+        # PlainTextViewer 唯一使用者是 user 卡（不承担流式跟随底部职责）。
+        try:
+            home = self.text_edit.textCursor()
+            home.movePosition(QTextCursor.Start)
+            self.text_edit.setTextCursor(home)
+        except RuntimeError:
+            pass
         # [PERF P0] 文档排版宽无条件同步（原版行为，保留）：hide/滚动条翻转期间
         # QTextEdit 不自动刷新排版宽，停留旧值会让增量高度读到错位排版
         # （fuzz seed60/61 复现 h=216 vs need=101）。
