@@ -432,6 +432,10 @@ def enforce_renderer_rss_gate(host) -> str:
                         - int(deficit // 170),
                     )
                     try:
+                        # [ALERT] L3：kill 动作前埋点（DRIFOX_GOVERNOR_TRACE=1 才落盘）
+                        from app.core.infra.alert_manager import note_governor_action
+
+                        note_governor_action("pre_kill", f"deficit={deficit:.0f}MB active={active}")
                         killed = int(
                             host._kill_lru_unloaded_renderers(
                                 keep=keep, min_offscreen=_gate_min_offscreen(active)
@@ -441,12 +445,22 @@ def enforce_renderer_rss_gate(host) -> str:
                         if killed > 0:
                             # Y1: 写冷却戳，否则 gate 入口冷却检查对本路径永不生效
                             host._last_kill_at = time.time()
+                            note_governor_action("post_kill", f"killed={killed}")
                     except Exception as e:
                         # Y2: 不静默吞错，对齐 _kill_lru 本体日志惯例
                         logger.warning(f"[T6] deficit-kill 调用失败: {e}")
                         killed = 0
                 tag = f"soft-unload({_gate_soft_unload(host, active)})"
                 actions.append(tag + (f"+deficit-kill({killed})" if killed else ""))
+        if actions:
+            # [ALERT] L2：闸门软限触发点（复用既有触发链，不新增动作；InfoBar 投递
+            # 走 alert_manager 内部主线程桥，10min 限频 + 恢复不重弹由其状态机管）
+            try:
+                from app.core.infra.alert_manager import note_gate_soft
+
+                note_gate_soft(main_mb, web_mb, "+".join(actions))
+            except Exception:
+                pass
         return "+".join(actions) if actions else "idle"
     except Exception:
         return "error"
