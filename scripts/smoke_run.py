@@ -275,6 +275,14 @@ def main(argv=None) -> int:
 
     pre_dir = _archive_pre(tag_ts)
 
+    # [SERDE-FIX] 清 __pycache__：防 pyc 与源码行号错位（曾实测 +1 错位误导崩溃归因）
+    import shutil as _sh
+
+    for pkg_dir in (ROOT / "app", ROOT / "tools"):
+        for cache in pkg_dir.rglob("__pycache__"):
+            _sh.rmtree(cache, ignore_errors=True)
+    _log("已清理 app/ tools/ __pycache__")
+
     app_env = dict(os.environ, **APP_ENV)
     runner_env = dict(os.environ, **APP_ENV)
     for k in _RUNNER_DROP:

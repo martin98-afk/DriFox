@@ -21,10 +21,27 @@ PEP 784 zstd API 注意：
 
 from __future__ import annotations
 
+import json
+import os
 from compression import zstd  # PEP 784, Python 3.14+
 from typing import Any
 
 import orjson
+
+# [SERDE-FIX] orjson 兑现快赢前的应急兑底：DRIFOX_SERDE_STDLIB=1 时走 stdlib
+# json（慢但稳）。背景：orjson.loads 在 CPython 3.14.x 的 SIGSEGV 社区案例
+# （orjson 3.11.9 + Py3.14.2 已实测一起原生崩，root-cause RC-1），换 stdlib 后
+# 社区报告消除。默认关：orjson 快路径仍是主路径，供独占复测对照。
+_STDLIB_FALLBACK = os.environ.get("DRIFOX_SERDE_STDLIB", "").strip().lower() in (
+    "1", "true", "on", "yes",
+)
+
+
+def _json_loads(raw: bytes) -> Any:
+    """orjson 快路径；DRIFOX_SERDE_STDLIB=1 时走 stdlib（注意 stdlib 不收 bytes）。"""
+    if _STDLIB_FALLBACK:
+        return json.loads(raw.decode("utf-8"))
+    return orjson.loads(raw)
 
 # 格式魔数常量
 _MAGIC_ZSTD = b"ZSTD"  # 新版 zstd 压缩数据
@@ -116,7 +133,7 @@ def deserialize(data) -> Any:
             )
         payload = data[5:]
         raw = _zstd_decompress(payload)
-        return orjson.loads(raw)
+        return _json_loads(raw)
 
     # 格式 B：新版未压缩 JSON（预留）
     if data.startswith(_MAGIC_JSON):
@@ -127,10 +144,10 @@ def deserialize(data) -> Any:
                 f"(expected {_VERSION_V1!r})"
             )
         payload = data[5:]
-        return orjson.loads(payload)
+        return _json_loads(payload)
 
-    # 格式 C：旧数据（无 magic，直接 orjson 解析，最大限度向后兼容）
-    return orjson.loads(data)
+    # 格式 C：旧数据（无 magic，直接解析，最大限度向后兼容）
+    return _json_loads(data)
 
 
 
