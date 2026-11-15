@@ -70,6 +70,7 @@ from qfluentwidgets import (
     TransparentToolButton,
 )
 from qfluentwidgets.components.widgets.scroll_bar import SmoothScrollDelegate
+from app.core.infra import perf_jsonl
 from app.core.infra.webengine_profile import get_shared_web_profile
 from app.utils.design_tokens import (
     Animations,
@@ -199,6 +200,11 @@ def _render_v2_enabled() -> bool:
     v2 出问题时不回滚代码即可退回旧全量路径。
     """
     return os.environ.get("DRIFOX_RENDER_V2", "1").strip().lower() not in ("0", "false", "no")
+
+
+# [O5] renderer 假死探测：仅观测（DRIFOX_RENDER_PROBE=1），关闭时零行为。
+_RENDER_PROBE = perf_jsonl.env_flag("DRIFOX_RENDER_PROBE")
+_RENDER_TERMINATED_N = 0
 
 
 @lru_cache(maxsize=16)
@@ -368,7 +374,24 @@ class ConsoleMonitorPage(QWebEnginePage):
 
     def _on_render_process_terminated(self, status, exit_code):
         """QWebEnginePage 内建信号转发：renderer 进程终止 → 通知宿主卡片自愈"""
+        global _RENDER_TERMINATED_N
+
         logger.warning(f"WebEngine renderer 崩溃: status={status} exit_code={exit_code}")
+        # [O5] 假死探测：只累计与写盘，自愈链（renderCrashed.emit）语义不变
+        if _RENDER_PROBE:
+            try:
+                _RENDER_TERMINATED_N += 1
+                perf_jsonl.append_event(
+                    "renderer_terminated",
+                    _RENDER_TERMINATED_N,
+                    {
+                        "status": int(status),
+                        "exit_code": int(exit_code),
+                        "pid": int(getattr(self, "_renderer_pid", 0) or 0),
+                    },
+                )
+            except Exception:  # noqa: BLE001 - 观测不得反噬自愈链
+                pass
         self.renderCrashed.emit()
 
     def acceptNavigationRequest(self, url, nav_type, is_main_frame):
@@ -2532,10 +2555,21 @@ class CodeWebViewer(QWebEngineView):
             self._render_deferred = False
             self._schedule_render(immediate=True)
         # [B4-强回收] 记录 renderer 进程 PID（强回收层 kill 离屏进程用）
+        # [O5] 假死探测：赋值前留旧值，新 pid 非 0 且与旧值不同 → 记一次漂移
+        _probe_old_pid = int(getattr(self, "_renderer_pid", 0) or 0) if _RENDER_PROBE else 0
         try:
             self._renderer_pid = self.page().renderProcessPid()
         except Exception:
             self._renderer_pid = 0
+        if _RENDER_PROBE:
+            try:
+                _probe_new_pid = int(self._renderer_pid or 0)
+                if _probe_new_pid and _probe_old_pid and _probe_new_pid != _probe_old_pid:
+                    perf_jsonl.append_event(
+                        "renderer_pid_drift", _probe_new_pid, {"old": _probe_old_pid}
+                    )
+            except Exception:  # noqa: BLE001 - 观测不得反噬主流程
+                pass
 
     def _load_skeleton(self):
         # 🛡️ 透明合成必须在导航前重申（2026-11-13）：Chromium 合成面一旦丢失
