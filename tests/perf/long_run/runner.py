@@ -467,17 +467,20 @@ def _register_scenarios() -> None:
     from .scenario_a_message_stream import run_message_stream_scenario
     from .scenario_b_session_switch import run_session_switch_scenario
     from .scenario_c_plugin_hot_reload import run_plugin_hot_reload_scenario
+    from .scenario_f_window_session import run_window_session_scenario
 
     SCENARIO_REGISTRY["a"] = run_message_stream_scenario
     SCENARIO_REGISTRY["b"] = run_session_switch_scenario
     SCENARIO_REGISTRY["c"] = run_plugin_hot_reload_scenario
+    # SC-F：窗口级会话开关（纯 HTTP 驱动运行中实例，需 DRIFOX_UI_TEST_SERVER）
+    SCENARIO_REGISTRY["f"] = run_window_session_scenario
 
 
 def main(argv: List[str]) -> int:
     parser = argparse.ArgumentParser(description="DriFox 长时压测 runner")
     parser.add_argument(
         "--scenario",
-        choices=["a", "b", "c", "all"],
+        choices=["a", "b", "c", "f", "all"],
         default="all",
         help="跑哪个场景（默认 all）",
     )
@@ -505,7 +508,7 @@ def main(argv: List[str]) -> int:
             duration = FULL_DURATION_SEC if env_full_mode() else DEMO_DURATION_SEC
 
     if args.scenario == "all":
-        scenarios = ["a", "b", "c"]
+        scenarios = ["a", "b", "c", "f"]
     else:
         scenarios = [args.scenario]
 
