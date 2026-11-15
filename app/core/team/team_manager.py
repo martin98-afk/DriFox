@@ -1418,11 +1418,13 @@ class TeamManager:
         targets: Optional[List[str]] = None,
         exclude_self: bool = True,
         team_name: str = DEFAULT_TEAM,
+        from_window: str = "",
     ) -> Dict[str, Any]:
-        """群发任务邮件（leader 专属，门禁在工具层）——逐目标独立 mail_id
+        """群发任务邮件（任意成员/外部窗口可发）——逐目标独立 mail_id
 
-        发件人取 team.json 顶层 leader_window_id 反查（群发已定 leader 专属，
-        自洽）。跨团队打标逐目标判定（to_run_id 各自现查，不混用单目标值）。
+        发件人=from_window（工具层透传调用方窗口）；缺省/为空时回落
+        team.json 顶层 leader_window_id（兼容旧调用），两者皆空 → 全部
+        skipped。跨团队打标逐目标判定（to_run_id 各自现查，不混用单目标值）。
 
         Args:
             subject: 邮件主题（body 前 80 字符兜底）
@@ -1430,19 +1432,20 @@ class TeamManager:
             targets: 目标标识符列表（agent_name 或 agent_name@window_id）；
                 None 或含 "*" 时展开为全队成员。agent_name 展开为该名的
                 **全部**成员（同名单发 find_member 只取第一个的坑在此绕开）。
-            exclude_self: True 时跳过 leader 自身（记入 skipped）。
+            exclude_self: True 时跳过发送者自身（记入 skipped）。
             team_name: 团队名（仅定位 team.json，全链路 DEFAULT_TEAM）
+            from_window: 发件人窗口 ID；空则回落 leader_window_id
 
         Returns:
             {"sent": [{identifier, mail_id, to_run_id, cross_team}, ...],
              "skipped": [(identifier, reason), ...]}；离线成员（不在 members 表）
             记 skipped，不抛异常。
         """
-        from_window = self.get_leader_window_id(team_name)
-        if not from_window:
-            return {"sent": [], "skipped": [("*", "团队未登记 leader 窗口，无法群发")]}
-        from_agent = self.get_member_agent_name(from_window, team_name) or "leader"
-        from_run_id = self.get_member_run_id(from_window, team_name)
+        sender_wid = str(from_window or "").strip() or self.get_leader_window_id(team_name)
+        if not sender_wid:
+            return {"sent": [], "skipped": [("*", "无法确定发件窗口（未传 from_window 且团队未登记 leader）")]}
+        from_agent = self.get_member_agent_name(sender_wid, team_name) or "user"
+        from_run_id = self.get_member_run_id(sender_wid, team_name)
 
         members = self.get_members(team_name)
 
@@ -1477,8 +1480,8 @@ class TeamManager:
             if not wid or wid in seen_wids:
                 continue
             seen_wids.add(wid)
-            if exclude_self and wid == from_window:
-                skipped.append((wid, "跳过 leader 自身"))
+            if exclude_self and wid == sender_wid:
+                skipped.append((wid, "跳过发送者自身"))
                 continue
 
             to_run_id = self.get_member_run_id(wid, team_name)
@@ -1487,7 +1490,7 @@ class TeamManager:
                 "id": this_mail_id,
                 "type": "task",
                 "team_name": team_name,
-                "from_window": from_window,
+                "from_window": sender_wid,
                 "from_agent": from_agent,
                 "to_window": wid,
                 "to_agent": m.get("agent_name", ""),

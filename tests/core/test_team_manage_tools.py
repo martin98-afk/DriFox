@@ -214,6 +214,42 @@ def test_broadcast_star_excludes_self(team_env):
     ids = {s["identifier"] for s in res["sent"]}
     assert ids == {"build@win_91", "review@win_92"}
 
+def test_broadcast_any_member_can_send(team_env):
+    """任意成员可群发：非 leader 窗口显式作为发件人，排除发送者自身。"""
+    tt, tm = team_env["tt"], team_env["tm"]
+    _prepare_team(tm)
+    res = _facade("team.manage").send_task_broadcast(
+        "s", "body", targets=["*"], from_window="win_91"
+    )
+    ids = {s["identifier"] for s in res["sent"]}
+    assert ids == {"leader@win_90", "review@win_92"}
+    mails = tm.get_mailbox_mails("win_90")
+    assert mails and mails[0]["from_window"] == "win_91" and mails[0]["from_agent"] == "build"
+
+def test_broadcast_without_leader_uses_sender_window(team_env):
+    """预置团队（未登记 leader）：传 from_window 即可群发，不再全体 skipped。"""
+    tt, tm = team_env["tt"], team_env["tm"]
+    _prepare_team(tm)
+    with tm._data_lock:
+        data = tm._get_team_data(tm.DEFAULT_TEAM)
+        data["leader_window_id"] = ""
+        tm._save_team_data(tm.DEFAULT_TEAM)
+    res = _facade("team.manage").send_task_broadcast(
+        "s", "body", targets=["*"], from_window="win_91"
+    )
+    assert len(res["sent"]) == 2 and res["skipped"] == [("win_91", "跳过发送者自身")]
+
+def test_broadcast_no_sender_window_all_skipped(team_env):
+    """未传 from_window 且未登记 leader：保持全 skipped 兜底，不抛异常。"""
+    tt, tm = team_env["tt"], team_env["tm"]
+    _prepare_team(tm)
+    with tm._data_lock:
+        data = tm._get_team_data(tm.DEFAULT_TEAM)
+        data["leader_window_id"] = ""
+        tm._save_team_data(tm.DEFAULT_TEAM)
+    res = _facade("team.manage").send_task_broadcast("s", "body", targets=["*"])
+    assert res["sent"] == [] and res["skipped"][0][0] == "*"
+
 
 def _facade(cap_id):
     from app.plugins.capabilities.facets import build_facet

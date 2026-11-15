@@ -76,7 +76,7 @@ def _spawn_facade() -> Optional[dict]:
     return facade if isinstance(facade, dict) else None
 
 def _leader_gate(tm, window_id: str) -> Optional[ToolResult]:
-    """leader 门禁单点（remove_member / 群发；不进 PermissionResolver）。
+    """leader 门禁单点（仅 remove_member；群发已放开不限 leader；不进 PermissionResolver）。
 
     Returns:
         None=放行；否则返回 deny 结果。leader_window_id 为空（非
@@ -295,8 +295,8 @@ def _team_send_message(tool_ctx, to_agent, message: str) -> ToolResult:
     """向团队成员发送任务邮件（to_agent: str | list[str]；"*"/["*"]=全队群发）
 
     单目标路径行为不变（向后兼容）；群发走 team.manage.send_task_broadcast
-    （leader 门禁单点在本函数内），targets 原样透传（"*" 展开语义由
-    TeamManager 侧负责，工具层不先展开，保住「未登记 leader → skipped」语义）。
+    （任意成员/外部窗口可群发，发件人=调用窗口，不再限 leader），targets
+    原样透传（"*" 展开语义由 TeamManager 侧负责，工具层不先展开）。
 
     🛡️ M1（user 拍板放行+打标）：跨团队消息**不再硬拦截**，改为放行+打标——
     mail dict 写 from_run_id / to_run_id 字段，返回成功结果后追加「⚠ 跨团队
@@ -332,17 +332,15 @@ def _team_send_message(tool_ctx, to_agent, message: str) -> ToolResult:
     if not is_member:
         from_agent = "user"
 
-    # ── 群发分支：list 或 "*"（leader 门禁；单目标行为完全不变）──
+    # ── 群发分支：list 或 "*"（任何成员/外部窗口可群发，发件人=调用窗口；
+    # 单目标行为完全不变）──
     if isinstance(to_agent, list) or to_agent == "*":
-        gate = _leader_gate(tm, window_id)
-        if gate is not None:
-            return gate
         mg = _get_team_manage()
         if mg is None:
             return ToolResult(False, error="团队管理能力不可用（缺少 team.manage 能力声明）")
         targets = [str(t) for t in to_agent] if isinstance(to_agent, list) else None
         text = str(message or "")
-        result = mg.send_task_broadcast(subject=text[:80], body=text, targets=targets)
+        result = mg.send_task_broadcast(subject=text[:80], body=text, targets=targets, from_window=window_id)
         sent = result.get("sent", []) or []
         skipped = result.get("skipped", []) or []
         lines = [f"群发完成：成功 {len(sent)} 封，跳过 {len(skipped)} 个目标。"]

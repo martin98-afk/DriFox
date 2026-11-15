@@ -21520,6 +21520,11 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def _continue_from_entry(self, entry: dict):
         """把一条排队消息作为新一轮发送（此刻才创建用户气泡 + 新回复卡）"""
+        # 🛡️ 失败回插队首依赖条目带 id（卡片刷新/编辑/删除均按 id 寻址）；
+        # _dispatch_busy_send 的 worker-退出分支传入临时构造条目无 id，统一在此补齐
+        if "id" not in entry:
+            self._pending_message_seq += 1
+            entry["id"] = f"q{self._pending_message_seq}"
         user_text = str(entry.get("text", ""))
         image_paths = entry.get("image_paths") or []
         hook_event = entry.get("hook_event") or None

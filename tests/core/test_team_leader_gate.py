@@ -66,15 +66,26 @@ def test_remove_denied_for_non_leader(team_env):
     assert "leader" in r.error
 
 
-def test_broadcast_denied_for_non_leader(team_env):
+def test_broadcast_allowed_for_any_member(team_env):
+    """群发已放开（不限 leader）：成员窗口群发成功，发件人=调用窗口。"""
     tt, tm = team_env["tt"], team_env["tm"]
     r = tt._team_send_message(
         {"team_window_id": "win_91", "team_agent_name": "build"},
         ["review@win_92"],
         "群发尝试",
     )
-    assert not r.success
-    assert "leader" in r.error
+    assert r.success
+    assert "群发完成：成功 1 封" in r.content
+    mails = tm.get_mailbox_mails("win_92")
+    assert mails and mails[0]["from_window"] == "win_91"
+
+def test_remove_still_leader_gated(team_env):
+    """remove 的 leader 门禁保留：群发放开不影响移除权限。"""
+    tt = team_env["tt"]
+    r = tt._team_manage_impl(
+        {"team_window_id": "win_91", "team_agent_name": "build"}, action="remove", agent_name="review"
+    )
+    assert not r.success and "leader" in r.error
 
 
 def test_remove_same_name_members_all(team_env):
