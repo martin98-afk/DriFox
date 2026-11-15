@@ -21,6 +21,27 @@ def reset_singleton():
     TrayManager.get_instance()._tab_manager_window = None
 
 
+@pytest.fixture(autouse=True)
+def two_phase_construction_complete(monkeypatch):
+    """两阶段构造契约适配（T6b）：create_instance 后补建阶段二。
+
+    T6b 后 create_instance 只产出壳期实例（基座+标题栏+空骨架），TabPanel/
+    _content_area/_splitter 等由 complete_construction() 补建（生产路径由
+    main._show_popup 驱动）。本文件测试均为完整态行为测试，在 fixture 层
+    统一包装 create_instance 驱动 complete，模拟主路径；幂等 flag 保证
+    兜底路径重复驱动零开销。
+    """
+    original = TabManagerWindow.create_instance.__func__
+
+    def create_and_complete(cls, parent=None):
+        tm = original(cls, parent)
+        tm.complete_construction()
+        return tm
+
+    monkeypatch.setattr(TabManagerWindow, "create_instance", classmethod(create_and_complete))
+    yield
+
+
 class TestEmptyStateWidget:
     def test_create(self, qtbot):
         w = EmptyStateWidget()

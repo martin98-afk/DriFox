@@ -150,6 +150,9 @@ class SubAgentExecutor(QThread):
         self.agent_name = agent_name
         self.task_description = task_description
         self.llm_config = llm_config
+        # perf(net): per-task 复用的 API client（None=未建）；任务结束由 run()
+        # finally 在本 worker 线程内 close 置 None
+        self._api_client = None
         self.agent_manager = agent_manager
         self.tool_executor = tool_executor
         self.parent_context = parent_context
@@ -586,6 +589,17 @@ class SubAgentExecutor(QThread):
                 except Exception as e:
                     logger.warning(f"[SubAgentExecutor] 保存错误状态失败: {e}")
             self.error_occurred.emit(self.task_id, self._execution_error)
+        finally:
+            # perf(net): 任务结束（正常/异常/取消）在本 worker 线程内关闭复用
+            # client——openai SDK 的 __del__ 同步 close 连接池，留到主线程 gc
+            # 析构会把关闭开销整个跑在主线程（chat_worker 实测 695ms 卡顿）
+            client = self._api_client
+            self._api_client = None
+            if client is not None:
+                try:
+                    client.close()
+                except Exception as e:  # noqa: BLE001 — 关闭失败不影响收尾
+                    logger.debug(f"[SubAgentExecutor] 关闭 API client 失败: {e}")
 
     def _execute_agent_loop(self, messages: List[Dict], tools: List[Dict], llm_config: Dict) -> str:
         """执行子智能体对话循环"""
@@ -1218,11 +1232,19 @@ class SubAgentExecutor(QThread):
         # 的 IN_FLIGHT_MAX_SECONDS(1800s) 兜底，不靠读超时兜。
         import httpx
 
-        client = build_openai_client(
-            api_key=api_key,
-            base_url=base_url,
-            timeout=httpx.Timeout(600.0, connect=60.0),
-        )
+        # perf(net): per-task 复用 client——此前每次 API 调用新建 OpenAI client
+        # （免 key 路径还新建 httpx.Client+transport）= N 轮工具循环 N 次
+        # TCP+TLS 握手（远端 https ~100-300ms/轮，10 轮 ≈ 1-3s 纯握手）。
+        # llm_config 任务内恒定（仅 __init__/run() 防御两处写入），缓存安全；
+        # 任务结束由 run() finally 在本 worker 线程内 close（对齐 chat_worker
+        # _close_http_client 惯例：client 留给主线程 gc 析构会卡主线程 695ms）
+        if self._api_client is None:
+            self._api_client = build_openai_client(
+                api_key=api_key,
+                base_url=base_url,
+                timeout=httpx.Timeout(600.0, connect=60.0),
+            )
+        client = self._api_client
         auth_headers = resolve_extra_headers(config, getattr(self, "_task_session_id", None) or "")
 
         def create_and_consume():

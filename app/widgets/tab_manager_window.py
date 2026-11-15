@@ -1250,19 +1250,29 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
         self.setWindowFlags(Qt.Window)
         self.updateFrameless()
 
+        # perf(startup): UI 构建段子打点（titlebar 段边界）
+        _probe("p4.titlebar.start")
         from app.widgets.custom_title_bar import CustomTitleBar
 
         self.setTitleBar(CustomTitleBar(self))
         # 顶栏接线：侧栏开关 → 复用 TabPanel 折叠链（sidebarToggled → 宽度动画）
-        self.titleBar.sidebar_toggle_requested.connect(lambda: self._tab_panel._toggle_sidebar())
+        # perf(startup): 两阶段构造壳期 _tab_panel 未建（complete_construction 前），
+        # 侧栏按钮可点，lambda 需容缺失
+        self.titleBar.sidebar_toggle_requested.connect(
+            lambda: getattr(self, "_tab_panel", None) is not None and self._tab_panel._toggle_sidebar()
+        )
         # 顶栏 tab 切换：「聊天」→ 对话视图；full 卡片 tab → 切换显示
         self.titleBar.tab_clicked.connect(self._on_titlebar_tab_clicked)
         # 顶栏 tab × 关闭（仅 full 卡片 tab 有）：真实隐藏卡片并从 open 集合移除
         self.titleBar.tab_close_clicked.connect(self._on_replace_tab_close_clicked)
         self.setWindowIcon(QIcon(":/icons/drifox.ico"))
 
+        # perf(startup): UI 构建段子打点（titlebar 段收口）
+        _probe("p4.titlebar.end")
         # 确保 Colors 已刷新（主题色初始化）
         Colors.refresh()
+        # perf(startup): UI 构建段子打点（Colors.refresh 段收口）
+        _probe("p4.colors_refresh.end")
 
         # 替换类型(full 容器)卡片标题栏 tab 状态
         # full 卡片 tab 状态按对话标签页隔离：{window_id: {card_id: title}}
@@ -1286,8 +1296,10 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
 
         _probe("p4.setup_ui.start")
         self._setup_ui()
-        self._setup_signals()
-        _probe("p4.setup_ui.end")
+        # perf(startup): 两阶段构造阶段一止：重 UI（TabPanel/容器树/_setup_signals/
+        # workbench）迁入 complete_construction()，由 main._show_popup 在壳可见后、
+        # 首窗构造前同步驱动（singleShot 不可用：同拍内 add_window 需要完整 UI 树）
+        _probe("p4.shell_setup.end")
         # 不在 __init__ 设位置，等第一次 showEvent 时再设
 
         # ── 应用级服务启动已挪至 main.py（壳显示后、首窗构造前）──
@@ -1303,38 +1315,94 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
         # 修复多 tab 下后建窗口静默覆盖先建窗口的问题（之前由 MainWidget
         # 在 _init_llm_api_service 注册 handler，绑死后建窗口的 widget；现改为
         # 每次调用实时查 _tab_panel.active_index 对应的活跃 ChatWindow）
-        from app.core.local_service.session_handler import APISessionHandler
-        from app.core.local_service import LLMAPIService
+        # perf(startup): API 会话/全局卡段（冷 import 级联 + 单例注册 +
+        # refresh_ui_plugins，实测 ~230-330ms）延迟到事件循环首拍
+        # （singleShot(0)），不再阻塞首窗构造。时序安全论证：
+        # ① 闭包注册于 __init__，首拍顺序在 _show_popup / _deferred_startup 之后，
+        #    执行时 _setup_ui / 单例注册 / 首窗构造均已完成；tm.repaint() 不处理
+        #    事件队列（见 main._show_popup 注释），闭包不会在启动中途重入；
+        # ② LLMAPIService 启动期不自启（唯一入口=设置卡手动开启 / open_docs），
+        #    且 handler 为 None 时路由层 503 降级（api_server.py），
+        #    set_session_handler 必然早于任何本地 API 请求到达；
+        # ③ refresh_ui_plugins 读 UIPluginRegistry，全量注册在首窗 deferred 队列
+        #    （init_ui_plugins_deferred）内，跑在本闭包之后——调用前后注册表
+        #    同为空，空转等价；showEvent 与 _update_shared_launcher 均有补刷。
+        def _deferred_api_wiring():
+            # perf(startup): 壳期实例防御——未 complete 时重排队，防 singleShot 回调早于
+            # complete 触发（测试直构壳期实例场景）；裸跳过会永久漏掉 API wiring
+            # （singleShot 一次性），重排队在 complete 后下一拍自然续接
+            if not getattr(self, "_construction_completed", False):
+                QTimer.singleShot(0, _deferred_api_wiring)
+                return
+            from app.core.local_service.session_handler import APISessionHandler
+            from app.core.local_service import LLMAPIService
 
-        def _active_main_widget():
-            idx = self._tab_panel.active_index if self._tab_panel is not None else -1
-            if 0 <= idx < len(self._windows):
-                w = self._windows[idx]
-                if w is not None and not getattr(w, "_is_destroyed", False):
-                    return w
-            return None
+            def _active_main_widget():
+                idx = self._tab_panel.active_index if self._tab_panel is not None else -1
+                if 0 <= idx < len(self._windows):
+                    w = self._windows[idx]
+                    if w is not None and not getattr(w, "_is_destroyed", False):
+                        return w
+                return None
 
-        self._api_session_handler = APISessionHandler(_active_main_widget)
-        LLMAPIService.set_session_handler(self._api_session_handler)
+            self._api_session_handler = APISessionHandler(_active_main_widget)
+            LLMAPIService.set_session_handler(self._api_session_handler)
 
-        # 全局卡片控制器：系统设置/服务商编辑/Hook/MCP 卡片挂载在 Tab 窗口层
-        # （单例在此处初始化，确保全局容器已随 _setup_ui 创建完毕）
-        from app.widgets.cards.global_card_controller import get_global_card_controller
+            # 全局卡片控制器：系统设置/服务商编辑/Hook/MCP 卡片挂载在 Tab 窗口层
+            # （单例在此处初始化，全局容器已随 _setup_ui 创建完毕）
+            from app.widgets.cards.global_card_controller import get_global_card_controller
 
-        get_global_card_controller()
+            get_global_card_controller()
 
-        # 刷新 Tab 面板内嵌的 UI 插件列表
-        _probe("p4.refresh_ui_plugins.start")
-        self._tab_panel.refresh_ui_plugins()
-        _probe("p4.refresh_ui_plugins.end")
-        # 注册到 TrayManager
+            # 刷新 Tab 面板内嵌的 UI 插件列表
+            # （probe 针打在 _probe_dump 之后，不再入表；耗时改走本行日志）
+            _t_api = _sm_time.perf_counter()
+            _probe("p4.refresh_ui_plugins.start")
+            self._tab_panel.refresh_ui_plugins()
+            _probe("p4.refresh_ui_plugins.end")
+            logger.debug(
+                f"[TabManager] __init__ API 会话/全局卡段耗时（deferred 首拍）"
+                f" {(_sm_time.perf_counter() - _t_api) * 1000:.0f}ms"
+            )
+
+        QTimer.singleShot(0, _deferred_api_wiring)
+        # perf(startup): 两阶段构造：TrayManager/theme/workbench 段已迁入
+        # complete_construction()（阶段二，壳可见后同步补建）
+
+        # 初始加载全局背景图（延迟到首帧后，背景为纯装饰，不阻塞出现）
+        QTimer.singleShot(0, self._apply_bg_from_theme)
+
+        # 顶栏内置「聊天」常驻 tab（full 卡片 tab 由显隐事件动态增删，
+        # 插件常驻 tab 由 _sync_plugin_titlebar_tabs 挂载）
+        self.titleBar.add_tab(CHAT_TAB_ID, "对话")
+        self._sync_plugin_titlebar_tabs()
+
+    def complete_construction(self) -> None:
+        """两阶段构造·阶段二（壳先行，批5 同模式）：补建重 UI + signals + workbench。
+
+        阶段一（__init__）只建基座/标题栏/空骨架，让 tm.show() 尽快可见；
+        本方法由 main._show_popup 在壳可见后、首窗构造前显式同步驱动：
+        - 不能用 singleShot(0)：同拍内 add_window 消费 UI 树，deferred 会时序倒挂；
+        - 幂等：主路径与兜底路径（main_widget 惰性重建）重复调用安全。
+        """
+        import time as _sm_time  # 原 __init__ 局部 import，随段迁入
+
+        if getattr(self, "_construction_completed", False):
+            return
+        self._construction_completed = True
+        _probe("p5.complete_setup.start")
+        self._complete_setup_ui()
+        # perf(startup): 阶段二接线段（原 __init__ _setup_signals 调用迁入）
+        _probe("p5.complete_signals.start")
+        self._setup_signals()
+        _probe("p5.complete_signals.end")
+        # 注册到 TrayManager（原 __init__ 段迁入）
         _sm_t2 = _sm_time.perf_counter()
-        logger.debug(f"[TabManager] __init__ API 会话/全局卡段耗时 {(_sm_t2 - _sm_t1) * 1000:.0f}ms")
         from app.tray_manager import TrayManager
 
         TrayManager.get_instance()._tab_manager_window = self
         logger.debug(
-            f"[TabManager] __init__ TrayManager 单例段耗时 {(_sm_time.perf_counter() - _sm_t2) * 1000:.0f}ms"
+            f"[TabManager] complete_construction TrayManager 单例段耗时 {(_sm_time.perf_counter() - _sm_t2) * 1000:.0f}ms"
         )
 
         # 注册主题刷新回调（虽主题切换路径不走 dispatch_refresh，
@@ -1413,14 +1481,7 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
         self._wb_suppress_memory = False
         self._wb_in_preview = False
         self._wb_promote_on_leave = False
-
-        # 初始加载全局背景图（延迟到首帧后，背景为纯装饰，不阻塞出现）
-        QTimer.singleShot(0, self._apply_bg_from_theme)
-
-        # 顶栏内置「聊天」常驻 tab（full 卡片 tab 由显隐事件动态增删，
-        # 插件常驻 tab 由 _sync_plugin_titlebar_tabs 挂载）
-        self.titleBar.add_tab(CHAT_TAB_ID, "对话")
-        self._sync_plugin_titlebar_tabs()
+        _probe("p5.complete_setup.end")
 
     def _on_titlebar_tab_clicked(self, tab_id: str):
         """顶栏 tab 点击：「聊天」→ 对话视图；full 卡片 tab → 切换/显示；
@@ -3033,6 +3094,11 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
                 pass
 
     def _setup_ui(self):
+        """阶段一（壳骨架，同步）：底色层 + 空内容容器。
+
+        重 UI（TabPanel/容器树/splitter/样式）由 _complete_setup_ui 在壳可见后
+        补建（complete_construction 驱动）；本段只保 tm.show() 能尽快画壳。
+        """
         # ── 外层纵向布局：直接放内容区（顶部让位自绘无边框标题栏） ──
         main_layout = QVBoxLayout(self)
         # 顶部让位自绘无边框标题栏（mac 与 Win/Linux 统一 38，交通灯由 mixin 居中）
@@ -3047,11 +3113,24 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
         self._window_base_layer.show()
 
         # ── 内容区（水平：TabPanel + QStackedWidget） ──
+        # perf(startup): 两阶段构造阶段一仅建空骨架；阶段二（_complete_setup_ui）
+        # 沿用本骨架挂载完整 UI 树
         content_widget = QWidget(self)
         content_widget.setObjectName("tabManagerContent")
         content_layout = QHBoxLayout(content_widget)
         content_layout.setContentsMargins(0, 0, 0, 0)
         content_layout.setSpacing(0)
+        self._shell_layout = main_layout
+        self._shell_content = content_widget
+
+    def _complete_setup_ui(self):
+        """阶段二（重 UI 补建）：TabPanel/容器树/splitter/样式/工作区宿主。
+
+        由 complete_construction() 驱动；main_layout/content_widget 沿用阶段一骨架。
+        """
+        main_layout = self._shell_layout
+        content_widget = self._shell_content
+        content_layout = content_widget.layout()
 
         # 左侧 Tab 面板（可拖拽调整宽度）
         from app.widgets.tab_panel import TabPanel
@@ -6221,7 +6300,14 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
         lay.addWidget(text)
         ph.setStyleSheet("background: transparent;")
         self._boot_placeholder = ph
-        ph.setGeometry(self._content_area.geometry())
+        # perf(startup): 两阶段构造壳期 _content_area 未建（complete_construction 前），
+        # 占位锚定回退到窗口内容区（标题栏以下全幅）；complete 后锚回真实内容区几何
+        anchor = getattr(self, "_content_area", None)
+        if anchor is not None:
+            ph.setGeometry(anchor.geometry())
+        else:
+            _tb_h = self.titleBar.height()
+            ph.setGeometry(0, _tb_h, self.width(), max(0, self.height() - _tb_h))
         ph.raise_()
         ph.show()
 
@@ -6476,7 +6562,9 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
         # 根因：插件热加载发生在窗口隐藏期间时，刷新被可见性门控跳过
         # （main_widget 仅对可见的 TabManagerWindow 刷新），showEvent 无补刷
         # → 列表停留在旧状态（全关重开才恢复）。重新显示时补刷一次。
-        if self._tab_panel is not None:
+        # perf(startup): 两阶段构造壳期 _tab_panel 未建（complete_construction 前），
+        # 首次 showEvent 会先到，需容缺失
+        if getattr(self, "_tab_panel", None) is not None:
             self._tab_panel.refresh_ui_plugins()
         # 插件常驻标题栏 tab 同步补刷（同 refresh_ui_plugins 的可见性门控根因）
         try:

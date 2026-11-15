@@ -158,6 +158,10 @@ class WebViewPool:
                 continue
             self._failures = 0
             self._stats["hit"] += 1
+            # perf(memory): 取用即复位回收抑制标志（兜底）——正常时序中置位后
+            # kill 成功的实例走上方 evict 分支销毁、kill 失败的已回滚，此处覆盖
+            # 未来新增置位路径遗漏回滚的情况，保证复用行为与未回收实例一致
+            viewer._heal_suppressed = False
             # perf: #26 60s 窗口内重开 tab 取走 viewer → 取消清池，保留复用收益
             self._cancel_idle_gc()
             return viewer
@@ -272,6 +276,25 @@ class WebViewPool:
                     if pid > 0:
                         pids.add(pid)
         return pids
+
+    # ── [MEM] 与 T31/RSS 闸门回收的协同：pid 反查 ─────────────
+
+    def viewer_for_pid(self, pid: int):
+        """按 renderer PID 反查池内 viewer（memory_governor kill 前置抑制用）。
+
+        回收池内候选时需先在 viewer 上置 _heal_suppressed，阻断 renderCrashed
+        自愈链把刚 kill 的 renderer 重建回来（P1-1）。池内无此 pid 返回 None
+        （记账条目的 viewer 可能已被 evict 销毁，属正常）。
+        """
+        for bucket in self._idle.values():
+            for viewer in bucket:
+                try:
+                    # __dict__.get：getattr 读缺失属性会触发 sip 直构实例检查
+                    if int(viewer.__dict__.get("_renderer_pid", 0) or 0) == pid:
+                        return viewer
+                except Exception:
+                    continue
+        return None
 
     # ── 内部 ────────────────────────────────────────────────────────
 

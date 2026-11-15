@@ -2718,7 +2718,14 @@ class MarkdownBlockViewer(QWidget):
 
         stripped = md_text.rstrip() if md_text and md_text[-1] in " \t\r\n" else md_text
 
-        return stripped.endswith("</think>") or stripped.endswith("```")
+        # fix: 补 ~~~ 形态对齐 CodeWebViewer._CLEAN_BOUNDARY_CODE_BLOCK_RE 口径
+        # （~~~ 是渲染型 fence 合法开栏）：漏判则 ~~~ 围栏结尾永不命中硬边界
+        # immediate，图表落地退化为软定时器
+        return (
+            stripped.endswith("</think>")
+            or stripped.endswith("```")
+            or stripped.endswith("~~~")
+        )
 
 
     @staticmethod

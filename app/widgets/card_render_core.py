@@ -1109,7 +1109,10 @@ def _protect_inline_svg_blocks(md_text: str) -> str:
     for line in lines:
         stripped = line.strip()
         if not in_svg:
-            if stripped.startswith("```"):
+            # fix: 补 ~~~ 形态（对齐 _sanitize_incomplete_markdown 双形态口径）：
+            # SVG 保护圈的 fence 翻转此前只认 ```，~~~ 围栏内的 SVG 会被误撕。
+            # 保持既有「行首三连翻转」简化语义，不引入 marker 配对。
+            if stripped.startswith("```") or stripped.startswith("~~~"):
                 in_fence = not in_fence
             if not in_fence and stripped[:4].lower() == "<svg" and "</svg>" not in stripped.lower():
                 in_svg = True
@@ -3331,15 +3334,26 @@ def _render_markdown_to_html_worker(snapshot: dict) -> str:
     font_size = snapshot["code_font_size"]
     fmt_key = (style, font_size)
     if getattr(tls, "formatter_key", None) != fmt_key:
-        pre_color = "#1a1a1a" if style != "dracula" else "#D4D4D4"
+        # fix: noclasses=False 对齐主通道 _get_formatter_cached（2026-10-30 主题
+        # 切换重构口径）——线程池通道此前 noclasses=True + prestyles 内联 color
+        # （pre_color 即深浅主题前景色），把主题色固化进 HTML：主题切换后长卡
+        # （≥6000 字符走 worker 通道）代码块保持旧配色，内联 style 压过骨架
+        # #hl-css，同屏与短卡配色不一致；class 化后产物主题无关，换 CSS 即换色。
+        # perf(render): 载荷实测同量级（class 化较内联 +2%~15%，span 合并行为
+        # 随 formatter 口径有差异）；真实收益是主题零重渲（免 40~120ms/卡重跑），
+        # 长卡走 lazy_body 折叠注入，增量对 IPC 无感知。12KB diff → 154KB 的
+        # 「12.7 倍」注释指高亮产物 vs 源码，与 noclasses 口径无关。
+        # font-size 是用户布局常量（非主题相关）保留内联，与主通道对称；
+        # pre 主体实际被 _wrap_code_blocks_with_copy_button_web 换成项目容器，
+        # prestyles 仅存在于 Pygments 原始输出。
         tls.formatter = HtmlFormatter(
             style=style,
             linenos=False,
-            noclasses=True,
+            noclasses=False,
             cssclass="code-block",
             prestyles=(
                 f"margin:0; padding:0; background:transparent; "
-                f"font-family: Consolas, monospace; font-size:{font_size}px; color:{pre_color};"
+                f"font-family: Consolas, monospace; font-size:{font_size}px;"
             ),
         )
         tls.formatter_key = fmt_key

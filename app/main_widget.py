@@ -2470,6 +2470,7 @@ class OpenAIChatToolWindow(ToolWindow):
             # 多窗口模式已下线，禁止降级为独立 ToolPopupDialog（幽灵窗口）。
             # 若单例未就绪则惰性重建并确保可见。（TabManagerWindow 为模块级导入）
             tm = TabManagerWindow.get_instance() or TabManagerWindow.create_instance()
+            tm.complete_construction()  # perf(startup): 兜底路径补建阶段二 UI（幂等）
             if not tm.isVisible():
                 tm.show()
             tm.add_window(new_instance)
@@ -2560,6 +2561,7 @@ class OpenAIChatToolWindow(ToolWindow):
             # 若单例因异常未就绪则惰性重建，保证模板窗口一定进入 Tab 容器。
 
             tm = TabManagerWindow.get_instance() or TabManagerWindow.create_instance()
+            tm.complete_construction()  # perf(startup): 兜底路径补建阶段二 UI（幂等）
             if not tm.isVisible():
                 tm.show()
             tm.add_window(new_instance)

@@ -1574,6 +1574,13 @@ class CodeWebViewer(QWebEngineView):
         每 500ms 只恢复一张（可见优先）。JS webgl 路径若先恢复（置
         ``_context_lost=False``），队列下一拍自动剔除该条目，不会重复恢复。
         """
+        # perf(memory): 池内 viewer 被 T31/RSS 闸门回收时置位 _heal_suppressed
+        # （memory_governor kill 前置位）——自愈链不得为已回收进程重建 renderer，
+        # 否则 kill 后 ~500ms 内被拉回，回收被完全抵消（P1-1）
+        # __dict__.get 而非 getattr：读缺失属性会触发 sip 的
+        # super-class __init__ 检查，打爆 __new__ 直构实例的既有测试
+        if self.__dict__.get("_heal_suppressed", False):
+            return
         logger.warning("WebEngine renderer 崩溃，触发卡片自愈")
         self._render_crash_count += 1
         if self._render_crash_count > 2:
@@ -7674,8 +7681,10 @@ class CodeWebViewer(QWebEngineView):
     # 「内容变了」误判「没变」永久跳渲。
     _TAIL_INLINE_MIN_DELTA = 512
     _TAIL_INLINE_MIN_INTERVAL_S = 1.5
-    # 预编译代码块闭合检测
-    _CLEAN_BOUNDARY_CODE_BLOCK_RE = re.compile(r"```[\s]*$")
+    # 预编译代码块闭合检测：``` / ~~~ 双形态（~~~ 是渲染型 fence 合法开栏，
+    # 与 _CHART_FENCE_OPEN_RE 口径对齐；缺 ~~~ 则 ~~~ 围栏结尾永不命中硬边界
+    # immediate，图表落地退化为 90/300ms 定时器）
+    _CLEAN_BOUNDARY_CODE_BLOCK_RE = re.compile(r"(?:```|~~~)[\s]*$")
     # 长内容**历史渲染**走线程池的字符阈值（仅用于非"流式结束"的渲染）。
     # ⚠️ 结束路径后面紧跟 _cleanup_render_cache()，它 `self._render_seq += 1`
     # 会把异步结果判为过期丢弃（详见 _perform_update 内注释）——所以结束态必须

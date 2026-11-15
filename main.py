@@ -765,6 +765,12 @@ def main():
         # 宿主不再直接拉取。
         PluginHostService.get_instance().ensure_started()
         _smark("app_services_start")
+        # perf(startup): 两阶段构造阶段二：壳已可见（show+repaint 已画占位），此处
+        # 同步补建 TabPanel/容器树/signals/workbench（~400ms）。必须在首窗构造前
+        # 完成（add_window 同拍消费 UI 树，singleShot 会时序倒挂）；放 ensure_started
+        # 之后让「壳+占位」窗口最大化（服务启动期用户可见稳定反馈）。
+        tm.complete_construction()
+        _smark("tab_manager_complete")
         from app.utils.preheat import preheat_process_level
 
         preheat_process_level()

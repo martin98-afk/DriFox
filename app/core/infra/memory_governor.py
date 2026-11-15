@@ -343,11 +343,18 @@ def _gate_kill_heavy(host, active: bool) -> int:
     for _rss, _dist, pid in entries[:_KILL_BATCH_MAX]:
         if _pid_used_by_alive_windows(pid, exclude=host):
             continue  # T16 全局护栏：其他窗口在用，跳过
+        # perf(memory): 记账 viewer 多已随卡片 cleanup→detach_viewer 入池，kill
+        # 前同样抑制自愈链（P1-2 与 P1-1 同根，方案 a）
+        viewer = _pool_viewer_for_pid(pid)
+        suppressed = _suppress_viewer_heal(viewer)
         try:
             if host._kill_renderer(pid):
                 killed += 1
                 kill_set.add(pid)
+            elif suppressed:
+                _restore_viewer_after_failed_kill(viewer)
         except Exception:
+            _restore_viewer_after_failed_kill(viewer)
             continue
     if kill_set:
         try:
@@ -464,6 +471,58 @@ RENDERER_IDLE_RECLAIM_S = 180.0  # 空闲 3 分钟（#37 条 2：420→180，202
                                   # 销毁 viewer 对象，T31 kill pid，互不引用对方状态）
 RENDERER_IDLE_RECLAIM_BATCH_MAX = 6  # 每拍 ≤6 个：常态动作宁慢勿抖（kill 上限 12 的一半）
 
+def _pid_alive(pid: int) -> bool:
+    """perf(memory): 回收路径的 pid 存活探测（45s 低频，允许直接 psutil）。
+
+    与 _kill_renderer 内部直用 psutil 同先例；闸门判定的流式热路径仍走 rss_sampler。
+    """
+    try:
+        import psutil
+
+        psutil.Process(pid)
+        return True
+    except Exception:
+        return False
+
+def _pool_viewer_for_pid(pid: int):
+    """perf(memory): 反查池内持有该 renderer pid 的 viewer（kill 前置抑制用）。"""
+    try:
+        from app.widgets.webview_pool import WebViewPool
+
+        return WebViewPool.get_instance().viewer_for_pid(pid)
+    except Exception:
+        return None
+
+def _suppress_viewer_heal(viewer) -> bool:
+    """perf(memory): kill 前置位 viewer 自愈抑制 + 上下文丢失（P1-1/P1-2）。
+
+    置位后 renderCrashed 自愈链被入口守卫拦截（card_viewers._on_render_crashed），
+    刚 kill 的 renderer 不会被 ~500ms 内拉回；_context_lost=True 让下次 acquire
+    走池的既有 evict 分支销毁死进程实例（复用语义与池禁用/命中失效一致）。
+    返回是否成功置位（失败=viewer 状态不可触碰，调用方按无 viewer 处理）。
+    """
+    if viewer is None:
+        return False
+    try:
+        viewer._heal_suppressed = True
+        viewer._context_lost = True
+        return True
+    except Exception:
+        return False
+
+def _restore_viewer_after_failed_kill(viewer) -> None:
+    """perf(memory): kill 失败（进程仍活，如 AccessDenied/校验拒）回滚抑制与健康态。
+
+    viewer 继续正常参与复用与自愈；属性写入失败时静默（对象可能已销毁）。
+    """
+    if viewer is None:
+        return
+    try:
+        viewer._heal_suppressed = False
+        viewer._context_lost = False
+    except Exception:
+        pass
+
 def _idle_pool_pids() -> list:
     """#37 条 1：池内空闲 viewer 的 renderer PID 候选（按归还时刻排序，LRU keep 语义）。
 
@@ -507,7 +566,9 @@ def reclaim_idle_renderers(host) -> int:
     （池内进程曾完全不受空闲回收管辖，8 个静置 540MB 全滞留）。
     记账 ts 沿用 _unload_batch 登记时刻；池内候选 ts=_pool_idle_since（release
     打点，缺省兼容老实例）。keep-tab/LRU keep 语义保留：池内候选 kill 后由
-    WebViewPool.acquire 的 _is_usable 兜底剔除失效 viewer，且本窗口 keep-tab
+    WebViewPool.acquire 的 _is_usable 兜底剔除失效 viewer（kill 前置
+    _heal_suppressed 阻断 renderCrashed 自愈链，否则 ~500ms 内 renderer 被
+    重建回来抵消回收，P1-1），且本窗口 keep-tab
     （_kept_session_tab）与流式卡片仍由 _pid_still_in_use 护栏保护。
     三条判据同时满足才回收：
     1. 批次距离 ≥ 离屏护栏（8/12 批，覆盖活跃视口 ±2 豁免）——仅记账候选适用
@@ -583,11 +644,24 @@ def reclaim_idle_renderers(host) -> int:
         for _ts, pid in victims[:RENDERER_IDLE_RECLAIM_BATCH_MAX]:
             if _pid_used_by_alive_windows(pid, exclude=host):
                 continue  # T16/T22 全局护栏
+            viewer = _pool_viewer_for_pid(pid)
+            if viewer is not None and not _pid_alive(pid):
+                # perf(memory): pid 已死（此前已被回收）→ 清池内死 pid（P2-1），
+                # 消除每 45s 重复无效 kill 尝试与 pids() 护栏死条目
+                try:
+                    viewer._renderer_pid = 0
+                except Exception:
+                    pass
+                continue
+            suppressed = _suppress_viewer_heal(viewer)
             try:
                 if host._kill_renderer(pid):
                     killed += 1
                     kill_set.add(pid)
+                elif suppressed:
+                    _restore_viewer_after_failed_kill(viewer)
             except Exception:
+                _restore_viewer_after_failed_kill(viewer)
                 continue
         if kill_set:
             try:
