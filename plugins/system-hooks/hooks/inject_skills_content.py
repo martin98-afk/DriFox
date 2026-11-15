@@ -5,12 +5,12 @@ Hook 函数 — 注入「偏好技能」清单
 事件分工（hooks.json 声明）：
 - SessionStart：主对话入口，会话启动时注入一次进会话消息，不再占 system prompt。
 - BuildSystemPrompt：兜底。子智能体 / Gateway 没有会话启动点，只能靠系统提示
-  拿到清单；主对话若消息里已有清单则跳过，避免两份重复。
+  拿到清单；主对话若会话消息里已有清单则跳过，避免两份重复。
 
-数据由本插件自取，主程序不做预取：
+数据全部经能力池自取，主程序不做预取：
 - 技能清单 → SDK ``get_local_skills``（含插件技能与项目动态技能源）
-- 启用名单 → 能力池 ``config.read`` 读 ``llm_enabled_skills``
-- 已注入判定 → 能力池 ``session.read`` 看会话消息有没有清单标记
+- 启用名单 → ``config.read`` 读 ``llm_enabled_skills``
+- 已注入判定 → ``session.read`` 看会话消息有没有清单标记
 """
 
 from loguru import logger
@@ -69,7 +69,10 @@ def _enabled_names() -> set:
         return set()
 
 def _build_block(workdir: str) -> str:
-    """按「偏好技能」段格式拼清单；无启用技能返回空串。"""
+    """按「偏好技能」段格式拼清单；无启用技能返回空串。
+
+    两类进清单：启用名单内的技能、auto_enable=True 的条目（如项目技能）。
+    """
     from app.plugins.sdk import get_local_skills
 
     all_skills = get_local_skills(project_dir=workdir or None) or []

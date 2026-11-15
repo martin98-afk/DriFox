@@ -6,9 +6,9 @@ Hook 函数 — 注入可用子智能体清单（仅 SessionStart）
 子智能体清单只对主对话有意义：子智能体自身不能发布子任务（subagent_para 被
 禁用），Gateway 也禁用 subagent_para，两者都不需要这份清单。
 
-数据由本插件经能力池自取，主程序不做预取：``agent.read`` 拿管理器，
-按其 list_subagents 口径列举（含 hidden）。描述截断 300 字，标题行格式与
-设置页 token 估算（app/widgets/cards/settings/plugin_components_card.py）一致。
+数据经能力池自取：``agent.read`` 拿管理器，按其 list_subagents 口径列举（含
+hidden）。描述截断 300 字，标题行格式与设置页 token 估算
+（app/widgets/cards/settings/plugin_components_card.py）一致。
 """
 
 from loguru import logger
