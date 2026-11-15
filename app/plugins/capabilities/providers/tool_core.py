@@ -282,8 +282,9 @@ def register(registry) -> None:
         def interrupt() -> bool:
             return queue.enqueue(wid, "interrupt", {})
 
-        def new_session() -> bool:
-            return queue.enqueue(wid, "new", {})
+        def new_session(title: str = "") -> bool:
+            """新建会话；title 非空时新会话直接用它作标题（交接沿用源会话主题）"""
+            return queue.enqueue(wid, "new", {"title": str(title or "").strip()})
 
         def send(text: str, *, ephemeral: bool = False, mode: str = "queue", hook_event: str = "SessionSend") -> bool:
             # 三模式复用 ui_core 同实现（先例：_ui_artifacts_show 跨 provider 复用）

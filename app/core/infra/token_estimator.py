@@ -207,7 +207,8 @@ def _fast_estimate_tokens(text: str) -> int:
     text_len = len(text)
 
     # 统计中文字符
-    chinese_chars = len(_CHINESE_PATTERN.findall(text))
+    # finditer 替代 findall：避免对大文本先物化百万级匹配列表再取 len（P6）
+    chinese_chars = sum(1 for _ in _CHINESE_PATTERN.finditer(text))
     non_chinese = text_len - chinese_chars
 
     # 中文 ~1.2 token/字；英文/其他 ~1 token/4 字符
@@ -273,20 +274,6 @@ def _estimate_tokens_cached(text_hash: int, text_len: int, model: str) -> int:
             pass
     # 降级到快速估算
     return _fast_estimate_tokens(text)
-    if not text:
-        return 0
-
-    # 尝试使用 tiktoken
-    encoder = _get_encoder(_get_encoding_name(model))
-    if encoder:
-        try:
-            tokens = encoder.encode(text, disallowed_special=())
-            return len(tokens)
-        except Exception:
-            pass
-
-    # 降级到快速估算
-    return _fast_estimate_tokens(text)
 
 
 # ========== count_messages_tokens 多入口 is 缓存 ==========
@@ -330,6 +317,69 @@ def _lookup_token_cache(messages: list, model: str, tools_sig: int) -> int | Non
             return result
     return None
 # ==========
+
+
+# ========== 工具 schema 指纹缓存（P1）==========
+# 旧实现 count_messages_tokens 每次调用都 hash(str(tools))：对 35+ 工具的
+# 100KB 级 schema 全量序列化只为算缓存键，每轮固定多付 5-30ms + 等量临时字符串。
+# 快照对象在会话内不变（engine 的 _tools_snap 同一思路），故按对象身份缓存指纹：
+# id 做不了键（复用脏命中风险），沿用上方 4-entry `is` 身份比较模式，FIFO 逐出。
+_tools_sig_cache_local = threading.local()
+_MAX_TOOLS_SIG_CACHE_ENTRIES = 4
+
+
+def _tools_signature(tools: Optional[List[Dict]]) -> int:
+    """工具列表指纹（带 is 身份缓存）：同一列表对象重复调用不再 str() 全量序列化。"""
+    if not tools:
+        return 0
+    cache = getattr(_tools_sig_cache_local, "cache", None)
+    if cache is None:
+        cache = []
+        _tools_sig_cache_local.cache = cache
+    for i, entry in enumerate(cache):
+        obj, sig = entry
+        if obj is tools:
+            # 命中后移到末尾保活（LRU）
+            cache.append(cache.pop(i))
+            return sig
+    sig = hash(str(tools))
+    cache.append((tools, sig))
+    if len(cache) > _MAX_TOOLS_SIG_CACHE_ENTRIES:
+        cache.pop(0)
+    return sig
+
+
+# ========== 工具定义 tokens 缓存（P2）==========
+# count_tools_tokens 逐工具对 name/description/parameters 跑 tiktoken 编码，
+# 35+ 工具单次约 10-50ms；worker 兜底估算路径每轮调用且此前无缓存下沉
+# （engine.py 的快照级缓存只覆盖 UI 快照）。键 (指纹, 模型, ratio)，
+# 快照换代或切模型自动错开；指纹相等即内容等价（与旧 hash(str) 口径一致），数值不变。
+_tools_tokens_cache_local = threading.local()
+_MAX_TOOLS_TOKENS_CACHE_ENTRIES = 4
+
+
+def _lookup_tools_tokens_cache(sig: int, model: str, ratio: float) -> Optional[int]:
+    """按 (指纹, 模型, ratio) 查工具 tokens 缓存；thread-local 无锁。"""
+    cache = getattr(_tools_tokens_cache_local, "cache", None)
+    if not cache:
+        return None
+    for i, entry in enumerate(cache):
+        s, m, r, tokens = entry
+        if s == sig and m == model and r == ratio:
+            cache.append(cache.pop(i))  # LRU 保活
+            return tokens
+    return None
+
+
+def _set_tools_tokens_cache(sig: int, model: str, ratio: float, tokens: int) -> None:
+    """写入工具 tokens 缓存；超上限 FIFO 逐出最旧条目。"""
+    cache = getattr(_tools_tokens_cache_local, "cache", None)
+    if cache is None:
+        cache = []
+        _tools_tokens_cache_local.cache = cache
+    cache.append((sig, model, ratio, tokens))
+    if len(cache) > _MAX_TOOLS_TOKENS_CACHE_ENTRIES:
+        cache.pop(0)
 
 
 def _compute_message_tokens(msg: Dict, model: str) -> int:
@@ -459,7 +509,8 @@ def count_messages_tokens(
 
     # 多入口 is 缓存：身份比较，彻底防 id 复用脏命中
     # 循环内 [msg] 临时列表每次全新对象 → 必然 MISS → 正确
-    tools_sig = hash(str(tools)) if tools else 0
+    # P1：指纹经 is 身份缓存，同一 tools 列表对象不再每轮 str() 全量序列化
+    tools_sig = _tools_signature(tools)
     cached = _lookup_token_cache(messages, model, tools_sig)
     if cached is not None:
         return cached
@@ -507,6 +558,15 @@ def count_tools_tokens(
     if not tools:
         return 0
 
+    # P2：先解析 ratio（兜底值确定），再按 (指纹, 模型, ratio) 查缓存；
+    # tools 列表即便每轮重建（内容等价），指纹相等也直接命中，不再全量重分词
+    if ratio is None:
+        ratio = _get_model_token_ratio(model)
+    sig = _tools_signature(tools)
+    cached_tokens = _lookup_tools_tokens_cache(sig, model, ratio)
+    if cached_tokens is not None:
+        return cached_tokens
+
     total = 0
 
     for tool in tools:
@@ -534,11 +594,10 @@ def count_tools_tokens(
                 params_str = str(params)
                 total += estimate_tokens(params_str, model)
 
-    if ratio is None:
-        ratio = _get_model_token_ratio(model)
-    return int(total * ratio)
-
-
+    # 应用模型校正系数并写入缓存（P2）：同一 (指纹, 模型, ratio) 直接复用
+    result = int(total * ratio)
+    _set_tools_tokens_cache(sig, model, ratio, result)
+    return result
 
 
 def truncate_text_to_token_limit(

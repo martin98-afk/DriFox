@@ -579,6 +579,7 @@ class OpenAIChatWorker(QThread):
         self._answer_event = s.permission.answer_event
         self._permission_pending = s.permission.pending_permission
         self._permission_approved = s.permission.permission_approved
+        self._permission_event = s.permission.permission_event  # P5：授权等待 Event 化
         self._permission_cache = s.permission_cache
         self._previewed_tool_call_ids = s.tool_call.previewed_ids
         self._current_tool_calls = s.tool_call.current_calls
@@ -612,6 +613,8 @@ class OpenAIChatWorker(QThread):
         self._compaction_cache = s.compaction.cache
         self._api_messages_cache = s.api_cache.cache
         self._api_messages_built = s.api_cache.built
+        # P4：从 state 恢复的 cache 来源不可控 → 标志置未知，materialize 首次快筛收敛
+        self._api_cache_has_vision_refs = None if self._api_messages_cache else False
         self._event_bus = s.event_bus
         # 工具执行分阶段计时（tool_call_id → 单调时钟打点）。
         # 权限弹窗等待原本完全不可见（用户点确认要几秒），这里把它单独拆出来，
@@ -720,13 +723,59 @@ class OpenAIChatWorker(QThread):
                 logger.warning(f"[chat_worker] vision revoke 失败（保留 data URI，下轮重试）: {e}")
         return result
 
+    # API 消息缓存是否含 vision 引用块：None=未知（惰性快筛），False=无图可直通，
+    # True=有图走拷贝路径。必须与 cache 内容严格同步（_set_api_messages_cache /
+    # append 增量维护），任何拿不准的情形回退拷贝，绝不把 image_ref 发给 provider。
+    _api_cache_has_vision_refs: Optional[bool] = None
+
+    @staticmethod
+    def _scan_vision_refs(messages: List[Any]) -> bool:
+        """块级快筛 cache 是否含 vision 引用块（image_ref 或未回收的 data:image）。
+
+        与 persist/revive 的命中条件一致（session_repository 同款判定）；
+        只做类型/前缀检查，无 stat 系统调用，O(块数)。
+        """
+        for msg in messages or []:
+            if not isinstance(msg, dict):
+                continue
+            content = msg.get("content")
+            if not isinstance(content, list):
+                continue
+            for block in content:
+                if not isinstance(block, dict):
+                    continue
+                if block.get("type") == "image_ref":
+                    return True
+                if block.get("type") == "image_url":
+                    img = block.get("image_url")
+                    url = img.get("url") if isinstance(img, dict) else None
+                    if isinstance(url, str) and url.startswith("data:image"):
+                        return True
+        return False
+
+    def _set_api_messages_cache(self, msgs: List[Dict[str, Any]]) -> None:
+        """写入 API 消息缓存并同步 vision 引用标志（唯一授权写入口，防漏记）。"""
+        self._api_messages_cache = msgs
+        self._api_cache_has_vision_refs = self._scan_vision_refs(msgs)
+
     def _materialize_for_send(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """[方案 A] 发送前物化：从轻量 cache 构造可发送副本（data URI 只在本作用域存在）。
 
         cache 常驻 image_ref 形态（出口已回收）；发送需要 data:image 形态，
         因此浅拷贝消息骨架（msg dict + content list 两层）后 revive 幂等读回。
         副本随请求结束 GC，cache 本体不被污染。
+
+        P4 无图直通：cache 不含 vision 引用块时跳过两层拷贝与 revive 全量扫描
+        （纯文字会话此前 100% 为无效功）。标志惰性快筛兜底 + 增量维护，
+        miss/未知一律回退本拷贝路径。
         """
+        flag = self._api_cache_has_vision_refs
+        if flag is None:
+            # 未知（state 同步恢复/外部改写）→ 首次快筛后固定，稳态零扫描
+            flag = self._scan_vision_refs(messages)
+            self._api_cache_has_vision_refs = flag
+        if not flag:
+            return messages
         out: List[Dict[str, Any]] = []
         for msg in messages:
             if not isinstance(msg, dict):
@@ -758,7 +807,7 @@ class OpenAIChatWorker(QThread):
             return self._api_messages_cache
 
         # 首次构建：处理所有历史消息
-        self._api_messages_cache = self._serialize_for_api(self.messages).messages
+        self._set_api_messages_cache(self._serialize_for_api(self.messages).messages)
         self._api_messages_built = True
         return self._api_messages_cache
 
@@ -771,12 +820,16 @@ class OpenAIChatWorker(QThread):
             new_messages: 新增的消息列表
         """
         if self._api_messages_cache is None:
-            self._api_messages_cache = self._serialize_for_api(new_messages).messages
+            self._set_api_messages_cache(self._serialize_for_api(new_messages).messages)
             return
 
         # 只转换新消息并追加（serialize_messages 已过滤空 user 消息）
         for api_msg in self._serialize_for_api(new_messages).messages:
             self._api_messages_cache.append(api_msg)
+            # P4 增量维护 vision 标志：仅快筛新增消息（追加多为文本，O(新增) 极小）；
+            # True/None 不降级（None 由 materialize 惰性快筛收敛）
+            if self._api_cache_has_vision_refs is False and self._scan_vision_refs([api_msg]):
+                self._api_cache_has_vision_refs = True
 
     def _inject_pending_hook_messages(
         self, session_messages_target: List = None, include_team_mail: bool = True
@@ -1557,6 +1610,7 @@ class OpenAIChatWorker(QThread):
         if self._permission_pending:
             self._permission_pending = None
             self._state.permission.pending_permission = None
+            self._permission_event.set()  # P5：取消时唤醒授权等待循环
 
         # 🛡️ 请求 Qt 线程中断（替代 terminate() 的安全机制）
         # 设置 isInterruptionRequested() 标志供 run() 检查，
@@ -2202,6 +2256,7 @@ class OpenAIChatWorker(QThread):
                 self._permission_cache.allow_session(tool_name)
             self._permission_approved = True
             self._permission_pending = None
+            self._permission_event.set()  # P5：唤醒等待循环
         else:
             # id 不匹配时原实现静默不改状态 → 与等待循环组合成"永久阻塞"，
             # 且日志无任何证据。显式告警让该失败模式可观测（S2）
@@ -2215,6 +2270,7 @@ class OpenAIChatWorker(QThread):
             self._permission_approved = False
             self._permission_deny_reason = reason or ""
             self._permission_pending = None
+            self._permission_event.set()  # P5：唤醒等待循环
         else:
             logger.warning(
                 f"[Permission] deny 决策被丢弃：id 不匹配 got={tool_call_id} "
@@ -2242,7 +2298,7 @@ class OpenAIChatWorker(QThread):
             self._current_session_messages = list(current_session_messages)
 
             # 用当前消息初始化 API 缓存（使 _inject_pending_hook_messages 能正确追加）
-            self._api_messages_cache = self._serialize_for_api(current_messages).messages
+            self._set_api_messages_cache(self._serialize_for_api(current_messages).messages)
             self._state.api_cache.cache = self._api_messages_cache  # 同步到 state，防止 _sync_state_from_state 覆盖
             self._api_messages_built = False
             self._accumulated_tokens = 0  # 重置 token 累加，每个新的对话从零开始
@@ -2636,11 +2692,25 @@ class OpenAIChatWorker(QThread):
                     if tool_results:
                         from app.core.context.pipeline import ContextPipeline
 
-                        _before_chars = sum(len(str(r.get("content", "") or "")) for r in tool_results)
+                        def _stats_chars(results: list) -> int:
+                            # P3：统计只取长度。content 为 str 时直接 len（此前
+                            # str(dict/list) 会把数百 KB～MB 级工具结果完整序列化，
+                            # before/after 各一次 = 每轮两次纯浪费的全量拷贝）；
+                            # 非 str 情形罕见，用 str() 长度兜底，观测语义不变。
+                            _total = 0
+                            for _r in results:
+                                _c = _r.get("content", "") if isinstance(_r, dict) else ""
+                                if isinstance(_c, str):
+                                    _total += len(_c)
+                                elif _c:
+                                    _total += len(str(_c))
+                            return _total
+
+                        _before_chars = _stats_chars(tool_results)
                         tool_results = ContextPipeline().ingest_tool_results(
                             tool_results, self.llm_config or {}, session_id=self.session_id or ""
                         )
-                        _after_chars = sum(len(str(r.get("content", "") or "")) for r in tool_results)
+                        _after_chars = _stats_chars(tool_results)
                         if _after_chars < _before_chars:
                             self._last_persist_stats = {
                                 "persisted_count": sum(
@@ -3279,12 +3349,13 @@ class OpenAIChatWorker(QThread):
         # 但 _api_messages_cache 仍是旧版本（无图片）。
         # 此处立即重建完整缓存，确保后续 append 操作在正确基线上增量更新。
         try:
-            self._api_messages_cache = self._serialize_for_api(current_messages).messages
+            self._set_api_messages_cache(self._serialize_for_api(current_messages).messages)
             self._api_messages_built = True
         except Exception as cache_e:
             logger.warning(f"[Vision] Failed to rebuild API cache: {cache_e}")
             self._api_messages_cache = None
             self._api_messages_built = False
+            self._api_cache_has_vision_refs = None  # cache 置空 → 标志同步回到未知
         return True  # 重建了完整缓存，调用方应跳过 _append_to_api_cache
 
     def _fix_tool_result_order(self, messages: List[Dict]) -> tuple[List[Dict], bool]:
@@ -3736,7 +3807,7 @@ class OpenAIChatWorker(QThread):
             fresh = self._serialize_for_api(messages).messages
             if use_cache:
                 # cache 常驻轻量 image_ref 形态；materialize 副本只进发送作用域
-                self._api_messages_cache = fresh
+                self._set_api_messages_cache(fresh)
                 self._api_messages_built = True
             sanitized = self._materialize_for_send(fresh)
 
@@ -3847,13 +3918,16 @@ class OpenAIChatWorker(QThread):
                         logger.warning("[API] 检测到 tool call result 顺序错误 (2013)，尝试自动修复...")
                         # 🛡️ 仅调用一次修复：api_messages 与 messages 的 tool_call_id 集合等价
                         # （messages_to_api 是保结构转换），结果直接复用，杜绝重复扫描同一份数据
-                        fixed_messages, was_fixed = self._fix_tool_result_order(api_messages)
+                        # P4 直通下 api_messages 可能与 cache 同引用；本修复的中断分支会
+                        # 原地 pop tool_calls，先做骨架拷贝防 cache 污染（拷贝路径下本为副本）
+                        _repair_target = [dict(m) if isinstance(m, dict) else m for m in api_messages]
+                        fixed_messages, was_fixed = self._fix_tool_result_order(_repair_target)
 
                         if was_fixed:
                             fixed_sanitized = self._serialize_for_api(fixed_messages).messages
                             # cache 存轻量形态；重试发送用物化副本（data URI 只在本作用域）
                             if use_cache:
-                                self._api_messages_cache = fixed_sanitized
+                                self._set_api_messages_cache(fixed_sanitized)
                             api_messages = self._materialize_for_send(fixed_sanitized)
                             # 同步修复源头 current_messages：fixed_messages 与 messages 同型（都是内部格式），
                             # 直接 slice 赋值即可固化源头，避免再次调用 _fix_tool_result_order
@@ -3878,7 +3952,7 @@ class OpenAIChatWorker(QThread):
                         if fixed_messages is not None:
                             fixed_sanitized = self._serialize_for_api(fixed_messages).messages
                             if use_cache:
-                                self._api_messages_cache = fixed_sanitized
+                                self._set_api_messages_cache(fixed_sanitized)
                             api_messages = self._materialize_for_send(fixed_sanitized)
                             logger.warning(f"[API] 已恢复工具参数，已更新缓存，重试 (attempt {attempt + 1}/{max_retries})")
                             continue
@@ -4620,12 +4694,17 @@ class OpenAIChatWorker(QThread):
             # 性能优化：移除后台线程中的 processEvents()
             # processEvents() 在非主线程调用会导致信号丢失、死锁等问题
             # UI 响应应通过信号-槽机制自然处理
+            # P5：授权等待 Event 化（对齐上方 question 等待的既有 Event 模式）——
+            # 旧实现 100ms sleep 轮询每秒无谓唤醒 worker 线程 10 次。clear 必须在
+            # emit 之后（此刻才进入等待），竞态由循环条件兜底：即使决策在 clear
+            # 前已置位 pending=None，wait 超时后条件不成立即退出，不丢决策。
+            self._permission_event.clear()
             while (
                 self._permission_pending is not None and not self._is_cancelled and not self._tool_execution_cancelled
             ):
-                # if not self._legacy_direct_callbacks:
-                #     QApplication.processEvents()  # 移除：后台线程不应调用 processEvents()
-                time.sleep(0.1)  # 保留 sleep 用于轮询等待用户授权
+                if self._permission_event.wait(timeout=1.0):
+                    break
+                self._permission_event.clear()
 
             if self._is_cancelled or self._tool_execution_cancelled:
                 self._emit_cancelled_tool_result(

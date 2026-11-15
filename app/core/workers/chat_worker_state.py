@@ -74,6 +74,7 @@ class PermissionState:
     answer_event: Event = field(default_factory=Event)  # 回答事件
     pending_permission: Optional[Dict] = None  # 待批准的权限
     permission_approved: bool = False
+    permission_event: Event = field(default_factory=Event)  # 权限决策事件（P5：替代 sleep 轮询）
 
 
 @dataclass

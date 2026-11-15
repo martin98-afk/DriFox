@@ -7,6 +7,10 @@
 - **团队框统一任务标题 + 成员行身份头像** (`app/widgets/tab_panel.py` · `app/widgets/tab_manager_window.py` · `app/widgets/elided_label.py`): 团队框 header 不再显示团队名，改显示整个团队唯一的任务标题（run 内最早生成的真实标题，按 `created_at` 取最早；未生成时回退团队名，历史回查带 5s TTL 缓存），header 项目图标改为标准尺寸（与普通 Tab 同档 20px），header 聚合 badge 整体停用（人数不需要，状态也不再堆到 header），hover 按钮只保留「新建任务」「解散团队」两个（快速新建成员的 hover 按钮去掉，入口保留在团队框右键菜单），团队成员行不再显示单个关闭按钮（保持列表齐整，右键菜单「关闭标签页」仍可关）；成员行标题让位给行尾语义文案——空闲显示最后活动时间（`session.last_updated` 相对时间），生成中/待回答/出错显示状态文案且配色与头像状态环同一套，时间退到 tooltip；行内容为「角色单字母彩色头像 + 角色名（普通文字，彩色胶囊去掉）+ 行尾文案」，折叠态与展开态共用同一套单字母头像，流式/待答光效画在该头像外侧（行层不再给角色名套环——早期把环画在胶囊/角色名外沿，视觉上像一个框套住全名，与头像环重复）；折叠态 tooltip 补「角色 · 任务标题」以区分成员；长角色名（root-cause-analyst / regression-guard）用 `_ElidedLabel` 左省略保留尾段（…analyst / …guard）并占剩余宽度，不再把行撑出面板可视区（时间与 header hover 按钮恢复可达）；`_ElidedLabel` 新增 `elide_mode` 参数（默认 Middle 行为不变），角色名原文单独存 `_role_text`，避免省略后取首字母画头像。
 - **群发权限放开：任意成员可全队群发** (`plugins/system-team/tools/team_tools.py` · `app/core/team/team_manager.py`): `team_send_message` 群发分支不再做 leader 门禁（`_leader_gate` 仅保留给 remove_member），发件人从「team.json 顶层 leader_window_id 反查」改为调用方窗口（`send_task_broadcast` 新增 `from_window` 参数，缺省回落 leader 登记以兼容旧调用），exclude_self 语义同步改为「跳过发送者自身」。预置/模板团队（join 路径不回写 leader 登记）此前全员含 leader 本人均被拒群发的死锁由此解除。remove 的 leader 门禁不变。
 
+### 🐛 问题修复 (Bug Fixes)
+
+- **表格紧贴正文时渲染成普通文本** (`app/widgets/card_render_core.py`): 模型常把表格紧接在段落下一行、不给空行，而 Python-Markdown 的 tables 扩展只在独立块上生效（GFM 同样不允许表格打断段落），整张表退化成一行行带 `|` 的文本加 `<br>`，表现为「表格渲染不出来」。新增 `_normalize_table_blocks`，在 `_sanitize_incomplete_markdown` 入口补表格前后空行——该函数是全量 / 差量段 / 尾部行内 / worker / viewer / block 六条渲染管线的共同入口，一处补齐全线生效；识别依赖 `_looks_like_table_separator`（分隔行字符集与列数判定，与 tables 扩展口径一致）。同时补上表格后紧跟正文的空行，避免正文被 tables 扩展当成缺列的数据行吞进表体。围栏内原样不动，输入已规范时零改动（幂等）。
+
 ## [v0.7.2] - 2026-11-14 (重新发布 #8)
 
 自 v0.7.1 以来的变更 | 提交数：150 · 文件变更：582 · +28735/-9824 | 贡献者：dingma, drifox-bot, mading, martin98-afk

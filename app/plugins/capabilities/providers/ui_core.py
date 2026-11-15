@@ -862,8 +862,10 @@ def _session_control(host: Any):
     def interrupt() -> bool:
         return queue.enqueue(wid, "interrupt", {})
 
-    def new_session() -> bool:
-        return queue.enqueue(wid, "new", {})
+    def new_session(title: str = "") -> bool:
+        """新建会话；title 非空时新会话直接用它作标题（交接沿用源会话主题）"""
+        payload = {"title": str(title or "").strip()}
+        return queue.enqueue(wid, "new", payload)
 
     def send(
         text: str,
