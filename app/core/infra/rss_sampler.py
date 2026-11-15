@@ -50,20 +50,39 @@ def _sample_handles() -> "dict | None":
         try:
             import ctypes
 
+            # use_last_error=True：GetGuiResources 失败返回 0 与「真 0 个对象」
+            # 需靠 GetLastError 区分（见 _sample_handles 的加固分支）。
             _HANDLE_API = (
-                (ctypes.windll.user32, ctypes.windll.kernel32) if os.name == "nt" else False
+                (
+                    ctypes.WinDLL("user32", use_last_error=True),
+                    ctypes.WinDLL("kernel32", use_last_error=True),
+                )
+                if os.name == "nt"
+                else False
             )
         except Exception:
             _HANDLE_API = False
     if not _HANDLE_API:
         return None
     try:
+        import ctypes
+
         user32, kernel32 = _HANDLE_API
+        # 照方抓药（2026-11-15）：零声明时 GetCurrentProcess 的伪句柄 -1 按
+        # c_int 32 位传 64 位 API → 非法参数（lasterror=87）→ 失败 0 被当
+        # 合法读数落盘（gdi_handles 恒 0 的根因）。
+        kernel32.GetCurrentProcess.restype = ctypes.c_void_p
+        user32.GetGuiResources.argtypes = [ctypes.c_void_p, ctypes.c_uint]
+        user32.GetGuiResources.restype = ctypes.c_uint
         hproc = kernel32.GetCurrentProcess()
-        return {
-            "gdi": int(user32.GetGuiResources(hproc, 0)),  # GR_GDIOBJECTS
-            "user": int(user32.GetGuiResources(hproc, 1)),  # GR_USEROBJECTS
-        }
+        gdi = int(user32.GetGuiResources(hproc, 0))  # GR_GDIOBJECTS
+        user = int(user32.GetGuiResources(hproc, 1))  # GR_USEROBJECTS
+        # (0, 0) 且 GetLastError() != 0 → 调用失败而非真 0；退化为不采样，
+        # 避免把失败 0 写进判据⑤（smoke_verdict 对行缺失有 SKIP 分支兜底）。
+        last_err = ctypes.get_last_error()
+        if gdi == 0 and user == 0 and last_err != 0:
+            return None
+        return {"gdi": gdi, "user": user}
     except Exception:
         return None
 
