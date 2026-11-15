@@ -3147,7 +3147,7 @@ class TabPanel(QWidget):
 
         from app.widgets.elided_label import _ElidedLabel as _ELLabel
 
-        name_label = _ELLabel("", header)
+        name_label = _ELLabel("", header, elide_mode=Qt.ElideRight, hover_scroll=True)
         name_label.setObjectName("teamGroupName")
         name_label.setText("团队")
 
