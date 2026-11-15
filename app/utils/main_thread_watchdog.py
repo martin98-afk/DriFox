@@ -20,9 +20,12 @@ import sys
 import threading
 import time
 import traceback
+from collections import deque
 
 from loguru import logger
 from PyQt5.QtCore import QTimer
+
+from app.core.infra.perf_jsonl import append_event, env_flag
 
 _HEARTBEAT_INTERVAL_MS = 200  # 心跳间隔：事件循环正常调度抖动远小于此
 _CHECK_INTERVAL_S = 0.05  # 监控线程检查粒度
@@ -37,6 +40,27 @@ _IDLE_TOP_FRAMES = {"wait", "sleep", "get", "poll", "select", "accept", "recv", 
 # 全线程 dump 每线程帧数上限
 _BARE_DUMP_FRAMES_PER_THREAD = 8
 
+# [O2a] 阻塞事件 JSONL 落盘门控（默认关）：loguru WARNING 路径逐字不变，
+# JSONL 只是增量旁路，供基线归档/自动化统计消费。
+_WATCHDOG_JSONL_ENABLED = env_flag("DRIFOX_WATCHDOG_JSONL")
+# [O2b] 事件循环延迟指标门控（默认关）。bare_ratio 与延迟分位数同源、同一次
+# 落盘消费，故合并到这一个 env：分设 DRIFOX_BARE_RATIO 只会让同一行数据要配
+# 两个开关，且缺了它 el_latency 就少了「阻塞性质」维度。
+_EL_METRICS_ENABLED = env_flag("DRIFOX_EL_METRICS")
+_EL_SAMPLE_MAXLEN = 1500  # 200ms × 1500 = 5min 滑窗
+_EL_REPORT_INTERVAL_S = 300.0  # 5min 落一行 el_latency
+
+
+def _percentile(samples: list, q: float) -> float:
+    """线性插值分位数（samples 非空）。"""
+    s = sorted(samples)
+    if len(s) == 1:
+        return s[0]
+    k = (len(s) - 1) * q
+    lo = int(k)
+    hi = min(lo + 1, len(s) - 1)
+    return s[lo] + (s[hi] - s[lo]) * (k - lo)
+
 
 class MainThreadWatchdog:
     """主线程阻塞观测器：QTimer 心跳 + 后台线程抓栈。进程级一份。"""
@@ -49,6 +73,12 @@ class MainThreadWatchdog:
         self._suspended = False  # 已知合法阻塞期间（SC_MOVE 模态循环）暂停判定
         self._main_ident = threading.main_thread().ident
         self._last_bare_dump = 0.0  # 上次裸栈全线程 dump 时间（monotonic）
+
+        # [O2b] 事件循环延迟样本（gap_ms - 心跳本底）与裸栈率计数
+        self._el_samples: deque = deque(maxlen=_EL_SAMPLE_MAXLEN)
+        self._el_last_report = time.monotonic()
+        self._bare_count = 0
+        self._total_reports = 0
 
         self._timer = QTimer(parent)
         self._timer.setInterval(_HEARTBEAT_INTERVAL_MS)
@@ -64,7 +94,12 @@ class MainThreadWatchdog:
         self._timer.start()
 
     def _tick(self) -> None:
-        self._last_tick = time.monotonic()
+        now = time.monotonic()
+        if _EL_METRICS_ENABLED and self._heartbeating:
+            # 减心跳本底：静置时只剩调度抖动，否则 p95 恒 ≈200ms 全是噪音。
+            # 首次心跳不采样（构造到首跳的间隔含启动期同步段，不是 EL 延迟）。
+            self._el_samples.append(round((now - self._last_tick) * 1000.0 - _HEARTBEAT_INTERVAL_MS, 1))
+        self._last_tick = now
         self._heartbeating = True
         self._reported = False
 
@@ -82,6 +117,12 @@ class MainThreadWatchdog:
     def _monitor_loop(self) -> None:
         while True:
             time.sleep(_CHECK_INTERVAL_S)
+            # [O2b] 指标落盘放在监控线程：写盘 I/O 不占主线程（5min 一次）。
+            if _EL_METRICS_ENABLED:
+                now = time.monotonic()
+                if now - self._el_last_report >= _EL_REPORT_INTERVAL_S:
+                    self._el_last_report = now
+                    self._emit_metrics()
             if self._suspended:
                 continue
             if not self._heartbeating or self._reported:
@@ -114,6 +155,46 @@ class MainThreadWatchdog:
             f"[MainThreadWatchdog] 主线程阻塞 ≥{self._threshold_s * 1000:.0f}ms"
             f"（当前间隙 {gap_s * 1000:.0f}ms），阻塞期调用栈：\n{body}"
         )
+        # [O2a] 结构化旁路：上面的 WARNING 逐字保持，JSONL 只做增量（默认关）。
+        self._total_reports += 1
+        if is_bare:
+            self._bare_count += 1
+        if _WATCHDOG_JSONL_ENABLED:
+            try:
+                append_event(
+                    "watchdog_block",
+                    round(gap_s * 1000, 1),
+                    {
+                        "threshold_ms": int(self._threshold_s * 1000),
+                        "bare": is_bare,
+                        "other_threads": len(all_frames) - 1,
+                    },
+                )
+            except Exception:  # noqa: BLE001 — 观测不得反噬看门狗主路径
+                pass
+
+    def _emit_metrics(self) -> None:
+        """落一行 el_latency（5min 周期，监控线程调用；门控在调用侧）。"""
+        try:
+            samples = list(self._el_samples)
+            if not samples:
+                return
+            p95 = _percentile(samples, 0.95)
+            bare_ratio = round(self._bare_count / self._total_reports, 4) if self._total_reports else 0.0
+            append_event(
+                "el_latency",
+                round(p95, 1),
+                {
+                    "p50": round(_percentile(samples, 0.50), 1),
+                    "p95": round(p95, 1),
+                    "p99": round(_percentile(samples, 0.99), 1),
+                    "max": round(max(samples), 1),
+                    "samples": len(samples),
+                    "bare_ratio": bare_ratio,
+                },
+            )
+        except Exception:  # noqa: BLE001 — 观测不得反噬看门狗主路径
+            pass
 
     def _dump_other_threads(self, all_frames: dict) -> str:
         """裸栈辅助现场：格式化除主线程与监控线程外的活动线程栈。

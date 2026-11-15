@@ -414,7 +414,12 @@ def main():
     if not _watchdog_packaged or _watchdog_forced:
         from app.utils.main_thread_watchdog import install_watchdog as _install_watchdog
 
-        _install_watchdog()
+        # 阈值可 env 覆盖（T12 剧本按 200ms 探 500ms 阈下盲区）；非法值回退 500
+        try:
+            _watchdog_threshold_ms = int(os.environ.get("DRIFOX_WATCHDOG_THRESHOLD_MS", "500"))
+        except ValueError:
+            _watchdog_threshold_ms = 500
+        _install_watchdog(_watchdog_threshold_ms)
 
     # 🧵 全线程周期 dump（T12/G7）：DRIFOX_CPU_TRACE=1 时每 60s 落一行
     # thread_dump（线程名→栈深），供主线程原生/GIL 等待归因；默认零行为。
