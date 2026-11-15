@@ -1712,36 +1712,66 @@ class HistoryManager:
     def get_archived_sessions(self) -> List[Dict]:
         """同步获取归档列表（兼容旧调用方，UI 层请优先使用 scan_archives_async）。
 
-        该方法阻塞主线程：先调用 get_archived_session_count 提示归零，
-        实际读取仍走 N 次文件 I/O。仅在插件/测试场景下使用。
+        该方法阻塞主线程：先调用 get_archived_session_count 提示归零。
+        仅在插件/测试场景下使用。
         """
         archived_files: List[Dict] = []
         if not self.archive_dir.exists():
             return archived_files
 
         try:
+            # (mtime, item) 局部收集：排序复用循环里已 stat 的 mtime，
+            # 免去排序阶段对每条再 getmtime 一次（N 次 stat → 0 次重复 stat）。
+            staged: List[Tuple[float, Dict]] = []
             for json_file in self.archive_dir.glob("*.json"):
+                fp_str = str(json_file)
                 try:
-                    with open(json_file, "r", encoding="utf-8") as f:
-                        data = json.loads(f.read())
-                    archived_files.append(
-                        {
-                            "path": str(json_file),
-                            "name": json_file.name,
+                    mtime = os.path.getmtime(fp_str)
+                except OSError:
+                    mtime = 0.0
+                # 优化点：原行为每次调用都 open+read+parse 全部归档 JSON（主线程
+                # N 次全量读盘，归档一多插件侧每次取列表都是整目录 I/O）；新行为
+                # 按 mtime 复用解析结果——文件未变（mtime 相等）直接取缓存，只有
+                # 新增/变更文件才读盘。缓存写入与后台 _ArchiveScanTask 同结构
+                # （含 last_time/message_count/preview/project 全键），双写者键集
+                # 一致，避免窄缓存污染异步扫描的 enrich 字段；坏文件不进缓存，
+                # mtime 变化后仍会重试（读回内容与原实现逐字段一致）。
+                with self._archive_cache_lock:
+                    cached = self._archive_meta_cache.get(fp_str)
+                info: Optional[Dict] = None
+                if cached is not None and cached[0] == mtime:
+                    info = cached[1]
+                if info is None:
+                    try:
+                        with open(json_file, "r", encoding="utf-8") as f:
+                            data = json.loads(f.read())
+                        info = {
                             "session_id": data.get("session_id", ""),
                             "title": data.get("title", json_file.stem[:50]),
+                            "last_time": data.get("last_time", ""),
+                            "message_count": data.get("message_count", 0),
+                            "preview": data.get("preview", ""),
+                            "project": data.get("project", ""),
                         }
-                    )
-                except Exception:
-                    logger.error(f"[HistoryManager] 读取归档文件失败: {json_file}")
-                    continue
+                        with self._archive_cache_lock:
+                            self._archive_meta_cache[fp_str] = (mtime, info)
+                    except Exception:
+                        logger.error(f"[HistoryManager] 读取归档文件失败: {json_file}")
+                        continue
+                archived_files.append(
+                    {
+                        "path": fp_str,
+                        "name": json_file.name,
+                        "session_id": info.get("session_id", ""),
+                        "title": info.get("title", json_file.stem[:50]),
+                    }
+                )
+                staged.append((mtime, archived_files[-1]))
         except Exception:
             pass
 
-        archived_files.sort(
-            key=lambda x: os.path.getmtime(x["path"]),
-            reverse=True,
-        )
+        staged.sort(key=lambda x: x[0], reverse=True)
+        archived_files = [item for _, item in staged]
         return archived_files
 
     def get_session_by_index(self, index: int) -> Optional[List[Dict]]:

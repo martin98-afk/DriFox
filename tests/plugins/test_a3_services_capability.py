@@ -179,7 +179,13 @@ def test_service_call_audited(tmp_path, log_capture):
     executor = _make_executor(tmp_path)
     captured = []
     ctx, _ = _run_tool(executor, "plugin:audit-plug", captured)
-    _ = ctx["services"]["mcp"].ping  # 属性触达即审计
+    # 优化点（2026-11-15，#49 考古适配）：services 投影已切能力池——
+    # ctx["services"]["mcp"] 现为 pool.legacy("mcp","mcp.call") 主实现返回的
+    # 真实 MCPClientManager（旧桩 _FakeBT._mcp_manager 的 SimpleNamespace(ping=...)
+    # 不再被消费；ping 属性在真实管理器三版均不存在，属用例过期而非产品回归）。
+    # 触达载体换成类常量 TOOL_PREFIX（mcp_tools.py:743 真实存在、无副作用），
+    # _AuditedService.__getattr__ 「属性触达即审计」语义不变。
+    _ = ctx["services"]["mcp"].TOOL_PREFIX
     _ = ctx["sub_agent_manager"].anything
     audits = [r for r in log_capture if "[ServiceAudit]" in r]
     assert any("plugin=audit-plug" in r and "service=mcp" in r for r in audits)

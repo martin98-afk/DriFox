@@ -166,7 +166,7 @@ def register_ui(registry):
 
 > **工作台 tab（`register_workbench_tab`）**：注册到右侧工作台（WorkbenchPanel）的页签条。★ 面板**零保留槽位、零 page_id 语义**：页序 = `(metadata["order_hint"], 注册序)`，默认落点 = `metadata["default_landing"]` 标记页（缺省顺序第一页），一个页都没注册时空态页。宿主在 `refresh_workbench` 时调 `panel.sync_plugin_pages(tabs)` reconcile；页签一律按 **tab_id** 定位（`set_current_tab_by_id` / `current_tab_id`），宿主不得假设 index。**注册即联动注册 `/{page_id}` 命令**。数据由页面**自拉**：面板只发无参 `refresh_current_page_data()`，页面实现可选协议 `refresh_data()`（从 `context` / 活跃窗口取数）。参考实现：`plugins/artifacts-manager/ui/artifacts_page.py`、`plugins/worktree-manager/ui/worktree_page.py`、`plugins/history-manager/ui/history_page.py`。
 
-> **向工作台页定向投递**（插件 A 把内容交给插件 B 的页）：`registry.open_workbench_page(page_id)` 展开工作台、定位该页并**返回页面实例**（不可用返回 `None`），拿不到副作用时用 `registry.get_workbench_page(page_id)` 只查询已挂载实例。面板侧对应 `WorkbenchPanel.get_plugin_page(page_id)`，外部不要直接摸 `_plugin_widgets`。页面自行暴露接收方法（如文件树页的 `preview_path(path) -> bool`）。
+> **向工作台页定向投递**（插件 A 把内容交给插件 B 的页）：`registry.open_workbench_page(page_id)` 展开工作台、定位该页并**返回页面实例**（不可用返回 `None`），拿不到副作用时用 `registry.get_workbench_page(page_id)` 只查询已挂载实例。面板侧对应 `WorkbenchPanel.get_plugin_page(page_id)`，外部不要直接摸 `_plugin_widgets`。页面自行暴露接收方法（如文件树页的 `preview_path(path) -> bool`）。注意首次打开工作台时页面刚构建、`sync_plugin_pages` 尚未跑过，`open_workbench_page` 内部会先 reconcile 再展开；页面自身的定位/加载很可能仍是异步的（如文件树页的根扫描），接收方法不该假设「调用返回时内容已就绪」。
 
 ### UI 扩展点 → 自动命令（联动矩阵）
 

@@ -7361,6 +7361,15 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
             ConfigSyncService.get_instance().disable(clear_state=False)
         except Exception as e:
             logger.warning(f"[TabManager] cleanup ConfigSyncService.disable 失败: {e}")
+        # [LEAK-FIX P1-6] 单例置空重建前，显式退订本窗口构造期注册的 UIEventBus
+        # 订阅（EV_CARD_VISIBILITY_CHANGED 绑定方法）。bus 侧弱引用已是兜底防线，
+        # 此处同步显式退订，不依赖下一次 publish 的惰性清理时机。
+        try:
+            from app.core.infra.ui_event_bus import EV_CARD_VISIBILITY_CHANGED, UIEventBus
+
+            UIEventBus.get_instance().unsubscribe(EV_CARD_VISIBILITY_CHANGED, self._on_card_visibility_changed)
+        except Exception as e:
+            logger.warning(f"[TabManager] cleanup 退订卡片显隐事件失败: {e}")
         for w in list(self._windows):
             try:
                 w.close()

@@ -270,6 +270,55 @@ class TestInitialLoadKeepsPreview:
         finally:
             _cleanup(card)
 
+    def test_reveal_lands_after_first_tree_load(self, tmp_path, monkeypatch):
+        """首点预览时树还没建：根扫描落地后必须补上定位，返回树页能看到选中"""
+        root = tmp_path / "proj"
+        root.mkdir()
+        target = root / "a.py"
+        target.write_text("print(1)\n", encoding="utf-8")
+        card = _make_card(root, monkeypatch)
+        try:
+            assert card.preview_path(str(target)) is True
+            assert card._tree_view.selected_source_paths() == []  # 此刻树是空的
+            card._async_load_tree()
+            assert card._tree_view.selected_source_paths() == [str(target)]
+            card._close_preview()
+            assert card._stack.currentIndex() == cards_mod._PAGE_TREE
+            assert card._tree_view.selected_source_paths() == [str(target)]
+        finally:
+            _cleanup(card)
+
+    def test_reveal_deep_path_scans_levels(self, tmp_path, monkeypatch):
+        """深层文件：逐层扫描祖先目录，每层落地后再往前推一步，最终定位成功"""
+        root = tmp_path / "proj"
+        deep = root / "app" / "core" / "store"
+        deep.mkdir(parents=True)
+        target = deep / "repo.py"
+        target.write_text("x = 1\n", encoding="utf-8")
+        card = _make_card(root, monkeypatch)
+        try:
+            card._async_load_tree()  # 只加载根层：app 节点已建但未展开
+            assert card._source_model.find_node(str(root / "app")) is not None
+            assert card.preview_path(str(target)) is True
+            # 桩扫描是同步的：每层请求立刻落地并递归推进，最终应已定位
+            assert card._tree_view.selected_source_paths() == [str(target)]
+        finally:
+            _cleanup(card)
+
+    def test_outside_path_clears_pending(self, tmp_path, monkeypatch):
+        """项目外文件：定位无意义，待定位状态必须清掉，不能留着反复推进"""
+        root = tmp_path / "proj"
+        root.mkdir()
+        outside = tmp_path / "outside.py"
+        outside.write_text("y = 2\n", encoding="utf-8")
+        card = _make_card(root, monkeypatch)
+        try:
+            card._async_load_tree()
+            assert card.preview_path(str(outside)) is True
+            assert card._pending_reveal_path == ""
+        finally:
+            _cleanup(card)
+
     def test_real_project_switch_still_leaves_preview(self, tmp_path, monkeypatch):
         """真换项目（model 已有根）仍退出旧预览，避免跨项目串台"""
         root_a = tmp_path / "projA"

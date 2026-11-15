@@ -5,6 +5,7 @@
 用于记录文件操作并在需要时回滚
 """
 
+import os
 import re
 import shutil
 from dataclasses import dataclass
@@ -16,6 +17,18 @@ from loguru import logger
 
 # 预编译文件名清理正则
 _SANITIZE_FILENAME_PATTERN = re.compile(r'[<>:"/\\|?*]')
+
+# ── P2-2b 备份配额扫描缓存 ──────────────────────────────
+# 「配额走缓存/增量」落地：enforce_backup_limit 未超限时把 (目录快速签名,
+# total) 记下；下次同签名直接判定未超限返回 []，免掉全量 rglob+逐文件 stat。
+# 签名未捕获的变更（同路径覆盖写，备份命名含时间戳故罕见）后果是少清一轮，
+# 下次任何新增即触发重扫，渐进收敛；超限场景每次全量扫描，FIFO 语义不变。
+_QUOTA_SCAN_CACHE: Dict[str, tuple] = {}
+_QUOTA_SCAN_CACHE_MAX = 8
+# 病态目录防御上限：遍历条目达到该值即对已见集合执行清理并告警。
+# 正常规模（未触上限）行为与逐字节一致；触上限属配额语义（可变面），
+# 表现为渐进清理——本次可能清不到位，下次触发继续。
+_QUOTA_SCAN_ENTRY_LIMIT = 200_000
 
 from app.core.store import SessionStore
 
@@ -372,41 +385,84 @@ def enforce_backup_limit(backup_base_dir, limit_mb: float, exclude_names: tuple 
     想"设为 0 表示不限制"，结果备份被全删。现统一为"0 = 不限"，与 Docker
     `--memory=0`、多数限流配置的 0 语义一致；且不再依赖调用方自觉加
     `if limit > 0` 包壳（任何新调用方漏判都会全删备份 —— 现在的实现自处理）。
+
+    P2-2b 配额扫描（2026-11-15）：
+    - 未超限判定走目录快速签名缓存：同签名且上次未超限 → 直接返回 []，
+      免掉全量 rglob + 逐文件 stat（正常规模返回集合不变：与"确实未超限"
+      时原实现一致）。
+    - 单遍流式扫描：path/size/mtime 一次 stat 收齐，删除排序不再二次 stat。
+    - 遍历条目上限 `_QUOTA_SCAN_ENTRY_LIMIT`：病态目录防无界；触上限时对
+      已见集合执行 FIFO 清理并告警，本次可能清不到位、下次触发继续（渐进收敛）；
+      不写缓存（超大目录状态易变）。未触上限行为与原实现逐字节一致。
     """
     base = Path(backup_base_dir)
     if not base.exists():
         return []
     if float(limit_mb) <= 0:  # 0 = 不限：不做任何清理
         return []
+    limit_bytes = int(float(limit_mb) * 1024 * 1024)
+
+    # 配额扫描缓存：签名未变且上次未超限 → 未超限结论对同一文件集依然成立
+    cache_key = str(base)
     try:
-        files = [f for f in base.rglob("*") if f.is_file()]
+        sig = _dir_quick_signature(base)
+        cached = _QUOTA_SCAN_CACHE.get(cache_key)
+        if sig and cached is not None and cached[0] == sig and cached[1] <= limit_bytes:
+            return []
+    except OSError:
+        sig = None
+
+    excluded = tuple(str(n) for n in exclude_names) if exclude_names else ()
+    files_meta: list = []  # (path, size, mtime)；stat 失败的文件 size/mtime 记 None，仍参与删除尝试
+    total = 0
+    seen = 0
+    truncated = False
+    try:
+        for f in base.rglob("*"):
+            if not f.is_file():
+                continue
+            if excluded and _has_excluded_ancestor(f, base, excluded):
+                continue
+            try:
+                st = f.stat()
+                size, mtime = st.st_size, st.st_mtime
+            except OSError:
+                size, mtime = None, None
+            files_meta.append((f, size, mtime))
+            if size is not None:
+                total += size
+            seen += 1
+            if seen >= _QUOTA_SCAN_ENTRY_LIMIT:
+                truncated = True
+                break
     except OSError as e:
         logger.warning(f"[FileRecorder] 备份目录扫描失败: {e}")
         return []
-    if exclude_names:
-        excluded = tuple(str(n) for n in exclude_names)
-        files = [f for f in files if not _has_excluded_ancestor(f, base, excluded)]
-    if not files:
-        return []
 
-    limit_bytes = int(float(limit_mb) * 1024 * 1024)
-    total = 0
-    for f in files:
-        try:
-            total += f.stat().st_size
-        except OSError:
-            continue
-    if limit_bytes > 0 and total <= limit_bytes:
+    if truncated:
+        logger.warning(
+            f"[FileRecorder] 备份目录遍历达到条目上限 {_QUOTA_SCAN_ENTRY_LIMIT}，"
+            f"本次仅对已扫描部分执行配额清理，剩余超限部分留待下次触发"
+        )
+    elif not truncated and total <= limit_bytes:
+        # 完整扫描且未超限：记录签名缓存，下次免扫
+        if sig:
+            if len(_QUOTA_SCAN_CACHE) >= _QUOTA_SCAN_CACHE_MAX:
+                _QUOTA_SCAN_CACHE.clear()
+            _QUOTA_SCAN_CACHE[cache_key] = (sig, total)
         return []
 
     removed: list = []
-    for f in sorted(files, key=lambda x: x.stat().st_mtime):
-        if limit_bytes > 0 and total <= limit_bytes:
+    # mtime 缺失（首次 stat 失败）排最前优先尝试；原实现排序时二次 stat 失败会直接抛错
+    for f, size, mtime in sorted(files_meta, key=lambda t: t[2] if t[2] is not None else 0):
+        if total <= limit_bytes:
             break
         try:
-            size = f.stat().st_size
+            if size is None:
+                size = f.stat().st_size
             f.unlink()
-            total -= size
+            if size is not None:
+                total -= size
             removed.append(f)
         except OSError as e:
             logger.warning(f"[FileRecorder] 备份清理失败: {f} ({e})")
@@ -445,6 +501,33 @@ def cleanup_backups_partitioned(backups_dir, limit_mb: float) -> dict:
         "snapshots_removed": removed_snaps,
         "snapshot_limit_mb": snapshot_limit,
     }
+
+
+def _dir_quick_signature(base: Path) -> tuple:
+    """备份目录快速签名：全树**目录**条目的 (相对路径, mtime_ns) 集。
+
+    为什么只收目录：新建文件必刷新其所在目录的 mtime（NTFS 上父目录 mtime
+    只在直接子项增删时刷新，深层新增不向上传导——顶层签名会漏检，实测
+    edits/<sid>/ 新增文件时 backups 顶层 mtime 不变），因此必须收到每个
+    目录层。目录数 ≪ 文件数（备份是高频小文件），签名成本 = 全树 scandir
+    + 每目录一次 stat，省掉文件级 stat（实测占扫描开销大头）。
+    已知漏检窗口：文件**原地覆盖写**（同路径替换内容）不刷任何目录 mtime——
+    备份命名含时间戳，覆盖写罕见；漏检后果是少清一轮，下次任何新增即触发
+    重扫，渐进收敛，不会静默永久超限。目录不存在/不可读返回 ()（视为无效
+    签名，调用方跳过缓存判定）。
+    """
+    sig: list = []
+    try:
+        for dirpath, _dirnames, _filenames in os.walk(base):
+            dp = Path(dirpath)
+            try:
+                rel = dp.relative_to(base).as_posix()
+                sig.append((rel, dp.stat().st_mtime_ns))
+            except (OSError, ValueError):
+                continue
+    except OSError:
+        return ()
+    return tuple(sorted(sig))
 
 
 def _has_excluded_ancestor(path: Path, base: Path, excluded: tuple) -> bool:

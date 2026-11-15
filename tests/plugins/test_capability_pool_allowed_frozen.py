@@ -65,3 +65,24 @@ def test_allowed_no_new_set_allocation():
     assert isinstance(a, frozenset), f"应为 frozenset，实际 {type(a).__name__}"
     assert a is b and b is c, "_allowed() 每次返回了新对象（仍在重分配）"
     assert a is p._allowed_set, "未复用构造期预算集合"
+
+
+def test_frozen_allowed_survives_spec_reuse():
+    """S4×S3 交互：同一 spec 复用出的两个池，frozenset 内容一致且互不混写。"""
+    from app.plugins.capabilities.registry import CapabilityRegistry
+
+    reg = CapabilityRegistry()
+    try:
+        reg.register("session.read", lambda h: "x", surface="ui")
+        # 同 (plugin, surface, declared) 两个 host：spec 命中复用，池实例各自现建
+        p1 = reg.build_pool(surface="ui", host="h1", plugin="p", declared={"session.read"})
+        p2 = reg.build_pool(surface="ui", host="h2", plugin="p", declared={"session.read"})
+        assert p1 is not p2
+        a1, a2 = p1._allowed_set, p2._allowed_set
+        assert isinstance(a1, frozenset) and isinstance(a2, frozenset)
+        assert a1 == a2 == frozenset({"session.read"})  # 内容一致
+        assert p1.names() == p2.names() == ["session.read"]
+        # 各自首触互不串值（host 惰性值隔离，防跨池污染）
+        assert p1["session.read"] == "x" and p2["session.read"] == "x"
+    finally:
+        reg.clear()

@@ -9,6 +9,8 @@
   插件无需在 unload_ui 里手动退订（防止悬挂回调引用旧模块）
 """
 
+import inspect
+import weakref
 from typing import Any, Callable, Dict, List, Optional
 
 from loguru import logger
@@ -44,6 +46,45 @@ EV_TITLE_REQUEST = "title.request"
 _Callback = Callable[[Dict[str, Any]], None]
 
 
+def _resolve_callable(cb_ref):
+    """统一取当前可调用：WeakMethod 已死（宿主对象已销毁）返回 None。
+
+    输入为普通可调用（强持有形态）时原样返回（weakref 调用不可弱引用
+    对象会抛 TypeError，按原样返回兜底）。
+    """
+    try:
+        return cb_ref()
+    except TypeError:
+        return cb_ref
+
+
+def _is_dead(cb_ref) -> bool:
+    """弱引用是否已死；非弱引用恒为存活。"""
+    try:
+        return cb_ref() is None
+    except TypeError:
+        return False
+
+
+def _same_callable(pair_cb, callback) -> bool:
+    """订阅表里的当前可调用与待退订 callback 是否同一目标。
+
+    绑定方法每次属性访问产生新对象（h.on_theme != h.on_theme），身份比较
+    须按 (__self__, __func__) 对齐；普通函数/lambda 的 __self__ 为 None，
+    仍走 `is` 短路，语义不变。
+    """
+    cur = _resolve_callable(pair_cb)
+    if cur is callback:
+        return True
+    cb_self = getattr(callback, "__self__", None)
+    if cb_self is None:
+        return False
+    return (
+        getattr(cur, "__self__", None) is cb_self
+        and getattr(cur, "__func__", None) is getattr(callback, "__func__", None)
+    )
+
+
 class UIEventBus:
     """UI 事件总线（单例）"""
 
@@ -64,7 +105,17 @@ class UIEventBus:
         cls._instance = None
 
     def subscribe(self, event: str, callback: _Callback, plugin_name: Optional[str] = None) -> None:
-        """订阅事件；plugin_name 非空时随插件 unload 自动退订"""
+        """订阅事件；plugin_name 非空时随插件 unload 自动退订
+
+        [LEAK-FIX P1-6] 绑定方法改 weakref.WeakMethod 弱持有：单例窗口等宿主
+        以绑定方法订阅且无插件名，旧实现 _subs 强引用 callback，宿主销毁后
+        旧窗口整树仍被总线常驻（真实泄漏，详见 ISSUE_LIST P1-6）。弱引用使
+        回调随宿主对象销毁自然失效，publish 沿途惰性清理死引用；普通函数 /
+        lambda / 闭包不可安全弱引用（会提前失效），维持强持有，生命周期仍由
+        unsubscribe_plugin / unsubscribe 手动通道管理。
+        """
+        if inspect.ismethod(callback):
+            callback = weakref.WeakMethod(callback)
         self._subs.setdefault(event, []).append((plugin_name, callback))
 
     def unsubscribe(self, event: str, callback: _Callback) -> None:
@@ -76,8 +127,11 @@ class UIEventBus:
         pairs = self._subs.get(event)
         if not pairs:
             return
-        self._subs[event] = [pair for pair in pairs if pair[1] is not callback]
-        if not self._subs[event]:
+        # 弱持有形态下 pair[1] 是 WeakMethod：按当前可调用/绑定目标身份比对
+        kept = [pair for pair in pairs if not _same_callable(pair[1], callback)]
+        if kept:
+            self._subs[event] = kept
+        else:
             del self._subs[event]
 
     def unsubscribe_plugin(self, plugin_name: str) -> None:
@@ -97,7 +151,23 @@ class UIEventBus:
         """
         from time import perf_counter
 
-        for plugin_name, callback in list(self._subs.get(event, [])):
+        pairs = self._subs.get(event, [])
+        live: List[tuple] = []
+        deliverable: List[tuple] = []
+        for pair in pairs:
+            cb = _resolve_callable(pair[1])
+            if cb is None:
+                continue  # 弱引用宿主已销毁：不投递，顺带惰性清理
+            live.append(pair)
+            deliverable.append((pair[0], cb))
+        if len(live) != len(pairs):
+            # 死引用清出订阅表（纯列表维护，不改变投递/异常语义）
+            if live:
+                self._subs[event] = live
+            else:
+                del self._subs[event]
+
+        for plugin_name, callback in deliverable:
             _t0 = perf_counter()
             try:
                 callback(payload)
@@ -110,5 +180,8 @@ class UIEventBus:
                     logger.warning(f"[UIEventBus] 慢订阅者 {event}: {plugin_name or 'main'} {owner} = {_ms:.0f}ms")
 
     def subscriptions(self) -> Dict[str, int]:
-        """当前各事件订阅数（调试/测试）"""
-        return {event: len(pairs) for event, pairs in self._subs.items()}
+        """当前各事件订阅数（调试/测试；已死弱引用不计入）"""
+        return {
+            event: sum(1 for pair in pairs if not _is_dead(pair[1]))
+            for event, pairs in self._subs.items()
+        }

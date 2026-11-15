@@ -72,6 +72,12 @@ def _persist_vision_image_blocks_impl(messages: List[Any], session_id: str, root
     import os as _os
 
     out_dir = Path(root_dir) / "screenshots" / "persisted" / session_id
+    # 优化点：原行为=每个 data:image 块都重复 b64decode+sha1（同一图被多条
+    # 消息/多块引用时按块数全量重解码，单图可达数 MB），fpath.exists() 只挡
+    # 写盘不挡解码；新行为=同一次 persist 调用内按完整 data URI 复用
+    # (raw, digest, ext, meta) 解码结果，失败块不缓存保持逐块 try 语义；
+    # 根因=解码结果只取决于 b64 串，重复解码是纯浪费。
+    decode_cache: Dict[str, tuple] = {}
     for msg in messages:
         if not isinstance(msg, dict):
             continue
@@ -89,11 +95,16 @@ def _persist_vision_image_blocks_impl(messages: List[Any], session_id: str, root
                 header_end = url.find(",")
                 if header_end == -1:
                     continue
-                meta = url[len("data:") : header_end]  # image/png;base64
-                ext = ".png" if "png" in meta else (".jpg" if "jpeg" in meta or "jpg" in meta else ".bin")
-                b64 = url[header_end + 1 :]
-                raw = _base64.b64decode(b64)
-                digest = _hashlib.sha1(raw).hexdigest()[:16]
+                cached = decode_cache.get(url)
+                if cached is not None:
+                    raw, digest, ext, meta = cached
+                else:
+                    meta = url[len("data:") : header_end]  # image/png;base64
+                    ext = ".png" if "png" in meta else (".jpg" if "jpeg" in meta or "jpg" in meta else ".bin")
+                    b64 = url[header_end + 1 :]
+                    raw = _base64.b64decode(b64)
+                    digest = _hashlib.sha1(raw).hexdigest()[:16]
+                    decode_cache[url] = (raw, digest, ext, meta)
                 out_dir.mkdir(parents=True, exist_ok=True)
                 fpath = out_dir / f"{digest}{ext}"
                 if not fpath.exists():  # 幂等：同图（同 sha1）不重复写
@@ -152,6 +163,11 @@ def revive_vision_image_refs(messages: List[Any], root_dir=None) -> List[Any]:
 
         root_dir = get_app_data_dir()
     base_dir = Path(root_dir) / "screenshots" / "persisted"
+    # 优化点：原行为=每个 image_ref 块都重复 read_bytes+b64encode+压缩（同一
+    # 落盘图被多条消息引用时全量重编）；新行为=同一次 revive 调用内按
+    # (session_id, file, mime) 复用编码结果，失败/空结果分支不缓存保持逐块
+    # 重试语义；根因=同一 ref 的编码结果确定性，重复编码纯浪费。
+    encode_cache: Dict[tuple, str] = {}
     for msg in messages:
         if not isinstance(msg, dict):
             continue
@@ -166,15 +182,23 @@ def revive_vision_image_refs(messages: List[Any], root_dir=None) -> List[Any]:
             sid = str(ref.get("session_id") or "")
             data_uri = ""
             try:
-                fpath = base_dir / sid / fname
-                if fname and fpath.exists():
-                    raw = fpath.read_bytes()
-                    mime = str(ref.get("meta") or "image/png").split(";")[0]
-                    b64 = _base64.b64encode(raw).decode("ascii")
-                    data_uri = f"data:{mime};base64,{b64}"
-                    from app.utils.image_utils import compress_data_uri
+                cache_key = (sid, fname, str(ref.get("meta") or "image/png").split(";")[0])
+                cached_uri = encode_cache.get(cache_key)
+                cached_hit = cache_key in encode_cache
+                if cached_hit:
+                    data_uri = cached_uri or ""
+                else:
+                    fpath = base_dir / sid / fname
+                    if fname and fpath.exists():
+                        raw = fpath.read_bytes()
+                        mime = cache_key[2]
+                        b64 = _base64.b64encode(raw).decode("ascii")
+                        data_uri = f"data:{mime};base64,{b64}"
+                        from app.utils.image_utils import compress_data_uri
 
-                    data_uri = compress_data_uri(data_uri)
+                        data_uri = compress_data_uri(data_uri)
+                    if data_uri:
+                        encode_cache[cache_key] = data_uri
             except OSError:
                 data_uri = ""
             except Exception:  # noqa: BLE001 — 解码失败降级占位

@@ -104,28 +104,74 @@ def test_query_failure_without_cache_is_strict(reg, monkeypatch):
     assert reg.resolve_declared("fresh") == frozenset()
 
 
-def test_manifest_change_without_wiring_keeps_stale_cache(reg, monkeypatch, tmp_path):
-    """S1 语义反转后的新契约：manifest 变更但未接线 invalidate → 仍命中旧缓存。
+def test_manifest_content_change_auto_invalidates_without_stat(reg, monkeypatch, tmp_path):
+    """S1 内容寻址语义（裁决 A）：内容变化自动换新 + 零 stat + invalidate 幂等无害。
 
-    S1 去掉 stat 兜底后，「变更感知」唯一通道是 diff 点显式调 invalidate_declared；
-    此用例钉死「无接线不失效」，防止实现退回靠 stat 兼底的旧语义。
+    两道防线分工（leader 裁决）：内容寻址签名（path, repr(raw), api_version）管
+    「manifest 内容变化」——本用例钉死；S7 接线（enable/disable/hot reload/
+    get_plugin 对象更换等结构事件）由 test_capability_s7_invalidation_wiring.py
+    钉死，不在本用例范围。
     """
+    import os
+
     from app.plugins.managers.plugin_manager import PluginManager
 
     info = SimpleNamespace(manifest={"capabilities": ["session.read"]}, path=str(tmp_path))
     monkeypatch.setattr(
         PluginManager, "get_instance", classmethod(lambda cls: SimpleNamespace(get_plugin=lambda n: info))
     )
+    stat_calls = []
+    real_stat = os.stat
+
+    def _counting_stat(path, *args, **kwargs):
+        stat_calls.append(path)
+        return real_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "stat", _counting_stat)
+
+    narrow = reg.resolve_declared("demo")
+    assert narrow == {"session.read"}
+
+    # 1) 内容窄→宽，不调 invalidate：内容寻址签名自动 miss，直接换新
+    info.manifest = {"capabilities": ["session.read", "model.config", "ui.notify"]}
+    wide = reg.resolve_declared("demo")
+    assert wide == {"session.read", "model.config", "ui.notify"}
+    assert "ui.notify" not in set(narrow)
+
+    # 2) 全程零 os.stat（钉死零 stat 契约，禁止回退成 stat 兜底）
+    assert os.stat is not real_stat  # 确认 monkeypatch 生效，计数才有意义
+    assert stat_calls == [], f"解析路径出现 os.stat 调用（回退成 stat 兜底）：{stat_calls}"
+
+    # 3) invalidate_declared("") 对内容寻址缓存幂等无害：仍返回宽清单
+    reg.invalidate_declared("")
+    assert reg.resolve_declared("demo") == wide
+
+
+def test_persisted_file_edit_without_pm_awareness_stays_cached(reg, monkeypatch, tmp_path):
+    """S1 边界（dependency-mapper 补充）：磁盘直改文件不经 PluginManager 不被感知。
+
+    resolve_declared 的唯一数据源是 PluginManager 内存 manifest dict（签名取
+    repr(raw)），从不读磁盘——磁盘直改 plugin.json 而宿主未 rescan 时，声明
+    缓存必须仍命中旧值（与零 stat 契约同源：不会偷偷 stat 磁盘对账）。
+    """
+    from app.plugins.managers.plugin_manager import PluginManager
+
+    manifest_file = tmp_path / "plugin.json"
+    manifest_file.write_text('{"capabilities": ["session.read"]}', encoding="utf-8")
+    info = SimpleNamespace(manifest={"capabilities": ["session.read"]}, path=str(tmp_path))
+    monkeypatch.setattr(
+        PluginManager, "get_instance", classmethod(lambda cls: SimpleNamespace(get_plugin=lambda n: info))
+    )
     assert reg.resolve_declared("demo") == {"session.read"}
 
-    # 只改 manifest 内容，不 invalidate：签名 (path, repr(raw), api_version) 变了，
-    # 但缓存不感知（签名只在写入时计算，读取只比对），必须仍命中旧值。
-    info.manifest = {"capabilities": ["ui.notify"]}
-    assert reg.resolve_declared("demo") == {"session.read"}
+    # 磁盘直改：绕过 PluginManager 直接改文件，内存 manifest dict 不变
+    manifest_file.write_text('{"capabilities": ["session.read", "model.config", "ui.notify"]}', encoding="utf-8")
+    assert reg.resolve_declared("demo") == {"session.read"}  # 仍命中旧缓存
 
-    # 显式 invalidate（S7 接线点的行为等价物）后才换新
+    # 宿主感知（rescan → manifest dict 更新 / invalidate）后才换新
+    info.manifest = {"capabilities": ["session.read", "model.config", "ui.notify"]}
     reg.invalidate_declared("demo")
-    assert reg.resolve_declared("demo") == {"ui.notify"}
+    assert "model.config" in reg.resolve_declared("demo")
 
 
 def test_invalidate_declared_plugin_clears_only_that_plugin(reg, monkeypatch):
