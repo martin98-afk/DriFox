@@ -23,7 +23,7 @@ from PyQt5.QtCore import Qt
 import pytest
 
 from app.core.infra import scene_pixmap_cache as spc_mod
-from app.core.infra.scene_pixmap_cache import scene_pixmap_cache
+from app.core.infra.scene_pixmap_cache import baked_cap, scene_pixmap_cache
 
 
 @pytest.fixture
@@ -317,4 +317,30 @@ def test_baked_evicted_with_group(cache, wallpaper, tmp_path):
     cache.get_pixmap("baked", w3, load=_baked_load(100, 50),
                      width=100, height=50, blur_radius=8.0, pad=16)  # w2 组整体出
     assert cache.stats() == {"groups": 1, "entries": 1}
+
+
+# ── M-1c：baked 组内上限按像素面积反算 ─────────────────────
+
+def test_baked_cap_by_area():
+    """M-1c 纯函数：4K→1、1440p→3、1080p→4（现状不变）；脏参数回落硬上限"""
+    assert baked_cap(3840, 2160) == 1   # 31.64 MiB/份 > 48 MiB/2
+    assert baked_cap(2560, 1440) == 3   # 14.06 MiB/份 ×3 = 42.2 MiB
+    assert baked_cap(1920, 1080) == 4   # 7.91 MiB/份 → 6 截到硬上限 4
+    assert baked_cap(0, 0) == 4         # 非正尺寸：不因脏参数缩容
+    assert baked_cap(None, 1080) == 4   # 非法尺寸同上
+
+
+def test_baked_cap_applied_4k(cache, wallpaper):
+    """M-1c 接入：4K 几何写第 2 份即淘汰第 1 份；同组换 1080p 几何仍容 4 份"""
+    cache.acquire()
+    cache.get_pixmap("baked", wallpaper, load=_baked_load(3840, 2160),
+                     width=3840, height=2160, blur_radius=8.0, pad=16)
+    cache.get_pixmap("baked", wallpaper, load=_baked_load(3841, 2160),
+                     width=3841, height=2160, blur_radius=8.0, pad=16)
+    assert cache.stats()["entries"] == 1, "4K 单份超预算一半 → 上限降为 1，第二份写入淘汰第一份"
+    for i in range(6):
+        cache.get_pixmap("baked", wallpaper, load=_baked_load(1920 + i, 1080),
+                         width=1920 + i, height=1080, blur_radius=8.0, pad=16)
+    keys = [k for k in list(cache._groups.values())[0] if k[0] == "baked"]
+    assert len(keys) == 4, "1080p 面积小 → 上限回到硬上限 4（M2 行为零变化）"
 

@@ -32,8 +32,8 @@ from collections import OrderedDict
 from typing import Callable, Optional
 
 # 缓存组数上界：仅当前壁纸（T8 收紧，原 2 组 = 当前 + 上一主题）。
-# 一套全副本 ≈ 103-127MB（T40 核算），4K baked 最坏再 +131MB；
-# 1 组封顶 -103MB，代价仅切主题时重解码一次。
+# 一套全副本 ≈ 103-127MB（T40 核算），4K baked 由 _BAKED_BUDGET_BYTES
+# 降为 1 份（31.64 MiB）；1 组封顶 -103MB，代价仅切主题时重解码一次。
 _MAX_SETS = 1
 
 # 全部窗口关闭后的宽限秒数：到点才 clear。换来「快关快开」零重解码
@@ -42,8 +42,29 @@ _GRACE_SECONDS = 30.0
 
 # 每组 baked 条目上限（M2）：blur 壁纸拖拽 resize 按 (w,h,blur,pad) 逐帧写入，
 # 实测 40 步拖拽堆 40 份/330MB（1080p）且相邻几何命中率 0/39。取 4 = 覆盖
-# ≤3 窗活跃几何 + 1 份回弹缓冲；最坏驻留 1080p 约 34MB / 4K 约 131MB。
+# ≤3 窗活跃几何 + 1 份回弹缓冲。
 _MAX_BAKED_PER_GROUP = 4
+
+# baked 组内驻留字节预算（M-1c）：硬上限 4 份只对 1080p 合理（31.6 MiB），
+# 4K 全幅单份 31.64 MiB × 4 = 126.6 MiB。按单份实际像素面积反算条数：
+# 1080p→4（现状零变化）/ 1440p→3（42.2 MiB）/ 4K→1（31.64 MiB）。
+# 不用 dpr 判据：baked 尺寸取逻辑像素，4K 物理屏 dpr=1 才是 +131MB 那档，
+# dpr 越高逻辑尺寸越小、单份越小，按 dpr 降档恰好放过真凶。
+_BAKED_BUDGET_BYTES = 48 * 1024 * 1024
+
+
+def baked_cap(width: int, height: int, budget: int = _BAKED_BUDGET_BYTES) -> int:
+    """按单份 baked 像素面积反算组内条目上限（纯函数，便于单测）。
+
+    ARGB32 单份字节 = w×h×4；非法/非正尺寸按硬上限处理（不因脏参数缩容）。
+    """
+    try:
+        per = int(width) * int(height) * 4
+    except (TypeError, ValueError):
+        return _MAX_BAKED_PER_GROUP
+    if per <= 0:
+        return _MAX_BAKED_PER_GROUP
+    return max(1, min(_MAX_BAKED_PER_GROUP, int(budget // per)))
 
 
 class _ScenePixmapCache:
@@ -160,13 +181,14 @@ class _ScenePixmapCache:
             while len(self._groups) > self._max_sets:
                 self._groups.popitem(last=False)
         elif sub[0] == "baked":
-            # baked 组内上限（M2）：只淘汰最旧 baked，跳过非 baked 条目
-            # （source/premult 每组固定 ≤5 份，不能被 baked 挤掉）
+            # baked 组内上限（M2 + M-1c 面积预算）：只淘汰最旧 baked，跳过非
+            # baked 条目（source/premult 每组固定 ≤5 份，不能被 baked 挤掉）
+            cap = baked_cap(width, height)
             baked_count = 0
             for k in bucket:
                 if k[0] == "baked":
                     baked_count += 1
-            while baked_count >= _MAX_BAKED_PER_GROUP:
+            while baked_count >= cap:
                 for k in bucket:
                     if k[0] == "baked":
                         del bucket[k]
