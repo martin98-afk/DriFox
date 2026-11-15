@@ -939,6 +939,9 @@ class CustomTitleBar(TitleBarBase):
         self._sidebar_btn.setCursor(Qt.PointingHandCursor)
         self._sidebar_btn.setToolTip("收起/展开侧边栏")
         self._sidebar_btn.clicked.connect(self.sidebar_toggle_requested.emit)
+        # 点击不夺键盘焦点：原生 QPushButton 聚焦后由样式层补画焦点框（深色主题下
+        # 是浅蓝描边，见 2026-11-15 反馈），标题栏控件不需要键盘焦点。
+        self._sidebar_btn.setFocusPolicy(Qt.NoFocus)
         self._sidebar_btn.setAttribute(Qt.WA_Hover, True)
         self._sidebar_btn.installEventFilter(self)
 
@@ -951,6 +954,7 @@ class CustomTitleBar(TitleBarBase):
         self._workbench_btn.setCursor(Qt.PointingHandCursor)
         self._workbench_btn.setToolTip("打开/关闭工作台")
         self._workbench_btn.clicked.connect(self.workbench_toggle_requested.emit)
+        self._workbench_btn.setFocusPolicy(Qt.NoFocus)  # 同上，避免点击后残留焦点框
         self._workbench_btn.setAttribute(Qt.WA_Hover, True)
         self._workbench_btn.installEventFilter(self)
 
@@ -1488,13 +1492,17 @@ class CustomTitleBar(TitleBarBase):
             if hasattr(b, "apply_theme_colors"):
                 b.apply_theme_colors()
         # 侧栏开关：透明背景无边框，仅 hover 显底（图标由 _ThemeIconEngine 主题感知）
+        # ``outline: none`` 兜底：即便某条路径仍让按钮拿到键盘焦点
+        # （Alt/Tab 导航、外部 setFocus），也不让样式层补画焦点框。
         self._sidebar_btn.setStyleSheet(
-            "QPushButton { background: transparent; border: none; border-radius: 6px; padding: 3px; }"
+            "QPushButton { background: transparent; border: none; border-radius: 6px;"
+            " padding: 3px; outline: none; }"
             f"QPushButton:hover {{ background: {Colors.TAB_HOVER_BG}; }}"
         )
         # 工作台开关：与侧栏开关同款（图标"右侧边栏"主题感知）
         self._workbench_btn.setStyleSheet(
-            "QPushButton { background: transparent; border: none; border-radius: 6px; padding: 3px; }"
+            "QPushButton { background: transparent; border: none; border-radius: 6px;"
+            " padding: 3px; outline: none; }"
             f"QPushButton:hover {{ background: {Colors.TAB_HOVER_BG}; }}"
         )
         # 精简模式标题样式随主题刷新
