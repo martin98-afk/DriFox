@@ -123,7 +123,7 @@ $ARGUMENTS
 2. **比对 Available Subagents**：角色不存在时就近替换（如「美术」→ technical-artist）；无法替换的角色直接丢弃，不为它新建 .md。
 3. **提炼 team_role**：从用户原话浓缩一句（团队职责与目标）。
 4. **直接调用** `team_manage(action="create", team_name=<kebab-case 短名>, team_role=<一句职责>, members=[{agent_name, description}...])`。
-5. **时序纪律**：create 成功仅表示 leader 入队；members 的开窗请求本轮结束后拉起。返回体含 `queued/pending_window` 即成功；下一轮先 `team_manage(action="list")` 确认成员就位再派单；add 返回「能力未就绪」不要当成功。
+5. **时序纪律**：create/add 返回 `queued/pending_window` 即入队成功，开窗在后台异步进行。立即用 `team_send_message` 派单（邮箱排队，成员窗口拉起后自动执行），随后继续 leader 自身任务，不要停等开窗；仅当 `team_send_message` 报「成员不在表」时才 `team_manage(action="list")` 排查；add 返回「能力未就绪」不要当成功。
 
 ### 模板轨道（仅以下情形进入）
 

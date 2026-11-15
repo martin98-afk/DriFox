@@ -495,7 +495,7 @@ def register(registry) -> None:
                 "submitted": True,
                 "queued": len(names),
                 "pending_window": [a for sub in pending for a in sub],
-                "note": "成员窗口在本轮对话结束后拉起；下一轮用 team_manage(action=list) 验证",
+                "note": "成员窗口在本轮对话结束后拉起；无需等待，可立即用 team_send_message 派单（消息排队投递）并继续当前任务",
             }
 
         def ensure_leader_watch(window_id: str = "", run_id: str = "", team_label: str = "", team_name: str = ""):

@@ -732,7 +732,7 @@ def _team_add_member(tool_ctx, agent_name: str, role: str) -> ToolResult:
         return ToolResult(False, error=f'{{"submitted": false, "error": "{err}"}}')
 
     # P0②：状态回执（pending_window 由 provider 从 action_queue.peek 现算）
-    receipt["note"] = receipt.get("note") or "窗口正在实时创建（本轮对话期间拉起），下一轮用 team_manage(action=list) 验证。"
+    receipt["note"] = receipt.get("note") or "开窗后台进行中，无需等待：可立即用 team_send_message 派单（消息排队投递，窗口就绪后自动执行），并继续当前任务。"
     lines = [
         f"开窗请求已提交：{agent_name}" + (f"（{role}）" if str(role or "").strip() else ""),
         f"回执: {json.dumps(receipt, ensure_ascii=False)}",
@@ -823,7 +823,7 @@ _TEAM_MANAGE_SCHEMA = {
             "团队管理统一入口(action 分发)。"
             "list=查成员(任何窗口可用，非成员也可只读，返回 agent_name@window_id)；"
             "create=创建团队(任何窗口可用，team_name/team_role 必填，members 可选)，leader 与成员全新建窗口、当前窗口不切标签页；create 后即可用 team_send_message 派任务，成员自动执行；"
-            "add=拉成员入队(提交开窗请求，本轮结束后开窗；须已在团队中，成员可调用；agent_name/role 必填，下一轮用 list 验证)；"
+            "add=拉成员入队(提交开窗请求，本轮结束后开窗；须已在团队中，成员可调用；agent_name/role 必填；返回 queued/pending_window 即成功，无需等待，可立即用 team_send_message 派单并继续当前工作)；"
             "remove=移出成员(任意成员可调，agent_name 必填，同名全移除，不能移除自己)；"
             "leave=退出(须已在团队中，leader 退出自动移交)。"
         ),
