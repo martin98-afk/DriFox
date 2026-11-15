@@ -1453,12 +1453,16 @@ class ChatBackend(QObject):
 
         return session
 
-    def trigger_session_event(self, state: str, extra_context: dict = None):
+    def trigger_session_event(
+        self, state: str, extra_context: dict = None, only_matchers: Optional[set] = None
+    ):
         """触发 SessionStart hook，带会话状态
 
         Args:
             state: 会话状态，可选 startup/resume/clear/compact
             extra_context: 额外上下文信息
+            only_matchers: 非 None 时只执行 matcher 命中该集合的规则组（透传
+                hook_manager.trigger_event，供中途补触发只跑指定组，如团队加入）
         """
         if not self._hook_manager:
             return
@@ -1477,6 +1481,7 @@ class ChatBackend(QObject):
             context=ctx,
             current_message="",
             trigger_async=_is_ui_thread(),
+            only_matchers=only_matchers,
         )
         if session:
             for r in results:

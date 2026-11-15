@@ -5183,6 +5183,12 @@ class OpenAIChatToolWindow(ToolWindow):
         # 启动邮箱文件监听（检测新任务邮件）
         self._start_team_watcher()
 
+        # 🛡️ 团队 hook 补注入：手动 /team --join 不新建会话，SessionStart 不再
+        # 触发，团队三 hook（协作指引/团队上下文/智能体身份）挂在 SessionStart
+        # 的 #team_member matcher 下会永久缺失（新建会话才补上）。此处 join 完成
+        # 后只补触发该 matcher 组，无 matcher 组（技能/子智能体列表）不重复注入。
+        self.backend.trigger_session_event("startup", only_matchers={"#team_member"})
+
         InfoBar.success(
             "已加入团队",
             f"角色: {agent_name}\n队友可通过 UI 消息界面向你派发任务",

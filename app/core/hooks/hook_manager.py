@@ -1905,6 +1905,7 @@ class HookManager:
         current_message: str = "",
         trigger_async: bool = True,
         skip_finished_callback: bool = False,
+        only_matchers: Optional[set] = None,
     ) -> List[HookExecutionResult]:
         """
         触发事件，执行所有匹配的 Hooks（支持同事件内 Hook 级并行）
@@ -1919,6 +1920,10 @@ class HookManager:
                 的返回值已由调用方直接从 results 注入消息列表，完成回调再入队
                 属于重复投递；置 True 可从根上避免重复，无需事后按队列长度差排出
                 （该排出会误伤同期入队的用户插话等外部消息）。
+            only_matchers: 非 None 时只执行 matcher 命中该集合的规则组（如
+                {"#team_member"}），无 matcher 的规则组恒被跳过。供中途状态变化
+                补触发场景（手动加入团队后补注入团队 SessionStart hook）使用，
+                避免整事件重放导致技能/子智能体列表等已注入内容重复。
 
         Returns:
             执行结果列表（按原始注册顺序返回）
@@ -1936,6 +1941,9 @@ class HookManager:
         disabled_keys = self._disabled_component_keys()
         all_hooks: List[Hook] = []
         for rule in self._hooks[event_name]:
+            # only_matchers 过滤优先于常规匹配：供中途补触发只跑指定规则组
+            if only_matchers is not None and rule.matcher not in only_matchers:
+                continue
             if not rule.matches(context):
                 continue
             if disabled_keys is not None:
