@@ -321,3 +321,50 @@ def test_baked_cap_applied_4k(cache, wallpaper):
     keys = [k for k in list(cache._groups.values())[0] if k[0] == "baked"]
     assert len(keys) == 4, "1080p 面积小 → 上限回到硬上限 4（M2 行为零变化）"
 
+
+# ── M3：premult 按需生成（blur>0 时只是过程副本） ───────────
+
+def _write_bg(tmp_path, name="bg.png", w=64, h=48):
+    p = str(tmp_path / name)
+    img = QImage(w, h, QImage.Format_ARGB32)
+    img.fill(0xFF336699)
+    assert img.save(p, "PNG")
+    return p
+
+
+def _cached_kinds(cache):
+    return sorted(k[0] for b in cache._groups.values() for k in b)
+
+
+def test_premult_cached_only_without_blur(cache, qapp, tmp_path):
+    """M3 两分支：blur>0 → premult 不入缓存（只剩 source+baked，apply_config
+    末尾同步烘 baked 顶替）；blur==0 → premult 是最终显示副本，仍走共享缓存"""
+    from app.widgets.scene_layer import SceneLayer
+
+    bg = _write_bg(tmp_path)
+    base = {
+        "image": bg,
+        "opacity": 0.5,
+        "animation": {"enabled": False},
+        "foreground": {"enabled": False},
+    }
+
+    blurred = SceneLayer()
+    try:
+        blurred.apply_config(dict(base, blur=8), lambda p: p)
+        assert _cached_kinds(cache) == ["baked", "source"], (
+            "blur>0：premult 不得驻留共享缓存（同步烘 baked 顶替，省一份驻留）"
+        )
+    finally:
+        blurred.deleteLater()
+
+    cache.clear()
+    plain = SceneLayer()
+    try:
+        plain.apply_config(dict(base, blur=0), lambda p: p)
+        assert _cached_kinds(cache) == ["premult", "source"], (
+            "blur==0：premult 是最终显示副本，必须仍走共享缓存"
+        )
+    finally:
+        plain.deleteLater()
+

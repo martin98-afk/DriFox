@@ -456,6 +456,11 @@ class SceneLayer(QWidget):
         image = cfg.get("image")
         if image and image_resolver:
             resolved = image_resolver(image)
+            # [M3] blur 先解析：它决定 premult 是过渡副本还是最终显示副本
+            try:
+                blur = float(cfg.get("blur", 0) or 0)
+            except (TypeError, ValueError):
+                blur = 0.0
             # [T43] source 与预乘副本走跨窗口共享缓存：同壁纸同参数全进程一份，
             # QLabel.setPixmap 走 Qt 隐式共享（引用计数），零复制。
             pix = scene_pixmap_cache.get_pixmap(
@@ -465,16 +470,24 @@ class SceneLayer(QWidget):
                 self._image_label = QLabel(self)
                 self._image_source_pixmap = pix
                 self._image_source_path = resolved
-                # 整体透明度预乘进图片 alpha（QGraphicsOpacityEffect 等价物）
-                pix = scene_pixmap_cache.get_pixmap(
-                    "premult",
-                    resolved,
-                    load=lambda p, o=self._layer_opacity: SceneLayer._load_premult(
-                        p, "source", o
-                    ),
-                    opacity_255=int(round(self._layer_opacity * 255)),
-                )
-                self._image_label.setPixmap(pix)
+                # 整体透明度预乘进图片 alpha（QGraphicsOpacityEffect 等价物）。
+                # [M3] blur>0：本函数末尾同步烘 baked 并顶替，premult 只是过程
+                # 副本，本地构造不入共享缓存（烘焙后随 setPixmap 释放），省一份
+                # 驻留；blur==0：premult 是最终显示副本，仍走共享缓存。
+                if blur > 0:
+                    premult = QPixmap.fromImage(
+                        _premultiply_opacity(pix.toImage(), self._layer_opacity)
+                    )
+                else:
+                    premult = scene_pixmap_cache.get_pixmap(
+                        "premult",
+                        resolved,
+                        load=lambda p, o=self._layer_opacity: SceneLayer._load_premult(
+                            p, "source", o
+                        ),
+                        opacity_255=int(round(self._layer_opacity * 255)),
+                    )
+                self._image_label.setPixmap(premult)
                 self._image_label.setScaledContents(True)
                 self._sync_content_geometry()
                 # 图片也设圆角（避免溢出到 _chat_frame 圆角外）
@@ -483,10 +496,6 @@ class SceneLayer(QWidget):
                 )
                 self._image_label.show()
                 # blur 效果：离屏烘焙一次（加载时），之后 label 直接画烘焙结果
-                try:
-                    blur = float(cfg.get("blur", 0) or 0)
-                except (TypeError, ValueError):
-                    blur = 0.0
                 if blur > 0:
                     self._image_blur_radius = min(blur, 30.0)
                     self._blur_pad = int(self._image_blur_radius) * 2
