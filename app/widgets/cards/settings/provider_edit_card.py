@@ -184,6 +184,7 @@ class ProviderEditCard(QWidget):
         preset_provider: str = "",
     ):
         super().__init__(parent)
+        self._disposed = False
         self.provider_name = provider_name
         self.provider_info = (provider_info or {}).copy()
         self.is_new = is_new
@@ -211,6 +212,28 @@ class ProviderEditCard(QWidget):
         self.fetchFailed.connect(self._on_fetch_failed)
         self.loginSuccess.connect(self._on_login_success)
         self.loginFailed.connect(self._on_login_failed)
+
+    def dispose(self):
+        """表单结束后取消后台交付并销毁，不让模型行和旧回调常驻。"""
+        if self._disposed:
+            return
+        self._disposed = True
+        self._login_generation += 1
+        if self._login_cancel is not None:
+            self._login_cancel.set()
+        timer = self.modelListEditor._row_build_timer
+        if timer is not None:
+            timer.stop()
+        self.deleteLater()
+
+    def _emit_if_alive(self, signal_name, *args):
+        """后台线程可能晚于表单关闭返回，不向已析构的 QObject 发信号。"""
+        if self._disposed:
+            return
+        try:
+            getattr(self, signal_name).emit(*args)
+        except RuntimeError:
+            pass
 
     def _static_provider_row(self, provider_name: str) -> QWidget:
         """预置态的静态服务商展示行：图标 + 加粗名 + 「预置服务商」小标。
@@ -862,17 +885,19 @@ class ProviderEditCard(QWidget):
                 result = hook()
         except Exception as e:  # noqa: BLE001 —— 失败原因需透传到 UI
             if gen == self._login_generation:
-                self.loginFailed.emit(str(e))
+                self._emit_if_alive("loginFailed", str(e))
             return
         if gen != self._login_generation:
             return
         if not result or not result.get("api_key"):
-            self.loginFailed.emit("登录结果为空")
+            self._emit_if_alive("loginFailed", "登录结果为空")
             return
-        self.loginSuccess.emit(result["api_key"], result.get("info", ""))
+        self._emit_if_alive("loginSuccess", result["api_key"], result.get("info", ""))
 
     def _on_login_success(self, api_key: str, info: str):
         """登录成功（主线程）：回填 API Key 输入框，保存时走原生加密链"""
+        if self._disposed:
+            return
         self._reset_login_btn()
         self.apiKeyEdit.setText(api_key)
         from qfluentwidgets import InfoBar
@@ -889,6 +914,8 @@ class ProviderEditCard(QWidget):
 
     def _on_login_failed(self, reason: str):
         """登录失败（主线程）"""
+        if self._disposed:
+            return
         self._reset_login_btn()
         from qfluentwidgets import InfoBar
         from app.widgets.tab_manager_window import TabManagerWindow
@@ -991,7 +1018,9 @@ class ProviderEditCard(QWidget):
             result = fetch_func(*args)
         except Exception as e:  # noqa: BLE001 —— 失败原因需透传到 UI
             logger.warning(f"[ProviderEditCard] 获取模型列表失败: {e}")
-            self.fetchFailed.emit(str(e))
+            self._emit_if_alive("fetchFailed", str(e))
+            return
+        if self._disposed:
             return
         # 内置 fetch 返回 (models, filtered_out) 元组；插件 models_hook 返回纯列表
         if isinstance(result, tuple):
@@ -1001,9 +1030,9 @@ class ProviderEditCard(QWidget):
         self._fetched_models = models
         self._filtered_out_models = removed
         if models:
-            self.fetchSuccess.emit(models)
+            self._emit_if_alive("fetchSuccess", models)
         else:
-            self.fetchFailed.emit("")
+            self._emit_if_alive("fetchFailed", "")
 
     def _on_fetch_success(self, models: list):
         """获取成功（主线程）。
@@ -1014,6 +1043,8 @@ class ProviderEditCard(QWidget):
 
         默认模型失效判定随星标语义退役（P1-9）；拉取结果只进候选区。
         """
+        if self._disposed:
+            return
         self.fetchBtn.setEnabled(True)
         self._fetched_models = [str(m) for m in (models or []) if m]
 
@@ -1071,6 +1102,8 @@ class ProviderEditCard(QWidget):
 
     def _on_fetch_failed(self, reason: str = ""):
         """获取失败（主线程）；reason 为插件抛出的原因，空串走通用提示"""
+        if self._disposed:
+            return
         self.fetchBtn.setEnabled(True)
         # 失败状态同样随保存携带（供列表行状态点显示红/灰点）
         from app.core.modelmeta.model_refresh_service import STATUS_UNREACHABLE, now_ts_str

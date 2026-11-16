@@ -105,6 +105,26 @@ class TestScheduleAndCancel:
         assert pool.acquire() is v
         assert not pool._idle_gc_timer.isActive()
 
+    def test_partial_acquire_keeps_remaining_viewers_scheduled(self, pool):
+        """仅复用一部分页面时，剩下的页面仍须按原窗口回收。"""
+        first = _StubViewer()
+        remaining = _StubViewer()
+        pool.release(first)
+        pool.release(remaining)
+        assert pool.acquire() is first
+        assert pool.size() == 1
+        assert pool._idle_gc_timer.isActive(), "部分取用不可取消剩余页面的回收"
+
+    def test_other_bucket_still_has_idle_gc_after_acquire(self, pool):
+        """full 桶清空不能取消 light 桶剩余页面的回收。"""
+        full = _StubViewer()
+        light = _StubViewer()
+        pool.release(full)
+        pool.release(light, light=True)
+        assert pool.acquire() is full
+        assert pool.size(light=True) == 1
+        assert pool._idle_gc_timer.isActive()
+
 class TestIdleGc:
     def test_fresh_member_reschedules_and_keeps(self, pool):
         """GC 到点有 <60s 新鲜成员 → 不清池、重排下一窗"""

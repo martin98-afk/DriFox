@@ -184,7 +184,9 @@ class WebViewPool:
             # 未来新增置位路径遗漏回滚的情况，保证复用行为与未回收实例一致
             viewer._heal_suppressed = False
             # perf: #26 60s 窗口内重开 tab 取走 viewer → 取消清池，保留复用收益
-            self._cancel_idle_gc()
+            # 仅全池取空才取消；其他桶或本桶剩余页面仍需到期释放。
+            if not any(self._idle.values()):
+                self._cancel_idle_gc()
             return viewer
         self._stats["miss"] += 1
         return None
