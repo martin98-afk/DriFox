@@ -19,6 +19,23 @@ from app.utils.design_tokens import Colors, font_size_css
 from app.utils.utils import get_font_family_css
 
 
+def _fit_dialog_widget(widget, min_w: int, min_h: int, max_w: int, max_h: int):
+    """把 MaskDialogBase 的中心 widget 调成按内容自适应的尺寸。
+
+    ⚠ 不能只靠 adjustSize()：含 wordWrap 文本的 widget，其 sizeHint 高度
+    按「理想宽度」换行估算；当理想宽度超过 max 被截短后，同一段文本实际
+    需要更高的高度，超出部分文字会被上下裁切。因此 adjustSize 后必须按
+    截短后的实际宽度用 heightForWidth 重求高度。
+    """
+    widget.setMinimumSize(min_w, min_h)
+    widget.setMaximumSize(max_w, max_h)
+    widget.adjustSize()
+    width = max(min_w, min(widget.sizeHint().width(), max_w))
+    hfw = widget.heightForWidth(width)
+    if hfw > 0:
+        widget.resize(width, max(min_h, min(max_h, hfw)))
+
+
 class ConfirmDialog(MaskDialogBase):
     """通用确认弹框 — 替代 QMessageBox.question / qfluentwidgets MessageBox
 
@@ -183,14 +200,14 @@ class ConfirmDialog(MaskDialogBase):
         流程：
         - 从 MaskDialogBase 的 _hBoxLayout 取出 widget（layout 仍占位但不影响 widget 几何）
         - 设 maxSize 防极端撑爆
-        - adjustSize() 让 widget 按内容 sizeHint 撑到合适尺寸
+        - adjustSize() 给出初始尺寸；wordWrap 文本再按实际宽度用
+          heightForWidth 校正高度（见 _fit_dialog_widget）
         - _center_widget 居中；后续 dialog.resizeEvent 仍自动重新居中
         """
         self.layout().removeWidget(self.widget)  # 关键：从 QHBoxLayout 取出
         self.widget.setParent(self)  # 确保 parent 是 dialog（addWidget 时已是）
-        self.widget.setMinimumSize(self.DEFAULT_WIDTH, self.DEFAULT_HEIGHT)
-        self.widget.setMaximumSize(self.DEFAULT_MAX_WIDTH, self.DEFAULT_MAX_HEIGHT)
-        self.widget.adjustSize()
+        _fit_dialog_widget(self.widget, self.DEFAULT_WIDTH, self.DEFAULT_HEIGHT,
+                           self.DEFAULT_MAX_WIDTH, self.DEFAULT_MAX_HEIGHT)
         self._center_widget()
 
     def _center_widget(self):
@@ -362,11 +379,10 @@ class SingleInputDialog(MaskDialogBase):
         self.layout().removeWidget(self.widget)
         self.widget.setParent(self)
         # 阻止 MaskDialogBase 的 QHBoxLayout 把 widget 拉伸到全屏：
-        # minSize 保底，maxSize 防撑爆，adjustSize 让 widget 按内容尺寸自适应。
-        # 原 setFixedSize 会让 hint/输入说明等长文本溢出被按钮遮挡。
-        self.widget.setMinimumSize(self.DEFAULT_WIDTH, self.DEFAULT_HEIGHT)
-        self.widget.setMaximumSize(self.DEFAULT_WIDTH + 200, self.DEFAULT_HEIGHT + 320)
-        self.widget.adjustSize()
+        # minSize 保底，maxSize 防撑爆，高度按内容自适应（原 setFixedSize 会让
+        # hint/输入说明等长文本溢出被按钮遮挡）。
+        _fit_dialog_widget(self.widget, self.DEFAULT_WIDTH, self.DEFAULT_HEIGHT,
+                           self.DEFAULT_WIDTH + 200, self.DEFAULT_HEIGHT + 320)
         # 初始居中显示；后续 dialog resize 时通过 _center_widget 保持居中
         self._center_widget()
 
@@ -530,9 +546,8 @@ class InfoDialog(MaskDialogBase):
         # 否则 QHBoxLayout 默认让 widget 高度 = layout 高度（dialog 全屏）
         self.layout().removeWidget(self.widget)
         self.widget.setParent(self)
-        self.widget.setMinimumSize(self.DEFAULT_WIDTH, self.DEFAULT_HEIGHT)
-        self.widget.setMaximumSize(self.DEFAULT_MAX_WIDTH, self.DEFAULT_MAX_HEIGHT)
-        self.widget.adjustSize()
+        _fit_dialog_widget(self.widget, self.DEFAULT_WIDTH, self.DEFAULT_HEIGHT,
+                           self.DEFAULT_MAX_WIDTH, self.DEFAULT_MAX_HEIGHT)
         self._center_widget()
 
     def _on_confirm(self):
@@ -683,9 +698,8 @@ class ChoiceDialog(MaskDialogBase):
         # 内容自适应：minSize 保底 + maxSize 防撑爆
         self.layout().removeWidget(self.widget)
         self.widget.setParent(self)
-        self.widget.setMinimumSize(self.DEFAULT_WIDTH, self.DEFAULT_HEIGHT)
-        self.widget.setMaximumSize(self.DEFAULT_MAX_WIDTH, self.DEFAULT_MAX_HEIGHT)
-        self.widget.adjustSize()
+        _fit_dialog_widget(self.widget, self.DEFAULT_WIDTH, self.DEFAULT_HEIGHT,
+                           self.DEFAULT_MAX_WIDTH, self.DEFAULT_MAX_HEIGHT)
         self._center_widget()
 
     def _on_choose(self, key: str):
