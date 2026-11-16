@@ -1035,6 +1035,9 @@ def render_tool_block(
     if isinstance(tool_args, dict):
         desc_text = str(tool_args.get("description") or "").strip()
     title_text = desc_text or cn_name
+    # 描述已占标题位且与 tooltip 文案完全同文，再挂 title 只在 hover 时重复弹一遍 → 不挂；
+    # 无描述时标题位显示工具名，保留 title 兼容长工具名场景。
+    title_attr = "" if desc_text else f' title="{escape(title_text)}"'
     # 描述不截断：宁可右侧路径被挤掉，也要把「这一步做什么」完整摆出来
     path_arg = _tool_path_arg(tool_args)
     preview_text = args_preview
@@ -1081,7 +1084,7 @@ def render_tool_block(
                 {icon_html}
                 {badge_html}
             </span>
-            <span style="white-space: nowrap; flex: 0 0 auto; {get_font_family_css()}" title="{escape(title_text)}">{escape(title_text)}</span>
+            <span style="white-space: nowrap; flex: 0 0 auto; {get_font_family_css()}"{title_attr}>{escape(title_text)}</span>
         </span>
         <span style="display: flex; align-items: center; gap: 8px; margin-left: 10px; min-width: 0; flex: 1 1 auto; justify-content: flex-start; overflow: hidden;">
             {preview_span}{diff_stats_html}
@@ -1213,7 +1216,7 @@ def render_tool_block(
                 {icon_html}
                 {badge_html}
             </span>
-            <span style="white-space: nowrap; flex: 0 0 auto; {get_font_family_css()}" title="{escape(title_text)}">{escape(title_text)}</span>
+            <span style="white-space: nowrap; flex: 0 0 auto; {get_font_family_css()}"{title_attr}>{escape(title_text)}</span>
         </span>
         <span style="display: flex; align-items: center; gap: 8px; margin-left: 10px; min-width: 0; flex: 1 1 auto; justify-content: flex-start; overflow: hidden;">
             {preview_span}{diff_stats_html}
@@ -1232,7 +1235,7 @@ def render_tool_block(
                 {icon_html}
                 {badge_html}
             </span>
-            <span style="white-space: nowrap; flex: 0 0 auto; {get_font_family_css()}" title="{escape(title_text)}">{escape(title_text)}</span>
+            <span style="white-space: nowrap; flex: 0 0 auto; {get_font_family_css()}"{title_attr}>{escape(title_text)}</span>
         </span>
         <span style="display: flex; align-items: center; gap: 8px; margin-left: 10px; min-width: 0; flex: 1 1 auto; justify-content: flex-start; overflow: hidden;">
             {preview_span}{diff_stats_html}
