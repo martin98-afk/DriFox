@@ -25,6 +25,7 @@ from PyQt5.QtWidgets import (
 
 from qfluentwidgets import ScrollArea
 from app.utils.design_tokens import CardStyles, Colors, font_size_css, readable_text_on
+from app.utils.scroll_tuning import install_fast_wheel
 from app.utils.utils import get_font_family_css, get_icon, get_unified_font
 from app.widgets.cards.card_container import CardContainer
 from app.widgets.cards.floating.countdown_chip import CountdownChip
@@ -805,6 +806,7 @@ class QuestionFloatingWidget(QWidget):
         # ── 问题标题（按内容动态高度，上限自适应） ──
         self._question_scroll = _AutoHeightScrollArea()
         self._question_scroll.setWidgetResizable(True)
+        install_fast_wheel(self._question_scroll)
         self._question_scroll.setMaximumHeight(280)
         self._question_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self._question_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)

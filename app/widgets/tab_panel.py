@@ -63,6 +63,7 @@ from app.utils.design_tokens import (
     set_style_sheet_if_changed,
 )
 from app.utils.motion import retarget
+from app.utils.scroll_tuning import install_fast_wheel
 from app.utils.theme_manager import theme_manager
 from app.utils.utils import get_font_family_css, get_icon, get_unified_font
 from app.widgets.cards.settings.gitee_card import GiteeAccountRow
@@ -1904,6 +1905,7 @@ class TabPanel(QWidget):
         # 滚动列表（卡片内，默认折叠）
         self._custom_plugin_scroll = ScrollArea(self._custom_plugin_card)
         self._custom_plugin_scroll.setWidgetResizable(True)
+        install_fast_wheel(self._custom_plugin_scroll)
         self._custom_plugin_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self._custom_plugin_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self._custom_plugin_scroll.setFrameShape(QFrame.NoFrame)
@@ -1993,6 +1995,7 @@ class TabPanel(QWidget):
         # ── 中间：Tab 列表 ──
         self._scroll_area = ScrollArea(self)
         self._scroll_area.setWidgetResizable(True)
+        install_fast_wheel(self._scroll_area)
         self._scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self._scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self._scroll_area.setFrameShape(QFrame.NoFrame)
@@ -2036,6 +2039,7 @@ class TabPanel(QWidget):
         # QLayout.addWidget 会自动 reparent，两个重建函数各摆各的容器。
         self._tree_scroll = ScrollArea(self)
         self._tree_scroll.setWidgetResizable(True)
+        install_fast_wheel(self._tree_scroll)
         self._tree_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self._tree_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self._tree_scroll.setFrameShape(QFrame.NoFrame)

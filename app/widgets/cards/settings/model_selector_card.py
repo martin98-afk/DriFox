@@ -23,6 +23,7 @@ from app.utils.design_tokens import (
     get_unified_scrollbar_style,
     make_scroll_content_opaque,
 )
+from app.utils.scroll_tuning import install_fast_wheel
 from app.utils.utils import get_font_family_css, get_icon
 from app.widgets.capability_badges import (
     ALL_BADGES,
@@ -376,6 +377,7 @@ class ModelSelectorCardContent(QWidget):
         # 滚动区域
         self.scroll_area = ScrollArea(self)
         self.scroll_area.setWidgetResizable(True)
+        install_fast_wheel(self.scroll_area)
         self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.scroll_area.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.MinimumExpanding)
         self.scroll_area.setStyleSheet(f"""

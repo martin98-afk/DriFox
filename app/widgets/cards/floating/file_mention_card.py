@@ -32,6 +32,7 @@ if TYPE_CHECKING:
 
 from qfluentwidgets import ScrollArea
 from app.utils.design_tokens import CardStyles, Colors, font_size_css, get_unified_scrollbar_style
+from app.utils.scroll_tuning import install_fast_wheel
 from app.utils.utils import get_font_family_css
 from app.widgets.elided_label import _ElidedLabel
 
@@ -904,6 +905,7 @@ class FileMentionCard(QWidget):
         # 滚动区域
         self._scroll_area = ScrollArea(self)
         self._scroll_area.setWidgetResizable(True)
+        install_fast_wheel(self._scroll_area)
         self._scroll_area.setFrameShape(ScrollArea.NoFrame)
         self._scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self._scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)

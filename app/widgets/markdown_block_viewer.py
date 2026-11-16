@@ -66,6 +66,7 @@ from app.utils.design_tokens import (
     scale_font_size,
     set_style_sheet_if_changed,
 )
+from app.utils.scroll_tuning import install_fast_wheel
 from app.utils.utils import get_font_family_css, get_icon
 
 try:  # pygments 独立包，顶层安全导入
@@ -2285,6 +2286,7 @@ class ToolSectionWidget(QWidget):
         # ── 卡片内滚容器：坞态限高的载体 ──
         self._cards_scroll = ScrollArea(self)
         self._cards_scroll.setWidgetResizable(True)
+        install_fast_wheel(self._cards_scroll)
         self._cards_scroll.setFocusPolicy(Qt.NoFocus)
         self._cards_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self._cards_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)

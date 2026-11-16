@@ -26,6 +26,7 @@ from PyQt5.QtWidgets import (
 from qfluentwidgets import ScrollArea
 from app.utils.design_tokens import CardStyles, Colors, readable_text_on
 from app.utils.motion import LoopTimer
+from app.utils.scroll_tuning import install_fast_wheel
 from app.utils.utils import _is_current_theme_light, get_font_family_css, get_icon, get_unified_font
 from app.widgets.cards.card_container import CardContainer
 
@@ -678,6 +679,7 @@ class SubAgentCompactFloatingWidget(QWidget):
         self._scroll_area = ScrollArea(self)
         self._scroll_area.setObjectName("subAgentScrollArea")
         self._scroll_area.setWidgetResizable(True)
+        install_fast_wheel(self._scroll_area)
         self._scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self._scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self._scroll_area.setFrameShape(QFrame.NoFrame)

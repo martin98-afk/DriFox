@@ -138,6 +138,7 @@ from app.utils.design_tokens import (
 )
 from app.utils.theme_manager import theme_manager
 from app.utils.provider_icons import get_provider_icon
+from app.utils.scroll_tuning import install_fast_wheel
 from app.utils.utils import get_app_data_dir, get_font_family_css, get_icon
 
 # ── App Widget 导入 ──
@@ -3509,6 +3510,8 @@ class OpenAIChatToolWindow(ToolWindow):
                 self.chat_layout.setSpacing(8)
                 self.chat_layout.setAlignment(Qt.AlignBottom)
                 self.chat_scroll_area.setWidget(self.chat_container)
+                # 与 chat_area_module 同一口径：关平滑、保留加速（见 scroll_tuning）
+                install_fast_wheel(self.chat_scroll_area)
 
                 # 连接滚动事件，触发虚拟滚动回收
                 scroll_bar = self.chat_scroll_area.verticalScrollBar()

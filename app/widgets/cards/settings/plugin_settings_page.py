@@ -50,6 +50,7 @@ from app.plugins.contracts.plugin_display import plugin_display_name
 from app.plugins.kernel import COMPONENT_ORDER
 from app.plugins.registries.plugin_config_registry import PluginConfigRegistry
 from app.utils.design_tokens import Colors
+from app.utils.scroll_tuning import install_fast_wheel
 from app.widgets.cards.settings.plugin_config_form import PluginConfigForm, evaluate_config_status
 from app.widgets.cards.settings.plugin_components_card import _component_display_name
 
@@ -426,6 +427,7 @@ class _PluginDetailView(QWidget):
     def _make_scroll_page() -> QScrollArea:
         area = QScrollArea()
         area.setWidgetResizable(True)
+        install_fast_wheel(area)
         area.setFrameShape(QFrame.NoFrame)
         area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         area.setStyleSheet("QScrollArea { background: transparent; border: none; }")
@@ -788,6 +790,7 @@ class PluginSettingsPage(QWidget):
 
         self._list_area = QScrollArea(self)
         self._list_area.setWidgetResizable(True)
+        install_fast_wheel(self._list_area)
         self._list_area.setFrameShape(QFrame.NoFrame)
         self._list_area.setFixedWidth(_LIST_WIDTH)
         self._list_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)

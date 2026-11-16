@@ -39,6 +39,7 @@ from app.utils.design_tokens import (
     readable_text_on,
     scale_font_size,
 )
+from app.utils.scroll_tuning import install_fast_wheel
 from app.utils.utils import get_font_family_css, get_unified_font
 from app.widgets.cards.card_container import CardContainer
 
@@ -308,6 +309,7 @@ class PermissionApprovalWidget(QWidget):
 
         self._cmd_view = QScrollArea()
         self._cmd_view.setWidgetResizable(True)
+        install_fast_wheel(self._cmd_view)
         self._cmd_view.setFrameShape(QScrollArea.NoFrame)
         self._cmd_view.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self._cmd_view.setMaximumHeight(160)
