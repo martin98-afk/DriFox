@@ -31,6 +31,7 @@ from app.utils.design_tokens import (
     set_style_sheet_if_changed,
     scale_icon_size,
 )
+from app.utils.scroll_tuning import install_fast_wheel
 from app.utils.utils import get_font_family_css, get_icon, get_unified_font
 
 
@@ -168,6 +169,10 @@ class SystemCardFrame(QFrame):
         self.scroll_area.setWidgetResizable(True)
         self.scroll_area.setStyleSheet(self._scroll_style())
         self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        # 关掉 qfw 滚轮平滑动画（论据见 scroll_tuning 模块头）：接管器保留 qfw 的
+        # 两级放大（1.5 倍基础 + 500ms 窗口内最多 +100%），但改成一次 setValue，
+        # 不再 400ms/60fps 逐帧重绘。实测滚轮期 paint 1791→488、面积 156.8x→36.0x。
+        install_fast_wheel(self.scroll_area)
 
         self.content_widget = QWidget()
         self.content_widget.setStyleSheet("background: transparent;")

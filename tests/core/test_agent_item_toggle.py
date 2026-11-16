@@ -107,7 +107,7 @@ def test_disabled_item_not_registered(pm_stub, tmp_path):
 
 
 def test_disabled_item_not_in_prompt(pm_stub, tmp_path):
-    """细项停用后 get_available_subagents_for_prompt 不再包含该智能体"""
+    """细项停用后 list_subagents 不再包含该智能体（清单渲染由插件按此列举）"""
     import app.core.conversation.agent as agent_mod
 
     _write_agent_md(tmp_path / "agents" / "alpha.md", "alpha", "kept")
@@ -116,10 +116,10 @@ def test_disabled_item_not_in_prompt(pm_stub, tmp_path):
 
     mgr = _bare_manager(agent_mod)
     mgr._load_agents_from_dir(tmp_path / "agents", source_plugin="demo")
-    prompt = mgr.get_available_subagents_for_prompt()
+    names = [a.name for a in mgr.list_subagents(include_hidden=True)]
 
-    assert "- **alpha**" in prompt
-    assert "- **beta**" not in prompt
+    assert "alpha" in names
+    assert "beta" not in names
 
 
 def test_disabled_item_yaml_also_filtered(pm_stub, tmp_path):
@@ -172,7 +172,7 @@ def test_component_off_reload_unloads_existing(pm_stub, tmp_path):
     assert "alpha" not in mgr._agents
     assert "beta" not in mgr._agents
     assert mgr._plugin_agents.get("demo", set()) == set()
-    assert mgr.get_available_subagents_for_prompt() == ""
+    assert mgr.list_subagents(include_hidden=True) == []
 
 
 def test_component_off_skip_load_from_plugins(pm_stub, tmp_path, monkeypatch):
@@ -232,9 +232,9 @@ def test_set_item_disable_removes_from_registry_and_prompt(pm_stub, tmp_path):
     assert mgr.set_agent_item_enabled("demo", "alpha", False) is True
     assert "alpha" not in mgr._agents
     assert set(mgr._plugin_agents["demo"]) == {"beta"}
-    prompt = mgr.get_available_subagents_for_prompt()
-    assert "- **alpha**" not in prompt
-    assert "- **beta**" in prompt
+    names = [a.name for a in mgr.list_subagents(include_hidden=True)]
+    assert "alpha" not in names
+    assert "beta" in names
 
 
 def test_set_item_enable_restores_from_file_cache(pm_stub, tmp_path):

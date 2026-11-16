@@ -1,12 +1,77 @@
 ## [Unreleased]
 
+## [v0.7.3] - 2026-11-16 (重新发布 #3)
+
+自 v0.7.2 以来的变更 | 提交数：92 · 文件变更：268 · +28899/-8000 | 贡献者：dingma, drifox-bot, mading
+
 ### ✨ 新功能 (New Features)
 
+- **侧栏会话标题悬停滚动播放（marquee）** (`app/widgets/elided_label.py` · `app/widgets/tab_panel.py`): `_ElidedLabel` 新增可选 `hover_scroll`：悬停且全文宽于可视宽时不让位给省略号，改由自绘把全文横向来回滑动（0 → 尾部 → 0，两端各停 0.9s；基准 45px/s，超长文本按「一趟 ≤ 8 秒」提速），移出 / 换文本 / 隐藏即复位为常规省略；滚动实例干脆不挂 tooltip（全文自己滚出来），并在起滚瞬间调 `QToolTip.hideText()` 收掉起滚前就已弹出的那个（系统 tooltip 延迟可能短于 350ms 起滚延迟），残留的 `QEvent.ToolTip` 请求仍被吞掉兜底。带搜索高亮（富文本 `<span>`）的实例不滚，自绘纯文本会丢高亮区间。行为写死、不新增系统设置项，只由构造参数 `hover_scroll` 逐实例决定（默认不开），全仓其余 `_ElidedLabel` 调用点行为不变。左侧标签页会话标题改为**右侧省略**（会话名前段辨识度最高，尾部多为可丢信息）并开启该效果。测试：`tests/widgets/test_elided_label.py` 补 11 例（默认不建定时器 / 滚动实例不挂 tooltip / 非滚动实例保留 tooltip / 起滚收掉已弹出 tooltip / 起滚推进 / 未溢出不起滚 / 移出复位 / 零偏移复位也重绘 / 换文本复位 / 高亮不滚 / QSS 颜色自绘）；逐帧量测 offset 与「全文左移后裁剪」地面真值完全一致，墨迹不越出控件。
+- **主程序打开本地文件可被插件接管（file_opener 扩展点）+ 文件树接管可预览文件** (`app/plugins/registries/ui_plugin_registry.py` · `app/widgets/workbench_panel.py` · `app/main_widget.py` · `plugins/file-tree/ui/`): 新增 UI 扩展点 `register_file_opener(plugin_name, opener_id, can_open, open_file, priority)` 与统一询问入口 `try_open_local_file(path)`：宿主在交系统默认程序之前按优先级降序问各接管项，`can_open` 命中即调 `open_file`，返回 False 视为放弃、继续问下一家，全都没接才走 `QDesktopServices`；单插件抛异常只让它自己出局（不影响后续接管与最终降级），插件卸载时接管项随之清理。`file-tree` 注册「可预览文件」接管项：点击工具完成框里的文件地址时，代码 / md / json / 图片直接开在工作台文件树页预览（文件在当前项目树内时顺带展开祖先并选中，返回树页能看见自己的位置；项目外文件只进预览不动展开状态），不可预览的类型或预览失败（超大 / 二进制 / 损坏）仍交系统默认程序，行为与改动前一致。首次打开工作台时页刚构建、根扫描尚未落地，树内定位改为异步推进：记住待定位路径，根条目落地与每层目录扫描完成后各推进一步（深层文件逐层扫描祖先），返回树页或扫完即补上选中，不再出现「点开过文件但树里没有任何选中」。配套新增 `registry.open_workbench_page(page_id)` / `get_workbench_page(page_id)` 与 `WorkbenchPanel.get_plugin_page(page_id)`，供插件向其它插件的页定向投递内容；文件树页新增公开入口 `FileTreeCard.preview_path(path) -> bool`。
 - **工具完成框里的文件地址可点击打开** (`app/widgets/render_helpers.py` · `app/widgets/card_viewers.py` · `app/main_widget.py`): 折叠头右侧路径、以及 read/grep/list/glob 单行卡预览里的路径片段渲染为可点元素（默认无装饰，hover 变主题强调色 `--accent` + 实线下划线，悬停 title 显示完整路径），点击由骨架 click 委托在折叠头之前抢断，转 `open_file` 消息交宿主按会话 workdir 解析后用系统程序打开；路径不存在给 InfoBar 提示（原实现静默吞异常）。显示文本仍是首尾缩短版，`data-open-path` 存完整原始路径。骨架版本 v79 → v81。
+- **团队框统一任务标题 + 成员行身份头像** (`app/widgets/tab_panel.py` · `app/widgets/tab_manager_window.py` · `app/widgets/elided_label.py`): 团队框 header 不再显示团队名，改显示整个团队唯一的任务标题（run 内最早生成的真实标题，按 `created_at` 取最早；未生成时回退团队名，历史回查带 5s TTL 缓存），header 项目图标改为标准尺寸（与普通 Tab 同档 20px），header 聚合 badge 整体停用（人数不需要，状态也不再堆到 header），hover 按钮只保留「新建任务」「解散团队」两个（快速新建成员的 hover 按钮去掉，入口保留在团队框右键菜单），团队成员行不再显示单个关闭按钮（保持列表齐整，右键菜单「关闭标签页」仍可关）；成员行标题让位给行尾语义文案——空闲显示最后活动时间（`session.last_updated` 相对时间），生成中/待回答/出错显示状态文案且配色与头像状态环同一套，时间退到 tooltip；行内容为「角色单字母彩色头像 + 角色名（普通文字，彩色胶囊去掉）+ 行尾文案」，折叠态与展开态共用同一套单字母头像，流式/待答光效画在该头像外侧（行层不再给角色名套环——早期把环画在胶囊/角色名外沿，视觉上像一个框套住全名，与头像环重复）；折叠态 tooltip 补「角色 · 任务标题」以区分成员；长角色名（root-cause-analyst / regression-guard）用 `_ElidedLabel` 左省略保留尾段（…analyst / …guard）并占剩余宽度，不再把行撑出面板可视区（时间与 header hover 按钮恢复可达）；`_ElidedLabel` 新增 `elide_mode` 参数（默认 Middle 行为不变），角色名原文单独存 `_role_text`，避免省略后取首字母画头像。
+- **群发权限放开：任意成员可全队群发** (`plugins/system-team/tools/team_tools.py` · `app/core/team/team_manager.py`): `team_send_message` 群发分支不再做 leader 门禁（`_leader_gate` 仅保留给 remove_member），发件人从「team.json 顶层 leader_window_id 反查」改为调用方窗口（`send_task_broadcast` 新增 `from_window` 参数，缺省回落 leader 登记以兼容旧调用），exclude_self 语义同步改为「跳过发送者自身」。预置/模板团队（join 路径不回写 leader 登记）此前全员含 leader 本人均被拒群发的死锁由此解除。remove 的 leader 门禁不变。
+- **项目上下文注入去重（未变化不重复注入）** (`plugins/assistant_hub/hooks/project_notes.py` · `plugins/assistant_hub/hooks/hooks.json`): `PreUserMessage` 的项目上下文（路径规则 + git 分支/工作树/stash/最近 commits）此前每轮都往 `session.messages` 追加一份，长会话里堆出几十份相同内容白烧 token。改为按内容指纹去重：主智能体同一会话内上下文实质未变时返回空、跳过注入，变了才注入；指纹先抹平 git `%cr` 相对时间（`(4 minutes ago)` / `(4 分钟前)`）的时间漂移，否则每分钟都会判成「变了」。去重只作用于主智能体（子智能体每次都是全新上下文，始终注入），状态按 `(session_id, 项目根)` 记在 hook 进程内、上限 256 条，进程重启或 hook 热重载后重新注入一次。新增 SessionStart `clear|compact` hook `reset_context_dedup` 清空指纹：历史被清空或压缩摘要后旧注入已不可见，必须允许重新注入。
+- **Stop 阶段指令条件化注入** (`plugins/system-hooks/hooks/stop_guidance.py` · `plugins/system-hooks/hooks/hooks.json`): 原三条静态 prompt hook（`builtin_stop_cleanup` 71 字符 / `builtin_stop_followup` 269 / `team_member_notify` 54）每轮无条件注入 `session.messages` 并永久驻留，80 个大会话统计共 4340 条 / 986,115 字符，其中 95% 逐字节重复。规则正文上移到编码契约 `builtin_global_contract`（进 system prompt，会话内恒定、不随历史被压缩），Stop 只留一条 python hook 发「现在该做什么」的时机信号，正文 110 字符（团队场景）/ 约 70（非团队），且三条合成一条消息省掉两套消息包装。注入条件：收尾检查仅当本轮 `PreToolUse` 命中过 `Bash|Edit|Write|MultiEdit`（`record_write` 记标记，`reset_round` 在每轮 `PreUserMessage` 清残留）；追问预测仅当本轮回答 ≥150 字符（短确认不再触发续命，省一次完整 API 请求）；团队回报告仅 `is_team_member` 为真。三条都不命中 → 返回空串，不注入也不续命。`team_member_notify` 原 `#team_member` matcher 合入 `completed`：取消/出错轮不再催报告。再补 leader 判定：宿主 `chat_worker._check_team_leader()` 在 Stop context 注入 `is_team_leader`（与 `is_team_member` 同口径，取默认团队 `leader_window_id`），leader 自己不再收到「回报告」指令（只汇总成员报告，`team_send_message` 发给自己属无效动作），团队启动指引同步补「leader 例外」一条，避免去掉 Stop 提示后 leader 仍照团队铁律发邮件。
 
-## [v0.7.2] - 2026-11-14 (重新发布 #4)
 
-自 v0.7.1 以来的变更 | 提交数：137 · 文件变更：560 · +27422/-9612 | 贡献者：dingma, drifox-bot, mading, martin98-afk
+
+- **生产三级告警体系** (`app/core/infra/alert_manager.py` · `app/core/infra/memory_governor.py`): RSS 斜率预警默认生效、闸门动作弹 InfoBar 提示、governor 每次动作结构化落盘可追溯；告警带防轰炸限频，不会在高压时刷屏。
+
+### 🐛 问题修复 (Bug Fixes)
+
+- **Anthropic 通道新模型拒收采样参数（top_p/temperature/top_k 4.7+ 弃用）** (`plugins/system-transports/transports/anthropic_messages.py`): `build_request` 把配置里的温度/top_p/top_k 原样透传进请求体，而 Claude 4.7+ 起采样参数整体弃用（官方文档：设为任何非默认值即 400，4.6 及以下不受影响），实测报 `top_p is deprecated for this model.`。修法按模型名分代（复用既有 claude 版本正则，含旧命名 `claude-3-5-sonnet` 与日期后缀防误判口径）：≥4.7 整组不透传（与 thinking 分代 4.6 边界不同，独立判断），4.6 及以下行为不变。测试：`tests/plugins/test_anthropic_messages_transport.py` 补 5 例（4.7/5.x 剔除三参数、开思考同样剔除、4.6 与旧命名照常透传、日期后缀 4.0 不误判），共 22 例全过。
+- **Anthropic 通道新模型开思考必 400（thinking.type.enabled 已被拒）** (`plugins/system-transports/transports/anthropic_messages.py`): `build_request` 把思考参数硬编码为 `thinking={"type":"enabled","budget_tokens":N}`，而 Claude 4.7+ / 5.x 只认 adaptive（官方 thinking-troubleshooting：4.5 及以下仅 enabled、4.6 两种都收、4.7+ 发 enabled 直接 400），实测 `claude-sonnet-5-5`（OAIPRO）开思考即报 `"thinking.type.enabled" is not supported for this model`。修法按协议分代分流：caps 链 `thinking_enable_value` 显式声明优先（对齐 openai_chat），缺省时从模型名解析 claude 版本（≥4.6 → adaptive，兼容中转别名/点号分隔/日期后缀——minor 限 1~2 位数字防把 `20250514` 当 minor=20；旧命名 `claude-3-5-sonnet` 单独正则）；adaptive 发 `thinking={"type":"adaptive"}` + `output_config.effort`（思考等级经 `normalize_reasoning_effort` 按 caps 档位归一，无档位数据用协议全集 low/medium/high/xhigh/max），不发 budget_tokens 也不抬 max_tokens；enabled 老路径原样保留。测试：`tests/plugins/test_anthropic_messages_transport.py` 17 例（分代形状/日期后缀不误判/caps 声明优先/effort 归一/关思考行为不变），真实 caps 链下用户模型请求体形状核验通过。
+- **hook 跨函数状态不共享，Stop 收尾指令永不注入** (`plugins/system-hooks/hooks/stop_guidance.py` · `plugins/assistant_hub/hooks/project_notes.py`): `HookWorker` 以「函数路径」为缓存键，同一文件的每个 hook 函数会被各自 `exec` 成独立模块，模块级 dict 互不可见。实测后果：`record_write` 在 PreToolUse 记了写操作标记，`hook` 在 Stop 读到的是另一份空表 → 写了文件也收不到「收尾」指令（会话 `9107ca60bd` 实测：write 落盘后 Stop 零注入）；`reset_context_dedup` 同理清的是另一份空指纹表，clear/compact 后去重失效。修法：状态改挂 `sys.modules` 固定键（`_drifox_stop_guidance_state` / `_drifox_project_notes_dedup_state`），`sys.modules.setdefault` 保证并发首建只留一份。验证按 HookWorker 的真实加载方式复现（同一文件不同函数各 exec 一次）：修前跨实例标记丢失，修后 `record_write→hook`、`reset_round→hook`、`hook_context→reset_context_dedup` 三组跨实例读写全部打通。
+- **启动后首次对话的技能/子智能体清单不完整（占系统提示词 / 缺智能体列表）** (`app/core/services/plugin_host_service.py` · `app/core/conversation/agent.py`): 清单从 `BuildSystemPrompt` 拆到 `SessionStart` 后，启动后第一次对话表现异常，手动新建一次会话才恢复。两类同源症状，根因都是 agents+hooks 全量 reload 排在 `PluginHostService` 的 idle 延迟队列（delay 2s），而窗口 showEvent 的 critical 任务立刻 `create_session` 并触发 `SessionStart`：① hooks 尚未注册时 `HookManager.trigger_event` 首行 `if event_name not in self._hooks: return []` 静默空返（无日志），会话消息里两个清单都没有 → 首条消息退回 `inject_skills_content` 的 system prompt 兜底注入并随 `session.system_prompt` 持久化（实测差额 3731 字符，两次启动稳定复现）；② hooks 已注册但 agents 尚未解析时 `inject_subagent_info` 拿到空 `list_subagents` → 整块 `<available_subagents>` 不输出，而技能清单走 `config.read` 不依赖 AgentManager，表现为「有技能列表但没有智能体清单」。修法：`_init_plugin_system` 在 PluginManager 扫描后同步调用 `reload_agents()`（实测冷启动 243ms，热跑 10ms），idle 队列里那条保留（幂等热跑，兜住初始化后的插件变更）；hooks 组件整类停用的插件照旧跳过，与 `_load_agents` 同口径。测试：`tests/core/test_plugin_hooks_registered_before_session.py` 4 例（一次 reload 后 hooks 与 agents 同时就绪 / hooks 组件停用跳过 / `_init_plugin_system` 同步段确实调用 reload_agents / reload 抛异常不中断启动的延迟链）。
+- **表格紧贴正文时渲染成普通文本** (`app/widgets/card_render_core.py`): 模型常把表格紧接在段落下一行、不给空行，而 Python-Markdown 的 tables 扩展只在独立块上生效（GFM 同样不允许表格打断段落），整张表退化成一行行带 `|` 的文本加 `<br>`，表现为「表格渲染不出来」。新增 `_normalize_table_blocks`，在 `_sanitize_incomplete_markdown` 入口补表格前后空行——该函数是全量 / 差量段 / 尾部行内 / worker / viewer / block 六条渲染管线的共同入口，一处补齐全线生效；识别依赖 `_looks_like_table_separator`（分隔行字符集与列数判定，与 tables 扩展口径一致）。同时补上表格后紧跟正文的空行，避免正文被 tables 扩展当成缺列的数据行吞进表体。围栏内原样不动，输入已规范时零改动（幂等）。
+- **交接（update_handoff）新建的会话不生成标题** (`plugins/system-handoff/tools/update_handoff.py` · `app/main_widget.py` · `app/plugins/capabilities/providers/{ui_core,tool_core}.py`): 交接三连里的继续指令经 `session.send` 入队时默认带 `_hook_event="SessionSend"`，而宿主 `_publish_title_request` 的「首条真实用户消息」白名单只放 `TeamMail`，交接轮的 `len(user_messages)==0` 直接 return → `title.request` 永不发布，新会话停在占位名「对话 MM-DD HH:MM」；用户之后发的第一句真实消息反被当成首问，若 ≤10 字更会直接 commit 成标题（实测标题变成「顺便把测试也补上」这种跟原任务无关的句子）。修法双轨：① `session.new` 能力新增 `title` 参数，交接侧 `_handoff_title` 传源会话标题（占位形态「新对话」/「对话 MM-DD HH:MM」回退交接文档「任务目标」首行），宿主 `_handle_action_new` 走 `_apply_new_session_title` 直接落标题，不依赖模型；② 宿主白名单加入 `SessionSend`，并把「继续完成「…」会话的交接任务」固定句式剥成「」里的主题再判长短，兜住定时器触发等其它经 `session.send` 驱动的系统轮次。
+
+- **历史会话反序列化原生崩溃（orjson 兼容快赢）** (`app/core/infra/perf_jsonl.py` · `app/utils/config.py`): 读取旧会话时新版 orjson 反序列化直接触发原生崩溃；升级 orjson 3.13.0 并新增 `DRIFOX_SERDE_STDLIB` 兜底开关，一行环境变量即可退回标准库序列化路径，崩溃即时止血。
+- **壁纸内存观测读数恒 0** (`app/core/infra/rss_sampler.py`): GDI/USER 句柄读取零 ctypes 声明，伪句柄按 32 位传 64 位 API 恒失败，失败 0 被当合法读数落盘；补齐签名并增加失败判定（失败退化为不采样，不再写 0 污染判据），真实 GUI 进程读数恢复数百级。
+- **Responses API 插件化（Phase 3）**: \`/v1/responses\` 从 worker 原生通道迁入 \`system-transports/transports/openai_responses.py\`（id=\`openai_responses\`）：请求组装（input/instructions/tools/reasoning.summary/max_output_tokens）、SDK 流事件归一（reasoning/content/tool_call 三段/usage/finish）、错误映射全在插件内；worker 与子智能体统一按 \`protocol_dispatch.resolve_transport_target\` 解析 transport id，删除 \`_build_responses_kwargs\` / \`_process_responses_stream\` 与子智能体非流式 responses 实现（主程序净减约 400 行）。adapter \`protocol\` 字段补 \`responses\` 声明；SDK 新增 \`messages_to_responses_input\` / \`tools_to_responses\` 两个稳定符号。子智能体改走同一 transport + StreamEvent 聚合，不再有独立 responses 分支。
+
+### ⚡ 性能优化 (Performance)
+
+- **壁纸链路内存治理（4K 稳态约 -127MiB）** (`app/core/infra/scene_pixmap_cache.py` · `app/widgets/scene_layer.py`): baked 副本按像素面积预算封顶（4K 从 4 份降为 1 份，约 -95MiB）；全部窗口关闭后引用归零立即清空缓存（不再等 30s 宽限）；blur 前的 premult 副本改为过程副本不入缓存。三项合计 4K 稳态约 -127MiB，1080p 行为零变化。
+
+### 🧪 测试与诊断 (Tests & Diagnostics)
+
+- **持续运行性能观测体系（七类埋点，全部 env 门控默认关零开销）** (`app/core/infra/telemetry/` · `app/core/infra/rss_sampler.py` · `app/tools/mcp_tools.py`): 心跳分位数、全线程周期 dump、GC gen2 统计、GDI 句柄、renderer 假死探测、三级告警联动、WebView 命中率。配套机判脚本 `scripts/smoke_verdict.py`（六判据 PASS/FAIL/INVALID，退出码可接 CI）与一键冒烟起跑/归档脚本，跑完即可出机判表。
+- **长时压测场景补齐至六个 + runner 三档** (`tests/perf/long_run/`): 新增主题切换（D，活事件循环泵）、MCP 探活（E，本地 stub + 失败重试监控）、窗口级会话开关（F，纯 HTTP 驱动运行中实例 + 假 LLM 流式 stub）三场景；runner 支持 smoke/std/converge 三档与采样间隔覆盖；采样扩 GDI/QTimer/gap 三列；修复场景 C 指向已迁移的热重载入口。
+
+### ✨ 新功能 (New Features) (重新发布 #2 追加)
+
+- **多滚动区域快速滚轮** (`app/utils/scroll_tuning.py` · `app/main_widget.py` · `app/widgets/tab_panel.py` · `app/widgets/cards/` 等): 新增滚动调优模块：滚轮事件禁用平滑滚动动画、单步直接更新数值并按持续滚动加速，`install_fast_wheel` 一行接入 `SystemCardFrame`；`main_widget` / `tab_panel` / `chat_area_module` / `markdown_block_viewer`、@卡 / 权限批准 / 提问浮窗 / 分享卡 / 子智能体紧凑卡、LLM 设置 / 模型选择 / 插件设置页等十余个滚动区域全部接入。配套滚动性能与 paint 事件成本基准（`benchmarks/`）。
+- **瞬态 provider 表单资源管理** (`app/widgets/cards/global_card_controller.py` · `app/widgets/cards/settings/provider_edit_card.py` · `app/widgets/webview_pool.py`): provider 表单等瞬态卡片补生命周期资源管理；新增 `benchmarks/bench_card_lifecycle.py` / `bench_provider_lifecycle.py` 生命周期基准与 `tests/widgets/test_provider_form_lifecycle.py` / `test_webview_pool_idle_gc.py` 回归。
+- **anthropic_messages transport 按模型分代处理请求参数** (`plugins/system-transports/transports/anthropic_messages.py` · `app/widgets/card_render_core.py`): 按模型版本分代构建请求参数（新代模型弃用采样类参数，透传非默认值会被 400 拒绝），build_request 分代整组不透传；新增 `tests/plugins/test_anthropic_messages_transport.py` 与 `tests/widgets/test_chart_fence_scan_cost.py`；插件 plugin.json 描述与版本同步更新。
+- **同步合并期间抑制保存防数据丢失** (`app/core/sync/` · `app/utils/config.py` · `app/utils/secret_store.py` · `plugins/system-transports/transports/openai_chat.py`): 同步合并期间抑制本地保存，防止合并写入与运行时保存交错丢数据；`openai_chat` 请求参数形状治理配套，新增参数形状 / 保存守卫 / 密钥库等配套测试。
+- **CardContainer overlay 状态管理** (`app/widgets/cards/card_container.py`): 补 overlay 状态守卫，避免卡片切换链路上不必要的状态翻转。
+
+### 🐛 问题修复 (Bug Fixes) (重新发布 #2 追加)
+
+- **底部容器卡片切换 fallback 行为** (`app/plugins/registries/ui_plugin_registry.py`): 修正 UI 卡片切换的 fallback 行为判定。
+- **Gitee OAuth 连接移除本地备份步骤** (`app/widgets/cards/settings/gitee_card.py`): 连接流程不再执行本地目录备份（该步骤此前已挪后台线程），连接路径更直接。
+
+### ♻️ 代码重构 (Refactoring) (重新发布 #2 追加)
+
+- **插件化残留清理：M4 团队分组旧实现与长期记忆死链摘除** (`app/main_widget.py` · `plugins/history-manager/ui/history_card.py` · `app/core/conversation/memory_manager.py` · `app/core/store/`): 删除 `_build_team_groups` / `set_team_groups`（M4 混排后无业务调用方，仅旧测试引用）及 history_card 渲染路径三处老格式兼容分支与 `_team_groups` 死属性；`_history_card` / `_history_popup_card` 两个无写入者的空 setter 摘除（property 只读代理保留）。长期记忆链路整体下线：`MemoryManagerCore` 摘除条目记忆 API 与 `format_memories_for_prompt`（记忆/经验已由 assistant_hub 插件接管），`session_store` 删 `save_memory` / memories 表建表与 canvas_id 迁移，`app/core/store/memory_repository.py` 整文件删除；项目工作目录 API（get/set_working_directory，宿主与 worktree-manager 插件在用）不受影响。测试：`tests/widgets/test_team_restore.py` 删 8 个死用例，11 个引用已迁移旧路径（`app/widgets/cards/settings/history_card`）的用例改按文件路径加载 history-manager 插件模块；`test_core_smoke` / `test_perf_guard_io` 断言同步收窄。
+
+### ⚡ 性能优化 (Performance) (重新发布 #2 追加)
+
+- **关闭等待回答标签后停止空闲动画** (`app/widgets/tab_panel.py`): `remove_tab()` 补齐 `_question_count` 递减，避免已关闭标签留下等待回答计数，使 66ms 状态动画定时器持续空转。新增 3 条回归，覆盖单标签关闭、保留另一流式标签、混合状态批量关闭；相关 47 条测试通过。新增历史批次滚动/长帧与隐藏设置卡内存测量，结果及测量边界见 `docs/perf/2026-11-16-idle-animation-and-memory.md`。
+
+### 🔧 其他 (Chores & Build) (重新发布 #2 追加)
+
+- `marketplace.json` 由 CI 从插件 manifest 自动再生。
+
+### 🐛 问题修复 (Bug Fixes) (重新发布 #3 追加)
+
+- **改自定义模型上下文长度后不生效，要新建标签页才刷新** (`app/core/engines/ui/engine.py` · `app/core/modelmeta/model_capabilities.py` · `app/main_widget.py`): 五处独立缺陷叠加，任何一处都足以让用户改完设置看不到变化。① `UIEngine.get_context_usage_snapshot` 的快照缓存键只含消息版本/模型名/权威值/系统提示，漏了 `budget_tokens` 与 token 校正比——二者来自 `llm_config`，与消息版本毫不相干，于是未发新消息时永远命中旧快照，圆环预算停在旧值，只有新建标签页（新引擎 → 空缓存）才恢复；现在两项并入缓存键。② `resolve_context_limit` 完全不读「声明_上下文长度」，而 UI 能力胶囊走 `resolve_model_capabilities`（含声明层），两套口径不一致导致能力弹窗里填的上下文长度只改标签不改实际预算；补 L0 声明层（非法值跳过回落，`saved_providers` 的显式值让位给声明）。③ `_refresh_context_usage_indicator` 的节流分支直接 return 且无反向补偿，配置变更恰好落在上一轮 0.5s 窗口内就被静默丢弃；新增 `force` 参数供配置类变更绕过节流。④ `LLM.ModelOverrides` 全项目无 `valueChanged` 监听，任意标签页改模型级参数/能力声明，其他标签页的圆环与参数卡都不刷新；注册 `_on_model_overrides_changed`，圆环 force 重画、参数卡与模型选择卡在下一拍重建（延后一拍，避开 `configApplied` 发射栈内清空同批控件）。⑤ 快照缓存的写入值与返回值是同一对象，消费方（`ring.set_usage` / tooltip）原地改写 `breakdown` 会反向污染缓存，之后每个命中者都拿到脏值；抽 `_snapshot_copy` 统一隔离。另 `_on_providers_config_changed` 补 force 刷新，覆盖连接级「最大Token」与服务商默认变化。回归 `tests/core/test_context_limit_live_refresh.py` 新增 14 例，逐条锁死上述路径，含缓存来回改、缓存污染隔离、声明层优先级与非法值回落、force 越过节流、信号已接线。
+
+## [v0.7.2] - 2026-11-14 (重新发布 #8)
+
+自 v0.7.1 以来的变更 | 提交数：150 · 文件变更：582 · +28735/-9824 | 贡献者：dingma, drifox-bot, mading, martin98-afk
 
 ### ✨ 新功能 (New Features)
 
@@ -103,6 +168,37 @@
 ### 🔧 其他 (Chores & Build) (重新发布 #4 追加)
 
 - **插件市场索引自动重生成** (`marketplace.json`): GitHub Actions 按 plugin.json 重新生成（`[skip ci]`）。
+
+### ✨ 新功能 (New Features) (重新发布 #5 追加)
+
+- **文件树右键菜单精简，打开类动作置顶** (`plugins/file-tree/ui/cards.py`): 文件/目录的系统打开动作（「用默认程序打开」「在访达/资源管理器中打开」「打开所在文件夹」）提到菜单最上方，不再埋在底部；移除「打开方式…」与「预览」两个二级入口（双击分流与预览页自身的「打开方式」按钮仍在）；「新建文件」「新建文件夹」「刷新」收敛为仅目录节点与空白处（等价根目录）出现，文件右键不再显示无意义的目录操作。
+- **mac 文件「打开方式」能标出系统默认程序** (`plugins/file-tree/ui/openwith.py` · `plugins/file-tree/ui/preview.py`): 默认程序两级反查——静态读 `~/Library/Preferences/com.apple.LaunchServices/com.apple.launchservices.secure.plist` 的 `LSHandlers`（零依赖，按 `LSHandlerContentTag` 扩展名或 `LSHandlerContentType` UTI 匹配，bundle id 经应用扫描缓存反查路径），未命中再走 `LSCopyDefaultApplicationURLForURL`（pyobjc，按真实探针文件取 UTI）。默认项置顶并按 bundle 路径去重；预览页在无默认标记时不再拿候选首项冒充默认（此前会把任意程序当成默认显示图标）。应用扫描目录补齐 `/System/Applications` 与 `/System/Applications/Utilities`，系统自带应用（文本编辑、预览等）此前完全不在候选里。
+
+### 🎨 样式改进 (Style) (重新发布 #5 追加)
+
+- **mac 右键菜单四角白角** (`plugins/file-tree/ui/cards.py`): `WA_TranslucentBackground` 只把窗口标记为非 opaque，`NSWindow.backgroundColor` 照旧填默认窗底色（浅色外观≈白灰），从 QSS 圆角外的四角露出。`WA_NoSystemBackground` 与 `grab()` / `isOpaque` 都查不出（四角 alpha=0，白角在合成层）。修法：菜单 `installEventFilter`，`QEvent.Show` 时经 `objc_msgSend` 把 `NSWindow.backgroundColor` 设为 `NSColor.clearColor`（实测四角白色像素占比 2% → 0%）。时机是关键：不能提前用 `winId()` 强创原生窗口，那会绕开 Qt 的 popup 管理路径，菜单关闭后 grab 不释放导致整个界面僵死。
+
+### 📚 文档 (Docs) (重新发布 #5 追加)
+
+- **AGENTS.md 增加封面图 frontmatter** (`AGENTS.md`): 补 `cover` 元数据（image / actualRatio 16:9 / 2000×1125）。
+
+### 🐛 问题修复 (Bug Fixes) (重新发布 #6 追加)
+
+- **打包版「打开方式」菜单图标全部消失** (`plugins/file-tree/ui/openwith.py`): 打包目录里 `QtWinExtras.pyd` / `Qt5WinExtras.dll` 双缺席——插件源文件不被 PyInstaller 分析，主代码零静态引用，hook 不收集该模块；`_icon_from_exe` 的 `except Exception` 把 ImportError 静默吞成空 QIcon。HICON→像素改纯 ctypes（GetIconInfo + GetDIBits，与 `tree_widget.py` 同源实现），不再依赖 Qt 废弃绑定（Qt6 已移除），仅走系统 shell32/gdi32/user32，打包版无需重配即可恢复图标。
+
+### 🐛 问题修复 (Bug Fixes) (重新发布 #7 追加)
+- **钥匙串写入 -25244 回退明文落盘** (`app/utils/secret_store.py`): macOS Keychain 报 errSecInvalidOwnerEdit——条目由其他签名身份创建（adhoc 重打包后 hash 变化、或开发环境 Python 先写入），`SecItemUpdate` 无所有权被拒，fail-open 降级成明文 config.json。`SecretStore.set` 捕获 -25244/-25293 删除旧条目重建（首次触发系统授权框，「始终允许」后所有权转移；拒绝则照旧明文回退）。
+### ♻️ 代码重构 (Refactoring) (重新发布 #7 追加)
+- **插件密码硬切明文存储** (`app/plugins/managers/plugin_config_store.py`): 用户决策放弃插件字段走系统钥匙串——`config_schema` 声明 `type: password` 的字段一律明文落 `config.json`；钥匙串时代旧值首次读取时经 `_migrate_secret_back` 迁回 JSON 并删除密钥库条目，凭据不丢，`set_values` 顺手清理钥匙串残留。服务商 API Key 不受影响（`secret_mode` 三态照旧）。
+
+### 🐛 问题修复 (Bug Fixes) (重新发布 #8 追加)
+
+- **正常对话跑到 1 小时被强制中断（worker 总寿命默认 3600s）** (`app/core/workers/chat_worker.py`, `tests/core/test_chat_worker_lifetime.py`): 单次 worker 总寿命上限原默认 3600s，到点后 `run()` 主循环顶部判定超限、走正常完成路径结束本轮，长重构/连续编码任务被硬切断。改为默认 **0（关闭）**：墙钟不该截断正常对话，防挂死改由 `MAX_CONTINUATIONS`（默认 8）独立承担，它只拦 Stop hook / hook 队列反复 `continue` 这条异常路径，正常对话到不了触发点。需要硬上限时仍可用 `DRIFOX_WORKER_MAX_LIFETIME_S=<秒>` 打开。同时把 `_worker_lifetime_reason()` 非法值回退目标从硬编码 `3600.0` 改为新常量 `DEFAULT_WORKER_LIFETIME_S`，否则默认关闭时用户填一个非法值会反向打开一小时截断。
+- **服务商编辑卡闪现幽灵空窗** (`app/widgets/cards/settings/provider_edit_card.py`, `tests/widgets/test_provider_edit_card_no_ghost_window.py`): 能力类型行容器构造时无父对象，作为顶层窗口在屏幕上闪一下再被布局接管。改为带父构造 `QWidget(self)`，并把 `setVisible` 挪到 `addWidget` 之后（先入布局再显隐）。新增回归测试覆盖编辑已有 / 自定义添加 / 预置添加三条路径，断言无顶层幽灵 Show 事件。
+
+### 📚 文档 (Docs) (重新发布 #8 追加)
+
+- **贡献指南同步架构重构** (`CONTRIBUTING.md`): 技术栈更新为 Python 3.14+、依赖管理改 uv（`pyproject.toml`）；目录树反映 `core/conversation`、`core/context`、`hooks`、`plugins` 新结构；上下文说明由「LLM 压缩」改为「分层上下文管理，无损」。
 
 ## [v0.7.1] - 2026-11-11
 
@@ -273,7 +369,7 @@
 - **工具插件拆分**: `system-tools` 拆为 `system-core`（文件/终端/待办）、`system-web`（websearch/webfetch + 搜索 API Key 配置）、`system-question`（提问）、`system-team`（团队协作）、`system-diagnostics`（get_diagnostics / lsp），原插件保留技能加载/管理、MCP 管理、Gitee 上传。插件启停、工具级禁用键与搜索 Key 配置均有一次性迁移。
 - **模型协议入口手动选择**: 「接口入口」下拉收口到「服务商 → 模型列表 → 齿轮 → 模型能力」弹窗（参数卡不再渲染：渲染是配置驱动的，键不存在整行不出现，而三条注入链都不产出该键 → 死循环；能力弹窗里手选的插件被禁用/卸载时原值单独成项保留，不静默回退自动）。选项为自动 / Responses API / 已注册协议插件动态枚举，手选值按模型落盘（`ModelOverrides` 同条目）并在 worker 分派单点生效；旧键 `使用ResponsesAPI` 显式设置时优先。子智能体链路对齐 `responses` / 自动，手选插件通道警告回退。
 - **gpt-6 思考流式**: Responses 请求补 `reasoning.summary="auto"`（官方语义：不显式 opt in 就不返回思考摘要，此前只发 `effort` → 服务端只给 reasoning_tokens，UI 一个 reasoning delta 都收不到）；服务端 400 拒绝该字段时去掉后重试一次。Responses API 自动判定改为按 gpt 主版本号（≥5）通用匹配；恢复 worker `_chat_transport` 测试注入点读取（a6946c9f5 搬迁回归）。
-- **Responses API 插件化（Phase 3）**: \`/v1/responses\` 从 worker 原生通道迁入 \`system-transports/transports/openai_responses.py\`（id=\`openai_responses\`）：请求组装（input/instructions/tools/reasoning.summary/max_output_tokens）、SDK 流事件归一（reasoning/content/tool_call 三段/usage/finish）、错误映射全在插件内；worker 与子智能体统一按 \`protocol_dispatch.resolve_transport_target\` 解析 transport id，删除 \`_build_responses_kwargs\` / \`_process_responses_stream\` 与子智能体非流式 responses 实现（主程序净减约 400 行）。adapter \`protocol\` 字段补 \`responses\` 声明；SDK 新增 \`messages_to_responses_input\` / \`tools_to_responses\` 两个稳定符号。子智能体改走同一 transport + StreamEvent 聚合，不再有独立 responses 分支。
+- **Responses API 插件化（Phase 3）**: `/v1/responses` 从 worker 原生通道迁入 `system-transports/transports/openai_responses.py`（id=`openai_responses`）：请求组装（input/instructions/tools/reasoning.summary/max_output_tokens）、SDK 流事件归一（reasoning/content/tool_call 三段/usage/finish）、错误映射全在插件内；worker 与子智能体统一按 `protocol_dispatch.resolve_transport_target` 解析 transport id，删除 `_build_responses_kwargs` / `_process_responses_stream` 与子智能体非流式 responses 实现（主程序净减约 400 行）。adapter `protocol` 字段补 `responses` 声明；SDK 新增 `messages_to_responses_input` / `tools_to_responses` 两个稳定符号。子智能体改走同一 transport + StreamEvent 聚合，不再有独立 responses 分支。
 
 ### 🐛 问题修复 (Bug Fixes)
 - **关 tab 必现崩溃修复（system-timer 事件桥悬挂连接）**: 关闭任意标签页稳定触发 `TypeError: native Qt signal is not callable`（C 层异常，excepthook 连 traceback 都拿不到）。根因：`TimerScheduler._ensure_subscriptions` 清桥分支只 `bridge.event.disconnect()` + `deleteLater()`，未断开 `_connections` 中 backend 5 个对话流信号到桥的订阅，悬挂连接留到桥析构批次清理时炸出。修复为删桥前按 `handler.__self__ is bridge` 精确断开并同步清 `_connections`（与 `stop()` 逻辑一致）。附带改进：`main.py` 全局异常钩子补 no-tb 兜底——`exc_tb` 缺失时读 `exc_val.__traceback__`，仍无则 dump 主线程当前栈，纯 C 层异常不再只留一行孤立错误文本。回归测试 `tests/plugins/test_system_timer_bridge_cleanup.py`（清桥后 emit 不得穿透调度器），复现链 `tests/debug/repro_close_tab_full_boot.py`。

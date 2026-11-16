@@ -52,6 +52,7 @@ from app.utils.startup_manager import (
     request_auto_start_update,
 )
 from app.utils.theme_mode import apply_light
+from app.utils.scroll_tuning import install_fast_wheel
 from app.utils.utils import get_font_family_css, get_icon, invalidate_font_family_css_cache
 from app.widgets.cards.settings.list_setting_card import SkillListSettingCard
 from app.widgets.cards.settings.plugin_components_card import PluginComponentsCard
@@ -1232,6 +1233,7 @@ class LLMSettingsCard(SystemCardFrame):
         # 分组数变多后高度可能超过卡片可视区，导航自身可滚动（内容与分页共用滚动条样式）
         scroll = ScrollArea(nav)
         scroll.setWidgetResizable(True)
+        install_fast_wheel(scroll)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         scroll.setStyleSheet(SystemCardFrame._scroll_style())
 
@@ -1293,6 +1295,7 @@ class LLMSettingsCard(SystemCardFrame):
         """创建单个分页：独立 QScrollArea + 垂直内容布局"""
         page = ScrollArea(self)
         page.setWidgetResizable(True)
+        install_fast_wheel(page)
         page.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         page.setStyleSheet(SystemCardFrame._scroll_style())
 

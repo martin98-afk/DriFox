@@ -102,3 +102,7 @@ $RECYCLE.BIN/
 
 # sdd 编排台账（brief/report/ledger，不提交）
 .superpowers/
+
+# 探针输出（体积可达 GB 级，禁止入库）
+tests/debug/_*.txt
+tests/debug/*.log

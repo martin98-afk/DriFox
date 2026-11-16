@@ -47,9 +47,11 @@ _CONTEXT_WINDOW_ONLY_KEYS = frozenset({"最大Token", "上下文长度"})
 # 面板无任何反馈，观感等同于卡死）。
 _SUBAGENT_API_MAX_RETRIES = 5
 
-# ========== 上下文注入预算常量 ==========
-CHARS_PER_TOKEN = 4  # 与 HistoryCompactor 保持一致
-_CONTEXT_INJECTION_RATIO = 0.6  # 上下文注入最多占 budget 的 60%
+# [用户裁决 #35] 上下文注入预算已拆除（_CONTEXT_INJECTION_RATIO /
+# CHARS_PER_TOKEN / _compute_context_budget 随之删除）：父历史全文注入，
+# 不做预算性丢弃；超模型窗口由 provider API 报错，后果自担。
+# agent 配置的 inherit_history_budget_ratio 字段不再被读取（agent.py 字段
+# 定义保留，属死配置，待统一清理）。
 # 最终总结提示词兕底文案（激活策略无 final_summary_prompt 时使用，内容与原硬编码等价）
 _FALLBACK_FINAL_SUMMARY_PROMPT = """
 
@@ -62,35 +64,6 @@ _FALLBACK_FINAL_SUMMARY_PROMPT = """
 4. 待解决的问题（如有）
 
 直接输出总结内容："""
-
-
-def _compute_context_budget(llm_config: Dict) -> int:
-    """
-    计算当前模型的上下文 token 预算。
-    逻辑与 HistoryCompactor.get_budget() 保持一致。
-
-    Args:
-        llm_config: 模型配置字典
-
-    Returns:
-        可用于历史的 token 预算
-    """
-    if not isinstance(llm_config, dict):
-        logger.warning(
-            f"[SubAgentExecutor] _compute_context_budget received non-dict llm_config: {type(llm_config).__name__}, using defaults"
-        )
-        return 96000  # 默认 128k * 0.75
-
-    context_limit = resolve_context_limit(llm_config)
-    max_output_tokens = resolve_max_output_tokens(llm_config)
-
-    # O1/O3 模型需要更大的输出预留
-    model_name = str(llm_config.get("模型名称", "") or llm_config.get("model", "")).lower()
-    reserved = min(800, max_output_tokens)
-    if "o1" in model_name or "o3" in model_name:
-        reserved = min(max_output_tokens, 32000)
-
-    return max(500, context_limit - reserved)
 
 
 # [H5] tool_result 日志预览上限。UI 完整视图本就只渲染前 2000 字符
@@ -177,6 +150,9 @@ class SubAgentExecutor(QThread):
         self.agent_name = agent_name
         self.task_description = task_description
         self.llm_config = llm_config
+        # perf(net): per-task 复用的 API client（None=未建）；任务结束由 run()
+        # finally 在本 worker 线程内 close 置 None
+        self._api_client = None
         self.agent_manager = agent_manager
         self.tool_executor = tool_executor
         self.parent_context = parent_context
@@ -287,19 +263,26 @@ class SubAgentExecutor(QThread):
         self._pending_answer = answer
 
     def _build_inherited_context(self, agent, history_messages: List[Dict]) -> List[Dict]:
-        """
-        基于 context budget 构建主智能体历史上下文注入。
+        """父历史全文注入（用户裁决 #35：不做预算性丢弃）。
 
-        策略：
-        1. 获取模型 context budget（token 数）
-        2. 按比例计算可用 token
-        3. 从最新消息向前填充，保持每条消息完整（不截断内容）
-        4. 将消息作为原始 message 对象返回（保留 role/content），
-           以支持 API provider 的 prompt caching
-        5. 超出 budget 时整条消息丢弃（不截断内容）
+        旧实现按 context budget × ratio（agent 配置 0.1~0.8）从最新向前填充、
+        放不下整条丢弃；现改为完整注入全部历史，超模型窗口由 provider API
+        报错（后果自担）。
+
+        保留的清洗（请求合法性，非预算）：
+        - 提取 role/content 原始格式（multimodal content 原样保留），支持
+          API provider 的 prompt caching；
+        - 空 str 内容的消息跳过（空消息会让部分 provider 报 400）；
+          multimodal list 即使全空 text 也保留（与旧实现口径一致）。
+
+        tool 角色不再跳过：旧注释「工具结果很长」表明跳过动机是省预算而非
+        请求格式合法性（tool 是标准协议角色，与前置 assistant 的 tool_calls
+        声明配对后完全合法）。父历史来自完整配对的会话消息，全文注入天然
+        保住配对；inherit_history_count 截断可能从中间切开配对，悬空声明/
+        孤立结果由调用处 truncate_messages_at 修复。
 
         Args:
-            agent: Agent 配置对象
+            agent: Agent 配置对象（预算比例字段已废弃不再读取）
             history_messages: 主智能体的历史消息列表
 
         Returns:
@@ -308,63 +291,28 @@ class SubAgentExecutor(QThread):
         if not history_messages:
             return []
 
-        # 获取预算比例（优先从 agent 配置读取）
-        budget_ratio = (
-            getattr(agent, "inherit_history_budget_ratio", _CONTEXT_INJECTION_RATIO) or _CONTEXT_INJECTION_RATIO
-        )
-        # 确保比例在合理范围内
-        budget_ratio = max(0.1, min(0.8, float(budget_ratio)))
-
-        # 计算可用 token 预算
-        budget_tokens = _compute_context_budget(self.llm_config)
-        max_context_tokens = int(budget_tokens * budget_ratio)
-        if max_context_tokens <= 0:
-            return []
-
-        # 从最新消息向前填充，保持消息完整
         selected_messages = []
-        remaining_tokens = max_context_tokens
-
-        for msg in reversed(history_messages):
-            role = msg.get("role", "user")
-            # 跳过 tool 角色消息（工具结果很长且与 assistant 消息隐含关联）
-            if role == "tool":
-                continue
-
-            # 预估消息的 token 数
+        for msg in history_messages:
             content = msg.get("content", "")
+            # 带 tool_calls 声明的 assistant 不可因空 content 跳过——
+            # 否则其 tool 结果悬空，provider 直接 400（配对合法性优先于清洗）
+            has_declarations = bool(msg.get("tool_calls"))
             if isinstance(content, list):
-                # multimodal 内容（图文混合），只从 text 部分估算
-                content_text = "".join(c.get("text", "") for c in content if isinstance(c, dict))
+                # multimodal（图文混合）原样保留
+                pass
             elif isinstance(content, str):
-                content_text = content
+                if not content and not has_declarations:
+                    continue
             else:
-                content_text = str(content) if content else ""
+                if not content and not has_declarations:
+                    continue
 
-            # 无内容的消息跳过
-            if not content_text and not isinstance(content, list):
-                continue
+            # [请求合法性] 浅拷贝原消息**整体**透传（role/content/tool_calls/
+            # tool_call_id/thought_signature 等协议字段全保留）。旧实现重建
+            # {role, content} 两键会剥掉 tool 配对字段 → 注入的 tool 消息
+            # 无声明引用，provider 直接 400。
+            selected_messages.append(dict(msg))
 
-            # token 数估算（1 token ≈ 4 字符，+4 角色开销）
-            msg_tokens = max(1, len(content_text) // CHARS_PER_TOKEN) + 4
-
-            if msg_tokens <= remaining_tokens:
-                # 完整消息放得下，保留原始格式
-                clean_msg = {"role": role}
-                if isinstance(content, list):
-                    clean_msg["content"] = content  # 保留 multimodal 原始格式
-                elif isinstance(content, str):
-                    clean_msg["content"] = content
-                else:
-                    clean_msg["content"] = str(content) if content else ""
-                selected_messages.append(clean_msg)
-                remaining_tokens -= msg_tokens
-            else:
-                # 放不下则停止（不截断内容）
-                break
-
-        # 翻转回正序
-        selected_messages.reverse()
         return selected_messages
 
     def _add_log(self, log_type: str, content: str, extra: dict = None):
@@ -530,6 +478,18 @@ class SubAgentExecutor(QThread):
                         # 根据 inherit_history_count 限制消息数量
                         if agent.inherit_history_count is not None:
                             history_messages = history_messages[-agent.inherit_history_count :]
+                            # [请求合法性] count 截断可能从 assistant(tool_calls) 与其
+                            # tool 结果之间切开，留下悬空声明/孤立结果 → provider 400。
+                            # 旧实现靠「tool 全跳过」掩盖；全文注入后必须修配对
+                            # （保留 [0..末尾] 全部消息，仅剥悬空声明/孤立结果）。
+                            try:
+                                from app.core.conversation.message_content import truncate_messages_at
+
+                                history_messages = truncate_messages_at(
+                                    history_messages, len(history_messages) - 1
+                                )
+                            except Exception as repair_err:
+                                logger.warning(f"[SubAgentExecutor] 截断配对修复失败（按原样注入）: {repair_err}")
 
                         inherited_messages = self._build_inherited_context(agent, history_messages)
                 except Exception as e:
@@ -629,6 +589,17 @@ class SubAgentExecutor(QThread):
                 except Exception as e:
                     logger.warning(f"[SubAgentExecutor] 保存错误状态失败: {e}")
             self.error_occurred.emit(self.task_id, self._execution_error)
+        finally:
+            # perf(net): 任务结束（正常/异常/取消）在本 worker 线程内关闭复用
+            # client——openai SDK 的 __del__ 同步 close 连接池，留到主线程 gc
+            # 析构会把关闭开销整个跑在主线程（chat_worker 实测 695ms 卡顿）
+            client = self._api_client
+            self._api_client = None
+            if client is not None:
+                try:
+                    client.close()
+                except Exception as e:  # noqa: BLE001 — 关闭失败不影响收尾
+                    logger.debug(f"[SubAgentExecutor] 关闭 API client 失败: {e}")
 
     def _execute_agent_loop(self, messages: List[Dict], tools: List[Dict], llm_config: Dict) -> str:
         """执行子智能体对话循环"""
@@ -1261,11 +1232,19 @@ class SubAgentExecutor(QThread):
         # 的 IN_FLIGHT_MAX_SECONDS(1800s) 兜底，不靠读超时兜。
         import httpx
 
-        client = build_openai_client(
-            api_key=api_key,
-            base_url=base_url,
-            timeout=httpx.Timeout(600.0, connect=60.0),
-        )
+        # perf(net): per-task 复用 client——此前每次 API 调用新建 OpenAI client
+        # （免 key 路径还新建 httpx.Client+transport）= N 轮工具循环 N 次
+        # TCP+TLS 握手（远端 https ~100-300ms/轮，10 轮 ≈ 1-3s 纯握手）。
+        # llm_config 任务内恒定（仅 __init__/run() 防御两处写入），缓存安全；
+        # 任务结束由 run() finally 在本 worker 线程内 close（对齐 chat_worker
+        # _close_http_client 惯例：client 留给主线程 gc 析构会卡主线程 695ms）
+        if self._api_client is None:
+            self._api_client = build_openai_client(
+                api_key=api_key,
+                base_url=base_url,
+                timeout=httpx.Timeout(600.0, connect=60.0),
+            )
+        client = self._api_client
         auth_headers = resolve_extra_headers(config, getattr(self, "_task_session_id", None) or "")
 
         def create_and_consume():

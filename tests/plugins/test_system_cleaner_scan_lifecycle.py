@@ -92,7 +92,7 @@ def test_scan_worker_run_emits_sizes(qapp, tmp_path, monkeypatch):
     monkeypatch.setattr(
         scanner,
         "CACHE_DEFS",
-        [("logs", "📝", "日志文件", "logs", False)],
+        [scanner.CleanerItem("logs", "📝", "日志文件", "logs", False)],
     )
     w = scanner._ScanWorker(tmp_path)
     result = []

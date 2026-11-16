@@ -179,7 +179,10 @@ def _render_tool_block(block: Dict[str, Any], ctx: RenderCtx) -> str:
     proto = content_to_markdown([block])
     if not proto.strip():
         return ""
-    return _render_tool_block_content(
+    # perf: 流式消息 bypass lru：content 递增场景 key 永不命中，直算免白付
+    # 40KB 级 hash；定型消息（streaming=False）照常走缓存（#6 实测 23.9x）
+    _tool_fn = _render_tool_block_content if not ctx.streaming else _render_tool_block_content.__wrapped__
+    return _tool_fn(
         proto.strip(),
         compact=ctx.compact,
         heavy_caps=ctx.heavy_caps,
@@ -229,7 +232,77 @@ def block_key(block: Dict[str, Any], ctx: RenderCtx, completed: bool) -> tuple[s
 
     与 ``render_block`` 内联计算的 key 必须逐字一致，否则缓存永不命中（漏改
     一处即静默退化为每次全渲）。两侧共用本函数，不各写一份。
+
+    perf: key 指纹驻留在块 dict 的 ``_bk`` 上（(key, completed, sig) 三元组），
+    失据未变时直返驻留值，跳过全 content 的 sha1 重算（长会话每批 render_
+    blocks 都要对每个定型块查 key）。key 语义与逐字重算完全一致。
     """
+    # perf: custom 块的 data 是可变 dict（就地修改不换引用），无廉价失效判据，
+    # 不驻留照旧直算；其余类型 sig 均严格覆盖全部指纹输入。
+    if block.get("type") == "custom":
+        return _block_key_uncached(block, ctx, completed)
+
+    sig = _bk_sig(block, ctx)
+    cached = block.get("_bk")
+    if cached is not None and cached[1] == completed and cached[2] == sig:
+        return cached[0]
+    key = _block_key_uncached(block, ctx, completed)
+    # sig 持字符串本体引用：旧串被 _bk 钉住不销毁 → id 不会被新串复用，
+    # 等长替换也必然失效，不会漏判。
+    block["_bk"] = (key, completed, sig)
+    return key
+
+def _bk_sig(block: Dict[str, Any], ctx: RenderCtx) -> tuple:
+    """驻留失据快照：与 key 的全部指纹输入一一对应。
+
+    字符串字段按 ``(id, 本体)`` 判据：str 不可变，内容变更必换新对象；本体
+    引用被 ``_bk`` 持有 → 旧串存活期间 id 不可能被复用，id 相同即同对象即同
+    内容。取值口径与 ``_block_key_uncached`` 逐分支一致（该归一 ``or ""`` 的
+    同样归一，该原样透传 ``None`` 的同样透传）。compact 单独入 sig：简洁
+    模式是运行时可切换的全局配置（``ui_compact_tool_area``），viewer 复用时
+    块 dict 不重建，驻留必须跟着失效。
+    """
+    btype = block.get("type")
+
+    if btype == "reasoning":
+        content = str(block.get("content", "") or "")
+        return (id(content), content, ctx.compact)
+
+    if btype == "tool_streaming":
+        tcid = block.get("tool_call_id", "")
+        name = block.get("name", "")
+        preview = block.get("preview", "")
+        return (
+            id(tcid), tcid,
+            id(name), name,
+            id(preview), preview,
+            int(block.get("char_count", 0) or 0),
+            int(block.get("add_lines", 0) or 0),
+            int(block.get("del_lines", 0) or 0),
+            ctx.compact,
+        )
+
+    if btype == "tool_result":
+        tcid = block.get("tool_call_id", "")
+        name = block.get("name", "")
+        return (
+            id(tcid), tcid,
+            id(name), name,
+            bool(block.get("success", True)),
+            ctx.compact,
+        )
+
+    if btype in ("image_url", "input_image", "image"):
+        u = str(block.get("image_url", "")) or str(block.get("image", ""))
+        return (id(u), u, ctx.compact)
+
+    # text 与未知类型统一按文本处理（与 ensure_content_blocks 的兜底语义一致）
+    text = str(block.get("text", "") or "")
+    fp_tag = str(len(ctx.tool_fingerprints)) if (ctx.tool_fingerprints and "<tool>" in text) else ""
+    return (id(text), text, fp_tag, ctx.compact)
+
+def _block_key_uncached(block: Dict[str, Any], ctx: RenderCtx, completed: bool) -> tuple[str, str]:
+    """逐字重算 (kind, key)（block_key 的驻留未命中路径）。"""
     btype = block.get("type")
 
     if btype == "reasoning":

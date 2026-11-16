@@ -862,7 +862,7 @@ class FilePreviewPage(QWidget):
             openers = list_openers(path)
         except Exception:
             openers = []
-        opener = next((o for o in openers if o.is_default), openers[0] if openers else None)
+        opener = next((o for o in openers if o.is_default), None)
         if opener is None:
             self._has_opener_icon = False
             self._open_with_btn.set_icon(
@@ -1138,6 +1138,12 @@ class FilePreviewPage(QWidget):
 
     def toggle_highlight(self) -> None:
         self._on_code_button()
+
+    def wrap_enabled(self) -> bool:
+        return self._code_view.wrap_enabled()
+
+    def highlight_enabled(self) -> bool:
+        return self._code_view.highlight_enabled()
 
     # ── 视图开关 ──
 

@@ -466,10 +466,20 @@ class PluginManager:
         if hit:
             self._initialized = True
             self._restore_enabled_from_settings()
+            # perf: (#31) 命中路径不再同步算目录签名（67 插件 ≈134 stat，估
+            # 7-40ms 白占启动关键路径）：置 None 后延迟 2s 后台补算；签名唯一
+            # 用途是启动 3 秒后的 rescan 短路，补算前 rescan 入口现场算兜底
+            # （最坏打穿一次全扫，检测语义不变）
+            self._last_scan_signature = None
             try:
-                self._last_scan_signature = self._plugins_dir_signature(include_mtime=False)
+                from PyQt5.QtCore import QTimer
+
+                QTimer.singleShot(2000, self._backfill_scan_signature)
             except Exception:
-                self._last_scan_signature = None
+                self._backfill_scan_signature()
+            # perf: 优化点（#5a）：工具预载后台化——同步段实测 161ms（T3c 弹着点），
+            # 照 _backfill_scan_signature 同款 QTimer 2s 延迟，启动段直减
+            self._schedule_preload_plugin_tools()
             return
 
         # 1. 扫描系统插件
@@ -498,6 +508,52 @@ class PluginManager:
 
         # [T26] 全扫成功 → 回写发现缓存（下次启动命中；含损坏自修复）
         self._save_discovery_cache()
+        # perf: 优化点（#5a）：同命中路径，预载后台化
+        self._schedule_preload_plugin_tools()
+
+    def _schedule_preload_plugin_tools(self):
+        """[#5a] 工具预载后台化调度：QTimer 2s 后主线程执行（照 _backfill_scan_signature 模式）。
+
+        perf: T3c 实测同步预载 161ms 挡在 plugin_scan 段；延迟后启动段直减。
+        选主线程 QTimer 而非后台线程：插件工具 import 含 bs4 等重依赖，与
+        main_widget 级联 import 争 Python import 锁有负收益前科（实测拖慢主线程
+        26%），2s 时点级联早已完成。幂等互斥语义不变：2s 内保险丝先行触发则
+        本调度 0ms 短路；预载失败时保险丝仍可按 60s 节流重试兜底。
+        """
+        try:
+            from PyQt5.QtCore import QTimer
+
+            QTimer.singleShot(2000, self._preload_plugin_tools)
+        except Exception:
+            self._preload_plugin_tools()
+
+    def _preload_plugin_tools(self):
+        """[S1-C] 插件工具加载归位：initialize 末尾预调一次（幂等）。
+
+        perf: 原 ToolNameMapper.is_known 的 _ensure_plugin_tools_loaded 保险丝
+        会在首个 agent md 解析时隐式同步加载全部插件工具模块（实测冷 188ms），
+        把这笔成本藏进 reload_agents 段（#35 归因）。预调后成本显形归位到
+        plugin_scan 段，agent 解析回归毫秒级；重复调用零开销。
+        """
+        try:
+            from app.tools import _ensure_plugin_tools_loaded
+
+            _ensure_plugin_tools_loaded()
+        except Exception as e:
+            logger.debug(f"[PluginManager] 插件工具预载失败（跳过，后续保险丝兑底）: {e}")
+
+    def _backfill_scan_signature(self) -> None:
+        """延迟补算目录签名（#31 命中路径专用）。
+
+        rescan 若已先行写回（非 None）则跳过，幂等；异常静默置 None（rescan
+        入口现场算兜底，与命中路径改前行为一致）。
+        """
+        if self._last_scan_signature is not None:
+            return
+        try:
+            self._last_scan_signature = self._plugins_dir_signature(include_mtime=False)
+        except Exception:
+            self._last_scan_signature = None
 
     def _restore_enabled_from_settings(self):
         """从 Settings 恢复已启用插件状态，新发现的插件默认启用（D8：跳过禁用集）"""
@@ -1136,6 +1192,12 @@ class PluginManager:
         logger.info(f"[PluginManager] Rescan done: added={len(added_names)}, removed={len(removed_names)}")
         # MCP 配置可能因插件增删而变更，失效缓存（列表刷新/连接清理依赖最新数据）
         self.invalidate_mcp_cache()
+        # S7：diff 非空时失效能力池声明缓存（S1 去 stat 后的 manifest 变更感知
+        # 通道之一；热重载主通道在 plugin_host_service.reload_plugin_subsystems）
+        if added_names or removed_names or changed_list:
+            changed_names = {p.name for p in changed_list}
+            for _name in set(added_names) | set(removed_names) | changed_names:
+                self.invalidate_capability_declared(_name)
         # [T26] 全量重扫成功 → 回写发现缓存（短路路径不回写，缓存仍有效）
         self._save_discovery_cache()
         return result
@@ -1270,6 +1332,8 @@ class PluginManager:
                 disabled.discard(name)
                 self._save_disabled_set(disabled)
             self.invalidate_mcp_cache()  # 启用插件可能带入新 MCP 配置
+            # S7：启用后组件重载，该插件声明可见性变化，能力池声明缓存同步失效
+            self.invalidate_capability_declared(name)
             logger.info(f"[PluginManager] Enabled plugin: {name}")
             state_changed = True
         # 联动加载全部组件（与禁用路径对称）：只补 UI + 工具会让 providers /
@@ -1323,6 +1387,8 @@ class PluginManager:
             disabled.add(name)
             self._save_disabled_set(disabled)
             self.invalidate_mcp_cache()  # 禁用插件需剔除其 MCP 配置
+            # S7：禁用后组件卸载，该插件声明可见性变化，能力池声明缓存同步失效
+            self.invalidate_capability_declared(name)
             logger.info(f"[PluginManager] Disabled plugin: {name}")
             state_changed = True
         # 联动卸载全部组件（不只是 UI/tools）：禁用语义 = 该插件的一切都不再生效。
@@ -1989,6 +2055,18 @@ class PluginManager:
     # ============================================================
     # 插件查询
     # ============================================================
+
+    def invalidate_capability_declared(self, name: str) -> None:
+        """S7：启停/卸载路径的能力池声明缓存失效（委托 CapabilityRegistry）。
+
+        禁用后组件卸载、启用后重载，该插件的声明可见性变化，声明缓存同步失效。
+        """
+        try:
+            from app.plugins.capabilities.registry import CapabilityRegistry
+
+            CapabilityRegistry.get_instance().invalidate_declared(name)
+        except Exception as e:
+            logger.warning(f"[PluginManager] 能力池声明缓存失效失败 ({name}): {e}")
 
     def get_plugin(self, name: str) -> Optional[PluginInfo]:
         """获取指定插件"""

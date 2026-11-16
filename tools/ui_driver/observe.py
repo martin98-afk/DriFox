@@ -72,6 +72,23 @@ def _window_state() -> dict[str, Any]:
         out["cards_alive"] = sum(1 for c in cards if c is not None) if isinstance(cards, list) else None
         out["visible_batch_start"] = getattr(mw, "_visible_batch_start", None)
         out["visible_batch_end"] = getattr(mw, "_visible_batch_end", None)
+        # [SC-F] 生成中判定：UI 标志与 worker 真实状态取并集（main_widget._worker_actually_busy
+        # 口径：UI 的 _is_streaming 在收尾阶段可能领先于 worker 退出）。
+        busy = bool(getattr(mw, "_is_streaming", False))
+        checker = getattr(mw, "_worker_actually_busy", None)
+        if callable(checker):
+            try:
+                busy = busy or bool(checker())
+            except Exception:  # noqa: BLE001 — 观测不抛错
+                pass
+        out["streaming"] = busy
+        out["idle"] = not busy
+        # [SC-F] 存活会话 id 列表（与 ui_session close 的消失确认同口径）
+        out["sessions"] = [
+            sid
+            for sid in (str(getattr(w, "_current_session_id", "") or "") for w in wins)
+            if sid
+        ]
     except Exception as exc:  # noqa: BLE001 — 观测不抛错
         out["window_state_error"] = repr(exc)
     return out

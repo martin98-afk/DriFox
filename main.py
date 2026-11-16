@@ -342,7 +342,30 @@ def main():
     if not _watchdog_packaged or _watchdog_forced:
         from app.utils.main_thread_watchdog import install_watchdog as _install_watchdog
 
-        _install_watchdog()
+        # 阈值可 env 覆盖（T12 剧本按 200ms 探 500ms 阈下盲区）；非法值回退 500
+        try:
+            _watchdog_threshold_ms = int(os.environ.get("DRIFOX_WATCHDOG_THRESHOLD_MS", "500"))
+        except ValueError:
+            _watchdog_threshold_ms = 500
+        _install_watchdog(_watchdog_threshold_ms)
+
+    # 🧵/🧹 埋点启动挂载（thread-dumper / gc-gen2 统计）已收拢进
+    # app.core.infra.telemetry.startup（TELEMETRY-1），逐项自带 env 门控。
+    from app.core.infra.telemetry.startup import start_gc_tracer, start_thread_dumper
+
+    # 🧵 全线程周期 dump（T12/G7）：DRIFOX_CPU_TRACE=1 时每 60s 落一行
+    # thread_dump（线程名→栈深），供主线程原生/GIL 等待归因；默认零行为。
+    try:
+        start_thread_dumper()
+    except Exception:  # noqa: BLE001 - 诊断设施绝不能阻断启动
+        pass
+
+    # 🧹 GC gen2 统计（T11/B5）：DRIFOX_GC_TRACE=1 时注册 gc.callbacks，记录
+    # gen2 回收耗时与回收量（长跑 vm 级抖动归因）；默认零注册零行为。
+    try:
+        start_gc_tracer()
+    except Exception:  # noqa: BLE001 - 诊断设施绝不能阻断启动
+        pass
 
     # 🎡 SpinBox 滚轮守卫：数字框不再吃滚轮改值（误改要等失焦才落盘，
     # 用户几乎无感）。滚轮转交外层滚动容器，页面照常滚动；插件里的 SpinBox
@@ -765,6 +788,12 @@ def main():
         # 宿主不再直接拉取。
         PluginHostService.get_instance().ensure_started()
         _smark("app_services_start")
+        # perf(startup): 两阶段构造阶段二：壳已可见（show+repaint 已画占位），此处
+        # 同步补建 TabPanel/容器树/signals/workbench（~400ms）。必须在首窗构造前
+        # 完成（add_window 同拍消费 UI 树，singleShot 会时序倒挂）；放 ensure_started
+        # 之后让「壳+占位」窗口最大化（服务启动期用户可见稳定反馈）。
+        tm.complete_construction()
+        _smark("tab_manager_complete")
         from app.utils.preheat import preheat_process_level
 
         preheat_process_level()
@@ -824,6 +853,18 @@ def main():
                 ProviderRegistry.get_instance().ensure_loaded()
             except Exception:
                 logger.exception("[Startup] provider 插件预热失败（非致命）")
+            # perf: (#6b) 上下文组件预热：context_tiers / budget_resolvers 是对话
+            # 主链路依赖（tier 截断），原在 UI 装载段主线程同步扫（~0.5s，
+            # MainThreadWatchdog 实证）。迁到本预热线程提前扫，装载段改为
+            # wait_done 等待（常态秒回）；与装载段调用经 _warmup_component_done
+            # Event 互斥，谁先到谁扫。
+            try:
+                from app.plugins.loaders.runtime_component_loader import warmup_component
+
+                warmup_component("context_tiers")
+                warmup_component("budget_resolvers")
+            except Exception:
+                logger.exception("[Startup] 上下文组件预热失败（非致命）")
             # skills 索引预热仅在 PluginManager 已初始化时做：未初始化时
             # get_local_skills 只能扫到 fallback 路径，写入的残缺缓存会被
             # 后续 key（含插件目录）判 miss，预热白做还污染 key TTL。

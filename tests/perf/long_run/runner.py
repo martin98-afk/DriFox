@@ -65,7 +65,7 @@ def _ts() -> str:
 
 
 def _write_csv(samples: List[Sample], path: Path) -> None:
-    """落 CSV：列：scenario,elapsed_sec,loop_iter,rss_mb,qobject_count,biz_total,tm_current_mb,tm_peak_mb,timestamp"""
+    """落 CSV：列：scenario,elapsed_sec,loop_iter,rss_mb,qobject_count,biz_total,tm_current_mb,tm_peak_mb,gdi_count,timer_count,gap_p95,timestamp"""
     import csv
 
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -86,6 +86,9 @@ def _write_csv(samples: List[Sample], path: Path) -> None:
                 "tm_current_mb",
                 "tm_peak_mb",
                 "tm_ok",
+                "gdi_count",
+                "timer_count",
+                "gap_p95",
                 "timestamp",
             ]
         )
@@ -97,6 +100,11 @@ def _write_csv(samples: List[Sample], path: Path) -> None:
                 top_name, top_count = max(s.biz_object_counts.items(), key=lambda kv: kv[1])
                 biz_top_label = top_name
                 biz_top_count = top_count
+            # [RUNNER-TIER] tracemalloc 关闭时 tm 三列写空（trace 列空契约）
+            if s.tracemalloc_ok:
+                tm_cur, tm_peak, tm_ok = f"{s.tracemalloc_current_mb:.3f}", f"{s.tracemalloc_peak_mb:.3f}", "True"
+            else:
+                tm_cur = tm_peak = tm_ok = ""
             w.writerow(
                 [
                     s.scenario,
@@ -109,19 +117,35 @@ def _write_csv(samples: List[Sample], path: Path) -> None:
                     biz_total,
                     biz_top_label,
                     biz_top_count,
-                    f"{s.tracemalloc_current_mb:.3f}",
-                    f"{s.tracemalloc_peak_mb:.3f}",
-                    s.tracemalloc_ok,
+                    tm_cur,
+                    tm_peak,
+                    tm_ok,
+                    s.gdi_count,
+                    s.timer_count,
+                    f"{s.gap_p95:.2f}",
                     f"{s.timestamp:.3f}",
                 ]
             )
 
 
 def _write_json(summary: dict, path: Path) -> None:
-    """落 JSON：完整 summary（含每个 Sample 详情）。"""
+    """落 JSON：完整 summary（含每个 Sample 详情）。
+
+    [RUNNER-TIER] tracemalloc 关闭时 trace 字段落 null（非空列表/非 0 值），
+    与 PERF_TRACE_MALLOC 关闭契约一致；开启时保持原采样行为。
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     serializable = dict(summary)
-    serializable["samples"] = [s.to_dict() for s in summary["samples"]]
+    rows = []
+    for s in summary["samples"]:
+        d = s.to_dict()
+        if not s.tracemalloc_ok:
+            d["tracemalloc_top"] = None
+            d["tracemalloc_current_mb"] = None
+            d["tracemalloc_peak_mb"] = None
+            d["tracemalloc_ok"] = None
+        rows.append(d)
+    serializable["samples"] = rows
     with path.open("w", encoding="utf-8") as f:
         json.dump(serializable, f, ensure_ascii=False, indent=2)
 
@@ -258,11 +282,132 @@ def _render_ascii_chart(samples: List[Sample], width: int = 60, height: int = 18
     return "\n".join(rows)
 
 
+# [RUNNER-TIER] 档位配置：时长与默认采样间隔（--duration/--tier 与 LONGRUN_DURATION/
+# PERF_SAMPLE_INTERVAL 的优先级见 main() 内注释）
+TIER_CONFIG: Dict[str, dict] = {
+    "smoke": {"duration_sec": 2 * 3600, "sample_interval_s": 30.0},
+    "std": {"duration_sec": 8 * 3600, "sample_interval_s": 60.0},
+    "converge": {"duration_sec": 72 * 3600, "sample_interval_s": 120.0},
+}
+
+
+def _percentile(values: List[float], q: float) -> float:
+    """线性插值分位数（values 非空）。"""
+    s = sorted(values)
+    if len(s) == 1:
+        return s[0]
+    k = (len(s) - 1) * q
+    lo = int(k)
+    hi = min(lo + 1, len(s) - 1)
+    return s[lo] + (s[hi] - s[lo]) * (k - lo)
+
+
+def _criterion(cid, name, expected, actual, passed, source):
+    return {"id": cid, "name": name, "expected": expected,
+            "actual": actual, "pass": passed, "data_source": source}
+
+
+def _gdi_window_max_delta(samples: List[Sample], window_s: float = 600.0):
+    """GDI 按时间窗增量的最大值（对齐 smoke_verdict 判据⑤口径）；无样本返回 None。"""
+    from datetime import datetime as _dt
+
+    windows: Dict[int, List[float]] = {}
+    for s in samples:
+        if s.gdi_count < 0:
+            continue
+        ts = s.timestamp
+        windows.setdefault(int(ts // window_s), []).append(float(s.gdi_count))
+    if not windows:
+        return None
+    return max(max(v) - min(v) for v in windows.values())
+
+
+def _tier_verdict(tier: str, samples: List[Sample], duration_sec: float) -> Dict[str, Any]:
+    """按档位判据出 PASS/FAIL 机判（与 smoke_verdict.py 的 verdict 契约字段对齐）。
+
+    smoke：崩溃 0 / p95<100ms / RSS<+100MB / GDI 600s 窗增量<50 / 树 RSS<1200MB
+    std：RSS<+8% / QTimer 非单调递增 / GDI 窗增量<50（CPU 判据本 runner 无 CPU 采样列，SKIP）
+    converge：RSS<+5% / 斜率<1MB/h
+    """
+    rss = [s.rss_mb for s in samples if s.rss_mb and s.rss_mb > 0]
+    criteria = []
+    if tier == "smoke":
+        complete = bool(samples) and samples[-1].elapsed_sec >= duration_sec * 0.9
+        criteria.append(_criterion("①", "崩溃 0", "采样完整到末尾（进程未中途死）",
+                                 f"末样本 elapsed={samples[-1].elapsed_sec:.0f}s/{duration_sec:.0f}s" if samples else "无样本",
+                                 complete, "long_run CSV 行数/末样本"))
+        criteria.append(_criterion("②", "心跳 p95", "<100ms", "runner 无主线程心跳，gap_p95 恒 0",
+                                 None, "sampler.gap_p95（由主进程 G3 剧本单独验收）"))
+        if len(rss) >= 4:
+            q = max(1, len(rss) // 4)
+            drift = sum(rss[-q:]) / q - sum(rss[:q]) / q
+            criteria.append(_criterion("③", "RSS 漂移", "<+100MB", f"{drift:+.1f}MB",
+                                     drift < 100.0, "long_run CSV rss_mb"))
+        gdi = _gdi_window_max_delta(samples)
+        criteria.append(_criterion("④", "GDI 600s 窗增量", "<+50",
+                                 f"{gdi:+.0f}" if gdi is not None else "无 gdi 样本",
+                                 (gdi is not None and gdi < 50) if gdi is not None else None,
+                                 "sampler.gdi_count"))
+        peak = max(rss) if rss else None
+        criteria.append(_criterion("⑤", "软闸（树 RSS 峰值）", "<1200MB",
+                                 f"{peak:.0f}MB" if peak is not None else "无样本",
+                                 (peak is not None and peak < 1200.0) if peak is not None else None,
+                                 "long_run CSV rss_mb 峰值"))
+    elif tier == "std":
+        criteria.append(_criterion("①", "CPU", "<3%", "runner 无 CPU 采样列",
+                                 None, "sampler（待扩 cpu_pct 列后可判）"))
+        if len(rss) >= 4:
+            q = max(1, len(rss) // 4)
+            head, tail = rss[:q], rss[-q:]
+            ratio = (sum(tail) / q) / (sum(head) / q) - 1 if sum(head) > 0 else None
+            criteria.append(_criterion("②", "RSS 增幅", "<+8%",
+                                     f"{ratio * 100:+.1f}%" if ratio is not None else "n/a",
+                                     (ratio is not None and ratio < 0.08) if ratio is not None else None,
+                                     "long_run CSV rss_mb"))
+        timers = [s.timer_count for s in samples]
+        if len(timers) >= 3:
+            strictly_up = all(b > a for a, b in zip(timers, timers[1:]))
+            criteria.append(_criterion("③", "QTimer", "非单调递增（有回收）",
+                                     f"序列 {timers[:6]}…" if len(timers) <= 6 else f"序列头尾 {timers[0]}→{timers[-1]}",
+                                     not strictly_up, "sampler.timer_count"))
+        gdi = _gdi_window_max_delta(samples)
+        criteria.append(_criterion("④", "GDI 600s 窗增量", "<+50",
+                                 f"{gdi:+.0f}" if gdi is not None else "无 gdi 样本",
+                                 (gdi is not None and gdi < 50) if gdi is not None else None,
+                                 "sampler.gdi_count"))
+    elif tier == "converge":
+        if len(rss) >= 4:
+            q = max(1, len(rss) // 4)
+            head, tail = rss[:q], rss[-q:]
+            ratio = (sum(tail) / q) / (sum(head) / q) - 1 if sum(head) > 0 else None
+            criteria.append(_criterion("①", "RSS 增幅", "<+5%",
+                                     f"{ratio * 100:+.1f}%" if ratio is not None else "n/a",
+                                     (ratio is not None and ratio < 0.05) if ratio is not None else None,
+                                     "long_run CSV rss_mb"))
+        rate = _compute_growth_rate(samples).get("rss_mb_per_hour")
+        criteria.append(_criterion("②", "RSS 斜率", "<1MB/h",
+                                 f"{rate:+.2f}MB/h" if rate is not None else "样本不足",
+                                 (rate is not None and rate < 1.0) if rate is not None else None,
+                                 "_compute_growth_rate（末 60% 拟合）"))
+    judged = [c for c in criteria if c["pass"] is not None]
+    fail_items = [c["id"] for c in judged if not c["pass"]]
+    verdict = "FAIL" if fail_items else "PASS"
+    return {
+        "verdict": verdict,
+        "pass_count": len(judged) - len(fail_items),
+        "fail_items": fail_items,
+        "criteria": criteria,
+        "tier": tier,
+        "judged": len(judged),
+    }
+
+
 def run_all_scenarios(
     *,
     scenarios: List[str],
     duration_sec: float,
     out_dir: Path = BASELINES_DIR,
+    tier: str = "",
 ) -> Dict[str, dict]:
     """跑指定场景列表，返回每个场景的 summary dict。
 
@@ -290,6 +435,8 @@ def run_all_scenarios(
             )
 
         summary = fn(progress_cb=_cb, duration_sec=duration_sec)
+        if tier:
+            summary["tier_verdict"] = _tier_verdict(tier, summary["samples"], duration_sec)
         summaries[name] = summary
 
         # 落 CSV / JSON
@@ -318,6 +465,7 @@ def render_markdown_report(
     out_path: Path,
     timestamp: str,
     duration_sec: float,
+    tier_verdict: Optional[dict] = None,
 ) -> None:
     """汇总 3 场景 → Markdown 报告（基线数字 + 增长率 + 泄漏判定）。"""
     lines: List[str] = []
@@ -438,6 +586,26 @@ def render_markdown_report(
                 f = e.file.replace("\\", "/").split("/")[-1]
                 lines.append(f"| {i} | {e.size_kb:.1f} | {e.count} | `{f}:{e.line}` |")
 
+    # [RUNNER-TIER] 档位判据 PASS/FAIL 表（与 smoke_verdict.py 契约字段同名）
+    if tier_verdict:
+        lines.append("\n## 档位判据（机判）\n")
+        lines.append(
+            f"**档位**: `{tier_verdict.get('tier')}` · **verdict**: `"
+            f"{tier_verdict.get('verdict')}` · PASS {tier_verdict.get('pass_count')}/"
+            f"{tier_verdict.get('judged')}"
+            + (f" · FAIL: {', '.join(tier_verdict.get('fail_items') or [])}"
+               if tier_verdict.get("fail_items") else "")
+        )
+        lines.append("")
+        lines.append("| 判据 | 名称 | 期望 | 实际 | 结果 | 数据源 |")
+        lines.append("|---|---|---|---|---|---|")
+        for c in tier_verdict.get("criteria") or []:
+            mark = "SKIP" if c["pass"] is None else ("PASS" if c["pass"] else "FAIL")
+            lines.append(
+                f"| {c['id']} | {c['name']} | {c['expected']} | {c['actual']} | {mark} | {c['data_source']} |"
+            )
+        lines.append("")
+
     # 重跑指引
     lines.append("\n## 重跑指引\n")
     lines.append("```bash")
@@ -446,6 +614,9 @@ def render_markdown_report(
     lines.append("")
     lines.append("# Full（每场景 30min，总 90min）")
     lines.append("LONGRUN_FULL=1 python -m tests.perf.long_run.runner")
+    lines.append("")
+    lines.append("# Tier（方案 5.2：smoke=2h/std=8h/converge=72h，采样间隔 30/60/120s）")
+    lines.append("python -m tests.perf.long_run.runner --tier smoke --duration 7200")
     lines.append("")
     lines.append("# pytest 入口")
     lines.append("pytest tests/perf/long_run/test_long_run_scenarios.py -v -m perf_long")
@@ -461,17 +632,26 @@ def _register_scenarios() -> None:
     from .scenario_a_message_stream import run_message_stream_scenario
     from .scenario_b_session_switch import run_session_switch_scenario
     from .scenario_c_plugin_hot_reload import run_plugin_hot_reload_scenario
+    from .scenario_f_window_session import run_window_session_scenario
+    from .scenario_d_theme_switch import run_theme_switch_scenario
+    from .scenario_e_mcp_probe import run_mcp_probe_scenario
 
     SCENARIO_REGISTRY["a"] = run_message_stream_scenario
     SCENARIO_REGISTRY["b"] = run_session_switch_scenario
     SCENARIO_REGISTRY["c"] = run_plugin_hot_reload_scenario
+    # SC-F：窗口级会话开关（纯 HTTP 驱动运行中实例，需 DRIFOX_UI_TEST_SERVER）
+    SCENARIO_REGISTRY["f"] = run_window_session_scenario
+    # SC-D：主题切换（cfg.set + broadcast_theme_refresh + 活事件循环泵）
+    SCENARIO_REGISTRY["d"] = run_theme_switch_scenario
+    # SC-E：MCP 探活（本地 stub + probe_servers_background(force=True)）
+    SCENARIO_REGISTRY["e"] = run_mcp_probe_scenario
 
 
 def main(argv: List[str]) -> int:
     parser = argparse.ArgumentParser(description="DriFox 长时压测 runner")
     parser.add_argument(
         "--scenario",
-        choices=["a", "b", "c", "all"],
+        choices=["a", "b", "c", "f", "d", "e", "all"],
         default="all",
         help="跑哪个场景（默认 all）",
     )
@@ -481,11 +661,20 @@ def main(argv: List[str]) -> int:
         default=None,
         help="单场景时长（秒），默认根据 LONGRUN_FULL / LONGRUN_DURATION 自动选",
     )
+    parser.add_argument(
+        "--tier",
+        choices=["smoke", "std", "converge"],
+        default=None,
+        help="档位：smoke=2h/30s采样，std=8h/60s，converge=72h/120s；"
+             "时长与间隔可分别被 --duration / PERF_SAMPLE_INTERVAL 覆盖；"
+             "不指定则保持 demo/full 旧行为",
+    )
     args = parser.parse_args(argv)
 
     _register_scenarios()
 
-    # 优先级：--duration > LONGRUN_DURATION > LONGRUN_FULL → 30/1800
+    # 优先级：--duration > LONGRUN_DURATION > --tier 时长 > LONGRUN_FULL → 30/1800
+    tier_cfg = TIER_CONFIG.get(args.tier) if args.tier else None
     if args.duration is not None:
         duration = args.duration
     else:
@@ -495,16 +684,25 @@ def main(argv: List[str]) -> int:
                 duration = float(env_dur)
             except ValueError:
                 duration = FULL_DURATION_SEC if env_full_mode() else DEMO_DURATION_SEC
+        elif tier_cfg:
+            duration = tier_cfg["duration_sec"]
         else:
             duration = FULL_DURATION_SEC if env_full_mode() else DEMO_DURATION_SEC
 
+    # 档位默认采样间隔：仅当未显式设 PERF_SAMPLE_INTERVAL 时生效（env 显式优先）
+    if tier_cfg and not os.environ.get("PERF_SAMPLE_INTERVAL"):
+        os.environ["PERF_SAMPLE_INTERVAL"] = str(tier_cfg["sample_interval_s"])
+        print(f"[runner] tier={args.tier} 采样间隔 -> {tier_cfg['sample_interval_s']:.0f}s")
+
     if args.scenario == "all":
-        scenarios = ["a", "b", "c"]
+        scenarios = ["a", "b", "c", "f", "d", "e"]
     else:
         scenarios = [args.scenario]
 
     timestamp = _ts()
-    summaries = run_all_scenarios(scenarios=scenarios, duration_sec=duration)
+    summaries = run_all_scenarios(
+        scenarios=scenarios, duration_sec=duration, tier=args.tier or ""
+    )
 
     # 报告路径：仓库 docs/perf/long_run_baseline.md
     docs_dir = REPO_ROOT / "docs" / "perf"
@@ -515,6 +713,10 @@ def main(argv: List[str]) -> int:
         out_path=report_path,
         timestamp=timestamp,
         duration_sec=duration,
+        tier_verdict=next(
+            (s.get("tier_verdict") for s in summaries.values() if s.get("tier_verdict")),
+            None,
+        ),
     )
 
     return 0

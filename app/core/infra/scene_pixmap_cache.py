@@ -20,9 +20,9 @@ key 设计（七元组，见 get_pixmap）：
 同壁纸换主题但渲染参数未变时命中缓存恰是正确行为（显示本就该一致）。
 
 生命周期（引用计数）：每个活跃 SceneLayer 在构造时 acquire、析构时 release。
-计数归零（全部窗口关闭）不立刻丢弃，起 _GRACE_SECONDS 宽限定时器，到点 clear；
-宽限期内任一 acquire（重开窗口/切回主题）取消定时器并命中缓存，零重解码。
-窗口仍打开时计数 >0，任何路径都不会提前淘汰。
+计数归零（全部窗口关闭）立即 clear，不等宽限：托盘驻留（setQuitOnLastWindow-
+Closed(False)，关全部窗进程仍在）下缓存 103-127MB 不再滞留；代价是重开窗
+需重解码一次。窗口仍打开时计数 >0，任何路径都不会提前淘汰。
 """
 
 from __future__ import annotations
@@ -32,18 +32,35 @@ from collections import OrderedDict
 from typing import Callable, Optional
 
 # 缓存组数上界：仅当前壁纸（T8 收紧，原 2 组 = 当前 + 上一主题）。
-# 一套全副本 ≈ 103-127MB（T40 核算），4K baked 最坏再 +131MB；
-# 1 组封顶 -103MB，代价仅切主题时重解码一次。
+# 一套全副本 ≈ 103-127MB（T40 核算），4K baked 由 _BAKED_BUDGET_BYTES
+# 降为 1 份（31.64 MiB）；1 组封顶 -103MB，代价仅切主题时重解码一次。
 _MAX_SETS = 1
-
-# 全部窗口关闭后的宽限秒数：到点才 clear。换来「快关快开」零重解码
-# （重解码一份含 blur 烘焙的壁纸是主线程同步操作，秒级耗时不可接受）。
-_GRACE_SECONDS = 30.0
 
 # 每组 baked 条目上限（M2）：blur 壁纸拖拽 resize 按 (w,h,blur,pad) 逐帧写入，
 # 实测 40 步拖拽堆 40 份/330MB（1080p）且相邻几何命中率 0/39。取 4 = 覆盖
-# ≤3 窗活跃几何 + 1 份回弹缓冲；最坏驻留 1080p 约 34MB / 4K 约 131MB。
+# ≤3 窗活跃几何 + 1 份回弹缓冲。
 _MAX_BAKED_PER_GROUP = 4
+
+# baked 组内驻留字节预算（M-1c）：硬上限 4 份只对 1080p 合理（31.6 MiB），
+# 4K 全幅单份 31.64 MiB × 4 = 126.6 MiB。按单份实际像素面积反算条数：
+# 1080p→4（现状零变化）/ 1440p→3（42.2 MiB）/ 4K→1（31.64 MiB）。
+# 不用 dpr 判据：baked 尺寸取逻辑像素，4K 物理屏 dpr=1 才是 +131MB 那档，
+# dpr 越高逻辑尺寸越小、单份越小，按 dpr 降档恰好放过真凶。
+_BAKED_BUDGET_BYTES = 48 * 1024 * 1024
+
+
+def baked_cap(width: int, height: int, budget: int = _BAKED_BUDGET_BYTES) -> int:
+    """按单份 baked 像素面积反算组内条目上限（纯函数，便于单测）。
+
+    ARGB32 单份字节 = w×h×4；非法/非正尺寸按硬上限处理（不因脏参数缩容）。
+    """
+    try:
+        per = int(width) * int(height) * 4
+    except (TypeError, ValueError):
+        return _MAX_BAKED_PER_GROUP
+    if per <= 0:
+        return _MAX_BAKED_PER_GROUP
+    return max(1, min(_MAX_BAKED_PER_GROUP, int(budget // per)))
 
 
 class _ScenePixmapCache:
@@ -53,20 +70,15 @@ class _ScenePixmapCache:
         self._max_sets = max_sets
         # group_key -> OrderedDict[sub_key -> QPixmap]
         self._groups: "OrderedDict[tuple, OrderedDict[tuple, object]]" = OrderedDict()
-        # 引用计数：活跃使用者（SceneLayer）数；归零后宽限期结束 clear
+        # 引用计数：活跃使用者（SceneLayer）数；归零即 clear
         self._users = 0
-        self._evict_timer = None  # QTimer，归零时起，acquire 取消
 
     def acquire(self) -> None:
-        """活跃使用者 +1（SceneLayer 构造时调用）。取消未到期的归零宽限。"""
+        """活跃使用者 +1（SceneLayer 构造时调用）。"""
         self._users += 1
-        if self._evict_timer is not None:
-            self._evict_timer.stop()
-            self._evict_timer.deleteLater()
-            self._evict_timer = None
 
     def release(self) -> None:
-        """活跃使用者 -1（SceneLayer 析构时调用）；归零起宽限定时器，到点 clear。
+        """活跃使用者 -1（SceneLayer 析构时调用）；归零立即 clear。
 
         幂等：计数已归零时忽略（destroyed 信号最多发一次，此保护使重复
         release 也不会把计数打负）。
@@ -75,29 +87,12 @@ class _ScenePixmapCache:
             return
         self._users -= 1
         if self._users == 0:
-            self._schedule_eviction()
-
-    def _schedule_eviction(self) -> None:
-        """归零后起一次性宽限定时器（幂等：已有 pending 不重复起）。"""
-        if self._evict_timer is not None:
-            return
-        try:
-            from PyQt5.QtCore import QTimer
-
-            timer = QTimer()
-            timer.setSingleShot(True)
-            timer.timeout.connect(self._evict)
-            timer.start(int(_GRACE_SECONDS * 1000))
-        except RuntimeError:
-            # QApplication 已销毁（teardown/解释器关闭）：QTimer 无法创建，
-            # 宽限释放丢失属可接受（进程退出由 OS 兜底），静默即可
-            return
-        self._evict_timer = timer
-
-    def _evict(self) -> None:
-        """宽限期到点：此时计数必为 0（acquire 会取消定时器），安全清空。"""
-        self._evict_timer = None
-        self._groups.clear()
+            try:
+                self._groups.clear()
+            except RuntimeError:
+                # QApplication 已销毁（teardown/解释器关闭）：QPixmap 析构不可用，
+                # 进程退出由 OS 兜底，静默即可
+                pass
 
     @staticmethod
     def _group_key(resolved_path: str):
@@ -160,13 +155,14 @@ class _ScenePixmapCache:
             while len(self._groups) > self._max_sets:
                 self._groups.popitem(last=False)
         elif sub[0] == "baked":
-            # baked 组内上限（M2）：只淘汰最旧 baked，跳过非 baked 条目
-            # （source/premult 每组固定 ≤5 份，不能被 baked 挤掉）
+            # baked 组内上限（M2 + M-1c 面积预算）：只淘汰最旧 baked，跳过非
+            # baked 条目（source/premult 每组固定 ≤5 份，不能被 baked 挤掉）
+            cap = baked_cap(width, height)
             baked_count = 0
             for k in bucket:
                 if k[0] == "baked":
                     baked_count += 1
-            while baked_count >= _MAX_BAKED_PER_GROUP:
+            while baked_count >= cap:
                 for k in bucket:
                     if k[0] == "baked":
                         del bucket[k]

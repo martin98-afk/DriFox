@@ -43,15 +43,21 @@ def _goal_headline(body: str) -> str:
     return ""
 
 
-def _continue_prompt(source_title: str, body: str = "") -> str:
-    """自动继续文案：带上原会话标题，新会话里一眼看出在接哪段活
+def _handoff_title(source_title: str, body: str = "") -> str:
+    """新会话沿用哪个标题：源会话标题，占位时回退交接正文的任务目标首行
 
-    标题还没生成（"新对话"）时回退到交接正文的任务目标首行——会话名常是占位，
-    直接用它反而看不出接的是哪段活。
+    会话名常是占位（"新对话"/"对话 MM-DD HH:MM"），直接用它反而看不出接的是
+    哪段活。两者都拿不到时返回空串（由调用方决定回退行为）。
     """
     title = (source_title or "").strip()
-    if not title or title == "新对话":
+    if not title or title == "新对话" or title.startswith("对话 "):
         title = _goal_headline(body)
+    return title
+
+
+def _continue_prompt(source_title: str, body: str = "") -> str:
+    """自动继续文案：带上原会话标题，新会话里一眼看出在接哪段活"""
+    title = _handoff_title(source_title, body)
     if not title:
         return _CONTINUE_PROMPT
     return f"继续完成「{title}」会话的交接任务。\n" + _CONTINUE_PROMPT
@@ -203,11 +209,15 @@ def _arm_handoff(tool_ctx: Dict, path: Path, body: str) -> str:
         except Exception:
             pass
 
+    source_title = _source_session_title(tool_ctx)
     steps = (
         ("session.interrupt", {}),
-        ("session.new", {}),
+        # 新会话直接沿用源会话主题：标题生成守卫会跳过带 _hook_event 的
+        # SessionSend 消息（交接轮不算首问），不让宿主显式落标题的话新会话
+        # 会一直停在占位名，直到用户下一句话把它改写成跑题标题。
+        ("session.new", {"title": _handoff_title(source_title, body)}),
         # 自动继续是用户可见的一条新消息，带上原会话标题方便回溯
-        ("session.send", {"text": _continue_prompt(_source_session_title(tool_ctx), body)}),
+        ("session.send", {"text": _continue_prompt(source_title, body)}),
     )
     for cap_id, kwargs in steps:
         fn = _cap(tool_ctx, cap_id)

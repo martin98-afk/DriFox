@@ -187,7 +187,22 @@ class GlobalCardController:
             except Exception:
                 logger.warning(f"[GlobalCard] 移除 {card_id} replace tab 失败")
         self._card_manager.hide_card(card_id, GLOBAL_WINDOW_ID)
+        if card_id in ("provider_picker", "provider_edit"):
+            self._release_provider_edit_form()
         self._card_manager.show_card("settings", GLOBAL_WINDOW_ID)
+
+    def _release_provider_edit_form(self):
+        """编辑结束即释放一次性表单；下次进入原本就会重新构建。"""
+        form = self._provider_edit_popup
+        if form is None:
+            return
+        self._provider_edit_popup = None
+        for shell in (self._provider_picker_card, self._provider_edit_card):
+            if shell is not None:
+                shell.content_layout.removeWidget(form)
+                shell.clear_save_button()
+        form.hide()
+        form.dispose()
 
     # ───────────────────────────────────────────────────────────
     # 懒构建：系统设置大卡
@@ -374,7 +389,7 @@ class GlobalCardController:
     def _mount_provider_view(self):
         """把当前视图 widget 装进服务商卡内容区（卡片墙 ↔ 编辑表单互斥挂载）
 
-        卸载的 widget 不销毁：卡片墙常驻复用（懒构建一次），表单在重建时才销毁。
+        卡片墙常驻复用；回到卡片墙代表丢弃编辑，及时释放一次性表单。
         """
         card = self._provider_picker_card
         layout = card.content_layout
@@ -384,6 +399,7 @@ class GlobalCardController:
             if w is not None:
                 w.hide()
         if self._provider_view == "picker":
+            self._release_provider_edit_form()
             wall = self._provider_picker_popup
             # 每次进入卡片墙视图都按当前注册表重建：provider 插件热装/卸载
             # 后注册表已变，懒构建的旧快照必须丢弃（装完插件再打开必是新内容）
@@ -474,10 +490,7 @@ class GlobalCardController:
 
         self._ensure_provider_picker_card()
         # 旧表单销毁（每次进入都重建——现状语义，表单状态不跨次保留）
-        old = self._provider_edit_popup
-        if old is not None:
-            old.setParent(None)
-            old.deleteLater()
+        self._release_provider_edit_form()
         self._provider_edit_popup = ProviderEditCard(
             provider_name=provider_name,
             provider_info=provider_info,

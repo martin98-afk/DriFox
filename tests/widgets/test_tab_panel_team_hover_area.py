@@ -48,8 +48,8 @@ class TestTeamHoverButtonArea:
         grp = panel._team_groups[team_id]
         return idx, grp
 
-    def test_hover_buttons_keep_badge_x_constant(self, panel, qtbot, isolated_app_state):
-        """三按钮显隐前后 badge.x / 团队名 x 恒定（badge 在团队名左侧，不参与挤压）"""
+    def test_hover_buttons_keep_name_x_constant(self, panel, qtbot, isolated_app_state):
+        """三按钮显隐前后团队名 x 恒定（idle 态人数 badge 不展示）"""
         _, grp = self._setup_team(panel)
         panel.show()
         qtbot.waitExposed(panel)
@@ -59,23 +59,19 @@ class TestTeamHoverButtonArea:
         name = grp._team_name_label
         btn_area = grp._team_btn_area
         assert btn_area is not None and not btn_area.isHidden(), "按钮区展开态应始终可见"
-        badge_x_before = badge.geometry().x()
+        assert badge.isHidden(), "人数不展示：idle 态 badge 应隐藏"
         name_x_before = name.geometry().x()
 
         # hover 进入：三按钮 hidden→visible
         grp._team_new_task_btn.setVisible(True)
-        grp._team_add_btn.setVisible(True)
         grp._team_close_btn.setVisible(True)
         QApplication.processEvents()
-        assert badge.geometry().x() == badge_x_before, "hover 显示按钮后 badge 不得横移"
         assert name.geometry().x() == name_x_before, "hover 显示按钮后团队名不得横移"
 
         # hover 离开：三按钮恢复隐藏
         grp._team_new_task_btn.setVisible(False)
-        grp._team_add_btn.setVisible(False)
         grp._team_close_btn.setVisible(False)
         QApplication.processEvents()
-        assert badge.geometry().x() == badge_x_before, "hover 隐藏按钮后 badge 不得横移"
         assert name.geometry().x() == name_x_before, "hover 隐藏按钮后团队名不得横移"
 
     def test_header_height_constant_across_hover(self, panel, qtbot, isolated_app_state):
@@ -90,13 +86,11 @@ class TestTeamHoverButtonArea:
         assert h_before > 0, "布局生效后 header 应有实际高度"
 
         grp._team_new_task_btn.setVisible(True)
-        grp._team_add_btn.setVisible(True)
         grp._team_close_btn.setVisible(True)
         QApplication.processEvents()
         assert header.height() == h_before, "hover 显示按钮后 header 高度不得变化"
 
         grp._team_new_task_btn.setVisible(False)
-        grp._team_add_btn.setVisible(False)
         grp._team_close_btn.setVisible(False)
         QApplication.processEvents()
         assert header.height() == h_before, "hover 隐藏按钮后 header 高度不得变化"
@@ -135,80 +129,47 @@ class TestTeamHoverButtonArea:
         assert grp.minimumSizeHint().width() <= 120, (
             f"grp 最小宽应回落（回归时 154），实际 {grp.minimumSizeHint().width()}"
         )
-        # #12 用户定案：数字在团队名左侧
-        assert badge.geometry().x() < name.geometry().x(), (
-            f"badge 应在团队名左侧：badge.x={badge.geometry().x()} name.x={name.geometry().x()}"
-        )
+        # 人数不展示（用户定案）：idle 态 badge 隐藏，不再显示成员数
+        assert badge.isHidden(), "idle 态不应显示成员数 badge"
 
-    def test_badge_text_not_clipped(self, panel, qtbot, isolated_app_state):
-        """#12/#13：『N 运行』/『N 待答』文案完整不裁断（旧 30px 定宽裁成『运』）
-
-        断言内宽（width - 2×6 QSS padding）≥ 文本需求宽度——此前误用
-        ``badge.width() >= needed``（未减 padding）宽松 12px 掩盖真实裁断。
-        """
+    def test_badge_hidden_on_state_change(self, panel, qtbot, isolated_app_state):
+        """聚合 badge 已停用：待答/运行态变化后 badge 仍保持隐藏（状态由成员行行尾表达）"""
         _, grp = self._setup_team(panel)
         panel.show()
         qtbot.waitExposed(panel)
 
         badge = grp._team_badge
-        tooltip = ""
         for running_count in (1, 12):
             grp._team_streaming_count = running_count
             grp._team_question_count = 0
             panel._update_team_badge(grp)
             QApplication.processEvents()
-            text = badge.text()
-            assert text == f"{running_count} 运行", f"运行态文案应为『N 运行』，实际 {text!r}"
-            needed = badge.fontMetrics().horizontalAdvance(text)
-            inner = badge.width() - 2 * 6  # QSS padding: 1px 6px
-            assert inner >= needed, f"badge 内宽 {inner}px 不足以显示 {text!r}（需 {needed}px，外宽 {badge.width()}px）"
-            tooltip = badge.toolTip()
+            assert badge.isHidden(), f"运行态 badge 应隐藏，实际可见（count={running_count}）"
 
-        # 待答态同样完整
         grp._team_streaming_count = 0
         grp._team_question_count = 3
         panel._update_team_badge(grp)
         QApplication.processEvents()
-        assert badge.text() == "3 待答", f"待答态文案应为『3 待答』，实际 {badge.text()!r}"
-        inner = badge.width() - 2 * 6
-        needed = badge.fontMetrics().horizontalAdvance("3 待答")
-        assert inner >= needed, f"badge 内宽 {inner}px 不足以显示『3 待答』（需 {needed}px）"
-        assert tooltip, "badge 应有 tooltip"
+        assert badge.isHidden(), "待答态 badge 同样应隐藏"
 
-    def test_narrow_panel_hover_badge_not_clipped(self, panel, qtbot, isolated_app_state):
-        """#13：窄栏 + hover + 长文案组合下 badge 不被压缩裁字
-
-        实测压缩点：panelW≤180（header≤162）时布局压缩 badge——「12 运行」
-        73→48 内宽 36 < 需 61，团队名被压光。minimumWidth 钉住后挤压转嫁给
-        团队名（_ElidedLabel 有 elide 保护，显示省略号属预期），badge 文案完整。
-        """
+    def test_narrow_panel_hover_name_not_crushed(self, panel, qtbot, isolated_app_state):
+        """窄栏 + hover：团队标题不被 badge 挤压（badge 停用后标题区域完整保留）"""
         _, grp = self._setup_team(panel)
         panel.show()
         qtbot.waitExposed(panel)
 
         badge = grp._team_badge
         name = grp._team_name_label
-
-        # 长文案（12 运行），再收窄面板至压缩区
         grp._team_streaming_count = 12
         grp._team_question_count = 0
         panel._update_team_badge(grp)
         panel.resize(180, 500)
         QApplication.processEvents()
 
-        # hover 稳态：按钮展开挤压弹性团队名
         grp._team_new_task_btn.setVisible(True)
-        grp._team_add_btn.setVisible(True)
         grp._team_close_btn.setVisible(True)
         QApplication.processEvents()
         QApplication.processEvents()
 
-        text = badge.text()
-        needed = badge.fontMetrics().horizontalAdvance(text)
-        inner = badge.width() - 2 * 6
-        assert inner >= needed, (
-            f"窄栏 hover 下 badge 被压缩裁字：内宽 {inner}px < 需 {needed}px"
-            f"（文案 {text!r}，外宽 {badge.width()}px，header w={grp._team_header.width()}）"
-        )
-        # 挤压由团队名承担（elide 保护）：不出现负宽/异常
-        assert name.width() >= 0, f"团队名宽度异常：{name.width()}"
+        assert badge.isHidden(), "窄栏 hover 下 badge 仍应隐藏"
+        assert name.width() > 0, f"团队标题应保留可用宽度，实际 {name.width()}"

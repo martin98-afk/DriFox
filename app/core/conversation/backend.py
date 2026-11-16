@@ -153,6 +153,39 @@ _ERROR_TYPE_PATTERNS: tuple = (
 )
 
 
+def _resolve_hook_queue_maxsize() -> int:
+    """[⑤] hook 队列容量：env DRIFOX_HOOK_QUEUE_MAXSIZE 可配，非法/缺失回退 256，下限 16。"""
+    try:
+        v = int(os.environ.get("DRIFOX_HOOK_QUEUE_MAXSIZE", "256"))
+    except (TypeError, ValueError):
+        v = 256
+    return max(16, v)
+
+
+def _put_hook_message(q: "queue.Queue", msg: Dict[str, Any]) -> None:
+    """[⑤] 满时丢最旧保新的非阻塞入队。
+
+    queue.Queue.put 在满时会**阻塞 hook 回调线程**，这里换 nowait：正常路径
+    （队列未满）与 put 逐字节等价；仅异常兜底场景丢弃最旧条目（worker 卡死
+    时 hook 输出本就无法被消费，保新弃旧让最新上下文存活）。drain 路径
+    （withdraw_interject / reclaim_pending_interjects）用 get_nowait，不受影响。
+    """
+    try:
+        q.put_nowait(msg)
+        return
+    except queue.Full:
+        pass
+    try:
+        q.get_nowait()  # 丢最旧
+    except queue.Empty:
+        pass
+    try:
+        q.put_nowait(msg)
+    except queue.Full:
+        # 理论不可达（刚腾出一格）；并发极端下放弃本条，绝不阻塞回调线程
+        logger.warning("[ChatBackend] hook 队列满且腾格失败，丢弃当前 hook 消息")
+
+
 def _classify_error_text(message: str) -> str:
     text = str(message or "")
     for name, pattern in _ERROR_TYPE_PATTERNS:
@@ -393,8 +426,14 @@ class ChatBackend(QObject):
         # _pre_tool_message_queue: PreToolUse（同步触发，在 tool 执行后立即消费）
         # 预对话 hook（SessionStart/PreUserMessage/PostUserMessage 等）由 engine.py 直接注入
         # chat_worker 内部 hook（PreAssistant/PostAssistant/Stop）由 worker 直接注入
-        self._hook_message_queue: "queue.Queue[Dict]" = queue.Queue()
-        self._pre_tool_message_queue: "queue.Queue[Dict]" = queue.Queue()
+        # [⑤内存治理] maxsize 可配（env DRIFOX_HOOK_QUEUE_MAXSIZE，≥16）：
+        # 正常消费路径（worker loop 顶部/tool 后立即）远快于生产，队列常态为空；
+        # 上限只兜底「worker 卡死时 hook 线程被无界 put 拖入内存堆积」。满时
+        # 走 _put_hook_message 丢最旧保新（与 queue 语义的差异仅发生在
+        # 异常兜底场景，正常路径逐字节等价）。
+        _q_maxsize = _resolve_hook_queue_maxsize()
+        self._hook_message_queue: "queue.Queue[Dict]" = queue.Queue(maxsize=_q_maxsize)
+        self._pre_tool_message_queue: "queue.Queue[Dict]" = queue.Queue(maxsize=_q_maxsize)
 
         # 繁忙时插话消息的取消回收：worker 取消排空 hook 队列时，未消费的用户插话
         # 收集到此（供停止后回填输入框，不丢失）；queue.Queue 无法删项，只能取回。
@@ -481,13 +520,11 @@ class ChatBackend(QObject):
             # prompt hooks → 主队列
             if event_name == "PreToolUse":
                 hook_output = _format_hook_output(event_name, output, status_message)
-                self._pre_tool_message_queue.put(
-                    {
-                        "role": "user",
-                        "content": hook_output,
-                        "_hook_event": event_name,
-                    }
-                )
+                _put_hook_message(self._pre_tool_message_queue, {
+                    "role": "user",
+                    "content": hook_output,
+                    "_hook_event": event_name,
+                })
                 logger.debug("[HookManager] PreToolUse queued to pre-tool queue")
             elif is_prompt_hook or event_name in ("PostToolUse", "PluginChanged"):
                 hook_output = _format_hook_output(event_name, output, status_message)
@@ -499,7 +536,7 @@ class ChatBackend(QObject):
                 # 结构化 diff 随消息入队：worker 消费时批内合并，开关抵消（净零）整批不注入
                 if event_name == "PluginChanged" and diff:
                     msg["_plugin_diff"] = diff
-                self._hook_message_queue.put(msg)
+                _put_hook_message(self._hook_message_queue, msg)
                 self._hook_messages_updated.emit()
                 logger.debug(f"[HookManager] Hook queued for worker: {event_name}")
 
@@ -1416,12 +1453,16 @@ class ChatBackend(QObject):
 
         return session
 
-    def trigger_session_event(self, state: str, extra_context: dict = None):
+    def trigger_session_event(
+        self, state: str, extra_context: dict = None, only_matchers: Optional[set] = None
+    ):
         """触发 SessionStart hook，带会话状态
 
         Args:
             state: 会话状态，可选 startup/resume/clear/compact
             extra_context: 额外上下文信息
+            only_matchers: 非 None 时只执行 matcher 命中该集合的规则组（透传
+                hook_manager.trigger_event，供中途补触发只跑指定组，如团队加入）
         """
         if not self._hook_manager:
             return
@@ -1440,6 +1481,7 @@ class ChatBackend(QObject):
             context=ctx,
             current_message="",
             trigger_async=_is_ui_thread(),
+            only_matchers=only_matchers,
         )
         if session:
             for r in results:

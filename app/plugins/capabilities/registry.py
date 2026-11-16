@@ -9,7 +9,6 @@
 
 from __future__ import annotations
 
-import os
 from typing import Any, Dict, FrozenSet, List, Optional, Set, Tuple
 
 from loguru import logger
@@ -55,6 +54,14 @@ class CapabilityRegistry:
         # 全局审计去重：(plugin, surface, cap_id) -> 已记过。
         # 池实例可以有多个（每 ctx 一个），"某插件用过某能力"全局只需记一次。
         self._audited: Set[Tuple[str, str, str]] = set()
+        # S2：注册表版本戳——register/unregister/clear 任一注册面变化即递增，
+        # _pool_specs 缓存键含它，能力注册面变化即刻失效全部池规格。
+        self._entries_version: int = 0
+        # S3：host 无关池规格缓存 (plugin, surface, declared 签名, 版本戳)
+        #     → (declared_for_pool, providers, ungated, legacy)。
+        # providers/allowed/legacy 只依赖 surface+declared，与 host 无关，
+        # 构造期一次预算，build_pool 每次仅按当前 host 现建池实例。
+        self._pool_specs: Dict[tuple, tuple] = {}
 
     # ── 单例 ──
 
@@ -102,8 +109,12 @@ class CapabilityRegistry:
         self._arity(provider)
         if legacy_key:
             self._legacy_entries[(legacy_key, surface)] = provider
+            # S2：注册面变化递增版本戳，_pool_specs 全量失效
+            self._entries_version += 1
             return
         self._entries[(cap_id, surface)] = _Entry(provider, owner, experimental)
+        # S2：注册面变化递增版本戳，_pool_specs 全量失效
+        self._entries_version += 1
 
     def unregister(self, cap_id: str, *, surface: Optional[str] = None) -> None:
         if surface is None:
@@ -111,16 +122,24 @@ class CapabilityRegistry:
                 self._entries.pop(key, None)
             for key in [k for k in self._legacy_entries if k[1] == cap_id]:
                 self._legacy_entries.pop(key, None)
-            return
-        self._entries.pop((cap_id, surface), None)
-        for key in [k for k in self._legacy_entries if k[1] == cap_id]:
-            self._legacy_entries.pop(key, None)
+        else:
+            self._entries.pop((cap_id, surface), None)
+            for key in [k for k in self._legacy_entries if k[1] == cap_id]:
+                self._legacy_entries.pop(key, None)
+        # S2：注册面变化递增版本戳（热重载卸载路径；幂等重复卸载只是多失效一次缓存，正确性无损）
+        self._entries_version += 1
 
     def clear(self) -> None:
         self._entries.clear()
         self._legacy_entries.clear()
         self._declared_cache.clear()
         self._plugin_subs.clear()
+        # S2：三处派生缓存随注册面全清（原实现漏清 _hostless_pools/_audited，
+        # 热重载后会残留旧池与旧审计记录），并递增版本戳使 _pool_specs 全失效。
+        self._hostless_pools.clear()
+        self._audited.clear()
+        self._pool_specs.clear()
+        self._entries_version += 1
 
     def registered(self, surface: Optional[str] = None) -> List[str]:
         ids = {k[0] for k in self._entries if surface is None or k[1] == surface}
@@ -158,7 +177,30 @@ class CapabilityRegistry:
             if cached is not None:
                 return cached
 
-        pool = self._make_pool(surface, host, plugin, decl)
+        # S3：host 无关池规格（声明/允许集/providers/legacy）缓存一次预算。
+        # 键含 _entries_version：register/unregister/clear 任一注册面变化即失效。
+        # 缓存键禁含 host/窗口身份（host 相关的惰性值留池实例内，不进 spec）。
+        spec_sig = (
+            plugin,
+            surface,
+            None if decl is None else tuple(sorted(decl)),
+            self._entries_version,
+        )
+        spec = self._pool_specs.get(spec_sig)
+        if spec is None:
+            allowed, ungated = self._select(surface, decl)
+            providers = {cid: self._entries[(cid, surface)].provider for cid in (allowed | ungated)}
+            legacy = {
+                key[0]: provider
+                for key, provider in self._legacy_entries.items()
+                if key[1] == surface
+            }
+            spec = (None if decl is None else set(decl), providers, ungated, legacy)
+            if len(self._pool_specs) >= _CACHE_MAX:
+                self._pool_specs.clear()
+            self._pool_specs[spec_sig] = spec
+
+        pool = self._make_pool(surface, host, plugin, spec)
         if host is None and declared is not _UNSET:
             if len(self._hostless_pools) >= _CACHE_MAX:
                 self._hostless_pools.clear()
@@ -166,20 +208,20 @@ class CapabilityRegistry:
         return pool
 
     def _make_pool(
-        self, surface: str, host: Any, plugin: str, decl: Optional[FrozenSet[str]]
+        self, surface: str, host: Any, plugin: str, spec: tuple
     ) -> CapabilityPool:
-        allowed, ungated = self._select(surface, decl)
-        providers = {cid: self._entries[(cid, surface)].provider for cid in (allowed | ungated)}
-        legacy = {
-            key[0]: provider
-            for key, provider in self._legacy_entries.items()
-            if key[1] == surface
-        }
+        """S3 收窄：spec（host 无关池规格）+ host → 池实例。
+
+        声明解析与 providers 构建已上移 build_pool 的 spec 缓存；本方法只把
+        缓存规格绑定到当前 host。declared/providers/ungated/legacy 均为只读
+        共享（CapabilityPool 构造时自行拷贝），CapabilityDenied 类型与消息不变。
+        """
+        declared_pool, providers, ungated, legacy = spec
         return CapabilityPool(
             plugin=plugin,
             surface=surface,
             host=host,
-            declared=None if decl is None else set(decl),
+            declared=declared_pool,
             providers=providers,
             ungated=ungated,
             legacy_providers=legacy,
@@ -220,19 +262,20 @@ class CapabilityRegistry:
             logger.warning(f"[CapabilityAudit] 查询插件 {plugin} 失败: {e}")
         manifest = dict(getattr(info, "manifest", None) or {}) if info is not None else {}
         path = getattr(info, "path", "") if info is not None else ""
-        try:
-            mtime = os.stat(path).st_mtime if path else 0.0
-        except OSError:
-            mtime = 0.0
 
         cached = self._declared_cache.get(plugin)
         if query_failed:
             return cached[1] if cached is not None else frozenset()
 
         raw = manifest.get("capabilities")
-        # 缓存签名必须含声明内容：插件路径可能为空（测试替身 / 无固定目录来源），
-        # 只靠 (path, mtime) 会在这种情况下永久命中过期结果。
-        signature = (str(path), mtime, repr(raw), manifest.get("api_version"))
+        # S1：签名去掉 mtime（原实现每次取用一次 os.stat(path)，实测占取用开销
+        # 约 69%）。声明的唯一数据源是 PluginManager 内存里的 manifest dict：
+        # 内容变更必改 repr(raw)，磁盘 mtime 在此冗余；变更感知由 S7 在热重载/
+        # 启停/rescan 的 diff 点调 invalidate_declared() 主动失效（见
+        # plugin_host_service.reload_plugin_subsystems 与 plugin_manager）。
+        # 缓存签名仍含声明内容：插件路径可能为空（测试替身 / 无固定目录来源），
+        # 只靠 (path,) 会永久命中过期结果。
+        signature = (str(path), repr(raw), manifest.get("api_version"))
         if cached is not None and cached[0] == signature:
             return cached[1]
 
@@ -250,6 +293,22 @@ class CapabilityRegistry:
             self._declared_cache.clear()
         self._declared_cache[plugin] = (signature, resolved)
         return resolved
+
+    def invalidate_declared(self, plugin: str = "") -> None:
+        """S7 变更感知入口：热重载/启停/rescan 的 diff 点调用。
+
+        plugin 给出 → 只清该插件声明缓存（精细路径）。_pool_specs 键含 declared
+        签名，声明不变则旧 spec 仍正确，无需额外失效。
+        plugin 为空 → 全量失效：declared/池规格/无 host 特例池三缓存全清并递增
+        注册表版本戳（「重载插件」全量语义 / bootstrap 复位配套）。
+        """
+        if plugin:
+            self._declared_cache.pop(plugin, None)
+            return
+        self._declared_cache.clear()
+        self._hostless_pools.clear()
+        self._pool_specs.clear()
+        self._entries_version += 1
 
     # ── 订阅跟踪（stream.subscribe 等需要显式释放的连接） ──
 

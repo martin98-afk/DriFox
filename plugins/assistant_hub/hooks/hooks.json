@@ -12,6 +12,18 @@
             "id": "assistant_hub_inject_memory"
           }
         ]
+      },
+      {
+        "matcher": "clear|compact",
+        "hooks": [
+          {
+            "type": "python",
+            "function": ".project_notes:reset_context_dedup",
+            "add_output_to_context": false,
+            "statusMessage": "项目上下文重置:",
+            "id": "assistant_hub_project_context_reset"
+          }
+        ]
       }
     ],
     "BuildSystemPrompt": [

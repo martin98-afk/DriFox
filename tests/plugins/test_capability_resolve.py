@@ -325,3 +325,110 @@ def test_declared_for_reports_manifest(reg, monkeypatch):
     _fake_pm(monkeypatch, ["window.current"])
     declared = resolve.declared_for(plugin="demo")
     assert declared is not None and "window.current" in declared
+
+def test_stale_bound_host_falls_back_to_active(reg, fake_tm, monkeypatch):
+    """绑定窗口已销毁时必须回落活跃窗口，并清掉失效登记。
+
+    实证 bug：标题生成控制器在插件加载时建池，host 固化；窗口重建后旧池
+    指向已删窗口，model.config_for 抛 "wrapped C/C++ object ... has been
+    deleted" → 标题回退成首条消息前 15 字（"/plugin-creator"）。
+    """
+    from app.plugins.capabilities import resolve
+    from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+
+    _fake_pm(monkeypatch, ["window.current"])
+    stale = _fake_window(workdir="/dead")
+    stale._is_destroyed = True
+    active = _fake_window(workdir="/alive")
+    fake_tm(SimpleNamespace(get_current_window=lambda: None))
+    real = UIPluginRegistry.get_instance()
+    prev_main = getattr(real, "_main_widget", None)
+    resolve.note_host("demo", stale)
+    real.set_main_widget(active)
+    try:
+        snap = resolve.caps_for("window.current", plugin="demo")()
+    finally:
+        real.set_main_widget(prev_main)
+    assert snap is not None and snap["workdir"] == "/alive"
+    assert resolve._plugin_hosts.get("demo") is None
+
+def test_resolve_active_host_falls_back_when_host_dead(reg, monkeypatch):
+    """model.config_for / model.complete 的 host 已销毁时回落活跃窗口。
+
+    回归：host 固化在能力池闭包里，窗口重建后 config_for 拿死对象解析，
+    抛 "OpenAIChatToolWindow has been deleted" → 标题生成拿不到模型配置。
+    """
+    from app.plugins.capabilities import resolve
+    from app.plugins.capabilities.providers import ui_core
+
+    alive = SimpleNamespace(_window_id="win-alive")
+    stale = SimpleNamespace(_is_destroyed=True)
+    monkeypatch.setattr(resolve, "active_main_widget", lambda: alive)
+    assert ui_core._resolve_active_host(stale) is alive
+    assert ui_core._resolve_active_host(alive) is alive
+
+def test_active_main_widget_skips_destroyed_cached(reg, fake_tm, monkeypatch):
+    """UIPluginRegistry 缓存的 _main_widget 已删时，遍历窗口表取存活者。"""
+    from app.plugins.capabilities import resolve
+    from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+
+    fake_tm(SimpleNamespace(get_current_window=lambda: None))
+    alive = _fake_window(workdir="/alive")
+    real = UIPluginRegistry.get_instance()
+    prev_main = getattr(real, "_main_widget", None)
+    prev_map = dict(getattr(real, "_window_main_widgets", {}) or {})
+    stale = _fake_window(workdir="/dead")
+    stale._is_destroyed = True
+    try:
+        real._main_widget = stale
+        real._window_main_widgets = {"win-dead": stale, "win-alive": alive}
+        assert resolve.active_main_widget() is alive
+    finally:
+        real._main_widget = prev_main
+        real._window_main_widgets = prev_map
+
+# ── P2-1：note_host 直连 destroyed，窗口销毁自动注销 ──────────
+
+def test_note_host_forgets_on_destroyed(reg, monkeypatch):
+    """A：真 QObject 登记后 emit destroyed → 绑定被清，caps_for 回落活跃窗口"""
+    from PyQt5.QtCore import QObject
+
+    from app.plugins.capabilities import resolve
+
+    _fake_pm(monkeypatch, ["window.current"])
+    active = _fake_window(workdir="/active")
+    monkeypatch.setattr(resolve, "active_main_widget", lambda: active)
+
+    host = QObject()
+    resolve.note_host("demo", host)
+    assert resolve._plugin_hosts.get("demo") is host
+
+    host.destroyed.emit()
+    assert resolve._plugin_hosts.get("demo") is None
+    snap = resolve.caps_for("window.current", plugin="demo")()
+    assert snap is not None and snap["workdir"] == "/active"
+
+
+def test_forget_after_destroyed_is_idempotent(reg):
+    """B：destroyed 已清后再 forget_host 不抛、不误删后来登记的其它窗口"""
+    from PyQt5.QtCore import QObject
+
+    from app.plugins.capabilities import resolve
+
+    h1, h2 = QObject(), QObject()
+    resolve.note_host("demo", h1)
+    h1.destroyed.emit()
+    resolve.forget_host("demo", h1)   # 幂等：已清，不抛
+    resolve.note_host("demo", h2)
+    resolve.forget_host("demo", h1)   # 身份比较：旧窗口不得误删 h2
+    assert resolve._plugin_hosts.get("demo") is h2
+    h2.destroyed.emit()
+
+
+def test_note_host_tolerates_signal_less_host(reg):
+    """C：SimpleNamespace 假窗无 destroyed 信号 → 登记仍生效且不抛"""
+    from app.plugins.capabilities import resolve
+
+    fake = _fake_window()
+    resolve.note_host("demo", fake)
+    assert resolve._plugin_hosts.get("demo") is fake

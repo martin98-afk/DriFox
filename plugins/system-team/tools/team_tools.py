@@ -75,30 +75,6 @@ def _spawn_facade() -> Optional[dict]:
     facade = sp
     return facade if isinstance(facade, dict) else None
 
-def _leader_gate(tm, window_id: str) -> Optional[ToolResult]:
-    """leader 门禁单点（remove_member / 群发；不进 PermissionResolver）。
-
-    Returns:
-        None=放行；否则返回 deny 结果。leader_window_id 为空（非
-        team_manage(action=create) 建团的老团队）同样拒绝，避免管理操作悬空。
-    """
-    try:
-        leader_wid = str(tm.get_leader_window_id() or "")
-    except Exception:
-        leader_wid = ""
-    if not leader_wid:
-        return ToolResult(False, error="当前团队未登记 leader（仅 team_manage(action=create) 建团支持管理操作），已拒绝")
-    if window_id == leader_wid:
-        return None
-    leader_label = leader_wid
-    try:
-        name = tm.get_member_agent_name(leader_wid)
-        if name:
-            leader_label = f"{name}@{leader_wid}"
-    except Exception:
-        pass
-    return ToolResult(False, error=f"仅团队 leader 可执行该操作（当前 leader: {leader_label}）")
-
 
 def _format_capability(cap: dict) -> str:
     """格式化能力摘要：如 `写✓/编✓/bash✓ | 标签: implement`。"""
@@ -295,8 +271,8 @@ def _team_send_message(tool_ctx, to_agent, message: str) -> ToolResult:
     """向团队成员发送任务邮件（to_agent: str | list[str]；"*"/["*"]=全队群发）
 
     单目标路径行为不变（向后兼容）；群发走 team.manage.send_task_broadcast
-    （leader 门禁单点在本函数内），targets 原样透传（"*" 展开语义由
-    TeamManager 侧负责，工具层不先展开，保住「未登记 leader → skipped」语义）。
+    （任意成员/外部窗口可群发，发件人=调用窗口，不再限 leader），targets
+    原样透传（"*" 展开语义由 TeamManager 侧负责，工具层不先展开）。
 
     🛡️ M1（user 拍板放行+打标）：跨团队消息**不再硬拦截**，改为放行+打标——
     mail dict 写 from_run_id / to_run_id 字段，返回成功结果后追加「⚠ 跨团队
@@ -332,17 +308,15 @@ def _team_send_message(tool_ctx, to_agent, message: str) -> ToolResult:
     if not is_member:
         from_agent = "user"
 
-    # ── 群发分支：list 或 "*"（leader 门禁；单目标行为完全不变）──
+    # ── 群发分支：list 或 "*"（任何成员/外部窗口可群发，发件人=调用窗口；
+    # 单目标行为完全不变）──
     if isinstance(to_agent, list) or to_agent == "*":
-        gate = _leader_gate(tm, window_id)
-        if gate is not None:
-            return gate
         mg = _get_team_manage()
         if mg is None:
             return ToolResult(False, error="团队管理能力不可用（缺少 team.manage 能力声明）")
         targets = [str(t) for t in to_agent] if isinstance(to_agent, list) else None
         text = str(message or "")
-        result = mg.send_task_broadcast(subject=text[:80], body=text, targets=targets)
+        result = mg.send_task_broadcast(subject=text[:80], body=text, targets=targets, from_window=window_id)
         sent = result.get("sent", []) or []
         skipped = result.get("skipped", []) or []
         lines = [f"群发完成：成功 {len(sent)} 封，跳过 {len(skipped)} 个目标。"]
@@ -735,8 +709,14 @@ def _team_add_member(tool_ctx, agent_name: str, role: str) -> ToolResult:
         pass
 
     try:
+        # keep_current_active=True：拉人入队同样不抢当前焦点 tab——成员窗口在
+        # 后台拉起，调用方（leader 或其他成员）视角停在原会话。与 create 路径
+        # 对齐（原先默认 False 会切到新成员 tab）。
         receipt = facade["spawn_members"](
-            [{"agent_name": agent_name, "description": str(role or "").strip()}], run_id, team_label
+            [{"agent_name": agent_name, "description": str(role or "").strip()}],
+            run_id,
+            team_label,
+            keep_current_active=True,
         )
     except TypeError as e:
         # 只兜 provider 签名漂移；形态错误已在上方 isinstance 拦截并明示
@@ -752,7 +732,7 @@ def _team_add_member(tool_ctx, agent_name: str, role: str) -> ToolResult:
         return ToolResult(False, error=f'{{"submitted": false, "error": "{err}"}}')
 
     # P0②：状态回执（pending_window 由 provider 从 action_queue.peek 现算）
-    receipt["note"] = receipt.get("note") or "窗口正在实时创建（本轮对话期间拉起），下一轮用 team_manage(action=list) 验证。"
+    receipt["note"] = receipt.get("note") or "开窗后台进行中，无需等待：可立即用 team_send_message 派单（消息排队投递，窗口就绪后自动执行），并继续当前任务。"
     lines = [
         f"开窗请求已提交：{agent_name}" + (f"（{role}）" if str(role or "").strip() else ""),
         f"回执: {json.dumps(receipt, ensure_ascii=False)}",
@@ -760,7 +740,7 @@ def _team_add_member(tool_ctx, agent_name: str, role: str) -> ToolResult:
     return ToolResult(True, content="\n".join(lines))
 
 def _team_remove_member(tool_ctx, agent_name: str) -> ToolResult:
-    """按 agent_name 移除成员（leader 门禁；多同名全移并在返回里说明）"""
+    """按 agent_name 移除成员（任意团队成员可调；多同名全移并在返回里说明）"""
     window_id = tool_ctx.get("team_window_id", "")
     if not window_id:
         return ToolResult(False, error="当前不在团队上下文中，请先执行 /team --join=<agent> 加入团队")
@@ -769,9 +749,6 @@ def _team_remove_member(tool_ctx, agent_name: str) -> ToolResult:
         return ToolResult(False, error="agent_name 不能为空")
 
     tm = _get_team_manager()
-    gate = _leader_gate(tm, window_id)
-    if gate is not None:
-        return gate
     mg = _get_team_manage()
     if mg is None:
         return ToolResult(False, error="团队管理能力不可用（缺少 team.manage 能力声明）")
@@ -846,8 +823,8 @@ _TEAM_MANAGE_SCHEMA = {
             "团队管理统一入口(action 分发)。"
             "list=查成员(任何窗口可用，非成员也可只读，返回 agent_name@window_id)；"
             "create=创建团队(任何窗口可用，team_name/team_role 必填，members 可选)，leader 与成员全新建窗口、当前窗口不切标签页；create 后即可用 team_send_message 派任务，成员自动执行；"
-            "add=拉成员入队(提交开窗请求，本轮结束后开窗；须已在团队中，成员可调用；agent_name/role 必填，下一轮用 list 验证)；"
-            "remove=移出成员(仅 leader，agent_name 必填，同名全移除，不能移除自己)；"
+            "add=拉成员入队(提交开窗请求，本轮结束后开窗；须已在团队中，成员可调用；agent_name/role 必填；返回 queued/pending_window 即成功，无需等待，可立即用 team_send_message 派单并继续当前工作)；"
+            "remove=移出成员(任意成员可调，agent_name 必填，同名全移除，不能移除自己)；"
             "leave=退出(须已在团队中，leader 退出自动移交)。"
         ),
         "parameters": {
@@ -936,7 +913,7 @@ def _team_manage_impl(tool_ctx, **kwargs):
 def register(registry):
     # team_manage：team_only=False —— 非团队窗口（主窗口）可 action=create/list
     # 发起「一句话组队」，否则会被 agent.py 的 team_only schema 过滤拦在第一步；
-    # 权限按 action 在 impl 内分层（add 须成员、remove 须 leader、leave 须成员）
+    # 权限按 action 在 impl 内分层（add 须成员、remove 须成员、leave 须成员）
     registry.register(
         "team_manage",
         _TEAM_MANAGE_SCHEMA,

@@ -22,6 +22,7 @@ PR3 扩展（多区域主题插件基础设施）：
 import os
 
 from app.plugins.contracts.ui_module import UIModule
+from app.utils.scroll_tuning import install_fast_wheel
 
 
 def _resolve_chat_image(image: str) -> str:
@@ -84,6 +85,9 @@ class ChatAreaModule(UIModule):
         host.chat_layout.setSpacing(6)  # 消息间距（2026-09-23 收敛：8→6，配合卡片内边距收紧）
         host.chat_layout.setAlignment(Qt.AlignBottom)
         host.chat_scroll_area.setWidget(host.chat_container)
+        # 聊天区同样关掉平滑动画：流式期每帧逐帧滚动会把整视口重绘叠加到
+        # 渲染负载上；接管器保留连续滚轮加速，一次 setValue 到位。
+        install_fast_wheel(host.chat_scroll_area, native_scrollbar=False, smooth_ms=0)
 
         # 连接滚动事件（虚拟滚动回收）
         try:

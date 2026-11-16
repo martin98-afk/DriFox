@@ -64,10 +64,19 @@ class _Mgr:
         a = self.get(aid)
         if a is None or not a.memory_enabled:
             return ""
+        # 新契约：system block 只含静态纪律，记忆内容走 snapshot 通道
         return (
             "<memory_system>\n\n# 第一层 — 全局记忆\n文件：hub/xiaohu-x1/MEMORY.md\n\n"
             "# 第二层 — 项目记忆\n目录：.drifox/memory/xiaohu-x1/\n\n</memory_system>"
-            "\n\n<global_memory>\n用户喜欢简洁回复\n</global_memory>"
+        )
+
+    def memory_snapshot_block(self, aid, workdir=""):
+        a = self.get(aid)
+        if a is None or not a.memory_enabled:
+            return ""
+        # SessionStart 会话消息通道：记忆内容（一次性快照）
+        return (
+            "<global_memory>\n用户喜欢简洁回复\n</global_memory>"
             "<project_memory>\n项目：DriFox 重构中\n</project_memory>"
             "<daily_logs>\n- 2026-10-13（120 字）\n</daily_logs>"
         )
@@ -83,16 +92,17 @@ def _patch_mgr(monkeypatch):
 
 
 def test_hook_injects_identity_and_memory(monkeypatch):
-    """BuildSystemPrompt hook：身份块 + 记忆体系块（说明书/全局/项目/日志）全进系统提示词。"""
+    """BuildSystemPrompt hook：身份块 + 记忆纪律块（静态指针，不含记忆内容）。"""
     _patch_mgr(monkeypatch)
     context = {"current_role": "primary", "agent_identity_content": "原build提示词", "project_root": "/proj"}
     out = m.hook("BuildSystemPrompt", context)
     assert out and "小狐" in out
     assert "# 助手：小狐" in out
     assert "memory_system" in out and "第一层" in out
-    assert "<global_memory>" in out and "简洁回复" in out
-    assert "<project_memory>" in out and "DriFox 重构中" in out
-    assert "<daily_logs>" in out
+    # 新契约：内容走 SessionStart snapshot 通道，system prompt 无记忆内容
+    assert "<global_memory>" not in out and "简洁回复" not in out
+    assert "<project_memory>" not in out and "DriFox 重构中" not in out
+    assert "<daily_logs>" not in out
     # 不再改写宿主 context（主链路 system prompt 不注入原智能体身份，无需替换语义）
     assert context["agent_identity_content"] == "原build提示词"
 
@@ -116,13 +126,14 @@ def test_hook_memory_disabled_no_memory_block(monkeypatch):
     assert "小狐" in out and "memory_system" not in out
 
 
-def test_on_session_start_injects_pinned_only(monkeypatch):
-    """SessionStart hook：只注入人工提示（记忆走系统提示词单一通道）。"""
+def test_on_session_start_injects_pinned_and_snapshot(monkeypatch):
+    """SessionStart hook：人工提示 + 记忆快照（memory_snapshot_block）进会话消息。"""
     _patch_mgr(monkeypatch)
     out = m.on_session_start("SessionStart", {"state": "startup"})
     assert out and "人工提示" in out and "简洁回复" in out
-    # 记忆内容不进会话消息
-    assert "memory_system" not in out and "global_memory" not in out
+    # 快照内容进会话消息；静态纪律块不进
+    assert "<global_memory>" in out and "<project_memory>" in out and "<daily_logs>" in out
+    assert "memory_system" not in out
     assert "# 助手：" not in out
 
 
@@ -133,12 +144,20 @@ def test_on_session_start_no_active_assistant(monkeypatch):
 
 
 def test_on_session_start_uses_session_override(monkeypatch):
-    """会话 override 优先：临时助手无 pinned 时返回空串，不回落到主助手。"""
+    """会话 override 优先：临时助手无 pinned 时不回落主助手的人工提示。
+
+    新契约：snapshot 通道照常注入 override 助手自己的记忆（内容按 aid 区分，
+    桩按 aid 给不同快照），断言不串到主助手内容。
+    """
     mgr = _patch_mgr(monkeypatch)
     mgr.session_overrides["s2"] = "temp-1"
     mgr.pinned_block = lambda aid: "" if aid == "temp-1" else "# 人工提示\n\n- x"
+    mgr.memory_snapshot_block = lambda aid, workdir="": (
+        "临时助手记忆" if aid == "temp-1" else "主助手记忆"
+    )
     out = m.on_session_start("SessionStart", {"state": "compact", "session_id": "s2"})
-    assert out == ""
+    assert "人工提示" not in out and "主助手记忆" not in out, "不得回落主助手内容"
+    assert "临时助手记忆" in out
 
 
 def test_on_session_start_mgr_unavailable(monkeypatch):

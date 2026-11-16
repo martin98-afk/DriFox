@@ -8,6 +8,7 @@ Windows 原生保留 Aero Snap / 摇动 / 任务栏预览 / DWM 阴影。
 """
 
 import platform
+import time
 from collections import OrderedDict
 from typing import Any, Callable, Dict, List, Optional
 
@@ -24,7 +25,6 @@ from PyQt5.QtWidgets import (
     QGraphicsOpacityEffect,
     QHBoxLayout,
     QLabel,
-    QStackedWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -37,6 +37,7 @@ from app.utils.design_tokens import Animations, Colors, font_size_css
 from app.utils.theme_manager import theme_manager
 from app.utils.utils import get_font_family_css, get_unified_font
 from app.widgets.custom_title_bar import _MacTrafficLightCenterMixin
+from app.widgets.deferred_paint_stack import DeferredPaintStack
 
 # ── 对话区限宽档位（px）：窗口过宽时限制对话内容宽度并居中，两侧留白 ──
 # 避免聊天内容在超宽屏幕上被拉得难以阅读。档位可在 设置-外观 切换。
@@ -427,6 +428,9 @@ def _update_tab_icon(tab_idx: int, project: str):
                 if team_id:
                     initials, color = tm._team_project_icon_data(win, fallback=project)
                     tm._tab_panel.set_team_project(team_id, initials, color)
+                    # 成员行与普通 Tab 共用项目 icon（团队模式不再隐藏色块）
+                    if initials:
+                        tm._tab_panel.update_tab_project(tab_idx, initials, color)
                     return
 
         # 临时对话页：Tab 用固定隐身紫「临」图标（不用项目色），标题前缀由窗口标题携带
@@ -1222,6 +1226,13 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
         self._splitter_idle_timer.setInterval(120)
         self._splitter_idle_timer.timeout.connect(self._on_splitter_idle)
 
+        # ── 团队成员行「最后活动时间」周期刷新：刷新点（标题变更/一轮结束/
+        # 加入 Tab）只在活动时刻触发，算出的「刚刚」随闲置僵死；30s 重算一次 ──
+        self._member_time_timer = QTimer(self)
+        self._member_time_timer.setInterval(30 * 1000)
+        self._member_time_timer.timeout.connect(self._refresh_member_times)
+        self._member_time_timer.start()
+
         # ── 侧边栏内 left 卡片区（嵌入 sidebarSplitter）──
         # 卡片打开前的 TabPanel frame 宽（卡片关闭时恢复）与「卡片占位期间」标记
         self._left_card_saved_panel_frame_w: int = 0
@@ -1246,19 +1257,29 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
         self.setWindowFlags(Qt.Window)
         self.updateFrameless()
 
+        # perf(startup): UI 构建段子打点（titlebar 段边界）
+        _probe("p4.titlebar.start")
         from app.widgets.custom_title_bar import CustomTitleBar
 
         self.setTitleBar(CustomTitleBar(self))
         # 顶栏接线：侧栏开关 → 复用 TabPanel 折叠链（sidebarToggled → 宽度动画）
-        self.titleBar.sidebar_toggle_requested.connect(lambda: self._tab_panel._toggle_sidebar())
+        # perf(startup): 两阶段构造壳期 _tab_panel 未建（complete_construction 前），
+        # 侧栏按钮可点，lambda 需容缺失
+        self.titleBar.sidebar_toggle_requested.connect(
+            lambda: getattr(self, "_tab_panel", None) is not None and self._tab_panel._toggle_sidebar()
+        )
         # 顶栏 tab 切换：「聊天」→ 对话视图；full 卡片 tab → 切换显示
         self.titleBar.tab_clicked.connect(self._on_titlebar_tab_clicked)
         # 顶栏 tab × 关闭（仅 full 卡片 tab 有）：真实隐藏卡片并从 open 集合移除
         self.titleBar.tab_close_clicked.connect(self._on_replace_tab_close_clicked)
         self.setWindowIcon(QIcon(":/icons/drifox.ico"))
 
+        # perf(startup): UI 构建段子打点（titlebar 段收口）
+        _probe("p4.titlebar.end")
         # 确保 Colors 已刷新（主题色初始化）
         Colors.refresh()
+        # perf(startup): UI 构建段子打点（Colors.refresh 段收口）
+        _probe("p4.colors_refresh.end")
 
         # 替换类型(full 容器)卡片标题栏 tab 状态
         # full 卡片 tab 状态按对话标签页隔离：{window_id: {card_id: title}}
@@ -1282,8 +1303,10 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
 
         _probe("p4.setup_ui.start")
         self._setup_ui()
-        self._setup_signals()
-        _probe("p4.setup_ui.end")
+        # perf(startup): 两阶段构造阶段一止：重 UI（TabPanel/容器树/_setup_signals/
+        # workbench）迁入 complete_construction()，由 main._show_popup 在壳可见后、
+        # 首窗构造前同步驱动（singleShot 不可用：同拍内 add_window 需要完整 UI 树）
+        _probe("p4.shell_setup.end")
         # 不在 __init__ 设位置，等第一次 showEvent 时再设
 
         # ── 应用级服务启动已挪至 main.py（壳显示后、首窗构造前）──
@@ -1299,38 +1322,94 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
         # 修复多 tab 下后建窗口静默覆盖先建窗口的问题（之前由 MainWidget
         # 在 _init_llm_api_service 注册 handler，绑死后建窗口的 widget；现改为
         # 每次调用实时查 _tab_panel.active_index 对应的活跃 ChatWindow）
-        from app.core.local_service.session_handler import APISessionHandler
-        from app.core.local_service import LLMAPIService
+        # perf(startup): API 会话/全局卡段（冷 import 级联 + 单例注册 +
+        # refresh_ui_plugins，实测 ~230-330ms）延迟到事件循环首拍
+        # （singleShot(0)），不再阻塞首窗构造。时序安全论证：
+        # ① 闭包注册于 __init__，首拍顺序在 _show_popup / _deferred_startup 之后，
+        #    执行时 _setup_ui / 单例注册 / 首窗构造均已完成；tm.repaint() 不处理
+        #    事件队列（见 main._show_popup 注释），闭包不会在启动中途重入；
+        # ② LLMAPIService 启动期不自启（唯一入口=设置卡手动开启 / open_docs），
+        #    且 handler 为 None 时路由层 503 降级（api_server.py），
+        #    set_session_handler 必然早于任何本地 API 请求到达；
+        # ③ refresh_ui_plugins 读 UIPluginRegistry，全量注册在首窗 deferred 队列
+        #    （init_ui_plugins_deferred）内，跑在本闭包之后——调用前后注册表
+        #    同为空，空转等价；showEvent 与 _update_shared_launcher 均有补刷。
+        def _deferred_api_wiring():
+            # perf(startup): 壳期实例防御——未 complete 时重排队，防 singleShot 回调早于
+            # complete 触发（测试直构壳期实例场景）；裸跳过会永久漏掉 API wiring
+            # （singleShot 一次性），重排队在 complete 后下一拍自然续接
+            if not getattr(self, "_construction_completed", False):
+                QTimer.singleShot(0, _deferred_api_wiring)
+                return
+            from app.core.local_service.session_handler import APISessionHandler
+            from app.core.local_service import LLMAPIService
 
-        def _active_main_widget():
-            idx = self._tab_panel.active_index if self._tab_panel is not None else -1
-            if 0 <= idx < len(self._windows):
-                w = self._windows[idx]
-                if w is not None and not getattr(w, "_is_destroyed", False):
-                    return w
-            return None
+            def _active_main_widget():
+                idx = self._tab_panel.active_index if self._tab_panel is not None else -1
+                if 0 <= idx < len(self._windows):
+                    w = self._windows[idx]
+                    if w is not None and not getattr(w, "_is_destroyed", False):
+                        return w
+                return None
 
-        self._api_session_handler = APISessionHandler(_active_main_widget)
-        LLMAPIService.set_session_handler(self._api_session_handler)
+            self._api_session_handler = APISessionHandler(_active_main_widget)
+            LLMAPIService.set_session_handler(self._api_session_handler)
 
-        # 全局卡片控制器：系统设置/服务商编辑/Hook/MCP 卡片挂载在 Tab 窗口层
-        # （单例在此处初始化，确保全局容器已随 _setup_ui 创建完毕）
-        from app.widgets.cards.global_card_controller import get_global_card_controller
+            # 全局卡片控制器：系统设置/服务商编辑/Hook/MCP 卡片挂载在 Tab 窗口层
+            # （单例在此处初始化，全局容器已随 _setup_ui 创建完毕）
+            from app.widgets.cards.global_card_controller import get_global_card_controller
 
-        get_global_card_controller()
+            get_global_card_controller()
 
-        # 刷新 Tab 面板内嵌的 UI 插件列表
-        _probe("p4.refresh_ui_plugins.start")
-        self._tab_panel.refresh_ui_plugins()
-        _probe("p4.refresh_ui_plugins.end")
-        # 注册到 TrayManager
+            # 刷新 Tab 面板内嵌的 UI 插件列表
+            # （probe 针打在 _probe_dump 之后，不再入表；耗时改走本行日志）
+            _t_api = _sm_time.perf_counter()
+            _probe("p4.refresh_ui_plugins.start")
+            self._tab_panel.refresh_ui_plugins()
+            _probe("p4.refresh_ui_plugins.end")
+            logger.debug(
+                f"[TabManager] __init__ API 会话/全局卡段耗时（deferred 首拍）"
+                f" {(_sm_time.perf_counter() - _t_api) * 1000:.0f}ms"
+            )
+
+        QTimer.singleShot(0, _deferred_api_wiring)
+        # perf(startup): 两阶段构造：TrayManager/theme/workbench 段已迁入
+        # complete_construction()（阶段二，壳可见后同步补建）
+
+        # 初始加载全局背景图（延迟到首帧后，背景为纯装饰，不阻塞出现）
+        QTimer.singleShot(0, self._apply_bg_from_theme)
+
+        # 顶栏内置「聊天」常驻 tab（full 卡片 tab 由显隐事件动态增删，
+        # 插件常驻 tab 由 _sync_plugin_titlebar_tabs 挂载）
+        self.titleBar.add_tab(CHAT_TAB_ID, "对话")
+        self._sync_plugin_titlebar_tabs()
+
+    def complete_construction(self) -> None:
+        """两阶段构造·阶段二（壳先行，批5 同模式）：补建重 UI + signals + workbench。
+
+        阶段一（__init__）只建基座/标题栏/空骨架，让 tm.show() 尽快可见；
+        本方法由 main._show_popup 在壳可见后、首窗构造前显式同步驱动：
+        - 不能用 singleShot(0)：同拍内 add_window 消费 UI 树，deferred 会时序倒挂；
+        - 幂等：主路径与兜底路径（main_widget 惰性重建）重复调用安全。
+        """
+        import time as _sm_time  # 原 __init__ 局部 import，随段迁入
+
+        if getattr(self, "_construction_completed", False):
+            return
+        self._construction_completed = True
+        _probe("p5.complete_setup.start")
+        self._complete_setup_ui()
+        # perf(startup): 阶段二接线段（原 __init__ _setup_signals 调用迁入）
+        _probe("p5.complete_signals.start")
+        self._setup_signals()
+        _probe("p5.complete_signals.end")
+        # 注册到 TrayManager（原 __init__ 段迁入）
         _sm_t2 = _sm_time.perf_counter()
-        logger.debug(f"[TabManager] __init__ API 会话/全局卡段耗时 {(_sm_t2 - _sm_t1) * 1000:.0f}ms")
         from app.tray_manager import TrayManager
 
         TrayManager.get_instance()._tab_manager_window = self
         logger.debug(
-            f"[TabManager] __init__ TrayManager 单例段耗时 {(_sm_time.perf_counter() - _sm_t2) * 1000:.0f}ms"
+            f"[TabManager] complete_construction TrayManager 单例段耗时 {(_sm_time.perf_counter() - _sm_t2) * 1000:.0f}ms"
         )
 
         # 注册主题刷新回调（虽主题切换路径不走 dispatch_refresh，
@@ -1409,14 +1488,7 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
         self._wb_suppress_memory = False
         self._wb_in_preview = False
         self._wb_promote_on_leave = False
-
-        # 初始加载全局背景图（延迟到首帧后，背景为纯装饰，不阻塞出现）
-        QTimer.singleShot(0, self._apply_bg_from_theme)
-
-        # 顶栏内置「聊天」常驻 tab（full 卡片 tab 由显隐事件动态增删，
-        # 插件常驻 tab 由 _sync_plugin_titlebar_tabs 挂载）
-        self.titleBar.add_tab(CHAT_TAB_ID, "对话")
-        self._sync_plugin_titlebar_tabs()
+        _probe("p5.complete_setup.end")
 
     def _on_titlebar_tab_clicked(self, tab_id: str):
         """顶栏 tab 点击：「聊天」→ 对话视图；full 卡片 tab → 切换/显示；
@@ -3029,6 +3101,11 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
                 pass
 
     def _setup_ui(self):
+        """阶段一（壳骨架，同步）：底色层 + 空内容容器。
+
+        重 UI（TabPanel/容器树/splitter/样式）由 _complete_setup_ui 在壳可见后
+        补建（complete_construction 驱动）；本段只保 tm.show() 能尽快画壳。
+        """
         # ── 外层纵向布局：直接放内容区（顶部让位自绘无边框标题栏） ──
         main_layout = QVBoxLayout(self)
         # 顶部让位自绘无边框标题栏（mac 与 Win/Linux 统一 38，交通灯由 mixin 居中）
@@ -3043,11 +3120,24 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
         self._window_base_layer.show()
 
         # ── 内容区（水平：TabPanel + QStackedWidget） ──
+        # perf(startup): 两阶段构造阶段一仅建空骨架；阶段二（_complete_setup_ui）
+        # 沿用本骨架挂载完整 UI 树
         content_widget = QWidget(self)
         content_widget.setObjectName("tabManagerContent")
         content_layout = QHBoxLayout(content_widget)
         content_layout.setContentsMargins(0, 0, 0, 0)
         content_layout.setSpacing(0)
+        self._shell_layout = main_layout
+        self._shell_content = content_widget
+
+    def _complete_setup_ui(self):
+        """阶段二（重 UI 补建）：TabPanel/容器树/splitter/样式/工作区宿主。
+
+        由 complete_construction() 驱动；main_layout/content_widget 沿用阶段一骨架。
+        """
+        main_layout = self._shell_layout
+        content_widget = self._shell_content
+        content_layout = content_widget.layout()
 
         # 左侧 Tab 面板（可拖拽调整宽度）
         from app.widgets.tab_panel import TabPanel
@@ -3098,7 +3188,9 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
         tab_frame_layout.addWidget(self._sidebar_splitter)
 
         # 右侧内容区
-        self._content_area = QStackedWidget(content_widget)
+        # perf: (#25) DeferredPaintStack：切页首绘推迟下一拍合并（paint 61.8ms 实测），
+        # env DRIFOX_TAB_SWITCH_DEFERRED_PAINT=0 可回退原生 QStackedWidget 路径
+        self._content_area = DeferredPaintStack(content_widget)
         self._content_area.setObjectName("contentArea")
 
         # 空状态页（索引 0）
@@ -5046,6 +5138,9 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
                     )
                     self._tab_panel.update_tab_title(cur_idx, t)
                     self._tab_panel.update_tab_capsule(cur_idx, team_agent)
+                    # 成员会话标题可能就是团队首个真实标题 → 同步 header 统一标题
+                    self._sync_team_header_title(_win)
+                    self._tab_panel.update_tab_member_time(cur_idx, self._member_time_text(_win))
                 else:
                     # 非团队窗口：Tab 标题取窗口标题
                     t = _win.windowTitle() or getattr(_win, "_current_project", None) or "对话"
@@ -5084,6 +5179,9 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
                 else:  # idle
                     self._tab_panel.update_tab_streaming(cur_idx, False, False)
                     self._tab_panel.update_tab_question(cur_idx, False)
+                    # 一轮结束：成员行「最后活动时间」可能已变（会话保存后）
+                    if getattr(_win, "_team_agent_name", ""):
+                        self._tab_panel.update_tab_member_time(cur_idx, self._member_time_text(_win))
 
             window._tab_ai_state_slot = _on_ai_state_changed
             window.ai_state_changed.connect(_on_ai_state_changed)
@@ -5110,9 +5208,11 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
             panel.set_tab_team(tab_idx, team_id)
             # 同步团队框 header 名称（初次加入 Tab 时即同步）
             if team_id:
-                panel.set_team_label(team_id, getattr(window, "_team_name", "") or "")
-                # 团队模式：隐藏 Tab 项目 icon（项目 icon 移到团队标题处）
+                # 团队框 header = 统一任务标题（整个团队只显示一个）；成员行
+                # 改用项目 icon + 胶囊 + 最后活动时间
+                self._sync_team_header_title(window)
                 panel.set_tab_team_mode(tab_idx, True)
+                panel.update_tab_member_time(tab_idx, self._member_time_text(window))
                 # 团队标题 icon（团队级 project；团队框此时已创建，重新走
                 # _update_tab_icon 团队分支刷新 header）
                 _update_tab_icon(tab_idx, project)
@@ -5146,9 +5246,9 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
         同时同步团队分组（set_tab_team）：胶囊与分组框共同表达团队归属，
         胶囊显示角色名，分组框圈出同团队多个窗口。
 
-        同时同步团队框 header 名称（set_team_label）：窗口加入团队时把
-        窗口的 _team_name 注入团队框 header，离开团队时清空（set_tab_team
-        移除分组会自然触发 _maybe_remove_empty_group 清理）。
+        同时同步团队框 header 标题（set_team_label）：整个团队只展示一个
+        任务标题（run 内最早生成的真实标题，未生成时回退团队名），成员行
+        不再各自重复会话标题；离开团队时 set_tab_team 移除分组自然清理。
         """
         idx = self._window_to_index.get(id(window), -1)
         if idx < 0 or idx >= len(self._windows):
@@ -5163,12 +5263,13 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
         # 非团队窗口传 "" 留在独立区。胶囊仍显示角色名（team_agent）。
         team_id = self._resolve_tab_team_id(window)
         self._tab_panel.set_tab_team(idx, team_id)
-        # 团队模式切换：团队窗口隐藏 Tab 项目 icon（移到团队标题处显示）；
-        # 退出团队时恢复显示（检查点 2：清胶囊与恢复 icon 同时处理，勿漏）
+        # 团队模式切换：团队成员行改用项目 icon + 胶囊 + 最后活动时间；
+        # 退出团队时恢复标题显示（检查点 2：清胶囊与恢复行内容同时处理，勿漏）
         self._tab_panel.set_tab_team_mode(idx, bool(team_id))
-        # 同步团队框 header 名称 + 项目 icon（数据源=团队级 project）
+        # 同步团队框 header 标题 + 项目 icon（数据源=团队级 project）
         if team_id:
-            self._tab_panel.set_team_label(team_id, getattr(window, "_team_name", "") or "")
+            self._sync_team_header_title(window)
+            self._tab_panel.update_tab_member_time(idx, self._member_time_text(window))
             project = getattr(window, "_current_project", "") or ""
             self._tab_panel.set_team_project(team_id, *self._team_project_icon_data(window, fallback=project))
         else:
@@ -5177,6 +5278,111 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
             # 时的初值——review #11 问题 2：退出团队后 Tab 图标过时）
             project = getattr(window, "_current_project", "") or ""
             _update_tab_icon(idx, project)
+
+    def _sync_team_header_title(self, window) -> None:
+        """团队框 header 任务标题 + 成员行统一标题同步
+
+        整个团队只显示一个任务名：header 展示标题，成员行不重复（让位给
+        最后活动时间），但折叠态只有图标方块，tooltip 需要「角色 · 标题」。
+        """
+        team_id = self._resolve_tab_team_id(window)
+        if not team_id:
+            return
+        title = self._resolve_team_title(window)
+        self._tab_panel.set_team_label(team_id, title)
+        self._tab_panel.set_team_unified_title(team_id, title)
+
+    def _refresh_member_times(self):
+        """周期刷新团队成员行「最后活动时间」（闲置时「刚刚」僵死修复）"""
+        for w in self._windows:
+            if not getattr(w, "_team_agent_name", ""):
+                continue
+            if _sip.isdeleted(w):
+                continue
+            idx = self._window_to_index.get(id(w), -1)
+            if idx < 0:
+                continue
+            self._tab_panel.update_tab_member_time(idx, self._member_time_text(w))
+
+    @staticmethod
+    def _member_time_text(win) -> str:
+        """团队成员行「最后活动时间」文本（会话最后更新时间 → 相对时间）"""
+        try:
+            from app.utils.session_preview import format_relative_time
+
+            sm = getattr(win, "session_manager", None)
+            session = sm.get_current_session() if sm is not None else None
+            ts = str(getattr(session, "last_updated", "") or "")
+            return format_relative_time(ts) if ts else ""
+        except Exception:
+            return ""
+
+    def _resolve_team_title(self, window) -> str:
+        """团队统一任务标题：run 内最早生成的真实标题，未生成时回退团队名
+
+        数据源优先级：
+        1. 已打开成员窗口的会话标题（实时，无需落库；按会话创建时间取最早）
+        2. 历史库该 run 的成员会话记录（成员窗口已关闭场景；saved_at=创建时间，
+           带 5s TTL 缓存：刚建团队标题未生成时 windowTitleChanged 会反复触发）
+        3. 团队名（标题未生成前用团队名占位——用户定案）
+        """
+        team_name = (getattr(window, "_team_name", "") or "").strip() or "default"
+        run_id = TabManagerWindow._resolve_tab_team_id(window)
+        if not run_id:
+            return team_name
+        try:
+            from app.core.conversation.chat_session import is_default_title
+        except Exception:
+
+            def is_default_title(_text: str) -> bool:  # noqa: ARG001
+                return False
+
+        best = None  # (created_at, title)；created_at 最早者胜
+        tm = TabManagerWindow.get_instance()
+        for w in tm._windows if tm is not None else []:
+            try:
+                if TabManagerWindow._resolve_tab_team_id(w) != run_id:
+                    continue
+                sm = getattr(w, "session_manager", None)
+                session = sm.get_current_session() if sm is not None else None
+                if session is None:
+                    continue
+                title = (getattr(session, "topic_summary", "") or "").strip()
+                if not title or is_default_title(title):
+                    continue
+                created = str(getattr(session, "created_at", "") or "")
+                if best is None or (created and created < best[0]):
+                    best = (created, title)
+            except Exception:
+                continue
+        if best is not None:
+            return best[1]
+        # 成员窗口已关闭：回查历史库（团队会话可能被挤出内存前 500 条，
+        # get_team_sessions_by_run_id 直查存储，不受内存上限影响）
+        cache = getattr(self, "_team_title_hist_cache", None)
+        if cache is None:
+            cache = self._team_title_hist_cache = {}
+        now = time.monotonic()
+        hit = cache.get(run_id)
+        if hit is not None and now - hit[0] < 5.0:
+            return hit[1] or team_name
+        try:
+            from app.utils.history_manager import HistoryManager
+
+            history = HistoryManager.get_instance()
+            sessions = history.get_team_sessions_by_run_id(run_id) if history is not None else []
+            for s in sessions:
+                title = (s.get("title") or "").strip()
+                if not title or is_default_title(title):
+                    continue
+                created = str(s.get("saved_at") or "")
+                if best is None or (created and created < best[0]):
+                    best = (created, title)
+        except Exception:
+            pass
+        resolved = best[1] if best is not None else ""
+        cache[run_id] = (now, resolved)
+        return resolved or team_name
 
     @staticmethod
     def _resolve_tab_team_id(window) -> str:
@@ -5341,6 +5547,19 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
                 from app.widgets.webview_pool import WebViewPool
 
                 WebViewPool.get_instance().clear()
+            except Exception:
+                pass
+            # perf: [P2 #21] 全关页后 renderer 池已清，渲染缓存一并放行：两个模块级
+            # lru 常驻大 HTML（tool 块 16 条 + 整页 32 条 65~163KB/条，最坏 ~5MB+），
+            # 无窗口复用前景时空占内存。
+            try:
+                from app.widgets.card_render_core import (
+                    _render_markdown_to_html_cached_impl,
+                    _render_tool_block_content,
+                )
+
+                _render_tool_block_content.cache_clear()
+                _render_markdown_to_html_cached_impl.cache_clear()
             except Exception:
                 pass
         self.tabCountChanged.emit(len(self._windows))
@@ -6100,7 +6319,14 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
         lay.addWidget(text)
         ph.setStyleSheet("background: transparent;")
         self._boot_placeholder = ph
-        ph.setGeometry(self._content_area.geometry())
+        # perf(startup): 两阶段构造壳期 _content_area 未建（complete_construction 前），
+        # 占位锚定回退到窗口内容区（标题栏以下全幅）；complete 后锚回真实内容区几何
+        anchor = getattr(self, "_content_area", None)
+        if anchor is not None:
+            ph.setGeometry(anchor.geometry())
+        else:
+            _tb_h = self.titleBar.height()
+            ph.setGeometry(0, _tb_h, self.width(), max(0, self.height() - _tb_h))
         ph.raise_()
         ph.show()
 
@@ -6355,7 +6581,9 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
         # 根因：插件热加载发生在窗口隐藏期间时，刷新被可见性门控跳过
         # （main_widget 仅对可见的 TabManagerWindow 刷新），showEvent 无补刷
         # → 列表停留在旧状态（全关重开才恢复）。重新显示时补刷一次。
-        if self._tab_panel is not None:
+        # perf(startup): 两阶段构造壳期 _tab_panel 未建（complete_construction 前），
+        # 首次 showEvent 会先到，需容缺失
+        if getattr(self, "_tab_panel", None) is not None:
             self._tab_panel.refresh_ui_plugins()
         # 插件常驻标题栏 tab 同步补刷（同 refresh_ui_plugins 的可见性门控根因）
         try:
@@ -7133,6 +7361,15 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
             ConfigSyncService.get_instance().disable(clear_state=False)
         except Exception as e:
             logger.warning(f"[TabManager] cleanup ConfigSyncService.disable 失败: {e}")
+        # [LEAK-FIX P1-6] 单例置空重建前，显式退订本窗口构造期注册的 UIEventBus
+        # 订阅（EV_CARD_VISIBILITY_CHANGED 绑定方法）。bus 侧弱引用已是兜底防线，
+        # 此处同步显式退订，不依赖下一次 publish 的惰性清理时机。
+        try:
+            from app.core.infra.ui_event_bus import EV_CARD_VISIBILITY_CHANGED, UIEventBus
+
+            UIEventBus.get_instance().unsubscribe(EV_CARD_VISIBILITY_CHANGED, self._on_card_visibility_changed)
+        except Exception as e:
+            logger.warning(f"[TabManager] cleanup 退订卡片显隐事件失败: {e}")
         for w in list(self._windows):
             try:
                 w.close()

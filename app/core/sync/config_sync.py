@@ -1250,6 +1250,10 @@ class ConfigSyncService(QObject):
                 logger.warning(f"[ConfigSync] 合并插件重载调度失败: {_pe}")
         except Exception as e:
             logger.warning(f"[ConfigSync] Settings 重载失败: {e}")
+        finally:
+            # 内存已与磁盘合并结果对齐（或重载失败但已尽力），解除合并写盘
+            # 保护：此后 save() 落盘的就是合并后的值，不再有覆盖风险。
+            self._release_save_suppression()
 
         # 云端配置已全部写回 ConfigItem 内存 → 通知窗口级 UI 按云端值刷新
         # （如模型选择按钮：llm_selected_model.valueChanged 无监听器，须显式驱动刷新）
@@ -2643,6 +2647,24 @@ class ConfigSyncService(QObject):
             except Exception:
                 pass
             return
+        # 🛡️ 合并结果已落盘，但 Settings 内存还是合并前旧值（重载要等本次
+        # 下载全部完成后在主线程执行）。这段窗口里任何 save() 都会用旧内存态
+        # 整文件覆盖刚合并的云端配置 —— 真实事故：合并后 21 秒被插件迁移的
+        # save() 覆盖，云端独有的服务商条目与 12 处配置值全丢。此处置起写盘
+        # 保护，由 _reload_settings_on_main_thread 在内存同步完成后解除。
+        try:
+            from app.utils.config import Settings as _S
+
+            _inst = _S.get_instance()
+            _inst._suppress_save_reason = "sync-merge-pending-reload"
+            # 兜底解除：重载信号依赖主线程事件循环，若窗口在此期间被销毁或
+            # 重载抛异常未能走到 finally，保护会永久生效导致所有 save 失效。
+            # 60s 后无条件清一次（正常路径早已在重载末尾清空，此处是幂等空操作）。
+            from PyQt5.QtCore import QTimer as _QT
+
+            _QT.singleShot(60000, self._release_save_suppression)
+        except Exception as e:
+            logger.debug(f"[ConfigSync] 置起合并写盘保护失败: {e}")
         # 记账器与合并结果对齐：上传时 _flush_sync_meta 用它的条目表覆盖磁盘
         # SyncMeta，留旧表会把合并前的本地旧值重新标成最高 t 推回云端。
         rec = getattr(self, "_meta_recorder", None)
@@ -3250,6 +3272,18 @@ class ConfigSyncService(QObject):
         except Exception as e:
             logger.error(f"[ConfigSync] {tag} 下载异常: {e}")
             return False
+
+    def _release_save_suppression(self) -> None:
+        """解除合并期间的写盘保护（幂等，正常路径与超时兜底都调用）"""
+        try:
+            from app.utils.config import Settings as _S
+
+            inst = _S.get_instance()
+        except Exception:
+            return
+        if getattr(inst, "_suppress_save_reason", "") == "sync-merge-pending-reload":
+            inst._suppress_save_reason = ""
+            logger.debug("[ConfigSync] 合并写盘保护已解除")
 
     def _download_user_custom_merge(self) -> bool:
         """拉远端 user-custom zip → 三方合并到本地目录。

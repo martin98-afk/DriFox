@@ -24,6 +24,10 @@ class SubAgentLogRepository:
             db_manager: DatabaseManager 实例
         """
         self._db = db_manager
+        # 优化点：原行为每次任务 CRUD 都重跑 CREATE TABLE + 无条件 ALTER，
+        # 后者在列已存在时必抛 duplicate column 再被 except 吞掉；新增实例级
+        # 门控让首次就绪后短路，force=True 留给外部 drop 表后复位。
+        self._table_ready = False
 
     @property
     def is_initialized(self) -> bool:
@@ -35,10 +39,17 @@ class SubAgentLogRepository:
             return False, "数据库未初始化"
         return self._db.execute_sql(sql, params)
 
-    def _ensure_table(self) -> bool:
-        """确保表存在"""
+    def _ensure_table(self, force: bool = False) -> bool:
+        """确保表存在
+
+        force=True 时忽略进程内门控重跑一次（外部 drop 表后需重建的场景）。
+        """
         if not self.is_initialized:
             return False
+        # 优化点：门控只记「本实例已确认表与列就绪」，跨实例/跨库不共享；
+        # force 显式放行。短路后不再重复即时提交 DDL，也不再制造必抛异常。
+        if self._table_ready and not force:
+            return True
         try:
             self._db.create_table(self.TABLE_NAME, [
                 {"name": "task_id", "type": "TEXT", "primary_key": True},
@@ -53,15 +64,32 @@ class SubAgentLogRepository:
                 {"name": "created_at", "type": "TEXT"},
                 {"name": "updated_at", "type": "TEXT"},
             ])
-            # 兼容旧表：尝试添加 session_id 列（表已存在时，create_table 不会自动加新列）
-            self._db.execute_sql(
-                f'ALTER TABLE "{self.TABLE_NAME}" ADD COLUMN session_id TEXT DEFAULT ""'
-            )
+            # 优化点：原行为无条件 ALTER，列已存在必抛 duplicate column 被吞（5 轮
+            # save/get 触发 20 次 DDL 且每次带一次被吞异常）。改为先 PRAGMA 判列，
+            # 只在缺列时 ALTER；PRAGMA 走读锁，不占写锁、不强制同步 commit。
+            ok, cols = self._execute(f'PRAGMA table_info("{self.TABLE_NAME}")')
+            has_session_id = False
+            if ok and cols:
+                for col in cols:
+                    name = col.get("name") if isinstance(col, dict) else (
+                        col[1] if isinstance(col, (list, tuple)) and len(col) > 1 else None
+                    )
+                    if str(name) == "session_id":
+                        has_session_id = True
+                        break
+            if not has_session_id:
+                # 兼容旧表：表已存在但缺 session_id 列时补列，保持原迁移语义
+                self._db.execute_sql(
+                    f'ALTER TABLE "{self.TABLE_NAME}" ADD COLUMN session_id TEXT DEFAULT ""'
+                )
+            self._table_ready = True
             return True
         except Exception as e:
-            # ALTER TABLE ADD COLUMN 在列已存在时会抛异常，这是正常的
+            # 保留原有异常兜底：判列/ALTER 仍可能撞并发或旧库异常，
+            # duplicate column 之外的错误对外仍返回 False，表现不变。
             err_msg = str(e).lower()
             if "duplicate column" in err_msg or "already exists" in err_msg:
+                self._table_ready = True
                 return True
             logger.error(f"[SubAgentLogRepository] _ensure_table 异常: {e}")
             return False

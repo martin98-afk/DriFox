@@ -160,3 +160,49 @@ def test_remembered_password_auto_unlock_clears_backup(cfg, monkeypatch):
     cfg.save()
     assert is_ciphertext(_disk_key(cfg))
     assert "sk-x" not in cfg.file.read_text(encoding="utf-8")
+
+
+class _FakeKeyring:
+    """模拟 macOS keyring 后端：可编程的首次失败，记录调用序列"""
+
+    def __init__(self, first_error: Exception | None):
+        self.first_error = first_error
+        self.calls: list[tuple[str, str]] = []
+
+    def set_password(self, service, account, value):
+        self.calls.append(("set", account))
+        if self.first_error is not None:
+            err, self.first_error = self.first_error, None
+            raise err
+
+    def get_password(self, service, account):
+        return None
+
+    def delete_password(self, service, account):
+        self.calls.append(("del", account))
+
+
+def _fresh_store(monkeypatch, keyring) -> None:
+    monkeypatch.setattr(ss, "_load_keyring", lambda: keyring)
+    monkeypatch.setattr(ss, "_WIN", False)
+    ss.SecretStore._instance = None
+
+
+def test_set_recovers_from_owner_conflict(monkeypatch):
+    """-25244 所有权冲突：删旧条目重建成功，调用序列 set→del→set"""
+    kr = _FakeKeyring(
+        RuntimeError("Can't store password on keychain: (-25244, 'Unknown Error')")
+    )
+    _fresh_store(monkeypatch, kr)
+    store = ss.SecretStore()
+    assert store.set("provider/x", "sk-test") is True
+    assert kr.calls == [("set", "provider/x"), ("del", "provider/x"), ("set", "provider/x")]
+
+
+def test_set_unrelated_error_keeps_fail_open(monkeypatch):
+    """非所有权冲突错误：不触发重建，照旧返回 False 走明文回退"""
+    kr = _FakeKeyring(RuntimeError("Can't store password on keychain: (-25308, 'no UI')"))
+    _fresh_store(monkeypatch, kr)
+    store = ss.SecretStore()
+    assert store.set("provider/x", "sk-test") is False
+    assert kr.calls == [("set", "provider/x")]

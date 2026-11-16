@@ -218,6 +218,9 @@ class ProviderRegistry:
         self._loading = False
         self._loading_thread = None  # 加载者线程 ident：同线程递归时放行（见 ensure_loaded）
         self._load_done = threading.Event()
+        # perf: (#6a) 就绪回调链：消费方未就绪时挂回调代替硬等，就绪后 fire 补刷
+        self._ready_listeners: List[Callable[[], None]] = []
+        self._ready_fired = False
         # 内置 family 兜底（仅用于没有任何插件声明该 family 时，如自定义服务商）。
         # custom 不是"服务商"，而是通用默认能力，不属于可迁移的服务商硬编码。
         self._builtin_family_capabilities: Dict[str, Dict[str, Any]] = {
@@ -266,6 +269,7 @@ class ProviderRegistry:
             # 超时后本次读到部分数据，下次调用自动重试
             wait_event.wait(timeout=60.0)
             return
+        fire_ready = False
         try:
             from app.plugins.loaders.provider_loader import warmup_providers
 
@@ -273,15 +277,55 @@ class ProviderRegistry:
             if any(loaded.values()):
                 with self._lock:
                     self._warmup_done = True
+                fire_ready = True
             # 零注册 ≠ 正常完成：多为白名单未就绪的早期空转，允许重试
-            # （load_providers 同名保护幂等，重复扫描无副作用）
+            # （load_providers 同名保护幂等，重复扫描无副作用）。
+            # perf: (#6a) 空转分支不 fire：后续重试还会触发，保持等待侧挂起
         except Exception as e:
             logger.warning(f"[ProviderRegistry] 服务商插件懒加载失败: {e}")
+            # perf: (#6a) 异常 = 本次终态，fire 让消费方走空表兜底，
+            # 保证模型状态属性就位（避免 _current_provider_name 直读点 AttributeError）
+            fire_ready = True
         finally:
             self._load_done.set()
             with self._lock:
                 self._loading = False
                 self._loading_thread = None
+            # perf: (#6a) 成败都 fire（空转除外）：一次性 + 清空列表幂等，
+            # 锁外逐个调用（回调会 emit Qt 信号，持锁会死锁）
+            if fire_ready:
+                self._fire_ready()
+
+    # perf: (#6a) ── 就绪回调（消费方挂回调代替硬等）──
+
+    def is_ready(self) -> bool:
+        """provider 插件是否已完成有效加载（锁内读，线程安全）"""
+        with self._lock:
+            return self._warmup_done
+
+    def add_ready_listener(self, fn: Callable[[], None]) -> None:
+        """注册就绪回调；已 fire 过则立即同步执行（锁外，语义完备）"""
+        with self._lock:
+            if self._ready_fired:
+                pass
+            else:
+                self._ready_listeners.append(fn)
+                return
+        fn()
+
+    def _fire_ready(self) -> None:
+        """一次性触发全部就绪回调（幂等；锁外逐个调用）"""
+        with self._lock:
+            if self._ready_fired:
+                return
+            self._ready_fired = True
+            listeners = self._ready_listeners
+            self._ready_listeners = []
+        for fn in listeners:
+            try:
+                fn()
+            except Exception:
+                logger.exception("[ProviderRegistry] ready listener 执行失败")
 
     # ── 注册 / 查询 ─────────────────────────────────────────
 

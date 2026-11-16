@@ -52,7 +52,10 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 OUT_DIR = PROJECT_ROOT / ".perf_out"
-DEFAULT_OUT = OUT_DIR / "perf_baseline.json"
+DEFAULT_OUT = OUT_DIR / f"perf_baseline_{time.strftime('%Y%m%d_%H%M')}.json"
+# O3: 基线产物登记台账，perf_regression 无 --baseline 时按此取最新一条。
+BASELINE_INDEX = OUT_DIR / "baseline_index.jsonl"
+
 
 MARK_RE = re.compile(r"\[StartupMark\]\s+(.+?)\s+耗时\s+(\d+)ms")
 # Y4: MARK_RE 与 app/main.py StartupMark 打点格式（「耗时 Nms」中文格式）强耦合，
@@ -66,6 +69,59 @@ except ImportError:
     psutil = None  # type: ignore[assignment]
 
 from scripts.mem_baseline import classify, snapshot  # noqa: E402  (psutil 复用口径)
+
+
+# ── O3 基线产物登记（时间戳命名 + index 台账，供 perf_regression 取最新） ──
+
+def _unique_out_path(path: Path) -> Path:
+    """默认路径同一分钟内重复跑时加 _2/_3 后缀，避免覆盖上一次基线。"""
+    if not path.exists():
+        return path
+    for i in range(2, 100):
+        cand = path.with_name(f"{path.stem}_{i}{path.suffix}")
+        if not cand.exists():
+            return cand
+    return path
+
+
+def _resolve_out_path(out_arg: str) -> Path:
+    """--out 显式传参原样尊重；默认路径同一分钟重复跑时自动去重。"""
+    path = Path(out_arg)
+    return _unique_out_path(path) if out_arg == str(DEFAULT_OUT) else path
+
+
+def append_baseline_index(path: Path, mode: str) -> None:
+    """登记一次产物（file 存相对项目根路径，项目外存绝对路径）。"""
+    try:
+        try:
+            rel = path.resolve().relative_to(PROJECT_ROOT).as_posix()
+        except ValueError:
+            rel = str(path.resolve())
+        record = {"ts": datetime.now().isoformat(timespec="seconds"), "file": rel, "mode": mode}
+        BASELINE_INDEX.parent.mkdir(parents=True, exist_ok=True)
+        with open(BASELINE_INDEX, "a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except Exception as e:  # 登记失败不影响产物本身
+        print(f"[WARN] 基线登记失败（不影响产物）: {e}")
+
+
+def latest_baseline_from_index() -> "Path | None":
+    """读 index 最后一条有效登记并返回绝对路径；无台账/全坏行返回 None。"""
+    try:
+        lines = BASELINE_INDEX.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return None
+    for line in reversed(lines):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            name = json.loads(line)["file"]
+        except Exception:
+            continue  # 坏行/截断尾行跳过
+        p = Path(name)
+        return p if p.is_absolute() else PROJECT_ROOT / p
+    return None
 
 # ────────────────────────── sitecustomize 探针（--trace 专用） ──────────────────────────
 
@@ -441,9 +497,11 @@ def main() -> int:
               f" | python_child {snap['python_child_rss_mb']} | other {snap['other_rss_mb']}"
               f" = tree {snap['tree_rss_mb']} MB（{snap['n_procs']} 进程）")
         result["mem_only_snapshot"] = snap
-        OUT_DIR.mkdir(parents=True, exist_ok=True)
-        Path(args.out).write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
-        print(f"\nJSON -> {args.out}")
+        out_path = _resolve_out_path(args.out)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+        append_baseline_index(out_path, "mem_only")
+        print(f"\nJSON -> {out_path}")
         return 0
 
     # 模式 2：冷启动全流程
@@ -485,9 +543,10 @@ def main() -> int:
         for k, v in summary.items():
             print(f"  {k}: {v}")
 
-    out_path = Path(args.out)
+    out_path = _resolve_out_path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+    append_baseline_index(out_path, "startup")
     print(f"\nJSON -> {out_path}")
     return 0 if ok else 1
 

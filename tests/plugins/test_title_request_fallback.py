@@ -141,7 +141,6 @@ def test_second_user_message_does_not_republish(monkeypatch):
     [
         {"user_edited": True},
         {"topic_summary": "已有标题"},
-        {"is_temp": True},
     ],
 )
 def test_guards_skip(monkeypatch, kwargs):
@@ -151,6 +150,19 @@ def test_guards_skip(monkeypatch, kwargs):
     assert events == []
     assert commits == []
 
+
+def test_temp_session_still_publishes(monkeypatch):
+    """临时对话页同样生成标题：落库与否由提交侧 is_temp 分支裁决。
+
+    回归：宿主收敛守卫时把 is_temp 一并拦掉（旧 _maybe_generate_topic_summary
+    无此守卫），临时会话标题永远停在占位「对话 MM-DD HH:MM」。
+    """
+    events, _ = _capture(
+        monkeypatch,
+        _host([_user("帮我排查登录接口 500 报错的原因并给出修复方案")], is_temp=True),
+    )
+    assert len(events) == 1
+    assert events[0][0] == "title.request"
 
 def test_multimodal_content_takes_text_blocks(monkeypatch):
     messages = [
@@ -165,6 +177,27 @@ def test_multimodal_content_takes_text_blocks(monkeypatch):
     events, _ = _capture(monkeypatch, _host(messages))
     assert len(events) == 1
     assert events[0][1]["fallback"] == "帮我看看这张架构图有什么问题"
+
+def test_slash_command_prefix_stripped_from_fallback(monkeypatch):
+    """斜杠命令只是触发词，不得占满 fallback。
+
+    回归：首条 "/plugin-creator 参考这个 https://... 做一个插件" 生成失败时
+    fallback = first_text[:15] = "/plugin-creator"，会话标题直接变成命令名。
+    """
+    events, _ = _capture(
+        monkeypatch,
+        _host([_user("/plugin-creator 参考这个插件做一个文件管理 ui 插件")]),
+    )
+    assert len(events) == 1
+    assert events[0][1]["fallback"] == "参考这个插件做一个文件管理 u"
+    assert "/plugin-creator" not in events[0][1]["fallback"]
+
+def test_bare_slash_command_uses_command_name(monkeypatch):
+    """纯命令无参数时用命令名（去斜杠）作为标题来源，不含斜杠。"""
+    events, commits = _capture(monkeypatch, _host([_user("/plugin-creator")]))
+    assert commits == []
+    assert len(events) == 1
+    assert events[0][1]["fallback"] == "plugin-creator"
 
 
 # ═══════════════════════════════════════════════════════════════

@@ -336,24 +336,18 @@ class TestCompactStatusRing:
             cy_icon = item._icon_widget.geometry().center().y()
             assert abs(cy_icon - item.height() / 2) <= 1
 
-    def test_expanded_team_row_paints_capsule_ring(self, panel):
-        """展开团队行 streaming：胶囊环决策产出「胶囊外扩 3px + streaming」
+    def test_expanded_team_row_ring_on_avatar(self, panel):
+        """展开团队行 streaming：状态环画在角色头像上，行层不再套角色名
 
-        不走离屏 render：跨文件测试环境下 QWidget.render 触发 access violation
-        （实测，见 2026-10-26 会话），改测绘制决策纯方法，环绘制本体由
-        _TabProjectIcon 路径的既有测试覆盖（同一 _paint_status_ring_on）。
+        旧实现把环画在胶囊/角色名外沿（外扩 3px），与头像环重复且视觉上
+        像一个框套住全名；现统一由头像承担状态表达。
         """
         item = _team_member(panel, "leader")
         idx = panel._items.index(item)
         panel.update_tab_streaming(idx, True)
-        assert item._icon_widget.isHidden(), "前提：团队模式展开态 icon 隐藏，环必须换载体"
-        spec = item._capsule_ring_spec()
-        assert spec is not None, "streaming 态必须产出胶囊环绘制决策"
-        rect, state, _phase = spec
-        assert state == "streaming"
-        gr = item._capsule_label.geometry()
-        assert rect.center() == gr.center(), "环与胶囊同心"
-        assert rect.width() == gr.width() + 6 and rect.height() == gr.height() + 6, "环外扩 3px"
+        assert not item._icon_widget.isHidden(), "团队模式成员行头像可见（角色单字母）"
+        assert item._icon_widget._ring_state == "streaming", "状态环应挂在头像上"
+        assert item._capsule_ring_spec() is None, "行层不得再给角色名套环"
 
     def test_expanded_team_row_idle_no_ring(self, panel):
         """展开团队行无状态：不产出环绘制决策"""
@@ -379,13 +373,13 @@ class TestCompactStatusRing:
         panel.update_tab_question(idx, True)
         assert "等待你的回答" in item._icon_widget.toolTip()
 
-    def test_tooltip_plain_when_expanded(self, panel):
-        """展开态 tooltip 只留标题（不重复状态，标题本身可见）"""
+    def test_tooltip_role_and_title_when_expanded(self, panel):
+        """展开态 tooltip = 角色 · 标题（团队行不显示标题，hover 补全）"""
         panel.set_collapsed(True)
         item = _team_member(panel, "coder")
         panel.update_tab_streaming(panel._items.index(item), True)
         panel.set_collapsed(False)
-        assert item._icon_widget.toolTip() == item._title
+        assert item._icon_widget.toolTip() == f"{item._role_text} · {item._title}"
 
 
 # ══════════════════════════════════════════════════════════

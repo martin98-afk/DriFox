@@ -7,6 +7,7 @@ PlainTextViewer / _ImagePreviewDialog 及图片预览辅助函数。
 
 import base64
 import contextlib
+import hashlib
 import math
 import os
 import time
@@ -45,6 +46,7 @@ from PyQt5.QtGui import (
     QPainterPath,
     QPen,
     QPixmap,
+    QTextCursor,
     QTextDocument,
     QWheelEvent,
 )
@@ -68,6 +70,7 @@ from qfluentwidgets import (
     TransparentToolButton,
 )
 from qfluentwidgets.components.widgets.scroll_bar import SmoothScrollDelegate
+from app.core.infra.telemetry import perf_jsonl
 from app.core.infra.webengine_profile import get_shared_web_profile
 from app.utils.design_tokens import (
     Animations,
@@ -197,6 +200,11 @@ def _render_v2_enabled() -> bool:
     v2 出问题时不回滚代码即可退回旧全量路径。
     """
     return os.environ.get("DRIFOX_RENDER_V2", "1").strip().lower() not in ("0", "false", "no")
+
+
+# [O5] renderer 假死探测：仅观测（DRIFOX_RENDER_PROBE=1），关闭时零行为。
+_RENDER_PROBE = perf_jsonl.env_flag("DRIFOX_RENDER_PROBE")
+_RENDER_TERMINATED_N = 0
 
 
 @lru_cache(maxsize=16)
@@ -366,7 +374,24 @@ class ConsoleMonitorPage(QWebEnginePage):
 
     def _on_render_process_terminated(self, status, exit_code):
         """QWebEnginePage 内建信号转发：renderer 进程终止 → 通知宿主卡片自愈"""
+        global _RENDER_TERMINATED_N
+
         logger.warning(f"WebEngine renderer 崩溃: status={status} exit_code={exit_code}")
+        # [O5] 假死探测：只累计与写盘，自愈链（renderCrashed.emit）语义不变
+        if _RENDER_PROBE:
+            try:
+                _RENDER_TERMINATED_N += 1
+                perf_jsonl.append_event(
+                    "renderer_terminated",
+                    _RENDER_TERMINATED_N,
+                    {
+                        "status": int(status),
+                        "exit_code": int(exit_code),
+                        "pid": int(getattr(self, "_renderer_pid", 0) or 0),
+                    },
+                )
+            except Exception:  # noqa: BLE001 - 观测不得反噬自愈链
+                pass
         self.renderCrashed.emit()
 
     def acceptNavigationRequest(self, url, nav_type, is_main_frame):
@@ -921,7 +946,21 @@ class CodeWebViewer(QWebEngineView):
         # 流式渲染哈希缓存：避免对相同 processed_md 重复跑 6 轮正则 + md.convert()
         self._processed_md_hash = None
         self._cached_streaming_html = None
-        self._cached_raw_md_hash = 0  # hash(self._markdown_text) 在缓存时的快照，供 finish_streaming 验证缓存有效性
+        # perf: processed_md 判等的 len+4 点采样状态（替代每帧内置 hash 全文）
+        self._processed_md_len = 0
+        self._processed_md_s_head = ""
+        self._processed_md_s_mid1 = ""
+        self._processed_md_s_mid2 = ""
+        self._processed_md_s_tail = ""
+        self._cached_raw_md_hash = 0  # _raw_md_sha_hex() 在缓存时的快照，供 finish_streaming 验证缓存有效性
+        # [P0-⑤] 滚动 sha256 状态：流式 _markdown_text 严格单调追加，
+        # 每帧只 hash 新增段（旧版每帧内置 hash 全文 O(n)×2）
+        self._md_sha = None
+        self._md_sha_len = 0
+        self._md_sha_head = ""
+        self._md_sha_mid1 = ""
+        self._md_sha_mid2 = ""
+        self._md_sha_tail = ""
         self._lazy_markdown_cb = None  # 懒回调：渲染时才生成 markdown，避免高频 content_to_markdown
         # ── [B5] block 级渲染通道（DRIFOX_RENDER_V2=1 启用，步骤 3 灰度）──
         # _v2_last：已落地 DOM 的上一次渲染结果（MessageRender）；None = DOM
@@ -1026,7 +1065,12 @@ class CodeWebViewer(QWebEngineView):
         self._stable_html: str = ""
         self._stable_md_len: int = 0
         # [B1] 尾部行内渲染哈希缓存：安全定时器重复触发时 tail 未变则跳过渲染
+        # （[R2-H2] 值改存滚动 sha256 hex；int 0 = 未渲染哨兵）
         self._tail_html_hash: int = 0
+        # perf: 尾部窗口滚动 sha256 状态（stable 推进重建、追加只 update 新增段）
+        self._tail_sha = None
+        self._tail_sha_base = -1
+        self._tail_sha_len = 0
         self._needs_full_render: bool = True
         self._light_skeleton = light  # 轻量骨架标志（去掉 echarts CDN 等）
         # [PERF] 最小渲染间隔 80ms：降低 WebEngine setHtml 调用频率
@@ -1553,6 +1597,13 @@ class CodeWebViewer(QWebEngineView):
         每 500ms 只恢复一张（可见优先）。JS webgl 路径若先恢复（置
         ``_context_lost=False``），队列下一拍自动剔除该条目，不会重复恢复。
         """
+        # perf(memory): 池内 viewer 被 T31/RSS 闸门回收时置位 _heal_suppressed
+        # （memory_governor kill 前置位）——自愈链不得为已回收进程重建 renderer，
+        # 否则 kill 后 ~500ms 内被拉回，回收被完全抵消（P1-1）
+        # __dict__.get 而非 getattr：读缺失属性会触发 sip 的
+        # super-class __init__ 检查，打爆 __new__ 直构实例的既有测试
+        if self.__dict__.get("_heal_suppressed", False):
+            return
         logger.warning("WebEngine renderer 崩溃，触发卡片自愈")
         self._render_crash_count += 1
         if self._render_crash_count > 2:
@@ -2504,10 +2555,23 @@ class CodeWebViewer(QWebEngineView):
             self._render_deferred = False
             self._schedule_render(immediate=True)
         # [B4-强回收] 记录 renderer 进程 PID（强回收层 kill 离屏进程用）
+        # [O5] 假死探测：赋值前留旧值，新 pid 非 0 且与旧值不同 → 记一次漂移
+        _probe_old_pid = int(getattr(self, "_renderer_pid", 0) or 0) if _RENDER_PROBE else 0
         try:
             self._renderer_pid = self.page().renderProcessPid()
         except Exception:
             self._renderer_pid = 0
+        if _RENDER_PROBE:
+            try:
+                # [O5-FIX] 回填 page：renderer 终止时 ConsoleMonitorPage 记录真实旧 pid
+                self.page()._renderer_pid = self._renderer_pid
+                _probe_new_pid = int(self._renderer_pid or 0)
+                if _probe_new_pid and _probe_old_pid and _probe_new_pid != _probe_old_pid:
+                    perf_jsonl.append_event(
+                        "renderer_pid_drift", _probe_new_pid, {"old": _probe_old_pid}
+                    )
+            except Exception:  # noqa: BLE001 - 观测不得反噬主流程
+                pass
 
     def _load_skeleton(self):
         # 🛡️ 透明合成必须在导航前重申（2026-11-13）：Chromium 合成面一旦丢失
@@ -5017,12 +5081,22 @@ class CodeWebViewer(QWebEngineView):
                         var chart = el._chartInstance;
                         if (!chart || chart.isDisposed()) {{
                             chart = echarts.init(el, _CHART_IS_DARK ? 'dark' : undefined);
+                            // 优化点：原行为 RO 每次触发同步 chart.resize()，拖动窗口/
+                            // 布局抖动时一帧内多次全量重排（与放大页已修的同源卡顿，
+                            // 单次 74~130ms）。合并到 rAF 一帧一次：同一帧内多次触发
+                            // 只跑一次 resize，最终尺寸不变（功能零变化），只消重复重排。
+                            var _resizePending = false;
+                            var _ro = new ResizeObserver(function() {{
+                                if (_resizePending) return;
+                                _resizePending = true;
+                                requestAnimationFrame(function() {{
+                                    _resizePending = false;
+                                    try {{ if (chart && !chart.isDisposed()) chart.resize(); }} catch (e) {{ }}
+                                }});
+                            }});
                             // RO 必须持引用：节点被 innerHTML 销毁时若不 disconnect，
                             // RO 连同 target 常驻（本卡历史上最大的泄漏源之一，见
                             // _disposeChartNode）。
-                            var _ro = new ResizeObserver(function() {{
-                                try {{ chart.resize(); }} catch (e) {{ }}
-                            }});
                             _ro.observe(el);
                             el._chartRO = _ro;
                         }}
@@ -7115,9 +7189,10 @@ class CodeWebViewer(QWebEngineView):
 
                 // ===== SVG widget 工具栏挂载 =====
                 // 渲染后扫描正文的自由 svg（排除 mermaid/echarts 内部）包 wrapper 挂工具栏。
-                // 目标形态两种：① 顶层裸 svg（```svg 围栏透传）；② svg-only 容器（内联 svg
-                // 经 _protect_inline_svg_blocks 包 <div> / markdown 段落包 <p>，svg 沉一层，
-                // 只扫顶层会漏挂）。尺寸阈值滤掉装饰小图标（欢迎卡图标、行内 icon）。
+                // 目标形态三种：① 顶层裸 svg（```svg 围栏透传）；② svg-only 容器（内联 svg
+                // 经 _protect_inline_svg_blocks 包 <div> / markdown 段落包 <p>）；③ v2
+                // block 级通道的 <div data-block-wrapper> 包装层（内容再沉一层）。
+                // 尺寸阈值滤掉装饰小图标（欢迎卡图标、行内 icon）。
                 // svg._widgetToolbar 防重挂（innerHTML 全量重建后 DOM 全新，标记自然失效，重扫重挂）。
                 window.renderWidgetToolbars = function(roots) {{
                     // [T28] 无参（全量路径）退化为 content-placeholder 顶层集合；
@@ -7127,7 +7202,20 @@ class CodeWebViewer(QWebEngineView):
                         if (!_cp) return;
                         roots = _cp.children;
                     }}
-                    var children = roots;
+                    // v2 block 级通道把每段内容包进 <div data-block-wrapper>，
+                    // svg / .html-widget 沉到 wrapper 内层。差量路径 roots 恰为
+                    // 这些 wrapper，只扫直接子节点会全部漏挂（右上角按钮消失）。
+                    // 先展开包装层再按原语义遍历；tool-content 与正文同口径。
+                    var children = [];
+                    for (var r = 0; r < roots.length; r++) {{
+                        var root = roots[r];
+                        if (!root) continue;
+                        if (root.hasAttribute && root.hasAttribute('data-block-wrapper')) {{
+                            for (var c = 0; c < root.children.length; c++) children.push(root.children[c]);
+                        }} else {{
+                            children.push(root);
+                        }}
+                    }}
                     for (var i = 0; i < children.length; i++) {{
                         var el = children[i];
                         var svg = null;
@@ -7638,6 +7726,11 @@ class CodeWebViewer(QWebEngineView):
     # [T28 L1] 40 → 100ms：40ms 窗口太窄，快速流式（chunk 间隔 ~20-50ms）下
     # 大部分软边界仍落在窗口外 → 仍逐句重渲染。100ms 覆盖典型 chunk 间隔的
     # 2-5 倍，合并生效且不拖慢慢速流式（慢速流式距上次渲染远超 100ms → 仍即时）。
+    # [P0-⑤] 滚动 sha256 前缀抽样校验窗口（字节）
+    _RAW_SHA_SAMPLE = 16
+    # [P0-③] 主题检测链已刷新的版本号签名（None = 未刷/失效，下次渲染重刷）
+    _theme_chain_ver = None
+
     _SOFT_BOUNDARY_MERGE_MS = 100
     # [P2-8 F1] tail 行内渲染降载：软边界 ~每 30 字触发一次全量 tail convert
     # （主线程同步），无空行长文 tail 线性增长 → 总开销 O(n²)。增量阈值 512
@@ -7648,8 +7741,10 @@ class CodeWebViewer(QWebEngineView):
     # 「内容变了」误判「没变」永久跳渲。
     _TAIL_INLINE_MIN_DELTA = 512
     _TAIL_INLINE_MIN_INTERVAL_S = 1.5
-    # 预编译代码块闭合检测
-    _CLEAN_BOUNDARY_CODE_BLOCK_RE = re.compile(r"```[\s]*$")
+    # 预编译代码块闭合检测：``` / ~~~ 双形态（~~~ 是渲染型 fence 合法开栏，
+    # 与 _CHART_FENCE_OPEN_RE 口径对齐；缺 ~~~ 则 ~~~ 围栏结尾永不命中硬边界
+    # immediate，图表落地退化为 90/300ms 定时器）
+    _CLEAN_BOUNDARY_CODE_BLOCK_RE = re.compile(r"(?:```|~~~)[\s]*$")
     # 长内容**历史渲染**走线程池的字符阈值（仅用于非"流式结束"的渲染）。
     # ⚠️ 结束路径后面紧跟 _cleanup_render_cache()，它 `self._render_seq += 1`
     # 会把异步结果判为过期丢弃（详见 _perform_update 内注释）——所以结束态必须
@@ -7657,6 +7752,94 @@ class CodeWebViewer(QWebEngineView):
     # 真机实测（2026-09-09）：历史卡 md 24k~37k 时主线程 render 占 40~120ms/张，
     # 一张张串行就是"加载大会话时一顿一顿"的来源。
     _ASYNC_HISTORY_RENDER_MIN_CHARS = 6000
+
+    # ── [P0-⑤] 判等与滚动哈希 ──
+
+    @staticmethod
+    def _equiv_cache_hit(cur_md: str, cached_hash) -> bool:
+        """缓存命中判定（golden compare 契约方法，见 tests/golden 头注）。
+
+        语义与旧版一致：cached_hash 为空未命中；int = 内置 hash（processed_md
+        路径，非单调不可滚动）；str = sha256 hexdigest（_raw_md_sha_hex 滚动值）。
+        """
+        if cached_hash is None:
+            return False
+        if isinstance(cached_hash, int):
+            return hash(cur_md) == cached_hash
+        return hashlib.sha256(cur_md.encode("utf-8")).hexdigest() == cached_hash
+
+    @staticmethod
+    def _equiv_baseline_ok(cur_md: str, last_rendered: str) -> bool:
+        """差量基线一致性判定（golden compare 契约方法）：cur 是否为上次已渲染
+        md 的前缀延伸。与旧版「bool(last_rendered) and startswith」语义一致。
+        """
+        return bool(last_rendered) and cur_md.startswith(last_rendered)
+
+    def _raw_md_sha_hex(self) -> str:
+        """[P0-5] _markdown_text 的滚动 sha256：流式追加只 hash 新增段。
+        旧版消费点每帧对全文做内置 hash 两次（流式缓存写 + finish 验证）；
+        文本严格单调追加时新帧只 update 新增段。
+        前缀一致性校验（审计建议 5 收紧）：长度 + 首/三分一/三分二/尾 4 个
+        16 字节抽样点。流式主路径 len 严格增、抽样恒过；「len 不变/变长但
+        中间被替换」的内容替换被中间点拦截，无意等长替换漏检概率约 2^-160
+        （5x16 字节比对，与内置 hash 碰撞语义同量级）。抽样失配 / 文本缩短
+        （替换类低频路径）→ 全量重建 O(n)，一次性成本。
+        """
+        md = self._markdown_text
+        sha_obj = self._md_sha
+        n = self._md_sha_len
+        s = self._RAW_SHA_SAMPLE
+        if (
+            sha_obj is not None
+            and len(md) >= n
+            and (
+                n == 0
+                or (
+                    md[:s] == self._md_sha_head
+                    and (n < s or md[n // 3 : n // 3 + s] == self._md_sha_mid1)
+                    and (n < 2 * s or md[(2 * n) // 3 : (2 * n) // 3 + s] == self._md_sha_mid2)
+                    and md[n - s : n] == self._md_sha_tail
+                )
+            )
+        ):
+            tail = md[n:]
+            if tail:
+                sha_obj.update(tail.encode("utf-8"))
+                self._md_sha_len = len(md)
+                L = len(md)
+                self._md_sha_mid1 = md[L // 3 : L // 3 + s] if L >= s else ""
+                self._md_sha_mid2 = md[(2 * L) // 3 : (2 * L) // 3 + s] if L >= 2 * s else ""
+                self._md_sha_tail = md[-s:] if md else ""
+            return sha_obj.copy().hexdigest()
+        self._md_sha = hashlib.sha256(md.encode("utf-8"))
+        self._md_sha_len = len(md)
+        self._md_sha_head = md[:s]
+        L = len(md)
+        self._md_sha_mid1 = md[L // 3 : L // 3 + s] if L >= s else ""
+        self._md_sha_mid2 = md[(2 * L) // 3 : (2 * L) // 3 + s] if L >= 2 * s else ""
+        self._md_sha_tail = md[-s:] if md else ""
+        return self._md_sha.copy().hexdigest()
+
+
+    def _tail_sha_hex(self) -> str:
+        """[R2-H2] 流式尾部窗口 _markdown_text[_stable_md_len:] 的滚动 sha256。
+
+        复用 _raw_md_sha_hex 的滚动模式：stable 基线推进（base 变化）或文本
+        回退时全量重建；正常追加只 update 新增段，替代旧版每帧对整个尾部
+        窗口做内置 hash 的 O(n)。"""
+        md = self._markdown_text
+        base = self._stable_md_len
+        sha_obj = self._tail_sha
+        if sha_obj is not None and self._tail_sha_base == base and len(md) >= self._tail_sha_len:
+            tail = md[self._tail_sha_len :]
+            if tail:
+                sha_obj.update(tail.encode("utf-8"))
+                self._tail_sha_len = len(md)
+            return sha_obj.copy().hexdigest()
+        self._tail_sha = hashlib.sha256(md[base:].encode("utf-8"))
+        self._tail_sha_base = base
+        self._tail_sha_len = len(md)
+        return self._tail_sha.copy().hexdigest()
 
     @staticmethod
     def _has_reached_clean_boundary(md_text: str) -> bool:
@@ -7731,10 +7914,10 @@ class CodeWebViewer(QWebEngineView):
             # 每命中一次就同步跑一遍 O(tail) 的 markdown 转换，随消息增长呈
             # O(n²)。改由 _schedule_render 内部的 90ms 短定时器合并（见
             # _SOFT_BOUNDARY_RENDER_DELAY_MS），硬边界仍保持 immediate。
-            if self._has_reached_clean_boundary(self._markdown_text):
-                self._schedule_render(immediate=True)
-            else:
-                self._schedule_render(immediate=False)
+            # [P0-④] 同拍双扫去重：硬边界判定结果作参数传给 _schedule_render，
+            # 非 immediate 帧不再重判（旧逻辑同拍 O(n) rstrip+尾正则跑两遍）。
+            hard = self._has_reached_clean_boundary(self._markdown_text)
+            self._schedule_render(immediate=hard, boundary=hard)
         else:
             self._schedule_render()
 
@@ -7780,6 +7963,67 @@ class CodeWebViewer(QWebEngineView):
         except RuntimeError:
             pass
 
+    def _ensure_theme_chain(self):
+        """[P0-③] 主题检测链缓存化：主题/字号相关全局态只在主题刷新事件时变，
+
+        原版每次全量渲染同步跑 import + is_light_theme + set_pygments_style +
+        set_diff_highlight_style + _update_icon_prefix + _refresh_code_font_size
+        （流式边界每 100~300ms 一遍，全为重复功）。改按 ThemeRefreshCoordinator
+        版本号幂等刷新：version bump（EV_THEME_CHANGED / 字号变化）后下一次
+        渲染重刷一次，未变时零开销直通。
+
+        失效双保险：version 本身即事件源；refresh_theme / refresh_font 实例路径
+        另置 _theme_chain_ver = None 强制重刷。version 探测异常时置 None →
+        每帧重刷（保守正确，等价旧版）。
+        """
+        try:
+            from app.utils.theme_refresh import ThemeRefreshCoordinator
+
+            ver = ThemeRefreshCoordinator.get_version()
+        except Exception:
+            ver = None
+        if ver is not None and CodeWebViewer._theme_chain_ver == ver:
+            return
+        try:
+            from app.utils.theme_manager import theme_manager
+            from app.widgets.render_helpers import set_diff_highlight_style
+
+            _style = "friendly" if theme_manager.is_light_theme() else "dracula"
+            set_pygments_style(_style)
+            set_diff_highlight_style(_style)
+            # 同步缓存图标前缀与代码字号档位（原每帧重复执行，现随版本号幂等）
+            _update_icon_prefix()
+            _refresh_code_font_size()
+        except Exception:
+            pass
+        CodeWebViewer._theme_chain_ver = ver
+
+    def _processed_md_samples_match(self, processed_md: str) -> bool:
+        """[R2-H3] processed_md 缓存命中判定：len + 首/三分一/三分二/尾 4 点
+        采样比对（口径同 _raw_md_sha_hex 的前缀校验），替代每帧内置 hash 全文
+        O(n)。漏检概率与旧 hash 判等同量级（4×16 字节比对）；采样失配 →
+        全量重渲，与旧 hash 不命中同语义。"""
+        n = self._processed_md_len
+        if n != len(processed_md) or self._cached_streaming_html is None:
+            return False
+        s = self._RAW_SHA_SAMPLE
+        return (
+            processed_md[:s] == self._processed_md_s_head
+            and (n < s or processed_md[n // 3 : n // 3 + s] == self._processed_md_s_mid1)
+            and (n < 2 * s or processed_md[(2 * n) // 3 : (2 * n) // 3 + s] == self._processed_md_s_mid2)
+            and processed_md[n - s : n] == self._processed_md_s_tail
+        )
+
+    def _processed_md_samples_store(self, processed_md: str) -> None:
+        """[R2-H3] 缓存写入时快照 len + 4 点采样。"""
+        n = len(processed_md)
+        s = self._RAW_SHA_SAMPLE
+        self._processed_md_len = n
+        self._processed_md_s_head = processed_md[:s]
+        self._processed_md_s_mid1 = processed_md[n // 3 : n // 3 + s] if n >= s else ""
+        self._processed_md_s_mid2 = processed_md[(2 * n) // 3 : (2 * n) // 3 + s] if n >= 2 * s else ""
+        self._processed_md_s_tail = processed_md[n - s :] if processed_md else ""
+
     def _render_markdown_to_html(self, raw_md: str) -> str:
         """渲染 markdown 到 HTML。
 
@@ -7788,20 +8032,8 @@ class CodeWebViewer(QWebEngineView):
         """
         # 刷新字体（响应系统字体设置变化）
         self._refresh_viewer_font_css()
-        # 根据主题切换代码高亮风格（通用代码块 + 行内 diff）
-        try:
-            from app.utils.theme_manager import theme_manager
-            from app.widgets.render_helpers import set_diff_highlight_style
-
-            _style = "friendly" if theme_manager.is_light_theme() else "dracula"
-            set_pygments_style(_style)
-            set_diff_highlight_style(_style)
-            # 同步缓存图标前缀，避免每次渲染都重新检测主题
-            # [PERF L1] 字号缓存已惰性化：刷新失效（下渲染取新档位）
-            _update_icon_prefix()
-            _refresh_code_font_size()
-        except Exception:
-            pass
+        # [P0-③] 主题/高亮/图标/字号链：幂等刷新（原每帧同步跑，见方法 docstring）
+        self._ensure_theme_chain()
 
         if not self._streaming:
             # 非流式模式：直接渲染，所有 <think> 都是已完成的
@@ -7846,8 +8078,9 @@ class CodeWebViewer(QWebEngineView):
         # 跳过 md.convert() + _wrap_code_blocks（最昂贵的步骤）。
         # 命中场景：resize 触发重复渲染、thinking_finalized 状态切换但内容未变、
         # finish_streaming 后的 immediate render 与随后 render 定时器重叠
-        processed_hash = hash(processed_md)
-        if self._processed_md_hash == processed_hash and self._cached_streaming_html is not None:
+        # [R2-H3] 判等改 len+4 点采样（口径同 _raw_md_sha_hex 前缀校验）；
+        # 旧版每帧 hash(processed_md) 全文 O(n)，命中判定内再 hash 一次 = 双 O(n)。
+        if self._processed_md_samples_match(processed_md):
             return self._cached_streaming_html
 
         try:
@@ -7864,14 +8097,17 @@ class CodeWebViewer(QWebEngineView):
                 html_content = html_content + _CHAR_COUNT_HTML
 
             # 缓存渲染结果（只存一份，内存开销小）
-            self._processed_md_hash = processed_hash
             self._cached_streaming_html = html_content
-            self._cached_raw_md_hash = hash(str(self._markdown_text))
+            self._processed_md_samples_store(processed_md)
+            # [P0-⑤] 原版内置 hash 全文 O(n)；改滚动 sha256（每帧只 hash 新增段）
+            self._cached_raw_md_hash = self._raw_md_sha_hex()
             return html_content
         except Exception:
             return f"<pre>{escape(raw_md)}</pre>"
 
-    def _schedule_render(self, immediate: bool = False):
+    def _schedule_render(self, immediate: bool = False, boundary: "bool | None" = None):
+        """boundary：调用方已算好的硬边界判定结果（[P0-④] append_chunk 同拍
+        已判一次，传参免重判；None = 自行判定，兼容其他调用点）。"""
         if not self._is_js_ready:
             # 🛡️ F2：JS 未就绪时的渲染请求标记 deferred（不直接丢弃），
             # _on_js_ready 时统一补渲。否则 viewer 创建后未显示 + JS 未加载
@@ -7899,7 +8135,9 @@ class CodeWebViewer(QWebEngineView):
         if self._streaming:
             # 硬边界（段落结束 / think 闭合 / 代码块闭合）：立即渲染。
             # 硬边界密度远低于软边界，且段落结束必须及时重排，保持同步。
-            if self._has_reached_clean_boundary(self._markdown_text):
+            if boundary is None:
+                boundary = self._has_reached_clean_boundary(self._markdown_text)
+            if boundary:
                 self._perform_update()
                 return
             # 软边界（句号结尾）：**仅在密集流式时合并**，否则仍即时渲染。
@@ -8021,9 +8259,12 @@ class CodeWebViewer(QWebEngineView):
         字体，只有新建/换会话让 viewer 走到 ``_load_skeleton`` 才刷得出来
         （"要建几次会话才刷新"的真身）。
 
-        现在的做法与大主题刷新一致：字体走 CSS 变量，运行时注入覆盖
+        现在（2026-10-30 后）的做法与大主题刷新一致：字体走 CSS 变量，运行时注入覆盖
         :root，一轮 IPC 全卡生效，不重建骨架、不重跑 markdown。
         """
+        # [P0-③] 字号/字体变化会改变 pygments formatter 与图标前缀产物，
+        # 强制下一次渲染重刷主题检测链（version 号之外的实例级双保险）
+        CodeWebViewer._theme_chain_ver = None
         self._refresh_viewer_font_css()
         self._apply_font_vars()
         # 有图表卡：Mermaid / echarts 的 fontSize 是 init 期常量，变量改了不会
@@ -8314,7 +8555,7 @@ class CodeWebViewer(QWebEngineView):
                 # 移除流式模式追加的字符统计 <div>，它只在流式期间有用。
                 if (
                     self._cached_streaming_html is not None
-                    and hash(str(self._markdown_text)) == self._cached_raw_md_hash
+                    and self._raw_md_sha_hex() == self._cached_raw_md_hash
                 ):
                     if _CHAR_COUNT_HTML in self._cached_streaming_html:
                         html_content = self._cached_streaming_html[
@@ -8455,7 +8696,7 @@ class CodeWebViewer(QWebEngineView):
             if (
                 self._streaming
                 and self._stable_md_len > 0
-                and not self._markdown_text.startswith(self._last_rendered_markdown or "")
+                and not CodeWebViewer._equiv_baseline_ok(self._markdown_text, self._last_rendered_markdown)
             ):
                 self._stable_html = ""
                 self._stable_md_len = 0
@@ -8465,14 +8706,57 @@ class CodeWebViewer(QWebEngineView):
             elif self._streaming and self._has_pending_tool_dom():
                 self._rdiag_hit("full_tool_pending")
             if self._streaming and not self._needs_full_render and not self._has_pending_tool_dom():
-                stable_len, segs = _extract_closed_segments(self._markdown_text[self._stable_md_len :])
+                # [P0-⑥] 切片一次复用：旧版同帧两次 O(剩余) 拷贝（8567 与 _tail），
+                # _extract_closed_segments / _tail_before_unclosed_block 吃 str 签名
+                # 不动（card_render_core 非本任务所有权），调用侧复用切片变量。
+                _rest_md = self._markdown_text[self._stable_md_len :]
+                stable_len, segs = _extract_closed_segments(_rest_md)
                 # 含协议块的闭合段（think / tool / 插件注册 tag）仍让位全量：
                 # 这些块的 DOM 由 JS 增量注入维护，差量双写会出现重复框。
                 # 纯文本段占流式输出绝对多数，让位代价可忽略。
+                # [R1a] 让位范围缩小：首个协议段**之前**的纯文本闭合段照常差量
+                # 追加并推进基线（+2 与 _extract_closed_segments 的 stable_len
+                # 口径一致），协议段及其后保持整帧让位（DOM 由 JS 注入维护，
+                # 差量双写会重复框）。
                 if segs and any(_seg_has_protocol_block(seg) for seg in segs):
-                    self._refresh_viewer_font_css()
-                    self._last_rendered_markdown = self._markdown_text
-                    self._rdiag_hit("full_protocol_seg")
+                    _proto_idx = next((i for i, s in enumerate(segs) if _seg_has_protocol_block(s)), None)
+                    prefix_segs = segs[:_proto_idx] if _proto_idx else []
+                    if prefix_segs:
+                        # perf: 含协议块消息整帧放弃 → 前缀纯文本段差量追加，worker 全量整帧重建消除（86KB 帧 25.4ms）
+                        new_html = "".join(
+                            _render_stable_segment(seg, compact=self._tool_compact_mode, lazy_body=self._tool_lazy_body)
+                            for seg in prefix_segs
+                        )
+                        _advance = sum(len(s) + 2 for s in prefix_segs)
+                        _new_stable_len = self._stable_md_len + _advance
+                        # 防御（历史事故区）：基线推进不得越过本次切片可消费总量
+                        assert _new_stable_len <= self._stable_md_len + len(_rest_md), (
+                            f"[R1a] stable 越界: {_new_stable_len} > {self._stable_md_len}+{len(_rest_md)}"
+                        )
+                        self._stable_html += new_html
+                        self._stable_md_len = _new_stable_len
+                        # partial_prefix 口径 = 前缀段数（非调用次数）
+                        for _ in prefix_segs:
+                            self._rdiag_hit("partial_prefix")
+                        # 前缀段照常走差量追加（updateContentAppend，逻辑同上 方差量路径，
+                        # tail 交由紧随其后的整帧全量渲染处理）
+                        self._mark_has_charts(new_html)
+                        self.page().runJavaScript(
+                            "updateContentAppend("
+                            f"{json.dumps(new_html).decode('utf-8')},"
+                            '"");'
+                        )
+                        self._refresh_viewer_font_css()
+                        # 缩小后的让位：基线已推进，赋值同步截断（沿用差量成功路径
+                        # :8673 口径）。全文赋值会让 _equiv_baseline_ok 把协议段之后
+                        # 未差量内容误判为已渲染前缀。
+                        self._last_rendered_markdown = self._markdown_text[: self._stable_md_len]
+                        self._rdiag_hit("partial_protocol")
+                    else:
+                        # 整帧放弃（首个闭合段即协议段）：保持现有全文赋值口径
+                        self._refresh_viewer_font_css()
+                        self._last_rendered_markdown = self._markdown_text
+                        self._rdiag_hit("full_protocol_seg")
                     self._sequence_render(self._markdown_text, self._tool_compact_mode)
                     return
                 # 🐛 修复（流式重复/残留 —— 「同一张卡里出现两份 PLAN/两条工具框」根因）：
@@ -8514,7 +8798,8 @@ class CodeWebViewer(QWebEngineView):
                     # 不再字面显示 markdown 源码）。
                     # ⚠️ 未闭合 think/tool：tail 含未闭合块时不渲染（静默累积，
                     # 等闭合后由差量段/全量渲染处理，避免思考内容泄漏到正文）。
-                    _tail = self._markdown_text[self._stable_md_len :]
+                    # [P0-⑥] 复用 _rest_md（stable 推进前基线的剩余段），免二次切片
+                    _tail = _rest_md[stable_len:]
                     _tail_html = ""
                     if _tail:
                         # 🐛 修复（流式吞内容）：tail 含未闭合 think/tool 时只截到未闭合
@@ -9334,7 +9619,8 @@ class CodeWebViewer(QWebEngineView):
         # 闭合后由全量渲染分发 chart-streaming 骨架/真图）
         if _has_unclosed_chart_fence(_tail):
             return
-        _h = hash(_tail)
+        # perf: 每帧 hash(_tail) 全文 O(n) → 滚动 sha256 只 update 新增段
+        _h = self._tail_sha_hex()
         if _h == self._tail_html_hash:
             # hash 命中：内容未变，刷新降载状态基准（与渲染完成处同口径）
             self._tail_last_rendered_len = len(_tail)
@@ -11556,6 +11842,14 @@ class PlainTextViewer(QWidget):
         self._resize_debounce_timer.setSingleShot(True)
         self._resize_debounce_timer.setInterval(50)  # 50ms 防抖
         self._resize_debounce_timer.timeout.connect(self._do_resize_update)
+        # [P0] 高度回调去抖合并窗：旧版每 chunk singleShot(10) 逐条排队（800 chunk
+        # = 800 次回调），改 50ms 单发合并，窗口内高度只重算一次。首字延迟不变
+        # （文本在 append_chunk 里同步上屏，高度更新延一拍不影响可见性）。
+        self._height_debounce_timer = QTimer(self)
+        self._height_debounce_timer.setSingleShot(True)
+        self._height_debounce_timer.setInterval(50)
+        self._height_debounce_timer.timeout.connect(self._flush_height_update)
+        self._pending_incremental = False
 
     def _init_ui(self):
         layout = QVBoxLayout(self)
@@ -11565,6 +11859,9 @@ class PlainTextViewer(QWidget):
 
         self.text_edit = QTextEdit(self)
         self.text_edit.setReadOnly(True)
+        # [P0] 追加路径防 undo 栈膨胀：流式每 chunk 一次 insertText 会逐条入栈，
+        # 只读展示卡永不撤销，关闭后 QTextDocument 不再保留 undo step
+        self.text_edit.setUndoRedoEnabled(False)
         self.text_edit.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self.text_edit.setFrameShape(QTextEdit.NoFrame)
         self.text_edit.setContextMenuPolicy(Qt.CustomContextMenu)
@@ -11617,16 +11914,38 @@ class PlainTextViewer(QWidget):
         self._stream_base_w = None  # 字体变化 → 折行/宽度结论失效，增量基线作废
 
     def append_chunk(self, text: str):
+        # [P0] 增量插入：只把新 suffix 追加到文档末尾（O(新增)），替代旧版
+        # setPlainText 全量替换（O(全文) 重建文档 + 重排版）。
+        # ⚠️ 历史背景：此路线曾因 offscreen 段错误搁置（11620 旧注），本轮带
+        # 异常回退重做：insertText 任何异常 / RuntimeError 都退回 setPlainText
+        # 全量替换，行为等价旧版（且回退后 self._text 与文档必然一致，后续
+        # chunk 可重新尝试增量）。
+        try:
+            cursor = QTextCursor(self.text_edit.document())
+            cursor.movePosition(QTextCursor.End)
+            cursor.insertText(text)
+        except Exception:
+            # 回退全量（旧版行为）；回退后 self._text 与文档必然一致，后续
+            # chunk 可重新尝试增量。段错误（进程级）无法在此捕获，若真机
+            # 复现须整体回退本改动
+            self.text_edit.setPlainText(self._text + text)
         self._text += text
-        # [PERF P0] setPlainText 稳定形态 + 增量高度跳过二次独立测量（显示文档
-        # O(1) 读 documentSize，见 _try_incremental_height）；insertText O(1) 路线
-        # 因 offscreen 段错误搁置（证据链封存 .perf_out/，真机复现性未验证）。
-        self.text_edit.setPlainText(self._text)
+        # 🐛 内部滚动条「发送后默认置底」（2026-11-15 真机）：上面用 End 位置的
+        # QTextCursor 插入会让 QTextEdit 的可见光标落到文档末尾（共享
+        # QTextDocument），随后气泡定型 setFixedSize → QTextEdit 重排
+        # ensureCursorVisible → 内滚条被拉到末尾，长用户消息一出现就显示尾部。
+        # 用户气泡语义是从头读，插入后把可见光标归位到文档开头（只置滚动条
+        # value=0 无效：后续重排会按末尾光标再次 ensure 到底，实测值被拉回）。
+        # PlainTextViewer 唯一使用者是 user 卡（不承担流式跟随底部职责）。
+        try:
+            home = self.text_edit.textCursor()
+            home.movePosition(QTextCursor.Start)
+            self.text_edit.setTextCursor(home)
+        except RuntimeError:
+            pass
         # [PERF P0] 文档排版宽无条件同步（原版行为，保留）：hide/滚动条翻转期间
         # QTextEdit 不自动刷新排版宽，停留旧值会让增量高度读到错位排版
-        # （fuzz seed60/61 复现 h=216 vs need=101）。实测它不是大文档重排放大
-        # 元凶——缺失同步才是（insertText 实验后半段 27ms 的真因是缺失同步下的
-        # documentSize 强制排版）。
+        # （fuzz seed60/61 复现 h=216 vs need=101）。
         vp_width = self.text_edit.viewport().width()
         if vp_width > 0:
             self.text_edit.document().setTextWidth(vp_width)
@@ -11642,19 +11961,37 @@ class PlainTextViewer(QWidget):
         [P0 修复] immediate 为接口对齐参数（兄弟团队 T11 错峰链给 CodeWebViewer
         加了该参数并在 MessageCard 无条件传参，此处漏改导致鸭子类型断裂）。
         PlainTextViewer 是同步纯 Qt 渲染，无 WebEngine JS 投递可择机，错峰无意义，
-        故接收后忽略：立即 _schedule_update_height() 即等价于 immediate=True 语义。
+        故接收后忽略：立即同步定型高度（[P0-②裁决] 定型路径不走合并窗）。
         """
-        self._schedule_update_height()
+        self._schedule_update_height(immediate=True)
 
-    def _schedule_update_height(self, incremental: bool = False):
-        """🛡️ 安全的延迟高度更新
+    def _schedule_update_height(self, incremental: bool = False, immediate: bool = False):
+        """🛡️ 去抖合并窗版的高度更新派发（[P0-②裁决] 定型路径同步化）
 
-        使用 lambda 包装 + try/except 保护，防止 PlainTextViewer 被 deleteLater()
-        销毁后定时器回调仍访问已释放的 C++ 对象（text_edit）导致段错误。
-        incremental=True 时走流式增量高度路径（_update_height 内判定），失败自动
-        回退全量测量。
+        流式 append_chunk → 50ms 合并窗（旧版每 chunk singleShot(10) 逐条排队，
+        N chunk = N 回调；窗口内多次请求只跑一次）。incremental 语义：窗口内
+        任一帧要求增量即置位（增量路径内部失败自动回退全量测量）。
+
+        定型路径（set_text / finish_streaming / set_width_cap）→ immediate=True
+        同步落地：高度定型是这些调用的语义一部分，延后到合并窗会让依赖
+        「set_text 拍后高度已定型」的调用方（MessageCard 高度钳制 / tall_cap
+        单测的 _flush 时序）读到旧值。
+
+        存活性：QTimer 挂 self（viewer 销毁定时器同灭），回调再经
+        _safe_update_height 的 sip.isdeleted 双保险。
         """
-        QTimer.singleShot(10, lambda: self._safe_update_height(incremental))
+        if immediate:
+            self._pending_incremental = False
+            self._safe_update_height(incremental)
+            return
+        self._pending_incremental = self._pending_incremental or incremental
+        if not self._height_debounce_timer.isActive():
+            self._height_debounce_timer.start()
+
+    def _flush_height_update(self):
+        inc = self._pending_incremental
+        self._pending_incremental = False
+        self._safe_update_height(inc)
 
     def _safe_update_height(self, incremental: bool = False):
         """带存活性检查的 _update_height"""
@@ -11681,14 +12018,15 @@ class PlainTextViewer(QWidget):
         vp_width = self.text_edit.viewport().width()
         if vp_width > 0:
             self.text_edit.document().setTextWidth(vp_width)
-        self._schedule_update_height()
+        # [P0-②裁决] set_text 是定型路径：同步落地高度（不走流式合并窗）
+        self._schedule_update_height(immediate=True)
 
     def set_width_cap(self, cap: int):
         """设置气泡最大宽度（由 MessageCard.sync_width 按容器宽度注入）"""
         cap = max(60, int(cap))
         if cap != self._width_cap:
             self._width_cap = cap
-            self._schedule_update_height()
+            self._schedule_update_height(immediate=True)
 
     def _definitely_tall_chars(self) -> int:
         """[PERF] “必然超高”字符阈值（O(1) 计算）。
@@ -11778,6 +12116,19 @@ class PlainTextViewer(QWidget):
                     self.setFixedSize(cap, self.MAX_HEIGHT)
                     self.contentHeightChanged.emit(self.MAX_HEIGHT)
                 return
+        elif len(self._text) >= self._definitely_tall_chars():
+            # [PERF] 宽度上限尚未注入（cap=初始未限宽态）时的超长文本快速路径。
+            # 真机链路里 MessageCard.update_content → finish_streaming 发生在
+            # _add_chat_widget → _sync_single_card_width 之前，此时 cap 仍是
+            # 16777215，上面那条 cap < 100000 的判据拦不到，于是落到下面的
+            # 独立文档全量测量（offscreen 实测 50 万字符 4362ms，发送长消息时
+            # 主线程直接冻住）。字符数达阈值即内容必然超高，先按 MAX_HEIGHT
+            # 定型；宽度沿用当前实测值，宽度定型仍由随后 sync_width →
+            # set_width_cap 走上面那条 cap < 100000 分支完成。
+            if self.height() != self.MAX_HEIGHT:
+                self.setFixedSize(max(self.width(), 60), self.MAX_HEIGHT)
+                self.contentHeightChanged.emit(self.MAX_HEIGHT)
+            return
 
         # 测量用独立同步文档：共享文档被 QTextEdit 钉在 viewport 宽且布局异步，
         # setTextWidth(w) 后立即读 size() 拿到旧宽缓存 → 短消息误判"多行"

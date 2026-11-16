@@ -139,6 +139,43 @@ def test_session_read_targets_origin_window():
     assert calls == [("w-1", "季度报表分析")]
 
 
+def test_title_request_refreshes_pool(monkeypatch):
+    """每次 title.request 都重取能力池：建池时的 host 可能已被销毁。
+
+    回归：控制器在插件加载时建池，host 固化；窗口重建后旧池里的
+    model.complete 抛 "OpenAIChatToolWindow has been deleted" 并静默返回空串，
+    标题回退成首条消息前 15 字（实测 "/plugin-creator"）。
+    """
+    module = _load_generator()
+    initial_pool = _pool()
+    fresh_pool = _pool()
+    ctrl = module._TitleController(initial_pool)
+
+    import app.plugins.capabilities.resolve as resolve
+
+    monkeypatch.setattr(resolve, "pool_for", lambda *a, **kw: fresh_pool)
+
+    started = []
+
+    class _NoThread:
+        def __init__(self, target=None, args=(), daemon=None):
+            started.append(args)
+
+        def start(self):
+            pass
+
+    monkeypatch.setattr(module.threading, "Thread", _NoThread)
+    ctrl._on_title_request(
+        {
+            "window_id": "w-1",
+            "session_id": "s-1",
+            "messages": [{"role": "user", "content": "帮我分析这份季度报表并生成摘要"}],
+            "fallback": "帮我分析这份季度报表并",
+        }
+    )
+    assert ctrl._pool is fresh_pool
+    assert started and started[0][0] == "w-1"
+
 def test_controller_restart_reconnects_bridge(monkeypatch):
     """同进程 destroy→create 不重新 import 时仍能收到结果。"""
     module = _load_generator()

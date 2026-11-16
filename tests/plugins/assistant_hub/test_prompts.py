@@ -47,7 +47,8 @@ def test_build_distill_gate():
     assert "memory_write(scope=daily, mark_distilled=true)" in c
     assert "date=2026-10-15, mark_distilled" not in c, "打标不再逐日传 date"
     assert "校对" in c
-    assert "最珍贵" in c and "项目无关" in c and "宁缺勿滥" in c
+    # 新文案（蒸馏第4步自由整理段）：不要求独特 + 与项目无关 + 宁缺勿滥
+    assert "不要求独特" in c and "与项目无关" in c and "宁缺勿滥" in c
     assert "/proj/MEMORY.md" in c and "/data/MEMORY.md" in c
 
 

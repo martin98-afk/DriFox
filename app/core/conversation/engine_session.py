@@ -82,6 +82,26 @@ _HOOK_POLICY_IDS = {
 }
 
 
+def _dedup_duplicate_system(history: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """[用户裁决 #33/#P2 修正] system 去重（规范化，非截断）。
+
+    产品语义：system 仅会话开头一条（会话开始时缓存），会话内不会变化，
+    不存在「中途换 system」场景 → 非首条 system 一律不入史（不再比对内容）。
+    历史其余条目原序原样保留，永不因条数/字节被裁。
+    """
+    seen_first = False
+    out: List[Dict[str, Any]] = []
+    for m in history:
+        if isinstance(m, dict) and m.get("role") == "system":
+            if not seen_first:
+                seen_first = True
+                out.append(m)
+                continue
+            continue  # 非首条 system：一律忽略
+        out.append(m)
+    return out
+
+
 class EngineSessionImpl:
     """EngineSession 契约实现（同步阻塞驱动原语）
 
@@ -104,6 +124,9 @@ class EngineSessionImpl:
         self.engine_name = engine_name
         self._is_cancelled = False
         self._history: List[Dict[str, Any]] = []
+        # [用户裁决 #33] 历史不做任何按条数/字节截断，全量发送，超模型窗口由
+        # provider API 报错（用户明确接受）。仅保留 system 去重（规范化，
+        # 非 #33 撤销范围）。
 
         # 模型配置覆盖：插件可强制关思考/降温度等（如象棋插件关掉 reasoning 提速）。
         # 实时包裹 get_model_config，保留「模型切换后即时生效」语义，仅在顶层叠加。
@@ -260,7 +283,7 @@ class EngineSessionImpl:
             # 超时：非阻塞取消，让 turn() 尽快返回
             self.cancel()
             if auto_history:
-                self._history = msgs + self._round_messages
+                self._commit_history(msgs)
             return ChatResult(
                 timed_out=True,
                 messages=self._round_messages,
@@ -268,7 +291,7 @@ class EngineSessionImpl:
             )
 
         if auto_history:
-            self._history = msgs + self._round_messages
+            self._commit_history(msgs)
 
         if self._is_cancelled:
             return ChatResult(cancelled=True, messages=self._round_messages)
@@ -410,7 +433,17 @@ class EngineSessionImpl:
         except Exception as e:
             logger.warning(f"[EngineSession:{self.engine_name}] cleanup: {e}")
 
-    # ========== 内部防御 ==========
+    def _commit_history(self, msgs: List[Dict[str, Any]]) -> None:
+        """auto_history 提交：完整累积 + system 去重（规范化）。
+
+        正常完成与超时取消两条路径共用。历史永不因条数被裁（用户裁决 #33）。
+        system 去重口径（用户裁决 #33/#P2）：产品语义下 system 仅会话开头
+        一条且会话内不变，「中途换 system」场景不存在 → 非首条 system 一律
+        不入史（不比对内容），防多数 API 对多条 system 报错/行为未定义；
+        历史其余条目原序原样保留。
+        """
+        history = list(msgs) + list(self._round_messages)
+        self._history = _dedup_duplicate_system(history)
 
     def _on_messages_updated(self, messages: List[Dict[str, Any]]):
         """收集本轮完整消息流（含工具调用轮次）"""

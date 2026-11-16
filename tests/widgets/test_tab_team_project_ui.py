@@ -2,12 +2,12 @@
 """#5b 团队框 UI 改造测试
 
 覆盖：
-- B1: 团队模式标签页 _icon_widget 隐藏、胶囊显示（set_team_mode + set_capsule 共存）
-- B2: 非团队模式 _icon_widget 恢复显示（回归：行为与改动前一致）
+- B1: 团队模式标签页显示角色单字母头像、角色名以普通文字显示（胶囊底色已去掉）
+- B2: 非团队模式 _icon_widget 恢复项目色块（回归：行为与改动前一致）
 - B5: update_tab_capsule/clear_tab_capsule 正常
 - 附加（review 检查点 3/4）：
   - set_team_project header 项目 icon 值相等跳过（避免无效重绘）
-  - refresh_style 不覆盖团队模式隐藏态
+  - refresh_style 不把团队行角色头像换回项目缩写
 
 风格对齐 tests/widgets/test_tab_panel.py：panel/qtbot fixture + isHidden() 断言
 （父链未显示时 isVisible() 恒 False，用显式隐藏标志 isHidden 判断）。
@@ -33,48 +33,63 @@ def panel(qtbot):
 
 
 class TestTeamModeTabItem:
-    """B1/B2：团队模式标签页 icon 隐藏/恢复"""
+    """B1/B2：团队模式成员行头像与退出恢复"""
 
-    def test_team_mode_hides_icon_and_shows_capsule(self, panel):
-        """B1: 团队模式 _icon_widget 隐藏、胶囊显示，二者共存。"""
+    def test_team_mode_shows_role_avatar_and_name(self, panel):
+        """B1: 团队模式显示角色单字母头像 + 角色名（普通文字，无胶囊背景）。"""
         idx = panel.add_tab("会话A")
         panel.set_tab_team(idx, "run_1")
         panel.set_tab_team_mode(idx, True)
 
-        assert panel._items[idx]._icon_widget.isHidden(), "团队模式项目 icon 应隐藏"
-        # 胶囊照常显示（与 icon 隐藏共存）
-        panel._items[idx].set_capsule("coder")
-        assert not panel._items[idx]._capsule_label.isHidden(), "团队模式胶囊应显示"
-        assert panel._items[idx]._capsule_label.text() == "coder"
+        item = panel._items[idx]
+        assert not item._icon_widget.isHidden(), "团队模式应显示角色单字母头像"
+        # 胶囊照常显示（已改为普通文字，与头像共存）
+        item.set_capsule("coder")
+        assert not item._capsule_label.isHidden(), "团队模式角色名应显示"
+        assert item._capsule_label.text() == "coder"
+        assert item._icon_widget._initials == "C", "头像 = 角色首字母大写"
+        assert "background: transparent" in item._capsule_label.styleSheet(), "角色名不应再有胶囊底色"
 
     def test_non_team_mode_restores_icon(self, panel):
-        """B2: 非团队模式 _icon_widget 恢复显示（回归不变）。"""
+        """B2: 退出团队 _icon_widget 恢复项目色块（回归不变）。"""
         idx = panel.add_tab("会话A")
         panel.set_tab_team_mode(idx, True)
-        assert panel._items[idx]._icon_widget.isHidden()
 
         panel.set_tab_team_mode(idx, False)
         assert not panel._items[idx]._icon_widget.isHidden(), "非团队模式 icon 应恢复显示"
 
     def test_team_mode_exit_clears_capsule_and_restores_icon(self, panel):
-        """B2 变体: 退出团队（refresh_capsule_for_window 路径）胶囊清除 + icon 恢复。"""
+        """B2 变体: 退出团队（refresh_capsule_for_window 路径）角色清除 + icon 恢复。"""
         idx = panel.add_tab("会话A")
         panel.set_tab_team(idx, "run_1")
         panel.set_tab_team_mode(idx, True)
         panel._items[idx].set_capsule("coder")
 
-        # 模拟退出团队：清胶囊 + 恢复 icon
+        # 模拟退出团队：清角色 + 恢复 icon
         panel._items[idx].clear_capsule()
         panel.set_tab_team_mode(idx, False)
-        assert panel._items[idx]._capsule_label.isHidden(), "退出团队应清胶囊"
+        assert panel._items[idx]._capsule_label.isHidden(), "退出团队应清角色文字"
         assert not panel._items[idx]._icon_widget.isHidden(), "退出团队应恢复 icon"
 
-    def test_refresh_style_keeps_team_mode_hidden(self, panel):
-        """检查点 4: refresh_style 不得覆盖团队模式隐藏态。"""
+    def test_team_mode_hides_close_btn_on_hover(self, panel):
+        """团队成员行不弹单个关闭按钮（右键菜单「关闭标签页」仍可关）"""
         idx = panel.add_tab("会话A")
+        panel.set_tab_team(idx, "run_1")
         panel.set_tab_team_mode(idx, True)
+        item = panel._items[idx]
+        item.enterEvent(None)
+        assert item._close_btn.isHidden(), "团队成员行 hover 不应显示关闭按钮"
+
+    def test_refresh_style_keeps_team_role_avatar(self, panel):
+        """检查点 4: refresh_style 后团队行角色头像保持（不重建为项目 icon）。"""
+        idx = panel.add_tab("会话A", project_initials="DF", project_color="#2E7D32")
+        panel.set_tab_team(idx, "run_1")
+        panel.set_tab_team_mode(idx, True)
+        panel.update_tab_capsule(idx, "coder")
         panel.refresh_style()
-        assert panel._items[idx]._icon_widget.isHidden(), "refresh_style 后隐藏态应保持"
+        item = panel._items[idx]
+        assert not item._icon_widget.isHidden(), "refresh_style 后头像应保持可见"
+        assert item._icon_widget._initials == "C", "refresh_style 不得把角色头像换回项目缩写"
 
 
 class TestTeamHeaderIcon:

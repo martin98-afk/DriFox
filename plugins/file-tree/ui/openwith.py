@@ -284,6 +284,19 @@ def list_openers(path: str) -> List[Opener]:
     结果按「默认 → 最近使用 → 其他推荐」排序，同一程序只保留一次。
     """
     if os.name != "nt":
+        # mac：扫 .app 的 Info.plist 声明（不碰 LaunchServices API）；
+        # 默认程序从 launchservices.secure.plist 静态反查，查不到则菜单
+        # 退化靠「用系统默认程序打开」兜底入口
+        if sys.platform == "darwin":
+            ext = os.path.splitext(path or "")[1].lower().lstrip(".")
+            openers = _mac_file_openers(ext)
+            default = _mac_default_opener(ext)
+            if default is not None:
+                real = os.path.realpath(default.exe)
+                openers = [default] + [
+                    o for o in openers if os.path.realpath(o.exe) != real
+                ]
+            return openers
         return []
     ext = os.path.splitext(path or "")[1].lower()
     if not ext:
@@ -372,6 +385,8 @@ def _mac_app_dirs() -> List[str]:
     return [
         "/Applications",
         "/Applications/Utilities",
+        "/System/Applications",
+        "/System/Applications/Utilities",
         os.path.join(os.path.expanduser("~"), "Applications"),
     ]
 
@@ -428,6 +443,232 @@ def _mac_folder_apps() -> List[Opener]:
             )
     found.sort(key=lambda o: o.label.lower())
     return found
+
+# ── 文件候选（mac） ──────────────────────────────────────
+
+# 常见扩展名 → 系统 UTI。mac 不碰 LaunchServices（同 QFileIconProvider 的
+# 冻结风险），只能静态匹配 Info.plist 声明：``CFBundleTypeExtensions`` 直接
+# 给扩展名；``LSItemContentTypes`` 是 UTI，经本表反查成扩展名。表外类型
+# （专用软件的私有 UTI）匹配不到，属已知边界。
+_MAC_EXT_UTI: Dict[str, Tuple[str, ...]] = {
+    "txt": ("public.plain-text",),
+    "text": ("public.plain-text",),
+    "log": ("public.plain-text",),
+    "md": ("net.daringfireball.markdown", "public.plain-text"),
+    "markdown": ("net.daringfireball.markdown", "public.plain-text"),
+    "csv": ("public.comma-separated-values-text", "public.plain-text"),
+    "py": ("public.python-script", "public.plain-text"),
+    "js": ("com.netscape.javascript-source", "public.plain-text"),
+    "json": ("public.json", "public.plain-text"),
+    "xml": ("public.xml", "public.plain-text"),
+    "yml": ("public.plain-text",),
+    "yaml": ("public.plain-text",),
+    "html": ("public.html",),
+    "htm": ("public.html",),
+    "css": ("public.css", "public.plain-text"),
+    "sh": ("public.shell-script", "public.plain-text"),
+    "png": ("public.png",),
+    "jpg": ("public.jpeg",),
+    "jpeg": ("public.jpeg",),
+    "gif": ("com.compuserve.gif",),
+    "svg": ("public.svg-image",),
+    "pdf": ("com.adobe.pdf",),
+    "zip": ("public.zip-archive",),
+    "mp3": ("public.mp3",),
+    "wav": ("com.microsoft.waveform-audio",),
+    "mp4": ("public.mpeg-4",),
+    "mov": ("com.apple.quicktime-movie",),
+    "docx": ("org.openxmlformats.wordprocessingml.document",),
+    "xlsx": ("org.openxmlformats.spreadsheetml.sheet",),
+    "pptx": ("org.openxmlformats.presentationml.presentation",),
+}
+
+# 一次扫描 /Applications 建立「应用 → 支持的扩展名全集」缓存，之后按扩展名过滤
+_MAC_FILE_APPS_CACHE: Optional[List[Tuple[Opener, frozenset]]] = None
+# 同一次扫描顺带记录 bundle id → bundle 路径，供 LaunchServices 默认程序反查
+_MAC_BUNDLE_BY_ID: Dict[str, str] = {}
+
+def _mac_supported_exts(info: dict) -> frozenset:
+    """单个 .app 的 Info.plist 声明 → 它能处理的扩展名集合
+
+    老式 ``CFBundleTypeExtensions`` 直接是扩展名列表（``*`` 跳过，否则
+    全应用匹配一切文件）；新式 ``LSItemContentTypes`` 是 UTI，按表反查。
+    """
+    exts = set()
+    utis = set()
+    for doc in info.get("CFBundleDocumentTypes") or []:
+        if not isinstance(doc, dict):
+            continue
+        for ext in doc.get("CFBundleTypeExtensions") or []:
+            if isinstance(ext, str) and ext and ext != "*":
+                exts.add(ext.lower())
+        for uti in doc.get("LSItemContentTypes") or []:
+            if isinstance(uti, str) and uti:
+                utis.add(uti)
+    for ext, mapped in _MAC_EXT_UTI.items():
+        if utis.intersection(mapped):
+            exts.add(ext)
+    return frozenset(exts)
+
+def _mac_file_apps() -> List[Tuple[Opener, frozenset]]:
+    """扫描应用目录，返回 (候选模板, 支持的扩展名集合) 列表（进程内缓存一次）"""
+    import plistlib
+
+    global _MAC_FILE_APPS_CACHE
+    if _MAC_FILE_APPS_CACHE is not None:
+        return _MAC_FILE_APPS_CACHE
+    found: List[Tuple[Opener, frozenset]] = []
+    for folder in _mac_app_dirs():
+        try:
+            names = os.listdir(folder)
+        except OSError:
+            continue
+        for name in names:
+            if not name.endswith(".app"):
+                continue
+            bundle = os.path.join(folder, name)
+            try:
+                with open(os.path.join(bundle, "Contents", "Info.plist"), "rb") as fh:
+                    info = plistlib.load(fh)
+            except Exception:  # 损坏/无权限的 bundle 跳过
+                continue
+            if not isinstance(info, dict):
+                continue
+            bundle_id = str(info.get("CFBundleIdentifier") or "").strip()
+            if bundle_id and bundle_id not in _MAC_BUNDLE_BY_ID:
+                _MAC_BUNDLE_BY_ID[bundle_id] = os.path.realpath(bundle)
+            exts = _mac_supported_exts(info)
+            if not exts:
+                continue
+            found.append(
+                (
+                    Opener(
+                        label=_mac_bundle_label(bundle, info),
+                        exe=bundle,
+                        command=f'open -a "{bundle}" "%1"',
+                    ),
+                    exts,
+                )
+            )
+    found.sort(key=lambda pair: pair[0].label.lower())
+    _MAC_FILE_APPS_CACHE = found
+    return found
+
+def _mac_file_openers(ext: str) -> List[Opener]:
+    """按扩展名过滤出候选应用（缓存已建，过滤本身 O(apps)）"""
+    if not ext:
+        return []
+    return [opener for opener, exts in _mac_file_apps() if ext in exts]
+
+# ── mac 默认程序：静态解析 LaunchServices 配置 ─────────────
+
+_LS_DEFAULT_CACHE: Dict[str, Optional[Opener]] = {}
+
+def _mac_bundle_label_of(bundle: str) -> str:
+    """读 bundle 的 Info.plist 取展示名（读不到回退目录名）"""
+    import plistlib
+
+    try:
+        with open(os.path.join(bundle, "Contents", "Info.plist"), "rb") as fh:
+            info = plistlib.load(fh)
+        if isinstance(info, dict):
+            label = _mac_bundle_label(bundle, info)
+            if label:
+                return label
+    except Exception:
+        pass
+    return _mac_bundle_label(bundle, {})
+
+def _mac_default_via_ls(ext: str) -> Optional[Opener]:
+    """走 LaunchServices API 查系统默认程序（需要 pyobjc，可选依赖）
+
+    ``launchservices.secure.plist`` 只存用户显式改过的关联；常规默认在
+    LaunchServices 数据库里，只有走 API 能查到。实测单次 0-3ms，纯数据库
+    查询不走图标缓存，无 QFileIconProvider 那类冻窗风险。查询按文件 UTI
+    进行，需要一个真实存在的探针文件（空文件即可，UTI 按扩展名判定）。
+    """
+    try:
+        import tempfile
+
+        from CoreFoundation import CFURLCreateWithFileSystemPath, kCFURLPOSIXPathStyle
+        from CoreServices import LaunchServices
+
+        fd, probe = tempfile.mkstemp(suffix=f".{ext}", prefix="drifox_ls_probe_")
+        os.close(fd)
+        try:
+            url, _err = LaunchServices.LSCopyDefaultApplicationURLForURL(
+                CFURLCreateWithFileSystemPath(
+                    None, probe, kCFURLPOSIXPathStyle, False
+                ),
+                LaunchServices.kLSRolesAll,
+                None,
+            )
+        finally:
+            try:
+                os.remove(probe)
+            except OSError:
+                pass
+        bundle = url.path() if url else ""
+        if bundle and os.path.isdir(bundle):
+            return Opener(
+                label=_mac_bundle_label_of(bundle),
+                exe=bundle,
+                command='open "%1"',
+                is_default=True,
+            )
+    except Exception:  # 无 pyobjc / API 异常 → 降级为无默认标记
+        pass
+    return None
+
+def _mac_default_opener(ext: str) -> Optional[Opener]:
+    """反查该扩展名的系统默认程序，两层来源，都查不到维持无默认标记
+
+    第一层：静态读 ``launchservices.secure.plist`` 的 ``LSHandlers``（用户
+    显式设置过的关联，零依赖）；同一扩展名多条记录时后写覆盖先写，取最后
+    命中，bundle id 经应用扫描缓存反查路径。
+    第二层：第一层没拿到 bundle 路径时走 ``_mac_default_via_ls``（LaunchServices
+    API，需要 pyobjc）。
+    """
+    if ext in _LS_DEFAULT_CACHE:
+        return _LS_DEFAULT_CACHE[ext]
+    opener: Optional[Opener] = None
+    plist_path = os.path.expanduser(
+        "~/Library/Preferences/com.apple.LaunchServices/"
+        "com.apple.launchservices.secure.plist"
+    )
+    try:
+        import plistlib
+
+        with open(plist_path, "rb") as fh:
+            handlers = (plistlib.load(fh) or {}).get("LSHandlers") or []
+        utis = set(_MAC_EXT_UTI.get(ext, ()))
+        bundle_id = ""
+        for handler in handlers:
+            if not isinstance(handler, dict):
+                continue
+            role = handler.get("LSHandlerRoleAll") or handler.get("LSHandlerRoleViewer") or ""
+            if not role:
+                continue
+            tag = str(handler.get("LSHandlerContentTag") or "").lower()
+            if (
+                handler.get("LSHandlerContentTagClass") == "public.filename-extension"
+                and tag == ext
+            ) or str(handler.get("LSHandlerContentType") or "") in utis:
+                bundle_id = str(role)
+        bundle = _MAC_BUNDLE_BY_ID.get(bundle_id, "") if bundle_id else ""
+        if bundle:
+            opener = Opener(
+                label=_mac_bundle_label_of(bundle),
+                exe=bundle,
+                command='open "%1"',
+                is_default=True,
+            )
+    except Exception:  # 配置缺失/损坏时交给第二层
+        pass
+    if opener is None:
+        opener = _mac_default_via_ls(ext)
+    _LS_DEFAULT_CACHE[ext] = opener
+    return opener
 
 def _mac_finder_opener() -> Opener:
     return Opener(
@@ -579,12 +820,48 @@ _ICON_API_CACHE = None
 
 
 def _icon_api():
-    """一次性准备好 ExtractIconExW / DestroyIcon 的签名（模块级缓存）"""
+    """一次性准备好 ExtractIconExW 与 HICON→QImage 所需的全部 Win32 签名（模块级缓存）"""
     global _ICON_API_CACHE
     if _ICON_API_CACHE is not None:
         return _ICON_API_CACHE
     import ctypes
     from ctypes import wintypes
+    from types import SimpleNamespace
+
+    class ICONINFO(ctypes.Structure):
+        _fields_ = [
+            ("fIcon", wintypes.BOOL),
+            ("xHotspot", wintypes.DWORD),
+            ("yHotspot", wintypes.DWORD),
+            ("hbmMask", ctypes.c_void_p),
+            ("hbmColor", ctypes.c_void_p),
+        ]
+
+    class BITMAP(ctypes.Structure):
+        _fields_ = [
+            ("bmType", wintypes.LONG),
+            ("bmWidth", wintypes.LONG),
+            ("bmHeight", wintypes.LONG),
+            ("bmWidthBytes", wintypes.LONG),
+            ("bmPlanes", wintypes.WORD),
+            ("bmBitsPixel", wintypes.WORD),
+            ("bmBits", ctypes.c_void_p),
+        ]
+
+    class BITMAPINFOHEADER(ctypes.Structure):
+        _fields_ = [
+            ("biSize", wintypes.DWORD),
+            ("biWidth", wintypes.LONG),
+            ("biHeight", wintypes.LONG),
+            ("biPlanes", wintypes.WORD),
+            ("biBitCount", wintypes.WORD),
+            ("biCompression", wintypes.DWORD),
+            ("biSizeImage", wintypes.DWORD),
+            ("biXPelsPerMeter", wintypes.LONG),
+            ("biYPelsPerMeter", wintypes.LONG),
+            ("biClrUsed", wintypes.DWORD),
+            ("biClrImportant", wintypes.DWORD),
+        ]
 
     shell32 = ctypes.WinDLL("shell32", use_last_error=True)
     shell32.ExtractIconExW.argtypes = [
@@ -595,11 +872,97 @@ def _icon_api():
         wintypes.UINT,
     ]
     shell32.ExtractIconExW.restype = wintypes.UINT
+
     user32 = ctypes.WinDLL("user32", use_last_error=True)
     user32.DestroyIcon.argtypes = [wintypes.HICON]
     user32.DestroyIcon.restype = wintypes.BOOL
-    _ICON_API_CACHE = (ctypes, wintypes, shell32, user32)
+    # ★ 句柄参数一律 c_void_p：64 位下 ctypes 默认 c_int 会截断句柄
+    user32.GetIconInfo.restype = wintypes.BOOL
+    user32.GetIconInfo.argtypes = [ctypes.c_void_p, ctypes.POINTER(ICONINFO)]
+    user32.GetDC.restype = ctypes.c_void_p
+    user32.GetDC.argtypes = [ctypes.c_void_p]
+    user32.ReleaseDC.restype = ctypes.c_int
+    user32.ReleaseDC.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+
+    gdi32 = ctypes.WinDLL("gdi32", use_last_error=True)
+    gdi32.GetObjectW.restype = ctypes.c_int
+    gdi32.GetObjectW.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p]
+    gdi32.GetDIBits.restype = ctypes.c_int
+    gdi32.GetDIBits.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        wintypes.UINT,
+        wintypes.UINT,
+        ctypes.c_void_p,
+        ctypes.POINTER(BITMAPINFOHEADER),
+        wintypes.UINT,
+    ]
+    gdi32.DeleteObject.restype = wintypes.BOOL
+    gdi32.DeleteObject.argtypes = [ctypes.c_void_p]
+
+    _ICON_API_CACHE = SimpleNamespace(
+        ctypes=ctypes,
+        wintypes=wintypes,
+        shell32=shell32,
+        user32=user32,
+        gdi32=gdi32,
+        ICONINFO=ICONINFO,
+        BITMAP=BITMAP,
+        BITMAPINFOHEADER=BITMAPINFOHEADER,
+    )
     return _ICON_API_CACHE
+
+def _hicon_to_qimage(api, hicon):
+    """HICON → QImage（纯 ctypes：GetIconInfo + GetDIBits），失败返回 None
+
+    ★ 不用 PyQt5.QtWinExtras：Qt 废弃绑定（Qt6 已移除），且 PyInstaller 不分析
+    插件源文件，主代码零静态引用 → 打包版里 QtWinExtras.pyd / Qt5WinExtras.dll
+    双双缺席，import 即失败（与 tree_widget.py 同一约束，实现同源）。
+    """
+    ctypes = api.ctypes
+    info = api.ICONINFO()
+    if not api.user32.GetIconInfo(hicon, ctypes.byref(info)):
+        return None
+    hbm_color = info.hbmColor
+    hbm_mask = info.hbmMask
+    if not hbm_color:
+        if hbm_mask:
+            api.gdi32.DeleteObject(hbm_mask)
+        return None
+    try:
+        bm = api.BITMAP()
+        if not api.gdi32.GetObjectW(hbm_color, ctypes.sizeof(api.BITMAP), ctypes.byref(bm)):
+            return None
+        width, height = int(bm.bmWidth), int(bm.bmHeight)
+        if width <= 0 or height <= 0:
+            return None
+
+        header = api.BITMAPINFOHEADER()
+        header.biSize = ctypes.sizeof(api.BITMAPINFOHEADER)
+        header.biWidth = width
+        header.biHeight = -height  # 负值 = top-down，与 QImage 行序一致
+        header.biPlanes = 1
+        header.biBitCount = 32
+        header.biCompression = 0  # BI_RGB
+
+        buf = ctypes.create_string_buffer(width * height * 4)
+        hdc = api.user32.GetDC(None)
+        if not hdc:
+            return None
+        try:
+            if api.gdi32.GetDIBits(hdc, hbm_color, 0, height, buf, ctypes.byref(header), 0) == 0:
+                return None
+        finally:
+            api.user32.ReleaseDC(None, hdc)
+
+        from PyQt5.QtGui import QImage
+
+        # ARGB32 在小端机器上的内存布局即 GetDIBits 输出的 BGRA
+        return QImage(buf, width, height, QImage.Format_ARGB32).copy()
+    finally:
+        api.gdi32.DeleteObject(hbm_color)
+        if hbm_mask:
+            api.gdi32.DeleteObject(hbm_mask)
 
 
 def _icon_from_exe(exe: str):
@@ -608,29 +971,33 @@ def _icon_from_exe(exe: str):
     ★ 绝不能用 QFileIconProvider / SHGetFileInfo：它们走 Shell 图标缓存，
     某些 exe 会命中 Qt 的 5 秒超时（实测 pycharm64.exe、Typora.exe 各卡 5s，
     qt_messages 日志留下 "SHGetFileInfo() timed out"）。在 UI 线程调用等于整窗冻住。
-    ExtractIconExW 只解析 PE 资源，实测 1-2ms。
+    ExtractIconExW 只解析 PE 资源，实测 1-2ms。HICON→像素走纯 ctypes
+    （_hicon_to_qimage），不依赖 QtWinExtras（打包版未含该模块）。
     """
     if os.name != "nt" or not exe or not os.path.exists(exe):
         return None
     try:
-        ctypes, wintypes, shell32, user32 = _icon_api()
-        from PyQt5 import QtWinExtras
+        api = _icon_api()
+        ctypes = api.ctypes
+        wintypes = api.wintypes
 
         large = wintypes.HICON()
         small = wintypes.HICON()
-        count = shell32.ExtractIconExW(exe, 0, ctypes.byref(large), ctypes.byref(small), 1)
+        count = api.shell32.ExtractIconExW(exe, 0, ctypes.byref(large), ctypes.byref(small), 1)
         if not count:
             return None
         hicon = large.value or small.value
         if not hicon:
             return None
         try:
-            pixmap = QtWinExtras.QtWin.fromHICON(hicon)
+            qimage = _hicon_to_qimage(api, hicon)
         finally:
-            user32.DestroyIcon(hicon)
-        if pixmap is None or pixmap.isNull():
+            api.user32.DestroyIcon(hicon)
+        if qimage is None or qimage.isNull():
             return None
-        return pixmap
+        from PyQt5.QtGui import QPixmap
+
+        return QPixmap.fromImage(qimage)
     except Exception:
         return None
 

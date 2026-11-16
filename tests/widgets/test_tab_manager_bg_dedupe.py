@@ -28,6 +28,9 @@ def tm(qtbot):
     from app.widgets.tab_manager_window import TabManagerWindow
 
     win = TabManagerWindow.create_instance()
+    # 两阶段构造契约适配（T6b）：测试访问 _tab_frame 等阶段二产物，需补建
+    # （生产路径由 main._show_popup 驱动，幂等）
+    win.complete_construction()
     qtbot.addWidget(win)
     return win
 

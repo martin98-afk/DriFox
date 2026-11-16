@@ -144,6 +144,18 @@ def register_ui(registry):
         plugin_name, page_id, title, widget_class,
         icon_path="", icon_light_path="", order_hint=500, metadata=None,
     )
+
+    # 本地文件打开接管（宿主「交系统默认程序」之前的插件优先链）
+    registry.register_file_opener(
+        plugin_name, opener_id,
+        can_open=lambda path: True,     # (path) -> bool，纯判断无副作用（主线程）
+        open_file=lambda path: True,    # (path) -> bool，True=已展示；False=放弃接管
+        priority=0, metadata=None,
+    )  # 宿主入口：registry.try_open_local_file(path) -> bool
+       # 优先级降序逐个问 can_open，命中即调 open_file；返回 False 继续问下一家，
+       # 全都没接（或全都抛异常）才走 QDesktopServices。单插件异常只让它自己出局。
+       # 现网消费点：app/main_widget.py::_on_open_file_requested（工具卡文件地址点击）
+       # 现网实现：plugins/file-tree（图片/markdown/文本 → 工作台文件树页预览）
 ```
 
 详见 [`docs/plugin-architecture.md`](../plugin-architecture.md) 466-477 行。
@@ -153,6 +165,8 @@ def register_ui(registry):
 > - **非常驻**（`register_floating_card(container="full")`）：卡片打开时动态出现在标题栏（带 × 关闭钮），关闭即从标题栏移除；点击 tab 切换覆盖层显示。
 
 > **工作台 tab（`register_workbench_tab`）**：注册到右侧工作台（WorkbenchPanel）的页签条。★ 面板**零保留槽位、零 page_id 语义**：页序 = `(metadata["order_hint"], 注册序)`，默认落点 = `metadata["default_landing"]` 标记页（缺省顺序第一页），一个页都没注册时空态页。宿主在 `refresh_workbench` 时调 `panel.sync_plugin_pages(tabs)` reconcile；页签一律按 **tab_id** 定位（`set_current_tab_by_id` / `current_tab_id`），宿主不得假设 index。**注册即联动注册 `/{page_id}` 命令**。数据由页面**自拉**：面板只发无参 `refresh_current_page_data()`，页面实现可选协议 `refresh_data()`（从 `context` / 活跃窗口取数）。参考实现：`plugins/artifacts-manager/ui/artifacts_page.py`、`plugins/worktree-manager/ui/worktree_page.py`、`plugins/history-manager/ui/history_page.py`。
+
+> **向工作台页定向投递**（插件 A 把内容交给插件 B 的页）：`registry.open_workbench_page(page_id)` 展开工作台、定位该页并**返回页面实例**（不可用返回 `None`），拿不到副作用时用 `registry.get_workbench_page(page_id)` 只查询已挂载实例。面板侧对应 `WorkbenchPanel.get_plugin_page(page_id)`，外部不要直接摸 `_plugin_widgets`。页面自行暴露接收方法（如文件树页的 `preview_path(path) -> bool`）。注意首次打开工作台时页面刚构建、`sync_plugin_pages` 尚未跑过，`open_workbench_page` 内部会先 reconcile 再展开；页面自身的定位/加载很可能仍是异步的（如文件树页的根扫描），接收方法不该假设「调用返回时内容已就绪」。
 
 ### UI 扩展点 → 自动命令（联动矩阵）
 
@@ -178,7 +192,8 @@ def register_ui(registry):
 且携带内容参数）、`register_card_inline_panel`（挂进消息卡内部，无独立界面）、
 `register_content_renderer` / `register_tag_renderer` /
 `register_fence_renderer` / `register_message_factory` / `register_mention_provider` /
-`register_ui_module`（渲染/装配类，无用户可触发界面）。
+`register_ui_module`（渲染/装配类，无用户可触发界面）、`register_file_opener`
+（接管的是别人的打开动作，本身无入口）。
 
 ---
 

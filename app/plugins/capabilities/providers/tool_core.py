@@ -282,8 +282,9 @@ def register(registry) -> None:
         def interrupt() -> bool:
             return queue.enqueue(wid, "interrupt", {})
 
-        def new_session() -> bool:
-            return queue.enqueue(wid, "new", {})
+        def new_session(title: str = "") -> bool:
+            """新建会话；title 非空时新会话直接用它作标题（交接沿用源会话主题）"""
+            return queue.enqueue(wid, "new", {"title": str(title or "").strip()})
 
         def send(text: str, *, ephemeral: bool = False, mode: str = "queue", hook_event: str = "SessionSend") -> bool:
             # 三模式复用 ui_core 同实现（先例：_ui_artifacts_show 跨 provider 复用）
@@ -494,7 +495,7 @@ def register(registry) -> None:
                 "submitted": True,
                 "queued": len(names),
                 "pending_window": [a for sub in pending for a in sub],
-                "note": "成员窗口在本轮对话结束后拉起；下一轮用 team_manage(action=list) 验证",
+                "note": "成员窗口在本轮对话结束后拉起；无需等待，可立即用 team_send_message 派单（消息排队投递）并继续当前任务",
             }
 
         def ensure_leader_watch(window_id: str = "", run_id: str = "", team_label: str = "", team_name: str = ""):

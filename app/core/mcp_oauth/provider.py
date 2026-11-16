@@ -320,6 +320,10 @@ class McpOAuthProviderFactory:
             if session.status == "pending":
                 session.status = "error"
                 session.error = "授权未完成"
+            # A3 收尾即清：终态（done/error/cancelled）session 立即移除，不
+            # 残留 _sessions（pending 保留供判重与 cancel，见 authorize 开头）。
+            if session.status != "pending":
+                self._sessions.pop(key, None)
 
         if session.status == "done":
             logger.info(f"[MCP-OAuth] {key} 授权成功")

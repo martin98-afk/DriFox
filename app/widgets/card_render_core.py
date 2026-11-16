@@ -1039,14 +1039,144 @@ def _wrap_code_blocks_with_copy_button_web(
     return _CODE_BLOCK_WITH_LANG_PATTERN.sub(replacer, html)
 
 
+# 表格分隔行：`|---|---|` / `| :--- | :---: |` / `---|---`（GFM 允许单横线，Python-Markdown
+# 的 tables 扩展接受 set('|:- ') 内的字符）。
+def _looks_like_table_separator(line: str) -> bool:
+    """判定一行是否是 markdown 表格的分隔行。"""
+    stripped = line.strip()
+    if "-" not in stripped or "|" not in stripped:
+        return False
+    if not set(stripped) <= set("|:- \t"):
+        return False
+    return len(stripped.strip("|").split("|")) >= 2
+
+
+def _normalize_table_blocks(md_text: str) -> str:
+    """给缺失空行的 markdown 表格补前后空行。
+
+    模型经常写成「段落文字下一行直接跟表格」，中间不给空行。Python-Markdown
+    的 tables 扩展只在**独立块**上生效（BlockProcessor.test 拿到的 block 必须
+    以表格头行开头），GFM 规范同样要求表格不能打断段落（只有 1-6 类 HTML 块
+    例外）。结果是整张表格退化成一行行带 `|` 的普通文本加 `<br>`，用户看到的
+    就是「表格渲染不出来」。
+
+    规则（保守，只填空行不删内容）：
+    - 行 i 含 `|` 且行 i+1 是分隔行 → 认定 i 起是表格；若 i 前面紧贴非空行，
+      插一个空行把表格从段落里切出来
+    - 表格体逐行吞掉后续含 `|` 的行，遇到第一行不含 `|` 的 → 在其前插空行，
+      避免正文被吞成表格行（`| 1 | 2 |` 后面直接跟「在途：#33」时，
+      后者会被 tables 扩展当成缺列的行）
+    - ``` / ~~~ 围栏内原样不动
+
+    幂等：已经有空行的输入不产生任何改动。
+    """
+    if "|" not in md_text:
+        return md_text
+    lines = md_text.split("\n")
+    out: list = []
+    in_fence = False
+    i = 0
+    n = len(lines)
+    while i < n:
+        line = lines[i]
+        if line.lstrip(" \t")[:3] in ("```", "~~~"):
+            in_fence = not in_fence
+            out.append(line)
+            i += 1
+            continue
+        if (
+            not in_fence
+            and "|" in line
+            and i + 1 < n
+            and _looks_like_table_separator(lines[i + 1])
+        ):
+            if out and out[-1].strip():
+                out.append("")
+            out.append(line)
+            out.append(lines[i + 1])
+            i += 2
+            while i < n and lines[i].strip() and "|" in lines[i]:
+                out.append(lines[i])
+                i += 1
+            # 表格后紧跟正文（无空行）→ 补空行，防止被当作表格行吞掉
+            if i < n and lines[i].strip():
+                out.append("")
+            continue
+        out.append(line)
+        i += 1
+    return "\n".join(out)
+
+
+# 「裸井号」编号：行首（含列表/引用标记之后）1-6 个 `#` 紧跟非空白字符。
+# Python-Markdown 的 ATX 标题规则不要求 `#` 后必须有空格（CommonMark 要求），
+# 于是 `#56 审计…`、`#T1 完成…`、`##状态盘点` 全被判成 `<h1>`/`<h2>`：
+# 字号暴涨、原始 `#` 消失、列表项里还嵌一层标题。真实语料统计行首裸井号
+# 1700+ 处（`#56` 编号 1511 / `#T1` 167 / `##状态盘点` 57），是主噪源。
+#
+# 判据只认「`#` 后不跟空白」这一条，天然放过真标题（`# 标题`、`## 二级`）
+# 与围栏内代码；转义而非删除，原文 `#` 得以保留。
+_BARE_HASH_HEADER_PATTERN = re.compile(
+    r"^(?P<pre>[ ]{0,3}(?:>[ ]?)*(?:(?:[-*+]|\d{1,9}[.)])[ ]+)?)(?P<hashes>#{1,6})(?=[^\s#])",
+    re.MULTILINE,
+)
+
+
+def _escape_bare_hash_headers(md_text: str) -> str:
+    """把「裸井号编号」转义成字面 `#`，避免被当成 ATX 标题。
+
+    `#56 审计判定` → `\\#56 审计判定`（渲染成正文 `#56 审计判定`）。
+    围栏（``` / ~~~）内原样不动：代码里的 `#include` 不能改。
+    幂等：已转义的行首是 `\\#`，不再匹配。
+    """
+    if "#" not in md_text:
+        return md_text
+    out: list = []
+    in_fence = False
+    for line in md_text.split("\n"):
+        if line.lstrip(" \t")[:3] in ("```", "~~~"):
+            in_fence = not in_fence
+            out.append(line)
+            continue
+        if in_fence:
+            out.append(line)
+            continue
+        out.append(
+            _BARE_HASH_HEADER_PATTERN.sub(
+                lambda m: m.group("pre") + "\\" + m.group("hashes"), line
+            )
+        )
+    return "\n".join(out)
+
+
 def _sanitize_incomplete_markdown(md_text: str) -> str:
     if not md_text:
         return ""
+    # 裸井号编号转义：`#56 …` 会被 Python-Markdown 当成 ATX 标题（它不要求
+    # `#` 后有空格），字号暴涨且 `#` 被吃掉。放在所有渲染管线（全量/差量/
+    # 尾部/worker/viewer/block）的共同入口做一次。
+    md_text = _escape_bare_hash_headers(md_text)
+    # 表格补空行：模型常把表格紧贴在正文下一行，tables 扩展要求表格是独立块
+    # （GFM 同样不允许表格打断段落），缺空行整张表退化成带 | 的普通文本。
+    # 放在所有渲染管线（全量/差量/尾部/worker/viewer/block）的共同入口做一次。
+    md_text = _normalize_table_blocks(md_text)
     # 只处理 markdown 代码块的不完整情况
     # 不再删除尾随的 <，因为它可能是 HTML/工具标签的一部分
-    if md_text.count("```") % 2 == 1:
+    # 行扫描判定末尾未闭合 fence（``` / ~~~，同 marker 闭合，行内标记不计数，
+    # 与 _last_para_break_outside_fence 同语义）。旧 count("```")%2 看不见 ~~~
+    # 围栏：未闭合 ~~~ 图表 fence 既不补闭合也不改标 → 开栏行以裸 <p> 显示、
+    # 半截 HTML 直接透传（<style> 污染主文档 DOM）。
+    fence_marker = ""
+    fence_open_line = -1
+    for _li, _line in enumerate(md_text.split("\n")):
+        _tok = _line.lstrip(" \t")[:3]
+        if fence_marker:
+            if _tok == fence_marker:
+                fence_marker = ""
+        elif _tok in ("```", "~~~"):
+            fence_marker = _tok
+            fence_open_line = _li
+    if fence_marker:
         # 流式中间态：末尾未闭合 fence 若是图表语言，改语言标记降级为骨架占位。
-        #
         # mermaid：半截源码必然 parse 失败，mermaid 10 失败时会向 body 追加 error
         #   bomb SVG（innerHTML 全量重建清不掉，且占位 id 随内容 hash 变化无法去重，
         #   逐轮累积成消息结尾一串「Syntax error in text」）。
@@ -1055,21 +1185,20 @@ def _sanitize_incomplete_markdown(md_text: str) -> str:
         #   每轮都变，未渲染节点被反复塞进 vault 快速膨胀（多图白屏次因）。
         # 两者统一改标为 <lang>-streaming，由 _wrap_code_blocks_with_copy_button_web
         # 产出等高骨架；fence 闭合后语言标记复原，自动切换为真实图表。
+        # html 同样需要骨架：半截 HTML 透传会因标签未闭合破坏页面结构。
+        # 插件注册的 fence 也要改标（否则半截源码会被当成品渲染）。
         lines = md_text.split("\n")
-        for i in range(len(lines) - 1, -1, -1):
-            stripped = lines[i].strip()
-            if stripped.startswith("```"):
-                lang_token = stripped[3:].strip()
-                # html 同样需要骨架：半截 HTML 透传会因标签未闭合破坏页面结构。
-                # 插件注册的 fence 也要改标（否则半截源码会被当成品渲染）。
-                if (
-                    lang_token.lower() in ("mermaid", "echarts", "html", "widget")
-                    or _get_plugin_fence_renderer(lang_token.lower()) is not None
-                ):
-                    lines[i] = lines[i].replace(lang_token, f"{lang_token}-streaming", 1)
-                    md_text = "\n".join(lines)
-                break
-        md_text += "\n```"
+        stripped = lines[fence_open_line].strip()
+        lang_token = stripped[3:].strip()
+        if (
+            lang_token.lower() in ("mermaid", "echarts", "html", "widget")
+            or _get_plugin_fence_renderer(lang_token.lower()) is not None
+        ):
+            lines[fence_open_line] = lines[fence_open_line].replace(
+                lang_token, f"{lang_token}-streaming", 1
+            )
+            md_text = "\n".join(lines)
+        md_text += "\n" + fence_marker
     return md_text
 
 
@@ -1097,7 +1226,10 @@ def _protect_inline_svg_blocks(md_text: str) -> str:
     for line in lines:
         stripped = line.strip()
         if not in_svg:
-            if stripped.startswith("```"):
+            # fix: 补 ~~~ 形态（对齐 _sanitize_incomplete_markdown 双形态口径）：
+            # SVG 保护圈的 fence 翻转此前只认 ```，~~~ 围栏内的 SVG 会被误撕。
+            # 保持既有「行首三连翻转」简化语义，不引入 marker 配对。
+            if stripped.startswith("```") or stripped.startswith("~~~"):
                 in_fence = not in_fence
             if not in_fence and stripped[:4].lower() == "<svg" and "</svg>" not in stripped.lower():
                 in_svg = True
@@ -1625,6 +1757,8 @@ def _has_unclosed_registered_tag(text: str) -> bool:
 # 观感是"代码流式打出来、fence 闭合后被替换消失"（与 think/mood 泄漏同族）。
 # 未闭合期间静默累积，闭合后由全量渲染落地（chart-streaming 骨架/真图）。
 _CHART_FENCE_OPEN_RE = re.compile(r"^\s*(```|~~~)\s*(\w+)")
+# 只枚举行首围栏；正文行交给 C 层跳过，不再逐行切片、strip 和匹配。
+_CHART_FENCE_LINE_RE = re.compile(r"^[^\S\n]*(?:`{3}|~{3})[^\n]*", re.MULTILINE)
 _CHART_FENCE_LANGS = frozenset({"echarts", "mermaid", "html", "widget", "svg"})
 # chunk 边界切开标记的半截尾巴：行尾 1-3 个反引号/波浪（可能正在写 fence 开标记）
 # ⚠️ 本正则**禁止**直接对全文 search：`(?:^|\n)...$` 这类前缀分支 + 尾锚定，
@@ -1885,31 +2019,21 @@ def _has_unclosed_chart_fence(text: str) -> bool:
     inside = False
     chart = False
     marker = ""
-    # [PERF] 状态机只关心行首标记，用 find 跳跃扫描而非 split("\n") 全量切分
-    # （后者在流式每批都执行，按文本长度线性分配）+ 逐行 strip 拷贝。
-    pos = 0
-    n = len(text)
-    while pos <= n:
-        nl = text.find("\n", pos)
-        line_end = n if nl == -1 else nl
-        line = text[pos:line_end]
-        stripped = line.strip()
+    for fence_line in _CHART_FENCE_LINE_RE.finditer(text):
+        stripped = fence_line.group().strip()
         if not inside:
             m = _CHART_FENCE_OPEN_RE.match(stripped)
             if m:
                 inside = True
                 marker = m.group(1)
                 chart = _is_render_fence_lang(m.group(2))
-            elif stripped.startswith("```") or stripped.startswith("~~~"):
+            else:
                 inside = True
                 marker = stripped[:3]
                 chart = False
         elif marker and stripped.startswith(marker):
             inside = False
             chart = False
-        if nl == -1:
-            break
-        pos = nl + 1
     return inside and chart
 
 
@@ -2304,7 +2428,9 @@ def find_tool_segment_by_call_id(md_text: str, tool_call_id: str) -> str | None:
         i = end + len("</tool>")
 
 
-@lru_cache(maxsize=128)
+# perf: maxsize 128→64（#21 裁决）：条目 40KB 级大 HTML 常驻内存减半；64 槽覆盖
+# 历史重绘/主题切换的 50 条 replay 全命中（16 槽会全 miss），现实占用 ~0.2MB
+@lru_cache(maxsize=64)
 def _render_tool_block_content(
     content: str, compact: bool = False, heavy_caps=None, lazy_body: bool = False, body_only: bool = False
 ) -> str:
@@ -2848,8 +2974,11 @@ def _inject_tool_blocks(
             # 渲染成卡会与真实完成块内容重复，且空 id 使去重/清理判据失效、
             # 每次全量渲染累积一张（probe4 实证终态 3 块）。一律丢弃。
             if _TOOL_ID_PATTERN.search(content):
+                # perf: 流式（completed=False）bypass lru：递增 content key 永不命中，
+                # 直算省 40KB 级 hash 与缓存槽污染（#6 实测启用 0.692s vs 禁用 0.029s）
+                _tool_fn = _render_tool_block_content if completed else _render_tool_block_content.__wrapped__
                 parts.append(
-                    _render_tool_block_content(
+                    _tool_fn(
                         content, compact=compact, heavy_caps=heavy_caps, lazy_body=lazy_body
                     )
                 )
@@ -3171,11 +3300,29 @@ def _extract_fenced_code(md_text: str) -> tuple[list[str], str]:
     return fences, "\n".join(out_lines)
 
 
+_FENCED_SENTINEL_RE = re.compile("\\x00F(\\d+)\\x00")
+
 def _restore_fenced_code(md_text: str, fences: list[str]) -> str:
-    """_extract_fenced_code 提取的 fence 原文放回（md.convert 前）。"""
-    for i, src in enumerate(fences):
-        md_text = md_text.replace(f"\x00F{i}\x00", src)
-    return md_text
+    """_extract_fenced_code 提取的 fence 原文放回（md.convert 前）。
+
+    [R2-H6] 单趟 find 循环切 parts 一次拼回（O(n)），替代逐哨兵全文 replace
+    （O(n·k)）。等价性：哨兵互不为子串（\x00F1\x00 不命中 \x00F11\x00），
+    逐哨兵替换相互独立 → 产出与旧实现逐字节一致；超范围伪哨兵（无对应
+    fence 下标）旧 replace 不消费，此处同样原样保留。"""
+    if not fences:
+        return md_text
+    # perf: 逐哨兵全文 replace O(n·k) → 单趟哨兵切段一次拼回 O(n)（[R2-H6]）
+    parts: list[str] = []
+    pos = 0
+    n_fences = len(fences)
+    for m in _FENCED_SENTINEL_RE.finditer(md_text):
+        idx = int(m.group(1))
+        if idx < n_fences:
+            parts.append(md_text[pos : m.start()])
+            parts.append(fences[idx])
+            pos = m.end()
+    parts.append(md_text[pos:])
+    return "".join(parts)
 
 
 # 缓存大小阈值（KB）：超过此大小的文本不缓存，防止内存膨胀
@@ -3296,15 +3443,26 @@ def _render_markdown_to_html_worker(snapshot: dict) -> str:
     font_size = snapshot["code_font_size"]
     fmt_key = (style, font_size)
     if getattr(tls, "formatter_key", None) != fmt_key:
-        pre_color = "#1a1a1a" if style != "dracula" else "#D4D4D4"
+        # fix: noclasses=False 对齐主通道 _get_formatter_cached（2026-10-30 主题
+        # 切换重构口径）——线程池通道此前 noclasses=True + prestyles 内联 color
+        # （pre_color 即深浅主题前景色），把主题色固化进 HTML：主题切换后长卡
+        # （≥6000 字符走 worker 通道）代码块保持旧配色，内联 style 压过骨架
+        # #hl-css，同屏与短卡配色不一致；class 化后产物主题无关，换 CSS 即换色。
+        # perf(render): 载荷实测同量级（class 化较内联 +2%~15%，span 合并行为
+        # 随 formatter 口径有差异）；真实收益是主题零重渲（免 40~120ms/卡重跑），
+        # 长卡走 lazy_body 折叠注入，增量对 IPC 无感知。12KB diff → 154KB 的
+        # 「12.7 倍」注释指高亮产物 vs 源码，与 noclasses 口径无关。
+        # font-size 是用户布局常量（非主题相关）保留内联，与主通道对称；
+        # pre 主体实际被 _wrap_code_blocks_with_copy_button_web 换成项目容器，
+        # prestyles 仅存在于 Pygments 原始输出。
         tls.formatter = HtmlFormatter(
             style=style,
             linenos=False,
-            noclasses=True,
+            noclasses=False,
             cssclass="code-block",
             prestyles=(
                 f"margin:0; padding:0; background:transparent; "
-                f"font-family: Consolas, monospace; font-size:{font_size}px; color:{pre_color};"
+                f"font-family: Consolas, monospace; font-size:{font_size}px;"
             ),
         )
         tls.formatter_key = fmt_key
@@ -3653,7 +3811,11 @@ _SKELETON_CACHE_MAX = 48
 # _SKELETON_CACHE_VERSION +1（v81）：路径链接去掉常驻虚下划线——密集工具卡里
 # 点线是视觉噪音；改默认无装饰、hover 变主题强调色（--accent）+ 实线下划线，
 # cursor 仍为 pointer。
-_SKELETON_CACHE_VERSION = 81
+# +1（v82）：renderWidgetToolbars 穿透 <div data-block-wrapper>，v2 通道下
+# svg / .html-widget 右上角工具栏不再漏挂；旧骨架缓存须失效。
+# +1（v83）：内嵌 echarts 的 ResizeObserver resize 合并到 rAF 一帧一次
+# （card_viewers._initOneEcharts JS 变更）；旧骨架缓存须失效。
+_SKELETON_CACHE_VERSION = 83
 
 
 def _js_literal(value) -> str:
@@ -3897,7 +4059,8 @@ def _extract_closed_segments(md: str):
     stable_len = 0
     i = 0
     n = len(md)
-    fence_open = False  # 是否在 ``` 代码块内（跨段累计）
+    fence_open = False  # 是否在代码块内（跨段累计）
+    fence_marker = ""  # 开栏标记（``` / ~~~）：同 marker 才闭合
     fence_start = 0  # fence 开启段起点偏移（fence 跨 \n\n 时闭合段需回溯到此）
     while i < n:
         # 硬边界：空行 \n\n（markdown 段落分隔）——闭合段**唯一**切段边界。
@@ -3913,14 +4076,33 @@ def _extract_closed_segments(md: str):
             # 空段（连续空行 / 段首恰为分隔符）：跳过，不产出
             i = seg_end + boundary_len
             continue
-        fence_count = seg.count("```")
-
+        # fence 状态推进：段内逐行扫行首标记，与 _last_para_break_outside_fence /
+        # _has_unclosed_chart_fence 同语义（行首 ``` / ~~~ 开栏，同 marker 闭合，
+        # fence 内内容不计数）。fence 内源码也可能含空行（HTML 常态）→ 开栏后
+        # 仍需逐段推进状态。
+        # 🐛 旧实现 count("```") 奇偶：①看不见 ~~~ 围栏——图表 fence 用 ~~~
+        # 开栏（HTML 内容含 ``` 时模型常换 ~~~ 避冲突）时内容被当普通段落
+        # 逐段产出，_render_stable_segment 独立 convert 失去 fence 上下文 →
+        # CSS 生肉以裸文本泄露到正文（流式结束全量渲染才消失）；②行内 ```
+        # 也计数，与行首状态机口径漂移。
+        was_open = fence_open
+        if "`" in seg or "~" in seg:
+            for line in seg.split("\n"):
+                tok = line.lstrip(" \t")[:3]
+                if fence_open:
+                    if tok == fence_marker:
+                        fence_open = False
+                        fence_marker = ""
+                elif tok in ("```", "~~~"):
+                    fence_open = True
+                    fence_marker = tok
+                    fence_start = i
         if fence_open:
-            # 在 fence 内：偶数个 ``` → 仍在 fence 内（不切）；奇数个 → fence 闭合
-            if fence_count % 2 == 0:
-                i = seg_end + boundary_len
-                continue
-            fence_open = False
+            # fence 开启未闭合（本段开栏 / fence 内延续 / 闭后又开）→ 不产出，
+            # fence 状态延续到下一段
+            i = seg_end + boundary_len
+            continue
+        if was_open:
             # 🐛 修复（流式闪现孤立空代码块）：fence 跨 \n\n 时闭合段只是代码块
             # 尾部，若单独产出：①开启段/中间段落在 stable 内却从未追加
             # （updateContentAppend 删增量节点时连带删掉 tail 行内渲染的完整
@@ -3928,13 +4110,6 @@ def _extract_closed_segments(md: str):
             # 「半截正文 + 空 Plain Text 代码块」，全量渲染才恢复。
             # 回溯到 fence 开启段起点，把整个 fence 区间作为完整闭合段产出。
             seg = md[fence_start:seg_end]
-        else:
-            if fence_count % 2 == 1:
-                # 段内 fence 打开（未闭合）→ 不产出，fence 状态延续到下一段
-                fence_open = True
-                fence_start = i
-                i = seg_end + boundary_len
-                continue
 
         # fence 已闭合（或与 fence 无关）：检查 think/tool 配对是否闭合
         # think 配对守卫必须用真实标签 `<think>` / `</think>`（与 _build_incremental_md
@@ -4052,7 +4227,33 @@ def _render_plain_tail(text: str) -> str:
     return "".join(parts)
 
 
+# [P0-候选7] 单槽结果缓存：同输入（len + 首尾 16 字节抽样 + compact）同输出，
+# 纯函数结果缓存天然等价。命中场景：resize 重渲 / 同拍多处调用 / tail 未变的
+# 重复渲染。流式每帧 tail 增长 → 天然 miss，正常转换不受影响。
+# ⚠️ 完整「行内块边界增量缓存」与 _md_to_html_incremental 同族复杂度（需
+# 数百组 fuzz 等价论证），建议二期；现调用侧已有 _TAIL_INLINE_MIN_DELTA(512)
+# + 1.5s 旁路降载（card_viewers），本 memo 补齐重复输入路径。
+_INLINE_TAIL_MEMO: dict = {'key': None, 'out': ''}
+
+
 def _render_inline_tail(md_text: str, compact: bool = False) -> str:
+    # [审计建议4] 键用全文 sha256：len+首尾抽样对「同长度同首尾、中间不同」
+    # 的输入会结构性假命中（渲染旧内容），hash 后键唯一。O(len) C 级，
+    # 相对 tail convert（markdown 全管线）成本可忽略。
+    key = (
+        compact,
+        hashlib.sha256(md_text.encode('utf-8')).hexdigest() if md_text else '',
+    )
+    memo = _INLINE_TAIL_MEMO
+    if memo['key'] == key:
+        return memo['out']
+    out = _render_inline_tail_uncached(md_text, compact)
+    memo['key'] = key
+    memo['out'] = out
+    return out
+
+
+def _render_inline_tail_uncached(md_text: str, compact: bool = False) -> str:
     """渲染流式未闭合尾部为行内 HTML（差量渲染的即时格式化路径）。
 
     解决：无空行分隔的长段落（大模型常见输出，尤其中文）在流式期间
@@ -5111,17 +5312,26 @@ def _collect_and_strip_asks(md_text: str) -> tuple[str, list[str]]:
     #   - 缩进代码块（4 空格 / Tab）：markdown 的另一种代码块形态
     #   - 行内代码：同理
     #   - 协议块（think/tool/hook/system-reminder/plan/mood/注册 tag）：块内不是正文
-    proto_pattern = _ask_proto_block_pattern()
-    protected = [
+    code_spans = [
         (m.start(), m.end())
         for p in (
             _CODE_BLOCK_PATTERN,
             _ASK_TILDE_FENCE_PATTERN,
             _ASK_INDENTED_CODE_PATTERN,
             _ASK_INLINE_CODE_PATTERN,
-            proto_pattern,
         )
         for m in p.finditer(md_text)
+    ]
+
+    def _in_code(pos: int) -> bool:
+        return any(s <= pos < e for s, e in code_spans)
+
+    # 协议块起点落在代码区间内 → 那是正文里写出来的标签名（如表格里的 `` `<tool>` ``），
+    # 不是真的协议块。否则它会被当成未闭合块一路吞到文末，把真正的提问也保护掉。
+    protected = code_spans + [
+        (m.start(), m.end())
+        for m in _ask_proto_block_pattern().finditer(md_text)
+        if not _in_code(m.start())
     ]
 
     def _in_protected(pos: int) -> bool:
@@ -5242,6 +5452,11 @@ def _inject_context_links(md_text: str) -> str:
 
 # ===== _resolve_image_src 模块级常量（避免每次渲染重编译正则+重算路径） =====
 _IMG_SRC_PATTERN = re.compile(r'(<img\s[^>]*?src\s*=\s*["\'])([^"\']+)(["\'][^>]*?>)', re.IGNORECASE)
+
+# perf: [R2-H4] 图片存在性 memo（dict 超容量整体清空）——流式重渲免重复 isfile；
+# 键为 normpath 后的候选路径，渲染期同路径存在性不变（历史重渲不进 resolve）
+_IMG_EXISTS: dict = {}
+_IMG_EXISTS_CAP = 4096
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # 正文图片懒加载属性：http(s) 远程图在长会话里会随滚动/重渲染反复请求，
 # 一次性打开几十张卡会瞬间打出 N 个并发连接。loading=lazy 让浏览器只在图
@@ -5300,7 +5515,15 @@ def _resolve_image_src(html_content: str) -> str:
             # 相对路径：以项目根目录为基准拼接
             candidate = os.path.normpath(os.path.join(_PROJECT_ROOT, src))
 
-        if os.path.isfile(candidate):
+        # perf: memo 命中免重复 isfile（[R2-H4]，容量与键定义见模块头 _IMG_EXISTS）
+        if candidate in _IMG_EXISTS:
+            exists = _IMG_EXISTS[candidate]
+        else:
+            exists = os.path.isfile(candidate)
+            if len(_IMG_EXISTS) >= _IMG_EXISTS_CAP:
+                _IMG_EXISTS.clear()
+            _IMG_EXISTS[candidate] = exists
+        if exists:
             # 本地文件存在，转为 file:/// 路径
             file_url = QUrl.fromLocalFile(candidate).toString()
             return f"{prefix}{file_url}{new_suffix}"

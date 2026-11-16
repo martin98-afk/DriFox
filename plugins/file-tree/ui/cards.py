@@ -38,6 +38,7 @@ from PyQt5.QtCore import (
 )
 from PyQt5.QtGui import QColor, QCursor, QFont, QIcon
 from PyQt5.QtWidgets import (
+    QAbstractItemView,
     QApplication,
     QFrame,
     QHBoxLayout,
@@ -71,6 +72,7 @@ from .openwith import (
 )
 from .preview import FilePreviewPage, _ElidedLabel, _SplitButton, _wrap_icon, detect_kind
 from .scanner import _DirEntry, _TreeScanner
+from .sticky_scroll import StickyScrollOverlay
 from .tree_widget import (
     FileTreeFilterProxy,
     FileTreeModel,
@@ -214,6 +216,51 @@ def _menu_icon(icon: FluentIcon, color: QColor) -> QIcon:
         return icon.icon(color=color)
     except Exception:
         return icon.icon()
+
+_OBJC_BRIDGE = None  # (objc_lib, msg, msg1) mac ObjC 桥接缓存
+
+def _objc_bridge():
+    global _OBJC_BRIDGE
+    if _OBJC_BRIDGE is None:
+        import ctypes
+        import ctypes.util
+        lib = ctypes.cdll.LoadLibrary(ctypes.util.find_library("objc"))
+        lib.objc_getClass.restype = ctypes.c_void_p
+        lib.sel_registerName.restype = ctypes.c_void_p
+        msg = ctypes.CFUNCTYPE(ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p)(
+            ("objc_msgSend", lib)
+        )
+        msg1 = ctypes.CFUNCTYPE(
+            ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p
+        )(("objc_msgSend", lib))
+        _OBJC_BRIDGE = (lib, msg, msg1)
+    return _OBJC_BRIDGE
+
+def _mac_clear_window_bg(widget) -> None:
+    """mac：把菜单窗口的 NSWindow.backgroundColor 设为 clearColor
+
+    ★ WA_TranslucentBackground 只把窗口标记为非 opaque，
+    backgroundColor 照旧填充默认窗底色（浅色外观=白灰），从 QSS 圆角外的
+    四角露出来 → 白角。必须显式 clearColor。渲染层与 isOpaque 都查不出：
+    menu.grab() 四角 alpha=0、isOpaque=False，白角在合成层。
+    实测（screencapture 像素统计）：四角白色 2% → 0%。仅 darwin 生效。
+
+    ★ 时机必须在外层菜单 Show 之后（Qt 已按 popup 路径建好原生窗口）：
+    提前用 winId() 强创窗口会绕开 Qt 的 popup 管理路径，菜单关闭后
+    grab 不释放，整个界面僵死（点击无响应、不重绘）。已踩坑。
+    """
+    if sys.platform != "darwin":
+        return
+    try:
+        import ctypes
+        lib, msg, msg1 = _objc_bridge()
+        view = ctypes.c_void_p(int(widget.winId()))
+        window = ctypes.c_void_p(msg(view, lib.sel_registerName(b"window")))
+        nscolor = ctypes.c_void_p(lib.objc_getClass(b"NSColor"))
+        clear = ctypes.c_void_p(msg(nscolor, lib.sel_registerName(b"clearColor")))
+        msg1(window, lib.sel_registerName(b"setBackgroundColor:"), clear)
+    except Exception as e:
+        logger.warning(f"[FileTree] 清除菜单窗口底色失败: {e}")
 
 # ══════════════════════════════════════════════════════════
 # 主题对话框辅助
@@ -408,6 +455,11 @@ class FileTreeCard(QWidget):
         self._pending_scroll: int = 0
         # 队首目录扫描请求发起时刻（monotonic）：超时跳过防单层拖死整队
         self._pending_expand_since: float = 0.0
+        # 外部投递预览的「待定位路径」：首次打开工作台时页刚构建、根扫描尚未
+        # 落地，此刻树里还没有该节点。记下来，根条目落地后补一次定位。
+        self._pending_reveal_path: str = ""
+        # 待定位链路已请求过扫描的目录（防 populate 失败时反复重扫 → 递归）
+        self._pending_reveal_scanned: set = set()
         # 主题签名缓存（_apply_latest_theme 产出全等时跳过全部 set，切页高频路径）
         self._theme_signature: Optional[tuple] = None
 
@@ -445,6 +497,19 @@ class FileTreeCard(QWidget):
         self._tree_view.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         # 滚轮实际落点是内层 QTreeView（外层 ScrollArea 不滚），平滑引擎必须挂在它身上
         SmoothScrollDelegate(self._tree_view)
+
+        # 吸顶滚动：顶部可见行的祖先链显示在树**上方一行区域**（真实占位，
+        # 不遮挡任何内容）。条高变化时由 StickyScrollOverlay 内部做双向对称
+        # 补偿（条高与滚动值同进同退），并在拖拽滚动条期间冻结刷新 —— 细节
+        # 见 sticky_scroll.py 的 _apply_height / _is_dragging。
+        self._tree_host = QWidget(self._scroll_area)
+        _tree_host_layout = QVBoxLayout(self._tree_host)
+        _tree_host_layout.setContentsMargins(0, 0, 0, 0)
+        _tree_host_layout.setSpacing(0)
+        self._sticky = StickyScrollOverlay(self._tree_view, self._tree_host)
+        self._sticky.context_menu_requested.connect(self._on_sticky_context_menu)
+        _tree_host_layout.addWidget(self._sticky)
+        _tree_host_layout.addWidget(self._tree_view, 1)
 
         # 占位页面（QStackedWidget 切换，避免子控件无布局时左上角残留）
         # ★ 外层 stack：0=树区（含 ScrollArea）/ 1=居中占位页 / 2=文件预览页。
@@ -503,7 +568,7 @@ class FileTreeCard(QWidget):
         head.addWidget(self._refresh_btn)
         head.addWidget(self._folder_btn)
 
-        self._scroll_area.setWidget(self._tree_view)
+        self._scroll_area.setWidget(self._tree_host)
         self._vbox.addWidget(self._tree_header)
         self._vbox.addWidget(self._stack, 1)
 
@@ -517,6 +582,7 @@ class FileTreeCard(QWidget):
         self._proxy_model = FileTreeFilterProxy(self)
         self._proxy_model.setSourceModel(self._source_model)
         self._tree_view.setModel(self._proxy_model)
+        self._sticky.bind_model(self._proxy_model)
 
         # RenameDelegate
         self._rename_delegate = RenameDelegate(self._tree_view)
@@ -843,6 +909,7 @@ class FileTreeCard(QWidget):
 
         # 通知 delegate 更新主题色
         self._rename_delegate.set_colors(self._colors)
+        self._sticky.apply_colors(self._colors)
         self._preview_page.set_colors(
             self._colors,
             font_family=font_family,
@@ -1011,9 +1078,14 @@ class FileTreeCard(QWidget):
         回到该根时还原，故 A→B→A 来回切不丢用户展开的层级。
         """
         model_root = self._source_model.project_root()
+        # 页面首次拿到项目根（model_root 为空）时是**初始装载**而非换项目：
+        # 外部投递的预览（工具卡路径点击 → preview_path）可能先于根扫描结果
+        # 落地，此时不得把预览页抢回树页，否则「点开文件却看到文件树」。
+        is_initial_load = not model_root
         if _same_path(scan_dir, model_root):
             self._source_model.refresh_root(entries)
             if self._stack.currentIndex() == _PAGE_PREVIEW:
+                self._flush_pending_reveal()
                 return  # 同根刷新不抢页面（预览中保留当前阅读内容）
         else:
             self._live_expanded.clear()  # 旧根的实时展开路径不写进新根条目
@@ -1024,9 +1096,22 @@ class FileTreeCard(QWidget):
                 self._restore_view_state(cached)
             # 换根（切对话标签页 / 换项目）：旧预览已不属于当前上下文，
             # 必须退出预览态，否则每个标签页都停在同一个旧预览（串台）
+            if is_initial_load and self._stack.currentIndex() == _PAGE_PREVIEW:
+                self._flush_pending_reveal()
+                return  # 初始装载：保留外部投递的预览
         self._stack.setCurrentIndex(0 if entries else 1)
         if not entries:
             self._placeholder.setText("项目目录为空")
+        self._flush_pending_reveal()
+
+    def _flush_pending_reveal(self) -> None:
+        """根条目落地后补一次树内定位（外部投递预览早于根扫描的场景）
+
+        首次打开工作台点开文件时页刚构建、根扫描尚未落地，``_reveal_in_tree``
+        找不到节点只能跳过；不补这一步，用户点返回箭头回来会看到「树里没有
+        任何选中」，不知道刚才看的是哪个文件。
+        """
+        self._advance_pending_reveal()
 
     def _show_error(self, message: str):
         if self._stack.currentIndex() == _PAGE_PREVIEW:
@@ -1048,6 +1133,9 @@ class FileTreeCard(QWidget):
         dt = (time.perf_counter() - t0) * 1000
         if dt > 50:
             logger.warning(f"[FileTree] 子目录落地慢: {dir_path} populate+watch {dt:.0f}ms ({len(entries)} 条)")
+        # 外部投递的深层文件定位：每落一层就往前推一步（未投递时为零操作）
+        if self._pending_reveal_path:
+            self._advance_pending_reveal()
         self._process_expand_queue()  # 恢复队列：本层加载完成，展开下一层
 
     # ── 展开/折叠 ──
@@ -1500,6 +1588,9 @@ class FileTreeCard(QWidget):
         icon_style.setParent(menu)
         menu.setStyle(icon_style)
         menu.setAttribute(Qt.WA_TranslucentBackground, True)
+        # mac 上 popup 窗口透明未生效时，NSWindow 会拿默认底色（浅色外观=白）
+        # 从 QSS 圆角外的四角露出来；禁掉系统背景填充才不漏
+        menu.setAttribute(Qt.WA_NoSystemBackground, True)
         # 系统方角阴影会在透明圆角外画一圈黑灰边，直接关掉
         menu.setWindowFlag(Qt.NoDropShadowWindowHint, True)
         menu.setStyleSheet(f"""
@@ -1530,8 +1621,18 @@ class FileTreeCard(QWidget):
                 margin: 4px 10px;
             }}
         """)
+        # mac：默认窗底色会从 QSS 圆角外四角露出（白角），设 clearColor 消除。
+        # 不能在这里直接调：winId() 提前强创原生窗口会绕开 Qt popup 管理，
+        # 菜单关闭后 grab 残留导致全界面僵死；挂 filter 等菜单 Show 时再设
+        if sys.platform == "darwin":
+            menu.installEventFilter(self)
 
     # ── 右键菜单 ──
+
+    def _on_sticky_context_menu(self, proxy_idx: QModelIndex, global_pos):
+        """吸顶条右键 → 复用树的右键菜单（映射 proxy → source 后走同一链路）"""
+        src_idx = self._proxy_model.mapToSource(proxy_idx)
+        self._on_context_menu(src_idx, global_pos)
 
     def _on_context_menu(self, src_idx: QModelIndex, global_pos):
         menu = QMenu(self)
@@ -1564,15 +1665,10 @@ class FileTreeCard(QWidget):
                 _act(FluentIcon.APPLICATION, "用默认程序打开").triggered.connect(
                     lambda: self._open_file(item_path)
                 )
-                _act(FluentIcon.LANGUAGE, "打开方式…").triggered.connect(
-                    lambda: self._show_open_with_menu(item_path)
-                )
             _act(
                 FluentIcon.FOLDER,
                 f"在{_FILE_MANAGER}中打开" if is_dir else "打开所在文件夹",
             ).triggered.connect(lambda: self._open_in_explorer(item_path))
-            if not is_dir and detect_kind(item_path):
-                _act(FluentIcon.VIEW, "预览").triggered.connect(lambda: self._open_preview(item_path))
             menu.addSeparator()
 
         # 信息类
@@ -1611,21 +1707,22 @@ class FileTreeCard(QWidget):
                 lambda: self._on_delete_requested([item_path])
             )
 
-        menu.addSeparator()
+        # 新建与刷新仅在目录（含空白→根目录）上出现，文件右键不显示
+        if is_dir:
+            menu.addSeparator()
 
-        # 新建（在目录内操作）
-        _act(FluentIcon.DOCUMENT, "新建文件...").triggered.connect(
-            lambda: self._create_new_file(parent_path)
-        )
+            _act(FluentIcon.DOCUMENT, "新建文件...").triggered.connect(
+                lambda: self._create_new_file(parent_path)
+            )
 
-        _act(FluentIcon.FOLDER_ADD, "新建文件夹...").triggered.connect(
-            lambda: self._create_new_dir(parent_path)
-        )
+            _act(FluentIcon.FOLDER_ADD, "新建文件夹...").triggered.connect(
+                lambda: self._create_new_dir(parent_path)
+            )
 
-        menu.addSeparator()
+            menu.addSeparator()
 
-        # 刷新（原顶栏刷新按钮入口，顶栏已移除）
-        _act(FluentIcon.SYNC, "刷新").triggered.connect(self._on_refresh)
+            # 刷新（原顶栏刷新按钮入口，顶栏已移除）
+            _act(FluentIcon.SYNC, "刷新").triggered.connect(self._on_refresh)
 
         menu.adjustSize()
         self._round_menu(menu)
@@ -1851,6 +1948,126 @@ class FileTreeCard(QWidget):
 
     # ── 预览 ──
 
+    def preview_path(self, path: str) -> bool:
+        """外部投递（宿主 / 其它插件）预览指定文件，返回是否已展示
+
+        供主程序的「打开本地文件」接管链使用：点击工具卡里的文件地址时，
+        可预览的文件直接开在本页，不跳出应用。
+
+        两条路径：
+        - 文件在**当前项目树内**：展开祖先 → 选中 → 滚动到可见，再进预览页。
+          用户返回树页时能直接看到自己在哪。
+        - 不在树内 / 项目外临时文件：只进预览页，不动树的展开状态（避免为
+          一个目录外的文件把整棵树展开到无关分支）。
+
+        ★ 不做 ``detect_kind`` 判定以外的兜底：预览失败返回 False，由调用方
+          决定是否降级（宿主会继续交系统默认程序）。
+        """
+        if not path or not os.path.isfile(path):
+            return False
+        if not detect_kind(path):
+            return False
+        self._pending_reveal_path = os.path.normpath(path)
+        self._pending_reveal_scanned.clear()
+        self._advance_pending_reveal()
+        return self._render_preview(path)
+
+    def _advance_pending_reveal(self) -> None:
+        """推进「待定位路径」：逐层展开未加载的祖先目录，就绪后定位选中
+
+        首次打开工作台时页面刚构建、根扫描尚未落地，树里连目标节点都还没有；
+        深层文件（``app/core/store/x.py``）更要逐层扫描才能建出节点。所以定位
+        是异步的：这里只推进一层（请求扫描最深未加载的祖先目录），由扫描回调
+        ``_on_lazy_scan_done`` 再次推进，直到 ``_reveal_in_tree`` 命中。
+
+        树外文件（项目根之外）直接放弃：树里本就没有它，定位无意义。
+        """
+        path = self._pending_reveal_path
+        if not path:
+            return
+        if self._reveal_in_tree(path):
+            self._pending_reveal_path = ""
+            self._pending_reveal_scanned.clear()
+            return
+        root = self._source_model.project_root()
+        if not root:
+            return  # 根尚未落地：等 _apply_root_entries 里的 flush 再推进
+        try:
+            rel = os.path.relpath(path, root)
+        except ValueError:
+            rel = ""
+        if not rel or rel.startswith(".."):
+            self._pending_reveal_path = ""  # 项目外文件：树里没有，放弃
+            self._pending_reveal_scanned.clear()
+            return
+        parts = rel.split(os.sep)
+        for depth in range(1, len(parts)):
+            dir_path = os.path.join(root, *parts[:depth])
+            if self._source_model.node_is_failed(dir_path):
+                self._pending_reveal_path = ""  # 目录扫描已熔断，不再重试
+                self._pending_reveal_scanned.clear()
+                return
+            node = self._source_model.find_node(dir_path)
+            if node is None:
+                return  # 父级还没建出子节点，等其扫描回调再推
+            if not node.is_dir:
+                self._pending_reveal_path = ""  # 路径中间是文件，树里不存在该目标
+                self._pending_reveal_scanned.clear()
+                return
+            if node.loaded:
+                continue
+            key = os.path.normcase(os.path.normpath(dir_path))
+            if key in self._pending_reveal_scanned:
+                return  # 该层已请求过（扫描失败/被过滤）：等下一次触发，不重排
+            self._pending_reveal_scanned.add(key)
+            self._request_scan(
+                dir_path, lambda entries, _d=dir_path: self._on_lazy_scan_done(entries, _d)
+            )
+            return
+        # 祖先全部已加载但目标仍不存在（已被删除 / 被过滤规则隐藏）
+        self._pending_reveal_path = ""
+        self._pending_reveal_scanned.clear()
+
+    def _reveal_in_tree(self, path: str) -> bool:
+        """若目标在已加载的树内：展开祖先、选中并滚动到可见
+
+        Returns:
+            True 已定位；False 节点尚未加载 / 定位失败（调用方可稍后重试）。
+        """
+        try:
+            target = os.path.normpath(path)
+            node = self._source_model.find_node(target)
+            if node is None:
+                return False
+            # 祖先链自顶向下展开：父级未展开时子节点没有有效 proxy 索引
+            ancestors: List[str] = []
+            parent = getattr(node, "parent_node", None)
+            while parent is not None and getattr(parent, "is_dir", False):
+                ancestors.append(parent.path)
+                parent = getattr(parent, "parent_node", None)
+            for dir_path in reversed(ancestors):
+                dir_node = self._source_model.find_node(dir_path)
+                if dir_node is None or not dir_node.loaded:
+                    continue
+                src_idx = self._source_model._index_for_node(dir_node)
+                if not src_idx.isValid():
+                    continue
+                proxy_idx = self._proxy_model.mapFromSource(src_idx)
+                if proxy_idx.isValid() and not self._tree_view.isExpanded(proxy_idx):
+                    self._tree_view.expand(proxy_idx)
+            src_idx = self._source_model._index_for_node(node)
+            if not src_idx.isValid():
+                return False
+            proxy_idx = self._proxy_model.mapFromSource(src_idx)
+            if not proxy_idx.isValid():
+                return False
+            self._tree_view.setCurrentIndex(proxy_idx)
+            self._tree_view.scrollTo(proxy_idx, QAbstractItemView.PositionAtCenter)
+            return True
+        except Exception as e:  # 定位失败不影响预览本身
+            logger.debug(f"[FileTree] 树内定位失败（忽略）: {path} -> {e}")
+            return False
+
     def _open_preview(self, path: str) -> None:
         """卡片内预览（双击 / 右键菜单入口）；预览不了回退到默认程序"""
         if not path or not os.path.isfile(path):
@@ -1859,6 +2076,13 @@ class FileTreeCard(QWidget):
         if not detect_kind(path):
             self._open_file(path)
             return
+        if not self._render_preview(path):
+            # 预览失败（超大 / 损坏 / 含二进制内容）→ 回树页并交系统默认程序
+            self._close_preview()
+            self._open_file(path)
+
+    def _render_preview(self, path: str) -> bool:
+        """把文件渲染进预览页并切到预览态；返回是否成功（不含任何降级动作）"""
         self._preview_page.set_colors(
             self._colors,
             font_family=self._colors.get("font_family", ""),
@@ -1866,16 +2090,17 @@ class FileTreeCard(QWidget):
             scrollbar_qss=self._scrollbar_qss,
         )
         if not self._preview_page.load(path):
-            # 预览失败（超大 / 损坏 / 含二进制内容）→ 回树页并交系统默认程序
-            self._close_preview()
-            self._open_file(path)
-            return
+            return False
         self._stack.setCurrentIndex(_PAGE_PREVIEW)
+        return True
 
     def _close_preview(self) -> None:
         """返回文件树（树页未销毁，展开 / 选中 / 滚动原样保留）"""
         self._stack.setCurrentIndex(_PAGE_TREE if self._source_model.rowCount(QModelIndex()) else _PAGE_PLACEHOLDER)
         self._tree_view.setFocus()
+        # 返回树页时补一次外部投递定位：用户可能在根扫描落地前就点了返回，
+        # 那次定位因节点尚不存在被跳过，这里立刻接上（无待办时为零操作）
+        self._advance_pending_reveal()
 
     def _on_file_activated(self, path: str) -> None:
         """双击分流：可预览类型进预览，其余仍交系统默认程序"""
@@ -1928,4 +2153,7 @@ class FileTreeCard(QWidget):
     def eventFilter(self, obj, event):
         if obj is self.window() and event.type() == QEvent.Resize:
             self.updateGeometry()
+        elif event.type() == QEvent.Show:
+            # 菜单原生窗口此刻已由 Qt 按 popup 路径正常创建，设底色不干扰其生命周期
+            _mac_clear_window_bg(obj)
         return super().eventFilter(obj, event)

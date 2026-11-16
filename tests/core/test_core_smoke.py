@@ -449,13 +449,6 @@ class TestMemoryManagerCore:
         instance2 = mod.MemoryManagerCore.get_instance()
         assert instance is instance2
 
-    def test_entry_memory_methods(self, mod):
-        inst = mod.MemoryManagerCore.get_instance()
-        # 条目记忆写接口已随 UI 下线移除，仅读接口保留供 compile 链使用
-        for method in ("get_entry_memories",):
-            assert hasattr(inst, method), f"MemoryManagerCore missing method '{method}'"
-            assert callable(getattr(inst, method)), f"MemoryManagerCore.{method} not callable"
-
     def test_workdir_methods(self, mod):
         inst = mod.MemoryManagerCore.get_instance()
         for method in (
@@ -466,15 +459,6 @@ class TestMemoryManagerCore:
         ):
             assert hasattr(inst, method), f"MemoryManagerCore missing method '{method}'"
             assert callable(getattr(inst, method)), f"MemoryManagerCore.{method} not callable"
-
-    def test_context_formatter(self, mod):
-        inst = mod.MemoryManagerCore.get_instance()
-        assert hasattr(inst, "format_memories_for_prompt")
-        assert callable(inst.format_memories_for_prompt)
-        result = inst.format_memories_for_prompt()
-        assert isinstance(result, str)
-        assert "长期记忆" in result
-
 
 # =============================================================================
 # 7. app/core/hook_manager

@@ -318,6 +318,23 @@ class SecretStore:
             self._kr.set_password(SERVICE, account, value)
             return True
         except Exception as e:
+            # -25244 errSecInvalidOwnerEdit / -25293 errSecAuthFailed：
+            # 条目已存在但当前进程身份无 ACL 所有权（adhoc 重打包后签名 hash
+            # 变化、或条目由开发环境 python 创建）。删除旧条目重建，所有权
+            # 归新身份。首次触发时系统弹钥匙串授权框，用户点「始终允许」后
+            # 后续读写静默放行；拒绝则照旧走明文回退。
+            if any(code in str(e) for code in ("-25244", "-25293")):
+                try:
+                    self.delete(account)
+                except Exception:
+                    pass
+                try:
+                    self._kr.set_password(SERVICE, account, value)
+                    logger.info(f"[SecretStore] 所有权冲突已重建条目 account={account}")
+                    return True
+                except Exception as e2:
+                    logger.warning(f"[SecretStore] 重建失败 account={account}: {e2}")
+                    return False
             logger.warning(f"[SecretStore] 写入失败 account={account}: {e}")
             return False
 
@@ -450,15 +467,21 @@ def collect_ciphertexts(data: Dict[str, Any]) -> Dict[str, str]:
 def seal_secrets(data: Dict[str, Any], password: str, backup: Optional[Dict[str, str]] = None, kdf_salt: str = "") -> None:
     """password 模式落盘前处理：就地加密 data 中的服务商 API_KEY。
 
-    - 内存明文 + 有密码 → 加密写回；
+    - 内存明文 + 有密码 → 加密写回（明文与备份密文一致时复用旧密文，见下）；
     - 内存空（locked 未解锁）+ 有备份密文 → 写回备份（严禁丢密钥）；
     - 已是密文 → 原样保留；
-    - 明文但无密码（极端：解锁后又丢了密码）→ 有备份用备份，无备份保留明文并告警，
-      绝不写空覆盖。
+    - 明文但无密码（极端：解锁后又丢了密码）→ 有备份用备份，无备份则**置空并告警**。
+      绝不落明文：password 模式一旦漏写明文，watcher 会把整份配置上传云端，
+      密钥即以明文形式进入远端历史（真实事故：切模式过程中有 23 秒窗口触发）。
 
     kdf_salt：调用方传入的持久化 hex salt（复用后同 (password, salt) 只算一次
     scrypt，避免每次保存都付 ~300ms KDF）；传空则本批随机生成。nonce 始终随机，
     复用 salt 不影响安全性。
+
+    密文复用：nonce 随机导致同一明文每次加密结果都不同，文件内容随之变动，
+    watcher 便触发一次上传 —— 云端历史里大量「只差两个 API_KEY 密文」的空提交
+    即由此产生。若备份密文能用当前密码解出且结果等于内存明文，直接沿用旧密文。
+    密码已更换时解不开（MAC 校验失败），自然退回重新加密。
     """
     backup = backup or {}
     batch_salt = bytes.fromhex(kdf_salt) if kdf_salt else os.urandom(_SALT_LEN)
@@ -468,15 +491,32 @@ def seal_secrets(data: Dict[str, Any], password: str, backup: Optional[Dict[str,
         key = str(info.get("API_KEY") or "")
         if is_ciphertext(key):
             continue
+        prev = backup.get(str(cfg_id), "")
         if key:
             if password:
-                info["API_KEY"] = encrypt_secret(key, password, salt=batch_salt)
-            elif str(cfg_id) in backup:
-                info["API_KEY"] = backup[str(cfg_id)]
+                info["API_KEY"] = _reuse_or_encrypt(key, prev, password, batch_salt)
+            elif prev:
+                info["API_KEY"] = prev
             else:
-                logger.warning(f"[SecretStore] 无密码且无备份密文，cfg={cfg_id} 按明文落盘")
-        elif str(cfg_id) in backup:
-            info["API_KEY"] = backup[str(cfg_id)]
+                # 无法安全落盘：清空而非写明文，用户重新填写即可恢复
+                info["API_KEY"] = ""
+                logger.warning(
+                    f"[SecretStore] 密码模式缺密码且无备份密文，cfg={cfg_id} 本次置空（不落明文）"
+                )
+        elif prev:
+            info["API_KEY"] = prev
+
+
+def _reuse_or_encrypt(plain: str, prev_cipher: str, password: str, salt: bytes) -> str:
+    """明文未变则复用旧密文，否则重新加密（消除 nonce 随机带来的无意义变更）"""
+    if prev_cipher and is_ciphertext(prev_cipher):
+        try:
+            if decrypt_secret(prev_cipher, password) == plain:
+                return prev_cipher
+        except SecretDecryptError:
+            # 密码已更换 / 密文损坏：走重新加密
+            pass
+    return encrypt_secret(plain, password, salt=salt)
 
 
 def strip_secrets(data: Dict[str, Any], store, mode: str = MODE_KEYRING) -> None:
@@ -484,6 +524,12 @@ def strip_secrets(data: Dict[str, Any], store, mode: str = MODE_KEYRING) -> None
 
     store 不可用时整体旁路（明文落盘，与旧版一致）；写入 keyring 失败时
     保留明文（fail-open），严禁双丢。仅 keyring 模式有动作。
+
+    密文原样保留，绝不写入凭证库，也绝不清空：keyring 模式的机器拉到
+    password 模式的跨设备密文时，若把 ``enc:v2:...`` 存进凭证库，下次
+    ``unwrap_secrets`` 会因 ``is_ciphertext(back)`` 拒绝回填（密文不能当
+    key 用），而文件里的值又已被清空 → 密钥永久丢失且无任何报错，用户只能
+    重新填写。保持密文不动，本机切到密码模式或换回原设备时仍可解开。
     """
     if mode != MODE_KEYRING or not store.available:
         return
@@ -491,9 +537,14 @@ def strip_secrets(data: Dict[str, Any], store, mode: str = MODE_KEYRING) -> None
         if not isinstance(info, dict):
             continue
         key = str(info.get("API_KEY") or "")
-        if key and store.set(provider_account(str(cfg_id)), key):
+        if not key:
+            continue
+        if is_ciphertext(key):
+            # 跨设备密文：本机 keyring 解不开，原样留给文件（见上方说明）
+            continue
+        if store.set(provider_account(str(cfg_id)), key):
             info["API_KEY"] = ""
-        elif key:
+        else:
             # fail-open 的代价是静默明文落盘，必须留下痕迹才能事后定位
             logger.warning(f"[SecretStore] 密钥入凭证库失败，cfg={cfg_id} 本次按明文落盘")
 

@@ -241,13 +241,64 @@ def _tool_ui_session(**kwargs) -> Dict[str, Any]:
     action = str(kwargs.get("action") or "")
     from app.core.infra.window_registry import alive_window_instances
 
-    wins = alive_window_instances()
-    if not wins:
+    if action != "new" and not alive_window_instances():
         return {"ok": False, "error": "无存活主窗口"}
-    mw = wins[0]
-    sm = getattr(mw, "session_manager", None)
+    mw = None
+
 
     if action == "new":
+        if not alive_window_instances():
+            # 关闭链已移除对话窗口：经 TabManagerWindow 重建（对齐 main._show_popup 构造）
+            try:
+                from PyQt5.QtWidgets import QWidget
+
+                class _FakeHostPage(QWidget):
+                    """main.py FakePage 的工具侧副本：重建对话窗口的最小宿主占位。"""
+
+                    def __init__(self):
+                        super().__init__()
+                        from app.utils.config import Settings
+                        from qfluentwidgets import setFontFamilies
+
+                        self.cfg = Settings.get_instance()
+                        setFontFamilies([self.cfg.llm_font_family.value])
+
+                    def isActiveWindow(self):
+                        return True
+
+                    @property
+                    def workflow_name(self):
+                        return "standalone_llm_chatter"
+
+                    @property
+                    def global_variables_changed(self):
+                        class _FakeSignal:
+                            def connect(self, *args, **kwargs):
+                                pass
+
+                        return _FakeSignal()
+
+                    def setUpdatesEnabled(self, enabled):
+                        pass
+
+                    def update(self):
+                        pass
+
+                    def show_splitter(self):
+                        pass
+
+                    def hide_splitter(self):
+                        pass
+
+                from app.widgets.tab_manager_window import TabManagerWindow
+                from app.main_widget import OpenAIChatToolWindow
+
+                tm2 = TabManagerWindow.get_instance()
+                tm2.add_window(OpenAIChatToolWindow(_FakeHostPage()))
+            except Exception as exc:  # noqa: BLE001 — 重建失败向上报错
+                return {"ok": False, "error": f"重建对话窗口失败: {exc}"}
+        mw = alive_window_instances()[0]
+        sm = getattr(mw, "session_manager", None)
         assert sm is not None
         session = sm.create_new_session()
         mw._display_current_session()
@@ -261,6 +312,81 @@ def _tool_ui_session(**kwargs) -> Dict[str, Any]:
         }
 
     session_id = str(kwargs.get("session_id") or "")
+    # [SC-F] close：走 UI 真实关闭链（TabItem._close_btn.clicked → closeRequested
+    # → TabPanel.tabCloseRequested → TabManagerWindow._on_tab_close_requested），
+    # 不直调 session_store（保留关闭时的保存/回收副作用）。
+    if action == "close":
+        if not session_id:
+            return {"ok": False, "error": "close 需要 session_id"}
+        # 窗口/标签表挂在 TabManagerWindow 上（OpenAIChatToolWindow 无 _windows）
+        try:
+            from app.widgets.tab_manager_window import TabManagerWindow
+
+            tm = TabManagerWindow.get_instance()
+        except Exception:
+            tm = None
+        windows = list(getattr(tm, "_windows", []) or []) if tm is not None else []
+        idx = None
+        prefix = session_id[:8]
+        for i, win in enumerate(windows):
+            try:
+                # 已删 wrapper 的属性访问抛 RuntimeError（getattr 默认值兜不住）；
+                # 兼容短 id：ui_state.session_id 是 8 位截断，_windows 里是完整 id
+                sid_full = str(getattr(win, "_current_session_id", "") or "")
+                if sid_full == session_id or sid_full[:8] == prefix:
+                    idx = i
+                    break
+            except RuntimeError:
+                continue
+        if idx is None:
+            diag = []
+            for w in windows:
+                try:
+                    diag.append(str(getattr(w, "_current_session_id", "") or "")[:8])
+                except RuntimeError:
+                    diag.append("<deleted>")
+            return {
+                "ok": False,
+                "error": f"会话未在打开的标签中：{session_id[:8]}（窗口会话={diag}，共 {len(windows)} 窗）",
+            }
+        tab_panel = getattr(tm, "_tab_panel", None) if tm is not None else None
+        items = list(getattr(tab_panel, "_items", []) or []) if tab_panel is not None else []
+        item = items[idx] if idx < len(items) else None
+        via = ""
+        if item is not None:
+            btn = getattr(item, "_close_btn", None)
+            if btn is not None:
+                btn.click()
+                via = "close_button"
+                # 进行中的会话首次点击仅进确认态，需第二次点击才真关
+                try:
+                    need_confirm = bool(getattr(item, "_confirming_close", False))
+                except RuntimeError:
+                    need_confirm = False
+                if need_confirm:
+                    btn.click()
+        if not via:
+            if tab_panel is None or not hasattr(tab_panel, "tabCloseRequested"):
+                return {"ok": False, "error": "未找到 UI 关闭信号链"}
+            tab_panel.tabCloseRequested.emit(idx)
+            via = "tabCloseRequested"
+        # 等会话从 _windows 消失（最多 3s）
+        time_mod = __import__("time")
+        deadline = time_mod.time() + 3.0
+        while time_mod.time() < deadline:
+            alive = [str(getattr(w, "_current_session_id", "") or "") for w in (getattr(mw, "_windows", []) or [])]
+            if session_id not in alive:
+                break
+            time_mod.sleep(0.05)
+        alive = [str(getattr(w, "_current_session_id", "") or "") for w in (getattr(mw, "_windows", []) or [])]
+        return {
+            "ok": session_id not in alive,
+            "action": "close",
+            "session_id": session_id,
+            "session_id_short": session_id[:8],
+            "via": via,
+        }
+
     # [M2-r 简化] 测试服务三重闸（enabled 默认关 + 环境变量 + ARM）已含准入控制，
     # load/switch 免 token；confirm_token 两步协议留给 AI 助手工具场景（S1 原设计）
     if action in ("load", "switch"):
@@ -282,6 +408,24 @@ def _tool_ui_session(**kwargs) -> Dict[str, Any]:
             "msgs": len(msgs) if isinstance(msgs, list) else 0,
         }
     return {"ok": False, "error": f"未知 action: {action}"}
+
+
+def _tool_ui_send(**kwargs) -> Dict[str, Any]:
+    """发送一条用户消息：走主窗口真实发送槽（与发送按钮/Enter 同一入口）。"""
+    text = str(kwargs.get("text") or "")
+    if not text:
+        return {"ok": False, "error": "需要 text"}
+    from app.core.infra.window_registry import alive_window_instances
+
+    wins = alive_window_instances()
+    if not wins:
+        return {"ok": False, "error": "无存活主窗口"}
+    mw = wins[0]
+    fn = getattr(mw, "_on_send_clicked", None)
+    if not callable(fn):
+        return {"ok": False, "error": "主窗口无 _on_send_clicked（发送入口变更）"}
+    fn(user_text=text)
+    return {"ok": True, "chars": len(text)}
 
 
 def _schemas() -> Dict[str, Dict[str, Any]]:
@@ -352,13 +496,19 @@ def _schemas() -> Dict[str, Dict[str, Any]]:
         ),
         "ui_session": sch(
             "ui_session",
-            "会话操作：new 免 token；load/switch 需 confirm_token（ui_state 领取）",
+            "会话操作：new/load/switch/close；close 走 UI 关闭信号链（TabItem 关闭按钮 → tabCloseRequested）",
             {
-                "action": {"type": "string", "enum": ["load", "switch", "new"]},
+                "action": {"type": "string", "enum": ["load", "switch", "new", "close"]},
                 "session_id": {"type": "string"},
                 "confirm_token": {"type": "string"},
             },
             required=["action"],
+        ),
+        "ui_send": sch(
+            "ui_send",
+            "发送一条用户消息（走主窗口真实发送槽，与发送按钮/Enter 同入口）",
+            {"text": {"type": "string"}},
+            required=["text"],
         ),
         "ui_screenshot": sch(
             "ui_screenshot",
@@ -378,6 +528,7 @@ def _handlers() -> Dict[str, Callable[..., Dict[str, Any]]]:
         "ui_wait": _tool_ui_wait,
         "ui_screenshot": _tool_ui_screenshot,
         "ui_session": _tool_ui_session,
+        "ui_send": _tool_ui_send,
         "ui_memory": _tool_ui_memory,
     }
 

@@ -77,6 +77,20 @@ logger = logging.getLogger(__name__)
 # 二者由 SendableTextEdit.toPlainText() 双向对齐。
 _PLACEHOLDER_RE = re.compile(r"\[\[([^\]]*)\]\]")
 
+# 输入框「必然超过 maxHeight」的快速判据（见 _adjust_height_to_content）。
+# 输入框 maxHeight=300、上下 padding 14，即最多容纳 286px 正文；字号 15px。
+#
+# ① 硬换行数 blockCount：行高取**最小可能值** 15px（字号 15 时不会更小），
+#    286 / 15 ≈ 19 → 20 行 × 15px = 300px > 286px，必然溢出。
+# ② 字符数：应对「一大段无换行」的粘贴（blockCount 恒为 1）。按最乐观排版
+#    （窗口宽 4000px、单字符宽 0.35×15=5.25px）估算：每行最多 762 字符，
+#    填满 286px 需 15 行（行高按 19px）→ 11430 字符；向上取 15000 留余量。
+# 两条命中任一条即不再向 QTextDocument 要全量布局（doc.size() 对 50 万字符
+# 要 4.5 秒，是长文本粘贴卡死的主因）。阈值偏大只损失一点性能，偏小会把
+# 短短几行误钉到 300 高度（气泡下方大片空白）——宁可偏大。
+_TALL_BLOCK_THRESHOLD = 20
+_TALL_CHAR_THRESHOLD = 15000
+
 # ── inline 文件引用胶囊（QTextDocument 自定义对象）──────────────────
 # Qt 用 U+FFFC（object replacement character）在文档里代表一个 inline object。
 _FILE_MENTION_TYPE = QTextFormat.UserObject + 1
@@ -1735,7 +1749,10 @@ class SendableTextEdit(TextEdit):
         self.clearRequested.emit()
 
     def _on_text_changed(self):
-        has_text = bool(self.toPlainText().strip())
+        # perf: 入口取一次 toPlainText 全函数复用（原实现 has_text/历史比对/
+        # placeholder 同步各取一次 = 3×O(n) 全量快照，粘贴大 prompt 白付 2 份拷贝）
+        text = self.toPlainText()
+        has_text = bool(text.strip())
         # 在停止模式下，按钮应该始终可用（用于停止正在进行的请求）
         # 只在发送模式下才根据文本内容决定是否启用
         if not getattr(self, "_is_stop_mode", False):
@@ -1747,10 +1764,10 @@ class SendableTextEdit(TextEdit):
         # 注意：_setting_history_text 为 True 时跳过，避免 setPlainText 期间误触发
         if self._history_index >= 0 and not self._setting_history_text:
             idx = self._history_index
-            if idx < len(self._history_list) and self._history_list[idx].get("text", "") != self.toPlainText():
+            if idx < len(self._history_list) and self._history_list[idx].get("text", "") != text:
                 self._reset_history_mode(clear_attachments=False)
         # 文本 → 附件 反向同步：正文里的 [[basename]] 被删掉时通知附件栏
-        self._sync_placeholder_removals()
+        self._sync_placeholder_removals(text)
         # detail 模式参数同步（防抖：合并快速敲键，参考 / 命令触发节流）
         # IME 组合进行中（打拼音）跳过同步，避免每次敲键重建值列表打断输入法；
         # 提交后（preedit 清空）textChanged 再次触发，走防抖后正常同步。
@@ -1758,7 +1775,7 @@ class SendableTextEdit(TextEdit):
 
     # ==================== 文本 → 附件 反向同步 ====================
 
-    def _sync_placeholder_removals(self):
+    def _sync_placeholder_removals(self, text: Optional[str] = None):
         """扫描正文中的 [[basename]]，与上一次快照做差集并上报被删除的引用
 
         这是「删除文字里的附件引用 → 附件栏同步删除」的实现。判定规则：
@@ -1769,11 +1786,19 @@ class SendableTextEdit(TextEdit):
           新增占位符不上报（附件只能由附件栏或拖放产生，正文打字不会凭空造附件）。
         - **基线校准**：程序化设置文本（历史浏览切换、附件→文本同步）时只更新
           快照不上报，否则「恢复历史文本」会被误判成「用户删光了引用」→ 附件被清空。
+
+        Args:
+            text: 调用方已取好的 toPlainText 结果（_on_text_changed 链路复用，
+                省 1×O(n)）；None 时自取。三重守卫（IME/_setting_history_text/
+                _syncing_attachments）语义不受参数化影响。
         """
         if not self._sync_attachments_enabled:
             return
 
-        current = _PLACEHOLDER_RE.findall(self.toPlainText())
+        # perf: 复用调用方传入的 text（None 时自取，其他调用点行为不变）
+        if text is None:
+            text = self.toPlainText()
+        current = _PLACEHOLDER_RE.findall(text)
         last = self._last_placeholder_names
 
         # 程序化改文本：只校准基线
@@ -2060,7 +2085,21 @@ class SendableTextEdit(TextEdit):
         doc = self.document()
         # 14 = QSS 上下 padding (8 + 4) + 2px 余量；最小高度 44（单行时
         # 文字区 44-12=32px，完整容纳 15px 字号一行不裁切）
-        content_height = int(doc.size().height()) + 14
+        #
+        # [PERF] 超长文本 O(1) 快速路径：doc.size() 会强制 QTextDocument 对整篇
+        # 做一次全量布局，成本随字符数超线性增长（offscreen 实测：10 万字符
+        # 183ms / 30 万 1458ms / 50 万 4556ms）。粘贴几十万字符时 textChanged
+        # → 本方法一次全量布局就把主线程钉住数秒，表现即「整个软件卡死」。
+        # 两个 O(1) 判据（硬换行数 / 字符数）任一命中即说明内容必然溢出上限，
+        # 直接钉到 300，不问布局；与 PlainTextViewer 的
+        # _definitely_tall_chars 快速路径同一思路。
+        if (
+            doc.blockCount() > _TALL_BLOCK_THRESHOLD
+            or doc.characterCount() >= _TALL_CHAR_THRESHOLD
+        ):
+            content_height = 300
+        else:
+            content_height = int(doc.size().height()) + 14
         new_height = max(44, min(300, content_height))
 
         if self.height() != new_height:

@@ -34,7 +34,7 @@ import time
 import weakref
 from typing import Dict, List, Optional
 
-from PyQt5.QtCore import QObject, QTimer
+from PyQt5.QtCore import QObject, Qt, QRect, QTimer
 from PyQt5.QtGui import QImage, QImageReader
 
 logger = logging.getLogger(__name__)
@@ -50,10 +50,10 @@ _TICK_MS = max(1, 1000 // FPS_CAP)
 _IDLE_TICK_MS = 500
 # 应用失焦（本进程无激活窗口，用户切到别的应用）时的降帧倍数。
 # 分屏开发是常态：DriFox 挂在后台仍可见，但用户正在看的是别的窗口，
-# 壁纸动效没必要全速。3 倍 = 12fps→4fps，timer 唤醒同步降 3 倍；
-# 切回后最多一个降档间隔（~200ms）恢复全速，无感。
+# 壁纸动效没必要全速。5 倍 = 12fps→2.4fps，timer 唤醒同步降 5 倍；
+# 切回后最多一个降档间隔（~333ms）恢复全速，无感。
 # 不合并进 _IDLE_TICK_MS：失焦档仍推进解码队列（回来时不卡帧重解码）。
-_UNFOCUSED_FACTOR = 3
+_UNFOCUSED_FACTOR = 5  # perf: O3 失焦降帧 3→5（纯失焦 tick 12fps→2.4fps）
 # 公开别名：测试与外部模块（theme_manager 同款 FPS_CAP 模式）引用用
 TICK_MS = _TICK_MS
 IDLE_TICK_MS = _IDLE_TICK_MS
@@ -62,6 +62,40 @@ UNFOCUSED_TICK_MS = _TICK_MS * _UNFOCUSED_FACTOR
 # （弹窗/流式长帧），又不会把内存抬太多（1600x900 单帧 5.5MB → 最坏 +16.5MB）。
 # 队列满则工作线程等待，不会无限堆积。
 _PREFETCH_MAX = 3
+
+def _scale_frame_for(
+    img: QImage, tw: int, th: int, fit: str, position: str
+) -> Optional[QImage]:
+    """按目标几何缩放一帧（O1 纯函数，供解码线程调用）。
+
+    与 scene_layer._scaled_frame 的同步兜底路径同源：contain 等比缩放，
+    cover 先裁可见段再缩放（省掉不可见区域重采样）。缩放统一用
+    SmoothTransformation（O2 回退后与同步路径同口径；2026-11-15 实测
+    该 upscale 场景 Fast 反比 Smooth 慢 ~45%）。tile 由调用方
+    跳过（原帧直绘），这里遇到 tile/非法尺寸返回 None。
+    """
+    iw, ih = img.width(), img.height()
+    if iw <= 0 or ih <= 0 or tw <= 0 or th <= 0:
+        return None
+    if fit == "tile":
+        return None
+    if fit == "contain":
+        scale = min(tw / iw, th / ih)
+        w = max(1, int(iw * scale))
+        h = max(1, int(ih * scale))
+        return img.scaled(w, h, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+    # cover：先按可见段裁切，再缩放到目标尺寸（与同步路径同一裁切数学）
+    scale = max(tw / iw, th / ih)
+    sw, sh = tw / scale, th / scale
+    sx = (iw - sw) / 2
+    if position == "top":
+        sy = 0.0
+    elif position == "bottom":
+        sy = ih - sh
+    else:
+        sy = (ih - sh) / 2
+    src = QRect(int(sx), int(sy), max(1, int(sw)), max(1, int(sh)))
+    return img.copy(src).scaled(tw, th, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
 
 class AnimationSource:
     """一个动画文件的帧源
@@ -90,6 +124,14 @@ class AnimationSource:
         self._prefetch_space = threading.Condition(self._prefetch_lock)
         self._prefetch_thread: Optional[threading.Thread] = None
         self._prefetch_stop = threading.Event()
+        # perf: O1 几何注册表——layer 侧 id → (w, h, fit, position)，主线程
+        # 写、解码线程持锁取快照；只存数值 tuple 不存 widget 引用。
+        self._geo_lock = threading.Lock()
+        self._geometries: Dict[int, tuple] = {}
+        # perf: O1 回退开关——True 时快照恒空，整帧走主线程旧同步缩放路径
+        self._scale_off = False
+        # perf: O1 与 current 同帧到达的预缩放成品（几何 key → 缩放图）
+        self._pending_map: Optional[Dict[tuple, QImage]] = None
         self._open()
 
     # ── 解码 ─────────────────────────────────────────
@@ -145,18 +187,36 @@ class AnimationSource:
             # detach：跨线程共享的大图若不立刻深拷贝，后续 reader 复用可能
             # 改写同一块数据（QImage 写时复制只在写方可见）
             img = img.copy()
+            # perf: O1 缩放挪进解码线程——lock 下取几何快照，逐几何预缩放；
+            # 每帧新建 scaled_map 入队，队内元素只读；_scale_off 回退开关
+            # 置 True 时快照恒空 → 主线程兜底路径与旧版逐字一致。
+            with self._geo_lock:
+                snapshot = {} if self._scale_off else dict(self._geometries)
+            scaled_map: Dict[tuple, QImage] = {}
+            chosen_key = None
+            if snapshot:
+                iw, ih = img.width(), img.height()
+                for key, (tw, th, fit, pos) in snapshot.items():
+                    if fit == "tile" or tw <= 0:
+                        continue
+                    scaled = _scale_frame_for(img, tw, th, fit, pos)
+                    if scaled is None or scaled.isNull():
+                        continue
+                    scaled_map[(iw, ih, tw, th, fit, pos)] = scaled
+                    if chosen_key is None:
+                        chosen_key = key
             with self._prefetch_lock:
-                self._prefetch.append(img)
+                self._prefetch.append((img, chosen_key, scaled_map))
 
     def _take_prefetched(self) -> Optional[QImage]:
         """取一帧预解码结果；无可用帧返回 None。"""
         with self._prefetch_lock:
             if not self._prefetch:
                 return None
-            img = self._prefetch.popleft()
+            item = self._prefetch.popleft()
             if len(self._prefetch) < _PREFETCH_MAX:
                 self._prefetch_space.notify()
-            return img
+            return item
 
     def stop_prefetch(self) -> None:
         """停止后台线程（registry.prune / 进程退出时调用）。"""
@@ -194,14 +254,29 @@ class AnimationSource:
         if now_ms - self._last_advance_ms < interval:
             return False
         self._last_advance_ms = now_ms
-        img = self._take_prefetched()
-        if img is not None:
+        item = self._take_prefetched()
+        if item is not None:
+            img, _key, scaled_map = item
             self.current = img
+            self._pending_map = scaled_map  # perf: O1 预缩放成品随帧下发
             return True
-        # 兜底：预解码未就绪（队列尚未填满）→ 主线程同步解一帧
+        # 兜底：预解码未就绪（队列尚未填满）→ 主线程同步解一帧（无预缩放）
+        self._pending_map = None
         return self._read_next()
 
     # ── 订阅 ─────────────────────────────────────────
+
+    # ── 预缩放几何注册（O1，主线程调用） ──────────────
+
+    def register_geometry(self, key: int, geo: tuple) -> None:
+        """登记一个动画视图的目标几何（解码线程按快照预缩放）。"""
+        with self._geo_lock:
+            self._geometries[key] = geo
+
+    def unregister_geometry(self, key: int) -> None:
+        """注销（view 销毁/换源时）；不存在的 key 静默忽略。"""
+        with self._geo_lock:
+            self._geometries.pop(key, None)
 
     def subscribe(self, layer) -> None:
         if not any(r() is layer for r in self._subscribers):
@@ -218,7 +293,13 @@ class AnimationSource:
                 continue
             alive.append(ref)
             try:
-                layer.on_animation_frame(self.current)
+                # perf: O1 有预缩放成品才带第二参下发，保持旧单参调用形态
+                # 兼容（空 map/None 等效，订阅者无几何注册时不新增签名负担）
+                pending = self._pending_map
+                if pending:
+                    layer.on_animation_frame(self.current, pending)
+                else:
+                    layer.on_animation_frame(self.current)
             except RuntimeError:
                 continue  # C++ 对象已销毁
         self._subscribers = alive

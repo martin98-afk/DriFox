@@ -1,14 +1,16 @@
 # -*- coding: utf-8 -*-
 """
-回归测试：客户端工具循环检测
+回归测试：客户端工具循环检测 + [A34] 历史不裁剪契约
 
 背景：
 - Qwen/DashScope 服务端会拒绝"连续多轮相同 (tool_name, arguments) 的工具调用"，
   返回 HTTP 400 InternalError.Algo.InvalidParameter。
-- 同样的请求序列重试仍会被拒，必须客户端主动中断。
-- DriFox 在 ChatWorker 主循环的每次 API 调用前扫描最近 N 轮 assistant 消息的
-  tool_calls 签名（按 tool_name + arguments 计算），连续 N=3 轮完全一致就主动
-  终止并发友好错误提示。
+- 循环检测保留：连续 N=3 轮完全一致即检出，交 LoopPolicy 门控——STOP 终止会话
+  （会话控制），CONTINUE 继续对话。
+- [A34] 用户裁决「主程序不对上下文做任何操作」：重复轮次自动裁剪
+  （_truncate_repetitive_tool_calls 与静默清理路径）已拆除。历史消息序列
+  由主程序原样保留，死循环时历史膨胀/服务端拒绝的后果由用户的上下文管道
+  插件接管。本文件断言「重复轮次完整保留」。
 
 判断标准（与 qwen 服务端语义对齐）：
 - 比较**内容**：tool_name + arguments（不是 tool_call_id，id 每轮新生成）
@@ -112,7 +114,6 @@ def test_compute_signature_ignores_tool_call_id():
     assert sig1 == sig2, "id 变化不应影响签名"
     print("  ✓ tool_call_id 变化不影响签名")
 
-
 def test_compute_signature_ignores_whitespace_in_args():
     """arguments 字符串的空白差异不影响签名（避免模型生成风格差异导致误判）"""
     from app.core.workers.chat_worker import OpenAIChatWorker
@@ -124,7 +125,6 @@ def test_compute_signature_ignores_whitespace_in_args():
     ])
     assert sig1 == sig2, "空白差异应规范化"
     print("  ✓ 空白差异不影响签名")
-
 
 def test_detect_loop_with_three_identical_rounds():
     """核心场景：连续 3 轮相同 (name, args) → 应检测出循环"""
@@ -144,7 +144,6 @@ def test_detect_loop_with_three_identical_rounds():
     assert result["tool_calls"][0]["function"]["name"] == "bash"
     print(f"  ✓ 3 轮完全相同 → 检测到循环（rounds={result['rounds']}）")
 
-
 def test_detect_no_loop_with_varied_args():
     """每轮 args 不同 → 不应检测出循环"""
     messages = [
@@ -159,7 +158,6 @@ def test_detect_no_loop_with_varied_args():
     result = _detect(messages)
     assert result is None, "args 不同不应检测循环"
     print("  ✓ 每轮 args 不同 → 无循环")
-
 
 def test_detect_no_loop_with_inserted_different_call():
     """
@@ -181,7 +179,6 @@ def test_detect_no_loop_with_inserted_different_call():
     assert result is None, "中间有不同调用 → 不应算循环"
     print("  ✓ 中间插入不同调用 → 不算循环")
 
-
 def test_detect_no_loop_with_only_two_rounds():
     """只有 2 轮重复 → 不到阈值 → 不算循环（给模型自我修正机会）"""
     messages = [
@@ -194,7 +191,6 @@ def test_detect_no_loop_with_only_two_rounds():
     result = _detect(messages)
     assert result is None, "只有 2 轮重复 → 不算循环"
     print("  ✓ 只有 2 轮重复 → 不算循环（阈值保护）")
-
 
 def test_detect_loop_with_multiple_parallel_tool_calls():
     """
@@ -226,7 +222,6 @@ def test_detect_loop_with_multiple_parallel_tool_calls():
     assert len(result["tool_calls"]) == 2
     print("  ✓ 并行 tool_calls 全相同 → 循环")
 
-
 def test_detect_loop_strict_on_parallel_tool_calls():
     """并行场景：中间一轮少了一个 tool_call → 不算循环（严格匹配）"""
     messages = [
@@ -243,7 +238,6 @@ def test_detect_loop_strict_on_parallel_tool_calls():
     result = _detect(messages)
     assert result is None, "并行 tool_calls 不完全一致 → 不算循环"
     print("  ✓ 并行 tool_calls 不一致 → 不算循环")
-
 
 def test_detect_loop_ignores_text_only_assistants():
     """纯文本的 assistant 消息不算轮次（不算循环）"""
@@ -263,14 +257,20 @@ def test_detect_loop_ignores_text_only_assistants():
     print("  ✓ 中间插文本但 tool_calls 重复 → 循环")
 
 
-def _truncate(messages, threshold=3):
-    """Helper: 调用 `_truncate_repetitive_tool_calls`（static method）"""
+# ═══════════════════════════════════════════════════
+# [A34] 历史不裁剪契约：重复轮次完整保留
+# 旧 _truncate_repetitive_tool_calls 测试已随拆除反转：
+# 不再断言「清理后只保留第 1 轮」，改为「消息序列原样、检测仍触发」。
+# ═══════════════════════════════════════════════════
+
+def test_history_preserves_repetitive_rounds_keeps_all():
+    """[A34] 核心反转：3 轮重复 → 历史完整保留，主程序不再裁剪改写。
+
+    用户裁决「主程序不对上下文做任何操作」：检测仍触发（供 LoopPolicy STOP
+    终止会话），但消息序列必须原样不动。
+    """
     from app.core.workers.chat_worker import OpenAIChatWorker
-    return OpenAIChatWorker._truncate_repetitive_tool_calls(messages, threshold)
 
-
-def test_truncate_removes_repetitive_rounds_keeps_first():
-    """核心：3 轮重复 → 清理后只保留第 1 轮，且不再触发循环检测"""
     messages = [
         {"role": "user", "content": "读取文件"},
         make_assistant_msg([("read", {"path": "main_widget.py", "limit": 15})], "call_a"),
@@ -280,39 +280,24 @@ def test_truncate_removes_repetitive_rounds_keeps_first():
         make_assistant_msg([("read", {"path": "main_widget.py", "limit": 15})], "call_c"),
         make_tool_msg("call_c_0", "文件内容..."),
     ]
-    # 清理前应检测到循环
-    assert _detect(messages) is not None, "清理前应检测到循环"
+    # 检测语义保留：循环仍被检出（供策略终止会话）
+    assert _detect(messages) is not None, "循环检测语义保留：重复轮次仍应被检出"
 
-    sanitized = _truncate(messages, threshold=3)
+    # [A34] 裁剪函数已从产品代码移除（防复活断言）
+    assert not hasattr(OpenAIChatWorker, "_truncate_repetitive_tool_calls"), (
+        "_truncate_repetitive_tool_calls 必须保持拆除状态（A34 契约）"
+    )
 
-    # 保留 user + 第1轮 assistant + tool 结果 = 3 条（不再插入终止提示）
-    assert len(sanitized) == 3, f"清理后应剩 3 条，实际 {len(sanitized)}: {sanitized}"
-    assert sanitized[0]["role"] == "user"
-    assert sanitized[1]["role"] == "assistant"
-    assert sanitized[1].get("tool_calls") is not None  # 第1轮 assistant 保留
-    assert sanitized[2]["role"] == "tool"
+    # 消息序列静态不变：重复轮次全部在位
+    assert len(messages) == 7, f"消息序列不得被改写，应 7 条，实际 {len(messages)}"
+    assistant_rounds = [m for m in messages if m.get("role") == "assistant"]
+    assert len(assistant_rounds) == 3, "重复轮次必须完整保留（3 轮 assistant）"
+    tool_results = [m for m in messages if m.get("role") == "tool"]
+    assert len(tool_results) == 3, "tool 结果必须完整保留"
+    print("  ✓ [A34] 3 轮重复 → 历史完整保留，检测仍触发（无裁剪路径）")
 
-    # 清理后不应再检测到循环
-    assert _detect(sanitized) is None, "清理后不应再检测到循环"
-    print("  ✓ 3 轮重复 → 清理后只保留第1轮，不再触发循环检测")
-
-
-def test_truncate_noop_below_threshold():
-    """不足阈值 → 不清理，原样返回"""
-    messages = [
-        {"role": "user", "content": "ls"},
-        make_assistant_msg([("bash", {"command": "ls"})]),
-        make_tool_msg("c0", ""),
-        make_assistant_msg([("bash", {"command": "ls"})]),
-        make_tool_msg("c1", ""),
-    ]
-    sanitized = _truncate(messages, threshold=3)
-    assert sanitized == messages, "不足阈值不应修改消息"
-    print("  ✓ 不足阈值 → 原样返回")
-
-
-def test_truncate_preserves_preceding_context():
-    """清理时应保留循环之前的所有上下文消息"""
+def test_history_preserves_repetitive_rounds_preceding_context():
+    """[A34] 前序上下文 + 重复轮次全部原样保留（对照旧裁剪语义的反转断言）"""
     messages = [
         {"role": "user", "content": "帮我排查bug"},
         make_assistant_msg([("grep", {"pattern": "foo"})], "call_g"),
@@ -324,47 +309,18 @@ def test_truncate_preserves_preceding_context():
         make_assistant_msg([("read", {"path": "main.py", "limit": 15})], "call_c"),
         make_tool_msg("call_c_0", "内容3"),
     ]
-    sanitized = _truncate(messages, threshold=3)
-    # user + grep轮(assistant+tool) + read第1轮(assistant+tool) = 5条（不再插入终止提示）
-    assert len(sanitized) == 5, f"应保留前序上下文，实际 {len(sanitized)}: {sanitized}"
-    # 前序 grep 调用应保留
-    assert sanitized[1]["tool_calls"][0]["function"]["name"] == "grep"
-    # read 第1轮应保留
-    assert sanitized[3]["tool_calls"][0]["function"]["name"] == "read"
-    print("  ✓ 清理后保留前序上下文（grep + read第1轮）")
+    snapshot = [dict(m) for m in messages]
+    assert _detect(messages) is not None, "3 轮重复 read 应检出循环"
+    # 全序列原样：无任何移除/改写
+    assert messages == snapshot, "主程序不得改写消息序列"
+    assert messages[1]["tool_calls"][0]["function"]["name"] == "grep"
+    assert messages[3]["tool_calls"][0]["function"]["name"] == "read"
+    print("  ✓ [A34] 前序上下文 + 重复轮次全部原样保留")
 
+def test_history_preserves_user_new_message():
+    """[A34] 🔴 关键场景：卡死会话里用户新消息后，全部消息原样保留。
 
-def test_truncate_allows_session_continuation():
-    """端到端验证：清理后追加用户消息，模拟继续对话，不应触发循环检测"""
-    messages = [
-        {"role": "user", "content": "读取文件"},
-        make_assistant_msg([("read", {"path": "main.py", "limit": 15})], "call_a"),
-        make_tool_msg("call_a_0", "内容"),
-        make_assistant_msg([("read", {"path": "main.py", "limit": 15})], "call_b"),
-        make_tool_msg("call_b_0", "内容"),
-        make_assistant_msg([("read", {"path": "main.py", "limit": 15})], "call_c"),
-        make_tool_msg("call_c_0", "内容"),
-    ]
-    sanitized = _truncate(messages, threshold=3)
-
-    # 模拟用户继续发消息
-    continued = sanitized + [{"role": "user", "content": "换一种方法试试"}]
-    # 即使模型又调了一次同样的 read，也只算第2轮（历史1轮 + 新1轮 = 2轮），不到阈值3
-    continued_with_new_call = continued + [
-        make_assistant_msg([("read", {"path": "main.py", "limit": 15})], "call_d"),
-        make_tool_msg("call_d_0", "内容"),
-    ]
-    assert _detect(continued_with_new_call) is None, \
-        "清理后即使再调1次同样的工具也不应触发（只有2轮，不到阈值3）"
-    print("  ✓ 清理后会话可继续，即使再调1次也不触发循环检测")
-
-
-def test_truncate_preserves_user_new_message():
-    """
-    🔴 关键场景：用户在卡死的会话里发新消息，截断必须保留用户的新消息。
-
-    消息结构：[旧消息..., 3轮重复read, user(新消息)]
-    截断后应保留：[旧消息..., read第1轮, user(新消息)]
+    消息结构：[旧消息..., 3轮重复read, user(新消息)] → 原样保留，无截断。
     """
     messages = [
         {"role": "user", "content": "读取文件"},
@@ -374,29 +330,19 @@ def test_truncate_preserves_user_new_message():
         make_tool_msg("call_b_0", "内容"),
         make_assistant_msg([("read", {"path": "main.py", "limit": 15})], "call_c"),
         make_tool_msg("call_c_0", "内容"),
-        {"role": "user", "content": "用别的方法试试"},  # 用户的新消息
+        {"role": "user", "content": "用别的方法试试"},
     ]
-    sanitized = _truncate(messages, threshold=3)
+    snapshot = [dict(m) for m in messages]
+    user_msgs = [m for m in messages if m.get("role") == "user"]
+    assert len(user_msgs) == 2, "两条 user 消息（原始+新）必须都在"
+    assert messages[-1]["role"] == "user" and messages[-1]["content"] == "用别的方法试试"
+    assert messages == snapshot, "主程序不得改写消息序列（含用户新消息位置）"
+    print("  ✓ [A34] 用户新消息与重复轮次全部原样保留")
 
-    # 验证用户新消息被保留
-    user_msgs = [m for m in sanitized if m.get("role") == "user"]
-    assert len(user_msgs) == 2, f"应保留2条user消息（原始+新），实际 {len(user_msgs)}"
-    assert user_msgs[-1]["content"] == "用别的方法试试", "用户新消息应在最后"
+def test_history_preserves_more_than_threshold_rounds():
+    """[A34] 🔴 关键场景：超过阈值的重复轮次（5 轮）也全部完整保留。
 
-    # 最后一条应为用户新消息
-    assert sanitized[-1]["role"] == "user", "最后一条应为用户新消息"
-
-    # 清理后不应检测到循环
-    assert _detect(sanitized) is None, "清理后不应检测到循环"
-    print("  ✓ 截断保留用户新消息")
-
-
-def test_truncate_handles_more_than_threshold_rounds():
-    """
-    🔴 关键场景：超过阈值的重复轮次（如5轮），截断必须清理所有重复轮次。
-
-    5轮重复 read → 截断后只保留第1轮，移除第2~5轮。
-    如果只移除最后2轮，前3轮还在 → 下次又触发循环检测。
+    旧裁剪语义会清掉第 2~5 轮；A34 后全部保留（历史膨胀后果用户自担）。
     """
     messages = [
         {"role": "user", "content": "读取文件"},
@@ -411,22 +357,16 @@ def test_truncate_handles_more_than_threshold_rounds():
         make_assistant_msg([("read", {"path": "main.py", "limit": 15})], "call_e"),
         make_tool_msg("call_e_0", "内容"),
     ]
-    # 5轮重复，检测阈值3 → 应检测到循环
-    assert _detect(messages) is not None, "5轮重复应检测到循环"
+    snapshot = [dict(m) for m in messages]
+    # 检测语义保留：5 轮重复仍被检出
+    assert _detect(messages) is not None, "5 轮重复应检测到循环"
+    assert messages == snapshot, "主程序不得改写消息序列（5 轮全保留）"
+    assistant_rounds = [m for m in messages if m.get("role") == "assistant"]
+    assert len(assistant_rounds) == 5, "5 轮重复必须完整保留"
+    print("  ✓ [A34] 5 轮重复 → 全部完整保留（超阈值也不裁剪）")
 
-    sanitized = _truncate(messages, threshold=3)
-
-    # 应只保留 user + read第1轮(assistant+tool) = 3条（不再插入终止提示）
-    assert len(sanitized) == 3, f"5轮重复应清理为3条，实际 {len(sanitized)}: {sanitized}"
-    assert sanitized[1].get("tool_calls") is not None  # 第1轮保留
-
-    # 清理后不应检测到循环
-    assert _detect(sanitized) is None, "清理后不应检测到循环"
-    print("  ✓ 5轮重复 → 清理为3条（只保留第1轮），不再触发循环检测")
-
-
-def test_truncate_preserves_tail_with_new_message_after_5_rounds():
-    """5轮重复 + 用户新消息：截断后保留第1轮 + 终止提示 + 用户新消息"""
+def test_history_preserves_tail_with_new_message_after_5_rounds():
+    """[A34] 5 轮重复 + 用户新消息：全序列原样（旧语义会截为 4 条）"""
     messages = [
         {"role": "user", "content": "读取文件"},
         make_assistant_msg([("read", {"path": "main.py", "limit": 15})], "call_a"),
@@ -441,25 +381,20 @@ def test_truncate_preserves_tail_with_new_message_after_5_rounds():
         make_tool_msg("call_e_0", "内容"),
         {"role": "user", "content": "换方法"},  # 用户新消息
     ]
-    sanitized = _truncate(messages, threshold=3)
+    snapshot = [dict(m) for m in messages]
+    assert messages[-1]["role"] == "user" and messages[-1]["content"] == "换方法"
+    assert _detect(messages) is not None, "重复轮次仍应被检出"
+    assert messages == snapshot, "主程序不得改写消息序列（含尾部用户新消息）"
+    print("  ✓ [A34] 5 轮重复 + 用户新消息 → 全序列原样保留")
 
-    # user + read第1轮(assistant+tool) + user(新) = 4条（不再插入终止提示）
-    assert len(sanitized) == 4, f"应保留4条，实际 {len(sanitized)}: {sanitized}"
-    assert sanitized[-1]["role"] == "user"
-    assert sanitized[-1]["content"] == "换方法"
-    assert _detect(sanitized) is None, "清理后不应检测到循环"
-    print("  ✓ 5轮重复 + 用户新消息 → 保留第1轮 + 用户新消息")
-
-
-def test_truncate_real_world_scenario():
+def test_history_preserves_real_world_stuck_session():
     """
-    端到端模拟用户报告的实际场景：
-    1. 会话已卡死（3轮重复 read main_widget.py）
-    2. 用户重启 DriFox，在卡死会话里发新消息
-    3. 循环检测触发 → 截断清理 → 保存干净消息
-    4. 用户再发消息 → 不再触发循环 → 正常对话
+    [A34] 端到端反转：用户报告的实际场景（原 _truncate_real_world_scenario）。
+
+    1. 会话已卡死（3 轮重复 read）
+    2. 用户在卡死会话里发新消息
+    3. [A34] 循环检测仍触发 → 但消息序列原样保留（裁剪已拆除，不再"保存干净消息"）
     """
-    # Step 1: 卡死会话的消息（从磁盘加载）
     stuck_messages = [
         {"role": "user", "content": "排查 chat_worker 的工具调用循环错误"},
         make_assistant_msg([("read", {"path": "D:/work/DriFox/app/main_widget.py", "limit": 15, "show_line_numbers": True})], "call_a"),
@@ -469,22 +404,16 @@ def test_truncate_real_world_scenario():
         make_assistant_msg([("read", {"path": "D:/work/DriFox/app/main_widget.py", "limit": 15, "show_line_numbers": True})], "call_c"),
         make_tool_msg("call_c_0", "文件内容..."),
     ]
-
-    # Step 2: 用户发新消息
     messages_with_new = stuck_messages + [{"role": "user", "content": "如何解决？"}]
+    snapshot = [dict(m) for m in messages_with_new]
+
+    # 检测仍触发（供 LoopPolicy STOP 终止）
     assert _detect(messages_with_new) is not None, "应检测到循环"
 
-    # Step 3: 截断清理
-    sanitized = _truncate(messages_with_new, threshold=3)
-    assert _detect(sanitized) is None, "清理后不应检测到循环"
-    assert sanitized[-1]["content"] == "如何解决？", "用户新消息应保留"
-
-    # Step 4: 模拟模型正常回复（不再循环）
-    after_reply = sanitized + [
-        {"role": "assistant", "content": "这个问题可以通过修改截断逻辑来解决..."},
-    ]
-    assert _detect(after_reply) is None, "正常回复不应触发循环"
-    print("  ✓ 真实场景：卡死会话 → 发新消息 → 截断清理 → 继续对话，全流程通过")
+    # [A34] 历史原样：卡死消息 + 用户新消息一条不少
+    assert messages_with_new == snapshot, "主程序不得改写消息序列"
+    assert messages_with_new[-1]["content"] == "如何解决？", "用户新消息应保留"
+    print("  ✓ [A34] 真实卡死场景：全序列原样保留，检测仍触发（无裁剪）")
 
 
 def _make_context_usage_worker():
@@ -498,7 +427,6 @@ def _make_context_usage_worker():
     )
     worker._response_content_blocks = [{"type": "text", "text": "完成"}]
     return worker
-
 
 def test_response_uses_local_context_tokens_when_api_usage_missing():
     """API 不返回 usage 时，应把本地上下文计数写入 assistant 消息。"""
@@ -514,7 +442,6 @@ def test_response_uses_local_context_tokens_when_api_usage_missing():
         "total": 1234,
         "estimated": True,
     }
-
 
 def test_response_prefers_api_usage_over_local_context_tokens():
     """API 返回 usage 时，继续显示 API 的精确 input/output/total。"""
@@ -534,7 +461,6 @@ def test_response_prefers_api_usage_over_local_context_tokens():
         "total": 1200,
     }
 
-
 if __name__ == "__main__":
     test_compute_signature_is_stable_for_identical_calls()
     test_compute_signature_differs_for_different_args()
@@ -548,12 +474,10 @@ if __name__ == "__main__":
     test_detect_loop_with_multiple_parallel_tool_calls()
     test_detect_loop_strict_on_parallel_tool_calls()
     test_detect_loop_ignores_text_only_assistants()
-    test_truncate_removes_repetitive_rounds_keeps_first()
-    test_truncate_noop_below_threshold()
-    test_truncate_preserves_preceding_context()
-    test_truncate_allows_session_continuation()
-    test_truncate_preserves_user_new_message()
-    test_truncate_handles_more_than_threshold_rounds()
-    test_truncate_preserves_tail_with_new_message_after_5_rounds()
-    test_truncate_real_world_scenario()
+    test_history_preserves_repetitive_rounds_keeps_all()
+    test_history_preserves_repetitive_rounds_preceding_context()
+    test_history_preserves_user_new_message()
+    test_history_preserves_more_than_threshold_rounds()
+    test_history_preserves_tail_with_new_message_after_5_rounds()
+    test_history_preserves_real_world_stuck_session()
     print("\n🎉 All tool-loop detection tests passed!")

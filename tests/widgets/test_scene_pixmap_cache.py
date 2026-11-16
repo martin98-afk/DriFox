@@ -6,14 +6,13 @@ offscreen 运行，无键鼠、无可见窗口（P0 约束）。
 覆盖：
 ① 同 key 二次请求返回同一对象（QPixmap.cacheKey() 断言，隐式共享零复制）
 ② 不同 opacity/blur/尺寸产生不同条目
-③ LRU 超 _MAX_SETS=2 组淘汰最旧组
+③ LRU 超 _MAX_SETS=1 组淘汰最旧组
 ④ clear() 后重新创建
 ⑤ 接入层行为：同壁纸两个 SceneLayer 实例的预乘副本是同一对象（2 份→1 份）
 ⑥ 引用计数：两窗口共享只解码一次；⑦ 单窗口释放后另一窗口仍有效；
-⑧ 全关后宽限期到点释放；⑨ 重复开关窗口计数归零不泄漏
+⑧ 全关（计数归零）立即释放；⑨ 重复开关窗口计数归零不泄漏
 """
 import os
-import time
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -22,8 +21,7 @@ from PyQt5.QtCore import Qt
 
 import pytest
 
-from app.core.infra import scene_pixmap_cache as spc_mod
-from app.core.infra.scene_pixmap_cache import scene_pixmap_cache
+from app.core.infra.scene_pixmap_cache import baked_cap, scene_pixmap_cache
 
 
 @pytest.fixture
@@ -31,10 +29,6 @@ def cache():
     scene_pixmap_cache.clear()
     # 引用计数状态一并复位（跨测试隔离；仅测试态直改私有成员）
     scene_pixmap_cache._users = 0
-    if scene_pixmap_cache._evict_timer is not None:
-        scene_pixmap_cache._evict_timer.stop()
-        scene_pixmap_cache._evict_timer.deleteLater()
-        scene_pixmap_cache._evict_timer = None
     yield scene_pixmap_cache
     scene_pixmap_cache.clear()
 
@@ -83,20 +77,16 @@ def test_different_params_different_entries(cache, wallpaper):
 
 
 def test_lru_evicts_oldest_group(cache, tmp_path):
-    """③ 超 _MAX_SETS=2 组 → 淘汰最旧组（新壁纸进、旧壁纸出）"""
+    """③ 超 _MAX_SETS=1 组 → 淘汰最旧组（新壁纸进、旧壁纸出）"""
     w1 = str(tmp_path / "w1.png"); _make_png(w1, 100)
     w2 = str(tmp_path / "w2.png"); _make_png(w2, 150)
-    w3 = str(tmp_path / "w3.png"); _make_png(w3, 200)
-    cache.get_pixmap("source", w1, load=_load)
+    first = cache.get_pixmap("source", w1, load=_load)
     cache.get_pixmap("source", w2, load=_load)
-    assert cache.stats()["groups"] == 2
-    cache.get_pixmap("source", w3, load=_load)  # w1 组被淘汰
-    assert cache.stats()["groups"] == 2
-    # w1 再请求 → 缓存未命中重新构建（对象不同，验证旧组确实被淘汰）
+    assert cache.stats()["groups"] == 1, "第 2 组写入即淘汰最旧组（_MAX_SETS=1）"
+    # w1 旧组已淘汰：再请求是重新构建的新对象
     again = cache.get_pixmap("source", w1, load=_load)
-    # 淘汰后 w2 变最旧，但 w1 刚被触碰 → w3 被淘汰
-    keep = cache.get_pixmap("source", w2, load=_load)
-    assert cache.stats()["groups"] == 2
+    assert again is not first
+    assert cache.stats() == {"groups": 1, "entries": 1}
 
 
 def test_clear_then_rebuild(cache, wallpaper):
@@ -162,41 +152,30 @@ def test_two_windows_share_one_decode(cache, wallpaper):
 
 
 def test_one_closed_other_still_valid(cache, wallpaper):
-    """⑦ 关一窗口（release）后另一窗口取图仍有效：未归零不起宽限、缓存不动"""
+    """⑦ 关一窗口（release）后另一窗口取图仍有效：未归零不清缓存"""
     cache.acquire()
     cache.acquire()
     a = cache.get_pixmap("source", wallpaper, load=_load)
     cache.release()
     assert cache._users == 1
-    assert cache._evict_timer is None  # 计数未归零，不得起淘汰定时器
     b = cache.get_pixmap("source", wallpaper, load=_load)
     assert a is b  # 另一窗口拿到的仍是同一有效对象（无悬空、无重建）
     assert cache.stats()["entries"] == 1
 
 
-def test_all_closed_grace_then_evict(cache, wallpaper, qapp, monkeypatch):
-    """⑧ 全关后：宽限内重开取消定时器；宽限到点缓存被 clear"""
-    monkeypatch.setattr(spc_mod, "_GRACE_SECONDS", 0.05)
+def test_release_at_zero_clears_immediately(cache, wallpaper):
+    """⑧ 全关（计数归零）立即 clear，不等宽限；重开需重建（M-1b）"""
     cache.acquire()
     pix = cache.get_pixmap("source", wallpaper, load=_load)
     assert pix is not None
-    # 归零 → 宽限定时器挂起
     cache.release()
     assert cache._users == 0
-    assert cache._evict_timer is not None
-    # 宽限内重开窗口 → 取消定时器、命中缓存零重解码
+    assert cache.stats() == {"groups": 0, "entries": 0}, "归零后未立即释放（托盘駐留期驻留）"
+    # 重开窗口：缓存已清 → 重新构建（非同一对象）
     cache.acquire()
-    assert cache._evict_timer is None
-    assert cache.get_pixmap("source", wallpaper, load=_load) is pix
-    # 再归零 → 等宽限到点（事件循环驱动 QTimer）→ 缓存释放
-    cache.release()
-    assert cache._evict_timer is not None
-    deadline = time.monotonic() + 2.0
-    while cache._evict_timer is not None and time.monotonic() < deadline:
-        qapp.processEvents()
-        time.sleep(0.02)
-    assert cache._users == 0
-    assert cache.stats() == {"groups": 0, "entries": 0}
+    again = cache.get_pixmap("source", wallpaper, load=_load)
+    assert again is not pix
+    assert cache.stats()["entries"] == 1
 
 
 def test_reopen_cycles_refcount_returns_to_zero(cache, wallpaper):
@@ -212,33 +191,27 @@ def test_reopen_cycles_refcount_returns_to_zero(cache, wallpaper):
     assert cache._users == 0
 
 
-def test_scenelayer_destroyed_triggers_release(cache, wallpaper, qapp, monkeypatch):
+def test_scenelayer_destroyed_triggers_release(cache, wallpaper, qapp):
     """⑩ [E1] 接线测试：SceneLayer.destroyed 信号真实触发 release。
 
     直调 acquire/release 的用例验不住 connect 断裂（测试全绿但生产里
     _users 永久 >0、缓存永不释放）。本用例走真实析构链路：
     SceneLayer 构造 acquire → deleteLater + sendPostedEvents(DeferredDelete)
-    驱动 C++ 析构 → destroyed→release → 归零起宽限 → 到点 clear。
+    驱动 C++ 析构 → destroyed→release → 归零立即 clear。
     """
     from PyQt5.QtCore import QCoreApplication, QEvent
     from app.widgets.scene_layer import SceneLayer
 
-    monkeypatch.setattr(spc_mod, "_GRACE_SECONDS", 0.05)
     a, b = SceneLayer(), SceneLayer()
     assert cache._users == 2, "SceneLayer 构造未 acquire（接线断）"
+    cache.get_pixmap("source", wallpaper, load=_load)
+    assert cache.stats()["entries"] == 1
     a.deleteLater()
     b.deleteLater()
     # 裸 processEvents 不投递 DeferredDelete（Qt 语义），须强制投递
     QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
     assert cache._users == 0, "SceneLayer 析构未触发 release（destroyed 接线断）"
-    assert cache._evict_timer is not None, "归零后未起宽限定时器"
-    # 宽限到点缓存被清
-    cache.get_pixmap("source", wallpaper, load=_load)
-    deadline = time.monotonic() + 2.0
-    while cache._evict_timer is not None and time.monotonic() < deadline:
-        qapp.processEvents()
-        time.sleep(0.02)
-    assert cache.stats() == {"groups": 0, "entries": 0}, "宽限期到点缓存未被清"
+    assert cache.stats() == {"groups": 0, "entries": 0}, "归零后未立即清空缓存"
 
 
 # ── M2：baked 组内子键 LRU 上限 ─────────────────────────────
@@ -308,7 +281,7 @@ def test_baked_cap_not_affect_source_premult(cache, wallpaper):
 
 
 def test_baked_evicted_with_group(cache, wallpaper, tmp_path):
-    """M2-④ 3 组交替 → 最旧组整体淘汰，其 baked 一并释放"""
+    """M2-④ 切组 → 最旧组整体淘汰，其 baked 一并释放"""
     w1 = str(tmp_path / "w1.png"); _make_png(w1, 100)
     w2 = str(tmp_path / "w2.png"); _make_png(w2, 150)
     w3 = str(tmp_path / "w3.png"); _make_png(w3, 200)
@@ -317,8 +290,124 @@ def test_baked_evicted_with_group(cache, wallpaper, tmp_path):
                      width=100, height=50, blur_radius=8.0, pad=16)
     cache.get_pixmap("baked", w2, load=_baked_load(100, 50),
                      width=100, height=50, blur_radius=8.0, pad=16)
-    assert cache.stats()["groups"] == 2
+    assert cache.stats() == {"groups": 1, "entries": 1}  # w1 组整体出，baked 一并释放
     cache.get_pixmap("baked", w3, load=_baked_load(100, 50),
-                     width=100, height=50, blur_radius=8.0, pad=16)  # w1 组整体出
-    assert cache.stats()["groups"] == 2
-    assert cache.stats()["entries"] == 2  # 只剩 w2/w3 各 1 份 baked，w1 baked 全释放
+                     width=100, height=50, blur_radius=8.0, pad=16)  # w2 组整体出
+    assert cache.stats() == {"groups": 1, "entries": 1}
+
+
+# ── M-1c：baked 组内上限按像素面积反算 ─────────────────────
+
+def test_baked_cap_by_area():
+    """M-1c 纯函数：4K→1、1440p→3、1080p→4（现状不变）；脏参数回落硬上限"""
+    assert baked_cap(3840, 2160) == 1   # 31.64 MiB/份 > 48 MiB/2
+    assert baked_cap(2560, 1440) == 3   # 14.06 MiB/份 ×3 = 42.2 MiB
+    assert baked_cap(1920, 1080) == 4   # 7.91 MiB/份 → 6 截到硬上限 4
+    assert baked_cap(0, 0) == 4         # 非正尺寸：不因脏参数缩容
+    assert baked_cap(None, 1080) == 4   # 非法尺寸同上
+
+
+def test_baked_cap_applied_4k(cache, wallpaper):
+    """M-1c 接入：4K 几何写第 2 份即淘汰第 1 份；同组换 1080p 几何仍容 4 份"""
+    cache.acquire()
+    cache.get_pixmap("baked", wallpaper, load=_baked_load(3840, 2160),
+                     width=3840, height=2160, blur_radius=8.0, pad=16)
+    cache.get_pixmap("baked", wallpaper, load=_baked_load(3841, 2160),
+                     width=3841, height=2160, blur_radius=8.0, pad=16)
+    assert cache.stats()["entries"] == 1, "4K 单份超预算一半 → 上限降为 1，第二份写入淘汰第一份"
+    for i in range(6):
+        cache.get_pixmap("baked", wallpaper, load=_baked_load(1920 + i, 1080),
+                         width=1920 + i, height=1080, blur_radius=8.0, pad=16)
+    keys = [k for k in list(cache._groups.values())[0] if k[0] == "baked"]
+    assert len(keys) == 4, "1080p 面积小 → 上限回到硬上限 4（M2 行为零变化）"
+
+
+# ── M3：premult 按需生成（blur>0 时只是过程副本） ───────────
+
+def _write_bg(tmp_path, name="bg.png", w=64, h=48):
+    p = str(tmp_path / name)
+    img = QImage(w, h, QImage.Format_ARGB32)
+    img.fill(0xFF336699)
+    assert img.save(p, "PNG")
+    return p
+
+
+def _cached_kinds(cache):
+    return sorted(k[0] for b in cache._groups.values() for k in b)
+
+
+def test_premult_cached_only_without_blur(cache, qapp, tmp_path):
+    """M3 两分支：blur>0 → premult 不入缓存（只剩 source+baked，apply_config
+    末尾同步烘 baked 顶替）；blur==0 → premult 是最终显示副本，仍走共享缓存"""
+    from app.widgets.scene_layer import SceneLayer
+
+    bg = _write_bg(tmp_path)
+    base = {
+        "image": bg,
+        "opacity": 0.5,
+        "animation": {"enabled": False},
+        "foreground": {"enabled": False},
+    }
+
+    blurred = SceneLayer()
+    try:
+        blurred.apply_config(dict(base, blur=8), lambda p: p)
+        assert _cached_kinds(cache) == ["baked", "source"], (
+            "blur>0：premult 不得驻留共享缓存（同步烘 baked 顶替，省一份驻留）"
+        )
+    finally:
+        blurred.deleteLater()
+
+    cache.clear()
+    plain = SceneLayer()
+    try:
+        plain.apply_config(dict(base, blur=0), lambda p: p)
+        assert _cached_kinds(cache) == ["premult", "source"], (
+            "blur==0：premult 是最终显示副本，必须仍走共享缓存"
+        )
+    finally:
+        plain.deleteLater()
+
+
+def test_blur_scene_zero_geometry_waits_for_resize(cache, qapp, tmp_path):
+    """M3+ 早返回锚定：几何 0 → apply_config 不崩、label 无 pixmap、baked
+    未生成；把 source 直接挂 label 时早返回也不动它；resize 后重走烘焙恢复"""
+    from app.widgets.scene_layer import SceneLayer
+
+    bg = _write_bg(tmp_path)
+    layer = SceneLayer()  # 无父：_sync_geometry 直接返回，几何由 resize 控制
+    try:
+        layer.resize(0, 0)
+        layer.apply_config(
+            {
+                "image": bg,
+                "opacity": 0.5,
+                "blur": 8,
+                "animation": {"enabled": False},
+                "foreground": {"enabled": False},
+            },
+            lambda p: p,
+        )
+        label = layer._image_label
+        assert label is not None
+        pm = label.pixmap()
+        assert pm is None or pm.isNull(), "geo=0 早返回不得挂未预乘 source"
+        assert _cached_kinds(cache) == ["source"], "几何未定不得生成 baked"
+
+        # 早返回分支对「label 已被挂上 source」的旧状态必须安全：不动它、不崩
+        label.setPixmap(layer._image_source_pixmap)
+        layer._bake_image_now()
+        assert label.pixmap().cacheKey() == layer._image_source_pixmap.cacheKey()
+
+        # resize → _sync_content_geometry → 重走烘焙，baked 顶替
+        layer.resize(400, 300)
+        layer._sync_content_geometry()
+        layer._bake_image_now()  # 跳过 150ms 防抖
+        pm = label.pixmap()
+        assert pm is not None and not pm.isNull()
+        assert pm.width() == label.width() and pm.height() == label.height()
+        assert label.hasScaledContents() is False
+        assert _cached_kinds(cache) == ["baked", "source"]
+    finally:
+        layer.deleteLater()
+

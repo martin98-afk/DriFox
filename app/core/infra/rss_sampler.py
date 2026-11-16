@@ -30,9 +30,62 @@ psutil 调用。采样间隔默认 3s：内存是慢变量，不会在 3s 内从
 
 from __future__ import annotations
 
+import os
 import threading
 import time
 from typing import Optional
+
+from app.core.infra.telemetry.perf_jsonl import append_event, env_flag
+
+# ── GDI/USER 句柄采样（DRIFOX_HANDLE_TRACE=1 门控，默认关） ──────────
+# 首版只采主进程自身：GetGuiResources(GetCurrentProcess(), ...) 无需进程句柄，
+# 不引入 OpenProcess 与权限问题；renderer 侧句柄留给后续按需扩展。
+_HANDLE_API = None  # None=未探测 / False=不可用 / (user32, kernel32)
+
+
+def _sample_handles() -> "dict | None":
+    """读当前进程的 GDI/USER 对象数；非 Windows 或调用失败返回 None（不抛）。"""
+    global _HANDLE_API
+    if _HANDLE_API is None:
+        try:
+            import ctypes
+
+            # use_last_error=True：GetGuiResources 失败返回 0 与「真 0 个对象」
+            # 需靠 GetLastError 区分（见 _sample_handles 的加固分支）。
+            _HANDLE_API = (
+                (
+                    ctypes.WinDLL("user32", use_last_error=True),
+                    ctypes.WinDLL("kernel32", use_last_error=True),
+                )
+                if os.name == "nt"
+                else False
+            )
+        except Exception:
+            _HANDLE_API = False
+    if not _HANDLE_API:
+        return None
+    try:
+        import ctypes
+
+        user32, kernel32 = _HANDLE_API
+        # 照方抓药（2026-11-15）：零声明时 GetCurrentProcess 的伪句柄 -1 按
+        # c_int 32 位传 64 位 API → 非法参数（lasterror=87）→ 失败 0 被当
+        # 合法读数落盘（gdi_handles 恒 0 的根因）。
+        kernel32.GetCurrentProcess.restype = ctypes.c_void_p
+        user32.GetGuiResources.argtypes = [ctypes.c_void_p, ctypes.c_uint]
+        user32.GetGuiResources.restype = ctypes.c_uint
+        hproc = kernel32.GetCurrentProcess()
+        gdi = int(user32.GetGuiResources(hproc, 0))  # GR_GDIOBJECTS
+        user = int(user32.GetGuiResources(hproc, 1))  # GR_USEROBJECTS
+        # (0, 0) 且 GetLastError() != 0 → 调用失败而非真 0；退化为不采样，
+        # 避免把失败 0 写进判据⑤（smoke_verdict 对行缺失有 SKIP 分支兜底）。
+        last_err = ctypes.get_last_error()
+        if gdi == 0 and user == 0 and last_err != 0:
+            return None
+        return {"gdi": gdi, "user": user}
+    except Exception:
+        return None
+
 
 # 采样间隔（秒）。3s 兼顾「阈值判定新鲜度」与「后台 CPU 开销」。
 # 单次采样约 20-80ms，3s 周期下后台开销 < 3%。
@@ -189,6 +242,10 @@ class RssSampler:
                         web_by_pid[child.pid] = mb
                 except Exception:
                     continue
+            if env_flag("DRIFOX_HANDLE_TRACE"):
+                handles = _sample_handles()
+                if handles:
+                    append_event("gdi_handles", handles["gdi"], handles)
             return _RssSample(rss_mb, web_total, now, web_by_pid)
         except Exception:
             return _RssSample(0.0, 0.0, now, {})

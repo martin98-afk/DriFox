@@ -195,6 +195,32 @@ gh release delete <version> --yes --repo martin98-afk/DriFox
 
 > 💡 若没装 `gh` CLI，提示用户去 https://github.com/martin98-afk/DriFox/releases 手工点 Delete。
 
+**Release 正文不更新（重新发布高频坑）**：
+
+`softprops/action-gh-release@v2` 更新已有 Release 时走
+`body = releaseBody(config) || existingRelease.body` —— `body_path` 读到空串就**静默沿用旧正文**，action 仍报 success。v0.7.3 重新发布 #3 实测：七个步骤全绿，页面正文却停在「重新发布 #2」。
+
+工作流已加末步 `Ensure release body matches changelog` 自动校正（规范化比对 → 不一致用 API 覆盖，空正文直接判红）。收尾时仍要肉眼确认页面正文首行的「重新发布 #N」与本次一致；若发现没同步，用 API 直接补：
+
+```bash
+# 1) 取 Release id（GET /releases/tags/<v> 返回的 id）
+# 2) 把 tag 内 CHANGELOG 段写进 body.md
+# 3) 覆盖正文：传 release_id、token，正文从 body.md 读
+python3 - <<'PY' "$REL_ID" "$TOKEN"
+import json, sys, urllib.request
+rel_id, token = sys.argv[1], sys.argv[2]
+body = open("body.md", encoding="utf-8").read()
+req = urllib.request.Request(
+    f"https://api.github.com/repos/martin98-afk/DriFox/releases/{rel_id}",
+    data=json.dumps({"body": body}).encode(), method="PATCH",
+    headers={"Authorization": f"token {token}", "Accept": "application/vnd.github+json",
+             "Content-Type": "application/json"})
+print(urllib.request.urlopen(req, timeout=60).status)
+PY
+```
+
+> GitHub API 偶发 `RemoteDisconnected`（TLS 断连），原样重试 2-3 次即可，不要改逻辑。
+
 **历史踩坑——常见 CI 失败修复：**
 
 | 问题 | 症状 | 修复 |

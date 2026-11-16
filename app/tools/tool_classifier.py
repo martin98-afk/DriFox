@@ -103,6 +103,15 @@ def get_tool_counts(toggles: dict) -> tuple:
     Returns:
         (dangerous_count, safe_count)
     """
+    # perf: (#5f) 插件工具未就绪（首窗构造段）时跳过统计，返回 (0, 0)——
+    # DANGEROUS_TOOLS() 经 _registry() 触发保险丝同步加载（取证 167.3ms 挂在
+    # 首窗段，与 9108 get_toggles 链同构的第二条触发链）。语义=已报备的
+    # 「启动后 2-3s 工具计数徽标为空/0」窗口期；预载完成后由补刷链
+    # （_tool_registry_changed → _on_tool_count_dirty → 0ms 去抖 → 重刷）落正确值。
+    import app.tools as _tools_pkg
+
+    if not _tools_pkg.plugin_tools_ready():
+        return (0, 0)
     # [PERF T32] 危险集循环外提一次（原先每项 classify_tool_danger → O(N²)）
     dangerous = DANGEROUS_TOOLS()
     dangerous_count = 0

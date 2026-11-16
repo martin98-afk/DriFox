@@ -2,6 +2,7 @@
 import collections
 import re
 import threading
+import weakref
 from typing import Any, Dict, List, Optional
 
 import orjson as json
@@ -44,6 +45,20 @@ GEMINI_DUMMY_THOUGHT_SIGNATURE = "skip_thought_signature_validator"
 _MAX_CONSOLIDATE_ENTRIES = 4
 _TAIL_CHECK_W = 16  # 尾部校验窗口：检测流式收尾对末尾消息的原地补写
 _consolidate_cache_local = threading.local()
+
+
+def _weak_owner_ref(owner: Any) -> Optional["weakref.ReferenceType"]:
+    """[B1] 宿主探针：可弱引用宿主（如 ChatSession QObject）建 weakref。
+
+    None / 不可弱引用对象（内建容器、str 等）返回 None → 条目退化为
+    无探针模式（行为与旧实现一致，仅失去自动失效能力，容量仍封顶）。
+    """
+    if owner is None:
+        return None
+    try:
+        return weakref.ref(owner)
+    except TypeError:
+        return None
 
 
 def _msg_feature(msg: Any):
@@ -111,17 +126,22 @@ def _get_consolidate_cache() -> dict:
     return cache
 
 
-def _set_consolidate_cache(cache_key: tuple, list_len: int, result: list, tail_features: tuple):
+def _set_consolidate_cache(cache_key: tuple, list_len: int, result: list, tail_features: tuple, owner_ref=None):
     """写入 LRU 缓存；超上限时逐出最久未命中条目
+
+    [B1] ``owner_ref``：宿主探针（weakref.ref，可 None）。主表宿主释放后
+    （release_messages / evict / GC），下次命中路径探测到 ref() is None
+    即剔除条目，worker 线程 TLS 里的旧会话投影不再滞留到 FIFO 逐出。
 
     Args:
         cache_key: 完整主键 (id(list), 首部特征)
         list_len: 写入时列表长度
         result: 归一化结果
         tail_features: 写入时列表尾部窗口特征（下次命中校验用）
+        owner_ref: 宿主弱引用探针（可 None）
     """
     entries = _get_consolidate_cache()["_entries"]
-    entries[cache_key] = (list_len, tail_features, result)
+    entries[cache_key] = (list_len, tail_features, result, owner_ref)
     entries.move_to_end(cache_key)
     if len(entries) > _MAX_CONSOLIDATE_ENTRIES:
         entries.popitem(last=False)  # FIFO 逐出最旧条目
@@ -146,6 +166,30 @@ _SENSITIVE_MARKERS = [
 # 性能优化：预编译正则表达式用于一次性替换所有敏感标记
 _SANITIZE_PATTERN = re.compile('|'.join(re.escape(marker) for marker in _SENSITIVE_MARKERS))
 
+
+# [候选4] render_mode 查询 memo：registry 单例 + version 号键，version 未变时
+# 按 name 直取缓存（省掉每 block 一次 import 查找 + registry 锁读）。
+# 失效钩子=版本号键：register/unregister/clear 自增 _version → key 不匹配整表
+# 重建；含 id(registry) 防 reset_instance 后 version 归零的陈旧命中。
+# 表容量=工具数，天然有界。
+_render_mode_memo: dict = {}
+
+def _lookup_render_mode(name: str) -> str:
+    try:
+        from app.tools.registry import ToolRegistry
+
+        registry = ToolRegistry.get_instance()
+        key = (id(registry), registry.version)
+        if _render_mode_memo.get("key") != key:
+            _render_mode_memo.clear()
+            _render_mode_memo["key"] = key
+            _render_mode_memo["modes"] = {}
+        modes = _render_mode_memo["modes"]
+        if name not in modes:
+            modes[name] = registry.get_render_mode(name)
+        return modes[name]
+    except Exception:
+        return ""
 
 def _sanitize_rendering_string(text: str) -> str:
     """
@@ -515,7 +559,9 @@ def append_text_block(content: Any, text: Any) -> List[Dict[str, Any]]:
     return blocks
 
 
-def content_to_text(content: Any, include_tool_results: bool = False) -> str:
+def content_to_text(
+    content: Any, include_tool_results: bool = False, include_image_placeholder: bool = True
+) -> str:
     if isinstance(content, str):
         return content
 
@@ -526,8 +572,10 @@ def content_to_text(content: Any, include_tool_results: bool = False) -> str:
             text = str(block.get("text", ""))
             if text:
                 texts.append(text)
-        elif block_type in ("image_url", "input_image", "image", "image_ref"):
-            # 图片块输出占位符（导出/纯文本视图不丢图）
+        elif include_image_placeholder and block_type in ("image_url", "input_image", "image", "image_ref"):
+            # 图片块输出占位符（导出/纯文本视图不丢图）。
+            # include_image_placeholder=False：语义消费者（如审批弹窗的
+            # user_goal）只要目标文本，占位符反而污染断言/展示（C2-3）。
             texts.append("[图片]")
         elif include_tool_results and block_type == "tool_result":
             name = str(block.get("name", "tool"))
@@ -598,12 +646,7 @@ def content_to_markdown(content: Any) -> str:
             # UI 完全不展示结果内容 —— 结果只服务模型上下文。这类字段（result/diff/
             # echarts）不进渲染用 markdown：markdown 变短 → 每轮重渲染少扫一遍。
             # 形态由插件注册的 render_mode 声明，主程序不按工具名写死。
-            try:
-                from app.tools.registry import ToolRegistry
-
-                _render_mode = ToolRegistry.get_instance().get_render_mode(block.get("name", ""))
-            except Exception:
-                _render_mode = ""
+            _render_mode = _lookup_render_mode(block.get("name", ""))
             if _render_mode == "none":
                 continue
             _hide_payload = _render_mode == "inline"
@@ -702,14 +745,18 @@ def normalize_tool_call(tool_call: Any) -> Optional[Dict[str, Any]]:
     function_name = str(function.get("name", "") or "").strip()
     function_arguments = function.get("arguments", "{}")
     if isinstance(function_arguments, dict):
-        function_arguments = json.dumps(function_arguments).decode("utf-8")
+        # [候选1] dict 入参直用：跳过 dumps→loads round-trip（序列化次数 2→1）。
+        # 等价性：原链路 dumps(dict)→loads 的 JSON round-trip 对 int/float/str/
+        # None/bool/嵌套容器/键序均幂等；tuple 经 dumps 已转 array，直用同结果。
+        # 非法值（如 datetime）原链路在首个 dumps 即抛 TypeError，现推迟到最终
+        # dumps 处抛出，异常类型与消息一致。
+        parsed_arguments = function_arguments
     else:
         function_arguments = str(function_arguments or "{}")
-
-    try:
-        parsed_arguments = json.loads(function_arguments)
-    except Exception:
-        parsed_arguments = {}
+        try:
+            parsed_arguments = json.loads(function_arguments)
+        except Exception:
+            parsed_arguments = {}
 
     if not isinstance(parsed_arguments, dict):
         parsed_arguments = {}
@@ -955,7 +1002,7 @@ def normalize_message(message: Any) -> Optional[Dict[str, Any]]:
     return normalized
 
 
-def consolidate_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def consolidate_messages(messages: List[Dict[str, Any]], *, owner: Any = None) -> List[Dict[str, Any]]:
     """
     保持消息列表平坦，不再合并。
     每个 assistant 消息只包含自己的内容和 tool_calls。
@@ -964,6 +1011,10 @@ def consolidate_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]
     使用增量缓存：调用方传入同一个列表对象时，只 normalize 新增的消息；
     对末尾消息元数据的原地补写（流式收尾）会触发全量重算，不会返回脏数据。
     消息列表只追加（长度增加）或整体替换（id 变化），不原地修改历史条目。
+
+    [B1] ``owner``：主表宿主（如持有 messages 的 ChatSession）。提供后缓存
+    条目挂 weakref 探针，宿主释放后条目自动失效（下次访问即剔除），消除
+    worker 线程 TLS 里的旧会话投影滞留。不传时行为与旧实现完全一致。
 
     详见模块顶部 ``_MAX_CONSOLIDATE_ENTRIES`` 处的缓存策略说明。
     """
@@ -976,7 +1027,13 @@ def consolidate_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]
 
     cached = entries.get(cache_key)
     if cached is not None:
-        cached_n, cached_tail, cached_norm = cached
+        # [B1] 宿主探针失效检查：宿主已释放 → 条目即刻剔除（视为未命中）
+        cached_owner_ref = cached[3]
+        if cached_owner_ref is not None and cached_owner_ref() is None:
+            del entries[cache_key]
+            cached = None
+    if cached is not None:
+        cached_n, cached_tail, cached_norm = cached[0], cached[1], cached[2]
         if n == cached_n:
             # 长度未变：仅校验尾部窗口（O(W)），命中则复用同一列表对象
             if _msg_tail_features(messages, n) == cached_tail:
@@ -992,7 +1049,7 @@ def consolidate_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]
                     item = normalize_message(message)
                     if item:
                         normalized.append(item)
-                _set_consolidate_cache(cache_key, n, normalized, _msg_tail_features(messages, n))
+                _set_consolidate_cache(cache_key, n, normalized, _msg_tail_features(messages, n), _weak_owner_ref(owner))
                 return normalized
         # 变短（删除/回退/截断）或尾部校验失败 → 落到下面的全量重算
 
@@ -1002,7 +1059,7 @@ def consolidate_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]
         if item:
             normalized.append(item)
 
-    _set_consolidate_cache(cache_key, n, normalized, _msg_tail_features(messages, n))
+    _set_consolidate_cache(cache_key, n, normalized, _msg_tail_features(messages, n), _weak_owner_ref(owner))
 
     return normalized
 

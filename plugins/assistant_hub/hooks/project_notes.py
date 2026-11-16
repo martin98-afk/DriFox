@@ -1,12 +1,16 @@
 # -*- coding: utf-8 -*-
 """project_notes.py — assistant_hub hooks（项目笔记 + 项目上下文）
 
-两个 hook（替代原 system 插件的 read_project_notes / format_memory_context:hook_git）：
+三个 hook（替代原 system 插件的 read_project_notes / format_memory_context:hook_git）：
 
 1. ``hook_notes``（BuildSystemPrompt）：读取 {workdir}/AGENTS.md 项目笔记注入
    （不存在时用默认模板创建）。
 2. ``hook_context``（PreUserMessage）：注入项目根目录路径规则 + git 仓库状态
    （自动 git init / .gitignore 生成等副作用逻辑自原 system hook 原样迁移）。
+   主智能体同会话内上下文实质未变时不重复注入（按内容指纹去重，相对时间
+   漂移不算变化）；子智能体始终注入。
+3. ``reset_context_dedup``（SessionStart clear/compact）：清空去重指纹，让
+   历史被清空/摘要后能重新注入。
 
 注入开关（助手级配置，主智能体生效）：
 - ``Assistant.project_notes_enabled``   → hook_notes
@@ -22,11 +26,14 @@
 from __future__ import annotations
 
 import concurrent.futures
+import hashlib
 import importlib.util
 import re
 import subprocess
 import sys
+import threading
 import time
+import types
 from pathlib import Path
 from typing import Any, Dict
 
@@ -744,12 +751,77 @@ def _build_git_status_block(cwd: str) -> list[str] | None:
 # ============================================================
 
 
+# ---- 注入去重 ----
+# 同一会话内上下文实质未变时跳过重复注入：每轮都注入会在历史里堆出多份
+# 相同的「## 项目上下文」消息（长会话 token 浪费的主因之一）。
+# 状态按 (session_id, project_root) 记指纹，仅进程内有效；进程重启或模块
+# 热重载后重新注入一次，代价可忽略。
+_CONTEXT_FP_MAX = 256
+
+# 状态挂 sys.modules 固定键（见 _dedup_state 注释），不能用模块级 dict
+_DEDUP_STATE_KEY = "_drifox_project_notes_dedup_state"
+
+def _dedup_state():
+    """取跨模块实例共享的指纹表（FP / LOCK）
+
+    HookWorker 以「函数路径」为键缓存函数对象，同一文件的 hook_context 与
+    reset_context_dedup 会被各自 exec 成独立模块，模块级 dict 互不可见
+    （clear/compact 清的是另一份空表，等于没清）。
+    sys.modules.setdefault 保证并发首建只留一份。
+    """
+    state = sys.modules.get(_DEDUP_STATE_KEY)
+    if state is not None:
+        return state
+    created = types.ModuleType(_DEDUP_STATE_KEY)
+    created.FP = {}
+    created.LOCK = threading.Lock()
+    return sys.modules.setdefault(_DEDUP_STATE_KEY, created)
+
+# git 相对时间（`(4 minutes ago)` / `(4 分钟前)`）随真实时间漂移，不属实质变化，
+# 计算指纹前抹平，否则每分钟都会判定「变了」
+_REL_TIME_RE = re.compile(r"\(\s*\d[^()]*?(?:ago|前)\s*\)")
+
+def _context_fingerprint(text: str) -> str:
+    """上下文指纹：抹平相对时间漂移后取 sha1"""
+    normalized = _REL_TIME_RE.sub("(…)", text)
+    return hashlib.sha1(normalized.encode("utf-8", "replace")).hexdigest()
+
+def _should_inject(key: str, text: str) -> bool:
+    """与上次注入内容比对：相同返回 False（跳过），不同记录并返回 True"""
+    fp = _context_fingerprint(text)
+    state = _dedup_state()
+    with state.LOCK:
+        if state.FP.get(key) == fp:
+            return False
+        state.FP[key] = fp
+        overflow = len(state.FP) - _CONTEXT_FP_MAX
+        if overflow > 0:
+            for stale in list(state.FP)[:overflow]:
+                state.FP.pop(stale, None)
+    return True
+
+def reset_context_dedup(event: str, context: dict) -> str:
+    """SessionStart(clear/compact) hook：清空注入指纹
+
+    clear 后历史被清空、compact 后旧注入可能已被摘要掉，两种情况都必须允许
+    下一轮重新注入，否则模型会丢失项目上下文。
+    """
+    state = _dedup_state()
+    with state.LOCK:
+        state.FP.clear()
+    return ""
+
 def hook_context(event: str, context: dict) -> str:
-    """PreUserMessage hook：注入项目根目录路径规则 + git 仓库状态，按助手开关控制"""
-    if not _enabled_for_primary(context, "project_context_enabled"):
+    """PreUserMessage hook：注入项目根目录路径规则 + git 仓库状态，按助手开关控制
+
+    去重只针对主智能体（同会话内上下文未变则跳过）；子智能体每次都拿到全新
+    上下文，始终注入。
+    """
+    ctx = context or {}
+    if not _enabled_for_primary(ctx, "project_context_enabled"):
         return ""
 
-    project_root = (context or {}).get("project_root", "")
+    project_root = ctx.get("project_root", "")
     if not project_root:
         return ""
 
@@ -763,4 +835,11 @@ def hook_context(event: str, context: dict) -> str:
         ctx_lines.append("")
         ctx_lines.extend(git_block)
 
-    return "\n".join(ctx_lines)
+    text = "\n".join(ctx_lines)
+
+    if ctx.get("current_role") == "primary":
+        key = f"{ctx.get('session_id') or ''}\x00{project_root}"
+        if not _should_inject(key, text):
+            logger.debug("[assistant_hub.project_notes] 项目上下文未变化，跳过重复注入")
+            return ""
+    return text

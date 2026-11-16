@@ -455,7 +455,8 @@ class HistoryManager:
 
         # === 异步归档扫描（性能优化）===
         # _archive_meta_cache：file_path → (mtime, info_dict)
-        # 仅在后台 _ArchiveScanTask 线程内访问，访问路径都用 _archive_cache_lock 保护。
+        # 后台 _ArchiveScanTask 与同步 get_archived_sessions 两处访问，均以
+        # _archive_cache_lock 保护（#41 接入同步缓存复用后语义已变）。
         self._archive_meta_cache: Dict[str, Tuple[float, Dict]] = {}
         self._archive_cache_lock = threading.Lock()
         # 每次发起扫描自增；主线程接收结果时对比 _current_scan_request_id 丢弃过期数据。
@@ -590,13 +591,34 @@ class HistoryManager:
         # 首次打开历史面板又用数据库快照覆盖内存记录，导致延迟保存找不到目标。
         self._ensure_history_loaded()
 
+        # perf: 会话查询合并——原 team/pinned/usage/partial-hint 四分支各自调
+        # get_session_by_session_id，每轮保存最多重复 3~4 次全量扫描/SQLite 读。
+        # 四个查询点之间无任何写库动作，同一保存事务窗口内会话状态不变，
+        # 首次查询结果贯穿复用即可；None（无现有记录）语义在各分支照旧。
+        _existing_shared = None
+        _existing_queried = False
+        if session_id and (
+            team_run_id is None
+            or team_name is None
+            or agent_name is None
+            or team_members is None
+            or pinned is None
+            or last_api_prompt_tokens is None
+            or last_api_message_count is None
+            or last_api_prompt_from_usage is None
+            or token_calibration is None
+            or token_calibration_model is None
+        ):
+            _existing_shared = self.get_session_by_session_id(session_id)
+            _existing_queried = True
+
         # 🛡️ None→保留现值：与 update_session 语义对齐，避免 save 分支
         # （会话被挤出 _history_limit 后走 INSERT OR REPLACE）用空串覆盖
         # 团队元数据，导致团队会话从历史分组消失（数据损坏，不可逆）。
         if team_run_id is None or team_name is None or agent_name is None or team_members is None:
             existing = None
             if session_id:
-                existing = self.get_session_by_session_id(session_id)
+                existing = _existing_shared  # perf: 复用合并查询（原为重复查询）
             if existing:
                 if team_run_id is None:
                     team_run_id = existing.get("team_run_id", "") or ""
@@ -617,7 +639,7 @@ class HistoryManager:
         if pinned is None:
             existing_for_pin = None
             if session_id:
-                existing_for_pin = self.get_session_by_session_id(session_id)
+                existing_for_pin = _existing_shared  # perf: 复用合并查询（原为重复查询）
             pinned = bool(existing_for_pin.get("pinned", False)) if existing_for_pin else False
 
         # API 用量字段「None→保留现值」：高频保存路径不带这些字段时，沿用会话
@@ -631,7 +653,7 @@ class HistoryManager:
         }
         _existing_for_usage = None
         if any(v is None for v in _usage_provided.values()) and session_id:
-            _existing_for_usage = self.get_session_by_session_id(session_id)
+            _existing_for_usage = _existing_shared  # perf: 复用合并查询（原为重复查询）
         _usage = self._resolve_api_usage_fields(_usage_provided, _existing_for_usage)
 
         merged_messages = merge_session_messages(messages)
@@ -640,9 +662,13 @@ class HistoryManager:
         # 沿用库里现值，避免占用显示被清零。
         _ctx_hint = None
         if merged_messages and merged_messages[-1].get("_partial") and session_id:
-            _existing_for_hint = self.get_session_by_session_id(session_id)
-            if _existing_for_hint:
-                _ctx_hint = _existing_for_hint.get("context_usage", 0)
+            # perf: 复用合并查询；仅当开头判据未覆盖（全显式保存 + partial 尾巴）
+            # 才补查一次（原实现此处独立查询，查询次数不变）
+            if not _existing_queried:
+                _existing_shared = self.get_session_by_session_id(session_id)
+                _existing_queried = True
+            if _existing_shared:
+                _ctx_hint = _existing_shared.get("context_usage", 0)
         session_record = self._build_session_record(
             merged_messages,
             title,
@@ -1687,36 +1713,66 @@ class HistoryManager:
     def get_archived_sessions(self) -> List[Dict]:
         """同步获取归档列表（兼容旧调用方，UI 层请优先使用 scan_archives_async）。
 
-        该方法阻塞主线程：先调用 get_archived_session_count 提示归零，
-        实际读取仍走 N 次文件 I/O。仅在插件/测试场景下使用。
+        该方法阻塞主线程：先调用 get_archived_session_count 提示归零。
+        仅在插件/测试场景下使用。
         """
         archived_files: List[Dict] = []
         if not self.archive_dir.exists():
             return archived_files
 
         try:
+            # (mtime, item) 局部收集：排序复用循环里已 stat 的 mtime，
+            # 免去排序阶段对每条再 getmtime 一次（N 次 stat → 0 次重复 stat）。
+            staged: List[Tuple[float, Dict]] = []
             for json_file in self.archive_dir.glob("*.json"):
+                fp_str = str(json_file)
                 try:
-                    with open(json_file, "r", encoding="utf-8") as f:
-                        data = json.loads(f.read())
-                    archived_files.append(
-                        {
-                            "path": str(json_file),
-                            "name": json_file.name,
+                    mtime = os.path.getmtime(fp_str)
+                except OSError:
+                    mtime = 0.0
+                # 优化点：原行为每次调用都 open+read+parse 全部归档 JSON（主线程
+                # N 次全量读盘，归档一多插件侧每次取列表都是整目录 I/O）；新行为
+                # 按 mtime 复用解析结果——文件未变（mtime 相等）直接取缓存，只有
+                # 新增/变更文件才读盘。缓存写入与后台 _ArchiveScanTask 同结构
+                # （含 last_time/message_count/preview/project 全键），双写者键集
+                # 一致，避免窄缓存污染异步扫描的 enrich 字段；坏文件不进缓存，
+                # mtime 变化后仍会重试（读回内容与原实现逐字段一致）。
+                with self._archive_cache_lock:
+                    cached = self._archive_meta_cache.get(fp_str)
+                info: Optional[Dict] = None
+                if cached is not None and cached[0] == mtime:
+                    info = cached[1]
+                if info is None:
+                    try:
+                        with open(json_file, "r", encoding="utf-8") as f:
+                            data = json.loads(f.read())
+                        info = {
                             "session_id": data.get("session_id", ""),
                             "title": data.get("title", json_file.stem[:50]),
+                            "last_time": data.get("last_time", ""),
+                            "message_count": data.get("message_count", 0),
+                            "preview": data.get("preview", ""),
+                            "project": data.get("project", ""),
                         }
-                    )
-                except Exception:
-                    logger.error(f"[HistoryManager] 读取归档文件失败: {json_file}")
-                    continue
+                        with self._archive_cache_lock:
+                            self._archive_meta_cache[fp_str] = (mtime, info)
+                    except Exception:
+                        logger.error(f"[HistoryManager] 读取归档文件失败: {json_file}")
+                        continue
+                archived_files.append(
+                    {
+                        "path": fp_str,
+                        "name": json_file.name,
+                        "session_id": info.get("session_id", ""),
+                        "title": info.get("title", json_file.stem[:50]),
+                    }
+                )
+                staged.append((mtime, archived_files[-1]))
         except Exception:
             pass
 
-        archived_files.sort(
-            key=lambda x: os.path.getmtime(x["path"]),
-            reverse=True,
-        )
+        staged.sort(key=lambda x: x[0], reverse=True)
+        archived_files = [item for _, item in staged]
         return archived_files
 
     def get_session_by_index(self, index: int) -> Optional[List[Dict]]:

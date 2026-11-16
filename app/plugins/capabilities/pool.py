@@ -82,6 +82,10 @@ class CapabilityPool(Mapping):
         self._ungated = set(ungated)
         self._legacy_providers = dict(legacy_providers or {})
         self._registry = registry
+        # 优化点 S4：允许集合由 providers 键与 ungated 求并集，构造期只算一次，
+        # 冻结成 frozenset 预算。_allowed() 原先每次都 set(providers)|ungated
+        # 重分配两个临时集合；这些成员在构造后不再改写，可安全共享只读副本。
+        self._allowed_set: frozenset[str] = frozenset(self._providers) | frozenset(self._ungated)
         self._values: Dict[str, Any] = {}
         self._audited: Set[str] = set()
 
@@ -148,8 +152,10 @@ class CapabilityPool(Mapping):
 
     # ── 内部 ──
 
-    def _allowed(self) -> Set[str]:
-        return set(self._providers) | self._ungated
+    def _allowed(self) -> frozenset[str]:
+        # 优化点 S4：直接返回构造期预算的 frozenset，调用点全是只读
+        # （in / iter / len / sorted / for），无原地修改，行为逐值不变。
+        return self._allowed_set
 
     def _call(self, provider: Any) -> Any:
         if provider_arity(provider) >= 2:

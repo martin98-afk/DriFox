@@ -255,14 +255,69 @@ class PluginHostService(QObject):
 
             # 记录初始化前的状态，用于判断是否为首次初始化
             was_initialized = pm.is_initialized()
-            pm.initialize(app_data_dir)
+            # perf: 插件启动段子打点——拆黑盒 app_services_start 为
+            # plugin_scan / dir_signature / reload_agents 三段（纯打点零行为），
+            # 供 S2 裁决；dir_signature 段用运行时包装计时（实现体在
+            # plugin_manager.py，所有权在 #31，此处不改其文件）
+            _scan_t0 = time.perf_counter()
+            _sig_total_ms = 0.0
+            _orig_sig = getattr(pm, "_plugins_dir_signature", None)
+            if _orig_sig is not None:
+
+                def _timed_dir_signature(*args, **kwargs):
+                    nonlocal _sig_total_ms
+                    _t0 = time.perf_counter()
+                    try:
+                        return _orig_sig(*args, **kwargs)
+                    finally:
+                        _sig_total_ms += (time.perf_counter() - _t0) * 1000
+
+                pm._plugins_dir_signature = _timed_dir_signature
+            try:
+                pm.initialize(app_data_dir)
+            finally:
+                if _orig_sig is not None:
+                    try:
+                        pm._plugins_dir_signature = _orig_sig
+                    except Exception:
+                        pass
+            logger.debug(f"[StartupMark] plugin_scan 耗时 {(time.perf_counter() - _scan_t0) * 1000:.0f}ms")
+            logger.debug(f"[StartupMark] dir_signature 耗时 {_sig_total_ms:.0f}ms")
+
+            # 【关键路径】agents + hooks 必须早于任何会话创建就绪。
+            # 窗口 showEvent 的 critical 任务立刻 create_session 并触发
+            # SessionStart，而这两者原先都排在 idle 延迟队列（delay 2s），造成
+            # 两类空跑（2026-11-15 实测两次）：
+            # 1) hooks 未注册：HookManager.trigger_event 首行
+            #    `if event_name not in self._hooks: return []` 静默返回空列表
+            #    → 会话消息里两个清单都没有 → 首条消息退回 system prompt 兜底
+            #    注入并随 session.system_prompt 持久化。
+            # 2) hooks 已注册但 agents 未解析：inject_subagent_info 拿到空
+            #    list_subagents → 整块 <available_subagents> 不输出（技能清单走
+            #    config.read 不依赖 AgentManager，于是表现为「有技能没智能体」）。
+            # 故两者必须一起提前。成本实测：冷启动 243ms（构造时 PluginManager
+            # 尚未初始化，70 agents 真冷解析），热跑 10ms。idle 队列里那条
+            # reload_agents 保留（幂等热跑，兜住初始化后的插件变更）。
+            if self._agent_manager is not None:
+                try:
+                    _t_am = time.perf_counter()
+                    self._agent_manager.reload_agents()
+                    logger.debug(
+                        f"[StartupMark] 同步段 reload_agents 耗时 "
+                        f"{(time.perf_counter() - _t_am) * 1000:.0f}ms"
+                    )
+                except Exception as e:
+                    logger.error(f"[PluginHost] 同步段加载 agents/hooks 失败: {e}")
 
             # 首次初始化时才需要全量重载智能体
             # 后续窗口复用已有的 PluginManager/AgentManager 单例数据
             if not was_initialized:
-                # AgentManager 重新从已启用插件加载智能体（关键路径）
-                if self._agent_manager:
-                    self._agent_manager.reload_agents()
+                # perf: [S1-B] reload_agents 延迟化（#36）：原同步段实测 172ms
+                # （#35 归因：首 agent 解析隐式触发插件工具全量冷加载，C 步已归位）。
+                # 挪入 deferred 队列（idle, 2s）后启动直减；消费方（欢迎页/命令
+                # 面板 agent 列表）由「计划一次」重载链与单例读时兜底补刷
+                # （先例 ：1452 主线程重载改计划一次）
+                self._reload_agents_deferred = True
 
                 # ── 非关键路径：延迟到窗口就绪后执行 ──
                 # 主题刷新、插件热更新监听、LSP 初始化不需要阻塞首帧显示
@@ -308,6 +363,11 @@ class PluginHostService(QObject):
         queue = DeferredTaskQueue()
         self._deferred_queue = queue
         queue.register("reloader", self._deferred_register_reloaders, delay_ms=2000)
+        # perf: [S1-B] reload_agents 延迟任务（#36）：agents/hooks 全量重载挪出启动段；
+        # 放在 reloader 之后执行无强依赖（bind_runtime 只绑实例不读注册表），
+        # 但排在其后可保证重载器注册表先就绪（热更新链一致）
+        queue.register("reload_agents", self._deferred_reload_agents, delay_ms=2000)
+        queue.add_order_constraint("reloader", "reload_agents")
         queue.register("themes", self._deferred_reload_themes, delay_ms=2000)
         queue.register("watcher", self._deferred_start_watcher, delay_ms=2000)
         queue.register("plugin_tools_rescan", self._deferred_rescan_plugin_tools, delay_ms=2000)
@@ -375,6 +435,21 @@ class PluginHostService(QObject):
             register_builtin_reloaders(get_reloader_registry())
         except Exception as e:
             logger.error(f"[PluginHost] 内置 reloader 注册失败: {e}")
+
+    def _deferred_reload_agents(self):
+        """[S1-B] 延迟执行 agents/hooks 全量重载（原 _init_plugin_system 同步段）。
+
+        幂等性：reload_agents 全量刷新（clear + 重装），mtime 缓存命中时 ~1ms。
+        """
+        try:
+            if self._agent_manager:
+                t0 = time.perf_counter()
+                self._agent_manager.reload_agents()
+                logger.debug(
+                    f"[StartupMark] reload_agents 耗时 {(time.perf_counter() - t0) * 1000:.0f}ms（deferred）"
+                )
+        except Exception as e:
+            logger.error(f"[PluginHost] 延迟 reload_agents 失败: {e}")
 
     def _deferred_reload_themes(self):
         """刷新主题"""
@@ -2646,6 +2721,20 @@ class PluginHostService(QObject):
             removed = diff.get("removed", [])
             changed = diff.get("changed", [])
 
+            # S7：diff 点失效声明缓存——S1 去 stat 后 manifest 变更的唯一感知
+            # 通道（原靠 resolve_declared 每次取用 os.stat(path) 的 mtime 签名）。
+            # added/removed/changed 逐插件精细失效；_pool_specs 键含 declared
+            # 签名，签名不变则旧 spec 仍正确，无需全量失效。
+            if added or removed or changed:
+                try:
+                    from app.plugins.capabilities.registry import CapabilityRegistry
+
+                    _cap_reg = CapabilityRegistry.get_instance()
+                    for _p in list(added) + list(removed) + list(changed):
+                        _cap_reg.invalidate_declared(_p.name)
+                except Exception as e:
+                    logger.warning(f"[PluginHost] 能力池声明缓存失效失败: {e}")
+
             if force_full:
                 # ── 全量路径：设置面板「重载插件」显式语义 ──
                 return self._reload_all_subsystems(pm, result, result_keys)
@@ -2778,6 +2867,24 @@ class PluginHostService(QObject):
 
     def _reload_all_subsystems(self, pm, result: dict, result_keys: tuple) -> dict:
         """全量重载所有子系统（设置面板「重载插件」显式语义，force_full=True）"""
+        # S7：全量重载 = 能力池缓存与宿主绑定全面失效。invalidate_declared("")
+        # 清 declared/池规格/无 host 特例池三缓存并递增注册表版本戳；
+        # bootstrap 就绪标记复位（providers 等将随重载重新注册，原无产品调用点，
+        # 此处是 S7 补上的接线）；插件→窗口绑定登记随全量重载作废，
+        # 避免 _resolve_host 复用旧窗口死引用。
+        try:
+            from app.plugins.capabilities.bootstrap import reset_bootstrap
+            from app.plugins.capabilities.registry import CapabilityRegistry
+            from app.plugins.capabilities.resolve import forget_host
+
+            CapabilityRegistry.get_instance().invalidate_declared("")
+            reset_bootstrap()
+            for _p in pm.list_plugins():
+                forget_host(_p.name)
+            logger.info("[PluginHost] 全量重载：能力池三缓存已失效，bootstrap 已复位")
+        except Exception as e:
+            logger.warning(f"[PluginHost] 全量重载能力池失效失败: {e}")
+
         # 2. 重载 AgentManager（智能体 + hooks）
         if self._agent_manager:
             self._agent_manager.reload_agents()

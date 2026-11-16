@@ -27,6 +27,7 @@ from PyQt5.QtWidgets import (
 from qfluentwidgets import InfoBar, InfoBarPosition, ScrollArea
 
 from app.utils.design_tokens import Colors, current_theme, get_unified_scrollbar_style
+from app.utils.scroll_tuning import install_fast_wheel
 from app.utils.theme_manager import theme_manager
 from app.utils.utils import get_unified_font
 
@@ -769,6 +770,7 @@ class ShareCardContent(QWidget):
         # ── 预览区 ──
         self._preview_area = ScrollArea(self)
         self._preview_area.setWidgetResizable(True)
+        install_fast_wheel(self._preview_area)
         self._preview_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self._preview_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self._preview_area.setFrameShape(ScrollArea.NoFrame)

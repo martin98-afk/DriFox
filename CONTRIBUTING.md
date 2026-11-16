@@ -18,35 +18,40 @@ This project is a Python desktop AI assistant built with PyQt5. It has its own e
 - PyQt5-based floating window interface
 - Multi-model support (OpenAI, Claude, DeepSeek, MiniMax, Qwen)
 - Branching session management
-- Context compaction (LLM-based summarization)
+- Context management (tier-based pipeline, no lossy compaction)
 - Hook system (event-driven extensibility)
 - MCP (Model Context Protocol) support
 - Skill system (installable AI workflow modules)
 - Long-term memory (SQLite-based)
 
-**Tech Stack:** Python 3.8+, PyQt5, PyQt-Fluent-Widgets, SQLite, Loguru
+**Tech Stack:** Python 3.14+, PyQt5, PyQt-Fluent-Widgets, SQLite, Loguru
 
 ## Architecture Quick Reference
 
 ```
 DriFox/
 ├── main.py                    # Entry point
+├── cli.py                     # CLI entry
 ├── app/
 │   ├── main_widget.py         # Main window (OpenAIChatToolWindow)
-│   ├── side_dock_area.py     # Floating window container (ToolPopupDialog)
-│   ├── agents/               # Agent definitions (Markdown + YAML)
-│   ├── skills/               # Built-in skills (SKILL.md format)
-│   ├── tools/                # Tool implementations
-│   ├── core/                 # Core engine
-│   │   ├── chat_engine.py    # Context assembly & LLM calls
-│   │   ├── context_builder.py
-│   │   ├── history_compactor.py
-│   │   ├── hook_manager.py
-│   │   ├── agent.py
-│   │   └── backend.py
-│   └── widgets/              # UI components
-├── .drifox/                  # App data (sessions.db, skills, backups)
-└── requirements.txt
+│   ├── side_dock_area.py      # Floating window container (ToolPopupDialog)
+│   ├── agents/                # Agent definitions (Markdown + YAML)
+│   ├── skills/                # Built-in skills (SKILL.md format)
+│   ├── tools/                 # Tool implementations
+│   ├── core/                  # Core engine
+│   │   ├── conversation/
+│   │   │   └── backend.py     # ChatBackend: sole backend facade (HTTP+SSE / IM / card bridge)
+│   │   ├── context/           # Context tier pipeline (builder, budget, tool prune)
+│   │   ├── hooks/
+│   │   │   └── hook_manager.py
+│   │   └── agent.py
+│   ├── plugins/
+│   │   ├── contracts/         # EngineHost & capability contracts
+│   │   └── capabilities/      # Capability catalog
+│   └── widgets/               # UI components
+├── plugins/                   # System plugins (providers, tools, UI, gateways)
+├── .drifox/                   # App data (sessions.db, skills, backups)
+└── pyproject.toml + uv.lock   # Dependencies (managed with uv)
 ```
 
 ## Coding Conventions

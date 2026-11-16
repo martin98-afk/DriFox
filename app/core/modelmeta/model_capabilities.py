@@ -580,16 +580,31 @@ def resolve_context_limit(llm_config: Dict[str, Any], default: int = 128000) -> 
     """统一查找上下文窗口（tokens）。
 
     优先级（高 -> 低）：
+        L0: 声明_上下文长度（能力弹窗的用户显式声明，模型级最高优先）
         L1: llm_config 显式填的 最大Token / context_limit / 上下文长度 / max_context_tokens
         L2: 模型能力（models.dev per-model，带 provider 精确查；降级链见模块 docstring）
         L3: providers 插件声明默认 最大Token
         L4: family 能力（PROVIDER_CAPABILITIES[family].context_limit）
         兜底: default
 
+    L0 与 L1 必须并存：UI 能力胶囊走 resolve_model_capabilities（含声明层），
+    预算走本函数。漏掉 L0 会让用户在能力弹窗里填的上下文长度只改标签不改实际
+    预算（2026-11-16 用户实测「改完不生效」）。
+
     返回值始终 >= 1。
     """
     if not isinstance(llm_config, dict):
         return max(1, int(default))
+
+    # L0: 能力声明（声明_上下文长度）
+    declared_value = llm_config.get("声明_上下文长度")
+    if declared_value not in (None, ""):
+        try:
+            declared_limit = int(declared_value)
+        except (ValueError, TypeError):
+            declared_limit = 0
+        if declared_limit > 0:
+            return declared_limit
 
     # L1: 显式值
     for key in _CONTEXT_LIMIT_KEYS:

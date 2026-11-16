@@ -692,14 +692,20 @@ class UIEngine(BaseEngine):
         model = str(llm_config.get("模型名称", "gpt-4o") or "gpt-4o")
         # 本地估算校正系数（除数）：服务商能力 > app.config 覆盖 > 模型名兜底
         ratio = resolve_token_ratio(llm_config, model)
+        # 预算先行：既是缓存键的一部分（见下），也是 percent 分母
+        budget_tokens = max(1, self._conversation_core.context_builder.get_context_budget(llm_config))
 
-        # [PERF] 快照级缓存：键含消息版本/模型/权威值/系统提示，命中即返回拷贝。
+        # [PERF] 快照级缓存：键含消息版本/模型/权威值/系统提示/预算，命中即返回拷贝。
         # 背景：下方 project_for_ui（全量消息过 8 层 tier）+ 逐条 token 估算 +
         # breakdown 重算全部在主线程；消费方 _refresh_context_usage_indicator
         # 每轮落定/每工具结果后都调（500ms 节流只限频不限量），长会话线性劣化。
         # session._messages_version 由 set_messages/append 等写入口 bump，
         # 键不匹配即失效，无 TTL 也正确；校准因子 EMA 写回属副作用，同版本
         # 重复调用跳过无碍（同一观测不二次并入）。
+        # ⚠ budget_tokens / ratio 必须入键：二者来自 llm_config（用户改「上下文长度」/
+        # 声明_上下文长度），与消息版本、模型名、系统提示都不挂钩。漏掉会让改配置后
+        # 未发新消息时永久命中旧快照，圆环预算停在旧值，只有新建标签页（新 engine →
+        # 空缓存）才恢复（2026-11-16 用户实测）。
         _cache_key = (
             id(session),
             getattr(session, "_messages_version", 0),
@@ -708,16 +714,12 @@ class UIEngine(BaseEngine):
             from_api,
             len(session.messages),
             hash(system_prompt),
+            budget_tokens,
+            ratio,
         )
         _cached = getattr(self, "_ctx_usage_cache", None)
         if _cached and _cached.get("key") == _cache_key and _cached.get("value") is not None:
-            _snap = _cached["value"]
-            # 浅重建：防消费方（ring.set_usage）原地修改缓存内的 breakdown/compaction
-            return {
-                **_snap,
-                "compaction": dict(_snap.get("compaction", {}) or {}),
-                "breakdown": [dict(b) for b in (_snap.get("breakdown") or [])],
-            }
+            return self._snapshot_copy(_cached["value"])
 
         # S2: 上下文投影（ui stage）— 与 send stage 共用同一 cascade，
         # 保证「UI 估算 = 实际发送量」是结构性一致，不再手工重复截断。
@@ -752,8 +754,6 @@ class UIEngine(BaseEngine):
         else:
             tools_tokens = int(count_tools_tokens(available_tools, model, ratio)) if available_tools else 0
             _cache.update({"key": _token_key, "tokens": tools_tokens, "timestamp": _time.monotonic()})
-
-        budget_tokens = max(1, self._conversation_core.context_builder.get_context_budget(llm_config))
         # 估算总量：系统提示 + 全部消息 + 工具定义（含模型分词校正系数）
         # est_total = sum(per_message_tokens) + tools_tokens，保证与下方 breakdown 之和
         # 内部自洽（scale 等比缩放基线准确）。
@@ -882,7 +882,22 @@ class UIEngine(BaseEngine):
             "pruned_tokens": pruned_tokens,
         }
         self._ctx_usage_cache = {"key": _cache_key, "value": snapshot}
-        return snapshot
+        return self._snapshot_copy(snapshot)
+
+    @staticmethod
+    def _snapshot_copy(snapshot: Dict[str, Any]) -> Dict[str, Any]:
+        """快照浅重建（含嵌套 breakdown/compaction 拷贝）。
+
+        缓存的写入值与返回值必须隔离：消费方（ring.set_usage / tooltip）会原地
+        改写 breakdown 等字段，直接回传缓存对象会反向污染缓存，之后每个命中者
+        都拿到脏值（2026-11-16 回归测试发现）。
+        """
+        snap = snapshot or {}
+        return {
+            **snap,
+            "compaction": dict(snap.get("compaction", {}) or {}),
+            "breakdown": [dict(b) for b in (snap.get("breakdown") or [])],
+        }
 
     @staticmethod
     def _update_token_calibration(session, model: str, observed_ratio: float) -> None:
