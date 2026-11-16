@@ -4301,11 +4301,13 @@ class TabPanel(QWidget):
         """移除指定索引的 Tab"""
         if 0 <= index < len(self._items):
             item = self._items.pop(index)
-            # 如果该 tab 正在流式/报错，递减计数
+            # 移除标签时同步全部动画状态，避免等待回答计数残留导致空闲定时器空转。
             if item._streaming:
                 self._streaming_count = max(0, self._streaming_count - 1)
             if item._stream_error:
                 self._error_count = max(0, self._error_count - 1)
+            if item._question:
+                self._question_count = max(0, self._question_count - 1)
             if self._streaming_count + self._question_count + self._error_count == 0:
                 self._stop_anim_timer()
             self._list_layout.removeWidget(item)

@@ -3511,7 +3511,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 self.chat_layout.setAlignment(Qt.AlignBottom)
                 self.chat_scroll_area.setWidget(self.chat_container)
                 # 与 chat_area_module 同一口径：关平滑、保留加速（见 scroll_tuning）
-                install_fast_wheel(self.chat_scroll_area)
+                install_fast_wheel(self.chat_scroll_area, native_scrollbar=False, smooth_ms=0)
 
                 # 连接滚动事件，触发虚拟滚动回收
                 scroll_bar = self.chat_scroll_area.verticalScrollBar()

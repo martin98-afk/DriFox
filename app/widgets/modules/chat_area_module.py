@@ -87,7 +87,7 @@ class ChatAreaModule(UIModule):
         host.chat_scroll_area.setWidget(host.chat_container)
         # 聊天区同样关掉平滑动画：流式期每帧逐帧滚动会把整视口重绘叠加到
         # 渲染负载上；接管器保留连续滚轮加速，一次 setValue 到位。
-        install_fast_wheel(host.chat_scroll_area)
+        install_fast_wheel(host.chat_scroll_area, native_scrollbar=False, smooth_ms=0)
 
         # 连接滚动事件（虚拟滚动回收）
         try:

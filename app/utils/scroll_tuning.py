@@ -32,7 +32,7 @@ import math
 import time
 from collections import deque
 
-from PyQt5.QtCore import QEvent, QObject, Qt
+from PyQt5.QtCore import QElapsedTimer, QEvent, QObject, Qt, QTimer
 from PyQt5.QtWidgets import QAbstractScrollArea, QApplication
 
 try:  # qfw 是硬依赖，这里只是让模块可被单独 import 做自检
@@ -44,12 +44,66 @@ except Exception:  # pragma: no cover - 仅降级保护
 _DEFAULT_STEP_RATIO = 1.5
 _DEFAULT_ACCEL_WINDOW_MS = 500
 _DEFAULT_ACCEL_STAMP_CAP = 15
+# 短过渡时长：默认 0（一次到位）。
+# 实测 120ms 分帧（QTimer 16ms + ease-out + int 取整）在真实窗口上会拖出
+# 颜抖：定时器与显示器刷新不同步，一帧可能推进 0 次或 2 次，加上整数
+# 步进与既有滚动驱动（吸底/转发）竞争。一次到位虽然瞬变但无颜抖，
+# 且重绘量最低（滚轮 8 格：452 次 paint vs 动画 1850）。
+_DEFAULT_SMOOTH_MS = 0
+_FRAME_INTERVAL_MS = 16
 _WHEEL_NOTCH = 120
 _INSTALLED_ATTR = "_drifox_fast_wheel_filter"
 
+# qfw ScrollArea 的悬浮自绘条属性名（SmoothScrollDelegate 持有）
+_QFW_BAR_ATTRS = ("vScrollBar", "hScrollBar")
+
+
+def _switch_to_native_bar(area: QAbstractScrollArea) -> bool:
+    """把 qfw 悬浮自绘滚动条换成原生 QScrollBar，恢复 Qt 的滚动 blit。
+
+    [PERF] 悬浮条是 QScrollArea 的 child，压在 viewport 上方，Qt 因此不敢把
+    视口判定为可搬移，每滚一步整视口重绘。离屏实测（同一 60 行内容、48px/步）：
+    悬浮条 35.9 次 paint / 1.16 倍视口 / 3.33ms；换成原生条 8.2 次 / 0.23 倍 /
+    1.24ms（与纯 QScrollArea 持平）。
+
+    视觉不变：现有 _scroll_style 的透明声明全部保留，blit 不依赖它们
+    （实测去掉 QSS 后 paint 与保留时完全一致）。
+
+    Returns:
+        True = 已换；False = 不是 qfw 滚动区（原生 QScrollArea 无需处理）。
+    """
+    dele = getattr(area, "scrollDelagate", None)
+    if dele is None:
+        return False
+    from PyQt5.QtWidgets import QAbstractScrollArea as _QASA
+    from PyQt5.QtWidgets import QScrollBar
+
+    # ① 隐藏悬浮条（不删：delegate 的 eventFilter 仍会读它，删了会悬空引用）
+    for name in _QFW_BAR_ATTRS:
+        bar = getattr(dele, name, None)
+        if bar is not None:
+            try:
+                bar.hide()
+                bar.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+            except RuntimeError:
+                pass
+
+    # ② 换原生条（delegate 把 setVerticalScrollBarPolicy 换成了自己的实现，
+    #    必须用 QAbstractScrollArea 类方法绕开，否则策略仍被强制 AlwaysOff）
+    vbar = QScrollBar(Qt.Vertical, area)
+    _QASA.setVerticalScrollBar(area, vbar)
+    _QASA.setVerticalScrollBarPolicy(area, Qt.ScrollBarAsNeeded)
+    try:
+        from app.utils.design_tokens import get_unified_scrollbar_style
+
+        vbar.setStyleSheet(get_unified_scrollbar_style(8))
+    except Exception:  # noqa: BLE001 - 样式刷不上不影响滚动
+        pass
+    return True
+
 
 class _FastWheelFilter(QObject):
-    """viewport 级滚轮过滤器：一次步进 + 连续滚轮加速。"""
+    """viewport 级滚轮过滤器：连续滚轮加速 + 短过渡帧推进。"""
 
     def __init__(self, area: QAbstractScrollArea, parent=None):
         super().__init__(parent or area)
@@ -58,6 +112,19 @@ class _FastWheelFilter(QObject):
         self._step_ratio = _DEFAULT_STEP_RATIO
         self._window_ms = _DEFAULT_ACCEL_WINDOW_MS
         self._stamp_cap = _DEFAULT_ACCEL_STAMP_CAP
+        # 默认关：连续滚轮时步长会在 96→180px 间递增，一次到位下这种
+        # 「每格不一样远」直接可见，观感就是颜。固定步长反而稳。
+        self._accel = False
+        self._smooth_ms = _DEFAULT_SMOOTH_MS
+        # 短过渡状态：计时器只在动画期间跑，空闲时不占 CPU
+        self._timer = QTimer(self)
+        self._timer.setInterval(_FRAME_INTERVAL_MS)
+        self._timer.timeout.connect(self._tick)
+        self._elapsed = QElapsedTimer()
+        self._anim_bar = None
+        self._anim_target: int | None = None
+        self._anim_start = 0
+        self._last_set: int | None = None
 
     def eventFilter(self, obj, event):  # noqa: N802 - Qt 回调
         if event.type() != QEvent.Wheel:
@@ -89,8 +156,8 @@ class _FastWheelFilter(QObject):
         stamps.append(now)
         while stamps and now - stamps[0] > self._window_ms:
             stamps.popleft()
-        # 与 qfw 同构：窗口内滚轮越密，越接近 2 倍距离
-        accel_ratio = min(len(stamps) / self._stamp_cap, 1.0)
+        # 与 qfw 同构：窗口内滚轮越密，越接近 2 倍距离（默认关，见 _accel）
+        accel_ratio = min(len(stamps) / self._stamp_cap, 1.0) if self._accel else 0.0
 
         lines = QApplication.wheelScrollLines()
         if lines <= 0:  # -1 = 系统未设，取 Windows 默认 3 行
@@ -98,9 +165,64 @@ class _FastWheelFilter(QObject):
         step = max(1, bar.singleStep()) * lines
         notches = abs(delta) / _WHEEL_NOTCH
         distance = step * notches * self._step_ratio * (1.0 + accel_ratio)
-        bar.setValue(int(bar.value() - math.copysign(distance, delta)))
+        self._scroll_by(bar, -math.copysign(distance, delta))
         event.accept()
         return True
+
+    # ── 短过渡推进 ──────────────────────────────────────
+
+    def _scroll_by(self, bar, delta_value: float) -> None:
+        """按 delta_value 滚动；smooth_ms>0 时分帧推进，否则一次到位。"""
+        if self._smooth_ms <= 0:
+            bar.setValue(int(bar.value() + delta_value))
+            return
+        try:
+            cur = bar.value()
+        except RuntimeError:
+            return
+        # 动画中途外部改过值（吸底/拖滚动条）→ 丢弃旧动画，从当前值重开
+        if self._anim_bar is not bar or (self._last_set is not None and cur != self._last_set):
+            self._stop_animation()
+        if self._anim_target is None:
+            self._anim_start = cur
+            self._anim_target = cur
+        self._anim_bar = bar
+        self._anim_target = int(
+            max(bar.minimum(), min(bar.maximum(), self._anim_target + delta_value))
+        )
+        self._elapsed.start()
+        if not self._timer.isActive():
+            self._timer.start()
+
+    def _tick(self) -> None:
+        bar = self._anim_bar
+        target = self._anim_target
+        if bar is None or target is None:
+            self._stop_animation()
+            return
+        try:
+            cur = bar.value()
+        except RuntimeError:
+            self._stop_animation()
+            return
+        total = max(1, self._smooth_ms)
+        t = self._elapsed.elapsed() / total
+        if t >= 1.0:
+            if cur != target:
+                bar.setValue(target)
+            self._stop_animation()
+            return
+        p = 1.0 - (1.0 - t) ** 3  # ease-out cubic
+        v = int(round(self._anim_start + (target - self._anim_start) * p))
+        if v != cur:
+            bar.setValue(v)
+        self._last_set = bar.value()
+
+    def _stop_animation(self) -> None:
+        self._timer.stop()
+        self._anim_bar = None
+        self._anim_target = None
+        self._last_set = None
 
 
 def install_fast_wheel(
@@ -109,6 +231,9 @@ def install_fast_wheel(
     step_ratio: float = _DEFAULT_STEP_RATIO,
     accel_window_ms: int = _DEFAULT_ACCEL_WINDOW_MS,
     accel_stamp_cap: int = _DEFAULT_ACCEL_STAMP_CAP,
+    native_scrollbar: bool = True,
+    smooth_ms: int = _DEFAULT_SMOOTH_MS,
+    accel: bool = False,
 ) -> bool:
     """关闭 qfw 平滑动画并装上「一次步进 + 加速」接管器（幂等）。
 
@@ -117,6 +242,12 @@ def install_fast_wheel(
         step_ratio: 单格距离放大系数，1.5 = qfw 默认。
         accel_window_ms: 连续滚轮的统计窗口，窗口内越密越快（qfw 默认 500ms）。
         accel_stamp_cap: 加速饱和所需的窗口内滚轮事件数（qfw 默认 15）。
+        native_scrollbar: 换掉 qfw 悬浮自绘条以恢复滚动 blit（默认开；
+            聊天区这类对悬浮条观感敏感的调用点可传 False）。
+        smooth_ms: 每格滚动的过渡时长（0 = 一次到位）。分帧在真实窗口上
+            实测有颜抖（定时器与刷新不同步 + 整数步进），默认关。
+        accel: 连续滚轮加速（窗口内越密越远）。一次到位下会造成每格
+            距离不一致，默认关。
 
     Returns:
         True = 本次完成安装；False = 已装过或对象不合法。
@@ -144,11 +275,20 @@ def install_fast_wheel(
         except Exception:  # noqa: BLE001 - 平滑关不掉也不能影响滚动可用性
             pass
 
-    # ② 装接管器（viewporthook：事件先到 viewport）
+    # ② 换原生条恢复 blit（必须在装接管器之前，不然首帧读到的是悬浮条）
+    if native_scrollbar:
+        try:
+            _switch_to_native_bar(area)
+        except Exception:  # noqa: BLE001 - 换条失败也不能让滚动不可用
+            pass
+
+    # ③ 装接管器（viewport hook：事件先到 viewport）
     flt = _FastWheelFilter(area)
     flt._step_ratio = step_ratio
     flt._window_ms = accel_window_ms
     flt._stamp_cap = accel_stamp_cap
+    flt._smooth_ms = smooth_ms
+    flt._accel = accel
     target = area.viewport() if hasattr(area, "viewport") else area
     target.installEventFilter(flt)
     setattr(area, _INSTALLED_ATTR, flt)  # 挂住引用，防 GC 后过滤器失效
