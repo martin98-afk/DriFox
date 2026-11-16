@@ -661,8 +661,7 @@ class _TeamGroupCard(QFrame):
 
     def __init__(self, group: Dict, parent=None, is_current: bool = False):
         super().__init__(parent)
-        # 兼容两种来源：set_team_groups 老格式（run_id）/ 合并条目新格式（team_run_id）
-        self._run_id = group.get("run_id") or group.get("team_run_id") or ""
+        self._run_id = group.get("team_run_id") or ""
         self._members: List[Dict] = []
         self._members_visible = False
         self._last_time = group.get("last_time", "")
@@ -905,7 +904,7 @@ class _TeamGroupCard(QFrame):
 
     def update_group(self, group: Dict):
         """增量刷新团队合并条目（团队名/时间/成员·轮数标签/预览/成员列表）"""
-        self._run_id = group.get("run_id", self._run_id)
+        self._run_id = group.get("team_run_id", self._run_id)
         team_name = group.get("team_name") or "团队对话"
         self.title_label.setText(f"👥 {team_name}")
 
@@ -920,12 +919,8 @@ class _TeamGroupCard(QFrame):
         preview = group.get("preview", "") or ""
         self._ensure_preview_label(preview)
 
-        # 成员列表：展开区数据刷新
-        # 🛡️ 兼容旧格式（set_team_groups 传 run_id/agent_names，无 members）：
-        # 从 agent_names 兜底构造最小成员记录，保证展开区至少显示成员名
+        # 成员列表：展开区数据刷新（数据层 merge_team 条目恒带 members）
         members = group.get("members") or []
-        if not members:
-            members = [{"agent_name": a} for a in (group.get("agent_names") or []) if a]
         self._members = [dict(m) for m in members if isinstance(m, dict)]
         if self._members_visible:
             self._rebuild_member_rows()
@@ -995,11 +990,7 @@ class HistoryCard(QWidget):
         self._current_project: Optional[str] = None  # 当前过滤的项目
         self._search_filter: str = ""  # 搜索过滤文本
 
-        # === 团队对话分组（方案 A：按 run_id 分组的历史会话） ===
-        # 每项: {"run_id": str, "team_name": str, "agent_names": [str], "last_time": str}
-        # 由 main_widget 从 history_list 的团队字段组装后注入
-        self._team_groups: List[Dict] = []
-        # run_id → 团队分组卡片缓存（避免重复创建 widget）
+        # run_id → 团队合并条目卡片缓存（避免重复创建 widget）
         self._cached_team_cards: Dict[str, QWidget] = {}
 
         # === 分页控制 ===
@@ -1366,34 +1357,6 @@ class HistoryCard(QWidget):
             return
         self._update_display()
 
-    def set_team_groups(self, teams: List[Dict]):
-        """设置团队对话分组数据（方案 A）
-
-        # TODO: deprecated, remove with TestBuildTeamGroups
-        # M4 混排后无业务调用方（main_widget 改用 get_history_list(merge_team=True)
-        # 混排渲染），仅保留供旧测试引用。
-
-        Args:
-            teams: 按 run_id 分组的团队信息列表，每项:
-                {"run_id": str, "team_name": str, "agent_names": [str],
-                 "last_time": str, "session_count": int}
-            由 main_widget 从 history_list 的团队字段组装后传入。
-        """
-        self._team_groups = list(teams or [])
-        # 🛡️ 清理已不在新分组列表中的缓存 key：避免团队解散/分组消失后
-        # 旧卡片仍残留缓存，下次渲染时复用过期成员胶囊。
-        new_run_ids = {g.get("run_id", "") for g in self._team_groups}
-        stale_keys = [k for k in self._cached_team_cards if k not in new_run_ids]
-        for k in stale_keys:
-            card = self._cached_team_cards.pop(k, None)
-            if card is not None:
-                try:
-                    card.deleteLater()
-                except Exception:
-                    pass
-        if self._current_tab == "history":
-            self._update_display()
-
     def remove_session_card(self, session_id: str) -> bool:
         """手术式删除单个历史会话卡片，避免全量刷新。
 
@@ -1632,8 +1595,7 @@ class HistoryCard(QWidget):
                 group = item[1]
                 # 队列第 4 位 = 是否当前会话（渲染层判定，不写回源 dict）
                 is_current = item[3] if len(item) > 3 else False
-                # 兼容两种来源：set_team_groups 老格式（run_id）/ 合并条目新格式（team_run_id）
-                run_id = group.get("run_id") or group.get("team_run_id") or ""
+                run_id = group.get("team_run_id") or ""
                 card = self._cached_team_cards.get(run_id)
                 if card is None:
                     card = _TeamGroupCard(group, self, is_current=is_current)

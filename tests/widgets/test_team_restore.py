@@ -1,16 +1,16 @@
 # -*- coding: utf-8 -*-
-"""方案 A 阶段 3：历史面板团队分组 + 一键恢复逻辑测试
+"""历史面板团队恢复逻辑测试
 
 覆盖：
-1. main_widget._build_team_groups：按 run_id 聚合、agent 去重、按 last_time 倒序、
-   无 run_id 会话跳过
-2. tab_manager_window._resolve_tab_team_id：run_id 优先、回落 team_name、非团队空
-3. HistoryCard 团队分组渲染：set_team_groups 注入 + teamRestoreRequested 信号
-4. main_widget._on_team_restore_requested：按 run_id 收集会话、创建窗口、
+1. tab_manager_window._resolve_tab_team_id：run_id 优先、回落 team_name、非团队空
+2. HistoryCard 团队合并条目（history-manager 插件，按文件路径加载）：
+   teamRestoreRequested 信号存在性、恢复按钮 emit、update_group 成员增量刷新（F6 回归）
+3. main_widget._on_team_restore_requested：按 run_id 收集会话、创建窗口、
    注入恢复数据、join_team（mock 窗口创建与 history_manager）
 """
 
 import sys
+from pathlib import Path
 
 import pytest
 from PyQt5.QtCore import Qt
@@ -21,16 +21,6 @@ def _ensure_qapp():
     """确保 QApplication 可用"""
     return QApplication.instance() or QApplication(sys.argv)
 
-
-def _make_window_with_teams():
-    """构造一个带 _build_team_groups 的轻量替身（不实例化完整 UI）。
-
-    _build_team_groups 是纯数据方法（不依赖 UI 状态），直接用 object 绑定
-    main_widget 的模块级辅助逻辑即可——此处以 mock 方式验证分组逻辑。
-    """
-    from types import SimpleNamespace
-
-    return SimpleNamespace()
 
 
 def _history_samples():
@@ -83,40 +73,29 @@ def _history_samples():
     ]
 
 
-class TestBuildTeamGroups:
-    def test_groups_by_run_id(self):
-        """按 run_id 聚合分组"""
-        from app.main_widget import OpenAIChatToolWindow
 
-        # 直接用绑定方法（_build_team_groups 不依赖 self 状态）
-        groups = OpenAIChatToolWindow._build_team_groups(None, _history_samples())
-        run_ids = [g["run_id"] for g in groups]
-        assert run_ids == ["run-3", "run-2", "run-1"], "应按最后活跃时间倒序"
-
-    def test_agent_names_dedup(self):
-        """同组角色去重"""
-        from app.main_widget import OpenAIChatToolWindow
-
-        groups = OpenAIChatToolWindow._build_team_groups(None, _history_samples())
-        run1 = next(g for g in groups if g["run_id"] == "run-1")
-        assert run1["agent_names"] == ["build", "plan"], "run-1 应含 build+plan"
-        assert run1["session_count"] == 2
-
-    def test_no_run_id_sessions_excluded(self):
-        """无 run_id 会话不进分组"""
-        from app.main_widget import OpenAIChatToolWindow
-
-        groups = OpenAIChatToolWindow._build_team_groups(None, _history_samples())
-        run_ids = [g["run_id"] for g in groups]
-        assert "run-1" in run_ids and "run-2" in run_ids and "run-3" in run_ids
-        assert len(run_ids) == 3, "4 条记录中 3 个团队组（s4 非团队跳过）"
-
-    def test_empty_input(self):
-        """空列表返回空分组"""
-        from app.main_widget import OpenAIChatToolWindow
-
-        assert OpenAIChatToolWindow._build_team_groups(None, []) == []
-
+def _team_entry(run_id="run-9", agents=("build",)):
+    """构造数据层团队合并条目（M4 新格式：merge_team=True 轻量条目）"""
+    return {
+        "team_run_id": run_id,
+        "team_name": "dev",
+        "agent_names": list(agents),
+        "member_count": len(agents),
+        "message_count": len(agents),
+        "team_merged": True,
+        "session_id": f"{run_id}-latest",
+        "last_time": "2026-01-01 10:00:00",
+        "preview": "团队首问",
+        "members": [
+            {
+                "session_id": f"{run_id}-{a}",
+                "title": f"{a} 会话",
+                "agent_name": a,
+                "last_time": "2026-01-01 10:00:00",
+            }
+            for a in agents
+        ],
+    }
 
 class TestResolveTabTeamId:
     def test_team_run_id_priority(self):
@@ -153,75 +132,76 @@ class TestResolveTabTeamId:
         assert TabManagerWindow._resolve_tab_team_id(_Win()) == ""
 
 
+
+def _load_history_card_module():
+    """按文件路径加载 history-manager 插件的 history_card 模块（目录名带连字符）"""
+    import importlib.util
+
+    path = (
+        Path(__file__).resolve().parents[2]
+        / "plugins" / "history-manager" / "ui" / "history_card.py"
+    )
+    spec = importlib.util.spec_from_file_location("team_restore_history_card", str(path))
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules.setdefault("team_restore_history_card", mod)
+    spec.loader.exec_module(mod)
+    return mod
+
 class TestHistoryCardTeamGroups:
+    """history-manager 插件的团队合并条目（目录名带连字符，按文件路径加载）"""
+
     def test_signal_exists(self):
         """HistoryCard 应有 teamRestoreRequested 信号"""
         _ensure_qapp()
-        from app.widgets.cards.settings.history_card import HistoryCard
-
-        card = HistoryCard()
+        mod = _load_history_card_module()
+        card = mod.HistoryCard()
         assert hasattr(card, "teamRestoreRequested")
         assert "teamRestoreRequested" in [s for s in dir(card) if "teamRestore" in s]
 
-    def test_set_team_groups_stores(self):
-        """set_team_groups 存储数据"""
-        _ensure_qapp()
-        from app.widgets.cards.settings.history_card import HistoryCard
-
-        card = HistoryCard()
-        groups = [
-            {"run_id": "r1", "team_name": "t1", "agent_names": ["build"], "last_time": "2026-01-01"},
-        ]
-        card.set_team_groups(groups)
-        assert card._team_groups == groups
-
     def test_team_group_card_emits_restore(self):
-        """点击恢复按钮发射 restoreRequested(run_id)"""
+        """恢复按钮点击发射 restoreRequested(run_id)"""
         _ensure_qapp()
-        from app.widgets.cards.settings.history_card import _TeamGroupCard
-
-        card = _TeamGroupCard({"run_id": "run-9", "team_name": "dev", "agent_names": ["build"]})
+        mod = _load_history_card_module()
+        card = mod._TeamGroupCard(_team_entry())
         # 直接连接信号捕获参数（不依赖 qtbot）
         captured = []
         card.restoreRequested.connect(captured.append)
         card.restoreRequested.emit("run-9")
         assert captured == ["run-9"]
 
-    def test_team_group_card_update_group_refreshes_capsules(self):
+    def test_team_group_card_update_group_refreshes_members(self):
         """update_group 增量刷新成员数据（F6 回归：UI 成员 4→1 修复）。
 
-        M4 改造：角色胶囊改为展开区成员行（默认收起）。update_group 必须
-        同步元信息/成员列表；展开时渲染成员行（角色+标题），成员变化后
-        展开区刷新，否则 UI 成员与实际不一致。
+        数据用数据层 merge_team 合并条目（M4 新格式）；成员元信息与
+        展开区成员行必须随 members 变化同步刷新，否则 UI 与实际不一致。
         """
         _ensure_qapp()
-        from app.widgets.cards.settings.history_card import _TeamGroupCard
-
-        card = _TeamGroupCard({"run_id": "run-9", "team_name": "dev", "agent_names": ["build"]})
+        mod = _load_history_card_module()
+        card = mod._TeamGroupCard(_team_entry("run-9", ["build"]))
         # 默认收起：元信息显示 1 位成员，无成员行
         texts_1 = [lbl.text() for lbl in card.findChildren(QLabel)]
-        assert any("1 位成员" in t for t in texts_1)
+        assert any("1人" in t for t in texts_1)
         assert "build" not in texts_1, "收起状态下不应有成员行"
 
         # 展开 → 渲染成员行（build 胶囊）
         card._toggle_members()
+        QApplication.processEvents()
         texts_2 = [lbl.text() for lbl in card.findChildren(QLabel)]
         assert "build" in texts_2, "展开后应显示成员行 build"
 
         # 更新为 build + plan + review 三个成员
-        card.update_group({"run_id": "run-9", "team_name": "dev", "agent_names": ["build", "plan", "review"]})
+        card.update_group(_team_entry("run-9", ["build", "plan", "review"]))
         QApplication.processEvents()  # 处理旧成员行 deleteLater
         texts_3 = [lbl.text() for lbl in card.findChildren(QLabel)]
-        assert any("3 位成员" in t for t in texts_3), "元信息应刷新为 3 位成员"
+        assert any("3人" in t for t in texts_3), "元信息应刷新为 3 位成员"
         assert "build" in texts_3 and "plan" in texts_3 and "review" in texts_3, "展开区应刷新为 3 个成员行"
 
         # 成员减少也应生效（清理后只剩 build）
-        card.update_group({"run_id": "run-9", "team_name": "dev", "agent_names": ["build"]})
+        card.update_group(_team_entry("run-9", ["build"]))
         QApplication.processEvents()  # 处理旧成员行 deleteLater
         texts_4 = [lbl.text() for lbl in card.findChildren(QLabel)]
-        assert any("1 位成员" in t for t in texts_4)
+        assert any("1人" in t for t in texts_4)
         assert "build" in texts_4 and "plan" not in texts_4 and "review" not in texts_4, "成员行应随成员减少刷新"
-
 
 class TestTeamRestoreLogic:
     def test_restore_collects_by_run_id(self):
@@ -1723,9 +1703,9 @@ class TestTeamMergedCard:
     def test_card_click_toggles_expand_not_restore(self):
         """B-1：点击卡片只切换展开/收起，不再触发 restoreRequested。"""
         _ensure_qapp()
-        from app.widgets.cards.settings.history_card import _TeamGroupCard
+        mod = _load_history_card_module()
 
-        card = _TeamGroupCard(self._merged_entry())
+        card = mod._TeamGroupCard(self._merged_entry())
         restored = []
         card.restoreRequested.connect(restored.append)
         # 模拟鼠标左键点击卡片空白区
@@ -1744,9 +1724,9 @@ class TestTeamMergedCard:
     def test_card_expand_shows_member_rows(self):
         """B-1：展开后渲染成员行（角色+标题），点击成员行发 memberSelected。"""
         _ensure_qapp()
-        from app.widgets.cards.settings.history_card import _TeamGroupCard
+        mod = _load_history_card_module()
 
-        card = _TeamGroupCard(self._merged_entry())
+        card = mod._TeamGroupCard(self._merged_entry())
         selected = []
         card.memberSelected.connect(selected.append)
         card._toggle_members()
@@ -1769,7 +1749,7 @@ class TestTeamMergedCard:
         "build" 无法辨认。
         """
         _ensure_qapp()
-        from app.widgets.cards.settings.history_card import _TeamGroupCard
+        mod = _load_history_card_module()
 
         members = [
             {
@@ -1793,7 +1773,7 @@ class TestTeamMergedCard:
                 "last_time": "2026-01-03 10:00:00",
             },
         ]
-        card = _TeamGroupCard(self._merged_entry(members=members))
+        card = mod._TeamGroupCard(self._merged_entry(members=members))
         card._toggle_members()
         texts = [lbl.text() for lbl in card.findChildren(QLabel)]
         # T3 渲染：window_id 前缀 win_ 简写为 w → build·w02 / build·w03
@@ -1807,9 +1787,9 @@ class TestTeamMergedCard:
     def test_archive_button_emits_archive_requested(self):
         """B-4：归档按钮发 archiveRequested(run_id)。"""
         _ensure_qapp()
-        from app.widgets.cards.settings.history_card import _TeamGroupCard
+        mod = _load_history_card_module()
 
-        card = _TeamGroupCard(self._merged_entry())
+        card = mod._TeamGroupCard(self._merged_entry())
         captured = []
         card.archiveRequested.connect(captured.append)
         # 直接 emit（按钮 click 已 connect 到 lambda emit）
@@ -1819,18 +1799,18 @@ class TestTeamMergedCard:
     def test_preview_shows_first_question(self):
         """B-1：预览行显示团队首问。"""
         _ensure_qapp()
-        from app.widgets.cards.settings.history_card import _TeamGroupCard
+        mod = _load_history_card_module()
 
-        card = _TeamGroupCard(self._merged_entry(preview="首问：实现登录"))
+        card = mod._TeamGroupCard(self._merged_entry(preview="首问：实现登录"))
         texts = [lbl.text() for lbl in card.findChildren(QLabel)]
         assert any("首问：实现登录" in t for t in texts), "预览行应显示首问文本"
 
     def test_mixed_render_queue_places_team_card_inline(self):
         """B-2：渲染队列中合并条目与普通会话混排（团队卡插入普通条目同位置）。"""
         _ensure_qapp()
-        from app.widgets.cards.settings.history_card import HistoryCard
+        mod = _load_history_card_module()
 
-        card = HistoryCard()
+        card = mod.HistoryCard()
         card._prepare_history_render_queue()
         # 混入合并条目 + 普通会话（同一日期分组内）
         merged = self._merged_entry()

@@ -756,7 +756,7 @@ class SessionRepository:
             # （O(N)→O(1)），复用 _schedule_commit 攒批窗口、不自行 commit
             # （避免提前提交主 blob 破坏时序）；根因=execute_sql 只有
             # cursor.execute 无批量分支，本任务硬边界禁改 db_manager，故批量
-            # 落在仓储内（同 memory_repository.py 先例）。批量失败则回滚
+            # 落在仓储内（同仓储内既有先例）。批量失败则回滚
             # SAVEPOINT 并降级逐条，保持原「单条失败静默跳过、不冒泡」语义。
             sql = (
                 "INSERT OR REPLACE INTO session_msg_extras (session_id, msg_idx, field, value) "

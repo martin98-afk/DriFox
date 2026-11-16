@@ -6,7 +6,7 @@
 那类由批次 3 修复者随修复以 TDD 方式写入，避免当前工作树出现预期红用例。
 
 覆盖：
-- MemoryRepository / SubAgentLogRepository / ProjectWorkdirRepository 建表迁移幂等
+- SubAgentLogRepository / ProjectWorkdirRepository 建表迁移幂等
 - SessionRepository 的 extras 全删全插语义、主 blob 与 extras 合并一致性
 - freelist 回收开关不改变会话内容
 - vision data:image 落盘 → 引用块 → 回读字节级往返
@@ -102,81 +102,6 @@ def _fresh_db(tmp_path: Path):
 
 
 # ── 一、重复 DDL / 必抛 ALTER 的幂等行为 ──
-
-def test_memory_ensure_table_repeated_keeps_crud_identical(store):
-    """锁住：重复 _ensure_table（含旧表迁移路径）不改变记忆 CRUD 结果。"""
-    from app.core.store.memory_repository import MemoryRepository
-
-    repo = MemoryRepository(store._db)
-    for _ in range(3):
-        assert repo._ensure_table() is True
-
-    assert repo.save({"id": "m1", "content": "记忆一", "confidence": 0.9, "source": "manual"}) is True
-    assert repo.save({"id": "m2", "content": "记忆二", "confidence": 0.4, "enabled": False}) is True
-    assert repo._ensure_table() is True  # 优化点常落在建表路径，重复调用不得吞数据
-
-    loaded = repo.get("m1")
-    assert loaded["id"] == "m1"
-    assert loaded["content"] == "记忆一"
-    assert loaded["confidence"] == 0.9
-    assert loaded["enabled"] is True
-    assert repo.get("m2")["enabled"] is False
-    # 条数用 load_all 的长度锁定：count() 的返回形态随 DatabaseManager 的
-    # row_factory 变化，不属于本护栏要锁的行为契约。
-    assert len(repo.load_all(limit=10, include_disabled=True)) == 2
-    # 逐字段比对 load_all：排序口径（confidence DESC）与字段集合也要一致
-    assert [m["id"] for m in repo.load_all(limit=10, include_disabled=True)] == ["m1", "m2"]
-    assert repo.update("m1", "记忆一改") is True
-    assert repo.get("m1")["content"] == "记忆一改"
-    assert repo.delete("m2") is True
-    assert repo.get("m2") is None
-    assert len(repo.load_all(limit=10, include_disabled=True)) == 1
-
-
-def test_memory_legacy_table_present_keeps_rows_and_new_table_usable(tmp_path):
-    """锁住：旧 memories 表并存时，重复 _ensure_table 不改动旧表数据，新表 CRUD 结果稳定。
-
-    迁移是否触发取决于 PRAGMA table_info 的返回形态（既有链路差异），本护栏不判定
-    迁移成败，只锁住「重复 DDL 幂等 + 旧表逐字段不变 + 新表读写可用」这条不变行为。
-    """
-    from app.core.store.memory_repository import MemoryRepository
-
-    db = _fresh_db(tmp_path)
-    try:
-        db.execute_sql(
-            "CREATE TABLE memories ("
-            "memory_id TEXT PRIMARY KEY, category TEXT, content TEXT NOT NULL, "
-            "enabled INTEGER DEFAULT 1, confidence REAL DEFAULT 0.8, "
-            "source TEXT DEFAULT 'manual', created_at TEXT, updated_at TEXT, last_accessed TEXT)"
-        )
-        db.execute_sql(
-            "INSERT INTO memories VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            ("old-1", "分类", "旧记忆", 1, 0.75, "auto", "2026-01-01", "2026-01-02", "2026-01-03"),
-        )
-        db.flush()
-
-        repo = MemoryRepository(db)
-        assert repo._ensure_table() is True
-        assert repo._ensure_table() is True  # 重跑不得重复插入 / 覆盖
-
-        ok, rows = db.execute_sql("SELECT * FROM memories")
-        assert ok and len(rows) == 1, "旧表行数不得被重复建表改变"
-        assert rows[0]["memory_id"] == "old-1"
-        assert rows[0]["category"] == "分类"
-        assert rows[0]["content"] == "旧记忆"
-        assert rows[0]["confidence"] == 0.75
-
-        # 新表写入后再重复建表，读回结果不变
-        assert repo.save({"id": "new-1", "content": "新记忆", "confidence": 0.6}) is True
-        assert repo.get("new-1")["content"] == "新记忆"
-        assert repo._ensure_table() is True
-        assert repo.get("new-1")["content"] == "新记忆"
-        assert [m["id"] for m in repo.load_all(limit=10, include_disabled=True) if m["id"] == "new-1"] == ["new-1"]
-        ok2, rows2 = db.execute_sql("SELECT COUNT(*) AS n FROM memories")
-        assert ok2 and rows2[0]["n"] == 1, "旧表不得被清空或重复插入"
-    finally:
-        db.close()
-
 
 def test_subagent_log_ensure_table_repeated_keeps_task_fields(store):
     """锁住：ALTER 已存在列必抛异常被吞掉后，任务 CRUD 与序列化产物不变。"""

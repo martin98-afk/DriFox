@@ -1,3 +1,9 @@
+## [Unreleased]
+
+### ♻️ 代码重构 (Refactoring)
+
+- **插件化残留清理：M4 团队分组旧实现与长期记忆死链摘除** (`app/main_widget.py` · `plugins/history-manager/ui/history_card.py` · `app/core/conversation/memory_manager.py` · `app/core/store/`): 删除 `_build_team_groups` / `set_team_groups`（M4 混排后无业务调用方，仅旧测试引用）及 history_card 渲染路径三处老格式兼容分支与 `_team_groups` 死属性；`_history_card` / `_history_popup_card` 两个无写入者的空 setter 摘除（property 只读代理保留）。长期记忆链路整体下线：`MemoryManagerCore` 摘除条目记忆 API 与 `format_memories_for_prompt`（记忆/经验已由 assistant_hub 插件接管），`session_store` 删 `save_memory` / memories 表建表与 canvas_id 迁移，`app/core/store/memory_repository.py` 整文件删除；项目工作目录 API（get/set_working_directory，宿主与 worktree-manager 插件在用）不受影响。测试：`tests/widgets/test_team_restore.py` 删 8 个死用例，11 个引用已迁移旧路径（`app/widgets/cards/settings/history_card`）的用例改按文件路径加载 history-manager 插件模块；`test_core_smoke` / `test_perf_guard_io` 断言同步收窄。
+
 ## [v0.7.3] - 2026-11-16
 
 自 v0.7.2 以来的变更 | 提交数：78 · 文件变更：203 · +24351/-6193 | 贡献者：dingma, drifox-bot

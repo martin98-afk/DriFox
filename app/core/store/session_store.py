@@ -23,7 +23,6 @@ from loguru import logger
 
 from app.core.store.file_operation_repository import FileOperationRepository
 from app.core.store.input_history_repo import InputHistoryRepository
-from app.core.store.memory_repository import MemoryRepository
 
 # 导入子模块
 from app.core.store.session_repository import SessionRepository, extract_first_user_question
@@ -36,7 +35,6 @@ class SessionStore:
     """SQLite 会话存储层，提供原子性持久化（单例模式）"""
 
     TABLE_NAME = "sessions"
-    MEMORIES_TABLE = "memories"
     DB_FILENAME = "sessions.db"
     _CLEAN_SHUTDOWN_FLAG = "clean_shutdown.flag"
 
@@ -69,7 +67,7 @@ class SessionStore:
 
         # 初始化子模块（将在 _init_schema 中完成）
         self._session_repo: Optional[SessionRepository] = None
-        self._memory_repo: Optional[MemoryRepository] = None
+        self._file_op_repo: Optional[FileOperationRepository] = None
         self._file_op_repo: Optional[FileOperationRepository] = None
         self._subagent_log_repo: Optional[SubAgentLogRepository] = None
         self._input_history_repo: Optional[InputHistoryRepository] = None
@@ -418,20 +416,8 @@ class SessionStore:
                 )
 
                 # 创建记忆表
-                self._db.create_table(
-                    self.MEMORIES_TABLE,
-                    [
-                        {"name": "memory_id", "type": "TEXT", "primary_key": True},
-                        {"name": "content", "type": "TEXT"},
-                        {"name": "enabled", "type": "INTEGER", "default": 1},
-                        {"name": "confidence", "type": "REAL", "default": 0.8},
-                        {"name": "category", "type": "TEXT"},
-                        {"name": "source", "type": "TEXT"},
-                        {"name": "last_accessed", "type": "TEXT"},
-                        {"name": "created_at", "type": "TEXT"},
-                        {"name": "updated_at", "type": "TEXT"},
-                    ],
-                )
+                # （长期记忆系统已下线，记忆/经验由 assistant_hub 插件接管；
+                #   不再新建 memories 表，存量表残留不读写）
 
                 # 创建文件操作记录表
                 self._db.create_table(
@@ -518,7 +504,6 @@ class SessionStore:
 
                 # 初始化子模块
                 self._session_repo = SessionRepository(self._db)
-                self._memory_repo = MemoryRepository(self._db)
                 self._file_op_repo = FileOperationRepository(self._db)
                 self._subagent_log_repo = SubAgentLogRepository(self._db)
                 self._input_history_repo = InputHistoryRepository(self._db)
@@ -573,23 +558,6 @@ class SessionStore:
                 self._db.execute_sql(f"CREATE INDEX IF NOT EXISTS idx_updated ON {self.TABLE_NAME}(updated_at DESC)")
                 self._db.execute_sql(f"CREATE INDEX IF NOT EXISTS idx_project ON {self.TABLE_NAME}(project)")
                 logger.info("[SessionStore] sessions 表 canvas_id 列迁移完成")
-
-            mem_columns = self._db.get_table_info(self.MEMORIES_TABLE)
-            mem_col_names = [c.get("name", "") for c in mem_columns]
-            if "canvas_id" in mem_col_names:
-                logger.info("[SessionStore] 迁移：删除 memories 表的 canvas_id 列")
-                self._db.execute_sql(f"""
-                    CREATE TABLE {self.MEMORIES_TABLE}_temp AS
-                    SELECT memory_id, content, enabled, confidence, category, source,
-                           last_accessed, created_at, updated_at
-                    FROM {self.MEMORIES_TABLE}
-                """)
-                self._db.execute_sql(f"DROP TABLE {self.MEMORIES_TABLE}")
-                self._db.execute_sql(f"ALTER TABLE {self.MEMORIES_TABLE}_temp RENAME TO {self.MEMORIES_TABLE}")
-                self._db.execute_sql(
-                    f"CREATE INDEX IF NOT EXISTS idx_memories_canvas ON {self.MEMORIES_TABLE}(memory_id)"
-                )
-                logger.info("[SessionStore] memories 表 canvas_id 列迁移完成")
         except Exception as e:
             logger.warning(f"[SessionStore] canvas_id 列迁移失败(可能已不存在): {e}")
 
@@ -1006,19 +974,7 @@ class SessionStore:
             logger.error(f"[SessionStore] get_session_count 异常: {e}")
             return 0
 
-    # ==================== 长期记忆操作（委托给 MemoryRepository）====================
-
-    def save_memory(self, memory: Dict) -> bool:
-        """保存单条长期记忆"""
-        if self._memory_repo:
-            return self._memory_repo.save(memory)
-        return False
-
-
-
-
-
-
+    # ==================== 子智能体任务（委托给 SubAgentLogRepository）====================
 
     def save_subagent_task(
         self,
@@ -1132,7 +1088,7 @@ class SessionStore:
             self._db = None
             self._initialized = False
             self._session_repo = None
-            self._memory_repo = None
+            self._file_op_repo = None
             self._file_op_repo = None
             self._subagent_log_repo = None
             self._input_history_repo = None

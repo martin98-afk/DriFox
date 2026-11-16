@@ -1971,26 +1971,16 @@ class OpenAIChatToolWindow(ToolWindow):
         """历史会话页（插件工作台页）；插件未加载时为 None
 
         ★ 只读代理：页面归工作台面板所有（单例，跟随活跃窗口投影），
-        窗口不再持有自己的 HistoryPage。旧代码的 ``self._history_card = None``
-        初始化写入由 setter 吞掉（见下）。
+        窗口不再持有自己的 HistoryPage。
         """
         svc = self._history_service()
         return svc.page if svc is not None else None
-
-    @_history_card.setter
-    def _history_card(self, value) -> None:
-        """兼容旧初始化路径（``system_cards_module`` 置 None）；插件化后忽略写入"""
-        return
 
     @property
     def _history_popup_card(self):
         """会话列表卡片（插件页面自带）；插件未加载时为 None"""
         svc = self._history_service()
         return svc.card if svc is not None else None
-
-    @_history_popup_card.setter
-    def _history_popup_card(self, value) -> None:
-        return
 
     def _ensure_history_card(self):
         """确保「历史会话」工作台页已挂载（插件化：reconcile 插件页签）
@@ -9382,45 +9372,6 @@ class OpenAIChatToolWindow(ToolWindow):
                         pass
         except Exception:
             pass
-
-    def _build_team_groups(self, history_list: List[Dict]) -> List[Dict]:
-        """从历史会话列表组装团队对话分组（方案 A）
-
-        # TODO: deprecated, remove with TestBuildTeamGroups
-        # M4 混排后无业务调用方（_refresh_history_toggle_panel 改用
-        # get_history_list(merge_team=True)），仅保留供旧测试引用。
-
-        按 run_id 聚合：每组包含团队名、成员角色（agent_name 去重）、
-        最后活跃时间（组内最新 last_time）、会话数。无 run_id 的会话
-        （非团队 / 老团队）跳过。
-
-        Returns:
-            按最后活跃时间倒序的团队分组列表
-        """
-        groups: Dict[str, Dict] = {}
-        for session in history_list:
-            run_id = (session.get("team_run_id") or "").strip()
-            if not run_id:
-                continue
-            group = groups.setdefault(
-                run_id,
-                {
-                    "run_id": run_id,
-                    "team_name": (session.get("team_name") or "").strip() or "团队对话",
-                    "agent_names": [],
-                    "last_time": "",
-                    "session_count": 0,
-                },
-            )
-            agent = (session.get("agent_name") or "").strip()
-            if agent and agent not in group["agent_names"]:
-                group["agent_names"].append(agent)
-            group["session_count"] += 1
-            last_time = session.get("last_time") or ""
-            if last_time and last_time > group["last_time"]:
-                group["last_time"] = last_time
-
-        return sorted(groups.values(), key=lambda g: g["last_time"], reverse=True)
 
     def _on_history_project_selected(self, project: str):
         """历史面板项目切换（现在和标题栏同步）"""
