@@ -105,6 +105,9 @@ class CardContainer(QWidget):
         # 容器不在 splitter 中展开/折叠，而是作为 QStackedWidget 的覆盖层。
         # 卡片显隐时直接 show/hide 容器，发射 overlayStateChanged 信号供外部切换 stack。
         self._overlay_mode = False
+        # 上一次已发射的覆盖层可见状态（None = 尚未发射）；_do_expand 据此去重，
+        # 避免状态未变的 resize 反复驱动宿主切页。
+        self._overlay_state_last: Optional[bool] = None
         # 同侧堆叠卡兄弟容器（仅 DOCK LEFT/RIGHT 容器装配；非 dock 容器为 None）：
         # add_card 时把堆叠声明卡转交它托管；本容器折叠时若它仍可见则保留停靠位。
         self._stack_sibling: "Optional[CardStackContainer]" = None
@@ -797,7 +800,18 @@ class CardContainer(QWidget):
                 self._set_axis_min(0)
                 self.hide()
             self._layout.activate()
-            self.overlayStateChanged.emit(has_visible)
+            # ★ 只在可见状态**真变化**时发信号（2026-11-16）：本方法是 resize /
+            #   卡片显隐等多条路径的共用收口（_schedule_expand 的 resize 分支、
+            #   eventFilter 的 QEvent.Resize、heightChanged 都通向这里），无条件
+            #   emit 会让「状态根本没变」的 resize 也驱动宿主 setCurrentIndex(1)。
+            #   实测：打开 left 容器卡 → TabPanel 收窄、#tabFrame 加宽 → 对话区
+            #   被挤窄 → 覆层卡片收到 Resize → 重发 overlayStateChanged(True)
+            #   → 对话区被强切回卡片页，表现为在卡片页时开侧边栏卡「先滑回对话
+            #   再滑回去」的来回切换。
+            #   上面 show/hide/轴向约束仍无条件执行（容器自身状态必须正确）。
+            if getattr(self, "_overlay_state_last", None) != has_visible:
+                self._overlay_state_last = has_visible
+                self.overlayStateChanged.emit(has_visible)
             return
 
         # 停靠模式：折叠态容器是 hide() 的，展开前必须先 show()

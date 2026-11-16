@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### ⚡ 性能优化 (Performance)
+
+- **关闭等待回答标签后停止空闲动画** (`app/widgets/tab_panel.py`): `remove_tab()` 补齐 `_question_count` 递减，避免已关闭标签留下等待回答计数，使 66ms 状态动画定时器持续空转。新增 3 条回归，覆盖单标签关闭、保留另一流式标签、混合状态批量关闭；相关 47 条测试通过。新增历史批次滚动/长帧与隐藏设置卡内存测量，结果及测量边界见 `docs/perf/2026-11-16-idle-animation-and-memory.md`。
+
 ### ♻️ 代码重构 (Refactoring)
 
 - **插件化残留清理：M4 团队分组旧实现与长期记忆死链摘除** (`app/main_widget.py` · `plugins/history-manager/ui/history_card.py` · `app/core/conversation/memory_manager.py` · `app/core/store/`): 删除 `_build_team_groups` / `set_team_groups`（M4 混排后无业务调用方，仅旧测试引用）及 history_card 渲染路径三处老格式兼容分支与 `_team_groups` 死属性；`_history_card` / `_history_popup_card` 两个无写入者的空 setter 摘除（property 只读代理保留）。长期记忆链路整体下线：`MemoryManagerCore` 摘除条目记忆 API 与 `format_memories_for_prompt`（记忆/经验已由 assistant_hub 插件接管），`session_store` 删 `save_memory` / memories 表建表与 canvas_id 迁移，`app/core/store/memory_repository.py` 整文件删除；项目工作目录 API（get/set_working_directory，宿主与 worktree-manager 插件在用）不受影响。测试：`tests/widgets/test_team_restore.py` 删 8 个死用例，11 个引用已迁移旧路径（`app/widgets/cards/settings/history_card`）的用例改按文件路径加载 history-manager 插件模块；`test_core_smoke` / `test_perf_guard_io` 断言同步收窄。
