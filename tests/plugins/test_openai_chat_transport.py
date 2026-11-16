@@ -271,6 +271,66 @@ def test_build_request_kwargs_caps_max_tokens(transport, monkeypatch):
     out = transport.build_request_kwargs({"模型名称": "m", "最大输出": 999999}, cap_max_tokens=lambda m, r: 8192)
     assert out["extra_body"]["max_tokens"] == 8192
 
+# ---------- 11b. gpt-5+ / o 系参数形态（P1-22） ----------
+
+def test_gpt6_uses_max_completion_tokens(transport, monkeypatch):
+    """gpt-5 起 chat/completions 弃用 max_tokens，只认 max_completion_tokens。"""
+    monkeypatch.setattr(transport, "_apply_thinking", lambda *a: None)
+    out = transport.build_request_kwargs({"模型名称": "gpt-6.1-sol", "最大输出": 4096})
+    assert out["extra_body"]["max_completion_tokens"] == 4096
+    assert "max_tokens" not in out["extra_body"]
+
+def test_gpt6_drops_sampling_but_keeps_penalties(transport, monkeypatch):
+    """推理模型拒绝 temperature / top_p，但受理 presence / frequency_penalty。"""
+    monkeypatch.setattr(transport, "_apply_thinking", lambda *a: None)
+    out = transport.build_request_kwargs(
+        {
+            "模型名称": "gpt-6.1-sol",
+            "温度": 0.7,
+            "top_p": 1.0,
+            "presence_penalty": 0.1,
+            "frequency_penalty": 0.2,
+        }
+    )
+    assert "temperature" not in out["top_level"]
+    assert "top_p" not in out["top_level"]
+    assert out["top_level"]["presence_penalty"] == 0.1
+    assert out["top_level"]["frequency_penalty"] == 0.2
+
+def test_gpt4_keeps_legacy_params(transport, monkeypatch):
+    """旧模型形态不变：仍发 max_tokens 且保留采样参数（回归护栏）。"""
+    monkeypatch.setattr(transport, "_apply_thinking", lambda *a: None)
+    out = transport.build_request_kwargs({"模型名称": "gpt-4o", "最大输出": 100, "温度": 0.7, "top_p": 0.9})
+    assert out["extra_body"]["max_tokens"] == 100
+    assert "max_completion_tokens" not in out["extra_body"]
+    assert out["top_level"]["temperature"] == 0.7
+    assert out["top_level"]["top_p"] == 0.9
+
+def test_gpt6_reasoning_effort_falls_back_to_valid_value(transport, monkeypatch):
+    """中转站私有 ID 无 models.dev 档位数据，用户存的 max 要收敛到合法档位。"""
+    out = transport.build_request_kwargs(
+        {
+            "模型名称": "gpt-6.1-sol",
+            "思考模式": True,
+            "思考等级": "max",
+            "声明_思考参数": "reasoning_effort",
+        }
+    )
+    assert out["extra_body"]["reasoning_effort"] in {"low", "medium", "high", "xhigh"}
+
+def test_gpt6_invalid_effort_never_emits_max(transport, monkeypatch):
+    """minimal / max 都是实测 400 值，任何配置下都不得原样发出。"""
+    for effort in ("minimal", "max", "ultra", ""):
+        out = transport.build_request_kwargs(
+            {
+                "模型名称": "gpt-6.1-sol",
+                "思考模式": True,
+                "思考等级": effort,
+                "声明_思考参数": "reasoning_effort",
+            }
+        )
+        assert out["extra_body"].get("reasoning_effort") in {"low", "medium", "high", "xhigh"}
+
 
 # ---------- 12. 能力声明与契约 ----------
 

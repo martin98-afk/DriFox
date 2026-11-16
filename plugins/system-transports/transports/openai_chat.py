@@ -30,6 +30,74 @@ from app.plugins.sdk import (
 
 _VALID_IDENTIFIER_PATTERN = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
 
+# =============================================================================
+# OpenAI 系模型的请求参数形态（插件私有实现，不外溢到 sdk）
+#
+# gpt-5 起 chat/completions 弃用 max_tokens（只认 max_completion_tokens），
+# 且推理模型拒绝 temperature / top_p（携带即 400 unknown_parameter）。
+# 这类模型常以中转站私有 ID 出现（如 gpt-6.1-sol），models.dev 无覆盖、
+# caps 链落空、family 落到 custom，只能按模型名版本号判定。
+# 主程序侧 http_client 有一份等价实现（非插件调用路径），两处靠同一组单测约束。
+# =============================================================================
+
+# 从该主版本起改用 max_completion_tokens
+_MAX_COMPLETION_MIN_SERIAL = 5.0
+
+# 推理模型拒绝的采样参数（实测 gpt-6.1-sol：temperature / top_p 报 400，
+# frequency_penalty / presence_penalty 正常受理，故只排除前两个）
+_REASONING_REJECTED_PARAMS = frozenset({"temperature", "top_p"})
+
+# OpenAI 推理模型的 reasoning_effort 合法档位（中转站无 models.dev 数据时的兜底，
+# 避免用户存的 max / minimal 直发导致 400）
+_OPENAI_REASONING_EFFORTS = ["low", "medium", "high", "xhigh"]
+
+def _openai_model_serial(model: str) -> Optional[float]:
+    """从 ``gpt-<主>.<次>`` 形态的模型名解出版本号；其他形态返回 None。
+
+    只认紧跟 ``gpt-`` 的连续数字段：``gpt-6.1-sol`` → 6.1、``gpt-4o`` → 4、
+    ``gpt-5-nano`` → 5、``chat-latest`` / ``claude-sonnet-5`` → None。
+    """
+    name = str(model or "").strip().lower()
+    if not name.startswith("gpt-"):
+        return None
+    digits = []
+    for ch in name[4:]:
+        if ch.isdigit() or (ch == "." and digits):
+            digits.append(ch)
+            continue
+        break
+    serial = "".join(digits).rstrip(".")
+    if not serial:
+        return None
+    try:
+        return float(serial)
+    except ValueError:
+        return None
+
+def _uses_max_completion_tokens(model: str) -> bool:
+    """该模型是否只接受 ``max_completion_tokens``（旧 ``max_tokens`` 会 400）。"""
+    name = str(model or "").strip().lower()
+    if name.startswith(("o1", "o3")):
+        return True
+    serial = _openai_model_serial(name)
+    return serial is not None and serial >= _MAX_COMPLETION_MIN_SERIAL
+
+def _max_tokens_param_key(model: str) -> str:
+    """输出上限在该模型上应使用的参数名。"""
+    return "max_completion_tokens" if _uses_max_completion_tokens(model) else "max_tokens"
+
+def _rejects_sampling_param(model: str, param: str) -> bool:
+    """该模型是否拒绝指定采样参数（仅 temperature / top_p 属此列）。"""
+    if param not in _REASONING_REJECTED_PARAMS:
+        return False
+    return _uses_max_completion_tokens(model)
+
+def _effort_values_for(model: str, values: Optional[List[str]] = None) -> List[str]:
+    """思考等级合法档位：声明/models.dev 有值则用之，OpenAI 推理模型回退内置档位。"""
+    if values:
+        return list(values)
+    return list(_OPENAI_REASONING_EFFORTS) if _uses_max_completion_tokens(model) else []
+
 # 组装 extra_body 时排除的配置键（非 API 参数）
 _CONFIG_ONLY_KEYS = {
     "API_KEY",
@@ -132,8 +200,6 @@ class OpenAIChatTransport:
         extra_body: Dict[str, Any] = {}
         top_level: Dict[str, Any] = {}
 
-        is_o1 = model.startswith("o1") or model.startswith("o3")
-
         for cn_key, value in llm_config.items():
             if cn_key in _CONFIG_ONLY_KEYS or cn_key in QUOTA_EXCLUDE_KEYS():
                 continue
@@ -147,22 +213,25 @@ class OpenAIChatTransport:
             if not en_key or en_key == "max_tokens":
                 continue
             if en_key in _SAMPLING_PARAMS:
-                if is_o1:
-                    continue  # o1/o3 chat/completions 不接受采样参数
+                # 推理模型（o1/o3 及 gpt-5+）拒绝 temperature / top_p，携带即 400；
+                # frequency_penalty / presence_penalty 正常受理，按参数逐个判定
+                if _rejects_sampling_param(model, en_key):
+                    continue
                 top_level[en_key] = value
                 continue
             extra_body[en_key] = value
 
         # P1-21 语义拆分：「最大输出」是唯一的输出上限键（api_param="max_tokens"）；
         # 「最大Token」只作上下文窗口，不再直发。旧值不回退——用户没填「最大输出」
-        # 时不发 max_tokens，由服务端按模型默认处理（配合 worker 侧 caps 链兜底）。
+        # 时不发上限参数，由服务端按模型默认处理（配合 worker 侧 caps 链兜底）。
+        # gpt-5+ / o 系只认 max_completion_tokens，发 max_tokens 直接 400。
         max_output = llm_config.get("最大输出")
         if max_output is not None:
-            extra_body["max_tokens"] = (
-                cap_max_tokens(model, max_output) if callable(cap_max_tokens) else max_output
-            )
+            capped = cap_max_tokens(model, max_output) if callable(cap_max_tokens) else max_output
+            extra_body[_max_tokens_param_key(model)] = capped
 
         self._apply_thinking(extra_body, llm_config, model)
+        self._normalize_effort_in_body(extra_body, llm_config, model)
 
         # 认证头由 worker 统一组装（_build_auth_headers：bce + 服务商伪装头）后经
         # create_stream(auth_headers=...) 注入——transport 不重复实现认证逻辑，
@@ -172,6 +241,22 @@ class OpenAIChatTransport:
             "extra_body": extra_body,
             "top_level": top_level,
         }
+
+    @staticmethod
+    def _normalize_effort_in_body(extra_body: Dict[str, Any], llm_config: Dict[str, Any], model: str) -> None:
+        """思考等级非法值收口：通用参数循环会把「思考等级」按 api_param 直接写进
+        extra_body["reasoning_effort"]，绕过了 _apply_thinking 的归一化分支。
+
+        中转站私有 ID（如 gpt-6.1-sol）无 models.dev 档位数据，用户存的 max /
+        minimal 会原样发出并触发 400。此处对最终 body 再做一次收敛，覆盖所有写入路径。
+        """
+        if "reasoning_effort" not in extra_body:
+            return
+        caps = resolve_model_capabilities(llm_config)
+        values = _effort_values_for(model, caps.get("reasoning_effort_values"))
+        if not values:
+            return
+        extra_body["reasoning_effort"] = normalize_reasoning_effort(extra_body["reasoning_effort"], values)
 
     @staticmethod
     def _apply_thinking(extra_body: Dict[str, Any], llm_config: Dict[str, Any], model: str) -> None:
@@ -203,7 +288,8 @@ class OpenAIChatTransport:
             elif t_param == "reasoning_effort":
                 if "reasoning_effort" not in extra_body:
                     extra_body["reasoning_effort"] = normalize_reasoning_effort(
-                        llm_config.get("思考等级", "medium"), caps.get("reasoning_effort_values")
+                        llm_config.get("思考等级", "medium"),
+                        _effort_values_for(model, caps.get("reasoning_effort_values")),
                     )
                 extra_body.pop("thinking", None)
                 extra_body.pop("thinking_budget", None)
