@@ -122,6 +122,7 @@ def svc(tmp_path, monkeypatch):
     service._ext_dirty = {}
     service._content_hashes = {}
     service._merge_bases = set()
+    service._meta_recorder = None  # 隔离单例记账器，防跨用例 session_touched 污染
     service._upload_lock = threading.Lock()
     service._sync_base_dir = tmp_path / "cache" / "sync_base"
     service._sha_cache_path = tmp_path / ".sync_shas.json"
@@ -132,6 +133,15 @@ def svc(tmp_path, monkeypatch):
     service._user_custom_path = tmp_path / "plugins" / "user-custom"
     service._user_custom_path.mkdir(parents=True, exist_ok=True)
     yield service
+    # 谁污染谁清理：_apply_config_merge 会置 Settings 写盘保护（60s 兜底
+    # QTimer 在测试进程内不触发），残留会让后续用例的 cfg.save() 静默不落盘
+    service._meta_recorder = None
+    try:
+        from app.utils.config import Settings
+
+        Settings.get_instance()._suppress_save_reason = None
+    except Exception:
+        pass
     service._state = "disabled"
 
 
@@ -730,3 +740,217 @@ class TestDownloadMerge:
         # 墓碑必须进本地条目表持久化，否则下次上传会把它反杀回云端
         saved = svc._load_dir_meta("user-custom").get("entries") or {}
         assert saved.get("commands/team.md", {}).get("d") is True
+
+
+class TestOutOfBandEdit:
+    """带外编辑值三方判定（2026-11-16 网页改主题被启动合并覆盖回推）。
+
+    用户在 Gitee 网页改 app.config：只改值、不 bump t/h、clock 甚至倒退
+    （网页底稿是旧版本）。纯 LWW 下这种改动必败；值三方判定（base 业务
+    配置副本）让「只有远端动了值」的条目直接采纳远端。
+    """
+
+    BASE_NAME = "app.config.base.json"
+
+    @staticmethod
+    def _cfg(value: str, h: str, t: int) -> dict:
+        return {
+            "UI": {"ThemeMode": value},
+            "System": {
+                "SyncMeta": json.dumps(
+                    {"version": 1, "clock": t, "entries": {"UI.ThemeMode": {"h": h, "t": t}}}
+                )
+            },
+        }
+
+    def _prepare_base(self, svc, base_cfg: dict) -> None:
+        svc._sync_base_dir.mkdir(parents=True, exist_ok=True)
+        (svc._sync_base_dir / self.BASE_NAME).write_text(
+            json.dumps(base_cfg, ensure_ascii=False), encoding="utf-8"
+        )
+
+    def test_web_edit_wins_when_local_untouched(self, svc):
+        """本地未动 + 远端带外改值（t/h 不变）→ 远端赢（旧行为：本地优先吃掉网页改动）"""
+        self._prepare_base(svc, {"UI": {"ThemeMode": "light"}})
+        # 本地：与 base 一致（light）；远端：网页改成 dark，SyncMeta 原封不动
+        local = self._cfg("light", "h_light", 5)
+        remote = self._cfg("dark", "h_light", 5)
+        svc._config_path.write_text(json.dumps(local), encoding="utf-8")
+
+        svc._apply_config_merge(json.dumps(remote).encode("utf-8"))
+
+        data = json.loads(svc._config_path.read_text(encoding="utf-8"))
+        assert data["UI"]["ThemeMode"] == "dark"
+        entries = json.loads(data["System"]["SyncMeta"])["entries"]
+        assert entries["UI.ThemeMode"]["h"] == "h_light"
+
+    def test_web_edit_with_stale_base_wins(self, svc):
+        """网页贴旧底稿（clock 倒退）+ 本地未动 → 远端赢
+
+        真实事故时序：base 快照 clock=13792，网页提交 clock=13745，
+        本地启动合并时条目 t 平局 → 本地优先 → 网页改动被吃。
+        """
+        self._prepare_base(svc, {"UI": {"ThemeMode": "light"}})
+        local = self._cfg("light", "h_light", 13792)
+        # 网页底稿是更旧的版本：t=13662，值 dark
+        remote = self._cfg("dark", "h_light", 13662)
+        svc._config_path.write_text(json.dumps(local), encoding="utf-8")
+
+        svc._apply_config_merge(json.dumps(remote).encode("utf-8"))
+
+        data = json.loads(svc._config_path.read_text(encoding="utf-8"))
+        assert data["UI"]["ThemeMode"] == "dark"
+
+    def test_collection_elem_web_edit_wins(self, svc):
+        """集合条目（SavedProviders）内字段带外改值：本地未动 → 远端赢"""
+        self._prepare_base(
+            svc,
+            {"LLM": {"SavedProviders": {"p1": {"name": "a", "API_URL": "https://old"}}}},
+        )
+        meta = json.dumps(
+            {
+                "version": 1,
+                "clock": 5,
+                "entries": {"LLM.SavedProviders.p1": {"h": "h1", "t": 5}},
+            }
+        )
+        local = {
+            "LLM": {"SavedProviders": {"p1": {"name": "a", "API_URL": "https://old"}}},
+            "System": {"SyncMeta": meta},
+        }
+        remote = {
+            "LLM": {"SavedProviders": {"p1": {"name": "a", "API_URL": "https://new"}}},
+            "System": {"SyncMeta": meta},
+        }
+        svc._config_path.write_text(json.dumps(local), encoding="utf-8")
+
+        svc._apply_config_merge(json.dumps(remote).encode("utf-8"))
+
+        data = json.loads(svc._config_path.read_text(encoding="utf-8"))
+        assert data["LLM"]["SavedProviders"]["p1"]["API_URL"] == "https://new"
+
+    def test_local_change_still_wins(self, svc):
+        """远端未动 + 本地改值 → 本地赢（三方判定不得误伤正常本地改动）"""
+        self._prepare_base(svc, {"UI": {"ThemeMode": "light"}})
+        local = self._cfg("dark", "h_old", 5)  # 本地改成 dark（值变了）
+        remote = self._cfg("light", "h_old", 5)  # 远端还是 base 内容
+        svc._config_path.write_text(json.dumps(local), encoding="utf-8")
+
+        svc._apply_config_merge(json.dumps(remote).encode("utf-8"))
+
+        data = json.loads(svc._config_path.read_text(encoding="utf-8"))
+        assert data["UI"]["ThemeMode"] == "dark"
+
+    def test_both_changed_falls_back_to_lww(self, svc):
+        """双侧都改了 → 退回 t 裁决：t 高者胜"""
+        self._prepare_base(svc, {"UI": {"ThemeMode": "base"}})
+        local = self._cfg("local-val", "h_base", 9)
+        remote = self._cfg("remote-val", "h_base", 6)
+        svc._config_path.write_text(json.dumps(local), encoding="utf-8")
+
+        svc._apply_config_merge(json.dumps(remote).encode("utf-8"))
+
+        data = json.loads(svc._config_path.read_text(encoding="utf-8"))
+        assert data["UI"]["ThemeMode"] == "local-val"
+
+        local2 = self._cfg("local-val", "h_base", 6)
+        remote2 = self._cfg("remote-val", "h_base", 9)
+        svc._config_path.write_text(json.dumps(local2), encoding="utf-8")
+        # 第一段合并已把 base 副本更新为远端值；重置回共同祖先再验证 t 裁决
+        self._prepare_base(svc, {"UI": {"ThemeMode": "base"}})
+
+        svc._apply_config_merge(json.dumps(remote2).encode("utf-8"))
+
+        data2 = json.loads(svc._config_path.read_text(encoding="utf-8"))
+        assert data2["UI"]["ThemeMode"] == "remote-val"
+
+    def test_no_base_keeps_current_lww(self, svc):
+        """无 base 副本（升级首装/缓存丢失）→ 维持原平局本地优先行为"""
+        local = self._cfg("light", "h_same", 5)
+        remote = self._cfg("dark", "h_same", 5)
+        svc._config_path.write_text(json.dumps(local), encoding="utf-8")
+
+        svc._apply_config_merge(json.dumps(remote).encode("utf-8"))
+
+        data = json.loads(svc._config_path.read_text(encoding="utf-8"))
+        assert data["UI"]["ThemeMode"] == "light"
+
+    def test_base_snapshot_updated_after_merge(self, svc):
+        """合并后 base 业务副本更新为本次远端业务视图，作为下次判定基准"""
+        self._prepare_base(svc, {"UI": {"ThemeMode": "light"}})
+        local = self._cfg("light", "h_light", 5)
+        remote = self._cfg("dark", "h_light", 5)
+        svc._config_path.write_text(json.dumps(local), encoding="utf-8")
+
+        svc._apply_config_merge(json.dumps(remote).encode("utf-8"))
+
+        saved = json.loads((svc._sync_base_dir / self.BASE_NAME).read_text(encoding="utf-8"))
+        assert saved["UI"]["ThemeMode"] == "dark"
+        # 副本必须剔 SyncMeta（业务口径，下次值判定不受记账污染）
+        assert "SyncMeta" not in (saved.get("System") or {})
+
+    def test_tombstone_not_overridden_by_three_way(self, svc):
+        """本地墓碑 vs 远端带外改值 → 墓碑不进值三方，按 t 裁决（t 高的墓碑仍删）
+
+        防护：值三方不得压过删除意图；墓碑语义走专门特判与 t 裁决。
+        """
+        self._prepare_base(svc, {"UI": {"ThemeMode": "base"}})
+        # 本地：条目是墓碑（t=9，显式删除）；远端：网页带外改值（t=5 不变）
+        local = {
+            "UI": {},
+            "System": {
+                "SyncMeta": json.dumps(
+                    {"version": 1, "clock": 9, "entries": {"UI.ThemeMode": {"h": "h_base", "t": 9, "d": True}}}
+                )
+            },
+        }
+        remote = self._cfg("dark", "h_base", 5)
+        svc._config_path.write_text(json.dumps(local), encoding="utf-8")
+
+        svc._apply_config_merge(json.dumps(remote).encode("utf-8"))
+
+        data = json.loads(svc._config_path.read_text(encoding="utf-8"))
+        # 墓碑 t=9 > 远端 t=5 → 删除仍生效（值三方未接管）
+        entries = json.loads(data["System"]["SyncMeta"])["entries"]
+        assert entries["UI.ThemeMode"].get("d") is True
+        assert data["UI"] == {}
+
+    def test_flush_sync_meta_suppresses_upload(self, svc):
+        """_flush_sync_meta 写盘前必须开抑制窗，切断自激循环"""
+        svc._meta_recorder = None  # 无 recorder 时安全返回
+        svc._flush_sync_meta()  # 不抛异常即可
+
+        from app.core.sync.meta_recorder import SyncMetaRecorder
+
+        rec = SyncMetaRecorder(svc._device_tag)
+        local = self._cfg("light", "h", 5)
+        svc._config_path.write_text(json.dumps(local), encoding="utf-8")
+        rec.attach(local, local["System"]["SyncMeta"])
+        svc._meta_recorder = rec
+        svc._suppress_until = 0.0
+
+        rec._touch("UI.ThemeMode", "dark")
+        svc._flush_sync_meta()
+
+        assert time.time() < svc._suppress_until, "写盘后应处于抑制窗口内"
+        data = json.loads(svc._config_path.read_text(encoding="utf-8"))
+        assert data["System"]["SyncMeta"] == rec.dump(), "磁盘 SyncMeta 应与记账器一致"
+
+    def test_business_hash_ignores_sync_meta(self, svc):
+        """闸门 1 指纹剔除 SyncMeta：只有记账变化的写盘不再触发真上传"""
+        svc._config_path.write_text(json.dumps(self._cfg("light", "h", 5)), encoding="utf-8")
+        h1 = svc._unit_content_hash("app.config", svc._config_path)
+
+        # 只改 SyncMeta（模拟上传前 flush 写盘）
+        cfg = self._cfg("light", "h", 6)
+        cfg["System"]["SyncMeta"] = json.dumps(
+            {"version": 1, "clock": 6, "entries": {"UI.ThemeMode": {"h": "h", "t": 6}}}
+        )
+        svc._config_path.write_text(json.dumps(cfg), encoding="utf-8")
+        h2 = svc._unit_content_hash("app.config", svc._config_path)
+        assert h1 == h2
+
+        # 业务值变了 → 指纹必须变
+        svc._config_path.write_text(json.dumps(self._cfg("dark", "h", 6)), encoding="utf-8")
+        h3 = svc._unit_content_hash("app.config", svc._config_path)
+        assert h1 != h3

@@ -344,6 +344,10 @@ class ConfigSyncService(QObject):
         # 各同步单元「上次与远端一致时的本地内容指纹」（unit → hex），
         # 用于 zero-network 判断「内容没变就不要上传」。
         self._content_hashes: Dict[str, str] = {}
+        # app.config 三方合并基准：上次与本端一致时的业务配置副本
+        # （cache/sync_base/app.config.base.json）。合并时逐条目值三方判定：
+        # 只有远端动了值的条目直接采纳远端——网页带外编辑（改值不 bump t/h、
+        # clock 倒退）在纯 LWW 下必败，2026-11-16 网页改主题被启动合并覆盖。
         # 三方合并基准：单文件存内容副本，目录存 {相对路径: 文件 sha256} 清单
         self._sync_base_dir: Path = get_app_data_dir().resolve() / "cache" / "sync_base"
         self._device_tag: str = ""  # 冲突副本命名用设备标识（首次生成后持久化）
@@ -1968,6 +1972,79 @@ class ConfigSyncService(QObject):
             self._upload_lock.release()
 
     @staticmethod
+    def _business_view(data: object) -> Optional[dict]:
+        """app.config 业务视图：剔除 System.SyncMeta 与 Gitee token 段的深拷贝。
+
+        SyncMeta 是同步自身写入的记账元数据（每轮上传 clock 递增），把它算进
+        指纹会让「上传前 flush → watch 报变更 → 再上传」形成自激循环；
+        三方合并基准也应存业务视图（值判定口径与业务值一致）。
+        """
+        try:
+            if not isinstance(data, dict):
+                return None
+            trimmed = json.loads(json.dumps(data, ensure_ascii=False))  # 深拷贝
+            system = trimmed.get("System")
+            if isinstance(system, dict):
+                system.pop("SyncMeta", None)
+            gitee = trimmed.get("Gitee")
+            if isinstance(gitee, dict):
+                gitee.pop("UserToken", None)
+                gitee.pop("UserRefreshToken", None)
+                gitee.pop("TokenExpiresAt", None)
+            return trimmed
+        except Exception:
+            return None
+
+    def _config_business_hash(self, data: object) -> Optional[str]:
+        """app.config 业务内容指纹（业务视图规范化 sha256）。解析失败回退 None。"""
+        view = self._business_view(data)
+        if view is None:
+            return None
+        try:
+            payload = json.dumps(view, ensure_ascii=False, sort_keys=True).encode("utf-8")
+            return fp.sha256_bytes(payload)
+        except Exception:
+            return None
+
+    # ── 三方合并基准（业务配置副本）──────────────────────
+
+    def _base_config_path(self) -> Path:
+        return self._sync_base_dir / "app.config.base.json"
+
+    def _load_base_cfg(self) -> Optional[dict]:
+        """读三方合并基准业务副本；不存在/损坏返回 None（退化为纯 LWW）"""
+        try:
+            p = self._base_config_path()
+            if not p.exists():
+                return None
+            data = json.loads(p.read_text(encoding="utf-8"))
+            return data if isinstance(data, dict) else None
+        except Exception as e:
+            logger.debug(f"[ConfigSync] 三方基准副本读取失败: {e}")
+            return None
+
+    def _save_base_config(self, data: object) -> None:
+        """写三方合并基准业务副本（剔除 SyncMeta/token）；失败静默（退化为纯 LWW）"""
+        try:
+            view = self._business_view(data)
+            if view is None:
+                return
+            p = self._base_config_path()
+            p.parent.mkdir(parents=True, exist_ok=True)
+            tmp = p.with_suffix(".json.tmp")
+            tmp.write_text(json.dumps(view, ensure_ascii=False, sort_keys=True), encoding="utf-8")
+            os.replace(str(tmp), str(p))
+        except Exception as e:
+            logger.debug(f"[ConfigSync] 三方基准副本写入失败: {e}")
+
+    def _update_base_config_from_payload(self, payload: bytes) -> None:
+        """上传成功后：远端此刻就是这份 payload，其业务视图即新基准"""
+        try:
+            self._save_base_config(json.loads(payload.decode("utf-8")))
+        except Exception as e:
+            logger.debug(f"[ConfigSync] 从上传 payload 更新基准失败: {e}")
+
+    @staticmethod
     def _strip_gitee_token(local_path: Path) -> str:
         """读取 app.config 并剔除 Gitee token 段，返回 base64 内容。
 
@@ -2062,6 +2139,10 @@ class ConfigSyncService(QObject):
         ok, new_sha = self._put_file(payload, remote_path, put_sha, client, label=unit)
         if not ok:
             return False
+        if unit == "app.config":
+            # 远端此刻就是这份 payload：其业务视图存为下次合并的三方基准
+            # （带外编辑检测依据，见 _apply_config_merge）。
+            self._update_base_config_from_payload(payload)
         self._commit_unit_state(
             unit,
             new_sha or live_sha,
@@ -2096,6 +2177,11 @@ class ConfigSyncService(QObject):
                     data["System"] = system
                 if system.get("SyncMeta") == raw:
                     return
+                # 自己写盘自己抑制：否则这次写盘会触发 watch → 防抖 → 上传，
+                # 而上传开头又会 flush → 写盘 → watch……30~60s 周期自激。
+                # 抑制期内 watch 事件进 _flush_suppressed_changes 兜底检查，
+                # 业务指纹（已排 SyncMeta）未变时闸门 1 直接拦下。
+                self.pause_upload(10.0)
                 system["SyncMeta"] = raw
                 tmp = self._config_path.with_suffix(".config.synctmp")
                 tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -2258,6 +2344,11 @@ class ConfigSyncService(QObject):
             logger.error(f"[ConfigSync] {unit} 合并失败: {e}")
             return None
         logger.info(f"[ConfigSync] {unit} 合并完成（基准更新为远端 {sha[:8]}）")
+        if unit == "app.config":
+            try:
+                self._save_base_config(json.loads(content.decode("utf-8")))
+            except Exception:
+                pass
         self._flush_conflict_archive(client)
         self._set_cached_remote_sha(unit, sha)
         self._save_sha_cache()
@@ -2526,6 +2617,10 @@ class ConfigSyncService(QObject):
         local_meta = (local_data.get("System") or {}).get("SyncMeta") or "{}"
         remote_meta = (remote_data.get("System") or {}).get("SyncMeta") or "{}"
         remote_clock = int(load_state(remote_meta).get("clock") or 0)
+        # 三方合并基准：上次与本端一致时的业务配置副本。带外编辑（网页改值不
+        # bump t/h、clock 倒退）在纯 LWW 下必败，值三方让「只有远端动了值」
+        # 的条目直接采纳远端。
+        base_cfg = self._load_base_cfg()
 
         local_rec = SyncMetaRecorder(self._device_tag)
         local_rec.attach(local_data, local_meta)
@@ -2559,6 +2654,7 @@ class ConfigSyncService(QObject):
             remote_data,
             remote_rec.entries(),
             remote_authority=remote_authority,
+            base_cfg=base_cfg,
         )
         # 墓碑保底：合并只遍历值里的键，两端值都已删除的墓碑会被漏掉，
         # 丢掉后下一次同步就有人拿旧值把条目复活。墓碑一律取 t 更大的那份。
@@ -2677,6 +2773,10 @@ class ConfigSyncService(QObject):
         # 不在这里发射：同一次下载的尾部还会再 emit 一次（downloaded_config
         # 分支），双重重载曾读到中间态文件触发主题回退，统一由尾部触发。
         self._pause_after_merge()
+        # 三方基准更新为本次远端业务视图：随后 _refresh_and_upload_after_download
+        # 会把合并结果推上去并由 _upload_unit 覆盖为合并结果；若上传失败，
+        # 远端仍是这份原文，用它做 base 不会误判「远端未动」。
+        self._save_base_config(remote_data)
 
     def _conflict_path(self, unit: str, rel: str, ts: str) -> Path:
         """冲突副本落地路径（业务目录之外，按单元+时间戳+设备分组）"""
@@ -2870,11 +2970,23 @@ class ConfigSyncService(QObject):
             return None
 
     def _unit_content_hash(self, unit: str, local_path: Path) -> Optional[str]:
-        """unit 当前本地内容指纹（目录用清单摘要，文件用内容 sha256）"""
+        """unit 当前本地内容指纹（目录用清单摘要，文件用内容 sha256）。
+
+        app.config 剔除 System.SyncMeta 后再哈希（见 _config_business_hash）：
+        SyncMeta 每轮上传都在变，算进指纹会让无业务变更的写盘也触发真上传。
+        """
         try:
             if isinstance(local_path, Path) and local_path.is_dir():
                 return fp.dir_fingerprint(local_path)
             if unit == "app.config":
+                try:
+                    with open(local_path, encoding="utf-8") as _f:
+                        _data = json.load(_f)
+                    biz = self._config_business_hash(_data)
+                    if biz is not None:
+                        return biz
+                except Exception:
+                    pass
                 payload = self._strip_gitee_token_bytes(local_path)
                 return fp.sha256_bytes(payload) if payload is not None else None
             return fp.file_fingerprint(local_path) or None
@@ -3320,8 +3432,12 @@ class ConfigSyncService(QObject):
         self._apply_config_merge(content, remote_authority=not self._has_merge_base("app.config"))
         if sha:
             self._set_cached_remote_sha("app.config", sha)
-        # base 内容指纹取远端那份（本地独有改动保持未上传态，下次上传收敛）
-        self._content_hashes["app.config"] = fp.sha256_bytes(content)
+        # base 内容指纹取远端那份（业务口径，本地独有改动保持未上传态，下次上传收敛）
+        try:
+            _biz = self._config_business_hash(json.loads(content.decode("utf-8")))
+        except Exception:
+            _biz = None
+        self._content_hashes["app.config"] = _biz or fp.sha256_bytes(content)
         self._save_sha_cache()
         logger.info("[ConfigSync] app.config 已合并")
         return True
