@@ -1,8 +1,8 @@
 ## [Unreleased]
 
-## [v0.7.3] - 2026-11-16 (重新发布 #2)
+## [v0.7.3] - 2026-11-16 (重新发布 #3)
 
-自 v0.7.2 以来的变更 | 提交数：91 · 文件变更：264 · +28535/-7987 | 贡献者：dingma, drifox-bot, mading
+自 v0.7.2 以来的变更 | 提交数：92 · 文件变更：268 · +28676/-8000 | 贡献者：dingma, drifox-bot, mading
 
 ### ✨ 新功能 (New Features)
 
@@ -55,15 +55,19 @@
 
 ### ♻️ 代码重构 (Refactoring) (重新发布 #2 追加)
 
-- **插件化残留清理：M4 团队分组旧实现与长期记忆死链摘除** (`app/main_widget.py` · `plugins/history-manager/ui/history_card.py` · `app/core/conversation/memory_manager.py` · `app/core/store/`): 删除 `_build_team_groups` / `set_team_groups`（M4 混排后无业务调用方，仅旧测试引用）及 history_card 渲染路径三处老格式兼容分支与 `_team_groups` 死属性；`_history_card` / `_history_popup_card` 两个无写入者的空 setter 摘除（property 只读代理保留）。长期记忆链路整体下线：`MemoryManagerCore` 摘除条目记忆 API 与 `format_memories_for_prompt`（记忆/经验已由 assistant_hub 插件接管），`session_store` 删 `save_memory` / memories 表建表与 canvas_id 迁移，`app/core/store/memory_repository.py` 整文件删除；项目工作目录 API（get/set_working_directory，宿主与 worktree-manager 插件在用）不受影响。测试：`tests/widgets/test_team_restore.py` 删 8 个死用例，11 个引用已迁移旧路径（`app/widgets/cards/settings/history_card`）的用例改按文件路径加载 history-manager 插件模块；`test_core_smoke` / `test_perf_guard_io` 断言同步收窄。
+- **插件化残留清理：M4 团队分组旧实现与长期记忆死链摘除** (`app/main_widget.py` · `plugins/history-manager/ui/history_card.py` · `app/core/conversation/memory_manager.py` · `app/core/store/`): 删除 `_build_team_groups` / `set_team_groups`（M4 混排后无业务调用方，仅旧测试引用）及 history_card 渲染路径三处老格式兼容分支与 `_team_groups` 死属性；`_history_card` / `_history_popup_card` 两个无写入者的空 setter 摘除（property 只读代理保留）。长期记忆链路整体下线：`MemoryManagerCore` 摘除条目记忆 API 与 `format_memories_for_prompt`（记忆/经验已由 assistant_hub 插件接管），`session_store` 删 `save_memory` / memories 表建表与 canvas_id 迁移，`app/core/store/memory_repository.py` 整文件删除；项目工作目录 API（get/set_working_directory，宿主与 worktree-manager 插件在用）不受影响。测试：`tests/widgets/test_team_restore.py` 删 8 个死用例，11 个引用已迁移旧路径（`app/widgets/cards/settings/history_card`）的用例改按文件路径加载 history-manager 插件模块；`test_core_smoke` / `test_perf_guard_io` 断言同步收窄。
 
 ### ⚡ 性能优化 (Performance) (重新发布 #2 追加)
 
-- **关闭等待回答标签后停止空闲动画** (`app/widgets/tab_panel.py`): `remove_tab()` 补齐 `_question_count` 递减，避免已关闭标签留下等待回答计数，使 66ms 状态动画定时器持续空转。新增 3 条回归，覆盖单标签关闭、保留另一流式标签、混合状态批量关闭；相关 47 条测试通过。新增历史批次滚动/长帧与隐藏设置卡内存测量，结果及测量边界见 `docs/perf/2026-11-16-idle-animation-and-memory.md`。
+- **关闭等待回答标签后停止空闲动画** (`app/widgets/tab_panel.py`): `remove_tab()` 补齐 `_question_count` 递减，避免已关闭标签留下等待回答计数，使 66ms 状态动画定时器持续空转。新增 3 条回归，覆盖单标签关闭、保留另一流式标签、混合状态批量关闭；相关 47 条测试通过。新增历史批次滚动/长帧与隐藏设置卡内存测量，结果及测量边界见 `docs/perf/2026-11-16-idle-animation-and-memory.md`。
 
 ### 🔧 其他 (Chores & Build) (重新发布 #2 追加)
 
 - `marketplace.json` 由 CI 从插件 manifest 自动再生。
+
+### 🐛 问题修复 (Bug Fixes) (重新发布 #3 追加)
+
+- **改自定义模型上下文长度后不生效，要新建标签页才刷新** (`app/core/engines/ui/engine.py` · `app/core/modelmeta/model_capabilities.py` · `app/main_widget.py`): 五处独立缺陷叠加，任何一处都足以让用户改完设置看不到变化。① `UIEngine.get_context_usage_snapshot` 的快照缓存键只含消息版本/模型名/权威值/系统提示，漏了 `budget_tokens` 与 token 校正比——二者来自 `llm_config`，与消息版本毫不相干，于是未发新消息时永远命中旧快照，圆环预算停在旧值，只有新建标签页（新引擎 → 空缓存）才恢复；现在两项并入缓存键。② `resolve_context_limit` 完全不读「声明_上下文长度」，而 UI 能力胶囊走 `resolve_model_capabilities`（含声明层），两套口径不一致导致能力弹窗里填的上下文长度只改标签不改实际预算；补 L0 声明层（非法值跳过回落，`saved_providers` 的显式值让位给声明）。③ `_refresh_context_usage_indicator` 的节流分支直接 return 且无反向补偿，配置变更恰好落在上一轮 0.5s 窗口内就被静默丢弃；新增 `force` 参数供配置类变更绕过节流。④ `LLM.ModelOverrides` 全项目无 `valueChanged` 监听，任意标签页改模型级参数/能力声明，其他标签页的圆环与参数卡都不刷新；注册 `_on_model_overrides_changed`，圆环 force 重画、参数卡与模型选择卡在下一拍重建（延后一拍，避开 `configApplied` 发射栈内清空同批控件）。⑤ 快照缓存的写入值与返回值是同一对象，消费方（`ring.set_usage` / tooltip）原地改写 `breakdown` 会反向污染缓存，之后每个命中者都拿到脏值；抽 `_snapshot_copy` 统一隔离。另 `_on_providers_config_changed` 补 force 刷新，覆盖连接级「最大Token」与服务商默认变化。回归 `tests/core/test_context_limit_live_refresh.py` 新增 14 例，逐条锁死上述路径，含缓存来回改、缓存污染隔离、声明层优先级与非法值回落、force 越过节流、信号已接线。
 
 ## [v0.7.2] - 2026-11-14 (重新发布 #8)
 

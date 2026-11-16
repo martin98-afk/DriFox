@@ -3428,6 +3428,10 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 监听服务商配置变更，确保多窗口同步（全局监听，需尽早连接）
         self._reg_sig(self.cfg.llm_saved_providers.valueChanged, self._on_providers_config_changed)
+        # 监听模型级参数/能力声明变更（LLM.ModelOverrides）：上下文长度、声明_* 六键、
+        # 温度等模型级参数都写在这张表里——不监听会让其他标签页的圆环、参数卡停在
+        # 旧值（2026-11-16 用户实测「改完上下文要新建标签页才刷新」）。
+        self._reg_sig(self.cfg.llm_model_overrides.valueChanged, self._on_model_overrides_changed)
         # 监听技能配置变更（启用/禁用），确保多窗口同步
         self._reg_sig(self.cfg.llm_enabled_skills.valueChanged, self._on_skills_config_changed)
 
@@ -8265,7 +8269,7 @@ class OpenAIChatToolWindow(ToolWindow):
         model_overrides[override_key] = existing
         self.cfg.set(self.cfg.llm_model_overrides, model_overrides, save=True)
 
-    def _refresh_context_usage_indicator(self):
+    def _refresh_context_usage_indicator(self, force: bool = False):
         """刷新上下文使用环。
 
         性能：① 节流（流式/工具迭代期 2s，常态 0.5s）；② 快照计算后台化（A 优化）。
@@ -8273,6 +8277,9 @@ class OpenAIChatToolWindow(ToolWindow):
         长会话实测单次 500ms+（watchdog 报告阻塞主线程）；现丢应用级共享线程池
         跑，结果经 _ctx_usage_ready 信号回主线程画圆环。
         单飞守卫：上一轮未返回时只置 pending，完成后自动补一轮最新值，防任务堆积。
+
+        force=True 绕过节流：配置类变更（上下文长度、模型能力声明）必须立即落地，
+        否则刚好落在上一轮 0.5s 窗口内的刷新会被静默丢弃，圆环停在旧预算。
         """
         import time
 
@@ -8281,7 +8288,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # 流式/工具迭代期消息持续增长 → engine 快照缓存恒失效，每次全量重算，
         # 放宽到 2s 只降频率不降精度（落定后 _is_streaming/worker 复位即回 0.5s）。
         streaming_busy = bool(getattr(self, "_is_streaming", False)) or self._worker_actually_busy()
-        if now - last < (2.0 if streaming_busy else 0.5):
+        if not force and now - last < (2.0 if streaming_busy else 0.5):
             return
 
         if not getattr(self, "context_usage_ring", None):
@@ -10577,6 +10584,13 @@ class OpenAIChatToolWindow(ToolWindow):
         （双开关被改 / 条目被增删都要即时反映）。
         """
         self._load_model_configs()
+        # 预算可能来自连接级字段（saved_providers 的「最大Token」/服务商默认），
+        # 与模型级 overrides 一样必须立即落地：_load_model_configs 尾部的刷新走
+        # 常规节流，落在 0.5s 窗口内会被静默丢弃（2026-11-16 同源缺陷）。
+        try:
+            self._refresh_context_usage_indicator(force=True)
+        except Exception as e:
+            logger.debug(f"[ProvidersConfig] 圆环刷新失败: {e}")
         # 定时刷新服务：全量重建 active 集（幂等，内部只读配置）
         try:
             from app.core.modelmeta.model_refresh_service import ModelRefreshService
@@ -10655,6 +10669,50 @@ class OpenAIChatToolWindow(ToolWindow):
                     card._update_skill_token_count()
             except (RuntimeError, AttributeError):
                 pass
+
+    def _on_model_overrides_changed(self, overrides=None):
+        """模型级参数/能力声明变更（LLM.ModelOverrides）→ 本窗口同步刷新。
+
+        覆盖面：任意标签页改「上下文长度」「声明_上下文长度」等六键、温度等
+        模型级参数，以及能力弹窗保存声明。三处消费点都读这张表：
+          1. 上下文圆环 —— 预算变了必须立即重画（force 绕过节流，否则落在
+             上一轮 0.5s 窗口内的刷新会被静默丢弃）
+          2. 模型参数卡 —— 与 _get_current_model_config 同口径重新装载
+          3. 模型选择卡 —— 能力胶囊（上下文/思考）随声明变化
+        各窗口维护自己的 _current_provider_name，同一 override 只对选中该模型
+        的窗口可见，其余窗口刷新是幂等空操作。
+        """
+        if getattr(self, "_is_destroyed", False):
+            return
+        try:
+            self._refresh_context_usage_indicator(force=True)
+        except Exception as e:
+            logger.debug(f"[ModelOverrides] 圆环刷新失败: {e}")
+        # 卡片重建延后到下一拍：本信号可能正是在 ModelConfigCard.configApplied
+        # 的发射栈里（用户点保存 → _on_config_applied → cfg.set → 此处），
+        # 当场 set_config 会在控件发信号的栈内清空并重建同一批控件。
+        from PyQt5.QtCore import QTimer
+
+        QTimer.singleShot(0, self._refresh_model_cards_after_overrides)
+
+    def _refresh_model_cards_after_overrides(self):
+        """ModelOverrides 变更后的卡片刷新（事件循环下一拍，避免重建发射中的控件）"""
+        if getattr(self, "_is_destroyed", False):
+            return
+        card_manager = getattr(self, "_card_manager", None)
+        if card_manager is None:
+            return
+        # 隐藏的卡片首次显示会自行重新装载，此处只刷可见的，避免无谓开销
+        try:
+            if card_manager.is_card_visible("model_config", self._window_id):
+                self._load_model_config_to_card()
+        except Exception as e:
+            logger.debug(f"[ModelOverrides] 参数卡刷新失败: {e}")
+        try:
+            if card_manager.is_card_visible("model_selector", self._window_id):
+                self._load_model_selector_to_card()
+        except Exception as e:
+            logger.debug(f"[ModelOverrides] 模型选择卡刷新失败: {e}")
 
     def _on_skills_config_changed(self, enabled_skills):
         """技能配置变更时的回调（多窗口同步）
