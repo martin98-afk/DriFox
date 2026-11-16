@@ -42,6 +42,45 @@ def test_meta_item_excluded_from_entries():
     assert "System.Other" in r.entries()
 
 
+def test_gitee_local_credentials_excluded_from_entries():
+    """Gitee 设备本地凭证不进条目表：上传已剔除，留条目只会制造假更新"""
+    r = SyncMetaRecorder()
+    r.attach(
+        {
+            "Gitee": {
+                "UserToken": "tok",
+                "UserRefreshToken": "rtok",
+                "TokenExpiresAt": 123,
+                "Bound": True,
+                "Owner": "someone",
+            }
+        },
+        "{}",
+    )
+    r.seed_missing()
+    entries = r.entries()
+    assert "Gitee.UserToken" not in entries
+    assert "Gitee.UserRefreshToken" not in entries
+    assert "Gitee.TokenExpiresAt" not in entries
+    # 绑定态与 owner 属于跨设备业务配置，仍必须同步
+    assert "Gitee.Bound" in entries
+    assert "Gitee.Owner" in entries
+
+
+def test_gitee_token_change_does_not_lift_session_touched():
+    """token 轮换不应产生「本次会话改动」条目（否则每轮都被抬到云端之上）"""
+    r = SyncMetaRecorder()
+    r.attach(
+        {"Gitee": {"UserToken": "old", "UserRefreshToken": "old-r", "TokenExpiresAt": 1}},
+        "{}",
+    )
+    r.seed_missing()
+    r.on_item_changed("Gitee.UserToken", "old", "new")
+    r.on_item_changed("Gitee.UserRefreshToken", "old-r", "new-r")
+    r.on_item_changed("Gitee.TokenExpiresAt", 1, 2)
+    assert r.lift_session_touched(1000) == []
+
+
 def test_seed_missing_is_idempotent():
     r = _recorder()
     before = dict(r.entries())

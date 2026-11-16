@@ -216,14 +216,15 @@ def test_password_mode_seals_plaintext_and_leaves_ciphertext():
 
 
 def test_password_mode_seal_without_password_falls_back_to_backup():
-    """明文但无密码（解锁后又丢密码）：有备份用备份，无备份保留明文并告警"""
+    """明文但无密码（解锁后又丢密码）：有备份用备份，无备份置空且绝不落明文"""
     data = _make_data(api_key="sk-plain")
     backup = {"abc12345": ss.encrypt_secret("sk-backup", "pwd-old")}
     ss.seal_secrets(data, "", backup)
     assert data["LLM"]["SavedProviders"]["abc12345"]["API_KEY"] == backup["abc12345"]
+    # 无备份时不得保留明文：password 模式下漏写明文会被 watcher 整份上传云端
     data2 = _make_data(api_key="sk-plain")
     ss.seal_secrets(data2, "")
-    assert data2["LLM"]["SavedProviders"]["abc12345"]["API_KEY"] == "sk-plain"
+    assert data2["LLM"]["SavedProviders"]["abc12345"]["API_KEY"] == ""
 
 
 def test_hkdf_expand_rfc5869_vector():

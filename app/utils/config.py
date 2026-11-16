@@ -13,6 +13,7 @@
 import atexit
 import threading
 from copy import deepcopy
+from contextlib import contextmanager
 from enum import Enum
 from typing import Any, Callable, List
 import uuid
@@ -177,7 +178,27 @@ class Settings(QConfig):
             cls._instance._secrets_locked = False  # 密码模式下密钥未解锁
             cls._instance._cipher_backup = {}  # config_id → 密文（locked 期间落盘回写用）
             cls._instance._secret_password = ""  # 本次会话已解锁的密码（仅内存）
+            # 云同步合并写盘期间的落盘保护：合并结果由后台线程直接写文件，
+            # 此刻内存还是合并前的旧值。这段窗口里任何 save() 都会用旧内存态
+            # 整文件覆盖磁盘上的合并结果（真实事故：合并后 21 秒被插件迁移的
+            # save() 覆盖，云端配置项全丢）。置位期间 save() 改为丢弃本次写入。
+            cls._instance._suppress_save_reason = ""
         return cls._instance
+
+    @contextmanager
+    def suppress_save(self, reason: str = ""):
+        """在 with 块内丢弃 save() 写入（用于同步合并写盘与内存重载之间的窗口）。
+
+        合并由后台线程直接写文件，Settings 内存要到主线程重载时才跟上。这段
+        窗口里任何 save() 都会把旧内存态整文件写回，覆盖掉刚合并的云端配置。
+        嵌套调用安全：内层结束后恢复到外层的原因，全部退出才真正解除。
+        """
+        prev = getattr(self, "_suppress_save_reason", "")
+        self._suppress_save_reason = reason or prev or "sync-merge"
+        try:
+            yield
+        finally:
+            self._suppress_save_reason = prev
 
     @classmethod
     def _set_closing_down(cls):
@@ -431,6 +452,12 @@ class Settings(QConfig):
             return
         if getattr(self, "_closing", False):
             return
+        # 云同步合并写盘期间：内存是合并前旧值，此刻落盘会覆盖磁盘上的合并
+        # 结果。丢弃本次写入（值仍在内存，合并后的重载会以磁盘为准覆盖回来）。
+        _suppress = getattr(self, "_suppress_save_reason", "")
+        if _suppress:
+            logger.debug(f"[Settings] 同步合并写盘期间跳过一次保存: {_suppress}")
+            return
         try:
             from PyQt5.QtWidgets import QApplication
 
@@ -478,9 +505,15 @@ class Settings(QConfig):
                     from app.utils.secret_store import SecretStore, seal_secrets, strip_secrets
 
                     if mode == MODE_PASSWORD:
-                        # 密码模式：明文加密落盘；locked 期间用备份密文原样回写
+                        # 密码模式：明文加密落盘；locked 期间用备份密文原样回写。
+                        # 备份 = 磁盘现有密文 ∪ 内存备份：内存备份可能不完整
+                        # （切模式 / 跨设备同步后的中间态），只靠它会在缺密码时
+                        # 无处可取，最终把已有密钥置空。磁盘值是最后一道保险。
                         seal_secrets(
-                            data, self._secret_password, self._cipher_backup, kdf_salt=self._password_kdf_salt()
+                            data,
+                            self._secret_password,
+                            self._disk_cipher_backup() | dict(self._cipher_backup),
+                            kdf_salt=self._password_kdf_salt(),
                         )
                     else:
                         strip_secrets(data, SecretStore(), mode=mode)
@@ -626,6 +659,22 @@ class Settings(QConfig):
             if isinstance(info, dict) and not str(info.get("API_KEY") or ""):
                 return True
         return False
+
+    def _disk_cipher_backup(self) -> Dict[str, str]:
+        """磁盘文件里现存的密文（config_id → 密文），作为落盘时的最后兜底。
+
+        内存的 ``_cipher_backup`` 只在 load 读到密文时才填充；切模式、跨设备
+        同步等中间态下它可能为空，此刻若既无密码又无备份，密钥就无处可取。
+        磁盘值不依赖内存状态，始终可用。
+        """
+        try:
+            with open(self.file, encoding="utf-8") as f:
+                raw = json.load(f)
+        except Exception:
+            return {}
+        from app.utils.secret_store import collect_ciphertexts
+
+        return collect_ciphertexts(raw)
 
     def _password_kdf_salt(self) -> str:
         """密码模式批量 KDF salt（持久化复用，避免每次保存重复付 scrypt；nonce 仍每次随机）"""

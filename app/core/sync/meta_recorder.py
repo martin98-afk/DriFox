@@ -33,7 +33,21 @@ META_VERSION = 1
 # 不得进入同步条目表的配置项路径：
 # - System.SyncMeta：元数据自身（否则每次 dump 改变自身内容 → 无限自激）
 # - LLM.SelectedModel：本机上次选中的模型，存 cache/app_state.json，不参与 LWW
-META_ITEM_PATHS = frozenset({"System.SyncMeta", "LLM.SelectedModel"})
+# - Gitee.UserToken / UserRefreshToken / TokenExpiresAt：设备本地 OAuth 凭证。
+#   上传时已被 ``_strip_gitee_token_bytes`` 从文件里剔除，但 SyncMeta 若不排除
+#   它们，条目表里仍留着「本机 token 比云端新」的记录，每轮合并都被
+#   ``lift_session_touched`` 抬到云端 clock 之上并回传 —— 日志里表现为
+#   「本次会话有 N 个条目改动，已抬到远端版本之上: Gitee.TokenExpiresAt,
+#   Gitee.UserRefreshToken, Gitee.UserToken」，纯噪声且会让多端互相制造假更新。
+META_ITEM_PATHS = frozenset(
+    {
+        "System.SyncMeta",
+        "LLM.SelectedModel",
+        "Gitee.UserToken",
+        "Gitee.UserRefreshToken",
+        "Gitee.TokenExpiresAt",
+    }
+)
 
 
 def value_hash(value: object) -> str:
@@ -199,6 +213,11 @@ class SyncMetaRecorder:
 
     def on_item_changed(self, path: str, old: object, new: object) -> None:
         if self._suppress_depth:
+            return
+        if path in META_ITEM_PATHS:
+            # 不上云的条目（元数据自身 / 本机模型选择 / 设备本地凭证）不得记账：
+            # 进了 _session_touched 就会被 lift_session_touched 抬到云端 clock
+            # 之上，每轮同步都制造一次「本机更新」的假象。
             return
         with self._lock:
             kind = COLLECTION_KEYS.get(path)
