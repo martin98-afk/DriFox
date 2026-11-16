@@ -598,3 +598,76 @@ jobs:
             release-assets/pyside6/Drifox-macOS-*.dmg
             release-assets/pyside6/Drifox-Linux-*.tar.gz
             release-assets/SHA256SUMS
+
+      # ── 正文校正（重新发布必经）──
+      # softprops/action-gh-release@v2 更新已有 Release 时走
+      #   body = releaseBody(config) || existingRelease.body
+      # 拿到空串（body_path 读取失败等）就静默沿用旧正文，整个 action 仍报 success。
+      # v0.7.3 重新发布 #3 实测：七个步骤全绿，页面正文却停在「重新发布 #2」。
+      # 这里不依赖 action 的内部回退，直接比对远端正文与本地 release_body.txt，
+      # 不一致就覆盖，把「静默沿用旧正文」变成可观测、可自愈的动作。
+      - name: Ensure release body matches changelog
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          python - <<'PY'
+          import json, os, sys, urllib.request, urllib.error
+
+          tag = os.environ["TAG"]
+          token = os.environ["GH_TOKEN"]
+          repo = os.environ["GITHUB_REPOSITORY"]
+          api = f"https://api.github.com/repos/{repo}/releases/tags/{tag}"
+          headers = {
+              "Authorization": f"token {token}",
+              "Accept": "application/vnd.github+json",
+              "User-Agent": "drifox-release-ci",
+          }
+
+          local = open("release_body.txt", encoding="utf-8").read()
+          # 空正文说明 CHANGELOG 提取失败，宁可红也不要静默发布无正文的 Release
+          if not local.strip():
+              print("::error::release_body.txt 为空，拒绝校正（检查 Extract changelog 步骤）")
+              sys.exit(1)
+
+          def normalized(text):
+              """逐行去尾空白 + 连续空行压成一个 + 去首尾空行。
+
+              GitHub 存储会规范化空行（正文里 printf 多出的空行、尾部换行），
+              直接逐字节比会每次都误判为不一致，进而每次发布都多打一次 PATCH。
+              只用于比较，写入仍用原始 local，Markdown 空行原样保留。
+              """
+              lines = [line.rstrip() for line in (text or "").replace("\r\n", "\n").split("\n")]
+              squeezed = []
+              for line in lines:
+                  if not line and squeezed and not squeezed[-1]:
+                      continue  # 连续空行只留一个
+                  squeezed.append(line)
+              while squeezed and not squeezed[0]:
+                  squeezed.pop(0)
+              while squeezed and not squeezed[-1]:
+                  squeezed.pop()
+              return "\n".join(squeezed)
+
+          def request(url, data=None, method="GET"):
+              body = json.dumps(data).encode() if data is not None else None
+              req = urllib.request.Request(url, data=body, method=method, headers=headers)
+              with urllib.request.urlopen(req, timeout=60) as resp:
+                  return json.load(resp)
+
+          try:
+              release = request(api)
+          except urllib.error.HTTPError as exc:
+              print(f"::error::读取 Release 失败（tag={tag}, HTTP {exc.code}）")
+              sys.exit(1)
+
+          if normalized(release.get("body")) == normalized(local):
+              print(f"Release body 已与 CHANGELOG 一致（tag={tag}）")
+              sys.exit(0)
+
+          print(f"::warning::Release body 与 CHANGELOG 不一致，覆盖（tag={tag}）")
+          payload = {"body": local}
+          request(f"https://api.github.com/repos/{repo}/releases/{release['id']}", payload, "PATCH")
+          print("已校正 Release body")
+          PY
