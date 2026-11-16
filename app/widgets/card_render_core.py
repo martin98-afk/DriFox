@@ -1757,6 +1757,8 @@ def _has_unclosed_registered_tag(text: str) -> bool:
 # 观感是"代码流式打出来、fence 闭合后被替换消失"（与 think/mood 泄漏同族）。
 # 未闭合期间静默累积，闭合后由全量渲染落地（chart-streaming 骨架/真图）。
 _CHART_FENCE_OPEN_RE = re.compile(r"^\s*(```|~~~)\s*(\w+)")
+# 只枚举行首围栏；正文行交给 C 层跳过，不再逐行切片、strip 和匹配。
+_CHART_FENCE_LINE_RE = re.compile(r"^[^\S\n]*(?:`{3}|~{3})[^\n]*", re.MULTILINE)
 _CHART_FENCE_LANGS = frozenset({"echarts", "mermaid", "html", "widget", "svg"})
 # chunk 边界切开标记的半截尾巴：行尾 1-3 个反引号/波浪（可能正在写 fence 开标记）
 # ⚠️ 本正则**禁止**直接对全文 search：`(?:^|\n)...$` 这类前缀分支 + 尾锚定，
@@ -2017,31 +2019,21 @@ def _has_unclosed_chart_fence(text: str) -> bool:
     inside = False
     chart = False
     marker = ""
-    # [PERF] 状态机只关心行首标记，用 find 跳跃扫描而非 split("\n") 全量切分
-    # （后者在流式每批都执行，按文本长度线性分配）+ 逐行 strip 拷贝。
-    pos = 0
-    n = len(text)
-    while pos <= n:
-        nl = text.find("\n", pos)
-        line_end = n if nl == -1 else nl
-        line = text[pos:line_end]
-        stripped = line.strip()
+    for fence_line in _CHART_FENCE_LINE_RE.finditer(text):
+        stripped = fence_line.group().strip()
         if not inside:
             m = _CHART_FENCE_OPEN_RE.match(stripped)
             if m:
                 inside = True
                 marker = m.group(1)
                 chart = _is_render_fence_lang(m.group(2))
-            elif stripped.startswith("```") or stripped.startswith("~~~"):
+            else:
                 inside = True
                 marker = stripped[:3]
                 chart = False
         elif marker and stripped.startswith(marker):
             inside = False
             chart = False
-        if nl == -1:
-            break
-        pos = nl + 1
     return inside and chart
 
 

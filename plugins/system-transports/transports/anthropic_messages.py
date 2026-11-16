@@ -23,10 +23,12 @@ Auth：worker 传入的 auth_headers 只管 bce 与服务商伪装头，Bearer �
 from __future__ import annotations
 
 import json
+import re
 import socket
 from typing import Any, Dict, Iterator, List, Optional
 
 from app.plugins.contracts.stream_sink import StreamEvent
+from app.plugins.sdk import normalize_reasoning_effort, resolve_model_capabilities
 
 ANTHROPIC_VERSION = "2023-06-01"
 
@@ -35,6 +37,55 @@ DEFAULT_MAX_TOKENS = 8192
 
 # 思考默认预算（开启思考但用户未给「思考预算」时）
 DEFAULT_THINKING_BUDGET = 4096
+
+# Anthropic 思考协议分代（官方 thinking-troubleshooting 文档，2026-11 核对）：
+# - Claude 4.5 及以下：仅 enabled+budget_tokens，发 adaptive 反而 400
+# - Claude 4.6：两种都收（enabled 已弃用，优先 adaptive）
+# - Claude 4.7+ / 5.x：仅 adaptive，发 enabled 直接 400；强度走 output_config.effort
+# 版本从模型名解析（兼容中转站别名/日期后缀/点号分隔）；caps 显式声明
+# thinking_enable_value 时优先（对齐 openai_chat 的声明优先链）。
+_CLAUDE_VERSION_RE = re.compile(
+    r"claude-(?:opus|sonnet|haiku|fable|mythos)-(\d{1,2})(?:[.-](\d{1,2})(?!\d))?",
+    re.IGNORECASE,
+)
+# 旧命名：claude-3-5-sonnet（版本号在 family 前）
+_CLAUDE_LEGACY_VERSION_RE = re.compile(
+    r"claude-(\d{1,2})-(\d{1,2})-(?:opus|sonnet|haiku)", re.IGNORECASE
+)
+# adaptive 模式 effort 协议全集（caps 无档位数据时的归一化基准；
+# 并非每个模型都支持 xhigh/max，有 models.dev 档位时以其为准）
+_ANTHROPIC_EFFORT_VALUES = ["low", "medium", "high", "xhigh", "max"]
+
+
+def _claude_thinking_type(model: str) -> str:
+    """按模型名推断 thinking.type：4.6+ → adaptive，其余/解析失败 → enabled。
+
+    minor 限 1~2 位数字且后不接数字：claude-opus-4-20250514 的日期后缀
+    不得被当成 minor=20（4.0 仍走 enabled）。无 minor 的 claude-opus-5
+    按 major≥5 判 adaptive。
+    """
+    m = _CLAUDE_VERSION_RE.search(model) or _CLAUDE_LEGACY_VERSION_RE.search(model)
+    if not m:
+        return "enabled"
+    major = int(m.group(1))
+    minor = int(m.group(2)) if m.group(2) else 0
+    if major > 4 or (major == 4 and minor >= 6):
+        return "adaptive"
+    return "enabled"
+
+# 采样参数弃用分代（官方文档 2026-11 核对）：Opus 4.7 起 temperature /
+# top_p / top_k 弃用，任何非默认值即 400；4.6 及以下不受影响。注意与
+# thinking 分代（4.6 起 adaptive）边界不同，勿复用同一判断。
+_SAMPLING_DEPRECATED_MIN = (4, 7)
+
+def _claude_rejects_sampling_params(model: str) -> bool:
+    """该 Claude 是否拒绝 temperature/top_p/top_k（4.7+ 非默认值即 400）。"""
+    m = _CLAUDE_VERSION_RE.search(model) or _CLAUDE_LEGACY_VERSION_RE.search(model)
+    if not m:
+        return False
+    major = int(m.group(1))
+    minor = int(m.group(2)) if m.group(2) else 0
+    return (major, minor) >= _SAMPLING_DEPRECATED_MIN
 
 # 配置键 → Anthropic 请求顶层键（只映射本协议认的参数）
 _PASSTHROUGH_TOP_LEVEL = {
@@ -490,20 +541,38 @@ class AnthropicMessagesTransport:
 
         body: Dict[str, Any] = {"model": model, "max_tokens": max_tokens}
 
-        for cn_key, en_key in _PASSTHROUGH_TOP_LEVEL.items():
-            value = cfg.get(cn_key)
-            if value is None or value == "":
-                continue
-            body[en_key] = value
+        if not _claude_rejects_sampling_params(model):
+            for cn_key, en_key in _PASSTHROUGH_TOP_LEVEL.items():
+                value = cfg.get(cn_key)
+                if value is None or value == "":
+                    continue
+                body[en_key] = value
+        # 4.7+：temperature/top_p/top_k 弃用（非默认值即 400），整组不透传
 
-        # 思考：Anthropic 用 thinking.budget_tokens，且 max_tokens 必须大于预算
+        # 思考：按模型分代选协议形状（见 _claude_thinking_type）
         if cfg.get("思考模式") is True:
-            budget = _int_or(cfg.get("思考预算") or DEFAULT_THINKING_BUDGET, DEFAULT_THINKING_BUDGET)
-            budget = max(1024, budget)
-            if max_tokens <= budget:
-                max_tokens = budget + 1024
-                body["max_tokens"] = max_tokens
-            body["thinking"] = {"type": "enabled", "budget_tokens": budget}
+            caps = resolve_model_capabilities(cfg)
+            enable_value = caps.get("thinking_enable_value") or _claude_thinking_type(model)
+            if enable_value == "adaptive":
+                # adaptive 无预算概念：不发送 budget_tokens，也不抬 max_tokens；
+                # 强度由 output_config.effort 软引导（未设等级则用服务端默认）
+                body["thinking"] = {"type": "adaptive"}
+                effort = cfg.get("思考等级")
+                if effort not in (None, ""):
+                    body["output_config"] = {
+                        "effort": normalize_reasoning_effort(
+                            effort,
+                            caps.get("reasoning_effort_values") or _ANTHROPIC_EFFORT_VALUES,
+                        )
+                    }
+            else:
+                # enabled（4.5 及以下）：max_tokens 必须大于预算
+                budget = _int_or(cfg.get("思考预算") or DEFAULT_THINKING_BUDGET, DEFAULT_THINKING_BUDGET)
+                budget = max(1024, budget)
+                if max_tokens <= budget:
+                    max_tokens = budget + 1024
+                    body["max_tokens"] = max_tokens
+                body["thinking"] = {"type": "enabled", "budget_tokens": budget}
             # 开启 thinking 时 Anthropic 只接受 temperature=1
             body.pop("temperature", None)
         return body
