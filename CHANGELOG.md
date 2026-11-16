@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### 🐛 Bug 修复 (Bug Fixes)
+
+- **Anthropic 提示缓存命中率恒为 0 修复** (`plugins/system-transports/transports/anthropic_messages.py` · `app/core/workers/protocol_dispatch.py`): Anthropic 前缀缓存是 opt-in——请求里没有 `cache_control` 断点，服务端既不写也不读，命中率必然 0，而此前全仓无一处发送该字段（新增的 automatic caching 仍要求顶层有一个 `cache_control`）。现按官方推荐在位阶最低的两处挂断点：`tools` 末项（覆盖整段工具定义，system 每轮变动时这一段仍命中）与最后一条消息的最后一个非空 content block（覆盖 tools+system+历史，多轮逐轮累积），断点数 ≤2（官方上限 4）；无 tools 有 system 时退化为 system 单块断点（system 须为块数组才挂得上）。端点拒绝该字段（400 且报错点名 `cache_control`）时自动剥除断点重发一次并告警，不因中转不支持而失败；模型配置写 `提示缓存=false` 可永久关闭（缺省开启）。协议分派补一条兜底：`认证方式=anthropic` 的配置改走原生 `anthropic_messages` 通道（此前落到默认 `openai_chat`，OpenAI 兼容层没有该字段的位置），优先级低于「协议入口」手选与 adapter 声明。新增 `[AnthropicCache]` DEBUG 打点（断点数 + usage 的 prompt/read/write），用于区分「代码没发断点」与「渠道吞了断点」。测试：`tests/plugins/test_anthropic_messages_transport.py` 补 7 例，新建 `tests/core/test_protocol_dispatch.py` 6 例。
+
 ## [v0.7.3] - 2026-11-16 (重新发布 #3)
 
 自 v0.7.2 以来的变更 | 提交数：92 · 文件变更：268 · +28899/-8000 | 贡献者：dingma, drifox-bot, mading

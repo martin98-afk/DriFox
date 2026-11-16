@@ -10,7 +10,8 @@ Phase 3（2026-11-07）把 Responses API 从 worker 原生通道迁到 transport
 2. 协议入口 ``responses`` / ``transport:<id>``（能力弹窗手选）
 3. adapter flags：``protocol == "responses"`` 或 ``use_responses_api``
 4. adapter flags 的 ``extra["transport"]``（插件自声明，可为 id 或实现对象）
-5. None（TransportRegistry 默认 openai_chat）
+5. 认证方式 ``anthropic``（x-api-key 族）→ ``anthropic_messages``（原生 messages 协议）
+6. None（TransportRegistry 默认 openai_chat）
 
 返回值：transport id（str）或 adapter 直接给的实现对象；None = 注册表默认。
 """
@@ -21,6 +22,8 @@ from typing import Any, Dict, Optional
 
 # responses 协议的 transport 插件 id（system-transports/transports/openai_responses.py）
 RESPONSES_TRANSPORT_ID = "openai_responses"
+# Anthropic 原生 messages 协议（system-transports/transports/anthropic_messages.py）
+ANTHROPIC_TRANSPORT_ID = "anthropic_messages"
 
 
 def resolve_transport_target(llm_config: Dict[str, Any], flags: Any = None) -> Optional[Any]:
@@ -41,4 +44,10 @@ def resolve_transport_target(llm_config: Dict[str, Any], flags: Any = None) -> O
         transport = extra.get("transport") if isinstance(extra, dict) else None
         if transport is not None:
             return transport
+    # 认证方式 anthropic（x-api-key 族）→ 走 Anthropic 原生 messages 协议。
+    # OpenAI 兼容层无法表达 prompt caching 断点（前缀缓存 opt-in，不发
+    # cache_control 即命中恒 0），只有原生通道才发得出去。优先级低于「协议入口」
+    # 手选：只提供 chat/completions 的中转可用手选覆盖本条。
+    if str(cfg.get("认证方式", "") or "").strip().lower() == "anthropic":
+        return ANTHROPIC_TRANSPORT_ID
     return None
