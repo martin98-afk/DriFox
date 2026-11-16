@@ -3613,13 +3613,23 @@ class UIPluginRegistry:
         # 重试 2 次放弃），用户视角「点了打不开」；且 dock 容器不发
         # overlayStateChanged，没有任何机制自动切回对话页，此后每次点击
         # 只在记账与视觉错位间翻转。
-        # 两步都无条件执行（幂等）：
-        # 1) 内容栈不在对话页时切回；
-        # 2) 每次显示都踢容器 _schedule_expand——隐藏页期间容器展开会被
-        #    natural_h<=0 重试放弃，仅切页时踢一次不够（切页可能早已发生）。
+        # ★ 2026-11-16 收窄：该兜底只对 bottom 保留。left 卡片宿主已从对话区
+        #   左停靠区迁到侧边栏内部（_sidebar_splitter ⊂ #tabFrame，见
+        #   TabManagerWindow._complete_setup_ui），不再住对话页里，切页前提
+        #   不成立。无条件切页反而制造「卡片页 → 对话页」整页滑动：用户在
+        #   full 卡页时打开侧边栏卡，对话区先滑回对话，随后覆层容器因对话区
+        #   被挤窄重发 overlayStateChanged 又滑回去，表现为来回切换。（回归：
+        #   tools/debug/probe_left_card_switch.py）
+        # _schedule_expand 仍对两者执行：隐藏页期间容器展开会被 natural_h<=0
+        # 重试放弃，每次显示都踢一次是幂等兜底。
         if card_info.container in ("left", "bottom") and host is not None:
             stack = getattr(host, "_content_stack", None)
-            if stack is not None and callable(getattr(stack, "currentIndex", None)) and stack.currentIndex() != 0:
+            if (
+                card_info.container == "bottom"
+                and stack is not None
+                and callable(getattr(stack, "currentIndex", None))
+                and stack.currentIndex() != 0
+            ):
                 stack.setCurrentIndex(0, direction=-1)
             for _dock_attr in ("_left_card_container", "_bottom_card_container"):
                 _cont = getattr(host, _dock_attr, None)
