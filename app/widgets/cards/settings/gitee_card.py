@@ -715,12 +715,8 @@ class GiteeAccountRow(QFrame):
             return
 
         dialog = _RepoVisibilityDialog(self.window())
-        dialog.chosen.connect(self._start_oauth_with_backup)
+        dialog.chosen.connect(self._start_oauth)
         dialog.exec_()
-
-    def _start_oauth_with_backup(self, repo_private: bool):
-        self._sync_svc.backup_local()
-        self._start_oauth(repo_private)
 
     def _start_oauth(self, repo_private: bool):
         self._binding = True
@@ -743,6 +739,9 @@ class GiteeAccountRow(QFrame):
         try:
             from app.core.auth import get_oauth_backend
 
+            # 绑定前备份本地配置：copytree user-custom 约 6s，必须在后台线程
+            # 做（曾在主线程执行，选完仓库类型后 UI 冻结到授权页弹出）
+            self._sync_svc.backup_local()
             success, message = get_oauth_backend("gitee").bind(
                 repo_private=repo_private, cancel_event=cancel_event
             )
@@ -1868,15 +1867,8 @@ class GiteeCard(SettingCard):
             return
 
         dialog = _RepoVisibilityDialog(self.window())
-        dialog.chosen.connect(self._start_oauth_with_backup)
+        dialog.chosen.connect(self._start_oauth)
         dialog.exec_()
-
-    def _start_oauth_with_backup(self, repo_private: bool):
-        """绑定前先备份本地配置"""
-        from app.core.sync.config_sync import ConfigSyncService
-
-        ConfigSyncService.get_instance().backup_local()
-        self._start_oauth(repo_private)
 
     def _start_oauth(self, repo_private: bool):
         self._binding = True
@@ -1903,6 +1895,11 @@ class GiteeCard(SettingCard):
         try:
             from app.core.auth import get_oauth_backend
 
+            # 绑定前备份本地配置：copytree user-custom 约 6s，必须在后台线程
+            # 做（曾在主线程执行，选完仓库类型后 UI 冻结到授权页弹出）
+            from app.core.sync.config_sync import ConfigSyncService
+
+            ConfigSyncService.get_instance().backup_local()
             success, msg = get_oauth_backend("gitee").bind(
                 repo_private=repo_private, cancel_event=cancel_event
             )
