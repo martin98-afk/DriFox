@@ -1,16 +1,8 @@
 ## [Unreleased]
 
-### ⚡ 性能优化 (Performance)
+## [v0.7.3] - 2026-11-16 (重新发布 #2)
 
-- **关闭等待回答标签后停止空闲动画** (`app/widgets/tab_panel.py`): `remove_tab()` 补齐 `_question_count` 递减，避免已关闭标签留下等待回答计数，使 66ms 状态动画定时器持续空转。新增 3 条回归，覆盖单标签关闭、保留另一流式标签、混合状态批量关闭；相关 47 条测试通过。新增历史批次滚动/长帧与隐藏设置卡内存测量，结果及测量边界见 `docs/perf/2026-11-16-idle-animation-and-memory.md`。
-
-### ♻️ 代码重构 (Refactoring)
-
-- **插件化残留清理：M4 团队分组旧实现与长期记忆死链摘除** (`app/main_widget.py` · `plugins/history-manager/ui/history_card.py` · `app/core/conversation/memory_manager.py` · `app/core/store/`): 删除 `_build_team_groups` / `set_team_groups`（M4 混排后无业务调用方，仅旧测试引用）及 history_card 渲染路径三处老格式兼容分支与 `_team_groups` 死属性；`_history_card` / `_history_popup_card` 两个无写入者的空 setter 摘除（property 只读代理保留）。长期记忆链路整体下线：`MemoryManagerCore` 摘除条目记忆 API 与 `format_memories_for_prompt`（记忆/经验已由 assistant_hub 插件接管），`session_store` 删 `save_memory` / memories 表建表与 canvas_id 迁移，`app/core/store/memory_repository.py` 整文件删除；项目工作目录 API（get/set_working_directory，宿主与 worktree-manager 插件在用）不受影响。测试：`tests/widgets/test_team_restore.py` 删 8 个死用例，11 个引用已迁移旧路径（`app/widgets/cards/settings/history_card`）的用例改按文件路径加载 history-manager 插件模块；`test_core_smoke` / `test_perf_guard_io` 断言同步收窄。
-
-## [v0.7.3] - 2026-11-16
-
-自 v0.7.2 以来的变更 | 提交数：78 · 文件变更：203 · +24351/-6193 | 贡献者：dingma, drifox-bot
+自 v0.7.2 以来的变更 | 提交数：91 · 文件变更：264 · +28535/-7987 | 贡献者：dingma, drifox-bot, mading
 
 ### ✨ 新功能 (New Features)
 
@@ -47,6 +39,31 @@
 
 - **持续运行性能观测体系（七类埋点，全部 env 门控默认关零开销）** (`app/core/infra/telemetry/` · `app/core/infra/rss_sampler.py` · `app/tools/mcp_tools.py`): 心跳分位数、全线程周期 dump、GC gen2 统计、GDI 句柄、renderer 假死探测、三级告警联动、WebView 命中率。配套机判脚本 `scripts/smoke_verdict.py`（六判据 PASS/FAIL/INVALID，退出码可接 CI）与一键冒烟起跑/归档脚本，跑完即可出机判表。
 - **长时压测场景补齐至六个 + runner 三档** (`tests/perf/long_run/`): 新增主题切换（D，活事件循环泵）、MCP 探活（E，本地 stub + 失败重试监控）、窗口级会话开关（F，纯 HTTP 驱动运行中实例 + 假 LLM 流式 stub）三场景；runner 支持 smoke/std/converge 三档与采样间隔覆盖；采样扩 GDI/QTimer/gap 三列；修复场景 C 指向已迁移的热重载入口。
+
+### ✨ 新功能 (New Features) (重新发布 #2 追加)
+
+- **多滚动区域快速滚轮** (`app/utils/scroll_tuning.py` · `app/main_widget.py` · `app/widgets/tab_panel.py` · `app/widgets/cards/` 等): 新增滚动调优模块：滚轮事件禁用平滑滚动动画、单步直接更新数值并按持续滚动加速，`install_fast_wheel` 一行接入 `SystemCardFrame`；`main_widget` / `tab_panel` / `chat_area_module` / `markdown_block_viewer`、@卡 / 权限批准 / 提问浮窗 / 分享卡 / 子智能体紧凑卡、LLM 设置 / 模型选择 / 插件设置页等十余个滚动区域全部接入。配套滚动性能与 paint 事件成本基准（`benchmarks/`）。
+- **瞬态 provider 表单资源管理** (`app/widgets/cards/global_card_controller.py` · `app/widgets/cards/settings/provider_edit_card.py` · `app/widgets/webview_pool.py`): provider 表单等瞬态卡片补生命周期资源管理；新增 `benchmarks/bench_card_lifecycle.py` / `bench_provider_lifecycle.py` 生命周期基准与 `tests/widgets/test_provider_form_lifecycle.py` / `test_webview_pool_idle_gc.py` 回归。
+- **anthropic_messages transport 按模型分代处理请求参数** (`plugins/system-transports/transports/anthropic_messages.py` · `app/widgets/card_render_core.py`): 按模型版本分代构建请求参数（新代模型弃用采样类参数，透传非默认值会被 400 拒绝），build_request 分代整组不透传；新增 `tests/plugins/test_anthropic_messages_transport.py` 与 `tests/widgets/test_chart_fence_scan_cost.py`；插件 plugin.json 描述与版本同步更新。
+- **同步合并期间抑制保存防数据丢失** (`app/core/sync/` · `app/utils/config.py` · `app/utils/secret_store.py` · `plugins/system-transports/transports/openai_chat.py`): 同步合并期间抑制本地保存，防止合并写入与运行时保存交错丢数据；`openai_chat` 请求参数形状治理配套，新增参数形状 / 保存守卫 / 密钥库等配套测试。
+- **CardContainer overlay 状态管理** (`app/widgets/cards/card_container.py`): 补 overlay 状态守卫，避免卡片切换链路上不必要的状态翻转。
+
+### 🐛 问题修复 (Bug Fixes) (重新发布 #2 追加)
+
+- **底部容器卡片切换 fallback 行为** (`app/plugins/registries/ui_plugin_registry.py`): 修正 UI 卡片切换的 fallback 行为判定。
+- **Gitee OAuth 连接移除本地备份步骤** (`app/widgets/cards/settings/gitee_card.py`): 连接流程不再执行本地目录备份（该步骤此前已挪后台线程），连接路径更直接。
+
+### ♻️ 代码重构 (Refactoring) (重新发布 #2 追加)
+
+- **插件化残留清理：M4 团队分组旧实现与长期记忆死链摘除** (`app/main_widget.py` · `plugins/history-manager/ui/history_card.py` · `app/core/conversation/memory_manager.py` · `app/core/store/`): 删除 `_build_team_groups` / `set_team_groups`（M4 混排后无业务调用方，仅旧测试引用）及 history_card 渲染路径三处老格式兼容分支与 `_team_groups` 死属性；`_history_card` / `_history_popup_card` 两个无写入者的空 setter 摘除（property 只读代理保留）。长期记忆链路整体下线：`MemoryManagerCore` 摘除条目记忆 API 与 `format_memories_for_prompt`（记忆/经验已由 assistant_hub 插件接管），`session_store` 删 `save_memory` / memories 表建表与 canvas_id 迁移，`app/core/store/memory_repository.py` 整文件删除；项目工作目录 API（get/set_working_directory，宿主与 worktree-manager 插件在用）不受影响。测试：`tests/widgets/test_team_restore.py` 删 8 个死用例，11 个引用已迁移旧路径（`app/widgets/cards/settings/history_card`）的用例改按文件路径加载 history-manager 插件模块；`test_core_smoke` / `test_perf_guard_io` 断言同步收窄。
+
+### ⚡ 性能优化 (Performance) (重新发布 #2 追加)
+
+- **关闭等待回答标签后停止空闲动画** (`app/widgets/tab_panel.py`): `remove_tab()` 补齐 `_question_count` 递减，避免已关闭标签留下等待回答计数，使 66ms 状态动画定时器持续空转。新增 3 条回归，覆盖单标签关闭、保留另一流式标签、混合状态批量关闭；相关 47 条测试通过。新增历史批次滚动/长帧与隐藏设置卡内存测量，结果及测量边界见 `docs/perf/2026-11-16-idle-animation-and-memory.md`。
+
+### 🔧 其他 (Chores & Build) (重新发布 #2 追加)
+
+- `marketplace.json` 由 CI 从插件 manifest 自动再生。
 
 ## [v0.7.2] - 2026-11-14 (重新发布 #8)
 
