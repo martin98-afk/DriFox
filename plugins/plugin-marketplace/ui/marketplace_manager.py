@@ -83,7 +83,11 @@ def _official_plugin_branch() -> str:
 
 def _default_sources() -> List[Dict[str, Any]]:
     """默认源每次调用时求值：分支随当前进程构建变体动态选，
-    不在模块 import 时定死（能力池未就绪时会误选 main）。"""
+    不在模块 import 时定死（能力池未就绪时会误选 main）。
+
+    仅保留社区插件市场源。系统插件随主程序版本分发，不再提供在线更新，
+    故原先的 drifox-system 源已下线（见 _RETIRED_BUILTIN_SOURCES）。
+    """
     branch = _official_plugin_branch()
     return [
         {
@@ -95,22 +99,16 @@ def _default_sources() -> List[Dict[str, Any]]:
             "auto_update": True,
             "builtin": True,
         },
-        {
-            "name": "drifox-system",
-            "source": {
-                "source": "url",
-                "url": "https://raw.githubusercontent.com/martin98-afk/DriFox/master/marketplace.json",
-            },
-            "auto_update": True,
-            "builtin": True,
-        },
     ]
 
+# 已下线的内置市场源：系统插件不再走市场更新，存量 sources.json 里的
+# builtin 条目启动时清除（用户自建同名非 builtin 源不受影响）。
+_RETIRED_BUILTIN_SOURCES = {"drifox-system"}
 
 # ── C1：市场源白名单 ──────────────────────────────
 
 # 允许的 git 托管 host（url 类型源）；Settings.marketplace_allowed_git_hosts 可追加
-# raw.githubusercontent.com：GitHub 官方静态文件域（内置双源即此形态），非交互式 git host
+# raw.githubusercontent.com：GitHub 官方静态文件域（内置源即此形态），非交互式 git host
 _MARKETPLACE_ALLOWED_GIT_HOSTS = {
     "github.com",
     "raw.githubusercontent.com",
@@ -277,6 +275,8 @@ class MarketplaceSourceManager:
           只追加不更新会让老用户 sources.json 锁死旧 URL，永远拉旧清单。
           builtin 语义 = 随版本分发的官方源；用户自定义源（builtin 非真）
           与条目顺序不受影响。
+        - 已下线的内置源（_RETIRED_BUILTIN_SOURCES，如 drifox-system）：
+          存量 builtin 条目直接移除，用户自建同名非 builtin 源保留。
         """
         if not self._sources_file.exists():
             self._sources_file.write_text(
@@ -293,6 +293,17 @@ class MarketplaceSourceManager:
         if not isinstance(existing, list):
             logger.warning("[Marketplace] 市场源配置格式异常，跳过默认源合并")
             return
+        # 已下线内置源清理：系统插件不再在线更新，存量配置里的 builtin
+        # drifox-system 条目启动即移除（不保底用户自建同名源）
+        retired = [
+            s for s in existing
+            if isinstance(s, dict)
+            and s.get("name") in _RETIRED_BUILTIN_SOURCES
+            and s.get("builtin")
+        ]
+        if retired:
+            retired_ids = {id(s) for s in retired}
+            existing = [s for s in existing if id(s) not in retired_ids]
         defaults = _default_sources()
         existing_names = {s.get("name") for s in existing if isinstance(s, dict)}
         missing = [d for d in defaults if d.get("name") not in existing_names]
@@ -306,13 +317,17 @@ class MarketplaceSourceManager:
             if d and entry.get("builtin") and entry.get("source") != d.get("source"):
                 entry["source"] = d["source"]
                 updated_names.append(str(entry.get("name")))
-        if not missing and not updated_names:
+        if not missing and not updated_names and not retired:
             return
         try:
             self._sources_file.write_text(
                 json.dumps(existing + missing, ensure_ascii=False, indent=2),
                 encoding="utf-8",
             )
+            if retired:
+                logger.info(
+                    f"[Marketplace] 已移除下线内置市场源: {[s.get('name') for s in retired]}"
+                )
             if updated_names:
                 logger.info(f"[Marketplace] 已同步 builtin 市场源到当前版本默认值: {updated_names}")
             if missing:

@@ -92,7 +92,8 @@ def test_user_custom_source_untouched(tmp_path):
     assert _url_of(sources, "drifox-official") == "https://example.com/my-own-market.json"
     names = [s["name"] for s in sources]
     # 缺失的 builtin 默认源仍被补齐
-    assert "drifox-system" in names
+    assert "drifox-official" in names
+    assert len([n for n in names if n == "drifox-official"]) == 1
 
 
 def test_idempotent_when_already_current(tmp_path):
@@ -114,12 +115,72 @@ def test_idempotent_when_already_current(tmp_path):
 
 
 def test_missing_file_writes_all_defaults(tmp_path):
-    """文件不存在 → 写入全部默认源。"""
+    """文件不存在 → 写入全部默认源（现仅社区源，系统源已下线）。"""
     mgr = _make_mgr(tmp_path)
     mgr._ensure_defaults()
     sources = _read_sources(mgr)
     assert _url_of(sources, "drifox-official") == OFFICIAL_DEFAULT_URL
     assert len(sources) == len(mm._default_sources())
+    assert "drifox-system" not in [s["name"] for s in sources]
+
+def test_retired_builtin_source_removed(tmp_path):
+    """存量 drifox-system 内置源 → 启动即移除；用户自建同名非 builtin 源保留。"""
+    mgr = _make_mgr(tmp_path)
+    legacy = [
+        {
+            "name": "drifox-official",
+            "source": {"source": "url", "url": OFFICIAL_DEFAULT_URL},
+            "auto_update": True,
+            "builtin": True,
+        },
+        {
+            "name": "drifox-system",
+            "source": {
+                "source": "url",
+                "url": "https://raw.githubusercontent.com/martin98-afk/DriFox/master/marketplace.json",
+            },
+            "auto_update": True,
+            "builtin": True,
+        },
+        {
+            "name": "drifox-system",
+            "source": {"source": "url", "url": "https://example.com/custom-system.json"},
+            "auto_update": False,
+            "builtin": False,
+        },
+    ]
+    mgr._sources_file.write_text(json.dumps(legacy, ensure_ascii=False, indent=2), encoding="utf-8")
+    mgr._ensure_defaults()
+    sources = _read_sources(mgr)
+    system_entries = [s for s in sources if s.get("name") == "drifox-system"]
+    # builtin 条目被清，用户自建同名非 builtin 条目保留
+    assert len(system_entries) == 1
+    assert system_entries[0]["builtin"] is False
+    assert system_entries[0]["source"]["url"] == "https://example.com/custom-system.json"
+
+def test_retired_source_removal_persisted_without_other_change(tmp_path):
+    """只有下线源需要清理（无缺失/无 URL 漂移）也要写回，避免每次启动重复处理。"""
+    mgr = _make_mgr(tmp_path)
+    legacy = [
+        {
+            "name": "drifox-official",
+            "source": {"source": "url", "url": OFFICIAL_DEFAULT_URL},
+            "auto_update": True,
+            "builtin": True,
+        },
+        {
+            "name": "drifox-system",
+            "source": {
+                "source": "url",
+                "url": "https://raw.githubusercontent.com/martin98-afk/DriFox/master/marketplace.json",
+            },
+            "auto_update": True,
+            "builtin": True,
+        },
+    ]
+    mgr._sources_file.write_text(json.dumps(legacy, ensure_ascii=False, indent=2), encoding="utf-8")
+    mgr._ensure_defaults()
+    assert [s["name"] for s in _read_sources(mgr)] == ["drifox-official"]
 
 
 def test_official_branch_follows_build_variant(tmp_path, monkeypatch):
