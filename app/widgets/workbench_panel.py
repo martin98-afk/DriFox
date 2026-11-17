@@ -132,7 +132,8 @@ class WorkbenchPanel(QWidget):
         self._logical_index: int = -1
 
         root = QVBoxLayout(self)
-        root.setContentsMargins(10, 8, 8, 8)
+        # 插件页内容贴边（无缝填充）：边距只留给顶部页签条自身
+        root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(6)
 
         # ── 顶部：页签条（右对齐 + 自动换行）──
@@ -142,7 +143,9 @@ class WorkbenchPanel(QWidget):
         tab_bar_host.setObjectName("workbenchTabBarHost")
         tab_bar_host.setStyleSheet("background: transparent;")
         # FlowLayout：tab 多时自动折行；AlignRight 整体右对齐（每行独立计算）
-        self._tab_bar_layout = FlowLayout(tab_bar_host, spacing=2, alignment=Qt.AlignRight, margins=0)
+        self._tab_bar_layout = FlowLayout(
+            tab_bar_host, spacing=2, alignment=Qt.AlignRight, margins=(10, 8, 8, 0)
+        )
         root.addWidget(tab_bar_host)
         # 页签滑动指示器：与标题栏顶栏 tab 同款（先于任何按钮创建，天然垫在底层）
         self._indicator_ctl = TabIndicatorController(

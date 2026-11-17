@@ -63,8 +63,10 @@ def test_corner_detected_from_both_handles():
         gpos = h_outer.mapToGlobal(QPoint(2, h_outer.height() // 2))
         # 纵 handle 的水平中线与交点一致
         gpos.setY(h_vertical.mapToGlobal(QPoint(0, h_vertical.height() // 2)).y())
-        assert controller._corner_at(h_outer, gpos) is not None
-        assert controller._corner_at(h_vertical, gpos) is not None
+        window_ref = window
+        assert controller._find_corner(window_ref, gpos) is not None
+        # 交点两侧的留白也在命中方块内（用户不必精确压在 handle 上）
+        assert controller._find_corner(window_ref, gpos + QPoint(6, 0)) is not None
     finally:
         controller.stop()
         window.deleteLater()
@@ -108,6 +110,49 @@ def test_shift_pair_respects_minimum_sizes():
         # 向右狠拖：右窗格不会小于 minimumWidth(120)
         controller._shift_pair(outer, 1, sizes, 100000)
         assert outer.sizes()[1] >= 120
+    finally:
+        controller.stop()
+        window.deleteLater()
+
+
+def test_corner_zone_covers_container_padding():
+    """左右分栏与上下分栏之间隔着容器留白时，交点附近的留白仍应命中角点"""
+    from PyQt5.QtWidgets import QHBoxLayout
+
+    window = QWidget()
+    window.resize(600, 400)
+    outer = QSplitter(Qt.Horizontal, window)
+    left = QWidget()
+    left.setMinimumWidth(60)
+    wrapper = QWidget()
+    wrapper_layout = QHBoxLayout(wrapper)
+    wrapper_layout.setContentsMargins(14, 0, 0, 0)  # 模拟 frame padding / 卡片留白
+    vertical = QSplitter(Qt.Vertical, wrapper)
+    top = QWidget()
+    top.setMinimumHeight(60)
+    bottom = QWidget()
+    bottom.setMinimumHeight(60)
+    vertical.addWidget(top)
+    vertical.addWidget(bottom)
+    wrapper_layout.addWidget(vertical)
+    outer.addWidget(left)
+    outer.addWidget(wrapper)
+    layout = QVBoxLayout(window)
+    layout.setContentsMargins(0, 0, 0, 0)
+    layout.addWidget(outer)
+    window.show()
+    QTest.qWait(80)
+    outer.setSizes([300, 300])
+    QTest.qWait(50)
+
+    controller = SplitterCornerController()
+    try:
+        h_vertical = vertical.handle(1)
+        anchor = h_vertical.mapToGlobal(QPoint(0, h_vertical.height() // 2))
+        # 鼠标放在留白中间（距上下分栏左端 7px，不是 handle 本体）
+        assert controller._find_corner(window, anchor + QPoint(-7, 0)) is not None
+        # 超出容差（留白 + HIT_PAD 之外）不命中
+        assert controller._find_corner(window, anchor + QPoint(-60, 0)) is None
     finally:
         controller.stop()
         window.deleteLater()

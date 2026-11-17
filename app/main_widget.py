@@ -9741,11 +9741,23 @@ class OpenAIChatToolWindow(ToolWindow):
             target_min_w = 320
             host = self.window()
             # [PERF/N4] findChild 按宿主缓存：id(宿主) 未变直接复用，变化重查回填。
+            # [note2] 约定：host 为 None 时 host_id 记 0，与 __init__ 初值
+            # (0, None) 撞键短路——无宿主即无 splitter，直接复用不空跑
+            # findChild；改键值或初值时两处必须一起改。
             host_id = id(host) if host is not None else 0
             cached_id, sp = self._cached_dock_splitter
             if cached_id != host_id:
                 sp = host.findChild(QSplitter, "dockSplitter") if host is not None else None
                 self._cached_dock_splitter = (host_id, sp)
+            elif sp is not None:
+                # [note1] 兜底：宿主单例销毁重建 + id() 地址复用时，缓存可能
+                # 命中已销毁的 C++ 对象（访问抛 RuntimeError）。触发窗口极窄，
+                # 探测失败置 (0, None) 失效缓存并重查一次封死。
+                try:
+                    sp.count()
+                except RuntimeError:
+                    sp = host.findChild(QSplitter, "dockSplitter") if host is not None else None
+                    self._cached_dock_splitter = (host_id, sp)
             if sp is not None and sp.count() >= 2:
                 win_w = host.width()
                 dock_min = sp.widget(0).minimumWidth() + sp.handleWidth()

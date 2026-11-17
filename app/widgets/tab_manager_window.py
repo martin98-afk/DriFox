@@ -1454,8 +1454,10 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
         self._workbench_frame.setMinimumWidth(PANEL_WIDTH_MIN + 14)
         self._workbench_frame.setMaximumWidth(PANEL_WIDTH_MAX + 14)
         _wb_frame_layout = QVBoxLayout(self._workbench_frame)
-        # 与 #chatFrame / #tabFrame 内边距完全对齐，视觉一致
-        _wb_frame_layout.setContentsMargins(6, 6, 6, 6)
+        # 工作台页内容贴边（用户要求无缝填充）：不再留 6px 内边距。
+        # 注：下方 min/max 宽的 +14 是历史补偿（原 12 margins + 2 border），
+        # 现在多出的 12px 只放宽上限、不影响内容贴边，数值保持不动。
+        _wb_frame_layout.setContentsMargins(0, 0, 0, 0)
         _wb_frame_layout.setSpacing(0)
         _wb_frame_layout.addWidget(self.workbench_panel)
         self._workbench_frame.hide()  # 默认隐藏（标题栏「右侧边栏」按钮 toggle）

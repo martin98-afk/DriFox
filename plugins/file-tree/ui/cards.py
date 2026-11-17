@@ -940,7 +940,7 @@ class FileTreeCard(QWidget):
             "QSplitterHandle {"
             "  background: transparent;"
             f"  border-top: 2px solid rgba({border.red()},{border.green()},{border.blue()},90);"
-            "  margin: 2px 10px; border-radius: 1px;"
+            "  margin: 0; border-radius: 1px;"
             "}"
             "QSplitterHandle[splitterHot=\"true\"] {"
             f"  border-top: 2px solid {accent.name()};"
