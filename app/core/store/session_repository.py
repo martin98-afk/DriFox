@@ -919,6 +919,54 @@ class SessionRepository:
             logger.error(f"[SessionRepository] get_session 异常: {e}")
             return None
 
+    def get_by_ids(self, session_ids: List[str]) -> Dict[str, Dict]:
+        """按 ID 批量取回会话（session_id IN 一次查询，I6 引用会话 N+1 消除）。
+
+        每个 get() 都是 SELECT * 全 blob + 解压 + 浓缩前置读，N 个引用会话
+        串行执行时发送首字延迟线性叠加（session_reference 的 N+1 场景）。
+        本方法一次 IN 查询取回全部；分批防 SQLite 变量数上限（999/批，
+        老版 SQLITE_MAX_VARIABLE_NUMBER 固有行为）。
+
+        与 get() 语义对齐：成功取回的 sid 同样失效内容 hash 缓存（外部
+        加载最新数据，下次 save 重建）。
+
+        Returns:
+            {session_id: session dict}；查不到 / 反序列化失败的 id 不出现。
+            未初始化 / SQL 失败返回 {}（调用方降级逐个读）。
+        """
+        ids = [sid for sid in (session_ids or []) if sid]
+        if not ids or not self.is_initialized:
+            return {}
+        out: Dict[str, Dict] = {}
+        try:
+            for start in range(0, len(ids), 500):
+                chunk = ids[start : start + 500]
+                placeholders = ",".join("?" * len(chunk))
+                success, rows = self._execute(
+                    f"SELECT * FROM {self.TABLE_NAME} WHERE session_id IN ({placeholders})",
+                    tuple(chunk),
+                )
+                if not success:
+                    return {}
+                for row in rows:
+                    try:
+                        session = self._row_to_session(row)
+                    except Exception as e:  # noqa: BLE001 — 单行坏数据不拖垮整批
+                        logger.warning(f"[SessionRepository] get_by_ids 行反序列化失败: {e}")
+                        continue
+                    if isinstance(session, dict):
+                        sid = str(session.get("session_id", "") or "")
+                        if sid:
+                            out[sid] = session
+        except Exception as e:
+            logger.error(f"[SessionRepository] get_by_ids 异常: {e}")
+            return {}
+        if out:
+            with self._cache_lock:
+                for sid in out:
+                    self._content_hash_cache.pop(sid, None)
+        return out
+
     def get_all(self, limit: int = 100, offset: int = 0) -> List[Dict]:
         """获取所有会话（按更新时间倒序）"""
         if not self.is_initialized:
