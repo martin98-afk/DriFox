@@ -11220,9 +11220,28 @@ class OpenAIChatToolWindow(ToolWindow):
         的 showEvent、LLMSettingsCard 的 showEvent）。隐藏卡用户看不见，
         刷新纯属白付；置脏后由补刷链路自愈。无协议的卡保守照刷，避免
         主题更新永久丢失。
+
+        [I5] 外观纪元短路：batched 全局段的 EV_THEME_CHANGED 派发
+        （UIPluginRegistry._on_theme_changed_event → ensure_theme_fresh）
+        已把可见卡刷到当前纪元并打 `_drifox_theme_epoch`，本方法原有
+        `_refreshed_in_cycle` 键对此不可见（EV 链先于 per-window 循环执行、
+        不写本窗口 set）→ 同一卡被 refresh_style 双刷（约 ×2 单批 141ms）。
+        纪元相等即短路：①字体/字号变更同样无条件 bump 纪元，EV 链刷过的
+        卡 refresh_style 本就颜色+字体双敏感完整重建，5b 短路不漏刷；
+        ②隐藏卡 mark_theme_dirty 纪元落后 → 不短路，照常走置脏门控；
+        ③非 batched 单窗口路径不经 EV、纪元未 bump → 不短路照刷。
         """
         if widget is None or not hasattr(widget, method_name):
             return
+        try:
+            from app.utils.theme_refresh import ThemeRefreshCoordinator
+
+            if getattr(widget, "_drifox_theme_epoch", None) == ThemeRefreshCoordinator.get_appearance_epoch():
+                return
+        except RuntimeError:
+            return  # C++ 对象已销毁
+        except Exception:
+            pass  # 协调器不可用等异常：保守照刷
         key = (id(widget), method_name)
         if key in self._refreshed_in_cycle:
             return
