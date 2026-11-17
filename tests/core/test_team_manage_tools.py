@@ -288,9 +288,10 @@ def test_team_manage_action_create_when_already_in_team(team_env):
     assert tm.get_team_run_id() == old_run  # 未重复建 run
 
 
-# ── 用例 19：非团队成员向成员发送任务（外部发起，from_agent=user）──
+# ── 用例 19：非成员向成员发送任务（外部发起，自动改投 leader 转交）──
 
-def test_non_member_can_send_task_to_member(team_env):
+def test_non_member_send_task_routed_via_leader(team_env):
+    """🚪 外部消息统一经 leader：非成员发给成员的消息改投 leader 邮箱。"""
     tt, tm = team_env["tt"], team_env["tm"]
     _prepare_team(tm)
     r = tt._team_manage_impl(_member_ctx("win_90"), action="list")  # 预热能力
@@ -301,12 +302,26 @@ def test_non_member_can_send_task_to_member(team_env):
         message="外部任务",
     )
     assert res.success, res.error
-    mails = tm.get_mailbox_mails("win_91")
+    assert "改投" in res.content and "经 leader" in res.content
+    # 邮件不直投目标成员，而是落 leader 邮箱，正文标注原目标
+    assert tm.get_mailbox_mails("win_91") == []
+    mails = tm.get_mailbox_mails("win_90")
     assert len(mails) == 1
-    assert mails[0]["body"] == "外部任务"
     assert mails[0]["from_agent"] == "user"
     assert mails[0]["from_window"] == "win_95"
-    assert "外部发起" in res.content
+    assert mails[0]["to_agent"] == "leader"
+    assert "原目标: build@win_91" in mails[0]["body"]
+    assert "外部任务" in mails[0]["body"]
+    # 外部直发 leader 本身 → 不改投，直投 leader 邮箱
+    res2 = tt._team_send_impl(
+        {"team_window_id": "win_95", "team_agent_name": "build"},
+        to_agent="leader",
+        message="给 leader 的话",
+    )
+    assert res2.success, res2.error
+    mails2 = tm.get_mailbox_mails("win_90")
+    assert len(mails2) == 2
+    assert mails2[-1]["body"] == "给 leader 的话"
     # 成员只能发团队内部：成员回发到外部窗口会找不到目标
     back = tt._team_send_impl(
         {"team_window_id": "win_91", "team_agent_name": "build"},

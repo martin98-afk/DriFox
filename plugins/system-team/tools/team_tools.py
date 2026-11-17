@@ -7,7 +7,12 @@ team_*：经 team.read / team.send / team.manage 能力调用主程序 TeamManag
 #4（一句话组队）：team_manage 单工具 + action 分发（list/create/add/remove/leave），
 team_only=False → 非团队窗口可发起组队；权限按 action 在 impl 内分层。
 create 不再把调用窗口入队：leader 与成员全部新开窗，调用窗口保持非团队成员，
-可直接用 team_send_message 给成员派任务（非成员发送标识为 user；群发需 leader）。
+可直接用 team_send_message 给成员派任务（非成员发送标识为 user）。
+
+🚪 外部消息统一经 leader（用户定案）：非成员窗口的任何消息不得直投内部成员——
+单发成员改投 leader 转交；单发 leader 本身直投（leader 即外部入口）；群发整体
+打包一封改投 leader 分发；团队未登记 leader 时回退直投并提示。团队内部成员间
+自由交流不受限。
 
 子智能体工具（subagent_para / subagent_status + 结果注入器）已迁
 ``plugins/system-subagent/tools/subagent_tools.py``。
@@ -293,9 +298,13 @@ def _team_send_message(tool_ctx, to_agent, message: str) -> ToolResult:
     mail dict 写 from_run_id / to_run_id 字段，返回成功结果后追加「⚠ 跨团队
     消息已发送（run_a → run_b）」提示，由接收方/历史面板决定如何呈现。
 
-    🆕 非团队成员（外部发起）也可发送：发送方标识记为 "user"，任务照常投递
-    到成员邮箱并由成员 watcher 自动拉起执行；成员无法直接回复到外部窗口
-    （成员只能发团队内部），执行状态用 team_manage(action="list") 查看。
+    🆕 非团队成员（外部发起）也可发送：发送方标识记为 "user"。
+
+    🚪 外部消息统一经 leader（用户定案）：非成员窗口的任何消息不得直投内部
+    成员——单发成员自动改投 leader 邮箱（正文标注原目标），由 leader 转交；
+    单发 leader 本身直投（leader 即外部入口）；群发整体打包一封改投 leader。
+    团队未登记 leader 时回退直投并提示（避免死路）。团队内部成员间交流不受限；
+    成员无法直接回复到外部窗口，执行状态用 team_manage(action="list") 查看。
     """
     window_id = str(tool_ctx.get("team_window_id", "") or "")
     from_agent = str(tool_ctx.get("team_agent_name", "") or "")
@@ -323,6 +332,89 @@ def _team_send_message(tool_ctx, to_agent, message: str) -> ToolResult:
     if not is_member:
         from_agent = "user"
 
+    # ── 🚪 外部消息统一经 leader（用户定案）：非成员窗口的任何消息不得直投
+    # 内部成员——单发成员改投 leader 转交；单发 leader 本身直投（leader 即
+    # 外部入口）；群发整体打包一封改投 leader 分发。团队未登记 leader 时
+    # 回退直投并提示。团队内部成员间交流不受限。──
+    leader_wid = ""
+    if not is_member:
+        try:
+            leader_wid = str(tm.get_leader_window_id() or "")
+        except Exception:
+            leader_wid = ""
+    is_group = isinstance(to_agent, list) or to_agent == "*"
+
+    if not is_member and leader_wid:
+        leader_agent = tm.get_member_agent_name(leader_wid) or "leader"
+        leader_ident = f"{leader_agent}@{leader_wid}"
+        text = str(message or "")
+
+        if is_group:
+            # 群发：整体改投 leader 一封，由 leader 分发
+            targets_desc = "全队(*)" if (to_agent == "*" or not to_agent) else ", ".join(str(t) for t in to_agent)
+            wrapped = f"【外部群发改投·请分发】\n原目标: {targets_desc}\n来自: 外部窗口(user)\n---\n{text}"
+            sender0 = _get_team_sender()
+            if sender0 is None:
+                return ToolResult(False, error="团队派单能力不可用（缺少 team.send 能力声明）")
+            mail_id0 = sender0.send_task(
+                from_window=window_id,
+                from_agent="user",
+                to_identifier=leader_ident,
+                task_description=wrapped,
+            )
+            if not mail_id0:
+                return ToolResult(False, error=f"改投 leader 失败（{leader_ident} 不在成员表）")
+            return ToolResult(
+                True,
+                content=(
+                    f"团队外消息须经 leader：群发已整体改投 leader「{leader_ident}」分发 (#{mail_id0})，"
+                    f"原目标: {targets_desc}。\n执行状态用 team_manage(action=\"list\") 查看。"
+                ),
+            )
+
+        # 单发：目标即 leader → 直投（落下方原路径）；目标为其他成员 → 改投
+        single = str(to_agent or "")
+        target_pre = None
+        try:
+            target_pre = tm.find_member(single)
+        except Exception:
+            target_pre = None
+        if (target_pre or {}).get("window_id", "") != leader_wid:
+            if target_pre is None:
+                members = tm.get_members()
+                available = ", ".join(f"{m['agent_name']}@{m['window_id']}" for m in members)
+                return ToolResult(False, error=f"未找到目标「{single}」。当前团队成员: {available}")
+            wrapped = (
+                f"【外部消息改投·请转交】\n"
+                f"原目标: {target_pre.get('agent_name', '?')}@{target_pre.get('window_id', '?')}\n"
+                f"来自: 外部窗口(user)\n---\n{text}"
+            )
+            sender0 = _get_team_sender()
+            if sender0 is None:
+                return ToolResult(False, error="团队派单能力不可用（缺少 team.send 能力声明）")
+            mail_id0 = sender0.send_task(
+                from_window=window_id,
+                from_agent="user",
+                to_identifier=leader_ident,
+                task_description=wrapped,
+            )
+            if not mail_id0:
+                return ToolResult(False, error=f"改投 leader 失败（{leader_ident} 不在成员表）")
+            return ToolResult(
+                True,
+                content=(
+                    f"团队外消息须经 leader：已改投 leader「{leader_ident}」转交 (#{mail_id0})，"
+                    f"原目标「{target_pre.get('agent_name', '?')}@{target_pre.get('window_id', '?')}」。"
+                    f"\n执行状态用 team_manage(action=\"list\") 查看。"
+                ),
+            )
+        # 目标即 leader → 直投原路径
+
+    # 团队未登记 leader 的外部消息提示（回退直投场景，正常路径为空串）
+    leader_fallback_notice = ""
+    if not is_member and not leader_wid:
+        leader_fallback_notice = "\n⚠ 团队未登记 leader：消息已直投目标成员（建议建团登记 leader，外部消息统一经 leader 转交）"
+
     # ── 群发分支：list 或 "*"（任何成员/外部窗口可群发，发件人=调用窗口；
     # 单目标行为完全不变）──
     if isinstance(to_agent, list) or to_agent == "*":
@@ -340,7 +432,7 @@ def _team_send_message(tool_ctx, to_agent, message: str) -> ToolResult:
             lines.append(f"  ✓ {s.get('identifier', '?')} (#{s.get('mail_id', '?')}){mark}")
         for ident, reason in skipped:
             lines.append(f"  ⊘ {ident}：{reason}")
-        return ToolResult(True, content="\n".join(lines))
+        return ToolResult(True, content="\n".join(lines) + leader_fallback_notice)
 
     # ── 单目标原路径（保持不变）──
     to_agent = str(to_agent or "")
@@ -408,7 +500,7 @@ def _team_send_message(tool_ctx, to_agent, message: str) -> ToolResult:
             external_notice = '\n⚠ 外部发起（你不在团队中）：成员无法直接回复到本窗口；执行状态用 team_manage(action="list") 查看。'
         return ToolResult(
             True,
-            content=f"任务邮件已发送给「{target_label}」(#{mail_id}){cap_hint}{cross_team_notice}{external_notice}",
+            content=f"任务邮件已发送给「{target_label}」(#{mail_id}){cap_hint}{cross_team_notice}{external_notice}{leader_fallback_notice}",
         )
     else:
         members = tm.get_members()
@@ -915,14 +1007,14 @@ _TEAM_SEND_SCHEMA = {
     "type": "function",
     "function": {
         "name": "team_send_message",
-        "description": "向团队智能体发任务邮件(成员与非成员均可发；对方串行执行并自动开始)。非成员发送标识为 user；成员无法回复外部窗口，状态用 team_manage(action=list) 查。群发仅 leader。",
+        "description": "向团队智能体发任务邮件(成员与非成员均可发；对方串行执行并自动开始)。非成员发送标识为 user；团队外消息一律经 leader：非成员发给成员的消息自动改投 leader 转交（发给 leader 本身直投），群发同理整体改投。成员无法回复外部窗口，状态用 team_manage(action=list) 查。",
         "parameters": {
             "type": "object",
             "properties": {
                 "to_agent": {
                     "type": ["string", "array"],
                     "items": {"type": "string"},
-                    "description": "目标成员。单个成员名为私聊(任何成员可用)；数组/ [\"*\"] 为群发(仅 leader，* 跳过自己)。单个支持 agent_name 或 agent_name@window_id，用 team_manage(list) 查",
+                    "description": "目标成员。单个成员名为私聊(成员间自由直发；非成员发出时自动经 leader 转交)；数组/[\"*\"] 为群发(* 跳过自己，非成员群发整体改投 leader)。单个支持 agent_name 或 agent_name@window_id，用 team_manage(list) 查",
                 },
                 "message": {"type": "string", "description": "消息内容"},
             },
@@ -1052,5 +1144,5 @@ def register(registry):
         icon="邮件-发送",
         cn_name="发送邮件",
         group=GROUP_TEAM,
-        description="向团队成员发送任务（非成员也可发送；数组/[\"*\"] 群发仅 leader）",
+        description="向团队成员发送任务（非成员也可发送，外部消息自动经 leader 转交；数组/[\"*\"] 群发）",
     )
