@@ -395,5 +395,36 @@ def test_kind_badge_shows_letter(qapp):
     assert _KindBadge("text").text() == "T"
     assert _KindBadge("file").text() == "文"
 
+def test_plugin_registers_inline_panel(qapp):
+    """插件把成果栏注册到卡片内嵌面板槽位"""
+    from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+
+    ui_mod = import_module("plugins.artifacts-manager.ui")
+    ui_mod.register_ui(UIPluginRegistry.get_instance())
+    info = UIPluginRegistry.get_instance().get_card_inline_panel("artifacts")
+    assert info is not None
+    assert info.widget_class is InlineArtifactPanel
+
+
+def test_card_push_inline_items_delivers_to_panel(qapp):
+    """宿主通用投递：ensure_inline_panel + update_items 落到插件面板"""
+    from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+    from app.widgets.message_card import MessageCard
+
+    ui_mod = import_module("plugins.artifacts-manager.ui")
+    ui_mod.register_ui(UIPluginRegistry.get_instance())
+    card = MessageCard(role="assistant")
+    try:
+        n = card.push_inline_items("artifacts", [{"path": "/tmp/a.png"}])
+        assert n == 1
+        panel = card.get_inline_panel("artifacts")
+        assert panel is not None
+        assert [it["path"] for it in panel._items] == ["/tmp/a.png"]
+        card.push_inline_items("artifacts", [{"path": "/tmp/b.png"}])
+        assert [it["path"] for it in panel._items] == ["/tmp/a.png", "/tmp/b.png"]
+    finally:
+        card.deleteLater()
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
