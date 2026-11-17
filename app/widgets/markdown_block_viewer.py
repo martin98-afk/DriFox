@@ -399,6 +399,11 @@ _TEXT_BLOCK_CACHE: "OrderedDict[str, List[Dict[str, Any]]]" = OrderedDict()
 # 不设单条上限时少数巨块即可挤占全池；超限条目现算不缓存。
 _CODE_HIGHLIGHT_CACHE_MAX = 64
 _CODE_HIGHLIGHT_CACHE_MAX_ITEM_CHARS = 128 * 1024
+# [T3-A/R6 同口径] 超长代码块高亮降级阈值（与 card_render_core._TAIL_CODE_WRAP_MAX_CHARS
+# 同 4000 字口径，层级不同：那边是 WebEngine 渲染层产物管线，这边是 Qt 构造链）。
+# 实测（T3-A 探针）：400 行块首次 pygments 36ms + setHtml 排版 ~18ms = 构造帧尾刺 54ms；
+# 超阈值块改 escape 纯文本后语义不变（降级口径与 I1 一致，f0f14a76）。
+_QT_CODE_HIGHLIGHT_MAX_CHARS = 4000
 _CODE_HIGHLIGHT_CACHE: "OrderedDict[tuple, str]" = OrderedDict()
 _LIST_OR_QUOTE_CONT_RE = re.compile(r"^\s*(?:[-*+]|\d+[.)]|>)\s?")
 
@@ -441,6 +446,11 @@ def _highlight_inner_cached(code: str, lang: str) -> Optional[str]:
     参数（如 noclasses 切换），必须同步扩 key，否则输出脏命中。
     """
     style = "friendly" if _is_light_theme() else "dracula"
+    # [T3-A] 超长块降级：跳过 pygments，调用方走 escape/setPlainText 纯文本
+    #（与 I1 同口径）。首次高亮无缓存可命中（文本首次出现），大块 36ms 直接
+    # 转化为构造帧尾刺。
+    if len(code) > _QT_CODE_HIGHLIGHT_MAX_CHARS:
+        return None
     try:
         # 与 WebEngine 版同步：按主题切换 Pygments 风格，否则浅色主题下
         # dracula 浅灰文字在浅色底上不可见（原 _apply_highlight 逻辑上移）
@@ -1524,9 +1534,13 @@ class CodeBlockWidget(QFrame):
         # 同 (code, lang, style, 字号) 直接命中缓存，跳过全量 Pygments highlight。
         inner = _highlight_inner_cached(code, self._lang)
         if inner is None:
-            inner = _html_mod.escape(code)
-        self.text_edit.document().setDefaultStyleSheet("pre { margin:0; padding:0 0 0 4px; }")
-        self.text_edit.setHtml(f"<pre style='margin:0; white-space:pre;'>{inner}</pre>")
+            # [T3-A] 降级路径（pygments 不可用/失败/超长块）：setPlainText 替代
+            # setHtml——纯文本语义下 HTML 解析层纯开销，字体/底色由 styleSheet
+            # 继承，视觉与 escape 后 <pre> 一致。
+            self.text_edit.setPlainText(code)
+        else:
+            self.text_edit.document().setDefaultStyleSheet("pre { margin:0; padding:0 0 0 4px; }")
+            self.text_edit.setHtml(f"<pre style='margin:0; white-space:pre;'>{inner}</pre>")
         self._line_numbers.setText("\n".join(str(i + 1) for i in range(max(1, len(code.splitlines())))))
         self._height_timer.start()
 
@@ -2311,6 +2325,12 @@ class ToolSectionWidget(QWidget):
         self.hide()
 
     def reconcile(self, items: List[Tuple[str, Dict[str, Any]]], streaming: bool) -> None:
+        # [T3-A] 空态短路：纯正文流（无 think/tool）每帧 items 与 widgets 双空，
+        # 全流程（对齐+计数+可见性）恒等价于空操作，直接跳过——每帧 reconcile
+        # 调用 2 次→1 次（触发次数减半口径）。有块后删除到全空不命中本守卫
+        #（widgets 非空），删除路径照常清理。
+        if not items and not self._widgets:
+            return
         self._widgets, self._keys = reconcile_widgets(
             self._cards_layout, self._widgets, self._keys, items, self._build, streaming
         )
