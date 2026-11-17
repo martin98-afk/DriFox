@@ -39,10 +39,10 @@ __all__ = [
     # 样式常量
     "WINDOW_STYLE",
     "CHAT_SCROLL_STYLE",
-    "TITLE_STYLE",
+    "TITLE_STYLE",  # noqa: F822 —— PEP 562 惰性属性，由模块级 __getattr__ 提供
     "TitleEditWidget",
-    "MODEL_BTN_STYLE",
-    "MODEL_BTN_TEXT_STYLE",
+    "MODEL_BTN_STYLE",  # noqa: F822
+    "MODEL_BTN_TEXT_STYLE",  # noqa: F822
     # UI 辅助函数
     "setup_background_label",
     "is_widget_alive",
@@ -306,10 +306,23 @@ def _get_model_btn_text_style():
     return f"color: {Colors.TEXT_PRIMARY}; {font_size_css(13)} font-weight: bold; background: transparent;"
 
 
-# 兼容旧引用
-TITLE_STYLE = _get_title_style()
-MODEL_BTN_STYLE = _get_model_btn_style()
-MODEL_BTN_TEXT_STYLE = _get_model_btn_text_style()
+# 兼容旧引用（PEP 562 模块级惰性属性）：模块导入不再触发主题解析链
+# （Colors.refresh → config.load → secret_store.unwrap_secrets，暖启动 -213ms）。
+# 首次属性访问时经原 _get_* 函数构建并缓存进模块 globals，返回值与原实现
+# 逐字节一致（同一函数、同一三级链语义），from import 与属性访问两种用法
+# 均兼容；主题切换刷新路径不受影响（消费方持有的仍是 import/首访时固值，
+# 与原实现固值语义相同）。
+def __getattr__(name: str):
+    if name == "TITLE_STYLE":
+        value = _get_title_style()
+    elif name == "MODEL_BTN_STYLE":
+        value = _get_model_btn_style()
+    elif name == "MODEL_BTN_TEXT_STYLE":
+        value = _get_model_btn_text_style()
+    else:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    globals()[name] = value
+    return value
 
 
 # ==================== 预编译正则 ====================
