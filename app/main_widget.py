@@ -2886,7 +2886,9 @@ class OpenAIChatToolWindow(ToolWindow):
             _init_session_delay = int(getattr(self, "_initial_session_delay_ms", 0) or 0)
             q.register(
                 "create_new_session",
-                lambda: self._safe_timer_call(self._create_new_session),
+                lambda: self._safe_timer_call(
+                    lambda: self._create_new_session(defer_session_start_hook=True)
+                ),
                 priority="critical",
                 delay_ms=_init_session_delay,
             )
@@ -12172,7 +12174,37 @@ class OpenAIChatToolWindow(ToolWindow):
             if hasattr(self, "_agent_buttons") and agent_name in self._agent_buttons:
                 self._agent_buttons[agent_name]["btn"].setToolTip(tooltip)
 
-    def _create_new_session(self, close_history: bool = False, force_in_place: bool = False):
+    def _ensure_session_start_hook_ready(self) -> "_threading.Event":
+        """[R5] 启动首会话 SessionStart hook 就绪哨兵（惰性建，缺省置位=无 defer 不阻塞发送）"""
+        import threading as _threading
+
+        ev = getattr(self, "_session_start_hook_ready", None)
+        if ev is None:
+            ev = _threading.Event()
+            ev.set()  # 缺省已就绪：非启动路径 / 历史恢复路径发送零成本直通
+            self._session_start_hook_ready = ev
+        return ev
+
+    def _run_deferred_session_start_hook(self, session):
+        """[R5] 后台线程补触发启动首会话的 SessionStart hook（可交互关键路径外）。
+
+        失败兜底：异常仅日志 + Event 复位——会话本身已可用（缺 hook 只少注入
+        上下文），不白屏不挂死；发送守卫等 Event 超时后放行。
+        """
+        try:
+            self.backend.trigger_session_start_hook(session)
+            logger.info("[R5] 启动首会话 SessionStart hook 后台注入完成")
+        except Exception:
+            logger.exception("[R5] 启动首会话 SessionStart hook 后台触发失败（已放行发送）")
+        finally:
+            self._ensure_session_start_hook_ready().set()
+
+    def _create_new_session(
+        self,
+        close_history: bool = False,
+        force_in_place: bool = False,
+        defer_session_start_hook: bool = False,
+    ):
         """新建会话
 
         Args:
@@ -12183,6 +12215,10 @@ class OpenAIChatToolWindow(ToolWindow):
                           团队框「新建任务」专用：语义是全员就地清空当前窗口并留在
                           团队分组内，走 spawn_tab 会在团队外多出普通标签页，且新
                           run_id 只回写旧窗口（成员与分组错位）。
+            defer_session_start_hook: [R5] 启动路径专用——create_session 用
+                          trigger_hook=False 先建会话（可交互判定点不等 hook 同步段
+                          实测 575ms），SessionStart hook 由后台线程补触发；用户
+                          手动新建不传（保持同步 hook 原语义）。
         """
         import time as _time
 
@@ -12295,9 +12331,23 @@ class OpenAIChatToolWindow(ToolWindow):
         # 🛡️ 标记待注入：create_session 内部会同步触发 SessionStart hook 并
         # 通过 _hook_messages_updated → _on_messages_updated 回传，此时
         # _session_switched=True 会误拦截合法输出。置此标记让 _on_messages_updated 放行。
-        self._pending_session_hook = True
         try:
-            session = self.backend.create_session()
+            import threading as _threading
+
+            if defer_session_start_hook:
+                # [R5] 启动路径异步化：trigger_hook=False 先建会话（可交互判定点
+                # 不等 SessionStart hook 同步段，实测 575ms）；hook 后台线程补触发
+                # （_run_deferred_session_start_hook，失败仅日志不阻塞），注入完成前
+                # 发送守卫在 _on_send_clicked 侧等 Event（上限 15s，超时放行并告警）。
+                self._ensure_session_start_hook_ready().clear()
+                session = self.backend.create_session(trigger_hook=False)
+                _threading.Thread(
+                    target=self._run_deferred_session_start_hook, args=(session,), daemon=True
+                ).start()
+            else:
+                self._ensure_session_start_hook_ready().set()
+                self._pending_session_hook = True
+                session = self.backend.create_session()
         finally:
             self._pending_session_hook = False
         # 临时对话页：页内新建的会话标记临时（自动保存守卫链据此跳过落库）
@@ -21036,6 +21086,14 @@ class OpenAIChatToolWindow(ToolWindow):
         """
         if getattr(self, "_is_destroyed", False):
             return
+
+        # [R5] SessionStart hook 异步注入守卫：启动首会话 hook 后台补触发期间发送
+        # 需等注入完成（否则本次请求缺 SessionStart 上下文——技能/agents 注入丢失）。
+        # Event 已置位（常态/非启动路径）时 wait 立即返回零成本；上限 15s，超时放行
+        # 并告警——不白屏不挂死，用户始终可发送，仅本次可能缺注入上下文。
+        _hook_ev = getattr(self, "_session_start_hook_ready", None)
+        if _hook_ev is not None and not _hook_ev.wait(15):
+            logger.warning("[R5] SessionStart hook 注入超时 15s，放行发送（本次可能缺注入上下文）")
 
         from PyQt5.QtCore import QTimer  # 推迟 send_message 用
 

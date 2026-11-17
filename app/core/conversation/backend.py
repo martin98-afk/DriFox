@@ -1437,28 +1437,41 @@ class ChatBackend(QObject):
         self.session_created.emit(session.session_id)
 
         # Trigger SessionStart hook — 同步执行，直接注入 session.messages
-        if trigger_hook and self._hook_manager:
-            context = self._build_session_context("startup")
-            context["session_id"] = session.session_id  # Claude Code 兼容字段
-            # 🛡️ W1：UI 线程（新建/分支会话等 GUI 场景）→ trigger_async=True，
-            # command/http 类型 hook 后台执行 + finished 回调回补注入，主线程不被
-            # 外部进程/网络阻塞（PROMPT 类型仍同步顺序注入，语义不变）。
-            # 非 UI 线程（CLI 等无 Qt 事件循环，异步回调无处回补）→ 保持同步。
-            from app.core.hooks.hook_manager import _is_ui_thread
-
-            trigger_async = _is_ui_thread()
-            results = self._hook_manager.trigger_event(
-                "SessionStart",
-                context=context,
-                current_message="",
-                trigger_async=trigger_async,
-            )
-            for r in results:
-                if r.success and r.output:
-                    _inject_hook_to_session(session, "SessionStart", r.output, r.status_message)
-            self._hook_messages_updated.emit()
+        if trigger_hook:
+            self.trigger_session_start_hook(session)
 
         return session
+
+    def trigger_session_start_hook(self, session: ChatSession) -> None:
+        """补触发 SessionStart hook 并注入 session.messages（create_session 的 hook 段独立出口）。
+
+        供启动路径异步化（R5）：create_session(trigger_hook=False) 先建会话保
+        可交互判定点不等 hook 同步段（实测 575ms），本方法在后台线程补触发。
+        线程语义：_is_ui_thread()=False（后台线程）时 command/http hook 同步执行
+        （阻塞发生在调用线程，不阻塞主线程）；完成后 _hook_messages_updated
+        信号 queued 回主线程。
+        """
+        if not self._hook_manager:
+            return
+        context = self._build_session_context("startup")
+        context["session_id"] = session.session_id  # Claude Code 兼容字段
+        # 🛡️ W1：UI 线程（新建/分支会话等 GUI 场景）→ trigger_async=True，
+        # command/http 类型 hook 后台执行 + finished 回调回补注入，主线程不被
+        # 外部进程/网络阻塞（PROMPT 类型仍同步顺序注入，语义不变）。
+        # 非 UI 线程（CLI 等无 Qt 事件循环，异步回调无处回补）→ 保持同步。
+        from app.core.hooks.hook_manager import _is_ui_thread
+
+        trigger_async = _is_ui_thread()
+        results = self._hook_manager.trigger_event(
+            "SessionStart",
+            context=context,
+            current_message="",
+            trigger_async=trigger_async,
+        )
+        for r in results:
+            if r.success and r.output:
+                _inject_hook_to_session(session, "SessionStart", r.output, r.status_message)
+        self._hook_messages_updated.emit()
 
     def trigger_session_event(
         self, state: str, extra_context: dict = None, only_matchers: Optional[set] = None
