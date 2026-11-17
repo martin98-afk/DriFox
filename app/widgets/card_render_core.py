@@ -3856,7 +3856,11 @@ _SKELETON_CACHE_MAX = 48
 # svg / .html-widget 右上角工具栏不再漏挂；旧骨架缓存须失效。
 # +1（v83）：内嵌 echarts 的 ResizeObserver resize 合并到 rAF 一帧一次
 # （card_viewers._initOneEcharts JS 变更）；旧骨架缓存须失效。
-_SKELETON_CACHE_VERSION = 83
+# +1（v84）：[UX] 连续 resize 冻结——html.dfx-resizing 冻结页内过渡/动画并把
+# iframe/svg/canvas 隔离出主重排；window._dfxSetResizing / _dfxApplyWidgetH
+# （```widget iframe 高度 4px 死区 + resize 期延迟应用）/ _dfxRestoreFade
+# （占位恢复淡入）。CSS + JS 双资产变更，旧骨架缓存须失效。
+_SKELETON_CACHE_VERSION = 84
 
 
 def _js_literal(value) -> str:
@@ -5279,6 +5283,54 @@ _BODY_HEIGHT_CAP_JS = """
                         }
                     } catch (e) {}
                     if (typeof reportHeight === 'function') reportHeight();
+                };
+
+                // ===== [UX] 连续 resize 期冻结 / 延迟 =====
+                // 拖窗口、侧栏/工作台动画都会逐帧改变文档宽度。此时：
+                //  ① 冻结 CSS 过渡与动画（dfx-resizing 类），避免元素自带的
+                //     transition 每帧被重启，产生拖尾与抖动；
+                //  ② ```widget 沙箱 iframe 只记最新高度，静默后一次性应用，
+                //     切断「宽度变 → iframe 重排 → 高度回传 → 整卡改高」的
+                //     逐帧反馈链（连续拖动时整卡高度会跟着抽动）。
+                window._dfxResizing = false;
+                window._dfxApplyWidgetH = function (f) {
+                    var h = f && f._dfxPendingH;
+                    if (!h) return;
+                    var prev = parseInt(f.getAttribute('data-dfx-h') || '0', 10) || 0;
+                    if (Math.abs(h - prev) < 4) return;  // 4px 死区：抑制重排噪声
+                    f.setAttribute('data-dfx-h', String(h));
+                    f.style.height = h + 'px';
+                    if (typeof _autoScrollAfterAsyncRender === 'function') _autoScrollAfterAsyncRender();
+                    if (typeof reportHeightDebounced === 'function') reportHeightDebounced();
+                };
+                window._dfxSetResizing = function (on) {
+                    on = !!on;
+                    if (window._dfxResizing === on) return;
+                    window._dfxResizing = on;
+                    try {
+                        document.documentElement.classList.toggle('dfx-resizing', on);
+                    } catch (e) {}
+                    if (on) return;
+                    // 退出 resize：一次性落地所有被延迟的 iframe 高度
+                    var fs = document.querySelectorAll('.drifox-widget iframe');
+                    for (var i = 0; i < fs.length; i++) window._dfxApplyWidgetH(fs[i]);
+                };
+
+                // ===== [UX] 占位恢复时的内容淡入 =====
+                // 只由 Python 在 resize 恢复链里调用。opacity 走合成层，不触发布局；
+                // 先置 0 → 强制样式落定 → 下一拍过渡到 1，保证从透明起跑。
+                window._dfxRestoreFade = function () {
+                    var root = document.documentElement;
+                    try {
+                        window._dfxSetResizing(false);
+                        root.classList.remove('dfx-restore-fade');
+                        root.style.opacity = '0';
+                        void root.offsetWidth;
+                        root.classList.add('dfx-restore-fade');
+                        root.style.opacity = '1';
+                    } catch (e) {
+                        root.style.opacity = '1';
+                    }
                 };
 """
 

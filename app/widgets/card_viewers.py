@@ -1093,6 +1093,15 @@ class CodeWebViewer(QWebEngineView):
         self._resize_unlock_timer.setSingleShot(True)
         self._resize_unlock_timer.setInterval(150)  # resize 结束后 150ms 再报告高度
         self._resize_unlock_timer.timeout.connect(self._on_resize_unlock)
+        # [UX] 宽度连续变化期冻结文档过渡/动画 + 延迟 iframe 高度回报：
+        # 拖窗口或侧栏动画时逐帧改宽度，元素自带 transition 会被反复重启
+        # （拖尾/抖动），iframe 高度回报则形成「宽度→高度→整卡改高」的反馈链。
+        # 静默 150ms 后统一解冻并一次性落地延迟高度。
+        self._doc_resizing_state = False
+        self._doc_resize_quiet_timer = QTimer(self)
+        self._doc_resize_quiet_timer.setSingleShot(True)
+        self._doc_resize_quiet_timer.setInterval(150)
+        self._doc_resize_quiet_timer.timeout.connect(lambda: self._set_doc_resizing(False))
 
         # 思考已完成标志：工具调用开始时置 True，阻止 _render_markdown_to_html 继续剥离 </think>
         self._thinking_finalized = False
@@ -1820,6 +1829,10 @@ class CodeWebViewer(QWebEngineView):
         self._restore_finished_ids = None
         self._resize_locked = False
         self._height_report_pending = False
+        # [UX] 复用会重载骨架：页面侧冻结态随新文档归零，Python 侧记录必须同步，
+        # 否则下次 _set_doc_resizing(True) 因「状态未变」短路、冻结不再下发。
+        self._doc_resizing_state = False
+        self._doc_resize_quiet_timer.stop()
         # [T11] 复用前复位崩溃/上下文状态：计数器是「本 viewer 生命周期内」语义，
         # 不清零会让崩溃过的 viewer 复用后被陈旧计数误判 → 无谓重建；
         # 从崩溃队列移除（本页已重置，无需再自愈）。这是排队器正确性前置条件。
@@ -1918,6 +1931,50 @@ class CodeWebViewer(QWebEngineView):
         if self._height_report_pending:
             self._height_report_pending = False
         self._do_resize_check()
+
+    def _set_doc_resizing(self, on: bool) -> None:
+        """切换文档「连续 resize」冻结态（幂等）。
+
+        冻结态下页内 CSS 过渡/动画暂停、```widget iframe 的高度回报只记不应用
+        （见骨架 _dfxSetResizing）。由 resizeEvent 置位、静默 150ms 复位。
+        """
+        on = bool(on)
+        if on == getattr(self, "_doc_resizing_state", False):
+            return
+        self._doc_resizing_state = on
+        self._push_doc_resizing(on)
+
+    def _push_doc_resizing(self, on: bool) -> None:
+        """把冻结态下发给页面（JS 未就绪 / 页面已死时静默跳过）。"""
+        try:
+            page = self.page()
+            if page is not None:
+                page.runJavaScript(f"window._dfxSetResizing && window._dfxSetResizing({str(bool(on)).lower()});")
+        except (RuntimeError, AttributeError):
+            pass
+
+    def restore_content_fade(self) -> None:
+        """resize 占位恢复时让内容淡入，掩盖「占位 → 真实内容」的硬切。
+
+        opacity 是合成层动画，不触发重排；页面侧先置 0 再过渡到 1（见骨架
+        window._dfxRestoreFade）。系统「减少动态效果」开启时只解除冻结，不淡入。
+        """
+        try:
+            from app.utils.motion import Animations
+
+            _motion = Animations.motion_enabled()
+        except Exception:
+            _motion = True
+        try:
+            page = self.page()
+            if page is None:
+                return
+            if _motion:
+                page.runJavaScript("window._dfxRestoreFade && window._dfxRestoreFade();")
+            else:
+                page.runJavaScript("window._dfxSetResizing && window._dfxSetResizing(false);")
+        except (RuntimeError, AttributeError):
+            pass
 
     def _on_card_reading_changed(self, reading: bool):
         """记录「用户正在卡片内部滚动阅读」状态（reportHeight 第 4 字段翻转时推送）
@@ -2518,6 +2575,10 @@ class CodeWebViewer(QWebEngineView):
         # 强制补推一次真实值（否则整个渲染周期都停在不匹配的上限上，超限内容
         # 被静默裁掉且不可滚）。幂等，未变化时仅一次属性读取。
         self.sync_body_max_height(force=True)
+        # [UX] 冻结态在 JS 未就绪时下发会落空（函数还不存在），就绪后补一次；
+        # 覆盖「viewer 创建时窗口正在拖动」的窗口。
+        if getattr(self, "_doc_resizing_state", False):
+            self._push_doc_resizing(True)
         # 字体变量兜底：骨架 HTML 是按构建期字体分桶缓存的，从取缓存到 JS
         # 就绪之间配置可能已变（用户在别的窗口切了字体）；且池化复用的骨架
         # 保留上一张卡片的字体。这里比对一次，不一致就注入（一致则零 IPC）。
@@ -2588,6 +2649,12 @@ class CodeWebViewer(QWebEngineView):
         # 否则崩溃自愈 / 池化补载后的历史卡不会重新折叠。
         self._history_collapse_applied = False
         self._v2_reset_live()
+        # [UX] 重载骨架 = 新文档：页面侧冻结态归零，Python 记录同步复位
+        # （否则下次置位会因「状态未变」短路，dfx-resizing 再也不会下发）。
+        self._doc_resizing_state = False
+        _drq = getattr(self, "_doc_resize_quiet_timer", None)
+        if _drq is not None:
+            _drq.stop()
         # 获取系统字体
         font_family = _current_viewer_font_family()
         self._viewer_font_family = font_family
@@ -2819,6 +2886,30 @@ class CodeWebViewer(QWebEngineView):
                     font-size: var(--dfx-font-size, {scale_font_size(14)}px);
                     margin: 0; 
                     padding: 0;
+                }}
+                /* [UX] 宽度连续变化（拖窗口 / 侧栏动画）期间冻结文档内过渡与动画：
+                   逐帧宽度变化会让元素自带的 transition 每帧被重启（拖尾、抖动），
+                   CSS 动画同理。静态占位只在此类存在时生效，不影响正常渲染。 */
+                html.dfx-resizing *,
+                html.dfx-resizing *::before,
+                html.dfx-resizing *::after {{
+                    transition: none !important;
+                    animation-duration: 0s !important;
+                    animation-delay: 0s !important;
+                }}
+                /* 重元素在 resize 期隔离出主文档重排范围（只隔离绘制/布局，不改尺寸语义） */
+                html.dfx-resizing iframe,
+                html.dfx-resizing svg,
+                html.dfx-resizing canvas {{
+                    contain: layout paint;
+                }}
+                html.dfx-resizing img {{
+                    contain: paint;
+                }}
+                /* [UX] resize 恢复时的一次性淡入：只由 Python 侧 _dfxRestoreFade 触发，
+                   避免占位→真实内容的硬切。opacity 是合成层动画，不触发重排。 */
+                html.dfx-restore-fade {{
+                    transition: opacity 160ms cubic-bezier(0.22, 0.61, 0.36, 1);
                 }}
                 body {{
                     /* 右侧 8px = 14px 视觉边距 - 6px 常驻滚动轨道：轨道占位使
@@ -7438,7 +7529,21 @@ class CodeWebViewer(QWebEngineView):
                     if (!f) return;
                     if (msg.t === 'h') {{
                         var h = parseInt(msg.v, 10) || 0;
-                        if (h > 0) f.style.height = Math.max(48, Math.min(1600, h)) + 'px';
+                        if (h > 0) {{
+                            f._dfxPendingH = Math.max(48, Math.min(1600, h));
+                            if (window._dfxResizing) {{
+                                // resize 期只记最新值：逐帧改高度会让整卡跟着抽动。
+                                // 静默 120ms 或 _dfxSetResizing(false) 时一次性应用。
+                                if (!f._dfxHFlushTimer) {{
+                                    f._dfxHFlushTimer = setTimeout(function () {{
+                                        f._dfxHFlushTimer = 0;
+                                        window._dfxApplyWidgetH(f);
+                                    }}, 120);
+                                }}
+                            }} else {{
+                                window._dfxApplyWidgetH(f);
+                            }}
+                        }}
                         if (typeof _autoScrollAfterAsyncRender === 'function') _autoScrollAfterAsyncRender();
                         if (typeof reportHeightDebounced === 'function') reportHeightDebounced();
                         return;
@@ -11393,6 +11498,10 @@ class CodeWebViewer(QWebEngineView):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
+        # [UX] 宽度连续变化期冻结文档过渡/动画（详见 __init__ 的 timer 注释）。
+        # 必须在下面的 _streaming 早退之前：流式期间窗口同样会被拖动。
+        self._set_doc_resizing(True)
+        self._doc_resize_quiet_timer.start()
         # [MEM-2] 宽度变化 → 面积上限变化 → 文档滚动容器上限必须跟着变。
         # 必须放在下面的 `_streaming` 早退之前：流式期间同样会 resize（窗口拖拽、
         # 面板开合），漏掉就会在流式全程维持一个不匹配的上限（文字被裁且不可滚）。

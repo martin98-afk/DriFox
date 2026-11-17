@@ -3750,6 +3750,10 @@ class MessageCard(SimpleCardWidget):
             else:
                 target_width = max(320, parent_width - 20)
 
+        # [UX] 宽度量化到 4px 网格：连续拖拽时目标宽度几乎每帧变化，
+        # 量化后 Chromium 重排次数约减半（视觉差异不可见），并让
+        # _height_cache 的键更稳定、往返拖拽命中率更高。
+        target_width = max(0, int(target_width) & ~3)
         # 性能优化：只有宽度真正变化时才更新（user/非 user 统一守卫）
         if not force and target_width == self._last_synced_width:
             return
@@ -3831,55 +3835,63 @@ class MessageCard(SimpleCardWidget):
                 self.options_widget.hide()
             return
 
-        self.viewer.show()
-        self.viewer.setUpdatesEnabled(True)
-        if self._options_were_visible_before_resize:
-            self.options_widget.show()
-            self.options_widget.setUpdatesEnabled(True)
-        self.resize_placeholder.hide()
-        self.resize_placeholder.setFixedHeight(0)
-        self._resize_preview_height = 0
-        self._options_were_visible_before_resize = False
-
-        # [L3] 宽度→高度缓存命中：把已知高度作为本次恢复的目标，省掉等待
-        # JS 异步回传的那一帧（窗口拖拽宽度往返时命中率很高）。
-        # 只是预测：下方仍会发起异步上报，若真实高度不同会自动校正。
+        # ── 退出占位：先落高度、后显示 ──
+        # 旧顺序是 show → update_height → reportHeight 校正：首帧按占位前的
+        # 旧高度出图，随后异步校正把内容再顶一次（观感是「内容先出现、再跳一下」）。
+        # 现在把已知目标高度（宽度→高度缓存 / preview 期间累积）在 viewer 仍
+        # 隐藏时直接应用，show 的首帧就是新布局；异步上报保留做微调。
         if not self._streaming and self.role != "user":
             cached = self._height_cache.get(self._last_synced_width)
             if cached is not None:
                 self._pending_viewer_height = cached
 
+        options_were_visible = self._options_were_visible_before_resize
+        pending_h = getattr(self, "_pending_viewer_height", None)
+        self._pending_viewer_height = None
+        prev_viewer_h = self.viewer.height()
+
+        self.viewer.setUpdatesEnabled(False)
+        # 淡入必须在 show 之前置位：show 后首帧已绘制，再下发 CSS 会闪一下
+        # 不透明内容再淡入。此处页面仍隐藏，JS 置 opacity=0 无可见代价。
+        if self.isVisible() and hasattr(self.viewer, "restore_content_fade"):
+            self.viewer.restore_content_fade()
+        try:
+            if pending_h is not None and self.role != "user":
+                # 直落高度：绕开 HeightCommitBatch（其 flush 在本帧末尾，show 的
+                # 首帧仍会停在旧高度）与 preview 守卫（标志已复位）。面积上限由
+                # CodeWebViewer.setFixedHeight 内部钳。
+                # 🐛 从占位高度恢复到真实内容高度**存在真实增量**，不能清零：
+                # 外层据 _last_height_delta 做滚动锚定补偿，写 0 会让整个恢复期
+                # 零补偿 → 视口被 N 张卡逐张推走（「一 resize 画面就很乱」）。
+                self._unpin_layout_height()
+                self._last_height_delta = pending_h - prev_viewer_h
+                self.viewer.setFixedHeight(pending_h)
+                self._last_applied_viewer_height = pending_h
+                self.heightChanged.emit(pending_h)
+            self.viewer.show()
+            if options_were_visible:
+                self.options_widget.show()
+            self.resize_placeholder.hide()
+            self.resize_placeholder.setFixedHeight(0)
+            self._resize_preview_height = 0
+            self._options_were_visible_before_resize = False
+        finally:
+            self.viewer.setUpdatesEnabled(True)
+            self.viewer.update()
+            if options_were_visible:
+                self.options_widget.setUpdatesEnabled(True)
+
         if hasattr(self.viewer, "update_height"):
             self.viewer.update_height()
 
-        # [PERF] 流式卡片：preview 期间累积的高度变化一次性应用。
-        # _apply_viewer_height 在 preview 模式下只记录 _pending_viewer_height，
-        # 此处 setFixedHeight 把 viewer 设到正确高度，触发一次 ResizeObserver →
-        # reportHeight → Python 拿到真实高度，结束 preview 期间累积的高度死循环。
-        # 只对 CodeWebViewer（非 PlainTextViewer）有效：PlainTextViewer 的
-        # update_height() 已在上方调用且自身无 _pending_viewer_height 字段。
-        pending_h = getattr(self, "_pending_viewer_height", None)
-        if pending_h is not None and self.role != "user" and self.viewer is not None:
+        # 强制一次高度上报：让 JS 侧 ResizeObserver 也跟上 viewer 新高度，
+        # 防止 Chromium 内部仍按旧高度布局（_apply_viewer_height 没真正
+        # 改高度时 Chromium 视口尺寸未变）→ 首帧 paint 仍按旧宽排版。
+        if hasattr(self.viewer, "page") and self.viewer.page():
             try:
-                # 🐛 从占位高度恢复到真实内容高度**存在真实增量**，不能清零：
-                # 占位高度 = resize 前的旧 viewer 高度（+options），真实高度是新宽度
-                # 下的重排高度，两者差值必须由外层做锚定补偿。旧实现写死 `= 0`
-                # → 外层 `if delta and ...` 直接跳过 → 整个 resize 恢复期零补偿
-                # → 视口被 N 张卡逐张推走（「一 resize 画面就很乱」的直接来源）。
-                # 批量提交（HeightCommitBatch）激活时由 batch 统一接管并改用锚点修正。
-                self._last_height_delta = pending_h - self.viewer.height()
-                self._commit_viewer_height(pending_h)
+                self.viewer.page().runJavaScript("reportHeight();")
             except RuntimeError:
                 pass
-            self._pending_viewer_height = None
-            # 强制一次高度上报：让 JS 侧 ResizeObserver 也跟上 viewer 新高度，
-            # 防止 Chromium 内部仍按旧高度布局（_apply_viewer_height 没真正
-            # 改高度时 Chromium 视口尺寸未变）→ 首帧 paint 仍按旧宽排版。
-            if hasattr(self.viewer, "page") and self.viewer.page():
-                try:
-                    self.viewer.page().runJavaScript("reportHeight();")
-                except RuntimeError:
-                    pass
 
     def _sync_identity_header_width(self) -> None:
         """身份行右缘与气泡对齐（宽度取内容需求与气泡宽的较大值）。
