@@ -478,6 +478,11 @@ class SessionStore:
                 # 创建索引
                 self._db.execute_sql(f"CREATE INDEX IF NOT EXISTS idx_updated ON {self.TABLE_NAME}(updated_at DESC)")
                 self._db.execute_sql(f"CREATE INDEX IF NOT EXISTS idx_project ON {self.TABLE_NAME}(project)")
+                # 复合索引：get_all_lightweight 带 project 过滤时等值+排序一次命中，
+                # 消除单列索引二选一后再排序（#A2 诊断效率结论 2）
+                self._db.execute_sql(
+                    f"CREATE INDEX IF NOT EXISTS idx_project_updated ON {self.TABLE_NAME}(project, updated_at DESC)"
+                )
                 # file_operations 表索引（几乎所有查询都按 session_id / call_id 过滤）
                 self._db.execute_sql("CREATE INDEX IF NOT EXISTS idx_file_ops_session ON file_operations(session_id)")
                 self._db.execute_sql(
@@ -954,6 +959,15 @@ class SessionStore:
         if self._session_repo:
             return self._session_repo.get_by_project(project, limit)
         return []
+
+    def get_by_ids(self, session_ids: List[str]) -> Dict[str, Dict]:
+        """[I8] 按 session_id 批量取回会话（团队恢复循环读批量化）。
+
+        委托 SessionRepository.get_by_ids（SELECT * IN 分批查询）。返回剥离态
+        主 blob（不含 extras 合并），消费方（HistoryManager）自行补 extras。"""
+        if self._session_repo:
+            return self._session_repo.get_by_ids(session_ids)
+        return {}
 
     def archive_sessions_by_project(self, project: str) -> int:
         """归档指定项目的所有会话"""

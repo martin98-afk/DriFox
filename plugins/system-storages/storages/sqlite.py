@@ -49,6 +49,11 @@ class SqliteStorageEngine:
     def get(self, session_id: str):
         return self._repo.get(session_id)
 
+    def get_by_ids(self, session_ids: List[str]) -> Dict[str, Dict]:
+        """[I8] 按 session_id 批量取回（SessionBulkGetCapability 实现，团队恢复
+        循环读批量化）。返回剥离态主 blob，extras 由消费方按需合并。"""
+        return self._repo.get_by_ids(session_ids)
+
     def get_all(self, limit: int = 100, offset: int = 0):
         return self._repo.get_all(limit=limit, offset=offset)
 

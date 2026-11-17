@@ -9596,6 +9596,28 @@ class OpenAIChatToolWindow(ToolWindow):
             "团队对话",
         )
         _agent_window_index: Dict[str, int] = {}
+        # [I8] 批量预取全部成员会话消息：N 次 get_session_messages（每次
+        # SELECT * 全 blob 读+解压+extras）→ 引擎 get_by_ids 1~2 次 IN 查询
+        # + 每会话 extras 小查询。预取顺序复刻下方循环的 idx 选择逻辑，保证
+        # 命中同一批 session_id；未命中（引擎无能力/批量失败/DB 无记录）时
+        # 循环内回退原单读，语义与旧实现一致。
+        _bulk_member_messages: Dict[str, List[Dict]] = {}
+        try:
+            _probe_index: Dict[str, int] = {}
+            _plan_sids: List[str] = []
+            for _p_agent, _p_wid in window_plan:
+                _p_idx = _probe_index.get(_p_agent, 0)
+                _probe_index[_p_agent] = _p_idx + 1
+                _p_sessions = sessions_by_agent.get(_p_agent, [])
+                _p_session = _p_sessions[_p_idx] if _p_idx < len(_p_sessions) else {}
+                _p_sid = _p_session.get("session_id", "")
+                if _p_sid:
+                    _plan_sids.append(_p_sid)
+            if _plan_sids and self.history_manager:
+                _bulk_member_messages = self.history_manager.get_sessions_messages_bulk(_plan_sids)
+        except Exception as _bulk_err:
+            logger.warning(f"[RestoreTeam] 成员会话批量预取失败，回退逐个读取: {_bulk_err}")
+            _bulk_member_messages = {}
         # C1 批量布局：连续 add_tab 期间跳过每次全量重建，结束统一重建一次
         from app.widgets.tab_manager_window import TabManagerWindow as _TMW
 
@@ -9610,7 +9632,10 @@ class OpenAIChatToolWindow(ToolWindow):
                 session = agent_sessions[idx] if idx < len(agent_sessions) else {}
                 session_id = session.get("session_id", "")
                 try:
-                    messages = self.history_manager.get_session_messages(session_id) or []
+                    if session_id and session_id in _bulk_member_messages:
+                        messages = _bulk_member_messages[session_id]
+                    else:
+                        messages = self.history_manager.get_session_messages(session_id) or []
                 except Exception:
                     messages = []
                 try:
