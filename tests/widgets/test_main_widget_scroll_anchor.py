@@ -48,6 +48,11 @@ def _make_window(**overrides):
     # 裸 __new__ 实例 getattr 未定义属性会抛 RuntimeError —— 必须预置
     win._last_quota_log_at = 0.0
     win._initial_scroll_to_bottom = False
+    # [FIX-1] _ensure_height_batch 是「风暴主修 1a」新增调用：getattr 未定义属性
+    # 对裸 __new__ 实例抛 RuntimeError（同 _is_destroyed 先例）。预置 MagicMock
+    # 模拟「batch 已存在」→ 直接返回，begin() 幂等；不能用 None（chat_scroll_area
+    # 是 MagicMock 非 None，会走创建分支把 MagicMock 传给 QTimer(parent) 崩）。
+    win._height_batch = MagicMock()
     win._user_intentionally_away_from_bottom = False
     win._scroll_to_bottom = MagicMock()
     # _on_scroll_changed 依赖（滚动同步/定时器/历史加载）
@@ -421,6 +426,10 @@ class _AnchorHarness(QObject):
     # 跟随态贴底（invokeMethod 排队版，2026-10-15 折叠栏抖动修复引入）
     _schedule_bottom_snap = OpenAIChatToolWindow._schedule_bottom_snap
     _snap_bottom_queued = OpenAIChatToolWindow._snap_bottom_queued
+    # [FIX-1] 跳转置底压制锁：_snap_bottom_queued 执行前复查新增调用，
+    # 桩必须同步（方法自身 try/except AttributeError 兜底，类属性置 0 = 默认未锁）
+    _is_jump_scroll_locked = OpenAIChatToolWindow._is_jump_scroll_locked
+    _jump_scroll_lock_until = 0.0
     # _make_anchor_window 运行时注入的实例属性（类型声明供 pyright 收窄）
     _programmatic_scroll_depth: int
     _sync_scroll_maximum: Callable[[], int]
