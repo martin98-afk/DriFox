@@ -256,6 +256,67 @@ class TestExpandQueueTimeout:
             card.deleteLater()
             QApplication.processEvents()
 
+class TestFolderBtnIconColor:
+    """树顶栏「在文件夹中打开」按钮主图标必须随主题 secondary 色显式着色
+
+    问题：icon() 无 color 参数时 qfluentwidgets 按 isDarkTheme() 翻转黑白，
+    深色模式下翻转未命中 → 文件夹图标仍为黑色（深底黑图不可见）。
+    修复：_apply_latest_theme 中主图标与刷新钮同口径 icon(color=secondary)。
+    """
+
+    def test_main_icon_recolored_on_theme_apply(self, monkeypatch):
+        card, _ = _make_card(monkeypatch)
+        try:
+            seen = []
+            orig_set_icon = type(card._folder_btn).set_icon
+            card._folder_btn.set_icon = (
+                lambda icon: (seen.append(icon), orig_set_icon(card._folder_btn, icon))
+            )
+
+            card._apply_latest_theme()
+
+            assert seen, "主题应用必须重设打开按钮主图标"
+
+            # 像素级断言：非透明像素的最大亮度应达 secondary 灰（默认黑图标≈0）
+            from PyQt5.QtGui import QColor
+            secondary = card._colors.get("text_secondary", QColor(150, 150, 150))
+            img = seen[-1].pixmap(32, 32).toImage()
+            opaque = [
+                img.pixelColor(x, y)
+                for x in range(img.width())
+                for y in range(img.height())
+                if img.pixelColor(x, y).alpha() > 200
+            ]
+            assert opaque, "图标应有可见像素"
+            brightest = max(c.red() + c.green() + c.blue() for c in opaque)
+            assert brightest >= 150, (
+                f"主图标最大亮度 {brightest} 过暗，深色模式下不可见（应为 secondary={secondary.getRgb()[:3]}）"
+            )
+        finally:
+            card._cleanup_worker()
+            card.deleteLater()
+            QApplication.processEvents()
+
+    def test_main_icon_tracks_secondary_change(self, monkeypatch):
+        """主题切换（明→暗）后主图标颜色跟随新 secondary，不得停留在旧色/黑色"""
+        card, _ = _make_card(monkeypatch)
+        try:
+            card._apply_latest_theme()  # 暗色首次
+            card.set_context(_make_ctx(is_dark=False))
+            seen = []
+            orig_set_icon = type(card._folder_btn).set_icon
+            card._folder_btn.set_icon = (
+                lambda icon: (seen.append(icon), orig_set_icon(card._folder_btn, icon))
+            )
+
+            card._apply_latest_theme()
+
+            assert seen, "明暗切换必须重设主图标（签名变化触发）"
+        finally:
+            card._cleanup_worker()
+            card.deleteLater()
+            QApplication.processEvents()
+
 
 class TestFileIconCache:
     """图标缓存：同路径重绘复用同一 QIcon，不重复走 QFileInfo + Shell"""

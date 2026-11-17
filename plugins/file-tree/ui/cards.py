@@ -892,6 +892,9 @@ class FileTreeCard(QWidget):
         self._root_label.setStyleSheet(root_style)
         secondary = self._colors.get("text_secondary", QColor(150, 150, 150))
         self._refresh_btn.setIcon(FluentIcon.SYNC.icon(color=secondary))
+        # 主图标与刷新钮同口径显式带色：icon() 无 color 时按 qfluentwidgets
+        # isDarkTheme() 翻转，深色模式下翻转未命中 → 图标仍是黑色
+        self._folder_btn.set_icon(FluentIcon.FOLDER.icon(color=secondary))
         self._folder_btn.set_icon_color(secondary)
         self._folder_btn.set_hover_color(
             QColor(255, 255, 255, 26) if is_dark else QColor(0, 0, 0, 18)
