@@ -394,12 +394,6 @@ class MessageCard(SimpleCardWidget):
         self._todo_panel_host = None  # 面板挂载的布局容器（气泡布局）
         self._todo_panel_todos: list = []  # 任务数据快照（重建补推用）
         self._todo_panel_height_cache = 0  # 面板占高缓存（高度增量上报用）
-        # 卡片内嵌成果栏（懒创建，挂在任务看板之后；语义与任务看板的差异见
-        # update_artifact_list docstring——不迁卡，成果属于产生它的那一轮）
-        self._artifact_panel = None
-        self._artifact_panel_host = None
-        self._artifact_panel_items: list = []
-        self._artifact_panel_height_cache = 0
         # 插件注册的消息卡内嵌面板（panel_id -> widget；槽位见
         # UIPluginRegistry.register_card_inline_panel，挂载顺序同任务看板）
         self._inline_panels: Dict[str, QWidget] = {}
@@ -781,12 +775,12 @@ class MessageCard(SimpleCardWidget):
                 self._todo_panel.refresh_style()
             except RuntimeError:
                 self._todo_panel = None
-        # 内嵌成果栏：条目 QSS 同样构造期固化
-        if self._artifact_panel is not None:
+        # 插件内嵌面板：条目 QSS 在构造期固化，需随主题重放
+        for _pid, _panel in list(self._inline_panels.items()):
             try:
-                self._artifact_panel.refresh_style()
-            except RuntimeError:
-                self._artifact_panel = None
+                _panel.refresh_style()
+            except (RuntimeError, AttributeError):
+                self._inline_panels.pop(_pid, None)
         # 插件注册的内嵌面板（如子智能体运行区）：QSS 同样在构造期固化。
         # [PERF] 可见性分流：卡片滚出视口 / 在非当前标签页时只置脏，回到
         # 可见时由 showEvent → ensure_theme_fresh 补刷。
@@ -2860,9 +2854,6 @@ class MessageCard(SimpleCardWidget):
         # 任务看板是原生 Qt 控件，不随 viewer 重建；仅补推一次数据（幂等，签名未变会跳过）
         if self._todo_panel is not None:
             self._todo_panel.update_todos(self._todo_panel_todos or [])
-        # 成果栏同理补推（幂等）
-        if self._artifact_panel is not None:
-            self._artifact_panel.update_artifacts(self._artifact_panel_items or [])
 
         # 恢复正常样式
         self._apply_card_style()
@@ -5744,6 +5735,10 @@ class MessageCard(SimpleCardWidget):
         height_signal = getattr(panel, "heightChanged", None)
         if height_signal is not None and hasattr(height_signal, "connect"):
             height_signal.connect(lambda *_, _pid=panel_id: self._on_inline_panel_height_changed(_pid))
+        # 图片单击 → 内置预览（与正文图片同一通道；面板可选提供该信号）
+        preview_signal = getattr(panel, "previewImageRequested", None)
+        if preview_signal is not None and hasattr(preview_signal, "connect"):
+            preview_signal.connect(self._on_preview_image)
         bubble_lay = bubble.layout()
         if bubble_lay is not None:
             bubble_lay.addWidget(panel)
@@ -5883,131 +5878,31 @@ class MessageCard(SimpleCardWidget):
         except RuntimeError:
             return 0
 
-    # ── 卡片内嵌成果栏（三件套，契约同任务看板；关键差异见 update_artifact_list）──
+    # ── 插件内嵌面板投递（通用槽位）──
 
-    def update_artifact_list(self, items):
-        """合并推送成果条目（原生 Qt 面板，不进 WebEngine）
+    def push_inline_items(self, panel_id: str, items) -> int:
+        """向本卡的插件内嵌面板增量推送条目（面板实现 ``update_items`` 契约）
 
-        ★ **合并而非替换**：同轮多次工具产出、异步任务回填原卡（``ui.artifacts.show``
-        的 ``target="call"``）每次只带本次增量，整体替换会把先到的条目顶掉。
-        按 ``path`` 去重：已存在则原位更新，新路径追加到末尾（保持首次出现顺序）。
+        面板由 ``UIPluginRegistry.register_card_inline_panel`` 注册；插件未加载
+        或面板不支持该契约时静默丢弃（返回 0），不阻塞工具结果渲染。
 
-        与任务看板的语义差异——**不迁卡**：任务列表是"当前状态"，每轮工具轮次
-        都会迁到最新卡（宿主 ``_sync_todo_panel`` 卸旧卡挂新卡）；成果属于产生
-        它的那一轮，新卡不继承旧卡的成果，宿主侧不清空旧卡。显式清空走
-        ``clear_artifact_list()``（空列表推送不再隐含清空）。
+        ★ 不迁卡：成果属于产生它的那一轮，新卡不继承旧卡条目（与任务看板
+        的迁卡语义相反）。合并去重由面板按 path 自己做。
 
-        Args:
-            items: [{path, kind?, name?, width?, height?, size?, caption?, meta?}, ...]
-                   kind 缺省按扩展名推断
+        Returns:
+            投递条目数（未找到面板返 0）。
         """
-        merged = self._merge_artifact_items(self._artifact_panel_items, items)
-        if not merged:
-            return
-        self._artifact_panel_items = merged
-        if self.role != "assistant":
-            return
-        if self._assistant_bubble is None:
-            panel = self._artifact_panel
-            if panel is not None:
-                panel.update_artifacts(merged)
-            return
-        panel = self._ensure_artifact_panel()
-        if panel is not None:
-            panel.update_artifacts(merged)
-
-    @staticmethod
-    def _merge_artifact_items(current, incoming):
-        """按 path 合并成果条目：同路径原位替换，新路径追加（保序）"""
-        merged = list(current or [])
-        index = {}
-        for i, item in enumerate(merged):
-            if isinstance(item, dict) and item.get("path"):
-                index[str(item["path"])] = i
-        for raw in incoming or []:
-            if not isinstance(raw, dict):
-                continue
-            path = str(raw.get("path") or "").strip()
-            if not path:
-                continue
-            item = dict(raw)
-            item["path"] = path
-            pos = index.get(path)
-            if pos is None:
-                index[path] = len(merged)
-                merged.append(item)
-            else:
-                merged[pos] = item
-        return merged
-
-    def clear_artifact_list(self):
-        """显式清空成果栏（面板实例保留，卡片重建时直接复用）"""
-        self._artifact_panel_items = []
-        panel = self._artifact_panel
-        if panel is not None:
-            panel.clear_artifacts()
-
-    def _ensure_artifact_panel(self):
-        """懒创建成果栏并挂进气泡布局末尾（任务看板之后、页脚之前）"""
-        if self._artifact_panel is not None:
-            host = self._artifact_panel_host
-            if host is not None and host.indexOf(self._artifact_panel) < 0:
-                host.addWidget(self._artifact_panel)
-            return self._artifact_panel
-        try:
-            from app.widgets.inline_artifact_panel import InlineArtifactPanel
-
-            panel = InlineArtifactPanel(self._assistant_bubble)
-        except Exception as e:
-            logger.warning(f"[MessageCard] 成果栏创建失败: {e}")
-            return None
-        # 高度变化 → 重算卡片高度并上报外层锚定补偿（硬要求，P025/P027 教训）
-        panel.heightChanged.connect(lambda _p=panel: self._on_artifact_panel_height_changed())
-        # 图片单击 → 内置预览（与正文图片同一通道）
-        try:
-            panel.previewImageRequested.connect(self._on_preview_image)
-        except (RuntimeError, AttributeError):
-            pass
-        bubble_lay = self._assistant_bubble.layout()
-        if bubble_lay is not None:
-            # 挂载顺序：viewer → 任务看板 → 成果栏。任务在前（先看进度，再看产出）
-            bubble_lay.addWidget(panel)
-            self._artifact_panel_host = bubble_lay
-        self._artifact_panel = panel
-        return panel
-
-    def _on_artifact_panel_height_changed(self):
-        """成果栏高度变化：重算卡片高度并通知外层做锚定补偿
-
-        记账口径与 ``_on_todo_panel_height_changed`` 完全一致（含
-        ``_todo_panel_effective_height`` 注释里记录的 sizeHint 与实际占高
-        不同源问题，2026-10-09 真机现象）——两套缓存分开记，互不干扰。
-        """
-        try:
-            panel = self._artifact_panel
-            cur = self._artifact_panel_effective_height(panel)
-            prev = getattr(self, "_artifact_panel_height_cache", 0)
-            self._artifact_panel_height_cache = cur
-            delta = int(cur - prev)
-            if not delta:
-                return
-            bubble = getattr(self, "_assistant_bubble", None)
-            if bubble is not None:
-                bubble.updateGeometry()
-            self.updateGeometry()
-            self._last_height_delta += delta
-            self.heightChanged.emit(self.height())
-        except RuntimeError:
-            pass
-
-    def _artifact_panel_effective_height(self, panel) -> int:
-        """成果栏「当前实际占高」，口径同 ``_todo_panel_effective_height``（取大值）"""
-        if panel is None or not panel.isVisible():
+        if not items or self.role != "assistant":
+            return 0
+        panel = self.ensure_inline_panel(panel_id)
+        updater = getattr(panel, "update_items", None) if panel is not None else None
+        if not callable(updater):
             return 0
         try:
-            return max(int(panel.sizeHint().height()), int(panel.height()))
+            updater(list(items))
         except RuntimeError:
             return 0
+        return len(items)
 
     def update_tool_streaming(
         self,

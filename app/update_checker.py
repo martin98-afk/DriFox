@@ -62,6 +62,9 @@ class UpdateChecker(QWidget):
         # N2 后台安装链状态（macOS 安装线程句柄与「已启动」标志）
         self._install_thread = None
         self._installer_started = False
+        # 信号是否已 connect（失败重试会再次进入 _start_macos_install，
+        # connect 同一 bound method 不去重，须防单次 emit 触发多次槽）
+        self._signals_connected = False
 
     @classmethod
     def get_instance(cls, parent=None):
@@ -273,6 +276,10 @@ class UpdateChecker(QWidget):
             self.progress_dialog.setLabelText("正在安装更新，完成后将自动启动…")
             self.progress_dialog.setValue(100)
             self.progress_dialog.repaint()
+            # C-fix 建议②取舍：cancel 钮保留（下载阶段仍需可取消），但安装链
+            # （hdiutil/ditto）无法安全中止——中断留半成品 .app 比「静默装完自动
+            # 重启新版」更糟，故不加取消连接，仅用 tooltip 明示「安装中请勿关闭」
+            self.progress_dialog.setToolTip("更新安装中，请勿关闭")
 
         if platform.system().lower() == "darwin":
             # N2 性能优化：macOS 安装链含多个同步 subprocess（hdiutil/ditto 全量拷贝
@@ -290,11 +297,14 @@ class UpdateChecker(QWidget):
         无害；SQLite WAL + config 三方合并（commit c5df538cd）兜底数据一致。
         """
         if self._install_thread is not None:
-            # 防重复启动：PyQt 信号 connect 同一 bound method 不去重，重复 start 会双 emit
+            # 防重复启动：同一时刻只允许一个安装线程存在
             return
-        self._install_finished.connect(self._on_install_finished)
-        self._install_failed.connect(self._on_install_failed)
-        QApplication.instance().aboutToQuit.connect(self._on_about_to_quit_guard)
+        # 信号只连一次：失败重试会再次进入本方法，重复 connect 会让单次 emit 触发多次槽
+        if not self._signals_connected:
+            self._install_finished.connect(self._on_install_finished)
+            self._install_failed.connect(self._on_install_failed)
+            QApplication.instance().aboutToQuit.connect(self._on_about_to_quit_guard)
+            self._signals_connected = True
         self._installer_started = True
         self._install_thread = threading.Thread(
             target=self._macos_install_worker, name="macos-installer", daemon=False
@@ -322,6 +332,10 @@ class UpdateChecker(QWidget):
         if self.progress_dialog:
             self.progress_dialog.close()
             self.progress_dialog = None
+        # C-fix 必修①：重置安装状态，允许失败后重新下载再装（原同步版本失败后可重试；
+        # 不重置会让 _start_macos_install 的防重复守卫吞掉重试，进度条停 100% 无反馈）
+        self._install_thread = None
+        self._installer_started = False
         self.create_errorbar("启动失败", msg)
 
     def _on_about_to_quit_guard(self):
@@ -342,6 +356,8 @@ class UpdateChecker(QWidget):
         """启动安装（Windows 半静默、macOS 自动升级）"""
         system = platform.system().lower()
         try:
+            # 注：darwin 入口已在 _handle_download_finished 分流到 _start_macos_install
+            # （后台线程），此分支当前无调用方会走到，保留仅作防御兜底
             if system == "darwin":
                 self._run_macos_upgrade()
             else:

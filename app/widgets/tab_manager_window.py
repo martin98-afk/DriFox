@@ -2151,10 +2151,9 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
         force: bool = False,
         force_plugin: str = "",
     ) -> None:
-        """从当前活跃窗口拉取数据填充工作台（产物/项目记忆）
+        """从当前活跃窗口拉取数据填充工作台（项目记忆 + 插件注册页）
 
         数据源均为既有单一数据源：
-        - 产物：backend.file_recorder 会话级文件写入记录
         - 项目：win._current_project + _current_workdir → MemoryCardContent
 
         任务（todowrite）已迁至消息卡片内嵌看板（见 app/widgets/inline_todo_panel.py），
@@ -2169,7 +2168,7 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
         panel = getattr(self, "workbench_panel", None)
         if panel is None or not panel.isVisible():
             return
-        # 插件工作台页签 reconcile（内置产物/记忆 + 插件注册页）
+        # 插件工作台页签 reconcile（全部由插件注册）
         try:
             from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
 

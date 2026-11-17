@@ -1526,7 +1526,6 @@ def render_batch_to_assistant_card(assistant_card, batch: list, immediate_render
         immediate_render: 批量加载路径传 False（T11 错峰），避免 N 卡同帧
             全量重渲；交互路径保持默认 True。
     """
-    artifacts: list = []
     for msg in batch:
         if msg.get("role") == "assistant":
             # 跳过 hook 消息（内部通知不显示到 UI，仅用于 LLM 上下文）
@@ -1548,9 +1547,6 @@ def render_batch_to_assistant_card(assistant_card, batch: list, immediate_render
             if content:
                 assistant_card.append_text(content, immediate_render=immediate_render)
         elif msg.get("role") == "tool":
-            # 成果条目与展示内容独立：无正文的 tool 消息也可能带成果
-            if msg.get("artifacts"):
-                artifacts.extend(msg["artifacts"])
             if msg.get("content", ""):
                 assistant_card.append_tool_result(
                     tool_name=msg.get("name", ""),
@@ -1561,9 +1557,6 @@ def render_batch_to_assistant_card(assistant_card, batch: list, immediate_render
                     diff=msg.get("diff"),
                     echarts=msg.get("echarts"),
                 )
-    if artifacts:
-        # 成果属于产生它的那一轮，重开会话后仍要能看到（数据来自 tool 消息落库）
-        assistant_card.update_artifact_list(artifacts)
     _hydrate_inline_panels(assistant_card, batch)
     assistant_card.finish_streaming(history=True, immediate=immediate_render)
 

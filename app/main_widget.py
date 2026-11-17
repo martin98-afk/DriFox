@@ -12247,7 +12247,7 @@ class OpenAIChatToolWindow(ToolWindow):
             # 否则切换会话后产物区仍显示上一会话的文件记录。
             # _push_workbench_updates 自带活跃窗口隔离（非活跃窗口跳过）与
             # 面板不可见零开销（refresh_workbench 首行 return），可安全调用。
-            self._push_workbench_updates(refresh_artifacts=True)
+            self._push_workbench_updates()
             return
 
         self.title_edit.setText(session.topic_summary or session.name or "新对话")
@@ -12263,7 +12263,7 @@ class OpenAIChatToolWindow(ToolWindow):
             # 恢复缓存卡片后，多次滚动确保在底部
             self._scroll_to_bottom(sticky_ms=900)
             # 🐛 修复（产物区刷新不及时）：缓存恢复也是一次会话切换，同步刷新工作台
-            self._push_workbench_updates(refresh_artifacts=True)
+            self._push_workbench_updates()
             # 任务看板归属最新卡片：缓存卡片重建后面板需重新挂载
             QTimer.singleShot(0, lambda: self._sync_todo_panel())
             return
@@ -12272,7 +12272,7 @@ class OpenAIChatToolWindow(ToolWindow):
         if self._restore_kept_session(session.session_id):
             self._update_node_preview()
             self._refresh_context_usage_indicator()
-            self._push_workbench_updates(refresh_artifacts=True)
+            self._push_workbench_updates()
             return
 
         # [A3-C] 方案 C：切走时保留最近一个会话的卡片（keep>0 才生效）。
@@ -12297,7 +12297,7 @@ class OpenAIChatToolWindow(ToolWindow):
             self._invalidate_welcome_card()
             self._show_initial_welcome()
             # 🐛 修复（产物区刷新不及时）：切到空会话也需刷新工作台（清掉上一会话产物）
-            self._push_workbench_updates(refresh_artifacts=True)
+            self._push_workbench_updates()
             return
 
         self._load_message_batch(initial=True)
@@ -12306,7 +12306,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # 🐛 修复（产物区刷新不及时）：会话显示完成的统一出口，按新 session_id
         # 重拉工作台产物/任务/项目数据（_load_session_from_record / _create_new_session /
         # _switch_to_session_by_id 等所有加载路径都经过本方法，无需逐处补刷）
-        self._push_workbench_updates(refresh_artifacts=True)
+        self._push_workbench_updates()
         # 任务看板：重建/懒渲染完成后再挂一次（列表数据是窗口级，不随会话变化）
         QTimer.singleShot(0, lambda: self._sync_todo_panel())
 
@@ -22011,7 +22011,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 and self.backend.file_recorder is not None
                 and self.backend.file_recorder.is_tracked_operation(tool_name)
             ):
-                self._push_workbench_updates(refresh_artifacts=True)
+                self._push_workbench_updates()
         except Exception:
             pass
         # （T11-3c：原 if/elif 空分支已删——todo 更新由上方完成；
@@ -25583,6 +25583,8 @@ class OpenAIChatToolWindow(ToolWindow):
         迁移语义——那会让旧图串到新对话轮次里。
 
         目标卡优先 ``call_id`` 定位（异步任务晚于轮次结束回填原卡），否则最新卡。
+        面板实现由 artifacts-manager 插件提供（``panel_id="artifacts"``）；
+        插件未加载时静默丢弃。
 
         Args:
             artifacts: 成果条目列表（ToolResult.artifacts / 能力 ui.artifacts.show）
@@ -25594,23 +25596,23 @@ class OpenAIChatToolWindow(ToolWindow):
         card = self._current_assistant_card or self._find_latest_assistant_card()
         if card is None or not self._is_widget_alive(card):
             return
+        pusher = getattr(card, "push_inline_items", None)
+        if not callable(pusher):
+            return
         try:
-            card.update_artifact_list(list(artifacts))
+            pusher("artifacts", list(artifacts))
         except RuntimeError:
             pass
 
     # ── 右侧工作台浮层联动 ──
 
-    def _push_workbench_updates(self, refresh_artifacts: bool = False) -> None:
-        """向右侧工作台浮层推送增量更新（面板隐藏/无宿主时零开销跳过）
+    def _push_workbench_updates(self) -> None:
+        """刷新右侧工作台浮层（面板隐藏/无宿主时零开销跳过）
 
         ★ 标签页隔离：工作台是宿主级单例，数据投影自「当前活跃对话窗口」。
-        非活跃窗口的工具回调（如后台正在跑的另一个标签页）只更新自己的
-        ``_latest_todos`` 缓存，不写工作台 UI——否则当前标签页的工作台
-        会被其他标签页的产物覆盖。切回时 refresh_workbench 会拉取。
-
-        Args:
-            refresh_artifacts: True 时重拉产物列表（文件写入类工具完成后调用）
+        非活跃窗口的工具回调（如后台正在跑的另一个标签页）不写工作台 UI，
+        切回时 refresh_workbench 会拉取。
+        各页数据由页面自拉（文件树/工作树等），宿主只触发刷新。
         """
         if getattr(self, "_is_destroyed", False):
             return
@@ -25622,8 +25624,7 @@ class OpenAIChatToolWindow(ToolWindow):
             # 标签页隔离：仅活跃窗口可推送 UI 更新
             if tm.get_current_window() is not self:
                 return
-            if refresh_artifacts:
-                tm.refresh_workbench()
+            tm.refresh_workbench()
         except Exception:
             pass
 

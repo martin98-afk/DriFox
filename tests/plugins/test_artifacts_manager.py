@@ -1,12 +1,18 @@
-# -*- coding: utf-8 -*-
-"""成果栏（InlineArtifactPanel）与 artifacts 字段驱动测试
+"""成果栏（插件 artifacts-manager）与 artifacts 字段驱动测试
 
 覆盖：条目归一化 / kind 推断 / 去重 / 上限截断 / 空列表隐藏 / 坏数据容错 /
-ToolResult.artifacts 透传 / catalog 登记。端到端（面板挂卡）依赖 QApplication，
-走 tests/widgets 的既有 fixtures 形态，能起 QApplication 则跑，否则跳过。
+增量合并 / 历史回填 / ToolResult.artifacts 透传 / catalog 登记。
 """
+from importlib import import_module
 
 import pytest
+
+from app.tools.result import ToolResult
+
+_panel_mod = import_module("plugins.artifacts-manager.ui.artifact_panel")
+InlineArtifactPanel = _panel_mod.InlineArtifactPanel
+
+
 
 from app.tools.result import ToolResult
 
@@ -49,8 +55,6 @@ def qapp():
 
 @pytest.fixture()
 def panel(qapp):
-    from app.widgets.inline_artifact_panel import InlineArtifactPanel
-
     p = InlineArtifactPanel()
     yield p
     p.deleteLater()
@@ -210,8 +214,9 @@ def test_ui_provider_delivers_on_main_thread(qapp):
     delivered = []
 
     class FakeCard:
-        def update_artifact_list(self, items):
+        def push_inline_items(self, panel_id, items):
             delivered.extend(items)
+            return len(items)
 
     class FakeHost:
         _current_assistant_card = FakeCard()
@@ -233,8 +238,9 @@ def test_ui_provider_call_id_targeting(qapp):
         def __init__(self, tag):
             self.tag = tag
 
-        def update_artifact_list(self, items):
+        def push_inline_items(self, panel_id, items):
             delivered.append(self.tag)
+            return len(items)
 
     old_card, origin_card = FakeCard("latest"), FakeCard("origin")
     host = type("H", (), {})()
@@ -254,47 +260,54 @@ def test_ui_provider_missing_card_zero(qapp):
     assert provider([{"path": "/tmp/a.png"}]) == 0
 
 
-# ── 合并语义（修覆盖丢条目）──
+# ── 合并语义（面板 update_items 契约）──
 
-def test_card_artifact_list_merges_instead_of_replacing(qapp):
-    """同轮多次推送必须累积：旧实现整体替换，后到的会把先到的顶掉"""
-    from app.widgets.message_card import MessageCard
 
-    card = MessageCard(role="assistant")
-    try:
-        card.update_artifact_list([{"path": "/tmp/a.png"}, {"path": "/tmp/b.png"}])
-        card.update_artifact_list([{"path": "/tmp/c.png"}])
-        assert [it["path"] for it in card._artifact_panel_items] == ["/tmp/a.png", "/tmp/b.png", "/tmp/c.png"]
-    finally:
-        card.deleteLater()
+def test_panel_update_items_merges_instead_of_replacing(panel):
+    """同轮多次推送必须累积：整体替换会把先到的条目顶掉"""
+    panel.update_items([{"path": "/tmp/a.png"}, {"path": "/tmp/b.png"}])
+    panel.update_items([{"path": "/tmp/c.png"}])
+    assert [it["path"] for it in panel._items] == ["/tmp/a.png", "/tmp/b.png", "/tmp/c.png"]
 
-def test_card_artifact_list_updates_same_path_in_place(qapp):
+
+def test_panel_update_items_updates_same_path_in_place(panel):
     """同路径重复推送原位更新，不改变顺序"""
-    from app.widgets.message_card import MessageCard
+    panel.update_items([{"path": "/tmp/a.png", "size": 1}, {"path": "/tmp/b.png"}])
+    panel.update_items([{"path": "/tmp/a.png", "size": 2}])
+    assert [it["path"] for it in panel._items] == ["/tmp/a.png", "/tmp/b.png"]
+    assert panel._items[0]["size"] == 2
 
-    card = MessageCard(role="assistant")
-    try:
-        card.update_artifact_list([{"path": "/tmp/a.png", "size": 1}, {"path": "/tmp/b.png"}])
-        card.update_artifact_list([{"path": "/tmp/a.png", "size": 2}])
-        items = card._artifact_panel_items
-        assert [it["path"] for it in items] == ["/tmp/a.png", "/tmp/b.png"]
-        assert items[0]["size"] == 2
-    finally:
-        card.deleteLater()
 
-def test_card_artifact_list_ignores_empty_push(qapp):
-    """空列表不再隐含清空（显式清理走 clear_artifact_list）"""
-    from app.widgets.message_card import MessageCard
+def test_panel_update_items_ignores_empty_push(panel):
+    """空列表不隐含清空；显式清理走 clear_artifacts"""
+    panel.update_items([{"path": "/tmp/a.png"}])
+    panel.update_items([])
+    assert len(panel._items) == 1
+    panel.clear_artifacts()
+    assert panel._items == []
 
-    card = MessageCard(role="assistant")
-    try:
-        card.update_artifact_list([{"path": "/tmp/a.png"}])
-        card.update_artifact_list([])
-        assert len(card._artifact_panel_items) == 1
-        card.clear_artifact_list()
-        assert card._artifact_panel_items == []
-    finally:
-        card.deleteLater()
+
+def test_panel_restore_items_is_idempotent(panel):
+    """历史回填重复调用不产生重复行"""
+    items = [{"path": "/tmp/a.png"}, {"path": "/tmp/b.png"}]
+    panel.restore_items(items)
+    panel.restore_items(items)
+    assert [it["path"] for it in panel._items] == ["/tmp/a.png", "/tmp/b.png"]
+
+
+def test_plugin_history_loader_collects_tool_artifacts():
+    """会话重载：从 batch 的 tool 消息收集成果（空 content 也要收）"""
+    ui_mod = import_module("plugins.artifacts-manager.ui")
+
+    batch = [
+        {"role": "assistant", "content": "done"},
+        {"role": "tool", "content": "ok", "artifacts": [{"path": "/tmp/a.png"}]},
+        {"role": "tool", "content": "", "artifacts": [{"path": "/tmp/b.png"}]},
+        {"role": "tool", "content": "no-artifacts"},
+    ]
+    items = ui_mod._load_history(batch, None)
+    assert [it["path"] for it in items] == ["/tmp/a.png", "/tmp/b.png"]
+
 
 # ── 折叠态缩略图带 / 溢出展开 / 拖拽 ──
 
@@ -311,7 +324,7 @@ def test_panel_collapsed_strip_hidden_after_expand(panel):
     assert panel._thumb_strip.isHidden()
 
 def test_panel_overflow_expand_all(panel):
-    from app.widgets.inline_artifact_panel import MAX_VISIBLE_ITEMS
+    MAX_VISIBLE_ITEMS = _panel_mod.MAX_VISIBLE_ITEMS
 
     panel.update_artifacts(_img_items(25))
     rows = [panel._list_layout.itemAt(i).widget() for i in range(panel._list_layout.count())]
@@ -377,39 +390,10 @@ def test_normalize_artifacts_capped():
 
 def test_kind_badge_shows_letter(qapp):
     """徽标必须有字：构造期漏 setText 会渲成空白色块"""
-    from app.widgets.inline_artifact_panel import _KindBadge
+    _KindBadge = _panel_mod._KindBadge
 
     assert _KindBadge("text").text() == "T"
     assert _KindBadge("file").text() == "文"
-
-def test_render_batch_restores_artifacts():
-    """历史渲染收集 batch 内所有 tool 消息的成果（空 content 的也要收）"""
-    from app.widgets.ui_helpers import render_batch_to_assistant_card
-
-    calls = {}
-
-    class FakeCard:
-        def append_text(self, text, immediate_render=True):
-            calls.setdefault("text", []).append(text)
-
-        def append_tool_result(self, **kwargs):
-            calls.setdefault("tools", []).append(kwargs)
-
-        def update_artifact_list(self, items):
-            calls["artifacts"] = list(items)
-
-        def finish_streaming(self, history=False, immediate=True):
-            calls["finished"] = True
-
-    batch = [
-        {"role": "assistant", "content": "done"},
-        {"role": "tool", "name": "gen", "content": "ok", "tool_call_id": "c1", "artifacts": [{"path": "/tmp/a.png"}]},
-        {"role": "tool", "name": "gen2", "content": "", "tool_call_id": "c2", "artifacts": [{"path": "/tmp/b.png"}]},
-    ]
-    render_batch_to_assistant_card(FakeCard(), batch, immediate_render=False)
-    assert [it["path"] for it in calls["artifacts"]] == ["/tmp/a.png", "/tmp/b.png"]
-    assert len(calls["tools"]) == 1, "空 content 的 tool 消息不渲染工具块"
-    assert calls["finished"] is True
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

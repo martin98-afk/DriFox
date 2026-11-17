@@ -1,20 +1,18 @@
 # -*- coding: utf-8 -*-
-"""artifacts-manager 插件 UI 注册入口
+"""artifacts-manager 插件注册入口
 
-职责：
-- 注册工作台「产物」页（``page_id="artifacts-manager"``，与插件同名）—— 注册它即
-  填充产物页槽位，index 1；面板本身不提供产物实现，插件卸载后显示占位页）。
+职责（代码不分散，成果栏与它的工具同属本插件）：
 
-宿主契约（插件版产物页必须实现，否则面板推送数据会失败）：
-- ``set_operations(ops)``：接收文件操作记录并渲染
-- ``set_diff_all_callback(cb)``：接收差异回调
-- ``refresh_style()``：主题刷新
+- 卡片成果栏面板：``register_card_inline_panel(panel_id="artifacts")``，
+  面板类见 ``artifact_panel.InlineArtifactPanel``。
+- 成果展示工具：``tools/show_artifacts.py``，返回 ``ToolResult.artifacts``，
+  由宿主通用链路投递到本面板。
 
-页面实现见 ``artifacts_page.SystemArtifactsPage``：通过 context 从宿主拉取数据
-（``context["backend"]`` / ``context["session_id"]``），并通过
-``context["diff_requested_callback"]`` 触发差异对比。
+宿主契约：
 
-注册后自动获得 ``/artifacts`` 命令（UIPluginRegistry 命令账本联动注册）。
+- ``update_items(items)``：运行态增量推送
+- ``restore_items(items)``：会话重载历史回填（``history_loader`` 提供数据）
+- ``heightChanged`` / ``previewImageRequested``：宿主自动接线
 """
 
 from loguru import logger
@@ -22,23 +20,31 @@ from loguru import logger
 _PLUGIN_NAME = "artifacts-manager"
 
 
+def _load_history(batch, host):
+    """会话重载：从落库的 tool 消息收集成果条目（宿主不猜，按批次传账）"""
+    items = []
+    for msg in batch or []:
+        if not isinstance(msg, dict) or msg.get("role") != "tool":
+            continue
+        artifacts = msg.get("artifacts")
+        if artifacts:
+            items.extend(artifacts)
+    return items
+
+
 def register_ui(registry) -> None:
-    """产物页 ui 组件注册入口（被 UIPluginRegistry.load_plugin 调用）
-
-    Args:
-        registry: UIPluginRegistry 单例
-    """
+    """成果栏面板注册入口（被 UIPluginRegistry.load_plugin 调用）"""
     try:
-        from .artifacts_page import SystemArtifactsPage
+        from .artifact_panel import InlineArtifactPanel
 
-        registry.register_workbench_tab(
+        registry.register_card_inline_panel(
             plugin_name=_PLUGIN_NAME,
-            page_id="artifacts-manager",
-            label="产物",
-            widget_class=SystemArtifactsPage,
-            priority=10,
-            metadata={"source": "system", "order_hint": 10},
+            panel_id="artifacts",
+            widget_class=InlineArtifactPanel,
+            order=20,
+            metadata={"source": "system"},
+            history_loader=_load_history,
         )
-        logger.info("[artifacts-manager] 已注册工作台 tab: artifacts-manager（产物页）")
+        logger.info("[artifacts-manager] 已注册卡片成果栏: artifacts")
     except Exception as e:
-        logger.warning(f"[artifacts-manager] 注册 artifacts tab 失败（产物页将显示占位）: {e}")
+        logger.warning(f"[artifacts-manager] 注册成果栏失败（成果将无处展示）: {e}")

@@ -179,9 +179,13 @@ class _KindBadge(QLabel):
 class InlineArtifactPanel(QWidget):
     """成果栏：分隔条 + 行式清单（默认折叠）
 
-    数据入口 ``update_artifacts(items)``，接 ``ToolResult.artifacts`` 或能力
-    ``ui.artifacts.show`` 推送的条目列表。高度变化经 ``heightChanged`` 上报宿主
-    （MessageCard 据此做外层滚动锚定补偿，契约同 InlineTodoPanel）。
+    宿主通用内嵌面板（``UIPluginRegistry.register_card_inline_panel``，
+    panel_id="artifacts"）：
+
+    - ``update_items(items)``：运行态增量推送（同路径原位更新、新路径追加）
+    - ``restore_items(items)``：会话重载时按落库的 tool 消息重建
+    - ``heightChanged``：宿主自动接线做卡片高度锚定补偿
+    - ``previewImageRequested``：宿主自动接线到内置图片预览
     """
 
     heightChanged = pyqtSignal()
@@ -288,6 +292,45 @@ class InlineArtifactPanel(QWidget):
         self.heightChanged.emit()
 
     # ── 数据 ──
+
+    def update_items(self, items: List[Dict[str, Any]]) -> None:
+        """宿主通用契约：增量合并推送（同路径原位更新、新路径追加、保序）
+
+        ★ 不替换：同轮多次工具产出与异步回填每次只带增量，整体替换会把先到
+        的条目顶掉（2026-11 修）。空列表不清空，显式清空走 ``clear_artifacts``。
+        """
+        if not items:
+            return
+        merged = self._merge_items(self._items, items)
+        self.update_artifacts(merged)
+
+    def restore_items(self, items: List[Dict[str, Any]]) -> None:
+        """宿主通用契约：会话重载历史回填（从 tool 消息的 artifacts 字段重建）"""
+        self.update_items(items)
+
+    @staticmethod
+    def _merge_items(current, incoming) -> List[Dict[str, Any]]:
+        """按 path 合并：同路径原位替换，新路径追加（保持首次出现顺序）"""
+        merged = list(current or [])
+        index = {}
+        for i, item in enumerate(merged):
+            if isinstance(item, dict) and item.get("path"):
+                index[str(item["path"])] = i
+        for raw in incoming or []:
+            if not isinstance(raw, dict):
+                continue
+            path = str(raw.get("path") or "").strip()
+            if not path:
+                continue
+            item = dict(raw)
+            item["path"] = path
+            pos = index.get(path)
+            if pos is None:
+                index[path] = len(merged)
+                merged.append(item)
+            else:
+                merged[pos] = item
+        return merged
 
     def update_artifacts(self, items: List[Dict[str, Any]]) -> None:
         """刷新成果列表（幂等：同签名跳过；同路径去重保序；坏条目静默丢弃）"""

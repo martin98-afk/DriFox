@@ -1145,16 +1145,15 @@ def _ui_artifacts_show(host: Any):
             if card is None:
                 logger.warning("[Capability] artifacts.show 未找到目标卡片，丢弃")
                 return 0
-            updater = getattr(card, "update_artifact_list", None)
-            if not callable(updater):
+            pusher = getattr(card, "push_inline_items", None)
+            if not callable(pusher):
                 return 0
             try:
-                updater(payload)
+                return int(pusher("artifacts", payload) or 0)
             except RuntimeError:
                 # deleted wrapper：卡片已销毁，静默丢弃（P029 教训）
                 logger.warning("[Capability] artifacts.show 目标卡片已销毁")
                 return 0
-            return len(payload)
 
         if threading.current_thread() is threading.main_thread():
             # 主线程直跑：返回实际挂载数（未找到卡片 → 0，契约可测）

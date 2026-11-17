@@ -5,10 +5,10 @@
   },
   "name": "artifacts-manager",
   "display_name": {
-      "zh": "产物工作台"
+      "zh": "成果栏"
   },
-  "description": "DriFox 内置 UI 组件：工作台产物页（按用户问题分组展示会话文件产物）",
-  "version": "1.0.0",
+  "description": "DriFox 内置成果栏：消息卡片内嵌成果展示面板，并提供 show_artifacts 工具让模型把需要用户查看的文件放入成果栏",
+  "version": "1.1.0",
   "author": {
     "name": "DriFox Team"
   },
@@ -16,8 +16,8 @@
   "license": "GPL-3.0-or-later",
   "type": "system",
   "api_version": 2,
-  "capabilities": ["window.current"],
   "components": {
-    "ui": true
+    "ui": true,
+    "tools": true
   }
 }

@@ -156,3 +156,34 @@ def test_install_finished_signal_and_quit(qapp, monkeypatch):
     assert _wait_until(lambda: bool(main_thread_hits)), "queued 信号未送达主线程"
     assert got == ["finished"], "安装完成信号未发出"
     assert main_thread_hits[0] == threading.main_thread().name
+
+# ──────────── C-fix 必修①：失败后重试不被防重复守卫吞掉 ────────────
+
+def test_retry_after_failure_restarts_thread(qapp, monkeypatch):
+    """安装失败必须重置安装状态：否则再次下载后 _start_macos_install 静默 return，
+    安装不执行、进度条停 100% 无反馈（原同步版本失败后可重试）。"""
+    calls = []
+    monkeypatch.setattr(uc.UpdateChecker, "create_errorbar", lambda self, t, m: None)
+
+    def fail_first_time(self):
+        calls.append("run")
+        if len(calls) == 1:
+            raise RuntimeError("first attempt fails")
+
+    monkeypatch.setattr(uc.UpdateChecker, "_run_macos_upgrade", fail_first_time)
+    c = _real_checker(qapp, monkeypatch)
+
+    # 第一次安装：失败
+    c._start_macos_install()
+    first = c._install_thread
+    first.join(timeout=5)
+    # 失败槽（queued 送达主线程）执行后状态必须被重置
+    assert _wait_until(lambda: c._install_thread is None), "失败后未重置安装状态"
+    assert c._installer_started is False
+
+    # 第二次安装（用户重新下载后的重试）：必须能重新建线程并真正执行
+    c._start_macos_install()
+    assert c._install_thread is not None, "重试未创建新线程（被防重复守卫吞掉）"
+    assert c._install_thread is not first
+    c._install_thread.join(timeout=5)
+    assert len(calls) == 2, "重试未真正执行安装逻辑"

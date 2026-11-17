@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""show_artifacts 工具回归（plugins/system-core/tools/artifacts_tool.py）"""
+"""show_artifacts 工具回归（plugins/artifacts-manager/tools/show_artifacts.py）"""
 import sys
 from importlib import import_module
 from pathlib import Path
@@ -8,7 +8,7 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-_mod = import_module("plugins.system-core.tools.artifacts_tool")
+_mod = import_module("plugins.artifacts-manager.tools.show_artifacts")
 
 
 def _ctx(tmp_path):
