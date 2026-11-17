@@ -4,6 +4,7 @@ import platform
 import plistlib
 import subprocess
 import tempfile
+import threading
 import time
 import weakref
 
@@ -25,6 +26,11 @@ class UpdateChecker(QWidget):
     """优化后的更新检查器：保留 InfoBar 交互，适配 Inno Setup EXE"""
     finished = pyqtSignal(object)  # 供外部监听检查结果
     error = pyqtSignal(str)  # 供外部监听错误
+    # 安装线程 → 主线程信号（N2 后台安装链）：安装线程禁碰任何 Qt UI API
+    _install_finished = pyqtSignal()  # 安装完成，请求主线程退出
+    _install_failed = pyqtSignal(str)  # 安装失败，回主线程弹错误条
+    # 退出兜底 join 安装线程的超时（秒），短超时兜底消除半成品安装风险
+    _INSTALL_JOIN_TIMEOUT = 10
     _instance = None
     _initialized = False
 
@@ -53,6 +59,9 @@ class UpdateChecker(QWidget):
         self.progress_dialog = None
         self.download_thread = None
         self.installer_path = None
+        # N2 后台安装链状态（macOS 安装线程句柄与「已启动」标志）
+        self._install_thread = None
+        self._installer_started = False
 
     @classmethod
     def get_instance(cls, parent=None):
@@ -265,7 +274,69 @@ class UpdateChecker(QWidget):
             self.progress_dialog.setValue(100)
             self.progress_dialog.repaint()
 
-        self._run_installer()
+        if platform.system().lower() == "darwin":
+            # N2 性能优化：macOS 安装链含多个同步 subprocess（hdiutil/ditto 全量拷贝
+            # .app 可达数十秒），移入后台线程，主线程零阻塞只管进度条文案。
+            # Windows 保持同步路径（Popen + DETACHED_PROCESS 毫秒级返回，无线程必要）
+            self._start_macos_install()
+        else:
+            self._run_installer()
+
+    def _start_macos_install(self):
+        """启动 macOS 后台安装线程（主线程立即返回，UI 保持响应）
+
+        双实例容忍依据（评审必改④）：单实例锁默认关闭（app/utils/config.py:844
+        EnableSingleInstance 默认 False），装完 quit 与旧进程退出的共存窗口拉长
+        无害；SQLite WAL + config 三方合并（commit c5df538cd）兜底数据一致。
+        """
+        if self._install_thread is not None:
+            # 防重复启动：PyQt 信号 connect 同一 bound method 不去重，重复 start 会双 emit
+            return
+        self._install_finished.connect(self._on_install_finished)
+        self._install_failed.connect(self._on_install_failed)
+        QApplication.instance().aboutToQuit.connect(self._on_about_to_quit_guard)
+        self._installer_started = True
+        self._install_thread = threading.Thread(
+            target=self._macos_install_worker, name="macos-installer", daemon=False
+        )
+        self._install_thread.start()
+
+    def _macos_install_worker(self):
+        """安装线程主体：只碰 subprocess/glob/plistlib/os/time，禁任何 Qt UI API"""
+        try:
+            self._run_macos_upgrade()
+            self._install_finished.emit()
+        except Exception as e:
+            # 评审必改①：错误不在线程内碰 create_errorbar（Qt UI），信号回主线程弹
+            self._install_failed.emit(str(e))
+
+    def _on_install_finished(self):
+        """安装完成（主线程槽）：关进度条，请求退出事件循环"""
+        if self.progress_dialog:
+            self.progress_dialog.close()
+            self.progress_dialog = None
+        QApplication.quit()
+
+    def _on_install_failed(self, msg):
+        """安装失败（主线程槽）：关进度条弹错误条，应用继续运行（与改前等价）"""
+        if self.progress_dialog:
+            self.progress_dialog.close()
+            self.progress_dialog = None
+        self.create_errorbar("启动失败", msg)
+
+    def _on_about_to_quit_guard(self):
+        """事件循环退出兜底（评审必改②）：join 安装线程后仍 os._exit(0)
+
+        不裸删 os._exit：维持「退出尽量快」旧语义，规避 QtWebEngine teardown
+        挂起与双实例窗口拉长；join 短超时兜底消除「硬杀时安装线程还在 ditto
+        拷贝半路留半成品 .app」的风险（超时后仍退出，快语义优先）。
+        """
+        if not self._installer_started:
+            return
+        thread = self._install_thread
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=self._INSTALL_JOIN_TIMEOUT)
+        os._exit(0)
 
     def _run_installer(self):
         """启动安装（Windows 半静默、macOS 自动升级）"""

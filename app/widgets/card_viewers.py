@@ -7910,10 +7910,11 @@ class CodeWebViewer(QWebEngineView):
             return
         if self._streaming and len(text) > 3:
             # 差量渲染：仅在自然边界触发，否则靠增量文本 + 安全兜底
-            # [PERF] 软边界（句号）不再走 immediate —— 中文句号密度极高，
-            # 每命中一次就同步跑一遍 O(tail) 的 markdown 转换，随消息增长呈
-            # O(n²)。改由 _schedule_render 内部的 90ms 短定时器合并（见
-            # _SOFT_BOUNDARY_RENDER_DELAY_MS），硬边界仍保持 immediate。
+            # [PERF] 软边界（句号）不再无条件 immediate —— 中文句号密度极高，
+            # 无脑每句同步跑一遍 O(tail) 的 markdown 转换，会随消息增长呈
+            # O(n²)。实际策略见 _schedule_render：距上次渲染不足合并窗口
+            # （_SOFT_BOUNDARY_MERGE_MS，现为 100ms）才推迟到窗口末尾合并，
+            # 慢速流式（句间隔 ≥100ms）仍 immediate，硬边界始终 immediate。
             # [P0-④] 同拍双扫去重：硬边界判定结果作参数传给 _schedule_render，
             # 非 immediate 帧不再重判（旧逻辑同拍 O(n) rstrip+尾正则跑两遍）。
             hard = self._has_reached_clean_boundary(self._markdown_text)

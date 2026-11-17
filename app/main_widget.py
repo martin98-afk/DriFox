@@ -1151,13 +1151,21 @@ class OpenAIChatToolWindow(ToolWindow):
     _providers_ready = pyqtSignal()
 
     def __init__(self, homepage, source_window=None):
-        # 性能优化：标记是否为复制/分支窗口，必须在 super().__init__() 之前设置，
-        # 因为父类 __init__ 会触发 setup_ui，其中 _update_branch 需要根据此标志
-        # 跳过冗余的 `git branch --show-current` 子进程调用，直接复制源窗口分支状态。
-        # 复制/分支窗口与源窗口共享完全相同的项目与工作目录，git 分支必然一致，
-        # 无需重复执行同步子进程（最坏可达 3s 阻塞主线程，拖慢窗口出现速度）。
+        # 标记是否为复制/分支窗口，必须在 super().__init__() 之前设置：
+        # 父类 __init__ 会触发 setup_ui，其中 _update_branch 需根据此标志
+        # 决定是否直接复制源窗口分支状态。复制/分支窗口与源窗口共享同一
+        # 项目与工作目录，git 分支必然一致，无需重复检测（分支检测已迁
+        # worktree-manager 插件后台化：QThreadPool 后台执行 + 完成后
+        # signal 回主线程刷 UI，见 plugins/worktree-manager/ui/service.py
+        # update_branch，不再阻塞主线程）。
         self._is_duplicate_window = source_window is not None
         self._source_window = source_window
+        # [PERF/N4] dockSplitter 查找缓存 (id(宿主窗口), QSplitter|None)：
+        # resizeEvent 每帧 findChild 全树遍历纯浪费。id(宿主) 键控天然覆盖
+        # Tab 切换/窗口重 parent（宿主变化即重查回填），无需手动失效。
+        # 纯 Python 属性，先于 super().__init__() 设置：setup_ui 期间
+        # resizeEvent 就会被触发，晚初始化会在首帧 AttributeError。
+        self._cached_dock_splitter: tuple = (0, None)
         # 临时对话页标记：页内新建会话不落盘、不进历史，工作目录指向独立临时目录，
         # 关闭时整页目录删除（由 TabManagerWindow.spawn_tab(temp_scope=True) 置位）
         self._is_temp_scope: bool = False
@@ -9732,7 +9740,12 @@ class OpenAIChatToolWindow(ToolWindow):
         if hasattr(self, "chat_scroll_area"):
             target_min_w = 320
             host = self.window()
-            sp = host.findChild(QSplitter, "dockSplitter") if host is not None else None
+            # [PERF/N4] findChild 按宿主缓存：id(宿主) 未变直接复用，变化重查回填。
+            host_id = id(host) if host is not None else 0
+            cached_id, sp = self._cached_dock_splitter
+            if cached_id != host_id:
+                sp = host.findChild(QSplitter, "dockSplitter") if host is not None else None
+                self._cached_dock_splitter = (host_id, sp)
             if sp is not None and sp.count() >= 2:
                 win_w = host.width()
                 dock_min = sp.widget(0).minimumWidth() + sp.handleWidth()

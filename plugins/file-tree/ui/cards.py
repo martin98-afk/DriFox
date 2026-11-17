@@ -47,6 +47,7 @@ from PyQt5.QtWidgets import (
     QMenu,
     QMessageBox,
     QProxyStyle,
+    QSplitter,
     QStackedWidget,
     QStyle,
     QVBoxLayout,
@@ -70,7 +71,14 @@ from .openwith import (
     list_folder_openers,
     list_openers,
 )
-from .preview import FilePreviewPage, _ElidedLabel, _SplitButton, _wrap_icon, detect_kind
+from .preview import (
+    FilePreviewPage,
+    QuickPreviewPanel,
+    _ElidedLabel,
+    _SplitButton,
+    _wrap_icon,
+    detect_kind,
+)
 from .scanner import _DirEntry, _TreeScanner
 from .sticky_scroll import StickyScrollOverlay
 from .tree_widget import (
@@ -463,6 +471,10 @@ class FileTreeCard(QWidget):
         # 主题签名缓存（_apply_latest_theme 产出全等时跳过全部 set，切页高频路径）
         self._theme_signature: Optional[tuple] = None
 
+        # 快捷预览（树下方面板）：按钮开关状态 + 关闭前的分隔高度
+        self._quick_preview_on = False
+        self._quick_sizes: List[int] = []
+
         # 剪贴板: [(路径, 是否剪切)]
         self._clipboard: List[Tuple[str, bool]] = []
 
@@ -552,6 +564,12 @@ class FileTreeCard(QWidget):
         self._root_label = _ElidedLabel("", self._tree_header)
         self._root_label.setMinimumWidth(36)
 
+        # 快捷预览开关（眼睛）：开启后树下方展开面板，随选中项实时预览
+        self._quick_btn = TransparentToolButton(FluentIcon.VIEW, self._tree_header)
+        self._quick_btn.setFixedSize(26, 26)
+        self._quick_btn.setCheckable(True)
+        self._quick_btn.setToolTip("快捷预览：选中文件即在下方预览")
+        self._quick_btn.toggled.connect(self._on_quick_preview_toggled)
         self._refresh_btn = TransparentToolButton(FluentIcon.SYNC, self._tree_header)
         self._refresh_btn.setFixedSize(26, 26)
         self._refresh_btn.setToolTip("刷新文件树")
@@ -565,16 +583,52 @@ class FileTreeCard(QWidget):
         self._folder_btn.menu_clicked.connect(self._show_root_open_with_menu)
 
         head.addWidget(self._root_label, 1)
+        head.addWidget(self._quick_btn)
         head.addWidget(self._refresh_btn)
         head.addWidget(self._folder_btn)
 
         self._scroll_area.setWidget(self._tree_host)
+
+        # ── 树下方快捷预览（可拖拽分隔条调高度，眼睛按钮开关）──
+        self._quick_panel = QuickPreviewPanel(self)
+        self._quick_panel.hide()
+        # 防抖：键盘连续导航时合并加载（单次文本高亮 ~170ms，逐项加载会卡）
+        self._quick_timer = QTimer(self)
+        self._quick_timer.setSingleShot(True)
+        self._quick_timer.setInterval(120)
+        self._quick_timer.timeout.connect(self._load_quick_preview)
+
+        self._split = QSplitter(Qt.Vertical, self)
+        self._split.setObjectName("file-tree-split")
+        self._split.setChildrenCollapsible(False)
+        self._split.setHandleWidth(4)
+        self._split.addWidget(self._stack)
+        self._split.addWidget(self._quick_panel)
+        self._split.setStretchFactor(0, 3)
+        self._split.setStretchFactor(1, 2)
+        self._split.setSizes([600, 260])
+
         self._vbox.addWidget(self._tree_header)
-        self._vbox.addWidget(self._stack, 1)
+        self._vbox.addWidget(self._split, 1)
 
     def _on_page_changed(self, index: int) -> None:
-        """树顶栏只在树/占位页显示：预览页自带顶栏，不重复占一行"""
+        """树顶栏只在树/占位页显示：预览页自带顶栏，不重复占一行
+
+        全屏预览页占满整块区域，快捷面板让位；返回树页时按开关状态恢复，
+        并补一次渲染（预览期间选中项可能已经变了）。
+        """
         self._tree_header.setVisible(index != _PAGE_PREVIEW)
+        panel = getattr(self, "_quick_panel", None)
+        if panel is None:
+            return
+        if index != _PAGE_PREVIEW and self._quick_preview_on:
+            panel.show()
+            self._split.setSizes(self._quick_sizes or [600, 260])
+            self._load_quick_preview()
+        else:
+            if panel.isVisible():
+                self._quick_sizes = self._split.sizes()  # 全屏预览后返回时还原高度
+            panel.hide()
 
     def _setup_model(self):
         """创建 Model → Proxy → View 链路"""
@@ -613,6 +667,8 @@ class FileTreeCard(QWidget):
 
         # RenameDelegate
         self._rename_delegate.rename_requested.connect(self._on_rename_file)
+        # 树选中项变化 → 快捷预览跟随（selectionModel 已在 _setup_model 就位）
+        self._tree_view.selectionModel().currentChanged.connect(self._on_tree_current_changed)
 
     def _setup_shortcuts(self):
         """快捷键已通过 FileTreeView 信号处理（clipboard_copy/cut/paste）"""
@@ -876,13 +932,18 @@ class FileTreeCard(QWidget):
             f"color: {tc_hex}; background: transparent;"
             f"  font-family: '{font_family}'; font-size: {font_size}px;"
         )
+        # 快捷预览分隔条：透明底（面板自带 1px 顶边线），只留可拖拽的手柄空间
+        split_style = (
+            "#file-tree-split { background: transparent; }"
+            "#file-tree-split::handle { background: transparent; }"
+        )
 
         # ★ 签名缓存：产出（全部样式串 + 字体）与上次全等时跳过所有 set。
         # 切工作台页 / 项目联动高频走这里，对整棵 QTreeView 重复
         # setStyleSheet + setFont 会触发整树 unpolish/polish + 全量重绘
         # （树 2000+ 行时单次 40-130ms，实测），而主题 / 字体 / 颜色未变时
         # 产出必然不变 —— 跳过后切页路径零成本。
-        signature = (tree_style, placeholder_style, header_style, root_style, font_family, font_size)
+        signature = (tree_style, placeholder_style, header_style, root_style, split_style, font_family, font_size)
         if signature == self._theme_signature:
             return
         self._theme_signature = signature
@@ -892,6 +953,11 @@ class FileTreeCard(QWidget):
         self._root_label.setStyleSheet(root_style)
         secondary = self._colors.get("text_secondary", QColor(150, 150, 150))
         self._refresh_btn.setIcon(FluentIcon.SYNC.icon(color=secondary))
+        self._quick_btn.setIcon(
+            FluentIcon.VIEW.icon(
+                color=self._colors["accent"] if self._quick_preview_on else secondary
+            )
+        )
         # 主图标与刷新钮同口径显式带色：icon() 无 color 时按 qfluentwidgets
         # isDarkTheme() 翻转，深色模式下翻转未命中 → 图标仍是黑色
         self._folder_btn.set_icon(FluentIcon.FOLDER.icon(color=secondary))
@@ -909,11 +975,18 @@ class FileTreeCard(QWidget):
         self._placeholder.setStyleSheet(placeholder_style)
         self._ph_page.setStyleSheet("background: transparent;")
         self._stack.setStyleSheet("background: transparent;")
+        self._split.setStyleSheet(split_style)
 
         # 通知 delegate 更新主题色
         self._rename_delegate.set_colors(self._colors)
         self._sticky.apply_colors(self._colors)
         self._preview_page.set_colors(
+            self._colors,
+            font_family=font_family,
+            font_size=font_size,
+            scrollbar_qss=scrollbar_style,
+        )
+        self._quick_panel.set_colors(
             self._colors,
             font_family=font_family,
             font_size=font_size,
@@ -1094,6 +1167,9 @@ class FileTreeCard(QWidget):
             self._live_expanded.clear()  # 旧根的实时展开路径不写进新根条目
             self._stash_view_state(model_root)  # 必须先存：reset 后旧状态已不可取
             self._source_model.set_project(scan_dir, entries)
+            # 换根：旧根的预览内容不再属于当前上下文（同根刷新保留）
+            self._quick_timer.stop()
+            self._quick_panel.clear()
             cached = self._view_state_cache.get(os.path.normcase(os.path.normpath(scan_dir)))
             if cached:
                 self._restore_view_state(cached)
@@ -1210,6 +1286,8 @@ class FileTreeCard(QWidget):
                 self._stack.setCurrentIndex(1)
         else:
             self._source_model.refresh_children(dir_path, entries)
+        # 磁盘变更后，当前预览的正是该目录下的文件则重读，保持内容与磁盘一致
+        self._refresh_quick_preview_for_dir(dir_path)
 
     # ── 剪贴板操作 ──
 
@@ -2104,6 +2182,66 @@ class FileTreeCard(QWidget):
         # 返回树页时补一次外部投递定位：用户可能在根扫描落地前就点了返回，
         # 那次定位因节点尚不存在被跳过，这里立刻接上（无待办时为零操作）
         self._advance_pending_reveal()
+
+    # ── 快捷预览（树下方常驻面板） ──
+
+    def _on_quick_preview_toggled(self, checked: bool) -> None:
+        """眼睛按钮：展开 / 收起树下方快捷预览面板"""
+        self._quick_preview_on = bool(checked)
+        secondary = self._colors.get("text_secondary", QColor(150, 150, 150))
+        self._quick_btn.setIcon(
+            FluentIcon.VIEW.icon(
+                color=self._colors.get("accent", QColor(80, 150, 220)) if checked else secondary
+            )
+        )
+        if not checked:
+            self._quick_timer.stop()
+            if self._quick_panel.isVisible():
+                self._quick_sizes = self._split.sizes()  # 记住用户拖过的高度
+            self._quick_panel.hide()
+            return
+        self._quick_panel.show()
+        self._split.setSizes(self._quick_sizes or [600, 260])
+        self._load_quick_preview()
+
+    def _on_tree_current_changed(self, current: QModelIndex, previous: QModelIndex) -> None:
+        """树选中项变化 → 防抖刷新快捷预览（连按方向键只加载最后一屏）"""
+        if not self._quick_preview_on or not self._quick_panel.isVisible():
+            return
+        if not current.isValid():
+            return  # 树刷新导致选中暂时失效：保留上一屏，避免闪烁
+        self._quick_timer.start()
+
+    def _selected_tree_path(self) -> Tuple[str, bool]:
+        """当前选中项 → (路径, 是否目录)；无有效选中返回 ("", False)"""
+        idx = self._tree_view.currentIndex()
+        if not idx.isValid():
+            return "", False
+        src = self._proxy_model.mapToSource(idx)
+        if not src.isValid():
+            return "", False
+        return src.data(FileTreeModel.COL_PATH) or "", bool(src.data(FileTreeModel.COL_IS_DIR))
+
+    def _load_quick_preview(self) -> None:
+        """按当前选中项渲染快捷预览（目录/不支持类型给一行说明）"""
+        if not self._quick_preview_on:
+            return
+        self._quick_timer.stop()
+        path, is_dir = self._selected_tree_path()
+        if not path:
+            self._quick_panel.show_hint("选中文件即可在此预览")
+        elif is_dir:
+            self._quick_panel.show_hint("选中项是文件夹")
+        else:
+            self._quick_panel.show_path(path)
+
+    def _refresh_quick_preview_for_dir(self, dir_path: str) -> None:
+        """目录内容变化后，当前预览文件在该目录内则重读"""
+        path = self._quick_panel.current_path()
+        if not path or not os.path.isfile(path):
+            return
+        if _same_path(os.path.dirname(path), dir_path):
+            self._quick_panel.show_path(path)
 
     def _on_file_activated(self, path: str) -> None:
         """双击分流：可预览类型进预览，其余仍交系统默认程序"""

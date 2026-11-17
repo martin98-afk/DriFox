@@ -318,6 +318,13 @@ class MessageCard(SimpleCardWidget):
     # 不重置），若用「首字至今」当分母，10s 工具会把实时 tps 稀释到 1/10。
     _LIVE_GAP_CAP_S = 2.0
 
+    # N8 footer provider 软超时护栏参数：EMA 记每 provider 最近耗时，
+    # 连续 3 拍超过 50ms 则拉黑该 stat_id（provider 必须主线程跑，
+    # 无法真超时，改跳过策略；清零点见 stat_key 变化与 cleanup）
+    _FOOTER_SLOW_COST_MS = 50.0
+    _FOOTER_SLOW_STREAK_LIMIT = 3
+    _FOOTER_SLOW_EMA_ALPHA = 0.5
+
     @property
     def _renderer_pid(self) -> int:
         """renderer 进程 PID（转发 viewer；B4 强回收链路读 card._renderer_pid）。
@@ -425,6 +432,11 @@ class MessageCard(SimpleCardWidget):
         # （见 _refresh_footer_stats，按 stat_id 序列 tuple 作 key 比对）
         self._footer_stats_key: Optional[tuple] = None
         self._footer_stats_info: Dict[str, Any] = {}
+        # N8 footer provider 健康跟踪：EMA 最近耗时 / 连续慢拍计数 / 拉黑集合
+        # （连续 3 拍 EMA>50ms 拉黑，本会话不再调用；清零点：stat_key 变化与 cleanup）
+        self._footer_provider_cost_ema: Dict[str, float] = {}
+        self._footer_provider_slow_streak: Dict[str, int] = {}
+        self._footer_provider_blocked: set = set()
         # 耗时实时计时器
         self._elapsed_timer = QTimer(self)
         self._elapsed_timer.timeout.connect(self._update_elapsed_display)
@@ -1283,16 +1295,48 @@ class MessageCard(SimpleCardWidget):
         if stat_key != self._footer_stats_key:
             self._footer_stats_key = stat_key
             self._footer_stats_info = {i.stat_id: i for i in stat_list}
+            # N8 插件重载/注册变更：健康状态（EMA/连拍/拉黑）从头观察，
+            # 避免重载后的新 provider 实现被旧耗时记录误杀。
+            self._footer_provider_cost_ema.clear()
+            self._footer_provider_slow_streak.clear()
+            self._footer_provider_blocked.clear()
         infos = self._footer_stats_info
         ctx = self._footer_stat_context(streaming=streaming, elapsed=elapsed, token_usage=token_usage)
         for stat_id, label in self._footer_stat_labels.items():
             try:
+                if stat_id in self._footer_provider_blocked:
+                    # N8 已拉黑：本会话不再调用该 provider，label 维持空隐藏
+                    continue
                 info = infos.get(stat_id)
                 text = ""
                 if info is not None:
                     val = None
                     try:
+                        # N8 软超时护栏：provider 必须主线程跑、无法真超时，
+                        # 改跳过策略——EMA 平滑最近耗时，连续 3 拍 EMA>50ms
+                        # 则拉黑本会话不再调用（label 置空 + tooltip 说明）。
+                        t0 = time.perf_counter()
                         val = info.provider(ctx)
+                        cost_ms = (time.perf_counter() - t0) * 1000.0
+                        prev_ema = self._footer_provider_cost_ema.get(stat_id)
+                        ema = (
+                            cost_ms
+                            if prev_ema is None
+                            else self._FOOTER_SLOW_EMA_ALPHA * cost_ms
+                            + (1.0 - self._FOOTER_SLOW_EMA_ALPHA) * prev_ema
+                        )
+                        self._footer_provider_cost_ema[stat_id] = ema
+                        if ema > self._FOOTER_SLOW_COST_MS:
+                            streak = self._footer_provider_slow_streak.get(stat_id, 0) + 1
+                            self._footer_provider_slow_streak[stat_id] = streak
+                            if streak >= self._FOOTER_SLOW_STREAK_LIMIT:
+                                self._footer_provider_blocked.add(stat_id)
+                                label.setText("")
+                                label.setToolTip("该信息项已停用（响应过慢）")
+                                label.setVisible(False)
+                                continue
+                        else:
+                            self._footer_provider_slow_streak[stat_id] = 0
                     except Exception as e:
                         logger.warning(f"[MessageCard] footer_stat {stat_id} provider 失败: {e}")
                     if val:
@@ -6498,6 +6542,10 @@ class MessageCard(SimpleCardWidget):
         清理 MessageCard 持有的资源，防止内存泄漏。
         应该在删除卡片前调用，或者在 closeEvent 中自动调用。
         """
+        # N8：footer provider 健康状态随会话结束/卡片销毁清零
+        self._footer_provider_cost_ema.clear()
+        self._footer_provider_slow_streak.clear()
+        self._footer_provider_blocked.clear()
         # 停止所有定时器
         timers_to_stop = [
             self._anim_timer,

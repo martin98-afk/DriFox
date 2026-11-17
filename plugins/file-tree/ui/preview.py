@@ -838,6 +838,10 @@ class FilePreviewPage(QWidget):
         }.get(skipped, "")
         return "；".join(part for part in (base, extra) if part)
 
+    def set_header_visible(self, visible: bool) -> None:
+        """显示/隐藏顶栏（快捷预览面板只复用内容区，顶栏由树页承担）"""
+        self._header.setVisible(bool(visible))
+
     def reload_current(self) -> bool:
         """文件被外部修改后重读（卡片刷新按钮在预览态走这里）"""
         if not self._path or not os.path.isfile(self._path):
@@ -1306,3 +1310,104 @@ class FilePreviewPage(QWidget):
     def _show_message(self, text: str) -> None:
         self._msg_label.setText(text)
         self._content.setCurrentIndex(2)
+
+
+class QuickPreviewPanel(QWidget):
+    """树页下方的快捷预览面板（无顶栏，随树选中项切换内容）
+
+    复用 ``FilePreviewPage`` 的渲染链路（文本高亮 / 图片自适应缩放 / markdown），
+    自身不持有选中状态：由卡片在选中变化时投递路径，面板只负责渲染与提示。
+    """
+
+    def __init__(self, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self.setObjectName("file-tree-quick-preview")
+        self.setAttribute(Qt.WA_StyledBackground, True)
+        self.setMinimumHeight(96)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        self._page = FilePreviewPage(self)
+        # 顶栏在快捷预览里没有意义（返回 / 打开方式 / 视图开关都属于全屏预览页）
+        self._page.set_header_visible(False)
+
+        self._tip = QLabel("", self)
+        self._tip.setObjectName("file-tree-quick-tip")
+        self._tip.setAlignment(Qt.AlignCenter)
+        self._tip.setWordWrap(True)
+
+        self._stack = QStackedWidget(self)
+        self._stack.addWidget(self._page)  # 0: 内容
+        self._stack.addWidget(self._tip)  # 1: 提示
+        layout.addWidget(self._stack, 1)
+
+        self._path = ""
+
+    # ── 公开接口 ──
+
+    def current_path(self) -> str:
+        return self._path
+
+    def show_path(self, path: str) -> bool:
+        """载入并显示文件内容；返回是否成功（失败原因由内容区自解释）"""
+        self._path = path or ""
+        if not self._path:
+            self.show_hint("未选择文件")
+            return False
+        if not detect_kind(self._path):
+            self.show_hint("该文件类型不支持预览，双击可用系统程序打开")
+            return False
+        self._stack.setCurrentIndex(0)
+        ok = self._page.load(self._path)
+        if not ok:
+            self._path = ""  # 读失败（超大/损坏/二进制）：不留下过期路径
+        return ok
+
+    def show_hint(self, text: str) -> None:
+        self._path = ""
+        self._tip.setText(text or "")
+        self._stack.setCurrentIndex(1)
+
+    def clear(self) -> None:
+        self.show_hint("")
+
+    def reload_if_current(self, path: str) -> None:
+        """文件被外部修改后重读（当前预览的正是它才动作）"""
+        current = self._path
+        if not current or not path:
+            return
+        if os.path.normcase(os.path.normpath(path)) != os.path.normcase(
+            os.path.normpath(current)
+        ):
+            return
+        self.show_path(current)
+
+    def set_colors(
+        self,
+        colors: dict,
+        font_family: str = "",
+        font_size: int = 0,
+        scrollbar_qss: str = "",
+    ) -> None:
+        """应用卡片主题色（内容区转发给预览页，面板自身只画顶部分隔线）"""
+        colors = colors or {}
+        self._page.set_colors(
+            colors,
+            font_family=font_family,
+            font_size=font_size,
+            scrollbar_qss=scrollbar_qss,
+        )
+        family = font_family or colors.get("font_family", "Microsoft YaHei")
+        size = int(font_size or colors.get("font_size", 14))
+        border = colors.get("border", QColor(255, 255, 255, 30))
+        secondary = colors.get("text_secondary", QColor(150, 150, 150))
+        self.setStyleSheet(
+            f"#file-tree-quick-preview {{ background: transparent;"
+            f"  border-top: 1px solid rgba({border.red()},{border.green()},{border.blue()},90); }}"
+        )
+        self._tip.setStyleSheet(
+            f"#file-tree-quick-tip {{ color: {secondary.name()}; background: transparent;"
+            f"  font-family: '{family}'; font-size: {size}px; }}"
+        )

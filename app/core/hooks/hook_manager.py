@@ -559,6 +559,22 @@ class HookMatchRule:
     def __post_init__(self):
         if self.hooks is None:
             self.hooks = []
+        # 正则预编译（N3 性能优化）：坏正则在加载期即暴露（warning + 置 None），
+        # 匹配期不再逐次 try/except。工具名匹配走大小写不敏感版本
+        # （compiled.match 第二参数是 pos 而非 flags，IGNORECASE 必须编进 pattern）
+        self._compiled = None
+        self._compiled_ic = None
+        if self.matcher:
+            try:
+                self._compiled = re.compile(self.matcher)
+                self._compiled_ic = re.compile(self.matcher, re.IGNORECASE)
+            except re.error as e:
+                self._compiled = None
+                self._compiled_ic = None
+                logger.warning(
+                    f"[HookMatchRule] 正则编译失败，该规则不参与正则匹配: "
+                    f"skill={self.skill_name!r} matcher={self.matcher!r} error={e}"
+                )
 
     def matches(self, context: Dict[str, Any]) -> bool:
         """检查规则是否匹配当前上下文"""
@@ -628,35 +644,33 @@ class HookMatchRule:
 
             return ToolNameMapper.to_native(pattern) == ToolNameMapper.to_native(actual)
 
+        # 正则匹配段：matcher 为坏正则时 _compiled 为 None，直接早退 False
+        # （与改前三连 try/except re.error → return False 行为等价）
+        if self._compiled is None:
+            return False
+
         # 正则匹配用户消息
         message = context.get("message", "")
-        try:
-            if re.match(self.matcher, message):
-                return True
-        except re.error:
-            pass
+        if self._compiled.match(message):
+            return True
 
         # 对于 PostAssistantMessage/Stop 等事件，也尝试匹配 assistant 回复内容
         # context["response"] 是 DriFoxx 自有格式，context["assistant_response"] 是 Claude Code 兼容格式
         # 两个字段通常指向同一内容，取第一个非空值即可
         resp_text = context.get("assistant_response") or context.get("response", "")
         if resp_text:
-            try:
-                if re.match(self.matcher, resp_text):
-                    return True
-            except re.error:
-                pass
+            # 超长护栏：64KB 截断，仅防 DoS 级超长回复拖垮匹配，正常回复永不触发
+            resp_text = resp_text[:65536]
+            if self._compiled.match(resp_text):
+                return True
 
         # 对于工具相关事件，也尝试匹配工具名（大小写不敏感）
         # 这样 "Write|Edit" 这样的 matcher 可以直接匹配工具名
         if event_name in ("PreToolUse", "PostToolUse"):
             tool_name = context.get("tool_name", "")
             if tool_name:
-                try:
-                    if re.match(self.matcher, tool_name, re.IGNORECASE):
-                        return True
-                except re.error:
-                    pass
+                if self._compiled_ic.match(tool_name):
+                    return True
 
         return False
 

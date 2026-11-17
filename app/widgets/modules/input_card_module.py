@@ -36,8 +36,6 @@ class InputCardModule(UIModule):
         from app.utils.design_tokens import scale_font_size
         from app.widgets.bottom_input_area import SendableTextEdit
         from app.widgets.cards import ContainerType
-        from app.widgets.cards.floating.command_card import CommandCard
-        from app.widgets.cards.floating.file_mention_card import FileMentionCard
         from app.widgets.cards.floating.undo_delete_card import UndoDeleteCard
         from app.widgets.cards.floating.undo_delete_store import UndoDeleteStore
         from app.widgets.flow_layout import FlowLayout
@@ -139,47 +137,84 @@ class InputCardModule(UIModule):
         # 加载输入历史
         host._load_input_history()
 
-        # 命令卡片（必须是输入框创建后）
-        host._command_card = CommandCard(host._bottom_input_container, host=host)
-        host._command_card.setVisible(False)
-        host.input_area.set_command_card(host._command_card)
-        mgr = host._card_manager
-        # 命令卡片：注册到 L1 补全容器（ContainerType.COMPLETION），不再与
-        # BOTTOM 里的状态卡/系统卡同桶 —— 这是"命令卡参数态与排队卡抢高度、
-        # 排队卡被压在参数行上"的结构性修复（见 card_manager.ContainerType 注释）。
-        # 注：不再压制 sub_agent_compact —— L2 状态层（子智能体/排队/撤销）表达的是
-        # "系统正在发生的事"，与输入补全语义正交；压制它会让"子智能体运行中打 /"
-        # 之后状态卡再也不回来（CardManager 有压制声明但无恢复栈）。
-        mgr.register_card(
-            host._window_id,
-            ContainerType.COMPLETION,
-            "command",
-            host._command_card,
-            suppress_others=["tool", "sub_agent"],
-            layer="completion",
-        )
-        host._completion_container.add_card("command", host._command_card)
+        # 命令卡片 / 文件提及卡片（P1-1 懒实例化）：两卡合计数千行组件
+        # （CommandCard ~3253 行 / FileMentionCard ~2330 行，含 QFileSystemWatcher
+        # + 后台扫描线程），构造段同步创建估 50-150ms，占首帧关键路径。
+        # 改为延迟装配（_install_lazy_cards，singleShot 50ms 错开 critical 批次）：
+        # - 构造段零实例化、零 import（两卡模块的 import 级联也随装配延迟）；
+        # - 装配完成前属性不存在：main_widget 全部消费点为 `if not hasattr(...): return`
+        #   守卫（:7365/:7448/:7475 等）安全跳过；input_area._get_card()/_get_file_mention_card()
+        #   返回 None 且消费点判空（bottom_input_area.py:547/:714）；主题/插件侧
+        #   getattr(card, None) 同样安全 → 窗口期内 slash/@ 菜单暂不可用，无崩溃路径
+        #   （用户最早输入 / 至少数百 ms 后，无感知）。
+        # - 装配完成后属性/注册/信号拓扑与原同步版完全一致（见 _install_lazy_cards）。
+        # 注意：不能用「属性置 None」语义 —— main_widget 守卫是 hasattr 而非判空，
+        # None 会在 :7370 self._command_card.show_card(...) 处 AttributeError。
+        def _install_lazy_cards():
+            """延迟装配命令卡与文件提及卡（P1-1）。
 
-        # 文件提及卡片（输入 @ 时显示文件列表）
-        host._file_mention_card = FileMentionCard(host._bottom_input_container)
-        host._file_mention_card.setVisible(False)
-        host.input_area.set_file_mention_card(host._file_mention_card)
-        host._file_mention_card.fileSelected.connect(host._on_file_mention_selected)
-        host._file_mention_card.mentionSelected.connect(host._on_mention_selected)
-        host._file_mention_card.sessionSelected.connect(host._on_session_selected)
-        mgr.register_card(
-            host._window_id,
-            ContainerType.COMPLETION,
-            "file_mention",
-            host._file_mention_card,
-            layer="completion",
-        )
-        host._completion_container.add_card("file_mention", host._file_mention_card)
+            挂到 host 供测试同步触发（tests/plugins/test_input_card_module.py）。
+            host 已销毁时静默跳过（启动后立即关窗的窗口期）。
+            """
+            try:
+                import sip
+
+                if sip.isdeleted(host):
+                    return
+            except Exception:
+                pass
+            if getattr(host, "_is_destroyed", False):
+                return
+            from app.widgets.cards.floating.command_card import CommandCard
+            from app.widgets.cards.floating.file_mention_card import FileMentionCard
+
+            mgr = host._card_manager
+            # 命令卡片（必须是输入框创建后）
+            host._command_card = CommandCard(host._bottom_input_container, host=host)
+            host._command_card.setVisible(False)
+            host.input_area.set_command_card(host._command_card)
+            # 命令卡片：注册到 L1 补全容器（ContainerType.COMPLETION），不再与
+            # BOTTOM 里的状态卡/系统卡同桶 —— 这是"命令卡参数态与排队卡抢高度、
+            # 排队卡被压在参数行上"的结构性修复（见 card_manager.ContainerType 注释）。
+            # 注：不再压制 sub_agent_compact —— L2 状态层（子智能体/排队/撤销）表达的是
+            # "系统正在发生的事"，与输入补全语义正交；压制它会让"子智能体运行中打 /"
+            # 之后状态卡再也不回来（CardManager 有压制声明但无恢复栈）。
+            mgr.register_card(
+                host._window_id,
+                ContainerType.COMPLETION,
+                "command",
+                host._command_card,
+                suppress_others=["tool", "sub_agent"],
+                layer="completion",
+            )
+            host._completion_container.add_card("command", host._command_card)
+
+            # 文件提及卡片（输入 @ 时显示文件列表）
+            host._file_mention_card = FileMentionCard(host._bottom_input_container)
+            host._file_mention_card.setVisible(False)
+            host.input_area.set_file_mention_card(host._file_mention_card)
+            host._file_mention_card.fileSelected.connect(host._on_file_mention_selected)
+            host._file_mention_card.mentionSelected.connect(host._on_mention_selected)
+            host._file_mention_card.sessionSelected.connect(host._on_session_selected)
+            mgr.register_card(
+                host._window_id,
+                ContainerType.COMPLETION,
+                "file_mention",
+                host._file_mention_card,
+                layer="completion",
+            )
+            host._completion_container.add_card("file_mention", host._file_mention_card)
+
+        host._install_lazy_cards = _install_lazy_cards
+        # 50ms：错开启动 critical 批次（会话创建等 0ms 任务），早于 200ms 的
+        # _ensure_file_mention_cache（装配先于预缓存，顺序不变）。
+        QTimer.singleShot(50, _install_lazy_cards)
 
         # 预缓存文件列表：延迟到事件循环空闲后执行，不阻塞 UI 初始化
         QTimer.singleShot(200, host._ensure_file_mention_cache)
 
         # 撤销删除卡片
+        mgr = host._card_manager
         host._undo_delete_card = UndoDeleteCard(host._bottom_input_container)
         host._undo_delete_card.setVisible(False)
         host._undo_delete_card.restoreRequested.connect(host._restore_deleted_message)
