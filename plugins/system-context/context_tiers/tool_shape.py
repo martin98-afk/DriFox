@@ -24,7 +24,7 @@ import re
 from typing import Any, Dict, List
 
 from app.plugins.contracts.context_policy import ALL_STAGES, CACHE_NONE, TierOutcome
-from app.plugins.sdk import cfg_int, count_messages_tokens
+from app.plugins.sdk import cfg_int
 
 # 触发骨架化的 JSON 正文长度（字符）
 _DEFAULT_MAX_CHARS = 8000
@@ -132,11 +132,8 @@ class ToolResultShapeTier:
             result.append(m)
         if changed == 0:
             return TierOutcome(messages=list(view.messages), saved_tokens=0, note="无超长 JSON")
-        try:
-            saved = max(0, view.used_tokens - count_messages_tokens(result))
-        except Exception:
-            saved = 0
-        return TierOutcome(messages=result, saved_tokens=saved, note=f"骨架化 {changed} 条 JSON 结果")
+        # [#R6] saved 由 pipeline 统一增量计（同 tool_prune），不再全量 count。
+        return TierOutcome(messages=result, saved_tokens=0, note=f"骨架化 {changed} 条 JSON 结果")
 
 
 def register(registry):

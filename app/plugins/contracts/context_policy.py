@@ -41,6 +41,10 @@ class TierOutcome:
     """tier.apply 的返回。
 
     messages 必须是新列表（tier 不得原地修改 view.messages）。
+    saved_tokens：[#R6] 起不再采信 tier 自报 —— pipeline 统一用 view 前后
+    两次 #I3 增量刷新差值计（O(changed)）；tier 侧全量
+    count_messages_tokens(result) 整表遍历已删，字段保留默认 0 仅为
+    dataclass 兼容。幂等判定同口径：saved_tokens == 0 由 pipeline 得出。
     """
 
     messages: List[Dict[str, Any]]

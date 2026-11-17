@@ -18,7 +18,6 @@ import re
 from typing import Any, Dict, List
 
 from app.plugins.contracts.context_policy import ALL_STAGES, CACHE_NONE, TierOutcome
-from app.plugins.sdk import count_messages_tokens
 
 # 只处理长内容：短结果清洗收益低，复制开销反而显眼
 _MIN_LEN = 1024
@@ -82,11 +81,8 @@ class ToolNormalizeTier:
             result.append(m)
         if changed == 0:
             return TierOutcome(messages=list(view.messages), saved_tokens=0, note="无需规范化")
-        try:
-            saved = max(0, view.used_tokens - count_messages_tokens(result))
-        except Exception:
-            saved = 0
-        return TierOutcome(messages=result, saved_tokens=saved, note=f"规范化 {changed} 条工具结果")
+        # [#R6] saved 由 pipeline 统一增量计（同 tool_prune），不再全量 count。
+        return TierOutcome(messages=result, saved_tokens=0, note=f"规范化 {changed} 条工具结果")
 
 
 def register(registry):
