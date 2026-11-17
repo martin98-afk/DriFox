@@ -1209,7 +1209,6 @@ class TabItem(QFrame):
             self._confirming_close = True
             self._close_btn.setIcon(QIcon())  # 清除图标，文字占位
             self._close_btn.setText("确认关闭")
-            self._close_btn.setFixedSize(64, 20)
             # ⚠️ 必须显式透明背景 + TextOnly：局部 stylesheet 会覆盖 qfluentwidgets
             # 全局样式（原背景半透明白），若只设 color 则 Qt 回退默认深色底 → 全黑；
             # 且 ToolButton 默认 IconOnly 不绘制 setText 文字。
@@ -1219,6 +1218,11 @@ class TabItem(QFrame):
                 f"color: #f85149; font-weight: 600; {get_font_family_css()} {font_size_css(11)} "
                 "}"
             )
+            # 宽度按确认态字体度量：字号随配置档缩放（11 基准 + delta，大字号档
+            # 可到 17px），固定 64px 放不下四个字 → Qt elide 成「确...闭」。
+            # fontMetrics 须在 setStyleSheet 之后取（polish 后才反映确认态字体）。
+            text_w = self._close_btn.fontMetrics().horizontalAdvance("确认关闭")
+            self._close_btn.setFixedSize(max(64, text_w + 12), 20)
             self._close_btn.setToolTip("正在对话，再次点击确认关闭，3秒后自动取消")
             self._close_timer.start()
         else:
