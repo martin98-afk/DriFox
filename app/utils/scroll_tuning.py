@@ -73,14 +73,18 @@ def _switch_to_native_bar(area: QAbstractScrollArea) -> bool:
         True = 已换；False = 不是 qfw 滚动区（原生 QScrollArea 无需处理）。
     """
     dele = getattr(area, "scrollDelagate", None)
-    if dele is None:
+    # [#I6] qfw ScrollArea 的自绘条挂在 delegate 上；SingleDirectionScrollArea
+    # （聊天区在用）没有 delegate，SmoothScrollBar 直挂 area 自身属性——
+    # 只认 delegate 会让聊天区的 native_scrollbar=True 退化成空操作。
+    holder = dele if dele is not None else area
+    if getattr(holder, "vScrollBar", None) is None and getattr(holder, "hScrollBar", None) is None:
         return False
     from PyQt5.QtWidgets import QAbstractScrollArea as _QASA
     from PyQt5.QtWidgets import QScrollBar
 
-    # ① 隐藏悬浮条（不删：delegate 的 eventFilter 仍会读它，删了会悬空引用）
+    # ① 隐藏悬浮条（不删：delegate / SmoothScroll 引擎仍会读它，删了会悬空引用）
     for name in _QFW_BAR_ATTRS:
-        bar = getattr(dele, name, None)
+        bar = getattr(holder, name, None)
         if bar is not None:
             try:
                 bar.hide()
