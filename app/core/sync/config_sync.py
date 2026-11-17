@@ -292,6 +292,9 @@ class ConfigSyncService(QObject):
     syncDone = pyqtSignal(bool, str)  # success, message
     _configChanged = pyqtSignal()  # 文件变更通知（watch 线程 → 主线程）
     _reloadSettings = pyqtSignal()  # 请求在主线程重新加载 Settings（后台线程 → 主线程）
+    # save 写盘保护兜底窗口（ms）：置保护后超过此时长仍未被重载链 finally
+    # 复位，则由主线程 QTimer 强制解除。类属性便于测试注入短窗口。
+    SUPPRESSION_FAILSAFE_MS = 60_000
     # 云端配置已在主线程全部写回 ConfigItem 内存后发射（syncDone 之前）。
     # 供窗口级 UI（如模型选择按钮）按云端值做一次性刷新，避免依赖
     # valueChanged（llm_selected_model 无监听器）而错过更新。
@@ -2349,6 +2352,12 @@ class ConfigSyncService(QObject):
                 self._save_base_config(json.loads(content.decode("utf-8")))
             except Exception:
                 pass
+            # 上传冲突链的合并与下载链不同：没有「下载尾部统一 emit」的收尾，
+            # 置起的 save 保护（_apply_config_merge 内）只能依赖兜底解除，且
+            # 内存（本机旧值）/磁盘（合并结果）不一致窗口无界。此处 emit 桥接
+            # 主线程重载 → 内存对齐 + finally 复位；回传由 _pause_after_merge
+            # 的 20s 抑制窗口兜住，不会即时回传远端。
+            self._reloadSettings.emit()
         self._flush_conflict_archive(client)
         self._set_cached_remote_sha(unit, sha)
         self._save_sha_cache()
@@ -2753,12 +2762,14 @@ class ConfigSyncService(QObject):
 
             _inst = _S.get_instance()
             _inst._suppress_save_reason = "sync-merge-pending-reload"
+            _inst._suppress_since = time.monotonic()
             # 兜底解除：重载信号依赖主线程事件循环，若窗口在此期间被销毁或
             # 重载抛异常未能走到 finally，保护会永久生效导致所有 save 失效。
-            # 60s 后无条件清一次（正常路径早已在重载末尾清空，此处是幂等空操作）。
-            from PyQt5.QtCore import QTimer as _QT
-
-            _QT.singleShot(60000, self._release_save_suppression)
+            # SUPPRESSION_FAILSAFE_MS 后无条件清一次（正常路径早已在重载末尾
+            # 清空，此处是幂等空操作）。⚠️ 不能直接 QTimer.singleShot：本方法
+            # 跑在 daemon 同步线程上，无事件循环线程上投递静默丢失（同
+            # plugin_host_service 2026-10-29 市场更新事故机制），必须先投主线程。
+            self._arm_suppression_failsafe()
         except Exception as e:
             logger.debug(f"[ConfigSync] 置起合并写盘保护失败: {e}")
         # 记账器与合并结果对齐：上传时 _flush_sync_meta 用它的条目表覆盖磁盘
@@ -3385,17 +3396,62 @@ class ConfigSyncService(QObject):
             logger.error(f"[ConfigSync] {tag} 下载异常: {e}")
             return False
 
+    def _arm_suppression_failsafe(self) -> None:
+        """save 保护兜底：投递主线程排 QTimer（daemon 线程上 QTimer 静默丢失）。
+
+        旧实现在 daemon 同步线程上直接 ``QTimer.singleShot``——无事件循环线程
+        上投递既不报错也不触发（同 plugin_host_service 2026-10-29 市场更新事故
+        机制），兜底从未生效：下载链错过重载链 finally、上传冲突链全程无复位
+        时，保护即永久置位，所有 Settings.save() 静默丢弃。现改为先投主线程
+        （run_on_main_thread 信号桥），再由主线程 QTimer 按窗口驱动，保证回调
+        真实执行；投递桥不可用（无 QApplication）时记 WARNING 降级，该场景
+        进程本就不在运行期，残留不构成危害。
+        """
+        from app.core.services.plugin_host_service import run_on_main_thread
+
+        def _arm_on_main() -> None:
+            from PyQt5.QtCore import QTimer
+
+            QTimer.singleShot(self.SUPPRESSION_FAILSAFE_MS, self._release_save_suppression)
+
+        if not run_on_main_thread(_arm_on_main):
+            logger.warning(
+                "[ConfigSync] save 保护兜底投递失败（无 QApplication/桥未预热），"
+                "只能依赖重载链 finally 复位"
+            )
+
     def _release_save_suppression(self) -> None:
-        """解除合并期间的写盘保护（幂等，正常路径与超时兜底都调用）"""
+        """解除合并期间的写盘保护（幂等，正常路径与超时兜底都调用）。
+
+        置位时长超兜底窗口（SUPPRESSION_FAILSAFE_MS）才解除说明重载链异常
+        迟滞（或此前版本兜底失效残留），升级 WARNING 供观测；正常路径（重载链
+        finally）应在数秒内复位，INFO 记录。
+        """
         try:
             from app.utils.config import Settings as _S
 
             inst = _S.get_instance()
         except Exception:
             return
+        since = getattr(inst, "_suppress_since", None)
+        elapsed = None
+        if since is not None:
+            try:
+                elapsed = time.monotonic() - float(since)
+            except (TypeError, ValueError):
+                elapsed = None
+            inst._suppress_since = None
         if getattr(inst, "_suppress_save_reason", "") == "sync-merge-pending-reload":
             inst._suppress_save_reason = ""
-            logger.debug("[ConfigSync] 合并写盘保护已解除")
+            if elapsed is None:
+                logger.info("[ConfigSync] 合并写盘保护已解除")
+            elif elapsed > self.SUPPRESSION_FAILSAFE_MS / 1000:
+                logger.warning(
+                    f"[ConfigSync] 合并写盘保护置位 {elapsed:.0f}s 才解除（超兜底窗口，"
+                    "重载链可能未走 finally）"
+                )
+            else:
+                logger.info(f"[ConfigSync] 合并写盘保护已解除（置位 {elapsed:.1f}s）")
 
     def _download_user_custom_merge(self) -> bool:
         """拉远端 user-custom zip → 三方合并到本地目录。
