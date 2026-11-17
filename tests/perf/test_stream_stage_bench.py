@@ -231,9 +231,9 @@ def _run_one_round(round_idx: int, payload: str) -> dict:
     _orig_parse = mbv.parse_blocks
     _orig_align = mbv.reconcile_widgets
 
-    def timed_parse(md_text):
+    def timed_parse(md_text, *args, **kwargs):
         t0 = time.perf_counter()
-        r = _orig_parse(md_text)
+        r = _orig_parse(md_text, *args, **kwargs)
         parse_cost.append((time.perf_counter() - t0) * 1000)
         return r
 
