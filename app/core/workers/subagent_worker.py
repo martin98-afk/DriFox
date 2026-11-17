@@ -1027,9 +1027,12 @@ class SubAgentExecutor(QThread):
                     from app.core.infra.token_estimator import count_messages_tokens as _count
                     from app.core.modelmeta.model_capabilities import resolve_context_limit as _resolve_limit
 
-                    token_count = _count(current_messages)
-                    token_limit = 0
+                    # [T-B] model 口径：显式传实际模型名，旧默认 "gpt-4" 与真实
+                    # 模型编码不符导致估算偏差（同 chat_worker 主链路口径）。
                     llm_config = getattr(self, "llm_config", None)
+                    _model = str((llm_config or {}).get("model", "") or "gpt-4")
+                    token_count = _count(current_messages, model=_model)
+                    token_limit = 0
                     if llm_config:
                         token_limit = _resolve_limit(llm_config)
                     ctx["token_count"] = token_count

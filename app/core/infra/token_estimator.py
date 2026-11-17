@@ -295,21 +295,37 @@ def _get_token_cache() -> list:
     return cache
 
 
+def _content_sig(messages: list) -> tuple:
+    """内容敏感签名：消息数 + 末条消息对象身份（与 usage.py:_snapshot_sig 同法）。
+
+    is 身份缓存的正确性补丁：同列表对象 in-place 累积（chat_worker 的
+    current_messages 跨工具迭代 extend）时对象身份不变、内容已变，仅靠 `is`
+    判定会恒命中首轮旧值 → 圆环/token_usage 全程旧值（2026-11-17 诊断证实）。
+    """
+    return (len(messages), id(messages[-1]) if messages else 0)
+
+
 def _set_token_cache(messages: list, model: str, tools_sig: int, result: int):
     """写入 is 列表缓存；超上限时逐出最旧条目"""
     cache = _get_token_cache()
     # 移除同一对象的旧条目（若有）
     cache[:] = [e for e in cache if e[0] is not messages]
-    cache.append((messages, model, tools_sig, result))
+    cache.append((messages, model, tools_sig, _content_sig(messages), result))
     if len(cache) > _MAX_TOKEN_CACHE_ENTRIES:
         cache.pop(0)
 
 
 def _lookup_token_cache(messages: list, model: str, tools_sig: int) -> int | None:
-    """is 身份扫描；命中时返回缓存结果"""
+    """is 身份扫描 + 内容签名校验；命中时返回缓存结果。
+
+    [正确性] 同列表对象内容增长（append/extend）后签名失配 → 视为 MISS
+    走重算，由 _set 刷新条目；内容未变的重复查询仍命中（缓存语义不变）。
+    """
     for entry in _get_token_cache():
-        obj, m, ts, result = entry
+        obj, m, ts, sig, result = entry
         if obj is messages and m == model and ts == tools_sig:
+            if _content_sig(messages) != sig:
+                return None
             # 命中后移到末尾保活（LRU）
             cache = _get_token_cache()
             cache.remove(entry)
