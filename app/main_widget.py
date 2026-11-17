@@ -10472,6 +10472,69 @@ class OpenAIChatToolWindow(ToolWindow):
         except Exception:
             pass
 
+    def _snapshot_theme_transition(self) -> None:
+        """[ANIM #A3] 主题切换 grab 快照淡出：用旧视觉快照遮住「瞬跳」（EXIT_MS）。
+
+        时机必须在 Colors.refresh()（配色切换）之前 grab——widget.grab() 强制
+        重绘，晚于配色变化拿到的是新主题快照，淡出失效。重入门禁：appearance
+        epoch 记账，淡出完成时 epoch 已变立即让路（新快照层接管，不动它）；
+        二次切换进入时先销毁旧快照层再 grab，防双层叠加遮罩。收尾纪律同
+        #A1：移除 effect 与层，防常驻离屏合成。全程吞异常：快照/动画失败
+        不阻塞主题切换功能本身。
+        """
+        try:
+            from PyQt5.QtCore import Qt
+            from PyQt5.QtWidgets import QLabel
+
+            from app.utils.design_tokens import Animations
+            from app.utils.motion import fade_widget
+            from app.utils.theme_refresh import ThemeRefreshCoordinator as _TRC
+
+            epoch = _TRC.get_appearance_epoch()
+            top = self.window()
+            if top is None or not top.isVisible():
+                return
+            # 旧快照层立即销毁（新切换马上要 grab 新快照，旧层无保留价值）
+            old = getattr(self, "_theme_fade_overlay", None)
+            if old is not None:
+                try:
+                    old.close()
+                    old.deleteLater()
+                except RuntimeError:
+                    pass
+                self._theme_fade_overlay = None
+            pix = top.grab()
+            if epoch != _TRC.get_appearance_epoch():
+                return  # grab 期间发生并发切换，放弃本次
+            overlay = QLabel(top)
+            overlay.setPixmap(pix)
+            overlay.setGeometry(top.rect())
+            overlay.setScaledContents(True)
+            overlay.setAttribute(Qt.WA_TransparentForMouseEvents)
+            overlay.show()
+            overlay.raise_()
+            self._theme_fade_overlay = overlay
+
+            def _cleanup():
+                try:
+                    if _TRC.get_appearance_epoch() != epoch:
+                        return  # 已让路：新快照层接管，本层由重入路径销毁
+                except RuntimeError:
+                    pass
+                try:
+                    overlay.setGraphicsEffect(None)
+                    overlay.close()
+                    overlay.deleteLater()
+                    if getattr(self, "_theme_fade_overlay", None) is overlay:
+                        self._theme_fade_overlay = None
+                except RuntimeError:
+                    pass
+
+            fade_widget(overlay, 0.0, duration=Animations.EXIT_MS, on_finished=_cleanup)
+            self._theme_fade_epoch = epoch
+        except Exception:
+            pass  # 快照/动画失败不阻塞主题切换
+
     def refresh_theme(self):
         """ThemeManager 统一刷新入口（dispatch_refresh 调用）"""
         # dispatch_refresh = 主题发生变更 → scope="theme"
@@ -10557,6 +10620,8 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # ── 全局操作：只执行一次 ──
         ThemeRefreshCoordinator.timer_start("global")
+        # [ANIM #A3] 配色切换前 grab 旧视觉快照（晚于 Colors.refresh 即失效）
+        self._snapshot_theme_transition()
         Colors.refresh()
         try:
             from qfluentwidgets import Theme, setTheme
