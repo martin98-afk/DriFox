@@ -1970,7 +1970,16 @@ class FileMentionCard(QWidget):
                     logger.debug(f"[FileMentionCard] 轻量会话列表失败，回落全量: {e}")
                     sessions = None
             if sessions is None:
-                sessions = storage.get_all(limit=self._SESSION_SEARCH_LIMIT) or []
+                # [R1] 回落钳幅：light 失败（repo 未初始化 / 瞬时 SQL 错）时同因
+                # 下 get_all 也多半失败；此处防的是「实现了 get_all 却无 light
+                # 委托」的引擎形态——2000 会话库上全量 SELECT * 逐条 zstd 解压
+                # = GB 级瞬时峰值（单会话解压峰值实测 26.9MB）。钳到 200 条：
+                # 覆盖「最近会话参与搜索」核心体验，最坏降为百条元数据级解压。
+                _fallback_limit = min(self._SESSION_SEARCH_LIMIT, 200)
+                logger.warning(
+                    f"[FileMentionCard] 轻量会话列表不可用，回落全量接口（钳幅 {_fallback_limit} 条）"
+                )
+                sessions = storage.get_all(limit=_fallback_limit) or []
             # 项目过滤（轻量路径已在 SQL 过滤，此处幂等；回落全量路径必需）
             if project:
                 sessions = [s for s in sessions if isinstance(s, dict) and s.get("project") == project]
