@@ -56,6 +56,7 @@
 | P034 | 给已装插件新增组件类型，热加载不生效需重启 | 去抖把请求合并，兜底 diff 恒空 | 空转分支补「manifest 声明 vs 运行时注册」差异检查 |
 | P051/P021 | UI/MCP 组件热重载后不刷新 | 广播分支漏掉对应子系统；槽位签名短路吞掉重建 | 热重载广播要覆盖全部子系统；刷新函数带 `force` 参数 |
 | P038 | 改了代码热重载无效 | `sys.modules` 缓存旧模块（共享 manager / 动态 importlib 加载点） | 加载点加 mtime 自检 + 按前缀 purge `sys.modules` |
+| — | 插件自有顶层包（`biliscroll_core.*`）改了代码热重载无效，重启才生效 | 目录名非标识符（`bili-scroll`）时不触发隐式 purge，共享顶层名宿主不知道归属 | manifest 声明 `"module_prefixes": ["<包名>"]`（AST 放行 + 热重载/卸载统一 purge，市场仓 schema/validate_plugins 已校验） |
 | P020/P019/P018 | 热重载后 hook 顺序变化 / 分组错位 / 幽灵状态 | unregister 全删后 append 到末尾；索引未同步修正；id 漂移 | 卸载前记录位置，注册时按原位置 insert；pop 后遍历修正其它索引；id 按文件顺序防重 |
 | P023 | hook 来源标签错乱 | insert 索引在多 skill 交错下错位 | 用 `rule.skill_name` 作为归属真相，全量重建映射 |
 | — | QShortcut ambiguity | 命令热重载未销毁旧 shortcut | 重建前先销毁旧实例 |
