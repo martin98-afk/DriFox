@@ -113,15 +113,24 @@ def test_fade_widget_survives_effect_lifecycle(qtbot):
         assert w.graphicsEffect() is None, f"第 {round_index} 轮淡入未收尾，effect 残留（整卡透明）"
 
 
-def test_second_show_after_hide_fades_in(mgr_with_card, qtbot):
+def test_second_show_after_hide_fades_in(qtbot):
     """关闭后再次弹出：淡入必须完整收尾，不得留下 opacity=0 的常驻 effect"""
-    mgr, card = mgr_with_card
-    mgr.show_card("a2:popup", "w-a2")
-    qtbot.wait(300)
-    assert card.graphicsEffect() is None, "第一次弹出应正常收尾"
-    mgr.hide_card("a2:popup", "w-a2")
-    assert card.isHidden(), "隐藏后卡片应不可见"
-    mgr.show_card("a2:popup", "w-a2")
-    qtbot.wait(300)
-    assert card.graphicsEffect() is None, "第二次弹出效果必须收尾（否则卡片永久透明）"
-    assert not card.isHidden(), "第二次弹出卡片必须可见"
+    from app.widgets.cards.card_manager import CardManager, ContainerType
+
+    _ensure_qapp()
+    mgr = CardManager.get_instance()
+    card = _CountCard()
+    qtbot.addWidget(card)
+    mgr.register_card("w-second", ContainerType.TOP, "second:popup", card, system_card=False)
+    try:
+        mgr.show_card("second:popup", "w-second")
+        qtbot.wait(300)
+        assert card.graphicsEffect() is None, "第一次弹出应正常收尾"
+        mgr.hide_card("second:popup", "w-second")
+        assert card.isHidden(), "隐藏后卡片应不可见"
+        mgr.show_card("second:popup", "w-second")
+        qtbot.wait(300)
+        assert card.graphicsEffect() is None, "第二次弹出效果必须收尾（否则卡片永久透明）"
+        assert not card.isHidden(), "第二次弹出卡片必须可见"
+    finally:
+        mgr.unregister_card("w-second", "second:popup")
