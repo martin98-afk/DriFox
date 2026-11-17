@@ -1119,6 +1119,12 @@ _BARE_HASH_HEADER_PATTERN = re.compile(
     r"^(?P<pre>[ ]{0,3}(?:>[ ]?)*(?:(?:[-*+]|\d{1,9}[.)])[ ]+)?)(?P<hashes>#{1,6})(?=[^\s#])",
     re.MULTILINE,
 )
+# HTML 原样块（<style>/<script>）：内容不是 markdown，里面的行首 `#` 只可能是
+# CSS ID 选择器 / JS 片段，转义会直接破坏功能 —— 插件卡片把 `<style>` 拼进
+# 片段走同一条 markdown 管线，`#tu-tip {` 被转成 `\#tu-tip {` 后 CSS 解析成
+# 元素名选择器（永不匹配）→ 自绘 tooltip 的 display:none/position:fixed 全失效，
+# 文本以普通正文形式堆在卡片末尾（2026-11-17 用户截图：热力图 tooltip 变正文）。
+_HTML_RAW_BLOCK_TAG_RE = re.compile(r"<(style|script)\b", re.IGNORECASE)
 
 
 def _escape_bare_hash_headers(md_text: str) -> str:
@@ -1126,18 +1132,30 @@ def _escape_bare_hash_headers(md_text: str) -> str:
 
     `#56 审计判定` → `\\#56 审计判定`（渲染成正文 `#56 审计判定`）。
     围栏（``` / ~~~）内原样不动：代码里的 `#include` 不能改。
+    `<style>` / `<script>` 块内原样不动：CSS ID 选择器不能被转义（见上方注释）。
     幂等：已转义的行首是 `\\#`，不再匹配。
     """
     if "#" not in md_text:
         return md_text
     out: list = []
     in_fence = False
+    raw_tag = ""  # 非空 = 正处于 <style>/<script> 原样块内
     for line in md_text.split("\n"):
         if line.lstrip(" \t")[:3] in ("```", "~~~"):
             in_fence = not in_fence
             out.append(line)
             continue
         if in_fence:
+            out.append(line)
+            continue
+        if raw_tag:
+            out.append(line)
+            if f"</{raw_tag}" in line.lower():
+                raw_tag = ""
+            continue
+        _raw_m = _HTML_RAW_BLOCK_TAG_RE.search(line)
+        if _raw_m and f"</{_raw_m.group(1).lower()}" not in line.lower():
+            raw_tag = _raw_m.group(1).lower()
             out.append(line)
             continue
         out.append(

@@ -102,3 +102,27 @@ def test_sanitize_entry_wires_escape():
     """_sanitize_incomplete_markdown 是共同入口，必须带上转义。"""
     out = _sanitize_incomplete_markdown("#56 审计判定")
     assert out.startswith("\\#56"), out
+
+def test_style_block_untouched():
+    """`<style>` / `<script>` 块内的行首 `#` 不能转义：ID 选择器被改成
+    `\\#tu-tip` 后 CSS 解析成元素名选择器（永不匹配）→ 自绘 tooltip 的
+    display:none / position:fixed 全失效，文本以正文形式堆在卡片末尾。
+    """
+    css = "<style>\n#tu-tip {\n  display: none;\n}\n</style>"
+    out = _escape_bare_hash_headers(css)
+    assert "\\#tu-tip" not in out, out
+    assert "#tu-tip" in out
+    script = "<script>\n#anchor\n</script>"
+    assert "\\#anchor" not in _escape_bare_hash_headers(script)
+    # 块外的正文裸井号仍要转义
+    assert "\\#56" in _escape_bare_hash_headers(css + "\n#56 正文编号")
+    # 围栏里出现半个 <style> 不能吞掉后续转义
+    assert _escape_bare_hash_headers("```\n<style>\n```\n#8 z").rstrip().endswith("\\#8 z")
+
+
+def test_style_block_css_survives_pipeline():
+    """整条渲染管线：插件片段里的 ID 选择器必须原样落地。"""
+    html = _render_markdown_to_html_cached_impl(
+        "<style>\n#tu-tip {\n  display: none; position: fixed;\n}\n</style>", compact=False
+    )
+    assert "#tu-tip {" in html and "\\#tu-tip" not in html, html[-400:]
