@@ -3524,6 +3524,10 @@ class OpenAIChatToolWindow(ToolWindow):
                 self.chat_scroll_area.setWidget(self.chat_container)
                 # 与 chat_area_module 同一口径：关平滑、保留加速（见 scroll_tuning）
                 install_fast_wheel(self.chat_scroll_area, native_scrollbar=True, smooth_ms=0)
+                # [PERF #I2] 与 chat_area_module 同口径：纯色主题刷等价实底启用 blit
+                from app.widgets.modules.chat_area_module import apply_chat_surface_opaque
+
+                apply_chat_surface_opaque(self)
 
                 # 连接滚动事件，触发虚拟滚动回收
                 scroll_bar = self.chat_scroll_area.verticalScrollBar()
@@ -10471,6 +10475,14 @@ class OpenAIChatToolWindow(ToolWindow):
     def refresh_theme(self):
         """ThemeManager 统一刷新入口（dispatch_refresh 调用）"""
         # dispatch_refresh = 主题发生变更 → scope="theme"
+        # [PERF #I2] 主题变更 → 重判聊天区实底（纯色刷 / 壁纸还原，幂等）。
+        # 主装配与兜底装配共用 host（MainWidget），此处一处联动覆盖两路径。
+        try:
+            from app.widgets.modules.chat_area_module import apply_chat_surface_opaque
+
+            apply_chat_surface_opaque(self)
+        except Exception:
+            pass  # 模块 / 主题系统未就绪不阻塞主题刷新
         self._apply_runtime_ui_settings(scope="theme")
 
     # ── 多窗口批处理：避免每个窗口重复执行全局操作 ──
