@@ -69,7 +69,6 @@ from qfluentwidgets import (
     MaskDialogBase,
     TransparentToolButton,
 )
-from qfluentwidgets.components.widgets.scroll_bar import SmoothScrollDelegate
 from app.core.infra.telemetry import perf_jsonl
 from app.core.infra.webengine_profile import get_shared_web_profile
 from app.utils.design_tokens import (
@@ -84,6 +83,7 @@ from app.utils.design_tokens import (
     scale_font_size,
     scale_icon_size,
 )
+from app.utils.scroll_tuning import install_fast_wheel
 from app.utils.utils import get_font_family_css, get_icon
 from app.widgets.render import (
     HOME_CONTENT,
@@ -11873,12 +11873,12 @@ class PlainTextViewer(QWidget):
         self.text_edit.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.text_edit.setLineWrapMode(QTextEdit.WidgetWidth)
         self._apply_text_style()
-        # 把 QTextEdit 内部滚轮劫持到 qfluentwidgets SmoothScroll 引擎——
-        # 与外层 chat_scroll_area（SingleDirectionScrollArea）走同款 400ms
-        # 插值、stepRatio 1.5、连滚加速。手感统一，消除"卡内跳、卡间滑"的异样。
-        # CodeWebViewer 的 Chromium 内部滚动是引擎边界（事件被子进程拦截），
-        # 维持原状，边界放行靠外层 MessageCard.wheelEvent 接管。
-        SmoothScrollDelegate(self.text_edit)
+        # [I3] QTextEdit 内部滚轮改走 install_fast_wheel：关 qfw SmoothScrollDelegate
+        # 400ms/24 帧平滑动画（T5 实证内滚叠加透明层 667 paint/格），一次到位 +
+        # step_ratio 0.4（内滚小容器小步长）。到顶/到底放行语义保留：边界冒泡
+        # 仍靠外层 MessageCard.wheelEvent 接管；CodeWebViewer 的 Chromium 内部
+        # 滚动是引擎边界（事件被子进程拦截），维持原状。
+        install_fast_wheel(self.text_edit, step_ratio=0.4)
         layout.addWidget(self.text_edit)
 
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)

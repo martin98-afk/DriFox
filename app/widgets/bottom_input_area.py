@@ -54,10 +54,13 @@ from qfluentwidgets import (
     ComboBox,
     FluentIcon,
     IconWidget,
+    SmoothMode,
     TextEdit,
     TransparentToolButton,
     setCustomStyleSheet,
 )
+
+from app.utils.scroll_tuning import install_fast_wheel
 
 from app.widgets.stop_button import SendStopButton
 
@@ -218,6 +221,18 @@ class SendableTextEdit(TextEdit):
         except AttributeError:
             # qfluentwidgets 版本差异：无 delegate 时无需处理
             pass
+        # [I3] 关 qfw SmoothScrollDelegate 的 400ms/24 帧平滑动画（滚动链路统一
+        # 口径，T5：内滚叠加透明层 667 paint/格）。delegate 本体保留——Fluent
+        # 滚动条按需显隐逻辑挂在它的 vScrollBar 上（上方 rangeChanged 链），
+        # 不可移除；只关两方向平滑引擎，滚轮改走 _FastWheelFilter 一次到位
+        # （step_ratio 0.4，输入框小容器）。native_scrollbar=False：换原生条会
+        # 摧毁 delegate 滚动条显隐链，且小容器不需要 blit 优化。
+        try:
+            self.scrollDelegate.verticalSmoothScroll.setSmoothMode(SmoothMode.NO_SMOOTH)
+            self.scrollDelegate.horizonSmoothScroll.setSmoothMode(SmoothMode.NO_SMOOTH)
+        except (AttributeError, RuntimeError):
+            pass
+        install_fast_wheel(self, step_ratio=0.4, native_scrollbar=False)
         # placeholder 仅用 tips 轮播，不用通用提示语
         self.setPlaceholderText(random.choice(PLACEHOLDER_TIPS))
         self.setAcceptRichText(False)
