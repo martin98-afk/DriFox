@@ -23,6 +23,39 @@ from typing import Any, Callable, Dict, List, Optional
 from loguru import logger
 
 
+def _animate_card_popup(widget) -> None:
+    """浮动卡弹入过渡：淡入（ENTER_MS / EASE_ENTER），消灭「凭空弹出」。
+
+    仅在「从隐藏到可见」时调用（show_card 已可见路径早退，天然幂等）。
+    动画结束摘除 opacity effect，不给卡留常驻离屏合成开销（I4 同则）。
+    预置 opacity=0 后再 fade：fade_widget 复用现有 effect 的实测值起步，
+    不预置则 current=1.0、差值为 0，retarget 直接置终值无动画。
+    """
+    try:
+        from PyQt5.QtWidgets import QGraphicsOpacityEffect
+
+        from app.utils.design_tokens import Animations
+        from app.utils.motion import fade_widget
+
+        effect = QGraphicsOpacityEffect(widget)
+        effect.setOpacity(0.0)
+        widget.setGraphicsEffect(effect)
+        widget._fade_effect = effect  # 预置给 fade_widget 复用（含动画对象）
+
+        def _cleanup() -> None:
+            try:
+                widget.setGraphicsEffect(None)
+            except RuntimeError:
+                pass  # C++ 对象已销毁（动画期内卡被关/卸载）
+
+        fade_widget(widget, 1.0, duration=Animations.ENTER_MS, curve=Animations.EASE_ENTER,
+                    on_finished=_cleanup)
+    except RuntimeError:
+        raise
+    except Exception as e:  # noqa: BLE001 — 过渡失败不影响弹出本身
+        logger.debug(f"[CardManager] 弹出过渡跳过: {e}")
+
+
 class ContainerType(Enum):
     """卡片容器类型（全项目唯一权威定义）
 
@@ -457,6 +490,9 @@ class CardManager:
                     card_widget.setVisible(True)
             else:
                 card_widget.setVisible(True)
+            # [A2] 弹出过渡：仅覆盖层/补全弹出路径（本分支），dock 停靠分支
+            # （上方早退）是侧栏嵌入形态、不做弹出动画。已可见卡早退不重放。
+            _animate_card_popup(card_widget)
         except RuntimeError:
             # 竞态条件：检测后 widget 被删除了
             self._check_and_remove_deleted_card(window_id, card_id, container_type, card_widget)
