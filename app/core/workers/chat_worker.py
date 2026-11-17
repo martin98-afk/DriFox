@@ -3830,20 +3830,29 @@ class OpenAIChatWorker(QThread):
 
         # 性能优化：使用缓存的 API 消息。cache 常驻轻量 image_ref 形态（出口已
         # 回收），发送前 _materialize_for_send 物化出 data URI 副本（请求作用域）
-        if use_cache and self._api_messages_cache is not None:
-            sanitized = self._materialize_for_send(self._api_messages_cache)
+        # [T-C] responses 模式跳过 chat 形态序列化：transport 只消费内部 messages
+        # （自己序列化 input_items），chat 形态 api_messages 对它无效——白付
+        # revive/revoke 双扫 + 全量序列化 + 缓存物化，每轮工具迭代 O(N) 纯开销。
+        # 判据必须用原始 flags（_serialize_for_api 内部强制 False 后不可判）。
+        # 安全性：2013/missing_args 自愈带 not _is_responses_transport 守卫，不受
+        # api_messages=None 影响；hook 注入基座 run() 的 cache 初始化保留不动。
+        _responses_mode = False
+        try:
+            _responses_mode = bool(self._adapter_flags().use_responses_api)
+        except Exception:
+            _responses_mode = False
+
+        if _responses_mode:
+            api_messages = None
+        elif use_cache and self._api_messages_cache is not None:
+            api_messages = self._materialize_for_send(self._api_messages_cache)
         else:
             fresh = self._serialize_for_api(messages).messages
             if use_cache:
                 # cache 常驻轻量 image_ref 形态；materialize 副本只进发送作用域
                 self._set_api_messages_cache(fresh)
                 self._api_messages_built = True
-            sanitized = self._materialize_for_send(fresh)
-
-        # 消息序列化（协议无关，序列化器插件负责形态）
-        # 请求参数组装已下沉至 transport 插件（system-transports/openai_chat.py）；
-        # worker 只保留自愈逻辑需要的消息列表引用与流式能力判定
-        api_messages = sanitized
+            api_messages = self._materialize_for_send(fresh)
         model = str(self.llm_config.get("模型名称", "gpt-4o") or "gpt-4o")
         # 认证头（bce / 服务商伪装头）：由 worker 统一算出后交给 transport/原生通道
         auth_headers = self._build_auth_headers()
