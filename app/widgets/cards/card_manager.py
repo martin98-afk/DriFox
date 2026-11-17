@@ -47,6 +47,16 @@ def _animate_card_popup(widget) -> None:
                 widget.setGraphicsEffect(None)
             except RuntimeError:
                 pass  # C++ 对象已销毁（动画期内卡被关/卸载）
+            # effect 已随 setGraphicsEffect(None) 销毁：引用与动画对象一并失效，
+            # 残留会让下一次弹出复用 target 已死的动画（整卡透明，见 fade_widget）。
+            anim = getattr(widget, "_fade_anim", None)
+            if anim is not None:
+                try:
+                    anim.deleteLater()
+                except RuntimeError:
+                    pass
+            widget._fade_effect = None
+            widget._fade_anim = None
 
         fade_widget(widget, 1.0, duration=Animations.ENTER_MS, curve=Animations.EASE_ENTER,
                     on_finished=_cleanup)
