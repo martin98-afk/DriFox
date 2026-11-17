@@ -252,6 +252,93 @@ def test_pool_candidate_without_timestamp_is_skipped():
     finally:
         pool.clear()
 
+# ── I2：死 pid 记账清理 + 池 clear 移交记账 ──────────────────────
+
+def test_dead_pid_entry_purged_when_viewer_gone(monkeypatch):
+    """I2①：kill 失败且进程已不存在（viewer 已随池 clear 出池）→ 死条目移出记账。
+
+    旧实现：viewer=None 时 kill 恒 False 且 suppressed=False，两个分支都不进，
+    条目滞留 → 每 45s 拍重复无效探测。修复后必须移出，且因未发生真 kill
+    不写 60s 冷却（不推迟下拍其他窗口的真回收）。
+    """
+    now = time.time()
+    host = _FakeWindow(
+        unloaded_pids=[(911, now - RENDERER_IDLE_RECLAIM_S - 10, -1)],
+        batch_cards=[["c"]],
+        distances={0: 50},
+    )
+    monkeypatch.setattr(host, "_kill_renderer", lambda pid: False)  # NoSuchProcess 语义
+    monkeypatch.setattr(memory_governor, "_pool_viewer_for_pid", lambda pid: None)
+    monkeypatch.setattr(memory_governor, "_pid_alive", lambda pid: False)
+    killed = reclaim_idle_renderers(host)
+    assert killed == 0  # 死进程不算 kill 成功
+    assert host._unloaded_pids == [], "死 pid 条目必须移出记账（不再每拍重复探测）"
+    assert host._last_kill_at == 0.0, "死条目清理非 kill 动作，不得写 60s 冷却"
+
+def test_alive_pid_kill_failure_keeps_entry(monkeypatch):
+    """I2① 对照：进程仍活但 kill 失败（AccessDenied/校验拒）→ 记账保留，下拍重试"""
+    now = time.time()
+    host = _FakeWindow(
+        unloaded_pids=[(912, now - RENDERER_IDLE_RECLAIM_S - 10, -1)],
+        batch_cards=[["c"]],
+        distances={0: 50},
+    )
+    monkeypatch.setattr(host, "_kill_renderer", lambda pid: False)
+    monkeypatch.setattr(memory_governor, "_pool_viewer_for_pid", lambda pid: None)
+    monkeypatch.setattr(memory_governor, "_pid_alive", lambda pid: True)
+    assert reclaim_idle_renderers(host) == 0
+    assert len(host._unloaded_pids) == 1, "活进程 kill 失败保留记账（与旧行为一致）"
+
+def test_pool_clear_hands_over_pids_to_ledger():
+    """I2②：池 clear 后池内 renderer pid 移交活窗口记账（进入 T31 候选域）。
+
+    旧实现 clear 只 deleteLater：pid 随 viewer 销毁离开所有候选域，进程若未
+    被 Chromium 自行回收则 ~60MB 无兜底滞留。修复后 clear 把 _renderer_pid
+    经 _register_unloaded_pid 移交活窗口（复用其去重/背压），T31 按记账 ts
+    在下拍兜底回收。无 pid 的 viewer（_renderer_pid=0）不得产生移交条目。
+    """
+    from types import SimpleNamespace
+
+    from app.widgets.webview_pool import WebViewPool
+
+    pool = WebViewPool.get_instance()
+    pool.clear()
+    registered = []
+    win = _FakeWindow()
+    win._register_unloaded_pid = lambda pid, ts, idx: registered.append((pid, ts, idx))
+    window_registry.window_instances.clear()
+    window_registry.register_window(win)
+    pool._idle[False] = [
+        SimpleNamespace(_renderer_pid=921),
+        SimpleNamespace(_renderer_pid=922),
+        SimpleNamespace(_renderer_pid=0),  # 无 pid：不移交
+    ]
+    try:
+        pool.clear()
+        assert [p for p, _, _ in registered] == [921, 922], "clear 后池内 pid 必须进入记账候选域"
+        assert pool._idle[False] == [], "池对象照常销毁"
+        assert all(idx == -1 for _, _, idx in registered), "移交条目 idx=-1（批次视为足够远，T31 可回收）"
+    finally:
+        window_registry.window_instances.clear()
+        pool.clear()
+
+def test_pool_clear_handover_silent_without_alive_window():
+    """I2② 保底：无活窗口（退出期）移交静默跳过，clear 不炸不残留。"""
+    from types import SimpleNamespace
+
+    from app.widgets.webview_pool import WebViewPool
+
+    pool = WebViewPool.get_instance()
+    pool.clear()
+    window_registry.window_instances.clear()
+    pool._idle[True] = [SimpleNamespace(_renderer_pid=931)]
+    try:
+        pool.clear()
+        assert pool._idle[True] == []
+    finally:
+        window_registry.window_instances.clear()
+        pool.clear()
+
 
 def test_pool_candidate_blocked_by_other_window(monkeypatch):
     """条 1 保底：池候选仍受跨窗口在用护栏约束"""

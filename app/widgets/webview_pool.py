@@ -232,10 +232,55 @@ class WebViewPool:
         return True
 
     def clear(self) -> None:
-        """清空并销毁所有池中 viewer（退出 / 主题全局刷新等场景）。"""
+        """清空并销毁所有池中 viewer（退出 / 主题全局刷新等场景）。
+
+        perf(memory) I2 点位②：销毁前把 viewer 持有的 renderer pid 移交活窗口
+        卸载记账（_register_unloaded_pid，复用其按 pid 去重与背压）。此前 clear
+        只 deleteLater，进程退出依赖 Chromium 内部回收；池内 pid 只在「viewer
+        在池」时被 T31 的 _idle_pool_pids 覆盖，clear 后 pid 离开所有候选域——
+        进程若未随对象销毁退出，~60MB 滞留无兜底。移交后 T31 按记账 ts 兜底
+        （idx=-1 → 批次视为已裁掉=足够远，允许回收），回收窗口 60s~285s → ~65s。
+        复用安全性：移交 pid 若被新卡片共享复用，T31/闸门 kill 前的
+        _pid_still_in_use 卡片护栏命中跳过，不会误杀在用 renderer。
+        """
+        handover = []
         for bucket in self._idle.values():
             while bucket:
-                self._safe_delete(bucket.pop(0))
+                viewer = bucket.pop(0)
+                try:
+                    pid = int(viewer.__dict__.get("_renderer_pid", 0) or 0)
+                except Exception:
+                    pid = 0
+                if pid > 0:
+                    handover.append(pid)
+                self._safe_delete(viewer)
+        if handover:
+            self._handover_pids_to_ledger(handover)
+
+    @staticmethod
+    def _handover_pids_to_ledger(pids: List[int]) -> None:
+        """把池 clear 后仍存活的 renderer pid 登记进一个活窗口的卸载记账。
+
+        登记一个窗口即够：T31 回收拍（45s）按窗口逐个执行，任一窗口的
+        记账都会被兜底扫描。无活窗口（退出期）静默跳过——进程即将结束，
+        记账无意义。异常全兜底，不得反噬 clear 主流程。
+        """
+        try:
+            from app.core.infra import window_registry
+
+            for win in window_registry.alive_window_instances():
+                register = getattr(win, "_register_unloaded_pid", None)
+                if register is None:
+                    continue
+                now = time.time()
+                for pid in pids:
+                    try:
+                        register(pid, now, -1)
+                    except Exception:
+                        pass
+                return
+        except Exception:
+            pass
 
     # ── [MEM #26] 池内 idle 延迟清池 ────────────────────────────
 

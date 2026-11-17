@@ -655,6 +655,7 @@ def reclaim_idle_renderers(host) -> int:
         victims.sort()
         killed = 0
         kill_set = set()
+        dead_pids = set()
         for _ts, pid in victims[:RENDERER_IDLE_RECLAIM_BATCH_MAX]:
             if _pid_used_by_alive_windows(pid, exclude=host):
                 continue  # T16/T22 全局护栏
@@ -666,24 +667,34 @@ def reclaim_idle_renderers(host) -> int:
                     viewer._renderer_pid = 0
                 except Exception:
                     pass
+                dead_pids.add(pid)
                 continue
             suppressed = _suppress_viewer_heal(viewer)
             try:
                 if host._kill_renderer(pid):
                     killed += 1
                     kill_set.add(pid)
+                elif not _pid_alive(pid):
+                    # perf(memory) I2 点位①：kill 失败且进程已不存在（典型：池 clear
+                    # 已销毁 viewer，Chromium 已自行退出）→ 死条目移出记账。P2-1 只
+                    # 覆盖 viewer 在池场景；viewer=None 时 kill 恒 False 且
+                    # suppressed=False，旧实现什么都不做 → 死条目每拍重复探测。
+                    # 活进程 kill 失败（AccessDenied/校验拒）仍保留记账下拍重试。
+                    dead_pids.add(pid)
                 elif suppressed:
                     _restore_viewer_after_failed_kill(viewer)
             except Exception:
                 _restore_viewer_after_failed_kill(viewer)
                 continue
-        if kill_set:
+        purge = kill_set | dead_pids
+        if purge:
             try:
-                host._unloaded_pids = [e for e in entries if e[0] not in kill_set]
+                host._unloaded_pids = [e for e in entries if e[0] not in purge]
             except Exception:
                 pass
+        if kill_set:
             try:
-                host._last_kill_at = now  # 与 RSS 闸门共用 60s 冷却
+                host._last_kill_at = now  # 与 RSS 闸门共用 60s 冷却；死条目清理（I2）非 kill 动作，不写冷却
             except Exception:
                 pass
         return killed
