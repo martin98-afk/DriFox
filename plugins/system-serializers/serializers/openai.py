@@ -77,6 +77,22 @@ class OpenAIChatSerializer:
                             "content": [{"type": "output_text", "text": text}],
                         }
                     )
+                # DeepSeek /responses thinking mode：工具轮次的 reasoning 必须以
+                # reasoning_text item 回传，缺则 400 "reasoning_text ... must be
+                # passed back"；空串同样被拒，缺字段时用空格占位（上游只校验
+                # 存在性，实测占位可通过）。位置必须在 function_call 之前
+                # （服务端要求 call 与 output 严格相邻，中间不许插条目）。
+                if ctx.flags.replay_reasoning_text and tool_calls:
+                    reasoning = normalized.get("reasoning_content")
+                    input_items.append(
+                        {
+                            "type": "reasoning",
+                            "summary": [],
+                            "content": [
+                                {"type": "reasoning_text", "text": str(reasoning or "").strip() or " "}
+                            ],
+                        }
+                    )
                 for tc in tool_calls:
                     func = tc.get("function") or {}
                     call_id = tc.get("id") or tc.get("tool_call_id") or ""

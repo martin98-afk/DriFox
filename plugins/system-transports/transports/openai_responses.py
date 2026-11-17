@@ -109,7 +109,7 @@ class OpenAIResponsesTransport:
             )
         caps = resolve_model_capabilities(llm_config)
         input_items, instructions = messages_to_responses_input(
-            messages, bool(caps.get("supports_vision", True))
+            messages, bool(caps.get("supports_vision", True)), flags=self._protocol_flags(llm_config)
         )
         kwargs = self.build_request_kwargs(
             llm_config, input_items, instructions, tools, auth_headers, cap_max_tokens
@@ -127,6 +127,24 @@ class OpenAIResponsesTransport:
             else:
                 raise
         return _EventStream(self.to_events(response), response)
+
+    @staticmethod
+    def _protocol_flags(llm_config: Dict[str, Any]) -> Any:
+        """adapter 解析出的 ProtocolFlags（reasoning 回传等协议开关）。
+
+        transport 是通用通道，不知道 provider 差异；由 ModelAdapter 单一来源判定
+        （DeepSeek 家族置 replay_reasoning_text=True）。未注册/异常时返回 None，
+        序列化器按默认 flags（全关）处理，保持旧行为。
+        """
+        try:
+            from app.plugins.registries.model_adapter_registry import ModelAdapterRegistry
+
+            adapter = ModelAdapterRegistry.get_instance().resolve(llm_config or {})
+            if adapter is not None:
+                return adapter.protocol_flags(llm_config or {})
+        except Exception:
+            pass
+        return None
 
     def build_request_kwargs(
         self,

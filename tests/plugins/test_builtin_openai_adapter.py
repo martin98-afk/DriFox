@@ -44,12 +44,19 @@ _CASES = [
 
 @pytest.mark.parametrize("llm_config", _CASES)
 def test_flags_equivalent_to_legacy(llm_config):
-    """resolve 选中的家族返回的 flags == 旧 worker 方法（逐点等价）"""
+    """resolve 选中的家族返回的 flags == 旧 worker 方法（逐点等价）
+
+    replay_reasoning_text 是 responses 形态新增开关（旧 worker 无对应方法），
+    不参与等价性断言；行为见 tests/plugins/test_responses_reasoning_replay.py。
+    """
+    from dataclasses import replace
+
     from app.plugins.registries.model_adapter_registry import ModelAdapterRegistry
 
     adapter = ModelAdapterRegistry.get_instance().resolve(llm_config)
     assert adapter is not None, f"无家族命中: {llm_config}"
-    assert adapter.protocol_flags(llm_config) == _worker_flags(llm_config), f"不等价: {llm_config}"
+    actual = replace(adapter.protocol_flags(llm_config), replay_reasoning_text=False)
+    assert actual == _worker_flags(llm_config), f"不等价: {llm_config}"
 
 
 def test_family_adapters_always_positive():

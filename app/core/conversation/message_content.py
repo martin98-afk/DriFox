@@ -1547,15 +1547,24 @@ def _extract_responses_content(content: Any, supports_vision: bool = True) -> Li
 def messages_to_responses_input(
     messages: List[Dict[str, Any]],
     supports_vision: bool = True,
+    flags: Any = None,
 ) -> tuple:
     """将内部消息列表转换为 Responses API 请求参数（薄壳：委托默认序列化器）。
 
     返回形态 (input_items, instructions) 不变；use_responses_api=True 语义
     注入 ctx.flags；逻辑与旧实现逐点等价（instructions 提取 / function_call /
     function_call_output / images→文本 / S1 截断）。
+
+    ``flags`` 可传 adapter 解析出的 ProtocolFlags（transport 侧注入），用于
+    replay_reasoning_text 等协议开关；缺省按默认 flags（全部关闭）。
     """
+    from app.plugins.contracts.message_serializer import SerializeContext
+
     serializer = _resolve_serializer()
-    ctx = _default_ctx(supports_vision)
+    if flags is None:
+        ctx = _default_ctx(supports_vision)
+    else:
+        ctx = SerializeContext(supports_vision=supports_vision, flags=flags)
     ctx.flags.use_responses_api = True
     result = serializer.serialize(messages, ctx)
     return result.input_items, result.instructions
