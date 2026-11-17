@@ -6,7 +6,7 @@ offscreen 运行，无键鼠、无可见窗口（P0 约束）。
 覆盖：
 ① 同 key 二次请求返回同一对象（QPixmap.cacheKey() 断言，隐式共享零复制）
 ② 不同 opacity/blur/尺寸产生不同条目
-③ LRU 超 _MAX_SETS=1 组淘汰最旧组
+③ LRU 超 _MAX_SETS=2 组淘汰最旧组
 ④ clear() 后重新创建
 ⑤ 接入层行为：同壁纸两个 SceneLayer 实例的预乘副本是同一对象（2 份→1 份）
 ⑥ 引用计数：两窗口共享只解码一次；⑦ 单窗口释放后另一窗口仍有效；
@@ -77,16 +77,50 @@ def test_different_params_different_entries(cache, wallpaper):
 
 
 def test_lru_evicts_oldest_group(cache, tmp_path):
-    """③ 超 _MAX_SETS=1 组 → 淘汰最旧组（新壁纸进、旧壁纸出）"""
+    """③ 超 _MAX_SETS=2 组 → 淘汰最旧组（I4：scene 层与 window/sidebar 区块层
+
+    接入共享缓存后允许两组共存，防 scene 层 resize 烘焙热路径被 area 冷组挤掉；
+    第 3 组写入才淘汰最旧组。"""
     w1 = str(tmp_path / "w1.png"); _make_png(w1, 100)
     w2 = str(tmp_path / "w2.png"); _make_png(w2, 150)
+    w3 = str(tmp_path / "w3.png"); _make_png(w3, 200)
     first = cache.get_pixmap("source", w1, load=_load)
-    cache.get_pixmap("source", w2, load=_load)
-    assert cache.stats()["groups"] == 1, "第 2 组写入即淘汰最旧组（_MAX_SETS=1）"
-    # w1 旧组已淘汰：再请求是重新构建的新对象
-    again = cache.get_pixmap("source", w1, load=_load)
-    assert again is not first
-    assert cache.stats() == {"groups": 1, "entries": 1}
+    second = cache.get_pixmap("source", w2, load=_load)
+    third = cache.get_pixmap("source", w3, load=_load)
+    assert cache.stats()["groups"] == 2, "两组共存（_MAX_SETS=2），w1 组已被淘汰"
+    # 两次命中触碰使 LRU 序变 [w2, w3]（w3 最新）
+    assert cache.get_pixmap("source", w2, load=_load) is second
+    assert cache.get_pixmap("source", w3, load=_load) is third
+    # 第 3 组写入（w1 重建）→ 淘汰最旧组 w2
+    cache.get_pixmap("source", w1, load=_load)
+    assert cache.stats()["groups"] == 2
+    assert cache.get_pixmap("source", w3, load=_load) is third, "热组 w3 保留"
+    again = cache.get_pixmap("source", w2, load=_load)
+    assert again is not second, "最旧组 w2 被淘汰重建"
+
+def test_area_premult_kind(cache, wallpaper):
+    """[I4] area_premult kind：同图同 opacity 共享条目，不同 opacity 分条"""
+    a = cache.get_pixmap(
+        "area_premult", wallpaper,
+        load=lambda p: QPixmap.fromImage(_load(p).toImage()),
+        opacity_255=184,
+    )
+    b = cache.get_pixmap(
+        "area_premult", wallpaper,
+        load=lambda p: QPixmap.fromImage(_load(p).toImage()),
+        opacity_255=184,
+    )
+    assert a is b, "同图同 opacity → 命中同一条目（跨窗口共享）"
+    c = cache.get_pixmap(
+        "area_premult", wallpaper,
+        load=lambda p: QPixmap.fromImage(_load(p).toImage()),
+        opacity_255=128,
+    )
+    assert c is not a, "不同 opacity → 不同条目"
+    # source 与 area_premult 同图互不挤占（同一组的不同 sub_key）
+    src = cache.get_pixmap("source", wallpaper, load=_load)
+    assert cache.get_pixmap("source", wallpaper, load=_load) is src
+    assert cache.stats() == {"groups": 1, "entries": 3}
 
 
 def test_clear_then_rebuild(cache, wallpaper):
@@ -290,10 +324,10 @@ def test_baked_evicted_with_group(cache, wallpaper, tmp_path):
                      width=100, height=50, blur_radius=8.0, pad=16)
     cache.get_pixmap("baked", w2, load=_baked_load(100, 50),
                      width=100, height=50, blur_radius=8.0, pad=16)
-    assert cache.stats() == {"groups": 1, "entries": 1}  # w1 组整体出，baked 一并释放
+    assert cache.stats() == {"groups": 2, "entries": 2}  # I4：两组共存
     cache.get_pixmap("baked", w3, load=_baked_load(100, 50),
-                     width=100, height=50, blur_radius=8.0, pad=16)  # w2 组整体出
-    assert cache.stats() == {"groups": 1, "entries": 1}
+                     width=100, height=50, blur_radius=8.0, pad=16)  # 最旧组 w1 整体出
+    assert cache.stats() == {"groups": 2, "entries": 2}
 
 
 # ── M-1c：baked 组内上限按像素面积反算 ─────────────────────

@@ -135,3 +135,72 @@ class TestStaticBgKey:
         tm._apply_area_bg("sidebar", tm._tab_frame, dict(cfg))
 
         assert tm._sidebar_bg_label is first
+
+
+class TestAreaBgPremult:
+    """[I4] _apply_area_bg 摘常驻 QGraphicsOpacityEffect → 预乘入共享缓存
+
+    回归背景：opacity<1 的图片背景原来挂常驻 QGraphicsOpacityEffect，label
+    每次重绘（splitter 拖动/窗口缩放）走全幅离屏合成（双倍 blit）；独立
+    QPixmap(resolved_image) 解码游离在 scene_pixmap_cache 外，同图多区域
+    重复解码。预乘副本 alpha 与 effect 合成数学一致（alpha × opacity）。
+    """
+
+    def _apply_png(self, tm, monkeypatch, tmp_path, opacity):
+        from PyQt5.QtGui import QImage
+
+        p = str(tmp_path / f"bg_{int(opacity * 255)}.png")
+        img = QImage(8, 8, QImage.Format_ARGB32)
+        img.fill(0xFF3366AA)  # 不透明底
+        img.save(p, "PNG")
+        _patch_resolver(monkeypatch, tm, {"bg.png": p})
+        tm._apply_area_bg("sidebar", tm._tab_frame, {"image": "bg.png", "opacity": opacity})
+        return p
+
+    def test_no_graphics_effect_and_premultiplied_alpha(self, tm, monkeypatch, tmp_path):
+        """opacity<1：无 effect、pixmap alpha 预乘（255→184@0.72）"""
+        self._apply_png(tm, monkeypatch, tmp_path, 0.72)
+        label = tm._sidebar_bg_label
+        assert label is not None
+        assert label.graphicsEffect() is None, "常驻 effect 必须摘除（预乘替代）"
+        pm = label.pixmap()
+        assert pm is not None and not pm.isNull()
+        image = pm.toImage()
+        a = image.pixelColor(0, 0).alpha()
+        assert abs(a - int(round(0.72 * 255))) <= 1, f"预乘 alpha 应≈184，实际 {a}"
+
+    def test_shared_cache_entry_across_reapply(self, tm, monkeypatch, tmp_path):
+        """同图同 opacity 重复应用 → 命中同一缓存条目（游离解码消除）"""
+        from app.core.infra.scene_pixmap_cache import scene_pixmap_cache
+
+        scene_pixmap_cache._users += 1  # 防其他用例计数归零 clear
+        try:
+            p = self._apply_png(tm, monkeypatch, tmp_path, 0.72)
+            first = tm._sidebar_bg_label.pixmap()
+            # 幂等键命中直接 return，不走重建；强置键后重走取缓存路径
+            tm._last_sidebar_bg_key = None
+            tm._apply_area_bg("sidebar", tm._tab_frame, {"image": "bg.png", "opacity": 0.72})
+            second = tm._sidebar_bg_label.pixmap()
+            assert first is not None and second is not None
+            assert first.cacheKey() == second.cacheKey()
+            kinds = {sub[0] for bucket in scene_pixmap_cache._groups.values() for sub in bucket}
+            assert "area_premult" in kinds
+            assert p  # resolver 路径真实存在
+        finally:
+            scene_pixmap_cache._users = 0
+            scene_pixmap_cache.clear()
+
+    def test_opaque_image_shares_scene_source(self, tm, monkeypatch, tmp_path):
+        """opacity=1：区块层与 scene 层共用同一 source 条目（跨层共享收益）"""
+        from app.core.infra.scene_pixmap_cache import scene_pixmap_cache
+
+        scene_pixmap_cache._users += 1
+        try:
+            p = self._apply_png(tm, monkeypatch, tmp_path, 1.0)
+            pm = tm._sidebar_bg_label.pixmap()
+            shared = scene_pixmap_cache.get_pixmap("source", p, load=lambda _: None)
+            assert pm is not None and shared is not None
+            assert pm.cacheKey() == shared.cacheKey(), "应复用 scene 层的 source 条目，不重解码"
+        finally:
+            scene_pixmap_cache._users = 0
+            scene_pixmap_cache.clear()

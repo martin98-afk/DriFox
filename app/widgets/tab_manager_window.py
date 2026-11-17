@@ -22,7 +22,6 @@ from PyQt5.QtWidgets import (
     QAbstractScrollArea,
     QApplication,
     QFrame,
-    QGraphicsOpacityEffect,
     QHBoxLayout,
     QLabel,
     QVBoxLayout,
@@ -2934,19 +2933,33 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
         label = _AutoGeometryLabel(parent_widget)
         label.setAttribute(Qt.WA_TransparentForMouseEvents)
 
-        # 1. 图片
+        # 1. 图片（[I4] 预乘入 T43 共享缓存，摘常驻 QGraphicsOpacityEffect）
+        # opacity 烘进副本 alpha（scene_layer 同款预乘），label 重绘不再走
+        # effect 离屏合成路径（resize/splitter 拖动时全幅双倍 blit）；独立
+        # QPixmap 解码同时入缓存：opacity=1 时与 scene 层共用 source 条目，
+        # opacity<1 时按 area_premult+opacity_255 分条，同图同透明度跨窗口共享。
         if image:
-            pix = QPixmap(resolved_image)
+            from app.core.infra.scene_pixmap_cache import scene_pixmap_cache
+            from app.widgets.scene_layer import _premultiply_opacity
+
+            if opacity >= 0.999:
+                pix = scene_pixmap_cache.get_pixmap(
+                    "source", resolved_image, load=lambda p: QPixmap(p)
+                )
+            else:
+                pix = scene_pixmap_cache.get_pixmap(
+                    "area_premult",
+                    resolved_image,
+                    load=lambda p, o=opacity: QPixmap.fromImage(
+                        _premultiply_opacity(QPixmap(p).toImage(), o)
+                    ),
+                    opacity_255=int(round(opacity * 255)),
+                )
             if not pix.isNull():
                 label.setPixmap(pix)
                 label.setScaledContents(True)
 
-        # 2. 透明度
-        if opacity < 1.0:
-            effect = QGraphicsOpacityEffect(label)
-            effect.setOpacity(opacity)
-            label.setGraphicsEffect(effect)
-            setattr(self, opacity_attr, effect)
+        # 2. 透明度：已预乘进副本 alpha（见上方 [I4]），不再挂 QGraphicsOpacityEffect
 
         # 3. 颜色（背景底色，独立于图片）
         if color:
@@ -5499,7 +5512,9 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
 
     def get_current_window(self):
         """获取当前选中的窗口"""
-        idx = self._tab_panel.active_index
+        # 两阶段构造壳期 _tab_panel 未建（complete_construction 前），防属性缺失
+        _panel = getattr(self, "_tab_panel", None)
+        idx = _panel.active_index if _panel is not None else -1
         if 0 <= idx < len(self._windows):
             return self._windows[idx]
         return None
