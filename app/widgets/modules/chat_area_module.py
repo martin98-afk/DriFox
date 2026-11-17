@@ -42,6 +42,69 @@ def _resolve_chat_image(image: str) -> str:
     return image
 
 
+
+def _chat_theme_has_scene_backdrop() -> bool:
+    """当前主题是否用壁纸/动态层垫聊天区（决定能否实底化）
+
+    判据（theme_manager.get_theme_backgrounds）：scene / chat_area 任一区域配了
+    image，或 overlay 动态光影启用 → backdrop 逐像素变化，预合成实色会盖掉
+    场景观感，必须保持透明。纯色主题（含 chat_area 纯色底）返回 False。
+    """
+    from app.utils.theme_manager import theme_manager
+
+    bgs = theme_manager.get_theme_backgrounds(theme_manager.get_current_theme_id())
+    for region in ("scene", "chat_area"):
+        cfg = bgs.get(region) or {}
+        if cfg and cfg.get("enabled", True) and cfg.get("image"):
+            return True
+    overlay = bgs.get("overlay") or {}
+    if overlay and overlay.get("enabled", True):
+        return True
+    return False
+
+
+def apply_chat_surface_opaque(host) -> None:
+    """纯色主题下给聊天滚动内容层刷等价实底（启用 Qt 滚动 blit）。幂等。
+
+    [PERF #I2] chat_container 原 QSS transparent：滚动 blit 要求内容 widget
+    自身不透明，透明时 Qt 无法判定搬移残留可直接复用，每滚一步整视口重绘
+    （离屏实测 8 格滚动 220 paint，实底 91，2.4x）。实底色按 source-over
+    预合成（chatFrame CARD_BG a150 ⊕ 下层纯色），视觉与透明时逐像素等价
+    （结合律：气泡半透明底叠加结果不变，message_card._base_bg 的 rgba 无需
+    参与合成）。
+
+    壁纸/动态层主题跳过并还原透明（autofill 关闭即不画底，palette 残留色
+    无副作用）。主题切换经 host.refresh_theme 重入本函数完成刷/还原翻转。
+    注意：必须已在 QScrollArea.setWidget 之后调用（reparent 会重置属性）。
+    """
+    container = getattr(host, "chat_container", None)
+    if container is None:
+        return
+    try:
+        if _chat_theme_has_scene_backdrop():
+            container.setAutoFillBackground(False)
+            return
+        from app.utils.design_tokens import Colors, make_scroll_content_opaque
+        from app.utils.theme_manager import theme_manager
+
+        bgs = theme_manager.get_theme_backgrounds(theme_manager.get_current_theme_id())
+        chat_area = bgs.get("chat_area") or {}
+        base = (
+            chat_area.get("color")
+            if chat_area and chat_area.get("enabled", True)
+            else None
+        ) or Colors.CONTENT_BG
+        # alpha=150 = chatFrame 面板自身 alpha（_ThemedPanel 默认 bg_alpha=150）
+        make_scroll_content_opaque(
+            container,
+            fg=Colors.CARD_BG.format(alpha=255),
+            alpha=150,
+            backdrop=base,
+        )
+    except RuntimeError:
+        pass  # 宿主析构期（窗口关闭 / 插件热重载）
+
+
 class ChatAreaModule(UIModule):
     """对话区模块：top/bottom 卡容器间嵌入 chat scroll 区域"""
 
@@ -88,6 +151,8 @@ class ChatAreaModule(UIModule):
         # 聊天区同样关掉平滑动画：流式期每帧逐帧滚动会把整视口重绘叠加到
         # 渲染负载上；接管器保留连续滚轮加速，一次 setValue 到位。
         install_fast_wheel(host.chat_scroll_area, native_scrollbar=False, smooth_ms=0)
+        # [PERF #I2] 纯色主题刷等价实底启用滚动 blit（壁纸主题保持透明，见函数 docstring）
+        apply_chat_surface_opaque(host)
 
         # 连接滚动事件（虚拟滚动回收）
         try:
