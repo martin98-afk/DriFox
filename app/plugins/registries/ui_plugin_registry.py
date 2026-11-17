@@ -1732,7 +1732,7 @@ class UIPluginRegistry:
 
         与 ``attach_card_inline_panel``（运行态投影，恒迁到最新卡）互补：本方法
         **不迁卡**，只为「产生该数据的那张卡」重建面板——语义同成果栏
-        （``update_artifact_list`` 追加到所属卡片）。面板缺失时不创建无数据的空面板：
+        （``push_inline_items`` 增量追加到所属卡片）。面板缺失时不创建无数据的空面板：
         loader 返回空即跳过。
 
         Args:

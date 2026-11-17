@@ -593,7 +593,9 @@ class PluginManager:
         "tools": "system-interact",  # 2026-11-12 由 system-tools 更名
         "context_tiers": "system-context",
         "budget_resolvers": "system-context",
-        # 「ui」组件的系统插件锚点：产物页（工作树/历史已拆分为独立插件）
+        # 「ui」组件的系统插件锚点：v0.5.9 单体拆分迁移的一次性承继映射。
+        # ⚠ 不可删除：老版本用户升级时按此把旧 ui 组件归入 artifacts-manager；
+        # 该插件现已改为卡片成果栏（2026-11-17），映射对已迁移用户无副作用。
         "ui": "artifacts-manager",
         "team_templates": "system-team-templates",
         "mcp": "system-mcp",

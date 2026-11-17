@@ -10936,7 +10936,7 @@ class OpenAIChatToolWindow(ToolWindow):
             _mark(f"消息卡片x{_card_hits}")
             # ★ 右侧工作台插件页重建：ui 热重载后 registry 已更新，但面板
             # widget 是构建时快照，(page_id, label) 签名不变会被 sync_plugin_pages
-            # 短路跳过——强制销毁重建，常驻插件页（工作树/产物/自注册 tab）
+            # 短路跳过——强制销毁重建，常驻插件页（工作树/文件树/自注册 tab）
             # 才真正换用新代码。下一帧执行，避开广播栈内重建。
             # ★ 精准且无状态：按**插件归属**定向重建（面板就地记录每页归属），
             # 其余插件页原样保留，不丢滚动位置/展开项/输入草稿。插件名缺失
@@ -12243,8 +12243,8 @@ class OpenAIChatToolWindow(ToolWindow):
         session = self.session_manager.get_current_session()
         if not session:
             self._clear_chat_area()
-            # 🐛 修复（产物区刷新不及时）：会话显示出口同步重拉工作台产物/任务，
-            # 否则切换会话后产物区仍显示上一会话的文件记录。
+            # 🐛 修复（工作台刷新不及时）：会话显示出口同步刷新工作台，
+            # 否则切换会话后各页仍显示上一会话的数据。
             # _push_workbench_updates 自带活跃窗口隔离（非活跃窗口跳过）与
             # 面板不可见零开销（refresh_workbench 首行 return），可安全调用。
             self._push_workbench_updates()
@@ -12262,7 +12262,7 @@ class OpenAIChatToolWindow(ToolWindow):
             self._refresh_context_usage_indicator()
             # 恢复缓存卡片后，多次滚动确保在底部
             self._scroll_to_bottom(sticky_ms=900)
-            # 🐛 修复（产物区刷新不及时）：缓存恢复也是一次会话切换，同步刷新工作台
+            # 🐛 修复（工作台刷新不及时）：缓存恢复也是一次会话切换，同步刷新工作台
             self._push_workbench_updates()
             # 任务看板归属最新卡片：缓存卡片重建后面板需重新挂载
             QTimer.singleShot(0, lambda: self._sync_todo_panel())
@@ -12296,15 +12296,15 @@ class OpenAIChatToolWindow(ToolWindow):
             # _switch_to_session_by_id 等全部调用方，无需在每处重复失效。
             self._invalidate_welcome_card()
             self._show_initial_welcome()
-            # 🐛 修复（产物区刷新不及时）：切到空会话也需刷新工作台（清掉上一会话产物）
+            # 🐛 修复（工作台刷新不及时）：切到空会话也需刷新工作台（清掉上一会话数据）
             self._push_workbench_updates()
             return
 
         self._load_message_batch(initial=True)
         # 同步 batch 结构：确保 _batch_cards 和 _message_index 与布局一致
         self._sync_batch_structures()
-        # 🐛 修复（产物区刷新不及时）：会话显示完成的统一出口，按新 session_id
-        # 重拉工作台产物/任务/项目数据（_load_session_from_record / _create_new_session /
+        # 🐛 修复（工作台刷新不及时）：会话显示完成的统一出口，按新 session_id
+        # 重拉工作台数据（_load_session_from_record / _create_new_session /
         # _switch_to_session_by_id 等所有加载路径都经过本方法，无需逐处补刷）
         self._push_workbench_updates()
         # 任务看板：重建/懒渲染完成后再挂一次（列表数据是窗口级，不随会话变化）
@@ -12340,7 +12340,7 @@ class OpenAIChatToolWindow(ToolWindow):
             logger.debug(f"[OpenAIChatToolWindow] _show_initial_welcome: 会话已有消息，跳过（wid={self._window_id}）")
             # 🛡️ 兜底（2026-10-29）：守卫合法拦截（会话确有真消息）≠ 主区域有内容。
             # 迟到的 welcome 槽位可能晚于首轮对话渲染，此前只 return 会留下空白主区域。
-            # 走会话渲染汇聚点 _display_current_session()（内部含前置序列与产物刷新），
+            # 走会话渲染汇聚点 _display_current_session()（内部含前置序列与工作台刷新），
             # 不内联、不裸调 _load_message_batch。
             # _welcome_fallback_busy 防重入（_display_current_session 空 batch 分支会
             # 回调本方法，虽与守卫同口径下不可达，仍硬防）；_displayed_session_id 已是
@@ -22004,7 +22004,7 @@ class OpenAIChatToolWindow(ToolWindow):
         artifacts = result.get("artifacts") if isinstance(result, dict) else getattr(result, "artifacts", None)
         if artifacts:
             self._sync_artifact_panel(artifacts)
-        # 工作台浮层联动：文件写入类工具完成后重拉产物列表
+        # 工作台浮层联动：文件写入类工具完成后刷新工作台各页
         try:
             if not todos and (
                 tool_name

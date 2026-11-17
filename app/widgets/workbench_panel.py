@@ -65,12 +65,6 @@ class _PagePlaceholder(QWidget):
         self._hint = _EmptyHint(text, self)
         layout.addWidget(self._hint)
 
-    def set_operations(self, operations) -> None:
-        """宿主数据入口的空实现（插件版会覆盖；占位页无数据可渲染）"""
-
-    def set_diff_all_callback(self, callback) -> None:
-        """差异回调注入的空实现（占位页无差异入口）"""
-
     def refresh_style(self) -> None:
         self._hint.refresh_style()
 
@@ -105,8 +99,6 @@ class WorkbenchPanel(QWidget):
     # 本页面板内任一页请求「切换工作目录」（页面自带 workingDirChanged 信号时由
     # 面板通用转发，见 _wire_page_signals）→ 宿主转发给活跃窗口
     workingDirChanged = pyqtSignal(str)
-    # 差异请求：file_paths 为 None 表示「查看所有产物差异」
-    diff_requested = pyqtSignal(object)  # Optional[List[str]]
     # 卡片 tab × 关闭钮点击（registry 连接本信号，同步清理卡片归属状态并摘 tab）
     card_tab_close_requested = pyqtSignal(str)  # card_id
     # 当前页签变化（含程序化切换）：宿主用于按对话窗口独立记忆页签
@@ -248,15 +240,6 @@ class WorkbenchPanel(QWidget):
     def is_panel_visible(self) -> bool:
         return self.isVisible()
 
-    # ── 差异信号（产物页 → 宿主） ──
-
-    def _emit_diff(self, file_paths: Optional[List[str]] = None) -> None:
-        """产物页差异按钮回调：转发 file_paths 到宿主的 diff_requested 信号
-
-        None 表示「查看所有产物差异」（由宿主从当前 ops 重新计算）。
-        """
-        self.diff_requested.emit(file_paths)
-
     # ── 动态卡片 tab（right 容器 UI 插件卡片） ──
 
     def open_card_tab(
@@ -339,7 +322,7 @@ class WorkbenchPanel(QWidget):
                 pass
         self._rebuild_tab_bar()
         # 当前页被移除时 QStackedWidget 已自动切到邻近页，这里同步按钮高亮；
-        # 极端情况（空栈）回落产物页
+        # 极端情况（空栈）回落第一页
         self.set_current_tab(max(0, self._stack.currentIndex()))
         return True
 
@@ -740,7 +723,7 @@ class WorkbenchPanel(QWidget):
 
         宿主在「当前对话窗口没有页签记忆」时调用：初次打开工作台应落插件声明的
         默认页，而不是依赖 ``_stack.currentIndex()``——插件分批注册与 reconcile
-        重排会让当前索引漂移，曾导致首次打开落到产物页。
+        重排会让当前索引漂移，曾导致首次打开落到非预期页。
 
         ★ user=False：不发射 current_tab_changed、不写 per-window 记忆，
           用户主动切页后才锁定其选择。
@@ -797,7 +780,7 @@ class WorkbenchPanel(QWidget):
         ★ 不能用裸 window()：hover 悬浮预览期间工作台 frame 会被 setParent
         到 HoverPreviewOverlay（Qt.Tool 顶层 owned 窗口），此时 panel.window()
         返回的是**浮层**而不是主窗口。浮层没有 _build_ui_context → 插件页拿到
-        的 context 只剩 diff_requested_callback（backend 缺失 → 工作树页空列表、
+        的 context 只剩最小宿主快照（backend 缺失 → 工作树页空列表、
         添加/删除/切换全部静默失效）。因此这里按"能构建 UI context 的顶层窗口"
         解析：先看缓存宿主，再按 window() → 全部顶层窗口的顺序找第一个具备
         _build_ui_context 的窗口。
@@ -889,8 +872,6 @@ class WorkbenchPanel(QWidget):
                 context = parent_win._build_ui_context()
         except Exception:
             context = {}
-        # 差异回调注入 context，供插件版产物页触发
-        context.setdefault("diff_requested_callback", self._emit_diff)
         # 插件页拉取最新宿主上下文的入口：工作台页的 context 是构造时快照，
         # 项目切换后 project_root 会过期（文件树页曾因此显示旧项目目录）。
         # 老页面不读该键，行为完全不变。
@@ -949,7 +930,7 @@ class WorkbenchPanel(QWidget):
 
         ★ 切页后统一触发当前页 ``refresh_data()``（通用自拉，见
         ``refresh_current_page_data``）：宿主不识别页面语义，页面自己决定
-        要不要重建（如产物页按数据签名跳过、历史页按子页签分流）。
+        要不要重建（如历史页按数据签名跳过、按子页签分流）。
 
         ★ 「当前页」以 ``_logical_index`` 为准，不看 ``_stack.currentIndex()``：
         滑动段1 阶段 stack 仍是旧页，读实际页会误判 changed、把胶囊目标钉回。
@@ -1068,6 +1049,6 @@ class WorkbenchPanel(QWidget):
 
         ★ 此前只实现 refresh_style：register_refresh_target 注册了本面板，
         但 dispatch 的 hasattr(widget, "refresh_theme") 探测落空 → 静默跳过，
-        主题切换时整面板（含工作树/产物插件页）都不刷新。
+        主题切换时整面板（含工作树/文件树插件页）都不刷新。
         """
         self.refresh_style()

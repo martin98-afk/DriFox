@@ -36,7 +36,7 @@ DriFox 是一个桌面 AI 智能体工作台。它把「一支 AI 团队」装�
 
 「分工」在 DriFox 里是动词：每个成员的工具权限都透明可见、实时可调。团队靠分工明细的工具权限释放不同身份智能体的能力——测试成员不该碰部署命令、探索成员拿不到写权限——而你在任何时候都能看到谁握着哪些工具、随时收紧或放开。权限调整即时生效，不重启、不重建会话。
 
-作为工具，它是完备的：多智能体编排、工具权限实时控制、Git worktree 管理、定时任务、文件树与产物管理、多平台 IM 接入、28 个内置插件、17 套主题、MCP 协议与任意 OpenAI 兼容端点。
+作为工具，它是完备的：多智能体编排、工具权限实时控制、Git worktree 管理、定时任务、文件树与成果栏、多平台 IM 接入、27 个内置插件、17 套主题、MCP 协议与任意 OpenAI 兼容端点。
 
 作为搭档，它是顺手的：工具权限随时可见、随手可调；消息卡片自带审查 / 分支 / 复制，待办与计划内嵌；长对话自动交接，换会话不断档，旧会话原始转录可随时回查。
 
@@ -56,13 +56,13 @@ DriFox 是一个桌面 AI 智能体工作台。它把「一支 AI 团队」装�
 
 **MCP 系统** — 完整 Model Context Protocol 支持，含 OAuth 2.1 授权流（元数据发现 / PKCE / 动态客户端注册 / token 自动刷新），Notion 等需授权的服务一次登录即可使用；MCP 工具自动并入工具池。
 
-**插件系统** — 28 个内置插件（18 个系统组件插件 + 10 个功能插件）。插件可贡献：工具、命令、智能体、技能、主题、Hook、MCP、模型适配器、存储引擎、网关平台、UI 组件（浮动卡片 / 内容渲染器 / 消息工厂 / 独立窗口 / 设置卡 / 侧栏入口 / 输入区按钮）。官方市场一键安装，watchfiles 热更新，即改即生效。
+**插件系统** — 27 个内置插件（18 个系统组件插件 + 9 个功能插件）。插件可贡献：工具、命令、智能体、技能、主题、Hook、MCP、模型适配器、存储引擎、网关平台、UI 组件（浮动卡片 / 内容渲染器 / 消息工厂 / 独立窗口 / 设置卡 / 侧栏入口 / 输入区按钮）。官方市场一键安装，watchfiles 热更新，即改即生效。
 
 **安全** — API Key 三档保存：系统钥匙串（本机绑定）/ 密码加密（密文随配置云同步，换机输同一密码即可解出）/ 明文；OAuth token 走系统凭证库。安全中心提供命令解壳判定、路径白黑名单、网络外传检测、删除审批（删除类命令强制审批）、垃圾桶软删除（删除文件自动移入垃圾箱，误删可找回）、进程资源配额，全部可视化配置；企业网络的 TLS 拦截场景自动委托系统信任链校验。审批策略可配（审核处理）：人工审批（可设超时与超时处理：拒绝 / 允许 / AI 审核）或 AI 审批（由所选审核模型自动判定放行 / 拒绝，失败回落人工审批）。
 
 **界面与交互** — 无边框窗口 + 自定义标题栏，系统托盘常驻，全局热键（`ALT+Z`，可自定义）全局唤起 / 隐藏；工作台挤压折叠（拖拽落定智能让位、压穿自动折叠、按原宽恢复、per-tab 宽度记忆）；消息卡片支持审查（diff 统计）/ 分支 / 复制 / 内嵌待办与计划卡；ECharts 交互图表、词云生成、Markdown / HTML / 图片原生渲染；17 套主题、深浅自动适配。
 
-**会话与产物** — 历史 / 归档 / 搜索；消息级分支（从任意消息分叉新对话）；会话分享一键发布为在线 HTML 页面；工作台产物页按用户问题分组管理本会话文件；file-tree 与 Git worktree 页常驻侧栏；文件撤销。
+**会话与产物** — 历史 / 归档 / 搜索；消息级分支（从任意消息分叉新对话）；会话分享一键发布为在线 HTML 页面；消息卡片成果栏展示工具产出的文件；file-tree 与 Git worktree 页常驻侧栏；文件撤销。
 
 **多平台网关** — 企业微信 / 钉钉 / Telegram / Discord / 飞书 / Slack / WhatsApp 平台框架，QQ 与微信机器人适配器见社区插件仓 [`drifox-plugins2`](https://github.com/martin98-afk/drifox-plugins2)，让 AI 团队在你常用的 IM 上随时响应。
 
@@ -315,12 +315,12 @@ plugins/<功能插件>/        # 10 个内置功能插件
 ~/.drifox/plugins/        # 用户安装的社区插件（watchfiles 热扫描，热更新）
 ```
 
-**28 个内置插件**：
+**27 个内置插件**：
 
 | 类别 | 插件 |
 |---|---|
 | 系统组件（18） | agents / commands / context / hooks / hook-policies / loop-policies / mcp / model-adapters / providers / serializers / skills / storages / stream-sinks / team-templates / themes / tools / transports / cleaner |
-| 功能插件（10） | assistant_hub（助手中心）· plugin-marketplace（插件市场）· worktree-manager（工作树）· file-tree（文件树）· history-manager（历史）· artifacts-manager（产物）· agent_trace（轨迹）· share-history（分享记录）· shortcut-manager（快捷键）· welcome_changelog（更新日志）|
+| 功能插件（9） | assistant_hub（助手中心）· plugin-marketplace（插件市场）· worktree-manager（工作树）· file-tree（文件树）· history-manager（历史）· artifacts-manager（成果栏）· agent_trace（轨迹）· share-history（分享记录）· shortcut-manager（快捷键）· welcome_changelog（更新日志）|
 
 **扩展点**：tools / commands / agents / skills / themes / hooks / mcp / gateways / model_adapters / storages / serializers / loop_policies / context_tiers / budget_resolvers / stream_sinks / transports / team_templates / ui（浮动卡片、内容渲染器、消息工厂、独立窗口、设置卡、侧栏入口、输入区按钮、右键菜单、页脚信息项）。
 

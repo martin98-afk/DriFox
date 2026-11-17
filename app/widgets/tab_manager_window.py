@@ -38,6 +38,7 @@ from app.utils.theme_manager import theme_manager
 from app.utils.utils import get_font_family_css, get_unified_font
 from app.widgets.custom_title_bar import _MacTrafficLightCenterMixin
 from app.widgets.deferred_paint_stack import DeferredPaintStack
+from app.widgets.splitter_corners import SplitterCornerController
 
 # ── 对话区限宽档位（px）：窗口过宽时限制对话内容宽度并居中，两侧留白 ──
 # 避免聊天内容在超宽屏幕上被拉得难以阅读。档位可在 设置-外观 切换。
@@ -1225,6 +1226,9 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
         self._splitter_idle_timer.setSingleShot(True)
         self._splitter_idle_timer.setInterval(120)
         self._splitter_idle_timer.timeout.connect(self._on_splitter_idle)
+        # ── splitter 角点联动 + handle 延迟高亮（VSCode 式）──
+        # 实例在 _reapply_splitter_handle_styles 首次调用时创建（全局事件过滤器）
+        self._splitter_corners: Optional[SplitterCornerController] = None
 
         # ── 团队成员行「最后活动时间」周期刷新：刷新点（标题变更/一轮结束/
         # 加入 Tab）只在活动时刻触发，算出的「刚刚」随闲置僵死；30s 重算一次 ──
@@ -1431,7 +1435,6 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
         self.workbench_panel.hide()
         self.workbench_panel.close_requested.connect(self._hide_workbench)
         self.workbench_panel.refresh_requested.connect(self.refresh_workbench)
-        self.workbench_panel.diff_requested.connect(self._open_workbench_diff)
         # 🆕 页签按对话窗口独立记忆：页签变化 → 写入当前活跃窗口；切回窗口时恢复
         self.workbench_panel.current_tab_changed.connect(self._remember_workbench_tab)
         # 页面请求切换工作目录 → 转发给当前活跃窗口（实例缓存/分支标签/团队广播）
@@ -2182,7 +2185,7 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
         # ★ 初次打开：该窗口尚未主动切过工作台页签（无 per-window 记忆）→ 落到
         #   插件声明的默认落点页（metadata["default_landing"]，缺省顺序第一页）。
         #   必须在 reconcile 之后按 tab_id 定位：插件分批注册会让 stack 当前索引
-        #   漂移，直接沿用 currentIndex 会落到非预期页（曾表现为默认「产物」）。
+        #   漂移，直接沿用 currentIndex 会落到非预期页。
         #   user=False 不写记忆，用户主动切页后才锁定其选择。
         try:
             win = self.get_current_window()
@@ -2310,82 +2313,6 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
         except Exception:
             logger.exception("[Workbench] 打开历史会话失败")
 
-    # ── 工作台差异入口（替代标题栏 diff_btn） ──
-
-    def _open_workbench_diff(self, file_paths: Optional[List[str]]) -> None:
-        """工作台产物页的差异请求：调 controller.show_diff_viewer（保持工作台显示）
-
-        file_paths 为 None 表示「查看所有产物差异」，由宿主从当前 backend 重新拉取 ops。
-        """
-        panel = getattr(self, "workbench_panel", None)
-        if panel is None:
-            return
-        win = self.get_current_window()
-        backend = getattr(win, "backend", None) if win is not None else None
-        session_id = getattr(win, "_current_session_id", None)
-        if backend is None or not session_id:
-            self._show_diff_toast("当前没有活动会话")
-            return
-        try:
-            from app.utils.file_operation_recorder import FileOperationRecorder
-            from app.utils.diff_viewer import DiffHtmlGenerator
-
-            file_recorder = FileOperationRecorder(backend.session_store)
-            operations = file_recorder.get_all_operations_for_session(session_id)
-        except Exception as e:
-            logger.warning(f"[WorkbenchDiff] 数据准备失败: {e}")
-            operations = []
-
-        # 决定最终要 diff 的文件路径列表
-        target_paths: List[str] = []
-        if file_paths:
-            # 单条目入口：仅取有效存在的
-            target_paths = [p for p in file_paths if p]
-        if not target_paths:
-            # 「所有产物差异」入口：从 ops 拿文件路径去重
-            target_paths = list({op.get("file_path") for op in operations if op.get("file_path")})
-        if not target_paths:
-            self._show_diff_toast("本次会话没有可对比的产物文件")
-            return
-
-        # 生成 diff html
-        try:
-            diff_text = DiffHtmlGenerator.get_diff_for_files(target_paths, session_id)
-            html = DiffHtmlGenerator.generate_html_report(diff_text or "", session_id)
-        except Exception as e:
-            logger.warning(f"[WorkbenchDiff] 生成 diff html 失败: {e}")
-            self._show_diff_toast("生成差异失败")
-            return
-
-        # 调 controller 显示差异卡片（覆盖对话区域）
-        try:
-            from app.widgets.cards.global_card_controller import get_global_card_controller
-
-            controller = get_global_card_controller()
-            if controller is None:
-                self._show_diff_toast("卡片控制器未就绪")
-                return
-            controller.show_diff_viewer(html, f"产物差异（{len(target_paths)} 个文件）")
-        except Exception as e:
-            logger.warning(f"[WorkbenchDiff] show_diff_viewer 失败: {e}")
-            self._show_diff_toast("打开差异卡片失败")
-            return
-
-    def _show_diff_toast(self, msg: str) -> None:
-        """统一的轻量提示（InfoBar 顶层）"""
-        try:
-            from qfluentwidgets import InfoBar, InfoBarPosition
-
-            InfoBar.warning(
-                "提示",
-                msg,
-                parent=self,
-                position=InfoBarPosition.TOP_RIGHT,
-                duration=2500,
-            )
-        except Exception:
-            logger.warning(f"[WorkbenchDiff] {msg}")
-
     def refresh_theme(self):
         """ThemeManager 统一刷新入口（dispatch_refresh 调用）"""
         self._on_theme_changed()
@@ -2424,7 +2351,7 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
                     margin: 10px 2px;
                     border-radius: 1px;
                 }}
-                QSplitterHandle:hover {{
+                QSplitterHandle[splitterHot="true"] {{
                     border-left: 2px solid {Colors.BORDER_ACCENT};
                 }}
                 """,
@@ -2445,7 +2372,7 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
                     margin: 0;
                     border-radius: 1px;
                 }}
-                QSplitterHandle:hover {{
+                QSplitterHandle[splitterHot="true"] {{
                     border-left: 2px solid {Colors.BORDER_ACCENT};
                 }}
                 """,
@@ -2459,7 +2386,7 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
                     margin: 2px 10px;
                     border-radius: 1px;
                 }}
-                QSplitterHandle:hover {{
+                QSplitterHandle[splitterHot="true"] {{
                     border-top: 2px solid {Colors.BORDER_ACCENT};
                 }}
                 """,
@@ -2478,6 +2405,11 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
                     handle.setStyleSheet(qss)
             except RuntimeError:
                 continue  # C++ 对象已销毁
+
+        # 角点联动 / 延迟高亮控制器：全局事件过滤器，对本窗口与插件里的
+        # splitter 一并生效（无需逐个注册）
+        if getattr(self, "_splitter_corners", None) is None:
+            self._splitter_corners = SplitterCornerController(self)
 
     def _apply_theme_stylesheet(self):
         """应用主题样式表
@@ -5711,7 +5643,7 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
                     self.set_workbench_visible(bool(saved_visible), animate=False)
                 if self.is_workbench_visible():
                     # 🚀 数据刷新延迟一帧：setCurrentWidget 先完成目标窗口渲染，
-                    # 工作台全量刷新（产物/任务/工作树/历史换挂）在下一帧执行，
+                    # 工作台全量刷新（各插件页自拉数据）在下一帧执行，
                     # 切标签的感知延迟不再叠加工作台刷新成本。★ 序号守卫：
                     # 快速连续切换时旧调度作废，防止旧窗口记忆覆盖新活跃窗口状态
                     self._wb_refresh_seq = getattr(self, "_wb_refresh_seq", 0) + 1
@@ -7326,6 +7258,13 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
     def cleanup(self):
         """清理所有窗口和资源"""
         TabManagerWindow._instance = None
+        # 卸载全局 splitter 角点控制器（应用级事件过滤器，退出前必须在）
+        try:
+            if self._splitter_corners is not None:
+                self._splitter_corners.stop()
+                self._splitter_corners = None
+        except Exception:
+            pass
         # ★ 停止应用级服务（Gateway 平台 WebSocket 断连 + 插件 watcher 线程）
         try:
             from app.core.services.gateway_access import shutdown_gateway_service
