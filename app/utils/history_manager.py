@@ -2433,13 +2433,18 @@ class HistoryManager:
                 self._save_inflight -= 1
             self._save_cond.notify_all()
 
-    def _wait_inflight_saves(self, timeout: float = 5.0) -> bool:
+    def _wait_inflight_saves(self, timeout: float = 2.0) -> bool:
         """等待所有已交给后台线程的写盘结束（返回 False = 超时）。
 
         为什么需要：_do_save / flush_async 都在**起线程之前**就把
         _pending_save_session_id 置 None，flush() 只看 pending 会判定「无事可做」
         直接跳过 → 进程退出时 daemon 写线程被静默杀掉，最后一次保存丢失。
         本方法补上「等已交出去的写」这一环，flush() 之后才能安全地穿透提交。
+
+        [I1] 超时 5s→2s：本方法在调用线程同步等待（含主线程停止路径），
+        5s 上限意味着最坏卡 UI 一拍 5 秒；大会话写盘常态 700ms 级、带 3 次
+        重试也在 2s 内可完成，2s 足够覆盖正常在飞写。超时仍走 ERROR 告警
+        （下方日志），退出链后续由 DatabaseManager.close 的 flush 兜底。
         """
         deadline = time.monotonic() + timeout
         with self._save_cond:

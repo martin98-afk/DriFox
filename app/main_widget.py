@@ -26937,7 +26937,11 @@ class OpenAIChatToolWindow(ToolWindow):
                 self._persist_stop_elapsed()  # 只写 elapsed，不 save
             if self.history_manager:
                 self._save_current_session_to_history()
-                self.history_manager.flush()
+                # [I1] flush→flush_async：主线程同步 flush = serialize+zstd+SQL 写盘
+                # （大会话 700ms+，_wait_inflight_saves 最多等 5s），是停止路径
+                # 卡顿主因。后台线程非 daemon，退出时解释器 join 保数据安全
+                # （同 flush_async docstring 的最后一窗语义）。
+                self.history_manager.flush_async()
             return
 
         if interrupted_messages:
@@ -26960,7 +26964,9 @@ class OpenAIChatToolWindow(ToolWindow):
         # 修复前：_persist_stop_elapsed 内部 save，外面又 save → 同 pending_id 跳 3 次。
         if self.history_manager:
             self._save_current_session_to_history()
-            self.history_manager.flush()
+            # [I1] flush→flush_async：主线程不再同步等待写盘（大会话 700ms+
+            # 卡停止回调一拍）；非 daemon 后台写盘，数据安全语义不变。
+            self.history_manager.flush_async()
 
         # 清理计时相关状态
         self._response_start_time = None
