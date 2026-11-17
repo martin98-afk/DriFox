@@ -20532,19 +20532,79 @@ class OpenAIChatToolWindow(ToolWindow):
                     if retry < 2:
                         QTimer.singleShot(5000, lambda: self._load_input_history(retry + 1))
                     return
+                # [I12] 内存镜像：发送路径 _record_input_history 零 SQL 更新用
+                self._input_history_cache = list(history)
                 self.input_area.load_history(history)
         except Exception:
             pass
 
+    @staticmethod
+    def _merge_input_history_cache(cache: list, text: str, attachments: Optional[list] = None, limit: int = 50) -> list:
+        """[I12] 输入历史内存镜像维护（与 InputHistoryRepository 同口径纯函数）。
+
+        - 相邻去重：与镜像首条完全相同（text 去空白 + attachments JSON 序列化
+          等价）跳过——与 InputHistoryRepository.add 的相邻去重语义一致
+        - 最新在前 prepend、截断 limit（存储层 get_all LIMIT 50 同值）
+        - text 空白不入镜像（存储层 add 对空内容直接 return False）
+        """
+        clean_text = (text or "").strip()
+        if not clean_text:
+            return cache
+        new_attrs_json = json.dumps(attachments or []).decode("utf-8")
+        if cache:
+            first = cache[0]
+            if isinstance(first, dict):
+                first_text = str(first.get("text") or "").strip()
+                first_attrs_json = json.dumps(first.get("attachments") or []).decode("utf-8")
+            else:  # 兼容旧形态（load_history 对纯字符串同款转换）
+                first_text = str(first).strip()
+                first_attrs_json = json.dumps([]).decode("utf-8")
+            if first_text == clean_text and first_attrs_json == new_attrs_json:
+                return cache
+        entry = {"text": clean_text, "attachments": list(attachments or [])}
+        return [entry] + list(cache)[: limit - 1]
+
     def _record_input_history(self, text: str, attachments: Optional[list] = None):
-        """记录用户输入（含附件路径）到历史数据库"""
+        """记录用户输入（含附件路径）到历史数据库
+
+        [I12] 发送路径主线程零 SQL：原实现同步 add_input_history（去重
+        SELECT + INSERT + COUNT(+DELETE)）+ get_input_history（LIMIT 50）
+        共 4~5 次锁往返。现在：
+        - UI 缓存由内存镜像维护（_merge_input_history_cache，与存储层
+          相邻去重/最新在前/50 条上限同口径），即时更新零等待
+        - 落账转后台 daemon 线程（实例锁串行化；DatabaseManager 共享连接
+          自带读写锁，跨线程调用安全）
+        - 镜像未就绪（启动加载失败/未完成）时本次回退原同步路径并回填
+          镜像，语义与旧实现一致，下次发送起零 SQL
+        """
         try:
-            if hasattr(self, "session_store") and self.session_store:
-                self.session_store.add_input_history(text, attachments)
-                # 更新输入框的历史缓存；查询失败（None）保留现有列表不覆盖
-                history = self.session_store.get_input_history()
-                if history is not None:
-                    self.input_area.load_history(history)
+            cache = getattr(self, "_input_history_cache", None)
+            store = self.session_store if hasattr(self, "session_store") else None
+            if cache is None:
+                # 镜像未就绪：同步查一次回填（原 _load_input_history 失败链路兜底）
+                if not store:
+                    return
+                history = store.get_input_history()
+                if history is None:
+                    return
+                cache = list(history)
+            merged = self._merge_input_history_cache(cache, text, attachments)
+            self._input_history_cache = merged
+            self.input_area.load_history(merged)
+            if store:
+                lock = getattr(self, "_input_history_write_lock", None)
+                if lock is None:
+                    lock = threading.Lock()
+                    self._input_history_write_lock = lock
+
+                def _bg_record():
+                    try:
+                        with lock:
+                            store.add_input_history(text, attachments)
+                    except Exception as e:
+                        logger.warning(f"[InputHistory] 后台落账失败: {e}")
+
+                threading.Thread(target=_bg_record, daemon=True, name="input-history-save").start()
         except Exception:
             pass
 
@@ -26813,7 +26873,10 @@ class OpenAIChatToolWindow(ToolWindow):
 
         def _do_finalize():
             try:
-                interrupted_messages = engine_ref.finalize_stop() or []
+                # [I10] 后台/关窗路径显式 None（= executor 历史默认 3000+1000）：
+                # 门面默认值已收紧为 400（主线程安全预算），后台线程不受限短时，
+                # 这里必须显式 None 覆盖默认，保持宽松等待语义。
+                interrupted_messages = engine_ref.finalize_stop(timeout_ms=None) or []
             except Exception as e:
                 logger.error(f"[ChatWindow] _launch_background_finalize error: {e}\n{traceback.format_exc()}")
                 interrupted_messages = []

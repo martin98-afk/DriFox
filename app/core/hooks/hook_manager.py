@@ -2004,9 +2004,24 @@ class HookManager:
         # Phase 2: 同步阶段 hook（PROMPT + PYTHON 注入型）按序执行，输出需立即注入
         for idx in sync_indices:
             hook = all_hooks[idx]
+            # T7-obs 注入型补强（#A1 发现 #3 观测缺口）：注入型 hook 在主线程
+            # 发消息/建窗路径同步执行，慢 hook 吃主线程此前不可见（COMMAND 已有
+            # [HookSlowCommand] 打点）。对齐其口径补 [HookSlowInjected]；
+            # 仅观测，不改变任何执行行为。
+            _t0 = time.monotonic()
             results[idx] = self._execute_hook(
                 hook, context, trigger_async=False, skip_finished_callback=skip_finished_callback
             )
+            elapsed_ms = (time.monotonic() - _t0) * 1000
+            if elapsed_ms > 2000:
+                limit_ms = max(float(hook.timeout), 0.001) * 1000
+                ratio = elapsed_ms / limit_ms
+                proximity = "，接近 timeout 上限" if ratio >= 0.8 else ""
+                logger.warning(
+                    f"[HookSlowInjected] plugin={_hook_owner_name(hook)} event={event_name} "
+                    f"type={hook.type} fn={hook.function or hook.prompt or 'unknown'!r} "
+                    f"耗时 {elapsed_ms:.0f}ms (timeout {hook.timeout}s，占 {ratio:.0%}){proximity}"
+                )
 
         # Phase 3: 非 PROMPT hook 并行执行
         if parallel_indices:

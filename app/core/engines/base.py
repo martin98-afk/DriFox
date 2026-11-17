@@ -50,17 +50,24 @@ class BaseEngine:
         if self._conversation_executor:
             self._conversation_executor.cancel_worker()
 
-    def finalize_stop(self) -> List[Dict]:
+    def finalize_stop(self, timeout_ms: Optional[int] = 400) -> List[Dict]:
         """完成停止流程（阻塞操作，获取中断消息并清理）
 
         在 cancel_streaming() 调用后执行。
         此方法是阻塞的，应在 UI 更新后调用。
 
+        Args:
+            timeout_ms: 等待 worker 退出的总预算（ms），透传给
+                ConversationExecutor.finalize_stop（其内部预算拆分逻辑不变）。
+                **默认 400**（I10：原无参默认走 executor 3000+1000，主线程热路径
+                曾实测阻塞可达 4s）。后台/关闭路径显式传 None = executor 历史默认
+                3000+1000（不限短时语义）。
+
         Returns:
             被中断的消息列表
         """
         if self._conversation_executor:
-            return self._conversation_executor.finalize_stop()
+            return self._conversation_executor.finalize_stop(timeout_ms=timeout_ms)
         return []
 
     def stop(self, timeout_ms: Optional[int] = None) -> List[Dict]:

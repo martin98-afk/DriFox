@@ -974,17 +974,24 @@ class ChatBackend(QObject):
         if self._chat_engine:
             self._chat_engine.cancel_streaming()
 
-    def finalize_stop(self) -> List[Dict]:
+    def finalize_stop(self, timeout_ms: Optional[int] = 400) -> List[Dict]:
         """完成停止流程（阻塞操作，获取中断消息并清理）
 
         在 cancel_streaming() 调用后执行。
         此方法是阻塞的，应在 UI 更新后（或在后台线程中）调用。
 
+        Args:
+            timeout_ms: 等待 worker 退出的总预算（ms），透传给 engine.finalize_stop
+                → executor。**默认 400**（I10：原无参默认走 executor 3000+1000，
+                切历史会话等主线程热路径曾实测阻塞可达 4s——docstring 自证）。
+                后台/关闭路径请显式传 None（= executor 历史默认 3000+1000，
+                不限短时语义），见 main_widget._launch_background_finalize。
+
         Returns:
             被中断的消息列表
         """
         if self._chat_engine:
-            return self._chat_engine.finalize_stop()
+            return self._chat_engine.finalize_stop(timeout_ms=timeout_ms)
         return []
 
     def cleanup_worker(self):
