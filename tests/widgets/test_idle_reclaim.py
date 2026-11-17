@@ -181,9 +181,9 @@ def test_batch_max_cap():
 
 # ── #37 条 1：renderer 池内 pid 纳入空闲回收候选域 ──────────────
 
-def test_idle_threshold_is_180s():
-    """条 2 常量：420→180s（#26 裁决：池侧 60s 延迟清池落地后，T31 兜底窗口同步收短）"""
-    assert RENDERER_IDLE_RECLAIM_S == 180.0
+def test_idle_threshold_is_90s():
+    """条 2 常量：420→180s（#26）→90s（[#R3] 压到达下限时间非下限本身；代价=30-60s 重开场景 Chromium 重建 100-500ms）"""
+    assert RENDERER_IDLE_RECLAIM_S == 90.0
 
 
 def test_pool_idle_pid_enters_candidate_domain(monkeypatch):

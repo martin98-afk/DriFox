@@ -472,7 +472,7 @@ def enforce_renderer_rss_gate(host) -> str:
 # 累计 +357MB 全部滞留；8 个合计 493MB 低于 RSS 软阈 800 → RSS 闸门不触发
 # （总量应急的设计边界）。本回收器与 enforce_renderer_rss_gate 互补：
 # 闸门管「总量超限」（症状驱动），本函数管「单页空闲」（时间驱动），判据正交。
-RENDERER_IDLE_RECLAIM_S = 180.0  # 空闲 3 分钟（#37 条 2：420→180，2026-11-15）
+RENDERER_IDLE_RECLAIM_S = 90.0  # 空闲 90s（#37 条 2：420→180，2026-11-15；[#R3] 180→90 压到达下限时间）
                                   # 依据 t33 §6.2 静置实测：8 个 renderer 静置
                                   # 合计 540MB 全滞留（池内 pid 占大头）。keep-tab 保留期
                                   # 与 LRU keep 兜底仍在（活跃视口 ±2 批豁免 +

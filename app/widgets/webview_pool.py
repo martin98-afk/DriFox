@@ -89,9 +89,10 @@ _IDLE_GC_ENABLED = _load_idle_gc_enabled()
 def _idle_gc_enabled() -> bool:
     return _IDLE_GC_ENABLED
 
-# 延迟清池窗口：最后一次 release 后 60s 内无 acquire 命中才清。
-# 取 60s：用户「关掉再重开」的最常见间隔内保留复用收益，之后释放内存。
-_IDLE_GC_DELAY_MS = 60_000
+# 延迟清池窗口：最后一次 release 后 30s 内无 acquire 命中才清。
+# [#R3] 取 30s：压的是到达内存下限的时间非下限本身；代价=关 tab 后 30-60s
+# 重开场景的 100-500ms Chromium 重建（高频切换用户可感）。
+_IDLE_GC_DELAY_MS = 30_000
 _IDLE_GC_DELAY_S = _IDLE_GC_DELAY_MS / 1000.0
 
 # [O4] 池命中率周期日志：60s 一行 INFO（字段与 stats() 一致 + hit_rate 派生值）。
