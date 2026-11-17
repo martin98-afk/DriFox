@@ -932,10 +932,19 @@ class FileTreeCard(QWidget):
             f"color: {tc_hex}; background: transparent;"
             f"  font-family: '{font_family}'; font-size: {font_size}px;"
         )
-        # 快捷预览分隔条：透明底（面板自带 1px 顶边线），只留可拖拽的手柄空间
-        split_style = (
-            "#file-tree-split { background: transparent; }"
-            "#file-tree-split::handle { background: transparent; }"
+        # 快捷预览分隔条：2px 冷线，悬停延迟点亮为强调色（属性 splitterHot
+        # 由主程序全局角点控制器维护；插件侧只写样式，不重复实现延迟逻辑）
+        accent = self._colors["accent"]
+        split_style = "#file-tree-split { background: transparent; }"
+        quick_handle_qss = (
+            "QSplitterHandle {"
+            "  background: transparent;"
+            f"  border-top: 2px solid rgba({border.red()},{border.green()},{border.blue()},90);"
+            "  margin: 2px 10px; border-radius: 1px;"
+            "}"
+            "QSplitterHandle[splitterHot=\"true\"] {"
+            f"  border-top: 2px solid {accent.name()};"
+            "}"
         )
 
         # ★ 签名缓存：产出（全部样式串 + 字体）与上次全等时跳过所有 set。
@@ -943,7 +952,7 @@ class FileTreeCard(QWidget):
         # setStyleSheet + setFont 会触发整树 unpolish/polish + 全量重绘
         # （树 2000+ 行时单次 40-130ms，实测），而主题 / 字体 / 颜色未变时
         # 产出必然不变 —— 跳过后切页路径零成本。
-        signature = (tree_style, placeholder_style, header_style, root_style, split_style, font_family, font_size)
+        signature = (tree_style, placeholder_style, header_style, root_style, split_style, quick_handle_qss, font_family, font_size)
         if signature == self._theme_signature:
             return
         self._theme_signature = signature
@@ -976,6 +985,13 @@ class FileTreeCard(QWidget):
         self._ph_page.setStyleSheet("background: transparent;")
         self._stack.setStyleSheet("background: transparent;")
         self._split.setStyleSheet(split_style)
+        # handle 样式下沉到 handle 自身（与主程序同口径，避免 splitter 子树 repolish）
+        for idx in range(self._split.count() + 1):
+            handle = self._split.handle(idx)
+            if handle is None:
+                continue
+            handle.setAttribute(Qt.WA_StyledBackground, True)
+            handle.setStyleSheet(quick_handle_qss)
 
         # 通知 delegate 更新主题色
         self._rename_delegate.set_colors(self._colors)

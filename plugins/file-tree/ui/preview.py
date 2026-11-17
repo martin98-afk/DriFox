@@ -1391,7 +1391,7 @@ class QuickPreviewPanel(QWidget):
         font_size: int = 0,
         scrollbar_qss: str = "",
     ) -> None:
-        """应用卡片主题色（内容区转发给预览页，面板自身只画顶部分隔线）"""
+        """应用卡片主题色（内容区转发给预览页；顶部分隔线由 splitter handle 绘制）"""
         colors = colors or {}
         self._page.set_colors(
             colors,
@@ -1401,12 +1401,8 @@ class QuickPreviewPanel(QWidget):
         )
         family = font_family or colors.get("font_family", "Microsoft YaHei")
         size = int(font_size or colors.get("font_size", 14))
-        border = colors.get("border", QColor(255, 255, 255, 30))
         secondary = colors.get("text_secondary", QColor(150, 150, 150))
-        self.setStyleSheet(
-            f"#file-tree-quick-preview {{ background: transparent;"
-            f"  border-top: 1px solid rgba({border.red()},{border.green()},{border.blue()},90); }}"
-        )
+        self.setStyleSheet("#file-tree-quick-preview { background: transparent; }")
         self._tip.setStyleSheet(
             f"#file-tree-quick-tip {{ color: {secondary.name()}; background: transparent;"
             f"  font-family: '{family}'; font-size: {size}px; }}"

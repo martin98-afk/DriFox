@@ -208,7 +208,7 @@ def test_ui_provider_bad_items_zero(qapp, monkeypatch):
 
 
 def test_ui_provider_delivers_on_main_thread(qapp):
-    """主线程调用直接落到 update_artifact_list（用假卡片验证）"""
+    """主线程调用直接落到 push_inline_items（用假卡片验证）"""
     from app.plugins.capabilities.providers import ui_core
 
     delivered = []

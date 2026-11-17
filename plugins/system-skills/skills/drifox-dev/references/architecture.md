@@ -1,4 +1,4 @@
-# DriFox 架构参考（2026-09 实勘版）
+﻿# DriFox 架构参考（2026-09 实勘版）
 
 > 在 SKILL.md 把任务分派到「架构理解 / 模块定位」时加载。
 > 路径以实际仓库为准；行数一律从 `state.json.auto_snapshot.key_files_lines` 读。
@@ -100,7 +100,7 @@ app/tools/
 |------|---------|
 | `system-interact` | `tools/` |
 | `system-title-generator` | `ui/`（订阅 title.request 事件，调 model.complete 生成会话标题，模型可在插件设置选） |
-| `artifacts-manager` | `ui/`（工作台产物页，`register_workbench_tab` 通道） |
+| `artifacts-manager` | `ui/`（卡片成果栏，`register_card_inline_panel` 通道）+ `tools/`（`show_artifacts`） |
 | `system-hooks` | `hooks/` |
 | `system-hook-policies` | `hook_policies/` |
 | `system-commands` | `commands/` |
