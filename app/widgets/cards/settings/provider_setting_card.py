@@ -20,6 +20,7 @@ from qfluentwidgets import (
     qconfig,
 )
 
+from app.core.modelmeta.provider_save_plan import filter_disabled_models
 from app.plugins.registries.provider_registry import ProviderRegistry
 from app.utils.design_tokens import ButtonStyles, Colors, Sizes, font_size_css, scale_font_size, scale_icon_size
 from app.utils.provider_icons import get_provider_icon
@@ -181,14 +182,17 @@ class ProviderItem(QWidget):
         main_layout.addWidget(btn_widget, 0, Qt.AlignRight | Qt.AlignVCenter)
 
     def _subtitle_text(self) -> str:
-        """副标题：「N 个模型」。
+        """副标题：「N 个模型 · M 启用」。
 
+        M 为启用数（「模型列表」扣除「模型关闭列表」），口径与选择器/装配链
+        复用同一个 filter_disabled_models；无「模型关闭列表」键即全部启用。
         默认模型语义已随星标退役（「模型名称」由保存链自动维护，对用户无意义），
         不再展示；无「模型列表」键（词典兜底态）返回空串。
         """
         models = self.provider_info.get("模型列表")
         if isinstance(models, list):
-            return f"{len(models)} 个模型"
+            enabled = len(filter_disabled_models(models, self.provider_info))
+            return f"{len(models)} 个模型 · {enabled} 启用"
         return ""
 
     def _has_refresh_capability(self) -> bool:
