@@ -1580,7 +1580,11 @@ class OpenAIChatWorker(QThread):
             # 映射 signal_name 到 WorkerEvent
             event = self._signal_name_to_event(signal_name)
             if event:
-                self._emit_via_event_bus(event, *args)
+                # 高频流式事件跳过 bus 空跑：全仓无生产订阅者，bus.emit 零订阅
+                # 也要获取 threading.Lock，content/reasoning/tool_args 每 chunk
+                # 一次纯属开销。生命周期类事件保持双路径不变。
+                if event not in self._BUS_SKIP_EVENTS:
+                    self._emit_via_event_bus(event, *args)
                 if event in (WorkerEvent.FINISHED_WITH_CONTENT, WorkerEvent.FINISHED_WITH_MESSAGES):
                     self._report_health(STATUS_OK)
 
@@ -1611,6 +1615,11 @@ class OpenAIChatWorker(QThread):
         "permission_approval_requested": WorkerEvent.PERMISSION_REQUESTED,
         "error_occurred": WorkerEvent.ERROR,
     }
+
+    # 高频流式事件集合：每 chunk 触发，跳过 event_bus 空跑（见 _emit_with_callback）
+    _BUS_SKIP_EVENTS: frozenset = frozenset(
+        {WorkerEvent.CONTENT_RECEIVED, WorkerEvent.REASONING_RECEIVED, WorkerEvent.TOOL_CALL_STREAM}
+    )
 
     def _signal_name_to_event(self, signal_name: str) -> Optional[WorkerEvent]:
         """将 signal name 映射到 WorkerEvent（使用类变量缓存）"""
