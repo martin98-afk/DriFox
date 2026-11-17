@@ -10623,7 +10623,23 @@ class OpenAIChatToolWindow(ToolWindow):
         # ── 全局操作：只执行一次 ──
         ThemeRefreshCoordinator.timer_start("global")
         # [ANIM #A3] 配色切换前 grab 旧视觉快照（晚于 Colors.refresh 即失效）
-        self._snapshot_theme_transition()
+        # 本方法是 classmethod，快照在实例上（grab self.window()）→ 按顶层窗口去重
+        # 后逐实例调用：Tab 模式下多个窗口共享同一顶层，去重防同一 top 重复 grab
+        # 叠出多层遮罩；顶层不可见时由 _snapshot_theme_transition 内部自行跳过。
+        try:
+            _snapped_tops: list = []
+            for _w in window_registry.alive_window_instances():
+                if getattr(_w, "_is_destroyed", False):
+                    continue
+                _top = _w.window()
+                if _top is None or not _top.isVisible():
+                    continue
+                if any(_t is _top for _t in _snapped_tops):
+                    continue
+                _snapped_tops.append(_top)
+                _w._snapshot_theme_transition()
+        except Exception:
+            pass  # 快照失败不阻塞主题切换
         Colors.refresh()
         try:
             from qfluentwidgets import Theme, setTheme
