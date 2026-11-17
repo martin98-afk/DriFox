@@ -103,8 +103,11 @@ import pytest
 
 # 必须早于 QApplication 与任何 app.* 导入（pytest 收集期即执行）
 os.environ.setdefault("DRIFOX_DATA_DIR", str(Path(__file__).resolve().parents[2] / ".drifox-test"))
-os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-# 纯 Qt 块级渲染器：offscreen 下 QWebEngineView 崩溃（0xC0000409），同 #4 取舍
+# [方案 B 2026-11-18] offscreen → 真窗：DRIFOX_QT_RENDERER=1 纯 Qt 渲染器落地后，
+# 真窗已无 WebEngine 崩溃源；而 offscreen 下 OpenAIChatToolWindow 构造实测
+# 0xC0000409（2026-11-18 窗口期复测，主实例已释放仍崩）。默认跟随平台（Windows 真窗），
+# 如需 offscreen 请显式 export QT_QPA_PLATFORM。
+# 纯 Qt 块级渲染器：绕开 QWebEngineView（0xC0000409 家族），同 #4 取舍
 os.environ["DRIFOX_QT_RENDERER"] = "1"
 
 from PyQt5.QtCore import QCoreApplication, Qt  # noqa: E402
@@ -133,8 +136,17 @@ def _rss_mb() -> float:
     return _PROC.memory_info().rss / 1048576
 
 
+_CACHED_WIN = None  # [方案 B] 模块级复用：OpenAIChatToolWindow 第二实例构造在
+# 当前 dev（#R5 defer hook 入库后）必触发 0xC0000409 fail-fast（2026-11-18
+# 单实例 PASSED/双实例崩对照实验实锤，真窗与 offscreen 均复现）。业务侧修复前，
+# 场景 2/3/4 复用首实例窗口；断言均为「>0 采集链路有效」软断言不受影响，
+# 跨场景灌卡叠加使绝对口径变大（对比基线时需同口径）。
+
 def _build_window(qapp):
     """构造真实容器：TabManagerWindow → OpenAIChatToolWindow，出屏放置。"""
+    global _CACHED_WIN
+    if _CACHED_WIN is not None:
+        return _CACHED_WIN
     from PyQt5.QtWidgets import QWidget
 
     from app.utils.config import Settings
@@ -173,6 +185,7 @@ def _build_window(qapp):
     from tools.ui_driver import place_offscreen
 
     place_offscreen(win)
+    _CACHED_WIN = win
     return win
 
 
