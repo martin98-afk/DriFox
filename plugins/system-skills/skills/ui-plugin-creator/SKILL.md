@@ -112,6 +112,7 @@ python ../plugin-creator/scripts/check_skill_package.py .
 ```
 
 运行时验证（主题色实测 / 性能 / 跨环境 / 打包）按 `references/checklist.md` 执行；静态可判项已由脚本覆盖，人工只做运行时部分。
+**改样式/布局/重做卡片 → 先读 `references/checklist.md` §16「视觉自优化闭环」**：合成数据 → 独立预览进程连拍 → 读图 + 读数字 → 改 → 重拍，两三轮再交付。
 
 ## 6. 闭环
 
