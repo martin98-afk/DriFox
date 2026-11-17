@@ -16030,6 +16030,28 @@ class OpenAIChatToolWindow(ToolWindow):
         # GC 钩子：清空聊天区后防抖触发全局缓存清理 + 堆回收
         self._schedule_gc_hook()
 
+    def _fade_in_new_card(self, card) -> None:
+        """[ANIM #A1] 新轮次首卡淡入（ENTER_MS/OutCubic），消灭「凭空出现」。
+
+        仅追加路径的每轮首卡调用（节流见 _add_chat_widget）；动画结束移除
+        opacity effect——常驻 effect 会禁用部分渲染优化，且对 WebEngine 卡
+        有合成限制。全程吞 RuntimeError：卡片在动画启动前被回收不致命。
+        """
+        try:
+            from PyQt5.QtCore import QPropertyAnimation
+            from PyQt5.QtWidgets import QGraphicsOpacityEffect
+
+            from app.utils.motion import fade_widget
+
+            effect = QGraphicsOpacityEffect(card)
+            effect.setOpacity(0.0)
+            card.setGraphicsEffect(effect)
+            card._fade_effect = effect
+            card._fade_anim = QPropertyAnimation(effect, b"opacity", card)
+            fade_widget(card, 1.0, on_finished=lambda: card.setGraphicsEffect(None))
+        except RuntimeError:
+            pass  # 卡片在动画启动前被回收/销毁
+
     def _add_chat_widget(self, widget: QWidget, insert_index: Optional[int] = None):
         if getattr(self, "_is_destroyed", False):
             return
@@ -16061,8 +16083,19 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 🔧 内存修复：添加新卡片后触发虚拟滚动回收，
         # 否则离屏的旧 MessageCard（含 QWebEngineView）仅在手动滚动时才被回收，
+        # 🔧 内存修复：添加新卡片后触发虚拟滚动回收，
+        # 否则离屏的旧 MessageCard（含 QWebEngineView）仅在手动滚动时才被回收，
         # 长时间主动聊天会导致大量卡片堆积在布局中，WebEngine 内存持续增长
         self._virtual_scroll_timer.start()
+
+        # [ANIM #A1] 新消息卡淡入：仅「追加路径 + 每轮首卡」——显式 insert_index
+        # 是历史批次重建/占位重插，整批淡入反而怪；同轮后续卡（user+assistant
+        # 共享 _message_index=轮次号）直插防连环闪。
+        if insert_index is None and isinstance(widget, MessageCard):
+            round_key = getattr(widget, "_message_index", None)
+            if round_key is not None and round_key != getattr(self, "_last_fade_round_key", object()):
+                self._last_fade_round_key = round_key
+                self._fade_in_new_card(widget)
 
         # [PERF] 非懒渲染卡片加入懒渲染队列（如欢迎卡片 P0 优化后走此路径）
         if isinstance(widget, MessageCard) and not getattr(widget, "_lazy_rendered", True):
