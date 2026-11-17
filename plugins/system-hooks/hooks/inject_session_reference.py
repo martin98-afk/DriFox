@@ -11,7 +11,6 @@ PreUserMessage Hook 函数 — 将引用的历史会话内容注入 LLM 上下�
    （剔除工具调用与思考内容），格式化输出 → 自动注入 session.messages
 """
 
-
 def hook(event: str, context: dict) -> str:
     """将引用历史会话的浓缩记录注入为 PreUserMessage hook 输出
 
@@ -23,13 +22,23 @@ def hook(event: str, context: dict) -> str:
     Returns:
         格式化后的历史会话记录，或空字符串（无 pending 时）
     """
+    from loguru import logger
+
     refs = context.get("pending_session_refs")
     if not refs:
+        # 无 pending（用户未引用会话）属正常路径，debug 留痕即可
+        logger.debug("[SessionReference] 无 pending_session_refs，跳过引用注入")
         return ""
     try:
         from app.core.context.session_reference import build_referenced_context
 
-        return build_referenced_context(list(refs))
+        output = build_referenced_context(list(refs))
+        if not output:
+            # refs 有值但构建为空：会话加载失败或浓缩后无有效内容，
+            # 静默返回会让「引用了却没注入」无迹可查（2026-11-17 排查教训）
+            logger.warning(f"[SessionReference] 引用会话注入为空: refs={list(refs)}（会话不存在或浓缩后无有效内容）")
+        return output
     except Exception:
-        # 注入失败不阻塞发送（返回空 = 无 hook 输出）
+        # 注入失败不阻塞发送（返回空 = 无 hook 输出），但必须留痕
+        logger.exception(f"[SessionReference] 引用会话注入失败: refs={list(refs)}")
         return ""
