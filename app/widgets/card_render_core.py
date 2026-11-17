@@ -366,6 +366,30 @@ def _get_formatter_cached():
     return _FORMATTER_CACHE["formatter"]
 
 
+# [R6] 块粒度高亮产物缓存：formalize / v1 重渲会对已闭合代码块整块重新 highlight
+# （实测 60KB 文档 pygments 高亮 84.8ms，占整帧 92%，formalize 单次 95~110ms）。
+# highlight 是纯函数（内容 + lang + formatter 决定产物），缓存 key 含 formatter
+# 实例：主线程全局 _get_formatter_cached（由 style+font_size 重建）与 worker 线程
+# 局部 formatter（B3）各自实例稳定，实例变即 key 变，不会旧产物假命中。
+# 流式活动块内容每批增长 → key 每批变属预期 miss（活动块走尾部 4000 降级路径）；
+# 收益集中在已闭合块 = formalize / v1 重渲场景，二次起直接命中。
+# 128 条上限：高亮产物约为源码 10~15 倍（B3 注释实测 12KB→154KB），超限 LRU
+# 淘汰；异常不入缓存（lru_cache 默认行为），失败由调用侧兜底为 escape 纯文本。
+@lru_cache(maxsize=128)
+def _highlight_block_cached(code_text: str, lang: str, formatter) -> str:
+    """单代码块高亮并提取 <pre> 内部 HTML（产物完整非截断）。
+
+    供 _wrap_code_blocks_with_copy_button_web 的 replacer 调用；异常直接上抛，
+    由调用侧 try/except 兜底（不缓存失败结果）。
+    """
+    lexer = _get_lexer_cached(lang)
+    highlighted = highlight(code_text, lexer, formatter)
+    pre_match = _PRE_CONTENT_PATTERN.search(highlighted)
+    if pre_match:
+        return pre_match.group(1)
+    return escape(code_text)
+
+
 def _keep_token_rules(css: str, scope: str) -> list[str]:
     """从 Pygments 输出里只挑 token 规则（``<scope> .k`` 一类）
 
@@ -973,16 +997,15 @@ def _wrap_code_blocks_with_copy_button_web(
         line_count = len(lines)
 
         # 高亮代码（获取 <pre> 内部 HTML）
+        # [R6] 单块级规模降级：超长代码块（> _TAIL_CODE_WRAP_MAX_CHARS，与尾部
+        # 路径同口径）跳过 pygments 改 escape 纯文本——200 行 ≈ 5.7ms，数千行块
+        # 单次即数十 ms 且逐轮重复。容器/行号/复制按钮保留，仅失高亮色，内容完整。
         try:
-            lexer = _get_lexer_cached(lang)
-            _fmt = formatter if formatter is not None else _get_formatter_cached()
-            highlighted = highlight(copy_text, lexer, _fmt)
-            # 提取 <pre> 内部内容
-            pre_match = _PRE_CONTENT_PATTERN.search(highlighted)
-            if pre_match:
-                inner_code_html = pre_match.group(1)
-            else:
+            if len(copy_text) > _TAIL_CODE_WRAP_MAX_CHARS:
                 inner_code_html = escape(copy_text)
+            else:
+                _fmt = formatter if formatter is not None else _get_formatter_cached()
+                inner_code_html = _highlight_block_cached(copy_text, lang, _fmt)
         except Exception:
             inner_code_html = escape(copy_text)
 
