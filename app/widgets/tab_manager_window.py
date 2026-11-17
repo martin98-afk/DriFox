@@ -5599,7 +5599,9 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
             except Exception:
                 pass
             win = self._windows[index]
-            self._content_area.setCurrentWidget(win)
+            # [ANIM #A4] 用户点击页签走淡出过渡；程序化/启动恢复仍走
+            # setCurrentWidget（豁免动画），见 DeferredPaintStack 文档。
+            self._content_area.set_current_widget_faded(win)
             self.activeTabChanged.emit(index)
             # UI 插件浮动卡片按标签页投影显隐（per-tab 隔离）：
             # 卡片单实例挂全局容器，这里按目标标签页的可见记录 show/hide
