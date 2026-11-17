@@ -483,6 +483,13 @@ class SessionStore:
                 self._db.execute_sql(
                     f"CREATE INDEX IF NOT EXISTS idx_project_updated ON {self.TABLE_NAME}(project, updated_at DESC)"
                 )
+                # 复合索引：团队合并条目的首问候选按 team_run_id 过滤 + updated_at 排序。
+                # 缺此索引时该查询退化为全表 SCAN（实测 527MB/2607 行库单次 15.7ms，
+                # 122 个团队 run 的 N+1 合计 1779ms，历史卡片打开卡 544ms）；
+                # 建索引后同一循环 4.3ms。
+                self._db.execute_sql(
+                    f"CREATE INDEX IF NOT EXISTS idx_team_run ON {self.TABLE_NAME}(team_run_id, updated_at DESC)"
+                )
                 # file_operations 表索引（几乎所有查询都按 session_id / call_id 过滤）
                 self._db.execute_sql("CREATE INDEX IF NOT EXISTS idx_file_ops_session ON file_operations(session_id)")
                 self._db.execute_sql(
@@ -495,7 +502,6 @@ class SessionStore:
 
                 # 迁移逻辑
                 self._migrate_add_project_column()
-                self._migrate_remove_canvas_id()
                 self._migrate_add_user_edited_title_column()
                 self._migrate_add_worktree_path_column()
                 self._migrate_add_preview_column()
@@ -541,30 +547,6 @@ class SessionStore:
                 logger.info("[SessionStore] project 列迁移完成")
         except Exception as e:
             logger.warning(f"[SessionStore] project 列迁移失败(可能已存在): {e}")
-
-    def _migrate_remove_canvas_id(self):
-        """迁移：删除已废弃的 canvas_id 列（如果存在）"""
-        if not self._db or not self._db.is_connected:
-            return
-        try:
-            columns = self._db.get_table_info(self.TABLE_NAME)
-            col_names = [c.get("name", "") for c in columns]
-            if "canvas_id" in col_names:
-                logger.info("[SessionStore] 迁移：删除 sessions 表的 canvas_id 列")
-                self._db.execute_sql(f"""
-                    CREATE TABLE {self.TABLE_NAME}_temp AS
-                    SELECT session_id, title, messages, system_prompt,
-                           compaction_state, compaction_cache, message_count,
-                           project, created_at, updated_at
-                    FROM {self.TABLE_NAME}
-                """)
-                self._db.execute_sql(f"DROP TABLE {self.TABLE_NAME}")
-                self._db.execute_sql(f"ALTER TABLE {self.TABLE_NAME}_temp RENAME TO {self.TABLE_NAME}")
-                self._db.execute_sql(f"CREATE INDEX IF NOT EXISTS idx_updated ON {self.TABLE_NAME}(updated_at DESC)")
-                self._db.execute_sql(f"CREATE INDEX IF NOT EXISTS idx_project ON {self.TABLE_NAME}(project)")
-                logger.info("[SessionStore] sessions 表 canvas_id 列迁移完成")
-        except Exception as e:
-            logger.warning(f"[SessionStore] canvas_id 列迁移失败(可能已不存在): {e}")
 
     def _migrate_add_user_edited_title_column(self):
         """迁移：添加 user_edited_title 列（如果不存在）"""

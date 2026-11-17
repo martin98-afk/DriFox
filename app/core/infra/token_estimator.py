@@ -257,11 +257,15 @@ def estimate_tokens(text: str, model: str = "gpt-4") -> int:
 _cache_text_reg = threading.local()
 
 
-@lru_cache(maxsize=2048)
+@lru_cache(maxsize=8192)
 def _estimate_tokens_cached(text_hash: int, text_len: int, model: str) -> int:
     """内层缓存实现：键为 (hash, len, model)，不持消息全文。
 
     仅在 MISS 时从 _cache_text_reg 取原文计算；命中时完全不触碰寄存器。
+    容量实测（任务 B，N 档长会话 bench）：2048 在 msgs≈2135（N=800 档）
+    触发 LRU 抖动全 miss，单次全量估算 1.4→91.5ms（65 倍劣化），pipeline
+    单次投影被放大到 500ms+；8192 覆盖 ~4000 条消息，键轻量（hash+len+model
+    +int 值），内存增量可忽略。
     """
     text = getattr(_cache_text_reg, "text", "") or ""
     # 尝试使用 tiktoken
