@@ -10,6 +10,7 @@ import hashlib
 import math as _math
 import os
 import re
+from functools import lru_cache
 
 # ── 模块级缓存：避免 paintEvent 中反复解析 rgba 字符串 ──
 from typing import Dict, List, Optional
@@ -239,6 +240,15 @@ def _status_ring_color(state: str, phase: float) -> QColor:
     return c
 
 
+@lru_cache(maxsize=32)
+def _status_ring_points(x: float, y: float, width: float, height: float, radius: float):
+    """缓存固定环形的等弧长点列；相位和主题不影响几何。调用方只读点列。"""
+    path = _QPainterPath()
+    path.addRoundedRect(QRectF(x, y, width, height), radius, radius)
+    total_len = path.length()
+    return tuple(path.pointAtPercent(path.percentAtLength(total_len * i / 240)) for i in range(240))
+
+
 def _paint_status_ring_on(painter, rect, state: str, phase: float, radius: float = 5.0) -> None:
     """状态环绘制原语：icon 方块（_TabProjectIcon）与团队角色胶囊（TabItem 行层）共用
 
@@ -282,13 +292,9 @@ def _paint_status_ring_on(painter, rect, state: str, phase: float, radius: float
         # 锥形渐变量化成肉眼可见的分段色块，实测像贴了几块补丁。也不用
         # drawArc：那是外接椭圆，与圆角方环形状不符。
         # 做法：把路径按百分比离散成点列，沿点列取段绘制，每段独立 alpha。
-        path = _QPainterPath()
-        path.addRoundedRect(ring, radius, radius)
-        # 按弧长均匀取点（pointAtPercent 按参数百分比，圆角处会疏密不均，
-        # 26px 上表现为拖尾有锯齿）
-        total_len = path.length()
+        # 按弧长均匀取点，固定几何复用缓存，避免每帧重复计算贝塞尔弧长。
         samples = 240
-        pts = [path.pointAtPercent(path.percentAtLength(total_len * i / samples)) for i in range(samples)]
+        pts = _status_ring_points(ring.x(), ring.y(), ring.width(), ring.height(), radius)
         # 角度 = 匀速相位 + sin 调制 → 视觉上快慢交替（一圈约 1.8s）
         head_deg = _ring_head_angle(phase)
         head_idx = int(round(((head_deg % 360.0) / 360.0) * samples)) % samples
@@ -313,9 +319,7 @@ def _paint_status_ring_on(painter, rect, state: str, phase: float, radius: float
             seg_pen.setWidth(3)
             seg_pen.setCapStyle(Qt.RoundCap if k == 0 else Qt.FlatCap)
             painter.setPen(seg_pen)
-            poly = [
-                pts[(head_idx - k * tail_samples - m) % samples] for m in range(tail_samples + 1)
-            ]
+            poly = [pts[(head_idx - k * tail_samples - m) % samples] for m in range(tail_samples + 1)]
             painter.drawPolyline(*poly)
         return
 
@@ -478,6 +482,7 @@ class _TabProjectIcon(QWidget):
         if not self._ring_state:
             return
         _paint_status_ring_on(painter, rect, self._ring_state, self._ring_phase, radius=5)
+
 
 class TabItem(QFrame):
     """单个 Tab 项的 UI 组件
