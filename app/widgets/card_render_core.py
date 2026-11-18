@@ -3870,7 +3870,13 @@ _SKELETON_CACHE_MAX = 48
 # loading 清理（对齐全量，消除折叠块 shimmer 滞留）；删死代码 _streamingPulse
 # keyframes；reduced-motion 列表补 think-shimmer 两处覆盖。
 # CSS + JS 双资产变更，旧骨架缓存须失效。
-_SKELETON_CACHE_VERSION = 86
+# +1（v87）：v2 流式卡内 body 滚底补齐——_v2AfterPatch 原只在非流式收尾滚底，
+# 流式批次正文高度增长仅靠 _v2LiveStep 帧级揭示顺带滚；无 live 增量的批次
+# （段落正式化 / 工具块插入）与 force_full 清空重灌后不滚 → 卡内滚动条在底部
+# 但新内容不跟随。现补 _v2AtBottomBefore（patch 前贴底快照）+ 收尾双源判定
+# （跟随态或 patch 前贴底），滚动后复位误置的 _userScrolledWithin。
+# 旧骨架无 _v2AtBottomBefore → 判定退化为跟随态，必须失效缓存。
+_SKELETON_CACHE_VERSION = 87
 
 
 def _js_literal(value) -> str:

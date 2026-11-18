@@ -24,6 +24,7 @@
 
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 from typing import Any, List, Optional
@@ -168,6 +169,36 @@ def test_partial_patch_wraps_anchor_capture_restore(monkeypatch):
     assert i_cap < i_patch < i_res, "锚点必须在 patch 前捕获、patch 后恢复"
     assert "_c1.innerHTML=''" not in js, "局部 patch 不清容器"
     assert "_v2ScrollSave()" not in js
+def test_streaming_patch_records_bottom_before_and_follows_after(monkeypatch):
+    """流式批次必须补卡内 body 滚底：patch 前记录贴底快照，收尾按跟随态滚底。
+    回归背景（2026-11-18 用户实测）：卡内滚动条已在底部，流式新内容不跟随。
+    v2 的 body 滚底原先只在**非流式**收尾执行，流式批次仅靠 _v2LiveStep 帧级
+    揭示顺带滚；无 live 增量的批次（段落正式化 / 工具块插入）与 force_full
+    清空重灌后都不滚。修法：patch 前下发 _v2AtBottomBefore，_v2AfterPatch
+    用「跟随态 或 patch 前贴底」双源判定，滚动后复位误置的跟随标志。
+    """
+    blocks = [{"type": "text", "text": "第一段正文。"}]
+    v = _make_viewer(monkeypatch, blocks)
+    assert v._perform_update_v2() is True  # 首帧 force_full
+    v._page.js_calls.clear()
+    blocks[0]["text"] = "第一段正文（流式更新）。"
+    v._needs_full_render = False
+    assert v._perform_update_v2() is True
+    js = "".join(v._page.js_calls)
+    i_before = js.find("window._v2AtBottomBefore=")
+    i_patch = js.find("window.patchBlocks('content-placeholder'")
+    assert i_before >= 0, "patch 前必须记录 body 是否贴底"
+    assert i_before < i_patch, "贴底快照必须早于 patch（内容增长会推远距底）"
+def test_after_patch_scrolls_body_in_streaming(src: str):
+    """_v2AfterPatch 的 body 滚底不得再被 streaming 守卫排除。"""
+    m = re.search(r"window\._v2AfterPatch = function \(streaming\) \{\{.*?\n                \}\};", src, re.S)
+    assert m, "未找到 _v2AfterPatch 函数体"
+    body = m.group(0)
+    assert "_v2AtBottomBefore" in body, "收尾必须读取 patch 前贴底快照"
+    assert "streaming !== true && !window._userScrolledWithin" not in body, (
+        "流式批次同样需要卡内 body 滚底"
+    )
+    assert "_followBody" in body, "跟随判定必须包含贴底快照兜底"
 
 # ── 2. 骨架接线（源码级） ────────────────────────────────────────────
 

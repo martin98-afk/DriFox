@@ -6475,14 +6475,21 @@ class CodeWebViewer(QWebEngineView):
                             if (tc.children.length > 0 && typeof _updateToolSectionHeader === 'function') _updateToolSectionHeader();
                         }}
                         if (streaming === true && typeof _scrollToolContentToBottom === 'function') _scrollToolContentToBottom();
-                        // [T43] 非流式（历史加载 / 流式终渲染）落地后：跟随态则把卡内
-                        // body 滚到底。v1 路径（updateContent）尾部自带
-                        // _autoScrollStreamingBody 兜底，v2 通道此前完全没有 body 滚底 →
-                        // 历史会话里内容超过 body max-height 的超长卡片首帧停在最上面
-                        // （流式期间是贴底的，加载历史后行为不一致，用户实测）。
-                        // 仅跟随态执行：用户已上滚阅读时保持位置，语义与
-                        // _autoScrollStreamingBody 的 _userScrolledWithin 守卫一致。
-                        if (streaming !== true && !window._userScrolledWithin) {{
+                        // [T43] 落地后跟随态则把卡内 body 滚到底。v1 路径（updateContent）
+                        // 尾部自带 _autoScrollStreamingBody 兜底；v2 通道原先只在**非流式**
+                        // 收尾滚底（历史加载 / 终渲染），流式批次的正文高度增长只能靠
+                        // _v2LiveStep 帧级揭示顺带滚——没有 live 增量的批次（段落正式化、
+                        // 工具/图片块插入）以及 force_full 清空后重灌都不滚 → 用户停在
+                        // 卡内旧位置（「滚轮在底部但新内容不跟随」）。
+                        // 判定用双源：
+                        //   ① 跟随态（_userScrolledWithin !== true）——常规流式；
+                        //   ② patch 前实际贴底（_v2AtBottomBefore）——标志被几何变化
+                        //      误置为「已上滚」时的兜底，滚动后同步复位，避免永久锁死。
+                        // 用户真实上滚阅读（标志 true 且 patch 前不在底部）保持位置。
+                        var _followBody = (window._userScrolledWithin !== true)
+                            || window._v2AtBottomBefore === true;
+                        window._v2AtBottomBefore = null;
+                        if (_followBody) {{
                             window._suppressScrollEvent = true;
                             try {{
                                 document.body.scrollTop = document.body.scrollHeight;
@@ -6491,6 +6498,7 @@ class CodeWebViewer(QWebEngineView):
                                 window._autoScrollTime = performance.now();
                                 window._suppressScrollEvent = false;
                             }}
+                            if (window._userScrolledWithin === true) window._userScrolledWithin = false;
                         }}
                         if (typeof reportHeightDebounced === 'function') setTimeout(function () {{ reportHeightDebounced(); }}, 0);
                     }} catch (e) {{
@@ -9609,6 +9617,16 @@ class CodeWebViewer(QWebEngineView):
             js.append("if(typeof window._v2LiveDrop==='function')window._v2LiveDrop();")
         elif _has_patch_ops:
             js.append("if(typeof window._v2LiveFlush==='function')window._v2LiveFlush();")
+        if _has_patch_ops:
+            # patch 前记录 body 是否贴底（force_full 清空之前）：流式批次的正文
+            # 高度增长会把「距底」推过阈值，patch 后再判定就晚了；收尾
+            # _v2AfterPatch 用它在「跟随标志被误置」时仍能正确贴底。
+            js.append(
+                "window._v2AtBottomBefore=(function(){var b=document.body;"
+                "if(!b)return false;return (b.scrollHeight-b.scrollTop-b.clientHeight)<="
+                + str(AUTO_SCROLL_THRESHOLD)
+                + ";})();"
+            )
         if force_full:
             # 整页清空前快照滚动位置（body / 正文容器 / 工具区）：清空瞬间
             # scrollHeight 归零，scrollTop 被浏览器强制钳到 0 且不会自己回来
