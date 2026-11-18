@@ -7789,6 +7789,9 @@ class CodeWebViewer(QWebEngineView):
     _theme_chain_ver = None
 
     _SOFT_BOUNDARY_MERGE_MS = 100
+    # 硬边界合并窗：距上次渲染不足该值时并入窗口末尾一次全量渲染。
+    # 意义见 _schedule_render 硬边界分支注释（流式分配风暴削频）。
+    _HARD_BOUNDARY_MERGE_MS = 80
     # [P2-8 F1] tail 行内渲染降载：软边界 ~每 30 字触发一次全量 tail convert
     # （主线程同步），无空行长文 tail 线性增长 → 总开销 O(n²)。增量阈值 512
     # 字符（≈中文 2-4 句，触发频率降 ~16 倍）+ 时间旁路 1.5s（保证慢速流式
@@ -8191,11 +8194,22 @@ class CodeWebViewer(QWebEngineView):
         # 1. 自然边界触发（由 append_chunk 检测到并传 immediate=True）
         # 2. 安全兜底：2s 内无边界到达，强制渲染确保格式最终正确
         if self._streaming:
-            # 硬边界（段落结束 / think 闭合 / 代码块闭合）：立即渲染。
-            # 硬边界密度远低于软边界，且段落结束必须及时重排，保持同步。
+            # 硬边界（段落结束 / think 闭合 / 代码块闭合）：过 80ms 合并窗。
+            # [PERF] 原为 immediate——但全量渲染的分配是 O(全文)（markdown
+            # 解析 + HTML 序列化 + JS 桥传输），密集硬边界时段落级 immediate
+            # 让分配风暴频率 ≈ chunk 频率，是流式 RSS 锯齿的主要泵。距上次
+            # 渲染不足窗口时并入窗口末尾一次执行：观感代价 ≤80ms 格式化延迟，
+            # 全量次数显著下降。首渲不受影响（_last_render_ts=0 → since 巨大）。
             if boundary is None:
                 boundary = self._has_reached_clean_boundary(self._markdown_text)
             if boundary:
+                since_ms = (time.monotonic() - getattr(self, "_last_render_ts", 0.0)) * 1000
+                if since_ms < self._HARD_BOUNDARY_MERGE_MS:
+                    interval = max(1, self._HARD_BOUNDARY_MERGE_MS - int(since_ms))
+                    # 已挂更早到点的定时器（软窗/自适应）则不动，避免推迟
+                    if (not self._render_timer.isActive()) or (self._render_timer.interval() > interval):
+                        self._render_timer.start(interval)
+                    return
                 self._perform_update()
                 return
             # 软边界（句号结尾）：**仅在密集流式时合并**，否则仍即时渲染。
@@ -8589,7 +8603,12 @@ class CodeWebViewer(QWebEngineView):
                 if getattr(self, "_incremental_finalize", False) and self._try_incremental_finalize():
                     self._incremental_finalize = False
                     self._final_render_pending = False
-                    self._last_rendered_markdown = self._markdown_text
+                    # [MEM] 收尾完成即释放差量基线副本：_stable_html（全文 HTML
+                    # 已交付 DOM）与 _last_rendered_markdown（流式差量基线，终态
+                    # 无人读取，下一轮流式从重置点重建）各几十~几百 KB/卡。
+                    # 原写法 `= self._markdown_text` 还多复制一份全文，一并省掉。
+                    self._stable_html = ""
+                    self._last_rendered_markdown = ""
                     return
                 # 收尾失败 / 不适用 → 清标记 + 清稳定区基线，回退原全量路径。
                 # _try 失败时 _stable_md_len/_stable_html 可能已被部分推进
@@ -9921,6 +9940,12 @@ class CodeWebViewer(QWebEngineView):
                 lambda _result: None,
             )
         self._last_rendered_html = None
+        # [MEM] 终渲染落地后释放差量基线副本：_stable_html（最终全文 HTML，
+        # 已交付 DOM）与 _last_rendered_markdown（流式差量基线，终态不再走
+        # 差量）只在下一轮流式的重置点重建，长回复下两份副本各几十~几百 KB。
+        # 清空等价于重置语义（差量逻辑对空基线退化为全量渲染，安全）。
+        self._stable_html = ""
+        self._last_rendered_markdown = ""
 
     def _on_render_done_signal(self, seq: int, html):
         """主线程槽：接收 worker 线程池渲染完成信号（renderDone.emit 跨线程投递）"""

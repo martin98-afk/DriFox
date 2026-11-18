@@ -6380,6 +6380,17 @@ class MessageCard(SimpleCardWidget):
         # 一轮 100-300KB 残留到下次 start_elapsed_tracking 才清。
         self._stream_text_clear()
         self._stream_text_cursor = 0  # [T4-5] 增量采样游标同步复位
+        # [MEM] 流式结束 3s 后归还 malloc 空闲页（macOS）：本轮渲染的临时
+        # 分配经 gc 已进 freelist，等终渲染与工具块替换落定后统一 decommit，
+        # RSS 回落到真实占用而非高位驻留（锯齿谷底下移）。后台线程 + 60s
+        # 节流，见 memory_governor.release_malloc_pressure。
+        try:
+            from app.core.infra.memory_governor import release_malloc_pressure
+            from PyQt5.QtCore import QTimer as _QTimer
+
+            _QTimer.singleShot(3000, release_malloc_pressure)
+        except Exception:
+            pass
 
     def _has_active_tools(self) -> bool:
         """是否有仍在执行中的工具（已登记但未完成）。
