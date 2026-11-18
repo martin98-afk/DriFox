@@ -3860,7 +3860,17 @@ _SKELETON_CACHE_MAX = 48
 # iframe/svg/canvas 隔离出主重排；window._dfxSetResizing / _dfxApplyWidgetH
 # （```widget iframe 高度 4px 死区 + resize 期延迟应用）/ _dfxRestoreFade
 # （占位恢复淡入）。CSS + JS 双资产变更，旧骨架缓存须失效。
-_SKELETON_CACHE_VERSION = 84
+# +1（v85）：[UX] 摘除思考块头部轮播提示（16 条假进度文案 3.5s 轮换 + 
+# think-streaming-tip 脉冲渐变动画 + MutationObserver 启停）——live 区已实时
+# 滚动真实思考文字，轮播为装饰性噪音；.think-streaming-live:empty::before 
+# 占位保留（首文字 flush 前的空窗提示）。CSS + JS 双资产变更，旧骨架缓存须失效。
+# +1（v86）：[PERF] 蛇形思考动画重构——arc 列表缓存化（rAF 帧内不再全文档
+# querySelectorAll，由 MutationObserver 驱动重查 + 失联过滤）+ prefers-reduced-motion
+# 豁免（matchMedia 命中时置静态相位 0 并停 rAF）；差量渲染路径补 think-content
+# loading 清理（对齐全量，消除折叠块 shimmer 滞留）；删死代码 _streamingPulse
+# keyframes；reduced-motion 列表补 think-shimmer 两处覆盖。
+# CSS + JS 双资产变更，旧骨架缓存须失效。
+_SKELETON_CACHE_VERSION = 86
 
 
 def _js_literal(value) -> str:

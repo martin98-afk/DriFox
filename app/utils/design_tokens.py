@@ -756,7 +756,7 @@ class Animations:
 
     @staticmethod
     def _detect_reduce_motion() -> bool:
-        """读取系统动画偏好；仅实现 Windows，其他平台视为开启动画。"""
+        """读取系统动画偏好；Windows/macOS 实现，其他平台视为开启动画。"""
         if sys.platform == "win32":
             try:
                 # SPI_GETCLIENTAREAANIMATION = 0x1042：pvParam 收到 BOOL，
@@ -764,6 +764,15 @@ class Animations:
                 v = ctypes.c_bool(True)
                 ctypes.windll.user32.SystemParametersInfoW(0x1042, 0, ctypes.byref(v), 0)
                 return not v.value
+            except Exception:
+                return False
+        if sys.platform == "darwin":
+            try:
+                # macOS「减少动态效果」辅助功能偏好。AppKit（pyobjc）缺失
+                # 或查询失败按「开启动画」处理（与旧 Windows 失败分支同口径）。
+                from AppKit import NSWorkspace
+
+                return bool(NSWorkspace.sharedWorkspace().accessibilityDisplayShouldReduceMotion())
             except Exception:
                 return False
         return False

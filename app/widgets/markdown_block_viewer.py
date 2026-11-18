@@ -353,6 +353,10 @@ class _ThinkingSpinner(QWidget):
         self._timer.stop()
 
     def _tick(self) -> None:
+        # [PERF] 可见性门控：隐藏 tab / 滚出视口时空转不重绘（相位照常推进，
+        # 恢复可见后从原相位继续，无视觉跳变）。
+        if not self.isVisible():
+            return
         self._angle = (self._angle + 12) % 360
         self.update()
 

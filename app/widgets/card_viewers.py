@@ -3596,21 +3596,6 @@ class CodeWebViewer(QWebEngineView):
                     content: "深度思考中...";
                     color: var(--text-muted);
                 }}
-                /* 思考轮播提示文字 — 从左到右脉冲渐变色动画 */
-                .think-streaming-tip {{
-                    background: linear-gradient(
-                        90deg,
-                        var(--text-secondary) 0%,
-                        var(--accent) 45%,
-                        var(--accent-warm) 55%,
-                        var(--text-secondary) 100%
-                    );
-                    background-size: 200% 100%;
-                    background-clip: text;
-                    -webkit-background-clip: text;
-                    -webkit-text-fill-color: transparent;
-                    animation: think-tip-sweep 2.5s ease-in-out infinite;
-                }}
                 @keyframes think-tip-sweep {{
                     0% {{ background-position: 200% 0; }}
                     100% {{ background-position: -200% 0; }}
@@ -4290,14 +4275,15 @@ class CodeWebViewer(QWebEngineView):
                     50%      {{ opacity: .75; }}
                 }}
                 /* ── 减少动态效果：停掉所有**无限循环**的装饰性 CSS 动画 ──
-                   这些动画（骨架脉冲/扫光、思考提示流光、工具预览流光）会一直
+                   这些动画（骨架脉冲/扫光、工具预览流光）会一直
                    重绘直到元素被移除；流式期间与逐字渲染叠加会明显加剧掉帧与
                    图表闪烁。关掉后仍有静态骨架与文字，状态反馈不受影响。 */
                 @media (prefers-reduced-motion: reduce) {{
                     .chart-skeleton__bars i,
                     .chart-skeleton::after,
                     .dfx-stream-note,
-                    .think-streaming-tip,
+                    .think-content.loading,
+                    .think-block[data-streaming="true"] .think-streaming-preview::after,
                     .tool-streaming-block[data-streaming="true"] .tool-streaming-preview {{ animation: none !important; }}
                 }}
                 /* 图表不可用兜底：两类失败共用同一 class —— ① fence 已闭合但 JSON
@@ -4438,10 +4424,6 @@ class CodeWebViewer(QWebEngineView):
                     opacity: 1;
                 }}
 
-                @keyframes _streamingPulse {{
-                    0%, 100% {{ opacity: 0.3; transform: scale(0.85); }}
-                    50% {{ opacity: 1; transform: scale(1.1); }}
-                }}
                 #tool-content {{
                     /* 固定最大高度，超出时显示滚动条。
                        不设动态大小（不依赖 body 高度比例）。 */
@@ -5717,6 +5699,12 @@ class CodeWebViewer(QWebEngineView):
                     if (window._toolCompactMode) reorganizeContent();
                     // 包裹所有 <table>（不含 .code-table）到可横向滚动的容器中
                     // [T28] 八个后处理全部收窄到 roots 作用域（O(新增段)，替代全文扫描）
+                    // 🐛 修复（shimmer 滞留）：差量新增的思考块自带 loading class
+                    // （Python 渲染产物），原只在全量渲染清理——流式差量期间
+                    // 折叠块 background-position 动画持续逐帧重绘。与全量对齐清理。
+                    container.querySelectorAll('.think-content, .think-streaming-preview').forEach(function (content) {{
+                        content.classList.remove('loading');
+                    }});
                     window._wrapTablesIn(roots);
                     // 恢复展开状态
                     restoreCollapsibleStates(roots);
@@ -6498,8 +6486,11 @@ class CodeWebViewer(QWebEngineView):
                     }});
                     // 骨架挂回末尾（图表仍在生成中）；闭合时 _reattachSkeleton 自动丢弃
                     window._reattachSkeleton(container, _skel, html, '', tailDiv);
-                    // 与 updateContentAppend 对齐：表格包裹 + 折叠状态恢复 + 滚动
+                    // 与 updateContentAppend 对齐：loading 清理 + 表格包裹 + 折叠状态恢复 + 滚动
                     // [T28] 八个后处理全部收窄到 roots 作用域（O(新增段)，替代全文扫描）
+                    container.querySelectorAll('.think-content, .think-streaming-preview').forEach(function (content) {{
+                        content.classList.remove('loading');
+                    }});
                     window._wrapTablesIn(roots);
                     restoreCollapsibleStates(roots);
                     window._suppressScrollEvent = true;
@@ -7639,9 +7630,26 @@ class CodeWebViewer(QWebEngineView):
                 // 不再因 CSS animation 重启而导致视觉跳跃。
                 let _snakeStartTime = null;
                 let _snakeRafId = null;
-                function _animateThinkSnake() {{
+                let _snakeArcs = [];  // 缓存的 arc 元素列表：帧内不再全文档查询
+                function _refreshSnakeArcs() {{
+                    _snakeArcs = [];
                     const nodes = document.querySelectorAll('.think-snake-arc');
-                    if (!nodes.length) {{
+                    for (let i = 0; i < nodes.length; i++) _snakeArcs.push(nodes[i]);
+                    return _snakeArcs.length;
+                }}
+                function _applySnakeStatic() {{
+                    // 减少动效：跳过运动过程，dashoffset 固定相位 0（保留转圈图标的状态反馈）
+                    for (let i = 0; i < _snakeArcs.length; i++) {{
+                        if (_snakeArcs[i].isConnected) _snakeArcs[i].setAttribute('stroke-dashoffset', '0');
+                    }}
+                }}
+                function _animateThinkSnake() {{
+                    // [PERF] 帧内只滤失联节点，不重新全文档查询——新增节点由
+                    // MutationObserver 驱动的 _ensureThinkSnake 重查缓存。
+                    if (_snakeArcs.some(el => !el.isConnected)) {{
+                        _snakeArcs = _snakeArcs.filter(el => el.isConnected);
+                    }}
+                    if (!_snakeArcs.length) {{
                         // 蛇形图标已从 DOM 移除（思考结束 / 内容重建）：停掉 rAF。
                         // 旧实现在此仍无条件 requestAnimationFrame，形成**永不停止**
                         // 的 60fps 空转 + 每帧全表扫描，思考结束后白烧主线程。
@@ -7653,21 +7661,36 @@ class CodeWebViewer(QWebEngineView):
                     if (_snakeStartTime === null) _snakeStartTime = performance.now();
                     const elapsed = performance.now() - _snakeStartTime;
                     // 周期 1.5s，完整一圈对应 stroke-dashoffset: 0→-50.265（周长 2π×8 ≈ 50.265）
-                    nodes.forEach(el => {{
+                    for (let i = 0; i < _snakeArcs.length; i++) {{
+                        const el = _snakeArcs[i];
                         let extraDelay = 0;
                         if (el.classList.contains('think-snake-head')) extraDelay = 350;
                         else if (el.classList.contains('think-snake-body')) extraDelay = 180;
                         const phase = (elapsed + extraDelay) % 1500;
                         const offset = -(phase / 1500) * 50.265;
                         el.setAttribute('stroke-dashoffset', offset);
-                    }});
+                    }}
                     _snakeRafId = requestAnimationFrame(_animateThinkSnake);
                 }}
                 function _ensureThinkSnake() {{
-                    // 幂等：rAF 已在跑时立即返回（成本 = 一次空判断）
-                    if (_snakeRafId === null && document.querySelector('.think-snake-arc')) {{
-                        _animateThinkSnake();
-                    }}
+                    // 幂等：rAF 已在跑时立即返回（成本 = 一次空判断）。
+                    // [PERF] arc 列表缓存在 _snakeArcs，本函数（MutationObserver
+                    // 驱动）负责重查；rAF 帧内只做失联过滤。
+                    // 减少动效：不启动 rAF，arc 置静态相位 0；已在跑的先停。
+                    const hasArc = _refreshSnakeArcs() > 0;
+                    if (!hasArc) return;
+                    try {{
+                        if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) {{
+                            if (_snakeRafId !== null) {{
+                                cancelAnimationFrame(_snakeRafId);
+                                _snakeRafId = null;
+                                _snakeStartTime = null;
+                            }}
+                            _applySnakeStatic();
+                            return;
+                        }}
+                    }} catch (e) {{ /* matchMedia 不可用按开启动画处理 */ }}
+                    if (_snakeRafId === null) _animateThinkSnake();
                 }}
                 window._ensureThinkSnake = _ensureThinkSnake;
                 new MutationObserver(_ensureThinkSnake).observe(document.body, {{ childList: true, subtree: true }});
@@ -7725,77 +7748,6 @@ class CodeWebViewer(QWebEngineView):
                 // 原 _cleanupStuckTools 会在 30 秒后标记工具为"超时未返回结果"，
                 // 但工具可能仍在执行中，不应急于标记失败。硬等即可。
 
-                // ===== 深度思考轮播提示（减少等待焦虑，类似 CodeBuddy 设计理念）=====
-                // 当 .think-streaming[data-streaming="true"] 存在时，定时轮换显示
-                // 说明信息，让用户在等待期间能获取有用提示，而不是只盯着转圈。
-                const _thinkTips = [
-                    "正在深度思考中...",
-                    "分析上下文关联...",
-                    "检索相关知识库...",
-                    "正在综合推理...",
-                    "组织回答结构...",
-                    "即将输出结果...",
-                    "梳理关键信息...",
-                    "对比多个方案...",
-                    "校验逻辑完整性...",
-                    "回溯历史消息...",
-                    "推理最佳路径...",
-                    "整合分析结果...",
-                    "审查边缘场景...",
-                    "串联上下文线索...",
-                    "构建最终输出...",
-                    "准备呈现答案..."
-                ];
-                let _tipIndex = 0;
-                let _tipTimer = null;
-
-                function _startTipRotation() {{
-                    _stopTipRotation();
-                    // 首次启动时给文字 span 加上脉冲渐变色 class
-                    const el0 = document.querySelector('.think-streaming[data-streaming="true"]');
-                    if (el0) {{
-                        const s0 = el0.querySelector('span > span:last-child');
-                        if (s0) s0.classList.add('think-streaming-tip');
-                    }}
-                    _tipTimer = setInterval(() => {{
-                        const el = document.querySelector('.think-streaming[data-streaming="true"]');
-                        if (!el) {{ _stopTipRotation(); return; }}
-                        // 🐛 修复：不能用 span:last-child — 外层 span（唯一子元素）也会命中，
-                        // 导致 textContent 替换时清掉 spinner SVG。改为精确选择内层文字 span。
-                        const tipSpan = el.querySelector('span > span:last-child');
-                        if (tipSpan) {{
-                            _tipIndex = (_tipIndex + 1) % _thinkTips.length;
-                            tipSpan.textContent = _thinkTips[_tipIndex];
-                        }}
-                    }}, 3500);
-                }}
-
-                function _stopTipRotation() {{
-                    if (_tipTimer) {{
-                        clearInterval(_tipTimer);
-                        _tipTimer = null;
-                    }}
-                }}
-
-                // 通过 MutationObserver 监听 content-placeholder 变化，
-                // 自动启停轮播（兼容 updateContent 全量重建 DOM 的场景）。
-                const _tipObserver = new MutationObserver(() => {{
-                    const hasStreaming = !!document.querySelector('.think-streaming[data-streaming="true"]');
-                    if (hasStreaming && !_tipTimer) {{
-                        _startTipRotation();
-                    }} else if (!hasStreaming && _tipTimer) {{
-                        _stopTipRotation();
-                    }}
-                }});
-                const _tipTarget = document.getElementById('content-placeholder');
-                if (_tipTarget) {{
-                    _tipObserver.observe(_tipTarget, {{ childList: true, subtree: true }});
-                }}
-                // 也监听 tool-content（思考块被移动到此处）
-                const _tipToolContent = document.getElementById('tool-content');
-                if (_tipToolContent) {{
-                    _tipObserver.observe(_tipToolContent, {{ childList: true, subtree: true }});
-                }}
             </script>
         </body>
         </html>

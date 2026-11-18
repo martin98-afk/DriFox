@@ -6458,6 +6458,7 @@ class MessageCard(SimpleCardWidget):
             self._anim_timer,
             self._height_anim,
             self._elapsed_timer,
+            self._stream_height_tick,
         ]
         for timer in timers_to_stop:
             try:
