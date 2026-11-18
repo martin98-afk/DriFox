@@ -2468,6 +2468,49 @@ class CodeWebViewer(QWebEngineView):
         """
         self._do_resize_check()
 
+    # [MEM] 离屏页冻结（2026-11-18）：QWebEngineView 隐藏后 Qt 不会回收该页的
+    # 渲染与合成资源——实测长卡片单页综合占用约 107MB（dpr=1.88 下与纹理面积
+    # 成正比）。Frozen 状态让 Chromium 挂起该页渲染并归还资源，DOM 与内容保留，
+    # 重新可见只重绘、不重新导航。流式中的卡片不冻结（会暂停渲染与定时器）。
+    # 延迟 1.2s 才冻结，避免快速滚动时反复冻结/解冻带来的抖动。
+    _PAGE_FREEZE_DELAY_MS = 1200
+
+    def hideEvent(self, event):
+        """[MEM] 隐藏后延迟冻结页面，离屏卡片不再持有 GPU/渲染资源。"""
+        super().hideEvent(event)
+        try:
+            if getattr(self, "_streaming", False):
+                return
+            from PyQt5.QtCore import QTimer
+
+            QTimer.singleShot(self._PAGE_FREEZE_DELAY_MS, self._freeze_page_if_hidden)
+        except Exception:
+            pass
+
+    def _freeze_page_if_hidden(self) -> None:
+        """到点仍不可见则冻结页面（幂等；异常静默，绝不阻断渲染）。"""
+        try:
+            if self.isVisible() or getattr(self, "_streaming", False):
+                return
+            page = self.page()
+            if page is None:
+                return
+            if page.lifecycleState() == QWebEnginePage.LifecycleState.Active:
+                page.setLifecycleState(QWebEnginePage.LifecycleState.Frozen)
+        except Exception:
+            pass
+
+    def _thaw_page_if_frozen(self) -> None:
+        """恢复 Active（须在任何 setHtml / runJavaScript 之前调用）。"""
+        try:
+            page = self.page()
+            if page is None:
+                return
+            if page.lifecycleState() != QWebEnginePage.LifecycleState.Active:
+                page.setLifecycleState(QWebEnginePage.LifecycleState.Active)
+        except Exception:
+            pass
+
     def showEvent(self, event):
         """[V1] 可见性恢复：隐藏 tab 期间被门控的渲染请求在此补渲。
 
@@ -2477,6 +2520,8 @@ class CodeWebViewer(QWebEngineView):
         调度机制补渲，保证流式输出/工具结果的最终完整性。
         """
         super().showEvent(event)
+        # [MEM] 先解冻再补渲：Frozen 页面上 runJavaScript 会被挂起
+        self._thaw_page_if_frozen()
         # 🛡️ 首帧透明（2026-11-13 白底卡）：池化复用 / tab 切回 / 隐藏期尺寸
         # 变化后，viewer 重新映射时底层合成面可能以默认白底重建。macOS 实测
         # 表现为 HTML 区整块白底、文字色正常，滚动或切 tab 触发重绘后消失
@@ -2718,6 +2763,8 @@ class CodeWebViewer(QWebEngineView):
         cached = _skeleton_cache.get(cache_key)
         if cached is not None:
             _skeleton_cache.move_to_end(cache_key)  # LRU：命中提升为最新
+            # [MEM] 池化复用的 view 可能仍处于 Frozen：导航前先恢复 Active
+            self._thaw_page_if_frozen()
             self.setHtml(cached, QUrl.fromLocalFile(_PROJECT_ROOT + "/"))
             # 🛡️ 透明合成重申：page 的 backgroundColor 只在「下一次导航」才生效，
             # 而白底固化（Chromium 合成属性丢失后回退默认白底）一旦发生，
@@ -7758,6 +7805,8 @@ class CodeWebViewer(QWebEngineView):
         if len(_skeleton_cache) > _SKELETON_CACHE_MAX:
             _skeleton_cache.popitem(last=False)  # LRU：淘汰最久未用
         # 以项目根目录为基础 URL，使相对路径图片（如 images/xxx.png）可正确解析
+        # [MEM] 离屏冻结过的页先恢复 Active，否则导航会被挂起
+        self._thaw_page_if_frozen()
         self.setHtml(html, QUrl.fromLocalFile(_PROJECT_ROOT + "/"))
         # 🛡️ 同上（缓存命中分支）：导航后重申透明合成，防 HTML 区白底固化。
         self.ensure_transparent_composition()

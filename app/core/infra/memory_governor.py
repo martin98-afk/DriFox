@@ -14,8 +14,6 @@
 
 import contextlib
 import gc
-import sys
-import threading
 import time
 
 from loguru import logger
@@ -148,10 +146,6 @@ def _run_gc_hook():
         _compact_process_heap_after_cleanup()
     except Exception:
         pass
-    try:
-        release_malloc_pressure()
-    except Exception:
-        pass
 
 
 def _cleanup_global_lru_caches():
@@ -232,50 +226,6 @@ _GC_FULL_EVERY_N = 8
 _GC_FULL_MIN_INTERVAL_S = 120.0
 _gc_partial_count = 0
 _last_gc_full_at = 0.0
-
-# ═══ [MEM] macOS malloc 空闲页归还（2026-11-18） ═════════════════════════
-# 锯齿根因（实测见项目 MEMORY.md 内存基线）：流式渲染的临时分配经 malloc，
-# gc 后留在 DefaultMallocZone freelist，macOS 无 malloc_trim → RSS 高位驻留
-# （流式峰 1.8GB 回落后仍驻 ~1.4GB）。malloc_zone_pressure_relief 把空闲页
-# decommit 还内核，是「锯齿谷底」的直接解法。T11 当年移除的是 Windows
-# HeapCompact（100% 异常）与 Linux malloc_trim（收益有限），macOS 路径未试过。
-_malloc_relief_last_at = 0.0
-_MALLOC_RELIEF_MIN_INTERVAL_S = 60.0
-
-def release_malloc_pressure(force: bool = False) -> None:
-    """归还 malloc default zone 的空闲页给 OS（仅 macOS，60s 节流，后台线程）。
-
-    触发时机：卡片清理 GC 钩子（_run_gc_hook）与流式结束（finish_streaming
-    延迟 3s）。decommit 十万页级可能耗时 50-200ms，放后台线程避免主线程
-    冻结；libmalloc 内部有锁，跨线程调用安全。归还后再分配会轻微 page
-    fault，但触发点都在空闲期，无感。Windows/Linux 直接返回。
-    Args:
-        force: 诊断用，绕过节流。
-    """
-    global _malloc_relief_last_at
-    if sys.platform != "darwin":
-        return
-    now = time.monotonic()
-    if not force and now - _malloc_relief_last_at < _MALLOC_RELIEF_MIN_INTERVAL_S:
-        return
-    _malloc_relief_last_at = now
-
-    def _work() -> None:
-        try:
-            import ctypes
-
-            lib = ctypes.CDLL(None)  # libSystem：malloc API 默认链接
-            lib.malloc_default_zone.restype = ctypes.c_void_p
-            lib.malloc_zone_pressure_relief.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
-            zone = lib.malloc_default_zone()
-            if zone:
-                # len=0：relief 整个 zone 的全部空闲页（madvise decommit）
-                lib.malloc_zone_pressure_relief(zone, 0)
-        except Exception:
-            pass
-
-    threading.Thread(target=_work, name="malloc-relief", daemon=True).start()
-
 
 # ═══════════════ T22 动态阈值闸门（按 RSS 决策，不只按页数） ═══════════════
 

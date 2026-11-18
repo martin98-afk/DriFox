@@ -262,6 +262,15 @@ def main():
         nonlocal _sm_seg
         _now = _sm_time.perf_counter()
         msg = f"[StartupMark] {label} 耗时 {(_now - _sm_seg) * 1000:.0f}ms"
+        # [MEM] 附真实物理占用（源码运行默认开，DRIFOX_STARTUP_PROBE=0 可关）。
+        # 局部 import：_smark 的定义早于 main() 内的探针导入；诊断绝不能阻断启动。
+        try:
+            from app.utils._startup_probe import footprint_mb, trace_enabled
+
+            if trace_enabled():
+                msg += f" fp={footprint_mb():.0f}MB"
+        except Exception:
+            pass
         if level == "info":
             logger.info(msg)
         else:
