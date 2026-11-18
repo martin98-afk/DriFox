@@ -101,24 +101,27 @@ GLOBAL_REPLACE_TITLES = {
 # ★★ 坐标系纪律（此前踩过坑，务必看懂再改）：
 #   - `_FRAME_*` 系列是 **frame 宽**（QSplitter 直接控制的窗格宽度，含 padding）；
 #   - `TabPanel._auto_collapse_width` 等是 **content 宽**（TabPanel.width()
-#     自身宽度 = frame 宽 − 14）。
+#     自身宽度 = frame 宽 − _FRAME_PADDING_X）。
 #   两套坐标不能混用：早期把 frame 域的值直接塞进 TabPanel 的 content 域比较，
-#   等价于把阈值整体抬高 14px，并让展开/折叠的滞回区被撑成 24px —— 表现为
+#   等价于把阈值整体抬高 padding，并让展开/折叠的滞回区被撑成 24px —— 表现为
 #   "手动拉宽到 188px（内容区 174px，视觉上已完全够用）却仍是折叠态"。
 #   因此 content 域常量在此显式定义为 frame 值减去 padding，禁止再手写换算。
 # ══════════════════════════════════════════════════════════════════════════
 
-# frame 宽 = 内容宽 + margins 12 + border 2
-_FRAME_PADDING_X = 14
+# frame 宽 = 内容宽 + #tabFrame QSS margin-left 4（右 0 让位 splitter handle）。
+# ★ 2026-11-18：左栏内容改为贴边填充（与 #chatFrame 工作区同款），布局
+#   contentsMargins 归零后仅剩 QSS 的 4px 左边距，故 padding 由 14 改为 4。
+#   实测（offscreen）：布局 margins 6 时 frame−panel=16，归零后 frame−panel=4。
+_FRAME_PADDING_X = 4
 
 # ── 卡片态 frame↔槽位二次换算补偿（px，frame 域）──
-# 卡片打开期 #tabFrame 内多出两处未计入 _FRAME_PADDING_X 的装饰：
-#   #tabFrame QSS margin-left(4) + sidebarSplitter handle(4)。
-# 实测几何方程（卡片态）：frame 宽 = TabPanel 宽 + 卡片槽位 + 22
-# （= _FRAME_PADDING_X 14 + handle 4 + QSS margin 4）。
-# 卡片打开编排若不补偿，卡片槽每次重开被净吞 8px，连续切页时
-# 360→352→344 逐轮递减（表现为「切页往返后卡片越切越窄」）。
-_CARD_SLOT_CHROME_EXTRA = 8
+# 卡片打开期 #tabFrame 内除 _FRAME_PADDING_X 外还多出一处装饰：
+#   sidebarSplitter handle(4)。（QSS margin-left 4 已计入 _FRAME_PADDING_X）
+# 实测几何方程（卡片态）：frame 宽 = TabPanel 宽 + 卡片槽位 + 8
+# （= _FRAME_PADDING_X 4 + handle 4）。
+# 卡片打开编排若不补偿，卡片槽每次重开被净吞 4px，连续切页时
+# 逐轮递减（表现为「切页往返后卡片越切越窄」）。
+_CARD_SLOT_CHROME_EXTRA = 4
 
 # ── 侧边栏折叠线（px，★ content 宽，= TabPanel.width() 口径）──
 # 展开态拖窄到该宽度以下即视为不可用 → 触发自动折叠；同时作为挤压折叠后
@@ -3103,13 +3106,13 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
         # QSplitter 控制的 child 是 _tab_frame 而非 _tab_panel，因此
         # _tab_frame 必须显式设最大/最小宽度，否则 splitter 拖拽会绕过
         # _tab_panel 的约束：
-        #   frame min = 收起宽(46) + margins(12) + border(2) = 60
-        #   frame max = panel max(400) + margins(12) + border(2) = 414
+        #   frame min = 收起宽(46) + _FRAME_PADDING_X(4) = 50
+        #   frame max = panel max(400) + _FRAME_PADDING_X(4) = 404
         self._tab_frame.setMinimumWidth(_COLLAPSED_PANEL_WIDTH + _FRAME_PADDING_X)
         self._tab_frame.setMaximumWidth(_TAB_PANEL_MAX_CONTENT_WIDTH + _FRAME_PADDING_X)
         tab_frame_layout = QVBoxLayout(self._tab_frame)
-        # 与 #chatFrame 内边距完全对齐：让两侧容器视觉一致
-        tab_frame_layout.setContentsMargins(6, 6, 6, 6)
+        # 与 #chatFrame 内边距完全对齐：两侧容器内容均贴边（用户要求「填充」）
+        tab_frame_layout.setContentsMargins(0, 0, 0, 0)
         tab_frame_layout.setSpacing(0)
 
         # ── 侧边栏内部横向 splitter：TabPanel | left 卡片区 ──
@@ -3373,7 +3376,7 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
         content_widget.setLayout(content_layout)
         main_layout.addWidget(content_widget, 1)
 
-        # 固定默认面板宽度（_DEFAULT_PANEL_WIDTH + 14px 补偿 #tabFrame margins/border），不记忆
+        # 固定默认面板宽度（_DEFAULT_PANEL_WIDTH + _FRAME_PADDING_X 补偿 #tabFrame 边距），不记忆
         frame_w = _DEFAULT_PANEL_WIDTH + _FRAME_PADDING_X
         self._splitter.setSizes([frame_w, max(0, self.width() - frame_w)])
 
@@ -3539,11 +3542,10 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
             except Exception:
                 pass
             target = self._left_card_frame_target(card_w)
-            # ★ 槽位→frame 换算补偿（+8）：_FRAME_PADDING_X(14) 只覆盖
-            #   layout margins(12) + border(2)；卡片态下内层还有 QSS
-            #   margin-left(4) 与 splitter handle(4) 未计——不补偿时卡片槽
-            #   每次重开被压缩 8px（实测连续切页卡片槽 360→352→344 逐轮
-            #   递减，表现为「切页往返后卡片宽度越来越窄」）。
+            # ★ 槽位→frame 换算补偿（+4）：_FRAME_PADDING_X(4) 已含 QSS
+            #   margin-left；卡片态下内层还有 splitter handle(4) 未计——不补偿
+            #   时卡片槽每次重开被压缩 4px（连续切页会逐轮递减，表现为
+            #   「切页往返后卡片宽度越来越窄」）。
             target += _CARD_SLOT_CHROME_EXTRA
             # 3) 放宽 frame max（允许加宽）后落位
             self._tab_frame.setMaximumWidth(max(_tab_frame_max_expanded(), target))
@@ -3931,7 +3933,7 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
         left = sizes[0]
         # ★ 坐标系：sizes[0] 是 **frame 宽**，panel._auto_collapse_width 是
         #   **content 宽**（= TabPanel.width()）→ 比较前必须先换算，否则折叠线
-        #   被隐性抬高 14px。统一折算到 frame 域比较（本方法其余判定都在 frame 域）。
+        #   被隐性抬高 padding。统一折算到 frame 域比较（本方法其余判定都在 frame 域）。
         collapse_frame_w = panel._auto_collapse_width + _FRAME_PADDING_X
         if total <= 0 or left >= collapse_frame_w:
             return False  # 宽度正常：没有挤压，无需折叠

@@ -2138,7 +2138,7 @@ class TabPanel(QWidget):
         阈值区间，若在此触发会与动画互相打断。
 
         ★★ 坐标系：本方法比较的 self.width() 是 **content 宽**（TabPanel 自身
-        宽度 = #tabFrame 宽 − 14 padding），因此 _auto_collapse_width /
+        宽度 = #tabFrame 宽 − _FRAME_PADDING_X），因此 _auto_collapse_width /
         _auto_expand_width 都必须是 content 口径（见 __init__ 注释）。
         默认值：折叠线 150、展开线 156（滞回区 6px，仅吸收手抖/量化误差）。
         滞回区不可放大：用户拉宽是连续动作，滞回区一大就变成"明显拉宽了却
