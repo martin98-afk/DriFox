@@ -1122,6 +1122,9 @@ class OpenAIChatToolWindow(ToolWindow):
     _approval_review_ready = pyqtSignal(str, object, str)
     # 上下文占用快照后台化桥接（A 优化）：快照线程池 → 主线程画圆环
     _ctx_usage_ready = pyqtSignal(int, str, object, str)
+    # [PERF] 重载上下文快照后台化桥接（P1）：_restore_meta_from_batch 首算
+    # 移出主线程，gen/sid 双校验回填缓存后补刷可见 assistant 卡
+    _reload_ctx_ready = pyqtSignal(int, str, object, str)
     _interrupt_complete = pyqtSignal(object)  # 中断完成后主线程回调
     # [T4-4] diff 统计后台计算结果回主线程：tool_call_id, stats(dict|None)
     _diff_stats_ready = pyqtSignal(str, object)
@@ -1491,6 +1494,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self._approval_review_ready.connect(self._on_approval_review_ready)
         # 上下文占用快照桥接：快照后台线程 → 主线程画圆环（A 优化）
         self._ctx_usage_ready.connect(self._on_ctx_usage_ready)
+        self._reload_ctx_ready.connect(self._on_reload_ctx_ready)
         # 线程安全桥接：中断完成后回到主线程保存会话
         self._interrupt_complete.connect(self._on_finalize_complete)
         # [T4-4] diff 统计后台计算完成 → 主线程校验卡片存活后落数字
@@ -15551,20 +15555,13 @@ class OpenAIChatToolWindow(ToolWindow):
         session = self.session_manager.get_current_session()
         sid = getattr(session, "session_id", None) if session else None
         if used is None or _reload_sid != sid:
-            try:
-                # 带上会话的 API 权威值（含三态标记），否则重载后走纯本地估算
-                used = self.backend.get_context_usage_snapshot(
-                    session,
-                    self._get_current_model_config(),
-                    api_prompt_tokens=int(getattr(session, "last_api_prompt_tokens", 0) or 0),
-                    api_message_count=int(getattr(session, "last_api_message_count", 0) or 0),
-                    from_api=getattr(session, "last_api_prompt_from_usage", None),
-                ).get("used_tokens", 0)
-            except Exception:
-                used = 0
-            self._reload_ctx_used_tokens = used
-            self._reload_ctx_sid = sid
-        token_usage = {"total": used} if used > 0 else None
+            # [PERF] P1 首算移出主线程：project_for_ui(8 层 tier)+全量 token 估算
+            # 长会话实测 500ms+（watchdog），直调卡重载首帧。丢共享线程池后台算，
+            # 结果经 _reload_ctx_ready 回主线程回填缓存并补刷可见 assistant 卡。
+            # 本次渲染先不带 total（不显示假值），离屏卡由回收重建路径自然带 total。
+            self._kick_reload_ctx_snapshot(session, sid)
+            used = None
+        token_usage = {"total": used} if used is not None and used > 0 else None
         if token_usage and output_tokens:
             token_usage["output"] = output_tokens
             if ttft_ms:
@@ -15575,6 +15572,80 @@ class OpenAIChatToolWindow(ToolWindow):
         from PyQt5.QtCore import QTimer
 
         QTimer.singleShot(0, card._refresh_footer_separators)
+
+    def _kick_reload_ctx_snapshot(self, session, sid: Optional[str]) -> None:
+        """P1：重载快照首算后台化。单飞守卫 + gen 校验，结果回 _on_reload_ctx_ready。"""
+        if session is None or not sid:
+            self._reload_ctx_used_tokens = 0
+            self._reload_ctx_sid = sid
+            return
+        if getattr(self, "_reload_ctx_inflight_sid", None) == sid:
+            return  # 同会话任务在飞：等回调回填+补刷，不重复派发
+        backend = self.backend
+        llm_config = self._get_current_model_config()
+        api_prompt_tokens = int(getattr(session, "last_api_prompt_tokens", 0) or 0)
+        api_message_count = int(getattr(session, "last_api_message_count", 0) or 0)
+        from_api = getattr(session, "last_api_prompt_from_usage", None)
+        self._reload_ctx_gen = getattr(self, "_reload_ctx_gen", 0) + 1
+        gen = self._reload_ctx_gen
+        self._reload_ctx_inflight_sid = sid
+
+        def _fn():
+            # 纯计算：读 session 消息 + token 估算 + 投影，禁碰 UI 对象
+            return backend.get_context_usage_snapshot(
+                session,
+                llm_config,
+                api_prompt_tokens=api_prompt_tokens,
+                api_message_count=api_message_count,
+                from_api=from_api,
+            )
+
+        def _bridge(result, error=""):
+            # 后台线程 → 主线程（QueuedConnection）；窗口已析构时静默丢弃
+            if getattr(self, "_is_destroyed", False):
+                return
+            try:
+                self._reload_ctx_ready.emit(gen, sid, result, error or "")
+            except RuntimeError:
+                pass
+
+        self._gen_thread_pool.start(_CtxUsageSnapshotTask(_fn, _bridge))
+
+    def _on_reload_ctx_ready(self, gen: int, sid: str, snapshot, error: str):
+        """P1：重载快照后台结果落地。gen/会话双校验 → 回填缓存 → 补刷可见卡。"""
+        if getattr(self, "_is_destroyed", False):
+            return
+        self._reload_ctx_inflight_sid = None
+        if gen != getattr(self, "_reload_ctx_gen", 0):
+            return
+        session = self.session_manager.get_current_session()
+        cur_sid = getattr(session, "session_id", None) if session else None
+        if sid != cur_sid:
+            return
+        used = 0
+        if not error and isinstance(snapshot, dict):
+            used = int(snapshot.get("used_tokens", 0) or 0)
+        self._reload_ctx_used_tokens = used
+        self._reload_ctx_sid = sid
+        if used <= 0:
+            return
+        # 补刷：重跑 _restore_meta_from_batch（此刻缓存命中 → 带 total 渲染）。
+        # 只刷存活的可见 assistant 卡；离屏卡由回收重建路径自然带 total。
+        # set_meta_info 的 token_usage 仅在 elapsed 非 None 时消费，而历史卡
+        # batch 内必带 elapsed，重跑即完整恢复（不新增补刷逻辑）。
+        for batch_idx, cards in enumerate(self._batch_cards):
+            if not cards or batch_idx >= len(self._message_batch):
+                continue
+            batch = self._message_batch[batch_idx]
+            if not batch:
+                continue
+            for card in cards:
+                try:
+                    if card.role != "assistant" or not card.isVisible():
+                        continue
+                    self._restore_meta_from_batch(card, batch)
+                except RuntimeError:
+                    continue  # 卡片 C++ 侧已销毁（回收竞态）
 
     def _get_load_msg_extras_fn(self):
         """message_extras 懒读函数（探测式：引擎不支持时返回 None）。"""
