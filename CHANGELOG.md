@@ -1,4 +1,6 @@
-## [Unreleased]
+## [v0.7.4] - 2026-11-18
+
+自 v0.7.3 以来的变更 | 提交数：73 · 文件变更：152 · +10334/-1953 | 贡献者：dingma, drifox-bot, mading, martin98-afk
 
 ### ✨ 新功能 (New Features)
 
