@@ -1968,7 +1968,8 @@ class TabPanel(QWidget):
         # ★ 分支入口已迁移到助手消息卡片页脚（用户可在任意一条消息处分支）。
         self._top_bar = QWidget(self)
         top_layout = QHBoxLayout(self._top_bar)
-        top_layout.setContentsMargins(6, 4, 4, 2)
+        # 右 6 与左 6 同拍（此前右 4 叠 handle 4 = 8px，比左侧 10px 窄 2px）
+        top_layout.setContentsMargins(6, 4, 6, 2)
         top_layout.setSpacing(4)
 
         self._new_chat_row = QFrame(self._top_bar)
@@ -2028,8 +2029,9 @@ class TabPanel(QWidget):
         self._list_widget.setStyleSheet("background: transparent;")
         self._list_layout = QVBoxLayout(self._list_widget)
         # 左 0：tab 行 hover/选中块左缘与上方菜单行对齐（都从 frame padding 6px 处起）；
-        # 原左 2 叠 frame 6 = 8px，用户感知「对话列表外部 pad 太多」。右 2 保留给滚动条
-        self._list_layout.setContentsMargins(0, 0, 2, 0)
+        # 原左 2 叠 frame 6 = 8px，用户感知「对话列表外部 pad 太多」。右 6 与左侧同拍
+        # （此前右 2，行块右缘距边栏右缘 6px，视觉比左侧窄）
+        self._list_layout.setContentsMargins(0, 0, 6, 0)
         self._list_layout.setSpacing(2)
         self._list_layout.addStretch()
         self._scroll_area.setWidget(self._list_widget)
