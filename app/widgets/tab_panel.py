@@ -1916,7 +1916,10 @@ class TabPanel(QWidget):
         self._custom_plugin_scroll.setWidgetResizable(True)
         install_fast_wheel(self._custom_plugin_scroll)
         self._custom_plugin_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self._custom_plugin_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        # 垂直条恒显恒占位（AlwaysOn）：AsNeeded 下条出现/消失会让 viewport 宽度
+        # 跳变 8px，行内容跟着左右横移（用户感知为「横向移动的滚轮」）；悬浮条
+        # 时代不占宽故无此问题，换原生条后必须恒占位压掉跳变
+        self._custom_plugin_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
         self._custom_plugin_scroll.setFrameShape(QFrame.NoFrame)
         self._custom_plugin_scroll.setMaximumHeight(200)
         self._custom_plugin_scroll.setStyleSheet(
