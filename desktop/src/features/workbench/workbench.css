@@ -1,0 +1,141 @@
+/**
+ * Workbench 样式：并列侧板（宽窗分栏）/ 窄窗覆盖抽屉降级 / 页签条 / WorkspaceTree。
+ */
+
+.Workbench {
+  width: 300px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--surface);
+  border-left: 1px solid var(--border);
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* 页签条即头部（§三：旧标题行已移除） */
+.workbench-tabs {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 6px 8px 0;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.workbench-tab {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--font-sm);
+  color: var(--muted);
+  padding: 6px 12px;
+  border-radius: 8px 8px 0 0;
+  cursor: pointer;
+  user-select: none;
+}
+
+.workbench-tab:hover { color: var(--fg); background: var(--surface-hover); }
+.workbench-tab.is-active {
+  color: var(--fg);
+  font-weight: 600;
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  border-bottom-color: var(--card-bg);
+  margin-bottom: -1px;
+}
+
+.workbench-tab-close {
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1;
+  padding: 0 2px;
+  border-radius: 4px;
+}
+
+.workbench-tab-close:hover { background: var(--hover-btn-bg); color: var(--danger); }
+
+.workbench-collapse {
+  margin-left: auto;
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  font-size: 15px;
+  cursor: pointer;
+  padding: 2px 8px;
+  border-radius: 6px;
+}
+
+.workbench-collapse:hover { background: var(--hover-btn-bg); color: var(--fg); }
+
+.workbench-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 10px;
+}
+
+.workbench-body::-webkit-scrollbar { width: 6px; }
+.workbench-body::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+
+/* ---------- WorkspaceTree ---------- */
+
+.wt-project { margin-bottom: 12px; }
+
+.wt-project-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 6px;
+}
+
+.wt-project-name { font-size: var(--font-sm); font-weight: 600; }
+
+.wt-tree-row {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px 6px 24px;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: var(--font-xs);
+  color: var(--fg);
+}
+
+.wt-tree-row:hover { background: var(--surface-hover); }
+
+.wt-tree-icon { color: var(--muted); font-size: 12px; }
+.wt-tree-name { flex: 1; font-family: var(--code-font); }
+
+.wt-manage-btn {
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--muted);
+  font-size: 10px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+
+.wt-tree-row:hover .wt-manage-btn { opacity: 1; }
+.wt-manage-btn:hover { color: var(--accent); border-color: var(--accent); }
+
+/* ---------- 窄窗降级：覆盖抽屉 ---------- */
+
+@media (max-width: 1100px) {
+  .Workbench {
+    position: fixed;
+    right: 0;
+    top: 36px; /* TitleBar 高度下 */
+    bottom: 0;
+    z-index: 35; /* 低于 floating 卡片层 */
+    box-shadow: -8px 0 24px rgba(0, 0, 0, 0.18);
+  }
+}

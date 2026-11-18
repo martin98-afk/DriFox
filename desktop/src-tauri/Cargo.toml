@@ -1,0 +1,16 @@
+[package]
+name = "drifox-desktop"
+version = "0.1.0"
+description = "DriFox 桌面端 Tauri 壳"
+edition = "2021"
+
+# 后续 UI 复刻阶段再按需加 serde/tauri-plugin-* 依赖
+[lib]
+name = "drifox_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }

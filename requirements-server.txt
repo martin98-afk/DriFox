@@ -1,0 +1,4 @@
+# DriFox headless 服务层依赖（Tauri sidecar 用，独立于既有依赖组）
+# 安装：uv pip install -r requirements-server.txt
+fastapi>=0.110
+uvicorn[standard]>=0.29

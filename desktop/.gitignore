@@ -1,0 +1,9 @@
+# 依赖与构建产物
+node_modules/
+dist/
+
+# Rust 编译产物
+src-tauri/target/
+
+# Tauri 生成的能力 schema
+src-tauri/gen/

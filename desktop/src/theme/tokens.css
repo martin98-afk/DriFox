@@ -1,0 +1,146 @@
+/**
+ * DriFox 桌面端主题 token：双主题体系。
+ * - 三态切换：html[data-theme="light"|"dark"] 手动；无属性 = auto 跟随 prefers-color-scheme
+ * - 浅色默认 lumia（按 PyQt5 基准截图判色）；深色默认 true-black（obsidian 变量名体系）
+ * - 13 主题全量转换后置，本阶段先落双默认主题
+ */
+
+/* ---------- 浅色 lumia（默认） ---------- */
+:root {
+  color-scheme: light;
+
+  /* 基底 */
+  --bg: #ffffff;
+  --fg: #1a1a1e;
+  --surface: #f7f7f8;        /* 侧栏/面板 */
+  --surface-hover: #ececef;
+  --border: #e5e7eb;
+
+  /* 强调 */
+  --accent: #4c8dff;         /* 发送钮/链接蓝 */
+  --accent-fg: #ffffff;
+  --accent-warm: #e8963e;    /* tok/s / 工具徽章橙 */
+  --muted: #8a8f98;
+  --danger: #e5534b;
+
+  /* 气泡与头像 */
+  --bubble-user: #e6e9f5;    /* 用户气泡：低饱和蓝紫灰（验收判据色） */
+  --bubble-user-fg: #1a1a2e;
+  --bubble-user-accent: #e8963e; /* 字母头像基色系，成员色 L橙/P红/B蓝/R青/F粉 单独覆写 */
+
+  /* 卡片与输入 */
+  --card-bg: #ffffff;
+  --card-border: #e8eaee;
+  --ts-pill-bg: #ececef;     /* 助手时间戳胶囊底 */
+  --hover-btn-bg: rgba(127, 127, 127, 0.07);
+  --input-bg: linear-gradient(180deg, #ffffff 0%, #f6f7f9 100%);
+  --input-border: #dcdfe6;
+
+  /* 骨架 shimmer */
+  --shimmer-from: rgba(0, 0, 0, 0.04);
+  --shimmer-to: rgba(0, 0, 0, 0.10);
+
+  /* 代码块 */
+  --code-pre-bg: transparent;
+  --code-font: Consolas, "SF Mono", Menlo, monospace;
+  --code-size: 13px;
+
+  /* 字号 */
+  --font-xs: 11px;
+  --font-sm: 12px;
+  --font-md: 14px;
+  --font-lg: 20px;
+
+  /* 间距与圆角 */
+  --space-sm: 8px;
+  --space-md: 16px;
+  --space-lg: 24px;
+  --r-md: 10px;              /* MessageCard 圆角 */
+  --r-2xl: 24px;             /* InputArea 圆角（规格定案值） */
+  --radius: 8px;
+}
+
+/* ---------- 深色 true-black（obsidian 变量名体系） ---------- */
+:root[data-theme="dark"] {
+  color-scheme: dark;
+
+  --bg: #000000;
+  --fg: #e8eaed;
+  --surface: #101014;
+  --surface-hover: #1a1a20;
+  --border: #26262c;
+
+  --accent: #4c8dff;
+  --accent-fg: #ffffff;
+  --accent-warm: #e8963e;
+  --muted: #7d838d;
+  --danger: #ff6b6b;
+
+  --bubble-user: #262b38;
+  --bubble-user-fg: #e8eaed;
+  --bubble-user-accent: #e8963e;
+
+  --card-bg: #0c0c10;
+  --card-border: #1e1e24;
+  --ts-pill-bg: #1c1c22;
+  --hover-btn-bg: rgba(127, 127, 127, 0.07);
+  --input-bg: linear-gradient(180deg, #101014 0%, #0a0a0e 100%);
+  --input-border: #26262c;
+
+  --shimmer-from: rgba(255, 255, 255, 0.04);
+  --shimmer-to: rgba(255, 255, 255, 0.10);
+}
+
+/* auto：系统深色且未手动指定主题时走 true-black */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]):not([data-theme="dark"]) {
+    color-scheme: dark;
+
+    --bg: #000000;
+    --fg: #e8eaed;
+    --surface: #101014;
+    --surface-hover: #1a1a20;
+    --border: #26262c;
+
+    --accent: #4c8dff;
+    --accent-fg: #ffffff;
+    --accent-warm: #e8963e;
+    --muted: #7d838d;
+    --danger: #ff6b6b;
+
+    --bubble-user: #262b38;
+    --bubble-user-fg: #e8eaed;
+    --bubble-user-accent: #e8963e;
+
+    --card-bg: #0c0c10;
+    --card-border: #1e1e24;
+    --ts-pill-bg: #1c1c22;
+    --hover-btn-bg: rgba(127, 127, 127, 0.07);
+    --input-bg: linear-gradient(180deg, #101014 0%, #0a0a0e 100%);
+    --input-border: #26262c;
+
+    --shimmer-from: rgba(255, 255, 255, 0.04);
+    --shimmer-to: rgba(255, 255, 255, 0.10);
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--bg);
+  color: var(--fg);
+  font-family:
+    -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei",
+    "Segoe UI", sans-serif;
+  font-size: var(--font-md);
+  -webkit-font-smoothing: antialiased;
+}
