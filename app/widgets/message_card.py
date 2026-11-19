@@ -167,6 +167,7 @@ from app.widgets.card_render_core import (
     STREAM_HEIGHT_TRACK_FAR_PX,
     STREAM_HEIGHT_TRACK_MAX_FACTOR,
     _count_think_tool_prefix,
+    _CHART_FENCE_OPEN_RE,
     _edit_tools,
     _extract_closed_segments,
     _extract_fenced_code,
@@ -188,8 +189,11 @@ from app.widgets.card_render_core import (
     _inject_tag_cards,
     _inject_think_cards,
     _inject_tool_blocks,
+    _is_render_fence_lang,
     _iter_think_segments,
     _last_para_break_outside_fence,
+    _PARTIAL_FENCE_TAIL_RE,
+    _PARTIAL_TAG_TAIL_RE,
     _plugin_fence_placeholder,
     _protect_inline_svg_blocks,
     _qt_renderer_enabled,
@@ -202,6 +206,7 @@ from app.widgets.card_render_core import (
     _render_think_block_lightweight,
     _render_tool_block_content,
     _render_tool_streaming_block,
+    _registered_tag_names_safe,
     _restore_fenced_code,
     _sanitize_incomplete_markdown,
     _tail_before_unclosed_block,
@@ -575,6 +580,10 @@ class MessageCard(SimpleCardWidget):
         # 🆕 Bug B：当前活动思考块。append_reasoning 只追加到它（避免合并进已完成的
         # 旧思考块导致多轮思考堆积）；工具调用/新块开始时置 None / 覆盖。
         self._active_thinking_block: Optional[dict] = None
+        # [E6] 流式协议状态机增量检测状态（append_text 首批懒建；流重置/finish/cleanup 置 None）
+        self._proto_state: Optional[dict] = None
+        # [E6] 原文固化游标：_stream_text_parts 中已固化进 acc 的片段数（parts 不清空）
+        self._stream_text_parts_solid: int = 0
         self._pending_content: Optional[str] = None
         self._reasoning_total_len = 0  # reasoning 内容总长度计数器，避免每次遍历
         # 流式思考实时预览：增量文本缓冲 + 节流推送（250ms 批量，避免逐 chunk runJavaScript）
@@ -1249,25 +1258,167 @@ class MessageCard(SimpleCardWidget):
         return ctx
 
     def _stream_text_snapshot(self) -> str:
-        """返回本流累计原文（惰性固化）。
+        """返回本流累计原文（惰性固化，游标推进式）。
 
         [PERF] 写入侧（update_content，流式每批）只 append 到 _stream_text_parts；
-        本方法在读取时（_footer_stat_context 每 200ms 一拍）才 join 一次。
+        本方法在读取时（_footer_stat_context 每 200ms 一拍）才固化。
         旧实现每批做 `acc = acc + txt`，因读取方持有引用使 CPython 的原地
         realloc 失效 → O(n²)，实测 390KB 回复 516ms 全落在流式主线程。
 
-        固化策略：把待固化片段 join 进缓存串后清空 pending，O(新增) 而非 O(总量)。
+        [E6] 固化策略：parts 不清空，用 _stream_text_parts_solid 游标记住已固化
+        前缀；无新段拍 O(1) 直返；有新段拍 `"".join(parts[solid:])` 只拼新增段。
+        注：acc 与新增段的 `+` 仍是 O(总量) 字符串拷贝（CPython str 拼接不可
+        避免），本处消除的是「无新段拍」与「跨读取方重复固化」的开销；待固化
+        段 join 严格 O(新增)。
         """
         parts = getattr(self, "_stream_text_parts", None)
         if parts is None:
             # 兼容旧路径 / cleanup 后置 None 的情形
             return getattr(self, "_stream_text_acc", "") or ""
-        if parts:
-            merged = "".join(parts)
-            parts.clear()
+        solid = getattr(self, "_stream_text_parts_solid", 0)
+        if len(parts) != solid:
+            merged = "".join(parts[solid:])
             prev = getattr(self, "_stream_text_acc", None)
             self._stream_text_acc = (prev or "") + merged
+            self._stream_text_parts_solid = len(parts)
         return getattr(self, "_stream_text_acc", "") or ""
+
+    # ── [E6] 流式协议状态机 + 块级 pending 固化 ─────────────────
+    # append_text/append_reasoning 流式写入只 O(1) append 到块内 "_pend" 片段列表，
+    # 不再逐 chunk 拼 block["text"]/block["content"]（旧实现每 chunk O(全文) 拷贝，
+    # 390KB 回复累计 ~160MB 内存流量）。协议未闭合检测同步改增量状态机：
+    # 每批只扫「新段 + 劈开 carry」，不再对块全文跑 4 个 O(n) 检测函数。
+    # 读权威方（渲染 / 导出 / 落定 / block-key）进入前经 _solidify_text_blocks
+    # 固化，任何时点读取等价于逐 chunk 直拼（单测对拍覆盖）。
+
+    _PROTO_TAG_RE = re.compile(r"</?[a-zA-Z][a-zA-Z0-9-]{0,11}>")
+    _PROTO_TAG_PARTIAL_RE = _PARTIAL_TAG_TAIL_RE  # 劈开标记前缀形态（与全文宽松拦同源）
+    _PROTO_MARK_BASE = ("<think>", "</think>", "<tool>", "</tool>")
+    _PROTO_CARRY_MAX = 32  # 尾部劈开标记候选上限（最长完整标记 "</think>"=8 + 注册 tag 余量）
+    _FENCE_CARRY_MAX = 256  # 不完整行封顶：fence 开/闭标记只看 strip 后行首 21 字符内
+
+    def _proto_state_reset(self) -> None:
+        """复位流式协议状态机（append_text 首批懒建 / 流重置 / finish / cleanup 调用）"""
+        self._proto_state = {
+            "think_open": False,
+            "tag_open": {},
+            "tool_open": 0,
+            "fence_inside": False,
+            "fence_chart": False,
+            "fence_marker": "",
+            "fence_carry": "",
+            "last_line": "",
+            "carry": "",
+        }
+
+    @staticmethod
+    def _proto_carry_of(tail: str, tag_names: frozenset) -> str:
+        """取尾部可能是「被 chunk 劈开的标记前缀」的最长后缀（上限 32）。
+
+        tail 取自 finditer 末命中之后的子串，不含任何完整标记 → 命中的后缀
+        必是真前缀，下批拼接重扫不会重复计数。fence 由独立通道兜（fence_carry）。
+        判据两类：完整标记前缀（think/tool/注册 tag 两款）；partial tag 形态
+        （</?字母…，对齐全量版 _PARTIAL_TAG_TAIL_RE——注册表为空时半截
+        未注册 tag 同样要拦，宽松拦不依赖注册表）。
+        """
+        marks = list(MessageCard._PROTO_MARK_BASE)
+        for name in tag_names:
+            marks.append(f"<{name}>")
+            marks.append(f"</{name}>")
+        partial_re = MessageCard._PROTO_TAG_PARTIAL_RE
+        limit = min(len(tail), MessageCard._PROTO_CARRY_MAX)
+        for start in range(len(tail) - limit, len(tail)):
+            seg = tail[start:]
+            if seg and (any(m.startswith(seg) for m in marks) or partial_re.fullmatch(seg)):
+                return seg
+        return ""
+
+    def _proto_scan_chunk(self, st: dict, chunk: str) -> Tuple[bool, bool, bool, bool]:
+        """增量扫描新段，推进协议状态机，返回 (think, tag, tool, fence_chart) 未闭合四元组。
+
+        语义与全文版 _has_unclosed_think / _has_unclosed_registered_tag /
+        <tool> 计数 / _has_unclosed_chart_fence 逐项等价：
+        - tag/fence 的尾部宽松拦（_PARTIAL_*_TAIL_RE）由 carry/fence_carry 尾窗
+          复刻（carry 是 so_far 尾部子串，$ 锚定正则 search 尾窗严格等价）；
+        - chunk 边界劈开的不完整 fence 尾行由 fence_carry 延后一拍判定。
+        """
+        tag_names = frozenset(_registered_tag_names_safe())
+        seg = st["carry"] + chunk
+        st["carry"] = ""
+        last_end = 0
+        for m in MessageCard._PROTO_TAG_RE.finditer(seg):
+            last_end = m.end()
+            token = m.group()
+            closing = token.startswith("</")
+            name = token[2:-1] if closing else token[1:-1]
+            if name == "think":
+                st["think_open"] = not closing
+            elif name == "tool":
+                st["tool_open"] += -1 if closing else 1
+            elif name in tag_names:
+                st["tag_open"][name] = not closing
+        tail = seg[last_end:]
+        st["carry"] = self._proto_carry_of(tail, tag_names) if tail else ""
+        # fence 逐行推进：完整行立即判定，不完整行存 fence_carry（封顶 256）
+        lines = (st["fence_carry"] + seg).split("\n")
+        fence_carry = lines[-1]
+        st["fence_carry"] = fence_carry[: self._FENCE_CARRY_MAX] if len(fence_carry) > self._FENCE_CARRY_MAX else fence_carry
+        for line in lines[:-1]:
+            st["last_line"] = line
+            stripped = line.strip()
+            if not (stripped.startswith("```") or stripped.startswith("~~~")):
+                continue  # 非 fence 行不参与翻转（与 _CHART_FENCE_LINE_RE 语义一致）
+            if not st["fence_inside"]:
+                mo = _CHART_FENCE_OPEN_RE.match(stripped)
+                if mo:
+                    st["fence_inside"] = True
+                    st["fence_marker"] = mo.group(1)
+                    st["fence_chart"] = _is_render_fence_lang(mo.group(2))
+                else:
+                    st["fence_inside"] = True
+                    st["fence_marker"] = stripped[:3]
+                    st["fence_chart"] = False
+            elif st["fence_marker"] and stripped.startswith(st["fence_marker"]):
+                st["fence_inside"] = False
+                st["fence_chart"] = False
+        # 尾部宽松拦：与全文版 _PARTIAL_TAG_TAIL_RE / _PARTIAL_FENCE_TAIL_RE 对齐
+        # （carry 是 so_far 的尾部子串，$ 锚定下 search 尾窗与全文窗口严格等价；
+        # fence_carry 用 32 尾窗对齐全文窗口，截断安全。last_line：全文版对
+        # 「尾行恰为完整 fence 行（含 \n 终结）」同样 partial 命中（宽松宁误拦），
+        # 状态机逐行精确判定需显式补这一维度）
+        tag_partial = bool(_PARTIAL_TAG_TAIL_RE.search(st["carry"]))
+        fence_partial = bool(
+            _PARTIAL_FENCE_TAIL_RE.search(st["fence_carry"][-32:])
+            or _PARTIAL_FENCE_TAIL_RE.search(st["last_line"][-32:])
+        )
+        return (
+            st["think_open"],
+            any(st["tag_open"].values()) or tag_partial,
+            st["tool_open"] > 0,
+            (st["fence_inside"] and st["fence_chart"]) or fence_partial,
+        )
+
+    def _solidify_text_blocks(self) -> None:
+        """把流式 pending 片段固化进块的 text/content 字段（幂等、可重入）。
+
+        [E6] 遍历 _content_data 中带 "_pend" 的块，把片段 join 进正式字段并弹出
+        键。所有读权威方（_build_incremental_md / get_plain_text / 非流式落定 /
+        block-key 计算 / finish 数据层清账）进入前必须经本方法，保证读取口径与
+        逐 chunk 直拼逐字节一致；"_pend" 只存在于 UI 卡片层，固化后不进持久化。
+        """
+        data = self._content_data
+        if not isinstance(data, list):
+            return
+        for block in data:
+            if not isinstance(block, dict):
+                continue
+            pend = block.pop("_pend", None)
+            if not pend:
+                continue
+            if block.get("type") == "text":
+                block["text"] = str(block.get("text", "") or "") + "".join(pend)
+            elif block.get("type") == "reasoning":
+                block["content"] = str(block.get("content", "") or "") + "".join(pend)
 
     def _refresh_footer_stats(
         self, streaming: bool = False, elapsed: float = None, token_usage: dict = None
@@ -1378,6 +1529,7 @@ class MessageCard(SimpleCardWidget):
         """
         self._stream_text_parts = []
         self._stream_text_acc = None
+        self._stream_text_parts_solid = 0  # [E6] 固化游标与列表同步复位
 
     def start_elapsed_tracking(self):
         """开始实时计时（流式输出时调用）"""
@@ -1395,6 +1547,7 @@ class MessageCard(SimpleCardWidget):
         # 现改为只 append 片段（O(1)），读取时（200ms 一拍）才固化拼接。
         self._stream_text_parts: List[str] = []
         self._stream_text_acc: Optional[str] = None  # 已固化累计串；None = 空
+        self._stream_text_parts_solid: int = 0  # [E6] 已固化片段数游标（parts 不清空）
         self._stream_text_cursor = 0  # [T4-5] 增量采样游标（配合 live_text_delta）
         self._stream_gen_s = 0.0
         self._stream_last_text_t = None
@@ -4406,6 +4559,9 @@ class MessageCard(SimpleCardWidget):
         blocks = getattr(self, "_content_data", None)
         if self.role != "assistant" or not blocks:
             return False
+        # [E6] 热重载撞流式（罕见）：读权威方固化防 pending 丢进 content_to_markdown
+        self._solidify_text_blocks()
+        blocks = self._content_data
         from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
 
         registry = UIPluginRegistry.get_instance()
@@ -4450,6 +4606,9 @@ class MessageCard(SimpleCardWidget):
 
         對 tool_streaming / custom 等未知類型自動回退 content_to_markdown。
         """
+        # [E6] 读权威方固化：块内 "_pend" 片段先 join 进正式字段，保证转换口径
+        # 与逐 chunk 直拼一致（幂等；所有 _lazy_markdown_cb 消费点经此固化）。
+        self._solidify_text_blocks()
         content = self._content_data
         if isinstance(content, str) or not isinstance(content, list):
             return content_to_markdown(content)
@@ -4554,20 +4713,31 @@ class MessageCard(SimpleCardWidget):
             # 列表 → 所有块 dict 对象被替换 → _tool_anchor_refs 对象引用失效 →
             # append_tool_result 稳定锚点退化 → finish 完整重渲染时思考/工具顺序错乱。
             # 流式中 _content_data 已是标准块列表，原地追加/合并保住引用稳定。
+            # [E6] 状态机懒建必须在早退之前：懒渲染未就绪的批也要推进协议状态
+            # （下批以 carry 续扫，think 未闭合期间漏建会把劈开标记判成已闭合）。
+            if getattr(self, "_proto_state", None) is None:
+                self._proto_state_reset()
+            # [E6] 写入只 append 到块内 "_pend" 片段（O(1)），不逐 chunk 拼
+            # block["text"]；读权威方经 _solidify_text_blocks 固化（幂等）。
             if (
                 isinstance(self._content_data, list)
                 and self._content_data
                 and isinstance(self._content_data[-1], dict)
                 and self._content_data[-1].get("type") == "text"
             ):
-                self._content_data[-1]["text"] = str(self._content_data[-1].get("text", "") or "") + str(text or "")
+                self._content_data[-1].setdefault("_pend", []).append(str(text or ""))
             elif isinstance(self._content_data, list) and all(isinstance(b, dict) for b in self._content_data):
                 # 直接构造 text 块（避免 make_text_block 未导入），保持原地 append 不重建
-                self._content_data.append({"type": "text", "text": str(text or "")})
+                self._content_data.append({"type": "text", "text": "", "_pend": [str(text or "")]})
             else:
                 self._content_data = append_text_block(self._content_data, text)
             # 优化：懒渲染模式下直接跳过 markdown 渲染，避免不必要的计算
             if not self._lazy_rendered or not self.viewer:
+                # [E6] 状态机照常推进（本批标记进 carry，下批渲染分支续扫）
+                self._proto_scan_chunk(self._proto_state, str(text or ""))
+                # [E6] 非流式落定路径读 _content_data（经 set_content/content_to_markdown
+                # 白名单重建块、会丢 "_pend"），先把片段固化进正式字段防丢内容。
+                self._solidify_text_blocks()
                 self._pending_content = self._content_data
                 return
             # [PERF] 增量 markdown 構建：已完成的 tool_result 塊走緩存，只有文本塊即時轉換
@@ -4576,11 +4746,12 @@ class MessageCard(SimpleCardWidget):
             # 避免每个思考文本 chunk 都触发全量渲染 → reorganizeContent → think-streaming
             # DOM 节点反复 destroy+recreate 导致"思考中"状态闪烁。
             # 🆕 检测未闭合 <think> / 插件注册 tag / 渲染型 fence：静默累积不触发渲染，与 append_reasoning 策略一致
-            last_block = self._content_data[-1] if self._content_data else None
-            last_text = last_block.get("text", "") if isinstance(last_block, dict) else ""
-            _think_unclosed = _has_unclosed_think(last_text)
-            _tag_unclosed = _has_unclosed_registered_tag(last_text)
-            _fence_unclosed = _has_unclosed_chart_fence(last_text)
+            # [E6] 检测对象从块全文改为「本卡协议状态 + 新段」增量推进（旧实现对
+            # 每批跑 4 个 O(全文) 扫描；chunk 劈开的标记串由尾部 carry 兜住）。
+            # 状态机随流重置（finish_streaming / cleanup）复位。
+            _think_unclosed, _tag_unclosed, _tool_unclosed, _fence_unclosed = self._proto_scan_chunk(
+                self._proto_state, str(text or "")
+            )
             # 流式模式下增量追加纯文本到 DOM，让用户立即看到文字。
             # 🐛 修复（高块闪现）：think 未闭合期间**不**调用 _append_text_incremental ——
             # 否则思考内容会以普通正文逐行注入 #content-placeholder 堆叠成高块，
@@ -4592,12 +4763,7 @@ class MessageCard(SimpleCardWidget):
             # "文字/代码先流式出现又消失"
             # 🆕 未闭合 <tool> 协议段（glm 等中转把工具调用以协议文本嵌在 content
             # 里流式返回）同策略跳过增量注入：生肉闪现与 think 同症。
-            # [PERF] 先做 C 级子串包含判断再 count：count 是两遍 O(n) 全扫，
-            # 而绝大多数批次正文里根本没有协议标签（实测 390KB 两遍 count
-            # 0.39ms → 加 in 短路后 0.08ms，流式每批都跑）。
-            _tool_unclosed = (
-                False if "<tool" not in last_text else last_text.count("<tool>") > last_text.count("</tool>")
-            )
+            # [PERF] 旧实现此处对块全文跑两遍 count（O(n)），E6 已并入上方状态机增量判定。
             if (
                 self._streaming
                 and not _think_unclosed
@@ -4653,10 +4819,18 @@ class MessageCard(SimpleCardWidget):
             # ── 差量渲染（2026-07-22）──
             # 文字即时性已由 _append_text_incremental 保证。全量 HTML 渲染
             # 仅在自然边界触发（段落结束 / 块闭合 / 句号软边界），非边界时只启安全定时器。
-            # last_text 已通过 append_text_block 包含新追加文本，判断可靠。
+            # [E6] last_text 全文已不存在（text 字段不再逐 chunk 拼），boundary 判定
+            # 用「固化段尾部 + pending 拼合」的 128 字符尾窗：空白跳转 + 尾标记判定
+            # 只依赖尾部；极端「尾部空白 > 窗口且 </think> 在窗外」差异 = 渲染延迟
+            # 一拍，无正确性影响。
+            _last_block = self._content_data[-1] if self._content_data else None
+            _boundary_win = ""
+            if isinstance(_last_block, dict):
+                _pend_join = "".join(_last_block.get("_pend") or ())
+                _boundary_win = (str(_last_block.get("text", "") or "")[-160:] + _pend_join)[-128:]
             # [PERF] 软边界（句号）不再 immediate —— 与 append_chunk /
             # _schedule_render 保持一致，交由内部 90ms 短定时器合并。
-            if self._streaming and self.viewer._has_reached_clean_boundary(last_text):
+            if self._streaming and self.viewer._has_reached_clean_boundary(_boundary_win):
                 self.viewer._schedule_render(immediate=immediate_render)
             else:
                 self.viewer._schedule_render(immediate=False)
@@ -5143,6 +5317,8 @@ class MessageCard(SimpleCardWidget):
 
     def get_plain_text(self) -> str:
         if self.role == "assistant":
+            # [E6] 导出/复制口径先固化 pending，保证与渲染落定一致
+            self._solidify_text_blocks()
             return content_to_text(self._content_data, include_tool_results=True)
         if isinstance(self._content_data, list):
             return content_to_text(self._content_data)
@@ -5566,6 +5742,9 @@ class MessageCard(SimpleCardWidget):
             last_block = self._content_data[last_reasoning_idx]
         if not isinstance(last_block, dict):
             return
+        # [E6] 读权威方固化：content 传给 viewer 做 block-key 计算，必须与
+        # _build_incremental_md（固化后）口径一致，否则折叠框 key 不匹配重建闪烁。
+        self._solidify_text_blocks()
         raw_content = last_block.get("content") or ""
         if not raw_content.strip():
             # 空 block（start_new_thinking_block 刚创建）跳过 — 等后续 reasoning chunks
@@ -6117,21 +6296,26 @@ class MessageCard(SimpleCardWidget):
                     break
 
         if _target_block is not None:
-            # 找到已有的（活动）思考块，追加内容
-            _target_block["content"] = (_target_block.get("content", "") or "") + text
+            # [E6] 找到已有的（活动）思考块：写入只 append 到 "_pend" 片段（O(1)），
+            # 不逐 chunk 拼 content；读权威方经 _solidify_text_blocks 固化（幂等）。
+            _target_block.setdefault("_pend", []).append(text)
         else:
             # 未找到（或 force_new_block），新增 reasoning 块
-            _target_block = {"type": "reasoning", "content": text}
+            _target_block = {"type": "reasoning", "content": "", "_pend": [text]}
             self._content_data.append(_target_block)
         # 登记为活动块：后续同段思考继续追加到此块（历史批量加载逐条独立成块）
         self._active_thinking_block = _target_block
         self._reasoning_total_len += len(text)
 
         if defer_render:
-            # 历史批量加载：渲染由末尾 finish_streaming(history=True) 统一做
+            # [E6] 历史批量加载：数据层先固化 pending（finish_streaming(history=True)
+            # 的全量渲染 / 持久化都读 content），渲染由末尾统一做
+            self._solidify_text_blocks()
             return
 
         if not self._lazy_rendered or not self.viewer:
+            # [E6] 懒渲染未就绪：先固化 pending 再交 _pending_content（同 append_text）
+            self._solidify_text_blocks()
             self._pending_content = self._content_data
             return
 
@@ -6380,6 +6564,10 @@ class MessageCard(SimpleCardWidget):
         # 一轮 100-300KB 残留到下次 start_elapsed_tracking 才清。
         self._stream_text_clear()
         self._stream_text_cursor = 0  # [T4-5] 增量采样游标同步复位
+        # [E6] 落定数据层清账：残留 "_pend" 固化进正式字段（防持久化/导出路径
+        # 读到未拼全文），协议状态机一并复位。
+        self._solidify_text_blocks()
+        self._proto_state = None
 
     def _has_active_tools(self) -> bool:
         """是否有仍在执行中的工具（已登记但未完成）。
@@ -6508,6 +6696,7 @@ class MessageCard(SimpleCardWidget):
         # _footer_stat_context 用 getattr(..., "") or "" 兜底，置 None 安全。
         self._stream_text_parts = None
         self._stream_text_acc = None
+        self._stream_text_parts_solid = 0  # [E6] 游标同步复位
         self._rendered_code_blocks = []  # 代码块缓存
         self._pending_content = None  # 待渲染内容
         self._finished_streaming_ids.clear()  # 流式 ID 集合

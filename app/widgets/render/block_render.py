@@ -270,6 +270,11 @@ def _bk_sig(block: Dict[str, Any], ctx: RenderCtx) -> tuple:
 
     if btype == "reasoning":
         content = str(block.get("content", "") or "")
+        if block.get("_pend") is not None:
+            # [E6] 流式活动块：内容仍在 "_pend" 增长，sig 去内容本体（len+compact），
+            # 避免 _bk 驻留每批重挂全文引用、_block_key_uncached 重算全文 sha1。
+            # 固化后 "_pend" 被 pop → 判据自动失效 → 切回全文指纹。
+            return (len(content), ctx.compact)
         return (id(content), content, ctx.compact)
 
     if btype == "tool_streaming":
@@ -311,6 +316,10 @@ def _block_key_uncached(block: Dict[str, Any], ctx: RenderCtx, completed: bool) 
 
     if btype == "reasoning":
         content = str(block.get("content", "") or "")
+        if block.get("_pend") is not None:
+            # [E6] 流式活动块：指纹用 len 替代全文（与 _bk_sig 活动分支口径一致），
+            # 跳过整段 sha1；key 变化仅由长度推进，定型后切回全文指纹。
+            return KIND_REASONING, fingerprint("reasoning", len(content), completed, ctx.compact)
         return KIND_REASONING, fingerprint("reasoning", content, completed, ctx.compact)
 
     if btype == "tool_streaming":
