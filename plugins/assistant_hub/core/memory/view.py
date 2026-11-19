@@ -112,6 +112,11 @@ def _norm(text: str) -> str:
     return _NORM.sub("", str(text or "")).strip("-—。.,，；;")
 
 
+def norm_text(text: str) -> str:
+    """文本归一化：用于条目去重与整篇 diff 匹配。"""
+    return _norm(text)
+
+
 def diff_replace(
     state: Dict[str, Any], new_text: str, sections: List[Dict[str, str]]
 ) -> Dict[str, List[Dict[str, Any]]]:

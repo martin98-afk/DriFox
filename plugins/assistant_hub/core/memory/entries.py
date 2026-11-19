@@ -45,6 +45,11 @@ def _atomic_write(path: Path, text: str) -> None:
     os.replace(tmp, path)
 
 
+def write_text_atomic(path: Path, text: str) -> None:
+    """跨模块使用的原子写（视图落盘、状态文件）。"""
+    _atomic_write(Path(path), text)
+
+
 def entries_dir(aid_dir: Path) -> Path:
     return Path(aid_dir) / ENTRIES_DIR
 
@@ -95,6 +100,15 @@ def fingerprint(aid_dir: Path) -> str:
         except OSError:
             continue
     return "j" + h.hexdigest()[:12]
+
+
+def reset(aid_dir: Path) -> None:
+    """清空事件与视图状态（清除记忆 / 快照恢复前用）。快照目录不在本函数范围。"""
+    import shutil
+
+    d = entries_dir(aid_dir)
+    if d.exists():
+        shutil.rmtree(d, ignore_errors=True)
 
 
 def new_id(existing: Iterable[str] = ()) -> str:

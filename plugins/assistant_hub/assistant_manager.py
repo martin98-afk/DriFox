@@ -1364,10 +1364,64 @@ class AssistantManager:
         return out
 
     def read_global_memory(self, aid: str) -> str:
-        """全局记忆阅读视图。首次调用触发 v1→v2 迁移。"""
+        """全局记忆阅读视图。首次调用触发 v1→v2 迁移；视图落盘供人工查看。"""
         self._ensure_migrated(aid)
         state = self._core_entries().replay(self._assistant_dir(aid))
-        return self._core_view().render_markdown(state, self.memory_sections(aid))
+        return self._sync_global_view(aid, state)
+
+    def _sync_global_view(self, aid: str, state: Dict[str, Any]) -> str:
+        """渲染并落盘 MEMORY.md；检测到外部手改时先导入事件再覆盖，不丢内容。"""
+        import hashlib
+
+        mod, view_mod = self._core_entries(), self._core_view()
+        aid_dir = self._assistant_dir(aid)
+        sections = self.memory_sections(aid)
+        path = aid_dir / "MEMORY.md"
+        vpath = mod.view_state_path(aid_dir)
+        try:
+            old = path.read_text(encoding="utf-8")
+        except OSError:
+            old = ""
+        prev = ""
+        try:
+            prev = str(json.loads(vpath.read_text(encoding="utf-8")).get("hash") or "")
+        except (OSError, ValueError):
+            prev = ""
+        cur = hashlib.sha1(old.encode("utf-8")).hexdigest() if old else ""
+        if old.strip() and cur != prev and not old.startswith(view_mod.HEADER):
+            parsed = self._core_migrate().parse_legacy(old, sections)
+            known = {view_mod.norm_text(e["text"]) for e in mod.active_entries(state)}
+            device = self.memory_device_id()
+            added = 0
+            for ev in parsed["events"]:
+                key = view_mod.norm_text(ev["text"])
+                if key in known:
+                    continue
+                entry = mod.new_entry(
+                    ev["section"], ev["text"], origin="import", source={"kind": "external_edit"}
+                )
+                mod.append_event(aid_dir, device, {"op": "put", "id": entry["id"], "entry": entry})
+                known.add(key)
+                added += 1
+            if parsed["legacy"]:
+                merged = mod.replay(aid_dir)["legacy"] + parsed["legacy"]
+                mod.write_legacy(aid_dir, merged)
+            if added:
+                state = mod.replay(aid_dir)
+        md = view_mod.render_markdown(state, sections)
+        if old != md:
+            try:
+                mod.write_text_atomic(path, md)
+            except OSError:
+                pass
+        try:
+            mod.write_text_atomic(
+                vpath,
+                json.dumps({"hash": hashlib.sha1(md.encode("utf-8")).hexdigest()}, ensure_ascii=False) + "\n",
+            )
+        except OSError:
+            pass
+        return md
 
     # ── 全局记忆 v2（事件存储）──
 
@@ -1635,16 +1689,29 @@ class AssistantManager:
         g_path = store.global_memory_path(aid_dir)
         text = store.read_text(g_path)
         renamed = []
-        if text.strip():
-            for i, old_item in enumerate(old):
-                if i >= len(new):
-                    break
-                old_name, new_name = old_item.get("name"), new[i].get("name")
-                if old_name and new_name and old_name != new_name:
-                    text = store.rename_section_title(text, str(old_name), str(new_name))
-                    renamed.append(f"{old_name}→{new_name}")
-            if renamed:
-                store.write_global_memory(aid_dir, text)
+        moves = []
+        for i, old_item in enumerate(old):
+            if i >= len(new):
+                break
+            old_name, new_name = old_item.get("name"), new[i].get("name")
+            if old_name and new_name and old_name != new_name:
+                renamed.append(f"{old_name}→{new_name}")
+                moves.append((str(old_name), str(new_name)))
+        if renamed and text.strip():
+            for old_name, new_name in moves:
+                text = store.rename_section_title(text, old_name, new_name)
+            store.write_global_memory(aid_dir, text)
+        if moves:
+            # 事件层按 section 字段归属，改名必须显式搬移，否则条目会落在孤儿分区
+            state = self.memory_state(aid)
+            device = self.memory_device_id()
+            for old_name, new_name in moves:
+                for item in state["entries"].values():
+                    active = item.get("active") or {}
+                    if item.get("state") == "active" and str(active.get("section") or "") == old_name:
+                        self._core_entries().append_event(
+                            aid_dir, device, {"op": "move", "id": item["id"], "section": new_name}
+                        )
         return {"ok": True, "count": len(new), "renamed": renamed}
 
     def memory_sections_block(self, aid: str) -> str:
@@ -1760,7 +1827,12 @@ class AssistantManager:
         store = self._core_store()
         a_dir = self._assistant_dir(aid)
         target = store.global_memory_path(a_dir) if kind == "global" else store.project_memory_path(workdir, aid)
-        return store.restore_snapshot(a_dir, kind, name, target, workdir)
+        r = store.restore_snapshot(a_dir, kind, name, target, workdir)
+        if kind == "global" and r.get("ok"):
+            # 快照恢复了 MEMORY.md，需要重建事件层：清空事件后按恢复文本重新迁移
+            self._core_entries().reset(a_dir)
+            self._ensure_migrated(aid)
+        return r
 
     def memory_health(self, aid: str, workdir: str = "") -> Dict[str, Any]:
         """健康聚合：未蒸馏天数 / 超限 / 上次蒸馏 / 快照数 / 漂移（UI 状态行 + 恢复弹窗数据源）。"""
@@ -1806,12 +1878,13 @@ class AssistantManager:
         self._core_store().dismiss_drift(self._assistant_dir(aid), old_workdir)
 
     def clear_all_memory(self, aid: str, workdir: str = "") -> None:
-        """清除该助手全部记忆（全局 MEMORY.md + 项目记忆目录）；清除前强制快照（可恢复）；人工提示保留。"""
+        """清除该助手全部记忆（全局事件层 + 项目目录）；清除前强制快照（可恢复）；人工提示保留。"""
         store = self._core_store()
         a_dir = self._assistant_dir(aid)
         store.snapshot_memory(a_dir, "global", store.global_memory_path(a_dir))
         if workdir:
             store.snapshot_memory(a_dir, "project", store.project_memory_path(workdir, aid), workdir)
+        self._core_entries().reset(a_dir)
         store.clear_memory(a_dir, workdir)
 
     # ── 经验 ──
