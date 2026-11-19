@@ -131,6 +131,21 @@ QUOTA_EXPECTED = 12  # _MAX_RENDERED_CARDS（dpr=1 时 effective 值）
 _PROC = psutil.Process()
 
 
+class _FakeSettledViewer:
+    """[E11-#11] 高度落定守卫的最小 viewer 桩。
+
+    与 repro_recycle_guard.py 场景 2 同款：height() 返回非 40 值，配合
+    ``_viewer_async_height=False``（纯 Qt 渲染器语义）使
+    ``is_layout_height_settled()`` 判 True。
+    """
+
+    def __init__(self, h: int = 300):
+        self._h = h
+
+    def height(self) -> int:
+        return self._h
+
+
 # ── 工具函数 ──────────────────────────────────────────────────────────
 def _rss_mb() -> float:
     return _PROC.memory_info().rss / 1048576
@@ -193,6 +208,14 @@ def _feed_cards(win, registry: weakref.WeakSet, n: int, start_index: int = 0) ->
     """往真实容器灌 n 张卡片，登记进 _batch_cards；返回新建张数。
 
     防污染：卡片只经 WeakSet 登记，局部变量用完即 del，测试代码零强引用。
+
+    [E11-#11] 高度落定最小桩：仅置 ``_lazy_rendered`` 不再满足
+    ``_batch_fully_rendered`` → ``is_layout_height_settled`` 守卫
+    （viewer 为 None 必判 False，message_card.py:3670 附近）——淘汰链候选
+    全空、Δ=0 假象（追因 #11 定论）。此处按追因复现脚本
+    ``.drifox-test/repro_recycle_guard.py`` 场景 2 同款构造：最小 viewer 桩
+    （height=300）+ ``_viewer_async_height=False``（纯 Qt 渲染器语义：
+    height() 与内容同步）→ 守卫放行，淘汰链真实可达。
     """
     from app.widgets.message_card import MessageCard
 
@@ -201,10 +224,17 @@ def _feed_cards(win, registry: weakref.WeakSet, n: int, start_index: int = 0) ->
         card = MessageCard("assistant")
         card.resize(900, 300)
         win.chat_layout.addWidget(card)
+        # [E11-#11] 手工几何：布局未激活（不 show、不泵事件）时 addWidget 的
+        # 子项 geometry 全部重叠在 (0,0)，viewport 扫描会判「全部可见」→
+        # 全批保护 → 淘汰空转（第二拦截点）。纵向排开模拟布局结果：
+        # 出屏窗口视口 ~900px 只覆盖前 3 张，远端批次距离判定才可信。
+        card.setGeometry(0, (start_index + i) * 300, 900, 300)
         card._message_index = start_index + i
-        # 手工置位：offscreen 下 ensure_rendered 会崩（见文件头降级说明）。
-        # 置位后满足 _batch_fully_rendered 守卫，淘汰链能真实跑到。
+        # [E11-#11] 满足守卫最小落定状态（offscreen 下 ensure_rendered 会崩，
+        # 见文件头降级说明；桩构造与 repro_recycle_guard.py 场景 2 同款）。
         card._lazy_rendered = True
+        card.viewer = _FakeSettledViewer(300)
+        card._viewer_async_height = False
         win._rendered_card_count += 1
         registry.add(card)
         del card  # 不持有强引用
@@ -283,6 +313,7 @@ def test_perf_recycle_unload_before_after(qapp):
     before_rendered = win._rendered_card_count
     before_none = sum(1 for c in win._batch_cards if c is None)
     before_acc = _stream_acc_bytes(registry)
+    before_layout = win.chat_layout.count()
     print(
         f"[RECY] 淘汰前 存活卡片={before_alive} 张, 记账渲染数={before_rendered}, "
         f"_batch_cards 空槽={before_none}, RSS={before_rss:.1f} MB, "
@@ -299,6 +330,7 @@ def test_perf_recycle_unload_before_after(qapp):
     after_rendered = win._rendered_card_count
     after_none = sum(1 for c in win._batch_cards if c is None)
     after_acc = _stream_acc_bytes(registry)
+    after_layout = win.chat_layout.count()
     print(
         f"[RECY] 淘汰后 存活卡片={after_alive} 张, 记账渲染数={after_rendered}, "
         f"_batch_cards 空槽={after_none}, RSS={after_rss:.1f} MB, "
@@ -311,7 +343,21 @@ def test_perf_recycle_unload_before_after(qapp):
         f"空槽 {before_none} → {after_none}, 配额={quota}",
         flush=True,
     )
+    print(
+        f"[RECY] 配额语义 记账渲染数 {before_rendered} → {after_rendered}（配额 {quota}）, "
+        f"布局 widget {before_layout} → {after_layout}",
+        flush=True,
+    )
     assert before_alive > 0, "淘汰前存活卡片数为 0，采集链路失效"
+    # [E11-#11] 真实回收 verdict：改用同步口径断言（WeakSet 存活数在本文件
+    # 不泵事件纪律下因 deleteLater 未执行而不可靠，作辅助打印）。
+    # 改动前 verdict（守卫拦截假象）：卡片 120 → 120（Δ=0）、记账 120 → 120、
+    # 空槽 0 → 0——淘汰链从未到达 _unload_batch。
+    # 注意：布局 widget 数不降——等高占位顶替语义（_install_batch_placeholder
+    # 卸卡后往布局塞占位），口径换成「空槽数」与「记账渲染数」。
+    assert after_rendered < before_rendered, "淘汰后记账渲染数应回落（真实回收）"
+    assert after_rendered <= quota, f"淘汰后记账渲染数应回到配额内：{after_rendered}/{quota}"
+    assert after_none > 0, "淘汰后 _batch_cards 应出现空槽（_unload_batch 真实执行）"
 
 
 # ── 场景 4：跨会话复用度 ──────────────────────────────────────────────
