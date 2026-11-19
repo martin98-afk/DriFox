@@ -14,7 +14,6 @@ Windows 上用 `open(path, "w")` 写文本会把 `\\n` 静默翻成 `\\r\\n`。p
 ----
     python tools/eol_guard.py check                 # 检查工作区（或 --cached 检查暂存区）
     python tools/eol_guard.py fix <file>            # 按 HEAD 版本风格还原行尾（保留内容改动）
-    python tools/eol_guard.py --eol lf normalize    # dry-run；加 --apply 落地
 
 作为库使用：
     from tools.eol_guard import write_text_keep_eol
