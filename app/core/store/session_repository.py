@@ -546,11 +546,32 @@ class SessionRepository:
             messages = _persist_vision_image_blocks_impl(messages, session_id, get_app_data_dir())
         except Exception as e:
             logger.warning(f"[SessionRepository] vision 落盘失败，按原消息继续保存: {e}")
-        try:
-            extras, light_messages = extract_offload_fields(messages)
-        except Exception as e:
-            logger.warning(f"[SessionRepository] extract_offload_fields 失败，按全量保存: {e}")
+        # [E12] 方案 α：流式拍跳过剥离，blob 直接存全量消息。
+        # 声明通道：尾条 _partial（main_widget._maybe_flush_partial_reply 每 25s
+        # 维护的流式残缺回复标记，落定拍该标记消失）——调用方已声明的流式拍，
+        # 无需新增签名参数。窗口判定：len 不减且增量 ≤ KEEP_RECENT_ROUNDS
+        # （新增全在保活窗内 → 窗外消息集合结构性不变 → extras 差异必为空），
+        # 复用 _content_hash_cache 的 len 分量，零新增结构。基线缺失/get 失效/
+        # 超窗/截断一律走全链（保守正确）。blob 全量使崩溃窗口内（一个流式拍
+        # 周期 25s）强退恢复零丢失成为结构保证；落定拍走完整链恢复剥离。
+        skip_offload = False
+        _tail = messages[-1] if messages else None
+        if isinstance(_tail, dict) and _tail.get("_partial"):
+            with self._cache_lock:
+                _cached_key = self._content_hash_cache.get(session_id)
+            if _cached_key is not None:
+                _prev_len = _cached_key[0]
+                if len(messages) >= _prev_len and len(messages) - _prev_len <= KEEP_RECENT_ROUNDS:
+                    skip_offload = True
+                    logger.debug(f"[SessionRepository] 流式拍跳过剥离（blob 全量，session={session_id[:8]}）")
+        if skip_offload:
             extras, light_messages = {}, messages
+        else:
+            try:
+                extras, light_messages = extract_offload_fields(messages)
+            except Exception as e:
+                logger.warning(f"[SessionRepository] extract_offload_fields 失败，按全量保存: {e}")
+                extras, light_messages = {}, messages
 
         try:
             now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -662,6 +683,9 @@ class SessionRepository:
                         f"[SessionRepository] backfill 读失败，跳过本轮 extras 写入"
                         f"（保留库内旧值，session={session_id[:8]}）"
                     )
+                elif skip_offload:
+                    # [E12] 流式拍：blob 已全量自含字段，extras 表与本会话基线不动
+                    pass
                 else:
                     try:
                         self._write_extras(session_id, extras)
