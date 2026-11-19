@@ -438,11 +438,41 @@ def _write_impl(tool_ctx, **kw) -> ToolResult:
             lim = mgr.memory_max_chars(aid)[scope]
             label = "全局" if scope == "global" else "项目"
             mode = str(kw.get("mode") or "replace").strip().lower()
-            if mode not in ("replace", "append", "delete"):
+            if mode not in ("replace", "append", "delete", "update", "merge", "plan"):
                 return ToolResult(
                     False,
-                    error="mode 必须是 replace（整体替换）/ append（末尾追加）/ delete（删一条）",
+                    error=(
+                        "mode 必须是 append（新增一条）/ update（按 id 改）/ delete（按 id 软删）"
+                        " / merge（多条合并）/ plan（批量整理）/ replace（整篇替换）"
+                    ),
                 )
+            err = _validate_v2_args(kw)
+            if err:
+                return ToolResult(False, error=err)
+            if scope == "global" and mode in ("update", "merge", "plan"):
+                if mode == "update":
+                    r = mgr.update_memory_entry(
+                        aid,
+                        str(kw.get("id") or ""),
+                        content,
+                        str(kw.get("section") or ""),
+                        source={"kind": "conversation"},
+                    )
+                elif mode == "merge":
+                    r = mgr.merge_memory_entries(
+                        aid,
+                        [str(x) for x in kw.get("ids") or []],
+                        content,
+                        str(kw.get("section") or ""),
+                    )
+                else:
+                    r = mgr.apply_memory_plan(aid, kw.get("plan") or [], str(kw.get("reason") or ""))
+                return ToolResult(bool(r.get("ok")), content=str(r.get("message") or r.get("error") or ""))
+            if scope == "global" and mode == "delete" and str(kw.get("id") or "").strip():
+                r = mgr.delete_memory_entry_by_id(aid, str(kw["id"]), str(kw.get("reason") or ""))
+                if not r.get("ok"):
+                    return ToolResult(False, error=f"删除失败：{r.get('error')}")
+                return ToolResult(True, content=f"已软删 {kw['id']}（历史版本保留，可回滚）。")
             if mode == "delete":
                 del_section = str(kw.get("section") or "").strip()
                 if scope != "global" or not del_section:
@@ -550,7 +580,23 @@ def _write_impl(tool_ctx, **kw) -> ToolResult:
                 )
             base = str(kw.get("base") or "").strip()
             consolidate = bool(kw.get("consolidate"))
-            if scope == "global":
+            if scope == "global" and hasattr(mgr, "replace_global_memory"):
+                r = _retry(
+                    lambda: mgr.replace_global_memory(
+                        aid, content, confirm=bool(kw.get("confirm")), base=base
+                    )
+                )
+                if not r.get("ok") and r.get("error") == "confirm_required":
+                    return ToolResult(
+                        False,
+                        error=(
+                            f"这次替换会删除 {len(r.get('removed') or [])} 条"
+                            f"（保留 {r.get('kept')}、新增 {r.get('added')}）。"
+                            "确认要删就带 confirm=true 重试；只想补充内容请改用 mode=append。"
+                        ),
+                    )
+            elif scope == "global":
+                # 热重载窗口期可能拿到旧 manager（无 v2 方法）：回退旧写路径，不硬失败
                 r = _retry(
                     lambda: mgr.write_memory_guarded(
                         aid,
@@ -760,7 +806,12 @@ _WRITE_SCHEMA = {
                 },
                 "mode": {
                     "type": "string",
-                    "description": "scope=global/project：replace(缺省，整体替换)/append(追加一条，高频记一条用这个)/delete(删一条腾空间，需配 section+index)",
+                    "description": (
+                        "scope=global/project：append(新增一条，高频用)/update(按 id 改)"
+                        "/delete(按 id 软删，历史保留)/merge(多个 id 合并为一条)"
+                        "/plan(批量补丁，整理用)/replace(整篇替换，兼容旧提示词)。"
+                        "scope=daily 不需要 mode；mark_distilled=true 用于打标。"
+                    ),
                 },
                 "index": {
                     "type": "integer",
@@ -794,11 +845,46 @@ _WRITE_SCHEMA = {
                     "type": "boolean",
                     "description": "给 date 指定日志打 .distilled 标(保留可查，蒸馏/门禁忽略)，content 可空",
                 },
+                "id": {
+                    "type": "string",
+                    "description": "条目 id（update/delete 必填，形如 m7k2a9；从 memory_read(scope=global) 的 [id] 取）",
+                },
+                "ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "mode=merge 的源条目 id，至少两个",
+                },
+                "reason": {
+                    "type": "string",
+                    "description": "mode=delete/plan 的原因，写入变更记录后可追溯",
+                },
+                "confirm": {
+                    "type": "boolean",
+                    "description": "一次删除超过 active 条目 30% 时需 true 二次确认",
+                },
+                "plan": {
+                    "type": "array",
+                    "items": {"type": "object"},
+                    "description": "mode=plan 的批量操作：[{op, id, content?, section?, reason?}]，整批原子应用",
+                },
             },
             "required": ["scope"],
         },
     },
 }
+
+
+def _validate_v2_args(kw) -> str:
+    mode = str(kw.get("mode") or "").strip().lower()
+    if mode == "update" and not str(kw.get("id") or "").strip():
+        return "update 需要 id"
+    if mode == "delete" and not str(kw.get("id") or "").strip():
+        return "delete 需要 id"
+    if mode == "merge" and len(kw.get("ids") or []) < 2:
+        return "merge 需要至少两个 ids"
+    if mode == "plan" and not isinstance(kw.get("plan"), list):
+        return "plan 需要 plan 数组"
+    return ""
 
 
 def register(registry):

@@ -1433,6 +1433,102 @@ class AssistantManager:
         mod.append_event(aid_dir, self.memory_device_id(), {"op": "del", "id": entry_id, "reason": reason})
         return {"ok": True, "id": entry_id}
 
+    def update_memory_entry(
+        self, aid: str, entry_id: str, content: str, section: str = "", source=None
+    ) -> Dict[str, Any]:
+        """按 id 改：生成新版本，旧版本进 versions（superseded 但不丢）。"""
+        self._ensure_migrated(aid)
+        mod = self._core_entries()
+        aid_dir = self._assistant_dir(aid)
+        state = mod.replay(aid_dir)
+        item = state["entries"].get(entry_id)
+        if item is None or item.get("state") != "active" or not item.get("active"):
+            return {"ok": False, "error": f"条目 {entry_id} 不存在或已删除"}
+        old = item["active"]
+        text = str(content or "").strip()
+        if not text:
+            return {"ok": False, "error": "content 不能为空"}
+        entry = dict(
+            old,
+            text=text,
+            section=str(section or old.get("section") or ""),
+            updated_at=mod.now_iso(),
+            rev=int(old.get("rev") or 1) + 1,
+        )
+        if source:
+            entry["source"] = dict(source)
+        mod.append_event(
+            aid_dir,
+            self.memory_device_id(),
+            {"op": "put", "id": entry_id, "entry": entry, "supersedes": entry_id},
+        )
+        return {"ok": True, "id": entry_id, "rev": entry["rev"], "message": f"已更新 {entry_id}"}
+
+    def merge_memory_entries(self, aid: str, ids: list, content: str, section: str = "") -> Dict[str, Any]:
+        """多条合并：源条目 superseded，生成一条新条目。"""
+        self._ensure_migrated(aid)
+        mod = self._core_entries()
+        aid_dir = self._assistant_dir(aid)
+        state = mod.replay(aid_dir)
+        sources = [
+            i for i in ids if i in state["entries"] and state["entries"][i].get("state") == "active"
+        ]
+        if len(sources) < 2:
+            return {"ok": False, "error": "至少需要两个 active 条目"}
+        target_section = str(section or (state["entries"][sources[0]]["active"] or {}).get("section") or "")
+        entry = mod.new_entry(target_section, content, origin="agent", source={"kind": "merge", "refs": sources})
+        mod.append_event(
+            aid_dir,
+            self.memory_device_id(),
+            {"op": "merge", "id": entry["id"], "entry": entry, "sources": sources},
+        )
+        return {"ok": True, "id": entry["id"], "merged": len(sources), "message": f"已合并 {len(sources)} 条"}
+
+    def apply_memory_plan(self, aid: str, ops: list, reason: str = "") -> Dict[str, Any]:
+        """批量补丁：先在内存态校验全部 op，全通过才逐条落盘。"""
+        self._ensure_migrated(aid)
+        mod = self._core_entries()
+        aid_dir = self._assistant_dir(aid)
+        device = self.memory_device_id()
+        state = mod.replay(aid_dir)
+        checked = []
+        for op in ops or []:
+            if not isinstance(op, dict):
+                return {"ok": False, "error": "plan 的每一项必须是对象"}
+            kind = str(op.get("op") or "").strip().lower()
+            entry_id = str(op.get("id") or "").strip()
+            if kind in ("update", "delete", "move", "pin") and entry_id not in state["entries"]:
+                return {"ok": False, "error": f"条目 {entry_id} 不存在，整批未执行"}
+            checked.append(op)
+        applied = 0
+        for op in checked:
+            kind = str(op.get("op") or "").strip().lower()
+            entry_id = str(op.get("id") or "").strip()
+            if kind == "update":
+                r = self.update_memory_entry(
+                    aid, entry_id, str(op.get("content") or ""), str(op.get("section") or "")
+                )
+                if not r.get("ok"):
+                    return {"ok": False, "error": r.get("error"), "applied": applied}
+            elif kind == "delete":
+                mod.append_event(
+                    aid_dir,
+                    device,
+                    {"op": "del", "id": entry_id, "reason": str(op.get("reason") or reason)},
+                )
+            elif kind == "move":
+                mod.append_event(
+                    aid_dir, device, {"op": "move", "id": entry_id, "section": str(op.get("section") or "")}
+                )
+            elif kind == "pin":
+                mod.append_event(
+                    aid_dir, device, {"op": "pin", "id": entry_id, "pinned": bool(op.get("pinned"))}
+                )
+            else:
+                return {"ok": False, "error": f"未知 op: {kind}", "applied": applied}
+            applied += 1
+        return {"ok": True, "applied": applied, "message": f"已应用 {applied} 项变更"}
+
     def replace_global_memory(
         self, aid: str, content: str, confirm: bool = False, base: str = ""
     ) -> Dict[str, Any]:

@@ -21,6 +21,7 @@ def _active_by_section(state: Dict[str, Any]) -> Dict[str, List[Dict[str, Any]]]
             continue
         entry = dict(item["active"])
         entry["id"] = item["id"]
+        entry["section"] = str(entry.get("section") or "未分区")
         out.setdefault(str(entry.get("section") or ""), []).append(entry)
     for items in out.values():
         items.sort(key=lambda e: (not bool(e.get("pinned")), str(e.get("created_at") or "")))
