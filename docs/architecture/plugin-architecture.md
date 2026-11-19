@@ -100,7 +100,7 @@
 | 现有模块 | 目标层 | 插件类型 |
 |---|---|---|
 | `app/core/plugin_manager.py` | L1 内核（保留骨架） | — |
-| `app/core/ui_plugin_registry.py` | L2 seam + L3 | UI 插件 |
+| `app/plugins/registries/ui_plugin_registry.py` | L2 seam + L3 | UI 插件 |
 | `app/tools/plugin_tool_loader.py` | L2 seam | 工具插件 |
 | `plugins/system/{commands,agents,skills,themes,hooks,tools}/` | L3 | 对应类型插件 |
 | `plugins/*/.mcp.json` / MCP 管理（`app/tools/mcp_tools.py`） | L2 seam + L3 | MCP 插件 |
@@ -246,7 +246,7 @@ discover → load → enable → disable → unload
 | 工具 | tools/pre-execute（审批/改写）、tools/post-execute | waterfall/emit | `app/tools/plugin_tool_loader.py` + `app/core/tool_permission_controller.py` |
 | LLM | llm/stream（多模型路由中间件） | waterfall | `app/core/backend.py` 多模型后端改造 |
 | 能力 | fs/*、memory/*、telemetry/* | emit | 新增 |
-| UI | ui/card-registered、ui/slot-render（预定义插槽注入） | emit | `app/core/ui_plugin_registry.py` |
+| UI | ui/card-registered、ui/slot-render（预定义插槽注入） | emit | `app/plugins/registries/ui_plugin_registry.py` |
 
 ### 3.5 Seam 三层
 
@@ -278,7 +278,7 @@ discover → load → enable → disable → unload
 |---|---|---|---|---|---|
 | 1 | 事件总线 + DI 容器 | 无统一（现为 Qt signal / 单例 get_instance 直连） | 内核新增 ctx 注册表与 4 分发模式事件总线 | 中 | P0 |
 | 2 | 生命周期规范化 | 启停 = 配置双写（enabled/disabled）+ 手搓联动 reload | 五态生命周期 + 可逆副作用（ctx.effect 成对） | 中 | P0 |
-| 3 | UI 插件 | 已有 `app/core/ui_plugin_registry.py`（4 扩展点） | 补 seam 接口声明；UI 与运行时目录物理分家 | 低 | P0 |
+| 3 | UI 插件 | 已有 `app/plugins/registries/ui_plugin_registry.py`（28 个 register_* 扩展点） | 补 seam 接口声明；UI 与运行时目录物理分家 | 低 | P0 |
 | 4 | 工具插件 | 已有 `app/tools/plugin_tool_loader.py` | 注册/注销逆操作补齐；tools/* 事件 | 低 | P0 |
 | 5 | Hook 插件 | 已有 `plugins/system/hooks/` + `app/core/hook_manager.py` | 事件域标准化 | 低 | P0 |
 | 6 | LLM 适配器 | 多模型在引擎内（backend + provider_profile） | 拆 ctx.llm seam + 路由 middleware | 中 | P1 |
@@ -516,7 +516,7 @@ r = session.turn(messages=msgs, tools=[], timeout=180)
 插件自建引擎按 id 直取策略（不碰全局激活槽）见 `docs/plugins/loop-policies.md` §4.2。
 
 | lsp/ (.lsp.json) | `plugins/*/.lsp.json` | LspManager（`app/core/lsp/`） | `add_plugin_servers` / `remove_plugin_servers` 增量 | backend watchfiles → 增量重载 |
-| ui/ | `plugins/*/ui/__init__.py`（必须暴露 register_ui） | UIPluginRegistry（`app/core/ui_plugin_registry.py`） | `load_plugin`：sys.path 注入 → importlib 动态加载 → `register_ui(self)`；4 扩展点：register_content_renderer / register_message_factory / register_floating_card / register_welcome_tab；右工作台 tab：register_workbench_tab | backend watchfiles → reload_plugin（先卸旧后载新、清 sys.modules + pycache） |
+| ui/ | `plugins/*/ui/__init__.py`（必须暴露 register_ui） | UIPluginRegistry（`app/plugins/registries/ui_plugin_registry.py`） | `load_plugin`：sys.path 注入 → importlib 动态加载 → `register_ui(self)`；28 个 register_* 扩展点（全清单与签名见 `docs/plugins/ui-slots.md` §1）；右工作台 tab：register_workbench_tab | backend watchfiles → reload_plugin（先卸旧后载新、清 sys.modules + pycache） |
 | tools/ | `plugins/*/tools/*.py`（必须暴露 register(registry)） | ToolRegistry（`app/tools/registry.py`） | `plugin_tool_loader.load_plugin_tools`：source 强制 `plugin:<name>`、danger 必填、user 覆盖 system | 独立 PluginToolWatcher 轮询线程（2s 签名对比 → scan_now 全量重扫，幂等+锁） |
 | team_templates/ | `plugins/*/team_templates/*.yaml` | TeamManager + `app/core/team/template_manager.py` | `get_template` 查询 | 懒加载 |
 | engines/ | `plugins/*/engines/*.py`（必须暴露 register(registry)） | EngineRegistry（`app/plugins/registries/engine_registry.py`） | `runtime_component_loader._make_engine_loader` + `ensure_engine_watcher`；backend `create_engine_for_slot("ui", ChatEngine, ...)` 工厂化创建；替换类必须 `isinstance(ChatEngine)` 安全网回退内置 | `runtime_component_loader` watcher 轮询 → `builtin_reloaders._reload_engines` 精准卸载/重载单插件 |

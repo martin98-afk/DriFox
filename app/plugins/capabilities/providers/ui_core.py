@@ -193,7 +193,7 @@ def _window_current(host: Any):
 
 
 def _window_workbench(host: Any):
-    """打开 / 刷新右侧工作台页。"""
+    """打开 / 刷新右侧工作台页，或按 key 取页面实例。"""
 
     def open_page(key: str) -> None:
         tm = _resolve_tab_window()
@@ -203,6 +203,23 @@ def _window_workbench(host: Any):
         if callable(fn):
             fn(key)
 
+    def page(key: str) -> Any:
+        """取工作台页实例（插件对自己的页做原位操作：预选文件 / 滚动到底等）。
+
+        页面不存在 / 无工作台时返回 None；返回的 QWidget 只能主线程使用。
+        """
+        tm = _resolve_tab_window()
+        if tm is None:
+            return None
+        fn = getattr(tm, "open_workbench_page", None)
+        if not callable(fn):
+            return None
+        try:
+            return fn(key)
+        except Exception as e:
+            logger.debug(f"[Capability] window.workbench.page({key}) 失败: {e}")
+            return None
+
     def refresh() -> None:
         tm = _resolve_tab_window()
         if tm is None:
@@ -211,7 +228,7 @@ def _window_workbench(host: Any):
         if callable(fn):
             fn()
 
-    return {"open": open_page, "refresh": refresh}
+    return {"open": open_page, "page": page, "refresh": refresh}
 
 
 def _ui_events(host: Any, ctx: Any):
@@ -1068,6 +1085,102 @@ def _ui_dialog(host: Any):
         }
 
     return api
+
+
+def _file_open(host: Any, ctx: Any):
+    """本地文件打开面：注册接管项 + 把路径交给接管链。
+    接口（value_style="value"，pool 值为 dict，直接下标记取）::
+
+        api = caps_for("file.open")
+        api["register_opener"]("preview", can_open, open_file, priority=10)
+        api["open"](path)                    # 接管链 → 无人接管降级系统程序
+        api["open"](path, fallback=False)    # 只走接管链，返回 False 表示无人接管
+
+    接管项存于 UIPluginRegistry（注册面单一真相：宿主调用点、卸载清理、
+    优先级链都在那边），本 provider 只做三件事：把 plugin_name 强制归因成
+    ``ctx.plugin``（插件不能替别人注册）、后台线程派回主线程、把「无人接管」
+    的降级显式化。授权判定（是否声明 file.open）由注册表侧门控。
+    """
+    plugin_name = _plugin_name_of(ctx)
+
+    def _reg():
+        from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+
+        return UIPluginRegistry.get_instance()
+
+    def register_opener(opener_id: str, can_open: Any, open_file: Any, priority: int = 0) -> bool:
+        if not plugin_name or not str(opener_id or "").strip() or not callable(can_open) or not callable(open_file):
+            logger.warning(
+                f"[Capability] file.open 注册参数不合法（plugin={plugin_name!r} opener={opener_id!r}）"
+            )
+            return False
+        try:
+            return bool(
+                _reg().register_file_opener(
+                    plugin_name=plugin_name,
+                    opener_id=str(opener_id),
+                    can_open=can_open,
+                    open_file=open_file,
+                    priority=int(priority),
+                )
+            )
+        except Exception as e:
+            logger.warning(f"[Capability] file.open 注册接管项失败 {opener_id}（{plugin_name}）: {e}")
+            return False
+
+    def unregister_opener(opener_id: str) -> bool:
+        if not plugin_name or not opener_id:
+            return False
+        try:
+            return bool(_reg().unregister_file_opener(plugin_name, str(opener_id)))
+        except Exception as e:
+            logger.warning(f"[Capability] file.open 注销接管项失败 {opener_id}（{plugin_name}）: {e}")
+            return False
+
+    def openers() -> list:
+        """当前全部接管项（plugin / opener_id / priority），排查「为什么没接管」用。"""
+        try:
+            return [
+                {"plugin": i.plugin_name, "opener_id": i.opener_id, "priority": i.priority}
+                for i in _reg().get_file_openers()
+            ]
+        except Exception as e:
+            logger.debug(f"[Capability] file.open 读取接管项失败: {e}")
+            return []
+
+    def open_path(path: str, fallback: bool = True) -> bool:
+        target = str(path or "").strip()
+        if not target:
+            return False
+
+        def _apply() -> bool:
+            try:
+                if _reg().try_open_local_file(target):
+                    return True
+            except Exception as e:
+                logger.warning(f"[Capability] file.open 接管链异常，按降级处理: {e}")
+            if not fallback:
+                return False
+            try:
+                from PyQt5.QtCore import QUrl
+                from PyQt5.QtGui import QDesktopServices
+
+                return bool(QDesktopServices.openUrl(QUrl.fromLocalFile(target)))
+            except Exception as e:
+                logger.warning(f"[Capability] file.open 交系统程序失败 {target}: {e}")
+                return False
+
+        if threading.current_thread() is threading.main_thread():
+            return _apply()
+        # 后台线程：接管项都是 QWidget 操作，只能在主线程碰；投递成功即返回
+        return bool(post_to_main(_apply))
+
+    return {
+        "open": open_path,
+        "register_opener": register_opener,
+        "unregister_opener": unregister_opener,
+        "openers": openers,
+    }
 
 
 def _ui_card_show(host: Any):
@@ -2054,6 +2167,7 @@ def register(registry) -> None:
     reg.register("ui.card.show", _ui_card_show, surface="ui", owner="core:ui")
     reg.register("ui.card.hide", _ui_card_hide, surface="ui", owner="core:ui")
     reg.register("ui.artifacts.show", _ui_artifacts_show, surface="ui", owner="core:ui")
+    reg.register("file.open", _file_open, surface="ui", owner="core:ui")
     reg.register("ui.events", _ui_events, surface="ui", owner="core:ui")
     reg.register("question.control", _question_control, surface="ui", owner="core:ui")
     reg.register("command.read", _command_read, surface="ui", owner="core:ui")

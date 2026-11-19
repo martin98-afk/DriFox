@@ -35,14 +35,20 @@ def register_ui(registry):
         priority=10,
         metadata={"source": "system", "order_hint": 15, "default_landing": True},
     )
-    registry.register_file_opener(
-        plugin_name="file-tree",
-        opener_id="preview",
-        can_open=_can_open,
-        open_file=_open_file,
-        priority=10,
-        metadata={"page_id": _PAGE_ID, "label": "文件树预览"},
-    )
+    # 文件打开接管项走能力池 file.open（授权按 manifest 声明裁剪，与宿主调用链
+    # 同一口径）。能力不可用时只跳过接管，其余 UI 组件照常注册。
+    try:
+        from app.plugins.sdk import caps_for
+
+        api = caps_for("file.open", plugin="file-tree", surface="ui")
+        if api is None:
+            logger.warning("[file-tree] file.open 能力不可用（未声明或未注册），文件打开接管未登记")
+        elif api["register_opener"]("preview", _can_open, _open_file, priority=10):
+            logger.info("[file-tree] 已注册本地文件打开接管项: preview")
+        else:
+            logger.warning("[file-tree] 文件打开接管项注册失败（能力调用返回 False）")
+    except Exception as e:
+        logger.warning(f"[file-tree] 文件打开接管项注册异常: {e}")
     logger.info("[file-tree] UI components registered")
 
 
@@ -69,9 +75,13 @@ def _open_file(path: str) -> bool:
         工作台不可用 / 页面没拿到 / 预览失败都返回 False，不静默失败。
     """
     try:
-        from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+        from app.plugins.sdk import caps_for
 
-        page = UIPluginRegistry.get_instance().open_workbench_page(_PAGE_ID)
+        workbench = caps_for("window.workbench", plugin="file-tree", surface="ui")
+        if workbench is None:
+            logger.debug("[file-tree] window.workbench 能力不可用，放弃接管打开")
+            return False
+        page = workbench["page"](_PAGE_ID)
         if page is None:
             logger.debug("[file-tree] 工作台页不可用，放弃接管打开")
             return False

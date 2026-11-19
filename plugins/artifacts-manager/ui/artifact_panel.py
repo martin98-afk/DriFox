@@ -631,10 +631,32 @@ class InlineArtifactPanel(QWidget):
         return drag
 
     def _on_row_activate(self, path: str, kind: str) -> None:
-        """双击：图片走内置预览，其余交系统默认程序"""
+        """双击：图片走内置预览，其余走能力池 file.open（接管优先，降级系统程序）
+
+        与消息卡片里点工具参数文件走同一条链路：装了 file-tree 这类接管方时，
+        代码 / md / 图片直接开在应用内预览页，不跳出应用。
+        """
         if kind == "image":
             self.previewImageRequested.emit(path)
             return
+        self._open_with_opener_chain(path)
+
+    @staticmethod
+    def _open_with_opener_chain(path: str) -> None:
+        """经能力池 file.open 打开：插件接管优先，无人接管自动降级系统程序
+
+        ⚠️ 不直接 import 宿主注册表：插件与主程序之间的唯一调用入口是能力池。
+        能力不可用（未声明 / 未注册）时才用本机兜底，保证点得动。
+        """
+        try:
+            from app.plugins.sdk import caps_for
+
+            api = caps_for("file.open", plugin="artifacts-manager", surface="ui")
+            if api is not None:
+                api["open"](path)
+                return
+        except Exception:
+            pass
         QDesktopServices.openUrl(QUrl.fromLocalFile(path))
 
     def _show_context_menu(self, global_pos, path: str, kind: str) -> None:
@@ -673,7 +695,7 @@ class InlineArtifactPanel(QWidget):
             act_preview.triggered.connect(lambda: self.previewImageRequested.emit(path))
             menu.addSeparator()
         act_open = menu.addAction("打开文件")
-        act_open.triggered.connect(lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(path)))
+        act_open.triggered.connect(lambda: self._open_with_opener_chain(path))
         act_folder = menu.addAction("打开所在文件夹")
         act_folder.triggered.connect(lambda: self._reveal_in_folder(path))
         act_copy = menu.addAction("复制路径")
