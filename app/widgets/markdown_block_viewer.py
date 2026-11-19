@@ -1162,6 +1162,14 @@ def _block_key(b: Dict[str, Any]) -> str:
         return fp
     if b["type"] == "tool":
         raw = "tool:" + b.get("name", "") + "|" + b.get("args_raw", "") + "|" + b.get("result", "")
+    elif b["type"] == "table":
+        # [FIX] table 块 dict 只含 header/rows（无 html/code/content），旧实现
+        # raw 恒为空串 → 全部表格恒定同一指纹（#16 实测 table:3eb416223e9e）：
+        # 不同表格互撞、流式行增长永不触发原位 update。repr(header)+repr(rows)
+        # 作指纹源：markdown 只为闭合 <tr> 产出行，变化粒度 = 整行（无半成品
+        # 行逐字符波动），行定格后 fp 稳定无假阳性；稳定表格经 _fp 驻留零重算
+        # （2026-11-19 #17）。
+        raw = "table:" + repr(b.get("header", [])) + "|" + repr(b.get("rows", []))
     else:
         raw = b.get("html") or b.get("code") or b.get("content") or ""
     tail = f"{b.get('lang', '')}|{b.get('completed', b.get('closed', ''))}"
