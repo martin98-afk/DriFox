@@ -101,8 +101,9 @@ def test_get_skill_by_name_and_load_skill(contrib_env):
 
 
 def test_skill_dir_content_change_invalidates(contrib_env):
-    """watched dir 内新增 SKILL.md → 缓存 key 变化 → 新条目出现"""
-    from app.utils.utils import get_local_skills
+    """watched dir 内新增 SKILL.md：TTL 窗口内不自动出现（[E7-I] 折衷），
+    invalidate_skills_cache() 后立即可见（插件变更钩子同款路径）。"""
+    from app.utils.utils import get_local_skills, invalidate_skills_cache
 
     tmp, _ = contrib_env
     s1 = get_local_skills(project_dir=str(tmp))
@@ -110,5 +111,68 @@ def test_skill_dir_content_change_invalidates(contrib_env):
     d = tmp / ".drifox" / "skills" / "new-skill"
     d.mkdir()
     (d / "SKILL.md").write_text("---\nname: new-skill\ndescription: n\n---\nx", encoding="utf-8")
+    # 30s TTL 窗口内：动态段缓存命中，不重算 → 新技能暂不可见（用户已接受折衷）
     s2 = get_local_skills(project_dir=str(tmp))
-    assert any(s["name"] == "new-skill" for s in s2)
+    assert all(s["name"] != "new-skill" for s in s2), "TTL 窗口内不应重算动态段"
+    # invalidate 钩子清动态段缓存 → 立即可见
+    invalidate_skills_cache()
+    s3 = get_local_skills(project_dir=str(tmp))
+    assert any(s["name"] == "new-skill" for s in s3)
+
+def test_contrib_key_ttl_cache_hit(contrib_env, monkeypatch):
+    """[E7-I] 动态段 TTL 命中：同 project_dir 二次计算不再现算 iterdir+stat。"""
+    import time as time_mod
+
+    from app.utils import utils as u
+
+    tmp, _ = contrib_env
+    calls = {"n": 0}
+    real = u._scan_contrib_parts
+
+    def counting(pd):
+        calls["n"] += 1
+        return real(pd)
+
+    monkeypatch.setattr(u, "_scan_contrib_parts", counting)
+    k1 = u._compute_skills_cache_key(str(tmp))
+    k2 = u._compute_skills_cache_key(str(tmp))
+    assert calls["n"] == 1, f"TTL 窗口内应命中缓存，实测现算 {calls['n']} 次"
+    assert k1 == k2
+
+    # 过期（把缓存时刻拨回 31s 前）→ 重算
+    u._contrib_key_cached_at = time_mod.monotonic() - 31.0
+    u._compute_skills_cache_key(str(tmp))
+    assert calls["n"] == 2, "TTL 过期后应重算动态段"
+
+def test_invalidate_clears_contrib_cache(contrib_env, monkeypatch):
+    """[E7-I] invalidate_skills_cache 清动态段缓存：失效后强制现算。"""
+    from app.utils import utils as u
+
+    tmp, _ = contrib_env
+    calls = {"n": 0}
+    real = u._scan_contrib_parts
+
+    def counting(pd):
+        calls["n"] += 1
+        return real(pd)
+
+    monkeypatch.setattr(u, "_scan_contrib_parts", counting)
+    u._compute_skills_cache_key(str(tmp))
+    assert calls["n"] == 1
+    u._compute_skills_cache_key(str(tmp))
+    assert calls["n"] == 1, "窗口内应命中"
+    u.invalidate_skills_cache()
+    u._compute_skills_cache_key(str(tmp))
+    assert calls["n"] == 2, "invalidate 后应强制现算"
+
+def test_contrib_cache_recomputes_for_other_project(contrib_env):
+    """[E7-I] project_dir 变化 → 单槽键不匹配 → 重算（切项目不串味）。"""
+    from app.utils import utils as u
+
+    tmp, _ = contrib_env
+    other = Path(tempfile.mkdtemp(prefix="skills_other2_"))
+    k1 = u._compute_skills_cache_key(str(tmp))
+    k2 = u._compute_skills_cache_key(str(other))
+    assert u._contrib_key_cache is not None
+    assert u._contrib_key_cache[0] == str(other)
+    assert k1[0] == str(tmp) and k2[0] == str(other)
