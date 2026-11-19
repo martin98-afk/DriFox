@@ -39,29 +39,32 @@ import os
 from typing import Any, Dict, List, Optional
 from app.widgets._bounded_caches import _BoundedLRUCache
 
-from PyQt5.QtCore import QEvent, Qt, QTimer, pyqtSignal
+from PyQt5.QtCore import QEvent, QEasingCurve, QPropertyAnimation, Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QColor, QDesktopServices, QImageReader, QMouseEvent, QPainter, QPixmap
 from PyQt5.QtCore import QUrl
 from PyQt5.QtWidgets import QFrame, QHBoxLayout, QLabel, QMenu, QVBoxLayout, QWidget
 from qfluentwidgets import TransparentToolButton
 
-from app.utils.design_tokens import BorderRadius, Colors, font_size_css
+from app.utils.design_tokens import Animations, BorderRadius, Colors, font_size_css
 from app.utils.utils import get_font_family_css, get_icon
 from app.widgets._workbench_helpers import _SectionHeader
 from app.widgets.elided_label import _ElidedLabel
 
 # 单卡最多渲染条数：插件一次性推几百个文件时把卡片撑爆（上限外折叠进「还有 N 个」）
 MAX_VISIBLE_ITEMS = 20
-# 折叠态画廊：固定单行不换行，首图略宽，其余同宽；溢出收进「+N」，窄栏减槽位
+# 折叠态画廊：固定单行不换行，首图略宽，其余同宽；可见数由宽度决定（放得下就铺满），
+# 放不下收进「+N」；上限仅防病态超宽，不参与常规布局
 _COLLAPSED_THUMB_H = 64
 _COLLAPSED_FIRST_W = 112
 _COLLAPSED_ITEM_W = 72
 _COLLAPSED_GAP = 6
-_COLLAPSED_MAX_THUMBS = 3
+_COLLAPSED_MAX_THUMBS = 12
 # 摘要行（「另有 N 个文件」）高度
 _COLLAPSED_SUMMARY_H = 18
 # 缩略图预览块尺寸（展开列表行用；画廊用上面折叠常量，缓存按尺寸区分）
 _THUMB_W, _THUMB_H = 64, 48
+# 展开列表限高放行值（Qt 伪无限，同 markdown 折叠卡惯例）
+_QWIDGETSIZE_MAX = 16777215
 
 # kind → (徽标短标签, 主色)；主色同时用于徽标底与 meta 强调
 _KIND_META = {
@@ -266,11 +269,11 @@ class InlineArtifactPanel(QWidget):
         self._thumb_strip.setVisible(False)
         layout.addWidget(self._thumb_strip)
 
-        # 列表容器：不用 QScrollArea（sizeHint 缓存失真，见模块注释），全量展示
-        self._list_wrap = QWidget(self)
-        self._list_wrap.setStyleSheet("background: transparent;")
+        # 列表容器：同款浅底圆角卡片；不用 QScrollArea（sizeHint 缓存失真，见模块注释），全量展示
+        self._list_wrap = QFrame(self)
+        self._list_wrap.setObjectName("artifactListCard")
         self._list_layout = QVBoxLayout(self._list_wrap)
-        self._list_layout.setContentsMargins(0, 0, 2, 0)
+        self._list_layout.setContentsMargins(6, 4, 6, 6)
         self._list_layout.setSpacing(4)
         self._list_layout.addStretch(1)
         self._list_wrap.setVisible(False)
@@ -315,19 +318,80 @@ class InlineArtifactPanel(QWidget):
 
     def _on_collapse_clicked(self) -> None:
         self._collapsed = not self._collapsed
-        self._list_wrap.setVisible(not self._collapsed)
-        # 折叠带与清单互斥：折叠看缩略图，展开看完整行
-        self._thumb_strip.setVisible(self._collapsed and self._strip_layout.count() > 1)
         icon = "展开" if self._collapsed else "折叠"
         self._collapse_btn.setIcon(get_icon(icon))
         tip = "展开成果列表" if self._collapsed else "折叠成果列表"
         self._collapse_btn.setToolTip(tip)
         self._header.setToolTip(tip)
         if self._collapsed:
-            self._rebuild_thumb_strip()
-            self._schedule_strip_decode()
+            # 折叠：列表收到 0，收完画廊回归（中途反转从当前实际高度起步，不跳变）
+            was_visible = self._list_wrap.isVisible()
+            self._animate_list(False, was_visible)
         else:
+            # 展开：画廊立即让位，列表从当前高度长出（首次从 0 起步）
+            was_visible = self._list_wrap.isVisible()
+            self._thumb_strip.setVisible(False)
+            self._list_wrap.setVisible(True)
+            self._animate_list(True, was_visible)
             self._schedule_thumb_decode()
+
+    def _animate_list(self, expanding: bool, was_visible: bool) -> None:
+        """展开列表高度动画（轴向 maximumHeight，惯例同 markdown 折叠卡）：
+
+        展开 ENTER_MS+OutCubic / 收起 EXIT_MS+OutQuad（OutCubic 收起尾段拖尾）；
+        逐帧 emit heightChanged 让宿主卡片高度跟随，动画结束才不跳变。
+        """
+        wrap = self._list_wrap
+        if not Animations.motion_enabled() or self.parentWidget() is None:
+            # reduced-motion / 未挂载：跳过补间直落终值（收尾回调幂等）
+            if expanding:
+                wrap.setMaximumHeight(_QWIDGETSIZE_MAX)
+            else:
+                wrap.hide()
+                self._show_strip_after_collapse()
+                wrap.setMaximumHeight(_QWIDGETSIZE_MAX)
+            self._emit_height_chain()
+            return
+        if expanding:
+            start = max(wrap.height(), 0) if was_visible else 0
+            target = max(wrap.sizeHint().height(), 1)
+        else:
+            start = max(wrap.height(), 1)
+            wrap.setMaximumHeight(start)  # 先钳到实际高度再动画
+            target = 0
+        old = getattr(self, "_list_anim", None)
+        if old is not None:
+            old.stop()
+        anim = QPropertyAnimation(wrap, b"maximumHeight", self)
+        self._list_anim = anim
+        anim.setDuration(Animations.ENTER_MS if expanding else Animations.EXIT_MS)
+        anim.setEasingCurve(QEasingCurve(Animations.EASE_ENTER if expanding else Animations.EASE_EXIT))
+        anim.setStartValue(start)
+        anim.setEndValue(target)
+        anim.valueChanged.connect(lambda _v: self._emit_height_chain())
+        anim.finished.connect(lambda: self._on_list_anim_done(expanding))
+        anim.start()
+
+    def _on_list_anim_done(self, expanding: bool) -> None:
+        wrap = self._list_wrap
+        if expanding:
+            wrap.setMaximumHeight(_QWIDGETSIZE_MAX)  # 放开限高不二次跳变
+        else:
+            wrap.hide()
+            wrap.setMaximumHeight(_QWIDGETSIZE_MAX)
+            self._show_strip_after_collapse()
+        self._emit_height_chain()
+
+    def _show_strip_after_collapse(self) -> None:
+        """折叠动画收尾：画廊回归 + 解码调度 + 图标/提示同步"""
+        self._rebuild_thumb_strip()
+        # 折叠带与清单互斥：折叠看缩略图，展开看完整行
+        self._thumb_strip.setVisible(self._collapsed and self._strip_layout.count() > 1)
+        if self._collapsed:
+            self._schedule_strip_decode()
+
+    def _emit_height_chain(self) -> None:
+        """高度链对账：布局失效 + 宿主补偿（动画逐帧调用，值单调不抖）"""
         lay = self.layout()
         if lay is not None:
             lay.invalidate()
@@ -574,7 +638,7 @@ class InlineArtifactPanel(QWidget):
         row = QFrame(self._list_wrap)
         row.setObjectName("artifactItem")
         lay = QHBoxLayout(row)
-        lay.setContentsMargins(4, 4, 4, 4)
+        lay.setContentsMargins(2, 4, 6, 4)
         lay.setSpacing(8)
 
         kind = item["kind"]
@@ -853,7 +917,9 @@ class InlineArtifactPanel(QWidget):
             if pix is not None and not pix.isNull():
                 label.setPixmap(pix)
             else:
-                label.setText("✕")
+                # 文件已清理/不存在：显示类型徽标而非无解释的 ✕
+                label.setText(_KIND_META["image"][0])
+                label.setToolTip(f"{path}\n文件已不存在或无法读取（可能已被清理）")
         except (OSError, RuntimeError):
             pass
 
@@ -888,13 +954,15 @@ class InlineArtifactPanel(QWidget):
                     badge.refresh_style()
 
     def _style_strip(self) -> None:
-        """折叠画廊容器 / 缩略图 / 溢出 / 摘要的主题化样式（浅底卡片层级）"""
+        """画廊 / 展开列表两张卡片及具内部动态控件的主题化样式（浅底卡片层级）"""
         from app.utils.design_tokens import Colors
 
-        self._thumb_strip.setStyleSheet(
-            f"QFrame#artifactStripCard {{ background: {Colors.CARD_BG.format(alpha=110)};"
-            f" border: 1px solid {Colors.BORDER}; border-radius: {BorderRadius.MD}; }}"
+        card_css = (
+            f"background: {Colors.CARD_BG.format(alpha=110)};"
+            f" border: 1px solid {Colors.BORDER}; border-radius: {BorderRadius.MD};"
         )
+        self._thumb_strip.setStyleSheet(f"QFrame#artifactStripCard {{ {card_css} }}")
+        self._list_wrap.setStyleSheet(f"QFrame#artifactListCard {{ {card_css} }}")
         self._summary_label.setStyleSheet(
             f"QLabel#artifactSummary {{ color: {Colors.TEXT_SECONDARY}; background: transparent;"
             f" {get_font_family_css()} {font_size_css(11)}; padding: 0 2px; }}"

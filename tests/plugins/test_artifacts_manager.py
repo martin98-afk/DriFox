@@ -368,10 +368,40 @@ def test_panel_collapsed_strip_gallery_slots_and_overflow(panel):
     overflow = [w for w in widgets if w is not None and w.objectName() == "artifactOverflow"]
     summary = panel._thumb_strip.findChild(QLabel, "artifactSummary")
 
-    assert len(thumbs) == 3, "折叠画廊最多展示三张"
+    assert len(thumbs) == 4, "420 宽度下槽位由宽度算出（首图+3 常规）"
     assert thumbs[0].width() > thumbs[1].width(), "首图应略宽"
-    assert overflow and overflow[0].text() == "+2", "溢出计数只覆盖图片"
+    assert overflow and overflow[0].text() == "+1", "溢出计数只覆盖图片"
     assert summary is not None and summary.text() == "另有 1 个文件"
+
+def test_missing_image_thumb_shows_kind_fallback(panel):
+    """文件缺失/清理后显示 IMG 徽标与缺失说明，而非无解释的 ✕"""
+    panel.update_artifacts(_img_items(1))
+    panel.show()
+    label = next(
+        w
+        for w in (panel._strip_layout.itemAt(i).widget() for i in range(panel._strip_layout.count()))
+        if w is not None and w.objectName() == "artifactThumbnail"
+    )
+    panel._apply_thumb(label, "/nonexistent/xx.png", 112, 64)
+    assert label.text() == "IMG"
+    assert "不存在" in label.toolTip()
+
+
+def test_expand_collapse_without_motion_lands_final_state(panel, monkeypatch):
+    """reduced-motion：跳过补间直落终值（列表放开限高、画廊回归），不悬在中间态"""
+    monkeypatch.setattr(_panel_mod.Animations, "motion_enabled", lambda: False)
+    panel.update_artifacts(_img_items(2))
+    panel.show()
+
+    panel._on_collapse_clicked()  # 展开
+    assert panel._list_wrap.isVisible()
+    assert panel._list_wrap.maximumHeight() == _panel_mod._QWIDGETSIZE_MAX
+    assert panel._thumb_strip.isHidden()
+
+    panel._on_collapse_clicked()  # 折叠回
+    assert panel._list_wrap.isHidden()
+    assert not panel._thumb_strip.isHidden()
+    assert panel._list_wrap.maximumHeight() == _panel_mod._QWIDGETSIZE_MAX
 
 def test_panel_collapsed_strip_slots_shrink_on_narrow_width(panel):
     """窄栏优先减少常规缩略图数量，不换行"""
@@ -468,11 +498,17 @@ def test_kind_meta_label_is_human_readable(qapp):
     assert _panel_mod._KIND_LABEL["file"] == "文件"
 
 def test_gallery_container_is_theme_styled(panel):
-    """画廊容器与摘要行主题化：refresh_style 后带圆角与主题色"""
+    """画廊与展开列表两张卡片主题化：refresh_style 后带圆角与主题色"""
     panel.update_artifacts(_img_items(2) + [{"path": "/tmp/report.md", "kind": "text"}])
     css = panel._thumb_strip.styleSheet()
     assert "border-radius" in css, "画廊容器应有圆角"
     assert "artifactSummary" in css or panel._summary_label.styleSheet(), "摘要行应有主题样式"
+
+    panel.show()
+    panel._on_collapse_clicked()  # 展开
+    list_css = panel._list_wrap.styleSheet()
+    assert "border-radius" in list_css, "展开列表应包进同款圆角卡片"
+    assert "artifactListCard" in list_css
 
 def test_plugin_registers_inline_panel(qapp):
     """插件把成果栏注册到卡片内嵌面板槽位"""
