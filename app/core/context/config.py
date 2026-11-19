@@ -13,13 +13,23 @@ from typing import Any
 
 PLUGIN_NAME = "system-context"
 
+# [E7-A] 模块级共享 store：cfg() 每投影被调 10~20 次（tier 4 层+budget），
+# 30 轮工具迭代数百次。共享实例消除逐次建对象开销，也让失效钩子全局生效
+# （读盘缓存挂在 plugin_config_store 模块级，写路径失效对所有实例可见）。
+_cfg_store: Any = None
+
+def _get_store() -> Any:
+    global _cfg_store
+    if _cfg_store is None:
+        from app.plugins.managers.plugin_config_store import PluginConfigStore
+
+        _cfg_store = PluginConfigStore()
+    return _cfg_store
 
 def cfg(key: str, default: Any = None) -> Any:
     """读原始生效值。"""
     try:
-        from app.plugins.managers.plugin_config_store import PluginConfigStore
-
-        val = PluginConfigStore().get(PLUGIN_NAME, key)
+        val = _get_store().get(PLUGIN_NAME, key)
     except Exception:
         return default
     if val is None or val == "":
