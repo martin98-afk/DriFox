@@ -1247,6 +1247,54 @@ class TeamManager:
                     seen.append(rid)
         return seen
 
+    def resolve_run_id_for_project(
+        self,
+        project: str,
+        workdir: str = "",
+        team_name: str = DEFAULT_TEAM,
+    ) -> str:
+        """按项目解析团队运行标识：命中复用，未命中新建一个空团队运行。
+
+        动机：`/team --join` 原先取 team.json 顶层 run_id（跨项目全局单槽），
+        任意项目的标签页都会并进最近一次团队运行。项目归属复用
+        ``projects_by_run_id``（与 tab 团队框 header 同源），严格相等、不回退
+        顶层 project（顶层是跨 run 污染单槽）。
+
+        只认仍有成员归属的 run（get_team_run_ids 口径）：成员全失效的旧 run
+        视为该项目团队已解散，重新开一个，避免并进僵尸团队。
+
+        未命中分支等价「开新团队」：force 生成新 run、写入项目与工作目录、
+        落 runtime 模板槽（name=项目名，供团队框标题与窗口 _team_name 展示）。
+        不登记 leader——leader 由 team_manage(create) 开窗路径或成员补位。
+
+        Args:
+            project: 项目名（窗口 _current_project）
+            workdir: 团队统一工作目录（空串表示不设置）
+            team_name: 团队目录名
+
+        Returns:
+            命中的 run_id 或新建的 run_id；project 为空时回退顶层 run
+            （无则新建），兼容无项目上下文的旧调用。
+        """
+        project = str(project or "").strip()
+        with self._data_lock:
+            data = self._get_team_data(team_name)
+            mapping = data.get("projects_by_run_id") or {}
+            if project:
+                for rid in self.get_team_run_ids(team_name):
+                    if mapping.get(rid) == project:
+                        return rid
+            run_id = self.start_team_run(team_name=team_name, force=bool(project))
+            if project:
+                self.set_project_for_run_id(project, run_id, team_name=team_name)
+                self.set_template_for_run_id(
+                    {"name": project, "agents": [], "runtime": True},
+                    run_id=run_id,
+                    team_name=team_name,
+                )
+                self.set_team_workdir(workdir or "", run_id=run_id, team_name=team_name)
+            return run_id
+
     # ── 团队级统一项目（一人改项目全员同步）──
 
     def set_team_project(self, project: str, team_name: str = DEFAULT_TEAM):

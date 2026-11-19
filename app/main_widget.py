@@ -5138,24 +5138,26 @@ class OpenAIChatToolWindow(ToolWindow):
         self._on_agent_changed(agent_name)
         self._apply_agent_command_permissions(agent_name)
         tm = self._get_team_manager()
-        # 方案 A：复用团队已有 run_id（模板加载生成的）；手动加入老团队
-        # （无 run_id）时保持空串，团队会话不注入团队元数据（行为与现状一致）
-        # 🛡️ F3 可选收尾（根因 B）：手动加入且团队无 run_id → start_team_run()
-        # 幂等生成，使纯手动团队也获得 run_id、成员会话自动落团队元数据
-        # （_auto_save_current_session 的 _team_run_id 守卫因此生效），
-        # 否则手动成员会话不落团队字段、恢复时无法按 run_id 找回。
-        run_id = tm.get_team_run_id()
-        if not run_id:
-            run_id = tm.start_team_run()
+        # 🆕 项目隔离：按当前标签页所属项目解析团队运行——同项目复用同一
+        # run，项目尚无团队（无成员归属的 run）时新建一个空团队运行。
+        # 不能再用 get_team_run_id()：它取 team.json 顶层 run_id（跨项目全局
+        # 单槽），会让任意项目的标签页并进最近一次团队运行。
+        project = str(self.__dict__.get("_current_project") or "")
+        run_id = tm.resolve_run_id_for_project(project, self._resolve_project_workdir() or "")
         self._team_run_id = run_id
         # 🛡️ M1'：按 run_id 粒度读模板名，多团队并存下不再被顶层 template
         # 单槽的最新一次写入覆盖（A 团队成员 /team --join 时不会拿到
-        # B 团队的模板名）。未命中 run_id 时回退顶层 template 字段
-        # （兼容仅用旧 set_template 写入的老团队）。
-        self._team_name = (tm.get_template_for_run_id(run_id) or {}).get("name") or "default"
+        # B 团队的模板名）。未命中时用项目名兜底（新建团队槽 name=项目名），
+        # 再退 "default" 兼容老数据。
+        self._team_name = (tm.get_template_for_run_id(run_id) or {}).get("name") or project or "default"
         # 🛡️ M1：手动 join 路径也透传 run_id / team_label 到 TeamManager，
         # 让成员记录带上团队归属（多团队分组、跨团队拦截的前置条件）。
-        team_label = tm.get_team_label()
+        # team_label 按 run 反查：老成员记录里可能已有别的展示名；
+        # 反查失败（返回 run_id 本身）时用本 run 的模板名/项目名。
+        team_label = tm.get_team_label_by_run(run_id)
+        if not team_label or team_label == run_id:
+            team_label = self._team_name
+
         tm.join_team(
             window_id=self._window_id,
             agent_name=agent_name,
@@ -14598,7 +14600,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
             # 生成 git diff
             try:
-                from app.utils.diff_viewer import DiffHtmlGenerator
+                from app.utils.diff_html import DiffHtmlGenerator
 
                 diff_output = DiffHtmlGenerator.get_diff_for_files(file_paths, session_id)
             except Exception as e:
@@ -19163,7 +19165,7 @@ class OpenAIChatToolWindow(ToolWindow):
         遍历 session.messages 查找 role==tool 且 tool_call_id 匹配的消息，
         提取其 diff 字段，生成 HTML 报告并展示。
         """
-        from app.utils.diff_viewer import DiffHtmlGenerator
+        from app.utils.diff_html import DiffHtmlGenerator
 
         diff_content = None
 
@@ -19223,7 +19225,7 @@ class OpenAIChatToolWindow(ToolWindow):
         Returns:
             True 找到并展示了内嵌 diff；False 无内嵌 diff
         """
-        from app.utils.diff_viewer import DiffHtmlGenerator
+        from app.utils.diff_html import DiffHtmlGenerator
 
         start_idx, end_idx = get_round_message_indices(session, round_index)
         if start_idx is None:
@@ -24071,7 +24073,7 @@ class OpenAIChatToolWindow(ToolWindow):
             return
 
         try:
-            from app.utils.diff_viewer import ToolPayloadHtmlGenerator
+            from app.utils.diff_html import ToolPayloadHtmlGenerator
 
             html = ToolPayloadHtmlGenerator.generate_html_report(
                 tool_name=payload.get("tool_name", ""),

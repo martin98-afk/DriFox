@@ -16,16 +16,19 @@
 """
 
 import os
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from PyQt5.QtCore import QObject
-from PyQt5.QtWebEngineWidgets import QWebEngineProfile
 
-# 模块级单例
-_shared_profile: Optional[QWebEngineProfile] = None
+if TYPE_CHECKING:
+    from PyQt5.QtWebEngineWidgets import QWebEngineProfile
+
+# 模块级单例（QWebEngineProfile 延迟到工厂函数体内 import：本模块在启动链上，
+# 避免未用 WebEngine 的入口连帮加载 QtWebEngineWidgets）
+_shared_profile: Optional["QWebEngineProfile"] = None
 
 
-def init_shared_web_profile(parent: Optional[QObject] = None) -> QWebEngineProfile:
+def init_shared_web_profile(parent: Optional[QObject] = None) -> "QWebEngineProfile":
     """初始化共享 WebEngine Profile（应用启动时调用一次）。
 
     Args:
@@ -34,6 +37,8 @@ def init_shared_web_profile(parent: Optional[QObject] = None) -> QWebEngineProfi
     Returns:
         已初始化的 QWebEngineProfile 实例。
     """
+    from PyQt5.QtWebEngineWidgets import QWebEngineProfile
+
     global _shared_profile
     if _shared_profile is not None:
         return _shared_profile
@@ -52,7 +57,7 @@ def init_shared_web_profile(parent: Optional[QObject] = None) -> QWebEngineProfi
     return profile
 
 
-def get_shared_web_profile() -> QWebEngineProfile:
+def get_shared_web_profile() -> "QWebEngineProfile":
     """获取共享的 WebEngine Profile。
 
     Returns:
@@ -61,6 +66,8 @@ def get_shared_web_profile() -> QWebEngineProfile:
     Raises:
         RuntimeError: 尚未调用 init_shared_web_profile()。
     """
+    from PyQt5.QtWebEngineWidgets import QWebEngineProfile
+
     if _shared_profile is None:
         raise RuntimeError("共享 WebEngine Profile 尚未初始化。请先在 main.py 中调用 init_shared_web_profile()。")
     return _shared_profile
@@ -82,6 +89,8 @@ def _resolve_cache_dir() -> str:
 
 def _apply_storage_path(profile: "QWebEngineProfile") -> None:
     """固定持久化存储目录（localStorage/IndexedDB 落点，实测 5ms，不碰 HTTP 缓存后端）。"""
+    from PyQt5.QtWebEngineWidgets import QWebEngineProfile
+
     cache_dir = _resolve_cache_dir()
     if cache_dir:
         try:
@@ -91,12 +100,14 @@ def _apply_storage_path(profile: "QWebEngineProfile") -> None:
             pass
 
 
-def create_transient_web_profile(parent: Optional[QObject] = None) -> QWebEngineProfile:
+def create_transient_web_profile(parent: Optional[QObject] = None) -> "QWebEngineProfile":
     """创建一次性 WebEngine Profile。
 
     该 profile 不使用持久化缓存和 cookies，适合短生命周期的预览窗口
     （差异对比、图表放大查看等）。
     """
+    from PyQt5.QtWebEngineWidgets import QWebEngineProfile
+
     profile = QWebEngineProfile(parent)
     profile.setHttpCacheType(QWebEngineProfile.MemoryHttpCache)
     profile.setPersistentCookiesPolicy(QWebEngineProfile.NoPersistentCookies)

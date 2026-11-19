@@ -612,7 +612,7 @@ def generate_diff_html(old_content: str, new_content: str, backup_file) -> str:
     """
     import difflib
 
-    from app.utils.diff_viewer import DiffHtmlGenerator
+    from app.utils.diff_html import DiffHtmlGenerator
 
     old_lines = normalize_lines(old_content)
     new_lines = normalize_lines(new_content)
@@ -637,7 +637,7 @@ def generate_multi_file_diff_html(operations: list) -> str:
     """
     import difflib
 
-    from app.utils.diff_viewer import DiffHtmlGenerator
+    from app.utils.diff_html import DiffHtmlGenerator
 
     diff_parts = []
 

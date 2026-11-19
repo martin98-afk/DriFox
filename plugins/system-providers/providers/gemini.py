@@ -39,7 +39,10 @@ def register(registry):
                 "absolute_limit": 65536,
                 "supports_vision": True,
                 "supports_thinking": True,
-                "thinking_param": "thinking_budget",
+                # 端点只认 reasoning_effort（内部映射到 thinking_level / thinking_budget）。
+                # 顶层 thinking_budget 会被 protobuf 直接拒：Unknown name "thinking_budget"
+                # （2026-11-19 实测）；预算只能放进 google.thinking_config。
+                "thinking_param": "reasoning_effort",
                 # 服务商级请求参数黑名单（transport 通用读取 capabilities.unsupported_params）：
                 # Gemini 原生 generateContent 无 frequency/presence penalty 概念，OpenAI
                 # 兼容层会把未知字段透传给 protobuf 解析，整请求 400 Unknown name

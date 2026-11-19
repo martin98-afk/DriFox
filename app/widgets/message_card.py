@@ -99,7 +99,6 @@ from app.core import (
     ensure_content_blocks,
 )
 from app.core.conversation.message_content import make_tool_result_block
-from app.core.infra.webengine_profile import get_shared_web_profile
 from app.utils.design_tokens import (
     Animations,
     BorderRadius,
@@ -223,7 +222,6 @@ from app.widgets.card_render_core import (
 )
 from app.widgets.card_viewers import (
     CodeWebViewer,
-    ConsoleMonitorPage,
     PlainTextViewer,
     _HEIGHT_CACHE_MAX,
     _ImagePreviewDialog,
