@@ -12,6 +12,7 @@
 4. project 为空回退顶层 run（兼容无项目上下文调用）
 5. 项目映射存在但无任何成员归属的 run 不复用（视为团队已解散）
 """
+
 import pytest
 
 
@@ -62,3 +63,12 @@ class TestResolveRunIdForProject:
         tm.set_project_for_run_id("项目甲", orphan)
 
         assert tm.resolve_run_id_for_project("项目甲") != orphan
+
+    def test_legacy_top_level_project_reused(self, tm):
+        """单团队老数据（只有顶层 project/run_id）同项目仍复用，不凭空建新团队。"""
+        tm.set_active_window_ids({"win_a1"})
+        top = tm.start_team_run()
+        tm.set_team_project("项目甲")
+        tm.join_team("win_a1", "build", run_id=top, team_label="项目甲")
+
+        assert tm.resolve_run_id_for_project("项目甲") == top

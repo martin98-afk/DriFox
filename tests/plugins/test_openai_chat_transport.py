@@ -179,7 +179,9 @@ def test_gemini_thinking_requests_thought_summaries(transport, mod, monkeypatch)
         lambda cfg: {"thinking_param": "reasoning_effort", "reasoning_effort_values": ["low", "medium", "high"]},
     )
     monkeypatch.setattr(mod, "get_provider_profile", lambda cfg: {"family": "gemini"})
-    out = transport.build_request_kwargs({"模型名称": "gemini-4-hydrogen", "思考模式": True, "思考等级": "high"})
+    out = transport.build_request_kwargs(
+        {"API_URL": "https://generativelanguage.googleapis.com/v1beta/openai/", "模型名称": "gemini-4-hydrogen", "思考模式": True, "思考等级": "high"}
+    )
     assert out["extra_body"]["google"]["thinking_config"]["include_thoughts"] is True
     assert out["extra_body"]["reasoning_effort"] == "high"
 
@@ -187,7 +189,9 @@ def test_gemini_thinking_off_skips_thought_summaries(transport, mod, monkeypatch
     """思考关闭时不请求摘要，也不发非法顶层 thinking 字段（端点会 400）"""
     monkeypatch.setattr(mod, "resolve_model_capabilities", lambda cfg: {"thinking_param": "reasoning_effort"})
     monkeypatch.setattr(mod, "get_provider_profile", lambda cfg: {"family": "gemini"})
-    out = transport.build_request_kwargs({"模型名称": "gemini-4-hydrogen", "思考模式": False})
+    out = transport.build_request_kwargs(
+        {"API_URL": "https://generativelanguage.googleapis.com/v1beta/openai/", "模型名称": "gemini-4-hydrogen", "思考模式": False}
+    )
     assert "google" not in out["extra_body"]
     assert "thinking" not in out["extra_body"]
     assert "reasoning_effort" not in out["extra_body"]
@@ -201,11 +205,38 @@ def test_gemini_budget_param_rewritten_to_effort(transport, mod, monkeypatch):
     monkeypatch.setattr(mod, "resolve_model_capabilities", lambda cfg: {"thinking_param": "thinking_budget"})
     monkeypatch.setattr(mod, "get_provider_profile", lambda cfg: {"family": "gemini"})
     out = transport.build_request_kwargs(
-        {"模型名称": "gemini-2.5-pro", "思考模式": True, "思考预算": 8192, "思考等级": "medium"}
+        {
+            "API_URL": "https://generativelanguage.googleapis.com/v1beta/openai/", 
+            "模型名称": "gemini-2.5-pro",
+            "思考模式": True,
+            "思考预算": 8192,
+            "思考等级": "medium",
+        }
     )
     assert "thinking_budget" not in out["extra_body"]
     assert out["extra_body"]["reasoning_effort"] == "medium"
     assert out["extra_body"]["google"]["thinking_config"]["include_thoughts"] is True
+
+def test_gemini_via_aggregator_gateway_keeps_original_shape(transport, mod, monkeypatch):
+    """聚合网关承载的 gemini 模型不得注入 google 扩展字段。
+
+    实测 OpenCode Go（opencode.ai/zen/go/v1）对顶层 google 直接 400：
+    "google: cannot be represented by google; use scoped provider_options"。
+    该路径必须保持改动前的请求形状（含 thinking_budget / thinking 原样）。
+    """
+    monkeypatch.setattr(mod, "resolve_model_capabilities", lambda cfg: {"thinking_param": "thinking_budget"})
+    monkeypatch.setattr(mod, "get_provider_profile", lambda cfg: {"family": "gemini"})
+    out = transport.build_request_kwargs(
+        {
+            "API_URL": "https://opencode.ai/zen/go/v1",
+            "模型名称": "gemini-4-argon",
+            "思考模式": True,
+            "思考预算": 8192,
+        }
+    )
+    assert "google" not in out["extra_body"]
+    # 网关路径保持原行为：预算型仍按 t_param 发 thinking_budget
+    assert out["extra_body"]["thinking_budget"] == 8192
 
 def test_non_gemini_never_requests_thought_summaries(transport, mod, monkeypatch):
     """非 Gemini 家族不得被注入 google.thinking_config"""

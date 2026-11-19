@@ -20,7 +20,6 @@ from typing import Any, Dict, Iterator, List, Optional
 from app.plugins.contracts.stream_sink import StreamEvent
 from app.plugins.sdk import (
     PARAM_SCHEMA,
-    detect_provider_family,
     extract_reasoning_delta,
     get_provider_profile,
     normalize_reasoning_effort,
@@ -52,18 +51,16 @@ _REASONING_REJECTED_PARAMS = frozenset({"temperature", "top_p"})
 # 避免用户存的 max / minimal 直发导致 400）
 _OPENAI_REASONING_EFFORTS = ["low", "medium", "high", "xhigh"]
 
-def _is_gemini_target(llm_config: Dict[str, Any], model: str) -> bool:
-    """Gemini 家族判定（provider 声明/端点优先，模型名兜底）。
+def _is_official_gemini_endpoint(llm_config: Dict[str, Any]) -> bool:
+    """是否直连 Google 官方 Gemini 端点（只有它接受顶层 ``google`` 扩展字段）。
 
-    detect_provider_family 只按 ``model.startswith("gemini")`` 兜底，配置里常见的
-    ``models/gemini-2.5-flash`` 前缀会漏判，故此处再按「模型名含 gemini」补一层。
+    聚合网关（如 opencode.ai/zen/*、各中转站）同样承载 gemini 模型，但自有 provider
+    路由语义：顶层 ``google`` 会被拒，报 400 "google: cannot be represented by
+    google; use scoped provider_options"（2026-11-19 实测 OpenCode Go）。
+    故 Gemini 专有扩展字段只对官方端点下发，其余网关保持原请求形状。
     """
-    try:
-        if detect_provider_family(llm_config) == "gemini":
-            return True
-    except Exception:
-        pass
-    return "gemini" in str(model or "").lower()
+    url = str(llm_config.get("API_URL", "") or "").lower()
+    return "generativelanguage.googleapis.com" in url
 
 def _openai_model_serial(model: str) -> Optional[float]:
     """从 ``gpt-<主>.<次>`` 形态的模型名解出版本号；其他形态返回 None。
@@ -309,13 +306,14 @@ class OpenAIChatTransport:
         if not t_param:
             t_param = get_provider_profile(llm_config).get("thinking_param")
 
-        # Gemini 特化（2026-11-19 实测）：
+        # Gemini 官方端点特化（2026-11-19 实测）：
         # 1) 兼容层默认只回最终答案，思考摘要必须显式请求 include_thoughts；
         #    该字段与 reasoning_effort 语义正交（前者=是否返回摘要，后者=想多久），
         #    不触发官方「reasoning_effort 与 thinking_level/thinking_budget 互斥」约束。
         # 2) 顶层 thinking_budget / thinking 会被 protobuf 直接拒（Unknown name），
         #    预算型模型（2.5 系）改走 reasoning_effort（官方有 low/medium/high 映射）。
-        if _is_gemini_target(llm_config, model):
+        # 聚合网关不认这些扩展，传入即 400，故只对官方端点生效。
+        if _is_official_gemini_endpoint(llm_config):
             extra_body.pop("thinking_budget", None)
             if thinking_mode is True:
                 google = extra_body.get("google")
