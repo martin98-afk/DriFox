@@ -135,17 +135,18 @@ def test_panel_svg_thumb_decodes(panel, tmp_path):
     assert pix.width() <= _panel_mod._THUMB_W and pix.height() <= _panel_mod._THUMB_H
 
 def test_panel_load_thumb_supports_strip_sizes(panel, tmp_path):
-    """折叠画廊请求更大尺寸时解码不越界（首图 112x64）"""
+    """折叠方格 64×64：解码不越界（方向 C 统一方格）"""
     svg = tmp_path / "b.svg"
     svg.write_text(
         '<svg xmlns="http://www.w3.org/2000/svg" width="160" height="90">'
         '<rect width="160" height="90" fill="#10b981"/></svg>',
         encoding="utf-8",
     )
-    pix = panel._load_thumb(str(svg), _panel_mod._COLLAPSED_FIRST_W, _panel_mod._COLLAPSED_THUMB_H)
+    side = _panel_mod._COLLAPSED_THUMB
+    pix = panel._load_thumb(str(svg), side, side)
     assert pix is not None and not pix.isNull()
-    assert pix.width() <= _panel_mod._COLLAPSED_FIRST_W
-    assert pix.height() <= _panel_mod._COLLAPSED_THUMB_H
+    dpr = pix.devicePixelRatio()
+    assert pix.width() == pix.height() == round(side * dpr), "输出必须是精确的方格物理尺寸"
 
 
 def test_panel_overflow_capped(panel):
@@ -355,7 +356,7 @@ def test_panel_collapsed_strip_hides_when_only_files(panel):
     assert panel._thumb_strip.isHidden()
 
 def test_panel_collapsed_strip_gallery_slots_and_overflow(panel):
-    """单行画廊：首图略宽、上限三张、溢出 +N 只计图片、摘要只计非图片"""
+    """单行方格画廊：420 宽 6 槽（含 +N 位），放得下不出 +N，摘要给类型分布"""
     from PyQt5.QtWidgets import QLabel
 
     items = _img_items(5) + [{"path": "/tmp/report.md", "kind": "text", "name": "report.md"}]
@@ -368,10 +369,11 @@ def test_panel_collapsed_strip_gallery_slots_and_overflow(panel):
     overflow = [w for w in widgets if w is not None and w.objectName() == "artifactOverflow"]
     summary = panel._thumb_strip.findChild(QLabel, "artifactSummary")
 
-    assert len(thumbs) == 4, "420 宽度下槽位由宽度算出（首图+3 常规）"
-    assert thumbs[0].width() > thumbs[1].width(), "首图应略宽"
-    assert overflow and overflow[0].text() == "+1", "溢出计数只覆盖图片"
-    assert summary is not None and summary.text() == "另有 1 个文件"
+    assert panel._collapsed_slot_count(7) == 6, "420 宽应为 6 槽（+N 占一格）"
+    assert len(thumbs) == 5, "5 图 ≤ 6 槽时全部展示"
+    assert overflow == [], "放得下时不得出现 +N"
+    assert all(w.width() == 64 and w.height() == 64 for w in thumbs), "方格恒 64×64"
+    assert summary is not None and summary.text() == "a0.png · 5 张图片 · 1 个文件"
 
 def test_missing_image_thumb_shows_kind_fallback(panel):
     """文件缺失/清理后显示 IMG 徽标与缺失说明，而非无解释的 ✕"""
@@ -382,7 +384,7 @@ def test_missing_image_thumb_shows_kind_fallback(panel):
         for w in (panel._strip_layout.itemAt(i).widget() for i in range(panel._strip_layout.count()))
         if w is not None and w.objectName() == "artifactThumbnail"
     )
-    panel._apply_thumb(label, "/nonexistent/xx.png", 112, 64)
+    panel._apply_thumb(label, "/nonexistent/xx.png", 64, 64)
     assert label.text() == "IMG"
     assert "不存在" in label.toolTip()
 
@@ -437,41 +439,158 @@ def test_animating_sizehint_reports_clamped_height(qapp):
         host.deleteLater()
 
 
-def test_strip_thumb_width_adapts_to_aspect(panel, tmp_path):
-    """画廊块宽按宽高比自适应：竖图收窄、横图展宽、坏路径回退兜底宽"""
+def _strip_parts(panel):
+    widgets = [panel._strip_layout.itemAt(i).widget() for i in range(panel._strip_layout.count())]
+    thumbs = [w for w in widgets if w is not None and w.objectName() == "artifactThumbnail"]
+    overflow = [w for w in widgets if w is not None and w.objectName() == "artifactOverflow"]
+    return thumbs, overflow
+
+
+def _set_strip_width(panel, width: int) -> None:
+    """顶层窗口受 Qt 最小尺寸约束；直接缩画廊容器模拟任意可用宽"""
+    panel._thumb_strip.resize(width, 100)
+    assert panel._thumb_strip.width() == width
+
+
+def _add_solid_png(path, w: int, h: int) -> None:
     from PyQt5.QtGui import QColor, QImage, QPainter
 
-    def make(path, w, h):
+    img = QImage(w, h, QImage.Format_ARGB32)
+    p = QPainter(img)
+    p.fillRect(img.rect(), QColor(200, 60, 60))
+    p.end()
+    img.save(path)
+
+
+def test_strip_slots_boundary_table(panel):
+    """方向 C 边界表：+N 占格；放得下不溢出；窄栏只留计数入口；超宽 12 上限"""
+    panel.update_artifacts(_img_items(20))
+    _set_strip_width(panel, 420)
+    panel._rebuild_thumb_strip()
+    thumbs, overflow = _strip_parts(panel)
+    assert panel._collapsed_slot_count(20) == 6, "420 宽 6 槽"
+    assert len(thumbs) == 5 and overflow and overflow[0].text() == "+15"
+    assert panel._collapsed_slot_count(6) == 6, "6 图恰好塞满 6 槽"
+    assert panel._collapsed_slot_count(7) == 6
+
+    panel.update_artifacts(_img_items(7))
+    panel._rebuild_thumb_strip()
+    thumbs, overflow = _strip_parts(panel)
+    assert len(thumbs) == 5 and overflow and overflow[0].text() == "+2"
+
+    # +6 哨兵：W=64 → (64+6)//70 == 1；漏掉 +6 会算成 0
+    _set_strip_width(panel, 64)
+    panel._rebuild_thumb_strip()
+    thumbs, overflow = _strip_parts(panel)
+    assert panel._collapsed_slot_count(7) == 1
+    assert len(thumbs) == 0 and overflow and overflow[0].text() == "+7"
+
+    # W=414 → (414+6)//70 == 6；漏掉 +6 会算成 5
+    _set_strip_width(panel, 414)
+    panel._rebuild_thumb_strip()
+    thumbs, overflow = _strip_parts(panel)
+    assert panel._collapsed_slot_count(7) == 6
+    assert len(thumbs) == 5 and overflow and overflow[0].text() == "+2"
+
+    panel.resize(150, 200)
+    _set_strip_width(panel, 150)
+    panel._rebuild_thumb_strip()
+    thumbs, overflow = _strip_parts(panel)
+    assert panel._collapsed_slot_count(7) == 2
+    assert len(thumbs) == 1 and overflow and overflow[0].text() == "+6"
+
+    panel.resize(60, 200)
+    _set_strip_width(panel, 60)
+    panel._rebuild_thumb_strip()
+    thumbs, overflow = _strip_parts(panel)
+    assert panel._collapsed_slot_count(7) == 0
+    assert len(thumbs) == 0 and overflow and overflow[0].text() == "+7"
+
+    panel.update_artifacts(_img_items(20))
+    # W=1200 → (1206)//70 == 17 > 12：只有上限截断才能得到 12
+    panel.resize(900, 200)
+    _set_strip_width(panel, 1200)
+    panel._rebuild_thumb_strip()
+    thumbs, overflow = _strip_parts(panel)
+    assert panel._collapsed_slot_count(20) == 12, "超宽按上限 12 截断"
+    # +N 占格优先于「12 thumb」：12 槽溢出时为 11 thumb + “+9”
+    assert len(thumbs) == 11 and overflow and overflow[0].text() == "+9"
+
+
+def test_strip_single_image_shrinks_on_narrow_width(panel, monkeypatch):
+    """单图特例：W<70 时仍显示 1 格并等比缩格（真实窗口缩不到 60，注入宽度测纯逻辑）"""
+    panel.update_artifacts(_img_items(1))
+    monkeypatch.setattr(panel._thumb_strip, "width", lambda: 60)
+    panel._rebuild_thumb_strip()
+    thumbs, overflow = _strip_parts(panel)
+    assert len(thumbs) == 1 and overflow == []
+    assert thumbs[0].width() == 60 and thumbs[0].height() == 60, "极窄栏等比缩格仍保持正方形"
+
+
+def test_strip_thumb_covers_without_distortion(panel, tmp_path):
+    """1:4 / 4:1 图都 cover 填充到 64×64 方格，不压扁（裁切而非拉伸）"""
+    from PyQt5.QtGui import QColor, QImage, QPainter
+
+    def make(path, w, h, split_horizontal):
         img = QImage(w, h, QImage.Format_RGB32)
         p = QPainter(img)
-        p.fillRect(img.rect(), QColor(10, 120, 200))
+        p.fillRect(img.rect(), QColor(220, 40, 40))
+        if split_horizontal:
+            p.fillRect(0, 0, w // 2, h, QColor(40, 80, 220))
+        else:
+            p.fillRect(0, 0, w, h // 2, QColor(40, 80, 220))
         p.end()
         img.save(path)
 
-    tall = str(tmp_path / "tall.png")
     wide = str(tmp_path / "wide.png")
-    missing = str(tmp_path / "missing.png")
-    make(tall, 100, 400)  # 1:4 竖图 → 64*0.25=16 → clamp 到下限
-    make(wide, 800, 200)  # 4:1 横图 → 64*4=256 → clamp 到上限
+    tall = str(tmp_path / "tall.png")
+    make(wide, 800, 200, True)
+    make(tall, 100, 400, False)
+    side = _panel_mod._COLLAPSED_THUMB
+    for path, is_wide in ((wide, True), (tall, False)):
+        pix = panel._load_thumb(path, side, side)
+        assert pix is not None and not pix.isNull()
+        dpr = pix.devicePixelRatio()
+        assert pix.width() == pix.height() == round(side * dpr), "必须精确方格"
+        img = pix.toImage()
+        mid = int(round((side / 2) * dpr))
+        if is_wide:
+            assert img.pixelColor(mid, 1).alpha() == 255, "宽图 cover 后顶部中央必须不透明（fit 会留透明）"
+        else:
+            assert img.pixelColor(1, mid).alpha() == 255, "竖图 cover 后左侧中央必须不透明（fit 会留透明）"
 
-    assert panel._strip_thumb_width(tall, False) == _panel_mod._COLLAPSED_THUMB_MIN_W
-    assert panel._strip_thumb_width(wide, False) == _panel_mod._COLLAPSED_THUMB_MAX_W
-    assert panel._strip_thumb_width(missing, False) == _panel_mod._COLLAPSED_ITEM_W
-    assert panel._strip_thumb_width(missing, True) == _panel_mod._COLLAPSED_FIRST_W
 
-def test_panel_collapsed_strip_slots_shrink_on_narrow_width(panel):
-    """窄栏优先减少常规缩略图数量，不换行"""
-    panel.update_artifacts(_img_items(5))
-    panel.resize(420, 200)
+def test_strip_thumb_rounded_corners(panel, tmp_path):
+    """圆角必须真裁 pixmap：左上角透明、中心不透明（QSS border-radius 不裁）"""
+    path = str(tmp_path / "solid.png")
+    _add_solid_png(path, 200, 120)
+    side = _panel_mod._COLLAPSED_THUMB
+    pix = panel._load_thumb(path, side, side)
+    dpr = pix.devicePixelRatio()
+    img = pix.toImage()
+    mid = int(round((side / 2) * dpr))
+    assert img.pixelColor(0, 0).alpha() == 0, "左上角应被圆角裁掉"
+    assert img.pixelColor(mid, mid).alpha() == 255, "中心保持不透明"
+
+def test_strip_thumb_dpr_scales_decode(panel, tmp_path, monkeypatch):
+    """DPR 路径：物理像素 = 逻辑尺寸 × DPR，pixmap 带回 devicePixelRatio"""
+    path = str(tmp_path / "dpr.png")
+    _add_solid_png(path, 200, 120)
+    side = 64
+    monkeypatch.setattr(panel, "_dpr", lambda: 2.0)
+    pix = panel._load_thumb(path, side, side)
+    assert pix is not None
+    assert pix.devicePixelRatio() == 2.0
+    assert pix.width() == pix.height() == round(side * 2)
+
+def test_strip_blocks_are_fixed_squares(panel):
+    """折叠态所有块（缩略图 + 溢出 +N）恒 64×64"""
+    panel.update_artifacts(_img_items(8))
+    _set_strip_width(panel, 420)
     panel._rebuild_thumb_strip()
-    widgets = [panel._strip_layout.itemAt(i).widget() for i in range(panel._strip_layout.count())]
-    wide_count = len([w for w in widgets if w is not None and w.objectName() == "artifactThumbnail"])
-
-    panel.resize(150, 200)
-    panel._rebuild_thumb_strip()
-    widgets = [panel._strip_layout.itemAt(i).widget() for i in range(panel._strip_layout.count())]
-    narrow_count = len([w for w in widgets if w is not None and w.objectName() == "artifactThumbnail"])
-    assert narrow_count < wide_count, "窄栏应减少缩略图数量"
+    thumbs, overflow = _strip_parts(panel)
+    assert len(thumbs) == 5 and overflow and overflow[0].text() == "+3"
+    assert all(w.width() == 64 and w.height() == 64 for w in thumbs + overflow)
 
 def test_panel_overflow_expand_all(panel):
     MAX_VISIBLE_ITEMS = _panel_mod.MAX_VISIBLE_ITEMS
@@ -554,17 +673,42 @@ def test_kind_meta_label_is_human_readable(qapp):
     assert _panel_mod._KIND_LABEL["file"] == "文件"
 
 def test_gallery_container_is_theme_styled(panel):
-    """画廊与展开列表两张卡片主题化：refresh_style 后带圆角与主题色"""
+    """卡片层级：alpha250 + 派生边框对合成底 ≥1.5（review #6 裁定）"""
+    from PyQt5.QtGui import QColor
+
     panel.update_artifacts(_img_items(2) + [{"path": "/tmp/report.md", "kind": "text"}])
     css = panel._thumb_strip.styleSheet()
     assert "border-radius" in css, "画廊容器应有圆角"
+    assert ", 250)" in css, "内容容器 alpha 必须为 250（alpha110 会红）"
     assert "artifactSummary" in css or panel._summary_label.styleSheet(), "摘要行应有主题样式"
+
+    derived = _panel_mod._derived_card_border()
+    surface = _panel_mod._panel_card_surface()
+    ratio = _panel_mod._contrast_ratio(QColor(derived), surface)
+    assert ratio >= 1.5, f"派生边框对卡片合成底对比不足: {ratio:.3f}"
 
     panel.show()
     panel._on_collapse_clicked()  # 展开
     list_css = panel._list_wrap.styleSheet()
     assert "border-radius" in list_css, "展开列表应包进同款圆角卡片"
     assert "artifactListCard" in list_css
+    assert ", 250)" in list_css
+
+def test_derived_border_lifts_true_black(panel, monkeypatch):
+    """true-black 现状 BORDER 不达标时必须派生更亮值（不改 design_tokens）"""
+    from PyQt5.QtGui import QColor
+
+    monkeypatch.setattr(_panel_mod.Colors, "refresh", lambda: None)
+    monkeypatch.setattr(_panel_mod.Colors, "BORDER", "#2A2A2A")
+    monkeypatch.setattr(_panel_mod.Colors, "CARD_BG", "rgba(18, 18, 18, {alpha})")
+    monkeypatch.setattr(_panel_mod.Colors, "ASSISTANT_CARD_BG", "rgba(20, 20, 20, 150)")
+    monkeypatch.setattr(_panel_mod.Colors, "CONTENT_BG", "#101010")
+    monkeypatch.setattr("app.utils.theme_manager.theme_manager.is_light_theme", lambda *a, **k: False)
+
+    surface = _panel_mod._panel_card_surface()
+    derived = _panel_mod._derived_card_border()
+    assert derived != "#2A2A2A", "不达标时不得原值返回"
+    assert _panel_mod._contrast_ratio(QColor(derived), surface) >= 1.5
 
 def test_plugin_registers_inline_panel(qapp):
     """插件把成果栏注册到卡片内嵌面板槽位"""
