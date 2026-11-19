@@ -177,18 +177,9 @@ def _cleanup_global_lru_caches():
         invalidate_render_caches()
     except Exception:
         pass
-    try:
-        from app.utils.utils import invalidate_icon_cache
-
-        invalidate_icon_cache()
-    except Exception:
-        pass
-    try:
-        from app.utils.provider_icons import invalidate_provider_icon_cache
-
-        invalidate_provider_icon_cache()
-    except Exception:
-        pass
+    # [E2-R] 图标缓存（utils._ICON_CACHE / provider_icons._ICON_CACHE）不再随会话清理：
+    # 两者键空间均与会话无关（前者键=图标名且 QIcon 持主题感知 engine，后者键含
+    # provider 名与主题位），切会话清掉只会导致图标重载；主题切换由键/engine 自行适配。
 
 
 def _compact_process_heap_after_cleanup():
