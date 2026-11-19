@@ -108,11 +108,19 @@ class MessageBubble(QWidget):
         # 气泡不透明底色盖住 —— 2026-09-23 光带不可见根因）。
         self._stream_phase: Optional[float] = None
         self._stream_tint: Optional[QColor] = None
+        # 气泡轮廓路径缓存（几何不变即复用，resizeEvent 失效）：流式光带
+        # 50ms/帧逐次 paint 重建 addRoundedRect+united 是热点，缓存后 paint
+        # 只复用现成路径（2026-11-19 采样 TOP1 修复）。
+        self._shape_path: Optional[QPainterPath] = None
         # ⚠️ 不在这里建 layout：调用方（_setup_user_bubble / _setup_ui）会建自己的
         # layout —— widget 已有 layout 时再 Q-XxxLayout(self) 会产生孤儿 layout，
         # 子控件不再被管理（2026-09-23 用户气泡内容塌缩根因）。
         # 内容边距：顶部含引脚高度 + 视觉呼吸（5px，2026-09-23 收敛消息间距），左右 12、底部 8
         self.setContentsMargins(12, (PIN_HEIGHT + 5) if pin_side else 5, 12, 8)
+
+    def resizeEvent(self, event):
+        self._shape_path = None  # 几何变化 → 轮廓缓存失效
+        super().resizeEvent(event)
 
     def set_bubble_color(self, color: str) -> None:
         """更新气泡底色（幂等；主题切换时由 MessageCard._apply_card_style 调用）
@@ -179,30 +187,33 @@ class MessageBubble(QWidget):
 
         top = PIN_HEIGHT if self._pin_side else 0
         w, h = self.width(), self.height()
-        path = QPainterPath()
-        path.addRoundedRect(0.0, float(top), float(w), float(max(0, h - top)), RADIUS, RADIUS)
+        shape = self._shape_path
+        if shape is None:
+            path = QPainterPath()
+            path.addRoundedRect(0.0, float(top), float(w), float(max(0, h - top)), RADIUS, RADIUS)
 
-        if self._pin_side == "right":
-            px = float(w - PIN_INSET)
-            pin = self._make_pin_path(px - PIN_WIDTH, px, top, lean=+PIN_TIP_LEAN)
-        elif self._pin_side == "left":
-            px = float(PIN_INSET)
-            pin = self._make_pin_path(px, px + PIN_WIDTH, top, lean=-PIN_TIP_LEAN)
-        else:
-            pin = None
-        shape = path.united(pin) if pin is not None else path
+            if self._pin_side == "right":
+                px = float(w - PIN_INSET)
+                pin = self._make_pin_path(px - PIN_WIDTH, px, top, lean=+PIN_TIP_LEAN)
+            elif self._pin_side == "left":
+                px = float(PIN_INSET)
+                pin = self._make_pin_path(px, px + PIN_WIDTH, top, lean=-PIN_TIP_LEAN)
+            else:
+                pin = None
+            shape = path.united(pin) if pin is not None else path
+            self._shape_path = shape
 
-        painter.setPen(Qt.NoPen)
-        painter.setBrush(self._color)
-        painter.drawPath(shape)
-
-        # 整体细边框（含引脚）：气泡轮廓可辨识，避免与背景同色时「隐身」
+        # 填充+描边合并为一次 drawPath（brush 填内部 + pen 描居中轮廓；Qt 同一次
+        # 绘制先 brush 后 pen，与旧「先填后描」视觉等价，抗锯齿栅格化减半）。
+        # 无边框时退化为 NoPen，与旧行为一致。
         if self._border_color.isValid() and self._border_color.alpha() > 0:
             pen = QPen(self._border_color)
             pen.setWidthF(BORDER_WIDTH)
             painter.setPen(pen)
-            painter.setBrush(QBrush(Qt.NoBrush))
-            painter.drawPath(shape)
+        else:
+            painter.setPen(Qt.NoPen)
+        painter.setBrush(self._color)
+        painter.drawPath(shape)
 
         # 流式光带：底部往返（只要动效，不画描边 —— 2026-09-23 用户明确要求）
         if self._stream_phase is not None and self._stream_tint is not None and self._stream_tint.isValid():

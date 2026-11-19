@@ -2245,6 +2245,11 @@ def reconcile_widgets(
                 upd(b_new)
             except Exception:
                 break
+            # 原位更新后必须把新指纹写回 keys：控件内容已同步到 b_new，
+            # keys 里仍留 old_fp 会让下一帧同内容比较再次假阳性 → 同一块
+            # 每帧重复 update_content（实测 code 块重复 pygments+setHtml
+            # 占流式 CPU 大头，2026-11-19 #9 cProfile 实证）。
+            keys[common] = (new_slot, new_fp)
         common += 1
     while len(widgets) > common:
         w = widgets.pop()
