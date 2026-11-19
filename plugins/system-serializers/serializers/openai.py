@@ -10,10 +10,14 @@
 from __future__ import annotations
 
 import json
+import time
 from typing import Any, Dict, List
+
+from loguru import logger
 
 from app.core.conversation import message_content as mc
 from app.plugins.contracts.message_serializer import SerializeContext
+from app.utils._startup_probe import trace_enabled as _diag_trace_enabled
 
 
 class OpenAIChatSerializer:
@@ -46,6 +50,9 @@ class OpenAIChatSerializer:
 
     def serialize_responses(self, messages: List[Dict[str, Any]], ctx: SerializeContext) -> tuple:
         """内部消息列表 → (input_items, instructions)（等价旧 messages_to_responses_input）"""
+        # [E8-E] 全量序列化耗时打点：源码默认开，PROBE=0/打包版关（诊断守卫纪律）。
+        # 为后续 [B1] 式增量投影决策供数——本路径每次发送全量逐条 normalize_message。
+        _diag_t0 = time.perf_counter() if _diag_trace_enabled() else 0.0
         input_items: List[Dict[str, Any]] = []
         instructions_parts: List[str] = []
 
@@ -137,6 +144,11 @@ class OpenAIChatSerializer:
                 continue
 
         instructions = "\n\n".join(p for p in instructions_parts if p)
+        if _diag_t0:
+            logger.debug(
+                f"[responses-serialize] 耗时 {(time.perf_counter() - _diag_t0) * 1000:.2f}ms "
+                f"msgs={len(messages)} items={len(input_items)}"
+            )
         return input_items, instructions
 
     # ---------- chat/completions 单条转换（等价旧 to_api_message） ----------
