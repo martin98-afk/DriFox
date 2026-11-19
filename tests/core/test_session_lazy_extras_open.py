@@ -237,3 +237,100 @@ def test_alpha_full_blob_zero_pending(store):
     assert extras_selects == [], "α 共存：不应有任何 extras 定向查询"
     # 字段直接从 blob 就位
     assert got[1].get("reasoning_content") == msgs[1]["reasoning_content"]
+
+
+# ── E16：C1 并发防护 + C2 发送守卫 ────────────────────────────────
+
+
+def test_c1_write_extras_concurrent_sessions_no_baseline_corruption(store):
+    """C1：跨线程并发 _write_extras（基线段持 _cache_lock）——各会话基线与
+    DB 一致，不出现「A 删行后 B 按旧基线 diff 漏插」的静默丢行。"""
+    repo = store._session_repo
+    errors = []
+    for sid in ("s-c1a", "s-c1b"):
+        repo.save(_make_session(sid, _mk_msgs(12)))
+
+    def churn(sid):
+        try:
+            for round_no in range(6):
+                msgs = _mk_msgs(12 + round_no * 2)  # 长度变化 → extras 集合变化
+                repo.save(_make_session(sid, msgs))
+        except Exception as e:  # noqa: BLE001
+            errors.append((sid, e))
+
+    threads = [threading.Thread(target=churn, args=(sid,)) for sid in ("s-c1a", "s-c1b")]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=30)
+    assert not errors, f"并发写异常: {errors}"
+    for sid in ("s-c1a", "s-c1b"):
+        # 基线与 DB 一致：读回全量与轻量形态严格互补（窗外字段在 extras 不在 blob）
+        full = repo.get_full_messages(sid)
+        light = repo.get(sid)["messages"]
+        n = len(full)
+        for i in range(n):
+            for f in OFFLOAD_KEYS:
+                if i < n - 3 and full[i].get(f) is not None:
+                    assert light[i].get(f) is None, f"{sid} msg[{i}] 字段 {f} 基线/DB 失配（静默丢行）"
+
+
+def test_c1_write_extras_lock_serializes_same_session(store):
+    """C1：同会话并发写经 _cache_lock 串行化——最终 DB ≡ 某个完整 variant（无串写污染）。"""
+    repo = store._session_repo
+    sid = "s-c1serial"
+    repo.save(_make_session(sid, _mk_msgs(10)))
+    variants = []
+    for tag in range(4):
+        m = _mk_msgs(10)
+        for x in m:
+            if x.get("reasoning_content"):
+                x["reasoning_content"] = f"variant-{tag}"
+        variants.append(m)
+
+    def churn(m):
+        repo.save(_make_session(sid, m))
+
+    threads = [threading.Thread(target=churn, args=(m,)) for m in variants]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=30)
+    full = repo.get_full_messages(sid)
+    winners = [v for v in variants if full[1].get("reasoning_content") == v[1]["reasoning_content"]]
+    assert winners, "最终 DB 值必须等于某个完整 variant（无串写污染）"
+    winner = winners[0]
+    for i, m in enumerate(full):
+        assert m.get("diff", None) == winner[i].get("diff", None), f"msg[{i}] diff 与 winner 不一致（串写污染）"
+
+
+def test_c2_send_guard_rules():
+    """C2（复刻断言）：发送入口 pending 非空时守卫行为——正常补载清 pending
+    放行；补载异常保留 pending 留痕放行（红线：不静默缺字段）。实现为
+    main_widget._sync_flush_pending_extras 同款规则。"""
+    state = {"pending": [1, 3, 5], "loaded": [], "raise": False}
+
+    def sync_flush(session_messages):
+        # 复刻 _sync_flush_pending_extras 规则
+        idxs = list(state["pending"])
+        if not idxs:
+            return
+        try:
+            if state["raise"]:
+                raise RuntimeError("injected db failure")
+            state["loaded"].extend(idxs)
+            for i in idxs:
+                session_messages[i] = True
+            state["pending"] = []
+        except Exception:
+            pass  # 留痕放行（pending 保留）
+
+    session_messages = {}
+    sync_flush(session_messages)
+    assert state["pending"] == [] and sorted(state["loaded"]) == [1, 3, 5]
+    assert session_messages == {1: True, 3: True, 5: True}
+    # 补载失败：pending 保留 + 放行（不抛出）
+    state["pending"] = [7]
+    state["raise"] = True
+    sync_flush(session_messages)
+    assert state["pending"] == [7], "补载失败应保留 pending（留痕）而非静默清空"

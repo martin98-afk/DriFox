@@ -107,6 +107,8 @@ perf 基线曾判「灌入 120 张、配额 12，淘汰 Δ=0，回收未生效�
 | 项 | 状态 | 说明 / 核实路径 |
 |---|---|---|
 | 卡Q / E14：读链后台预取 + 懒 merge | 实施中（fix-smith 执行中） | 完成后在「一、实施台账」补行 |
+| C3 / E16：`get_session_messages` 游标不随 configs 变化失效 | 跟进票（e0b4dd04 引入） | 切服务商后游标仍指旧读取态：旧行为可回填、新行为被跳过。后果 = UI 显示级缺 provider_name（非数据丢失）。建议：游标挂 configs 代际号（configs 变更即失效重读） |
+| C4 / E16：`invalidate_prompt_injections` 无生产接线 | 跟进票（7056a182 引入） | 长会话内 agent 热切 / 技能 reload 后 prompt 注入 stale。建议：agent 切换点与 builtin_reloaders 挂钩调用失效，或 TTL 兜底 |
 | 英文键 `get("model")` 5 处 vs 中文键「模型名称」 | 线索待核实 | 核实路径：查 `_get_model_config` 是否有英文别名读法；若无，统一改双读（先例 `subagent_worker.py:403` 附近的双读形态） |
 | 存量失败 6 个（transport 插件注册 / 测试环境类） | 建议另开单 | 本轮多单基线对照反复复现（HEAD 上即失败），与本轮改动无关；集中在 transport 插件注册与测试环境假设 |
 | 素材卡规范改进 | 建议采纳 | 出卡附「已核对 commit 范围」+「同函数族 ±30 行 [PERF] 注释」字段——本轮多单实际受益于人工补做这两步 |

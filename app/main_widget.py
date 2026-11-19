@@ -16941,6 +16941,31 @@ class OpenAIChatToolWindow(ToolWindow):
             return
         self._extras_pending_idxs = []
 
+    def _sync_flush_pending_extras(self) -> None:
+        """[E16 C2] 发送前同步补载剩余 extras 哨兵行（pending 毫秒级，宁等勿缺）。
+
+        E14 后台分批补载的兜底同步路径：pending 非空时按 idxs 定向查询并
+        merge 进当前会话消息（主线程一次小查询），随后清 pending。补载失败
+        （DB 异常）保留 pending 并告警——放行发送但留痕，不静默。"""
+        idxs = list(getattr(self, "_extras_pending_idxs", None) or [])
+        if not idxs:
+            return
+        session = self.session_manager.get_current_session() if self.session_manager else None
+        sid = getattr(session, "session_id", None) if session else None
+        if not sid:
+            return
+        try:
+            from app.core.conversation.backend import get_session_storage
+
+            extras = get_session_storage().load_msg_extras(sid, idxs)
+            if extras:
+                from app.core.store.session_repository import merge_extras_into
+
+                merge_extras_into(session.messages, extras)
+            self._extras_pending_idxs = []
+        except Exception:
+            logger.warning("[MainWidget] 发送前 extras 同步补载失败（放行发送，pending 保留）", exc_info=True)
+
     def _apply_loaded_history(self, session_record: Dict, session_id: str, messages):
         """[E14] 历史会话建卡（自原 _load_session_from_record 尾段原样提取）。"""
         if not messages:
@@ -21307,6 +21332,13 @@ class OpenAIChatToolWindow(ToolWindow):
         _hook_ev = getattr(self, "_session_start_hook_ready", None)
         if _hook_ev is not None and not _hook_ev.wait(15):
             logger.warning("[R5] SessionStart hook 注入超时 15s，放行发送（本次可能缺注入上下文）")
+
+        # [E16 C2] extras 批次补载未完成的毫秒窗口内发送：上下文投影会缺字段
+        # （向上翻页有 _extras_pending_idxs 守卫，发送链没有）。同步补载剩余
+        # 哨兵行（毫秒级小查询，对齐上方 R5 同步等待先例）——红线：发送不得
+        # 静默缺字段；补载失败放行发送但留痕告警。
+        if getattr(self, "_extras_pending_idxs", None):
+            self._sync_flush_pending_extras()
 
         from PyQt5.QtCore import QTimer  # 推迟 send_message 用
 

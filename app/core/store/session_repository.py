@@ -784,7 +784,22 @@ class SessionRepository:
           保证与旧行为严格等价；compaction 索引漂移由「同 idx 比值不等 → 覆盖、
           旧行消失 → 删除」天然覆盖（与全删全插最终状态一致，回归锁定）。
         语义契约不变：调用后 DB extras ≡ 本次 extract 产物（旧字段整体消失）。
+        [E16 C1] 并发防护：基线「读 cached → diff → SQL → 写回 new_rows」必须
+        原子——A 删行后 B 按旧基线 diff 会产生基线与 DB 失配（后续 diff 永不
+        重插 → 静默丢行）。持 _cache_lock（与 _content_hash_cache 同锁，RLock
+        可重入覆盖 save 主路径）。嵌套顺序核查：本锁内 SQL 经 db._write_lock，
+        方向恒为 cache_lock → db_write_lock（db_manager 不持有 repo 引用，
+        无反向路径），全局单向无死锁；锁内 IO 最坏为全删全插量级（104ms@16K），
+        与写库本就串行于 _write_lock 的现状一致。
         """
+        try:
+            with self._cache_lock:
+                self._write_extras_locked(session_id, extras)
+        except Exception as e:
+            logger.error(f"[SessionRepository] write_extras 异常: {e}")
+
+    def _write_extras_locked(self, session_id: str, extras: Dict[int, Dict[str, bytes]]) -> None:
+        """C1 临界区体（持 _cache_lock 调用）：基线 diff 与 SQL 串行化。"""
         try:
             new_rows: Dict[tuple, bytes] = {
                 (i, f): v for i, fields in extras.items() for f, v in fields.items()

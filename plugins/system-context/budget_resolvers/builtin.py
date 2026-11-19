@@ -69,8 +69,10 @@ class BuiltInBudgetResolver:
         return BudgetResult(budget=history_budget, target_tokens=max(1, int(history_budget * target_ratio)))
 
     def _cached_system_tokens(self, content: str) -> int:
-        # 前置身份短路：(id, len) 双重校验命中直接返回，miss 才付 encode+md5；
-        # id 复用脏命中仅致预算比例短暂沿用旧值，与 md5 指纹缓存口径一致
+        # 前置身份短路：(id, len) 双重校验命中直接返回，miss 才付 encode+md5。
+        # id 复用且等长的脏命中（新串复用旧串 id、长度相同）会持续沿用旧值——
+        # 直到 len 变化或旧串被 GC 后 id 被再次复用为止；与 md5 指纹缓存口径一致
+        # （key 为内容 md5，内容不变则值恒真），脏命中仅影响预算比例，不丢数据
         ident = (id(content), len(content))
         fast = self._st_fast
         if fast is not None and fast[0] == ident:
