@@ -230,6 +230,59 @@ def test_tool_result_dict_as_declaration_survives_normalize():
     print("  ✓ 固化：脏声明经 normalize 后 id 为空（2013 直接来源）")
 
 
+# ========== 前置短路：纯聊天 / 空 id / 中断场景（E1 卡F）==========
+
+
+def test_fix_pure_chat_short_circuit_returns_original():
+    """纯聊天视图（无 tool 结果、无 assistant.tool_calls）→ 原样返回同一列表。"""
+    worker = _make_worker()
+    messages = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": "hello"},
+        {"role": "user", "content": "继续"},
+    ]
+    fixed, modified = worker._fix_tool_result_order(messages)
+    assert not modified
+    assert fixed is messages, "短路路径应原样返回同一列表对象"
+    print("  ✓ 纯聊天短路原样返回")
+
+
+def test_fix_empty_tool_ids_no_pending_returns_original():
+    """tool 消息存在但 tool_call_id 全空、无 assistant.tool_calls → 原样返回。
+
+    对齐修复前行为：该场景不满足中断剥离条件，返回 (messages, False)。
+    """
+    worker = _make_worker()
+    messages = [
+        {"role": "user", "content": "hi"},
+        {"role": "tool", "tool_call_id": "", "content": "legacy"},
+    ]
+    fixed, modified = worker._fix_tool_result_order(messages)
+    assert not modified
+    assert fixed is messages
+    print("  ✓ 空 id 无声明场景原样返回")
+
+
+def test_fix_interrupt_scenario_strips_tool_calls():
+    """中断场景：assistant 有 tool_calls 但无任何 tool 结果 → 剥离并补 content。"""
+    worker = _make_worker()
+    messages = [
+        {"role": "user", "content": "hi"},
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [{"id": "call_A", "type": "function", "function": {"name": "read", "arguments": "{}"}}],
+        },
+    ]
+    fixed, modified = worker._fix_tool_result_order(messages)
+    assert modified
+    assert fixed is messages, "中断剥离路径原地修改并返回同一列表"
+    assert "tool_calls" not in fixed[1]
+    assert fixed[1]["content"] == "", "content None 应补空串避免 API 报错"
+    print("  ✓ 中断场景剥离 tool_calls")
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for fn in fns:

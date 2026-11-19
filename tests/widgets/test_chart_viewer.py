@@ -442,3 +442,28 @@ class TestThemeIpcGate:
         v._has_charts = False
         v._mark_has_charts('<div class="chart-streaming"></div>')
         assert v._has_charts is True
+
+    def test_mark_has_charts_split_equals_join(self, qapp):
+        """[项3] 拆分调用等价：两段分别调用与拼接后单次调用置位结果一致。
+
+        只置不清语义下 (A+B) 含标记 ⟺ A 或 B 含标记，逐块调用与
+        拼接单次调用对 _has_charts 的效果完全相同（差量路径去拼接的依据）。
+        """
+        from app.widgets.message_card import CodeWebViewer
+
+        segs = [
+            "<p>plain</p>",
+            '<div class="echarts-container"></div>',
+            '<div class="mermaid-block"></div>',
+            '<div class="chart-streaming"></div>',
+        ]
+        for a in segs:
+            for b in segs:
+                v_join = CodeWebViewer.__new__(CodeWebViewer)
+                v_join._has_charts = False
+                v_join._mark_has_charts(a + b)
+                v_split = CodeWebViewer.__new__(CodeWebViewer)
+                v_split._has_charts = False
+                v_split._mark_has_charts(a)
+                v_split._mark_has_charts(b)
+                assert v_join._has_charts == v_split._has_charts, f"拆分与拼接不等价: {a!r} + {b!r}"

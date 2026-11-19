@@ -3431,37 +3431,41 @@ class OpenAIChatWorker(QThread):
         fixed_messages: List[Dict] = []
         modified = False
 
-        # 第一步：收集所有 tool 消息中的 tool_call_id（这些是"有效的"）
+        # 第一步：收集所有 tool 消息中的 tool_call_id（这些是"有效的"），
+        # 顺带记录是否存在 assistant 带 tool_calls（中断/orphan 候选判定用）
         valid_tool_call_ids: set = set()
+        has_pending_tool_calls = False
         for msg in messages:
             if msg.get("role") == "tool":
                 tc_id = msg.get("tool_call_id", "")
                 if tc_id:
                     valid_tool_call_ids.add(tc_id)
+            elif msg.get("role") == "assistant" and msg.get("tool_calls"):
+                has_pending_tool_calls = True
 
         # 正常路径每轮都会走到这里，warning 会在健康会话里刷屏；细节降 debug，
         # 异常场景（中断/重复/孤儿）的 warning 保留在下方各分支
         logger.debug(f"[ToolCall修复] 有效 tool_call_ids: {len(valid_tool_call_ids)} 个")
 
-        # 如果没有任何 tool 消息，说明是用户中断场景，但没有累积的工具结果
-        # 这种情况下直接返回无需修复
-        if not valid_tool_call_ids:
-            # 检查是否有 assistant 消息包含 tool_calls
-            has_tool_calls = any(msg.get("role") == "assistant" and msg.get("tool_calls") for msg in messages)
-            if has_tool_calls:
-                logger.warning("[ToolCall修复] 检测到用户中断场景：assistant 有 tool_calls 但无任何 tool 结果")
-                # 移除所有 assistant 消息中的 tool_calls
-                for msg in messages:
-                    if msg.get("role") == "assistant":
-                        if msg.get("tool_calls"):
-                            msg.pop("tool_calls", None)
-                            # 确保 content 不为 None，避免 API 报 "content or tool_calls must be set"
-                            if msg.get("content") is None:
-                                msg["content"] = ""
-                            modified = True
-                            logger.info("[ToolCall修复] 已移除中断时的 tool_calls")
-                return messages, modified
+        # 前置短路：无有效 tool 结果、也无任何 assistant 带 tool_calls →
+        # 纯聊天视图不可能有 orphan，原样返回（免去中断场景二次全扫）
+        if not valid_tool_call_ids and not has_pending_tool_calls:
             return messages, False
+
+        # 如果没有任何 tool 消息，说明是用户中断场景（能走到这里说明
+        # has_pending_tool_calls 为 True）：剥离所有 assistant 的 tool_calls
+        if not valid_tool_call_ids:
+            logger.warning("[ToolCall修复] 检测到用户中断场景：assistant 有 tool_calls 但无任何 tool 结果")
+            for msg in messages:
+                if msg.get("role") == "assistant":
+                    if msg.get("tool_calls"):
+                        msg.pop("tool_calls", None)
+                        # 确保 content 不为 None，避免 API 报 "content or tool_calls must be set"
+                        if msg.get("content") is None:
+                            msg["content"] = ""
+                        modified = True
+                        logger.info("[ToolCall修复] 已移除中断时的 tool_calls")
+            return messages, modified
 
         # 第二步：遍历每个 assistant 消息，修复 tool_calls
         for msg in messages:

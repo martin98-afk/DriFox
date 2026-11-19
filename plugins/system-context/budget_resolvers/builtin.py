@@ -33,6 +33,9 @@ class BuiltInBudgetResolver:
 
     def __init__(self) -> None:
         self._system_tokens_cache: "OrderedDict[str, int]" = OrderedDict()
+        # 身份短路哨兵：(id, len) → token 值；system_content 会话内多为同一
+        # 对象，命中免掉每轮全量 encode+md5（先例 token_estimator P1 指纹缓存）
+        self._st_fast: tuple[tuple[int, int], int] | None = None
 
     def resolve(self, llm_config: Dict[str, Any], system_content: str = "") -> BudgetResult:
         llm_config = llm_config or {}
@@ -66,10 +69,17 @@ class BuiltInBudgetResolver:
         return BudgetResult(budget=history_budget, target_tokens=max(1, int(history_budget * target_ratio)))
 
     def _cached_system_tokens(self, content: str) -> int:
+        # 前置身份短路：(id, len) 双重校验命中直接返回，miss 才付 encode+md5；
+        # id 复用脏命中仅致预算比例短暂沿用旧值，与 md5 指纹缓存口径一致
+        ident = (id(content), len(content))
+        fast = self._st_fast
+        if fast is not None and fast[0] == ident:
+            return fast[1]
         key = md5(content.encode("utf-8")).hexdigest()
         cached = self._system_tokens_cache.get(key)
         if cached is not None:
             self._system_tokens_cache.move_to_end(key)
+            self._st_fast = (ident, cached)
             return cached
         try:
             tokens = count_messages_tokens([{"role": "system", "content": content}])
@@ -78,7 +88,8 @@ class BuiltInBudgetResolver:
         self._system_tokens_cache[key] = tokens
         if len(self._system_tokens_cache) > 64:
             self._system_tokens_cache.popitem(last=False)
-        return self._system_tokens_cache[key]
+        self._st_fast = (ident, tokens)
+        return tokens
 
 
 def register(registry):

@@ -9008,8 +9008,9 @@ class CodeWebViewer(QWebEngineView):
                         f"{json.dumps(_tail_html).decode('utf-8')});"
                     )
                     # [T28] 差量产物入图检测（只置不清）：流式新增图表块不再拉长
-                    # 无图卡窗口期（与全量置位点同款）
-                    self._mark_has_charts(new_html + _tail_html)
+                    # 无图卡窗口期（与全量置位点同款）；两段分别检测避免拼接
+                    self._mark_has_charts(new_html)
+                    self._mark_has_charts(_tail_html)
                     self._rdiag_hit("diff_applied")
                     self.page().runJavaScript(js)
                     # 已差量消费的 markdown 视为"已渲染"（避免重复全量）
@@ -9644,7 +9645,12 @@ class CodeWebViewer(QWebEngineView):
             return True
 
         self._height_report_pending = True
-        self._mark_has_charts("".join(b.html for b in (*mr.content, *mr.tool)))
+        # [T28] 入图检测逐块短路：任一块命中标记即置位，不再 join 全量产物
+        if any(
+            "echarts-container" in b.html or "mermaid-block" in b.html or "chart-streaming" in b.html
+            for b in (*mr.content, *mr.tool)
+        ):
+            self._has_charts = True
 
         page = self.page()
         if page is None:
@@ -10500,8 +10506,10 @@ class CodeWebViewer(QWebEngineView):
                     f"{json.dumps(new_html).decode('utf-8')},"
                     f"{json.dumps(tail_html).decode('utf-8')});"
                 )
-                # [T28] 差量收尾产物入图检测（与全量置位点同款，只置不清）
-                self._mark_has_charts(new_html + tail_html)
+                # [T28] 差量收尾产物入图检测（与全量置位点同款，只置不清）；
+                # 两段分别检测避免拼接（只置不清语义下与拼接检测等价）
+                self._mark_has_charts(new_html)
+                self._mark_has_charts(tail_html)
             if replacements:
                 self.page().runJavaScript(f"finalizeStreamingBlocks({json.dumps(replacements).decode('utf-8')});")
             self._height_report_pending = True
