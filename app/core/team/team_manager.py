@@ -1284,6 +1284,17 @@ class TeamManager:
                 for rid in self.get_team_run_ids(team_name):
                     if mapping.get(rid) == project:
                         return rid
+                # 老数据兼容：单团队时代只写顶层 project（无 projects_by_run_id），
+                # 顶层项目命中且顶层 run 仍有成员时可安全复用，避免升级后
+                # 同一项目凭空多出一个团队框。
+                top_run = str(data.get("run_id") or "")
+                if (
+                    not mapping
+                    and top_run
+                    and top_run in self.get_team_run_ids(team_name)
+                    and str(data.get("project") or "").strip() == project
+                ):
+                    return top_run
             run_id = self.start_team_run(team_name=team_name, force=bool(project))
             if project:
                 self.set_project_for_run_id(project, run_id, team_name=team_name)
