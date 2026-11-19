@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections import OrderedDict
 from typing import Any, Dict, List
 
 from app.plugins.contracts.context_policy import ALL_STAGES, CACHE_NONE, TierOutcome
@@ -41,6 +42,12 @@ _MAX_DEPTH = 6
 
 # 判断内容是否以 JSON 容器开头（避免 lstrip 复制大字符串）
 _JSON_START_RE = re.compile(r"\s*[\{\[]")
+
+# [E2-J] 骨架化产物 memo：(id(content), len(content)) → (原文引用, 产物)。
+# str 不可变；条目持有原文引用保证存活期内 id 不复用（键安全，参照 tool_result
+# 的 _tool_md_cache 先例）。命中即跳过 parse+dump；LRU 512 防空胀。
+_SHAPE_MEMO_MAX = 512
+_shape_memo: OrderedDict[tuple[int, int], tuple[str, str]] = OrderedDict()
 
 
 def _shrink(value: Any, depth: int = 0) -> Any:
@@ -80,20 +87,39 @@ def _shrink(value: Any, depth: int = 0) -> Any:
     return value
 
 
+def _shape_memo_write(memo_key: tuple[int, int], text: str, out: str) -> None:
+    """写入 memo 并在超限时按 LRU 逐出最旧条目。"""
+    _shape_memo[memo_key] = (text, out)
+    if len(_shape_memo) > _SHAPE_MEMO_MAX:
+        _shape_memo.popitem(last=False)
+
 def shape_json_text(text: str) -> str:
-    """骨架化 JSON 文本；非 JSON 或无法缩短时原样返回。"""
+    """骨架化 JSON 文本；非 JSON 或无法缩短时原样返回（纯函数、幂等）。"""
+    memo_key = (id(text), len(text))
+    hit = _shape_memo.get(memo_key)
+    if hit is not None:
+        orig, out = hit
+        if orig is text:
+            _shape_memo.move_to_end(memo_key)
+            return out
+        _shape_memo.pop(memo_key, None)  # id 已被复用：过期条目，重算
     stripped = text.strip()
     if not stripped or stripped[0] not in "{[":
+        _shape_memo_write(memo_key, text, text)
         return text
     try:
         data = json.loads(stripped)
     except Exception:
+        _shape_memo_write(memo_key, text, text)
         return text
     try:
         shaped = json.dumps(_shrink(data), ensure_ascii=False, separators=(",", ":"))
     except Exception:
+        _shape_memo_write(memo_key, text, text)
         return text
-    return shaped if len(shaped) < len(text) else text
+    out = shaped if len(shaped) < len(text) else text
+    _shape_memo_write(memo_key, text, out)
+    return out
 
 
 class ToolResultShapeTier:
