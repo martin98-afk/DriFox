@@ -766,6 +766,11 @@ class SubAgentManager(QObject):
             # 单条注入永不触发，模型永远等不到 [后台任务状态] 通知。
             executor.error_occurred.connect(self._on_executor_error)
 
+            # finished（run() 返回、OS 线程退出）后自动析构 C++ 对象，防 executor
+            # 无主滞留；对照 share_card.py 上传线程先例。禁止挪到 pop 点——那里
+            # deleteLater 有析构抢跑 OS 线程的 qFatal 理论窗口。
+            executor.finished.connect(executor.deleteLater)
+
             # ★ T24：转发子智能体 ask 权限请求到主线程（带 window_id 供多窗口定位弹窗）
             executor.permission_requested.connect(self._forward_permission_request)
 

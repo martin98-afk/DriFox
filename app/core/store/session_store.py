@@ -27,8 +27,8 @@ from app.core.store.input_history_repo import InputHistoryRepository
 # 导入子模块
 from app.core.store.session_repository import SessionRepository, extract_first_user_question
 from app.core.store.subagent_log_repository import SubAgentLogRepository
+from app.utils.app_paths import get_app_data_dir
 from app.utils.db_manager import DatabaseManager
-from app.utils.utils import get_app_data_dir
 
 
 class SessionStore:
@@ -82,7 +82,7 @@ class SessionStore:
         2. 调用 compact_database() 分 3 批回收剩余 freelist（每批 1000 页 ≈ 4MB）
         """
         try:
-            from app.utils.utils import get_app_data_dir
+            from app.utils.app_paths import get_app_data_dir
 
             flag_path = Path(get_app_data_dir()) / cls._CLEAN_SHUTDOWN_FLAG
             flag_path.write_text("1", encoding="utf-8")

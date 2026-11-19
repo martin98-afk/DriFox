@@ -3351,8 +3351,28 @@ class OpenAIChatWorker(QThread):
                 ),
             },
         ]
+        from app.core.store.session_repository import _persist_vision_image_blocks_impl
+        from app.utils.app_paths import get_app_data_dir  # 对齐 T4 纯路径模块拆分
+
+        persist_ok = 0
+        persist_fallback = 0
+        # 对齐 L448-451 persister 取法：优先 worker 当前 session_id，兜底 "default"
+        sid = str(getattr(self, "_current_session_id", None) or getattr(self, "session_id", None) or "default")
         for du in data_uris:
-            vision_content.append({"type": "image_url", "image_url": {"url": du}})
+            block = {"type": "image_url", "image_url": {"url": du}}
+            try:
+                # 复用 main_widget 持久化先例（persist 单块路径）：先落盘 screenshots，
+                # 内存/API 缓存副本只留 image_ref 引用，消除 data URI 在缓存副本的滞留
+                holder = [{"role": "user", "content": [block]}]
+                _persist_vision_image_blocks_impl(holder, sid, get_app_data_dir())
+                block = holder[0]["content"][0]
+            except Exception as e:  # noqa: BLE001 — persist 失败降级保留原 image_url 块（行为同旧版）
+                logger.debug(f"[Vision] persist 失败，降级保留 data URI: {e}")
+            if isinstance(block, dict) and block.get("type") == "image_ref":
+                persist_ok += 1
+            else:
+                persist_fallback += 1
+            vision_content.append(block)
 
         vision_msg: Dict = {
             "role": "user",
@@ -3371,7 +3391,8 @@ class OpenAIChatWorker(QThread):
         current_messages.append(vision_msg)
 
         logger.info(
-            f"[Vision] Injected {len(data_uris)} image(s) via hook pattern for {model_name} (tools: {tool_names_str})"
+            f"[Vision] Injected {len(data_uris)} image(s) via hook pattern for {model_name} (tools: {tool_names_str}) "
+            f"persist 成功 {persist_ok} / 降级 {persist_fallback}"
         )
 
         # 重建 API 缓存：current_messages 已被修改（含 image_url），
@@ -4839,7 +4860,7 @@ class OpenAIChatWorker(QThread):
             # 删除豁免路径内的目标不保留（豁免语义 = 完全不干预，与审批口径一致）
             if delete_exempt(command, cfg, workdir=workdir):
                 return
-            from app.utils.utils import get_app_data_dir
+            from app.utils.app_paths import get_app_data_dir
 
             trash_root = get_app_data_dir() / "backups" / "deletes"
             stash_delete_targets_to_trash(command, trash_root, workdir=workdir)
@@ -5336,7 +5357,7 @@ def _compact_process_heap():
 def _get_log_dir_path(filename: str) -> str:
     """获取日志目录路径"""
     try:
-        from app.utils.utils import get_app_data_dir
+        from app.utils.app_paths import get_app_data_dir
 
         return str(get_app_data_dir() / "logs" / filename)
     except Exception:

@@ -5696,19 +5696,34 @@ class MessageCard(SimpleCardWidget):
             panel.update_todos(self._todo_panel_todos)
 
     def clear_todo_list(self):
-        """清空并卸载任务看板（任务迁往新卡片时由宿主调用）
+        """清空并销毁任务看板（任务迁往新卡片时由宿主调用）
 
-        面板实例随卡片存活，此处只清空数据 + 隐藏，避免重建同一张卡片时
-        重新创建控件。面板从布局中摘除（任务看板只属于最新卡片）。
+        迁卡路径一次性销毁旧面板（顺序契约对齐 remove_inline_panel）：
+        update_todos([]) → removeWidget → hide → setParent(None) → deleteLater。
+        宿主 _todo_panel_host 保留（新卡片重建面板时复用同一布局槽位）。
         """
         self._todo_panel_todos = []
         panel = self._todo_panel
         if panel is None:
             return
-        panel.update_todos([])
+        self._todo_panel = None
+        self._todo_panel_height_cache = 0
+        try:
+            panel.update_todos([])
+        except RuntimeError:
+            pass
         host = self._todo_panel_host
         if host is not None:
-            host.removeWidget(panel)
+            try:
+                host.removeWidget(panel)
+            except RuntimeError:
+                pass
+        try:
+            panel.hide()
+            panel.setParent(None)
+            panel.deleteLater()
+        except RuntimeError:
+            pass
 
     # ── 插件内嵌面板（通用槽位；任务看板/成果栏是内置的同位面板）──
 
@@ -5841,19 +5856,6 @@ class MessageCard(SimpleCardWidget):
         """
         try:
             panel = self._todo_panel
-            # [DEBUG-todo-h] 临时诊断：面板被压缩时输出几何全貌（定位后删除）
-            logger.info(
-                "[DEBUG-todo-h] panelChanged "
-                f"card.h={self.height()} card.min={self.minimumHeight()} card.max={self.maximumHeight()} "
-                f"pinned={getattr(self, '_layout_height_pinned', None)} "
-                f"viewer.h={self.viewer.height() if self.viewer else -1} "
-                f"viewer.min={self.viewer.minimumHeight() if self.viewer else -1} "
-                f"viewer.max={self.viewer.maximumHeight() if self.viewer else -1} "
-                f"panel.sizeHint={panel.sizeHint().height() if panel is not None else -1} "
-                f"panel.h={panel.height() if panel is not None else -1} "
-                f"panel.vis={panel.isVisible() if panel is not None else None} "
-                f"bubble.h={self._assistant_bubble.height() if self._assistant_bubble else -1}"
-            )
             cur = self._todo_panel_effective_height(panel)
             prev = getattr(self, "_todo_panel_height_cache", 0)
             self._todo_panel_height_cache = cur

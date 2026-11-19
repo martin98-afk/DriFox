@@ -78,8 +78,10 @@ class _PlatformRow(QFrame):
         layout.addWidget(self.name_label)
 
         self.state_label = CaptionLabel(_STATE_TEXT["unavailable"], self)
-        layout.addWidget(self.state_label)
-        layout.addStretch(1)
+        # 错误信息可能较长：允许换行，避免单行撑爆布局把右侧按钮顶出可视区
+        self.state_label.setWordWrap(True)
+        self.state_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        layout.addWidget(self.state_label, 1)
 
         self.reconnect_btn = TransparentToolButton(FluentIcon.SYNC, self)
         self.reconnect_btn.setToolTip("重新连接")
@@ -129,6 +131,8 @@ class _PlatformRow(QFrame):
         if state == "error":
             text = f"错误：{str(error)[:40]}"
         self.state_label.setText(text)
+        # 完整错误放 tooltip，避免截断后丢信息
+        self.state_label.setToolTip(str(error) if state == "error" else "")
         self.state_label.setStyleSheet(f"color: {color};")
         self.reconnect_btn.setEnabled(available and enabled)
 

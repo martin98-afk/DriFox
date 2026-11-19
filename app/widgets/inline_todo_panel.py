@@ -150,16 +150,6 @@ class InlineTodoPanel(QWidget):
         滚到底仍可滚出一片空白）。在高度真实出现/恢复的瞬间对账。
         """
         super().showEvent(event)
-        # [DEBUG-todo-h] 临时诊断（定位后删除）
-        try:
-            from loguru import logger as _lg
-
-            _lg.info(
-                f"[DEBUG-todo-h] panelShow panel.sizeHint={self.sizeHint().height()} "
-                f"panel.h={self.height()} wrap.sizeHint={self._list_wrap.sizeHint().height()}"
-            )
-        except Exception:
-            pass
         lay = self.layout()
         if lay is not None:
             lay.invalidate()  # 清 QBoxLayout sizeHint 缓存（滞后一拍的根源）

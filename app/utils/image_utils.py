@@ -167,7 +167,7 @@ def revoke_vision_blocks(
     import hashlib as _hashlib
 
     if root_dir is None:
-        from app.utils.utils import get_app_data_dir
+        from app.utils.app_paths import get_app_data_dir  # 与 revive 读侧同源（app_paths）
 
         root_dir = get_app_data_dir()
     sid_list = [str(s or "") for s in (session_id if isinstance(session_id, (list, tuple, set)) else [session_id])]

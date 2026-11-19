@@ -159,7 +159,7 @@ def revive_vision_image_refs(messages: List[Any], root_dir=None) -> List[Any]:
     import base64 as _base64
 
     if root_dir is None:
-        from app.utils.utils import get_app_data_dir
+        from app.utils.app_paths import get_app_data_dir
 
         root_dir = get_app_data_dir()
     base_dir = Path(root_dir) / "screenshots" / "persisted"
@@ -536,7 +536,7 @@ class SessionRepository:
             backfill_extras_failed = True
         # [方案 1] vision base64 落盘：data:image 块 → image_ref 文件引用
         try:
-            from app.utils.utils import get_app_data_dir
+            from app.utils.app_paths import get_app_data_dir
 
             messages = _persist_vision_image_blocks_impl(messages, session_id, get_app_data_dir())
         except Exception as e:
@@ -883,7 +883,7 @@ class SessionRepository:
 
         def _migrate(blob: bytes = blob) -> None:
             try:
-                from app.utils.utils import get_app_data_dir
+                from app.utils.app_paths import get_app_data_dir
 
                 work = deserialize(blob)
                 _persist_vision_image_blocks_impl(work, session_id, get_app_data_dir())

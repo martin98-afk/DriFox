@@ -83,7 +83,7 @@ def persist_env(monkeypatch, tmp_path):
     """app_data_dir 指向 tmp，并落一张真实 persist 图（revive 读得到 data URI）"""
     from app.utils.utils import get_app_data_dir as _orig
 
-    monkeypatch.setattr("app.utils.utils.get_app_data_dir", lambda: str(tmp_path))
+    monkeypatch.setattr("app.utils.app_paths.get_app_data_dir", lambda: str(tmp_path))
     persisted = tmp_path / "screenshots" / "persisted" / "sid_mat"
     persisted.mkdir(parents=True)
     (persisted / _PERSIST_FNAME).write_bytes(_PNG_1PX)
@@ -149,7 +149,7 @@ def test_original_messages_stay_revoked(capture_client, persist_env):
 def test_missing_persist_file_degrades_to_text(capture_client, monkeypatch, tmp_path):
     """persist 文件缺失：物化降级为 text 占位块，不抛错、不外泄 image_ref"""
     _ensure_plugins_loaded()
-    monkeypatch.setattr("app.utils.utils.get_app_data_dir", lambda: str(tmp_path))
+    monkeypatch.setattr("app.utils.app_paths.get_app_data_dir", lambda: str(tmp_path))
     # 不创建 persisted 文件
     executor = _build_executor()
     executor._vision_session_ids = ["sid_mat"]

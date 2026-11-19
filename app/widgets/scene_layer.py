@@ -430,7 +430,17 @@ class SceneLayer(QWidget):
         self._clear()
 
         if not cfg or not cfg.get("enabled", True):
+            # 切纯色主题/关壁纸：立即释放进程级壁纸位图组（4K 63~127MB/组，
+            # _MAX_SETS=2 极端 254MB）。其他窗口已持有的 pixmap 走 Qt 隐式共享
+            # 不受影响，代价仅切回壁纸时重解码一次（一次性 200-400ms）。
+            scene_pixmap_cache.clear()
             return
+
+        # 纯色形态（无 image 且无 anim）同理释放位图组
+        anim = cfg.get("animation")
+        has_anim = isinstance(anim, dict) and anim.get("enabled", True) and anim.get("src")
+        if not (cfg.get("image") and image_resolver) and not has_anim:
+            scene_pixmap_cache.clear()
 
         # 1. 整体透明度先读（传导给 color 底 / dim 蒙版 / 各图层）。
         # 原实现把 QGraphicsOpacityEffect 挂在整个 SceneLayer 上——effect
@@ -503,8 +513,7 @@ class SceneLayer(QWidget):
 
         # 4. 动画层（动画 WebP / GIF，Qt 内置解码，不依赖系统媒体栈）
         # Z 序：静态图之上、dim 之下（dim 是给文字提可读性的压暗层）
-        anim = cfg.get("animation")
-        if isinstance(anim, dict) and anim.get("enabled", True) and anim.get("src"):
+        if has_anim:
             self._apply_animation(anim, image_resolver, self._layer_opacity)
 
         # 5. 前景图层（壁纸拆出的全画布图层，如人物）

@@ -445,3 +445,15 @@ def test_blur_scene_zero_geometry_waits_for_resize(cache, qapp, tmp_path):
     finally:
         layer.deleteLater()
 
+
+def test_clear_on_solid_theme_releases_groups(cache, wallpaper, tmp_path):
+    """T15：写入组 → clear() → groups 归零 → 再 get_pixmap 重建正常"""
+    p1 = cache.get_pixmap("source", wallpaper, load=_load)
+    p2 = cache.get_pixmap("premult", wallpaper, load=_load, opacity_255=128)
+    assert cache.stats()["groups"] >= 1, "前置：已有缓存组"
+    cache.clear()
+    assert cache.stats()["groups"] == 0, "clear 后组应全部释放"
+    # 再取重建：功能不受影响
+    p3 = cache.get_pixmap("source", wallpaper, load=_load)
+    assert not p3.isNull()
+    assert cache.stats()["groups"] >= 1

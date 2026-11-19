@@ -98,3 +98,31 @@ def test_chat_area_module_no_longer_creates_scene_layer(qapp, monkeypatch):
     )
     # 但 _decoration_layer 仍然由 ChatAreaModule 创建
     assert hasattr(host, "_decoration_layer"), "ChatAreaModule 应仍创建 _decoration_layer"
+
+def test_apply_config_none_clears_shared_cache(qapp, tmp_path):
+    """T15：apply_config(None)/纯色形态 → 进程级壁纸位图缓存组释放"""
+    from PyQt5.QtGui import QImage
+    from app.core.infra.scene_pixmap_cache import scene_pixmap_cache
+    from app.widgets.scene_layer import SceneLayer
+
+    p = tmp_path / "w.png"
+    img = QImage(8, 8, QImage.Format_ARGB32)
+    img.fill(120)
+    img.save(str(p), "PNG")
+
+    layer = SceneLayer()
+    # 壁纸形态：缓存组建立
+    layer.apply_config({"enabled": True, "image": str(p)}, image_resolver=lambda s: s)
+    assert scene_pixmap_cache.stats()["groups"] >= 1, "前置：壁纸形态应有缓存组"
+    # 切 None（关壁纸）：缓存组立即释放
+    layer.apply_config(None)
+    assert scene_pixmap_cache.stats()["groups"] == 0, "apply_config(None) 后应释放位图组"
+    scene_pixmap_cache.clear()
+
+    # 纯色形态：同样释放
+    layer.apply_config({"enabled": True, "image": str(p)}, image_resolver=lambda s: s)
+    assert scene_pixmap_cache.stats()["groups"] >= 1
+    layer.apply_config({"enabled": True, "color": "#202020"})
+    assert scene_pixmap_cache.stats()["groups"] == 0, "纯色形态应释放位图组"
+    scene_pixmap_cache.clear()
+    layer.deleteLater()

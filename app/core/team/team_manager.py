@@ -136,6 +136,38 @@ class TeamManager:
         # 尝试清理失效成员（活跃窗口集合未知时会自动跳过）
         self._cleanup_stale_members(team_name)
 
+    # ── run_id 映射裁剪（防 templates/projects/workdirs_by_run_id 无限增长）──
+    @staticmethod
+    def _prune_run_mapping(mapping: Dict[str, Any], keep: set, max_entries: int = 32) -> Dict[str, Any]:
+        """按插入序从旧到新淘汰非 keep 条目至 ≤max_entries，返回新 dict（原 dict 不动）。
+
+        降级语义：条目被裁剪后，读路径按各自「未命中回退」逻辑取值
+        （get_template/get_project 回退顶层字段、get_team_workdir 返回空串）——
+        历史条目属于已结束的团队运行，回退行为与「从未设置」一致。
+        """
+        if len(mapping) <= max_entries:
+            return mapping
+        pruned = dict(mapping)
+        for rid in list(mapping.keys()):
+            if len(pruned) <= max_entries:
+                break
+            if rid not in keep:
+                pruned.pop(rid, None)
+        return pruned
+
+    def _active_keep_set(self, data: Dict[str, Any], team_name: str, current_run_id: str) -> set:
+        """三层 keep 集合：活跃成员 run_id ∪ 顶层 run_id ∪ 本次写入 run_id。
+
+        顶层 run_id 必须保护：main_widget set_template 紧跟 start_team_run(force=True)
+        调用，此刻 members 尚无新 run_id，缺这层会被当场淘汰。
+        RLock 可重入，get_team_run_ids 锁内直调安全。
+        """
+        return (
+            set(self.get_team_run_ids(team_name))
+            | {data.get("run_id", "") or ""}
+            | {current_run_id}
+        )
+
     def _get_team_data(self, team_name: str) -> Dict[str, Any]:
         """读取团队数据。
 
@@ -1043,6 +1075,8 @@ class TeamManager:
             # 复制 + 写回，避免多线程下直接改 dict 引发的并发问题
             new_mapping = dict(mapping)
             new_mapping[run_id] = template_info
+            # 先加后裁：keep 含本次写入项不会被淘汰，稳态 ≤32
+            new_mapping = self._prune_run_mapping(new_mapping, self._active_keep_set(data, team_name, run_id))
             data["templates_by_run_id"] = new_mapping
             self._save_team_data(team_name)
 
@@ -1276,6 +1310,8 @@ class TeamManager:
             # 复制 + 写回，避免多线程下直接改 dict 引发的并发问题
             new_mapping = dict(mapping)
             new_mapping[run_id] = project
+            # 先加后裁：keep 含本次写入项不会被淘汰，稳态 ≤32
+            new_mapping = self._prune_run_mapping(new_mapping, self._active_keep_set(data, team_name, run_id))
             data["projects_by_run_id"] = new_mapping
             self._save_team_data(team_name)
 
@@ -1329,6 +1365,8 @@ class TeamManager:
                     return
                 new_mapping = dict(mapping)
                 new_mapping[run_id] = workdir
+                # 先加后裁：keep 含本次写入项不会被淘汰，稳态 ≤32
+                new_mapping = self._prune_run_mapping(new_mapping, self._active_keep_set(data, team_name, run_id))
                 data["workdirs_by_run_id"] = new_mapping
                 self._save_team_data(team_name)
                 return
