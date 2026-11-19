@@ -1,6 +1,6 @@
-## [v0.7.4] - 2026-11-18 (重新发布 #2)
+## [v0.7.4] - 2026-11-18 (重新发布 #3)
 
-自 v0.7.3 以来的变更 | 提交数：82 · 文件变更：196 · +13788/-3439 | 贡献者：dingma, drifox-bot, mading, martin98-afk
+自 v0.7.3 以来的变更 | 提交数：132 · 文件变更：299 · +24555/-6114 | 贡献者：dingma, drifox-bot, mading, martin98-afk
 
 ### ✨ 新功能 (New Features)
 
@@ -43,6 +43,52 @@
 ### 🔧 其他 (Chores & Build) (重新发布 #2 追加)
 
 - `uv.lock` 依赖锁定同步刷新（2556 行）。
+
+### ✨ 新功能 (New Features) (重新发布 #3 追加)
+
+- **全局记忆事件化（v2 存储）** (`plugins/assistant_hub/core/memory/entries.py` · `tests/plugins/assistant_hub/test_memory_entries.py`): 全局记忆从「整篇 markdown 覆盖写」改为按条目追加事件日志：`entries/journal/<device>.jsonl` 逐设备落盘，`snapshot.jsonl` 存压缩基线，`legacy.jsonl` 保存迁移时无法归类的原始段落；条目 ID 用 `m` + 6 位 Crockford 字母表（`0123456789abcdefghjkmnpqrstvwxyz`），字段含 section/text/origin/source/rev/pinned/last_used_at/use_count；设备标识放在同步目录之外（避免两台设备共写一个 journal）；每路径一把线程锁，写盘走 tmp + `os.replace` 原子替换。支持 update/delete/merge/move/pin 五类事件，put 保留旧版本进 `versions`（superseded 不丢），`replay` = snapshot 覆盖 + 跳过已覆盖 seq，坏行容忍跳过。事件压缩 `compact()` 把当前状态落成快照后只保留最近 7 天 journal（时间解析失败的行一律保留）。跨设备并发写同一 id 且 updated_at 落在 24 小时窗口内自动标 `conflict`；`active_entries()` 按 pinned + updated_at 排序输出。
+- **记忆工具条目级操作与视图渲染** (`plugins/assistant_hub/tools/memory_tools.py` · `plugins/assistant_hub/core/memory/view.py` · `tests/plugins/assistant_hub/test_memory_tools_contract.py`): `memory_write` 新增 id 模式——update 按 id 生成新版本（旧版进 versions）、merge 多源合一条、plan 批量补丁先在内存态校验全部 op 全通过才逐条落盘、delete 软删可恢复；`render_markdown()` 输出带生成标记与条目 id 的阅读视图，跳过空分区、隐藏已删/已 superseded 条目、单列历史遗留段；`pack_injection()` 按分区配额装**整条**，装不下整条不进、绝不裁剪半条，并报告全部 omitted 条目。`diff_replace()` 把整篇文本与现有条目做文本匹配（保留/新增/软删），不做隐式物理删除。说明书 prompt 同步改为条目语义（不再要求整篇替换）。
+- **全局记忆读路径切事件视图并自动迁移** (`plugins/assistant_hub/assistant_manager.py` · `plugins/assistant_hub/core/memory/migrate.py` · `tests/plugins/assistant_hub/test_memory_write_v2.py`): 首次读取触发 v1 MEMORY.md → v2 事件的幂等迁移，解析失败或无法归入既有分区的段落整段进 `_legacy`，保留原文不参与注入与配额；阅读视图落盘 MEMORY.md 供人工查看，检测到用户手改时先导入事件再覆盖，不丢内容；清除记忆同时清事件层与项目目录（清除前强制快照可恢复），快照恢复把内容重新导入事件；分区改名搬运条目。记忆版本指纹改用 journal + snapshot 内容摘要（任一事件变化即变，与视图渲染无关），project 记忆仍用文件 stat。
+- **`file.open` 能力与 file-tree 工作台兜底** (`app/plugins/capabilities/catalog.py` · `app/plugins/capabilities/providers/ui_core.py` · `plugins/file-tree/ui/__init__.py` · `tests/plugins/test_capability_file_open.py`): 新增 `file.open` 能力（catalog 92→93 项，medium 风险，`value_style="value"`）：提供方 `_file_open` 门面暴露 `open/register_opener/unregister_opener/openers`，`register_file_opener` 按 `declared_allows` 做授权门控（未声明全放行、声明了按清单、校验异常按最严拒绝），`window.workbench` 增加 `page(key)`；file-tree 与 artifacts-manager 在 manifest 声明该能力，成果区双击/菜单改走 `caps_for`，宿主未注册 opener 时降级 `QDesktopServices`。file-tree 另加宿主注册表兜底：拿不到 v2 service 时回退 `_HOST_REGISTRY` 查 workbench 页，避免「装了插件但没有工作台入口」。
+- **成果栏折叠态单行画廊** (`plugins/artifacts-manager/ui/artifact_panel.py` · `docs/superpowers/specs/2026-11-19-artifact-gallery-design.md`): 折叠态由列表改为 `QFrame#artifactStripCard` 单行画廊（64px 高缩略图 + 可选摘要行），槽位按容器宽度计算（放不下才把最后一格让给 `+N`，只计图片，点击进完整列表），非图片走「另有 N 个文件」摘要行；缩略图按尺寸分缓存 key（拉小图放大不再互相污染），折叠/展开两条队列分帧解码（每拍一张，4K PNG 不卡 UI），`resizeEvent` 只在槽位数变化时重建；类型徽标改 `IMG/VID/HTML/TXT/FILE` + 人类可读名，拖拽导出优先用 64×48 具名 pixmap（避免 `row.grab()` 直角/透明角黑边）。
+
+### 🐛 问题修复 (Bug Fixes) (重新发布 #3 追加)
+
+- **成果栏画廊三连修：抖动、留白与块宽** (`plugins/artifacts-manager/ui/artifact_panel.py` · `tests/plugins/test_artifacts_manager.py`): ① 展开动画从 0 起步、折叠收到 0 才切画廊，`maximumHeight` 只钳 height 不钳 `sizeHint`，第一帧宿主就把卡片拉到全高（标题先跳后动画）；现以画廊占高作动画起终点做等高交接，动画中手算 `sizeHint`（`header + spacing + 钳后列表高`），宿主补偿取 `max(sizeHint, height)`，reduced-motion 直落终值。② 固定 112/72 块宽在竖图/横图上留白明显，新增 `_strip_thumb_width()` 按 `QImageReader.size()` 元数据算宽（32~160 限幅，不解码）。③ 槽位上限 3→12 并降级为病态超宽兜底，可见数改由宽度决定；列表容器改 `QFrame#artifactListCard` 与画廊共用卡片样式，`maximumHeight` 补间 + 逐帧 `_emit_height_chain()` 让宿主跟随。④ 折叠态统一 64 方格、`KeepAspectRatioByExpanding` + 居中裁 + `QPainterPath` 自绘圆角（QSS 不裁 pixmap），解码按 DPR 乘目标尺寸；边框在合成底对比 <1.5 时按明暗递进最多 40 档校正（部分主题下边框几乎不可辨）；解码失败占位由无解释 `✕` 改为类型徽标 + 「文件已不存在」tooltip。
+- **设置卡重建期列表跳位** (`app/widgets/cards/settings/expand_height_mixin.py` · `app/widgets/cards/settings/plugin_components_card.py`): 插件组件卡重建要「清空旧小节 → 再挂回」，中间帧布局高度偏小，外层滚动区 `maximum` 随之缩小，Qt 立刻把 `value` 钳到新上限，内容挂回后高度复原但 value 不回填（表现为滚轮没动、列表自己跳到中间）。mixin 新增 `_height_guard` 与 `begin_height_guard()/end_height_guard()`：保护期内 `_expanded_height()` 返回 `max(实测, 记录下限)`，释放时按实测定格一次（应对搜索过滤真变矮）；折叠完成路径显式清下限，卡片侧等全部批次挂完（`done`）才释放。
+- **extras 并发静默丢行 + 发送前缺字段** (`app/core/store/session_repository.py` · `app/main_widget.py` · `tests/core/test_session_lazy_extras_open.py`): ① `write_extras` 的「读基线→diff→SQL→写回基线」非原子，A 删行后 B 按旧基线 diff 会永久失配、后续 diff 不再重插；现临界区持 `_cache_lock`（与内容哈希缓存同锁，RLock 可重入），锁序固定 cache_lock → db_write_lock，无反向路径。② E14 后台分批补载未完成的毫秒窗口内发送，上下文投影会缺字段（翻页有守卫、发送链没有）；新增 `_sync_flush_pending_extras()` 在发送前按 idxs 定向查询并 merge，失败放行发送但告警留痕。perf-ledger 另记 C3（游标不随 configs 失效）/C4（`invalidate_prompt_injections` 无生产接线）两张跟进票。
+- **聚合网关 Gemini 模型整请求 400** (`plugins/system-transports/transports/openai_chat.py` · `tests/plugins/test_openai_chat_transport.py`): 原按「provider 声明或模型名含 gemini」判定 Gemini 特化，对 opencode.ai/zen 等聚合网关同样下发顶层 `google` 扩展字段，被拒 `400 google: cannot be represented by google; use scoped provider_options`。现改为只认官方端点（`generativelanguage.googleapis.com`），聚合网关保持原请求形状；`include_thoughts` / `thinking_budget`→`reasoning_effort` 重写同样只对官方端点生效。
+- **团队 run 复用老数据与临时会话 workdir 污染** (`app/core/team/team_manager.py` · `app/main_widget.py` · `tests/core/test_team_project_isolation.py`): ① 单团队时代只写顶层 `project`（无 `projects_by_run_id`），升级后同项目会凭空多出一个团队框；现顶层项目命中且顶层 run 仍有成员时安全复用。② 临时对话页工作目录是 `tmp-sessions/{window_id}`，原逻辑会把它写进团队级 workdir 污染整个团队的统一工作树；`_is_temp_scope` 为真时传空 workdir 解析 run。③ 团队标签页 run 解析抽出 `resolve_run_id_for_project`，按 `_current_project` 取 run、未命中回退项目名，避免任意项目并进最近一次团队运行。
+- **Gemini 原生 provider 的顶层思考预算字段被拒** (`plugins/system-providers/providers/gemini.py`): Gemini 原生 `generateContent` 无预算类顶层字段，`thinking_param` 下发 `thinking_budget` 会被 protobuf 拒（`Unknown name`）；改按 provider profile 走 `reasoning_effort`（官方 low/medium/high 映射），与 openai_chat 传输层「只对官方端点特化」配套。
+
+### ♻️ 代码重构 (Refactoring) (重新发布 #3 追加)
+
+- **diff 视图拆分子模块与 WebEngine 惰性导入** (`app/utils/diff_html.py` · `app/utils/diff_viewer.py` · `app/core/infra/webengine_profile.py`): `diff_viewer` 内 1751 行 HTML 生成逻辑拆到 `diff_html.py`（原文件只留 QtWebEngine 侧并 re-export，减小主链 import 体积）；`webengine_profile` 的 `QWebEngineProfile` 改函数内导入 + `TYPE_CHECKING`，避免启动链顶层 import 提前拉起 WebEngine。
+
+### ⚡ 性能优化 (Performance) (重新发布 #3 追加)
+
+- **历史会话打开：读链后台化 + 首屏懒载 extras** (`app/core/store/session_repository.py` · `app/core/store/session_store.py` · `app/main_widget.py` · `tests/core/test_session_lazy_extras_open.py`): 首屏只查视口行 idx（一次 IN 批量查询，不逐行查），窗外哨兵行进 `_extras_pending_idxs` 由后台分批补载；读链整体挪后台线程，回主线程前做 gen/sid 双校验再建卡，并发双会话懒读互不串行；首屏 + 全部 pending 补载后与 `get_full_messages` 逐字段一致（对拍测试锁定）。
+- **流式拍跳过 extras 抽取与写库** (`app/core/store/session_repository.py` · `tests/core/test_session_streaming_offload.py`): 尾条带 `_partial` 的流式拍，blob 存全量、extras 表不写（窗外字段未变），进程崩溃后从 blob 可完整恢复；落定拍恢复剥离与 extras 写入。新增消息仍在保活窗内同样跳过，超窗/截断才走全链。
+- **extras 改为 (sid, msg_idx) 行级 upsert 差量写** (`app/core/store/session_repository.py` · `tests/core/test_session_extras_upsert.py`): 由「全删全插」改为按 `(session_id, msg_idx)` 逐行 diff：未变 tick 零 SQL，同 idx 内容变化 upsert 覆盖（应对 compaction 漂移），截断与删除清掉超界行不留孤儿；多拍 save 往返逐字节一致、崩溃重开可恢复均有测试锁定。
+- **会话保存增量回填 provider 与 user 标志** (`app/main_widget.py` · `tests/core/test_session_save_incremental_backfill.py`): provider 回填加游标只扫新增尾部（首轮扫过的旧消息不再重扫），精确匹配失败 + 多服务商模糊命中仍跳过；「是否有用户消息」布尔首扫后缓存到会话对象（换会话自然重置），无用户消息会话继续跳过保存。
+- **流式游标块级 append 与协议状态机增量扫描** (`app/widgets/message_card.py` · `app/widgets/render/block_render.py` · `tests/widgets/test_stream_cursor_e6.py`): `append_text/append_reasoning` 只 O(1) append 进块内 `_pend` 片段列表，不再逐 chunk 拼整段（390KB 回复旧实现累计约 160MB 内存流量）；协议未闭合检测改增量状态机，每批只扫「新段 + 劈开 carry」，不再对块全文跑 4 个 O(n) 检测；读权威方（渲染/导出/落定/block-key）进入前经 `_solidify_text_blocks` 固化，任意时点读取与逐 chunk 直拼逐字节等价。
+- **启动期后台预热 `resolve_context_limit`** (`main.py` · `tests/test_main_context_limit_prewarm.py`): 首次发送时该链路要触发 13 个 provider 插件惰性 import + AST 审计，实测 96~108ms 主线程尖峰；`_deferred_startup` 在 `_sync_models_dev` 之后起 daemon 线程预热（取不到模型配置直接返回，异常吞），预热后首发送约 48ms。
+- **上下文层与预算解析去重复计算** (`plugins/system-context/context_tiers/tool_shape.py` · `plugins/system-context/context_tiers/tool_normalize.py` · `plugins/system-context/budget_resolvers/builtin.py` · `app/core/context/usage.py` · `tests/core/test_tier_memo.py` · `tests/core/test_unified_usage_snapshot_store.py`): ① tool_shape/tool_normalize 加记忆化（键 `(id(text), len(text))` + LRU 512，命中零 parse/正则，id 复用靠 `orig is text` 检测）；② 用量快照合并为 `_unified_snap_store` 单写入口（键含 session/messages 版本/末条 id/model/ratio/budget/from_api/system_prompt 摘要，LRU 64），hooks 与 UI 共用一次投影；③ system token 加 `(id, len)` 身份短路；④ 内置预算解析器的 `_cached_system_tokens` 快路径同步。
+- **token 估算前缀游标** (`app/core/infra/token_estimator.py` · `tests/core/test_prefix_cursor_token_estimation.py`): 无 usage 回传的 provider 走 thread-local 前缀游标（键 `(id(messages), model, tools_sig)`，保留 4 条）：命中前缀 id 一致 + 末条重算比对即复用前缀和、只算新增段，末条变化再回全量兜底；50 轮增量对全量 >5 倍加速。另加超大文本抽样外推（>50KB 走 9 窗口分层采样，×1.05 保守系数，避免 6×250KB 全量 finditer 的 103ms）。
+- **schema 浅克隆替代全量 deepcopy** (`app/tools/__init__.py` · `app/tools/registry.py` · `app/core/infra/token_estimator.py`): 每轮 LLM 调用把 35+ 工具 schema 全量深拷贝，是主线程热点；改为两层浅克隆（新 list + 顶层 dict + `function` 子 dict，parameters/description 叶子共享），唯一已知写点都落在克隆层。
+- **消息气泡形状路径缓存与渲染指纹回写** (`app/widgets/modules/message_bubble.py` · `app/widgets/markdown_block_viewer.py`): 流式光带 50ms/帧重建 `addRoundedRect + united` 路径是采样 TOP1，改为几何不变即复用（`resizeEvent` 失效），填充与描边合并成一次 `drawPath`（抗锯齿栅格化减半）；`reconcile_widgets` 原位更新后把新指纹写回 `keys`，消除同块每帧重复 `update_content`（code 块重复 pygments + setHtml 曾占流式 CPU 大头）。
+- **插件配置与技能目录读缓存** (`app/plugins/managers/plugin_config_store.py` · `app/core/context/config.py` · `app/utils/utils.py` · `tests/plugins/test_plugin_config_store.py`): ① 配置读盘按 `mtime_ns` 缓存（`_READ_CACHE_MAX=128`），写/删/损坏路径主动失效；`cfg()` 走模块级单例，单次上下文投影原要调 10~20 次。② 技能动态源签名纳入 30s TTL 缓存（键含 project_dir + 分区元组），`invalidate_skills_cache` 主动清；折衷是 TTL 窗口内手动放入的新技能最长 30s 不可见。
+- **LSP 符号操作轮询就绪与文件保活** (`app/core/lsp/lsp_client.py` · `app/core/lsp/lsp_manager.py` · `tests/core/test_lsp_symbol_op_ready.py`): `did_open` 后按 25ms 步进轮询 server 就绪（总超时 0.3s，超时照常执行操作，绝不更慢/挂死）；同一文件的连续符号操作走引用计数保活（窗口内只 `did_open` 一次，到期 `did_close` 一次），保活期间文件被外部修改补 `did_change`，异常路径同样释放。
+- **引擎会话 hook 注入缓存** (`app/core/conversation/engine_session.py` · `tests/plugins/test_engine_session_prompt_cache.py`): `BuildSystemPrompt` 注入按会话缓存，一轮内多次取用只跑一次 hook 链（返回防御性拷贝，调用方 extend 不污染缓存），`PreUserMessage` 保持每轮实时；提供显式失效入口（agent/技能/项目笔记热变场景）。
+- **子智能体状态查询与 API 消息增量缓存** (`plugins/system-subagent/manager.py` · `app/core/workers/subagent_worker.py` · `tests/core/test_subagent_api_cache.py`): ① 归档冻结集合 `_archived_frozen`：落库成功的任务不再重复写、`get_finished_tasks` 跳过、日志 dirty 判定只看未冻结任务；② `_api_messages_cache` 增量维护（5 处写点 append 新增段，全量只在 loop 基线重建），`_set_api_messages_cache` 为唯一写入口并做 vision 块级快筛，无 vision 时 `_materialize_for_send` 零拷贝直通。
+- **渲染与池化细节四处** (`app/core/tools/tool_executor.py` · `app/widgets/card_viewers.py` · `app/widgets/webview_pool.py`): ① `PostToolUse` 复用 `PreToolUse` 段算出的 `current_message_text`（None 时回退就地重扫，MCP 分支显式传 None）；② 图表尾边界判定改尾向 `isspace` 跳空白 + `endswith/search(0,end)` 在原串上做尾窗判定，全程零拷贝（原 `rstrip` 在尾部有空白时会拷贝整串）；③ 三处入图检测由 join/拼接改逐块短路 `any()`；④ webview_pool 复用取卡时重评 `_render_v2`（消除「页面关闭后重新打开 v2 永久失活」）。
+- **内存治理排除会话无关缓存** (`app/core/infra/memory_governor.py` · `tests/core/test_memory_governor_icon_cache_scope.py`): 全局 LRU 清理不再失效图标缓存（`invalidate_icon_cache` / `invalidate_provider_icon_cache`），图标与具体会话无关，清了只会让下次渲染重解码。
+- **启动与序列化耗时观测补盲** (`main.py` · `plugins/system-serializers/serializers/openai.py` · `tests/plugins/test_serializer_diag_mark.py`): ① `main.py` 顶层新增 `StartupMark` stderr 直写通道（`os.write(2, ...)`），补 loguru 初始化之前的壳前盲区（巨型 import、兼容补丁、异常钩子安装、数据迁移）；② responses 路径序列化加耗时打点（条数与毫秒数，`PROBE=0` 可关，产物不变）。
+- **性能基线测试改真实回收口径** (`tests/perf/test_recycle_efficacy.py` · `tests/perf/test_ui_memory_baseline.py`): 原按卡片数断言，淘汰链从未到达 `_unload_batch` 也判绿；改用高命中性 viewer 桩 + 「空槽数与记账渲染数」同步口径，并补回收后稳态基线场景（60 未渲染 / 100 已渲染采样 / 5 会话 × 50 消息）。
+
+### 📚 文档 (Docs) (重新发布 #3 追加)
+
+- **性能台账与设计文档** (`docs/perf/perf-ledger.md` · `docs/superpowers/specs/2026-11-19-artifact-gallery-design.md`): 新增 E12/E14 实施台账（会话保存与历史打开的量化基线与验收口径），成果栏单行画廊设计文档记录折叠/展开布局公式、等高交接与 reduced-motion 直落。
 
 ## [v0.7.3] - 2026-11-16 (重新发布 #3)
 
