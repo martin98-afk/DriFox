@@ -506,16 +506,19 @@ class TestVisionPersistToImageRef:
     def test_budget_omitted_images_not_persisted(self, monkeypatch, tmp_path):
         """T17 minor-3：8MB 预算省略的图不落盘（守护「预算判定先于 persist」时序契约）"""
         monkeypatch.setattr("app.utils.app_paths.get_app_data_dir", lambda: tmp_path)
+        import app.core.workers.chat_worker as cw
+        # 压缩恒等（模拟压不动），132B + 5MB 虽 <8MB 预算不省略；改用两张 5MB
+        monkeypatch.setattr(cw, "compress_data_uri", lambda du: du)
         w = _make_vision_worker("gpt-4o")
         w.session_id = "sess_t17"
         raw = b"\x89PNG" + b"\x02" * 128
         b64 = base64.b64encode(raw).decode()
-        # 单张 5MB base64×2 = 10MB > 8MB 预算 → pop 末尾 1 张
+        # 两张 5MB base64 = 10MB > 8MB 预算 → pop 末尾 1 张
         current_messages = [{"role": "user", "content": "看两张图"}]
         tool_results = [{
             "name": "read", "success": True, "content": "2 图",
             "image_data": [
-                {"mime": "image/png", "data": b64},
+                {"mime": "image/png", "data": "A" * (5 * 1024 * 1024)},
                 {"mime": "image/png", "data": "B" * (5 * 1024 * 1024)},
             ],
         }]
@@ -525,8 +528,9 @@ class TestVisionPersistToImageRef:
         files = list(persisted_dir.glob("*")) if persisted_dir.exists() else []
         assert len(files) == 1, f"仅未省略那张应落盘，实际 {files}"
         import hashlib
-        digest = hashlib.sha1(raw).hexdigest()[:16]
-        assert files[0].name == f"{digest}.png", "落盘的应是保留的那张（非省略图）"
+        kept_raw = base64.b64decode("A" * (5 * 1024 * 1024))
+        digest = hashlib.sha1(kept_raw).hexdigest()[:16]
+        assert files[0].name == f"{digest}.png", "落盘的应是保留的第一张（非省略图）"
         content = current_messages[-1]["content"]
         assert sum(1 for b in content if b.get("type") == "image_ref") == 1
         text = "".join(b.get("text", "") for b in content if b.get("type") == "text")

@@ -92,6 +92,20 @@ def _rejects_sampling_param(model: str, param: str) -> bool:
         return False
     return _uses_max_completion_tokens(model)
 
+def _unsupported_params(llm_config: Dict[str, Any]) -> frozenset:
+    """服务商插件声明的请求参数黑名单（capabilities.unsupported_params）。
+
+    「某家上游不收哪个字段」属服务商知识，由 providers 插件按 family 声明，
+    transport 只做通用剔除，不按 provider 硬编码：Gemini 原生 generateContent
+    没有 penalty 概念，OpenAI 兼容层会把未知字段透传给 protobuf 解析并报 400
+    Unknown name，整个请求连正常内容一起被拒。
+    """
+    try:
+        raw = get_provider_profile(llm_config).get("unsupported_params") or ()
+    except Exception:
+        return frozenset()
+    return frozenset(str(k) for k in raw)
+
 def _effort_values_for(model: str, values: Optional[List[str]] = None) -> List[str]:
     """思考等级合法档位：声明/models.dev 有值则用之，OpenAI 推理模型回退内置档位。"""
     if values:
@@ -199,6 +213,7 @@ class OpenAIChatTransport:
         model = str(llm_config.get("模型名称", "gpt-4o") or "gpt-4o")
         extra_body: Dict[str, Any] = {}
         top_level: Dict[str, Any] = {}
+        denied = _unsupported_params(llm_config)
 
         for cn_key, value in llm_config.items():
             if cn_key in _CONFIG_ONLY_KEYS or cn_key in QUOTA_EXCLUDE_KEYS():
@@ -211,6 +226,10 @@ class OpenAIChatTransport:
             if not en_key and _VALID_IDENTIFIER_PATTERN.match(cn_key):
                 en_key = cn_key
             if not en_key or en_key == "max_tokens":
+                continue
+            if en_key in denied:
+                # 服务商声明不收该字段（如 Gemini 无 penalty 语义），静默丢弃：
+                # 相近行为由上游默认值覆盖，发出去只会让整个请求 400
                 continue
             if en_key in _SAMPLING_PARAMS:
                 # 推理模型（o1/o3 及 gpt-5+）拒绝 temperature / top_p，携带即 400；

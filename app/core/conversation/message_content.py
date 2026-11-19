@@ -53,7 +53,8 @@ _consolidate_cache_local = threading.local()
 # 无条件按登记 id 剔除**自己 TLS** 里命中条目（与传入列表无关：真实序列传入的
 # 是重载后的新列表，id 已不同）。登记不随单线程消费删除（worker A 清掉后
 # worker B 的同 id 条目仍需清），容量封顶 _PENDING_INVALIDATE_MAX 防无限增长；
-# 超限挤出极端场景退回旧滞留行为，单条登记 16B 无害。id 复用误剔最坏多一次
+# 超限时 set.pop() 任意挤出兜底（无序，非 FIFO），极端场景退回旧滞留行为，
+# 单条登记 16B 无害。id 复用误剔最坏多一次
 # 毫秒级重算，结果恒正确，无害。
 _pending_invalidate: set = set()      # 元素 (id(list), len(list))
 _invalidate_lock = threading.Lock()

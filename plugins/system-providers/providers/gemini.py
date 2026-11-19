@@ -40,6 +40,10 @@ def register(registry):
                 "supports_vision": True,
                 "supports_thinking": True,
                 "thinking_param": "thinking_budget",
+                # 服务商级请求参数黑名单（transport 通用读取 capabilities.unsupported_params）：
+                # Gemini 原生 generateContent 无 frequency/presence penalty 概念，OpenAI
+                # 兼容层会把未知字段透传给 protobuf 解析，整请求 400 Unknown name
+                "unsupported_params": ["frequency_penalty", "presence_penalty"],
             },
         )
     )

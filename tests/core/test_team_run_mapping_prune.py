@@ -48,10 +48,9 @@ class TestPruneRunMapping:
         assert "r000" not in mapping, "最旧非 keep 条目应先被淘汰"
         assert "r_new" in mapping
         kept_old = [f"r{i:03d}" for i in range(40) if f"r{i:03d}" in mapping]
-        assert kept_old == sorted(kept_old)[-len(kept_old):]
-        # 保留的是插入序靠后的那批
-        nums = sorted(int(r[1:]) for r in mapping if r.startswith("r0"))
-        assert nums[-1] >= 30, f"应保留插入序最新的条目，实际最旧保留 {nums[0]}"
+        # 被删集合恰为编号最小的非 keep 项（r000..r008，含 r_new 写入触发的最后一次裁剪）
+        pruned_out = {f"r{i:03d}" for i in range(40)} - set(mapping)
+        assert pruned_out == {f"r{i:03d}" for i in range(9)}, f"应恰好淘汰最旧 9 条，实际淘汰 {sorted(pruned_out)}"
 
     def test_mapping_consistency_after_prune(self, fresh_tm):
         """裁剪后 cache 与 team.json 同批一致；读路径对被裁条目降级返回空串"""

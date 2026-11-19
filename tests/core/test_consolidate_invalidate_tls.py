@@ -33,8 +33,12 @@ class TestInvalidateReleaseFreesTlsProjection:
         invalidate_consolidate_cache(msgs)
         del msgs
         gc.collect()
-        # content 字符串仍被 TLS 投影条目引用，此时几乎不下降
+        # content 字符串仍被 TLS 投影条目引用，此时几乎不下降（守护 purge 的必要性）
         pinned = tracemalloc.get_traced_memory()[0]
+        assert pinned >= baseline * 0.5, (
+            f"del 后投影应仍钉住主要内存（content 字符串；原 dict 骨架即刻回收）："
+            f"baseline={baseline} pinned={pinned}"
+        )
         # SessionManager 真实序列：新列表（新 id）进入 consolidate → 入口 purge 清旧 id
         fresh = [{"role": "user", "content": f"y{i}", "timestamp": f"n{i}"} for i in range(4)]
         consolidate_messages(fresh)
@@ -48,7 +52,7 @@ class TestInvalidateReleaseFreesTlsProjection:
         )
 
     def test_invalidate_id_reuse_safe(self):
-        """登记失效后立即用等长新列表（模拟 id 复用）consolidate → 结果内容正确"""
+        """登记存在时新列表 consolidate 结果正确（同线程入口 purge 不误伤新条目）"""
         old = _big_messages(8)
         consolidate_messages(old)
         invalidate_consolidate_cache(old)

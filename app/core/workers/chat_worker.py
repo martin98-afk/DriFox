@@ -5149,6 +5149,23 @@ class OpenAIChatWorker(QThread):
                     f"  3. 重新发起任务（如开启新会话）",
                 )
                 return
+            # 服务端不认请求里的字段（Google protobuf：Unknown name "x": Cannot find field）。
+            # 必须排在「参数过长」之前——其文案含 Invalid JSON payload，会被下面的
+            # payload 关键词误捕成参数过大，把用户引向「拆工具参数」的错误方向。
+            if any(
+                kw in error_msg.lower()
+                for kw in ["unknown name", "cannot find field", "unknown field", "unrecognized field"]
+            ):
+                self._emit_with_callback(
+                    "error_occurred",
+                    self.error_occurred,
+                    f"[参数不支持] 服务端不接受请求里的某个字段，整个请求被拒。\n"
+                    f"通常是模型参数与所用协议不匹配（如把 OpenAI 专有的 frequency_penalty 发给 Gemini）。\n"
+                    f"建议: 清空模型参数里对应的项；内置服务商应在其插件 capabilities 的 "
+                    f"unsupported_params 中声明该字段。\n"
+                    f"详情: {error_msg[:300]}",
+                )
+                return
             # 检测参数过大相关错误（不同 provider 的不同错误信息）
             if any(
                 kw in error_msg.lower()

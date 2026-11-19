@@ -250,6 +250,37 @@ def test_penalty_params_go_top_level(transport, monkeypatch):
     assert out["top_level"]["frequency_penalty"] == 0.7
 
 
+def test_provider_declared_unsupported_params_dropped(transport, mod, monkeypatch):
+    """服务商声明 unsupported_params：命中字段整条剔除（Gemini 原生无 penalty 概念）。
+
+    黑名单来自 providers 插件 capabilities，transport 只做通用过滤，不按 provider 硬编码。
+    """
+    monkeypatch.setattr(transport, "_apply_thinking", lambda *a: None)
+    monkeypatch.setattr(
+        mod,
+        "get_provider_profile",
+        lambda cfg: {"family": "gemini", "unsupported_params": ["frequency_penalty", "presence_penalty"]},
+    )
+    out = transport.build_request_kwargs(
+        {
+            "模型名称": "gemini-4-hydrogen",
+            "presence_penalty": 0.3,
+            "frequency_penalty": 0.7,
+            "温度": 0.5,
+        }
+    )
+    assert "presence_penalty" not in out["top_level"]
+    assert "frequency_penalty" not in out["top_level"]
+    assert "presence_penalty" not in out["extra_body"]
+    assert out["top_level"]["temperature"] == 0.5  # 未命中黑名单的参数不受影响
+
+def test_no_unsupported_params_declaration_keeps_penalties(transport, mod, monkeypatch):
+    """服务商未声明黑名单（OpenAI 系）：penalty 参数照旧走顶层，不得误伤。"""
+    monkeypatch.setattr(transport, "_apply_thinking", lambda *a: None)
+    monkeypatch.setattr(mod, "get_provider_profile", lambda cfg: {"family": "openai"})
+    out = transport.build_request_kwargs({"模型名称": "gpt-4o", "frequency_penalty": 0.7})
+    assert out["top_level"]["frequency_penalty"] == 0.7
+
 def test_build_request_kwargs_o1_skips_sampling(transport, monkeypatch):
     monkeypatch.setattr(transport, "_apply_thinking", lambda *a: None)
     out = transport.build_request_kwargs({"模型名称": "o1-preview", "温度": 0.5, "top_p": 0.9})
