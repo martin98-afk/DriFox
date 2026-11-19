@@ -31,6 +31,10 @@ Thumbs.db
 /docs/*
 !docs/plugin-architecture.md
 !docs/plugins/
+# [E13] perf 台账单文件入库（docs/perf 其余诊断文档保持本地）
+!docs/perf/
+docs/perf/*
+!docs/perf/perf-ledger.md
 docs/plugins/*
 !docs/plugins/gateway-platforms.md
 !docs/plugins/runtime-engines.md
