@@ -862,7 +862,12 @@ class PluginComponentsCard(DynamicHeightExpandCardMixin, ExpandSettingCard):
         一次性挂载全部小节会阻塞主线程 ~250ms（65 插件 / 104 组件），
         表现为「打开设置面板卡一下」。这里首帧只构建 _FIRST_BATCH 个，
         剩余部分在后续事件循环里分批补齐，用户立刻就能滚动和点击。
+
+        ★ 重建期开高度下限：清空旧小节 → 再挂回，中间帧高度偏小会把外层
+        滚动条的 value 钳低（列表粘在中间位置不回弹）。内容最终高度不变，
+        重建全程保持原高度即可；真变矮时由 _finish_mount 释放后收缩一次。
         """
+        self.begin_height_guard()
         self._token += 1
         self._sig = self._signature()
         self._entries = self._collect_entries()
@@ -946,6 +951,10 @@ class PluginComponentsCard(DynamicHeightExpandCardMixin, ExpandSettingCard):
         self._mount_more_button(remaining if done else 0)
         self._mount_empty_state(done and not self._visible)
         self._refresh_summary_text()
+        # 全部批次挂完才释放高度下限：分批期间高度还在涨，提前释放会把
+        # 外壳压到下批挂载前的高度，外层滚动值同样会被钳低。
+        if done:
+            self.end_height_guard()
         self._adjust_view_size()
 
     # ── 高度同步与滚轮：由 DynamicHeightExpandCardMixin 统一提供 ──
