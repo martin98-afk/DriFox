@@ -9,6 +9,37 @@ import sys
 import time
 import warnings
 
+# ========== 启动分段打点：stderr 直写通道（P3）==========
+# 盲区补偿：loguru 在 setup_logging（壳显示后才执行，见 _setup_early_forensics）
+# 之前未初始化，壳前段（顶层巨型 import / 兼容补丁 / 异常钩子安装）无日志可落。
+# 此通道 os.write(2) 直写 stderr，行格式与 main() 内 [StartupMark] 日志行一致，
+# 供 T2/T6 启动测量脚本用同一解析规则匹配（不含 fp= 后缀：读 proc_pid_rusage
+# 需 ctypes 加载 libSystem，壳前段为诊断引入此开销得不偿失）。
+# 守卫与 app.utils._startup_probe.trace_enabled() 同款：源码运行默认开、
+# DRIFOX_STARTUP_PROBE=0/false/no 显式关、打包版默认关（诊断设施默认只对
+# 源码运行开）。纯增输出，不改变任何既有行为。
+_SM_SEG = time.perf_counter()
+
+def _startup_stderr_enabled() -> bool:
+    raw = os.environ.get("DRIFOX_STARTUP_PROBE", "").strip().lower()
+    if raw in ("0", "false", "no"):
+        return False
+    return not (getattr(sys, "frozen", False) or hasattr(sys, "_MEIPASS"))
+
+def _startup_stderr_write(line: str) -> None:
+    """P3 底层直写（守卫见上）。供壳前打点与 main() 内 _smark 共用。"""
+    if not _startup_stderr_enabled():
+        return
+    os.write(2, line.encode("utf-8", "replace"))
+
+def _startup_mark_stderr(label: str) -> None:
+    global _SM_SEG
+    now = time.perf_counter()
+    _startup_stderr_write(f"[StartupMark] {label} 耗时 {(now - _SM_SEG) * 1000:.0f}ms\n")
+    _SM_SEG = now
+
+_startup_mark_stderr("shell_core_import")
+
 # ========== 开机自启提权 helper（最早处理，不加载 Qt）==========
 # 拨动自启开关时主进程通过 runas 以管理员身份把本进程再次拉起，
 # 命令行携带 --configure-auto-start=on|off。helper 写完 HKLM 注册表
@@ -23,6 +54,7 @@ if os.name == "nt" and any(arg.startswith("--configure-auto-start=") for arg in 
 from qfluentwidgets import setFontFamilies
 
 warnings.filterwarnings("ignore")
+_startup_mark_stderr("shell_qfluentwidgets_import")
 
 # TLS 根证书兜底：打包环境默认 CA 路径可能失效，导致进程内所有 HTTPS/wss
 # 校验失败（飞书 WS 长连接即挂、urllib 报 self-signed certificate in chain）。
@@ -51,6 +83,7 @@ os.environ["PYTHONIOENCODING"] = "utf-8"
 from app.utils.render_env import apply_render_env, default_config_path
 
 RENDER_SETTINGS = apply_render_env(default_config_path())
+_startup_mark_stderr("shell_render_env")
 
 # ========== [C2] 数据迁移前置 ==========
 # 原在壳显示后的 _setup_early_forensics 内执行（保留幂等二次调用）。迁移必须先于后续任何数据目录 I/O
@@ -61,6 +94,7 @@ try:
     migrate_app_data_if_needed()
 except Exception:
     pass
+_startup_mark_stderr("shell_migrate_app_data")
 
 # 防御：QSG_RHI* 残留会让场景图走 RHI D3D11 合成，WebEngine 的 GL 纹理接不上 → 整块黑。
 for _env_key in ("QSG_RHI", "QSG_RHI_BACKEND"):
@@ -142,6 +176,7 @@ def _install_global_exception_hooks() -> None:
 
 
 _install_global_exception_hooks()
+_startup_mark_stderr("shell_patches_and_hooks")
 
 
 # ========== 内存诊断开关 ==========
@@ -275,6 +310,9 @@ def main():
             logger.info(msg)
         else:
             logger.debug(msg)
+        # P3：stderr 直写同款行（含 fp= 后缀，与日志行完全一致）。setup_logging
+        # 前的点位靠它进 stderr；之后的点位双写（stderr+文件），仅源码运行发生。
+        _startup_stderr_write(msg + "\n")
         _sm_seg = _now
 
     if _qt_pp:
