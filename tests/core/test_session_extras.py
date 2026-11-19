@@ -10,6 +10,8 @@
 - delete 级联清理 extras、compaction 重写后 extras 对齐
 """
 
+import os
+
 import pytest
 
 
@@ -240,6 +242,130 @@ def test_force_cleanup_project_cascades_extras(store):
     assert store.load_msg_extras("s9"), "前置：extras 应有数据"
     store.force_cleanup_project("测试项目")
     assert store.load_msg_extras("s9") == {}, "强制清理项目应级联清理 extras"
+
+
+def test_force_cleanup_project_survives_legacy_restart(tmp_path):
+    """归档项目不得在重启后复活（2026-11-19 实测根因回归）
+
+    复活链：get_projects = sessions ∪ project_workdir，归档清掉这两张表后，
+    下次启动 ProjectWorkdirRepository 会把 key_documents 里 is_working_dir=1
+    的行回灌进 project_workdir → 0 会话空壳项目重新出现在列表。
+    force_cleanup_project 必须连 key_documents 的工作目录行一起清掉。
+    """
+    from app.core.store.project_workdir_repository import ProjectWorkdirRepository
+    from app.core.store.session_store import SessionStore
+
+    db_dir = str(tmp_path / "db")
+    os.makedirs(db_dir, exist_ok=True)
+    SessionStore._instance = None
+    store = SessionStore(db_dir)
+    assert store.is_initialized
+    try:
+        # 造老库形态：key_documents 里存着项目 P 的工作目录
+        store._db.execute_sql(
+            """
+            CREATE TABLE IF NOT EXISTS key_documents (
+                id TEXT PRIMARY KEY, project TEXT NOT NULL, file_path TEXT NOT NULL,
+                file_name TEXT, added_at TEXT, added_by TEXT DEFAULT 'manual',
+                is_working_dir INTEGER DEFAULT 0, UNIQUE(project, file_path)
+            )
+            """
+        )
+        store._db.execute_sql(
+            "INSERT OR REPLACE INTO key_documents (id, project, file_path, is_working_dir)"
+            " VALUES ('k1', 'P', '/work/p', 1)"
+        )
+        store._db.execute_sql(
+            "INSERT OR REPLACE INTO key_documents (id, project, file_path, is_working_dir)"
+            " VALUES ('k2', 'P', '/work/p/doc.md', 0)"
+        )
+        s = _session("sid-p", [_msg("user", "hi")])
+        s["project"] = "P"
+        assert store.save_session(s)
+        # 项目工作目录也在（真实场景：新建项目即写 project_workdir；
+        # 该表由 MemoryManager 首次读取时 ensure_table 创建）
+        repo = ProjectWorkdirRepository(store._db)
+        assert repo.ensure_table() is True
+        assert repo.set("P", "/work/p") is True
+        assert "P" in store.get_projects(), "前置：归档前项目应在列表"
+
+        # 归档两步：删会话 + 强制清理项目
+        store.delete_session("sid-p")
+        assert store.force_cleanup_project("P") is True
+        assert "P" not in store.get_projects(), "归档后同进程内项目应消失"
+
+        # 重启：重建 store + 重置进程内迁移标记
+        store.close()
+        SessionStore._instance = None
+        ProjectWorkdirRepository._legacy_synced = False
+        store2 = SessionStore(db_dir)
+        assert store2.is_initialized
+        try:
+            ProjectWorkdirRepository(store2._db).ensure_table()
+            assert "P" not in store2.get_projects(), "重启后已归档项目不得复活"
+        finally:
+            store2.close()
+    finally:
+        try:
+            store.close()
+        except Exception:
+            pass
+        SessionStore._instance = None
+        ProjectWorkdirRepository._legacy_synced = False
+
+
+def test_force_cleanup_project_keeps_non_workdir_documents(tmp_path):
+    """只清工作目录行，不动关键文档行（表还承担项目文件关联职责）"""
+    from app.core.store.session_store import SessionStore
+
+    db_dir = str(tmp_path / "db")
+    os.makedirs(db_dir, exist_ok=True)
+    SessionStore._instance = None
+    store = SessionStore(db_dir)
+    assert store.is_initialized
+    try:
+        store._db.execute_sql(
+            """
+            CREATE TABLE IF NOT EXISTS key_documents (
+                id TEXT PRIMARY KEY, project TEXT NOT NULL, file_path TEXT NOT NULL,
+                file_name TEXT, added_at TEXT, added_by TEXT DEFAULT 'manual',
+                is_working_dir INTEGER DEFAULT 0, UNIQUE(project, file_path)
+            )
+            """
+        )
+        store._db.execute_sql(
+            "INSERT OR REPLACE INTO key_documents (id, project, file_path, is_working_dir)"
+            " VALUES ('k1', 'P', '/work/p', 1)"
+        )
+        store._db.execute_sql(
+            "INSERT OR REPLACE INTO key_documents (id, project, file_path, is_working_dir)"
+            " VALUES ('k2', 'P', '/work/p/doc.md', 0)"
+        )
+        store.force_cleanup_project("P")
+        ok, rows = store._db.execute_sql("SELECT id, is_working_dir FROM key_documents WHERE project = 'P'")
+        assert ok
+        remaining = {r["id"]: r["is_working_dir"] for r in rows or []}
+        assert remaining == {"k2": 0}, f"应只剩非工作目录行，实际 {remaining}"
+    finally:
+        try:
+            store.close()
+        except Exception:
+            pass
+        SessionStore._instance = None
+
+
+def test_force_cleanup_project_without_key_documents(store):
+    """极老库没有 key_documents 表：清理照常成功，不因缺表整体失败"""
+    from app.core.store.session_store import SessionStore
+
+    store._db.execute_sql("DROP TABLE IF EXISTS key_documents")
+    s = _session("s13", [_msg("user", "hi")])
+    s["project"] = "无表项目"
+    assert store.save_session(s)
+    assert store.force_cleanup_project("无表项目") is True, "缺 key_documents 表不应导致清理失败"
+    assert store.get_session("s13") is None
+    assert "无表项目" not in store.get_projects()
+    SessionStore._instance = store._instance  # 保持 fixture 单一实例语义
 
 
 def test_delete_session_without_extras_ok(store):

@@ -3870,7 +3870,12 @@ _SKELETON_CACHE_MAX = 48
 # loading 清理（对齐全量，消除折叠块 shimmer 滞留）；删死代码 _streamingPulse
 # keyframes；reduced-motion 列表补 think-shimmer 两处覆盖。
 # CSS + JS 双资产变更，旧骨架缓存须失效。
-_SKELETON_CACHE_VERSION = 86
+# +1（v87）：流式卡内跟随标志复位链加固——下滚输入记录方向并连续数帧检测
+# 贴底解封（_dfxReleaseFollowOnDown / body 版）、scroll 置位只认上滚方向、
+# 自动置底前按几何自愈、内层标志翻转即时上报、复用清理复位容器 expando。
+# 修「已滚到底但流式不再自动跟随」（内容在 scroll 事件派发前增长导致 atBottom
+# 判定失真，标志被误置为上滚阅读后永久卡住）。JS 资产变更，旧骨架缓存须失效。
+_SKELETON_CACHE_VERSION = 87
 
 
 def _js_literal(value) -> str:
@@ -4436,6 +4441,7 @@ _STREAMING_DOCK_JS = """
                         // 注：工具区高度变化引起的正文位移由外层聊天列表的
                         // HeightCommitBatch 锚点补偿承接（卡片自身不做 scrollTop 调整）。
                         var tc = document.getElementById('tool-content');
+                        if (tc && tc._userScrolledUp && _dfxNearBottom(tc)) tc._userScrolledUp = false;
                         if (tc && !tc._userScrolledUp) { _progScroll(tc, tc.scrollHeight); }
                     }
                     // 高度变化（工具区自然高度 ↔ 264px 限高）后报告文档高度。
@@ -4474,6 +4480,31 @@ _RESET_CONTENT_FOR_REUSE_JS = """
                     document.body.classList.remove('cp-blank');
                     var _cpR = document.getElementById('content-placeholder');
                     if (_cpR) _cpR._blankState = undefined;
+                    // 容器 expando 复位：容器元素跨卡片存活（只清 innerHTML），
+                    // _userScrolledUp/_progDepth 等挂在元素上不会随内容清空消失。
+                    // 上一张卡停在上滚阅读时，复用方一开始就带 true → 自动置底
+                    // 全程跳过（新卡「滚到底也不跟随」的来源之一）。
+                    if (_cpR) {
+                        if (_cpR._dfxSettleTimer) clearTimeout(_cpR._dfxSettleTimer);
+                        _cpR._dfxSettleTimer = 0;
+                        _cpR._userScrolledUp = false;
+                        _cpR._progDepth = 0;
+                        _cpR._lastInputAt = 0;
+                        _cpR._lastInputDir = 0;
+                        _cpR._downScrollBaseMax = 0;
+                        _cpR._dfxReleaseRaf = 0;
+                    }
+                    var _tcR0 = document.getElementById('tool-content');
+                    if (_tcR0) {
+                        if (_tcR0._dfxSettleTimer) clearTimeout(_tcR0._dfxSettleTimer);
+                        _tcR0._dfxSettleTimer = 0;
+                        _tcR0._userScrolledUp = false;
+                        _tcR0._progDepth = 0;
+                        _tcR0._lastInputAt = 0;
+                        _tcR0._lastInputDir = 0;
+                        _tcR0._downScrollBaseMax = 0;
+                        _tcR0._dfxReleaseRaf = 0;
+                    }
                     document.body.scrollTop = 0;
                     window._userScrolledWithin = false;
                     window._userScrolledUp = false;
@@ -5107,10 +5138,108 @@ _CONTENT_AUTOSCROLL_JS = """
                     _progBegin(el);
                     el.scrollTop = value;
                 }
+                // 底部判定：容差统一 30px（与 cp/tc 的 scroll 监听同口径）。
+                function _dfxNearBottom(el, tol) {
+                    return !!el && (el.scrollHeight - el.scrollTop - el.clientHeight) < (tol || 30);
+                }
+                // 下滚静默判定：向下滚只在**滚动停止后**才决定归属。
+                // 滚到底 → 跟随（不置位）；停在中间 → 用户要在那里读，置上滚态。
+                // 判据同样扣除本次下滚之后的内容增长（growth）：流式新内容把
+                // 「原本已到底」的位置顶开，不应被当成「停在中间」而停止跟随。
+                function _dfxSettleDownScroll(el, tol) {
+                    if (!el) return;
+                    if (el._dfxSettleTimer) clearTimeout(el._dfxSettleTimer);
+                    var _tol = tol || 30;
+                    el._dfxSettleTimer = setTimeout(function () {
+                        el._dfxSettleTimer = 0;
+                        if (!el || el._lastInputDir !== 1) return;
+                        var _max = Math.max(0, el.scrollHeight - el.clientHeight);
+                        var _growth = Math.max(0, _max - (el._downScrollBaseMax || 0));
+                        if ((el.scrollHeight - el.scrollTop - el.clientHeight) >= (_tol + _growth)) {
+                            el._userScrolledUp = true;
+                            if (typeof reportHeightDebounced === 'function') reportHeightDebounced();
+                        }
+                    }, 180);
+                }
+                // 下滚解封：向下滚 = 用户要看更新的内容，滚到容器底即恢复跟随。
+                // 不能只靠 scroll 事件的 atBottom 判定：流式内容常在 scroll 事件
+                // 派发之前又长高，事件读到的距底恒 > 阈值 → 「已抵底」被判成
+                // 「用户在上方阅读」→ _userScrolledUp 永久卡 true，自动置底从此
+                // 失效（症状：明明滚到底了，流式新内容却不再跟随）。
+                // 判据：以「最后一次下滚输入时的可滚量」为基准，把之后内容增长
+                // （growth）从距底值里扣掉——用户停在原地被新内容顶开的部分不算
+                // 离开底部；仍差着一屏就不算（正常阅读态不受影响）。
+                // 滚轮应用是异步的，到底那一刻本帧还读不到 → 连续 6 帧复查
+                // （≈100ms，覆盖平滑滚动尾巴），任一帧命中即解封。
+                function _dfxReleaseFollowOnDown(el, tol) {
+                    if (!el) return;
+                    el._dfxReleaseFrames = 0;
+                    if (el._dfxReleaseRaf) return;
+                    var _tol = tol || 30;
+                    var tick = function () {
+                        el._dfxReleaseRaf = 0;
+                        if (el._userScrolledUp && el._lastInputDir === 1) {
+                            var _max = Math.max(0, el.scrollHeight - el.clientHeight);
+                            var _growth = Math.max(0, _max - (el._downScrollBaseMax || 0));
+                            if ((el.scrollHeight - el.scrollTop - el.clientHeight) < (_tol + _growth)) {
+                                el._userScrolledUp = false;
+                                if (typeof reportHeightDebounced === 'function') reportHeightDebounced();
+                                else if (typeof reportHeight === 'function') reportHeight();
+                                return;
+                            }
+                        }
+                        el._dfxReleaseFrames = (el._dfxReleaseFrames || 0) + 1;
+                        if (el._dfxReleaseFrames < 6) el._dfxReleaseRaf = requestAnimationFrame(tick);
+                    };
+                    el._dfxReleaseRaf = requestAnimationFrame(tick);
+                }
+                // body 版静默判定（语义同 _dfxSettleDownScroll，标志在 window 上）。
+                function _dfxSettleBodyDownScroll(tol) {
+                    if (window._dfxSettleBodyTimer) clearTimeout(window._dfxSettleBodyTimer);
+                    var _tol = tol || 30;
+                    window._dfxSettleBodyTimer = setTimeout(function () {
+                        window._dfxSettleBodyTimer = 0;
+                        var b = document.body;
+                        if (!b || b._lastInputDir !== 1) return;
+                        var _max = Math.max(0, b.scrollHeight - b.clientHeight);
+                        var _growth = Math.max(0, _max - (b._downScrollBaseMax || 0));
+                        if ((b.scrollHeight - b.scrollTop - b.clientHeight) >= (_tol + _growth)) {
+                            window._userScrolledWithin = true;
+                            if (typeof reportHeightDebounced === 'function') reportHeightDebounced();
+                        }
+                    }, 180);
+                }
+                // body 版（标志挂在 window 上，不在元素 expando）。
+                function _dfxReleaseBodyFollowOnDown(tol) {
+                    window._dfxReleaseBodyFrames = 0;
+                    if (window._dfxReleaseBodyRaf) return;
+                    var _tol = tol || 30;
+                    var tick = function () {
+                        window._dfxReleaseBodyRaf = 0;
+                        var b = document.body;
+                        if (window._userScrolledWithin && b._lastInputDir === 1) {
+                            var _max = Math.max(0, b.scrollHeight - b.clientHeight);
+                            var _growth = Math.max(0, _max - (b._downScrollBaseMax || 0));
+                            if ((b.scrollHeight - b.scrollTop - b.clientHeight) < (_tol + _growth)) {
+                                window._userScrolledWithin = false;
+                                if (typeof reportHeightDebounced === 'function') reportHeightDebounced();
+                                return;
+                            }
+                        }
+                        window._dfxReleaseBodyFrames = (window._dfxReleaseBodyFrames || 0) + 1;
+                        if (window._dfxReleaseBodyFrames < 6) {
+                            window._dfxReleaseBodyRaf = requestAnimationFrame(tick);
+                        }
+                    };
+                    window._dfxReleaseBodyRaf = requestAnimationFrame(tick);
+                }
                 // 用户滚动意图：只由**真实输入**驱动（wheel / 触摸 / 键盘）。scroll 事件
                 // 不再承担置位职责 —— 程序性滚动与浏览器钳制同样派发 scroll，用它推断
                 // 意图必然误判（P033）。置位同步完成，用于抢占「滚轮 → 在途渲染 JS 拉底」
                 // 的竞争窗口（scroll 事件异步派发，抢不过渲染 JS）。
+                // 方向（_lastInputDir）：-1 上滚 / 1 下滚。scroll 监听只允许**上滚**
+                // 置位 —— 下滚输入若也参与置位，滚到底途中遇到的任何一次「内容又长
+                // 高了」都会被记成上滚阅读，跟随随即停摆。
                 function _bindUserScrollIntent(el) {
                     if (!el || el._intentBound) return;
                     el._intentBound = true;
@@ -5120,6 +5249,7 @@ _CONTENT_AUTOSCROLL_JS = """
                         // innerHTML 重建钳制）时也会改 scrollTop 并派发 scroll，
                         // 那不是用户意图。
                         el._lastInputAt = performance.now();
+                        el._lastInputDir = -1;
                         // 🐛 门控：仅当容器实际可滚（内容溢出）才记为上滚 —— 无溢出时 wheel
                         // 本应转发外层聊天列表，页面内收到的事件属冒泡残留，置位会让
                         // 跟随被无关操作误锁死。
@@ -5131,10 +5261,20 @@ _CONTENT_AUTOSCROLL_JS = """
                         }
                     };
                     var stamp = function () { el._lastInputAt = performance.now(); };
-                    el.addEventListener('wheel', function (e) { if (e.deltaY < 0) mark(); else stamp(); }, {passive: true});
+                    var markDown = function () {
+                        stamp();
+                        el._lastInputDir = 1;
+                        // 解封基准：本次下滚输入时的可滚量。之后内容增长的部分
+                        // 是「用户没动、内容顶上来的」，不算离开底部。
+                        el._downScrollBaseMax = Math.max(0, el.scrollHeight - el.clientHeight);
+                        _dfxSettleDownScroll(el);
+                        _dfxReleaseFollowOnDown(el);
+                    };
+                    el.addEventListener('wheel', function (e) { if (e.deltaY < 0) mark(); else if (e.deltaY > 0) markDown(); else stamp(); }, {passive: true});
                     el.addEventListener('touchstart', mark, {passive: true});
                     el.addEventListener('keydown', function (e) {
                         if (e.key === 'ArrowUp' || e.key === 'PageUp' || e.key === 'Home') mark();
+                        else if (e.key === 'ArrowDown' || e.key === 'PageDown' || e.key === 'End') markDown();
                         else stamp();
                     });
                 }
@@ -5173,8 +5313,12 @@ _CONTENT_AUTOSCROLL_JS = """
                             var cWant = Math.min(s.cp.top, cMax);
                             if (Math.abs(cp.scrollTop - cWant) >= 1) _progScroll(cp, cWant);
                         }
-                        // 恢复用户上滚意图：重建期的钳制不得反过来改写跟随态
-                        cp._userScrolledUp = s.cp.up;
+                        // 恢复用户上滚意图：重建期的钳制不得反过来改写跟随态。
+                        // 但快照是重建前的：用户在重建窗口内（scroll 事件被
+                        // _suppressScrollEvent 抑制）滚到底时，盲目写回 true 会
+                        // 覆盖「已回到底」的事实，跟随随即停摆直到下次滚动。
+                        // 此刻几何已贴底 → 不恢复上滚态。
+                        cp._userScrolledUp = s.cp.up && !_dfxNearBottom(cp);
                     }
                     if (tc && s.tc) {
                         // [#12 R1] display:none 期间节点在渲染树外，clientHeight/
@@ -5190,7 +5334,7 @@ _CONTENT_AUTOSCROLL_JS = """
                                 if (Math.abs(tc.scrollTop - tWant) >= 1) _progScroll(tc, tWant);
                             }
                         }
-                        tc._userScrolledUp = s.tc.up;
+                        tc._userScrolledUp = s.tc.up && !_tsGone && !_dfxNearBottom(tc);
                     }
                 }
                 function _autoScrollStreamingBody(bodyOnly) {
@@ -5203,6 +5347,13 @@ _CONTENT_AUTOSCROLL_JS = """
                     // 代码块/图表」等仍可能内滚的容器状态，不做位置调换。
                     var _cp = document.getElementById('content-placeholder');
                     if (document.body.classList.contains('streaming-dock') && _cp) {
+                        // 自愈：标志说「用户在上方阅读」，几何却说「已贴底」时以几何
+                        // 为准。流式内容增长会让最后一次 scroll 事件的 atBottom 判定
+                        // 失真，标志一旦错置，这里若不纠正就再没有自动复位的机会。
+                        if (_cp._userScrolledUp && _dfxNearBottom(_cp)) {
+                            _cp._userScrolledUp = false;
+                            if (typeof reportHeightDebounced === 'function') reportHeightDebounced();
+                        }
                         if (!_cp._userScrolledUp) {
                             _progScroll(_cp, _cp.scrollHeight);
                         }
@@ -5238,11 +5389,22 @@ _CONTENT_AUTOSCROLL_JS = """
                     // 一旦间隔 >800ms 标志卡死为"已离开"→ 内容更新时跟随失效、
                     // 视口被 _cpPrevTop 还原拖回旧阅读位置（弹回中间的根因）。
                     var atBottom = Math.abs(cp.scrollHeight - cp.scrollTop - cp.clientHeight) < 30;
-                    // 贴底任何时候都恢复跟随；置位「用户上滚」需近期真实输入证据，
+                    // 贴底任何时候都恢复跟随；置位「用户上滚」需近期**上滚**输入证据，
                     // 否则几何变化引起的 scroll（切回标签页 / 重建钳制）会把跟随
                     // 永久锁死（卡内停在旧位置的根因）。
-                    if (atBottom) cp._userScrolledUp = false;
-                    else if (_recentUserScrollInput(cp)) cp._userScrolledUp = true;
+                    // 方向门控：下滚时方向焦点在下方的 _dfxReleaseFollowOnDown；
+                    // 此处若因内容高度又增长而置位，会把「正在滚向最新内容」误判
+                    // 成「已在上面阅读」，从此停止跟随。
+                    if (atBottom) {
+                        if (cp._userScrolledUp) {
+                            cp._userScrolledUp = false;
+                            // 阅读态翻转必须立即回传：外层只看这份标志决定是否让位，
+                            // 等到下一次高度上报才刷新会让贴底被白白跳过一拍。
+                            if (typeof reportHeightDebounced === 'function') reportHeightDebounced();
+                        }
+                    } else if (cp._lastInputDir === -1 && _recentUserScrollInput(cp)) {
+                        cp._userScrolledUp = true;
+                    }
                 });
                 // 异步渲染（mermaid/katex/echarts/widget iframe）完成后补滚底。
                 // 这些渲染在 updateContent 置底**之后**才完成并增高内容 →

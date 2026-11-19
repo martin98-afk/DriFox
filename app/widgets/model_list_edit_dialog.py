@@ -22,11 +22,12 @@ from PyQt5.QtWidgets import (
     QLineEdit,
     QListWidget,
     QListWidgetItem,
+    QMenu,
     QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
-from qfluentwidgets import FluentIcon, PushButton, SwitchButton, TransparentToolButton
+from qfluentwidgets import CheckBox, FluentIcon, PushButton, SwitchButton, TransparentToolButton
 
 from app.utils.design_tokens import Colors, font_size_css, get_unified_scrollbar_style, scale_font_size
 from app.utils.utils import get_font_family_css
@@ -35,7 +36,7 @@ from app.widgets.flow_layout import FlowLayout  # noqa: F401  （候选区/外�
 
 _DUP_COLOR = "#e05656"  # 重复项前景色
 
-_ROW_H = 46  # 行高：双行文本（名称 + 灰字摘要）+ 开关 + 底部分隔线
+_ROW_H = 62  # 行高：名称行 + 元信息行（上下文 + 能力胶囊 + 铅笔）+ 分隔线（实测自然高）
 # 行控件分批异步构建：单行 ~7ms（qfluentwidgets 开关 4.5ms 占大头），几百行同步建
 # 会冻结 UI 数秒（用户实测「模型列表多时进卡卡很久」）。item（纯数据）同步全建，
 # 行控件超出阈值的部分入队由 QTimer 分批建，拍间事件循环呼吸，UI 全程可响应。
@@ -47,8 +48,16 @@ _ROW_BUILD_BATCH = 6  # 每拍建行数（~45ms/拍，低于 50ms 可感卡顿�
 # 表格列宽（行控件与表头共用）：价格/开关列固定；徽章列随字号缩放（_badges_col_width）
 _COL_PRICE_W = 68  # 单个价格列（右对齐；$10.00 实测需 ~46px，余量给名称列）
 _COL_SWITCH_W = 68  # 开关列
-_BADGE_EDIT_BTN_W = 26  # 能力列尾部「编辑能力」按钮占宽
+_BADGE_EDIT_BTN_W = 26  # （已退役）旧能力列尾部编辑按钮占宽，保留常量防外部引用断链
 _PRICE_NA = "-"  # models.dev 无价格占位（对齐 opencode 的空价列）
+
+# 可排序列标识：名称 / 启用态 / 四个价格列（与表头标签一一对应）
+_SORT_NAME = "name"
+_SORT_ENABLED = "enabled"
+_SORT_PRICE_KEYS = ("input", "output", "cache_read", "cache_write")
+# 表头列标识 → 标签原文（箭头由 _refresh_header_arrows 在其后追加）
+_HEADER_TITLES = {"name": "模型", "enabled": "启用"}
+_HEADER_TITLES.update(dict(zip(_SORT_PRICE_KEYS, ("输入", "输出", "缓存读", "缓存写"))))
 
 
 def _fmt_price(v) -> str:
@@ -59,11 +68,10 @@ def _fmt_price(v) -> str:
 
 
 def _badges_col_width() -> int:
-    """能力徽章列宽：随系统字号缩放（三个文字 chip 最宽组合 + 尾部编辑按钮）。
+    """（已退役）旧「能力」固定列宽。
 
-    固定基准值在高字号档位下会截断 chip（用户实测「开关思考」被裁），
-    三 chip 齐全时（开关思考 + 思考强度 + 多模态）实测约 272px，故留足余量：
-    11 个字 ×(11+delta) + padding/间距 100 + 按钮 26。
+    能力胶囊已下移到行内元信息行（跟随模型名，不再独占一列），本函数只保留
+    导出兼容，不再参与任何布局计算。
     """
     delta = scale_font_size(11) - 11
     return 11 * (11 + delta) + 100 + _BADGE_EDIT_BTN_W
@@ -151,33 +159,34 @@ class _ModelRowWidget(QWidget):
         row.setContentsMargins(12, 4, 8, 4)
         row.setSpacing(0)
 
-        # 名称列：模型名 + 灰字上下文（双行；第二行空则隐藏）
+        # 名称列：模型名 + 元信息行（上下文 · 能力胶囊 · 编辑按钮）
         text_col = QVBoxLayout()
         text_col.setContentsMargins(0, 0, 0, 0)
         text_col.setSpacing(1)
         self.name_label = _ElidedLabel(self.model_name, self)
-        self.sub_label = QLabel(self._summary_text(caps), self)
         text_col.addWidget(self.name_label)
+
+        # 元信息行（第二行）：上下文灰字 + 能力胶囊 + 铅笔，全部左对齐串成一行。
+        # 胶囊从原「能力列」下移到此（用户要求）：省掉一个 313px 固定列，
+        # 名称列拿回全部宽度；胶囊天然紧跟模型名，扫读时不用横跳。
+        self._meta_row = QHBoxLayout()
+        self._meta_row.setContentsMargins(0, 0, 0, 0)
+        self._meta_row.setSpacing(6)
+        self.sub_label = QLabel(self._summary_text(caps), self)
+        self._meta_row.addWidget(self.sub_label, 0, Qt.AlignVCenter)
         # 灰字行恒在布局里，空文本靠隐藏让位：能力声明编辑后可能从「无上下文」
         # 变为「有上下文」，若初始未 addWidget，后续 setVisible(True) 不会显示
-        text_col.addWidget(self.sub_label)
         self.sub_label.setVisible(bool(self.sub_label.text()))
-        row.addLayout(text_col, 1)
-
-        # 能力徽章列：固定宽（保证价格/开关列跨行严格对齐，无徽章也占位）；
-        # 宽度随系统字号缩放，字号变更时 refresh_style 同步；
-        # 末尾齿轮是能力声明入口（chip 自带 tooltip 一律清除，行级 tooltip 统一说明）
-        self.badge_holder = QWidget(self)
-        self.badge_holder.setFixedWidth(_badges_col_width())
-        badge_lay = QHBoxLayout(self.badge_holder)
-        badge_lay.setContentsMargins(8, 0, 8, 0)
-        badge_lay.setSpacing(0)
         self.badges = self._make_badges(caps)
-        badge_lay.addWidget(self.badges, 0, Qt.AlignLeft | Qt.AlignVCenter)
-        badge_lay.addStretch(1)
-        self.caps_btn = TransparentToolButton(FluentIcon.EDIT, self.badge_holder)
-        self.caps_btn.setFixedSize(22, 22)
-        self.caps_btn.setIconSize(QSize(13, 13))
+        # Minimum 横向策略：窄窗时先压上下文文字与尾部 stretch，胶囊不缩
+        # （默认 Preferred 会被压扁到 43px，三个 chip 挤成一团）
+        self.badges.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Preferred)
+        self._meta_row.addWidget(self.badges, 0, Qt.AlignVCenter)
+        # 铅笔紧跟胶囊尾巴（用户选定的位置）：视觉上属于这串胶囊，
+        # 比固定列更贴「改这几个胶囊」的意图
+        self.caps_btn = TransparentToolButton(FluentIcon.EDIT, self)
+        self.caps_btn.setFixedSize(20, 20)
+        self.caps_btn.setIconSize(QSize(12, 12))
         self.caps_btn.setToolTip("编辑模型能力（多模态 / 思考 / 上下文长度）")
         self.caps_btn.clicked.connect(self._emit_edit_caps)
         # 默认半透明：每行一个铅笔常亮会抢过内容，hover 才提到满不透明
@@ -185,8 +194,10 @@ class _ModelRowWidget(QWidget):
         self._caps_btn_fx.setOpacity(0.4)
         self.caps_btn.setGraphicsEffect(self._caps_btn_fx)
         self.caps_btn.installEventFilter(self)
-        badge_lay.addWidget(self.caps_btn, 0, Qt.AlignRight | Qt.AlignVCenter)
-        row.addWidget(self.badge_holder, 0, Qt.AlignVCenter)
+        self._meta_row.addWidget(self.caps_btn, 0, Qt.AlignVCenter)
+        self._meta_row.addStretch(1)
+        text_col.addLayout(self._meta_row)
+        row.addLayout(text_col, 1)
 
         # 价格四列（caps["cost"] 来自 models.dev，$/M tokens；无数据显示 "-"；
         # 不设独立 tooltip：行 tooltip 已含能力细节，多重悬浮反而乱）
@@ -222,7 +233,7 @@ class _ModelRowWidget(QWidget):
 
     def _make_badges(self, caps: dict) -> ModelCapabilityBadges:
         """构造芯片行（chip 自带 tooltip 清空：行级 tooltip 统一说明来源）"""
-        badges = ModelCapabilityBadges(caps or {}, parent=self.badge_holder)
+        badges = ModelCapabilityBadges(caps or {}, parent=self)
         for attr in ("think_label", "effort_label", "vision_label"):
             chip = getattr(badges, attr, None)
             if chip is not None:
@@ -242,19 +253,23 @@ class _ModelRowWidget(QWidget):
         for lbl, key in zip(self.price_labels, ("input", "output", "cache_read", "cache_write")):
             lbl.setText(_fmt_price(cost.get(key)))
         old = self.badges
-        lay = self.badge_holder.layout()
+        # 原位替换：铅笔紧跟胶囊，新徽章必须插回同一位置（sub_label 之后）
+        pos = self._meta_row.indexOf(old) if old is not None else 1
+        if pos < 0:
+            pos = 1
         if old is not None:
-            lay.removeWidget(old)
+            self._meta_row.removeWidget(old)
             old.setParent(None)
             old.deleteLater()
         self.badges = self._make_badges(caps)
-        lay.insertWidget(0, self.badges, 0, Qt.AlignLeft | Qt.AlignVCenter)
+        self.badges.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Preferred)
+        self._meta_row.insertWidget(pos, self.badges, 0, Qt.AlignVCenter)
         self._apply_text_style()
 
     @staticmethod
     def _summary_text(caps: dict) -> str:
-        """灰字摘要：只留上下文长度。能力短语（开关思考/思考强度档位等）与右侧
-        徽章重复且长文本挤压行内布局，细节收进行 tooltip（用户反馈列表「混乱」）"""
+        """灰字摘要：只留上下文长度。能力细节由同一行的胶囊表达，
+        长文本不重复（用户反馈列表「混乱」）"""
         caps = caps or {}
         ctx = caps.get("context_limit")
         if isinstance(ctx, int) and ctx > 0:
@@ -312,12 +327,30 @@ class _ModelRowWidget(QWidget):
 
     def refresh_style(self):
         self._apply_text_style()
-        # 字号档位变更 → 徽章列宽同步（防高字号下 chip 截断）
-        try:
-            self.badge_holder.setFixedWidth(_badges_col_width())
-        except RuntimeError:
-            pass
 
+
+class _SortableItem(QListWidgetItem):
+    """可排序 item：排序键存在实例上，__lt__ 只比该键。
+
+    为什么不用 takeItem/insertItem 手动重排：setItemWidget 挂上去的行控件会在
+    takeItem 时被一并销毁（实测无法重新 setItemWidget 挂回），手动挪 item 等于
+    把整列行控件删掉重建。sortItems 只搬 item 不碰 itemWidget，行控件与隐藏态
+    都原样跟走（实测），是唯一可行路径。
+    """
+
+    def __init__(self):
+        super().__init__()
+        self._sort_key = None
+
+    def __lt__(self, other):
+        a = self._sort_key
+        b = getattr(other, "_sort_key", None)
+        try:
+            return a < b
+        except TypeError:
+            # 同一次排序内键类型一致；跨列混排（不该发生）时退化为字符串比较，
+            # 保证 Qt 的稳定排序不会因比较器抛异常而崩
+            return str(a) < str(b)
 
 def _split_model_input(text: str) -> list:
     """把用户输入拆成模型名列表：换行/逗号（含中文逗号）分隔，去空去重保序"""
@@ -357,6 +390,11 @@ class ModelListEditorWidget(QWidget):
         self._candidate_models: list = []
         self._candidate_expanded = False
         self._candidate_folded_hint = "其他"
+        # 排序态：列标识 + 是否降序（空 = 未排序，保持磁盘/新增顺序）
+        self._sort_col: str = ""
+        self._sort_desc = False
+        # 只看启用（与搜索关键词叠加过滤）
+        self._only_enabled = False
         # 分批建行队列：待建行控件的 item（数据已同步建好，见 _make_row_item）
         self._pending_rows: list = []
         self._row_build_timer: QTimer | None = None
@@ -388,22 +426,102 @@ class ModelListEditorWidget(QWidget):
         # 表头直接在 layout 里不吃这 1px，补偿后列线才对齐
         lay.setContentsMargins(13, 6, 9, 6)
         lay.setSpacing(0)
-        lay.addWidget(QLabel("模型", header), 1)
-        self.header_feats_label = QLabel("能力", header)
-        self.header_feats_label.setFixedWidth(_badges_col_width())
-        # 与行内徽章左侧 8px 内边距对齐（否则表头文字比徽章靠左一截）
-        self.header_feats_label.setIndent(8)
-        lay.addWidget(self.header_feats_label)
-        for cn in ("输入", "输出", "缓存读", "缓存写"):
-            lbl = QLabel(cn, header)
+        # 可点列的标签原文（排序箭头在其后追加；改文案两处同步）
+        self._header_cols: dict = {}
+
+        def _clickable(col: str) -> QLabel:
+            """建列标签并挂点击（点列头排序；箭头由 _refresh_header_arrows 维护）"""
+            lbl = QLabel("", header)
+            lbl.setCursor(Qt.PointingHandCursor)
+            lbl.mousePressEvent = lambda _e, c=col: self._on_header_clicked(c)
+            self._header_cols[col] = lbl
+            return lbl
+
+        name_lbl = _clickable(_SORT_NAME)
+        name_lbl.setText("模型")
+        lay.addWidget(name_lbl, 1)
+        for cn, key in zip(("输入", "输出", "缓存读", "缓存写"), _SORT_PRICE_KEYS):
+            lbl = _clickable(key)
+            lbl.setText(cn)
             lbl.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
             lbl.setFixedWidth(_COL_PRICE_W)
             lay.addWidget(lbl)
-        en = QLabel("启用", header)
+        en = _clickable(_SORT_ENABLED)
+        en.setText("启用")
         en.setAlignment(Qt.AlignCenter)
         en.setFixedWidth(_COL_SWITCH_W)
         lay.addWidget(en)
         return header
+
+    # ── 表头排序（视图即落盘：sortItems 直接改变 get_models() 的顺序）────
+
+    def _on_header_clicked(self, col: str):
+        """点列头：同列切换升降，换列重置为升序（价格升序 = 便宜优先）"""
+        if col == self._sort_col:
+            self._sort_desc = not self._sort_desc
+        else:
+            self._sort_col = col
+            self._sort_desc = False
+        self._apply_sort()
+
+    def _price_of(self, name: str, key: str):
+        """取单列价格；无数据/非法值返回 None（排序时统一垫底）"""
+        cost = (self._caps_for(name) or {}).get("cost")
+        value = cost.get(key) if isinstance(cost, dict) else None
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
+            return None
+        return float(value)
+
+    def _apply_sort(self):
+        """按当前排序列重算全部 item 的排序键并排序。
+
+        - 必须给**每个** item 赋值再排序：sortItems 内部任意两项都可能被比较，
+          缺键会退化成 None 比较。
+        - 无价格项（models.dev 无数据）恒垫底：升序给 +inf、降序给 -inf，
+          翻转后都落到末尾，不参与“便宜/贵”语义。
+        - 排序改变的是 listWidget 实际顺序 → get_models() 即新序 → 保存即落盘。
+        """
+        col = self._sort_col
+        if not col:
+            return
+        desc = self._sort_desc
+        for i in range(self.listWidget.count()):
+            item = self.listWidget.item(i)
+            if not isinstance(item, _SortableItem):
+                continue
+            name = str(item.data(Qt.UserRole) or "")
+            if col == _SORT_NAME:
+                key = name.lower()
+            elif col == _SORT_ENABLED:
+                # 升序 = 启用在前（0 启用 / 1 关闭）；降序自动变关闭在前（即分段）
+                key = 1 if name in self._disabled else 0
+            else:
+                price = self._price_of(name, col)
+                if price is None:
+                    key = float("-inf") if desc else float("inf")
+                else:
+                    key = price
+            item._sort_key = key
+        self.listWidget.sortItems(Qt.DescendingOrder if desc else Qt.AscendingOrder)
+        self._refresh_header_arrows()
+
+    def _refresh_header_arrows(self):
+        """当前排序列追加 ↑/↓ 并用 accent 色高亮，其余列回落 QSS 样式"""
+        for col, lbl in (getattr(self, "_header_cols", None) or {}).items():
+            title = _HEADER_TITLES.get(col, col)
+            if col == self._sort_col:
+                arrow = " ↓" if self._sort_desc else " ↑"
+                try:
+                    lbl.setText(title + arrow)
+                    lbl.setStyleSheet(f"color: {Colors.SYSTEM_ACCENT};")
+                except RuntimeError:
+                    pass
+            else:
+                try:
+                    lbl.setText(title)
+                    lbl.setStyleSheet("")
+                except RuntimeError:
+                    pass
 
     def _build_qss(self) -> str:
         """构建主题 QSS（refresh_style 时重建，保证颜色/字号随系统）"""
@@ -487,13 +605,6 @@ class ModelListEditorWidget(QWidget):
         title = getattr(self, "candidate_title", None)
         if title is not None:
             title.setStyleSheet("")  # 样式走 QSS objectName 选择器
-        # 字号档位变更 → 表头徽章列宽同步（行内列宽由各行 refresh_style 自行更新）
-        feats = getattr(self, "header_feats_label", None)
-        if feats is not None:
-            try:
-                feats.setFixedWidth(_badges_col_width())
-            except RuntimeError:
-                pass
         lw = getattr(self, "listWidget", None)
         if lw is not None:
             for i in range(lw.count()):
@@ -503,6 +614,8 @@ class ModelListEditorWidget(QWidget):
                         row.refresh_style()
                     except RuntimeError:
                         pass
+        # 主题切换后 accent 色变 → 排序列箭头色需重建
+        self._refresh_header_arrows()
 
     def set_provider_name(self, name: str):
         """切换所属服务商（新建卡切下拉时调用）：能力查询跟随，缓存作废。
@@ -592,9 +705,11 @@ class ModelListEditorWidget(QWidget):
         defer=True：item 同步入列表（数据立即可查），行控件入分批队列异步建
         （大批量时避免同步构建冻结 UI）；defer=False 保持旧行为同步建。
         """
-        item = QListWidgetItem()
+        item = _SortableItem()
         item.setData(Qt.UserRole, str(name))
         item.setSizeHint(QSize(0, _ROW_H))
+        # 未排序时排序键按名称算（仅防 sortItems 外部误触发时 None 比较）
+        item._sort_key = str(name).lower()
         if insert_at < 0:
             self.listWidget.addItem(item)
         else:
@@ -670,9 +785,14 @@ class ModelListEditorWidget(QWidget):
         self.searchEdit.returnPressed.connect(self._on_search_return)
         self.addBtn = PushButton("添加")
         self.addBtn.clicked.connect(self._on_search_return)
+        # 只看启用：关闭的行直接隐藏（与搜索关键词叠加）
+        self.onlyEnabledBox = CheckBox("只看启用")
+        self.onlyEnabledBox.setChecked(False)
+        self.onlyEnabledBox.toggled.connect(self._on_only_enabled_toggled)
         search_row = QHBoxLayout()
         search_row.setSpacing(6)
         search_row.addWidget(self.searchEdit, 1)
+        search_row.addWidget(self.onlyEnabledBox)
         search_row.addWidget(self.addBtn)
         layout.addLayout(search_row)
 
@@ -712,9 +832,14 @@ class ModelListEditorWidget(QWidget):
         # 主列表（行内开关启停；无拖拽、无双击编辑；高度全展开不内滚，滚动交给外层卡片）
         self.listWidget = QListWidget()
         self.listWidget.setSelectionBehavior(QListWidget.SelectRows)
-        self.listWidget.setSelectionMode(QListWidget.SingleSelection)
+        # 多选：Ctrl 点选 / Shift 范围选 / Ctrl+A 全选；批量启停走右键菜单
+        self.listWidget.setSelectionMode(QListWidget.ExtendedSelection)
         self.listWidget.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.listWidget.itemChanged.connect(lambda _item: self._check_duplicates())
+        # 右键菜单：行控件上的右键也会冒泡到这里（实测能收到），但**不改选中态**，
+        # 因此 _on_context_menu 自己判定位
+        self.listWidget.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.listWidget.customContextMenuRequested.connect(self._on_context_menu)
         self._fill_rows(models)
         self._update_list_height()
         layout.addWidget(self.listWidget)
@@ -737,6 +862,123 @@ class ModelListEditorWidget(QWidget):
         row = self._row_of(name)
         if row is not None:
             row._apply_text_style()
+        if self._only_enabled:
+            # 只看启用开着：关掉的行立即从视野消失（用户明确要求语义干净）
+            self._apply_filter()
+        if self._sort_col == _SORT_ENABLED:
+            # 正按启用态排序：顺序必须跟着变，否则表头箭头在扯谎
+            self._apply_sort()
+
+    # ── 批量操作（多选 + 右键菜单）───────────────────────
+
+    def _selected_names(self) -> list:
+        """当前选中行的模型名（按**列表序**，非点选序）；无选中返回空。
+
+        不用 selectedItems()：它按选中先后返回，菜单里「(N)」与批量顺序会和用户
+        看到的表格顺序不一致。
+        """
+        return [
+            str(self.listWidget.item(i).data(Qt.UserRole) or "")
+            for i in range(self.listWidget.count())
+            if self.listWidget.item(i).isSelected()
+        ]
+
+    def _on_context_menu(self, pos):
+        """右键菜单：启用/关闭/移除所选 + 全选/反选。
+
+        右键落在未选中行上 → 先清空选中并只选该行（标准表格行为）；落在选中行上
+        → 保持现有多选集，不破坏用户刚做的选择。
+        """
+        item = self.listWidget.itemAt(pos)
+        if item is not None and not item.isSelected():
+            self.listWidget.clearSelection()
+            item.setSelected(True)
+            self.listWidget.setCurrentItem(item)
+        names = self._selected_names()
+        n = len(names)
+        menu = QMenu(self)
+        menu.setStyleSheet(f"""
+            QMenu {{
+                background: {Colors.CARD_BG.format(alpha=235)};
+                border: 1px solid {Colors.BORDER};
+                border-radius: 6px;
+                padding: 4px;
+            }}
+            QMenu::item {{
+                padding: 6px 20px;
+                border-radius: 4px;
+                color: {Colors.TEXT_PRIMARY};
+                {get_font_family_css()} {font_size_css(13)}
+            }}
+            QMenu::item:selected {{
+                background: {Colors.HOVER_BG};
+            }}
+            QMenu::item:disabled {{
+                color: {Colors.TEXT_MUTED};
+            }}
+        """)
+        suffix = f" ({n})" if n else ""
+        act_enable = menu.addAction(f"启用所选{suffix}")
+        act_enable.triggered.connect(lambda: self._batch_set_enabled(names, True))
+        act_disable = menu.addAction(f"关闭所选{suffix}")
+        act_disable.triggered.connect(lambda: self._batch_set_enabled(names, False))
+        menu.addSeparator()
+        act_remove = menu.addAction(f"移除所选{suffix}")
+        act_remove.triggered.connect(self._remove_names)
+        for act in (act_enable, act_disable, act_remove):
+            act.setEnabled(bool(names))
+        menu.addSeparator()
+        act_all = menu.addAction("全选")
+        act_all.triggered.connect(self._select_all)
+        act_invert = menu.addAction("反选")
+        act_invert.triggered.connect(self._invert_selection)
+        menu.exec_(self.listWidget.viewport().mapToGlobal(pos))
+
+    def _select_all(self):
+        """全选（含被过滤隐藏的行？不含：setSelected 对隐藏项无效，与用户视觉一致）"""
+        self.listWidget.selectAll()
+
+    def _invert_selection(self):
+        """反选：可见行取反，隐藏行不参与（用户只能反选看得见的）"""
+        for i in range(self.listWidget.count()):
+            item = self.listWidget.item(i)
+            if not item.isHidden():
+                item.setSelected(not item.isSelected())
+
+    def _batch_set_enabled(self, names: list, enabled: bool):
+        """批量启停：一次性改关闭集 + 逐行同步开关态（不重建列表）。
+
+        走 row.set_enabled_state（内部 blockSignals）而非 setChecked，避免每行都
+        触发 _on_row_toggle 的重复重算。
+        """
+        if not names:
+            return
+        if enabled:
+            self._disabled.difference_update(names)
+        else:
+            self._disabled.update(names)
+        for name in names:
+            row = self._row_of(name)
+            if row is not None and hasattr(row, "set_enabled_state"):
+                row.set_enabled_state(enabled)
+        if self._only_enabled:
+            # 批量关掉的行立即从视野消失（与单行语义一致）
+            self._apply_filter()
+        if self._sort_col == _SORT_ENABLED:
+            self._apply_sort()
+
+    def _remove_names(self, names: list):
+        """按名批量移出主列表（关闭态随之清除；候选区可找回）"""
+        for name in names:
+            self._disabled.discard(name)
+            for i in range(self.listWidget.count()):
+                item = self.listWidget.item(i)
+                if str(item.data(Qt.UserRole) or "") == name:
+                    self.listWidget.takeItem(i)
+                    break
+        self._check_duplicates()
+        self._update_list_height()
+        self._apply_filter()
 
     def set_disabled_models(self, models: list):
         """装载「模型关闭列表」（磁盘值；装载后同步各行开关态）"""
@@ -745,6 +987,8 @@ class ModelListEditorWidget(QWidget):
             row = self.listWidget.itemWidget(self.listWidget.item(i))
             if row is not None and hasattr(row, "set_enabled_state"):
                 row.set_enabled_state(row.model_name not in self._disabled)
+        if self._only_enabled:
+            self._apply_filter()
 
     def get_disabled_models(self) -> list:
         """关闭的模型（按主列表序返回；恒为主列表子集）"""
@@ -753,12 +997,22 @@ class ModelListEditorWidget(QWidget):
     # ── 过滤与添加 ─────────────────────────────────────────
 
     def _apply_filter(self):
-        """按搜索框关键词隐藏/显示主列表项（仅视觉过滤，不删数据）；隐藏后重算高度"""
+        """按搜索关键词 + 只看启用隐藏主列表项（仅视觉过滤，不删数据）；重算高度"""
         kw = self.searchEdit.text().strip().lower()
+        only_enabled = self._only_enabled
         for i in range(self.listWidget.count()):
-            name = str(self.listWidget.item(i).data(Qt.UserRole) or "")
-            self.listWidget.item(i).setHidden(bool(kw) and kw not in name.lower())
+            item = self.listWidget.item(i)
+            name = str(item.data(Qt.UserRole) or "")
+            hidden = bool(kw) and kw not in name.lower()
+            if only_enabled and name in self._disabled:
+                hidden = True
+            item.setHidden(hidden)
         self._update_list_height()
+
+    def _on_only_enabled_toggled(self, checked: bool):
+        """「只看启用」勾选变化 → 重新过滤"""
+        self._only_enabled = bool(checked)
+        self._apply_filter()
 
     def _on_search_return(self):
         """搜索框回车：把框内文本（可多行/逗号分隔）作为新模型批量加入"""
@@ -791,6 +1045,9 @@ class ModelListEditorWidget(QWidget):
             self._schedule_row_build()
             self._check_duplicates()
             self._apply_filter()
+            # 当前处于排序态：新行也要按同列归位（否则新行带着名称键混在价格序里）
+            if self._sort_col:
+                self._apply_sort()
             self.listWidget.scrollToTop()
             self.listWidget.setCurrentRow(0)
         return added
@@ -845,16 +1102,19 @@ class ModelListEditorWidget(QWidget):
             return ""
 
     def _delete_selected(self):
-        """删除选中行 = 移出「模型列表」（候选区可找回）；关闭态随之清除"""
-        row = self.listWidget.currentRow()
-        if row < 0:
-            return
-        item = self.listWidget.item(row)
-        name = str(item.data(Qt.UserRole) or "") if item is not None else ""
-        self._disabled.discard(name)
-        self.listWidget.takeItem(row)
-        self._check_duplicates()
-        self._update_list_height()
+        """删除选中行 = 移出「模型列表」（候选区可找回）；关闭态随之清除。
+
+        多选时逐个删除；无选中（或仅 currentRow 非选中）时回退到当前行，
+        兼容既有单选调用点与测试。
+        """
+        names = self._selected_names()
+        if not names:
+            row = self.listWidget.currentRow()
+            if row < 0:
+                return
+            item = self.listWidget.item(row)
+            names = [str(item.data(Qt.UserRole) or "")] if item is not None else []
+        self._remove_names(names)
 
     def _check_duplicates(self):
         """重复项标红提示（不阻止操作；写回下拉时仍会自动去重）"""
@@ -991,10 +1251,14 @@ class ModelListEditorWidget(QWidget):
         self._pending_rows.clear()
         if self._row_build_timer is not None:
             self._row_build_timer.stop()
+        # 外部装载顺序即磁盘顺序：排序态重置，否则表头箭头会误导（看着排过其实没排）
+        self._sort_col = ""
+        self._sort_desc = False
         self._fill_rows(self._dedupe(models))
         self._check_duplicates()
         self._apply_filter()
         self._update_list_height()
+        self._refresh_header_arrows()
 
     def _fill_rows(self, models: list):
         """批量装行：前 _DEFER_ROW_THRESHOLD 行同步建（首屏即时可见，兼容

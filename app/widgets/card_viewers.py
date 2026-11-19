@@ -7633,9 +7633,35 @@ class CodeWebViewer(QWebEngineView):
                 (function () {{
                     var _b = document.body;
                     var _stamp = function () {{ _b._lastInputAt = performance.now(); }};
-                    _b.addEventListener('wheel', _stamp, {{passive: true}});
-                    _b.addEventListener('touchstart', _stamp, {{passive: true}});
-                    _b.addEventListener('keydown', _stamp);
+                    // 方向语义同 _bindUserScrollIntent：-1 上滚 / 1 下滚。
+                    // body 的 scroll 监听只允许上滚置位——下滚途中内容增长被
+                    // 记成「上滚阅读」的话，跟随会永久停摆。
+                    _b.addEventListener('wheel', function (e) {{
+                        _b._lastInputDir = e.deltaY < 0 ? -1 : 1;
+                        _stamp();
+                        if (e.deltaY > 0) {{
+                            // 解封基准：本次下滚时的可滚量（之后内容增长不算离底）
+                            _b._downScrollBaseMax = Math.max(0, _b.scrollHeight - _b.clientHeight);
+                            if (typeof _dfxReleaseBodyFollowOnDown === 'function') {{
+                                _dfxReleaseBodyFollowOnDown({AUTO_SCROLL_THRESHOLD});
+                            }}
+                            if (typeof _dfxSettleBodyDownScroll === 'function') {{
+                                _dfxSettleBodyDownScroll({AUTO_SCROLL_THRESHOLD});
+                            }}
+                        }}
+                    }}, {{passive: true}});
+                    _b.addEventListener('touchstart', function () {{
+                        _b._lastInputDir = -1;  // 触屏方向未知，按上滚保守处理
+                        _stamp();
+                    }}, {{passive: true}});
+                    _b.addEventListener('keydown', function (e) {{
+                        if (e.key === 'ArrowUp' || e.key === 'PageUp' || e.key === 'Home') {{
+                            _b._lastInputDir = -1;
+                        }} else if (e.key === 'ArrowDown' || e.key === 'PageDown' || e.key === 'End') {{
+                            _b._lastInputDir = 1;
+                        }}
+                        _stamp();
+                    }});
                 }})();
                 document.body.addEventListener('scroll', function() {{
                     var _st = document.body.scrollTop;
@@ -7655,10 +7681,12 @@ class CodeWebViewer(QWebEngineView):
                     var _nearBottom = Math.abs(document.body.scrollHeight - _st - document.body.clientHeight) < {
             AUTO_SCROLL_THRESHOLD
         };
-                    // 只允许「贴底 → 复位」；置位需近期真实输入证据（见上方时间戳）。
-                    // 否则切回标签页 / 高度上限变化引起的 scroll 会把跟随永久锁死。
+                    // 只允许「贴底 → 复位」；置位需近期**上滚**输入证据（见上方方向
+                    // 记录）。否则切回标签页 / 高度上限变化引起的 scroll 会把跟随
+                    // 永久锁死；下滚输入同样不能置位（朝最新内容滚，不该判成阅读态）。
                     if (_nearBottom) window._userScrolledWithin = false;
-                    else if (document.body._lastInputAt &&
+                    else if (document.body._lastInputDir === -1 &&
+                             document.body._lastInputAt &&
                              (performance.now() - document.body._lastInputAt) < 900) {{
                         window._userScrolledWithin = true;
                     }}
@@ -7752,7 +7780,14 @@ class CodeWebViewer(QWebEngineView):
                 function _scrollToolContentToBottom() {{
                     var tc = document.getElementById('tool-content');
                     if (!tc) return;
-                    // 用户主动向上滚动了工具区则不自动滚底
+                    // 用户主动向上滚动了工具区则不自动滚底。
+                    // 自愈：标志与几何矛盾（已贴底）时以几何为准，否则一次误置
+                    // 就再没有自动复位的机会（流式内容在 scroll 事件派发前增长
+                    // 会让 atBottom 判定失真）。
+                    if (tc._userScrolledUp && _dfxNearBottom(tc)) {{
+                        tc._userScrolledUp = false;
+                        if (typeof reportHeightDebounced === 'function') reportHeightDebounced();
+                    }}
                     if (tc._userScrolledUp) return;
                     // 抑制本次程序滚底触发的 scroll 事件：异步 scroll 到达时
                     // scrollHeight 可能已增长（流式新块加入），atBottom 误判 false
@@ -7772,10 +7807,17 @@ class CodeWebViewer(QWebEngineView):
                     // 程序性滚底（_scrollToolContentToBottom / innerHTML 重建）不视为用户行为
                     if (tc._progDepth > 0) {{ tc._progDepth--; return; }}
                     var atBottom = Math.abs(tc.scrollHeight - tc.scrollTop - tc.clientHeight) < 30;
-                    // 贴底任何时候都恢复跟随；置位「用户上滚」需近期真实输入证据
-                    // （tc 已绑 _bindUserScrollIntent，会记录 _lastInputAt）。
-                    if (atBottom) tc._userScrolledUp = false;
-                    else if (_recentUserScrollInput(tc)) tc._userScrolledUp = true;
+                    // 贴底任何时候都恢复跟随；置位「用户上滚」需近期**上滚**输入证据
+                    // （tc 已绑 _bindUserScrollIntent，会记录 _lastInputAt/_lastInputDir）。
+                    // 下滚不置位：否则滚向最新内容途中被内容增长卡成阅读态。
+                    if (atBottom) {{
+                        if (tc._userScrolledUp) {{
+                            tc._userScrolledUp = false;
+                            if (typeof reportHeightDebounced === 'function') reportHeightDebounced();
+                        }}
+                    }} else if (tc._lastInputDir === -1 && _recentUserScrollInput(tc)) {{
+                        tc._userScrolledUp = true;
+                    }}
                 }});
                 // 🐛 修复（流式滚动位置重置）：wheel 事件同步标记上滚意图——scroll
                 // 事件异步派发，与流式 JS（_scrollToolContentToBottom）存在竞争窗口：

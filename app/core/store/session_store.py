@@ -899,8 +899,12 @@ class SessionStore:
     def force_cleanup_project(self, project_name: str) -> bool:
         """强制清理项目的所有关联数据（绕过 repo 层，直接 SQL 删除表记录）
 
-        归档时调用此方法，确保 sessions、project_workdir
-        两张表中该项目的所有记录都被删除，避免 UNION 查询让已归档项目"复活"。
+        归档时调用此方法，清掉所有能让项目重新出现在列表里的数据源：
+        - sessions / project_workdir：get_projects 的 UNION 两源
+        - key_documents：ProjectWorkdirRepository 启动时会把 is_working_dir=1
+          的行回灌进 project_workdir（见 _migrate_from_key_documents），
+          不清则已归档项目在下次启动以 0 会话空壳复活
+        - session_msg_extras：随会话删除的级联子表
         """
         if not self._db or not self._db.is_connected:
             logger.error(f"[SessionStore] 数据库未连接，无法清理项目 {project_name}")
@@ -914,6 +918,14 @@ class SessionStore:
             self._execute("DELETE FROM sessions WHERE project = ?", (project_name,))
             # 删除项目工作目录
             self._execute("DELETE FROM project_workdir WHERE project = ?", (project_name,))
+            # 清工作目录的历史宿主表：启动期迁移会从 key_documents 回灌
+            # project_workdir，不清则归档项目必在下次启动复活（2026-11-19 实证）。
+            # 极老库没有这张表（关键文档功能早期版本）→ 跳过，不拖垮整体清理。
+            ok_kd, kd_err = self._execute(
+                "DELETE FROM key_documents WHERE project = ? AND is_working_dir = 1", (project_name,)
+            )
+            if not ok_kd:
+                logger.debug(f"[SessionStore] key_documents 清理跳过: {kd_err}")
             # message_extras 级联清理（最后删）：前两步失败则 extras 与会话保持一致保留；
             # 前两步成功而 extras 失败只剩无害孤儿行（会话已不存在，无人查询）。
             for sid in target_ids:
