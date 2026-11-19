@@ -1,6 +1,6 @@
-## [v0.7.4] - 2026-11-18
+## [v0.7.4] - 2026-11-18 (重新发布 #2)
 
-自 v0.7.3 以来的变更 | 提交数：73 · 文件变更：152 · +10334/-1953 | 贡献者：dingma, drifox-bot, mading, martin98-afk
+自 v0.7.3 以来的变更 | 提交数：82 · 文件变更：196 · +13788/-3439 | 贡献者：dingma, drifox-bot, mading, martin98-afk
 
 ### ✨ 新功能 (New Features)
 
@@ -20,6 +20,29 @@
 - **Anthropic 提示缓存命中率恒为 0 修复** (`plugins/system-transports/transports/anthropic_messages.py` · `app/core/workers/protocol_dispatch.py`): Anthropic 前缀缓存是 opt-in——请求里没有 `cache_control` 断点，服务端既不写也不读，命中率必然 0，而此前全仓无一处发送该字段（新增的 automatic caching 仍要求顶层有一个 `cache_control`）。现按官方推荐在位阶最低的两处挂断点：`tools` 末项（覆盖整段工具定义，system 每轮变动时这一段仍命中）与最后一条消息的最后一个非空 content block（覆盖 tools+system+历史，多轮逐轮累积），断点数 ≤2（官方上限 4）；无 tools 有 system 时退化为 system 单块断点（system 须为块数组才挂得上）。端点拒绝该字段（400 且报错点名 `cache_control`）时自动剥除断点重发一次并告警，不因中转不支持而失败；模型配置写 `提示缓存=false` 可永久关闭（缺省开启）。协议分派补一条兜底：`认证方式=anthropic` 的配置改走原生 `anthropic_messages` 通道（此前落到默认 `openai_chat`，OpenAI 兼容层没有该字段的位置），优先级低于「协议入口」手选与 adapter 声明。新增 `[AnthropicCache]` DEBUG 打点（断点数 + usage 的 prompt/read/write），用于区分「代码没发断点」与「渠道吞了断点」。测试：`tests/plugins/test_anthropic_messages_transport.py` 补 7 例，新建 `tests/core/test_protocol_dispatch.py` 6 例。
 
 - **通用弹框长文本上下被裁切修复** (`app/widgets/common_dialogs.py`): ConfirmDialog / SingleInputDialog / InfoDialog / ChoiceDialog 的内容自适应原先只靠 `adjustSize()`，而含 wordWrap 文本的 widget 其 `sizeHint` 高度按「理想宽度」换行估算——理想宽度超过 `maximumSize` 被截短后，同一段文本实际需要更高的高度（「加载团队模板」确认框：sizeHint 按宽 647 估内容高 85px，实际宽 600 需 129px），layout 把内容 label 压缩后文字垂直溢出、首行/末行各露半截字。新增模块级 `_fit_dialog_widget`：`adjustSize()` 后按截短后的实际宽度用 `heightForWidth` 重求高度再 `resize`，四处调用点统一替换；短文本场景仍按 `DEFAULT_HEIGHT` 保底不膨胀。测试：`tests/widgets/test_common_dialogs.py` 新增 4 例（长文本不裁 / 高度按内容撑开 / 短文本保底 / InfoDialog 长文本不裁）。
+
+### ✨ 新功能 (New Features) (重新发布 #2 追加)
+
+- **模型列表编辑器重做：表头排序 + 多选批量启停 + 元信息行合并** (`app/widgets/model_list_edit_dialog.py` · `tests/widgets/test_model_list_editor_batch.py`): 列头可点排序（名称 / 启用态 / 四个价格列，同列切换升降、换列重置升序，当前列箭头以 accent 色高亮；无价格项恒垫底），排序直接改变 listWidget 实际顺序 → `get_models()` 即新序 → 保存落盘。行选择改多选（Ctrl 点选 / Shift 范围 / Ctrl+A 全选），右键菜单批量启用/禁用，一次性改关闭集并逐行同步开关态而不重建列表；正按启用态排序时顺序同步跟随。能力胶囊从原 313px 固定列下移到行内元信息行（上下文灰字 + 胶囊 + 铅笔，左对齐串成一行），名称列拿回全宽，行高按实测自然高改 62。测试 232 行（批量启停 / 价格与名称排序 / 启用态筛选）。
+
+### 🐛 问题修复 (Bug Fixes) (重新发布 #2 追加)
+
+- **归档项目下次启动以 0 会话空壳复活** (`app/core/store/session_store.py` · `tests/core/test_session_extras.py`): `force_cleanup_project` 只清 `sessions` / `project_workdir` 两张 UNION 源表，而 `ProjectWorkdirRepository._migrate_from_key_documents` 每次启动首次 `ensure_table` 会把 `key_documents.is_working_dir=1` 的行回灌进 `project_workdir`，被归档的项目随即复活。现同步清 `key_documents`（仅 `is_working_dir=1` 行，极老库缺表则跳过不拖垮整体清理）与级联子表 `session_msg_extras`。测试覆盖归档后不留残留、老库缺表降级、非工作目录行不受影响。
+- **内存滞留多处清理** (`app/core/workers/chat_worker.py` · `app/core/conversation/message_content.py` · `app/core/conversation/chat_session.py` · `app/widgets/scene_layer.py` · `app/utils/utils.py`): ① vision 图像注入前先把 data URI 落盘为 `image_ref`，失败降级保留原块，消除 base64 在 API 请求缓存副本里的长驻（内嵌 data:image 实测 20.5MB 级）；② consolidate 投影新增 `invalidate_consolidate_cache` 登记失效列表，ChatSession 替换/释放消息时各线程下次入口自清 TLS 旧投影（登记表容量封顶，超限任意挤出）；③ `SceneLayer.apply_config` 切 None / 纯色壁纸时立即 clear 进程级位图缓存组（最高约省 254MB）；④ `clear_todo_list` 改为一次性销毁旧面板、subagent executor finished 后自动 `deleteLater`、hover 预览定时器挂到 overlay 父对象；⑤ `get_app_data_dir` 拆到 `app/utils/app_paths.py` 纯路径模块，避免无 GUI 场景（core.store）被拉起 AppKit（+134MB → +25MB RSS），全仓调用点与测试同步迁移。测试：T8/T17 vision 注入持久化 / TLS 失效登记 / run_id 裁剪。
+- **team_manager run_id 映射无界增长** (`app/core/team/team_manager.py` · `tests/core/test_team_run_mapping_prune.py`): run_id 三层映射（templates / projects / workdirs）新增按 keep 集合（成员 ∪ 顶层 ∪ 本次写入）裁剪，封顶 32 条，裁剪在写入之后执行保证本次记录不被误删。
+- **流式卡已贴底却停止自动跟随** (`app/widgets/card_render_core.py` · `app/widgets/card_viewers.py` · `tests/widgets/test_stream_bottom_follow_release.py`): 骨架 JS +1（v87）。根因是内容在 scroll 事件派发前增长，`atBottom` 判定失真后跟随标志被误置为「上滚阅读」并永久卡住。现 `scroll` 监听只认上滚方向置位、下滚记录本次可滚基准并连续数帧检测贴底解封、自动置底前按几何自愈、内层标志翻转即时上报、复用清理复位容器 expando。回退路径：`_SKELETON_CACHE_VERSION` 递增使旧缓存失效。
+- **正文工具块只剩标题行（懒加载误用）** (`app/widgets/render/block_render.py`): `lazy_body` 的前提是「用户看不见」（折叠区 / 历史卡），但 `keep_in_content` 的工具块归正文，构造出来立刻可见，懒化后 body 永远等不到「展开工具区」那次注入。改为仅当 `_tool_home(block, ctx) != HOME_CONTENT` 时才懒化。
+- **原生滚动条切换后永久隐藏（侧边栏自定义插件区 / tab 列表滚动条消失）** (`app/utils/scroll_tuning.py` · `app/widgets/tab_panel.py` · `tests/widgets/test_scroll_native_bar_policy.py`): `SmoothScrollDelegate.__init__` 用实例属性劫持了 `setVerticalScrollBarPolicy`（内部强制 AlwaysOff，只联动已隐藏的 qfw 悬浮条），调用点随后任何一次 `AsNeeded` 都会把原生条打回永久隐藏。现切换时 `delattr` 恢复类方法，policy setter 回到原生语义；自定义插件区滚动条改 `AlwaysOn` 恒占位，避免条出现/消失导致 viewport 宽度跳变 8px（用户感知为「横向移动的滚轮」）。
+- **顶栏与对话列表左右边距不齐** (`app/widgets/tab_panel.py`): 顶栏右内边距 4（叠 handle 4 = 8px，比左 10px 窄 2px）改 6 与左同拍；列表右 2 改 6，行块右缘与左侧留白一致，去掉「列表外部 pad 太多」的观感。
+- **Gemini 收 OpenAI 专有参数整请求 400** (`plugins/system-providers/providers/gemini.py` · `plugins/system-transports/transports/openai_chat.py` · `app/core/workers/chat_worker.py`): Gemini 原生 `generateContent` 无 penalty 概念，OpenAI 兼容层把未知字段透传给 protobuf 解析，返回 `Unknown name ... Cannot find field` 并拒掉整个请求（连正常内容一起）。现在 provider 插件在 `capabilities.unsupported_params` 声明不收的字段（Gemini 声明 `frequency_penalty` / `presence_penalty`），transport 通用剔除，不按 provider 硬编码；worker 新增该错误分类，且判定排在「参数过长」之前——其文案含 `Invalid JSON payload`，会被 payload 关键词误捕成参数过大，把用户引向「拆工具参数」的错误方向。测试：`test_gemini_provider_unsupported_params` / `test_openai_chat_transport` / `test_bad_request_error_classification`。
+
+### ⚡ 性能优化 (Performance) (重新发布 #2 追加)
+
+- **会话重载首屏上下文快照移出主线程** (`app/main_widget.py` · `tests/widgets/test_reload_ctx_async.py`): `_restore_meta_from_batch` 首次计算（`project_for_ui` 8 层 tier + 全量 token 估算）长会话实测 500ms+ 阻塞首帧，栈落在 MainThreadWatchdog。现丢共享线程池后台算，结果经 `_reload_ctx_ready` 信号（gen / sid 双校验）回主线程回填缓存并补刷可见 assistant 卡；同会话任务单飞不重复派发，本次渲染先不显示 total（不显示假值），离屏卡由回收重建路径自然带 total。
+
+### 🔧 其他 (Chores & Build) (重新发布 #2 追加)
+
+- `uv.lock` 依赖锁定同步刷新（2556 行）。
 
 ## [v0.7.3] - 2026-11-16 (重新发布 #3)
 
