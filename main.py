@@ -617,6 +617,39 @@ def main():
         except Exception:
             logger.exception("[DeferredStartup] 启动 models.dev 后台同步线程失败")
 
+        # [PERF E7] 预热 resolve_context_limit：首次发送该链路实测 96~108ms 尖峰
+        # （provider 插件模块加载 + AST 审计 + profile 缓存冷启动），后台预热后
+        # 降至 ~48ms（E5 实测）。目的仅是消除首次发送尖峰，不是启动耗时优化：
+        # daemon 线程、吞异常，不阻塞/不改序任何启动步骤；取不到模型名就跳过。
+        def _prewarm_context_limit():
+            try:
+                from app.core.modelmeta.model_capabilities import resolve_context_limit
+                from app.utils.config import Settings
+
+                settings = Settings.get_instance()
+                saved = dict(settings.llm_saved_providers.value or {})
+                llm_cfg: dict = {}
+                selected = settings.llm_selected_model.value or ""
+                if selected and selected in saved and isinstance(saved[selected], dict):
+                    llm_cfg = saved[selected]
+                elif saved:
+                    first = next(iter(saved.values()))
+                    if isinstance(first, dict):
+                        llm_cfg = first
+                if not llm_cfg.get("模型名称"):
+                    return
+                resolve_context_limit(llm_cfg)
+                logger.info("[DeferredStartup] resolve_context_limit 预热完成")
+            except Exception:
+                logger.debug("[DeferredStartup] resolve_context_limit 预热失败（忽略）")
+
+        try:
+            import threading
+
+            threading.Thread(target=_prewarm_context_limit, daemon=True).start()
+        except Exception:
+            logger.exception("[DeferredStartup] 启动 context-limit 预热线程失败")
+
         # 崩溃取证自检（仅调试）：DRIFOX_CRASH_TEST=1 时在 faulthandler 安装后
         # 触发真实 SIGSEGV，验证 crash log/WER 链路。正常运行永不设置此变量。
         # ⚠️ 必须在主线程触发：Windows CRT 的 signal handler 只在主线程路由
