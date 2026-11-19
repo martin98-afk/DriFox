@@ -26,9 +26,9 @@ text   徽标+名   双击系统程序；左键拖拽导出；右键菜单
 file   徽标+名   双击系统程序；左键拖拽导出；右键菜单
 =====  ========  ====================================
 
-缩略图懒解码：折叠态只解码缩略图带（最多 ``_COLLAPSED_THUMB_LIMIT`` 张），
-展开时经 ``QTimer`` 分帧解码（每拍一张），4K PNG 全量解码约百毫秒级，
-一帧一张不会卡死 UI 线程。
+缩略图懒解码：折叠态画廊与展开列表分两队列分帧解码（每拍一张），
+4K PNG 全量解码约百毫秒级，一帧一张不会卡死 UI 线程。折叠画廊按当前
+宽度计算可见槽位（首图略宽），溢出收进「+N」，窄栏自动减少缩略图。
 
 数据入口按 ``path`` 合并（同路径原位更新、新路径追加），同轮多次推送不会
 互相覆盖；历史会话加载时由 ``render_batch_to_assistant_card`` 从 tool 消息的
@@ -52,18 +52,32 @@ from app.widgets.elided_label import _ElidedLabel
 
 # 单卡最多渲染条数：插件一次性推几百个文件时把卡片撑爆（上限外折叠进「还有 N 个」）
 MAX_VISIBLE_ITEMS = 20
-# 折叠态缩略图带：图片是最高频产出，折叠时也要看得见，只展示前 N 张
-_COLLAPSED_THUMB_LIMIT = 5
-# 缩略图预览块尺寸（折叠带与列表行共用，缓存可复用）
+# 折叠态画廊：固定单行不换行，首图略宽，其余同宽；溢出收进「+N」，窄栏减槽位
+_COLLAPSED_THUMB_H = 64
+_COLLAPSED_FIRST_W = 112
+_COLLAPSED_ITEM_W = 72
+_COLLAPSED_GAP = 6
+_COLLAPSED_MAX_THUMBS = 3
+# 摘要行（「另有 N 个文件」）高度
+_COLLAPSED_SUMMARY_H = 18
+# 缩略图预览块尺寸（展开列表行用；画廊用上面折叠常量，缓存按尺寸区分）
 _THUMB_W, _THUMB_H = 64, 48
 
-# kind → (徽标字, 主色)；主色同时用于徽标底与 meta 强调
+# kind → (徽标短标签, 主色)；主色同时用于徽标底与 meta 强调
 _KIND_META = {
-    "image": ("图", "#3b82f6"),
-    "video": ("视", "#8b5cf6"),
-    "html": ("H", "#f59e0b"),
-    "text": ("T", "#10b981"),
-    "file": ("文", "#6b7280"),
+    "image": ("IMG", "#3b82f6"),
+    "video": ("VID", "#8b5cf6"),
+    "html": ("HTML", "#f59e0b"),
+    "text": ("TXT", "#10b981"),
+    "file": ("FILE", "#6b7280"),
+}
+# 人类可读类型名（展开列表 meta 行 / tooltip）
+_KIND_LABEL = {
+    "image": "图像",
+    "video": "视频",
+    "html": "HTML",
+    "text": "文本",
+    "file": "文件",
 }
 
 _IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".svg"}
@@ -111,6 +125,11 @@ def _kind_from_ext(path: str) -> str:
     return "file"
 
 
+def _thumb_key(path: str, w: int, h: int) -> str:
+    """缩略图缓存 key：同路径不同尺寸（折叠画廊 vs 展开列表）分开存，不拉小图"""
+    return f"{path}|{w}x{h}"
+
+
 def _human_size(size: Any) -> str:
     try:
         n = int(size)
@@ -154,25 +173,25 @@ class _ThumbLabel(QLabel):
 
 
 class _KindBadge(QLabel):
-    """非图片类条目的类型徽标：圆角色块 + 单字"""
+    """非图片类条目的类型徽标：圆角色块 + 扩展名短标签"""
 
     def __init__(self, kind: str, parent=None):
         super().__init__(parent)
         self._kind = kind
-        ch, color = _KIND_META.get(kind, _KIND_META["file"])
-        self._ch, self._color = ch, color
+        label, color = _KIND_META.get(kind, _KIND_META["file"])
+        self._label, self._color = label, color
         self.setFixedSize(_THUMB_W, _THUMB_H)
         self.setAlignment(Qt.AlignCenter)
         # 徽标字与样式必须构造期落地：此前只在主题刷新里补，而刷新路径遍历的是
         # 列表根节点（徽标是行的子控件，永远命中不到）→ 徽标一直是空白色块。
-        self.setText(ch)
+        self.setText(label)
         self.refresh_style()
 
     def refresh_style(self) -> None:
         self.setStyleSheet(
             f"QLabel {{ background: {self._color}22; color: {self._color};"
             f" border: 1px solid {self._color}55; border-radius: 6px;"
-            f" {get_font_family_css()} {font_size_css(16)}; font-weight: 600; }}"
+            f" {get_font_family_css()} {font_size_css(11)}; font-weight: 600; }}"
         )
 
 
@@ -198,14 +217,17 @@ class InlineArtifactPanel(QWidget):
         self._show_all = False  # 点过「还有 N 项」后不再截断
         self._items: List[Dict[str, Any]] = []
         self._last_sig: Optional[str] = None
-        self._pending_thumbs: List[tuple] = []  # [(QLabel, path)] 展开态列表行的分帧解码队列
-        self._pending_strip_thumbs: List[tuple] = []  # [(QLabel, path)] 折叠态缩略图带的解码队列
+        self._pending_thumbs: List[tuple] = []  # [(QLabel, path, w, h)] 展开态列表行的分帧解码队列
+        self._pending_strip_thumbs: List[tuple] = []  # [(QLabel, path, w, h)] 折叠态画廊的解码队列
         # [A3-2] 有界 LRU（32 ≈ 384KB 上界 @64x48 RGBA 12KB/条）：面板随卡片
         # 存活、无确定性收尾点，上限是唯一可靠边界；命中触碰热序。
-        self._thumb_pixmaps = _BoundedLRUCache(32)  # path → 缩略图缓存
+        # key 带 (path, 尺寸)：折叠画廊与展开列表请求不同尺寸，不互相污染
+        self._thumb_pixmaps = _BoundedLRUCache(32)
         # 左键拖拽导出（拖到资源管理器/聊天软件即引用该文件）
         self._drag_press_pos = None
         self._drag_started = False
+        # 折叠画廊当前可见槽位数：宽度变化只在槽位数变化时重建（防逐像素重排/重解码）
+        self._strip_slot_count = -1
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 2, 0, 2)
@@ -223,14 +245,24 @@ class InlineArtifactPanel(QWidget):
         self._header.setToolTip("点击展开成果列表")
         layout.addWidget(self._header)
 
-        # 折叠态缩略图带：只有折叠 + 有图片成果时可见，展开后让位给完整清单
-        self._thumb_strip = QWidget(self)
-        self._thumb_strip.setStyleSheet("background: transparent;")
-        # 固定高度：垂直 policy 默认 Preferred 会吸收多余空间，把缩略图拉到面板中部
-        self._thumb_strip.setFixedHeight(_THUMB_H)
-        self._strip_layout = QHBoxLayout(self._thumb_strip)
-        self._strip_layout.setContentsMargins(2, 0, 2, 0)
-        self._strip_layout.setSpacing(6)
+        # 折叠态画廊：浅底圆角容器 = 缩略图行 +（可选）非图片摘要行。
+        # 只有折叠 + 有图片成果时可见，展开后让位给完整清单。
+        self._thumb_strip = QFrame(self)
+        self._thumb_strip.setObjectName("artifactStripCard")
+        strip_box = QVBoxLayout(self._thumb_strip)
+        strip_box.setContentsMargins(6, 6, 6, 6)
+        strip_box.setSpacing(4)
+        strip_row = QWidget(self._thumb_strip)
+        strip_row.setStyleSheet("background: transparent;")
+        self._strip_layout = QHBoxLayout(strip_row)
+        self._strip_layout.setContentsMargins(0, 0, 0, 0)
+        self._strip_layout.setSpacing(_COLLAPSED_GAP)
+        self._strip_layout.addStretch(1)
+        strip_box.addWidget(strip_row)
+        self._summary_label = QLabel(self._thumb_strip)
+        self._summary_label.setObjectName("artifactSummary")
+        self._summary_label.setVisible(False)
+        strip_box.addWidget(self._summary_label)
         self._thumb_strip.setVisible(False)
         layout.addWidget(self._thumb_strip)
 
@@ -249,6 +281,29 @@ class InlineArtifactPanel(QWidget):
 
         self.hide()  # 无成果整区隐藏
         self.refresh_style()
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 - Qt 命名
+        super().resizeEvent(event)
+        # 宽度变化只影响折叠画廊的可见槽位数；槽位数不变不重建（防逐像素重排重解码）
+        if not self._collapsed or not self._items or self._strip_slot_count <= 0:
+            return
+        images = sum(1 for it in self._items if it["kind"] == "image")
+        if images and self._collapsed_slot_count(images) != self._strip_slot_count:
+            self._rebuild_thumb_strip()
+            lay = self.layout()
+            if lay is not None:
+                lay.invalidate()
+            self.updateGeometry()
+            self.heightChanged.emit()
+
+    def _collapsed_slot_count(self, image_count: int) -> int:
+        """按当前宽度算可见槽位：首图 1 + 常规图 N，上限 _COLLAPSED_MAX_THUMBS"""
+        if image_count <= 1:
+            return max(0, min(image_count, 1))
+        strip_w = self._thumb_strip.width()
+        usable = strip_w - 12 if strip_w > 24 else _COLLAPSED_FIRST_W + _COLLAPSED_GAP + _COLLAPSED_ITEM_W
+        rest_slots = max(0, (usable - _COLLAPSED_FIRST_W - _COLLAPSED_GAP) // (_COLLAPSED_ITEM_W + _COLLAPSED_GAP))
+        return max(1, min(image_count, 1 + rest_slots, _COLLAPSED_MAX_THUMBS))
 
     # ── 折叠 ──
 
@@ -269,6 +324,7 @@ class InlineArtifactPanel(QWidget):
         self._collapse_btn.setToolTip(tip)
         self._header.setToolTip(tip)
         if self._collapsed:
+            self._rebuild_thumb_strip()
             self._schedule_strip_decode()
         else:
             self._schedule_thumb_decode()
@@ -444,43 +500,59 @@ class InlineArtifactPanel(QWidget):
             w.deleteLater()
 
     def _rebuild_thumb_strip(self) -> None:
-        """折叠态缩略图带：只放图片类成果，超上限显示 +N
+        """折叠态单行画廊：首图略宽，溢出收进 +N，非图片只入摘要行
 
-        折叠时只占一条缩略图高度，却能让生图类产出直接可见（旧行为折叠态
-        只有「成果 N 项」一行字，图片必须手动展开才能看到）。
+        折叠时只占画廊高度（混合成果多一行摘要），生图类产出直接可见；
+        槽位按当前宽度算，窄栏自动减常规缩略图，不换行不横向滚动。
         """
         self._clear_strip()
         images = [it for it in self._items if it["kind"] == "image"]
         if not images:
             self._thumb_strip.setVisible(False)
+            self._summary_label.setVisible(False)
+            self._strip_slot_count = 0
             return
-        for item in images[:_COLLAPSED_THUMB_LIMIT]:
+        visible = self._collapsed_slot_count(len(images))
+        self._strip_slot_count = visible
+        for idx, item in enumerate(images[:visible]):
             path = item["path"]
+            w = _COLLAPSED_FIRST_W if idx == 0 else _COLLAPSED_ITEM_W
             thumb = QLabel(self._thumb_strip)
-            thumb.setFixedSize(_THUMB_W, _THUMB_H)
+            thumb.setObjectName("artifactThumbnail")
+            thumb.setFixedSize(w, _COLLAPSED_THUMB_H)
             thumb.setAlignment(Qt.AlignCenter)
             thumb.setCursor(Qt.PointingHandCursor)
             thumb.setToolTip(f"{item['name']}\n单击预览，左键拖拽可引用到其他应用")
-            pix = self._thumb_pixmaps.get(path)
+            pix = self._thumb_pixmaps.get(_thumb_key(path, w, _COLLAPSED_THUMB_H))
             if pix is not None and not pix.isNull():
                 thumb.setPixmap(pix)
             else:
                 thumb.setText("…")
-                self._pending_strip_thumbs.append((thumb, path))
+                self._pending_strip_thumbs.append((thumb, path, w, _COLLAPSED_THUMB_H))
             thumb.mousePressEvent = lambda ev, p=path: self._on_strip_press(ev, p)
             thumb.mouseReleaseEvent = lambda ev, p=path: self._on_strip_release(ev, p)
             thumb.mouseMoveEvent = lambda ev, p=path, w=thumb: self._on_row_move(ev, p, w)
             self._strip_layout.addWidget(thumb)
-        rest = len(images) - _COLLAPSED_THUMB_LIMIT
+        rest = len(images) - visible
         if rest > 0:
             more = QLabel(f"+{rest}", self._thumb_strip)
+            more.setObjectName("artifactOverflow")
             more.setAlignment(Qt.AlignCenter)
-            more.setStyleSheet(
-                f"QLabel {{ color: {Colors.TEXT_SECONDARY}; background: transparent;"
-                f" {get_font_family_css()} {font_size_css(11)}; }}"
-            )
+            more.setCursor(Qt.PointingHandCursor)
+            more.setToolTip(f"还有 {rest} 张图片，点击展开全部")
+            # 点 +N 直接进完整列表（折叠看图，展开找文件）
+            more.mousePressEvent = lambda _ev: self._on_collapse_clicked()
             self._strip_layout.addWidget(more)
         self._strip_layout.addStretch(1)
+        files_n = len(self._items) - len(images)
+        if files_n > 0:
+            self._summary_label.setText(f"另有 {files_n} 个文件")
+            self._summary_label.setVisible(True)
+        else:
+            self._summary_label.setVisible(False)
+        total_h = 12 + _COLLAPSED_THUMB_H + ((4 + _COLLAPSED_SUMMARY_H) if files_n > 0 else 0)
+        self._thumb_strip.setFixedHeight(total_h)
+        self._style_strip()
         self._thumb_strip.setVisible(self._collapsed)
 
     def _on_strip_press(self, ev: QMouseEvent, path: str) -> None:
@@ -511,9 +583,10 @@ class InlineArtifactPanel(QWidget):
         # 预览块
         if kind == "image":
             thumb = QLabel(row)
+            thumb.setObjectName("artifactRowThumb")
             thumb.setFixedSize(_THUMB_W, _THUMB_H)
             thumb.setAlignment(Qt.AlignCenter)
-            pix = self._thumb_pixmaps.get(path)
+            pix = self._thumb_pixmaps.get(_thumb_key(path, _THUMB_W, _THUMB_H))
             if pix is not None and not pix.isNull():
                 thumb.setPixmap(pix)
             else:
@@ -521,7 +594,7 @@ class InlineArtifactPanel(QWidget):
                 # 折叠态也入队但不调度（_decode_next_thumb 检查折叠态即停）；
                 # 展开切换时 _on_collapse_clicked 统一调度。此前版本折叠态
                 # 直接剔除队列，导致「先推数据后展开」的场景缩略图永不解码。
-                self._pending_thumbs.append((thumb, path))
+                self._pending_thumbs.append((thumb, path, _THUMB_W, _THUMB_H))
         elif kind == "video":
             duration = ""
             meta = item.get("meta") or {}
@@ -543,7 +616,7 @@ class InlineArtifactPanel(QWidget):
         )
         text_col.addWidget(name)
 
-        meta_bits = [_KIND_META.get(kind, _KIND_META["file"])[0]]
+        meta_bits = [_KIND_LABEL.get(kind, "文件")]
         if item.get("width") and item.get("height"):
             meta_bits.append(f"{item['width']}×{item['height']}")
         size_text = _human_size(item.get("size"))
@@ -742,11 +815,11 @@ class InlineArtifactPanel(QWidget):
         # 再展开时队列已空 → 缩略图永驻占位符。
         if self._collapsed or not self._pending_thumbs:
             return
-        label, path = self._pending_thumbs[0]
+        label, path, w, h = self._pending_thumbs[0]
         if not label.isVisible():
             return
         self._pending_thumbs.pop(0)
-        self._apply_thumb(label, path)
+        self._apply_thumb(label, path, w, h)
         if self._pending_thumbs:
             QTimer.singleShot(10, self._decode_next_thumb)
 
@@ -759,22 +832,22 @@ class InlineArtifactPanel(QWidget):
     def _decode_next_strip_thumb(self) -> None:
         if not self._collapsed or not self._pending_strip_thumbs:
             return
-        label, path = self._pending_strip_thumbs[0]
+        label, path, w, h = self._pending_strip_thumbs[0]
         if not label.isVisible():
             return
         self._pending_strip_thumbs.pop(0)
-        self._apply_thumb(label, path)
+        self._apply_thumb(label, path, w, h)
         if self._pending_strip_thumbs:
             QTimer.singleShot(10, self._decode_next_strip_thumb)
 
-    def _apply_thumb(self, label: QLabel, path: str) -> None:
+    def _apply_thumb(self, label: QLabel, path: str, w: int = _THUMB_W, h: int = _THUMB_H) -> None:
         """解码并回填（缓存命中直接复用；失败显示 ✕ 不报错）"""
         try:
-            pix = self._thumb_pixmaps.get(path)
+            pix = self._thumb_pixmaps.get(_thumb_key(path, w, h))
             if pix is None:
-                pix = self._load_thumb(path)
+                pix = self._load_thumb(path, w, h)
                 if pix is not None and not pix.isNull():
-                    self._thumb_pixmaps[path] = pix
+                    self._thumb_pixmaps[_thumb_key(path, w, h)] = pix
             if not label.isVisible():
                 return
             if pix is not None and not pix.isNull():
@@ -784,7 +857,7 @@ class InlineArtifactPanel(QWidget):
         except (OSError, RuntimeError):
             pass
 
-    def _load_thumb(self, path: str) -> Optional[QPixmap]:
+    def _load_thumb(self, path: str, w: int = _THUMB_W, h: int = _THUMB_H) -> Optional[QPixmap]:
         """按缩略尺寸解码（QImageReader.setScaledSize 避免 4K 全量位图驻留内存）
 
         KeepAspectRatio 适配进显示块：产出 pixmap 必然 ≤ 块尺寸，不依赖
@@ -795,7 +868,7 @@ class InlineArtifactPanel(QWidget):
         reader.setAutoTransform(True)
         size = reader.size()
         if size.isValid() and size.width() > 0 and size.height() > 0:
-            reader.setScaledSize(size.scaled(_THUMB_W, _THUMB_H, Qt.KeepAspectRatio))
+            reader.setScaledSize(size.scaled(w, h, Qt.KeepAspectRatio))
         img = reader.read()
         if img.isNull():
             return None
@@ -805,6 +878,7 @@ class InlineArtifactPanel(QWidget):
 
     def refresh_style(self) -> None:
         self._header.refresh_style()
+        self._style_strip()
         for i in range(self._list_layout.count()):
             w = self._list_layout.itemAt(i).widget()
             if isinstance(w, QFrame) and w.objectName() == "artifactItem":
@@ -812,3 +886,30 @@ class InlineArtifactPanel(QWidget):
                 # 徽标是行的子控件，不在列表根节点上（旧实现永远命中不到）
                 for badge in w.findChildren(_KindBadge):
                     badge.refresh_style()
+
+    def _style_strip(self) -> None:
+        """折叠画廊容器 / 缩略图 / 溢出 / 摘要的主题化样式（浅底卡片层级）"""
+        from app.utils.design_tokens import Colors
+
+        self._thumb_strip.setStyleSheet(
+            f"QFrame#artifactStripCard {{ background: {Colors.CARD_BG.format(alpha=110)};"
+            f" border: 1px solid {Colors.BORDER}; border-radius: {BorderRadius.MD}; }}"
+        )
+        self._summary_label.setStyleSheet(
+            f"QLabel#artifactSummary {{ color: {Colors.TEXT_SECONDARY}; background: transparent;"
+            f" {get_font_family_css()} {font_size_css(11)}; padding: 0 2px; }}"
+        )
+        for lab in self._thumb_strip.findChildren(QLabel):
+            name = lab.objectName()
+            if name == "artifactThumbnail":
+                lab.setStyleSheet(
+                    f"QLabel#artifactThumbnail {{ background: {Colors.HOVER_BG};"
+                    f" border: 1px solid {Colors.BORDER}; border-radius: 6px; }}"
+                )
+            elif name == "artifactOverflow":
+                lab.setStyleSheet(
+                    f"QLabel#artifactOverflow {{ color: {Colors.TEXT_SECONDARY};"
+                    f" background: {Colors.HOVER_BG}; border: 1px dashed {Colors.BORDER};"
+                    f" border-radius: 6px; {get_font_family_css()} {font_size_css(12)};"
+                    f" font-weight: 600; }}"
+                )

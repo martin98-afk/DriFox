@@ -134,6 +134,19 @@ def test_panel_svg_thumb_decodes(panel, tmp_path):
     assert pix is not None and not pix.isNull()
     assert pix.width() <= _panel_mod._THUMB_W and pix.height() <= _panel_mod._THUMB_H
 
+def test_panel_load_thumb_supports_strip_sizes(panel, tmp_path):
+    """折叠画廊请求更大尺寸时解码不越界（首图 112x64）"""
+    svg = tmp_path / "b.svg"
+    svg.write_text(
+        '<svg xmlns="http://www.w3.org/2000/svg" width="160" height="90">'
+        '<rect width="160" height="90" fill="#10b981"/></svg>',
+        encoding="utf-8",
+    )
+    pix = panel._load_thumb(str(svg), _panel_mod._COLLAPSED_FIRST_W, _panel_mod._COLLAPSED_THUMB_H)
+    assert pix is not None and not pix.isNull()
+    assert pix.width() <= _panel_mod._COLLAPSED_FIRST_W
+    assert pix.height() <= _panel_mod._COLLAPSED_THUMB_H
+
 
 def test_panel_overflow_capped(panel):
     """超上限截断 + 「还有 N 项」提示"""
@@ -336,6 +349,44 @@ def test_panel_collapsed_strip_hidden_after_expand(panel):
     panel._on_collapse_clicked()
     assert panel._thumb_strip.isHidden()
 
+def test_panel_collapsed_strip_hides_when_only_files(panel):
+    """纯文件成果不渲染图片画廊（无图片占位）"""
+    panel.update_artifacts([{"path": "/tmp/report.md", "kind": "text", "name": "report.md"}])
+    assert panel._thumb_strip.isHidden()
+
+def test_panel_collapsed_strip_gallery_slots_and_overflow(panel):
+    """单行画廊：首图略宽、上限三张、溢出 +N 只计图片、摘要只计非图片"""
+    from PyQt5.QtWidgets import QLabel
+
+    items = _img_items(5) + [{"path": "/tmp/report.md", "kind": "text", "name": "report.md"}]
+    panel.update_artifacts(items)
+    panel.resize(420, 200)
+    panel._rebuild_thumb_strip()
+
+    widgets = [panel._strip_layout.itemAt(i).widget() for i in range(panel._strip_layout.count())]
+    thumbs = [w for w in widgets if w is not None and w.objectName() == "artifactThumbnail"]
+    overflow = [w for w in widgets if w is not None and w.objectName() == "artifactOverflow"]
+    summary = panel._thumb_strip.findChild(QLabel, "artifactSummary")
+
+    assert len(thumbs) == 3, "折叠画廊最多展示三张"
+    assert thumbs[0].width() > thumbs[1].width(), "首图应略宽"
+    assert overflow and overflow[0].text() == "+2", "溢出计数只覆盖图片"
+    assert summary is not None and summary.text() == "另有 1 个文件"
+
+def test_panel_collapsed_strip_slots_shrink_on_narrow_width(panel):
+    """窄栏优先减少常规缩略图数量，不换行"""
+    panel.update_artifacts(_img_items(5))
+    panel.resize(420, 200)
+    panel._rebuild_thumb_strip()
+    widgets = [panel._strip_layout.itemAt(i).widget() for i in range(panel._strip_layout.count())]
+    wide_count = len([w for w in widgets if w is not None and w.objectName() == "artifactThumbnail"])
+
+    panel.resize(150, 200)
+    panel._rebuild_thumb_strip()
+    widgets = [panel._strip_layout.itemAt(i).widget() for i in range(panel._strip_layout.count())]
+    narrow_count = len([w for w in widgets if w is not None and w.objectName() == "artifactThumbnail"])
+    assert narrow_count < wide_count, "窄栏应减少缩略图数量"
+
 def test_panel_overflow_expand_all(panel):
     MAX_VISIBLE_ITEMS = _panel_mod.MAX_VISIBLE_ITEMS
 
@@ -405,8 +456,23 @@ def test_kind_badge_shows_letter(qapp):
     """徽标必须有字：构造期漏 setText 会渲成空白色块"""
     _KindBadge = _panel_mod._KindBadge
 
-    assert _KindBadge("text").text() == "T"
-    assert _KindBadge("file").text() == "文"
+    assert _KindBadge("text").text() == "TXT"
+    assert _KindBadge("file").text() == "FILE"
+    assert _KindBadge("image").text() == "IMG"
+    assert _KindBadge("html").text() == "HTML"
+
+def test_kind_meta_label_is_human_readable(qapp):
+    """meta 行用可读类型词而非单字母缩写"""
+    assert _panel_mod._KIND_LABEL["text"] == "文本"
+    assert _panel_mod._KIND_LABEL["image"] == "图像"
+    assert _panel_mod._KIND_LABEL["file"] == "文件"
+
+def test_gallery_container_is_theme_styled(panel):
+    """画廊容器与摘要行主题化：refresh_style 后带圆角与主题色"""
+    panel.update_artifacts(_img_items(2) + [{"path": "/tmp/report.md", "kind": "text"}])
+    css = panel._thumb_strip.styleSheet()
+    assert "border-radius" in css, "画廊容器应有圆角"
+    assert "artifactSummary" in css or panel._summary_label.styleSheet(), "摘要行应有主题样式"
 
 def test_plugin_registers_inline_panel(qapp):
     """插件把成果栏注册到卡片内嵌面板槽位"""
