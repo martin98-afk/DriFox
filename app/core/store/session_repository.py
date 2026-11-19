@@ -385,6 +385,11 @@ class SessionRepository:
         # 内容地址缓存：session_id -> (message_count, last_msg_hash)
         # 用于跳过内容未变的重复持久化，节省全量序列化+zstd压缩开销
         self._content_hash_cache: Dict[str, tuple] = {}
+        # [E10] extras 行集基线缓存：session_id -> {(msg_idx, field): value_bytes}
+        # _write_extras 差异 upsert 的比对基线（流式拍 extras 集合不变 → 0 写 SQL）。
+        # 缓存缺失（重启首拍/写入失败）→ 退化为旧全删全插并重建基线；delete 清理。
+        # DB extras 仅本仓储写（唯一 INSERT 点），单实例下行集缓存与 DB 一致。
+        self._extras_written: Dict[str, Dict[tuple, bytes]] = {}
         # 保护 _content_hash_cache 的读写原子性。
         # Gateway（异步写入）+ UI（同步 save）跨线程访问同一缓存时，
         # 裸 dict 的复合判断+赋值在 GIL 释放窗口内可能丢失更新或脏命中，
@@ -743,57 +748,96 @@ class SessionRepository:
 
 
     def _write_extras(self, session_id: str, extras: Dict[int, Dict[str, bytes]]) -> None:
-        """全删全插该会话的剥离字段（失败不阻塞主保存，仅记日志）。"""
+        """把本次 extract 的剥离字段同步进 DB（差异 upsert；失败不阻塞主保存）。
+
+        [E10] 旧实现全删全插（DELETE 全会话行 + executemany 重插），流式拍
+        extras 集合不变也要付 104ms@16K（E3 曲线 59-65%）。现按
+        (session_id, msg_idx, field) 行集与基线缓存 diff：
+        - 新增/变更行 → executemany INSERT OR REPLACE（len 快筛 + bytes 逐字节比对）
+        - 消失行（截断/清空）→ executemany 精确 DELETE，idx 复用不串字段
+        - 无变化拍 → 0 写 SQL（流式拍主收益）
+        - 基线缓存缺失（重启首拍/历史写入失败）→ 退化为旧全删全插并重建基线，
+          保证与旧行为严格等价；compaction 索引漂移由「同 idx 比值不等 → 覆盖、
+          旧行消失 → 删除」天然覆盖（与全删全插最终状态一致，回归锁定）。
+        语义契约不变：调用后 DB extras ≡ 本次 extract 产物（旧字段整体消失）。
+        """
         try:
-            self._execute("DELETE FROM session_msg_extras WHERE session_id = ?", (session_id,))
-            if not extras:
-                return
-            # 优化点：原行为=逐行 _execute(INSERT OR REPLACE)，每行一次
-            # Python↔SQLite 往返且每条都过 db_manager.execute_sql 的
-            # SAVEPOINT+攒批包装，SQL 次数=1 次 DELETE + N 次 INSERT；
-            # 新行为=保持 DELETE 全删（compaction 索引漂移自愈）与 dict
-            # 遍历顺序，收集参数行后在写锁内一次 cursor.executemany 下发
-            # （O(N)→O(1)），复用 _schedule_commit 攒批窗口、不自行 commit
-            # （避免提前提交主 blob 破坏时序）；根因=execute_sql 只有
-            # cursor.execute 无批量分支，本任务硬边界禁改 db_manager，故批量
-            # 落在仓储内（同仓储内既有先例）。批量失败则回滚
-            # SAVEPOINT 并降级逐条，保持原「单条失败静默跳过、不冒泡」语义。
-            sql = (
+            new_rows: Dict[tuple, bytes] = {
+                (i, f): v for i, fields in extras.items() for f, v in fields.items()
+            }
+            upsert_sql = (
                 "INSERT OR REPLACE INTO session_msg_extras (session_id, msg_idx, field, value) "
                 "VALUES (?, ?, ?, ?)"
             )
-            rows = [
-                (session_id, i, f, v)
-                for i, fields in extras.items()
-                for f, v in fields.items()
-            ]
-            if not rows:
+            delete_sql = "DELETE FROM session_msg_extras WHERE session_id = ? AND msg_idx = ? AND field = ?"
+            cached = self._extras_written.get(session_id)
+            if cached is None:
+                # 未知基线：旧全删全插（读回断言/既有门禁依赖的等价路径）
+                self._execute("DELETE FROM session_msg_extras WHERE session_id = ?", (session_id,))
+                if not new_rows:
+                    self._extras_written[session_id] = {}
+                    return
+                rows = [(session_id, i, f, v) for (i, f), v in new_rows.items()]
+                if self._executemany_extras(upsert_sql, rows):
+                    self._extras_written[session_id] = new_rows
+                else:
+                    self._extras_written.pop(session_id, None)  # 全失败 → 下拍重新校准
                 return
-            db = self._db
-            conn = getattr(db, "_conn", None)
-            done = False
-            if conn is not None:
-                try:
-                    with db._write_lock:
-                        cursor = conn.cursor()
-                        cursor.execute("SAVEPOINT sp_exec")
-                        try:
-                            cursor.executemany(sql, rows)
-                        except Exception:
-                            cursor.execute("ROLLBACK TO sp_exec")
-                            cursor.execute("RELEASE sp_exec")
-                        else:
-                            cursor.execute("RELEASE sp_exec")
-                            done = True
-                except Exception:
-                    done = False
-            if done:
-                db._schedule_commit()
-                return
-            for row in rows:
-                self._execute(sql, row)
+            # 已知基线：差异 upsert
+            to_upsert = [(session_id, i, f, v) for (i, f), v in new_rows.items() if cached.get((i, f)) != v]
+            to_delete = [(session_id, i, f) for (i, f) in cached if (i, f) not in new_rows]
+            if not to_upsert and not to_delete:
+                return  # 无变化拍：0 写 SQL
+            if len(to_delete) > 512:
+                # 大规模消失（清空/大截断）：逐行 DELETE 不如一条全删 + 全量重插
+                # （最终状态等价、SQL 数最少；512 阈值≈逐行删开始劣化的量级）
+                self._execute("DELETE FROM session_msg_extras WHERE session_id = ?", (session_id,))
+                to_upsert = [(session_id, i, f, v) for (i, f), v in new_rows.items()]
+                to_delete = []
+            ok = True
+            if to_delete:
+                ok = self._executemany_extras(delete_sql, to_delete)
+            if ok and to_upsert:
+                ok = self._executemany_extras(upsert_sql, to_upsert)
+            if ok:
+                self._extras_written[session_id] = new_rows
+            else:
+                # 降级也失败：基线不可信，清缓存 → 下拍退化为全删全插校准
+                self._extras_written.pop(session_id, None)
         except Exception as e:
             logger.error(f"[SessionRepository] write_extras 异常: {e}")
+
+    def _executemany_extras(self, sql: str, rows: list) -> bool:
+        """批量下发 extras SQL（SAVEPOINT 包裹，失败降级逐条）。
+
+        Returns:
+            True=批量或降级全部成功；False=彻底失败（调用方清基线缓存）。
+        """
+        db = self._db
+        conn = getattr(db, "_conn", None)
+        if conn is not None:
+            try:
+                with db._write_lock:
+                    cursor = conn.cursor()
+                    cursor.execute("SAVEPOINT sp_exec")
+                    try:
+                        cursor.executemany(sql, rows)
+                    except Exception:
+                        cursor.execute("ROLLBACK TO sp_exec")
+                        cursor.execute("RELEASE sp_exec")
+                    else:
+                        cursor.execute("RELEASE sp_exec")
+                        db._schedule_commit()
+                        return True
+            except Exception:
+                pass  # 落到降级逐条
+        for row in rows:
+            try:
+                self._execute(sql, row)
+            except Exception:  # noqa: BLE001 — 单条失败静默跳过（既有语义）
+                return False
+        db._schedule_commit()
+        return True
 
     def load_extras_for_session(
         self, session_id: str, idxs: Optional[List[int]] = None
@@ -911,8 +955,12 @@ class SessionRepository:
             success, rows = self._execute(f"SELECT * FROM {self.TABLE_NAME} WHERE session_id = ?", (session_id,))
             if success and rows and len(rows) > 0:
                 # 外部加载了最新数据，失效内容缓存，下次 save 会重建
+                # [E10] extras 行集基线同步失效：外部读意味着可能存在绕过 repo 层的
+                # DB 直改（老数据迁移/修复脚本），缓存与库可能失配 → 下拍 save 退化
+                # 全删全插重新校准（一次性成本，与 hash 缓存同触发点同语义）。
                 with self._cache_lock:
                     self._content_hash_cache.pop(session_id, None)
+                    self._extras_written.pop(session_id, None)
                 return self._row_to_session(rows[0])
             return None
         except Exception as e:
@@ -965,6 +1013,7 @@ class SessionRepository:
             with self._cache_lock:
                 for sid in out:
                     self._content_hash_cache.pop(sid, None)
+                    self._extras_written.pop(sid, None)  # [E10] 同步失效（同 get 语义）
         return out
 
     def get_all(self, limit: int = 100, offset: int = 0) -> List[Dict]:
@@ -1232,6 +1281,7 @@ class SessionRepository:
 
         try:
             self._content_hash_cache.pop(session_id, None)
+            self._extras_written.pop(session_id, None)  # [E10] 行集基线随会话删除清理
             success, _ = self._execute(f"DELETE FROM {self.TABLE_NAME} WHERE session_id = ?", (session_id,))
             if success:
                 # message_extras 级联清理（后删子表）：主表失败则整体未删保持一致；
