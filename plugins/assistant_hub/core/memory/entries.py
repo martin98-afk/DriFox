@@ -195,20 +195,48 @@ def _state_item(entry_id: str) -> Dict[str, Any]:
     return {"id": entry_id, "versions": [], "active": None, "state": "active", "conflict": False}
 
 
+def _parse_ts(value: Any) -> Optional[datetime]:
+    try:
+        return datetime.fromisoformat(str(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _conflict(prev: Dict[str, Any], new: Dict[str, Any]) -> bool:
+    t1, t2 = _parse_ts(prev.get("updated_at")), _parse_ts(new.get("updated_at"))
+    if t1 is None or t2 is None:
+        return False
+    return abs((t1 - t2).total_seconds()) < CONFLICT_WINDOW_HOURS * 3600
+
+
 def _apply_put(state: Dict[str, Any], ev: Dict[str, Any]) -> None:
     entry = ev.get("entry") or {}
     entry_id = str(ev.get("id") or entry.get("id") or "")
     if not entry_id:
         return
     item = state["entries"].setdefault(entry_id, _state_item(entry_id))
-    if item["active"] is not None:
-        item["versions"].append(item["active"])
+    prev = item["active"]
+    explicit = str(ev.get("supersedes") or "") == entry_id
+    if prev is not None:
+        item["versions"].append(prev)
+        if not explicit and _conflict(prev, entry):
+            item["conflict"] = True
     item["active"] = dict(entry)
     item["state"] = "active"
     sup = str(ev.get("supersedes") or "")
     if sup and sup != entry_id and sup in state["entries"]:
         state["entries"][sup]["state"] = "superseded"
         state["entries"][sup]["superseded_by"] = entry_id
+
+
+def active_entries(state: Dict[str, Any]) -> List[Dict[str, Any]]:
+    out = [
+        dict(item["active"], id=item["id"])
+        for item in state["entries"].values()
+        if item.get("state") == "active" and item.get("active")
+    ]
+    out.sort(key=lambda e: (not bool(e.get("pinned")), str(e.get("updated_at") or "")))
+    return out
 
 
 def _apply_del(state: Dict[str, Any], ev: Dict[str, Any]) -> None:
