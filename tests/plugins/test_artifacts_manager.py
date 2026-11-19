@@ -403,6 +403,62 @@ def test_expand_collapse_without_motion_lands_final_state(panel, monkeypatch):
     assert not panel._thumb_strip.isHidden()
     assert panel._list_wrap.maximumHeight() == _panel_mod._QWIDGETSIZE_MAX
 
+
+def test_animating_sizehint_reports_clamped_height(qapp):
+    """等高交接动画：动画中 sizeHint ≈ 折叠态占高（宿主补偿不跳变，标题不抖）"""
+    from PyQt5.QtWidgets import QVBoxLayout, QWidget
+
+    host = QWidget()
+    host.resize(420, 400)
+    lay = QVBoxLayout(host)
+    lay.setContentsMargins(0, 0, 0, 0)
+    panel = InlineArtifactPanel()
+    lay.addWidget(panel)
+    host.show()
+    try:
+        panel.update_artifacts(_img_items(3))
+        folded_h = panel.sizeHint().height()
+        strip_h = panel._strip_visual_height()
+        assert strip_h > 0, "折叠态画廊应有占高"
+
+        panel._on_collapse_clicked()  # 展开：列表从画廊占高长出
+        anim = panel._list_anim
+        assert anim is not None and anim.state() == _panel_mod.QAbstractAnimation.Running
+        assert int(anim.startValue()) == strip_h, "展开应从画廊占高起步（等高交接）"
+        anim_h = panel.sizeHint().height()
+        assert abs(anim_h - folded_h) <= 4, f"动画起点占高应与折叠态一致 anim={anim_h} folded={folded_h}"
+
+        anim.stop()
+        panel._on_list_anim_done(True)  # 模拟动画收尾：放开限高
+        expanded_h = panel.sizeHint().height()
+        assert expanded_h > folded_h + 10, "动画结束后 sizeHint 应回到全展开高"
+    finally:
+        panel.deleteLater()
+        host.deleteLater()
+
+
+def test_strip_thumb_width_adapts_to_aspect(panel, tmp_path):
+    """画廊块宽按宽高比自适应：竖图收窄、横图展宽、坏路径回退兜底宽"""
+    from PyQt5.QtGui import QColor, QImage, QPainter
+
+    def make(path, w, h):
+        img = QImage(w, h, QImage.Format_RGB32)
+        p = QPainter(img)
+        p.fillRect(img.rect(), QColor(10, 120, 200))
+        p.end()
+        img.save(path)
+
+    tall = str(tmp_path / "tall.png")
+    wide = str(tmp_path / "wide.png")
+    missing = str(tmp_path / "missing.png")
+    make(tall, 100, 400)  # 1:4 竖图 → 64*0.25=16 → clamp 到下限
+    make(wide, 800, 200)  # 4:1 横图 → 64*4=256 → clamp 到上限
+
+    assert panel._strip_thumb_width(tall, False) == _panel_mod._COLLAPSED_THUMB_MIN_W
+    assert panel._strip_thumb_width(wide, False) == _panel_mod._COLLAPSED_THUMB_MAX_W
+    assert panel._strip_thumb_width(missing, False) == _panel_mod._COLLAPSED_ITEM_W
+    assert panel._strip_thumb_width(missing, True) == _panel_mod._COLLAPSED_FIRST_W
+
 def test_panel_collapsed_strip_slots_shrink_on_narrow_width(panel):
     """窄栏优先减少常规缩略图数量，不换行"""
     panel.update_artifacts(_img_items(5))

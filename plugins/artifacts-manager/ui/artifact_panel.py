@@ -39,7 +39,7 @@ import os
 from typing import Any, Dict, List, Optional
 from app.widgets._bounded_caches import _BoundedLRUCache
 
-from PyQt5.QtCore import QEvent, QEasingCurve, QPropertyAnimation, Qt, QTimer, pyqtSignal
+from PyQt5.QtCore import QAbstractAnimation, QEvent, QEasingCurve, QMargins, QPropertyAnimation, QSize, Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QColor, QDesktopServices, QImageReader, QMouseEvent, QPainter, QPixmap
 from PyQt5.QtCore import QUrl
 from PyQt5.QtWidgets import QFrame, QHBoxLayout, QLabel, QMenu, QVBoxLayout, QWidget
@@ -52,9 +52,12 @@ from app.widgets.elided_label import _ElidedLabel
 
 # 单卡最多渲染条数：插件一次性推几百个文件时把卡片撑爆（上限外折叠进「还有 N 个」）
 MAX_VISIBLE_ITEMS = 20
-# 折叠态画廊：固定单行不换行，首图略宽，其余同宽；可见数由宽度决定（放得下就铺满），
-# 放不下收进「+N」；上限仅防病态超宽，不参与常规布局
+# 折叠态画廊：固定单行不换行，块高统一、块宽按图片宽高比自适应（竖图窄条/横图宽块）；
+# 可见数由宽度决定（放得下就铺满），放不下收进「+N」；上限仅防病态超宽
 _COLLAPSED_THUMB_H = 64
+_COLLAPSED_THUMB_MIN_W = 32
+_COLLAPSED_THUMB_MAX_W = 160
+# 图片宽高不可得时的兜底块宽（首图略宽）
 _COLLAPSED_FIRST_W = 112
 _COLLAPSED_ITEM_W = 72
 _COLLAPSED_GAP = 6
@@ -231,6 +234,9 @@ class InlineArtifactPanel(QWidget):
         self._drag_started = False
         # 折叠画廊当前可见槽位数：宽度变化只在槽位数变化时重建（防逐像素重排/重解码）
         self._strip_slot_count = -1
+        # 展开动画状态：动画中宿主按钳后的 sizeHint 补偿（见 sizeHint 重写）
+        self._list_anim: Optional[QPropertyAnimation] = None
+        self._list_natural_h = 0
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 2, 0, 2)
@@ -324,26 +330,38 @@ class InlineArtifactPanel(QWidget):
         self._collapse_btn.setToolTip(tip)
         self._header.setToolTip(tip)
         if self._collapsed:
-            # 折叠：列表收到 0，收完画廊回归（中途反转从当前实际高度起步，不跳变）
-            was_visible = self._list_wrap.isVisible()
-            self._animate_list(False, was_visible)
+            # 折叠：先重建画廊拿目标占高（保持隐藏），列表收到同高后无缝换回画廊
+            self._rebuild_thumb_strip()
+            self._thumb_strip.setVisible(False)
+            self._animate_list(False)
         else:
-            # 展开：画廊立即让位，列表从当前高度长出（首次从 0 起步）
-            was_visible = self._list_wrap.isVisible()
+            # 展开：先取画廊占高作等高起点，再隐藏画廊、钳列表同高显示（标题不动）
+            start = self._strip_visual_height()
             self._thumb_strip.setVisible(False)
             self._list_wrap.setVisible(True)
-            self._animate_list(True, was_visible)
+            self._list_wrap.setMaximumHeight(start)
+            self._animate_list(True, start)
             self._schedule_thumb_decode()
 
-    def _animate_list(self, expanding: bool, was_visible: bool) -> None:
+    def _strip_visual_height(self) -> int:
+        """折叠态画廊的占高（含摘要行）；画廊不可见则 0"""
+        if self._thumb_strip.isHidden():
+            return 0
+        return self._thumb_strip.height()
+
+    def _animate_list(self, expanding: bool, start: Optional[int] = None) -> None:
         """展开列表高度动画（轴向 maximumHeight，惯例同 markdown 折叠卡）：
 
-        展开 ENTER_MS+OutCubic / 收起 EXIT_MS+OutQuad（OutCubic 收起尾段拖尾）；
-        逐帧 emit heightChanged 让宿主卡片高度跟随，动画结束才不跳变。
+        与画廊等高交接：展开从画廊占高长出、收起收到画廊占高再换回，
+        全程面板高度单调变化，标题不抖。展开 ENTER_MS+OutCubic / 收起
+        EXIT_MS+OutQuad（OutCubic 收起尾段拖尾）；逐帧 emit heightChanged
+        让宿主卡片高度跟随。
         """
         wrap = self._list_wrap
         if not Animations.motion_enabled() or self.parentWidget() is None:
             # reduced-motion / 未挂载：跳过补间直落终值（收尾回调幂等）
+            self._list_anim = None
+            self._list_natural_h = 0
             if expanding:
                 wrap.setMaximumHeight(_QWIDGETSIZE_MAX)
             else:
@@ -352,16 +370,17 @@ class InlineArtifactPanel(QWidget):
                 wrap.setMaximumHeight(_QWIDGETSIZE_MAX)
             self._emit_height_chain()
             return
+        old = self._list_anim
+        if old is not None:
+            old.stop()
         if expanding:
-            start = max(wrap.height(), 0) if was_visible else 0
+            start = start if start is not None else self._strip_visual_height()
             target = max(wrap.sizeHint().height(), 1)
         else:
             start = max(wrap.height(), 1)
             wrap.setMaximumHeight(start)  # 先钳到实际高度再动画
-            target = 0
-        old = getattr(self, "_list_anim", None)
-        if old is not None:
-            old.stop()
+            target = self._strip_visual_height()
+        self._list_natural_h = max(wrap.sizeHint().height(), 1)
         anim = QPropertyAnimation(wrap, b"maximumHeight", self)
         self._list_anim = anim
         anim.setDuration(Animations.ENTER_MS if expanding else Animations.EXIT_MS)
@@ -373,6 +392,8 @@ class InlineArtifactPanel(QWidget):
         anim.start()
 
     def _on_list_anim_done(self, expanding: bool) -> None:
+        self._list_anim = None
+        self._list_natural_h = 0
         wrap = self._list_wrap
         if expanding:
             wrap.setMaximumHeight(_QWIDGETSIZE_MAX)  # 放开限高不二次跳变
@@ -382,9 +403,28 @@ class InlineArtifactPanel(QWidget):
             self._show_strip_after_collapse()
         self._emit_height_chain()
 
+    def sizeHint(self) -> QSize:  # noqa: N802 - Qt 命名
+        """动画期间手算钳后占高（宿主补偿取 max(sizeHint, height)）
+
+        maximumHeight 只钳 height 不钳布局 sizeHint：不重写的话展开第一帧
+        宿主就把卡片拉到全高，标题先跳后动画（实测抖动根因）。布局自然高
+        在子项受钳时不可信，故按可见子项手算：header + spacing + 列表(钳)。
+        """
+        anim = self._list_anim
+        if anim is None or anim.state() != QAbstractAnimation.Running:
+            return super().sizeHint()
+        lay = self.layout()
+        margins = lay.contentsMargins() if lay is not None else QMargins(0, 0, 0, 0)
+        spacing = lay.spacing() if lay is not None else 0
+        h = self._header.sizeHint().height()
+        if self._list_wrap.isVisible():
+            h += spacing + max(0, int(self._list_wrap.maximumHeight()))
+        if self._thumb_strip.isVisible():
+            h += spacing + self._thumb_strip.height()
+        return QSize(super().sizeHint().width(), max(1, h + margins.top() + margins.bottom()))
+
     def _show_strip_after_collapse(self) -> None:
-        """折叠动画收尾：画廊回归 + 解码调度 + 图标/提示同步"""
-        self._rebuild_thumb_strip()
+        """折叠动画收尾：画廊回归 + 解码调度（高度已在动画前算好，切换等高无缝）"""
         # 折叠带与清单互斥：折叠看缩略图，展开看完整行
         self._thumb_strip.setVisible(self._collapsed and self._strip_layout.count() > 1)
         if self._collapsed:
@@ -563,8 +603,19 @@ class InlineArtifactPanel(QWidget):
             w.setParent(None)
             w.deleteLater()
 
+    def _strip_thumb_width(self, path: str, is_first: bool) -> int:
+        """画廊块宽按图片宽高比自适应（等高 64）：竖图窄条/横图宽块，杜绝固定块留白。
+
+        QImageReader.size() 只读元数据不解码；宽高不可得（不存在/损坏）回退兜底宽。
+        """
+        size = QImageReader(path).size()
+        if size.isValid() and size.width() > 0 and size.height() > 0:
+            w = round(_COLLAPSED_THUMB_H * size.width() / size.height())
+            return max(_COLLAPSED_THUMB_MIN_W, min(w, _COLLAPSED_THUMB_MAX_W))
+        return _COLLAPSED_FIRST_W if is_first else _COLLAPSED_ITEM_W
+
     def _rebuild_thumb_strip(self) -> None:
-        """折叠态单行画廊：首图略宽，溢出收进 +N，非图片只入摘要行
+        """折叠态单行画廊：等高自适应宽，溢出收进 +N，非图片只入摘要行
 
         折叠时只占画廊高度（混合成果多一行摘要），生图类产出直接可见；
         槽位按当前宽度算，窄栏自动减常规缩略图，不换行不横向滚动。
@@ -580,7 +631,7 @@ class InlineArtifactPanel(QWidget):
         self._strip_slot_count = visible
         for idx, item in enumerate(images[:visible]):
             path = item["path"]
-            w = _COLLAPSED_FIRST_W if idx == 0 else _COLLAPSED_ITEM_W
+            w = self._strip_thumb_width(path, idx == 0)
             thumb = QLabel(self._thumb_strip)
             thumb.setObjectName("artifactThumbnail")
             thumb.setFixedSize(w, _COLLAPSED_THUMB_H)
