@@ -1125,6 +1125,11 @@ class OpenAIChatToolWindow(ToolWindow):
     # [PERF] 重载上下文快照后台化桥接（P1）：_restore_meta_from_batch 首算
     # 移出主线程，gen/sid 双校验回填缓存后补刷可见 assistant 卡
     _reload_ctx_ready = pyqtSignal(int, str, object, str)
+    # [E14] 历史会话读链后台化桥接：gen, sid, messages, pending_idxs, error。
+    # 首帧回包（blob + 首屏 extras 已 merge）；pending 为未补载哨兵消息 idx。
+    _history_load_ready = pyqtSignal(int, str, object, object, str)
+    # [E14] 剩余 extras 批次后台补载完成：gen, sid（校验后清 pending 渲染守卫）
+    _extras_batch_ready = pyqtSignal(int, str)
     _interrupt_complete = pyqtSignal(object)  # 中断完成后主线程回调
     # [T4-4] diff 统计后台计算结果回主线程：tool_call_id, stats(dict|None)
     _diff_stats_ready = pyqtSignal(str, object)
@@ -1495,6 +1500,11 @@ class OpenAIChatToolWindow(ToolWindow):
         # 上下文占用快照桥接：快照后台线程 → 主线程画圆环（A 优化）
         self._ctx_usage_ready.connect(self._on_ctx_usage_ready)
         self._reload_ctx_ready.connect(self._on_reload_ctx_ready)
+        # [E14] 历史会话读链后台化桥接：首帧回包建卡 + 批次补载完成清守卫
+        self._history_load_ready.connect(self._on_history_load_ready)
+        self._extras_batch_ready.connect(self._on_extras_batch_ready)
+        self._history_load_gen = 0  # [E14] 连切代际：递增使旧读链回包失效
+        self._extras_pending_idxs: list = []  # [E14] 未补载哨兵消息 idx（非空时推迟向上翻页）
         # 线程安全桥接：中断完成后回到主线程保存会话
         self._interrupt_complete.connect(self._on_finalize_complete)
         # [T4-4] diff 统计后台计算完成 → 主线程校验卡片存活后落数字
@@ -12953,6 +12963,10 @@ class OpenAIChatToolWindow(ToolWindow):
     def _load_more_history_batches(self):
         if self._is_loading_history_batches or not self._has_more_history_batches():
             return
+        # [E14] extras 批次补载未完成：推迟本次翻页（后台毫秒级完成，滚轮继续
+        # 触发自愈）——防止渲染到未补载字段的历史批（R1 红线：不静默丢字段渲染）。
+        if getattr(self, "_extras_pending_idxs", None):
+            return
 
         scroll_bar = self.chat_scroll_area.verticalScrollBar()
         previous_value = scroll_bar.value()
@@ -16820,10 +16834,117 @@ class OpenAIChatToolWindow(ToolWindow):
         _cleanup_global_lru_caches()
 
         # 通过 session_id 获取会话消息，确保即使列表顺序变化也能加载正确的会话
-        messages = self.history_manager.get_session_messages(session_id)
+        # [E14] 读链后台化：内存命中（[I8] 同语义，公开 API 判定）同步走原路径；
+        # 冷打开（blob 读 + extras 首屏载 ~62ms@16K）移后台线程，gen/sid 双校验
+        # 回主线程建卡——连切时旧回包被 gen 校验丢弃（对齐 _reload_ctx 先例）。
+        cached_msgs = self._peek_in_memory_history_messages(session_id)
+        if cached_msgs is not None:
+            self._apply_loaded_history(session_record, session_id, cached_msgs)
+            return
+        self._kick_load_history_messages(session_record, session_id)
+
+    def _peek_in_memory_history_messages(self, session_id: str):
+        """[E14] 内存命中判定（公开 API）：目标会话在本窗 _history_sessions 内
+        且持有非空 messages → 返回该全量列表（[I8] 语义：只信任内存列表内的
+        记录）；未命中 → None（调用方走后台读链）。sync_db=False 免跨进程
+        重载探测（打开链前置刚 auto_save，本进程内存即权威）。"""
+        try:
+            for s in self.history_manager.get_history_list(with_messages=True, sync_db=False):
+                if s.get("session_id") == session_id and s.get("messages"):
+                    return s["messages"]
+        except Exception:
+            logger.warning("[MainWidget] 内存命中判定失败，按冷打开处理", exc_info=True)
+        return None
+
+    def _kick_load_history_messages(self, session_record: Dict, session_id: str) -> None:
+        """[E14] 冷打开读链后台化：blob + 首屏 extras（懒 merge）后台载，回包建卡。
+
+        gen 递增使旧回包失效（连切竞态防线，对齐 _reload_ctx 先例）；后台只读
+        存储与纯函数，禁碰 UI 对象；首屏 = 尾部 48 条内的哨兵消息（近似首屏
+        12 批所需，向上翻页守卫兜底精确性）；剩余哨兵 idx 分批补载完成后发
+        _extras_batch_ready 清守卫。record 经 _pending_history_record 暂存，
+        回调 gen 校验通过后消费（连切覆盖语义已论证安全）。
+        """
+        self._history_load_gen = getattr(self, "_history_load_gen", 0) + 1
+        gen = self._history_load_gen
+        self._extras_pending_idxs = []
+        self._pending_history_record = session_record
+        from app.core.conversation.backend import get_session_storage as _gss
+
+        def _task():
+            try:
+                store = _gss()
+                msgs, pending = store.get_messages_with_lazy_extras(session_id, [])
+                tail = max(0, len(msgs) - 48)
+                first = [i for i in pending if i >= tail]
+                if first:
+                    extras = store.load_msg_extras(session_id, first)
+                    if extras:
+                        from app.core.store.session_repository import merge_extras_into
+
+                        merge_extras_into(msgs, extras)
+                    pending = [i for i in pending if i not in set(first)]
+            except Exception as e:  # noqa: BLE001 — 后台异常回主线程统一降级
+                try:
+                    self._history_load_ready.emit(gen, session_id, None, [], str(e))
+                except RuntimeError:
+                    pass
+                return
+            try:
+                self._history_load_ready.emit(gen, session_id, msgs, pending, "")
+            except RuntimeError:
+                pass
+            # 剩余哨兵 idx 后台分批补载（每批 200）：完成后清渲染守卫
+            while pending:
+                batch = pending[:200]
+                pending = pending[200:]
+                try:
+                    extras = store.load_msg_extras(session_id, batch)
+                    if extras:
+                        from app.core.store.session_repository import merge_extras_into
+
+                        merge_extras_into(msgs, extras)
+                except Exception:  # noqa: BLE001 — 单批失败不拖垮后续批次
+                    break
+            try:
+                self._extras_batch_ready.emit(gen, session_id)
+            except RuntimeError:
+                pass
+
+        self._gen_thread_pool.start(_CtxUsageSnapshotTask(_task, lambda result, error="": None))
+
+    def _on_history_load_ready(self, gen: int, sid: str, messages, pending, error: str):
+        """[E14] 后台读链首帧落地：gen/sid 双校验 → 建卡（原同步路径逻辑原样）。"""
+        if getattr(self, "_is_destroyed", False):
+            return
+        self._extras_pending_idxs = list(pending or [])
+        if gen != getattr(self, "_history_load_gen", 0):
+            return  # 连切：旧读链回包丢弃
+        session = self.session_manager.get_current_session() if self.session_manager else None
+        cur_sid = getattr(session, "session_id", None) if session else None
+        if sid != cur_sid:
+            return
+        session_record = getattr(self, "_pending_history_record", None) or {}
+        if error or not messages:
+            # 降级：读链失败回退 history_manager 同步路径（与旧行为等价）
+            fallback = self.history_manager.get_session_messages(sid) if self.history_manager else None
+            if not fallback:
+                return
+            messages = fallback
+        self._apply_loaded_history(session_record, sid, messages)
+
+    def _on_extras_batch_ready(self, gen: int, sid: str):
+        """[E14] 剩余 extras 批次补载完成：校验后清渲染守卫（恢复向上翻页）。"""
+        if getattr(self, "_is_destroyed", False):
+            return
+        if gen != getattr(self, "_history_load_gen", 0):
+            return
+        self._extras_pending_idxs = []
+
+    def _apply_loaded_history(self, session_record: Dict, session_id: str, messages):
+        """[E14] 历史会话建卡（自原 _load_session_from_record 尾段原样提取）。"""
         if not messages:
             return
-
         title = session_record.get("title") or session_record.get("name") or "历史对话"
 
         # 使用辅助函数创建会话

@@ -872,6 +872,12 @@ class SessionStore:
             return self._session_repo.get_full_messages(session_id)
         return []
 
+    def get_messages_with_lazy_extras(self, session_id: str, first_idxs: List[int]):
+        """[E14] 打开链懒 merge 入口（透传 repo）；导出/深读仍走 get_full_messages。"""
+        if self._session_repo:
+            return self._session_repo.get_messages_with_lazy_extras(session_id, first_idxs)
+        return [], []
+
     def delete_session(self, session_id: str) -> bool:
         """删除会话"""
         if self._session_repo:

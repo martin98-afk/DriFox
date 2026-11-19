@@ -926,6 +926,42 @@ class SessionRepository:
             return msgs
         return merge_extras_into(msgs, extras)
 
+    def get_messages_with_lazy_extras(
+        self, session_id: str, first_idxs: List[int]
+    ) -> Tuple[List[Dict[str, Any]], List[int]]:
+        """[E14] 打开链专用懒 merge：blob 读 + 首屏 idxs 的 extras 合并。
+
+        与 get_full_messages（全量语义，导出/深读专用）的差异：extras 只载
+        ``first_idxs`` 里「带 _x_idx 哨兵的轻量消息」（缺字段者），其余 idx
+        作为 pending 返回，由调用方后台分批补载（load_extras_for_session +
+        merge_extras_into，幂等）。E12 方案 α 的全量 blob 无哨兵 → 零查询零
+        pending，天然共存。
+
+        Returns:
+            (messages, pending_idxs)；会话不存在 → ([], [])。
+            pending 为「尚未补载 extras 的消息下标」升序表。
+        """
+        sess = self.get(session_id)
+        if not sess:
+            return [], []
+        msgs = sess.get("messages", [])
+        self._schedule_legacy_image_blob_migration(session_id, msgs)
+        first_set = set(first_idxs or [])
+        need = [
+            i
+            for i in first_set
+            if 0 <= i < len(msgs) and isinstance(msgs[i], dict) and msgs[i].get(OFFLOAD_IDX_FIELD) is not None
+        ]
+        extras = self.load_extras_for_session(session_id, need) if need else {}
+        if extras:
+            merge_extras_into(msgs, extras)
+        pending = [
+            i
+            for i, m in enumerate(msgs)
+            if isinstance(m, dict) and m.get(OFFLOAD_IDX_FIELD) is not None and i not in first_set
+        ]
+        return msgs, pending
+
     def _schedule_legacy_image_blob_migration(self, session_id: str, msgs: List[Any]) -> None:
         """读侧防御迁移：blob 内嵌 data:image → 后台落盘图并回写 ref 形态 blob。
 
