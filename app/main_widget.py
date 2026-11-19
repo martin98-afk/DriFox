@@ -23320,12 +23320,18 @@ class OpenAIChatToolWindow(ToolWindow):
         # 普通会话）。与 _auto_save_current_session 同口径：team 邮件
         # （_hook_event="TeamMail"）视为真实用户问题（邮件触发的对话应保存），
         # 其余 hook 消息不算。
-        has_user_message = any(
-            msg.get("role") == "user" and (not msg.get("_hook_event") or msg.get("_hook_event") == "TeamMail")
-            for msg in saved_messages
-        )
+        # [E8-机2] 会话级布尔态（与 _auto_save_current_session 同口径）：首扫确认
+        # 后置 True（挂 session 对象，切会话自然重置），置 True 后跳过全量 any 扫。
+        if not getattr(session, "_has_user_message_cached", False):
+            if any(
+                msg.get("role") == "user" and (not msg.get("_hook_event") or msg.get("_hook_event") == "TeamMail")
+                for msg in saved_messages
+            ):
+                session._has_user_message_cached = True
         # 只有 ephemeral 消息的会话（系统驱动）也放行
-        if not has_user_message and not (getattr(session, "metadata", None) or {}).get("_ephemeral_session"):
+        if not getattr(session, "_has_user_message_cached", False) and not (
+            getattr(session, "metadata", None) or {}
+        ).get("_ephemeral_session"):
             return
 
         # 🛡️ 跳过无变更保存：自上次保存后会话没有新消息/修改，
@@ -26486,12 +26492,19 @@ class OpenAIChatToolWindow(ToolWindow):
         # 跳过没有用户消息的会话（SessionStart hook 产生的空会话不应保存到历史）
         # 🛡️ R7 修复：team 邮件（_hook_event="TeamMail"）视为真实用户问题
         # → mail-only 会话也能自动保存到历史（之前被全过滤误伤，永不落库）
-        has_user_message = any(
-            msg.get("role") == "user" and (not msg.get("_hook_event") or msg.get("_hook_event") == "TeamMail")
-            for msg in session.messages
-        )
+        # [E8-机2] 会话级布尔态：首扫确认后置 True（挂 session 对象，切会话自然重置）。
+        # 用户消息只增不减，置 True 后跳过全量 any 扫；扫到 False 不置位（每轮重扫，
+        # 与原行为等价——后来出现的用户消息仍能放行）。
+        if not getattr(session, "_has_user_message_cached", False):
+            if any(
+                msg.get("role") == "user" and (not msg.get("_hook_event") or msg.get("_hook_event") == "TeamMail")
+                for msg in session.messages
+            ):
+                session._has_user_message_cached = True
         # 只有 ephemeral 消息的会话（系统驱动）也放行
-        if not has_user_message and not (getattr(session, "metadata", None) or {}).get("_ephemeral_session"):
+        if not getattr(session, "_has_user_message_cached", False) and not (
+            getattr(session, "metadata", None) or {}
+        ).get("_ephemeral_session"):
             return None
 
         # 🛡️ 跳过无变更保存：自上次保存后会话没有被修改，
@@ -26502,11 +26515,18 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 🛡️ 落库前回填：给有 model_name 但缺 provider_name 的 assistant 消息补上
         # 策略：优先精确匹配当前选中的服务商，其次模糊匹配
+        # [E8-机2] 游标增量：finalize 链（流结束处理）已给当轮 assistant 消息
+        # 一次性写 provider_name，保存链只需兜底旧会话/漏写消息。append-only
+        # 保证游标前已扫过的消息不新增字段，从游标续扫即可；扫过的失败案例
+        # （多匹配不明确）语义上永不回填，不重试。游标挂 session 对象，切会话重置。
+        cursor = getattr(session, "_provider_backfill_upto", 0)
+        if cursor > len(session.messages):
+            cursor = 0  # 消息被重置/截断（防御）
         current_provider_display = ""
         if self._current_provider_name:
             cfg = self._valid_configs.get(self._current_provider_name, {})
             current_provider_display = cfg.get("display_name", self._current_provider_name)
-        for msg in session.messages:
+        for msg in session.messages[cursor:]:
             if msg.get("role") != "assistant":
                 continue
             if msg.get("model_name") and not msg.get("provider_name") and self._valid_configs:
@@ -26527,6 +26547,7 @@ class OpenAIChatToolWindow(ToolWindow):
                             break
                 if matched:
                     msg["provider_name"] = matched
+        session._provider_backfill_upto = len(session.messages)
 
         system_prompt = getattr(session, "system_prompt", "") or ""
         # [PERF-close] 关窗探测 worktree 需起最多 3 个 git 子进程（Windows
