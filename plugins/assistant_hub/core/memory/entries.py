@@ -77,6 +77,26 @@ def now_iso() -> str:
     return datetime.now().astimezone().isoformat(timespec="seconds")
 
 
+def write_legacy(aid_dir: Path, items: List[Dict[str, Any]]) -> None:
+    """迁移时无法解析的原始段落：整段保留，不参与注入与配额。"""
+    lines = [json.dumps(x, ensure_ascii=False) for x in items]
+    _atomic_write(legacy_path(aid_dir), "\n".join(lines) + "\n")
+
+
+def fingerprint(aid_dir: Path) -> str:
+    """journal + snapshot 的内容摘要：任一事件变化都会变，与视图渲染无关。"""
+    import hashlib
+
+    h = hashlib.sha1()
+    for p in sorted(entries_dir(aid_dir).rglob("*.jsonl")):
+        try:
+            h.update(p.name.encode("utf-8"))
+            h.update(p.read_bytes())
+        except OSError:
+            continue
+    return "j" + h.hexdigest()[:12]
+
+
 def new_id(existing: Iterable[str] = ()) -> str:
     seen = set(existing)
     while True:
@@ -244,6 +264,8 @@ def _apply_del(state: Dict[str, Any], ev: Dict[str, Any]) -> None:
     item = state["entries"].get(entry_id)
     if item is None:
         return
+    if item.get("active"):
+        item["versions"].append(item["active"])
     item["state"] = "deleted"
     item["deleted_at"] = str(ev.get("ts") or "")
 
@@ -313,7 +335,24 @@ def replay(aid_dir: Path) -> Dict[str, Any]:
             _apply_move(state, ev)
         elif op == "pin":
             _apply_pin(state, ev)
+    _load_legacy(state, aid_dir)
     return state
+
+
+def _load_legacy(state: Dict[str, Any], aid_dir: Path) -> None:
+    """legacy.jsonl 是唯一来源；文件不存在时保留 snapshot 里的 legacy。"""
+    p = legacy_path(aid_dir)
+    if not p.exists():
+        return
+    state["legacy"] = []
+    for obj in _iter_jsonl(p):
+        state["legacy"].append(
+            {
+                "text": str(obj.get("text") or ""),
+                "reason": str(obj.get("reason") or ""),
+                "line_no": obj.get("line_no") or 0,
+            }
+        )
 
 
 def compact(aid_dir: Path, keep_days: int = 7) -> Dict[str, Any]:

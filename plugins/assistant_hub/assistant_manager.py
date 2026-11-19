@@ -1085,6 +1085,15 @@ class AssistantManager:
     def _core_prompts(self):
         return _load_core_module("memory.prompts", "memory/prompts.py")
 
+    def _core_entries(self):
+        return _load_core_module("memory.entries", "memory/entries.py")
+
+    def _core_view(self):
+        return _load_core_module("memory.view", "memory/view.py")
+
+    def _core_migrate(self):
+        return _load_core_module("memory.migrate", "memory/migrate.py")
+
     def _core_experience(self):
         return _load_core_module("experience", "experience.py")
 
@@ -1209,19 +1218,15 @@ class AssistantManager:
         limits = self.memory_max_chars(aid)
         parts: list[str] = []
 
-        # 全局记忆
-        g_text = (store.read_global_memory(aid_dir) or "").strip()
-        if g_text:
-            if len(g_text) > limits["global"]:
-                g_text = (
-                    g_text[: limits["global"]]
-                    + "\n... (全局记忆超限，已截断)\n\n**ACTION REQUIRED**: 全局记忆已超上限。先整理 "
-                    + global_file
-                    + "：合并去重、删过时内容、保持精简，然后继续用户的任务。"
-                )
+        # 全局记忆：按条目装包，超预算整条让位，绝不半条截断
+        state = self.memory_state(aid)
+        packed = self._core_view().pack_injection(
+            state, self.memory_sections(aid), self.memory_section_quotas(aid), limits["global"]
+        )
+        if packed["text"].strip():
             parts.append(
                 "<global_memory>\n以下是跨项目的全局记忆（知识层让你少犯错，感性层让你更像个人）。\n\n"
-                + g_text
+                + packed["text"]
                 + "\n</global_memory>"
             )
 
@@ -1359,15 +1364,119 @@ class AssistantManager:
         return out
 
     def read_global_memory(self, aid: str) -> str:
-        return self._core_store().read_global_memory(self._assistant_dir(aid))
+        """全局记忆阅读视图。首次调用触发 v1→v2 迁移。"""
+        self._ensure_migrated(aid)
+        state = self._core_entries().replay(self._assistant_dir(aid))
+        return self._core_view().render_markdown(state, self.memory_sections(aid))
+
+    # ── 全局记忆 v2（事件存储）──
+
+    def memory_device_id(self) -> str:
+        """本机标识：放同步目录之外，避免两台设备共用一个 journal 文件。"""
+        return self._core_entries().load_or_create_device_id(self.root.parent)
+
+    def _ensure_migrated(self, aid: str) -> Dict[str, Any]:
+        """首次访问：v1 MEMORY.md → v2 事件；幂等，失败不留标记。"""
+        entries_mod = self._core_entries()
+        aid_dir = self._assistant_dir(aid)
+        if entries_mod.migrated_flag(aid_dir).exists():
+            return {"migrated": False}
+        old_text = ""
+        try:
+            old_text = (aid_dir / "MEMORY.md").read_text(encoding="utf-8")
+        except OSError:
+            old_text = ""
+        if old_text.strip():
+            parsed = self._core_migrate().parse_legacy(old_text, self.memory_sections(aid))
+            device = self.memory_device_id()
+            stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+            try:
+                (aid_dir / f"MEMORY.md.bak-{stamp}").write_text(old_text, encoding="utf-8")
+            except OSError:
+                pass
+            for ev in parsed["events"]:
+                entry = entries_mod.new_entry(
+                    ev["section"], ev["text"], origin=ev.get("origin") or "import", source=ev.get("source")
+                )
+                entries_mod.append_event(aid_dir, device, {"op": "put", "id": entry["id"], "entry": entry})
+            if parsed["legacy"]:
+                entries_mod.write_legacy(aid_dir, parsed["legacy"])
+        entries_mod.migrated_flag(aid_dir).parent.mkdir(parents=True, exist_ok=True)
+        entries_mod.migrated_flag(aid_dir).write_text("1\n", encoding="utf-8")
+        return {"migrated": True}
+
+    def memory_state(self, aid: str) -> Dict[str, Any]:
+        self._ensure_migrated(aid)
+        return self._core_entries().replay(self._assistant_dir(aid))
+
+    def append_memory_entry(
+        self, aid: str, section: str, text: str, origin: str = "agent", source=None
+    ) -> Dict[str, Any]:
+        """单条追加：最常用路径，不做整篇重写。"""
+        self._ensure_migrated(aid)
+        if not str(text or "").strip():
+            return {"ok": False, "error": "content 不能为空"}
+        mod = self._core_entries()
+        entry = mod.new_entry(section, text, origin=origin, source=source)
+        mod.append_event(
+            self._assistant_dir(aid), self.memory_device_id(), {"op": "put", "id": entry["id"], "entry": entry}
+        )
+        return {"ok": True, "id": entry["id"], "entry": entry}
+
+    def delete_memory_entry_by_id(self, aid: str, entry_id: str, reason: str = "") -> Dict[str, Any]:
+        self._ensure_migrated(aid)
+        mod = self._core_entries()
+        aid_dir = self._assistant_dir(aid)
+        state = mod.replay(aid_dir)
+        if entry_id not in state["entries"]:
+            return {"ok": False, "error": "not_found"}
+        mod.append_event(aid_dir, self.memory_device_id(), {"op": "del", "id": entry_id, "reason": reason})
+        return {"ok": True, "id": entry_id}
+
+    def replace_global_memory(
+        self, aid: str, content: str, confirm: bool = False, base: str = ""
+    ) -> Dict[str, Any]:
+        """整篇替换：解析为条目 diff，默认拒绝大量删除。"""
+        self._ensure_migrated(aid)
+        mod, view_mod = self._core_entries(), self._core_view()
+        aid_dir = self._assistant_dir(aid)
+        cur_base = mod.fingerprint(aid_dir)
+        if base and base != cur_base:
+            return {"ok": False, "error": "conflict", "cur_base": cur_base}
+        state = mod.replay(aid_dir)
+        sections = self.memory_sections(aid)
+        plan = view_mod.diff_replace(state, content, sections)
+        total = len(mod.active_entries(state)) or 1
+        deleted = len(plan["removed"])
+        if not confirm and deleted / total > 0.3:
+            return {
+                "ok": False,
+                "error": "confirm_required",
+                "removed": [e["text"][:40] for e in plan["removed"]],
+                "kept": len(plan["kept"]),
+                "added": len(plan["added"]),
+            }
+        device = self.memory_device_id()
+        for item in plan["added"]:
+            entry = mod.new_entry(item["section"], item["text"], origin="agent", source={"kind": "replace"})
+            mod.append_event(aid_dir, device, {"op": "put", "id": entry["id"], "entry": entry})
+        for item in plan["removed"]:
+            mod.append_event(aid_dir, device, {"op": "del", "id": item["id"], "reason": "replace"})
+        return {
+            "ok": True,
+            "kept": len(plan["kept"]),
+            "added": len(plan["added"]),
+            "deleted": len(plan["removed"]),
+        }
 
     def read_global_section(self, aid: str, name: str) -> str:
         """取全局记忆里某个分区的块（UI 点卡片查看用）；无此分区返回空串。"""
         store = self._core_store()
-        return store.section_block_text(store.read_global_memory(self._assistant_dir(aid)), name)
+        return store.section_block_text(self.read_global_memory(aid), name)
 
     def write_global_memory(self, aid: str, content: str) -> bool:
-        return self._core_store().write_global_memory(self._assistant_dir(aid), content)
+        r = self.replace_global_memory(aid, content, confirm=True)
+        return bool(r.get("ok"))
 
     def read_project_memory(self, aid: str, workdir: str) -> str:
         return self._core_store().read_project_memory(workdir, aid)
@@ -1376,23 +1485,28 @@ class AssistantManager:
         return self._core_store().write_project_memory(workdir, aid, content)
 
     def memory_fingerprint(self, aid: str, kind: str, workdir: str = "") -> str:
-        """记忆文件版本指纹（memory_read 返回、memory_write base 校验用）。"""
-        store = self._core_store()
+        """记忆版本指纹：global 用事件摘要（与视图渲染无关），project 仍用文件 stat。"""
         if kind == "global":
-            return store.memory_fingerprint(store.global_memory_path(self._assistant_dir(aid)))
+            self._ensure_migrated(aid)
+            return self._core_entries().fingerprint(self._assistant_dir(aid))
         if kind == "project" and workdir:
+            store = self._core_store()
             return store.memory_fingerprint(store.project_memory_path(workdir, aid))
         return ""
 
     def append_memory(self, aid: str, kind: str, text: str, workdir: str = "", section: str = "") -> Dict[str, Any]:
-        """向全局/项目 MEMORY.md 追加一块（不覆盖已有行）。
+        """向全局/项目记忆追加一块（不覆盖已有内容）。
 
-        section 仅对 global 有意义：插入该分区块末尾（块不存在则新建）。
+        global 走条目事件（section 必填于有分区时）；project 仍写 MEMORY.md 文本。
         """
-        store = self._core_store()
         if kind == "global":
-            return store.append_memory_file(store.global_memory_path(self._assistant_dir(aid)), text, section)
+            r = self.append_memory_entry(aid, section, text, origin="agent")
+            if not r.get("ok"):
+                return r
+            state = self.memory_state(aid)
+            return {"ok": True, "chars": len(self._core_view().render_markdown(state, self.memory_sections(aid))), "id": r["id"]}
         if kind == "project" and workdir:
+            store = self._core_store()
             return store.append_memory_file(store.project_memory_path(workdir, aid), text)
         return {"ok": False, "error": "bad_kind"}
 

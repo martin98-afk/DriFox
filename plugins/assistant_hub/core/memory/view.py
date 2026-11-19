@@ -137,7 +137,7 @@ def diff_replace(
 def _parse_plain(text: str, sections: List[Dict[str, str]]) -> List[Dict[str, Any]]:
     names = [str(s.get("name") or "") for s in sections or []]
     out: List[Dict[str, Any]] = []
-    current = ""
+    current = names[0] if names else ""
     for raw in str(text or "").splitlines():
         line = raw.strip()
         if line.startswith("## "):
