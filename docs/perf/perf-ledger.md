@@ -18,7 +18,6 @@
 | `2f29ff63` | E1（顺手批） | quickwins 三连：system-tokens md5 身份短路、charts 逐块标记、orphan-fix 早退 | 8 用例（budget resolver/chart viewer/orphan fix） | `test_builtin_budget_resolver.py` 等 3 文件 |
 | `6fe79514` | E7 | PluginConfigStore 读盘进程级缓存（键=path+mtime_ns，写路径失效）+ cfg() 共享 store 实例 | **读盘对照：10 key × 2 轮投影 20 次 parse → 1 次**（同文件多 key 共享一次读盘） | `test_context_cfg_shared_store.py` + store 6 用例 |
 | `735009e2` | E7 | skills 缓存 key 动态源签名段（iterdir+stat）纳入既有 30s TTL（原每次现算） | TTL 命中零现算 / 过期重算 / invalidate 清动态段，21 passed（含 reloaders 钩子链） | `test_local_skills_contrib.py` +3 用例 |
-| `735009e2` | E7 | skills 缓存 key 动态源签名段（iterdir+stat）纳入既有 30s TTL（原每次现算） | TTL 命中零现算 / 过期重算 / invalidate 清动态段，21 passed（含 reloaders 钩子链） | `test_local_skills_contrib.py` +3 用例 |
 | `0c3fe727` | E7 | 启动期 daemon 预热 `resolve_context_limit`（provider 插件惰性 import + AST 审计冷启动） | **首次发送尖峰 106ms → 47.7ms**（E5 实测口径）；不改启动时序（AST 守卫） | `test_main_context_limit_prewarm.py` |
 | `cd7cbbee` | E6 | 流式游标化批：pending-parts 块追加、proto-state 扫描、快照实心游标，消除流式 O(n²) | **fuzz 5 种子 × 40 轮零失配**（等价性）；游标位置确定性 | `test_stream_cursor_e6.py` |
 | `5fa407f5` | E8 | responses 序列化路径耗时 diag mark（为 [B1] 式增量投影决策供数；源码开/打包关） | 打点输出 `耗时 X.XXms msgs=N items=M`；PROBE=0 零日志；产物逐点等价 | `test_serializer_diag_mark.py` |
@@ -27,7 +26,8 @@
 | `3bb285b9` | E9 | LSP 符号操作 sleep(0.3) 改就绪轮询（25ms 步进）+ did_open/close 保活引用计数（延时关闭窗口） | **就绪命中 ~30ms（原固定 300ms）**、兜底 ≈300ms 照常执行、连续操作 1 open / 到期 1 close | `test_lsp_symbol_op_ready.py` |
 | `02e025c1` | E10 | session extras 改 (sid,msg_idx) upsert diff 写、未变 tick 零 SQL | **write_extras -94%**（E10 基准口径） | `test_session_extras_upsert.py` |
 | `9e0d533d` | E11 | 测试修复：recycle 守卫假设（viewer 桩 + 几何排开双拦截点）与内存基线稳态口径落地 | **recycle verdict 120→12（Δ=-108，原 Δ=0 假象）**；**稳态 12 卡 / 14.5 MB/会话**（对照零回收上界 136.9-146.6 MB/会话） | 两 perf 文件重构（改断言口径） |
-| （进行中） | E12 | 流式拍 blob 全量直存（session_repository.py） | 实施中，完成后补行 | — |
+| `5f6b25e7` | E12 | 流式拍（尾条 _partial）跳过 extract+write_extras、blob 全量直存，finish 拍自然恢复剥离 | **流式拍 extras 链 122→15ms @16K、513→69ms @64K（净收益 86.6%）**；serialize 膨胀实测可忽略（嵌套计时口径） | `test_session_streaming_offload.py` |
+| （进行中） | E14 | 卡Q 读链后台化 + 懒 merge（fix-smith 执行中，碰 session_repository 与 main_widget 打开链） | 完成后补行 | — |
 
 关联背景 commit（同批调研/清账，非本轮实施）：`2761c685`（artifacts 画廊设计记录）、`a867211b`/`830895bb`/`90f3927b`/`e354f313`/`f8a7044a`（更早的 R6/#I3 系列与 perf refactor，见各自 commit message）。
 
@@ -100,10 +100,13 @@ perf 基线曾判「灌入 120 张、配额 12，淘汰 Δ=0，回收未生效�
 
 ## 四、遗留与后续
 
+### 方案 α 窗口语义（E12 落定的持久化语义，动 save 链前必读）
+
+流式期间的 blob **自含全量字段（不剥离）**——流式拍（尾条 `_partial`）跳过 extract + write_extras，整拍直接全量直存；崩溃窗口上限 = 一个流式拍周期（25s partial flush 间隔），窗口内强退恢复**零丢失为结构保证**。落定拍（finish）自然恢复轻量 blob（剥离语义回归）。任何未来动 save 链的改动必须维持这条不变式：**流式拍全量、落定拍轻量**，破坏它等于打开崩溃丢失窗口。实施见 `5f6b25e7`。
+
 | 项 | 状态 | 说明 / 核实路径 |
 |---|---|---|
-| 卡Q：读链后台预取 + 懒 merge | E4 判定立项，实施中排队 | 立项后在本台账追加行 |
-| E12：流式拍 blob 全量直存 | 实施中 | 完成后在「一、实施台账」补行 |
+| 卡Q / E14：读链后台预取 + 懒 merge | 实施中（fix-smith 执行中） | 完成后在「一、实施台账」补行 |
 | 英文键 `get("model")` 5 处 vs 中文键「模型名称」 | 线索待核实 | 核实路径：查 `_get_model_config` 是否有英文别名读法；若无，统一改双读（先例 `subagent_worker.py:403` 附近的双读形态） |
 | 存量失败 6 个（transport 插件注册 / 测试环境类） | 建议另开单 | 本轮多单基线对照反复复现（HEAD 上即失败），与本轮改动无关；集中在 transport 插件注册与测试环境假设 |
 | 素材卡规范改进 | 建议采纳 | 出卡附「已核对 commit 范围」+「同函数族 ±30 行 [PERF] 注释」字段——本轮多单实际受益于人工补做这两步 |
