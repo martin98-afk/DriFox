@@ -104,6 +104,7 @@ def test_panel_drops_invalid_items(panel):
     [
         ("/x/a.png", "image"),
         ("/x/a.JPG", "image"),
+        ("/x/a.svg", "image"),
         ("/x/a.mp4", "video"),
         ("/x/a.html", "html"),
         ("/x/a.md", "text"),
@@ -120,6 +121,18 @@ def test_panel_kind_explicit_wins(panel):
     """显式 kind 优先于扩展名推断"""
     panel.update_artifacts([{"path": "/x/a.png", "kind": "video"}])
     assert panel._items[0]["kind"] == "video"
+
+def test_panel_svg_thumb_decodes(panel, tmp_path):
+    """SVG 走图片路径要真能解码出缩略图（Qt qsvg 插件在位）"""
+    svg = tmp_path / "a.svg"
+    svg.write_text(
+        '<svg xmlns="http://www.w3.org/2000/svg" width="120" height="80">'
+        '<rect width="120" height="80" fill="#3b82f6"/></svg>',
+        encoding="utf-8",
+    )
+    pix = panel._load_thumb(str(svg))
+    assert pix is not None and not pix.isNull()
+    assert pix.width() <= _panel_mod._THUMB_W and pix.height() <= _panel_mod._THUMB_H
 
 
 def test_panel_overflow_capped(panel):

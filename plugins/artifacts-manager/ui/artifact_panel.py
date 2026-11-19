@@ -66,7 +66,7 @@ _KIND_META = {
     "file": ("文", "#6b7280"),
 }
 
-_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"}
+_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".svg"}
 _VIDEO_EXTS = {".mp4", ".mov", ".webm", ".mkv", ".avi"}
 _HTML_EXTS = {".html", ".htm"}
 _TEXT_EXTS = {".md", ".txt", ".json", ".csv", ".log", ".py", ".js", ".ts", ".yaml", ".yml"}
