@@ -5143,7 +5143,10 @@ class OpenAIChatToolWindow(ToolWindow):
         # 不能再用 get_team_run_id()：它取 team.json 顶层 run_id（跨项目全局
         # 单槽），会让任意项目的标签页并进最近一次团队运行。
         project = str(self.__dict__.get("_current_project") or "")
-        run_id = tm.resolve_run_id_for_project(project, self._resolve_project_workdir() or "")
+        # 临时对话页的工作目录是 tmp-sessions/{window_id}，不能写进团队级
+        # workdir（会污染整个团队的统一工作树）。
+        join_workdir = "" if self.__dict__.get("_is_temp_scope", False) else (self._resolve_project_workdir() or "")
+        run_id = tm.resolve_run_id_for_project(project, join_workdir)
         self._team_run_id = run_id
         # 🛡️ M1'：按 run_id 粒度读模板名，多团队并存下不再被顶层 template
         # 单槽的最新一次写入覆盖（A 团队成员 /team --join 时不会拿到
