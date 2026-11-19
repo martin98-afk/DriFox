@@ -184,6 +184,12 @@ class EngineSessionImpl:
         # SessionStart 预对话事件（此前插件引擎无此触发点，UI 主对话专属）
         self._session_start_injections: List[str] = []
         self._trigger_session_start_hook()
+        # [E8-H] SessionStart + BuildSystemPrompt 合并注入缓存（照 builder.py 的
+        # session.system_prompt 形态）。主对话同产品语义：BuildSystemPrompt 产物
+        # 会话内不变（builder 缓存 + system 去重注释双证）；实例生命周期即会话
+        # 生命周期（cron/gateway 每任务新建），会话重建自然失效；agent/技能/
+        # 项目笔记热变可调 invalidate_prompt_injections() 显式失效。
+        self._prewarm_injections_cache: Optional[List[str]] = None
 
     # ========== 逃生舱（公开完整对话执行栈） ==========
 
@@ -214,7 +220,6 @@ class EngineSessionImpl:
     ) -> ChatResult:
         """执行一轮对话（阻塞）。见 contracts/engine_session.py 契约文档。"""
         from app.plugins.contracts.hook_policy import (
-            BuildSystemPromptEvent,
             PostUserMessageEvent,
             PreUserMessageEvent,
         )
@@ -229,16 +234,11 @@ class EngineSessionImpl:
         if auto_history:
             msgs = self._history + msgs
 
-        # 引擎 hook 事件统一拼接：SessionStart（会话初始化时触发）+
-        # BuildSystemPrompt / PreUserMessage（本轮触发）→ 全部拼进 system。
+        # 引擎 hook 事件统一拼接：SessionStart（会话初始化时触发，缓存）+
+        # BuildSystemPrompt（缓存，首次构建后复用）→ 拼进 system；
+        # PreUserMessage（含本轮 user 消息）每轮实时触发。
         # cron 等插件对话不读 session.messages，注入必须进 prompt 才对 LLM 生效
-        injections = list(self._session_start_injections)
-        injections.extend(
-            self._trigger_engine_hook(
-                "BuildSystemPrompt",
-                BuildSystemPromptEvent(),
-            )
-        )
+        injections = self._get_prewarm_injections()
         if user:
             injections.extend(
                 self._trigger_engine_hook(
@@ -359,6 +359,28 @@ class EngineSessionImpl:
         except Exception:
             pass
         return ctx
+
+    def _get_prewarm_injections(self) -> List[str]:
+        """[E8-H] SessionStart + BuildSystemPrompt 注入缓存读径。
+
+        首次调用构建并缓存，后续 turn 直接复用（跳过 BuildSystemPrompt hook 链）。
+        PreUserMessage 不入缓存（含本轮 user 消息，必须实时）。返回防御性拷贝——
+        turn() 会对返回值 extend 拼接，不得污染缓存本体。
+        """
+        if self._prewarm_injections_cache is None:
+            from app.plugins.contracts.hook_policy import BuildSystemPromptEvent
+
+            bsp = self._trigger_engine_hook("BuildSystemPrompt", BuildSystemPromptEvent())
+            self._prewarm_injections_cache = list(self._session_start_injections) + bsp
+        return list(self._prewarm_injections_cache)
+
+    def invalidate_prompt_injections(self) -> None:
+        """[E8-H] 显式失效提示词注入缓存。
+
+        agent 切换/技能变化/项目笔记（AGENTS.md）编辑等热变场景由插件侧调用；
+        不确定是否受影响时调用无害（下次 turn 重算，开销 = 原每轮成本）。
+        """
+        self._prewarm_injections_cache = None
 
     def _trigger_engine_hook(self, event_name: str, event, ctx_extra: Dict[str, Any] = None) -> List[str]:
         """按引擎 hook policy 判定并同步触发一个 hook 事件
