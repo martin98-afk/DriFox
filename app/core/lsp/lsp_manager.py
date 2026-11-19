@@ -18,6 +18,7 @@ import os
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -764,46 +765,49 @@ class LspManager:
 
     # ── 透明代理 LSP 操作 ─────────────────────────────────────
 
-    async def go_to_definition(self, file_path: str, line: int, column: int) -> Optional[list]:
+    # [E9] did_open 后等待 server 就绪的轮询参数：25ms 步进，总超时 0.3s（原固定
+    # sleep 的兑底语义保留——轮询只是提前命中，超时照常执行操作，绝不更慢/挂死）
+    _SYM_READY_POLL_INTERVAL = 0.025
+    _SYM_READY_MAX_WAIT = 0.3
+
+    async def _wait_index_ready(self, client: LspClient, file_path: str) -> None:
+        """did_open 后等待 server 对该文件的首条响应（索引完成代理信号）。
+
+        信号源：publishDiagnostics push（client._diag_push_time per-uri 时间戳）。
+        did_open 时该 uri 时间戳已重置，其后出现的新推送即代表 server 已处理该文件。
+        server 不推诊断（或文件无问题不推）时空转到超时，与原固定 sleep(0.3) 等价。
+        """
+        try:
+            opened_uri = Path(file_path).resolve().as_uri()
+        except Exception:
+            opened_uri = ""
+        opened_at = time.monotonic()
+        deadline = opened_at + self._SYM_READY_MAX_WAIT
+        while time.monotonic() < deadline:
+            if opened_uri and client._diag_push_time.get(opened_uri, 0.0) > opened_at:
+                return
+            await asyncio.sleep(self._SYM_READY_POLL_INTERVAL)
+
+    async def _symbol_op(self, file_path: str, op_name: str, *args):
+        """四符号操作同构骨架：acquire → 就绪等待（轮询/超时兑底）→ 操作 → release。"""
         client = self.get_client_for_file(file_path)
         if not client or not await self._ensure_started(client):
             return None
-        await client.did_open(file_path)
-        await asyncio.sleep(0.3)
+        await client.acquire_file(file_path)
         try:
-            return await client.go_to_definition(file_path, line, column)
+            await self._wait_index_ready(client, file_path)
+            return await getattr(client, op_name)(file_path, *args)
         finally:
-            await client.did_close(file_path)
+            await client.release_file(file_path)
+
+    async def go_to_definition(self, file_path: str, line: int, column: int) -> Optional[list]:
+        return await self._symbol_op(file_path, "go_to_definition", line, column)
 
     async def find_references(self, file_path: str, line: int, column: int) -> Optional[list]:
-        client = self.get_client_for_file(file_path)
-        if not client or not await self._ensure_started(client):
-            return None
-        await client.did_open(file_path)
-        await asyncio.sleep(0.3)
-        try:
-            return await client.find_references(file_path, line, column)
-        finally:
-            await client.did_close(file_path)
+        return await self._symbol_op(file_path, "find_references", line, column)
 
     async def hover(self, file_path: str, line: int, column: int) -> Optional[str]:
-        client = self.get_client_for_file(file_path)
-        if not client or not await self._ensure_started(client):
-            return None
-        await client.did_open(file_path)
-        await asyncio.sleep(0.3)
-        try:
-            return await client.hover(file_path, line, column)
-        finally:
-            await client.did_close(file_path)
+        return await self._symbol_op(file_path, "hover", line, column)
 
     async def document_symbols(self, file_path: str) -> Optional[list]:
-        client = self.get_client_for_file(file_path)
-        if not client or not await self._ensure_started(client):
-            return None
-        await client.did_open(file_path)
-        await asyncio.sleep(0.3)
-        try:
-            return await client.document_symbols(file_path)
-        finally:
-            await client.did_close(file_path)
+        return await self._symbol_op(file_path, "document_symbols")
