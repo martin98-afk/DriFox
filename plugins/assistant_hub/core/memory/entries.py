@@ -220,6 +220,34 @@ def _apply_del(state: Dict[str, Any], ev: Dict[str, Any]) -> None:
     item["deleted_at"] = str(ev.get("ts") or "")
 
 
+def _apply_merge(state: Dict[str, Any], ev: Dict[str, Any]) -> None:
+    target = ev.get("entry") or {}
+    target_id = str(ev.get("id") or target.get("id") or "")
+    for sid in ev.get("sources") or []:
+        src = state["entries"].get(str(sid))
+        if src is not None and src["state"] == "active":
+            src["state"] = "superseded"
+            src["superseded_by"] = target_id
+    _apply_put(state, {"op": "put", "id": target_id, "entry": target})
+
+
+def _apply_move(state: Dict[str, Any], ev: Dict[str, Any]) -> None:
+    item = state["entries"].get(str(ev.get("id") or ""))
+    if item is None or not item.get("active"):
+        return
+    item["active"] = dict(
+        item["active"], section=str(ev.get("section") or ""), updated_at=str(ev.get("ts") or "")
+    )
+    item["active"]["rev"] = int(item["active"].get("rev") or 1) + 1
+
+
+def _apply_pin(state: Dict[str, Any], ev: Dict[str, Any]) -> None:
+    item = state["entries"].get(str(ev.get("id") or ""))
+    if item is None or not item.get("active"):
+        return
+    item["active"] = dict(item["active"], pinned=bool(ev.get("pinned")))
+
+
 def _apply_snapshot(state: Dict[str, Any], ev: Dict[str, Any]) -> None:
     for rec in ev.get("entries") or []:
         entry_id = str(rec.get("id") or "")
@@ -251,4 +279,10 @@ def replay(aid_dir: Path) -> Dict[str, Any]:
             _apply_put(state, ev)
         elif op == "del":
             _apply_del(state, ev)
+        elif op == "merge":
+            _apply_merge(state, ev)
+        elif op == "move":
+            _apply_move(state, ev)
+        elif op == "pin":
+            _apply_pin(state, ev)
     return state
