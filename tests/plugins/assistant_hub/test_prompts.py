@@ -54,3 +54,12 @@ def test_build_distill_gate():
 
 
 
+
+
+def test_memory_system_mentions_entry_ops():
+    """v2：全局记忆说明书按条目语义，不再要求整篇替换。"""
+    text = m.build_memory_system("/data/MEMORY.md", "/proj/.drifox/memory/build", {"global": 4000, "project": 3000})
+    assert "memory_read(scope=global)" in text
+    assert "整体替换" not in text
+    assert "mode=update" in text
+    assert "mode=delete" in text
