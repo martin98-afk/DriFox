@@ -314,3 +314,46 @@ def replay(aid_dir: Path) -> Dict[str, Any]:
         elif op == "pin":
             _apply_pin(state, ev)
     return state
+
+
+def compact(aid_dir: Path, keep_days: int = 7) -> Dict[str, Any]:
+    """当前状态落成 snapshot，再裁剪旧事件；读取结果与裁剪前等价。"""
+    state = replay(aid_dir)
+    covered: Dict[str, int] = {}
+    for p in journal_dir(aid_dir).glob("*.jsonl"):
+        seqs = [int(ev.get("seq") or 0) for ev in _iter_jsonl(p)]
+        covered[p.stem] = max(seqs or [0])
+    payload = {
+        "op": "snapshot",
+        "ts": now_iso(),
+        "covered": covered,
+        "entries": [
+            {
+                "id": item["id"],
+                "state": item["state"],
+                "active": item.get("active"),
+                "versions": item.get("versions") or [],
+                "conflict": bool(item.get("conflict")),
+            }
+            for item in state["entries"].values()
+        ],
+        "legacy": state.get("legacy") or [],
+    }
+    _atomic_write(snapshot_path(aid_dir), json.dumps(payload, ensure_ascii=False) + "\n")
+    _prune_journals(aid_dir, keep_days)
+    return {"ok": True, "entries": len(payload["entries"]), "covered": covered}
+
+
+def _prune_journals(aid_dir: Path, keep_days: int) -> None:
+    """保留最近 keep_days 天的事件；时间解析失败的行一律保留（宁多留不误删）。"""
+    cutoff = datetime.now().astimezone().timestamp() - keep_days * 86400
+    for p in journal_dir(aid_dir).glob("*.jsonl"):
+        keep: List[str] = []
+        for ev in _iter_jsonl(p):
+            ts = _parse_ts(ev.get("ts"))
+            if ts is None or ts.timestamp() >= cutoff:
+                keep.append(json.dumps(ev, ensure_ascii=False, separators=(",", ":")))
+        if keep:
+            _atomic_write(p, "\n".join(keep) + "\n")
+        else:
+            p.unlink(missing_ok=True)
