@@ -182,11 +182,15 @@ def _render_tool_block(block: Dict[str, Any], ctx: RenderCtx) -> str:
     # perf: 流式消息 bypass lru：content 递增场景 key 永不命中，直算免白付
     # 40KB 级 hash；定型消息（streaming=False）照常走缓存（#6 实测 23.9x）
     _tool_fn = _render_tool_block_content if not ctx.streaming else _render_tool_block_content.__wrapped__
+    # 正文块不懒化：lazy_body 的前提是「用户看不见」（折叠区/历史卡才成立）。
+    # keep_in_content 的工具块归正文（_tool_home），构造出来立刻可见，懒化会让
+    # body 永远等不到「展开工具区」的那次注入，只剩标题行。
+    lazy_body = ctx.lazy_body and _tool_home(block, ctx) != HOME_CONTENT
     return _tool_fn(
         proto.strip(),
         compact=ctx.compact,
         heavy_caps=ctx.heavy_caps,
-        lazy_body=ctx.lazy_body,
+        lazy_body=lazy_body,
     )
 
 
