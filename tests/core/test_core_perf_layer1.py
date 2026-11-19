@@ -99,7 +99,7 @@ class _FakeBackend:
 
 
 def _reset_cache():
-    cu._snap_cache.clear()
+    cu._unified_snap_store.clear()
 
 
 def test_snapshot_cache_same_sig_returns_cached():
@@ -152,7 +152,7 @@ def test_snapshot_cache_no_pollution_on_empty_or_fallback():
     empty_session = _FakeSession()
     # 空消息：早退，不写缓存
     assert cu.snapshot_usage_for_hooks(backend, session=empty_session) == (0, 0)
-    assert cu._snap_cache == {}
+    assert cu._unified_snap_store == {}
 
     # 快照抛异常 → legacy 回退，不写缓存
     class _BoomBackend:
@@ -162,4 +162,4 @@ def test_snapshot_cache_no_pollution_on_empty_or_fallback():
     session = _FakeSession()
     session.messages = [{"role": "user", "content": "hi"}]
     cu.snapshot_usage_for_hooks(_BoomBackend(), session=session)
-    assert cu._snap_cache == {}
+    assert cu._unified_snap_store == {}

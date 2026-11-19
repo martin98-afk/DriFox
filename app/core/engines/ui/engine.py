@@ -41,7 +41,7 @@ def _tools_schema_hash(tools: List[Dict]) -> str:
     """工具 schema 内容指纹（日志对账用，方便定位「哪一轮前缀变了」）"""
     try:
         blob = json.dumps(tools, sort_keys=True, ensure_ascii=False)
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         blob = repr(tools)
     return hashlib.md5(blob.encode("utf-8")).hexdigest()[:8]
 
@@ -307,9 +307,7 @@ class UIEngine(BaseEngine):
         else:
             logger.warning(f"[Permission] 无法投递 deny：worker 不存在 id={tool_call_id}")
 
-    def decide_tool_permission(
-        self, tool_call_id: str, decision: str, remember: str = "", reason: str = ""
-    ) -> None:
+    def decide_tool_permission(self, tool_call_id: str, decision: str, remember: str = "", reason: str = "") -> None:
         """结构化审批决策回传（替代文本标签反解析）。
 
         - decision="allow" + remember="tool"    → 仅当前工具调用放行（不写缓存）
@@ -603,9 +601,7 @@ class UIEngine(BaseEngine):
                 worker.finished.connect(worker.deleteLater)
             except RuntimeError:
                 pass
-            logger.error(
-                f"[ChatEngine] PreSendWorker timeout after {_PRESEND_TIMEOUT_MS}ms, aborting send"
-            )
+            logger.error(f"[ChatEngine] PreSendWorker timeout after {_PRESEND_TIMEOUT_MS}ms, aborting send")
             self._emit(
                 "error",
                 f"消息预处理超时（{_PRESEND_TIMEOUT_MS // 1000}s），已中止本次发送",
@@ -761,9 +757,22 @@ class UIEngine(BaseEngine):
             budget_tokens,
             ratio,
         )
-        _cached = getattr(self, "_ctx_usage_cache", None)
-        if _cached and _cached.get("key") == _cache_key and _cached.get("value") is not None:
-            return self._snapshot_copy(_cached["value"])
+        # [B3] 命中读走 hooks/UI 统一 store（键与 usage.py 同构）：同状态
+        # 的 hook 取用不再迫使 UI 侧失效重算，反之亦然。
+        from app.core.context.usage import _unified_snap_store, _unified_snapshot_key, _store_snapshot
+
+        _unified_key = _unified_snapshot_key(
+            session,
+            llm_config,
+            backend=self._backend,
+            api_prompt_tokens=api_prompt_tokens,
+            from_api=from_api,
+            budget_tokens=budget_tokens,
+            ratio=ratio,
+        )
+        _cached = _unified_snap_store.get(_unified_key)
+        if _cached is not None:
+            return self._snapshot_copy(_cached)
 
         # S2: 上下文投影（ui stage）— 与 send stage 共用同一 cascade，
         # 保证「UI 估算 = 实际发送量」是结构性一致，不再手工重复截断。
@@ -925,7 +934,9 @@ class UIEngine(BaseEngine):
             "breakdown": breakdown,
             "pruned_tokens": pruned_tokens,
         }
-        self._ctx_usage_cache = {"key": _cache_key, "value": snapshot}
+        # [B3] 写入统一 store（engine 旧 _ctx_usage_cache 退役）：hooks 侧
+        # 同键取用直接复用本产物。
+        _store_snapshot(_unified_key, snapshot)
         return self._snapshot_copy(snapshot)
 
     @staticmethod
