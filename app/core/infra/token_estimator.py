@@ -27,6 +27,16 @@ except ImportError:
 # 预编译正则表达式
 _CHINESE_PATTERN = re.compile(r'[\u4e00-\u9fff]')
 
+# [PERF] G1 冷建档抽样参数（2026-11-19 #11）：>阈值走首/中/尾窗口抽样外推，
+# 本就是字符/4 粗算口径，6×250KB 全量 finditer 实测 leader 环境 103ms
+# （ingest 占 20%）；×1.05 保守系数向预算安全侧（宁略高估勿低估；
+# #11 leader 裁决 1.02→1.05：估算服务预算门控，低估有溢出风险，
+# 高估仅浪费少量预算且 tier cascade 有熔断兑底）。
+# 阈值以下维持全量（小文本全量更快更准，行为零变化）。
+_FAST_SAMPLE_THRESHOLD = 50 * 1024
+_FAST_SAMPLE_WINDOW = 4 * 1024
+_FAST_SAMPLE_SAFETY = 1.05
+
 # 编码映射
 ENCODING_MAPPING = {
     # OpenAI 模型
@@ -205,6 +215,22 @@ def _fast_estimate_tokens(text: str) -> int:
         return 0
 
     text_len = len(text)
+
+    if text_len > _FAST_SAMPLE_THRESHOLD:
+        # [PERF] G1 分层抽样：均匀 9 处各 2KB 统计中文占比按比例外推总量。
+        # est 对中文占比线性（est ≈ L/4 + ch×0.95），占比误差直接映射为估算
+        # 误差。9 窗口 = 每窗口代表 11% 区间的分层采样：均匀混合文本占比
+        # 误差 ~±1%，分段不均匀（多语言块拼接）时窗口覆盖偏差 bounded 于
+        # ±1 个窗口（11%），实测病理样本转为轻度高估（预算安全侧）；
+        # 三窗口 4KB 版病理样本曾低估 -16%（2026-11-19 #11 验证）。
+        w = _FAST_SAMPLE_WINDOW
+        sampled = "".join(text[i * (text_len - w) // 8 : i * (text_len - w) // 8 + w] for i in range(9))
+        ratio = sum(1 for _ in _CHINESE_PATTERN.finditer(sampled)) / len(sampled)
+        chinese_chars = int(text_len * ratio)
+        estimated = int(
+            (chinese_chars * 1.2 + (text_len - chinese_chars) / 4.0) * _FAST_SAMPLE_SAFETY
+        )
+        return max(1, estimated)
 
     # 统计中文字符
     # finditer 替代 findall：避免对大文本先物化百万级匹配列表再取 len（P6）
