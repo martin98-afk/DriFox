@@ -444,7 +444,14 @@ class ToolExecutor:
 
         return snapshot_usage_for_hooks(self._backend, session=session)
 
-    def _trigger_post_tool_use(self, tool_name: str, args: dict, result=None, enabled: bool = True) -> None:
+    def _trigger_post_tool_use(
+        self,
+        tool_name: str,
+        args: dict,
+        result=None,
+        enabled: bool = True,
+        current_message_text: Optional[str] = None,
+    ) -> None:
         """触发 PostToolUse hook（统一方法，减少重复代码）
 
         Args:
@@ -452,6 +459,8 @@ class ToolExecutor:
             args: 工具参数
             result: 工具执行结果（ToolResult 或 None），用于回填结果信息
             enabled: 是否触发（引擎 HookPolicy.NONE 时 False，跳过工具级 hooks）
+            current_message_text: 末条用户消息文本。execute() PreToolUse 段已算过同一值时
+                直接传入复用；None（外部调用方）时保持旧路径就地重扫。
         """
         if not enabled:
             return
@@ -534,15 +543,19 @@ class ToolExecutor:
         if file_path:
             context["file"] = file_path
 
-        # 获取最后一条用户消息（用于 hook matcher 匹配上下文）
-        current_message_text = ""
-        if self._backend.session_manager:
-            session = self._backend.get_current_session()
-            if session and hasattr(session, "messages"):
-                for msg in reversed(session.messages):
-                    if msg.get("role") == "user":
-                        current_message_text = content_to_text(msg.get("content", ""))
-                        break
+        # 获取最后一条用户消息（用于 hook matcher 匹配上下文）。[Q2] 复用
+        # execute() PreToolUse 段已算好的同一值：两计算点间 session.messages 无
+        # 合法变更路径（Post hook 自身的 session 注入发生在本函数返回之后），
+        # 重复的 reversed 全扫 + content_to_text 全量抽取是纯浪费；未传时才重扫。
+        if current_message_text is None:
+            current_message_text = ""
+            if self._backend.session_manager:
+                session = self._backend.get_current_session()
+                if session and hasattr(session, "messages"):
+                    for msg in reversed(session.messages):
+                        if msg.get("role") == "user":
+                            current_message_text = content_to_text(msg.get("content", ""))
+                            break
 
         # ====== 注入上下文使用量信息（供 auto-compact hook 检测）======
         token_count, token_limit = self._get_context_usage_info()
@@ -847,7 +860,10 @@ class ToolExecutor:
             return ToolResult(False, error=_self_kill_reason)
 
         # Trigger PreToolUse hook（同步执行，支持跳过和输出回填）
-        # trigger_hooks=False 时整体跳过（引擎 HookPolicy.NONE）
+        # trigger_hooks=False 时整体跳过（引擎 HookPolicy.NONE）。
+        # [Q2] Pre 段算出的末条用户消息在此初始化（条件块不满足时为空串），
+        # 供 Pre/Post 两段 hook 复用；条件不满足时两段 hook 均早退，不会消费该值。
+        current_message_text = ""
         if trigger_hooks and self._backend and self._backend.hook_manager:
             # 创建标准化 tool_input 副本（兼容 Claude Code 字段命名）
             _normalized_input = dict(args)  # 浅拷贝，不污染原始 args
@@ -961,7 +977,11 @@ class ToolExecutor:
 
         # MCP 工具调用：工具名以 "mcp__" 开头
         if tool_name.startswith("mcp__") and self._builtin_tools:
-            return self._execute_mcp_tool(tool_name, args, trigger_hooks=trigger_hooks)
+            # MCP 分支在下方 PreToolUse 计算段之前返回，此处尚无
+            # current_message_text，传 None 让 _trigger_post_tool_use 走就地重扫兜底。
+            return self._execute_mcp_tool(
+                tool_name, args, trigger_hooks=trigger_hooks, current_message_text=None
+            )
 
         # ========== 工具执行前的有效性检查 ==========
         # 在 UI 关闭场景下，即使方法开头检查通过，
@@ -1000,7 +1020,9 @@ class ToolExecutor:
                     result = self._try_auto_lsp_diagnose(tool_name, args, result)
 
                 # Trigger PostToolUse hook（统一方法，含结果回填）
-                self._trigger_post_tool_use(tool_name, args, result, enabled=trigger_hooks)
+                self._trigger_post_tool_use(
+                    tool_name, args, result, enabled=trigger_hooks, current_message_text=current_message_text
+                )
 
                 return result
             except Exception as e:
@@ -1008,7 +1030,7 @@ class ToolExecutor:
                 if self._is_write_group(tool_name):
                     self._cleanup_backup_on_failure(local_session_id, local_call_id)
                 err_result = ToolResult(False, error=f"Execution error: {str(e)}")
-                self._trigger_post_tool_use(tool_name, args, err_result)
+                self._trigger_post_tool_use(tool_name, args, err_result, current_message_text=current_message_text)
                 return err_result
 
         return ToolResult(False, error=f"Unknown tool: {tool_name}")
@@ -1140,7 +1162,9 @@ class ToolExecutor:
 
         return _run
 
-    def _execute_mcp_tool(self, tool_name: str, args: dict, trigger_hooks: bool = True) -> ToolResult:
+    def _execute_mcp_tool(
+        self, tool_name: str, args: dict, trigger_hooks: bool = True, current_message_text: Optional[str] = None
+    ) -> ToolResult:
         """执行 MCP 工具调用"""
         # 执行前检查 ToolExecutor 有效性
         if not self.is_valid():
@@ -1165,12 +1189,16 @@ class ToolExecutor:
         except TimeoutError as e:
             logger.error(f"[ToolExecutor] MCP tool '{tool_name}' timeout: {e}")
             err_result = ToolResult(False, error="MCP 工具调用超时，请稍后重试")
-            self._trigger_post_tool_use(tool_name, args, err_result, enabled=trigger_hooks)
+            self._trigger_post_tool_use(
+                tool_name, args, err_result, enabled=trigger_hooks, current_message_text=current_message_text
+            )
             return err_result
         except Exception as e:
             logger.error(f"[ToolExecutor] MCP tool '{tool_name}' raised exception: {e}")
             err_result = ToolResult(False, error=f"MCP 工具执行异常: {str(e)}")
-            self._trigger_post_tool_use(tool_name, args, err_result, enabled=trigger_hooks)
+            self._trigger_post_tool_use(
+                tool_name, args, err_result, enabled=trigger_hooks, current_message_text=current_message_text
+            )
             return err_result
 
         # 执行后检查 ToolExecutor 有效性（MCP 调用可能耗时较长）
@@ -1179,7 +1207,7 @@ class ToolExecutor:
             # 不再尝试修改 result，避免访问已删除的 QObject 属性
 
         # Trigger PostToolUse hook for MCP tools
-        self._trigger_post_tool_use(tool_name, args, result, enabled=trigger_hooks)
+        self._trigger_post_tool_use(tool_name, args, result, enabled=trigger_hooks, current_message_text=current_message_text)
 
         return result
 

@@ -19,6 +19,7 @@ from app.constants import PARAM_SCHEMA
 from app.constants import PROVIDER_MANAGED_KEYS
 from app.constants import provider_quota_exclude_keys as QUOTA_EXCLUDE_KEYS
 from app.core.conversation.message_content import extract_reasoning_delta
+from app.utils._startup_probe import trace_enabled as _diag_trace_enabled
 from app.core.modelmeta.model_capabilities import (
     ABSOLUTE_FALLBACK_CEILING,
     get_caps_max_output_tokens,
@@ -833,6 +834,8 @@ class SubAgentExecutor(QThread):
         落盘 session_id 用 _vision_session_ids 候选集合（继承历史的真实 sid，
         revoke 侧逐目录存在性探测，全部不命中安全降级保留）。
         """
+        # [E4] 单轮序列化耗时打点：源码默认开，PROBE=0/打包版关（诊断守卫纪律）。
+        _diag_t0 = time.perf_counter() if _diag_trace_enabled() else 0.0
         from app.plugins.contracts.message_serializer import SerializeContext
         from app.plugins.registries.serializer_registry import SerializerRegistry
 
@@ -870,6 +873,8 @@ class SubAgentExecutor(QThread):
                     )
             except Exception as e:  # noqa: BLE001 — 回收失败保留 data URI，不阻断
                 logger.warning(f"[SubAgentWorker] serialize vision revoke 失败（保留 data URI）: {e}")
+        if _diag_t0:
+            logger.debug(f"[subagent-serialize] 耗时 {(time.perf_counter() - _diag_t0) * 1000:.2f}ms msgs={len(messages)}")
         return result
 
     def _protocol_flags(self, llm_config: Dict = None):
@@ -1159,6 +1164,8 @@ class SubAgentExecutor(QThread):
         读回，data URI 只在本请求作用域存在；已回收的原 messages 不被二次污染。
         副本随请求结束 GC。
         """
+        # [E4] 物化耗时打点（守卫同 serialize）。
+        _diag_t0 = time.perf_counter() if _diag_trace_enabled() else 0.0
         out: List[Dict[str, Any]] = []
         for msg in messages:
             if not isinstance(msg, dict):
@@ -1173,9 +1180,14 @@ class SubAgentExecutor(QThread):
         try:
             from app.core.store.session_repository import revive_vision_image_refs
 
-            return revive_vision_image_refs(out)
+            _rv = revive_vision_image_refs(out)
+            if _diag_t0:
+                logger.debug(f"[subagent-materialize] 耗时 {(time.perf_counter() - _diag_t0) * 1000:.2f}ms msgs={len(messages)}")
+            return _rv
         except Exception as e:  # noqa: BLE001 — 物化失败按副本发送（image_ref 会被 provider 拒，走重试/报错链路）
             logger.warning(f"[SubAgentWorker] materialize revive 失败（按副本发送）: {e}")
+            if _diag_t0:
+                logger.debug(f"[subagent-materialize] 耗时(降级) {(time.perf_counter() - _diag_t0) * 1000:.2f}ms msgs={len(messages)}")
             return out
 
     @_in_flight

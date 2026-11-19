@@ -85,6 +85,7 @@ from app.utils.design_tokens import (
 )
 from app.utils.scroll_tuning import install_fast_wheel
 from app.utils.utils import get_font_family_css, get_icon
+from app.utils._startup_probe import trace_enabled as _diag_trace_enabled
 from app.widgets.render import (
     HOME_CONTENT,
     KIND_TEXT,
@@ -1825,6 +1826,10 @@ class CodeWebViewer(QWebEngineView):
         self._v2_ctx_sig = None
         self._block_cache.clear()
         self._v2_reset_live()
+        # [R2 #13] 通道开关随归还重评：_perform_update 无块源分支的「永久关闭」
+        # 只对**本卡生命周期**成立；viewer 归还进池后开关必须恢复环境变量当前值，
+        # 否则曾服务过欢迎页/纯文本卡的 viewer 被有块源的新卡复用时 v2 永久失活。
+        self._render_v2 = _render_v2_enabled()
         self._lazy_markdown_cb = None
         self._restore_finished_ids = None
         self._resize_locked = False
@@ -8007,14 +8012,20 @@ class CodeWebViewer(QWebEngineView):
         # 段落结束（双换行）：O(1) 后缀检测
         if md_text.endswith("\n\n"):
             return True
-        # think 块 / 代码块闭合：rstrip 后判尾部。
+        # think 块 / 代码块闭合：尾向判定（P2，与软边界同款写法）。
         # ⚠️ 不要改成尾部锚定正则（曾试过 `</think>[\s]*$|```[\s]*$`）：
-        # re 无法跳到串尾，多分支尾部匹配是全串逐位回溯，实测比 rstrip 慢 3x；
-        # 而 CPython 的 str.rstrip() 在无可剥离字符时**返回同一对象**
-        # （'abc'.rstrip() is 'abc' → True），流式正文绝大多数帧尾部无空白，
-        # 原写法本就是零拷贝。
-        stripped = md_text.rstrip()
-        return stripped.endswith("</think>") or CodeWebViewer._CLEAN_BOUNDARY_CODE_BLOCK_RE.search(stripped) is not None
+        # re 无法跳到串尾，多分支尾部匹配是全串逐位回溯，实测比 rstrip 慢 3x。
+        # 尾向 isspace 跳空白后用 endswith/search 的 (start, end) 窗口参数在
+        # **原串**上做尾窗判定：全程零拷贝（rstrip 在尾部有空白时全串拷贝），
+        # 语义与 rstrip 版严格等价——rstrip 剥 Unicode 空白全集，isspace 同全集；
+        # re 的 endpos 语义即「串在 endpos 处截断」，$ 匹配 endpos，无窗口越界。
+        i = len(md_text) - 1
+        while i >= 0 and md_text[i].isspace():
+            i -= 1
+        if i < 0:
+            return False
+        end = i + 1
+        return md_text.endswith("</think>", 0, end) or CodeWebViewer._CLEAN_BOUNDARY_CODE_BLOCK_RE.search(md_text, 0, end) is not None
 
     @staticmethod
     def _has_reached_soft_boundary(md_text: str) -> bool:
@@ -9365,7 +9376,13 @@ class CodeWebViewer(QWebEngineView):
         since = now - self.__dict__.get("_v2_live_tail_done_ts", 0.0)
         if grown < self._TAIL_INLINE_MIN_DELTA and since < self._TAIL_INLINE_MIN_INTERVAL_S:
             return None
+        # [E3] v2 尾部行内渲染耗时打点（守卫同 v1，见 _render_tail_inline）
+        _diag_t0 = time.perf_counter() if _diag_trace_enabled() else 0.0
         html = self._v2_live_tail_html(text, reasoning=False)
+        if _diag_t0:
+            logger.debug(
+                f"[tail-inline] v2 渲染耗时 {(time.perf_counter() - _diag_t0) * 1000:.2f}ms len={len(text)}"
+            )
         if not html:
             # 含协议标签 / 渲染失败：退回纯文本尾（不更新记账，下一批再试）
             return None
@@ -9794,7 +9811,14 @@ class CodeWebViewer(QWebEngineView):
             self._tail_last_rendered_len = len(_tail)
             self._tail_last_rendered_ts = _now
             return
+        # [E3] 尾部行内渲染耗时打点：源码运行默认开，DRIFOX_STARTUP_PROBE=0
+        # 或打包版关（_diag_trace_enabled，同 main.py 诊断守卫纪律）。
+        _diag_t0 = time.perf_counter() if _diag_trace_enabled() else 0.0
         html = _render_inline_tail(_tail, compact=self._tool_compact_mode)
+        if _diag_t0:
+            logger.debug(
+                f"[tail-inline] v1 渲染耗时 {(time.perf_counter() - _diag_t0) * 1000:.2f}ms len={len(_tail)}"
+            )
         # 🐛 守卫（流式图表两遍）：尾部渲染产物含稳定区**已渲染过**的图表容器
         # （同 id）→ 说明差量基线落后于 DOM（典型：fence 闭合后基线停在 fence
         # 前）。此时插入尾节点会让同一图表出现两份；置全量标记，交整体替换去重。

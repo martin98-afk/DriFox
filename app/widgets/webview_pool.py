@@ -184,6 +184,11 @@ class WebViewPool:
             # kill 成功的实例走上方 evict 分支销毁、kill 失败的已回滚，此处覆盖
             # 未来新增置位路径遗漏回滚的情况，保证复用行为与未回收实例一致
             viewer._heal_suppressed = False
+            # [R2 #13] 新卡接管时通道开关重评（同 reset_for_reuse 归还路径，此处
+            # 兜底覆盖池外遗留置 False 的情况）。惰性 import：本模块被启动链
+            # （memory_governor 等）惰性引用，顶层引 card_viewers 会连带重模块。
+            from app.widgets.card_viewers import _render_v2_enabled
+            viewer._render_v2 = _render_v2_enabled()
             # perf: #26 60s 窗口内重开 tab 取走 viewer → 取消清池，保留复用收益
             # 仅全池取空才取消；其他桶或本桶剩余页面仍需到期释放。
             if not any(self._idle.values()):
