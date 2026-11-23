@@ -99,46 +99,114 @@ def test_inject_degrades_without_storage_cap(monkeypatch):
     assert mod.hook("SessionStart", {}) == ""
 
 
-def test_trigger_skips_when_active(monkeypatch):
-    mod = _load_hook("auto_compact_trigger.py")
-    kv = _KV({"handoff_active": {"ts": time.time()}})
-    sent = []
+def _caps_with_data_dir(tmp_path, sent, kv=None):
+    """caps mock：storage.data_dir → tmp_path；session.send 记账；state.kv 可选"""
     import app.plugins.sdk as sdk
 
-    monkeypatch.setattr(
-        sdk,
-        "caps_for",
-        lambda cap: kv if cap == "state.kv" else (lambda *a, **kw: sent.append(a)),
+    def _caps(cap):
+        if cap == "storage.data_dir":
+            return lambda: str(tmp_path)
+        if cap == "session.send":
+            return lambda *a, **kw: (sent.append((a, kw)), True)[1]
+        if cap == "state.kv":
+            return kv
+        return None
+
+    return sdk, _caps
+
+
+def _active_file(tmp_path: Path, key: str) -> Path:
+    return tmp_path / "plugin_data" / "system-handoff" / "active" / f"{key}.json"
+
+
+def test_trigger_skips_when_active(monkeypatch, tmp_path):
+    """同一会话已有新鲜标记 → 不重复触发（标记按会话键落文件，不再用窗口级 kv）"""
+    mod = _load_hook("auto_compact_trigger.py")
+    sent = []
+    sdk, caps = _caps_with_data_dir(tmp_path, sent)
+    monkeypatch.setattr(sdk, "caps_for", caps)
+
+    ctx = {"token_count": 90, "token_limit": 100, "session_id": "s1", "window_id": "w1"}
+    assert mod.hook("PostToolUse", ctx) != ""      # 第一次触发并写标记
+    assert mod.hook("PostToolUse", ctx) == ""      # 第二次被标记拦住
+    assert len(sent) == 1
+    assert _active_file(tmp_path, "s1").is_file()
+
+
+def test_trigger_marker_is_per_session(monkeypatch, tmp_path):
+    """标记按会话隔离：A 会话触发不抑制 B 会话"""
+    mod = _load_hook("auto_compact_trigger.py")
+    sent = []
+    sdk, caps = _caps_with_data_dir(tmp_path, sent)
+    monkeypatch.setattr(sdk, "caps_for", caps)
+
+    assert mod.hook("PostToolUse", {"token_count": 90, "token_limit": 100, "session_id": "s1", "window_id": "w1"}) != ""
+    assert mod.hook("PostToolUse", {"token_count": 90, "token_limit": 100, "session_id": "s2", "window_id": "w2"}) != ""
+    assert len(sent) == 2
+
+
+def test_trigger_enqueues_when_over_threshold(monkeypatch, tmp_path):
+    mod = _load_hook("auto_compact_trigger.py")
+    sent = []
+    sdk, caps = _caps_with_data_dir(tmp_path, sent)
+    monkeypatch.setattr(sdk, "caps_for", caps)
+
+    out = mod.hook(
+        "PostToolUse",
+        {"token_count": 90, "token_limit": 100, "session_id": "s1", "window_id": "w1"},
     )
-    assert mod.hook("PostToolUse", {"token_count": 90, "token_limit": 100}) == ""
+    assert "上下文交接" in out          # 提示直接进上下文，模型下一轮就能看到
+    assert len(sent) == 1               # 队列里仍留一条兜底
+    assert sent[0][1].get("ephemeral") is True
+    # 定向到本会话所属窗口；不带就落到活跃窗口（串窗根因）
+    assert sent[0][1].get("window_id") == "w1"
+
+
+def test_trigger_skips_subagent(monkeypatch, tmp_path):
+    """子智能体不参与交接：没有自己的会话，触发只会污染父会话文档"""
+    mod = _load_hook("auto_compact_trigger.py")
+    sent = []
+    sdk, caps = _caps_with_data_dir(tmp_path, sent)
+    monkeypatch.setattr(sdk, "caps_for", caps)
+
+    ctx = {"token_count": 90, "token_limit": 100, "session_id": "s1", "window_id": "w1"}
+    assert mod.hook("PostToolUse", {**ctx, "current_role": "subagent"}) == ""
+    assert mod.hook("PostToolUse", {**ctx, "is_subagent_call": True}) == ""
     assert sent == []
 
 
-def test_trigger_enqueues_when_over_threshold(monkeypatch):
+def test_trigger_under_threshold_noop(monkeypatch, tmp_path):
     mod = _load_hook("auto_compact_trigger.py")
-    kv = _KV()
     sent = []
+    sdk, caps = _caps_with_data_dir(tmp_path, sent)
+    monkeypatch.setattr(sdk, "caps_for", caps)
+    assert mod.hook("PostToolUse", {"token_count": 10, "token_limit": 100, "session_id": "s1"}) == ""
+    assert sent == []
+    assert not _active_file(tmp_path, "s1").exists()
+
+
+def test_inject_clears_active_marker_by_source_session(tmp_path, monkeypatch):
+    """注入端按 source_session_id 清掉对应会话的 active 文件（只清自己那一个）"""
+    mod = _load_hook("inject_handoff.py")
+    p = _write_pending(tmp_path, {"content": "## 任务目标\nX", "ts": time.time(), "source_session_id": "s1"})
+    mine = _active_file(tmp_path, "s1")
+    other = _active_file(tmp_path, "s2")
+    for f in (mine, other):
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(json.dumps({"ts": time.time()}), encoding="utf-8")
+
     import app.plugins.sdk as sdk
 
-    monkeypatch.setattr(
-        sdk,
-        "caps_for",
-        lambda cap: kv if cap == "state.kv" else (lambda *a, **kw: sent.append((a, kw))),
-    )
-    out = mod.hook("PostToolUse", {"token_count": 90, "token_limit": 100})
-    assert "上下文交接" in out          # 提示直接进上下文，模型下一轮就能看到
-    assert len(sent) == 1               # 队列里仍留一条兜底
-    assert "handoff_active" in kv.data
+    def _caps(cap):
+        if cap == "storage.data_dir":
+            return lambda: str(tmp_path)
+        return None
 
-
-def test_trigger_under_threshold_noop(monkeypatch):
-    mod = _load_hook("auto_compact_trigger.py")
-    kv = _KV()
-    import app.plugins.sdk as sdk
-
-    monkeypatch.setattr(sdk, "caps_for", lambda cap: kv if cap == "state.kv" else None)
-    assert mod.hook("PostToolUse", {"token_count": 10, "token_limit": 100}) == ""
-    assert kv.data == {}
+    monkeypatch.setattr(sdk, "caps_for", _caps)
+    assert "## 任务目标" in mod.hook("SessionStart", {})
+    assert not p.exists()
+    assert not mine.exists(), "源会话的防重入标记随注入消费清掉"
+    assert other.exists(), "别的会话的标记不能被误清"
 
 
 def test_guide_only_for_primary():

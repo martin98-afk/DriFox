@@ -958,6 +958,13 @@ class SubAgentExecutor(QThread):
                 ctx["project_root"] = self.tool_executor.get_workdir() or ""
         except Exception:
             pass
+        # window_id：本子智能体所属窗口。hook 内无 ctx 的 caps_for 会回落到
+        # 活跃窗口，缺这个字段时定向类能力（session.send）会串到别的窗口。
+        try:
+            _backend = getattr(self.tool_executor, "_backend", None) if self.tool_executor else None
+            ctx["window_id"] = str(getattr(_backend, "_window_id", "") or "")
+        except Exception:
+            ctx["window_id"] = ""
         if extra:
             ctx.update(extra)
         return ctx

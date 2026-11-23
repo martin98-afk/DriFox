@@ -1286,6 +1286,10 @@ class OpenAIChatWorker(QThread):
             ctx = {
                 "project_root": workdir,
                 "session_id": _session_id,  # Claude Code 兼容字段
+                # 本 worker 所属窗口：hook 内的 caps_for 无 ctx 时按活跃窗口解析
+                # host，多窗口下会串窗（交接补写提示被发到用户正看着的那个窗口）。
+                # hook 用该字段把 session.send 定向回自己。
+                "window_id": str(getattr(backend, "_window_id", "") or ""),
                 # 【新增】让 hook 能识别当前执行角色（与 subagent_worker._build_hook_context 对齐）
                 "current_role": "primary",
                 "is_subagent_call": False,

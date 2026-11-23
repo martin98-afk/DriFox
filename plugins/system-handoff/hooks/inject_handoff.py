@@ -27,8 +27,8 @@ _PREFIX = """另一个语言模型此前在处理同一个任务，留下了这�
 _TTL_S = 600
 
 
-def _pending_path():
-    """待注入交接文件；storage.data_dir 不可用时返回 None"""
+def _data_dir():
+    """插件数据根目录；storage.data_dir 不可用时返回 None"""
     from app.plugins.sdk import caps_for
 
     getter = caps_for("storage.data_dir")
@@ -38,13 +38,31 @@ def _pending_path():
         base = getter() if callable(getter) else getter
     except Exception:
         return None
-    if not base:
+    return Path(str(base)) if base else None
+
+
+def _pending_path():
+    """待注入交接文件；storage.data_dir 不可用时返回 None"""
+    base = _data_dir()
+    if base is None:
         return None
-    return Path(str(base)) / "plugin_data" / "system-handoff" / "pending.json"
+    return base / "plugin_data" / "system-handoff" / "pending.json"
 
 
-def _clear_active():
-    """清防重入标记（auto_compact_trigger 写入，拿不到 state.kv 就跳过）"""
+def _clear_active(source_session_id: str = ""):
+    """清防重入标记（auto_compact_trigger 按会话写在 active/<key>.json）
+
+    source_session_id 缺失时清不掉文件：代价是该会话 TTL 内不再重复提示，
+    不会误伤其他会话。旧版本写在窗口级 kv 的标记一并清掉（升级残留会让
+    本窗口静默 10 分钟）。
+    """
+    sid = str(source_session_id or "").strip()
+    base = _data_dir()
+    if base is not None and sid:
+        try:
+            (base / "plugin_data" / "system-handoff" / "active" / f"{sid}.json").unlink()
+        except Exception:
+            pass
     try:
         from app.plugins.sdk import caps_for
 
@@ -78,7 +96,7 @@ def hook(event: str, context: dict) -> str:
         path.unlink()
     except Exception:
         pass
-    _clear_active()
+    _clear_active(str(pending.get("source_session_id") or ""))
 
     try:
         if time.time() - float(pending.get("ts") or 0) > _TTL_S:
