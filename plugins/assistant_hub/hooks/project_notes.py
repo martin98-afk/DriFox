@@ -28,6 +28,7 @@ from __future__ import annotations
 import concurrent.futures
 import hashlib
 import importlib.util
+import os
 import re
 import subprocess
 import sys
@@ -252,7 +253,7 @@ def hook_notes(event: str, context: dict) -> str:
 # Git 状态采集（自 system 插件 format_memory_context.py 原样迁移）
 # ============================================================
 
-_GIT_TIMEOUT = 1.5
+_GIT_TIMEOUT = 5.0
 _MAX_CONTEXT_LENGTH = 2000
 _MAX_STAGED_ITEMS = 30
 _MAX_UNSTAGED_ITEMS = 30
@@ -261,11 +262,183 @@ _MAX_RECENT_COMMITS = 5
 # 同一 cwd 只尝试一次自动 git init，避免重复触发破坏性操作
 _AUTO_INITED: set[str] = set()
 
-# 同 cwd 在 TTL 秒内复用 git 命令结果，避免反复跑 git
-_GIT_CACHE_TTL = 5.0
-_GIT_CACHE: dict[str, tuple[float, Any]] = {}
+# ── 工作树签名短路（PERF）────────────────────────────────────────────
+# 背景实测（2026-11-23，本机 .git 有 22119 个文件）：
+#   git --version                 = 1030ms   ← 这台机器每个 git 进程固定开销
+#   git status --porcelain -uall  = 4683ms
+#   4 条并发墙钟                  = 4951ms   ← 每次用户发送都付一次
+# 原来只有 5s TTL，用户两条消息间隔 >5s 就是每次都白跑 5 秒。
+#
+# 修法：在真正跑 git 之前先取「工作树签名」（4 次 stat ≈ 0.1ms），签名与上次
+# 一致则完全跳过 git 子进程，直接复用上次结果。
+#
+# 签名必须能覆盖「已追踪文件内容被改」这类不改 index/目录 mtime 的变化 ——
+# 单靠签名会漏，故叠加两条兜底：
+#   1) 签名**变化或缺失**时一律真跑 git（保守，不漏）
+#   2) 即使签名相同，超过 `_GIT_REFRESH_TTL` 也强制刷新一次
+#      → 语义从「每次都跑」降为「每 N 秒最多跑一次」，允许 ≤N 秒陈旧
+# 这样纯内容修改最迟 N 秒后一定反映；`git add`/新建文件走签名变化路径立即反映。
+_GIT_REFRESH_TTL = 30.0
+# HEAD 侧兜底 TTL：新提交/切分支的 reflog / refs 信号很可靠，故 TTL 可以长一些；
+# 即便信号漏了（如 packed-refs 被外部改写但 mtime 未变），5 分钟内也会强制刷一次。
+_GIT_HEAD_REFRESH_TTL = 300.0
+# 采集失败（超时等）后的退避：本机 `git status -uall` 实测 4.7s、超时上限 5s。
+# 退避必须 ≥ 一次超时的墙钟，否则等于没有退避、每一轮都要白等 5s；
+# 又要远小于两侧 TTL（30s / 300s），保证一个 TTL 周期内有多次重试机会，
+# 不会把一次瞬时空闲放大成 5 分钟陈旧。
+_GIT_FAIL_BACKOFF = 5.0
+# 签名缓存按 cwd 键（实践中个位数），设上限防插件被指到大量临时目录时无界增长
+_GIT_PEN_MAX = 32
+# git 目录向上探测最大层数（常规仓库 cwd 即根，1 层命中）
+_GIT_DIR_MAX_WALK = 8
+# cwd -> (ts_work, ts_head, work_sig, head_sig, result_dict)
+# ts_* 是**该侧最后一次成功采集**的时刻，两侧独立判 TTL（失败侧会被回拨）
+_GIT_SIG_CACHE: dict[str, tuple[float, float, Any, Any, dict]] = {}
+
 # git 是否安装：一个进程只检查一次
 _GIT_AVAILABLE: bool | None = None
+
+
+def _resolve_git_dir(cwd: str) -> Path | None:
+    """从 cwd 向上找 `.git`，返回**该工作树专属** git 目录（不追到共享目录）。
+
+    - 常规仓库：`<root>/.git` 目录
+    - linked worktree / submodule：`.git` 是文件，内容 `gitdir: <path>`，
+      指向 `.git/worktrees/<name>` 之类的专属 gitdir
+      （HEAD、index、logs/HEAD 都在这里，不在主仓库 `.git`）
+
+    零子进程（只 stat + 读两个小文件）：签名计算路径上绝不能起 git 进程，
+    本机每个 git 进程固定开销约 0.7~1s。找不到返回 None。
+    """
+    try:
+        cur = Path(cwd)
+    except (OSError, ValueError):
+        return None
+    for _ in range(_GIT_DIR_MAX_WALK):
+        dot_git = cur / ".git"
+        try:
+            if dot_git.is_dir():
+                return dot_git
+            if dot_git.is_file():
+                text = dot_git.read_text(encoding="utf-8", errors="replace").strip()
+                if text.startswith("gitdir:"):
+                    target = Path(text[len("gitdir:") :].strip())
+                    if not target.is_absolute():
+                        target = dot_git.parent / target
+                    target = Path(os.path.normpath(target))
+                    return target if target.is_dir() else None
+                return None
+        except OSError:
+            return None
+        parent = cur.parent
+        if parent == cur:
+            return None
+        cur = parent
+    return None
+
+
+def _git_common_dir(git_dir: Path) -> Path:
+    """git_dir 对应的**共享**目录：linked worktree 的 gitdir 内有 `commondir`
+    文件（内容形如 `../..`），refs 与 packed-refs 在共享目录里。
+    无 commondir（常规仓库）时即返回自身。"""
+    try:
+        marker = git_dir / "commondir"
+        if marker.is_file():
+            text = marker.read_text(encoding="utf-8", errors="replace").strip()
+            if text:
+                target = Path(text)
+                if not target.is_absolute():
+                    target = git_dir / target
+                target = Path(os.path.normpath(target))
+                if target.is_dir():
+                    return target
+    except OSError:
+        pass
+    return git_dir
+
+
+def _git_work_sig(cwd: str) -> Any:
+    """**工作树信号**：文件增删 / staged 变化。
+
+    跟踪项：
+    - `.git/index` mtime_ns → git add / rm / checkout（暂存区变化）
+    - 工作树根目录 mtime_ns → 新建/删除**顶层**文件
+
+    已知盲区（由 status 组的 `_GIT_REFRESH_TTL` 兜底）：只改已追踪文件**内容**
+    不改任何 mtime；在**子目录**内新建文件也不改根目录 mtime。
+    """
+    try:
+        git_dir = _resolve_git_dir(cwd)
+        if git_dir is None:
+            return None
+        return (
+            (git_dir / "index").stat().st_mtime_ns,
+            Path(cwd).stat().st_mtime_ns,
+        )
+    except OSError:
+        return None
+
+
+def _git_head_sig(cwd: str) -> Any:
+    """**HEAD 信号**：新提交 / 切分支 / reset / rebase / fetch。
+
+    跟踪项（全部是 stat，不逐个文件遍历）：
+    - `<git_dir>/logs/HEAD` mtime_ns → **主信号**。reflog 是追加写单文件，
+      commit / reset --soft / rebase / fetch / checkout 只要移动 ref 就写它。
+      不能依赖 `refs/heads` 目录 mtime：重写**已有** ref 文件内容（新提交、
+      `reset --soft HEAD~1` 移动分支 ref）不改父目录 mtime，只有增删文件才改。
+    - `<git_dir>/HEAD` mtime_ns → 切分支 / detach
+    - refs 目录本身及**一级子目录** mtime_ns → 新建分支/标签
+    - `packed-refs` mtime_ns（存在时）→ git gc / 大量分支操作
+      refs / packed-refs 同时看共享目录（linked worktree 下它们在 commondir）。
+
+    降级：`core.logAllRefUpdates=false` 时 reflog 不写、logs/HEAD 不存在，
+    此时只剩 HEAD + 目录 mtime 项（与改造前同量级），签名仍会变，不会退化成常量。
+
+    ⚠️ **不能用 `os.walk` 逐文件 stat**：本仓 `.git/refs` 只有 49 个文件，
+    但 Windows 下逐个 `stat` 实测 **204.8ms**（每次都是独立系统调用），
+    这会把「无变化时应为 0ms」的验收拖成 256ms。目录 mtime 在子项增删时
+    由文件系统自动更新；「重写已有 ref 内容」这类变化由 logs/HEAD 覆盖。
+    """
+    git_dir = _resolve_git_dir(cwd)
+    if git_dir is None:
+        return None
+    try:
+        parts: list[int] = [(git_dir / "HEAD").stat().st_mtime_ns]
+    except OSError:
+        return None
+    # reflog：所有 ref 移动都会追加写它，这是 reset --soft 唯一可见的信号
+    try:
+        parts.append((git_dir / "logs" / "HEAD").stat().st_mtime_ns)
+    except OSError:
+        pass  # 未开 reflog（core.logAllRefUpdates=false）：退回下面的目录 mtime 兜底
+    seen: set[str] = set()
+    for base in (git_dir, _git_common_dir(git_dir)):
+        key = os.path.normpath(str(base))
+        if key in seen:
+            continue
+        seen.add(key)
+        refs_dir = Path(base) / "refs"
+        if refs_dir.is_dir():
+            parts.append(refs_dir.stat().st_mtime_ns)
+            # 只取一级子目录（heads / tags / remotes / ...），不递归文件
+            try:
+                with os.scandir(refs_dir) as it:
+                    for entry in it:
+                        try:
+                            if entry.is_dir(follow_symlinks=False):
+                                parts.append(entry.stat(follow_symlinks=False).st_mtime_ns)
+                        except OSError:
+                            continue
+            except OSError:
+                pass
+        packed = Path(base) / "packed-refs"
+        if packed.exists():
+            try:
+                parts.append(packed.stat().st_mtime_ns)
+            except OSError:
+                pass
+    return tuple(parts)
 
 
 def _run_git(cwd: str, *args: str) -> tuple[str, str, int]:
@@ -442,14 +615,102 @@ def _parse_numstat(out: str) -> dict[str, tuple[int, int]]:
     return stats
 
 
+def _head_ref_unborn(cwd: str) -> bool:
+    """HEAD 指向的分支 ref 尚无对象（空仓库 / 未曾提交）→ True。
+
+    只在 `git log` 返回非 0 时调用（罕见路径），零子进程。用来区分
+    「空仓库的 legit 128」与「超时 / 其他错误的失败」：前者 commits 应清空成「(无)」，
+    后者必须保留上一轮值。
+    """
+    git_dir = _resolve_git_dir(cwd)
+    if git_dir is None:
+        return False
+    try:
+        head = (git_dir / "HEAD").read_text(encoding="utf-8", errors="replace").strip()
+    except OSError:
+        return False
+    if not head.startswith("ref:"):
+        return False  # detached / 裸 sha：一定指向已有提交
+    ref = head[4:].strip()
+    for base in (git_dir, _git_common_dir(git_dir)):
+        try:
+            if (Path(base) / ref).exists():
+                return False
+            # linked worktree：refs 在共享目录，packed 后也可能没有 loose ref 文件
+            packed = Path(base) / "packed-refs"
+            if packed.is_file() and ref in packed.read_text(
+                encoding="utf-8", errors="replace"
+            ):
+                return False
+        except OSError:
+            continue
+    return True
+
+
+def _git_sig_store(
+    cwd: str,
+    ts_work: float,
+    ts_head: float,
+    work_sig: Any,
+    head_sig: Any,
+    result: dict,
+) -> None:
+    """写双信号缓存（带简单上限：超限丢最早插入的一条，避免无界增长）。
+
+    `ts_work` / `ts_head` 是**各自最后一次成功采集**的时刻；失败侧被 `_backoff_ts`
+    回拨，两侧独立判 TTL，互不影响（共享一个 ts 会把另一侧成功侧的 TTL 一起推迟）。
+    """
+    if len(_GIT_SIG_CACHE) >= _GIT_PEN_MAX and cwd not in _GIT_SIG_CACHE:
+        try:
+            _GIT_SIG_CACHE.pop(next(iter(_GIT_SIG_CACHE)))
+        except (StopIteration, KeyError):
+            pass
+    _GIT_SIG_CACHE[cwd] = (ts_work, ts_head, work_sig, head_sig, result)
+
+
+def _backoff_ts(now: float, ttl: float) -> float:
+    """失败侧的假时间戳：使该侧在 `_GIT_FAIL_BACKOFF` 秒内不重跑，
+    之后立刻允许重试（而不是等满整个 ttl）。
+
+    为什么不用「完全不动缓存（传 prev_ts）」：失败时缓存里的签名已经换成新值，
+    若 ts 不动，need_* 恒为 True → 每一轮都重跑那条烧满 5s 的超时进程，
+    用户每次发送都要白等。回拨 ts 让退避期内的相同签名复用旧结果。
+    """
+    return now - max(0.0, ttl - _GIT_FAIL_BACKOFF)
+
+
 def _collect_all_git(cwd: str) -> dict[str, Any]:
-    """并发跑所有 git 命令并合并结果。结果按 cwd 缓存 5 秒。"""
+    """并发跑所有 git 命令并合并结果。
+
+    [PERF] 两个**独立**信号，两组结果**分别缓存、互不覆盖**：
+
+    | 命令组 | 触发条件 | 兜底 TTL |
+    |---|---|---|
+    | status(+`-uall`) + diff（两路并发） | `work_sig` 变 | 30s |
+    | log -n5 --oneline（单条） | `head_sig` 变 | 300s |
+
+    `work_sig` 未变时仍复用上次 status/diff 结果；`head_sig` 未变时仍复用上次
+    log 结果。任一组触发时只跑该组的命令——不是「两个 TTL 共用一次全量跑」。
+
+    采集量（2026-11-23 本机实测，3 次中位，本仓 / 临时空仓 ms）：
+    - `git --version`                 641 / 740   ← 单进程固定开销 ~700ms
+    - `status --branch -uall`        2393 / 906
+    - `diff --numstat`               1965 / 784
+    - `log -n5`（含 %cr）             1550 / 1012
+    - `stash list`                   1773 / 734
+
+    保留 `-uall`（untracked 到文件级）与 `log`（最近提交）。
+    去掉 `stash list`：信息价值低，且 stash 变化会同时改 refs（被 head_sig 覆盖），
+    需要时重加即可。
+    保留 `--branch`（ahead/behind 必需）与 `--no-renames`（现有解析器把
+    `old -> new` 整体当路径，认不了 `R` 行）。
+
+    ⚠️ 原 `_GIT_CACHE_TTL`（5s）次级复用**已移除**：它会绕过签名判定直接返回
+    旧结果，导致「签名都变了却还是旧数据」。
+
+    空变化时直接返回**缓存本体**（同一 dict 引用），调用方只读、禁止原地修改。
+    """
     now = time.monotonic()
-    cached = _GIT_CACHE.get(cwd)
-    if cached is not None:
-        ts, val = cached
-        if now - ts < _GIT_CACHE_TTL:
-            return val
 
     empty: dict[str, Any] = {
         "branch": "",
@@ -462,6 +723,47 @@ def _collect_all_git(cwd: str) -> dict[str, Any]:
         "commits": [],
     }
 
+    # ── 两个信号（各 ~2 次 stat / 一次 refs walk）──
+    # 非 git 目录返回 None；用稳定哨兵参与比对，否则「非 git 目录」永远命中
+    # 不了缓存，每次发送都白跑一次 git（实测 1.4s）。
+    raw_work = _git_work_sig(cwd)
+    work_sig = raw_work if raw_work is not None else ("__no_git__", cwd)
+    raw_head = _git_head_sig(cwd)
+    head_sig = raw_head if raw_head is not None else ("__no_git__", cwd)
+
+    cached = _GIT_SIG_CACHE.get(cwd)
+    prev_work_sig = prev_head_sig = None
+    prev_result: dict[str, Any] = empty
+    prev_ts_work = prev_ts_head = 0.0
+    if cached is not None:
+        prev_ts_work, prev_ts_head, prev_work_sig, prev_head_sig, prev_result = cached
+
+    need_work = not (
+        prev_work_sig == work_sig and (now - prev_ts_work) < _GIT_REFRESH_TTL
+    )
+    need_head = not (
+        prev_head_sig == head_sig and (now - prev_ts_head) < _GIT_HEAD_REFRESH_TTL
+    )
+
+    # 两组都不需要 → 0 个子进程，直接返回上次结果（缓存本体，调用方只读）
+    if not need_work and not need_head:
+        return prev_result
+
+    def _store_failure(exc: Exception | None = None) -> dict[str, Any]:
+        """整组采集异常：结果沿用上次，**失败侧**回拨 ts 做短退避（见 `_backoff_ts`）。"""
+        if exc is not None:
+            logger.debug(f"[project_notes] git 采集异常（{cwd}）: {exc!r}")
+        _git_sig_store(
+            cwd,
+            _backoff_ts(now, _GIT_REFRESH_TTL) if need_work else prev_ts_work,
+            _backoff_ts(now, _GIT_HEAD_REFRESH_TTL) if need_head else prev_ts_head,
+            work_sig,
+            head_sig,
+            prev_result,
+        )
+        return prev_result
+
+    # ── 准备要跑的命令（只跑需要的那组）──
     def _branch_and_status() -> str:
         out, _, code = _run_git(
             cwd,
@@ -479,50 +781,91 @@ def _collect_all_git(cwd: str) -> dict[str, Any]:
         out, _, code = _run_git(cwd, "-c", "core.quotepath=false", "diff", "--numstat")
         return out if code == 0 else ""
 
-    def _commits() -> str:
-        out, _, code = _run_git(
-            cwd,
-            "log",
-            f"-n{_MAX_RECENT_COMMITS}",
-            "--pretty=format:%h %s (%cr)",
-        )
-        return out if code == 0 else ""
+    def _log() -> tuple[str, int]:
+        """`git log` → (输出, code)。空仓库识别为合法空态返回 ("", 0)。"""
+        out, err, code = _run_git(cwd, "log", f"-n{_MAX_RECENT_COMMITS}", "--oneline")
+        if code == 0:
+            return out, 0
+        if code == 128 and _head_ref_unborn(cwd):
+            # 空仓库（无任何提交）git log 返回 128，这是 legit 空态，界面显示「(无)」
+            logger.debug(f"[project_notes] 空仓库无提交（{cwd}）: {err}")
+            return "", 0
+        logger.debug(f"[project_notes] git log 失败（{cwd}）code={code}: {err}")
+        return "", code
 
-    def _stash() -> str:
-        out, _, code = _run_git(cwd, "stash", "list")
-        return out if code == 0 else ""
+    bs_out: str | None = None
+    diff_out: str | None = None
+    log_out: str | None = None  # None = log 真失败；"" = 空仓库（合法空态）
 
-    try:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as ex:
-            f_bs = ex.submit(_branch_and_status)
-            f_diff = ex.submit(_diff)
-            f_commits = ex.submit(_commits)
-            f_stash = ex.submit(_stash)
-            bs_out = f_bs.result()
-            diff_out = f_diff.result()
-            commits_out = f_commits.result()
-            stash_out = f_stash.result()
-    except Exception:
-        return empty
+    if need_work and need_head:
+        # 三路并发：log(1.4s) < status(2.4s)，不额外增墙钟
+        try:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=3) as ex:
+                f_bs = ex.submit(_branch_and_status)
+                f_diff = ex.submit(_diff)
+                f_log = ex.submit(_log)
+                bs_out, diff_out = f_bs.result(), f_diff.result()
+                log_text, log_code = f_log.result()
+                log_out = log_text if log_code == 0 else None
+        except Exception as exc:
+            return _store_failure(exc)
+    elif need_work:
+        # 只文件侧变化：只跑 status + diff
+        try:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
+                f_bs = ex.submit(_branch_and_status)
+                f_diff = ex.submit(_diff)
+                bs_out, diff_out = f_bs.result(), f_diff.result()
+        except Exception as exc:
+            return _store_failure(exc)
+    else:
+        # 只 HEAD 侧变化：只跑 log 一条
+        try:
+            log_text, log_code = _log()
+            log_out = log_text if log_code == 0 else None
+        except Exception as exc:
+            return _store_failure(exc)
 
-    if not bs_out:
-        return empty
+    # ── 合并：**逐组**判成败，成功组用新结果、失败组沿用上次并退避 ──
+    # 两组必须分开：status 超时不能让已经成功拿到的 log 结果一起丢掉（否则 commits
+    # 被压制到 300s 后才刷）。
+    result: dict[str, Any] = dict(prev_result)  # 浅拷贝，保留未更新的组
+    ts_work = prev_ts_work
+    ts_head = prev_ts_head
 
-    parsed = _parse_status_v1(bs_out)
-    branch_info = parsed["branch_info"]
-    files = parsed["files"]
+    if need_work:
+        if bs_out:
+            parsed = _parse_status_v1(bs_out)
+            branch_info = parsed["branch_info"]
+            result.update(
+                {
+                    "branch": branch_info["branch"],
+                    "ahead": branch_info["ahead"],
+                    "behind": branch_info["behind"],
+                    "is_detached": branch_info["is_detached"],
+                    "files": parsed["files"],
+                    "diff_stats": _parse_numstat(diff_out or ""),
+                }
+            )
+            ts_work = now
+        else:
+            # status 无输出：非仓库、git 失败或**超时**。保留上次结果，work 侧退避
+            logger.debug(f"[project_notes] git status 无输出（{cwd}），沿用上次结果并退避")
+            ts_work = _backoff_ts(now, _GIT_REFRESH_TTL)
 
-    result = {
-        "branch": branch_info["branch"],
-        "ahead": branch_info["ahead"],
-        "behind": branch_info["behind"],
-        "is_detached": branch_info["is_detached"],
-        "files": files,
-        "diff_stats": _parse_numstat(diff_out),
-        "stash_count": len(stash_out.splitlines()) if stash_out else 0,
-        "commits": commits_out.splitlines() if commits_out else [],
-    }
-    _GIT_CACHE[cwd] = (now, result)
+    if need_head:
+        if log_out is not None:
+            result["commits"] = log_out.splitlines() if log_out else []
+            ts_head = now
+        else:
+            # log 真失败（超时 / git 缺失 / 其他错误）：**不得**把 commits 写成空，
+            # 否则界面把「最近 commits」显示成 (无) 并缓存 300s
+            ts_head = _backoff_ts(now, _GIT_HEAD_REFRESH_TTL)
+
+    # stash 已不采集：字段恒 0，保持下游取键结构不变
+    result.setdefault("stash_count", 0)
+
+    _git_sig_store(cwd, ts_work, ts_head, work_sig, head_sig, result)
     return result
 
 

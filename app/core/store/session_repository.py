@@ -59,6 +59,196 @@ def merge_extras_into(messages: List[Any], extras: Dict[int, Dict[str, Any]]) ->
 # ── vision base64 落盘（方案 1，T1d 底稿）──
 
 
+# 嵌套结构递归哈希的预算：防止深/大结构把指纹成本跑到 str() 之上
+_FP_MAX_DEPTH = 6
+_FP_MAX_NODES = 2000
+_FP_CHUNK = 2048
+# 小消息快速路径阈值（粗估字节）：低于此值直接走 `hash(str(msg))`。
+# 分片递归只在「大到 str() 明显吃亏」时才划算 —— 实测拐点约 32KB：
+#   8KB 的 content list：str() 2.2ms vs 分片 4.6ms（分片更慢）
+#   1MB tool_result：   str() 70ms   vs 分片 1.6ms（分片快 44x）
+# 取 32KB：覆盖绝大多数普通消息与中等流式内容，只对真正的大消息启用分片。
+_FP_FAST_PATH_BYTES = 32768
+
+
+def _fp_has_long_child(container: Any, depth: int = 3) -> bool:
+    """容器内是否含超阈值的长 str/bytes（递归 depth 层，成本仍很低）。
+
+    只下探一层会漏掉 `{role, content:短, tool_result:{payload:{data:500KB}}}`
+    这类常见嵌套：它会误走 small 路径（实测 1.58ms vs 分片 0.02ms，差 79x）。
+    下探 3 层能覆盖 tool_result / message / block 三级嵌套的惯用结构，且因为
+    每层元素数通常很少，总成本仍在微秒级。
+    """
+    if depth <= 0:
+        return False
+    values = container.values() if isinstance(container, dict) else container
+    try:
+        for item in values:
+            if isinstance(item, (str, bytes, bytearray)):
+                if len(item) >= _FP_FAST_PATH_BYTES:
+                    return True
+            elif isinstance(item, (dict, list, tuple)):
+                if _fp_has_long_child(item, depth - 1):
+                    return True
+    except Exception:
+        return False
+    return False
+
+
+def _fp_needs_chunking(msg: dict) -> bool:
+    """快速判定是否需要分片指纹（浅层扫描，成本 ~1μs）。
+
+    分片只在「内容总量大到 str() 明显吃亏」时才划算。判据按**浅层累加长度**：
+    - str/bytes 字段累加其长度
+    - 容器字段累加其直接元素的 str/bytes 长度（只下探一层）
+
+    累加超过 `_FP_FAST_PATH_BYTES` 即走分片。普通消息累加只有几百字节 →
+    走 `str()` 快速路径，与原实现同速；`{content:短, tool_result:{data:500KB}}`
+    浅层就能累出 500KB → 走分片拿 20~50x 收益。
+
+    实现上优先走「单字段快判」（含 3 层下探），避免普通消息为累加付出完整遍历。
+    """
+    for v in msg.values():
+        if isinstance(v, (str, bytes, bytearray)):
+            if len(v) >= _FP_FAST_PATH_BYTES:
+                return True
+        elif isinstance(v, (list, tuple, dict)):
+            if len(v) >= 128:  # 元素多到一定程度，str() 开销就值得改用分片
+                return True
+            if _fp_has_long_child(v):
+                return True
+    # 单字段都不够大：累加浅层长度，覆盖「多个中等字段凑成大内容」
+    total = 0
+    for v in msg.values():
+        if isinstance(v, (str, bytes, bytearray)):
+            total += len(v)
+        elif isinstance(v, dict):
+            for inner in v.values():
+                total += len(inner) if isinstance(inner, (str, bytes, bytearray)) else 16
+        elif isinstance(v, (list, tuple)):
+            for item in v:
+                if isinstance(item, (str, bytes, bytearray)):
+                    total += len(item)
+                elif isinstance(item, dict):
+                    for inner in item.values():
+                        total += len(inner) if isinstance(inner, (str, bytes, bytearray)) else 16
+                else:
+                    total += 16
+        else:
+            total += 16
+        if total >= _FP_FAST_PATH_BYTES:
+            return True
+    return False
+
+
+def _fp_hash_value(val: Any, depth: int, budget: list) -> Any:
+    """把任意值折叠成内容敏感的哈希片段（递归，带深度与节点预算）。
+
+    **必须内容敏感**：末条 content / tool_calls 常为 list[dict]，流式增长发生在
+    中间元素的文本上。只取 `(n, head_type, tail_type)` 会漏判这类变化 → 跳过
+    保存 → 崩溃窗口丢流式中间态。
+
+    预算耗尽后降级为**内容敏感**的摘要 `(len, hash(str(val)[:1024]))`：
+    只取长度的话，同长度的不同内容会得到相同指纹 = 漏存（review 实测
+    `DEPTH_TRUNC_SAME` / `NODES_TRUNC_SAME` 均为 True）。降级只发生在前
+    1024 字符也相同且长度相同时，真实消息几乎不会触发。
+
+    方向仍是「宁可多写一次，不可漏存」。
+    """
+    budget[0] -= 1
+    if budget[0] <= 0 or depth > _FP_MAX_DEPTH:
+        try:
+            n = len(val) if hasattr(val, "__len__") else 0
+            return ("~trunc", n, hash(str(val)[:1024]))
+        except Exception:
+            return ("~trunc", 0, 0)
+    if isinstance(val, str):
+        b = val.encode("utf-8", "replace")
+        return ("s", len(b), hash(b[:_FP_CHUNK]), hash(b[-_FP_CHUNK:]))
+    if isinstance(val, (bytes, bytearray)):
+        b = bytes(val)
+        return ("b", len(b), hash(b[:_FP_CHUNK]), hash(b[-_FP_CHUNK:]))
+    if isinstance(val, dict):
+        # 逐键递归（键排序保证顺序无关），键本身也进指纹
+        return (
+            "d",
+            len(val),
+            tuple((str(k), _fp_hash_value(val[k], depth + 1, budget)) for k in sorted(val, key=str)),
+        )
+    if isinstance(val, (list, tuple)):
+        # 逐元素递归：中间元素文本增长会改变对应片段
+        return ("l" if isinstance(val, list) else "t", len(val), tuple(
+            _fp_hash_value(v, depth + 1, budget) for v in val
+        ))
+    if isinstance(val, (int, float, bool, type(None))):
+        return ("v", type(val).__name__, val)
+    try:
+        return ("o", type(val).__name__, str(val)[:64])
+    except Exception:
+        return ("o", type(val).__name__, "")
+
+
+def _light_msg_fingerprint(msg: Any) -> tuple:
+    """末条消息的轻量内容指纹（避免 str() 全量序列化）。
+
+    原实现 `hash(str(last_msg))` 对末条做**全量**字符串化：末条带大 tool_result
+    或 base64 图片时，每次保存都要复制并哈希 1MB 级文本。
+
+    ⚠️ **不能用 `id(msg)` 做分量**：`history_manager` 每次保存都
+    `copy.deepcopy(messages)`，末条每次都是新对象、新 id，指纹永不相等 →
+    「内容未变则跳过写盘」的短路永久失效（实测：比原实现更慢）。
+
+    故只能用**内容派生量**：字段数 + 每字段递归内容哈希（`_fp_hash_value`）。
+    字符串/字节取长度 + 首尾 2KB；list/dict 递归到标量叶子，带深度与节点预算。
+
+    保证（按强度递减）：
+    - 内容相同 → 指纹相同（去重能生效）
+    - 内容不同 → 指纹几乎必然不同。**已知例外（极端）**：
+      1) 嵌套超过 `_FP_MAX_DEPTH`(6) 层或超过 `_FP_MAX_NODES`(2000) 个节点，
+         且超出部分的前 1024 字符与长度都相同 → 可能漏判
+      2) str/bytes 长度相同、首尾 2KB 相同、中间不同
+      两类都要求极端结构，真实消息基本触不到。发生时的后果是**少写一次盘**
+         （数据仍是上一次已落库的内容，不是丢数据）。
+    - 小消息不比原实现慢：体积低于 `_FP_FAST_PATH_BYTES` 直接走 `str()`
+    """
+    if not isinstance(msg, dict):
+        return ("non-dict", type(msg).__name__, _fp_hash_value(msg, 0, [_FP_MAX_NODES]))
+    # 极快路径：字段数少且没有任何长内容 → 直接 str()，零额外开销。
+    # 下探 3 层（见 _fp_has_long_child）：单层下探会漏掉
+    # {role, content:短, tool_result:{payload:{data:500KB}}} 这类常见嵌套，
+    # 导致它误走 str() 慢路径（实测 1.58ms vs 分片 0.02ms）。
+    if len(msg) <= 8:
+        small = True
+        for v in msg.values():
+            if isinstance(v, (str, bytes, bytearray)):
+                if len(v) >= _FP_FAST_PATH_BYTES:
+                    small = False
+                    break
+            elif isinstance(v, dict):
+                if len(v) >= 128 or _fp_has_long_child(v):
+                    small = False
+                    break
+            elif isinstance(v, (list, tuple)):
+                if len(v) >= 128 or _fp_has_long_child(v):
+                    small = False
+                    break
+        if small:
+            try:
+                return ("small", len(msg), hash(str(msg)))
+            except Exception:
+                pass
+    # 小消息快速路径：分片递归只在单项内容很大时才划算
+    if not _fp_needs_chunking(msg):
+        try:
+            return ("small", len(msg), hash(str(msg)))
+        except Exception:
+            pass
+    budget = [_FP_MAX_NODES]
+    return ("n", len(msg), tuple(
+        (str(k), _fp_hash_value(msg[k], 1, budget)) for k in sorted(msg, key=str)
+    ))
+
+
 def _persist_vision_image_blocks_impl(messages: List[Any], session_id: str, root_dir) -> List[Any]:
     """把消息 content 中 data:image 块替换为 image_ref 引用块（就地修改）。
 
@@ -511,15 +701,18 @@ class SessionRepository:
             return False
 
         # 增量内容指纹：消息流式过程中只追加/修改最后一条消息，
-        # 用 (len, last_msg_hash) 二元组替代 hash(str(全量)) 避免 O(n) 字符串化。
+        # 用 (len, 末条轻量指纹) 二元组替代 hash(str(全量)) 避免 O(n) 字符串化。
         # 对于"修改历史消息"的非常规场景（如 compaction），后续 serialize 会覆盖写入。
         # 🛡️ R5（T3）：元组追加 team_members 指纹——消息未变但快照变了
         # （如 join 新成员后 _get_team_members_snapshot_json 内容更新）时
         # hash 不同不跳过，保证新快照落库（否则恢复仍丢新成员）。
+        # [PERF] 末条指纹走 _light_msg_fingerprint：原 `hash(str(last_msg))` 在
+        # 末条含大 tool_result/base64 时每次保存都全量复制 1MB 级文本。轻量版
+        # 只取 id/字段数/每字段长度 + 首尾 2KB 哈希；最坏退化为多写一次，不漏存。
         messages = session.get("messages", [])
         if messages:
             last_msg = messages[-1]
-            content_key = (len(messages), hash(str(last_msg)))
+            content_key = (len(messages), _light_msg_fingerprint(last_msg))
         else:
             content_key = (0, 0)
         content_key = content_key + (hash(session.get("team_members") or ""),)

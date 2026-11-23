@@ -170,7 +170,9 @@ class GitWorktreeDetector:
             GitWorktreeDetector._detect_cache, path, GitWorktreeDetector._DETECT_CACHE_TTL
         )
         if cached is not None:
-            return cached
+            # 负结果用空串存（见下方写入侧）：None 无法区分「未缓存」与
+            # 「已缓存且结果为 None」，直接 return None 会被调用侧当 miss。
+            return cached or None
         try:
             result = _run_git(["rev-parse", "--show-toplevel"], cwd=path)
             if result.returncode == 0:
@@ -179,7 +181,10 @@ class GitWorktreeDetector:
                 return val
         except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
             logger.debug(f"[GitWorktree] detect_git failed for {path}: {e}")
-        GitWorktreeDetector._cache_set(GitWorktreeDetector._detect_cache, path, None)
+        # 负结果存空串而非 None：`_cache_get` 用 `entry` 判存在，但 `None` 值
+        # 会被调用侧 `if cached is not None` 当 miss → 非 git 目录每次重跑
+        # （实测 845/428/405ms 永不命中，本机 21/38 个 workspace 是非 git）。
+        GitWorktreeDetector._cache_set(GitWorktreeDetector._detect_cache, path, "")
         return None
 
     @staticmethod
@@ -215,14 +220,22 @@ class GitWorktreeDetector:
         原理：主仓库的 .git 是文件夹，worktree 的 .git 是文件；
         且 .git 文件指向的 gitdir 必须存在（zombie worktree 不算）
 
-        [PERF-close] 结果缓存（TTL 30s）：.git 为目录时本方法要起 2 个
-        git 子进程，Windows + Defender 下实测每个 100-300ms；发消息/
-        保存会话/关窗保存均高频调用本方法。.git 形态仅在显式切换
-        worktree 时变化，30s 陈旧窗口可接受。
+        [PERF-close] 结果缓存：.git 为目录时本方法要起 2 个 git 子进程，
+        Windows + Defender 下实测每个 100-300ms（本机实测 370~750ms）；发消息/
+        保存会话/关窗保存均高频调用本方法。
+
+        TTL 用 `_DETECT_CACHE_TTL`（300s）而非默认 `_CACHE_TTL`（30s）：
+        调用间隔实测 min 32s / p50 53s（`_maybe_flush_partial_reply` 节流 25s），
+        30s 的 TTL **比调用间隔还短** → 每次刚好过期 → 每次都起 2 个 git 进程。
+        这就是「74 次主线程阻塞中 69 次是 is_worktree」的根因。
+        删除/新建 worktree 后由 worktree-manager 的 `_invalidate_info_cache`
+        显式清缓存（必须包含 `_is_worktree_cache`，否则会认错 worktree）。
         """
         if not path:
             return False
-        cached = GitWorktreeDetector._cache_get(GitWorktreeDetector._is_worktree_cache, path)
+        cached = GitWorktreeDetector._cache_get(
+            GitWorktreeDetector._is_worktree_cache, path, GitWorktreeDetector._DETECT_CACHE_TTL
+        )
         if cached is not None:
             return cached
         result = False

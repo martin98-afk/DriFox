@@ -77,9 +77,12 @@ class WorktreeService:
         # worktree 的 .git 是文件，主仓库的 .git 是目录
         if GitWorktreeDetector.is_worktree(git_root):
             return git_root
-        # 工作目录可能是 worktree 内的子目录，向上探测
-        if GitWorktreeDetector.is_worktree(str(workdir)):
-            return str(workdir)
+        # 工作目录可能是 worktree 内的子目录，向上探测。
+        # 与 git_root 同一路径时跳过（normcase 归一，Windows 大小写/斜杠差异
+        # 会误判为不同路径 → 白跑一次 2 个 git 子进程）。
+        if os.path.normcase(os.path.abspath(str(workdir))) != os.path.normcase(os.path.abspath(git_root)):
+            if GitWorktreeDetector.is_worktree(str(workdir)):
+                return str(workdir)
         return ""
 
     def get_session_worktree_kwargs(self, mw: Any) -> dict:

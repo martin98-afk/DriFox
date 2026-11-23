@@ -85,6 +85,11 @@ class FunctionCommandHandlers:
 _CACHE_VERSION = 6
 _cache_disabled = False  # 调试用，设为 True 跳过缓存
 
+# 上一次成功重载时的源文件签名（(path, mtime) 列表的 md5）。
+# 仅供 reload_all_commands(only_if_changed=True) 的“没变就不重扫”短路用；
+# None 表示本进程还没成功扫过一次。
+_last_source_key: Optional[str] = None
+
 
 def _get_cache_dir() -> Path:
     """获取缓存目录"""
@@ -589,18 +594,27 @@ _last_reload_time: float = 0.0
 _RELOAD_DEBOUNCE_MS: float = 500.0
 
 
-def reload_all_commands():
+def reload_all_commands(only_if_changed: bool = False) -> bool:
     """强制重新加载所有内置命令（重置 _registered 标志，用于运行时重载）
 
     内置 500ms 防抖：短时间内重复调用跳过，避免 shortcut-manager 手动触发
     与 backend watcher 异步热更新叠加导致重复加载。
+
+    Args:
+        only_if_changed: True 时，若命令/智能体源文件签名（路径+mtime）与上次
+            成功重载时一致，直接返回 False 不重扫。用于「加载历史会话」这类
+            与命令定义无关的路径——那里每次切会话都全量重解析 60+ .md + 写缓存，
+            实测 30~150ms 白花在主线程。插件装载/热重载路径必须保持默认 False。
+
+    Returns:
+        True = 真的重载了；False = 防抖/签名未变/无源文件而跳过。
     """
-    global _registered, _last_reload_time
+    global _registered, _last_reload_time, _last_source_key
 
     now = time.time() * 1000
     if now - _last_reload_time < _RELOAD_DEBOUNCE_MS:
         logger.debug(f"[BuiltinCommands] 防抖跳过 reload_all_commands（距上次 {(now - _last_reload_time):.0f}ms）")
-        return
+        return False
     _last_reload_time = now
 
     _registered = False
@@ -614,7 +628,14 @@ def reload_all_commands():
     if not source_files:
         logger.warning("[BuiltinCommands] reload_all_commands: 无命令/智能体源文件，跳过重载")
         _registered = True
-        return
+        return False
+
+    # 按需短路：源文件（路径+mtime）没变就不重扫（调用方要求“脏了才重载”时）
+    cache_key = _compute_cache_key(source_files)
+    if only_if_changed and _last_source_key == cache_key:
+        logger.debug("[BuiltinCommands] 源文件签名未变，跳过 reload_all_commands")
+        _registered = True
+        return False
 
     # 清空旧命令
     for name in list(cmd_mgr.get_command_names()):
@@ -628,8 +649,6 @@ def reload_all_commands():
 
     logger.info(f"[BuiltinCommands] Reloaded {len(commands)} commands + {len(agents)} agents ({elapsed * 1000:.0f}ms)")
 
-    # 重新生成缓存（写回最新解析结果）
-    cache_key = _compute_cache_key(source_files)
     serialized_commands = []
     for cmd in commands:
         serialized_commands.append(
@@ -667,11 +686,15 @@ def reload_all_commands():
 
     _registered = True
 
+    # 记下本次成功的源文件签名，供 only_if_changed 下次短路判定
+    _last_source_key = cache_key
+
     # ── 快捷键绑定同步 ──────────────────────────────────
     # reload 会重新注册命令定义（含 shortcut），但 Qt 的 QShortcut 绑定未自动更新。
     # 旧 QShortcut 仍绑定旧按键序列，新按键序列无对应 QShortcut 创建。
     # 此处遍历所有窗口实例，重新注册快捷键绑定，与 _on_plugin_hot_reload 一致。
     _rebind_command_shortcuts()
+    return True
 
 
 def _rebind_command_shortcuts():

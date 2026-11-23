@@ -134,18 +134,34 @@ def run_inner() -> dict:
         def hide_splitter(self):
             pass
 
-    t_w0 = time.perf_counter()
     fake_page = FakePage()
-    chat_window = OpenAIChatToolWindow(fake_page)
-    t_window = time.perf_counter() - t_w0
 
-    # Tab 管理器模式 show（与 main.py 生产路径一致）
+    # 壳先行两阶段构造（与 main.py _show_popup / _deferred 生产路径一致）：
+    # 阶段一 create_instance 建基座 → show+占位 → 阶段二 complete_construction
+    # 补建 TabPanel/容器树/signals/workbench → 首窗构造 → add_window。
+    # 顺序不可换：add_window 消费 complete_construction 才建出的 _content_area。
     t_s0 = time.perf_counter()
     from app.widgets.tab_manager_window import TabManagerWindow
 
     tm = TabManagerWindow.create_instance()
-    tm.add_window(chat_window)
     tm.show()
+    tm.show_boot_placeholder()
+    try:
+        tm.repaint()
+    except Exception:
+        pass
+    t_shell_visible = time.perf_counter()
+
+    tm.complete_construction()
+    t_constructed = time.perf_counter()
+
+    t_w0 = time.perf_counter()
+    chat_window = OpenAIChatToolWindow(fake_page)
+    t_window = time.perf_counter() - t_w0
+
+    tm.add_window(chat_window)
+    tm.remove_boot_placeholder()
+    tm._mark_first_window_ready()
     t_show_after = time.perf_counter()
     t_tm_show = t_show_after - t_s0
     t_total_show = t_show_after - T0
@@ -155,6 +171,8 @@ def run_inner() -> dict:
             "t_web_import_ms": round(t_web_import * 1000, 1),
             "t_qapp_ms": round(t_qapp * 1000, 1),
             "t_window_ms": round(t_window * 1000, 1),
+            "t_shell_visible_ms": round((t_shell_visible - t_s0) * 1000, 1),
+            "t_complete_construction_ms": round((t_constructed - t_shell_visible) * 1000, 1),
             "t_tm_show_ms": round(t_tm_show * 1000, 1),
             "t_total_show_s": round(t_total_show, 3),
         }
@@ -247,11 +265,12 @@ def run_outer(runs: int) -> dict:
     for i in range(runs):
         print(f"\n===== 启动基准 run {i + 1}/{runs} =====")
         proc = subprocess.run(
-            [sys.executable, os.path.abspath(__file__), "--inner"],
+            [bc.real_python(), os.path.abspath(__file__), "--inner"],
             capture_output=True,
             text=True,
             encoding="utf-8",
             errors="replace",
+            env=bc.spawn_env(),
             cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
         )
         got = None

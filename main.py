@@ -285,6 +285,13 @@ def main():
     # 的无日志空窗，逐段 DEBUG 打点便于定位后续优化目标（行为零变更）
     import time as _sm_time
 
+    # [PERF PROBE] 探针句柄：main() 内一次性取得，供 _smark 同步分段耗时。
+    # 导入失败（诊断设施不得阻断启动）时降级为 None，_smark 静默跳过。
+    try:
+        from app.core.infra.telemetry import perf_probe as _perf_probe
+    except Exception:  # noqa: BLE001
+        _perf_probe = None
+
     _sm_seg = _sm_time.perf_counter()
 
     def _smark(label: str, level: str = "debug") -> None:
@@ -310,6 +317,13 @@ def main():
             logger.info(msg)
         else:
             logger.debug(msg)
+        # [PERF PROBE] 探针开启时把同一分段耗时写入 JSONL（默认关闭零开销：
+        # record_span 关闭态首行直接 return，不做 perf_counter / 不建目录）。
+        if _perf_probe is not None:
+            try:
+                _perf_probe.record_span(f"startup.{label}", (_now - _sm_seg) * 1000.0)
+            except Exception:  # noqa: BLE001 - 诊断不得反噬启动
+                pass
         # P3：stderr 直写同款行（含 fp= 后缀，与日志行完全一致）。setup_logging
         # 前的点位靠它进 stderr；之后的点位双写（stderr+文件），仅源码运行发生。
         _startup_stderr_write(msg + "\n")
@@ -371,6 +385,16 @@ def main():
         _start_paint_profiler()
     except Exception:  # noqa: BLE001 - 诊断设施绝不能阻断启动
         pass
+
+    # 🔬 性能探针内存采样（默认完全关闭，打包版强制不可用）：
+    # 仅当 DRIFOX_PERF_PROBE=1 且 DRIFOX_PERF_PROBE_MEM=1 时起后台 daemon 线程，
+    # 按 DRIFOX_PERF_PROBE_MEM_MS（默认 2000ms）落一行 RSS 到 .perf_out/。
+    # 关闭态 start_mem_sampler() 立即返回 None：不开线程、不建目录、零副作用。
+    if _perf_probe is not None:
+        try:
+            _perf_probe.start_mem_sampler()
+        except Exception:  # noqa: BLE001 - 诊断设施绝不能阻断启动
+            pass
 
     # 🛡️ InfoBar 系统级守卫：死壳清洗 + notify 主线程投递桥预热。
     # 只在 GUI 分支装（qfluentwidgets 仅 GUI 需要）；CLI 不加载。

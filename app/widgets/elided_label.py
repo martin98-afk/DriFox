@@ -70,6 +70,12 @@ class _ElidedLabel(QLabel):
         self._hl_query = ""
         self._hl_queries: List[str] = []  # 多关键字高亮
         self._hl_color = ""
+        # ── 全文宽度缓存（避免每拍 horizontalAdvance 全文重测）──
+        # 失效点三处缺一不可：setText / setHighlights / FontChange 事件。
+        # **不要在 resizeEvent 里清**：文本宽度与控件宽度无关，清掉反而让每次
+        # resize 都重测全文；宽度变化已由 _last_elided_w 短路判定覆盖。
+        self._full_text_w: int | None = None
+        self._last_elided_w: int = -1
         # ── hover 滚动播放状态（定时器懒建：只有真正滚过的实例才持有）──
         self._hover_scroll = hover_scroll
         self._hovering = False
@@ -90,6 +96,8 @@ class _ElidedLabel(QLabel):
     def setText(self, text: str):
         """设置完整文本，同时清除高亮"""
         self._full_text = text
+        self._full_text_w = None  # 文本变了，全文宽度缓存作废
+        self._last_elided_w = -1  # 内容换了，同宽度也要重算
         self._hl_query = ""
         self._hl_queries = []
         self._hl_color = ""
@@ -120,6 +128,8 @@ class _ElidedLabel(QLabel):
         self._hl_queries = list(queries)
         self._hl_query = queries[0] if queries else ""  # 主查询用于省略锚定
         self._hl_color = color
+        self._full_text_w = None  # 高亮态可能切富文本渲染，全文宽度需重测
+        self._last_elided_w = -1  # 渲染分支变了，同宽度也要重算
         self._reset_scroll()  # 富文本高亮与自绘滚动互斥，进高亮态先停滚
         self._update_elided()
 
@@ -162,7 +172,27 @@ class _ElidedLabel(QLabel):
 
     def _scroll_overflow_px(self) -> int:
         """全文宽与可视宽之差（<=0 表示不需要滚动）"""
-        return self.fontMetrics().horizontalAdvance(_to_single_line(self._full_text)) - self.width()
+        return self._full_text_width() - self.width()
+
+    def _full_text_width(self) -> int:
+        """全文渲染宽度（单行归一化后），带缓存。
+
+        滚动 tick 每 16ms 调一次，而 horizontalAdvance 对长标题是实打实的
+        字形测量；缓存后滚动期零测量。
+        """
+        if self._full_text_w is None:
+            self._full_text_w = self.fontMetrics().horizontalAdvance(
+                _to_single_line(self._full_text)
+            )
+        return self._full_text_w
+
+    def changeEvent(self, event):
+        """字体变化时作废全文宽度缓存（字号/字体切换会改变文本宽度）。"""
+        super().changeEvent(event)
+        if event.type() == QEvent.FontChange:
+            self._full_text_w = None
+            self._last_elided_w = -1  # 宽度未变但字号变了，必须重算一次
+            self._update_elided()
 
     def _is_scrolling(self) -> bool:
         return self._scroll_timer is not None and self._scroll_timer.isActive()
@@ -273,7 +303,14 @@ class _ElidedLabel(QLabel):
             single = _to_single_line(self._full_text)
             if self.text() != single:
                 super().setText(single)
+            self._last_elided_w = w
             return
+
+        # 宽度短路：同一宽度重复进入是无意义重算（resize/setText/高亮都可能
+        # 连打多次）。宽度的真实变化仍会走到下面的重算，故不是棘轮锁死。
+        if w == self._last_elided_w:
+            return
+        self._last_elided_w = w
 
         # 决定使用哪种省略策略
         if self._hl_query and self._hl_color:

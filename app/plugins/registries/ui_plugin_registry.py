@@ -4446,17 +4446,36 @@ class UIPluginRegistry:
 
     @staticmethod
     def _compute_ui_signature(plugin_path) -> float:
-        """ui/ 目录 mtime 签名（全部文件 mtime 最大值；目录不存在返回 -1）。"""
+        """ui/ 目录 mtime 签名（全部文件 mtime 最大值；目录不存在返回 -1）。
+
+        遍历用 os.scandir 手工递归而非 Path.rglob，签名语义与旧实现一致：
+        - 目录判定 entry.is_dir(follow_symlinks=False)：软链接目录不递归
+          （同 rglob 默认行为），目录条目零 stat；
+        - 文件判定 entry.is_file()（跟随软链接，同 Path.is_file），随后
+          entry.stat() 复用枚举阶段已拿到的 DirEntry 信息，不再为每个
+          条目单独发起一次 stat（Windows 上 stat 直接来自 FindFirstFile
+          的 WIN32_FIND_DATA，POSIX 上命中 d_type/stat 缓存）；
+        - 不可读目录或条目静默跳过，与 rglob 对 PermissionError 的处理一致。
+        """
         ui_dir = Path(plugin_path) / "ui"
         if not ui_dir.is_dir():
             return -1.0
         latest = -1.0
-        for f in ui_dir.rglob("*"):
-            if f.is_file():
-                try:
-                    latest = max(latest, f.stat().st_mtime)
-                except OSError:
-                    continue
+        pending = [str(ui_dir)]
+        while pending:
+            current = pending.pop()
+            try:
+                with os.scandir(current) as it:
+                    for entry in it:
+                        try:
+                            if entry.is_dir(follow_symlinks=False):
+                                pending.append(entry.path)
+                            elif entry.is_file():
+                                latest = max(latest, entry.stat().st_mtime)
+                        except OSError:
+                            continue
+            except OSError:
+                continue
         return latest
 
     def poll_silent_ui_changes(self) -> list:

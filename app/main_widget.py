@@ -1571,6 +1571,10 @@ class OpenAIChatToolWindow(ToolWindow):
         # ── 繁忙时排队消息（内存态，不持久化；切会话清空）──
         self._pending_message_queue: list = []  # [{id, text, image_paths}]
         self._pending_message_seq: int = 0
+        # 已登记 defer、尚未进入发送收尾的 send 条数（UI 已置 _is_streaming=True，
+        # 但 engine 还没启动 worker）。批式触发（多个定时任务同一 drain 出队）时
+        # 后一条若只看 engine.is_streaming 会把「前一条待启动」误判成「worker 已结束」。
+        self._deferred_send_pending: int = 0
         # 已撤回的插话文本（撤回兜底登记，停止回填链路去重，一次性消费）
         self._interject_withdrawn_texts: set = set()
 
@@ -13931,7 +13935,9 @@ class OpenAIChatToolWindow(ToolWindow):
             pass
         return 300
 
-    def _batch_is_protected(self, batch_idx: int, vp_range: Optional[tuple] = None) -> bool:
+    def _batch_is_protected(
+        self, batch_idx: int, vp_range: Optional[tuple] = None, restore_win: Optional[int] = None
+    ) -> bool:
         """判断批次是否受保护（温和淘汰不碰）：
         - 视口邻域（`_restore_window_batches` 口径）
         - 包含当前流式输出助手卡片的批次
@@ -13949,6 +13955,12 @@ class OpenAIChatToolWindow(ToolWindow):
 
         正解是让保护范围**精确等于重建窗口**：重建窗口内的批次 LRU 不碰（卸了
         会被立刻建回），窗口外则允许淘汰（它们只持占位，滚过去时才重建）。
+
+        [PERF] `restore_win`：重建窗口的调用方已经算过（`:func:`_recycle_lru_batches`
+        逐批调用本方法），把它作为参数传进来，避免每批都重算一次
+        `_restore_window_batches()`（它会从视口向两侧累加批次高度、逐卡调
+        `card.height()`，B=40 时是 O(B×W×卡片数) 的 Qt 调用）。
+        传 None 时保持旧行为自算（其余零散调用点无需改）。
         """
         if not (0 <= batch_idx < len(self._batch_cards)):
             return True
@@ -13956,7 +13968,9 @@ class OpenAIChatToolWindow(ToolWindow):
         if not cards:
             return False
         # 与第 1.5 步的重建窗口同口径（距离 0 = 视口内）
-        if self._batch_distance(batch_idx, vp_range) <= self._restore_window_batches():
+        if restore_win is None:
+            restore_win = self._restore_window_batches()
+        if self._batch_distance(batch_idx, vp_range) <= restore_win:
             return True
         # 当前流式卡
         if self._current_assistant_card is not None and self._current_assistant_card in cards:
@@ -14107,6 +14121,11 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 可视区几何只解析一次，保护判定与距离计算共用（避免逐批反复扫布局）
         vp_range = self._resolve_viewport_range()
+        # [PERF] 重建窗口同理：入口算一次传给每批，避免逐批重走
+        # _restore_window_batches()（从视口向外累加批次高度 + 逐卡 height()，
+        # B=40 时约 960 次 Qt 调用）。窗口内批次 LRU 不能碰，该值对整个
+        # 候选扫描是常量。
+        restore_win = self._restore_window_batches()
 
         # 候选：所有非空批次（跳过受保护），按距离降序（最远先淘汰）
         candidates = []
@@ -14118,7 +14137,7 @@ class OpenAIChatToolWindow(ToolWindow):
             # 候选阶段直接过滤，避免 LRU 空转
             if not self._batch_fully_rendered(cards):
                 continue
-            if self._batch_is_protected(idx, vp_range):
+            if self._batch_is_protected(idx, vp_range, restore_win):
                 # 🐛 配额修复：保护区间按「真实视口 ±缓冲」算之后，小表（可见批次
                 # 少 + 缓冲）仍可能把全部批次判为受保护 → 候选为空 → 计数永不
                 # 回落。这里留一份「仅排除流式卡/欢迎卡」的降级候选，主候选耗尽
@@ -17031,11 +17050,17 @@ class OpenAIChatToolWindow(ToolWindow):
             # #25 问题 4：原 CommandManager.reload_all_commands 是 AttributeError
             # （CommandManager 无此方法，模块级函数在 builtin_commands），被 except
             # 静默吞掉——保守对齐原意图改调模块级函数
+            # [PERF] only_if_changed=True：加载历史会话与命令/智能体定义无关，
+            # 源文件签名（路径+mtime）未变时直接 return，省掉全量重解析 60+ .md
+            # + YAML + 写 commands_cache.json（实测 30~150ms 主线程）。
+            # UI 插件命令的 re_register_all_commands 已由 reload_all_commands
+            # 内部完成，此处不再重复调用；但签名未变时它不会跑，故仍需单独补一次
+            # （UI 插件命令走独立注册表，与内置命令缓存无关，开销仅内存重放）。
             from app.core.commands.builtin_commands import reload_all_commands
             from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
 
-            reload_all_commands()
-            UIPluginRegistry.get_instance().re_register_all_commands()
+            if not reload_all_commands(only_if_changed=True):
+                UIPluginRegistry.get_instance().re_register_all_commands()
         except Exception:
             pass
 
@@ -21546,7 +21571,9 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 非函数命令：繁忙时按设置项路由（插话/排队），Ctrl+Enter 恒为另一行为。
         # 命令/技能拦截在本分支之前，行为不变（永不排队）。
-        if self._is_streaming:
+        # 在途 send 也算繁忙：_is_streaming=False 但前一条已登记 defer 未启动时，
+        # 直接走发送路径会并发开两轮（后一轮被 execute 拒绝后回滚 UI 成半死态）。
+        if self._is_streaming or self._deferred_send_pending > 0:
             from app.utils.config import Settings
 
             behavior = resolve_busy_behavior(Settings.get_instance().busy_enter_behavior.value, inverse)
@@ -21667,6 +21694,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 ephemeral=ephemeral,
             )
 
+        self._deferred_send_pending += 1
         QTimer.singleShot(0, _do_deferred_send)
 
     def _on_deferred_send_ready(self, ctx: dict):
@@ -21705,6 +21733,9 @@ class OpenAIChatToolWindow(ToolWindow):
         编码期间用户切会话则放弃发送并回滚 UI，防把旧会话的图发进新会话。
         ephemeral=True 时消息只进本轮请求，不写 session、不渲染气泡。
         """
+        # 进入收尾即脱离「待启动」清单：本函数同步执行到 send_message_to_engine，
+        # 期间主线程不会再插入另一条 send 的复核。
+        self._deferred_send_pending = max(0, self._deferred_send_pending - 1)
         if getattr(self, "_is_destroyed", False):
             return
 
@@ -21878,7 +21909,9 @@ class OpenAIChatToolWindow(ToolWindow):
         """
         if getattr(self, "_is_destroyed", False):
             return
-        if self._worker_actually_busy():
+        # 在途 send（已登记 defer、engine 尚未启动）同样必须按繁忙处理：此时
+        # engine.is_streaming=False 只说明前一条还没轮到执行，不是「worker 已退出」。
+        if self._worker_actually_busy() or self._deferred_send_pending > 0:
             if behavior == "queue":
                 self._enqueue_pending_message(user_text, image_paths, hook_event)
             else:
@@ -22178,7 +22211,20 @@ class OpenAIChatToolWindow(ToolWindow):
         session = self.session_manager.get_current_session()
 
         def _do_deferred_send():
+            self._deferred_send_pending = max(0, self._deferred_send_pending - 1)
             if getattr(self, "_is_destroyed", False):
+                return
+            # 撞忙复核（同 _finish_deferred_send）：本条 defer 到执行之间可能有别的
+            # send 抢先启动 worker，此时 execute() 会拒绝并把 UI 回滚成空闲态，
+            # 而真实 worker 仍在跑（按钮不是停止、正文只流浪 fallback 到工具框）。
+            # 在发送前拦下：条目回队首等本轮结束续发，UI 保持流式态。
+            if self._worker_actually_busy():
+                assistant_card.deleteLater()
+                if getattr(self, "_current_assistant_card", None) is assistant_card:
+                    self._current_assistant_card = None
+                self._pending_message_queue.insert(0, entry)
+                self._refresh_queue_card()
+                logger.info("[BusySend] 续发撞上已启动 worker，条目回队首等本轮结束")
                 return
             if session and self.backend.tool_executor:
                 self.backend.set_session_context(session.session_id)
@@ -22218,6 +22264,7 @@ class OpenAIChatToolWindow(ToolWindow):
             self._publish_title_request()
             self._update_history_questions_badge()
 
+        self._deferred_send_pending += 1
         QTimer.singleShot(0, _do_deferred_send)
 
     def _clear_pending_message_queue(self):

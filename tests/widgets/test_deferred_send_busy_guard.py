@@ -39,6 +39,7 @@ def _make_widget(monkeypatch):
     w = OpenAIChatToolWindow.__new__(OpenAIChatToolWindow)
     w._is_destroyed = False
     w._is_streaming = True
+    w._deferred_send_pending = 1  # 本条 send 已登记 defer、尚未收尾
     w._current_assistant_card = object()
     w._toggle_send_stop = lambda flag: setattr(w, "_stop_flag", flag)
     w.backend = type("B", (), {"chat_engine": type("E", (), {"is_streaming": True})()})()

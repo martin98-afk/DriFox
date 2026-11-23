@@ -132,6 +132,36 @@ PLACEHOLDER_TIPS = [
 # 轮播间隔（毫秒）
 _PLACEHOLDER_ROTATE_INTERVAL_MS = 15000
 
+# ======== 输入框光晕 QPen 缓存 ========
+# InputGlowUnderlay._paint_inner_halo 每次重绘要画 42 层光晕，每层原本新建
+# 一个 QColor + 一个 QPen；输入时每次重绘就是 84 个临时对象。QPen 本身不可变
+# （alpha 是唯一变量，颜色由 set_color 整批换），故按 (rgb, alpha) 缓存即可：
+# 同一颜色的 42 层在第一帧后全部命中，后续重绘零分配。
+# 失效：InputGlowUnderlay.set_color 换色时必须 clear()，否则旧色 pen 会被复用。
+_HALO_PEN_CACHE: dict = {}
+
+# 光晕高度容忍带（px）：胶囊高度抖动在此范围内不重绘（宽/x/y/radius 仍须全等）。
+# 输入框自撑高时每敲一行都可能 ±1px 抖动，每次抖动重绘 42 层光晕。
+_HALO_HEIGHT_TOLERANCE_PX = 2
+
+
+def _halo_pen(rgb: int, alpha: int) -> QPen:
+    """按 (颜色 rgb, alpha) 取缓存 QPen；未命中则新建并存入。
+
+    QPen 在 drawRoundedRect 期间不被修改，可跨多次 paintEvent 复用。
+    """
+    key = (rgb, alpha)
+    pen = _HALO_PEN_CACHE.get(key)
+    if pen is None:
+        c = QColor()
+        c.setRgb(rgb)
+        c.setAlpha(alpha)
+        pen = QPen(c, 1)
+        pen.setCosmetic(True)
+        pen.setJoinStyle(Qt.RoundJoin)
+        _HALO_PEN_CACHE[key] = pen
+    return pen
+
 
 class SendableTextEdit(TextEdit):
     sendMessageRequested = pyqtSignal()
@@ -2817,6 +2847,8 @@ class InputGlowUnderlay(QWidget):
         if c.rgb() == self._color.rgb():
             return
         self._color = c
+        # 换色后旧色 pen 不能再复用，否则光晕停在上一套主题色
+        _HALO_PEN_CACHE.clear()
         self.update()
 
     def set_glow(
@@ -2910,6 +2942,20 @@ class InputGlowUnderlay(QWidget):
             and radius == self._radius
         ):
             return
+        # 高度容忍带：输入框自撑高时，行高/内边距会带来 1~2px 的来回抖动，
+        # 每抖一次重绘 = 42 层光晕。宽/x/y/radius 完全不变、高度变化 ≤2px 时
+        # 只记账不重绘（下帧若真变到 >2px 会自然地走到下面重绘）。
+        # 必须放在全等判重之后：全等是零变化快路径，这里是「微变化」快路径。
+        if (
+            pill_x == self._pill_x
+            and pill_y == self._pill_y
+            and pill_w == self._pill_w
+            and radius == self._radius
+            and abs(pill_h - self._pill_h) <= _HALO_HEIGHT_TOLERANCE_PX
+            and self._pill_h > 0
+        ):
+            self._pill_h = max(0, int(pill_h))
+            return
         self._pill_x = int(pill_x)
         self._pill_y = int(pill_y)
         self._pill_w = max(0, int(pill_w))
@@ -2961,6 +3007,7 @@ class InputGlowUnderlay(QWidget):
         画到胶囊外面，每一道描边都是闭合的圆角矩形轮廓。
         """
         steps = max(blur, 12)
+        rgb = self._color.rgb()
         for i in range(steps):
             t = i / steps  # 0 边缘 → 1 深处
             falloff_factor = math.exp(-((t * falloff) ** 2))
@@ -2968,13 +3015,7 @@ class InputGlowUnderlay(QWidget):
             if layer_alpha < 1:
                 continue
             layer_alpha = min(255, layer_alpha)
-            c = QColor(self._color)
-            c.setAlpha(layer_alpha)
-
-            pen = QPen(c, 1)
-            pen.setCosmetic(True)
-            pen.setJoinStyle(Qt.RoundJoin)
-            painter.setPen(pen)
+            painter.setPen(_halo_pen(rgb, layer_alpha))
 
             # i + 0.5 偏移：把 1px 描边正好画在像素中心，抗锯齿更平滑
             offset = i + 0.5

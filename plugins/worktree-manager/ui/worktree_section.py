@@ -269,10 +269,16 @@ def _invalidate_repo_cache(folder: str) -> None:
 
     `_info_cache` 只是最外层；`_worktrees_cache` / `_branch_cache` 各有
     30s TTL，不清会拿回删除前的列表（表现为已删的 worktree 仍在行里）。
+
+    ⚠️ `_is_worktree_cache` 必须一起清（TTL 已从 30s 提到 300s）：不清的话
+    用户在 UI 里删掉 worktree 后，5 分钟内 `is_worktree(已删路径)` 仍返回
+    True → 会话的 `worktree_path` 会写进已删除的目录。
+    与 `tools/worktree_tools.py:_invalidate_info_cache` 保持同一清缓存集合。
     """
     GitWorktreeDetector._info_cache.pop(folder, None)
     GitWorktreeDetector._worktrees_cache.clear()
     GitWorktreeDetector._branch_cache.clear()
+    GitWorktreeDetector._is_worktree_cache.clear()
 
 
 def _find_git_root_for(wt_path: str) -> str:
