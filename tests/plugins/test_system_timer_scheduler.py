@@ -292,6 +292,22 @@ class _StubCapRegistry:
         return _Pool()
 
 
+def _mount_window(reg, wid: str, session_id: str):
+    """挂一个空闲状态的假窗口：忙判据三个数据源都显式给 False。
+
+    MagicMock 的未设属性是 truthy 的 MagicMock，若不显式置空，
+    TimerScheduler._widget_busy 会把每个假窗口都判成 busy。
+    """
+    win = MagicMock()
+    win._window_id = wid
+    win.session_manager.get_current_session.return_value.session_id = session_id
+    win.backend.chat_engine.is_streaming = False
+    win._is_streaming = False
+    win._deferred_send_pending = 0
+    reg._window_main_widgets = {wid: win}
+    return win
+
+
 class TestWindowResolve:
     @pytest.fixture(autouse=True)
     def _isolated_registry(self):
@@ -309,11 +325,7 @@ class TestWindowResolve:
         reset_bootstrap()
 
     def _mount_window(self, wid: str, session_id: str):
-        win = MagicMock()
-        win._window_id = wid
-        win.session_manager.get_current_session.return_value.session_id = session_id
-        self._reg._window_main_widgets = {wid: win}
-        return win
+        return _mount_window(self._reg, wid, session_id)
 
     def test_send_goes_to_matched_window(self, timer_mod, monkeypatch):
         """session_id 命中 → 经该窗口能力池 session.send，prompt 文本与 wid 正确"""
@@ -365,11 +377,119 @@ class TestWindowResolve:
         win = MagicMock()
         win._window_id = "w-dead"
         win.session_manager.get_current_session.side_effect = RuntimeError("wrapped C/C++ object deleted")
+        win.backend.chat_engine.is_streaming = False
+        win._is_streaming = False
+        win._deferred_send_pending = 0
         self._reg._window_main_widgets = {"w-dead": win}
         loop = s.add_task("s1", "窗口已死", interval_minutes=1)
         s.tick(time.monotonic() + 5)
         assert stub.sent == []
         assert loop["id"] in {t["id"] for t in s.list_tasks()}
+        s.stop()
+
+
+# ═══════════════════════════════════════════════════════════════
+# 组 2b：多任务同 tick 的窗口忙闸门（queue 模式串行化）
+# ═══════════════════════════════════════════════════════════════
+
+
+class TestBusyWindowGate:
+    """同 tick 多条到期：queue 模式必须等目标窗口空闲才发。
+
+    回归场景（2026-11-23）：三条定时同时到期 → 同批 send 落进主程序
+    ActionQueue → drain 循环里第 3 条撞上 engine 已流式 → 回滚 UI 并
+    按 busy_enter_behavior=interject 降级成插话，「后几条被并进上一轮
+    回答，没各自开新一轮」。
+    """
+
+    @pytest.fixture(autouse=True)
+    def _isolated_registry(self):
+        from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+
+        UIPluginRegistry.get_instance().reset()
+        self._reg = UIPluginRegistry.get_instance()
+        yield
+        UIPluginRegistry.get_instance().reset()
+
+    def _scheduler_with_send(self, timer_mod):
+        """调度器 + _send 桩：每发一条就把窗口置忙（模拟主程序同步开流）。"""
+        s = _scheduler_mod(timer_mod).TimerScheduler()
+        win = _mount_window(self._reg, "w1", "s1")
+        calls = []
+
+        def fake_send(text, window_id, mode="queue"):
+            calls.append((window_id, text, mode))
+            win.backend.chat_engine.is_streaming = True
+            return True
+
+        s._send = fake_send
+        return s, win, calls
+
+    def test_same_tick_queue_tasks_fire_one_by_one(self, timer_mod):
+        s, win, calls = self._scheduler_with_send(timer_mod)
+        base = time.monotonic()
+        t1 = s.add_task("s1", "第一条", delay_seconds=1)
+        t2 = s.add_task("s1", "第二条", delay_seconds=1)
+        t3 = s.add_task("s1", "第三条", delay_seconds=1)
+
+        s.tick(base + 5)
+        assert [c[1] for c in calls] == ["⏰ 定时任务触发：第一条"], "同 tick 只应发出首条"
+        left = {t["id"] for t in s.list_tasks()}
+        assert left == {t2["id"], t3["id"]}, "被闸门拦下的任务保留到期状态，不得出表"
+        assert all(not t.get("firing") for t in s.list_tasks() if t["id"] in left)
+
+        # 首轮结束（窗口转空闲）→ 下个 tick 发第二条，仍不连带第三条
+        win.backend.chat_engine.is_streaming = False
+        s.tick(base + 6)
+        assert [c[1] for c in calls][-1] == "⏰ 定时任务触发：第二条"
+        assert len(calls) == 2
+        assert {t["id"] for t in s.list_tasks()} == {t3["id"]}
+        s.stop()
+
+    def test_busy_window_keeps_task_not_missed(self, timer_mod):
+        s, win, calls = self._scheduler_with_send(timer_mod)
+        win.backend.chat_engine.is_streaming = True  # 已有别的轮次在跑
+        once = s.add_task("s1", "等空闲", delay_seconds=1)
+        s.tick(time.monotonic() + 5)
+        assert calls == [], "窗口忙时 queue 任务不得入队"
+        assert [t["id"] for t in s.list_tasks()] == [once["id"]], "忙碌不是 missed，任务必须留表"
+        s.stop()
+
+    def test_loop_task_does_not_advance_while_busy(self, timer_mod):
+        """循环任务被闸门拦下时 fire_at 不推进（否则本轮被静默吞掉）。"""
+        s, win, calls = self._scheduler_with_send(timer_mod)
+        win.backend.chat_engine.is_streaming = True
+        task = s.add_task("s1", "每分钟", interval_minutes=1)
+        fire_at_before = s._tasks[task["id"]]["fire_at"]
+        s.tick(time.monotonic() + 61)
+        assert calls == []
+        assert s._tasks[task["id"]]["fire_at"] == fire_at_before, "到期未发不得推进 fire_at"
+        s.stop()
+
+    def test_skip_mode_not_gated(self, timer_mod):
+        """skip 语义是「忙时直接忽略」，不能改成排队等待。"""
+        s, win, calls = self._scheduler_with_send(timer_mod)
+        win.backend.chat_engine.is_streaming = True
+        s.add_task("s1", "跳过本次", delay_seconds=1, mode="skip")
+        s.tick(time.monotonic() + 5)
+        assert [c[2] for c in calls] == ["skip"], "skip 模式必须照常交给 session.send 判定"
+        s.stop()
+
+    def test_busy_fallback_when_engine_missing(self, timer_mod):
+        """engine 缺失时回退 UI 标志：_is_streaming / _deferred_send_pending 同样算忙。"""
+        s = _scheduler_mod(timer_mod).TimerScheduler()
+        win = _mount_window(self._reg, "w1", "s1")
+        win.backend = None
+        win._is_streaming = True
+        win._deferred_send_pending = 0
+        assert s._widget_busy(win) is True
+
+        win._is_streaming = False
+        win._deferred_send_pending = 1
+        assert s._widget_busy(win) is True, "已登记 defer、worker 未启动的 tick 也算忙"
+
+        win._deferred_send_pending = 0
+        assert s._widget_busy(win) is False
         s.stop()
 
 
@@ -522,6 +642,9 @@ class TestProviderRealChain:
             self_win = MagicMock()
             self_win._window_id = self.WID
             self_win.session_manager.get_current_session.return_value.session_id = "s-real"
+            self_win.backend.chat_engine.is_streaming = False
+            self_win._is_streaming = False
+            self_win._deferred_send_pending = 0
             reg._window_main_widgets = {self.WID: self_win}
             s = _scheduler_mod(timer_mod).TimerScheduler()
             s.add_task("s-real", "全真链路", delay_seconds=1)
