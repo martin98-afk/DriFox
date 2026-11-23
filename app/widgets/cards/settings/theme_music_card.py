@@ -20,7 +20,7 @@ from __future__ import annotations
 import os
 
 from loguru import logger
-from PyQt5.QtCore import Qt, pyqtSignal
+from PyQt5.QtCore import QEvent, QObject, Qt, pyqtSignal
 from PyQt5.QtWidgets import QHBoxLayout, QLabel, QWidget
 from qfluentwidgets import ExpandSettingCard, FluentIcon, Slider, SwitchButton
 
@@ -36,6 +36,46 @@ _SLIDER_WIDTH = 160
 _INDEX_WIDTH = 22
 _STATE_WIDTH = 46
 _ROW_HEIGHT = 32
+
+
+class _HeaderSliderReleaseGuard(QObject):
+    """吞掉滑块的 mouse release，阻止它冒泡到卡片头部
+
+    qfluentwidgets 的 ``HeaderSettingCard`` 对**任何** MouseButtonRelease 都调
+    ``expandButton.click()``（不看落点、也不要求先收到 press），而 Slider 与
+    SliderHandle 的 release 都没有 accept，于是拖动音量会顺手把卡片展开/收起。
+    """
+
+    def eventFilter(self, obj, event):
+        if event.type() == QEvent.MouseButtonRelease:
+            event.accept()
+        return False
+
+
+class _HeaderSlider(Slider):
+    """放在 ExpandSettingCard 头部里的滑块：鼠标事件一律显式 accept
+
+    ``Slider.mousePressEvent`` 不调 super 也不 accept，``mouseReleaseEvent`` 走
+    QAbstractSlider 默认实现（内部会 ignore），事件因此冒泡到卡片头部被当成
+    「点击展开」。这里补齐 accept，让点击与拖动都只作用于滑块。
+    """
+
+    def __init__(self, orientation=Qt.Horizontal, parent=None):
+        super().__init__(orientation, parent)
+        self._release_guard = _HeaderSliderReleaseGuard(self)
+        self.handle.installEventFilter(self._release_guard)
+
+    def mousePressEvent(self, event):
+        super().mousePressEvent(event)
+        event.accept()
+
+    def mouseMoveEvent(self, event):
+        super().mouseMoveEvent(event)
+        event.accept()
+
+    def mouseReleaseEvent(self, event):
+        super().mouseReleaseEvent(event)
+        event.accept()
 
 
 class _TrackRow(QWidget):
@@ -125,7 +165,7 @@ class ThemeMusicCard(DynamicHeightExpandCardMixin, ExpandSettingCard):
         self._volume_label = QLabel(self)
         self._volume_label.setFixedWidth(scale_font_size(30))
         self._volume_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        self.slider = Slider(Qt.Horizontal, self)
+        self.slider = _HeaderSlider(Qt.Horizontal, self)
         self.slider.setRange(0, 100)
         self.slider.setFixedWidth(_SLIDER_WIDTH)
         self.slider.valueChanged.connect(self._on_slider_changed)

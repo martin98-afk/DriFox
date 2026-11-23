@@ -944,6 +944,12 @@ class LLMSettingsCard(SystemCardFrame):
         appearance_layout.addWidget(self.uiThemeModeCard)
         appearance_layout.addWidget(self.uiThemeStyleCard)
 
+        # 主题音乐（无音乐的主题整卡隐藏；展开看歌单/单曲开关/当前播放）
+        self.uiMusicCard = ThemeMusicCard(self.cfg.ui_music_volume, parent=self)
+        # 配置项级监听：卡内滑块与其他入口（配置文件/云同步）都能同步到播放器
+        self.cfg.ui_music_volume.valueChanged.connect(self._on_music_volume_changed)
+        appearance_layout.addWidget(self.uiMusicCard)
+
         # 系统关闭「动画效果」时的逃生口：全仓动效统一查 Animations.motion_enabled()
         self.uiMotionCard = SwitchSettingCard(
             FluentIcon.SPEED_HIGH,
@@ -954,12 +960,6 @@ class LLMSettingsCard(SystemCardFrame):
         )
         self.uiMotionCard.checkedChanged.connect(self._on_motion_override_changed)
         appearance_layout.addWidget(self.uiMotionCard)
-
-        # 主题音乐（无音乐的主题整卡隐藏；展开看歌单/单曲开关/当前播放）
-        self.uiMusicCard = ThemeMusicCard(self.cfg.ui_music_volume, parent=self)
-        # 配置项级监听：卡内滑块与其他入口（配置文件/云同步）都能同步到播放器
-        self.cfg.ui_music_volume.valueChanged.connect(self._on_music_volume_changed)
-        appearance_layout.addWidget(self.uiMusicCard)
 
         # 界面字号 + 全局字体
         appearance_layout.addWidget(self.uiFontSizeCard)
