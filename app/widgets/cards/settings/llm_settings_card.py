@@ -944,6 +944,17 @@ class LLMSettingsCard(SystemCardFrame):
         appearance_layout.addWidget(self.uiThemeModeCard)
         appearance_layout.addWidget(self.uiThemeStyleCard)
 
+        # 系统关闭「动画效果」时的逃生口：全仓动效统一查 Animations.motion_enabled()
+        self.uiMotionCard = SwitchSettingCard(
+            FluentIcon.SPEED_HIGH,
+            "始终播放动效",
+            "系统关闭动画效果时仍播放过渡动画",
+            configItem=self.cfg.ui_motion_always_on,
+            parent=self,
+        )
+        self.uiMotionCard.checkedChanged.connect(self._on_motion_override_changed)
+        appearance_layout.addWidget(self.uiMotionCard)
+
         # 主题音乐（无音乐的主题整卡隐藏；展开看歌单/单曲开关/当前播放）
         self.uiMusicCard = ThemeMusicCard(self.cfg.ui_music_volume, parent=self)
         # 配置项级监听：卡内滑块与其他入口（配置文件/云同步）都能同步到播放器
@@ -1790,6 +1801,14 @@ class LLMSettingsCard(SystemCardFrame):
             icon=get_icon("主题风格"),
             parent=self,
         )
+
+    def _on_motion_override_changed(self, checked: bool) -> None:
+        """动效覆盖切换 → 丢弃系统偏好探测缓存
+
+        配置值本身实时生效，清缓存是为了让「关闭覆盖」时重新读一次系统
+        开关（用户可能在运行期动过系统设置），而不是沿用启动时的旧值。
+        """
+        Animations.refresh_reduce_motion()
 
     def _on_music_volume_changed(self, value: int) -> None:
         """主题音乐音量滑块 → 播放器（value 为 0~100）"""

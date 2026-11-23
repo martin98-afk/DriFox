@@ -978,6 +978,10 @@ class Settings(QConfig):
     # 消息身份行：每条消息顶部显示发送者头像 + 名称（插件可覆盖身份）
     ui_message_identity = ConfigItem("UI", "MessageIdentity", True, BoolValidator())
 
+    # 系统「减少动态效果」关闭时是否仍播放动效（外观页「始终播放动效」）。
+    # 默认 False = 尊重系统辅助功能偏好；True 时不查询系统开关。
+    ui_motion_always_on = ConfigItem("UI", "MotionAlwaysOn", False, BoolValidator())
+
     # 对话页（TabPanel）显示模式：list=列表 / tree=工作区树
     tab_panel_mode = OptionsConfigItem("UI", "TabPanelMode", "list", OptionsValidator(["list", "tree"]))
 
