@@ -1,3 +1,39 @@
+## [v0.7.5] - 2026-11-23
+
+自 v0.7.4 以来的变更 | 提交数：17 · 文件变更：95 · +8706/-748 | 贡献者：drifox-bot, mading
+
+### ✨ 新功能 (New Features)
+
+- **文件树全局面板 + 引用到输入框** (`plugins/file-tree/ui/global_preview.py` · `preview.py` · `quote.py` · `cards.py` · `.drifox-plugin/plugin.json` 0.7.0): 新增遮罩式非模态 `GlobalPreviewDialog`，图片与文本共用同一面板（同一时刻只留一个，切换与卸载时释放）；`_ImageView` 支持滚轮/键盘缩放与拖拽平移并实时显示缩放百分比；树右键与预览区右键统一菜单（预览 / 全局预览 / 引用到输入框 / 复制路径 / 用默认程序打开 / 重新加载），引用把文件路径或选中文字（带行号）写进对话输入框；插件接管主程序里工具卡文件地址的点击预览。踩坑记录：`QAction.triggered(bool)` 会把 checked 当实参覆盖 lambda 默认参数，必须用 `lambda *_, p=item_path` 吃掉，否则动作静默失灵。
+- **安全模式（`--safe-mode`）** (`app/utils/safe_mode.py` · `app/plugins/managers/plugin_manager.py` · `app/plugins/loaders/_roots.py` · `app/tray_manager.py` · `app/utils/app_restart.py`): 只加载系统插件，跳过用户插件目录与 Claude 插件缓存；扫描根 / 热重载 / 插件工具预加载 / 全局 hooks / `plugin_host_service` 五处统一收口，热更新也不得把用户插件重新拉回来。安全模式既不读也不写发现缓存——缓存 key 只含磁盘目录签名、与加载范围无关，落盘后正常启动会命中「仅 system」缓存并丢用户插件。测试：`tests/plugins/test_safe_mode_plugin_loading.py`。
+- **session.send 支持 window_id 定向** (`app/plugins/capabilities/providers/tool_core.py` · `app/core/workers/chat_worker.py` · `subagent_worker.py` · `plugins/system-handoff/hooks/auto_compact_trigger.py` · `inject_handoff.py`): chat_worker / subagent_worker 在 hook context 里注入 `window_id`（hook 内 `caps_for` 无 ctx 会回落到活跃窗口），`send()` 新增 `window_id` 参数按 id 解析目标窗口。修掉交接文档多窗口串窗：A 窗口超阈值、补写提示被发进用户正看的 B 窗口。`auto_compact_trigger` 另加磁盘防重入标记（`plugin_data/system-handoff/active/<key>.json`，key=`session_id`，缺失退窗口 id），并明确子智能体不参与交接。测试：`tests/plugins/test_session_send_window_targeting.py` 4 例、`test_handoff_plugin_hooks.py` 11 例。
+- **Timer 队列任务等窗口空闲再发** (`plugins/system-timer/ui/scheduler.py`): queue 模式先探测目标窗口是否在途（engine 真实状态优先，回退 UI 标志与延迟发送计数），忙则本 tick 不消耗任务（`firing` 复位、`fire_at` 保持到期），下个 tick 再看。原行为下主程序 drain 是 while 循环，同批多条 send 从第二条起撞上 engine 已流式 → 回滚 UI 并降级为 interject，表现为「后几条定时被并进上一轮回答」。skip / hook 语义不变。
+- **记忆系统成本口径与分区配额角标** (`plugins/assistant_hub/assistant_manager.py` · `core/memory/entries.py` · `view.py` · `prompts.py` · `tools/memory_tools.py` · `ui/sections.py`): 条目成本统一按「正文 + 行头 id」口径计（id 剥离后再算），`memory_read(scope=sections)` 只报真正装不下的区——某区超自己平分额度但同侧池仍有余量时不报警，不逼模型删条目；分区 chip 底部新增「已用 / 配额 字」角标，超配额转红，滑杆拖动只改文案不重建卡片；prompts 增补四条记忆自检规则（一题一条 / 一事实一处 / 同区不重复 / 禁标签与事实描述）。
+- **外观页动效逃生口「始终播放动效」** (`app/utils/design_tokens.py` · `app/utils/config.py` · `app/widgets/cards/settings/llm_settings_card.py`): 新增 `UI.MotionAlwaysOn`（默认 False = 尊重系统辅助功能偏好）。系统「减少动态效果」常被优化工具/精简镜像改成关闭，用户看不到任何过渡动画时需要显式开关；开启后 `motion_enabled()` 不查系统开关直接返回 True（状态反馈保留、只去运动过程），系统检测结果进程内缓存一次。
+- **主题音乐设置卡** (`app/widgets/cards/settings/theme_music_card.py` · `llm_settings_card.py`): 外观页新增音乐卡（无音乐的主题整卡隐藏），展开可看歌单、单曲开关与当前播放；音量配置项级监听，配置文件与云同步改动都能同步到播放器。同时修掉「拖动音量顺手展开/收起卡片」：qfluentwidgets `HeaderSettingCard` 对任何 MouseButtonRelease 都点 `expandButton`，新增 `_HeaderSlider` 补齐 press/move/release 的 `accept()`，并给 handle 装 release 事件过滤器。
+
+### ⚡ 性能优化 (Performance)
+
+- **项目笔记 git 采集签名短路** (`plugins/assistant_hub/hooks/project_notes.py`): 本机实测 `git --version` 1030ms、`git status --porcelain -uall` 4683ms、4 条并发墙钟 4951ms，且每次用户发送都付一次（原只有 5s TTL，两条消息间隔超 5s 就白跑）。改为先取工作树签名（4 次 stat ≈ 0.1ms，零子进程，支持 linked worktree 的 `gitdir:` 指针），签名一致直接复用上次结果；叠加 30s 工作树 TTL、300s HEAD 侧 TTL 与 5s 失败退避，纯内容修改最迟 30s 内反映，`git add`/新建文件走签名变化立即反映。
+- **git worktree 零子进程探测** (`app/utils/git_worktree.py` · `app/utils/thread_guard.py` · `app/widgets/webview_pool.py` · `plugins/worktree-manager/`): 新增纯文件探测（读 `.git` 目录/文件与 `gitdir:` 内容，不起 git 进程），`DRIFOX_PURE_FILE_GIT` 环境变量可切回旧路径；缓存按新检测方式失效；`WebViewPool` 空闲回收延迟 60s → 180s；`_CodeView` 主题应用提前返回，避免无意义的 `setStyleSheet` 重刷。测试：`tests/widgets/test_file_tree_theme_early_return.py`。
+- **命令源签名短路 + 探针基建** (`app/core/commands/builtin_commands.py` · `app/core/infra/telemetry/perf_probe.py` · `benchmarks/` · `main.py`): `reload_all_commands(only_if_changed=True)` 按（路径 + mtime）签名短路，加载历史会话不再每次全量重解析 60+ .md（实测 30~150ms 白花在主线程），插件装载/热重载路径保持默认全量；新增 `DRIFOX_PERF_PROBE=1` 单一开关的轻量探针（启动分段耗时写 JSONL，内存采样需 `DRIFOX_PERF_PROBE_MEM=1`，关闭态不开线程不建目录）与 `benchmarks/` 启动/操作基准及探针运行器。
+
+### 🐛 Bug 修复 (Bug Fixes)
+
+- **打包版诊断探针门卫收口** (`app/core/infra/telemetry/perf_jsonl.py` · `app/utils/_startup_probe.py` · `tests/core/test_packaged_probe_gate.py`): 两处各自加 `packaged()` 硬门（`sys.frozen` / `sys._MEIPASS` 为真即恒 False），环境变量撬不开。`perf_jsonl.env_flag` 一处覆盖 CPU / GC / HANDLE / GOVERNOR / RENDER / WATCHDOG_JSONL / EL_METRICS，`_startup_probe` 的 mark / dump / faulthandler / `DRIFOX_STARTUP_PROBE_EXIT_MS` 全部挂在 `_ENABLED` 上。测试 5 例。
+- **历史卡片列表被压扁、滚轮失效** (`plugins/history-manager/ui/history_card.py`): `QScrollArea(widgetResizable)` 只在 resize / 布局请求时按 `qSmartMinSize` 结算一次内容尺寸，页面若在「未显示 / 尺寸未结算」阶段完成分批渲染，内容就停在 viewport 高，之后最小高度涨上去不再结算 → 几十个条目被等比压到十几像素、滚动条 range 恒 0（实测 content=826 / minimumSizeHint=1546 / range=0..0，条目 45px → 19px）。新增 `_ensure_content_fits()`：把内容最小高度显式钉到布局最小高度一拍触发重结算，下一拍放开临时 min。
+- **模型列表右键「移除所选」点了没反应** (`app/widgets/model_list_edit_dialog.py` · `tests/widgets/test_model_list_editor_batch.py`): `QAction.triggered(bool)` 直接连 `_remove_names(names)`，`False` 被当名字列表传入 → `TypeError: 'bool' object is not iterable`，被 excepthook 记日志后吞掉。改为 `lambda: self._remove_names(names)`；回归测试走真实 `act.trigger()` 而非直接调槽。
+- **只读 bash 命令不再触发收尾** (`plugins/system-hooks/hooks/stop_guidance.py`): 按 `;` `|` `&&` 与换行分段判定，首命令命中白名单（ls/cat/grep/head/git status 等）且无重定向与命令替换才算只读；任一写命令照旧打标，拿不准一律返回 False（宁可多提醒也不漏收尾）。
+- **WebEngine 重建期视口跳动** (`app/widgets/message_card.py` · `app/widgets/card_render_core.py`): 重建前记录卡片总高与 viewer 之外的固定开销，新 viewer 初始约 40px 时 pin 住卡片高度，避免长回复数千 px 高度瞬间塌陷、滚动 value 被钳制后视口跳动数百 ms；先断 viewer 信号再销毁，防延迟信号打到新 viewer 或已删控件。另加渲染通道 reason 打点（`DRIFOX_RENDER_REASON=1` 转 INFO），用于排查「这张卡为什么走了 WebEngine」。
+- **初始化未完成即关窗** (`app/main_widget.py`): `_initialization_in_progress` 为真时只跳过「保存会话 + 后台 finalize」并停掉延迟队列，信号断开 / `backend.cleanup` / 缓存释放照原流程，避免依赖尚未就绪的 backend 状态。
+- **会话内容指纹降级路径口径** (`app/core/store/session_repository.py`): 极端结构（depth>6 / nodes>2000）原按 `str(val)[:1024]` **字符**截断，与 UTF-8 字节口径不等价（1024 字节 ≈ 341 个汉字）。改为 3KB 以内整串 blake2b（零碰撞），更长取长度 + 头/中/尾各 1KB 哈希，只有三窗与长度都相同才可能漏判，取向保持「宁可多写一次」。
+
+### 🔧 其他 (Chores & Build)
+
+- **测试沉淀与迁移工具** (`tests/widgets/test_tab_no_geometry_memory.py` · `test_team_arrange_count.py` · `tools/perf/migrate_base64_vision.py` · `vision_scan_common.py`): 窗口几何持久化改为显式「不记忆」断言（旧 `test_tab_geometry_roundtrip.py` 删除），覆盖 `_pending_arrange_count` 异常路径的减计数与重排；新增 base64 内嵌图片迁 CAS 文件引用的迁移工具（含安全校验与备份），扫描器同时支持全文与块级统计。
+- **marketplace.json 自动重生成** (`marketplace.json`): 由 GitHub Actions 按各插件 `plugin.json` 同步，`[skip ci]`。
+- 版本号升至 v0.7.5（`pyproject.toml` / `app/utils/config.py` / `dist/installer.iss` / `README.md`）。
+
 ## [v0.7.4] - 2026-11-18 (重新发布 #3)
 
 自 v0.7.3 以来的变更 | 提交数：132 · 文件变更：299 · +24555/-6114 | 贡献者：dingma, drifox-bot, mading, martin98-afk
