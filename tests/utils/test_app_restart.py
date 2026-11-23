@@ -58,3 +58,23 @@ def test_render_env_keys_are_stripped_from_child_env(monkeypatch):
         assert key not in env
     assert env["KEEP_ME"] == "1"
     assert os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] == "stale"
+
+
+def test_extra_args_appended_without_duplication(monkeypatch):
+    """安全模式重启：追加 --safe-mode；已在原参数中时不重复"""
+    monkeypatch.setattr(sys, "argv", ["main.py", "--safe-mode", "--keep"])
+    argv, _, _ = build_restart_command(extra_args=["--safe-mode"])
+    assert argv.count("--safe-mode") == 1
+    assert "--keep" in argv
+
+    monkeypatch.setattr(sys, "argv", ["main.py", "--keep"])
+    argv, _, _ = build_restart_command(extra_args=["--safe-mode"])
+    assert argv[-1] == "--safe-mode"
+
+
+def test_drop_args_removed(monkeypatch):
+    """退出安全模式重启：从新进程命令行剥离 --safe-mode，其余参数保留"""
+    monkeypatch.setattr(sys, "argv", ["main.py", "--safe-mode", "--keep"])
+    argv, _, _ = build_restart_command(drop_args=["--safe-mode"])
+    assert "--safe-mode" not in argv
+    assert "--keep" in argv

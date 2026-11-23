@@ -236,20 +236,14 @@ class TestChatWrapperWheelForward:
         assert tm._forward_wheel_to_scroll_area(ev) is True
         assert chat_area.verticalScrollBar().value() > 0
 
-    def test_event_filter_wheel_accepted(self, qtbot):
-        """eventFilter 收到 Wheel 且转发成功时返回 True 并 accept"""
-        from PyQt5.QtCore import QEvent, QPoint, QPointF, Qt
+    @staticmethod
+    def _wheel_at(x: int, y: int):
+        from PyQt5.QtCore import QPoint, QPointF, Qt
         from PyQt5.QtGui import QWheelEvent
 
-        tm = TabManagerWindow.create_instance()
-        qtbot.addWidget(tm)
-        chat_area = self._make_scroll_area(qtbot)
-        win = SimpleNamespace(chat_scroll_area=chat_area)
-        tm.get_current_window = lambda: win
-
-        ev = QWheelEvent(
-            QPointF(10, 10),
-            QPointF(10, 10),
+        return QWheelEvent(
+            QPointF(x, y),
+            QPointF(x, y),
             QPoint(0, 0),
             QPoint(0, -120),
             Qt.NoButton,
@@ -257,10 +251,61 @@ class TestChatWrapperWheelForward:
             Qt.NoScrollPhase,
             False,
         )
+
+    @staticmethod
+    def _prepare_padded_wrapper(tm, pad: int = 60):
+        """让 wrapper 左右各留 pad 空白，返回 (留白点, 内容点)（wrapper 局部坐标）"""
+        from PyQt5.QtCore import QPoint
+        from PyQt5.QtWidgets import QApplication
+
+        tm._chat_wrapper.resize(400, 300)
+        QApplication.processEvents()
+        tm._chat_wrapper_layout.setContentsMargins(pad, 0, pad, 0)
+        tm._chat_wrapper_layout.activate()
+        QApplication.processEvents()
+        geo = tm._content_stack.geometry()
+        assert geo.left() >= pad, f"内容区未按留白内缩: {geo}"
+        padding_pt = QPoint(max(1, geo.left() // 2), 10)
+        return padding_pt, geo.center()
+
+    def test_event_filter_wheel_accepted(self, qtbot):
+        """留白区 Wheel：转发到 chat_scroll_area 并 accept"""
+        tm = TabManagerWindow.create_instance()
+        qtbot.addWidget(tm)
+        chat_area = self._make_scroll_area(qtbot)
+        win = SimpleNamespace(chat_scroll_area=chat_area)
+        tm.get_current_window = lambda: win
+
+        padding_pt, content_pt = self._prepare_padded_wrapper(tm)
+        assert tm._chat_wrapper.childAt(padding_pt) is None
+        assert tm._chat_wrapper.childAt(content_pt) is not None
+
+        ev = self._wheel_at(padding_pt.x(), padding_pt.y())
         handled = tm.eventFilter(tm._chat_wrapper, ev)
         assert handled is True
         assert ev.isAccepted() is True
         assert chat_area.verticalScrollBar().value() > 0
+
+    def test_event_filter_wheel_from_child_not_forwarded(self, qtbot):
+        """回归：子控件冒泡上来的 Wheel 不得转发给消息列表
+
+        输入框（或卡片内滚动体）滚到顶/底后未消费的 Wheel 沿父链冒泡到
+        _chat_wrapper，此时 pos 落在子控件上；此前被无差别转发给
+        chat_scroll_area，表现为输入框滚动带动消息列表一起滚。
+        """
+        tm = TabManagerWindow.create_instance()
+        qtbot.addWidget(tm)
+        chat_area = self._make_scroll_area(qtbot)
+        win = SimpleNamespace(chat_scroll_area=chat_area)
+        tm.get_current_window = lambda: win
+
+        _padding_pt, content_pt = self._prepare_padded_wrapper(tm)
+        assert tm._chat_wrapper.childAt(content_pt) is not None
+
+        ev = self._wheel_at(content_pt.x(), content_pt.y())
+        handled = tm.eventFilter(tm._chat_wrapper, ev)
+        assert handled is False
+        assert chat_area.verticalScrollBar().value() == 0
 
     def test_event_filter_other_widget_ignored(self, qtbot):
         """非 wrapper 对象上的 Wheel 不拦截"""
