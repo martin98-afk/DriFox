@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import threading
 from datetime import datetime
 from pathlib import Path
@@ -27,11 +28,22 @@ _FILE_NAME = "trace_events.jsonl"
 _LOCK = threading.Lock()
 
 
+def packaged() -> bool:
+    """是否运行在打包产物里（PyInstaller 等）。诊断设施在打包版一律不可用。"""
+    return bool(getattr(sys, "frozen", False) or hasattr(sys, "_MEIPASS"))
+
 def env_flag(name: str) -> bool:
     """布尔型环境变量门控（1/true/on/yes 为开，其余含空值一律关）。
 
     埋点统一走这里，保证口径一致（对齐 main.py / webview_pool.py 现有写法）。
+
+    **打包版恒 False**：``sys.frozen`` / ``sys._MEIPASS`` 为真时，即便设置了
+    环境变量也撬不开 —— 诊断设施不随发布版流出（与 perf_probe.enabled /
+    paint_profiler.enabled 同款纪律）。所有观测门控（CPU/GC/HANDLE/GOVERNOR/
+    RENDER/WATCHDOG_JSONL/EL_METRICS）都走这里，一处收口。
     """
+    if packaged():
+        return False
     return os.environ.get(name, "").strip().lower() in ("1", "true", "on", "yes")
 
 

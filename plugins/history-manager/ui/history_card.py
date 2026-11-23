@@ -1660,6 +1660,10 @@ class HistoryCard(QWidget):
             self._restore_scroll_if_pending()
             # 放开重建前钉住的内容最小高度（见 _capture_scroll_anchor）
             self._release_scroll_anchor()
+            # 兜底：页面尚未完成布局就渲染完（首屏 / 卡片刚插入停靠区）时，
+            # QScrollArea 已按当时的 viewport 高度结算过内容高度，此后布局最小
+            # 高度变大不会再触发结算 → 条目被等比压扁、滚动条 range=0。
+            self._ensure_content_fits()
             # ★ 记录本次已落地布局的「渲染形态」签名（历史页签专属；归档页签与
             #   搜索态无法走快路径 —— 前者每批都全量重建，后者依赖过滤器命中的
             #   条目集合本身变化）。下同形态的 set_history 即可就地只换高亮。
@@ -2188,6 +2192,54 @@ class HistoryCard(QWidget):
             return  # 无可滚空间：塌不塌都不影响 value
         content_widget.setMinimumHeight(height)
         self._scroll_anchor_widget = content_widget
+
+    def _ensure_content_fits(self) -> None:
+        """内容高度不足时撑开一拍（防「列表挤成一条条、滚轮无效」）
+
+        QScrollArea(widgetResizable) 只在自身被 resize / 收到布局请求时按
+        ``qSmartMinSize`` 结算一次内容尺寸。页面若在「未显示 / 尺寸未结算」
+        阶段完成分批渲染，那次结算把内容 widget 定在 viewport 高度；之后
+        条目入布局、最小高度涨到远大于 viewport，却不再有一次结算 —— 内容
+        停在 viewport 高，QVBoxLayout 只能把几十个条目等比压到十几像素，
+        滚动条 range 恒为 0（实测 content=826 / minimumSizeHint=1546 /
+        range=0..0，条目 45px → 19px）。
+
+        修法：把内容最小高度显式钉到布局最小高度一拍。setMinimumHeight 会
+        同步触发 widget resize → QScrollArea 重新结算，尺寸与 range 恢复；
+        下一拍放开临时 min（已结算的尺寸不会回缩）。内容本就够高时是空操作。
+        """
+        scroll_area = self._parent_scroll_area()
+        if scroll_area is None:
+            return
+        content_widget = scroll_area.widget()
+        layout = self.get_content_layout()
+        if content_widget is None or layout is None:
+            return
+        try:
+            need = max(layout.minimumSize().height(), content_widget.minimumSizeHint().height())
+            if need <= content_widget.height():
+                return
+            content_widget.setMinimumHeight(need)
+        except RuntimeError:
+            return  # 页面/内容已销毁
+        QTimer.singleShot(0, lambda: self._release_fit_floor(content_widget))
+
+    @staticmethod
+    def _release_fit_floor(content_widget) -> None:
+        """放开 ``_ensure_content_fits`` 临时钉住的最小高度"""
+        try:
+            content_widget.setMinimumHeight(0)
+        except RuntimeError:
+            pass
+
+    def showEvent(self, event):  # noqa: N802 (Qt 命名)
+        """页面显示后再兜一次内容高度校正
+
+        首屏渲染常在页面显示前完成，见 ``_ensure_content_fits``。延迟一拍：
+        showEvent 时滚动区尺寸尚未结算，立即量到的 viewport 还是旧值。
+        """
+        super().showEvent(event)
+        QTimer.singleShot(0, self._ensure_content_fits)
 
     def _release_scroll_anchor(self) -> None:
         """放开 ``_capture_scroll_anchor`` 钉住的最小高度（延迟一拍等布局落地）"""

@@ -18,7 +18,11 @@ import os
 import sys
 import time
 
-_ENABLED = os.environ.get("DRIFOX_STARTUP_PROBE") == "1"
+# 打包版恒关：诊断设施不随发布版流出，环境变量撬不开（与 perf_probe /
+# paint_profiler / perf_jsonl.env_flag 同款纪律）。mark/dump/faulthandler/
+# DRIFOX_STARTUP_PROBE_EXIT_MS 全部挂在 _ENABLED 上，一处收口。
+_PACKAGED = bool(getattr(sys, "frozen", False) or hasattr(sys, "_MEIPASS"))
+_ENABLED = (not _PACKAGED) and os.environ.get("DRIFOX_STARTUP_PROBE") == "1"
 if _ENABLED:
     # 诊断模式自带 faulthandler：启动早期（壳显示前，正式崩溃捕获尚未安装）
     # 发生原生崩溃时也能把 Python 栈落到 stderr。
