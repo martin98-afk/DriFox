@@ -38,6 +38,10 @@ def _make_zombie(tmp_path, name, main_root):
 def main_root(tmp_path):
     root = tmp_path / "main"
     (root / ".git" / "worktrees").mkdir(parents=True)
+    # 真实 common git dir 必有 HEAD：is_worktree 用它区分
+    # 「<common>/worktrees/<名>」布局与恰好叫 worktrees 的普通目录
+    # （如 clone --separate-git-dir 落在 worktrees/ 下）。
+    (root / ".git" / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
     return root
 
 

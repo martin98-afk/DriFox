@@ -13286,6 +13286,17 @@ class OpenAIChatToolWindow(ToolWindow):
 
         self._is_virtual_recycling = True
         try:
+            # [计数自愈] 滚动/回收/懒渲染的公共汇合点：切会话/清空聊天区把
+            # 计数归零后，懒队列可能根本不产生增量记账（卡片已 _lazy_rendered，
+            # 甚至根本不走懒队列）。这里是每次滚动必进的入口（不像
+            # _recycle_lru_batches 要计数 >quota 才被调度、其内部 0 计数校准
+            # 因此永远没机会执行），先按实况校准一次，配额淘汰才能重新启动。
+            if self._rendered_card_count == 0:
+                self._recount_rendered_cards()
+                if self._rendered_card_count:
+                    logger.debug(
+                        f"[render-quota] recount: 0 -> {self._rendered_card_count} (out-of-view)"
+                    )
             # 计算可视缓冲区范围（基准 = 屏幕可见批次，不是加载窗口）
             buffer_batches = self._incremental_visible_batch_count * self._virtual_scroll_buffer
             vp_start, vp_end = self._resolve_viewport_range()
@@ -14088,6 +14099,23 @@ class OpenAIChatToolWindow(ToolWindow):
                 except RuntimeError:
                     continue
         self._sync_global_rendered_pages(actual)
+
+    def _recount_rendered_after_lazy(self, reason: str) -> None:
+        """[计数自愈] 懒渲染收口按实况校准计数，并在超配额时调度淘汰。
+
+        切会话/清空聊天区会把 `_rendered_card_count` 归零
+        （`_sync_global_rendered_pages(0)`），而后续懒渲染的增量记账可能
+        恒 0（卡片重建时 `_lazy_rendered` 已置位）→ 「> quota 才调度」永不
+        成立 → `_recycle_lru_batches` 里计数 0 的校准分支也永远没机会执行
+        （死锁：离屏批次不卸载、viewer 不归还池）。懒渲染收口走一次即自愈。
+        """
+        before = self._rendered_card_count
+        self._recount_rendered_cards()
+        after = self._rendered_card_count
+        if after != before:
+            logger.debug(f"[render-quota] recount: {before} -> {after} ({reason})")
+        if after > self._effective_max_rendered_cards():
+            QTimer.singleShot(0, lambda: self._recycle_lru_batches())
 
     def _recycle_lru_batches(self):
         """B4 温和层：并发页超限时按「距可视区最远优先」淘汰批次 UI。
@@ -16009,6 +16037,11 @@ class OpenAIChatToolWindow(ToolWindow):
         self._extend_jump_scroll_lock()
 
         if not self._pending_lazy_cards:
+            # [计数自愈] 切会话/清空聊天区后 drain 常从「队列已空」进入：
+            # 计数被归零时按实况校准（条件守门，常态零成本），否则配额
+            # 淘汰永远不会被调度（死锁）。
+            if self._rendered_card_count == 0 and self._batch_cards:
+                self._recount_rendered_after_lazy("lazy-empty")
             self._loading_session = False
             self._lazy_batch_timer_active = False
             return
@@ -16028,6 +16061,9 @@ class OpenAIChatToolWindow(ToolWindow):
             if self._pending_lazy_cards:
                 QTimer.singleShot(0, self._process_next_lazy_batch)
             else:
+                # [计数自愈] 批次全被过滤且队列已空：同样做一次异常态校准。
+                if self._rendered_card_count == 0 and self._batch_cards:
+                    self._recount_rendered_after_lazy("lazy-filtered")
                 self._loading_session = False
                 self._lazy_batch_timer_active = False
             return
@@ -16071,6 +16107,9 @@ class OpenAIChatToolWindow(ToolWindow):
             QTimer.singleShot(80, self._process_next_lazy_batch)
         else:
             self._loading_session = False
+            # [计数自愈] 懒渲染 drain 完成是「渲染收口」的唯一时点：按
+            # `_batch_cards` 实况重算计数，超配额时调度淘汰。
+            self._recount_rendered_after_lazy("lazy-drained")
             # 懒渲染队列排空：打一次配额/池化占用（加载大会话的观测点）
             self._log_render_quota("lazy-drained")
             self._lazy_batch_timer_active = False

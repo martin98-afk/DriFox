@@ -394,7 +394,14 @@ class GitWorktreeDetector:
                     # submodule 的 gitdir 是 `<repo>/.git/modules/<名>`，
                     # 父目录名不是 worktrees，故不会误判。
                     if os.path.basename(os.path.dirname(gd_n)) == "worktrees":
-                        result = os.path.isdir(gitdir)
+                        # 父目录名为 worktrees 还不够：真实布局是
+                        # <common>/worktrees/<名>，其上一级必须是 git dir（含 HEAD）。
+                        # `clone --separate-git-dir` 恰好落在名为 worktrees 的目录
+                        # 下时，上一级没有 HEAD，不能判成 worktree。
+                        common_candidate = os.path.dirname(os.path.dirname(gd_n))
+                        result = os.path.isdir(gitdir) and os.path.isfile(
+                            os.path.join(common_candidate, "HEAD")
+                        )
                 GitWorktreeDetector._cache_set(
                     GitWorktreeDetector._is_worktree_cache, path, result
                 )

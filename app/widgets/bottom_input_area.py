@@ -140,10 +140,6 @@ _PLACEHOLDER_ROTATE_INTERVAL_MS = 15000
 # 失效：InputGlowUnderlay.set_color 换色时必须 clear()，否则旧色 pen 会被复用。
 _HALO_PEN_CACHE: dict = {}
 
-# 光晕高度容忍带（px）：胶囊高度抖动在此范围内不重绘（宽/x/y/radius 仍须全等）。
-# 输入框自撑高时每敲一行都可能 ±1px 抖动，每次抖动重绘 42 层光晕。
-_HALO_HEIGHT_TOLERANCE_PX = 2
-
 
 def _halo_pen(rgb: int, alpha: int) -> QPen:
     """按 (颜色 rgb, alpha) 取缓存 QPen；未命中则新建并存入。
@@ -2942,20 +2938,11 @@ class InputGlowUnderlay(QWidget):
             and radius == self._radius
         ):
             return
-        # 高度容忍带：输入框自撑高时，行高/内边距会带来 1~2px 的来回抖动，
-        # 每抖一次重绘 = 42 层光晕。宽/x/y/radius 完全不变、高度变化 ≤2px 时
-        # 只记账不重绘（下帧若真变到 >2px 会自然地走到下面重绘）。
-        # 必须放在全等判重之后：全等是零变化快路径，这里是「微变化」快路径。
-        if (
-            pill_x == self._pill_x
-            and pill_y == self._pill_y
-            and pill_w == self._pill_w
-            and radius == self._radius
-            and abs(pill_h - self._pill_h) <= _HALO_HEIGHT_TOLERANCE_PX
-            and self._pill_h > 0
-        ):
-            self._pill_h = max(0, int(pill_h))
-            return
+        # 高度变化一律走下面的重绘：MainWidget._position_input_glow_underlay
+        # 每拍无条件 setGeometry（underlay 高度 = 胶囊高度 + 2*margin），resize
+        # 自身就会 invalidate backing store 并重绘；在此做 1px 去抖只会把
+        # _pill_h 基准提前挪走，绘制次数不变、零收益。若将来把 setGeometry
+        # 改成条件调用，才需要重新考虑高度抖动去抖。
         self._pill_x = int(pill_x)
         self._pill_y = int(pill_y)
         self._pill_w = max(0, int(pill_w))

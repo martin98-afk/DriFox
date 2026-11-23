@@ -8,7 +8,10 @@
 
 判定方式：对每行每列的值做 `data:image` 子串检测。
 - TEXT 列直接查
-- BLOB 列先尝试 zstd 解压（serialize 用 zstd），失败再当原始 bytes 查
+- BLOB 列按 `app.core.store.serde` 的格式解析（`ZSTD\x01` + zstd frame /
+  `JSON\x01` + json / 无头旧 JSON），失败再当原始 bytes 查。
+  ⚠️ 不能把整个 BLOB 直接交给 zstd 解压：serde 头是 5 字节前缀，
+  直接解必然失败（旧实现因此在有图库上永远报 0）。
 
 输出：表/列/行数/字节数/会话数/去重后唯一图片数（按 sha1 去重）
 """
@@ -23,6 +26,15 @@ import re
 import sqlite3
 import sys
 from pathlib import Path
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+_PERF_DIR = Path(__file__).resolve().parent
+if str(_PERF_DIR) not in sys.path:
+    sys.path.insert(0, str(_PERF_DIR))
+
+from vision_scan_common import inline_image_stats, load_blob  # noqa: E402
 
 DATA_IMAGE_RE = re.compile(r"data:image/[a-zA-Z0-9.+-]+;base64,")
 # base64 body 允许的字符（宽松：含 padding）
@@ -44,15 +56,6 @@ def table_columns(con: sqlite3.Connection, table: str) -> list[tuple[str, str]]:
     cur = con.execute(f'PRAGMA table_info("{table}")')
     return [(r[1], (r[2] or "").upper()) for r in cur.fetchall()]
 
-
-def try_decompress(blob: bytes) -> bytes | None:
-    """尝试 zstd 解压（serialize 走 zstd）；失败返回 None。"""
-    try:
-        import zstandard as zstd
-
-        return zstd.ZstdDecompressor().decompress(blob, max_output_size=512 * 1024 * 1024)
-    except Exception:
-        return None
 
 
 def extract_images(text: str) -> list[tuple[str, int]]:
@@ -78,6 +81,7 @@ def scan(db_path: str) -> dict:
         "tables": {},
         "totals": {
             "rows_with_image": 0,
+            "blocks": 0,
             "b64_bytes": 0,
             "sessions": 0,
             "unique_images": 0,
@@ -85,6 +89,10 @@ def scan(db_path: str) -> dict:
     }
     unique: set[str] = set()
     sessions: set[str] = set()
+    # 块级口径汇总（与迁移器 blocks_replaced / b64_bytes / unique_images 同口径）
+    vb_unique: set[str] = set()
+    vb_sessions: set[str] = set()
+    vb_rows = vb_blocks = vb_bytes_count = 0
 
     for table in list_tables(con):
         cols = table_columns(con, table)
@@ -102,30 +110,55 @@ def scan(db_path: str) -> dict:
             continue
 
         table_stat: dict = {}
+        # 块级口径：只统计 content[i] 中 type=image_url 的内嵌图，与迁移器一致；
+        # 全文本口径（上面的 table_stat）仍保留，能发现二维码/HTML/业务字段里的副本
+        vision_stat: dict = {}
         idx = {c: i for i, (c, _) in enumerate(cols)}
         for row in cur:
             for cname, ctype in cols:
                 val = row[idx[cname]]
                 if val is None:
                     continue
-                text = None
+                obj = None
                 if isinstance(val, str):
                     text = val
+                    obj = load_blob(val)
                 elif isinstance(val, (bytes, bytearray)):
-                    b = bytes(val)
-                    dec = try_decompress(b)
-                    text = (dec if dec is not None else b).decode("utf-8", "replace")
+                    raw = bytes(val)
+                    obj = load_blob(raw)
+                    text = str(obj) if obj is not None else raw.decode("utf-8", "replace")
                 else:
                     continue
+                vb_n, vb_bytes, vb_uniq = (
+                    inline_image_stats(obj) if obj is not None else (0, 0, set())
+                )
+                if vb_n:
+                    vs = vision_stat.setdefault(
+                        cname,
+                        {"rows": 0, "blocks": 0, "b64_bytes": 0, "unique": set(), "sessions": set()},
+                    )
+                    vs["rows"] += 1
+                    vs["blocks"] += vb_n
+                    vs["b64_bytes"] += vb_bytes
+                    vs["unique"] |= vb_uniq
+                    vb_rows += 1
+                    vb_blocks += vb_n
+                    vb_bytes_count += vb_bytes
+                    vb_unique |= vb_uniq
+                    if sid_col and row[idx[sid_col]]:
+                        vs["sessions"].add(str(row[idx[sid_col]]))
+                        vb_sessions.add(str(row[idx[sid_col]]))
                 if "data:image" not in text:
                     continue
                 imgs = extract_images(text)
                 if not imgs:
                     continue
                 csv = table_stat.setdefault(
-                    cname, {"rows": 0, "b64_bytes": 0, "unique": set(), "sessions": set()}
+                    cname,
+                    {"rows": 0, "blocks": 0, "b64_bytes": 0, "unique": set(), "sessions": set()},
                 )
                 csv["rows"] += 1
+                csv["blocks"] += len(imgs)
                 for sha, blen in imgs:
                     csv["b64_bytes"] += blen
                     csv["unique"].add(sha)
@@ -134,21 +167,43 @@ def scan(db_path: str) -> dict:
                     csv["sessions"].add(str(row[idx[sid_col]]))
                     sessions.add(str(row[idx[sid_col]]))
                 report["totals"]["rows_with_image"] += 1
+                report["totals"]["blocks"] += len(imgs)
                 report["totals"]["b64_bytes"] += sum(blen for _s, blen in imgs)
 
-        if table_stat:
-            report["tables"][table] = {
-                c: {
+        if table_stat or vision_stat:
+            cols_out: dict = {}
+            for c in sorted(set(table_stat) | set(vision_stat)):
+                v = table_stat.get(c) or {
+                    "rows": 0, "blocks": 0, "b64_bytes": 0, "unique": set(), "sessions": set()
+                }
+                vs = vision_stat.get(c) or {
+                    "rows": 0, "blocks": 0, "b64_bytes": 0, "unique": set(), "sessions": set()
+                }
+                cols_out[c] = {
                     "rows": v["rows"],
+                    "blocks": v["blocks"],
                     "b64_bytes": v["b64_bytes"],
                     "unique_images": len(v["unique"]),
                     "sessions": len(v["sessions"]),
+                    "vision_blocks": {
+                        "rows": vs["rows"],
+                        "blocks": vs["blocks"],
+                        "b64_bytes": vs["b64_bytes"],
+                        "unique_images": len(vs["unique"]),
+                        "sessions": len(vs["sessions"]),
+                    },
                 }
-                for c, v in table_stat.items()
-            }
+            report["tables"][table] = cols_out
 
     report["totals"]["unique_images"] = len(unique)
     report["totals"]["sessions"] = len(sessions)
+    report["totals"]["vision_blocks"] = {
+        "rows_with_image": vb_rows,
+        "blocks": vb_blocks,
+        "b64_bytes": vb_bytes_count,
+        "unique_images": len(vb_unique),
+        "sessions": len(vb_sessions),
+    }
     # 估算可回收：base64 比原始字节大约 4/3，回收的是 b64 文本 → 原字节的差额
     report["totals"]["b64_mb"] = round(report["totals"]["b64_bytes"] / 1048576, 2)
     con.close()

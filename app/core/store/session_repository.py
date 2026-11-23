@@ -149,11 +149,13 @@ def _fp_hash_value(val: Any, depth: int, budget: list) -> Any:
     保存 → 崩溃窗口丢流式中间态。
 
     预算耗尽后降级为**内容敏感**的摘要 `(len, hash(str(val)[:1024]))`：
-    只取长度的话，同长度的不同内容会得到相同指纹 = 漏存（review 实测
+    只取长度的话，同长度的不同内容会得到相同指纹 = 漏判（review 实测
     `DEPTH_TRUNC_SAME` / `NODES_TRUNC_SAME` 均为 True）。降级只发生在前
     1024 字符也相同且长度相同时，真实消息几乎不会触发。
 
-    方向仍是「宁可多写一次，不可漏存」。
+    边界（非绝对保证）：正常结构下内容变化都能被指纹捕捉；上述降级路径对
+    「同长度且前 1024 字符相同」的差异不敏感，可能让 save() 的内容去重误判
+    为「未变」。设计取向是「宁可多写一次」，但降级碰撞难免少写一次。
     """
     budget[0] -= 1
     if budget[0] <= 0 or depth > _FP_MAX_DEPTH:
@@ -207,8 +209,13 @@ def _light_msg_fingerprint(msg: Any) -> tuple:
       1) 嵌套超过 `_FP_MAX_DEPTH`(6) 层或超过 `_FP_MAX_NODES`(2000) 个节点，
          且超出部分的前 1024 字符与长度都相同 → 可能漏判
       2) str/bytes 长度相同、首尾 2KB 相同、中间不同
-      两类都要求极端结构，真实消息基本触不到。发生时的后果是**少写一次盘**
-         （数据仍是上一次已落库的内容，不是丢数据）。
+      两类都要求极端结构，真实消息基本触不到。
+
+    例外发生时的后果链：save() 在 `_content_hash_cache` 命中相同 content_key
+    时直接 `return True`，跳过序列化与写盘，且不更新缓存（同键会持续命中）；
+    后续内容变化若突破指纹差异，会整篇补写（写的是完整 session，之前的变更
+    一并落库）。因此这里不是零成本：**若进程在下次成功写盘前退出/崩溃，
+    这段未落库的变更会丢失**。
     - 小消息不比原实现慢：体积低于 `_FP_FAST_PATH_BYTES` 直接走 `str()`
     """
     if not isinstance(msg, dict):
@@ -708,7 +715,9 @@ class SessionRepository:
         # hash 不同不跳过，保证新快照落库（否则恢复仍丢新成员）。
         # [PERF] 末条指纹走 _light_msg_fingerprint：原 `hash(str(last_msg))` 在
         # 末条含大 tool_result/base64 时每次保存都全量复制 1MB 级文本。轻量版
-        # 只取 id/字段数/每字段长度 + 首尾 2KB 哈希；最坏退化为多写一次，不漏存。
+        # 只取字段数 + 每字段递归内容哈希（字符串取长度 + 首尾 2KB）。
+        # 极端结构（depth>6 / nodes>2000）降级摘要可能碰撞 → 本次写盘被跳过；
+        # 后续变化会整篇补写，但崩溃窗口内的变更会丢（详见函数 docstring）。
         messages = session.get("messages", [])
         if messages:
             last_msg = messages[-1]

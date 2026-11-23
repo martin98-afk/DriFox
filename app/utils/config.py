@@ -1087,8 +1087,10 @@ class Settings(QConfig):
 
     # ========== Tab 管理器 ==========
     enable_tab_manager = ConfigItem("UI", "EnableTabManager", True, BoolValidator())
-    # 窗口几何/面板宽度不做记忆（打开时固定默认 960x640 居中 + panel 280），
+    # 窗口几何/面板宽度不做记忆（打开时固定默认 1100x800 居中 + 侧边栏 187），
     # 原 tab_panel_width / tab_panel_collapsed / tab_manager_geometry 配置项已移除
+    # 实际值来源：tab_manager_window.py:_restore_geometry（1100x800 居中）、
+    # ：_DEFAULT_PANEL_WIDTH = 187（content 宽）
     window_always_on_top = ConfigItem("UI", "WindowAlwaysOnTop", False, BoolValidator())
 
     # ========== 渲染与性能（Webview）==========

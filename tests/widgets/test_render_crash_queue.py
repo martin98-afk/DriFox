@@ -318,3 +318,86 @@ def test_try_restore_reasserts_transparency_before_skeleton_load():
     assert calls == ["transparent", "skeleton"], f"重申必须先于骨架加载，实际 {calls}"
     assert v._context_lost is False
     v.contextRestored.emit.assert_called_once()
+
+
+# ─── 自愈成功清零：分散崩溃不得累积成整卡重建 ───────────────────────
+
+def test_dispersed_render_crashes_reset_after_each_success(monkeypatch):
+    """崩溃 → 恢复成功 ×3：计数每轮回 0，不触发 needRecreate。
+
+    旧实现只在 reset_for_reuse 归零：同一 viewer 生命周期内 3 次分散且
+    每次都成功恢复的崩溃 → 第 3 次被误判成环境级问题 → 整卡重建。
+    """
+    v = _make_viewer()
+    enq = MagicMock(return_value=True)
+    monkeypatch.setattr(
+        RenderCrashQueue, "get_instance", classmethod(lambda cls: MagicMock(enqueue=enq))
+    )
+
+    for _ in range(3):
+        v._context_lost = False
+        v._on_render_crashed()
+        assert v._render_crash_count == 1
+        v._mark_self_heal_success()  # contentReady = 恢复成功
+        assert v._render_crash_count == 0
+
+    v.needRecreate.emit.assert_not_called()
+    assert enq.call_count == 3
+
+def test_consecutive_render_failures_still_recreate_at_third(monkeypatch):
+    """连续 3 次崩溃且都未恢复成功：阈值语义不变，第 3 次重建。"""
+    v = _make_viewer()
+    enq = MagicMock(return_value=True)
+    monkeypatch.setattr(
+        RenderCrashQueue, "get_instance", classmethod(lambda cls: MagicMock(enqueue=enq))
+    )
+
+    v._on_render_crashed()
+    v._on_render_crashed()
+    v._on_render_crashed()  # 不调 _mark_self_heal_success = 恢复失败
+
+    assert v._render_crash_count == 3
+    assert v.needRecreate.emit.call_count == 1
+    assert enq.call_count == 2
+
+def test_dispersed_webgl_lost_reset_after_each_success():
+    """webgl 丢失 → 恢复成功 ×3：计数每轮回 0，不触发 needRecreate。"""
+    v = _make_viewer()
+    v._schedule_context_restore = MagicMock()
+
+    for _ in range(3):
+        v._context_lost = False
+        v._handle_context_lost()
+        assert v._webgl_ctx_lost_count == 1
+        v._mark_self_heal_success()
+        assert v._webgl_ctx_lost_count == 0
+
+    v.needRecreate.emit.assert_not_called()
+    assert v._schedule_context_restore.call_count == 3
+
+def test_consecutive_webgl_failures_still_recreate_at_second():
+    """连续 2 次丢失且都未恢复成功：阈值 >1 语义不变，第 2 次重建。"""
+    v = _make_viewer()
+    v._schedule_context_restore = MagicMock()
+
+    v._handle_context_lost()
+    v._context_lost = False  # 恢复尝试已发出但骨架未就绪
+    v._handle_context_lost()
+
+    assert v._webgl_ctx_lost_count == 2
+    assert v.needRecreate.emit.call_count == 1
+
+def test_js_ready_is_the_self_heal_success_point():
+    """清零挂在 contentReady（_on_js_ready），不在 _try_restore_context。
+
+    _try_restore_context 只是发出恢复（导航），加载失败时不会走到
+    contentReady；在此处清零会吞掉「连续失败」计数。
+    """
+    import inspect
+
+    from app.widgets.message_card import CodeWebViewer
+
+    src = inspect.getsource(CodeWebViewer._on_js_ready)
+    assert "self._mark_self_heal_success()" in src
+    restore_src = inspect.getsource(CodeWebViewer._try_restore_context)
+    assert "_mark_self_heal_success()" not in restore_src

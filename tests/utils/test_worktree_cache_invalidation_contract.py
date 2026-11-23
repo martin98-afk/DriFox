@@ -85,10 +85,14 @@ def _load_tools_invalidate():
 
 
 def _load_ui_invalidate():
-    """按路径加载 worktree_section 的 `_invalidate_repo_cache`。
+    """按路径加载 worktree_section 的 `_invalidate_repo_cache`（**真实实现**）。
 
-    UI 模块依赖 PyQt5 与插件包上下文，直接 exec 可能失败 —— 失败时退回
-    「检查源码里确实调了 clear」的静态断言，避免让契约测试因环境问题假绿/假红。
+    ⚠️ 这里**不允许**在手写替身上自证。历史版本曾在 import 失败时返回一个
+    手写的等价函数（自己清 4 个缓存），测试随后验证的是那个替身，真实实现
+    根本没被执行 —— 典型的假绿：真实实现把 `.clear()` 删掉，测试照样绿。
+
+    原则：**宁可不跑，不要替身自证**。import 失败一律 skip，让「未验证」
+    如实暴露为 skipped 而不是伪装成 passed。
     """
     import importlib.util
     from pathlib import Path
@@ -100,30 +104,116 @@ def _load_ui_invalidate():
         / "ui"
         / "worktree_section.py"
     )
-    src = path.read_text(encoding="utf-8")
-    # 静态兜底：函数体内必须出现 _is_worktree_cache.clear()
-    start = src.find("def _invalidate_repo_cache")
-    assert start >= 0, "找不到 UI 层 _invalidate_repo_cache，缓存失效契约失去一条路径"
-    body = src[start : start + 1200]
-    if "_is_worktree_cache.clear()" not in body:
-        raise AssertionError(
-            "UI 层 _invalidate_repo_cache 未清 _is_worktree_cache："
-            "删 worktree 后 300s 内 is_worktree 仍会返回 True，worktree_path 会写错"
-        )
     try:
         spec = importlib.util.spec_from_file_location("_wt_ui_contract", path)
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
-        return mod._invalidate_repo_cache
-    except Exception:
-        # PyQt5/包上下文缺失：用等价的纯清缓存替身（静态断言已保证实现里会清）
-        def _equivalent(folder: str) -> None:
-            GitWorktreeDetector._info_cache.pop(folder, None)
-            GitWorktreeDetector._worktrees_cache.clear()
-            GitWorktreeDetector._branch_cache.clear()
-            GitWorktreeDetector._is_worktree_cache.clear()
+        fn = getattr(mod, "_invalidate_repo_cache", None)
+    except Exception as exc:  # noqa: BLE001 — 环境问题（缺 PyQt5/包上下文）
+        pytest.skip(f"UI 模块不可导入（{exc!r}），无法验证真实实现 → 跳过而非替身自证")
+    if fn is None:
+        pytest.skip("worktree_section 未暴露 _invalidate_repo_cache")
+    return fn
 
-        return _equivalent
+
+# ── AST 级静态断言：真实实现必须真的清这些缓存 ──────────────────────
+# 名单依据：直接读 worktree_section.py::_invalidate_repo_cache 函数体确认。
+# 前 4 项是本次性能改动引入 `_is_worktree_cache` 时必须一并清的集合，
+# `_detect_cache` 用循环 + abspath 匹配逐键 pop（负缓存也在此失效）。
+_UI_EXPECTED_CLEARS = (
+    ("_info_cache", "pop"),  # GitWorktreeDetector._info_cache.pop(folder, None)
+    ("_worktrees_cache", "clear"),  # .clear()
+    ("_branch_cache", "clear"),  # .clear()
+    ("_is_worktree_cache", "clear"),  # .clear() ← 本契约的核心
+    ("_detect_cache", "pop"),  # 循环内 .pop(key, None)
+)
+
+
+def _ui_section_func_node():
+    """解析 worktree_section.py，返回 `_invalidate_repo_cache` 的 AST 节点。"""
+    import ast
+    from pathlib import Path
+
+    path = (
+        Path(__file__).resolve().parent.parent.parent
+        / "plugins"
+        / "worktree-manager"
+        / "ui"
+        / "worktree_section.py"
+    )
+    # 该文件带 UTF-8 BOM，必须用 utf-8-sig 读，否则 ast.parse 报
+    # invalid non-printable character U+FEFF
+    tree = ast.parse(path.read_text(encoding="utf-8-sig"))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == "_invalidate_repo_cache":
+            return node
+    pytest.fail("worktree_section.py 里找不到 _invalidate_repo_cache")
+
+
+def _collect_reachable_stmts(func_node):
+    """收集函数体内**可达的叶子语句**（排除 `if False` / `if 0` 常量死分支）。
+
+    关键设计：**只返回叶子语句**（Expr/Assign/Return/...），
+    **不返回** If/While/For/With/Try 这些复合节点本身。
+
+    原因：调用方会用 `ast.walk(stmt)` 展开每条返回的语句来找 `.clear()` 调用。
+    若把整个 `If` 节点返回，`ast.walk` 会连它的死分支 body 一起展开 →
+    `if False: cache.clear()` 照样被搜到，断言失效（本函数首版正是这么错的，
+    被 `test_reachable_helper_rejects_if_false` 元测试抓出）。
+
+    复合语句只用于向下递归，进入哪个分支由 `_is_const_false` 决定。
+    """
+    import ast
+
+    _COMPOUND = (ast.If, ast.While, ast.For, ast.AsyncFor, ast.With, ast.AsyncWith, ast.Try, ast.Match)
+    out = []
+
+    def _is_const_false(test_node) -> bool:
+        # `False` / `0` / `None` / `""` 字面量
+        if isinstance(test_node, ast.Constant):
+            return not test_node.value
+        # `not True` 形式
+        if isinstance(test_node, ast.UnaryOp) and isinstance(test_node.op, ast.Not):
+            inner = test_node.operand
+            if isinstance(inner, ast.Constant):
+                return bool(inner.value)
+        return False
+
+    def _walk(stmts):
+        for stmt in stmts:
+            if isinstance(stmt, ast.If):
+                if _is_const_false(stmt.test):
+                    _walk(stmt.orelse)  # 死分支：只走 else
+                else:
+                    _walk(stmt.body)
+                    _walk(stmt.orelse)
+            elif isinstance(stmt, ast.While):
+                if _is_const_false(stmt.test):
+                    _walk(stmt.orelse)  # while False 的 body 不可达
+                else:
+                    _walk(stmt.body)
+                    _walk(stmt.orelse)
+            elif isinstance(stmt, (ast.For, ast.AsyncFor)):
+                # For 的 body 是可达的（迭代次数未知，保守按可达处理）
+                _walk(stmt.body)
+                _walk(stmt.orelse)
+            elif isinstance(stmt, (ast.With, ast.AsyncWith)):
+                _walk(stmt.body)
+            elif isinstance(stmt, ast.Try):
+                _walk(stmt.body)
+                for handler in getattr(stmt, "handlers", []):
+                    _walk(handler.body)
+                _walk(getattr(stmt, "orelse", []))
+                _walk(getattr(stmt, "finalbody", []))
+            elif isinstance(stmt, ast.Match):
+                for case in stmt.cases:
+                    _walk(case.body)
+            else:
+                # 叶子语句：直接收（不含死分支子树）
+                out.append(stmt)
+
+    _walk(func_node.body)
+    return out
 
 
 class TestCacheInvalidationContract:
@@ -193,3 +283,136 @@ class TestCacheInvalidationContract:
             "is_worktree 应使用 _DETECT_CACHE_TTL(>=300s)；"
             "若退回 30s，说明缓存失效路径的重要性被削弱，本契约需重新评估"
         )
+
+
+class TestUiInvalidateStaticContract:
+    """AST 级静态断言：`_invalidate_repo_cache` **可达代码**里必须真的清这些缓存。
+
+    这组与上面的动态测试互补：
+    - 动态测试（`test_ui_invalidate_makes_is_worktree_false`）跑真实函数，
+      但它依赖 import 成功；且只验证「`_is_worktree_cache` 这一条」的最终效果，
+      其余 4 个缓存清了没清它看不出来。
+    - 静态测试逐个确认 5 个缓存都有对应清理调用，且**不在 `if False` 死分支里**。
+
+    历史假绿的教训：旧实现用「源码字符串窗口内出现 `.clear()`」判定，
+    只要把 `.clear()` 移出 1200 字符窗口、或包进 `if False:`，断言仍然绿。
+    改 AST 后这两种作弊都会被抓到。
+    """
+
+    def test_all_expected_caches_are_cleared_in_reachable_code(self):
+        """5 个缓存的清理调用都必须出现在可达代码里。"""
+        import ast
+
+        node = _ui_section_func_node()
+        stmts = _collect_reachable_stmts(node)
+
+        # 收集可达语句里出现的 "X.clear()" / "X.pop(...)" 调用：{(cache_attr, op)}
+        found: set[tuple[str, str]] = set()
+        for stmt in stmts:
+            for sub in ast.walk(stmt):
+                if not isinstance(sub, ast.Call):
+                    continue
+                func = sub.func
+                if not isinstance(func, ast.Attribute):
+                    continue
+                op = func.attr  # clear / pop
+                if op not in ("clear", "pop"):
+                    continue
+                target = func.value
+                # 形如 GitWorktreeDetector._xxx_cache.clear()
+                if isinstance(target, ast.Attribute) and target.attr.startswith("_"):
+                    found.add((target.attr, op))
+                # 形如 for key in list(GitWorktreeDetector._detect_cache) 内 pop：
+                # 遍历的那个循环本身也在可达语句里，pop 的 target 是 _detect_cache
+
+        missing = []
+        for cache_attr, expected_op in _UI_EXPECTED_CLEARS:
+            if (cache_attr, expected_op) not in found:
+                # 放宽：pop/clear 任一都算清（实现可能换形态）
+                alt = "clear" if expected_op == "pop" else "pop"
+                if (cache_attr, alt) not in found:
+                    missing.append(f"{cache_attr}.{expected_op}()")
+
+        assert not missing, (
+            f"UI 层 _invalidate_repo_cache 的可达代码里缺少这些清理调用：{missing}。"
+            f"实际找到：{sorted(found)}"
+        )
+
+    def test_is_worktree_cache_clear_is_reachable_specifically(self):
+        """核心断言：`_is_worktree_cache.clear()` 必须在可达代码里（单独锁一条）。"""
+        import ast
+
+        node = _ui_section_func_node()
+        stmts = _collect_reachable_stmts(node)
+
+        hit = False
+        for stmt in stmts:
+            for sub in ast.walk(stmt):
+                if (
+                    isinstance(sub, ast.Call)
+                    and isinstance(sub.func, ast.Attribute)
+                    and sub.func.attr == "clear"
+                    and isinstance(sub.func.value, ast.Attribute)
+                    and sub.func.value.attr == "_is_worktree_cache"
+                ):
+                    hit = True
+                    break
+            if hit:
+                break
+
+        assert hit, (
+            "_is_worktree_cache.clear() 不在 _invalidate_repo_cache 的可达代码里："
+            "删 worktree 后 300s 内 is_worktree 仍返回 True → worktree_path 会写进已删目录"
+        )
+
+    def test_detect_cache_pop_is_reachable(self):
+        """`_detect_cache` 的失效（循环内 pop）也必须在可达代码里。"""
+        node = _ui_section_func_node()
+        stmts = _collect_reachable_stmts(node)
+        import ast
+
+        hit = False
+        for stmt in stmts:
+            for sub in ast.walk(stmt):
+                if (
+                    isinstance(sub, ast.Call)
+                    and isinstance(sub.func, ast.Attribute)
+                    and sub.func.attr == "pop"
+                    and isinstance(sub.func.value, ast.Attribute)
+                    and sub.func.value.attr == "_detect_cache"
+                ):
+                    hit = True
+                    break
+            if hit:
+                break
+
+        assert hit, "_detect_cache.pop(...) 不在可达代码里：负缓存不会失效"
+
+    def test_reachable_helper_rejects_if_false(self):
+        """元测试：`_collect_reachable_stmts` 自身必须能识破 `if False:` 死分支。
+
+        这条防止「断言工具本身失效导致全组假绿」——不验证工具就没法信任它。
+        """
+        import ast
+
+        code = """
+def demo():
+    GitWorktreeDetector._a_cache.clear()
+    if False:
+        GitWorktreeDetector._is_worktree_cache.clear()
+"""
+        tree = ast.parse(code)
+        func = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef))
+        stmts = _collect_reachable_stmts(func)
+
+        names = set()
+        for stmt in stmts:
+            for sub in ast.walk(stmt):
+                if isinstance(sub, ast.Attribute):
+                    names.add(sub.attr)
+
+        assert "_a_cache" in names, "可达分支的 clear 应被收集"
+        assert "_is_worktree_cache" not in names, (
+            "_collect_reachable_stmts 未能排除 `if False:` 死分支 → 本组断言全部不可信"
+        )
+

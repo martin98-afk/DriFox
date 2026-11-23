@@ -7,8 +7,10 @@
 
 1. **QPen 复用**：同 (颜色, alpha) 必须命中同一个 QPen 实例。
 2. **set_color 失效**：换色后旧色 pen 不能再被复用（否则光晕停在旧主题色）。
-3. **高度容忍带**：宽/x/y/radius 不变、高度变化 ≤2px 时不重绘（但记账）；
-   超出容忍带、或宽度变化时必须重绘。
+3. **高度变化必然重绘**：胶囊高度任何变化都必须重绘。底层
+   `_position_input_glow_underlay` 每拍无条件 setGeometry（尺寸随胶囊高度变），
+   resize 自身就会重绘；曾有的 ≤2px 容忍带只是把 `_pill_h` 基准提前挪走，
+   绘制次数不变、零收益，已删除。
 
 这些是「可观测的性能契约」，不是像素级视觉断言 —— 光晕外观由人工目视验收，
 这里只锁「不该干的活没干」。
@@ -21,6 +23,8 @@ from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QColor
 from PyQt5.QtWidgets import QApplication
 
+from app.widgets.bottom_input_area import InputGlowUnderlay
+
 
 def _ensure_qapp():
     """确保 QApplication 可用（与 test_elided_label.py 同款，不建主窗口）。"""
@@ -29,10 +33,37 @@ def _ensure_qapp():
 
 def _make_underlay():
     """构造独立 underlay 并设为不显示（WA_DontShowOnScreen，避免真窗口）。"""
-    from app.widgets.bottom_input_area import InputGlowUnderlay
-
     w = InputGlowUnderlay()
     w.setAttribute(Qt.WA_DontShowOnScreen, True)
+    return w
+
+
+class _CountingUnderlay(InputGlowUnderlay):
+    """paintEvent 是 C++ 虚函数分发，实例属性 monkeypatch 无效，只能用子类计数。"""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.paint_calls = 0
+
+    def paintEvent(self, event):
+        self.paint_calls += 1
+        super().paintEvent(event)
+
+
+def _make_counting_underlay(app):
+    """可计数的独立 underlay。必须 show() 才会真正派发 paintEvent；
+    WA_DontShowOnScreen 避免弹真窗口。
+    """
+    w = _CountingUnderlay()
+    w.setAttribute(Qt.WA_DontShowOnScreen, True)
+    w.resize(460, 220)
+    w.show()
+    app.processEvents()
+    # 让 has_visible_glow() 为真，否则 paintEvent 直接 return（计数仍会 +1，
+    # 但为了真正跑到绘制路径这里还是点亮环境光）。
+    w.set_glow(0, 0, 128, 42)
+    app.processEvents()
+    w.paint_calls = 0
     return w
 
 
@@ -109,32 +140,18 @@ class TestHaloPenCache:
         assert len(mod._HALO_PEN_CACHE) == before, "同色 set_color 不应清缓存"
 
 
-class TestPillGeometryTolerance:
+class TestPillGeometryRepaint:
     def test_identical_geometry_is_noop(self):
-        """全等判重：完全相同的几何不记账变化。"""
+        """全等判重：完全相同的几何不记账变化、不重绘。"""
         _ensure_qapp()
         w = _make_underlay()
         w.set_pill_geometry(0, 0, 100, 48, 16)
         w.set_pill_geometry(0, 0, 100, 48, 16)
         assert (w._pill_x, w._pill_y, w._pill_w, w._pill_h, w._radius) == (0, 0, 100, 48, 16)
 
-    @pytest.mark.parametrize("delta", [1, -1, 2, -2])
-    def test_height_within_tolerance_is_recorded_not_repainted(self, delta):
-        """高度变化 ≤2px 且其余不变：记账但不重绘。"""
-        _ensure_qapp()
-        w = _make_underlay()
-        w.set_pill_geometry(10, 20, 300, 48, 16)
-        calls = []
-        w.update = lambda *a, **k: calls.append(1)  # 拦截重绘
-
-        w.set_pill_geometry(10, 20, 300, 48 + delta, 16)
-
-        assert w._pill_h == 48 + delta, "容忍带内也要记账（否则下次判定基准错）"
-        assert not calls, f"高度变化 {delta}px 在容忍带内，不应触发重绘"
-
-    @pytest.mark.parametrize("delta", [3, -3, 10, -20])
-    def test_height_beyond_tolerance_repaints(self, delta):
-        """高度变化 >2px：必须重绘（输入框真撑高时要跟着画）。"""
+    @pytest.mark.parametrize("delta", [1, -1, 2, -2, 3, -3, 10, -20])
+    def test_any_height_change_repaints(self, delta):
+        """高度任何变化都必须重绘（不再有 ≤2px 容忍带）。"""
         _ensure_qapp()
         w = _make_underlay()
         w.set_pill_geometry(10, 20, 300, 48, 16)
@@ -144,10 +161,10 @@ class TestPillGeometryTolerance:
         w.set_pill_geometry(10, 20, 300, 48 + delta, 16)
 
         assert w._pill_h == 48 + delta
-        assert calls, f"高度变化 {delta}px 超出容忍带，必须重绘"
+        assert calls, f"高度变化 {delta}px 必须重绘"
 
     def test_width_change_repaints(self):
-        """宽度变化即使高度在容忍带内也必须重绘（横向形变影响光晕轮廓）。"""
+        """宽度变化必须重绘（横向形变影响光晕轮廓）。"""
         _ensure_qapp()
         w = _make_underlay()
         w.set_pill_geometry(10, 20, 300, 48, 16)
@@ -184,30 +201,53 @@ class TestPillGeometryTolerance:
         assert calls, "radius 变了必须重绘"
 
     def test_growth_from_zero_height_repaints(self):
-        """从 0 高起步不受容忍带影响：否则首个可见帧会被吞掉。"""
+        """从 0 高起步必须重绘：否则首个可见帧会被吞掉。"""
         _ensure_qapp()
         w = _make_underlay()
         w.set_pill_geometry(10, 20, 300, 0, 16)
         calls = []
         w.update = lambda *a, **k: calls.append(1)
 
-        w.set_pill_geometry(10, 20, 300, 2, 16)  # |2-0|=2 在容忍带内
+        w.set_pill_geometry(10, 20, 300, 2, 16)  # 高度从 0 变到 2
 
         assert calls, "从 0 高起步必须重绘，否则光晕首帧不出现"
         assert w._pill_h == 2
 
-    def test_tolerance_accumulates_across_calls(self):
-        """连续微抖动逐次记账后，累计超过容忍带即重绘（不会无限吞）。"""
-        _ensure_qapp()
-        w = _make_underlay()
-        w.set_pill_geometry(10, 20, 300, 48, 16)
-        calls = []
-        w.update = lambda *a, **k: calls.append(1)
+    def test_height_changes_always_repaint(self):
+        """48→50→52→55 逐轮驱动：每一轮都要真的重绘一次（共 4 次）。"""
+        app = _ensure_qapp()
+        w = _make_counting_underlay(app)
 
-        w.set_pill_geometry(10, 20, 300, 50, 16)  # +2 → 记账
-        assert not calls
-        w.set_pill_geometry(10, 20, 300, 52, 16)  # 相对 50 又是 +2 → 记账
-        assert not calls
-        w.set_pill_geometry(10, 20, 300, 55, 16)  # 相对 52 是 +3 → 重绘
-        assert calls, "累计超过容忍带必须重绘"
-        assert w._pill_h == 55
+        for h in (48, 50, 52, 55):
+            w.set_pill_geometry(10, 20, 300, h, 16)
+            w.setGeometry(0, 0, 460, h + 160)
+            app.processEvents()
+            assert w._pill_h == h, f"_pill_h 必须如实等于目标高度 {h}"
+
+        assert w.paint_calls == 4, f"4 轮高度变化应绘制 4 次，实际 {w.paint_calls}"
+
+    def test_twenty_consecutive_plus_two_repaints(self):
+        """连续 20 轮 +2px：每轮都重绘，棘轮不应再把基准提前挪走。"""
+        app = _ensure_qapp()
+        w = _make_counting_underlay(app)
+
+        for i in range(20):
+            h = 48 + 2 * (i + 1)
+            w.set_pill_geometry(10, 20, 300, h, 16)
+            w.setGeometry(0, 0, 460, h + 160)
+            app.processEvents()
+
+        assert w.paint_calls == 20, f"20 轮 +2px 应绘制 20 次，实际 {w.paint_calls}"
+
+    def test_twenty_consecutive_one_px_jitter_repaints(self):
+        """连续 20 轮 1px 抖动：也是 20 次（证明不再假装拦住抖动）。"""
+        app = _ensure_qapp()
+        w = _make_counting_underlay(app)
+
+        for i in range(20):
+            h = 49 if i % 2 == 0 else 48
+            w.set_pill_geometry(10, 20, 300, h, 16)
+            w.setGeometry(0, 0, 460, h + 160)
+            app.processEvents()
+
+        assert w.paint_calls == 20, f"20 轮 1px 抖动应绘制 20 次，实际 {w.paint_calls}"

@@ -2608,8 +2608,26 @@ class CodeWebViewer(QWebEngineView):
         except RuntimeError:
             pass
 
+    def _mark_self_heal_success(self) -> None:
+        """自愈成功的确认点：骨架重新就绪 = 页面已恢复健康，清零两条计数。
+
+        renderer 崩溃（``_render_crash_count``）与 JS webgl 丢失
+        （``_webgl_ctx_lost_count``）最终都走同一条恢复链：
+        ``_try_restore_context`` → ``_load_skeleton`` → contentReady →
+        本方法，故两个计数一起清零。
+
+        为什么不在 ``_try_restore_context`` 里清零：那里只是**发出**恢复
+        （触发导航），骨架加载失败时不会走到 contentReady，计数必须保留，
+        否则「连续失败达阈值才重建」的语义会被破坏。``reset_for_reuse``
+        的归零保持不变（池化复用边界）。
+        """
+        self._render_crash_count = 0
+        self._webgl_ctx_lost_count = 0
+
     def _on_js_ready(self):
         self._is_js_ready = True
+        # 崩溃/上下文丢失自愈成功的唯一确认点（contentReady 已到）。
+        self._mark_self_heal_success()
         # 🛡️ 导航已落地：白底的另一条入口是「setHtml 时合成的首帧先用了默认
         # 白底，后续透明属性没再回推」。就绪事件是本次导航的第一个稳定时点，
         # 在这里补一次重申，覆盖池化补载 / 看门狗重载骨架 / 崩溃自愈。
