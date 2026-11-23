@@ -47,6 +47,7 @@ from PyQt5.QtWidgets import QFrame, QHBoxLayout, QLabel, QMenu, QVBoxLayout, QWi
 from qfluentwidgets import TransparentToolButton
 
 from app.utils.design_tokens import Animations, BorderRadius, Colors, font_size_css, scale_font_size
+from app.utils.color_parse import parse_color
 from app.utils.utils import get_font_family_css, get_icon
 from app.widgets.elided_label import _ElidedLabel
 
@@ -378,7 +379,7 @@ class _ArtifactHeader(QFrame):
         if self._hover > 0.001:
             p = QPainter(self)
             p.setRenderHint(QPainter.Antialiasing)
-            base = QColor(Colors.HOVER_BG)
+            base = parse_color(Colors.HOVER_BG)
             alpha = int(round(base.alpha() * self._hover))
             p.setPen(Qt.NoPen)
             p.setBrush(QColor(base.red(), base.green(), base.blue(), alpha))
