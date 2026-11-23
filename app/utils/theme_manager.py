@@ -22,6 +22,8 @@ from typing import Dict, Optional
 
 import yaml
 
+from app.utils.safe_mode import is_safe_mode
+
 logger = logging.getLogger(__name__)
 
 # 内置主题目录（打包在 exe 中，只读）
@@ -134,7 +136,9 @@ class ThemeManager:
                     if theme_dir.exists():
                         self._load_from_dir(theme_dir, is_builtin=True)
 
-        # 用户插件目录: ~/.drifox/plugins/
+        # 用户插件目录: ~/.drifox/plugins/（安全模式只加载系统插件，跳过）
+        if is_safe_mode():
+            return
         try:
             from app.utils.utils import get_app_data_dir
 
@@ -853,7 +857,9 @@ class ThemeManager:
         """
         from app.utils.utils import get_app_data_dir
 
-        roots = (Path(__file__).parent.parent.parent / "plugins", get_app_data_dir() / "plugins")
+        roots = (Path(__file__).parent.parent.parent / "plugins",)
+        if not is_safe_mode():
+            roots += (get_app_data_dir() / "plugins",)
         sig_parts = []
         for root in roots:
             try:

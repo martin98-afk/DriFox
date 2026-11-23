@@ -17,6 +17,8 @@ from PyQt5.QtCore import QAbstractNativeEventFilter, QObject, QTimer, QUrl, pyqt
 from PyQt5.QtGui import QDesktopServices, QIcon
 from PyQt5.QtWidgets import QApplication, QSystemTrayIcon
 
+from app.utils.safe_mode import SAFE_MODE_FLAG, is_safe_mode
+
 
 class _HotkeyBridge(QObject):
     """从 keyboard 库线程桥接到 Qt 主线程的信号桥"""
@@ -251,6 +253,11 @@ class TrayManager(QObject):
         menu.addSeparator()
 
         menu.add_icon_action(FluentIcon.SYNC, "重启", self._restart_application)
+        # 安全模式入口：正常模式显示进入，安全模式进程内显示退出
+        if is_safe_mode():
+            menu.add_icon_action(FluentIcon.VPN, "退出安全模式重启", self._restart_normal_mode)
+        else:
+            menu.add_icon_action(FluentIcon.VPN, "安全模式重启", self._restart_in_safe_mode)
         menu.add_icon_action(FluentIcon.POWER_BUTTON, "退出", self._quit_application)
 
         return menu
@@ -1246,11 +1253,36 @@ class TrayManager(QObject):
             logger.debug(f"[TrayManager] 健康检查异常（非致命）: {exc}")
 
     def _restart_application(self) -> None:
-        """托盘菜单重启：拉起新进程替换当前实例（与设置页「立即重启」同源）"""
+        """托盘菜单重启：拉起新进程替换当前实例（与设置页「立即重启」同源）
+
+        安全模式只由「安全模式重启」入口进入，普通重启一律回正常模式，
+        避免「任何打开方式都是正常打开」被重启绕过。
+        """
         from app.utils.app_restart import restart_application
 
-        if not restart_application():
-            self._tray_icon.showMessage("Drifox", "重启失败：无法拉起新进程", QSystemTrayIcon.MessageIcon(3), 4000)
+        drop = [SAFE_MODE_FLAG] if is_safe_mode() else []
+        if not restart_application(drop_args=drop):
+            self._notify_restart_failed()
+
+    def _restart_in_safe_mode(self) -> None:
+        """安全模式重启：新进程带 --safe-mode，只加载系统插件"""
+        from app.utils.app_restart import restart_application
+
+        if not restart_application(extra_args=[SAFE_MODE_FLAG]):
+            self._notify_restart_failed()
+
+    def _restart_normal_mode(self) -> None:
+        """退出安全模式重启：从新进程命令行剥离 --safe-mode"""
+        from app.utils.app_restart import restart_application
+
+        if not restart_application(drop_args=[SAFE_MODE_FLAG]):
+            self._notify_restart_failed()
+
+    def _notify_restart_failed(self) -> None:
+        """重启拉起的失败提示（与原有 Toast 文案保持一致）"""
+        self._tray_icon.showMessage(
+            "Drifox", "重启失败：无法拉起新进程", QSystemTrayIcon.MessageIcon(3), 4000
+        )
 
     def _quit_application(self) -> None:
         """退出应用：强制关闭所有窗口后退出"""

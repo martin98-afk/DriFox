@@ -564,7 +564,10 @@ class ChatBackend(QObject):
         from app.plugins.managers.plugin_manager import PluginManager
 
         pm = PluginManager.get_instance()
-        if pm.is_initialized():
+        # 全局 hooks 存在 user-custom 插件目录，安全模式只加载系统插件
+        from app.utils.safe_mode import is_safe_mode
+
+        if pm.is_initialized() and not is_safe_mode():
             global_hooks_file = pm.get_global_hooks_file()
             if global_hooks_file.exists() and "user-custom" not in self._hook_manager._skill_to_hooks:
                 try:

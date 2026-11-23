@@ -18,6 +18,11 @@ QTWEBENGINE_CHROMIUM_FLAGS（见 app/utils/render_env.py），运行中改配置
    原样重放会让新进程直接退出，表现为「重启后程序没了」。
 3. **单实例锁**：main.py 中的 SingleInstanceGuard 段目前被注释停用，无需处理
    锁交接；若日后恢复，需先释放锁再拉起新进程（否则新进程会通知旧窗口后退出）。
+
+安全模式
+--------
+托盘菜单通过 ``extra_args`` 注入 ``--safe-mode``（进入）或 ``drop_args`` 剥离
+（退出），只作用于本次拉起的子进程，不写任何持久化配置。
 """
 
 from __future__ import annotations
@@ -25,6 +30,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+from typing import Sequence
 
 from loguru import logger
 
@@ -61,14 +67,25 @@ def entry_script() -> str:
     return os.path.abspath(argv0)
 
 
-def build_restart_command() -> tuple[list[str], str, dict[str, str]]:
+def build_restart_command(
+    extra_args: Sequence[str] = (),
+    drop_args: Sequence[str] = (),
+) -> tuple[list[str], str, dict[str, str]]:
     """构造重启命令：``(argv, cwd, env)``，纯函数便于单测。
 
     - frozen（PyInstaller）：``[<exe>, *过滤后的原参数]``
     - 源码运行：``[<python>, <入口脚本>, *过滤后的原参数]``
     - env：当前环境去掉 RENDER_ENV_KEYS，保证新进程重新按 app.config 换算
+    - extra_args：追加到原参数之后（去重），如安全模式 ``--safe-mode``
+    - drop_args：从原参数中移除，如「退出安全模式重启」剥离 ``--safe-mode``
     """
     args = [a for a in sys.argv[1:] if not a.startswith(_ONE_SHOT_ARG_PREFIXES)]
+    if drop_args:
+        drop = set(drop_args)
+        args = [a for a in args if a not in drop]
+    if extra_args:
+        existing = set(args)
+        args.extend(a for a in extra_args if a not in existing)
     if getattr(sys, "frozen", False):
         argv = [sys.executable, *args]
     else:
@@ -77,13 +94,20 @@ def build_restart_command() -> tuple[list[str], str, dict[str, str]]:
     return argv, os.getcwd(), env
 
 
-def restart_application() -> bool:
+def restart_application(
+    extra_args: Sequence[str] = (),
+    drop_args: Sequence[str] = (),
+) -> bool:
     """拉起新进程并退出当前实例。
+
+    Args:
+        extra_args: 追加给新进程的命令行参数（去重），如 ``--safe-mode``
+        drop_args: 从新进程命令行中移除的参数，如退出安全模式时剥离该开关
 
     Returns:
         True：新进程已成功拉起（当前实例随后退出）；False：拉起失败，调用方应恢复 UI。
     """
-    argv, cwd, env = build_restart_command()
+    argv, cwd, env = build_restart_command(extra_args=extra_args, drop_args=drop_args)
     # 必须先放锁：开启「单实例限制」时，新进程 try_lock 若撞上旧进程的
     # QSharedMemory，会走「通知已有实例 + 退出」分支 → 表现为「点了重启程序没了」
     _release_single_instance_lock()

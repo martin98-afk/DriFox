@@ -7014,8 +7014,11 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
         elif obj is self._chat_wrapper and event.type() == QEvent.Wheel:
             # 限宽居中的左右留白区域没有子控件接收滚轮事件，
             # 转发给当前内容区（对话列表/覆盖层）的滚动区域。
+            # ⚠️ 只转发真正落在留白上的滚轮：子控件（输入框 / 卡片内滚动体 /
+            # WebView）滚到顶底未消费的 Wheel 会沿父链冒泡到 wrapper，无差别
+            # 转发会让输入框滚到顶/底后带动消息列表滚动（2026-11-23 用户实测）。
             try:
-                if self._forward_wheel_to_scroll_area(event):
+                if self._chat_wrapper.childAt(event.pos()) is None and self._forward_wheel_to_scroll_area(event):
                     event.accept()
                     return True
             except Exception:
