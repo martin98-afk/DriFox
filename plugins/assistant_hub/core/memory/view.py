@@ -13,6 +13,20 @@ LEGACY_TITLE = "历史遗留（未归类）"
 
 _NORM = re.compile(r"\s+")
 
+# 条目正文开头的 id 标签（可能是多个，历史合并残留）：读取视图带 id，模型整篇
+# 重写时会把它们原样抄回正文，必须在写入口剥掉，否则每轮重写都在正文里堆 id。
+_LEAD_IDS = re.compile(r"^(\[\s*m[0-9a-z]{6}\s*\]\s*)+")
+
+def strip_entry_ids(text: str) -> str:
+    """剥掉正文开头的 [id] 标签（可连续多个），其余原样保留。"""
+    return _LEAD_IDS.sub("", str(text or "")).strip()
+
+# 注入成本口径：条目正文 + "- " + "[id] "（id 固定 7 位）。配额、预检、
+# 健康统计一律用这一套，别再混用文件字符数：文件里的 id、分区标题、空行
+# 都不是模型真正要读的内容，按文件算会让预算与注入量对不上。
+ENTRY_OVERHEAD = 11
+SECTION_OVERHEAD = 4  # "## " + 换行
+
 
 def _active_by_section(state: Dict[str, Any]) -> Dict[str, List[Dict[str, Any]]]:
     out: Dict[str, List[Dict[str, Any]]] = {}
@@ -58,8 +72,21 @@ def render_markdown(state: Dict[str, Any], sections: List[Dict[str, str]]) -> st
     return "\n".join(lines).rstrip() + "\n"
 
 
-def _cost(entry: Dict[str, Any]) -> int:
-    return len(str(entry.get("text") or "")) + len(str(entry.get("id") or "")) + 8
+def entry_cost(entry: Dict[str, Any]) -> int:
+    """单条注入成本：正文长度 + 行头与 id 开销。"""
+    return len(str(entry.get("text") or "")) + ENTRY_OVERHEAD
+
+def state_cost(state: Dict[str, Any]) -> int:
+    """全部 active 条目的注入总成本（与 pack_injection 的 used 同口径）。"""
+    return sum(entry_cost(e) for items in _active_by_section(state).values() for e in items)
+
+def section_costs(state: Dict[str, Any]) -> Dict[str, int]:
+    """按分区的注入成本（未分区的区名照实返回）。"""
+    return {name: sum(entry_cost(e) for e in items) for name, items in _active_by_section(state).items()}
+
+def parsed_cost(items: List[Dict[str, Any]]) -> int:
+    """待写入条目的注入成本（replace 预检用）。"""
+    return sum(len(str(i.get("text") or "")) + ENTRY_OVERHEAD for i in (items or []))
 
 
 def pack_injection(
@@ -68,37 +95,74 @@ def pack_injection(
     quotas: Dict[str, int],
     budget: int,
 ) -> Dict[str, Any]:
-    """按分区配额装整条；装不下就整条不进，绝不裁剪半条。"""
+    """按分区配额装整条，带分区标题；装不下就整条不进，绝不裁剪半条。
+
+    分区标题必须进注入：system prompt 要求按理性/感性归属写回，注入里看不到
+    归属时模型只能靠猜，写回时常把条目塞进错误分区。
+    """
     by_section = _active_by_section(state)
     order = [str(s.get("name") or "") for s in (sections or [])]
-    selected: List[Dict[str, Any]] = []
+    order += [name for name in by_section if name not in order]
+    tone_by_name = {
+        str(s.get("name") or ""): ("emotional" if str(s.get("tone") or "") == "emotional" else "rational")
+        for s in (sections or [])
+    }
+    quota_by_name = {str(s.get("name") or ""): int(quotas.get(str(s.get("name") or ""), budget)) for s in (sections or [])}
+    grouped: List[List[Any]] = []
     omitted: List[Dict[str, Any]] = []
     used = 0
     for name in order:
         items = by_section.get(name) or []
-        quota = int(quotas.get(name, budget))
+        quota = quota_by_name.get(name, budget)
+        picked: List[Dict[str, Any]] = []
         local = 0
         for e in items:
-            cost = _cost(e)
-            if used + cost <= budget and local + cost <= quota:
-                selected.append(e)
-                used += cost
-                local += cost
+            cost = entry_cost(e)
+            extra = (len(name) + SECTION_OVERHEAD) if not picked else 0
+            if used + cost + extra <= budget and local + cost + extra <= quota:
+                picked.append(e)
+                used += cost + extra
+                local += cost + extra
             else:
-                omitted.append({"id": e["id"], "preview": str(e.get("text") or "")[:20]})
-    for name, items in by_section.items():
-        if name in order:
-            continue
-        for e in items:
-            cost = _cost(e)
-            if used + cost <= budget:
-                selected.append(e)
-                used += cost
-            else:
-                omitted.append({"id": e["id"], "preview": str(e.get("text") or "")[:20]})
+                omitted.append(
+                    {"id": e["id"], "preview": str(e.get("text") or "")[:20], "entry": e, "section": name}
+                )
+        if picked:
+            grouped.append([name, picked])
+    # 同侧额度借用：配额是上限不是任务，同侧（理性/感性）某区装不满时，
+    # 把闲置额度让给被挤出的同侧条目。跨侧不借：tone 比例是用户的明确选择。
+    side_total: Dict[str, int] = {}
+    for name, q in quota_by_name.items():
+        tone = tone_by_name.get(name, "rational")
+        side_total[tone] = side_total.get(tone, 0) + q
+    side_used: Dict[str, int] = {}
+    for name, picked in grouped:
+        tone = tone_by_name.get(name, "rational")
+        side_used[tone] = side_used.get(tone, 0) + len(name) + SECTION_OVERHEAD
+        side_used[tone] += sum(entry_cost(e) for e in picked)
+    remaining: List[Dict[str, Any]] = []
+    for item in omitted:
+        e, name = item["entry"], item["section"]
+        tone = tone_by_name.get(name, "rational")
+        cost = entry_cost(e)
+        if used + cost <= budget and side_used.get(tone, 0) + cost <= side_total.get(tone, 0):
+            target = next((g for g in grouped if g[0] == name), None)
+            if target is None:
+                used += len(name) + SECTION_OVERHEAD
+                side_used[tone] = side_used.get(tone, 0) + len(name) + SECTION_OVERHEAD
+                target = [name, []]
+                grouped.append(target)
+            target[1].append(e)
+            used += cost
+            side_used[tone] = side_used.get(tone, 0) + cost
+        else:
+            remaining.append(item)
+    omitted = remaining
     lines: List[str] = []
-    for e in selected:
-        lines.append(f"- [{e['id']}] {e['text']}")
+    for name, picked in grouped:
+        lines.append(f"## {name}")
+        for e in picked:
+            lines.append(f"- [{e['id']}] {e['text']}")
     text = "\n".join(lines)
     if omitted:
         refs = "；".join(f"{o['id']} ｜ {o['preview']}" for o in omitted[:10])
@@ -151,7 +215,7 @@ def _parse_plain(text: str, sections: List[Dict[str, str]]) -> List[Dict[str, An
             current = title if title in names else (names[0] if names else "")
             continue
         if line.startswith("-") and current:
-            body = line.lstrip("-").strip()
+            body = strip_entry_ids(line.lstrip("-").strip())
             if body:
                 out.append({"section": current, "text": body})
     return out

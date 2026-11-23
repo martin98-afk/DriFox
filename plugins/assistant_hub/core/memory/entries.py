@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import os
 import random
+import re
 import threading
 from datetime import datetime
 from pathlib import Path
@@ -23,6 +24,13 @@ MIGRATED_FLAG = ".migrated_v2"
 
 CONFLICT_WINDOW_HOURS = 24
 _ALPHABET = "0123456789abcdefghjkmnpqrstvwxyz"
+
+# 正文开头的 id 标签（历史写入被污染后的残留，可能是多个）。与 view.py 的
+# _LEAD_IDS 保持同一语义：两个模块各自独立加载，不能互相 import。
+_LEAD_IDS = re.compile(r"^(\[\s*m[0-9a-z]{6}\s*\]\s*)+")
+
+def strip_id_prefix(text: Any) -> str:
+    return _LEAD_IDS.sub("", str(text or "")).strip()
 
 _locks: Dict[str, threading.Lock] = {}
 _locks_guard = threading.Lock()
@@ -129,7 +137,7 @@ def new_entry(
     return {
         "id": new_id(),
         "section": str(section or "").strip(),
-        "text": str(text or "").strip(),
+        "text": strip_id_prefix(text),
         "origin": origin,
         "source": dict(source or {}),
         "created_at": stamp,
@@ -255,7 +263,10 @@ def _apply_put(state: Dict[str, Any], ev: Dict[str, Any]) -> None:
         item["versions"].append(prev)
         if not explicit and _conflict(prev, entry):
             item["conflict"] = True
-    item["active"] = dict(entry)
+    # 回放时再洗一次：历史事件里的脏正文不重写就无法回滚，但视图不能再脏下去。
+    entry = dict(entry)
+    entry["text"] = strip_id_prefix(entry.get("text"))
+    item["active"] = entry
     item["state"] = "active"
     sup = str(ev.get("supersedes") or "")
     if sup and sup != entry_id and sup in state["entries"]:

@@ -1610,12 +1610,14 @@ class SectionEditDialog(MaskDialogBase):
         v.addWidget(self._hint_edit)
 
         # 基调：决定该区吃哪个配额池（理性池/感性池由记忆区滑杆分配）
+        # 竖排而非横排：两条文案都带解释，横排在窄弹窗里必被裁掉尾巴；
+        # 内容完整优先于紧凑，高度多一行不影响使用。
         tone_lab = QLabel("基调", self.widget)
         tone_lab.setStyleSheet(f"color: {Colors.TEXT_PRIMARY}; {get_font_family_css()} {font_size_css(12)}")
         v.addWidget(tone_lab)
-        tone_row = QHBoxLayout()
+        tone_row = QVBoxLayout()
         tone_row.setContentsMargins(0, 0, 0, 0)
-        tone_row.setSpacing(18)
+        tone_row.setSpacing(6)
         radio_qss = (
             f"QRadioButton {{ color: {Colors.TEXT_PRIMARY}; {get_font_family_css()} {font_size_css(12)};"
             " spacing: 6px; background: transparent; }"
@@ -1626,8 +1628,8 @@ class SectionEditDialog(MaskDialogBase):
         for rb in (self._tone_rational, self._tone_emotional):
             rb.setStyleSheet(radio_qss)
             rb.setCursor(Qt.PointingHandCursor)
+            rb.setMinimumWidth(0)
             tone_row.addWidget(rb)
-        tone_row.addStretch()
         self._tone_rational.setChecked(str(tone) != "emotional")
         self._tone_emotional.setChecked(str(tone) == "emotional")
         v.addLayout(tone_row)

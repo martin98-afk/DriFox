@@ -1306,52 +1306,88 @@ class AssistantManager:
         return store.section_quotas(sections, self.memory_tone_ratio(aid), self.memory_max_chars(aid)["global"])
 
     def memory_section_usage(self, aid: str) -> List[Dict[str, Any]]:
-        """各区实际用量 vs 配额（只返回超配额的区，memory_read(scope=sections) 用）。"""
-        store = self._core_store()
+        """各区实际用量 vs 配额（只返回真正装不下的区，memory_read(scope=sections) 用）。
+
+        口径与注入装包一致（正文 + 行头 id），且按同侧（理性/感性）池判断：
+        某区超出自己的平分额度、但同侧池还有余量时，注入照样装得下，不该报超限
+        逼模型去删条目。只有侧池本身超了才报警，并点名具体超出的区。
+        """
         if not aid:
             return []
-        text = store.read_global_memory(self._assistant_dir(aid))
-        return store.section_usage(text, self.memory_section_quotas(aid))
-
-    def memory_section_chars(self, aid: str) -> Dict[str, int]:
-        """各区已用字符数（卡片角标用，含未超配额的区）。"""
-        store = self._core_store()
-        if not aid:
-            return {}
-        text = store.read_global_memory(self._assistant_dir(aid))
-        out: Dict[str, int] = {}
-        for b in store.parse_section_blocks(text).get("blocks") or []:
-            out[str(b.get("name") or "")] = len("\n".join(b.get("lines") or []))
+        costs = self._core_view().section_costs(self.memory_state(aid))
+        sections = self.memory_sections(aid)
+        quotas = self.memory_section_quotas(aid)
+        tone_by = {
+            str(s.get("name") or ""): ("emotional" if str(s.get("tone") or "") == "emotional" else "rational")
+            for s in sections
+        }
+        side_total: Dict[str, int] = {}
+        side_used: Dict[str, int] = {}
+        for name, chars in costs.items():
+            tone = tone_by.get(name, "rational")
+            side_total[tone] = side_total.get(tone, 0) + int(quotas.get(name, 0))
+            side_used[tone] = side_used.get(tone, 0) + int(chars)
+        out: List[Dict[str, Any]] = []
+        for name, chars in costs.items():
+            tone = tone_by.get(name, "rational")
+            quota = int(quotas.get(name) or 0)
+            if quota and chars > quota and side_used.get(tone, 0) > side_total.get(tone, 0):
+                out.append({"name": name, "chars": chars, "quota": quota, "over": chars - quota})
+        out.sort(key=lambda x: -int(x.get("over") or 0))
         return out
 
+    def memory_usage_chars(self, aid: str) -> Dict[str, int]:
+        """全局记忆已用字符（注入成本口径，与 pack_injection 的 used 同源）。"""
+        if not aid:
+            return {"global": 0}
+        return {"global": self._core_view().state_cost(self.memory_state(aid))}
+
+    def memory_section_chars(self, aid: str) -> Dict[str, int]:
+        """各区已用字符数（卡片角标用，含未超配额的区；注入成本口径）。"""
+        if not aid:
+            return {}
+        return self._core_view().section_costs(self.memory_state(aid))
+
+    def _section_active(self, aid: str, section: str) -> List[Dict[str, Any]]:
+        """某区的 active 条目（排序与注入一致：置顶优先，再按创建时间）。"""
+        target = str(section or "")
+        items = [
+            dict(v["active"], id=k)
+            for k, v in self.memory_state(aid)["entries"].items()
+            if v.get("state") == "active"
+            and v.get("active")
+            and str(v["active"].get("section") or "") == target
+        ]
+        items.sort(key=lambda e: (not bool(e.get("pinned")), str(e.get("created_at") or "")))
+        return items
+
     def memory_section_entries(self, aid: str, section: str) -> List[Dict[str, Any]]:
-        """某区逐条账目（index 从 1 起）：超限时告诉模型删哪条，避免整篇重写。"""
-        store = self._core_store()
+        """某区逐条账目（index 从 1 起，带 id）：超限时告诉模型删哪条，避免整篇重写。"""
         if not aid:
             return []
-        return store.section_entries(store.read_global_memory(self._assistant_dir(aid)), section)
+        out: List[Dict[str, Any]] = []
+        for i, e in enumerate(self._section_active(aid, section), 1):
+            text = str(e.get("text") or "")
+            out.append({"index": i, "id": e["id"], "chars": len(text), "preview": text[:24]})
+        return out
 
     def delete_memory_entry(self, aid: str, section: str, index: int) -> Dict[str, Any]:
-        """删全局记忆某区的一条（覆盖写前自动快照）。返回 {ok, removed, chars} 或 {ok:False, error, count}。"""
-        store = self._core_store()
-        aid_dir = self._assistant_dir(aid)
-        path = store.global_memory_path(aid_dir)
-        text = store.read_text(path)
-        r = store.delete_section_entry(text, section, index)
-        if not r.get("ok"):
-            return r
+        """按分区序号删除：映射到条目 id 后走事件存储（视图只是渲染结果，不能直改）。
+
+        直改 MEMORY.md 的下场：下一次渲染会用事件重放的结果把它覆盖回去，删除静默失效。
+        """
         try:
-            self.snapshot_memory(aid, "global")
-        except Exception as e:
-            logger.debug(f"[assistant_hub] 删除条目前快照失败: {e}")
-        store.write_global_memory(aid_dir, str(r.get("content") or ""))
-        # 不失效 system prompt：记忆内容已不在提示词里（走 SessionStart 快照），
-        # 删条不影响提示词；模型当轮从工具回显就知道删了什么。
-        return {
-            "ok": True,
-            "removed": str(r.get("removed") or ""),
-            "chars": len(str(r.get("content") or "").strip()),
-        }
+            idx = int(index)
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "bad_index", "count": 0}
+        items = self._section_active(aid, section)
+        if idx < 1 or idx > len(items):
+            return {"ok": False, "error": "bad_index", "count": len(items)}
+        target = items[idx - 1]
+        r = self.delete_memory_entry_by_id(aid, target["id"], "delete_by_index")
+        if not r.get("ok"):
+            return {"ok": False, "error": r.get("error") or "not_found", "count": len(items)}
+        return {"ok": True, "removed": str(target.get("text") or ""), "id": target["id"]}
 
     def memory_paths(self, aid: str, workdir: str = "") -> Dict[str, str]:
         """该助手的记忆路径集合（UI 展示用）。"""
@@ -1499,7 +1535,7 @@ class AssistantManager:
         if item is None or item.get("state") != "active" or not item.get("active"):
             return {"ok": False, "error": f"条目 {entry_id} 不存在或已删除"}
         old = item["active"]
-        text = str(content or "").strip()
+        text = mod.strip_id_prefix(content)
         if not text:
             return {"ok": False, "error": "content 不能为空"}
         entry = dict(
@@ -1582,6 +1618,18 @@ class AssistantManager:
                 return {"ok": False, "error": f"未知 op: {kind}", "applied": applied}
             applied += 1
         return {"ok": True, "applied": applied, "message": f"已应用 {applied} 项变更"}
+
+    def preview_replace_chars(self, aid: str, content: str) -> int:
+        """整篇替换后的注入成本预演（与 pack_injection 同口径）。
+
+        预检必须按「写入后真正会被注入的东西」算：只比 content 的字符数会放行
+        实际超限的写入（渲染后每条还要加 - [id] 行头）。
+        """
+        view_mod = self._core_view()
+        state = self.memory_state(aid)
+        plan = view_mod.diff_replace(state, content, self.memory_sections(aid))
+        items = [{"text": e.get("text")} for e in plan["kept"]] + list(plan["added"])
+        return int(view_mod.parsed_cost(items))
 
     def replace_global_memory(
         self, aid: str, content: str, confirm: bool = False, base: str = ""
@@ -1839,7 +1887,7 @@ class AssistantManager:
         store = self._core_store()
         a_dir = self._assistant_dir(aid)
         lims = self.memory_max_chars(aid)
-        g_text = store.read_global_memory(a_dir).strip()
+        g_chars = int(self.memory_usage_chars(aid)["global"])
         p_text = store.read_project_memory(workdir, aid).strip() if workdir else ""
         stale_days = 0
         last_distill = ""
@@ -1859,10 +1907,10 @@ class AssistantManager:
         return {
             "stale_days": stale_days,
             "over_limit": {
-                "global": len(g_text) > lims["global"],
+                "global": g_chars > lims["global"],
                 "project": bool(workdir) and len(p_text) > lims["project"],
             },
-            "usage": {"global": [len(g_text), lims["global"]], "project": [len(p_text), lims["project"]]},
+            "usage": {"global": [g_chars, lims["global"]], "project": [len(p_text), lims["project"]]},
             "last_distill": last_distill,
             "snapshot_counts": {
                 "global": len(store.list_snapshots(a_dir, "global")),

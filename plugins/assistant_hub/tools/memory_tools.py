@@ -94,10 +94,10 @@ def _get_manager():
 
 
 def _over_quota_hint(mgr, aid: str, scope: str, section: str, over: int, lim: int) -> str:
-    """超限拒绝时的可执行指弱：点名最长的几条 + 给出删条命令。
+    """超限拒绝时的可执行指引：点名最长的几条（带 id）+ 给出删条命令。
 
     模型对整篇字数不敏感，对「删第 3 条」这种具体动作才一次做对；
-    只给「超了 120 字」会引发反复重写整篇。
+    只给「超了 120 字」会引发反复重写整篇。按 id 删是唯一真相路径。
     """
     lines = [f"写入被拒绝：超出 {over} 字（上限 {lim}）。"]
     if scope == "global" and section:
@@ -109,11 +109,11 @@ def _over_quota_hint(mgr, aid: str, scope: str, section: str, over: int, lim: in
             longest = sorted(entries, key=lambda e: -int(e.get("chars") or 0))[:3]
             lines.append(f"「{section}」现有 {len(entries)} 条，最长的几条：")
             for e in longest:
-                lines.append(f"  #{e['index']}·{e['chars']}字：{e['preview']}")
+                lines.append(f"  {e['id']}·{e['chars']}字：{e['preview']}")
             lines.append(
                 "不必重写全文：先腾空间再一次写好就行。\n"
-                "  a) 删一条：memory_write(scope=global, mode=delete, section=<分区>, index=<序号>)\n"
-                "  b) 合并语义重复的两条（合并本身也能省字数），用整体替换写回该区"
+                "  a) 删一条：memory_write(scope=global, mode=delete, id=<条目 id>)\n"
+                "  b) 合并语义重复的两条：memory_write(scope=global, mode=merge, ids=[id1, id2], content=<合并后的正文>)"
             )
     if len(lines) == 1:
         lines.append("先 memory_read 读全文，合并去重、删过时条目后再写。")
@@ -220,7 +220,7 @@ def _read_impl(tool_ctx, **kw) -> ToolResult:
                 except Exception:
                     entries = []
                 if entries:
-                    chips = "；".join(f"#{e['index']}·{e['chars']}字" for e in entries[:12])
+                    chips = "；".join(f"{e['id']}·{e['chars']}字" for e in entries[:12])
                     if len(entries) > 12:
                         chips += f"；…共 {len(entries)} 条"
                     lines.append(f"  现有 {len(entries)} 条：{chips}")
@@ -238,15 +238,19 @@ def _read_impl(tool_ctx, **kw) -> ToolResult:
         if scope == "global":
             text = mgr.read_global_memory(aid).strip()
             lim = mgr.memory_max_chars(aid)["global"]
-            if len(text) > lim:
+            used = int(mgr.memory_usage_chars(aid)["global"])
+            # 截断只为防上下文爆炸（超两倍上限才切），超限判定走成本口径：
+            # 按文件字符切会把条目尾巴切掉、id 也切掉，模型反而没法整理。
+            if len(text) > lim * 2:
                 text = (
-                    text[:lim]
-                    + f"\n...（截断：全文 {len(text)} 字符超上限 {lim}。处理原则：合并去重、删过时条目、压缩表述，"
+                    text[: lim * 2]
+                    + f"\n...（已截断：全文 {len(text)} 字符超上限 {lim} 两倍。先合并去重、删过时条目，"
                     "再用 memory_write(scope=global) 整体写回精简版。）"
                 )
             fp = mgr.memory_fingerprint(aid, "global")
-            used = len(text)
-            budget = f"（上限 {lim}，已用 {used}，剩 {max(0, lim - used)} 字）"
+            budget = f"（上限 {lim}，已用 {used}，剩 {max(0, lim - used)} 字；已用按注入成本计：正文 + 每行 id 开销）"
+            if used > lim:
+                budget += "\n**ACTION REQUIRED**：全局记忆已超上限，先合并去重或按 id 删过时条目再写。"
             return ToolResult(True, content=((text or "（全局记忆为空）") + f"\n{budget}\n(base: {fp})"))
         if scope == "project":
             if not wd:
@@ -484,12 +488,12 @@ def _write_impl(tool_ctx, **kw) -> ToolResult:
                         False,
                         error=(
                             f"删除失败：{r.get('error')}（「{del_section}」共 {r.get('count', 0)} 条，index 从 1 起）。"
-                            "先 memory_read(scope=global) 确认序号。"
+                            "先 memory_read(scope=global) 确认序号，或改用 id 删。"
                         ),
                     )
                 return ToolResult(
                     True,
-                    content=f"已删除「{del_section}」第 {del_index} 条：{r.get('removed')}（现 {r.get('chars')} 字）。",
+                    content=f"已删除「{del_section}」第 {del_index} 条（{r.get('id')}）：{r.get('removed')}。",
                 )
             # 全局记忆分区：schema 非空时强制归属（空 = 自由格式，全部跳过）
             sections = mgr.memory_sections(aid) if scope == "global" else []
@@ -531,12 +535,13 @@ def _write_impl(tool_ctx, **kw) -> ToolResult:
                         )
             if mode == "append":
                 # 末尾追加：不覆盖任何已有行；超限预检（追加后总量）
-                cur_text = str(
-                    (mgr.read_global_memory(aid) or "")
-                    if scope == "global"
-                    else (mgr.read_project_memory(aid, wd) or "")
-                ).strip()
-                new_total = len(cur_text) + len(content) + (1 if cur_text else 0)
+                if scope == "global":
+                    # 与注入同口径：已有部分的正文 + 行头，新条目再加一条行头
+                    cur_chars = int(mgr.memory_usage_chars(aid)["global"])
+                    new_total = cur_chars + len(content) + 11
+                else:
+                    cur_text = str(mgr.read_project_memory(aid, wd) or "").strip()
+                    new_total = len(cur_text) + len(content) + (1 if cur_text else 0)
                 if new_total > lim:
                     return ToolResult(
                         False,
@@ -559,7 +564,10 @@ def _write_impl(tool_ctx, **kw) -> ToolResult:
                     content=f"已追加到{label}记忆{where}（现 {r.get('chars')} 字）。已有内容不受影响。{note}",
                 )
             # ── 整体替换：超限预检 → 乐观锁 + 收缩确认 → 锁内快照落盘 ──
-            if len(content) > lim:
+            projected = len(content)
+            if scope == "global" and hasattr(mgr, "preview_replace_chars"):
+                projected = int(mgr.preview_replace_chars(aid, content))
+            if projected > lim:
                 # 按区统计超出量，把「删哪条」说具体（整篇重写对模型是不可控动作）
                 first_sec = ""
                 try:
@@ -575,7 +583,7 @@ def _write_impl(tool_ctx, **kw) -> ToolResult:
                 return ToolResult(
                     False,
                     error=_over_quota_hint(
-                        mgr, aid, scope, first_sec, len(content) - lim, lim
+                        mgr, aid, scope, first_sec, projected - lim, lim
                     ),
                 )
             base = str(kw.get("base") or "").strip()
@@ -808,14 +816,14 @@ _WRITE_SCHEMA = {
                     "type": "string",
                     "description": (
                         "scope=global/project：append(新增一条，高频用)/update(按 id 改)"
-                        "/delete(按 id 软删，历史保留)/merge(多个 id 合并为一条)"
+                        "/delete(按 id 软删，历史保留；也可 section+index 按序号删)/merge(多个 id 合并为一条)"
                         "/plan(批量补丁，整理用)/replace(整篇替换，兼容旧提示词)。"
                         "scope=daily 不需要 mode；mark_distilled=true 用于打标。"
                     ),
                 },
                 "index": {
                     "type": "integer",
-                    "description": "mode=delete 时必填：该分区内条目的序号(从 1 起，按 memory_read 的顺序)",
+                    "description": "mode=delete 且不带 id 时用：该分区内条目的序号(从 1 起)",
                 },
                 "section": {
                     "type": "string",
@@ -879,7 +887,8 @@ def _validate_v2_args(kw) -> str:
     if mode == "update" and not str(kw.get("id") or "").strip():
         return "update 需要 id"
     if mode == "delete" and not str(kw.get("id") or "").strip():
-        return "delete 需要 id"
+        if not (str(kw.get("section") or "").strip() and kw.get("index")):
+            return "delete 需要 id（或 section + index 双参数）"
     if mode == "merge" and len(kw.get("ids") or []) < 2:
         return "merge 需要至少两个 ids"
     if mode == "plan" and not isinstance(kw.get("plan"), list):
