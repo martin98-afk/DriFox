@@ -172,6 +172,33 @@ class TestBatchToggle:
         assert "cheap" not in editor.get_models()
         assert editor.get_disabled_models() == []
 
+    def test_context_menu_remove_actually_removes(self, editor, monkeypatch):
+        # 回归：QAction.triggered(bool) 直接连带一参的槽会传 False，
+        # _remove_names(False) 抛 TypeError 被 excepthook 吞掉，用户看到「点了没反应」
+        from PyQt5.QtWidgets import QMenu
+
+        editor.listWidget.clearSelection()
+        editor.listWidget.item(0).setSelected(True)
+        editor.listWidget.item(1).setSelected(True)
+
+        clicked = []
+
+        def fake_exec(self, *args, **kwargs):
+            for act in self.actions():
+                if act.text().startswith("移除所选"):
+                    clicked.append(act.text())
+                    act.trigger()
+                    break
+            return None
+
+        monkeypatch.setattr(QMenu, "exec_", fake_exec)
+        editor._on_context_menu(
+            editor.listWidget.visualItemRect(editor.listWidget.item(0)).center()
+        )
+
+        assert clicked, "右键菜单里应有「移除所选」"
+        assert editor.get_models() == ["pricey", "mid"]
+
 
 class TestDeleteSelected:
     def test_multi_select_delete(self, editor):

@@ -924,7 +924,10 @@ class ModelListEditorWidget(QWidget):
         act_disable.triggered.connect(lambda: self._batch_set_enabled(names, False))
         menu.addSeparator()
         act_remove = menu.addAction(f"移除所选{suffix}")
-        act_remove.triggered.connect(self._remove_names)
+        # triggered(bool checked=False) 直接连 _remove_names(names) 会把 False 当
+        # 名字列表传入 → TypeError: 'bool' object is not iterable，被主程序
+        # excepthook 记日志后吞掉，表现为「右键点移除没反应」。必须包一层固定实参
+        act_remove.triggered.connect(lambda: self._remove_names(names))
         for act in (act_enable, act_disable, act_remove):
             act.setEnabled(bool(names))
         menu.addSeparator()
