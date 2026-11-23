@@ -35,6 +35,7 @@ from app.constants import provider_quota_exclude_keys as QUOTA_EXCLUDE_KEYS
 from app.tools.result import as_image_list
 
 from app.plugins.contracts.stream_sink import StreamInterruptedError  # noqa: F401  契约层定义，此处兼容 re-export
+from app.utils.thread_guard import mark_thread_active
 
 # 插件编程错误类型集（G3）：transport/sink 抛出这些异常 = 插件代码 bug，
 # 快速失败不重试（使用点：_make_api_call 异常分类、_handle_error 文案分支）
@@ -2346,6 +2347,9 @@ class OpenAIChatWorker(QThread):
             self._continuation_count = 0
 
             while not self._is_cancelled:
+                # [ThreadGuard] 每轮开头打活动点：主循环推进 = 线程在干活（不是卡死），
+                # 不能拿 WorkerLifetime 的 `_run_started_at` 当活动判据（它只在起点写一次）。
+                mark_thread_active(self)
                 if self._is_cancelled:
                     return
                 # [T15/M6] 退出期 atexit 钩子会 requestInterruption() 收敛存活的
@@ -2640,7 +2644,11 @@ class OpenAIChatWorker(QThread):
                 tool_count = len(self._current_tool_calls) if self._current_tool_calls else 0
                 self._mem_snapshot("before_tool_exec", tool_count=tool_count, msg_count=len(current_messages))
 
+                # [ThreadGuard] 工具组执行可能持续几十秒：前后各打一次活动点，
+                # 覆盖「工具内部长跑」与「执行完回归主循环」两端
+                mark_thread_active(self)
                 tool_results = self._execute_all_tools()
+                mark_thread_active(self)
 
                 # ★ 消费 PreToolUse 队列（独立于 PostToolUse 队列）
                 # PreToolUse 由 tool_executor 同步触发后入 pre_tool 队列，
@@ -2651,9 +2659,16 @@ class OpenAIChatWorker(QThread):
                     # 提前捕获 _question_pending，避免 cancel+cleanup 竞态导致丢失引用
                     q = self._question_pending
                     self._answer_event.clear()
-                    while self._pending_answer is None and not self._is_cancelled:
-                        if self._answer_event.wait(timeout=1.0):
-                            break
+                    # [ThreadGuard] 等用户回答期间无活动是预期行为：置豁免，
+                    # 不在此打点（打了会把「人在思考」当活成），等完立即复位。
+                    _guard_exempt_prev = getattr(self, "_guard_exempt", False)
+                    self._guard_exempt = True
+                    try:
+                        while self._pending_answer is None and not self._is_cancelled:
+                            if self._answer_event.wait(timeout=1.0):
+                                break
+                    finally:
+                        self._guard_exempt = _guard_exempt_prev
 
                     if self._is_cancelled:
                         return
@@ -4143,6 +4158,9 @@ class OpenAIChatWorker(QThread):
                             return None, None
                         time.sleep(min(step, wait_time - elapsed))
                         elapsed += step
+                        # [ThreadGuard] 退避等待每 0.5s 推进一次算活动；
+                        # 不预支 wait_time（审阅已确认它只用于 UI 展示）。
+                        mark_thread_active(self)
                     continue
 
                 if hasattr(e, "response") and e.response is not None:
@@ -4762,12 +4780,19 @@ class OpenAIChatWorker(QThread):
             # emit 之后（此刻才进入等待），竞态由循环条件兜底：即使决策在 clear
             # 前已置位 pending=None，wait 超时后条件不成立即退出，不丢决策。
             self._permission_event.clear()
-            while (
-                self._permission_pending is not None and not self._is_cancelled and not self._tool_execution_cancelled
-            ):
-                if self._permission_event.wait(timeout=1.0):
-                    break
-                self._permission_event.clear()
+            # [ThreadGuard] 等用户审批期间无活动是预期行为：置豁免，不打活动点
+            #（打了会把「人还在看弹窗」当成干活），出等待立即复位。
+            _guard_exempt_prev = getattr(self, "_guard_exempt", False)
+            self._guard_exempt = True
+            try:
+                while (
+                    self._permission_pending is not None and not self._is_cancelled and not self._tool_execution_cancelled
+                ):
+                    if self._permission_event.wait(timeout=1.0):
+                        break
+                    self._permission_event.clear()
+            finally:
+                self._guard_exempt = _guard_exempt_prev
 
             if self._is_cancelled or self._tool_execution_cancelled:
                 self._emit_cancelled_tool_result(

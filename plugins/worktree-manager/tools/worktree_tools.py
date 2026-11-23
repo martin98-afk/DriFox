@@ -130,10 +130,19 @@ def _resolve_main_repo(tool_ctx: dict, path: str = "") -> Tuple[Optional[str], s
 
 
 def _invalidate_info_cache(repo_root: str) -> None:
-    """清掉指向该仓库的 get_repo_info/detect_git 缓存（value.root 匹配，跨 path key）"""
+    """清掉指向该仓库的 get_repo_info/detect_git 缓存（value.root 匹配，跨 path key）
+
+    [PERF] `_info_cache` 的键现在是 `(path, with_counts)` 元组（快速版与完整版
+    分开缓存，避免 counts 互相覆盖）；仍兼容历史纯 path 键。
+    """
     for key, entry in list(GitWorktreeDetector._info_cache.items()):
         info = entry[0] if entry else None
         if info is not None and getattr(info, "root", None) == repo_root:
+            GitWorktreeDetector._info_cache.pop(key, None)
+    # 键形式兜底：值不是 info（None 哨兵）时按 path 分量匹配
+    for key in list(GitWorktreeDetector._info_cache):
+        path_part = key[0] if isinstance(key, tuple) else key
+        if os.path.abspath(str(path_part)) == os.path.abspath(repo_root):
             GitWorktreeDetector._info_cache.pop(key, None)
     for key in list(GitWorktreeDetector._detect_cache):
         if os.path.abspath(key) == os.path.abspath(repo_root):

@@ -89,6 +89,9 @@ def install_guard() -> None:
             )
         # ★ 看门狗起点：记录创建时间戳，用于卡死检测
         self._guard_start_ts = _time.monotonic()
+        # 最后活动时间初值 = 创建时间；之后由 mark_thread_active() 刷新。
+        # 判据是「多久没活动」而非「总共跑了多久」：长任务只要持续打点就不报警。
+        self._guard_last_active_ts = self._guard_start_ts
         # ── 1. 重设 parent → 全局隐藏锚点 ──
         # 不管调用方传了什么 parent（哪怕是 widget），
         # 都改为 _thread_anchor，防止 widget 销毁时连带销毁运行中的 QThread
@@ -162,7 +165,10 @@ def install_guard() -> None:
 
 
 # ── 看门狗：定期扫描 _running_threads，检测卡死线程 ──
-_STUCK_TIMEOUT_S = 60  # 卡死阈值（秒）：线程创建后超过此时间未结束视为可疑
+# 无活动阈值（秒）：距最后一次活动超过此时间视为可疑卡死。
+# 语义是「无活动」不是「总运行时长」——长任务（长流式响应、长时间工具执行）
+# 只要在推进就持续打点，不会因为跑得久被误报。
+_STUCK_TIMEOUT_S = 60
 _WATCHDOG_INTERVAL_S = 30  # 扫描间隔（秒）
 _atexit_wait_ms = 500  # 退出期单个线程 wait 上限（毫秒）
 _atexit_budget_s = 1.0  # 退出期清理总时长预算（秒），超时仅告警不硬中断
@@ -170,6 +176,18 @@ _watchdog_lock = _threading.Lock()
 _watchdog_thread = None
 _watchdog_logger = _logging.getLogger("thread_guard.watchdog")
 _atexit_registered = False
+
+
+def mark_thread_active(thread=None) -> None:
+    """刷新线程的「最后活动时间」，供看门狗判定是否真的卡死。
+
+    默认打点当前 QThread；在非线程自身代码里打点时显式传对象。
+    成本纪律：一次 time.monotonic() + 一次属性写入，不做校验/日志/锁，
+    单次 <0.5μs；高频路径（每个流式 chunk）调用方自己再做 ≥1s 节流。
+    """
+    if thread is None:
+        thread = QThread.currentThread()
+    thread._guard_last_active_ts = _time.monotonic()
 
 
 def _cpp_alive(obj: QObject) -> bool:
@@ -190,6 +208,10 @@ def _scan_stuck_threads() -> None:
     """扫描一轮 _running_threads：报告疑似卡死线程，并剔除 C++ 侧已析构的条目。
 
     独立成函数是为了能被单测直接驱动（原逻辑内嵌 while True + sleep 30s，无法验证）。
+
+    判据：距 `_guard_last_active_ts`（最后活动时间）超过 `_STUCK_TIMEOUT_S`，
+    而非距 `_guard_start_ts`（创建时间）。`_guard_exempt=True` 的线程整条跳过
+    ——等待用户输入/审批期间没有活动是预期行为，不能算卡死。
     """
     now = _time.monotonic()
     with _watchdog_lock:
@@ -214,13 +236,18 @@ def _scan_stuck_threads() -> None:
             continue
         if not running:
             continue
+        # 豁免标记：等待用户输入/审批的线程没有「活动」是预期行为，跳过
+        if getattr(thread, "_guard_exempt", False):
+            continue
         start_ts = getattr(thread, "_guard_start_ts", None)
         if start_ts is None:
             continue
-        elapsed = now - start_ts
+        # 判据 = 距最后活动时间；无打点记录时退回创建时间（等价旧行为）
+        last_active = getattr(thread, "_guard_last_active_ts", start_ts)
+        elapsed = now - last_active
         if elapsed > _STUCK_TIMEOUT_S:
             _watchdog_logger.warning(
-                "[ThreadGuard] 检测到疑似卡死线程: %s (已运行 %.0fs, 阈值 %ds)",
+                "[ThreadGuard] 检测到疑似卡死线程: %s (已 %.0fs 无活动, 阈值 %ds)",
                 type(thread).__name__,
                 elapsed,
                 _STUCK_TIMEOUT_S,
@@ -230,7 +257,7 @@ def _scan_stuck_threads() -> None:
 def _watchdog_loop() -> None:
     """看门狗循环：每 _WATCHDOG_INTERVAL_S 秒扫描一次 _running_threads。
 
-    对每个仍在运行的 QThread，若自创建起超过 _STUCK_TIMEOUT_S 秒仍未结束，
+    对每个仍在运行的 QThread，若距最后一次活动超过 _STUCK_TIMEOUT_S 秒，
     输出 WARNING 日志（仅记录，不自动终止——避免误杀长任务）。
     """
     while True:

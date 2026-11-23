@@ -43,6 +43,130 @@ def _run_git(args: list, cwd: str) -> subprocess.CompletedProcess:
     )
 
 
+# ============================================================
+# 纯文件 git 探测（PERF）
+# ============================================================
+# 动机（review 实测）：本机每个 git 子进程固定开销 1.1~1.4s（Windows + Defender），
+# 冷启动 git 段 4.3~5.6s、FULL refresh 12.3~16.3s（8+N 个子进程）。而仓库结构
+# 其实是**纯文件事实**：`.git` 是目录 → 普通仓库；`.git` 是文件（`gitdir: ...`）
+# → linked worktree/submodule；`<gitdir>/commondir` 存在 → 有独立 common dir。
+# 纯文件读取实测 25~50ms（3 层向上查找 18.5ms 中位 + 读 1~2 个小文件）。
+#
+# 四种仓库形态（普通/worktree/submodule/bare）结论与 `git rev-parse` 全部一致。
+# 唯一盲区：`GIT_DIR` / `GIT_WORK_TREE` / `GIT_COMMON_DIR` 环境变量会改变 git 的
+# 判定但不改变文件布局 —— 检测到即回落子进程（触发概率≈0）。
+#
+# 开关：`DRIFOX_PURE_FILE_GIT=0` 关闭纯文件路径，行为回到改造前（全部走子进程）。
+
+
+def _pure_file_enabled() -> bool:
+    """纯文件探测是否启用（默认启用；`DRIFOX_PURE_FILE_GIT=0` 关闭）。"""
+    return os.environ.get("DRIFOX_PURE_FILE_GIT", "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+    )
+
+
+def _env_overrides_git_dir() -> bool:
+    """环境变量是否覆盖了 git 的目录判定（此时文件布局不再可信）。"""
+    return bool(
+        os.environ.get("GIT_DIR")
+        or os.environ.get("GIT_WORK_TREE")
+        or os.environ.get("GIT_COMMON_DIR")
+    )
+
+
+def _read_gitfile(gitfile_path: str) -> Optional[str]:
+    """读 `.git` 文件（worktree/submodule 形态），返回 gitdir 绝对路径。
+
+    文件内容形如 `gitdir: <相对或绝对路径>`。非该格式、空值、不可读均返回 None。
+    """
+    try:
+        with open(gitfile_path, "r", encoding="utf-8", errors="replace") as f:
+            s = f.read(4096).strip()
+    except OSError:
+        return None
+    if not s.startswith("gitdir:"):
+        return None
+    d = s[7:].strip()
+    if not d:
+        return None
+    return d if os.path.isabs(d) else os.path.abspath(os.path.join(os.path.dirname(gitfile_path), d))
+
+
+def _resolve_common_dir(gitdir: str) -> Optional[str]:
+    """解析 `<gitdir>/commondir`（linked worktree 才有），返回 common dir 绝对路径。
+
+    无 commondir 时 common == gitdir（普通仓库/worktree 自身即 common）。
+    """
+    cd = os.path.join(gitdir, "commondir")
+    if not os.path.isfile(cd):
+        return gitdir
+    try:
+        with open(cd, "r", encoding="utf-8", errors="replace") as f:
+            rel = f.read().strip()
+    except OSError:
+        return None
+    if not rel:
+        return gitdir
+    return os.path.abspath(os.path.join(gitdir, rel))
+
+
+def find_repo(path: str) -> Optional[tuple]:
+    """纯文件向上查找仓库，返回 `(toplevel, gitdir, common)` 或 None。
+
+    - `toplevel`：工作树根（含 `.git` 的那层目录）
+    - `gitdir`  ：`.git` 实际指向的目录（worktree 时是 `<common>/worktrees/<名>`）
+    - `common`  ：共享目录（普通仓库与 gitdir 相同；worktree 时是主仓库 `.git`）
+
+    环境变量覆盖 git 目录判定时返回 None（调用方回落子进程，保守正确）。
+    """
+    if _env_overrides_git_dir():
+        return None
+    p = os.path.abspath(path)
+    if not os.path.isdir(p):
+        return None
+    while True:
+        dot = os.path.join(p, ".git")
+        if os.path.isdir(dot):
+            return (p, dot, dot)
+        if os.path.isfile(dot):
+            gd = _read_gitfile(dot)
+            if not gd or not os.path.isdir(gd):
+                return None
+            common = _resolve_common_dir(gd)
+            if common is None:
+                return None
+            return (p, gd, common)
+        parent = os.path.dirname(p)
+        if parent == p:
+            return None
+        p = parent
+
+
+def _read_head_branch(gitdir: str) -> Optional[str]:
+    """读 `<gitdir>/HEAD` 得到分支名；detached 或不可读返回 None。
+
+    - 内容 `ref: refs/heads/<name>` → `<name>`
+    - 其它（裸 sha = detached，或格式异常）→ None（交由调用方决定回落值）
+    """
+    try:
+        with open(os.path.join(gitdir, "HEAD"), "r", encoding="utf-8", errors="replace") as f:
+            s = f.read(4096).strip()
+    except OSError:
+        return None
+    if not s.startswith("ref:"):
+        return None
+    ref = s[4:].strip()
+    if ref.startswith("refs/heads/"):
+        name = ref[len("refs/heads/") :].strip()
+        return name or None
+    return None
+
+
+
 @dataclass
 class WorktreeInfo:
     """Worktree 信息"""
@@ -164,8 +288,6 @@ class GitWorktreeDetector:
         """
         if not path or not os.path.isdir(path):
             return None
-        if not GitWorktreeDetector._is_git_available():
-            return None
         cached = GitWorktreeDetector._cache_get(
             GitWorktreeDetector._detect_cache, path, GitWorktreeDetector._DETECT_CACHE_TTL
         )
@@ -173,6 +295,17 @@ class GitWorktreeDetector:
             # 负结果用空串存（见下方写入侧）：None 无法区分「未缓存」与
             # 「已缓存且结果为 None」，直接 return None 会被调用侧当 miss。
             return cached or None
+
+        # [PERF] 纯文件路径优先：命中则不启动任何 git 子进程（省 ~1.1-1.4s）
+        if _pure_file_enabled():
+            found = find_repo(path)
+            if found is not None:
+                val = found[0]
+                GitWorktreeDetector._cache_set(GitWorktreeDetector._detect_cache, path, val)
+                return val
+
+        if not GitWorktreeDetector._is_git_available():
+            return None
         try:
             result = _run_git(["rev-parse", "--show-toplevel"], cwd=path)
             if result.returncode == 0:
@@ -238,6 +371,37 @@ class GitWorktreeDetector:
         )
         if cached is not None:
             return cached
+
+        # [PERF] 纯文件路径优先：gitdir != common 即为 worktree。
+        # 这一支替换掉原来「.git 为目录」时的 2 次 rev-parse 子进程
+        # （--git-common-dir + --git-dir，各 1.1~1.4s，合计省 2.3~2.8s）。
+        # 必须用 normcase + abspath 归一后比较：worktree 的 commondir 内容常是
+        # 相对路径（`../.git`），而 gitdir 是绝对路径，直接 `!=` 会把普通仓库
+        # 也判成 worktree。
+        if _pure_file_enabled():
+            found = find_repo(path)
+            if found is not None:
+                _toplevel, gitdir, common = found
+                gd_n = os.path.normcase(os.path.abspath(gitdir))
+                cm_n = os.path.normcase(os.path.abspath(common))
+                result = gd_n != cm_n
+                if not result:
+                    # 兼容分支：`.git` 是**文件**但 gitdir 内没有 commondir。
+                    # 真实 worktree 一定有 commondir；缺它的只有「伪造/半成品」
+                    # 布局（单测构造、手工造的工作树）。这类目录按 git 的
+                    # `<common>/worktrees/<名>` 布局特征判 worktree，
+                    # 与旧实现（.git 是文件 + gitdir 存在 → True）保持一致。
+                    # submodule 的 gitdir 是 `<repo>/.git/modules/<名>`，
+                    # 父目录名不是 worktrees，故不会误判。
+                    if os.path.basename(os.path.dirname(gd_n)) == "worktrees":
+                        result = os.path.isdir(gitdir)
+                GitWorktreeDetector._cache_set(
+                    GitWorktreeDetector._is_worktree_cache, path, result
+                )
+                return result
+
+        if not GitWorktreeDetector._is_git_available():
+            return False
         result = False
         git_path = os.path.join(path, ".git")
         if os.path.isfile(git_path):
@@ -267,6 +431,18 @@ class GitWorktreeDetector:
         cached = GitWorktreeDetector._cache_get(GitWorktreeDetector._branch_cache, path)
         if cached is not None:
             return cached
+
+        # [PERF] 纯文件路径优先：读 <gitdir>/HEAD（detached 时返回空串，与
+        # `git branch --show-current` 的输出语义一致）。
+        if _pure_file_enabled():
+            found = find_repo(path)
+            if found is not None:
+                branch = _read_head_branch(found[1]) or ""
+                GitWorktreeDetector._cache_set(GitWorktreeDetector._branch_cache, path, branch)
+                return branch
+
+        if not GitWorktreeDetector._is_git_available():
+            return ""
         result = ""
         try:
             r = _run_git(["branch", "--show-current"], cwd=path)
@@ -278,7 +454,7 @@ class GitWorktreeDetector:
         return result
 
     @staticmethod
-    def list_worktrees(git_root: str) -> List[WorktreeInfo]:
+    def list_worktrees(git_root: str, with_counts: bool = True) -> List[WorktreeInfo]:
         """
         列出 git 仓库的所有 worktree
 
@@ -286,6 +462,9 @@ class GitWorktreeDetector:
 
         Args:
             git_root: git 仓库根目录
+            with_counts: 是否计算 ahead/behind（需要提交图遍历，纯文件不可行）。
+                False 时走纯文件快速路径，零 git 子进程；True 时走 git
+                `worktree list` + N 个 `rev-list`。
 
         Returns:
             List[WorktreeInfo]: worktree 列表
@@ -295,10 +474,32 @@ class GitWorktreeDetector:
         get_repo_info 在 PreUserMessage 每条消息前触发（hook 上下文）。
         worktree 增删由 worktree-manager 的 _invalidate_info_cache 主动
         失效本缓存，30s 陈旧窗口仅覆盖外部 git 命令行操作。
+
+        [PERF] `with_counts=False` 的纯文件路径：
+        - 零子进程（原路径 worktree list + N×rev-list 在本机 FULL refresh 实测
+          占 12.3~16.3s 的大部分）
+        - counts 恒 0（调用方明确不需要时才用这个模式）
+        - `is_current` 语义不变（仍取第一条，见「明确不做」说明）
         """
         if not git_root or not os.path.exists(git_root):
             return []
-        cached = GitWorktreeDetector._cache_get(GitWorktreeDetector._worktrees_cache, git_root)
+
+        # ── 纯文件快速路径（不需要 counts 时）──
+        if not with_counts and _pure_file_enabled():
+            fast = GitWorktreeDetector._list_worktrees_pure_file(git_root)
+            if fast is not None:
+                # 独立缓存：不能与 with_counts=True 的结果共用 key，
+                # 否则快速版（counts=0）会覆盖完整版（有 counts），
+                # UI 面板会缺 ahead/behind。
+                GitWorktreeDetector._cache_set(
+                    GitWorktreeDetector._worktrees_cache, ("fast", git_root), fast
+                )
+                return fast
+
+        cache_key = ("full", git_root) if with_counts else git_root
+        cached = GitWorktreeDetector._cache_get(
+            GitWorktreeDetector._worktrees_cache, cache_key
+        )
         if cached is not None:
             return cached
 
@@ -376,7 +577,9 @@ class GitWorktreeDetector:
                             wt.behind_main = behind
                             wt.ahead_main = ahead
 
-            GitWorktreeDetector._cache_set(GitWorktreeDetector._worktrees_cache, git_root, worktrees)
+            GitWorktreeDetector._cache_set(
+                GitWorktreeDetector._worktrees_cache, cache_key, worktrees
+            )
             return worktrees
 
         except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
@@ -384,25 +587,37 @@ class GitWorktreeDetector:
             return []
 
     @staticmethod
-    def get_repo_info(path: str) -> Optional[GitRepoInfo]:
-        """获取路径的完整 git 仓库信息（带 2s 缓存）"""
+    def get_repo_info(path: str, with_counts: bool = True) -> Optional[GitRepoInfo]:
+        """获取路径的完整 git 仓库信息
+
+        Args:
+            with_counts: 是否算 ahead/behind。False 时 list_worktrees 走纯文件
+                快速路径（零子进程，counts 恒 0），缓存键也分开存，避免与
+                完整版互相覆盖。
+        """
         if not path:
             return None
-        if not GitWorktreeDetector._is_git_available():
-            return None
 
-        cached = GitWorktreeDetector._cache_get(GitWorktreeDetector._info_cache, path)
+        # [PERF] 纯文件路径不依赖 git 可执行文件，缓存命中/命中纯文件都可先走；
+        # git 可用性只在确实需要回落子进程时懒检测（省一次 `git --version`）。
+        cache_key = (path, bool(with_counts))
+        cached = GitWorktreeDetector._cache_get(GitWorktreeDetector._info_cache, cache_key)
         if cached is not None:
             return cached
 
+        # 标记是否已写入过 None 哨兵：_cache_get 对 None 值与「未缓存」不可区分，
+        # 故沿用原行为，直接重算（有 detect_cache 兵底，不会反复起子进程）。
         git_root = GitWorktreeDetector.detect_git(path)
         if not git_root:
-            GitWorktreeDetector._cache_set(GitWorktreeDetector._info_cache, path, None)
+            if GitWorktreeDetector._is_git_available():
+                GitWorktreeDetector._cache_set(
+                    GitWorktreeDetector._info_cache, cache_key, None
+                )
             return None
 
         is_wt = GitWorktreeDetector.is_worktree(path) or GitWorktreeDetector.is_worktree(git_root)
         branch = GitWorktreeDetector.get_current_branch(path)
-        worktrees = GitWorktreeDetector.list_worktrees(git_root)
+        worktrees = GitWorktreeDetector.list_worktrees(git_root, with_counts=with_counts)
 
         info = GitRepoInfo(
             root=git_root,
@@ -410,11 +625,13 @@ class GitWorktreeDetector:
             worktrees=worktrees,
             current_branch=branch,
         )
-        GitWorktreeDetector._cache_set(GitWorktreeDetector._info_cache, path, info)
+        GitWorktreeDetector._cache_set(GitWorktreeDetector._info_cache, cache_key, info)
         return info
 
     @staticmethod
-    def get_repo_info_stale_while_revalidate(path: str) -> Optional["GitRepoInfo"]:
+    def get_repo_info_stale_while_revalidate(
+        path: str, with_counts: bool = True
+    ) -> Optional["GitRepoInfo"]:
         """主线程安全版 get_repo_info：命中缓存（忽略 TTL）立即返回，过期后台刷新。
 
         背景：get_repo_info 缓存过期时会同步跑 5+N 个 git 子进程（detect_git /
@@ -432,36 +649,120 @@ class GitWorktreeDetector:
         """
         if not path:
             return None
-        entry = GitWorktreeDetector._info_cache.get(path)
+        cache_key = (path, bool(with_counts))
+        entry = GitWorktreeDetector._info_cache.get(cache_key)
         info = entry[0] if entry else None
         if info is None:
             # 无缓存（首次访问或历史缓存为 None 哨兵）：后台预热，本次拿不到就给 None
-            GitWorktreeDetector._spawn_info_refresh(path)
+            GitWorktreeDetector._spawn_info_refresh(cache_key)
             return None
         import time as _time
 
         if _time.monotonic() - entry[1] >= GitWorktreeDetector._CACHE_TTL:
-            GitWorktreeDetector._spawn_info_refresh(path)
+            GitWorktreeDetector._spawn_info_refresh(cache_key)
         return info
 
     @staticmethod
-    def _spawn_info_refresh(path: str):
-        """后台线程刷新 repo info（同 path 去重：已有刷新在跑则跳过）"""
+    def _spawn_info_refresh(cache_key) -> None:
+        """后台线程刷新 repo info（按 (path, with_counts) 去重：同键在跑则跳过）。
+
+        去重键必须是完整缓存键而非单一 path：快速版（with_counts=False）与
+        完整版（True）结果不同，共用去重键会让其中一种的刷新被误挡掉。
+        """
+        if isinstance(cache_key, tuple):
+            path, with_counts = cache_key
+        else:  # 兼容旧调用（只传 path）
+            path, with_counts = cache_key, True
         with GitWorktreeDetector._refresh_lock:
-            if path in GitWorktreeDetector._refreshing:
+            if cache_key in GitWorktreeDetector._refreshing:
                 return
-            GitWorktreeDetector._refreshing.add(path)
+            GitWorktreeDetector._refreshing.add(cache_key)
 
         def _run():
             try:
-                GitWorktreeDetector.get_repo_info(path)
+                GitWorktreeDetector.get_repo_info(path, with_counts=with_counts)
             except Exception:
                 pass
             finally:
                 with GitWorktreeDetector._refresh_lock:
-                    GitWorktreeDetector._refreshing.discard(path)
+                    GitWorktreeDetector._refreshing.discard(cache_key)
 
         threading.Thread(target=_run, daemon=True, name="git-info-refresh").start()
+
+    @staticmethod
+    def _list_worktrees_pure_file(git_root: str) -> Optional[List[WorktreeInfo]]:
+        """纯文件枚举 worktree（zero subprocess）。无法判定时返回 None 回落 git。
+
+        数据来源：
+        - 主工作树：`git_root` 自身（`.git` 存在即主仓库/普通仓库）
+        - 子工作树：`<common>/worktrees/<name>/gitdir` 文件指向该工作树根
+        - 分支：读各 gitdir 的 `HEAD`
+        - prunable：`<name>/gitdir` 指向的目录不存在（对应 `--porcelain` 的 prunable）
+
+        `is_main` / `is_current` 口径与 `_finish_worktree` 完全一致：
+        - `is_main` = `<path>/.git` 是**目录**（主仓库形态）
+        - `is_current` = 列表第一条（保持现状语义，见模块说明「明确不做」）
+        counts 恒 0（纯文件读不出提交图）。
+        """
+        found = find_repo(git_root)
+        if found is None:
+            return None
+        toplevel, _gitdir, common = found
+        if not os.path.isdir(common):
+            return None
+
+        out: List[WorktreeInfo] = []
+        # 1) 主工作树（列表第一条 → is_current=True，与 _finish_worktree 同口径）
+        main_branch = _read_head_branch(common) or "(detached)"
+        out.append(
+            WorktreeInfo(
+                path=toplevel,
+                branch=main_branch,
+                is_main=os.path.isdir(os.path.join(toplevel, ".git")),
+                is_current=True,
+                is_bare=False,
+            )
+        )
+
+        # 2) 子工作树：<common>/worktrees/*/gitdir
+        wt_base = os.path.join(common, "worktrees")
+        if not os.path.isdir(wt_base):
+            return out
+        try:
+            names = sorted(os.listdir(wt_base))
+        except OSError:
+            return None
+        for name in names:
+            entry_dir = os.path.join(wt_base, name)
+            if not os.path.isdir(entry_dir):
+                continue
+            gitdir_file = os.path.join(entry_dir, "gitdir")
+            wt_path = None
+            if os.path.isfile(gitdir_file):
+                try:
+                    with open(gitdir_file, "r", encoding="utf-8", errors="replace") as f:
+                        wt_path = f.read(4096).strip() or None
+                except OSError:
+                    wt_path = None
+            if not wt_path:
+                continue
+            # gitdir 文件指向 `<工作树根>/.git`，其父目录才是工作树根
+            if os.path.basename(wt_path) == ".git":
+                wt_root = os.path.dirname(wt_path)
+            else:
+                wt_root = wt_path
+            branch = _read_head_branch(entry_dir) or "(detached)"
+            prunable = not os.path.isdir(wt_root)
+            out.append(
+                WorktreeInfo(
+                    path=wt_root,
+                    branch=branch,
+                    is_main=False,
+                    is_current=False,
+                    is_bare=prunable,  # 复用 is_bare 表示可清理（同 _finish_worktree）
+                )
+            )
+        return out
 
     @staticmethod
     def get_main_repo_path(worktree_path: str) -> Optional[str]:

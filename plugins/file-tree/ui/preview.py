@@ -382,6 +382,8 @@ class _CodeView(QPlainTextEdit):
         self.setContextMenuPolicy(Qt.CustomContextMenu)
         self.customContextMenuRequested.connect(self._on_context_menu)
         self._font_px = 14
+        self._theme_sig = None  # apply_theme 参数快照，用于函数级早退
+        self._dark_applied = None  # 上次下发的明暗态（高亮配色只在它变化时重跑）
         self._highlight_on = True
         self._language = ""
         self._source_path = ""
@@ -406,20 +408,45 @@ class _CodeView(QPlainTextEdit):
         extra_qss: str = "",
         is_dark: bool = True,
     ) -> None:
-        self._gutter_text = gutter_text
-        self._gutter_bg = gutter_bg
-        self._font_px = max(11, int(font_pixel_size))
-        self.setFont(_mono_font(self._font_px))
-        self._update_gutter_width()
-        self._highlighter.set_theme(is_dark)
-        self.setStyleSheet(
-            f"QPlainTextEdit {{"
-            f"  background: transparent; border: none;"
-            f"  color: {text_color.name()};"
-            f"  selection-background-color: {selection.name(QColor.HexArgb)};"
-            f"}}"
-            f"{extra_qss}"
+        # 主题参数按值快照：同一预览反复 set_colors（每次打开文件都会走一遍）
+        # 时跳过 setFont/setStyleSheet/重上色。selection 必须用 HexArgb 取快照，
+        # HexRgb 会丢掉 alpha（70/120 两档选区被视作相同 → 串色）。
+        want_px = max(11, int(font_pixel_size))
+        style_sig = (
+            text_color.name(),
+            selection.name(QColor.HexArgb),
+            extra_qss,
+            int(gutter_text.rgba()),
+            int(gutter_bg.rgba()),
+            bool(is_dark),
         )
+        # 字号与样式分开判定：只改字号不该重设样式表，只改颜色不该重置用户缩放。
+        # want_px == _font_px 这道判定不能省：Ctrl+滚轮 set_font_pixel_size 会绕过
+        # 签名改字号，只比签名会把缩放后的字号「粘」在新打开的文件上不回默认值。
+        font_changed = want_px != self._font_px
+        style_changed = style_sig != self._theme_sig
+        if not font_changed and not style_changed:
+            return
+        if font_changed:
+            self._font_px = want_px
+            self.setFont(_mono_font(self._font_px))
+            self._update_gutter_width()
+        if style_changed:
+            self._theme_sig = style_sig
+            self._gutter_text = gutter_text
+            self._gutter_bg = gutter_bg
+            # 高亮配色只跟明暗走，换文字色不必重跑一遍词法着色
+            if self._dark_applied != bool(is_dark):
+                self._dark_applied = bool(is_dark)
+                self._highlighter.set_theme(is_dark)
+            self.setStyleSheet(
+                f"QPlainTextEdit {{"
+                f"  background: transparent; border: none;"
+                f"  color: {text_color.name()};"
+                f"  selection-background-color: {selection.name(QColor.HexArgb)};"
+                f"}}"
+                f"{extra_qss}"
+            )
         self._gutter.update()
 
     # ── 右键菜单 ──

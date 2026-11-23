@@ -1344,7 +1344,13 @@ class ChatBackend(QObject):
             from app.utils.git_worktree import GitWorktreeDetector
 
             if project_root:
-                repo_info = GitWorktreeDetector.get_repo_info_stale_while_revalidate(project_root)
+                # [PERF] with_counts=False：本段只用 root / current_branch /
+                # worktrees[].branch / is_current，**不用 ahead-behind**。
+                # 传 False 让 list_worktrees 走纯文件快速路径（零 git 子进程，
+                # 原本 FULL refresh 要 8+N 个子进程 / 12.3~16.3s）。
+                repo_info = GitWorktreeDetector.get_repo_info_stale_while_revalidate(
+                    project_root, with_counts=False
+                )
                 if repo_info and repo_info.worktrees:
                     ctx["worktree"] = {
                         "repo_name": os.path.basename(repo_info.root),

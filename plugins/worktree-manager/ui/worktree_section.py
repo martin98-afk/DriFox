@@ -279,6 +279,13 @@ def _invalidate_repo_cache(folder: str) -> None:
     GitWorktreeDetector._worktrees_cache.clear()
     GitWorktreeDetector._branch_cache.clear()
     GitWorktreeDetector._is_worktree_cache.clear()
+    # `_detect_cache` 以原始 path 为键（300s TTL，负结果存空串）：删除 worktree
+    # 后不清，`detect_git(已删路径)` 5 分钟内仍返回旧 git root → UI 把已删目录
+    # 当有效仓库。与 tools/worktree_tools.py:_invalidate_info_cache 保持同一
+    # 清缓存集合（按 abspath 匹配键，兼容不同写法的同一路径）。
+    for key in list(GitWorktreeDetector._detect_cache):
+        if os.path.abspath(key) == os.path.abspath(folder):
+            GitWorktreeDetector._detect_cache.pop(key, None)
 
 
 def _find_git_root_for(wt_path: str) -> str:
