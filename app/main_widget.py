@@ -26936,6 +26936,19 @@ class OpenAIChatToolWindow(ToolWindow):
     def closeEvent(self, event):
         self._release_drop_targets()
 
+        # 🛡️ 初始化未完成即关窗：会话保存与后台 finalize 依赖尚未就绪的
+        # backend / session 状态（6b1858eac 曾把 5 处读点整批删掉，替代的
+        # _safe_timer_call 只拦「已销毁/已删」，不拦「可见但仍在初始化」）。
+        # 保守修：只跳过「保存会话 + 后台 finalize」并停掉延迟队列，
+        # 其余清理（信号断开 / backend.cleanup / 缓存释放）照原流程走。
+        _init_in_progress = bool(getattr(self, "_initialization_in_progress", False))
+        if _init_in_progress:
+            logger.warning("[ChatWindow] 初始化未完成即关窗，跳过会话保存与后台 finalize")
+            try:
+                self._deferred_queue.stop()
+            except Exception:
+                pass
+
         # 🔧 F14b: 注销 ToolRegistry 变更监听（注册于 __init__）。监听者虽以
         # 弱引用持有，但 close→deleteLater 间隙 wrapper 尚存，sip 硬判前的
         # 回调窗口仍在；此处主动幂等注销（off_change 对不存在监听静默）。
@@ -27139,10 +27152,11 @@ class OpenAIChatToolWindow(ToolWindow):
             # - 后台 finalize：收集 interrupted_messages + 应用 + 持久化
             #   （_is_destroyed=True 时后台线程直接处理，主线程回调全 return
             #   无并发写；停止按钮路径走 emit 回主线程原语义）
-            try:
-                self._launch_background_finalize()
-            except Exception as e:
-                logger.warning(f"[ChatWindow] closeEvent 启动后台 finalize 失败: {e}")
+            if not _init_in_progress:
+                try:
+                    self._launch_background_finalize()
+                except Exception as e:
+                    logger.warning(f"[ChatWindow] closeEvent 启动后台 finalize 失败: {e}")
             # - backend.cleanup() 保留主线程（B6 已让超时转后台，不阻塞）
             try:
                 self.backend.cleanup()

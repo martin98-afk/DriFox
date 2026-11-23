@@ -173,3 +173,62 @@ class TestSafetyAndBudget:
         c = _light_msg_fingerprint({"content": b"y" * 100})
         assert a == b
         assert a != c
+
+
+class TestTruncatedFingerprintSensitivity:
+    """降级摘要（depth>6 / nodes>2000）对同长度不同内容的敏感性。
+
+    旧实现只取 `str(val)[:1024]`：`"a"*2000 + "x"` 与 `"a"*2000 + "y"`
+    的降级摘要相同 → save() 误判「未变」→ 跳过写盘（崩溃窗口丢数据）。
+    现实现改长度 + 头/中/尾各 1KB 采样，尾部差异可区分。
+    """
+
+    @staticmethod
+    def _deep(value, layers=8):
+        for _ in range(layers):
+            value = {"k": value}
+        return value
+
+    def test_same_length_tail_differs_is_distinguished(self):
+        """≤3KB 走整串哈希：尾部差异必然区分（分支覆盖：短值路径）。"""
+        from app.core.store.session_repository import _fp_hash_value
+
+        a = _fp_hash_value(self._deep("a" * 2000 + "x"), 0, [10 ** 9])
+        b = _fp_hash_value(self._deep("a" * 2000 + "y"), 0, [10 ** 9])
+        assert a != b, "同长度、前 1KB 相同的尾部差异必须被短值整串哈希区分"
+
+    def test_three_window_catches_head_and_tail_diff(self):
+        """A) >3KB 走头/中/尾三窗：头窗或尾窗内的差异必须区分。
+
+        5000 字节 > 3×1024，强制进入三窗采样分支（短值整串哈希覆盖不到）。
+        """
+        from app.core.store.session_repository import _fp_hash_value
+
+        head_a = _fp_hash_value(self._deep("x" + "a" * 4999), 0, [10 ** 9])
+        head_b = _fp_hash_value(self._deep("y" + "a" * 4999), 0, [10 ** 9])
+        assert head_a != head_b, "头窗内的差异必须被三窗采样区分"
+
+        tail_a = _fp_hash_value(self._deep("a" * 4999 + "x"), 0, [10 ** 9])
+        tail_b = _fp_hash_value(self._deep("a" * 4999 + "y"), 0, [10 ** 9])
+        assert tail_a != tail_b, "尾窗内的差异必须被三窗采样区分"
+
+    def test_known_gap_collision_between_windows(self):
+        """B) 已知边界：差异落在三窗之间的间隙 → 仍碰撞，断言「相同」。
+
+        三窗 = 头 [0,1024) / 中 [mid-512, mid+512) / 尾 [-1024,)。5000 字节时
+        中窗约 [1988,3012)，把 50 字节变化放在 1100~1150 就落在窗间间隙。
+        这是**已知且接受**的碰撞面（非 bug）：碰撞只会让一次 save 被跳过，
+        后续内容变化会整篇补写。改动采样策略（如加窗）必须同步更新本用例。
+        """
+        from app.core.store.session_repository import _fp_hash_value
+
+        gap_a = _fp_hash_value(self._deep("a" * 1100 + "x" * 50 + "a" * 3850), 0, [10 ** 9])
+        gap_b = _fp_hash_value(self._deep("a" * 1100 + "y" * 50 + "a" * 3850), 0, [10 ** 9])
+        assert gap_a == gap_b, "窗间间隙内的差异按设计仍碰撞（已知边界）"
+
+    def test_truncated_fingerprint_stable(self):
+        from app.core.store.session_repository import _fp_hash_value
+
+        val = self._deep("a" * 4999 + "x")
+        prints = {_fp_hash_value(val, 0, [10 ** 9]) for _ in range(5)}
+        assert len(prints) == 1, "同一结构重复计算必须稳定"

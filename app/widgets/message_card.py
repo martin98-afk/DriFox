@@ -585,7 +585,6 @@ class MessageCard(SimpleCardWidget):
         # [E6] 原文固化游标：_stream_text_parts 中已固化进 acc 的片段数（parts 不清空）
         self._stream_text_parts_solid: int = 0
         self._pending_content: Optional[str] = None
-        self._reasoning_total_len = 0  # reasoning 内容总长度计数器，避免每次遍历
         # 流式思考实时预览：增量文本缓冲 + 节流推送（250ms 批量，避免逐 chunk runJavaScript）
         self._streaming_live_buffer: str = ""
         self._streaming_live_timer = QTimer(self)
@@ -2955,33 +2954,36 @@ class MessageCard(SimpleCardWidget):
         if hasattr(self.viewer, "_markdown_text"):
             markdown_text = self.viewer._markdown_text
 
-        # 销毁旧viewer
+        # 重建瞬间的几何快照：卡片总高 + viewer 之外的固定开销。
+        # 新 viewer 初始约 40px，不 pin 的话卡片高度立刻塌陷（长回复数千 px），
+        # 滚动区 value 被钳制 → 视口跳动，直到 JS 上报真实高度（数百 ms）。
+        old_h = self.height()
+        content_overhead = max(0, old_h - self.viewer.height())
+
+        # 先断信号再销毁：旧 viewer 的延迟信号（contentHeightChanged /
+        # needRecreate 等）若仍连着卡片，重建后会打到新 viewer 或已删控件。
+        self._disconnect_viewer_signals()
+
+        # 故意不入池：旧 viewer 已 _context_lost 或崩溃 >2 次，_is_usable 必然
+        # 拒绝；复用会污染池的可复用口径，直接销毁。
+        self._viewer_layout.removeWidget(self.viewer)
         self.viewer.deleteLater()
 
-        # 重新创建viewer
+        # 重新创建viewer（先摘 layout 再 delete：deleteLater 不立即移除 item，
+        # 一帧内 layout 残留两个 item 会让高度短暂抖动 / 旧 view 闪一帧）
         for i in reversed(range(self._viewer_layout.count())):
             item = self._viewer_layout.itemAt(i)
             if item and item.widget():
-                item.widget().deleteLater()
+                w = item.widget()
+                self._viewer_layout.removeWidget(w)
+                w.deleteLater()
 
         # 灰度：Qt 渲染器无 context lost，不应进入此方法；防御性回退到 WebEngine
         self.viewer = CodeWebViewer(self)
         self.viewer._lazy_markdown_cb = self._build_incremental_md
-        self.viewer.codeActionRequested.connect(self.actionRequested)
-        self.viewer.contextActionRequested.connect(self.contextActionRequested)
-        self.viewer.contentHeightChanged.connect(self._update_height)
-        self.viewer.toolDiffRequested.connect(self.toolDiffRequested)
-        self.viewer.openFileRequested.connect(self.openFileRequested)
-        self.viewer.subAgentLogRequested.connect(self.subAgentLogRequested)
-        self.viewer.saveFileRequested.connect(self.saveFileRequested)
-        self.viewer.chartExpandRequested.connect(self._on_chart_expand)
-        self.viewer.saveChartPngRequested.connect(self._on_save_chart_png)
-        self.viewer.saveWidgetFileRequested.connect(self._on_save_widget_file)
-        self.viewer.previewImageRequested.connect(self._on_preview_image)
-        self.viewer.contextLost.connect(self._on_webengine_context_lost)
-        self.viewer.contextRestored.connect(self._on_webengine_context_restored)
-        self.viewer.needRecreate.connect(self._on_webengine_need_recreate)
-        self.viewer._install_dialog_filter()
+        # 统一走成对维护的 connect（与 _disconnect_viewer_signals 同一份清单，
+        # 避免两处信号列表漂移）
+        self._connect_viewer_signals()
         # 🐛 重建后的语义同步（与 ensure_rendered 同口径）：新建 viewer 默认
         # _streaming=True / _is_history=False，不补这两项会让历史卡重建成
         # 「流式形态」（字数统计、工具区坞态限高、思考不折叠），而渲染看门狗的
@@ -2996,6 +2998,9 @@ class MessageCard(SimpleCardWidget):
             setattr(self.viewer, "_restore_finished_ids", self._finished_streaming_ids)
 
         self._viewer_layout.addWidget(self.viewer)
+        # 钉住重建前高度；首个真实高度上报时由 _commit_viewer_height 里的
+        # _unpin_layout_height 解除（与 T42 占位重建同一机制）。
+        self.pin_layout_height(old_h, content_overhead)
 
         # 恢复内容
         if markdown_text:
@@ -6305,7 +6310,6 @@ class MessageCard(SimpleCardWidget):
             self._content_data.append(_target_block)
         # 登记为活动块：后续同段思考继续追加到此块（历史批量加载逐条独立成块）
         self._active_thinking_block = _target_block
-        self._reasoning_total_len += len(text)
 
         if defer_render:
             # [E6] 历史批量加载：数据层先固化 pending（finish_streaming(history=True)

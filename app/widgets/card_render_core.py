@@ -1906,6 +1906,29 @@ def _registered_fence_langs() -> Optional[frozenset]:
         return None
 
 
+# 渲染通道 reason 打点开关：默认 DEBUG（零噪音）；排查时设
+# DRIFOX_RENDER_REASON=1 → INFO 输出，无需改全局日志级别。
+_RENDER_REASON_LOG = os.environ.get("DRIFOX_RENDER_REASON", "").strip().lower() not in (
+    "",
+    "0",
+    "false",
+    "no",
+)
+
+
+def _log_render_reason(reason: str) -> None:
+    """打一行渲染通道判定原因（只在判定走 WebEngine 时调用）。
+
+    `DRIFOX_RENDER_REASON=1` → INFO，用于排查「为什么这张卡走了 WebEngine」；
+    默认 DEBUG，不污染常规日志。
+    """
+    line = f"[render-channel] reason={reason}"
+    if _RENDER_REASON_LOG:
+        logger.info(line)
+    else:
+        logger.debug(line)
+
+
 def _content_needs_webengine(content: Any) -> bool:
     """判定内容是否**必须**走 WebEngine（纯 Qt 渲染器渲染不了）。
 
@@ -1925,6 +1948,7 @@ def _content_needs_webengine(content: Any) -> bool:
         True = 必须走 WebEngine；False = 纯 Qt 渲染器可胜任。
     """
     if content is None:
+        _log_render_reason("invalid_type")
         return True
     if isinstance(content, list):
         # content blocks：只认得 text 块的降级判定——list 中出现任何「非 text」
@@ -1934,22 +1958,29 @@ def _content_needs_webengine(content: Any) -> bool:
         # 原样进 content_to_markdown 会落空；此处返 True 是冗余保护而非渲染必需。
         for block in content:
             if not (isinstance(block, dict) and block.get("type") == "text"):
+                _log_render_reason("nontext_block")
                 return True
         try:
             from app.core.conversation.message_content import content_to_text
 
             text = content_to_text(content) or ""
         except Exception:
+            _log_render_reason("text_extract_error")
             return True
         if not isinstance(text, str):
+            _log_render_reason("text_extract_error")
             return True
         if not text:
             # list 非空但仅取文本为空（tool_result 等块被丢弃）→ 仍有可渲染内容，
             # 保守走 WebEngine；空列表无内容可降级，与空 str 同语义走 Qt
-            return bool(content)
+            if content:
+                _log_render_reason("empty_text")
+                return True
+            return False
     elif isinstance(content, str):
         text = content
     else:
+        _log_render_reason("invalid_type")
         return True
 
     if not text:
@@ -1959,6 +1990,7 @@ def _content_needs_webengine(content: Any) -> bool:
     # 插件注册的 fence lang：拿不到表 → 保守
     plugin_langs = _registered_fence_langs()
     if plugin_langs is None:
+        _log_render_reason("plugin_fence_not_ready")
         return True
 
     # 渲染型 fence（内置 echarts/mermaid/html/widget/svg + 插件注册）
@@ -1967,20 +1999,25 @@ def _content_needs_webengine(content: Any) -> bool:
         if not lang:
             continue
         if lang in _CHART_FENCE_LANGS or lang in plugin_langs:
+            _log_render_reason(f"fence:{lang}")
             return True
         # 插件表可能滞后注册（热加载时序）：动态查询兜底
         try:
             if _is_render_fence_lang(lang):
+                _log_render_reason(f"fence:{lang}")
                 return True
         except Exception:
+            _log_render_reason(f"fence:{lang}")
             return True
 
     # LaTeX 公式
     if _LATEX_DOLLAR_RE.search(text) or _LATEX_BRACKET_RE.search(text):
+        _log_render_reason("latex")
         return True
 
     # markdown 正文图片
     if _MD_IMAGE_RE.search(text):
+        _log_render_reason("image")
         return True
 
     return False
@@ -2036,6 +2073,7 @@ def _should_use_qt_renderer(content: Any, streaming: bool = False) -> bool:
         return _qt_renderer_enabled()
     if streaming:
         # 内容不全，漏判风险不可接受 → 保守走 WebEngine
+        _log_render_reason("streaming")
         return False
     if _content_needs_webengine(content):
         return False
