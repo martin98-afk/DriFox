@@ -425,6 +425,9 @@ class _SectionChip(QFrame):
     ):
         super().__init__(parent)
         self._tone = tone if str(tone) in ("rational", "emotional") else "rational"
+        self.section_name = str(name or "")
+        self._chars = int(chars)
+        self._quota = int(quota or 0)
         self.setObjectName("sectionChip")
         self.setCursor(Qt.PointingHandCursor)
         self.setFixedSize(self.W, self.preferred_height())
@@ -488,19 +491,31 @@ class _SectionChip(QFrame):
         # 当作顶层窗口弹出来（每张卡一个，实测变成一排幽灵小窗），然后才被 addWidget 收养。
         self._usage = QLabel(self)
         self._usage.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-        if chars >= 0:
-            over = bool(quota) and chars > quota
-            text = f"{chars} / {quota} 字" if quota else f"{chars} 字"
-            self._usage.setText(text)
-            self._usage.setStyleSheet(
-                f"color: {Colors.ERROR if over else Colors.TEXT_MUTED};"
-                f"background: transparent; border: none;"
-                f"{get_font_family_css()} {font_size_css(9)}; {'font-weight:600;' if over else ''}"
-            )
         v.addWidget(self._usage)
-        self._usage.setVisible(chars >= 0)
+        self._render_usage()
         self.setToolTip(f"{intro or name}\n\n点击查看该分区的记忆内容")
         self._apply_style()
+
+    def _render_usage(self) -> None:
+        """底部角标：已用 / 配额，超配额转红。配额随感性滑杆变化时只改文案，不重建卡片。"""
+        chars, quota = self._chars, self._quota
+        if chars < 0:
+            self._usage.setVisible(False)
+            return
+        over = bool(quota) and chars > quota
+        text = f"{chars} / {quota} 字" if quota else f"{chars} 字"
+        self._usage.setText(text)
+        self._usage.setStyleSheet(
+            f"color: {Colors.ERROR if over else Colors.TEXT_MUTED};"
+            f"background: transparent; border: none;"
+            f"{get_font_family_css()} {font_size_css(9)}; {'font-weight:600;' if over else ''}"
+        )
+        self._usage.setVisible(True)
+
+    def set_quota(self, quota: int) -> None:
+        """更新配额并重渲染角标（滑轨拖动后同侧各区的额度都会变）。"""
+        self._quota = int(quota or 0)
+        self._render_usage()
 
     def _apply_style(self) -> None:
         edge = _tone_color(self._tone, 110)
@@ -1901,13 +1916,21 @@ class MemorySection(_Section):
             self._tone_loading = False
 
     def set_section_quotas(self, quotas: Dict[str, int]) -> None:
-        """分区标题行摘要：理性池/感性池的实际字符配额（随滑杆与区数变化）。"""
+        """分区标题行摘要 + 每张卡片的配额角标（随滑杆与区数变化）。
+
+        卡片角标必须一起刷：滑杆改的是同侧各区的额度，只更新标题行数字会让
+        「x / 1400 字」停在旧配额上，用户以为滑杆没生效。
+        """
         if not self._sections:
             return
         tones = {str(s.get("name") or ""): str(s.get("tone") or "rational") for s in self._sections}
         rat = sum(int(v) for k, v in (quotas or {}).items() if tones.get(k) == "rational")
         emo = sum(int(v) for k, v in (quotas or {}).items() if tones.get(k) == "emotional")
         self._sec_head.set_desc(f"{len(self._sections)} 个 · 理性 {rat} / 感性 {emo}")
+        for i in range(self._chips_row.count()):
+            w = self._chips_row.itemAt(i).widget()
+            if isinstance(w, _SectionChip):
+                w.set_quota(int((quotas or {}).get(w.section_name, 0)))
 
     def set_sections(
         self,
