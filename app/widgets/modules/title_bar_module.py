@@ -64,7 +64,7 @@ class TitleBarModule(UIModule):
         on_title_edit_finished = getattr(host, "_on_title_edit_finished", None)
         toggle_history_questions_popup = getattr(host, "_toggle_history_questions_popup", None)
         on_share_clicked = getattr(host, "_on_share_clicked", None)
-        # 差异按钮已迁移到工作台产物页；保留 host.diff_btn = None 的兼容，
+        # 差异按钮入口已移除；保留 host.diff_btn = None 的兼容，
         # 防止外部代码仍持有引用（见 main_widget._open_diff_viewer）。
         host.diff_btn = None
 
@@ -211,8 +211,8 @@ class TitleBarModule(UIModule):
             host._share_btn.clicked.connect(on_share_clicked)
         right_layout.addWidget(host._share_btn)
 
-        # 差异对比按钮已迁移到工作台产物页（见 WorkbenchPanel.diff_requested），
-        # 此处不再创建 diff_btn，避免按钮无处不在。
+        # 差异对比按钮不再常驻标题栏：逐工具/逐卡差异在对应卡片上触发，
+        # 全量产物差异入口随工作台产物页退场（2026-11-17）。
         right_layout.addSpacing(8)  # 右侧留白
 
         session_bar_layout.addLayout(right_layout)

@@ -288,9 +288,10 @@ def test_team_manage_action_create_when_already_in_team(team_env):
     assert tm.get_team_run_id() == old_run  # 未重复建 run
 
 
-# ── 用例 19：非团队成员向成员发送任务（外部发起，from_agent=user）──
+# ── 用例 19：非成员向成员发送任务（外部发起，自动改投 leader 转交）──
 
-def test_non_member_can_send_task_to_member(team_env):
+def test_non_member_send_task_routed_via_leader(team_env):
+    """🚪 外部消息统一经 leader：非成员发给成员的消息改投 leader 邮箱。"""
     tt, tm = team_env["tt"], team_env["tm"]
     _prepare_team(tm)
     r = tt._team_manage_impl(_member_ctx("win_90"), action="list")  # 预热能力
@@ -301,12 +302,26 @@ def test_non_member_can_send_task_to_member(team_env):
         message="外部任务",
     )
     assert res.success, res.error
-    mails = tm.get_mailbox_mails("win_91")
+    assert "改投" in res.content and "经 leader" in res.content
+    # 邮件不直投目标成员，而是落 leader 邮箱，正文标注原目标
+    assert tm.get_mailbox_mails("win_91") == []
+    mails = tm.get_mailbox_mails("win_90")
     assert len(mails) == 1
-    assert mails[0]["body"] == "外部任务"
     assert mails[0]["from_agent"] == "user"
     assert mails[0]["from_window"] == "win_95"
-    assert "外部发起" in res.content
+    assert mails[0]["to_agent"] == "leader"
+    assert "原目标: build@win_91" in mails[0]["body"]
+    assert "外部任务" in mails[0]["body"]
+    # 外部直发 leader 本身 → 不改投，直投 leader 邮箱
+    res2 = tt._team_send_impl(
+        {"team_window_id": "win_95", "team_agent_name": "build"},
+        to_agent="leader",
+        message="给 leader 的话",
+    )
+    assert res2.success, res2.error
+    mails2 = tm.get_mailbox_mails("win_90")
+    assert len(mails2) == 2
+    assert mails2[-1]["body"] == "给 leader 的话"
     # 成员只能发团队内部：成员回发到外部窗口会找不到目标
     back = tt._team_send_impl(
         {"team_window_id": "win_91", "team_agent_name": "build"},
@@ -380,3 +395,112 @@ def test_team_remove_triggers_immediate_ui_sync(team_env):
         assert not tm.is_team_member("win_91")
     finally:
         unregister_immediate_handler("team_leave", _handler)
+
+# ── 用例 21+：add/remove/leave 的 team_name 目标团队规则 ──
+# 规则（用户定案）：成员不写 team_name → 默认本团队；非成员不写 → 直接报错；
+# 非成员写 team_name → 操作指定团队。
+
+def _create_two_teams(tt, tm):
+    """建 g1/g2 两个团队并返回各自 run_id。
+
+    真实链路里 leader 开窗后 join（成员记录带 run_id/team_label），
+    测试同样登记 leader，让 get_team_run_ids / label 反查有数据可扫。
+    """
+    r1 = tt._team_manage_impl(_member_ctx(), action="create", team_name="g1", team_role="dev")
+    rid1 = tm.get_team_run_id()
+    tm.join_team("win_90", "leader", run_id=rid1, team_label="g1")
+    r2 = tt._team_manage_impl(_member_ctx("win_99"), action="create", team_name="g2", team_role="ops")
+    rid2 = tm.get_team_run_id()
+    tm.join_team("win_99", "leader", run_id=rid2, team_label="g2")
+    assert r1.success and r2.success and rid1 and rid2 and rid1 != rid2
+    return rid1, rid2
+
+def test_add_non_member_without_team_name_rejected(team_env):
+    """非成员 add 不写 team_name → 直接报错，不产生成员记录。"""
+    tt, tm = team_env["tt"], team_env["tm"]
+    _create_two_teams(tt, tm)
+    r = tt._team_manage_impl(
+        {"team_window_id": "", "team_agent_name": ""}, action="add", agent_name="build", role="干活"
+    )
+    assert not r.success
+    assert "team_name" in r.error
+    assert not [m for m in tm.get_members() if m.get("agent_name") == "build"]
+
+def test_add_non_member_with_team_name_targets_that_team(team_env, monkeypatch):
+    """非成员写 team_name → 开窗请求提交到指定团队的 run。"""
+    import app.plugins.sdk as sdk
+
+    tt, tm = team_env["tt"], team_env["tm"]
+    rid_g1, rid_g2 = _create_two_teams(tt, tm)
+    calls = []
+
+    def _fake_spawn(roles, rid, label, keep_current_active=True):
+        calls.append({"roles": roles, "run_id": rid, "team_label": label})
+        return {"submitted": True, "run_id": rid}
+
+    def fake_caps(cap_id, plugin="", surface=""):
+        if cap_id == "team.spawn":
+            return {"spawn_members": _fake_spawn}
+        if cap_id in {"team.read", "team.send", "team.manage"}:
+            from app.plugins.capabilities.facets import build_facet
+
+            return build_facet(cap_id)
+        return None
+
+    monkeypatch.setattr(sdk, "caps_for", fake_caps)
+    r = tt._team_manage_impl(
+        {"team_window_id": "", "team_agent_name": ""},
+        action="add", agent_name="build", role="干活", team_name="g1",
+    )
+    assert r.success, r.error
+    assert calls and calls[0]["run_id"] == rid_g1 and calls[0]["team_label"] == "g1"
+    assert "g1" in r.content
+
+def test_remove_non_member_without_team_name_rejected(team_env):
+    """非成员 remove 不写 team_name → 直接报错，不动任何成员。"""
+    tt, tm = team_env["tt"], team_env["tm"]
+    rid_g1, _ = _create_two_teams(tt, tm)
+    tm.join_team("win_a", "build", run_id=rid_g1, team_label="g1")
+    r = tt._team_manage_impl(
+        {"team_window_id": "", "team_agent_name": ""}, action="remove", agent_name="build"
+    )
+    assert not r.success
+    assert "team_name" in r.error
+    assert tm.is_team_member("win_a")
+
+def test_remove_with_team_name_scoped_to_target_team(team_env):
+    """写 team_name → 同名成员只在目标团队内被移除，别队不受牵连。"""
+    tt, tm = team_env["tt"], team_env["tm"]
+    rid_g1, rid_g2 = _create_two_teams(tt, tm)
+    tm.join_team("win_a", "build", run_id=rid_g1, team_label="g1")
+    tm.join_team("win_b", "build", run_id=rid_g2, team_label="g2")
+    r = tt._team_manage_impl(
+        {"team_window_id": "", "team_agent_name": ""},
+        action="remove", agent_name="build", team_name="g1",
+    )
+    assert r.success, r.error
+    assert not tm.is_team_member("win_a")
+    assert tm.is_team_member("win_b")
+
+def test_leave_non_member_rejected(team_env):
+    """非成员 leave：无窗口上下文与有窗口但不在成员表，均直接报错。"""
+    tt, tm = team_env["tt"], team_env["tm"]
+    _create_two_teams(tt, tm)
+    r1 = tt._team_manage_impl({"team_window_id": "", "team_agent_name": ""}, action="leave")
+    assert not r1.success
+    r2 = tt._team_manage_impl({"team_window_id": "win_77", "team_agent_name": "ghost"}, action="leave")
+    assert not r2.success
+    assert not tm.is_team_member("win_77")
+
+def test_leave_with_team_name_membership_guard(team_env):
+    """写 team_name：不属于该团队报错；属于则退出成功。"""
+    tt, tm = team_env["tt"], team_env["tm"]
+    rid_g1, _ = _create_two_teams(tt, tm)
+    tm.join_team("win_90", "build", run_id=rid_g1, team_label="g1")
+    r = tt._team_manage_impl(_member_ctx("win_90"), action="leave", team_name="g2")
+    assert not r.success
+    assert "g2" in r.error
+    assert tm.is_team_member("win_90")
+    r2 = tt._team_manage_impl(_member_ctx("win_90"), action="leave", team_name="g1")
+    assert r2.success, r2.error
+    assert not tm.is_team_member("win_90")

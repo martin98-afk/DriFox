@@ -514,4 +514,67 @@ git commit -m "feat(<plugin-name>): <功能描述>"
 - [ ] `on_click(ctx)` 能拿到 `ctx["card"]`（`get_plain_text()` 有内容）
 - [ ] `footer_stat` provider 纯内存快速返回；本条不适用时返回 `None`（信息项与 `·` 分隔点一起隐藏）
 - [ ] 深浅主题图标两套都给了（`icon_path` + `icon_light_path`）
+
+---
+
+## 16. 视觉自优化闭环（模拟数据 → 真实截图 → 量化归因）
+
+> 适用：调样式、改布局、重做卡片这类「代码全绿但观感可能很丑」的任务。
+> 本仓实战一次把窄屏整页滚动（1449→896）、Markdown 排版失控、按钮抖动全部当场抓出。
+
+### 16.1 循环（跑 2~3 轮再交付）
+
+```
+① 合成快照 → ② 独立预览进程 → ③ 连续截图 → ④ 读图 + 读数字 → ⑤ 改代码 → 回到 ②
+```
+
+1. **合成快照**：造一份与真实数据结构完全一致的假数据（含长标题、超长路径、空态），
+   绝不触发真实业务（值班、发评论、上传、扣费）。演示数据必须在交付时说明来源。
+2. **独立预览进程**：`preview.py` 里 `importlib` 载入插件模块 + 创建 QApplication，
+    **不启动主程序**，因此不会碰调度器、MCP、网络。
+3. **一个进程连拍全部用例**：`QTimer.singleShot(250, ...)` 里 `widget.grab().save()`，
+   存完再排下一个用例；不要每张图重启一次（启动耗时且状态不一致）。
+4. **用例矩阵**：深/浅 × 宽(≥1000)/窄(≈620)/极窄(≈460) × 有内容/空态，至少覆盖 5 张。
+5. **每张图旁边打印数字**（下方 16.2），图用来判断观感，数字用来定位根因。
+6. **改完重拍**，与上一轮同尺寸对比；只看新图看不出「变好了多少」。
+
+macOS 必须带平台前缀，且 `bash` 工具不支持 `VAR=val cmd` 写法，用 `env`：
+
+```bash
+env QT_QPA_PLATFORM=cocoa python3 .drifox/<task>/preview.py
+```
+
+### 16.2 每张截图必打印的四组数字
+
+```python
+print(name, "窗口", widget.width(), widget.height(),
+      "页面", page.width(), page.height(),                       # 是否虚高
+      "横向溢出", scroll.horizontalScrollBar().maximum(),          # 必须 0
+      "面板/建议", panel.height(), panel.sizeHint().height(),      # 谁在抬高度
+      flush=True)
+```
+
+- `page.height() > 窗口高` 且内容不满 → 有隐藏控件在抬 `sizeHint`（pitfalls §36）。
+- `横向溢出 ≠ 0` → 有控件设了固定 px 宽或 `sizeHint` 不收缩。
+- `panel.height() < sizeHint` 被压扁 → 下次 resize 可能裁切内容。
+
+### 16.3 截图之外的三条硬验证
+
+- [ ] 状态切换前后**几何相等**（按钮宽度、工具栏高度）：`show()` + `processEvents()` 之后比，
+      未 show 的控件没有真实几何，断言会假通过（pitfalls §38）
+- [ ] 真实 worker 回调走对渲染器：`QEventLoop` + 定时器轮询「线程已归零」，
+      断言状态复位、按钮恢复、数据确实渲染 —— 只 mock `_start_worker` 抓不到「结果交给错渲染器」
+- [ ] 主题上下文抛异常时卡片仍可打开（宿主切换窗口期间 provider 会炸）：
+
+```python
+card.set_context_provider(lambda: (_ for _ in ()).throw(RuntimeError("切换中")))
+card.refresh_style()          # 不应抛
+```
+
+### 16.4 交付纪律
+
+- 预览脚本与截图放任务目录（如 `.drifox/<task>/`），**不进插件安装物**；交付后清理临时脚本，只留截图证据。
+- 改的是源码仓库、跑的是开发宿主副本时：先 `cmp`/AST 比对确认副本无独立改动，再覆盖同步，最后 `cmp` 复核。
+  绝不对运行副本做「就地手改」。
+- 交付话术区分「截图验证了观感」与「真实业务跑通了」：没跑真实值班就不要说「已确认可用」。
 - [ ] 卸载插件后按钮/信息项消失（`unload_plugin` 幂等清理）

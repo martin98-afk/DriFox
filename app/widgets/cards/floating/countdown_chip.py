@@ -67,6 +67,9 @@ class CountdownChip(QWidget):
         self.update()
 
     def _on_breath(self, value) -> None:
+        # [PERF] 可见性门控：隐藏时相位照常推进、跳过重绘（恢复可见无跳变）
+        if not self.isVisible():
+            return
         self._glow = (1.0 - math.cos(2.0 * math.pi * float(value))) / 2.0
         self.update()
 

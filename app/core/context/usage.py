@@ -16,28 +16,82 @@ from typing import Dict, Optional, Tuple
 
 from loguru import logger
 
-# 快照签名缓存：键 session_id（无则 id(session)），值 (sig, result)。
-# 签名 = (消息数, 末条消息对象 id, API prompt_tokens)：任一变化即失效，
-# 保证 auto-compact 判定新鲜度（不设 TTL）。仅包主路径快照，legacy 回退不缓存。
-# 🔧 有界化：原裸 dict 会话数无上限增长；改 LRU 上限 64，命中刷新位，
-# 未命中/签名不匹配不刷位（与 builder._system_tokens_cache 同法）。
-_snap_cache: "OrderedDict" = OrderedDict()
-_SNAP_CACHE_MAX = 64
+# [B3] hooks/UI 双投影统一快照 store：两侧（本模块 hook 签名缓存 + engine 的
+# _ctx_usage_cache）键统一后共享同一份投影产物，消除「消息版本 bump 后两侧
+# 各 miss、各跑一次全量 project_for_ui（8 层 tier + per_message_tokens 全量
+# + tools tokens）」的结构性重复。键 = 两侧失效来源的语义并集（见
+# _unified_snapshot_key）。线程面：hooks 侧 worker 线程、UI 侧后台线程+节流，
+# OrderedDict 原子操作与现状同级（不加锁，项目惯例）。LRU 上限 64，
+# 命中刷新位，未命中不刷位（与旧 _snap_cache 同法）。
+_unified_snap_store: "OrderedDict" = OrderedDict()
+_UNIFIED_STORE_MAX = 64
 
 
-def _snapshot_sig(session) -> tuple:
-    """快照失效签名：消息数 + 末条消息对象身份 + API 口径修正值。"""
+def _unified_snapshot_key(
+    session,
+    llm_config: Optional[Dict],
+    backend=None,
+    api_prompt_tokens: int = 0,
+    from_api=None,
+    budget_tokens: Optional[int] = None,
+    ratio: Optional[float] = None,
+) -> tuple:
+    """统一快照键 = hooks/UI 两侧失效来源的语义并集。
+    - usage.py 旧签名：(len, id(last), last_api_prompt_tokens)
+    - engine.py 旧键：(id(session), _messages_version, model, api_prompt_tokens,
+      from_api, len, hash(system_prompt), budget, ratio)
+    budget/ratio 由 engine 侧写入时传入（已就地算好）；hooks 侧传 None 时
+    经 backend.chat_engine._conversation_core.context_builder（公开 dataclass
+    字段，与 engine 同源）就地求值，取不到时置 0/1.0——此时键与 engine 侧
+    不同构，该轮退化为双 miss（与改造前行为等价，无错乱）。
+    """
     msgs = getattr(session, "messages", None) or []
+    model = str((llm_config or {}).get("模型名称", "gpt-4o") or "gpt-4o")
+    if ratio is None:
+        try:
+            from app.core.modelmeta.provider_profile import resolve_token_ratio
+
+            ratio = resolve_token_ratio(llm_config or {}, model)
+        except Exception:
+            ratio = 1.0
+    if budget_tokens is None:
+        budget_tokens = 0
+        try:
+            cb = getattr(
+                getattr(getattr(backend, "chat_engine", None), "_conversation_core", None),
+                "context_builder",
+                None,
+            )
+            if cb is not None:
+                budget_tokens = int(cb.get_context_budget(llm_config))
+        except Exception:
+            budget_tokens = 0
     return (
+        str(getattr(session, "session_id", "") or ""),
+        id(session),
+        int(getattr(session, "_messages_version", 0) or 0),
         len(msgs),
         id(msgs[-1]) if msgs else 0,
-        int(getattr(session, "last_api_prompt_tokens", 0) or 0),
+        model,
+        ratio,
+        budget_tokens,
+        int(api_prompt_tokens or 0),
+        from_api,
+        # 校准因子（多槽 LRU 必需）：calibration 学习写回 session 但不 bump
+        # 消息版本，不进键会让旧条目在 LRU 中复活、返回校准前的旧估算
+        # （test_calibration_learned_and_applied 抓到）。
+        float(getattr(session, "token_calibration", 0) or 0),
+        str(getattr(session, "token_calibration_model", "") or ""),
+        hash(str(getattr(session, "system_prompt", "") or "")),
     )
 
 
-def _cache_key(session) -> object:
-    sid = getattr(session, "session_id", None)
-    return sid if sid else id(session)
+def _store_snapshot(key: tuple, snapshot: Dict) -> None:
+    """统一 store 写入 + LRU 淘汰（唯一写入口）。"""
+    _unified_snap_store[key] = snapshot
+    _unified_snap_store.move_to_end(key)
+    if len(_unified_snap_store) > _UNIFIED_STORE_MAX:
+        _unified_snap_store.popitem(last=False)
 
 
 def snapshot_usage_for_hooks(
@@ -72,15 +126,22 @@ def snapshot_usage_for_hooks(
                 llm_config = getter() or {}  # type: ignore[assignment]
         llm_config = llm_config or {}
 
-        # 签名缓存：同会话同状态下重复调用（每 tool call / 每 assistant 消息
-        # 各一次）直接复用上一次快照，免 O(N) 全量重算；任一变化源变动即重算。
-        sig = _snapshot_sig(session)
-        key = _cache_key(session)
-        cached = _snap_cache.get(key)
-        if cached is not None and cached[0] == sig:
-            # 命中刷新 LRU 位；未命中/签名不匹配不刷位（保持旧条目优先淘汰）
-            _snap_cache.move_to_end(key)
-            return cached[1]
+        # [B3] 统一键（含旧签名全部失效来源）：同会话同状态下重复调用（每
+        # tool call / 每 assistant 消息各一次）直接复用 UI 侧已产出的快照，
+        # 免 O(N) 全量重算；任一变化源变动即新键（自然失效）。
+        api_tokens = int(getattr(session, "last_api_prompt_tokens", 0) or 0)
+        from_api = getattr(session, "last_api_prompt_from_usage", None)
+        key = _unified_snapshot_key(
+            session, llm_config, backend=backend, api_prompt_tokens=api_tokens, from_api=from_api
+        )
+        cached = _unified_snap_store.get(key)
+        if cached is not None:
+            # 命中刷新 LRU 位；未命中不刷位（保持旧条目优先淘汰）
+            _unified_snap_store.move_to_end(key)
+            used = int(cached.get("used_tokens", 0) or 0)
+            budget = int(cached.get("budget_tokens", 0) or 0)
+            if used > 0 and budget > 0:
+                return (used, budget)
 
         snap = {}
         if hasattr(backend, "get_context_usage_snapshot"):
@@ -88,10 +149,10 @@ def snapshot_usage_for_hooks(
                 backend.get_context_usage_snapshot(
                     session,
                     llm_config,
-                    api_prompt_tokens=int(getattr(session, "last_api_prompt_tokens", 0) or 0),
+                    api_prompt_tokens=api_tokens,
                     api_message_count=int(getattr(session, "last_api_message_count", 0) or 0),
                     # 三态透传：None = 未知（老记录无该标记）→ 引擎按"可用"处理
-                    from_api=getattr(session, "last_api_prompt_from_usage", None),
+                    from_api=from_api,
                 )
                 or {}
             )
@@ -99,10 +160,7 @@ def snapshot_usage_for_hooks(
         budget = int(snap.get("budget_tokens", 0) or 0)
         if used > 0 and budget > 0:
             result = (used, budget)
-            _snap_cache[key] = (sig, result)
-            _snap_cache.move_to_end(key)
-            if len(_snap_cache) > _SNAP_CACHE_MAX:
-                _snap_cache.popitem(last=False)
+            _store_snapshot(key, snap)
             return result
     except Exception as e:
         logger.warning(f"[ContextUsage] hook 快照口径失败，回退本地估算: {e}")

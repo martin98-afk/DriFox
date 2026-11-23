@@ -304,7 +304,7 @@ def get_builtin_tools_schema(agent_manager=None, builtin_tools=None, session_id:
         and _CACHE_VERSION == current_version
         and _CACHE_AGENT_REF is agent_manager  # 引用比对：agent 实例更换即失效（多窗口隔离）
     ):
-        result = copy.deepcopy(_CACHE_RESULT)
+        result = _shallow_clone_schemas(_CACHE_RESULT)
         # 对话前 schema 过滤（缓存之后应用，助手权限档位等按 owner 裁剪）
         try:
             result = ToolRegistry.get_instance().apply_schema_filters(result, {"session_id": session_id})
@@ -405,3 +405,24 @@ def get_builtin_tools_schema(agent_manager=None, builtin_tools=None, session_id:
     except Exception as e:
         logger.warning(f"[BuiltinTools] schema 过滤失败，返回全量: {e}")
     return result
+
+
+def _shallow_clone_schemas(schemas: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """schema 两层浅克隆（O(n) 指针级）：新 list + 每项顶层 dict 克隆 + 其
+    "function" 子 dict 克隆，parameters/description 等叶子共享。
+
+    [PERF] 2026-11-19 #12：替换每轮 LLM 调用的全量 deepcopy（35+ 工具规模
+    下递归深拷贝是主线程热点）。唯一已知写点（get_builtin_tools_schema 内
+    description 注入 / lsp 状态追加 / schema 过滤器裁剪）均落在克隆层，
+    不穿透 _CACHE_RESULT 与 registry 原始注册数据；叶子共享依赖约定：
+    调用方不得原地改 parameters 等叶子（未来新增写点须同步扩层）。
+    """
+    out: List[Dict[str, Any]] = []
+    for s in schemas:
+        if isinstance(s, dict):
+            s = dict(s)
+            fn = s.get("function")
+            if isinstance(fn, dict):
+                s["function"] = dict(fn)
+        out.append(s)
+    return out

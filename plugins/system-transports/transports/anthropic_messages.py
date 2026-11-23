@@ -23,6 +23,7 @@ Auth：worker 传入的 auth_headers 只管 bce 与服务商伪装头，Bearer �
 from __future__ import annotations
 
 import json
+import logging
 import re
 import socket
 from typing import Any, Dict, Iterator, List, Optional
@@ -30,7 +31,25 @@ from typing import Any, Dict, Iterator, List, Optional
 from app.plugins.contracts.stream_sink import StreamEvent
 from app.plugins.sdk import normalize_reasoning_effort, resolve_model_capabilities
 
+logger = logging.getLogger(__name__)
+
 ANTHROPIC_VERSION = "2023-06-01"
+
+# 提示缓存断点（Anthropic 前缀缓存是 opt-in：不发 cache_control，服务端既不写
+# 也不读，命中率恒 0；新版 automatic caching 仍需顶层一个 cache_control 字段）。
+# 官方上限 4 个断点，本通道只用 2 个，见 create_stream 的断点放置注释。
+CACHE_CONTROL_MARKER: Dict[str, str] = {"type": "ephemeral"}
+
+# llm_config["提示缓存"] 显式为假时关闭；未声明默认开启（不支持断点的中转会被
+# 400 自动降级，见 create_stream）
+_CACHE_OFF_VALUES = (False, 0, "0", "false", "False", "off", "关闭")
+
+def _prompt_cache_enabled(cfg: Dict[str, Any]) -> bool:
+    """「提示缓存」配置项解析：缺省开启，显式假值关闭。"""
+    value = (cfg or {}).get("提示缓存")
+    if value is None or value == "":
+        return True
+    return value not in _CACHE_OFF_VALUES
 
 # 默认输出上限（Anthropic 协议 max_tokens 必填）
 DEFAULT_MAX_TOKENS = 8192
@@ -305,8 +324,16 @@ def build_anthropic_messages(
     return ("\n\n".join(p for p in system_parts if p), merged)
 
 
-def build_anthropic_tools(tools: Optional[List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
-    """OpenAI function 工具列表 → Anthropic tools 形态。"""
+def build_anthropic_tools(
+    tools: Optional[List[Dict[str, Any]]],
+    cache_control: bool = False,
+) -> List[Dict[str, Any]]:
+    """OpenAI function 工具列表 → Anthropic tools 形态。
+
+    cache_control=True 时在最后一个工具上挂缓存断点：Anthropic 按
+    tools → system → messages 顺序渲染并做前缀匹配，末项断点覆盖整段工具定义。
+    system 频繁变动（记忆/项目笔记注入）时，这一段仍能命中。
+    """
     out: List[Dict[str, Any]] = []
     for tool in tools or []:
         if not isinstance(tool, dict):
@@ -322,8 +349,55 @@ def build_anthropic_tools(tools: Optional[List[Dict[str, Any]]]) -> List[Dict[st
         schema = func.get("parameters")
         item["input_schema"] = schema if isinstance(schema, dict) else {"type": "object", "properties": {}}
         out.append(item)
+    if cache_control and out:
+        out[-1]["cache_control"] = dict(CACHE_CONTROL_MARKER)
     return out
 
+
+def mark_last_message_cacheable(messages: List[Dict[str, Any]]) -> bool:
+    """在最后一条消息的最后一个非空 content block 上挂缓存断点（原地）。
+
+    空块（空 text）会被服务端拒绝，跳过继续往前找。返回是否挂上。
+    """
+    for msg in reversed(messages or []):
+        if not isinstance(msg, dict):
+            continue
+        content = msg.get("content")
+        if not isinstance(content, list):
+            continue
+        for block in reversed(content):
+            if not isinstance(block, dict):
+                continue
+            btype = block.get("type")
+            if not btype:
+                continue
+            if btype == "text" and not str(block.get("text", "") or ""):
+                continue
+            block["cache_control"] = dict(CACHE_CONTROL_MARKER)
+            return True
+    return False
+
+def strip_cache_markers(body: Dict[str, Any]) -> int:
+    """剥除请求体里所有 cache_control（原地），返回剥除个数。
+
+    仅用于端点拒绝该字段时的降级重发。
+    """
+    removed = 0
+    system = body.get("system")
+    if isinstance(system, list):
+        for block in system:
+            if isinstance(block, dict) and block.pop("cache_control", None) is not None:
+                removed += 1
+    for tool in body.get("tools") or []:
+        if isinstance(tool, dict) and tool.pop("cache_control", None) is not None:
+            removed += 1
+    for msg in body.get("messages") or []:
+        if not isinstance(msg, dict):
+            continue
+        for block in msg.get("content") or []:
+            if isinstance(block, dict) and block.pop("cache_control", None) is not None:
+                removed += 1
+    return removed
 
 def _map_stop_reason(stop_reason: Optional[str]) -> str:
     """Anthropic stop_reason → OpenAI finish_reason（sink 按 OpenAI 语义判截断）。"""
@@ -480,6 +554,15 @@ class AnthropicMessagesStream:
                 break
 
         if pending_usage:
+            # 打点用于验证渠道是否透传断点：read/write 全 0 且 breaks>0 说明
+            # 中转把 cache_control 吞了（或前缀不足最小可缓存长度）
+            details = pending_usage.get("prompt_tokens_details") or {}
+            logger.debug(
+                f"[AnthropicCache] usage prompt={pending_usage.get('prompt_tokens', 0)} "
+                f"read={details.get('cached_tokens', 0)} "
+                f"write={pending_usage.get('cache_creation_tokens', 0)} "
+                f"out={pending_usage.get('completion_tokens', 0)}"
+            )
             yield StreamEvent(type="usage", usage=dict(pending_usage))
         if saw_output or stop_reason:
             yield StreamEvent(type="finish", finish_reason=_map_stop_reason(stop_reason))
@@ -516,6 +599,8 @@ def _usage_from_anthropic(usage: Dict[str, Any], output_key: str = "output_token
         "completion_tokens": output,
         "total_tokens": prompt + output,
         "prompt_tokens_details": {"cached_tokens": cache_read},
+        # 非 OpenAI 字段：只供 [AnthropicCache] 打点，sink 与 tracker 不消费
+        "cache_creation_tokens": cache_creation,
     }
 
 
@@ -609,14 +694,38 @@ class AnthropicMessagesTransport:
         if not anth_messages:
             raise RuntimeError("Anthropic 通道没有可发送的消息")
 
+        cache_on = _prompt_cache_enabled(cfg)
+        anth_tools = build_anthropic_tools(tools, cache_control=cache_on)
         body = self.build_request(cfg, cap_max_tokens=cap_max_tokens)
         body["messages"] = anth_messages
         if system_prompt:
             body["system"] = system_prompt
-        anth_tools = build_anthropic_tools(tools)
         if anth_tools:
             body["tools"] = anth_tools
         body["stream"] = True
+
+        # 缓存断点：① tools 末项 → 覆盖整段工具定义（system 每轮变动时仍命中）；
+        # ② 最后一条消息末块 → 覆盖 tools+system+历史，多轮对话逐轮累积。
+        # 无 tools 有 system 时退化为 system 单块断点（块数组才能挂 cache_control）。
+        breakpoints = 0
+        if cache_on:
+            if anth_tools:
+                breakpoints += 1
+            if mark_last_message_cacheable(anth_messages):
+                breakpoints += 1
+            if not anth_tools and system_prompt:
+                body["system"] = [
+                    {
+                        "type": "text",
+                        "text": system_prompt,
+                        "cache_control": dict(CACHE_CONTROL_MARKER),
+                    }
+                ]
+                breakpoints += 1
+        logger.debug(
+            f"[AnthropicCache] model={model} enabled={cache_on} breaks={breakpoints} "
+            f"tools={len(anth_tools)} msgs={len(anth_messages)} system_chars={len(system_prompt)}"
+        )
 
         headers = {
             "content-type": "application/json",
@@ -672,6 +781,39 @@ class AnthropicMessagesTransport:
                 resp.close()
             except Exception:
                 pass
+            # 400 且错误点名 cache_control：该端点不认断点（部分中转直接拒绝
+            # 未知字段）。剥掉断点重发一次，并提示可永久关闭「提示缓存」。
+            if status == 400 and "cache_control" in detail and breakpoints:
+                removed = strip_cache_markers(body)
+                logger.warning(
+                    f"[AnthropicCache] 端点拒绝 cache_control（去掉 {removed} 个断点重试）: "
+                    f"{detail[:160]}"
+                )
+                try:
+                    resp = requests.post(
+                        url,
+                        headers=headers,
+                        json=body,
+                        stream=True,
+                        timeout=(30, 600),
+                    )
+                except Exception as exc:
+                    raise RuntimeError(
+                        f"Anthropic 通道降级重发失败: {type(exc).__name__}: {exc}"
+                    ) from exc
+                if resp.status_code == 200:
+                    return AnthropicMessagesStream(
+                        resp, supports_thinking=cfg.get("思考模式") is True
+                    )
+                status = resp.status_code
+                try:
+                    detail = (resp.text or "")[:500]
+                except Exception:
+                    detail = ""
+                try:
+                    resp.close()
+                except Exception:
+                    pass
             raise RuntimeError(f"Anthropic 通道 HTTP {status}: {detail}")
 
         return AnthropicMessagesStream(resp, supports_thinking=cfg.get("思考模式") is True)

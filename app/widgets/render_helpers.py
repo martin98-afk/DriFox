@@ -41,8 +41,33 @@ def get_tool_qrc_prefix() -> str:
     except Exception:
         return "qrc:/icons"
 
-# ===== 主程序 qrc 资源存在性缓存（避免每条消息都查 QFile） =====
-# icon 在插件目录里查不到时，渲染层会用 DEFAULT_FALLBACK_ICON ("工具") 兜底——
+# ===== 工具图标 HTML 缓存（避免同一图标重复读盘 + 重复 base64） =====
+# 背景实测（2026-11-23）：`_get_tool_icon_html` 每次调用都 `svg_path.exists()`
+# + `read_bytes()`，在逐帧渲染栈里分别出现 16 次 / 18 次阻塞，合计 17.9s。
+# 入口分布：JS console / on_tool_call_started / on_tool_args_updated / reasoning
+# —— 工具调用密集时每个事件都重新读盘。
+#
+# 缓存**最终 HTML**（不只是 bytes）：连 base64 编码与拼接也省掉。
+#
+# key 必须含所有影响输出的输入：
+# - icon_name / size / tool_name（决定查哪个目录、出什么尺寸）
+# - is_light（决定 icons_light 还是 icons，也决定 qrc prefix）
+# 不含 prefix（等价于 is_light）、不含 qrc 存在性（`_QRC_ICON_EXISTS_CACHE`
+# 已单独缓存且 qrc 编译期固化）、不含 icon_dir（只在插件注册时变，由 version 覆盖）。
+#
+# 失效用 **ToolRegistry.version() 世代号**：version 在 register / unregister /
+# unregister_by_source / clear 四处自增（registry.py:289/299/314/325），其中
+# `unregister_by_source` 才是插件卸载的真实路径 —— 手动挂 6 个入口容易漏它。
+#
+# **线程安全：不加锁**。假定调用方在主线程（渲染路径实际如此）；即便并发，
+# CPython GIL 保证 dict 的 get / __setitem__ / clear 是原子操作，最坏情况是
+# 两个线程各算一次再各自写入（重复计算），**不会读到半写值** —— 缓存值是不可变
+# str，不存在部分写入状态。`_ICON_HTML_CACHE_VER` 同理。
+_ICON_HTML_CACHE: dict = {}
+_ICON_HTML_CACHE_VER: int = -1
+_ICON_HTML_CACHE_MAX = 512
+
+# ===== 主程序 qrc 资源存在性缓存（避免每条消息都查 QFile） =====# icon 在插件目录里查不到时，渲染层会用 DEFAULT_FALLBACK_ICON ("工具") 兜底——
 # 该常量已知存在于 icons.qrc + icons_light.qrc，避免破图。
 _QRC_ICON_EXISTS_CACHE: dict = {}
 _QRC_ICON_CACHE_MAX = 256
@@ -690,23 +715,62 @@ def _get_tool_icon_html(icon_name: str, size: int = 18, tool_name: str = None) -
        - 浅色主题 → icons_light/；深色主题 → icons/
        - 缺浅色版 → 回退深色版 → 回退主程序 qrc
     2. 主程序 qrc 资源（qrc:/icons 或 qrc:/icons_light，主题感知）
+
+    [PERF] 结果按 `(icon_name, size, tool_name, is_light)` 缓存**最终 HTML**。
+    原先每次调用都 `exists()` + `read_bytes()` + base64 + 拼串，在逐帧渲染
+    栈里分别贡献 16 / 18 次阻塞（合计 17.9s）。缓存失效走
+    `ToolRegistry.version()` 世代号，插件注册/卸载/热重载全部自动失效。
     """
-    if tool_name:
+    global _ICON_HTML_CACHE_VER
+
+    # 先取主题态与 registry 世代号（都必须在缓存键/失效判定之前）
+    is_light = False
+    try:
+        from app.utils.theme_manager import theme_manager
+
+        is_light = theme_manager.is_light_theme()
+    except Exception:
+        pass
+
+    reg_mgr = None
+    try:
+        from app.tools.registry import ToolRegistry
+
+        reg_mgr = ToolRegistry.get_instance()
+        _ver = reg_mgr.version()
+        if _ver != _ICON_HTML_CACHE_VER:
+            # 插件集合变了（register/unregister/unregister_by_source/clear 任一）
+            # → 图标目录与可用图标都可能变，整表作废
+            _ICON_HTML_CACHE.clear()
+            _ICON_HTML_CACHE_VER = _ver
+    except Exception:
+        reg_mgr = None
+
+    cache_key = (icon_name, int(size), tool_name or "", bool(is_light))
+    cached_html = _ICON_HTML_CACHE.get(cache_key)
+    if cached_html is not None:
+        return cached_html
+
+    html = _build_tool_icon_html(icon_name, int(size), tool_name, is_light, reg_mgr)
+
+    # 写缓存（含负结果：图标全找不着时同样返回 fallback HTML，也缓存）
+    if len(_ICON_HTML_CACHE) >= _ICON_HTML_CACHE_MAX:
+        _ICON_HTML_CACHE.clear()
+    _ICON_HTML_CACHE[cache_key] = html
+    return html
+
+
+def _build_tool_icon_html(
+    icon_name: str, size: int, tool_name: str, is_light: bool, reg_mgr
+) -> str:
+    """真正生成图标 HTML（无缓存逻辑，供 `_get_tool_icon_html` 调用）。"""
+    if tool_name and reg_mgr is not None:
         try:
             from pathlib import Path
 
-            from app.tools.registry import ToolRegistry
-
-            reg = ToolRegistry.get_instance().get(tool_name)
+            reg = reg_mgr.get(tool_name)
             if reg is not None:
                 # 主题感知：浅色优先 icons_light，深色用 icons
-                is_light = False
-                try:
-                    from app.utils.theme_manager import theme_manager
-
-                    is_light = theme_manager.is_light_theme()
-                except Exception:
-                    pass
                 icon_dirs = [reg.icon_dir_light if is_light else reg.icon_dir]
                 if is_light and not icon_dirs[0]:
                     icon_dirs.append(reg.icon_dir)  # 浅色缺失 → 回退深色
@@ -740,6 +804,8 @@ def _get_tool_icon_html(icon_name: str, size: int = 18, tool_name: str = None) -
         )
         icon_name = DEFAULT_FALLBACK_ICON
     return f'<img src="{prefix}/{icon_name}.svg" style="width:{size}px;height:{size}px;pointer-events:none;" />'
+
+
 def _get_tool_icon(tool_name: str, tool_args: dict = None) -> str:
     """[已弃用] 根据工具名查找图标（保留兼容，返回图标文件名）
 
@@ -1035,6 +1101,9 @@ def render_tool_block(
     if isinstance(tool_args, dict):
         desc_text = str(tool_args.get("description") or "").strip()
     title_text = desc_text or cn_name
+    # 描述已占标题位且与 tooltip 文案完全同文，再挂 title 只在 hover 时重复弹一遍 → 不挂；
+    # 无描述时标题位显示工具名，保留 title 兼容长工具名场景。
+    title_attr = "" if desc_text else f' title="{escape(title_text)}"'
     # 描述不截断：宁可右侧路径被挤掉，也要把「这一步做什么」完整摆出来
     path_arg = _tool_path_arg(tool_args)
     preview_text = args_preview
@@ -1081,7 +1150,7 @@ def render_tool_block(
                 {icon_html}
                 {badge_html}
             </span>
-            <span style="white-space: nowrap; flex: 0 0 auto; {get_font_family_css()}" title="{escape(title_text)}">{escape(title_text)}</span>
+            <span style="white-space: nowrap; flex: 0 0 auto; {get_font_family_css()}"{title_attr}>{escape(title_text)}</span>
         </span>
         <span style="display: flex; align-items: center; gap: 8px; margin-left: 10px; min-width: 0; flex: 1 1 auto; justify-content: flex-start; overflow: hidden;">
             {preview_span}{diff_stats_html}
@@ -1213,7 +1282,7 @@ def render_tool_block(
                 {icon_html}
                 {badge_html}
             </span>
-            <span style="white-space: nowrap; flex: 0 0 auto; {get_font_family_css()}" title="{escape(title_text)}">{escape(title_text)}</span>
+            <span style="white-space: nowrap; flex: 0 0 auto; {get_font_family_css()}"{title_attr}>{escape(title_text)}</span>
         </span>
         <span style="display: flex; align-items: center; gap: 8px; margin-left: 10px; min-width: 0; flex: 1 1 auto; justify-content: flex-start; overflow: hidden;">
             {preview_span}{diff_stats_html}
@@ -1232,7 +1301,7 @@ def render_tool_block(
                 {icon_html}
                 {badge_html}
             </span>
-            <span style="white-space: nowrap; flex: 0 0 auto; {get_font_family_css()}" title="{escape(title_text)}">{escape(title_text)}</span>
+            <span style="white-space: nowrap; flex: 0 0 auto; {get_font_family_css()}"{title_attr}>{escape(title_text)}</span>
         </span>
         <span style="display: flex; align-items: center; gap: 8px; margin-left: 10px; min-width: 0; flex: 1 1 auto; justify-content: flex-start; overflow: hidden;">
             {preview_span}{diff_stats_html}

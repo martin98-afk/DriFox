@@ -239,6 +239,26 @@ class TestClassStructure:
                             break
         assert found, "缺少 @classmethod _execute_batched_theme_refresh"
 
+    def test_no_self_in_class_and_static_methods(self):
+        """@classmethod/@staticmethod 体内禁止出现 self
+
+        回归 b8f685db：_execute_batched_theme_refresh 是 classmethod，
+        体里写了 self._snapshot_theme_transition() → 运行时 NameError，
+        且异常点位于 Colors.refresh() 之前，主题切换整链被跳过。
+        """
+        cls = _get_target_class()
+        offenders = []
+        for stmt in cls.body:
+            if not isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            decos = {d.id for d in stmt.decorator_list if isinstance(d, ast.Name)}
+            if not decos & {"classmethod", "staticmethod"}:
+                continue
+            for node in ast.walk(stmt):
+                if isinstance(node, ast.Name) and node.id == "self":
+                    offenders.append(f"{stmt.name}@{node.lineno}")
+        assert not offenders, f"classmethod/staticmethod 内引用 self 将 NameError: {offenders}"
+
     def test_class_has_update_node_preview_method(self):
         """类有 _update_node_preview 方法"""
         cls = _get_target_class()

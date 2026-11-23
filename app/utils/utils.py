@@ -50,40 +50,11 @@ def _get_light_icon_map():
     return _ICON_NAME_TO_FILE_LIGHT
 
 
-def get_app_data_dir() -> Path:
-    """获取应用数据目录（跨平台兼容）
-
-    开发环境: 当前目录/.drifox
-    PyInstaller打包: ~/.drifox（用户 home 目录，可写）
-    macOS .app: ~/Library/Application Support/Drifox/.drifox
-
-    测试/多实例隔离: 设置环境变量 DRIFOX_DATA_DIR 后一律使用该目录
-    （优先级最高，置于 frozen 判断之前，UI 驱动库与测试脚手架依赖此隔离）。
-    """
-    env_dir = os.environ.get("DRIFOX_DATA_DIR")
-    if env_dir:
-        path = Path(env_dir)
-        path.mkdir(parents=True, exist_ok=True)
-        return path
-
-    # 开发环境
-    if not hasattr(sys, '_MEIPASS') and not getattr(sys, 'frozen', False):
-        return Path('.drifox')
-
-    # macOS .app: 使用 Application Support（用户可写）
-    if sys.platform == 'darwin':
-        from AppKit import NSApplicationSupportDirectory, NSFileManager, NSUserDomainMask
-        paths = NSFileManager.defaultManager().URLsForDirectory_inDomains_(
-            NSApplicationSupportDirectory, NSUserDomainMask
-        )
-        if paths:
-            app_support_path = paths[0].fileSystemRepresentation().decode('utf-8')
-            app_support = Path(app_support_path) / 'Drifox'
-            app_support.mkdir(parents=True, exist_ok=True)
-            return app_support / '.drifox'
-
-    # Windows/Linux 打包: 使用 ~/.drifox（用户 home，不受安装位置限制）
-    return Path.home() / '.drifox'
+# get_app_data_dir 实现已拆至 app.utils.app_paths（纯路径模块）：
+# utils 顶层 import Settings → qfluentwidgets → AppKit，无 GUI 场景（core.store）
+# 经此模块取路径会被动拉起 AppKit（实测 import 期 RSS +134MB）。此处保留符号
+# re-export 兼容既有 from app.utils.utils import get_app_data_dir 调用点。
+from app.utils.app_paths import get_app_data_dir  # noqa: E402
 
 
 _MIGRATED_FLAG = False  # 防止重复迁移
@@ -445,6 +416,12 @@ _skills_cache_key: tuple = ()
 _SKILLS_KEY_TTL = 30.0  # 秒
 _skills_key_cache: tuple | None = None
 _skills_key_cached_at: float = 0.0
+# [E7-I] 动态源签名段同窗口 TTL 缓存（原每次现算 iterdir+stat）。单槽
+# (project_dir, contrib_parts)，project_dir 变化即重算；即时感知由
+# invalidate_skills_cache 承担（插件变更钩子已接）；TTL 窗口内手动放进
+# watched_dirs 的新技能最长 30s 不可见（用户已接受的折衷）。
+_contrib_key_cache: tuple | None = None
+_contrib_key_cached_at: float = 0.0
 
 
 def _compute_skills_cache_key(project_dir: str | None = None) -> tuple:
@@ -452,55 +429,24 @@ def _compute_skills_cache_key(project_dir: str | None = None) -> tuple:
 
     project_dir 纳入 key：多标签页开不同项目时，动态技能源按项目求值，切项目自动失效。
     动态源签名：每个 skill_source 的 watched_dirs 内技能文件的
-    (目录存在数, 文件数, max_mtime)，每次现算不吃 TTL（目录小、量级 ms；
-    吃 TTL 会让项目内新技能最长 30s 不可见，违背「放进目录即被发现」）。
-    静态部分保留二级 TTL 窗口内复用（原有机制不变）。
+    (目录存在数, 文件数, max_mtime)，与静态部分共用 30s TTL 窗口（[E7-I]），
+    窗口内手动放入文件靠 invalidate_skills_cache 即时生效。
     """
-    global _skills_key_cache, _skills_key_cached_at
+    global _skills_key_cache, _skills_key_cached_at, _contrib_key_cache, _contrib_key_cached_at
     now = time.monotonic()
 
-    # ---- 动态源签名：每次现算 ----
-    contrib_parts: list[tuple] = []
-    if project_dir:
-        try:
-            from app.plugins.registries.contribution_registry import ContributionRegistry
-
-            wd = Path(project_dir)
-            for c_plugin, c_name, c_entry in ContributionRegistry.get_instance().iter_skill_sources():
-                wf = c_entry.get("watched_dirs")
-                c_dirs: list[Path] = []
-                if wf is not None:
-                    try:
-                        c_dirs = [Path(d) for d in (wf(wd) or [])]
-                    except Exception:
-                        c_dirs = []
-                c_exists = 0
-                c_files = 0
-                c_mtime = 0.0
-                for c_base in c_dirs:
-                    if not c_base.exists():
-                        continue
-                    c_exists += 1
-                    try:
-                        for c_skill in c_base.iterdir():
-                            if not c_skill.is_dir():
-                                continue
-                            if c_skill.name.startswith(("_", ".")):
-                                continue
-                            for c_fname in ("SKILL.md", "skill.md"):
-                                c_f = c_skill / c_fname
-                                if c_f.exists():
-                                    c_files += 1
-                                    try:
-                                        c_mtime = max(c_mtime, c_f.stat().st_mtime)
-                                    except OSError:
-                                        pass
-                                    break
-                    except OSError:
-                        pass
-                contrib_parts.append((c_plugin, c_name, c_exists, c_files, c_mtime))
-        except ImportError:
-            contrib_parts.append(("contrib", "unavailable"))
+    # ---- 动态源签名：同窗口 TTL 缓存（[E7-I]）----
+    proj_key = project_dir or ""
+    if (
+        _contrib_key_cache is not None
+        and _contrib_key_cache[0] == proj_key
+        and now - _contrib_key_cached_at < _SKILLS_KEY_TTL
+    ):
+        contrib_parts = list(_contrib_key_cache[1])
+    else:
+        contrib_parts = _scan_contrib_parts(project_dir)
+        _contrib_key_cache = (proj_key, tuple(contrib_parts))
+        _contrib_key_cached_at = now
 
     # ---- 静态部分：二级 TTL 缓存 ----
     if _skills_key_cache is not None and now - _skills_key_cached_at < _SKILLS_KEY_TTL:
@@ -559,12 +505,60 @@ def _compute_skills_cache_key(project_dir: str | None = None) -> tuple:
     return (project_dir or "", tuple(contrib_parts), *key)
 
 
+def _scan_contrib_parts(project_dir: str | None) -> list[tuple]:
+    """动态源签名现算（原 _compute_skills_cache_key 内联段，逻辑原样搬移）。"""
+    contrib_parts: list[tuple] = []
+    if not project_dir:
+        return contrib_parts
+    try:
+        from app.plugins.registries.contribution_registry import ContributionRegistry
+
+        wd = Path(project_dir)
+        for c_plugin, c_name, c_entry in ContributionRegistry.get_instance().iter_skill_sources():
+            wf = c_entry.get("watched_dirs")
+            c_dirs: list[Path] = []
+            if wf is not None:
+                try:
+                    c_dirs = [Path(d) for d in (wf(wd) or [])]
+                except Exception:
+                    c_dirs = []
+            c_exists = 0
+            c_files = 0
+            c_mtime = 0.0
+            for c_base in c_dirs:
+                if not c_base.exists():
+                    continue
+                c_exists += 1
+                try:
+                    for c_skill in c_base.iterdir():
+                        if not c_skill.is_dir():
+                            continue
+                        if c_skill.name.startswith(("_", ".")):
+                            continue
+                        for c_fname in ("SKILL.md", "skill.md"):
+                            c_f = c_skill / c_fname
+                            if c_f.exists():
+                                c_files += 1
+                                try:
+                                    c_mtime = max(c_mtime, c_f.stat().st_mtime)
+                                except OSError:
+                                    pass
+                                break
+                except OSError:
+                    pass
+            contrib_parts.append((c_plugin, c_name, c_exists, c_files, c_mtime))
+    except ImportError:
+        contrib_parts.append(("contrib", "unavailable"))
+    return contrib_parts
+
+
 def invalidate_skills_cache() -> None:
     """手动失效 skills 缓存。插件启用/禁用后如需立即生效可调用。"""
-    global _skills_cache, _skills_cache_key, _skills_key_cache
+    global _skills_cache, _skills_cache_key, _skills_key_cache, _contrib_key_cache
     _skills_cache = None
     _skills_cache_key = ()
     _skills_key_cache = None
+    _contrib_key_cache = None
 
 
 def _parse_skill_dir(skill_dir: Path, plugin_name: str | None = None,

@@ -69,7 +69,6 @@ from qfluentwidgets import (
     MaskDialogBase,
     TransparentToolButton,
 )
-from qfluentwidgets.components.widgets.scroll_bar import SmoothScrollDelegate
 from app.core.infra.telemetry import perf_jsonl
 from app.core.infra.webengine_profile import get_shared_web_profile
 from app.utils.design_tokens import (
@@ -84,7 +83,9 @@ from app.utils.design_tokens import (
     scale_font_size,
     scale_icon_size,
 )
+from app.utils.scroll_tuning import install_fast_wheel
 from app.utils.utils import get_font_family_css, get_icon
+from app.utils._startup_probe import trace_enabled as _diag_trace_enabled
 from app.widgets.render import (
     HOME_CONTENT,
     KIND_TEXT,
@@ -1093,6 +1094,15 @@ class CodeWebViewer(QWebEngineView):
         self._resize_unlock_timer.setSingleShot(True)
         self._resize_unlock_timer.setInterval(150)  # resize 结束后 150ms 再报告高度
         self._resize_unlock_timer.timeout.connect(self._on_resize_unlock)
+        # [UX] 宽度连续变化期冻结文档过渡/动画 + 延迟 iframe 高度回报：
+        # 拖窗口或侧栏动画时逐帧改宽度，元素自带 transition 会被反复重启
+        # （拖尾/抖动），iframe 高度回报则形成「宽度→高度→整卡改高」的反馈链。
+        # 静默 150ms 后统一解冻并一次性落地延迟高度。
+        self._doc_resizing_state = False
+        self._doc_resize_quiet_timer = QTimer(self)
+        self._doc_resize_quiet_timer.setSingleShot(True)
+        self._doc_resize_quiet_timer.setInterval(150)
+        self._doc_resize_quiet_timer.timeout.connect(lambda: self._set_doc_resizing(False))
 
         # 思考已完成标志：工具调用开始时置 True，阻止 _render_markdown_to_html 继续剥离 </think>
         self._thinking_finalized = False
@@ -1816,10 +1826,18 @@ class CodeWebViewer(QWebEngineView):
         self._v2_ctx_sig = None
         self._block_cache.clear()
         self._v2_reset_live()
+        # [R2 #13] 通道开关随归还重评：_perform_update 无块源分支的「永久关闭」
+        # 只对**本卡生命周期**成立；viewer 归还进池后开关必须恢复环境变量当前值，
+        # 否则曾服务过欢迎页/纯文本卡的 viewer 被有块源的新卡复用时 v2 永久失活。
+        self._render_v2 = _render_v2_enabled()
         self._lazy_markdown_cb = None
         self._restore_finished_ids = None
         self._resize_locked = False
         self._height_report_pending = False
+        # [UX] 复用会重载骨架：页面侧冻结态随新文档归零，Python 侧记录必须同步，
+        # 否则下次 _set_doc_resizing(True) 因「状态未变」短路、冻结不再下发。
+        self._doc_resizing_state = False
+        self._doc_resize_quiet_timer.stop()
         # [T11] 复用前复位崩溃/上下文状态：计数器是「本 viewer 生命周期内」语义，
         # 不清零会让崩溃过的 viewer 复用后被陈旧计数误判 → 无谓重建；
         # 从崩溃队列移除（本页已重置，无需再自愈）。这是排队器正确性前置条件。
@@ -1918,6 +1936,50 @@ class CodeWebViewer(QWebEngineView):
         if self._height_report_pending:
             self._height_report_pending = False
         self._do_resize_check()
+
+    def _set_doc_resizing(self, on: bool) -> None:
+        """切换文档「连续 resize」冻结态（幂等）。
+
+        冻结态下页内 CSS 过渡/动画暂停、```widget iframe 的高度回报只记不应用
+        （见骨架 _dfxSetResizing）。由 resizeEvent 置位、静默 150ms 复位。
+        """
+        on = bool(on)
+        if on == getattr(self, "_doc_resizing_state", False):
+            return
+        self._doc_resizing_state = on
+        self._push_doc_resizing(on)
+
+    def _push_doc_resizing(self, on: bool) -> None:
+        """把冻结态下发给页面（JS 未就绪 / 页面已死时静默跳过）。"""
+        try:
+            page = self.page()
+            if page is not None:
+                page.runJavaScript(f"window._dfxSetResizing && window._dfxSetResizing({str(bool(on)).lower()});")
+        except (RuntimeError, AttributeError):
+            pass
+
+    def restore_content_fade(self) -> None:
+        """resize 占位恢复时让内容淡入，掩盖「占位 → 真实内容」的硬切。
+
+        opacity 是合成层动画，不触发重排；页面侧先置 0 再过渡到 1（见骨架
+        window._dfxRestoreFade）。系统「减少动态效果」开启时只解除冻结，不淡入。
+        """
+        try:
+            from app.utils.motion import Animations
+
+            _motion = Animations.motion_enabled()
+        except Exception:
+            _motion = True
+        try:
+            page = self.page()
+            if page is None:
+                return
+            if _motion:
+                page.runJavaScript("window._dfxRestoreFade && window._dfxRestoreFade();")
+            else:
+                page.runJavaScript("window._dfxSetResizing && window._dfxSetResizing(false);")
+        except (RuntimeError, AttributeError):
+            pass
 
     def _on_card_reading_changed(self, reading: bool):
         """记录「用户正在卡片内部滚动阅读」状态（reportHeight 第 4 字段翻转时推送）
@@ -2411,6 +2473,49 @@ class CodeWebViewer(QWebEngineView):
         """
         self._do_resize_check()
 
+    # [MEM] 离屏页冻结（2026-11-18）：QWebEngineView 隐藏后 Qt 不会回收该页的
+    # 渲染与合成资源——实测长卡片单页综合占用约 107MB（dpr=1.88 下与纹理面积
+    # 成正比）。Frozen 状态让 Chromium 挂起该页渲染并归还资源，DOM 与内容保留，
+    # 重新可见只重绘、不重新导航。流式中的卡片不冻结（会暂停渲染与定时器）。
+    # 延迟 1.2s 才冻结，避免快速滚动时反复冻结/解冻带来的抖动。
+    _PAGE_FREEZE_DELAY_MS = 1200
+
+    def hideEvent(self, event):
+        """[MEM] 隐藏后延迟冻结页面，离屏卡片不再持有 GPU/渲染资源。"""
+        super().hideEvent(event)
+        try:
+            if getattr(self, "_streaming", False):
+                return
+            from PyQt5.QtCore import QTimer
+
+            QTimer.singleShot(self._PAGE_FREEZE_DELAY_MS, self._freeze_page_if_hidden)
+        except Exception:
+            pass
+
+    def _freeze_page_if_hidden(self) -> None:
+        """到点仍不可见则冻结页面（幂等；异常静默，绝不阻断渲染）。"""
+        try:
+            if self.isVisible() or getattr(self, "_streaming", False):
+                return
+            page = self.page()
+            if page is None:
+                return
+            if page.lifecycleState() == QWebEnginePage.LifecycleState.Active:
+                page.setLifecycleState(QWebEnginePage.LifecycleState.Frozen)
+        except Exception:
+            pass
+
+    def _thaw_page_if_frozen(self) -> None:
+        """恢复 Active（须在任何 setHtml / runJavaScript 之前调用）。"""
+        try:
+            page = self.page()
+            if page is None:
+                return
+            if page.lifecycleState() != QWebEnginePage.LifecycleState.Active:
+                page.setLifecycleState(QWebEnginePage.LifecycleState.Active)
+        except Exception:
+            pass
+
     def showEvent(self, event):
         """[V1] 可见性恢复：隐藏 tab 期间被门控的渲染请求在此补渲。
 
@@ -2420,6 +2525,8 @@ class CodeWebViewer(QWebEngineView):
         调度机制补渲，保证流式输出/工具结果的最终完整性。
         """
         super().showEvent(event)
+        # [MEM] 先解冻再补渲：Frozen 页面上 runJavaScript 会被挂起
+        self._thaw_page_if_frozen()
         # 🛡️ 首帧透明（2026-11-13 白底卡）：池化复用 / tab 切回 / 隐藏期尺寸
         # 变化后，viewer 重新映射时底层合成面可能以默认白底重建。macOS 实测
         # 表现为 HTML 区整块白底、文字色正常，滚动或切 tab 触发重绘后消失
@@ -2501,8 +2608,26 @@ class CodeWebViewer(QWebEngineView):
         except RuntimeError:
             pass
 
+    def _mark_self_heal_success(self) -> None:
+        """自愈成功的确认点：骨架重新就绪 = 页面已恢复健康，清零两条计数。
+
+        renderer 崩溃（``_render_crash_count``）与 JS webgl 丢失
+        （``_webgl_ctx_lost_count``）最终都走同一条恢复链：
+        ``_try_restore_context`` → ``_load_skeleton`` → contentReady →
+        本方法，故两个计数一起清零。
+
+        为什么不在 ``_try_restore_context`` 里清零：那里只是**发出**恢复
+        （触发导航），骨架加载失败时不会走到 contentReady，计数必须保留，
+        否则「连续失败达阈值才重建」的语义会被破坏。``reset_for_reuse``
+        的归零保持不变（池化复用边界）。
+        """
+        self._render_crash_count = 0
+        self._webgl_ctx_lost_count = 0
+
     def _on_js_ready(self):
         self._is_js_ready = True
+        # 崩溃/上下文丢失自愈成功的唯一确认点（contentReady 已到）。
+        self._mark_self_heal_success()
         # 🛡️ 导航已落地：白底的另一条入口是「setHtml 时合成的首帧先用了默认
         # 白底，后续透明属性没再回推」。就绪事件是本次导航的第一个稳定时点，
         # 在这里补一次重申，覆盖池化补载 / 看门狗重载骨架 / 崩溃自愈。
@@ -2518,6 +2643,10 @@ class CodeWebViewer(QWebEngineView):
         # 强制补推一次真实值（否则整个渲染周期都停在不匹配的上限上，超限内容
         # 被静默裁掉且不可滚）。幂等，未变化时仅一次属性读取。
         self.sync_body_max_height(force=True)
+        # [UX] 冻结态在 JS 未就绪时下发会落空（函数还不存在），就绪后补一次；
+        # 覆盖「viewer 创建时窗口正在拖动」的窗口。
+        if getattr(self, "_doc_resizing_state", False):
+            self._push_doc_resizing(True)
         # 字体变量兜底：骨架 HTML 是按构建期字体分桶缓存的，从取缓存到 JS
         # 就绪之间配置可能已变（用户在别的窗口切了字体）；且池化复用的骨架
         # 保留上一张卡片的字体。这里比对一次，不一致就注入（一致则零 IPC）。
@@ -2588,6 +2717,12 @@ class CodeWebViewer(QWebEngineView):
         # 否则崩溃自愈 / 池化补载后的历史卡不会重新折叠。
         self._history_collapse_applied = False
         self._v2_reset_live()
+        # [UX] 重载骨架 = 新文档：页面侧冻结态归零，Python 记录同步复位
+        # （否则下次置位会因「状态未变」短路，dfx-resizing 再也不会下发）。
+        self._doc_resizing_state = False
+        _drq = getattr(self, "_doc_resize_quiet_timer", None)
+        if _drq is not None:
+            _drq.stop()
         # 获取系统字体
         font_family = _current_viewer_font_family()
         self._viewer_font_family = font_family
@@ -2651,6 +2786,8 @@ class CodeWebViewer(QWebEngineView):
         cached = _skeleton_cache.get(cache_key)
         if cached is not None:
             _skeleton_cache.move_to_end(cache_key)  # LRU：命中提升为最新
+            # [MEM] 池化复用的 view 可能仍处于 Frozen：导航前先恢复 Active
+            self._thaw_page_if_frozen()
             self.setHtml(cached, QUrl.fromLocalFile(_PROJECT_ROOT + "/"))
             # 🛡️ 透明合成重申：page 的 backgroundColor 只在「下一次导航」才生效，
             # 而白底固化（Chromium 合成属性丢失后回退默认白底）一旦发生，
@@ -2819,6 +2956,30 @@ class CodeWebViewer(QWebEngineView):
                     font-size: var(--dfx-font-size, {scale_font_size(14)}px);
                     margin: 0; 
                     padding: 0;
+                }}
+                /* [UX] 宽度连续变化（拖窗口 / 侧栏动画）期间冻结文档内过渡与动画：
+                   逐帧宽度变化会让元素自带的 transition 每帧被重启（拖尾、抖动），
+                   CSS 动画同理。静态占位只在此类存在时生效，不影响正常渲染。 */
+                html.dfx-resizing *,
+                html.dfx-resizing *::before,
+                html.dfx-resizing *::after {{
+                    transition: none !important;
+                    animation-duration: 0s !important;
+                    animation-delay: 0s !important;
+                }}
+                /* 重元素在 resize 期隔离出主文档重排范围（只隔离绘制/布局，不改尺寸语义） */
+                html.dfx-resizing iframe,
+                html.dfx-resizing svg,
+                html.dfx-resizing canvas {{
+                    contain: layout paint;
+                }}
+                html.dfx-resizing img {{
+                    contain: paint;
+                }}
+                /* [UX] resize 恢复时的一次性淡入：只由 Python 侧 _dfxRestoreFade 触发，
+                   避免占位→真实内容的硬切。opacity 是合成层动画，不触发重排。 */
+                html.dfx-restore-fade {{
+                    transition: opacity 160ms cubic-bezier(0.22, 0.61, 0.36, 1);
                 }}
                 body {{
                     /* 右侧 8px = 14px 视觉边距 - 6px 常驻滚动轨道：轨道占位使
@@ -3505,21 +3666,6 @@ class CodeWebViewer(QWebEngineView):
                     content: "深度思考中...";
                     color: var(--text-muted);
                 }}
-                /* 思考轮播提示文字 — 从左到右脉冲渐变色动画 */
-                .think-streaming-tip {{
-                    background: linear-gradient(
-                        90deg,
-                        var(--text-secondary) 0%,
-                        var(--accent) 45%,
-                        var(--accent-warm) 55%,
-                        var(--text-secondary) 100%
-                    );
-                    background-size: 200% 100%;
-                    background-clip: text;
-                    -webkit-background-clip: text;
-                    -webkit-text-fill-color: transparent;
-                    animation: think-tip-sweep 2.5s ease-in-out infinite;
-                }}
                 @keyframes think-tip-sweep {{
                     0% {{ background-position: 200% 0; }}
                     100% {{ background-position: -200% 0; }}
@@ -4199,14 +4345,15 @@ class CodeWebViewer(QWebEngineView):
                     50%      {{ opacity: .75; }}
                 }}
                 /* ── 减少动态效果：停掉所有**无限循环**的装饰性 CSS 动画 ──
-                   这些动画（骨架脉冲/扫光、思考提示流光、工具预览流光）会一直
+                   这些动画（骨架脉冲/扫光、工具预览流光）会一直
                    重绘直到元素被移除；流式期间与逐字渲染叠加会明显加剧掉帧与
                    图表闪烁。关掉后仍有静态骨架与文字，状态反馈不受影响。 */
                 @media (prefers-reduced-motion: reduce) {{
                     .chart-skeleton__bars i,
                     .chart-skeleton::after,
                     .dfx-stream-note,
-                    .think-streaming-tip,
+                    .think-content.loading,
+                    .think-block[data-streaming="true"] .think-streaming-preview::after,
                     .tool-streaming-block[data-streaming="true"] .tool-streaming-preview {{ animation: none !important; }}
                 }}
                 /* 图表不可用兜底：两类失败共用同一 class —— ① fence 已闭合但 JSON
@@ -4347,10 +4494,6 @@ class CodeWebViewer(QWebEngineView):
                     opacity: 1;
                 }}
 
-                @keyframes _streamingPulse {{
-                    0%, 100% {{ opacity: 0.3; transform: scale(0.85); }}
-                    50% {{ opacity: 1; transform: scale(1.1); }}
-                }}
                 #tool-content {{
                     /* 固定最大高度，超出时显示滚动条。
                        不设动态大小（不依赖 body 高度比例）。 */
@@ -5626,6 +5769,12 @@ class CodeWebViewer(QWebEngineView):
                     if (window._toolCompactMode) reorganizeContent();
                     // 包裹所有 <table>（不含 .code-table）到可横向滚动的容器中
                     // [T28] 八个后处理全部收窄到 roots 作用域（O(新增段)，替代全文扫描）
+                    // 🐛 修复（shimmer 滞留）：差量新增的思考块自带 loading class
+                    // （Python 渲染产物），原只在全量渲染清理——流式差量期间
+                    // 折叠块 background-position 动画持续逐帧重绘。与全量对齐清理。
+                    container.querySelectorAll('.think-content, .think-streaming-preview').forEach(function (content) {{
+                        content.classList.remove('loading');
+                    }});
                     window._wrapTablesIn(roots);
                     // 恢复展开状态
                     restoreCollapsibleStates(roots);
@@ -6407,8 +6556,11 @@ class CodeWebViewer(QWebEngineView):
                     }});
                     // 骨架挂回末尾（图表仍在生成中）；闭合时 _reattachSkeleton 自动丢弃
                     window._reattachSkeleton(container, _skel, html, '', tailDiv);
-                    // 与 updateContentAppend 对齐：表格包裹 + 折叠状态恢复 + 滚动
+                    // 与 updateContentAppend 对齐：loading 清理 + 表格包裹 + 折叠状态恢复 + 滚动
                     // [T28] 八个后处理全部收窄到 roots 作用域（O(新增段)，替代全文扫描）
+                    container.querySelectorAll('.think-content, .think-streaming-preview').forEach(function (content) {{
+                        content.classList.remove('loading');
+                    }});
                     window._wrapTablesIn(roots);
                     restoreCollapsibleStates(roots);
                     window._suppressScrollEvent = true;
@@ -7438,7 +7590,21 @@ class CodeWebViewer(QWebEngineView):
                     if (!f) return;
                     if (msg.t === 'h') {{
                         var h = parseInt(msg.v, 10) || 0;
-                        if (h > 0) f.style.height = Math.max(48, Math.min(1600, h)) + 'px';
+                        if (h > 0) {{
+                            f._dfxPendingH = Math.max(48, Math.min(1600, h));
+                            if (window._dfxResizing) {{
+                                // resize 期只记最新值：逐帧改高度会让整卡跟着抽动。
+                                // 静默 120ms 或 _dfxSetResizing(false) 时一次性应用。
+                                if (!f._dfxHFlushTimer) {{
+                                    f._dfxHFlushTimer = setTimeout(function () {{
+                                        f._dfxHFlushTimer = 0;
+                                        window._dfxApplyWidgetH(f);
+                                    }}, 120);
+                                }}
+                            }} else {{
+                                window._dfxApplyWidgetH(f);
+                            }}
+                        }}
                         if (typeof _autoScrollAfterAsyncRender === 'function') _autoScrollAfterAsyncRender();
                         if (typeof reportHeightDebounced === 'function') reportHeightDebounced();
                         return;
@@ -7490,9 +7656,35 @@ class CodeWebViewer(QWebEngineView):
                 (function () {{
                     var _b = document.body;
                     var _stamp = function () {{ _b._lastInputAt = performance.now(); }};
-                    _b.addEventListener('wheel', _stamp, {{passive: true}});
-                    _b.addEventListener('touchstart', _stamp, {{passive: true}});
-                    _b.addEventListener('keydown', _stamp);
+                    // 方向语义同 _bindUserScrollIntent：-1 上滚 / 1 下滚。
+                    // body 的 scroll 监听只允许上滚置位——下滚途中内容增长被
+                    // 记成「上滚阅读」的话，跟随会永久停摆。
+                    _b.addEventListener('wheel', function (e) {{
+                        _b._lastInputDir = e.deltaY < 0 ? -1 : 1;
+                        _stamp();
+                        if (e.deltaY > 0) {{
+                            // 解封基准：本次下滚时的可滚量（之后内容增长不算离底）
+                            _b._downScrollBaseMax = Math.max(0, _b.scrollHeight - _b.clientHeight);
+                            if (typeof _dfxReleaseBodyFollowOnDown === 'function') {{
+                                _dfxReleaseBodyFollowOnDown({AUTO_SCROLL_THRESHOLD});
+                            }}
+                            if (typeof _dfxSettleBodyDownScroll === 'function') {{
+                                _dfxSettleBodyDownScroll({AUTO_SCROLL_THRESHOLD});
+                            }}
+                        }}
+                    }}, {{passive: true}});
+                    _b.addEventListener('touchstart', function () {{
+                        _b._lastInputDir = -1;  // 触屏方向未知，按上滚保守处理
+                        _stamp();
+                    }}, {{passive: true}});
+                    _b.addEventListener('keydown', function (e) {{
+                        if (e.key === 'ArrowUp' || e.key === 'PageUp' || e.key === 'Home') {{
+                            _b._lastInputDir = -1;
+                        }} else if (e.key === 'ArrowDown' || e.key === 'PageDown' || e.key === 'End') {{
+                            _b._lastInputDir = 1;
+                        }}
+                        _stamp();
+                    }});
                 }})();
                 document.body.addEventListener('scroll', function() {{
                     var _st = document.body.scrollTop;
@@ -7512,10 +7704,12 @@ class CodeWebViewer(QWebEngineView):
                     var _nearBottom = Math.abs(document.body.scrollHeight - _st - document.body.clientHeight) < {
             AUTO_SCROLL_THRESHOLD
         };
-                    // 只允许「贴底 → 复位」；置位需近期真实输入证据（见上方时间戳）。
-                    // 否则切回标签页 / 高度上限变化引起的 scroll 会把跟随永久锁死。
+                    // 只允许「贴底 → 复位」；置位需近期**上滚**输入证据（见上方方向
+                    // 记录）。否则切回标签页 / 高度上限变化引起的 scroll 会把跟随
+                    // 永久锁死；下滚输入同样不能置位（朝最新内容滚，不该判成阅读态）。
                     if (_nearBottom) window._userScrolledWithin = false;
-                    else if (document.body._lastInputAt &&
+                    else if (document.body._lastInputDir === -1 &&
+                             document.body._lastInputAt &&
                              (performance.now() - document.body._lastInputAt) < 900) {{
                         window._userScrolledWithin = true;
                     }}
@@ -7534,9 +7728,26 @@ class CodeWebViewer(QWebEngineView):
                 // 不再因 CSS animation 重启而导致视觉跳跃。
                 let _snakeStartTime = null;
                 let _snakeRafId = null;
-                function _animateThinkSnake() {{
+                let _snakeArcs = [];  // 缓存的 arc 元素列表：帧内不再全文档查询
+                function _refreshSnakeArcs() {{
+                    _snakeArcs = [];
                     const nodes = document.querySelectorAll('.think-snake-arc');
-                    if (!nodes.length) {{
+                    for (let i = 0; i < nodes.length; i++) _snakeArcs.push(nodes[i]);
+                    return _snakeArcs.length;
+                }}
+                function _applySnakeStatic() {{
+                    // 减少动效：跳过运动过程，dashoffset 固定相位 0（保留转圈图标的状态反馈）
+                    for (let i = 0; i < _snakeArcs.length; i++) {{
+                        if (_snakeArcs[i].isConnected) _snakeArcs[i].setAttribute('stroke-dashoffset', '0');
+                    }}
+                }}
+                function _animateThinkSnake() {{
+                    // [PERF] 帧内只滤失联节点，不重新全文档查询——新增节点由
+                    // MutationObserver 驱动的 _ensureThinkSnake 重查缓存。
+                    if (_snakeArcs.some(el => !el.isConnected)) {{
+                        _snakeArcs = _snakeArcs.filter(el => el.isConnected);
+                    }}
+                    if (!_snakeArcs.length) {{
                         // 蛇形图标已从 DOM 移除（思考结束 / 内容重建）：停掉 rAF。
                         // 旧实现在此仍无条件 requestAnimationFrame，形成**永不停止**
                         // 的 60fps 空转 + 每帧全表扫描，思考结束后白烧主线程。
@@ -7548,21 +7759,36 @@ class CodeWebViewer(QWebEngineView):
                     if (_snakeStartTime === null) _snakeStartTime = performance.now();
                     const elapsed = performance.now() - _snakeStartTime;
                     // 周期 1.5s，完整一圈对应 stroke-dashoffset: 0→-50.265（周长 2π×8 ≈ 50.265）
-                    nodes.forEach(el => {{
+                    for (let i = 0; i < _snakeArcs.length; i++) {{
+                        const el = _snakeArcs[i];
                         let extraDelay = 0;
                         if (el.classList.contains('think-snake-head')) extraDelay = 350;
                         else if (el.classList.contains('think-snake-body')) extraDelay = 180;
                         const phase = (elapsed + extraDelay) % 1500;
                         const offset = -(phase / 1500) * 50.265;
                         el.setAttribute('stroke-dashoffset', offset);
-                    }});
+                    }}
                     _snakeRafId = requestAnimationFrame(_animateThinkSnake);
                 }}
                 function _ensureThinkSnake() {{
-                    // 幂等：rAF 已在跑时立即返回（成本 = 一次空判断）
-                    if (_snakeRafId === null && document.querySelector('.think-snake-arc')) {{
-                        _animateThinkSnake();
-                    }}
+                    // 幂等：rAF 已在跑时立即返回（成本 = 一次空判断）。
+                    // [PERF] arc 列表缓存在 _snakeArcs，本函数（MutationObserver
+                    // 驱动）负责重查；rAF 帧内只做失联过滤。
+                    // 减少动效：不启动 rAF，arc 置静态相位 0；已在跑的先停。
+                    const hasArc = _refreshSnakeArcs() > 0;
+                    if (!hasArc) return;
+                    try {{
+                        if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) {{
+                            if (_snakeRafId !== null) {{
+                                cancelAnimationFrame(_snakeRafId);
+                                _snakeRafId = null;
+                                _snakeStartTime = null;
+                            }}
+                            _applySnakeStatic();
+                            return;
+                        }}
+                    }} catch (e) {{ /* matchMedia 不可用按开启动画处理 */ }}
+                    if (_snakeRafId === null) _animateThinkSnake();
                 }}
                 window._ensureThinkSnake = _ensureThinkSnake;
                 new MutationObserver(_ensureThinkSnake).observe(document.body, {{ childList: true, subtree: true }});
@@ -7577,7 +7803,14 @@ class CodeWebViewer(QWebEngineView):
                 function _scrollToolContentToBottom() {{
                     var tc = document.getElementById('tool-content');
                     if (!tc) return;
-                    // 用户主动向上滚动了工具区则不自动滚底
+                    // 用户主动向上滚动了工具区则不自动滚底。
+                    // 自愈：标志与几何矛盾（已贴底）时以几何为准，否则一次误置
+                    // 就再没有自动复位的机会（流式内容在 scroll 事件派发前增长
+                    // 会让 atBottom 判定失真）。
+                    if (tc._userScrolledUp && _dfxNearBottom(tc)) {{
+                        tc._userScrolledUp = false;
+                        if (typeof reportHeightDebounced === 'function') reportHeightDebounced();
+                    }}
                     if (tc._userScrolledUp) return;
                     // 抑制本次程序滚底触发的 scroll 事件：异步 scroll 到达时
                     // scrollHeight 可能已增长（流式新块加入），atBottom 误判 false
@@ -7597,10 +7830,17 @@ class CodeWebViewer(QWebEngineView):
                     // 程序性滚底（_scrollToolContentToBottom / innerHTML 重建）不视为用户行为
                     if (tc._progDepth > 0) {{ tc._progDepth--; return; }}
                     var atBottom = Math.abs(tc.scrollHeight - tc.scrollTop - tc.clientHeight) < 30;
-                    // 贴底任何时候都恢复跟随；置位「用户上滚」需近期真实输入证据
-                    // （tc 已绑 _bindUserScrollIntent，会记录 _lastInputAt）。
-                    if (atBottom) tc._userScrolledUp = false;
-                    else if (_recentUserScrollInput(tc)) tc._userScrolledUp = true;
+                    // 贴底任何时候都恢复跟随；置位「用户上滚」需近期**上滚**输入证据
+                    // （tc 已绑 _bindUserScrollIntent，会记录 _lastInputAt/_lastInputDir）。
+                    // 下滚不置位：否则滚向最新内容途中被内容增长卡成阅读态。
+                    if (atBottom) {{
+                        if (tc._userScrolledUp) {{
+                            tc._userScrolledUp = false;
+                            if (typeof reportHeightDebounced === 'function') reportHeightDebounced();
+                        }}
+                    }} else if (tc._lastInputDir === -1 && _recentUserScrollInput(tc)) {{
+                        tc._userScrolledUp = true;
+                    }}
                 }});
                 // 🐛 修复（流式滚动位置重置）：wheel 事件同步标记上滚意图——scroll
                 // 事件异步派发，与流式 JS（_scrollToolContentToBottom）存在竞争窗口：
@@ -7620,77 +7860,6 @@ class CodeWebViewer(QWebEngineView):
                 // 原 _cleanupStuckTools 会在 30 秒后标记工具为"超时未返回结果"，
                 // 但工具可能仍在执行中，不应急于标记失败。硬等即可。
 
-                // ===== 深度思考轮播提示（减少等待焦虑，类似 CodeBuddy 设计理念）=====
-                // 当 .think-streaming[data-streaming="true"] 存在时，定时轮换显示
-                // 说明信息，让用户在等待期间能获取有用提示，而不是只盯着转圈。
-                const _thinkTips = [
-                    "正在深度思考中...",
-                    "分析上下文关联...",
-                    "检索相关知识库...",
-                    "正在综合推理...",
-                    "组织回答结构...",
-                    "即将输出结果...",
-                    "梳理关键信息...",
-                    "对比多个方案...",
-                    "校验逻辑完整性...",
-                    "回溯历史消息...",
-                    "推理最佳路径...",
-                    "整合分析结果...",
-                    "审查边缘场景...",
-                    "串联上下文线索...",
-                    "构建最终输出...",
-                    "准备呈现答案..."
-                ];
-                let _tipIndex = 0;
-                let _tipTimer = null;
-
-                function _startTipRotation() {{
-                    _stopTipRotation();
-                    // 首次启动时给文字 span 加上脉冲渐变色 class
-                    const el0 = document.querySelector('.think-streaming[data-streaming="true"]');
-                    if (el0) {{
-                        const s0 = el0.querySelector('span > span:last-child');
-                        if (s0) s0.classList.add('think-streaming-tip');
-                    }}
-                    _tipTimer = setInterval(() => {{
-                        const el = document.querySelector('.think-streaming[data-streaming="true"]');
-                        if (!el) {{ _stopTipRotation(); return; }}
-                        // 🐛 修复：不能用 span:last-child — 外层 span（唯一子元素）也会命中，
-                        // 导致 textContent 替换时清掉 spinner SVG。改为精确选择内层文字 span。
-                        const tipSpan = el.querySelector('span > span:last-child');
-                        if (tipSpan) {{
-                            _tipIndex = (_tipIndex + 1) % _thinkTips.length;
-                            tipSpan.textContent = _thinkTips[_tipIndex];
-                        }}
-                    }}, 3500);
-                }}
-
-                function _stopTipRotation() {{
-                    if (_tipTimer) {{
-                        clearInterval(_tipTimer);
-                        _tipTimer = null;
-                    }}
-                }}
-
-                // 通过 MutationObserver 监听 content-placeholder 变化，
-                // 自动启停轮播（兼容 updateContent 全量重建 DOM 的场景）。
-                const _tipObserver = new MutationObserver(() => {{
-                    const hasStreaming = !!document.querySelector('.think-streaming[data-streaming="true"]');
-                    if (hasStreaming && !_tipTimer) {{
-                        _startTipRotation();
-                    }} else if (!hasStreaming && _tipTimer) {{
-                        _stopTipRotation();
-                    }}
-                }});
-                const _tipTarget = document.getElementById('content-placeholder');
-                if (_tipTarget) {{
-                    _tipObserver.observe(_tipTarget, {{ childList: true, subtree: true }});
-                }}
-                // 也监听 tool-content（思考块被移动到此处）
-                const _tipToolContent = document.getElementById('tool-content');
-                if (_tipToolContent) {{
-                    _tipObserver.observe(_tipToolContent, {{ childList: true, subtree: true }});
-                }}
             </script>
         </body>
         </html>
@@ -7701,6 +7870,8 @@ class CodeWebViewer(QWebEngineView):
         if len(_skeleton_cache) > _SKELETON_CACHE_MAX:
             _skeleton_cache.popitem(last=False)  # LRU：淘汰最久未用
         # 以项目根目录为基础 URL，使相对路径图片（如 images/xxx.png）可正确解析
+        # [MEM] 离屏冻结过的页先恢复 Active，否则导航会被挂起
+        self._thaw_page_if_frozen()
         self.setHtml(html, QUrl.fromLocalFile(_PROJECT_ROOT + "/"))
         # 🛡️ 同上（缓存命中分支）：导航后重申透明合成，防 HTML 区白底固化。
         self.ensure_transparent_composition()
@@ -7732,6 +7903,9 @@ class CodeWebViewer(QWebEngineView):
     _theme_chain_ver = None
 
     _SOFT_BOUNDARY_MERGE_MS = 100
+    # 硬边界合并窗：距上次渲染不足该值时并入窗口末尾一次全量渲染。
+    # 意义见 _schedule_render 硬边界分支注释（流式分配风暴削频）。
+    _HARD_BOUNDARY_MERGE_MS = 80
     # [P2-8 F1] tail 行内渲染降载：软边界 ~每 30 字触发一次全量 tail convert
     # （主线程同步），无空行长文 tail 线性增长 → 总开销 O(n²)。增量阈值 512
     # 字符（≈中文 2-4 句，触发频率降 ~16 倍）+ 时间旁路 1.5s（保证慢速流式
@@ -7856,14 +8030,20 @@ class CodeWebViewer(QWebEngineView):
         # 段落结束（双换行）：O(1) 后缀检测
         if md_text.endswith("\n\n"):
             return True
-        # think 块 / 代码块闭合：rstrip 后判尾部。
+        # think 块 / 代码块闭合：尾向判定（P2，与软边界同款写法）。
         # ⚠️ 不要改成尾部锚定正则（曾试过 `</think>[\s]*$|```[\s]*$`）：
-        # re 无法跳到串尾，多分支尾部匹配是全串逐位回溯，实测比 rstrip 慢 3x；
-        # 而 CPython 的 str.rstrip() 在无可剥离字符时**返回同一对象**
-        # （'abc'.rstrip() is 'abc' → True），流式正文绝大多数帧尾部无空白，
-        # 原写法本就是零拷贝。
-        stripped = md_text.rstrip()
-        return stripped.endswith("</think>") or CodeWebViewer._CLEAN_BOUNDARY_CODE_BLOCK_RE.search(stripped) is not None
+        # re 无法跳到串尾，多分支尾部匹配是全串逐位回溯，实测比 rstrip 慢 3x。
+        # 尾向 isspace 跳空白后用 endswith/search 的 (start, end) 窗口参数在
+        # **原串**上做尾窗判定：全程零拷贝（rstrip 在尾部有空白时全串拷贝），
+        # 语义与 rstrip 版严格等价——rstrip 剥 Unicode 空白全集，isspace 同全集；
+        # re 的 endpos 语义即「串在 endpos 处截断」，$ 匹配 endpos，无窗口越界。
+        i = len(md_text) - 1
+        while i >= 0 and md_text[i].isspace():
+            i -= 1
+        if i < 0:
+            return False
+        end = i + 1
+        return md_text.endswith("</think>", 0, end) or CodeWebViewer._CLEAN_BOUNDARY_CODE_BLOCK_RE.search(md_text, 0, end) is not None
 
     @staticmethod
     def _has_reached_soft_boundary(md_text: str) -> bool:
@@ -7910,10 +8090,11 @@ class CodeWebViewer(QWebEngineView):
             return
         if self._streaming and len(text) > 3:
             # 差量渲染：仅在自然边界触发，否则靠增量文本 + 安全兜底
-            # [PERF] 软边界（句号）不再走 immediate —— 中文句号密度极高，
-            # 每命中一次就同步跑一遍 O(tail) 的 markdown 转换，随消息增长呈
-            # O(n²)。改由 _schedule_render 内部的 90ms 短定时器合并（见
-            # _SOFT_BOUNDARY_RENDER_DELAY_MS），硬边界仍保持 immediate。
+            # [PERF] 软边界（句号）不再无条件 immediate —— 中文句号密度极高，
+            # 无脑每句同步跑一遍 O(tail) 的 markdown 转换，会随消息增长呈
+            # O(n²)。实际策略见 _schedule_render：距上次渲染不足合并窗口
+            # （_SOFT_BOUNDARY_MERGE_MS，现为 100ms）才推迟到窗口末尾合并，
+            # 慢速流式（句间隔 ≥100ms）仍 immediate，硬边界始终 immediate。
             # [P0-④] 同拍双扫去重：硬边界判定结果作参数传给 _schedule_render，
             # 非 immediate 帧不再重判（旧逻辑同拍 O(n) rstrip+尾正则跑两遍）。
             hard = self._has_reached_clean_boundary(self._markdown_text)
@@ -8133,11 +8314,22 @@ class CodeWebViewer(QWebEngineView):
         # 1. 自然边界触发（由 append_chunk 检测到并传 immediate=True）
         # 2. 安全兜底：2s 内无边界到达，强制渲染确保格式最终正确
         if self._streaming:
-            # 硬边界（段落结束 / think 闭合 / 代码块闭合）：立即渲染。
-            # 硬边界密度远低于软边界，且段落结束必须及时重排，保持同步。
+            # 硬边界（段落结束 / think 闭合 / 代码块闭合）：过 80ms 合并窗。
+            # [PERF] 原为 immediate——但全量渲染的分配是 O(全文)（markdown
+            # 解析 + HTML 序列化 + JS 桥传输），密集硬边界时段落级 immediate
+            # 让分配风暴频率 ≈ chunk 频率，是流式 RSS 锯齿的主要泵。距上次
+            # 渲染不足窗口时并入窗口末尾一次执行：观感代价 ≤80ms 格式化延迟，
+            # 全量次数显著下降。首渲不受影响（_last_render_ts=0 → since 巨大）。
             if boundary is None:
                 boundary = self._has_reached_clean_boundary(self._markdown_text)
             if boundary:
+                since_ms = (time.monotonic() - getattr(self, "_last_render_ts", 0.0)) * 1000
+                if since_ms < self._HARD_BOUNDARY_MERGE_MS:
+                    interval = max(1, self._HARD_BOUNDARY_MERGE_MS - int(since_ms))
+                    # 已挂更早到点的定时器（软窗/自适应）则不动，避免推迟
+                    if (not self._render_timer.isActive()) or (self._render_timer.interval() > interval):
+                        self._render_timer.start(interval)
+                    return
                 self._perform_update()
                 return
             # 软边界（句号结尾）：**仅在密集流式时合并**，否则仍即时渲染。
@@ -8531,7 +8723,12 @@ class CodeWebViewer(QWebEngineView):
                 if getattr(self, "_incremental_finalize", False) and self._try_incremental_finalize():
                     self._incremental_finalize = False
                     self._final_render_pending = False
-                    self._last_rendered_markdown = self._markdown_text
+                    # [MEM] 收尾完成即释放差量基线副本：_stable_html（全文 HTML
+                    # 已交付 DOM）与 _last_rendered_markdown（流式差量基线，终态
+                    # 无人读取，下一轮流式从重置点重建）各几十~几百 KB/卡。
+                    # 原写法 `= self._markdown_text` 还多复制一份全文，一并省掉。
+                    self._stable_html = ""
+                    self._last_rendered_markdown = ""
                     return
                 # 收尾失败 / 不适用 → 清标记 + 清稳定区基线，回退原全量路径。
                 # _try 失败时 _stable_md_len/_stable_html 可能已被部分推进
@@ -8829,8 +9026,9 @@ class CodeWebViewer(QWebEngineView):
                         f"{json.dumps(_tail_html).decode('utf-8')});"
                     )
                     # [T28] 差量产物入图检测（只置不清）：流式新增图表块不再拉长
-                    # 无图卡窗口期（与全量置位点同款）
-                    self._mark_has_charts(new_html + _tail_html)
+                    # 无图卡窗口期（与全量置位点同款）；两段分别检测避免拼接
+                    self._mark_has_charts(new_html)
+                    self._mark_has_charts(_tail_html)
                     self._rdiag_hit("diff_applied")
                     self.page().runJavaScript(js)
                     # 已差量消费的 markdown 视为"已渲染"（避免重复全量）
@@ -9197,7 +9395,13 @@ class CodeWebViewer(QWebEngineView):
         since = now - self.__dict__.get("_v2_live_tail_done_ts", 0.0)
         if grown < self._TAIL_INLINE_MIN_DELTA and since < self._TAIL_INLINE_MIN_INTERVAL_S:
             return None
+        # [E3] v2 尾部行内渲染耗时打点（守卫同 v1，见 _render_tail_inline）
+        _diag_t0 = time.perf_counter() if _diag_trace_enabled() else 0.0
         html = self._v2_live_tail_html(text, reasoning=False)
+        if _diag_t0:
+            logger.debug(
+                f"[tail-inline] v2 渲染耗时 {(time.perf_counter() - _diag_t0) * 1000:.2f}ms len={len(text)}"
+            )
         if not html:
             # 含协议标签 / 渲染失败：退回纯文本尾（不更新记账，下一批再试）
             return None
@@ -9459,7 +9663,12 @@ class CodeWebViewer(QWebEngineView):
             return True
 
         self._height_report_pending = True
-        self._mark_has_charts("".join(b.html for b in (*mr.content, *mr.tool)))
+        # [T28] 入图检测逐块短路：任一块命中标记即置位，不再 join 全量产物
+        if any(
+            "echarts-container" in b.html or "mermaid-block" in b.html or "chart-streaming" in b.html
+            for b in (*mr.content, *mr.tool)
+        ):
+            self._has_charts = True
 
         page = self.page()
         if page is None:
@@ -9626,7 +9835,14 @@ class CodeWebViewer(QWebEngineView):
             self._tail_last_rendered_len = len(_tail)
             self._tail_last_rendered_ts = _now
             return
+        # [E3] 尾部行内渲染耗时打点：源码运行默认开，DRIFOX_STARTUP_PROBE=0
+        # 或打包版关（_diag_trace_enabled，同 main.py 诊断守卫纪律）。
+        _diag_t0 = time.perf_counter() if _diag_trace_enabled() else 0.0
         html = _render_inline_tail(_tail, compact=self._tool_compact_mode)
+        if _diag_t0:
+            logger.debug(
+                f"[tail-inline] v1 渲染耗时 {(time.perf_counter() - _diag_t0) * 1000:.2f}ms len={len(_tail)}"
+            )
         # 🐛 守卫（流式图表两遍）：尾部渲染产物含稳定区**已渲染过**的图表容器
         # （同 id）→ 说明差量基线落后于 DOM（典型：fence 闭合后基线停在 fence
         # 前）。此时插入尾节点会让同一图表出现两份；置全量标记，交整体替换去重。
@@ -9863,6 +10079,12 @@ class CodeWebViewer(QWebEngineView):
                 lambda _result: None,
             )
         self._last_rendered_html = None
+        # [MEM] 终渲染落地后释放差量基线副本：_stable_html（最终全文 HTML，
+        # 已交付 DOM）与 _last_rendered_markdown（流式差量基线，终态不再走
+        # 差量）只在下一轮流式的重置点重建，长回复下两份副本各几十~几百 KB。
+        # 清空等价于重置语义（差量逻辑对空基线退化为全量渲染，安全）。
+        self._stable_html = ""
+        self._last_rendered_markdown = ""
 
     def _on_render_done_signal(self, seq: int, html):
         """主线程槽：接收 worker 线程池渲染完成信号（renderDone.emit 跨线程投递）"""
@@ -10302,8 +10524,10 @@ class CodeWebViewer(QWebEngineView):
                     f"{json.dumps(new_html).decode('utf-8')},"
                     f"{json.dumps(tail_html).decode('utf-8')});"
                 )
-                # [T28] 差量收尾产物入图检测（与全量置位点同款，只置不清）
-                self._mark_has_charts(new_html + tail_html)
+                # [T28] 差量收尾产物入图检测（与全量置位点同款，只置不清）；
+                # 两段分别检测避免拼接（只置不清语义下与拼接检测等价）
+                self._mark_has_charts(new_html)
+                self._mark_has_charts(tail_html)
             if replacements:
                 self.page().runJavaScript(f"finalizeStreamingBlocks({json.dumps(replacements).decode('utf-8')});")
             self._height_report_pending = True
@@ -11392,6 +11616,10 @@ class CodeWebViewer(QWebEngineView):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
+        # [UX] 宽度连续变化期冻结文档过渡/动画（详见 __init__ 的 timer 注释）。
+        # 必须在下面的 _streaming 早退之前：流式期间窗口同样会被拖动。
+        self._set_doc_resizing(True)
+        self._doc_resize_quiet_timer.start()
         # [MEM-2] 宽度变化 → 面积上限变化 → 文档滚动容器上限必须跟着变。
         # 必须放在下面的 `_streaming` 早退之前：流式期间同样会 resize（窗口拖拽、
         # 面板开合），漏掉就会在流式全程维持一个不匹配的上限（文字被裁且不可滚）。
@@ -11872,12 +12100,12 @@ class PlainTextViewer(QWidget):
         self.text_edit.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.text_edit.setLineWrapMode(QTextEdit.WidgetWidth)
         self._apply_text_style()
-        # 把 QTextEdit 内部滚轮劫持到 qfluentwidgets SmoothScroll 引擎——
-        # 与外层 chat_scroll_area（SingleDirectionScrollArea）走同款 400ms
-        # 插值、stepRatio 1.5、连滚加速。手感统一，消除"卡内跳、卡间滑"的异样。
-        # CodeWebViewer 的 Chromium 内部滚动是引擎边界（事件被子进程拦截），
-        # 维持原状，边界放行靠外层 MessageCard.wheelEvent 接管。
-        SmoothScrollDelegate(self.text_edit)
+        # [I3] QTextEdit 内部滚轮改走 install_fast_wheel：关 qfw SmoothScrollDelegate
+        # 400ms/24 帧平滑动画（T5 实证内滚叠加透明层 667 paint/格），一次到位 +
+        # step_ratio 0.4（内滚小容器小步长）。到顶/到底放行语义保留：边界冒泡
+        # 仍靠外层 MessageCard.wheelEvent 接管；CodeWebViewer 的 Chromium 内部
+        # 滚动是引擎边界（事件被子进程拦截），维持原状。
+        install_fast_wheel(self.text_edit, step_ratio=0.4)
         layout.addWidget(self.text_edit)
 
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)

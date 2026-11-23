@@ -559,6 +559,22 @@ class HookMatchRule:
     def __post_init__(self):
         if self.hooks is None:
             self.hooks = []
+        # 正则预编译（N3 性能优化）：坏正则在加载期即暴露（warning + 置 None），
+        # 匹配期不再逐次 try/except。工具名匹配走大小写不敏感版本
+        # （compiled.match 第二参数是 pos 而非 flags，IGNORECASE 必须编进 pattern）
+        self._compiled = None
+        self._compiled_ic = None
+        if self.matcher:
+            try:
+                self._compiled = re.compile(self.matcher)
+                self._compiled_ic = re.compile(self.matcher, re.IGNORECASE)
+            except re.error as e:
+                self._compiled = None
+                self._compiled_ic = None
+                logger.warning(
+                    f"[HookMatchRule] 正则编译失败，该规则不参与正则匹配: "
+                    f"skill={self.skill_name!r} matcher={self.matcher!r} error={e}"
+                )
 
     def matches(self, context: Dict[str, Any]) -> bool:
         """检查规则是否匹配当前上下文"""
@@ -628,35 +644,33 @@ class HookMatchRule:
 
             return ToolNameMapper.to_native(pattern) == ToolNameMapper.to_native(actual)
 
+        # 正则匹配段：matcher 为坏正则时 _compiled 为 None，直接早退 False
+        # （与改前三连 try/except re.error → return False 行为等价）
+        if self._compiled is None:
+            return False
+
         # 正则匹配用户消息
         message = context.get("message", "")
-        try:
-            if re.match(self.matcher, message):
-                return True
-        except re.error:
-            pass
+        if self._compiled.match(message):
+            return True
 
         # 对于 PostAssistantMessage/Stop 等事件，也尝试匹配 assistant 回复内容
         # context["response"] 是 DriFoxx 自有格式，context["assistant_response"] 是 Claude Code 兼容格式
         # 两个字段通常指向同一内容，取第一个非空值即可
         resp_text = context.get("assistant_response") or context.get("response", "")
         if resp_text:
-            try:
-                if re.match(self.matcher, resp_text):
-                    return True
-            except re.error:
-                pass
+            # 超长护栏：64KB 截断，仅防 DoS 级超长回复拖垮匹配，正常回复永不触发
+            resp_text = resp_text[:65536]
+            if self._compiled.match(resp_text):
+                return True
 
         # 对于工具相关事件，也尝试匹配工具名（大小写不敏感）
         # 这样 "Write|Edit" 这样的 matcher 可以直接匹配工具名
         if event_name in ("PreToolUse", "PostToolUse"):
             tool_name = context.get("tool_name", "")
             if tool_name:
-                try:
-                    if re.match(self.matcher, tool_name, re.IGNORECASE):
-                        return True
-                except re.error:
-                    pass
+                if self._compiled_ic.match(tool_name):
+                    return True
 
         return False
 
@@ -1990,9 +2004,24 @@ class HookManager:
         # Phase 2: 同步阶段 hook（PROMPT + PYTHON 注入型）按序执行，输出需立即注入
         for idx in sync_indices:
             hook = all_hooks[idx]
+            # T7-obs 注入型补强（#A1 发现 #3 观测缺口）：注入型 hook 在主线程
+            # 发消息/建窗路径同步执行，慢 hook 吃主线程此前不可见（COMMAND 已有
+            # [HookSlowCommand] 打点）。对齐其口径补 [HookSlowInjected]；
+            # 仅观测，不改变任何执行行为。
+            _t0 = time.monotonic()
             results[idx] = self._execute_hook(
                 hook, context, trigger_async=False, skip_finished_callback=skip_finished_callback
             )
+            elapsed_ms = (time.monotonic() - _t0) * 1000
+            if elapsed_ms > 2000:
+                limit_ms = max(float(hook.timeout), 0.001) * 1000
+                ratio = elapsed_ms / limit_ms
+                proximity = "，接近 timeout 上限" if ratio >= 0.8 else ""
+                logger.warning(
+                    f"[HookSlowInjected] plugin={_hook_owner_name(hook)} event={event_name} "
+                    f"type={hook.type} fn={hook.function or hook.prompt or 'unknown'!r} "
+                    f"耗时 {elapsed_ms:.0f}ms (timeout {hook.timeout}s，占 {ratio:.0%}){proximity}"
+                )
 
         # Phase 3: 非 PROMPT hook 并行执行
         if parallel_indices:

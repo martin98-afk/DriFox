@@ -123,6 +123,18 @@ def test_window_workbench_without_tm_is_noop(monkeypatch):
     api = pool["window.workbench"]
     api["open"]("docs")  # 不应抛异常
     api["refresh"]()
+    assert api["page"]("docs") is None
+
+
+def test_window_workbench_page_returns_plugin_page(monkeypatch):
+    """page(key)：插件取自己的页面实例做原位操作（file-tree 预览定位用）。"""
+    page = object()
+    tm = _Tm()
+    tm.open_workbench_page = lambda key: page if key == "file-tree" else None
+    pool = _pool({"window.workbench"}, monkeypatch, tm=tm)
+    api = pool["window.workbench"]
+    assert api["page"]("file-tree") is page
+    assert api["page"]("other") is None
 
 
 # ──────────────── ui.events ────────────────

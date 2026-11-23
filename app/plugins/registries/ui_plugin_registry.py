@@ -1732,7 +1732,7 @@ class UIPluginRegistry:
 
         与 ``attach_card_inline_panel``（运行态投影，恒迁到最新卡）互补：本方法
         **不迁卡**，只为「产生该数据的那张卡」重建面板——语义同成果栏
-        （``update_artifact_list`` 追加到所属卡片）。面板缺失时不创建无数据的空面板：
+        （``push_inline_items`` 增量追加到所属卡片）。面板缺失时不创建无数据的空面板：
         loader 返回空即跳过。
 
         Args:
@@ -2190,12 +2190,18 @@ class UIPluginRegistry:
         open_file: Callable[[str], bool],
         priority: int = 0,
         metadata: Optional[Dict[str, Any]] = None,
-    ) -> None:
+    ) -> bool:
         """注册本地文件打开接管项
 
         宿主在把文件交系统默认程序之前，按 priority 降序询问各接管项的
         ``can_open``，命中即调其 ``open_file``；后者返回 False 视为放弃接管，
         继续问下一家，全都没接才走系统默认程序。
+
+        ★ 授权门控：接管项位于宿主的打开路径上（priority 高 + can_open 恒真
+          就能静默接管所有文件打开），故要求插件在 manifest 里声明能力
+          ``file.open``。兼容期语义与能力池一致：未写 capabilities 清单的旧
+          插件（api_version < 2）按全量放行，空清单（api_version >= 2）收紧。
+          拒绝时返回 False 并记 warning，不抛异常打崩插件加载。
 
         Args:
             plugin_name: 所属插件名
@@ -2204,7 +2210,17 @@ class UIPluginRegistry:
             open_file: ``(path) -> bool`` 实际接管（主线程，True=已展示）
             priority: 高者优先
             metadata: 附加元数据
+
+        Returns:
+            True = 已登记；False = 未声明 file.open 能力，拒绝登记。
         """
+        if not self.declared_allows(plugin_name, "file.open"):
+            logger.warning(
+                f"[UIPluginRegistry] 插件 {plugin_name} 未声明能力 file.open，"
+                f"拒绝注册文件打开接管项 {opener_id}（在 .drifox-plugin/plugin.json "
+                f'的 capabilities 数组加入 "file.open" 后重载插件）'
+            )
+            return False
         key = f"{plugin_name}:{opener_id}"
         self._file_openers[key] = FileOpenerInfo(
             plugin_name=plugin_name,
@@ -2214,6 +2230,31 @@ class UIPluginRegistry:
             priority=priority,
             metadata=metadata or {},
         )
+        return True
+
+    def declared_allows(self, plugin_name: str, cap_id: str) -> bool:
+        """插件是否获授权某能力（沿用能力池的声明口径，不另立一套）。
+
+        返回 True 的三种情况：内置调用方（plugin_name 为空）、旧插件未写清单
+        （declared is None，兼容期全量放行）、清单里含该能力。解析异常时按
+        最严口径拒绝，避免能力模块故障静默放大权限。
+        """
+        if not plugin_name:
+            return True
+        try:
+            from app.plugins.capabilities.registry import CapabilityRegistry
+
+            declared = CapabilityRegistry.get_instance().resolve_declared(plugin_name)
+        except Exception as e:
+            logger.warning(f"[UIPluginRegistry] 解析 {plugin_name} 能力声明失败，按最严口径拒绝: {e}")
+            return False
+        if declared is None:
+            return True
+        return cap_id in declared
+
+    def unregister_file_opener(self, plugin_name: str, opener_id: str) -> bool:
+        """注销单个接管项（能力面 file.open 的 unregister_opener 用）"""
+        return self._file_openers.pop(f"{plugin_name}:{opener_id}", None) is not None
 
     def unregister_file_openers(self, plugin_name: str) -> None:
         """注销某插件的全部文件打开接管项（插件卸载时调用）"""
@@ -4405,17 +4446,36 @@ class UIPluginRegistry:
 
     @staticmethod
     def _compute_ui_signature(plugin_path) -> float:
-        """ui/ 目录 mtime 签名（全部文件 mtime 最大值；目录不存在返回 -1）。"""
+        """ui/ 目录 mtime 签名（全部文件 mtime 最大值；目录不存在返回 -1）。
+
+        遍历用 os.scandir 手工递归而非 Path.rglob，签名语义与旧实现一致：
+        - 目录判定 entry.is_dir(follow_symlinks=False)：软链接目录不递归
+          （同 rglob 默认行为），目录条目零 stat；
+        - 文件判定 entry.is_file()（跟随软链接，同 Path.is_file），随后
+          entry.stat() 复用枚举阶段已拿到的 DirEntry 信息，不再为每个
+          条目单独发起一次 stat（Windows 上 stat 直接来自 FindFirstFile
+          的 WIN32_FIND_DATA，POSIX 上命中 d_type/stat 缓存）；
+        - 不可读目录或条目静默跳过，与 rglob 对 PermissionError 的处理一致。
+        """
         ui_dir = Path(plugin_path) / "ui"
         if not ui_dir.is_dir():
             return -1.0
         latest = -1.0
-        for f in ui_dir.rglob("*"):
-            if f.is_file():
-                try:
-                    latest = max(latest, f.stat().st_mtime)
-                except OSError:
-                    continue
+        pending = [str(ui_dir)]
+        while pending:
+            current = pending.pop()
+            try:
+                with os.scandir(current) as it:
+                    for entry in it:
+                        try:
+                            if entry.is_dir(follow_symlinks=False):
+                                pending.append(entry.path)
+                            elif entry.is_file():
+                                latest = max(latest, entry.stat().st_mtime)
+                        except OSError:
+                            continue
+            except OSError:
+                continue
         return latest
 
     def poll_silent_ui_changes(self) -> list:

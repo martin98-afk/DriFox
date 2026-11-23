@@ -18,6 +18,7 @@ from typing import Dict, List, Optional
 # tiktoken 优先，否则降级
 try:
     import tiktoken
+
     _TIKTOKEN_AVAILABLE = True
 except ImportError:
     _TIKTOKEN_AVAILABLE = False
@@ -25,7 +26,17 @@ except ImportError:
 
 
 # 预编译正则表达式
-_CHINESE_PATTERN = re.compile(r'[\u4e00-\u9fff]')
+_CHINESE_PATTERN = re.compile(r"[\u4e00-\u9fff]")
+
+# [PERF] G1 冷建档抽样参数（2026-11-19 #11）：>阈值走首/中/尾窗口抽样外推，
+# 本就是字符/4 粗算口径，6×250KB 全量 finditer 实测 leader 环境 103ms
+# （ingest 占 20%）；×1.05 保守系数向预算安全侧（宁略高估勿低估；
+# #11 leader 裁决 1.02→1.05：估算服务预算门控，低估有溢出风险，
+# 高估仅浪费少量预算且 tier cascade 有熔断兑底）。
+# 阈值以下维持全量（小文本全量更快更准，行为零变化）。
+_FAST_SAMPLE_THRESHOLD = 50 * 1024
+_FAST_SAMPLE_WINDOW = 4 * 1024
+_FAST_SAMPLE_SAFETY = 1.05
 
 # 编码映射
 ENCODING_MAPPING = {
@@ -124,14 +135,14 @@ def blend_calibration(old: Optional[float], observed_ratio: float) -> float:
     """
     try:
         ratio = float(observed_ratio)
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return 1.0
     if ratio <= 0 or ratio != ratio:  # 非正 / NaN
         return 1.0
 
     try:
         prev = float(old or 0.0)
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         prev = 0.0
     if prev <= 0:
         blended = ratio
@@ -152,7 +163,7 @@ def resolve_calibration(
     """
     try:
         value = float(stored or 0.0)
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return 1.0
     if value <= 0:
         return 1.0
@@ -206,6 +217,20 @@ def _fast_estimate_tokens(text: str) -> int:
 
     text_len = len(text)
 
+    if text_len > _FAST_SAMPLE_THRESHOLD:
+        # [PERF] G1 分层抽样：均匀 9 处各 2KB 统计中文占比按比例外推总量。
+        # est 对中文占比线性（est ≈ L/4 + ch×0.95），占比误差直接映射为估算
+        # 误差。9 窗口 = 每窗口代表 11% 区间的分层采样：均匀混合文本占比
+        # 误差 ~±1%，分段不均匀（多语言块拼接）时窗口覆盖偏差 bounded 于
+        # ±1 个窗口（11%），实测病理样本转为轻度高估（预算安全侧）；
+        # 三窗口 4KB 版病理样本曾低估 -16%（2026-11-19 #11 验证）。
+        w = _FAST_SAMPLE_WINDOW
+        sampled = "".join(text[i * (text_len - w) // 8 : i * (text_len - w) // 8 + w] for i in range(9))
+        ratio = sum(1 for _ in _CHINESE_PATTERN.finditer(sampled)) / len(sampled)
+        chinese_chars = int(text_len * ratio)
+        estimated = int((chinese_chars * 1.2 + (text_len - chinese_chars) / 4.0) * _FAST_SAMPLE_SAFETY)
+        return max(1, estimated)
+
     # 统计中文字符
     # finditer 替代 findall：避免对大文本先物化百万级匹配列表再取 len（P6）
     chinese_chars = sum(1 for _ in _CHINESE_PATTERN.finditer(text))
@@ -216,8 +241,6 @@ def _fast_estimate_tokens(text: str) -> int:
 
     # 极短文本至少 1 token，避免 0 值
     return max(1, estimated)
-
-
 
 
 def estimate_tokens(text: str, model: str = "gpt-4") -> int:
@@ -257,11 +280,15 @@ def estimate_tokens(text: str, model: str = "gpt-4") -> int:
 _cache_text_reg = threading.local()
 
 
-@lru_cache(maxsize=2048)
+@lru_cache(maxsize=8192)
 def _estimate_tokens_cached(text_hash: int, text_len: int, model: str) -> int:
     """内层缓存实现：键为 (hash, len, model)，不持消息全文。
 
     仅在 MISS 时从 _cache_text_reg 取原文计算；命中时完全不触碰寄存器。
+    容量实测（任务 B，N 档长会话 bench）：2048 在 msgs≈2135（N=800 档）
+    触发 LRU 抖动全 miss，单次全量估算 1.4→91.5ms（65 倍劣化），pipeline
+    单次投影被放大到 500ms+；8192 覆盖 ~4000 条消息，键轻量（hash+len+model
+    +int 值），内存增量可忽略。
     """
     text = getattr(_cache_text_reg, "text", "") or ""
     # 尝试使用 tiktoken
@@ -295,28 +322,140 @@ def _get_token_cache() -> list:
     return cache
 
 
+def _content_sig(messages: list, model: str = "") -> tuple:
+    """内容敏感签名：消息数 + 末条消息对象身份 + 末条内容指纹（与
+    usage.py:_snapshot_sig 同法）。
+
+    is 身份缓存的正确性补丁：同列表对象 in-place 累积（chat_worker 的
+    current_messages 跨工具迭代 extend）时对象身份不变、内容已变，仅靠 `is`
+    判定会恒命中首轮旧值 → 圆环/token_usage 全程旧值（2026-11-17 诊断证实）。
+    [B4] 第三维末条 raw：原地改写（流式更新同对象同 id，len 也不变）
+    用 id 检测不到 → 重算末条 token 对比（O(末条)，微秒级）兜住该盲区。
+    """
+    return (
+        len(messages),
+        id(messages[-1]) if messages else 0,
+        _compute_message_tokens(messages[-1], model) if messages else 0,
+    )
+
+
 def _set_token_cache(messages: list, model: str, tools_sig: int, result: int):
     """写入 is 列表缓存；超上限时逐出最旧条目"""
     cache = _get_token_cache()
     # 移除同一对象的旧条目（若有）
     cache[:] = [e for e in cache if e[0] is not messages]
-    cache.append((messages, model, tools_sig, result))
+    cache.append((messages, model, tools_sig, _content_sig(messages, model), result))
     if len(cache) > _MAX_TOKEN_CACHE_ENTRIES:
         cache.pop(0)
 
 
 def _lookup_token_cache(messages: list, model: str, tools_sig: int) -> int | None:
-    """is 身份扫描；命中时返回缓存结果"""
+    """is 身份扫描 + 内容签名校验；命中时返回缓存结果。
+
+    [正确性] 同列表对象内容增长（append/extend）后签名失配 → 视为 MISS
+    走重算，由 _set 刷新条目；内容未变的重复查询仍命中（缓存语义不变）。
+    """
     for entry in _get_token_cache():
-        obj, m, ts, result = entry
+        obj, m, ts, sig, result = entry
         if obj is messages and m == model and ts == tools_sig:
+            if _content_sig(messages, model) != sig:
+                return None
             # 命中后移到末尾保活（LRU）
             cache = _get_token_cache()
             cache.remove(entry)
             cache.append(entry)
             return result
     return None
+
+
 # ==========
+
+
+# ========== [B4] 前缀游标增量估算（无 usage 供应商场景）==========
+# 现状（T3-C）：chat_worker 每轮 extend 后 content_sig 必 MISS → 每轮 O(全部
+# 消息) 重分词，已算前缀无增量复用（MiniMax 类不返 usage 的供应商每轮付出）。
+# 方案（T4f）：按「已计前缀 id 元组 + raw 累计」记游标，新请求前缀一致时仅对
+# 新增段增量分词；缩短/前缀位变化/末条被原地改写（id 不变内容变——流式更新
+# 场景，用「末条重算对比游标值」检测）一律全量重算兜底。
+# 等价性红线：游标存 ratio 应用前、tools 之外的 raw 前缀和——与全量路径同一
+# 累加顺序（从头按序），浮点位模式一致，增量续加与全量重算严格同值；
+# tools tokens 每次重算（有 P1 指纹缓存，廉价）。
+# 已知边界：非末条的原地改写检测不到（append-only 场景不存在该形态，
+# T4g 定论接受）；游标挂 estimator 内部 thread-local，对调用方透明，
+# chat_worker / subagent_worker 的全量估算调用点自动受益。
+_prefix_cursor_cache_local = threading.local()
+_PREFIX_CURSOR_MAX_ENTRIES = 4  # 活跃 messages 列表数少，与 is 缓存同级
+
+
+def _get_prefix_cursors() -> dict:
+    """thread-local 游标表：键 (id(messages), model, tools_sig) → (ids 元组, raw 前缀和, 末条 raw)"""
+    c = getattr(_prefix_cursor_cache_local, "cursors", None)
+    if c is None:
+        c = {}
+        _prefix_cursor_cache_local.cursors = c
+    return c
+
+
+def _prefix_cursor_store(messages: list, model: str, tools_sig: int, raw_total: int) -> None:
+    """全量重算后建/刷新游标（FIFO 有界，与 is 缓存同法）。"""
+    cursors = _get_prefix_cursors()
+    cursors[(id(messages), model, tools_sig)] = (
+        tuple(id(m) for m in messages),
+        raw_total,
+        _compute_message_tokens(messages[-1], model) if messages else 0,
+    )
+    while len(cursors) > _PREFIX_CURSOR_MAX_ENTRIES:
+        cursors.pop(next(iter(cursors)))
+
+
+def _prefix_cursor_lookup(
+    messages: list,
+    model: str,
+    tools_sig: int,
+    tools: Optional[List[Dict]],
+    ratio: Optional[float],
+) -> Optional[int]:
+    """前缀游标命中：增量估算最终结果（含 tools 与 ratio，与全量同式）。
+
+    Returns:
+        int  = 增量成功（游标已推进）
+        None = 任一兜底条件命中（缩短/前缀位变化/末条改写/无游标），
+               调用方走全量重算并由全量路径重建游标。
+    """
+    cursors = _get_prefix_cursors()
+    key = (id(messages), model, tools_sig)
+    cur = cursors.get(key)
+    if cur is None:
+        return None
+    ids, raw_total, last_raw = cur
+    n = len(ids)
+    if len(messages) < n:
+        return None
+    for i in range(n):
+        if id(messages[i]) != ids[i]:
+            return None
+    # 末条改写检测：重算末条 raw 与游标值对比（O(末条)，微秒级）
+    if n:
+        if _compute_message_tokens(messages[-1], model) != last_raw:
+            return None
+    new_raw = 0
+    for msg in messages[n:]:
+        new_raw += _compute_message_tokens(msg, model)
+    total_raw = raw_total + new_raw
+    if ratio is None:
+        ratio = _get_model_token_ratio(model)
+    if tools:
+        total_raw += count_tools_tokens(tools, model, ratio)
+    result = max(0, int(total_raw * ratio))
+    # 游标推进（新增段拼接 + raw 累计；无新增时末条未变，last_raw 保持）
+    if len(messages) > n:
+        ids = ids + tuple(id(m) for m in messages[n:])
+        raw_total += new_raw
+        last_raw = _compute_message_tokens(messages[-1], model)
+    cursors[key] = (ids, raw_total, last_raw)
+    while len(cursors) > _PREFIX_CURSOR_MAX_ENTRIES:
+        cursors.pop(next(iter(cursors)))
+    return result
 
 
 # ========== 工具 schema 指纹缓存（P1）==========
@@ -511,6 +650,12 @@ def count_messages_tokens(
     # 循环内 [msg] 临时列表每次全新对象 → 必然 MISS → 正确
     # P1：指纹经 is 身份缓存，同一 tools 列表对象不再每轮 str() 全量序列化
     tools_sig = _tools_signature(tools)
+    # [B4] 游标先于 is 缓存：content_sig（len+id(last)）检测不到末条原地
+    # 改写（流式更新同对象同 id），游标的末条重算对比能兜住该盲区；
+    # is 缓存退为游标表 FIFO 挤出场景的兜底。
+    incremental = _prefix_cursor_lookup(messages, model, tools_sig, tools, ratio)
+    if incremental is not None:
+        return incremental
     cached = _lookup_token_cache(messages, model, tools_sig)
     if cached is not None:
         return cached
@@ -521,6 +666,9 @@ def count_messages_tokens(
     # 避免内联 ~70 行循环体在两处（count_messages_tokens 与 per_message_tokens）重复
     for msg in messages:
         total += _compute_message_tokens(msg, model)
+
+    # [B4] ratio 前的纯消息 raw 和（游标重建材料；游标不含 tools、未乘 ratio）
+    raw_msgs_total = total
 
     # 工具定义 tokens
     if tools:
@@ -534,6 +682,8 @@ def count_messages_tokens(
     # 确保返回值非负（防御性编程）
     result = max(0, total)
     _set_token_cache(messages, model, tools_sig, result)
+    # [B4] 全量重算后重建游标（增量路径的基线）
+    _prefix_cursor_store(messages, model, tools_sig, raw_msgs_total)
     return result
 
 
@@ -600,21 +750,16 @@ def count_tools_tokens(
     return result
 
 
-def truncate_text_to_token_limit(
-    text: str,
-    max_tokens: int,
-    model: str = "gpt-4",
-    suffix: str = "..."
-) -> str:
+def truncate_text_to_token_limit(text: str, max_tokens: int, model: str = "gpt-4", suffix: str = "...") -> str:
     """
     将文本截断到指定的 token 限制
-    
+
     Args:
         text: 原始文本
         max_tokens: 最大 token 数
         model: 模型名称
         suffix: 截断后缀
-    
+
     Returns:
         截断后的文本
     """
@@ -682,11 +827,7 @@ class TokenCounter:
 
         return tokens
 
-    def count_messages(
-        self,
-        messages: List[Dict],
-        tools: Optional[List[Dict]] = None
-    ) -> int:
+    def count_messages(self, messages: List[Dict], tools: Optional[List[Dict]] = None) -> int:
         """计数消息列表"""
         return count_messages_tokens(messages, self.model, tools)
 
@@ -697,8 +838,4 @@ class TokenCounter:
         self._hit_count = 0
 
 
-
-
 # 全局默认实例
-
-

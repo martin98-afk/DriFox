@@ -109,9 +109,26 @@ def build_referenced_context(session_ids: List[str]) -> str:
         return ""
 
     blocks: List[str] = []
+    # I6：批量能力探测——SessionRepository.get_by_ids 一次 IN 查询替代 N 次
+    # 串行 get()（每次 = SELECT * 全 blob + 解压，本函数执行于 _PreSendWorker
+    # worker 线程，N+1 线性拖慢发送首字）。批量能力是可选 Protocol（contracts
+    # storage.SessionBulkGetCapability，与 title/counts capability 同构），
+    # 引擎不支持 / 批量异常时降级原逐个读，行为零变化；批量 miss 的 id 仍走
+    # 单查兜底，保持与逐个读完全一致的数据获取语义。
+    bulk: Dict[str, Dict] = {}
+    try:
+        from app.plugins.contracts.storage import SessionBulkGetCapability
+
+        if isinstance(storage, SessionBulkGetCapability):
+            bulk = storage.get_by_ids(ids) or {}
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"[SessionReference] 批量取回失败，降级逐个读: {e}")
+        bulk = {}
     for sid in ids:
         try:
-            data = storage.get(sid)
+            data = bulk.get(sid)
+            if data is None:
+                data = storage.get(sid)  # 批量 miss（不存在 / 行级失败）→ 单查兜底
         except Exception as e:  # noqa: BLE001
             logger.warning(f"[SessionReference] 加载会话 {sid} 失败: {e}")
             continue

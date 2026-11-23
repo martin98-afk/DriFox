@@ -31,6 +31,12 @@ class ProtocolFlags:
     use_responses_api: bool = False
     serializer_id: str = "openai"
     protocol: str = "openai"
+    # Responses API 下把 assistant 的 reasoning 作为 reasoning_text item 回传。
+    # DeepSeek /responses thinking mode 强制要求（缺则 400 "The `reasoning_text`
+    # in the thinking mode must be passed back to the API"），且 item 必须排在
+    # function_call 之前。chat/completions 用 requires_reasoning_content 表达同一
+    # 契约，本字段只管 responses 形态。
+    replay_reasoning_text: bool = False
     # adapter 透传的 provider 状态（如 Code Assist 的 gcp project id）。
     # 协议无关方不读此字段，默认空 dict 保证既有 adapter 零行为变化。
     extra: Dict[str, Any] = field(default_factory=dict)

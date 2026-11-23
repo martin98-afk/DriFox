@@ -19,6 +19,7 @@ from app.constants import PARAM_SCHEMA
 from app.constants import PROVIDER_MANAGED_KEYS
 from app.constants import provider_quota_exclude_keys as QUOTA_EXCLUDE_KEYS
 from app.core.conversation.message_content import extract_reasoning_delta
+from app.utils._startup_probe import trace_enabled as _diag_trace_enabled
 from app.core.modelmeta.model_capabilities import (
     ABSOLUTE_FALLBACK_CEILING,
     get_caps_max_output_tokens,
@@ -100,6 +101,7 @@ def _cap_args_tree(obj, limit, depth=0):
         return [_cap_args_tree(v, limit, depth + 1) for v in obj]
     return obj
 
+
 def _in_flight(method):
     """标记「有阻塞操作在途」：期间 stall 看门狗不得按日志静默误杀。
 
@@ -113,6 +115,7 @@ def _in_flight(method):
             return method(self, *args, **kwargs)
 
     return wrapper
+
 
 class SubAgentExecutor(QThread):
     """子智能体执行器 - 独立线程运行子智能体任务"""
@@ -143,7 +146,9 @@ class SubAgentExecutor(QThread):
         max_iterations: Optional[
             int
         ] = None,  # 轮数上限（per-agent steps 优先）；None=走激活策略（默认 subagent 策略 30）
-        hook_policy_id: Optional[str] = None,  # 子智能体域 hook 策略插件 id（plugins/system-hook-policies/hook_policies/）
+        hook_policy_id: Optional[
+            str
+        ] = None,  # 子智能体域 hook 策略插件 id（plugins/system-hook-policies/hook_policies/）
     ):
         super().__init__()
         self.task_id = task_id
@@ -153,6 +158,11 @@ class SubAgentExecutor(QThread):
         # perf(net): per-task 复用的 API client（None=未建）；任务结束由 run()
         # finally 在本 worker 线程内 close 置 None
         self._api_client = None
+        # [B1] 增量 API 消息缓存（对齐 chat_worker 模式）：None=未建，建好后由
+        # 写点增量 append；vision 标志与 cache 内容严格同步（_set_api_messages_cache
+        # 是唯一授权写入口），拿不准回退拷贝，绝不把 image_ref 发给 provider。
+        self._api_messages_cache: Optional[List[Dict[str, Any]]] = None
+        self._api_cache_has_vision_refs: Optional[bool] = None
         self.agent_manager = agent_manager
         self.tool_executor = tool_executor
         self.parent_context = parent_context
@@ -356,8 +366,7 @@ class SubAgentExecutor(QThread):
             if isinstance(_raw, str) and len(_raw) > _LOG_RESULT_PREVIEW_CHARS:
                 log_entry["result_original_len"] = len(_raw)
                 log_entry["result"] = (
-                    _raw[:_LOG_RESULT_PREVIEW_CHARS]
-                    + f"\n…（结果过长，已截断；全文 {len(_raw)} 字符）"
+                    _raw[:_LOG_RESULT_PREVIEW_CHARS] + f"\n…（结果过长，已截断；全文 {len(_raw)} 字符）"
                 )
         self._logs.append(log_entry)
         # 每次输出日志都刷新活跃时间（供外部 stall 检测）
@@ -485,9 +494,7 @@ class SubAgentExecutor(QThread):
                             try:
                                 from app.core.conversation.message_content import truncate_messages_at
 
-                                history_messages = truncate_messages_at(
-                                    history_messages, len(history_messages) - 1
-                                )
+                                history_messages = truncate_messages_at(history_messages, len(history_messages) - 1)
                             except Exception as repair_err:
                                 logger.warning(f"[SubAgentExecutor] 截断配对修复失败（按原样注入）: {repair_err}")
 
@@ -607,6 +614,9 @@ class SubAgentExecutor(QThread):
         # [方案 A] 继承历史的 image_ref 块携带真实落盘 session_id（revive 后丢失），
         # 在首次 serialize 前收集作为 revoke 的候选目录
         self._vision_session_ids = self._collect_vision_session_ids(current_messages)
+        # [B1] loop 基线：一次性全量建缓存（此后写点增量 append；写点挂钩
+        # 依赖 cache 已建，首轮 _make_api_call 即命中，后续轮免全量 serialize）。
+        self._set_api_messages_cache(self._serialize_for_api(current_messages).messages)
         response_content = ""
         current_reasoning = ""  # DeepSeek V4 thinking mode
         iteration_count = 0
@@ -631,6 +641,7 @@ class SubAgentExecutor(QThread):
                     self._add_log("progress", f"已达到最大迭代次数 ({round_limit})，强制结束并总结")
                     final_summary_prompt = self._final_summary_prompt()
                     current_messages.append({"role": "user", "content": final_summary_prompt})
+                    self._append_to_api_cache([current_messages[-1]])
                     # 强制续命前也触发 PreAssistantMessage（与正常轮次一致）
                     self._trigger_hook_sync("PreAssistantMessage", current_messages)
                     response_content, _, _ = self._make_api_call(current_messages, None, llm_config)
@@ -687,6 +698,7 @@ class SubAgentExecutor(QThread):
                 # 上游要求 thinking mode 下 tool_calls assistant 必须带 reasoning_content 字段（可为空串）
                 assistant_msg["reasoning_content"] = ""
             current_messages.append(assistant_msg)
+            self._append_to_api_cache([assistant_msg])
 
             tool_results, hook_messages = self._execute_tools(tool_calls)
 
@@ -704,6 +716,7 @@ class SubAgentExecutor(QThread):
                         "content": self._pending_answer,
                     }
                 )
+                self._append_to_api_cache([current_messages[-1]])
                 self._pending_answer = None
                 continue
 
@@ -711,6 +724,10 @@ class SubAgentExecutor(QThread):
             # 再 extend hook_messages（role="user" 消息，避免插入 tool_calls 和 tool 之间导致 2013 错误）
             current_messages.extend(tool_results)
             current_messages.extend(hook_messages)
+            if tool_results:
+                self._append_to_api_cache(tool_results)
+            if hook_messages:
+                self._append_to_api_cache(hook_messages)
 
             # 工具请求本轮收尾（ToolResult.end_turn）：不再发起下一轮 API 调用
             if getattr(self, "_end_turn_requested", False):
@@ -821,9 +838,7 @@ class SubAgentExecutor(QThread):
             return content
         return _THINKING_PATTERN.sub("", content)
 
-    def _serialize_for_api(
-        self, messages: List[Dict], llm_config: Dict = None, revoke_after: bool = True
-    ):
+    def _serialize_for_api(self, messages: List[Dict], llm_config: Dict = None, revoke_after: bool = True):
         """序列化单入口（Phase C）：adapter flags → serializer_id → 序列化器 → SerializeResult。
 
         与 chat_worker._serialize_for_api 对称；supports_vision 默认 True（subagent 无视觉注入）。
@@ -833,6 +848,8 @@ class SubAgentExecutor(QThread):
         落盘 session_id 用 _vision_session_ids 候选集合（继承历史的真实 sid，
         revoke 侧逐目录存在性探测，全部不命中安全降级保留）。
         """
+        # [E4] 单轮序列化耗时打点：源码默认开，PROBE=0/打包版关（诊断守卫纪律）。
+        _diag_t0 = time.perf_counter() if _diag_trace_enabled() else 0.0
         from app.plugins.contracts.message_serializer import SerializeContext
         from app.plugins.registries.serializer_registry import SerializerRegistry
 
@@ -857,19 +874,17 @@ class SubAgentExecutor(QThread):
             try:
                 from app.utils.image_utils import revoke_vision_blocks
 
-                restored = revoke_vision_blocks(
-                    result.messages, getattr(self, "_vision_session_ids", None) or ""
-                )
+                restored = revoke_vision_blocks(result.messages, getattr(self, "_vision_session_ids", None) or "")
                 if result.messages is not messages:
-                    restored += revoke_vision_blocks(
-                        messages, getattr(self, "_vision_session_ids", None) or ""
-                    )
+                    restored += revoke_vision_blocks(messages, getattr(self, "_vision_session_ids", None) or "")
                 if restored:
-                    logger.debug(
-                        f"[Memory] 子代理 serialize 出口回收 {restored} 张图片（data URI → image_ref）"
-                    )
+                    logger.debug(f"[Memory] 子代理 serialize 出口回收 {restored} 张图片（data URI → image_ref）")
             except Exception as e:  # noqa: BLE001 — 回收失败保留 data URI，不阻断
                 logger.warning(f"[SubAgentWorker] serialize vision revoke 失败（保留 data URI）: {e}")
+        if _diag_t0:
+            logger.debug(
+                f"[subagent-serialize] 耗时 {(time.perf_counter() - _diag_t0) * 1000:.2f}ms msgs={len(messages)}"
+            )
         return result
 
     def _protocol_flags(self, llm_config: Dict = None):
@@ -943,6 +958,13 @@ class SubAgentExecutor(QThread):
                 ctx["project_root"] = self.tool_executor.get_workdir() or ""
         except Exception:
             pass
+        # window_id：本子智能体所属窗口。hook 内无 ctx 的 caps_for 会回落到
+        # 活跃窗口，缺这个字段时定向类能力（session.send）会串到别的窗口。
+        try:
+            _backend = getattr(self.tool_executor, "_backend", None) if self.tool_executor else None
+            ctx["window_id"] = str(getattr(_backend, "_window_id", "") or "")
+        except Exception:
+            ctx["window_id"] = ""
         if extra:
             ctx.update(extra)
         return ctx
@@ -1027,9 +1049,12 @@ class SubAgentExecutor(QThread):
                     from app.core.infra.token_estimator import count_messages_tokens as _count
                     from app.core.modelmeta.model_capabilities import resolve_context_limit as _resolve_limit
 
-                    token_count = _count(current_messages)
-                    token_limit = 0
+                    # [T-B] model 口径：显式传实际模型名，旧默认 "gpt-4" 与真实
+                    # 模型编码不符导致估算偏差（同 chat_worker 主链路口径）。
                     llm_config = getattr(self, "llm_config", None)
+                    _model = str((llm_config or {}).get("model", "") or "gpt-4")
+                    token_count = _count(current_messages, model=_model)
+                    token_limit = 0
                     if llm_config:
                         token_limit = _resolve_limit(llm_config)
                     ctx["token_count"] = token_count
@@ -1067,14 +1092,15 @@ class SubAgentExecutor(QThread):
             # ★ 只注入标记为 add_to_context=true 的 hook 结果
             from app.core.conversation.backend import _make_hook_message
 
-            injected = 0
+            injected_msgs: List[Dict[str, Any]] = []
             for r in results:
                 if r.success and r.output and r.add_to_context:
                     msg = _make_hook_message(event_name, r.output, r.status_message)
                     current_messages.append(msg)
-                    injected += 1
-            if injected:
-                logger.debug(f"[SubAgent] Hook '{event_name}' injected {injected} msg(s) into messages")
+                    injected_msgs.append(msg)
+            if injected_msgs:
+                self._append_to_api_cache(injected_msgs)
+                logger.debug(f"[SubAgent] Hook '{event_name}' injected {len(injected_msgs)} msg(s) into messages")
         except Exception as e:
             logger.debug(f"[SubAgent] Hook '{event_name}' trigger failed: {e}")
 
@@ -1145,6 +1171,61 @@ class SubAgentExecutor(QThread):
         except Exception as e:  # noqa: BLE001 — 回收失败保留 data URI
             logger.warning(f"[SubAgentWorker] vision revoke 失败（保留 data URI）: {e}")
 
+    # [B1] cache 是否含 vision 引用块：None=未知（materialize 首次快筛兜底收敛），
+    # False=无图可直通，True=有图走拷贝路径。必须与 cache 内容严格同步。
+    @staticmethod
+    def _scan_vision_refs(messages: List[Any]) -> bool:
+        """块级快筛是否含 vision 引用块（image_ref 或未回收的 data:image）。
+        与 persist/revive 的命中条件一致（session_repository 同款判定）；
+        只做类型/前缀检查，无 stat 系统调用，O(块数)。
+        """
+        for msg in messages or []:
+            if not isinstance(msg, dict):
+                continue
+            content = msg.get("content")
+            if not isinstance(content, list):
+                continue
+            for block in content:
+                if not isinstance(block, dict):
+                    continue
+                if block.get("type") == "image_ref":
+                    return True
+                if block.get("type") == "image_url":
+                    img = block.get("image_url")
+                    url = img.get("url") if isinstance(img, dict) else None
+                    if isinstance(url, str) and url.startswith("data:image"):
+                        return True
+        return False
+
+    def _set_api_messages_cache(self, msgs: List[Dict[str, Any]]) -> None:
+        """写入 API 消息缓存并同步 vision 引用标志（唯一授权写入口，防漏记）。"""
+        self._api_messages_cache = msgs
+        self._api_cache_has_vision_refs = self._scan_vision_refs(msgs)
+
+    def _append_to_api_cache(self, new_messages: List[Dict[str, Any]]) -> None:
+        """将新增段追加进 API 缓存（cache 未建时整段 serialize 后作为初值）。
+        只转换新增段并追加，避免每轮重处理整个列表；vision 标志仅按新增段
+        增量维护（True/None 不降级，None 由 materialize 惰性快筛收敛）。
+        """
+        if self._api_messages_cache is None:
+            self._set_api_messages_cache(self._serialize_for_api(new_messages).messages)
+            return
+        for api_msg in self._serialize_for_api(new_messages).messages:
+            self._api_messages_cache.append(api_msg)
+            if self._api_cache_has_vision_refs is False and self._scan_vision_refs([api_msg]):
+                self._api_cache_has_vision_refs = True
+
+    def _invalidate_api_cache(self) -> None:
+        """[B1] 防御性失效：置空 cache 与 vision 标志，下一轮全量重建。
+        不变式（T4g 定稿）：cache 只反映「内部格式 messages 经 serializer 的
+        确定性投影」。既有写点清单（loop 基线 set + 5 处 append 挂钩）全部
+        天然安全；未来任何绕过写点的 messages 突变——直接改写历史段、外部
+        持引用改写、serializer 配置热切换——都必须先调本方法回退全量。
+        宁可多一次全量 serialize，绝不冒 cache 与实况不一致的险。
+        """
+        self._api_messages_cache = None
+        self._api_cache_has_vision_refs = None
+
     def _materialize_for_send(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """[方案 A] 发送前物化（对称 chat_worker._materialize_for_send）。
 
@@ -1156,6 +1237,14 @@ class SubAgentExecutor(QThread):
         读回，data URI 只在本请求作用域存在；已回收的原 messages 不被二次污染。
         副本随请求结束 GC。
         """
+        # [B1] P4 无图直通：标志确认无 vision 引用块时跳过三级浅拷贝与 revive
+        # 全扫（纯文字任务此前 100% 为无效功），返回原引用零拷贝。True/None
+        # 一律走拷贝路径——None 不在此快筛，直通只认「明确无图」；拿不准
+        # 回退拷贝，绝不把 image_ref 发给 provider（红线）。
+        if self._api_cache_has_vision_refs is False:
+            return messages
+        # [E4] 物化耗时打点（守卫同 serialize）。
+        _diag_t0 = time.perf_counter() if _diag_trace_enabled() else 0.0
         out: List[Dict[str, Any]] = []
         for msg in messages:
             if not isinstance(msg, dict):
@@ -1170,9 +1259,18 @@ class SubAgentExecutor(QThread):
         try:
             from app.core.store.session_repository import revive_vision_image_refs
 
-            return revive_vision_image_refs(out)
+            _rv = revive_vision_image_refs(out)
+            if _diag_t0:
+                logger.debug(
+                    f"[subagent-materialize] 耗时 {(time.perf_counter() - _diag_t0) * 1000:.2f}ms msgs={len(messages)}"
+                )
+            return _rv
         except Exception as e:  # noqa: BLE001 — 物化失败按副本发送（image_ref 会被 provider 拒，走重试/报错链路）
             logger.warning(f"[SubAgentWorker] materialize revive 失败（按副本发送）: {e}")
+            if _diag_t0:
+                logger.debug(
+                    f"[subagent-materialize] 耗时(降级) {(time.perf_counter() - _diag_t0) * 1000:.2f}ms msgs={len(messages)}"
+                )
             return out
 
     @_in_flight
@@ -1203,7 +1301,15 @@ class SubAgentExecutor(QThread):
 
         # chat 形态消息：chat transport 直接用它发请求；responses transport 忽略它，
         # 从内部格式 messages 自行序列化 input_items
-        api_messages = self._serialize_for_api(messages, config).messages
+        # [B1] 增量缓存：命中直接用（写点已 append 增量段），跳过每轮全量
+        # revive+serialize+revoke；未建才全量 serialize 并落 cache。落点在
+        # 调用点而非 _serialize_for_api 内部——与 chat_worker 对齐（后者
+        # serialize 无条件真实执行，append 新段也依赖它）。
+        if self._api_messages_cache is not None:
+            api_messages = self._api_messages_cache
+        else:
+            api_messages = self._serialize_for_api(messages, config).messages
+            self._set_api_messages_cache(api_messages)
         # [方案 A] 发送前物化（对称 chat_worker）：出口回收后 api_messages 的图片块
         # 是 image_ref 形态，chat transport 原样外发必触发 400；responses transport
         # 忽略 api_messages、从内部格式 messages 重新序列化，同样只认 image_url ——
@@ -1280,10 +1386,7 @@ class SubAgentExecutor(QThread):
 
     def _notify_api_retry(self, err: Exception, attempt: int, max_retries: int, wait_time: float) -> None:
         """重试状态上报：进任务日志 + 推面板行，避免重试期面板只有计时器在动。"""
-        msg = (
-            f"模型请求失败（{type(err).__name__}），"
-            f"第 {attempt}/{max_retries} 次重试，{wait_time:.0f}s 后继续"
-        )
+        msg = f"模型请求失败（{type(err).__name__}），第 {attempt}/{max_retries} 次重试，{wait_time:.0f}s 后继续"
         self._add_log("progress", msg)
         try:
             self.retry_status.emit(self.task_id, msg)

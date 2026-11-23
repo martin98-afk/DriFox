@@ -21,7 +21,7 @@ from typing import Any, Callable, Dict, List, Optional
 from loguru import logger
 from PyQt5.QtCore import QObject
 
-from app.core.conversation.message_content import consolidate_messages
+from app.core.conversation.message_content import consolidate_messages, invalidate_consolidate_cache
 from app.core.infra.token_estimator import count_messages_tokens
 
 # 内存泄漏修复：会话消息数软限制
@@ -133,6 +133,12 @@ class ChatSession:
 
     @messages.setter
     def messages(self, value: Optional[List[Dict]]) -> None:
+        # [TLS] 旧列表的 consolidate 投影登记失效：各线程下次入口自清，
+        # 防 worker TLS 钉住已替换的消息体（单会话可达数十 MB）。getattr 防御
+        # __init__ 首次赋值（self._messages 尚不存在）。
+        old = getattr(self, "_messages", None)
+        if old:
+            invalidate_consolidate_cache(old)
         self._messages = value or []
         self._messages_released = False
         # [PERF T33] 赋值路径统一失效（覆盖 set_messages 之外的直写点，
@@ -180,6 +186,8 @@ class ChatSession:
             return 0
         released = len(self._messages)
         self.message_count = released
+        # [TLS] 释放前登记旧列表投影失效（同 messages.setter，见彼处注释）
+        invalidate_consolidate_cache(self._messages)
         self._messages = []
         self._messages_released = True
         # [PERF T33] 释放后内容不再可用（下次读会从 SQLite 重载），

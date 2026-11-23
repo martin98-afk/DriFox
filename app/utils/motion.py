@@ -222,6 +222,7 @@ def fade_widget(
     target: float,
     *,
     duration: Optional[int] = None,
+    curve: Optional[QEasingCurve.Type] = None,
     on_finished: Optional[Callable[[], None]] = None,
 ) -> bool:
     """淡入/淡出到 ``target``（0.0–1.0），复用同一个 opacity effect
@@ -229,18 +230,45 @@ def fade_widget(
     结束回调里自行决定是否 ``hide()``：淡出必须等动画跑完再隐藏，否则
     末帧「内容还在就突然消失」。
 
+    Args:
+        curve: 缓动曲线，None → ``Animations.EASE_OUT``（retarget 同款默认）。
     Returns:
         True = 已在动画中；False = 未启动，调用方需自行写 opacity
     """
     from PyQt5.QtWidgets import QGraphicsOpacityEffect
 
     effect = getattr(widget, "_fade_effect", None)
+    if effect is not None:
+        try:
+            effect.opacity()
+        except RuntimeError:
+            # setGraphicsEffect(None) 已销毁 C++ 对象，Python wrapper 仍挂着
+            effect = None
     if effect is None:
         effect = QGraphicsOpacityEffect(widget)
         widget.setGraphicsEffect(effect)
         widget._fade_effect = effect
-        widget._fade_anim = QPropertyAnimation(effect, b"opacity", widget)
-    anim = widget._fade_anim
+    # 动画对象独立兜底：调用方可预置 _fade_effect（如先置 opacity=0 再淡入），
+    # 此时 _fade_anim 尚未创建（既有契约假设两者同生，实测会 AttributeError）。
+    # ★ 目标校验：effect 被摘除重建后，旧 anim 的 target 已是野指针，复用它
+    # 会 start 即停摆、finished 永不发射——调用方预置的 opacity=0 就永久留下
+    # （浮动卡第二次弹出整卡透明的根因）。绑定对象不符一律重建。
+    anim = getattr(widget, "_fade_anim", None)
+    if anim is not None:
+        try:
+            stale = anim.targetObject() is not effect
+        except RuntimeError:
+            stale = True
+        if stale:
+            try:
+                anim.stop()
+                anim.deleteLater()
+            except RuntimeError:
+                pass
+            anim = None
+    if anim is None:
+        anim = QPropertyAnimation(effect, b"opacity", widget)
+        widget._fade_anim = anim
     current = float(effect.opacity())
     if duration is None:
         duration = Animations.ENTER_MS if target > current else Animations.EXIT_MS
@@ -249,7 +277,7 @@ def fade_widget(
         if on_finished is not None:
             on_finished()
 
-    if not retarget(anim, current, float(target), duration=duration, on_finished=_finish):
+    if not retarget(anim, current, float(target), duration=duration, curve=curve, on_finished=_finish):
         effect.setOpacity(float(target))
         if on_finished is not None:
             on_finished()

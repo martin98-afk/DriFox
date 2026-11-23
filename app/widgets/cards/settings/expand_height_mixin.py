@@ -149,6 +149,7 @@ class DynamicHeightExpandCardMixin:
     _height_resync_queued = False  # 下一帧高度校正是否已排队
     _resync_rounds = 0  # 剩余校正轮数（收敛式校正，见 _adjust_view_size）
     _expanding = False  # 高度动画进行中（期间不直接改高度，避免打断动画）
+    _height_guard = None  # 高度下限（不为 None 时卡片不收缩，见 begin_height_guard）
 
     # ── 钩子（子类按需覆盖） ──
 
@@ -185,10 +186,42 @@ class DynamicHeightExpandCardMixin:
     # ── 高度动画 ──
 
     def _expanded_height(self) -> int:
-        """展开态应有的总高度 = header + 内容实测高度"""
+        """展开态应有的总高度 = header + 内容实测高度
+
+        重建保护期内取实测值与下限的较大者（见 begin_height_guard）。
+        """
         self._invalidate_layouts()
         self.viewLayout.activate()
-        return self.card.height() + self.viewLayout.sizeHint().height()
+        height = self.card.height() + self.viewLayout.sizeHint().height()
+        guard = self._height_guard
+        if guard is not None and self.isExpand:
+            return max(height, guard)
+        return height
+
+    # ── 重建期高度下限 ──
+
+    def begin_height_guard(self) -> None:
+        """开启高度下限：此后到 end_height_guard 之前卡片不低于当前高度
+
+        内容重建要「清空旧行 → 再挂新行」，中间那一帧布局高度必然偏小。
+        若此时按实测高度定格，外层滚动区的 maximum 随之缩小，Qt 会立刻把
+        value 钳到新上限；内容挂回后高度复原，value 却没人写回 —— 用户视角
+        是「滚轮没动，列表自己跳到了中间某处」。
+
+        重建前后内容数量通常不变（停用的条目仍会补回列表），最终高度也
+        不变，所以整个重建期维持原高度即可消除跳变；真正变少的情形（搜索
+        过滤）由 end_height_guard 按实测高度收缩一次。
+
+        折叠态不启用：内容不可见，高度本就该留在 header 高度；此时记录下限
+        只会在后续 _finish_mount 里变成没人释放的残留值。
+        """
+        if self._height_guard is None and self.isExpand:
+            self._height_guard = self.height()
+
+    def end_height_guard(self) -> None:
+        """结束保护并按当前实测高度定格"""
+        self._height_guard = None
+        self._sync_height_now()
 
     def _animate_to(self, target: int) -> None:
         """高度过渡到 target；高度已就位则直接定格"""
@@ -208,6 +241,7 @@ class DynamicHeightExpandCardMixin:
         if not self.isExpand:
             # 折叠完成才隐藏内容：QLayout.sizeHint() 会忽略隐藏控件，不隐藏的话
             # 搜索过滤留下的隐藏行仍会被算进高度
+            self._height_guard = None  # 折叠后不再需要下限（内容已不可见）
             try:
                 self.view.setVisible(False)
             except RuntimeError:

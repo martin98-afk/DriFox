@@ -10,6 +10,7 @@ import hashlib
 import math as _math
 import os
 import re
+from functools import lru_cache
 
 # ── 模块级缓存：避免 paintEvent 中反复解析 rgba 字符串 ──
 from typing import Dict, List, Optional
@@ -239,6 +240,15 @@ def _status_ring_color(state: str, phase: float) -> QColor:
     return c
 
 
+@lru_cache(maxsize=32)
+def _status_ring_points(x: float, y: float, width: float, height: float, radius: float):
+    """缓存固定环形的等弧长点列；相位和主题不影响几何。调用方只读点列。"""
+    path = _QPainterPath()
+    path.addRoundedRect(QRectF(x, y, width, height), radius, radius)
+    total_len = path.length()
+    return tuple(path.pointAtPercent(path.percentAtLength(total_len * i / 240)) for i in range(240))
+
+
 def _paint_status_ring_on(painter, rect, state: str, phase: float, radius: float = 5.0) -> None:
     """状态环绘制原语：icon 方块（_TabProjectIcon）与团队角色胶囊（TabItem 行层）共用
 
@@ -282,13 +292,9 @@ def _paint_status_ring_on(painter, rect, state: str, phase: float, radius: float
         # 锥形渐变量化成肉眼可见的分段色块，实测像贴了几块补丁。也不用
         # drawArc：那是外接椭圆，与圆角方环形状不符。
         # 做法：把路径按百分比离散成点列，沿点列取段绘制，每段独立 alpha。
-        path = _QPainterPath()
-        path.addRoundedRect(ring, radius, radius)
-        # 按弧长均匀取点（pointAtPercent 按参数百分比，圆角处会疏密不均，
-        # 26px 上表现为拖尾有锯齿）
-        total_len = path.length()
+        # 按弧长均匀取点，固定几何复用缓存，避免每帧重复计算贝塞尔弧长。
         samples = 240
-        pts = [path.pointAtPercent(path.percentAtLength(total_len * i / samples)) for i in range(samples)]
+        pts = _status_ring_points(ring.x(), ring.y(), ring.width(), ring.height(), radius)
         # 角度 = 匀速相位 + sin 调制 → 视觉上快慢交替（一圈约 1.8s）
         head_deg = _ring_head_angle(phase)
         head_idx = int(round(((head_deg % 360.0) / 360.0) * samples)) % samples
@@ -313,9 +319,7 @@ def _paint_status_ring_on(painter, rect, state: str, phase: float, radius: float
             seg_pen.setWidth(3)
             seg_pen.setCapStyle(Qt.RoundCap if k == 0 else Qt.FlatCap)
             painter.setPen(seg_pen)
-            poly = [
-                pts[(head_idx - k * tail_samples - m) % samples] for m in range(tail_samples + 1)
-            ]
+            poly = [pts[(head_idx - k * tail_samples - m) % samples] for m in range(tail_samples + 1)]
             painter.drawPolyline(*poly)
         return
 
@@ -478,6 +482,7 @@ class _TabProjectIcon(QWidget):
         if not self._ring_state:
             return
         _paint_status_ring_on(painter, rect, self._ring_state, self._ring_phase, radius=5)
+
 
 class TabItem(QFrame):
     """单个 Tab 项的 UI 组件
@@ -1209,7 +1214,6 @@ class TabItem(QFrame):
             self._confirming_close = True
             self._close_btn.setIcon(QIcon())  # 清除图标，文字占位
             self._close_btn.setText("确认关闭")
-            self._close_btn.setFixedSize(64, 20)
             # ⚠️ 必须显式透明背景 + TextOnly：局部 stylesheet 会覆盖 qfluentwidgets
             # 全局样式（原背景半透明白），若只设 color 则 Qt 回退默认深色底 → 全黑；
             # 且 ToolButton 默认 IconOnly 不绘制 setText 文字。
@@ -1219,6 +1223,11 @@ class TabItem(QFrame):
                 f"color: #f85149; font-weight: 600; {get_font_family_css()} {font_size_css(11)} "
                 "}"
             )
+            # 宽度按确认态字体度量：字号随配置档缩放（11 基准 + delta，大字号档
+            # 可到 17px），固定 64px 放不下四个字 → Qt elide 成「确...闭」。
+            # fontMetrics 须在 setStyleSheet 之后取（polish 后才反映确认态字体）。
+            text_w = self._close_btn.fontMetrics().horizontalAdvance("确认关闭")
+            self._close_btn.setFixedSize(max(64, text_w + 12), 20)
             self._close_btn.setToolTip("正在对话，再次点击确认关闭，3秒后自动取消")
             self._close_timer.start()
         else:
@@ -1907,7 +1916,10 @@ class TabPanel(QWidget):
         self._custom_plugin_scroll.setWidgetResizable(True)
         install_fast_wheel(self._custom_plugin_scroll)
         self._custom_plugin_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self._custom_plugin_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        # 垂直条恒显恒占位（AlwaysOn）：AsNeeded 下条出现/消失会让 viewport 宽度
+        # 跳变 8px，行内容跟着左右横移（用户感知为「横向移动的滚轮」）；悬浮条
+        # 时代不占宽故无此问题，换原生条后必须恒占位压掉跳变
+        self._custom_plugin_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
         self._custom_plugin_scroll.setFrameShape(QFrame.NoFrame)
         self._custom_plugin_scroll.setMaximumHeight(200)
         self._custom_plugin_scroll.setStyleSheet(
@@ -1959,7 +1971,8 @@ class TabPanel(QWidget):
         # ★ 分支入口已迁移到助手消息卡片页脚（用户可在任意一条消息处分支）。
         self._top_bar = QWidget(self)
         top_layout = QHBoxLayout(self._top_bar)
-        top_layout.setContentsMargins(6, 4, 4, 2)
+        # 右 6 与左 6 同拍（此前右 4 叠 handle 4 = 8px，比左侧 10px 窄 2px）
+        top_layout.setContentsMargins(6, 4, 6, 2)
         top_layout.setSpacing(4)
 
         self._new_chat_row = QFrame(self._top_bar)
@@ -2019,8 +2032,9 @@ class TabPanel(QWidget):
         self._list_widget.setStyleSheet("background: transparent;")
         self._list_layout = QVBoxLayout(self._list_widget)
         # 左 0：tab 行 hover/选中块左缘与上方菜单行对齐（都从 frame padding 6px 处起）；
-        # 原左 2 叠 frame 6 = 8px，用户感知「对话列表外部 pad 太多」。右 2 保留给滚动条
-        self._list_layout.setContentsMargins(0, 0, 2, 0)
+        # 原左 2 叠 frame 6 = 8px，用户感知「对话列表外部 pad 太多」。右 6 与左侧同拍
+        # （此前右 2，行块右缘距边栏右缘 6px，视觉比左侧窄）
+        self._list_layout.setContentsMargins(0, 0, 6, 0)
         self._list_layout.setSpacing(2)
         self._list_layout.addStretch()
         self._scroll_area.setWidget(self._list_widget)
@@ -2134,7 +2148,7 @@ class TabPanel(QWidget):
         阈值区间，若在此触发会与动画互相打断。
 
         ★★ 坐标系：本方法比较的 self.width() 是 **content 宽**（TabPanel 自身
-        宽度 = #tabFrame 宽 − 14 padding），因此 _auto_collapse_width /
+        宽度 = #tabFrame 宽 − _FRAME_PADDING_X），因此 _auto_collapse_width /
         _auto_expand_width 都必须是 content 口径（见 __init__ 注释）。
         默认值：折叠线 150、展开线 156（滞回区 6px，仅吸收手抖/量化误差）。
         滞回区不可放大：用户拉宽是连续动作，滞回区一大就变成"明显拉宽了却

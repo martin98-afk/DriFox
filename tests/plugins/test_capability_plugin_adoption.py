@@ -87,7 +87,7 @@ def _all_plugins():
 def test_plugins_are_discovered():
     """哨兵：确认扫描确实命中已迁移插件（防止 glob 写错导致测试空跑）。"""
     names = {d.name for d, _ in _all_plugins()}
-    assert {"history-manager", "artifacts-manager", "welcome_changelog", "worktree-manager"} <= names
+    assert {"history-manager", "welcome_changelog", "worktree-manager"} <= names
 
 
 @pytest.mark.parametrize("plugin_dir,manifest", _all_plugins(), ids=lambda v: getattr(v, "name", ""))

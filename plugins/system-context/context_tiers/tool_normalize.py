@@ -15,10 +15,10 @@ cache_impact=none：纯函数、幂等、同内容每轮投影完全一致，前
 from __future__ import annotations
 
 import re
+from collections import OrderedDict
 from typing import Any, Dict, List
 
 from app.plugins.contracts.context_policy import ALL_STAGES, CACHE_NONE, TierOutcome
-from app.plugins.sdk import count_messages_tokens
 
 # 只处理长内容：短结果清洗收益低，复制开销反而显眼
 _MIN_LEN = 1024
@@ -39,15 +39,36 @@ _BLANK_RUN_RE = re.compile(r"\n{3,}")
 # 覆盖关系：`[ \t]+(?=\n)` 命中必然以空格或制表符收尾 → 含 " \n" 或 "\t\n"。
 _CLEAN_HINTS = ("\x1b", " \n", "\t\n", "\n\n\n")
 
+# [E2-K] 规范化产物 memo：(id(content), len(content)) → (原文引用, 产物)。
+# 规范化幂等（产物再跑输出不变），条目持原文引用保证 id 存活期内不复用；
+# 命中即跳过四条正则全文扫描。与 tool_shape 各自实现，无共享状态依赖。
+_NORM_MEMO_MAX = 512
+_norm_memo: OrderedDict[tuple[int, int], tuple[str, str]] = OrderedDict()
+
+def _norm_memo_write(memo_key: tuple[int, int], text: str, out: str) -> None:
+    """写入 memo 并在超限时按 LRU 逐出最旧条目。"""
+    _norm_memo[memo_key] = (text, out)
+    if len(_norm_memo) > _NORM_MEMO_MAX:
+        _norm_memo.popitem(last=False)
 
 def normalize_text(text: str) -> str:
     """无损规范化（纯函数、幂等）：ANSI / 控制字符 / 行尾空白 / 连续空行。"""
+    memo_key = (id(text), len(text))
+    hit = _norm_memo.get(memo_key)
+    if hit is not None:
+        orig, out = hit
+        if orig is text:
+            _norm_memo.move_to_end(memo_key)
+            return out
+        _norm_memo.pop(memo_key, None)  # id 已被复用：过期条目，重算
     if not any(h in text for h in _CLEAN_HINTS) and _CTRL_RE.search(text) is None:
+        _norm_memo_write(memo_key, text, text)
         return text
     out = _ANSI_RE.sub("", text)
     out = _CTRL_RE.sub("", out)
     out = _TRAILING_WS_RE.sub("", out)
     out = _BLANK_RUN_RE.sub("\n\n", out)
+    _norm_memo_write(memo_key, text, out)
     return out
 
 
@@ -82,11 +103,8 @@ class ToolNormalizeTier:
             result.append(m)
         if changed == 0:
             return TierOutcome(messages=list(view.messages), saved_tokens=0, note="无需规范化")
-        try:
-            saved = max(0, view.used_tokens - count_messages_tokens(result))
-        except Exception:
-            saved = 0
-        return TierOutcome(messages=result, saved_tokens=saved, note=f"规范化 {changed} 条工具结果")
+        # [#R6] saved 由 pipeline 统一增量计（同 tool_prune），不再全量 count。
+        return TierOutcome(messages=result, saved_tokens=0, note=f"规范化 {changed} 条工具结果")
 
 
 def register(registry):

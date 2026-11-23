@@ -16,16 +16,14 @@ stage=all：ingest 也要截断，否则落盘判定会基于未截断内容（�
 cache_impact=none：截断发生在入口，同一条 tool 结果每次投影的字节完全一致，
 前缀稳定 —— 这是本层与其他层的关键区别。
 
-order 20 排在 tool_dedupe(30) 之前：截断保留头尾 + 取回指引，信息损失可控；
-去重整条替换为占位符，损失不可逆。若先去重，去重后常已达标而 break，
-超长单条结果会全文进上下文（实测 30K 未被截断）。
+order 20 在 tool_offload(15) 落盘之后兜底：>50K 已落盘可回读，本层截断 24K~50K 的结果，保留头尾 + 取回指引，信息损失可控。
 """
 
 from __future__ import annotations
 
 from typing import Any, Dict, List
 
-from app.plugins.sdk import cfg_int, count_messages_tokens, prune_skip_tools, prune_tool_result
+from app.plugins.sdk import cfg_int, prune_skip_tools, prune_tool_result
 from app.plugins.sdk import resolve_tool_result_max_len, tool_registry_api
 from app.plugins.contracts.context_policy import ALL_STAGES, CACHE_NONE, TierOutcome
 
@@ -73,12 +71,6 @@ def _tool_api(kind: str = "read"):
 def _tool_api(kind: str = "read"):
     """工具注册表只读面 / 注入面（实现见 sdk.tool_registry_api）。"""
     return tool_registry_api(kind, module_globals=globals())
-
-def _count_tokens(messages: List[Dict[str, Any]]) -> int:
-    try:
-        return count_messages_tokens(messages)
-    except Exception:
-        return 0
 
 
 class ToolPruneTier:
@@ -128,11 +120,12 @@ class ToolPruneTier:
             result.append(m)
         if changed == 0:
             return TierOutcome(messages=list(view.messages), saved_tokens=0, note="无超阈值结果")
-        saved = view.used_tokens - _count_tokens(result)
+        # [#R6] saved 由 pipeline 统一增量计（view 前后两次 #I3 增量刷新差值），
+        # tier 不再全量 count_messages_tokens(result)（N=800 档整表遍历已删）。
         note = f"截断 {changed} 条工具结果"
         if pruned_errors:
             note += f"（含 {pruned_errors} 条错误）"
-        return TierOutcome(messages=result, saved_tokens=max(0, saved), note=note)
+        return TierOutcome(messages=result, saved_tokens=0, note=note)
 
     def _limit(self, view) -> int:
         """截断阈值：插件配置优先（0/未配则按模型上下文容量动态放大）。"""

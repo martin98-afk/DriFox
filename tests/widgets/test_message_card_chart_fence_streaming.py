@@ -97,7 +97,9 @@ def test_partial_tag_tail_intercepted():
 
 def test_first_unclosed_chart_fence_pos():
     """未闭合渲染型 fence 的位置计算：截断点在 fence 开标记处。"""
-    from app.widgets.message_card import _first_unclosed_chart_fence_pos
+    # 2026-11 迁移跟进：函数本体已从 message_card.py 移至 card_render_core.py
+    # （message_card 的 re-export 列表不再包含它），语义未变，import 路径跟进。
+    from app.widgets.card_render_core import _first_unclosed_chart_fence_pos
 
     md = "正文一\n\n```echarts\n{\"a\":1"
     pos = _first_unclosed_chart_fence_pos(md)

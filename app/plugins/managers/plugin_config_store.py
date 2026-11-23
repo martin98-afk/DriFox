@@ -28,6 +28,18 @@ from app.plugins.registries.plugin_config_registry import PluginConfigRegistry
 # RLock 因 set_values 的 read-modify-write 需在锁内嵌套调用 _read_raw/_write_raw
 _IO_LOCK = threading.RLock()
 
+# [E7-A] 读盘进程级缓存：键=path，值=(mtime_ns, dict 快照)。
+# 命中免 read_text+json.loads（tier 投影每轮 10~20 次 cfg 读盘的主成本，
+# 键含 mtime：外部改文件自动 miss）。缓存值只读，出缓存一律浅拷贝——
+# set_values 的 read-modify-write 会修改 _read_raw 返回值，不能回写缓存。
+# 容量上限防异常场景膨胀（插件数有限，正常永不触发逐出）。
+_READ_CACHE_MAX = 128
+_read_cache: Dict[Path, tuple[int, Dict[str, Any]]] = {}
+
+def _read_cache_invalidate(path: Path) -> None:
+    """写路径主动失效对应条目（_IO_LOCK 内调用）。"""
+    _read_cache.pop(path, None)
+
 
 class PluginConfigStore:
     """按插件读写配置（无状态，可随时实例化）"""
@@ -77,15 +89,31 @@ class PluginConfigStore:
         path = self._path(plugin_name)
         try:
             with _IO_LOCK:
+                try:
+                    mtime_ns = path.stat().st_mtime_ns
+                except OSError:
+                    mtime_ns = 0
+                cached = _read_cache.get(path)
+                if cached is not None and cached[0] == mtime_ns and mtime_ns:
+                    return dict(cached[1])
                 if path.exists():
                     data = json.loads(path.read_text(encoding="utf-8"))
                     if isinstance(data, dict):
-                        return data
+                        if mtime_ns == 0:
+                            try:
+                                mtime_ns = path.stat().st_mtime_ns
+                            except OSError:
+                                mtime_ns = 0
+                        _read_cache[path] = (mtime_ns, data)
+                        if len(_read_cache) > _READ_CACHE_MAX:
+                            _read_cache.pop(next(iter(_read_cache)))
+                        return dict(data)
         except Exception as e:
             # 半截 JSON（进程被杀/断电）不再无限吞：改名 .corrupt 保留现场供排查，
             # 之后读取按空处理（回退 schema 默认值），下次写入重建干净文件
             try:
                 with _IO_LOCK:
+                    _read_cache_invalidate(path)
                     corrupt = path.with_suffix(".json.corrupt")
                     if corrupt.exists():
                         corrupt.unlink()
@@ -104,6 +132,7 @@ class PluginConfigStore:
                 tmp = path.with_suffix(".json.tmp")
                 tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
                 os.replace(tmp, path)
+                _read_cache_invalidate(path)  # [E7-A] 写后失效，下次读按新 mtime 重读
             return True
         except Exception as e:
             logger.warning(f"[PluginConfigStore] {plugin_name} 配置写入失败: {e}")
@@ -273,6 +302,8 @@ class PluginConfigStore:
             path = self._path(plugin_name)
             if path.exists():
                 path.unlink()
+            with _IO_LOCK:
+                _read_cache_invalidate(path)  # [E7-A] 删除后失效缓存条目
             return True
         except Exception as e:
             logger.warning(f"[PluginConfigStore] {plugin_name} 重置失败: {e}")

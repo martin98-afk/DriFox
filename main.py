@@ -9,6 +9,37 @@ import sys
 import time
 import warnings
 
+# ========== 启动分段打点：stderr 直写通道（P3）==========
+# 盲区补偿：loguru 在 setup_logging（壳显示后才执行，见 _setup_early_forensics）
+# 之前未初始化，壳前段（顶层巨型 import / 兼容补丁 / 异常钩子安装）无日志可落。
+# 此通道 os.write(2) 直写 stderr，行格式与 main() 内 [StartupMark] 日志行一致，
+# 供 T2/T6 启动测量脚本用同一解析规则匹配（不含 fp= 后缀：读 proc_pid_rusage
+# 需 ctypes 加载 libSystem，壳前段为诊断引入此开销得不偿失）。
+# 守卫与 app.utils._startup_probe.trace_enabled() 同款：源码运行默认开、
+# DRIFOX_STARTUP_PROBE=0/false/no 显式关、打包版默认关（诊断设施默认只对
+# 源码运行开）。纯增输出，不改变任何既有行为。
+_SM_SEG = time.perf_counter()
+
+def _startup_stderr_enabled() -> bool:
+    raw = os.environ.get("DRIFOX_STARTUP_PROBE", "").strip().lower()
+    if raw in ("0", "false", "no"):
+        return False
+    return not (getattr(sys, "frozen", False) or hasattr(sys, "_MEIPASS"))
+
+def _startup_stderr_write(line: str) -> None:
+    """P3 底层直写（守卫见上）。供壳前打点与 main() 内 _smark 共用。"""
+    if not _startup_stderr_enabled():
+        return
+    os.write(2, line.encode("utf-8", "replace"))
+
+def _startup_mark_stderr(label: str) -> None:
+    global _SM_SEG
+    now = time.perf_counter()
+    _startup_stderr_write(f"[StartupMark] {label} 耗时 {(now - _SM_SEG) * 1000:.0f}ms\n")
+    _SM_SEG = now
+
+_startup_mark_stderr("shell_core_import")
+
 # ========== 开机自启提权 helper（最早处理，不加载 Qt）==========
 # 拨动自启开关时主进程通过 runas 以管理员身份把本进程再次拉起，
 # 命令行携带 --configure-auto-start=on|off。helper 写完 HKLM 注册表
@@ -23,6 +54,7 @@ if os.name == "nt" and any(arg.startswith("--configure-auto-start=") for arg in 
 from qfluentwidgets import setFontFamilies
 
 warnings.filterwarnings("ignore")
+_startup_mark_stderr("shell_qfluentwidgets_import")
 
 # TLS 根证书兜底：打包环境默认 CA 路径可能失效，导致进程内所有 HTTPS/wss
 # 校验失败（飞书 WS 长连接即挂、urllib 报 self-signed certificate in chain）。
@@ -51,6 +83,7 @@ os.environ["PYTHONIOENCODING"] = "utf-8"
 from app.utils.render_env import apply_render_env, default_config_path
 
 RENDER_SETTINGS = apply_render_env(default_config_path())
+_startup_mark_stderr("shell_render_env")
 
 # ========== [C2] 数据迁移前置 ==========
 # 原在壳显示后的 _setup_early_forensics 内执行（保留幂等二次调用）。迁移必须先于后续任何数据目录 I/O
@@ -61,6 +94,7 @@ try:
     migrate_app_data_if_needed()
 except Exception:
     pass
+_startup_mark_stderr("shell_migrate_app_data")
 
 # 防御：QSG_RHI* 残留会让场景图走 RHI D3D11 合成，WebEngine 的 GL 纹理接不上 → 整块黑。
 for _env_key in ("QSG_RHI", "QSG_RHI_BACKEND"):
@@ -142,6 +176,7 @@ def _install_global_exception_hooks() -> None:
 
 
 _install_global_exception_hooks()
+_startup_mark_stderr("shell_patches_and_hooks")
 
 
 # ========== 内存诊断开关 ==========
@@ -250,6 +285,13 @@ def main():
     # 的无日志空窗，逐段 DEBUG 打点便于定位后续优化目标（行为零变更）
     import time as _sm_time
 
+    # [PERF PROBE] 探针句柄：main() 内一次性取得，供 _smark 同步分段耗时。
+    # 导入失败（诊断设施不得阻断启动）时降级为 None，_smark 静默跳过。
+    try:
+        from app.core.infra.telemetry import perf_probe as _perf_probe
+    except Exception:  # noqa: BLE001
+        _perf_probe = None
+
     _sm_seg = _sm_time.perf_counter()
 
     def _smark(label: str, level: str = "debug") -> None:
@@ -262,10 +304,29 @@ def main():
         nonlocal _sm_seg
         _now = _sm_time.perf_counter()
         msg = f"[StartupMark] {label} 耗时 {(_now - _sm_seg) * 1000:.0f}ms"
+        # [MEM] 附真实物理占用（源码运行默认开，DRIFOX_STARTUP_PROBE=0 可关）。
+        # 局部 import：_smark 的定义早于 main() 内的探针导入；诊断绝不能阻断启动。
+        try:
+            from app.utils._startup_probe import footprint_mb, trace_enabled
+
+            if trace_enabled():
+                msg += f" fp={footprint_mb():.0f}MB"
+        except Exception:
+            pass
         if level == "info":
             logger.info(msg)
         else:
             logger.debug(msg)
+        # [PERF PROBE] 探针开启时把同一分段耗时写入 JSONL（默认关闭零开销：
+        # record_span 关闭态首行直接 return，不做 perf_counter / 不建目录）。
+        if _perf_probe is not None:
+            try:
+                _perf_probe.record_span(f"startup.{label}", (_now - _sm_seg) * 1000.0)
+            except Exception:  # noqa: BLE001 - 诊断不得反噬启动
+                pass
+        # P3：stderr 直写同款行（含 fp= 后缀，与日志行完全一致）。setup_logging
+        # 前的点位靠它进 stderr；之后的点位双写（stderr+文件），仅源码运行发生。
+        _startup_stderr_write(msg + "\n")
         _sm_seg = _now
 
     if _qt_pp:
@@ -324,6 +385,16 @@ def main():
         _start_paint_profiler()
     except Exception:  # noqa: BLE001 - 诊断设施绝不能阻断启动
         pass
+
+    # 🔬 性能探针内存采样（默认完全关闭，打包版强制不可用）：
+    # 仅当 DRIFOX_PERF_PROBE=1 且 DRIFOX_PERF_PROBE_MEM=1 时起后台 daemon 线程，
+    # 按 DRIFOX_PERF_PROBE_MEM_MS（默认 2000ms）落一行 RSS 到 .perf_out/。
+    # 关闭态 start_mem_sampler() 立即返回 None：不开线程、不建目录、零副作用。
+    if _perf_probe is not None:
+        try:
+            _perf_probe.start_mem_sampler()
+        except Exception:  # noqa: BLE001 - 诊断设施绝不能阻断启动
+            pass
 
     # 🛡️ InfoBar 系统级守卫：死壳清洗 + notify 主线程投递桥预热。
     # 只在 GUI 分支装（qfluentwidgets 仅 GUI 需要）；CLI 不加载。
@@ -569,6 +640,39 @@ def main():
             threading.Thread(target=_sync_models_dev, daemon=True).start()
         except Exception:
             logger.exception("[DeferredStartup] 启动 models.dev 后台同步线程失败")
+
+        # [PERF E7] 预热 resolve_context_limit：首次发送该链路实测 96~108ms 尖峰
+        # （provider 插件模块加载 + AST 审计 + profile 缓存冷启动），后台预热后
+        # 降至 ~48ms（E5 实测）。目的仅是消除首次发送尖峰，不是启动耗时优化：
+        # daemon 线程、吞异常，不阻塞/不改序任何启动步骤；取不到模型名就跳过。
+        def _prewarm_context_limit():
+            try:
+                from app.core.modelmeta.model_capabilities import resolve_context_limit
+                from app.utils.config import Settings
+
+                settings = Settings.get_instance()
+                saved = dict(settings.llm_saved_providers.value or {})
+                llm_cfg: dict = {}
+                selected = settings.llm_selected_model.value or ""
+                if selected and selected in saved and isinstance(saved[selected], dict):
+                    llm_cfg = saved[selected]
+                elif saved:
+                    first = next(iter(saved.values()))
+                    if isinstance(first, dict):
+                        llm_cfg = first
+                if not llm_cfg.get("模型名称"):
+                    return
+                resolve_context_limit(llm_cfg)
+                logger.info("[DeferredStartup] resolve_context_limit 预热完成")
+            except Exception:
+                logger.debug("[DeferredStartup] resolve_context_limit 预热失败（忽略）")
+
+        try:
+            import threading
+
+            threading.Thread(target=_prewarm_context_limit, daemon=True).start()
+        except Exception:
+            logger.exception("[DeferredStartup] 启动 context-limit 预热线程失败")
 
         # 崩溃取证自检（仅调试）：DRIFOX_CRASH_TEST=1 时在 faulthandler 安装后
         # 触发真实 SIGSEGV，验证 crash log/WER 链路。正常运行永不设置此变量。

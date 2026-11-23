@@ -747,23 +747,59 @@ class Animations:
     def motion_enabled(cls) -> bool:
         """系统未开启「减少动态效果」时返回 True。
 
+        应用内「始终播放动效」（外观页）为真时无条件返回 True：系统级辅助
+        功能偏好常被优化工具/精简镜像改成关闭，用户看不到任何过渡动画时
+        需要一个显式逃生口。
+
         消费方约定：返回 False 时跳过动画、直接把属性置为终值
-        （保留状态反馈，去掉运动过程）。结果进程内缓存一次。
+        （保留状态反馈，去掉运动过程）。系统检测结果进程内缓存一次。
         """
+        if cls._motion_override():
+            return True
         if cls._reduce_motion is None:
             cls._reduce_motion = cls._detect_reduce_motion()
         return not cls._reduce_motion
 
     @staticmethod
+    def _motion_override() -> bool:
+        """读外观设置「始终播放动效」；配置层不可用时按未开启处理"""
+        try:
+            from app.utils.config import Settings
+
+            instance = Settings._instance  # 不触发懒初始化（无配置即无覆盖）
+            if instance is None:
+                return False
+            return bool(instance.ui_motion_always_on.value)
+        except Exception:
+            return False
+
+    @classmethod
+    def refresh_reduce_motion(cls) -> None:
+        """丢弃系统偏好探测缓存（系统开关在运行期被改动后重新探测）"""
+        cls._reduce_motion = None
+
+    @staticmethod
     def _detect_reduce_motion() -> bool:
-        """读取系统动画偏好；仅实现 Windows，其他平台视为开启动画。"""
+        """读取系统动画偏好；Windows/macOS 实现，其他平台视为开启动画。"""
         if sys.platform == "win32":
             try:
-                # SPI_GETCLIENTAREAANIMATION = 0x1042：pvParam 收到 BOOL，
-                # True = 客户区动画开启。查询失败按「开启动画」处理。
-                v = ctypes.c_bool(True)
-                ctypes.windll.user32.SystemParametersInfoW(0x1042, 0, ctypes.byref(v), 0)
-                return not v.value
+                # SPI_GETCLIENTAREAANIMATION = 0x1042：pvParam 收 BOOL。Win32 的
+                # BOOL 是 4 字节 int，用 c_bool（1 字节）会被越界写 3 字节。
+                # 返回 0 = 查询失败，按「开启动画」处理。
+                v = ctypes.c_int(0)
+                ok = ctypes.windll.user32.SystemParametersInfoW(0x1042, 0, ctypes.byref(v), 0)
+                if not ok:
+                    return False
+                return v.value == 0
+            except Exception:
+                return False
+        if sys.platform == "darwin":
+            try:
+                # macOS「减少动态效果」辅助功能偏好。AppKit（pyobjc）缺失
+                # 或查询失败按「开启动画」处理（与旧 Windows 失败分支同口径）。
+                from AppKit import NSWorkspace
+
+                return bool(NSWorkspace.sharedWorkspace().accessibilityDisplayShouldReduceMotion())
             except Exception:
                 return False
         return False

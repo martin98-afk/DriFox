@@ -27,8 +27,8 @@ from app.core.store.input_history_repo import InputHistoryRepository
 # 导入子模块
 from app.core.store.session_repository import SessionRepository, extract_first_user_question
 from app.core.store.subagent_log_repository import SubAgentLogRepository
+from app.utils.app_paths import get_app_data_dir
 from app.utils.db_manager import DatabaseManager
-from app.utils.utils import get_app_data_dir
 
 
 class SessionStore:
@@ -82,7 +82,7 @@ class SessionStore:
         2. 调用 compact_database() 分 3 批回收剩余 freelist（每批 1000 页 ≈ 4MB）
         """
         try:
-            from app.utils.utils import get_app_data_dir
+            from app.utils.app_paths import get_app_data_dir
 
             flag_path = Path(get_app_data_dir()) / cls._CLEAN_SHUTDOWN_FLAG
             flag_path.write_text("1", encoding="utf-8")
@@ -478,6 +478,18 @@ class SessionStore:
                 # 创建索引
                 self._db.execute_sql(f"CREATE INDEX IF NOT EXISTS idx_updated ON {self.TABLE_NAME}(updated_at DESC)")
                 self._db.execute_sql(f"CREATE INDEX IF NOT EXISTS idx_project ON {self.TABLE_NAME}(project)")
+                # 复合索引：get_all_lightweight 带 project 过滤时等值+排序一次命中，
+                # 消除单列索引二选一后再排序（#A2 诊断效率结论 2）
+                self._db.execute_sql(
+                    f"CREATE INDEX IF NOT EXISTS idx_project_updated ON {self.TABLE_NAME}(project, updated_at DESC)"
+                )
+                # 复合索引：团队合并条目的首问候选按 team_run_id 过滤 + updated_at 排序。
+                # 缺此索引时该查询退化为全表 SCAN（实测 527MB/2607 行库单次 15.7ms，
+                # 122 个团队 run 的 N+1 合计 1779ms，历史卡片打开卡 544ms）；
+                # 建索引后同一循环 4.3ms。
+                self._db.execute_sql(
+                    f"CREATE INDEX IF NOT EXISTS idx_team_run ON {self.TABLE_NAME}(team_run_id, updated_at DESC)"
+                )
                 # file_operations 表索引（几乎所有查询都按 session_id / call_id 过滤）
                 self._db.execute_sql("CREATE INDEX IF NOT EXISTS idx_file_ops_session ON file_operations(session_id)")
                 self._db.execute_sql(
@@ -490,7 +502,6 @@ class SessionStore:
 
                 # 迁移逻辑
                 self._migrate_add_project_column()
-                self._migrate_remove_canvas_id()
                 self._migrate_add_user_edited_title_column()
                 self._migrate_add_worktree_path_column()
                 self._migrate_add_preview_column()
@@ -536,30 +547,6 @@ class SessionStore:
                 logger.info("[SessionStore] project 列迁移完成")
         except Exception as e:
             logger.warning(f"[SessionStore] project 列迁移失败(可能已存在): {e}")
-
-    def _migrate_remove_canvas_id(self):
-        """迁移：删除已废弃的 canvas_id 列（如果存在）"""
-        if not self._db or not self._db.is_connected:
-            return
-        try:
-            columns = self._db.get_table_info(self.TABLE_NAME)
-            col_names = [c.get("name", "") for c in columns]
-            if "canvas_id" in col_names:
-                logger.info("[SessionStore] 迁移：删除 sessions 表的 canvas_id 列")
-                self._db.execute_sql(f"""
-                    CREATE TABLE {self.TABLE_NAME}_temp AS
-                    SELECT session_id, title, messages, system_prompt,
-                           compaction_state, compaction_cache, message_count,
-                           project, created_at, updated_at
-                    FROM {self.TABLE_NAME}
-                """)
-                self._db.execute_sql(f"DROP TABLE {self.TABLE_NAME}")
-                self._db.execute_sql(f"ALTER TABLE {self.TABLE_NAME}_temp RENAME TO {self.TABLE_NAME}")
-                self._db.execute_sql(f"CREATE INDEX IF NOT EXISTS idx_updated ON {self.TABLE_NAME}(updated_at DESC)")
-                self._db.execute_sql(f"CREATE INDEX IF NOT EXISTS idx_project ON {self.TABLE_NAME}(project)")
-                logger.info("[SessionStore] sessions 表 canvas_id 列迁移完成")
-        except Exception as e:
-            logger.warning(f"[SessionStore] canvas_id 列迁移失败(可能已不存在): {e}")
 
     def _migrate_add_user_edited_title_column(self):
         """迁移：添加 user_edited_title 列（如果不存在）"""
@@ -885,6 +872,12 @@ class SessionStore:
             return self._session_repo.get_full_messages(session_id)
         return []
 
+    def get_messages_with_lazy_extras(self, session_id: str, first_idxs: List[int]):
+        """[E14] 打开链懒 merge 入口（透传 repo）；导出/深读仍走 get_full_messages。"""
+        if self._session_repo:
+            return self._session_repo.get_messages_with_lazy_extras(session_id, first_idxs)
+        return [], []
+
     def delete_session(self, session_id: str) -> bool:
         """删除会话"""
         if self._session_repo:
@@ -912,8 +905,12 @@ class SessionStore:
     def force_cleanup_project(self, project_name: str) -> bool:
         """强制清理项目的所有关联数据（绕过 repo 层，直接 SQL 删除表记录）
 
-        归档时调用此方法，确保 sessions、project_workdir
-        两张表中该项目的所有记录都被删除，避免 UNION 查询让已归档项目"复活"。
+        归档时调用此方法，清掉所有能让项目重新出现在列表里的数据源：
+        - sessions / project_workdir：get_projects 的 UNION 两源
+        - key_documents：ProjectWorkdirRepository 启动时会把 is_working_dir=1
+          的行回灌进 project_workdir（见 _migrate_from_key_documents），
+          不清则已归档项目在下次启动以 0 会话空壳复活
+        - session_msg_extras：随会话删除的级联子表
         """
         if not self._db or not self._db.is_connected:
             logger.error(f"[SessionStore] 数据库未连接，无法清理项目 {project_name}")
@@ -927,6 +924,14 @@ class SessionStore:
             self._execute("DELETE FROM sessions WHERE project = ?", (project_name,))
             # 删除项目工作目录
             self._execute("DELETE FROM project_workdir WHERE project = ?", (project_name,))
+            # 清工作目录的历史宿主表：启动期迁移会从 key_documents 回灌
+            # project_workdir，不清则归档项目必在下次启动复活（2026-11-19 实证）。
+            # 极老库没有这张表（关键文档功能早期版本）→ 跳过，不拖垮整体清理。
+            ok_kd, kd_err = self._execute(
+                "DELETE FROM key_documents WHERE project = ? AND is_working_dir = 1", (project_name,)
+            )
+            if not ok_kd:
+                logger.debug(f"[SessionStore] key_documents 清理跳过: {kd_err}")
             # message_extras 级联清理（最后删）：前两步失败则 extras 与会话保持一致保留；
             # 前两步成功而 extras 失败只剩无害孤儿行（会话已不存在，无人查询）。
             for sid in target_ids:
@@ -954,6 +959,15 @@ class SessionStore:
         if self._session_repo:
             return self._session_repo.get_by_project(project, limit)
         return []
+
+    def get_by_ids(self, session_ids: List[str]) -> Dict[str, Dict]:
+        """[I8] 按 session_id 批量取回会话（团队恢复循环读批量化）。
+
+        委托 SessionRepository.get_by_ids（SELECT * IN 分批查询）。返回剥离态
+        主 blob（不含 extras 合并），消费方（HistoryManager）自行补 extras。"""
+        if self._session_repo:
+            return self._session_repo.get_by_ids(session_ids)
+        return {}
 
     def archive_sessions_by_project(self, project: str) -> int:
         """归档指定项目的所有会话"""

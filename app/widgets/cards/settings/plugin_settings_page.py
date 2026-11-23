@@ -18,7 +18,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, List, Optional
 
-from PyQt5.QtCore import Qt, QTimer, QUrl, pyqtSignal
+from PyQt5.QtCore import QSize, Qt, QTimer, QUrl, pyqtSignal
 from PyQt5.QtGui import QDesktopServices, QIcon, QPixmap
 from PyQt5.QtWidgets import (
     QFrame,
@@ -372,6 +372,21 @@ def _state_color(entry: PluginEntry) -> str:
     return Colors.SUCCESS
 
 
+class _FlexSegmented(SegmentedWidget):
+    """详情页页签：默认按每项 _ITEM_PREF_W 排布，空间不足时回落到文字宽被压缩。
+
+    Pivot 默认 sizeHint = item 文字宽之和，三个两字页签挤成窄条；
+    这里抬高 sizeHint 让默认更宽松，最小尺寸仍是文字宽（外层布局可压到该下限）。
+    """
+
+    _ITEM_PREF_W = 88
+
+    def sizeHint(self):
+        s = super().sizeHint()
+        preferred = self._ITEM_PREF_W * max(1, len(self.items))
+        return QSize(max(s.width(), preferred), s.height())
+
+
 class _PluginDetailView(QWidget):
     """右侧详情：插件头部 + 配置 / 权限 / 关于 三页签。"""
 
@@ -402,14 +417,15 @@ class _PluginDetailView(QWidget):
         title_box.addWidget(self._title)
         title_box.addWidget(self._meta)
         header.addLayout(title_box, 1)
-        layout.addLayout(header)
 
-        self._seg = SegmentedWidget(self)
+        # 页签贴插件名右侧同一行（原为独立整行，占掉一屏高度）
+        self._seg = _FlexSegmented(self)
         self._seg.addItem("config", "配置")
         self._seg.addItem("perms", "权限")
         self._seg.addItem("about", "关于")
         self._seg.currentItemChanged.connect(self._on_segment_changed)
-        layout.addWidget(self._seg)
+        header.addWidget(self._seg, 0, Qt.AlignVCenter)
+        layout.addLayout(header)
 
         self._stack = QStackedWidget(self)
         self._stack.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
@@ -487,6 +503,8 @@ class _PluginDetailView(QWidget):
         first = routes[0]
         self._seg.setCurrentItem(first)
         self._stack.setCurrentWidget(self._pages[first])
+        # sizeHint 随页签数量变化，需让父布局重算（否则沿用旧宽度）
+        self._seg.updateGeometry()
 
     def _set_page(self, key: str, widget: QWidget) -> None:
         area = self._pages[key]

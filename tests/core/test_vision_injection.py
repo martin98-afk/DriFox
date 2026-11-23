@@ -53,6 +53,10 @@ def _make_vision_worker(model: str):
     w._append_to_api_cache = lambda msgs: None  # stub（不引入 messages_to_api 依赖）
     w._is_gemini_model = lambda: False
     w._requires_reasoning_content = lambda: False
+    # __new__ 绕过 __init__ 后 QObject.__getattr__ 对缺失属性抛 RuntimeError，
+    # getattr 默认值失效 → 显式补 persist/注入路径读取的实例属性
+    w._current_session_id = None
+    w.session_id = None
     return w
 
 
@@ -439,3 +443,95 @@ class TestVisionTotalBudget:
         text = "".join(b.get("text", "") for b in content if b.get("type") == "text")
         assert len(blocks) == 1  # 8MB 预算只容 1 张 5MB
         assert "已省略 2 张" in text
+
+
+class TestVisionPersistToImageRef:
+    """T8：vision 注入先落盘再挂 image_ref（消除 data URI 在 API 缓存副本滞留）"""
+
+    def test_vision_inject_persists_to_image_ref(self, monkeypatch, tmp_path):
+        """注入后 content 块为 image_ref，磁盘出现 <sha1[:16]>.png，UI 副本同步"""
+        import base64
+        import hashlib
+
+        monkeypatch.setattr("app.utils.app_paths.get_app_data_dir", lambda: tmp_path)
+        w = _make_vision_worker("gpt-4o")
+        w.session_id = "sess_t8"
+        raw = b"\x89PNG" + b"\x00" * 256
+        b64 = base64.b64encode(raw).decode()
+        current_messages = [{"role": "user", "content": "看图"}]
+        session_messages: list = []
+        tool_results = [_read_result_with_image(data=b64)]
+        ok = w._try_inject_vision_content(tool_results, current_messages, session_messages=session_messages)
+        assert ok
+        digest = hashlib.sha1(raw).hexdigest()[:16]
+        # API 缓存消息（current_messages）：image_ref 引用而非 data URI
+        vision_msg = current_messages[-1]
+        blocks = [b for b in vision_msg["content"] if b.get("type") == "image_ref"]
+        assert len(blocks) == 1, f"期望 image_ref 块，实际: {vision_msg['content']}"
+        ref = blocks[0]["image_ref"]
+        assert ref["file"] == f"{digest}.png"
+        assert ref["session_id"] == "sess_t8"
+        # 磁盘：sha1[:16].png 落在 persisted/<sid>/
+        fpath = tmp_path / "screenshots" / "persisted" / "sess_t8" / f"{digest}.png"
+        assert fpath.exists(), f"落盘缺失: {fpath}"
+        assert fpath.read_bytes() == raw
+        # session_messages（UI 副本）与 API 副本共享 content list，同样见 image_ref
+        ui_blocks = [b for b in session_messages[-1]["content"] if b.get("type") == "image_ref"]
+        assert len(ui_blocks) == 1
+        assert not any(
+            b.get("type") == "image_url" and str(b.get("image_url", {}).get("url", "")).startswith("data:")
+            for b in vision_msg["content"]
+        ), "API 缓存副本不应残留 data URI"
+
+    def test_vision_inject_persist_failure_fallback(self, monkeypatch, tmp_path):
+        """persist 抛异常 → 降级保留 image_url 块，返回 True 不抛"""
+        monkeypatch.setattr("app.utils.app_paths.get_app_data_dir", lambda: tmp_path)
+
+        def _boom(*_a, **_k):
+            raise RuntimeError("disk full")
+
+        monkeypatch.setattr("app.core.store.session_repository._persist_vision_image_blocks_impl", _boom)
+        w = _make_vision_worker("gpt-4o")
+        w.session_id = "sess_t8f"
+        raw = b"\x89PNG" + b"\x01" * 64
+        b64 = base64.b64encode(raw).decode()
+        current_messages = [{"role": "user", "content": "看图"}]
+        tool_results = [_read_result_with_image(data=b64)]
+        ok = w._try_inject_vision_content(tool_results, current_messages, session_messages=[])
+        assert ok, "persist 失败应降级不阻断"
+        blocks = [b for b in current_messages[-1]["content"] if b.get("type") == "image_url"]
+        assert len(blocks) == 1
+        assert blocks[0]["image_url"]["url"].startswith("data:image/png;base64,")
+
+    def test_budget_omitted_images_not_persisted(self, monkeypatch, tmp_path):
+        """T17 minor-3：8MB 预算省略的图不落盘（守护「预算判定先于 persist」时序契约）"""
+        monkeypatch.setattr("app.utils.app_paths.get_app_data_dir", lambda: tmp_path)
+        import app.core.workers.chat_worker as cw
+        # 压缩恒等（模拟压不动），132B + 5MB 虽 <8MB 预算不省略；改用两张 5MB
+        monkeypatch.setattr(cw, "compress_data_uri", lambda du: du)
+        w = _make_vision_worker("gpt-4o")
+        w.session_id = "sess_t17"
+        raw = b"\x89PNG" + b"\x02" * 128
+        b64 = base64.b64encode(raw).decode()
+        # 两张 5MB base64 = 10MB > 8MB 预算 → pop 末尾 1 张
+        current_messages = [{"role": "user", "content": "看两张图"}]
+        tool_results = [{
+            "name": "read", "success": True, "content": "2 图",
+            "image_data": [
+                {"mime": "image/png", "data": "A" * (5 * 1024 * 1024)},
+                {"mime": "image/png", "data": "B" * (5 * 1024 * 1024)},
+            ],
+        }]
+        ok = w._try_inject_vision_content(tool_results, current_messages, session_messages=[])
+        assert ok
+        persisted_dir = tmp_path / "screenshots" / "persisted" / "sess_t17"
+        files = list(persisted_dir.glob("*")) if persisted_dir.exists() else []
+        assert len(files) == 1, f"仅未省略那张应落盘，实际 {files}"
+        import hashlib
+        kept_raw = base64.b64decode("A" * (5 * 1024 * 1024))
+        digest = hashlib.sha1(kept_raw).hexdigest()[:16]
+        assert files[0].name == f"{digest}.png", "落盘的应是保留的第一张（非省略图）"
+        content = current_messages[-1]["content"]
+        assert sum(1 for b in content if b.get("type") == "image_ref") == 1
+        text = "".join(b.get("text", "") for b in content if b.get("type") == "text")
+        assert "已省略 1 张" in text

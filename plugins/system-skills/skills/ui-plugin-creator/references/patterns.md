@@ -53,6 +53,8 @@
   - 10.3 高 DPI 坐标换算 — L600
   - 10.4 测试要点（pytest-qt） — L619
 - **11. 项目 / 工作目录联动（可选协议 on_project_changed）** — L634–L669
+- **12. 操作模型先于布局（用户说「逻辑很蠢」时）** — L696
+- **13. QSplitter 分隔条约定（角点联动 + 延迟高亮）** — L718
 ## 1. 上下文注入（拉模型）
 
 **核心原则**：**不要直接推数据**。卡片通过 `set_context_provider(provider)` 注入一个**无参函数**，在需要时自行调用获取最新上下文（主题色、字体、项目信息等）。
@@ -714,3 +716,30 @@ shot.setDevicePixelRatio(dpr)
 3. **改名就地做**：双击标题进编辑、点徽章改名字，回车/失焦提交、Esc 取消。弹输入框属于上一代交互，一律不要。
 
 > 判据：把所有动作按「谁最常用、谁依赖当前视图、谁很少用」排一次，落在三个不同的层上；三层里有任意一层放了两类动作，就还没排完。
+---
+## 13. QSplitter 分隔条约定（角点联动 + 延迟高亮）
+主程序装了全局 `SplitterCornerController`（`app/widgets/splitter_corners.py`），对**任何** `QSplitter` 自动生效，插件零接入：
+- **角点联动**：横向与纵向 splitter 的 handle 交汇处构成角点，悬停变对角光标（nwse / nesw 按几何取），按住拖动同时调整两个 splitter 的尺寸；命中方块已覆盖容器留白，插件不需要额外加热区。
+- **延迟高亮**：handle 悬停 140ms 后才点亮，动态属性 `splitterHot=True` 由控制器写入，移出立即熄灭。
+
+插件侧只负责**高亮态的画法**（不写不影响拖动，只是悬停没有视觉反馈）：
+
+```css
+QSplitterHandle {
+    background: transparent;
+    border-top: 2px solid rgba(<border>,90);
+    margin: 0;                 /* 不留横向缩进，线贯穿整宽 */
+}
+QSplitterHandle[splitterHot="true"] {
+    border-top: 2px solid <accent>;
+}
+```
+
+要点：
+1. handle 样式下沉到 handle 自身（`handle.setStyleSheet(...)` + `setAttribute(Qt.WA_StyledBackground, True)`），不要 `splitter.setStyleSheet("...::handle ...")`——后者会让 QStyleSheetStyle repolish 整棵 splitter 子树。
+2. **不要写 `:hover` 即时高亮**：会和 140ms 延迟时序打架，出现两套行为。
+3. 自绘 handle（子类化 `QSplitterHandle` 覆盖 `paintEvent`）时读 `self.property("splitterHot")` 决定画法。
+4. 不要自己实现分隔条拖拽：非 `QSplitter` 的自定义分隔条不享受角点联动。
+5. 分隔线视觉要与页面内容对齐：页内容贴边时分隔条也 `margin: 0`，否则线在两侧断开。
+
+先例：`plugins/file-tree/ui/cards.py` 的 `quick_handle_qss`（快捷预览分割条）。

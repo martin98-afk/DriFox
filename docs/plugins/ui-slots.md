@@ -168,6 +168,66 @@ def register_ui(registry):
 
 > **向工作台页定向投递**（插件 A 把内容交给插件 B 的页）：`registry.open_workbench_page(page_id)` 展开工作台、定位该页并**返回页面实例**（不可用返回 `None`），拿不到副作用时用 `registry.get_workbench_page(page_id)` 只查询已挂载实例。面板侧对应 `WorkbenchPanel.get_plugin_page(page_id)`，外部不要直接摸 `_plugin_widgets`。页面自行暴露接收方法（如文件树页的 `preview_path(path) -> bool`）。注意首次打开工作台时页面刚构建、`sync_plugin_pages` 尚未跑过，`open_workbench_page` 内部会先 reconcile 再展开；页面自身的定位/加载很可能仍是异步的（如文件树页的根扫描），接收方法不该假设「调用返回时内容已就绪」。
 
+### 1.3 页脚 / 弹窗 / 身份 / 模块（其余扩展点）
+
+```python
+def register_ui(registry):
+    # 消息身份「显示名」提供者（渲染期高频调用：须纯函数、禁止 I/O 与阻塞）
+    registry.register_identity_name_provider(
+        plugin_name, provider_id, resolve_func,
+        priority=0, metadata=None,
+    )  # resolve_func: (ctx) -> str，空串/None=未提供；ctx 含 role/session_id/team_agent/window_id
+       # 同 provider_id 重复注册视为同一插件刷新（去重）；priority 高者先问
+
+    # 消息身份「头像」提供者（约束同上）
+    registry.register_identity_avatar_provider(
+        plugin_name, provider_id, resolve_func,
+        priority=0, metadata=None,
+    )  # resolve_func 返回头像「引用」：本地图片绝对路径 / "builtin:drifox" 内置图标；
+       # 空串 → 渲染层用显示名派生色块 + 首字母
+
+    # 标题栏内嵌 widget（同 slot 高优先级覆盖低者；窗口 build 时装配）
+    registry.register_titlebar_widget(
+        plugin_name, slot, widget_factory,
+        priority=0, metadata=None,
+    )  # widget_factory: (宿主) -> QWidget
+
+    # 消息卡片页脚左区信息项（provider 在卡片构建/回合落定/流式节拍时回调，主线程）
+    registry.register_footer_stat(
+        plugin_name, stat_id, provider,
+        priority=0, metadata=None,
+    )  # provider: (ctx) -> Optional[{"text","color","tooltip"}]；须纯内存快速计算，不得阻塞或弹 UI
+
+    # 消息卡片页脚右区 hover 按钮（与内置分支/复制同排）
+    registry.register_footer_action(
+        plugin_name, action_id, icon_path="", icon_light_path="", tooltip="",
+        on_click=None, priority=0, role="assistant", metadata=None,
+    )  # on_click: (ctx) -> None；role: "assistant"|"user"|"both"（非法值回退 "assistant"）
+
+    # 插件独立弹窗（顶级窗口，壳复用 FramelessWindow + CustomTitleBar）
+    registry.register_window(
+        plugin_name, window_id, widget_class,
+        title="", icon_path="", width=640, height=480,
+        min_width=0, min_height=0, context_provider=None,
+        metadata=None, register_command=True, group="",
+    )  # 自动入左侧自定义插件栏（TabPanel）点击开/关切换；同 window_id 后注册覆盖；
+       # 生命周期随应用退出 / 插件卸载销毁；register_command=True 联动注册 /<window_id> 命令；
+       # group: "system"|"custom"|""（空串跟随插件归属）
+
+    # UI 模块实现（Phase F 模块级：多实现并存，胜者=最高 priority）
+    registry.register_ui_module(
+        module_id, factory,
+        plugin_name="system", priority=0,
+    )  # factory: 无参可调用，延迟到 get_ui_module 时构造返回 UIModule 实例；
+       # 同 module_id 多实现并存，priority 高者胜（系统基线 0，插件覆盖建议 >= 100）
+
+    # UI 命令账本唯一登记入口（register_* 联动命令亦走此账本，卸载/重放自动管理）
+    registry.register_ui_command(
+        name, description, handler,
+        owner="", *, override_external=True,
+    )  # handler: (name: str) -> None
+```
+
 ### UI 扩展点 → 自动命令（联动矩阵）
 
 `register_*` 时自动登记一条系统命令到 `UIPluginRegistry` 命令账本

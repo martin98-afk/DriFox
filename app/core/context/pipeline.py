@@ -127,13 +127,20 @@ class ContextPipeline:
 
             view.replace_messages(outcome.messages)
             after = view.used_tokens
+            # [#R6] saved 统一增量口径：before/after 均为 view 的 #I3 增量刷新值
+            # （O(changed)），差值即本层真实节省。原 outcome.saved_tokens 需 tier
+            # 全量 count_messages_tokens(result)（N=800 档整表遍历三处，已删）；
+            # 且 token_estimator ratio 表现行全 1.00 → 整表口径与逐条 Σper 口径
+            # 严格恒等，before-after 与原全量计算数学等价。TierStat 三数字
+            # （before/after/saved）自此同口径自洽，熔断判定语义不变。
+            saved = max(0, before - after)
             view.record(
                 TierStat(
                     tier_id=tier.id,
                     label=getattr(tier, "label", tier.id),
                     before_tokens=before,
                     after_tokens=after,
-                    saved_tokens=outcome.saved_tokens,
+                    saved_tokens=saved,
                     cache_impact=getattr(tier, "cache_impact", ""),
                     note=outcome.note,
                 )
@@ -142,7 +149,7 @@ class ContextPipeline:
             if view.used_tokens <= view.target_tokens:
                 break  # 达标即停
 
-            if outcome.saved_tokens <= 0:
+            if saved <= 0:
                 n = view.note_failure(tier.id)
                 if n >= TIER_FAILURE_LIMIT:
                     logger.warning(f"[Context] tier '{tier.id}' 连续 {n} 次无收益，本轮后续跳过（熔断）")

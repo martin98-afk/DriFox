@@ -201,3 +201,127 @@ def test_claude_legacy_3_5_keeps_sampling_params(transport):
     cfg = {'模型名称': 'claude-3-5-sonnet-20241022', '思考模式': False, 'top_p': 0.9}
     body = transport.build_request(cfg)
     assert body['top_p'] == 0.9
+
+# ---------- 6. 提示缓存断点（Anthropic 前缀缓存 opt-in，不发断点命中恒 0） ----------
+
+class _FakeResp:
+    """requests.post 的最小替身：create_stream 不迭代响应，只要 status_code。"""
+
+    def __init__(self, status_code=200, text=""):
+        self.status_code = status_code
+        self.text = text
+        self.closed = False
+
+    def close(self):
+        self.closed = True
+
+def _capture_post(monkeypatch, responses):
+    """替换 requests.post：记录请求体，按序返回预置响应。
+
+    记录必须深拷贝：400 降级路径会原地剥掉 body 里的 cache_control，
+    持引用会让第一次请求的取证被第二次请求覆盖。
+    """
+    import copy
+
+    import requests
+
+    calls = []
+    seq = list(responses)
+
+    def fake_post(url, headers=None, json=None, stream=None, timeout=None):
+        calls.append({"url": url, "json": copy.deepcopy(json), "headers": headers})
+        return seq.pop(0) if seq else _FakeResp()
+
+    monkeypatch.setattr(requests, "post", fake_post)
+    return calls
+
+_CACHE_CFG = {
+    "模型名称": "claude-sonnet-5-5",
+    "API_URL": "https://api.anthropic.com",
+    "API_KEY": "sk-test",
+    "思考模式": False,
+}
+_CACHE_MESSAGES = [
+    {"role": "system", "content": "系统提示"},
+    {"role": "user", "content": "你好"},
+]
+_CACHE_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "read_file",
+            "description": "读文件",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    }
+]
+
+def test_create_stream_marks_tools_and_last_message(transport, monkeypatch):
+    calls = _capture_post(monkeypatch, [_FakeResp()])
+    transport.create_stream(_CACHE_CFG, _CACHE_MESSAGES, tools=_CACHE_TOOLS)
+    body = calls[0]["json"]
+    assert body["tools"][-1]["cache_control"] == {"type": "ephemeral"}
+    assert body["messages"][-1]["content"][-1]["cache_control"] == {"type": "ephemeral"}
+    assert body["system"] == "系统提示"  # 有 tools 时不改 system 形态
+
+def test_create_stream_system_breakpoint_without_tools(transport, monkeypatch):
+    calls = _capture_post(monkeypatch, [_FakeResp()])
+    transport.create_stream(_CACHE_CFG, _CACHE_MESSAGES)
+    body = calls[0]["json"]
+    assert body["system"] == [
+        {"type": "text", "text": "系统提示", "cache_control": {"type": "ephemeral"}}
+    ]
+
+def test_create_stream_cache_off_sends_no_marker(transport, monkeypatch):
+    calls = _capture_post(monkeypatch, [_FakeResp()])
+    transport.create_stream(
+        {**_CACHE_CFG, "提示缓存": False}, _CACHE_MESSAGES, tools=_CACHE_TOOLS
+    )
+    body = calls[0]["json"]
+    assert "cache_control" not in body["tools"][-1]
+    assert "cache_control" not in body["messages"][-1]["content"][-1]
+
+def test_create_stream_retries_without_markers_on_400(transport, monkeypatch):
+    calls = _capture_post(
+        monkeypatch,
+        [
+            _FakeResp(400, '{"error":{"message":"cache_control: unsupported"}}'),
+            _FakeResp(200),
+        ],
+    )
+    transport.create_stream(_CACHE_CFG, _CACHE_MESSAGES, tools=_CACHE_TOOLS)
+    assert len(calls) == 2
+    assert "cache_control" in calls[0]["json"]["tools"][-1]
+    assert "cache_control" not in calls[1]["json"]["tools"][-1]
+    assert "cache_control" not in calls[1]["json"]["messages"][-1]["content"][-1]
+
+def test_mark_last_message_cacheable_skips_empty_text(mod):
+    messages = [
+        {
+            "role": "user",
+            "content": [{"type": "text", "text": "有效"}, {"type": "text", "text": ""}],
+        }
+    ]
+    assert mod.mark_last_message_cacheable(messages) is True
+    assert "cache_control" in messages[0]["content"][0]
+    assert "cache_control" not in messages[0]["content"][1]
+
+def test_strip_cache_markers_clears_all(mod):
+    marker = {"type": "ephemeral"}
+    body = {
+        "system": [{"type": "text", "text": "s", "cache_control": marker}],
+        "tools": [{"name": "t", "cache_control": marker}],
+        "messages": [
+            {"role": "user", "content": [{"type": "text", "text": "x", "cache_control": marker}]}
+        ],
+    }
+    assert mod.strip_cache_markers(body) == 3
+    assert "cache_control" not in body["system"][0]
+    assert "cache_control" not in body["tools"][0]
+    assert "cache_control" not in body["messages"][0]["content"][0]
+
+def test_prompt_cache_enabled_defaults_true_and_reads_off_values(mod):
+    assert mod._prompt_cache_enabled({}) is True
+    assert mod._prompt_cache_enabled({"提示缓存": True}) is True
+    assert mod._prompt_cache_enabled({"提示缓存": False}) is False
+    assert mod._prompt_cache_enabled({"提示缓存": "false"}) is False

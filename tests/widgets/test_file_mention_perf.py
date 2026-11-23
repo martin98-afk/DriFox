@@ -13,6 +13,7 @@
 import fnmatch
 import os
 import sys
+import time
 
 from PyQt5.QtWidgets import QApplication
 
@@ -509,6 +510,99 @@ class TestScrollAndFlashRegression:
         card._do_filter_and_render()
         assert calls[-1] is None
 
+
+class TestSessionCacheAsyncRefresh:
+    """TTL 过期首键后台化：旧数据即时响应，同步路径仅限首次/强制失效（#A2 点位 9）"""
+
+    @staticmethod
+    def _make_card():
+        _ensure_qapp()
+        return FileMentionCard()
+
+    @staticmethod
+    def _stale_cache(card):
+        """灌旧缓存并置于「自然过期」态（cache_at > 0 且超出 TTL）"""
+        card._cache_dirty = False
+        card._session_project = "ProjA"
+        card._session_items_cache = [
+            {
+                "type": "session",
+                "session_id": "s-old",
+                "name": "旧标题",
+                "description": "",
+                "path": "session://s-old",
+                "relative_path": "旧标题",
+            }
+        ]
+        card._session_cache_at = time.monotonic() - card._SESSION_CACHE_TTL - 1
+
+    def test_ttl_expired_first_key_returns_stale_without_sync_io(self, monkeypatch):
+        """自然过期首键：立即返回旧缓存，拉取在后台线程完成，下次取用生效"""
+        import threading
+
+        _ensure_qapp()
+        started = threading.Event()
+
+        class FakeStorage:
+            def get_sessions_lightweight(self, limit=100, offset=0, project=None):
+                started.set()
+                time.sleep(0.3)  # 模拟重 IO：同步路径若被走到必然拖垮首键计时
+                return [
+                    {"session_id": "s-new", "title": "刷新后标题", "project": project or "", "updated_at": "t"}
+                ]
+
+            def get_all(self, limit=100):
+                return []
+
+        import app.core.conversation.backend as backend_mod
+
+        monkeypatch.setattr(backend_mod, "get_session_storage", lambda: FakeStorage())
+
+        card = self._make_card()
+        self._stale_cache(card)
+
+        t0 = time.monotonic()
+        items = card._collect_session_items()
+        elapsed = time.monotonic() - t0
+
+        assert items and items[0]["name"] == "旧标题", "过期首键应即时返回旧缓存"
+        assert elapsed < 0.2, f"首键耗时 {elapsed:.3f}s，仍在同步等 IO"
+        assert card._session_refreshing, "应已调度后台刷新"
+
+        thread = card._session_refresh_thread
+        assert thread is not None
+        thread.join(timeout=3)
+        assert not thread.is_alive(), "后台刷新线程应结束"
+        assert card._session_items_cache and card._session_items_cache[0]["name"] == "刷新后标题", (
+            "刷新后缓存应落地新数据"
+        )
+        assert card._session_refreshing is False
+
+    def test_forced_invalidation_stays_sync(self, monkeypatch):
+        """show_card 置零 cache_at（切项目/根目录）：同步重拉，不返回旧数据"""
+        _ensure_qapp()
+        calls = []
+
+        class FakeStorage:
+            def get_sessions_lightweight(self, limit=100, offset=0, project=None):
+                calls.append(project)
+                return [{"session_id": "s2", "title": "新数据", "project": project or "", "updated_at": "t"}]
+
+            def get_all(self, limit=100):
+                return []
+
+        import app.core.conversation.backend as backend_mod
+
+        monkeypatch.setattr(backend_mod, "get_session_storage", lambda: FakeStorage())
+
+        card = self._make_card()
+        self._stale_cache(card)
+        card._session_cache_at = 0.0  # show_card 强制失效形态
+
+        items = card._collect_session_items()
+        assert calls and calls[0] == "ProjA", "强制失效必须同步重拉"
+        assert items[0]["name"] == "新数据", "不得返回旧缓存"
+        assert card._session_refreshing is False, "同步路径不应起后台线程"
 
 class TestBrowseUX:
     """目录浏览 UX：空态保留卡片、浏览↔输入框联动、文件级 gitignore 不再过滤"""

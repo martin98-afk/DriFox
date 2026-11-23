@@ -35,6 +35,7 @@ from app.constants import provider_quota_exclude_keys as QUOTA_EXCLUDE_KEYS
 from app.tools.result import as_image_list
 
 from app.plugins.contracts.stream_sink import StreamInterruptedError  # noqa: F401  契约层定义，此处兼容 re-export
+from app.utils.thread_guard import mark_thread_active
 
 # 插件编程错误类型集（G3）：transport/sink 抛出这些异常 = 插件代码 bug，
 # 快速失败不重试（使用点：_make_api_call 异常分类、_handle_error 文案分支）
@@ -1285,6 +1286,10 @@ class OpenAIChatWorker(QThread):
             ctx = {
                 "project_root": workdir,
                 "session_id": _session_id,  # Claude Code 兼容字段
+                # 本 worker 所属窗口：hook 内的 caps_for 无 ctx 时按活跃窗口解析
+                # host，多窗口下会串窗（交接补写提示被发到用户正看着的那个窗口）。
+                # hook 用该字段把 session.send 定向回自己。
+                "window_id": str(getattr(backend, "_window_id", "") or ""),
                 # 【新增】让 hook 能识别当前执行角色（与 subagent_worker._build_hook_context 对齐）
                 "current_role": "primary",
                 "is_subagent_call": False,
@@ -1580,7 +1585,11 @@ class OpenAIChatWorker(QThread):
             # 映射 signal_name 到 WorkerEvent
             event = self._signal_name_to_event(signal_name)
             if event:
-                self._emit_via_event_bus(event, *args)
+                # 高频流式事件跳过 bus 空跑：全仓无生产订阅者，bus.emit 零订阅
+                # 也要获取 threading.Lock，content/reasoning/tool_args 每 chunk
+                # 一次纯属开销。生命周期类事件保持双路径不变。
+                if event not in self._BUS_SKIP_EVENTS:
+                    self._emit_via_event_bus(event, *args)
                 if event in (WorkerEvent.FINISHED_WITH_CONTENT, WorkerEvent.FINISHED_WITH_MESSAGES):
                     self._report_health(STATUS_OK)
 
@@ -1611,6 +1620,11 @@ class OpenAIChatWorker(QThread):
         "permission_approval_requested": WorkerEvent.PERMISSION_REQUESTED,
         "error_occurred": WorkerEvent.ERROR,
     }
+
+    # 高频流式事件集合：每 chunk 触发，跳过 event_bus 空跑（见 _emit_with_callback）
+    _BUS_SKIP_EVENTS: frozenset = frozenset(
+        {WorkerEvent.CONTENT_RECEIVED, WorkerEvent.REASONING_RECEIVED, WorkerEvent.TOOL_CALL_STREAM}
+    )
 
     def _signal_name_to_event(self, signal_name: str) -> Optional[WorkerEvent]:
         """将 signal name 映射到 WorkerEvent（使用类变量缓存）"""
@@ -2337,6 +2351,9 @@ class OpenAIChatWorker(QThread):
             self._continuation_count = 0
 
             while not self._is_cancelled:
+                # [ThreadGuard] 每轮开头打活动点：主循环推进 = 线程在干活（不是卡死），
+                # 不能拿 WorkerLifetime 的 `_run_started_at` 当活动判据（它只在起点写一次）。
+                mark_thread_active(self)
                 if self._is_cancelled:
                     return
                 # [T15/M6] 退出期 atexit 钩子会 requestInterruption() 收敛存活的
@@ -2631,7 +2648,11 @@ class OpenAIChatWorker(QThread):
                 tool_count = len(self._current_tool_calls) if self._current_tool_calls else 0
                 self._mem_snapshot("before_tool_exec", tool_count=tool_count, msg_count=len(current_messages))
 
+                # [ThreadGuard] 工具组执行可能持续几十秒：前后各打一次活动点，
+                # 覆盖「工具内部长跑」与「执行完回归主循环」两端
+                mark_thread_active(self)
                 tool_results = self._execute_all_tools()
+                mark_thread_active(self)
 
                 # ★ 消费 PreToolUse 队列（独立于 PostToolUse 队列）
                 # PreToolUse 由 tool_executor 同步触发后入 pre_tool 队列，
@@ -2642,9 +2663,16 @@ class OpenAIChatWorker(QThread):
                     # 提前捕获 _question_pending，避免 cancel+cleanup 竞态导致丢失引用
                     q = self._question_pending
                     self._answer_event.clear()
-                    while self._pending_answer is None and not self._is_cancelled:
-                        if self._answer_event.wait(timeout=1.0):
-                            break
+                    # [ThreadGuard] 等用户回答期间无活动是预期行为：置豁免，
+                    # 不在此打点（打了会把「人在思考」当活成），等完立即复位。
+                    _guard_exempt_prev = getattr(self, "_guard_exempt", False)
+                    self._guard_exempt = True
+                    try:
+                        while self._pending_answer is None and not self._is_cancelled:
+                            if self._answer_event.wait(timeout=1.0):
+                                break
+                    finally:
+                        self._guard_exempt = _guard_exempt_prev
 
                     if self._is_cancelled:
                         return
@@ -3342,8 +3370,28 @@ class OpenAIChatWorker(QThread):
                 ),
             },
         ]
+        from app.core.store.session_repository import _persist_vision_image_blocks_impl
+        from app.utils.app_paths import get_app_data_dir  # 对齐 T4 纯路径模块拆分
+
+        persist_ok = 0
+        persist_fallback = 0
+        # 对齐 L448-451 persister 取法：优先 worker 当前 session_id，兜底 "default"
+        sid = str(getattr(self, "_current_session_id", None) or getattr(self, "session_id", None) or "default")
         for du in data_uris:
-            vision_content.append({"type": "image_url", "image_url": {"url": du}})
+            block = {"type": "image_url", "image_url": {"url": du}}
+            try:
+                # 复用 main_widget 持久化先例（persist 单块路径）：先落盘 screenshots，
+                # 内存/API 缓存副本只留 image_ref 引用，消除 data URI 在缓存副本的滞留
+                holder = [{"role": "user", "content": [block]}]
+                _persist_vision_image_blocks_impl(holder, sid, get_app_data_dir())
+                block = holder[0]["content"][0]
+            except Exception as e:  # noqa: BLE001 — persist 失败降级保留原 image_url 块（行为同旧版）
+                logger.debug(f"[Vision] persist 失败，降级保留 data URI: {e}")
+            if isinstance(block, dict) and block.get("type") == "image_ref":
+                persist_ok += 1
+            else:
+                persist_fallback += 1
+            vision_content.append(block)
 
         vision_msg: Dict = {
             "role": "user",
@@ -3362,7 +3410,8 @@ class OpenAIChatWorker(QThread):
         current_messages.append(vision_msg)
 
         logger.info(
-            f"[Vision] Injected {len(data_uris)} image(s) via hook pattern for {model_name} (tools: {tool_names_str})"
+            f"[Vision] Injected {len(data_uris)} image(s) via hook pattern for {model_name} (tools: {tool_names_str}) "
+            f"persist 成功 {persist_ok} / 降级 {persist_fallback}"
         )
 
         # 重建 API 缓存：current_messages 已被修改（含 image_url），
@@ -3401,37 +3450,41 @@ class OpenAIChatWorker(QThread):
         fixed_messages: List[Dict] = []
         modified = False
 
-        # 第一步：收集所有 tool 消息中的 tool_call_id（这些是"有效的"）
+        # 第一步：收集所有 tool 消息中的 tool_call_id（这些是"有效的"），
+        # 顺带记录是否存在 assistant 带 tool_calls（中断/orphan 候选判定用）
         valid_tool_call_ids: set = set()
+        has_pending_tool_calls = False
         for msg in messages:
             if msg.get("role") == "tool":
                 tc_id = msg.get("tool_call_id", "")
                 if tc_id:
                     valid_tool_call_ids.add(tc_id)
+            elif msg.get("role") == "assistant" and msg.get("tool_calls"):
+                has_pending_tool_calls = True
 
         # 正常路径每轮都会走到这里，warning 会在健康会话里刷屏；细节降 debug，
         # 异常场景（中断/重复/孤儿）的 warning 保留在下方各分支
         logger.debug(f"[ToolCall修复] 有效 tool_call_ids: {len(valid_tool_call_ids)} 个")
 
-        # 如果没有任何 tool 消息，说明是用户中断场景，但没有累积的工具结果
-        # 这种情况下直接返回无需修复
-        if not valid_tool_call_ids:
-            # 检查是否有 assistant 消息包含 tool_calls
-            has_tool_calls = any(msg.get("role") == "assistant" and msg.get("tool_calls") for msg in messages)
-            if has_tool_calls:
-                logger.warning("[ToolCall修复] 检测到用户中断场景：assistant 有 tool_calls 但无任何 tool 结果")
-                # 移除所有 assistant 消息中的 tool_calls
-                for msg in messages:
-                    if msg.get("role") == "assistant":
-                        if msg.get("tool_calls"):
-                            msg.pop("tool_calls", None)
-                            # 确保 content 不为 None，避免 API 报 "content or tool_calls must be set"
-                            if msg.get("content") is None:
-                                msg["content"] = ""
-                            modified = True
-                            logger.info("[ToolCall修复] 已移除中断时的 tool_calls")
-                return messages, modified
+        # 前置短路：无有效 tool 结果、也无任何 assistant 带 tool_calls →
+        # 纯聊天视图不可能有 orphan，原样返回（免去中断场景二次全扫）
+        if not valid_tool_call_ids and not has_pending_tool_calls:
             return messages, False
+
+        # 如果没有任何 tool 消息，说明是用户中断场景（能走到这里说明
+        # has_pending_tool_calls 为 True）：剥离所有 assistant 的 tool_calls
+        if not valid_tool_call_ids:
+            logger.warning("[ToolCall修复] 检测到用户中断场景：assistant 有 tool_calls 但无任何 tool 结果")
+            for msg in messages:
+                if msg.get("role") == "assistant":
+                    if msg.get("tool_calls"):
+                        msg.pop("tool_calls", None)
+                        # 确保 content 不为 None，避免 API 报 "content or tool_calls must be set"
+                        if msg.get("content") is None:
+                            msg["content"] = ""
+                        modified = True
+                        logger.info("[ToolCall修复] 已移除中断时的 tool_calls")
+            return messages, modified
 
         # 第二步：遍历每个 assistant 消息，修复 tool_calls
         for msg in messages:
@@ -3821,20 +3874,29 @@ class OpenAIChatWorker(QThread):
 
         # 性能优化：使用缓存的 API 消息。cache 常驻轻量 image_ref 形态（出口已
         # 回收），发送前 _materialize_for_send 物化出 data URI 副本（请求作用域）
-        if use_cache and self._api_messages_cache is not None:
-            sanitized = self._materialize_for_send(self._api_messages_cache)
+        # [T-C] responses 模式跳过 chat 形态序列化：transport 只消费内部 messages
+        # （自己序列化 input_items），chat 形态 api_messages 对它无效——白付
+        # revive/revoke 双扫 + 全量序列化 + 缓存物化，每轮工具迭代 O(N) 纯开销。
+        # 判据必须用原始 flags（_serialize_for_api 内部强制 False 后不可判）。
+        # 安全性：2013/missing_args 自愈带 not _is_responses_transport 守卫，不受
+        # api_messages=None 影响；hook 注入基座 run() 的 cache 初始化保留不动。
+        _responses_mode = False
+        try:
+            _responses_mode = bool(self._adapter_flags().use_responses_api)
+        except Exception:
+            _responses_mode = False
+
+        if _responses_mode:
+            api_messages = None
+        elif use_cache and self._api_messages_cache is not None:
+            api_messages = self._materialize_for_send(self._api_messages_cache)
         else:
             fresh = self._serialize_for_api(messages).messages
             if use_cache:
                 # cache 常驻轻量 image_ref 形态；materialize 副本只进发送作用域
                 self._set_api_messages_cache(fresh)
                 self._api_messages_built = True
-            sanitized = self._materialize_for_send(fresh)
-
-        # 消息序列化（协议无关，序列化器插件负责形态）
-        # 请求参数组装已下沉至 transport 插件（system-transports/openai_chat.py）；
-        # worker 只保留自愈逻辑需要的消息列表引用与流式能力判定
-        api_messages = sanitized
+            api_messages = self._materialize_for_send(fresh)
         model = str(self.llm_config.get("模型名称", "gpt-4o") or "gpt-4o")
         # 认证头（bce / 服务商伪装头）：由 worker 统一算出后交给 transport/原生通道
         auth_headers = self._build_auth_headers()
@@ -4100,6 +4162,9 @@ class OpenAIChatWorker(QThread):
                             return None, None
                         time.sleep(min(step, wait_time - elapsed))
                         elapsed += step
+                        # [ThreadGuard] 退避等待每 0.5s 推进一次算活动；
+                        # 不预支 wait_time（审阅已确认它只用于 UI 展示）。
+                        mark_thread_active(self)
                     continue
 
                 if hasattr(e, "response") and e.response is not None:
@@ -4719,12 +4784,19 @@ class OpenAIChatWorker(QThread):
             # emit 之后（此刻才进入等待），竞态由循环条件兜底：即使决策在 clear
             # 前已置位 pending=None，wait 超时后条件不成立即退出，不丢决策。
             self._permission_event.clear()
-            while (
-                self._permission_pending is not None and not self._is_cancelled and not self._tool_execution_cancelled
-            ):
-                if self._permission_event.wait(timeout=1.0):
-                    break
-                self._permission_event.clear()
+            # [ThreadGuard] 等用户审批期间无活动是预期行为：置豁免，不打活动点
+            #（打了会把「人还在看弹窗」当成干活），出等待立即复位。
+            _guard_exempt_prev = getattr(self, "_guard_exempt", False)
+            self._guard_exempt = True
+            try:
+                while (
+                    self._permission_pending is not None and not self._is_cancelled and not self._tool_execution_cancelled
+                ):
+                    if self._permission_event.wait(timeout=1.0):
+                        break
+                    self._permission_event.clear()
+            finally:
+                self._guard_exempt = _guard_exempt_prev
 
             if self._is_cancelled or self._tool_execution_cancelled:
                 self._emit_cancelled_tool_result(
@@ -4821,7 +4893,7 @@ class OpenAIChatWorker(QThread):
             # 删除豁免路径内的目标不保留（豁免语义 = 完全不干预，与审批口径一致）
             if delete_exempt(command, cfg, workdir=workdir):
                 return
-            from app.utils.utils import get_app_data_dir
+            from app.utils.app_paths import get_app_data_dir
 
             trash_root = get_app_data_dir() / "backups" / "deletes"
             stash_delete_targets_to_trash(command, trash_root, workdir=workdir)
@@ -5110,6 +5182,23 @@ class OpenAIChatWorker(QThread):
                     f"  3. 重新发起任务（如开启新会话）",
                 )
                 return
+            # 服务端不认请求里的字段（Google protobuf：Unknown name "x": Cannot find field）。
+            # 必须排在「参数过长」之前——其文案含 Invalid JSON payload，会被下面的
+            # payload 关键词误捕成参数过大，把用户引向「拆工具参数」的错误方向。
+            if any(
+                kw in error_msg.lower()
+                for kw in ["unknown name", "cannot find field", "unknown field", "unrecognized field"]
+            ):
+                self._emit_with_callback(
+                    "error_occurred",
+                    self.error_occurred,
+                    f"[参数不支持] 服务端不接受请求里的某个字段，整个请求被拒。\n"
+                    f"通常是模型参数与所用协议不匹配（如把 OpenAI 专有的 frequency_penalty 发给 Gemini）。\n"
+                    f"建议: 清空模型参数里对应的项；内置服务商应在其插件 capabilities 的 "
+                    f"unsupported_params 中声明该字段。\n"
+                    f"详情: {error_msg[:300]}",
+                )
+                return
             # 检测参数过大相关错误（不同 provider 的不同错误信息）
             if any(
                 kw in error_msg.lower()
@@ -5318,7 +5407,7 @@ def _compact_process_heap():
 def _get_log_dir_path(filename: str) -> str:
     """获取日志目录路径"""
     try:
-        from app.utils.utils import get_app_data_dir
+        from app.utils.app_paths import get_app_data_dir
 
         return str(get_app_data_dir() / "logs" / filename)
     except Exception:

@@ -52,6 +52,7 @@ from app.plugins.kernel import KNOWN_COMPONENTS
 # 插件平台声明与 deps 统一加载（设计：docs/superpowers/specs/2026-08-27-plugin-platform-deps-design.md）
 from app.plugins.deps_loader import check_platform, ensure_deps_on_path
 from app.utils._startup_probe import mark as _probe
+from app.utils.safe_mode import is_safe_mode as _safe_mode_active
 
 # 插件名合法字符：首字符必须为字母或数字，后续允许字母数字与 _ . -
 # 严禁路径分隔符与 `..`（plugin_name 会参与配置存储路径拼接，见 plugin_config_store）
@@ -381,6 +382,10 @@ class PluginManager:
 
     _instance: Optional["PluginManager"] = None
 
+    # 安全模式（--safe-mode）：本进程只加载系统插件。类属性给 __new__ 构造的
+    # 测试实例提供默认值，真实实例在 __init__ 中按命令行开关覆盖。
+    _safe_mode: bool = False
+
     # 插件搜索路径（按优先级）
     # 系统插件：项目根目录 plugins/（打包在 exe 中；P1-6：onedir 下解析 _MEIPASS/plugins）
     _SYSTEM_PLUGIN_DIR = _resolve_system_plugin_dir()
@@ -420,6 +425,8 @@ class PluginManager:
         self._plugins: Dict[str, PluginInfo] = {}
         self._initialized = False
         self._app_data_dir: Optional[Path] = None
+        # 安全模式：托盘「安全模式重启」注入 --safe-mode，只加载系统插件
+        self._safe_mode = _safe_mode_active()
         # 组件/细项禁用集缓存（None = 未加载）。Settings 里该项变更极低频，
         # 但 hooks 触发等热路径会高频查询，故缓存到进程内，写操作同步更新。
         self._disabled_components_cache: Optional[frozenset] = None
@@ -456,6 +463,22 @@ class PluginManager:
 
         # 0. 一次性迁移：system 单体插件拆分为 system-* 系列后的旧状态键改写
         self._migrate_split_system_states()
+
+        # 安全模式：只扫系统插件，跳过发现缓存与 Claude/用户插件目录。
+        # 缓存不能读也不能写：缓存 key 只含磁盘目录签名，与加载范围无关，
+        # 读写会让正常启动命中「仅 system」的缓存并丢掉用户插件。
+        if self._safe_mode:
+            logger.warning("[PluginManager] 安全模式：仅加载系统插件（跳过 Claude/用户插件）")
+            self._discover_system_plugins()
+            logger.info(f"[PluginManager] Safe mode loaded {len(self._plugins)} system plugins")
+            self._initialized = True
+            self._restore_enabled_from_settings()
+            try:
+                self._last_scan_signature = self._plugins_dir_signature(include_mtime=False)
+            except Exception:
+                self._last_scan_signature = None
+            self._schedule_preload_plugin_tools()
+            return
 
         # [T26/H2] 插件发现缓存命中 → 跳过三连全扫（热态 -0.8~2.5s）。
         # 命中路径复用 _merge_discovered 合并语义 + 重放幂等副作用
@@ -593,7 +616,9 @@ class PluginManager:
         "tools": "system-interact",  # 2026-11-12 由 system-tools 更名
         "context_tiers": "system-context",
         "budget_resolvers": "system-context",
-        # 「ui」组件的系统插件锚点：产物页（工作树/历史已拆分为独立插件）
+        # 「ui」组件的系统插件锚点：v0.5.9 单体拆分迁移的一次性承继映射。
+        # ⚠ 不可删除：老版本用户升级时按此把旧 ui 组件归入 artifacts-manager；
+        # 该插件现已改为卡片成果栏（2026-11-17），映射对已迁移用户无副作用。
         "ui": "artifacts-manager",
         "team_templates": "system-team-templates",
         "mcp": "system-mcp",
@@ -734,6 +759,10 @@ class PluginManager:
 
     def is_initialized(self) -> bool:
         return self._initialized
+
+    def is_safe_mode(self) -> bool:
+        """本进程是否为安全模式（只加载系统插件，由 --safe-mode 决定）"""
+        return bool(self._safe_mode)
 
     # ============================================================
     # 运行时重扫
@@ -895,7 +924,12 @@ class PluginManager:
         [T10g] 空插件守卫：_plugins 为空时（如测试隔离目录实例）直接不写，
         避免空缓存文件落盘污染——真实路径靠 key 不匹配兜底，但空缓存文件
         本身不应存在。
+
+        安全模式不写：缓存 key 与加载范围无关，落盘后正常启动会命中
+        「仅 system」缓存，用户插件在正常运行中消失。
         """
+        if self._safe_mode:
+            return
         if not self._plugins:
             return
         try:
@@ -921,6 +955,9 @@ class PluginManager:
         验收日志：命中打 "from cache"、全扫不打（键不等打 "full scan"）。
         """
         try:
+            if self._safe_mode:
+                # 缓存里含 Claude/用户插件，安全模式必须走全扫（只扫系统）
+                return False
             cache_file = self._discovery_cache_path()
             if not cache_file.exists():
                 return False
@@ -1136,17 +1173,18 @@ class PluginManager:
         system_plugins = self._scan_plugins(self._SYSTEM_PLUGIN_DIR, "system")
         current_system = {p.name: p for p in system_plugins}
 
-        # 2. 重新扫描用户插件
+        # 2. 重新扫描用户插件（安全模式不加载，热重载同样不得引入）
         user_plugins = []
-        if self._app_data_dir:
+        if self._app_data_dir and not self._safe_mode:
             user_plugin_dir = self._app_data_dir / self._USER_PLUGIN_DIR_NAME
             user_plugins = self._scan_plugins(user_plugin_dir, "user")
         current_user = {p.name: p for p in user_plugins}
 
         # 2.5 重新扫描 Claude Code 插件
         claude_plugins = []
-        for claude_dir in (self._CLAUDE_USER_SKILLS_DIR, self._CLAUDE_PLUGIN_CACHE_DIR):
-            claude_plugins.extend(self._scan_plugins(claude_dir, "claude"))
+        if not self._safe_mode:
+            for claude_dir in (self._CLAUDE_USER_SKILLS_DIR, self._CLAUDE_PLUGIN_CACHE_DIR):
+                claude_plugins.extend(self._scan_plugins(claude_dir, "claude"))
         current_claude = {p.name: p for p in claude_plugins}
 
         # 3. 优先级合并（公共函数：rescan 与发现缓存命中路径共用同一语义，[T26]）
@@ -1268,10 +1306,12 @@ class PluginManager:
         search_dirs: List[tuple] = [
             (self._SYSTEM_PLUGIN_DIR, "system"),
         ]
-        for d in (self._CLAUDE_USER_SKILLS_DIR, self._CLAUDE_PLUGIN_CACHE_DIR):
-            search_dirs.append((d, "claude"))
-        if self._app_data_dir:
-            search_dirs.append((self._app_data_dir / self._USER_PLUGIN_DIR_NAME, "user"))
+        # 安全模式只搜系统插件，热更新不得把用户/Claude 插件重新拉回来
+        if not self._safe_mode:
+            for d in (self._CLAUDE_USER_SKILLS_DIR, self._CLAUDE_PLUGIN_CACHE_DIR):
+                search_dirs.append((d, "claude"))
+            if self._app_data_dir:
+                search_dirs.append((self._app_data_dir / self._USER_PLUGIN_DIR_NAME, "user"))
 
         for base_dir, plugin_type in search_dirs:
             if not base_dir.exists():
@@ -2022,7 +2062,9 @@ class PluginManager:
             self._plugins[p.name] = p
 
     def _discover_user_plugins(self, app_data_dir: Path):
-        """扫描用户插件目录 ~/.drifox/plugins/"""
+        """扫描用户插件目录 ~/.drifox/plugins/（安全模式下跳过）"""
+        if self._safe_mode:
+            return
         user_plugin_dir = app_data_dir / self._USER_PLUGIN_DIR_NAME
         plugins = self._scan_plugins(user_plugin_dir, "user")
         for p in plugins:
@@ -2042,7 +2084,11 @@ class PluginManager:
 
         优先级介于系统插件和 DriFox 用户插件之间，即：
         系统 → Claude → DriFox 用户（最高）
+
+        安全模式下跳过（Claude 插件也是用户安装的外部插件）。
         """
+        if self._safe_mode:
+            return
         for base_dir in (self._CLAUDE_USER_SKILLS_DIR, self._CLAUDE_PLUGIN_CACHE_DIR):
             plugins = self._scan_plugins(base_dir, "claude")
             for p in plugins:
@@ -2159,17 +2205,19 @@ class PluginManager:
                     result.append(md_file)
 
         # 始终包含 user-custom 命令目录（最高优先级，覆盖所有其他插件）
-        from app.utils.utils import get_app_data_dir
+        # 安全模式只加载系统插件，user-custom 也是用户侧内容
+        if not self._safe_mode:
+            from app.utils.utils import get_app_data_dir
 
-        user_custom_cmd = get_app_data_dir() / "plugins" / "user-custom" / "commands"
-        if user_custom_cmd.exists():
-            for md_file in sorted(user_custom_cmd.glob("*.md")):
-                if md_file.stem in name_order:
-                    idx = name_order[md_file.stem]
-                    result[idx] = md_file
-                else:
-                    name_order[md_file.stem] = len(result)
-                    result.append(md_file)
+            user_custom_cmd = get_app_data_dir() / "plugins" / "user-custom" / "commands"
+            if user_custom_cmd.exists():
+                for md_file in sorted(user_custom_cmd.glob("*.md")):
+                    if md_file.stem in name_order:
+                        idx = name_order[md_file.stem]
+                        result[idx] = md_file
+                    else:
+                        name_order[md_file.stem] = len(result)
+                        result.append(md_file)
 
         return result
 
@@ -2187,6 +2235,8 @@ class PluginManager:
         result: List[Path] = []
 
         if plugin_name == "user-custom":
+            if self._safe_mode:
+                return result
             from app.utils.utils import get_app_data_dir
 
             cmd_dir = get_app_data_dir() / "plugins" / "user-custom" / "commands"
@@ -2292,7 +2342,8 @@ class PluginManager:
                     logger.warning(f"[PluginManager] 解析 {lsp_file} 失败: {e}")
 
         # 2. 额外扫描：用户插件目录下没有 manifest 但有 .lsp.json 的目录
-        if self._app_data_dir:
+        # 安全模式只加载系统插件，这里也一并跳过
+        if self._app_data_dir and not self._safe_mode:
             disabled_components = self._get_disabled_components()
             user_plugins_dir = self._app_data_dir / self._USER_PLUGIN_DIR_NAME
             if user_plugins_dir.exists():
@@ -2367,6 +2418,9 @@ class PluginManager:
                     files[idx] = md_file
 
         # 始终包含 user-custom 对应子目录（最高优先级，覆盖所有其他插件）
+        # 安全模式只加载系统插件，跳过用户自定义内容
+        if self._safe_mode:
+            return files
         from app.utils.utils import get_app_data_dir
 
         user_custom_sub = get_app_data_dir() / "plugins" / "user-custom" / subdir

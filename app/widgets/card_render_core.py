@@ -366,6 +366,30 @@ def _get_formatter_cached():
     return _FORMATTER_CACHE["formatter"]
 
 
+# [R6] 块粒度高亮产物缓存：formalize / v1 重渲会对已闭合代码块整块重新 highlight
+# （实测 60KB 文档 pygments 高亮 84.8ms，占整帧 92%，formalize 单次 95~110ms）。
+# highlight 是纯函数（内容 + lang + formatter 决定产物），缓存 key 含 formatter
+# 实例：主线程全局 _get_formatter_cached（由 style+font_size 重建）与 worker 线程
+# 局部 formatter（B3）各自实例稳定，实例变即 key 变，不会旧产物假命中。
+# 流式活动块内容每批增长 → key 每批变属预期 miss（活动块走尾部 4000 降级路径）；
+# 收益集中在已闭合块 = formalize / v1 重渲场景，二次起直接命中。
+# 128 条上限：高亮产物约为源码 10~15 倍（B3 注释实测 12KB→154KB），超限 LRU
+# 淘汰；异常不入缓存（lru_cache 默认行为），失败由调用侧兜底为 escape 纯文本。
+@lru_cache(maxsize=128)
+def _highlight_block_cached(code_text: str, lang: str, formatter) -> str:
+    """单代码块高亮并提取 <pre> 内部 HTML（产物完整非截断）。
+
+    供 _wrap_code_blocks_with_copy_button_web 的 replacer 调用；异常直接上抛，
+    由调用侧 try/except 兜底（不缓存失败结果）。
+    """
+    lexer = _get_lexer_cached(lang)
+    highlighted = highlight(code_text, lexer, formatter)
+    pre_match = _PRE_CONTENT_PATTERN.search(highlighted)
+    if pre_match:
+        return pre_match.group(1)
+    return escape(code_text)
+
+
 def _keep_token_rules(css: str, scope: str) -> list[str]:
     """从 Pygments 输出里只挑 token 规则（``<scope> .k`` 一类）
 
@@ -973,16 +997,15 @@ def _wrap_code_blocks_with_copy_button_web(
         line_count = len(lines)
 
         # 高亮代码（获取 <pre> 内部 HTML）
+        # [R6] 单块级规模降级：超长代码块（> _TAIL_CODE_WRAP_MAX_CHARS，与尾部
+        # 路径同口径）跳过 pygments 改 escape 纯文本——200 行 ≈ 5.7ms，数千行块
+        # 单次即数十 ms 且逐轮重复。容器/行号/复制按钮保留，仅失高亮色，内容完整。
         try:
-            lexer = _get_lexer_cached(lang)
-            _fmt = formatter if formatter is not None else _get_formatter_cached()
-            highlighted = highlight(copy_text, lexer, _fmt)
-            # 提取 <pre> 内部内容
-            pre_match = _PRE_CONTENT_PATTERN.search(highlighted)
-            if pre_match:
-                inner_code_html = pre_match.group(1)
-            else:
+            if len(copy_text) > _TAIL_CODE_WRAP_MAX_CHARS:
                 inner_code_html = escape(copy_text)
+            else:
+                _fmt = formatter if formatter is not None else _get_formatter_cached()
+                inner_code_html = _highlight_block_cached(copy_text, lang, _fmt)
         except Exception:
             inner_code_html = escape(copy_text)
 
@@ -1119,6 +1142,12 @@ _BARE_HASH_HEADER_PATTERN = re.compile(
     r"^(?P<pre>[ ]{0,3}(?:>[ ]?)*(?:(?:[-*+]|\d{1,9}[.)])[ ]+)?)(?P<hashes>#{1,6})(?=[^\s#])",
     re.MULTILINE,
 )
+# HTML 原样块（<style>/<script>）：内容不是 markdown，里面的行首 `#` 只可能是
+# CSS ID 选择器 / JS 片段，转义会直接破坏功能 —— 插件卡片把 `<style>` 拼进
+# 片段走同一条 markdown 管线，`#tu-tip {` 被转成 `\#tu-tip {` 后 CSS 解析成
+# 元素名选择器（永不匹配）→ 自绘 tooltip 的 display:none/position:fixed 全失效，
+# 文本以普通正文形式堆在卡片末尾（2026-11-17 用户截图：热力图 tooltip 变正文）。
+_HTML_RAW_BLOCK_TAG_RE = re.compile(r"<(style|script)\b", re.IGNORECASE)
 
 
 def _escape_bare_hash_headers(md_text: str) -> str:
@@ -1126,18 +1155,30 @@ def _escape_bare_hash_headers(md_text: str) -> str:
 
     `#56 审计判定` → `\\#56 审计判定`（渲染成正文 `#56 审计判定`）。
     围栏（``` / ~~~）内原样不动：代码里的 `#include` 不能改。
+    `<style>` / `<script>` 块内原样不动：CSS ID 选择器不能被转义（见上方注释）。
     幂等：已转义的行首是 `\\#`，不再匹配。
     """
     if "#" not in md_text:
         return md_text
     out: list = []
     in_fence = False
+    raw_tag = ""  # 非空 = 正处于 <style>/<script> 原样块内
     for line in md_text.split("\n"):
         if line.lstrip(" \t")[:3] in ("```", "~~~"):
             in_fence = not in_fence
             out.append(line)
             continue
         if in_fence:
+            out.append(line)
+            continue
+        if raw_tag:
+            out.append(line)
+            if f"</{raw_tag}" in line.lower():
+                raw_tag = ""
+            continue
+        _raw_m = _HTML_RAW_BLOCK_TAG_RE.search(line)
+        if _raw_m and f"</{_raw_m.group(1).lower()}" not in line.lower():
+            raw_tag = _raw_m.group(1).lower()
             out.append(line)
             continue
         out.append(
@@ -1865,6 +1906,29 @@ def _registered_fence_langs() -> Optional[frozenset]:
         return None
 
 
+# 渲染通道 reason 打点开关：默认 DEBUG（零噪音）；排查时设
+# DRIFOX_RENDER_REASON=1 → INFO 输出，无需改全局日志级别。
+_RENDER_REASON_LOG = os.environ.get("DRIFOX_RENDER_REASON", "").strip().lower() not in (
+    "",
+    "0",
+    "false",
+    "no",
+)
+
+
+def _log_render_reason(reason: str) -> None:
+    """打一行渲染通道判定原因（只在判定走 WebEngine 时调用）。
+
+    `DRIFOX_RENDER_REASON=1` → INFO，用于排查「为什么这张卡走了 WebEngine」；
+    默认 DEBUG，不污染常规日志。
+    """
+    line = f"[render-channel] reason={reason}"
+    if _RENDER_REASON_LOG:
+        logger.info(line)
+    else:
+        logger.debug(line)
+
+
 def _content_needs_webengine(content: Any) -> bool:
     """判定内容是否**必须**走 WebEngine（纯 Qt 渲染器渲染不了）。
 
@@ -1884,6 +1948,7 @@ def _content_needs_webengine(content: Any) -> bool:
         True = 必须走 WebEngine；False = 纯 Qt 渲染器可胜任。
     """
     if content is None:
+        _log_render_reason("invalid_type")
         return True
     if isinstance(content, list):
         # content blocks：只认得 text 块的降级判定——list 中出现任何「非 text」
@@ -1893,22 +1958,29 @@ def _content_needs_webengine(content: Any) -> bool:
         # 原样进 content_to_markdown 会落空；此处返 True 是冗余保护而非渲染必需。
         for block in content:
             if not (isinstance(block, dict) and block.get("type") == "text"):
+                _log_render_reason("nontext_block")
                 return True
         try:
             from app.core.conversation.message_content import content_to_text
 
             text = content_to_text(content) or ""
         except Exception:
+            _log_render_reason("text_extract_error")
             return True
         if not isinstance(text, str):
+            _log_render_reason("text_extract_error")
             return True
         if not text:
             # list 非空但仅取文本为空（tool_result 等块被丢弃）→ 仍有可渲染内容，
             # 保守走 WebEngine；空列表无内容可降级，与空 str 同语义走 Qt
-            return bool(content)
+            if content:
+                _log_render_reason("empty_text")
+                return True
+            return False
     elif isinstance(content, str):
         text = content
     else:
+        _log_render_reason("invalid_type")
         return True
 
     if not text:
@@ -1918,6 +1990,7 @@ def _content_needs_webengine(content: Any) -> bool:
     # 插件注册的 fence lang：拿不到表 → 保守
     plugin_langs = _registered_fence_langs()
     if plugin_langs is None:
+        _log_render_reason("plugin_fence_not_ready")
         return True
 
     # 渲染型 fence（内置 echarts/mermaid/html/widget/svg + 插件注册）
@@ -1926,20 +1999,25 @@ def _content_needs_webengine(content: Any) -> bool:
         if not lang:
             continue
         if lang in _CHART_FENCE_LANGS or lang in plugin_langs:
+            _log_render_reason(f"fence:{lang}")
             return True
         # 插件表可能滞后注册（热加载时序）：动态查询兜底
         try:
             if _is_render_fence_lang(lang):
+                _log_render_reason(f"fence:{lang}")
                 return True
         except Exception:
+            _log_render_reason(f"fence:{lang}")
             return True
 
     # LaTeX 公式
     if _LATEX_DOLLAR_RE.search(text) or _LATEX_BRACKET_RE.search(text):
+        _log_render_reason("latex")
         return True
 
     # markdown 正文图片
     if _MD_IMAGE_RE.search(text):
+        _log_render_reason("image")
         return True
 
     return False
@@ -1995,6 +2073,7 @@ def _should_use_qt_renderer(content: Any, streaming: bool = False) -> bool:
         return _qt_renderer_enabled()
     if streaming:
         # 内容不全，漏判风险不可接受 → 保守走 WebEngine
+        _log_render_reason("streaming")
         return False
     if _content_needs_webengine(content):
         return False
@@ -3815,7 +3894,26 @@ _SKELETON_CACHE_MAX = 48
 # svg / .html-widget 右上角工具栏不再漏挂；旧骨架缓存须失效。
 # +1（v83）：内嵌 echarts 的 ResizeObserver resize 合并到 rAF 一帧一次
 # （card_viewers._initOneEcharts JS 变更）；旧骨架缓存须失效。
-_SKELETON_CACHE_VERSION = 83
+# +1（v84）：[UX] 连续 resize 冻结——html.dfx-resizing 冻结页内过渡/动画并把
+# iframe/svg/canvas 隔离出主重排；window._dfxSetResizing / _dfxApplyWidgetH
+# （```widget iframe 高度 4px 死区 + resize 期延迟应用）/ _dfxRestoreFade
+# （占位恢复淡入）。CSS + JS 双资产变更，旧骨架缓存须失效。
+# +1（v85）：[UX] 摘除思考块头部轮播提示（16 条假进度文案 3.5s 轮换 + 
+# think-streaming-tip 脉冲渐变动画 + MutationObserver 启停）——live 区已实时
+# 滚动真实思考文字，轮播为装饰性噪音；.think-streaming-live:empty::before 
+# 占位保留（首文字 flush 前的空窗提示）。CSS + JS 双资产变更，旧骨架缓存须失效。
+# +1（v86）：[PERF] 蛇形思考动画重构——arc 列表缓存化（rAF 帧内不再全文档
+# querySelectorAll，由 MutationObserver 驱动重查 + 失联过滤）+ prefers-reduced-motion
+# 豁免（matchMedia 命中时置静态相位 0 并停 rAF）；差量渲染路径补 think-content
+# loading 清理（对齐全量，消除折叠块 shimmer 滞留）；删死代码 _streamingPulse
+# keyframes；reduced-motion 列表补 think-shimmer 两处覆盖。
+# CSS + JS 双资产变更，旧骨架缓存须失效。
+# +1（v87）：流式卡内跟随标志复位链加固——下滚输入记录方向并连续数帧检测
+# 贴底解封（_dfxReleaseFollowOnDown / body 版）、scroll 置位只认上滚方向、
+# 自动置底前按几何自愈、内层标志翻转即时上报、复用清理复位容器 expando。
+# 修「已滚到底但流式不再自动跟随」（内容在 scroll 事件派发前增长导致 atBottom
+# 判定失真，标志被误置为上滚阅读后永久卡住）。JS 资产变更，旧骨架缓存须失效。
+_SKELETON_CACHE_VERSION = 87
 
 
 def _js_literal(value) -> str:
@@ -4381,6 +4479,7 @@ _STREAMING_DOCK_JS = """
                         // 注：工具区高度变化引起的正文位移由外层聊天列表的
                         // HeightCommitBatch 锚点补偿承接（卡片自身不做 scrollTop 调整）。
                         var tc = document.getElementById('tool-content');
+                        if (tc && tc._userScrolledUp && _dfxNearBottom(tc)) tc._userScrolledUp = false;
                         if (tc && !tc._userScrolledUp) { _progScroll(tc, tc.scrollHeight); }
                     }
                     // 高度变化（工具区自然高度 ↔ 264px 限高）后报告文档高度。
@@ -4419,6 +4518,31 @@ _RESET_CONTENT_FOR_REUSE_JS = """
                     document.body.classList.remove('cp-blank');
                     var _cpR = document.getElementById('content-placeholder');
                     if (_cpR) _cpR._blankState = undefined;
+                    // 容器 expando 复位：容器元素跨卡片存活（只清 innerHTML），
+                    // _userScrolledUp/_progDepth 等挂在元素上不会随内容清空消失。
+                    // 上一张卡停在上滚阅读时，复用方一开始就带 true → 自动置底
+                    // 全程跳过（新卡「滚到底也不跟随」的来源之一）。
+                    if (_cpR) {
+                        if (_cpR._dfxSettleTimer) clearTimeout(_cpR._dfxSettleTimer);
+                        _cpR._dfxSettleTimer = 0;
+                        _cpR._userScrolledUp = false;
+                        _cpR._progDepth = 0;
+                        _cpR._lastInputAt = 0;
+                        _cpR._lastInputDir = 0;
+                        _cpR._downScrollBaseMax = 0;
+                        _cpR._dfxReleaseRaf = 0;
+                    }
+                    var _tcR0 = document.getElementById('tool-content');
+                    if (_tcR0) {
+                        if (_tcR0._dfxSettleTimer) clearTimeout(_tcR0._dfxSettleTimer);
+                        _tcR0._dfxSettleTimer = 0;
+                        _tcR0._userScrolledUp = false;
+                        _tcR0._progDepth = 0;
+                        _tcR0._lastInputAt = 0;
+                        _tcR0._lastInputDir = 0;
+                        _tcR0._downScrollBaseMax = 0;
+                        _tcR0._dfxReleaseRaf = 0;
+                    }
                     document.body.scrollTop = 0;
                     window._userScrolledWithin = false;
                     window._userScrolledUp = false;
@@ -5052,10 +5176,108 @@ _CONTENT_AUTOSCROLL_JS = """
                     _progBegin(el);
                     el.scrollTop = value;
                 }
+                // 底部判定：容差统一 30px（与 cp/tc 的 scroll 监听同口径）。
+                function _dfxNearBottom(el, tol) {
+                    return !!el && (el.scrollHeight - el.scrollTop - el.clientHeight) < (tol || 30);
+                }
+                // 下滚静默判定：向下滚只在**滚动停止后**才决定归属。
+                // 滚到底 → 跟随（不置位）；停在中间 → 用户要在那里读，置上滚态。
+                // 判据同样扣除本次下滚之后的内容增长（growth）：流式新内容把
+                // 「原本已到底」的位置顶开，不应被当成「停在中间」而停止跟随。
+                function _dfxSettleDownScroll(el, tol) {
+                    if (!el) return;
+                    if (el._dfxSettleTimer) clearTimeout(el._dfxSettleTimer);
+                    var _tol = tol || 30;
+                    el._dfxSettleTimer = setTimeout(function () {
+                        el._dfxSettleTimer = 0;
+                        if (!el || el._lastInputDir !== 1) return;
+                        var _max = Math.max(0, el.scrollHeight - el.clientHeight);
+                        var _growth = Math.max(0, _max - (el._downScrollBaseMax || 0));
+                        if ((el.scrollHeight - el.scrollTop - el.clientHeight) >= (_tol + _growth)) {
+                            el._userScrolledUp = true;
+                            if (typeof reportHeightDebounced === 'function') reportHeightDebounced();
+                        }
+                    }, 180);
+                }
+                // 下滚解封：向下滚 = 用户要看更新的内容，滚到容器底即恢复跟随。
+                // 不能只靠 scroll 事件的 atBottom 判定：流式内容常在 scroll 事件
+                // 派发之前又长高，事件读到的距底恒 > 阈值 → 「已抵底」被判成
+                // 「用户在上方阅读」→ _userScrolledUp 永久卡 true，自动置底从此
+                // 失效（症状：明明滚到底了，流式新内容却不再跟随）。
+                // 判据：以「最后一次下滚输入时的可滚量」为基准，把之后内容增长
+                // （growth）从距底值里扣掉——用户停在原地被新内容顶开的部分不算
+                // 离开底部；仍差着一屏就不算（正常阅读态不受影响）。
+                // 滚轮应用是异步的，到底那一刻本帧还读不到 → 连续 6 帧复查
+                // （≈100ms，覆盖平滑滚动尾巴），任一帧命中即解封。
+                function _dfxReleaseFollowOnDown(el, tol) {
+                    if (!el) return;
+                    el._dfxReleaseFrames = 0;
+                    if (el._dfxReleaseRaf) return;
+                    var _tol = tol || 30;
+                    var tick = function () {
+                        el._dfxReleaseRaf = 0;
+                        if (el._userScrolledUp && el._lastInputDir === 1) {
+                            var _max = Math.max(0, el.scrollHeight - el.clientHeight);
+                            var _growth = Math.max(0, _max - (el._downScrollBaseMax || 0));
+                            if ((el.scrollHeight - el.scrollTop - el.clientHeight) < (_tol + _growth)) {
+                                el._userScrolledUp = false;
+                                if (typeof reportHeightDebounced === 'function') reportHeightDebounced();
+                                else if (typeof reportHeight === 'function') reportHeight();
+                                return;
+                            }
+                        }
+                        el._dfxReleaseFrames = (el._dfxReleaseFrames || 0) + 1;
+                        if (el._dfxReleaseFrames < 6) el._dfxReleaseRaf = requestAnimationFrame(tick);
+                    };
+                    el._dfxReleaseRaf = requestAnimationFrame(tick);
+                }
+                // body 版静默判定（语义同 _dfxSettleDownScroll，标志在 window 上）。
+                function _dfxSettleBodyDownScroll(tol) {
+                    if (window._dfxSettleBodyTimer) clearTimeout(window._dfxSettleBodyTimer);
+                    var _tol = tol || 30;
+                    window._dfxSettleBodyTimer = setTimeout(function () {
+                        window._dfxSettleBodyTimer = 0;
+                        var b = document.body;
+                        if (!b || b._lastInputDir !== 1) return;
+                        var _max = Math.max(0, b.scrollHeight - b.clientHeight);
+                        var _growth = Math.max(0, _max - (b._downScrollBaseMax || 0));
+                        if ((b.scrollHeight - b.scrollTop - b.clientHeight) >= (_tol + _growth)) {
+                            window._userScrolledWithin = true;
+                            if (typeof reportHeightDebounced === 'function') reportHeightDebounced();
+                        }
+                    }, 180);
+                }
+                // body 版（标志挂在 window 上，不在元素 expando）。
+                function _dfxReleaseBodyFollowOnDown(tol) {
+                    window._dfxReleaseBodyFrames = 0;
+                    if (window._dfxReleaseBodyRaf) return;
+                    var _tol = tol || 30;
+                    var tick = function () {
+                        window._dfxReleaseBodyRaf = 0;
+                        var b = document.body;
+                        if (window._userScrolledWithin && b._lastInputDir === 1) {
+                            var _max = Math.max(0, b.scrollHeight - b.clientHeight);
+                            var _growth = Math.max(0, _max - (b._downScrollBaseMax || 0));
+                            if ((b.scrollHeight - b.scrollTop - b.clientHeight) < (_tol + _growth)) {
+                                window._userScrolledWithin = false;
+                                if (typeof reportHeightDebounced === 'function') reportHeightDebounced();
+                                return;
+                            }
+                        }
+                        window._dfxReleaseBodyFrames = (window._dfxReleaseBodyFrames || 0) + 1;
+                        if (window._dfxReleaseBodyFrames < 6) {
+                            window._dfxReleaseBodyRaf = requestAnimationFrame(tick);
+                        }
+                    };
+                    window._dfxReleaseBodyRaf = requestAnimationFrame(tick);
+                }
                 // 用户滚动意图：只由**真实输入**驱动（wheel / 触摸 / 键盘）。scroll 事件
                 // 不再承担置位职责 —— 程序性滚动与浏览器钳制同样派发 scroll，用它推断
                 // 意图必然误判（P033）。置位同步完成，用于抢占「滚轮 → 在途渲染 JS 拉底」
                 // 的竞争窗口（scroll 事件异步派发，抢不过渲染 JS）。
+                // 方向（_lastInputDir）：-1 上滚 / 1 下滚。scroll 监听只允许**上滚**
+                // 置位 —— 下滚输入若也参与置位，滚到底途中遇到的任何一次「内容又长
+                // 高了」都会被记成上滚阅读，跟随随即停摆。
                 function _bindUserScrollIntent(el) {
                     if (!el || el._intentBound) return;
                     el._intentBound = true;
@@ -5065,6 +5287,7 @@ _CONTENT_AUTOSCROLL_JS = """
                         // innerHTML 重建钳制）时也会改 scrollTop 并派发 scroll，
                         // 那不是用户意图。
                         el._lastInputAt = performance.now();
+                        el._lastInputDir = -1;
                         // 🐛 门控：仅当容器实际可滚（内容溢出）才记为上滚 —— 无溢出时 wheel
                         // 本应转发外层聊天列表，页面内收到的事件属冒泡残留，置位会让
                         // 跟随被无关操作误锁死。
@@ -5076,10 +5299,20 @@ _CONTENT_AUTOSCROLL_JS = """
                         }
                     };
                     var stamp = function () { el._lastInputAt = performance.now(); };
-                    el.addEventListener('wheel', function (e) { if (e.deltaY < 0) mark(); else stamp(); }, {passive: true});
+                    var markDown = function () {
+                        stamp();
+                        el._lastInputDir = 1;
+                        // 解封基准：本次下滚输入时的可滚量。之后内容增长的部分
+                        // 是「用户没动、内容顶上来的」，不算离开底部。
+                        el._downScrollBaseMax = Math.max(0, el.scrollHeight - el.clientHeight);
+                        _dfxSettleDownScroll(el);
+                        _dfxReleaseFollowOnDown(el);
+                    };
+                    el.addEventListener('wheel', function (e) { if (e.deltaY < 0) mark(); else if (e.deltaY > 0) markDown(); else stamp(); }, {passive: true});
                     el.addEventListener('touchstart', mark, {passive: true});
                     el.addEventListener('keydown', function (e) {
                         if (e.key === 'ArrowUp' || e.key === 'PageUp' || e.key === 'Home') mark();
+                        else if (e.key === 'ArrowDown' || e.key === 'PageDown' || e.key === 'End') markDown();
                         else stamp();
                     });
                 }
@@ -5118,8 +5351,12 @@ _CONTENT_AUTOSCROLL_JS = """
                             var cWant = Math.min(s.cp.top, cMax);
                             if (Math.abs(cp.scrollTop - cWant) >= 1) _progScroll(cp, cWant);
                         }
-                        // 恢复用户上滚意图：重建期的钳制不得反过来改写跟随态
-                        cp._userScrolledUp = s.cp.up;
+                        // 恢复用户上滚意图：重建期的钳制不得反过来改写跟随态。
+                        // 但快照是重建前的：用户在重建窗口内（scroll 事件被
+                        // _suppressScrollEvent 抑制）滚到底时，盲目写回 true 会
+                        // 覆盖「已回到底」的事实，跟随随即停摆直到下次滚动。
+                        // 此刻几何已贴底 → 不恢复上滚态。
+                        cp._userScrolledUp = s.cp.up && !_dfxNearBottom(cp);
                     }
                     if (tc && s.tc) {
                         // [#12 R1] display:none 期间节点在渲染树外，clientHeight/
@@ -5135,7 +5372,7 @@ _CONTENT_AUTOSCROLL_JS = """
                                 if (Math.abs(tc.scrollTop - tWant) >= 1) _progScroll(tc, tWant);
                             }
                         }
-                        tc._userScrolledUp = s.tc.up;
+                        tc._userScrolledUp = s.tc.up && !_tsGone && !_dfxNearBottom(tc);
                     }
                 }
                 function _autoScrollStreamingBody(bodyOnly) {
@@ -5148,6 +5385,13 @@ _CONTENT_AUTOSCROLL_JS = """
                     // 代码块/图表」等仍可能内滚的容器状态，不做位置调换。
                     var _cp = document.getElementById('content-placeholder');
                     if (document.body.classList.contains('streaming-dock') && _cp) {
+                        // 自愈：标志说「用户在上方阅读」，几何却说「已贴底」时以几何
+                        // 为准。流式内容增长会让最后一次 scroll 事件的 atBottom 判定
+                        // 失真，标志一旦错置，这里若不纠正就再没有自动复位的机会。
+                        if (_cp._userScrolledUp && _dfxNearBottom(_cp)) {
+                            _cp._userScrolledUp = false;
+                            if (typeof reportHeightDebounced === 'function') reportHeightDebounced();
+                        }
                         if (!_cp._userScrolledUp) {
                             _progScroll(_cp, _cp.scrollHeight);
                         }
@@ -5183,11 +5427,22 @@ _CONTENT_AUTOSCROLL_JS = """
                     // 一旦间隔 >800ms 标志卡死为"已离开"→ 内容更新时跟随失效、
                     // 视口被 _cpPrevTop 还原拖回旧阅读位置（弹回中间的根因）。
                     var atBottom = Math.abs(cp.scrollHeight - cp.scrollTop - cp.clientHeight) < 30;
-                    // 贴底任何时候都恢复跟随；置位「用户上滚」需近期真实输入证据，
+                    // 贴底任何时候都恢复跟随；置位「用户上滚」需近期**上滚**输入证据，
                     // 否则几何变化引起的 scroll（切回标签页 / 重建钳制）会把跟随
                     // 永久锁死（卡内停在旧位置的根因）。
-                    if (atBottom) cp._userScrolledUp = false;
-                    else if (_recentUserScrollInput(cp)) cp._userScrolledUp = true;
+                    // 方向门控：下滚时方向焦点在下方的 _dfxReleaseFollowOnDown；
+                    // 此处若因内容高度又增长而置位，会把「正在滚向最新内容」误判
+                    // 成「已在上面阅读」，从此停止跟随。
+                    if (atBottom) {
+                        if (cp._userScrolledUp) {
+                            cp._userScrolledUp = false;
+                            // 阅读态翻转必须立即回传：外层只看这份标志决定是否让位，
+                            // 等到下一次高度上报才刷新会让贴底被白白跳过一拍。
+                            if (typeof reportHeightDebounced === 'function') reportHeightDebounced();
+                        }
+                    } else if (cp._lastInputDir === -1 && _recentUserScrollInput(cp)) {
+                        cp._userScrolledUp = true;
+                    }
                 });
                 // 异步渲染（mermaid/katex/echarts/widget iframe）完成后补滚底。
                 // 这些渲染在 updateContent 置底**之后**才完成并增高内容 →
@@ -5238,6 +5493,54 @@ _BODY_HEIGHT_CAP_JS = """
                         }
                     } catch (e) {}
                     if (typeof reportHeight === 'function') reportHeight();
+                };
+
+                // ===== [UX] 连续 resize 期冻结 / 延迟 =====
+                // 拖窗口、侧栏/工作台动画都会逐帧改变文档宽度。此时：
+                //  ① 冻结 CSS 过渡与动画（dfx-resizing 类），避免元素自带的
+                //     transition 每帧被重启，产生拖尾与抖动；
+                //  ② ```widget 沙箱 iframe 只记最新高度，静默后一次性应用，
+                //     切断「宽度变 → iframe 重排 → 高度回传 → 整卡改高」的
+                //     逐帧反馈链（连续拖动时整卡高度会跟着抽动）。
+                window._dfxResizing = false;
+                window._dfxApplyWidgetH = function (f) {
+                    var h = f && f._dfxPendingH;
+                    if (!h) return;
+                    var prev = parseInt(f.getAttribute('data-dfx-h') || '0', 10) || 0;
+                    if (Math.abs(h - prev) < 4) return;  // 4px 死区：抑制重排噪声
+                    f.setAttribute('data-dfx-h', String(h));
+                    f.style.height = h + 'px';
+                    if (typeof _autoScrollAfterAsyncRender === 'function') _autoScrollAfterAsyncRender();
+                    if (typeof reportHeightDebounced === 'function') reportHeightDebounced();
+                };
+                window._dfxSetResizing = function (on) {
+                    on = !!on;
+                    if (window._dfxResizing === on) return;
+                    window._dfxResizing = on;
+                    try {
+                        document.documentElement.classList.toggle('dfx-resizing', on);
+                    } catch (e) {}
+                    if (on) return;
+                    // 退出 resize：一次性落地所有被延迟的 iframe 高度
+                    var fs = document.querySelectorAll('.drifox-widget iframe');
+                    for (var i = 0; i < fs.length; i++) window._dfxApplyWidgetH(fs[i]);
+                };
+
+                // ===== [UX] 占位恢复时的内容淡入 =====
+                // 只由 Python 在 resize 恢复链里调用。opacity 走合成层，不触发布局；
+                // 先置 0 → 强制样式落定 → 下一拍过渡到 1，保证从透明起跑。
+                window._dfxRestoreFade = function () {
+                    var root = document.documentElement;
+                    try {
+                        window._dfxSetResizing(false);
+                        root.classList.remove('dfx-restore-fade');
+                        root.style.opacity = '0';
+                        void root.offsetWidth;
+                        root.classList.add('dfx-restore-fade');
+                        root.style.opacity = '1';
+                    } catch (e) {
+                        root.style.opacity = '1';
+                    }
                 };
 """
 

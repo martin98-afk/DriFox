@@ -130,10 +130,19 @@ def _resolve_main_repo(tool_ctx: dict, path: str = "") -> Tuple[Optional[str], s
 
 
 def _invalidate_info_cache(repo_root: str) -> None:
-    """清掉指向该仓库的 get_repo_info/detect_git 缓存（value.root 匹配，跨 path key）"""
+    """清掉指向该仓库的 get_repo_info/detect_git 缓存（value.root 匹配，跨 path key）
+
+    [PERF] `_info_cache` 的键现在是 `(path, with_counts)` 元组（快速版与完整版
+    分开缓存，避免 counts 互相覆盖）；仍兼容历史纯 path 键。
+    """
     for key, entry in list(GitWorktreeDetector._info_cache.items()):
         info = entry[0] if entry else None
         if info is not None and getattr(info, "root", None) == repo_root:
+            GitWorktreeDetector._info_cache.pop(key, None)
+    # 键形式兜底：值不是 info（None 哨兵）时按 path 分量匹配
+    for key in list(GitWorktreeDetector._info_cache):
+        path_part = key[0] if isinstance(key, tuple) else key
+        if os.path.abspath(str(path_part)) == os.path.abspath(repo_root):
             GitWorktreeDetector._info_cache.pop(key, None)
     for key in list(GitWorktreeDetector._detect_cache):
         if os.path.abspath(key) == os.path.abspath(repo_root):
@@ -143,6 +152,11 @@ def _invalidate_info_cache(repo_root: str) -> None:
     # 全清后 30s 内自然重建）
     GitWorktreeDetector._worktrees_cache.clear()
     GitWorktreeDetector._branch_cache.clear()
+    # ⚠️ 必须清 is_worktree 缓存：它已改用 `_DETECT_CACHE_TTL`（300s），
+    # 若不清，删除 worktree 后 5 分钟内该路径仍被判为 worktree → 会话的
+    # `worktree_path` 落库错误（写进已删除的目录）。
+    # 缓存条目数等于被探测过的路径数（实践中个位数），全清代价可忽略。
+    GitWorktreeDetector._is_worktree_cache.clear()
 
 
 def _load_get_bridge():
@@ -477,6 +491,9 @@ def _action_merge(tool_ctx: dict, kwargs: dict) -> ToolResult:
     status = _run_git(["diff", "--name-only", "--diff-filter=U"], repo_root, timeout=10)
     conflict_files = [ln for ln in (status.stdout or "").splitlines() if ln.strip()]
     if not conflict_files:
+        # merge 失败也可能已改动索引/工作树（如自动合并了部分文件后中断、
+        # 或本地更改挡路时 MERGE_HEAD 已写入），缓存必须失效再返回。
+        _invalidate_info_cache(repo_root)
         return ToolResult(False, error=r.stderr.strip() or r.stdout.strip() or f"git merge 失败 (rc={r.returncode})")
 
     # 冲突：保留现场（不 abort），返回冲突文件与冲突块内容，由模型继续解决

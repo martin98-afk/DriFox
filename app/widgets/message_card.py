@@ -99,7 +99,6 @@ from app.core import (
     ensure_content_blocks,
 )
 from app.core.conversation.message_content import make_tool_result_block
-from app.core.infra.webengine_profile import get_shared_web_profile
 from app.utils.design_tokens import (
     Animations,
     BorderRadius,
@@ -168,6 +167,7 @@ from app.widgets.card_render_core import (
     STREAM_HEIGHT_TRACK_FAR_PX,
     STREAM_HEIGHT_TRACK_MAX_FACTOR,
     _count_think_tool_prefix,
+    _CHART_FENCE_OPEN_RE,
     _edit_tools,
     _extract_closed_segments,
     _extract_fenced_code,
@@ -189,8 +189,11 @@ from app.widgets.card_render_core import (
     _inject_tag_cards,
     _inject_think_cards,
     _inject_tool_blocks,
+    _is_render_fence_lang,
     _iter_think_segments,
     _last_para_break_outside_fence,
+    _PARTIAL_FENCE_TAIL_RE,
+    _PARTIAL_TAG_TAIL_RE,
     _plugin_fence_placeholder,
     _protect_inline_svg_blocks,
     _qt_renderer_enabled,
@@ -203,6 +206,7 @@ from app.widgets.card_render_core import (
     _render_think_block_lightweight,
     _render_tool_block_content,
     _render_tool_streaming_block,
+    _registered_tag_names_safe,
     _restore_fenced_code,
     _sanitize_incomplete_markdown,
     _tail_before_unclosed_block,
@@ -223,7 +227,6 @@ from app.widgets.card_render_core import (
 )
 from app.widgets.card_viewers import (
     CodeWebViewer,
-    ConsoleMonitorPage,
     PlainTextViewer,
     _HEIGHT_CACHE_MAX,
     _ImagePreviewDialog,
@@ -318,6 +321,13 @@ class MessageCard(SimpleCardWidget):
     # 不重置），若用「首字至今」当分母，10s 工具会把实时 tps 稀释到 1/10。
     _LIVE_GAP_CAP_S = 2.0
 
+    # N8 footer provider 软超时护栏参数：EMA 记每 provider 最近耗时，
+    # 连续 3 拍超过 50ms 则拉黑该 stat_id（provider 必须主线程跑，
+    # 无法真超时，改跳过策略；清零点见 stat_key 变化与 cleanup）
+    _FOOTER_SLOW_COST_MS = 50.0
+    _FOOTER_SLOW_STREAK_LIMIT = 3
+    _FOOTER_SLOW_EMA_ALPHA = 0.5
+
     @property
     def _renderer_pid(self) -> int:
         """renderer 进程 PID（转发 viewer；B4 强回收链路读 card._renderer_pid）。
@@ -387,12 +397,6 @@ class MessageCard(SimpleCardWidget):
         self._todo_panel_host = None  # 面板挂载的布局容器（气泡布局）
         self._todo_panel_todos: list = []  # 任务数据快照（重建补推用）
         self._todo_panel_height_cache = 0  # 面板占高缓存（高度增量上报用）
-        # 卡片内嵌成果栏（懒创建，挂在任务看板之后；语义与任务看板的差异见
-        # update_artifact_list docstring——不迁卡，成果属于产生它的那一轮）
-        self._artifact_panel = None
-        self._artifact_panel_host = None
-        self._artifact_panel_items: list = []
-        self._artifact_panel_height_cache = 0
         # 插件注册的消息卡内嵌面板（panel_id -> widget；槽位见
         # UIPluginRegistry.register_card_inline_panel，挂载顺序同任务看板）
         self._inline_panels: Dict[str, QWidget] = {}
@@ -425,6 +429,11 @@ class MessageCard(SimpleCardWidget):
         # （见 _refresh_footer_stats，按 stat_id 序列 tuple 作 key 比对）
         self._footer_stats_key: Optional[tuple] = None
         self._footer_stats_info: Dict[str, Any] = {}
+        # N8 footer provider 健康跟踪：EMA 最近耗时 / 连续慢拍计数 / 拉黑集合
+        # （连续 3 拍 EMA>50ms 拉黑，本会话不再调用；清零点：stat_key 变化与 cleanup）
+        self._footer_provider_cost_ema: Dict[str, float] = {}
+        self._footer_provider_slow_streak: Dict[str, int] = {}
+        self._footer_provider_blocked: set = set()
         # 耗时实时计时器
         self._elapsed_timer = QTimer(self)
         self._elapsed_timer.timeout.connect(self._update_elapsed_display)
@@ -571,8 +580,11 @@ class MessageCard(SimpleCardWidget):
         # 🆕 Bug B：当前活动思考块。append_reasoning 只追加到它（避免合并进已完成的
         # 旧思考块导致多轮思考堆积）；工具调用/新块开始时置 None / 覆盖。
         self._active_thinking_block: Optional[dict] = None
+        # [E6] 流式协议状态机增量检测状态（append_text 首批懒建；流重置/finish/cleanup 置 None）
+        self._proto_state: Optional[dict] = None
+        # [E6] 原文固化游标：_stream_text_parts 中已固化进 acc 的片段数（parts 不清空）
+        self._stream_text_parts_solid: int = 0
         self._pending_content: Optional[str] = None
-        self._reasoning_total_len = 0  # reasoning 内容总长度计数器，避免每次遍历
         # 流式思考实时预览：增量文本缓冲 + 节流推送（250ms 批量，避免逐 chunk runJavaScript）
         self._streaming_live_buffer: str = ""
         self._streaming_live_timer = QTimer(self)
@@ -769,12 +781,12 @@ class MessageCard(SimpleCardWidget):
                 self._todo_panel.refresh_style()
             except RuntimeError:
                 self._todo_panel = None
-        # 内嵌成果栏：条目 QSS 同样构造期固化
-        if self._artifact_panel is not None:
+        # 插件内嵌面板：条目 QSS 在构造期固化，需随主题重放
+        for _pid, _panel in list(self._inline_panels.items()):
             try:
-                self._artifact_panel.refresh_style()
-            except RuntimeError:
-                self._artifact_panel = None
+                _panel.refresh_style()
+            except (RuntimeError, AttributeError):
+                self._inline_panels.pop(_pid, None)
         # 插件注册的内嵌面板（如子智能体运行区）：QSS 同样在构造期固化。
         # [PERF] 可见性分流：卡片滚出视口 / 在非当前标签页时只置脏，回到
         # 可见时由 showEvent → ensure_theme_fresh 补刷。
@@ -1245,25 +1257,167 @@ class MessageCard(SimpleCardWidget):
         return ctx
 
     def _stream_text_snapshot(self) -> str:
-        """返回本流累计原文（惰性固化）。
+        """返回本流累计原文（惰性固化，游标推进式）。
 
         [PERF] 写入侧（update_content，流式每批）只 append 到 _stream_text_parts；
-        本方法在读取时（_footer_stat_context 每 200ms 一拍）才 join 一次。
+        本方法在读取时（_footer_stat_context 每 200ms 一拍）才固化。
         旧实现每批做 `acc = acc + txt`，因读取方持有引用使 CPython 的原地
         realloc 失效 → O(n²)，实测 390KB 回复 516ms 全落在流式主线程。
 
-        固化策略：把待固化片段 join 进缓存串后清空 pending，O(新增) 而非 O(总量)。
+        [E6] 固化策略：parts 不清空，用 _stream_text_parts_solid 游标记住已固化
+        前缀；无新段拍 O(1) 直返；有新段拍 `"".join(parts[solid:])` 只拼新增段。
+        注：acc 与新增段的 `+` 仍是 O(总量) 字符串拷贝（CPython str 拼接不可
+        避免），本处消除的是「无新段拍」与「跨读取方重复固化」的开销；待固化
+        段 join 严格 O(新增)。
         """
         parts = getattr(self, "_stream_text_parts", None)
         if parts is None:
             # 兼容旧路径 / cleanup 后置 None 的情形
             return getattr(self, "_stream_text_acc", "") or ""
-        if parts:
-            merged = "".join(parts)
-            parts.clear()
+        solid = getattr(self, "_stream_text_parts_solid", 0)
+        if len(parts) != solid:
+            merged = "".join(parts[solid:])
             prev = getattr(self, "_stream_text_acc", None)
             self._stream_text_acc = (prev or "") + merged
+            self._stream_text_parts_solid = len(parts)
         return getattr(self, "_stream_text_acc", "") or ""
+
+    # ── [E6] 流式协议状态机 + 块级 pending 固化 ─────────────────
+    # append_text/append_reasoning 流式写入只 O(1) append 到块内 "_pend" 片段列表，
+    # 不再逐 chunk 拼 block["text"]/block["content"]（旧实现每 chunk O(全文) 拷贝，
+    # 390KB 回复累计 ~160MB 内存流量）。协议未闭合检测同步改增量状态机：
+    # 每批只扫「新段 + 劈开 carry」，不再对块全文跑 4 个 O(n) 检测函数。
+    # 读权威方（渲染 / 导出 / 落定 / block-key）进入前经 _solidify_text_blocks
+    # 固化，任何时点读取等价于逐 chunk 直拼（单测对拍覆盖）。
+
+    _PROTO_TAG_RE = re.compile(r"</?[a-zA-Z][a-zA-Z0-9-]{0,11}>")
+    _PROTO_TAG_PARTIAL_RE = _PARTIAL_TAG_TAIL_RE  # 劈开标记前缀形态（与全文宽松拦同源）
+    _PROTO_MARK_BASE = ("<think>", "</think>", "<tool>", "</tool>")
+    _PROTO_CARRY_MAX = 32  # 尾部劈开标记候选上限（最长完整标记 "</think>"=8 + 注册 tag 余量）
+    _FENCE_CARRY_MAX = 256  # 不完整行封顶：fence 开/闭标记只看 strip 后行首 21 字符内
+
+    def _proto_state_reset(self) -> None:
+        """复位流式协议状态机（append_text 首批懒建 / 流重置 / finish / cleanup 调用）"""
+        self._proto_state = {
+            "think_open": False,
+            "tag_open": {},
+            "tool_open": 0,
+            "fence_inside": False,
+            "fence_chart": False,
+            "fence_marker": "",
+            "fence_carry": "",
+            "last_line": "",
+            "carry": "",
+        }
+
+    @staticmethod
+    def _proto_carry_of(tail: str, tag_names: frozenset) -> str:
+        """取尾部可能是「被 chunk 劈开的标记前缀」的最长后缀（上限 32）。
+
+        tail 取自 finditer 末命中之后的子串，不含任何完整标记 → 命中的后缀
+        必是真前缀，下批拼接重扫不会重复计数。fence 由独立通道兜（fence_carry）。
+        判据两类：完整标记前缀（think/tool/注册 tag 两款）；partial tag 形态
+        （</?字母…，对齐全量版 _PARTIAL_TAG_TAIL_RE——注册表为空时半截
+        未注册 tag 同样要拦，宽松拦不依赖注册表）。
+        """
+        marks = list(MessageCard._PROTO_MARK_BASE)
+        for name in tag_names:
+            marks.append(f"<{name}>")
+            marks.append(f"</{name}>")
+        partial_re = MessageCard._PROTO_TAG_PARTIAL_RE
+        limit = min(len(tail), MessageCard._PROTO_CARRY_MAX)
+        for start in range(len(tail) - limit, len(tail)):
+            seg = tail[start:]
+            if seg and (any(m.startswith(seg) for m in marks) or partial_re.fullmatch(seg)):
+                return seg
+        return ""
+
+    def _proto_scan_chunk(self, st: dict, chunk: str) -> Tuple[bool, bool, bool, bool]:
+        """增量扫描新段，推进协议状态机，返回 (think, tag, tool, fence_chart) 未闭合四元组。
+
+        语义与全文版 _has_unclosed_think / _has_unclosed_registered_tag /
+        <tool> 计数 / _has_unclosed_chart_fence 逐项等价：
+        - tag/fence 的尾部宽松拦（_PARTIAL_*_TAIL_RE）由 carry/fence_carry 尾窗
+          复刻（carry 是 so_far 尾部子串，$ 锚定正则 search 尾窗严格等价）；
+        - chunk 边界劈开的不完整 fence 尾行由 fence_carry 延后一拍判定。
+        """
+        tag_names = frozenset(_registered_tag_names_safe())
+        seg = st["carry"] + chunk
+        st["carry"] = ""
+        last_end = 0
+        for m in MessageCard._PROTO_TAG_RE.finditer(seg):
+            last_end = m.end()
+            token = m.group()
+            closing = token.startswith("</")
+            name = token[2:-1] if closing else token[1:-1]
+            if name == "think":
+                st["think_open"] = not closing
+            elif name == "tool":
+                st["tool_open"] += -1 if closing else 1
+            elif name in tag_names:
+                st["tag_open"][name] = not closing
+        tail = seg[last_end:]
+        st["carry"] = self._proto_carry_of(tail, tag_names) if tail else ""
+        # fence 逐行推进：完整行立即判定，不完整行存 fence_carry（封顶 256）
+        lines = (st["fence_carry"] + seg).split("\n")
+        fence_carry = lines[-1]
+        st["fence_carry"] = fence_carry[: self._FENCE_CARRY_MAX] if len(fence_carry) > self._FENCE_CARRY_MAX else fence_carry
+        for line in lines[:-1]:
+            st["last_line"] = line
+            stripped = line.strip()
+            if not (stripped.startswith("```") or stripped.startswith("~~~")):
+                continue  # 非 fence 行不参与翻转（与 _CHART_FENCE_LINE_RE 语义一致）
+            if not st["fence_inside"]:
+                mo = _CHART_FENCE_OPEN_RE.match(stripped)
+                if mo:
+                    st["fence_inside"] = True
+                    st["fence_marker"] = mo.group(1)
+                    st["fence_chart"] = _is_render_fence_lang(mo.group(2))
+                else:
+                    st["fence_inside"] = True
+                    st["fence_marker"] = stripped[:3]
+                    st["fence_chart"] = False
+            elif st["fence_marker"] and stripped.startswith(st["fence_marker"]):
+                st["fence_inside"] = False
+                st["fence_chart"] = False
+        # 尾部宽松拦：与全文版 _PARTIAL_TAG_TAIL_RE / _PARTIAL_FENCE_TAIL_RE 对齐
+        # （carry 是 so_far 的尾部子串，$ 锚定下 search 尾窗与全文窗口严格等价；
+        # fence_carry 用 32 尾窗对齐全文窗口，截断安全。last_line：全文版对
+        # 「尾行恰为完整 fence 行（含 \n 终结）」同样 partial 命中（宽松宁误拦），
+        # 状态机逐行精确判定需显式补这一维度）
+        tag_partial = bool(_PARTIAL_TAG_TAIL_RE.search(st["carry"]))
+        fence_partial = bool(
+            _PARTIAL_FENCE_TAIL_RE.search(st["fence_carry"][-32:])
+            or _PARTIAL_FENCE_TAIL_RE.search(st["last_line"][-32:])
+        )
+        return (
+            st["think_open"],
+            any(st["tag_open"].values()) or tag_partial,
+            st["tool_open"] > 0,
+            (st["fence_inside"] and st["fence_chart"]) or fence_partial,
+        )
+
+    def _solidify_text_blocks(self) -> None:
+        """把流式 pending 片段固化进块的 text/content 字段（幂等、可重入）。
+
+        [E6] 遍历 _content_data 中带 "_pend" 的块，把片段 join 进正式字段并弹出
+        键。所有读权威方（_build_incremental_md / get_plain_text / 非流式落定 /
+        block-key 计算 / finish 数据层清账）进入前必须经本方法，保证读取口径与
+        逐 chunk 直拼逐字节一致；"_pend" 只存在于 UI 卡片层，固化后不进持久化。
+        """
+        data = self._content_data
+        if not isinstance(data, list):
+            return
+        for block in data:
+            if not isinstance(block, dict):
+                continue
+            pend = block.pop("_pend", None)
+            if not pend:
+                continue
+            if block.get("type") == "text":
+                block["text"] = str(block.get("text", "") or "") + "".join(pend)
+            elif block.get("type") == "reasoning":
+                block["content"] = str(block.get("content", "") or "") + "".join(pend)
 
     def _refresh_footer_stats(
         self, streaming: bool = False, elapsed: float = None, token_usage: dict = None
@@ -1283,16 +1437,48 @@ class MessageCard(SimpleCardWidget):
         if stat_key != self._footer_stats_key:
             self._footer_stats_key = stat_key
             self._footer_stats_info = {i.stat_id: i for i in stat_list}
+            # N8 插件重载/注册变更：健康状态（EMA/连拍/拉黑）从头观察，
+            # 避免重载后的新 provider 实现被旧耗时记录误杀。
+            self._footer_provider_cost_ema.clear()
+            self._footer_provider_slow_streak.clear()
+            self._footer_provider_blocked.clear()
         infos = self._footer_stats_info
         ctx = self._footer_stat_context(streaming=streaming, elapsed=elapsed, token_usage=token_usage)
         for stat_id, label in self._footer_stat_labels.items():
             try:
+                if stat_id in self._footer_provider_blocked:
+                    # N8 已拉黑：本会话不再调用该 provider，label 维持空隐藏
+                    continue
                 info = infos.get(stat_id)
                 text = ""
                 if info is not None:
                     val = None
                     try:
+                        # N8 软超时护栏：provider 必须主线程跑、无法真超时，
+                        # 改跳过策略——EMA 平滑最近耗时，连续 3 拍 EMA>50ms
+                        # 则拉黑本会话不再调用（label 置空 + tooltip 说明）。
+                        t0 = time.perf_counter()
                         val = info.provider(ctx)
+                        cost_ms = (time.perf_counter() - t0) * 1000.0
+                        prev_ema = self._footer_provider_cost_ema.get(stat_id)
+                        ema = (
+                            cost_ms
+                            if prev_ema is None
+                            else self._FOOTER_SLOW_EMA_ALPHA * cost_ms
+                            + (1.0 - self._FOOTER_SLOW_EMA_ALPHA) * prev_ema
+                        )
+                        self._footer_provider_cost_ema[stat_id] = ema
+                        if ema > self._FOOTER_SLOW_COST_MS:
+                            streak = self._footer_provider_slow_streak.get(stat_id, 0) + 1
+                            self._footer_provider_slow_streak[stat_id] = streak
+                            if streak >= self._FOOTER_SLOW_STREAK_LIMIT:
+                                self._footer_provider_blocked.add(stat_id)
+                                label.setText("")
+                                label.setToolTip("该信息项已停用（响应过慢）")
+                                label.setVisible(False)
+                                continue
+                        else:
+                            self._footer_provider_slow_streak[stat_id] = 0
                     except Exception as e:
                         logger.warning(f"[MessageCard] footer_stat {stat_id} provider 失败: {e}")
                     if val:
@@ -1342,6 +1528,7 @@ class MessageCard(SimpleCardWidget):
         """
         self._stream_text_parts = []
         self._stream_text_acc = None
+        self._stream_text_parts_solid = 0  # [E6] 固化游标与列表同步复位
 
     def start_elapsed_tracking(self):
         """开始实时计时（流式输出时调用）"""
@@ -1359,6 +1546,7 @@ class MessageCard(SimpleCardWidget):
         # 现改为只 append 片段（O(1)），读取时（200ms 一拍）才固化拼接。
         self._stream_text_parts: List[str] = []
         self._stream_text_acc: Optional[str] = None  # 已固化累计串；None = 空
+        self._stream_text_parts_solid: int = 0  # [E6] 已固化片段数游标（parts 不清空）
         self._stream_text_cursor = 0  # [T4-5] 增量采样游标（配合 live_text_delta）
         self._stream_gen_s = 0.0
         self._stream_last_text_t = None
@@ -2766,33 +2954,36 @@ class MessageCard(SimpleCardWidget):
         if hasattr(self.viewer, "_markdown_text"):
             markdown_text = self.viewer._markdown_text
 
-        # 销毁旧viewer
+        # 重建瞬间的几何快照：卡片总高 + viewer 之外的固定开销。
+        # 新 viewer 初始约 40px，不 pin 的话卡片高度立刻塌陷（长回复数千 px），
+        # 滚动区 value 被钳制 → 视口跳动，直到 JS 上报真实高度（数百 ms）。
+        old_h = self.height()
+        content_overhead = max(0, old_h - self.viewer.height())
+
+        # 先断信号再销毁：旧 viewer 的延迟信号（contentHeightChanged /
+        # needRecreate 等）若仍连着卡片，重建后会打到新 viewer 或已删控件。
+        self._disconnect_viewer_signals()
+
+        # 故意不入池：旧 viewer 已 _context_lost 或崩溃 >2 次，_is_usable 必然
+        # 拒绝；复用会污染池的可复用口径，直接销毁。
+        self._viewer_layout.removeWidget(self.viewer)
         self.viewer.deleteLater()
 
-        # 重新创建viewer
+        # 重新创建viewer（先摘 layout 再 delete：deleteLater 不立即移除 item，
+        # 一帧内 layout 残留两个 item 会让高度短暂抖动 / 旧 view 闪一帧）
         for i in reversed(range(self._viewer_layout.count())):
             item = self._viewer_layout.itemAt(i)
             if item and item.widget():
-                item.widget().deleteLater()
+                w = item.widget()
+                self._viewer_layout.removeWidget(w)
+                w.deleteLater()
 
         # 灰度：Qt 渲染器无 context lost，不应进入此方法；防御性回退到 WebEngine
         self.viewer = CodeWebViewer(self)
         self.viewer._lazy_markdown_cb = self._build_incremental_md
-        self.viewer.codeActionRequested.connect(self.actionRequested)
-        self.viewer.contextActionRequested.connect(self.contextActionRequested)
-        self.viewer.contentHeightChanged.connect(self._update_height)
-        self.viewer.toolDiffRequested.connect(self.toolDiffRequested)
-        self.viewer.openFileRequested.connect(self.openFileRequested)
-        self.viewer.subAgentLogRequested.connect(self.subAgentLogRequested)
-        self.viewer.saveFileRequested.connect(self.saveFileRequested)
-        self.viewer.chartExpandRequested.connect(self._on_chart_expand)
-        self.viewer.saveChartPngRequested.connect(self._on_save_chart_png)
-        self.viewer.saveWidgetFileRequested.connect(self._on_save_widget_file)
-        self.viewer.previewImageRequested.connect(self._on_preview_image)
-        self.viewer.contextLost.connect(self._on_webengine_context_lost)
-        self.viewer.contextRestored.connect(self._on_webengine_context_restored)
-        self.viewer.needRecreate.connect(self._on_webengine_need_recreate)
-        self.viewer._install_dialog_filter()
+        # 统一走成对维护的 connect（与 _disconnect_viewer_signals 同一份清单，
+        # 避免两处信号列表漂移）
+        self._connect_viewer_signals()
         # 🐛 重建后的语义同步（与 ensure_rendered 同口径）：新建 viewer 默认
         # _streaming=True / _is_history=False，不补这两项会让历史卡重建成
         # 「流式形态」（字数统计、工具区坞态限高、思考不折叠），而渲染看门狗的
@@ -2807,6 +2998,9 @@ class MessageCard(SimpleCardWidget):
             setattr(self.viewer, "_restore_finished_ids", self._finished_streaming_ids)
 
         self._viewer_layout.addWidget(self.viewer)
+        # 钉住重建前高度；首个真实高度上报时由 _commit_viewer_height 里的
+        # _unpin_layout_height 解除（与 T42 占位重建同一机制）。
+        self.pin_layout_height(old_h, content_overhead)
 
         # 恢复内容
         if markdown_text:
@@ -2816,9 +3010,6 @@ class MessageCard(SimpleCardWidget):
         # 任务看板是原生 Qt 控件，不随 viewer 重建；仅补推一次数据（幂等，签名未变会跳过）
         if self._todo_panel is not None:
             self._todo_panel.update_todos(self._todo_panel_todos or [])
-        # 成果栏同理补推（幂等）
-        if self._artifact_panel is not None:
-            self._artifact_panel.update_artifacts(self._artifact_panel_items or [])
 
         # 恢复正常样式
         self._apply_card_style()
@@ -3715,6 +3906,10 @@ class MessageCard(SimpleCardWidget):
             else:
                 target_width = max(320, parent_width - 20)
 
+        # [UX] 宽度量化到 4px 网格：连续拖拽时目标宽度几乎每帧变化，
+        # 量化后 Chromium 重排次数约减半（视觉差异不可见），并让
+        # _height_cache 的键更稳定、往返拖拽命中率更高。
+        target_width = max(0, int(target_width) & ~3)
         # 性能优化：只有宽度真正变化时才更新（user/非 user 统一守卫）
         if not force and target_width == self._last_synced_width:
             return
@@ -3796,55 +3991,63 @@ class MessageCard(SimpleCardWidget):
                 self.options_widget.hide()
             return
 
-        self.viewer.show()
-        self.viewer.setUpdatesEnabled(True)
-        if self._options_were_visible_before_resize:
-            self.options_widget.show()
-            self.options_widget.setUpdatesEnabled(True)
-        self.resize_placeholder.hide()
-        self.resize_placeholder.setFixedHeight(0)
-        self._resize_preview_height = 0
-        self._options_were_visible_before_resize = False
-
-        # [L3] 宽度→高度缓存命中：把已知高度作为本次恢复的目标，省掉等待
-        # JS 异步回传的那一帧（窗口拖拽宽度往返时命中率很高）。
-        # 只是预测：下方仍会发起异步上报，若真实高度不同会自动校正。
+        # ── 退出占位：先落高度、后显示 ──
+        # 旧顺序是 show → update_height → reportHeight 校正：首帧按占位前的
+        # 旧高度出图，随后异步校正把内容再顶一次（观感是「内容先出现、再跳一下」）。
+        # 现在把已知目标高度（宽度→高度缓存 / preview 期间累积）在 viewer 仍
+        # 隐藏时直接应用，show 的首帧就是新布局；异步上报保留做微调。
         if not self._streaming and self.role != "user":
             cached = self._height_cache.get(self._last_synced_width)
             if cached is not None:
                 self._pending_viewer_height = cached
 
+        options_were_visible = self._options_were_visible_before_resize
+        pending_h = getattr(self, "_pending_viewer_height", None)
+        self._pending_viewer_height = None
+        prev_viewer_h = self.viewer.height()
+
+        self.viewer.setUpdatesEnabled(False)
+        # 淡入必须在 show 之前置位：show 后首帧已绘制，再下发 CSS 会闪一下
+        # 不透明内容再淡入。此处页面仍隐藏，JS 置 opacity=0 无可见代价。
+        if self.isVisible() and hasattr(self.viewer, "restore_content_fade"):
+            self.viewer.restore_content_fade()
+        try:
+            if pending_h is not None and self.role != "user":
+                # 直落高度：绕开 HeightCommitBatch（其 flush 在本帧末尾，show 的
+                # 首帧仍会停在旧高度）与 preview 守卫（标志已复位）。面积上限由
+                # CodeWebViewer.setFixedHeight 内部钳。
+                # 🐛 从占位高度恢复到真实内容高度**存在真实增量**，不能清零：
+                # 外层据 _last_height_delta 做滚动锚定补偿，写 0 会让整个恢复期
+                # 零补偿 → 视口被 N 张卡逐张推走（「一 resize 画面就很乱」）。
+                self._unpin_layout_height()
+                self._last_height_delta = pending_h - prev_viewer_h
+                self.viewer.setFixedHeight(pending_h)
+                self._last_applied_viewer_height = pending_h
+                self.heightChanged.emit(pending_h)
+            self.viewer.show()
+            if options_were_visible:
+                self.options_widget.show()
+            self.resize_placeholder.hide()
+            self.resize_placeholder.setFixedHeight(0)
+            self._resize_preview_height = 0
+            self._options_were_visible_before_resize = False
+        finally:
+            self.viewer.setUpdatesEnabled(True)
+            self.viewer.update()
+            if options_were_visible:
+                self.options_widget.setUpdatesEnabled(True)
+
         if hasattr(self.viewer, "update_height"):
             self.viewer.update_height()
 
-        # [PERF] 流式卡片：preview 期间累积的高度变化一次性应用。
-        # _apply_viewer_height 在 preview 模式下只记录 _pending_viewer_height，
-        # 此处 setFixedHeight 把 viewer 设到正确高度，触发一次 ResizeObserver →
-        # reportHeight → Python 拿到真实高度，结束 preview 期间累积的高度死循环。
-        # 只对 CodeWebViewer（非 PlainTextViewer）有效：PlainTextViewer 的
-        # update_height() 已在上方调用且自身无 _pending_viewer_height 字段。
-        pending_h = getattr(self, "_pending_viewer_height", None)
-        if pending_h is not None and self.role != "user" and self.viewer is not None:
+        # 强制一次高度上报：让 JS 侧 ResizeObserver 也跟上 viewer 新高度，
+        # 防止 Chromium 内部仍按旧高度布局（_apply_viewer_height 没真正
+        # 改高度时 Chromium 视口尺寸未变）→ 首帧 paint 仍按旧宽排版。
+        if hasattr(self.viewer, "page") and self.viewer.page():
             try:
-                # 🐛 从占位高度恢复到真实内容高度**存在真实增量**，不能清零：
-                # 占位高度 = resize 前的旧 viewer 高度（+options），真实高度是新宽度
-                # 下的重排高度，两者差值必须由外层做锚定补偿。旧实现写死 `= 0`
-                # → 外层 `if delta and ...` 直接跳过 → 整个 resize 恢复期零补偿
-                # → 视口被 N 张卡逐张推走（「一 resize 画面就很乱」的直接来源）。
-                # 批量提交（HeightCommitBatch）激活时由 batch 统一接管并改用锚点修正。
-                self._last_height_delta = pending_h - self.viewer.height()
-                self._commit_viewer_height(pending_h)
+                self.viewer.page().runJavaScript("reportHeight();")
             except RuntimeError:
                 pass
-            self._pending_viewer_height = None
-            # 强制一次高度上报：让 JS 侧 ResizeObserver 也跟上 viewer 新高度，
-            # 防止 Chromium 内部仍按旧高度布局（_apply_viewer_height 没真正
-            # 改高度时 Chromium 视口尺寸未变）→ 首帧 paint 仍按旧宽排版。
-            if hasattr(self.viewer, "page") and self.viewer.page():
-                try:
-                    self.viewer.page().runJavaScript("reportHeight();")
-                except RuntimeError:
-                    pass
 
     def _sync_identity_header_width(self) -> None:
         """身份行右缘与气泡对齐（宽度取内容需求与气泡宽的较大值）。
@@ -4361,6 +4564,9 @@ class MessageCard(SimpleCardWidget):
         blocks = getattr(self, "_content_data", None)
         if self.role != "assistant" or not blocks:
             return False
+        # [E6] 热重载撞流式（罕见）：读权威方固化防 pending 丢进 content_to_markdown
+        self._solidify_text_blocks()
+        blocks = self._content_data
         from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
 
         registry = UIPluginRegistry.get_instance()
@@ -4405,6 +4611,9 @@ class MessageCard(SimpleCardWidget):
 
         對 tool_streaming / custom 等未知類型自動回退 content_to_markdown。
         """
+        # [E6] 读权威方固化：块内 "_pend" 片段先 join 进正式字段，保证转换口径
+        # 与逐 chunk 直拼一致（幂等；所有 _lazy_markdown_cb 消费点经此固化）。
+        self._solidify_text_blocks()
         content = self._content_data
         if isinstance(content, str) or not isinstance(content, list):
             return content_to_markdown(content)
@@ -4509,20 +4718,31 @@ class MessageCard(SimpleCardWidget):
             # 列表 → 所有块 dict 对象被替换 → _tool_anchor_refs 对象引用失效 →
             # append_tool_result 稳定锚点退化 → finish 完整重渲染时思考/工具顺序错乱。
             # 流式中 _content_data 已是标准块列表，原地追加/合并保住引用稳定。
+            # [E6] 状态机懒建必须在早退之前：懒渲染未就绪的批也要推进协议状态
+            # （下批以 carry 续扫，think 未闭合期间漏建会把劈开标记判成已闭合）。
+            if getattr(self, "_proto_state", None) is None:
+                self._proto_state_reset()
+            # [E6] 写入只 append 到块内 "_pend" 片段（O(1)），不逐 chunk 拼
+            # block["text"]；读权威方经 _solidify_text_blocks 固化（幂等）。
             if (
                 isinstance(self._content_data, list)
                 and self._content_data
                 and isinstance(self._content_data[-1], dict)
                 and self._content_data[-1].get("type") == "text"
             ):
-                self._content_data[-1]["text"] = str(self._content_data[-1].get("text", "") or "") + str(text or "")
+                self._content_data[-1].setdefault("_pend", []).append(str(text or ""))
             elif isinstance(self._content_data, list) and all(isinstance(b, dict) for b in self._content_data):
                 # 直接构造 text 块（避免 make_text_block 未导入），保持原地 append 不重建
-                self._content_data.append({"type": "text", "text": str(text or "")})
+                self._content_data.append({"type": "text", "text": "", "_pend": [str(text or "")]})
             else:
                 self._content_data = append_text_block(self._content_data, text)
             # 优化：懒渲染模式下直接跳过 markdown 渲染，避免不必要的计算
             if not self._lazy_rendered or not self.viewer:
+                # [E6] 状态机照常推进（本批标记进 carry，下批渲染分支续扫）
+                self._proto_scan_chunk(self._proto_state, str(text or ""))
+                # [E6] 非流式落定路径读 _content_data（经 set_content/content_to_markdown
+                # 白名单重建块、会丢 "_pend"），先把片段固化进正式字段防丢内容。
+                self._solidify_text_blocks()
                 self._pending_content = self._content_data
                 return
             # [PERF] 增量 markdown 構建：已完成的 tool_result 塊走緩存，只有文本塊即時轉換
@@ -4531,11 +4751,12 @@ class MessageCard(SimpleCardWidget):
             # 避免每个思考文本 chunk 都触发全量渲染 → reorganizeContent → think-streaming
             # DOM 节点反复 destroy+recreate 导致"思考中"状态闪烁。
             # 🆕 检测未闭合 <think> / 插件注册 tag / 渲染型 fence：静默累积不触发渲染，与 append_reasoning 策略一致
-            last_block = self._content_data[-1] if self._content_data else None
-            last_text = last_block.get("text", "") if isinstance(last_block, dict) else ""
-            _think_unclosed = _has_unclosed_think(last_text)
-            _tag_unclosed = _has_unclosed_registered_tag(last_text)
-            _fence_unclosed = _has_unclosed_chart_fence(last_text)
+            # [E6] 检测对象从块全文改为「本卡协议状态 + 新段」增量推进（旧实现对
+            # 每批跑 4 个 O(全文) 扫描；chunk 劈开的标记串由尾部 carry 兜住）。
+            # 状态机随流重置（finish_streaming / cleanup）复位。
+            _think_unclosed, _tag_unclosed, _tool_unclosed, _fence_unclosed = self._proto_scan_chunk(
+                self._proto_state, str(text or "")
+            )
             # 流式模式下增量追加纯文本到 DOM，让用户立即看到文字。
             # 🐛 修复（高块闪现）：think 未闭合期间**不**调用 _append_text_incremental ——
             # 否则思考内容会以普通正文逐行注入 #content-placeholder 堆叠成高块，
@@ -4547,12 +4768,7 @@ class MessageCard(SimpleCardWidget):
             # "文字/代码先流式出现又消失"
             # 🆕 未闭合 <tool> 协议段（glm 等中转把工具调用以协议文本嵌在 content
             # 里流式返回）同策略跳过增量注入：生肉闪现与 think 同症。
-            # [PERF] 先做 C 级子串包含判断再 count：count 是两遍 O(n) 全扫，
-            # 而绝大多数批次正文里根本没有协议标签（实测 390KB 两遍 count
-            # 0.39ms → 加 in 短路后 0.08ms，流式每批都跑）。
-            _tool_unclosed = (
-                False if "<tool" not in last_text else last_text.count("<tool>") > last_text.count("</tool>")
-            )
+            # [PERF] 旧实现此处对块全文跑两遍 count（O(n)），E6 已并入上方状态机增量判定。
             if (
                 self._streaming
                 and not _think_unclosed
@@ -4608,10 +4824,18 @@ class MessageCard(SimpleCardWidget):
             # ── 差量渲染（2026-07-22）──
             # 文字即时性已由 _append_text_incremental 保证。全量 HTML 渲染
             # 仅在自然边界触发（段落结束 / 块闭合 / 句号软边界），非边界时只启安全定时器。
-            # last_text 已通过 append_text_block 包含新追加文本，判断可靠。
+            # [E6] last_text 全文已不存在（text 字段不再逐 chunk 拼），boundary 判定
+            # 用「固化段尾部 + pending 拼合」的 128 字符尾窗：空白跳转 + 尾标记判定
+            # 只依赖尾部；极端「尾部空白 > 窗口且 </think> 在窗外」差异 = 渲染延迟
+            # 一拍，无正确性影响。
+            _last_block = self._content_data[-1] if self._content_data else None
+            _boundary_win = ""
+            if isinstance(_last_block, dict):
+                _pend_join = "".join(_last_block.get("_pend") or ())
+                _boundary_win = (str(_last_block.get("text", "") or "")[-160:] + _pend_join)[-128:]
             # [PERF] 软边界（句号）不再 immediate —— 与 append_chunk /
             # _schedule_render 保持一致，交由内部 90ms 短定时器合并。
-            if self._streaming and self.viewer._has_reached_clean_boundary(last_text):
+            if self._streaming and self.viewer._has_reached_clean_boundary(_boundary_win):
                 self.viewer._schedule_render(immediate=immediate_render)
             else:
                 self.viewer._schedule_render(immediate=False)
@@ -5098,6 +5322,8 @@ class MessageCard(SimpleCardWidget):
 
     def get_plain_text(self) -> str:
         if self.role == "assistant":
+            # [E6] 导出/复制口径先固化 pending，保证与渲染落定一致
+            self._solidify_text_blocks()
             return content_to_text(self._content_data, include_tool_results=True)
         if isinstance(self._content_data, list):
             return content_to_text(self._content_data)
@@ -5521,6 +5747,9 @@ class MessageCard(SimpleCardWidget):
             last_block = self._content_data[last_reasoning_idx]
         if not isinstance(last_block, dict):
             return
+        # [E6] 读权威方固化：content 传给 viewer 做 block-key 计算，必须与
+        # _build_incremental_md（固化后）口径一致，否则折叠框 key 不匹配重建闪烁。
+        self._solidify_text_blocks()
         raw_content = last_block.get("content") or ""
         if not raw_content.strip():
             # 空 block（start_new_thinking_block 刚创建）跳过 — 等后续 reasoning chunks
@@ -5649,19 +5878,34 @@ class MessageCard(SimpleCardWidget):
             panel.update_todos(self._todo_panel_todos)
 
     def clear_todo_list(self):
-        """清空并卸载任务看板（任务迁往新卡片时由宿主调用）
+        """清空并销毁任务看板（任务迁往新卡片时由宿主调用）
 
-        面板实例随卡片存活，此处只清空数据 + 隐藏，避免重建同一张卡片时
-        重新创建控件。面板从布局中摘除（任务看板只属于最新卡片）。
+        迁卡路径一次性销毁旧面板（顺序契约对齐 remove_inline_panel）：
+        update_todos([]) → removeWidget → hide → setParent(None) → deleteLater。
+        宿主 _todo_panel_host 保留（新卡片重建面板时复用同一布局槽位）。
         """
         self._todo_panel_todos = []
         panel = self._todo_panel
         if panel is None:
             return
-        panel.update_todos([])
+        self._todo_panel = None
+        self._todo_panel_height_cache = 0
+        try:
+            panel.update_todos([])
+        except RuntimeError:
+            pass
         host = self._todo_panel_host
         if host is not None:
-            host.removeWidget(panel)
+            try:
+                host.removeWidget(panel)
+            except RuntimeError:
+                pass
+        try:
+            panel.hide()
+            panel.setParent(None)
+            panel.deleteLater()
+        except RuntimeError:
+            pass
 
     # ── 插件内嵌面板（通用槽位；任务看板/成果栏是内置的同位面板）──
 
@@ -5700,6 +5944,10 @@ class MessageCard(SimpleCardWidget):
         height_signal = getattr(panel, "heightChanged", None)
         if height_signal is not None and hasattr(height_signal, "connect"):
             height_signal.connect(lambda *_, _pid=panel_id: self._on_inline_panel_height_changed(_pid))
+        # 图片单击 → 内置预览（与正文图片同一通道；面板可选提供该信号）
+        preview_signal = getattr(panel, "previewImageRequested", None)
+        if preview_signal is not None and hasattr(preview_signal, "connect"):
+            preview_signal.connect(self._on_preview_image)
         bubble_lay = bubble.layout()
         if bubble_lay is not None:
             bubble_lay.addWidget(panel)
@@ -5790,19 +6038,6 @@ class MessageCard(SimpleCardWidget):
         """
         try:
             panel = self._todo_panel
-            # [DEBUG-todo-h] 临时诊断：面板被压缩时输出几何全貌（定位后删除）
-            logger.info(
-                "[DEBUG-todo-h] panelChanged "
-                f"card.h={self.height()} card.min={self.minimumHeight()} card.max={self.maximumHeight()} "
-                f"pinned={getattr(self, '_layout_height_pinned', None)} "
-                f"viewer.h={self.viewer.height() if self.viewer else -1} "
-                f"viewer.min={self.viewer.minimumHeight() if self.viewer else -1} "
-                f"viewer.max={self.viewer.maximumHeight() if self.viewer else -1} "
-                f"panel.sizeHint={panel.sizeHint().height() if panel is not None else -1} "
-                f"panel.h={panel.height() if panel is not None else -1} "
-                f"panel.vis={panel.isVisible() if panel is not None else None} "
-                f"bubble.h={self._assistant_bubble.height() if self._assistant_bubble else -1}"
-            )
             cur = self._todo_panel_effective_height(panel)
             prev = getattr(self, "_todo_panel_height_cache", 0)
             self._todo_panel_height_cache = cur
@@ -5839,131 +6074,31 @@ class MessageCard(SimpleCardWidget):
         except RuntimeError:
             return 0
 
-    # ── 卡片内嵌成果栏（三件套，契约同任务看板；关键差异见 update_artifact_list）──
+    # ── 插件内嵌面板投递（通用槽位）──
 
-    def update_artifact_list(self, items):
-        """合并推送成果条目（原生 Qt 面板，不进 WebEngine）
+    def push_inline_items(self, panel_id: str, items) -> int:
+        """向本卡的插件内嵌面板增量推送条目（面板实现 ``update_items`` 契约）
 
-        ★ **合并而非替换**：同轮多次工具产出、异步任务回填原卡（``ui.artifacts.show``
-        的 ``target="call"``）每次只带本次增量，整体替换会把先到的条目顶掉。
-        按 ``path`` 去重：已存在则原位更新，新路径追加到末尾（保持首次出现顺序）。
+        面板由 ``UIPluginRegistry.register_card_inline_panel`` 注册；插件未加载
+        或面板不支持该契约时静默丢弃（返回 0），不阻塞工具结果渲染。
 
-        与任务看板的语义差异——**不迁卡**：任务列表是"当前状态"，每轮工具轮次
-        都会迁到最新卡（宿主 ``_sync_todo_panel`` 卸旧卡挂新卡）；成果属于产生
-        它的那一轮，新卡不继承旧卡的成果，宿主侧不清空旧卡。显式清空走
-        ``clear_artifact_list()``（空列表推送不再隐含清空）。
+        ★ 不迁卡：成果属于产生它的那一轮，新卡不继承旧卡条目（与任务看板
+        的迁卡语义相反）。合并去重由面板按 path 自己做。
 
-        Args:
-            items: [{path, kind?, name?, width?, height?, size?, caption?, meta?}, ...]
-                   kind 缺省按扩展名推断
+        Returns:
+            投递条目数（未找到面板返 0）。
         """
-        merged = self._merge_artifact_items(self._artifact_panel_items, items)
-        if not merged:
-            return
-        self._artifact_panel_items = merged
-        if self.role != "assistant":
-            return
-        if self._assistant_bubble is None:
-            panel = self._artifact_panel
-            if panel is not None:
-                panel.update_artifacts(merged)
-            return
-        panel = self._ensure_artifact_panel()
-        if panel is not None:
-            panel.update_artifacts(merged)
-
-    @staticmethod
-    def _merge_artifact_items(current, incoming):
-        """按 path 合并成果条目：同路径原位替换，新路径追加（保序）"""
-        merged = list(current or [])
-        index = {}
-        for i, item in enumerate(merged):
-            if isinstance(item, dict) and item.get("path"):
-                index[str(item["path"])] = i
-        for raw in incoming or []:
-            if not isinstance(raw, dict):
-                continue
-            path = str(raw.get("path") or "").strip()
-            if not path:
-                continue
-            item = dict(raw)
-            item["path"] = path
-            pos = index.get(path)
-            if pos is None:
-                index[path] = len(merged)
-                merged.append(item)
-            else:
-                merged[pos] = item
-        return merged
-
-    def clear_artifact_list(self):
-        """显式清空成果栏（面板实例保留，卡片重建时直接复用）"""
-        self._artifact_panel_items = []
-        panel = self._artifact_panel
-        if panel is not None:
-            panel.clear_artifacts()
-
-    def _ensure_artifact_panel(self):
-        """懒创建成果栏并挂进气泡布局末尾（任务看板之后、页脚之前）"""
-        if self._artifact_panel is not None:
-            host = self._artifact_panel_host
-            if host is not None and host.indexOf(self._artifact_panel) < 0:
-                host.addWidget(self._artifact_panel)
-            return self._artifact_panel
-        try:
-            from app.widgets.inline_artifact_panel import InlineArtifactPanel
-
-            panel = InlineArtifactPanel(self._assistant_bubble)
-        except Exception as e:
-            logger.warning(f"[MessageCard] 成果栏创建失败: {e}")
-            return None
-        # 高度变化 → 重算卡片高度并上报外层锚定补偿（硬要求，P025/P027 教训）
-        panel.heightChanged.connect(lambda _p=panel: self._on_artifact_panel_height_changed())
-        # 图片单击 → 内置预览（与正文图片同一通道）
-        try:
-            panel.previewImageRequested.connect(self._on_preview_image)
-        except (RuntimeError, AttributeError):
-            pass
-        bubble_lay = self._assistant_bubble.layout()
-        if bubble_lay is not None:
-            # 挂载顺序：viewer → 任务看板 → 成果栏。任务在前（先看进度，再看产出）
-            bubble_lay.addWidget(panel)
-            self._artifact_panel_host = bubble_lay
-        self._artifact_panel = panel
-        return panel
-
-    def _on_artifact_panel_height_changed(self):
-        """成果栏高度变化：重算卡片高度并通知外层做锚定补偿
-
-        记账口径与 ``_on_todo_panel_height_changed`` 完全一致（含
-        ``_todo_panel_effective_height`` 注释里记录的 sizeHint 与实际占高
-        不同源问题，2026-10-09 真机现象）——两套缓存分开记，互不干扰。
-        """
-        try:
-            panel = self._artifact_panel
-            cur = self._artifact_panel_effective_height(panel)
-            prev = getattr(self, "_artifact_panel_height_cache", 0)
-            self._artifact_panel_height_cache = cur
-            delta = int(cur - prev)
-            if not delta:
-                return
-            bubble = getattr(self, "_assistant_bubble", None)
-            if bubble is not None:
-                bubble.updateGeometry()
-            self.updateGeometry()
-            self._last_height_delta += delta
-            self.heightChanged.emit(self.height())
-        except RuntimeError:
-            pass
-
-    def _artifact_panel_effective_height(self, panel) -> int:
-        """成果栏「当前实际占高」，口径同 ``_todo_panel_effective_height``（取大值）"""
-        if panel is None or not panel.isVisible():
+        if not items or self.role != "assistant":
+            return 0
+        panel = self.ensure_inline_panel(panel_id)
+        updater = getattr(panel, "update_items", None) if panel is not None else None
+        if not callable(updater):
             return 0
         try:
-            return max(int(panel.sizeHint().height()), int(panel.height()))
+            updater(list(items))
         except RuntimeError:
             return 0
+        return len(items)
 
     def update_tool_streaming(
         self,
@@ -6166,21 +6301,25 @@ class MessageCard(SimpleCardWidget):
                     break
 
         if _target_block is not None:
-            # 找到已有的（活动）思考块，追加内容
-            _target_block["content"] = (_target_block.get("content", "") or "") + text
+            # [E6] 找到已有的（活动）思考块：写入只 append 到 "_pend" 片段（O(1)），
+            # 不逐 chunk 拼 content；读权威方经 _solidify_text_blocks 固化（幂等）。
+            _target_block.setdefault("_pend", []).append(text)
         else:
             # 未找到（或 force_new_block），新增 reasoning 块
-            _target_block = {"type": "reasoning", "content": text}
+            _target_block = {"type": "reasoning", "content": "", "_pend": [text]}
             self._content_data.append(_target_block)
         # 登记为活动块：后续同段思考继续追加到此块（历史批量加载逐条独立成块）
         self._active_thinking_block = _target_block
-        self._reasoning_total_len += len(text)
 
         if defer_render:
-            # 历史批量加载：渲染由末尾 finish_streaming(history=True) 统一做
+            # [E6] 历史批量加载：数据层先固化 pending（finish_streaming(history=True)
+            # 的全量渲染 / 持久化都读 content），渲染由末尾统一做
+            self._solidify_text_blocks()
             return
 
         if not self._lazy_rendered or not self.viewer:
+            # [E6] 懒渲染未就绪：先固化 pending 再交 _pending_content（同 append_text）
+            self._solidify_text_blocks()
             self._pending_content = self._content_data
             return
 
@@ -6429,6 +6568,10 @@ class MessageCard(SimpleCardWidget):
         # 一轮 100-300KB 残留到下次 start_elapsed_tracking 才清。
         self._stream_text_clear()
         self._stream_text_cursor = 0  # [T4-5] 增量采样游标同步复位
+        # [E6] 落定数据层清账：残留 "_pend" 固化进正式字段（防持久化/导出路径
+        # 读到未拼全文），协议状态机一并复位。
+        self._solidify_text_blocks()
+        self._proto_state = None
 
     def _has_active_tools(self) -> bool:
         """是否有仍在执行中的工具（已登记但未完成）。
@@ -6498,11 +6641,16 @@ class MessageCard(SimpleCardWidget):
         清理 MessageCard 持有的资源，防止内存泄漏。
         应该在删除卡片前调用，或者在 closeEvent 中自动调用。
         """
+        # N8：footer provider 健康状态随会话结束/卡片销毁清零
+        self._footer_provider_cost_ema.clear()
+        self._footer_provider_slow_streak.clear()
+        self._footer_provider_blocked.clear()
         # 停止所有定时器
         timers_to_stop = [
             self._anim_timer,
             self._height_anim,
             self._elapsed_timer,
+            self._stream_height_tick,
         ]
         for timer in timers_to_stop:
             try:
@@ -6552,6 +6700,7 @@ class MessageCard(SimpleCardWidget):
         # _footer_stat_context 用 getattr(..., "") or "" 兜底，置 None 安全。
         self._stream_text_parts = None
         self._stream_text_acc = None
+        self._stream_text_parts_solid = 0  # [E6] 游标同步复位
         self._rendered_code_blocks = []  # 代码块缓存
         self._pending_content = None  # 待渲染内容
         self._finished_streaming_ids.clear()  # 流式 ID 集合

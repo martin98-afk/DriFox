@@ -32,12 +32,13 @@
         },
         {
             "name": "artifacts-manager",
-            "description": "DriFox 内置 UI 组件：工作台产物页（按用户问题分组展示会话文件产物）",
-            "version": "1.0.0",
+            "description": "DriFox 内置成果栏：消息卡片内嵌成果展示面板，并提供 show_artifacts 工具让模型把需要用户查看的文件放入成果栏",
+            "version": "1.1.0",
             "author": "DriFox Team",
             "license": "GPL-3.0-or-later",
             "categories": [
-                "ui"
+                "ui",
+                "tool"
             ],
             "source": {
                 "type": "git-subdir",
@@ -46,10 +47,11 @@
                 "ref": "master"
             },
             "components": {
-                "ui": true
+                "ui": true,
+                "tools": true
             },
             "display_name": {
-                "zh": "产物工作台"
+                "zh": "成果栏"
             },
             "homepage": "https://github.com/martin98-afk/DriFox",
             "icon": {
@@ -90,8 +92,8 @@
         },
         {
             "name": "file-tree",
-            "description": "当前项目文件树浏览 — 直观展示项目目录结构，支持图片/文本预览（语法高亮、换行开关）、用指定程序打开、右键菜单与实时文件监听；并接管主程序里可预览文件的打开动作（工具卡文件地址点击直接用本页预览）",
-            "version": "0.5.0",
+            "description": "当前项目文件树浏览 — 直观展示项目目录结构，支持图片/文本预览（语法高亮、换行开关）、图片全局面板（可自由拖拽平移与缩放）、用指定程序打开、右键菜单与实时文件监听；树页眼睛按钮开启「快捷预览」在树下方直接选中即看（不必双击进入预览页）；可把文件或选中文字（带路径与行号）引用到对话输入框；并接管主程序里可预览文件的打开动作（工具卡文件地址点击直接用本页预览）",
+            "version": "0.7.0",
             "author": "DriFox Contributors",
             "license": "GPL-3.0-or-later",
             "categories": [
@@ -919,7 +921,7 @@
         {
             "name": "system-transports",
             "description": "DriFox 内置协议传输器：OpenAI chat/completions、responses 与 Anthropic messages 三通道（请求组装 + 响应事件归一 → StreamEvent）",
-            "version": "1.1.0",
+            "version": "1.2.0",
             "author": "DriFoxx Team",
             "license": "GPL-3.0-or-later",
             "categories": [],

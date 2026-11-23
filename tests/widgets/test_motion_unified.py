@@ -145,6 +145,7 @@ def test_height_animator_releases_min_and_max(qapp):
 # ── 行为：LoopTimer ───────────────────────────────────────────────
 
 
+@_MOTION_ON
 def test_loop_timer_respects_visibility_gate(qapp):
     """宿主不可见时零回调（隐藏的控件不再空转重绘）"""
     from PyQt5.QtTest import QTest
@@ -161,6 +162,7 @@ def test_loop_timer_respects_visibility_gate(qapp):
     assert ticks["n"] == 0
 
 
+@_MOTION_ON
 def test_loop_timer_respects_custom_gate(qapp):
     """自定义门控为假时不回调，为真时恢复回调"""
     from PyQt5.QtTest import QTest

@@ -50,3 +50,17 @@ class InputHistoryCapability(Protocol):
     def get_input_history(self, limit: int = 50) -> Optional[List[Dict[str, Any]]]: ...
 
     def add_input_history(self, content: str, attachments: Optional[list] = None) -> bool: ...
+
+@runtime_checkable
+class SessionBulkGetCapability(Protocol):
+    """可选能力：按 session_id 批量取回会话（I6 引用会话 N+1 消除）。
+
+    与 SessionTitleCapability 同构的可选能力：引擎可不实现；消费方
+    （session_reference）isinstance 探测，不支持时安全降级逐个 get()。
+    本 Protocol 不进入 SessionStorageEngine 主契约，多存储插件零波及。
+
+    约定签名：get_by_ids(session_ids) -> Dict[session_id, session_dict]，
+    查不到 / 失败的 id 不出现在结果中。
+    """
+
+    def get_by_ids(self, session_ids: List[str]) -> Dict[str, Dict]: ...

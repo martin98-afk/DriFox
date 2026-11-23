@@ -28,6 +28,63 @@ _ASK_MIN_CHARS = 150
 _DIRTY_TTL_S = 1800
 _DIRTY_MAX = 256
 
+# Bash 只读命令降噪：首命令命中白名单、且无重定向/命令替换时，不标记 dirty。
+# 按 ; | && 换行 切段逐段判定：所有段都只读才算只读，任一写命令即照旧打标。
+# 保守原则：拿不准一律返回 False（照旧打标），宁可多提醒也不漏收尾。
+import re as _re
+
+_READONLY_COMMANDS = frozenset({
+    # 文件/目录列举与查看
+    "ls", "dir", "find", "cat", "type", "head", "tail", "wc", "stat", "tree",
+    "grep", "egrep", "fgrep", "rg", "sed", "awk", "less", "more",
+    "pwd", "which", "where", "echo", "printf", "true", "false", "test",
+    "hg", "svn",
+    # PowerShell 只读 cmdlet（大小写不敏感匹配）
+    "get-childitem", "get-content", "get-item", "get-command", "get-location",
+    "select-object", "where-object", "foreach-object", "measure-object",
+    "format-list", "format-table", "write-output", "write-host", "out-string",
+    "resolve-path", "test-path",
+})
+# git 只认只读子命令；commit/push/add 等写子命令不在集合内 → 照旧打标
+_GIT_READONLY_SUBCMDS = frozenset({
+    "status", "diff", "log", "show", "branch", "blame", "ls-files", "ls-tree",
+    "grep", "remote", "tag", "rev-parse", "config", "describe", "cat-file", "count-objects",
+})
+# 命令替换/重定向视为有副作用；管道与分号是只读组合，改为分段处理
+_WRITE_OPS = (">>", ">", "$(", "`")
+_CMD_SEPARATORS = _re.compile(r"[;|&]+|\n")
+_ENV_PREFIX = _re.compile(r"^\$?[A-Za-z_]\w*=")
+
+
+def _is_readonly_command(ctx: dict) -> bool:
+    """Bash 工具：命令是否为纯只读。非 Bash 或无命令返回 False。"""
+    tool = str(ctx.get("tool_name") or ctx.get("tool_name_native") or "")
+    if tool.lower() not in ("bash", "shell", "powershell", "pwsh"):
+        return False
+    cmd = str(ctx.get("command") or "")
+    if not cmd.strip():
+        return False
+    if any(op in cmd for op in _WRITE_OPS):
+        return False
+    for seg in _CMD_SEPARATORS.split(cmd):
+        toks = seg.strip().split()
+        while toks and _ENV_PREFIX.match(toks[0]):
+            toks = toks[1:]
+        if not toks:
+            continue
+        exe = toks[0].strip("\"'").lower()
+        exe = exe.replace("\\", "/").rsplit("/", 1)[-1]
+        if exe.endswith(".exe"):
+            exe = exe[:-4]
+        if exe == "git":
+            sub = toks[1].strip("\"'").lower() if len(toks) > 1 else ""
+            if sub not in _GIT_READONLY_SUBCMDS:
+                return False
+        elif exe not in _READONLY_COMMANDS:
+            return False
+    return True
+
+
 # 状态挂 sys.modules 固定键（见 _state 注释），不能用模块级 dict
 _STATE_KEY = "_drifox_stop_guidance_state"
 
@@ -57,6 +114,9 @@ def record_write(event: str, context: dict) -> str:
         return ""
     ctx = context or {}
     if ctx.get("current_role", "primary") != "primary":
+        return ""
+    # 只读命令降噪：Bash 的纯查询命令不改变文件状态，不标记 dirty
+    if _is_readonly_command(ctx):
         return ""
     session_id = str(ctx.get("session_id") or "")
     if not session_id:

@@ -9,7 +9,7 @@
 tab_id 定位、通用 ``refresh_data()`` 协议、卡片页签追加、主题刷新、宽度边界、
 WA_NativeWindow 穿透根治、空态页。纯离屏（offscreen）运行。
 
-产物页/历史页实现分别在 ``plugins/artifacts-manager`` / ``plugins/history-manager``，
+历史页实现见 ``plugins/history-manager``，
 其自身行为由各自插件测试覆盖；本文件只验证面板的通用装配语义。
 """
 
@@ -180,7 +180,7 @@ def test_mount_injects_context_and_parent(panel):
 
     panel.sync_plugin_pages([_info("ctx", "上下文页", widget_class=_P)])
     assert seen["parent"] is panel._stack
-    assert "diff_requested_callback" in seen["context"]
+    assert isinstance(seen["context"], dict)
 
 
 def test_page_without_protocol_is_tolerated(panel):
@@ -312,7 +312,7 @@ def test_indicator_follows_logical_tab_during_slide(panel, monkeypatch, qapp):
 
 @pytest.mark.parametrize(
     "plugin_dir",
-    ["plugins/worktree-manager", "plugins/artifacts-manager", "plugins/history-manager"],
+    ["plugins/worktree-manager", "plugins/history-manager"],
 )
 def test_plugin_ui_module_importable(plugin_dir):
     """插件 ui/__init__.py 应存在且暴露 register_ui 函数"""

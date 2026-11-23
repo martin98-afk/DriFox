@@ -13,6 +13,8 @@ from typing import Dict, List, Optional
 
 from loguru import logger
 
+from app.utils.safe_mode import is_safe_mode
+
 # 插件根等级：system < user。低等级根注册的同名工具可被高等级根覆盖
 _ROOT_KIND_SYSTEM = "system"  # 项目工作树 plugins/（含 plugins/system/）
 _ROOT_KIND_USER = "user"  # 用户数据目录 <app_data>/plugins/
@@ -20,8 +22,14 @@ _ROOT_KIND_PRIORITY: Dict[str, int] = {_ROOT_KIND_SYSTEM: 0, _ROOT_KIND_USER: 1}
 
 
 def _plugin_roots() -> List[Path]:
-    """插件扫描根：项目 plugins/（含 system）+ 用户插件目录"""
+    """插件扫描根：项目 plugins/（含 system）+ 用户插件目录
+
+    安全模式只返回系统根：工具/服务商/运行时组件三个 loader 共用本函数，
+    返回用户根就会在系统插件之外继续 import 用户插件代码。
+    """
     roots = [Path(__file__).resolve().parent.parent.parent.parent / "plugins"]
+    if is_safe_mode():
+        return roots
     try:
         from app.utils.utils import get_app_data_dir
 

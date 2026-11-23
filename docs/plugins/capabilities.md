@@ -18,9 +18,9 @@
 |---|---|---|
 | **能力型**（要宿主运行时状态、有副作用） | `ctx["capabilities"]` | `session.write`、`platform.send`、`stream.subscribe` |
 | **静态型**（无宿主依赖，import 期就要用） | `app.plugins.sdk` | `Colors`、`ToolResult`、`ElidedLabel`、`GitWorktreeDetector` |
-| **注册型**（加载期向宿主登记扩展点） | 现有 `register_*` | `register_content_renderer`、`register_floating_card`、工具 / hook 注册 |
+| **注册型**（加载期向宿主登记扩展点） | 能挂到能力池的走能力池，纯 UI 扩展点走 `register_*` | 能力池：`file.open`、`tool.register`、`sync.register`；`register_*`：`register_content_renderer`、`register_floating_card`、欢迎页 tab |
 
-判定：需要窗口 / 会话 / 配置实例才成立的 → 能力型；不需要 → 静态型；是"告诉宿主我有这个东西" → 注册型。
+判定：需要窗口 / 会话 / 配置实例才成立的 → 能力型；不需要 → 静态型；是"告诉宿主我有这个东西" → 注册型（有对应能力时优先走能力池：授权与被裁剪、卸载清理都走同一套）。
 
 三者合起来构成插件唯一合法依赖面。除此之外的 `app.*` import 由 `tools/plugin_import_guard.py` 报违规。
 
@@ -215,6 +215,26 @@ cfg = caps.legacy("get_provider_config", "model.config")(
 | `workdir.read` | low | 当前工作目录 |
 | `workdir.write` | medium | 切换工作目录（一次封装：实例缓存 + executor 同步 + 团队广播 + 事件） |
 
+### 本地文件
+
+| ID | level | 说明 |
+|---|---|---|
+| `file.open` | medium | 打开本地文件：`open(path, fallback=True)` 走插件接管链（无人接管降级系统程序）；`register_opener(id, can_open, open_file, priority)` 注册接管项；`unregister_opener(id)`；`openers()` 查当前接管项 |
+
+> **注册型能力**（`file.open` / `tool.register` / `sync.register` / `mcp.register`）：加载期向宿主登记扩展点，也要走能力池，不要直接 import 宿主注册表。登记后由宿主统一调用与清理（插件卸载自动注销）。
+>
+> `file.open` 的接管项要求插件在 manifest 声明本能力：宿主打开本地文件前按 `priority` 降序问 `can_open`，命中即调 `open_file`；返回 False 视为放弃、继续问下一家。消息卡片里点工具参数文件、成果栏双击/右键「打开文件」走的是同一条链。
+>
+> ```python
+> from app.plugins.sdk import caps_for
+>
+> api = caps_for("file.open")
+> if api:
+>     api["register_opener"]("preview", can_open, open_file, priority=10)
+>     api["open"](path)            # 应用内预览优先，没人接就交系统程序
+>     api["open"](path, fallback=False)  # 只问接管链，没人接返回 False
+> ```
+
 ### 项目
 
 | ID | level | 说明 |
@@ -321,7 +341,7 @@ UIPluginRegistry.get_instance().register_slot_entry(
 | `window.host` | low | 宿主顶层窗口（弹窗 / InfoBar 的合适 parent） |
 | `window.list` | low | 存活窗口 id 集合 |
 | `window.events` | medium | 订阅 tab 切换等窗口级事件 |
-| `window.workbench` | medium | 打开 / 刷新右侧工作台页 |
+| `window.workbench` | medium | 打开 / 刷新右侧工作台页；`page(key)` 取页面实例（插件对自己的页做原位操作） |
 
 > **全局对话报错事件**：backend 在错误最终回传时同步发布 `conversation_error` 到 `ui.events` 总线（与窗口内 `stream.errors` 同源，payload 相同）。字段：`window_id` / `session_id` / `provider` / `model` / `message` / `error_type` / `timestamp`；`error_type` 粗分类为 `timeout` / `rate_limit` / `auth` / `network` / `unknown`。全局监听插件（如报错自动换模型）用它收所有窗口的事件，再按 `window_id` 调 `model.set` / `session.send` 定向处理：
 >

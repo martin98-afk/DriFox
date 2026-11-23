@@ -25,6 +25,8 @@ description: UI 插件编码级踩坑记录（症状→原因→修法），来�
 10. 弹窗是宿主同款吗？          → 原生白底/英文按钮 → 用了 QMessageBox 或 caps_for 拿不到 ui.dialog（见下 §30）
 11. 宽屏下内容还读得下去吗？    → 行太长/糊满屏 → 给面板设 maximumWidth，别整页铺满
 12. 改完数据后界面刷新了吗？    → 状态文字变了按钮没变 → 图标/文案放在状态机同一处切换（暂停态漏刷是高频 bug）
+13. 切状态时工具栏抖吗？        → 按钮变宽挤走图标 → 按最长文案 fontMetrics 定宽（见下 §38）
+14. 内容没满屏却整页滚动吗？    → 隐藏空态 wordWrap 抬 sizeHint → 阅读区垂直 Ignored（见下 §36）
 ```
 
 ### 渲染类插件（HTML 片段 / 欢迎 tab / 消息卡片）的额外自检
@@ -945,5 +947,70 @@ def clear_layout(layout) -> None:
 
 **验证**（离屏可跑）：同一控件连续 `set_xxx()` 两次，比较 `findChildren` 数量是否持平。旧写法实测 `15 → 25`（且全部 `isVisible()`），修复后稳定 `15`。
 
+## 36. 内容没满屏却整页滚动 → 隐藏的空态页在抬高 sizeHint
+
+**症状**：卡片内容明明不满一屏，却出现整页竖向滚动条；窗口拉窄后滚动长度暴涨（实测宽 1100 时 `_page.height()`=820，窄 460 时=1449）。
+
+**原因**：父级建议高度取所有子项 `sizeHint` 的最大值，而 `QStackedWidget` 的**非当前页同样参与计算**。空态页里开了 `setWordWrap(True)` 的 QLabel，其 C++ sizeHint 按「理想宽度」估算折行高度，窄窗下虚高（实测空态页 443px）；再叠加两个内容面板的 `setMinimumHeight`，整页就被顶起来了。文档类 `QTextBrowser` 默认垂直 `Expanding`，也会把整篇文档高度当建议高度。
+
+**修法**：让阅读区的高度由显式约束决定，而不是由内容文本推断。
+
+```python
+panel.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Ignored)   # 面板高度不发言
+stack.setMinimumHeight(160)                                        # 给一个阅读下限
+stack.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)      # 隐藏页不抬父级
+reader.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)   # 长文在内部滚动
+```
+
+**验证不能只看截图**，要打印三组数字对比修复前后：`page.height()`、`scroll.horizontalScrollBar().maximum()`（必须 0）、`panel.sizeHint().height()`。本次修复 1449 → 896。
+
+## 37. `setMarkdown()` 之后 stylesheet 改不动段距和链接色
+
+**症状**：给 `setDefaultStyleSheet()` 写了 `a{color:...}`、`p{margin:...}`、`h1{font-size:...}`，渲染出来链接仍是默认蓝、段落几乎贴死、标题巨大（与 §31 同源）。
+
+**原因**：`setMarkdown()` 解析出的文档自带显式块格式与字符格式，优先级高于默认样式表。§31 的「转 HTML + 内联 style」是长期方案；若需要保留 Markdown 语义（例如直接渲染用户/引擎产出的 `.md`），得在解析后做一次二次精修。
+
+**修法**：遍历 block 覆写块格式，并对 anchor 片段合并字符格式；主题刷新或重新 setMarkdown 后必须重跑，否则颜色会回到默认。
+
+```python
+block = view.document().begin()
+while block.isValid():
+    cursor, fmt = QTextCursor(block), block.blockFormat()
+    fmt.setTopMargin(8 if fmt.headingLevel() else 0)
+    fmt.setBottomMargin(5)
+    fmt.setLineHeight(125, QTextBlockFormat.ProportionalHeight)
+    cursor.setBlockFormat(fmt)
+    it = block.begin()
+    while not it.atEnd():
+        frag = it.fragment()
+        if frag.isValid() and frag.charFormat().isAnchor():
+            cursor.setPosition(frag.position())
+            cursor.setPosition(frag.position() + frag.length(), QTextCursor.KeepAnchor)
+            link = QTextCharFormat()
+            link.setForeground(QColor(accent))
+            link.setFontUnderline(False)
+            cursor.mergeCharFormat(link)
+        it += 1
+    block = block.next()
+```
+
+顺带：标题字号用 `headingLevel()` 反推（`base + max(2, 9 - level * 2)`），别指望 `h1~h6` 的 CSS。
+
+## 38. 按钮文案随状态变长 → 工具栏抖动或被截断
+
+**症状**：空闲态「跑一轮」切到运行态「值班中…（约 5-20 分钟）」时按钮变宽，右侧图标被挤走；字号档调大后文案又变成「值班…」。
+
+**原因**：qfluentwidgets 按钮宽度跟 `sizeHint` 走，`setMinimumWidth(96)` 只保底、不封顶；文案长度随状态变化就会重新排版。
+
+**修法**：按**最长文案**用实际字体度量定宽（字号随宿主变化也能跟上），长说明挪到 hint 标签里，不要塞进按钮。
+
+```python
+btn.setFont(font)
+btn.setFixedWidth(max(96, btn.fontMetrics().horizontalAdvance("值班中…") + 36))
+```
+
+**验证**：`card.show()` + `processEvents()` 之后记录宽度，切状态再比一次必须相等（未 show 的控件没有真实几何，断言会假通过）。
+
 ---
+
 > 新坑写回格式：`## N. 标题` + **症状/原因/修法** 三段 + 可运行代码片段。

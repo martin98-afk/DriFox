@@ -24,6 +24,7 @@ def _make_widget(*, ui_streaming: bool, engine_streaming):
     w._clear_input_area = lambda: None
     w._clear_attachments = lambda: None
     w._pending_message_queue = []
+    w._deferred_send_pending = 0
     return w
 
 
@@ -110,3 +111,23 @@ class TestDispatchBusySend:
 
         assert calls["interject"][0] == "插话消息"
         assert "entry" not in calls
+
+    def test_pending_send_counts_as_busy(self):
+        """在途 send（已登记 defer、engine 未启动）不得判为「worker 已结束」
+
+        复现现场（2026-11-23 13:57:03）：两个定时任务同一 drain 出队
+        actions=['send', 'send']，第一条 defer 未执行时第二条复核拿到
+        engine.is_streaming=False → 误判 worker 已退出 → 重开新一轮，
+        第二次 execute 撞 Already streaming 并把 UI 回滚成空闲态。
+        """
+        w = _make_widget(ui_streaming=True, engine_streaming=False)
+        w._deferred_send_pending = 1
+        calls: dict = {}
+        w._continue_from_entry = lambda entry: calls.setdefault("entry", entry)
+        w._enqueue_pending_message = lambda t, i, h=None: calls.setdefault("queue", (t, i, h))
+
+        OpenAIChatToolWindow._dispatch_busy_send(w, "第二条定时任务", [], "queue", False)
+
+        assert calls["queue"][0] == "第二条定时任务"
+        assert "entry" not in calls
+        assert w._is_streaming is True, "在途 send 期间不得复位流式标志"

@@ -14,8 +14,11 @@ key 设计（七元组，见 get_pixmap）：
 - 副本类型/目标尺寸/opacity/blur/pad：任一渲染参数不同即不同条目，
   显示结果逐像素等同各自构建。
 
-淘汰策略：按「壁纸组」整体 LRU（path+mtime 为组键），_MAX_SETS=1 组封顶
-（仅当前壁纸），一套 ~103MB → 缓存上界 ~103-127MB；切主题时旧组淘汰、新组重解码。
+淘汰策略：按「壁纸组」整体 LRU（path+mtime 为组键），_MAX_SETS=2 组封顶
+（I4：scene 层与 window/sidebar 层接入后允许「场景图 + 区块图」两组共存，
+共图主题仍合为 1 组；_MAX_SETS=1 时 scene 层 resize 烘焙热路径会被
+area 冷组挤掉反复重解码）。一套 ~103MB → 缓存上界 ~206MB（仅异图双壁纸
+主题触顶）；切主题时旧组淘汰、新组重解码。
 不提供显式 invalidate：换壁纸 = path/mtime 变化 → 新组进、旧组出；
 同壁纸换主题但渲染参数未变时命中缓存恰是正确行为（显示本就该一致）。
 
@@ -31,10 +34,13 @@ import os
 from collections import OrderedDict
 from typing import Callable, Optional
 
-# 缓存组数上界：仅当前壁纸（T8 收紧，原 2 组 = 当前 + 上一主题）。
-# 一套全副本 ≈ 103-127MB（T40 核算），4K baked 由 _BAKED_BUDGET_BYTES
-# 降为 1 份（31.64 MiB）；1 组封顶 -103MB，代价仅切主题时重解码一次。
-_MAX_SETS = 1
+# 缓存组数上界：2（I4 放开；T8 曾收紧为 1=仅当前壁纸，但 window/sidebar
+# 区块层接入共享缓存后，异图双壁纸主题会形成「场景图 + 区块图」两组，
+# 1 组封顶会让 scene 层 resize 烘焙热路径被 area 冷组反复挤掉重解码。
+# 共图主题两组 key 相同仍合为 1 组；一套全副本 ≈ 103-127MB（T40 核算），
+# 4K baked 由 _BAKED_BUDGET_BYTES 降为 1 份（31.64 MiB）；上界 ~254MB
+# 仅在「异图双壁纸 + 4K」极端主题触顶，实际内置主题均为共图或区块小图。
+_MAX_SETS = 2
 
 # 每组 baked 条目上限（M2）：blur 壁纸拖拽 resize 按 (w,h,blur,pad) 逐帧写入，
 # 实测 40 步拖拽堆 40 份/330MB（1080p）且相邻几何命中率 0/39。取 4 = 覆盖

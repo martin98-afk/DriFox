@@ -325,14 +325,17 @@ class TestHeightTickAlignment:
     """[T34→P1步骤4] 追踪节拍 16→33ms 降频（砍 Chromium resize 回环），防抖不得另立一拍"""
 
     def test_tick_matches_frame_budget(self):
-        """追踪 tick 降频 33ms（30Hz）砍 Chromium resize 回环，防抖保持 16ms 复用 DEBOUNCE 常量。
-
+        """追踪 tick 节拍不高于帧预算上界，防抖保持 16ms 复用 DEBOUNCE 常量。
         [T34] 曾要求 tick 与打字机 rAF(~17ms) 同频（<=20ms）；P1 步骤4 改为
         33ms：追高回环 setFixedHeight → Chromium resize → ResizeObserver 回传
         的频率减半，factor 同步提速（基线 0.45→0.70，boost cap 0.85）保持收敛
         时间不变。防抖维持 16ms（STREAM_HEIGHT_DEBOUNCE_MS），只降追踪拍、
         不增加上报滞后。
+        [R4-A] 33 → 50（20Hz）：#14 实测单次跨进程 resize 往返 p50=2.18ms，
+        33ms tick = 66ms/s 主线程同步等待，是流式卡顿主因；50ms 后 44ms/s
+        （-34%）。防回归点相应更新为 50ms 上界（防回环频率进一步劣化）。
         """
+        import re
         from pathlib import Path
 
         widgets_dir = Path(__file__).resolve().parents[2] / "app" / "widgets"
@@ -340,8 +343,15 @@ class TestHeightTickAlignment:
         card_text = (widgets_dir / "message_card.py").read_text(encoding="utf-8")
         s = core_text.find("STREAM_HEIGHT_TICK_MS = ")
         assert s != -1
-        tick = int(core_text[s : core_text.find("\n", s)].split("=")[1].strip())
-        assert tick <= 35, f"STREAM_HEIGHT_TICK_MS 应 <=35ms（33ms tick + 2ms 余量），实际 {tick}"
+        line = core_text[s : core_text.find("\n", s)]
+        # 实况源码是 env 形式：int(os.environ.get("DRIFOX_STREAM_HEIGHT_TICK_MS", "50"))，
+        # 解析其默认值；纯字面量形式（STREAM_HEIGHT_TICK_MS = 50）仍兼容。
+        m = re.search(r'os\.environ\.get\("DRIFOX_STREAM_HEIGHT_TICK_MS",\s*"(\d+)"\)', line)
+        if m:
+            tick = int(m.group(1))
+        else:
+            tick = int(line.split("=")[1].strip())
+        assert tick <= 50, f"STREAM_HEIGHT_TICK_MS 默认值应 <=50ms（R4-A 20Hz 回环口径），实际 {tick}"
         # 防抖不得硬编码成另一拍：tick 降频后防抖仍须复用 DEBOUNCE 常量保持单帧
         assert (
             "self._stream_height_timer.setInterval(STREAM_HEIGHT_DEBOUNCE_MS)" in card_text

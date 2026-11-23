@@ -564,7 +564,10 @@ class ChatBackend(QObject):
         from app.plugins.managers.plugin_manager import PluginManager
 
         pm = PluginManager.get_instance()
-        if pm.is_initialized():
+        # 全局 hooks 存在 user-custom 插件目录，安全模式只加载系统插件
+        from app.utils.safe_mode import is_safe_mode
+
+        if pm.is_initialized() and not is_safe_mode():
             global_hooks_file = pm.get_global_hooks_file()
             if global_hooks_file.exists() and "user-custom" not in self._hook_manager._skill_to_hooks:
                 try:
@@ -974,17 +977,24 @@ class ChatBackend(QObject):
         if self._chat_engine:
             self._chat_engine.cancel_streaming()
 
-    def finalize_stop(self) -> List[Dict]:
+    def finalize_stop(self, timeout_ms: Optional[int] = 400) -> List[Dict]:
         """完成停止流程（阻塞操作，获取中断消息并清理）
 
         在 cancel_streaming() 调用后执行。
         此方法是阻塞的，应在 UI 更新后（或在后台线程中）调用。
 
+        Args:
+            timeout_ms: 等待 worker 退出的总预算（ms），透传给 engine.finalize_stop
+                → executor。**默认 400**（I10：原无参默认走 executor 3000+1000，
+                切历史会话等主线程热路径曾实测阻塞可达 4s——docstring 自证）。
+                后台/关闭路径请显式传 None（= executor 历史默认 3000+1000，
+                不限短时语义），见 main_widget._launch_background_finalize。
+
         Returns:
             被中断的消息列表
         """
         if self._chat_engine:
-            return self._chat_engine.finalize_stop()
+            return self._chat_engine.finalize_stop(timeout_ms=timeout_ms)
         return []
 
     def cleanup_worker(self):
@@ -1334,7 +1344,13 @@ class ChatBackend(QObject):
             from app.utils.git_worktree import GitWorktreeDetector
 
             if project_root:
-                repo_info = GitWorktreeDetector.get_repo_info_stale_while_revalidate(project_root)
+                # [PERF] with_counts=False：本段只用 root / current_branch /
+                # worktrees[].branch / is_current，**不用 ahead-behind**。
+                # 传 False 让 list_worktrees 走纯文件快速路径（零 git 子进程，
+                # 原本 FULL refresh 要 8+N 个子进程 / 12.3~16.3s）。
+                repo_info = GitWorktreeDetector.get_repo_info_stale_while_revalidate(
+                    project_root, with_counts=False
+                )
                 if repo_info and repo_info.worktrees:
                     ctx["worktree"] = {
                         "repo_name": os.path.basename(repo_info.root),
@@ -1430,28 +1446,41 @@ class ChatBackend(QObject):
         self.session_created.emit(session.session_id)
 
         # Trigger SessionStart hook — 同步执行，直接注入 session.messages
-        if trigger_hook and self._hook_manager:
-            context = self._build_session_context("startup")
-            context["session_id"] = session.session_id  # Claude Code 兼容字段
-            # 🛡️ W1：UI 线程（新建/分支会话等 GUI 场景）→ trigger_async=True，
-            # command/http 类型 hook 后台执行 + finished 回调回补注入，主线程不被
-            # 外部进程/网络阻塞（PROMPT 类型仍同步顺序注入，语义不变）。
-            # 非 UI 线程（CLI 等无 Qt 事件循环，异步回调无处回补）→ 保持同步。
-            from app.core.hooks.hook_manager import _is_ui_thread
-
-            trigger_async = _is_ui_thread()
-            results = self._hook_manager.trigger_event(
-                "SessionStart",
-                context=context,
-                current_message="",
-                trigger_async=trigger_async,
-            )
-            for r in results:
-                if r.success and r.output:
-                    _inject_hook_to_session(session, "SessionStart", r.output, r.status_message)
-            self._hook_messages_updated.emit()
+        if trigger_hook:
+            self.trigger_session_start_hook(session)
 
         return session
+
+    def trigger_session_start_hook(self, session: ChatSession) -> None:
+        """补触发 SessionStart hook 并注入 session.messages（create_session 的 hook 段独立出口）。
+
+        供启动路径异步化（R5）：create_session(trigger_hook=False) 先建会话保
+        可交互判定点不等 hook 同步段（实测 575ms），本方法在后台线程补触发。
+        线程语义：_is_ui_thread()=False（后台线程）时 command/http hook 同步执行
+        （阻塞发生在调用线程，不阻塞主线程）；完成后 _hook_messages_updated
+        信号 queued 回主线程。
+        """
+        if not self._hook_manager:
+            return
+        context = self._build_session_context("startup")
+        context["session_id"] = session.session_id  # Claude Code 兼容字段
+        # 🛡️ W1：UI 线程（新建/分支会话等 GUI 场景）→ trigger_async=True，
+        # command/http 类型 hook 后台执行 + finished 回调回补注入，主线程不被
+        # 外部进程/网络阻塞（PROMPT 类型仍同步顺序注入，语义不变）。
+        # 非 UI 线程（CLI 等无 Qt 事件循环，异步回调无处回补）→ 保持同步。
+        from app.core.hooks.hook_manager import _is_ui_thread
+
+        trigger_async = _is_ui_thread()
+        results = self._hook_manager.trigger_event(
+            "SessionStart",
+            context=context,
+            current_message="",
+            trigger_async=trigger_async,
+        )
+        for r in results:
+            if r.success and r.output:
+                _inject_hook_to_session(session, "SessionStart", r.output, r.status_message)
+        self._hook_messages_updated.emit()
 
     def trigger_session_event(
         self, state: str, extra_context: dict = None, only_matchers: Optional[set] = None

@@ -404,7 +404,7 @@ def test_image_ref_survives_save_load_resave(repo, tmp_path, monkeypatch):
 
     # persist 内部走全局 get_app_data_dir()，测试必须隔离到 tmp_path，
     # 否则落盘文件写到真实 .drifox 且 revive 读不到。
-    monkeypatch.setattr("app.utils.utils.get_app_data_dir", lambda: tmp_path, raising=False)
+    monkeypatch.setattr("app.utils.app_paths.get_app_data_dir", lambda: tmp_path, raising=False)
 
     sid = "vision-resave"
     png = _png_bytes(32)

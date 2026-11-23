@@ -56,9 +56,13 @@ def vision_env(tmp_path, monkeypatch):
     """落盘根目录指向临时目录（不污染真实 AppData），并清空压缩 LRU。"""
     root = tmp_path / "appdata"
     root.mkdir()
+    import app.utils.app_paths as apaths
     import app.utils.utils as uutils
 
+    # 双模块同 patch：revive/revoke 读侧已切 app_paths（T14/T17），utils
+    # re-export 仍被个别旧调用点消费；缺一即落真实 AppData 致断言失败
     monkeypatch.setattr(uutils, "get_app_data_dir", lambda: str(root))
+    monkeypatch.setattr(apaths, "get_app_data_dir", lambda: str(root))
     _COMPRESS_CACHE.clear()
     yield root
     _COMPRESS_CACHE.clear()

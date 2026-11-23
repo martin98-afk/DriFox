@@ -14,6 +14,9 @@ from app.plugins.managers.plugin_config_store import PluginConfigStore
 def store_env(tmp_path, monkeypatch):
     """把 app_data_dir 指到临时目录，隔离真实用户数据。"""
     monkeypatch.setattr("app.utils.utils.get_app_data_dir", lambda: str(tmp_path))
+    import app.plugins.managers.plugin_config_store as pcs
+
+    pcs._read_cache.clear()  # 模块级缓存隔离：防其它测试残留条目撞路径
     reg = PluginConfigRegistry.get_instance()
     reg.register(
         parse_config_schema(
@@ -35,6 +38,7 @@ def store_env(tmp_path, monkeypatch):
     )
     yield tmp_path, monkeypatch
     reg.unregister_plugin("plug-x")
+    pcs._read_cache.clear()
 
 
 class TestPriorityChain:
@@ -163,3 +167,79 @@ class TestMigration:
     def test_migrate_missing_file(self, store_env):
         s = PluginConfigStore()
         assert s.migrate("plug-x", "/no/such/file.json", key_map={}) is False
+
+
+class TestReadCache:
+    """[E7-A] 读盘进程级缓存：mtime 键命中、写失效、拷贝隔离、reset 失效。"""
+
+    def _loads_counter(self, monkeypatch):
+        import app.plugins.managers.plugin_config_store as pcs
+
+        calls = {"n": 0}
+        real = pcs.json.loads
+
+        def counting(*a, **k):
+            calls["n"] += 1
+            return real(*a, **k)
+
+        monkeypatch.setattr(pcs.json, "loads", counting)
+        return calls
+
+    def test_second_read_hits_cache_no_reparse(self, store_env, monkeypatch):
+        s = PluginConfigStore()
+        s.set_values("plug-x", {"api_key": "k1"})
+        s.get("plug-x", "api_key")  # 首读填缓存
+        calls = self._loads_counter(monkeypatch)
+        assert s.get("plug-x", "api_key") == "k1"
+        assert s.get_all("plug-x")["api_key"] == "k1"
+        assert calls["n"] == 0, f"二次读应命中缓存零 parse，实测 {calls['n']} 次"
+
+    def test_external_modify_bypasses_cache(self, store_env):
+        """外部直改文件（mtime 变）→ 下次读失效重读新值。"""
+        s = PluginConfigStore()
+        s.set_values("plug-x", {"api_key": "old"})
+        assert s.get("plug-x", "api_key") == "old"
+        raw_file = store_env[0] / "plugin_data" / "plug-x" / "config.json"
+        raw_file.write_text(json.dumps({"api_key": "externally-edited"}), encoding="utf-8")
+        assert s.get("plug-x", "api_key") == "externally-edited", "mtime miss 应重读"
+
+    def test_write_invalidates_and_rewrites(self, store_env):
+        s = PluginConfigStore()
+        assert s.get("plug-x", "api_key") == "built-in-default"
+        s.set_values("plug-x", {"api_key": "new-key"})
+        assert s.get("plug-x", "api_key") == "new-key", "写后失效，不得 stale 命中"
+
+    def test_cache_returns_copy_not_shared_ref(self, store_env):
+        """命中返回浅拷贝：调用方修改返回值不污染缓存（set_values read-modify-write 依赖此点）。"""
+        s = PluginConfigStore()
+        s.set_values("plug-x", {"api_key": "k1"})
+        r1 = s.stored_values("plug-x")
+        r1["api_key"] = "caller-mutated"
+        r2 = s.stored_values("plug-x")
+        assert r2["api_key"] == "k1", "缓存值不得被调用方修改穿透"
+
+    def test_reset_invalidates(self, store_env):
+        s = PluginConfigStore()
+        s.set_values("plug-x", {"api_key": "k1"})
+        assert s.get("plug-x", "api_key") == "k1"
+        s.reset("plug-x")
+        assert s.get("plug-x", "api_key") == "built-in-default"
+
+    def test_concurrent_read_write_thread_safe(self, store_env):
+        """缓存读写全在 _IO_LOCK 内：并发下终态一致（原子写既有语义保持）。"""
+        import concurrent.futures
+
+        s = PluginConfigStore()
+        s.set_values("plug-x", {"api_key": "seed"})
+
+        def worker(n):
+            for i in range(50):
+                if n % 2 == 0:
+                    s.set_values("plug-x", {"api_key": f"w{n}-{i}"})
+                else:
+                    s.get("plug-x", "api_key")
+            return True
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as ex:
+            assert all(ex.map(worker, range(4)))
+        assert s.get("plug-x", "api_key").startswith("w"), "终态应为某次写入值"

@@ -136,6 +136,38 @@ class TeamManager:
         # 尝试清理失效成员（活跃窗口集合未知时会自动跳过）
         self._cleanup_stale_members(team_name)
 
+    # ── run_id 映射裁剪（防 templates/projects/workdirs_by_run_id 无限增长）──
+    @staticmethod
+    def _prune_run_mapping(mapping: Dict[str, Any], keep: set, max_entries: int = 32) -> Dict[str, Any]:
+        """按插入序从旧到新淘汰非 keep 条目至 ≤max_entries，返回新 dict（原 dict 不动）。
+
+        降级语义：条目被裁剪后，读路径按各自「未命中回退」逻辑取值
+        （get_template/get_project 回退顶层字段、get_team_workdir 返回空串）——
+        历史条目属于已结束的团队运行，回退行为与「从未设置」一致。
+        """
+        if len(mapping) <= max_entries:
+            return mapping
+        pruned = dict(mapping)
+        for rid in list(mapping.keys()):
+            if len(pruned) <= max_entries:
+                break
+            if rid not in keep:
+                pruned.pop(rid, None)
+        return pruned
+
+    def _active_keep_set(self, data: Dict[str, Any], team_name: str, current_run_id: str) -> set:
+        """三层 keep 集合：活跃成员 run_id ∪ 顶层 run_id ∪ 本次写入 run_id。
+
+        顶层 run_id 必须保护：main_widget set_template 紧跟 start_team_run(force=True)
+        调用，此刻 members 尚无新 run_id，缺这层会被当场淘汰。
+        RLock 可重入，get_team_run_ids 锁内直调安全。
+        """
+        return (
+            set(self.get_team_run_ids(team_name))
+            | {data.get("run_id", "") or ""}
+            | {current_run_id}
+        )
+
     def _get_team_data(self, team_name: str) -> Dict[str, Any]:
         """读取团队数据。
 
@@ -1043,6 +1075,8 @@ class TeamManager:
             # 复制 + 写回，避免多线程下直接改 dict 引发的并发问题
             new_mapping = dict(mapping)
             new_mapping[run_id] = template_info
+            # 先加后裁：keep 含本次写入项不会被淘汰，稳态 ≤32
+            new_mapping = self._prune_run_mapping(new_mapping, self._active_keep_set(data, team_name, run_id))
             data["templates_by_run_id"] = new_mapping
             self._save_team_data(team_name)
 
@@ -1213,6 +1247,65 @@ class TeamManager:
                     seen.append(rid)
         return seen
 
+    def resolve_run_id_for_project(
+        self,
+        project: str,
+        workdir: str = "",
+        team_name: str = DEFAULT_TEAM,
+    ) -> str:
+        """按项目解析团队运行标识：命中复用，未命中新建一个空团队运行。
+
+        动机：`/team --join` 原先取 team.json 顶层 run_id（跨项目全局单槽），
+        任意项目的标签页都会并进最近一次团队运行。项目归属复用
+        ``projects_by_run_id``（与 tab 团队框 header 同源），严格相等、不回退
+        顶层 project（顶层是跨 run 污染单槽）。
+
+        只认仍有成员归属的 run（get_team_run_ids 口径）：成员全失效的旧 run
+        视为该项目团队已解散，重新开一个，避免并进僵尸团队。
+
+        未命中分支等价「开新团队」：force 生成新 run、写入项目与工作目录、
+        落 runtime 模板槽（name=项目名，供团队框标题与窗口 _team_name 展示）。
+        不登记 leader——leader 由 team_manage(create) 开窗路径或成员补位。
+
+        Args:
+            project: 项目名（窗口 _current_project）
+            workdir: 团队统一工作目录（空串表示不设置）
+            team_name: 团队目录名
+
+        Returns:
+            命中的 run_id 或新建的 run_id；project 为空时回退顶层 run
+            （无则新建），兼容无项目上下文的旧调用。
+        """
+        project = str(project or "").strip()
+        with self._data_lock:
+            data = self._get_team_data(team_name)
+            mapping = data.get("projects_by_run_id") or {}
+            if project:
+                for rid in self.get_team_run_ids(team_name):
+                    if mapping.get(rid) == project:
+                        return rid
+                # 老数据兼容：单团队时代只写顶层 project（无 projects_by_run_id），
+                # 顶层项目命中且顶层 run 仍有成员时可安全复用，避免升级后
+                # 同一项目凭空多出一个团队框。
+                top_run = str(data.get("run_id") or "")
+                if (
+                    not mapping
+                    and top_run
+                    and top_run in self.get_team_run_ids(team_name)
+                    and str(data.get("project") or "").strip() == project
+                ):
+                    return top_run
+            run_id = self.start_team_run(team_name=team_name, force=bool(project))
+            if project:
+                self.set_project_for_run_id(project, run_id, team_name=team_name)
+                self.set_template_for_run_id(
+                    {"name": project, "agents": [], "runtime": True},
+                    run_id=run_id,
+                    team_name=team_name,
+                )
+                self.set_team_workdir(workdir or "", run_id=run_id, team_name=team_name)
+            return run_id
+
     # ── 团队级统一项目（一人改项目全员同步）──
 
     def set_team_project(self, project: str, team_name: str = DEFAULT_TEAM):
@@ -1276,6 +1369,8 @@ class TeamManager:
             # 复制 + 写回，避免多线程下直接改 dict 引发的并发问题
             new_mapping = dict(mapping)
             new_mapping[run_id] = project
+            # 先加后裁：keep 含本次写入项不会被淘汰，稳态 ≤32
+            new_mapping = self._prune_run_mapping(new_mapping, self._active_keep_set(data, team_name, run_id))
             data["projects_by_run_id"] = new_mapping
             self._save_team_data(team_name)
 
@@ -1329,6 +1424,8 @@ class TeamManager:
                     return
                 new_mapping = dict(mapping)
                 new_mapping[run_id] = workdir
+                # 先加后裁：keep 含本次写入项不会被淘汰，稳态 ≤32
+                new_mapping = self._prune_run_mapping(new_mapping, self._active_keep_set(data, team_name, run_id))
                 data["workdirs_by_run_id"] = new_mapping
                 self._save_team_data(team_name)
                 return

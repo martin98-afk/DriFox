@@ -164,11 +164,19 @@ def test_highlight_memo_invalidates_on_style_switch(monkeypatch):
 
 
 def test_highlight_memo_skips_oversized(monkeypatch):
-    """高亮结果超 128K 字符不写入缓存，但本次渲染仍正确返回现算结果。"""
+    """高亮结果超 128K 字符不写入缓存，但本次渲染仍正确返回现算结果。
+
+    [T3-A 迁移] 降级引入（>4000 字符返回 None，见 _QT_CODE_HIGHLIGHT_MAX_CHARS）
+    后两语义数学上不可同触：降级线上方样本最高膨胀 ~15 倍（43K < 128K），
+    膨胀超 128K 需 ≥32.8 倍。故本用例 monkeypatch 降级线为天文值以隔离该
+    维度，专测「缓存单条上限守卫」：现算返回 + 超限不写缓存。
+    降级行为本身由 test_code_widget_highlight_fallback.py::test_oversize_code_falls_back_to_none 单独覆盖。
+    """
     from app.widgets import markdown_block_viewer as mbv
 
     calls = _hl_counter(monkeypatch)
     monkeypatch.setattr(mbv, "_is_light_theme", lambda: True)
+    monkeypatch.setattr(mbv, "_QT_CODE_HIGHLIGHT_MAX_CHARS", 10**9)
     mbv._CODE_HIGHLIGHT_CACHE.clear()
     big_code = "x = 1\n" * 4000  # 28KB 源码，class 化膨胀后必超 128K
     inner = mbv._highlight_inner_cached(big_code, "python")

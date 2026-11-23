@@ -45,7 +45,7 @@ pytest tests/ui -m ui                  # A 档全链 UI 测试（默认收集已
 - **提交前**：`python tools/eol_guard.py check`（或 `--cached`）。`scripts/hooks/pre-commit` 已自动拦截（阈值：噪声占比 ≥80% 且改动 ≥20 行）；确属整文件重写时用 `git commit --no-verify`。
 - 钩子安装：`git config core.hooksPath scripts/hooks`（每个克隆执行一次）。
 - 误翻转修复：`python tools/eol_guard.py fix <file>`（按 HEAD 版本风格还原，保留内容改动）。
-- **全仓归一化**：`python tools/eol_guard.py normalize --eol lf`（默认 dry-run，`--apply` 落地）。当前 1324 个文本文件中 717 个待转 —— 属破坏性大动作，须在无并行改动的窗口期单独提交。
+- 全仓归一化：暂无受支持的子命令（argparse 仅 `check`/`fix`），如需统一行尾须另行立项评估。
 
 ## 3. 目录结构
 
@@ -58,7 +58,7 @@ pytest tests/ui -m ui                  # A 档全链 UI 测试（默认收集已
 | `app/widgets/`            | UI 组件、设置卡片、像素宠物                                                                                                             |
 | `app/plugins/contracts/`  | Protocol：ModelAdapter/LoopPolicy/SessionStorageEngine/MessageSerializer/ContextPolicy                                       |
 | `app/plugins/registries/` | 四注册表单例(adapter/loop policy/storage/serializer)                                                                              |
-| `plugins/system-*`        | 系统插件：tools/model_adapters/loop_policies/storages/serializers/context_tiers/budget_resolvers/hooks/skills/themes/commands/ui |
+| `plugins/system-*`        | 系统插件（`plugins/` 下共 38 个插件目录）：tools/model_adapters/loop_policies/storages/serializers/context_tiers/budget_resolvers/hooks/skills/themes/commands/ui |
 | `~/.drifox/plugins/`      | 用户级社区插件(watchfiles 热扫描)                                                                                                     |
 | `tests/`                  | 与源码按模块对齐：core/widgets/plugins/utils/perf/gateway/debug；`tests/ui`（全链 UI，需显式跑）与 `tests/perf`（基准）默认不收集                        |
 | `docs/`                   | plugins/perf/security/superpowers 四大知识库                                                                                     |
@@ -71,9 +71,9 @@ pytest tests/ui -m ui                  # A 档全链 UI 测试（默认收集已
 
 **运行时组件**：`model_adapters/*.py`、`loop_policies/*.py`、`storages/*.py`、`serializers/*.py` 各自 `register(registry)`。user 根覆盖 system 根。激活 `LoopPolicyRegistry.get_instance().set_active(<id>)`。序列化单入口 `MessageSerializer.serialize(messages, ctx)`，按 `ctx.flags.use_responses_api` 路由。
 
-**上下文策略**（插件 `context_tiers/*.py` 与 `budget_resolvers/*.py` 各自 `register(registry)`）：契约见 `app/plugins/contracts/context_policy.py`。tier cascade 分由轻到重 8 层（order 10-80：图片剥离/去重/工具截断/落盘/参数截断/摘要化/尾保留/LLM 摘要），三个 stage `ingest`（允许落盘副作用）/`send`／`ui`（禁止副作用）共用同一链。tier 只产出新 messages 列表、不得修改 view 输入、阈值一律走 config_schema（`system-context` 插件）；同 order 后注册覆盖先注册，默认 tier 不可删。入口统一为 `ContextPipeline`（`ingest_tool_results` / `project_for_send` / `project_for_ui`），禁止在调用点手工重复截断。
+**上下文策略**（插件 `context_tiers/*.py` 与 `budget_resolvers/*.py` 各自 `register(registry)`）：契约见 `app/plugins/contracts/context_policy.py`。tier cascade 分由轻到重 4 层（order 12-20，见 `plugins/system-context/context_tiers/`：tool_normalize 无损规范化 12 / tool_offload 长结果落盘 15 / tool_result_shape JSON 骨架化 18 / tool_prune 工具截断 20），三个 stage `ingest`（允许落盘副作用）/`send`／`ui`（禁止副作用）共用同一链。tier 只产出新 messages 列表、不得修改 view 输入、阈值一律走 config_schema（`system-context` 插件）；同 order 后注册覆盖先注册，默认 tier 不可删。入口统一为 `ContextPipeline`（`ingest_tool_results` / `project_for_send` / `project_for_ui`），禁止在调用点手工重复截断。
 
-**Gateway**：插件在 `gateways/<platform>.py` 注册 `GatewayPlatformDef`；主程序查 `GatewayPlatformRegistry.get_instance()`，零平台 if。SDK vendor 到 `<插件>/deps/`，顶层 `sys.path.insert(0,_deps)` 优先，本体函数内延迟导入（教训：dingtalk_stream 顶层导入致 gateway 包加载失败）。
+**Gateway**：插件在 `gateways/<platform>.py` 注册 `GatewayPlatformDef`；主程序查 `GatewayPlatformRegistry.get_instance()`，零平台 if。SDK vendor 到 `<插件>/deps/`，顶层 `sys.path.insert(0,_deps)` 优先，本体函数内延迟导入（教训：dingtalk_stream 顶层导入致 gateway 包加载失败）。仓库内暂无实装平台（无插件携带 `gateways/`），机制就绪。
 
 **平台特定依赖**：含原生扩展的依赖必须按平台分目录落地，`deps/<platform>/`（darwin/win32/linux）优先于公共 `deps/`。装在错误平台的 `.pyd`/`.so` 会让插件 import 静默失败、进而整个 `gateways` 组件不进 registry，表现为「配置里 enabled=true 但日志无任何连接记录、设置卡开关无效」。安装器侧 `_platform_wheel_tags()` 已按 `sys.platform` 裁剪候选集并覆盖 `macosx_10_9_universal2`（回归测试 `tests/plugins/test_deps_installer_wheel_tags.py`）。
 

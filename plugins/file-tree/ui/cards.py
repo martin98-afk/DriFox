@@ -47,6 +47,7 @@ from PyQt5.QtWidgets import (
     QMenu,
     QMessageBox,
     QProxyStyle,
+    QSplitter,
     QStackedWidget,
     QStyle,
     QVBoxLayout,
@@ -63,6 +64,7 @@ from qfluentwidgets import (
     isDarkTheme,
 )
 
+from .global_preview import GlobalPreviewDialog
 from .openwith import (
     DEFAULT_SUFFIX,
     icon_for_exe,
@@ -70,7 +72,15 @@ from .openwith import (
     list_folder_openers,
     list_openers,
 )
-from .preview import FilePreviewPage, _ElidedLabel, _SplitButton, _wrap_icon, detect_kind
+from .quote import quote_to_input
+from .preview import (
+    FilePreviewPage,
+    QuickPreviewPanel,
+    _ElidedLabel,
+    _SplitButton,
+    _wrap_icon,
+    detect_kind,
+)
 from .scanner import _DirEntry, _TreeScanner
 from .sticky_scroll import StickyScrollOverlay
 from .tree_widget import (
@@ -463,6 +473,13 @@ class FileTreeCard(QWidget):
         # 主题签名缓存（_apply_latest_theme 产出全等时跳过全部 set，切页高频路径）
         self._theme_signature: Optional[tuple] = None
 
+        # 快捷预览（树下方面板）：按钮开关状态 + 关闭前的分隔高度
+        self._quick_preview_on = False
+        self._quick_sizes: List[int] = []
+
+        # 全局面板（遮罩式图片/文本预览）：同一时刻只留一个
+        self._global_preview: Optional[GlobalPreviewDialog] = None
+
         # 剪贴板: [(路径, 是否剪切)]
         self._clipboard: List[Tuple[str, bool]] = []
 
@@ -532,7 +549,9 @@ class FileTreeCard(QWidget):
         self._preview_page.back_requested.connect(self._close_preview)
         self._preview_page.open_with_requested.connect(self._show_open_with_menu)
         self._preview_page.open_default_requested.connect(self._open_file)
-        self._preview_page.context_menu_requested.connect(self._on_preview_context_menu)
+        self._preview_page.context_menu_requested.connect(
+            lambda pos: self._on_preview_context_menu(self._preview_page, pos)
+        )
         self._stack.addWidget(self._preview_page)  # index 2: 文件预览页
         # 初始显示占位页，等待扫描完成
         self._stack.setCurrentIndex(1)
@@ -552,6 +571,12 @@ class FileTreeCard(QWidget):
         self._root_label = _ElidedLabel("", self._tree_header)
         self._root_label.setMinimumWidth(36)
 
+        # 快捷预览开关（眼睛）：开启后树下方展开面板，随选中项实时预览
+        self._quick_btn = TransparentToolButton(FluentIcon.VIEW, self._tree_header)
+        self._quick_btn.setFixedSize(26, 26)
+        self._quick_btn.setCheckable(True)
+        self._quick_btn.setToolTip("快捷预览：选中文件即在下方预览")
+        self._quick_btn.toggled.connect(self._on_quick_preview_toggled)
         self._refresh_btn = TransparentToolButton(FluentIcon.SYNC, self._tree_header)
         self._refresh_btn.setFixedSize(26, 26)
         self._refresh_btn.setToolTip("刷新文件树")
@@ -565,16 +590,56 @@ class FileTreeCard(QWidget):
         self._folder_btn.menu_clicked.connect(self._show_root_open_with_menu)
 
         head.addWidget(self._root_label, 1)
+        head.addWidget(self._quick_btn)
         head.addWidget(self._refresh_btn)
         head.addWidget(self._folder_btn)
 
         self._scroll_area.setWidget(self._tree_host)
+
+        # ── 树下方快捷预览（可拖拽分隔条调高度，眼睛按钮开关）──
+        self._quick_panel = QuickPreviewPanel(self)
+        self._quick_panel.hide()
+        # 快手预览内容区右键：菜单由卡片统一构建（全局面板 / 引用 / 打开方式）
+        self._quick_panel.context_menu_requested.connect(
+            lambda pos: self._on_preview_context_menu(self._quick_panel.page(), pos)
+        )
+        # 防抖：键盘连续导航时合并加载（单次文本高亮 ~170ms，逐项加载会卡）
+        self._quick_timer = QTimer(self)
+        self._quick_timer.setSingleShot(True)
+        self._quick_timer.setInterval(120)
+        self._quick_timer.timeout.connect(self._load_quick_preview)
+
+        self._split = QSplitter(Qt.Vertical, self)
+        self._split.setObjectName("file-tree-split")
+        self._split.setChildrenCollapsible(False)
+        self._split.setHandleWidth(4)
+        self._split.addWidget(self._stack)
+        self._split.addWidget(self._quick_panel)
+        self._split.setStretchFactor(0, 3)
+        self._split.setStretchFactor(1, 2)
+        self._split.setSizes([600, 260])
+
         self._vbox.addWidget(self._tree_header)
-        self._vbox.addWidget(self._stack, 1)
+        self._vbox.addWidget(self._split, 1)
 
     def _on_page_changed(self, index: int) -> None:
-        """树顶栏只在树/占位页显示：预览页自带顶栏，不重复占一行"""
+        """树顶栏只在树/占位页显示：预览页自带顶栏，不重复占一行
+
+        全屏预览页占满整块区域，快捷面板让位；返回树页时按开关状态恢复，
+        并补一次渲染（预览期间选中项可能已经变了）。
+        """
         self._tree_header.setVisible(index != _PAGE_PREVIEW)
+        panel = getattr(self, "_quick_panel", None)
+        if panel is None:
+            return
+        if index != _PAGE_PREVIEW and self._quick_preview_on:
+            panel.show()
+            self._split.setSizes(self._quick_sizes or [600, 260])
+            self._load_quick_preview()
+        else:
+            if panel.isVisible():
+                self._quick_sizes = self._split.sizes()  # 全屏预览后返回时还原高度
+            panel.hide()
 
     def _setup_model(self):
         """创建 Model → Proxy → View 链路"""
@@ -613,6 +678,8 @@ class FileTreeCard(QWidget):
 
         # RenameDelegate
         self._rename_delegate.rename_requested.connect(self._on_rename_file)
+        # 树选中项变化 → 快捷预览跟随（selectionModel 已在 _setup_model 就位）
+        self._tree_view.selectionModel().currentChanged.connect(self._on_tree_current_changed)
 
     def _setup_shortcuts(self):
         """快捷键已通过 FileTreeView 信号处理（clipboard_copy/cut/paste）"""
@@ -876,13 +943,27 @@ class FileTreeCard(QWidget):
             f"color: {tc_hex}; background: transparent;"
             f"  font-family: '{font_family}'; font-size: {font_size}px;"
         )
+        # 快捷预览分隔条：2px 冷线，悬停延迟点亮为强调色（属性 splitterHot
+        # 由主程序全局角点控制器维护；插件侧只写样式，不重复实现延迟逻辑）
+        accent = self._colors["accent"]
+        split_style = "#file-tree-split { background: transparent; }"
+        quick_handle_qss = (
+            "QSplitterHandle {"
+            "  background: transparent;"
+            f"  border-top: 2px solid rgba({border.red()},{border.green()},{border.blue()},90);"
+            "  margin: 0; border-radius: 1px;"
+            "}"
+            "QSplitterHandle[splitterHot=\"true\"] {"
+            f"  border-top: 2px solid {accent.name()};"
+            "}"
+        )
 
         # ★ 签名缓存：产出（全部样式串 + 字体）与上次全等时跳过所有 set。
         # 切工作台页 / 项目联动高频走这里，对整棵 QTreeView 重复
         # setStyleSheet + setFont 会触发整树 unpolish/polish + 全量重绘
         # （树 2000+ 行时单次 40-130ms，实测），而主题 / 字体 / 颜色未变时
         # 产出必然不变 —— 跳过后切页路径零成本。
-        signature = (tree_style, placeholder_style, header_style, root_style, font_family, font_size)
+        signature = (tree_style, placeholder_style, header_style, root_style, split_style, quick_handle_qss, font_family, font_size)
         if signature == self._theme_signature:
             return
         self._theme_signature = signature
@@ -892,6 +973,14 @@ class FileTreeCard(QWidget):
         self._root_label.setStyleSheet(root_style)
         secondary = self._colors.get("text_secondary", QColor(150, 150, 150))
         self._refresh_btn.setIcon(FluentIcon.SYNC.icon(color=secondary))
+        self._quick_btn.setIcon(
+            FluentIcon.VIEW.icon(
+                color=self._colors["accent"] if self._quick_preview_on else secondary
+            )
+        )
+        # 主图标与刷新钮同口径显式带色：icon() 无 color 时按 qfluentwidgets
+        # isDarkTheme() 翻转，深色模式下翻转未命中 → 图标仍是黑色
+        self._folder_btn.set_icon(FluentIcon.FOLDER.icon(color=secondary))
         self._folder_btn.set_icon_color(secondary)
         self._folder_btn.set_hover_color(
             QColor(255, 255, 255, 26) if is_dark else QColor(0, 0, 0, 18)
@@ -906,11 +995,25 @@ class FileTreeCard(QWidget):
         self._placeholder.setStyleSheet(placeholder_style)
         self._ph_page.setStyleSheet("background: transparent;")
         self._stack.setStyleSheet("background: transparent;")
+        self._split.setStyleSheet(split_style)
+        # handle 样式下沉到 handle 自身（与主程序同口径，避免 splitter 子树 repolish）
+        for idx in range(self._split.count() + 1):
+            handle = self._split.handle(idx)
+            if handle is None:
+                continue
+            handle.setAttribute(Qt.WA_StyledBackground, True)
+            handle.setStyleSheet(quick_handle_qss)
 
         # 通知 delegate 更新主题色
         self._rename_delegate.set_colors(self._colors)
         self._sticky.apply_colors(self._colors)
         self._preview_page.set_colors(
+            self._colors,
+            font_family=font_family,
+            font_size=font_size,
+            scrollbar_qss=scrollbar_style,
+        )
+        self._quick_panel.set_colors(
             self._colors,
             font_family=font_family,
             font_size=font_size,
@@ -1091,6 +1194,9 @@ class FileTreeCard(QWidget):
             self._live_expanded.clear()  # 旧根的实时展开路径不写进新根条目
             self._stash_view_state(model_root)  # 必须先存：reset 后旧状态已不可取
             self._source_model.set_project(scan_dir, entries)
+            # 换根：旧根的预览内容不再属于当前上下文（同根刷新保留）
+            self._quick_timer.stop()
+            self._quick_panel.clear()
             cached = self._view_state_cache.get(os.path.normcase(os.path.normpath(scan_dir)))
             if cached:
                 self._restore_view_state(cached)
@@ -1207,6 +1313,8 @@ class FileTreeCard(QWidget):
                 self._stack.setCurrentIndex(1)
         else:
             self._source_model.refresh_children(dir_path, entries)
+        # 磁盘变更后，当前预览的正是该目录下的文件则重读，保持内容与磁盘一致
+        self._refresh_quick_preview_for_dir(dir_path)
 
     # ── 剪贴板操作 ──
 
@@ -1669,6 +1777,19 @@ class FileTreeCard(QWidget):
                 FluentIcon.FOLDER,
                 f"在{_FILE_MANAGER}中打开" if is_dir else "打开所在文件夹",
             ).triggered.connect(lambda: self._open_in_explorer(item_path))
+            # 可预览文件：预览 / 全局面板 / 引用三件套（图片同样适用）
+            # ★ QAction.triggered 会带一个 checked(bool)：lambda 必须先用 *_) 吃掉它，
+            #   否则默认参数 p 会被覆盖成 False，动作静默失灵（踩过）
+            if not is_dir and detect_kind(item_path):
+                _act(FluentIcon.VIEW, "预览").triggered.connect(
+                    lambda *_, p=item_path: self._open_preview(p)
+                )
+                _act(FluentIcon.FULL_SCREEN, "全局预览").triggered.connect(
+                    lambda *_, p=item_path: self._open_global_preview(p)
+                )
+                _act(FluentIcon.SHARE, "引用到输入框").triggered.connect(
+                    lambda *_, p=item_path: self._quote_file(p)
+                )
             menu.addSeparator()
 
         # 信息类
@@ -1748,11 +1869,13 @@ class FileTreeCard(QWidget):
             self._watcher.add_path(path)
 
     def _on_close(self):
+        self._release_global_preview()
         self._cleanup_worker()
         self._watcher.clear()
         self.closed.emit()
 
     def deleteLater(self):
+        self._release_global_preview()
         self._cleanup_worker()
         self._watcher.clear()
         super().deleteLater()
@@ -1915,10 +2038,12 @@ class FileTreeCard(QWidget):
         if not launch(opener, path):
             logger.error(f"[FileTree] 用 {opener.label} 打开失败: {path}")
 
-    def _on_preview_context_menu(self, global_pos: QPoint) -> None:
-        """代码区右键：接管 QPlainTextEdit 自带的原生英文黑菜单"""
-        page = self._preview_page
-        if not page.current_path():
+    def _on_preview_context_menu(self, page, global_pos: QPoint) -> None:
+        """预览区右键：接管 QPlainTextEdit 自带的原生英文黑菜单
+
+        page 由调用方传入：卡片内预览页与全局面板共用同一套菜单。
+        """
+        if page is None or not page.current_path():
             return
         menu = QMenu(self)
         self._style_menu(menu)
@@ -1926,6 +2051,35 @@ class FileTreeCard(QWidget):
 
         def _act(icon: FluentIcon, text: str):
             return menu.addAction(_menu_icon(icon, icon_color), text)
+
+        if page.current_kind() == "image":
+            image_path = page.current_path()
+            # triggered(bool) 会把默认参数覆盖掉：一律用 *_ 吃掉 checked
+            _act(FluentIcon.SHARE, "引用到输入框").triggered.connect(
+                lambda *_, p=image_path: self._quote_file(p)
+            )
+            if not self._is_global_preview_page(page):
+                _act(FluentIcon.FULL_SCREEN, "全局预览").triggered.connect(
+                    lambda *_, p=image_path: self._open_global_preview(p)
+                )
+            _act(FluentIcon.LINK, "复制路径").triggered.connect(
+                lambda *_, p=image_path: self._copy_to_clipboard(p)
+            )
+            menu.addSeparator()
+            _act(FluentIcon.APPLICATION, "用默认程序打开").triggered.connect(
+                lambda *_, p=image_path: self._open_file(p)
+            )
+            _act(FluentIcon.SYNC, "重新加载").triggered.connect(lambda *_: page.reload_current())
+            menu.exec_(self._menu_position(menu, global_pos))
+            return
+
+        path, _start, _end, selected = page.quote_payload()
+        if path:
+            label = "引用选中内容到输入框" if selected else "引用文件到输入框"
+            _act(FluentIcon.SHARE, label).triggered.connect(
+                lambda *_, p=page: self._quote_from_page(p)
+            )
+            menu.addSeparator()
 
         copy_act = _act(FluentIcon.COPY, "复制")
         copy_act.setEnabled(page.has_selection())
@@ -2101,6 +2255,167 @@ class FileTreeCard(QWidget):
         # 返回树页时补一次外部投递定位：用户可能在根扫描落地前就点了返回，
         # 那次定位因节点尚不存在被跳过，这里立刻接上（无待办时为零操作）
         self._advance_pending_reveal()
+
+    # ── 全局预览 / 引用到输入框 ──
+
+    def _open_global_preview(self, path: str) -> bool:
+        """遮罩式全局面板：不受工作台页宽度限制，图片可自由拖拽
+
+        与卡片内预览页互不影响：同一套渲染链路换个宿主，卡片内选中/展开不变。
+        """
+        if not path or not os.path.isfile(path) or not detect_kind(path):
+            return False
+        self._release_global_preview()
+        overlay = GlobalPreviewDialog(
+            path,
+            colors=self._colors,
+            parent=self.window(),
+            scrollbar_qss=self._scrollbar_qss,
+        )
+        page = overlay.page()
+        page.open_with_requested.connect(self._show_open_with_menu)
+        page.open_default_requested.connect(self._open_file)
+        page.context_menu_requested.connect(
+            lambda pos, p=page: self._on_preview_context_menu(p, pos)
+        )
+        # finished 在淡出结束后发：此刻释放引用，面板对象才真正回收
+        overlay.finished.connect(lambda *_: self._release_global_preview(overlay))
+        self._global_preview = overlay
+        overlay.show_overlay()
+        return True
+
+    def _is_global_preview_page(self, page) -> bool:
+        """该预览页是否承载在全局面板里（决定菜单是否给「全局预览」入口）"""
+        overlay = self._global_preview
+        return overlay is not None and overlay.page() is page
+
+    def _release_global_preview(self, overlay=None) -> None:
+        """释放全局面板：传对象时只回收该对象，不传则连同引用一起清掉
+
+        面板淡出结束（finished）后由信号调到这里 —— 此时对象已不可见，
+        deleteLater 不会打断动画；新旧面板交替时旧对象也能走到回收。
+        """
+        target = overlay if overlay is not None else self._global_preview
+        if target is None:
+            return
+        if self._global_preview is target:
+            self._global_preview = None
+        try:
+            target.deleteLater()
+        except Exception:
+            pass
+
+    def _close_global_preview(self) -> None:
+        overlay = self._global_preview
+        if overlay is None:
+            return
+        try:
+            overlay.reject()
+        except Exception:
+            self._release_global_preview()
+
+    def _quote_file(self, path: str) -> None:
+        """树里右键引用整个文件（图片走胶囊，文本走胶囊或 @路径）"""
+        if not path:
+            return
+        ok, how = quote_to_input(path, root=self._project_root)
+        if not ok:
+            self._notify("引用失败：输入框不可用")
+            return
+        if how == "text":
+            self._notify("输入框胶囊不可用，已改用纯文本 @路径")
+        # 引用即收起全局面板（从面板里的右键菜单进来时遮罩还挡着输入框）
+        self._close_global_preview()
+
+    def _quote_from_page(self, page) -> None:
+        """预览页（卡片内 / 全局面板）引用：有选中则带内容与行号"""
+        path, start, end, text = page.quote_payload()
+        self._on_quote_requested(path, start, end, text)
+
+    def _on_quote_requested(self, path: str, start: int, end: int, text: str) -> None:
+        if not path:
+            return
+        ok, _how = quote_to_input(
+            path, start=start, end=end, text=text, root=self._project_root
+        )
+        if not ok:
+            self._notify("引用失败：输入框不可用")
+            return
+        # 引用即收起全局面板：写入会把对话视图切回来，遮罩留着反而挡路
+        self._close_global_preview()
+
+    def _notify(self, message: str, kind: str = "warning") -> None:
+        """轻提示（ui.notify 不可用时只记日志，不弹原生框打断）"""
+        try:
+            from app.plugins.sdk import caps_for
+
+            notify = caps_for("ui.notify", plugin="file-tree", surface="ui")
+            if notify is not None:
+                notify("引用到输入框", message, kind=kind)
+                return
+        except Exception:
+            pass
+        logger.warning(f"[file-tree] {message}")
+
+    # ── 快捷预览（树下方常驻面板） ──
+
+    def _on_quick_preview_toggled(self, checked: bool) -> None:
+        """眼睛按钮：展开 / 收起树下方快捷预览面板"""
+        self._quick_preview_on = bool(checked)
+        secondary = self._colors.get("text_secondary", QColor(150, 150, 150))
+        self._quick_btn.setIcon(
+            FluentIcon.VIEW.icon(
+                color=self._colors.get("accent", QColor(80, 150, 220)) if checked else secondary
+            )
+        )
+        if not checked:
+            self._quick_timer.stop()
+            if self._quick_panel.isVisible():
+                self._quick_sizes = self._split.sizes()  # 记住用户拖过的高度
+            self._quick_panel.hide()
+            return
+        self._quick_panel.show()
+        self._split.setSizes(self._quick_sizes or [600, 260])
+        self._load_quick_preview()
+
+    def _on_tree_current_changed(self, current: QModelIndex, previous: QModelIndex) -> None:
+        """树选中项变化 → 防抖刷新快捷预览（连按方向键只加载最后一屏）"""
+        if not self._quick_preview_on or not self._quick_panel.isVisible():
+            return
+        if not current.isValid():
+            return  # 树刷新导致选中暂时失效：保留上一屏，避免闪烁
+        self._quick_timer.start()
+
+    def _selected_tree_path(self) -> Tuple[str, bool]:
+        """当前选中项 → (路径, 是否目录)；无有效选中返回 ("", False)"""
+        idx = self._tree_view.currentIndex()
+        if not idx.isValid():
+            return "", False
+        src = self._proxy_model.mapToSource(idx)
+        if not src.isValid():
+            return "", False
+        return src.data(FileTreeModel.COL_PATH) or "", bool(src.data(FileTreeModel.COL_IS_DIR))
+
+    def _load_quick_preview(self) -> None:
+        """按当前选中项渲染快捷预览（目录/不支持类型给一行说明）"""
+        if not self._quick_preview_on:
+            return
+        self._quick_timer.stop()
+        path, is_dir = self._selected_tree_path()
+        if not path:
+            self._quick_panel.show_hint("选中文件即可在此预览")
+        elif is_dir:
+            self._quick_panel.show_hint("选中项是文件夹")
+        else:
+            self._quick_panel.show_path(path)
+
+    def _refresh_quick_preview_for_dir(self, dir_path: str) -> None:
+        """目录内容变化后，当前预览文件在该目录内则重读"""
+        path = self._quick_panel.current_path()
+        if not path or not os.path.isfile(path):
+            return
+        if _same_path(os.path.dirname(path), dir_path):
+            self._quick_panel.show_path(path)
 
     def _on_file_activated(self, path: str) -> None:
         """双击分流：可预览类型进预览，其余仍交系统默认程序"""

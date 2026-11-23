@@ -164,6 +164,91 @@ def test_reasoning_vendor_fields_non_stream(transport):
     events = list(transport.to_events(_message_completion(reasoning="非流式思考", content="答")))
     assert [(e.type, e.text) for e in events] == [("reasoning_delta", "非流式思考"), ("content_delta", "答")]
 
+# ---------- 5b. Gemini 思考摘要请求（include_thoughts） ----------
+
+def test_gemini_thinking_requests_thought_summaries(transport, mod, monkeypatch):
+    """Gemini 思考开启时必须显式请求思考摘要。
+
+    兼容层默认只回最终答案（2026-11-19 实测：11 条 gemini assistant 消息
+    reasoning_content 全空，而同库 glm/deepseek 正常）。include_thoughts 与
+    reasoning_effort 语义正交，可同时下发。
+    """
+    monkeypatch.setattr(
+        mod,
+        "resolve_model_capabilities",
+        lambda cfg: {"thinking_param": "reasoning_effort", "reasoning_effort_values": ["low", "medium", "high"]},
+    )
+    monkeypatch.setattr(mod, "get_provider_profile", lambda cfg: {"family": "gemini"})
+    out = transport.build_request_kwargs(
+        {"API_URL": "https://generativelanguage.googleapis.com/v1beta/openai/", "模型名称": "gemini-4-hydrogen", "思考模式": True, "思考等级": "high"}
+    )
+    assert out["extra_body"]["google"]["thinking_config"]["include_thoughts"] is True
+    assert out["extra_body"]["reasoning_effort"] == "high"
+
+def test_gemini_thinking_off_skips_thought_summaries(transport, mod, monkeypatch):
+    """思考关闭时不请求摘要，也不发非法顶层 thinking 字段（端点会 400）"""
+    monkeypatch.setattr(mod, "resolve_model_capabilities", lambda cfg: {"thinking_param": "reasoning_effort"})
+    monkeypatch.setattr(mod, "get_provider_profile", lambda cfg: {"family": "gemini"})
+    out = transport.build_request_kwargs(
+        {"API_URL": "https://generativelanguage.googleapis.com/v1beta/openai/", "模型名称": "gemini-4-hydrogen", "思考模式": False}
+    )
+    assert "google" not in out["extra_body"]
+    assert "thinking" not in out["extra_body"]
+    assert "reasoning_effort" not in out["extra_body"]
+
+def test_gemini_budget_param_rewritten_to_effort(transport, mod, monkeypatch):
+    """预算型模型（2.5）不发顶层 thinking_budget：端点报 Unknown name，改走 reasoning_effort。
+
+    官方映射：reasoning_effort low/medium/high → 2.5 的 1024/8192/24576。
+    用户已存的「思考预算」值在 gemini 路径被丢弃（顶层非法），等级改由思考等级决定。
+    """
+    monkeypatch.setattr(mod, "resolve_model_capabilities", lambda cfg: {"thinking_param": "thinking_budget"})
+    monkeypatch.setattr(mod, "get_provider_profile", lambda cfg: {"family": "gemini"})
+    out = transport.build_request_kwargs(
+        {
+            "API_URL": "https://generativelanguage.googleapis.com/v1beta/openai/", 
+            "模型名称": "gemini-2.5-pro",
+            "思考模式": True,
+            "思考预算": 8192,
+            "思考等级": "medium",
+        }
+    )
+    assert "thinking_budget" not in out["extra_body"]
+    assert out["extra_body"]["reasoning_effort"] == "medium"
+    assert out["extra_body"]["google"]["thinking_config"]["include_thoughts"] is True
+
+def test_gemini_via_aggregator_gateway_keeps_original_shape(transport, mod, monkeypatch):
+    """聚合网关承载的 gemini 模型不得注入 google 扩展字段。
+
+    实测 OpenCode Go（opencode.ai/zen/go/v1）对顶层 google 直接 400：
+    "google: cannot be represented by google; use scoped provider_options"。
+    该路径必须保持改动前的请求形状（含 thinking_budget / thinking 原样）。
+    """
+    monkeypatch.setattr(mod, "resolve_model_capabilities", lambda cfg: {"thinking_param": "thinking_budget"})
+    monkeypatch.setattr(mod, "get_provider_profile", lambda cfg: {"family": "gemini"})
+    out = transport.build_request_kwargs(
+        {
+            "API_URL": "https://opencode.ai/zen/go/v1",
+            "模型名称": "gemini-4-argon",
+            "思考模式": True,
+            "思考预算": 8192,
+        }
+    )
+    assert "google" not in out["extra_body"]
+    # 网关路径保持原行为：预算型仍按 t_param 发 thinking_budget
+    assert out["extra_body"]["thinking_budget"] == 8192
+
+def test_non_gemini_never_requests_thought_summaries(transport, mod, monkeypatch):
+    """非 Gemini 家族不得被注入 google.thinking_config"""
+    monkeypatch.setattr(
+        mod,
+        "resolve_model_capabilities",
+        lambda cfg: {"thinking_param": "reasoning_effort", "reasoning_effort_values": ["low", "medium", "high"]},
+    )
+    monkeypatch.setattr(mod, "get_provider_profile", lambda cfg: {"family": "openai"})
+    out = transport.build_request_kwargs({"模型名称": "gpt-6.1-sol", "思考模式": True, "思考等级": "high"})
+    assert "google" not in out["extra_body"]
+
 
 # ---------- 6. finish_reason=None 不发 finish ----------
 
@@ -249,6 +334,37 @@ def test_penalty_params_go_top_level(transport, monkeypatch):
     assert out["top_level"]["presence_penalty"] == 0.3
     assert out["top_level"]["frequency_penalty"] == 0.7
 
+
+def test_provider_declared_unsupported_params_dropped(transport, mod, monkeypatch):
+    """服务商声明 unsupported_params：命中字段整条剔除（Gemini 原生无 penalty 概念）。
+
+    黑名单来自 providers 插件 capabilities，transport 只做通用过滤，不按 provider 硬编码。
+    """
+    monkeypatch.setattr(transport, "_apply_thinking", lambda *a: None)
+    monkeypatch.setattr(
+        mod,
+        "get_provider_profile",
+        lambda cfg: {"family": "gemini", "unsupported_params": ["frequency_penalty", "presence_penalty"]},
+    )
+    out = transport.build_request_kwargs(
+        {
+            "模型名称": "gemini-4-hydrogen",
+            "presence_penalty": 0.3,
+            "frequency_penalty": 0.7,
+            "温度": 0.5,
+        }
+    )
+    assert "presence_penalty" not in out["top_level"]
+    assert "frequency_penalty" not in out["top_level"]
+    assert "presence_penalty" not in out["extra_body"]
+    assert out["top_level"]["temperature"] == 0.5  # 未命中黑名单的参数不受影响
+
+def test_no_unsupported_params_declaration_keeps_penalties(transport, mod, monkeypatch):
+    """服务商未声明黑名单（OpenAI 系）：penalty 参数照旧走顶层，不得误伤。"""
+    monkeypatch.setattr(transport, "_apply_thinking", lambda *a: None)
+    monkeypatch.setattr(mod, "get_provider_profile", lambda cfg: {"family": "openai"})
+    out = transport.build_request_kwargs({"模型名称": "gpt-4o", "frequency_penalty": 0.7})
+    assert out["top_level"]["frequency_penalty"] == 0.7
 
 def test_build_request_kwargs_o1_skips_sampling(transport, monkeypatch):
     monkeypatch.setattr(transport, "_apply_thinking", lambda *a: None)

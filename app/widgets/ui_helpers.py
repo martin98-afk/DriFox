@@ -39,10 +39,10 @@ __all__ = [
     # 样式常量
     "WINDOW_STYLE",
     "CHAT_SCROLL_STYLE",
-    "TITLE_STYLE",
+    "TITLE_STYLE",  # noqa: F822 —— PEP 562 惰性属性，由模块级 __getattr__ 提供
     "TitleEditWidget",
-    "MODEL_BTN_STYLE",
-    "MODEL_BTN_TEXT_STYLE",
+    "MODEL_BTN_STYLE",  # noqa: F822
+    "MODEL_BTN_TEXT_STYLE",  # noqa: F822
     # UI 辅助函数
     "setup_background_label",
     "is_widget_alive",
@@ -306,10 +306,23 @@ def _get_model_btn_text_style():
     return f"color: {Colors.TEXT_PRIMARY}; {font_size_css(13)} font-weight: bold; background: transparent;"
 
 
-# 兼容旧引用
-TITLE_STYLE = _get_title_style()
-MODEL_BTN_STYLE = _get_model_btn_style()
-MODEL_BTN_TEXT_STYLE = _get_model_btn_text_style()
+# 兼容旧引用（PEP 562 模块级惰性属性）：模块导入不再触发主题解析链
+# （Colors.refresh → config.load → secret_store.unwrap_secrets，暖启动 -213ms）。
+# 首次属性访问时经原 _get_* 函数构建并缓存进模块 globals，返回值与原实现
+# 逐字节一致（同一函数、同一三级链语义），from import 与属性访问两种用法
+# 均兼容；主题切换刷新路径不受影响（消费方持有的仍是 import/首访时固值，
+# 与原实现固值语义相同）。
+def __getattr__(name: str):
+    if name == "TITLE_STYLE":
+        value = _get_title_style()
+    elif name == "MODEL_BTN_STYLE":
+        value = _get_model_btn_style()
+    elif name == "MODEL_BTN_TEXT_STYLE":
+        value = _get_model_btn_text_style()
+    else:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    globals()[name] = value
+    return value
 
 
 # ==================== 预编译正则 ====================
@@ -599,7 +612,7 @@ def generate_diff_html(old_content: str, new_content: str, backup_file) -> str:
     """
     import difflib
 
-    from app.utils.diff_viewer import DiffHtmlGenerator
+    from app.utils.diff_html import DiffHtmlGenerator
 
     old_lines = normalize_lines(old_content)
     new_lines = normalize_lines(new_content)
@@ -624,7 +637,7 @@ def generate_multi_file_diff_html(operations: list) -> str:
     """
     import difflib
 
-    from app.utils.diff_viewer import DiffHtmlGenerator
+    from app.utils.diff_html import DiffHtmlGenerator
 
     diff_parts = []
 
@@ -1526,7 +1539,6 @@ def render_batch_to_assistant_card(assistant_card, batch: list, immediate_render
         immediate_render: 批量加载路径传 False（T11 错峰），避免 N 卡同帧
             全量重渲；交互路径保持默认 True。
     """
-    artifacts: list = []
     for msg in batch:
         if msg.get("role") == "assistant":
             # 跳过 hook 消息（内部通知不显示到 UI，仅用于 LLM 上下文）
@@ -1548,9 +1560,6 @@ def render_batch_to_assistant_card(assistant_card, batch: list, immediate_render
             if content:
                 assistant_card.append_text(content, immediate_render=immediate_render)
         elif msg.get("role") == "tool":
-            # 成果条目与展示内容独立：无正文的 tool 消息也可能带成果
-            if msg.get("artifacts"):
-                artifacts.extend(msg["artifacts"])
             if msg.get("content", ""):
                 assistant_card.append_tool_result(
                     tool_name=msg.get("name", ""),
@@ -1561,9 +1570,6 @@ def render_batch_to_assistant_card(assistant_card, batch: list, immediate_render
                     diff=msg.get("diff"),
                     echarts=msg.get("echarts"),
                 )
-    if artifacts:
-        # 成果属于产生它的那一轮，重开会话后仍要能看到（数据来自 tool 消息落库）
-        assistant_card.update_artifact_list(artifacts)
     _hydrate_inline_panels(assistant_card, batch)
     assistant_card.finish_streaming(history=True, immediate=immediate_render)
 

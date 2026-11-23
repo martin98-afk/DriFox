@@ -182,11 +182,15 @@ def _render_tool_block(block: Dict[str, Any], ctx: RenderCtx) -> str:
     # perf: 流式消息 bypass lru：content 递增场景 key 永不命中，直算免白付
     # 40KB 级 hash；定型消息（streaming=False）照常走缓存（#6 实测 23.9x）
     _tool_fn = _render_tool_block_content if not ctx.streaming else _render_tool_block_content.__wrapped__
+    # 正文块不懒化：lazy_body 的前提是「用户看不见」（折叠区/历史卡才成立）。
+    # keep_in_content 的工具块归正文（_tool_home），构造出来立刻可见，懒化会让
+    # body 永远等不到「展开工具区」的那次注入，只剩标题行。
+    lazy_body = ctx.lazy_body and _tool_home(block, ctx) != HOME_CONTENT
     return _tool_fn(
         proto.strip(),
         compact=ctx.compact,
         heavy_caps=ctx.heavy_caps,
-        lazy_body=ctx.lazy_body,
+        lazy_body=lazy_body,
     )
 
 
@@ -266,6 +270,11 @@ def _bk_sig(block: Dict[str, Any], ctx: RenderCtx) -> tuple:
 
     if btype == "reasoning":
         content = str(block.get("content", "") or "")
+        if block.get("_pend") is not None:
+            # [E6] 流式活动块：内容仍在 "_pend" 增长，sig 去内容本体（len+compact），
+            # 避免 _bk 驻留每批重挂全文引用、_block_key_uncached 重算全文 sha1。
+            # 固化后 "_pend" 被 pop → 判据自动失效 → 切回全文指纹。
+            return (len(content), ctx.compact)
         return (id(content), content, ctx.compact)
 
     if btype == "tool_streaming":
@@ -307,6 +316,10 @@ def _block_key_uncached(block: Dict[str, Any], ctx: RenderCtx, completed: bool) 
 
     if btype == "reasoning":
         content = str(block.get("content", "") or "")
+        if block.get("_pend") is not None:
+            # [E6] 流式活动块：指纹用 len 替代全文（与 _bk_sig 活动分支口径一致），
+            # 跳过整段 sha1；key 变化仅由长度推进，定型后切回全文指纹。
+            return KIND_REASONING, fingerprint("reasoning", len(content), completed, ctx.compact)
         return KIND_REASONING, fingerprint("reasoning", content, completed, ctx.compact)
 
     if btype == "tool_streaming":

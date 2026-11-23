@@ -7,7 +7,12 @@ team_*：经 team.read / team.send / team.manage 能力调用主程序 TeamManag
 #4（一句话组队）：team_manage 单工具 + action 分发（list/create/add/remove/leave），
 team_only=False → 非团队窗口可发起组队；权限按 action 在 impl 内分层。
 create 不再把调用窗口入队：leader 与成员全部新开窗，调用窗口保持非团队成员，
-可直接用 team_send_message 给成员派任务（非成员发送标识为 user；群发需 leader）。
+可直接用 team_send_message 给成员派任务（非成员发送标识为 user）。
+
+🚪 外部消息统一经 leader（用户定案）：非成员窗口的任何消息不得直投内部成员——
+单发成员改投 leader 转交；单发 leader 本身直投（leader 即外部入口）；群发整体
+打包一封改投 leader 分发；团队未登记 leader 时回退直投并提示。团队内部成员间
+自由交流不受限。
 
 子智能体工具（subagent_para / subagent_status + 结果注入器）已迁
 ``plugins/system-subagent/tools/subagent_tools.py``。
@@ -201,10 +206,20 @@ def _team_list_members(tool_ctx) -> ToolResult:
             my_label = "未归属"
             other_teams = list(by_run.items())
     else:
-        # 单团队（含 legacy 兼容）：全部视为本团队
-        my_members = list(members)
-        my_label = _safe_team_label()
-        other_teams = []
+        if not _is_member_view and by_run:
+            # 🆕 非成员只读视角（多团队常态）：按团队分段并列展示，
+            # 每段用各自 team_label 命名，不再混排成单个 default 组。
+            my_members = []
+            my_label = ""
+            other_teams = list(by_run.items())
+            if legacy_members:
+                my_members = list(legacy_members)
+                my_label = "未归属"
+        else:
+            # 单团队（含 legacy 兼容）：全部视为本团队
+            my_members = list(members)
+            my_label = _safe_team_label()
+            other_teams = []
 
     def _render_member(m: dict) -> str:
         suffix = ""
@@ -240,20 +255,25 @@ def _team_list_members(tool_ctx) -> ToolResult:
             line += f"\n      权限: {_format_capability(cap)}"
         return line
 
-    lines: list = [f"团队「{my_label}」 ({len(my_members)} 人):"]
-    for m in my_members:
-        lines.append(_render_member(m))
+    lines: list = []
+    if my_members:
+        lines.append(f"团队「{my_label}」 ({len(my_members)} 人):")
+        for m in my_members:
+            lines.append(_render_member(m))
 
     if other_teams:
-        lines.append("")
-        lines.append(f"其他团队 ({len(other_teams)} 个):")
+        if lines:
+            lines.append("")
+        if _is_member_view:
+            lines.append(f"其他团队 ({len(other_teams)} 个):")
         for rid, info in other_teams:
             label = info.get("label") or _safe_team_label_by_run(rid) or rid
-            lines.append(f"  团队「{label}」({len(info['members'])} 人):")
+            lines.append(f"团队「{label}」({len(info['members'])} 人):")
             for m in info["members"]:
                 lines.append(_render_member(m))
-        lines.append("")
-        lines.append("⚠ 团队间沟通：你只能向本团队成员发送任务；如需联系其他团队，只通过各自 leader 传递团队间消息。")
+        if _is_member_view:
+            lines.append("")
+            lines.append("⚠ 团队间沟通：你只能向本团队成员发送任务；如需联系其他团队，只通过各自 leader 传递团队间消息。")
 
     # P1③：pending 开窗回执（防模型把「团队 (1 人)」误判为全员就绪）
     try:
@@ -278,9 +298,13 @@ def _team_send_message(tool_ctx, to_agent, message: str) -> ToolResult:
     mail dict 写 from_run_id / to_run_id 字段，返回成功结果后追加「⚠ 跨团队
     消息已发送（run_a → run_b）」提示，由接收方/历史面板决定如何呈现。
 
-    🆕 非团队成员（外部发起）也可发送：发送方标识记为 "user"，任务照常投递
-    到成员邮箱并由成员 watcher 自动拉起执行；成员无法直接回复到外部窗口
-    （成员只能发团队内部），执行状态用 team_manage(action="list") 查看。
+    🆕 非团队成员（外部发起）也可发送：发送方标识记为 "user"。
+
+    🚪 外部消息统一经 leader（用户定案）：非成员窗口的任何消息不得直投内部
+    成员——单发成员自动改投 leader 邮箱（正文标注原目标），由 leader 转交；
+    单发 leader 本身直投（leader 即外部入口）；群发整体打包一封改投 leader。
+    团队未登记 leader 时回退直投并提示（避免死路）。团队内部成员间交流不受限；
+    成员无法直接回复到外部窗口，执行状态用 team_manage(action="list") 查看。
     """
     window_id = str(tool_ctx.get("team_window_id", "") or "")
     from_agent = str(tool_ctx.get("team_agent_name", "") or "")
@@ -308,6 +332,89 @@ def _team_send_message(tool_ctx, to_agent, message: str) -> ToolResult:
     if not is_member:
         from_agent = "user"
 
+    # ── 🚪 外部消息统一经 leader（用户定案）：非成员窗口的任何消息不得直投
+    # 内部成员——单发成员改投 leader 转交；单发 leader 本身直投（leader 即
+    # 外部入口）；群发整体打包一封改投 leader 分发。团队未登记 leader 时
+    # 回退直投并提示。团队内部成员间交流不受限。──
+    leader_wid = ""
+    if not is_member:
+        try:
+            leader_wid = str(tm.get_leader_window_id() or "")
+        except Exception:
+            leader_wid = ""
+    is_group = isinstance(to_agent, list) or to_agent == "*"
+
+    if not is_member and leader_wid:
+        leader_agent = tm.get_member_agent_name(leader_wid) or "leader"
+        leader_ident = f"{leader_agent}@{leader_wid}"
+        text = str(message or "")
+
+        if is_group:
+            # 群发：整体改投 leader 一封，由 leader 分发
+            targets_desc = "全队(*)" if (to_agent == "*" or not to_agent) else ", ".join(str(t) for t in to_agent)
+            wrapped = f"【外部群发改投·请分发】\n原目标: {targets_desc}\n来自: 外部窗口(user)\n---\n{text}"
+            sender0 = _get_team_sender()
+            if sender0 is None:
+                return ToolResult(False, error="团队派单能力不可用（缺少 team.send 能力声明）")
+            mail_id0 = sender0.send_task(
+                from_window=window_id,
+                from_agent="user",
+                to_identifier=leader_ident,
+                task_description=wrapped,
+            )
+            if not mail_id0:
+                return ToolResult(False, error=f"改投 leader 失败（{leader_ident} 不在成员表）")
+            return ToolResult(
+                True,
+                content=(
+                    f"团队外消息须经 leader：群发已整体改投 leader「{leader_ident}」分发 (#{mail_id0})，"
+                    f"原目标: {targets_desc}。\n执行状态用 team_manage(action=\"list\") 查看。"
+                ),
+            )
+
+        # 单发：目标即 leader → 直投（落下方原路径）；目标为其他成员 → 改投
+        single = str(to_agent or "")
+        target_pre = None
+        try:
+            target_pre = tm.find_member(single)
+        except Exception:
+            target_pre = None
+        if (target_pre or {}).get("window_id", "") != leader_wid:
+            if target_pre is None:
+                members = tm.get_members()
+                available = ", ".join(f"{m['agent_name']}@{m['window_id']}" for m in members)
+                return ToolResult(False, error=f"未找到目标「{single}」。当前团队成员: {available}")
+            wrapped = (
+                f"【外部消息改投·请转交】\n"
+                f"原目标: {target_pre.get('agent_name', '?')}@{target_pre.get('window_id', '?')}\n"
+                f"来自: 外部窗口(user)\n---\n{text}"
+            )
+            sender0 = _get_team_sender()
+            if sender0 is None:
+                return ToolResult(False, error="团队派单能力不可用（缺少 team.send 能力声明）")
+            mail_id0 = sender0.send_task(
+                from_window=window_id,
+                from_agent="user",
+                to_identifier=leader_ident,
+                task_description=wrapped,
+            )
+            if not mail_id0:
+                return ToolResult(False, error=f"改投 leader 失败（{leader_ident} 不在成员表）")
+            return ToolResult(
+                True,
+                content=(
+                    f"团队外消息须经 leader：已改投 leader「{leader_ident}」转交 (#{mail_id0})，"
+                    f"原目标「{target_pre.get('agent_name', '?')}@{target_pre.get('window_id', '?')}」。"
+                    f"\n执行状态用 team_manage(action=\"list\") 查看。"
+                ),
+            )
+        # 目标即 leader → 直投原路径
+
+    # 团队未登记 leader 的外部消息提示（回退直投场景，正常路径为空串）
+    leader_fallback_notice = ""
+    if not is_member and not leader_wid:
+        leader_fallback_notice = "\n⚠ 团队未登记 leader：消息已直投目标成员（建议建团登记 leader，外部消息统一经 leader 转交）"
+
     # ── 群发分支：list 或 "*"（任何成员/外部窗口可群发，发件人=调用窗口；
     # 单目标行为完全不变）──
     if isinstance(to_agent, list) or to_agent == "*":
@@ -325,7 +432,7 @@ def _team_send_message(tool_ctx, to_agent, message: str) -> ToolResult:
             lines.append(f"  ✓ {s.get('identifier', '?')} (#{s.get('mail_id', '?')}){mark}")
         for ident, reason in skipped:
             lines.append(f"  ⊘ {ident}：{reason}")
-        return ToolResult(True, content="\n".join(lines))
+        return ToolResult(True, content="\n".join(lines) + leader_fallback_notice)
 
     # ── 单目标原路径（保持不变）──
     to_agent = str(to_agent or "")
@@ -393,7 +500,7 @@ def _team_send_message(tool_ctx, to_agent, message: str) -> ToolResult:
             external_notice = '\n⚠ 外部发起（你不在团队中）：成员无法直接回复到本窗口；执行状态用 team_manage(action="list") 查看。'
         return ToolResult(
             True,
-            content=f"任务邮件已发送给「{target_label}」(#{mail_id}){cap_hint}{cross_team_notice}{external_notice}",
+            content=f"任务邮件已发送给「{target_label}」(#{mail_id}){cap_hint}{cross_team_notice}{external_notice}{leader_fallback_notice}",
         )
     else:
         members = tm.get_members()
@@ -529,22 +636,85 @@ def _team_create(tool_ctx, team_name: str, team_role: str, members) -> ToolResul
         ),
     )
 
-def _team_leave(tool_ctx) -> ToolResult:
-    """调用者退出当前团队（数据层直接改；无 leader 判定）"""
+def _resolve_target_run(tm, team_name: str):
+    """按团队名（team_label）定位目标团队的 run_id（多团队并存寻址）。
+
+    add/remove/leave 写 team_name 时把对外展示名翻译成内部 run_id。
+    匹配顺序：先扫各 run 的成员归属 label，再扫 run 模板槽 name
+    （覆盖刚 create、尚无成员的团队），最后回退顶层 template.name
+    （老单团队）。未命中返回 ("", "")。
+    """
+    want = str(team_name or "").strip()
+    if not want:
+        return "", ""
+    getter_ids = getattr(tm, "get_team_run_ids", None)
+    if callable(getter_ids):
+        try:
+            for rid in getter_ids() or []:
+                label = ""
+                getter = getattr(tm, "get_team_label_by_run", None)
+                if callable(getter):
+                    got = str(getter(rid) or "").strip()
+                    # 反查回退返回 run_id 本身时视为无归属 label
+                    if got and got != rid:
+                        label = got
+                if not label:
+                    slot_getter = getattr(tm, "get_template_for_run_id", None)
+                    if callable(slot_getter):
+                        slot = slot_getter(rid)
+                        if isinstance(slot, dict):
+                            label = str(slot.get("name") or "").strip()
+                if label == want:
+                    return rid, want
+        except Exception:
+            pass
+    try:
+        if str(tm.get_team_label() or "").strip() == want:
+            return tm.get_team_run_id(), want
+    except Exception:
+        pass
+    return "", ""
+
+def _team_leave(tool_ctx, team_name: str = "") -> ToolResult:
+    """调用者退出团队（数据层直接改；无 leader 判定）
+
+    目标团队：team_name 缺省=本团队（须已入队，非成员直接报错）；
+    写 team_name=退出指定团队（校验归属，防写错团队名误退别队）。
+    """
     window_id = tool_ctx.get("team_window_id", "")
-    if not window_id:
-        return ToolResult(False, error="当前不在团队上下文中，无需退出")
 
     tm = _get_team_manager()
     mg = _get_team_manage()
     if mg is None:
         return ToolResult(False, error="团队管理能力不可用（缺少 team.manage 能力声明）")
 
+    target_team = str(team_name or "").strip()
     was_leader = False
-    try:
-        was_leader = tm.get_leader_window_id() == window_id
-    except Exception:
-        pass
+    if window_id:
+        try:
+            was_leader = tm.get_leader_window_id() == window_id
+        except Exception:
+            pass
+
+    if target_team:
+        if not window_id:
+            return ToolResult(False, error="leave 退出的是调用者所在团队：当前窗口无团队上下文，无从退出")
+        # 归属校验：调用者须确实属于指定团队
+        try:
+            my_rid = tm.get_member_run_id(window_id)
+            my_label = (tm.get_team_label_by_run(my_rid) if my_rid else "") or tm.get_team_label()
+        except Exception:
+            my_label = ""
+        if str(my_label or "").strip() != target_team:
+            return ToolResult(False, error=f"你不在团队「{target_team}」中，无法退出该团队")
+    else:
+        if not window_id:
+            return ToolResult(False, error="当前不在团队上下文中，无需退出")
+        try:
+            if not tm.is_team_member(window_id):
+                return ToolResult(False, error="调用者不在团队成员表中，无需退出")
+        except Exception:
+            pass  # 成员表不可用时保持旧行为（leave_team 幂等）
 
     mg.leave_team(window_id)
 
@@ -644,16 +814,16 @@ def _team_pending_window_snapshot(window_id: str) -> list:
     except Exception:
         return []
 
-def _team_add_member(tool_ctx, agent_name: str, role: str) -> ToolResult:
+def _team_add_member(tool_ctx, agent_name: str, role: str, team_name: str = "") -> ToolResult:
     """拉人入队（入队开窗请求语义；成员可拉人，无 leader 限制）
 
     - 不自己 join_team（新成员的 members 写入由开窗路径前置完成，防孤儿记录）
-    - 校验角色存在（P0①）→ 校验调用者已入队 → 调 team.spawn 能力入队开窗
+    - 校验角色存在（P0①）→ 解析目标团队 → 调 team.spawn 能力入队开窗
+    - 目标团队：team_name 缺省=本团队（须已入队，非成员报错）；写 team_name=
+      指定团队（非成员也能拉，主窗口管理指定团队由此支持）
     - team.spawn 未注册（本轮）→ 结构化「能力未就绪」，不写 members/槽位
     """
     window_id = tool_ctx.get("team_window_id", "")
-    if not window_id:
-        return ToolResult(False, error="当前不在团队上下文中，请先执行 /team --join=<agent> 加入团队")
     agent_name = str(agent_name or "").strip()
     if not agent_name:
         return ToolResult(False, error="agent_name 不能为空")
@@ -665,12 +835,31 @@ def _team_add_member(tool_ctx, agent_name: str, role: str) -> ToolResult:
     if invalid is not None:
         return invalid
 
-    # 调用者必须已入队（成员表核查）
-    try:
-        if not tm.is_team_member(window_id):
-            return ToolResult(False, error="调用者不在团队成员表中，请先 team_manage(action=create) 建团或 /team --join 入队")
-    except Exception:
-        return ToolResult(False, error="成员表不可用，无法校验调用者身份")
+    # 目标团队解析：缺省=本团队（成员专属）；写 team_name=指定团队（非成员可拉）
+    target_team = str(team_name or "").strip()
+    if target_team:
+        run_id, team_label = _resolve_target_run(tm, target_team)
+        if not team_label:
+            return ToolResult(
+                False,
+                error=f'团队「{target_team}」不存在：用 team_manage(action="list") 查看现存团队，或确认团队名拼写',
+            )
+    else:
+        if not window_id:
+            return ToolResult(False, error="非团队成员调用 add 必须写 team_name（目标团队名）；不写则仅团队成员可向本团队拉人")
+        # 调用者必须已入队（成员表核查）
+        try:
+            if not tm.is_team_member(window_id):
+                return ToolResult(False, error="调用者不在团队成员表中：非成员拉人必须写 team_name（目标团队名）；成员缺省操作本团队")
+        except Exception:
+            return ToolResult(False, error="成员表不可用，无法校验调用者身份")
+        run_id = ""
+        team_label = ""
+        try:
+            run_id = tm.get_member_run_id(window_id) or tm.get_team_run_id()
+            team_label = (tm.get_team_label_by_run(run_id) if run_id else "") or tm.get_team_label()
+        except Exception:
+            pass
 
     # team.spawn 能力（#10 注册；本轮未注册 → 结构化未就绪，不产生假成功）
     try:
@@ -700,14 +889,6 @@ def _team_add_member(tool_ctx, agent_name: str, role: str) -> ToolResult:
             error='{"submitted": false, "error": "team.spawn 返回形态异常（预期 dict.spawn_members），成员未加入"}',
         )
 
-    run_id = ""
-    team_label = ""
-    try:
-        run_id = tm.get_member_run_id(window_id) or tm.get_team_run_id()
-        team_label = (tm.get_team_label_by_run(run_id) if run_id else "") or tm.get_team_label()
-    except Exception:
-        pass
-
     try:
         # keep_current_active=True：拉人入队同样不抢当前焦点 tab——成员窗口在
         # 后台拉起，调用方（leader 或其他成员）视角停在原会话。与 create 路径
@@ -733,17 +914,20 @@ def _team_add_member(tool_ctx, agent_name: str, role: str) -> ToolResult:
 
     # P0②：状态回执（pending_window 由 provider 从 action_queue.peek 现算）
     receipt["note"] = receipt.get("note") or "开窗后台进行中，无需等待：可立即用 team_send_message 派单（消息排队投递，窗口就绪后自动执行），并继续当前任务。"
+    team_note = f" → 团队「{team_label}」" if str(team_label or "").strip() else ""
     lines = [
-        f"开窗请求已提交：{agent_name}" + (f"（{role}）" if str(role or "").strip() else ""),
+        f"开窗请求已提交：{agent_name}{team_note}" + (f"（{role}）" if str(role or "").strip() else ""),
         f"回执: {json.dumps(receipt, ensure_ascii=False)}",
     ]
     return ToolResult(True, content="\n".join(lines))
 
-def _team_remove_member(tool_ctx, agent_name: str) -> ToolResult:
-    """按 agent_name 移除成员（任意团队成员可调；多同名全移并在返回里说明）"""
+def _team_remove_member(tool_ctx, agent_name: str, team_name: str = "") -> ToolResult:
+    """按 agent_name 移除成员（任意成员可调；多同名全移并在返回里说明）
+
+    目标团队：team_name 缺省=本团队（须已入队，非成员报错）；写 team_name=
+    限定指定团队内移除（非成员也可调，同名只删目标团队内的窗口）。
+    """
     window_id = tool_ctx.get("team_window_id", "")
-    if not window_id:
-        return ToolResult(False, error="当前不在团队上下文中，请先执行 /team --join=<agent> 加入团队")
     agent_name = str(agent_name or "").strip()
     if not agent_name:
         return ToolResult(False, error="agent_name 不能为空")
@@ -753,14 +937,37 @@ def _team_remove_member(tool_ctx, agent_name: str) -> ToolResult:
     if mg is None:
         return ToolResult(False, error="团队管理能力不可用（缺少 team.manage 能力声明）")
 
-    # 防呆：不能移除自己（退出用 team_manage(action=leave)）
-    try:
-        if tm.get_member_agent_name(window_id) == agent_name:
+    target_team = str(team_name or "").strip()
+    if target_team:
+        # 限定目标团队：按 label 定位 run，只移除该 run 内的同名成员窗口
+        run_id, team_label = _resolve_target_run(tm, target_team)
+        if not team_label:
+            return ToolResult(
+                False,
+                error=f'团队「{target_team}」不存在：用 team_manage(action="list") 查看现存团队',
+            )
+        members = tm.get_members(run_id=run_id)
+        targets = [m.get("window_id", "") for m in members if m.get("agent_name") == agent_name]
+        targets = [t for t in targets if t]
+        if not targets:
+            return ToolResult(False, error=f'团队「{team_label}」中未找到名为「{agent_name}」的成员')
+        if window_id and window_id in targets:
             return ToolResult(False, error="不能移除自己；如需退出请用 team_manage(action=leave)")
-    except Exception:
-        pass
-
-    removed = mg.remove_member(agent_name=agent_name)
+        removed: list = []
+        for wid in targets:
+            removed.extend(mg.remove_member(window_id=wid))
+    else:
+        if not window_id:
+            return ToolResult(False, error="非团队成员调用 remove 必须写 team_name（目标团队名）；不写则仅团队成员可移除本团队成员")
+        # 防呆：不能移除自己（退出用 team_manage(action=leave)）
+        try:
+            if tm.get_member_agent_name(window_id) == agent_name:
+                return ToolResult(False, error="不能移除自己；如需退出请用 team_manage(action=leave)")
+            if not tm.is_team_member(window_id):
+                return ToolResult(False, error="调用者不在团队成员表中：非成员移除成员必须写 team_name（目标团队名）；成员缺省操作本团队")
+        except Exception:
+            pass
+        removed = mg.remove_member(agent_name=agent_name)
     if not removed:
         return ToolResult(False, error=f"未找到名为「{agent_name}」的团队成员")
 
@@ -783,7 +990,9 @@ def _team_remove_member(tool_ctx, agent_name: str) -> ToolResult:
         lines.append("被移除窗口的标签页已自动关闭。")
     try:
         new_leader = str(tm.get_leader_window_id() or "")
-        if new_leader and new_leader != window_id:
+        # 顶层 leader_window_id 无 run 维度，多团队并存时可能指向别队 leader；
+        # team_name 分支（跨团队管理）跳过该提示，避免误导。
+        if not target_team and new_leader and new_leader != window_id:
             lines.append(f"leader 已自动接任: {tm.get_member_agent_name(new_leader) or '?'}@{new_leader}")
     except Exception:
         pass
@@ -798,14 +1007,14 @@ _TEAM_SEND_SCHEMA = {
     "type": "function",
     "function": {
         "name": "team_send_message",
-        "description": "向团队智能体发任务邮件(成员与非成员均可发；对方串行执行并自动开始)。非成员发送标识为 user；成员无法回复外部窗口，状态用 team_manage(action=list) 查。群发仅 leader。",
+        "description": "向团队智能体发任务邮件(成员与非成员均可发；对方串行执行并自动开始)。非成员发送标识为 user；团队外消息一律经 leader：非成员发给成员的消息自动改投 leader 转交（发给 leader 本身直投），群发同理整体改投。成员无法回复外部窗口，状态用 team_manage(action=list) 查。",
         "parameters": {
             "type": "object",
             "properties": {
                 "to_agent": {
                     "type": ["string", "array"],
                     "items": {"type": "string"},
-                    "description": "目标成员。单个成员名为私聊(任何成员可用)；数组/ [\"*\"] 为群发(仅 leader，* 跳过自己)。单个支持 agent_name 或 agent_name@window_id，用 team_manage(list) 查",
+                    "description": "目标成员。单个成员名为私聊(成员间自由直发；非成员发出时自动经 leader 转交)；数组/[\"*\"] 为群发(* 跳过自己，非成员群发整体改投 leader)。单个支持 agent_name 或 agent_name@window_id，用 team_manage(list) 查",
                 },
                 "message": {"type": "string", "description": "消息内容"},
             },
@@ -823,9 +1032,9 @@ _TEAM_MANAGE_SCHEMA = {
             "团队管理统一入口(action 分发)。"
             "list=查成员(任何窗口可用，非成员也可只读，返回 agent_name@window_id)；"
             "create=创建团队(任何窗口可用，team_name/team_role 必填，members 可选)，leader 与成员全新建窗口、当前窗口不切标签页；create 后即可用 team_send_message 派任务，成员自动执行；"
-            "add=拉成员入队(提交开窗请求，本轮结束后开窗；须已在团队中，成员可调用；agent_name/role 必填；返回 queued/pending_window 即成功，无需等待，可立即用 team_send_message 派单并继续当前工作)；"
-            "remove=移出成员(任意成员可调，agent_name 必填，同名全移除，不能移除自己)；"
-            "leave=退出(须已在团队中，leader 退出自动移交)。"
+            "add=拉成员入队(提交开窗请求，本轮结束后开窗；成员缺省拉入本团队，非成员须写 team_name 指定目标团队；agent_name/role 必填；返回 queued/pending_window 即成功，无需等待，可立即用 team_send_message 派单并继续当前工作)；"
+            "remove=移出成员(任意成员可调，agent_name 必填，同名全移除，不能移除自己；非成员须写 team_name 指定目标团队)；"
+            "leave=退出(须已在团队中，leader 退出自动移交；退出指定团队须写 team_name)。"
         ),
         "parameters": {
             "type": "object",
@@ -835,7 +1044,7 @@ _TEAM_MANAGE_SCHEMA = {
                     "enum": ["list", "create", "add", "remove", "leave"],
                     "description": "操作类型",
                 },
-                "team_name": {"type": "string", "description": "action=create 必填：团队名（对外展示标签）"},
+                "team_name": {"type": "string", "description": "action=create 必填：团队名（对外展示标签）。action=add/remove/leave 可选：目标团队名——团队成员缺省操作本团队，非团队成员必须写（缺省直接报错）"},
                 "team_role": {"type": "string", "description": "action=create 必填：团队定位（一句话职责与目标）"},
                 "members": {
                     "type": "array",
@@ -902,11 +1111,11 @@ def _team_manage_impl(tool_ctx, **kwargs):
     if action == "create":
         return _team_create(tool_ctx, kwargs.get("team_name", ""), kwargs.get("team_role", ""), kwargs.get("members"))
     if action == "add":
-        return _team_add_member(tool_ctx, kwargs.get("agent_name", ""), kwargs.get("role", ""))
+        return _team_add_member(tool_ctx, kwargs.get("agent_name", ""), kwargs.get("role", ""), kwargs.get("team_name", ""))
     if action == "remove":
-        return _team_remove_member(tool_ctx, kwargs.get("agent_name", ""))
+        return _team_remove_member(tool_ctx, kwargs.get("agent_name", ""), kwargs.get("team_name", ""))
     if action == "leave":
-        return _team_leave(tool_ctx)
+        return _team_leave(tool_ctx, kwargs.get("team_name", ""))
     return ToolResult(False, error=f'未知 action: {action!r}。可用: list / create / add / remove / leave')
 
 
@@ -935,5 +1144,5 @@ def register(registry):
         icon="邮件-发送",
         cn_name="发送邮件",
         group=GROUP_TEAM,
-        description="向团队成员发送任务（非成员也可发送；数组/[\"*\"] 群发仅 leader）",
+        description="向团队成员发送任务（非成员也可发送，外部消息自动经 leader 转交；数组/[\"*\"] 群发）",
     )

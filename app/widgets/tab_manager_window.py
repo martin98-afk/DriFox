@@ -22,7 +22,6 @@ from PyQt5.QtWidgets import (
     QAbstractScrollArea,
     QApplication,
     QFrame,
-    QGraphicsOpacityEffect,
     QHBoxLayout,
     QLabel,
     QVBoxLayout,
@@ -38,6 +37,7 @@ from app.utils.theme_manager import theme_manager
 from app.utils.utils import get_font_family_css, get_unified_font
 from app.widgets.custom_title_bar import _MacTrafficLightCenterMixin
 from app.widgets.deferred_paint_stack import DeferredPaintStack
+from app.widgets.splitter_corners import SplitterCornerController
 
 # ── 对话区限宽档位（px）：窗口过宽时限制对话内容宽度并居中，两侧留白 ──
 # 避免聊天内容在超宽屏幕上被拉得难以阅读。档位可在 设置-外观 切换。
@@ -101,24 +101,27 @@ GLOBAL_REPLACE_TITLES = {
 # ★★ 坐标系纪律（此前踩过坑，务必看懂再改）：
 #   - `_FRAME_*` 系列是 **frame 宽**（QSplitter 直接控制的窗格宽度，含 padding）；
 #   - `TabPanel._auto_collapse_width` 等是 **content 宽**（TabPanel.width()
-#     自身宽度 = frame 宽 − 14）。
+#     自身宽度 = frame 宽 − _FRAME_PADDING_X）。
 #   两套坐标不能混用：早期把 frame 域的值直接塞进 TabPanel 的 content 域比较，
-#   等价于把阈值整体抬高 14px，并让展开/折叠的滞回区被撑成 24px —— 表现为
+#   等价于把阈值整体抬高 padding，并让展开/折叠的滞回区被撑成 24px —— 表现为
 #   "手动拉宽到 188px（内容区 174px，视觉上已完全够用）却仍是折叠态"。
 #   因此 content 域常量在此显式定义为 frame 值减去 padding，禁止再手写换算。
 # ══════════════════════════════════════════════════════════════════════════
 
-# frame 宽 = 内容宽 + margins 12 + border 2
-_FRAME_PADDING_X = 14
+# frame 宽 = 内容宽 + #tabFrame QSS margin-left 4（右 0 让位 splitter handle）。
+# ★ 2026-11-18：左栏内容改为贴边填充（与 #chatFrame 工作区同款），布局
+#   contentsMargins 归零后仅剩 QSS 的 4px 左边距，故 padding 由 14 改为 4。
+#   实测（offscreen）：布局 margins 6 时 frame−panel=16，归零后 frame−panel=4。
+_FRAME_PADDING_X = 4
 
 # ── 卡片态 frame↔槽位二次换算补偿（px，frame 域）──
-# 卡片打开期 #tabFrame 内多出两处未计入 _FRAME_PADDING_X 的装饰：
-#   #tabFrame QSS margin-left(4) + sidebarSplitter handle(4)。
-# 实测几何方程（卡片态）：frame 宽 = TabPanel 宽 + 卡片槽位 + 22
-# （= _FRAME_PADDING_X 14 + handle 4 + QSS margin 4）。
-# 卡片打开编排若不补偿，卡片槽每次重开被净吞 8px，连续切页时
-# 360→352→344 逐轮递减（表现为「切页往返后卡片越切越窄」）。
-_CARD_SLOT_CHROME_EXTRA = 8
+# 卡片打开期 #tabFrame 内除 _FRAME_PADDING_X 外还多出一处装饰：
+#   sidebarSplitter handle(4)。（QSS margin-left 4 已计入 _FRAME_PADDING_X）
+# 实测几何方程（卡片态）：frame 宽 = TabPanel 宽 + 卡片槽位 + 8
+# （= _FRAME_PADDING_X 4 + handle 4）。
+# 卡片打开编排若不补偿，卡片槽每次重开被净吞 4px，连续切页时
+# 逐轮递减（表现为「切页往返后卡片越切越窄」）。
+_CARD_SLOT_CHROME_EXTRA = 4
 
 # ── 侧边栏折叠线（px，★ content 宽，= TabPanel.width() 口径）──
 # 展开态拖窄到该宽度以下即视为不可用 → 触发自动折叠；同时作为挤压折叠后
@@ -1225,6 +1228,9 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
         self._splitter_idle_timer.setSingleShot(True)
         self._splitter_idle_timer.setInterval(120)
         self._splitter_idle_timer.timeout.connect(self._on_splitter_idle)
+        # ── splitter 角点联动 + handle 延迟高亮（VSCode 式）──
+        # 实例在 _reapply_splitter_handle_styles 首次调用时创建（全局事件过滤器）
+        self._splitter_corners: Optional[SplitterCornerController] = None
 
         # ── 团队成员行「最后活动时间」周期刷新：刷新点（标题变更/一轮结束/
         # 加入 Tab）只在活动时刻触发，算出的「刚刚」随闲置僵死；30s 重算一次 ──
@@ -1431,7 +1437,6 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
         self.workbench_panel.hide()
         self.workbench_panel.close_requested.connect(self._hide_workbench)
         self.workbench_panel.refresh_requested.connect(self.refresh_workbench)
-        self.workbench_panel.diff_requested.connect(self._open_workbench_diff)
         # 🆕 页签按对话窗口独立记忆：页签变化 → 写入当前活跃窗口；切回窗口时恢复
         self.workbench_panel.current_tab_changed.connect(self._remember_workbench_tab)
         # 页面请求切换工作目录 → 转发给当前活跃窗口（实例缓存/分支标签/团队广播）
@@ -1451,8 +1456,10 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
         self._workbench_frame.setMinimumWidth(PANEL_WIDTH_MIN + 14)
         self._workbench_frame.setMaximumWidth(PANEL_WIDTH_MAX + 14)
         _wb_frame_layout = QVBoxLayout(self._workbench_frame)
-        # 与 #chatFrame / #tabFrame 内边距完全对齐，视觉一致
-        _wb_frame_layout.setContentsMargins(6, 6, 6, 6)
+        # 工作台页内容贴边（用户要求无缝填充）：不再留 6px 内边距。
+        # 注：下方 min/max 宽的 +14 是历史补偿（原 12 margins + 2 border），
+        # 现在多出的 12px 只放宽上限、不影响内容贴边，数值保持不动。
+        _wb_frame_layout.setContentsMargins(0, 0, 0, 0)
         _wb_frame_layout.setSpacing(0)
         _wb_frame_layout.addWidget(self.workbench_panel)
         self._workbench_frame.hide()  # 默认隐藏（标题栏「右侧边栏」按钮 toggle）
@@ -2151,10 +2158,9 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
         force: bool = False,
         force_plugin: str = "",
     ) -> None:
-        """从当前活跃窗口拉取数据填充工作台（产物/项目记忆）
+        """从当前活跃窗口拉取数据填充工作台（项目记忆 + 插件注册页）
 
         数据源均为既有单一数据源：
-        - 产物：backend.file_recorder 会话级文件写入记录
         - 项目：win._current_project + _current_workdir → MemoryCardContent
 
         任务（todowrite）已迁至消息卡片内嵌看板（见 app/widgets/inline_todo_panel.py），
@@ -2169,7 +2175,7 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
         panel = getattr(self, "workbench_panel", None)
         if panel is None or not panel.isVisible():
             return
-        # 插件工作台页签 reconcile（内置产物/记忆 + 插件注册页）
+        # 插件工作台页签 reconcile（全部由插件注册）
         try:
             from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
 
@@ -2183,7 +2189,7 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
         # ★ 初次打开：该窗口尚未主动切过工作台页签（无 per-window 记忆）→ 落到
         #   插件声明的默认落点页（metadata["default_landing"]，缺省顺序第一页）。
         #   必须在 reconcile 之后按 tab_id 定位：插件分批注册会让 stack 当前索引
-        #   漂移，直接沿用 currentIndex 会落到非预期页（曾表现为默认「产物」）。
+        #   漂移，直接沿用 currentIndex 会落到非预期页。
         #   user=False 不写记忆，用户主动切页后才锁定其选择。
         try:
             win = self.get_current_window()
@@ -2311,82 +2317,6 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
         except Exception:
             logger.exception("[Workbench] 打开历史会话失败")
 
-    # ── 工作台差异入口（替代标题栏 diff_btn） ──
-
-    def _open_workbench_diff(self, file_paths: Optional[List[str]]) -> None:
-        """工作台产物页的差异请求：调 controller.show_diff_viewer（保持工作台显示）
-
-        file_paths 为 None 表示「查看所有产物差异」，由宿主从当前 backend 重新拉取 ops。
-        """
-        panel = getattr(self, "workbench_panel", None)
-        if panel is None:
-            return
-        win = self.get_current_window()
-        backend = getattr(win, "backend", None) if win is not None else None
-        session_id = getattr(win, "_current_session_id", None)
-        if backend is None or not session_id:
-            self._show_diff_toast("当前没有活动会话")
-            return
-        try:
-            from app.utils.file_operation_recorder import FileOperationRecorder
-            from app.utils.diff_viewer import DiffHtmlGenerator
-
-            file_recorder = FileOperationRecorder(backend.session_store)
-            operations = file_recorder.get_all_operations_for_session(session_id)
-        except Exception as e:
-            logger.warning(f"[WorkbenchDiff] 数据准备失败: {e}")
-            operations = []
-
-        # 决定最终要 diff 的文件路径列表
-        target_paths: List[str] = []
-        if file_paths:
-            # 单条目入口：仅取有效存在的
-            target_paths = [p for p in file_paths if p]
-        if not target_paths:
-            # 「所有产物差异」入口：从 ops 拿文件路径去重
-            target_paths = list({op.get("file_path") for op in operations if op.get("file_path")})
-        if not target_paths:
-            self._show_diff_toast("本次会话没有可对比的产物文件")
-            return
-
-        # 生成 diff html
-        try:
-            diff_text = DiffHtmlGenerator.get_diff_for_files(target_paths, session_id)
-            html = DiffHtmlGenerator.generate_html_report(diff_text or "", session_id)
-        except Exception as e:
-            logger.warning(f"[WorkbenchDiff] 生成 diff html 失败: {e}")
-            self._show_diff_toast("生成差异失败")
-            return
-
-        # 调 controller 显示差异卡片（覆盖对话区域）
-        try:
-            from app.widgets.cards.global_card_controller import get_global_card_controller
-
-            controller = get_global_card_controller()
-            if controller is None:
-                self._show_diff_toast("卡片控制器未就绪")
-                return
-            controller.show_diff_viewer(html, f"产物差异（{len(target_paths)} 个文件）")
-        except Exception as e:
-            logger.warning(f"[WorkbenchDiff] show_diff_viewer 失败: {e}")
-            self._show_diff_toast("打开差异卡片失败")
-            return
-
-    def _show_diff_toast(self, msg: str) -> None:
-        """统一的轻量提示（InfoBar 顶层）"""
-        try:
-            from qfluentwidgets import InfoBar, InfoBarPosition
-
-            InfoBar.warning(
-                "提示",
-                msg,
-                parent=self,
-                position=InfoBarPosition.TOP_RIGHT,
-                duration=2500,
-            )
-        except Exception:
-            logger.warning(f"[WorkbenchDiff] {msg}")
-
     def refresh_theme(self):
         """ThemeManager 统一刷新入口（dispatch_refresh 调用）"""
         self._on_theme_changed()
@@ -2425,7 +2355,7 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
                     margin: 10px 2px;
                     border-radius: 1px;
                 }}
-                QSplitterHandle:hover {{
+                QSplitterHandle[splitterHot="true"] {{
                     border-left: 2px solid {Colors.BORDER_ACCENT};
                 }}
                 """,
@@ -2446,7 +2376,7 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
                     margin: 0;
                     border-radius: 1px;
                 }}
-                QSplitterHandle:hover {{
+                QSplitterHandle[splitterHot="true"] {{
                     border-left: 2px solid {Colors.BORDER_ACCENT};
                 }}
                 """,
@@ -2460,7 +2390,7 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
                     margin: 2px 10px;
                     border-radius: 1px;
                 }}
-                QSplitterHandle:hover {{
+                QSplitterHandle[splitterHot="true"] {{
                     border-top: 2px solid {Colors.BORDER_ACCENT};
                 }}
                 """,
@@ -2479,6 +2409,11 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
                     handle.setStyleSheet(qss)
             except RuntimeError:
                 continue  # C++ 对象已销毁
+
+        # 角点联动 / 延迟高亮控制器：全局事件过滤器，对本窗口与插件里的
+        # splitter 一并生效（无需逐个注册）
+        if getattr(self, "_splitter_corners", None) is None:
+            self._splitter_corners = SplitterCornerController(self)
 
     def _apply_theme_stylesheet(self):
         """应用主题样式表
@@ -3001,19 +2936,33 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
         label = _AutoGeometryLabel(parent_widget)
         label.setAttribute(Qt.WA_TransparentForMouseEvents)
 
-        # 1. 图片
+        # 1. 图片（[I4] 预乘入 T43 共享缓存，摘常驻 QGraphicsOpacityEffect）
+        # opacity 烘进副本 alpha（scene_layer 同款预乘），label 重绘不再走
+        # effect 离屏合成路径（resize/splitter 拖动时全幅双倍 blit）；独立
+        # QPixmap 解码同时入缓存：opacity=1 时与 scene 层共用 source 条目，
+        # opacity<1 时按 area_premult+opacity_255 分条，同图同透明度跨窗口共享。
         if image:
-            pix = QPixmap(resolved_image)
+            from app.core.infra.scene_pixmap_cache import scene_pixmap_cache
+            from app.widgets.scene_layer import _premultiply_opacity
+
+            if opacity >= 0.999:
+                pix = scene_pixmap_cache.get_pixmap(
+                    "source", resolved_image, load=lambda p: QPixmap(p)
+                )
+            else:
+                pix = scene_pixmap_cache.get_pixmap(
+                    "area_premult",
+                    resolved_image,
+                    load=lambda p, o=opacity: QPixmap.fromImage(
+                        _premultiply_opacity(QPixmap(p).toImage(), o)
+                    ),
+                    opacity_255=int(round(opacity * 255)),
+                )
             if not pix.isNull():
                 label.setPixmap(pix)
                 label.setScaledContents(True)
 
-        # 2. 透明度
-        if opacity < 1.0:
-            effect = QGraphicsOpacityEffect(label)
-            effect.setOpacity(opacity)
-            label.setGraphicsEffect(effect)
-            setattr(self, opacity_attr, effect)
+        # 2. 透明度：已预乘进副本 alpha（见上方 [I4]），不再挂 QGraphicsOpacityEffect
 
         # 3. 颜色（背景底色，独立于图片）
         if color:
@@ -3157,13 +3106,13 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
         # QSplitter 控制的 child 是 _tab_frame 而非 _tab_panel，因此
         # _tab_frame 必须显式设最大/最小宽度，否则 splitter 拖拽会绕过
         # _tab_panel 的约束：
-        #   frame min = 收起宽(46) + margins(12) + border(2) = 60
-        #   frame max = panel max(400) + margins(12) + border(2) = 414
+        #   frame min = 收起宽(46) + _FRAME_PADDING_X(4) = 50
+        #   frame max = panel max(400) + _FRAME_PADDING_X(4) = 404
         self._tab_frame.setMinimumWidth(_COLLAPSED_PANEL_WIDTH + _FRAME_PADDING_X)
         self._tab_frame.setMaximumWidth(_TAB_PANEL_MAX_CONTENT_WIDTH + _FRAME_PADDING_X)
         tab_frame_layout = QVBoxLayout(self._tab_frame)
-        # 与 #chatFrame 内边距完全对齐：让两侧容器视觉一致
-        tab_frame_layout.setContentsMargins(6, 6, 6, 6)
+        # 与 #chatFrame 内边距完全对齐：两侧容器内容均贴边（用户要求「填充」）
+        tab_frame_layout.setContentsMargins(0, 0, 0, 0)
         tab_frame_layout.setSpacing(0)
 
         # ── 侧边栏内部横向 splitter：TabPanel | left 卡片区 ──
@@ -3427,7 +3376,7 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
         content_widget.setLayout(content_layout)
         main_layout.addWidget(content_widget, 1)
 
-        # 固定默认面板宽度（_DEFAULT_PANEL_WIDTH + 14px 补偿 #tabFrame margins/border），不记忆
+        # 固定默认面板宽度（_DEFAULT_PANEL_WIDTH + _FRAME_PADDING_X 补偿 #tabFrame 边距），不记忆
         frame_w = _DEFAULT_PANEL_WIDTH + _FRAME_PADDING_X
         self._splitter.setSizes([frame_w, max(0, self.width() - frame_w)])
 
@@ -3593,11 +3542,10 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
             except Exception:
                 pass
             target = self._left_card_frame_target(card_w)
-            # ★ 槽位→frame 换算补偿（+8）：_FRAME_PADDING_X(14) 只覆盖
-            #   layout margins(12) + border(2)；卡片态下内层还有 QSS
-            #   margin-left(4) 与 splitter handle(4) 未计——不补偿时卡片槽
-            #   每次重开被压缩 8px（实测连续切页卡片槽 360→352→344 逐轮
-            #   递减，表现为「切页往返后卡片宽度越来越窄」）。
+            # ★ 槽位→frame 换算补偿（+4）：_FRAME_PADDING_X(4) 已含 QSS
+            #   margin-left；卡片态下内层还有 splitter handle(4) 未计——不补偿
+            #   时卡片槽每次重开被压缩 4px（连续切页会逐轮递减，表现为
+            #   「切页往返后卡片宽度越来越窄」）。
             target += _CARD_SLOT_CHROME_EXTRA
             # 3) 放宽 frame max（允许加宽）后落位
             self._tab_frame.setMaximumWidth(max(_tab_frame_max_expanded(), target))
@@ -3985,7 +3933,7 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
         left = sizes[0]
         # ★ 坐标系：sizes[0] 是 **frame 宽**，panel._auto_collapse_width 是
         #   **content 宽**（= TabPanel.width()）→ 比较前必须先换算，否则折叠线
-        #   被隐性抬高 14px。统一折算到 frame 域比较（本方法其余判定都在 frame 域）。
+        #   被隐性抬高 padding。统一折算到 frame 域比较（本方法其余判定都在 frame 域）。
         collapse_frame_w = panel._auto_collapse_width + _FRAME_PADDING_X
         if total <= 0 or left >= collapse_frame_w:
             return False  # 宽度正常：没有挤压，无需折叠
@@ -5566,7 +5514,9 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
 
     def get_current_window(self):
         """获取当前选中的窗口"""
-        idx = self._tab_panel.active_index
+        # 两阶段构造壳期 _tab_panel 未建（complete_construction 前），防属性缺失
+        _panel = getattr(self, "_tab_panel", None)
+        idx = _panel.active_index if _panel is not None else -1
         if 0 <= idx < len(self._windows):
             return self._windows[idx]
         return None
@@ -5651,7 +5601,9 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
             except Exception:
                 pass
             win = self._windows[index]
-            self._content_area.setCurrentWidget(win)
+            # [ANIM #A4] 用户点击页签走淡出过渡；程序化/启动恢复仍走
+            # setCurrentWidget（豁免动画），见 DeferredPaintStack 文档。
+            self._content_area.set_current_widget_faded(win)
             self.activeTabChanged.emit(index)
             # UI 插件浮动卡片按标签页投影显隐（per-tab 隔离）：
             # 卡片单实例挂全局容器，这里按目标标签页的可见记录 show/hide
@@ -5712,7 +5664,7 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
                     self.set_workbench_visible(bool(saved_visible), animate=False)
                 if self.is_workbench_visible():
                     # 🚀 数据刷新延迟一帧：setCurrentWidget 先完成目标窗口渲染，
-                    # 工作台全量刷新（产物/任务/工作树/历史换挂）在下一帧执行，
+                    # 工作台全量刷新（各插件页自拉数据）在下一帧执行，
                     # 切标签的感知延迟不再叠加工作台刷新成本。★ 序号守卫：
                     # 快速连续切换时旧调度作废，防止旧窗口记忆覆盖新活跃窗口状态
                     self._wb_refresh_seq = getattr(self, "_wb_refresh_seq", 0) + 1
@@ -7062,8 +7014,11 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
         elif obj is self._chat_wrapper and event.type() == QEvent.Wheel:
             # 限宽居中的左右留白区域没有子控件接收滚轮事件，
             # 转发给当前内容区（对话列表/覆盖层）的滚动区域。
+            # ⚠️ 只转发真正落在留白上的滚轮：子控件（输入框 / 卡片内滚动体 /
+            # WebView）滚到顶底未消费的 Wheel 会沿父链冒泡到 wrapper，无差别
+            # 转发会让输入框滚到顶/底后带动消息列表滚动（2026-11-23 用户实测）。
             try:
-                if self._forward_wheel_to_scroll_area(event):
+                if self._chat_wrapper.childAt(event.pos()) is None and self._forward_wheel_to_scroll_area(event):
                     event.accept()
                     return True
             except Exception:
@@ -7327,6 +7282,13 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
     def cleanup(self):
         """清理所有窗口和资源"""
         TabManagerWindow._instance = None
+        # 卸载全局 splitter 角点控制器（应用级事件过滤器，退出前必须在）
+        try:
+            if self._splitter_corners is not None:
+                self._splitter_corners.stop()
+                self._splitter_corners = None
+        except Exception:
+            pass
         # ★ 停止应用级服务（Gateway 平台 WebSocket 断连 + 插件 watcher 线程）
         try:
             from app.core.services.gateway_access import shutdown_gateway_service

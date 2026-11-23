@@ -73,14 +73,18 @@ def _switch_to_native_bar(area: QAbstractScrollArea) -> bool:
         True = 已换；False = 不是 qfw 滚动区（原生 QScrollArea 无需处理）。
     """
     dele = getattr(area, "scrollDelagate", None)
-    if dele is None:
+    # [#I6] qfw ScrollArea 的自绘条挂在 delegate 上；SingleDirectionScrollArea
+    # （聊天区在用）没有 delegate，SmoothScrollBar 直挂 area 自身属性——
+    # 只认 delegate 会让聊天区的 native_scrollbar=True 退化成空操作。
+    holder = dele if dele is not None else area
+    if getattr(holder, "vScrollBar", None) is None and getattr(holder, "hScrollBar", None) is None:
         return False
     from PyQt5.QtWidgets import QAbstractScrollArea as _QASA
     from PyQt5.QtWidgets import QScrollBar
 
-    # ① 隐藏悬浮条（不删：delegate 的 eventFilter 仍会读它，删了会悬空引用）
+    # ① 隐藏悬浮条（不删：delegate / SmoothScroll 引擎仍会读它，删了会悬空引用）
     for name in _QFW_BAR_ATTRS:
-        bar = getattr(dele, name, None)
+        bar = getattr(holder, name, None)
         if bar is not None:
             try:
                 bar.hide()
@@ -99,6 +103,20 @@ def _switch_to_native_bar(area: QAbstractScrollArea) -> bool:
         vbar.setStyleSheet(get_unified_scrollbar_style(8))
     except Exception:  # noqa: BLE001 - 样式刷不上不影响滚动
         pass
+
+    # ③ 反劫持：SmoothScrollDelegate.__init__ 把实例方法 setVerticalScrollBarPolicy
+    #    换成了自己的实现——内部用类方法强制原生条 AlwaysOff，只联动已隐藏的
+    #    qfw 悬浮条。不删除的话，调用点随后任何一次 setVerticalScrollBarPolicy
+    #    （如各滚动区构造时的 ScrollBarAsNeeded）都会把原生条打回永久隐藏
+    #    （2026-11-18 侧边栏自定义插件区滚动条消失的根因，tab 列表同病）。
+    #    删实例属性恢复类方法：policy setter 回到原生语义；悬浮条已 hide 且
+    #    鼠标穿透，setForceHidden 联动不再有意义。
+    if dele is not None:
+        for attr in ("setVerticalScrollBarPolicy", "setHorizontalScrollBarPolicy"):
+            try:
+                delattr(area, attr)
+            except AttributeError:
+                pass  # 无劫持（理论不可达，防御）
     return True
 
 
@@ -281,7 +299,6 @@ def install_fast_wheel(
             _switch_to_native_bar(area)
         except Exception:  # noqa: BLE001 - 换条失败也不能让滚动不可用
             pass
-
     # ③ 装接管器（viewport hook：事件先到 viewport）
     flt = _FastWheelFilter(area)
     flt._step_ratio = step_ratio

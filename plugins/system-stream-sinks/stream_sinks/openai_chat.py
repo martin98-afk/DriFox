@@ -235,13 +235,18 @@ class OpenAIChatStreamSink:
                     ctx.response_chunks.append(content)
                     ctx.chunks_total_len += len(content)
                     ctx.response_content_blocks = append_text_block(ctx.response_content_blocks, content)
-                    # [PERF] 批量发送：积累到 30 字符或 80ms 才 emit，降低信号频率
+                    # [PERF] 批量发送：积累到 120 字符或 80ms 才 emit，降低信号频率
                     # 原 15 字符/50ms 过于激进，每 50ms 触发一次完整的
                     # content_received → _on_content_received → append_chunk → _schedule_render → setHtml 链
                     # 增大阈值后大幅减少 WebEngine 渲染次数，用户感知的流式流畅度无显著影响
+                    # 30→120（T2-B，CTO 裁定）：实测 3 万字符流式 14s 中喂入节拍
+                    # 占 89%（批数 × Windows 时钟下限 15.6ms/拍），批数降 4 倍
+                    # 直接压缩总时长。字数与 80ms 为独立或条件（先到者发），
+                    # 80ms 保底不受影响；UI 侧 append_chunk 按任意切点增量注入，
+                    # 批切分不感知 markdown 结构亦安全。
                     _content_batch += content
                     now = time.time()
-                    if len(_content_batch) >= 30 or (now - _content_batch_time) > 0.08:
+                    if len(_content_batch) >= 120 or (now - _content_batch_time) > 0.08:
                         ctx.emit("content_received", _content_batch)
                         _content_batch = ""
                         _content_batch_time = now

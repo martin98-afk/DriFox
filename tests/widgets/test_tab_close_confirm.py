@@ -219,3 +219,32 @@ def test_timer_timeout_cancels_confirm(qapp):
         assert item._close_btn.text() == ""
     finally:
         item.deleteLater()
+
+# ══════════════════════════════════════════════════════════
+# ⑧ 大字号档：确认按钮宽度自适应（修复「确...闭」截断）
+# ══════════════════════════════════════════════════════════
+
+def test_confirm_btn_width_scales_with_font(qapp, monkeypatch):
+    """大字号档下确认态按钮宽度须容纳全部文字。
+
+    根因：字号按配置档缩放（11 基准 + delta，大字号档达 17px），固定 64px
+    放不下四个字 → Qt elide 成「确...闭」。修复后宽度 = max(64, 文本宽+12)。
+    """
+    import app.utils.design_tokens as dt
+
+    # 强制大字号档：字号 delta +6（11 → 17px），并确保缩放缓存命中 patch 值
+    monkeypatch.setattr(dt, "_cached_font_size_key", "4")
+    monkeypatch.setattr(dt, "_cached_font_size_delta", 6)
+
+    item = _make_item(None)
+    item.set_streaming(True)
+    try:
+        item._on_close_btn_clicked()
+
+        fm = item._close_btn.fontMetrics()
+        need = fm.horizontalAdvance("确认关闭") + 12
+        assert item._close_btn.width() >= need, (
+            f"按钮宽 {item._close_btn.width()}px < 文本所需 {need}px，会 elide 成省略号"
+        )
+    finally:
+        item.deleteLater()

@@ -76,6 +76,17 @@ class LspClient:
         self._diag_future: Optional[asyncio.Future] = None
         self._diagnostics: List[Dict[str, Any]] = []
         self._last_diag_time: float = 0.0  # 最近一次 publishDiagnostics 推送时间（monotonic）
+        # [E9] per-uri 推送时间戳：符号操作就绪信号（did_open 后该 uri 出现新推送
+        # = server 已处理该文件）。全局 _last_diag_time 不分文件，跨文件推送会误判提前。
+        self._diag_push_time: Dict[str, float] = {}
+        # [E9] 文件保活引用计数：符号操作配对 acquire/release；归零后不立即
+        # did_close，调度延时关闭（保活窗口）——窗口内同文件连续/并发查询免重复
+        # open/close 协议往返，复用时取消延时任务。mtime 记录用于保活期间检测
+        # 外部修改并补发 did_change（等价重新 open 的内容同步）。
+        self._keepalive_refs: Dict[str, int] = {}
+        self._keepalive_mtimes: Dict[str, float] = {}
+        self._keepalive_closer_tasks: Dict[str, "asyncio.Task"] = {}
+        self._keepalive_ttl: float = 5.0  # 保活窗口（秒）；测试可调小
         self._restart_count = 0
 
     # ── 生命周期 ──────────────────────────────────────────────────
@@ -142,6 +153,8 @@ class LspClient:
                         })
                     self._diagnostics = diags
                     self._last_diag_time = time.monotonic()
+                    if file_uri:
+                        self._diag_push_time[file_uri] = self._last_diag_time
                     if self._diag_future and not self._diag_future.done():
                         self._diag_future.set_result(diags)
                     logger.debug(
@@ -210,6 +223,12 @@ class LspClient:
             self._started = False
             self._client = None
             await asyncio.sleep(0.2)
+            # [E9] server 已停：打开文件集合与保活计数/延时任务全量清空（重启后重 open）
+            for t in self._keepalive_closer_tasks.values():
+                t.cancel()
+            self._keepalive_closer_tasks.clear()
+            self._keepalive_refs.clear()
+            self._keepalive_mtimes.clear()
             logger.debug(f"[LspClient:{self.config.name}] 已停止")
 
     async def restart(self) -> bool:
@@ -346,6 +365,7 @@ class LspClient:
 
             self._diagnostics.clear()
             self._diag_future = None
+            self._diag_push_time.pop(uri, None)  # [E9] 重置就绪信号：open 后须有新推送
 
             self._client.protocol.notify(
                 lsp.TEXT_DOCUMENT_DID_OPEN,
@@ -401,6 +421,63 @@ class LspClient:
             )
         except Exception as e:
             logger.error(f"[LspClient:{self.config.name}] didClose 失败: {e}")
+
+    # ── [E9] 符号操作文件保活（引用计数 + 延时关闭窗口） ─────────
+
+    async def acquire_file(self, file_path: str) -> None:
+        """符号操作保活入口；冷路径首次 did_open，窗口内复用取消延时关闭。
+
+        保活窗口内复用（免重复 open/close 协议往返）；保活期间文件被外部修改
+        （mtime 变化）时补发 did_change（全量推新内容，与重新 did_open 的内容
+        同步效果等价）。
+        """
+        key = str(Path(file_path).resolve())
+        pending = self._keepalive_closer_tasks.pop(key, None)
+        reused = pending is not None and not pending.done()
+        if reused:
+            pending.cancel()
+        n = self._keepalive_refs.get(key, 0) + 1
+        self._keepalive_refs[key] = n
+        if reused:
+            # 窗口内复用：server 端文件仍打开，仅需检查外部修改补偿
+            try:
+                mtime = os.path.getmtime(file_path)
+            except OSError:
+                return
+            if mtime != self._keepalive_mtimes.get(key):
+                self._keepalive_mtimes[key] = mtime
+                await self.did_change(file_path)
+            return
+        await self.did_open(file_path)
+        try:
+            self._keepalive_mtimes[key] = os.path.getmtime(file_path)
+        except OSError:
+            self._keepalive_mtimes.pop(key, None)
+
+    async def release_file(self, file_path: str) -> None:
+        """保活出口：引用计数 -1；归零不立即 close，调度延时关闭（保活窗口）。"""
+        key = str(Path(file_path).resolve())
+        n = self._keepalive_refs.get(key, 0) - 1
+        if n > 0:
+            self._keepalive_refs[key] = n
+            return
+        self._keepalive_refs[key] = 0  # 保留基引用位：窗口内复用时直接 +1
+        old = self._keepalive_closer_tasks.pop(key, None)
+        if old is not None and not old.done():
+            old.cancel()
+        loop = asyncio.get_running_loop()
+        self._keepalive_closer_tasks[key] = loop.create_task(self._delayed_close(key, file_path))
+
+    async def _delayed_close(self, key: str, file_path: str) -> None:
+        """保活窗口到期后真正 did_close（取消时不动 refs）。"""
+        try:
+            await asyncio.sleep(self._keepalive_ttl)
+        except asyncio.CancelledError:
+            return
+        self._keepalive_refs.pop(key, None)
+        self._keepalive_mtimes.pop(key, None)
+        self._keepalive_closer_tasks.pop(key, None)
+        await self.did_close(file_path)
 
     async def request_full_diagnostics(self, file_path: str) -> None:
         """主动触发服务器对文件做完整语义分析。

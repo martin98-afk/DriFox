@@ -240,7 +240,26 @@ def caps_for(cap_id: str, plugin: str = "", surface: str = "") -> Any:
         host = _resolve_host(plugin, surface)
         pool = reg.build_pool(surface=surface, host=host, plugin=plugin)
         if cap_id not in pool:
-            logger.debug(f"[caps_for] plugin={plugin or '(builtin)'} cap={cap_id} 未授权或未注册，返回 None")
+            # 排障要点：原先只说「未授权或未注册」，两种根因（manifest 声明没生效 /
+            # provider 未注册）在日志里无法区分，实测排查要多花一轮。这里带上
+            # declared 快照与 catalog 登记状态，一眼定位是哪一侧缺失。
+            try:
+                from app.plugins.capabilities import catalog as _catalog
+
+                decl = pool.declared()
+                if decl is None:
+                    decl_text = "None(兼容期全量放行)"
+                else:
+                    items = sorted(decl)
+                    more = f"…共{len(items)}项" if len(items) > 12 else ""
+                    decl_text = f"{items[:12]}{more}"
+                spec_text = "已登记" if _catalog.get(cap_id) is not None else "未登记"
+            except Exception as e:
+                decl_text, spec_text = f"<读取失败: {e}>", "未知"
+            logger.debug(
+                f"[caps_for] plugin={plugin or '(builtin)'} cap={cap_id} 不可用"
+                f"（declared={decl_text}，catalog={spec_text}），返回 None"
+            )
             return None
         return pool[cap_id]
     except Exception as e:

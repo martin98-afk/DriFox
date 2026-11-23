@@ -812,7 +812,7 @@ class Settings(QConfig):
     auto_start = ConfigItem("General", "AutoStart", False, BoolValidator())
 
     # 版本信息
-    current_version = "v0.7.3"
+    current_version = "v0.7.5"
     # 构建变体：pyqt5 | pyside6。同一 Release 同时挂两套安装包，更新器据此选包，
     # 插件市场据此选官方插件库分支（pyqt5 → main，pyside6 → pyside6）。
     # CI 构建期由 release.yml 的 Inject build_variant 步骤按 matrix 覆写，缺省取本分支值。
@@ -978,6 +978,10 @@ class Settings(QConfig):
     # 消息身份行：每条消息顶部显示发送者头像 + 名称（插件可覆盖身份）
     ui_message_identity = ConfigItem("UI", "MessageIdentity", True, BoolValidator())
 
+    # 系统「减少动态效果」关闭时是否仍播放动效（外观页「始终播放动效」）。
+    # 默认 False = 尊重系统辅助功能偏好；True 时不查询系统开关。
+    ui_motion_always_on = ConfigItem("UI", "MotionAlwaysOn", False, BoolValidator())
+
     # 对话页（TabPanel）显示模式：list=列表 / tree=工作区树
     tab_panel_mode = OptionsConfigItem("UI", "TabPanelMode", "list", OptionsValidator(["list", "tree"]))
 
@@ -1083,8 +1087,10 @@ class Settings(QConfig):
 
     # ========== Tab 管理器 ==========
     enable_tab_manager = ConfigItem("UI", "EnableTabManager", True, BoolValidator())
-    # 窗口几何/面板宽度不做记忆（打开时固定默认 960x640 居中 + panel 280），
+    # 窗口几何/面板宽度不做记忆（打开时固定默认 1100x800 居中 + 侧边栏 187），
     # 原 tab_panel_width / tab_panel_collapsed / tab_manager_geometry 配置项已移除
+    # 实际值来源：tab_manager_window.py:_restore_geometry（1100x800 居中）、
+    # ：_DEFAULT_PANEL_WIDTH = 187（content 宽）
     window_always_on_top = ConfigItem("UI", "WindowAlwaysOnTop", False, BoolValidator())
 
     # ========== 渲染与性能（Webview）==========

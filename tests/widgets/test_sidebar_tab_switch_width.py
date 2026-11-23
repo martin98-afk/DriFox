@@ -309,10 +309,14 @@ def test_restore_runs_without_card_snapshot(qapp):
 
 
 def test_card_slot_chrome_extra_constant(qapp):
-    """卡片槽位→frame 换算补偿常量存在且为正（防回退成 0 引入逐轮递减）"""
+    """卡片槽位→frame 换算补偿常量存在且为正（防回退成 0 引入逐轮递减）
+
+    取值 = sidebarSplitter handle 宽（4）。QSS margin-left 已含在
+    _FRAME_PADDING_X 内，不再重复计入（2026-11-18 左栏改贴边后为 4）。
+    """
     from app.widgets.tab_manager_window import _CARD_SLOT_CHROME_EXTRA
 
-    assert _CARD_SLOT_CHROME_EXTRA == 8
+    assert _CARD_SLOT_CHROME_EXTRA == 4
 
 
 # ── Bug 2：left 卡片 frame 目标宽 ──
@@ -374,8 +378,10 @@ def test_frame_target_counts_visible_workbench(qapp):
     """对照：工作台可见时旧值参与 cap，钳制语义不变"""
     win = _StubTargetWindow([60, 546, 494])
     win._workbench_frame = _StubWBFrame(visible=True)
-    # free=606，cap=max(300, 606-400)=300 → target=300
-    assert TabManagerWindow._left_card_frame_target(win, 360) == 300
+    # free=606，cap=max(base+240, 606-400=206)=base+240 → target=base+240
+    assert TabManagerWindow._left_card_frame_target(win, 360) == (
+        _BASE_FRAME_W + _LEFT_CARD_MIN_VISIBLE_WIDTH
+    )
 
 
 def test_restore_aborts_when_card_deactivates(qapp):

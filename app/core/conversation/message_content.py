@@ -46,6 +46,27 @@ _MAX_CONSOLIDATE_ENTRIES = 4
 _TAIL_CHECK_W = 16  # 尾部校验窗口：检测流式收尾对末尾消息的原地补写
 _consolidate_cache_local = threading.local()
 
+# ── TLS 投影失效登记表 ──────────────────────────────────────
+# _consolidate_cache_local 是 threading.local：主线程（如 ChatSession.release_messages
+# / messages.setter）无法直清 worker 线程 TLS 里的旧投影。被释放/替换的列表其缓存
+# key（id(list), …）永不再被查询 → 登记失效 id，各线程在下次 consolidate 入口
+# 无条件按登记 id 剔除**自己 TLS** 里命中条目（与传入列表无关：真实序列传入的
+# 是重载后的新列表，id 已不同）。登记不随单线程消费删除（worker A 清掉后
+# worker B 的同 id 条目仍需清），容量封顶 _PENDING_INVALIDATE_MAX 防无限增长；
+# 超限时 set.pop() 任意挤出兜底（无序，非 FIFO），极端场景退回旧滞留行为，
+# 单条登记 16B 无害。id 复用误剔最坏多一次
+# 毫秒级重算，结果恒正确，无害。
+_pending_invalidate: set = set()      # 元素 (id(list), len(list))
+_invalidate_lock = threading.Lock()
+_PENDING_INVALIDATE_MAX = 256
+
+def invalidate_consolidate_cache(messages: list) -> None:
+    """登记一个已失效的消息列表，各线程下次 consolidate 入口剔除其 TLS 投影。"""
+    with _invalidate_lock:
+        if len(_pending_invalidate) >= _PENDING_INVALIDATE_MAX:
+            _pending_invalidate.pop()
+        _pending_invalidate.add((id(messages), len(messages)))
+
 
 def _weak_owner_ref(owner: Any) -> Optional["weakref.ReferenceType"]:
     """[B1] 宿主探针：可弱引用宿主（如 ChatSession QObject）建 weakref。
@@ -1002,6 +1023,25 @@ def normalize_message(message: Any) -> Optional[Dict[str, Any]]:
     return normalized
 
 
+def _purge_invalidated(messages: list) -> None:
+    """消费失效登记：剔除**本线程 TLS** 中命中登记 id 的条目（同 id 不同长度一并清）。
+
+    与传入列表无关：真实序列传入的是重载后的新列表（id 已不同），
+    传入仅作为触发时机。登记项不被消费删除——worker A 清掉后 worker B
+    的同 id 条目仍需清理；容量由 _PENDING_INVALIDATE_MAX 封顶。
+    """
+    with _invalidate_lock:
+        pending = set(_pending_invalidate)
+    if not pending:
+        return
+    pids = {pid for pid, _plen in pending}
+    entries = _get_consolidate_cache()["_entries"]
+    stale = [k for k in entries if k[0] in pids]
+    if not stale:
+        return
+    for key in stale:
+        del entries[key]
+
 def consolidate_messages(messages: List[Dict[str, Any]], *, owner: Any = None) -> List[Dict[str, Any]]:
     """
     保持消息列表平坦，不再合并。
@@ -1020,6 +1060,8 @@ def consolidate_messages(messages: List[Dict[str, Any]], *, owner: Any = None) -
     """
     if messages is None:
         return []
+    if _pending_invalidate:  # GIL 下布尔检查原子，空集合零成本
+        _purge_invalidated(messages)
 
     entries = _get_consolidate_cache()["_entries"]
     cache_key = (id(messages), _msg_head_key(messages))
@@ -1547,15 +1589,24 @@ def _extract_responses_content(content: Any, supports_vision: bool = True) -> Li
 def messages_to_responses_input(
     messages: List[Dict[str, Any]],
     supports_vision: bool = True,
+    flags: Any = None,
 ) -> tuple:
     """将内部消息列表转换为 Responses API 请求参数（薄壳：委托默认序列化器）。
 
     返回形态 (input_items, instructions) 不变；use_responses_api=True 语义
     注入 ctx.flags；逻辑与旧实现逐点等价（instructions 提取 / function_call /
     function_call_output / images→文本 / S1 截断）。
+
+    ``flags`` 可传 adapter 解析出的 ProtocolFlags（transport 侧注入），用于
+    replay_reasoning_text 等协议开关；缺省按默认 flags（全部关闭）。
     """
+    from app.plugins.contracts.message_serializer import SerializeContext
+
     serializer = _resolve_serializer()
-    ctx = _default_ctx(supports_vision)
+    if flags is None:
+        ctx = _default_ctx(supports_vision)
+    else:
+        ctx = SerializeContext(supports_vision=supports_vision, flags=flags)
     ctx.flags.use_responses_api = True
     result = serializer.serialize(messages, ctx)
     return result.input_items, result.instructions

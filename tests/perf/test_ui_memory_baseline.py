@@ -65,7 +65,10 @@ import pytest
 
 # 必须早于 QApplication 与任何 app.* 导入（pytest 收集期即执行）
 os.environ.setdefault("DRIFOX_DATA_DIR", str(Path(__file__).resolve().parents[2] / ".drifox-test"))
-os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+# [E11-#15] 平台跟随（不再强制 offscreen）：稳态对照组需构造真实容器
+# （OpenAIChatToolWindow），offscreen 下窗口构造实测 0xC0000409（2026-11-18，
+# 与 test_recycle_efficacy.py 方案 B 同款取舍）。真窗 + DRIFOX_QT_RENDERER=1
+# 纯 Qt 渲染器已无 WebEngine 崩溃源；如需 offscreen 请显式 export QT_QPA_PLATFORM。
 # 纯 Qt 块级渲染器：offscreen 下 QWebEngineView 崩溃（0xC0000409），
 # 与 test_stream_render_bench.py 保持一致取舍。
 os.environ["DRIFOX_QT_RENDERER"] = "1"
@@ -188,7 +191,13 @@ def test_perf_ui_rendered_card_cost(qapp):
 
 # ── 场景 3：多会话 UI 层线性度（对照「几个对话 2-3GB」的关键指标）──────
 def test_perf_ui_session_linearity(qapp):
-    """K 个会话 × M 条消息，全部建卡片并渲染，输出每会话 UI 层增量。"""
+    """K 个会话 × M 条消息，全部建卡片并渲染，输出每会话 UI 层增量。
+
+    [E11-#15] 口径标注：本用例卡片全部强引用在裸列表、无容器无回收器，
+    量得的是**零回收上界**（修复前基线 127.9 MB/会话 即此口径）。
+    「容器内 + 配额回收后稳态」对照见
+    ``test_perf_ui_session_linearity_recycled_steady_state``（本文件下方）。
+    """
     from app.widgets.message_card import MessageCard
 
     gc.collect()
@@ -226,6 +235,152 @@ def test_perf_ui_session_linearity(qapp):
     assert len(cards) == SESSION_K * SESSION_M
     assert total > 0, "多会话 UI 层无 RSS 增长，采集链路疑似失效"
     del cards
+
+
+# ── 场景 3b：容器内 + 配额回收后稳态（[E11-#15] 对照组）───────────────
+_CACHED_WIN = None  # 模块级复用（同 test_recycle_efficacy：第二实例构造会崩）
+
+
+class _FakeSettledViewer:
+    """高度落定守卫的最小 viewer 桩（同 test_recycle_efficacy：纯 Qt 渲染器语义）。"""
+
+    def __init__(self, h: int = 300):
+        self._h = h
+
+    def height(self) -> int:
+        return self._h
+
+
+def _build_window(qapp):
+    """构造真实容器（与 test_recycle_efficacy._build_window 同款：真窗出屏 + 复用）。"""
+    global _CACHED_WIN
+    if _CACHED_WIN is not None:
+        return _CACHED_WIN
+    from PyQt5.QtWidgets import QWidget
+
+    from qfluentwidgets import Theme, setTheme
+
+    setTheme(Theme.DARK)
+
+    class _FakePage(QWidget):
+        def __init__(self):
+            super().__init__()
+            self.cfg = __import__("app.utils.config", fromlist=["Settings"]).Settings.get_instance()
+
+        def isActiveWindow(self):
+            return True
+
+        @property
+        def workflow_name(self):
+            return "memory_baseline"
+
+    from app.widgets.tab_manager_window import TabManagerWindow
+
+    try:
+        TabManagerWindow(_FakePage())
+    except RuntimeError:
+        pass
+
+    from app.main_widget import OpenAIChatToolWindow
+
+    win = OpenAIChatToolWindow(_FakePage())
+    win.resize(1200, 900)
+    from tools.ui_driver import place_offscreen
+
+    place_offscreen(win)
+    _CACHED_WIN = win
+    return win
+
+
+def _feed_cards_steady(win, n: int, start_index: int) -> None:
+    """往真实容器灌 n 张守卫合规卡（桩 viewer + 几何排开），增量并入批次结构。
+
+    与 test_recycle_efficacy._feed_cards 同款守卫构造；批次结构**增量 extend**
+    而非整批重建——重建会把已卸载批次的占位 widget 误作活卡批次，破坏回收链
+    记账（实测记账 12→32 漂移的根因）。
+    """
+    from app.widgets.message_card import MessageCard
+
+    new_batches = []
+    for i in range(n):
+        card = MessageCard("assistant")
+        card.resize(900, 300)
+        win.chat_layout.addWidget(card)
+        card.setGeometry(0, (start_index + i) * 300, 900, 300)
+        card._message_index = start_index + i
+        card._lazy_rendered = True
+        card.viewer = _FakeSettledViewer(300)
+        card._viewer_async_height = False
+        win._rendered_card_count += 1
+        new_batches.append([card])
+        del card
+    win._pending_lazy_cards.clear()
+    win._batch_cards.extend(new_batches)
+    win._visible_batch_end = len(win._batch_cards)
+    win._visible_batch_start = max(0, win._visible_batch_end - win._initial_visible_batch_count)
+
+
+def _settle_placeholders(win) -> None:
+    """[E11-#15] 把占位 widget 摆回被卸批次的几何位置（布局未激活的模拟补偿）。
+
+    _install_batch_placeholder 的占位在未激活布局里 geometry 重叠 (0,0)，
+    viewport 扫描会把全部占位判成「视口内」→ 视口 range 被撑满 → 保护范围
+    扩大 → 每轮少卸。占位应躺在被卸批次的位置（本构造每批 1 卡 × 300px，
+    y = 批 idx × 300）。
+    """
+    for idx, ph in (getattr(win, "_batch_placeholders", None) or {}).items():
+        try:
+            ph.setGeometry(0, idx * 300, 900, max(1, int(ph.height())))
+        except RuntimeError:
+            pass
+
+
+def test_perf_ui_session_linearity_recycled_steady_state(qapp):
+    """[E11-#15] 容器内 + 配额回收后稳态：每会话灌卡后触发回收链，量 RSS/卡数。
+
+    线上语义对照：真实 UI 有 _batch_cards 容器与 _recycle_lru_batches 淘汰链，
+    稳态卡片数应为配额级（12 卡）而非全量常驻——与场景 3 的零回收上界口径
+    （146.6 MB/会话）相对照。
+    """
+    win = _build_window(qapp)
+    quota = win._effective_max_rendered_cards()
+    gc.collect()
+    rss0 = _rss_mb()
+    prev = rss0
+    per_session: list[float] = []
+    steady_cards: list[int] = []
+    fed = len(win._batch_cards)
+    for k in range(SESSION_K):
+        _feed_cards_steady(win, SESSION_M, start_index=fed)
+        fed += SESSION_M
+        win._recycle_lru_batches()
+        _settle_placeholders(win)  # 占位几何补偿：防视口 range 被重叠占位撑大
+        gc.collect()
+        cur = _rss_mb()
+        per_session.append(cur - prev)
+        prev = cur
+        rendered = win._rendered_card_count
+        steady_cards.append(rendered)
+        print(
+            f"[UI-MEM] 稳态 会话 k={k + 1}/{SESSION_K}, 灌入={SESSION_M} 张, "
+            f"回收后记账卡数={rendered}（配额 {quota}）, 布局={win.chat_layout.count()}, "
+            f"空槽={sum(1 for c in win._batch_cards if c is None)}, "
+            f"本会话 RSS 增量={per_session[-1]:.1f} MB, 累计={cur - rss0:.1f} MB",
+            flush=True,
+        )
+
+    total = prev - rss0
+    avg_session = total / SESSION_K
+    tail_avg = sum(per_session[2:]) / max(1, len(per_session[2:]))  # 平台期口径：后段会话均值
+    print(
+        f"[UI-MEM] 回收后稳态汇总 会话数={SESSION_K}, 每会话灌入={SESSION_M} 张, "
+        f"稳态记账卡数={steady_cards[-1]}（配额 {quota}）, 总 RSS 增量={total:.1f} MB, "
+        f"平均={avg_session:.1f} MB/会话, 后段均值={tail_avg:.1f} MB/会话 "
+        f"| 对照上界口径 146.6 MB/会话",
+        flush=True,
+    )
+    assert steady_cards[-1] <= quota, f"回收后稳态卡数应回到配额内：{steady_cards[-1]}/{quota}"
+    assert all(c <= quota for c in steady_cards), f"每会话回收后都应回到配额内：{steady_cards}"
 
 
 # ── 场景 4：QPixmap / 图标重复解码检测（估算口径）─────────────────────

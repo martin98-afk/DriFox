@@ -85,10 +85,13 @@ def test_content_autoscroll_respects_user_scroll():
     # 正文容器必须有 scroll 监听跟踪用户滚动（滚回底部附近恢复跟随）
     assert "getElementById('content-placeholder')?.addEventListener('scroll'" in js, "正文容器必须有独立 scroll 监听"
     # 监听内恢复跟随：位置判定（接近底部=跟随，离开=用户阅读）
-    assert "if (atBottom) cp._userScrolledUp = false;" in js, "滚回底部附近必须恢复自动跟随（位置判定）"
-    # 置位上滚必须有真实输入证据：几何变化（切回标签页 / 高度上限变化 /
-    # innerHTML 重建钳制）引起的 scroll 不得把跟随永久锁死
-    assert "else if (_recentUserScrollInput(cp)) cp._userScrolledUp = true;" in js, "置位上滚必须有真实输入证据"
+    assert "if (atBottom) {" in js, "滚回底部附近必须恢复自动跟随（位置判定）"
+    assert "cp._userScrolledUp = false;" in js, "滚回底部必须清除上滚标志"
+    # 置位上滚必须有真实输入证据 + **上滚方向**：几何变化（切回标签页 /
+    # 高度上限变化 / innerHTML 重建钳制）与下滚输入都不得把跟随永久锁死
+    assert "else if (cp._lastInputDir === -1 && _recentUserScrollInput(cp)) {" in js, (
+        "置位上滚必须有真实输入证据，且只认上滚方向"
+    )
     # DOM 操作期间程序性 scroll 必须忽略（防误标正文上滚→置顶），与 body 监听对称
     assert "if (window._suppressScrollEvent) return;" in js, "DOM 操作期间的程序 scroll 必须忽略"
     # 程序滚动事件吞掉（不误标用户）

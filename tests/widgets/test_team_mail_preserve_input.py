@@ -39,6 +39,7 @@ def _make_main_widget_instance():
     inst._attachments = []
     inst._session_switched = False
     inst._is_streaming = False
+    inst._deferred_send_pending = 0
     inst._truncation_sentinel = None
     inst._current_assistant_card = None
     inst._current_model_name = "test-model"

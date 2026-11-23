@@ -2965,6 +2965,12 @@ class PluginHostService(QObject):
         if cfg.mcp_discovered.value:
             return
 
+        # 安全模式只加载系统插件：不向 user-custom 写入，也不消耗一次性标记
+        from app.utils.safe_mode import is_safe_mode
+
+        if is_safe_mode():
+            return
+
         from app.tools.mcp_tools import discover_and_merge
 
         merged, new_ones = discover_and_merge()

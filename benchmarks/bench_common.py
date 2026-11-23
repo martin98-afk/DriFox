@@ -33,6 +33,112 @@ RESULTS_DIR = Path(__file__).resolve().parent / "results"
 RESULTS_DIR.mkdir(exist_ok=True)
 
 
+def real_python() -> str:
+    """返回不含 launcher 中间层的真解释器路径。
+
+    uv 建的 venv 里 `Scripts/python.exe` 是 ~241KB 的 shim：它先起一个极小的
+    父进程，再 spawn 真正的 CPython。直接用 `sys.executable` 拉子进程会多出
+    一层父进程，后果有两处：
+      1) 进程树 RSS 分类失真（父进程占 main，真解释器落到 python_child）；
+      2) 启动耗时被 launcher 层放大（实测 t_interp 0.165s → 16.4s）。
+    故优先用 `sys.base_prefix/python.exe`（venv 的 base 解释器）。解析失败
+    回退 `sys.executable`。
+
+    注意：真解释器不执行 venv 的 `*.pth`，仅靠 PYTHONPATH 会让 pywin32 报
+    `DLL load failed`（pywintypes314.dll 在 pywin32_system32/）。故配套用
+    :func:`spawn_env` 注入一个 sitecustomize 垫片，见其说明。
+    """
+    try:
+        base = Path(sys.base_prefix) / ("python.exe" if os.name == "nt" else "bin/python")
+        if base.exists() and str(base) != sys.executable:
+            return str(base)
+    except Exception:
+        pass
+    return sys.executable
+
+
+def site_packages() -> str:
+    """当前解释器的首个 site-packages（真解释器场景注入搜索路径用）。"""
+    for p in sys.path:
+        if p and ("site-packages" in p or "dist-packages" in p):
+            return p
+    return ""
+
+
+_SITECUSTOMIZE = '''"""基准子进程垫片：把 uv venv 的搜索路径与 DLL 目录补齐到真解释器。"""
+import os, sys
+
+_sp = {site_packages!r}
+if _sp and _sp not in sys.path:
+    sys.path.insert(0, _sp)
+
+# venv 的 pywin32.pth 内容（真解释器不会执行 pth，必须在此显式重放）
+for _sub in ("win32", "win32/lib", "pythonwin"):
+    _p = os.path.join(_sp, _sub.replace("/", os.sep))
+    if os.path.isdir(_p) and _p not in sys.path:
+        sys.path.append(_p)
+
+# pywintypes314.dll / pythoncom314.dll 只靠 PATH 找不到（win32api.pyd 运行时依赖）
+_dll = os.path.join(_sp, "pywin32_system32")
+if os.path.isdir(_dll):
+    try:
+        os.add_dll_directory(_dll)
+    except Exception:
+        pass
+    os.environ["PATH"] = _dll + os.pathsep + os.environ.get("PATH", "")
+
+# editable 安装：__editable__*.pth 里的 finder 同样需要手动重放
+for _n in os.listdir(_sp) if os.path.isdir(_sp) else []:
+    if _n.startswith("__editable__") and _n.endswith(".pth"):
+        try:
+            exec(open(os.path.join(_sp, _n), encoding="utf-8").read())
+        except Exception:
+            pass
+            
+# 让子进程也能找到仓库根（benchmarks 脚本 import app.*）
+_root = {root!r}
+if _root and _root not in sys.path:
+    sys.path.insert(0, _root)
+'''
+
+
+def spawn_env(extra: dict | None = None) -> dict:
+    """子进程环境：真解释器场景下补 site-packages 路径与 pywin32 DLL 目录。
+
+    做法：先写一个临时 `sitecustomize.py` 到独立目录，把该目录放到
+    PYTHONPATH 最前。Python 启动时自动 import sitecustomize，垫片里重放
+    venv 的 `pywin32.pth` / `__editable__*.pth` 内容并注册 DLL 目录。
+    这比裸 PYTHONPATH 干净：`win32api` 的 DLL 依赖只有 `add_dll_directory`
+    能解，单靠 PATH 不够（已实测确认）。
+    """
+    env = dict(os.environ)
+    exe = real_python()
+    if exe != sys.executable:
+        sp = site_packages()
+        if sp:
+            shim_dir = Path(tempfile.gettempdir()) / "drifox_bench_shim"
+            try:
+                shim_dir.mkdir(parents=True, exist_ok=True)
+                (shim_dir / "sitecustomize.py").write_text(
+                    _SITECUSTOMIZE.format(
+                        site_packages=sp, root=str(PROJECT_ROOT)
+                    ),
+                    encoding="utf-8",
+                )
+                prev = env.get("PYTHONPATH", "")
+                env["PYTHONPATH"] = str(shim_dir) + (
+                    os.pathsep + prev if prev else ""
+                )
+            except Exception:
+                # 写垫片失败也不能让基准崩，退化到裸 PYTHONPATH
+                env["PYTHONPATH"] = sp + (
+                    os.pathsep + env.get("PYTHONPATH") if env.get("PYTHONPATH") else ""
+                )
+    if extra:
+        env.update({k: str(v) for k, v in extra.items()})
+    return env
+
+
 def setup_isolation(tag: str) -> Path:
     """chdir 到独立临时目录，隔离 .drifox 用户数据（sessions.db/插件/配置）。
 

@@ -54,10 +54,13 @@ from qfluentwidgets import (
     ComboBox,
     FluentIcon,
     IconWidget,
+    SmoothMode,
     TextEdit,
     TransparentToolButton,
     setCustomStyleSheet,
 )
+
+from app.utils.scroll_tuning import install_fast_wheel
 
 from app.widgets.stop_button import SendStopButton
 
@@ -115,123 +118,45 @@ _COMMAND_MENTION_NAME_PROP = QTextFormat.UserProperty + 4
 _SCROLLBAR_MIN_MARGIN = 12
 
 # ======== 输入框 placeholder 定时轮播 tips ========
+# 只保留输入框自身相关的操作提示，不再轮播插件/命令/技能等内容
 PLACEHOLDER_TIPS = [
-    # ════ 基本输入 ════
     "拖拽文件到输入框即可快速分析",
     "Shift+Enter 换行，Enter 发送",
     "输入框为空时按 ↑/↓ 切换历史输入",
-    "输入 @ 快速引用项目文件",
-    "输入 / 查看内建指令、技能与智能体",
     "Ctrl+Z 撤销 / Ctrl+Shift+Z 重做",
-    # ════ 快捷键 ════
-    "Ctrl+Shift+N 新建对话，Ctrl+L 清空会话",
-    "Alt+Q 收起/展开左侧边栏",
-    "Alt+E 打开/关闭右侧工作台",
-    # ════ 项目 ════
-    "点击顶部项目名切换/新建/归档项目",
-    "项目笔记自动关联，切换项目即切换笔记",
-    "文档中添加文件夹作为工具工作目录",
-    "/project-note 快速新建/优化项目笔记",
-    "/worktree-manager 管理 Git 工作树并行开发",
-    # ════ 模型与参数 ════
-    "点击顶部模型名快速切换模型",
-    "温度/最大Token影响回复风格",
-    "/quota-setting 查看/设置模型额度与用量",
-    # ════ 智能体系统 ════
-    "/plan 分析需求制定编码计划",
-    "/build 执行编码实现与测试验证",
-    "/explore 探索分析代码库结构",
-    "/code-reviewer 审查代码修改并提改进建议",
-    "/review 代码审查（简版）",
-    "/leader 统筹子智能体团队协作",
-    "/compaction 手动触发上下文压缩",
-    "/task-executor 执行批量预设任务",
-    "子智能体协作处理复杂任务，支持并行 DAG 工作流",
-    # ════ 技能系统 ════
-    "/brainstorming 集思广益探索需求方案",
-    "/tdd 测试驱动开发：红→绿→重构",
-    "/diagnose 系统诊断 Bug 与性能回归",
-    "/drifox-dev DriFox 专属开发技能",
-    "/skill-creator 创建自定义技能",
-    "/ui-plugin-creator 创建自定义 UI 插件扩展界面",
-    "/find-skills 搜索发现可用技能",
-    "/github-ops GitHub 操作自动化",
-    "/grill-me 基于代码库深度提问",
-    "/grill-with-docs 结合文档深度分析",
-    "/improve-codebase-architecture 分析优化架构",
-    "/writing-plans 编写实施计划",
-    "/to-issues 转 GitHub Issues",
-    "/to-prd 生成产品需求文档",
-    "/subagent-driven-development 子智能体驱动开发",
-    "/dispatching-parallel-agents 并行分派子智能体",
-    "/executing-plans 执行编码实施计划",
-    # ════ 代码与工具 ════
-    "代码块右上角可复制或保存文件",
-    "撤销按钮可单独撤销编辑操作",
-    "文件操作历史追溯，误改一键恢复",
-    # ════ 窗口与布局 ════
-    "右上角「新建窗口」并发处理多任务",
-    "「分支」按钮复制会话到新窗口",
-    "右侧工作台「历史会话」页签继续对话",
-    "记忆管理让 AI 记住你的偏好",
-    "像素宠物陪伴开发，点击互动",
-    # ════ 消息卡片页脚 ════
-    "页脚：差异 | 审查 | Token | 耗时 | 模型",
-    "点击消息页脚差异对比统计查看文件修改对比",
-    "点击 🔍 用 code-reviewer 审查修改",
-    "点击 Token 查看上下文详情与预算",
-    "点击模型名快速切换对应服务商和模型",
-    # ════ 高级功能 ════
-    "点击上下文指示器查看 Token 趋势与消息量",
-    "子智能体 DAG 工作流编排复杂多步骤任务",
-    "子智能体对话框实时查看任务日志与执行摘要",
-    "长对话按无损层截断工具结果与冗余文本，不改写前缀",
-    "历史会话自动保存，关闭不丢失",
-    "来源项目追踪：切换项目不串会话",
-    "/debug 调试模式查看内部状态",
-    "/release 打包发布当前版本",
-    "/verify 验证项目配置完整性",
-    "/todos 管理待办事项清单",
-    "/remember 让 AI 记住重要信息",
-    "/theme 一键生成主题配色",
-    # ════ 动态主题 ════
-    "设置中实时切换主题配色，全局即时生效",
-    "UI 插件自动适配主题色，无需手动配置",
-    # ════ UI 插件系统 ════
-    "UI 插件提供可热加载的组件，支持自定义按钮、面板、卡片等",
-    "已安装插件：插件市场 / 文件树 / 系统清理 / Token 统计",
-    # ════ Hook 预设 ════
-    "系统 Hook 链：会话注入→安全检查→上下文增强",
-    "安全守卫在写/改文件前自动审查指令安全性",
-    "长期记忆 Hook 让 AI 跨会话记住你的偏好",
-    "项目笔记自动注入对话上下文，无需手动引用",
-    "命令提示词自动注入，/ 命令即用即知",
-    # ════ MCP 系统 ════
-    "系统设置中配置 MCP Server 扩展 AI 能力",
-    "MCP 工具连接后自动可用，无需额外配置",
-    "npx server-filesystem 让 AI 读写文件系统",
-    "npx @playwright/mcp 让 AI 操作浏览器",
-    "npx server-github 让 AI 访问 GitHub API",
-    "npx server-sqlite 让 AI 查询数据库",
-    "/lsp-install 安装语言服务器协议支持",
-    # ════ 内建指令 ════
-    "/new 新建会话 /branch 创建分支",
-    "/theme 主题配色 /compact 压缩上下文",
-    "/subagents 启动子智能体任务",
-    "/team 团队协作模式启动",
-    "/receive-review 接收外部审查意见",
-    "/finish-branch 完成分支并合并",
-    "/webresearch 联网搜索研究",
-    "/wordcloud 生成词云分析",
-    "/ 命令支持 #skill #agent #ui #prompt 类别过滤",
-    "/ 搜索支持 | 和 & 组合关键字",
-    # ════ 文件提及 ════
+    "输入 @ 快速引用项目文件",
     "@ 搜索支持 | 和 & 组合筛选",
     "@ 模糊匹配：rqrmnts 也能找到 requirements.txt",
 ]
 
 # 轮播间隔（毫秒）
 _PLACEHOLDER_ROTATE_INTERVAL_MS = 15000
+
+# ======== 输入框光晕 QPen 缓存 ========
+# InputGlowUnderlay._paint_inner_halo 每次重绘要画 42 层光晕，每层原本新建
+# 一个 QColor + 一个 QPen；输入时每次重绘就是 84 个临时对象。QPen 本身不可变
+# （alpha 是唯一变量，颜色由 set_color 整批换），故按 (rgb, alpha) 缓存即可：
+# 同一颜色的 42 层在第一帧后全部命中，后续重绘零分配。
+# 失效：InputGlowUnderlay.set_color 换色时必须 clear()，否则旧色 pen 会被复用。
+_HALO_PEN_CACHE: dict = {}
+
+
+def _halo_pen(rgb: int, alpha: int) -> QPen:
+    """按 (颜色 rgb, alpha) 取缓存 QPen；未命中则新建并存入。
+
+    QPen 在 drawRoundedRect 期间不被修改，可跨多次 paintEvent 复用。
+    """
+    key = (rgb, alpha)
+    pen = _HALO_PEN_CACHE.get(key)
+    if pen is None:
+        c = QColor()
+        c.setRgb(rgb)
+        c.setAlpha(alpha)
+        pen = QPen(c, 1)
+        pen.setCosmetic(True)
+        pen.setJoinStyle(Qt.RoundJoin)
+        _HALO_PEN_CACHE[key] = pen
+    return pen
 
 
 class SendableTextEdit(TextEdit):
@@ -322,6 +247,18 @@ class SendableTextEdit(TextEdit):
         except AttributeError:
             # qfluentwidgets 版本差异：无 delegate 时无需处理
             pass
+        # [I3] 关 qfw SmoothScrollDelegate 的 400ms/24 帧平滑动画（滚动链路统一
+        # 口径，T5：内滚叠加透明层 667 paint/格）。delegate 本体保留——Fluent
+        # 滚动条按需显隐逻辑挂在它的 vScrollBar 上（上方 rangeChanged 链），
+        # 不可移除；只关两方向平滑引擎，滚轮改走 _FastWheelFilter 一次到位
+        # （step_ratio 0.4，输入框小容器）。native_scrollbar=False：换原生条会
+        # 摧毁 delegate 滚动条显隐链，且小容器不需要 blit 优化。
+        try:
+            self.scrollDelegate.verticalSmoothScroll.setSmoothMode(SmoothMode.NO_SMOOTH)
+            self.scrollDelegate.horizonSmoothScroll.setSmoothMode(SmoothMode.NO_SMOOTH)
+        except (AttributeError, RuntimeError):
+            pass
+        install_fast_wheel(self, step_ratio=0.4, native_scrollbar=False)
         # placeholder 仅用 tips 轮播，不用通用提示语
         self.setPlaceholderText(random.choice(PLACEHOLDER_TIPS))
         self.setAcceptRichText(False)
@@ -2906,6 +2843,8 @@ class InputGlowUnderlay(QWidget):
         if c.rgb() == self._color.rgb():
             return
         self._color = c
+        # 换色后旧色 pen 不能再复用，否则光晕停在上一套主题色
+        _HALO_PEN_CACHE.clear()
         self.update()
 
     def set_glow(
@@ -2999,6 +2938,11 @@ class InputGlowUnderlay(QWidget):
             and radius == self._radius
         ):
             return
+        # 高度变化一律走下面的重绘：MainWidget._position_input_glow_underlay
+        # 每拍无条件 setGeometry（underlay 高度 = 胶囊高度 + 2*margin），resize
+        # 自身就会 invalidate backing store 并重绘；在此做 1px 去抖只会把
+        # _pill_h 基准提前挪走，绘制次数不变、零收益。若将来把 setGeometry
+        # 改成条件调用，才需要重新考虑高度抖动去抖。
         self._pill_x = int(pill_x)
         self._pill_y = int(pill_y)
         self._pill_w = max(0, int(pill_w))
@@ -3050,6 +2994,7 @@ class InputGlowUnderlay(QWidget):
         画到胶囊外面，每一道描边都是闭合的圆角矩形轮廓。
         """
         steps = max(blur, 12)
+        rgb = self._color.rgb()
         for i in range(steps):
             t = i / steps  # 0 边缘 → 1 深处
             falloff_factor = math.exp(-((t * falloff) ** 2))
@@ -3057,13 +3002,7 @@ class InputGlowUnderlay(QWidget):
             if layer_alpha < 1:
                 continue
             layer_alpha = min(255, layer_alpha)
-            c = QColor(self._color)
-            c.setAlpha(layer_alpha)
-
-            pen = QPen(c, 1)
-            pen.setCosmetic(True)
-            pen.setJoinStyle(Qt.RoundJoin)
-            painter.setPen(pen)
+            painter.setPen(_halo_pen(rgb, layer_alpha))
 
             # i + 0.5 偏移：把 1px 描边正好画在像素中心，抗锯齿更平滑
             offset = i + 0.5

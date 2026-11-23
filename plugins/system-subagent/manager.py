@@ -267,6 +267,13 @@ class SubAgentManager(QObject):
     # [T36] 200 → 64：与 _finished_tasks 的 maxlen=200 拉开距离。两者相等时，
     # 大量运行中任务拒绝记录会挤掉 _finished_tasks 里真实完成的结果。
     _MAX_RUNNING_TASKS = 64
+    # [B2] 进程级归档冻结集合：task_id 归档成功落库后加入；frozen 任务在
+    # 状态查询链（get_task_logs / get_finished_tasks）中跳过归档全扫——
+    # 8c 热点主消解点：UI 轮询每拍无条件 get_finished_tasks() 时，已归档
+    # 任务不再反复 get_logs() 全扫。类属性 → 多窗口共享单例时全局生效
+    # （set.add/member 原子，与 _settled_tasks 同级）；_BoundedTaskDict
+    # 弹出旧条目不影响本集合（集合管事实、dict 管驻留）。
+    _archived_frozen: set = set()
 
     def __init__(self, agent_manager, tool_executor, get_llm_config: Callable):
         super().__init__()
@@ -335,7 +342,7 @@ class SubAgentManager(QObject):
     ):
         """保存任务到数据库（插件表），携带会话 ID 以实现会话隔离"""
         if self._task_store is None:
-            return
+            return False
         try:
             if logs is None or summary is None:
                 executor = self._running_tasks.get(task_id)
@@ -354,8 +361,10 @@ class SubAgentManager(QObject):
                 summary or {},
                 session_id=session_id or self._current_session_id,
             )
+            return True
         except Exception as e:
             logger.error(f"[SubAgentManager] 保存任务到数据库失败: {e}")
+            return False
 
     # ========== 日志活力度 Stall 检测 ==========
 
@@ -766,6 +775,11 @@ class SubAgentManager(QObject):
             # 单条注入永不触发，模型永远等不到 [后台任务状态] 通知。
             executor.error_occurred.connect(self._on_executor_error)
 
+            # finished（run() 返回、OS 线程退出）后自动析构 C++ 对象，防 executor
+            # 无主滞留；对照 share_card.py 上传线程先例。禁止挪到 pop 点——那里
+            # deleteLater 有析构抢跑 OS 线程的 qFatal 理论窗口。
+            executor.finished.connect(executor.deleteLater)
+
             # ★ T24：转发子智能体 ask 权限请求到主线程（带 window_id 供多窗口定位弹窗）
             executor.permission_requested.connect(self._forward_permission_request)
 
@@ -857,7 +871,8 @@ class SubAgentManager(QObject):
         finished = []
         for task_id in list(self._running_tasks.keys()):
             executor = self._running_tasks[task_id]
-            if executor.isFinished():
+            # [B2] frozen（已成功归档落库）任务跳过：get_logs 全扫与重复落库都不再发生。
+            if executor.isFinished() and task_id not in self._archived_frozen:
                 # 通过公共属性获取结果
                 result = executor.last_result or ""
                 error = executor.execution_error or ""
@@ -899,10 +914,12 @@ class SubAgentManager(QObject):
                         self._finished_tasks[task_id]["error"] = error
 
                 # 更新数据库（传入锁定的 session_id）
-                self._save_task_to_store(
+                # [B2] 落库成功才冻结（写失败不 add，下次重试——与既有「写失败
+                # UI 退化」语义一致）。
+                if self._save_task_to_store(
                     task_id, agent_name, task_description, "finished", result, error, session_id=task_session_id
-                )
-
+                ):
+                    self._archived_frozen.add(task_id)
                 del self._running_tasks[task_id]
                 finished.append(task_id)
         return finished
@@ -1022,6 +1039,7 @@ class SubAgentManager(QObject):
         if self._task_store is not None:
             try:
                 self._task_store.update_status(task_id, "finished", result, final_error, logs, summary)
+                self._archived_frozen.add(task_id)  # [B2] 归档落库成功 → 冻结
             except Exception as e:
                 logger.warning(f"[SubAgentManager] mark_task_finished 落库失败: {e}")
 
@@ -1046,12 +1064,20 @@ class SubAgentManager(QObject):
         # 顺序很关键：executor 运行期间实时日志回调持续写 DB running 状态，
         # 若先查库命中即返回，get_finished_tasks 永不执行，DB 状态永挂 running，
         # 会话卡片（SubAgentSessionCard）会永远显示「执行中」且工具数/时间冻结。
-        self.get_finished_tasks()
+        # [B2] dirty 守卫：仅当 _running_tasks 中存在「已完成但未冻结」的
+        # executor 时才走归档全扫；frozen（已成功落库）任务直接查 DB。
+        # 保留原顺序语义：未冻结的完成任务仍先归档推进 DB，再查库。
+        if any(ex.isFinished() and tid not in self._archived_frozen for tid, ex in self._running_tasks.items()):
+            self.get_finished_tasks()
 
         # 从数据库获取
         if self._task_store is not None:
             db_task = self._task_store.get(task_id)
             if db_task:
+                # [B2] 重启 lazy 补录：进程重启后内存 frozen 清零，首次查 DB
+                # status=finished 即事实冻结，后续轮询不再触发归档全扫。
+                if db_task.get("status") == "finished":
+                    self._archived_frozen.add(task_id)
                 summary = db_task.get("summary", {})
                 # 确保 task_description 在 summary 中
                 if not summary.get("task_description"):
@@ -1258,9 +1284,7 @@ class SubAgentManager(QObject):
         if target_session and self._last_task_session_id != target_session:
             has_own = any(
                 info.get("session_id", "") == target_session for info in self._finished_tasks.values()
-            ) or any(
-                getattr(ex, "_task_session_id", "") == target_session for ex in self._running_tasks.values()
-            )
+            ) or any(getattr(ex, "_task_session_id", "") == target_session for ex in self._running_tasks.values())
             if not has_own and self._last_task_session_id:
                 target_session = self._last_task_session_id
         tasks_info = []

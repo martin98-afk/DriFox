@@ -2,8 +2,10 @@
 """云同步的 LWW（Last Write Wins）+ 墓碑合并。
 
 每个同步条目带一份元数据 ``{"h": 内容指纹, "t": Lamport 计数, "d": 墓碑标记}``。
-合并逐条目比 ``t``，大者胜；胜者为墓碑时删除。与设备时钟无关，
-也不需要「上一次一致版本」（base）。
+合并逐条目比 ``t``，大者胜；胜者为墓碑时删除。与设备时钟无关。
+``merge_config_lww`` 可选提供 ``base_cfg``（上次两端一致时的业务配置）做值三方判定：
+只有一侧动了值的条目直接采纳动过的一侧，不再受 t 大小约束——
+这是网页带外编辑（改值但不 bump t/h，clock 甚至倒退）能被采纳的唯一途径。
 
 设计取舍：
 - 删除是显式数据（墓碑），不靠「缺失」推断，所以换机、清缓存后仍能传播。
@@ -76,6 +78,28 @@ _t = entry_ts
 def _is_tombstone(entry: Entry | None) -> bool:
     return isinstance(entry, dict) and bool(entry.get(TOMBSTONE_KEY))
 
+
+def _three_way_pick(local_value: object, remote_value: object, base_value: object) -> Optional[str]:
+    """业务值三方判定：只有一侧动了值就直接采纳动过的一侧。
+
+    返回 "local"/"remote" 或 None（需 t 裁决）。基于实际值比较而非条目 h：
+    网页带外编辑改值不 bump h/t，h 判据对它失明（真实事故：2026-11-16
+    用户在 Gitee 网页改主题被本机启动合并覆盖回推）。缺值哨兵 _MISSING
+    参与比较：新增/删除语义天然覆盖。调用方需先排除墓碑条目（两侧任一为墓碑
+    时不做值三方，墓碑语义由专门特判与 t 裁决处理）；种子同理由前置特判消化。
+    """
+    if base_value is _MISSING:
+        # base 里没有这个键：本地新增 / 远端新增 / 双侧新增 → 走 t 裁决
+        return None
+    local_changed = local_value != base_value
+    remote_changed = remote_value != base_value
+    if not local_changed and remote_changed:
+        return "remote"  # 本地未动、远端动了（含带外编辑 / 贴旧底稿回退）
+    if local_changed and not remote_changed:
+        return "local"  # 远端未动、本地动了（t 未抬的真实改动也不丢）
+    if not local_changed and not remote_changed:
+        return "local"  # 两侧都没动：取谁都一样，取本地省一次写
+    return None  # 双侧都改了 → 落到 t 裁决 / 冲突
 
 def merge_entries(
     local: Dict[str, Entry],
@@ -180,11 +204,32 @@ def _collection_items(kind: str, value: object) -> Dict[str, object]:
     return items
 
 
+def _base_item_at(base_cfg: object, group: str, name: str) -> object:
+    """从 base 业务配置取条目值（Group.Name）；缺组/缺键/非 dict 返回 _MISSING"""
+    if not isinstance(base_cfg, dict):
+        return _MISSING
+    g = base_cfg.get(group)
+    if not isinstance(g, dict):
+        return _MISSING
+    return g.get(name, _MISSING)
+
+
+def _base_elem_at(base_cfg: object, group: str, name: str, kind: str, ek: str) -> object:
+    """从 base 业务配置取集合元素值（Group.Name.elemkey）"""
+    item = _base_item_at(base_cfg, group, name)
+    if item is _MISSING:
+        return _MISSING
+    return _collection_items(kind, item).get(ek, _MISSING)
+
+
 def _pick_entry(
     path: str,
     local_entries: Dict[str, Entry],
     remote_entries: Dict[str, Entry],
     remote_authority: bool = False,
+    base_cfg: Optional[Dict[str, object]] = None,
+    local_value: object = _MISSING,
+    remote_value: object = _MISSING,
 ) -> Tuple[Entry | None, str]:
     """按 t 取胜者，返回 (entry, side)。side ∈ {local, remote, conflict, none}。
 
@@ -192,6 +237,8 @@ def _pick_entry(
     union 降级：本地有取本地，否则取远端。``remote_authority=True`` 时改为
     远端优先——用于本机没有合并基准（解绑重绑 / 新机首次绑定）的首次合并，
     此时本地配置可能是被回滚的绑定前快照，不能压过云端。
+    ``base_cfg`` 提供时先做值三方判定（单侧改动直接采纳，见 _three_way_pick）：
+    调用方需同时传入该条目的两侧业务值。
     """
     le = local_entries.get(path)
     re_ = remote_entries.get(path)
@@ -209,6 +256,13 @@ def _pick_entry(
         return re_, "remote"
     if _is_tombstone(le) and is_seed(re_):
         return le, "local"
+    if base_cfg is not None and not _is_tombstone(le) and not _is_tombstone(re_):
+        # 墓碑不参与值三方：本地/远端的删除意图按 t 裁决，
+        # 避免「删除 + 对侧带外改值」被值判定压过删除语义。
+        _group, _, _name = path.split(".", 1)
+        tri = _three_way_pick(local_value, remote_value, _base_item_at(base_cfg, _group, _name))
+        if tri is not None:
+            return (le if tri == "local" else re_), tri
     lt, rt = entry_ts(le), entry_ts(re_)
     if rt > lt:
         return re_, "remote"
@@ -234,13 +288,29 @@ def _merge_collection(
     merged_entries: Dict[str, Entry],
     conflicts: List[str],
     remote_authority: bool = False,
+    base_cfg: Optional[Dict[str, object]] = None,
 ) -> object:
     l_items = _collection_items(kind, local_value) if local_value is not _MISSING else {}
     r_items = _collection_items(kind, remote_value) if remote_value is not _MISSING else {}
     out_items: Dict[str, object] = {}
     order = list(l_items) + [k for k in r_items if k not in l_items]
+    _group, _, _name = path.rpartition(".")
     for ek in order:
         epath = f"{path}.{ek}"
+        if base_cfg is not None:
+            tri = _three_way_pick(
+                l_items.get(ek, _MISSING),
+                r_items.get(ek, _MISSING),
+                _base_elem_at(base_cfg, _group, _name, kind, ek),
+            )
+            if tri is not None:
+                _win = local_entries.get(epath) if tri == "local" else remote_entries.get(epath)
+                if _win is not None:
+                    merged_entries[epath] = dict(_win)
+                out_items[ek] = (
+                    l_items.get(ek, r_items.get(ek)) if tri == "local" else r_items.get(ek, l_items.get(ek))
+                )
+                continue
         entry, side = _pick_entry(epath, local_entries, remote_entries, remote_authority)
         if entry is not None:
             merged_entries[epath] = entry
@@ -263,11 +333,13 @@ def merge_config_lww(
     remote_cfg: Dict[str, object],
     remote_entries: Dict[str, Entry],
     remote_authority: bool = False,
+    base_cfg: Optional[Dict[str, object]] = None,
 ) -> Tuple[Dict[str, object], Dict[str, Entry], List[str]]:
     """按条目 LWW 合并两份 app.config，返回 (结果, 条目表, 冲突路径)。
 
     直接操作嵌套结构，不经过「扁平化再重建」往返，避免路径里含点号时的歧义。
     ``remote_authority=True`` 时，两端都缺元数据的条目改取远端（默认取本地）。
+    ``base_cfg`` 提供时先做值三方判定（单侧改动直接采纳，见 _three_way_pick）。
     """
     merged_cfg: Dict[str, object] = {}
     merged_entries: Dict[str, Entry] = {}
@@ -285,7 +357,16 @@ def merge_config_lww(
             rg = {}
         if not isinstance(lg, dict) or not isinstance(rg, dict):
             path = str(group)
-            entry, side = _pick_entry(path, local_entries, remote_entries, remote_authority)
+            _group, _, _name = path.split(".", 1)
+            entry, side = _pick_entry(
+                path,
+                local_entries,
+                remote_entries,
+                remote_authority,
+                base_cfg,
+                lg if lg is not _MISSING else _MISSING,
+                rg if rg is not _MISSING else _MISSING,
+            )
             if entry is not None:
                 merged_entries[path] = entry
                 if side == "conflict":
@@ -315,9 +396,25 @@ def merge_config_lww(
                     merged_entries,
                     conflicts,
                     remote_authority,
+                    base_cfg,
                 )
                 g_out[name] = value
                 continue
+            if base_cfg is not None:
+                tri = _three_way_pick(
+                    lg.get(name, _MISSING),
+                    rg.get(name, _MISSING),
+                    _base_item_at(base_cfg, group, name),
+                )
+                if tri is not None:
+                    _epath = f"{group}.{name}"
+                    _win_entry = local_entries.get(_epath) if tri == "local" else remote_entries.get(_epath)
+                    if _win_entry is not None:
+                        merged_entries[_epath] = dict(_win_entry)
+                    g_out[name] = (
+                        lg.get(name, rg.get(name)) if tri == "local" else rg.get(name, lg.get(name))
+                    )
+                    continue
             entry, side = _pick_entry(path, local_entries, remote_entries, remote_authority)
             if entry is not None:
                 merged_entries[path] = entry

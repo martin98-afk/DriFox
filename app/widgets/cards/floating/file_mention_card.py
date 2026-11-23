@@ -318,6 +318,7 @@ def _file_item_bg_css(state: int, selected_bg: str, hover_bg: str) -> str:
 
 # 头像 pixmap 缓存：{icon_path: QPixmap}（mention 条目头像，尺寸固定 20×20）
 _MENTION_ICON_CACHE: Dict[str, QPixmap] = {}
+_MENTION_ICON_CACHE_MAX = 32  # 头像数量有限，封顶防异常环境膨胀（对齐 _FILE_ITEM_BG_CSS_CACHE 先例）
 _MENTION_ICON_SIZE = 20
 
 
@@ -342,6 +343,8 @@ def _mention_icon_pixmap(icon_path: str) -> Optional[QPixmap]:
             Qt.KeepAspectRatioByExpanding,
             Qt.SmoothTransformation,
         )
+        if len(_MENTION_ICON_CACHE) >= _MENTION_ICON_CACHE_MAX:
+            _MENTION_ICON_CACHE.clear()
         _MENTION_ICON_CACHE[icon_path] = pm
         return pm
     except Exception:
@@ -823,6 +826,9 @@ class FileMentionCard(QWidget):
         # 浏览模式展示量保持卡片有限高度内的合理值
         self._SESSION_SEARCH_LIMIT = 2000
         self._SESSION_BROWSE_LIMIT = 30
+        # TTL 过期后台刷新状态：首键返回旧缓存即时响应，线程预取新数据下次生效
+        self._session_refreshing = False
+        self._session_refresh_thread: Optional[threading.Thread] = None
         # 会话搜索的项目归属：show_card 由 main_widget 传入当前项目名，
         # 非空时只列该项目的会话（SQL project 过滤 + 回落路径内存过滤）
         self._session_project = ""
@@ -1918,8 +1924,11 @@ class FileMentionCard(QWidget):
         load_items 切 _SESSION_BROWSE_LIMIT，与旧体验一致。
 
         [PERF] 带 TTL 缓存：load_items 随每次按键触发，SQLite get_all 是
-        磁盘 I/O，逐键同步查库会造成输入卡顿；TTL 内复用内存缓存，
-        切换根目录/项目/超时后在下一次取用时刷新。
+        磁盘 I/O，逐键同步查库会造成输入卡顿；TTL 内复用内存缓存。
+        TTL 过期且已有旧缓存（曾拉过且数据源未失效）：首键返回旧数据即时
+        响应，后台线程预取新数据落地缓存，下次取用生效（消除按键路径
+        UI 线程同步重 IO，#A2 诊断点位 9）。仅首次无缓存或 _cache_dirty
+        （切根目录/项目，show_card 置零 cache_at）时同步拉取。
         """
         import time as _time
 
@@ -1927,6 +1936,23 @@ class FileMentionCard(QWidget):
         now = _time.monotonic()
         if not self._cache_dirty and (now - self._session_cache_at) < self._SESSION_CACHE_TTL:
             return self._session_items_cache
+        # 自然过期（cache_at > 0 且非 dirty）：旧数据仍可用，后台预取不阻塞按键。
+        # 强制失效（show_card 置零 cache_at / dirty）走同步，保「切换项目立即重拉」语义。
+        if self._session_cache_at > 0 and not self._cache_dirty and self._session_items_cache:
+            if not self._session_refreshing:
+                self._start_session_refresh(project)
+            return self._session_items_cache
+        items = self._fetch_session_items(project)
+        self._session_items_cache = items
+        self._session_cache_at = now
+        return items
+
+    def _fetch_session_items(self, project: str) -> List[Dict[str, str]]:
+        """同步拉取会话轻量列表并映射为 @ 卡条目（同步路径与后台预取共用）
+
+        走 ChatBackend.get_session_storage() 门面；引擎不可用/加载失败
+        返回空列表，不影响文件区展示。
+        """
         items: List[Dict[str, str]] = []
         try:
             from app.core.conversation.backend import get_session_storage
@@ -1944,7 +1970,16 @@ class FileMentionCard(QWidget):
                     logger.debug(f"[FileMentionCard] 轻量会话列表失败，回落全量: {e}")
                     sessions = None
             if sessions is None:
-                sessions = storage.get_all(limit=self._SESSION_SEARCH_LIMIT) or []
+                # [R1] 回落钳幅：light 失败（repo 未初始化 / 瞬时 SQL 错）时同因
+                # 下 get_all 也多半失败；此处防的是「实现了 get_all 却无 light
+                # 委托」的引擎形态——2000 会话库上全量 SELECT * 逐条 zstd 解压
+                # = GB 级瞬时峰值（单会话解压峰值实测 26.9MB）。钳到 200 条：
+                # 覆盖「最近会话参与搜索」核心体验，最坏降为百条元数据级解压。
+                _fallback_limit = min(self._SESSION_SEARCH_LIMIT, 200)
+                logger.warning(
+                    f"[FileMentionCard] 轻量会话列表不可用，回落全量接口（钳幅 {_fallback_limit} 条）"
+                )
+                sessions = storage.get_all(limit=_fallback_limit) or []
             # 项目过滤（轻量路径已在 SQL 过滤，此处幂等；回落全量路径必需）
             if project:
                 sessions = [s for s in sessions if isinstance(s, dict) and s.get("project") == project]
@@ -1974,9 +2009,34 @@ class FileMentionCard(QWidget):
                     "relative_path": title,
                 }
             )
-        self._session_items_cache = items
-        self._session_cache_at = now
         return items
+
+    def _start_session_refresh(self, project: str) -> None:
+        """后台线程预取会话列表（TTL 过期首键即时响应的配套）
+
+        线程只做成员变量引用替换（GIL 下原子，不触 UI）；落地前校验项目
+        归属与 _cache_dirty 未变，避免过期线程结果覆盖新数据源。
+        """
+        import time as _time
+
+        def _refresh():
+            try:
+                items = self._fetch_session_items(project)
+            except Exception:  # noqa: BLE001 — 预取失败保旧缓存，下次自然过期重试
+                self._session_refreshing = False
+                return
+            if self._cache_dirty or self._session_project != project:
+                self._session_refreshing = False
+                return
+            self._session_items_cache = items
+            self._session_cache_at = _time.monotonic()
+            self._session_refreshing = False
+
+        self._session_refreshing = True
+        self._session_refresh_thread = threading.Thread(
+            target=_refresh, daemon=True, name="mention-session-refresh"
+        )
+        self._session_refresh_thread.start()
 
     def _card_height(self, rows: int) -> int:
         """按可见行数计算卡片总高（含面包屑条）"""

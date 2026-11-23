@@ -64,3 +64,52 @@ class DeferredPaintStack(QStackedWidget):
         """下一拍恢复 updates（恢复即触发一次合并重绘）；幂等。"""
         if not self.updatesEnabled():
             self.setUpdatesEnabled(True)
+
+    _fade_overlay = None  # 快照遮罩层（淡出期间驻留，完成后销毁）
+
+    def set_current_widget_faded(self, widget) -> None:
+        """[ANIM #A4] 带淡出过渡的切页（用户点击页签路径专用）。
+
+        时序与 #25 一拍合并协同：先 grab 旧页（此刻仍可见，拿到旧视觉缓存），
+        再走 setCurrentWidget 的冻结+下一拍合并首绘，快照遮罩叠栈顶遮住当拍
+        视觉；淡出时长（EXIT_MS）远大于 singleShot(0) 的首绘拍，揭底时首绘
+        已就绪，不露白。程序化/启动恢复批量切换走原 setCurrentWidget 豁免。
+        系统「减少动态效果」开启时 motion 直通终值：跳过遮罩直接切页。
+        收尾纪律同 #A1/#A3：effect 移除 + 层销毁 + 记账清空。
+        """
+        try:
+            from PyQt5.QtCore import Qt
+            from PyQt5.QtWidgets import QLabel
+
+            from app.utils.design_tokens import Animations
+            from app.utils.motion import fade_widget
+
+            old = self.currentWidget()
+            if old is widget or not Animations.motion_enabled():
+                self.setCurrentWidget(widget)
+                return
+            pix = old.grab()  # 旧页仍在当前可见态，grab 拿旧视觉
+            self.setCurrentWidget(widget)  # 冻结 + 下一拍合并首绘
+            overlay = QLabel(self)
+            overlay.setPixmap(pix)
+            overlay.setGeometry(self.rect())
+            overlay.setScaledContents(True)
+            overlay.setAttribute(Qt.WA_TransparentForMouseEvents)
+            overlay.show()
+            overlay.raise_()
+            self._fade_overlay = overlay
+
+            def _cleanup():
+                try:
+                    overlay.setGraphicsEffect(None)
+                    overlay.close()
+                    overlay.deleteLater()
+                except RuntimeError:
+                    pass
+                if getattr(self, "_fade_overlay", None) is overlay:
+                    self._fade_overlay = None
+
+            fade_widget(overlay, 0.0, duration=Animations.EXIT_MS, on_finished=_cleanup)
+        except Exception:
+            # 过渡失败不影响切换功能：兜底直达目标页
+            self.setCurrentWidget(widget)

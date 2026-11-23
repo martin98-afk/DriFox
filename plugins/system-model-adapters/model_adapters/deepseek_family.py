@@ -33,6 +33,9 @@ class DeepSeekFamilyAdapter:
             is_gemini=det.detect_is_gemini(llm_config),
             requires_reasoning_content=True,
             use_responses_api=det.detect_use_responses(llm_config),
+            # DeepSeek /responses thinking mode：assistant turn 的 reasoning 必须
+            # 以 reasoning_text item 回传，否则工具循环内 400（2026-11-17 实测）。
+            replay_reasoning_text=True,
         )
 
 

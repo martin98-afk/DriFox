@@ -271,7 +271,9 @@ def register(registry) -> None:
         工具 impl 跑在 worker 线程，直接停流会杀掉自己所在的 worker，
         所以只入队，由 main_widget 在本轮结束时 drain。
         window_id 从 backend 精确取，拿不到一律拒绝入队（防多窗口串窗）。
-        send 支持三模式（queue/skip/hook），见 ui_core._send_with_mode。
+        send 支持三模式（queue/skip/hook），见 ui_core._send_with_mode；另支持
+        显式 window_id 定向——hook 无 ctx、host 是活跃窗口，不指定就会把消息
+        发进用户正看着的窗口。
         """
         from app.core.conversation.action_queue import get_action_queue
 
@@ -286,14 +288,29 @@ def register(registry) -> None:
             """新建会话；title 非空时新会话直接用它作标题（交接沿用源会话主题）"""
             return queue.enqueue(wid, "new", {"title": str(title or "").strip()})
 
-        def send(text: str, *, ephemeral: bool = False, mode: str = "queue", hook_event: str = "SessionSend") -> bool:
+        def send(
+            text: str,
+            *,
+            ephemeral: bool = False,
+            mode: str = "queue",
+            hook_event: str = "SessionSend",
+            window_id: str = "",
+        ) -> bool:
             # 三模式复用 ui_core 同实现（先例：_ui_artifacts_show 跨 provider 复用）
-            from app.plugins.capabilities.providers.ui_core import _send_with_mode
+            # window_id 定向：hook 无 ctx、host 常是活跃窗口，不给定向就会把消息
+            # 发进用户正看着的窗口（多窗口交接实测：A 窗口超阈值，B 窗口开始写交接）。
+            from app.plugins.capabilities.providers.ui_core import _resolve_window_by_id, _send_with_mode
+
+            target_wid = str(window_id or "").strip() or wid
+            target_backend = backend
+            if target_wid != wid:
+                target_win = _resolve_window_by_id(target_wid)
+                target_backend = getattr(target_win, "backend", None) if target_win is not None else None
 
             return _send_with_mode(
-                backend,
+                target_backend,
                 queue,
-                wid,
+                target_wid,
                 text,
                 ephemeral=ephemeral,
                 mode=mode,

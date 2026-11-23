@@ -382,6 +382,8 @@ class _CodeView(QPlainTextEdit):
         self.setContextMenuPolicy(Qt.CustomContextMenu)
         self.customContextMenuRequested.connect(self._on_context_menu)
         self._font_px = 14
+        self._theme_sig = None  # apply_theme 参数快照，用于函数级早退
+        self._dark_applied = None  # 上次下发的明暗态（高亮配色只在它变化时重跑）
         self._highlight_on = True
         self._language = ""
         self._source_path = ""
@@ -406,20 +408,45 @@ class _CodeView(QPlainTextEdit):
         extra_qss: str = "",
         is_dark: bool = True,
     ) -> None:
-        self._gutter_text = gutter_text
-        self._gutter_bg = gutter_bg
-        self._font_px = max(11, int(font_pixel_size))
-        self.setFont(_mono_font(self._font_px))
-        self._update_gutter_width()
-        self._highlighter.set_theme(is_dark)
-        self.setStyleSheet(
-            f"QPlainTextEdit {{"
-            f"  background: transparent; border: none;"
-            f"  color: {text_color.name()};"
-            f"  selection-background-color: {selection.name(QColor.HexArgb)};"
-            f"}}"
-            f"{extra_qss}"
+        # 主题参数按值快照：同一预览反复 set_colors（每次打开文件都会走一遍）
+        # 时跳过 setFont/setStyleSheet/重上色。selection 必须用 HexArgb 取快照，
+        # HexRgb 会丢掉 alpha（70/120 两档选区被视作相同 → 串色）。
+        want_px = max(11, int(font_pixel_size))
+        style_sig = (
+            text_color.name(),
+            selection.name(QColor.HexArgb),
+            extra_qss,
+            int(gutter_text.rgba()),
+            int(gutter_bg.rgba()),
+            bool(is_dark),
         )
+        # 字号与样式分开判定：只改字号不该重设样式表，只改颜色不该重置用户缩放。
+        # want_px == _font_px 这道判定不能省：Ctrl+滚轮 set_font_pixel_size 会绕过
+        # 签名改字号，只比签名会把缩放后的字号「粘」在新打开的文件上不回默认值。
+        font_changed = want_px != self._font_px
+        style_changed = style_sig != self._theme_sig
+        if not font_changed and not style_changed:
+            return
+        if font_changed:
+            self._font_px = want_px
+            self.setFont(_mono_font(self._font_px))
+            self._update_gutter_width()
+        if style_changed:
+            self._theme_sig = style_sig
+            self._gutter_text = gutter_text
+            self._gutter_bg = gutter_bg
+            # 高亮配色只跟明暗走，换文字色不必重跑一遍词法着色
+            if self._dark_applied != bool(is_dark):
+                self._dark_applied = bool(is_dark)
+                self._highlighter.set_theme(is_dark)
+            self.setStyleSheet(
+                f"QPlainTextEdit {{"
+                f"  background: transparent; border: none;"
+                f"  color: {text_color.name()};"
+                f"  selection-background-color: {selection.name(QColor.HexArgb)};"
+                f"}}"
+                f"{extra_qss}"
+            )
         self._gutter.update()
 
     # ── 右键菜单 ──
@@ -572,10 +599,21 @@ class _CodeView(QPlainTextEdit):
 
 
 class _ImageView(QWidget):
-    """自绘图片视图：以「适应窗口」为 1x，支持缩放与平移"""
+    """自绘图片视图：以「适应窗口」为 1x，支持自由平移与缩放
+
+    交互对齐主流看图器：
+    - 左键 / 中键拖动平移；图大于视口时按边界滑动，图完整放得下时
+      允许临时拖开、松手回中
+    - 滚轮直接缩放（不必按 Ctrl），以光标为锚点；Shift+滚轮横向平移
+    - 双击在「适应窗口」与「1:1 原始像素」之间切换
+    - 键盘 + / - 缩放，0 适应窗口，1 原始像素
+    """
 
     MIN_ZOOM = 0.05
-    MAX_ZOOM = 20.0
+    MAX_ZOOM = 40.0
+
+    zoom_changed = pyqtSignal(float)  # 当前相对原图的显示比例（1.0 = 100% 像素）
+    context_menu_requested = pyqtSignal(QPoint)  # 右键菜单（全局坐标）
 
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
@@ -584,15 +622,22 @@ class _ImageView(QWidget):
         self._offset = QPointF(0.0, 0.0)
         self._drag_origin: Optional[QPoint] = None
         self._drag_start_offset = QPointF(0.0, 0.0)
+        self._drag_button = None
         self.setCursor(Qt.OpenHandCursor)
         self.setFocusPolicy(Qt.WheelFocus)
         self.setMinimumSize(1, 1)
+        # 图片区右键：全局预览 / 引用 / 复制路径（菜单由卡片构建）
+        self.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.customContextMenuRequested.connect(self._on_context_menu)
 
     # ── 状态 ──
 
     def set_pixmap(self, pixmap: QPixmap) -> None:
         self._pixmap = pixmap
-        self.reset_zoom()
+        self._zoom = 1.0
+        self._offset = QPointF(0.0, 0.0)
+        self.update()
+        self._emit_zoom()
 
     def has_image(self) -> bool:
         return not self._pixmap.isNull()
@@ -605,12 +650,43 @@ class _ImageView(QWidget):
         self._zoom = 1.0
         self._offset = QPointF(0.0, 0.0)
         self.update()
+        self._emit_zoom()
 
     def zoom_in(self) -> None:
         self._apply_zoom(self._zoom * 1.25, None)
 
     def zoom_out(self) -> None:
         self._apply_zoom(self._zoom / 1.25, None)
+
+    def zoom_percent(self) -> float:
+        """当前显示比例（1.0 = 原图 100% 像素）"""
+        return self._fit_scale() * self._zoom
+
+    def zoom_to_fit(self) -> None:
+        self.reset_zoom()
+
+    def zoom_to_actual(self) -> None:
+        """切到 1:1 原始像素（大图立刻可拖动看细节）"""
+        fit = self._fit_scale()
+        if fit <= 0:
+            return
+        self._apply_zoom(1.0 / fit, None)
+
+    def _emit_zoom(self) -> None:
+        try:
+            self.zoom_changed.emit(self.zoom_percent())
+        except Exception:
+            pass
+
+    def _image_larger_than_view(self) -> bool:
+        """图像当前绘制尺寸是否超出视口（决定拖动是滑动还是临时拖开）"""
+        if self._pixmap.isNull():
+            return False
+        scale = self._fit_scale() * self._zoom
+        return (
+            self._pixmap.width() * scale > self.width() + 0.5
+            or self._pixmap.height() * scale > self.height() + 0.5
+        )
 
     # ── 缩放数学 ──
 
@@ -644,11 +720,15 @@ class _ImageView(QWidget):
             point.y() - cy - uy * scale_new,
         )
         self._zoom = new_zoom
-        self._clamp_offset()
+        if self._image_larger_than_view():
+            self._clamp_offset()
+        else:
+            self._offset = QPointF(0.0, 0.0)
         self.update()
+        self._emit_zoom()
 
     def _clamp_offset(self) -> None:
-        """图像小于视口时锁定居中；大于视口时限制边缘不越界"""
+        """图大于视口时按边界滑动；图完整放得下时不动（松手回中）"""
         if self._pixmap.isNull():
             self._offset = QPointF(0.0, 0.0)
             return
@@ -657,10 +737,10 @@ class _ImageView(QWidget):
         draw_h = self._pixmap.height() * scale
         limit_x = max(0.0, (draw_w - self.width()) / 2.0)
         limit_y = max(0.0, (draw_h - self.height()) / 2.0)
-        self._offset = QPointF(
-            max(-limit_x, min(limit_x, self._offset.x())),
-            max(-limit_y, min(limit_y, self._offset.y())),
-        )
+        if limit_x > 0:
+            self._offset.setX(max(-limit_x, min(limit_x, self._offset.x())))
+        if limit_y > 0:
+            self._offset.setY(max(-limit_y, min(limit_y, self._offset.y())))
 
     # ── 绘制 ──
 
@@ -681,18 +761,28 @@ class _ImageView(QWidget):
     # ── 交互 ──
 
     def wheelEvent(self, event):  # noqa: N802
-        if event.modifiers() & (Qt.ControlModifier | Qt.MetaModifier):
-            steps = event.angleDelta().y() / 120.0
-            if steps:
-                self._apply_zoom(self._zoom * (1.2**steps), QPointF(event.pos()))
+        steps = event.angleDelta().y() / 120.0
+        if not steps:
+            steps = event.angleDelta().x() / 120.0
+        if not steps:
             event.accept()
             return
-        super().wheelEvent(event)
+        if event.modifiers() & Qt.ShiftModifier:
+            # Shift+滚轮：横向平移（放大后左右查看）
+            self._offset = QPointF(self._offset.x() + steps * 60.0, self._offset.y())
+            self._clamp_offset()
+            self.update()
+            event.accept()
+            return
+        # 滚轮直接缩放：看图时不必先按住 Ctrl，手感与主流看图器一致
+        self._apply_zoom(self._zoom * (1.2**steps), QPointF(event.pos()))
+        event.accept()
 
     def mousePressEvent(self, event):  # noqa: N802
-        if event.button() == Qt.LeftButton and not self._pixmap.isNull():
+        if event.button() in (Qt.LeftButton, Qt.MiddleButton) and not self._pixmap.isNull():
             self._drag_origin = event.pos()
             self._drag_start_offset = QPointF(self._offset)
+            self._drag_button = event.button()
             self.setCursor(Qt.ClosedHandCursor)
             event.accept()
             return
@@ -705,30 +795,67 @@ class _ImageView(QWidget):
                 self._drag_start_offset.x() + delta.x(),
                 self._drag_start_offset.y() + delta.y(),
             )
-            self._clamp_offset()
+            if self._image_larger_than_view():
+                self._clamp_offset()
             self.update()
             event.accept()
             return
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):  # noqa: N802
-        if event.button() == Qt.LeftButton and self._drag_origin is not None:
+        if self._drag_origin is not None and event.button() == self._drag_button:
             self._drag_origin = None
+            self._drag_button = None
             self.setCursor(Qt.OpenHandCursor)
+            if self._image_larger_than_view():
+                self._clamp_offset()
+            else:
+                # 图完整放得下：拖动只用于临时看某角，松手回中
+                self._offset = QPointF(0.0, 0.0)
+            self.update()
             event.accept()
             return
         super().mouseReleaseEvent(event)
 
     def mouseDoubleClickEvent(self, event):  # noqa: N802
         if event.button() == Qt.LeftButton:
-            self.reset_zoom()
+            # 适应 ↔ 1:1 来回切：双击是看图时最顺手的「放大看细节 / 退回全局」
+            if abs(self.zoom_percent() - 1.0) < 0.02:
+                self.zoom_to_actual()
+            else:
+                self.zoom_to_fit()
             event.accept()
             return
         super().mouseDoubleClickEvent(event)
 
+    def keyPressEvent(self, event):  # noqa: N802
+        key = event.key()
+        if key in (Qt.Key_Plus, Qt.Key_Equal):
+            self.zoom_in()
+            event.accept()
+            return
+        if key in (Qt.Key_Minus, Qt.Key_Underscore):
+            self.zoom_out()
+            event.accept()
+            return
+        if key == Qt.Key_0:
+            self.zoom_to_fit()
+            event.accept()
+            return
+        if key == Qt.Key_1:
+            self.zoom_to_actual()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
     def resizeEvent(self, event):  # noqa: N802
         super().resizeEvent(event)
         self._clamp_offset()
+        # 视口变了，适应比例跟着变：同步刷新百分比显示（首次 show 时也靠这一步）
+        self._emit_zoom()
+
+    def _on_context_menu(self, pos: QPoint) -> None:
+        self.context_menu_requested.emit(self.mapToGlobal(pos))
 
 
 # ── 预览页 ────────────────────────────────────────────────
@@ -758,6 +885,7 @@ class FilePreviewPage(QWidget):
         self._accent_color = QColor(80, 150, 220)
         self._is_dark = True
         self._has_opener_icon = False
+        self._zoom_label_enabled = False  # 卡片内页默认不显示百分比（窄栏让给文件名）
         self._setup_ui()
 
     # ── 公开接口 ──
@@ -837,6 +965,64 @@ class FilePreviewPage(QWidget):
             "failed": "语法高亮失败，按纯文本显示",
         }.get(skipped, "")
         return "；".join(part for part in (base, extra) if part)
+
+    def set_header_visible(self, visible: bool) -> None:
+        """显示/隐藏顶栏（快捷预览面板只复用内容区，顶栏由树页承担）"""
+        self._header.setVisible(bool(visible))
+
+    def set_back_visible(self, visible: bool) -> None:
+        """显示/隐藏返回按钮（全局面板把它当关闭入口）"""
+        self._back_btn.setVisible(bool(visible))
+
+    def set_back_tip(self, text: str) -> None:
+        """返回按钮的提示文案（全局面板里它其实是「关闭预览」）"""
+        self._back_btn.setToolTip(text or "返回文件树")
+
+    def set_zoom_label_visible(self, enabled: bool) -> None:
+        """百分比标签开关：全局面板开（宽裕），卡片内页关（窄栏优先留给文件名）"""
+        self._zoom_label_enabled = bool(enabled)
+        self._zoom_label.setVisible(self._zoom_label_enabled and self._kind == "image")
+
+    # ── 缩放（顶栏 / 键盘 / 全局面板共用） ──
+
+    def zoom_to_fit(self) -> None:
+        self._image_view.zoom_to_fit()
+
+    def zoom_to_actual(self) -> None:
+        self._image_view.zoom_to_actual()
+
+    def zoom_percent(self) -> float:
+        return self._image_view.zoom_percent()
+
+    def _on_zoom_changed(self, percent: float) -> None:
+        self._zoom_label.setText(f"{max(1, int(round(percent * 100)))}%")
+
+    # ── 引用到输入框 ──
+
+    def quote_payload(self) -> Tuple[str, int, int, str]:
+        """当前可引用内容：(路径, 起始行, 结束行, 选中文本)
+
+        行号从 1 起；图片与 markdown 渲染态给 0（渲染后的 block 不对应源码行）。
+        无选中时只返回路径，调用侧把整个文件当引用目标。
+        """
+        path = self._path
+        if not path or not self._kind:
+            return "", 0, 0, ""
+        if self._kind in ("text", "markdown"):
+            source_mode = self._content.currentIndex() == _PAGE_TEXT
+            view = self._code_view if source_mode else self._md_view
+            cursor = view.textCursor()
+            if not cursor.hasSelection():
+                return path, 0, 0, ""
+            text = cursor.selectedText().replace("\u2029", "\n")
+            if not source_mode:
+                return path, 0, 0, text
+            doc = self._code_view.document()
+            first = doc.findBlock(cursor.selectionStart()).blockNumber() + 1
+            end_pos = max(cursor.selectionStart(), cursor.selectionEnd() - 1)
+            last = doc.findBlock(end_pos).blockNumber() + 1
+            return path, first, last, text
+        return path, 0, 0, ""
 
     def reload_current(self) -> bool:
         """文件被外部修改后重读（卡片刷新按钮在预览态走这里）"""
@@ -921,6 +1107,10 @@ class FilePreviewPage(QWidget):
         self._name_label.setStyleSheet(
             f"color: {text_color.name()}; background: transparent;"
             f"  font-family: '{family}'; font-size: {self._font_size}px;"
+        )
+        self._zoom_label.setStyleSheet(
+            f"color: {secondary.name()}; background: transparent;"
+            f"  font-family: '{family}'; font-size: {max(11, self._font_size - 3)}px;"
         )
         self._hint.setStyleSheet(
             f"color: {'#ffc861' if is_dark else '#8a6d3b'};"
@@ -1020,18 +1210,24 @@ class FilePreviewPage(QWidget):
 
         self._zoom_out_btn = TransparentToolButton(FluentIcon.ZOOM_OUT, self._header)
         self._zoom_out_btn.setFixedSize(26, 26)
-        self._zoom_out_btn.setToolTip("缩小（Ctrl+滚轮）")
+        self._zoom_out_btn.setToolTip("缩小（滚轮）")
         self._zoom_out_btn.clicked.connect(lambda: self._image_view.zoom_out())
 
         self._zoom_in_btn = TransparentToolButton(FluentIcon.ZOOM_IN, self._header)
         self._zoom_in_btn.setFixedSize(26, 26)
-        self._zoom_in_btn.setToolTip("放大（Ctrl+滚轮）")
+        self._zoom_in_btn.setToolTip("放大（滚轮）")
         self._zoom_in_btn.clicked.connect(lambda: self._image_view.zoom_in())
 
         self._fit_btn = TransparentToolButton(FluentIcon.FIT_PAGE, self._header)
         self._fit_btn.setFixedSize(26, 26)
-        self._fit_btn.setToolTip("适应窗口（双击图片）")
-        self._fit_btn.clicked.connect(lambda: self._image_view.reset_zoom())
+        self._fit_btn.setToolTip("适应窗口（双击图片 / 0）")
+        self._fit_btn.clicked.connect(lambda: self._image_view.zoom_to_fit())
+
+        # 当前显示比例（1:1 = 原图像素）：图片态可见，缩放时实时刷新
+        self._zoom_label = QLabel("100%", self._header)
+        self._zoom_label.setAlignment(Qt.AlignCenter)
+        self._zoom_label.setMinimumWidth(44)
+        self._zoom_label.setToolTip("当前显示比例：滚轮缩放，双击在适应/1:1 间切换")
 
         # ── 文本视图控件（图片态隐藏）──
         self._wrap_btn = TransparentToolButton(self._header)
@@ -1058,6 +1254,7 @@ class FilePreviewPage(QWidget):
 
         head.addWidget(self._back_btn)
         head.addWidget(self._name_label, 1)
+        head.addWidget(self._zoom_label)
         head.addWidget(self._wrap_btn)
         head.addWidget(self._highlight_btn)
         head.addWidget(self._zoom_out_btn)
@@ -1072,6 +1269,8 @@ class FilePreviewPage(QWidget):
         self._hint.setVisible(False)
 
         self._image_view = _ImageView(self)
+        self._image_view.zoom_changed.connect(self._on_zoom_changed)
+        self._image_view.context_menu_requested.connect(self.context_menu_requested.emit)
         self._code_view = _CodeView(self)
         self._code_view.context_menu_requested.connect(self.context_menu_requested.emit)
         self._code_view.highlight_ready.connect(self._on_highlight_ready)
@@ -1109,6 +1308,7 @@ class FilePreviewPage(QWidget):
     def _set_zoom_visible(self, visible: bool) -> None:
         for btn in (self._zoom_out_btn, self._zoom_in_btn, self._fit_btn):
             btn.setVisible(visible)
+        self._zoom_label.setVisible(bool(visible) and self._zoom_label_enabled)
 
     def _set_text_controls_visible(self, visible: bool) -> None:
         self._wrap_btn.setVisible(visible)
@@ -1306,3 +1506,107 @@ class FilePreviewPage(QWidget):
     def _show_message(self, text: str) -> None:
         self._msg_label.setText(text)
         self._content.setCurrentIndex(2)
+
+
+class QuickPreviewPanel(QWidget):
+    """树页下方的快捷预览面板（无顶栏，随树选中项切换内容）
+
+    复用 ``FilePreviewPage`` 的渲染链路（文本高亮 / 图片自适应缩放 / markdown），
+    自身不持有选中状态：由卡片在选中变化时投递路径，面板只负责渲染与提示。
+    """
+
+    context_menu_requested = pyqtSignal(QPoint)  # 内容区右键（全局坐标）
+
+    def __init__(self, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self.setObjectName("file-tree-quick-preview")
+        self.setAttribute(Qt.WA_StyledBackground, True)
+        self.setMinimumHeight(96)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        self._page = FilePreviewPage(self)
+        # 顶栏在快捷预览里没有意义（返回 / 打开方式 / 视图开关都属于全屏预览页）
+        self._page.set_header_visible(False)
+        self._page.context_menu_requested.connect(self.context_menu_requested.emit)
+
+        self._tip = QLabel("", self)
+        self._tip.setObjectName("file-tree-quick-tip")
+        self._tip.setAlignment(Qt.AlignCenter)
+        self._tip.setWordWrap(True)
+
+        self._stack = QStackedWidget(self)
+        self._stack.addWidget(self._page)  # 0: 内容
+        self._stack.addWidget(self._tip)  # 1: 提示
+        layout.addWidget(self._stack, 1)
+
+        self._path = ""
+
+    # ── 公开接口 ──
+
+    def current_path(self) -> str:
+        return self._path
+
+    def page(self) -> FilePreviewPage:
+        """内容页实例（右键菜单取引用 payload 用）"""
+        return self._page
+
+    def show_path(self, path: str) -> bool:
+        """载入并显示文件内容；返回是否成功（失败原因由内容区自解释）"""
+        self._path = path or ""
+        if not self._path:
+            self.show_hint("未选择文件")
+            return False
+        if not detect_kind(self._path):
+            self.show_hint("该文件类型不支持预览，双击可用系统程序打开")
+            return False
+        self._stack.setCurrentIndex(0)
+        ok = self._page.load(self._path)
+        if not ok:
+            self._path = ""  # 读失败（超大/损坏/二进制）：不留下过期路径
+        return ok
+
+    def show_hint(self, text: str) -> None:
+        self._path = ""
+        self._tip.setText(text or "")
+        self._stack.setCurrentIndex(1)
+
+    def clear(self) -> None:
+        self.show_hint("")
+
+    def reload_if_current(self, path: str) -> None:
+        """文件被外部修改后重读（当前预览的正是它才动作）"""
+        current = self._path
+        if not current or not path:
+            return
+        if os.path.normcase(os.path.normpath(path)) != os.path.normcase(
+            os.path.normpath(current)
+        ):
+            return
+        self.show_path(current)
+
+    def set_colors(
+        self,
+        colors: dict,
+        font_family: str = "",
+        font_size: int = 0,
+        scrollbar_qss: str = "",
+    ) -> None:
+        """应用卡片主题色（内容区转发给预览页；顶部分隔线由 splitter handle 绘制）"""
+        colors = colors or {}
+        self._page.set_colors(
+            colors,
+            font_family=font_family,
+            font_size=font_size,
+            scrollbar_qss=scrollbar_qss,
+        )
+        family = font_family or colors.get("font_family", "Microsoft YaHei")
+        size = int(font_size or colors.get("font_size", 14))
+        secondary = colors.get("text_secondary", QColor(150, 150, 150))
+        self.setStyleSheet("#file-tree-quick-preview { background: transparent; }")
+        self._tip.setStyleSheet(
+            f"#file-tree-quick-tip {{ color: {secondary.name()}; background: transparent;"
+            f"  font-family: '{family}'; font-size: {size}px; }}"
+        )

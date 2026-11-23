@@ -14,7 +14,7 @@ import threading
 from typing import Any, Callable, Dict, List, Optional
 
 from loguru import logger
-from PyQt5.QtCore import QEventLoop, QThread
+from PyQt5.QtCore import QEventLoop, QThread, QTimer
 
 from app.core.conversation.agent import PermissionResolver
 from app.core.conversation.chat_session import (
@@ -41,7 +41,7 @@ def _tools_schema_hash(tools: List[Dict]) -> str:
     """工具 schema 内容指纹（日志对账用，方便定位「哪一轮前缀变了」）"""
     try:
         blob = json.dumps(tools, sort_keys=True, ensure_ascii=False)
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         blob = repr(tools)
     return hashlib.md5(blob.encode("utf-8")).hexdigest()[:8]
 
@@ -307,9 +307,7 @@ class UIEngine(BaseEngine):
         else:
             logger.warning(f"[Permission] 无法投递 deny：worker 不存在 id={tool_call_id}")
 
-    def decide_tool_permission(
-        self, tool_call_id: str, decision: str, remember: str = "", reason: str = ""
-    ) -> None:
+    def decide_tool_permission(self, tool_call_id: str, decision: str, remember: str = "", reason: str = "") -> None:
         """结构化审批决策回传（替代文本标签反解析）。
 
         - decision="allow" + remember="tool"    → 仅当前工具调用放行（不写缓存）
@@ -564,12 +562,54 @@ class UIEngine(BaseEngine):
         worker.start()
 
         # ---- QEventLoop 等待：主线程不阻塞，可处理 UI 事件 ----
+        # [I11] 超时兜底：原实现无任何超时——预处理 worker 卡死（hook 死锁 /
+        # 同步 IO 挂起）时 loop.exec() 永不返回，发送路径永久挂起且 worker
+        # 永不 deleteLater。预处理实际耗时毫秒级（hook 注入类，团队加载实测
+        # 上界 ~2s，见 hook_manager._wait_futures_ui_safe 注释），取 30s
+        # （10 倍余量）只兜死挂起，不改正常路径行为。模式对照
+        # _wait_futures_ui_safe 的超时保护（QTimer + loop.quit）。
         loop = QEventLoop()
         worker.finished.connect(loop.quit)
-        loop.exec()  # 处理 UI 事件直到 worker 完成
+        _PRESEND_TIMEOUT_MS = 30_000
+        _presend_timeout_hit = False
+        _presend_timer = QTimer()
+        _presend_timer.setSingleShot(True)
 
-        # T6-A: 释放 _PreSendWorker 的 QThread C++ 对象（loop.exec 返回时线程已结束）。
-        # 统一放在这里，正常路径与下方 _error 提前 return 分支都覆盖。
+        def _on_presend_timeout():
+            nonlocal _presend_timeout_hit
+            _presend_timeout_hit = True
+            loop.quit()
+
+        _presend_timer.timeout.connect(_on_presend_timeout)
+        _presend_timer.start(_PRESEND_TIMEOUT_MS)
+        loop.exec()  # 处理 UI 事件直到 worker 完成（或超时）
+        _presend_timer.stop()  # 正常完成路径停表，防同拍定时器误标（超时路径已触发，无害）
+
+        if _presend_timeout_hit and worker.isRunning():
+            # 超时且 worker 仍卡死：请求中断（线程内检查点自行退出，不
+            # terminate——强杀 OS 线程可能损坏解释器状态），上报错误并中止
+            # 本次发送（预处理结果不完整，不得继续对话流程）。
+            # ⚠️ 卡死线程**不可立即 deleteLater**：deleteLater 事件派发时线程
+            # 仍在运行 → "QThread: Destroyed while thread is still running"
+            # qFatal（0xC0000409 fail-fast）。改挂 finished 延迟回收：
+            # requestInterruption 促其自退，退出时由 finished 信号安全析构。
+            try:
+                worker.requestInterruption()
+            except Exception:
+                pass
+            try:
+                worker.finished.connect(worker.deleteLater)
+            except RuntimeError:
+                pass
+            logger.error(f"[ChatEngine] PreSendWorker timeout after {_PRESEND_TIMEOUT_MS}ms, aborting send")
+            self._emit(
+                "error",
+                f"消息预处理超时（{_PRESEND_TIMEOUT_MS // 1000}s），已中止本次发送",
+            )
+            return False
+
+        # T6-A: 释放 _PreSendWorker 的 QThread C++ 对象（走到这里线程必已结束，
+        # 直接 deleteLater 安全；正常路径与 _error 提前 return 分支都覆盖）。
         try:
             worker.deleteLater()
         except RuntimeError:
@@ -717,9 +757,22 @@ class UIEngine(BaseEngine):
             budget_tokens,
             ratio,
         )
-        _cached = getattr(self, "_ctx_usage_cache", None)
-        if _cached and _cached.get("key") == _cache_key and _cached.get("value") is not None:
-            return self._snapshot_copy(_cached["value"])
+        # [B3] 命中读走 hooks/UI 统一 store（键与 usage.py 同构）：同状态
+        # 的 hook 取用不再迫使 UI 侧失效重算，反之亦然。
+        from app.core.context.usage import _unified_snap_store, _unified_snapshot_key, _store_snapshot
+
+        _unified_key = _unified_snapshot_key(
+            session,
+            llm_config,
+            backend=self._backend,
+            api_prompt_tokens=api_prompt_tokens,
+            from_api=from_api,
+            budget_tokens=budget_tokens,
+            ratio=ratio,
+        )
+        _cached = _unified_snap_store.get(_unified_key)
+        if _cached is not None:
+            return self._snapshot_copy(_cached)
 
         # S2: 上下文投影（ui stage）— 与 send stage 共用同一 cascade，
         # 保证「UI 估算 = 实际发送量」是结构性一致，不再手工重复截断。
@@ -881,7 +934,9 @@ class UIEngine(BaseEngine):
             "breakdown": breakdown,
             "pruned_tokens": pruned_tokens,
         }
-        self._ctx_usage_cache = {"key": _cache_key, "value": snapshot}
+        # [B3] 写入统一 store（engine 旧 _ctx_usage_cache 退役）：hooks 侧
+        # 同键取用直接复用本产物。
+        _store_snapshot(_unified_key, snapshot)
         return self._snapshot_copy(snapshot)
 
     @staticmethod

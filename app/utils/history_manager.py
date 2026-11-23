@@ -28,6 +28,7 @@ from PyQt5.QtCore import QObject, QRunnable, QThreadPool, QTimer, pyqtSignal
 
 from app.core.conversation.message_content import consolidate_messages, content_to_text
 from app.core.infra.token_estimator import count_messages_tokens
+from app.plugins.contracts.storage import SessionBulkGetCapability
 from app.utils.utils import deserialize_from_json, get_app_data_dir, serialize_for_json
 
 
@@ -1885,6 +1886,15 @@ class HistoryManager:
         💡 内存优化：委托 get_session_by_session_id 处理懒加载，
         避免启动时一次性反序列化所有消息。
 
+        [I8] 双读去重：切会话路径先调 get_session_by_session_id（懒回填后
+        内存记录即合并 extras 的全量消息），紧随的本次调用原实现会再走
+        get_full_messages 把同一会话大 blob 完整重读解压一遍。现在优先复用
+        _history_sessions 内已持有非空 messages 的记录（懒回填/本窗口保存
+        写入，均为全量形态）；⚠ 只信任内存列表内的记录——
+        get_session_by_session_id 的 SQLite 直查分支返回未合并 extras 的
+        剥离态，不能当全量用。跨窗口一致性权衡：内存记录可能落后于他窗
+        刚写入的 DB（多窗同会话并发写为边界场景），换取砍掉一整次全量 I/O。
+
         🛡️ 必须返回全量消息（主 blob + session_msg_extras 合并）：
         SQLite 主 blob 的历史消息已被剥离 arguments/diff/reasoning_content
         （仅 _x_idx 哨兵标记）。若把轻量列表直接塞进内存会话，用户在该
@@ -1897,6 +1907,10 @@ class HistoryManager:
         if not session_id:
             return None
         if self._use_sqlite and self._session_store and self._session_store.is_initialized:
+            # [I8] 内存命中复用（懒回填/保存链写入的全量形态）
+            for session in self._history_sessions:
+                if session.get("session_id") == session_id and session.get("messages"):
+                    return session["messages"]
             full = self._session_store.get_full_messages(session_id)
             if full:
                 return full
@@ -1904,6 +1918,56 @@ class HistoryManager:
         if session:
             return session.get("messages", [])
         return None
+
+    def get_sessions_messages_bulk(self, session_ids: List[str]) -> Dict[str, List[Dict]]:
+        """[I8] 批量取多会话全量消息（团队恢复循环读批量化）。
+
+        引擎实现 SessionBulkGetCapability（get_by_ids）时：主 blob 1~2 次
+        IN 查询取回全部成员会话（原 N 次 SELECT * 全 blob 读），extras 仍按
+        会话 load_msg_extras 小查询补合并（行数少、走 idx_msg_extras_session，
+        非瓶颈）。引擎不支持或批量失败时回退逐会话 get_session_messages
+        （与原循环单读语义一致，第三方引擎零波及）。
+
+        Returns:
+            {session_id: 全量消息列表}；查不到/失败的 sid 不出现在结果中。
+        """
+        ids = [sid for sid in (session_ids or []) if sid]
+        if not ids:
+            return {}
+        store = self._session_store
+        if not (self._use_sqlite and store and store.is_initialized):
+            return {}
+        bulk: Dict[str, Dict] = {}
+        try:
+            if isinstance(store, SessionBulkGetCapability):
+                bulk = store.get_by_ids(ids) or {}
+        except Exception as e:
+            logger.warning(f"[HistoryManager] 批量取会话失败，回退逐会话读取: {e}")
+            bulk = {}
+        if not bulk:
+            # 能力缺失或批量失败：回退逐会话单读（原语义）
+            out: Dict[str, List[Dict]] = {}
+            for sid in ids:
+                msgs = self.get_session_messages(sid)
+                if msgs:
+                    out[sid] = msgs
+            return out
+        out = {}
+        for sid in ids:
+            sess = bulk.get(sid)
+            if not sess:
+                continue
+            messages = sess.get("messages", []) or []
+            try:
+                extras = store.load_msg_extras(sid)
+                if extras:
+                    from app.core.store.session_repository import merge_extras_into
+
+                    merge_extras_into(messages, extras)
+            except Exception as e:  # noqa: BLE001 — 单会话 extras 失败降级轻量，不拖垮整批
+                logger.warning(f"[HistoryManager] 批量 extras 合并失败 {sid[:8]}: {e}")
+            out[sid] = messages
+        return out
 
     def get_team_sessions_by_run_id(self, run_id: str) -> List[Dict]:
         """按团队 run_id 获取全部成员会话（轻量，不含 messages）。
@@ -2433,13 +2497,18 @@ class HistoryManager:
                 self._save_inflight -= 1
             self._save_cond.notify_all()
 
-    def _wait_inflight_saves(self, timeout: float = 5.0) -> bool:
+    def _wait_inflight_saves(self, timeout: float = 2.0) -> bool:
         """等待所有已交给后台线程的写盘结束（返回 False = 超时）。
 
         为什么需要：_do_save / flush_async 都在**起线程之前**就把
         _pending_save_session_id 置 None，flush() 只看 pending 会判定「无事可做」
         直接跳过 → 进程退出时 daemon 写线程被静默杀掉，最后一次保存丢失。
         本方法补上「等已交出去的写」这一环，flush() 之后才能安全地穿透提交。
+
+        [I1] 超时 5s→2s：本方法在调用线程同步等待（含主线程停止路径），
+        5s 上限意味着最坏卡 UI 一拍 5 秒；大会话写盘常态 700ms 级、带 3 次
+        重试也在 2s 内可完成，2s 足够覆盖正常在飞写。超时仍走 ERROR 告警
+        （下方日志），退出链后续由 DatabaseManager.close 的 flush 兜底。
         """
         deadline = time.monotonic() + timeout
         with self._save_cond:

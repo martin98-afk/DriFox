@@ -148,6 +148,19 @@ CATALOG: Dict[str, CapabilitySpec] = {
             _UI,
             ["set_workdir", "sync_working_directory"],
         ),
+        # ── 本地文件 ──
+        # 注册型 + 调用型混合：既能登记接管项（宿主打开本地文件前按 priority
+        # 询问），也能让插件把某个路径交给接管链（无人接管再降级系统程序）。
+        # 定 medium 的理由：接管项位于宿主的打开路径上，能改变其他插件/用户
+        # 点击文件的实际去向（priority 高 + can_open 恒真即可静默全接管），
+        # 但不读写数据、不产生外发，够不上 high。
+        _spec(
+            "file.open",
+            _M,
+            "打开本地文件：注册接管项（priority 链）或把路径交接管链，无人接管降级系统程序",
+            _UI,
+            value_style="value",
+        ),
         # ── 项目 ──
         _spec(
             "project.read",
@@ -262,7 +275,12 @@ CATALOG: Dict[str, CapabilitySpec] = {
         _spec("window.host", _L, "宿主顶层窗口（弹窗/InfoBar 的合适 parent）", _UI),
         _spec("window.list", _L, "存活窗口 id 集合", _UI),
         _spec("window.events", _M, "订阅 tab 切换等窗口级事件", _UI),
-        _spec("window.workbench", _M, "打开/刷新右侧工作台页", _UI),
+        _spec(
+            "window.workbench",
+            _M,
+            "打开/刷新右侧工作台页；page(key) 取页面实例供插件对自己的页做原位操作",
+            _UI,
+        ),
         # ── 插件管理 ──
         _spec("plugin.read", _L, "已安装插件列表/元数据", _UI),
         _spec(

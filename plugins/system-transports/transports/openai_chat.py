@@ -51,6 +51,17 @@ _REASONING_REJECTED_PARAMS = frozenset({"temperature", "top_p"})
 # 避免用户存的 max / minimal 直发导致 400）
 _OPENAI_REASONING_EFFORTS = ["low", "medium", "high", "xhigh"]
 
+def _is_official_gemini_endpoint(llm_config: Dict[str, Any]) -> bool:
+    """是否直连 Google 官方 Gemini 端点（只有它接受顶层 ``google`` 扩展字段）。
+
+    聚合网关（如 opencode.ai/zen/*、各中转站）同样承载 gemini 模型，但自有 provider
+    路由语义：顶层 ``google`` 会被拒，报 400 "google: cannot be represented by
+    google; use scoped provider_options"（2026-11-19 实测 OpenCode Go）。
+    故 Gemini 专有扩展字段只对官方端点下发，其余网关保持原请求形状。
+    """
+    url = str(llm_config.get("API_URL", "") or "").lower()
+    return "generativelanguage.googleapis.com" in url
+
 def _openai_model_serial(model: str) -> Optional[float]:
     """从 ``gpt-<主>.<次>`` 形态的模型名解出版本号；其他形态返回 None。
 
@@ -91,6 +102,20 @@ def _rejects_sampling_param(model: str, param: str) -> bool:
     if param not in _REASONING_REJECTED_PARAMS:
         return False
     return _uses_max_completion_tokens(model)
+
+def _unsupported_params(llm_config: Dict[str, Any]) -> frozenset:
+    """服务商插件声明的请求参数黑名单（capabilities.unsupported_params）。
+
+    「某家上游不收哪个字段」属服务商知识，由 providers 插件按 family 声明，
+    transport 只做通用剔除，不按 provider 硬编码：Gemini 原生 generateContent
+    没有 penalty 概念，OpenAI 兼容层会把未知字段透传给 protobuf 解析并报 400
+    Unknown name，整个请求连正常内容一起被拒。
+    """
+    try:
+        raw = get_provider_profile(llm_config).get("unsupported_params") or ()
+    except Exception:
+        return frozenset()
+    return frozenset(str(k) for k in raw)
 
 def _effort_values_for(model: str, values: Optional[List[str]] = None) -> List[str]:
     """思考等级合法档位：声明/models.dev 有值则用之，OpenAI 推理模型回退内置档位。"""
@@ -199,6 +224,7 @@ class OpenAIChatTransport:
         model = str(llm_config.get("模型名称", "gpt-4o") or "gpt-4o")
         extra_body: Dict[str, Any] = {}
         top_level: Dict[str, Any] = {}
+        denied = _unsupported_params(llm_config)
 
         for cn_key, value in llm_config.items():
             if cn_key in _CONFIG_ONLY_KEYS or cn_key in QUOTA_EXCLUDE_KEYS():
@@ -211,6 +237,10 @@ class OpenAIChatTransport:
             if not en_key and _VALID_IDENTIFIER_PATTERN.match(cn_key):
                 en_key = cn_key
             if not en_key or en_key == "max_tokens":
+                continue
+            if en_key in denied:
+                # 服务商声明不收该字段（如 Gemini 无 penalty 语义），静默丢弃：
+                # 相近行为由上游默认值覆盖，发出去只会让整个请求 400
                 continue
             if en_key in _SAMPLING_PARAMS:
                 # 推理模型（o1/o3 及 gpt-5+）拒绝 temperature / top_p，携带即 400；
@@ -275,6 +305,34 @@ class OpenAIChatTransport:
         enable_value = caps.get("thinking_enable_value", "enabled")
         if not t_param:
             t_param = get_provider_profile(llm_config).get("thinking_param")
+
+        # Gemini 官方端点特化（2026-11-19 实测）：
+        # 1) 兼容层默认只回最终答案，思考摘要必须显式请求 include_thoughts；
+        #    该字段与 reasoning_effort 语义正交（前者=是否返回摘要，后者=想多久），
+        #    不触发官方「reasoning_effort 与 thinking_level/thinking_budget 互斥」约束。
+        # 2) 顶层 thinking_budget / thinking 会被 protobuf 直接拒（Unknown name），
+        #    预算型模型（2.5 系）改走 reasoning_effort（官方有 low/medium/high 映射）。
+        # 聚合网关不认这些扩展，传入即 400，故只对官方端点生效。
+        if _is_official_gemini_endpoint(llm_config):
+            extra_body.pop("thinking_budget", None)
+            if thinking_mode is True:
+                google = extra_body.get("google")
+                if not isinstance(google, dict):
+                    google = {}
+                    extra_body["google"] = google
+                thinking_config = google.get("thinking_config")
+                if not isinstance(thinking_config, dict):
+                    thinking_config = {}
+                    google["thinking_config"] = thinking_config
+                thinking_config["include_thoughts"] = True
+            if t_param == "thinking_budget":
+                t_param = "reasoning_effort"
+            if thinking_mode is not True:
+                # 上游不接受顶层 thinking:disabled（同样 Unknown name 400）。
+                # Gemini 3/4 本就无法关闭思考；2.5 需 reasoning_effort=none，
+                # 走档位归一化会被收敛成 low，故此处静默不发，保留上游默认。
+                extra_body.pop("thinking", None)
+                return
 
         if thinking_mode is True:
             if t_param == "thinking":

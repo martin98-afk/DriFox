@@ -3,7 +3,7 @@
 
 覆盖：
 1. 状态点三色（ok=绿 / unreachable=红 / auth_failed=红 / 其余=灰）+ 无点场景
-2. 副标题格式「{模型名称} · {N} 个模型」+ 「模型列表」键缺失时退化
+2. 副标题格式「N 个模型 · M 启用」（M=启用数）+ 「模型列表」键缺失时退化
 3. tooltip（中文状态 + 探测方式 + 状态更新相对时间）
 """
 
@@ -142,7 +142,7 @@ class TestStatusDot:
 
 class TestSubtitle:
     def test_subtitle_with_model_count(self, _qapp, registry):
-        """有「模型列表」→ 「{模型名称} · {N} 个模型」"""
+        """有「模型列表」无关闭列表 → 「N 个模型 · N 启用」（全部启用）"""
         item = _make_item(
             {
                 "provider_name": "测试服务商",
@@ -151,10 +151,10 @@ class TestSubtitle:
                 "模型列表": ["a", "b", "c"],
             }
         )
-        assert item.modelLabel.text() == "gpt-x · 3 个模型"
+        assert item.modelLabel.text() == "3 个模型 · 3 启用"
 
     def test_subtitle_without_model_list_key(self, _qapp, registry):
-        """「模型列表」键缺失（词典兜底态）→ 只显示模型名"""
+        """「模型列表」键缺失（词典兜底态）→ 空串"""
         item = _make_item(
             {
                 "provider_name": "测试服务商",
@@ -162,7 +162,7 @@ class TestSubtitle:
                 "模型名称": "gpt-x",
             }
         )
-        assert item.modelLabel.text() == "gpt-x"
+        assert item.modelLabel.text() == ""
 
     def test_subtitle_empty_list_counts_zero(self, _qapp, registry):
         """空列表是显式值（0 个模型）→ 显示计数"""
@@ -174,14 +174,38 @@ class TestSubtitle:
                 "模型列表": [],
             }
         )
-        assert item.modelLabel.text() == "gpt-x · 0 个模型"
+        assert item.modelLabel.text() == "0 个模型 · 0 启用"
 
     def test_subtitle_empty_model_name(self, _qapp, registry):
         """无模型名但有列表 → 只显示计数"""
         item = _make_item(
             {"provider_name": "测试服务商", "API_URL": "https://api.example.com/v1", "模型列表": ["a"]}
         )
-        assert item.modelLabel.text() == "1 个模型"
+        assert item.modelLabel.text() == "1 个模型 · 1 启用"
+
+    def test_subtitle_enabled_excludes_disabled(self, _qapp, registry):
+        """启用数 = 模型列表扣除「模型关闭列表」；总数仍含关闭模型"""
+        item = _make_item(
+            {
+                "provider_name": "测试服务商",
+                "API_URL": "https://api.example.com/v1",
+                "模型列表": ["a", "b", "c", "d"],
+                "模型关闭列表": ["b", "d"],
+            }
+        )
+        assert item.modelLabel.text() == "4 个模型 · 2 启用"
+
+    def test_subtitle_disabled_legacy_string(self, _qapp, registry):
+        """磁盘旧数据：关闭列表为字符串字面量同样解析"""
+        item = _make_item(
+            {
+                "provider_name": "测试服务商",
+                "API_URL": "https://api.example.com/v1",
+                "模型列表": ["a", "b", "c"],
+                "模型关闭列表": "['a']",
+            }
+        )
+        assert item.modelLabel.text() == "3 个模型 · 2 启用"
 
 
 class TestTooltip:

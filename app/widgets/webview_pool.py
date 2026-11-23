@@ -74,7 +74,7 @@ def _load_idle_gc_enabled() -> bool:
 
     背景：关 tab 后 viewer 入池保活，池内 renderer 进程（单个 65~217MB）
     原本只有关闭最后一个 tab 才清池 → 「关闭对话后内存不回落」。开时，
-    release 入池后挂 60s 延迟单发 QTimer，到点仍无复用则 clear() 清池。
+    release 入池后挂 180s 延迟单发 QTimer，到点仍无复用则 clear() 清池。
 
     默认开；设 0/false/no（不分大小写）关闭 → 完全回现状（不清池）。
     import 期读取固化，进程内不热变（实验按进程设 env 启动），
@@ -89,9 +89,12 @@ _IDLE_GC_ENABLED = _load_idle_gc_enabled()
 def _idle_gc_enabled() -> bool:
     return _IDLE_GC_ENABLED
 
-# 延迟清池窗口：最后一次 release 后 60s 内无 acquire 命中才清。
-# 取 60s：用户「关掉再重开」的最常见间隔内保留复用收益，之后释放内存。
-_IDLE_GC_DELAY_MS = 60_000
+# 延迟清池窗口：最后一次 release 后 180s 内无 acquire 命中才清。
+# [#R3/#11c] 30s → 180s：池心跳实测 94% 采样两桶皆空，命中率 9% 不是取不到
+# 而是没货——30s 比实测 acquire 间隔（60~120s）还短，归还的 viewer 在下次
+# 取用前就被 _idle_gc → clear() 清掉（67 次归还中 22 次如此）。180s 覆盖
+# 该间隔；代价=关 tab 后最长 180s 才回收 renderer，容量仍 2 不新增实例。
+_IDLE_GC_DELAY_MS = 180_000
 _IDLE_GC_DELAY_S = _IDLE_GC_DELAY_MS / 1000.0
 
 # [O4] 池命中率周期日志：60s 一行 INFO（字段与 stats() 一致 + hit_rate 派生值）。
@@ -183,7 +186,12 @@ class WebViewPool:
             # kill 成功的实例走上方 evict 分支销毁、kill 失败的已回滚，此处覆盖
             # 未来新增置位路径遗漏回滚的情况，保证复用行为与未回收实例一致
             viewer._heal_suppressed = False
-            # perf: #26 60s 窗口内重开 tab 取走 viewer → 取消清池，保留复用收益
+            # [R2 #13] 新卡接管时通道开关重评（同 reset_for_reuse 归还路径，此处
+            # 兜底覆盖池外遗留置 False 的情况）。惰性 import：本模块被启动链
+            # （memory_governor 等）惰性引用，顶层引 card_viewers 会连带重模块。
+            from app.widgets.card_viewers import _render_v2_enabled
+            viewer._render_v2 = _render_v2_enabled()
+            # perf: #26 180s 窗口内重开 tab 取走 viewer → 取消清池，保留复用收益
             # 仅全池取空才取消；其他桶或本桶剩余页面仍需到期释放。
             if not any(self._idle.values()):
                 self._cancel_idle_gc()
@@ -232,15 +240,60 @@ class WebViewPool:
         return True
 
     def clear(self) -> None:
-        """清空并销毁所有池中 viewer（退出 / 主题全局刷新等场景）。"""
+        """清空并销毁所有池中 viewer（退出 / 主题全局刷新等场景）。
+
+        perf(memory) I2 点位②：销毁前把 viewer 持有的 renderer pid 移交活窗口
+        卸载记账（_register_unloaded_pid，复用其按 pid 去重与背压）。此前 clear
+        只 deleteLater，进程退出依赖 Chromium 内部回收；池内 pid 只在「viewer
+        在池」时被 T31 的 _idle_pool_pids 覆盖，clear 后 pid 离开所有候选域——
+        进程若未随对象销毁退出，~60MB 滞留无兜底。移交后 T31 按记账 ts 兜底
+        （idx=-1 → 批次视为已裁掉=足够远，允许回收），回收窗口 60s~285s → ~65s。
+        复用安全性：移交 pid 若被新卡片共享复用，T31/闸门 kill 前的
+        _pid_still_in_use 卡片护栏命中跳过，不会误杀在用 renderer。
+        """
+        handover = []
         for bucket in self._idle.values():
             while bucket:
-                self._safe_delete(bucket.pop(0))
+                viewer = bucket.pop(0)
+                try:
+                    pid = int(viewer.__dict__.get("_renderer_pid", 0) or 0)
+                except Exception:
+                    pid = 0
+                if pid > 0:
+                    handover.append(pid)
+                self._safe_delete(viewer)
+        if handover:
+            self._handover_pids_to_ledger(handover)
+
+    @staticmethod
+    def _handover_pids_to_ledger(pids: List[int]) -> None:
+        """把池 clear 后仍存活的 renderer pid 登记进一个活窗口的卸载记账。
+
+        登记一个窗口即够：T31 回收拍（45s）按窗口逐个执行，任一窗口的
+        记账都会被兜底扫描。无活窗口（退出期）静默跳过——进程即将结束，
+        记账无意义。异常全兜底，不得反噬 clear 主流程。
+        """
+        try:
+            from app.core.infra import window_registry
+
+            for win in window_registry.alive_window_instances():
+                register = getattr(win, "_register_unloaded_pid", None)
+                if register is None:
+                    continue
+                now = time.time()
+                for pid in pids:
+                    try:
+                        register(pid, now, -1)
+                    except Exception:
+                        pass
+                return
+        except Exception:
+            pass
 
     # ── [MEM #26] 池内 idle 延迟清池 ────────────────────────────
 
     def _schedule_idle_gc(self) -> None:
-        """挂/重启延迟清池单发 QTimer（最后一次 release 后 60s 无复用即清）。
+        """挂/重启延迟清池单发 QTimer（最后一次 release 后 180s 无复用即清）。
 
         QTimer 挂 _ensure_host() 的 host：本类非 QObject，self 挂不了；
         host 与池同生命周期，timer 随 host 销毁，无泄漏。已存在则 start()
@@ -260,13 +313,13 @@ class WebViewPool:
         timer.start(_IDLE_GC_DELAY_MS)
 
     def _cancel_idle_gc(self) -> None:
-        """acquire 命中池时取消待执行的清池（60s 内重开 tab 的场景）。"""
+        """acquire 命中池时取消待执行的清池（180s 内重开 tab 的场景）。"""
         timer = self._idle_gc_timer
         if timer is not None and self._is_alive(timer):
             timer.stop()
 
     def _idle_gc(self) -> None:
-        """到点检查：有任何池内成员未满 60s → 重排下一窗；全过期 → clear()。
+        """到点检查：有任何池内成员未满 180s → 重排下一窗；全过期 → clear()。
 
         重排防御 GC pending 期间归还的实例：release 会重启 timer，但
         timeout 与事件队列的交错顺序不可依赖，这里按新鲜度兜底重排。

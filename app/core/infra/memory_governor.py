@@ -177,18 +177,9 @@ def _cleanup_global_lru_caches():
         invalidate_render_caches()
     except Exception:
         pass
-    try:
-        from app.utils.utils import invalidate_icon_cache
-
-        invalidate_icon_cache()
-    except Exception:
-        pass
-    try:
-        from app.utils.provider_icons import invalidate_provider_icon_cache
-
-        invalidate_provider_icon_cache()
-    except Exception:
-        pass
+    # [E2-R] 图标缓存（utils._ICON_CACHE / provider_icons._ICON_CACHE）不再随会话清理：
+    # 两者键空间均与会话无关（前者键=图标名且 QIcon 持主题感知 engine，后者键含
+    # provider 名与主题位），切会话清掉只会导致图标重载；主题切换由键/engine 自行适配。
 
 
 def _compact_process_heap_after_cleanup():
@@ -226,7 +217,6 @@ _GC_FULL_EVERY_N = 8
 _GC_FULL_MIN_INTERVAL_S = 120.0
 _gc_partial_count = 0
 _last_gc_full_at = 0.0
-
 
 # ═══════════════ T22 动态阈值闸门（按 RSS 决策，不只按页数） ═══════════════
 
@@ -472,7 +462,7 @@ def enforce_renderer_rss_gate(host) -> str:
 # 累计 +357MB 全部滞留；8 个合计 493MB 低于 RSS 软阈 800 → RSS 闸门不触发
 # （总量应急的设计边界）。本回收器与 enforce_renderer_rss_gate 互补：
 # 闸门管「总量超限」（症状驱动），本函数管「单页空闲」（时间驱动），判据正交。
-RENDERER_IDLE_RECLAIM_S = 180.0  # 空闲 3 分钟（#37 条 2：420→180，2026-11-15）
+RENDERER_IDLE_RECLAIM_S = 90.0  # 空闲 90s（#37 条 2：420→180，2026-11-15；[#R3] 180→90 压到达下限时间）
                                   # 依据 t33 §6.2 静置实测：8 个 renderer 静置
                                   # 合计 540MB 全滞留（池内 pid 占大头）。keep-tab 保留期
                                   # 与 LRU keep 兜底仍在（活跃视口 ±2 批豁免 +
@@ -655,6 +645,7 @@ def reclaim_idle_renderers(host) -> int:
         victims.sort()
         killed = 0
         kill_set = set()
+        dead_pids = set()
         for _ts, pid in victims[:RENDERER_IDLE_RECLAIM_BATCH_MAX]:
             if _pid_used_by_alive_windows(pid, exclude=host):
                 continue  # T16/T22 全局护栏
@@ -666,24 +657,34 @@ def reclaim_idle_renderers(host) -> int:
                     viewer._renderer_pid = 0
                 except Exception:
                     pass
+                dead_pids.add(pid)
                 continue
             suppressed = _suppress_viewer_heal(viewer)
             try:
                 if host._kill_renderer(pid):
                     killed += 1
                     kill_set.add(pid)
+                elif not _pid_alive(pid):
+                    # perf(memory) I2 点位①：kill 失败且进程已不存在（典型：池 clear
+                    # 已销毁 viewer，Chromium 已自行退出）→ 死条目移出记账。P2-1 只
+                    # 覆盖 viewer 在池场景；viewer=None 时 kill 恒 False 且
+                    # suppressed=False，旧实现什么都不做 → 死条目每拍重复探测。
+                    # 活进程 kill 失败（AccessDenied/校验拒）仍保留记账下拍重试。
+                    dead_pids.add(pid)
                 elif suppressed:
                     _restore_viewer_after_failed_kill(viewer)
             except Exception:
                 _restore_viewer_after_failed_kill(viewer)
                 continue
-        if kill_set:
+        purge = kill_set | dead_pids
+        if purge:
             try:
-                host._unloaded_pids = [e for e in entries if e[0] not in kill_set]
+                host._unloaded_pids = [e for e in entries if e[0] not in purge]
             except Exception:
                 pass
+        if kill_set:
             try:
-                host._last_kill_at = now  # 与 RSS 闸门共用 60s 冷却
+                host._last_kill_at = now  # 与 RSS 闸门共用 60s 冷却；死条目清理（I2）非 kill 动作，不写冷却
             except Exception:
                 pass
         return killed

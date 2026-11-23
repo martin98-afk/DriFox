@@ -299,26 +299,13 @@ class SystemWorktreePage(QWidget):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
-        # 页头：标题 + 仓库路径
-        header = QWidget(self)
-        header_layout = QHBoxLayout(header)
-        header_layout.setContentsMargins(12, 10, 12, 6)
-        header_layout.setSpacing(8)
-
-        self._title_label = BodyLabel("工作树", header)
-        Colors.refresh()
-        self._title_label.setStyleSheet(
-            f"color: {Colors.TEXT_PRIMARY}; font-weight: 600;"
-            f" {get_font_family_css()} {font_size_css(14)}"
-        )
-        header_layout.addWidget(self._title_label)
-        header_layout.addStretch()
-        root.addWidget(header)
+        # 页面标题由右侧工作台页签承担，页内不再重复
 
         # 内容容器
+        Colors.refresh()
         self._body = QWidget(self)
         self._body_layout = QVBoxLayout(self._body)
-        self._body_layout.setContentsMargins(12, 0, 12, 12)
+        self._body_layout.setContentsMargins(12, 12, 12, 12)
         self._body_layout.setSpacing(8)
         self._body_layout.addStretch(1)
         root.addWidget(self._body, 1)
@@ -536,10 +523,6 @@ class SystemWorktreePage(QWidget):
     def refresh_style(self):
         """主题刷新：重建整页（内联样式在构造时写死）"""
         Colors.refresh()
-        self._title_label.setStyleSheet(
-            f"color: {Colors.TEXT_PRIMARY}; font-weight: 600;"
-            f" {get_font_family_css()} {font_size_css(14)}"
-        )
         self._empty_hint.setStyleSheet(
             f"background: transparent; color: {Colors.TEXT_MUTED};"
             f" {get_font_family_css()} {font_size_css(13)} padding: 24px;"

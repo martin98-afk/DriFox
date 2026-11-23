@@ -202,11 +202,11 @@ class HoverPreviewController:
         self._on_leave = on_leave
         self._previewing = False
         self._show_pending = False  # 挂起的展开意图（_do_enter 的判据，防迟到触发）
-        self._hide_timer = QTimer()
+        self._hide_timer = QTimer(self._overlay)
         self._hide_timer.setSingleShot(True)
         self._hide_timer.setInterval(int(hide_delay_ms))
         self._hide_timer.timeout.connect(self._do_leave)
-        self._show_timer = QTimer()
+        self._show_timer = QTimer(self._overlay)
         self._show_timer.setSingleShot(True)
         self._show_timer.setInterval(int(show_delay_ms))
         self._show_timer.timeout.connect(self._do_enter)

@@ -281,6 +281,21 @@ class TimerScheduler:
                     due.append(dict(task))
         due.sort(key=lambda item: item["fire_at"])  # 同 tick 多任务按到期先后触发
         for snapshot in due:
+            # queue 模式（默认）的语义是「等本轮结束再发」，所以必须等目标窗口空闲
+            # 才发：主程序 drain 是 while 循环，同批多条 send 会在第二条之后撞上
+            # engine 已流式 → 回滚 UI 并降级为 interject 插话，导致「后几条定时被
+            # 并进上一轮回答，没各自开新一轮」。忙则本轮不消耗任务（firing 复位、
+            # fire_at 保持到期），下个 tick 再看；本 tick 发出一条后窗口即转忙，
+            # 同 tick 余下任务自然被拦在同一处。skip/hook 不改语义：它们本就要求
+            # 在忙时走各自的拒绝/注入分支。
+            if snapshot.get("mode", "queue") == "queue" and self._session_busy(
+                snapshot.get("session_id", "")
+            ):
+                with self._lock:
+                    task = self._tasks.get(snapshot["id"])
+                    if task is not None:
+                        task["firing"] = False
+                continue
             try:
                 self._fire(snapshot)
             except Exception as e:  # noqa: BLE001 - 单任务异常不拖垮整个 tick
@@ -531,6 +546,11 @@ class TimerScheduler:
 
     def _find_window(self, session_id: str) -> Optional[str]:
         """按 session_id 反查窗口 id（遍历 UIPluginRegistry 的窗口主部件表）。"""
+        entry = self._find_window_entry(session_id)
+        return entry[0] if entry is not None else None
+
+    def _find_window_entry(self, session_id: str) -> Optional[tuple]:
+        """按 session_id 反查 (window_id, main_widget)，供窗口忙判定复用。"""
         try:
             from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
 
@@ -543,10 +563,47 @@ class TimerScheduler:
                 except Exception:  # noqa: BLE001 - 单窗口异常不影响其余窗口匹配
                     continue
                 if session is not None and getattr(session, "session_id", "") == session_id:
-                    return str(window_id)
+                    return str(window_id), main_widget
         except Exception as e:  # noqa: BLE001
             logger.warning(f"[system-timer] 窗口定位失败: {e}")
         return None
+
+    def _session_busy(self, session_id: str) -> bool:
+        """目标会话所在窗口是否在途（流式中/发送待启动）。找不到窗口返回 False，
+        交给 _fire 走「未找到目标窗口」的 missed 分支，与原有语义一致。
+
+        整体 try：本方法在 tick 的 QTimer 槽内调用，槽内未捕获异常会 abort 进程
+        （PyQt5 ≥5.5），查询失败一律按「不忙」退回原行为。
+        """
+        try:
+            entry = self._find_window_entry(session_id)
+            if entry is None:
+                return False
+            return self._widget_busy(entry[1])
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"[system-timer] 窗口忙判定失败，按空闲处理: {e}")
+            return False
+
+    @staticmethod
+    def _widget_busy(main_widget: Any) -> bool:
+        """窗口忙判据：engine 真实状态优先，缺失时回退 UI 标志与延迟发送计数。
+
+        只读宿主对象状态，不触碰 UI：tick 在主线程跑，读属性是安全的。
+        _deferred_send_pending 必须计入——_on_send_clicked 已建卡登记、worker
+        尚未启动的那一 tick 内 engine.is_streaming 仍为 False。
+        """
+        engine = getattr(getattr(main_widget, "backend", None), "chat_engine", None)
+        if engine is not None:
+            try:
+                return bool(engine.is_streaming)
+            except Exception:  # noqa: BLE001 - 状态读取失败按后续判据继续
+                pass
+        if bool(getattr(main_widget, "_is_streaming", False)):
+            return True
+        try:
+            return int(getattr(main_widget, "_deferred_send_pending", 0) or 0) > 0
+        except Exception:  # noqa: BLE001
+            return False
 
     def _send(self, text: str, window_id: str, mode: str = "queue") -> bool:
         """经目标窗口 tool surface 能力池 session.send 入队（mode 透传触发方式）。"""

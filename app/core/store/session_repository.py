@@ -5,6 +5,7 @@
 从 SessionStore 中提取的会话 CRUD 逻辑。
 """
 
+import hashlib
 from datetime import datetime
 from pathlib import Path
 from threading import RLock, Thread
@@ -57,6 +58,229 @@ def merge_extras_into(messages: List[Any], extras: Dict[int, Dict[str, Any]]) ->
 
 
 # ── vision base64 落盘（方案 1，T1d 底稿）──
+
+
+# 嵌套结构递归哈希的预算：防止深/大结构把指纹成本跑到 str() 之上
+_FP_MAX_DEPTH = 6
+_FP_MAX_NODES = 2000
+_FP_CHUNK = 2048
+# 降级摘要采样窗口（字节）：短于 3×窗口时直接整串哈希（零碰撞）；更长时
+# 取头/中/尾各一窗。按 UTF-8 字节切片：1024 字节 ≈ 341 个中文汉字或
+# 256 emoji，与旧实现的 `str(val)[:1024]` **字符**口径不等价（实际窗口更小）。
+# 三窗合计 3KB，成本可忽略；只看头部会让「同长度、前 1KB 相同」的差异漏判。
+_FP_TRUNC_SAMPLE = 1024
+# 小消息快速路径阈值（粗估字节）：低于此值直接走 `hash(str(msg))`。
+# 分片递归只在「大到 str() 明显吃亏」时才划算 —— 实测拐点约 32KB：
+#   8KB 的 content list：str() 2.2ms vs 分片 4.6ms（分片更慢）
+#   1MB tool_result：   str() 70ms   vs 分片 1.6ms（分片快 44x）
+# 取 32KB：覆盖绝大多数普通消息与中等流式内容，只对真正的大消息启用分片。
+_FP_FAST_PATH_BYTES = 32768
+
+
+def _fp_has_long_child(container: Any, depth: int = 3) -> bool:
+    """容器内是否含超阈值的长 str/bytes（递归 depth 层，成本仍很低）。
+
+    只下探一层会漏掉 `{role, content:短, tool_result:{payload:{data:500KB}}}`
+    这类常见嵌套：它会误走 small 路径（实测 1.58ms vs 分片 0.02ms，差 79x）。
+    下探 3 层能覆盖 tool_result / message / block 三级嵌套的惯用结构，且因为
+    每层元素数通常很少，总成本仍在微秒级。
+    """
+    if depth <= 0:
+        return False
+    values = container.values() if isinstance(container, dict) else container
+    try:
+        for item in values:
+            if isinstance(item, (str, bytes, bytearray)):
+                if len(item) >= _FP_FAST_PATH_BYTES:
+                    return True
+            elif isinstance(item, (dict, list, tuple)):
+                if _fp_has_long_child(item, depth - 1):
+                    return True
+    except Exception:
+        return False
+    return False
+
+
+def _fp_needs_chunking(msg: dict) -> bool:
+    """快速判定是否需要分片指纹（浅层扫描，成本 ~1μs）。
+
+    分片只在「内容总量大到 str() 明显吃亏」时才划算。判据按**浅层累加长度**：
+    - str/bytes 字段累加其长度
+    - 容器字段累加其直接元素的 str/bytes 长度（只下探一层）
+
+    累加超过 `_FP_FAST_PATH_BYTES` 即走分片。普通消息累加只有几百字节 →
+    走 `str()` 快速路径，与原实现同速；`{content:短, tool_result:{data:500KB}}`
+    浅层就能累出 500KB → 走分片拿 20~50x 收益。
+
+    实现上优先走「单字段快判」（含 3 层下探），避免普通消息为累加付出完整遍历。
+    """
+    for v in msg.values():
+        if isinstance(v, (str, bytes, bytearray)):
+            if len(v) >= _FP_FAST_PATH_BYTES:
+                return True
+        elif isinstance(v, (list, tuple, dict)):
+            if len(v) >= 128:  # 元素多到一定程度，str() 开销就值得改用分片
+                return True
+            if _fp_has_long_child(v):
+                return True
+    # 单字段都不够大：累加浅层长度，覆盖「多个中等字段凑成大内容」
+    total = 0
+    for v in msg.values():
+        if isinstance(v, (str, bytes, bytearray)):
+            total += len(v)
+        elif isinstance(v, dict):
+            for inner in v.values():
+                total += len(inner) if isinstance(inner, (str, bytes, bytearray)) else 16
+        elif isinstance(v, (list, tuple)):
+            for item in v:
+                if isinstance(item, (str, bytes, bytearray)):
+                    total += len(item)
+                elif isinstance(item, dict):
+                    for inner in item.values():
+                        total += len(inner) if isinstance(inner, (str, bytes, bytearray)) else 16
+                else:
+                    total += 16
+        else:
+            total += 16
+        if total >= _FP_FAST_PATH_BYTES:
+            return True
+    return False
+
+
+def _fp_hash_value(val: Any, depth: int, budget: list) -> Any:
+    """把任意值折叠成内容敏感的哈希片段（递归，带深度与节点预算）。
+
+    **必须内容敏感**：末条 content / tool_calls 常为 list[dict]，流式增长发生在
+    中间元素的文本上。只取 `(n, head_type, tail_type)` 会漏判这类变化 → 跳过
+    保存 → 崩溃窗口丢流式中间态。
+
+    预算耗尽后降级为**内容敏感**的摘要 `(len, hash(str(val)[:1024]))`：
+    只取长度的话，同长度的不同内容会得到相同指纹 = 漏判（review 实测
+    `DEPTH_TRUNC_SAME` / `NODES_TRUNC_SAME` 均为 True）。降级只发生在前
+    1024 字符也相同且长度相同时，真实消息几乎不会触发。
+
+    边界（非绝对保证）：正常结构下内容变化都能被指纹捕捉。降级摘要对 3KB
+    以内的值整串哈希（零碰撞）；更长的值取长度 + 头/中/尾各 1KB 哈希，只有
+    三窗与长度都相同、变化恰好落在采样间隙时才可能漏判（概率极低，非零）。
+    设计取向是「宁可多写一次」，碰撞发生时仍会少写一次。
+    """
+    budget[0] -= 1
+    if budget[0] <= 0 or depth > _FP_MAX_DEPTH:
+        try:
+            if isinstance(val, (str, bytes, bytearray, memoryview)):
+                if isinstance(val, str):
+                    b = val.encode("utf-8", "replace")
+                elif isinstance(val, memoryview):
+                    b = val.tobytes()
+                else:
+                    b = bytes(val)
+            else:
+                b = str(val).encode("utf-8", "replace")
+            n = len(b)
+            if n <= 3 * _FP_TRUNC_SAMPLE:
+                # 短结构整串哈希：与长度的双元组零碰撞，成本同旧实现同量级
+                return ("~trunc", n, hashlib.blake2b(b, digest_size=16).hexdigest())
+            mid = n // 2
+            half = _FP_TRUNC_SAMPLE // 2
+            return (
+                "~trunc",
+                n,
+                hashlib.blake2b(b[:_FP_TRUNC_SAMPLE], digest_size=16).hexdigest(),
+                hashlib.blake2b(b[mid - half : mid + half], digest_size=16).hexdigest(),
+                hashlib.blake2b(b[-_FP_TRUNC_SAMPLE:], digest_size=16).hexdigest(),
+            )
+        except Exception:
+            return ("~trunc", 0, 0)
+    if isinstance(val, str):
+        b = val.encode("utf-8", "replace")
+        return ("s", len(b), hash(b[:_FP_CHUNK]), hash(b[-_FP_CHUNK:]))
+    if isinstance(val, (bytes, bytearray)):
+        b = bytes(val)
+        return ("b", len(b), hash(b[:_FP_CHUNK]), hash(b[-_FP_CHUNK:]))
+    if isinstance(val, dict):
+        # 逐键递归（键排序保证顺序无关），键本身也进指纹
+        return (
+            "d",
+            len(val),
+            tuple((str(k), _fp_hash_value(val[k], depth + 1, budget)) for k in sorted(val, key=str)),
+        )
+    if isinstance(val, (list, tuple)):
+        # 逐元素递归：中间元素文本增长会改变对应片段
+        return ("l" if isinstance(val, list) else "t", len(val), tuple(
+            _fp_hash_value(v, depth + 1, budget) for v in val
+        ))
+    if isinstance(val, (int, float, bool, type(None))):
+        return ("v", type(val).__name__, val)
+    try:
+        return ("o", type(val).__name__, str(val)[:64])
+    except Exception:
+        return ("o", type(val).__name__, "")
+
+
+def _light_msg_fingerprint(msg: Any) -> tuple:
+    """末条消息的轻量内容指纹（避免 str() 全量序列化）。
+
+    原实现 `hash(str(last_msg))` 对末条做**全量**字符串化：末条带大 tool_result
+    或 base64 图片时，每次保存都要复制并哈希 1MB 级文本。
+
+    ⚠️ **不能用 `id(msg)` 做分量**：`history_manager` 每次保存都
+    `copy.deepcopy(messages)`，末条每次都是新对象、新 id，指纹永不相等 →
+    「内容未变则跳过写盘」的短路永久失效（实测：比原实现更慢）。
+
+    故只能用**内容派生量**：字段数 + 每字段递归内容哈希（`_fp_hash_value`）。
+    字符串/字节取长度 + 首尾 2KB；list/dict 递归到标量叶子，带深度与节点预算。
+
+    保证（按强度递减）：
+    - 内容相同 → 指纹相同（去重能生效）
+    - 内容不同 → 指纹几乎必然不同。**已知例外（极端）**：
+      1) 嵌套超过 `_FP_MAX_DEPTH`(6) 层或超过 `_FP_MAX_NODES`(2000) 个节点，
+         且超出部分长度相同、头/中/尾各 1KB 采样窗也相同 → 可能漏判
+      2) str/bytes 长度相同、首尾 2KB 相同、中间不同
+      两类都要求极端结构，真实消息基本触不到。
+    - 小消息不比原实现慢：体积低于 `_FP_FAST_PATH_BYTES` 直接走 `str()`
+
+    例外发生时的后果链：save() 在 `_content_hash_cache` 命中相同 content_key
+    时直接 `return True`，跳过序列化与写盘，且不更新缓存（同键会持续命中）；
+    后续内容变化若突破指纹差异，会整篇补写（写的是完整 session，之前的变更
+    一并落库）。因此这里不是零成本：**若进程在下次成功写盘前退出/崩溃，
+    这段未落库的变更会丢失**。
+    """
+    if not isinstance(msg, dict):
+        return ("non-dict", type(msg).__name__, _fp_hash_value(msg, 0, [_FP_MAX_NODES]))
+    # 极快路径：字段数少且没有任何长内容 → 直接 str()，零额外开销。
+    # 下探 3 层（见 _fp_has_long_child）：单层下探会漏掉
+    # {role, content:短, tool_result:{payload:{data:500KB}}} 这类常见嵌套，
+    # 导致它误走 str() 慢路径（实测 1.58ms vs 分片 0.02ms）。
+    if len(msg) <= 8:
+        small = True
+        for v in msg.values():
+            if isinstance(v, (str, bytes, bytearray)):
+                if len(v) >= _FP_FAST_PATH_BYTES:
+                    small = False
+                    break
+            elif isinstance(v, dict):
+                if len(v) >= 128 or _fp_has_long_child(v):
+                    small = False
+                    break
+            elif isinstance(v, (list, tuple)):
+                if len(v) >= 128 or _fp_has_long_child(v):
+                    small = False
+                    break
+        if small:
+            try:
+                return ("small", len(msg), hash(str(msg)))
+            except Exception:
+                pass
+    # 小消息快速路径：分片递归只在单项内容很大时才划算
+    if not _fp_needs_chunking(msg):
+        try:
+            return ("small", len(msg), hash(str(msg)))
+        except Exception:
+            pass
+    budget = [_FP_MAX_NODES]
+    return ("n", len(msg), tuple(
+        (str(k), _fp_hash_value(msg[k], 1, budget)) for k in sorted(msg, key=str)
+    ))
 
 
 def _persist_vision_image_blocks_impl(messages: List[Any], session_id: str, root_dir) -> List[Any]:
@@ -159,7 +383,7 @@ def revive_vision_image_refs(messages: List[Any], root_dir=None) -> List[Any]:
     import base64 as _base64
 
     if root_dir is None:
-        from app.utils.utils import get_app_data_dir
+        from app.utils.app_paths import get_app_data_dir
 
         root_dir = get_app_data_dir()
     base_dir = Path(root_dir) / "screenshots" / "persisted"
@@ -385,6 +609,11 @@ class SessionRepository:
         # 内容地址缓存：session_id -> (message_count, last_msg_hash)
         # 用于跳过内容未变的重复持久化，节省全量序列化+zstd压缩开销
         self._content_hash_cache: Dict[str, tuple] = {}
+        # [E10] extras 行集基线缓存：session_id -> {(msg_idx, field): value_bytes}
+        # _write_extras 差异 upsert 的比对基线（流式拍 extras 集合不变 → 0 写 SQL）。
+        # 缓存缺失（重启首拍/写入失败）→ 退化为旧全删全插并重建基线；delete 清理。
+        # DB extras 仅本仓储写（唯一 INSERT 点），单实例下行集缓存与 DB 一致。
+        self._extras_written: Dict[str, Dict[tuple, bytes]] = {}
         # 保护 _content_hash_cache 的读写原子性。
         # Gateway（异步写入）+ UI（同步 save）跨线程访问同一缓存时，
         # 裸 dict 的复合判断+赋值在 GIL 释放窗口内可能丢失更新或脏命中，
@@ -506,15 +735,21 @@ class SessionRepository:
             return False
 
         # 增量内容指纹：消息流式过程中只追加/修改最后一条消息，
-        # 用 (len, last_msg_hash) 二元组替代 hash(str(全量)) 避免 O(n) 字符串化。
+        # 用 (len, 末条轻量指纹) 二元组替代 hash(str(全量)) 避免 O(n) 字符串化。
         # 对于"修改历史消息"的非常规场景（如 compaction），后续 serialize 会覆盖写入。
         # 🛡️ R5（T3）：元组追加 team_members 指纹——消息未变但快照变了
         # （如 join 新成员后 _get_team_members_snapshot_json 内容更新）时
         # hash 不同不跳过，保证新快照落库（否则恢复仍丢新成员）。
+        # [PERF] 末条指纹走 _light_msg_fingerprint：原 `hash(str(last_msg))` 在
+        # 末条含大 tool_result/base64 时每次保存都全量复制 1MB 级文本。轻量版
+        # 只取字段数 + 每字段递归内容哈希（字符串取长度 + 首尾 2KB）。
+        # 极端结构（depth>6 / nodes>2000）降级为长度 + 头/中/尾各 1KB 采样，
+        # 仅采样间隙内变化可能碰撞 → 本次写盘被跳过；
+        # 后续变化会整篇补写，但崩溃窗口内的变更会丢（详见函数 docstring）。
         messages = session.get("messages", [])
         if messages:
             last_msg = messages[-1]
-            content_key = (len(messages), hash(str(last_msg)))
+            content_key = (len(messages), _light_msg_fingerprint(last_msg))
         else:
             content_key = (0, 0)
         content_key = content_key + (hash(session.get("team_members") or ""),)
@@ -536,16 +771,37 @@ class SessionRepository:
             backfill_extras_failed = True
         # [方案 1] vision base64 落盘：data:image 块 → image_ref 文件引用
         try:
-            from app.utils.utils import get_app_data_dir
+            from app.utils.app_paths import get_app_data_dir
 
             messages = _persist_vision_image_blocks_impl(messages, session_id, get_app_data_dir())
         except Exception as e:
             logger.warning(f"[SessionRepository] vision 落盘失败，按原消息继续保存: {e}")
-        try:
-            extras, light_messages = extract_offload_fields(messages)
-        except Exception as e:
-            logger.warning(f"[SessionRepository] extract_offload_fields 失败，按全量保存: {e}")
+        # [E12] 方案 α：流式拍跳过剥离，blob 直接存全量消息。
+        # 声明通道：尾条 _partial（main_widget._maybe_flush_partial_reply 每 25s
+        # 维护的流式残缺回复标记，落定拍该标记消失）——调用方已声明的流式拍，
+        # 无需新增签名参数。窗口判定：len 不减且增量 ≤ KEEP_RECENT_ROUNDS
+        # （新增全在保活窗内 → 窗外消息集合结构性不变 → extras 差异必为空），
+        # 复用 _content_hash_cache 的 len 分量，零新增结构。基线缺失/get 失效/
+        # 超窗/截断一律走全链（保守正确）。blob 全量使崩溃窗口内（一个流式拍
+        # 周期 25s）强退恢复零丢失成为结构保证；落定拍走完整链恢复剥离。
+        skip_offload = False
+        _tail = messages[-1] if messages else None
+        if isinstance(_tail, dict) and _tail.get("_partial"):
+            with self._cache_lock:
+                _cached_key = self._content_hash_cache.get(session_id)
+            if _cached_key is not None:
+                _prev_len = _cached_key[0]
+                if len(messages) >= _prev_len and len(messages) - _prev_len <= KEEP_RECENT_ROUNDS:
+                    skip_offload = True
+                    logger.debug(f"[SessionRepository] 流式拍跳过剥离（blob 全量，session={session_id[:8]}）")
+        if skip_offload:
             extras, light_messages = {}, messages
+        else:
+            try:
+                extras, light_messages = extract_offload_fields(messages)
+            except Exception as e:
+                logger.warning(f"[SessionRepository] extract_offload_fields 失败，按全量保存: {e}")
+                extras, light_messages = {}, messages
 
         try:
             now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -657,6 +913,9 @@ class SessionRepository:
                         f"[SessionRepository] backfill 读失败，跳过本轮 extras 写入"
                         f"（保留库内旧值，session={session_id[:8]}）"
                     )
+                elif skip_offload:
+                    # [E12] 流式拍：blob 已全量自含字段，extras 表与本会话基线不动
+                    pass
                 else:
                     try:
                         self._write_extras(session_id, extras)
@@ -743,57 +1002,111 @@ class SessionRepository:
 
 
     def _write_extras(self, session_id: str, extras: Dict[int, Dict[str, bytes]]) -> None:
-        """全删全插该会话的剥离字段（失败不阻塞主保存，仅记日志）。"""
+        """把本次 extract 的剥离字段同步进 DB（差异 upsert；失败不阻塞主保存）。
+
+        [E10] 旧实现全删全插（DELETE 全会话行 + executemany 重插），流式拍
+        extras 集合不变也要付 104ms@16K（E3 曲线 59-65%）。现按
+        (session_id, msg_idx, field) 行集与基线缓存 diff：
+        - 新增/变更行 → executemany INSERT OR REPLACE（len 快筛 + bytes 逐字节比对）
+        - 消失行（截断/清空）→ executemany 精确 DELETE，idx 复用不串字段
+        - 无变化拍 → 0 写 SQL（流式拍主收益）
+        - 基线缓存缺失（重启首拍/历史写入失败）→ 退化为旧全删全插并重建基线，
+          保证与旧行为严格等价；compaction 索引漂移由「同 idx 比值不等 → 覆盖、
+          旧行消失 → 删除」天然覆盖（与全删全插最终状态一致，回归锁定）。
+        语义契约不变：调用后 DB extras ≡ 本次 extract 产物（旧字段整体消失）。
+        [E16 C1] 并发防护：基线「读 cached → diff → SQL → 写回 new_rows」必须
+        原子——A 删行后 B 按旧基线 diff 会产生基线与 DB 失配（后续 diff 永不
+        重插 → 静默丢行）。持 _cache_lock（与 _content_hash_cache 同锁，RLock
+        可重入覆盖 save 主路径）。嵌套顺序核查：本锁内 SQL 经 db._write_lock，
+        方向恒为 cache_lock → db_write_lock（db_manager 不持有 repo 引用，
+        无反向路径），全局单向无死锁；锁内 IO 最坏为全删全插量级（104ms@16K），
+        与写库本就串行于 _write_lock 的现状一致。
+        """
         try:
-            self._execute("DELETE FROM session_msg_extras WHERE session_id = ?", (session_id,))
-            if not extras:
-                return
-            # 优化点：原行为=逐行 _execute(INSERT OR REPLACE)，每行一次
-            # Python↔SQLite 往返且每条都过 db_manager.execute_sql 的
-            # SAVEPOINT+攒批包装，SQL 次数=1 次 DELETE + N 次 INSERT；
-            # 新行为=保持 DELETE 全删（compaction 索引漂移自愈）与 dict
-            # 遍历顺序，收集参数行后在写锁内一次 cursor.executemany 下发
-            # （O(N)→O(1)），复用 _schedule_commit 攒批窗口、不自行 commit
-            # （避免提前提交主 blob 破坏时序）；根因=execute_sql 只有
-            # cursor.execute 无批量分支，本任务硬边界禁改 db_manager，故批量
-            # 落在仓储内（同仓储内既有先例）。批量失败则回滚
-            # SAVEPOINT 并降级逐条，保持原「单条失败静默跳过、不冒泡」语义。
-            sql = (
+            with self._cache_lock:
+                self._write_extras_locked(session_id, extras)
+        except Exception as e:
+            logger.error(f"[SessionRepository] write_extras 异常: {e}")
+
+    def _write_extras_locked(self, session_id: str, extras: Dict[int, Dict[str, bytes]]) -> None:
+        """C1 临界区体（持 _cache_lock 调用）：基线 diff 与 SQL 串行化。"""
+        try:
+            new_rows: Dict[tuple, bytes] = {
+                (i, f): v for i, fields in extras.items() for f, v in fields.items()
+            }
+            upsert_sql = (
                 "INSERT OR REPLACE INTO session_msg_extras (session_id, msg_idx, field, value) "
                 "VALUES (?, ?, ?, ?)"
             )
-            rows = [
-                (session_id, i, f, v)
-                for i, fields in extras.items()
-                for f, v in fields.items()
-            ]
-            if not rows:
+            delete_sql = "DELETE FROM session_msg_extras WHERE session_id = ? AND msg_idx = ? AND field = ?"
+            cached = self._extras_written.get(session_id)
+            if cached is None:
+                # 未知基线：旧全删全插（读回断言/既有门禁依赖的等价路径）
+                self._execute("DELETE FROM session_msg_extras WHERE session_id = ?", (session_id,))
+                if not new_rows:
+                    self._extras_written[session_id] = {}
+                    return
+                rows = [(session_id, i, f, v) for (i, f), v in new_rows.items()]
+                if self._executemany_extras(upsert_sql, rows):
+                    self._extras_written[session_id] = new_rows
+                else:
+                    self._extras_written.pop(session_id, None)  # 全失败 → 下拍重新校准
                 return
-            db = self._db
-            conn = getattr(db, "_conn", None)
-            done = False
-            if conn is not None:
-                try:
-                    with db._write_lock:
-                        cursor = conn.cursor()
-                        cursor.execute("SAVEPOINT sp_exec")
-                        try:
-                            cursor.executemany(sql, rows)
-                        except Exception:
-                            cursor.execute("ROLLBACK TO sp_exec")
-                            cursor.execute("RELEASE sp_exec")
-                        else:
-                            cursor.execute("RELEASE sp_exec")
-                            done = True
-                except Exception:
-                    done = False
-            if done:
-                db._schedule_commit()
-                return
-            for row in rows:
-                self._execute(sql, row)
+            # 已知基线：差异 upsert
+            to_upsert = [(session_id, i, f, v) for (i, f), v in new_rows.items() if cached.get((i, f)) != v]
+            to_delete = [(session_id, i, f) for (i, f) in cached if (i, f) not in new_rows]
+            if not to_upsert and not to_delete:
+                return  # 无变化拍：0 写 SQL
+            if len(to_delete) > 512:
+                # 大规模消失（清空/大截断）：逐行 DELETE 不如一条全删 + 全量重插
+                # （最终状态等价、SQL 数最少；512 阈值≈逐行删开始劣化的量级）
+                self._execute("DELETE FROM session_msg_extras WHERE session_id = ?", (session_id,))
+                to_upsert = [(session_id, i, f, v) for (i, f), v in new_rows.items()]
+                to_delete = []
+            ok = True
+            if to_delete:
+                ok = self._executemany_extras(delete_sql, to_delete)
+            if ok and to_upsert:
+                ok = self._executemany_extras(upsert_sql, to_upsert)
+            if ok:
+                self._extras_written[session_id] = new_rows
+            else:
+                # 降级也失败：基线不可信，清缓存 → 下拍退化为全删全插校准
+                self._extras_written.pop(session_id, None)
         except Exception as e:
             logger.error(f"[SessionRepository] write_extras 异常: {e}")
+
+    def _executemany_extras(self, sql: str, rows: list) -> bool:
+        """批量下发 extras SQL（SAVEPOINT 包裹，失败降级逐条）。
+
+        Returns:
+            True=批量或降级全部成功；False=彻底失败（调用方清基线缓存）。
+        """
+        db = self._db
+        conn = getattr(db, "_conn", None)
+        if conn is not None:
+            try:
+                with db._write_lock:
+                    cursor = conn.cursor()
+                    cursor.execute("SAVEPOINT sp_exec")
+                    try:
+                        cursor.executemany(sql, rows)
+                    except Exception:
+                        cursor.execute("ROLLBACK TO sp_exec")
+                        cursor.execute("RELEASE sp_exec")
+                    else:
+                        cursor.execute("RELEASE sp_exec")
+                        db._schedule_commit()
+                        return True
+            except Exception:
+                pass  # 落到降级逐条
+        for row in rows:
+            try:
+                self._execute(sql, row)
+            except Exception:  # noqa: BLE001 — 单条失败静默跳过（既有语义）
+                return False
+        db._schedule_commit()
+        return True
 
     def load_extras_for_session(
         self, session_id: str, idxs: Optional[List[int]] = None
@@ -858,6 +1171,42 @@ class SessionRepository:
             return msgs
         return merge_extras_into(msgs, extras)
 
+    def get_messages_with_lazy_extras(
+        self, session_id: str, first_idxs: List[int]
+    ) -> Tuple[List[Dict[str, Any]], List[int]]:
+        """[E14] 打开链专用懒 merge：blob 读 + 首屏 idxs 的 extras 合并。
+
+        与 get_full_messages（全量语义，导出/深读专用）的差异：extras 只载
+        ``first_idxs`` 里「带 _x_idx 哨兵的轻量消息」（缺字段者），其余 idx
+        作为 pending 返回，由调用方后台分批补载（load_extras_for_session +
+        merge_extras_into，幂等）。E12 方案 α 的全量 blob 无哨兵 → 零查询零
+        pending，天然共存。
+
+        Returns:
+            (messages, pending_idxs)；会话不存在 → ([], [])。
+            pending 为「尚未补载 extras 的消息下标」升序表。
+        """
+        sess = self.get(session_id)
+        if not sess:
+            return [], []
+        msgs = sess.get("messages", [])
+        self._schedule_legacy_image_blob_migration(session_id, msgs)
+        first_set = set(first_idxs or [])
+        need = [
+            i
+            for i in first_set
+            if 0 <= i < len(msgs) and isinstance(msgs[i], dict) and msgs[i].get(OFFLOAD_IDX_FIELD) is not None
+        ]
+        extras = self.load_extras_for_session(session_id, need) if need else {}
+        if extras:
+            merge_extras_into(msgs, extras)
+        pending = [
+            i
+            for i, m in enumerate(msgs)
+            if isinstance(m, dict) and m.get(OFFLOAD_IDX_FIELD) is not None and i not in first_set
+        ]
+        return msgs, pending
+
     def _schedule_legacy_image_blob_migration(self, session_id: str, msgs: List[Any]) -> None:
         """读侧防御迁移：blob 内嵌 data:image → 后台落盘图并回写 ref 形态 blob。
 
@@ -883,7 +1232,7 @@ class SessionRepository:
 
         def _migrate(blob: bytes = blob) -> None:
             try:
-                from app.utils.utils import get_app_data_dir
+                from app.utils.app_paths import get_app_data_dir
 
                 work = deserialize(blob)
                 _persist_vision_image_blocks_impl(work, session_id, get_app_data_dir())
@@ -911,13 +1260,66 @@ class SessionRepository:
             success, rows = self._execute(f"SELECT * FROM {self.TABLE_NAME} WHERE session_id = ?", (session_id,))
             if success and rows and len(rows) > 0:
                 # 外部加载了最新数据，失效内容缓存，下次 save 会重建
+                # [E10] extras 行集基线同步失效：外部读意味着可能存在绕过 repo 层的
+                # DB 直改（老数据迁移/修复脚本），缓存与库可能失配 → 下拍 save 退化
+                # 全删全插重新校准（一次性成本，与 hash 缓存同触发点同语义）。
                 with self._cache_lock:
                     self._content_hash_cache.pop(session_id, None)
+                    self._extras_written.pop(session_id, None)
                 return self._row_to_session(rows[0])
             return None
         except Exception as e:
             logger.error(f"[SessionRepository] get_session 异常: {e}")
             return None
+
+    def get_by_ids(self, session_ids: List[str]) -> Dict[str, Dict]:
+        """按 ID 批量取回会话（session_id IN 一次查询，I6 引用会话 N+1 消除）。
+
+        每个 get() 都是 SELECT * 全 blob + 解压 + 浓缩前置读，N 个引用会话
+        串行执行时发送首字延迟线性叠加（session_reference 的 N+1 场景）。
+        本方法一次 IN 查询取回全部；分批防 SQLite 变量数上限（999/批，
+        老版 SQLITE_MAX_VARIABLE_NUMBER 固有行为）。
+
+        与 get() 语义对齐：成功取回的 sid 同样失效内容 hash 缓存（外部
+        加载最新数据，下次 save 重建）。
+
+        Returns:
+            {session_id: session dict}；查不到 / 反序列化失败的 id 不出现。
+            未初始化 / SQL 失败返回 {}（调用方降级逐个读）。
+        """
+        ids = [sid for sid in (session_ids or []) if sid]
+        if not ids or not self.is_initialized:
+            return {}
+        out: Dict[str, Dict] = {}
+        try:
+            for start in range(0, len(ids), 500):
+                chunk = ids[start : start + 500]
+                placeholders = ",".join("?" * len(chunk))
+                success, rows = self._execute(
+                    f"SELECT * FROM {self.TABLE_NAME} WHERE session_id IN ({placeholders})",
+                    tuple(chunk),
+                )
+                if not success:
+                    return {}
+                for row in rows:
+                    try:
+                        session = self._row_to_session(row)
+                    except Exception as e:  # noqa: BLE001 — 单行坏数据不拖垮整批
+                        logger.warning(f"[SessionRepository] get_by_ids 行反序列化失败: {e}")
+                        continue
+                    if isinstance(session, dict):
+                        sid = str(session.get("session_id", "") or "")
+                        if sid:
+                            out[sid] = session
+        except Exception as e:
+            logger.error(f"[SessionRepository] get_by_ids 异常: {e}")
+            return {}
+        if out:
+            with self._cache_lock:
+                for sid in out:
+                    self._content_hash_cache.pop(sid, None)
+                    self._extras_written.pop(sid, None)  # [E10] 同步失效（同 get 语义）
+        return out
 
     def get_all(self, limit: int = 100, offset: int = 0) -> List[Dict]:
         """获取所有会话（按更新时间倒序）"""
@@ -1184,6 +1586,7 @@ class SessionRepository:
 
         try:
             self._content_hash_cache.pop(session_id, None)
+            self._extras_written.pop(session_id, None)  # [E10] 行集基线随会话删除清理
             success, _ = self._execute(f"DELETE FROM {self.TABLE_NAME} WHERE session_id = ?", (session_id,))
             if success:
                 # message_extras 级联清理（后删子表）：主表失败则整体未删保持一致；

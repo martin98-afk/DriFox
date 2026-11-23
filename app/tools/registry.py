@@ -345,9 +345,24 @@ class ToolRegistry:
             return list(self._tools.values())
 
     def schemas(self) -> List[Dict[str, Any]]:
-        """返回全部 schema 深拷贝（给 LLM 用）"""
+        """返回全部 schema 副本（给 LLM 用）。
+
+        [PERF] 2026-11-19 #12：锁内仅取 values 快照（解掉持锁深拷贝与高频
+        get()/has() 争锁），锁外做两层浅克隆（顶层 dict + "function" 子 dict，
+        O(n) 指针级替换全量 deepcopy）。唯一已知写点（description 注入）落在
+        克隆层，不穿透 registry 原始数据；parameters 等叶子共享依赖约定：
+        调用方不得原地改叶子（未来新增写点须同步扩层）。
+        """
         with self._lock:
-            return [copy.deepcopy(r.schema) for r in self._tools.values()]
+            snapshot = list(self._tools.values())
+        out: List[Dict[str, Any]] = []
+        for reg in snapshot:
+            s = dict(reg.schema)
+            fn = s.get("function")
+            if isinstance(fn, dict):
+                s["function"] = dict(fn)
+            out.append(s)
+        return out
 
     def snapshot(self) -> Dict[str, ToolRegistration]:
         """执行快照：工具执行前取用，热重载（unregister）不影响已启动调用。"""
