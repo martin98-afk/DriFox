@@ -9817,7 +9817,8 @@ class OpenAIChatToolWindow(ToolWindow):
         # 动画期间宿主会抑制预览模式：中间对话区原样实时显示（#31）
         wb_size = getattr(self, "_workbench_relayout_host_size", None)
         state_guard = getattr(self.window(), "_window_state_guard_timer", None)
-        if (not getattr(self, "_suppress_resize_preview", False)
+        width_changed = event.oldSize().width() != event.size().width()
+        if (width_changed and not getattr(self, "_suppress_resize_preview", False)
                 and not (state_guard is not None and state_guard.isActive())
                 and (wb_size is None or wb_size != self.window().size())):
             self._set_cards_resize_preview_mode(True)

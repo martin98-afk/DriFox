@@ -3504,14 +3504,10 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
 
     def _on_chat_width_changed(self, *_args):
         """限宽档位变化 → 重算对话区/覆盖层留白 + 消息卡宽度"""
+        # 先保护正文，再改变留白；守卫启动的收尾定时器会按最终宽度分帧同步。
+        # 此处不能直接同步：它会提前清除守卫，漏掉 Qt 延迟投递的布局变化。
+        self._guard_windows_resize_settle()
         self._sync_chat_wrapper_width()
-        # 强制所有窗口的消息卡按新容器宽度重算（full 档铺满 / 窄档收紧）。
-        # 走既有的分帧宽度同步链，30 张卡不会冻结主线程。
-        for win in self._windows:
-            try:
-                win._sync_all_cards_width()
-            except Exception:
-                pass
 
     # ── 侧边栏内 left 卡片区：宿主编排（frame 加宽 / TabPanel 折叠态 / 对话区让位） ──
 
