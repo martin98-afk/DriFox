@@ -227,6 +227,28 @@ class _ArchiveScanSignals(QObject):
     finished = pyqtSignal(int, list)  # request_id, enriched_list
 
 
+# 归档元数据缓存上限。归档目录本身没有条数上限（文件只增不减），缓存若不封顶
+# 会随归档数量线性增长；文件被删除时 _ArchiveScanTask 阶段 3 会反向对账 pop，
+# 但那是「文件消失才释放」，不是上限。512 条 ≈ 300~400KB，超出按插入序淘汰
+# 最旧条目，代价是下一轮扫描重读被淘汰的 JSON（后台线程，单文件毫秒级）。
+_ARCHIVE_META_CACHE_MAX = 512
+
+
+def _archive_meta_put(cache: Dict[str, Tuple[float, Dict]], key: str, value: Tuple[float, Dict]) -> None:
+    """写入归档元数据缓存并按上限淘汰最旧条目。
+
+    调用方必须已持有 cache_lock（threading.Lock 不可重入，故本函数不自锁）。
+    已存在的 key 先 pop 再写，刷新插入序；淘汰按 dict 插入序 FIFO。
+    """
+    cache.pop(key, None)
+    cache[key] = value
+    while len(cache) > _ARCHIVE_META_CACHE_MAX:
+        try:
+            cache.pop(next(iter(cache)))
+        except (StopIteration, KeyError):
+            break
+
+
 class _HistoryLoadSignals(QObject):
     """历史首次加载完成信号：后台预热线程 → 主线程（queued 连接）。
 
@@ -319,7 +341,7 @@ class _ArchiveScanTask(QRunnable):
                     "project": parsed.get("project", ""),
                 }
                 with self._cache_lock:
-                    self._cache[fp_str] = (mtime, info)
+                    _archive_meta_put(self._cache, fp_str, (mtime, info))
                 enriched.append(self._enrich_from_info(fp_str, fp_path, mtime, info))
 
             # 阶段 3：反向对账——归档文件已删除的缓存条目清除（原实现只 add
@@ -1782,7 +1804,7 @@ class HistoryManager:
                             "project": data.get("project", ""),
                         }
                         with self._archive_cache_lock:
-                            self._archive_meta_cache[fp_str] = (mtime, info)
+                            _archive_meta_put(self._archive_meta_cache, fp_str, (mtime, info))
                     except Exception:
                         logger.error(f"[HistoryManager] 读取归档文件失败: {json_file}")
                         continue

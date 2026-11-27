@@ -213,6 +213,36 @@ def _resolve_sink_level() -> str:
     return "INFO" if getattr(sys, "frozen", False) else "DEBUG"
 
 
+def _memoize_exception_formatter_lib_dirs() -> None:
+    """记忆化 loguru 的 ExceptionFormatter._get_lib_dirs（每个 sink 调一次）。
+
+    loguru 每个 sink 建一个 ExceptionFormatter（``_logger.py:986``），其
+    ``__init__`` 调 ``_get_lib_dirs()``（``_better_exceptions.py:170``），
+    内部对 ``sysconfig.get_scheme_names()`` × 4 种 path 名做全量展开——本机实测
+    单次 ~2.6ms，11 个 sink 合计 ~28ms 纯浪费（结果只取决于进程启动时的
+    sys.path，运行期不变）。
+
+    只在本模块内打补丁，不修改第三方包（升级 loguru 不受影响，补丁失效时
+    只是退回原开销）。幂等。
+    """
+    try:
+        from loguru._better_exceptions import ExceptionFormatter
+    except Exception:  # noqa: BLE001 - 补丁失败只是不回本，不影响日志功能
+        return
+    original = ExceptionFormatter._get_lib_dirs
+    if getattr(original, "_drifox_memoized", False):
+        return
+    cached: list[str] = []
+
+    def _cached_lib_dirs() -> list[str]:
+        if not cached:
+            cached.extend(original())
+        return cached
+
+    _cached_lib_dirs._drifox_memoized = True  # type: ignore[attr-defined]
+    ExceptionFormatter._get_lib_dirs = staticmethod(_cached_lib_dirs)
+
+
 def setup_logging(log_dir: Path, mem_diag_enabled: bool = False) -> None:
     """配置全量日志 + 分系统日志 + 内存诊断日志。
 
@@ -225,6 +255,10 @@ def setup_logging(log_dir: Path, mem_diag_enabled: bool = False) -> None:
     既不格式化也不入队，所以降级后高频 DEBUG 调用的成本基本只剩参数拼接。
     """
     log_dir.mkdir(parents=True, exist_ok=True)
+
+    # 每个 sink 会新建 ExceptionFormatter（各自重算 sysconfig 路径展开），
+    # 记忆化后再装 sink，省 ~20ms（见 _memoize_exception_formatter_lib_dirs）。
+    _memoize_exception_formatter_lib_dirs()
 
     sink_level = _resolve_sink_level()
 

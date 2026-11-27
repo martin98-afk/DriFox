@@ -120,11 +120,21 @@ def resolve_light(mode: str, probe: Optional[bool], current: bool) -> bool:
 
 
 def effective_light(mode: Optional[str] = None) -> bool:
-    """按当前配置解析生效深浅（auto 会现场探测一次系统）"""
+    """按当前配置解析生效深浅（auto 会现场探测一次系统）
+
+    探测必须按模式短路：`resolve_light` 是非 auto 模式时忽略 probe，但若把
+    `system_prefers_light()` 直接写成实参，Python 会先求值再进函数——手动
+    模式下每个调用点都白跑一次系统探测。macOS 旧实现每次 fork 一个
+    `defaults` 子进程（实测 8~10ms），启动链有 3 个调用点，手动模式用户
+    因此白付这段成本。
+    """
     cfg = _settings()
     if mode is None:
         mode = cfg.ui_theme_mode.value
-    return resolve_light(mode, system_theme.system_prefers_light(), bool(cfg.ui_light_mode.value))
+    current = bool(cfg.ui_light_mode.value)
+    if mode != MODE_AUTO:
+        return resolve_light(mode, None, current)
+    return resolve_light(mode, system_theme.system_prefers_light(), current)
 
 
 # ── 同步应用屏蔽 ──

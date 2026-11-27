@@ -409,6 +409,11 @@ class LLMSettingsCard(SystemCardFrame):
         "update": "_build_update_page",
         "mcp": "_build_mcp_page",
         "hooks": "_build_hooks_page",
+        # 非首屏轻卡下沉（各 2~6ms + 数十控件）：用户可能整场不进这些页
+        "lsp": "_build_lsp_page",
+        "tools": "_build_tools_page",
+        "agents": "_build_agents_page",
+        "context": "_build_context_page",
     }
     closed = pyqtSignal()
     configChanged = pyqtSignal()
@@ -560,54 +565,13 @@ class LLMSettingsCard(SystemCardFrame):
         # ConfigSync/mcp-eventloop 等常驻资源同步推迟到进入页后。
         self.mcpListCard = None
 
-        # ════ LSP 页 ════
-        lsp_layout = self._page_layouts["lsp"]
-
-        from app.widgets.cards.settings.lsp_setting_card import LspListSettingCard
-
-        self.lspListCard = LspListSettingCard(
-            icon=get_icon("lsp"),
-            title="LSP 语言服务器",
-            content="代码智能与诊断",
-            parent=self,
-        )
-        lsp_layout.addWidget(self.lspListCard)
-        lsp_layout.addStretch(1)
-
-        # ════ 工具 / 智能体 / 技能 启停（按插件维度 D9/D10，各自独立分页）════
-        tools_layout = self._page_layouts["tools"]
-        self.pluginToolCard = PluginComponentsCard(
-            components=("tools",),
-            title="工具启用",
-            content="按插件控制其工具的启停",
-            icon=FluentIcon.DEVELOPER_TOOLS,
-            parent=self,
-        )
-        tools_layout.addWidget(self.pluginToolCard)
-        tools_layout.addStretch(1)
-
-        agents_layout = self._page_layouts["agents"]
-        self.pluginAgentCard = PluginComponentsCard(
-            components=("agents",),
-            title="智能体启用",
-            content="按插件控制其智能体的启停",
-            icon=get_icon("智能体"),
-            parent=self,
-        )
-        agents_layout.addWidget(self.pluginAgentCard)
-        agents_layout.addStretch(1)
-
-        # ════ 上下文管理页（按插件控制上下文层启停 + 阈值）════
-        context_layout = self._page_layouts["context"]
-        self.pluginContextCard = PluginComponentsCard(
-            components=("context_tiers", "budget_resolvers"),
-            title="上下文管理",
-            content="按插件控制上下文层（截断 / 落盘 / 压缩）的启停",
-            icon=get_icon("上下文"),
-            parent=self,
-        )
-        context_layout.addWidget(self.pluginContextCard)
-        context_layout.addStretch(1)
+        # ════ LSP / 工具 / 智能体 / 上下文 四页：卡片下沉懒构造 ════
+        # 四张卡各自 2~6ms + 数十控件，用户可能整场不进这些页 → 首次进页才建
+        # （_ensure_page_ready → _build_*_page）。占位 None 让外部 getattr 探测安全。
+        self.lspListCard = None
+        self.pluginToolCard = None
+        self.pluginAgentCard = None
+        self.pluginContextCard = None
 
         # 技能启用（按插件/内置/用户分组，行在展开后分批构建）
         skills_layout = self._page_layouts["skills"]
@@ -628,14 +592,10 @@ class LLMSettingsCard(SystemCardFrame):
         # 首次进页（_ensure_page_ready）或显示后空闲帧（_prefetch_pages 错峰）。
 
         # ════ 插件设置页（主从：全部插件清单 + 配置/权限/关于 详情）════
-        # 页面 UI 轻量，数据在首次进页时 reload（rebuild_plugin_cards 触发）：
-        # 打开设置的那一帧不读插件清单、不建 60+ 列表行。
-        self.pluginSettingsPage = PluginSettingsPage(self)
-        self._plugin_cards_widget = self.pluginSettingsPage  # 兼容既有可见性控制
-        self._page_layouts["plugins"].addWidget(self.pluginSettingsPage, 1)
-        # 筛选 chips 挂到全宽顶部条（返回按钮右侧），跨父级 reparent 由 Qt 处理
-        self._chips_holder.layout().insertWidget(0, self.pluginSettingsPage.filter_bar)
-        self._plugin_cards_widget.setVisible(False)
+        # 容器也下沉懒建（实测 5.7ms + 筛选 chips 一片控件）：首次进入插件页时
+        # 由 rebuild_plugin_cards → _ensure_plugins_page 建，随即 reload 列表数据。
+        self.pluginSettingsPage = None
+        self._plugin_cards_widget = None  # 兼容既有可见性控制（未建时为 None）
         # 左侧导航：按「有无插件」显隐（只查清单不构造行；列表数据延迟到
         # 首次进入该页 reload，见 _ensure_page_ready）
         self._sync_plugin_nav_visibility()
@@ -652,20 +612,8 @@ class LLMSettingsCard(SystemCardFrame):
         self.cfg.llm_api_port.valueChanged.connect(self._on_llm_api_port_changed)
 
         # 列表形式配置卡片手风琴：展开一个时自动收起其他
-        # getattr 防御：懒构造分页（mcp/hooks 等）首开时卡片未建，进页后再补入
-        self._list_cards = [
-            c
-            for c in (
-                self.llmProviderCard,
-                getattr(self, "hookListCard", None),
-                getattr(self, "mcpListCard", None),
-                self.pluginToolCard,
-                self.pluginAgentCard,
-                self.llmSkillsCard,
-                self.lspListCard,
-            )
-            if c is not None
-        ]
+        # 懒构造页的卡片在各自 builder 里经 _register_list_card 增量补入
+        self._list_cards = [c for c in (self.llmProviderCard, self.llmSkillsCard) if c is not None]
         self._apply_list_accordion()
 
     # ── 懒构造分页（首次进页/空闲帧预热时才构建，见 _ensure_page_ready）───
@@ -1034,8 +982,10 @@ class LLMSettingsCard(SystemCardFrame):
         """
         self._sync_plugin_tabs()
         if not force and not self._plugin_cards_built:
+            # 未进过插件页：容器与列表都还不该建（toggle_settings 每次打开都会走到这里）
             self._sync_plugin_nav_visibility()
             return
+        self._ensure_plugins_page()
         if not self._sync_plugin_nav_visibility():
             return
         self._plugin_cards_built = True
@@ -1109,6 +1059,88 @@ class LLMSettingsCard(SystemCardFrame):
             self.hookListCard._hook_manager = HookManager()
         self.hookListCard._refresh(reload=True)
 
+    def _ensure_plugins_page(self):
+        """插件设置页容器懒建（幂等）：首次进插件页时才建页面 + 挂筛选 chips
+
+        容器下沉收益：实测 5.7ms + 一片 chips 控件。列表数据仍由
+        rebuild_plugin_cards 随后的 reload 拉取，两段成本都推给首次进页。
+        """
+        if getattr(self, "pluginSettingsPage", None) is not None:
+            return
+        page = PluginSettingsPage(self)
+        self.pluginSettingsPage = page
+        self._plugin_cards_widget = page  # 兼容既有可见性控制
+        self._page_layouts["plugins"].addWidget(page, 1)
+        # 筛选 chips 挂到全宽顶部条（返回按钮右侧），跨父级 reparent 由 Qt 处理
+        self._chips_holder.layout().insertWidget(0, page.filter_bar)
+        self._sync_plugin_nav_visibility()
+
+    def _register_list_card(self, card):
+        """懒构造卡片补入手风琴表 + 单卡包装（增量，防已包卡重复包）"""
+        self._list_cards.append(card)
+        self._wrap_list_card_accordion(card)
+
+    def _build_lsp_page(self):
+        """LSP 页懒构造：LspListSettingCard 构造 + 首刷（首次进页才付）"""
+        from app.widgets.cards.settings.lsp_setting_card import LspListSettingCard
+
+        lsp_layout = self._page_layouts["lsp"]
+        self.lspListCard = LspListSettingCard(
+            icon=get_icon("lsp"),
+            title="LSP 语言服务器",
+            content="代码智能与诊断",
+            parent=self,
+        )
+        lsp_layout.addWidget(self.lspListCard)
+        lsp_layout.addStretch(1)
+        self._register_list_card(self.lspListCard)
+
+    # 工具/智能体/上下文 三页同构：只差 components 维度与文案/图标
+    _PLUGIN_COMPONENT_SPECS = {
+        "tools": (
+            "pluginToolCard",
+            ("tools",),
+            "工具启用",
+            "按插件控制其工具的启停",
+            FluentIcon.DEVELOPER_TOOLS,
+        ),
+        "agents": ("pluginAgentCard", ("agents",), "智能体启用", "按插件控制其智能体的启停", None),
+        "context": (
+            "pluginContextCard",
+            ("context_tiers", "budget_resolvers"),
+            "上下文管理",
+            "按插件控制上下文层（截断 / 落盘 / 压缩）的启停",
+            None,
+        ),
+    }
+
+    def _build_plugin_components_page(self, tab_id: str):
+        """工具/智能体/上下文页懒构造：PluginComponentsCard 构造（首刷由调用方补）"""
+        attr, components, title, content, icon = self._PLUGIN_COMPONENT_SPECS[tab_id]
+        if icon is None:
+            icon = get_icon("智能体" if tab_id == "agents" else "上下文")
+        layout = self._page_layouts[tab_id]
+        card = PluginComponentsCard(
+            components=components,
+            title=title,
+            content=content,
+            icon=icon,
+            parent=self,
+        )
+        setattr(self, attr, card)
+        layout.addWidget(card)
+        layout.addStretch(1)
+        self._register_list_card(card)
+
+    def _build_tools_page(self):
+        self._build_plugin_components_page("tools")
+
+    def _build_agents_page(self):
+        self._build_plugin_components_page("agents")
+
+    def _build_context_page(self):
+        self._build_plugin_components_page("context")
+
     def _apply_list_accordion(self):
         """为列表形式配置卡片应用手风琴效果
 
@@ -1122,12 +1154,15 @@ class LLMSettingsCard(SystemCardFrame):
     def _wrap_list_card_accordion(self, card):
         """单卡手风琴包装（增量入口：懒构造分页补建时只包新卡，防套娃）"""
         original_set_expand = card.setExpand
-        # 通过闭包捕获当前 card 和其他兄弟卡片
-        siblings = [c for c in self._list_cards if c is not card]
 
-        def _wrapped_set_expand(is_expand, _orig=original_set_expand, _sibs=siblings, _card=card):
+        def _siblings():
+            # 实时求值：懒构造页的卡片在包装之后才入场，快照会让后入场兄弟
+            # 不被「展开一个收起其他」覆盖（手风琴语义缺失）
+            return [c for c in self._list_cards if c is not card]
+
+        def _wrapped_set_expand(is_expand, _orig=original_set_expand, _sibs=_siblings, _card=card):
             if is_expand:
-                for sib in _sibs:
+                for sib in _sibs():
                     if sib.isExpand:
                         sib.setExpand(False)
             _orig(is_expand)
@@ -1176,7 +1211,7 @@ class LLMSettingsCard(SystemCardFrame):
         self._hot_reload_timer.start()
 
     def _prefetch_skills(self):
-        """空闲帧预热：提前跑一次技能发现，让展开技能卡更跟手"""
+        """技能发现预热：只在进技能页时跑（原 showEvent 的 300ms 定时预热已下线）"""
         try:
             card = getattr(self, "llmSkillsCard", None)
             if card is None or getattr(card, "_discovered", True):
@@ -1195,8 +1230,11 @@ class LLMSettingsCard(SystemCardFrame):
             self.rebuild_plugin_cards(force=True)
             # force=True：热重载可能只改了组件内部的细项（工具/智能体增删），
             # 插件清单未变 → 签名相同 → 非 force 的脏检查会跳过，必须强制重建
+            # 懒构造：卡片未建的页跳过（首次进页时 refresh_components 自己会付）
             for card_name in ("pluginToolCard", "pluginAgentCard"):
-                getattr(self, card_name).refresh_components(force=True)
+                card = getattr(self, card_name, None)
+                if card is not None:
+                    card.refresh_components(force=True)
             logger.info("[LLMSettingsCard] 插件热重载后已刷新设置面板")
         except Exception as e:
             logger.warning(f"[LLMSettingsCard] 热重载后刷新设置面板失败: {e}")
@@ -1233,6 +1271,7 @@ class LLMSettingsCard(SystemCardFrame):
         """构建左侧导航面板：分组标题 + 图标导航项，顶部对齐，超高可滚动"""
         self._nav_buttons = {}
         self._nav_group_labels = []
+        self._nav_order = []  # 页序（供相邻页预热定位）
         nav = QFrame(self)
         nav.setObjectName("settingsSideNav")
         nav.setStyleSheet(self._nav_frame_style())
@@ -1272,10 +1311,14 @@ class LLMSettingsCard(SystemCardFrame):
                 # 高度固定、宽度铺满导航整行：选中态色块长度不再随文字长短变化
                 btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
                 btn.setCursor(Qt.PointingHandCursor)
-                btn.setStyleSheet(self._nav_btn_style(False))
+                # 样式统一由父容器一份 QSS 提供（objectName + active 属性选择器）：
+                # 13 个按钮逐个 setStyleSheet 会各触发一次全量 repolish（实测 24.8ms）
+                btn.setObjectName("settingsNavBtn")
+                btn.setProperty("active", "false")
                 btn.clicked.connect(lambda _checked=False, tid=tab_id: self._set_active_page(tid))
                 body_layout.addWidget(btn)
                 self._nav_buttons[tab_id] = btn
+                self._nav_order.append(tab_id)
         body_layout.addStretch(1)
 
         scroll.setWidget(body)
@@ -1436,7 +1479,10 @@ class LLMSettingsCard(SystemCardFrame):
             has_plugins = bool(pm.is_initialized() and pm.list_plugins())
         except Exception:
             has_plugins = False
-        self._plugin_cards_widget.setVisible(has_plugins)
+        # 容器懒建：未进插件页时 _plugin_cards_widget 为 None，只同步导航显隐
+        widget = getattr(self, "_plugin_cards_widget", None)
+        if widget is not None:
+            widget.setVisible(has_plugins)
         try:
             self._nav_buttons["plugins"].setVisible(has_plugins)
         except Exception:
@@ -1472,6 +1518,10 @@ class LLMSettingsCard(SystemCardFrame):
             self._plugin_tab_pages.pop(key, None)
             self._page_ready.discard(key)
             btn = self._nav_buttons.pop(key, None)
+            # __dict__ 直取：__new__ 桩未初始化 QObject，getattr 会抛 RuntimeError
+            order = self.__dict__.get("_nav_order")
+            if order is not None and key in order:
+                order.remove(key)
             if btn is not None:
                 nav_layout = getattr(self, "_nav_body_layout", None)
                 if nav_layout is not None:
@@ -1509,9 +1559,14 @@ class LLMSettingsCard(SystemCardFrame):
             # 与 _build_side_nav 一致：高度固定、宽度铺满导航整行
             btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
             btn.setCursor(Qt.PointingHandCursor)
-            btn.setStyleSheet(self._nav_btn_style(False))
+            btn.setObjectName("settingsNavBtn")
+            btn.setProperty("active", "false")
             btn.clicked.connect(lambda _checked=False, tid=key: self._set_active_page(tid))
             self._nav_buttons[key] = btn
+            # __dict__ 直取：__new__ 桩未初始化 QObject，getattr 会抛 RuntimeError
+            order = self.__dict__.get("_nav_order")
+            if order is not None:
+                order.append(key)
             if insert_at is not None and nav_layout is not None:
                 nav_layout.insertWidget(insert_at + idx, btn)
             page, page_layout = self._make_page()
@@ -1552,8 +1607,9 @@ class LLMSettingsCard(SystemCardFrame):
             builder = self._LAZY_PAGE_BUILDERS.get(tab_id)
             if builder is not None:
                 getattr(self, builder)()
-                self._apply_appearance_to_page(tab_id)
-            elif tab_id in ("tools", "agents", "context"):
+            # 内容刷新：懒建卡在该卡存在后才能同步（tools/agents/context 首刷较重，
+            # 不能放在 builder 里连同构造一超付——与既有页保持同一节奏）
+            if tab_id in ("tools", "agents", "context"):
                 card = getattr(
                     self,
                     {"tools": "pluginToolCard", "agents": "pluginAgentCard", "context": "pluginContextCard"}[tab_id],
@@ -1567,6 +1623,8 @@ class LLMSettingsCard(SystemCardFrame):
                 self._prefetch_skills()
             elif tab_id.startswith("tab:"):
                 self._build_plugin_tab_page(tab_id)
+            # 建完后统一对齐当前全局外观（字号/主题刷新只覆盖已存在控件）
+            self._apply_appearance_to_page(tab_id)
         except Exception as e:
             # 失败不标记 ready：否则该页内容会永久为空且不再重试
             logger.warning(f"[LLMSettingsCard] {tab_id} 页首次准备失败: {e}")
@@ -1609,19 +1667,60 @@ class LLMSettingsCard(SystemCardFrame):
             page.verticalScrollBar().setValue(0)
 
     def _update_nav_styles(self):
-        for tab_id, btn in self._nav_buttons.items():
-            css = self._nav_btn_style(tab_id == self._current_tab)
-            # setStyleSheet 对同串也会全量 repolish（Qt5 不短路），13 个导航按钮
-            # 每次外观刷新都重写一遍，短路掉
-            if css != btn.styleSheet():
-                btn.setStyleSheet(css)
+        """切换导航选中态：只动变化的那两个按钮（动态属性 + 定点 repolish）
+
+        `_nav_qss_dirty` 由字号/字族变更置位（见 _on_config_changed）：按钮 QSS
+        内嵌 font_size_css / get_font_family_css，必须重设父容器 QSS 才吃到新值。
+
+        ⚠ 收益是可维护性，不是性能。早期记录的「逐按钮 setStyleSheet 实测
+        24.8ms」是抓栈采样的失真值——该法把「在等别人」算成「自己在花」
+        （本项目已三次确认：#9 信号连接 197.9ms→实际 0.1ms、#28
+        scroll_bar.__initWidget 216ms→实际 0.02ms、本条 24.8ms→实际
+        0.87ms）。wall-clock 复测：换色后基线逐按钮重设 0.87ms，本实现的
+        父容器重设 1.57ms（反而约 +0.7ms）；同态重复调用 0.02ms vs 0.04ms。
+        换来的是 QSS 只有一处定义、不必逐控件同步，不是省时间。
+        """
+        if self.__dict__.get("_nav_qss_dirty", False):
+            self._nav_qss_dirty = False
+            nav = self.__dict__.get("_nav_frame")
+            if nav is not None:
+                from app.utils.design_tokens import set_style_sheet_if_changed
+
+                set_style_sheet_if_changed(nav, self._nav_frame_style())
+        prev = self.__dict__.get("_styled_tab")
+        cur = self.__dict__.get("_current_tab")
+        if prev == cur:
+            return
+        self._styled_tab = cur
+        for tab_id in (prev, cur):
+            btn = self._nav_buttons.get(tab_id) if tab_id else None
+            if btn is None:
+                continue
+            want = "true" if tab_id == cur else "false"
+            if btn.property("active") == want:
+                continue
+            btn.setProperty("active", want)
+            btn.style().unpolish(btn)
+            btn.style().polish(btn)
+            btn.update()
 
     def _nav_frame_style(self) -> str:
+        """导航面板 QSS：面板底 + 导航按钮全部样式（选中态走 active 动态属性）
+
+        按钮样式集中在一份父容器 QSS：原来每个按钮各自 setStyleSheet（Qt5 对
+        同串也不短路，会全量 repolish）。⚠ 动机是可维护性不是性能：实测父容器
+        重设 1.57ms 反而比逐按钮 0.87ms 略贵，省下的是「QSS 只有一处定义」，
+        不是毫秒。_nav_btn_style 仍是唯一真源，字号/字族改动直接反映到这里。
+        """
+        inactive = self._nav_btn_style(False).replace("QToolButton", "QToolButton#settingsNavBtn")
+        active = self._nav_btn_style(True).replace("QToolButton", 'QToolButton#settingsNavBtn[active="true"]')
         return f"""
             QFrame#settingsSideNav {{
                 background: transparent;
                 border-right: 1px solid {Colors.BORDER};
             }}
+            {inactive}
+            {active}
         """
 
     @staticmethod
@@ -1945,6 +2044,9 @@ class LLMSettingsCard(SystemCardFrame):
         #   apply_font_size_to_widget 的 setFont；不重建则切 tab 前字体不生效）
         if needs_nav_rebuild:
             try:
+                # 按钮 QSS 唯一真源在父容器（见 _nav_frame_style）：置脏后由
+                # _update_nav_styles 重设一次，字号/字族才能即时生效
+                self._nav_qss_dirty = True
                 self._update_nav_styles()
             except Exception:
                 pass
@@ -2180,11 +2282,10 @@ class LLMSettingsCard(SystemCardFrame):
         self._ensure_hot_reload_connected()
         # 重新打开设置卡时恢复正常导航（全宽模式不跨开关保留，分页不动）
         self._exit_fullwidth_mode()
-        # 预热技能发现：展开技能卡时要同步扫盘 + parse 每个 SKILL.md（~90ms），
-        # 挪到打开设置后的空闲帧做，用户点开卡片时就不必再等
-        QTimer.singleShot(300, self._prefetch_skills)
-        # 非首屏页内容在空闲帧补齐（见 _prefetch_pages）
-        self._prefetch_pages()
+        # 预热退场：原实现在 2.05s 内把 10 页全量建完（实测 +1105 控件、267ms
+        # 构建），且无取消机制——用户关掉设置后 singleShot 照建不误。改为
+        # 「停留够久才预热当前页 + 相邻页」，其余页首次进页才付（_ensure_page_ready）。
+        self._schedule_idle_prefetch()
         # 打开设置时刷新工具/智能体列表（插件热重载/启停后保持最新）。
         # ★ 仅限「已访问过的页」：未访问页的第一次 refresh_components 会走全量
         # 构建（数百毫秒），那笔由 _ensure_page_ready 在该页首次进入时付，
@@ -2197,24 +2298,121 @@ class LLMSettingsCard(SystemCardFrame):
                 card.refresh_components()
         super().showEvent(event)
 
-    def _prefetch_pages(self):
-        """空闲帧错峰预热：把非首屏页的内容在卡片显示后逐页补齐
+    # 停留多久才预热相邻页：低于此值说明用户只是扫一眼首屏就关，预热是纯浪费
+    _IDLE_PREFETCH_MS = 1500
+    # 相邻页之间的错峰间隔：单帧只付一页的钱（冷缓存单页可达 60ms）
+    _PREFETCH_STEP_MS = 150
 
-        为什么不是「一次性补齐」：五页合计数百毫秒（冷缓存下工具/智能体页单页
-        可达 360ms），挤在一帧里就是打开设置后的一次明显顿卡。按页错峰后单帧
-        只付一页的钱。
+    # 重模块预 import 清单（#41）：两页首进成本的 95%+ 是 Python 首次 import，
+    # 实测冷热差 mcp 137ms / lsp 141ms（mcp_setting_card 单独 146.8ms，其中 mcp
+    # SDK 本体 64.9ms；lsp_manager 单独 141.8ms）。import 阶段实测新增线程 0，
+    # 无 event loop / 子进程副作用，故可安全地挪到空闲线程。
+    _HEAVY_PREWARM_MODULES = (
+        "app.widgets.cards.settings.mcp_setting_card",
+        "app.core.lsp.lsp_manager",
+    )
+    _heavy_prewarm_started: bool = False  # __new__ 桩兜底
 
-        为什么不是「只等在首次进入该页时」：那样「填充内容」与「展开卡片」会
-        落在同一 tick，而原实现里两者相隔很久（构造时填充、用户点导航时才展开），
-        ExpandSettingCard 的展开动画依赖其间的布局轮次。预热后用户点导航时内容
-        早已就位，时序回到原实现；_expand_page_cards 里的调用退化为「用户点得
-        比预热还快」时的兜底。
+    def _prewarm_heavy_modules(self):
+        """空闲时在后台线程预 import mcp / lsp 两页的重模块（幂等，失败静默）
+
+        为什么放线程：单模块 import 141~147ms 且持 GIL，放主线程等于把懒建的
+        收益吐回去（设置卡构造 41ms 会涨到 ~180ms）。线程里做只影响 GIL 争用，
+        且此时用户已停留 1.5s、正在看首屏，交互密度低。
+
+        只 import 不初始化：不建 Qt 对象、不调 get_lsp_manager()、不探测服务器，
+        所以不涉及 Qt 线程亲和性。失败静默（DEBUG）：用户点进该页时按正常路径
+        再 import 一次，行为与未预热的现状完全一致——退化安全。
         """
-        tabs = ("hooks", "common", "appearance", "update", "plugins", "tools", "agents", "security", "skills", "render")
-        if all(t in self._page_ready for t in tabs):
+        if self.__dict__.get("_heavy_prewarm_started", False):
             return
-        for i, tab_id in enumerate(tabs):
-            QTimer.singleShot(250 + i * 200, lambda t=tab_id: self._ensure_page_ready(t))
+        try:
+            self._heavy_prewarm_started = True
+        except RuntimeError:
+            return  # __new__ 桩：无 QObject，也就不需要预热
+
+        def _run():
+            import importlib
+
+            for mod in self._HEAVY_PREWARM_MODULES:
+                try:
+                    importlib.import_module(mod)
+                except Exception as e:  # noqa: BLE001 - 预热失败绝不能影响使用
+                    logger.debug(f"[LLMSettingsCard] 预 import {mod} 失败（退化为按需加载）: {e}")
+
+        try:
+            import threading
+
+            threading.Thread(target=_run, name="settings-prewarm", daemon=True).start()
+        except Exception as e:  # noqa: BLE001 - 起线程失败同样只降级
+            logger.debug(f"[LLMSettingsCard] 预 import 线程启动失败（退化为按需加载）: {e}")
+
+    def _schedule_idle_prefetch(self):
+        """启动空闲预热定时器（停留 1.5s 且窗口仍可见才触发，见 _prefetch_pages）"""
+        try:
+            timer = getattr(self, "_idle_prefetch_timer", None)
+            if timer is None:
+                timer = QTimer(self)
+                timer.setSingleShot(True)
+                timer.setInterval(self._IDLE_PREFETCH_MS)
+                timer.timeout.connect(self._prefetch_pages)
+                self._idle_prefetch_timer = timer
+            timer.start()
+        except RuntimeError:
+            pass  # __new__ 桩：无 QObject
+
+    def _prefetch_pages(self):
+        """停留够久后预热「当前页 + 前后相邻页」，不碰其余页
+
+        为什么不再全量预热：原实现把 10 页排进 singleShot（`250 + i*200`，2.05s
+        内逐页建完，+1105 控件、267ms 构建），用户可能只是看一眼首屏就关，
+        白付全部成本且无取消机制。首屏可见时间因此从 ~218ms 涨到 1.26s。
+
+        为什么仍保留少量预热：相邻页是用户最可能点的下一页，停留超 1.5s 说明
+        八成在找东西，提前把邻居内容备好，点击时只需付展开动画。
+        """
+        if not self.isVisible():
+            return
+        # [PERF #41] 重模块空闲预 import：mcp/lsp 两页首进成本 95%+ 是 Python 首次
+        # import（冷热差 137/141ms）。用户在设置页停留超 1.5s 后才走到这里，正是
+        # 把这两笔挪去后台线程的窗口；放本方法而非 _schedule_idle_prefetch，是因为
+        # 已有 isVisible 守卫（不可见时不起线程）。
+        self._prewarm_heavy_modules()
+        order = self.__dict__.get("_nav_order") or ()
+        cur = self.__dict__.get("_current_tab")
+        if cur not in order:
+            return
+        i = order.index(cur)
+        targets = [order[j] for j in (i, i + 1, i - 1) if 0 <= j < len(order)]
+        self._prefetch_queue = [t for t in dict.fromkeys(targets) if t not in self._page_ready]
+        self._prefetch_tick()
+
+    def _prefetch_tick(self):
+        """逐页错峰预热：一次只建一页，间隔 _PREFETCH_STEP_MS 再建下一页"""
+        queue = self.__dict__.get("_prefetch_queue") or []
+        if not queue or not self.isVisible():
+            self._prefetch_queue = []
+            return
+        tab_id = queue.pop(0)
+        if tab_id not in self._page_ready:
+            try:
+                self._ensure_page_ready(tab_id)
+            except RuntimeError:
+                self._prefetch_queue = []
+                return
+        if not queue:
+            return
+        try:
+            timer = getattr(self, "_prefetch_step_timer", None)
+            if timer is None:
+                timer = QTimer(self)
+                timer.setSingleShot(True)
+                timer.setInterval(self._PREFETCH_STEP_MS)
+                timer.timeout.connect(self._prefetch_tick)
+                self._prefetch_step_timer = timer
+            timer.start()
+        except RuntimeError:
+            pass  # __new__ 桩：无 QObject
 
     def set_opacity(self, opacity: float):
         """设置透明度（保留接口，暂不实现动态透明度）"""

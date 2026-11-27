@@ -6720,6 +6720,20 @@ class MessageCard(SimpleCardWidget):
         if hasattr(self, "_markdown_cache") and self._markdown_cache:
             self._markdown_cache.clear()
             self._markdown_cache = None
+        # [M5] 宽度→高度预测缓存：卡销毁后仍被本对象持有，随 cleanup 一并释放
+        # （键是宽度 int、值 int，量小但属清理遗漏；读取点 _last_synced_width
+        # 为 0 时不写缓存，清空不会影响任何存活路径）。
+        self._height_cache.clear()
+        # [M4-附带] 插件内嵌面板「panel_id → 占高」缓存，cleanup 同样漏清
+        # （键值为 str→int，量小；面板已卸载时条目永驻）。
+        self._inline_panel_height_cache.clear()
+        # [M4-附带] panel 的 parent 是卡内 _assistant_bubble（实测
+        # panel.parent() 为 MessageBubble，c.isAncestorOf(panel) 为 True），
+        # 卡销毁时 C++ 侧由 Qt 连带销毁（实测卡销毁后 sip.isdeleted(panel)
+        # 为 True）；本 dict 只持 Python wrapper，不清则死 wrapper 常驻。
+        # 故这里只断引用，不调 deleteLater（避免与卡的销毁链双删）。
+        self._inline_panels.clear()
+        self._inline_panel_host = None
 
     def closeEvent(self, e):
         self.cleanup()

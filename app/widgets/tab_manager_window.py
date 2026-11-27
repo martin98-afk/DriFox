@@ -2645,13 +2645,21 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
                 "sidebar", getattr(self, "_tab_frame", None), bgs["sidebar"]
             )
             self._apply_video_overlay(bgs.get("overlay"))
-            # 主题切换后回收不再被任何区域订阅的动画源（旧素材不占内存）
-            from app.widgets.anim_background import AnimationRegistry
-
-            AnimationRegistry.instance().prune()
             self._apply_theme_music(bgs.get("music"))
         except Exception as e:
             logger.warning(f"[TabManagerWindow] 应用主题背景失败: {e}")
+        finally:
+            # 动画源回收（保险丝）：正常回收走 AnimationSource 引用计数 ——
+            # SceneLayer 换源/销毁时 release，计数归零立即 stop_prefetch + 摘除。
+            # 此处只兜计数漏减的异常路径。必须在 finally：原实现挂在 try 尾部，
+            # 前面任一 _apply_* 抛异常就被 except 跳过，旧动画源的预解码线程
+            # 会一直留到下次成功切主题。
+            try:
+                from app.widgets.anim_background import AnimationRegistry
+
+                AnimationRegistry.instance().prune()
+            except Exception:
+                pass
 
     def _apply_theme_music(self, music_cfg):
         """应用 backgrounds.music 到主窗口级播放器

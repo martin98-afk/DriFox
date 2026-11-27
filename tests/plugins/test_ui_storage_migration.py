@@ -141,14 +141,20 @@ def test_file_operation_recorder_accepts_engine(tmp_path, monkeypatch):
 # ---------- backend.session_store 门面 ----------
 
 
-def test_backend_session_store_returns_active_engine(fresh_storage_registry, fresh_serializer_registry):
+def test_backend_session_store_returns_active_engine(
+    tmp_path, monkeypatch, fresh_storage_registry, fresh_serializer_registry
+):
     """backend.session_store 返回 StorageRegistry 活跃引擎（自定义引擎生效）"""
     from app.core.conversation.backend import ChatBackend
+    from app.core.store.session_store import SessionStore
     from importlib import import_module
     SqliteStorageEngine = import_module("plugins.system-storages.storages.sqlite").SqliteStorageEngine
 
+    # SessionStore 是单例：不重置则本用例的 db_dir 被前一个用例的实例静默忽略
+    monkeypatch.setattr(SessionStore, "_instance", None, raising=False)
     backend = ChatBackend.__new__(ChatBackend)
-    fresh_storage_registry.register(SqliteStorageEngine(db_dir=":memory:"), source="plugin:system")
+    # ":memory:" 不是 SQLite 内存模式，会被当相对路径在 cwd 下建 <cwd>/:memory:/sessions.db
+    fresh_storage_registry.register(SqliteStorageEngine(db_dir=str(tmp_path)), source="plugin:system")
     mem = _MemEngine()
     fresh_storage_registry.register(mem, source="plugin:demo")
     fresh_storage_registry.set_active("memory")

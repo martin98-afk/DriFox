@@ -74,13 +74,19 @@ def test_facade_returns_sqlite_when_empty(fresh_storage_registry, fresh_serializ
     assert engine.id == "sqlite"
 
 
-def test_facade_returns_active_plugin_engine(fresh_storage_registry, fresh_serializer_registry):
+def test_facade_returns_active_plugin_engine(
+    tmp_path, monkeypatch, fresh_storage_registry, fresh_serializer_registry
+):
     """已注册自定义引擎并 set_active → 门面返回自定义引擎"""
     from app.core.conversation.backend import get_session_storage
+    from app.core.store.session_store import SessionStore
     from importlib import import_module
     SqliteStorageEngine = import_module("plugins.system-storages.storages.sqlite").SqliteStorageEngine
 
-    fresh_storage_registry.register(SqliteStorageEngine(db_dir=":memory:"), source="plugin:system")
+    # SessionStore 是单例：不重置则本用例的 db_dir 被前一个用例的实例静默忽略
+    monkeypatch.setattr(SessionStore, "_instance", None, raising=False)
+    # ":memory:" 不是 SQLite 内存模式，会被当相对路径在 cwd 下建 <cwd>/:memory:/sessions.db
+    fresh_storage_registry.register(SqliteStorageEngine(db_dir=str(tmp_path)), source="plugin:system")
     mem = _MemEngine()
     fresh_storage_registry.register(mem, source="plugin:demo")
     fresh_storage_registry.set_active("memory")

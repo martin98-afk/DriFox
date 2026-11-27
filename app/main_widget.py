@@ -14857,6 +14857,34 @@ class OpenAIChatToolWindow(ToolWindow):
         # GC 钩子：防抖触发全局缓存清理 + 堆回收
         if delete_widgets:
             self._schedule_gc_hook()
+        # [PERF] next-tick 强制消费 DeferredDelete：deleteLater() 只是把销毁事件
+        # 排进队列，Qt 真正析构 QWebEnginePage 时 renderer 进程才退出。
+        # 实测（#39 四分支对照，10 卡 → 11 renderer）：
+        #   deleteLater 后立即计数          → 11 不回落
+        #   + processEvents() 300ms         → 11 不回落
+        #   + processEvents() 2s + sleep 2s → 11 不回落
+        #   + sendPostedEvents(DeferredDelete) → 1 立即回落
+        # 即 processEvents 不消费 DeferredDelete，「让事件循环转一圈」不会回收。
+        # 目的：切会话后旧会话活卡的 renderer（~100MB/个）立即退出，避免
+        # 「待销毁但未销毁」窗口内的 RSS 峰值叠加（实测 1136.6MB → 1671.8MB）。
+        # ⚠️ 必须 next-tick，禁止同拍：sendPostedEvents 会一并销毁同一队列里
+        # 别处刚排入的对象（当前调用栈可能仍持有引用 → sip-deleted wrapper）。
+        # 半死卡（_pending_delete，已 setParent(None)）也会被一并消费——这是
+        # 期望行为，但同样要求当前栈先出栈（2026-10-15 两次 access violation
+        # 的成因正是「对半死 QWebEngineView 操作原生 HWND」）。
+        # 纪律：整段吞异常，诊断设施不得反噬主流程。
+        if delete_widgets:
+
+            def _pump_deferred_delete() -> None:
+                try:
+                    from PyQt5.QtCore import QCoreApplication
+
+                    gc.collect()
+                    QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+                except Exception:
+                    pass
+
+            QTimer.singleShot(0, _pump_deferred_delete)
 
     # ── [A3-C] 方案 C：非活动标签卡片延迟销毁（DRIFOX_TAB_KEEP_SECS，默认 0） ──
 
@@ -27305,6 +27333,13 @@ class OpenAIChatToolWindow(ToolWindow):
                     wc.cleanup()
                 wc.deleteLater()
             self._session_card_cache.clear()
+            # ★ 泄漏修复（M5）：_tool_card_map 按 tool_call_id 持有 MessageCard，
+            # 切会话路径已 clear（_clear_chat_area），但「直接关窗」不走那里，
+            # 映射连同其持的卡片引用一起把窗口对象图拖到进程结束。
+            self._tool_card_map.clear()
+            # 批次占位：remove_from_layout=False——窗口正在销毁，不需要再摘
+            # layout（省一轮 O(n) 摘除），只清 dict 与 overhead 记账释放引用。
+            self._clear_batch_placeholders(remove_from_layout=False)
         except Exception:
             pass
 

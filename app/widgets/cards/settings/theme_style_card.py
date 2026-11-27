@@ -128,7 +128,21 @@ def _luminance(color: QColor) -> float:
 # 预览图缓存：键为解析后的图像源。多套主题共用同一张 fox_bg，按源缓存能
 # 让 13 个格子只持一份 QImage；用 QImage 而非 QPixmap，避免模块级 QPixmap
 # 在 QApplication 析构后销毁造成退出崩。
+#
+# ⚠️ 必须封顶：值是缩放到屏幕尺寸的 QImage，dpr=2 时单条实测 1.07MB。主题
+# 可跨会话累积（用户轮换主题、主题包更新换图），无上限就是纯泄漏。24 条在
+# dpr=3 下上界约 29MB（原注释自述「≤40 条 → dpr2 ≈ 43MB」只是经验假设，
+# 代码里从无强制）。淘汰按 dict 插入序做 LRU，从头部 pop 最久未用。
 _IMAGE_CACHE: dict = {}
+_IMAGE_CACHE_MAX = 24
+
+
+def _cache_put_theme_image(source: str, result) -> None:
+    """写预览图缓存并维持 LRU 上限（缺图的 None 同样入缓存）。"""
+    _IMAGE_CACHE.pop(source, None)
+    _IMAGE_CACHE[source] = result
+    while len(_IMAGE_CACHE) > _IMAGE_CACHE_MAX:
+        _IMAGE_CACHE.pop(next(iter(_IMAGE_CACHE)), None)
 
 
 # 异步加载队列：背景图解码挪出卡片构建关键路径。首次打开设置弹窗时 13 个
@@ -173,6 +187,8 @@ def _request_theme_image(entry: dict, on_ready) -> None:
     if not source:
         return
     if source in _IMAGE_CACHE:
+        # LRU 触碰：pop 后重插即移到插入序末尾，避免热点图被后来的冷图挤掉
+        _IMAGE_CACHE[source] = _IMAGE_CACHE.pop(source)
         on_ready(_IMAGE_CACHE[source])
         return
     _pending_cbs.setdefault(source, []).append(on_ready)
@@ -196,7 +212,7 @@ def _load_next_theme_image() -> None:
         target = _preview_cache_target_size(_max_screen_dpr())
         scaled = image.scaled(target, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
         result = scaled if not scaled.isNull() else image  # 极端小源图兜底
-    _IMAGE_CACHE[source] = result
+    _cache_put_theme_image(source, result)
     for callback in callbacks:
         callback(result)
     if _load_queue:
