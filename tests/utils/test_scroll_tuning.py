@@ -191,6 +191,43 @@ def test_scroll_wheel_to_falls_back_to_native():
     assert area.wheel_event_calls == 1
 
 
+def test_forwarded_wheel_notifies_input_hook(flt):
+    """转发滚轮必须通知宿主「这是真实用户输入」。
+
+    卡片内滚到边界后，viewer / MessageCard 把 wheel 直接交给
+    ``scroll_wheel_to`` → ``handle_wheel``，事件**不经过** viewport 上的
+    eventFilter。宿主（聊天区）若只靠 eventFilter 标记「真实滚动输入」，
+    经卡片转发的外层滚动会被当成程序滚动 → away 永不置位 → 内容更新时
+    视口恒被拽回底部（用户报障）。
+    """
+    area = flt._area
+    setattr(area, scroll_tuning._INSTALLED_ATTR, flt)
+    calls: list[int] = []
+    scroll_tuning.set_wheel_input_hook(area, lambda: calls.append(1))
+    assert scroll_tuning.scroll_wheel_to(area, _wheel(pixel=-12)) is True
+    assert calls == [1]
+
+
+def test_wheel_input_hook_survives_install_order(qapp):
+    """钩子先注册、接管器后安装 → 仍生效（两处构建分支装配顺序不同）。"""
+    from PyQt5 import sip
+
+    area = _FakeArea()
+    calls: list[int] = []
+    scroll_tuning.set_wheel_input_hook(area, lambda: calls.append(1))
+    holder = QObject()
+    filt = scroll_tuning._FastWheelFilter(area, parent=holder)
+    try:
+        assert filt.handle_wheel(_wheel(pixel=-12)) is True
+        assert calls == [1]
+    finally:
+        if filt._timer is not None:
+            filt._timer.stop()
+        sip.delete(filt)
+        sip.delete(holder)
+        qapp.processEvents()
+
+
 def test_scroll_activity_window(qapp, monkeypatch):
     """滚动活跃标记：窗口内 True，超窗 False。"""
 

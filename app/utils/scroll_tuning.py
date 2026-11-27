@@ -62,6 +62,8 @@ _DEFAULT_SMOOTH_MS = 0
 _FRAME_INTERVAL_MS = 16
 _WHEEL_NOTCH = 120
 _INSTALLED_ATTR = "_drifox_fast_wheel_filter"
+# 「滚轮输入到达」回调（由滚动区宿主注册，见 set_wheel_input_hook）。
+_INPUT_HOOK_ATTR = "_drifox_wheel_input_hook"
 # 滚动活跃窗口：滚轮/触控板消费事件后置位，动画类控件据此在滚动期降级重绘。
 # 120ms ≈ 两次手势间的最长空档，滚动一停动画立即恢复（相位由各控件自己保存）。
 _SCROLL_ACTIVE_MS = 120.0
@@ -175,12 +177,39 @@ def scroll_wheel_to(area: QAbstractScrollArea, event) -> bool:
     return True
 
 
+def set_wheel_input_hook(area: QAbstractScrollArea, hook) -> None:
+    """登记「滚轮输入到达」回调（幂等，与 install_fast_wheel 顺序无关）。
+
+    为什么需要：卡片内滚到边界后，viewer / MessageCard 把 wheel 直接交给
+    ``scroll_wheel_to`` → ``handle_wheel``，事件**不经过** viewport 上的
+    eventFilter。宿主若只在 eventFilter 里标记「真实滚动输入」，经卡片转发
+    的外层滚动会被当成程序滚动（away 永不置位 → 内容更新时视口恒被拽回
+    底部）。回调放在接管器上，两条入口（viewport 过滤 / 外部转发）都能覆盖。
+
+    Args:
+        area: 已装或待装接管器的滚动区。
+        hook: 无参回调，收到滚轮输入时调用（可为 None 取消登记）。
+    """
+    if area is None:
+        return
+    try:
+        setattr(area, _INPUT_HOOK_ATTR, hook)
+        flt = getattr(area, _INSTALLED_ATTR, None)
+    except RuntimeError:
+        return  # area 已销毁
+    if isinstance(flt, _FastWheelFilter):
+        flt._input_hook = hook
+
+
 class _FastWheelFilter(QObject):
     """viewport 级滚轮过滤器：触控板像素直通 + 连续滚轮加速 + 短过渡帧推进。"""
 
     def __init__(self, area: QAbstractScrollArea, parent=None):
         super().__init__(parent or area)
         self._area = area
+        # 宿主注册的输入回调：install_fast_wheel 可能晚于注册（两处构建分支
+        # 装配顺序不同），故安装时也要从 area 上回读一次。
+        self._input_hook = getattr(area, _INPUT_HOOK_ATTR, None)
         self._stamps: deque = deque()
         self._step_ratio = _DEFAULT_STEP_RATIO
         self._window_ms = _DEFAULT_ACCEL_WINDOW_MS
@@ -214,6 +243,15 @@ class _FastWheelFilter(QObject):
         滚轮守卫）共用：直接调 ``area.wheelEvent()`` 会绕过 eventFilter，
         触控板像素路径就失效了。
         """
+        # 任何到达接管器的 wheel 都是真实用户输入（无论下面是否消费成功）。
+        # 必须在 setValue 之前调用：宿主靠这个时间窗判定随后的 valueChanged
+        # 是用户意图（away 置位）而非程序滚动。
+        hook = self._input_hook
+        if hook is not None:
+            try:
+                hook()
+            except Exception:  # noqa: BLE001 - 通知失败不得影响滚动本身
+                pass
         area = self._area
         try:
             vbar = area.verticalScrollBar()

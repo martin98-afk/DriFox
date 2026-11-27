@@ -138,7 +138,7 @@ from app.utils.design_tokens import (
 )
 from app.utils.theme_manager import theme_manager
 from app.utils.provider_icons import get_provider_icon
-from app.utils.scroll_tuning import install_fast_wheel
+from app.utils.scroll_tuning import install_fast_wheel, set_wheel_input_hook
 from app.utils.utils import get_app_data_dir, get_font_family_css, get_icon
 
 # ── App Widget 导入 ──
@@ -20671,6 +20671,10 @@ class OpenAIChatToolWindow(ToolWindow):
         away 置位只认这条链（见 `_on_scroll_changed`）：
         - 滚轮 / 触控板：Wheel 事件。qfw 平滑滚动把一次滚轮拆成 400ms 内
           逐拍发给**内置条**的合成 Wheel；
+        - 卡片转发的滚轮：viewer / MessageCard 到边界后直接调
+          ``scroll_wheel_to`` 滚外层，**不经过** viewport 过滤器 —— 靠接管器
+          上的输入回调补上（漏掉这一条时，鼠标停在卡片上滚轮永远不算用户
+          意图，away 永不置位 → 任何内容更新都把视口拽回底部）；
         - 拖滑块 / 点页槽 / 键盘翻页：QAbstractSlider.actionTriggered
           （程序 `setValue` 不触发本信号）。
 
@@ -20684,6 +20688,8 @@ class OpenAIChatToolWindow(ToolWindow):
         try:
             bar = self.chat_scroll_area.verticalScrollBar()
             bar.installEventFilter(self)
+            # 转发路径（卡片转外层）不经事件过滤器，单独挂输入回调
+            set_wheel_input_hook(self.chat_scroll_area, self._mark_user_scroll_input)
             bar.actionTriggered.connect(self._on_scroll_action_triggered)
             # viewport 也要装：高精度滚轮（触控板 / delta 非 120 倍数）在 qfw
             # 里走 QAbstractScrollArea.wheelEvent 直接落到内置条，**不经**内置条
