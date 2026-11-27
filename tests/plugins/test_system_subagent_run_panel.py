@@ -252,7 +252,39 @@ def test_detail_labels_have_text_color_rule(panel):
 # ──────────────────── 桥接 ────────────────────
 
 
+def test_subagent_keyboard_reverses_running_transition(qapp, monkeypatch):
+    from PyQt5.QtCore import Qt
+    from PyQt5.QtTest import QTest
+    from PyQt5.QtWidgets import QVBoxLayout, QWidget
+    from app.utils.design_tokens import Animations
+
+    monkeypatch.setattr(Animations, "motion_enabled", staticmethod(lambda: True))
+    host = QWidget()
+    layout = QVBoxLayout(host)
+    panel = SubAgentRunPanel(host)
+    layout.addWidget(panel)
+    host.show()
+    try:
+        for i in range(3):
+            panel.add_task(str(i), "build", "验证折叠")
+        QTest.qWait(25)
+        height = panel._body_wrap.height()
+        QTest.keyClick(panel._collapse_btn, Qt.Key_Return)
+        QTest.qWait(60)
+        cap = panel._body_wrap.maximumHeight()
+        assert 0 < cap < height
+        QTest.keyClick(panel._collapse_btn, Qt.Key_Space)
+        assert panel._body_wrap.maximumHeight() == cap
+        QTest.qWait(Animations.ENTER_MS + 40)
+        assert not panel.is_collapsed() and panel._body_wrap.maximumHeight() == 16777215
+    finally:
+        host.close()
+        host.deleteLater()
+        qapp.processEvents()
+
+
 class _FakeExecutor(QObject):
+    retry_status = pyqtSignal(str, str)
     tool_call_started = pyqtSignal(str, str, dict)
     token_usage_updated = pyqtSignal(str, int, int, int)
 

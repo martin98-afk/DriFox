@@ -741,5 +741,51 @@ def test_card_push_inline_items_delivers_to_panel(qapp):
         card.deleteLater()
 
 
+def test_card_gallery_height_handoff(qapp, monkeypatch):
+    from PyQt5.QtTest import QTest
+    from PyQt5.QtWidgets import QVBoxLayout, QWidget
+    from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+    from app.widgets.message_card import MessageCard
+
+    monkeypatch.setattr(_panel_mod.Animations, "motion_enabled", staticmethod(lambda: True))
+    import_module("plugins.artifacts-manager.ui").register_ui(UIPluginRegistry.get_instance())
+    host = QWidget()
+    layout = QVBoxLayout(host)
+    card = MessageCard(role="assistant")
+    from PyQt5.QtCore import Qt
+    layout.addWidget(card, 0, Qt.AlignTop)
+    layout.addStretch()
+    host.resize(680, 900)
+    host.show()
+    try:
+        card.push_inline_items("artifacts", _img_items(4))
+        panel = card.get_inline_panel("artifacts")
+        QTest.qWait(25)
+        strip = panel._strip_visual_height()
+        folded = card.height()
+        panel._on_collapse_clicked()
+        QTest.qWait(55)
+        target = int(panel._list_anim.endValue())
+        mid = card.height()
+        QTest.qWait(_panel_mod.Animations.ENTER_MS + 40)
+        assert folded < mid < card.height()
+        assert abs(panel._list_wrap.height() - target) <= 2, (target, panel._list_wrap.height())
+        panel._on_collapse_clicked()
+        assert int(panel._list_anim.endValue()) == strip, (strip, folded, mid, card.height())
+        QTest.qWait(45)
+        current = panel._list_wrap.maximumHeight()
+        panel._on_collapse_clicked()
+        assert int(panel._list_anim.startValue()) == current
+        QTest.qWait(_panel_mod.Animations.ENTER_MS + 40)
+        panel._on_collapse_clicked()
+        QTest.qWait(_panel_mod.Animations.EXIT_MS + 50)
+        assert card.height() == folded
+        assert not panel._thumb_strip.isHidden()
+    finally:
+        host.close()
+        host.deleteLater()
+        qapp.processEvents()
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

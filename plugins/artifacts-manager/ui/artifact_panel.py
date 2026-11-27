@@ -44,6 +44,7 @@ from PyQt5.QtCore import QAbstractAnimation, QEvent, QEasingCurve, QMargins, QPr
 from PyQt5.QtGui import QColor, QDesktopServices, QImageReader, QMouseEvent, QPainter, QPainterPath, QPixmap
 from PyQt5.QtCore import QUrl
 from PyQt5.QtWidgets import QFrame, QHBoxLayout, QLabel, QMenu, QVBoxLayout, QWidget
+from app.widgets.inline_disclosure import DisclosureButton
 from qfluentwidgets import TransparentToolButton
 
 from app.utils.design_tokens import Animations, BorderRadius, Colors, font_size_css, scale_font_size
@@ -336,9 +337,8 @@ class _ArtifactHeader(QFrame):
         layout.addStretch(1)
         layout.addWidget(self._extra_label)
         layout.addSpacing(4)
-        self._collapse_btn = TransparentToolButton(get_icon("展开"), self)
-        self._collapse_btn.setFixedSize(22, 22)
-        self._collapse_btn.setIconSize(QSize(14, 14))
+        self._collapse_btn = DisclosureButton(self)
+        self._collapse_btn.setToolTip("展开成果列表")
         self._collapse_btn.clicked.connect(self.clicked)
         layout.addWidget(self._collapse_btn)
         self.refresh_style()
@@ -391,8 +391,6 @@ class _ArtifactHeader(QFrame):
         self._extra_label.setText(text)
 
     def set_expanded(self, expanded: bool) -> None:
-        icon = "折叠" if expanded else "展开"
-        self._collapse_btn.setIcon(get_icon(icon))
         tip = "折叠成果列表" if expanded else "展开成果列表"
         self._collapse_btn.setToolTip(tip)
         self.setToolTip(tip)
@@ -543,7 +541,7 @@ class InlineArtifactPanel(QWidget):
             self._animate_list(False)
         else:
             # 展开：先取画廊占高作等高起点，再隐藏画廊、钳列表同高显示（标题不动）
-            start = self._strip_visual_height()
+            start = self._list_wrap.maximumHeight() if self._list_anim is not None else self._strip_visual_height()
             self._thumb_strip.setVisible(False)
             self._list_wrap.setVisible(True)
             self._list_wrap.setMaximumHeight(start)
@@ -565,7 +563,12 @@ class InlineArtifactPanel(QWidget):
         让宿主卡片高度跟随。
         """
         wrap = self._list_wrap
+        old = self._list_anim
+        if old is not None:
+            old.stop()
+            old.deleteLater()
         if not Animations.motion_enabled() or self.parentWidget() is None:
+            self._collapse_btn.set_progress(float(expanding))
             # reduced-motion / 未挂载：跳过补间直落终值（收尾回调幂等）
             self._list_anim = None
             self._list_natural_h = 0
@@ -577,16 +580,13 @@ class InlineArtifactPanel(QWidget):
                 wrap.setMaximumHeight(_QWIDGETSIZE_MAX)
             self._emit_height_chain()
             return
-        old = self._list_anim
-        if old is not None:
-            old.stop()
         if expanding:
             start = start if start is not None else self._strip_visual_height()
             target = max(wrap.sizeHint().height(), 1)
         else:
-            start = max(wrap.height(), 1)
-            wrap.setMaximumHeight(start)  # 先钳到实际高度再动画
-            target = self._strip_visual_height()
+            start = wrap.maximumHeight() if old is not None else max(wrap.height(), 1)
+            wrap.setMaximumHeight(start)
+            target = self._thumb_strip.height() if self._strip_layout.count() > 1 else 0
         self._list_natural_h = max(wrap.sizeHint().height(), 1)
         anim = QPropertyAnimation(wrap, b"maximumHeight", self)
         self._list_anim = anim
@@ -594,12 +594,23 @@ class InlineArtifactPanel(QWidget):
         anim.setEasingCurve(QEasingCurve(Animations.EASE_ENTER if expanding else Animations.EASE_EXIT))
         anim.setStartValue(start)
         anim.setEndValue(target)
-        anim.valueChanged.connect(lambda _v: self._emit_height_chain())
+        arrow_start = self._collapse_btn._progress
+
+        def frame(_value):
+            t = anim.easingCurve().valueForProgress(anim.currentTime() / max(1, anim.duration()))
+            self._collapse_btn.set_progress(arrow_start + (float(expanding) - arrow_start) * t)
+            self._emit_height_chain()
+
+        anim.valueChanged.connect(frame)
         anim.finished.connect(lambda: self._on_list_anim_done(expanding))
         anim.start()
 
     def _on_list_anim_done(self, expanding: bool) -> None:
+        anim = self._list_anim
         self._list_anim = None
+        if anim is not None:
+            anim.deleteLater()
+        self._collapse_btn.set_progress(float(expanding))
         self._list_natural_h = 0
         wrap = self._list_wrap
         if expanding:
