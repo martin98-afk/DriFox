@@ -141,6 +141,12 @@ def _text_color(secondary: bool = False) -> str:
     return "rgba(0,0,0,0.45)" if secondary else "rgba(0,0,0,0.85)"
 
 
+def _file_tree_context(ctx: dict) -> dict:
+    # 工作台页可能比会话窗口长寿。仅保留绘制和目录定位用到的值，
+    # backend 只作 WorkbenchPanel 的就绪标志，不持有后端实例。
+    fields = ("colors", "is_dark", "card_bg", "font_family", "font_size", "project_root")
+    return {**{k: ctx[k] for k in fields if k in ctx}, "backend": bool(ctx.get("backend"))}
+
 def _ctx_text_color(ctx: dict, secondary: bool = False) -> str:
     colors = ctx.get("colors", {})
     key = "text_secondary" if secondary else "text_primary"
@@ -423,12 +429,12 @@ class FileTreeCard(QWidget):
         # 浮动卡的取数链路（project_root / 主题色 / 字体等字段同构）
         # 挂到实例属性：WorkbenchPanel._page_context_incomplete 据此检测
         # 「启动早期宿主未就绪 → 拿到残缺 context」的坏页并触发重建
-        self._context = context if isinstance(context, dict) else {}
+        self._context = _file_tree_context(context) if isinstance(context, dict) and context else {}
         # 宿主上下文拉取入口（工作台页由 WorkbenchPanel._make_page_widget 注入）：
         # 构造时的 context 是快照，项目切换后 project_root 会过期，refresh_data
         # 时经此重取最新上下文。
         self._host_context_provider: Optional[Callable[[], dict]] = (
-            self._context.get("context_provider") if self._context else None
+            context.get("context_provider") if self._context else None
         )
         if not callable(self._host_context_provider):
             self._host_context_provider = None
@@ -698,8 +704,8 @@ class FileTreeCard(QWidget):
         """
         if not isinstance(context, dict) or not context:
             return
-        self._context = context
-        self._context_provider = lambda: context
+        self._context = _file_tree_context(context)
+        self._context_provider = lambda ctx=self._context: ctx
         if self.isVisible():
             self.show_card()
 
@@ -876,8 +882,8 @@ class FileTreeCard(QWidget):
         except Exception:
             return
         if isinstance(ctx, dict) and ctx:
-            self._context = ctx
-            self._context_provider = lambda _ctx=ctx: _ctx
+            self._context = _file_tree_context(ctx)
+            self._context_provider = lambda _ctx=self._context: _ctx
 
     # ── 主题色 ──
 

@@ -2180,7 +2180,7 @@ class OpenAIChatToolWindow(ToolWindow):
         """确保模型选择卡片框架已创建（内容由 _build_deferred_card_model_selector 填充）"""
         if self._model_selector_card is not None:
             return
-        self._model_selector_card = BaseSettingsCard("", "", self)
+        self._model_selector_card = BaseSettingsCard("", parent=self)
         # 最小可见下限（对齐 SystemCardFrame._MIN_CARD_VISIBLE_H）：窗口极矮时
         # 布局需要能压缩卡片，过大下限会顶破可用空间导致卡片底部被窗口裁掉
         self._model_selector_card.setMinimumHeight(120)
@@ -17308,6 +17308,10 @@ class OpenAIChatToolWindow(ToolWindow):
         )
         return card
 
+    def _on_assistant_context_action(self, action, context):
+        self.handle_recommended_question(action, context)
+        self.contextActionRequested.emit(action, context)
+
     def _append_assistant_message(
         self,
         timestamp: str = None,
@@ -17346,11 +17350,6 @@ class OpenAIChatToolWindow(ToolWindow):
                         break
             config_id = matched
 
-        # 使用辅助函数创建卡片
-        def on_context_action(action, context):
-            self.handle_recommended_question(action, context)
-            self.contextActionRequested.emit(action, context)
-
         # ===== UI 插件消息工厂钩子 =====
         # 让插件工厂先尝试处理这条消息（高优先级先尝试）
         custom_widget = self._create_message_widget(
@@ -17375,7 +17374,7 @@ class OpenAIChatToolWindow(ToolWindow):
             provider_name=provider_name,
             config_id=config_id,
             on_action=self._on_code_action,
-            on_context_action=on_context_action,
+            on_context_action=self._on_assistant_context_action,
             on_tool_diff=self._on_tool_diff_requested,
             on_open_file=self._on_open_file_requested,
             on_card_diff=self._on_card_diff_requested,

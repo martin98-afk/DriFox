@@ -110,3 +110,82 @@ def test_no_handoff_cases(qtbot, anim):
         assert a.switch(0, -1) is False
     finally:
         Animations.motion_enabled = monkey
+
+
+def test_reverse_mid_out_bounces_back(qtbot, anim):
+    """段1 离场途中点回仍显示的旧页：倒放归位，不换页、不重建动画对象"""
+    a, stack, layout, _host = anim
+    swapped = []
+    assert a.switch(2, 1, on_switched=lambda: swapped.append(True)) is True
+    qtbot.waitUntil(lambda: stack.x() < -5, timeout=1500)
+    assert stack.currentIndex() == 0  # 段1 未换页
+    assert a.switch(0, -1) is True  # 接手回弹，调用方不再直切
+    assert a._phase == "back"
+    assert stack.currentIndex() == 0
+    assert not swapped  # 全程未换页，段间回调不触发
+    _wait_done(qtbot, a)
+    assert stack.x() == 0
+    assert layout.indexOf(stack) == 0
+    assert not swapped
+    assert len(a.findChildren(QVariantAnimation)) <= 1
+
+
+def test_burst_reverse_last_request_wins(qtbot, anim):
+    """段1/段2 中途连续反向：最终停在最后一次请求的页，布局归位"""
+    a, stack, layout, _host = anim
+    assert a.switch(2, 1)
+    qtbot.waitUntil(lambda: stack.x() < -5, timeout=1500)
+    assert a.switch(1, -1)  # 段1 中途反向到第三页
+    qtbot.waitUntil(lambda: a._phase == "in", timeout=2000)
+    assert stack.currentIndex() == 1
+    assert a.switch(0, -1)  # 段2 中途反向到原始页
+    _wait_done(qtbot, a)
+    assert stack.currentIndex() == 0
+    assert layout.indexOf(stack) == 0
+    assert stack.x() == 0
+    assert len(a.findChildren(QVariantAnimation)) <= 1
+
+
+def test_reverse_mid_in_no_snap(qtbot, anim):
+    """段2 滑入途中反向：倒放回画外再换方向进场，反向瞬间不归位跳变"""
+    a, stack, layout, _host = anim
+    assert a.switch(2, 1)
+    qtbot.waitUntil(lambda: a._phase == "in", timeout=2000)
+    qtbot.wait(60)  # 滑入中途（x 在画内、未归位）
+    x_before = stack.x()
+    assert 0 < x_before < stack.width()
+    assert a.switch(0, -1) is True
+    assert a._phase == "back_in"
+    assert stack.x() == x_before  # 反向瞬间保持原位，不跳回 0
+    assert stack.currentIndex() == 2  # 仍显示旧目标，换页发生在画外
+    _wait_done(qtbot, a)
+    assert stack.currentIndex() == 0
+    assert layout.indexOf(stack) == 0
+    assert stack.x() == 0
+
+
+def test_reverse_back_then_new_target(qtbot, anim):
+    """回弹途中改点新目标：回弹被取代，最终停在新目标且布局归位"""
+    a, stack, layout, _host = anim
+    assert a.switch(2, 1)
+    qtbot.waitUntil(lambda: stack.x() < -5, timeout=1500)
+    assert a.switch(0, -1) is True
+    assert a._phase == "back"
+    assert a.switch(1, 1) is True
+    _wait_done(qtbot, a)
+    assert stack.currentIndex() == 1
+    assert layout.indexOf(stack) == 0
+    assert stack.x() == 0
+
+
+def test_rapid_burst_no_animation_growth(qtbot, anim):
+    """连续打断不等待完成：动画对象恒定、最终布局归位"""
+    a, stack, layout, _host = anim
+    for target, direction in ((2, 1), (1, -1), (0, -1), (2, 1), (1, -1)):
+        a.switch(target, direction)
+        qtbot.wait(20)  # 制造中断，不等待动画完成
+    _wait_done(qtbot, a)
+    assert stack.currentIndex() == 1
+    assert layout.count() == 1
+    assert stack.x() == 0
+    assert len(a.findChildren(QVariantAnimation)) <= 1

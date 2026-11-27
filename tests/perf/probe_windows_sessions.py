@@ -33,6 +33,11 @@ def tree_sample():
 
 
 def memory(tm, first, drain):
+    import gc
+    import weakref
+
+    closed_refs = []
+
     def sample(phase, cycle):
         drain(2000)
         for _ in range(3):
@@ -52,6 +57,7 @@ def memory(tm, first, drain):
             card.finish_streaming()
             drain(800)
             assert card.isVisible() and card.viewer._is_js_ready
+            closed_refs.append(weakref.ref(window))
             del card, window
         sample('open', cycle)
         for i in range(3):
@@ -59,6 +65,12 @@ def memory(tm, first, drain):
             drain(350)
         assert tm._windows == [first]
         sample('closed', cycle)
+    # 只在最后一次字节采样后 GC，检验可回收性而不污染内存曲线。
+    drain(2000)
+    gc.collect()
+    remaining = sum(ref() is not None for ref in closed_refs)
+    emit(closed_windows=len(closed_refs), retained_after_gc=remaining)
+    assert remaining == 0, f'{remaining} 个关闭窗口仍有强引用'
 
 
 def run(mode, directory):
