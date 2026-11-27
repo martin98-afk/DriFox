@@ -6,7 +6,8 @@ import pytest
 pytestmark = pytest.mark.perf
 
 
-def test_compact_stream_geometry(qapp, qtbot):
+@pytest.mark.parametrize('collapse', [False, True], ids=['prose', 'collapse'])
+def test_compact_stream_geometry(qapp, qtbot, collapse):
     if os.environ.get('DRIFOX_VISIBLE_CADENCE') != '1' or qapp.platformName() == 'offscreen':
         pytest.skip('需要真实前台窗口')
     from PyQt5.QtWidgets import QWidget, QVBoxLayout, QScrollArea
@@ -37,18 +38,20 @@ def test_compact_stream_geometry(qapp, qtbot):
 
     assert js('window._toolCompactMode')
     card.start_streaming_anim()
-    # 在简洁流式正文内插入再收起等高元素；以浏览器绘制帧检测外层何时收回空位。
-    card.append_text('测量正文内元素收起后的气泡底边。')
-    qtbot.waitUntil(lambda: js("document.querySelector('#content-placeholder').innerText").count('底边') == 1)
-    js("var box=document.createElement('div');box.style.height='300px';document.body.appendChild(box)")
-    qtbot.waitUntil(lambda: js('Math.abs(window.innerHeight-document.body.scrollHeight-2)<=3'))
-    js('''box.remove();window._collapseLag=null;var t0=performance.now();requestAnimationFrame(function tick(){
-        if(window.innerHeight-document.body.scrollHeight<=5)window._collapseLag=performance.now()-t0;
-        else requestAnimationFrame(tick);});''')
-    qtbot.waitUntil(lambda: js('window._collapseLag') is not None, timeout=2500)
-    collapse_ms = js('window._collapseLag')
-    print(f'300px 元素收起后空白收回耗时={collapse_ms:.0f}ms', flush=True)
-    assert collapse_ms < 300
+    if collapse:
+        card.append_text('测量正文内元素收起后的气泡底边。')
+        qtbot.waitUntil(lambda: js("document.querySelector('#content-placeholder').innerText").count('底边') == 1)
+        js("var box=document.createElement('div');box.style.height='300px';document.querySelector('#content-placeholder').appendChild(box)")
+        qtbot.waitUntil(lambda: js('Math.abs(window.innerHeight-document.body.scrollHeight-2)<=3'))
+        js('''box.remove();window._collapseLag=null;var t0=performance.now();requestAnimationFrame(function tick(){
+            if(window.innerHeight-document.body.scrollHeight<=5)window._collapseLag=performance.now()-t0;
+            else requestAnimationFrame(tick);});''')
+        qtbot.waitUntil(lambda: js('window._collapseLag') is not None, timeout=2500)
+        collapse_ms = js('window._collapseLag')
+        print(f'300px 元素收起后空白收回耗时={collapse_ms:.0f}ms', flush=True)
+        card.finish_streaming()
+        assert collapse_ms < 300
+        return
     js('''window._gapSamples=[];requestAnimationFrame(function tick(){
         var c=document.querySelector('#content-placeholder');
         if(c.innerText.length>40) window._gapSamples.push([performance.now(),window.innerHeight,
@@ -78,4 +81,6 @@ def test_compact_stream_geometry(qapp, qtbot):
     qtbot.waitUntil(lambda: js("document.querySelector('#content-placeholder').innerText").count(text)
                     == ''.join(expected).count(text), timeout=5000)
     assert frames[-1][1] == cap and frames[-1][2] > cap
-    assert max(clip[int(.95*len(gaps))], blank[int(.95*len(gaps))]) <= 30
+    line_px = js("parseFloat(getComputedStyle(document.querySelector('#content-placeholder p') || document.querySelector('#content-placeholder')).lineHeight)") or 27
+    assert clip[int(.95*len(gaps))] <= 2 * round(line_px)
+    assert blank[int(.95*len(gaps))] <= 2
