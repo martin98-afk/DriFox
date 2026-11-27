@@ -18709,19 +18709,26 @@ class OpenAIChatToolWindow(ToolWindow):
             from app.widgets.ui_helpers import get_session_compaction_info
 
             compaction_info = get_session_compaction_info(session)
-            idx = self.history_manager.find_index_by_session_id(self._current_session_id)
             worktree_path = self._get_current_worktree_path()
             worktree_kwargs = {"worktree_path": worktree_path or ""}
-            if idx is not None:
-                # 🛡️ 更新已有会话时不传 project，保留该会话原有的项目归属
-                self.history_manager.update_session(
-                    idx,
-                    session.messages,
-                    **compaction_info,
-                    **self._api_usage_kwargs(session),
-                    **worktree_kwargs,
+            # 🛡️ 数据来源是 session 本体：以 session.session_id 为权威。
+            # _current_session_id 只是缓存，多标签页/后台 finalize 并发下可能
+            # 滞后于 session（旧实现会因此把 A 的内容写进 B 的记录）。
+            _sid = getattr(session, "session_id", None) or self._current_session_id
+            if _sid != self._current_session_id:
+                logger.warning(
+                    f"[RESTORE] session_id 不一致，以会话本体为准: cached={str(self._current_session_id)[:8]} "
+                    f"session={str(_sid)[:8]}"
                 )
-            else:
+                self._current_session_id = _sid
+            updated = self.history_manager.update_session_by_id(
+                _sid,
+                session.messages,
+                **compaction_info,
+                **self._api_usage_kwargs(session),
+                **worktree_kwargs,
+            )
+            if not updated:
                 # 🛡️ 罕见路径（恢复时历史被截断 / 已归档）：用 originating_project
                 # 优先的 fallback 链，避免被当前 _current_project 错误覆盖
                 resolved_project = self._resolve_session_project_fallback(
@@ -23624,21 +23631,30 @@ class OpenAIChatToolWindow(ToolWindow):
         # 🛡️ 始终记录当前 worktree_path（空字符串表示主仓库，清除旧关联）
         worktree_kwargs = {"worktree_path": worktree_path or ""}
 
+        # 🛡️ 会话 ID 一致性守卫：数据来自 session 本体，session.session_id 是
+        # 权威。后台 finalize / 多标签页并发下 _current_session_id 可能滞后，
+        # 旧实现会拿它去定位记录，把当前会话内容写进另一条会话（标题保留、
+        # 内容串台）。发现不一致时以 session 为准并留痕。
+        _sid = getattr(session, "session_id", None)
+        if _sid and self._current_session_id != _sid:
+            logger.warning(
+                f"[HistorySave] session_id 不一致，以会话本体为准: cached={str(self._current_session_id)[:8]} "
+                f"session={_sid[:8]} window={getattr(self, '_window_id', '')}"
+            )
+            self._current_session_id = _sid
+
         if self._current_session_id is not None:
-            idx = self.history_manager.find_index_by_session_id(self._current_session_id)
-            if idx is not None:
-                # 🛡️ 更新已有会话时不传 project，保留该会话原有的项目归属
-                self.history_manager.update_session(
-                    idx,
-                    saved_messages,
-                    compaction_state=getattr(session, "compaction_state", {}),
-                    compaction_cache=getattr(session, "compaction_cache", {}),
-                    system_prompt=system_prompt,
-                    **api_usage_kwargs,
-                    **worktree_kwargs,
-                    **team_kwargs,
-                )
-            else:
+            updated = self.history_manager.update_session_by_id(
+                self._current_session_id,
+                saved_messages,
+                compaction_state=getattr(session, "compaction_state", {}),
+                compaction_cache=getattr(session, "compaction_cache", {}),
+                system_prompt=system_prompt,
+                **api_usage_kwargs,
+                **worktree_kwargs,
+                **team_kwargs,
+            )
+            if not updated:
                 # 🛡️ 内存中找不到（如老会话被 _history_limit=100 截断），
                 # 优先查询 SQLite 原有 project，避免被当前 _current_project 错误覆盖
                 resolved_project = self._resolve_session_project_fallback(
@@ -26814,36 +26830,45 @@ class OpenAIChatToolWindow(ToolWindow):
         # 🛡️ 始终记录当前 worktree_path（空字符串表示主仓库，清除旧关联）
         worktree_kwargs = {"worktree_path": worktree_path or ""}
 
+        # 🛡️ 会话 ID 一致性守卫（同 _save_current_session_to_history）：
+        # 以 session.session_id 为权威，避免后台 finalize / 多标签页并发下
+        # 用滞后的缓存 id 把当前会话内容写进别的会话记录。
+        _sid = getattr(session, "session_id", None)
+        if _sid and self._current_session_id != _sid:
+            logger.warning(
+                f"[AutoSave] session_id 不一致，以会话本体为准: cached={str(self._current_session_id)[:8]} "
+                f"session={_sid[:8]} window={getattr(self, '_window_id', '')}"
+            )
+            self._current_session_id = _sid
+
         if self._current_session_id is not None:
-            idx = self.history_manager.find_index_by_session_id(self._current_session_id)
-            if idx is not None:
-                # 🛡️ 更新已有会话时不传 project，保留该会话原有的项目归属
-                # 避免项目切换后 _current_project 已改变，导致旧会话被错误地划归新项目
-                # 团队元数据：update_session 语义为 None 保留现值，故仅当本窗口
-                # 处于团队模式（_team_run_id 非空）才显式传参覆盖；非团队窗口
-                # 不传（None）→ 保留历史值，避免普通编辑把团队会话元数据清空。
-                team_kwargs = {}
-                if self._team_run_id:
-                    team_kwargs = {
-                        "team_run_id": self._team_run_id,
-                        "team_name": self._team_name or "",
-                        "agent_name": self._team_agent_name or "",
-                        # 🛡️ F3（T2-P3 第 2 层）：团队成员快照随会话落库——
-                        # 恢复不依赖当前 team.json（历史 run 的 team.json 会被新
-                        # run 覆盖），手动成员在历史 run 中也能找回。
-                        "team_members": self._get_team_members_snapshot_json(),
-                    }
-                self.history_manager.update_session(
-                    idx,
-                    session.messages,
-                    compaction_state=getattr(session, "compaction_state", {}),
-                    compaction_cache=getattr(session, "compaction_cache", {}),
-                    system_prompt=system_prompt,
-                    **self._api_usage_kwargs(session),
-                    **worktree_kwargs,
-                    **team_kwargs,
-                )
-            else:
+            # 🛡️ 更新已有会话时不传 project，保留该会话原有的项目归属
+            # 避免项目切换后 _current_project 已改变，导致旧会话被错误地划归新项目
+            # 团队元数据：update_session 语义为 None 保留现值，故仅当本窗口
+            # 处于团队模式（_team_run_id 非空）才显式传参覆盖；非团队窗口
+            # 不传（None）→ 保留历史值，避免普通编辑把团队会话元数据清空。
+            team_kwargs = {}
+            if self._team_run_id:
+                team_kwargs = {
+                    "team_run_id": self._team_run_id,
+                    "team_name": self._team_name or "",
+                    "agent_name": self._team_agent_name or "",
+                    # 🛡️ F3（T2-P3 第 2 层）：团队成员快照随会话落库——
+                    # 恢复不依赖当前 team.json（历史 run 的 team.json 会被新
+                    # run 覆盖），手动成员在历史 run 中也能找回。
+                    "team_members": self._get_team_members_snapshot_json(),
+                }
+            updated = self.history_manager.update_session_by_id(
+                self._current_session_id,
+                session.messages,
+                compaction_state=getattr(session, "compaction_state", {}),
+                compaction_cache=getattr(session, "compaction_cache", {}),
+                system_prompt=system_prompt,
+                **self._api_usage_kwargs(session),
+                **worktree_kwargs,
+                **team_kwargs,
+            )
+            if not updated:
                 # 🛡️ 内存找不到（老会话被截断出 _history_limit）：
                 # 先查 SQLite 原 project，避免被当前 _current_project 覆盖
                 resolved_project = self._resolve_session_project_fallback(
