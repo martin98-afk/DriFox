@@ -1,4 +1,57 @@
-## [v0.7.5] - 2026-11-23
+## 未发布
+
+- **消息卡片底部面板**：任务列表、子智能体和成果栏支持平滑折叠、连续反向点击与键盘操作；修复成果栏收起时缩略图区域跳高。
+
+- **当前会话提问导航**：用聊天区右缘的悬停刻度和滑出列表取代标题栏历史问题按钮、徽章与浮动卡片；支持键盘选择并跳回原消息。
+
+## [v0.7.6] - 2026-11-27 (重新发布 #2)
+
+自 v0.7.5 以来的变更 | 提交数：26 · 文件变更：133 · +17622/-3690 | 贡献者：mading, martin98-afk, dingma
+
+### ✨ 新功能 (New Features)
+- **性能基准、预算门禁与测量规程** (`tools/perf/benchmark_core.py` · `measure_gate.py` · `check_plan_coverage.py` · `tests/perf/`): 新增核心性能基准、测量规程、证伪清单与下一轮优先项文档；加入启动/内存预算门、插件加载冒烟、AST 与 code cache 安全测试。顺带修复 AST 门禁缓存绕过、会话 CAS 静默失败、缓存泄漏与动画源回收遗漏；优化设置页懒建、主题探测、日志 formatter、插件编译缓存及 renderer 回收。
+
+### 🐛 问题修复 (Bug Fixes)
+- **触控板像素直通与滚动期动画降载** (`app/utils/scroll_tuning.py` · `app/widgets/card_viewers.py` · `message_card.py`): Qt5 `QAbstractSlider::wheelEvent` 只认 angleDelta，pixelDelta 被整段丢弃（离屏实测 pixelDelta=-10 连发 6 次滚动条只走 0~1px，mac 触控板发涩根因）。pixelDelta 非空时按像素 1:1 setValue，细分 angleDelta 按 120→step×lines 折算并保留小数残差；新增 `scroll_wheel_to` 统一转发入口（直调 `area.wheelEvent` 会绕过 viewport 过滤器）；短过渡 QTimer 改懒创建，`smooth_ms=0` 的滚动区不再常驻；滚动活跃 120ms 内跳过装饰动画帧。测试 `tests/utils/test_scroll_tuning.py` 9 例（修复前 0px / 修复后 60px）。
+- **重建卡首报补偿改用稳定布局偏移** (`app/widgets/message_card.py` · `app/main_widget.py`): 虚拟滚动重建卡片时首报 mapTo 在布局未传播时读到 y=0，方向误判成「上方」把 value 拽走 120~300px。新增 `_layout_offset_before` 按插入位置前累计高度一次性判定，写入一次性令牌 `_rebuild_above_px`，消费后清除恢复常规几何判定；纯 Qt 渲染器高度同步落定，首报即解除占位钉死。回归 `tests/widgets/test_rebuild_scroll_compensation.py`。
+- **滚动输入识别与 Mac 删除快捷键** (`app/utils/scroll_tuning.py` · `app/main_widget.py` · `plugins/file-tree/ui/tree_widget.py`): 滚动接管器新增输入回调，覆盖卡片转发滚轮，避免用户滚动状态漏判导致视口被拽回底部；file-tree 支持 Delete、Backspace+Cmd/Ctrl 删除，排除 Shift+Backspace 误触。附记忆压缩/注入优先级/项目记忆预算测试。
+- **子智能体 400 MissingSessionID** (`app/core/workers/subagent_worker.py` · `app/main_widget.py`): 斜杠命令派发路径 `_execute_subagent_task` 未传 session_id，空会话标识让 `resolve_extra_headers` 跳过 `x-opencode-session`，OpenCode Zen/Go 首轮即 400。派发时锁定当前会话 ID，worker 新增 `_request_session_id` 缺失时以 task_id 兜底（覆盖插件经 `subagent.run` 自行派发路径）。测试 `tests/core/test_subagent_session_header_fallback.py` 4 例。
+- **多标签页会话串台** (`app/utils/history_manager.py` · `app/main_widget.py` · `app/widgets/ui_helpers.py`): HistoryManager 新增 `_history_lock`(RLock)，结构变更持锁；新增 `update_session_by_id` 按 session_id 重新定位，避免下标漂移误写他条记录；三处保存路径以 `session.session_id` 为权威，缓存 id 不一致时告警并纠正。回归覆盖下标漂移、并发插入、多线程交叉写入。
+- **切主题后已开标签页聊天区背景不刷新** (`app/main_widget.py`): 批量刷新路径 `_apply_runtime_ui_settings` 颜色块补调 `apply_chat_surface_opaque`（与 `refresh_theme` 两处缺一不可），源码级测试锁定两条路径。
+- **Artifact 头部 hover 背景解析** (`plugins/artifacts-manager/ui/artifact_panel.py`): `QColor(Colors.HOVER_BG)` 换 `parse_color`，修复主题色为 rgba 字符串时 alpha 丢失。
+
+### 🔧 其他 (Chores & Build)
+- 版本号升至 v0.7.6（`pyproject.toml` / `app/utils/config.py` / `dist/installer.iss` / `README.md`）。
+
+### ✨ 新功能 (New Features)
+- **历史会话首屏渐进渲染 (History First Paint)** (`app/widgets/message_card.py` · `app/main_widget.py` · `app/core/history_core.py`): 新增 `HistoryFirstPaintGate` 管理历史会话首屏展示，确保加载期间无缝体验；集成主题变化与会话状态处理；取消切换会话时的前次加载；归档流程直接调用新会话归档方法；移除过时测试并更新现有测试；覆盖欢迎卡与长短会话场景。
+- **Tab 管理器动画与尺寸过渡** (`app/widgets/tab_manager.py` · `_DockSideWrapper`): 卡片动画期间禁用最小尺寸提示；左侧卡片区域平滑宽度过渡；改进面板展开/折叠体验。
+- **Backdrop 检测扩展 window 区域与视频背景** (`app/main_widget.py` · chat theme): backdrop 检测逻辑纳入 window 区域并支持视频背景。
+- **SQL 查询优化与会话计数** (`app/core/store/session_repository.py`): 优化 SQL 查询与会话计数逻辑；新增项目查询单元测试。
+- **统一消息注入 OpenAIChatWorker** (`app/core/workers/chat_worker.py`): 所有流统一消息注入；新增消息处理回归测试。
+- **UI 能力与动画处理增强** (`app/main_widget.py`): 增强 UI 能力与动画处理；新增上下文管理与内存测试。
+- **SlideTabAnimator 动画稳定性** (`app/widgets/slide_tab_animator.py`): 增强动画处理与稳定性；新增可见文本节奏与内存性能测试。
+- **参数化 compact stream geometry 测试** (`tests/...`): 参数化 `test_compact_stream_geometry` 覆盖折叠行为；改进元素测量逻辑。
+
+### 🐛 问题修复 (Bug Fixes)
+- **骨架缓存版本更新与图表占位动画** (`app/...`): 更新骨架缓存版本并改进图表占位动画。
+- **聊天容器尺寸策略调整** (`app/widgets/...`): 调整聊天容器尺寸策略改善布局处理。
+- **聊天工具与 Tab 管理器 resize 处理** (`app/widgets/...`): 改进 resize 处理。
+- **工作台拖动与窗口状态切换聊天卡片闪空** (`app/main_widget.py` · `message_card.py`): 修复拖动与状态切换时聊天卡片闪空。
+
+### ♻️ 代码重构 (Refactoring)
+- **代码结构重构** (`app/`): 重构代码结构提升可读性与可维护性。
+
+### 🔄 其他变更 (Other Changes)
+- **UI 测试覆盖**: 新增 user bubble viewport edge、workbench drag pixels、history first paint 测试套件。
+- **消息卡片底部面板折叠动效与键盘交互优化** (`app/widgets/message_card.py`): 优化折叠动效与键盘交互。
+- **首批正文出字节奏与工具完成框原位过渡优化** (`app/...`): 优化出字节奏与完成框过渡。
+- **综合测试覆盖**: 新增 token estimation、rendering、UI behavior 测试。
+
+### 🔧 其他 (Chores & Build)
+- 版本号升至 v0.7.6（重新发布 #2）（`pyproject.toml` / `app/utils/config.py` / `dist/installer.iss` / `README.md`）。
+
+
 
 自 v0.7.4 以来的变更 | 提交数：17 · 文件变更：95 · +8706/-748 | 贡献者：drifox-bot, mading
 

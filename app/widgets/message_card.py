@@ -128,6 +128,7 @@ from app.widgets.render_helpers import (
     render_tool_block,
 )
 from app.utils.session_preview import format_relative_time
+from app.utils.scroll_tuning import is_scroll_active, scroll_wheel_to
 from app.widgets.simple_hover_tooltip import install_hover_tooltip
 
 # 渲染管线与查看器已拆分至独立模块；此处 re-export 保持既有 import 路径兼容。
@@ -159,6 +160,7 @@ from app.widgets.card_render_core import (
     _STREAM_TINT_RETRY,
     STREAM_HEIGHT_ANIM_ENABLED,
     STREAM_HEIGHT_ANIM_MIN_DELTA,
+    STREAM_HEIGHT_SNAP_GAP_PX,
     STREAM_HEIGHT_DEBOUNCE_MS,
     STREAM_HEIGHT_TICK_MS,
     STREAM_HEIGHT_TRACK_BOOST,
@@ -229,7 +231,6 @@ from app.widgets.card_viewers import (
     CodeWebViewer,
     PlainTextViewer,
     _HEIGHT_CACHE_MAX,
-    _ImagePreviewDialog,
     _PHYSICAL_TEXTURE_LIMIT,
     _decode_image_url_to_pixmap,
     _download_and_preview,
@@ -249,6 +250,11 @@ _TOOL_BLOCK_KEY_RE = re.compile(r'data-block-key="([^"]*)"')
 _TOOL_BLOCK_BUTTON_RE = re.compile(r"<button[^>]*>(.*?)</button>", re.DOTALL)
 _TOOL_COLLAPSIBLE_BODY_RE = re.compile(r'<div[^>]*class="cm-collapsible__body"[^>]*>(.*)</div>$', re.DOTALL)
 _TOOL_COLLAPSIBLE_BODY_STYLE_RE = re.compile(r'<div[^>]*class="cm-collapsible__body"[^>]*style="([^"]*)"')
+
+# 自写高度回环抑制窗口（秒）：setFixedHeight → Chromium 视口变化 → ResizeObserver
+# → reportHeight 的往返实测 p50≈2ms、偶发跨进程调度可达数十毫秒。窗口内与已应用
+# 值差 ≤ STREAM_HEIGHT_TRACK_EPSILON 的回传视为自激噪声，直接丢弃。
+_SELF_WRITE_GUARD_S = 0.08
 
 
 def user_bubble_target_width(container_width: int) -> int:
@@ -492,6 +498,8 @@ class MessageCard(SimpleCardWidget):
         self._finish_t0 = 0.0
         # 最近一次 viewer 高度增量（新值 - 旧值），供外层列表滚动锚定补偿读取
         self._last_height_delta = 0
+        # 自写高度回环抑制窗口截止时刻（monotonic，0 = 无窗口）：见 _SELF_WRITE_GUARD_S
+        self._viewer_write_guard_until = 0.0
         # 🆕 流式高度防抖：减少频繁 height report 导致的 viewer resize 抖动
         # [T29] 80 → 32ms：目标值进入追踪的频率。追踪 tick 已把"应用"
         # 侧的节拍连续化，防抖只负责合并同一窗口内的上报，不再需要独自扛
@@ -2407,7 +2415,7 @@ class MessageCard(SimpleCardWidget):
             pixmap.loadFromData(QByteArray.fromBase64(data_uri.split("base64,", 1)[-1].encode("ascii")))
         if pixmap.isNull():
             return
-        _ImagePreviewDialog(pixmap, parent=self.window()).exec_()
+        _show_image_preview(pixmap, parent=self.window())
 
     def _ensure_user_viewer(self) -> None:
         """懒创建用户气泡 PlainTextViewer（修 #2）。
@@ -2603,6 +2611,12 @@ class MessageCard(SimpleCardWidget):
         # 暂停期间重启时钟：动画位置由累积时间 _anim_t_ms 决定，不推进即停在原位置，
         # 恢复后从原位置继续，无视觉跳变；下一拍定时器自动续跑，无需显式重启。
         if not self.isVisible():
+            self._anim_clock.restart()
+            return
+        # 滚动活跃门控：视口正在移动时跳装饰动画帧（呼吸光带/流光）。滚动本身
+        # 每帧已经在重绘整视口，再叠一路 15fps 整卡 update() 会直接掉帧；
+        # 相位语义同上，滚动一停（120ms）从原位置继续，无视觉跳变。
+        if is_scroll_active():
             self._anim_clock.restart()
             return
         # [P2-7] 视口门控：卡片滚出 chat 视口可见范围时不空耗 update()（20fps
@@ -3300,6 +3314,28 @@ class MessageCard(SimpleCardWidget):
         except Exception:
             pass
         current_height = self.viewer.height() or self.viewer.minimumHeight() or 40
+        # 🆕 [自写回环抑制] 本次 setFixedHeight 引起的 Chromium 视口变化，会在
+        # 20~60ms 内以「与已应用值几乎相同」的高度经 ResizeObserver 回传。流式期
+        # 这条回传会重启 16ms 防抖 timer、再排一次追踪，形成「写 → 回传 → 重排 →
+        # 写」空转（外层每拍都收到一次无意义的高度变化，是抖动的残余来源）。
+        # 只吞「自写窗口内 + 与已应用值差 ≤ 追踪落定阈值」的回传；真实增长
+        # （差值超阈值）照常进入下方追踪/防抖。
+        if (
+            self._streaming
+            and time.monotonic() < self.__dict__.get("_viewer_write_guard_until", 0.0)
+            and abs(target_height - int(getattr(self, "_last_applied_viewer_height", 0) or 0))
+            <= STREAM_HEIGHT_TRACK_EPSILON
+        ):
+            return
+        if (self._streaming and target_height > current_height + 2
+                and not self.wants_outer_max_prelift()):
+            self._cancel_pending_shrink()
+            self._stream_height_timer.stop()
+            if self._stream_height_anim_active:
+                self._stop_stream_height_track()
+            self._target_viewer_height = target_height
+            self._apply_viewer_height(target_height)
+            return
         # 注：_target_viewer_height 不再在入口无条件覆盖。追踪活跃时由下方
         # 方向守卫分支决定是否改写；其余路径在各自应用点显式赋值。
         # [L3] 稳定状态下的高度才写入宽度→高度缓存
@@ -3582,13 +3618,29 @@ class MessageCard(SimpleCardWidget):
             # 增长方向：小阈值立即应用，保证流式输出滚底跟随。
             # 🐛 新内容填平了此前的收拢需求 → 取消挂起的延迟收缩。
             self._cancel_pending_shrink()
-            if h - current_height > 2:
+            gap = h - current_height
+            if gap > 2:
+                # 🆕 [同步优先] 落后超过一行余隙 → 直接对齐，不再插值追踪。
+                # 追踪是「用 50ms/84% 的插值把一个台阶摊成几拍」，代价是卡片
+                # 高度持续落后内容：大量正文流式输出时落后量稳定在 20~40px，
+                # 正文底部顶在 viewer 视口边缘（被裁）→ 随后突然蹦出，体感就是
+                # 「WebView 内部元素与外部气泡高度不同步」。跨过余隙的那一拍
+                # 立即 snap，把落后窗口从 ~150ms 压到一个 tick（≤50ms）；小步
+                # 增长仍走追踪，保留连续生长的观感。
+                if gap >= STREAM_HEIGHT_SNAP_GAP_PX:
+                    # 先停追踪（否则下一拍 tick 会用旧目标覆盖回去）。该调用会
+                    # 重发一次「已应用高度」（delta 已清零）；简洁流式卡外层不
+                    # 预抬上界，只多一次幂等贴底投递。
+                    if self._stream_height_anim_active:
+                        self._stop_stream_height_track()
+                    self._target_viewer_height = h
+                    self._apply_viewer_height(h)
                 # [T29] 增量足够大 → 启动追踪，消除「憋一下再整块蹦高」的
                 # 台阶感；量级不足（流式尾巴的小抖动）直接 snap，避免 tick 常转。
-                if (
+                elif (
                     STREAM_HEIGHT_ANIM_ENABLED
                     and Animations.motion_enabled()
-                    and (h - current_height) >= STREAM_HEIGHT_ANIM_MIN_DELTA
+                    and gap >= STREAM_HEIGHT_ANIM_MIN_DELTA
                 ):
                     self._target_viewer_height = h
                     self._begin_stream_height_track(h)
@@ -3606,13 +3658,16 @@ class MessageCard(SimpleCardWidget):
 
     def _schedule_pending_shrink(self, target: int):
         """挂起一次小步收拢：500ms 稳定窗后落地，窗口内被增长/finish 取消。"""
+        compact = not self.wants_outer_max_prelift()
+        same_target = self._pending_shrink_height == int(target)
         self._pending_shrink_height = int(target)
         if self._shrink_timer is None:
             self._shrink_timer = QTimer(self)
             self._shrink_timer.setSingleShot(True)
-            self._shrink_timer.setInterval(500)
             self._shrink_timer.timeout.connect(self._apply_pending_shrink)
-        self._shrink_timer.start()
+        if compact and same_target and self._shrink_timer.isActive():
+            return
+        self._shrink_timer.start(64 if compact else 500)
 
     def _cancel_pending_shrink(self):
         """取消挂起的延迟收缩（增长方向到来 / finish 收敛接管）。"""
@@ -3639,7 +3694,8 @@ class MessageCard(SimpleCardWidget):
             # [T29] 延迟收缩落地同样走追踪：工具密集时多个收缩会在同一拍落地，
             # snap 是「掉下去」。量级小时不值得动画（这里是 <40px 的小步收拢，
             # 阈值用 FINISH 的 60 太大，直接判是否 >= 12px）。
-            if STREAM_HEIGHT_ANIM_ENABLED and Animations.motion_enabled() and (current_height - target) >= 12:
+            if (self.wants_outer_max_prelift() and STREAM_HEIGHT_ANIM_ENABLED
+                    and Animations.motion_enabled() and current_height - target >= 12):
                 self._target_viewer_height = target
                 self._begin_stream_height_track(target)
             else:
@@ -3648,8 +3704,11 @@ class MessageCard(SimpleCardWidget):
     def _on_qt_viewer_height(self, h: int) -> None:
         """灰度：纯 Qt viewer 高度自治（layout 自适应，不 setFixedHeight），
         仅转发高度变化给父容器（滚底跟随依赖 heightChanged 链路）。"""
-        # 灰度路径无增量语义：清零防止外层列表用残留 delta 做错误锚定补偿
+        # 纯 Qt viewer 的高度同步落定；若占位钉死发生在 viewer 创建前，
+        # 首次同步上报必须解除它，否则后续布局会永久被占位高度锁住。
+        self._unpin_layout_height()
         self._last_height_delta = 0
+        self.updateGeometry()
         self.heightChanged.emit(max(40, int(h)))
 
     def _resolve_height_batch(self):
@@ -3731,25 +3790,19 @@ class MessageCard(SimpleCardWidget):
                 退回「viewer 增量」口径，在重建路径上会严重高估（见
                 ``_apply_viewer_height`` 的说明）。
         """
-        # 🐛 用户卡片（PlainTextViewer）不参与钉死：PlainTextViewer 同步定型，
-        # set_text 当拍即 setFixedSize 到实测尺寸，contentHeightChanged emit 时
-        # viewer.height() 已等于上报值 → 卡片侧 _update_height 的 ±2px 噪声死区
-        # （target == current）恒命中 return，高度永远到不了 _apply_viewer_height
-        # 的 unpin 出口。T42 重建时序又是「建卡（emit 已被死区消费）→ 钉死」，
-        # 钉死后不再有任何自然上报 → 卡片永久 min=max=占位高度 H，H 与真实内容
-        # 高的任何偏差（批次均摊、卸载到重建之间的宽度变化、字体度量漂移）都被
-        # 固化成永久高度错误（长历史会话向上翻页时上方重建的用户卡片偶现异常）。
-        # 跳钉后高度由布局按 PlainTextViewer.sizeHint()（实测值）自然分配，
-        # viewer 已建立即正确；viewer 未建（兜底）→ 创建后同样走布局，均可自愈。
-        # assistant/welcome 的 CodeWebViewer 异步上报（reportHeight 在 pin 后到达，
-        # 起步 40 → 真实高的差必 > 2px）不受死区影响，钉死行为保持不变。
-        if self.role == "user":
-            v = self.viewer
-            if v is not None:
-                try:
-                    self._apply_viewer_height(int(v.height()))
-                except RuntimeError:
-                    pass
+        # 🐛 纯 Qt 渲染器高度同步落定，不需要占位钉死。重建路径通常在
+        # ensure_rendered 之后才调用本方法，此时卡片已经有真实 sizeHint；若
+        # 调用顺序相反，则由 _on_qt_viewer_height 在首次同步上报时解除。
+        if self.role == "user" or (
+            self.viewer is not None and not getattr(self, "_viewer_async_height", True)
+        ):
+            if self.role == "user":
+                v = self.viewer
+                if v is not None:
+                    try:
+                        self._apply_viewer_height(int(v.height()))
+                    except RuntimeError:
+                        pass
             return
         try:
             self.setFixedHeight(max(1, int(height)))
@@ -3777,6 +3830,38 @@ class MessageCard(SimpleCardWidget):
             self.setMaximumHeight(_QWIDGETSIZE_MAX)
         except RuntimeError:
             pass
+
+    def wants_outer_max_prelift(self) -> bool:
+        """外层滚动区是否应为本卡的高度增量**预抬** maximum。
+
+        简洁模式（`ui_compact_tool_area`）流式期返回 False：
+
+        * 该模式下工具/思考区在卡片顶部按步合并、正文连续生长，高度上报是
+          内容驱动的连续流（20Hz 级）；
+        * 外层原逻辑每拍 `sb.setMaximum(maximum + delta)` 手工预抬上界，而 Qt
+          布局要到下一拍才落地 —— 预抬值与真实值之间那几 px 的缝，正是滚动条
+          thumb / 折叠栏可见抖动的来源（`_schedule_bottom_snap` 的 landed 口径
+          只能修「贴底落点」，修不了「上界本身每拍被人工改写」这一层）；
+        * 交给 Qt 自己维护上界后，跟底仍由 queued 贴底（读 `_landed_bottom_value`）
+          保证，不丢跟随。
+
+        非流式 / 非简洁模式返回 True：高度变化是离散事件（折叠、展开、终渲染），
+        预抬能让滚动条 range 立刻跟上，避免脏读旧上界。
+        """
+        if not getattr(self, "_streaming", False):
+            return True
+        try:
+            viewer = self.viewer
+        except RuntimeError:
+            return True
+        if viewer is None:
+            return True
+        try:
+            compact = bool(getattr(viewer, "_tool_compact_mode", False))
+        except (RuntimeError, AttributeError):
+            # sip-deleted wrapper：按旧行为预抬，避免异常路径丢掉外层补偿
+            return True
+        return not compact
 
     def _commit_viewer_height(self, height: int) -> None:
         """高度应用的统一出口。
@@ -3844,6 +3929,9 @@ class MessageCard(SimpleCardWidget):
             self._pending_viewer_height = height
             return
         self._commit_viewer_height(height)
+        # [自写回环抑制] 记录本次写入时刻：紧随其后的等值回传由 _update_height 入口吞掉
+        # （见该处注释）。只在真正写 viewer 的拍设置，resize preview / 等值短路不设。
+        self._viewer_write_guard_until = time.monotonic() + _SELF_WRITE_GUARD_S
         # viewer 高度变化后 body 视口可能改变，仅在用户已处于底部时重新滚动到底部
         # 🐛 修复：当 MAX_HEIGHT 限制导致 body 首次出现溢出时，scrollTop=0，
         # wasAtBottom 永远为 false，auto-scroll 不触发。跟踪用户主动滚动行为，
@@ -4120,16 +4208,14 @@ class MessageCard(SimpleCardWidget):
 
     def wheelEvent(self, event: QWheelEvent):
         # MessageCard 的 wheelEvent 仅在子 widget（viewer）未消费事件时被调用。
-        # 此时说明内部没有可滚动内容，或内部已达边界 → 转发外层滚动区，
-        # 走 qfluentwidgets SmoothScroll，与卡片间隙滚动同款平滑手感。
+        # 此时说明内部没有可滚动内容，或内部已达边界 → 转发外层聊天滚动区。
+        # 必须走 scroll_wheel_to（而不是 scroll_area.wheelEvent）：后者绕过
+        # viewport 上的接管器，触控板像素直通与整格放大全部失效。
         try:
             scroll_area = self._parent.chat_scroll_area
-            if scroll_area:
-                vbar = scroll_area.verticalScrollBar()
-                if vbar and vbar.minimum() != vbar.maximum() and event.angleDelta().y() != 0:
-                    scroll_area.wheelEvent(event)
-                    event.accept()
-                    return
+            if scroll_area and scroll_wheel_to(scroll_area, event):
+                event.accept()
+                return
         except Exception:
             pass
         super().wheelEvent(event)
@@ -6718,6 +6804,20 @@ class MessageCard(SimpleCardWidget):
         if hasattr(self, "_markdown_cache") and self._markdown_cache:
             self._markdown_cache.clear()
             self._markdown_cache = None
+        # [M5] 宽度→高度预测缓存：卡销毁后仍被本对象持有，随 cleanup 一并释放
+        # （键是宽度 int、值 int，量小但属清理遗漏；读取点 _last_synced_width
+        # 为 0 时不写缓存，清空不会影响任何存活路径）。
+        self._height_cache.clear()
+        # [M4-附带] 插件内嵌面板「panel_id → 占高」缓存，cleanup 同样漏清
+        # （键值为 str→int，量小；面板已卸载时条目永驻）。
+        self._inline_panel_height_cache.clear()
+        # [M4-附带] panel 的 parent 是卡内 _assistant_bubble（实测
+        # panel.parent() 为 MessageBubble，c.isAncestorOf(panel) 为 True），
+        # 卡销毁时 C++ 侧由 Qt 连带销毁（实测卡销毁后 sip.isdeleted(panel)
+        # 为 True）；本 dict 只持 Python wrapper，不清则死 wrapper 常驻。
+        # 故这里只断引用，不调 deleteLater（避免与卡的销毁链双删）。
+        self._inline_panels.clear()
+        self._inline_panel_host = None
 
     def closeEvent(self, e):
         self.cleanup()

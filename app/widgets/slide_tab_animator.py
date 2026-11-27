@@ -33,7 +33,7 @@ QStackedWidget 同一时刻只显示一页（hidden→visible 传播），无法
 
 from typing import Callable, Optional
 
-from PyQt5.QtCore import QObject, QRect, QVariantAnimation
+from PyQt5.QtCore import QAbstractAnimation, QObject, QRect, QVariantAnimation
 from PyQt5.QtWidgets import QLayout, QStackedWidget
 
 from app.utils.design_tokens import Animations
@@ -50,19 +50,24 @@ class SlideTabAnimator(QObject):
         super().__init__(parent if parent is not None else stack)
         self._stack = stack
         self._layout = layout
-        self._anim: Optional[QVariantAnimation] = None
+        self._anim = QVariantAnimation(self)
+        self._anim.setStartValue(0.0)
+        self._anim.setEndValue(1.0)
+        self._anim.valueChanged.connect(self._on_tick)
+        self._anim.finished.connect(self._on_phase_done)
         self._geo = QRect()
         self._layout_index = -1
         self._target = -1
         self._dir = 0
-        self._phase = ""  # "out" 滑出 / "in" 滑入
+        self._pending_dir = 0  # 段2 反向时暂存新方向，倒放仍用旧方向
+        self._phase = ""  # out 滑出 / in 滑入 / back 倒放回原位 / back_in 倒放到画外
         self._on_switched: Optional[Callable[[], None]] = None
 
     # ── 状态 ──
 
     def is_running(self) -> bool:
         """是否有滑动在途（调用方可据此避免叠加动画）"""
-        return self._anim is not None and self._anim.state() == QVariantAnimation.Running
+        return self._anim.state() == QVariantAnimation.Running
 
     # ── 切换 ──
 
@@ -80,12 +85,36 @@ class SlideTabAnimator(QObject):
             调用方按原逻辑直切。
         """
         stack = self._stack
-        if not (0 <= index < stack.count()) or index == stack.currentIndex():
+        if not (0 <= index < stack.count()):
             return False
-        if direction == 0 or not Animations.motion_enabled():
+        if self._phase:
+            if index == self._target:
+                return True
+            if index == stack.currentIndex() and self._phase == "out":
+                # 离场途中点回仍显示的旧页：倒放离场动画平滑归位，不换页、
+                # 不重建动画。直接 _finish 会让画面从画外瞬间跳回原位。
+                self._target = -1
+                self._on_switched = None
+                self._phase = "back"
+                self._anim.setDirection(QAbstractAnimation.Backward)
+                if self._anim.state() != QVariantAnimation.Running:
+                    self._anim.start()
+                return True
+            if self._phase == "in":
+                # 滑入途中改目标：先倒放把当前页送回进场侧画外，再换页从
+                # 新方向进场。画外瞬移不可见，避免中途归位造成可见跳回。
+                self._target = index
+                self._pending_dir = 1 if direction > 0 else -1
+                self._on_switched = on_switched
+                self._phase = "back_in"
+                self._anim.setDirection(QAbstractAnimation.Backward)
+                if self._anim.state() != QVariantAnimation.Running:
+                    self._anim.start()
+                return True
+            # 新选择取代旧目标（段2 已换页时旧目标已显示，需重新离场）。
+            self._finish(interrupted=False)
+        if index == stack.currentIndex() or direction == 0 or not Animations.motion_enabled():
             return False
-        if self.is_running():
-            self._finish(interrupted=True)
         self._target = index
         self._dir = 1 if direction > 0 else -1
         self._on_switched = on_switched
@@ -96,7 +125,7 @@ class SlideTabAnimator(QObject):
 
     def finish_now(self) -> None:
         """立即收敛到终态（外部打断：面板隐藏 / 宽度动画 / 页面被移除等）"""
-        if self._anim is not None:
+        if self._phase:
             self._finish(interrupted=True)
 
     # ── 内部 ──
@@ -122,9 +151,8 @@ class SlideTabAnimator(QObject):
         stack.setGeometry(self._geo)
 
     def _start_anim(self) -> None:
-        anim = QVariantAnimation(self)
-        anim.setStartValue(0.0)
-        anim.setEndValue(1.0)
+        anim = self._anim
+        anim.setDirection(QAbstractAnimation.Forward)
         if self._phase == "in":
             anim.setDuration(self.SLIDE_IN_MS)
             anim.setEasingCurve(Animations.EASE_ENTER)
@@ -132,28 +160,44 @@ class SlideTabAnimator(QObject):
             anim.setDuration(self.SLIDE_OUT_MS)
             # 离场用 InCubic 加速带出：OutCubic 的减速长尾落在画外，纯属白等
             anim.setEasingCurve(Animations.EASE_IN)
-        anim.valueChanged.connect(self._on_tick)
-        anim.finished.connect(self._on_phase_done)
-        self._anim = anim
         anim.start()
 
     def _on_tick(self, t: float) -> None:
         w = self._geo.width()
-        if self._phase == "out":
-            # 旧页画面向出场侧滑出
+        if self._phase in ("out", "back"):
+            # 旧页画面向出场侧滑出；back 为离场倒放，t 递减回 0 即原位
             self._stack.move(self._geo.x() - round(w * self._dir * t), self._geo.y())
-        else:
-            # 新页从进场侧滑入
+        elif self._phase in ("in", "back_in"):
+            # 新页从进场侧滑入；back_in 为倒放，t 递减回 0 即回到画外
             self._stack.move(self._geo.x() + round(w * self._dir * (1.0 - t)), self._geo.y())
 
     def _on_phase_done(self) -> None:
-        if self._phase == "out":
+        if self._phase == "back":
+            # 倒放归位完成：全程未换页，直接收尾（不触发 on_switched）
+            self._finish(interrupted=False)
+            return
+        if self._phase == "back_in":
+            # 进场倒放到画外完成：换页并从新方向滑入
+            self._dir = self._pending_dir
+            self._phase = "in"
             self._swap_page()
+            if self._phase != "in":  # 刷新回调可能已经取消或替换此次切页
+                return
+            if not self.isVisible_stack():
+                self._finish(interrupted=True)
+                return
+            self._stack.move(self._geo.x() + self._geo.width() * self._dir, self._geo.y())
+            self._start_anim()
+            return
+        if self._phase == "out":
+            self._phase = "in"
+            self._swap_page()
+            if self._phase != "in":  # 刷新回调可能已经取消或替换此次切页
+                return
             if not self.isVisible_stack():
                 # 面板在槽间被隐藏/销毁：不再做滑入，直接收敛
                 self._finish(interrupted=True)
                 return
-            self._phase = "in"
             self._stack.move(self._geo.x() + self._geo.width() * self._dir, self._geo.y())
             self._start_anim()
             return
@@ -179,23 +223,21 @@ class SlideTabAnimator(QObject):
 
     def _finish(self, interrupted: bool) -> None:
         """收尾（幂等）：停动画、必要时补换页、按原布局位置放回并归位"""
-        anim = self._anim
-        if anim is not None:
-            try:
-                anim.finished.disconnect(self._on_phase_done)
-                anim.valueChanged.disconnect(self._on_tick)
-            except (TypeError, RuntimeError):
-                pass
-            anim.stop()
-        self._anim = None
-        # 先取出待用状态再清空，避免补换页回调读到已归零的 target
-        need_swap = self._phase == "out" and self._target >= 0
+        self._anim.stop()
+        self._anim.setDirection(QAbstractAnimation.Forward)
+        # 主动收尾才补换页；被新目标取代的旧页不该再刷新。
+        need_swap = interrupted and self._phase == "out" and self._target >= 0
         target = self._target
         cb = self._on_switched
         self._phase = ""
         self._on_switched = None
         self._target = -1
         self._dir = 0
+        self._pending_dir = 0
+        try:
+            self._reattach()
+        except RuntimeError:
+            return
         if need_swap:
             # 段1 被打断：仍完成换页，杜绝「高亮/信号已切、内容未切」的状态漂移
             try:
@@ -205,7 +247,3 @@ class SlideTabAnimator(QObject):
                         cb()
             except RuntimeError:
                 pass
-        try:
-            self._reattach()
-        except RuntimeError:
-            pass

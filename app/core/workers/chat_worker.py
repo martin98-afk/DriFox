@@ -747,6 +747,11 @@ class OpenAIChatWorker(QThread):
     # append 增量维护），任何拿不准的情形回退拷贝，绝不把 image_ref 发给 provider。
     _api_cache_has_vision_refs: Optional[bool] = None
 
+    # 本轮注入落点：run() 绑定，finally 清空。responses 通道的唯一请求体来源，
+    # 注入出口 _append_injected_messages 统一写（绑定前为 None，注入退化为旧行为）。
+    _live_messages: Optional[List[Dict[str, Any]]] = None
+    _live_session_messages: Optional[List[Dict[str, Any]]] = None
+
     @staticmethod
     def _scan_vision_refs(messages: List[Any]) -> bool:
         """块级快筛 cache 是否含 vision 引用块（image_ref 或未回收的 data:image）。
@@ -850,6 +855,37 @@ class OpenAIChatWorker(QThread):
             if self._api_cache_has_vision_refs is False and self._scan_vision_refs([api_msg]):
                 self._api_cache_has_vision_refs = True
 
+    def _append_injected_messages(
+        self, msgs: List[Dict[str, Any]], session_messages_target: Optional[List[Dict[str, Any]]] = None
+    ) -> None:
+        """注入消息的唯一出口：一次写全所有消费方，杜绝调用点各传一半。
+
+        三条消息流互相独立，缺一条的后果各不相同：
+        - ``_api_messages_cache``：chat/completions 通道的请求体来源，缺则模型
+          看不到（历史实现只补这里，故 responses 通道长期漏注入）。
+        - ``_live_messages``：本轮 ``create_stream(messages)`` 的入参，
+          openai_responses transport 忽略 api_messages、只从这里重新序列化
+          input_items —— gpt-6 系全部走此通道，缺则「消息列表里有、模型没反应」。
+        - ``_live_session_messages`` / ``_current_session_messages``：会话列表与
+          其镜像，UI 落卡与持久化读这里。
+
+        ``session_messages_target`` 保留调用点已有的额外目标（兼容旧签名），
+        按对象身份去重：既有调用点把 API 列表当 session 目标传，不去重会双写。
+        """
+        self._append_to_api_cache(msgs)
+        targets = [
+            getattr(self, "_live_messages", None),
+            getattr(self, "_live_session_messages", None),
+            getattr(self, "_current_session_messages", None),
+            session_messages_target,
+        ]
+        seen = set()
+        for target in targets:
+            if target is None or id(target) in seen:
+                continue
+            seen.add(id(target))
+            target.extend(msgs)
+
     def _inject_pending_hook_messages(
         self, session_messages_target: List = None, include_team_mail: bool = True
     ) -> None:
@@ -926,10 +962,7 @@ class OpenAIChatWorker(QThread):
                 self._emit_with_callback("queued_user_injected", self.queued_user_injected, interject_count)
 
             if injected:
-                self._append_to_api_cache(injected)
-                self._current_session_messages.extend(injected)
-                if session_messages_target is not None:
-                    session_messages_target.extend(injected)
+                self._append_injected_messages(injected, session_messages_target)
                 logger.debug(f"[HookManager] Injected {len(injected)} hook msgs from queue")
 
             # 🆕 主动检查团队待处理邮件（不依赖 QFileSystemWatcher）
@@ -959,10 +992,7 @@ class OpenAIChatWorker(QThread):
                     hook_content = _format_hook_output("TeamMail", content, wrap_system_reminder=False)
                     msg = {"role": "user", "content": hook_content, "_hook_event": "TeamMail"}
 
-                    self._append_to_api_cache([msg])
-                    self._current_session_messages.append(msg)
-                    if session_messages_target is not None:
-                        session_messages_target.append(msg)
+                    self._append_injected_messages([msg], session_messages_target)
 
                     logger.info(f"[TeamMail] Worker 注入团队邮件: #{mail['id']} from [{sender_id}]")
         except Exception as e:
@@ -1193,10 +1223,7 @@ class OpenAIChatWorker(QThread):
                     break
 
             if msgs:
-                self._append_to_api_cache(msgs)
-                self._current_session_messages.extend(msgs)
-                if session_messages_target is not None:
-                    session_messages_target.extend(msgs)
+                self._append_injected_messages(msgs, session_messages_target)
                 logger.debug(f"[HookManager] Injected {len(msgs)} pretool msgs from queue")
         except Exception as e:
             logger.debug(f"[HookManager] Failed to inject pending pretool msgs: {e}")
@@ -2330,6 +2357,11 @@ class OpenAIChatWorker(QThread):
             if current_session_messages is not current_messages:
                 current_session_messages, _ = self._fix_tool_result_order(current_session_messages)
             self._current_session_messages = list(current_session_messages)
+            # 🔗 注入落点绑定：注入必须写进本轮真正送 API 的列表（responses 通道
+            # 只用 messages 重新序列化，不读 chat 形态 api cache），而各注入调用点
+            # 手里的列表各不相同，靠调用点自己传必漏。在此绑定一次，注入出口统一写。
+            self._live_messages = current_messages
+            self._live_session_messages = current_session_messages
 
             # 用当前消息初始化 API 缓存（使 _inject_pending_hook_messages 能正确追加）
             self._set_api_messages_cache(self._serialize_for_api(current_messages).messages)
@@ -2912,6 +2944,9 @@ class OpenAIChatWorker(QThread):
             # 被下一个 worker 当新插话消费（2026-10-29 已撤回插话复活 + 双卡片）
             if self._is_cancelled:
                 self._reclaim_pending_interjects_on_exit()
+            # 注入落点只在本轮有效：清空防跨轮悬挂已失效的列表对象
+            self._live_messages = None
+            self._live_session_messages = None
 
     def _make_assistant_msg(self, content, model_name, reasoning_content, timestamp):
         """构建 assistant 消息 dict（消除 3 处重复构造）"""

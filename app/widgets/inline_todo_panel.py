@@ -23,14 +23,14 @@ from typing import Any, Dict, List, Optional
 
 from PyQt5.QtCore import QEvent, Qt, pyqtSignal
 from PyQt5.QtWidgets import QFrame, QHBoxLayout, QLabel, QProgressBar, QVBoxLayout, QWidget
-from qfluentwidgets import TransparentToolButton
 
 from app.utils.design_tokens import BorderRadius, Colors, font_size_css
 from app.utils.motion import LoopTimer
-from app.utils.utils import _is_current_theme_light, get_font_family_css, get_icon
+from app.utils.utils import _is_current_theme_light, get_font_family_css
 from app.widgets._workbench_helpers import _SectionHeader
 from app.widgets.cards.floating.sub_agent_compact_widget import _RotatingIcon
 from app.widgets.elided_label import _ElidedLabel
+from app.widgets.inline_disclosure import DisclosureButton, DisclosureMotion
 from app.widgets.status_dot import StatusDot
 
 
@@ -68,8 +68,8 @@ class InlineTodoPanel(QWidget):
 
         # ── 头部：图标 + 标题 + 统计 + 折叠按钮 ──
         self._header = _SectionHeader("任务列表", "todo", self)
-        self._collapse_btn = TransparentToolButton(get_icon("展开"), self)
-        self._collapse_btn.setFixedSize(22, 22)
+        self._header.layout().setContentsMargins(6, 0, 4, 0)
+        self._collapse_btn = DisclosureButton(self._header)
         self._collapse_btn.setToolTip("展开任务列表")
         self._collapse_btn.clicked.connect(self._on_collapse_clicked)
         # 折叠按钮插入到 header 末尾（统计之后）
@@ -113,6 +113,8 @@ class InlineTodoPanel(QWidget):
         self._list_layout.addStretch(1)
         self._list_wrap.setVisible(False)  # 默认折叠
         layout.addWidget(self._list_wrap)
+        self._motion = DisclosureMotion(self._list_wrap, self._notify_height)
+        self._motion.progressChanged.connect(self._collapse_btn.set_progress)
 
         self.hide()  # 无任务整区隐藏
         self.refresh_style()
@@ -122,15 +124,10 @@ class InlineTodoPanel(QWidget):
     def is_collapsed(self) -> bool:
         return self._collapsed
 
-    def _set_collapsed(self, collapsed: bool) -> None:
-        """内部：设置折叠态（不触发高度回调，避免递归）
-
-        只收起任务列表；进行中常驻条不随折叠隐藏（折叠态保持可见执行中任务）。
-        """
+    def _set_collapsed(self, collapsed: bool, animate: bool = False) -> None:
+        """只收起清单；进行中常驻条始终保留。"""
         self._collapsed = collapsed
-        self._list_wrap.setVisible(not collapsed)
-        icon = "展开" if collapsed else "折叠"
-        self._collapse_btn.setIcon(get_icon(icon))
+        self._motion.set_expanded(not collapsed, animate=animate)
         self._collapse_btn.setToolTip("展开任务列表" if collapsed else "折叠任务列表")
         self._header.setToolTip("点击展开任务列表" if collapsed else "点击折叠任务列表")
 
@@ -157,7 +154,9 @@ class InlineTodoPanel(QWidget):
         self.heightChanged.emit()
 
     def _on_collapse_clicked(self) -> None:
-        self._set_collapsed(not self._collapsed)
+        self._set_collapsed(not self._collapsed, animate=True)
+
+    def _notify_height(self) -> None:
         lay = self.layout()
         if lay is not None:
             lay.invalidate()  # 清 QBoxLayout sizeHint 缓存（滞后一拍的根源）
@@ -232,8 +231,12 @@ class InlineTodoPanel(QWidget):
         # 重建列表：全部任务按原序 → 底部 stretch
         for t in todos:
             status, content, priority = self._item_fields(t)
-            self._list_layout.addWidget(self._make_item(status, content, priority))
+            row = self._make_item(status, content, priority)
+            self._list_layout.addWidget(row)
+            if self._list_wrap.isVisible():
+                row.show()  # 展开态立即计高；折叠态由容器下次显示时排版
         self._list_layout.addStretch(1)
+        self._motion.refresh_target()
 
         # 强制本面板布局立即重算：子布局（_list_wrap）invalidate 不会即时传播到
         # 本层 sizeHint 缓存（QBoxLayout cached geom），宿主在 heightChanged 里读
@@ -365,6 +368,10 @@ class InlineTodoPanel(QWidget):
     def refresh_style(self) -> None:
         """主题刷新（宿主在主题切换时调用）"""
         self._header.refresh_style()
+        self._header.setStyleSheet(self._header.styleSheet() + (
+            f"QFrame#workbenchSectionHeader:hover {{ background: {Colors.HOVER_BG}; border-radius: {BorderRadius.SM}; }}"
+        ))
+        self._header._title_label.setStyleSheet(f"color: {Colors.TEXT_PRIMARY}; font-weight: 600;")
         # 置顶常驻区：淡琥珀底卡，与下方普通列表视觉区分
         self._running_wrap.setStyleSheet(
             "QFrame#taskRunningWrap { background: rgba(245, 158, 11, 0.10);"

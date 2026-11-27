@@ -117,7 +117,7 @@ def _prepare_text(md_text: str, ctx: RenderCtx, completed: bool) -> str:
     inline svg 保护 → 公式提取 → 代码块解包 → 上下文链接 → fence 哨兵 →
     think / tool / hook / tag 注入 → fence 还原。任何一步换位置都会改变产物。
     """
-    safe_md = _sanitize_incomplete_markdown(md_text)
+    safe_md = _sanitize_incomplete_markdown(md_text, final=ctx.compact and not ctx.streaming)
     safe_md = _protect_inline_svg_blocks(safe_md)
     safe_md = _extract_formulas(safe_md)
     safe_md = _unwrap_code_blocks_with_context_links(safe_md)

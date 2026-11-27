@@ -227,6 +227,28 @@ class _ArchiveScanSignals(QObject):
     finished = pyqtSignal(int, list)  # request_id, enriched_list
 
 
+# 归档元数据缓存上限。归档目录本身没有条数上限（文件只增不减），缓存若不封顶
+# 会随归档数量线性增长；文件被删除时 _ArchiveScanTask 阶段 3 会反向对账 pop，
+# 但那是「文件消失才释放」，不是上限。512 条 ≈ 300~400KB，超出按插入序淘汰
+# 最旧条目，代价是下一轮扫描重读被淘汰的 JSON（后台线程，单文件毫秒级）。
+_ARCHIVE_META_CACHE_MAX = 512
+
+
+def _archive_meta_put(cache: Dict[str, Tuple[float, Dict]], key: str, value: Tuple[float, Dict]) -> None:
+    """写入归档元数据缓存并按上限淘汰最旧条目。
+
+    调用方必须已持有 cache_lock（threading.Lock 不可重入，故本函数不自锁）。
+    已存在的 key 先 pop 再写，刷新插入序；淘汰按 dict 插入序 FIFO。
+    """
+    cache.pop(key, None)
+    cache[key] = value
+    while len(cache) > _ARCHIVE_META_CACHE_MAX:
+        try:
+            cache.pop(next(iter(cache)))
+        except (StopIteration, KeyError):
+            break
+
+
 class _HistoryLoadSignals(QObject):
     """历史首次加载完成信号：后台预热线程 → 主线程（queued 连接）。
 
@@ -319,7 +341,7 @@ class _ArchiveScanTask(QRunnable):
                     "project": parsed.get("project", ""),
                 }
                 with self._cache_lock:
-                    self._cache[fp_str] = (mtime, info)
+                    _archive_meta_put(self._cache, fp_str, (mtime, info))
                 enriched.append(self._enrich_from_info(fp_str, fp_path, mtime, info))
 
             # 阶段 3：反向对账——归档文件已删除的缓存条目清除（原实现只 add
@@ -433,6 +455,13 @@ class HistoryManager:
         # 在写 SQLite；_save_seq 递增序号用于丢弃已被更新请求超越的陈旧快照
         # （防抖 timer 到期与 flush 交叉时，旧快照后完成会覆盖新内容）。
         self._save_write_lock = threading.Lock()
+        # 🛡️ 内存缓存结构锁（跨窗口/跨线程）：HistoryManager 是全局单例，
+        # 多标签页关窗时各自的后台 finalize 线程 + 主线程会并发
+        # pop/insert `_history_sessions`。旧实现按「调用方传入的 index」
+        # 定位替换，下标在并发插入下会漂移 → A 会话的消息被写进 B 会话记录
+        # （标题保留、内容串台，2026-11-27 多标签页实机事故）。
+        # 所有结构变更必须持此锁，且替换一律按 session_id 重新定位。
+        self._history_lock = threading.RLock()
         self._save_seq = 0
         # 🛡️ 在飞写盘计数：_do_save 起线程前把自己登记进来，线程结束（含失败/早退）
         # 时注销。flush / flush_async / 关窗路径据此等待「已交给后台但还没落盘」的写，
@@ -497,20 +526,21 @@ class HistoryManager:
         列表本身已按 updated_at DESC 排序（最新在索引 0），
         因此正向遍历首次出现的即为最新，保留即可。
         """
-        seen_ids = set()
-        unique_sessions = []
-        for session in self._history_sessions:
-            session_id = session.get("session_id")
-            if session_id and session_id not in seen_ids:
-                seen_ids.add(session_id)
-                unique_sessions.append(session)
-        removed = len(self._history_sessions) - len(unique_sessions)
-        if removed > 0:
-            logger.warning(f"[HistoryManager] 移除了 {removed} 个重复会话")
-            self._history_sessions = unique_sessions
-            self._mark_cache_dirty()
-        else:
-            self._history_sessions = unique_sessions
+        with self._history_lock:
+            seen_ids = set()
+            unique_sessions = []
+            for session in self._history_sessions:
+                session_id = session.get("session_id")
+                if session_id and session_id not in seen_ids:
+                    seen_ids.add(session_id)
+                    unique_sessions.append(session)
+            removed = len(self._history_sessions) - len(unique_sessions)
+            if removed > 0:
+                logger.warning(f"[HistoryManager] 移除了 {removed} 个重复会话")
+                self._history_sessions = unique_sessions
+                self._mark_cache_dirty()
+            else:
+                self._history_sessions = unique_sessions
 
     def _init_storage(self):
         """初始化存储层（经 backend 门面获取活跃引擎，行为等价 SessionStore）"""
@@ -689,21 +719,22 @@ class HistoryManager:
         )
         new_session_id = session_record["session_id"]
 
-        # 更新内存缓存
-        existing_index = None
-        for i, s in enumerate(self._history_sessions):
-            if s.get("session_id") == new_session_id:
-                existing_index = i
-                break
+        # 更新内存缓存（结构锁内完成查找+替换，防并发插入导致误删他条记录）
+        with self._history_lock:
+            existing_index = None
+            for i, s in enumerate(self._history_sessions):
+                if s.get("session_id") == new_session_id:
+                    existing_index = i
+                    break
 
-        if existing_index is not None:
-            # 更新现有会话时，移动到列表开头以保持与 SQLite ORDER BY updated_at DESC 一致
-            self._history_sessions.pop(existing_index)
-            self._history_sessions.insert(0, session_record)
-        else:
-            self._history_sessions.insert(0, session_record)
+            if existing_index is not None:
+                # 更新现有会话时，移动到列表开头以保持与 SQLite ORDER BY updated_at DESC 一致
+                self._history_sessions.pop(existing_index)
+                self._history_sessions.insert(0, session_record)
+            else:
+                self._history_sessions.insert(0, session_record)
 
-        self._history_sessions = self._history_sessions[: self._history_limit]
+            self._history_sessions = self._history_sessions[: self._history_limit]
         self._mark_cache_dirty()
 
         # 持久化到 SQLite
@@ -828,20 +859,23 @@ class HistoryManager:
         }
 
     def get_current_title(self, index: int) -> str:
-        if 0 <= index < len(self._history_sessions):
-            return self._history_sessions[index].get("title", "")
+        with self._history_lock:
+            if 0 <= index < len(self._history_sessions):
+                return self._history_sessions[index].get("title", "")
         return ""
 
     def update_session_title(self, index: int, new_title: str):
-        if 0 <= index < len(self._history_sessions):
-            self._history_sessions[index]["title"] = new_title
-            self._cache_dirty = True
+        with self._history_lock:
+            if 0 <= index < len(self._history_sessions):
+                self._history_sessions[index]["title"] = new_title
+                self._cache_dirty = True
 
     def set_user_edited_title(self, index: int, edited: bool = True):
         """标记会话标题已被用户编辑"""
-        if 0 <= index < len(self._history_sessions):
-            self._history_sessions[index]["user_edited_title"] = edited
-            self._cache_dirty = True
+        with self._history_lock:
+            if 0 <= index < len(self._history_sessions):
+                self._history_sessions[index]["user_edited_title"] = edited
+                self._cache_dirty = True
 
 
     def update_topic_summary(self, index: int, summary: str):
@@ -900,7 +934,8 @@ class HistoryManager:
                 # 二次检查 + 条件赋值：查询期间外部可能已加载/注入，
                 # 以外部数据为准，不覆盖（GIL 内条件赋值原子）
                 elif not self._history_loaded:
-                    self._history_sessions = sessions
+                    with self._history_lock:
+                        self._history_sessions = sessions
                     self._deduplicate_history_sessions()
                     self._migrate_if_needed()
                     self._history_loaded = True
@@ -1043,7 +1078,8 @@ class HistoryManager:
                     # 查询失败保留内存现有数据，不得把 _history_sessions 污染成 None
                     logger.warning("[HistoryManager] 跨进程重载查询失败，保留内存现有数据")
                     return
-                self._history_sessions = sessions
+                with self._history_lock:
+                    self._history_sessions = sessions
                 self._deduplicate_history_sessions()
                 self._migrate_if_needed()
                 self._history_loaded = True
@@ -1328,22 +1364,24 @@ class HistoryManager:
 
     def move_to_project(self, index: int, project: str) -> bool:
         """将会话移动到指定项目"""
-        if 0 <= index < len(self._history_sessions):
-            self._history_sessions[index]["project"] = project
+        with self._history_lock:
+            if not (0 <= index < len(self._history_sessions)):
+                return False
             session = self._history_sessions[index]
-            if self._use_sqlite and self._session_store:
-                self._session_store.update_session_project(session.get("session_id"), project)
-            self._persist_session(session)
-            self._mark_cache_dirty()
-            return True
-        return False
+            session["project"] = project
+        if self._use_sqlite and self._session_store:
+            self._session_store.update_session_project(session.get("session_id"), project)
+        self._persist_session(session)
+        self._mark_cache_dirty()
+        return True
 
     def archive_sessions_by_project(self, project: str) -> int:
         """批量归档指定项目的所有会话"""
         if self._use_sqlite and self._session_store:
             count = self._session_store.archive_sessions_by_project(project)
             # 同步内存缓存
-            self._history_sessions = [s for s in self._history_sessions if s.get("project", "默认项目") != project]
+            with self._history_lock:
+                self._history_sessions = [s for s in self._history_sessions if s.get("project", "默认项目") != project]
             self._mark_cache_dirty()
             return count
         return 0
@@ -1381,7 +1419,8 @@ class HistoryManager:
                 continue
 
             # 从内存缓存移除
-            self._history_sessions = [s for s in self._history_sessions if s.get("session_id") != session_id]
+            with self._history_lock:
+                self._history_sessions = [s for s in self._history_sessions if s.get("session_id") != session_id]
 
             # 从 SQLite 删除
             if self._use_sqlite and self._session_store:
@@ -1428,7 +1467,8 @@ class HistoryManager:
         # 🛡️ 守卫 session_id="unknown"（轻量记录缺失 id 时的兜底值）：
         # 避免误删多条无 id 会话的内存记录。
         if session_id != "unknown":
-            self._history_sessions = [s for s in self._history_sessions if s.get("session_id") != session_id]
+            with self._history_lock:
+                self._history_sessions = [s for s in self._history_sessions if s.get("session_id") != session_id]
         self._mark_cache_dirty()
 
         # 从 SQLite 删除
@@ -1439,9 +1479,11 @@ class HistoryManager:
 
     def archive_history(self, index: int) -> bool:
         """归档历史记录"""
-        if 0 <= index < len(self._history_sessions):
-            return self._archive_session_record(self._history_sessions[index])
-        return False
+        with self._history_lock:
+            if not (0 <= index < len(self._history_sessions)):
+                return False
+            record = self._history_sessions[index]
+        return self._archive_session_record(record)
 
     def remove_session(self, session_id: str, release_messages_only: bool = True) -> bool:
         """从内存缓存移除会话记录（或仅释放其消息体）。
@@ -1462,19 +1504,20 @@ class HistoryManager:
         if not session_id:
             return False
         self._ensure_history_loaded()
-        for i, s in enumerate(self._history_sessions):
-            if s.get("session_id") == session_id:
-                if release_messages_only:
-                    if s.get("messages"):
-                        s["messages"] = []
-                        # 🛡️ 释放态标记：_do_save / flush_async 的空消息守卫据此
-                        # 区分「内存已释放、无数据可写」与「显式清空、就是要写空」。
-                        # 由 _build_session_record 重建记录时自然清除。
-                        s["_messages_released"] = True
-                else:
-                    self._history_sessions.pop(i)
-                    self._mark_cache_dirty()
-                return True
+        with self._history_lock:
+            for i, s in enumerate(self._history_sessions):
+                if s.get("session_id") == session_id:
+                    if release_messages_only:
+                        if s.get("messages"):
+                            s["messages"] = []
+                            # 🛡️ 释放态标记：_do_save / flush_async 的空消息守卫据此
+                            # 区分「内存已释放、无数据可写」与「显式清空、就是要写空」。
+                            # 由 _build_session_record 重建记录时自然清除。
+                            s["_messages_released"] = True
+                    else:
+                        self._history_sessions.pop(i)
+                        self._mark_cache_dirty()
+                    return True
         return False
 
     def release_messages_except(self, active_session_ids: set, extra_skip: "set | None" = None) -> int:
@@ -1570,11 +1613,14 @@ class HistoryManager:
             # 检查是否已存在相同 session_id 的会话
             existing_session_id = session.get("session_id")
             if existing_session_id:
-                existing_index = self.find_index_by_session_id(existing_session_id)
-                if existing_index is not None:
+                if self.find_index_by_session_id(existing_session_id) is not None:
                     # 更新已存在的会话，移动到列表开头以保持与 SQLite ORDER BY updated_at DESC 一致
-                    self._history_sessions.pop(existing_index)
-                    self._history_sessions.insert(0, session)
+                    with self._history_lock:
+                        for i, s in enumerate(self._history_sessions):
+                            if s.get("session_id") == existing_session_id:
+                                self._history_sessions.pop(i)
+                                break
+                        self._history_sessions.insert(0, session)
                     self._mark_cache_dirty()
                     self._schedule_save(existing_session_id)
                     logger.info(f"[HistoryManager] 更新已存在的会话: {existing_session_id}")
@@ -1593,16 +1639,18 @@ class HistoryManager:
                         session["title"] = f"[导入] {session.get('title', '新对话')}"
 
                     # 添加到内存缓存顶部
-                    self._history_sessions.insert(0, session)
-                    self._history_sessions = self._history_sessions[: self._history_limit]
+                    with self._history_lock:
+                        self._history_sessions.insert(0, session)
+                        self._history_sessions = self._history_sessions[: self._history_limit]
                     self._mark_cache_dirty()
                     self._schedule_save(session["session_id"])
                     logger.info(f"[HistoryManager] 导入新会话: {session['session_id']}")
             else:
                 # 没有 session_id，生成一个新的
                 session["session_id"] = uuid.uuid4().hex[:8]
-                self._history_sessions.insert(0, session)
-                self._history_sessions = self._history_sessions[: self._history_limit]
+                with self._history_lock:
+                    self._history_sessions.insert(0, session)
+                    self._history_sessions = self._history_sessions[: self._history_limit]
                 self._mark_cache_dirty()
                 self._schedule_save(session["session_id"])
 
@@ -1756,7 +1804,7 @@ class HistoryManager:
                             "project": data.get("project", ""),
                         }
                         with self._archive_cache_lock:
-                            self._archive_meta_cache[fp_str] = (mtime, info)
+                            _archive_meta_put(self._archive_meta_cache, fp_str, (mtime, info))
                     except Exception:
                         logger.error(f"[HistoryManager] 读取归档文件失败: {json_file}")
                         continue
@@ -1835,12 +1883,13 @@ class HistoryManager:
         return sorted(projects)
 
     def find_index_by_session_id(self, session_id: str) -> Optional[int]:
-        """根据 session_id 查找索引"""
+        """根据 session_id 查找索引（仅供展示/判定，写入请用 update_session_by_id）"""
         if not session_id:
             return None
-        for i, session in enumerate(self._history_sessions):
-            if session.get("session_id") == session_id:
-                return i
+        with self._history_lock:
+            for i, session in enumerate(self._history_sessions):
+                if session.get("session_id") == session_id:
+                    return i
         return None
 
     def get_session_by_session_id(self, session_id: str) -> Optional[Dict]:
@@ -2121,7 +2170,62 @@ class HistoryManager:
         agent_name: str = None,
         team_members: str = None,
     ):
-        """更新会话
+        """更新会话（index 兼容入口）。
+
+        ⚠️ index 只用来取一次目标 session_id，真正的替换由
+        ``update_session_by_id`` 在结构锁内按 session_id 重新定位。
+        HistoryManager 是全局单例：多标签页关窗时，各窗口的后台 finalize
+        线程与主线程会并发 pop/insert ``_history_sessions``，调用方算出的
+        index 在到达这里时可能已经指向别的会话（2026-11-27 实机事故：
+        消石灰会话内容被写进「欢迎卡片插件评估」记录，标题保留内容串台）。
+        新代码请直接调 ``update_session_by_id``。
+        """
+        self._ensure_history_loaded()
+        with self._history_lock:
+            if not (0 <= index < len(self._history_sessions)):
+                return
+            session_id = self._history_sessions[index].get("session_id")
+        if not session_id:
+            return
+        self.update_session_by_id(
+            session_id,
+            messages,
+            compaction_state=compaction_state,
+            compaction_cache=compaction_cache,
+            system_prompt=system_prompt,
+            project=project,
+            worktree_path=worktree_path,
+            last_api_prompt_tokens=last_api_prompt_tokens,
+            last_api_message_count=last_api_message_count,
+            last_api_prompt_from_usage=last_api_prompt_from_usage,
+            token_calibration=token_calibration,
+            token_calibration_model=token_calibration_model,
+            team_run_id=team_run_id,
+            team_name=team_name,
+            agent_name=agent_name,
+            team_members=team_members,
+        )
+
+    def update_session_by_id(
+        self,
+        session_id: str,
+        messages: List[Dict],
+        compaction_state: Dict = None,
+        compaction_cache: Dict = None,
+        system_prompt: str = None,
+        project: str = None,
+        worktree_path: str = None,
+        last_api_prompt_tokens: Optional[int] = None,
+        last_api_message_count: Optional[int] = None,
+        last_api_prompt_from_usage: Optional[bool] = None,
+        token_calibration: Optional[float] = None,
+        token_calibration_model: Optional[str] = None,
+        team_run_id: str = None,
+        team_name: str = None,
+        agent_name: str = None,
+        team_members: str = None,
+    ) -> bool:
+        """按 session_id 更新会话（并发安全的唯一写入口，命中返回 True）。
 
         team_run_id/team_name/agent_name/team_members 为 None 时保留现有值
         （最小侵入，不传则不触碰团队元数据），传入非 None 才更新——避免
@@ -2131,50 +2235,71 @@ class HistoryManager:
         每轮消息都跑的高频路径，不带这些字段时必须沿用，否则 API 返回的精确
         上下文占用会在第一轮保存后即被清零。
         """
-        if 0 <= index < len(self._history_sessions):
-            merged_messages = merge_session_messages(messages)
-            # 🛡️ 落地前清理孤立 tool_calls，保证下一轮加载时消息天然干净
-            merged_messages = _clean_orphan_tool_calls(merged_messages)
-            existing = self._history_sessions[index]
-            _usage = self._resolve_api_usage_fields(
-                {
-                    "last_api_prompt_tokens": last_api_prompt_tokens,
-                    "last_api_message_count": last_api_message_count,
-                    "last_api_prompt_from_usage": last_api_prompt_from_usage,
-                    "token_calibration": token_calibration,
-                    "token_calibration_model": token_calibration_model,
-                },
-                existing,
-            )
-            updated = self._build_session_record(
-                merged_messages,
-                title=existing.get("title"),
-                session_id=existing.get("session_id"),
-                compaction_state=(
-                    compaction_state if compaction_state is not None else existing.get("compaction_state", {})
-                ),
-                compaction_cache=(
-                    compaction_cache if compaction_cache is not None else existing.get("compaction_cache", {})
-                ),
-                system_prompt=(
-                    system_prompt
-                    if system_prompt is not None
-                    else self._resolve_existing_system_prompt(existing)
-                ),
-                project=project if project is not None else existing.get("project", "默认项目"),
-                worktree_path=worktree_path if worktree_path is not None else existing.get("worktree_path", ""),
-                **_usage,
-                team_run_id=team_run_id if team_run_id is not None else existing.get("team_run_id", ""),
-                team_name=team_name if team_name is not None else existing.get("team_name", ""),
-                agent_name=agent_name if agent_name is not None else existing.get("agent_name", ""),
-                team_members=team_members if team_members is not None else existing.get("team_members", ""),
-                context_usage_hint=existing.get("context_usage", 0),
-            )
-            # 移动到列表开头以保持与 SQLite ORDER BY updated_at DESC 一致
-            self._history_sessions.pop(index)
-            self._history_sessions.insert(0, updated)
-            self._mark_cache_dirty()
-            self._schedule_save(existing.get("session_id"))
+        if not session_id:
+            return False
+        self._ensure_history_loaded()
+        # 1) 锁内取目标记录引用。只读其元数据（title/project/team_*），
+        #    构造期间即使主线程把它替换掉，旧 dict 内容也不会被改写。
+        with self._history_lock:
+            existing = None
+            for s in self._history_sessions:
+                if s.get("session_id") == session_id:
+                    existing = s
+                    break
+        if existing is None:
+            return False
+
+        merged_messages = merge_session_messages(messages)
+        # 🛡️ 落地前清理孤立 tool_calls，保证下一轮加载时消息天然干净
+        merged_messages = _clean_orphan_tool_calls(merged_messages)
+        _usage = self._resolve_api_usage_fields(
+            {
+                "last_api_prompt_tokens": last_api_prompt_tokens,
+                "last_api_message_count": last_api_message_count,
+                "last_api_prompt_from_usage": last_api_prompt_from_usage,
+                "token_calibration": token_calibration,
+                "token_calibration_model": token_calibration_model,
+            },
+            existing,
+        )
+        updated = self._build_session_record(
+            merged_messages,
+            title=existing.get("title"),
+            session_id=session_id,
+            compaction_state=(
+                compaction_state if compaction_state is not None else existing.get("compaction_state", {})
+            ),
+            compaction_cache=(
+                compaction_cache if compaction_cache is not None else existing.get("compaction_cache", {})
+            ),
+            system_prompt=(
+                system_prompt if system_prompt is not None else self._resolve_existing_system_prompt(existing)
+            ),
+            project=project if project is not None else existing.get("project", "默认项目"),
+            worktree_path=worktree_path if worktree_path is not None else existing.get("worktree_path", ""),
+            **_usage,
+            team_run_id=team_run_id if team_run_id is not None else existing.get("team_run_id", ""),
+            team_name=team_name if team_name is not None else existing.get("team_name", ""),
+            agent_name=agent_name if agent_name is not None else existing.get("agent_name", ""),
+            team_members=team_members if team_members is not None else existing.get("team_members", ""),
+            context_usage_hint=existing.get("context_usage", 0),
+        )
+        # 2) 锁内按 id 重新定位并替换（移动到列表头，保持与 SQLite
+        #    ORDER BY updated_at DESC 一致）。期间不会有别的线程插入导致错位。
+        with self._history_lock:
+            replaced = False
+            for i, s in enumerate(self._history_sessions):
+                if s.get("session_id") == session_id:
+                    self._history_sessions.pop(i)
+                    self._history_sessions.insert(0, updated)
+                    replaced = True
+                    break
+            if not replaced:
+                # 构造期间被移除（归档/删除/历史重载）：写回内存，避免静默丢失
+                self._history_sessions.insert(0, updated)
+        self._mark_cache_dirty()
+        self._schedule_save(session_id)
+        return True
 
     def save_cleared_session(
         self,
@@ -2211,12 +2336,15 @@ class HistoryManager:
             return False
         if not session_id:
             return False
-        index = self.find_index_by_session_id(session_id)
-        if index is None:
+        with self._history_lock:
+            existing = None
+            for s in self._history_sessions:
+                if s.get("session_id") == session_id:
+                    existing = s
+                    break
+        if existing is None:
             logger.warning(f"[HistoryManager] 清空会话不在内存记录中，跳过落库: {session_id[:8]}...")
             return False
-
-        existing = self._history_sessions[index]
         _usage = self._resolve_api_usage_fields(
             {
                 "last_api_prompt_tokens": api_usage_kwargs.get("last_api_prompt_tokens"),
@@ -2247,8 +2375,16 @@ class HistoryManager:
             team_members=existing.get("team_members", ""),
             pinned=existing.get("pinned", False),
         )
-        self._history_sessions.pop(index)
-        self._history_sessions.insert(0, cleared)
+        with self._history_lock:
+            replaced = False
+            for i, s in enumerate(self._history_sessions):
+                if s.get("session_id") == session_id:
+                    self._history_sessions.pop(i)
+                    self._history_sessions.insert(0, cleared)
+                    replaced = True
+                    break
+            if not replaced:
+                self._history_sessions.insert(0, cleared)
         self._mark_cache_dirty()
 
         # 该会话若已有排队中的延迟保存，先作废：目标记录已被替换为清空版，
@@ -2378,10 +2514,11 @@ class HistoryManager:
 
         # 主线程捕获待保存快照引用（列表遍历不与后台写盘并发）
         target = None
-        for session in self._history_sessions:
-            if session.get("session_id") == pending_id:
-                target = session
-                break
+        with self._history_lock:
+            for session in self._history_sessions:
+                if session.get("session_id") == pending_id:
+                    target = session
+                    break
         self._pending_save_session_id = None
         if target is None:
             logger.debug(f"[HistoryManager] 待保存会话不在列表中: {pending_id[:8]}...")
@@ -2999,10 +3136,13 @@ class HistoryManager:
                         # 检查是否已存在
                         existing_id = session.get("session_id", "")
                         if existing_id:
-                            existing_index = self.find_index_by_session_id(existing_id)
-                            if existing_index is not None:
-                                # 更新已存在会话
-                                self._history_sessions[existing_index] = session
+                            if self.find_index_by_session_id(existing_id) is not None:
+                                # 更新已存在会话（锁内按 id 重新定位，防下标漂移）
+                                with self._history_lock:
+                                    for i, s in enumerate(self._history_sessions):
+                                        if s.get("session_id") == existing_id:
+                                            self._history_sessions[i] = session
+                                            break
                                 self._schedule_save(existing_id)
                                 imported_count += 1
                                 continue
@@ -3010,7 +3150,8 @@ class HistoryManager:
                         # 新会话
                         if not existing_id:
                             session["session_id"] = uuid.uuid4().hex[:8]
-                        self._history_sessions.insert(0, session)
+                        with self._history_lock:
+                            self._history_sessions.insert(0, session)
                         self._schedule_save(session["session_id"])
                         imported_count += 1
                     except Exception as e:

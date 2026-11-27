@@ -65,6 +65,7 @@ def _build_skeleton_html() -> str:
     v._v2_last = None
     v.page = lambda: page
     v.setHtml = lambda html, url=None: captured.setdefault("html", html)
+    v._doc_resize_quiet_timer = None
     v.ensure_transparent_composition = lambda: None
     v._load_skeleton()
     return captured.get("html", "")

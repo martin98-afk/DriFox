@@ -246,49 +246,32 @@ class TestConsistencyAcrossAllFourSites:
     而不是复制过滤代码到测试（复制等于测自己的复制）。
     """
 
-    @staticmethod
-    def _count_team_mail_filters() -> int:
-        """用 AST 解析 main_widget.py，统计含 TeamMail 例外的 user 消息过滤点
+    def test_question_edge_uses_displayable_users_and_version_cache(self, qapp):
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        from app.main_widget import OpenAIChatToolWindow
+        from app.widgets.question_edge_navigator import QuestionEdgeNavigator
+        from PyQt5.QtWidgets import QWidget
 
-        精确匹配两种过滤模式（均为 R6/R7 修复后的"含 TeamMail"逻辑）：
-        - 正向包含：`(not msg.get("_hook_event") or msg.get("_hook_event") == "TeamMail")`
-        - 反向跳过：`if msg.get("_hook_event") and msg.get("_hook_event") != "TeamMail": continue`
-        """
-        import ast
-        from pathlib import Path
-
-        src = Path("app/main_widget.py").read_text(encoding="utf-8")
-        tree = ast.parse(src)
-
-        # 统计正向包含模式：比较表达式中含 `_hook_event` 与 `TeamMail` 的 equality
-        pos_count = 0
-        neg_count = 0
-        for node in ast.walk(tree):
-            # 正向包含：Compare 含 == "TeamMail"（在 or 分支中）
-            if isinstance(node, ast.Compare):
-                for op, comp in zip(node.ops, node.comparators):
-                    if isinstance(op, ast.Eq) and isinstance(comp, ast.Constant) and comp.value == "TeamMail":
-                        pos_count += 1
-            # 反向跳过：NotEq "TeamMail"
-            if isinstance(node, ast.Compare):
-                for op, comp in zip(node.ops, node.comparators):
-                    if isinstance(op, ast.NotEq) and isinstance(comp, ast.Constant) and comp.value == "TeamMail":
-                        neg_count += 1
-        return pos_count + neg_count
-
-    def test_main_widget_team_mail_filter_count_exact(self):
-        """main_widget.py 中含 TeamMail 的过滤点数量应精确为 12（R6 4 + R7 5 + F1 1 + F4 Bug1 1 + 空白会话守卫 1）
-
-        计数演进（均为合理新增，语义见各自提交）：
-        - R6/R7 修复：9 处（标题生成/历史问题卡片 4 + 自动保存/归档/worker 识别 5）
-        - F1（停止重触发修复）：+1 处（_check_and_process_pending 停止冷却判定附近）
-        - F4 Bug1（round_index 口径统一）：+1 处（_get_current_user_round_index
-          改为含 TeamMail 例外，与全仓口径一致）
-        - 团队解散空白会话守卫：+1 处（_save_current_session_to_history 新增
-          has_user_message 守卫，拦截仅含 SessionStart hook 消息的空白会话落库）
-        """
-        count = self._count_team_mail_filters()
-        assert count == 12, f"含 TeamMail 的过滤点应精确为 12（R6 4 + R7 5 + F1 1 + F4 1 + 守卫 1），实际 {count} 处"
+        viewport = QWidget()
+        edge = QuestionEdgeNavigator(viewport)
+        session = SimpleNamespace(session_id="s", _messages_version=1, messages=[
+            {"role": "user", "content": "第一问"},
+            {"role": "user", "content": "内部通知", "_hook_event": "SessionStart"},
+            {"role": "user", "content": "团队邮件", "_hook_event": "TeamMail"},
+        ])
+        host = SimpleNamespace(_question_edge=edge, session_manager=Mock())
+        host.session_manager.get_current_session.return_value = session
+        OpenAIChatToolWindow._update_history_questions_badge(host)
+        assert edge.rows == ["第一问", "团队邮件"]
+        before = edge.rows
+        OpenAIChatToolWindow._update_history_questions_badge(host)
+        assert edge.rows is before
+        host._message_batch = [[session.messages[0]], [session.messages[2]]]
+        host._locate_and_scroll_to_batch = Mock(return_value=False)
+        host._scroll_to_target_node_index = Mock()
+        OpenAIChatToolWindow._jump_to_history_question(host, 1)
+        host._scroll_to_target_node_index.assert_called_once_with(1, 1)
 
     def test_no_bare_hook_event_filter_remains(self):
         """main_widget.py 不应再残留裸 `not msg.get("_hook_event")`（不含 TeamMail 例外）的 **user 消息** 过滤

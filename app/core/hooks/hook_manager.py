@@ -2028,7 +2028,8 @@ class HookManager:
             parallel_hooks = [all_hooks[i] for i in parallel_indices]
             # 🛡️ W1：trigger_async=True（UI 线程 SessionStart）时，command/非注入型
             # hook 改走后台异步执行 + 回调回补，主线程不被外部进程/网络阻塞。
-            parallel_results = self._execute_hooks_parallel(parallel_hooks, context, trigger_async=trigger_async)
+            parallel_results = self._execute_hooks_parallel(parallel_hooks, context, trigger_async=trigger_async,
+                                                            skip_finished_callback=skip_finished_callback)
             for orig_idx, result in zip(parallel_indices, parallel_results):
                 results[orig_idx] = result
 
@@ -2066,7 +2067,8 @@ class HookManager:
                 results[i] = HookExecutionResult(success=False, output="Unknown parallel hook error")
 
     def _execute_hooks_parallel(
-        self, hooks: List[Hook], context: Dict[str, Any], trigger_async: bool = False
+        self, hooks: List[Hook], context: Dict[str, Any], trigger_async: bool = False,
+        skip_finished_callback: bool = False,
     ) -> List[HookExecutionResult]:
         """并行执行多个 Hook（非 PROMPT 类型），返回结果列表（顺序与输入一致）
 
@@ -2101,12 +2103,14 @@ class HookManager:
                 # 请求异步但该 hook 不可后台（http/python 注入型）：线程池执行 +
                 # UI 线程事件循环保活等待（最长 hook.timeout，界面不冻结）。
                 executor = _get_parallel_executor()
-                future = executor.submit(self._execute_hook, hook, dict(context), trigger_async=False)
+                future = executor.submit(self._execute_hook, hook, dict(context), trigger_async=False,
+                                         skip_finished_callback=skip_finished_callback)
                 results: List[Optional[HookExecutionResult]] = [None]
                 self._collect_futures({future: 0}, results)
                 return results  # type: ignore[return-value]
             # 非异步请求：保持历史语义，在调用线程同步执行（减少线程调度开销）
-            return [self._execute_hook(hook, dict(context), trigger_async=False)]
+            return [self._execute_hook(hook, dict(context), trigger_async=False,
+                                       skip_finished_callback=skip_finished_callback)]
 
         logger.debug(f"[HookManager] Executing {n} hooks in parallel")
         results: List[Optional[HookExecutionResult]] = [None] * n
@@ -2121,7 +2125,8 @@ class HookManager:
             else:
                 # 浅拷贝 context：保证每个 hook 有自己的 context 副本，
                 # _execute_hook 中的 context["skill_root"] = ... 等写入不影响其他 hook
-                future = executor.submit(self._execute_hook, hook, dict(context), trigger_async=False)
+                future = executor.submit(self._execute_hook, hook, dict(context), trigger_async=False,
+                                         skip_finished_callback=skip_finished_callback)
                 future_to_idx[future] = i
 
         if future_to_idx:

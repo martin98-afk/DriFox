@@ -243,7 +243,15 @@ def _load_module(plugin_name: str, path: Path, root_kind: str = ""):
             f"[PluginToolLoader] [AST审计] 插件 {plugin_name} 工具模块含模块级危险 import"
             f"（已放行，仅告警）: {_audit_detail} ({path}) kind={root_kind or 'unknown'}"
         )
-    code = compile(source, str(path), "exec")
+    # [PERF] 编译产物跨进程缓存：compile 与源码体积线性相关（实测约 120 ns/byte，
+    # 19 个工具模块合计 35~38ms），是 load_plugin_tools 的主要成本；exec 本身只占 3.8ms。
+    # 缓存键用源码 sha256 + 解释器版本 + schema，**不用 mtime**——本函数上方注释
+    # 记录的 pyc 事故正是 mtime 精度不足导致误复用旧字节码，自建缓存不能重蹈。
+    from app.plugins.loaders import _code_cache
+
+    code, _hit = _code_cache.get_code(source, str(path))
+    if not _hit:
+        _code_cache.schedule_flush()
     try:
         exec(code, module.__dict__)
     except Exception:

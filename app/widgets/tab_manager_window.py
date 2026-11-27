@@ -533,6 +533,14 @@ class _DockSideWrapper(QWidget):
         lay.addWidget(stack)
         primary.installEventFilter(self)
         stack.installEventFilter(self)
+        # 开合动画期把最小尺寸提示归零（卡片内容最小宽会经 minimumSizeHint
+        # 把 #tabFrame 顶在满宽，逐帧 setSizes 的中间值会被 QSplitter 钳掉）
+        self._min_hint_disabled = False
+        # 宿主开合动画接管内层 sidebarSplitter 分配时置 True（见
+        # TabManagerWindow._animate_left_card_width）：本类不再自行 setSizes，
+        # 只维护宽度记忆，否则动画首帧就被一次瞬切覆盖成「列表先拉宽再弹回」。
+        self._host_animating = False
+        self._pending_host_hide = False
         self.hide()  # 默认收起
 
     def set_partner_pane(self, pane: QWidget, collapsed_size: int = 0) -> None:
@@ -557,6 +565,25 @@ class _DockSideWrapper(QWidget):
         # 立即同步：默认两子均 hide → 立即压回 splitter 0 大小，
         # 避免 addWidget 后 splitter 默认均分空间导致空白 handle 显示
         self._sync()
+
+    def set_min_hint_disabled(self, disabled: bool) -> bool:
+        """切换「最小尺寸提示归零」；幂等，切换后主动 updateGeometry 让 splitter 重算
+
+        卡片区开合动画期间必须归零：卡片内容最小宽经 minimumSizeHint 把
+        宿主窗格顶在满宽，宿主逐帧 setSizes 的中间值被钳掉 → 动画只剩首尾
+        两帧（与 _WorkbenchFrame 同一手法）。
+        """
+        disabled = bool(disabled)
+        if self._min_hint_disabled == disabled:
+            return False
+        self._min_hint_disabled = disabled
+        self.updateGeometry()
+        return True
+
+    def minimumSizeHint(self):  # noqa: N802 (Qt 命名)
+        if self._min_hint_disabled:
+            return QSize(0, 0)
+        return super().minimumSizeHint()
 
     def eventFilter(self, obj, ev):
         # Show/Hide（17/18）仅在父级可见时发出；父级（wrapper 自身）hidden 时
@@ -615,6 +642,7 @@ class _DockSideWrapper(QWidget):
         frame 压到收起宽 → 卡片被挤没」的回路。
         """
         if self.isHidden():
+            self._pending_host_hide = False  # 反向开合：上一轮延后的 hide 作废
             self.show()
             # 预置展开宽度（仅槽位为 0 的全收起重开）：
             # - primary（CardContainer）有可见卡片：用容器 dock 协议已算好
@@ -633,6 +661,13 @@ class _DockSideWrapper(QWidget):
                 expand_w = self._expanded_width
             if idx < len(sizes) and sizes[idx] == 0:
                 self.expandedChanged.emit(True)  # 宿主先备 TabPanel 收起态
+                if self._host_animating:
+                    # 宿主动画逐帧接管：此处只记伙伴宽度（关闭时恢复基准）
+                    if self._partner_saved_size <= 0:
+                        pane_idx = self._partner_splitter_index
+                        if 0 <= pane_idx < len(sizes) and sizes[pane_idx] > 0:
+                            self._partner_saved_size = sizes[pane_idx]
+                    return
                 sizes[idx] = expand_w
                 self._shrink_partner(sizes)
                 sp = self._splitter
@@ -641,6 +676,9 @@ class _DockSideWrapper(QWidget):
         else:
             # 已展开（互斥切卡）：槽位可能与新卡片记忆不符，交由容器
             # _apply_visible_card_dock_size 处理；此处只保证伙伴已收窄
+            self._pending_host_hide = False
+            if self._host_animating:
+                return
             if self._partner_pane is not None and idx < len(sizes) and sizes[idx] > 0:
                 before = list(sizes)
                 self._shrink_partner(sizes)
@@ -660,6 +698,12 @@ class _DockSideWrapper(QWidget):
         if idx < len(sizes) and sp is not None:
             self._expanded_width = sizes[idx] if sizes[idx] > 0 else self._expanded_width or self.DEFAULT_EXPANDED_WIDTH
             self.expandedChanged.emit(False)  # 宿主先备 TabPanel 展开态
+            if self._host_animating:
+                # 宿主动画接管：延后 hide（要占住内层窗格，否则卡片区让出的
+                # 宽度会全被 TabPanel 吃掉——列表被拉宽再弹回），内层由它逐帧落位
+                self._partner_saved_size = 0
+                self._pending_host_hide = True
+                return
             sizes[idx] = 0
             self._restore_partner(sizes)
             sp.setSizes(sizes)
@@ -1217,6 +1261,9 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
 
         # ── Resize 动画节流：100ms 无 resize 事件后退出节流模式 ──
         self._resize_blocking: bool = False  # resize 期间跳过 super().resizeEvent，冻结全部布局
+        # 窗口状态切换（最大化/还原/最小化）期的预览抑制开关（见 _begin_window_state_guard）
+        self._window_state_preview_guard: bool = False
+        self._last_layout_window_state = self.windowState()
         self._resize_timer = QTimer(self)
         self._resize_timer.setSingleShot(True)
         self._resize_timer.setInterval(100)
@@ -1249,6 +1296,15 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
         # 卡片打开前 TabPanel 是否处于折叠态（关闭卡片时按其恢复，避免
         # 「折叠态 → 开插件 → 关插件」意外展开侧边栏）
         self._left_card_prev_collapsed: bool = False
+        # 卡片区开合动画：外层 frame 宽与内层 TabPanel 槽宽同步插值（插件面板
+        # 侧滑展开/收回）。_left_card_pending_wb_restore 记「关闭后需重开被挤压
+        # 折叠的工作台」，等动画收尾再执行（避免两个动画抢同一 splitter）。
+        self._left_card_anim: Optional[QVariantAnimation] = None
+        self._left_card_anim_frame_from: int = 0
+        self._left_card_anim_frame_to: int = 0
+        self._left_card_anim_panel_from: int = _COLLAPSED_PANEL_WIDTH
+        self._left_card_anim_panel_to: int = _COLLAPSED_PANEL_WIDTH
+        self._left_card_pending_wb_restore: bool = False
 
         self.setWindowTitle("飘狐-DriFox")
         self.setObjectName("tabManagerWindow")
@@ -1465,6 +1521,7 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
         self._workbench_frame.hide()  # 默认隐藏（标题栏「右侧边栏」按钮 toggle）
         # 挂到 splitter：不拉伸（与左侧 tabFrame 同策略），宽度由 handle 拖拽
         self._splitter.addWidget(self._workbench_frame)
+        self._bind_workbench_splitter_handle()
         self._splitter.setStretchFactor(2, 0)
         # 初始宽度（隐藏态不占空间，展开时生效）
         self._workbench_frame_w = PANEL_WIDTH_DEFAULT + 14
@@ -1742,6 +1799,22 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
             if w is not None:
                 w._suppress_resize_preview = suppressed
 
+    def _guard_windows_resize_settle(self) -> None:
+        """把随后排入事件循环的异步布局重排也挡在 resize 预览之外
+
+        setSizes / show-hide 之后 Qt 会再排一次 LayoutRequest，当拍解除预览抑制
+        后这一拍延迟 resize 仍会把正文换成占位框（实测右栏收起后正文像素
+        4131→0）。主窗口侧的同名守卫只封预览、不推迟宽度同步：几何静默 100ms
+        后由 _sync_all_cards_width 清除并重排。逐窗口调用以覆盖后台页。
+        """
+        if not hasattr(self, "_content_area"):
+            return
+        for i in range(self._content_area.count()):
+            w = self._content_area.widget(i)
+            guard = getattr(w, "_guard_workbench_relayout", None)
+            if guard is not None:
+                guard()
+
     def toggle_workbench(self) -> None:
         """标题栏「右侧边栏」按钮回调：直接显示/隐藏工作台（无折叠动画）
 
@@ -1894,6 +1967,9 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
         frame = getattr(self, "_workbench_frame", None)
         if frame is not None:
             frame.set_min_hint_disabled(False)
+        cur = self.get_current_window()
+        if cur is not None and hasattr(cur, "_guard_workbench_relayout"):
+            cur._guard_workbench_relayout()
         self._set_windows_resize_preview_suppressed(False)
         # [T30] 动画结束可见性恢复点：补刷隐藏期置脏的顶层容器
         self._refresh_theme_dirty_frames()
@@ -1913,6 +1989,13 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
             " border-radius: 8px;"
             " }"
         )
+
+    def _bind_workbench_splitter_handle(self) -> None:
+        # 工作台预览会把 frame 移出 splitter；回挂时 Qt 创建新 handle，
+        # 构造阶段装在旧 handle 上的拖动保护不会跟着 frame 一起回来。
+        idx = self._splitter.indexOf(self._workbench_frame)
+        self._splitter_right_handle = self._splitter.handle(idx)
+        self._splitter_right_handle.installEventFilter(self)
 
     def _wb_preview_enter(self) -> None:
         """控制器 on_enter：把工作台 frame 摘到浮层做纯几何滑入。
@@ -1968,6 +2051,7 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
             self._wb_overlay.hide()
             frame.setParent(self._splitter)
             self._splitter.insertWidget(2, frame)
+            self._bind_workbench_splitter_handle()
             # 回挂后重新继承本窗口 QSS：清内联样式，防残留压住 _apply_theme_stylesheet
             frame.setStyleSheet("")
             if self._wb_promote_on_leave:
@@ -2041,6 +2125,8 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
         from app.widgets.workbench_panel import PANEL_WIDTH_DEFAULT, PANEL_WIDTH_MIN
 
         self._wb_visible_target = visible
+        if animate and cur is not None and hasattr(cur, "_guard_workbench_relayout"):
+            cur._guard_workbench_relayout()
         self._stop_wb_anim()
         try:
             sizes = self._splitter.sizes()
@@ -2645,13 +2731,21 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
                 "sidebar", getattr(self, "_tab_frame", None), bgs["sidebar"]
             )
             self._apply_video_overlay(bgs.get("overlay"))
-            # 主题切换后回收不再被任何区域订阅的动画源（旧素材不占内存）
-            from app.widgets.anim_background import AnimationRegistry
-
-            AnimationRegistry.instance().prune()
             self._apply_theme_music(bgs.get("music"))
         except Exception as e:
             logger.warning(f"[TabManagerWindow] 应用主题背景失败: {e}")
+        finally:
+            # 动画源回收（保险丝）：正常回收走 AnimationSource 引用计数 ——
+            # SceneLayer 换源/销毁时 release，计数归零立即 stop_prefetch + 摘除。
+            # 此处只兜计数漏减的异常路径。必须在 finally：原实现挂在 try 尾部，
+            # 前面任一 _apply_* 抛异常就被 except 跳过，旧动画源的预解码线程
+            # 会一直留到下次成功切主题。
+            try:
+                from app.widgets.anim_background import AnimationRegistry
+
+                AnimationRegistry.instance().prune()
+            except Exception:
+                pass
 
     def _apply_theme_music(self, music_cfg):
         """应用 backgrounds.music 到主窗口级播放器
@@ -3433,14 +3527,10 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
 
     def _on_chat_width_changed(self, *_args):
         """限宽档位变化 → 重算对话区/覆盖层留白 + 消息卡宽度"""
+        # 先保护正文，再改变留白；守卫启动的收尾定时器会按最终宽度分帧同步。
+        # 此处不能直接同步：它会提前清除守卫，漏掉 Qt 延迟投递的布局变化。
+        self._guard_windows_resize_settle()
         self._sync_chat_wrapper_width()
-        # 强制所有窗口的消息卡按新容器宽度重算（full 档铺满 / 窄档收紧）。
-        # 走既有的分帧宽度同步链，30 张卡不会冻结主线程。
-        for win in self._windows:
-            try:
-                win._sync_all_cards_width()
-            except Exception:
-                pass
 
     # ── 侧边栏内 left 卡片区：宿主编排（frame 加宽 / TabPanel 折叠态 / 对话区让位） ──
 
@@ -3493,6 +3583,11 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
         sizes = self._splitter.sizes()
         if not sizes:
             return
+        # 开合会改 #tabFrame 宽度 → 对话区 resize。全程抑制卡片 resize 预览，
+        # 正文保持原样不切占位框；收尾再交 settle 守卫兜住随后排入的异步
+        # LayoutRequest（当拍解抑制后仍可能有一拍 resize 把正文换成占位）。
+        self._set_windows_resize_preview_suppressed(True)
+        self._guard_windows_resize_settle()
         tab_w = sizes[0]
 
         if expanded:
@@ -3547,10 +3642,9 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
             #   时卡片槽每次重开被压缩 4px（连续切页会逐轮递减，表现为
             #   「切页往返后卡片宽度越来越窄」）。
             target += _CARD_SLOT_CHROME_EXTRA
-            # 3) 放宽 frame max（允许加宽）后落位
+            # 3) 放宽 frame max（允许加宽）后逐帧过渡（侧滑展开）
             self._tab_frame.setMaximumWidth(max(_tab_frame_max_expanded(), target))
-            if abs(tab_w - target) > 1:
-                self._splitter.setSizes(self._splitter_sizes_with_left(target))
+            self._animate_left_card_width(target, panel_to=_COLLAPSED_PANEL_WIDTH)
         else:
             # 1) TabPanel 恢复打开前的状态：折叠前是收起态就回收起态，
             #    展开态才恢复打开前的宽度（否则会意外把用户收起的侧边栏撑开）。
@@ -3587,16 +3681,138 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
                 #   无卡宽兜底（saved 缺省时保持旧回落行为）。
                 if int(getattr(self, "_saved_panel_frame_width", 0) or 0) > 0:
                     target = max(_EXPANDED_MIN_FRAME_WIDTH, int(self._saved_panel_frame_width))
-            # 2) 收回 frame max（回到无卡片时的静态上限）后落位
+            # 2) 收回 frame max（回到无卡片时的静态上限）后逐帧收窄
             self._tab_frame.setMaximumWidth(_TAB_PANEL_MAX_CONTENT_WIDTH + _FRAME_PADDING_X)
-            if abs(tab_w - target) > 1:
-                self._splitter.setSizes(self._splitter_sizes_with_left(target))
             # 卡片关闭空间回收：卡片打开时挤压协调收的工作台，放得下则重开
-            # （规则 2 反向；growth_required=False：布局性恢复，窗口总宽未变）
-            if getattr(self, "_wb_collapsed_by_squeeze", False):
-                self._maybe_restore_workbench_after_squeeze(growth_required=False)
+            # （规则 2 反向；growth_required=False：布局性恢复，窗口总宽未变）。
+            # ★ 先记账再动画：瞬时路径（无动效）会在动画调用内同步走完收尾。
+            self._left_card_pending_wb_restore = bool(getattr(self, "_wb_collapsed_by_squeeze", False))
+            # 内层 TabPanel 槽宽同步插值到恢复宽，卡片区槽位逐帧取剩余收到 0；
+            # 不同步插值时多出的宽度会被 QSplitter 全分给 TabPanel（列表跳一下）。
+            self._animate_left_card_width(target, panel_to=max(0, target - _FRAME_PADDING_X))
+
+    def _animate_left_card_width(self, target: int, panel_to: int) -> None:
+        """把 #tabFrame 宽与内层 TabPanel 槽宽按同一条进度过渡到终值（侧滑观感）
+
+        两个 splitter 必须同步插值：内层 sidebarSplitter 铺满 #tabFrame，任一
+        时刻都是 panel_w + 卡片区槽位 = frame_w − padding。只插值外层时，多出/
+        缺少的空间会被 QSplitter 全分给剩余可见窗格——关闭方向卡片区已 hide，
+        TabPanel 会先被拉宽再弹回（列表可见地跳一下）。
+
+        预览抑制与 settle 守卫由调用方负责（见 _on_left_card_area_toggled）。
+        """
+        panel = getattr(self, "_tab_panel", None)
+        wrapper = getattr(self, "_global_left_wrapper", None)
+        try:
+            sizes = self._splitter.sizes()
+        except Exception:
+            sizes = []
+        start_w = sizes[0] if sizes else self.width()
+        panel_from = 0
+        sp = getattr(self, "_sidebar_splitter", None)
+        if sp is not None and panel is not None:
+            try:
+                inner = sp.sizes()
+                p_idx = sp.indexOf(panel)
+                if 0 <= p_idx < len(inner):
+                    panel_from = inner[p_idx]
+            except RuntimeError:
+                pass
+        self._left_card_anim_frame_from = int(start_w)
+        self._left_card_anim_frame_to = int(target)
+        self._left_card_anim_panel_from = int(panel_from)
+        self._left_card_anim_panel_to = int(panel_to)
+        anim = self._left_card_anim
+        if anim is None:
+            anim = QVariantAnimation(self)
+            anim.valueChanged.connect(self._on_left_card_anim_value)
+            anim.finished.connect(self._on_left_card_anim_finished)
+            self._left_card_anim = anim
+        anim.stop()
+        expanding = target > start_w
+        # 瞬时路径（系统「减少动态效果」/ 两端几乎重合）：完全交回 wrapper 自行
+        # 落位（与改动前一致），只做主窗口几何 + 收尾。
+        if not Animations.motion_enabled() or (
+            abs(start_w - target) < 3 and abs(panel_from - panel_to) < 3
+        ):
+            self._apply_left_card_geometry(target, panel_to)
+            self._finish_left_card_toggle()
+            return
+        # 动画期摘掉内容最小宽 + 挂起 TabPanel 形态自治（中间宽度既不算折叠
+        # 也不算展开，不抑制会被 resizeEvent 误判成用户拖拽而自动折叠）；
+        # 同时让 wrapper 停手：内层分配改由本节拍逐帧驱动。
+        if wrapper is not None:
+            wrapper.set_min_hint_disabled(True)
+            wrapper._host_animating = True
+        if panel is not None:
+            panel.set_animating(True)
+        anim.setDuration(Animations.ENTER_MS if expanding else Animations.EXIT_MS)
+        anim.setEasingCurve(QEasingCurve(Animations.EASE_ENTER if expanding else Animations.EASE_EXIT))
+        anim.setStartValue(0.0)
+        anim.setEndValue(1.0)
+        anim.start()
+
+    def _on_left_card_anim_value(self, value) -> None:
+        """动画每帧：按进度同时插值外层帧宽与内层 TabPanel 槽宽"""
+        p = max(0.0, min(1.0, float(value)))
+        f0 = self._left_card_anim_frame_from
+        f1 = self._left_card_anim_frame_to
+        p0 = self._left_card_anim_panel_from
+        p1 = self._left_card_anim_panel_to
+        self._apply_left_card_geometry(int(round(f0 + (f1 - f0) * p)), int(round(p0 + (p1 - p0) * p)))
+
+    def _apply_left_card_geometry(self, frame_w: int, panel_w: int) -> None:
+        """外层帧宽 + 内层 [TabPanel panel_w, 卡片区取剩余] 一次落位（几何自洽）"""
+        self._splitter.setSizes(self._splitter_sizes_with_left(frame_w))
+        sp = getattr(self, "_sidebar_splitter", None)
+        panel = getattr(self, "_tab_panel", None)
+        wrapper = getattr(self, "_global_left_wrapper", None)
+        if sp is None or panel is None or wrapper is None:
+            return
+        try:
+            sizes = sp.sizes()
+            p_idx = sp.indexOf(panel)
+            w_idx = sp.indexOf(wrapper)
+        except RuntimeError:
+            return
+        if p_idx < 0 or w_idx < 0 or len(sizes) < 2:
+            return
+        panel_w = max(0, min(int(panel_w), frame_w - _FRAME_PADDING_X))
+        sizes[p_idx] = panel_w
+        sizes[w_idx] = max(0, frame_w - panel_w - _FRAME_PADDING_X)
+        sp.setSizes(sizes)
+
+    def _on_left_card_anim_finished(self) -> None:
+        """动画收尾：精确落位到终值后走统一收尾"""
+        self._on_left_card_anim_value(1.0)
+        self._finish_left_card_toggle()
+
+    def _finish_left_card_toggle(self) -> None:
+        """开合收尾：恢复 wrapper/TabPanel 自治 + 解抑制 + 交 settle 守卫"""
+        panel = getattr(self, "_tab_panel", None)
+        if panel is not None:
+            panel.set_animating(False)
+        wrapper = getattr(self, "_global_left_wrapper", None)
+        if wrapper is not None:
+            wrapper.set_min_hint_disabled(False)
+            wrapper._host_animating = False
+            # 关闭方向：wrapper 延到动画结束才 hide（动画期间它要占住内层窗格，
+            # 否则让出的宽度会全被 TabPanel 吃掉）
+            if getattr(wrapper, "_pending_host_hide", False):
+                wrapper._pending_host_hide = False
+                wrapper.hide()
         # 卡片区宽度变化会改 frame 上限，同步一次（拖拽增量全部给卡片）
         self._sync_tab_frame_cap()
+        # 若本回调又同步启动了新动画（反向开合），交由其收尾解锁
+        if self._left_card_anim is None or self._left_card_anim.state() != QVariantAnimation.Running:
+            # 先解抑制，再把随后排入的异步 LayoutRequest 交给 settle 守卫：
+            # 否则下一拍 resize 仍会把正文换成占位框（右栏收起实测出现空帧）。
+            self._set_windows_resize_preview_suppressed(False)
+            self._guard_windows_resize_settle()
+        if self._left_card_pending_wb_restore:
+            self._left_card_pending_wb_restore = False
+            self._maybe_restore_workbench_after_squeeze(growth_required=False)
+
 
     def _left_card_frame_target(self, card_w: int) -> int:
         """卡片打开时的 frame 目标宽：TabPanel 收起宽 + 卡片宽（含 padding）
@@ -3763,6 +3979,12 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
 
     def _start_sidebar_anim(self, start_w: int, end_w: int, collapsing: bool):
         """启动侧边栏宽度动画（时长/曲线走全局 token，按方向分离）"""
+        # 卡片区开合动画与侧栏动画同抢主 splitter 的 sizes：先把前者就地收尾
+        # （含 wrapper 挂起标志/延后 hide 清理），否则两者逐帧互盖。
+        if self._left_card_anim is not None and self._left_card_anim.state() == QVariantAnimation.Running:
+            self._left_card_anim.stop()
+            self._on_left_card_anim_value(1.0)
+            self._finish_left_card_toggle()
         # ── #31 中间对话区原样实时显示：不再冻结 _content_area 重绘 ──
         # 改为抑制卡片进入 resize 预览模式（WebView 保持可见），动画期
         # 每帧 restart 的宽度同步防抖在动画结束后一次执行。
@@ -4824,8 +5046,7 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
     def _on_splitter_idle(self):
         """splitter 拖拽防抖超时：落定折叠态 + 恢复内容区绘制 + 解除节流
 
-        ~120ms 无新 splitterMoved 即视为停手/松手，由 _splitter_idle_timer
-        触发。
+        真实把手拖动在释放时调用；未收到把手按键事件的移动由静默计时器兜底。
 
         ★★ 拖拽落定（抖动修复的收尾）：拖拽期 TabPanel 被置 _dragging_splitter
         抑制了 emit（否则逐帧跨阈值反复启停动画 = 抖动），因此折叠态与最终宽度
@@ -4944,7 +5165,7 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
         面板再撑开。
 
         ★★ 抖动修复：本方法只负责**开启拖拽会话**（置 panel._dragging_splitter），
-        折叠/展开的落定全部交给 _on_splitter_idle（~120ms 无新事件 = 松手）。
+        折叠/展开的落定交给 _on_splitter_idle（真实把手释放或无按键移动的静默兜底）。
         此前在拖拽过程中就按 pos 判定并 QTimer.singleShot(0, _on_sidebar_toggled)
         启动动画，而 splitterMoved 是逐帧触发的 → 拖拽区跨阈值时反复启停
         200ms 动画，动画与拖拽同时写 setSizes 互相打断 = 抖动。
@@ -4981,14 +5202,9 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
             self._left_card_frame_target_w = max(_COLLAPSED_PANEL_WIDTH + _FRAME_PADDING_X, int(pos))
         # ★ 开启拖拽会话：拖拽期 resizeEvent 只跟随 UI 形态，不 emit 折叠信号
         panel.set_dragging_splitter(True)
-        # ── 视觉修复：拖拽期不再冻结 _content_area 重绘（与 #31 动画期实时显示对齐）──
-        # 旧 OPT-2 首帧冻结已移除：拖动中 layout 每帧重排使全区域失效，
-        # 冻结期间失效区域只显示背景色，用户看到「对话区控件消失」。
-        # WebView 重排已由 resize 预览模式（MainWidget.resizeEvent）兑底，
-        # 剩余 QWidget 实时重绘成本可控，可见性优先。
-        # 每次 splitterMoved 重置 ~120ms 防抖 timer，松手后由
-        # _on_splitter_idle 统一落定折叠态。
-        if hasattr(self, "_splitter_idle_timer"):
+        # 不冻结 _content_area：真实拖拽期间可见 WebView 原位跟宽。
+        # 有把手按键事件就等释放；其他移动保留原防抖落定路径。
+        if hasattr(self, "_splitter_idle_timer") and getattr(self, "_sidebar_drag_handle", None) is None:
             self._splitter_idle_timer.start()
 
     # ── 窗口管理 ──
@@ -6911,6 +7127,8 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
 
     def changeEvent(self, event):
         """窗口状态变化：标准系统窗口的最大化/还原由 OS 处理，无需自定义逻辑"""
+        if event.type() == QEvent.WindowStateChange:
+            self._begin_window_state_guard()
         super().changeEvent(event)
         if event.type() == QEvent.WindowStateChange:
             # 最大化 / 还原 / 全屏由系统直接改窗口几何，Qt 不一定走完整的
@@ -6921,7 +7139,6 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
             # relayout（左面板被瞬时压窄）。抑制侧边栏自动折叠，避免把
             # 最大化/还原误判为"用户拖窄"。resize 周期结束会提前解除，
             # 这里的定时器只是兜底。
-            self._begin_window_state_guard()
             # 最小化时 owned 浮层被系统连带隐藏：预览态需同步收场
             # （on_clicked 取消缓收并走非 promote 的 leave 路径）
             if self.isMinimized():
@@ -6930,7 +7147,14 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
                     ctrl.on_clicked()
 
     def _begin_window_state_guard(self):
-        """窗口状态切换（最大化/还原/全屏）期间抑制侧边栏自动折叠"""
+        """窗口状态切换（最大化/还原/全屏/最小化）期间抑制侧边栏折叠与卡片预览
+
+        状态切换会连续改几何 → 对话区 resize：卡片一旦进入 resize 预览就被换成
+        占位框，用户看到正文整体闪一下再淡回来。抑制到几何收拢
+        （_deferred_resize_complete / 兜底定时器）再交既有防抖宽度同步。
+        """
+        self._window_state_preview_guard = True
+        self._set_windows_resize_preview_suppressed(True)
         panel = getattr(self, "_tab_panel", None)
         if panel is None:
             return
@@ -6949,9 +7173,21 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
         # 此处不提前解除，否则后续 relayout 瞬变会重新误折叠。
         if getattr(self, "_resize_blocking", False):
             return
+        self._release_window_state_preview_guard()
         panel = getattr(self, "_tab_panel", None)
         if panel is not None:
             panel.set_auto_collapse_suppressed(False)
+
+    def _release_window_state_preview_guard(self):
+        """解除状态切换期的预览抑制；随后排入的异步布局交 settle 守卫
+
+        幂等：重复调用只在第一次生效（_window_state_preview_guard 已清）。
+        """
+        if not getattr(self, "_window_state_preview_guard", False):
+            return
+        self._window_state_preview_guard = False
+        self._set_windows_resize_preview_suppressed(False)
+        self._guard_windows_resize_settle()
 
     def _on_application_focus_changed(self, state):
         """应用激活态变化 → 转发给主题音乐播放器（失焦暂停 / 回焦续播）
@@ -7002,8 +7238,33 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
         # ── 左栏 / 聊天区之间的 splitter 把手：双击折叠/展开侧边栏 ──
         # ★ 必须在 handle 上过滤：QSplitter 命中 handle 时 MouseButtonDblClick
         #   不会冒泡到 QSplitter 自身，装在 splitter 上收不到。
-        if obj is getattr(self, "_splitter_left_handle", None) and event.type() == QEvent.MouseButtonDblClick:
-            if event.button() == Qt.LeftButton:
+        is_left = obj is getattr(self, "_splitter_left_handle", None)
+        if is_left or obj is getattr(self, "_splitter_right_handle", None):
+            kind = event.type()
+            if kind == QEvent.MouseButtonPress and event.button() == Qt.LeftButton:
+                self._sidebar_drag_handle = obj
+                if is_left:
+                    self._splitter_idle_timer.stop()
+                mw = self._content_area.currentWidget()
+                self._sidebar_drag_owner = mw if hasattr(mw, "_set_sidebar_drag_live") else None
+                if self._sidebar_drag_owner is not None:
+                    self._sidebar_drag_owner._set_sidebar_drag_live(True)
+            elif getattr(self, "_sidebar_drag_handle", None) is obj and (
+                (kind == QEvent.MouseButtonRelease and event.button() == Qt.LeftButton)
+                or kind in (QEvent.UngrabMouse, QEvent.Hide, QEvent.WindowDeactivate)
+            ):
+                self._sidebar_drag_handle = None
+                owner = self._sidebar_drag_owner
+                self._sidebar_drag_owner = None
+                try:
+                    if is_left and self._tab_panel._dragging_splitter:
+                        self._on_splitter_idle()
+                finally:
+                    if owner is not None and not _sip.isdeleted(owner):
+                        owner._set_sidebar_drag_live(False)
+                        if not is_left:
+                            owner._guard_workbench_relayout()
+            elif is_left and kind == QEvent.MouseButtonDblClick and event.button() == Qt.LeftButton:
                 self._toggle_sidebar_from_handle()
                 return True
         if obj is self._chat_wrapper and event.type() == QEvent.Resize:
@@ -7172,6 +7433,11 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
         if hasattr(self, "_content_area"):
             self._content_area.update()
 
+        # 状态切换（最大化/还原/最小化）的预览抑制到此解除：几何已收拢，
+        # 随后排入的异步 LayoutRequest 由 settle 守卫继续挡在预览之外。
+        # ★ 必须在下面的挤压判定之前：它可能启动侧栏动画（自带抑制/释放）。
+        self._release_window_state_preview_guard()
+
         # ── 几何已收拢：解除抑制 + 按最终宽度判定"是否真被挤压" ──
         # 整个 resize 周期（含 _force_relayout 瞬变）内 TabPanel 不自动折叠，
         # 这里基于稳定后的真实几何决定，避免最大化/还原这类几何瞬变把
@@ -7220,6 +7486,20 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
             if getattr(self, "_window_base_layer", None) is not None:
                 self._window_base_layer.setGeometry(self.rect())
             self._sync_wb_overlay_geometry()
+            return
+
+        # Windows 可能先投递 Resize 再投递 WindowStateChange，两个入口均须在
+        # 子树重排前识别状态变化，否则第一帧就会把聊天正文藏进占位框。
+        state = self.windowState()
+        if state != self._last_layout_window_state:
+            self._last_layout_window_state = state
+            self._begin_window_state_guard()
+        guard = getattr(self, "_window_state_guard_timer", None)
+        if guard is not None and guard.isActive():
+            super().resizeEvent(event)
+            self._resize_bg_labels()
+            self._sync_wb_overlay_geometry()
+            self._save_geometry()
             return
 
         if self._resize_blocking:

@@ -1159,7 +1159,14 @@ class FileTreeView(QTreeView):
     # ── 键盘 ──
 
     def keyPressEvent(self, event: QKeyEvent):
-        if event.key() == Qt.Key_Delete:
+        # Delete：Windows/Linux 标准键、Mac fn+⌫
+        # ⌫+Cmd/Ctrl：MacBook 的 ⌫ 是 Key_Backspace，⌘⌫ 在 Qt/macOS 下映射为
+        # ControlModifier+Backspace（Command→Control，Control→Meta），两者都要认，
+        # 否则 Mac 上按 ⌘⌫ 无反应。Shift+⌫ 等组合不吞，避免误删。
+        is_delete = event.key() == Qt.Key_Delete or (
+            event.key() == Qt.Key_Backspace and bool(event.modifiers() & (Qt.ControlModifier | Qt.MetaModifier))
+        )
+        if is_delete:
             self._emit_delete()
         elif event.key() == Qt.Key_F2:
             self._start_rename()

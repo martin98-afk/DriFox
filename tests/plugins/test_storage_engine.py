@@ -23,22 +23,30 @@ def test_sqlite_engine_interface(tmp_path, monkeypatch):
     assert engine.get("s1") is None
 
 
-def test_registry_fallback_default(monkeypatch):
+def test_registry_fallback_default(tmp_path, monkeypatch):
     """注册 sqlite 插件引擎（系统插件路径）→ get_active 回落 sqlite"""
     from importlib import import_module
+    from app.core.store.session_store import SessionStore
     SqliteStorageEngine = import_module("plugins.system-storages.storages.sqlite").SqliteStorageEngine
     from app.plugins.registries.storage_registry import StorageRegistry
 
+    # SessionStore 是单例：不重置则本用例的 db_dir 被前一个用例的实例静默忽略
+    monkeypatch.setattr(SessionStore, "_instance", None, raising=False)
     reg = StorageRegistry()
     monkeypatch.setattr(StorageRegistry, "get_instance", staticmethod(lambda: reg))
-    reg.register(SqliteStorageEngine(db_dir=":memory:"), source="plugin:system")
+    # ":memory:" 不是 SQLite 内存模式，会被当相对路径在 cwd 下建 <cwd>/:memory:/sessions.db
+    reg.register(SqliteStorageEngine(db_dir=str(tmp_path)), source="plugin:system")
     assert reg.get_active().id == "sqlite"
 
 
-def test_plugin_engine_override(monkeypatch):
+def test_plugin_engine_override(tmp_path, monkeypatch):
     from importlib import import_module
+    from app.core.store.session_store import SessionStore
     SqliteStorageEngine = import_module("plugins.system-storages.storages.sqlite").SqliteStorageEngine
     from app.plugins.registries.storage_registry import StorageRegistry
+
+    # SessionStore 单例：不重置则复用前面用例的库，本用例的 db_dir 会被静默忽略
+    monkeypatch.setattr(SessionStore, "_instance", None, raising=False)
 
     class _MemEngine:
         id = "memory"
@@ -63,7 +71,7 @@ def test_plugin_engine_override(monkeypatch):
 
     reg = StorageRegistry()
     monkeypatch.setattr(StorageRegistry, "get_instance", staticmethod(lambda: reg))
-    reg.register(SqliteStorageEngine(db_dir=":memory:"), source="plugin:system")
+    reg.register(SqliteStorageEngine(db_dir=str(tmp_path)), source="plugin:system")
     reg.register(_MemEngine(), source="plugin:demo")
     reg.set_active("memory")
     assert reg.get_active().id == "memory"
@@ -109,7 +117,7 @@ def test_sqlite_capability_methods_delegate(tmp_path, monkeypatch):
     assert history and history[0]["text"] == "hello"
 
 
-def test_engine_without_capability_safe_degrades(monkeypatch):
+def test_engine_without_capability_safe_degrades(tmp_path, monkeypatch):
     """无能力引擎：isinstance 探测为 False，消费方走降级分支（不炸）"""
     from importlib import import_module
     SqliteStorageEngine = import_module("plugins.system-storages.storages.sqlite").SqliteStorageEngine
@@ -145,5 +153,5 @@ def test_engine_without_capability_safe_degrades(monkeypatch):
     from app.core.store.session_store import SessionStore
 
     monkeypatch.setattr(SessionStore, "_instance", None, raising=False)
-    sqlite_engine = SqliteStorageEngine(db_dir=":memory:")
+    sqlite_engine = SqliteStorageEngine(db_dir=str(tmp_path))
     assert isinstance(sqlite_engine, SessionTitleCapability) is True

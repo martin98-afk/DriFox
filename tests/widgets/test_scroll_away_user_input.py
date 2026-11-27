@@ -184,6 +184,26 @@ def test_wire_user_scroll_input_is_idempotent():
     assert bar.installEventFilter.call_count == calls
 
 
+def test_wire_user_scroll_input_registers_forward_hook(monkeypatch):
+    """卡片转发的滚轮不经 viewport 过滤器，必须挂输入回调补上。
+
+    viewer / MessageCard 到边界后把 wheel 交给 ``scroll_wheel_to`` 直接滚
+    外层，事件不经过本窗口的 eventFilter。若只依赖 eventFilter 标记输入，
+    鼠标停在卡片上滚轮永远不算用户意图 → away 永不置位 → 任何内容更新都把
+    视口拽回底部（用户报障：只有靠近最底部才该自动置底）。
+    """
+    import app.main_widget as mw
+
+    registered = []
+    monkeypatch.setattr(mw, "set_wheel_input_hook", lambda area, hook: registered.append((area, hook)))
+    win = _make_win()
+    win._wire_user_scroll_input()
+    assert len(registered) == 1, "聊天滚动区必须登记一次输入回调"
+    area, hook = registered[0]
+    assert area is win.chat_scroll_area
+    assert hook == win._mark_user_scroll_input
+
+
 # ─── 5. 端到端：后台被 Qt 重排 → 切回必须自动置底 ───────────────
 
 

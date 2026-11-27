@@ -27,6 +27,14 @@ except ImportError:
 
 # 预编译正则表达式
 _CHINESE_PATTERN = re.compile(r"[\u4e00-\u9fff]")
+_CHINESE_RUN = re.compile(r"[\u4e00-\u9fff]+")
+
+
+def _count_chinese_chars(text: str) -> int:
+    if text.isascii() or not _CHINESE_PATTERN.search(text):
+        return 0
+    # 连续汉字整段删除，长度差就是汉字数；调用方已把输入限制在 50 Ki 字符内。
+    return len(text) - len(_CHINESE_RUN.sub('', text))
 
 # [PERF] G1 冷建档抽样参数（2026-11-19 #11）：>阈值走首/中/尾窗口抽样外推，
 # 本就是字符/4 粗算口径，6×250KB 全量 finditer 实测 leader 环境 103ms
@@ -218,7 +226,9 @@ def _fast_estimate_tokens(text: str) -> int:
     text_len = len(text)
 
     if text_len > _FAST_SAMPLE_THRESHOLD:
-        # [PERF] G1 分层抽样：均匀 9 处各 2KB 统计中文占比按比例外推总量。
+        if text.isascii():
+            return max(1, int((text_len / 4.0) * _FAST_SAMPLE_SAFETY))
+        # [PERF] G1 分层抽样：均匀 9 处各 4 Ki 字符统计中文占比按比例外推总量。
         # est 对中文占比线性（est ≈ L/4 + ch×0.95），占比误差直接映射为估算
         # 误差。9 窗口 = 每窗口代表 11% 区间的分层采样：均匀混合文本占比
         # 误差 ~±1%，分段不均匀（多语言块拼接）时窗口覆盖偏差 bounded 于
@@ -226,14 +236,12 @@ def _fast_estimate_tokens(text: str) -> int:
         # 三窗口 4KB 版病理样本曾低估 -16%（2026-11-19 #11 验证）。
         w = _FAST_SAMPLE_WINDOW
         sampled = "".join(text[i * (text_len - w) // 8 : i * (text_len - w) // 8 + w] for i in range(9))
-        ratio = sum(1 for _ in _CHINESE_PATTERN.finditer(sampled)) / len(sampled)
+        ratio = _count_chinese_chars(sampled) / len(sampled)
         chinese_chars = int(text_len * ratio)
         estimated = int((chinese_chars * 1.2 + (text_len - chinese_chars) / 4.0) * _FAST_SAMPLE_SAFETY)
         return max(1, estimated)
 
-    # 统计中文字符
-    # finditer 替代 findall：避免对大文本先物化百万级匹配列表再取 len（P6）
-    chinese_chars = sum(1 for _ in _CHINESE_PATTERN.finditer(text))
+    chinese_chars = _count_chinese_chars(text)
     non_chinese = text_len - chinese_chars
 
     # 中文 ~1.2 token/字；英文/其他 ~1 token/4 字符
@@ -339,25 +347,28 @@ def _content_sig(messages: list, model: str = "") -> tuple:
     )
 
 
-def _set_token_cache(messages: list, model: str, tools_sig: int, result: int):
+def _set_token_cache(messages: list, model: str, tools_sig: int, result: int, *, last_raw: int | None = None, ratio: float | None = None):
     """写入 is 列表缓存；超上限时逐出最旧条目"""
     cache = _get_token_cache()
     # 移除同一对象的旧条目（若有）
     cache[:] = [e for e in cache if e[0] is not messages]
-    cache.append((messages, model, tools_sig, _content_sig(messages, model), result))
+    sig = _content_sig(messages, model) if last_raw is None else (len(messages), id(messages[-1]), last_raw)
+    cache.append((messages, model, tools_sig, sig, result, ratio))
     if len(cache) > _MAX_TOKEN_CACHE_ENTRIES:
         cache.pop(0)
 
 
-def _lookup_token_cache(messages: list, model: str, tools_sig: int) -> int | None:
+def _lookup_token_cache(messages: list, model: str, tools_sig: int, ratio: float | None = None) -> int | None:
     """is 身份扫描 + 内容签名校验；命中时返回缓存结果。
 
     [正确性] 同列表对象内容增长（append/extend）后签名失配 → 视为 MISS
     走重算，由 _set 刷新条目；内容未变的重复查询仍命中（缓存语义不变）。
     """
+    if ratio is None:
+        ratio = _get_model_token_ratio(model)
     for entry in _get_token_cache():
-        obj, m, ts, sig, result = entry
-        if obj is messages and m == model and ts == tools_sig:
+        obj, m, ts, sig, result, cached_ratio = entry
+        if obj is messages and m == model and ts == tools_sig and cached_ratio == ratio:
             if _content_sig(messages, model) != sig:
                 return None
             # 命中后移到末尾保活（LRU）
@@ -436,25 +447,24 @@ def _prefix_cursor_lookup(
             return None
     # 末条改写检测：重算末条 raw 与游标值对比（O(末条)，微秒级）
     if n:
-        if _compute_message_tokens(messages[-1], model) != last_raw:
+        if _compute_message_tokens(messages[n - 1], model) != last_raw:
             return None
-    new_raw = 0
-    for msg in messages[n:]:
-        new_raw += _compute_message_tokens(msg, model)
-    total_raw = raw_total + new_raw
+    added_ids = []
+    for i in range(n, len(messages)):
+        msg = messages[i]
+        added_ids.append(id(msg))
+        last_raw = _compute_message_tokens(msg, model)
+        raw_total += last_raw
+    total_raw = raw_total
     if ratio is None:
         ratio = _get_model_token_ratio(model)
     if tools:
         total_raw += count_tools_tokens(tools, model, ratio)
     result = max(0, int(total_raw * ratio))
     # 游标推进（新增段拼接 + raw 累计；无新增时末条未变，last_raw 保持）
-    if len(messages) > n:
-        ids = ids + tuple(id(m) for m in messages[n:])
-        raw_total += new_raw
-        last_raw = _compute_message_tokens(messages[-1], model)
-    cursors[key] = (ids, raw_total, last_raw)
-    while len(cursors) > _PREFIX_CURSOR_MAX_ENTRIES:
-        cursors.pop(next(iter(cursors)))
+    if added_ids:
+        cursors[key] = (ids + tuple(added_ids), raw_total, last_raw)
+        _set_token_cache(messages, model, tools_sig, result, last_raw=last_raw, ratio=ratio)
     return result
 
 
@@ -656,9 +666,13 @@ def count_messages_tokens(
     incremental = _prefix_cursor_lookup(messages, model, tools_sig, tools, ratio)
     if incremental is not None:
         return incremental
-    cached = _lookup_token_cache(messages, model, tools_sig)
-    if cached is not None:
-        return cached
+    if ratio is None:
+        ratio = _get_model_token_ratio(model)
+    # 只有游标被逐出才用备用缓存；游标明确拒绝时必须全量重算。
+    if (id(messages), model, tools_sig) not in _get_prefix_cursors():
+        cached = _lookup_token_cache(messages, model, tools_sig, ratio)
+        if cached is not None:
+            return cached
 
     total = 0
 
@@ -674,14 +688,11 @@ def count_messages_tokens(
     if tools:
         total += count_tools_tokens(tools, model, ratio)
 
-    # 模型 tokenizer 校正系数（cl100k_base → 实际模型编码补偿，除数）
-    if ratio is None:
-        ratio = _get_model_token_ratio(model)
     total = int(total * ratio)
 
     # 确保返回值非负（防御性编程）
     result = max(0, total)
-    _set_token_cache(messages, model, tools_sig, result)
+    _set_token_cache(messages, model, tools_sig, result, ratio=ratio)
     # [B4] 全量重算后重建游标（增量路径的基线）
     _prefix_cursor_store(messages, model, tools_sig, raw_msgs_total)
     return result

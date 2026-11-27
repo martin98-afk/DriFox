@@ -1,22 +1,75 @@
 # -*- coding: utf-8 -*-
 """TabManagerWindow 组件测试"""
 
+import gc
 from types import SimpleNamespace
 
 import pytest
+from PyQt5.QtCore import QCoreApplication, QEvent
 from PyQt5.QtWidgets import QLabel
 
 from app.widgets.tab_manager_window import TabManagerWindow, EmptyStateWidget
 
 
+# 本文件每个用例各建一个 TabManagerWindow（含全量子 widget），统一登记到此处，
+# 由 reset_singleton 的 teardown 集中销毁
+_CREATED_WINDOWS = []
+
+
+def _destroy_created_windows():
+    """显式销毁本用例创建的窗口，并泵到 DeferredDelete 落地
+
+    qtbot.addWidget 只调 deleteLater：事件只是投递，processEvents() 不消费
+    DeferredDelete，必须 sendPostedEvents(None, QEvent.DeferredDelete)。
+    之后还要清掉 Python 侧强引用（_instance / TrayManager / 登记表）并
+    gc.collect()，否则 wrapper 留在 gc 里，探针（gc.get_objects）数得到。
+    """
+    if not _CREATED_WINDOWS:
+        return
+    for tm in _CREATED_WINDOWS:
+        try:
+            tm.hide()
+            tm.setParent(None)
+            tm.deleteLater()
+        except RuntimeError:
+            continue  # C++ 对象已销毁
+    QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+    QCoreApplication.processEvents()
+    _CREATED_WINDOWS.clear()
+    TabManagerWindow._instance = None
+    try:
+        from app.tray_manager import TrayManager
+
+        TrayManager.get_instance()._tab_manager_window = None
+    except Exception:
+        pass
+    # GlobalCardController 是模块级单例，持有 _tab_manager 强引用：不清它，
+    # 被删 window 的 wrapper 仍从单例可达，gc 收不掉（实测残留 1~2 个）
+    try:
+        from app.widgets.cards import global_card_controller as _gcc
+
+        _gcc._controller = None
+    except Exception:
+        pass
+    gc.collect()
+    QCoreApplication.processEvents()
+
+
 @pytest.fixture(autouse=True)
 def reset_singleton():
-    """每个测试前后重置单例与 TrayManager 引用"""
+    """每个测试前后重置单例与 TrayManager 引用
+
+    teardown 里销毁本用例创建的窗口：本 fixture 最先 setup，因而最后
+    teardown，此时 qtbot 已释放它对 widget 的引用，gc.collect() 才能真正
+    回收 wrapper（放在后 setup 的 fixture 里会因 qtbot 仍持有而收不掉，
+    实测 alive 停在 1~3 不归零）。
+    """
     from app.tray_manager import TrayManager
 
     TabManagerWindow._instance = None
     TrayManager.get_instance()._tab_manager_window = None
     yield
+    _destroy_created_windows()
     TabManagerWindow._instance = None
     TrayManager.get_instance()._tab_manager_window = None
 
@@ -30,12 +83,16 @@ def two_phase_construction_complete(monkeypatch):
     main._show_popup 驱动）。本文件测试均为完整态行为测试，在 fixture 层
     统一包装 create_instance 驱动 complete，模拟主路径；幂等 flag 保证
     兜底路径重复驱动零开销。
+
+    ★ 建出的实例登记到 _CREATED_WINDOWS，由 reset_singleton 的 teardown
+    统一销毁（该 fixture 最后 teardown，那时 qtbot 引用已释放）。
     """
     original = TabManagerWindow.create_instance.__func__
 
     def create_and_complete(cls, parent=None):
         tm = original(cls, parent)
         tm.complete_construction()
+        _CREATED_WINDOWS.append(tm)
         return tm
 
     monkeypatch.setattr(TabManagerWindow, "create_instance", classmethod(create_and_complete))

@@ -337,6 +337,9 @@ def test_snap_bottom_queued_follow_state_still_snaps(qapp):
     win._is_jump_scroll_locked = lambda: False
     win.chat_scroll_area = MagicMock()
     scroll_bar = MagicMock()
+    # 贴底前会用「已落地底」补齐 range（landed > maximum 才抬高），
+    # 桩必须给出可比较的数值，否则 MagicMock 参与 > 比较直接 TypeError。
+    scroll_bar.maximum.return_value = 0
     win.chat_scroll_area.verticalScrollBar.return_value = scroll_bar
     win._landed_bottom_value = MagicMock(return_value=999)
 

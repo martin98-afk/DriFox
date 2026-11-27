@@ -1235,6 +1235,17 @@ def save_or_archive_session(
     if resolved_project is None:
         resolved_project = project_fallback
 
+    # 🛡️ 会话 ID 以 session 本体为权威：current_session_id 只是调用方缓存，
+    # 后台 finalize / 多标签页并发下可能滞后。旧实现优先用它定位记录，
+    # 一旦两者不一致，A 会话的消息会被写进 B 会话（标题保留、内容串台）。
+    source_session_id = getattr(session, "session_id", None) if session is not None else None
+    if current_session_id and source_session_id and current_session_id != source_session_id:
+        logger.warning(
+            f"[SessionSave] session_id 不一致，以会话本体为准: cached={current_session_id[:8]} "
+            f"session={source_session_id[:8]}"
+        )
+    target_session_id = source_session_id or current_session_id
+
     save_kwargs = dict(compaction_info)
     if resolved_project is not None:
         save_kwargs["project"] = resolved_project
@@ -1242,17 +1253,14 @@ def save_or_archive_session(
     if session is not None and hasattr(session, "api_usage_dict"):
         save_kwargs.update(session.api_usage_dict())
 
-    if current_session_id is not None:
-        idx = history_manager.find_index_by_session_id(current_session_id)
-        if idx is not None:
-            history_manager.update_session(idx, session.messages, **save_kwargs)
-            return current_session_id
-        else:
-            history_manager.save_session(session.messages, session_id=session.session_id, **save_kwargs)
-            return session.session_id
-    else:
-        history_manager.save_session(session.messages, session_id=session.session_id, **save_kwargs)
-        return session.session_id
+    if target_session_id:
+        if history_manager.update_session_by_id(target_session_id, session.messages, **save_kwargs):
+            return target_session_id
+        history_manager.save_session(session.messages, session_id=target_session_id, **save_kwargs)
+        return target_session_id
+    # 无任何可用 id（理论不可达）：交给 history_manager 生成新 id
+    history_manager.save_session(session.messages, session_id=None, **save_kwargs)
+    return getattr(session, "session_id", "") or ""
 
 
 def truncate_and_remove_round(session, round_index, round_ranges, remove_cards_func=None) -> tuple:

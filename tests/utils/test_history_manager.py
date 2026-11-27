@@ -761,3 +761,161 @@ def test_normal_tail_still_estimates_tokens(monkeypatch, tmp_path):
     record = manager._history_sessions[0]
     assert record["context_usage"] > 0
     assert record["context_usage"] != 12345, "正常尾巴必须重新估算，不能沿用旧值"
+
+
+def test_update_session_by_id_survives_index_drift(monkeypatch, tmp_path):
+    """⚠️ 回归（2026-11-27 多标签页会话污染）：按 id 更新必须抵抗下标漂移。
+
+    HistoryManager 是全局单例，多标签页关窗时各窗口后台 finalize 线程会并发
+    pop/insert `_history_sessions`。旧实现由调用方传入 index 定位记录，下标在
+    并发插入后漂移 → A 会话的消息被写进 B 会话（标题保留、内容串台）。
+    """
+    manager = _make_manager(monkeypatch, tmp_path)
+    manager._use_sqlite = False
+    manager._history_loaded = True
+    manager._persist_session = lambda _record: None
+    manager._history_sessions = [
+        {**_lightweight_session(0), "title": "目标会话"},
+        {**_lightweight_session(1), "title": "旁观会话"},
+    ]
+
+    # 模拟另一窗口在本次更新前插入新会话：所有旧下标 +1
+    manager.save_session(
+        [{"role": "user", "content": "新会话", "timestamp": "2026-07-20 15:00:00"}],
+        session_id="session-new",
+        project="默认项目",
+    )
+
+    ok = manager.update_session_by_id(
+        "session-0",
+        [{"role": "user", "content": "目标会话的新内容", "timestamp": "2026-07-20 15:00:00"}],
+    )
+    assert ok
+
+    target = manager.get_session_by_session_id("session-0")
+    assert target["messages"][0]["content"] == "目标会话的新内容"
+    assert target["title"] == "目标会话"
+    # 旁观会话与新会话都不得被写入目标内容
+    for sid in ("session-1", "session-new"):
+        other = manager.get_session_by_session_id(sid)
+        assert "目标会话的新内容" not in json.dumps(other["messages"], ensure_ascii=False)
+
+
+def test_save_or_archive_session_uses_session_id_over_stale_cache(monkeypatch, tmp_path):
+    """⚠️ 回归：会话本体 id 与调用方缓存 id 不一致时，以会话本体为准落库。"""
+    from app.widgets.ui_helpers import save_or_archive_session
+
+    manager = _make_manager(monkeypatch, tmp_path)
+    manager._use_sqlite = False
+    manager._history_loaded = True
+    manager._persist_session = lambda _record: None
+    manager._history_sessions = [
+        {**_lightweight_session(0), "title": "消石灰会话"},
+        {**_lightweight_session(1), "title": "欢迎卡片会话"},
+        {**_lightweight_session(2), "title": "旁观会话"},
+    ]
+
+    class _Session:
+        session_id = "session-1"
+        originating_project = "DriFoxPlugins"
+        messages = [{"role": "user", "content": "欢迎卡片的新消息", "timestamp": "2026-07-20 15:00:00"}]
+
+        def api_usage_dict(self):
+            return {}
+
+    # 调用方缓存停留在 session-0（旧会话），实际 session 是 session-1
+    returned = save_or_archive_session(manager, _Session(), "session-0", project_fallback="默认项目")
+    assert returned == "session-1"
+
+    assert manager.get_session_by_session_id("session-0")["messages"] == []
+    assert (
+        manager.get_session_by_session_id("session-1")["messages"][0]["content"]
+        == "欢迎卡片的新消息"
+    )
+
+
+def test_update_session_by_id_relocates_after_concurrent_insert(monkeypatch, tmp_path):
+    """⚠️ 回归：构造记录期间列表被并发插入，替换仍须按 id 重新定位。
+
+    旧实现先取 index、构造完直接 pop(index)/insert(0)：期间任何插入都会让
+    index 指向别的会话 → 目标记录未更新，另一条会话被覆盖（标题保留、内容
+    串台，2026-11-27 多标签页实机事故）。
+    """
+    manager = _make_manager(monkeypatch, tmp_path)
+    manager._use_sqlite = False
+    manager._history_loaded = True
+    manager._persist_session = lambda _record: None
+    manager._history_sessions = [
+        {**_lightweight_session(0), "title": "目标会话"},
+        {**_lightweight_session(1), "title": "旁观会话"},
+    ]
+
+    original_build = manager._build_session_record
+    injected = {"done": False}
+
+    def build_with_concurrent_insert(*args, **kwargs):
+        if not injected["done"]:
+            injected["done"] = True
+            # 模拟另一线程在本条记录构造期间插入新会话（列表整体后移）
+            manager.save_session(
+                [{"role": "user", "content": "并发新会话", "timestamp": "2026-07-20 15:00:00"}],
+                session_id="session-concurrent",
+                project="默认项目",
+            )
+        return original_build(*args, **kwargs)
+
+    monkeypatch.setattr(manager, "_build_session_record", build_with_concurrent_insert)
+
+    ok = manager.update_session_by_id(
+        "session-0",
+        [{"role": "user", "content": "目标会话的新内容", "timestamp": "2026-07-20 15:00:00"}],
+    )
+    assert ok
+    assert manager.get_session_by_session_id("session-0")["messages"][0]["content"] == "目标会话的新内容"
+    # 旁观会话与并发新会话都不得被串台
+    assert manager.get_session_by_session_id("session-1")["messages"] == []
+    assert manager.get_session_by_session_id("session-concurrent")["messages"][0]["content"] == "并发新会话"
+
+
+def test_concurrent_session_updates_do_not_cross_write(monkeypatch, tmp_path):
+    """⚠️ 回归：多线程同时更新不同会话 + 插入新会话，互不串台。"""
+    import threading
+
+    manager = _make_manager(monkeypatch, tmp_path)
+    manager._use_sqlite = False
+    manager._history_loaded = True
+    manager._persist_session = lambda _record: None
+    manager._history_sessions = [
+        {**_lightweight_session(0), "title": "会话A"},
+        {**_lightweight_session(1), "title": "会话B"},
+    ]
+
+    def updater(sid, text):
+        for i in range(60):
+            manager.update_session_by_id(
+                sid, [{"role": "user", "content": f"{text}{i}", "timestamp": "2026-07-20 15:00:00"}]
+            )
+
+    def inserter():
+        for i in range(60):
+            manager.save_session(
+                [{"role": "user", "content": f"new{i}", "timestamp": "2026-07-20 15:00:00"}],
+                session_id=f"new-{i}",
+                project="默认项目",
+            )
+
+    threads = [
+        threading.Thread(target=updater, args=("session-0", "A")),
+        threading.Thread(target=updater, args=("session-1", "B")),
+        threading.Thread(target=inserter),
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    a = manager.get_session_by_session_id("session-0")
+    b = manager.get_session_by_session_id("session-1")
+    assert a["messages"][0]["content"].startswith("A")
+    assert b["messages"][0]["content"].startswith("B")
+    assert a["title"] == "会话A" and b["title"] == "会话B"

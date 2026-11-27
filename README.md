@@ -13,7 +13,7 @@
 ![Stars](https://img.shields.io/github/stars/martin98-afk/DriFox)
 ![Downloads](https://img.shields.io/github/downloads/martin98-afk/DriFox/total)
 ![Last Commit](https://img.shields.io/github/last-commit/martin98-afk/DriFox)
-![Version](https://img.shields.io/badge/version-0.7.5-brightgreen)
+![Version](https://img.shields.io/badge/version-0.7.6-brightgreen)
 
 </div>
 
@@ -61,6 +61,8 @@ DriFox 是一个桌面 AI 智能体工作台。它把「一支 AI 团队」装�
 **安全** — API Key 三档保存：系统钥匙串（本机绑定）/ 密码加密（密文随配置云同步，换机输同一密码即可解出）/ 明文；OAuth token 走系统凭证库。安全中心提供命令解壳判定、路径白黑名单、网络外传检测、删除审批（删除类命令强制审批）、垃圾桶软删除（删除文件自动移入垃圾箱，误删可找回）、进程资源配额，全部可视化配置；企业网络的 TLS 拦截场景自动委托系统信任链校验。审批策略可配（审核处理）：人工审批（可设超时与超时处理：拒绝 / 允许 / AI 审核）或 AI 审批（由所选审核模型自动判定放行 / 拒绝，失败回落人工审批）。
 
 **界面与交互** — 无边框窗口 + 自定义标题栏，系统托盘常驻，全局热键（`ALT+Z`，可自定义）全局唤起 / 隐藏；工作台挤压折叠（拖拽落定智能让位、压穿自动折叠、按原宽恢复、per-tab 宽度记忆）；消息卡片支持审查（diff 统计）/ 分支 / 复制 / 内嵌待办与计划卡；ECharts 交互图表、词云生成、Markdown / HTML / 图片原生渲染；17 套主题、深浅自动适配。
+
+**提问导航** — 悬停聊天区右缘的短刻度可展开当前会话的提问列表，点击条目跳回原消息。也可用 Tab 聚焦刻度，按 Enter 展开、方向键选择、Enter 跳转，Esc 收起。列表覆盖在正文上，不改变消息宽度。
 
 **会话与产物** — 历史 / 归档 / 搜索；消息级分支（从任意消息分叉新对话）；会话分享一键发布为在线 HTML 页面；消息卡片成果栏展示工具产出的文件；file-tree 与 Git worktree 页常驻侧栏；文件撤销。
 
@@ -273,7 +275,7 @@ python main.py
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
-│                    DriFox v0.7.5 架构                       │
+│                    DriFox v0.7.6 架构                       │
 ├──────────────────────────────────────────────────────────────┤
 │  UI 层      标签页宿主 / 消息卡片 / 工作台 / 输入区                │
 │             标题栏 + 侧栏 / 设置面板 / 浮动卡片 / 系统托盘     │

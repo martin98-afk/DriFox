@@ -382,6 +382,24 @@ class SceneLayer(QWidget):
         # 单例，不触碰 Qt 对象，事件循环内/外均安全）。重复 release 幂等。
         scene_pixmap_cache.acquire()
         self.destroyed.connect(scene_pixmap_cache.release)
+        # [历史] 曾在此用 self.destroyed.connect(...) 归还 AnimationRegistry 引用，
+        # 已证伪并移除：Qt 在 QWidget::~QWidget 链内部发射 destroyed，此时 Python
+        # wrapper 处于半销毁状态，槽体内任何真实 C-API 调用（weakref 解引用、
+        # 属性查找、QTimer.singleShot）都会 SIGSEGV。A/B 两版共 6 次验证。
+        #
+        # 正常路径（宿主主题/背景/动画切换）走 clear() → _clear() → unsubscribe()，
+        # 实测 10 次交替切换后 sources 稳态归零、预解码线程回落到基线。
+        #
+        # ⚠️ 已知缺口（Qt 直接析构 SceneLayer，不走 clear() 的路径）：
+        # 会残留 1 个 AnimationSource + 1 个预解码 daemon 线程，且 **prune() 无法回收**。
+        # 原因：has_subscribers() 用 weakref 判活，C++ 对象销毁后 Python wrapper 仍可能
+        # 存活，r() is not None 恒为 True → prune 判据不成立。需等 wrapper 被 GC 后
+        # 再 prune 才生效。
+        # 修法（未实施）：has_subscribers() 里加 sip.isdeleted(r()) 判据，
+        # 详见 tools/perf/NEXT_ROUND_PRIORITIES.md。
+        #
+        # 注意 scene_pixmap_cache.release 那个 destroyed 直连是安全的——零参数 bound
+        # method，PyQt 丢弃信号实参，不做任何对象求值。
 
     def set_canvas_provider(self, provider) -> None:
         """注入跨宿主画布求值函数（幂等，可重复调用）

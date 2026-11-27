@@ -12,8 +12,6 @@
 - coding_plan_ring          CodingPlanRing（编码计划圆环）
 - _coding_plan_hidden       bool（圆环初始隐藏标记）
 - context_usage_ring        ContextUsageRing（上下文用量圆环）
-- _history_questions_btn    TransparentToolButton（历史问题）
-- _history_questions_badge  InfoBadge（问题数角标）
 - _share_btn                TransparentToolButton（分享）
 - diff_btn                  TransparentToolButton（差异对比）
 
@@ -41,8 +39,6 @@ class TitleBarModule(UIModule):
         from qfluentwidgets import (
             TransparentToolButton,
             FluentIcon,
-            InfoBadge,
-            InfoBadgePosition,
         )
         from app.utils.utils import get_font_family_css
         from app.widgets.ui_helpers import TitleEditWidget, Colors, font_size_css
@@ -62,7 +58,6 @@ class TitleBarModule(UIModule):
         copy_branch_from = getattr(host, "_copy_branch_from", lambda *_a: None)
         update_branch = getattr(host, "_update_branch", lambda: None)
         on_title_edit_finished = getattr(host, "_on_title_edit_finished", None)
-        toggle_history_questions_popup = getattr(host, "_toggle_history_questions_popup", None)
         on_share_clicked = getattr(host, "_on_share_clicked", None)
         # 差异按钮入口已移除；保留 host.diff_btn = None 的兼容，
         # 防止外部代码仍持有引用（见 main_widget._open_diff_viewer）。
@@ -184,24 +179,11 @@ class TitleBarModule(UIModule):
         host._coding_plan_hidden = True
         host.context_usage_ring = ContextUsageRing(host)
 
-        # 标题栏右侧：分享按钮 + 当前会话历史问题按钮（替代时间线节点）
+        # 标题栏右侧：分享按钮
         right_layout = QHBoxLayout()
         right_layout.setContentsMargins(0, 0, 0, 0)
         right_layout.setSpacing(2)
         right_layout.setAlignment(Qt.AlignVCenter)
-
-        # 历史问题按钮（点击弹窗显示当前会话所有用户提问，支持快速跳转）
-        host._history_questions_btn = TransparentToolButton(FluentIcon.MESSAGE, host)
-        host._history_questions_btn.setFixedSize(28, 28)
-        host._history_questions_btn.setToolTip("当前会话的用户提问历史")
-        if toggle_history_questions_popup is not None:
-            host._history_questions_btn.clicked.connect(toggle_history_questions_popup)
-        right_layout.addWidget(host._history_questions_btn)
-        # 右上角 InfoBadge，显示用户问题总数（自动跟随按钮位置）
-        host._history_questions_badge = InfoBadge.attension(
-            0, parent=host, target=host._history_questions_btn, position=InfoBadgePosition.LEFT
-        )
-        host._history_questions_badge.setVisible(False)
 
         # 分享按钮
         host._share_btn = TransparentToolButton(FluentIcon.SHARE, host)

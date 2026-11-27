@@ -93,6 +93,47 @@ def test_last_message_rewrite_falls_back_to_full():
     assert inc > before, "内容变长后 token 必须增长（改写确实被捕捉）"
 
 
+def test_append_only_counts_old_tail_and_new_items(monkeypatch):
+    msgs = [_base_msg(i) for i in range(100)]
+    te.count_messages_tokens(msgs)
+    old_tail = msgs[-1]
+    added = [{'role': 'assistant', 'content': '长回复。' * 200}, {'role': 'tool', 'content': 'ok'}]
+    msgs.extend(added)
+    original = te._compute_message_tokens
+    expected = sum(original(msg, 'gpt-4') for msg in msgs)
+    visited = []
+
+    def tracked(msg, model):
+        visited.append(msg)
+        return original(msg, model)
+
+    monkeypatch.setattr(te, '_compute_message_tokens', tracked)
+    assert te.count_messages_tokens(msgs) == expected
+    assert visited == [old_tail, *added]
+
+
+def test_rewrite_old_tail_then_append_equal_cost_message():
+    msgs = [_base_msg(0), {'role': 'user', 'content': 'ok'}]
+    te.count_messages_tokens(msgs)
+    msgs[-1]['content'] = '补充内容' * 100
+    msgs.append({'role': 'user', 'content': 'ok'})
+    assert te.count_messages_tokens(msgs) == sum(te._compute_message_tokens(msg, 'gpt-4') for msg in msgs)
+
+
+def test_replaced_prefix_with_unchanged_tail_recounts():
+    msgs = [_base_msg(0), _base_msg(1)]
+    te.count_messages_tokens(msgs)
+    msgs[0] = {'role': 'tool', 'content': '新增工具结果' * 100}
+    assert te.count_messages_tokens(msgs) == sum(te._compute_message_tokens(msg, 'gpt-4') for msg in msgs)
+
+
+def test_evicted_cursor_does_not_reuse_wrong_ratio():
+    msgs = [_base_msg(0)]
+    raw = te.count_messages_tokens(msgs, ratio=1.0)
+    te._get_prefix_cursors().clear()
+    assert te.count_messages_tokens(msgs, ratio=2.0) == raw * 2
+
+
 def test_incremental_faster_than_full_over_50_rounds():
     """用例④：50 轮增量累计耗时 << 50 轮全量累计耗时（>5x）"""
     n_rounds = 50

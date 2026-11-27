@@ -451,6 +451,7 @@ class ToolExecutor:
         result=None,
         enabled: bool = True,
         current_message_text: Optional[str] = None,
+        hook_messages: Optional[List[Dict]] = None,
     ) -> None:
         """触发 PostToolUse hook（统一方法，减少重复代码）
 
@@ -505,8 +506,8 @@ class ToolExecutor:
             "tool_input": _normalized_input,
             "session_id": local_session_id,
             # 【新增】让 hook 能识别当前执行角色（与 subagent_worker._build_hook_context 对齐）
-            "current_role": "primary",
-            "is_subagent_call": False,
+            "current_role": "subagent" if hook_messages is not None else "primary",
+            "is_subagent_call": hook_messages is not None,
         }
 
         # 注入工具结果信息（PostToolUse 最核心的增强）
@@ -574,83 +575,38 @@ class ToolExecutor:
             context=context,
             current_message=current_message_text,
             trigger_async=False,
+            skip_finished_callback=True,
         )
 
-        # ====== PostToolUse 纯文本输出直接入队（不依赖 HookManager 完成回调）======
-        # 回调 `_on_finished_callback` 在多窗口/多 HookManager 实例下可能设在别的
-        # 实例上，hook 明明返回了文本却无人接（实测全天日志 0 条 "queued for worker"）。
-        # 这里按 add_to_context 语义自己入队：纯文本注入上下文，JSON 交给下方
-        # replaceContent 约定处理，不重复注入。
-        try:
-            from app.core.conversation.backend import _format_hook_output
+        # 返回值是唯一来源；替换指令作用于工具结果，普通输出交给调用方。
+        from app.core.conversation.backend import _format_hook_output
 
-            _queue = getattr(self._backend, "_hook_message_queue", None)
-            for _r in results or ():
-                if not _r.success or not _r.output:
+        replaced = False
+        for r in results or ():
+            if not r.success or not r.output or not (text := r.output.strip()):
+                continue
+            if text.startswith("{"):
+                try:
+                    hso = _json.loads(text).get("hookSpecificOutput")
+                except ValueError:
+                    hso = None
+                if isinstance(hso, dict) and hso.get("hookEventName") == "PostToolUse" and "replaceContent" in hso:
+                    if not replaced and result is not None and result.success and isinstance(result.content, str):
+                        result.content = str(hso["replaceContent"])
+                        replaced = True
+                        logger.debug(f"[ToolExecutor] PostToolUse hook 替换了 {tool_name} 结果内容")
                     continue
-                _text = _r.output.strip()
-                if not _text or _text.startswith("{"):
+                if not r.add_to_context:
                     continue
-                if _queue is not None:
-                    _queue.put(
-                        {
-                            "role": "user",
-                            "content": _format_hook_output("PostToolUse", _text, _r.status_message),
-                            "_hook_event": "PostToolUse",
-                        }
-                    )
-                    self._backend._hook_messages_updated.emit()
-        except Exception:
-            pass
-
-        # ====== PostToolUse hook 替换工具结果内容（hookSpecificOutput 约定）======
-        # 适用场景：hook 需要对工具结果做脱敏/过滤/加密，再给大模型。
-        #
-        # 约定：PostToolUse hook 的返回值 JSON 中包含
-        #   hookSpecificOutput.hookEventName == "PostToolUse"
-        #   hookSpecificOutput.replaceContent == "替换后的内容"
-        # 时才触发替换。普通文本输出或其他 JSON 输出不触发。
-        #
-        # 替换后清空 _hook_message_queue 防止双重注入（替换内容已反映在 result.content 中）。
-        if result is not None and result.success and isinstance(result.content, str):
-            _replaced = False
-            for _r in results:
-                if _r.success and _r.output:
-                    try:
-                        _data = _json.loads(_r.output)
-                        if isinstance(_data, dict):
-                            _hso = _data.get("hookSpecificOutput")
-                            if (
-                                isinstance(_hso, dict)
-                                and _hso.get("hookEventName") == "PostToolUse"
-                                and "replaceContent" in _hso
-                            ):
-                                result.content = str(_hso["replaceContent"])
-                                _replaced = True
-                                logger.debug(
-                                    f"[ToolExecutor] PostToolUse hook 替换了 {tool_name}"
-                                    f" 结果内容 ({len(result.content)} chars, replaceContent)"
-                                )
-                                break
-                    except Exception:
-                        pass  # 非 JSON 或无法解析 → 不触发替换
-            if _replaced:
-                # 清空 hook 队列：替换后的内容已在 result.content 中，
-                # 队列中的副本会导致 worker 在下一轮循环中再次注入，造成双重注入。
-                _q2 = getattr(self._backend, "_hook_message_queue", None)
-                if _q2 is not None:
-                    import queue as _queue2
-
-                    while True:
-                        try:
-                            _q2.get_nowait()
-                        except _queue2.Empty:
-                            break
-                    logger.debug(
-                        "[ToolExecutor] PostToolUse 替换后已清空 _hook_message_queue，"
-                        "防止 result.content 与队列消息双重注入"
-                    )
-        # ============================================================
+            msg = {
+                "role": "user", "_hook_event": "PostToolUse",
+                "content": _format_hook_output("PostToolUse", text, r.status_message),
+            }
+            if hook_messages is not None:
+                hook_messages.append(msg)
+            elif (q := getattr(self._backend, "_hook_message_queue", None)) is not None:
+                q.put(msg)
+                self._backend._hook_messages_updated.emit()
 
     # ========== 自动 LSP 诊断（文件编辑后） ==========
 
@@ -812,6 +768,7 @@ class ToolExecutor:
         call_id: str = None,
         hook_context: Optional[Dict] = None,
         trigger_hooks: bool = True,
+        hook_messages: Optional[List[Dict]] = None,
     ) -> ToolResult:
         """
         执行工具调用
@@ -935,6 +892,7 @@ class ToolExecutor:
                 context=context,
                 current_message=current_message_text,
                 trigger_async=False,  # 关键：同步执行，才能检测 BLOCK 决策
+                skip_finished_callback=hook_messages is not None,
             )
 
             # 检查是否有 hook 要求跳过工具执行（exit 2 或 JSON {"decision":"block"}）
@@ -950,7 +908,7 @@ class ToolExecutor:
                     # _build_response_message_sequence(tool_results) 双重注入。
                     # 清空队列中本应属于此 BLOCK hook 的输出（如果 add_output_to_context=True）。
                     _q = getattr(self._backend, "_pre_tool_message_queue", None)
-                    if _q is not None:
+                    if hook_messages is None and _q is not None:
                         import queue as _queue
 
                         while True:
@@ -966,6 +924,16 @@ class ToolExecutor:
                         or f"Tool '{tool_name}' was blocked by PreToolUse hook (exit code 2 / decision:block).",
                     )
 
+            if hook_messages is not None:
+                from app.core.conversation.backend import _format_hook_output
+
+                for r in results:
+                    if r.success and r.add_to_context and r.output and r.output.strip():
+                        hook_messages.append({
+                            "role": "user", "_hook_event": "PreToolUse",
+                            "content": _format_hook_output("PreToolUse", r.output, r.status_message),
+                        })
+
         # 校验必需参数（单一数据源：注册工具从 registry schema 的 function.required 读取；
         required = self._get_required_args(tool_name)
         missing = [p for p in required if not args.get(p)]
@@ -980,7 +948,7 @@ class ToolExecutor:
             # MCP 分支在下方 PreToolUse 计算段之前返回，此处尚无
             # current_message_text，传 None 让 _trigger_post_tool_use 走就地重扫兜底。
             return self._execute_mcp_tool(
-                tool_name, args, trigger_hooks=trigger_hooks, current_message_text=None
+                tool_name, args, trigger_hooks=trigger_hooks, current_message_text=None, hook_messages=hook_messages
             )
 
         # ========== 工具执行前的有效性检查 ==========
@@ -1021,7 +989,8 @@ class ToolExecutor:
 
                 # Trigger PostToolUse hook（统一方法，含结果回填）
                 self._trigger_post_tool_use(
-                    tool_name, args, result, enabled=trigger_hooks, current_message_text=current_message_text
+                    tool_name, args, result, enabled=trigger_hooks, current_message_text=current_message_text,
+                    hook_messages=hook_messages,
                 )
 
                 return result
@@ -1030,7 +999,8 @@ class ToolExecutor:
                 if self._is_write_group(tool_name):
                     self._cleanup_backup_on_failure(local_session_id, local_call_id)
                 err_result = ToolResult(False, error=f"Execution error: {str(e)}")
-                self._trigger_post_tool_use(tool_name, args, err_result, current_message_text=current_message_text)
+                self._trigger_post_tool_use(tool_name, args, err_result, enabled=trigger_hooks,
+                                            current_message_text=current_message_text, hook_messages=hook_messages)
                 return err_result
 
         return ToolResult(False, error=f"Unknown tool: {tool_name}")
@@ -1163,7 +1133,8 @@ class ToolExecutor:
         return _run
 
     def _execute_mcp_tool(
-        self, tool_name: str, args: dict, trigger_hooks: bool = True, current_message_text: Optional[str] = None
+        self, tool_name: str, args: dict, trigger_hooks: bool = True, current_message_text: Optional[str] = None,
+        hook_messages: Optional[List[Dict]] = None,
     ) -> ToolResult:
         """执行 MCP 工具调用"""
         # 执行前检查 ToolExecutor 有效性
@@ -1190,14 +1161,16 @@ class ToolExecutor:
             logger.error(f"[ToolExecutor] MCP tool '{tool_name}' timeout: {e}")
             err_result = ToolResult(False, error="MCP 工具调用超时，请稍后重试")
             self._trigger_post_tool_use(
-                tool_name, args, err_result, enabled=trigger_hooks, current_message_text=current_message_text
+                tool_name, args, err_result, enabled=trigger_hooks, current_message_text=current_message_text,
+                hook_messages=hook_messages,
             )
             return err_result
         except Exception as e:
             logger.error(f"[ToolExecutor] MCP tool '{tool_name}' raised exception: {e}")
             err_result = ToolResult(False, error=f"MCP 工具执行异常: {str(e)}")
             self._trigger_post_tool_use(
-                tool_name, args, err_result, enabled=trigger_hooks, current_message_text=current_message_text
+                tool_name, args, err_result, enabled=trigger_hooks, current_message_text=current_message_text,
+                hook_messages=hook_messages,
             )
             return err_result
 
@@ -1207,7 +1180,8 @@ class ToolExecutor:
             # 不再尝试修改 result，避免访问已删除的 QObject 属性
 
         # Trigger PostToolUse hook for MCP tools
-        self._trigger_post_tool_use(tool_name, args, result, enabled=trigger_hooks, current_message_text=current_message_text)
+        self._trigger_post_tool_use(tool_name, args, result, enabled=trigger_hooks,
+                                    current_message_text=current_message_text, hook_messages=hook_messages)
 
         return result
 

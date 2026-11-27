@@ -631,8 +631,14 @@ class SessionRepository:
             return False, "数据库未初始化"
         return self._db.execute_sql(sql, params)
 
-    def _row_to_session(self, row) -> Dict:
-        """将数据库行转换为会话字典"""
+    def _row_to_session(self, row, keep_raw_blob: bool = False) -> Dict:
+        """将数据库行转换为会话字典。
+        keep_raw_blob：额外带出库内 messages 原始字节（键 ``_raw_messages_blob``）。
+        旧图 blob 迁移的 CAS 条件必须是库内那一份字节 —— 键序 / 压缩器版本任一
+        不同都会让 ``serialize(msgs)`` 产出不同字节，CAS 恒不命中（2026-07-13
+        引入 ``OPT_SORT_KEYS`` 后，早于该日期落库的会话全部踩中）。调用方用完即
+        pop，不得把它带进任何序列化链路（bytes 不能 JSON 化，且 100MB 级白占内存）。
+        """
         if not row:
             return {}
 
@@ -677,7 +683,7 @@ class SessionRepository:
 
         # 统一字段名：DB 的 title 列映射到 name 和 topic_summary
         raw_title = d.get("title", "") or ""
-        return {
+        result = {
             "session_id": d.get("session_id", ""),
             "name": raw_title,  # ChatSession.name
             "title": raw_title,  # HistoryManager 兼容
@@ -714,6 +720,13 @@ class SessionRepository:
             "saved_at": d.get("saved_at") or d.get("created_at", ""),
             "user_edited_title": d.get("user_edited_title", False),
         }
+        if keep_raw_blob:
+            raw_messages = d.get("messages")
+            # 保留原始类型（TEXT/BLOB）：CAS 的 WHERE messages = ? 是类型敏感比较
+            result["_raw_messages_blob"] = (
+                raw_messages if isinstance(raw_messages, (bytes, str)) else None
+            )
+        return result
 
     def save(self, session: Dict) -> bool:
         """
@@ -1158,13 +1171,15 @@ class SessionRepository:
         get() 每次返回新反序列化的消息列表，就地合并无副作用。
         extras 读失败（None）→ WARNING + 返回轻量消息（降级不炸）。
         """
-        sess = self.get(session_id)
+        sess = self.get(session_id, keep_raw_blob=True)
         if not sess:
             return []
         msgs = sess.get("messages", [])
+        raw_blob = sess.pop("_raw_messages_blob", None)
         # [T3] 旧 blob 防御迁移：persist 链引入前的存量 / persist 失败降级残留
         # 仍内嵌 data:image，后台线程堵洞（快筛不命中零开销）
-        self._schedule_legacy_image_blob_migration(session_id, msgs)
+        # raw_blob：CAS 条件用库内原始字节（见 _row_to_session 的讨论）
+        self._schedule_legacy_image_blob_migration(session_id, msgs, raw_blob)
         extras = self.load_extras_for_session(session_id)
         if extras is None:
             logger.warning(f"[SessionRepository] get_full_messages: {session_id} extras 读取失败，降级返回轻量消息")
@@ -1186,11 +1201,12 @@ class SessionRepository:
             (messages, pending_idxs)；会话不存在 → ([], [])。
             pending 为「尚未补载 extras 的消息下标」升序表。
         """
-        sess = self.get(session_id)
+        sess = self.get(session_id, keep_raw_blob=True)
         if not sess:
             return [], []
         msgs = sess.get("messages", [])
-        self._schedule_legacy_image_blob_migration(session_id, msgs)
+        raw_blob = sess.pop("_raw_messages_blob", None)
+        self._schedule_legacy_image_blob_migration(session_id, msgs, raw_blob)
         first_set = set(first_idxs or [])
         need = [
             i
@@ -1207,52 +1223,71 @@ class SessionRepository:
         ]
         return msgs, pending
 
-    def _schedule_legacy_image_blob_migration(self, session_id: str, msgs: List[Any]) -> None:
+    def _schedule_legacy_image_blob_migration(
+        self, session_id: str, msgs: List[Any], raw_blob: Any = None
+    ) -> None:
         """读侧防御迁移：blob 内嵌 data:image → 后台落盘图并回写 ref 形态 blob。
-
         persist 链引入前的存量 blob、persist 单块失败降级残留，在每次全量读时
         触发一次后台迁移（复用 _persist_vision_image_blocks_impl 幂等链：sha1
         去重 + 原子写，已落盘则跳过）。
-
         - 快筛：块级扫描（与 persist 链命中条件一致）不命中直接返回（零开销）
-        - 传 blob 快照而非活对象：调用方主线程随后 merge_extras_into 就地改 msgs
-        - CAS 回写：UPDATE 带 WHERE messages = 旧快照，blob 已被 worker save 覆盖
-          即放弃本轮（防旧快照回写吞新保存）；失败降级保留原 blob 下次重试；
-          UPDATE 失败但图已落盘时 sha1 同名覆盖无害
+        - CAS 条件用**库内原始字节**（raw_blob）：serialize(msgs) 受 OPT_SORT_KEYS
+          （2026-07-13 引入）与压缩器版本影响，与落库时的字节可能不等 —— 早于该
+          改动的存量会话用它做条件恒不命中（0 行更新 + 静默丢弃，白烧一次 100MB
+          级序列化）。raw_blob 缺失（非读路径调用）才回退 serialize(msgs)。
+        - rowcount 非 1 记 WARNING：并发写覆盖 / 键序不一致过去都是静默失败
         - 内存侧不就地换 ref：读路径原样返回，UI 链由既有出口 revoke 兜底
         """
         try:
             if not _has_inline_data_image_blocks(msgs):
                 return
-            # 快筛命中才 serialize：传 blob 快照而非活对象（调用方主线程随后
-            # merge_extras_into 会就地改 msgs，线程内 deserialize 出独立对象）
-            blob = serialize(msgs)
+            # 优先用库内原始字节；缺失才回退当前序列化产物（见 docstring）
+            if isinstance(raw_blob, (bytes, str)) and raw_blob:
+                blob = raw_blob
+            else:
+                blob = serialize(msgs)
         except Exception:  # noqa: BLE001 — 快筛失败按无需迁移
             return
 
-        def _migrate(blob: bytes = blob) -> None:
+        def _migrate(blob=blob) -> None:
             try:
                 from app.utils.app_paths import get_app_data_dir
 
                 work = deserialize(blob)
                 _persist_vision_image_blocks_impl(work, session_id, get_app_data_dir())
                 new_blob = serialize(work)
-                if new_blob == blob:
+                # 仅 bytes 快照可做字节等值短路（str 原值是旧未压缩格式，
+                # serialize 后必然变压缩格式，属于格式升级，不短路）
+                if isinstance(blob, (bytes, bytearray)) and new_blob == blob:
                     return  # 无 data:image 块（快筛误命中），避免无谓写
                 # CAS：blob 已被 worker save 覆盖即放弃（防旧快照回写吞新保存），
                 # 未命中即放弃本轮，下次读时快筛自然再触发
-                self._execute(
+                ok, affected = self._execute(
                     f"UPDATE {self.TABLE_NAME} SET messages = ? "
                     f"WHERE session_id = ? AND messages = ?",
                     (new_blob, session_id, blob),
                 )
+                if not ok:
+                    logger.warning(
+                        f"[SessionRepository] 旧图 blob 迁移写回失败 {session_id}: {affected}"
+                    )
+                elif affected != 1:
+                    # 0 行 = CAS 未命中（并发写覆盖 / 条件字节与库内不一致）；
+                    # 过去这里丢弃返回值，问题被完全静默，故必须留痕。
+                    logger.warning(
+                        f"[SessionRepository] 旧图 blob 迁移未命中 "
+                        f"(rowcount={affected}) {session_id}：blob 已被并发写覆盖或键序不一致，"
+                        f"本轮放弃，下次读再试"
+                    )
             except Exception as e:  # noqa: BLE001 — 迁移失败保留原 blob 下次重试
                 logger.warning(f"[SessionRepository] 旧图 blob 迁移失败 {session_id}: {e}")
 
         Thread(target=_migrate, daemon=True, name=f"migrate-img-blob-{session_id[:8]}").start()
 
-    def get(self, session_id: str) -> Optional[Dict]:
-        """根据 ID 获取单个会话（同时失效内容 hash 缓存）"""
+    def get(self, session_id: str, keep_raw_blob: bool = False) -> Optional[Dict]:
+        """根据 ID 获取单个会话（同时失效内容 hash 缓存）。
+        keep_raw_blob：见 :meth:`_row_to_session`（旧图 blob 迁移 CAS 需要）。
+        """
         if not self.is_initialized:
             return None
 
@@ -1266,7 +1301,7 @@ class SessionRepository:
                 with self._cache_lock:
                     self._content_hash_cache.pop(session_id, None)
                     self._extras_written.pop(session_id, None)
-                return self._row_to_session(rows[0])
+                return self._row_to_session(rows[0], keep_raw_blob=keep_raw_blob)
             return None
         except Exception as e:
             logger.error(f"[SessionRepository] get_session 异常: {e}")
@@ -1560,11 +1595,10 @@ class SessionRepository:
         try:
             success, rows = self._execute(
                 f"""
-                SELECT DISTINCT project FROM (
-                    SELECT project FROM {self.TABLE_NAME}
-                    UNION
-                    SELECT project FROM project_workdir
-                ) ORDER BY project
+                SELECT DISTINCT project FROM {self.TABLE_NAME}
+                UNION
+                SELECT project FROM project_workdir
+                ORDER BY project
                 """
             )
             if success and rows:
@@ -1662,12 +1696,12 @@ class SessionRepository:
             return 0
 
     def get_session_counts(self) -> Dict[str, int]:
-        """获取所有项目（非归档）的会话数量（COUNT DISTINCT session_id 去重）"""
+        """获取所有项目（非归档）的会话数量；session_id 为主键，COUNT 忽略 NULL。"""
         if not self.is_initialized:
             return {}
         try:
             success, rows = self._execute(
-                f"SELECT project, COUNT(DISTINCT session_id) as cnt FROM {self.TABLE_NAME} "
+                f"SELECT project, COUNT(session_id) as cnt FROM {self.TABLE_NAME} "
                 f"WHERE project NOT LIKE '__archived__%' GROUP BY project"
             )
             if success and rows:
