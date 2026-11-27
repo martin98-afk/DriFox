@@ -7105,6 +7105,9 @@ class OpenAIChatToolWindow(ToolWindow):
             on_finished=None,
             on_error=None,
             llm_config=llm_config,
+            # 会话标识必须随任务锁定：OpenCode 网关缺 x-opencode-session 直接
+            # 400 MissingSessionID（manager._current_session_id 无写入方，不能靠它）
+            session_id=self._current_session_id or "",
         )
         logger.info(f"[BuiltinCommands] 触发子智能体任务: agent={agent_name}, task={task_description[:50]}...")
 

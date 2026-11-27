@@ -117,6 +117,16 @@ def _in_flight(method):
     return wrapper
 
 
+def _request_session_id(executor, task_id: str) -> str:
+    """请求头用的会话标识：任务锁定的 session_id，缺失时退回 task_id。
+
+    OpenCode Zen/Go 网关要求每个 LLM 请求带 x-opencode-session，缺头即 400
+    MissingSessionID（2026-11 实测）；派发方不保证传 session_id（斜杠命令
+    路径曾整条漏传），而任务 id 在同一任务内稳定，足以满足网关路由要求。
+    """
+    return getattr(executor, "_task_session_id", None) or task_id or ""
+
+
 class SubAgentExecutor(QThread):
     """子智能体执行器 - 独立线程运行子智能体任务"""
 
@@ -1351,7 +1361,11 @@ class SubAgentExecutor(QThread):
                 timeout=httpx.Timeout(600.0, connect=60.0),
             )
         client = self._api_client
-        auth_headers = resolve_extra_headers(config, getattr(self, "_task_session_id", None) or "")
+        # 会话标识缺失时以 task_id 兜底：OpenCode Zen/Go 网关对无 x-opencode-session
+        # 的请求直接 400 MissingSessionID，而派发方（斜杠命令/第三方插件经
+        # subagent.run 能力）不保证传 session_id；任务 id 在同一任务内稳定，满足
+        # 网关的路由要求。
+        auth_headers = resolve_extra_headers(config, _request_session_id(self, self.task_id))
 
         def create_and_consume():
             """建流 + 消费流一体：SSE 读超时/断流发生在迭代期，只包住建流等于没重试。"""
