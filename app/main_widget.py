@@ -166,7 +166,7 @@ from app.widgets.cards import (
     ContainerType,
     TopCardContainer,
 )
-from app.widgets.cards.floating.history_questions_card import HistoryQuestionsCardContent
+from app.widgets.question_edge_navigator import QuestionEdgeNavigator
 from app.widgets.cards.floating.share_card import ShareCardContent
 
 # [PERF] 设置卡导入纪律：顶层仅保留 __init__/setup_ui 直线构造的卡片；
@@ -1069,7 +1069,6 @@ class OpenAIChatToolWindow(ToolWindow):
         # "hook_edit",
         "tool_control",
         "share",
-        "history_questions",
     )
     # AutoLoop 状态（已插件化：运行状态由插件管理，主程序仅维护独占模式计数）
     _exclusive_ui_modes: set = set()
@@ -1666,6 +1665,8 @@ class OpenAIChatToolWindow(ToolWindow):
         self._resize_complete_timer.setSingleShot(True)
         self._resize_complete_timer.setInterval(100)  # resize 结束后尽快恢复真实内容
         self._resize_complete_timer.timeout.connect(self._sync_all_cards_width)
+        self._sidebar_drag_live = False
+        self._sidebar_drag_resized = False
         self._resize_preview_active = False
         # [L1] 高度批量提交器：惰性创建（依赖 chat_scroll_area 就绪）
         self._height_batch: HeightCommitBatch | None = None
@@ -2040,21 +2041,6 @@ class OpenAIChatToolWindow(ToolWindow):
         )
         self._top_card_container.add_card("share", self._share_card)
 
-    def _ensure_history_questions_card(self):
-        """确保历史问题卡片框架已创建（内容由 _build_deferred_card_history_questions 填充）"""
-        if self._history_questions_card is not None:
-            return
-        self._history_questions_card = BaseSettingsCard("历史问题", icon_svg="question", parent=self)
-        self._history_questions_card.set_height_mode("content")
-        self._history_questions_card.setVisible(False)
-        self._history_questions_card.closed.connect(
-            lambda: self._card_manager.hide_card("history_questions", self._window_id)
-        )
-        self._card_manager.register_card(
-            self._window_id, ContainerType.TOP, "history_questions", self._history_questions_card, system_card=True
-        )
-        self._top_card_container.add_card("history_questions", self._history_questions_card)
-
     def _ensure_tool_control_card(self):
         """工具控制卡片懒创建（批1）：构造/接线/注册按需执行
 
@@ -2251,7 +2237,6 @@ class OpenAIChatToolWindow(ToolWindow):
         self._deferred_card_steps = [
             self._build_deferred_card_history,
             self._build_deferred_card_share,
-            self._build_deferred_card_history_questions,
             self._build_deferred_card_model_config,
             self._build_deferred_card_model_selector,
         ]
@@ -2286,21 +2271,6 @@ class OpenAIChatToolWindow(ToolWindow):
             self._share_card.content_layout.addWidget(self._share_card_content)
         except Exception:
             logger.exception("[DeferredBuild] ShareCard 构建失败")
-        finally:
-            self._schedule_next_deferred_card()
-
-    def _build_deferred_card_history_questions(self):
-        """── ③ 历史问题卡片 ──"""
-        try:
-            self._ensure_history_questions_card()  # P0-1：框架惰性创建
-            self._history_questions_card_content = HistoryQuestionsCardContent(self)
-            self._history_questions_card_content.questionClicked.connect(self._on_history_question_clicked)
-            self._history_questions_card_content.questionClicked.connect(
-                lambda: self._card_manager.hide_card("history_questions", self._window_id)
-            )
-            self._history_questions_card.content_layout.addWidget(self._history_questions_card_content)
-        except Exception:
-            logger.exception("[DeferredBuild] HistoryQuestionsCard 构建失败")
         finally:
             self._schedule_next_deferred_card()
 
@@ -3559,6 +3529,10 @@ class OpenAIChatToolWindow(ToolWindow):
 
                 # [P1 步骤6] chat_scroll_area 就绪后接 rangeChanged 事件驱动贴底
                 self._wire_scroll_range_changed()
+
+        self._question_edge = QuestionEdgeNavigator(self.chat_scroll_area.viewport())
+        self._question_edge.questionClicked.connect(self._jump_to_history_question)
+        self._question_edge.refreshRequested.connect(self._update_history_questions_badge, Qt.QueuedConnection)
 
         # ── 六张系统卡片框架懒创建（Phase F：已迁移到 SystemCardsModule，由 compose 驱动）──
         from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
@@ -9824,6 +9798,21 @@ class OpenAIChatToolWindow(ToolWindow):
                 target_min_w = 0
             if self.chat_scroll_area.minimumWidth() != target_min_w:
                 self.chat_scroll_area.setMinimumWidth(target_min_w)
+        if getattr(self, "_sidebar_drag_live", False):
+            if not self._sidebar_drag_resized:
+                self._sidebar_drag_resized = True
+                self._resize_complete_timer.stop()
+                self._resize_debounce_timer.stop()
+                # 作废上一轮尚未完成的分帧宽度任务，避免回写旧宽。
+                self._restore_epoch += 1
+                if self._resize_preview_active:
+                    self._resize_preview_active = False
+                    self._release_leftover_preview_placeholders()
+            # 节流而非防抖：计时中只保留最新视口尺寸，不推迟下一拍。
+            if not self._resize_debounce_timer.isActive():
+                self._resize_debounce_timer.start(16)
+            self._position_bottom_toolbar()
+            return
         # 动画期间宿主会抑制预览模式：中间对话区原样实时显示（#31）
         if not getattr(self, "_suppress_resize_preview", False):
             self._set_cards_resize_preview_mode(True)
@@ -9834,6 +9823,14 @@ class OpenAIChatToolWindow(ToolWindow):
         self._resize_complete_timer.start()
         # 重新定位底部工具栏（绝对定位，不在 layout 里）
         self._position_bottom_toolbar()
+
+    def _set_sidebar_drag_live(self, enabled: bool):
+        self._sidebar_drag_live = enabled
+        if not enabled and self._sidebar_drag_resized:
+            self._sidebar_drag_resized = False
+            self._resize_debounce_timer.stop()
+            self._resize_debounce_timer.setInterval(self._RESIZE_DEBOUNCE_MS)
+            self._resize_complete_timer.start()
 
     def _set_cards_resize_preview_mode(self, enabled: bool):
         if enabled == self._resize_preview_active:
@@ -10375,6 +10372,10 @@ class OpenAIChatToolWindow(ToolWindow):
         # 观测：稳态下的并发渲染页 / 复用池占用（内部自带 2s 节流）
         self._log_render_quota("scroll")
         self._last_layout_scan = scan
+        edge = getattr(self, "_question_edge", None)
+        visible = scan.get("rng")
+        if edge is not None and visible is not None:
+            edge.set_reading(self._get_user_round_index_for_batch_index(visible[0]))
 
         prev_visible = self._last_visible_card_ids
 
@@ -11798,7 +11799,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 self._question_floating_widget,
                 self._permission_floating_widget,
                 self._share_card_content,
-                self._history_questions_card_content,
+                getattr(self, "_question_edge", None),
                 self._undo_delete_card,
                 # 排队消息卡（input_card_module 装配）：漏刷会导致切主题后
                 # 卡片停在构造时主题（浅→深仍是白底白页眉）
@@ -11890,7 +11891,7 @@ class OpenAIChatToolWindow(ToolWindow):
             self._question_floating_widget,
             self._permission_floating_widget,
             self._share_card_content,
-            self._history_questions_card_content,
+            getattr(self, "_question_edge", None),
             self._undo_delete_card,
             # 排队消息卡（与 5a 同口径；字体变化路径 5a 不走，靠这里补刷）
             getattr(self, "_queue_message_card", None),
@@ -17545,7 +17546,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # 同步更新历史问题徽章
         self._update_history_questions_badge()
 
-    def _scroll_to_target_node_index(self, target_index: int):
+    def _scroll_to_target_node_index(self, target_index: int, target_batch_index=None):
         """
         滚动到指定节点索引的位置。如果目标卡片未渲染，先加载历史批次。
 
@@ -17564,7 +17565,8 @@ class OpenAIChatToolWindow(ToolWindow):
         self._lock_scroll_after_jump()
 
         # 将节点索引转换为 _message_batch 索引（与 build_node_preview_data 对齐）
-        target_batch_index = self._get_batch_index_from_node_index(target_index)
+        if target_batch_index is None:
+            target_batch_index = self._get_batch_index_from_node_index(target_index)
         if target_batch_index < 0:
             logger.warning(f"[NodePreview] Cannot find batch for target_index={target_index}")
             return
@@ -18089,68 +18091,35 @@ class OpenAIChatToolWindow(ToolWindow):
             "context_usage": getattr(session, "context_usage", 0) or 0,
         }
 
-    def _toggle_history_questions_popup(self):
-        """切换历史问题卡片的显示"""
-        self._ensure_history_questions_card()  # P0-1：框架懒创建（原 hasattr 检查改为惰性创建）
-
-        if self._card_manager.is_card_visible("history_questions", self._window_id):
-            self._card_manager.hide_card("history_questions", self._window_id)
-            return
-
-        # 获取当前会话的用户问题
-        session = self.session_manager.get_current_session()
-        if not session:
-            return
-
-        from app.core import consolidate_messages, content_to_text
-
-        messages = consolidate_messages(session.messages)
-        questions = []
-        for msg in messages:
-            if msg.get("role") == "user":
-                # 🛡️ R7 修复：风格与其他 3 处统一为"正向包含"——
-                # team 邮件（_hook_event="TeamMail"）视为真实用户问题，
-                # 非 TeamMail 的 hook 事件（SessionStart / vision_inject /
-                # SubAgentFinished 等）跳过。
-                if not msg.get("_hook_event") or msg.get("_hook_event") == "TeamMail":
-                    text = content_to_text(msg.get("content", ""))
-                    if len(text) > 60:
-                        text = text[:60] + "…"
-                    questions.append((len(questions), text))
-
-        self._history_questions_card_content.set_questions(questions)
-        self._card_manager.toggle_card("history_questions", self._window_id)
-
     def _update_history_questions_badge(self):
-        """更新历史问题徽章计数（当前会话用户问题总数）"""
-        if not hasattr(self, "_history_questions_badge"):
+        """按会话消息版本更新导航，悬停和动画均不扫描会话。"""
+        edge = getattr(self, "_question_edge", None)
+        if edge is None or _is_sip_deleted(edge):
+            return
+        if QThread.currentThread() != edge.thread():
+            edge.refreshRequested.emit()
             return
         session = self.session_manager.get_current_session()
-        if not session:
-            self._history_questions_badge.setVisible(False)
+        key = (getattr(session, "session_id", None), id(session), getattr(session, "_messages_version", None))
+        if key == getattr(self, "_last_question_edge_key", None):
             return
+        previews = []
+        if session:
+            for msg in consolidate_messages(session.messages, owner=session):
+                if msg.get("role") == "user" and not _is_hook_message(msg):
+                    text = content_to_text(msg.get("content", ""))
+                    previews.append(" ".join(text[:120].split()) + ("…" if len(text) > 120 else ""))
+        edge.set_questions(previews, key[:2])
+        self._last_question_edge_key = key
 
-        messages = consolidate_messages(session.messages)
-        # 🛡️ R6 修复：team 邮件（_hook_event="TeamMail"）计入用户问题数
-        count = sum(
-            1
-            for msg in messages
-            if msg.get("role") == "user" and (not msg.get("_hook_event") or msg.get("_hook_event") == "TeamMail")
-        )
-
-        if count > 0:
-            self._history_questions_badge.setNum(count)
-            self._history_questions_badge.adjustSize()
-            # 重新定位（badge 尺寸变化后需刷新位置）
-            if self._history_questions_badge.manager:
-                self._history_questions_badge.move(self._history_questions_badge.manager.position())
-            self._history_questions_badge.setVisible(True)
-        else:
-            self._history_questions_badge.setVisible(False)
-
-    def _on_history_question_clicked(self, index: int):
-        """历史问题弹窗条目点击，跳转到对应位置（复用时间线节点跳转逻辑）"""
-        self._on_node_preview_clicked(index)
+    def _jump_to_history_question(self, index: int):
+        # 时间线会合并连续提问，但列表逐条展示；定位使用真实用户批次。
+        users = (i for i, batch in enumerate(self._message_batch) if batch and batch[0].get("role") == "user")
+        for row, batch_idx in enumerate(users):
+            if row == index:
+                if not self._locate_and_scroll_to_batch(batch_idx):
+                    self._scroll_to_target_node_index(index, batch_idx)
+                return
 
     def _on_node_preview_clicked(self, index: int):
         """

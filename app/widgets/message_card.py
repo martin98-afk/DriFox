@@ -231,7 +231,6 @@ from app.widgets.card_viewers import (
     CodeWebViewer,
     PlainTextViewer,
     _HEIGHT_CACHE_MAX,
-    _ImagePreviewDialog,
     _PHYSICAL_TEXTURE_LIMIT,
     _decode_image_url_to_pixmap,
     _download_and_preview,
@@ -2416,7 +2415,7 @@ class MessageCard(SimpleCardWidget):
             pixmap.loadFromData(QByteArray.fromBase64(data_uri.split("base64,", 1)[-1].encode("ascii")))
         if pixmap.isNull():
             return
-        _ImagePreviewDialog(pixmap, parent=self.window()).exec_()
+        _show_image_preview(pixmap, parent=self.window())
 
     def _ensure_user_viewer(self) -> None:
         """懒创建用户气泡 PlainTextViewer（修 #2）。

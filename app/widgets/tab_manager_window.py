@@ -4832,8 +4832,7 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
     def _on_splitter_idle(self):
         """splitter 拖拽防抖超时：落定折叠态 + 恢复内容区绘制 + 解除节流
 
-        ~120ms 无新 splitterMoved 即视为停手/松手，由 _splitter_idle_timer
-        触发。
+        真实把手拖动在释放时调用；未收到把手按键事件的移动由静默计时器兜底。
 
         ★★ 拖拽落定（抖动修复的收尾）：拖拽期 TabPanel 被置 _dragging_splitter
         抑制了 emit（否则逐帧跨阈值反复启停动画 = 抖动），因此折叠态与最终宽度
@@ -4952,7 +4951,7 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
         面板再撑开。
 
         ★★ 抖动修复：本方法只负责**开启拖拽会话**（置 panel._dragging_splitter），
-        折叠/展开的落定全部交给 _on_splitter_idle（~120ms 无新事件 = 松手）。
+        折叠/展开的落定交给 _on_splitter_idle（真实把手释放或无按键移动的静默兜底）。
         此前在拖拽过程中就按 pos 判定并 QTimer.singleShot(0, _on_sidebar_toggled)
         启动动画，而 splitterMoved 是逐帧触发的 → 拖拽区跨阈值时反复启停
         200ms 动画，动画与拖拽同时写 setSizes 互相打断 = 抖动。
@@ -4989,14 +4988,9 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
             self._left_card_frame_target_w = max(_COLLAPSED_PANEL_WIDTH + _FRAME_PADDING_X, int(pos))
         # ★ 开启拖拽会话：拖拽期 resizeEvent 只跟随 UI 形态，不 emit 折叠信号
         panel.set_dragging_splitter(True)
-        # ── 视觉修复：拖拽期不再冻结 _content_area 重绘（与 #31 动画期实时显示对齐）──
-        # 旧 OPT-2 首帧冻结已移除：拖动中 layout 每帧重排使全区域失效，
-        # 冻结期间失效区域只显示背景色，用户看到「对话区控件消失」。
-        # WebView 重排已由 resize 预览模式（MainWidget.resizeEvent）兑底，
-        # 剩余 QWidget 实时重绘成本可控，可见性优先。
-        # 每次 splitterMoved 重置 ~120ms 防抖 timer，松手后由
-        # _on_splitter_idle 统一落定折叠态。
-        if hasattr(self, "_splitter_idle_timer"):
+        # 不冻结 _content_area：真实拖拽期间可见 WebView 原位跟宽。
+        # 有把手按键事件就等释放；其他移动保留原防抖落定路径。
+        if hasattr(self, "_splitter_idle_timer") and not getattr(self, "_sidebar_handle_down", False):
             self._splitter_idle_timer.start()
 
     # ── 窗口管理 ──
@@ -7010,8 +7004,29 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
         # ── 左栏 / 聊天区之间的 splitter 把手：双击折叠/展开侧边栏 ──
         # ★ 必须在 handle 上过滤：QSplitter 命中 handle 时 MouseButtonDblClick
         #   不会冒泡到 QSplitter 自身，装在 splitter 上收不到。
-        if obj is getattr(self, "_splitter_left_handle", None) and event.type() == QEvent.MouseButtonDblClick:
-            if event.button() == Qt.LeftButton:
+        if obj is getattr(self, "_splitter_left_handle", None):
+            kind = event.type()
+            if kind == QEvent.MouseButtonPress and event.button() == Qt.LeftButton:
+                self._sidebar_handle_down = True
+                self._splitter_idle_timer.stop()
+                mw = self._content_area.currentWidget()
+                self._sidebar_drag_owner = mw if hasattr(mw, "_set_sidebar_drag_live") else None
+                if self._sidebar_drag_owner is not None:
+                    self._sidebar_drag_owner._set_sidebar_drag_live(True)
+            elif getattr(self, "_sidebar_handle_down", False) and (
+                (kind == QEvent.MouseButtonRelease and event.button() == Qt.LeftButton)
+                or kind in (QEvent.UngrabMouse, QEvent.Hide, QEvent.WindowDeactivate)
+            ):
+                self._sidebar_handle_down = False
+                owner = self._sidebar_drag_owner
+                self._sidebar_drag_owner = None
+                try:
+                    if self._tab_panel._dragging_splitter:
+                        self._on_splitter_idle()
+                finally:
+                    if owner is not None and not _sip.isdeleted(owner):
+                        owner._set_sidebar_drag_live(False)
+            elif kind == QEvent.MouseButtonDblClick and event.button() == Qt.LeftButton:
                 self._toggle_sidebar_from_handle()
                 return True
         if obj is self._chat_wrapper and event.type() == QEvent.Resize:

@@ -2,7 +2,7 @@
 """消息卡片查看器组件（自 message_card.py 拆出，纯搬移）。
 
 ConsoleMonitorPage / _DialogEventFilter / CodeWebViewer /
-PlainTextViewer / _ImagePreviewDialog 及图片预览辅助函数。
+PlainTextViewer / ImageLightbox 及图片预览辅助函数。
 """
 
 import base64
@@ -66,7 +66,6 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 from qfluentwidgets import (
-    MaskDialogBase,
     TransparentToolButton,
 )
 from app.core.infra.telemetry import perf_jsonl
@@ -12765,90 +12764,6 @@ def plan_image_attachment_sources(paths, fallback_content=None) -> list:
     return plan
 
 
-class _ImagePreviewDialog(MaskDialogBase):
-    """图片查看弹窗：Mask 遮罩风格，完整等比显示（适配屏幕可用区 60%），无滚动，点遮罩关闭。"""
-
-    def __init__(self, pixmap, parent=None):
-        super().__init__(parent)
-        Colors.refresh()
-        self.setShadowEffect(60, (0, 10), QColor(0, 0, 0, 120))
-        self.setClosableOnMaskClicked(True)
-        self.setDraggable(True)
-        self.setMaskColor(QColor(0, 0, 0, 160))
-
-        self.widget.setObjectName("imagePreviewWidget")
-        self.widget.setStyleSheet(f"""
-            #imagePreviewWidget {{
-                background-color: #1E1E1E;
-                border: 1px solid {Colors.BORDER};
-                border-radius: 8px;
-            }}
-        """)
-        lay = QVBoxLayout(self.widget)
-        lay.setContentsMargins(6, 6, 6, 6)
-
-        # 等比适配屏幕可用区 60%：完整显示、非原图尺寸、无滚动
-        screen = QApplication.primaryScreen().availableGeometry()
-        scaled = pixmap.scaled(
-            int(screen.width() * 0.6),
-            int(screen.height() * 0.6),
-            Qt.KeepAspectRatio,
-            Qt.SmoothTransformation,
-        )
-        img_label = QLabel(self.widget)
-        img_label.setPixmap(scaled)
-        img_label.setScaledContents(False)
-        lay.addWidget(img_label)
-
-        # 滚轮缩放：以"适配屏幕 60%"为 1.0 基准，范围 0.2x ~ 5x
-        self._pixmap = pixmap
-        self._base_size = (scaled.width(), scaled.height())
-        self._scale = 1.0
-        self._img_label = img_label
-
-        # MaskDialogBase 的 QHBoxLayout 会把 widget 拉伸到全屏：
-        # 取出后自管几何并居中（与 ConfirmDialog._fit_widget_to_content 同法）
-        self.layout().removeWidget(self.widget)
-        self.widget.setParent(self)
-        self.widget.adjustSize()
-        self._center_widget()
-
-    def wheelEvent(self, e):
-        delta = e.angleDelta().y() if hasattr(e, "angleDelta") else 0
-        if not delta:
-            return
-        factor = 1.15 if delta > 0 else 1 / 1.15
-        new_scale = max(0.2, min(5.0, self._scale * factor))
-        if abs(new_scale - self._scale) < 1e-6:
-            return
-        self._scale = new_scale
-        self._apply_scale()
-        e.accept()
-
-    def _apply_scale(self):
-        bw, bh = self._base_size
-        screen = QApplication.primaryScreen().availableGeometry()
-        w = max(16, int(bw * self._scale))
-        h = max(16, int(bh * self._scale))
-        # 上限保护：不超过屏幕可用区 92%，避免缩放到超出可见范围
-        max_w = int(screen.width() * 0.92)
-        max_h = int(screen.height() * 0.92)
-        if w > max_w or h > max_h:
-            w, h = max_w, max_h
-        self._img_label.setPixmap(self._pixmap.scaled(w, h, Qt.KeepAspectRatio, Qt.SmoothTransformation))
-        self.widget.adjustSize()
-        self._center_widget()
-
-    def _center_widget(self):
-        x = max(0, (self.width() - self.widget.width()) // 2)
-        y = max(0, (self.height() - self.widget.height()) // 2)
-        self.widget.move(x, y)
-
-    def resizeEvent(self, e):
-        super().resizeEvent(e)
-        self._center_widget()
-
-
 def _decode_image_url_to_pixmap(url_str: str):
     """file:// / 绝对本地路径 / data:image → QPixmap（同步，失败返回 None）。
 
@@ -13014,8 +12929,14 @@ def _fence_assets_for_skeleton() -> tuple:
 
 
 def _show_image_preview(pixmap, parent=None) -> None:
-    """打开图片预览弹窗（_ImagePreviewDialog 同模块，无需导入）。"""
-    _ImagePreviewDialog(pixmap, parent=parent).exec_()
+    from app.widgets.image_lightbox import ImageLightbox
+
+    if pixmap is not None and not pixmap.isNull():
+        preview = ImageLightbox(pixmap, parent)
+        try:
+            preview.exec_()
+        finally:
+            preview.deleteLater()
 
 
 # [L3] 单张卡片保留的「宽度 → 高度」缓存条数上限。

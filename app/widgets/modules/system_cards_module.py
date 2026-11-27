@@ -6,7 +6,6 @@
 
 契约属性集（grep `self.[a-z_]+ *=` over 2979-3112，逐项 host.setattr）：
 - _share_card _share_card_content
-- _history_questions_card _history_questions_card_content
 - _memory_card _memory_card_popup _model_config_card _model_config_popup
 - _model_selector_card _model_selector_card_content
 - _tool_control_card（批1 懒创建：None 占位，_ensure_tool_control_card 按需构建）
@@ -46,8 +45,6 @@ class SystemCardsModule(UIModule):
         #   （转发插件服务），不可赋值。
         host._share_card = None
         host._share_card_content = None
-        host._history_questions_card = None
-        host._history_questions_card_content = None
         host._memory_card = None
         host._memory_card_popup = None
         host._model_config_card = None

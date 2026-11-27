@@ -3,9 +3,9 @@
 
 契约属性集（源 main_widget.setup_ui L2878-L3013 全量 self.* → host.setattr）：
 - _project_branch_container _project_avatar _branch_widget
-- _project_label title_edit _history_questions_btn _share_btn diff_btn
-（共 8 项；其余 balance_display / coding_plan_ring / _coding_plan_hidden /
-context_usage_ring / _history_questions_badge 亦由 build 设置，此处聚焦会话栏契约）
+- _project_label title_edit _share_btn diff_btn
+（共 7 项；其余 balance_display / coding_plan_ring / _coding_plan_hidden /
+context_usage_ring 亦由 build 设置，此处聚焦会话栏契约）
 注：极简化后 _pb_separator（三角连接符）已移除。
 """
 
@@ -21,7 +21,6 @@ _CONTRACT_ATTRS = (
     "_branch_widget",
     "_project_label",
     "title_edit",
-    "_history_questions_btn",
     "_share_btn",
     "diff_btn",
 )
@@ -54,5 +53,6 @@ def test_compose_builds_title_bar(fresh_registry, qapp):
     report = compose(host, ["title_bar"], root_layout_factory=_ensure_layout)
 
     assert report["title_bar"] == "system"
+    assert not hasattr(host, "_history_questions_btn")
     for attr in _CONTRACT_ATTRS:
         assert hasattr(host, attr), f"missing host attribute: {attr}"

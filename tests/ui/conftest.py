@@ -118,6 +118,7 @@ def ui_app(request):
 
     page = _FakePage()
     tm = TabManagerWindow.create_instance()
+    tm.complete_construction()
     chat_window = OpenAIChatToolWindow(page)
     tm.add_window(chat_window)
     tm.show()
