@@ -3933,7 +3933,8 @@ _SKELETON_CACHE_MAX = 48
 # 修「已滚到底但流式不再自动跟随」（内容在 scroll 事件派发前增长导致 atBottom
 # 判定失真，标志被误置为上滚阅读后永久卡住）。JS 资产变更，旧骨架缓存须失效。
 # v88：简洁阅读样式和图表状态变更，池化前的旧骨架不可复用。
-_SKELETON_CACHE_VERSION = 88
+# v89：简洁正文揭示加入视口反馈，换行后按真实布局上报。
+_SKELETON_CACHE_VERSION = 89
 
 
 def _js_literal(value) -> str:

@@ -1595,11 +1595,10 @@ class SessionRepository:
         try:
             success, rows = self._execute(
                 f"""
-                SELECT DISTINCT project FROM (
-                    SELECT project FROM {self.TABLE_NAME}
-                    UNION
-                    SELECT project FROM project_workdir
-                ) ORDER BY project
+                SELECT DISTINCT project FROM {self.TABLE_NAME}
+                UNION
+                SELECT project FROM project_workdir
+                ORDER BY project
                 """
             )
             if success and rows:
@@ -1697,12 +1696,12 @@ class SessionRepository:
             return 0
 
     def get_session_counts(self) -> Dict[str, int]:
-        """获取所有项目（非归档）的会话数量（COUNT DISTINCT session_id 去重）"""
+        """获取所有项目（非归档）的会话数量；session_id 为主键，COUNT 忽略 NULL。"""
         if not self.is_initialized:
             return {}
         try:
             success, rows = self._execute(
-                f"SELECT project, COUNT(DISTINCT session_id) as cnt FROM {self.TABLE_NAME} "
+                f"SELECT project, COUNT(session_id) as cnt FROM {self.TABLE_NAME} "
                 f"WHERE project NOT LIKE '__archived__%' GROUP BY project"
             )
             if success and rows:

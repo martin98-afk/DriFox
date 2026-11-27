@@ -172,12 +172,12 @@ class TestSelfWriteGuard:
         card = _make_card()
         card._apply_viewer_height(240)
         card._update_height(280)  # 真实增长 40px > 落定阈值
-        assert card._debounced_target_height == 280
-        assert card._stream_height_timer.starts == 1
+        assert card.viewer.fixed == [240, 280]
+        assert card._stream_height_timer.starts == 0
 
     def test_echo_outside_window_is_tracked(self):
         """窗口过期后同值回传按常规路径处理（可能是真实内容变化）。"""
-        card = _make_card()
+        card = _make_card(compact=False)
         card._viewer_write_guard_until = time.monotonic() - 0.001
         card._update_height(240)
         assert card._debounced_target_height == 240

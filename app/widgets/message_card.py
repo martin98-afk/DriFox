@@ -3659,13 +3659,16 @@ class MessageCard(SimpleCardWidget):
 
     def _schedule_pending_shrink(self, target: int):
         """挂起一次小步收拢：500ms 稳定窗后落地，窗口内被增长/finish 取消。"""
+        compact = not self.wants_outer_max_prelift()
+        same_target = self._pending_shrink_height == int(target)
         self._pending_shrink_height = int(target)
         if self._shrink_timer is None:
             self._shrink_timer = QTimer(self)
             self._shrink_timer.setSingleShot(True)
-            self._shrink_timer.setInterval(500)
             self._shrink_timer.timeout.connect(self._apply_pending_shrink)
-        self._shrink_timer.start()
+        if compact and same_target and self._shrink_timer.isActive():
+            return
+        self._shrink_timer.start(64 if compact else 500)
 
     def _cancel_pending_shrink(self):
         """取消挂起的延迟收缩（增长方向到来 / finish 收敛接管）。"""
@@ -3692,7 +3695,8 @@ class MessageCard(SimpleCardWidget):
             # [T29] 延迟收缩落地同样走追踪：工具密集时多个收缩会在同一拍落地，
             # snap 是「掉下去」。量级小时不值得动画（这里是 <40px 的小步收拢，
             # 阈值用 FINISH 的 60 太大，直接判是否 >= 12px）。
-            if STREAM_HEIGHT_ANIM_ENABLED and Animations.motion_enabled() and (current_height - target) >= 12:
+            if (self.wants_outer_max_prelift() and STREAM_HEIGHT_ANIM_ENABLED
+                    and Animations.motion_enabled() and current_height - target >= 12):
                 self._target_viewer_height = target
                 self._begin_stream_height_track(target)
             else:

@@ -35,18 +35,31 @@ def test_compact_stream_geometry(qapp, qtbot):
         qtbot.waitUntil(lambda: bool(values), timeout=5000)
         return values[0]
 
-    reports = []
-    card.viewer.contentHeightChanged.connect(lambda h: reports.append((h, card.viewer.height())))
     assert js('window._toolCompactMode')
     card.start_streaming_anim()
+    # 在简洁流式正文内插入再收起等高元素；以浏览器绘制帧检测外层何时收回空位。
+    card.append_text('测量正文内元素收起后的气泡底边。')
+    qtbot.waitUntil(lambda: js("document.querySelector('#content-placeholder').innerText").count('底边') == 1)
+    js("var box=document.createElement('div');box.style.height='300px';document.body.appendChild(box)")
+    qtbot.waitUntil(lambda: js('Math.abs(window.innerHeight-document.body.scrollHeight-2)<=3'))
+    js('''box.remove();window._collapseLag=null;var t0=performance.now();requestAnimationFrame(function tick(){
+        if(window.innerHeight-document.body.scrollHeight<=5)window._collapseLag=performance.now()-t0;
+        else requestAnimationFrame(tick);});''')
+    qtbot.waitUntil(lambda: js('window._collapseLag') is not None, timeout=2500)
+    collapse_ms = js('window._collapseLag')
+    print(f'300px 元素收起后空白收回耗时={collapse_ms:.0f}ms', flush=True)
+    assert collapse_ms < 300
     js('''window._gapSamples=[];requestAnimationFrame(function tick(){
         var c=document.querySelector('#content-placeholder');
         if(c.innerText.length>40) window._gapSamples.push([performance.now(),window.innerHeight,
             document.body.scrollHeight,c.innerText.length]);
         if(!window._stopGap)requestAnimationFrame(tick);});''')
     text = '段落会逐步换行，阅读位置应该跟随真实内容。'
+    expected = []
     for i in range(140):
-        card.append_text(text * (4 if i % 7 == 0 else 2) + ('\n\n' if i % 11 == 10 else ''))
+        chunk = text * (4 if i % 7 == 0 else 2) + ('\n\n' if i % 11 == 10 else '')
+        expected.append(chunk)
+        card.append_text(chunk)
         qtbot.wait(24)
     qtbot.wait(600)
     frames = js('window._stopGap=true;window._gapSamples')
@@ -59,6 +72,10 @@ def test_compact_stream_geometry(qapp, qtbot):
     blank = sorted(max(0, g) for g in gaps)
     print(f'采样={len(gaps)} 空白P95/峰值={blank[int(.95*len(gaps))]}/{blank[-1]} '
           f'裁切P95/峰值={clip[int(.95*len(gaps))]}/{clip[-1]} 终态差={gaps[-1]}', flush=True)
-    print('开关', js('[window._streamingActive,window._toolCompactMode,window.devicePixelRatio]'), '报告前段', reports[:18], '帧', frames[:20])
+    qtbot.waitUntil(lambda: js("document.querySelector('#content-placeholder').innerText").count(text)
+                    == ''.join(expected).count(text), timeout=5000)
     card.finish_streaming()
+    qtbot.waitUntil(lambda: js("document.querySelector('#content-placeholder').innerText").count(text)
+                    == ''.join(expected).count(text), timeout=5000)
+    assert frames[-1][1] == cap and frames[-1][2] > cap
     assert max(clip[int(.95*len(gaps))], blank[int(.95*len(gaps))]) <= 30

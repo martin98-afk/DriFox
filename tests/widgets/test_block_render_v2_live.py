@@ -275,7 +275,7 @@ def test_formalize_patch_matches_live_key(monkeypatch, reasoning):
     monkeypatch.setattr(CodeWebViewer, '_v2_render_ctx', lambda self: RenderCtx(streaming=True, compact=True))
     assert v._perform_update_v2()
     v._page.js_calls.clear()
-    blocks[0][field] += '续写' * 220
+    blocks[0][field] += '**重点**' + '续写' * 220
     assert v._perform_update_v2()
     js = ''.join(v._page.js_calls)
     ops = _patch_ops(js, 'content-placeholder') + _patch_ops(js, 'tool-content')
