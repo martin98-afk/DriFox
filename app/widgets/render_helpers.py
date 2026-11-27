@@ -883,7 +883,7 @@ def _render_inline_tool(
                 {icon_html}
                 {badge_html}
             </span>
-            <span style="white-space: nowrap; flex: 0 0 auto; color: {Colors.TOOL_TITLE_MCP if tool_name.startswith('mcp__') else Colors.TOOL_TITLE}; font-size: {scale_font_size(13)}px; font-weight: 500;">{escape(cn_name)}</span>
+            <span style="white-space: nowrap; flex: 0 0 auto; margin-left: 6px; line-height: 22px; color: {Colors.TOOL_TITLE_MCP if tool_name.startswith('mcp__') else Colors.TOOL_TITLE}; font-size: {scale_font_size(13)}px; font-weight: 500;">{escape(cn_name)}</span>
         </span>
         <span style="flex: 1 1 auto; min-width: 0; text-align: left; color: var(--text-secondary); font-size: {scale_font_size(11)}px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-left: 12px;">
             {preview_html}
@@ -1150,20 +1150,20 @@ def render_tool_block(
                 {icon_html}
                 {badge_html}
             </span>
-            <span style="white-space: nowrap; flex: 0 0 auto; {get_font_family_css()}"{title_attr}>{escape(title_text)}</span>
+            <span style="white-space: nowrap; flex: 0 0 auto; margin-left: 6px; line-height: 22px; {get_font_family_css()}"{title_attr}>{escape(title_text)}</span>
         </span>
         <span style="display: flex; align-items: center; gap: 8px; margin-left: 10px; min-width: 0; flex: 1 1 auto; justify-content: flex-start; overflow: hidden;">
             {preview_span}{diff_stats_html}
         </span>"""
         if no_collapse:
             return f"""<div class="tool-block tool-block--no-collapse" data-block-key="{block_key}" data-lazy-body="1" data-tool-name="{escape(tool_name)}" data-tool-call-id="{escape(tool_call_id or "")}"{_keep_attr}{_succ_attr} style="margin: 4px 0; background: transparent; border-radius: 6px;">
-    <div class="tool-block__header" style="cursor: default; padding: 4px 8px; color: {title_color}; font-size: {scale_font_size(13)}px; font-weight: 500; display: flex; align-items: center; gap: 6px; width: 100%; overflow: hidden; background: transparent; border: none; text-align: left; box-sizing: border-box; {get_font_family_css()}">
+    <div class="tool-block__header" style="cursor: default; padding: 4px 10px; color: {title_color}; font-size: {scale_font_size(13)}px; font-weight: 500; display: flex; align-items: center; gap: 6px; width: 100%; overflow: hidden; background: transparent; border: none; text-align: left; box-sizing: border-box; {get_font_family_css()}">
         {_head_spans}
     </div>
     <div class="tool-block__body" style="padding: 0 8px 4px;"></div>
 </div>"""
         return f"""<div class="cm-collapsible tool-block" data-block-key="{block_key}" data-expanded="false" data-lazy-body="1" data-tool-name="{escape(tool_name)}" data-tool-call-id="{escape(tool_call_id or "")}"{_keep_attr}{_succ_attr} style="margin: 4px 0; background: transparent; border-radius: 6px;">
-    <button type="button" class="cm-collapsible__summary tool-block__summary" aria-expanded="false" style="cursor: pointer; padding: 4px 8px; color: {title_color}; font-size: {scale_font_size(13)}px; font-weight: 500; display: flex; align-items: center; gap: 6px; width: 100%; overflow: hidden; background: transparent; border: none; text-align: left; box-sizing: border-box; {get_font_family_css()}">
+    <button type="button" class="cm-collapsible__summary tool-block__summary" aria-expanded="false" style="cursor: pointer; padding: 4px 10px; color: {title_color}; font-size: {scale_font_size(13)}px; font-weight: 500; display: flex; align-items: center; gap: 6px; width: 100%; overflow: hidden; background: transparent; border: none; text-align: left; box-sizing: border-box; {get_font_family_css()}">
         {_head_spans}
         <span class="cm-collapsible__chevron" aria-hidden="true" style="flex: 0 0 auto; margin-left: auto;"></span>
     </button>
@@ -1276,13 +1276,13 @@ def render_tool_block(
         # 禁用折叠框渲染：无 cm-collapsible 交互，标题栏 + body 直接展示
         _keep_attr = ' data-keep-in-content="true"' if tool_name in _keep_in_content_tools() else ""
         return f"""<div class="tool-block tool-block--no-collapse" data-tool-name="{escape(tool_name)}" data-tool-call-id="{escape(tool_call_id or "")}"{_keep_attr}{_succ_attr} style="margin: 4px 0; background: transparent; border-radius: 6px;">
-    <div class="tool-block__header" style="cursor: default; padding: 4px 8px; color: {title_color}; font-size: {scale_font_size(13)}px; font-weight: 500; display: flex; align-items: center; gap: 6px; width: 100%; overflow: hidden; background: transparent; border: none; text-align: left; box-sizing: border-box; {get_font_family_css()}">
+    <div class="tool-block__header" style="cursor: default; padding: 4px 10px; color: {title_color}; font-size: {scale_font_size(13)}px; font-weight: 500; display: flex; align-items: center; gap: 6px; width: 100%; overflow: hidden; background: transparent; border: none; text-align: left; box-sizing: border-box; {get_font_family_css()}">
         <span style="display: inline-flex; align-items: center; gap: 14px; flex: 0 0 auto;">
             <span style="position:relative;display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;flex:0 0 auto;">
                 {icon_html}
                 {badge_html}
             </span>
-            <span style="white-space: nowrap; flex: 0 0 auto; {get_font_family_css()}"{title_attr}>{escape(title_text)}</span>
+            <span style="white-space: nowrap; flex: 0 0 auto; margin-left: 6px; line-height: 22px; {get_font_family_css()}"{title_attr}>{escape(title_text)}</span>
         </span>
         <span style="display: flex; align-items: center; gap: 8px; margin-left: 10px; min-width: 0; flex: 1 1 auto; justify-content: flex-start; overflow: hidden;">
             {preview_span}{diff_stats_html}
@@ -1295,13 +1295,13 @@ def render_tool_block(
 
     _keep_attr = ' data-keep-in-content="true"' if tool_name in _keep_in_content_tools() else ""
     return f"""<div class="cm-collapsible tool-block" data-block-key="{block_key}" data-expanded="{expanded_attr}" data-tool-name="{escape(tool_name)}" data-tool-call-id="{escape(tool_call_id or "")}"{_keep_attr}{_succ_attr} style="margin: 4px 0; background: transparent; border-radius: 6px;">
-    <button type="button" class="cm-collapsible__summary tool-block__summary" aria-expanded="{expanded_attr}" style="cursor: pointer; padding: 4px 8px; color: {title_color}; font-size: {scale_font_size(13)}px; font-weight: 500; display: flex; align-items: center; gap: 6px; width: 100%; overflow: hidden; background: transparent; border: none; text-align: left; box-sizing: border-box; {get_font_family_css()}">
+    <button type="button" class="cm-collapsible__summary tool-block__summary" aria-expanded="{expanded_attr}" style="cursor: pointer; padding: 4px 10px; color: {title_color}; font-size: {scale_font_size(13)}px; font-weight: 500; display: flex; align-items: center; gap: 6px; width: 100%; overflow: hidden; background: transparent; border: none; text-align: left; box-sizing: border-box; {get_font_family_css()}">
         <span style="display: inline-flex; align-items: center; gap: 14px; flex: 0 0 auto;">
             <span style="position:relative;display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;flex:0 0 auto;">
                 {icon_html}
                 {badge_html}
             </span>
-            <span style="white-space: nowrap; flex: 0 0 auto; {get_font_family_css()}"{title_attr}>{escape(title_text)}</span>
+            <span style="white-space: nowrap; flex: 0 0 auto; margin-left: 6px; line-height: 22px; {get_font_family_css()}"{title_attr}>{escape(title_text)}</span>
         </span>
         <span style="display: flex; align-items: center; gap: 8px; margin-left: 10px; min-width: 0; flex: 1 1 auto; justify-content: flex-start; overflow: hidden;">
             {preview_span}{diff_stats_html}

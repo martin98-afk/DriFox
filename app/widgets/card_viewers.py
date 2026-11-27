@@ -3804,6 +3804,13 @@ class CodeWebViewer(QWebEngineView):
                     font-size: {code_font_size}px;
                     font-family: var(--dfx-font-family, '{font_family}', sans-serif);
                     white-space: normal;
+                    border-radius: 6px;
+                    /* 完成块整行可点（展开/收起），但原先零 hover 反馈；
+                       与 .think-block__summary 同口径加浅底，读不出可点语义时也不喧哗。 */
+                    transition: background-color 160ms ease;
+                }}
+                .tool-block__summary:hover {{
+                    background: {"rgba(15, 23, 42, 0.03)" if _is_light_diff else "rgba(255, 255, 255, 0.035)"};
                 }}
                 .tool-expanded-content {{
                     padding: 0;
@@ -4062,7 +4069,9 @@ class CodeWebViewer(QWebEngineView):
                     display: flex;
                     align-items: flex-start;
                     padding: 6px 12px;
-                    border-bottom: 1px solid var(--border);
+                    /* 参数行分隔线降到主题弱对比：原先 var(--border) 硬线在折叠区里
+                       与围栏叠成多层表格感，读起来比内容本身重。 */
+                    border-bottom: 1px solid {"rgba(15, 23, 42, 0.06)" if _is_light_diff else "rgba(255, 255, 255, 0.06)"};
                     font-size: {tag_font_size}px;
                 }}
                 .args-row:last-child {{
@@ -4120,7 +4129,7 @@ class CodeWebViewer(QWebEngineView):
                 }}
                 .tool-content {{
                     padding: 10px 12px;
-                    border-top: 1px solid var(--border);
+                    border-top: 1px solid {"rgba(15, 23, 42, 0.06)" if _is_light_diff else "rgba(255, 255, 255, 0.06)"};
                     background: transparent;
                 }}
                 .tool-content pre {{
@@ -9604,6 +9613,7 @@ class CodeWebViewer(QWebEngineView):
             ctx.icon_prefix,
             ctx.code_font_size,
         )
+        first_render = self._v2_last is None and self._v2_ctx_sig is None
         if sig != self._v2_ctx_sig:
             self._v2_ctx_sig = sig
             self._block_cache.clear()
@@ -9705,6 +9715,10 @@ class CodeWebViewer(QWebEngineView):
             self._v2_live_formalize_ts = time.monotonic()
         elif live_index is not None:
             # 纯文本尾态：活动块不跑 markdown，其余块照常（缓存命中）
+            # 只拆全新消息的首批正文。已有卡片重建、切主题和超大快照均直接恢复全文。
+            first_burst = (first_render and len(blocks) == 1 and plain_prose
+                           and 8 < len(live_text) <= 512)
+            initial_text = live_text[:8] if first_burst else live_text
             mr = render_message(
                 blocks,
                 ctx,
@@ -9712,11 +9726,14 @@ class CodeWebViewer(QWebEngineView):
                 char_count=False,
                 cache=self._block_cache,
                 live_index=live_index,
-                live_html=self._v2_live_html(live_text, reasoning=live_reasoning),
+                live_html=self._v2_live_html(initial_text, reasoning=live_reasoning),
             )
             content_ops, tool_ops = diff_message(None if force_full else self._v2_last, mr)
             self._v2_last = mr
-            if self._v2_live_key == live_key_now:
+            if first_burst:
+                live_delta = live_text[len(initial_text):]
+                self._v2_live_whole_done_len = len(live_text)
+            elif self._v2_live_key == live_key_now:
                 # 同块续写：只下发新增文本（首帧 / force_full 时 html 已含全量）
                 if live_text.startswith(self._v2_live_sent):
                     live_delta = live_text[len(self._v2_live_sent) :]

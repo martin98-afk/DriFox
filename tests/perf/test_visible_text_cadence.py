@@ -10,7 +10,8 @@ import pytest
 pytestmark = pytest.mark.perf
 
 
-def test_visible_text_cadence(qapp, qtbot):
+@pytest.mark.parametrize('batch', [1, 8], ids=['uniform', 'bursty'])
+def test_visible_text_cadence(qapp, qtbot, batch):
     if os.environ.get("DRIFOX_VISIBLE_CADENCE") != "1" or qapp.platformName() == "offscreen":
         pytest.skip("需显式开启真窗可见文字回放")
     from PyQt5.QtCore import Qt, QTimer
@@ -32,13 +33,18 @@ def test_visible_text_cadence(qapp, qtbot):
         qtbot.waitUntil(lambda: bool(result), timeout=5000)
         return result[0]
 
+    card.raise_()
+    card.activateWindow()
     card.start_streaming_anim()
-    assert js("""(function(){var n=document.getElementById('content-placeholder');
-        if(!n)return false;var start=performance.now(), prev=0, stamps=[];
-        window._sampleStamps=stamps;function tick(){var size=n.textContent.trim().length;
-        if(size>prev)stamps.push(performance.now()-start);prev=size;
+    sample_origin = time.perf_counter()
+    assert js("""(function(){var start=performance.now(), prev=0, stamps=[];
+        window._sampleStart=start;window._sampleDone=false;window._sampleStamps=stamps;
+        function tick(){var n=document.getElementById('content-placeholder');var size=n?n.textContent.trim().length:0;
+        if(size>prev)stamps.push([performance.now()-start,size-prev]);prev=size;
         if(!window._sampleDone)requestAnimationFrame(tick);}tick();return true;})()""")
+    echo_ms = (time.perf_counter() - sample_origin) * 1000
     pieces = ["样本%03d段落" % i for i in range(120)]
+    pieces = [''.join(pieces[i:i+batch]) for i in range(0, len(pieces), batch)]
     sent = []
     timer = QTimer(card)
     timer.setTimerType(Qt.PreciseTimer)
@@ -51,7 +57,8 @@ def test_visible_text_cadence(qapp, qtbot):
             timer.stop()
 
     timer.timeout.connect(feed)
-    timer.start(25)
+    feed()  # 两种输入都立即发首批，首字延迟不包含定时器的首次等待。
+    timer.start(25 * batch)
     qtbot.waitUntil(lambda: len(sent) == len(pieces), timeout=15000)
     expected = ''.join(pieces)
 
@@ -63,7 +70,14 @@ def test_visible_text_cadence(qapp, qtbot):
     qtbot.waitUntil(complete, timeout=5000)
     times = js("window._sampleDone=true;window._sampleStamps")
     assert len(times) >= 2
-    gaps = sorted(b-a for a,b in zip(times,times[1:]))
-    print(f"可见增长帧={len(times)} 首次={times[0]:.0f}ms 间隔中位={gaps[len(gaps)//2]:.0f}ms P95={gaps[int(.95*len(gaps))]:.0f}ms 最长={max(gaps):.0f}ms 投递跨度={(sent[-1]-sent[0])*1000:.0f}ms", flush=True)
+    gaps = sorted(b[0]-a[0] for a,b in zip(times,times[1:]))
+    jumps = sorted(t[1] for t in times)
+    span = (sent[-1]-sent[0])*1000
+    origin_to_send = (sent[0] - sample_origin) * 1000
+    first = times[0][0] - origin_to_send
+    tail = times[-1][0] - origin_to_send - span
+    print(f"可见增长帧={len(times)} 首批到首帧≈{first:.0f}ms 末批到末帧≈{tail:.0f}ms 对时误差≤{echo_ms:.0f}ms 首帧增字={times[0][1]} 间隔中位={gaps[len(gaps)//2]:.0f}ms P95={gaps[int(.95*len(gaps))]:.0f}ms 最长={max(gaps):.0f}ms 单帧增字P95={jumps[int(.95*len(jumps))]} 最大={max(jumps)}", flush=True)
+    if batch > 1:
+        assert times[0][1] < len(pieces[0]), '首批正文不应整段跳出'
     card.finish_streaming()
     qtbot.waitUntil(complete, timeout=5000)

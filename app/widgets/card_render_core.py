@@ -1617,7 +1617,7 @@ def _render_tool_streaming_block(
             <span style="position:relative;display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;flex:0 0 auto;">
                 {icon_html}
             </span>
-            <span style="white-space: nowrap; flex: 0 0 auto; color: {title_color}; font-size: {scale_font_size(13)}px; font-weight: 500; line-height: 22px;">{escape(cn_name)}</span>
+            <span style="white-space: nowrap; flex: 0 0 auto; margin-left: 6px; color: {title_color}; font-size: {scale_font_size(13)}px; font-weight: 500; line-height: 22px;">{escape(cn_name)}</span>
             {spinner_html}
         </span>
         <span class="tool-streaming-preview" style="flex: 0 1 auto; min-width: 0; text-align: left; color: var(--text-secondary); font-size: {scale_font_size(11)}px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-left: 12px;">
@@ -3934,7 +3934,11 @@ _SKELETON_CACHE_MAX = 48
 # 判定失真，标志被误置为上滚阅读后永久卡住）。JS 资产变更，旧骨架缓存须失效。
 # v88：简洁阅读样式和图表状态变更，池化前的旧骨架不可复用。
 # v89：简洁正文揭示加入视口反馈，换行后按真实布局上报。
-_SKELETON_CACHE_VERSION = 89
+# v90：工具完成框头部与运行行同边距（图标右侧 6px 间距、行高 22px、左右 10px），
+# 流式块→完成块替换时标题不再左移/下移；参数行与结果区分隔线降为弱对比，
+# 折叠框内不再出现硬表格线叠围栏；完成块可点标题补 hover 浅底。CSS 资产变更，
+# 旧骨架缓存须失效。
+_SKELETON_CACHE_VERSION = 90
 
 
 def _js_literal(value) -> str:

@@ -114,6 +114,29 @@ def _long_text(n: int = 600) -> str:
 # ── 1. render 层：live key 恒定，内容增长不产生 patch ────────────────
 
 
+def test_compact_first_burst_reveals_only_new_message(monkeypatch):
+    text = '首段内容' * 14
+    blocks = [{'type': 'text', 'text': text}]
+    v = _make_viewer(monkeypatch, blocks)
+    monkeypatch.setattr(CodeWebViewer, '_tool_compact_mode', property(lambda self: True))
+    monkeypatch.setattr(CodeWebViewer, '_v2_render_ctx', lambda self: RenderCtx(compact=True, streaming=True))
+    assert v._perform_update_v2()
+    js = ''.join(v._page.js_calls)
+    assert text[:8] in js and text not in js
+    assert f'''window._v2LiveAppend('content-placeholder',"live:0","{text[8:]}",false)''' in js
+
+    v._page.js_calls.clear()
+    blocks[0]['text'] += '续写'
+    assert v._perform_update_v2()
+    assert f'''window._v2LiveAppend('content-placeholder',"live:0","续写",false)''' in ''.join(v._page.js_calls)
+
+    v._page.js_calls.clear()
+    v._needs_full_render = True
+    assert v._perform_update_v2()
+    js = ''.join(v._page.js_calls)
+    assert text + '续写' in js and "window._v2LiveAppend('" not in js
+
+
 def test_live_block_identity_stable_across_growth():
     ctx = RenderCtx(streaming=True)
     b1 = [{"type": "text", "text": "a" * 600}]
