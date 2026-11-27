@@ -59,6 +59,7 @@ def _make_tm():
     tm = TabManagerWindow.create_instance()
     tm.resize(1400, 900)
     tm.show()
+    tm.complete_construction()
     _pump(300)
     # 等足启动补射（_restore_sidebar_collapsed 排了 80/200/400/700ms 四档，
     # 补射会在卡片区未展开时按存档态重设 frame 宽度，把用例内的拖拽结果冲掉）
@@ -357,11 +358,17 @@ class TestCollapsedRoundTrip:
         _pump(400)
         assert tm._tab_panel._collapsed is True, "卡片打开期 TabPanel 应保持折叠（卡片区仍展开）"
 
-        UIPluginRegistry.get_instance().toggle_floating_card("tp-left-fracollapse")
-        for _ in range(6):
-            QApplication.processEvents()
-        _pump(400)
+        transitions = []
+        tm._global_left_wrapper.expandedChanged.connect(transitions.append)
+        try:
+            UIPluginRegistry.get_instance().toggle_floating_card("tp-left-fracollapse")
+            for _ in range(6):
+                QApplication.processEvents()
+            _pump(400)
+        finally:
+            tm._global_left_wrapper.expandedChanged.disconnect(transitions.append)
 
+        assert transitions == [False], "一次关闭只应通知宿主恢复一次"
         assert tm._tab_panel._collapsed is True, "关闭卡片后应回到折叠态（打开前就是折叠）"
         assert abs(tm._splitter.sizes()[0] - collapsed_frame_w) <= 20, (
             f"frame 应回到折叠宽 {collapsed_frame_w}，实际 {tm._splitter.sizes()[0]}"

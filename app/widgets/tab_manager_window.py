@@ -690,14 +690,15 @@ class _DockSideWrapper(QWidget):
         """卡片全隐：收起自身；伙伴窗格（若指定）恢复打开前宽度
 
         ★ 信号时序同 _on_expand：expandedChanged(False) 先发，宿主在回调里
-        把 TabPanel 置回展开态（静默），随后伙伴恢复宽度时不会误 emit。
+        静默恢复 TabPanel 打开卡片前的形态，随后伙伴恢复宽度时不会误 emit。
         """
-        if self.isHidden():
+        if self.isHidden() or self._pending_host_hide:
+            # 宿主已开始恢复侧栏，只是延后隐藏 wrapper，不能再次消费折叠快照。
             return
         sp = self._splitter
         if idx < len(sizes) and sp is not None:
             self._expanded_width = sizes[idx] if sizes[idx] > 0 else self._expanded_width or self.DEFAULT_EXPANDED_WIDTH
-            self.expandedChanged.emit(False)  # 宿主先备 TabPanel 展开态
+            self.expandedChanged.emit(False)  # 宿主先恢复卡片打开前的侧栏状态
             if self._host_animating:
                 # 宿主动画接管：延后 hide（要占住内层窗格，否则卡片区让出的
                 # 宽度会全被 TabPanel 吃掉——列表被拉宽再弹回），内层由它逐帧落位
