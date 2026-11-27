@@ -1665,6 +1665,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self._resize_complete_timer.setSingleShot(True)
         self._resize_complete_timer.setInterval(100)  # resize 结束后尽快恢复真实内容
         self._resize_complete_timer.timeout.connect(self._sync_all_cards_width)
+        self._workbench_relayout_host_size = None
         self._sidebar_drag_live = False
         self._sidebar_drag_resized = False
         self._resize_preview_active = False
@@ -9814,7 +9815,11 @@ class OpenAIChatToolWindow(ToolWindow):
             self._position_bottom_toolbar()
             return
         # 动画期间宿主会抑制预览模式：中间对话区原样实时显示（#31）
-        if not getattr(self, "_suppress_resize_preview", False):
+        wb_size = getattr(self, "_workbench_relayout_host_size", None)
+        state_guard = getattr(self.window(), "_window_state_guard_timer", None)
+        if (not getattr(self, "_suppress_resize_preview", False)
+                and not (state_guard is not None and state_guard.isActive())
+                and (wb_size is None or wb_size != self.window().size())):
             self._set_cards_resize_preview_mode(True)
         # resize 期间持续重置防抖，避免在拖拽过程中提前批量重排
         self._resize_debounce_timer.stop()
@@ -9823,6 +9828,12 @@ class OpenAIChatToolWindow(ToolWindow):
         self._resize_complete_timer.start()
         # 重新定位底部工具栏（绝对定位，不在 layout 里）
         self._position_bottom_toolbar()
+
+    def _guard_workbench_relayout(self):
+        # show/hide、松手均可能排入异步 LayoutRequest。保护到本轮几何静默，
+        # 不在动画 finished / 鼠标 release 当拍就允许把正文换成占位。
+        self._workbench_relayout_host_size = self.window().size()
+        self._resize_complete_timer.start()
 
     def _set_sidebar_drag_live(self, enabled: bool):
         self._sidebar_drag_live = enabled
@@ -9908,6 +9919,7 @@ class OpenAIChatToolWindow(ToolWindow):
         分帧批处理：每批 _SYNC_WIDTH_BATCH 张、批间让出主线程，单帧阻塞
         <15ms（无感），总完成时间增加 <50ms。
         """
+        self._workbench_relayout_host_size = None
         # [L2] 后台页：整条恢复链挂起，等该页重新激活时（on_activated）同步补跑。
         orchestrator = ResizeOrchestrator.get_instance()
         if not orchestrator.is_current(self):

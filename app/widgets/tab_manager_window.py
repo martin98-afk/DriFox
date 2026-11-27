@@ -1239,6 +1239,9 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
         self._member_time_timer.timeout.connect(self._refresh_member_times)
         self._member_time_timer.start()
 
+        # 窗口状态切换（最大化/还原/最小化）期的预览抑制开关（见 _begin_window_state_guard）
+        self._window_state_preview_guard: bool = False
+        self._last_layout_window_state = self.windowState()
         # ── 侧边栏内 left 卡片区（嵌入 sidebarSplitter）──
         # 卡片打开前的 TabPanel frame 宽（卡片关闭时恢复）与「卡片占位期间」标记
         self._left_card_saved_panel_frame_w: int = 0
@@ -1495,6 +1498,7 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
         self._wb_suppress_memory = False
         self._wb_in_preview = False
         self._wb_promote_on_leave = False
+        self._bind_workbench_splitter_handle()
         _probe("p5.complete_setup.end")
 
     def _on_titlebar_tab_clicked(self, tab_id: str):
@@ -1772,6 +1776,22 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
 
     def _apply_wb_width(self, w: float) -> None:
         """动画帧：把工作台窗格宽度推到指定值（从对话区借/还空间，总宽不变）
+    def _guard_windows_resize_settle(self) -> None:
+        """把随后排入事件循环的异步布局重排也挡在 resize 预览之外
+
+        setSizes / show-hide 之后 Qt 会再排一次 LayoutRequest，当拍解除预览抑制
+        后这一拍延迟 resize 仍会把正文换成占位框（实测右栏收起后正文像素
+        4131→0）。主窗口侧的同名守卫只封预览、不推迟宽度同步：几何静默 100ms
+        后由 _sync_all_cards_width 清除并重排。逐窗口调用以覆盖后台页。
+        """
+        if not hasattr(self, "_content_area"):
+            return
+        for i in range(self._content_area.count()):
+            w = self._content_area.widget(i)
+            guard = getattr(w, "_guard_workbench_relayout", None)
+            if guard is not None:
+                guard()
+
 
         几何用 _start_wb_anim 时的快照（总宽/左侧栏宽）计算三值，配合 round 取整：
         每帧读写 splitter 会引入量化漂移；round 比 int 截断帧间步进更均匀。"""
@@ -1924,6 +1944,9 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
         from app.widgets.workbench_panel import PANEL_WIDTH_MIN
 
         frame = self._workbench_frame
+        cur = self.get_current_window()
+        if cur is not None and hasattr(cur, "_guard_workbench_relayout"):
+            cur._guard_workbench_relayout()
         panel = self.workbench_panel
         self._wb_in_preview = True
         self._wb_visible_target = False  # 预览≠打开：is_workbench_visible() 保持 False，不污染
@@ -1943,6 +1966,13 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
             panel.setUpdatesEnabled(True)
             panel.setMinimumWidth(PANEL_WIDTH_MIN)
             self.refresh_workbench()
+
+    def _bind_workbench_splitter_handle(self) -> None:
+        # 工作台预览会把 frame 移出 splitter；回挂时 Qt 创建新 handle，
+        # 构造阶段装在旧 handle 上的拖动保护不会跟着 frame 一起回来。
+        idx = self._splitter.indexOf(self._workbench_frame)
+        self._splitter_right_handle = self._splitter.handle(idx)
+        self._splitter_right_handle.installEventFilter(self)
 
         self._wb_overlay.slide_in(target, on_done=_shown)
 
@@ -1998,6 +2028,7 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
         显示时 chatFrame 右侧靠 splitter handle 与 workbenchFrame 隔开（margin 右 0）;
         隐藏后没有 handle 兑底，需切到 margin 右 4px。用 QSS 属性选择器切换。
         """
+            self._bind_workbench_splitter_handle()
         cf = getattr(self, "_chat_frame", None)
         if cf is None or cf.property("wbHidden") == hidden:
             return
@@ -2071,6 +2102,8 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
                 # 完全展开后再恢复渲染并填充数据（用户认可的“先不渲染后显示”）。
                 panel.setUpdatesEnabled(False)
 
+        if animate and cur is not None and hasattr(cur, "_guard_workbench_relayout"):
+            cur._guard_workbench_relayout()
                 def _wb_expand_finished() -> None:
                     panel.setUpdatesEnabled(True)
                     frame.setMinimumWidth(PANEL_WIDTH_MIN + 14)
@@ -4990,7 +5023,7 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
         panel.set_dragging_splitter(True)
         # 不冻结 _content_area：真实拖拽期间可见 WebView 原位跟宽。
         # 有把手按键事件就等释放；其他移动保留原防抖落定路径。
-        if hasattr(self, "_splitter_idle_timer") and not getattr(self, "_sidebar_handle_down", False):
+        if hasattr(self, "_splitter_idle_timer") and getattr(self, "_sidebar_drag_handle", None) is None:
             self._splitter_idle_timer.start()
 
     # ── 窗口管理 ──
@@ -6923,7 +6956,6 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
             # relayout（左面板被瞬时压窄）。抑制侧边栏自动折叠，避免把
             # 最大化/还原误判为"用户拖窄"。resize 周期结束会提前解除，
             # 这里的定时器只是兜底。
-            self._begin_window_state_guard()
             # 最小化时 owned 浮层被系统连带隐藏：预览态需同步收场
             # （on_clicked 取消缓收并走非 promote 的 leave 路径）
             if self.isMinimized():
@@ -6932,7 +6964,14 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
                     ctrl.on_clicked()
 
     def _begin_window_state_guard(self):
-        """窗口状态切换（最大化/还原/全屏）期间抑制侧边栏自动折叠"""
+        """窗口状态切换（最大化/还原/全屏/最小化）期间抑制侧边栏折叠与卡片预览
+
+        状态切换会连续改几何 → 对话区 resize：卡片一旦进入 resize 预览就被换成
+        占位框，用户看到正文整体闪一下再淡回来。抑制到几何收拢
+        （_deferred_resize_complete / 兜底定时器）再交既有防抖宽度同步。
+        """
+        self._window_state_preview_guard = True
+        self._set_windows_resize_preview_suppressed(True)
         panel = getattr(self, "_tab_panel", None)
         if panel is None:
             return
@@ -7004,29 +7043,33 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
         # ── 左栏 / 聊天区之间的 splitter 把手：双击折叠/展开侧边栏 ──
         # ★ 必须在 handle 上过滤：QSplitter 命中 handle 时 MouseButtonDblClick
         #   不会冒泡到 QSplitter 自身，装在 splitter 上收不到。
-        if obj is getattr(self, "_splitter_left_handle", None):
+        is_left = obj is getattr(self, "_splitter_left_handle", None)
+        if is_left or obj is getattr(self, "_splitter_right_handle", None):
             kind = event.type()
             if kind == QEvent.MouseButtonPress and event.button() == Qt.LeftButton:
-                self._sidebar_handle_down = True
-                self._splitter_idle_timer.stop()
+                self._sidebar_drag_handle = obj
+                if is_left:
+                    self._splitter_idle_timer.stop()
                 mw = self._content_area.currentWidget()
                 self._sidebar_drag_owner = mw if hasattr(mw, "_set_sidebar_drag_live") else None
                 if self._sidebar_drag_owner is not None:
                     self._sidebar_drag_owner._set_sidebar_drag_live(True)
-            elif getattr(self, "_sidebar_handle_down", False) and (
+            elif getattr(self, "_sidebar_drag_handle", None) is obj and (
                 (kind == QEvent.MouseButtonRelease and event.button() == Qt.LeftButton)
                 or kind in (QEvent.UngrabMouse, QEvent.Hide, QEvent.WindowDeactivate)
             ):
-                self._sidebar_handle_down = False
+                self._sidebar_drag_handle = None
                 owner = self._sidebar_drag_owner
                 self._sidebar_drag_owner = None
                 try:
-                    if self._tab_panel._dragging_splitter:
+                    if is_left and self._tab_panel._dragging_splitter:
                         self._on_splitter_idle()
                 finally:
                     if owner is not None and not _sip.isdeleted(owner):
                         owner._set_sidebar_drag_live(False)
-            elif kind == QEvent.MouseButtonDblClick and event.button() == Qt.LeftButton:
+                        if not is_left:
+                            owner._guard_workbench_relayout()
+            elif is_left and kind == QEvent.MouseButtonDblClick and event.button() == Qt.LeftButton:
                 self._toggle_sidebar_from_handle()
                 return True
         if obj is self._chat_wrapper and event.type() == QEvent.Resize:
@@ -7034,6 +7077,8 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
                 self._sync_chat_wrapper_width()
             except Exception:
                 pass
+        if event.type() == QEvent.WindowStateChange:
+            self._begin_window_state_guard()
         elif obj is self._chat_wrapper and event.type() == QEvent.Wheel:
             # 限宽居中的左右留白区域没有子控件接收滚轮事件，
             # 转发给当前内容区（对话列表/覆盖层）的滚动区域。
@@ -7072,10 +7117,22 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
         return False
 
     def _sync_chat_wrapper_width(self):
+        self._release_window_state_preview_guard()
         """按当前 wrapper 宽度设置左右 margins，实现限宽居中
 
         - 对话区（index 0）：按当前宽度档位限宽居中；full 档不限宽，margins 归零
         - 覆盖层（index 1）：配置类卡片（系统设置/服务商/Hook/MCP）按
+    def _release_window_state_preview_guard(self):
+        """解除状态切换期的预览抑制；随后排入的异步布局交 settle 守卫
+
+        幂等：重复调用只在第一次生效（_window_state_preview_guard 已清）。
+        """
+        if not getattr(self, "_window_state_preview_guard", False):
+            return
+        self._window_state_preview_guard = False
+        self._set_windows_resize_preview_suppressed(False)
+        self._guard_windows_resize_settle()
+
           覆盖层宽度限宽居中；内容型卡片（diff_viewer、
           子智能体会话、full 浮动卡）铺满全宽
         """
@@ -7316,6 +7373,11 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
         try:
             from app.core.services.gateway_access import shutdown_gateway_service
             from app.core.services.plugin_host_service import PluginHostService
+        # 状态切换（最大化/还原/最小化）的预览抑制到此解除：几何已收拢，
+        # 随后排入的异步 LayoutRequest 由 settle 守卫继续挡在预览之外。
+        # ★ 必须在下面的挤压判定之前：它可能启动侧栏动画（自带抑制/释放）。
+        self._release_window_state_preview_guard()
+
 
             # 网关实现归 system-im 插件：停平台连接 + 关事件循环线程 + 释放引擎
             shutdown_gateway_service()
@@ -7366,6 +7428,20 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
 
 
 class _AutoGeometryLabel(QLabel):
+        # Windows 可能先投递 Resize 再投递 WindowStateChange，两个入口均须在
+        # 子树重排前识别状态变化，否则第一帧就会把聊天正文藏进占位框。
+        state = self.windowState()
+        if state != self._last_layout_window_state:
+            self._last_layout_window_state = state
+            self._begin_window_state_guard()
+        guard = getattr(self, "_window_state_guard_timer", None)
+        if guard is not None and guard.isActive():
+            super().resizeEvent(event)
+            self._resize_bg_labels()
+            self._sync_wb_overlay_geometry()
+            self._save_geometry()
+            return
+
     """背景 label：监听 parent 的 resize，自动同步 geometry
 
     用于 QSplitter 拖动 / parent 自身 resize 等场景。
