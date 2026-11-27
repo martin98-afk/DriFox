@@ -180,6 +180,7 @@ from app.widgets.conversation_node_preview import (
     ConversationNodePreview,
 )
 from app.widgets.height_commit_batch import HeightCommitBatch
+from app.widgets.history_first_paint import HistoryFirstPaintGate
 from app.widgets.resize_orchestrator import ResizeOrchestrator
 from app.widgets.cards.settings.file_undo_card import FileUndoCard
 from app.widgets.cards.floating.undo_delete_store import (
@@ -10602,6 +10603,8 @@ class OpenAIChatToolWindow(ToolWindow):
             apply_chat_surface_opaque(self)
         except Exception:
             pass  # 模块 / 主题系统未就绪不阻塞主题刷新
+        # [首屏一次显示] 等待中的遮罩按新主题重刷（未激活时零开销）
+        self._history_first_paint_theme_changed()
         self._apply_runtime_ui_settings(scope="theme")
 
     # ── 多窗口批处理：避免每个窗口重复执行全局操作 ──
@@ -11575,6 +11578,8 @@ class OpenAIChatToolWindow(ToolWindow):
                 apply_chat_surface_opaque(self)
             except Exception:
                 pass  # 模块 / 主题系统未就绪不阻塞主题刷新
+            # [首屏一次显示] 同上：等待中的首屏遮罩按新主题重刷（幂等，未激活零开销）
+            self._history_first_paint_theme_changed()
 
             # 分支标签
             ThemeRefreshCoordinator.timer_start("branch_chip")
@@ -12502,10 +12507,13 @@ class OpenAIChatToolWindow(ToolWindow):
         if released:
             logger.debug(f"[Memory] 已释放 {released} 个非活跃会话的消息数据")
 
-    def _display_current_session(self):
+    def _display_current_session(self, *, history_first_paint: bool = False):
         # 会话切换：撤销条目绑定在具体 session 上，跨会话一律失效
         # （本方法是所有会话加载路径的汇聚点，在此兜底即可覆盖全部调用方）
         self._clear_undo_store_for_session_switch()
+        # [首屏一次显示] 上一轮等待（若有）立即撤罩作废：旧回调不得揭示新会话。
+        # 放在本方法入口 = 覆盖缓存恢复 / 空会话 / 保留会话等全部早退分支。
+        self._cancel_history_first_paint()
 
         session = self.session_manager.get_current_session()
         if not session:
@@ -12567,6 +12575,10 @@ class OpenAIChatToolWindow(ToolWindow):
             self._push_workbench_updates()
             return
 
+        # [首屏一次显示] 历史重建：先在聊天区上罩，等屏内正文落地 + 几何稳定 +
+        # 贴底后一次揭示（缓存恢复 / 空会话 / 保留会话在上面已早退，不受影响）。
+        if history_first_paint:
+            self._begin_history_first_paint(session.session_id)
         self._load_message_batch(initial=True)
         # 同步 batch 结构：确保 _batch_cards 和 _message_index 与布局一致
         self._sync_batch_structures()
@@ -12576,6 +12588,160 @@ class OpenAIChatToolWindow(ToolWindow):
         self._push_workbench_updates()
         # 任务看板：重建/懒渲染完成后再挂一次（列表数据是窗口级，不随会话变化）
         QTimer.singleShot(0, lambda: self._sync_todo_panel())
+
+    # ── 历史会话首屏一次揭示（2026-11-28）──────────────────────────
+    # 状态机本体在 app/widgets/history_first_paint.py（只认宿主采集的状态），
+    # 本类只负责三件事：给遮罩找父控件、采集「屏内落地度 + 首屏几何 + 贴底」、
+    # 揭示时补一次贴底。仅在历史重建路径（_display_current_session 非缓存分支）
+    # 启用；缓存恢复 / 空会话 / 实时输出 / 上翻历史一律不经过这里。
+
+    def _history_first_paint_gate(self) -> HistoryFirstPaintGate:
+        """惰性装配首屏揭示状态机（无属性依赖，可安全用于 __new__ 测试桩）。"""
+        gate = self.__dict__.get("_history_first_paint_controller")
+        if gate is None:
+            gate = HistoryFirstPaintGate(
+                cover_parent=self._history_first_paint_cover_parent,
+                state_provider=self._history_first_paint_state,
+                on_reveal=self._reveal_history_first_paint,
+                parent=self,
+            )
+            self.__dict__["_history_first_paint_controller"] = gate
+        return gate
+
+    def _history_first_paint_cover_parent(self):
+        """遮罩父控件 = 聊天滚动区 viewport（盖住内容区，随窗口尺寸自适应）。"""
+        try:
+            return self.chat_scroll_area.viewport()
+        except (AttributeError, RuntimeError):
+            return None
+
+    def _begin_history_first_paint(self, session_id) -> None:
+        """历史重建开始：上罩并等待首屏就绪。失败一律静默（不得影响会话显示）。"""
+        try:
+            self._history_first_paint_gate().begin(session_id)
+        except Exception as exc:  # noqa: BLE001 — 观感增强失败不得影响加载主链
+            logger.debug(f"[first-paint] 开始等待失败: {exc}")
+
+    def _cancel_history_first_paint(self) -> None:
+        """撤销当前等待（切会话 / 清理）。未激活时零开销。"""
+        gate = self.__dict__.get("_history_first_paint_controller")
+        if gate is None:
+            return
+        try:
+            gate.cancel()
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"[first-paint] 取消等待失败: {exc}")
+
+    def _history_first_paint_theme_changed(self) -> None:
+        """主题切换：等待中的遮罩就地重刷配色（未激活时零开销）。"""
+        gate = self.__dict__.get("_history_first_paint_controller")
+        if gate is None:
+            return
+        try:
+            gate.on_theme_changed()
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"[first-paint] 遮罩重刷主题失败: {exc}")
+
+    def _reveal_history_first_paint(self, stick_bottom: bool = True) -> None:
+        """揭示动作：屏内正文已落地，补一次贴底锁住落点（屏外落高由既有贴底链兜住）。"""
+        if not stick_bottom:
+            return
+        try:
+            if getattr(self, "_user_intentionally_away_from_bottom", False):
+                return
+            self._scroll_to_bottom(sticky_ms=600)
+        except (AttributeError, RuntimeError):
+            pass
+
+    def _history_first_paint_state(self):
+        """采集就绪判定输入。
+
+        返回 None = 几何不可用（窗口未完成布局 / 离屏），状态机只等硬超时。
+
+        只统计**当前视口内**的卡片：屏外（上方的旧消息）继续后台落高，不参与
+        判定 —— 否则「等整段历史加载完」会把揭示无限推迟（spec：屏外不阻塞）。
+
+        屏内某卡是否落地取 ``MessageCard.is_layout_height_settled()``（正文已
+        呈现 + 高度已提交布局），**不用** ``_lazy_rendered`` 当完成信号：它只
+        代表 viewer 已建，正文与高度都可能还在路上。该标志仅作反面信号（未置位
+        = viewer 还没派发），用于禁止「长时间静止」兜底误判。
+        """
+        try:
+            session = self.session_manager.get_current_session()
+            session_id = getattr(session, "session_id", None) if session else None
+        except (AttributeError, RuntimeError):
+            session_id = None
+        try:
+            area = self.chat_scroll_area
+            layout = self.chat_layout
+            viewport = area.viewport()
+            bar = area.verticalScrollBar()
+            viewport_top = int(bar.value())
+            viewport_height = int(viewport.height())
+        except (AttributeError, RuntimeError, TypeError):
+            return None
+        if viewport_height <= 0:
+            return None  # 窗口几何没就绪（最小化/离屏）：下一拍再看
+        try:
+            at_bottom = bool(self._is_view_at_bottom())
+        except (AttributeError, RuntimeError):
+            at_bottom = False
+        away = bool(getattr(self, "_user_intentionally_away_from_bottom", False))
+        viewport_bottom = viewport_top + viewport_height
+        try:
+            container = area.widget()
+            layout_height = int(container.height()) if container is not None else 0
+        except (AttributeError, RuntimeError, TypeError):
+            layout_height = 0
+
+        visible_cards = 0
+        pending_cards = 0
+        offscreen_pending = False
+        unrendered_cards = 0
+        signature = []
+        try:
+            for index in range(layout.count()):
+                item = layout.itemAt(index)
+                widget = item.widget() if item is not None else None
+                if not isinstance(widget, MessageCard):
+                    continue
+                top = int(widget.y())
+                height = int(widget.height())
+                if top + height < viewport_top or top > viewport_bottom:
+                    if not offscreen_pending:
+                        offscreen_pending = not widget.is_layout_height_settled()
+                    continue  # 不等这张卡；仅防止误把分批落高之间的间隙当成静止
+                visible_cards += 1
+                # 首屏几何用**屏幕坐标**（容器 y − 滚动值）而非容器绝对 y：
+                # 上方旧卡片落高会把屏内卡片整体下移，贴底跟随让它们在屏幕上
+                # 原地不动 —— 只有屏幕位置才是用户真正看到的「稳定」。
+                signature.append((id(widget), height, top - viewport_top))
+                try:
+                    settled = bool(widget.is_layout_height_settled())
+                except (AttributeError, RuntimeError):
+                    settled = False
+                if settled:
+                    continue
+                pending_cards += 1
+                if getattr(widget, "role", None) != "user" and not getattr(
+                    widget, "_lazy_rendered", False
+                ):
+                    unrendered_cards += 1
+        except (AttributeError, RuntimeError, TypeError):
+            return None
+        return {
+            "session_id": session_id,
+            "visible_cards": visible_cards,
+            "pending_cards": pending_cards,
+            "offscreen_pending": offscreen_pending,
+            "unrendered_cards": unrendered_cards,
+            "at_bottom": at_bottom,
+            "away": away,
+            # 屏内几何：揭示后用户看到的就是这几张卡，它们的屏幕位置不变才算稳定
+            "visible_geometry": (viewport_height, tuple(signature)),
+            # 整屏内容高度：屏外卡片落高会改它；揭示时它必须已静止（否则顶走可见内容）
+            "layout_height": layout_height,
+        }
 
     def _show_initial_welcome(self):
         """仅在UI上显示欢迎卡片，不改动Session数据
@@ -14810,6 +14976,9 @@ class OpenAIChatToolWindow(ToolWindow):
         QTimer.singleShot(150, memory_governor._run_gc_hook)
 
     def _clear_chat_area(self, delete_widgets: bool = True):
+        # [首屏一次显示] 聊天区整体清空 = 当前等待已无意义（会话删除/清空/切换），
+        # 立刻撤罩，避免残留一轮等待在空聊天区上超时后才揭开。
+        self._cancel_history_first_paint()
         self._current_assistant_card = None
         self._displayed_session_id = None
         # [A3-2] 工具卡映射清理：键=tool_call_id 无界增长、值持 MessageCard
@@ -16493,20 +16662,30 @@ class OpenAIChatToolWindow(ToolWindow):
                 QTimer.singleShot(200, self._process_next_lazy_batch)
 
     def _archive_history_session(self, index: int):
+        """兼容入口：``index`` = 历史卡片列表（插件页签）内的位置。
 
-        # 🛡️ 使用历史面板缓存的 _all_history 列表查找 session_id，
-        # 避免因流式保存导致排序变化后 index 偏移指向错误会话。
-        session_record = self._history_popup_card.get_history_at_index(index)
+        🛡️ 卡片列表经项目筛选 / 团队合并 / 置顶重排，与 HistoryManager 全量
+        列表不同源；index 只在此层解析成 session_id，真实归档走
+        ``_archive_session_by_id``。跨层传 index 会归档到错误会话。
+        """
+        card = self._history_popup_card
+        session_record = card.get_history_at_index(index) if card is not None else None
         if not session_record:
             return
-        session_id = session_record.get("session_id")
-        if not session_id:
-            return
-        # 通过 session_id 找到全量列表中的真实 index
+        self._archive_session_by_id(session_record.get("session_id"))
+
+    def _archive_session_by_id(self, session_id: Optional[str]) -> bool:
+        """按 session_id 归档单个历史会话（唯一实现）。
+
+        归档当前会话时创建新会话状态；非当前会话手术式删卡片。
+        """
+        if not session_id or self.history_manager is None:
+            return False
+        # 全量列表 index 在本方法内解析、消费，不向调用方泄露
         full_index = self.history_manager.find_index_by_session_id(session_id)
         if full_index is None:
-            # 会话不存在，恢复状态
-            return
+            # 会话不存在（并发归档 / 已被删除）
+            return False
 
         archived_current = self._current_session_id is not None and session_id == self._current_session_id
 
@@ -16553,6 +16732,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 if not removed:
                     # 回退：手术式删除失败，走全量刷新
                     self._notify_history_data_changed()
+        return bool(archived)
 
 
     def _on_team_archive_requested(self, run_id: str):
@@ -16948,6 +17128,11 @@ class OpenAIChatToolWindow(ToolWindow):
         if not session_id:
             return
 
+        # [首屏一次显示] 用户已点开别的会话：上一轮等待（遮罩）立即作废。
+        # 冷打开读链是异步的（_kick_load_history_messages），若等它回包后的
+        # _display_current_session 才取消，旧遮罩会多挂一段且可能揭示错会话。
+        self._cancel_history_first_paint()
+
         if self._is_streaming:
             self._on_stop_clicked()
             # 🐛 修复（加载历史打断对话 partial 丢失）：_on_stop_clicked 是异步
@@ -17184,7 +17369,7 @@ class OpenAIChatToolWindow(ToolWindow):
         if _wt_svc is not None:
             _wt_svc.on_session_loaded(self, session_record)
 
-        self._display_current_session()
+        self._display_current_session(history_first_paint=True)
         self._release_inactive_session_messages()
 
         # 会话数据变更统一通知：加载历史会话后当前会话高亮/最近列表变化
@@ -21109,7 +21294,7 @@ class OpenAIChatToolWindow(ToolWindow):
             _wt_svc = self._worktree_service()
             if _wt_svc is not None:
                 _wt_svc.on_session_loaded(self, session_record)
-            self._display_current_session()
+            self._display_current_session(history_first_paint=True)
             self._release_inactive_session_messages()
             self._hide_welcome_cards()
         else:
@@ -21117,7 +21302,7 @@ class OpenAIChatToolWindow(ToolWindow):
             for i, session in enumerate(self.session_manager.get_all_sessions()):
                 if session.session_id == session_id:
                     self.backend.switch_session(i)
-                    self._display_current_session()
+                    self._display_current_session(history_first_paint=True)
                     self._release_inactive_session_messages()
                     self._hide_welcome_cards()
                     return

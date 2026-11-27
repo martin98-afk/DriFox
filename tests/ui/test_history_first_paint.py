@@ -185,7 +185,7 @@ def _visible_jump(frames: list[dict], tag: str) -> tuple[int, float]:
         cur = {
             c["idx"]: c["viewport_y"]
             for c in f["cards"]
-            if c["in_view"] and c["rendered"] and not c["skeleton"] and c["idx"] >= 0
+            if c["in_view"] and c["rendered"] and not c["skeleton"] and isinstance(c["idx"], int) and c["idx"] >= 0
         }
         for idx, y in cur.items():
             if idx in prev:
@@ -198,7 +198,7 @@ def _visible_jump(frames: list[dict], tag: str) -> tuple[int, float]:
     return count, worst
 
 
-def _open_history_and_sample(mw, qtbot, sid: str, max_frames: int = 240) -> tuple[list[dict], list]:
+def _open_history_and_sample(mw, qtbot, sid: str, max_frames: int = 240, *, welcome=False) -> tuple[list[dict], list]:
     """从历史入口打开会话，逐帧采样到画面静止（贴底 + 懒队列空 + 高度稳定）。"""
     import time
 
@@ -212,7 +212,10 @@ def _open_history_and_sample(mw, qtbot, sid: str, max_frames: int = 240) -> tupl
     frames.append(_frame(mw, viewport, 0.0))
 
     t0 = time.monotonic()
-    mw._load_session_from_record(record)
+    if welcome:
+        mw.handle_recommended_question(sid, "session")
+    else:
+        mw._load_session_from_record(record)
 
     still = 0
     for i in range(max_frames):
@@ -267,7 +270,7 @@ def self_role(card: dict) -> bool:
     return card["role"] in ("assistant", "tool")
 
 
-def _run_case(ui_app, qtbot, *, rounds: int, long_text: bool, name: str) -> None:
+def _run_case(ui_app, qtbot, *, rounds: int, long_text: bool, name: str, welcome=False) -> None:
     tm, mw = ui_app["tm"], ui_app["chat_window"]
     tm.showNormal()
     tm.resize(1120, 760)
@@ -276,7 +279,7 @@ def _run_case(ui_app, qtbot, *, rounds: int, long_text: bool, name: str) -> None
     _reset_to_empty_session(mw)
     qtbot.wait(300)
     sid = _seed_history(mw, _make_messages(rounds, long_text), name)
-    frames, images = _open_history_and_sample(mw, qtbot, sid)
+    frames, images = _open_history_and_sample(mw, qtbot, sid, welcome=welcome)
     _save_evidence(name, frames, images)
     _assert_first_paint(frames, name)
 
@@ -289,3 +292,8 @@ def test_first_paint_short_session(ui_app, qtbot):
 def test_first_paint_long_session(ui_app, qtbot):
     """长会话：24 轮长回复，屏外卡片落高不得带动可见区跳动。"""
     _run_case(ui_app, qtbot, rounds=24, long_text=True, name="long")
+
+
+def test_first_paint_welcome_recent_session(ui_app, qtbot):
+    """欢迎卡片的最近会话经 session 动作按 ID 打开，不走历史列表入口。"""
+    _run_case(ui_app, qtbot, rounds=6, long_text=False, name="welcome_recent", welcome=True)

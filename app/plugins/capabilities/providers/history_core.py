@@ -117,14 +117,26 @@ def _session_history_write(host: Any):
         return ok
 
     def archive(session_id: str) -> bool:
-        """归档单个会话（当前会话归档时由宿主承担新会话切换）。"""
+        """归档单个会话（当前会话归档时由宿主承担新会话切换）。
+
+        ★ 按 session_id 直达宿主 ``_archive_session_by_id``：历史卡片列表
+        （项目筛选 / 团队合并 / 置顶重排）与 HistoryManager 全量列表不同源，
+        传 index 会让宿主再按卡片列表解析一次 → 归档错位（2026-11-28 修复）。
+        旧宿主无该方法时回退旧入口（其语义即卡片列表 index）。
+        """
         if not session_id:
             return False
+        fn = getattr(host, "_archive_session_by_id", None)
+        if callable(fn):
+            try:
+                return bool(fn(session_id))
+            except Exception as e:
+                logger.warning(f"[Capability] 归档会话失败 session={session_id}: {e}")
+                return False
         fn = getattr(host, "_archive_history_session", None)
         if not callable(fn):
             return False
-        hm = _history()
-        idx = hm.find_index_by_session_id(session_id)
+        idx = _history().find_index_by_session_id(session_id)
         if idx is None:
             return False
         try:
