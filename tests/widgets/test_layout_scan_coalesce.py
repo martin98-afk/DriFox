@@ -35,6 +35,7 @@ def _make_scan_window(scroll_value=0, viewport_h=200):
     """
     win = OpenAIChatToolWindow.__new__(OpenAIChatToolWindow)
     win._is_destroyed = False
+    win._question_edge = None
     win._last_visible_card_ids = set()
     win._last_layout_scan = None
     win._restore_queue = []

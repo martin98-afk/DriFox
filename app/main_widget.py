@@ -10310,6 +10310,8 @@ class OpenAIChatToolWindow(ToolWindow):
         near_cards: list = []
         preview_cards: list = []
         visible_batches: List[int] = []
+        question_anchor = None
+        at_bottom = scroll_area.verticalScrollBar().maximum() > 0 and viewport_top == scroll_area.verticalScrollBar().maximum()
         degenerate = True
         try:
             for i in range(self.chat_layout.count()):
@@ -10322,6 +10324,12 @@ class OpenAIChatToolWindow(ToolWindow):
                 idx = ph_by_widget.get(id(widget))
                 if idx is None:
                     idx = getattr(widget, "_message_index", None)
+                if (question_anchor is None or at_bottom) and rect.height() > 0 and rect.bottom() >= viewport_top and rect.top() < viewport_bottom and not widget.isHidden():
+                    live_round = getattr(widget, "_question_live_round", None)
+                    if live_round is not None and (idx is None or not 0 <= idx < len(self._message_batch) or not self._message_batch[idx]):
+                        question_anchor = ("round", live_round)
+                    elif idx is not None and idx >= 0:
+                        question_anchor = ("batch", idx)
                 if idx is not None:
                     if rect.height() > 0:
                         degenerate = False
@@ -10362,6 +10370,7 @@ class OpenAIChatToolWindow(ToolWindow):
             "ph_in_view": ph_in_view,
             "ph_near": ph_near,
             "rng": rng,
+            "question_anchor": question_anchor,
         }
 
     def _sync_visible_cards_on_scroll(self):
@@ -10385,9 +10394,10 @@ class OpenAIChatToolWindow(ToolWindow):
         self._log_render_quota("scroll")
         self._last_layout_scan = scan
         edge = getattr(self, "_question_edge", None)
-        visible = scan.get("rng")
-        if edge is not None and visible is not None:
-            edge.set_reading(self._get_user_round_index_for_batch_index(visible[0]))
+        anchor = scan.get("question_anchor")
+        if edge is not None and anchor is not None:
+            kind, value = anchor
+            edge.set_reading(value if kind == "round" else self._get_user_round_index_for_batch_index(value))
 
         prev_visible = self._last_visible_card_ids
 
@@ -17286,7 +17296,8 @@ class OpenAIChatToolWindow(ToolWindow):
                 session.originating_project = self._current_project
 
         # 计算当前 user message 的 round_index
-        if user_round_index is None:
+        live = user_round_index is None
+        if live:
             user_round_index = self._get_current_user_round_index()
 
         card = MessageCard(
@@ -17297,6 +17308,8 @@ class OpenAIChatToolWindow(ToolWindow):
             source_message=source_message,
         )
         card._round_index = user_round_index
+        if live:
+            card._question_live_round = user_round_index
         card.update_content(content)
         # 图片附件预览：正文上方缩略图条（恢复会话时 content 为 multimodal list，
         # 传入作路径失效兑底；发送当下 content 是纯文本，路径必然有效）
@@ -17374,6 +17387,8 @@ class OpenAIChatToolWindow(ToolWindow):
             provider_name=provider_name,
         )
         if custom_widget is not None:
+            if round_index is None:
+                custom_widget._question_live_round = self._current_assistant_round_index
             self._add_chat_widget(custom_widget, insert_index=insert_index)
             if scroll and not self._suspend_auto_scroll and self._should_follow_bottom():
                 self._scroll_to_bottom()
@@ -17398,6 +17413,8 @@ class OpenAIChatToolWindow(ToolWindow):
             source_message=source_message,
         )
 
+        if round_index is None:
+            card._question_live_round = self._current_assistant_round_index
         # 连接模型标签点击信号到切换逻辑
         card.modelLabelClicked.connect(self._on_footer_model_label_clicked)
 
@@ -17795,6 +17812,10 @@ class OpenAIChatToolWindow(ToolWindow):
         if card is None:
             return False
 
+        self._start_question_card_jump(card)
+        return True
+
+    def _start_question_card_jump(self, card):
         self._jump_target_card = card
         self._jump_settle_left = JUMP_SETTLE_MAX_TRIES
         self._jump_settle_last_geom = None
@@ -17803,7 +17824,6 @@ class OpenAIChatToolWindow(ToolWindow):
         self._lock_scroll_after_jump()
         self._apply_jump_target_now()
         self._schedule_jump_settle()
-        return True
 
     def _find_jump_target_card(self, batch_index: int):
         """找出批次对应的 user 卡片（`_batch_cards` 优先，布局遍历兜底）。"""
@@ -18131,6 +18151,14 @@ class OpenAIChatToolWindow(ToolWindow):
             if row == index:
                 if not self._locate_and_scroll_to_batch(batch_idx):
                     self._scroll_to_target_node_index(index, batch_idx)
+                return
+
+        # 新发送的用户卡先入布局，再由消息回调补齐批次；空槽不能当历史批次跳转。
+        for pos in range(self.chat_layout.count() - 1, -1, -1):
+            card = self.chat_layout.itemAt(pos).widget()
+            if (getattr(card, "_question_live_round", None) == index
+                    and getattr(card, "role", None) == "user" and not card.isHidden()):
+                self._start_question_card_jump(card)
                 return
 
     def _on_node_preview_clicked(self, index: int):
