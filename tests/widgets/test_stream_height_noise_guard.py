@@ -138,6 +138,33 @@ class TestTrackDirectionGuard:
             container.deleteLater()
             qapp.processEvents()
 
+    def test_height_tick_defers_during_scroll_and_resumes(self, qapp, monkeypatch):
+        """滚动期不重复提交高度，滚动停止后仍从最新目标继续收敛。"""
+        container, card = _make_streaming_card(qapp, viewer_height=500)
+        try:
+            card._target_viewer_height = 700
+            card._stream_height_anim_active = True
+            scroll_active = True
+            monkeypatch.setattr(
+                "app.widgets.message_card.is_scroll_active",
+                lambda: scroll_active,
+            )
+
+            card._stream_height_tick_step()
+
+            assert card.viewer.set_calls == []
+            assert card._stream_height_anim_active is True
+            assert card._target_viewer_height == 700
+
+            scroll_active = False
+            card._stream_height_tick_step()
+
+            assert card.viewer.set_calls
+            assert card.viewer.set_calls[-1] > 500
+        finally:
+            container.deleteLater()
+            qapp.processEvents()
+
 
 class TestStreamingShrinkSuspends:
     """非追踪流式路径：收拢（含 >=40px 大步）统一挂起。"""
