@@ -44,18 +44,27 @@ def _resolve_chat_image(image: str) -> str:
 
 
 def _chat_theme_has_scene_backdrop() -> bool:
-    """当前主题是否用壁纸/动态层垫聊天区（决定能否实底化）
+    """当前主题是否在聊天区下方垫了逐像素变化的背景层（决定能否实底化）
 
-    判据（theme_manager.get_theme_backgrounds）：scene / chat_area 任一区域配了
-    image，或 overlay 动态光影启用 → backdrop 逐像素变化，预合成实色会盖掉
-    场景观感，必须保持透明。纯色主题（含 chat_area 纯色底）返回 False。
+    判据（theme_manager.get_theme_backgrounds）：window / scene / chat_area
+    任一区域配了 image、animation 或 video，或 overlay 动态光影启用 →
+    backdrop 逐像素变化，预合成实色会盖掉背景观感，必须保持透明。
+    window 是整窗最底层壁纸（主题库 57 套里 48 套把壁纸/动画放这里，旧
+    `background.chat_list` 也归一到 window），漏判会让聊天区被刷成不透明
+    实色块、壁纸在消息列表处断开；scene 只配 animation（无 image）同理。
+    纯色主题（含 chat_area 纯色底）返回 False。
     """
     from app.utils.theme_manager import theme_manager
 
     bgs = theme_manager.get_theme_backgrounds(theme_manager.get_current_theme_id())
-    for region in ("scene", "chat_area"):
+    for region in ("window", "scene", "chat_area"):
         cfg = bgs.get(region) or {}
-        if cfg and cfg.get("enabled", True) and cfg.get("image"):
+        if not cfg or not cfg.get("enabled", True):
+            continue
+        if cfg.get("image") or cfg.get("video"):
+            return True
+        anim = cfg.get("animation") or {}
+        if anim and anim.get("enabled", True):
             return True
     overlay = bgs.get("overlay") or {}
     if overlay and overlay.get("enabled", True):
