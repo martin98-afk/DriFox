@@ -144,6 +144,9 @@ class ChatAreaModule(UIModule):
         host.chat_scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
 
         host.chat_container = QWidget()
+        # 高度仍按内容滚动；宽度由视口决定，不能被离屏助手卡的旧固定宽撑住。
+        host.chat_container.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        host.chat_container.setMinimumWidth(1)
         host.chat_container.setStyleSheet("background: transparent;")
         host.chat_container.setAcceptDrops(True)
         try:

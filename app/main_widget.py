@@ -3505,6 +3505,8 @@ class OpenAIChatToolWindow(ToolWindow):
                 self.chat_scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
 
                 self.chat_container = QWidget()
+                self.chat_container.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+                self.chat_container.setMinimumWidth(1)
                 self.chat_container.setStyleSheet("background: transparent;")
                 self.chat_container.setAcceptDrops(True)
                 self.chat_container.installEventFilter(self)
