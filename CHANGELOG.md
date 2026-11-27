@@ -4,9 +4,9 @@
 
 - **当前会话提问导航**：用聊天区右缘的悬停刻度和滑出列表取代标题栏历史问题按钮、徽章与浮动卡片；支持键盘选择并跳回原消息。
 
-## [v0.7.6] - 2026-11-27
+## [v0.7.6] - 2026-11-27 (重新发布 #2)
 
-自 v0.7.5 以来的变更 | 提交数：9 · 文件变更：52 · +8937/-485 | 贡献者：mading, martin98-afk
+自 v0.7.5 以来的变更 | 提交数：26 · 文件变更：133 · +17622/-3690 | 贡献者：mading, martin98-afk, dingma
 
 ### ✨ 新功能 (New Features)
 - **性能基准、预算门禁与测量规程** (`tools/perf/benchmark_core.py` · `measure_gate.py` · `check_plan_coverage.py` · `tests/perf/`): 新增核心性能基准、测量规程、证伪清单与下一轮优先项文档；加入启动/内存预算门、插件加载冒烟、AST 与 code cache 安全测试。顺带修复 AST 门禁缓存绕过、会话 CAS 静默失败、缓存泄漏与动画源回收遗漏；优化设置页懒建、主题探测、日志 formatter、插件编译缓存及 renderer 回收。
@@ -23,7 +23,35 @@
 ### 🔧 其他 (Chores & Build)
 - 版本号升至 v0.7.6（`pyproject.toml` / `app/utils/config.py` / `dist/installer.iss` / `README.md`）。
 
-## [v0.7.5] - 2026-11-23
+### ✨ 新功能 (New Features)
+- **历史会话首屏渐进渲染 (History First Paint)** (`app/widgets/message_card.py` · `app/main_widget.py` · `app/core/history_core.py`): 新增 `HistoryFirstPaintGate` 管理历史会话首屏展示，确保加载期间无缝体验；集成主题变化与会话状态处理；取消切换会话时的前次加载；归档流程直接调用新会话归档方法；移除过时测试并更新现有测试；覆盖欢迎卡与长短会话场景。
+- **Tab 管理器动画与尺寸过渡** (`app/widgets/tab_manager.py` · `_DockSideWrapper`): 卡片动画期间禁用最小尺寸提示；左侧卡片区域平滑宽度过渡；改进面板展开/折叠体验。
+- **Backdrop 检测扩展 window 区域与视频背景** (`app/main_widget.py` · chat theme): backdrop 检测逻辑纳入 window 区域并支持视频背景。
+- **SQL 查询优化与会话计数** (`app/core/store/session_repository.py`): 优化 SQL 查询与会话计数逻辑；新增项目查询单元测试。
+- **统一消息注入 OpenAIChatWorker** (`app/core/workers/chat_worker.py`): 所有流统一消息注入；新增消息处理回归测试。
+- **UI 能力与动画处理增强** (`app/main_widget.py`): 增强 UI 能力与动画处理；新增上下文管理与内存测试。
+- **SlideTabAnimator 动画稳定性** (`app/widgets/slide_tab_animator.py`): 增强动画处理与稳定性；新增可见文本节奏与内存性能测试。
+- **参数化 compact stream geometry 测试** (`tests/...`): 参数化 `test_compact_stream_geometry` 覆盖折叠行为；改进元素测量逻辑。
+
+### 🐛 问题修复 (Bug Fixes)
+- **骨架缓存版本更新与图表占位动画** (`app/...`): 更新骨架缓存版本并改进图表占位动画。
+- **聊天容器尺寸策略调整** (`app/widgets/...`): 调整聊天容器尺寸策略改善布局处理。
+- **聊天工具与 Tab 管理器 resize 处理** (`app/widgets/...`): 改进 resize 处理。
+- **工作台拖动与窗口状态切换聊天卡片闪空** (`app/main_widget.py` · `message_card.py`): 修复拖动与状态切换时聊天卡片闪空。
+
+### ♻️ 代码重构 (Refactoring)
+- **代码结构重构** (`app/`): 重构代码结构提升可读性与可维护性。
+
+### 🔄 其他变更 (Other Changes)
+- **UI 测试覆盖**: 新增 user bubble viewport edge、workbench drag pixels、history first paint 测试套件。
+- **消息卡片底部面板折叠动效与键盘交互优化** (`app/widgets/message_card.py`): 优化折叠动效与键盘交互。
+- **首批正文出字节奏与工具完成框原位过渡优化** (`app/...`): 优化出字节奏与完成框过渡。
+- **综合测试覆盖**: 新增 token estimation、rendering、UI behavior 测试。
+
+### 🔧 其他 (Chores & Build)
+- 版本号升至 v0.7.6（重新发布 #2）（`pyproject.toml` / `app/utils/config.py` / `dist/installer.iss` / `README.md`）。
+
+
 
 自 v0.7.4 以来的变更 | 提交数：17 · 文件变更：95 · +8706/-748 | 贡献者：drifox-bot, mading
 
