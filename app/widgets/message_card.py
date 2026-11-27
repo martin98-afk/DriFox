@@ -3534,6 +3534,10 @@ class MessageCard(SimpleCardWidget):
         try:
             current_height = self.viewer.height() or self.viewer.minimumHeight() or 40
             diff = target - current_height
+            if is_scroll_active():
+                # 滚动补偿期避免与 QWebEngine 高度调整争抢主线程；目标值保留，
+                # 滚动活跃窗口结束后由下一拍继续收敛。
+                return
             if abs(diff) <= STREAM_HEIGHT_TRACK_EPSILON:
                 # 落定：精确对齐 + 解除上报隔离 + 通知宿主布局
                 self._apply_viewer_height(target)
