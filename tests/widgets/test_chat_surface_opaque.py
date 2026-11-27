@@ -25,12 +25,12 @@ class _Host:
             self.chat_container = QWidget()
 
 
-def _mock_theme(monkeypatch, *, scene=None, chat_area=None, overlay=None):
+def _mock_theme(monkeypatch, *, window=None, scene=None, chat_area=None, overlay=None):
     """替换 theme_manager 单例的主题背景查询（不加载真实主题库）"""
     from app.utils.theme_manager import theme_manager
 
     bgs = {
-        "window": None,
+        "window": window,
         "sidebar": None,
         "chat_area": chat_area,
         "scene": scene,
@@ -64,6 +64,48 @@ def test_chat_area_image_stays_transparent(qapp, monkeypatch):
     host = _Host()
     apply_chat_surface_opaque(host)
     assert host.chat_container.autoFillBackground() is False, "chat_area 配图也算壁纸"
+
+
+def test_window_wallpaper_stays_transparent(qapp, monkeypatch):
+    """整窗壁纸放在 backgrounds.window（主题库主流写法）也必须保持透明
+
+    48/57 套主题把壁纸/动画放 window 区域，聊天区原本透出它；漏判会把整片
+    消息列表刷成不透明实色块，壁纸在消息区断开。
+    """
+    _mock_theme(monkeypatch, window={"image": "bg.jpg", "enabled": True})
+    host = _Host()
+    apply_chat_surface_opaque(host)
+    assert host.chat_container.autoFillBackground() is False, "window 壁纸必须保持透明"
+
+
+def test_window_animation_stays_transparent(qapp, monkeypatch):
+    """只有 animation、没有 image 的 window（动态壁纸主题）同样保持透明"""
+    _mock_theme(
+        monkeypatch,
+        window={"animation": {"src": "chat.webp", "enabled": True}, "enabled": True},
+    )
+    host = _Host()
+    apply_chat_surface_opaque(host)
+    assert host.chat_container.autoFillBackground() is False, "window 动画壁纸必须保持透明"
+
+
+def test_scene_animation_only_stays_transparent(qapp, monkeypatch):
+    """scene 只配 animation（无 image）也算逐像素变化的 backdrop"""
+    _mock_theme(
+        monkeypatch,
+        scene={"animation": {"src": "scene.webp", "enabled": True}, "enabled": True},
+    )
+    host = _Host()
+    apply_chat_surface_opaque(host)
+    assert host.chat_container.autoFillBackground() is False, "scene 动画必须保持透明"
+
+
+def test_window_solid_color_paints_opaque(qapp, monkeypatch):
+    """window 只是纯色（无媒体）→ 仍可刷等价实底"""
+    _mock_theme(monkeypatch, window={"color": "rgba(20, 20, 24, 255)", "enabled": True})
+    host = _Host()
+    apply_chat_surface_opaque(host)
+    assert host.chat_container.autoFillBackground() is True, "纯色 window 不应阻止实底化"
 
 
 def test_overlay_enabled_stays_transparent(qapp, monkeypatch):

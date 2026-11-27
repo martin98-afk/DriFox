@@ -1421,7 +1421,10 @@ class CodeWebViewer(QWebEngineView):
         try:
             if self.page() and self._is_js_ready:
                 compact = "true" if self._tool_compact_mode else "false"
-                self.page().runJavaScript(f"window._toolCompactMode = {compact};")
+                self.page().runJavaScript(
+                    f"window._toolCompactMode = {compact};"
+                    "document.documentElement.classList.toggle('compact-reading',window._toolCompactMode);"
+                )
         except RuntimeError:
             pass
 
@@ -4565,6 +4568,27 @@ class CodeWebViewer(QWebEngineView):
                     margin-bottom: 0;
                 }}
                 {_STREAMING_DOCK_CSS}
+                /* 简洁模式只保留阅读所需的层次；活动段与完成段使用同一度量。 */
+                .compact-reading #content-placeholder p,
+                .compact-reading #content-placeholder .v2-live-text:not(.think-compact),
+                .compact-reading #content-placeholder li {{
+                    line-height: 1.7;
+                    color: var(--text);
+                    overflow-wrap: break-word;
+                }}
+                .compact-reading #content-placeholder h1,
+                .compact-reading #content-placeholder h2,
+                .compact-reading #content-placeholder h3 {{ line-height: 1.35; }}
+                .compact-reading .chart-skeleton__bars i {{ animation: none; opacity: .36; }}
+                .compact-reading .chart-skeleton::after {{ display: none; }}
+                .compact-reading .dfx-stream-note {{ animation: none; opacity: 1; color: var(--text-muted); }}
+                .chart-failure {{
+                    display: flex; align-items: center; justify-content: space-between;
+                    margin: 10px 0; padding: 10px 14px; border: 1px solid var(--border);
+                    border-radius: var(--r-md); color: var(--text-secondary); font-size: .9em;
+                }}
+                .chart-failure .code-btn {{ background: transparent; border: 0; cursor: pointer; }}
+                .compact-reading .chart-toolbar:focus-within {{ opacity: 1; }}
             </style>
             <!-- 代码高亮主题（Pygments class 化）：单独一个 style 便于运行时
                  整段替换；内容 HTML 与主题无关，切主题不再重渲正文 -->
@@ -4967,12 +4991,12 @@ class CodeWebViewer(QWebEngineView):
                 var _KATEX_CSS = '{_katex_css_url}';
                 var _KATEX_LIB = '{_katex_js_url}';
 
-                function _mmdLoadScript(src, onOk) {{
+                function _mmdLoadScript(src, onOk, onError) {{
                     if (!src) {{ onOk(); return; }}
                     var s = document.createElement('script');
                     s.src = src;
                     s.onload = onOk;
-                    s.onerror = function () {{ console.error('[mermaid] load failed: ' + src); }};
+                    s.onerror = onError;
                     document.head.appendChild(s);
                 }}
 
@@ -5006,19 +5030,20 @@ class CodeWebViewer(QWebEngineView):
 
                 function _mmdEnsure(cb) {{
                     if (window.mermaid && window.mermaid.render) {{ cb(); return; }}
+                    if (window._mmdFailed) {{ cb(); return; }}
                     if (!window._mmdQueue) window._mmdQueue = [];
                     window._mmdQueue.push(cb);
                     if (window._mmdLoading) return;          // 已在加载中，排队即可
                     window._mmdLoading = true;
+                    function settle() {{
+                        window._mmdLoading = false;
+                        window._mmdFailed = !(window.mermaid && window.mermaid.render);
+                        var q = window._mmdQueue || []; window._mmdQueue = [];
+                        for (var qi = 0; qi < q.length; qi++) {{ q[qi](); }}
+                    }}
                     _mmdLoadScript(_MMD_POLYFILL, function () {{
-                        _mmdLoadScript(_MMD_LIB, function () {{
-                            window._mmdApplyTheme();
-                            window._mmdLoading = false;
-                            var q = window._mmdQueue || [];
-                            window._mmdQueue = [];
-                            for (var qi = 0; qi < q.length; qi++) {{ q[qi](); }}
-                        }});
-                    }});
+                        _mmdLoadScript(_MMD_LIB, function () {{ window._mmdApplyTheme(); settle(); }}, settle);
+                    }}, settle);
                 }}
 
                 // ===== mermaid 渲染并发限制：同时最多 2 个 render =====
@@ -5042,7 +5067,11 @@ class CodeWebViewer(QWebEngineView):
                     var blocks = window._scopeQuery(roots, '.mermaid-block[data-mermaid-src]');
                     if (!blocks.length) return;
                     _mmdEnsure(function () {{
-                        if (!window.mermaid || !window.mermaid.render) return;
+                        if (!window.mermaid || !window.mermaid.render) {{
+                            for (var ei=0; ei<blocks.length; ei++) blocks[ei].textContent='流程图未显示：渲染组件未能加载。';
+                            if (typeof reportHeightDebounced === 'function') reportHeightDebounced();
+                            return;
+                        }}
                         for (var i = 0; i < blocks.length; i++) {{
                             (function (el) {{
                                 if (el._mmdDone || el._mmdQueued) return;
@@ -5065,16 +5094,16 @@ class CodeWebViewer(QWebEngineView):
                                     if (svg.indexOf('<svg') < 0) throw new Error('no svg in result');
                                     el.classList.remove('mermaid-pending');
                                     el.innerHTML = svg;
+                                    window._chartKeyOf(el); // 清空载荷前保留身份，供后续块级替换复用
                                     el.setAttribute('data-mermaid-src', '');   // 渲染完释放 b64
                                     if (window._attachChartToolbar) window._attachChartToolbar(el, 'mermaid');
                                     if (typeof _autoScrollAfterAsyncRender === 'function') _autoScrollAfterAsyncRender();
                                     if (typeof reportHeightDebounced === 'function') reportHeightDebounced();
                                     done();
                                 }})['catch'](function (e) {{
-                                    // 失败不吞内容：退回原始源码，用户仍可复制
                                     el.classList.remove('mermaid-pending');
-                                    el.innerHTML = '<pre class="mermaid-error"></pre>';
-                                    el.firstChild.textContent = decoded;
+                                    el.innerHTML = '<div class="chart-failure"><span>流程图未显示：请检查 Mermaid 语法。</span><button type="button" class="code-btn" aria-label="复制图表源码" data-tooltip="复制图表源码" data-action="copy"><span class="ci ci-copy"></span></button></div>';
+                                    el.querySelector('button').setAttribute('data-copy', el.getAttribute('data-mermaid-src'));
                                     // mermaid render 失败时会向 body 追加 error bomb SVG
                                     // （含「Syntax error in text」文案）。它不在卡片容器内，
                                     // innerHTML 全量重建清不掉，会逐轮流式累积，这里顺手移除。
@@ -5228,6 +5257,7 @@ class CodeWebViewer(QWebEngineView):
                         var chart = el._chartInstance;
                         if (!chart || chart.isDisposed()) {{
                             chart = echarts.init(el, _CHART_IS_DARK ? 'dark' : undefined);
+                            el._chartInstance = chart; // setOption 可能失败，先登记供统一回收
                             // 优化点：原行为 RO 每次触发同步 chart.resize()，拖动窗口/
                             // 布局抖动时一帧内多次全量重排（与放大页已修的同源卡顿，
                             // 单次 74~130ms）。合并到 rAF 一帧一次：同一帧内多次触发
@@ -5266,6 +5296,7 @@ class CodeWebViewer(QWebEngineView):
                         // JSON 不完整（流式半截）或 option 非法：保留占位骨架，内容补齐后
                         // 下一轮自然重试（b64 变 → key 变 → 新节点重新入队）。
                         // 原实现只 console.error，容器留 400px 空白 → 用户看到"图表区空一块"。
+                        window._disposeChartNode(el);
                         el.classList.add('echarts-failed');
                         console.error('ECharts init error:', e);
                         // 与 mermaid 失败路径对齐：降级态也要上报，避免高度停在旧值
@@ -5889,12 +5920,19 @@ class CodeWebViewer(QWebEngineView):
                     }}
                     var carried = (typeof window._carryCollapseState === 'function'
                         && window._carryCollapseState(_victims)) || {{}};
+                    var reuse = new Map();
                     for (var i = 0; i < del; i++) {{
                         var victim = nodes[base + i];
                         if (victim && victim.parentNode) {{
                             if (typeof window._disposeChartNode === 'function') {{
-                                var _olds = victim.querySelectorAll('.echarts-container');
-                                for (var oi = 0; oi < _olds.length; oi++) window._disposeChartNode(_olds[oi]);
+                                var _olds = victim.querySelectorAll('.echarts-container,.mermaid-block');
+                                for (var oi = 0; oi < _olds.length; oi++) {{
+                                    var old = _olds[oi], id = window._chartKeyOf(old);
+                                    if (window._toolCompactMode && id && window._chartReady(old)) {{
+                                        if (!reuse.has(id)) reuse.set(id, []);
+                                        reuse.get(id).push(old);
+                                    }} else window._disposeChartNode(old);
+                                }}
                             }}
                             victim.parentNode.removeChild(victim);
                         }}
@@ -5922,10 +5960,18 @@ class CodeWebViewer(QWebEngineView):
                         var wrap = document.createElement('div');
                         wrap.setAttribute('data-block-wrapper', '1');
                         wrap.innerHTML = item.html || '';
+                        if (reuse.size) {{
+                            var fresh = wrap.querySelectorAll('.echarts-container,.mermaid-block');
+                            for (var ri=0; ri<fresh.length; ri++) {{
+                                var slot = fresh[ri], matches = reuse.get(window._chartKeyOf(slot));
+                                if (matches && matches.length) slot.parentNode.replaceChild(matches.shift(), slot);
+                            }}
+                        }}
                         _applyBlockMeta(wrap, item, base + j);
                         frag.appendChild(wrap);
                         made.push(wrap);
                     }}
+                    reuse.forEach(function(rest) {{ rest.forEach(window._disposeChartNode); }});
                     if (anchor && anchor.parentNode === container) {{
                         container.insertBefore(frag, anchor);
                     }} else {{
@@ -6066,6 +6112,22 @@ class CodeWebViewer(QWebEngineView):
                     var dt = Math.max(1, Math.min(200, _raw)) + _over;
                     var n = Math.max(1, Math.ceil(st.buf.length * (dt / st.CATCHUP_MS)));
                     if (st.buf.length > st.BURST_LEN) n = Math.max(n, Math.ceil(st.buf.length / 8));
+                    if (window._toolCompactMode && !st.reasoning && window._streamingActive) {{
+                        var body = document.body;
+                        var cap = parseInt(document.documentElement.style.getPropertyValue('--dfx-body-max-h'), 10);
+                        if (cap && window.innerHeight < cap - 2) {{
+                            // Chromium 已换行但 Qt 的 resize 还没回到该视口：别继续堆不可见行。
+                            // 超时放行以兼容宿主隐藏、批布局等不推进几何的情形。
+                            if (body.scrollHeight > window.innerHeight + 4) {{
+                                if (!st.waitSince) {{ st.waitSince = now; reportHeight(); }}
+                                if (now - st.waitSince < 120) {{
+                                    st.raf = requestAnimationFrame(window._v2LiveStep); return;
+                                }}
+                            }}
+                            st.waitSince = 0;
+                            n = Math.min(n, Math.max(8, Math.floor(body.clientWidth / {body_font_size})));
+                        }}
+                    }}
                     var slice = st.buf.slice(0, n);
                     st.buf = st.buf.slice(n);
                     try {{ window._v2LiveAppendNow(st.cid, st.key, slice, st.reasoning); }} catch (e) {{}}
@@ -6090,6 +6152,7 @@ class CodeWebViewer(QWebEngineView):
                     var st = window._v2tw;
                     if (!st) return;
                     if (st.raf) {{ cancelAnimationFrame(st.raf); st.raf = 0; }}
+                    st.waitSince = 0;
                     if (!st.buf) return;
                     var t = st.buf;
                     st.buf = "";
@@ -6102,6 +6165,7 @@ class CodeWebViewer(QWebEngineView):
                     if (!st) return;
                     if (st.raf) {{ cancelAnimationFrame(st.raf); st.raf = 0; }}
                     st.buf = "";
+                    st.waitSince = 0;
                     st.node = null;
                 }};
                 // Python 侧入口：增量进缓冲，由 _v2LiveStep 按帧揭示
@@ -6119,7 +6183,7 @@ class CodeWebViewer(QWebEngineView):
                     st.buf += text;
                     // 异常保险：正常指数追赶下缓冲稳态几百字符；超 2000 = 揭示链
                     // 被闸门/rAF 饥饿卡死，此时瞬时全显优于继续追。
-                    if (st.buf.length > 2000) {{ window._v2LiveFlush(); return true; }}
+                    if (st.buf.length > 2000 && (!window._toolCompactMode || st.reasoning)) {{ window._v2LiveFlush(); return true; }}
                     if (!st.raf) {{
                         st.last = performance.now();
                         st.raf = requestAnimationFrame(window._v2LiveStep);
@@ -7200,6 +7264,12 @@ class CodeWebViewer(QWebEngineView):
                     new ResizeObserver(() => {{
                         // 动画期间跳过高度报告
                         if (_collapsibleHeightReporting) return;
+                        if (window._toolCompactMode && window._streamingActive) {{
+                            // RO 在布局后投递；真实换行已发生，不再等 50ms 静默窗和下一帧。
+                            if (resizeTimeout) {{ clearTimeout(resizeTimeout); resizeTimeout = null; }}
+                            reportHeight();
+                            return;
+                        }}
                         if (resizeTimeout) clearTimeout(resizeTimeout);
                         resizeTimeout = setTimeout(() => requestAnimationFrame(reportHeight), 50);
                     }}).observe(document.body);
@@ -9330,6 +9400,8 @@ class CodeWebViewer(QWebEngineView):
         self._v2_live_finalize_requested = True
         self._schedule_render(immediate=True)
 
+    _PROSE_MARKUP = re.compile(r"[`~*#<>\[\]_|$\\&]|(?:^|\n)\s*(?:[-+=>:]|\d+[.)]\s| {4}|\t)")
+
     def _v2_live_active(self, blocks, active: Optional[int] = None) -> Optional[int]:
         """本批可走纯文本尾态的活动块下标；None = 走常规全量渲染。
 
@@ -9347,8 +9419,16 @@ class CodeWebViewer(QWebEngineView):
         if btype not in ("text", "reasoning"):
             return None
         _text = str((blk.get("content") if btype == "reasoning" else blk.get("text")) or "")
-        if len(_text) < self._LIVE_MIN_CHARS:
+        if btype == 'text' and self._tool_compact_mode and (
+            '```' in _text or '~~~' in _text or '<svg' in _text.lower()
+        ):
+            # 此块已经有结构边界；不能再把累计全文或 delta 当 textContent 送进揭示队列。
+            # 后续批次仍按块 diff，普通代码继续使用正式的高亮/复制控件。
             return None
+        if len(_text) < self._LIVE_MIN_CHARS:
+            if not (btype == 'text' and self._tool_compact_mode and _text
+                    and not self._PROSE_MARKUP.search(_text)):
+                return None
         return active
 
     @staticmethod
@@ -9576,8 +9656,10 @@ class CodeWebViewer(QWebEngineView):
         # 思考内容会被逐段永久铺开（预览限高窗口形同虚设）；思考也不该跑
         # markdown（与 _v2_live_tail_html 的 reasoning 保守口径一致）。
         # 长思考靠后续整块 formalize 定型，预览始终只在 96px 窗口内滚动。
+        plain_prose = (live_index is not None and not live_reasoning and ctx.compact
+                       and not self._PROSE_MARKUP.search(live_text))
         if (
-            live_index is not None
+            not plain_prose and live_index is not None
             and not force_full
             and self._v2_live_key == live_key_now
             and not live_reasoning
@@ -9590,7 +9672,7 @@ class CodeWebViewer(QWebEngineView):
                     return True
 
         formalize = (
-            live_index is not None
+            not plain_prose and live_index is not None
             and not force_full
             and self._v2_live_key == live_key_now
             and self._v2_live_should_formalize(live_text)
@@ -9657,7 +9739,7 @@ class CodeWebViewer(QWebEngineView):
             # 一份容器/代码块，用户可见「渲染代码与图表并存」），且超过
             # _TAIL_CODE_WRAP_MAX_CHARS 时 live 里的图表还会降级成代码块
             # （「已渲染图表回退成代码」）。
-            if not live_reasoning:
+            if not live_reasoning and not plain_prose:
                 _tail_from = self._v2_live_formalized_len
                 _tail_text = live_text[_tail_from:] if _tail_from > 0 else live_text
                 _tail_html = self._v2_live_tail_refresh(_tail_text)

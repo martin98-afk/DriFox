@@ -160,6 +160,7 @@ from app.widgets.card_render_core import (
     _STREAM_TINT_RETRY,
     STREAM_HEIGHT_ANIM_ENABLED,
     STREAM_HEIGHT_ANIM_MIN_DELTA,
+    STREAM_HEIGHT_SNAP_GAP_PX,
     STREAM_HEIGHT_DEBOUNCE_MS,
     STREAM_HEIGHT_TICK_MS,
     STREAM_HEIGHT_TRACK_BOOST,
@@ -250,6 +251,11 @@ _TOOL_BLOCK_KEY_RE = re.compile(r'data-block-key="([^"]*)"')
 _TOOL_BLOCK_BUTTON_RE = re.compile(r"<button[^>]*>(.*?)</button>", re.DOTALL)
 _TOOL_COLLAPSIBLE_BODY_RE = re.compile(r'<div[^>]*class="cm-collapsible__body"[^>]*>(.*)</div>$', re.DOTALL)
 _TOOL_COLLAPSIBLE_BODY_STYLE_RE = re.compile(r'<div[^>]*class="cm-collapsible__body"[^>]*style="([^"]*)"')
+
+# 自写高度回环抑制窗口（秒）：setFixedHeight → Chromium 视口变化 → ResizeObserver
+# → reportHeight 的往返实测 p50≈2ms、偶发跨进程调度可达数十毫秒。窗口内与已应用
+# 值差 ≤ STREAM_HEIGHT_TRACK_EPSILON 的回传视为自激噪声，直接丢弃。
+_SELF_WRITE_GUARD_S = 0.08
 
 
 def user_bubble_target_width(container_width: int) -> int:
@@ -493,6 +499,8 @@ class MessageCard(SimpleCardWidget):
         self._finish_t0 = 0.0
         # 最近一次 viewer 高度增量（新值 - 旧值），供外层列表滚动锚定补偿读取
         self._last_height_delta = 0
+        # 自写高度回环抑制窗口截止时刻（monotonic，0 = 无窗口）：见 _SELF_WRITE_GUARD_S
+        self._viewer_write_guard_until = 0.0
         # 🆕 流式高度防抖：减少频繁 height report 导致的 viewer resize 抖动
         # [T29] 80 → 32ms：目标值进入追踪的频率。追踪 tick 已把"应用"
         # 侧的节拍连续化，防抖只负责合并同一窗口内的上报，不再需要独自扛
@@ -3307,6 +3315,28 @@ class MessageCard(SimpleCardWidget):
         except Exception:
             pass
         current_height = self.viewer.height() or self.viewer.minimumHeight() or 40
+        # 🆕 [自写回环抑制] 本次 setFixedHeight 引起的 Chromium 视口变化，会在
+        # 20~60ms 内以「与已应用值几乎相同」的高度经 ResizeObserver 回传。流式期
+        # 这条回传会重启 16ms 防抖 timer、再排一次追踪，形成「写 → 回传 → 重排 →
+        # 写」空转（外层每拍都收到一次无意义的高度变化，是抖动的残余来源）。
+        # 只吞「自写窗口内 + 与已应用值差 ≤ 追踪落定阈值」的回传；真实增长
+        # （差值超阈值）照常进入下方追踪/防抖。
+        if (
+            self._streaming
+            and time.monotonic() < self.__dict__.get("_viewer_write_guard_until", 0.0)
+            and abs(target_height - int(getattr(self, "_last_applied_viewer_height", 0) or 0))
+            <= STREAM_HEIGHT_TRACK_EPSILON
+        ):
+            return
+        if (self._streaming and target_height > current_height + 2
+                and not self.wants_outer_max_prelift()):
+            self._cancel_pending_shrink()
+            self._stream_height_timer.stop()
+            if self._stream_height_anim_active:
+                self._stop_stream_height_track()
+            self._target_viewer_height = target_height
+            self._apply_viewer_height(target_height)
+            return
         # 注：_target_viewer_height 不再在入口无条件覆盖。追踪活跃时由下方
         # 方向守卫分支决定是否改写；其余路径在各自应用点显式赋值。
         # [L3] 稳定状态下的高度才写入宽度→高度缓存
@@ -3589,13 +3619,29 @@ class MessageCard(SimpleCardWidget):
             # 增长方向：小阈值立即应用，保证流式输出滚底跟随。
             # 🐛 新内容填平了此前的收拢需求 → 取消挂起的延迟收缩。
             self._cancel_pending_shrink()
-            if h - current_height > 2:
+            gap = h - current_height
+            if gap > 2:
+                # 🆕 [同步优先] 落后超过一行余隙 → 直接对齐，不再插值追踪。
+                # 追踪是「用 50ms/84% 的插值把一个台阶摊成几拍」，代价是卡片
+                # 高度持续落后内容：大量正文流式输出时落后量稳定在 20~40px，
+                # 正文底部顶在 viewer 视口边缘（被裁）→ 随后突然蹦出，体感就是
+                # 「WebView 内部元素与外部气泡高度不同步」。跨过余隙的那一拍
+                # 立即 snap，把落后窗口从 ~150ms 压到一个 tick（≤50ms）；小步
+                # 增长仍走追踪，保留连续生长的观感。
+                if gap >= STREAM_HEIGHT_SNAP_GAP_PX:
+                    # 先停追踪（否则下一拍 tick 会用旧目标覆盖回去）。该调用会
+                    # 重发一次「已应用高度」（delta 已清零）；简洁流式卡外层不
+                    # 预抬上界，只多一次幂等贴底投递。
+                    if self._stream_height_anim_active:
+                        self._stop_stream_height_track()
+                    self._target_viewer_height = h
+                    self._apply_viewer_height(h)
                 # [T29] 增量足够大 → 启动追踪，消除「憋一下再整块蹦高」的
                 # 台阶感；量级不足（流式尾巴的小抖动）直接 snap，避免 tick 常转。
-                if (
+                elif (
                     STREAM_HEIGHT_ANIM_ENABLED
                     and Animations.motion_enabled()
-                    and (h - current_height) >= STREAM_HEIGHT_ANIM_MIN_DELTA
+                    and gap >= STREAM_HEIGHT_ANIM_MIN_DELTA
                 ):
                     self._target_viewer_height = h
                     self._begin_stream_height_track(h)
@@ -3782,6 +3828,38 @@ class MessageCard(SimpleCardWidget):
         except RuntimeError:
             pass
 
+    def wants_outer_max_prelift(self) -> bool:
+        """外层滚动区是否应为本卡的高度增量**预抬** maximum。
+
+        简洁模式（`ui_compact_tool_area`）流式期返回 False：
+
+        * 该模式下工具/思考区在卡片顶部按步合并、正文连续生长，高度上报是
+          内容驱动的连续流（20Hz 级）；
+        * 外层原逻辑每拍 `sb.setMaximum(maximum + delta)` 手工预抬上界，而 Qt
+          布局要到下一拍才落地 —— 预抬值与真实值之间那几 px 的缝，正是滚动条
+          thumb / 折叠栏可见抖动的来源（`_schedule_bottom_snap` 的 landed 口径
+          只能修「贴底落点」，修不了「上界本身每拍被人工改写」这一层）；
+        * 交给 Qt 自己维护上界后，跟底仍由 queued 贴底（读 `_landed_bottom_value`）
+          保证，不丢跟随。
+
+        非流式 / 非简洁模式返回 True：高度变化是离散事件（折叠、展开、终渲染），
+        预抬能让滚动条 range 立刻跟上，避免脏读旧上界。
+        """
+        if not getattr(self, "_streaming", False):
+            return True
+        try:
+            viewer = self.viewer
+        except RuntimeError:
+            return True
+        if viewer is None:
+            return True
+        try:
+            compact = bool(getattr(viewer, "_tool_compact_mode", False))
+        except (RuntimeError, AttributeError):
+            # sip-deleted wrapper：按旧行为预抬，避免异常路径丢掉外层补偿
+            return True
+        return not compact
+
     def _commit_viewer_height(self, height: int) -> None:
         """高度应用的统一出口。
 
@@ -3848,6 +3926,9 @@ class MessageCard(SimpleCardWidget):
             self._pending_viewer_height = height
             return
         self._commit_viewer_height(height)
+        # [自写回环抑制] 记录本次写入时刻：紧随其后的等值回传由 _update_height 入口吞掉
+        # （见该处注释）。只在真正写 viewer 的拍设置，resize preview / 等值短路不设。
+        self._viewer_write_guard_until = time.monotonic() + _SELF_WRITE_GUARD_S
         # viewer 高度变化后 body 视口可能改变，仅在用户已处于底部时重新滚动到底部
         # 🐛 修复：当 MAX_HEIGHT 限制导致 body 首次出现溢出时，scrollTop=0，
         # wasAtBottom 永远为 false，auto-scroll 不触发。跟踪用户主动滚动行为，

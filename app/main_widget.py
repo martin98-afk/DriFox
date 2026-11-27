@@ -20306,8 +20306,9 @@ class OpenAIChatToolWindow(ToolWindow):
             return
         try:
             sb = self.chat_scroll_area.verticalScrollBar()
+            landed = self._landed_bottom_value()
             with self._programmatic_scroll():
-                sb.setValue(self._landed_bottom_value())
+                sb.setValue(landed)
         except RuntimeError:
             # 会话/窗口切换中对象已销毁，放弃本次贴底
             pass
@@ -20871,17 +20872,22 @@ class OpenAIChatToolWindow(ToolWindow):
             container = self.chat_scroll_area.widget()
             if delta and container is not None and sender.parentWidget() is container:
                 sb = self.chat_scroll_area.verticalScrollBar()
-                if delta > 0:
+                # 🆕 简洁模式流式卡：**不预抬**上界。该模式下高度是内容驱动的
+                # 连续流，每拍手工 `maximum + delta` 与 Qt 下一拍才落地的真实值
+                # 之间总有几 px 的缝 —— 滚动条 thumb / 折叠栏的可见抖动正是它。
+                # 交给 Qt 维护上界，跟底仍由下方 queued 贴底（_landed_bottom_value）
+                # 保证；判据见 MessageCard.wants_outer_max_prelift。
+                if delta > 0 and sender.wants_outer_max_prelift():
                     with self._programmatic_scroll():
                         sb.setMaximum(max(0, sb.maximum() + delta))
                     # 缓存同步抬到新上界（而非置 None）：贴底/锚定拍与兑底链随后
                     # 读取时命中缓存即可，不再触发全量 sizeHint，O(1) 优化不白做。
                     self._scroll_max_cache = (time.monotonic(), sb.maximum())
                 else:
-                    # 收缩方向无法用增量表达（Qt 会自行压低上界）。不在此处补偿：
-                    # setValue 会被 Qt 自动钳到新上界，语义等价。仅失效缓存，让
-                    # 下一次读取（锚定拍/兑底链）落到 Qt 的真实值，避免读到陈旧
-                    # 上界抵消本优化的收益。
+                    # 收缩方向无法用增量表达（Qt 会自行压低上界）；简洁流式卡同理
+                    # 交给 Qt。不在此处补偿：setValue 会被 Qt 自动钳到新上界，
+                    # 语义等价。仅失效缓存，让下一次读取（锚定拍/兑底链）落到
+                    # Qt 的真实值，避免读到陈旧上界抵消本优化的收益。
                     self._scroll_max_cache = None
                 value = sb.value()
                 # 🐛 重建卡的位置判定：重建刚 insertWidget 时 Qt 布局未传播，

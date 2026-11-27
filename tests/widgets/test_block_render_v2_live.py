@@ -303,14 +303,14 @@ def test_rollback_forces_full_reload(monkeypatch):
 # ── 6. 门槛以下不启用 ─────────────────────────────────────────────
 
 
-def test_short_text_keeps_regular_path(monkeypatch):
+def test_compact_short_prose_enters_live_path(monkeypatch):
     blocks = [{"type": "text", "text": "短文本"}]
     v = _make_viewer(monkeypatch, blocks)
     assert v._perform_update_v2() is True
     js = "".join(v._page.js_calls)
     ops = _patch_ops(js, "content-placeholder")
-    assert ops and ops[0]["items"][0]["key"] != "live:0"
-    assert v._v2_live_key == ""
+    assert ops and ops[0]["items"][0]["key"] == "live:0"
+    assert v._v2_live_active([{'type': 'text', 'text': '**短文本**'}], 0) is None
 
 
 # ── 7. 骨架 JS 防线：新增的两个函数必须真实存在且语法有效 ──────────

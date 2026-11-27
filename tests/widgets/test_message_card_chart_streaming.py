@@ -34,14 +34,14 @@ from pathlib import Path
 
 import pytest
 
-from app.widgets import message_card
+from app.widgets import card_viewers
 from app.widgets.message_card import (
     _render_markdown_to_html_cached_impl,
     _sanitize_incomplete_markdown,
     _wrap_code_blocks_with_copy_button_web,
 )
 
-_SRC = Path(message_card.__file__).read_text(encoding="utf-8")
+_SRC = Path(card_viewers.__file__).read_text(encoding="utf-8")
 
 HALF_ECHARTS = "前文。\n\n```echarts\n" + '{"title":{"text":"销量"},"series":[{"type":"bar","data":[1,'
 FULL_ECHARTS = '```echarts\n{"title":{"text":"销量"},"series":[{"type":"bar","data":[1,2]}]}\n```\n\n后文。'
@@ -88,11 +88,17 @@ def test_complete_echarts_untouched():
     assert _sanitize_incomplete_markdown(FULL_ECHARTS) == FULL_ECHARTS
 
 
-def test_invalid_json_falls_back_to_code_block():
-    """fence 已闭合但 JSON 畸形：降级普通代码块，不留空洞容器。"""
-    html = _wrap_code_blocks_with_copy_button_web(code_block("echarts", "{这不是JSON,,,"))
-    assert "data-echarts-json" not in html, "非法 JSON 不应下发渲染属性（会留下空洞容器）"
-    assert "code-container" in html, "应降级为普通代码块"
+def test_invalid_json_preserves_source_for_copy_only():
+    raw = '{这不是JSON,,,'
+    html = _wrap_code_blocks_with_copy_button_web(code_block('echarts', raw))
+    assert 'data-echarts-json' not in html and raw not in html
+    assert 'chart-failure' in html and '有效的 JSON' in html
+    assert base64.b64decode(re.search(r'data-copy="([^"]+)"', html)[1]).decode() == raw
+
+
+def test_split_svg_keeps_source_out_of_visible_code():
+    html = _render_markdown_to_html_cached_impl('```svg\n<svg viewBox="0 0 10 10">')
+    assert 'chart-skeleton' in html and 'viewBox' not in html
 
 
 def test_plain_code_block_unaffected():
@@ -209,7 +215,7 @@ def test_skeleton_taken_before_incremental_removal(fn, args):
     """
     head = f"function {fn}{args} {{"
     i = _SRC.index(head)
-    body = _SRC[i : i + 2200]
+    body = _SRC[i : _SRC.index('\n                }}', i)]
     take = body.index("window._takeSkeleton(container)")
     remove = body.index('data-incremental="true"')
     reattach = body.index("window._reattachSkeleton(")

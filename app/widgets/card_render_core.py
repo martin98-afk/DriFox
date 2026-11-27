@@ -532,6 +532,13 @@ STREAM_HEIGHT_TRACK_EPSILON = 2
 # 不存在「常开空转」问题（那是 MIN_DELTA 存在的历史原因，已被 epsilon
 # 停拍机制覆盖）。
 STREAM_HEIGHT_ANIM_MIN_DELTA = 2
+# 落后续隙（px）：目标比当前 viewer 高出这么多时**直接对齐**，不再走插值追踪。
+# 背景（用户可见）：大量正文流式输出时，JS 上报本身已是 80ms 级台阶，追踪再
+# 用 50ms/84% 逼近 → 卡片高度持续落后内容 1~2 拍（约 20~40px）。落后期间正文
+# 底部顶在 viewer 视口边缘（被裁）或被裁后突然蹦出 = 「与气泡高度不同步 / 局部
+# 空白」的体感来源。跨过一行的余隙就直接 snap，把「落后窗口」从 ~150ms 压到
+# 一拍；小步增长（< 该值）仍走追踪，保持连续生长的观感。
+STREAM_HEIGHT_SNAP_GAP_PX = 32
 # 结束态（FINISH 窗口）追踪的逼近比例：比流式更缓——结束态的高度变化
 # 与页面内 CSS 过渡（200ms）/ FLIP（220ms）同量级，追踪太快会"Qt 侧先到、
 # 页面还在动"的两段感，即丝绸尾音。[T34] 0.28 → 0.12：按 τ 不变重算
@@ -812,6 +819,15 @@ def _plugin_fence_placeholder(info, code_content_raw: str) -> str:
     return _CHART_SKELETON_HTML
 
 
+def _chart_failure(message: str, source: str) -> str:
+    # 已识别为图表的围栏不再落入普通代码路径；源码仍可通过复制按钮取回。
+    raw = _unescape_html(source)
+    payload = base64.b64encode(raw.encode('utf-8')).decode('ascii')
+    return (f'<div class="chart-failure" role="note"><span>{escape(message)}</span>'
+            f'<button type="button" class="code-btn" data-action="copy" data-copy="{payload}" '
+            'aria-label="复制图表源码" data-tooltip="复制图表源码"><span class="ci ci-copy"></span></button></div>')
+
+
 def _render_render_fence(lang: str, code_content_raw: str) -> Optional[str]:
     """渲染型 fence → 图表/卡片容器 HTML；非渲染型返回 None。
 
@@ -827,7 +843,10 @@ def _render_render_fence(lang: str, code_content_raw: str) -> Optional[str]:
     # <lang>-streaming。这里必须在此之前拦截：残缺 JSON 若照常包成
     # .echarts-container，其 b64 每轮随内容增长而变化 → vault key 每轮都不同，
     # 节点被反复塞进 vault 迅速膨胀（多图白屏的次因）。骨架不入 vault、不 init。
-    if lang in ("echarts-streaming", "mermaid-streaming", "html-streaming", "widget-streaming"):
+    lang = lang.lower()
+    if lang.endswith('-incomplete') and _is_render_fence_lang(lang[:-11]):
+        return _chart_failure('内容未显示：输出结束时，渲染块尚未闭合。', code_content_raw)
+    if lang in ("echarts-streaming", "mermaid-streaming", "html-streaming", "widget-streaming", "svg-streaming"):
         return _CHART_SKELETON_HTML
     # 插件注册的 fence 在流式期同样降级为占位：半截源码交给 render_func
     # 必然产出残缺节点，且内容每轮变化会让产物反复变更、高度抖动。
@@ -851,16 +870,16 @@ def _render_render_fence(lang: str, code_content_raw: str) -> Optional[str]:
         try:
             # 解码 HTML 实体（&quot; → " 等），确保 JSON 可解析
             json_text = _unescape_html(code_content_raw)
-            json.loads(json_text)  # 校验：非法 JSON 降级为普通代码块，不留空洞容器
+            if not isinstance(json.loads(json_text), dict):
+                return _chart_failure('图表未显示：配置必须是 JSON 对象。', code_content_raw)
             # base64 编码防止 HTML 属性转义问题
             b64_json = base64.b64encode(json_text.encode("utf-8")).decode("ascii")
             chart_id = "echart-" + hashlib.sha1(json_text.encode("utf-8")).hexdigest()[:12]
             return f'''
                 <div id="{chart_id}" class="echarts-container" data-echarts-json="{b64_json}" style="width: 100%; height: 400px; margin: 12px 0; border-radius: 10px; overflow: hidden;"></div>
                 '''
-        except Exception:
-            # JSON 解析失败，降级为普通代码块
-            return None
+        except (ValueError, TypeError, RecursionError):
+            return _chart_failure('图表未显示：配置不是有效的 JSON。', code_content_raw)
 
     # ===== Mermaid 代码块：渲染为矢量图表 =====
     # 这里只产出占位容器，真正的 vendor（polyfill + mermaid 10.9.1）
@@ -879,7 +898,7 @@ def _render_render_fence(lang: str, code_content_raw: str) -> Optional[str]:
                 )
         except Exception:
             pass
-        return None
+        return _chart_failure('流程图未显示：图表描述为空或无法读取。', code_content_raw)
 
     # ===== SVG 代码块：透传 raw HTML，浏览器直渲 =====
     # 协议上 SVG 应内联正文（visualization skill），但模型习惯性输出 ```svg 围栏，
@@ -1189,7 +1208,7 @@ def _escape_bare_hash_headers(md_text: str) -> str:
     return "\n".join(out)
 
 
-def _sanitize_incomplete_markdown(md_text: str) -> str:
+def _sanitize_incomplete_markdown(md_text: str, *, final: bool = False) -> str:
     if not md_text:
         return ""
     # 裸井号编号转义：`#56 …` 会被 Python-Markdown 当成 ATX 标题（它不要求
@@ -1232,11 +1251,11 @@ def _sanitize_incomplete_markdown(md_text: str) -> str:
         stripped = lines[fence_open_line].strip()
         lang_token = stripped[3:].strip()
         if (
-            lang_token.lower() in ("mermaid", "echarts", "html", "widget")
+            lang_token.lower() in ("mermaid", "echarts", "html", "widget", "svg")
             or _get_plugin_fence_renderer(lang_token.lower()) is not None
         ):
             lines[fence_open_line] = lines[fence_open_line].replace(
-                lang_token, f"{lang_token}-streaming", 1
+                lang_token, f"{lang_token}-{'incomplete' if final else 'streaming'}", 1
             )
             md_text = "\n".join(lines)
         md_text += "\n" + fence_marker
@@ -3913,7 +3932,8 @@ _SKELETON_CACHE_MAX = 48
 # 自动置底前按几何自愈、内层标志翻转即时上报、复用清理复位容器 expando。
 # 修「已滚到底但流式不再自动跟随」（内容在 scroll 事件派发前增长导致 atBottom
 # 判定失真，标志被误置为上滚阅读后永久卡住）。JS 资产变更，旧骨架缓存须失效。
-_SKELETON_CACHE_VERSION = 87
+# v88：简洁阅读样式和图表状态变更，池化前的旧骨架不可复用。
+_SKELETON_CACHE_VERSION = 88
 
 
 def _js_literal(value) -> str:
