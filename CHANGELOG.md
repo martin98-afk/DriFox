@@ -1,3 +1,22 @@
+## [v0.7.6] - 2026-11-27
+
+自 v0.7.5 以来的变更 | 提交数：9 · 文件变更：52 · +8937/-485 | 贡献者：mading, martin98-afk
+
+### ✨ 新功能 (New Features)
+- **性能基准、预算门禁与测量规程** (`tools/perf/benchmark_core.py` · `measure_gate.py` · `check_plan_coverage.py` · `tests/perf/`): 新增核心性能基准、测量规程、证伪清单与下一轮优先项文档；加入启动/内存预算门、插件加载冒烟、AST 与 code cache 安全测试。顺带修复 AST 门禁缓存绕过、会话 CAS 静默失败、缓存泄漏与动画源回收遗漏；优化设置页懒建、主题探测、日志 formatter、插件编译缓存及 renderer 回收。
+
+### 🐛 问题修复 (Bug Fixes)
+- **触控板像素直通与滚动期动画降载** (`app/utils/scroll_tuning.py` · `app/widgets/card_viewers.py` · `message_card.py`): Qt5 `QAbstractSlider::wheelEvent` 只认 angleDelta，pixelDelta 被整段丢弃（离屏实测 pixelDelta=-10 连发 6 次滚动条只走 0~1px，mac 触控板发涩根因）。pixelDelta 非空时按像素 1:1 setValue，细分 angleDelta 按 120→step×lines 折算并保留小数残差；新增 `scroll_wheel_to` 统一转发入口（直调 `area.wheelEvent` 会绕过 viewport 过滤器）；短过渡 QTimer 改懒创建，`smooth_ms=0` 的滚动区不再常驻；滚动活跃 120ms 内跳过装饰动画帧。测试 `tests/utils/test_scroll_tuning.py` 9 例（修复前 0px / 修复后 60px）。
+- **重建卡首报补偿改用稳定布局偏移** (`app/widgets/message_card.py` · `app/main_widget.py`): 虚拟滚动重建卡片时首报 mapTo 在布局未传播时读到 y=0，方向误判成「上方」把 value 拽走 120~300px。新增 `_layout_offset_before` 按插入位置前累计高度一次性判定，写入一次性令牌 `_rebuild_above_px`，消费后清除恢复常规几何判定；纯 Qt 渲染器高度同步落定，首报即解除占位钉死。回归 `tests/widgets/test_rebuild_scroll_compensation.py`。
+- **滚动输入识别与 Mac 删除快捷键** (`app/utils/scroll_tuning.py` · `app/main_widget.py` · `plugins/file-tree/ui/tree_widget.py`): 滚动接管器新增输入回调，覆盖卡片转发滚轮，避免用户滚动状态漏判导致视口被拽回底部；file-tree 支持 Delete、Backspace+Cmd/Ctrl 删除，排除 Shift+Backspace 误触。附记忆压缩/注入优先级/项目记忆预算测试。
+- **子智能体 400 MissingSessionID** (`app/core/workers/subagent_worker.py` · `app/main_widget.py`): 斜杠命令派发路径 `_execute_subagent_task` 未传 session_id，空会话标识让 `resolve_extra_headers` 跳过 `x-opencode-session`，OpenCode Zen/Go 首轮即 400。派发时锁定当前会话 ID，worker 新增 `_request_session_id` 缺失时以 task_id 兜底（覆盖插件经 `subagent.run` 自行派发路径）。测试 `tests/core/test_subagent_session_header_fallback.py` 4 例。
+- **多标签页会话串台** (`app/utils/history_manager.py` · `app/main_widget.py` · `app/widgets/ui_helpers.py`): HistoryManager 新增 `_history_lock`(RLock)，结构变更持锁；新增 `update_session_by_id` 按 session_id 重新定位，避免下标漂移误写他条记录；三处保存路径以 `session.session_id` 为权威，缓存 id 不一致时告警并纠正。回归覆盖下标漂移、并发插入、多线程交叉写入。
+- **切主题后已开标签页聊天区背景不刷新** (`app/main_widget.py`): 批量刷新路径 `_apply_runtime_ui_settings` 颜色块补调 `apply_chat_surface_opaque`（与 `refresh_theme` 两处缺一不可），源码级测试锁定两条路径。
+- **Artifact 头部 hover 背景解析** (`plugins/artifacts-manager/ui/artifact_panel.py`): `QColor(Colors.HOVER_BG)` 换 `parse_color`，修复主题色为 rgba 字符串时 alpha 丢失。
+
+### 🔧 其他 (Chores & Build)
+- 版本号升至 v0.7.6（`pyproject.toml` / `app/utils/config.py` / `dist/installer.iss` / `README.md`）。
+
 ## [v0.7.5] - 2026-11-23
 
 自 v0.7.4 以来的变更 | 提交数：17 · 文件变更：95 · +8706/-748 | 贡献者：drifox-bot, mading
