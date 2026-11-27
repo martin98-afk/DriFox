@@ -10565,6 +10565,8 @@ class OpenAIChatToolWindow(ToolWindow):
         # dispatch_refresh = 主题发生变更 → scope="theme"
         # [PERF #I2] 主题变更 → 重判聊天区实底（纯色刷 / 壁纸还原，幂等）。
         # 主装配与兜底装配共用 host（MainWidget），此处一处联动覆盖两路径。
+        # ⚠️ batched 路径不经过本方法（直接调 _apply_runtime_ui_settings），
+        # 同口径调用必须同时存在于该方法颜色块内，两处不可删任一处。
         try:
             from app.widgets.modules.chat_area_module import apply_chat_surface_opaque
 
@@ -11530,6 +11532,20 @@ class OpenAIChatToolWindow(ToolWindow):
             set_style_sheet_if_changed(self, "background: transparent;")
             ThemeRefreshCoordinator.timer_end("self_qss")
             self.setAutoFillBackground(False)
+
+            # [PERF #I2] 消息列表（chat_container）实底随主题重判：纯色主题
+            # 刷预合成不透明底（滚动 blit），壁纸/动态层主题还原透明。
+            # 必须在此处执行而非只放 refresh_theme()：GUI 手动切主题走
+            # _execute_batched_theme_refresh → 直接调本方法、不经过
+            # refresh_theme，漏掉这一步的窗口（含切回补刷的非活动标签页）
+            # 会保留旧主题的实底色，表现为「新开标签页正常、已开标签页
+            # 深浅切换后消息列表背景不刷新」。幂等，重复进入无副作用。
+            try:
+                from app.widgets.modules.chat_area_module import apply_chat_surface_opaque
+
+                apply_chat_surface_opaque(self)
+            except Exception:
+                pass  # 模块 / 主题系统未就绪不阻塞主题刷新
 
             # 分支标签
             ThemeRefreshCoordinator.timer_start("branch_chip")

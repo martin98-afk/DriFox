@@ -105,3 +105,22 @@ def test_idempotent_when_already_opaque(qapp, monkeypatch):
 def test_host_without_container_is_safe(qapp, monkeypatch):
     _mock_theme(monkeypatch)
     apply_chat_surface_opaque(_Host(with_container=False))  # 不抛异常即可
+
+
+def test_appearance_refresh_reapplies_chat_surface():
+    """GUI 手动切主题走 _execute_batched_theme_refresh → 直接调
+    _apply_runtime_ui_settings（不经过 refresh_theme），该路径必须重判
+    chat_container 实底，否则已打开标签页保留旧主题底色。
+
+    源码级锁定：两处调用缺任一处都会让「新开页正常、已开页不刷新」复发。
+    """
+    import inspect
+
+    from app.main_widget import OpenAIChatToolWindow
+
+    src_refresh_theme = inspect.getsource(OpenAIChatToolWindow.refresh_theme)
+    src_runtime = inspect.getsource(OpenAIChatToolWindow._apply_runtime_ui_settings)
+    assert "apply_chat_surface_opaque" in src_refresh_theme, "dispatch_refresh 路径漏刷聊天区实底"
+    assert "apply_chat_surface_opaque" in src_runtime, (
+        "batched 路径（_apply_runtime_ui_settings 颜色块）漏刷聊天区实底"
+    )
