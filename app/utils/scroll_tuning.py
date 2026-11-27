@@ -24,6 +24,15 @@ qfw 引擎里的两级放大也一并失效：基础 1.5 倍 ``stepRatio``，以
 
 滚到顶/底时返回 False 让事件继续冒泡，不吞掉外层容器（卡片套卡片、WebView 内外
 路由、消息卡把滚轮转给聊天区）已有的滚轮链路。
+
+## 触控板（pixelDelta）
+
+Qt5 的 ``QAbstractSlider::wheelEvent`` 只认 ``angleDelta``，按
+``singleStep × wheelScrollLines`` 做「累积到 120 才走一步」的量化，
+触控板的连续小 delta 与 ``pixelDelta`` 因此被整段丢掉（离屏实测：
+``pixelDelta=-10`` 连发 6 次，滚动条只走 1px；手指滑 60px、内容走 1px）。
+本模块对带 ``pixelDelta`` 的事件一律按像素位移 1:1 ``setValue``，
+惯性仍由系统 momentum 事件（同样以 wheel 形式到达）驱动，不自造动画。
 """
 
 from __future__ import annotations
@@ -53,6 +62,22 @@ _DEFAULT_SMOOTH_MS = 0
 _FRAME_INTERVAL_MS = 16
 _WHEEL_NOTCH = 120
 _INSTALLED_ATTR = "_drifox_fast_wheel_filter"
+# 滚动活跃窗口：滚轮/触控板消费事件后置位，动画类控件据此在滚动期降级重绘。
+# 120ms ≈ 两次手势间的最长空档，滚动一停动画立即恢复（相位由各控件自己保存）。
+_SCROLL_ACTIVE_MS = 120.0
+_scroll_active_until = 0.0
+
+
+def mark_scroll_activity() -> None:
+    """登记一次滚动输入，刷新活跃窗口。"""
+    global _scroll_active_until
+    _scroll_active_until = time.monotonic() + _SCROLL_ACTIVE_MS / 1000.0
+
+
+def is_scroll_active() -> bool:
+    """是否处于滚动活跃窗口内（供动画类控件跳过装饰性重绘）。"""
+    return time.monotonic() < _scroll_active_until
+
 
 # qfw ScrollArea 的悬浮自绘条属性名（SmoothScrollDelegate 持有）
 _QFW_BAR_ATTRS = ("vScrollBar", "hScrollBar")
@@ -120,8 +145,38 @@ def _switch_to_native_bar(area: QAbstractScrollArea) -> bool:
     return True
 
 
+def _can_step(bar, value_delta: int) -> bool:
+    """滚动条能否按 value_delta 再走一步（到顶/到底返回 False，保留外层链路）。"""
+    if bar is None or bar.maximum() <= bar.minimum():
+        return False
+    if value_delta > 0 and bar.value() >= bar.maximum():
+        return False
+    if value_delta < 0 and bar.value() <= bar.minimum():
+        return False
+    return True
+
+
+def scroll_wheel_to(area: QAbstractScrollArea, event) -> bool:
+    """把 wheel 事件交给 area 已装的接管器；未装则回退 Qt 原生。
+
+    转发点原先直接调 ``area.wheelEvent(event)``，绕过 viewport 上的
+    eventFilter → 触控板像素路径与整格放大全部失效。统一收口到这里。
+
+    Returns:
+        True = 已消费（调用方应 accept），False = 未消费。
+    """
+    flt = getattr(area, _INSTALLED_ATTR, None)
+    if isinstance(flt, _FastWheelFilter):
+        try:
+            return flt.handle_wheel(event)
+        except RuntimeError:
+            return False
+    area.wheelEvent(event)
+    return True
+
+
 class _FastWheelFilter(QObject):
-    """viewport 级滚轮过滤器：连续滚轮加速 + 短过渡帧推进。"""
+    """viewport 级滚轮过滤器：触控板像素直通 + 连续滚轮加速 + 短过渡帧推进。"""
 
     def __init__(self, area: QAbstractScrollArea, parent=None):
         super().__init__(parent or area)
@@ -134,39 +189,74 @@ class _FastWheelFilter(QObject):
         # 「每格不一样远」直接可见，观感就是颜。固定步长反而稳。
         self._accel = False
         self._smooth_ms = _DEFAULT_SMOOTH_MS
-        # 短过渡状态：计时器只在动画期间跑，空闲时不占 CPU
-        self._timer = QTimer(self)
-        self._timer.setInterval(_FRAME_INTERVAL_MS)
-        self._timer.timeout.connect(self._tick)
+        # 短过渡状态：计时器只在动画期间创建并运行，空闲时不占 CPU。
+        # 懒创建（而非构造即建）：默认 smooth_ms=0 的调用点永远用不到它，
+        # 每个滚动区少一个常驻 QTimer；离屏测试里也能避免残留 timer 与
+        # qfw 图标绘制同进程时的段错误。
+        self._timer: QTimer | None = None
         self._elapsed = QElapsedTimer()
         self._anim_bar = None
         self._anim_target: int | None = None
         self._anim_start = 0
         self._last_set: int | None = None
+        # 细分 angleDelta（无 pixelDelta 的平台）的像素折算残差
+        self._frac = 0.0
 
     def eventFilter(self, obj, event):  # noqa: N802 - Qt 回调
         if event.type() != QEvent.Wheel:
             return False
+        return self.handle_wheel(event)
+
+    def handle_wheel(self, event) -> bool:
+        """消费一个 wheel 事件；True = 已滚动并 accept，False = 放行。
+
+        从 viewport 的 eventFilter 与外部转发点（卡内 viewer 到边界后转外层、
+        滚轮守卫）共用：直接调 ``area.wheelEvent()`` 会绕过 eventFilter，
+        触控板像素路径就失效了。
+        """
+        area = self._area
+        try:
+            vbar = area.verticalScrollBar()
+            hbar = area.horizontalScrollBar()
+        except RuntimeError:
+            return False  # area 已销毁
+
+        # ① 触控板/高精度指针：pixelDelta 1:1 跟手（正 delta = 内容下移 = value 减）
+        pixel = event.pixelDelta()
+        if not pixel.isNull():
+            py, px = pixel.y(), pixel.x()
+            bar = vbar if py else hbar
+            move = -(py or px)
+            if move and _can_step(bar, move):
+                mark_scroll_activity()
+                bar.setValue(bar.value() + move)
+                event.accept()
+                return True
+            return False
+
         dy = event.angleDelta().y()
         dx = event.angleDelta().x()
         delta = dy or dx
         if not delta:
             return False
-        # 触控板 / 高精度滚轮（非 120 的整数倍）交给 Qt 原生按像素滚
-        if abs(delta) % _WHEEL_NOTCH != 0:
-            return False
 
-        area = self._area
-        try:
-            bar = area.verticalScrollBar() if dy else area.horizontalScrollBar()
-        except RuntimeError:
-            return False  # area 已销毁
-        if bar is None or bar.maximum() <= bar.minimum():
-            return False
-        # 到顶 / 到底放行，保留外层容器的滚轮链路
-        if (delta > 0 and bar.value() <= bar.minimum()) or (
-            delta < 0 and bar.value() >= bar.maximum()
-        ):
+        # ② 无 pixelDelta 的细分滚轮：按角度折算像素并保留小数残差，
+        #    不交给 Qt 的整格累积量化（那正是「滚了没反应」的源头）。
+        if abs(delta) % _WHEEL_NOTCH != 0:
+            bar = vbar if dy else hbar
+            lines = QApplication.wheelScrollLines()
+            if lines <= 0:
+                lines = 3
+            step_px = max(1, bar.singleStep()) * lines
+            move = -self._accumulate_angle(delta, step_px)
+            if move and _can_step(bar, move):
+                mark_scroll_activity()
+                bar.setValue(bar.value() + move)
+            event.accept()  # 本区接管（含残差不足 1px 的拍），不再外溢
+            return True
+
+        bar = vbar if dy else hbar
+        if not _can_step(bar, -delta):
             return False
 
         now = time.monotonic() * 1000.0
@@ -183,9 +273,31 @@ class _FastWheelFilter(QObject):
         step = max(1, bar.singleStep()) * lines
         notches = abs(delta) / _WHEEL_NOTCH
         distance = step * notches * self._step_ratio * (1.0 + accel_ratio)
+        mark_scroll_activity()
         self._scroll_by(bar, -math.copysign(distance, delta))
         event.accept()
         return True
+
+    def _accumulate_angle(self, delta: int, step_px: int) -> int:
+        """把细分 angleDelta 折算成整数像素并保留小数残差。
+
+        方向翻转时清零残差，避免正反滚互相抵消（会让手感变「黏」）。
+        """
+        if delta and (delta > 0) != (self._frac > 0):
+            self._frac = 0.0
+        self._frac += delta * step_px / _WHEEL_NOTCH
+        whole = int(self._frac)
+        if whole:
+            self._frac -= whole
+        return whole
+
+    def _ensure_timer(self) -> QTimer:
+        """按需创建短过渡计时器。"""
+        if self._timer is None:
+            self._timer = QTimer(self)
+            self._timer.setInterval(_FRAME_INTERVAL_MS)
+            self._timer.timeout.connect(self._tick)
+        return self._timer
 
     # ── 短过渡推进 ──────────────────────────────────────
 
@@ -205,12 +317,11 @@ class _FastWheelFilter(QObject):
             self._anim_start = cur
             self._anim_target = cur
         self._anim_bar = bar
-        self._anim_target = int(
-            max(bar.minimum(), min(bar.maximum(), self._anim_target + delta_value))
-        )
+        self._anim_target = int(max(bar.minimum(), min(bar.maximum(), self._anim_target + delta_value)))
         self._elapsed.start()
-        if not self._timer.isActive():
-            self._timer.start()
+        timer = self._ensure_timer()
+        if not timer.isActive():
+            timer.start()
 
     def _tick(self) -> None:
         bar = self._anim_bar
@@ -237,7 +348,8 @@ class _FastWheelFilter(QObject):
         self._last_set = bar.value()
 
     def _stop_animation(self) -> None:
-        self._timer.stop()
+        if self._timer is not None:
+            self._timer.stop()
         self._anim_bar = None
         self._anim_target = None
         self._last_set = None

@@ -128,6 +128,7 @@ from app.widgets.render_helpers import (
     render_tool_block,
 )
 from app.utils.session_preview import format_relative_time
+from app.utils.scroll_tuning import is_scroll_active, scroll_wheel_to
 from app.widgets.simple_hover_tooltip import install_hover_tooltip
 
 # 渲染管线与查看器已拆分至独立模块；此处 re-export 保持既有 import 路径兼容。
@@ -2605,6 +2606,12 @@ class MessageCard(SimpleCardWidget):
         if not self.isVisible():
             self._anim_clock.restart()
             return
+        # 滚动活跃门控：视口正在移动时跳装饰动画帧（呼吸光带/流光）。滚动本身
+        # 每帧已经在重绘整视口，再叠一路 15fps 整卡 update() 会直接掉帧；
+        # 相位语义同上，滚动一停（120ms）从原位置继续，无视觉跳变。
+        if is_scroll_active():
+            self._anim_clock.restart()
+            return
         # [P2-7] 视口门控：卡片滚出 chat 视口可见范围时不空耗 update()（20fps
         # 整卡动画在长会话里大多发生在屏幕外）。与隐藏分支同款相位语义：
         # 时钟 restart，滚回视口后从原相位继续，无视觉跳变。
@@ -4120,16 +4127,14 @@ class MessageCard(SimpleCardWidget):
 
     def wheelEvent(self, event: QWheelEvent):
         # MessageCard 的 wheelEvent 仅在子 widget（viewer）未消费事件时被调用。
-        # 此时说明内部没有可滚动内容，或内部已达边界 → 转发外层滚动区，
-        # 走 qfluentwidgets SmoothScroll，与卡片间隙滚动同款平滑手感。
+        # 此时说明内部没有可滚动内容，或内部已达边界 → 转发外层聊天滚动区。
+        # 必须走 scroll_wheel_to（而不是 scroll_area.wheelEvent）：后者绕过
+        # viewport 上的接管器，触控板像素直通与整格放大全部失效。
         try:
             scroll_area = self._parent.chat_scroll_area
-            if scroll_area:
-                vbar = scroll_area.verticalScrollBar()
-                if vbar and vbar.minimum() != vbar.maximum() and event.angleDelta().y() != 0:
-                    scroll_area.wheelEvent(event)
-                    event.accept()
-                    return
+            if scroll_area and scroll_wheel_to(scroll_area, event):
+                event.accept()
+                return
         except Exception:
             pass
         super().wheelEvent(event)

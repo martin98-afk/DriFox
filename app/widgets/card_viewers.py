@@ -83,7 +83,7 @@ from app.utils.design_tokens import (
     scale_font_size,
     scale_icon_size,
 )
-from app.utils.scroll_tuning import install_fast_wheel
+from app.utils.scroll_tuning import install_fast_wheel, scroll_wheel_to
 from app.utils.utils import get_font_family_css, get_icon
 from app.utils._startup_probe import trace_enabled as _diag_trace_enabled
 from app.widgets.render import (
@@ -11694,7 +11694,7 @@ class CodeWebViewer(QWebEngineView):
         外层转发走同一条 SmoothScroll 路径，手感一致。
         返回 True = 事件已消费（调用方应拦截），False = 放行给 Chromium。
         """
-        dy = event.angleDelta().y()
+        dy = event.angleDelta().y() or event.pixelDelta().y()
         if dy == 0:
             return False
         state = self._inner_wheel_state(dy)
@@ -11728,7 +11728,8 @@ class CodeWebViewer(QWebEngineView):
         文本遮挡」的第二半：几何修好了也没有滚动手径）。
 
         内部 PlainTextViewer(QWidget) 本身不可滚动，始终转发到外部。
-        转发外层滚动区走 qfluentwidgets SmoothScroll，与卡片间隙滚动同款平滑手感。
+        转发走 ``scroll_wheel_to``（外层已装接管器时触控板像素直通，否则回退 Qt
+        原生）——直接调 ``scroll_area.wheelEvent()`` 会绕过 viewport 过滤器。
         ⚠️ 宿主层级可变（曾直挂卡片，2026-09-23 起移入 assistant 气泡），
         不能写死 parent().parent() 层数 —— 层数变了 _parent 取不到，
         AttributeError 被吞后滚轮静默失效。沿父链找持 _parent 的 MessageCard。
@@ -11742,17 +11743,9 @@ class CodeWebViewer(QWebEngineView):
                     break
                 node = node.parent()
             scroll_area = card._parent.chat_scroll_area if card is not None else None
-            if scroll_area:
-                vbar = scroll_area.verticalScrollBar()
-                dy = event.angleDelta().y()
-                if vbar and vbar.minimum() != vbar.maximum() and dy != 0:
-                    _at_bound = (dy > 0 and vbar.value() <= vbar.minimum()) or (
-                        dy < 0 and vbar.value() >= vbar.maximum()
-                    )
-                    if not _at_bound:
-                        scroll_area.wheelEvent(event)
-                        event.accept()
-                        return True
+            if scroll_area and scroll_wheel_to(scroll_area, event):
+                event.accept()
+                return True
         except Exception:
             pass
         return False
