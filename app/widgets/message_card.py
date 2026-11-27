@@ -3655,8 +3655,11 @@ class MessageCard(SimpleCardWidget):
     def _on_qt_viewer_height(self, h: int) -> None:
         """灰度：纯 Qt viewer 高度自治（layout 自适应，不 setFixedHeight），
         仅转发高度变化给父容器（滚底跟随依赖 heightChanged 链路）。"""
-        # 灰度路径无增量语义：清零防止外层列表用残留 delta 做错误锚定补偿
+        # 纯 Qt viewer 的高度同步落定；若占位钉死发生在 viewer 创建前，
+        # 首次同步上报必须解除它，否则后续布局会永久被占位高度锁住。
+        self._unpin_layout_height()
         self._last_height_delta = 0
+        self.updateGeometry()
         self.heightChanged.emit(max(40, int(h)))
 
     def _resolve_height_batch(self):
@@ -3738,25 +3741,19 @@ class MessageCard(SimpleCardWidget):
                 退回「viewer 增量」口径，在重建路径上会严重高估（见
                 ``_apply_viewer_height`` 的说明）。
         """
-        # 🐛 用户卡片（PlainTextViewer）不参与钉死：PlainTextViewer 同步定型，
-        # set_text 当拍即 setFixedSize 到实测尺寸，contentHeightChanged emit 时
-        # viewer.height() 已等于上报值 → 卡片侧 _update_height 的 ±2px 噪声死区
-        # （target == current）恒命中 return，高度永远到不了 _apply_viewer_height
-        # 的 unpin 出口。T42 重建时序又是「建卡（emit 已被死区消费）→ 钉死」，
-        # 钉死后不再有任何自然上报 → 卡片永久 min=max=占位高度 H，H 与真实内容
-        # 高的任何偏差（批次均摊、卸载到重建之间的宽度变化、字体度量漂移）都被
-        # 固化成永久高度错误（长历史会话向上翻页时上方重建的用户卡片偶现异常）。
-        # 跳钉后高度由布局按 PlainTextViewer.sizeHint()（实测值）自然分配，
-        # viewer 已建立即正确；viewer 未建（兜底）→ 创建后同样走布局，均可自愈。
-        # assistant/welcome 的 CodeWebViewer 异步上报（reportHeight 在 pin 后到达，
-        # 起步 40 → 真实高的差必 > 2px）不受死区影响，钉死行为保持不变。
-        if self.role == "user":
-            v = self.viewer
-            if v is not None:
-                try:
-                    self._apply_viewer_height(int(v.height()))
-                except RuntimeError:
-                    pass
+        # 🐛 纯 Qt 渲染器高度同步落定，不需要占位钉死。重建路径通常在
+        # ensure_rendered 之后才调用本方法，此时卡片已经有真实 sizeHint；若
+        # 调用顺序相反，则由 _on_qt_viewer_height 在首次同步上报时解除。
+        if self.role == "user" or (
+            self.viewer is not None and not getattr(self, "_viewer_async_height", True)
+        ):
+            if self.role == "user":
+                v = self.viewer
+                if v is not None:
+                    try:
+                        self._apply_viewer_height(int(v.height()))
+                    except RuntimeError:
+                        pass
             return
         try:
             self.setFixedHeight(max(1, int(height)))

@@ -13202,8 +13202,42 @@ class OpenAIChatToolWindow(ToolWindow):
                 # 高度上报时由卡片侧解除（_unpin_layout_height）。若只裸钉不解除，
                 # H 与内容实际高度的差会被布局压给气泡 + 页脚（页脚拉伸畸变）。
                 card.pin_layout_height(max(1, target), content_overhead=content_overhead)
+                if getattr(card, "_layout_height_pinned", False):
+                    # 🐛 首报补偿方向不能靠 mapTo：重建刚 insertWidget + setFixedHeight，
+                    # Qt 布局要下一拍才传播，此刻 mapTo 读到 y=0 → 视口内/下方的卡会被
+                    # 误判成「整卡在视口上方」，外层对 delta 施加 value += delta 把视口
+                    # 拽走（实测 120~300px，滚动时反复出现 = 滚轮乱跳）。
+                    # 改为记录「插入位置之前的累计布局高度」：之前各项的 height() 都是
+                    # 已落定的稳定值，不依赖待传播的布局。一次性令牌，首报消费后清除。
+                    card._rebuild_above_px = self._layout_offset_before(card)
             except (RuntimeError, AttributeError):
                 continue
+
+    def _layout_offset_before(self, card) -> int:
+        """``card`` 在 ``chat_layout`` 中之前的累计布局高度（含槽间距）。
+
+        供重建卡首报时判定「是否整卡在视口上方」。与 ``card.mapTo()`` 的区别是
+        只读**其它**控件的 height()——它们已经落定；重建卡自身的几何（尚未传播）
+        完全不参与，因此不受 ``y=0`` 中间态影响。
+        """
+        total = 0
+        try:
+            count = int(self.chat_layout.count())
+            spacing = max(0, int(self.chat_layout.spacing()))
+        except (AttributeError, RuntimeError, TypeError, ValueError):
+            return 0
+        for i in range(count):
+            item = self.chat_layout.itemAt(i)
+            widget = item.widget() if item is not None else None
+            if widget is card:
+                return total
+            if widget is None or not self._is_widget_alive(widget):
+                continue
+            try:
+                total += int(widget.height()) + spacing
+            except (RuntimeError, TypeError, ValueError):
+                continue
+        return total
 
     def _clear_batch_placeholders(self, remove_from_layout: bool = True):
         """清空全部批次占位。会话切换 / 布局重建时必须调用，防止索引错位。
@@ -20814,7 +20848,20 @@ class OpenAIChatToolWindow(ToolWindow):
                     # 上界抵消本优化的收益。
                     self._scroll_max_cache = None
                 value = sb.value()
-                card_top = sender.mapTo(container, sender.rect().topLeft()).y()
+                # 🐛 重建卡的位置判定：重建刚 insertWidget 时 Qt 布局未传播，
+                # mapTo 会读到 y=0，把视口内/下方的卡误判成「整卡在视口上方」，
+                # 于是对 delta 施加 value += delta 把视口拽走（滚动时反复发生）。
+                # `_rebuild_above_px` 由 `_apply_placeholder_height` 在重建侧写入
+                # （插入位置之前的累计布局高度，只读已落定的其它控件），一次性令牌。
+                above_px = getattr(sender, "_rebuild_above_px", None)
+                if above_px is not None:
+                    try:
+                        sender._rebuild_above_px = None
+                    except (RuntimeError, AttributeError):
+                        pass
+                    card_top = int(above_px)
+                else:
+                    card_top = sender.mapTo(container, sender.rect().topLeft()).y()
                 card_bottom = card_top + sender.height()
                 follow = self._should_follow_bottom()
                 if follow:
