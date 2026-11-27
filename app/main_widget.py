@@ -1591,6 +1591,10 @@ class OpenAIChatToolWindow(ToolWindow):
         # 跟随态贴底任务在队列中标志：同一轮内多次高度回调只投递一次
         # （见 _schedule_bottom_snap）。
         self._bottom_snap_queued = False
+        # 简洁流式卡的高度变化先落到 WebView，再异步传播到外层容器。
+        # queued snap 首拍只等待布局传播，避免读取到上一拍的 container 底。
+        self._bottom_snap_retrying = False
+        self._bottom_snap_retry_count = 0
         # 🛡️ 会话切换哨兵：_create_new_session 中置 True，丢弃 stop_streaming 后
         # 仍可能跨线程到达的 worker 旧回调（_on_messages_updated / _do_post_stream_cleanup
         # / _on_finalize_complete），防止把旧会话消息写到新会话再被 save 到新项目。
@@ -20493,22 +20497,35 @@ class OpenAIChatToolWindow(ToolWindow):
         由「目标批次重建卡的高度回调」把视口贴回底部。
         """
         self._bottom_snap_queued = False
-        # 🐛 跳转锁单点收紧：`_should_follow_bottom()` 只认 `until` 未过期，
-        # 尾巴（TAIL_MS=1200）过期但收敛链未结束时它会放行——#45 实测跳转
-        # 3.1s 后卡片落高的本槽投递撞进该空窗，setValue(landed) 把刚落好的
-        # 跳转落点拽回底部。`_is_jump_scroll_locked()` 过期后还查
-        # `_is_jump_in_flight()` 且自带 10s hard cap，复用它即获得兜底，
-        # 不动公共判据（其余 17 个调用点零变化，「回到底部」显式解锁链不受影响）。
         if not self._should_follow_bottom() or self._is_jump_scroll_locked():
+            self._bottom_snap_retrying = False
+            self._bottom_snap_retry_count = 0
             return
         try:
             sb = self.chat_scroll_area.verticalScrollBar()
-            landed = self._landed_bottom_value()
+            container = self.chat_scroll_area.widget()
+            viewport = self.chat_scroll_area.viewport()
+            if container is None:
+                self._bottom_snap_retrying = False
+                self._bottom_snap_retry_count = 0
+                return
+
+            landed = max(0, container.height() - viewport.height())
+            retry_limit = 2
+            if self._bottom_snap_retrying and self._bottom_snap_retry_count < retry_limit:
+                self._bottom_snap_retry_count += 1
+                self._bottom_snap_queued = True
+                QMetaObject.invokeMethod(self, "_snap_bottom_queued", Qt.QueuedConnection)
+                return
+
             with self._programmatic_scroll():
-                sb.setValue(landed)
+                sb.setValue(self._landed_bottom_value())
         except RuntimeError:
-            # 会话/窗口切换中对象已销毁，放弃本次贴底
             pass
+        finally:
+            if not self._bottom_snap_queued:
+                self._bottom_snap_retrying = False
+                self._bottom_snap_retry_count = 0
 
     def _schedule_bottom_snap(self):
         """跟随态贴底：投递到事件队列，等布局传播落地后一次贴准。
@@ -20533,6 +20550,9 @@ class OpenAIChatToolWindow(ToolWindow):
         """
         if getattr(self, "_bottom_snap_queued", False):
             return
+        if not getattr(self, "_bottom_snap_retrying", False):
+            self._bottom_snap_retry_count = 0
+        self._bottom_snap_retrying = True
         self._bottom_snap_queued = True
         QMetaObject.invokeMethod(self, "_snap_bottom_queued", Qt.QueuedConnection)
 
