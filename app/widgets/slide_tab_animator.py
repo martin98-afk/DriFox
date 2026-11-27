@@ -50,7 +50,11 @@ class SlideTabAnimator(QObject):
         super().__init__(parent if parent is not None else stack)
         self._stack = stack
         self._layout = layout
-        self._anim: Optional[QVariantAnimation] = None
+        self._anim = QVariantAnimation(self)
+        self._anim.setStartValue(0.0)
+        self._anim.setEndValue(1.0)
+        self._anim.valueChanged.connect(self._on_tick)
+        self._anim.finished.connect(self._on_phase_done)
         self._geo = QRect()
         self._layout_index = -1
         self._target = -1
@@ -62,7 +66,7 @@ class SlideTabAnimator(QObject):
 
     def is_running(self) -> bool:
         """是否有滑动在途（调用方可据此避免叠加动画）"""
-        return self._anim is not None and self._anim.state() == QVariantAnimation.Running
+        return self._anim.state() == QVariantAnimation.Running
 
     # ── 切换 ──
 
@@ -80,12 +84,15 @@ class SlideTabAnimator(QObject):
             调用方按原逻辑直切。
         """
         stack = self._stack
-        if not (0 <= index < stack.count()) or index == stack.currentIndex():
+        if not (0 <= index < stack.count()):
             return False
-        if direction == 0 or not Animations.motion_enabled():
+        if self._phase:
+            if index == self._target:
+                return True
+            # 新选择取代旧目标，尤其是离场途中点回仍显示的旧页。
+            self._finish(interrupted=False)
+        if index == stack.currentIndex() or direction == 0 or not Animations.motion_enabled():
             return False
-        if self.is_running():
-            self._finish(interrupted=True)
         self._target = index
         self._dir = 1 if direction > 0 else -1
         self._on_switched = on_switched
@@ -96,7 +103,7 @@ class SlideTabAnimator(QObject):
 
     def finish_now(self) -> None:
         """立即收敛到终态（外部打断：面板隐藏 / 宽度动画 / 页面被移除等）"""
-        if self._anim is not None:
+        if self._phase:
             self._finish(interrupted=True)
 
     # ── 内部 ──
@@ -122,9 +129,7 @@ class SlideTabAnimator(QObject):
         stack.setGeometry(self._geo)
 
     def _start_anim(self) -> None:
-        anim = QVariantAnimation(self)
-        anim.setStartValue(0.0)
-        anim.setEndValue(1.0)
+        anim = self._anim
         if self._phase == "in":
             anim.setDuration(self.SLIDE_IN_MS)
             anim.setEasingCurve(Animations.EASE_ENTER)
@@ -132,9 +137,6 @@ class SlideTabAnimator(QObject):
             anim.setDuration(self.SLIDE_OUT_MS)
             # 离场用 InCubic 加速带出：OutCubic 的减速长尾落在画外，纯属白等
             anim.setEasingCurve(Animations.EASE_IN)
-        anim.valueChanged.connect(self._on_tick)
-        anim.finished.connect(self._on_phase_done)
-        self._anim = anim
         anim.start()
 
     def _on_tick(self, t: float) -> None:
@@ -148,12 +150,14 @@ class SlideTabAnimator(QObject):
 
     def _on_phase_done(self) -> None:
         if self._phase == "out":
+            self._phase = "in"
             self._swap_page()
+            if self._phase != "in":  # 刷新回调可能已经取消或替换此次切页
+                return
             if not self.isVisible_stack():
                 # 面板在槽间被隐藏/销毁：不再做滑入，直接收敛
                 self._finish(interrupted=True)
                 return
-            self._phase = "in"
             self._stack.move(self._geo.x() + self._geo.width() * self._dir, self._geo.y())
             self._start_anim()
             return
@@ -179,23 +183,19 @@ class SlideTabAnimator(QObject):
 
     def _finish(self, interrupted: bool) -> None:
         """收尾（幂等）：停动画、必要时补换页、按原布局位置放回并归位"""
-        anim = self._anim
-        if anim is not None:
-            try:
-                anim.finished.disconnect(self._on_phase_done)
-                anim.valueChanged.disconnect(self._on_tick)
-            except (TypeError, RuntimeError):
-                pass
-            anim.stop()
-        self._anim = None
-        # 先取出待用状态再清空，避免补换页回调读到已归零的 target
-        need_swap = self._phase == "out" and self._target >= 0
+        self._anim.stop()
+        # 主动收尾才补换页；被新目标取代的旧页不该再刷新。
+        need_swap = interrupted and self._phase == "out" and self._target >= 0
         target = self._target
         cb = self._on_switched
         self._phase = ""
         self._on_switched = None
         self._target = -1
         self._dir = 0
+        try:
+            self._reattach()
+        except RuntimeError:
+            return
         if need_swap:
             # 段1 被打断：仍完成换页，杜绝「高亮/信号已切、内容未切」的状态漂移
             try:
@@ -205,7 +205,3 @@ class SlideTabAnimator(QObject):
                         cb()
             except RuntimeError:
                 pass
-        try:
-            self._reattach()
-        except RuntimeError:
-            pass

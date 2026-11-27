@@ -952,6 +952,7 @@ class WorkbenchPanel(QWidget):
         if direction != 0:
             switched = self._slide.switch(index, direction, on_switched=self.refresh_current_page_data)
         if not switched:
+            self._slide.finish_now()
             self._stack.setCurrentIndex(index)
         # 逻辑选中先于高亮/胶囊写入：两者都读它，且滑动段1 stack 仍是旧页
         self._logical_index = index

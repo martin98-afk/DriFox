@@ -267,6 +267,21 @@ def test_formalize_on_boundary_then_append_again(monkeypatch):
     assert "_v2LiveAppend(" in js or "_v2LiveSplit(" in js or "patchBlocks" in js
 
 
+@pytest.mark.parametrize('reasoning', [False, True])
+def test_formalize_patch_matches_live_key(monkeypatch, reasoning):
+    field = 'content' if reasoning else 'text'
+    blocks = [{'type': 'reasoning' if reasoning else 'text', field: '首段' * 300}]
+    v = _make_viewer(monkeypatch, blocks)
+    monkeypatch.setattr(CodeWebViewer, '_v2_render_ctx', lambda self: RenderCtx(streaming=True, compact=True))
+    assert v._perform_update_v2()
+    v._page.js_calls.clear()
+    blocks[0][field] += '续写' * 220
+    assert v._perform_update_v2()
+    js = ''.join(v._page.js_calls)
+    ops = _patch_ops(js, 'content-placeholder') + _patch_ops(js, 'tool-content')
+    assert [item['key'] for op in ops for item in op['items']] == ['live:0']
+
+
 # ── 5. 文本回退 → 整卡重落地 ──────────────────────────────────────
 
 
@@ -382,6 +397,7 @@ def _build_skeleton_html() -> str:
     v._v2_last = None
     v.page = lambda: page
     v.setHtml = lambda html, url=None: captured.setdefault("html", html)
+    v._doc_resize_quiet_timer = None
     v.ensure_transparent_composition = lambda: None
     v._load_skeleton()
     return captured.get("html", "")

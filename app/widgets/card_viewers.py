@@ -2308,7 +2308,11 @@ class CodeWebViewer(QWebEngineView):
         """探针回音：按真实 DOM 判空，命中则分级自愈。"""
         if gen != self._live_probe_gen:
             return
-        self._live_probe_timer.stop()
+        try:
+            self._live_probe_timer.stop()
+        except RuntimeError:
+            # WebEngine 在页面析构时仍可能交付未完成的 JS 回调。
+            return
         try:
             cp_kids, tc_kids, cp_text, tc_text, scroll_h = (int(x) for x in str(result).split("|"))
         except Exception:
@@ -8354,10 +8358,13 @@ class CodeWebViewer(QWebEngineView):
                 else:
                     self._perform_update()
                 return
-            # 无边界：启安全定时器（仅当未激活时）
-            # [PERF] 使用自适应间隔：快速流式用 150ms，慢速用 500ms，默认 300ms
+            # v1 有独立的逐字注入；v2 只能等块补丁。沿用 v1 的 300ms
+            # 兜底会把连续输入攒成一团。首帧快出，后续保留合并以免逐 token 重排。
             if not self._render_timer.isActive():
-                self._render_timer.start(self._current_adaptive_interval)
+                interval = self._current_adaptive_interval
+                if self.__dict__.get("_render_v2", False):
+                    interval = min(interval, 80 if self._last_rendered_markdown else 16)
+                self._render_timer.start(interval)
         else:
             # 非流式模式（历史加载）：40ms 防抖后渲染
             if not self._render_timer.isActive():
@@ -9446,12 +9453,14 @@ class CodeWebViewer(QWebEngineView):
         否则下一批 live 渲染 key 又变化 → diff 判定块被替换 → 每批重新整块
         重传纯文本，O(n²) 又回来了。
         """
-        content = list(mr.content)
-        for i, it in enumerate(content):
-            if it.key in (formal_key, formal_key + ":cc"):
-                content[i] = BlockRender(kind=it.kind, key=lk, html=it.html, home=it.home)
-                break
-        return MessageRender(content=tuple(content), tool=mr.tool)
+        # 活动块是该容器的末块；历史上可能有文本完全相同的块，不能从头改名。
+        def stable(items):
+            if not items or items[-1].key not in (formal_key, formal_key + ":cc"):
+                return items
+            it = items[-1]
+            return (*items[:-1], BlockRender(kind=it.kind, key=lk, html=it.html, home=it.home))
+
+        return MessageRender(content=stable(mr.content), tool=stable(mr.tool))
 
     def _perform_update_v2(self) -> bool:
         """block 级渲染：``render_message`` → ``diff_message`` → ``patchBlocks``。
@@ -9597,6 +9606,16 @@ class CodeWebViewer(QWebEngineView):
 
             _, formal_key = block_key(blocks[live_index], ctx, True)
             self._v2_last = self._v2_live_stabilize(mr, live_key_now, formal_key)
+            # 必须先用正式 key 算 diff（强制替换旧 HTML），再用与落库基线
+            # 一致的 key 发补丁；否则后续 rAF 追加找不到 DOM 节点。
+            from app.widgets.render.blocks import PatchOps
+
+            if content_ops.items:
+                base = content_ops.base
+                content_ops = PatchOps(base, content_ops.delete, self._v2_last.content[base:base + len(content_ops.items)])
+            if tool_ops.items:
+                base = tool_ops.base
+                tool_ops = PatchOps(base, tool_ops.delete, self._v2_last.tool[base:base + len(tool_ops.items)])
             self._v2_live_key = live_key_now
             self._v2_live_sent = live_text
             self._v2_live_formalized_len = len(live_text)

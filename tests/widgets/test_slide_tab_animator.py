@@ -2,6 +2,7 @@
 """SlideTabAnimator：QStackedWidget 两段式方向滑动（方向、摘除/归位、打断一致性）"""
 
 import pytest
+from PyQt5.QtCore import QVariantAnimation
 from PyQt5.QtWidgets import QLabel, QStackedWidget, QVBoxLayout, QWidget
 
 from app.utils.design_tokens import Animations
@@ -75,6 +76,24 @@ def test_interrupt_still_switches_page(qtbot, anim):
     assert swapped
     assert not a.is_running()
     assert layout.count() == 1
+
+
+def test_animation_objects_bounded(qtbot, anim):
+    a, stack, _, _host = anim
+    for target in (1, 2, 0, 1):
+        assert a.switch(target, 1)
+        _wait_done(qtbot, a)
+    assert len(a.findChildren(QVariantAnimation)) <= 1
+
+
+def test_reverse_before_swap(qtbot, anim):
+    a, stack, layout, _host = anim
+    assert a.switch(1, 1)
+    if not a.switch(0, -1):
+        stack.setCurrentIndex(0)  # 工作台的直切回退
+    _wait_done(qtbot, a)
+    assert stack.currentIndex() == 0
+    assert layout.indexOf(stack) == 0
 
 
 def test_no_handoff_cases(qtbot, anim):

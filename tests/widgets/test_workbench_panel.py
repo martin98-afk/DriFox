@@ -134,6 +134,21 @@ def test_plugin_pages_ordered_by_order_hint(panel):
         assert panel._stack.indexOf(panel._plugin_widgets[pid]) == idx
 
 
+@pytest.mark.parametrize("last_is_user", [True, False])
+def test_last_selection_survives_pending_slide(panel, qtbot, monkeypatch, last_is_user):
+    from app.utils.design_tokens import Animations
+
+    monkeypatch.setattr(Animations, "motion_enabled", classmethod(lambda cls: True))
+    panel.sync_plugin_pages([_info("a", "A页"), _info("b", "B页")])
+    panel.set_current_tab(0)
+    panel.set_current_tab(1, user=True)
+    assert panel._slide.is_running()
+    panel.set_current_tab(0, user=last_is_user)
+    qtbot.waitUntil(lambda: not panel._slide.is_running(), timeout=3000)
+    assert panel.current_tab() == panel._stack.currentIndex() == 0
+    assert panel._bottom_layout.indexOf(panel._stack) >= 0
+
+
 def test_default_landing_prefers_flag_then_first(panel):
     panel.sync_plugin_pages([_info("a", "A页", order_hint=0), _info("b", "B页", order_hint=10, default=True)])
     assert panel.default_page_id() == "b"
