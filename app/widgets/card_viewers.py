@@ -4587,8 +4587,7 @@ class CodeWebViewer(QWebEngineView):
                 .compact-reading #content-placeholder h1,
                 .compact-reading #content-placeholder h2,
                 .compact-reading #content-placeholder h3 {{ line-height: 1.35; }}
-                .compact-reading .chart-skeleton__bars i {{ animation: none; opacity: .36; }}
-                .compact-reading .chart-skeleton::after {{ display: none; }}
+                /* 图表占位沿用 chartSkPulse / chartSkSweep；减少动态效果由媒体查询统一处理。 */
                 .compact-reading .dfx-stream-note {{ animation: none; opacity: 1; color: var(--text-muted); }}
                 .chart-failure {{
                     display: flex; align-items: center; justify-content: space-between;

@@ -83,6 +83,16 @@ def test_compact_mixed_stream(qapp, qtbot, long_intro):
         for chunk in chunks:
             card.append_text(chunk)
             qtbot.wait(140)
+            if chunk.startswith('{"tooltip"'):
+                bar = "document.querySelector('.chart-skeleton__bars i')"
+                qtbot.waitUntil(lambda: bool(js(f'!!{bar}')), timeout=3000)
+                if not js("matchMedia('(prefers-reduced-motion: reduce)').matches"):
+                    samples = []
+                    for _ in range(5):
+                        samples.append(js(f"[getComputedStyle({bar}).transform,{bar}.closest('.chart-skeleton').offsetHeight]"))
+                        qtbot.wait(60)
+                    assert len({v[0] for v in samples}) > 1, '图表占位符内部的柱条没有动'
+                    assert len({v[1] for v in samples}) == 1
             capture_frame()
         js('window._duringStreamSwaps=window._chartSwaps')
         card.finish_streaming()

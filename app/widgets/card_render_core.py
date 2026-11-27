@@ -3939,7 +3939,9 @@ _SKELETON_CACHE_MAX = 48
 # 折叠框内不再出现硬表格线叠围栏；完成块可点标题补 hover 浅底。CSS 资产变更，
 # 旧骨架缓存须失效。
 # v91：流式期折叠工具栏相对已落地的 WebView 视口对齐。
-_SKELETON_CACHE_VERSION = 91
+# v92：向 Qt 同步底部工具区的实际显隐，用于流式表面限高。
+# v93：恢复图表占位柱条和扫光；长正文不按聊天区一屏截高。
+_SKELETON_CACHE_VERSION = 93
 
 
 def _js_literal(value) -> str:
