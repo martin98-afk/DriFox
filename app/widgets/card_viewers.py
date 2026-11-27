@@ -6689,6 +6689,9 @@ class CodeWebViewer(QWebEngineView):
                         var _tcR = document.getElementById('tool-content');
                         if (_tcR && _tcR._userScrolledUp === true) _rd = true;
                     }} catch (_e) {{}}
+                    if (window._toolCompactMode && window._streamingActive) {{
+                        _b.classList.toggle('dock-reading', _rd);
+                    }}
                     // [T37] 第 5 字段：正文可见文本长度（内容哨兵数据源）。
                     // Python 侧用它对照 _markdown_text 积压量，检测"DOM 内容丢失"
                     // （池化误清 / 渲染链路停摆 / JS 注入失败等各类根因）并自动补渲。
@@ -7267,6 +7270,12 @@ class CodeWebViewer(QWebEngineView):
                     if (typeof window._ensureVisibleToolBodies === 'function') {{
                         requestAnimationFrame(window._ensureVisibleToolBodies);
                     }}
+                    var dockSection = document.getElementById('tool-section');
+                    function syncDockFooter() {{
+                        document.body.classList.toggle('dock-collapsed-footer', dockSection.dataset.collapsed === 'true');
+                    }}
+                    syncDockFooter();
+                    new MutationObserver(syncDockFooter).observe(dockSection, {{attributes:true, attributeFilter:['data-collapsed']}});
                     // 使用防抖的 ResizeObserver，避免频繁触发高度更新
                     let resizeTimeout = null;
                     new ResizeObserver(() => {{

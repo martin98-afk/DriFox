@@ -3938,7 +3938,8 @@ _SKELETON_CACHE_MAX = 48
 # 流式块→完成块替换时标题不再左移/下移；参数行与结果区分隔线降为弱对比，
 # 折叠框内不再出现硬表格线叠围栏；完成块可点标题补 hover 浅底。CSS 资产变更，
 # 旧骨架缓存须失效。
-_SKELETON_CACHE_VERSION = 90
+# v91：流式期折叠工具栏相对已落地的 WebView 视口对齐。
+_SKELETON_CACHE_VERSION = 91
 
 
 def _js_literal(value) -> str:
@@ -4458,6 +4459,16 @@ _STREAMING_DOCK_CSS = """
                    流式期间工具/思考条目数量不可控，不限高会把正文一路顶出视口；
                    264px ≈ 9-10 行，常规工具序列可看到实时进度，且卡片总高不随
                    流式膨胀。 */
+                /* 只约束当前已落地的视口；scrollHeight 仍保留真实文档高度用于 Qt 上报。 */
+                .compact-reading body.streaming-dock.dock-collapsed-footer {
+                    max-height: min(100vh, var(--dfx-body-max-h, 3000px));
+                    box-sizing: border-box;
+                }
+                .compact-reading body.streaming-dock.dock-collapsed-footer:not(.dock-reading) #content-placeholder + #tool-section {
+                    position: sticky;
+                    bottom: 0;
+                    background-color: var(--bg);
+                }
                 body.streaming-dock #tool-content {
                     max-height: 264px;
                 }
