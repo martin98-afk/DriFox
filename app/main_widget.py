@@ -11545,8 +11545,9 @@ class OpenAIChatToolWindow(ToolWindow):
         ThemeRefreshCoordinator.timer_end("findChildren")
 
         # ── 1. 颜色/主题相关块 ──
+        if self._first_run_guide is not None:
+            self._first_run_guide.refresh_style()
         if is_color:
-            self._update_first_run_progress()
             if not _skip_global:
                 theme_manager.on_theme_changed()
 
@@ -12769,6 +12770,13 @@ class OpenAIChatToolWindow(ToolWindow):
             layout.insertWidget(layout.indexOf(self.chat_scroll_area), guide, 1)
             guide.addProvider.connect(self._open_guide_provider_picker)
             guide.chooseModel.connect(self._toggle_model_selector_card)
+            from app.widgets.cards.global_card_controller import get_global_card_controller
+
+            controller = get_global_card_controller()
+            if controller is not None:
+                guide.openAccount.connect(controller.open_gitee_settings)
+                guide.openSecrets.connect(controller.open_secret_settings)
+                guide.openSecurity.connect(lambda: controller.open_settings("security"))
             guide.finished.connect(self._finish_first_run_guide)
         self._update_first_run_progress()
         self.chat_scroll_area.hide()

@@ -315,6 +315,21 @@ class GlobalCardController:
             self._settings_popup.raise_()
             self._settings_popup.activateWindow()
 
+    def open_gitee_settings(self):
+        """从引导页进入同一个账户卡，复用仓库选择、授权中止与结果提示。"""
+        self.open_settings("provider")
+        popup = self._settings_popup
+        popup._page_widgets["provider"].ensureWidgetVisible(popup.giteeCard)
+        if not self.cfg.gitee_bound.value:
+            popup.giteeCard._on_bind()
+
+    def open_secret_settings(self):
+        self.open_settings("provider")
+        popup = self._settings_popup
+        card = popup.secretModeCard
+        card.setExpand(True)
+        popup._page_widgets["provider"].ensureWidgetVisible(card.card)
+
     def on_settings_config_changed(self):
         """外观设置变更 → 刷新所有窗口的模型列表 + 批量主题刷新"""
 
