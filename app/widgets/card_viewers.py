@@ -13042,13 +13042,14 @@ def _fence_assets_for_skeleton() -> tuple:
     return (assets_js, perms_js, tuple(sig))
 
 
-def _show_image_preview(pixmap, parent=None) -> None:
+def _show_image_preview(pixmap, parent=None, *, annotation_dir=None) -> str | None:
     from app.widgets.image_lightbox import ImageLightbox
 
     if pixmap is not None and not pixmap.isNull():
-        preview = ImageLightbox(pixmap, parent)
+        preview = ImageLightbox(pixmap, parent, annotation_dir=annotation_dir)
         try:
-            preview.exec_()
+            if preview.exec_() and preview.annotations is not None:
+                return preview.annotations.output_path
         finally:
             preview.deleteLater()
 

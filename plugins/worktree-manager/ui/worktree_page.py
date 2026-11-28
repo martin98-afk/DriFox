@@ -239,7 +239,6 @@ class SystemWorktreePage(QWidget):
 
     def set_context_provider(self, provider: Callable[[], dict]) -> None:
         self._context_provider = provider
-        self._apply_plugin_icon()
 
     # ── 头部（标题 + 插件图标）──
 
@@ -247,17 +246,19 @@ class SystemWorktreePage(QWidget):
     def _title_qss() -> str:
         return (
             f"color: {Colors.TEXT_PRIMARY}; background: transparent;"
-            f" {get_font_family_css()} {font_size_css(16)}; font-weight: 600;"
+            f" {get_font_family_css()} {font_size_css(16)} font-weight: 600;"
         )
 
     def _apply_plugin_icon(self) -> None:
-        """用插件自己的 icon（ctx 注入的浅/深两套路径），主题切换后需重新应用"""
+        """用插件目录自带的 icon.svg / icon_dark.svg（按当前主题）"""
         try:
             from PyQt5.QtGui import QIcon
 
-            icon_info = (self._context_provider() or {}).get("plugin_icon") or {}
-            path = icon_info.get("dark" if isDarkTheme() else "light", "")
-            self._header_icon.setIcon(QIcon(path) if path else QIcon())
+            path = os.path.join(
+                os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                "icon_dark.svg" if isDarkTheme() else "icon.svg",
+            )
+            self._header_icon.setIcon(QIcon(path) if os.path.exists(path) else QIcon())
         except Exception as e:
             logger.debug(f"[worktree-manager] 头部图标应用失败: {e}")
 
@@ -321,9 +322,9 @@ class SystemWorktreePage(QWidget):
         header = QHBoxLayout()
         header.setContentsMargins(12, 8, 8, 0)
         header.setSpacing(8)
-        # 头部图标：插件自带 icon.svg / icon_dark.svg（宿主经 ctx 注入当前主题路径）
+        # 头部图标：插件目录自带的 icon.svg / icon_dark.svg
         self._header_icon = IconWidget(self)
-        self._header_icon.setFixedSize(18, 18)
+        self._header_icon.setFixedSize(22, 22)
         header.addWidget(self._header_icon)
         self._title = QLabel("工作树", self)
         self._title.setStyleSheet(self._title_qss())

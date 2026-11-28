@@ -13,6 +13,7 @@ from PyQt5.QtCore import (
     QEasingCurve,
     QMimeData,
     QObject,
+    QPointF,
     QRectF,
     QSize,
     QSizeF,
@@ -174,6 +175,8 @@ class SendableTextEdit(TextEdit):
     atTriggered = pyqtSignal(str)  # 检测到 @ 触发，携带查询文本
     atDismissed = pyqtSignal()  # @ 触发结束
     fileMentionConfirmed = pyqtSignal(str)  # @路径 + 空格确认：携带绝对路径，供上层登记附件
+    imagePreviewRequested = pyqtSignal(str)
+    imageReferenceReplaced = pyqtSignal(str, str)
     files_dropped = pyqtSignal(list)  # list[str] 拖入/粘贴的文件路径
     paste_image_saved = pyqtSignal(str)  # 粘贴图片后台落盘完成（跨线程刷新附件芯片用）
     enteringHistoryMode = pyqtSignal()  # 即将进入历史浏览模式（main_widget 需保存当前附件）
@@ -203,6 +206,7 @@ class SendableTextEdit(TextEdit):
         self._suppress_slash_trigger = False  # 切换历史时临时阻止 / 触发
         # 文本 → 附件 反向同步（详见 _sync_placeholder_removals）
         self._last_placeholder_names: list[str] = []  # 上一次文本里的 [[...]] 快照
+        self._image_revisions: dict[tuple[str, str], tuple[str, str]] = {}
         self._syncing_attachments = False  # 程序化改文本中：只校准快照，不上报删除
         self._sync_attachments_enabled = True  # 总开关：批量流程整体暂停反向同步
 
@@ -743,6 +747,7 @@ class SendableTextEdit(TextEdit):
         cursor = self.textCursor()
         cursor.setCharFormat(QTextCharFormat())
         self.setTextCursor(cursor)
+        self._image_revisions.clear()
         super().setPlainText(text)
 
     def toPlainText(self) -> str:
@@ -807,7 +812,8 @@ class SendableTextEdit(TextEdit):
         fmt = QTextCharFormat()
         fmt.setObjectType(_FILE_MENTION_TYPE)
         fmt.setProperty(_FILE_MENTION_PATH_PROP, file_path)
-        fmt.setToolTip(file_path)
+        hint = "\n双击预览与标注" if AttachmentChip.supports_image_preview(file_path) else ""
+        fmt.setToolTip(file_path + hint)
         return fmt
 
     def insert_file_mention(self, file_path: str):
@@ -1730,6 +1736,17 @@ class SendableTextEdit(TextEdit):
                 removed.append(name)
 
         self._last_placeholder_names = current
+        # 撤销/重做一次标注会同时减少和增加一个引用；恢复附件版本须先于普通删除。
+        if (
+            self._image_revisions
+            and removed
+            and len(removed) == len(remaining)
+            and len(set(removed)) == len(set(remaining)) == 1
+        ):
+            revision = self._image_revisions.get((removed[0], remaining[0]))
+            if revision:
+                self.imageReferenceReplaced.emit(*revision)
+                return
         if removed:
             self.attachmentsRemoved.emit(removed)
 
@@ -1766,6 +1783,45 @@ class SendableTextEdit(TextEdit):
         cursor.setPosition(max(0, min(cursor_pos, len(new_text))))
         self.setTextCursor(cursor)
         return True
+
+    def replace_image_reference(self, old: str, new: str, attachments: list[str]):
+        """按完整路径更新正文胶囊，兼容历史草稿里的字面占位符。"""
+        doc = self.document()
+        cursor = QTextCursor(doc)
+        cursor.beginEditBlock()
+        self._syncing_attachments = True
+        try:
+            match = doc.find(_OBJECT_REPLACEMENT)
+            found = False
+            mentioned = set()
+            while not match.isNull():
+                fmt = match.charFormat()
+                if fmt.objectType() == _FILE_MENTION_TYPE:
+                    path = fmt.stringProperty(_FILE_MENTION_PATH_PROP)
+                    mentioned.add(path)
+                    if path == old:
+                        match.setCharFormat(self._make_mention_format(new))
+                        found = True
+                match = doc.find(_OBJECT_REPLACEMENT, match)
+            if not found:
+                name = os.path.basename(old)
+                # 同名路径按附件顺序消耗；已有胶囊的路径不占用字面引用。
+                match = QTextCursor(doc)
+                for path in attachments:
+                    if os.path.basename(path) == name and path not in mentioned:
+                        match = doc.find(f"[[{name}]]", match, doc.FindCaseSensitively)
+                        if match.isNull():
+                            break
+                        if path == old:
+                            match.insertText(_OBJECT_REPLACEMENT, self._make_mention_format(new))
+                            break
+        finally:
+            cursor.endEditBlock()
+            self._syncing_attachments = False
+        old_name, new_name = os.path.basename(old), os.path.basename(new)
+        self._image_revisions[old_name, new_name] = (old, new)
+        self._image_revisions[new_name, old_name] = (new, old)
+        self.imageReferenceReplaced.emit(old, new)
 
     def remove_mention_objects(self, path: str) -> bool:
         """删除正文中指向 path 的 inline 文件胶囊（附件 → 正文 方向的同步）
@@ -2701,6 +2757,23 @@ class SendableTextEdit(TextEdit):
         if cursor.position() > 0:
             self.ensureCursorVisible()
 
+    def mouseDoubleClickEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            # ExactHit 排除行尾空白；坐标从视口转换到可滚动的文档。
+            pos = event.localPos() + QPointF(self.horizontalScrollBar().value(), self.verticalScrollBar().value())
+            index = self.document().documentLayout().hitTest(pos, Qt.ExactHit)
+            if index >= 0 and self.document().characterAt(index) == _OBJECT_REPLACEMENT:
+                cursor = QTextCursor(self.document())
+                cursor.setPosition(index)
+                cursor.movePosition(QTextCursor.NextCharacter, QTextCursor.KeepAnchor)
+                fmt = cursor.charFormat()
+                path = fmt.stringProperty(_FILE_MENTION_PATH_PROP)
+                if fmt.objectType() == _FILE_MENTION_TYPE and AttachmentChip.supports_image_preview(path):
+                    event.accept()
+                    self.imagePreviewRequested.emit(path)
+                    return
+        super().mouseDoubleClickEvent(event)
+
     def mousePressEvent(self, event):
         # 点击时退出历史浏览模式
         # 注意：点击输入框内不主动 dismiss 命令卡片 —— 卡片跟随输入框失焦关闭
@@ -2716,6 +2789,7 @@ class SendableTextEdit(TextEdit):
     def clear(self):
         """重写 clear 方法，清空输入时退出历史浏览模式"""
         self._reset_history_mode()
+        self._image_revisions.clear()
         super().clear()
 
     @staticmethod
@@ -3042,6 +3116,7 @@ class AttachmentChip(QFrame):
     """
 
     removed = pyqtSignal(str)  # file path
+    imagePreviewRequested = pyqtSignal(str)
 
     #: 文件名最大像素宽度，超出部分中间省略
     _MAX_NAME_WIDTH = 148
@@ -3090,6 +3165,17 @@ class AttachmentChip(QFrame):
         self.filepath = filepath
         self._missing = not os.path.exists(filepath)
         self._setup_ui()
+
+    @classmethod
+    def supports_image_preview(cls, path: str) -> bool:
+        return os.path.splitext(path)[1].lower() in cls._IMAGE_PREVIEW_EXTS
+
+    def mouseDoubleClickEvent(self, event):
+        if event.button() == Qt.LeftButton and self.supports_image_preview(self.filepath):
+            event.accept()
+            self.imagePreviewRequested.emit(self.filepath)
+            return
+        super().mouseDoubleClickEvent(event)
 
     @staticmethod
     def _get_file_icon(filepath: str) -> AppIcon:
@@ -3161,9 +3247,13 @@ class AttachmentChip(QFrame):
         tip = self.filepath + (f"\n{size_text}" if size_text else "")
         if self._missing:
             tip += "\n⚠ 文件已不存在，发送时将被忽略"
+        if self.supports_image_preview(self.filepath):
+            tip += "\n双击预览与标注"
+            self._label.setAttribute(Qt.WA_TransparentForMouseEvents)
+            self._icon_widget.setAttribute(Qt.WA_TransparentForMouseEvents)
         self.setToolTip(tip)
         # 图像附件：hover 时在气泡内预览缩略图（loader 失败/非图像自动回退纯文本）
-        if not self._missing and os.path.splitext(self.filepath)[1].lower() in self._IMAGE_PREVIEW_EXTS:
+        if not self._missing and self.supports_image_preview(self.filepath):
             _f = get_hover_filter(self)
             if _f is not None:
                 _f.set_image_loader(lambda: load_preview_pixmap(self.filepath))

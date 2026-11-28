@@ -21634,12 +21634,43 @@ class OpenAIChatToolWindow(ToolWindow):
             # 直连槽而非 lambda：removed 自带 path 参数，语义等价，
             # 且不会像循环内的 lambda 那样因闭包迟绑定捕获到错误的变量。
             chip.removed.connect(self._remove_attachment)
+            chip.imagePreviewRequested.connect(self._preview_input_image, Qt.QueuedConnection)
             self._attach_layout.addWidget(chip)
         if overflow > 0:
             self._attach_layout.addWidget(
                 AttachmentOverflowChip(overflow, len(self._attachments), self._attach_container)
             )
         self._attach_container.setVisible(bool(self._attachments))
+
+    def _preview_input_image(self, path: str):
+        from PyQt5.QtGui import QImageReader, QPixmap
+
+        from app.widgets.card_viewers import _show_image_preview
+
+        if path not in self._attachments:
+            return
+        if not self.input_area._wait_pending_image_saves():
+            self.input_area._warn_image_save_pending()
+            return
+        if path not in self._attachments:
+            return
+        reader = QImageReader(path)
+        reader.setAutoTransform(True)
+        image = reader.read()
+        if image.isNull():
+            InfoBar.warning(title="无法预览图片", content=reader.errorString(), parent=self)
+            return
+        edited = _show_image_preview(
+            QPixmap.fromImage(image), self, annotation_dir=(get_app_data_dir() / "screenshots" / "annotated").resolve()
+        )
+        if edited and path in self._attachments:
+            self.input_area.replace_image_reference(path, os.path.normpath(edited), self._attachments)
+            self.input_area.setFocus()
+
+    def _replace_image_attachment(self, old: str, new: str):
+        if old in self._attachments:
+            self._attachments[self._attachments.index(old)] = new
+            self._rebuild_attachment_chips()
 
     def _remove_attachment(self, path: str):
         """移除指定附件（点 chip 的 × 触发）"""

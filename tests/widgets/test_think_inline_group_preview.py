@@ -43,11 +43,10 @@ def test_completed_reasoning_inline_group_preview_is_sampled():
 
     ctx = RenderCtx(compact=True, inline_groups=True, streaming=False)
     item = render_block(_reasoning_block(), ctx, completed=True)
-    # 预览走「结论标记优先」：从「因此」起采样，原文开头不应出现在预览里
-    shown = visible_text(item.html)
-    assert "用户想要的是把渲染回归修好" not in shown, f"预览疑似全文铺开: {shown!r}"
-    assert "..." in shown, f"长思考预览应有省略号: {shown!r}"
-    assert len(shown) < len(_LONG_THINK), f"预览应短于原文: {shown!r}"
+    assert visible_text(item.html) == (
+        "因此结论是：完成态思考块必须保持短预览形态，不能降级成裸 div 全高铺开，"
+        "否则会破坏浅色限高流式输出最后收成短预览的整体观感。"
+    )
 
 
 def test_completed_reasoning_non_inline_group_unchanged():
