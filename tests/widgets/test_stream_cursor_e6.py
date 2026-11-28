@@ -265,6 +265,28 @@ def test_proto_state_chunk_split_protocol_marks(qapp):
     assert st["carry"] == ""
 
 
+def test_split_plugin_tag_only_queries_registry_for_candidates(qapp, monkeypatch):
+    card = _make_card()
+    card._proto_state_reset()
+    calls = []
+
+    def tags():
+        calls.append(1)
+        return ["test-tag"]
+
+    monkeypatch.setattr(mc, "_registered_tag_names_safe", tags)
+    scan = card._proto_scan_chunk
+    state = card._proto_state
+    scan(state, "正文")
+    assert calls == []
+    scan(state, "<<test-")
+    assert scan(state, "tag>")[1]
+    assert scan(state, "正文")[1]
+    scan(state, "</test-")
+    assert not scan(state, "tag>")[1]
+    assert len(calls) == 4
+
+
 def test_proto_state_reset_between_streams(qapp):
     """流重置：_proto_state None → 首批懒建从零开始（新流不继承旧状态）。"""
     card = _make_card()

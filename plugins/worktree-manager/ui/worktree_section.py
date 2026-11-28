@@ -762,6 +762,7 @@ class _AddWorktreeRow(QWidget):
         layout.setContentsMargins(10, 2, 8, 2)
         layout.setSpacing(6)
 
+        layout.addStretch()  # 右对齐：入口贴右下，与列表行操作区同一右边界
         icon = ThemeIconLabel("新建", 13, self)
         layout.addWidget(icon)
 
@@ -774,7 +775,6 @@ class _AddWorktreeRow(QWidget):
         add_label.mousePressEvent = lambda e: self._on_add()
         icon.mousePressEvent = lambda e: self._on_add()
         layout.addWidget(add_label)
-        layout.addStretch()
 
     def _on_add(self):
         from app.plugins.sdk import SingleInputDialog

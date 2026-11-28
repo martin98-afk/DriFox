@@ -1,5 +1,8 @@
 """消息卡片在首次差异、重试及切换可见状态时的行为。"""
 
+from PyQt5.QtCore import Qt
+from PyQt5.QtWidgets import QLabel
+
 from app.widgets.message_card import MessageCard, _stream_boundary_tail
 
 
@@ -62,3 +65,24 @@ def test_boundary_tail_spans_committed_text_and_fragments():
     for parts in ([], [""] * 3, ["短"] * 180, ["字" * 300], ["\n", "", "\n"]):
         text = "前文" * 90
         assert _stream_boundary_tail({"text": text, "_pend": parts}) == (text + "".join(parts))[-128:]
+
+
+def test_options_and_resize_placeholder_follow_body_after_retry(qtbot):
+    card = MessageCard("assistant")
+    qtbot.addWidget(card)
+    card.set_error_state(True, "连接失败")
+    assert "resize_placeholder" not in vars(card)
+    assert "options_widget" not in vars(card)
+
+    option = {"label": "继续"}
+    card.add_interactive_options([option])
+    card.show()
+    main = card.layout()
+    assert main.indexOf(card._assistant_bubble) < main.indexOf(card.resize_placeholder)
+    assert main.indexOf(card.resize_placeholder) < main.indexOf(card.options_widget)
+    assert main.indexOf(card.options_widget) < main.indexOf(card._retry_status_widget)
+    assert main.indexOf(card._retry_status_widget) < main.indexOf(card._footer_bar)
+    label = next(label for label in card.options_widget.findChildren(QLabel) if label.text() == "• 继续")
+    with qtbot.waitSignal(card.optionSelected) as clicked:
+        qtbot.mouseClick(label, Qt.LeftButton)
+    assert clicked.args == [option]

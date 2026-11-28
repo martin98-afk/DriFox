@@ -4493,7 +4493,7 @@ class TabPanel(QWidget):
         装饰性**的无限循环动画，关掉后仍有静态状态色与图标反馈，不需要运动。
         放在这个唯一入口上，``set_resizing(False)`` 的恢复路径也自动受控。
         """
-        if not Animations.motion_enabled():
+        if self._is_resizing or not self.isVisible() or not Animations.motion_enabled():
             return
         if self._anim_timer is None:
             from PyQt5.QtCore import QTimer
@@ -4511,6 +4511,16 @@ class TabPanel(QWidget):
         if self._anim_timer and self._anim_timer.isActive():
             self._anim_timer.stop()
         self._anim_phase = 0.0
+
+    def hideEvent(self, event):
+        super().hideEvent(event)
+        if self._anim_timer is not None:
+            self._anim_timer.stop()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if self._streaming_count + self._question_count + self._error_count:
+            self._ensure_anim_timer()
 
     def set_resizing(self, active: bool):
         """设置 resize 活跃状态
