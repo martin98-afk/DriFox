@@ -3,9 +3,9 @@
 - 助手记忆工具按作用域校验写入模式。项目笔记支持追加和整体替换，全局条目支持按 ID 阅读、修改和删除。批量整理先依次验证全部操作，再一次提交。
 - 会话开始时，全局记忆在分区内优先展示置顶和最近更新的条目，项目笔记按完整章节或自然段取舍。日常写入只追加事件日志，显式压缩支持按设备归档。
 
-## [v0.7.7] - 2026-11-28 (重新发布)
+## [v0.7.7] - 2026-11-28 (重新发布 #2)
 
-自 v0.7.6 以来的变更 | 提交数：34 · 文件变更：544 · +34127/-17541 | 贡献者：dingma, drifox-bot
+自 v0.7.6 以来的变更 | 提交数：41 · 文件变更：579 · +35749/-17964 | 贡献者：dingma, drifox-bot
 
 ### ✨ 新功能 (New Features)
 
@@ -45,6 +45,28 @@
 
 - 插件市场索引自动重生成（`marketplace.json`，CI）。
 - 版本号升至 v0.7.7（`pyproject.toml` / `app/utils/config.py` / `dist/installer.iss` / `README.md`）。
+
+### ✨ 新功能 (New Features)
+
+- **输入区图片标注与预览** (`app/widgets/image_annotations.py` · `app/widgets/image_lightbox.py` · `app/widgets/bottom_input_area.py` · `app/main_widget.py`): 输入区图片支持双击预览并直接标注；新增 `ImageAnnotations` 组件承载标注数据与绘制，`ImageLightbox` 展示已有标注。回归 `tests/widgets/test_input_image_annotation.py` · `tests/ui/test_screenshot_annotation.py`。
+- **记忆存储原子化与设备级压缩** (`plugins/assistant_hub/core/memory/entries.py` · `view.py` · `tools/memory_tools.py`): 写入改走临时文件原子替换并加事务锁，中断不再丢数据；快照按设备归档，压缩按设备独立进行且不丢条目，批量追加支持单次原子提交。补齐压缩、注入优先级与工具路由用例。
+- **Windows 命令诊断与替代指引** (`plugins/system-core/tools/terminal_tools.py`): cmd 缺 head/tail/grep 等 Unix 命令时在错误里补充替代工具说明；`bash` 工具描述按平台生成。
+- **grep / glob 大仓库收敛** (`plugins/system-core/tools/file_tools.py`): 目录搜索先按文件名筛出候选再有界提交读取，不再为每个文件创建 Future；`glob` 改用 `iglob` 惰性遍历；结果按内容长度上限截断。
+- **Worktree 页头动态插件图标** (`plugins/worktree-manager/ui/worktree_page.py`): 页头图标随插件动态解析，样式同步调整。
+
+### 🐛 问题修复 (Bug Fixes)
+
+- **read 行号偏移** (`plugins/system-core/tools/file_tools.py`): 带行号读取按真实行号输出，起始行不再错位。回归 `tests/tools/test_file_search_read.py`。
+- **worktree 缓存失效** (`plugins/worktree-manager/tools/worktree_tools.py` · `ui/worktree_section.py`): 清理缓存改全清，避免残留条目刷新后命中旧数据；补契约用例。
+
+### ♻️ 代码重构 (Refactoring)
+
+- **简洁模式思考预览提取** (`app/widgets/card_render_core.py`): 预览改为按句评估，优先选已确认的结论，其次选决定或下一步，跳过试探性开场；模型给出小节标题时与选中句一起展示。`plugins/system-message-output/README.md` 同步说明。
+- **首运行引导账号与安全设置** (`app/widgets/first_run_guide.py` · `app/main_widget.py` · `app/utils/safe_mode.py` · `app/widgets/cards/global_card_controller.py`): 引导流程补充账号与安全设置步骤，安全模式说明同步更新，设置卡可唤起引导；补 `tests/widgets/test_first_run_guide.py`。
+
+### 🔧 其他 (Chores & Build)
+
+- 重新发布 #2：纳入 2026-11-28 17:05~17:42 的 7 个提交，重建 tag 与 Release。
 
 ## [v0.7.6] - 2026-11-27 (重新发布 #2)
 
