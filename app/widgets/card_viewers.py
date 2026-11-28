@@ -6059,7 +6059,7 @@ class CodeWebViewer(QWebEngineView):
                 // Python 侧 live_delta 的下发节奏由批处理决定（软边界 100ms 合并 /
                 // 安全定时器 150~500ms），直接 append 到 DOM 就是"一块一块蹦"。
                 // 这里把「到达节奏」与「显示节奏」解耦：Python 只管 push 增量，
-                // rAF 每帧按指数追赶揭示（CATCHUP_MS 内排空），掉帧时按实际经过
+                // rAF 每帧按剩余字数逐步揭示，掉帧时按实际经过
                 // 时间补足欠账，不会越拖越长。
                 window._v2tw = {{
                     buf: "",          // 待揭示文本
@@ -6070,7 +6070,9 @@ class CodeWebViewer(QWebEngineView):
                     node: null,       // 节点引用缓存（patch 后 isConnected 失效自动重查）
                     reportedAt: 0,    // 上次高度上报时刻
                     reasoning: false, // 当前尾态是否属于思考块（决定 think-compact 类）
-                    CATCHUP_MS: 110,  // 目标追赶窗口：积压在此时间内排空
+                    CATCHUP_MS: 110,  // 指数追赶的时间常数
+                    lastAppendAt: 0,  // 最近一批增量入队的时间
+                    proseCharsPerMs: 0,
                     NORMAL_FRAME_MS: 33,  // 正常帧间隔基准（30fps）
                     BURST_LEN: 400,   // 超过该积压视为突发，加速揭示
                     REPORT_MS: 40     // 高度上报节流（与 v1 _twStep 同口径）
@@ -6147,6 +6149,10 @@ class CodeWebViewer(QWebEngineView):
                     var n = Math.max(1, Math.ceil(st.buf.length * (dt / st.CATCHUP_MS)));
                     if (st.buf.length > st.BURST_LEN) n = Math.max(n, Math.ceil(st.buf.length / 8));
                     if (window._toolCompactMode && !st.reasoning && window._streamingActive) {{
+                        // 以入队时的积压量保底，避免最后几个字逐帧减速。下方仍按视口限量。
+                        if (now - st.lastAppendAt >= st.CATCHUP_MS) {{
+                            n = Math.max(n, Math.ceil(st.proseCharsPerMs * dt));
+                        }}
                         var body = document.body;
                         var cap = parseInt(document.documentElement.style.getPropertyValue('--dfx-body-max-h'), 10);
                         if (cap && window.innerHeight < cap - 2) {{
@@ -6215,6 +6221,8 @@ class CodeWebViewer(QWebEngineView):
                     }}
                     st.reasoning = !!reasoning;
                     st.buf += text;
+                    st.lastAppendAt = performance.now();
+                    st.proseCharsPerMs = st.buf.length / st.CATCHUP_MS;
                     // 异常保险：正常指数追赶下缓冲稳态几百字符；超 2000 = 揭示链
                     // 被闸门/rAF 饥饿卡死，此时瞬时全显优于继续追。
                     if (st.buf.length > 2000 && (!window._toolCompactMode || st.reasoning)) {{ window._v2LiveFlush(); return true; }}

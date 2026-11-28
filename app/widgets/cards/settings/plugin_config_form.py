@@ -103,12 +103,7 @@ class SelectComboRow(QWidget):
 
 
 class _FieldRow(QWidget):
-    """字段行：左侧固定列宽 label，右侧控件按自身最大宽度停靠。
-
-    label 列宽由表单按最长字段名统一计算（见 PluginConfigForm._calc_label_width），
-    而不是每行各算各的：只要有一行 label 更长，控件左边缘就会整体右移，视觉上
-    整张表单错位。控件也不撑满整行：数字/下拉只占需要的那点宽度。
-    """
+    """兼容旧配置卡导出的固定列宽字段行。"""
 
     def __init__(
         self,
@@ -193,32 +188,9 @@ class PluginConfigForm(QWidget):
         schema = PluginConfigRegistry.get_instance().get(plugin_name)
         if schema is None:
             return
-        self._label_width = self._calc_label_width(schema)
         for f in schema.fields:
             self._build_field(f)
         self.echo()
-
-    def _calc_label_width(self, schema) -> int:
-        """按最长字段名算统一列宽（120~200px）
-
-        字号跟随设置页配置，所以用 QFontMetrics 实测而不是写死像素。
-        """
-        try:
-            from PyQt5.QtGui import QFont, QFontMetrics
-
-            from app.utils.design_tokens import get_ui_font_size, scale_font_size
-
-            font = QFont()
-            font.setPixelSize(scale_font_size(get_ui_font_size()))
-            metrics = QFontMetrics(font)
-            widths = [
-                metrics.horizontalAdvance(f.label + (" *" if getattr(f, "required", False) else ""))
-                for f in schema.fields
-                if f.type != "bool"
-            ]
-            return max(120, min(200, max(widths, default=0) + 16))
-        except Exception:
-            return 140
 
     # ── 字段构建 ──────────────────────────────────────────
 
@@ -230,58 +202,38 @@ class PluginConfigForm(QWidget):
             switch.setOnText("")
             switch.setOffText("")
             switch.checkedChanged.connect(lambda _checked, _k=f.key: self._on_field_changed(_k))
-            self._add_field_row(
-                f,
-                _FieldRow(
-                    f.label,
-                    switch,
-                    self,
-                    required=f.required,
-                    label_width=self._label_width,
-                    stretch_control=False,
-                ),
-            )
+            self._add_field_row(f, switch)
         elif f.type == "select":
             # 下拉选择：点击选中即保存（SelectComboRow）
             combo = SelectComboRow(f.options, self)
             combo.valueChanged.connect(lambda _v, _k=f.key: self._on_field_changed(_k))
             self._rows[f.key] = combo
-            self._add_field_row(f, _FieldRow(f.label, combo, self, required=f.required, label_width=self._label_width))
+            self._add_field_row(f, combo)
         elif f.type == "model":
             # 模型选择下拉：选项走 provider.list × model.enumerate 能力动态填充，
             # 首项「跟随当前会话模型」= 空值；存储与保存语义同 select
             combo = SelectComboRow(self._load_model_options(), self)
             combo.valueChanged.connect(lambda _v, _k=f.key: self._on_field_changed(_k))
             self._rows[f.key] = combo
-            self._add_field_row(f, _FieldRow(f.label, combo, self, required=f.required, label_width=self._label_width))
+            self._add_field_row(f, combo)
         elif f.type == "number":
             spin = SpinBox(self)
             spin.setRange(f.min if f.min is not None else 0, f.max if f.max is not None else 2147483647)
             spin.setSingleStep(max(1, f.step))
             spin.valueChanged.connect(lambda *_a, _k=f.key: self._on_field_changed(_k))
             self._rows[f.key] = spin
-            self._add_field_row(f, _FieldRow(f.label, spin, self, required=f.required, label_width=self._label_width))
+            self._add_field_row(f, spin)
         elif f.type == "link":
             # 外链按钮：HyperlinkButton（主题色 + 链接图标），点击用系统浏览器打开。
-            # 按钮自身是居中对齐文本，撑满整行会飘到右边，用 stretch 尾巴把它钉在左侧
             link_text = f.placeholder or f.url
             link = HyperlinkButton(f.url, link_text, self, AppIcon.LINK)
-            holder = self._left_aligned(link)
-            self._add_field_row(
-                f,
-                _FieldRow(f.label, holder, self, required=f.required, label_width=self._label_width, stretch_control=False),
-            )
+            self._add_field_row(f, link)
         elif f.type == "action":
             # 动作按钮：点击弹窗执行声明式工具编排（通用机制，见 ToolActionDialog），
             # 无存储值不参与保存/回显
             btn = PrimaryPushButton(f.placeholder or f.label, self)
             btn.clicked.connect(lambda _c, _f=f, _btn=btn: self._open_action_dialog(_f, _btn))
-            # 按钮不自撑满（撑满后文字居中、显得像主操作按钮），包一层靠左
-            holder = self._left_aligned(btn)
-            self._add_field_row(
-                f,
-                _FieldRow(f.label, holder, self, required=f.required, label_width=self._label_width, stretch_control=False),
-            )
+            self._add_field_row(f, btn)
         elif f.type == "textarea":
             edit = _PlainEdit(self)
             if f.placeholder:
@@ -289,7 +241,7 @@ class PluginConfigForm(QWidget):
             edit.setFixedHeight(max(2, f.rows) * 22 + 8)
             edit.editingFinished.connect(lambda _k=f.key: self._on_field_changed(_k))
             self._rows[f.key] = edit
-            self._add_field_row(f, _FieldRow(f.label, edit, self, required=f.required, label_width=self._label_width))
+            self._add_field_row(f, edit)
         else:
             edit = PasswordLineEdit() if f.type == "password" else LineEdit()
             edit.setClearButtonEnabled(True)
@@ -297,16 +249,7 @@ class PluginConfigForm(QWidget):
                 edit.setPlaceholderText(f.placeholder)
             self._rows[f.key] = edit
             edit.editingFinished.connect(lambda _k=f.key: self._on_field_changed(_k))
-            self._add_field_row(f, _FieldRow(f.label, edit, self, required=f.required, label_width=self._label_width))
-
-    def _left_aligned(self, control: QWidget) -> QWidget:
-        """按钮类控件包一层靠左容器（按钮自身撑满会居中，视觉上像主操作）"""
-        holder = QWidget(control.parentWidget())
-        holder_layout = QHBoxLayout(holder)
-        holder_layout.setContentsMargins(0, 0, 0, 0)
-        holder_layout.addWidget(control)
-        holder_layout.addStretch(1)
-        return holder
+            self._add_field_row(f, edit)
 
     def _load_model_options(self) -> tuple:
         """模型下拉选项：首项「跟随当前会话模型」+ provider.list × model.enumerate。
@@ -359,25 +302,35 @@ class PluginConfigForm(QWidget):
         label.setStyleSheet(f"color: {Colors.TEXT_SECONDARY}; font-size: {px}px;")
         label.setMaximumWidth(760)
 
-    def _add_field_row(self, f, row: QWidget) -> None:
-        """一个字段 = 一行控件 +（可选）说明，整块与相邻字段拉开间距
-
-        说明文字用 CaptionLabel 而不自设颜色：设计令牌的 TEXT_SECONDARY 是
-        深色主题值（白色半透明），浅色主题下写了就等于隐形；CaptionLabel 自带
-        随主题变化的次要文字样式。说明行用同样的 label 列宽占位，左边缘与控件对齐。
-        """
+    def _add_field_row(self, f, control: QWidget) -> None:
+        """同一字段的名称和说明共用左列，编辑控件靠右；长文本编辑器占整行。"""
         block = QWidget(self)
         box = QVBoxLayout(block)
-        box.setContentsMargins(0, 0, 0, 0)
-        box.setSpacing(2)
-        box.addWidget(row)
+        box.setContentsMargins(0, 6, 0, 6)
+        box.setSpacing(6)
+        row = QHBoxLayout()
+        row.setSpacing(16)
+        box.addLayout(row)
+        text = QVBoxLayout()
+        text.setSpacing(3)
+        row.addLayout(text, 3)
+        label = BodyLabel(f"{f.label} *" if f.required else f.label, block)
+        label.setObjectName("fieldLabel")
+        label.setWordWrap(True)
+        text.addWidget(label)
         if f.description:
             hint = CaptionLabel(f.description, block)
             hint.setWordWrap(True)
             self._style_hint(hint)
-            box.addWidget(_FieldRow("", hint, block, label_width=self._label_width, stretch_control=True))
+            text.addWidget(hint)
+        control.setAccessibleName(f.label)
+        if f.type == "textarea":
+            box.addWidget(control)
+        elif f.type in ("bool", "link", "action"):
+            row.addWidget(control, 0, Qt.AlignRight | Qt.AlignVCenter)
+        else:
+            row.addWidget(control, 2)
         self._layout.addWidget(block)
-        self._layout.addSpacing(12)
 
     # ── 回显与保存 ────────────────────────────────────────
 

@@ -36,7 +36,6 @@ from qfluentwidgets import (
     CaptionLabel,
     ComboBox,
     HyperlinkButton,
-    PillPushButton,
     PushButton,
     SearchLineEdit,
     SegmentedWidget,
@@ -56,7 +55,8 @@ from app.widgets.cards.settings.plugin_config_form import PluginConfigForm, eval
 from app.widgets.cards.settings.plugin_components_card import _component_display_name
 
 _SEARCH_DEBOUNCE_MS = 180
-_LIST_WIDTH = 236
+_LIST_WIDTH = 252
+_STATUS_FILTERS = {"configured": "有配置", "todo": "待配置", "none": "无配置", "all": "全部"}
 # 类型下拉最多直接可见的档位数，超出滚动（默认 -1 会按屏幕高度撑满）
 _TYPE_COMBO_MAX_VISIBLE_ITEMS = 10
 _STATE_RANK = {"missing": 0, "unconfigured": 1, "ok": 2, "none": 3}
@@ -196,7 +196,7 @@ class _KeyValueRow(QWidget):
     def __init__(self, key: str, value: str, parent=None):
         super().__init__(parent)
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(0, 3, 0, 3)
+        layout.setContentsMargins(0, 5, 0, 5)
         layout.setSpacing(16)
         label = CaptionLabel(key, self)
         label.setObjectName("kvLabel")
@@ -216,27 +216,16 @@ class _SectionTitle(QLabel):
     def __init__(self, text: str, parent=None):
         super().__init__(text, parent)
         self.setObjectName("sectionTitle")
-        self.setStyleSheet(
-            f"color: {Colors.TEXT_MUTED}; font-size: 12px; padding: 14px 0 2px 0;"
-        )
+        _font_px(self, 0)
+        self.setStyleSheet(self.styleSheet() + "font-weight: 600; padding: 12px 0 4px 0;")
 
 
 def _h_line(parent: QWidget) -> QFrame:
     """1px 分隔线（关于页分组之间）"""
     line = QFrame(parent)
     line.setFixedHeight(1)
-    line.setStyleSheet(f"background: {Colors.BORDER}; border: none;")
+    line.setObjectName("pluginSectionDivider")
     return line
-
-
-def _badge(text: str, parent: QWidget) -> QLabel:
-    """组件徽章：accent 文字 + 半透明底"""
-    label = QLabel(text, parent)
-    label.setStyleSheet(
-        f"color: {Colors.TEXT_ACCENT}; background: {Colors.TAB_ACTIVE_BG};"
-        "border-radius: 4px; padding: 1px 8px; font-size: 12px;"
-    )
-    return label
 
 
 class _EmptyHint(QWidget):
@@ -304,7 +293,9 @@ _PAINT_RULES = {
     "configHint": "secondary",
     "kvLabel": "secondary",
     "kvValue": "primary",
-    "sectionTitle": "muted",
+    "sectionTitle": "primary",
+    "aboutDescription": "secondary",
+    "resultCount": "secondary",
     "emptyTitle": "primary",
     "emptyDetail": "secondary",
     "permCap": "primary",
@@ -316,7 +307,8 @@ def _detail_frame_css() -> str:
     """详情面板背景/边框：每次调用重读 Colors token（主题切换后重算）"""
     return (
         f"#pluginDetailFrame {{ background: {Colors.CARD_BG.format(alpha=140)};"
-        f" border: 1px solid {Colors.BORDER}; border-radius: 8px; }}"
+        f" border: none; border-radius: 0; }}"
+        f"QFrame#pluginSectionDivider {{ background: {Colors.DIVIDER_COLOR}; border: none; }}"
     )
 
 def _paint_theme_colors(root: QWidget) -> None:
@@ -377,7 +369,7 @@ class _FlexSegmented(SegmentedWidget):
     这里抬高 sizeHint 让默认更宽松，最小尺寸仍是文字宽（外层布局可压到该下限）。
     """
 
-    _ITEM_PREF_W = 88
+    _ITEM_PREF_W = 58
 
     def sizeHint(self):
         s = super().sizeHint()
@@ -396,8 +388,8 @@ class _PluginDetailView(QWidget):
         self._form: Optional[PluginConfigForm] = None
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(14, 10, 6, 10)
-        layout.setSpacing(8)
+        layout.setContentsMargins(18, 6, 12, 10)
+        layout.setSpacing(14)
 
         header = QHBoxLayout()
         header.setContentsMargins(0, 0, 0, 0)
@@ -410,20 +402,21 @@ class _PluginDetailView(QWidget):
         title_box.setSpacing(1)
         self._title = StrongBodyLabel("", self)
         self._title.setObjectName("detailTitle")
+        self._title.setWordWrap(True)
         self._meta = CaptionLabel("", self)
         self._meta.setObjectName("detailMeta")
+        self._meta.setWordWrap(True)
         title_box.addWidget(self._title)
         title_box.addWidget(self._meta)
         header.addLayout(title_box, 1)
 
-        # 页签独占一行，长插件名也能保留完整的操作区。
         self._seg = _FlexSegmented(self)
         self._seg.addItem("config", "配置")
         self._seg.addItem("perms", "权限")
         self._seg.addItem("about", "关于")
         self._seg.currentItemChanged.connect(self._on_segment_changed)
+        header.addWidget(self._seg, 0, Qt.AlignRight | Qt.AlignVCenter)
         layout.addLayout(header)
-        layout.addWidget(self._seg, 0, Qt.AlignLeft)
 
         self._stack = QStackedWidget(self)
         self._stack.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
@@ -651,36 +644,21 @@ class _PluginDetailView(QWidget):
 
         body = QWidget()
         layout = QVBoxLayout(body)
-        layout.setContentsMargins(2, 8, 12, 16)
-        layout.setSpacing(2)
+        layout.setContentsMargins(0, 4, 12, 16)
+        layout.setSpacing(3)
 
         # 描述独立成段：不塞进键值行，避免长描述把两列撑歪
         desc = BodyLabel(info.description or "此插件未提供描述", body)
+        desc.setObjectName("aboutDescription")
         desc.setWordWrap(True)
         layout.addWidget(desc)
 
         layout.addWidget(_SectionTitle("基本信息", body))
         layout.addWidget(_h_line(body))
-        layout.addWidget(_KeyValueRow("版本", str(info.version), body))
         layout.addWidget(_KeyValueRow("许可证", str(manifest.get("license") or "未声明"), body))
-        layout.addWidget(_KeyValueRow("来源", "内置插件" if info.is_system else "用户插件", body))
-        layout.addWidget(_KeyValueRow("状态", "已启用" if entry.enabled else "已停用", body))
         if entry.components:
-            comp_row = QWidget(body)
-            h = QHBoxLayout(comp_row)
-            h.setContentsMargins(0, 3, 0, 3)
-            h.setSpacing(16)
-            lbl = CaptionLabel("组件", comp_row)
-            lbl.setFixedWidth(104)
-            lbl.setStyleSheet(f"color: {Colors.TEXT_SECONDARY};")
-            h.addWidget(lbl, 0, Qt.AlignTop)
-            badges = QHBoxLayout()
-            badges.setSpacing(6)
-            for comp in entry.components:
-                badges.addWidget(_badge(_component_display_name(comp), comp_row))
-            badges.addStretch(1)
-            h.addLayout(badges, 1)
-            layout.addWidget(comp_row)
+            components = "、".join(_component_display_name(comp) for comp in entry.components)
+            layout.addWidget(_KeyValueRow("组件", components, body))
 
         if author_name or home:
             layout.addWidget(_SectionTitle("作者与来源", body))
@@ -696,7 +674,10 @@ class _PluginDetailView(QWidget):
                 home_lbl.setFixedWidth(104)
                 home_lbl.setStyleSheet(f"color: {Colors.TEXT_SECONDARY};")
                 hh.addWidget(home_lbl, 0, Qt.AlignTop)
-                hh.addWidget(HyperlinkButton(home, home, home_row), 1)
+                link = HyperlinkButton(home, "访问主页", home_row)
+                link.setToolTip(home)
+                hh.addWidget(link, 0, Qt.AlignLeft)
+                hh.addStretch(1)
                 layout.addWidget(home_row)
 
         layout.addWidget(_SectionTitle("兼容性", body))
@@ -762,8 +743,13 @@ class PluginSettingsPage(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(8)
 
-        self._search = SearchLineEdit(self)
-        self._search.setPlaceholderText("搜索插件、配置项、能力…")
+        self._sidebar = QWidget(self)
+        sidebar_layout = QVBoxLayout(self._sidebar)
+        sidebar_layout.setContentsMargins(4, 4, 4, 4)
+        sidebar_layout.setSpacing(8)
+        self._search = SearchLineEdit(self._sidebar)
+        self._search.setPlaceholderText("搜索插件")
+        self._search.setToolTip("搜索插件、配置字段或能力名称")
         self._search.setClearButtonEnabled(True)
         self._search.setFixedHeight(32)
         self._search_timer = QTimer(self)
@@ -773,43 +759,27 @@ class PluginSettingsPage(QWidget):
         self._search.textChanged.connect(self._on_search_text_changed)
         self._search.searchSignal.connect(self._apply_filter)
 
-        # 类型下拉（搜索框左侧）：按组件能力过滤（工具/技能/智能体…），
-        # 档位在 reload 时按插件清单实际出现的组件动态生成，避免空档
+        sidebar_layout.addWidget(self._search)
+        self._status_combo = ComboBox(self._sidebar)
+        self._status_combo.setAccessibleName("配置状态")
+        for key, title in _STATUS_FILTERS.items():
+            self._status_combo.addItem(title, userData=key)
+        self._status_combo.currentIndexChanged.connect(self._on_status_changed)
         self._type_combo = ComboBox(self)
         self._type_combo.setFixedHeight(32)
-        self._type_combo.setMinimumWidth(132)
+        self._type_combo.setAccessibleName("组件类型")
         self._type_combo.setMaxVisibleItems(_TYPE_COMBO_MAX_VISIBLE_ITEMS)
         self._type_combo.addItem("全部类型")
         self._type_combo.currentIndexChanged.connect(self._on_type_changed)
         search_row = QHBoxLayout()
         search_row.setContentsMargins(0, 0, 0, 0)
         search_row.setSpacing(8)
-        search_row.addWidget(self._search, 1)
-        search_row.addWidget(self._type_combo)
-        layout.addLayout(search_row)
-
-        self.filter_bar = QWidget(self)
-        chips = QHBoxLayout(self.filter_bar)
-        chips.setContentsMargins(0, 0, 0, 0)
-        chips.setSpacing(6)
-        self._chips = {}
-        # 默认只看「有配置」：插件页的主要任务是配置，无配置插件与全量放后面
-        for key, text in (
-            ("configured", "有配置"),
-            ("todo", "待配置"),
-            ("none", "无配置"),
-            ("all", "全部"),
-        ):
-            chip = PillPushButton(text, self.filter_bar)
-            chip.setCheckable(True)
-            chip.setChecked(key == "configured")
-            chip.clicked.connect(lambda _c=False, k=key: self._on_chip_clicked(k))
-            chips.addWidget(chip)
-            self._chips[key] = chip
-        chips.addStretch(1)
-        self._result_count = CaptionLabel(self.filter_bar)
-        chips.addWidget(self._result_count)
-        layout.addWidget(self.filter_bar)
+        search_row.addWidget(self._status_combo, 1)
+        search_row.addWidget(self._type_combo, 1)
+        sidebar_layout.addLayout(search_row)
+        self._result_count = CaptionLabel(self._sidebar)
+        self._result_count.setObjectName("resultCount")
+        sidebar_layout.addWidget(self._result_count)
 
         body = QHBoxLayout()
         body.setContentsMargins(0, 0, 0, 0)
@@ -820,7 +790,7 @@ class PluginSettingsPage(QWidget):
         self._list_area.setWidgetResizable(True)
         install_fast_wheel(self._list_area)
         self._list_area.setFrameShape(QFrame.NoFrame)
-        self._list_area.setFixedWidth(_LIST_WIDTH)
+        self._sidebar.setFixedWidth(_LIST_WIDTH)
         self._list_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self._list_area.setStyleSheet("QScrollArea { background: transparent; border: none; }")
         list_body = QWidget()
@@ -829,7 +799,8 @@ class PluginSettingsPage(QWidget):
         self._list_layout.setSpacing(2)
         self._list_layout.addStretch(1)
         self._list_area.setWidget(list_body)
-        body.addWidget(self._list_area)
+        sidebar_layout.addWidget(self._list_area, 1)
+        body.addWidget(self._sidebar)
 
         self._detail_frame = QFrame(self)
         self._detail_frame.setObjectName("pluginDetailFrame")
@@ -860,13 +831,24 @@ class PluginSettingsPage(QWidget):
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
-        compact = event.size().width() < 650
+        self._size_sidebar()
+
+    def _size_sidebar(self) -> None:
+        # 数量、组件名与字体都会变化；为文字与下拉箭头分别留出空间。
+        filter_width = 16
+        for combo in (self._status_combo, self._type_combo):
+            text_width = combo.fontMetrics().horizontalAdvance(combo.currentText())
+            width = max(combo.sizeHint().width(), text_width + 50)
+            combo.setMinimumWidth(width)
+            filter_width += width
+        sidebar_width = max(_LIST_WIDTH, filter_width)
+        compact = self.width() < sidebar_width + 398
         if compact:
-            self._list_area.setMinimumWidth(0)
-            self._list_area.setMaximumWidth(16777215)
+            self._sidebar.setMinimumWidth(0)
+            self._sidebar.setMaximumWidth(16777215)
             self._list_area.setFixedHeight(110)
         else:
-            self._list_area.setFixedWidth(_LIST_WIDTH)
+            self._sidebar.setFixedWidth(sidebar_width)
             self._list_area.setMinimumHeight(0)
             self._list_area.setMaximumHeight(16777215)
         self._panes.setDirection(QBoxLayout.TopToBottom if compact else QBoxLayout.LeftToRight)
@@ -990,7 +972,8 @@ class PluginSettingsPage(QWidget):
     def _reset_filters(self) -> None:
         self._search.clear()
         self._type_combo.setCurrentIndex(0)
-        self._on_chip_clicked("all")
+        self._status_combo.setCurrentIndex(self._status_combo.findData("all"))
+        self._apply_filter()
         self._search.setFocus()
 
     def _apply_filter(self, *, refresh_detail: bool = False) -> None:
@@ -1000,6 +983,7 @@ class PluginSettingsPage(QWidget):
         for row in self._rows:
             row.setVisible(row._entry.info.name in self._visible_names)
         self._result_count.setText(f"{len(matches)} 个结果")
+        self._result_count.setVisible(bool(self._keyword or self._type_filter))
         if matches:
             self._select(self._current if self._current in self._visible_names else matches[0], force=refresh_detail)
         else:
@@ -1023,20 +1007,18 @@ class PluginSettingsPage(QWidget):
             return entry.state in ("missing", "unconfigured")
         return True
 
-    def _on_chip_clicked(self, key: str) -> None:
-        self._filter = key
-        for k, chip in self._chips.items():
-            chip.setChecked(k == key)
+    def _on_status_changed(self, index: int) -> None:
+        self._filter = self._status_combo.itemData(index)
         self._apply_filter()
 
     def _update_counts(self) -> None:
         total = len(self._entries)
         todo = sum(1 for e in self._entries if e.state in ("missing", "unconfigured"))
         configured = sum(1 for e in self._entries if e.has_config)
-        self._chips["configured"].setText(f"有配置 {configured}")
-        self._chips["todo"].setText(f"待配置 {todo}")
-        self._chips["none"].setText(f"无配置 {total - configured}")
-        self._chips["all"].setText(f"全部 {total}")
+        counts = {"configured": configured, "todo": todo, "none": total - configured, "all": total}
+        for index, (key, title) in enumerate(_STATUS_FILTERS.items()):
+            self._status_combo.setItemText(index, f"{title} {counts[key]}")
+        self._size_sidebar()
 
     # ── 选中与详情 ────────────────────────────────────────
 
@@ -1070,6 +1052,7 @@ class PluginSettingsPage(QWidget):
         _refresh_hint_fonts(self._detail)
         self._detail_frame.setStyleSheet(_detail_frame_css())
         _apply_font(self)
+        self._size_sidebar()
         _paint_theme_colors(self)
 
     def refresh_entry_state(self, entry: PluginEntry) -> None:

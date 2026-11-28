@@ -118,18 +118,18 @@ def test_search_by_plugin_name_and_field_label(env, qapp):
     visible = [r._entry.info.name for r in page._rows if not r.isHidden()]
     assert visible == ["voice-reply"]
     # 默认筛选只看「有配置」，搜无配置插件前先切到「全部」
-    page._on_chip_clicked("all")
+    page._status_combo.setCurrentIndex(page._status_combo.findData("all"))
     page._search.setText("browser")
     page._apply_filter()
     visible = [r._entry.info.name for r in page._rows if not r.isHidden()]
     assert visible == ["browser"]
 
 
-def test_filter_chip_pending(env, qapp):
+def test_filter_pending(env, qapp):
     page = page_mod.PluginSettingsPage()
     page.reload(force=True)
     _pump(qapp)
-    page._on_chip_clicked("todo")
+    page._status_combo.setCurrentIndex(page._status_combo.findData("todo"))
     visible = [r._entry.info.name for r in page._rows if not r.isHidden()]
     assert visible == ["voice-reply"]
 
@@ -155,16 +155,16 @@ def test_filter_keeps_detail_in_results_and_recovers_from_empty(env, qapp):
 def test_required_field_save_updates_hint_and_pending_results(env, qapp):
     page = page_mod.PluginSettingsPage()
     page.reload(force=True)
-    page._on_chip_clicked("todo")
+    page._status_combo.setCurrentIndex(page._status_combo.findData("todo"))
     field = page._detail._form._rows["api_key"]
     field.setText("test-value")
     field.editingFinished.emit()
     _pump(qapp)
     assert page._detail._missing_hint.isHidden()
-    assert page._chips["todo"].text() == "待配置 0"
+    assert page._status_combo.currentText() == "待配置 0"
     assert page._current is None
     page.reload(force=True)
-    page._on_chip_clicked("configured")
+    page._status_combo.setCurrentIndex(page._status_combo.findData("configured"))
     page._select("voice-reply")
     assert page._detail._form._rows["api_key"].text() == "test-value"
 
@@ -188,7 +188,7 @@ def test_type_combo_filters_by_component(env, qapp):
     page = page_mod.PluginSettingsPage()
     page.reload(force=True)
     _pump(qapp)
-    assert "off" not in page._chips
+    assert page._status_combo.findData("off") == -1
     # 档位只列清单实际出现的组件，按 COMPONENT_ORDER 排列：skills < mcp < ui < tools
     assert page._type_keys == [None, "skills", "mcp", "ui", "tools"]
     # 选「工具」→ 只剩 voice-reply（默认「有配置」chip 下三者都有配置）
@@ -196,7 +196,7 @@ def test_type_combo_filters_by_component(env, qapp):
     visible = [r._entry.info.name for r in page._rows if not r.isHidden()]
     assert visible == ["voice-reply"]
     # 切「全部」chip + 「界面扩展」→ 无配置的 browser 也能被类型筛出
-    page._on_chip_clicked("all")
+    page._status_combo.setCurrentIndex(page._status_combo.findData("all"))
     page._type_combo.setCurrentIndex(page._type_keys.index("ui"))
     visible = [r._entry.info.name for r in page._rows if not r.isHidden()]
     assert visible == ["browser"]
@@ -472,7 +472,7 @@ def test_detail_frame_bg_refreshes_on_theme_toggle(env, qapp, monkeypatch):
     _pump(qapp)
     old_css = page._detail_frame.styleSheet()
     monkeypatch.setattr(page_mod.Colors, "CARD_BG", "rgba(9, 8, 7, {alpha})")
-    monkeypatch.setattr(page_mod.Colors, "BORDER", "#010203")
+    monkeypatch.setattr(page_mod.Colors, "DIVIDER_COLOR", "#010203")
     page.refresh_style()
     new_css = page._detail_frame.styleSheet()
     assert new_css != old_css
