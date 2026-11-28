@@ -3929,7 +3929,10 @@ _SKELETON_CACHE_MAX = 48
 # v98：分组内容共享流式滚动窗口，完成后按自然高度展开。
 # v99：分组模式无旧工具页脚，不以延迟到达的 Qt 视口高度限制正文。
 # v100：已完成分组的标题带动作图标和右侧箭头。
-_SKELETON_CACHE_VERSION = 101
+# v102：分组流式工具栏的跟随态加固——程序置底改深度令牌识别（_followGroupTail /
+# _progDepth，替代 _lastFollowTop 等值比较），scroll 判定容差 4px→24px，新一轮
+# 流式重置 _followTail，搬移/重排后补一次置底。修「没动滚轮，工具栏自己就不置底」。
+_SKELETON_CACHE_VERSION = 102
 
 
 def _js_literal(value) -> str:

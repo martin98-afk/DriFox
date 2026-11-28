@@ -8,13 +8,31 @@ body.dfx-grouped #tool-section { display:none !important; }
 
 GROUP_JS = """
 var _groupHeightSync = false;
+// 跟随态判定的距底容差。旧值 4px 且只由 scroll 事件推断：一次布局重排引起的
+// scroll（非用户滚轮）差出几像素就会把 _followTail 永久关掉，而关闭之后没有
+// 任何恢复路径 —— 表现为「没动滚轮，工具栏自己就不置底了」。24px 与主程序
+// AT_BOTTOM_TOLERANCE 同口径。
+var _GROUP_FOLLOW_TOL = 24;
+// 程序置底令牌：panel.scrollTop = scrollHeight 会派发 scroll，必须与用户滚动
+// 区分。旧实现用 _lastFollowTop 等值比较，内容在同一帧继续增长时基准立即失效
+// → 自身事件被当成用户滚动 → 跟随被误关。改为深度令牌 + 下一帧清零
+// （同 app/main_widget._programmatic_scroll、骨架 _progScroll 语义）。
+function _followGroupTail(panel) {
+    panel._progDepth = (panel._progDepth || 0) + 1;
+    if (!panel._progRaf) {
+        panel._progRaf = requestAnimationFrame(function() {
+            panel._progRaf = 0;
+            panel._progDepth = 0;
+        });
+    }
+    panel.scrollTop = panel.scrollHeight;
+}
 // 观察内容的自然高度。外层限高后，继续追加工具或异步展开结果仍能收到通知。
 var _groupResize = new ResizeObserver(function(entries) {
     entries.forEach(function(entry) {
         var panel = entry.target.parentNode;
         if (!panel || !panel.hasAttribute('data-live') || !panel.clientHeight || !panel._followTail) return;
-        panel.scrollTop = panel.scrollHeight;
-        panel._lastFollowTop = panel.scrollTop;
+        _followGroupTail(panel);
     });
 });
 function _createGroupPanel() {
@@ -26,9 +44,17 @@ function _createGroupPanel() {
     panel._followTail = true;
     panel.onscroll = function() {
         if (!panel.hasAttribute('data-live') || !panel.clientHeight) return;
-        if (panel._followTail && panel.scrollTop === panel._lastFollowTop) return;
-        panel._followTail = panel.scrollHeight - panel.clientHeight - panel.scrollTop < 4;
+        // 程序置底引起的 scroll 不改变跟随态（rAF 兜底清零，无需逐个配平）
+        if (panel._progDepth > 0) return;
+        panel._followTail = panel.scrollHeight - panel.clientHeight - panel.scrollTop <= _GROUP_FOLLOW_TOL;
     };
+    // 上滚意图同步置位（scroll 事件异步派发，抢不过同一帧的 RO 补滚）。
+    // 门控：容器真能滚、且不在顶部 —— 否则滚轮是给外层聊天列表的冒泡残留。
+    panel.addEventListener('wheel', function(e) {
+        if (e.deltaY >= 0 || !panel.hasAttribute('data-live')) return;
+        if (panel.scrollHeight <= panel.clientHeight || panel.scrollTop <= 0) return;
+        panel._followTail = false;
+    }, {passive: true});
     return panel;
 }
 document.addEventListener('keydown', function(e) { if (e.key === 'Tab') document.body.classList.add('dfx-key-focus'); }, true);
@@ -98,8 +124,14 @@ window._applyMessageGroups = function(groups, streaming) {
         var items = panel.firstElementChild;
         slots[g[0]] = [b,panel];
         if (panel.hasAttribute('data-live') !== !!streaming) {
-            if (streaming) _groupResize.observe(items);
-            else _groupResize.unobserve(items);
+            if (streaming) {
+                // 新一轮流式从跟随态起步：上一轮用户上滚留下的 false 不能继承
+                panel._followTail = true;
+                panel._progDepth = 0;
+                _groupResize.observe(items);
+            } else {
+                _groupResize.unobserve(items);
+            }
         }
         panel.toggleAttribute('data-live', !!streaming);
         for (var i=g[0]; i<g[1]; i++) {
@@ -145,6 +177,11 @@ window._applyMessageGroups = function(groups, streaming) {
     buttons.forEach(function(b,k) {
         _groupResize.unobserve(b._panel.firstElementChild);
         b._panel.remove(); b.remove(); manual.delete(k);
+    });
+    // 搬移/重排后补一次置底：令牌同步置位，顺带吞掉重排引起的 scroll 事件
+    // （否则它会被当成用户滚动把跟随关掉，之后再没有补滚路径）。
+    root.querySelectorAll('.dfx-group-body[data-live]').forEach(function(panel) {
+        if (panel._followTail && panel.clientHeight) _followGroupTail(panel);
     });
     root._currentGroups = groups;
 };
