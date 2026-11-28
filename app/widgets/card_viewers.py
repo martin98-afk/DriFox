@@ -5124,12 +5124,13 @@ class CodeWebViewer(QWebEngineView):
                                 window.mermaid.render(rid, decoded).then(function (r) {{
                                     var svg = r && r.svg ? r.svg : String(r);
                                     if (svg.indexOf('<svg') < 0) throw new Error('no svg in result');
+                                    var wasAtBottom = _dfxNearBottom(document.body);
                                     el.classList.remove('mermaid-pending');
                                     el.innerHTML = svg;
                                     window._chartKeyOf(el); // 清空载荷前保留身份，供后续块级替换复用
                                     el.setAttribute('data-mermaid-src', '');   // 渲染完释放 b64
                                     if (window._attachChartToolbar) window._attachChartToolbar(el, 'mermaid');
-                                    if (typeof _autoScrollAfterAsyncRender === 'function') _autoScrollAfterAsyncRender();
+                                    _autoScrollAfterAsyncRender(wasAtBottom);
                                     if (typeof reportHeightDebounced === 'function') reportHeightDebounced();
                                     done();
                                 }})['catch'](function (e) {{
@@ -5351,6 +5352,7 @@ class CodeWebViewer(QWebEngineView):
                     window.__echPumpBusy = true;
                     requestAnimationFrame(function () {{
                         window.__echPumpBusy = false;
+                        var wasAtBottom = _dfxNearBottom(document.body);
                         var _t0 = (window.performance && performance.now) ? performance.now() : Date.now();
                         while (window.__echQueue.length) {{
                             var el = window.__echQueue.shift();
@@ -5359,9 +5361,9 @@ class CodeWebViewer(QWebEngineView):
                             var _now = (window.performance && performance.now) ? performance.now() : Date.now();
                             if (_now - _t0 >= window._ECH_FRAME_BUDGET_MS) break;
                         }}
+                        _autoScrollAfterAsyncRender(wasAtBottom);
                         if (window.__echQueue.length) window._pumpEcharts();
                         else {{
-                            if (typeof _autoScrollAfterAsyncRender === 'function') _autoScrollAfterAsyncRender();
                             if (typeof reportHeightDebounced === 'function') reportHeightDebounced();
                         }}
                     }});
@@ -6609,23 +6611,8 @@ class CodeWebViewer(QWebEngineView):
                             if (tc.children.length > 0 && typeof _updateToolSectionHeader === 'function') _updateToolSectionHeader();
                         }}
                         if (streaming === true && typeof _scrollToolContentToBottom === 'function') _scrollToolContentToBottom();
-                        // [T43] 非流式（历史加载 / 流式终渲染）落地后：跟随态则把卡内
-                        // body 滚到底。v1 路径（updateContent）尾部自带
-                        // _autoScrollStreamingBody 兜底，v2 通道此前完全没有 body 滚底 →
-                        // 历史会话里内容超过 body max-height 的超长卡片首帧停在最上面
-                        // （流式期间是贴底的，加载历史后行为不一致，用户实测）。
-                        // 仅跟随态执行：用户已上滚阅读时保持位置，语义与
-                        // _autoScrollStreamingBody 的 _userScrolledWithin 守卫一致。
-                        if (streaming !== true && !window._userScrolledWithin) {{
-                            window._suppressScrollEvent = true;
-                            try {{
-                                document.body.scrollTop = document.body.scrollHeight;
-                            }} finally {{
-                                window._prevScrollTop = document.body.scrollTop;
-                                window._autoScrollTime = performance.now();
-                                window._suppressScrollEvent = false;
-                            }}
-                        }}
+                        // 图表替换占位块也会撑高正文，即使本批没有逐帧追加的文字。
+                        if (!window._userScrolledWithin) document.body.scrollTop = document.body.scrollHeight;
                         if (typeof reportHeightDebounced === 'function') setTimeout(function () {{ reportHeightDebounced(); }}, 0);
                     }} catch (e) {{
                         if (window.console) console.log('v2-after-patch-failed:' + e);

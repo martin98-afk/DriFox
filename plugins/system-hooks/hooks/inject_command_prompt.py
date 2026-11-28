@@ -79,7 +79,7 @@ def _format_skill_output(pending: dict) -> str:
     if not content:
         return ""
 
-    parts = [f"用户通过 /{name} 技能发起了请求，已自动加载该技能："]
+    parts = [f"用户通过 /{name} 引用了技能。请直接按下方已注入的正文执行，无需再调用 skill 加载同一技能。"]
 
     if workspace:
         parts.append(f"\n技能工作目录：{workspace}")

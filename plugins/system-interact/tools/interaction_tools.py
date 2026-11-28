@@ -21,7 +21,7 @@ _SKILL_SCHEMA = {
     "function": {
         "name": "skill",
         "description": (
-            "加载用户点名（含 /命令）、项目要求或完成任务需要的技能。已加载的技能可直接使用。"
+            "当上下文缺少所需技能的正文时加载。/技能名 已自动注入正文时直接执行，无需重复调用。"
             "可用技能见「偏好技能」，需要查找其他技能时用 manage_skill(action=list)。"
         ),
         "parameters": {

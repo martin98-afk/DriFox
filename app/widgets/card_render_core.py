@@ -3929,7 +3929,7 @@ _SKELETON_CACHE_MAX = 48
 # v98：分组内容共享流式滚动窗口，完成后按自然高度展开。
 # v99：分组模式无旧工具页脚，不以延迟到达的 Qt 视口高度限制正文。
 # v100：已完成分组的标题带动作图标和右侧箭头。
-_SKELETON_CACHE_VERSION = 100
+_SKELETON_CACHE_VERSION = 101
 
 
 def _js_literal(value) -> str:
@@ -5250,6 +5250,7 @@ _CONTENT_AUTOSCROLL_JS = """
                             var _growth = Math.max(0, _max - (el._downScrollBaseMax || 0));
                             if ((el.scrollHeight - el.scrollTop - el.clientHeight) < (_tol + _growth)) {
                                 el._userScrolledUp = false;
+                                _progScroll(el, el.scrollHeight);
                                 if (typeof reportHeightDebounced === 'function') reportHeightDebounced();
                                 else if (typeof reportHeight === 'function') reportHeight();
                                 return;
@@ -5289,6 +5290,7 @@ _CONTENT_AUTOSCROLL_JS = """
                             var _growth = Math.max(0, _max - (b._downScrollBaseMax || 0));
                             if ((b.scrollHeight - b.scrollTop - b.clientHeight) < (_tol + _growth)) {
                                 window._userScrolledWithin = false;
+                                b.scrollTop = b.scrollHeight;
                                 if (typeof reportHeightDebounced === 'function') reportHeightDebounced();
                                 return;
                             }
@@ -5478,11 +5480,9 @@ _CONTENT_AUTOSCROLL_JS = """
                 // _cp（坞态正文容器）停在旧位置，下一个 chunk 的 updateContent
                 // 又拉回底部 → 视口在「固定位置 ↔ 底部」往返抖动（图表卡片
                 // 滚轮来回跳的根因）。增高完成后立即补滚。
-                // 守卫：仅坞态流式生效；用户上滚阅读（_userScrolledUp）不拉底，
-                // 由 _autoScrollStreamingBody 内部判定；非流式（历史卡片懒渲染
-                // 图表）绝不滚动。
-                function _autoScrollAfterAsyncRender() {
-                    if (window._streamingActive && typeof _autoScrollStreamingBody === 'function') {
+                // 终帧之后仍可能有图表落高。只延续布局变化前的贴底位置。
+                function _autoScrollAfterAsyncRender(wasAtBottom) {
+                    if (window._streamingActive || wasAtBottom) {
                         _autoScrollStreamingBody();
                     }
                 }
@@ -5537,9 +5537,10 @@ _BODY_HEIGHT_CAP_JS = """
                     if (!h) return;
                     var prev = parseInt(f.getAttribute('data-dfx-h') || '0', 10) || 0;
                     if (Math.abs(h - prev) < 4) return;  // 4px 死区：抑制重排噪声
+                    var wasAtBottom = _dfxNearBottom(document.body);
                     f.setAttribute('data-dfx-h', String(h));
                     f.style.height = h + 'px';
-                    if (typeof _autoScrollAfterAsyncRender === 'function') _autoScrollAfterAsyncRender();
+                    _autoScrollAfterAsyncRender(wasAtBottom);
                     if (typeof reportHeightDebounced === 'function') reportHeightDebounced();
                 };
                 window._dfxSetResizing = function (on) {

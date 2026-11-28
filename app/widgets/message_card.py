@@ -30,7 +30,7 @@ import threading
 import urllib.parse
 from collections import OrderedDict
 from datetime import datetime
-from functools import lru_cache
+from functools import cached_property, lru_cache
 from html import escape, unescape
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -1324,16 +1324,17 @@ class MessageCard(SimpleCardWidget):
         （</?字母…，对齐全量版 _PARTIAL_TAG_TAIL_RE——注册表为空时半截
         未注册 tag 同样要拦，宽松拦不依赖注册表）。
         """
-        marks = list(MessageCard._PROTO_MARK_BASE)
-        for name in tag_names:
-            marks.append(f"<{name}>")
-            marks.append(f"</{name}>")
-        partial_re = MessageCard._PROTO_TAG_PARTIAL_RE
-        limit = min(len(tail), MessageCard._PROTO_CARRY_MAX)
-        for start in range(len(tail) - limit, len(tail)):
-            seg = tail[start:]
-            if seg and (any(m.startswith(seg) for m in marks) or partial_re.fullmatch(seg)):
-                return seg
+        # 所有候选都以 < 开头，且标记内不含第二个 <。
+        start = tail.rfind("<", max(0, len(tail) - MessageCard._PROTO_CARRY_MAX))
+        if start < 0:
+            return ""
+        seg = tail[start:]
+        if MessageCard._PROTO_TAG_PARTIAL_RE.fullmatch(seg) or any(
+            m.startswith(seg) for m in MessageCard._PROTO_MARK_BASE
+        ):
+            return seg
+        if any(f"<{name}>".startswith(seg) or f"</{name}>".startswith(seg) for name in tag_names):
+            return seg
         return ""
 
     def _proto_scan_chunk(self, st: dict, chunk: str) -> Tuple[bool, bool, bool, bool]:
@@ -1345,29 +1346,29 @@ class MessageCard(SimpleCardWidget):
           复刻（carry 是 so_far 尾部子串，$ 锚定正则 search 尾窗严格等价）；
         - chunk 边界劈开的不完整 fence 尾行由 fence_carry 延后一拍判定。
         """
-        tag_names = frozenset(_registered_tag_names_safe())
         seg = st["carry"] + chunk
         st["carry"] = ""
-        last_end = 0
-        for m in MessageCard._PROTO_TAG_RE.finditer(seg):
-            last_end = m.end()
-            token = m.group()
-            closing = token.startswith("</")
-            name = token[2:-1] if closing else token[1:-1]
-            if name == "think":
-                st["think_open"] = not closing
-            elif name == "tool":
-                st["tool_open"] += -1 if closing else 1
-            elif name in tag_names:
-                st["tag_open"][name] = not closing
-        tail = seg[last_end:]
-        st["carry"] = self._proto_carry_of(tail, tag_names) if tail else ""
+        if "<" in seg:
+            tag_names = frozenset(_registered_tag_names_safe())
+            last_end = 0
+            for m in MessageCard._PROTO_TAG_RE.finditer(seg):
+                last_end = m.end()
+                token = m.group()
+                closing = token.startswith("</")
+                name = token[2:-1] if closing else token[1:-1]
+                if name == "think":
+                    st["think_open"] = not closing
+                elif name == "tool":
+                    st["tool_open"] += -1 if closing else 1
+                elif name in tag_names:
+                    st["tag_open"][name] = not closing
+            st["carry"] = self._proto_carry_of(seg[max(last_end, len(seg) - self._PROTO_CARRY_MAX):], tag_names)
         # fence 逐行推进：完整行立即判定，不完整行存 fence_carry（封顶 256）
         lines = (st["fence_carry"] + seg).split("\n")
         fence_carry = lines[-1]
         st["fence_carry"] = fence_carry[: self._FENCE_CARRY_MAX] if len(fence_carry) > self._FENCE_CARRY_MAX else fence_carry
         for line in lines[:-1]:
-            st["last_line"] = line
+            st["last_line"] = line[-32:]
             stripped = line.strip()
             if not (stripped.startswith("```") or stripped.startswith("~~~")):
                 continue  # 非 fence 行不参与翻转（与 _CHART_FENCE_LINE_RE 语义一致）
@@ -2448,11 +2449,6 @@ class MessageCard(SimpleCardWidget):
             main.addWidget(self._viewer_container)
             self._lazy_rendered = False
             self.viewer = None  # 懒加载，延后创建
-            self.resize_placeholder = QFrame(self)
-            self.resize_placeholder.setVisible(False)
-            self.resize_placeholder.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-            self.resize_placeholder.setStyleSheet(_RESIZE_GHOST_QSS)
-            main.addWidget(self.resize_placeholder)
         elif self.role != "user":  # user 已在 _setup_user_bubble 创建，不再进入懒渲染
             # 懒渲染：占位符，不立即创建QWebEngine，进入可视区域再创建
             placeholder = QLabel("加载中...", self)
@@ -2474,19 +2470,9 @@ class MessageCard(SimpleCardWidget):
                 main.addWidget(self._viewer_container)
             self._lazy_rendered = False
             self.viewer = None  # 懒加载，延后创建
-            self.resize_placeholder = QFrame(self)
-            self.resize_placeholder.setVisible(False)
-            self.resize_placeholder.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-            self.resize_placeholder.setStyleSheet(_RESIZE_GHOST_QSS)
-            main.addWidget(self.resize_placeholder)
 
-        self.options_widget = QWidget(self)
-        self.options_layout = QVBoxLayout(self.options_widget)
-        self.options_layout.setContentsMargins(0, 4, 0, 0)
-        self.options_layout.setSpacing(4)
-        self.options_widget.setVisible(False)
-        main.addWidget(self.options_widget)
-
+        # 记录正文末项，按实际使用顺序创建的附加控件始终排在页脚前。
+        self._details_anchor = main.itemAt(main.count() - 1).widget()
         self._retry_status_widget = None
 
         if self.role == "welcome":  # 全减：assistant 无底部装饰线；user 简洁气泡本就不带
@@ -2502,6 +2488,34 @@ class MessageCard(SimpleCardWidget):
 
         # 淡入动画：新消息微妙出现（200ms，仅透明度）
         fade_in_widget(self, 200)
+
+    @cached_property
+    def resize_placeholder(self) -> QFrame:
+        if self.role == "user":
+            raise AttributeError("用户气泡没有拖动占位控件")
+        frame = QFrame(self)
+        frame.hide()
+        frame.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        frame.setStyleSheet(_RESIZE_GHOST_QSS)
+        main = self.layout()
+        main.insertWidget(main.indexOf(self._details_anchor) + 1, frame)
+        return frame
+
+    @cached_property
+    def options_widget(self) -> QWidget:
+        widget = QWidget(self)
+        widget.hide()
+        layout = QVBoxLayout(widget)
+        layout.setContentsMargins(0, 4, 0, 0)
+        layout.setSpacing(4)
+        anchor = self.__dict__.get("resize_placeholder", self._details_anchor)
+        main = self.layout()
+        main.insertWidget(main.indexOf(anchor) + 1, widget)
+        return widget
+
+    @property
+    def options_layout(self) -> QVBoxLayout:
+        return self.options_widget.layout()
 
     def _ensure_retry_status_bar(self):
         if self._retry_status_widget is not None:
@@ -2568,7 +2582,8 @@ class MessageCard(SimpleCardWidget):
         )
         retry_layout.addWidget(self._retry_wait_label)
         main = self.layout()
-        main.insertWidget(main.indexOf(self.options_widget) + 1, self._retry_status_widget)
+        anchor = self.__dict__.get("options_widget") or self.__dict__.get("resize_placeholder") or self._details_anchor
+        main.insertWidget(main.indexOf(anchor) + 1, self._retry_status_widget)
 
     def start_streaming_anim(self):
         if self._streaming:
@@ -3853,13 +3868,14 @@ class MessageCard(SimpleCardWidget):
 
         if enabled:
             viewer_height = max(self.viewer.height(), self.viewer.minimumHeight(), 40)
-            options_height = self.options_widget.sizeHint().height() if self.options_widget.isVisible() else 0
+            options = self.__dict__.get("options_widget")
+            self._options_were_visible_before_resize = options is not None and options.isVisible()
+            options_height = options.sizeHint().height() if self._options_were_visible_before_resize else 0
             self._resize_preview_height = max(40, viewer_height + options_height)
             self.resize_placeholder.setFixedHeight(self._resize_preview_height)
             self.resize_placeholder.show()
             self.viewer.setUpdatesEnabled(False)
             self.viewer.hide()
-            self._options_were_visible_before_resize = self.options_widget.isVisible()
             if self._options_were_visible_before_resize:
                 self.options_widget.setUpdatesEnabled(False)
                 self.options_widget.hide()
