@@ -121,7 +121,7 @@ def _get_openai_errors() -> Dict[str, type]:
                 }
     return _OPENAI_ERRORS
 
-from app.core.context.budget import resolve_context_budget
+from app.core.context.budget import check_request_budget, resolve_context_budget
 from app.core.conversation.config import HookPolicy, PermissionCache
 from app.core.conversation.message_content import append_text_block, consolidate_messages
 
@@ -3054,6 +3054,8 @@ class OpenAIChatWorker(QThread):
                     "echarts": item.get("echarts"),
                     "lsp_diagnostic": item.get("lsp_diagnostic"),
                 }
+                if item.get("_context_ingested"):
+                    tool_result_map[tc_id]["_context_ingested"] = True
                 # 成果条目：与 ts_ms 同理，重建 dict 时漏掉 → 重开会话成果栏丢失
                 if item.get("artifacts"):
                     tool_result_map[tc_id]["artifacts"] = item["artifacts"]
@@ -3933,6 +3935,7 @@ class OpenAIChatWorker(QThread):
                 self._api_messages_built = True
             api_messages = self._materialize_for_send(fresh)
         model = str(self.llm_config.get("模型名称", "gpt-4o") or "gpt-4o")
+        check_request_budget(api_messages if api_messages is not None else messages, self.tools, self.llm_config)
         # 认证头（bce / 服务商伪装头）：由 worker 统一算出后交给 transport/原生通道
         auth_headers = self._build_auth_headers()
 

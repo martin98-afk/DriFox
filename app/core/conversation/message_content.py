@@ -107,6 +107,7 @@ def _msg_feature(msg: Any):
             msg.get("provider_name", ""),
             msg.get("config_id", ""),
             msg.get("elapsed"),
+            msg.get("_context_ingested", False),
             content_len,
         )
     return None
@@ -965,6 +966,8 @@ def normalize_message(message: Any) -> Optional[Dict[str, Any]]:
         if "arguments" in message:
             normalized["arguments"] = message.get("arguments")
         normalized["success"] = bool(message.get("success", True))
+        if message.get("_context_ingested"):
+            normalized["_context_ingested"] = True
         if message.get("round_id"):
             normalized["round_id"] = str(message.get("round_id"))
         if message.get("diff"):

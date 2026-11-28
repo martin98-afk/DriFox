@@ -14,6 +14,8 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
+from loguru import logger
+
 from app.core.infra.token_estimator import count_messages_tokens
 from app.core.modelmeta.model_capabilities import resolve_context_limit, resolve_max_output_tokens
 
@@ -41,6 +43,20 @@ def resolve_context_budget(llm_config: Optional[Dict[str, Any]] = None) -> int:
         reserved = min(max_output_tokens, REASONING_OUTPUT_RESERVE)
 
     return max(MIN_CONTEXT_BUDGET, context_limit - reserved)
+
+
+def check_request_budget(messages: List[Dict], tools: Optional[List[Dict]], config: Dict) -> None:
+    """每次请求按完整输入估算。只写本地诊断，估算误差不应中断发送或改写前缀。"""
+    try:
+        model = str(config.get("模型名称") or config.get("model") or "gpt-4")
+        used = count_messages_tokens(messages, model=model, tools=tools)
+        budget = resolve_context_budget(config)
+        if any(config.get(k) for k in ("最大输出", "最大新Token", "max_tokens", "max_output_tokens")):
+            budget = min(budget, max(0, resolve_context_limit(config) - resolve_max_output_tokens(config)))
+        if used > budget:
+            logger.warning(f"[Context] 本次请求估算输入 {used} tokens，超过预留输出后的预算 {budget}（{model}）")
+    except Exception as exc:
+        logger.debug(f"[Context] 发送前预算估算失败: {exc}")
 
 
 def compute_usage(messages: List[Dict[str, Any]], budget: int) -> Dict[str, Any]:

@@ -32,44 +32,6 @@ _CHARS_PER_TOKEN = 4  # 节省字符 → token 的粗算口径（仅用于 stats
 
 
 def _tool_api(kind: str = "read"):
-    """工具注册表只读面 / 注入面。
-
-    优先用本模块的 ``ToolRegistry`` 符号（若存在：插件可注入替身，测试常用），
-    否则经能力池（tool.read / tool.inject）。两者都不可用时返回 None。
-    """
-    cap = "tool.inject" if kind == "inject" else "tool.read"
-    reg = globals().get("ToolRegistry")
-    if reg is not None:
-        try:
-            inst = reg.get_instance()
-            return _registry_api(inst, kind)
-        except Exception:
-            pass
-    try:
-        from app.plugins.capabilities.bootstrap import ensure_registered
-        from app.plugins.capabilities.registry import CapabilityRegistry
-
-        ensure_registered("tool")
-        plugin = ""
-        try:
-            from pathlib import Path
-
-            parts = Path(__file__).resolve().parts
-            if "plugins" in parts:
-                plugin = parts[parts.index("plugins") + 1]
-        except Exception:
-            pass
-        pool = CapabilityRegistry.get_instance().build_pool(
-            surface="tool", host=None, plugin=plugin, declared={cap, "state.kv", "plugin.log"}
-        )
-        if cap not in pool:
-            return None
-        return pool[cap]()
-    except Exception:
-        return None
-
-
-def _tool_api(kind: str = "read"):
     """工具注册表只读面 / 注入面（实现见 sdk.tool_registry_api）。"""
     return tool_registry_api(kind, module_globals=globals())
 
@@ -82,28 +44,6 @@ class ToolOffloadTier:
     stages = frozenset({STAGE_INGEST})
     cache_impact = CACHE_NONE
 
-    def __init__(self, session_id: str = "") -> None:
-        self._session_id = session_id
-        self._persister = None
-
-    def set_session_id(self, session_id: str) -> None:
-        """会话切换时更新落盘归属（pipeline 在 ingest 前调用）。
-
-        persister 内含按会话隔离的落盘目录与冻结表，session 变化必须
-        重建实例：跨会话复用会让冻结表与落盘目录语义失效。
-        """
-        if session_id == self._session_id:
-            return
-        self._session_id = session_id
-        self._persister = None
-
-    def _get_persister(self):
-        if self._persister is None:
-            from app.core.tools.tool_result_persister import ToolResultPersister
-
-            self._persister = ToolResultPersister(session_id=str(self._session_id))
-        return self._persister
-
     def should_apply(self, view) -> bool:
         single = cfg_int("single_result_threshold", 50_000)
         total = cfg_int("message_total_threshold", 200_000)
@@ -113,7 +53,7 @@ class ToolOffloadTier:
         api = _tool_api("read")
         acc = 0
         for r in view.messages:
-            if self._skip(r.get("name", ""), skip, api):
+            if r.get("_context_ingested") or self._skip(r.get("name", ""), skip, api):
                 continue
             c = r.get("content", "")
             if not isinstance(c, str):
@@ -127,7 +67,21 @@ class ToolOffloadTier:
         single = cfg_int("single_result_threshold", 50_000)
         total = cfg_int("message_total_threshold", 200_000)
         # 阈值打通：插件配置直达 persister 判定（process 不再用模块常量兜底）
-        results, stats = self._get_persister().process(view.messages, single_threshold=single, total_threshold=total)
+        from app.core.tools.tool_result_persister import ToolResultPersister
+
+        skip = offload_skip_tools()
+        api = _tool_api("read")
+        results = list(view.messages)
+        indices = [
+            i for i, msg in enumerate(results)
+            if not msg.get("_context_ingested") and not self._skip(msg.get("name", ""), skip, api)
+        ]
+        batch = [dict(results[i]) for i in indices]
+        processed, stats = ToolResultPersister(view.session_id).process(
+            batch, single_threshold=single, total_threshold=total
+        )
+        for i, msg in zip(indices, processed):
+            results[i] = msg
         persisted = getattr(stats, "persisted_count", 0) or 0
         if not persisted:
             return TierOutcome(messages=list(view.messages), saved_tokens=0, note="无超大结果")

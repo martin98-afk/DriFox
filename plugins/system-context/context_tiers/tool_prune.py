@@ -25,7 +25,7 @@ from typing import Any, Dict, List
 
 from app.plugins.sdk import cfg_int, prune_skip_tools, prune_tool_result
 from app.plugins.sdk import resolve_tool_result_max_len, tool_registry_api
-from app.plugins.contracts.context_policy import ALL_STAGES, CACHE_NONE, TierOutcome
+from app.plugins.contracts.context_policy import ALL_STAGES, CACHE_NONE, TierOutcome, needs_tool_projection
 
 _ERROR_KEEP_MULTIPLIER_DEFAULT = 4  # 错误结果保留倍数默认值（与 plugin.json default 同步）
 
@@ -90,7 +90,7 @@ class ToolPruneTier:
         # 按「每条 tool 消息」调用时长会话会累积成主线程数百 ms 阻塞。
         api = _tool_api("read")
         for m in view.messages:
-            if m.get("role") != "tool" or self._skip(m.get("name", ""), skip, api):
+            if not needs_tool_projection(m) or self._skip(m.get("name", ""), skip, api):
                 continue
             c = m.get("content")
             if isinstance(c, str) and len(c) > self._limit_for(m, base, mult):
@@ -106,7 +106,7 @@ class ToolPruneTier:
         changed = 0
         pruned_errors = 0
         for m in view.messages:
-            if m.get("role") == "tool" and isinstance(m.get("content"), str):
+            if needs_tool_projection(m) and isinstance(m.get("content"), str):
                 name = m.get("name", "")
                 if self._skip(name, skip, api):
                     result.append(m)

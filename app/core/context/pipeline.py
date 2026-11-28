@@ -52,8 +52,7 @@ class ContextPipeline:
         session_id: str = "",
     ) -> List[Dict[str, Any]]:
         """ingest stage：工具结果入库前（允许落盘副作用）。"""
-        # 会话归属下传：落盘类 tier（如 tool_offload）按 session 隔离
-        # 落盘目录与冻结表。duck-typing 传参，不约束无会话语义的 tier。
+        # 兼容旧第三方 tier 的 setter；内置 tier 从本次 view 读取归属。
         for tier in self._chain(STAGE_INGEST):
             set_sid = getattr(tier, "set_session_id", None)
             if callable(set_sid):
@@ -62,8 +61,10 @@ class ContextPipeline:
                 except Exception as e:
                     logger.warning(f"[Context] tier '{tier.id}' set_session_id 失败: {e}")
         view = self._build_view(tool_results, llm_config, STAGE_INGEST)
+        view.session_id = session_id
         view = self.run(view)
-        return view.messages
+        # 将首次入库时的工具文本定稿；旧会话没有此标记，沿用已有投影。
+        return [{**m, "_context_ingested": True} if m.get("role") == "tool" else m for m in view.messages]
 
     def project_for_send(
         self,
@@ -146,6 +147,9 @@ class ContextPipeline:
                 )
             )
 
+            # 入库针对本批新结果执行各层自身阈值，整批 token 达标不能跳过落盘。
+            if view.stage == STAGE_INGEST:
+                continue
             if view.used_tokens <= view.target_tokens:
                 break  # 达标即停
 

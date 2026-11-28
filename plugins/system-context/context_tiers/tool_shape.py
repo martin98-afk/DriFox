@@ -24,7 +24,7 @@ import re
 from collections import OrderedDict
 from typing import Any, Dict, List
 
-from app.plugins.contracts.context_policy import ALL_STAGES, CACHE_NONE, TierOutcome
+from app.plugins.contracts.context_policy import ALL_STAGES, CACHE_NONE, TierOutcome, needs_tool_projection
 from app.plugins.sdk import cfg_int
 
 # 触发骨架化的 JSON 正文长度（字符）
@@ -137,7 +137,7 @@ class ToolResultShapeTier:
     def should_apply(self, view) -> bool:
         limit = self._limit()
         for m in view.messages:
-            if m.get("role") != "tool":
+            if not needs_tool_projection(m):
                 continue
             c = m.get("content")
             if isinstance(c, str) and len(c) > limit and _JSON_START_RE.match(c):
@@ -150,7 +150,7 @@ class ToolResultShapeTier:
         changed = 0
         for m in view.messages:
             c = m.get("content")
-            if m.get("role") == "tool" and isinstance(c, str) and len(c) > limit:
+            if needs_tool_projection(m) and isinstance(c, str) and len(c) > limit:
                 new_content = shape_json_text(c)
                 if new_content != c:
                     m = {**m, "content": new_content}

@@ -8,6 +8,7 @@ import re
 import threading
 import time
 from contextlib import contextmanager
+from dataclasses import replace
 from typing import Any, Dict, List, Optional
 
 import orjson
@@ -18,6 +19,7 @@ from PyQt5.QtCore import QThread, pyqtSignal
 from app.constants import PARAM_SCHEMA
 from app.constants import PROVIDER_MANAGED_KEYS
 from app.constants import provider_quota_exclude_keys as QUOTA_EXCLUDE_KEYS
+from app.core.context.budget import check_request_budget
 from app.core.conversation.message_content import extract_reasoning_delta
 from app.utils._startup_probe import trace_enabled as _diag_trace_enabled
 from app.core.modelmeta.model_capabilities import (
@@ -719,16 +721,22 @@ class SubAgentExecutor(QThread):
                 if self._is_cancelled:
                     return ""
 
-                current_messages.append(
-                    {
-                        "role": "tool",
-                        "tool_call_id": self._question_pending["tool_call_id"],
-                        "content": self._pending_answer,
-                    }
-                )
-                self._append_to_api_cache([current_messages[-1]])
+                tool_results = [{
+                    "role": "tool",
+                    "tool_call_id": self._question_pending["tool_call_id"],
+                    "content": self._pending_answer,
+                }]
                 self._pending_answer = None
-                continue
+
+            if tool_results:
+                from app.core.context.pipeline import ContextPipeline
+
+                try:
+                    tool_results = ContextPipeline().ingest_tool_results(
+                        tool_results, llm_config, session_id=f"subagent-{self.task_id}"
+                    )
+                except Exception:
+                    logger.exception("[SubAgent] 工具结果入库失败，保留原结果")
 
             # 先 extend tool_results（纯 role="tool" 消息，紧跟在 assistant(tool_calls) 之后），
             # 再 extend hook_messages（role="user" 消息，避免插入 tool_calls 和 tool 之间导致 2013 错误）
@@ -876,6 +884,9 @@ class SubAgentExecutor(QThread):
 
         config = llm_config if llm_config is not None else getattr(self, "llm_config", None)
         flags = self._protocol_flags(config)
+        # 缓存始终保存消息列表；Responses transport 在最终发送时生成 input_items。
+        if flags.use_responses_api:
+            flags = replace(flags, use_responses_api=False)
         serializer = SerializerRegistry.get_instance().resolve(flags.serializer_id)
         result = serializer.serialize(messages, SerializeContext(flags=flags))
         if revoke_after:
@@ -1294,6 +1305,7 @@ class SubAgentExecutor(QThread):
         # 因此两路统一改传物化副本（data URI 只在本请求作用域存在，已回收的原
         # current_messages 不被二次污染，副本随请求结束 GC）。
         materialized = self._materialize_for_send(api_messages)
+        check_request_budget(materialized, tools, config)
 
         from app.core.workers.error_handler import create_api_call_with_retry
         from app.core.workers.protocol_dispatch import resolve_transport_target
@@ -1675,9 +1687,7 @@ class SubAgentExecutor(QThread):
             # 不再发起下一轮 API 调用，直接拿已产出的文本收工。
             if getattr(result, "end_turn", False):
                 self._end_turn_requested = True
-            # 用 to_api_message 标准化：仅保留 role/tool_call_id/name/content，避免非标字段混淆API
-            serialized = self._serialize_for_api([raw_result]).messages
-            tool_results.append(serialized[0] if serialized else raw_result)
+            tool_results.append(raw_result)
 
         return tool_results, hook_messages
 
