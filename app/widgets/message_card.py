@@ -367,6 +367,8 @@ class MessageCard(SimpleCardWidget):
         super().__init__(parent)
         self._parent = parent
         self.role = role
+        from app.plugins.contracts.message_layout import ORIGINAL, selected_mode
+        self._output_mode = selected_mode() if role == 'assistant' else ORIGINAL
         self.model_name = model_name
         self.provider_name = provider_name
         self._provider_config_id = config_id  # UUID key in _valid_configs, for precise provider lookup
@@ -4498,6 +4500,7 @@ class MessageCard(SimpleCardWidget):
             pooled = WebViewPool.get_instance().acquire(light=is_welcome)
             if pooled is not None:
                 try:
+                    pooled._output_mode = self._output_mode
                     pooled.setParent(self)
                     pooled.setUpdatesEnabled(True)
                     # [白卡修复] 第二次跨顶层 reparent（隐藏宿主 → 本卡）已完成：

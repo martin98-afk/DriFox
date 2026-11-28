@@ -8,7 +8,7 @@ pytestmark = pytest.mark.perf
 
 
 @pytest.mark.parametrize('long_intro', [False, True], ids=['short', 'long'])
-def test_compact_mixed_stream(qapp, qtbot, long_intro):
+def test_compact_mixed_stream(qapp, qtbot, long_intro, compact_output_plugin):
     if os.environ.get('DRIFOX_VISIBLE_CADENCE') != '1' or qapp.platformName() == 'offscreen':
         pytest.skip('需显式开启真窗 WebEngine 回放')
     from PyQt5.QtWidgets import QScrollArea, QVBoxLayout, QWidget

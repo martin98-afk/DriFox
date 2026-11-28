@@ -1,10 +1,5 @@
 """就地插入标题，不包裹或重建 patchBlocks 的子节点。"""
 GROUP_CSS = """
-.dfx-group-button { display:block; width:100%; text-align:left; font:inherit;
- color:var(--text-secondary); background:transparent; border:0; cursor:pointer;
- padding:5px 2px; margin:2px 0; }
-.dfx-group-button::before { content:'▸'; display:inline-block; width:1.2em; }
-.dfx-group-button[aria-expanded=true]::before { content:'▾'; }
 #content-placeholder > [data-group-hidden] { display:none !important; }
 body.dfx-grouped #tool-section { display:none !important; }
 """
@@ -35,8 +30,14 @@ window._applyMessageGroups = function(groups) {
         buttons.delete(key);
         if (first.previousElementSibling !== b) root.insertBefore(b, first);
         var opened = manual.has(key) ? manual.get(key) : g[2];
-        var label = g[3];
-        if (b.textContent !== label) b.textContent = label;
+        var label = g[3], failed = g[4] || '';
+        if (b.textContent !== label + failed) {
+            b.textContent = label;
+            if (failed) {
+                var badge = document.createElement('span'); badge.className = 'dfx-group-fail';
+                badge.textContent = failed; b.appendChild(badge);
+            }
+        }
         if (b.getAttribute('aria-expanded') !== String(opened)) b.setAttribute('aria-expanded', String(opened));
         if (!opened) for (var i=g[0]; i<g[1]; i++) hidden.add(i);
     });

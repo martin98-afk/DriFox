@@ -3942,7 +3942,8 @@ _SKELETON_CACHE_MAX = 48
 # v92：向 Qt 同步底部工具区的实际显隐，用于流式表面限高。
 # v93：恢复图表占位柱条和扫光；长正文不按聊天区一屏截高。
 # v94：简洁模式的原位分组按钮与有序块布局。
-_SKELETON_CACHE_VERSION = 94
+# v95：展示方式按消息绑定，摘要样式由系统插件提供。
+_SKELETON_CACHE_VERSION = 95
 
 
 def _js_literal(value) -> str:

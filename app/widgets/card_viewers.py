@@ -98,7 +98,7 @@ from app.widgets.render import (
     render_message,
 )
 from app.widgets.render.group_dom import GROUP_CSS, GROUP_JS
-from app.plugins.contracts.message_layout import resolve_groups
+from app.plugins.contracts.message_layout import ORIGINAL
 from app.widgets.render_crash_queue import RenderCrashQueue
 from app.widgets.card_render_core import (
     ACTION_COLOR_MAP,
@@ -904,6 +904,7 @@ class CodeWebViewer(QWebEngineView):
 
     def __init__(self, parent=None, light=False):
         super().__init__(parent)
+        self._output_mode = getattr(parent, '_output_mode', ORIGINAL)
         # 🛡️ 物理纹理上限钳制：Chromium 离屏表面按「逻辑尺寸 × DPR」分配物理纹理，
         # D3D11/WARP 单纹理硬上限 16384px。逻辑上限随本机 DPR 收缩，保物理
         # ≤ 16000（留 384 余量）。历史案例：10000 逻辑 @DPR2.25 → 22500 物理 →
@@ -1403,12 +1404,7 @@ class CodeWebViewer(QWebEngineView):
 
     @property
     def _tool_compact_mode(self) -> bool:
-        try:
-            from app.utils.config import Settings
-
-            return Settings.get_instance().ui_compact_tool_area.value
-        except Exception:
-            return True
+        return self.__dict__.get('_output_mode', ORIGINAL).groups is not None
 
     def sync_compact_mode_to_js(self) -> None:
         """把当前简洁模式配置同步到 JS 全局 window._toolCompactMode。
@@ -1425,6 +1421,9 @@ class CodeWebViewer(QWebEngineView):
                 self.page().runJavaScript(
                     f"window._toolCompactMode = {compact};"
                     "document.documentElement.classList.toggle('compact-reading',window._toolCompactMode);"
+                    "var modeStyle=document.getElementById('dfx-output-style');"
+                    "if(!modeStyle){modeStyle=document.createElement('style');modeStyle.id='dfx-output-style';document.head.appendChild(modeStyle);}"
+                    + 'modeStyle.textContent=' + json.dumps(self._output_mode.css).decode('utf-8') + ';'
                 )
         except RuntimeError:
             pass
@@ -9799,13 +9798,15 @@ class CodeWebViewer(QWebEngineView):
             )
             group_sig = (kinds, self._streaming)
             if force_full or not content_ops.is_empty or self.__dict__.get('_layout_sig') != group_sig:
-                groups = resolve_groups(kinds, streaming=self._streaming)
+                groups = self._output_mode.layout(kinds, streaming=self._streaming)
                 rows = []
                 for start, stop, opened in groups:
                     segment = kinds[start:stop]
                     counts = [('思考', segment.count('reasoning')), ('工具', segment.count('tool'))]
-                    label = ' · '.join(f'{n} 次{name}' for name, n in counts if n) or '消息详情'
-                    rows.append((start, stop, opened, label))
+                    failed = sum(kinds[i] == 'tool' and blocks[i].get('type') == 'tool_result'
+                                 and blocks[i].get('success') is False for i in range(start, stop))
+                    label = ' · '.join(f'{name} {n} 次' for name, n in counts if n) or '消息详情'
+                    rows.append((start, stop, opened, label, f' · 失败 {failed} 次' if failed else ''))
                 groups_js = json.dumps(rows).decode('utf-8')
                 self._layout_sig = group_sig
         if content_ops.is_empty and tool_ops.is_empty and not live_delta and _pending_tail is None and groups_js is None:

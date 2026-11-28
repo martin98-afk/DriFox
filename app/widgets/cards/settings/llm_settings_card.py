@@ -654,15 +654,7 @@ class LLMSettingsCard(SystemCardFrame):
         )
         common_layout.addWidget(self.singleInstanceCard)
 
-        # 简洁模式：工具调用/思考块折叠显示
-        self.compactToolCard = SwitchSettingCard(
-            FluentIcon.MENU,
-            "简洁模式",
-            "工具与思考归拢到可滚动区域",
-            configItem=self.cfg.ui_compact_tool_area,
-            parent=self,
-        )
-        common_layout.addWidget(self.compactToolCard)
+        # 消息展示方式现由「设置 → 插件 → 流式输出方式」管理。
 
         # 消息身份行：每条消息顶部显示发送者头像 + 名称（插件可覆盖身份）
         self.messageIdentityCard = SwitchSettingCard(

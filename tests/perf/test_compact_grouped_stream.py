@@ -6,7 +6,7 @@ import pytest
 pytestmark = pytest.mark.perf
 
 
-def test_compact_grouped_stream(qapp, qtbot):
+def test_compact_grouped_stream(qapp, qtbot, compact_output_plugin):
     if os.environ.get('DRIFOX_VISIBLE_CADENCE') != '1' or qapp.platformName() == 'offscreen':
         pytest.skip('需开启真窗 WebEngine 回放')
     from PyQt5.QtWidgets import QVBoxLayout, QWidget
@@ -49,7 +49,14 @@ def test_compact_grouped_stream(qapp, qtbot):
         qtbot.waitUntil(lambda: js(states) == ['true', 'true'], timeout=10000)
         card.append_text('第二段正文。\n\n')
         qtbot.waitUntil(lambda: js(states) == ['true', 'false'], timeout=10000)
-        card.append_tool_result(tool_call_id='late-1', tool_name='read', arguments={}, result='晚到结果', success=True)
+        settings = compact_output_plugin.get_settings_cards()[0].widget_class()
+        qtbot.addWidget(settings)
+        settings._choices['original'].click()
+        another = MessageCard('assistant', parent=window)
+        assert another._output_mode.id == 'original' and card._output_mode.id == 'compact'
+        card.append_tool_result(tool_call_id='late-1', tool_name='read', arguments={}, result='晚到结果', success=False)
+        qtbot.waitUntil(lambda: js('firstButton.textContent') == '思考 1 次 · 工具 1 次 · 失败 1 次', timeout=10000)
+        assert js("getComputedStyle(firstButton).backgroundColor === 'rgba(0, 0, 0, 0)' && parseFloat(getComputedStyle(firstButton).fontSize) < parseFloat(getComputedStyle(firstButton.parentNode).fontSize)")
         qtbot.waitUntil(lambda: bool(js("document.querySelector('[data-tool-call-id=\"late-1\"]:not(.tool-streaming-block)')" + ' !== null')), timeout=10000)
         assert js(f"firstButton === {buttons}[0]")
         assert js(f"{buttons}[0].nextElementSibling.nextElementSibling.querySelector('[data-tool-call-id=\"late-1\"]') !== null")

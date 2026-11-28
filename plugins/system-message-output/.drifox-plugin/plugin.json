@@ -1,0 +1,12 @@
+{
+  "name": "system-message-output",
+  "display_name": {"zh": "流式输出方式"},
+  "description": "管理聊天消息的展示方式，内置按正文位置折叠思考与工具的简洁模式。",
+  "version": "0.1.0",
+  "type": "system",
+  "api_version": 2,
+  "capabilities": [],
+  "components": {"ui": true},
+  "author": {"name": "DriFoxx Team"},
+  "license": "GPL-3.0-or-later"
+}
