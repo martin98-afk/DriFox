@@ -297,3 +297,67 @@ def test_first_paint_long_session(ui_app, qtbot):
 def test_first_paint_welcome_recent_session(ui_app, qtbot):
     """欢迎卡片的最近会话经 session 动作按 ID 打开，不走历史列表入口。"""
     _run_case(ui_app, qtbot, rounds=6, long_text=False, name="welcome_recent", welcome=True)
+
+
+def test_long_history_rail_latest_click_stays_on_question(ui_app, qtbot):
+    from PyQt5.QtCore import Qt
+    from PyQt5.QtTest import QTest
+
+    tm, mw = ui_app["tm"], ui_app["chat_window"]
+    tm.showNormal()
+    tm.resize(1500, 850)
+    _reset_to_empty_session(mw)
+    sid = _seed_history(mw, _make_messages(72, True), "rail-jump")
+    record = mw.history_manager.get_session_by_session_id(sid)
+    mw._load_session_from_record(record)
+    edge = mw._question_edge
+    qtbot.waitUntil(lambda: len(edge.rows) == 72 and not mw._loading_session)
+    qtbot.wait(450)
+    rail = edge.surface
+    assert rail.geometry().left() == tm._chat_wrapper.mapToGlobal(QPoint()).x()
+
+    # 先定位尚未建卡的第一问，紧接着改点另一段，等待分页与网页实际高度上报。
+    QTest.mouseClick(rail, Qt.LeftButton, pos=QPoint(2, 6))
+    point = QPoint(2, rail.height() // 2)
+    expected = rail.row_at(point)
+    QTest.mouseClick(rail, Qt.LeftButton, pos=point)
+    qtbot.waitUntil(lambda: mw._jump_reading_card is not None, timeout=15000)
+    target = mw._jump_reading_card
+    assert target._source_message["content"] == record["messages"][2 * expected]["content"]
+    bar = mw.chat_scroll_area.verticalScrollBar()
+    qtbot.wait(1600)
+    assert abs(bar.value() - min(target.y(), bar.maximum())) <= 2
+
+    # 模拟一个迟到的上方卡片高度变化，已经结束的首次定位仍能守住目标。
+    idx = mw.chat_layout.indexOf(target)
+    assert idx > 0
+    above = mw.chat_layout.itemAt(idx - 1).widget()
+    above.setFixedHeight(above.height() + 180)
+    qtbot.wait(200)
+    assert abs(bar.value() - min(target.y(), bar.maximum())) <= 2
+    mw._mark_user_scroll_input()
+    assert mw._jump_reading_card is None
+
+
+
+def test_narrow_history_preview_preserves_message_width(ui_app, qtbot):
+    tm, mw = ui_app["tm"], ui_app["chat_window"]
+    tm.showNormal()
+    tm.resize(830, 760)
+    _reset_to_empty_session(mw)
+    sid = _seed_history(mw, _make_messages(2, True), "rail-narrow")
+    mw._load_session_from_record(mw.history_manager.get_session_by_session_id(sid))
+    qtbot.waitUntil(lambda: len(mw._question_edge.rows) == 2 and not mw._loading_session)
+    qtbot.wait(600)
+    edge = mw._question_edge
+    area = mw.chat_scroll_area
+
+    def widths():
+        return area.viewport().width(), mw._batch_cards[-1][-1].width()
+
+    initial = widths()
+    edge.expand(keyboard=True)
+    qtbot.wait(250)
+    assert edge.preview.isVisible() and widths() == initial
+    edge.collapse(immediate=True)
+    assert widths() == initial

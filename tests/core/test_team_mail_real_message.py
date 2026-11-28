@@ -263,7 +263,7 @@ class TestConsistencyAcrossAllFourSites:
         host = SimpleNamespace(_question_edge=edge, session_manager=Mock())
         host.session_manager.get_current_session.return_value = session
         OpenAIChatToolWindow._update_history_questions_badge(host)
-        assert edge.rows == ["第一问", "团队邮件"]
+        assert [row.title for row in edge.rows] == ["第一问", "团队邮件"]
         before = edge.rows
         OpenAIChatToolWindow._update_history_questions_badge(host)
         assert edge.rows is before

@@ -166,7 +166,7 @@ from app.widgets.cards import (
     ContainerType,
     TopCardContainer,
 )
-from app.widgets.question_edge_navigator import QuestionEdgeNavigator
+from app.widgets.question_edge_navigator import QuestionEdgeNavigator, question_previews
 from app.widgets.cards.floating.share_card import ShareCardContent
 
 # [PERF] 设置卡导入纪律：顶层仅保留 __init__/setup_ui 直线构造的卡片；
@@ -1769,6 +1769,9 @@ class OpenAIChatToolWindow(ToolWindow):
         # 跳转落点收敛链（见 _locate_and_scroll_to_batch）：目标卡引用 + 剩余拍数
         # + 上一拍落点。目标卡销毁/会话切换时链自行终止（_jump_settle_step 内判活）。
         self._jump_target_card = None
+        self._jump_reading_card = None
+        self._jump_token = None
+        self._jump_realign_queued = False
         self._jump_settle_left: int = 0
         self._jump_settle_last_geom: Optional[tuple] = None
         # 撤销删除功能：回退条目栈由 input_card_module 创建（_undo_delete_store），
@@ -3088,6 +3091,14 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def eventFilter(self, obj, event):
         """处理窗口大小变化"""
+        if (
+            self.__dict__.get("_jump_reading_card") is not None
+            and obj is self.chat_container
+            and event.type() in (QEvent.LayoutRequest, QEvent.Resize)
+            and not self._jump_realign_queued
+        ):
+            self._jump_realign_queued = True
+            QTimer.singleShot(0, self._realign_history_question)
         # ── 真实滚动输入标记 ──
         # away 状态机只认真实输入（见 `_on_scroll_changed`）：滚轮（qfw 平滑
         # 滚动会逐拍把合成 Wheel 发给内置条，天然一并覆盖）、拖滑块 / 点页槽。
@@ -3540,7 +3551,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 # [P1 步骤6] chat_scroll_area 就绪后接 rangeChanged 事件驱动贴底
                 self._wire_scroll_range_changed()
 
-        self._question_edge = QuestionEdgeNavigator(self.chat_scroll_area.viewport())
+        self._question_edge = QuestionEdgeNavigator(self.chat_scroll_area.viewport(), self.chat_scroll_area)
         self._question_edge.questionClicked.connect(self._jump_to_history_question)
         self._question_edge.refreshRequested.connect(self._update_history_questions_badge, Qt.QueuedConnection)
 
@@ -10402,9 +10413,12 @@ class OpenAIChatToolWindow(ToolWindow):
         # 观测：稳态下的并发渲染页 / 复用池占用（内部自带 2s 节流）
         self._log_render_quota("scroll")
         self._last_layout_scan = scan
-        edge = getattr(self, "_question_edge", None)
+        edge = self.__dict__.get("_question_edge")
         anchor = scan.get("question_anchor")
-        if edge is not None and anchor is not None:
+        pinned = self.__dict__.get("_jump_reading_card")
+        if edge is not None and pinned is not None and self._is_widget_alive(pinned):
+            edge.set_reading(pinned._round_index)
+        elif edge is not None and self.__dict__.get("_pending_scroll_to_index") is None and anchor is not None:
             kind, value = anchor
             edge.set_reading(value if kind == "round" else self._get_user_round_index_for_batch_index(value))
 
@@ -13252,7 +13266,8 @@ class OpenAIChatToolWindow(ToolWindow):
         def restore_anchor():
             try:
                 new_height = self.chat_container.sizeHint().height()
-                scroll_bar.setValue(previous_value + max(0, new_height - previous_height))
+                if self.__dict__.get("_jump_token") is None:
+                    scroll_bar.setValue(previous_value + max(0, new_height - previous_height))
             finally:
                 self._is_loading_history_batches = False
 
@@ -17907,6 +17922,7 @@ class OpenAIChatToolWindow(ToolWindow):
         Args:
             target_batch_start: 目标批次起始索引
         """
+        token = self.__dict__.get("_jump_token")
         if target_batch_start >= self._visible_batch_start:
             # 已经到达目标位置，滚动到目标节点
             self._scroll_to_pending_target()
@@ -17947,6 +17963,8 @@ class OpenAIChatToolWindow(ToolWindow):
             self._visible_batch_start = chunk_start
 
             def _restore_prepend_anchor():
+                if token is not self.__dict__.get("_jump_token"):
+                    return
                 try:
                     new_height = self.chat_container.sizeHint().height()
                     delta = max(0, new_height - previous_height)
@@ -17963,7 +17981,11 @@ class OpenAIChatToolWindow(ToolWindow):
             QTimer.singleShot(0, _restore_prepend_anchor)
 
             # 延迟检查是否需要继续加载（使用 QTimer.singleShot 避免重复）
-            QTimer.singleShot(100, lambda: self._load_history_to_index(target_batch_start))
+            def continue_load():
+                if token is self.__dict__.get("_jump_token"):
+                    self._load_history_to_index(target_batch_start)
+
+            QTimer.singleShot(100, continue_load)
 
     def _scroll_to_pending_target(self):
         """滚动到待处理的目标节点"""
@@ -18099,14 +18121,30 @@ class OpenAIChatToolWindow(ToolWindow):
         return True
 
     def _start_question_card_jump(self, card):
+        self._lock_scroll_after_jump()
+        self._jump_reading_card = card
         self._jump_target_card = card
         self._jump_settle_left = JUMP_SETTLE_MAX_TRIES
         self._jump_settle_last_geom = None
         # 先上锁再落点：落点本身是程序滚动，紧接着的懒渲染排空/锚定重试
         # 都必须被压住，否则视口会被拽回底部
-        self._lock_scroll_after_jump()
         self._apply_jump_target_now()
         self._schedule_jump_settle()
+
+    def _realign_history_question(self):
+        """历史卡片异步落高后，按已经排版的目标卡补正阅读位置。"""
+        self._jump_realign_queued = False
+        card = self._jump_reading_card
+        if card is None:
+            return
+        if not self._is_widget_alive(card) or card.parentWidget() is not self.chat_container:
+            self._unlock_scroll_after_jump()
+            return
+        bar = self.chat_scroll_area.verticalScrollBar()
+        target = min(max(0, card.y()), bar.maximum())
+        if bar.value() != target:
+            with self._programmatic_scroll():
+                bar.setValue(target)
 
     def _find_jump_target_card(self, batch_index: int):
         """找出批次对应的 user 卡片（`_batch_cards` 优先，布局遍历兜底）。"""
@@ -18117,6 +18155,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     self._is_widget_alive(candidate)
                     and isinstance(candidate, MessageCard)
                     and candidate.role == "user"
+                    and getattr(candidate, "_message_index", None) == batch_index
                 ):
                     return candidate
 
@@ -18179,7 +18218,13 @@ class OpenAIChatToolWindow(ToolWindow):
             self._jump_target_card = None
             return
         self._jump_settle_left -= 1
-        QTimer.singleShot(JUMP_SETTLE_INTERVAL_MS, self._jump_settle_step)
+        token = self.__dict__.get("_jump_token")
+
+        def settle_if_current():
+            if token is self.__dict__.get("_jump_token"):
+                self._jump_settle_step()
+
+        QTimer.singleShot(JUMP_SETTLE_INTERVAL_MS, settle_if_current)
 
     def _jump_settle_step(self) -> None:
         """收敛拍：布局传播后重读几何，稳定即停。
@@ -18418,13 +18463,8 @@ class OpenAIChatToolWindow(ToolWindow):
         key = (getattr(session, "session_id", None), id(session), getattr(session, "_messages_version", None))
         if key == getattr(self, "_last_question_edge_key", None):
             return
-        previews = []
-        if session:
-            for msg in consolidate_messages(session.messages, owner=session):
-                if msg.get("role") == "user" and not _is_hook_message(msg):
-                    text = content_to_text(msg.get("content", ""))
-                    previews.append(" ".join(text[:120].split()) + ("…" if len(text) > 120 else ""))
-        edge.set_questions(previews, key[:2])
+        messages = consolidate_messages(session.messages, owner=session) if session else []
+        edge.set_questions(question_previews(messages), key[0])
         self._last_question_edge_key = key
 
     def _jump_to_history_question(self, index: int):
@@ -18521,7 +18561,7 @@ class OpenAIChatToolWindow(ToolWindow):
             except (AttributeError, RuntimeError):
                 pass
             self._pending_scroll_to_bottom = False
-        if value <= self._history_load_threshold:
+        if value <= self._history_load_threshold and not self.__dict__.get("_jump_token"):
             self._load_more_history_batches()
         # 滚动时复用单个防抖定时器，避免堆积大量 singleShot 回调
         self._scroll_sync_timer.stop()
@@ -20683,6 +20723,8 @@ class OpenAIChatToolWindow(ToolWindow):
         复用（测试载体只挂几个方法），方法调用会 AttributeError，而字段读取
         经 getattr 兜底天然安全。
         """
+        if self.__dict__.get("_jump_reading_card") is not None:
+            return False
         try:
             until = self._jump_scroll_lock_until
         except (AttributeError, RuntimeError):
@@ -20714,10 +20756,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 return True
         except (AttributeError, RuntimeError):
             pass
-        try:
-            return self._jump_settle_left > 0
-        except (AttributeError, RuntimeError):
-            return False
+        return False
 
     def _is_jump_scroll_locked(self) -> bool:
         """跳转置底压制是否生效。
@@ -20767,6 +20806,8 @@ class OpenAIChatToolWindow(ToolWindow):
         在跳转期间持续续期；跳转结束后自然过期。这样压制窗口与实际工作量
         成正比，不再假设「3 秒一定够」。
         """
+        self._unlock_scroll_after_jump()
+        self._jump_token = object()
         self._jump_scroll_lock_until = time.monotonic() + JUMP_SCROLL_LOCK_TAIL_MS / 1000.0
         # 撤销进行中的置底请求与 sticky 锚定：它们会在窗口内反复把视口往下拉
         self._pending_scroll_to_bottom = False
@@ -20780,6 +20821,10 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def _unlock_scroll_after_jump(self) -> None:
         """解除跳转置底压制（用户显式要求回到底部 / 用户真实滚动时调用）。"""
+        self._jump_token = None
+        self._jump_target_card = self._jump_reading_card = None
+        self._pending_scroll_to_index = self._pending_scroll_to_batch = None
+        self._jump_settle_left = 0
         self._jump_scroll_lock_until = 0.0
 
     def _reset_bottom_follow(self):
@@ -21035,6 +21080,8 @@ class OpenAIChatToolWindow(ToolWindow):
 
         600ms 覆盖平滑滚动的 400ms 尾段；连续滚轮会逐拍续期。
         """
+        if self.__dict__.get("_jump_token") is not None:
+            self._unlock_scroll_after_jump()
         self._user_scroll_input_until = time.monotonic() + hold_ms / 1000.0
 
     def _has_recent_user_scroll_input(self) -> bool:
@@ -21241,7 +21288,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     # 视口内容突跳本拍 delta → 折叠栏频繁抖动（见
                     # _schedule_bottom_snap 注释）。投递到布局落地后贴底。
                     self._schedule_bottom_snap(wait_for_compact_layout=not sender.wants_outer_max_prelift())
-                elif card_bottom <= value:
+                elif card_bottom <= value and self.__dict__.get("_jump_reading_card") is None:
                     # 非跟随态：卡片整体在视口上方 → 锚定补偿，保持其相对位置。
                     # 落点同样钳到已落地底：上界可能刚被预抬，value+delta 落在
                     # 预抬区间时 widget 还没长高，视口底部同样露白。

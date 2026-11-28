@@ -216,6 +216,7 @@ class _UnloadedJumpHarness:
     """`_scroll_to_target_node_index` 的载体（只验是否上锁，不跑加载）。"""
 
     _scroll_to_target_node_index = OpenAIChatToolWindow._scroll_to_target_node_index
+    _unlock_scroll_after_jump = OpenAIChatToolWindow._unlock_scroll_after_jump
     _lock_scroll_after_jump = OpenAIChatToolWindow._lock_scroll_after_jump
     _is_jump_scroll_locked = OpenAIChatToolWindow._is_jump_scroll_locked
     _get_batch_index_from_node_index = lambda self, i: i  # noqa: E731

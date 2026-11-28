@@ -3649,7 +3649,8 @@ class CodeWebViewer(QWebEngineView):
                     align-items: flex-start;
                     gap: 6px;
                     box-sizing: border-box;
-                    width: fit-content;
+                    /* 预览行是整行条：背景铺满可用宽度，不随文字长短收缩 */
+                    width: 100%;
                     max-width: 100%;
                     margin: 2px 0;
                     padding: 3px 8px;
@@ -3666,6 +3667,7 @@ class CodeWebViewer(QWebEngineView):
                     display: -webkit-box;
                     -webkit-box-orient: vertical;
                     -webkit-line-clamp: 2;
+                    flex: 1 1 auto;
                     min-width: 0;
                     overflow: hidden;
                     white-space: normal;

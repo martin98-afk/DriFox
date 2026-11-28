@@ -190,6 +190,7 @@ class _JumpHarness:
     _resolve_jump_target_value = OpenAIChatToolWindow._resolve_jump_target_value
     _schedule_jump_settle = OpenAIChatToolWindow._schedule_jump_settle
     _jump_settle_step = OpenAIChatToolWindow._jump_settle_step
+    _extend_jump_scroll_lock = OpenAIChatToolWindow._extend_jump_scroll_lock
     _programmatic_scroll = OpenAIChatToolWindow._programmatic_scroll
     _sync_scroll_maximum = lambda self: self.chat_scroll_area.verticalScrollBar().maximum()  # noqa: E731
 
