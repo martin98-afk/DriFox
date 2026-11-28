@@ -3,9 +3,9 @@
 - 助手记忆工具按作用域校验写入模式。项目笔记支持追加和整体替换，全局条目支持按 ID 阅读、修改和删除。批量整理先依次验证全部操作，再一次提交。
 - 会话开始时，全局记忆在分区内优先展示置顶和最近更新的条目，项目笔记按完整章节或自然段取舍。日常写入只追加事件日志，显式压缩支持按设备归档。
 
-## [v0.7.7] - 2026-11-28 (重新发布 #3)
+## [v0.7.7] - 2026-11-28 (重新发布 #4)
 
-自 v0.7.6 以来的变更 | 提交数：48 · 文件变更：664 · +37466/-18027 | 贡献者：dingma, drifox-bot
+自 v0.7.6 以来的变更 | 提交数：53 · 文件变更：692 · +38402/-18474 | 贡献者：dingma, martin98-afk, drifox-bot
 
 ### ✨ 新功能 (New Features)
 
@@ -94,6 +94,29 @@
 ### 🔧 其他 (Chores & Build) (重新发布 #3 追加)
 
 - 重新发布 #3：纳入 2026-11-28 19:24~19:32 的 7 个提交（85 文件 / +1717-985），重建 tag 与 Release。
+
+### 🐛 问题修复 (Bug Fixes) (重新发布 #4 追加)
+
+- **会话切换后渲染卡超配额** (`app/widgets/message_card.py` · `card_viewers.py` · `app/main_widget.py`): 淘汰早于 viewer 落高时保留该卡并置等待标记，改由滚动空闲定时器合并复核，160 ms 节流的单次 `singleShot` 退场。两个各 20 轮的历史会话（含 4K PNG）交替切换 10 次，修复前留下 16–17 张卡片（配额 12），修复后两个独立进程均回到 12/12。复测 `tests/ui/test_ui_virtmem.py::test_session_switch_memory_rebounds`。
+- **滚动期高度提交延后** (`app/widgets/message_card.py` · `tests/widgets/test_stream_height_noise_guard.py`): 滚动补偿期跳过流式高度提交，避免与 QWebEngine 高度调整争抢主线程；目标值保留，滚动活跃窗口结束后下一拍继续收敛。
+
+### ♻️ 代码重构 (Refactoring) (重新发布 #4 追加)
+
+- **上下文文本投影有界缓存** (`app/core/context/text_memo.py` · `plugins/system-context/context_tiers/tool_shape.py` · `tool_normalize.py`): 新增 `TextTransformMemo`，按对象同一性校验命中，每条目计入字符串驻留字节，每层上限 512 项、4 MiB，超预算结果直接返回不缓存；替换原先无上限的 `OrderedDict` 骨架缓存。回归 `tests/core/test_tier_memo.py`。
+- **会话差异写入按行指纹比对** (`app/core/store/session_repository.py`): extras 基线改存行指纹，短于 32 字节的值直接比较、其余用 SHA-256，基线只保留最近 32 个会话；全部 SQL 成功后才发布新基线，任一步失败清空该会话基线与内容哈希，下次保存重新同步。数据格式与读回结果保持兼容，回归 `tests/core/test_session_extras_upsert.py`。
+- **思考预览渲染统一** (`app/widgets/message_card.py` · `card_viewers.py` · `card_render_core.py`): 独立 reasoning 块与正文思考标签共用同一限高预览窗口，首段直接写入转义快照、后续合并到活动块刷新，标题行在流式态隐藏；骨架缓存版本升至 104。
+
+### ⚡ 性能优化 (Performance) (重新发布 #4 追加)
+
+- **token 估算与治理缓存即时释放** (`app/core/infra/token_estimator.py` · `memory_governor.py`): 估算完成即清空临时原文槽，新增 `clear_session_token_caches()` 一并清理调用线程的消息列表、前缀游标与进程级文本估算，修正内存治理清理调错对象导致的缓存常驻。实测 512 条约 40 KiB 工具日志走完四层 `ingest_tool_results`，RSS 增量中位数 39.36 → 2.90 MiB；四份 2 MiB 消息估算后执行会话清理，tracemalloc 驻留 8.00 → <0.01 MiB；32 会话各写约 256 KiB 压缩差异，8.27 → 0.02 MiB。基线见 `docs/perf/perf-ledger.md`，复测 `tests/perf/test_context_memory.py`。
+
+### 📚 文档 (Docs) (重新发布 #4 追加)
+
+- `docs/superpowers/specs/2026-11-27-stream-height-coalesce-design.md` 与 `plans/2026-11-27-stream-height-coalesce.md`：记录滚动期流式高度提交合并的设计与实施计划。
+
+### 🔧 其他 (Chores & Build) (重新发布 #4 追加)
+
+- 重新发布 #4：纳入 2026-11-27 15:58~2026-11-28 20:31 的 5 个提交（28 文件 / +936-447），重建 tag 与 Release。
 
 ## [v0.7.6] - 2026-11-27 (重新发布 #2)
 
