@@ -1309,11 +1309,6 @@ def _get_think_block_styles() -> str:
     return f"{get_font_family_css()} font-size: {scale_font_size(13)}px;"
 
 
-# 预览采样目标长度：未达此值则继续拼接下一句（上限仍是 max_length）
-_PREVIEW_TARGET_LEN: int = 60
-# 结论标记之后的正文最小长度：短于此说明标记紧贴文末，不构成摘要，退回开头采样
-_PREVIEW_MIN_CONCLUSION_BODY: int = 8
-
 # Responses 思考摘要的小节标题：summary_text 首行的 `**标题**`。
 # 服务端没有独立 title 字段（事件只带 delta / summary_index），ChatGPT 与
 # Codex 客户端那个分段标题就是这一行加粗文本（2026-11-07 实测 OpenCode Go）。
@@ -1335,118 +1330,58 @@ def _split_think_title(content: str) -> tuple:
     return match.group(1).strip(), (rest.lstrip("\n") if sep else "")
 
 
-def _get_think_preview(content: str, max_length: int = 160) -> str:
-    """生成思考内容折叠框的预览文本
-
-    策略（连贯优先）：
-      1. 结论标记 → 展示从该标记起的连续内容（取文中**最早**出现的标记）
-      2. 无结论（或结论片段过短）→ 从开头取连续句，拼到 60 字或 max_length 为止
-      3. 末尾未覆盖全文时追加省略号
-
-    刻意不做跳跃采样：预览是单行 ellipsis 显示，中间插 " ... " 的三段式
-    采样读起来是三句不相干的话，信息量低于等长的连续开头片段。
-    """
-    if not content:
-        return ""
-
-    text = content.strip()
-    if not text:
-        return ""
-
-    # 预览单行显示（CSS nowrap），换行塌成空格
-    flat = text.replace("\n", " ")
-    norm_len = len(flat.replace(" ", ""))
-
-    def _is_full(preview_len: int) -> bool:
-        """预览是否已覆盖完整内容（忽略空白、换行差异）"""
-        return preview_len >= norm_len
-
-    def _finish(preview: str) -> str:
-        """收尾：超长则从句边界回退截断，未覆盖全文则补省略号"""
-        if len(preview) > max_length:
-            for i in range(max_length, 0, -1):
-                if preview[i - 1] in "。！？.!?；;":
-                    preview = preview[:i]
-                    break
-            else:
-                preview = preview[:max_length]
-        return preview if _is_full(len(preview)) else preview + "..."
-
-    # ── 策略1: 结论优先（按文中最早出现的标记，而非 markers 元组顺序）──
-    best_idx = -1
-    best_marker = ""
-    for marker in _CONCLUSION_MARKERS:
-        idx = flat.find(marker)
-        if idx != -1 and (best_idx == -1 or idx < best_idx):
-            best_idx, best_marker = idx, marker
-    if best_idx != -1:
-        conclusion = flat[best_idx:].strip()
-        # 标记后必须有实质内容才认（排除「…最终。」这类紧贴文末的退化命中）
-        if len(conclusion) - len(best_marker) >= _PREVIEW_MIN_CONCLUSION_BODY:
-            return _finish(conclusion)
-
-    # ── 策略2: 从开头取连续句 ──
-    # 中文按句末标点切；英文为主时按「标点 + 空格 + 大写」切，避免 1. / U.S. / v2.5
-    # 被误判成句子边界
-    cjk_count = sum(1 for c in flat if "\u4e00" <= c <= "\u9fff")
-    is_english_heavy = cjk_count < len(flat) * 0.3
-    if is_english_heavy:
-        sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+(?=[A-Z])", flat) if s.strip()]
-    else:
-        sentences = []
-        current = ""
-        for ch in flat:
-            current += ch
-            if ch in "。！？.!?；;":
-                if current.strip():
-                    sentences.append(current.strip())
-                current = ""
-        if current.strip():
-            sentences.append(current.strip())
-
-    if not sentences:
-        # 无句边界（纯短语 / 列表式思考）：直接按字符截断
-        if len(flat) <= max_length:
-            return flat
-        for i in range(max_length, 0, -1):
-            if flat[i - 1] in " ，,、；;：:.":
-                return flat[:i].rstrip(" ，,、.") + "..."
-        return flat[:max_length] + "..."
-
-    preview = ""
-    for s in sentences:
-        # 英文句子的分隔符（空格）已被 strip 吃掉，拼回来否则 "a.B" 粘连
-        preview += (s if not preview else (s if not is_english_heavy else " " + s))
-        if len(preview) >= _PREVIEW_TARGET_LEN or len(preview) >= max_length:
-            break
-
-    return _finish(preview)
-
-
-# 结论标记（中英文，优先级最高）
-_CONCLUSION_MARKERS = (
-    "因此",
-    "所以",
-    "综上",
-    "综上所述",
-    "总而言之",
-    "总的来说",
-    "建议",
-    "推荐",
-    "结论是",
-    "答案是",
-    "总结一下",
-    "也就是说",
-    "最终",
-    "therefore",
-    "in conclusion",
-    "overall",
-    "the answer is",
-    "the solution is",
-    "i recommend",
-    "i suggest",
-    "so the answer",
+# 按句评估；英文句点后需有空白，保留文件名和版本号中的点。
+_THINK_SENTENCE_BREAK = re.compile(r"(?<=[。！？])(?=[^。！？])|(?<=[!?])[^\S\n]+|(?<=\.)[^\S\n]+(?=[A-Z])|\n+")
+_THINK_FINDING = re.compile(
+    r"根因(?:是|在|为|[：:])|原因(?:是|在于|[：:])|已(?:经)?(?:确认|定位|验证|修复)|"
+    r"结论(?:是|为|[：:])|答案(?:是|为|[：:])|问题(?:出在|在于)|结果(?:显示|表明)|"
+    r"\b(?:root cause|the (?:cause|answer|solution) is|confirmed that|turns out|in conclusion)\b",
+    re.I,
 )
+_THINK_ACTION = re.compile(
+    r"^(?:因此|所以|综上|最终|建议|推荐|下一步|接下来|决定|改为|采用|"
+    r"(?:therefore|so|overall|next|instead|i recommend|we should)\b)",
+    re.I,
+)
+_THINK_TENTATIVE = re.compile(
+    r"^(?:如果|假如|假设|也许|可能|(?:首先|先)(?:看|分析|检查|确认)|让我|我需要先|用户(?:希望|想要)|"
+    r"(?:if|maybe|perhaps|let me|i need to|the user wants)\b)",
+    re.I,
+)
+
+
+def _think_sentence_rank(sentence: str) -> int:
+    if sentence.endswith(("?", "？", ":", "：")) or _THINK_TENTATIVE.match(sentence):
+        return -1
+    if _THINK_FINDING.search(sentence):
+        return 2
+    if _THINK_ACTION.match(sentence):
+        return 1
+    return 0
+
+
+def _get_think_preview(content: str, max_length: int = 160) -> str:
+    """摘出一句原文，优先结论或发现，其次是决定或下一步。"""
+    if not content or max_length <= 0:
+        return ""
+
+    best = ""
+    best_rank = -2
+    prose = _CODE_BLOCK_REMOVE_PATTERN.sub("\n", content) if "```" in content else content
+    for raw in _THINK_SENTENCE_BREAK.split(prose.strip() or content):
+        sentence = " ".join(raw.split())
+        if not sentence:
+            continue
+        rank = _think_sentence_rank(sentence)
+        # 多次修订时取较晚的发现或决定；无明确信号时保留首个陈述。
+        if rank > best_rank or (rank == best_rank and rank > 0):
+            best, best_rank = sentence, rank
+
+    if len(best) <= max_length:
+        return best
+    suffix = "..."[:max_length]
+    prefix = best[: max_length - len(suffix)]
+    return prefix.rstrip() + suffix
 
 
 # ★ 着色用 #RRGGBB + stroke-opacity：QtSvg（QSvgRenderer）不支持 CSS rgba() 函数——
@@ -1637,7 +1572,8 @@ def _render_think_block(content: str, completed: bool = True, compact: bool = Fa
             block_seed = f"{content}|1"
             block_key = "think-" + hashlib.sha1(block_seed.encode("utf-8")).hexdigest()[:12]
             preview_right = (
-                f'<span style="color: var(--text-secondary); font-weight: {preview_weight}; margin-left: 8px; font-size: {scale_font_size(11)}px;">'
+                f'<span style="color: var(--text-secondary); font-weight: {preview_weight}; margin-left: 8px; font-size: {scale_font_size(11)}px; '
+                'min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">'
                 f"{escape(preview)}</span>"
             )
             return f"""<div class="think-compact" data-block-key="{block_key}"{_flip_attr} style="margin: 2px 0; padding: 4px 8px; {font_style} display: flex; align-items: baseline; gap: 6px; border-radius: 4px;">
