@@ -51,15 +51,15 @@ def _theme():
 
 
 def test_type_icons_are_app_icons(qt_app):
-    """类型图标应为 AppIcon，不再是 emoji 字符串"""
-    from app.utils.app_icon import AppIcon
+    """类型图标应支持 Fluent 图标接口，不再是 emoji 字符串"""
+    from qfluentwidgets import FluentIconBase
 
     from ui.cards import _TYPE_ICONS, _TYPE_ICON_FALLBACK
 
     assert set(_TYPE_ICONS) == {"session", "project"}
     for icon in _TYPE_ICONS.values():
-        assert isinstance(icon, AppIcon)
-    assert isinstance(_TYPE_ICON_FALLBACK, AppIcon)
+        assert isinstance(icon, FluentIconBase)
+    assert isinstance(_TYPE_ICON_FALLBACK, FluentIconBase)
 
 
 def test_no_emoji_in_source():

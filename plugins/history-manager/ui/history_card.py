@@ -31,9 +31,12 @@ from qfluentwidgets import (
     SimpleCardWidget,
     TransparentToolButton,
 )
-from app.utils.app_icon import AppIcon
+from qfluentwidgets import FluentIcon
+from app.plugins.sdk import caps_for
 
 from app.plugins.sdk import ElidedLabel as _ElidedLabel
+
+icons = caps_for("ui.icons", plugin="history-manager", surface="ui") or FluentIcon
 
 # ── 分页常量 ──
 _PAGE_SIZE = 30  # 每页显示的会话数（含当前会话）
@@ -506,7 +509,7 @@ class _ArchivedItemCard(QFrame):
         btns_layout = QHBoxLayout(self._btns)
         btns_layout.setContentsMargins(0, 0, 0, 0)
         btns_layout.setSpacing(0)
-        self.delete_btn = TransparentToolButton(AppIcon.DELETE, self._btns)
+        self.delete_btn = TransparentToolButton(icons.DELETE, self._btns)
         self.delete_btn.setToolTip("彻底删除")
         self.delete_btn.setFixedSize(22, 22)
         self.delete_btn.clicked.connect(lambda: self.permanentlyDeleted.emit(self._file_path))
@@ -725,7 +728,7 @@ class _TeamGroupCard(QFrame):
         btns_layout = QHBoxLayout(self._btns)
         btns_layout.setContentsMargins(0, 0, 0, 0)
         btns_layout.setSpacing(0)
-        self.restore_btn = TransparentToolButton(AppIcon.PLAY, self._btns)
+        self.restore_btn = TransparentToolButton(icons.PLAY, self._btns)
         self.restore_btn.setToolTip("恢复团队")
         self.restore_btn.setFixedSize(22, 22)
         self.restore_btn.clicked.connect(lambda: self.restoreRequested.emit(self._run_id))

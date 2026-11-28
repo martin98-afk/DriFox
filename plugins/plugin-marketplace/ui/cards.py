@@ -64,7 +64,8 @@ from qfluentwidgets import (
     TransparentToolButton,
     isDarkTheme,
 )
-from app.utils.app_icon import AppIcon
+from qfluentwidgets import FluentIcon
+from app.plugins.sdk import caps_for
 
 from app.plugins.sdk import ElidedLabel as _ElidedLabel
 
@@ -81,6 +82,8 @@ from ._squircle_avatar import (
     name_color,
     resolve_remote_icon_urls,
 )
+
+icons = caps_for("ui.icons", plugin="plugin-marketplace", surface="ui") or FluentIcon
 
 # 模块级孤儿线程容器：跨卡片生命周期持有已 quit 的线程
 # （防止 running 线程随卡片析构被连带销毁 → Qt abort 0xC0000409）
@@ -840,9 +843,9 @@ class _PluginDetailDialog(MaskDialogBase):
                 author_val = _field_value(f'<a href="{a_url}" style="color:{accent_bg};">{a_name or a_url}</a>')
             else:
                 author_val = _field_value(a_name or "—")
-            base_rows.append((AppIcon.PEOPLE, "作者", author_val))
+            base_rows.append((icons.PEOPLE, "作者", author_val))
         elif author:
-            base_rows.append((AppIcon.PEOPLE, "作者", _field_value(str(author))))
+            base_rows.append((icons.PEOPLE, "作者", _field_value(str(author))))
         # 宿主版本要求（未声明不显示，老插件零噪音）
         min_host = self._meta.get("min_host_version")
         if min_host:
@@ -850,26 +853,26 @@ class _PluginDetailDialog(MaskDialogBase):
 
             if self._ver_ok:
                 base_rows.append(
-                    (AppIcon.IOT, "需要 DriFox", _field_value(f"v{min_host} 及以上"))
+                    (icons.IOT, "需要 DriFox", _field_value(f"v{min_host} 及以上"))
                 )
             else:
                 need = _field_value(f"v{min_host} 及以上")
                 need.setStyleSheet(
                     f"color: #EF5350; background: transparent; {ff_qss} font-size: {max(8, fs - 1)}px;"
                 )
-                base_rows.append((AppIcon.IOT, "需要 DriFox", need))
+                base_rows.append((icons.IOT, "需要 DriFox", need))
                 cur = _field_value(f"当前 v{host_version_string()}，请先升级 DriFox")
                 cur.setStyleSheet(
                     f"color: #EF5350; background: transparent; {ff_qss} font-size: {max(8, fs - 1)}px;"
                 )
-                base_rows.append((AppIcon.SYNC, "当前版本过低", cur))
+                base_rows.append((icons.SYNC, "当前版本过低", cur))
         # 平台兼容（platforms 缺省不显示，全平台插件零噪音）
         platforms = self._meta.get("platforms")
         if isinstance(platforms, list) and platforms:
             plat_names = {"windows": "Windows", "linux": "Linux", "darwin": "macOS"}
             if self._plat_ok_platform:
                 base_rows.append(
-                    (AppIcon.IOT, "支持平台", _chips([plat_names.get(p, p) for p in platforms]))
+                    (icons.IOT, "支持平台", _chips([plat_names.get(p, p) for p in platforms]))
                 )
             else:
                 plat_text = " / ".join(plat_names.get(p, p) for p in platforms)
@@ -877,27 +880,27 @@ class _PluginDetailDialog(MaskDialogBase):
                 bad.setStyleSheet(
                     f"color: #EF5350; background: transparent; {ff_qss} font-size: {max(8, fs - 1)}px;"
                 )
-                base_rows.append((AppIcon.IOT, "支持平台", bad))
+                base_rows.append((icons.IOT, "支持平台", bad))
         license_ = self._meta.get("license", "")
         if license_:
-            base_rows.append((AppIcon.CERTIFICATE, "License", _field_value(str(license_))))
+            base_rows.append((icons.CERTIFICATE, "License", _field_value(str(license_))))
         tags = self._meta.get("_cached_tags", []) or []
         if tags:
-            base_rows.append((AppIcon.TAG, "标签", _chips([str(t) for t in tags])))
+            base_rows.append((icons.TAG, "标签", _chips([str(t) for t in tags])))
         marketplace = self._meta.get("_marketplace", "")
         if marketplace:
-            base_rows.append((AppIcon.SHOPPING_CART, "来源市场", _field_value(str(marketplace))))
+            base_rows.append((icons.SHOPPING_CART, "来源市场", _field_value(str(marketplace))))
         downloads = self._meta.get("downloads", 0)
         if downloads:
             base_rows.append(
-                (AppIcon.DOWNLOAD, "下载量", _field_value(f"{downloads:,} 次安装", accent=True))
+                (icons.DOWNLOAD, "下载量", _field_value(f"{downloads:,} 次安装", accent=True))
             )
         homepage = _PluginRow._compute_homepage(self._meta)
         if homepage:
             link = _field_value(f'<a href="{homepage}" style="color:{accent_bg};">{homepage}</a>')
-            base_rows.append((AppIcon.LINK, "官网", link))
+            base_rows.append((icons.LINK, "官网", link))
         if not base_rows:
-            base_rows.append((AppIcon.INFO, "信息", _field_value("该插件未提供更多信息")))
+            base_rows.append((icons.INFO, "信息", _field_value("该插件未提供更多信息")))
 
         info_layout.addWidget(_section("基本信息", first=True))
         base_grid = _new_grid()
@@ -910,23 +913,23 @@ class _PluginDetailDialog(MaskDialogBase):
             contents = _collect_plugin_contents(_PluginRow._find_local_plugin_path(name))
             content_rows = []
             if contents.get("skills"):
-                content_rows.append((AppIcon.LIBRARY, "技能", "，".join(contents["skills"])))
+                content_rows.append((icons.LIBRARY, "技能", "，".join(contents["skills"])))
             if contents.get("mcp"):
-                content_rows.append((AppIcon.CONNECT, "MCP", "，".join(contents["mcp"])))
+                content_rows.append((icons.CONNECT, "MCP", "，".join(contents["mcp"])))
             if contents.get("commands"):
-                content_rows.append((AppIcon.COMMAND_PROMPT, "命令", "，".join(contents["commands"])))
+                content_rows.append((icons.COMMAND_PROMPT, "命令", "，".join(contents["commands"])))
             if contents.get("agents"):
-                content_rows.append((AppIcon.ROBOT, "Agents", "，".join(contents["agents"])))
+                content_rows.append((icons.ROBOT, "Agents", "，".join(contents["agents"])))
             if contents.get("hooks"):
-                content_rows.append((AppIcon.CODE, "Hooks", "，".join(contents["hooks"])))
+                content_rows.append((icons.CODE, "Hooks", "，".join(contents["hooks"])))
             if contents.get("themes"):
-                content_rows.append((AppIcon.PALETTE, "主题", "，".join(contents["themes"])))
+                content_rows.append((icons.PALETTE, "主题", "，".join(contents["themes"])))
             if contents.get("tools"):
-                content_rows.append((AppIcon.DEVELOPER_TOOLS, "工具", "，".join(contents["tools"])))
+                content_rows.append((icons.DEVELOPER_TOOLS, "工具", "，".join(contents["tools"])))
             if contents.get("ui"):
-                content_rows.append((AppIcon.LAYOUT, "UI", "，".join(contents["ui"])))
+                content_rows.append((icons.LAYOUT, "UI", "，".join(contents["ui"])))
             if not content_rows:
-                content_rows.append((AppIcon.INFO, "内容", "该插件未声明可展示的组件"))
+                content_rows.append((icons.INFO, "内容", "该插件未声明可展示的组件"))
 
             info_layout.addWidget(_section("组件内容"))
             content_grid = _new_grid()
@@ -1677,7 +1680,7 @@ class _PluginRow(QFrame):
         self._dl_label = None
         if downloads:
             title_layout.addStretch(1)
-            dl_icon = IconWidget(AppIcon.DOWNLOAD, title_row)
+            dl_icon = IconWidget(icons.DOWNLOAD, title_row)
             dl_icon.setFixedSize(14, 14)
             title_layout.addWidget(dl_icon)
             self._dl_label = QLabel(
@@ -1770,7 +1773,7 @@ class _PluginRow(QFrame):
         self._dir_btn = None
         local_path = self._local_path
         if local_path:
-            self._dir_btn = TransparentToolButton(AppIcon.FOLDER, self)
+            self._dir_btn = TransparentToolButton(icons.FOLDER, self)
             self._dir_btn.setFixedSize(28, 28)
             self._dir_btn.setToolTip(f"打开插件所在文件夹 {local_path}")
             self._dir_btn.clicked.connect(lambda checked, p=local_path: self.openDirRequested.emit(str(p)))
@@ -1780,14 +1783,14 @@ class _PluginRow(QFrame):
         # 官网链接按钮（仅未安装时显示；已安装可在详情弹窗查看官网）
         homepage = self._compute_homepage(self._meta)
         if homepage and not self._installed:
-            link_btn = TransparentToolButton(AppIcon.LINK, self)
+            link_btn = TransparentToolButton(icons.LINK, self)
             link_btn.setFixedSize(28, 28)
             link_btn.setToolTip(f"打开官网 {homepage}")
             link_btn.clicked.connect(lambda checked, u=homepage: self.openUrlRequested.emit(u))
             icon_col.addWidget(link_btn)
 
         # 详情按钮（未安装也能查看完整信息）
-        detail_btn = TransparentToolButton(AppIcon.INFO, self)
+        detail_btn = TransparentToolButton(icons.INFO, self)
         detail_btn.setFixedSize(28, 28)
         detail_btn.setToolTip("查看详情")
         detail_btn.clicked.connect(lambda checked, m=self._meta: self.detailRequested.emit(m))
@@ -3118,7 +3121,7 @@ class MarketplaceCard(QWidget):
         header_layout.setContentsMargins(16, 12, 16, 4)
         header_layout.setSpacing(8)
 
-        icon = IconWidget(AppIcon.SHOPPING_CART, header)
+        icon = IconWidget(icons.SHOPPING_CART, header)
         icon.setFixedSize(22, 22)
         header_layout.addWidget(icon)
         self._header_icon = icon
@@ -3149,7 +3152,7 @@ class MarketplaceCard(QWidget):
         # 一键更新 + 诊断 + 刷新 + 关闭（一键更新在最左）
         # 一键更新：待更新 >1 时出现图标，右上角 badge 显示数量（归零即隐藏）
         # 图标用 DOWNLOAD（向下载入）：UPDATE 画成 ⟲ 时钟样，与旁边 ⟳ 刷新易混
-        self._update_all_btn = TransparentToolButton(AppIcon.DOWNLOAD, header)
+        self._update_all_btn = TransparentToolButton(icons.DOWNLOAD, header)
         self._update_all_btn.setFixedSize(24, 24)
         self._update_all_btn.setToolTip("一键更新")
         self._update_all_btn.clicked.connect(self._on_update_all)
@@ -3193,19 +3196,19 @@ class MarketplaceCard(QWidget):
 
         # 诊断 + 刷新 + 关闭（诊断在刷新左侧）
         # 诊断导出：汇总插件状态/兼容性/依赖/日志错误，复制给 AI 排查
-        self._diag_btn = TransparentToolButton(AppIcon.DEVELOPER_TOOLS, header)
+        self._diag_btn = TransparentToolButton(icons.DEVELOPER_TOOLS, header)
         self._diag_btn.setFixedSize(24, 24)
         self._diag_btn.setToolTip("导出插件诊断（复制给 AI 排查）")
         self._diag_btn.clicked.connect(self._on_export_diagnostics)
         header_layout.addWidget(self._diag_btn)
 
-        self._refresh_btn = TransparentToolButton(AppIcon.SYNC, header)
+        self._refresh_btn = TransparentToolButton(icons.SYNC, header)
         self._refresh_btn.setFixedSize(24, 24)
         self._refresh_btn.setToolTip("刷新")
         self._refresh_btn.clicked.connect(self._on_refresh)
         header_layout.addWidget(self._refresh_btn)
 
-        self._close_btn = TransparentToolButton(AppIcon.CLOSE, header)
+        self._close_btn = TransparentToolButton(icons.CLOSE, header)
         self._close_btn.setFixedSize(24, 24)
         self._close_btn.setToolTip("关闭")
         self._close_btn.clicked.connect(self._on_close)
@@ -3445,7 +3448,7 @@ class MarketplaceCard(QWidget):
         tip.setStyleSheet(f"color: {_text_color(secondary=True)}; background: transparent;")
         tool_lay.addWidget(tip)
         tool_lay.addStretch(1)
-        refresh_btn = TransparentToolButton(AppIcon.SYNC, tool_row)
+        refresh_btn = TransparentToolButton(icons.SYNC, tool_row)
         refresh_btn.setToolTip("刷新分组")
         refresh_btn.setCursor(Qt.PointingHandCursor)
         refresh_btn.setFixedSize(30, 30)
@@ -5647,10 +5650,10 @@ class MarketplaceCard(QWidget):
         btn_layout.setContentsMargins(0, 0, 0, 0)
         btn_layout.setSpacing(8)
         btn_layout.addStretch(1)  # 右对齐：按钮组靠右
-        test_btn = PushButton("测试连接", btn_row, AppIcon.CAFE)
+        test_btn = PushButton("测试连接", btn_row, icons.CAFE)
         test_btn.clicked.connect(self._on_proxy_test)
         btn_layout.addWidget(test_btn)
-        save_btn = PushButton("保存", btn_row, AppIcon.SAVE)
+        save_btn = PushButton("保存", btn_row, icons.SAVE)
         save_btn.clicked.connect(self._on_proxy_save)
         btn_layout.addWidget(save_btn)
         config_layout.addWidget(btn_row)
@@ -6761,7 +6764,7 @@ class MarketplaceCard(QWidget):
         h.addLayout(info, 1)
 
         # 校验按钮：单独强制重拉该源
-        check_btn = TransparentToolButton(AppIcon.SYNC, row)
+        check_btn = TransparentToolButton(icons.SYNC, row)
         check_btn.setFixedSize(28, 28)
         check_btn.setToolTip(f"重新拉取 {src_def['name']}")
         check_btn.clicked.connect(lambda checked, n=src_def["name"]: self._check_source(n))
@@ -6782,7 +6785,7 @@ class MarketplaceCard(QWidget):
                 link_url = u.replace(".git", "")
 
         if link_url:
-            link_btn = TransparentToolButton(AppIcon.LINK, row)
+            link_btn = TransparentToolButton(icons.LINK, row)
             link_btn.setFixedSize(28, 28)
             link_btn.setToolTip(f"打开 {link_url}")
             link_btn.clicked.connect(lambda checked, u=link_url: self._open_url(u))
@@ -6790,7 +6793,7 @@ class MarketplaceCard(QWidget):
 
         # 删除按钮（内置市场不可删）
         if not src_def.get("builtin"):
-            del_btn = TransparentToolButton(AppIcon.DELETE, row)
+            del_btn = TransparentToolButton(icons.DELETE, row)
             del_btn.setFixedSize(28, 28)
             del_btn.setToolTip("移除市场")
             del_btn.clicked.connect(lambda checked, n=src_def["name"]: self._on_remove_marketplace(n))

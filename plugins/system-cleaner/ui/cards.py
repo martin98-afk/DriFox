@@ -39,7 +39,8 @@ from qfluentwidgets import (
     TransparentToolButton,
     isDarkTheme,
 )
-from app.utils.app_icon import AppIcon
+from qfluentwidgets import FluentIcon
+from app.plugins.sdk import caps_for
 from loguru import logger
 
 from .cleaner import _CacheItemRow, _on_accent_text, _styled_cleaner_confirm, _styled_cleaner_info
@@ -55,6 +56,8 @@ from .scanner import (
     _release_memory_deep_core,
     _release_memory_light,
 )
+
+icons = caps_for("ui.icons", plugin="system-cleaner", surface="ui") or FluentIcon
 
 
 # ── 主题色/字体辅助 ──────────────────────────────────────
@@ -593,7 +596,7 @@ class SystemCleanerCard(QWidget):
         hly.setContentsMargins(16, 12, 16, 4)
         hly.setSpacing(8)
 
-        self._header_icon = IconWidget(AppIcon.BROOM, header)
+        self._header_icon = IconWidget(icons.BROOM, header)
         self._header_icon.setFixedSize(22, 22)
         hly.addWidget(self._header_icon)
 
@@ -611,12 +614,12 @@ class SystemCleanerCard(QWidget):
 
         hly.addStretch(1)
 
-        self._refresh_btn = TransparentToolButton(AppIcon.SYNC, header)
+        self._refresh_btn = TransparentToolButton(icons.SYNC, header)
         self._refresh_btn.setToolTip("刷新")
         self._refresh_btn.clicked.connect(self._on_refresh)
         hly.addWidget(self._refresh_btn)
 
-        close_btn = TransparentToolButton(AppIcon.CLOSE, header)
+        close_btn = TransparentToolButton(icons.CLOSE, header)
         close_btn.setFixedSize(24, 24)
         close_btn.setToolTip("关闭")
         close_btn.clicked.connect(self._on_close)

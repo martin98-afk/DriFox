@@ -48,7 +48,10 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
-from app.utils.utils import get_icon
+from qfluentwidgets import FluentIcon
+from app.plugins.sdk import caps_for
+
+icons = caps_for("ui.icons", plugin="file-tree", surface="ui") or FluentIcon
 
 # ══════════════════════════════════════════════════════════
 # 文件图标 — 后台加载 + 超时熔断
@@ -489,7 +492,7 @@ def _placeholder_file_icon() -> QIcon:
     """通用文件占位图标（后台结果到达前的临时显示）"""
     global _PLACEHOLDER_FILE_ICON
     if _PLACEHOLDER_FILE_ICON is None:
-        _PLACEHOLDER_FILE_ICON = get_icon("read")
+        _PLACEHOLDER_FILE_ICON = icons.DOCUMENT.qicon()
     return _PLACEHOLDER_FILE_ICON
 
 
@@ -510,7 +513,7 @@ def _query_icon_sync(file_path: str) -> QIcon:
     icon = _FILE_ICON_PROVIDER.icon(QFileInfo(file_path))
     if icon and not icon.isNull():
         return icon
-    return get_icon("read")
+    return icons.DOCUMENT.qicon()
 
 
 def _get_file_icon(file_path: str) -> QIcon:
@@ -536,7 +539,7 @@ def _get_file_icon(file_path: str) -> QIcon:
 
 def _get_dir_icon() -> QIcon:
     """目录使用应用主题图标；文件关联仍由系统提供。"""
-    return get_icon("folder")
+    return icons.FOLDER.qicon()
 
 
 

@@ -20,10 +20,13 @@ from qfluentwidgets import (
     SwitchButton,
     TransparentToolButton,
 )
-from app.utils.app_icon import AppIcon
+from qfluentwidgets import FluentIcon
+from app.plugins.sdk import caps_for
 
 from app.utils.design_tokens import Colors
 from app.widgets.cards.settings.base_settings_card import BaseSettingsCard
+
+icons = caps_for("ui.icons", plugin="system-im", surface="ui") or FluentIcon
 
 SERVICE_KEY = "im_gateway"
 _PLUGIN_NAME = "system-im"
@@ -83,7 +86,7 @@ class _PlatformRow(QFrame):
         self.state_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         layout.addWidget(self.state_label, 1)
 
-        self.reconnect_btn = TransparentToolButton(AppIcon.SYNC, self)
+        self.reconnect_btn = TransparentToolButton(icons.SYNC, self)
         self.reconnect_btn.setToolTip("重新连接")
         self.reconnect_btn.clicked.connect(self._on_reconnect)
         layout.addWidget(self.reconnect_btn)
@@ -223,7 +226,7 @@ class ImGatewaySettingsCard(BaseSettingsCard):
         footer_layout.addWidget(self._session_label)
         footer_layout.addStretch(1)
 
-        refresh_btn = TransparentToolButton(AppIcon.SYNC, footer)
+        refresh_btn = TransparentToolButton(icons.SYNC, footer)
         refresh_btn.setToolTip("立即刷新状态")
         refresh_btn.clicked.connect(self._refresh)
         footer_layout.addWidget(refresh_btn)

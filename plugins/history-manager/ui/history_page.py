@@ -53,7 +53,8 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 from qfluentwidgets import ScrollArea, TransparentToolButton
-from app.utils.app_icon import AppIcon
+from qfluentwidgets import FluentIcon
+from app.plugins.sdk import caps_for
 
 from loguru import logger
 
@@ -68,6 +69,8 @@ from app.plugins.sdk import CustomTabButton
 from app.plugins.sdk import SquareAvatar as _SquareAvatar
 
 from .project_selector_card import ProjectItem, ProjectSelectorCardContent
+
+icons = caps_for("ui.icons", plugin="history-manager", surface="ui") or FluentIcon
 
 
 # 项目过滤器哨兵值（「当前项目」跟随活跃窗口；「全部项目」混合视图）
@@ -624,13 +627,13 @@ class HistoryPage(QWidget):
         )
         tools.addWidget(self._project_new_edit, 1)
 
-        self._project_new_btn = TransparentToolButton(AppIcon.ADD, body)
+        self._project_new_btn = TransparentToolButton(icons.ADD, body)
         self._project_new_btn.setFixedSize(24, 24)
         self._project_new_btn.setToolTip("创建项目")
         self._project_new_btn.clicked.connect(self._on_new_project_submitted)
         tools.addWidget(self._project_new_btn, 0)
 
-        self._project_folder_btn = TransparentToolButton(AppIcon.FOLDER, body)
+        self._project_folder_btn = TransparentToolButton(icons.FOLDER, body)
         self._project_folder_btn.setFixedSize(24, 24)
         self._project_folder_btn.setToolTip("选择文件夹作为项目根目录")
         self._project_folder_btn.clicked.connect(lambda: self._project_action("pick_folder"))

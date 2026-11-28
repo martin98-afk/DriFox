@@ -44,9 +44,12 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 from qfluentwidgets import TransparentToolButton
-from app.utils.app_icon import AppIcon
+from qfluentwidgets import FluentIcon
+from app.plugins.sdk import caps_for
 
 from .highlight import CodeHighlighter, analyze
+
+icons = caps_for("ui.icons", plugin="file-tree", surface="ui") or FluentIcon
 
 # ── 限流阈值 ──────────────────────────────────────────────
 
@@ -263,7 +266,7 @@ class _SplitButton(QWidget):
         self._icon_btn.setIconSize(QSize(16, 16))
         self._icon_btn.setCursor(Qt.PointingHandCursor)
         self._icon_btn.clicked.connect(self.default_clicked.emit)
-        self._icon_btn.setIcon(AppIcon.APPLICATION.icon())
+        self._icon_btn.setIcon(icons.APPLICATION.icon())
 
         self._arrow_btn = QToolButton(self)
         self._arrow_btn.setAutoRaise(True)
@@ -271,7 +274,7 @@ class _SplitButton(QWidget):
         self._arrow_btn.setFixedSize(18, 26)
         self._arrow_btn.setIconSize(QSize(10, 10))
         self._arrow_btn.setCursor(Qt.PointingHandCursor)
-        self._arrow_btn.setIcon(AppIcon.CARE_DOWN_SOLID.icon())
+        self._arrow_btn.setIcon(icons.CARE_DOWN_SOLID.icon())
         self._arrow_btn.clicked.connect(self.menu_clicked.emit)
 
         layout.addWidget(self._icon_btn)
@@ -316,7 +319,7 @@ class _SplitButton(QWidget):
         self._arrow_btn.setToolTip(text)
 
     def set_icon_color(self, color: QColor) -> None:
-        self._arrow_btn.setIcon(AppIcon.CARE_DOWN_SOLID.icon(color=color))
+        self._arrow_btn.setIcon(icons.CARE_DOWN_SOLID.icon(color=color))
 
 
 # ── 省略名标签 ────────────────────────────────────────────
@@ -1053,7 +1056,7 @@ class FilePreviewPage(QWidget):
         if opener is None:
             self._has_opener_icon = False
             self._open_with_btn.set_icon(
-                AppIcon.APPLICATION.icon(color=self._secondary_color)
+                icons.APPLICATION.icon(color=self._secondary_color)
             )
             self._open_with_btn.set_tooltip("用默认程序打开")
             return
@@ -1061,7 +1064,7 @@ class FilePreviewPage(QWidget):
         if icon.isNull():
             self._has_opener_icon = False
             self._open_with_btn.set_icon(
-                AppIcon.APPLICATION.icon(color=self._secondary_color)
+                icons.APPLICATION.icon(color=self._secondary_color)
             )
         else:
             self._has_opener_icon = True
@@ -1164,7 +1167,7 @@ class FilePreviewPage(QWidget):
         try:
             if self._kind == "markdown":
                 mode = self._md_mode
-                icon = AppIcon.VIEW if mode == "render" else AppIcon.CODE
+                icon = icons.VIEW if mode == "render" else icons.CODE
                 self._highlight_btn.setIcon(icon.icon(color=inactive if mode == "source_plain" else accent))
                 self._highlight_btn.setToolTip(
                     {
@@ -1176,13 +1179,13 @@ class FilePreviewPage(QWidget):
                 self._highlight_btn.setEnabled(True)
             else:
                 self._highlight_btn.setIcon(
-                    AppIcon.CODE.icon(color=accent if self._code_view.highlight_enabled() else inactive)
+                    icons.CODE.icon(color=accent if self._code_view.highlight_enabled() else inactive)
                 )
-            self._reload_btn.setIcon(AppIcon.SYNC.icon(color=inactive))
+            self._reload_btn.setIcon(icons.SYNC.icon(color=inactive))
             self._open_with_btn.set_icon_color(inactive)
             if not self._has_opener_icon:
                 # 已取到默认程序图标时不能被主题刷新回通用图标
-                self._open_with_btn.set_icon(AppIcon.APPLICATION.icon(color=inactive))
+                self._open_with_btn.set_icon(icons.APPLICATION.icon(color=inactive))
         except Exception:
             pass
 
@@ -1201,7 +1204,7 @@ class FilePreviewPage(QWidget):
         head.setContentsMargins(6, 0, 6, 0)
         head.setSpacing(2)
 
-        self._back_btn = TransparentToolButton(AppIcon.LEFT_ARROW, self._header)
+        self._back_btn = TransparentToolButton(icons.LEFT_ARROW, self._header)
         self._back_btn.setFixedSize(28, 28)
         self._back_btn.setToolTip("返回文件树")
         self._back_btn.clicked.connect(self.back_requested.emit)
@@ -1209,17 +1212,17 @@ class FilePreviewPage(QWidget):
         self._name_label = _ElidedLabel("", self._header)
         self._name_label.setMinimumWidth(36)
 
-        self._zoom_out_btn = TransparentToolButton(AppIcon.ZOOM_OUT, self._header)
+        self._zoom_out_btn = TransparentToolButton(icons.ZOOM_OUT, self._header)
         self._zoom_out_btn.setFixedSize(26, 26)
         self._zoom_out_btn.setToolTip("缩小（滚轮）")
         self._zoom_out_btn.clicked.connect(lambda: self._image_view.zoom_out())
 
-        self._zoom_in_btn = TransparentToolButton(AppIcon.ZOOM_IN, self._header)
+        self._zoom_in_btn = TransparentToolButton(icons.ZOOM_IN, self._header)
         self._zoom_in_btn.setFixedSize(26, 26)
         self._zoom_in_btn.setToolTip("放大（滚轮）")
         self._zoom_in_btn.clicked.connect(lambda: self._image_view.zoom_in())
 
-        self._fit_btn = TransparentToolButton(AppIcon.FIT_PAGE, self._header)
+        self._fit_btn = TransparentToolButton(icons.FIT_PAGE, self._header)
         self._fit_btn.setFixedSize(26, 26)
         self._fit_btn.setToolTip("适应窗口（双击图片 / 0）")
         self._fit_btn.clicked.connect(lambda: self._image_view.zoom_to_fit())
@@ -1237,13 +1240,13 @@ class FilePreviewPage(QWidget):
         self._wrap_btn.setToolTip("自动换行：关（点击切换）")
         self._wrap_btn.clicked.connect(self._on_toggle_wrap)
 
-        self._highlight_btn = TransparentToolButton(AppIcon.CODE, self._header)
+        self._highlight_btn = TransparentToolButton(icons.CODE, self._header)
         self._highlight_btn.setFixedSize(26, 26)
         self._highlight_btn.setToolTip("语法高亮：开（点击切换）")
         self._highlight_btn.clicked.connect(self._on_code_button)
 
         # ── 两种视图共用 ──
-        self._reload_btn = TransparentToolButton(AppIcon.SYNC, self._header)
+        self._reload_btn = TransparentToolButton(icons.SYNC, self._header)
         self._reload_btn.setFixedSize(26, 26)
         self._reload_btn.setToolTip("重新加载（文件被外部修改后重读）")
         self._reload_btn.clicked.connect(self.reload_current)
