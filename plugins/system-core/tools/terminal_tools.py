@@ -363,6 +363,20 @@ def _cleanup_script_temp(path: Optional[str]) -> None:
             pass
 
 
+# cmd 的缺命令诊断（中英文）；仅对已知替代工具给出下一步，保留原始退出码与输出。
+_WINDOWS_TOOL_GUIDANCE = (
+    "Windows 上外部程序可直接执行，管道和重定向使用 cmd.exe。"
+    "列目录用 list，查内容用 grep，按行读文件用 read；"
+    "限制 Git 日志数量用 git log -n 10。head/tail 等 Unix 命令未必安装。"
+    "若有 powershell 工具，直接用它执行 cmdlet，取输出首尾用 Select-Object -First/-Last。"
+)
+_CMD_MISSING_UNIX_TOOL = re.compile(
+    r"^\s*'(?:head|tail|grep|ls|wc|cat|sed|awk|which|export)'\s*"
+    r"(?:is not recognized as an internal or external command|不是内部或外部命令)",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
 class TerminalTools:
     def __init__(self, owner):
         self._owner = owner
@@ -485,6 +499,8 @@ class TerminalTools:
             # 检查进程退出码
             if process.returncode != 0:
                 detail = combined if combined else "(no output)"
+                if sys.platform == "win32" and _CMD_MISSING_UNIX_TOOL.search(stderr):
+                    detail += f"\n{_WINDOWS_TOOL_GUIDANCE}"
                 return ToolResult(
                     False,
                     error=f"Command exited with code {process.returncode}:\n{detail}",
@@ -611,7 +627,13 @@ _BASH_SCHEMA = {
     "type": "function",
     "function": {
         "name": "bash",
-        "description": "执行 shell 命令。仅专用工具不足时用：构建(pytest/ruff)、git、进程、管道、环境探测(which/env)。禁替代 read/write/edit/multi_edit/list/glob/grep/get_diagnostics/lsp/background_task/websearch/webfetch。有专用工具就用它；失败先读错误输出定位，勿换写法反复重试，三次仍败说明并求助。",
+        "description": (
+            "执行构建、测试、git 和环境探测命令。"
+            + (_WINDOWS_TOOL_GUIDANCE if sys.platform == "win32" else "")
+            + "文件读写与检索优先用 read/write/edit/multi_edit/list/glob/grep，"
+            "诊断用 get_diagnostics/lsp，持续服务用 background_task，联网用 websearch/webfetch。"
+            "失败先检查错误输出，勿换写法反复重试，三次仍败说明并求助。"
+        ),
         "parameters": {
             "type": "object",
             "properties": {
@@ -641,7 +663,11 @@ _BACKGROUND_TASK_SCHEMA = {
                     "enum": ["start", "stop", "logs", "list"],
                     "description": "start=启动；stop=停止；logs=看日志；list=列任务",
                 },
-                "command": {"type": "string", "description": "action=start：要执行的命令"},
+                "command": {
+                    "type": "string",
+                    "description": "action=start：要执行的命令。"
+                    + ("Windows 的管道和重定向使用 cmd.exe 语法。" if sys.platform == "win32" else ""),
+                },
                 "cwd": {"type": "string", "description": "action=start：工作目录，默认项目根"},
                 "task_id": {"type": "string", "description": "action=stop/logs：任务 ID(bg_xxxxxxxx)"},
                 "lines": {"type": "integer", "description": "action=logs：取最近 N 行，默认 100"},
