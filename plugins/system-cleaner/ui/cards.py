@@ -32,7 +32,6 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 from qfluentwidgets import (
-    FluentIcon,
     IconWidget,
     SmoothScrollDelegate,
     StrongBodyLabel,
@@ -40,6 +39,7 @@ from qfluentwidgets import (
     TransparentToolButton,
     isDarkTheme,
 )
+from app.utils.app_icon import AppIcon
 from loguru import logger
 
 from .cleaner import _CacheItemRow, _on_accent_text, _styled_cleaner_confirm, _styled_cleaner_info
@@ -593,7 +593,7 @@ class SystemCleanerCard(QWidget):
         hly.setContentsMargins(16, 12, 16, 4)
         hly.setSpacing(8)
 
-        self._header_icon = IconWidget(FluentIcon.BROOM, header)
+        self._header_icon = IconWidget(AppIcon.BROOM, header)
         self._header_icon.setFixedSize(22, 22)
         hly.addWidget(self._header_icon)
 
@@ -611,12 +611,12 @@ class SystemCleanerCard(QWidget):
 
         hly.addStretch(1)
 
-        self._refresh_btn = TransparentToolButton(FluentIcon.SYNC, header)
+        self._refresh_btn = TransparentToolButton(AppIcon.SYNC, header)
         self._refresh_btn.setToolTip("刷新")
         self._refresh_btn.clicked.connect(self._on_refresh)
         hly.addWidget(self._refresh_btn)
 
-        close_btn = TransparentToolButton(FluentIcon.CLOSE, header)
+        close_btn = TransparentToolButton(AppIcon.CLOSE, header)
         close_btn.setFixedSize(24, 24)
         close_btn.setToolTip("关闭")
         close_btn.clicked.connect(self._on_close)

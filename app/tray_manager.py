@@ -244,30 +244,30 @@ class TrayManager(QObject):
         app/widgets/modules/tray_menu.py 模块注释。
         """
         # 延迟导入：qfluentwidgets 较重，不占用启动关键路径
-        from qfluentwidgets import FluentIcon
+        from app.utils.app_icon import AppIcon
 
         from app.widgets.modules.tray_menu import TrayContextMenu
 
         menu = TrayContextMenu()
 
-        menu.add_icon_action(FluentIcon.HOME, "打开主界面", self._show_main_window)
+        menu.add_icon_action(AppIcon.HOME, "打开主界面", self._show_main_window)
 
         menu.addSeparator()
 
         # 右侧显示当前版本号，点击走手动检查更新
-        menu.add_hint_action(FluentIcon.UPDATE, "检查更新", self._current_version(), self._check_update)
-        menu.add_icon_action(FluentIcon.DOCUMENT, "打开日志", self._open_current_log)
-        menu.add_icon_action(FluentIcon.FOLDER, "打开日志文件夹", self._open_log_folder)
+        menu.add_hint_action(AppIcon.UPDATE, "检查更新", self._current_version(), self._check_update)
+        menu.add_icon_action(AppIcon.DOCUMENT, "打开日志", self._open_current_log)
+        menu.add_icon_action(AppIcon.FOLDER, "打开日志文件夹", self._open_log_folder)
 
         menu.addSeparator()
 
-        menu.add_icon_action(FluentIcon.SYNC, "重启", self._restart_application)
+        menu.add_icon_action(AppIcon.SYNC, "重启", self._restart_application)
         # 安全模式入口：正常模式显示进入，安全模式进程内显示退出
         if is_safe_mode():
-            menu.add_icon_action(FluentIcon.VPN, "退出安全模式重启", self._restart_normal_mode)
+            menu.add_icon_action(AppIcon.VPN, "退出安全模式重启", self._restart_normal_mode)
         else:
-            menu.add_icon_action(FluentIcon.VPN, "安全模式重启", self._restart_in_safe_mode)
-        menu.add_icon_action(FluentIcon.POWER_BUTTON, "退出", self._quit_application)
+            menu.add_icon_action(AppIcon.VPN, "安全模式重启", self._restart_in_safe_mode)
+        menu.add_icon_action(AppIcon.POWER_BUTTON, "退出", self._quit_application)
 
         return menu
 

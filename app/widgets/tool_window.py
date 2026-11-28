@@ -16,7 +16,8 @@ from typing import Optional
 
 from PyQt5.QtCore import QObject, pyqtSignal
 from PyQt5.QtWidgets import QHBoxLayout, QLabel, QWidget
-from qfluentwidgets import FluentIcon, IconWidget, TransparentToolButton
+from qfluentwidgets import IconWidget, TransparentToolButton
+from app.utils.app_icon import AppIcon
 
 from app.utils.config import Settings
 from app.utils.design_tokens import Colors, scale_font_size
@@ -65,7 +66,7 @@ class ToolWindowTitleBar(QWidget):
         self._min_btn.setFixedSize(28, 28)
         self._min_btn.setToolTip("最小化")
 
-        self._popup_btn = TransparentToolButton(FluentIcon.CLOSE, self)
+        self._popup_btn = TransparentToolButton(AppIcon.CLOSE, self)
         self._popup_btn.setFixedSize(28, 28)
         self._popup_btn.setToolTip("关闭")
         self._popup_btn.clicked.connect(self._on_popup_clicked)

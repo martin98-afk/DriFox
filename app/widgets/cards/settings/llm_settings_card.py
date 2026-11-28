@@ -20,7 +20,6 @@ from PyQt5.QtWidgets import (
 )
 from qfluentwidgets import (
     ExpandSettingCard,
-    FluentIcon,
     OptionsSettingCard,
     PrimaryPushButton,
     RangeSettingCard,
@@ -28,6 +27,7 @@ from qfluentwidgets import (
     SettingCard,
     SwitchSettingCard,
 )
+from app.utils.app_icon import AppIcon
 
 from app.utils.config import Settings
 from app.utils.design_tokens import (
@@ -304,7 +304,7 @@ class FontSizeStepperCard(ExpandSettingCard):
 
 class ManualUpdateCard(SettingCard):
     def __init__(self, title, content, parent_widget, parent=None):
-        super().__init__(FluentIcon.SYNC, title, content, parent)
+        super().__init__(AppIcon.SYNC, title, content, parent)
         self.parent_widget = parent_widget
 
         self.updateBtn = PrimaryPushButton("检查更新", self)
@@ -354,7 +354,7 @@ class LLMSettingsCard(SystemCardFrame):
     """大模型设置卡片 - 固定边框 + 垂直列表布局"""
 
     # 左侧导航分组：(分组标题, ((tab_id, 显示名, 图标源), ...))
-    # 图标源：字符串 → 主题感知资源图标 get_icon(name)；FluentIcon 枚举 → 内置图标
+    # 图标源：字符串 → 主题感知资源图标 get_icon(name)；AppIcon 枚举 → 内置图标
     # 「插件」项按注册卡片动态显隐（_sync_plugin_nav_visibility）；
     # 插件注册的独立配置大 tab（register_settings_tab）动态插到「插件」项之后
     NAV_GROUPS = (
@@ -369,22 +369,22 @@ class LLMSettingsCard(SystemCardFrame):
                 ("agents", "智能体", "智能体"),
                 ("context", "上下文", "上下文"),
                 ("skills", "技能", "技能"),
-                ("plugins", "插件", FluentIcon.APPLICATION),
+                ("plugins", "插件", AppIcon.APPLICATION),
             ),
         ),
         (
             "界面",
             (
                 ("appearance", "外观", "主题风格"),
-                ("render", "渲染", FluentIcon.SPEED_HIGH),
+                ("render", "渲染", AppIcon.SPEED_HIGH),
             ),
         ),
         (
             "系统",
             (
-                ("common", "通用", FluentIcon.SETTING),
+                ("common", "通用", AppIcon.SETTING),
                 ("security", "安全中心", "锁定"),
-                ("update", "更新", FluentIcon.UPDATE),
+                ("update", "更新", AppIcon.UPDATE),
             ),
         ),
     )
@@ -494,7 +494,7 @@ class LLMSettingsCard(SystemCardFrame):
         # + 插件筛选 chips（仅插件页显示），整条只在全宽页可见（2026-11-08 设计）
         self._back_btn = QToolButton(self)
         self._back_btn.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
-        self._back_btn.setIcon(FluentIcon.RETURN.qicon())
+        self._back_btn.setIcon(AppIcon.RETURN.qicon())
         self._back_btn.setIconSize(QSize(16, 16))
         self._back_btn.setText("返回设置")
         self._back_btn.setFixedHeight(32)
@@ -624,7 +624,7 @@ class LLMSettingsCard(SystemCardFrame):
 
         # 锁屏远程
         self.lockRemoteCard = SwitchSettingCard(
-            FluentIcon.SYNC,
+            AppIcon.SYNC,
             "锁屏远程",
             "保持系统唤醒、屏幕常亮。",
             configItem=self.cfg.lock_screen_remote_enabled,
@@ -646,7 +646,7 @@ class LLMSettingsCard(SystemCardFrame):
 
         # 单实例限制：同时只允许运行一个实例
         self.singleInstanceCard = SwitchSettingCard(
-            FluentIcon.LAYOUT,
+            AppIcon.LAYOUT,
             "单实例限制",
             "开启后限制一个 Drifox 实例，重启生效",
             configItem=self.cfg.enable_single_instance,
@@ -658,7 +658,7 @@ class LLMSettingsCard(SystemCardFrame):
 
         # 消息身份行：每条消息顶部显示发送者头像 + 名称（插件可覆盖身份）
         self.messageIdentityCard = SwitchSettingCard(
-            FluentIcon.PEOPLE,
+            AppIcon.PEOPLE,
             "消息身份行",
             "每条消息显示发送者头像与名称",
             configItem=self.cfg.ui_message_identity,
@@ -668,7 +668,7 @@ class LLMSettingsCard(SystemCardFrame):
 
         # 灰度开关：纯 Qt 消息渲染器（MarkdownBlockViewer 替代 QWebEngineView）
         self.qtRendererCard = SwitchSettingCard(
-            FluentIcon.CODE,
+            AppIcon.CODE,
             "纯 Qt 消息渲染（实验）",
             "消息正文改用原生控件渲染，显著降低内存占用",
             configItem=self.cfg.qt_message_renderer,
@@ -679,7 +679,7 @@ class LLMSettingsCard(SystemCardFrame):
         # 繁忙时 Enter 键行为：智能体运行时按 Enter 的动作（Ctrl+Enter 恒为另一行为）
         self.busyEnterCard = OptionsSettingCard(
             self.cfg.busy_enter_behavior,
-            FluentIcon.SEND,
+            AppIcon.SEND,
             "繁忙时 Enter 键行为",
             "仅在智能体运行时生效；Ctrl+Enter 使用另一行为",
             texts=["插话发送", "排队发送"],
@@ -776,7 +776,7 @@ class LLMSettingsCard(SystemCardFrame):
         # WebGL 按需解禁（3D 图形需要）
         self.renderWebglCard = OptionsSettingCard(
             self.cfg.render_webgl,
-            FluentIcon.GLOBE,
+            AppIcon.GLOBE,
             "WebGL / 3D 图形",
             "关闭可省 GPU 进程内存",
             texts=["自动", "开", "关"],
@@ -787,7 +787,7 @@ class LLMSettingsCard(SystemCardFrame):
         # Chromium renderer 进程硬上限（内存治理核心项）
         self.renderProcessLimitCard = RangeSettingCard(
             self.cfg.render_renderer_process_limit,
-            FluentIcon.LAYOUT,
+            AppIcon.LAYOUT,
             "Renderer 进程上限",
             "消息卡片渲染进程数硬上限",
             parent=self,
@@ -798,7 +798,7 @@ class LLMSettingsCard(SystemCardFrame):
         # 单 renderer JS 堆上限
         self.renderJsHeapCard = RangeSettingCard(
             self.cfg.render_js_heap_mb,
-            FluentIcon.CLOUD,
+            AppIcon.CLOUD,
             "单卡片 JS 堆上限 (MB)",
             "限制单张消息卡片的内存",
             parent=self,
@@ -808,7 +808,7 @@ class LLMSettingsCard(SystemCardFrame):
 
         # Chromium 低内存模式
         self.renderLowEndCard = SwitchSettingCard(
-            FluentIcon.REMOVE_FROM,
+            AppIcon.REMOVE_FROM,
             "低内存模式",
             "压低渲染缓冲/缓存，抗锯齿略降",
             configItem=self.cfg.render_low_end_device_mode,
@@ -818,7 +818,7 @@ class LLMSettingsCard(SystemCardFrame):
 
         # 合成器平滑滚动
         self.renderSmoothCard = SwitchSettingCard(
-            FluentIcon.TILES,
+            AppIcon.TILES,
             "平滑滚动",
             "卡内滚动的合成器动画",
             configItem=self.cfg.render_smooth_scrolling,
@@ -828,7 +828,7 @@ class LLMSettingsCard(SystemCardFrame):
 
         # 后台渲染节流（长对话离屏卡片被降优先级 → 流式卡顿的解药）
         self.renderThrottleCard = SwitchSettingCard(
-            FluentIcon.PAUSE,
+            AppIcon.PAUSE,
             "关闭后台渲染节流",
             "离屏卡片不再被降优先级，抗流式卡顿",
             configItem=self.cfg.render_disable_background_throttling,
@@ -838,7 +838,7 @@ class LLMSettingsCard(SystemCardFrame):
 
         # 2D canvas 抗锯齿
         self.renderCanvasAACard = SwitchSettingCard(
-            FluentIcon.BRUSH,
+            AppIcon.BRUSH,
             "Canvas 抗锯齿",
             "开启后 echarts 图表边缘更平滑",
             configItem=self.cfg.render_canvas_aa,
@@ -848,7 +848,7 @@ class LLMSettingsCard(SystemCardFrame):
 
         # 共享 GL 上下文：省约 12.7% 内存；共用一个上下文被怀疑与多卡/图表闪烁相关
         self.renderShareGLCard = SwitchSettingCard(
-            FluentIcon.LAYOUT,
+            AppIcon.LAYOUT,
             "共享 GL 上下文",
             "省约 12% 内存；渲染闪烁时可尝试关闭",
             configItem=self.cfg.render_share_gl_contexts,
@@ -892,7 +892,7 @@ class LLMSettingsCard(SystemCardFrame):
 
         # 系统关闭「动画效果」时的逃生口：全仓动效统一查 Animations.motion_enabled()
         self.uiMotionCard = SwitchSettingCard(
-            FluentIcon.SPEED_HIGH,
+            AppIcon.SPEED_HIGH,
             "始终播放动效",
             "系统关闭动画效果时仍播放过渡动画",
             configItem=self.cfg.ui_motion_always_on,
@@ -926,7 +926,7 @@ class LLMSettingsCard(SystemCardFrame):
 
         # 接收 Beta 版更新（含 prerelease）
         self.betaUpdateCard = SwitchSettingCard(
-            FluentIcon.UPDATE,
+            AppIcon.UPDATE,
             "接收 Beta 版更新",
             "检查更新时包含 Beta 预览版",
             configItem=self.cfg.allow_beta_update,
@@ -1094,7 +1094,7 @@ class LLMSettingsCard(SystemCardFrame):
             ("tools",),
             "工具启用",
             "按插件控制其工具的启停",
-            FluentIcon.DEVELOPER_TOOLS,
+            AppIcon.DEVELOPER_TOOLS,
         ),
         "agents": ("pluginAgentCard", ("agents",), "智能体启用", "按插件控制其智能体的启停", None),
         "context": (
@@ -1328,7 +1328,7 @@ class LLMSettingsCard(SystemCardFrame):
 
     @staticmethod
     def _resolve_nav_icon(icon_src) -> QIcon:
-        """导航图标源 → QIcon：字符串走主题感知资源图标，FluentIcon 枚举走动态主题图标"""
+        """导航图标源 → QIcon：字符串走主题感知资源图标，AppIcon 枚举走动态主题图标"""
         if isinstance(icon_src, str):
             return get_icon(icon_src)
         # FluentIconBase.icon() 在调用瞬间把当前主题烧进静态 QIcon（文件名含颜色），
@@ -1544,7 +1544,7 @@ class LLMSettingsCard(SystemCardFrame):
             infos[key] = info
             btn = QToolButton(self._nav_frame)
             btn.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
-            btn.setIcon(self._resolve_nav_icon(info.icon if info.icon is not None else FluentIcon.APPLICATION))
+            btn.setIcon(self._resolve_nav_icon(info.icon if info.icon is not None else AppIcon.APPLICATION))
             btn.setIconSize(QSize(18, 18))
             btn.setText(info.title)
             btn.setFixedHeight(36)
@@ -1863,7 +1863,7 @@ class LLMSettingsCard(SystemCardFrame):
         )
         self.uiChatWidthCard = OptionsSettingCard(
             self.cfg.ui_chat_width,
-            FluentIcon.LAYOUT,
+            AppIcon.LAYOUT,
             "对话区宽度",
             "窗口过宽时限制内容宽度并居中",
             texts=["窄", "标准", "宽", "不限宽"],
@@ -1936,7 +1936,7 @@ class LLMSettingsCard(SystemCardFrame):
 
         class FontSettingCard(SettingCard):
             def __init__(self, title, content, cfg, parent=None):
-                super().__init__(FluentIcon.FONT, title, content, parent)
+                super().__init__(AppIcon.FONT, title, content, parent)
                 self.cfg = cfg
                 self._parent = parent
 

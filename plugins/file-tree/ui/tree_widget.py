@@ -43,11 +43,12 @@ from PyQt5.QtWidgets import (
     QFileIconProvider,
     QFrame,
     QLineEdit,
-    QStyle,
     QStyledItemDelegate,
     QTreeView,
     QWidget,
 )
+
+from app.utils.utils import get_icon
 
 # ══════════════════════════════════════════════════════════
 # 文件图标 — 后台加载 + 超时熔断
@@ -86,7 +87,6 @@ _BREAKER_OPEN_UNTIL = 0.0  # 熔断打开截止时刻（time.monotonic）
 _ICON_LOADER: Optional["_IconLoader"] = None
 _FILE_ICON_PROVIDER: Optional[QFileIconProvider] = None
 _PLACEHOLDER_FILE_ICON: Optional[QIcon] = None
-_DIR_ICON: Optional[QIcon] = None
 
 if _IS_WIN:
     import ctypes
@@ -489,7 +489,7 @@ def _placeholder_file_icon() -> QIcon:
     """通用文件占位图标（后台结果到达前的临时显示）"""
     global _PLACEHOLDER_FILE_ICON
     if _PLACEHOLDER_FILE_ICON is None:
-        _PLACEHOLDER_FILE_ICON = QApplication.style().standardIcon(QStyle.SP_FileIcon)
+        _PLACEHOLDER_FILE_ICON = get_icon("read")
     return _PLACEHOLDER_FILE_ICON
 
 
@@ -510,7 +510,7 @@ def _query_icon_sync(file_path: str) -> QIcon:
     icon = _FILE_ICON_PROVIDER.icon(QFileInfo(file_path))
     if icon and not icon.isNull():
         return icon
-    return QApplication.style().standardIcon(QStyle.SP_FileIcon)
+    return get_icon("read")
 
 
 def _get_file_icon(file_path: str) -> QIcon:
@@ -535,17 +535,9 @@ def _get_file_icon(file_path: str) -> QIcon:
 
 
 def _get_dir_icon() -> QIcon:
-    """目录图标（首次查询后缓存；不针对具体文件，无 Shell 卡顿风险）"""
-    global _DIR_ICON, _FILE_ICON_PROVIDER
-    if _DIR_ICON is not None:
-        return _DIR_ICON
-    if _FILE_ICON_PROVIDER is None:
-        _FILE_ICON_PROVIDER = QFileIconProvider()
-    icon = _FILE_ICON_PROVIDER.icon(QFileIconProvider.Folder)
-    if not icon or icon.isNull():
-        icon = QApplication.style().standardIcon(QStyle.SP_DirIcon)
-    _DIR_ICON = icon
-    return icon
+    """目录使用应用主题图标；文件关联仍由系统提供。"""
+    return get_icon("folder")
+
 
 
 # ══════════════════════════════════════════════════════════

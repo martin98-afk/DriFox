@@ -219,8 +219,8 @@ class _ThemeIconEngine(QIconEngine):
 
         # fallback
         try:
-            from qfluentwidgets import FluentIcon
-            return FluentIcon.APPLICATION.icon()
+            from app.utils.app_icon import AppIcon
+            return AppIcon.APPLICATION.icon()
         except Exception:
             pass
         return QIcon()

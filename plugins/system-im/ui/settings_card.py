@@ -16,11 +16,11 @@ from PyQt5.QtWidgets import QFrame, QHBoxLayout, QSizePolicy, QVBoxLayout, QWidg
 from qfluentwidgets import (
     BodyLabel,
     CaptionLabel,
-    FluentIcon,
     StrongBodyLabel,
     SwitchButton,
     TransparentToolButton,
 )
+from app.utils.app_icon import AppIcon
 
 from app.utils.design_tokens import Colors
 from app.widgets.cards.settings.base_settings_card import BaseSettingsCard
@@ -83,7 +83,7 @@ class _PlatformRow(QFrame):
         self.state_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         layout.addWidget(self.state_label, 1)
 
-        self.reconnect_btn = TransparentToolButton(FluentIcon.SYNC, self)
+        self.reconnect_btn = TransparentToolButton(AppIcon.SYNC, self)
         self.reconnect_btn.setToolTip("重新连接")
         self.reconnect_btn.clicked.connect(self._on_reconnect)
         layout.addWidget(self.reconnect_btn)
@@ -223,7 +223,7 @@ class ImGatewaySettingsCard(BaseSettingsCard):
         footer_layout.addWidget(self._session_label)
         footer_layout.addStretch(1)
 
-        refresh_btn = TransparentToolButton(FluentIcon.SYNC, footer)
+        refresh_btn = TransparentToolButton(AppIcon.SYNC, footer)
         refresh_btn.setToolTip("立即刷新状态")
         refresh_btn.clicked.connect(self._refresh)
         footer_layout.addWidget(refresh_btn)

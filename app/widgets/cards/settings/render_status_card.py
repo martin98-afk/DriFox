@@ -22,12 +22,12 @@ from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import QApplication
 from qfluentwidgets import (
     ConfigItem,
-    FluentIcon,
     InfoBar,
     InfoBarPosition,
     SettingCard,
     TransparentToolButton,
 )
+from app.utils.app_icon import AppIcon
 
 from app.utils.design_tokens import Colors, font_size_css
 from app.utils.render_env import describe_applied, platform_recommended_profile
@@ -67,16 +67,16 @@ class RenderStatusCard(SettingCard):
             render_items: Render 组 ConfigItem 列表（「恢复默认」的作用对象）
             parent: 父控件
         """
-        super().__init__(FluentIcon.INFO, "当前生效参数", "", parent)
+        super().__init__(AppIcon.INFO, "当前生效参数", "", parent)
         self._items: list[ConfigItem] = list(render_items)
         self._applied: dict = {}
 
-        self.copyBtn = TransparentToolButton(FluentIcon.COPY, self)
+        self.copyBtn = TransparentToolButton(AppIcon.COPY, self)
         self.copyBtn.setToolTip("复制完整参数")
         self.copyBtn.setFocusPolicy(Qt.NoFocus)
         self.copyBtn.clicked.connect(self._on_copy)
 
-        self.resetBtn = TransparentToolButton(FluentIcon.SYNC, self)
+        self.resetBtn = TransparentToolButton(AppIcon.SYNC, self)
         self.resetBtn.setToolTip("恢复默认（需重启生效）")
         self.resetBtn.setFocusPolicy(Qt.NoFocus)
         self.resetBtn.clicked.connect(self._on_reset)

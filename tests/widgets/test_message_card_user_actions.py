@@ -5,7 +5,8 @@
 role=assistant 仅渲染在助手页脚按钮组；both 双端渲染。
 """
 
-from qfluentwidgets import TransparentToolButton
+from PyQt5.QtCore import QEvent
+from PyQt5.QtWidgets import QToolButton
 
 from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
 from app.widgets.message_card import MessageCard
@@ -27,20 +28,17 @@ def _make_card(role: str) -> MessageCard:
 
 def _user_btn_count(card: MessageCard) -> int:
     """用户气泡底部操作行的按钮总数（内置复制/撤销/删除 + 插件按钮）"""
-    btns = getattr(card, "_user_action_btns", None)
+    card.enterEvent(QEvent(QEvent.Enter))
+    btns = card._user_action_btns
     assert btns is not None
-    return len(btns.findChildren(TransparentToolButton))
+    return len(btns.findChildren(QToolButton))
 
 
 def _assistant_btn_count(card: MessageCard) -> int:
-    """助手卡片页脚按钮组按钮数（内置审查/分支/复制 + 插件按钮）
-
-    审查按钮 2026-10-14 从差异胶囊内移入按钮组，初始隐藏（有 diff 才显示），
-    但控件始终存在于布局中，findChildren 会计入。
-    """
+    """普通助手消息仅含分支、复制与适用的插件按钮。"""
     btns = getattr(card, "_assistant_action_btns", None)
     assert btns is not None
-    return len(btns.findChildren(TransparentToolButton))
+    return len(btns.findChildren(QToolButton))
 
 
 def test_user_card_renders_role_user_button(qapp):
@@ -76,7 +74,7 @@ def test_assistant_card_skips_role_user_button(qapp):
     reg = _fresh_reg()
     reg.register_footer_action("plug-a", "user-btn", tooltip="U", role="user")
     card = _make_card("assistant")
-    assert _assistant_btn_count(card) == 3
+    assert _assistant_btn_count(card) == 2
     UIPluginRegistry.get_instance().reset()
 
 
@@ -87,7 +85,7 @@ def test_both_role_renders_both_sides(qapp):
     user_card = _make_card("user")
     assert _user_btn_count(user_card) == 4  # 3 内置 + both
     assist_card = _make_card("assistant")
-    assert _assistant_btn_count(assist_card) == 4  # 审查/分支/复制 + both
+    assert _assistant_btn_count(assist_card) == 3  # 分支/复制 + both
     UIPluginRegistry.get_instance().reset()
 
 
@@ -120,13 +118,17 @@ def test_assistant_action_btns_always_visible(qapp):
 def test_user_hover_buttons_no_height_change(qapp):
     """user 气泡 hover 显隐按钮不改变卡片高度（对照，_set_actions_visible 路径）"""
     card = _make_card("user")
+    assert card._user_action_btns is None
+    assert card._image_strip is None
     card.show()
     qapp.processEvents()
     h_before = card.height()
-    MessageCard._set_actions_visible(card._user_action_btns, True)
+    width_before = card.sizeHint().width()
+    card.enterEvent(QEvent(QEvent.Enter))
     qapp.processEvents()
     h_shown = card.height()
-    MessageCard._set_actions_visible(card._user_action_btns, False)
+    assert card.sizeHint().width() == width_before
+    card.leaveEvent(QEvent(QEvent.Leave))
     qapp.processEvents()
     assert h_shown == h_before, f"hover 显隐改变卡片高度: {h_before} -> {h_shown}"
 
@@ -143,6 +145,7 @@ def test_user_plugin_button_click_dispatches_context(qapp):
         "plug-a", "user-btn", tooltip="U", role="user", on_click=_on_click
     )
     card = _make_card("user")
+    card.enterEvent(QEvent(QEvent.Enter))
     bl = card._user_action_btns.layout()
     plugin_btn = bl.itemAt(0).widget()
     assert plugin_btn.toolTip() == "U"

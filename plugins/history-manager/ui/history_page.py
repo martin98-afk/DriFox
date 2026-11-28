@@ -52,7 +52,8 @@ from PyQt5.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-from qfluentwidgets import FluentIcon, ScrollArea, TransparentToolButton
+from qfluentwidgets import ScrollArea, TransparentToolButton
+from app.utils.app_icon import AppIcon
 
 from loguru import logger
 
@@ -623,13 +624,13 @@ class HistoryPage(QWidget):
         )
         tools.addWidget(self._project_new_edit, 1)
 
-        self._project_new_btn = TransparentToolButton(FluentIcon.ADD, body)
+        self._project_new_btn = TransparentToolButton(AppIcon.ADD, body)
         self._project_new_btn.setFixedSize(24, 24)
         self._project_new_btn.setToolTip("创建项目")
         self._project_new_btn.clicked.connect(self._on_new_project_submitted)
         tools.addWidget(self._project_new_btn, 0)
 
-        self._project_folder_btn = TransparentToolButton(FluentIcon.FOLDER, body)
+        self._project_folder_btn = TransparentToolButton(AppIcon.FOLDER, body)
         self._project_folder_btn.setFixedSize(24, 24)
         self._project_folder_btn.setToolTip("选择文件夹作为项目根目录")
         self._project_folder_btn.clicked.connect(lambda: self._project_action("pick_folder"))

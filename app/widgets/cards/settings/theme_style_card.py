@@ -30,7 +30,8 @@ from PyQt5.QtGui import (
     QPen,
 )
 from PyQt5.QtWidgets import QGridLayout, QLabel, QSizePolicy, QWidget
-from qfluentwidgets import ExpandSettingCard, FluentIcon
+from qfluentwidgets import ExpandSettingCard
+from app.utils.app_icon import AppIcon
 
 from app.utils.color_parse import parse_color as _parse_color_shared
 from app.utils.design_tokens import Colors, _get_global_font, scale_font_size
@@ -459,9 +460,9 @@ class _ThemeTile(QWidget):
         """左上角媒体角标：视频 / 音乐（两者可同时存在，横向排列）"""
         icons = []
         if self._entry.get("has_video"):
-            icons.append(FluentIcon.MOVIE)
+            icons.append(AppIcon.MOVIE)
         if self._entry.get("has_music"):
-            icons.append(FluentIcon.MUSIC)
+            icons.append(AppIcon.MUSIC)
         if not icons:
             return
 
@@ -541,7 +542,7 @@ class ThemeStyleCard(DynamicHeightExpandCardMixin, ExpandSettingCard):
 
     def __init__(self, configItem, entries: list[dict], settings, is_light: bool = False, icon=None, parent=None):
         # icon 不能传 None：SettingIconWidget 的重载解析会直接抛 TypeError
-        super().__init__(icon or FluentIcon.PALETTE, "主题风格", "选择界面卡片配色方案", parent)
+        super().__init__(icon or AppIcon.PALETTE, "主题风格", "选择界面卡片配色方案", parent)
         self.configItem = configItem
         self.configName = configItem.name
         self._settings = settings

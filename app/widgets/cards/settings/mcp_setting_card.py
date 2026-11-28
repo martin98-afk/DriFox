@@ -31,7 +31,6 @@ from qfluentwidgets import (
     BodyLabel,
     CardWidget,
     ExpandSettingCard,
-    FluentIcon,
     InfoBar,
     InfoBarPosition,
     PushButton,
@@ -39,6 +38,7 @@ from qfluentwidgets import (
     ToolButton,
     isDarkTheme,
 )
+from app.utils.app_icon import AppIcon
 
 from app.core.tools.mcp_lsp_safety import (
     confirm_by_key,
@@ -150,7 +150,7 @@ def _group_header_style() -> str:
 
 
 def _resolve_mcp_server_icon(server_data: dict):
-    """按 .mcp.json 的来源插件解析图标，失败返回 None（调用方用 FluentIcon 兜底）。
+    """按 .mcp.json 的来源插件解析图标，失败返回 None（调用方用 AppIcon 兜底）。
 
     只认 DriFox 自己的插件图标体系，不从 url 猜服务商 logo：
     用户手写的 .mcp.json（_source 不在插件目录内）取不到插件，自然无图标。
@@ -914,12 +914,12 @@ class MCPServerRow(CardWidget):
         edit_btn = None
         del_btn = None
         if _editable:
-            edit_btn = ToolButton(FluentIcon.EDIT)
+            edit_btn = ToolButton(AppIcon.EDIT)
             edit_btn.setFixedSize(Sizes.TOOL_BUTTON_SZ)
             edit_btn.setStyleSheet(ButtonStyles.tool_button())
             edit_btn.clicked.connect(lambda: self.editRequested.emit(self._name))
 
-            del_btn = ToolButton(FluentIcon.CLOSE)
+            del_btn = ToolButton(AppIcon.CLOSE)
             del_btn.setFixedSize(Sizes.TOOL_BUTTON_SZ)
             del_btn.setStyleSheet(ButtonStyles.tool_button())
             del_btn.clicked.connect(lambda: self.removeRequested.emit(self._name))
@@ -1220,7 +1220,7 @@ class MCPListSettingCard(ExpandSettingCard):
         self.viewLayout.setContentsMargins(8, 0, 8, 0)
         self.view.setStyleSheet("background-color: transparent;")
 
-        self.addButton = PushButton("添加", self, FluentIcon.ADD)
+        self.addButton = PushButton("添加", self, AppIcon.ADD)
         self.addButton.clicked.connect(self.showAddCard.emit)
         self.addWidget(self.addButton)
 

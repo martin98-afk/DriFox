@@ -12,7 +12,7 @@
 - coding_plan_ring          CodingPlanRing（编码计划圆环）
 - _coding_plan_hidden       bool（圆环初始隐藏标记）
 - context_usage_ring        ContextUsageRing（上下文用量圆环）
-- _share_btn                TransparentToolButton（分享）
+- _share_btn                TransparentToolButton（会话操作，保留原属性名）
 - diff_btn                  TransparentToolButton（差异对比）
 
 极简化：移除 _pb_separator（▸ 三角连接符），avatar 与分支之间靠 8px 留白 + 视觉重量差分组。
@@ -22,10 +22,14 @@ host 方法/属性引用均经 getattr 兜底（模块对宿主弱耦合：主�
 行为零变化；测试 stub 缺失时静默跳过）。
 """
 
-from PyQt5.QtCore import Qt
-from PyQt5.QtWidgets import QFrame, QHBoxLayout, QLabel
+from PyQt5.QtCore import QPoint
+from PyQt5.QtGui import QColor
+from PyQt5.QtWidgets import QMenu
+
 from app.plugins.contracts.ui_module import UIModule
-from app.utils.utils import get_icon
+from app.utils.app_icon import AppIcon
+from app.utils.design_tokens import Colors, font_size_css
+from app.utils.utils import get_font_family_css, get_icon, get_unified_font
 
 
 class TitleBarModule(UIModule):
@@ -38,10 +42,9 @@ class TitleBarModule(UIModule):
         from PyQt5.QtWidgets import QFrame, QLabel, QHBoxLayout
         from qfluentwidgets import (
             TransparentToolButton,
-            FluentIcon,
         )
         from app.utils.utils import get_font_family_css
-        from app.widgets.ui_helpers import TitleEditWidget, Colors, font_size_css
+        from app.widgets.ui_helpers import TitleEditWidget, font_size_css
         from app.widgets.balance_display import BalanceDisplay
         from app.widgets.coding_plan_ring import CodingPlanRing
         from app.widgets.context_usage_ring import ContextUsageRing
@@ -58,7 +61,6 @@ class TitleBarModule(UIModule):
         copy_branch_from = getattr(host, "_copy_branch_from", lambda *_a: None)
         update_branch = getattr(host, "_update_branch", lambda: None)
         on_title_edit_finished = getattr(host, "_on_title_edit_finished", None)
-        on_share_clicked = getattr(host, "_on_share_clicked", None)
         # 差异按钮入口已移除；保留 host.diff_btn = None 的兼容，
         # 防止外部代码仍持有引用（见 main_widget._open_diff_viewer）。
         host.diff_btn = None
@@ -179,18 +181,17 @@ class TitleBarModule(UIModule):
         host._coding_plan_hidden = True
         host.context_usage_ring = ContextUsageRing(host)
 
-        # 标题栏右侧：分享按钮
+        # 标题栏右侧：当前对话操作
         right_layout = QHBoxLayout()
         right_layout.setContentsMargins(0, 0, 0, 0)
         right_layout.setSpacing(2)
         right_layout.setAlignment(Qt.AlignVCenter)
 
-        # 分享按钮
-        host._share_btn = TransparentToolButton(FluentIcon.SHARE, host)
+        host._share_btn = TransparentToolButton(get_icon("更多"), host)
         host._share_btn.setFixedSize(28, 28)
-        host._share_btn.setToolTip("分享当前对话")
-        if on_share_clicked is not None:
-            host._share_btn.clicked.connect(on_share_clicked)
+        host._share_btn.setToolTip("更多对话操作")
+        host._share_btn.setAccessibleName("更多对话操作")
+        host._share_btn.clicked.connect(lambda: self._show_session_menu(host))
         right_layout.addWidget(host._share_btn)
 
         # 差异对比按钮不再常驻标题栏：逐工具/逐卡差异在对应卡片上触发，
@@ -199,3 +200,54 @@ class TitleBarModule(UIModule):
 
         session_bar_layout.addLayout(right_layout)
         layout.addLayout(session_bar_layout)
+
+    @staticmethod
+    def _show_session_menu(host):
+        manager = getattr(host, "session_manager", None)
+        session = manager.get_current_session() if manager else None
+        if session is None:
+            return
+        history = host.history_manager
+        pinned = history.get_pin_state(session.session_id) if history else None
+        button = host._share_btn
+        menu = QMenu(button)
+        menu.setFont(get_unified_font(10))
+        Colors.refresh()
+        menu.setStyleSheet(f"""
+            QMenu {{ {get_font_family_css()} {font_size_css(13)} background: {Colors.CONTENT_BG}; color: {Colors.TEXT_PRIMARY};
+                    border: 1px solid {Colors.BORDER}; border-radius: 8px; padding: 5px; }}
+            QMenu::item {{ padding: 7px 24px 7px 30px; border-radius: 4px; }}
+            QMenu::item:selected {{ background: {Colors.HOVER_BG}; }}
+            QMenu::item:disabled {{ color: {Colors.TEXT_MUTED}; }}
+            QMenu::separator {{ height: 1px; background: {Colors.BORDER}; margin: 4px 6px; }}
+        """)
+        rename = menu.addAction(AppIcon.EDIT.icon(), "重命名")
+        pin = menu.addAction(get_icon("取消置顶" if pinned else "置顶"), "取消置顶" if pinned else "置顶聊天")
+        share = menu.addAction(AppIcon.SHARE.icon(), "分享对话")
+        branch = menu.addAction(get_icon("分支"), "创建聊天分支")
+        menu.addSeparator()
+        archive = menu.addAction(get_icon("归档"), "归档")
+        delete = menu.addAction(AppIcon.DELETE.icon(color=QColor(Colors.ERROR)), "删除")
+        pin.setEnabled(pinned is not None)
+        share.setEnabled(bool(session.messages))
+        branch.setEnabled(bool(session.messages))
+        can_remove = pinned is not None and not host._is_streaming
+        archive.setEnabled(can_remove)
+        delete.setEnabled(can_remove)
+        pos = QPoint(button.width() - menu.sizeHint().width(), button.height() + 4)
+        selected = menu.exec_(button.mapToGlobal(pos))
+        menu.deleteLater()
+        if selected is None or manager.get_current_session() is not session or host.session_manager is not manager:
+            return
+        if selected == rename:
+            host.title_edit.setReadOnly(False)
+        elif selected == share:
+            host._on_share_clicked()
+        elif selected == branch:
+            host._safe_duplicate_window(branch=True)
+        elif selected == pin:
+            if history.set_session_pinned(session.session_id, not pinned):
+                host._notify_history_data_changed()
+                host._refresh_chat_tree()
+        elif selected == archive or selected == delete:
+            host._remove_current_chat(session.session_id, permanent=selected == delete)

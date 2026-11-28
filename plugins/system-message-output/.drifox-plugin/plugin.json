@@ -1,4 +1,5 @@
 {
+  "icon": {"light": "icon.svg", "dark": "icon_dark.svg"},
   "name": "system-message-output",
   "display_name": {"zh": "流式输出方式"},
   "description": "管理聊天消息的展示方式，内置按正文位置折叠思考与工具的简洁模式。",

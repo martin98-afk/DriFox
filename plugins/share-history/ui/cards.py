@@ -36,7 +36,6 @@ from PyQt5.QtWidgets import (
 )
 from loguru import logger
 from qfluentwidgets import (
-    FluentIcon,
     FluentLabelBase,
     IconWidget,
     InfoBar,
@@ -46,6 +45,7 @@ from qfluentwidgets import (
     TransparentToolButton,
     isDarkTheme,
 )
+from app.utils.app_icon import AppIcon
 
 from .db import clear_all_records, delete_record, get_records, update_record_file_path
 
@@ -116,8 +116,8 @@ _DEFAULT_THEME: Dict[str, Any] = {
 # ════════════════════════════════════════════════════════════
 
 # 类型图标（矢量图标，随主题动态取色）
-_TYPE_ICONS = {"session": FluentIcon.CHAT, "project": FluentIcon.ZIP_FOLDER}
-_TYPE_ICON_FALLBACK = FluentIcon.DOCUMENT
+_TYPE_ICONS = {"session": AppIcon.CHAT, "project": AppIcon.ZIP_FOLDER}
+_TYPE_ICON_FALLBACK = AppIcon.DOCUMENT
 _TYPE_LABELS = {"session": "会话", "project": "项目"}
 
 
@@ -294,32 +294,32 @@ class _RecordItem(QFrame):
         has_url = bool(upload_url)
 
         if has_file:
-            self._open_btn = TransparentPushButton("打开", None, FluentIcon.FOLDER)
+            self._open_btn = TransparentPushButton("打开", None, AppIcon.FOLDER)
             self._open_btn.setFixedHeight(26)
             self._open_btn.setCursor(Qt.PointingHandCursor)
             self._open_btn.clicked.connect(lambda: self._open_file(self._record.get("file_path", "")))
             row.addWidget(self._open_btn)
         elif has_url:
-            self._download_btn = TransparentPushButton("下载", None, FluentIcon.DOWNLOAD)
+            self._download_btn = TransparentPushButton("下载", None, AppIcon.DOWNLOAD)
             self._download_btn.setFixedHeight(26)
             self._download_btn.setCursor(Qt.PointingHandCursor)
             self._download_btn.clicked.connect(lambda: self._download_file(upload_url))
             row.addWidget(self._download_btn)
         else:
-            self._missing_btn = TransparentPushButton("文件缺失", None, FluentIcon.DOCUMENT)
+            self._missing_btn = TransparentPushButton("文件缺失", None, AppIcon.DOCUMENT)
             self._missing_btn.setFixedHeight(26)
             self._missing_btn.setEnabled(False)
             row.addWidget(self._missing_btn)
 
         if has_url:
-            self._copy_btn = TransparentPushButton("复制链接", None, FluentIcon.LINK)
+            self._copy_btn = TransparentPushButton("复制链接", None, AppIcon.LINK)
             self._copy_btn.setFixedHeight(26)
             self._copy_btn.setCursor(Qt.PointingHandCursor)
             self._copy_btn.clicked.connect(lambda: self._copy_link(upload_url))
             row.addWidget(self._copy_btn)
 
         # 删除按钮
-        self._delete_btn = TransparentToolButton(FluentIcon.DELETE)
+        self._delete_btn = TransparentToolButton(AppIcon.DELETE)
         self._delete_btn.setFixedSize(32, 26)
         self._delete_btn.setCursor(Qt.PointingHandCursor)
         self._delete_btn.setToolTip("删除此记录")
@@ -462,7 +462,7 @@ class _RecordItem(QFrame):
                     }}
                 """)
 
-        # 类型图标（FluentIcon 按当前主题动态取色，重绘即可）
+        # 类型图标（AppIcon 按当前主题动态取色，重绘即可）
         if self._icon_lb:
             self._icon_lb.update()
 
@@ -792,7 +792,7 @@ class ShareHistoryCard(QWidget):
             except RuntimeError:
                 pass
 
-        # 图标载体（FluentIcon 按当前主题动态取色，重绘即可）
+        # 图标载体（AppIcon 按当前主题动态取色，重绘即可）
         for child in self.findChildren(IconWidget):
             try:
                 child.update()
@@ -870,7 +870,7 @@ class ShareHistoryCard(QWidget):
         hly.setSpacing(8)
 
         # 图标
-        self._header_icon = IconWidget(FluentIcon.HISTORY, header)
+        self._header_icon = IconWidget(AppIcon.HISTORY, header)
         self._header_icon.setFixedSize(22, 22)
         hly.addWidget(self._header_icon)
 
@@ -889,19 +889,19 @@ class ShareHistoryCard(QWidget):
         hly.addStretch(1)
 
         # 清空按钮
-        self._clear_btn = TransparentToolButton(FluentIcon.DELETE, header)
+        self._clear_btn = TransparentToolButton(AppIcon.DELETE, header)
         self._clear_btn.setToolTip("清空全部记录")
         self._clear_btn.clicked.connect(self._on_clear_all)
         hly.addWidget(self._clear_btn)
 
         # 刷新按钮
-        self._refresh_btn = TransparentToolButton(FluentIcon.SYNC, header)
+        self._refresh_btn = TransparentToolButton(AppIcon.SYNC, header)
         self._refresh_btn.setToolTip("刷新")
         self._refresh_btn.clicked.connect(self._load_records)
         hly.addWidget(self._refresh_btn)
 
         # 关闭按钮
-        close_btn = TransparentToolButton(FluentIcon.CLOSE, header)
+        close_btn = TransparentToolButton(AppIcon.CLOSE, header)
         close_btn.setFixedSize(24, 24)
         close_btn.setToolTip("关闭")
         close_btn.clicked.connect(self._on_close)
@@ -917,7 +917,7 @@ class ShareHistoryCard(QWidget):
         layout.setContentsMargins(16, 6, 16, 2)
         layout.setSpacing(6)
 
-        self._search_icon = IconWidget(FluentIcon.SEARCH, container)
+        self._search_icon = IconWidget(AppIcon.SEARCH, container)
         self._search_icon.setFixedSize(16, 16)
         layout.addWidget(self._search_icon)
 

@@ -326,10 +326,9 @@ class EmptyStateWidget(QWidget):
         layout.setAlignment(Qt.AlignCenter)
         layout.setSpacing(16)
 
-        icon_label = QLabel("📑", self)
-        icon_label.setAlignment(Qt.AlignCenter)
-        icon_label.setStyleSheet("font-size: 48px; background: transparent;")
-        layout.addWidget(icon_label)
+        from app.widgets.ui_helpers import _ThemedIconLabel
+
+        layout.addWidget(_ThemedIconLabel("tab切换", 48, self), 0, Qt.AlignCenter)
 
         self._text_label = QLabel("没有打开的窗口", self)
         self._text_label.setAlignment(Qt.AlignCenter)

@@ -188,6 +188,7 @@ CATALOG: Dict[str, CapabilitySpec] = {
         ),
         # ── 外观 ──
         _spec("theme.read", _L, "主题 id/名称/配色/字体/字号", _UI),
+        _spec("ui.icons", _L, "主题图标集（Fluent 图标接口）", _UI),
         # ── 工具 ──
         _spec("tool.read", _L, "工具注册表元数据查询", _BOTH),
         _spec(

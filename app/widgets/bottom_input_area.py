@@ -52,13 +52,13 @@ from PyQt5.QtWidgets import (
 )
 from qfluentwidgets import (
     ComboBox,
-    FluentIcon,
     IconWidget,
     SmoothMode,
     TextEdit,
     TransparentToolButton,
     setCustomStyleSheet,
 )
+from app.utils.app_icon import AppIcon
 
 from app.utils.scroll_tuning import install_fast_wheel
 
@@ -3049,36 +3049,36 @@ class AttachmentChip(QFrame):
     #  svg/ico 依赖 Qt 图像插件能力，读取失败自动回退纯文本 tooltip）
     _IMAGE_PREVIEW_EXTS = (".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".svg", ".ico")
 
-    # 文件扩展名 → FluentIcon 映射
+    # 文件扩展名 → AppIcon 映射
     # 注意：单元素元组必须写尾随逗号，否则 (".cs") 是 str，
     # ``ext in exts`` 会退化成子串判断（历史 bug，曾漏掉三处逗号）。
-    _FILE_ICON_MAP: dict[tuple[str, ...], FluentIcon] = {
+    _FILE_ICON_MAP: dict[tuple[str, ...], AppIcon] = {
         # 代码
-        (".py", ".pyw", ".pyx"): FluentIcon.CODE,
-        (".js", ".jsx", ".mjs", ".cjs"): FluentIcon.CODE,
-        (".ts", ".tsx"): FluentIcon.CODE,
-        (".html", ".htm", ".css", ".scss", ".less"): FluentIcon.CODE,
-        (".java", ".kt", ".kts"): FluentIcon.CODE,
-        (".cpp", ".c", ".h", ".hpp", ".hxx", ".cxx", ".cc"): FluentIcon.CODE,
-        (".cs",): FluentIcon.CODE,
-        (".go", ".rs", ".rb", ".php"): FluentIcon.CODE,
-        (".swift", ".m", ".mm"): FluentIcon.CODE,
-        (".sql",): FluentIcon.CODE,
-        (".sh", ".bash", ".zsh", ".ps1", ".bat", ".cmd"): FluentIcon.COMMAND_PROMPT,
+        (".py", ".pyw", ".pyx"): AppIcon.CODE,
+        (".js", ".jsx", ".mjs", ".cjs"): AppIcon.CODE,
+        (".ts", ".tsx"): AppIcon.CODE,
+        (".html", ".htm", ".css", ".scss", ".less"): AppIcon.CODE,
+        (".java", ".kt", ".kts"): AppIcon.CODE,
+        (".cpp", ".c", ".h", ".hpp", ".hxx", ".cxx", ".cc"): AppIcon.CODE,
+        (".cs",): AppIcon.CODE,
+        (".go", ".rs", ".rb", ".php"): AppIcon.CODE,
+        (".swift", ".m", ".mm"): AppIcon.CODE,
+        (".sql",): AppIcon.CODE,
+        (".sh", ".bash", ".zsh", ".ps1", ".bat", ".cmd"): AppIcon.COMMAND_PROMPT,
         # 图片
-        (".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".svg", ".ico"): FluentIcon.IMAGE_EXPORT,
+        (".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".svg", ".ico"): AppIcon.IMAGE_EXPORT,
         # 视频
-        (".mp4", ".avi", ".mov", ".mkv", ".wmv", ".flv", ".webm", ".m4v"): FluentIcon.VIDEO,
+        (".mp4", ".avi", ".mov", ".mkv", ".wmv", ".flv", ".webm", ".m4v"): AppIcon.VIDEO,
         # 音频
-        (".mp3", ".wav", ".flac", ".aac", ".ogg", ".wma", ".m4a"): FluentIcon.MUSIC,
+        (".mp3", ".wav", ".flac", ".aac", ".ogg", ".wma", ".m4a"): AppIcon.MUSIC,
         # 压缩包
-        (".zip", ".rar", ".7z", ".tar", ".gz", ".bz2", ".xz", ".zst"): FluentIcon.ZIP_FOLDER,
+        (".zip", ".rar", ".7z", ".tar", ".gz", ".bz2", ".xz", ".zst"): AppIcon.ZIP_FOLDER,
         # 文档/数据
-        (".pdf",): FluentIcon.DOCUMENT,
-        (".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx"): FluentIcon.DOCUMENT,
-        (".txt", ".md", ".rst", ".log"): FluentIcon.DOCUMENT,
-        (".json", ".xml", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".conf"): FluentIcon.DOCUMENT,
-        (".csv", ".tsv"): FluentIcon.DOCUMENT,
+        (".pdf",): AppIcon.DOCUMENT,
+        (".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx"): AppIcon.DOCUMENT,
+        (".txt", ".md", ".rst", ".log"): AppIcon.DOCUMENT,
+        (".json", ".xml", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".conf"): AppIcon.DOCUMENT,
+        (".csv", ".tsv"): AppIcon.DOCUMENT,
     }
 
     def __init__(self, filepath: str, parent=None):
@@ -3088,15 +3088,15 @@ class AttachmentChip(QFrame):
         self._setup_ui()
 
     @staticmethod
-    def _get_file_icon(filepath: str) -> FluentIcon:
-        """根据文件扩展名返回对应的 FluentIcon"""
+    def _get_file_icon(filepath: str) -> AppIcon:
+        """根据文件扩展名返回对应的 AppIcon"""
         if os.path.isdir(filepath):
-            return FluentIcon.FOLDER
+            return AppIcon.FOLDER
         ext = os.path.splitext(filepath)[1].lower()
         for exts, icon in AttachmentChip._FILE_ICON_MAP.items():
             if ext in exts:
                 return icon
-        return FluentIcon.DOCUMENT
+        return AppIcon.DOCUMENT
 
     @staticmethod
     def _human_size(path: str) -> str:
@@ -3140,7 +3140,7 @@ class AttachmentChip(QFrame):
 
         # 删除按钮：16x16 命中区，图标 9x9 保持视觉轻盈
         # （原实现是 10x10 按钮，图标几乎看不见且难点中）
-        self._close_btn = TransparentToolButton(FluentIcon.CLOSE, self)
+        self._close_btn = TransparentToolButton(AppIcon.CLOSE, self)
         self._close_btn.setFixedSize(16, 16)
         self._close_btn.setIconSize(QSize(9, 9))
         self._close_btn.clicked.connect(lambda: self.removed.emit(self.filepath))
@@ -3230,7 +3230,7 @@ class FileMentionObject(QObject, QTextObjectInterface):
     #: 文件名最大像素宽度，超出中间省略（保证胶囊不会宽到撑坏换行）
     _MAX_TEXT_WIDTH = 148
 
-    # FluentIcon → QIcon 缓存（构造 QIcon 涉及 SVG 解析，绘制期反复调用太贵）
+    # AppIcon → QIcon 缓存（构造 QIcon 涉及 SVG 解析，绘制期反复调用太贵）
     _icon_cache: dict[str, object] = {}
 
     def intrinsicSize(self, doc, posInDocument, format) -> QSizeF:  # noqa: A002

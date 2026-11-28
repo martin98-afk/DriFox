@@ -41,9 +41,9 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 from qfluentwidgets import (
-    FluentIcon as FIF,
     ScrollArea,
 )
+from app.utils.app_icon import AppIcon as FIF
 from qfluentwidgets import (
     TransparentToolButton,
     isDarkTheme,
@@ -616,7 +616,7 @@ class TabItem(QFrame):
         self._pin_btn.clicked.connect(lambda *_a: self.pinToggleRequested.emit())
         layout.addWidget(self._pin_btn)
 
-        # 关闭按钮（与主标题栏一致的 FluentIcon.CLOSE，支持内联二次确认）
+        # 关闭按钮（与主标题栏一致的 AppIcon.CLOSE，支持内联二次确认）
         self._close_btn = TransparentToolButton(self)
         self._close_btn.setIcon(FIF.CLOSE)
         self._close_btn.setFixedSize(20, 20)

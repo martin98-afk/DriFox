@@ -1,1 +1,51 @@
-<?xml version="1.0" standalone="no"?><!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd"><svg t="1788543619353" class="icon" viewBox="0 0 1126 1024" version="1.1" xmlns="http://www.w3.org/2000/svg" p-id="6468" xmlns:xlink="http://www.w3.org/1999/xlink" width="219.921875" height="200"><path d="M766.976 36.5568a168.448 168.448 0 0 1 142.848 257.5872 42.1376 42.1376 0 0 1-73.728-40.3456l2.3552-4.3008a84.224 84.224 0 1 0-155.648-44.544 42.0864 42.0864 0 0 1-84.224 0 168.448 168.448 0 0 1 168.448-168.3968zM766.976 987.4432a168.448 168.448 0 0 0 142.848-257.5872 42.1376 42.1376 0 0 0-73.728 40.3456l2.3552 4.3008a84.224 84.224 0 1 1-155.648 44.544 42.0864 42.0864 0 0 0-84.224 0 168.448 168.448 0 0 0 168.448 168.3968z" p-id="6469" fill="#ffffff"></path><path d="M1069.3632 349.8496a168.448 168.448 0 0 1-211.8144 204.6464 42.1376 42.1376 0 0 1 19.8656-81.7152l4.8128 1.1776a84.224 84.224 0 1 0 2.7648-161.8944 42.0864 42.0864 0 0 1-21.8624-81.3568 168.448 168.448 0 0 1 206.2336 119.1424z" p-id="6470" fill="#ffffff"></path><path d="M1069.3632 602.4192a168.448 168.448 0 0 1-166.656 211.968 42.0864 42.0864 0 0 1-2.9184-84.0192l4.9152-0.1536a84.224 84.224 0 0 0 21.76-166.144l-6.4512-1.28a42.0864 42.0864 0 0 1 13.312-83.1488 168.448 168.448 0 0 1 136.0384 122.7776zM788.0704 373.2992a42.0864 42.0864 0 1 1 0 84.224c-58.1632 0-105.2672 47.104-105.2672 105.216a42.0864 42.0864 0 0 1-84.224 0 189.44 189.44 0 0 1 189.44-189.44z" p-id="6471" fill="#ffffff"></path><path d="M640.6656 871.0144c21.0944 0 42.1376-13.6192 42.1376-27.2384V190.1056c0-13.6192-21.0432-27.2384-42.1376-27.2384-25.2416 0-42.0864 13.6192-42.0864 27.2384V843.776c0 16.384 21.0432 27.2384 42.0864 27.2384zM359.424 36.5568a168.448 168.448 0 0 0-142.848 257.5872 42.1376 42.1376 0 0 0 73.728-40.3456l-2.3552-4.3008a84.224 84.224 0 1 1 155.648-44.544 42.0864 42.0864 0 0 0 84.224 0A168.448 168.448 0 0 0 359.3728 36.5568zM359.424 987.4432a168.448 168.448 0 0 1-142.848-257.5872 42.1376 42.1376 0 0 1 73.728 40.3456l-2.3552 4.3008a84.224 84.224 0 1 0 155.648 44.544 42.0864 42.0864 0 0 1 84.224 0 168.448 168.448 0 0 1-168.448 168.3968z" p-id="6472" fill="#ffffff"></path><path d="M57.0368 349.8496A168.448 168.448 0 0 0 268.8 554.496a42.1376 42.1376 0 0 0-19.8656-81.7152l-4.8128 1.1776a84.224 84.224 0 1 1-2.7648-161.8944 42.0864 42.0864 0 0 0 21.8624-81.3568 168.448 168.448 0 0 0-206.2336 119.1424z" p-id="6473" fill="#ffffff"></path><path d="M57.0368 602.4192a168.448 168.448 0 0 0 166.656 211.968 42.0864 42.0864 0 0 0 2.9184-84.0192l-4.9152-0.1536a84.224 84.224 0 0 1-21.76-166.144l6.4512-1.28a42.0864 42.0864 0 0 0-13.312-83.1488 168.448 168.448 0 0 0-136.0384 122.7776zM338.3296 373.2992a42.0864 42.0864 0 1 0 0 84.224c58.1632 0 105.2672 47.104 105.2672 105.216a42.0864 42.0864 0 0 0 84.224 0 189.44 189.44 0 0 0-189.44-189.44z" p-id="6474" fill="#ffffff"></path><path d="M485.7344 871.0144c-21.0944 0-42.1376-13.6192-42.1376-27.2384V190.1056c0-13.6192 21.0432-27.2384 42.1376-27.2384 25.2416 0 42.0864 13.6192 42.0864 27.2384V843.776c0 16.384-21.0432 27.2384-42.0864 27.2384z" p-id="6475" fill="#ffffff"></path></svg>
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M2 6h4" />
+  <path d="M2 10h4" />
+  <path d="M2 14h4" />
+  <path d="M2 18h4" />
+  <rect width="16" height="20" x="4" y="2" rx="2" />
+  <path d="M9.5 8h5" />
+  <path d="M9.5 12H16" />
+  <path d="M9.5 16H14" />
+<metadata>Lucide 0.545.0 / notebook-text
+ISC License
+
+Copyright (c) for portions of Lucide are held by Cole Bemis 2013-2023 as part of Feather (MIT). All other copyright (c) for Lucide are held by Lucide Contributors 2025.
+
+Permission to use, copy, modify, and/or distribute this software for any
+purpose with or without fee is hereby granted, provided that the above
+copyright notice and this permission notice appear in all copies.
+
+THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+
+---
+
+The MIT License (MIT) (for portions derived from Feather)
+
+Copyright (c) 2013-2023 Cole Bemis
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+</metadata>
+</svg>

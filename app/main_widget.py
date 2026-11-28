@@ -56,7 +56,6 @@ from PyQt5.QtWidgets import (
 from qfluentwidgets import (
     BodyLabel,
     CaptionLabel,
-    FluentIcon,
     IconWidget,
     InfoBar,
     InfoBarPosition,
@@ -66,6 +65,7 @@ from qfluentwidgets import (
     TransparentToolButton,
     setFont,
 )
+from app.utils.app_icon import AppIcon
 
 from app.constants import (
     IMAGE_EXTENSIONS,
@@ -484,7 +484,7 @@ class _ProjectExportChoiceDialog(MaskDialogBase):
         """
 
         # 导出到本地
-        local_btn = QPushButton("💾  导出到本地", self.widget)
+        local_btn = QPushButton(get_icon("save"), "导出到本地", self.widget)
         local_btn.setCursor(Qt.PointingHandCursor)
         local_btn.setFixedHeight(56)
         local_btn.setStyleSheet(btn_style)
@@ -499,7 +499,7 @@ class _ProjectExportChoiceDialog(MaskDialogBase):
         layout.addWidget(local_hint)
 
         # 导出为URL链接
-        url_btn = QPushButton("🔗  导出为URL链接", self.widget)
+        url_btn = QPushButton(get_icon("link"), "导出为URL链接", self.widget)
         url_btn.setCursor(Qt.PointingHandCursor)
         url_btn.setFixedHeight(56)
         url_btn.setStyleSheet(btn_style)
@@ -607,7 +607,7 @@ class _ProjectImportOptionDialog(MaskDialogBase):
             }}
         """
 
-        file_btn = QPushButton("📁  从文件导入", self.widget)
+        file_btn = QPushButton(get_icon("folder"), "从文件导入", self.widget)
         file_btn.setCursor(Qt.PointingHandCursor)
         file_btn.setFixedHeight(56)
         file_btn.setStyleSheet(btn_style)
@@ -622,7 +622,7 @@ class _ProjectImportOptionDialog(MaskDialogBase):
         layout.addWidget(file_hint)
 
         # 从URL导入
-        url_btn = QPushButton("🔗  从URL导入", self.widget)
+        url_btn = QPushButton(get_icon("link"), "从URL导入", self.widget)
         url_btn.setCursor(Qt.PointingHandCursor)
         url_btn.setFixedHeight(56)
         url_btn.setStyleSheet(btn_style)
@@ -2207,7 +2207,7 @@ class OpenAIChatToolWindow(ToolWindow):
             self._model_selector_card_content.set_search_filter,
         )
         self._model_selector_card.add_header_button(
-            FluentIcon.ADD,
+            AppIcon.ADD,
             "添加服务商",
             self._on_add_provider_from_card,
         )
@@ -2272,7 +2272,7 @@ class OpenAIChatToolWindow(ToolWindow):
         """── ② 分享卡片 ──"""
         try:
             self._ensure_share_card()  # P0-1：框架惰性创建
-            self._share_card_content = ShareCardContent(self)
+            self._share_card_content = ShareCardContent(self, header_label=self._share_card.title_label)
             self._share_card.content_layout.addWidget(self._share_card_content)
         except Exception:
             logger.exception("[DeferredBuild] ShareCard 构建失败")
@@ -2316,7 +2316,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self._branch_btn.clicked.connect(lambda: self._safe_duplicate_window(branch=True))
         title_bar.insert_button(1, self._branch_btn)
         # 创建设置按钮
-        self._settings_btn = TransparentToolButton(FluentIcon.SETTING, self)
+        self._settings_btn = TransparentToolButton(AppIcon.SETTING, self)
         self._settings_btn.setFixedSize(28, 28)
         self._settings_btn.setToolTip("设置")
         # 设置弹窗已改为懒构建（1500ms 后），
@@ -16682,6 +16682,59 @@ class OpenAIChatToolWindow(ToolWindow):
             return
         self._archive_session_by_id(session_record.get("session_id"))
 
+    def _remove_current_chat(self, session_id: str, *, permanent: bool):
+        """从标题栏移除当前会话。弹窗期间可能已切换会话或开始生成。"""
+        if permanent:
+            from app.widgets.common_dialogs import ConfirmDialog
+
+            dialog = ConfirmDialog(
+                title="删除聊天",
+                content=f"确定永久删除「{self.title_edit.text()}」吗？此操作无法撤销。",
+                confirm_text="删除",
+                parent=self.window(),
+            )
+            dialog.confirmed.connect(lambda: self._finish_removing_current_chat(session_id, permanent=True))
+            dialog.exec_()
+            dialog.deleteLater()
+        else:
+            self._finish_removing_current_chat(session_id, permanent=False)
+
+    def _finish_removing_current_chat(self, session_id: str, *, permanent: bool):
+        session = self.session_manager.get_current_session()
+        if not session or session.session_id != session_id or self._is_streaming:
+            return
+        if permanent:
+            removed = self.history_manager.delete_history_by_id(session_id)
+            if removed:
+                if self.backend.file_recorder:
+                    self.backend.file_recorder.clear_session(session_id)
+                self._reset_after_chat_removal()
+                self._notify_history_data_changed()
+        else:
+            self._auto_save_current_session()
+            removed = self._archive_session_by_id(session_id)
+        if not removed:
+            InfoBar.error("操作失败", "无法移除当前对话，请重试。", parent=self.window())
+        else:
+            self._refresh_chat_tree()
+
+    def _refresh_chat_tree(self):
+        manager = TabManagerWindow.get_instance()
+        if manager is not None:
+            manager.refresh_workspace_tree()
+
+    def _reset_after_chat_removal(self):
+        self._session_switched = True
+        self._session_dirty = False
+        self._history_preview_messages = None
+        self._clear_pending_message_queue()
+        self._invalidate_current_session_card_cache()
+        self._message_batch = []
+        self._batch_cards = []
+        new_state = create_new_session_state(self.session_manager, self.backend.chat_engine)
+        init_new_session_after_archive(self, new_state, self.backend, self._clear_chat_area, self._show_initial_welcome)
+        self._sync_dialog_title()
+
     def _archive_session_by_id(self, session_id: Optional[str]) -> bool:
         """按 session_id 归档单个历史会话（唯一实现）。
 
@@ -16697,26 +16750,15 @@ class OpenAIChatToolWindow(ToolWindow):
 
         archived_current = self._current_session_id is not None and session_id == self._current_session_id
 
-        old_session_manager = self.session_manager
-        old_chat_engine = self.backend.chat_engine
-
-        # 清理归档会话的文件操作记录和备份
+        archived = self.history_manager.archive_history(full_index)
+        if not archived:
+            return False
         if self.backend.tool_executor and self.backend.file_recorder:
             self.backend.file_recorder.clear_session(session_id)
             logger.info(f"[FileRecorder] 已清理归档会话的文件操作记录: {session_id}")
 
-        archived = self.history_manager.archive_history(full_index)
-
-        if archived_current and archived:
-            # 使用辅助函数创建新会话状态
-            new_state = create_new_session_state(old_session_manager, old_chat_engine)
-            init_new_session_after_archive(
-                self,
-                new_state,
-                self.backend,
-                self._clear_chat_area,
-                self._show_initial_welcome,
-            )
+        if archived_current:
+            self._reset_after_chat_removal()
 
         # 手术式删除卡片 vs 全量刷新
         current_tab = (

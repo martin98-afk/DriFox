@@ -12,13 +12,13 @@ from PyQt5.QtWidgets import (
 from qfluentwidgets import (
     ConfigItem,
     ExpandSettingCard,
-    FluentIcon,
     IconWidget,
     PushButton,
     SearchLineEdit,
     ToolButton,
     qconfig,
 )
+from app.utils.app_icon import AppIcon
 
 from app.core.modelmeta.provider_save_plan import filter_disabled_models
 from app.plugins.registries.provider_registry import ProviderRegistry
@@ -169,8 +169,8 @@ class ProviderItem(QWidget):
         btn_layout = QHBoxLayout(btn_widget)
         btn_layout.setContentsMargins(0, 0, 0, 0)
         btn_layout.setSpacing(4)
-        self.editButton = ToolButton(FluentIcon.EDIT)
-        self.removeButton = ToolButton(FluentIcon.CLOSE)
+        self.editButton = ToolButton(AppIcon.EDIT)
+        self.removeButton = ToolButton(AppIcon.CLOSE)
         self.editButton.setFixedSize(Sizes.TOOL_BUTTON_SZ)
         self.removeButton.setFixedSize(Sizes.TOOL_BUTTON_SZ)
         self.editButton.setIconSize(Sizes.TOOL_ICON_SZ)
@@ -388,7 +388,7 @@ class ProviderListSettingCard(DynamicHeightExpandCardMixin, ExpandSettingCard):
         self.title = title
         self.configItem = configItem
         self.defaultProviderItem = defaultProviderItem
-        self.addProviderButton = PushButton("添加", self, FluentIcon.ADD)
+        self.addProviderButton = PushButton("添加", self, AppIcon.ADD)
         self.providers = qconfig.get(configItem).copy() if isinstance(qconfig.get(configItem), dict) else {}
         self.default_provider = qconfig.get(defaultProviderItem) or ""
         # 搜索关键词（空 = 不过滤）与无匹配空态标签（惰性创建）

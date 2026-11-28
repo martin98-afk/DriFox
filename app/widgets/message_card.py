@@ -608,8 +608,6 @@ class MessageCard(SimpleCardWidget):
         self._active_thinking_block: Optional[dict] = None
         # [E6] 流式协议状态机增量检测状态（append_text 首批懒建；流重置/finish/cleanup 置 None）
         self._proto_state: Optional[dict] = None
-        # [E6] 原文固化游标：_stream_text_parts 中已固化进 acc 的片段数（parts 不清空）
-        self._stream_text_parts_solid: int = 0
         self._pending_content: Optional[str] = None
         # 流式思考实时预览：增量文本缓冲 + 节流推送（250ms 批量，避免逐 chunk runJavaScript）
         self._streaming_live_buffer: str = ""
@@ -1287,29 +1285,19 @@ class MessageCard(SimpleCardWidget):
         return ctx
 
     def _stream_text_snapshot(self) -> str:
-        """返回本流累计原文（惰性固化，游标推进式）。
+        """将待采样片段并入本流累计原文，释放已消费的片段引用。
 
         [PERF] 写入侧（update_content，流式每批）只 append 到 _stream_text_parts；
         本方法在读取时（_footer_stat_context 每 200ms 一拍）才固化。
         旧实现每批做 `acc = acc + txt`，因读取方持有引用使 CPython 的原地
         realloc 失效 → O(n²)，实测 390KB 回复 516ms 全落在流式主线程。
 
-        [E6] 固化策略：parts 不清空，用 _stream_text_parts_solid 游标记住已固化
-        前缀；无新段拍 O(1) 直返；有新段拍 `"".join(parts[solid:])` 只拼新增段。
-        注：acc 与新增段的 `+` 仍是 O(总量) 字符串拷贝（CPython str 拼接不可
-        避免），本处消除的是「无新段拍」与「跨读取方重复固化」的开销；待固化
-        段 join 严格 O(新增)。
+        多个读取方共享同一快照；没有新片段时直接返回上次结果。
         """
         parts = getattr(self, "_stream_text_parts", None)
-        if parts is None:
-            # 兼容旧路径 / cleanup 后置 None 的情形
-            return getattr(self, "_stream_text_acc", "") or ""
-        solid = getattr(self, "_stream_text_parts_solid", 0)
-        if len(parts) != solid:
-            merged = "".join(parts[solid:])
-            prev = getattr(self, "_stream_text_acc", None)
-            self._stream_text_acc = (prev or "") + merged
-            self._stream_text_parts_solid = len(parts)
+        if parts:
+            self._stream_text_acc = (self._stream_text_acc or "") + "".join(parts)
+            parts.clear()
         return getattr(self, "_stream_text_acc", "") or ""
 
     # ── [E6] 流式协议状态机 + 块级 pending 固化 ─────────────────
@@ -1558,7 +1546,7 @@ class MessageCard(SimpleCardWidget):
         """
         self._stream_text_parts = []
         self._stream_text_acc = None
-        self._stream_text_parts_solid = 0  # [E6] 固化游标与列表同步复位
+        self._stream_text_cursor = 0
 
     def start_elapsed_tracking(self):
         """开始实时计时（流式输出时调用）"""
@@ -1574,10 +1562,7 @@ class MessageCard(SimpleCardWidget):
         # → CPython 的 INPLACE_ADD 原地优化失效，长回复退化为 O(n²)
         # （实测 390KB 回复 516ms 全在流式主线程上）。
         # 现改为只 append 片段（O(1)），读取时（200ms 一拍）才固化拼接。
-        self._stream_text_parts: List[str] = []
-        self._stream_text_acc: Optional[str] = None  # 已固化累计串；None = 空
-        self._stream_text_parts_solid: int = 0  # [E6] 已固化片段数游标（parts 不清空）
-        self._stream_text_cursor = 0  # [T4-5] 增量采样游标（配合 live_text_delta）
+        self._stream_text_clear()
         self._stream_gen_s = 0.0
         self._stream_last_text_t = None
         self._stream_first_text_t = None
@@ -2286,39 +2271,20 @@ class MessageCard(SimpleCardWidget):
         # 比气泡宽（多出的部分透明），footer 的时间戳与按钮才有地方放，而不必
         # 反过来把气泡撑宽。
         main.addWidget(self._user_bubble, 0, Qt.AlignRight)
-        _bubble_alive = True
 
         # 正文视图容器挂到气泡内（原 _viewer_container 直接挂卡片）
         self._viewer_container.setParent(self._user_bubble)
         bubble_lay.addWidget(self._viewer_container)
         self._lazy_rendered = True
 
-        # 图片附件预览条：挂 main 布局，位于气泡与底部按钮行**之间**（气泡外），
-        # set_image_attachments 时才显示（懒占位）
-        self._image_strip = QWidget(self)
+        self._image_strip = None
         self._thumbnail_jobs = set()
-        self._image_strip_lay = QHBoxLayout(self._image_strip)
-        self._image_strip_lay.setContentsMargins(2, 4, 2, 2)
-        self._image_strip_lay.setSpacing(6)
-        self._image_strip.setVisible(False)
-        main.addWidget(self._image_strip, 0, Qt.AlignRight)
 
         # 底部操作行（纯按钮）：时间戳已移到身份行第二行（见 IdentityHeader）
         # 外层 wrap 固定高度：按钮显隐切换时 footer 占位不变，卡片不跳动
         footer_wrap = QWidget(self)
         footer_wrap.setStyleSheet("background: transparent;")
         footer_wrap.setFixedHeight(28)  # 26px 按钮 + 垂直余量，紧凑
-        footer = QHBoxLayout(footer_wrap)
-        footer.setContentsMargins(6, 0, 6, 0)
-        footer.setSpacing(6)
-        footer.addStretch()
-
-        # 按钮 hover 浮现在右端（卡片右缘对齐，与身份行头像侧一致）
-        btns = QWidget(self)
-        self._user_action_btns = btns
-        bl = QHBoxLayout(btns)
-        bl.setContentsMargins(0, 0, 0, 0)
-        bl.setSpacing(2)
         # 插件注册按钮（footer_action role=user/both）：位于内置按钮之前（左侧），
         # 同排同风格，hover 随容器整体浮现；点击复用 _on_footer_plugin_action。
         plugin_actions = []
@@ -2332,7 +2298,25 @@ class MessageCard(SimpleCardWidget):
             ]
         except Exception:
             plugin_actions = []
-        for info in plugin_actions:
+        self._user_footer_actions = plugin_actions
+        count = 3 + len(plugin_actions)
+        footer_wrap.setMinimumWidth(12 + count * 26 + (count - 1) * 2)
+        self._footer_wrap = footer_wrap
+        self._user_action_btns = None
+        main.addWidget(footer_wrap)
+
+    def _ensure_user_actions(self):
+        if self._user_action_btns is not None:
+            return
+        footer = QHBoxLayout(self._footer_wrap)
+        footer.setContentsMargins(6, 0, 6, 0)
+        footer.addStretch()
+        btns = QWidget(self._footer_wrap)
+        self._user_action_btns = btns
+        bl = QHBoxLayout(btns)
+        bl.setContentsMargins(0, 0, 0, 0)
+        bl.setSpacing(2)
+        for info in self._user_footer_actions:
             try:
                 from PyQt5.QtGui import QIcon
 
@@ -2372,10 +2356,7 @@ class MessageCard(SimpleCardWidget):
         # 恒定、布局不重排（否则宽度 0↔82 来回变，表现为「hover 撑大气泡」）。
         btns.setFixedSize(bl.sizeHint())
         footer.addWidget(btns)
-        self._footer_wrap = footer_wrap
-        # 初始隐藏：容器常驻布局占位，仅切换子按钮显隐（不用 effect，见 _set_actions_visible）
-        MessageCard._set_actions_visible(btns, False)
-        main.addWidget(footer_wrap)
+        self._user_footer_actions = ()
 
     def set_image_attachments(self, paths, fallback_content=None):
         """设置图片附件预览（用户气泡下方、底部按钮行上方缩略图条）
@@ -2390,8 +2371,14 @@ class MessageCard(SimpleCardWidget):
             return
         from app.widgets.attachment_thumbnails import AttachmentThumbnails
 
-        if not self._image_strip_lay.count():
+        if self._image_strip is None:
+            self._image_strip = QWidget(self)
+            self._image_strip_lay = QHBoxLayout(self._image_strip)
+            self._image_strip_lay.setContentsMargins(2, 4, 2, 2)
+            self._image_strip_lay.setSpacing(6)
             self._image_strip_lay.addStretch()
+            main = self.layout()
+            main.insertWidget(main.indexOf(self._footer_wrap), self._image_strip, 0, Qt.AlignRight)
         self._image_strip.setMinimumHeight(86)  # 预留图片与布局边距，解码完成时不推移消息
         self._image_strip.show()
         job = AttachmentThumbnails(paths, fallback_content, self._image_strip.devicePixelRatioF() or 1.0)
@@ -4062,7 +4049,7 @@ class MessageCard(SimpleCardWidget):
             # 卡片多出的部分是透明留白，不影响气泡视觉宽度。
             footer = getattr(self, "_footer_wrap", None)
             if footer is not None:
-                need = footer.minimumSizeHint().width()
+                need = max(footer.minimumWidth(), footer.minimumSizeHint().width())
                 if need > 60:
                     self.setMinimumWidth(need)
             # 上限同步给 viewer（卡内边距 4*2 + viewer 布局边距 8*2），
@@ -4213,7 +4200,8 @@ class MessageCard(SimpleCardWidget):
 
     def enterEvent(self, event):
         # 仅 user 气泡走 hover 浮现；assistant 操作按钮常显（见 _assistant_action_btns 构建处）
-        if self.role == "user" and getattr(self, "_user_action_btns", None) is not None:
+        if self.role == "user":
+            self._ensure_user_actions()
             self._set_actions_visible(self._user_action_btns, True)
         super().enterEvent(event)
 
@@ -6846,7 +6834,6 @@ class MessageCard(SimpleCardWidget):
         # _footer_stat_context 用 getattr(..., "") or "" 兜底，置 None 安全。
         self._stream_text_parts = None
         self._stream_text_acc = None
-        self._stream_text_parts_solid = 0  # [E6] 游标同步复位
         self._rendered_code_blocks = []  # 代码块缓存
         self._pending_content = None  # 待渲染内容
         self._finished_streaming_ids.clear()  # 流式 ID 集合

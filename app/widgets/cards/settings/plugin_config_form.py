@@ -28,7 +28,6 @@ from qfluentwidgets import (
     BodyLabel,
     CaptionLabel,
     ComboBox,
-    FluentIcon,
     HyperlinkButton,
     LineEdit,
     PasswordLineEdit,
@@ -37,6 +36,7 @@ from qfluentwidgets import (
     SwitchButton,
     TextEdit,
 )
+from app.utils.app_icon import AppIcon
 
 from loguru import logger
 
@@ -265,7 +265,7 @@ class PluginConfigForm(QWidget):
             # 外链按钮：HyperlinkButton（主题色 + 链接图标），点击用系统浏览器打开。
             # 按钮自身是居中对齐文本，撑满整行会飘到右边，用 stretch 尾巴把它钉在左侧
             link_text = f.placeholder or f.url
-            link = HyperlinkButton(f.url, link_text, self, FluentIcon.LINK)
+            link = HyperlinkButton(f.url, link_text, self, AppIcon.LINK)
             holder = self._left_aligned(link)
             self._add_field_row(
                 f,
