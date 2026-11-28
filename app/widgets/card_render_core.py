@@ -3944,7 +3944,8 @@ _SKELETON_CACHE_MAX = 48
 # v94：简洁模式的原位分组按钮与有序块布局。
 # v95：展示方式按消息绑定，摘要样式由系统插件提供。
 # v96：摘要文字独立于失败计数，鼠标和键盘焦点分离。
-_SKELETON_CACHE_VERSION = 96
+# v97：简洁摘要的内容高度过渡与中途反向。
+_SKELETON_CACHE_VERSION = 97
 
 
 def _js_literal(value) -> str:

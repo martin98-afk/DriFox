@@ -50,6 +50,48 @@ def test_plugin_host_imports_only_capability_entry():
                 assert node.module == 'app.plugins.sdk' and [n.name for n in node.names] == ['caps_for'], file
 
 
+def test_dynamic_summaries(qapp, monkeypatch):
+    from app.tools.registry import ToolRegistry
+    import importlib.util
+    sandbox = ToolRegistry()
+    monkeypatch.setattr(ToolRegistry, 'get_instance', lambda: sandbox)
+    spec = importlib.util.spec_from_file_location('summary_test_files', PATH.parent / 'system-core/tools/file_tools.py')
+    files = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(files)
+    from app.plugins.loaders.plugin_tool_loader import _PluginRegistryProxy
+    files.register(_PluginRegistryProxy(sandbox, 'system-core'))
+    from app.plugins.contracts.message_layout import summary_items
+
+    reg = UIPluginRegistry()
+    assert reg.load_plugin(NAME, PATH)
+    try:
+        mode = reg.get_ui_module('message_output:compact')
+        def items(names, paths, running=False):
+            blocks = [dict(type='tool_streaming' if running else 'tool_result', name=n,
+                           arguments={'path': p, 'token': 'secret'}, result='private result') for n, p in zip(names, paths)]
+            return summary_items(['tool'] * len(blocks), blocks)
+        mixed = items(['grep', 'read', 'read', 'list', 'read', 'glob'], ['dir', 'a', 'b', 'dir', 'c', 'dir'])
+        from app.tools.registry import ToolRegistry
+        tools = ToolRegistry.get_instance()
+        tools.register('dfx_test_archive', {}, cn_name='归档', source='plugin:test-summary', danger='safe')
+        try:
+            assert mode.describe(items(['dfx_test_archive'], [None])) == '归档了 1 次'
+        finally:
+            tools.unregister('dfx_test_archive')
+        assert mode.describe(mixed) == '读取了 3 个文件，搜索了 1 次，另有 2 次操作'
+        assert mode.describe(items(['read'] * 3, ['a'] * 3)) == '分 3 次读取了 1 个文件'
+        assert mode.describe(items(['read'], [None], running=True)) == '正在读取 1 次'
+        assert mode.describe(items(['my_tool'], [None])) == '调用了 my_tool 1 次'
+        assert mode.describe(summary_items(['reasoning'] * 2, [{}, {}])) == '思考 2 次'
+        assert mixed[0]._fields == ('kind', 'name', 'state', 'target') and mixed[0].target == 0
+        assert ORIGINAL.describe(mixed) == '工具 6 次'
+        def fail(_):
+            raise ValueError('模拟摘要失败')
+        assert OutputMode('bad', '测试', '', summary=fail).describe(mixed) == '工具 6 次'
+    finally:
+        reg.unload_plugin(NAME)
+
+
 def test_policy_failure_preserves_blocks():
     mode = OutputMode('broken', '测试', '', lambda kinds, *, streaming: [(0, 3, True)])
     assert mode.layout(('body',), streaming=True) == ()

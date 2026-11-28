@@ -2,6 +2,7 @@ from app.plugins.sdk import caps_for
 
 from .compact import CSS, grouped_runs
 from .settings import OutputSettingsCard
+from .summary import describe
 
 NAME = 'system-message-output'
 
@@ -38,7 +39,7 @@ def register_ui(registry):
             super().__init__(registry.output_mode_choices, current, choose, parent)
 
     registry.register_output_mode('compact', '简洁', '按正文分组折叠思考与工具，单独标出失败次数。',
-                                  groups=grouped_runs, css=CSS, plugin_name=NAME)
+                                  groups=grouped_runs, css=CSS, summary=describe, plugin_name=NAME)
     registry.register_ui_module('message_output_selection', current, plugin_name=NAME)
     registry.register_settings_card(NAME, 'stream_output_modes', '流式输出方式', SettingsCard,
                                     section='plugins', priority=20,

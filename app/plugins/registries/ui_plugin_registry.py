@@ -2946,10 +2946,10 @@ class UIPluginRegistry:
 
     SYSTEM_MODULE_PRIORITY = 0  # 系统模块基线；插件覆盖须 >= 100
 
-    def register_output_mode(self, mode_id, name, description, *, groups=None, css='', plugin_name):
+    def register_output_mode(self, mode_id, name, description, *, groups=None, css='', summary=None, plugin_name):
         from app.plugins.contracts.message_layout import OutputMode, register_output_mode
 
-        register_output_mode(self, OutputMode(mode_id, name, description, groups, css), plugin_name=plugin_name)
+        register_output_mode(self, OutputMode(mode_id, name, description, groups, css, summary), plugin_name=plugin_name)
 
     def output_mode_choices(self):
         from app.plugins.contracts.message_layout import output_modes

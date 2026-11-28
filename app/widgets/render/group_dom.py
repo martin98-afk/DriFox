@@ -1,5 +1,6 @@
 """就地插入标题，不包裹或重建 patchBlocks 的子节点。"""
 GROUP_CSS = """
+#content-placeholder > [data-group-member] { display:flow-root; }
 #content-placeholder > [data-group-hidden] { display:none !important; }
 body.dfx-grouped #tool-section { display:none !important; }
 """
@@ -7,6 +8,33 @@ body.dfx-grouped #tool-section { display:none !important; }
 GROUP_JS = """
 document.addEventListener('keydown', function(e) { if (e.key === 'Tab') document.body.classList.add('dfx-key-focus'); }, true);
 document.addEventListener('mousedown', function() { document.body.classList.remove('dfx-key-focus'); }, true);
+function _setGroupVisibility(node, hidden, animate) {
+    var previous = node._groupMotion;
+    if (previous && previous.hidden === hidden) return;
+    var wasHidden = node.hasAttribute('data-group-hidden');
+    if (!previous && wasHidden === hidden) return;
+    var from = wasHidden ? 0 : node.getBoundingClientRect().height;
+    var alpha = wasHidden ? 0 : parseFloat(getComputedStyle(node).opacity);
+    if (previous) { previous.animation.cancel(); node._groupMotion = null; }
+    if (!animate || matchMedia('(prefers-reduced-motion: reduce)').matches) {
+        node.toggleAttribute('data-group-hidden', hidden);
+        return;
+    }
+    node.removeAttribute('data-group-hidden');
+    var to = hidden ? 0 : node.getBoundingClientRect().height;
+    if (Math.abs(to-from) < 1) { node.toggleAttribute('data-group-hidden', hidden); return; }
+    var motion = node.animate([
+        {height:from+'px', opacity:alpha, overflow:'hidden'},
+        {height:to+'px', opacity:hidden ? 0 : 1, overflow:'hidden'}
+    ], {duration:180, easing:'cubic-bezier(.22,.61,.36,1)', fill:'both'});
+    node._groupMotion = {hidden:hidden, animation:motion};
+    motion.onfinish = function() {
+        if (!node._groupMotion || node._groupMotion.animation !== motion) return;
+        node.toggleAttribute('data-group-hidden', hidden);
+        node._groupMotion = null; motion.cancel();
+        if (node.isConnected) reportHeightDebounced();
+    };
+}
 window._applyMessageGroups = function(groups) {
     var root = document.getElementById('content-placeholder');
     var nodes = window._blockNodes(root);
@@ -15,7 +43,7 @@ window._applyMessageGroups = function(groups) {
     root.querySelectorAll(':scope > .dfx-group-button').forEach(function(b) {
         buttons.set(b.dataset.groupStart, b);
     });
-    var hidden = new Set();
+    var hidden = new Set(), changed = new Set(), members = new Set();
     groups.forEach(function(g) {
         var first = nodes[g[0]], key = String(g[0]);
         if (!first) return;
@@ -41,12 +69,17 @@ window._applyMessageGroups = function(groups) {
                 badge.textContent = failed; b.appendChild(badge);
             }
         }
-        if (b.getAttribute('aria-expanded') !== String(opened)) b.setAttribute('aria-expanded', String(opened));
-        if (!opened) for (var i=g[0]; i<g[1]; i++) hidden.add(i);
+        var last = b.getAttribute('aria-expanded');
+        if (last !== String(opened)) b.setAttribute('aria-expanded', String(opened));
+        for (var i=g[0]; i<g[1]; i++) {
+            members.add(i); if (!opened) hidden.add(i);
+            if (last !== null && last !== String(opened)) changed.add(i);
+        }
     });
     buttons.forEach(function(b,k) { b.remove(); manual.delete(k); });
     nodes.forEach(function(n,i) {
-        if (hidden.has(i) !== n.hasAttribute('data-group-hidden')) n.toggleAttribute('data-group-hidden', hidden.has(i));
+        n.toggleAttribute('data-group-member', members.has(i));
+        _setGroupVisibility(n, hidden.has(i), changed.has(i));
     });
     root._currentGroups = groups;
 };

@@ -98,7 +98,7 @@ from app.widgets.render import (
     render_message,
 )
 from app.widgets.render.group_dom import GROUP_CSS, GROUP_JS
-from app.plugins.contracts.message_layout import ORIGINAL
+from app.plugins.contracts.message_layout import ORIGINAL, summary_items
 from app.widgets.render_crash_queue import RenderCrashQueue
 from app.widgets.card_render_core import (
     ACTION_COLOR_MAP,
@@ -9801,12 +9801,17 @@ class CodeWebViewer(QWebEngineView):
                 groups = self._output_mode.layout(kinds, streaming=self._streaming)
                 rows = []
                 for start, stop, opened in groups:
-                    segment = kinds[start:stop]
-                    counts = [('思考', segment.count('reasoning')), ('工具', segment.count('tool'))]
-                    failed = sum(kinds[i] == 'tool' and blocks[i].get('type') == 'tool_result'
-                                 and blocks[i].get('success') is False for i in range(start, stop))
-                    label = ' · '.join(f'{name} {n} 次' for name, n in counts if n) or '消息详情'
-                    rows.append((start, stop, opened, label, f' · 失败 {failed} 次' if failed else ''))
+                    items = summary_items(kinds[start:stop], blocks[start:stop])
+                    failed = sum(item.state == 'failed' for item in items)
+                    label = self._output_mode.describe(items)
+                    if failed and self._output_mode.summary:
+                        tools = [item for item in items if item.kind == 'tool']
+                        unique_targets = {item.target for item in tools}
+                        unit = '个' if None not in unique_targets and len(unique_targets) == len(tools) else '次'
+                        suffix = f'，{failed} {unit}失败'
+                    else:
+                        suffix = f' · 失败 {failed} 次' if failed else ''
+                    rows.append((start, stop, opened, label, suffix))
                 groups_js = json.dumps(rows).decode('utf-8')
                 self._layout_sig = group_sig
         if content_ops.is_empty and tool_ops.is_empty and not live_delta and _pending_tail is None and groups_js is None:

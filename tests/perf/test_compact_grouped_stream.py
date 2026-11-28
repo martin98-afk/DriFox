@@ -43,7 +43,24 @@ def test_compact_grouped_stream(qapp, qtbot, compact_output_plugin):
         qtbot.waitUntil(lambda: js(states) == ['true'], timeout=10000)
         card.append_text('第一段正文。\n\n')
         qtbot.waitUntil(lambda: js(states) == ['false'], timeout=10000)
-        js(f"window.firstButton={buttons}[0]; firstButton.click()")
+        js(f"window.firstButton={buttons}[0]")
+        hidden = "firstButton.nextElementSibling.hasAttribute('data-group-hidden')"
+        qtbot.waitUntil(lambda: bool(js(hidden)), timeout=4000)
+        if not js("matchMedia('(prefers-reduced-motion: reduce)').matches"):
+            for opening in (True, False):
+                js("""window._heights=[]; window._sampled=false;
+                  (function(){var end=performance.now()+320;firstButton.click();
+                  function sample(){var els=[firstButton.nextElementSibling,firstButton.nextElementSibling.nextElementSibling];
+                    _heights.push(els.reduce((s,e)=>s+e.getBoundingClientRect().height,0));
+                    if(performance.now()<end)requestAnimationFrame(sample);else window._sampled=true;}sample()})()""")
+                qtbot.waitUntil(lambda: bool(js('window._sampled')), timeout=4000)
+                heights = js('window._heights')
+                assert len(set(heights)) >= 3, heights
+                assert all((b-a if opening else a-b) >= -1 for a,b in zip(heights, heights[1:])), heights
+            js('firstButton.click();setTimeout(()=>firstButton.click(),55)')
+            qtbot.wait(300)
+            assert js(hidden) and js(states) == ['false']
+        js('firstButton.click()')
         card.start_new_thinking_block()
         card.append_reasoning('第二段思考。')
         qtbot.waitUntil(lambda: js(states) == ['true', 'true'], timeout=10000)
@@ -54,8 +71,8 @@ def test_compact_grouped_stream(qapp, qtbot, compact_output_plugin):
         settings._choices['original'].click()
         another = MessageCard('assistant', parent=window)
         assert another._output_mode.id == 'original' and card._output_mode.id == 'compact'
-        card.append_tool_result(tool_call_id='late-1', tool_name='read', arguments={}, result='晚到结果', success=False)
-        qtbot.waitUntil(lambda: js('firstButton.textContent') == '思考 1 次 · 工具 1 次 · 失败 1 次', timeout=10000)
+        card.append_tool_result(tool_call_id='late-1', tool_name='read', arguments={'path': 'first.txt'}, result='晚到结果', success=False)
+        qtbot.waitUntil(lambda: js('firstButton.textContent') == '读取了 1 个文件，1 个失败', timeout=10000)
         style = js("""(function(){var p=Array.from(document.querySelectorAll('#content-placeholder p')).find(n=>n.textContent.includes('第一段正文'));
           firstButton.focus(); var s=getComputedStyle(firstButton), l=getComputedStyle(firstButton.querySelector('.dfx-group-label')), t=getComputedStyle(p);
           return [parseFloat(t.fontSize)-parseFloat(l.fontSize),l.color===t.color,parseFloat(l.opacity),s.outlineStyle,s.backgroundColor];})()""")

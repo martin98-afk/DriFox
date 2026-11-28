@@ -2,10 +2,10 @@
   "name": "system-message-output",
   "display_name": {"zh": "流式输出方式"},
   "description": "管理聊天消息的展示方式，内置按正文位置折叠思考与工具的简洁模式。",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "type": "system",
   "api_version": 2,
-  "capabilities": ["plugin.config.read", "plugin.config.write", "config.read"],
+  "capabilities": ["plugin.config.read", "plugin.config.write", "config.read", "tool.read"],
   "config_schema": {"title": "流式输出方式", "fields": [
     {"key": "mode_id", "type": "text", "label": "输出方式", "default": ""}
   ]},
