@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """
 模型列表编辑器（OpenCode 风格清单，P1-9）
 
@@ -27,7 +27,8 @@ from PyQt5.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-from qfluentwidgets import CheckBox, FluentIcon, PushButton, SwitchButton, TransparentToolButton
+from qfluentwidgets import CheckBox, PushButton, SwitchButton, TransparentToolButton
+from app.utils.app_icon import AppIcon
 
 from app.utils.design_tokens import Colors, font_size_css, get_unified_scrollbar_style, scale_font_size
 from app.utils.utils import get_font_family_css
@@ -184,7 +185,7 @@ class _ModelRowWidget(QWidget):
         self._meta_row.addWidget(self.badges, 0, Qt.AlignVCenter)
         # 铅笔紧跟胶囊尾巴（用户选定的位置）：视觉上属于这串胶囊，
         # 比固定列更贴「改这几个胶囊」的意图
-        self.caps_btn = TransparentToolButton(FluentIcon.EDIT, self)
+        self.caps_btn = TransparentToolButton(AppIcon.EDIT, self)
         self.caps_btn.setFixedSize(20, 20)
         self.caps_btn.setIconSize(QSize(12, 12))
         self.caps_btn.setToolTip("编辑模型能力（多模态 / 思考 / 上下文长度）")

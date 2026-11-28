@@ -8,6 +8,7 @@ import re
 import threading
 import time
 from contextlib import contextmanager
+from dataclasses import replace
 from typing import Any, Dict, List, Optional
 
 import orjson
@@ -18,6 +19,7 @@ from PyQt5.QtCore import QThread, pyqtSignal
 from app.constants import PARAM_SCHEMA
 from app.constants import PROVIDER_MANAGED_KEYS
 from app.constants import provider_quota_exclude_keys as QUOTA_EXCLUDE_KEYS
+from app.core.context.budget import check_request_budget
 from app.core.conversation.message_content import extract_reasoning_delta
 from app.utils._startup_probe import trace_enabled as _diag_trace_enabled
 from app.core.modelmeta.model_capabilities import (
@@ -719,16 +721,22 @@ class SubAgentExecutor(QThread):
                 if self._is_cancelled:
                     return ""
 
-                current_messages.append(
-                    {
-                        "role": "tool",
-                        "tool_call_id": self._question_pending["tool_call_id"],
-                        "content": self._pending_answer,
-                    }
-                )
-                self._append_to_api_cache([current_messages[-1]])
+                tool_results = [{
+                    "role": "tool",
+                    "tool_call_id": self._question_pending["tool_call_id"],
+                    "content": self._pending_answer,
+                }]
                 self._pending_answer = None
-                continue
+
+            if tool_results:
+                from app.core.context.pipeline import ContextPipeline
+
+                try:
+                    tool_results = ContextPipeline().ingest_tool_results(
+                        tool_results, llm_config, session_id=f"subagent-{self.task_id}"
+                    )
+                except Exception:
+                    logger.exception("[SubAgent] 工具结果入库失败，保留原结果")
 
             # 先 extend tool_results（纯 role="tool" 消息，紧跟在 assistant(tool_calls) 之后），
             # 再 extend hook_messages（role="user" 消息，避免插入 tool_calls 和 tool 之间导致 2013 错误）
@@ -876,6 +884,9 @@ class SubAgentExecutor(QThread):
 
         config = llm_config if llm_config is not None else getattr(self, "llm_config", None)
         flags = self._protocol_flags(config)
+        # 缓存始终保存消息列表；Responses transport 在最终发送时生成 input_items。
+        if flags.use_responses_api:
+            flags = replace(flags, use_responses_api=False)
         serializer = SerializerRegistry.get_instance().resolve(flags.serializer_id)
         result = serializer.serialize(messages, SerializeContext(flags=flags))
         if revoke_after:
@@ -1114,38 +1125,6 @@ class SubAgentExecutor(QThread):
         except Exception as e:
             logger.debug(f"[SubAgent] Hook '{event_name}' trigger failed: {e}")
 
-    def _drain_hook_queues(self) -> List[Dict[str, Any]]:
-        """消费 backend 的 _pre_tool_message_queue 和 _hook_message_queue
-
-        tool_executor.execute() 内部已同步触发 PreToolUse/PostToolUse，
-        对应消息已分别进 _pre_tool_message_queue 和 _hook_message_queue。
-        这里把两个队列的消息全取出来，由调用方按需插入到 tool_result 之前/之后。
-        """
-        msgs: List[Dict[str, Any]] = []
-        try:
-            backend = getattr(self.tool_executor, "_backend", None) if self.tool_executor else None
-            if not backend:
-                return msgs
-            for q_attr in ("_pre_tool_message_queue", "_hook_message_queue"):
-                q = getattr(backend, q_attr, None)
-                if q is None:
-                    continue
-                while True:
-                    try:
-                        msgs.append(q.get_nowait())
-                    except Exception:
-                        break
-            # PluginChanged 净零合并：连续开关插件（中间无消费）时整批不注入
-            try:
-                from app.core.hooks.hook_manager import filter_net_zero_plugin_messages
-
-                msgs = filter_net_zero_plugin_messages(msgs)
-            except Exception as e:
-                logger.debug(f"[SubAgent] 净零合并判定跳过: {e}")
-        except Exception as e:
-            logger.debug(f"[SubAgent] drain hook queues failed: {e}")
-        return msgs
-
     def _collect_vision_session_ids(self, messages: List[Dict]) -> List[str]:
         """[方案 A] 收集消息中 image_ref 块的真实落盘 session_id（revive 前调用）。"""
         ids = []
@@ -1326,6 +1305,7 @@ class SubAgentExecutor(QThread):
         # 因此两路统一改传物化副本（data URI 只在本请求作用域存在，已回收的原
         # current_messages 不被二次污染，副本随请求结束 GC）。
         materialized = self._materialize_for_send(api_messages)
+        check_request_budget(materialized, tools, config)
 
         from app.core.workers.error_handler import create_api_call_with_retry
         from app.core.workers.protocol_dispatch import resolve_transport_target
@@ -1570,9 +1550,7 @@ class SubAgentExecutor(QThread):
           应在所有 tool_results 被 extend 之后再 extend，避免插入 assistant(tool_calls)
           和 tool 消息之间导致 API 2013 错误
 
-        同步执行所有 tool_executor.execute()，并在末尾消费 backend 的 hook 队列：
-        - _pre_tool_message_queue → PreToolUse 消息（role="user"）
-        - _hook_message_queue    → PostToolUse 消息（role="user"）
+        同步工具 hook 写入本次调用的 hook_messages，不消费主会话队列。
         """
         if not tool_calls or not self.tool_executor:
             return [], []
@@ -1676,12 +1654,11 @@ class SubAgentExecutor(QThread):
                 else:
                     result = ToolResult(False, error=f"工具 {tool_name} 已被禁用或拒绝")
             else:
-                # tool_executor.execute() 内部已同步触发 PreToolUse 和 PostToolUse，
-                # 消息分别进 backend 的 _pre_tool_message_queue / _hook_message_queue
-                # 传入 hook_context 覆盖默认角色，防止 subagent 工具调用误用 primary 角色
+                # 工具结果与本次工具 hook 分开收集，不读父会话收件箱。
                 result = self.tool_executor.execute(
                     tool_name,
                     arguments,
+                    hook_messages=hook_messages,
                     hook_context={
                         "current_role": "subagent",
                         "is_subagent_call": True,
@@ -1694,11 +1671,6 @@ class SubAgentExecutor(QThread):
             self._add_log("tool_result", tool_name, {"result": result_content, "success": success})
             # [T4-3] 已删除 `QCoreApplication.processEvents()`：子线程无 Qt 事件
             # 循环，该调用是纯空转。勿回加。
-
-            # 消费 PreToolUse 队列（role="user" 消息），放入 hook_messages 而非 tool_results
-            pretool_msgs = self._drain_pretool_queue()
-            if pretool_msgs:
-                hook_messages.extend(pretool_msgs)
 
             raw_result = {
                 "role": "tool",
@@ -1715,14 +1687,7 @@ class SubAgentExecutor(QThread):
             # 不再发起下一轮 API 调用，直接拿已产出的文本收工。
             if getattr(result, "end_turn", False):
                 self._end_turn_requested = True
-            # 用 to_api_message 标准化：仅保留 role/tool_call_id/name/content，避免非标字段混淆API
-            serialized = self._serialize_for_api([raw_result]).messages
-            tool_results.append(serialized[0] if serialized else raw_result)
-
-            # 消费 PostToolUse 队列（role="user" 消息），放入 hook_messages 而非 tool_results
-            posttool_msgs = self._drain_posttool_queue()
-            if posttool_msgs:
-                hook_messages.extend(posttool_msgs)
+            tool_results.append(raw_result)
 
         return tool_results, hook_messages
 
@@ -1824,48 +1789,3 @@ class SubAgentExecutor(QThread):
         self._permission_allow = bool(allow)
         self._permission_answered = True
         self._permission_event.set()
-
-    def _drain_pretool_queue(self) -> List[Dict[str, Any]]:
-        """仅消费 backend 的 _pre_tool_message_queue（PreToolUse 消息）"""
-        msgs: List[Dict[str, Any]] = []
-        try:
-            backend = getattr(self.tool_executor, "_backend", None) if self.tool_executor else None
-            if not backend:
-                return msgs
-            q = getattr(backend, "_pre_tool_message_queue", None)
-            if q is None:
-                return msgs
-            while True:
-                try:
-                    msgs.append(q.get_nowait())
-                except Exception:
-                    break
-        except Exception as e:
-            logger.debug(f"[SubAgent] drain pretool queue failed: {e}")
-        return msgs
-
-    def _drain_posttool_queue(self) -> List[Dict[str, Any]]:
-        """仅消费 backend 的 _hook_message_queue（PostToolUse 消息）"""
-        msgs: List[Dict[str, Any]] = []
-        try:
-            backend = getattr(self.tool_executor, "_backend", None) if self.tool_executor else None
-            if not backend:
-                return msgs
-            q = getattr(backend, "_hook_message_queue", None)
-            if q is None:
-                return msgs
-            while True:
-                try:
-                    msgs.append(q.get_nowait())
-                except Exception:
-                    break
-            # PluginChanged 净零合并：连续开关插件（中间无消费）时整批不注入
-            try:
-                from app.core.hooks.hook_manager import filter_net_zero_plugin_messages
-
-                msgs = filter_net_zero_plugin_messages(msgs)
-            except Exception as e:
-                logger.debug(f"[SubAgent] 净零合并判定跳过: {e}")
-        except Exception as e:
-            logger.debug(f"[SubAgent] drain posttool queue failed: {e}")
-        return msgs

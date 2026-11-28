@@ -199,6 +199,38 @@ def test_ai_failure_submits_skip_text(monkeypatch):
     answers = [args[0] for name, args in api.calls if name == "answer"]
     assert answers and "已跳过" in answers[0]
 
+def test_question_unsubscribe_releases_only_its_window():
+    import weakref
+    from app.plugins.capabilities.providers.ui_core import _question_control
+    from app.plugins.capabilities.registry import CapabilityRegistry
+
+    class Host:
+        def __init__(self):
+            self.listeners = set()
+
+        def question_control_subscribe(self, cb):
+            self.listeners.add(cb)
+            return True
+
+        def question_control_unsubscribe(self, cb):
+            self.listeners.remove(cb)
+            return True
+
+    registry = CapabilityRegistry()
+    ctx = SimpleNamespace(plugin="system-question", registry=registry)
+    a, b = Host(), Host()
+    cb = lambda *_: None
+    api = _question_control(a, ctx)
+    api["subscribe"](cb)
+    _question_control(b, ctx)["subscribe"](cb)
+    assert api["unsubscribe"](cb)
+    ref = weakref.ref(a)
+    del a, api
+    assert ref() is None
+    assert cb in b.listeners
+    assert registry.release_plugin(ctx.plugin) == 1
+    assert not b.listeners
+
 def test_ensure_subscriptions_skips_host_without_question_control(monkeypatch):
     """回归：__global__ 全局卡片宿主无 question.control 能力，每秒扫描时
     不应被发起订阅，否则 provider 抛 RuntimeError、WARNING 每秒刷屏。

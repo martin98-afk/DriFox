@@ -20,6 +20,7 @@
         "_plugin_marketplace_ui"
     ],
     "capabilities": [
+        "ui.icons",
         "config.read",
         "input.write",
         "plugin.reload_components"

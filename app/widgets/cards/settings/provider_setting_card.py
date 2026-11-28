@@ -12,13 +12,13 @@ from PyQt5.QtWidgets import (
 from qfluentwidgets import (
     ConfigItem,
     ExpandSettingCard,
-    FluentIcon,
     IconWidget,
     PushButton,
     SearchLineEdit,
     ToolButton,
     qconfig,
 )
+from app.utils.app_icon import AppIcon
 
 from app.core.modelmeta.provider_save_plan import filter_disabled_models
 from app.plugins.registries.provider_registry import ProviderRegistry
@@ -169,8 +169,8 @@ class ProviderItem(QWidget):
         btn_layout = QHBoxLayout(btn_widget)
         btn_layout.setContentsMargins(0, 0, 0, 0)
         btn_layout.setSpacing(4)
-        self.editButton = ToolButton(FluentIcon.EDIT)
-        self.removeButton = ToolButton(FluentIcon.CLOSE)
+        self.editButton = ToolButton(AppIcon.EDIT)
+        self.removeButton = ToolButton(AppIcon.CLOSE)
         self.editButton.setFixedSize(Sizes.TOOL_BUTTON_SZ)
         self.removeButton.setFixedSize(Sizes.TOOL_BUTTON_SZ)
         self.editButton.setIconSize(Sizes.TOOL_ICON_SZ)
@@ -388,7 +388,7 @@ class ProviderListSettingCard(DynamicHeightExpandCardMixin, ExpandSettingCard):
         self.title = title
         self.configItem = configItem
         self.defaultProviderItem = defaultProviderItem
-        self.addProviderButton = PushButton("添加", self, FluentIcon.ADD)
+        self.addProviderButton = PushButton("添加", self, AppIcon.ADD)
         self.providers = qconfig.get(configItem).copy() if isinstance(qconfig.get(configItem), dict) else {}
         self.default_provider = qconfig.get(defaultProviderItem) or ""
         # 搜索关键词（空 = 不过滤）与无匹配空态标签（惰性创建）
@@ -587,14 +587,17 @@ class ProviderListSettingCard(DynamicHeightExpandCardMixin, ExpandSettingCard):
     def _group_label_style() -> str:
         return f"color: {Colors.TEXT_MUTED}; {font_size_css(12)} font-weight: 600; {get_font_family_css()}"
 
+    def _apply_empty_style(self):
+        self._empty_label.setStyleSheet(
+            f"color: {Colors.TEXT_MUTED}; {font_size_css(12)} {get_font_family_css()}; padding: 16px 0;"
+        )
+
     def _show_empty_state(self):
         """空态提示：区分「库中本无服务商」与「关键词无匹配」两种文案"""
         if self._empty_label is None:
             self._empty_label = QLabel("", self.view)
             self._empty_label.setAlignment(Qt.AlignCenter)
-        self._empty_label.setStyleSheet(
-            f"color: {Colors.TEXT_MUTED}; {font_size_css(12)} {get_font_family_css()}; padding: 16px 0;"
-        )
+        self._apply_empty_style()
         if self._keyword:
             self._empty_label.setText(f"未找到匹配「{self._keyword}」的服务商")
         else:
@@ -739,6 +742,8 @@ class ProviderListSettingCard(DynamicHeightExpandCardMixin, ExpandSettingCard):
     def refresh_style(self):
         """主题/字体变更时刷新所有服务商行与组头的字体颜色"""
         Colors.refresh()
+        if self._empty_label is not None:
+            self._apply_empty_style()
         for label in self._group_headers:
             try:
                 label.setStyleSheet(self._group_label_style())

@@ -8,9 +8,12 @@
 
 import ctypes
 import sys
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from PyQt5.QtCore import QEasingCurve, QSize
+
+if TYPE_CHECKING:
+    from PyQt5.QtGui import QColor
 
 
 # ─── 字体/字号缓存 ──────────────────────────────────────────
@@ -54,21 +57,36 @@ def invalidate_font_cache() -> None:
         pass
 
 
+def system_font_family() -> str:
+    """系统界面字体；Windows 的菜单字体能正确解析本地化字体。"""
+    from PyQt5.QtGui import QFontDatabase, QGuiApplication
+    from PyQt5.QtWidgets import QApplication
+
+    if not isinstance(QGuiApplication.instance(), QGuiApplication):
+        return "sans-serif"
+    if sys.platform == "win32" and isinstance(QGuiApplication.instance(), QApplication):
+        return QApplication.font("QMenu").family()
+    return QFontDatabase.systemFont(QFontDatabase.GeneralFont).family()
+
+
 def _get_global_font() -> str:
-    """获取全局字体名称，用于样式表（缓存）"""
     global _cached_font_family
-    if _cached_font_family is not None:
-        return _cached_font_family
-    try:
+    if _cached_font_family is None:
         from app.utils.config import Settings
 
-        _cached_font_family = Settings.get_instance().llm_font_family.value
-    except Exception:
-        try:
-            _cached_font_family = Settings.get_instance().canvas_font_selected.value
-        except Exception:
-            _cached_font_family = "Segoe UI"
+        _cached_font_family = Settings.get_instance().ui_font_family.value or system_font_family()
     return _cached_font_family
+
+
+def chat_font_family() -> str:
+    """正文独立选取字体，沿用旧版保存的字体。"""
+    from app.utils.config import Settings
+
+    return Settings.get_instance().llm_font_family.value or system_font_family()
+
+
+def chat_font_css() -> str:
+    return f"font-family: '{chat_font_family()}';"
 
 
 def _get_font_family_css() -> str:
@@ -600,6 +618,10 @@ class Colors:
             return
         cls._cached_theme_items = current_items
 
+        # YAML 的可选项未声明时使用类定义的默认值，避免沿用上一个主题的覆盖值。
+        for attr, default in _THEME_TOKEN_DEFAULTS.items():
+            setattr(cls, attr, default)
+
         # 1. 特殊处理：CARD_BG 需要 {alpha} 模板
         if "card_bg" in theme:
             cls.CARD_BG = (
@@ -676,6 +698,9 @@ class Colors:
             cls.INPUT_GLOW_UNFOCUSED_AMBIENT_BLUR,
         )
         return True
+
+
+_THEME_TOKEN_DEFAULTS = {attr: getattr(Colors, attr) for attr in Colors._get_theme_sourced_attrs()}
 
 
 # Colors.refresh() 已延迟到首次调用时执行（ThemeManager 懒加载），
@@ -1640,8 +1665,11 @@ def make_card_content_opaque(content, container_alpha: int = 246) -> bool:
     try:
         from PyQt5.QtGui import QPalette
 
+        content._drifox_card_surface_alpha = container_alpha
         color = card_container_surface_color(container_alpha)
         pal = content.palette()
+        if content.autoFillBackground() and pal.color(QPalette.Window) == color:
+            return True
         pal.setColor(QPalette.Window, color)
         content.setPalette(pal)
         content.setAutoFillBackground(True)
@@ -1670,6 +1698,8 @@ def make_scroll_content_opaque(content, fg: str, alpha: int, backdrop: str) -> b
     try:
         color = opaque_surface_color(fg, alpha, backdrop)
         pal = content.palette()
+        if content.autoFillBackground() and pal.color(content.backgroundRole()) == color:
+            return True
         pal.setColor(content.backgroundRole(), color)
         content.setPalette(pal)
         content.setAutoFillBackground(True)

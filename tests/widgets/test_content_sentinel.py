@@ -229,8 +229,9 @@ class TestBlankContentCollapse:
 
     def test_css_collapses_blank_content_in_dock(self):
         t = self._core_text()
-        assert "body.streaming-dock.cp-blank #content-placeholder" in t, "坞态空正文折叠 CSS 缺失"
-        assert "display: none" in t.split("cp-blank #content-placeholder")[1][:200]
+        selector = 'body.streaming-dock.cp-blank:not(.dfx-grouped) #content-placeholder'
+        assert selector in t, '只有工具独立显示时才能隐藏空正文'
+        assert 'display: none' in t.split(selector)[1][:200]
 
     def test_report_height_maintains_blank_flag(self):
         from pathlib import Path

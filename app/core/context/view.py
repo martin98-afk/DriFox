@@ -84,6 +84,7 @@ class ContextView:
     compaction_state: Dict[str, Any] = field(default_factory=dict)
     compaction_cache: Dict[str, Any] = field(default_factory=dict)
     failure_counts: Dict[str, int] = field(default_factory=dict)
+    session_id: str = ""
 
     # used_tokens 惰性估算 + per-message 增量数组：与 messages 平行的指纹/单条
     # token 数组，replace_messages 按「共同前缀+后缀」对齐，仅重算被改条目，

@@ -206,21 +206,21 @@ def set_mode(mode: str, *, save: bool = True, broadcast: bool = True) -> None:
 def broadcast_theme_refresh() -> None:
     """通知所有窗口按「主题变更」刷新（复用设置卡的刷新链路）"""
     try:
-        from app.widgets.cards.settings.llm_settings_card import LLMSettingsCard
-
-        LLMSettingsCard._last_change_type = "theme"
-    except Exception:
-        pass
-    try:
         from app.core.infra import window_registry
 
-        windows = list(window_registry.alive_window_instances())
+        windows = [win for win in window_registry.alive_window_instances() if not getattr(win, "_is_destroyed", False)]
     except Exception:
         return
+    if not windows:
+        from app.utils.theme_manager import theme_manager
+
+        theme_manager.dispatch_refresh()
+        return
+    from app.widgets.cards.settings.llm_settings_card import LLMSettingsCard
+
     for win in windows:
-        if getattr(win, "_is_destroyed", False):
-            continue
         try:
+            LLMSettingsCard._last_change_type = "theme"
             win._on_settings_config_changed()
         except Exception:
             logger.debug("外观模式：窗口刷新失败", exc_info=True)

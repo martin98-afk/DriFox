@@ -1,7 +1,7 @@
 {
   "icon": {
     "light": "icon.svg",
-    "dark": "icon.svg"
+    "dark": "icon_dark.svg"
   },
   "name": "worktree-manager",
   "display_name": {

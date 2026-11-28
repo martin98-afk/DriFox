@@ -1,9 +1,5 @@
 # -*- coding: utf-8 -*-
-"""test_memory_compact_auto.py — 事件日志的自动压缩与多设备快照合并。
-
-覆盖：阈值触发（低于阈值 / 间隔太近都不压）、按设备分文件写、合并读取不丢
-另一台的条目、旧版单文件快照仍可读、state_key 随写入变化。
-"""
+"""显式压缩、跨设备重放与日志序号回归。"""
 import importlib.util
 import json
 import sys
@@ -33,52 +29,15 @@ def _texts(aid_dir):
     return {str(e.get("text") or "") for e in entries.active_entries(state)}
 
 
-# ── 阈值触发 ──────────────────────────────────────────────
+def test_large_journal_only_compacts_on_request(tmp_path):
+    _put(tmp_path, "dev-a", "x" * 2_000_000)
+    _put(tmp_path, "dev-a", "第二条")
+    assert not list(entries.entries_dir(tmp_path).glob("snapshot*"))
+    assert [e["seq"] for e in entries.read_events(tmp_path)] == [1, 2]
 
-
-def test_maybe_compact_skips_when_small(tmp_path):
-    _put(tmp_path, "dev-a", "小日志")
-    r = entries.maybe_compact(tmp_path, "dev-a")
-    assert r["ok"] is False
-    assert r["reason"] == "below_threshold"
-    assert not list(entries.entries_dir(tmp_path).glob("snapshot*.jsonl"))
-
-
-def test_maybe_compact_triggers_over_threshold(tmp_path, monkeypatch):
-    monkeypatch.setattr(entries, "COMPACT_MIN_BYTES", 1)
-    monkeypatch.setattr(entries, "COMPACT_FIRST_BYTES", 1)
-    monkeypatch.setattr(entries, "COMPACT_MIN_INTERVAL_HOURS", 0)
-    _put(tmp_path, "dev-a", "够大就压")
-    r = entries.maybe_compact(tmp_path, "dev-a")
-    assert r["ok"] is True
-    assert entries.snapshot_path(tmp_path, "dev-a").exists()
-    assert "够大就压" in _texts(tmp_path)
-
-
-def test_maybe_compact_respects_interval(tmp_path, monkeypatch):
-    monkeypatch.setattr(entries, "COMPACT_MIN_BYTES", 1)
-    monkeypatch.setattr(entries, "COMPACT_FIRST_BYTES", 1)
-    monkeypatch.setattr(entries, "COMPACT_MIN_INTERVAL_HOURS", 12)
-    entries.compact(tmp_path, keep_days=7, device="dev-a")
-    _put(tmp_path, "dev-a", "刚压过")
-    r = entries.maybe_compact(tmp_path, "dev-a")
-    assert r["ok"] is False
-    assert r["reason"] == "recent"
-
-
-def test_first_compact_threshold_is_lower(tmp_path, monkeypatch):
-    """尚无任何快照时用更低的首压门槛，避免 journal 长期没人压。"""
-    monkeypatch.setattr(entries, "COMPACT_MIN_BYTES", 10**9)
-    monkeypatch.setattr(entries, "COMPACT_FIRST_BYTES", 1)
-    monkeypatch.setattr(entries, "COMPACT_MIN_INTERVAL_HOURS", 0)
-    _put(tmp_path, "dev-a", "首次就该压")
-    # 写入路径自己就会检查压缩条件，不需要外部再调一次
-    assert entries.snapshot_path(tmp_path, "dev-a").exists()
-    assert "首次就该压" in _texts(tmp_path)
-    # 有快照后回到常规门槛（这里设得极大，所以不再触发）
-    _put(tmp_path, "dev-a", "第二次")
-    r = entries.maybe_compact(tmp_path, "dev-a")
-    assert r["ok"] is False and r["reason"] == "below_threshold"
+    entries.compact(tmp_path, keep_days=0, device="dev-a")
+    assert entries.snapshot_path(tmp_path, "dev-a").is_file()
+    assert len(_texts(tmp_path)) == 2
 
 
 # ── 按设备分文件与合并读取 ────────────────────────────────
@@ -134,3 +93,52 @@ def test_state_key_changes_after_write_and_stable_without(tmp_path):
     assert entries.state_key(tmp_path) == k1
     _put(tmp_path, "dev-a", "第二条")
     assert entries.state_key(tmp_path) != k1
+
+def test_simultaneous_append_and_manual_compact(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+
+    start = Barrier(2)
+
+    def append():
+        start.wait()
+        for i in range(50):
+            _put(tmp_path, "dev-a", str(i))
+
+    def compact():
+        start.wait()
+        for _ in range(10):
+            entries.compact(tmp_path, keep_days=0, device="dev-a")
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        writers = [pool.submit(append), pool.submit(compact)]
+        for task in writers:
+            task.result(timeout=10)
+    assert _texts(tmp_path) == {str(i) for i in range(50)}
+    assert sorted(ev["seq"] for ev in entries.read_events(tmp_path)) == list(range(1, 51))
+
+
+def test_repeated_full_compact_preserves_sequence(tmp_path):
+    _put(tmp_path, "dev-a", "第一条")
+    entries.compact(tmp_path, keep_days=0)
+    entries.compact(tmp_path, keep_days=0)
+    _put(tmp_path, "dev-a", "下一条")
+    assert list(entries._iter_jsonl(entries.journal_path(tmp_path, "dev-a")))[0]["seq"] == 2
+    assert _texts(tmp_path) == {"第一条", "下一条"}
+
+
+def test_offline_device_archives_replay_in_event_order(tmp_path):
+    import shutil
+
+    a, b = tmp_path / "a", tmp_path / "b"
+    e = entries.new_entry("甲区", "正文")
+    entries.append_event(a, "dev-a", {"op": "put", "id": e["id"], "entry": e, "ts": "2026-01-01"})
+    entries.append_event(a, "dev-a", {"op": "move", "id": e["id"], "section": "乙区", "ts": "2026-01-03"})
+    entries.append_event(b, "dev-b", {"op": "pin", "id": e["id"], "pinned": True, "ts": "2026-01-02"})
+    for root, device in [(a, "dev-a"), (b, "dev-b")]:
+        entries.compact(root, keep_days=0, device=device)
+        assert not entries.journal_path(root, device).exists()
+    shutil.copy2(entries.snapshot_path(a, "dev-a"), entries.snapshot_path(b, "dev-a"))
+    item = entries.replay(b)["entries"][e["id"]]["active"]
+    assert item["section"] == "乙区"
+    assert item["pinned"] is True

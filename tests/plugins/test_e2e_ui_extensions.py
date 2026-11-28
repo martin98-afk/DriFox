@@ -83,6 +83,42 @@ def test_plugin_unload_clears_all(fresh_registry, tmp_path):
     assert not fresh_registry.is_loaded("demo-plugin")
 
 
+def test_repeated_enable_preserves_module_and_explicit_reload_replaces_it(fresh_registry, tmp_path):
+    import sys
+
+    name = "demo-plugin"
+    root = _write_plugin(tmp_path)
+    assert fresh_registry.ensure_plugin_loaded(name, root)
+    original = sys.modules["ui_plugin_demo_plugin"]
+    for _ in range(10):
+        assert fresh_registry.ensure_plugin_loaded(name, root)
+        assert sys.modules["ui_plugin_demo_plugin"] is original
+    assert fresh_registry.reload_plugin(name, root)
+    assert sys.modules["ui_plugin_demo_plugin"] is not original
+    other_root = _write_plugin(tmp_path / "user")
+    assert fresh_registry.ensure_plugin_loaded(name, other_root)
+    assert Path(sys.modules["ui_plugin_demo_plugin"].__file__).parent.parent == other_root
+    assert fresh_registry.unload_plugin(name)
+
+
+def test_register_failure_releases_partial_ui(fresh_registry, tmp_path):
+    import sys
+
+    from tools.eol_guard import write_text_keep_eol
+
+    name = "partial-ui-test"
+    root = _write_plugin(tmp_path, name)
+    code = _PLUGIN_CODE.replace("demo-plugin", name)
+    write_text_keep_eol(root / "ui" / "__init__.py", code + "\n    raise ValueError('partial')\n")
+    assert not fresh_registry.ensure_plugin_loaded(name, root)
+    assert "ui_plugin_partial_ui_test" not in sys.modules
+    assert not fresh_registry.get_sidebar_items()
+    assert not fresh_registry.get_settings_cards()
+    write_text_keep_eol(root / "ui" / "__init__.py", code)
+    assert fresh_registry.ensure_plugin_loaded(name, root)
+    assert fresh_registry.unload_plugin(name)
+
+
 def test_plugin_reload_updates_registration(fresh_registry, tmp_path):
     """热重载：修改插件代码 → load_plugin 重新加载 → 新注册生效（旧注册被清）"""
     plugin_dir = _write_plugin(tmp_path)

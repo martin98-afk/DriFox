@@ -812,7 +812,7 @@ class Settings(QConfig):
     auto_start = ConfigItem("General", "AutoStart", False, BoolValidator())
 
     # 版本信息
-    current_version = "v0.7.6"
+    current_version = "v0.7.7"
     # 构建变体：pyqt5 | pyside6。同一 Release 同时挂两套安装包，更新器据此选包，
     # 插件市场据此选官方插件库分支（pyqt5 → main，pyside6 → pyside6）。
     # CI 构建期由 release.yml 的 Inject build_variant 步骤按 matrix 覆写，缺省取本分支值。
@@ -922,10 +922,11 @@ class Settings(QConfig):
         "interject",
         OptionsValidator(["interject", "queue"]),
     )
-    # 全局字体设置
-    llm_font_family = ConfigItem("LLM", "FontFamily", "楷体")
+    # 对话正文；沿用原存储键，空字符串表示跟随系统字体。
+    llm_font_family = ConfigItem("LLM", "FontFamily", "")
 
     # ========== UI appearance ==========
+    ui_font_family = ConfigItem("UI", "FontFamily", "")
     # 界面字号档位：delta 键 "-5".."10"（实际字号 = 14 + delta，步进 1px）
     class _FontSizeValidator(OptionsValidator):
         """字号档位校验：旧档位键（small/medium/large/superlarge）读取时自动迁移到 delta 键"""

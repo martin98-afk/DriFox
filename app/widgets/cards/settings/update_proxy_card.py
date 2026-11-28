@@ -30,12 +30,12 @@ from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtWidgets import QFrame, QHBoxLayout, QLabel, QVBoxLayout, QWidget
 from qfluentwidgets import (
     ExpandSettingCard,
-    FluentIcon,
     InfoBar,
     InfoBarPosition,
     LineEdit,
     PushButton,
 )
+from app.utils.app_icon import AppIcon
 
 from app.utils import update_proxy
 from app.utils.config import Settings
@@ -194,7 +194,7 @@ class UpdateProxyCard(DynamicHeightExpandCardMixin, ExpandSettingCard):
 
     def __init__(self, parent=None):
         super().__init__(
-            FluentIcon.GLOBE,
+            AppIcon.GLOBE,
             "更新下载代理",
             "决定安装包下载走哪条网络路径",
             parent,

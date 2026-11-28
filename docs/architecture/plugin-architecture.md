@@ -606,3 +606,11 @@ r = session.turn(messages=msgs, tools=[], timeout=180)
 - 现状：backend watchfiles 与 PluginToolWatcher 轮询两套机制并存。
 - 方案：合并为单一 PluginWatcher，插件侧注册 `on_change(component)` 回调替代 backend 手写 if/elif。
 - 收益：一套扫描/去重/分派逻辑；组件 reloader 注册表（建议①）即 watcher 的回调表，二合一。
+
+## 上下文流水线与前缀缓存
+
+主聊天和子智能体把本批新工具结果交给 `ContextPipeline.ingest_tool_results`。入库按每层自身阈值执行规范化、落盘、JSON 骨架化和截断。落盘层从本次 `ContextView.session_id` 读取归属，同一调用与同一内容在所属会话内产生稳定路径。
+
+新工具消息随会话保存内部标记 `_context_ingested`。内置 tier 在发送和 UI 投影时复用定稿文本，后续调整阈值只影响新结果。旧会话沿用已存的工具文本和逐条截断兼容路径；规范化和 JSON 骨架化只在首次入库时执行，避免重写旧日志或旧 JSON。Chat Completions 与 Responses 序列化器只发送协议字段。
+
+每次模型调用前按消息、工具定义及输出预留估算预算。超过预算会记录本地日志，估算过程只读。正常续轮追加消息；跨窗口的上下文交接仍由 `system-handoff` 管理。

@@ -24,7 +24,7 @@ import re
 from collections import OrderedDict
 from typing import Any, Dict, List
 
-from app.plugins.contracts.context_policy import ALL_STAGES, CACHE_NONE, TierOutcome
+from app.plugins.contracts.context_policy import CACHE_NONE, STAGE_INGEST, TierOutcome, needs_tool_projection
 from app.plugins.sdk import cfg_int
 
 # 触发骨架化的 JSON 正文长度（字符）
@@ -128,7 +128,7 @@ class ToolResultShapeTier:
     order = 18
     # 设置页细项行副标题（component_items 走 AST 静态读取，仅支持字面量）
     description = "超长 JSON 工具结果保留结构骨架（键名、数组头尾、长串截断），输出仍是合法 JSON，避免字符截断切碎结构；非 JSON 内容不动"
-    stages = frozenset(ALL_STAGES)
+    stages = frozenset({STAGE_INGEST})
     cache_impact = CACHE_NONE
 
     def _limit(self) -> int:
@@ -137,7 +137,7 @@ class ToolResultShapeTier:
     def should_apply(self, view) -> bool:
         limit = self._limit()
         for m in view.messages:
-            if m.get("role") != "tool":
+            if not needs_tool_projection(m):
                 continue
             c = m.get("content")
             if isinstance(c, str) and len(c) > limit and _JSON_START_RE.match(c):
@@ -150,7 +150,7 @@ class ToolResultShapeTier:
         changed = 0
         for m in view.messages:
             c = m.get("content")
-            if m.get("role") == "tool" and isinstance(c, str) and len(c) > limit:
+            if needs_tool_projection(m) and isinstance(c, str) and len(c) > limit:
                 new_content = shape_json_text(c)
                 if new_content != c:
                     m = {**m, "content": new_content}

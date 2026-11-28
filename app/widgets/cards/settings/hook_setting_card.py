@@ -22,12 +22,12 @@ from PyQt5.QtWidgets import (
 from qfluentwidgets import (
     BodyLabel,
     ExpandSettingCard,
-    FluentIcon,
     isDarkTheme,
     PushButton,
     SwitchButton,
     ToolButton,
 )
+from app.utils.app_icon import AppIcon
 
 from typing import Dict
 
@@ -304,12 +304,12 @@ class HookItem(QWidget):
         self.switch.setChecked(self._hook_data.get("enabled", True))
 
         # 编辑/删除按钮（所有来源都可用）
-        self.editBtn = ToolButton(FluentIcon.EDIT)
+        self.editBtn = ToolButton(AppIcon.EDIT)
         self.editBtn.setFixedSize(Sizes.TOOL_BUTTON_SZ)
         self.editBtn.setStyleSheet(ButtonStyles.tool_button())
         self.editBtn.clicked.connect(lambda: self.edited.emit(self.hook_id))
 
-        self.delBtn = ToolButton(FluentIcon.CLOSE)
+        self.delBtn = ToolButton(AppIcon.CLOSE)
         self.delBtn.setFixedSize(Sizes.TOOL_BUTTON_SZ)
         self.delBtn.setStyleSheet(ButtonStyles.tool_button())
         self.delBtn.clicked.connect(lambda: self.removed.emit(self.hook_id))
@@ -1131,7 +1131,7 @@ class HookListSettingCard(ExpandSettingCard):
         self.viewLayout.setAlignment(Qt.AlignTop)
         self.viewLayout.setContentsMargins(8, 0, 8, 0)
 
-        self.addButton = PushButton("添加", self, FluentIcon.ADD)
+        self.addButton = PushButton("添加", self, AppIcon.ADD)
         self.addButton.setObjectName("_hook_add_btn")
         self.addButton.clicked.connect(self.showAddHookCard.emit)
 

@@ -162,12 +162,18 @@ def replay_theme_qss(root: Any) -> int:
     except Exception as e:
         logger.warning(f"[theme_style] Colors.refresh 失败: {e}")
 
+    from app.utils.design_tokens import make_card_content_opaque
+
     count = 0
     stack = [root]
     while stack:
         obj = stack.pop()
         if obj is None:
             continue
+        # 插件通过 SDK 设置的滚动底色也随页面重放，沿用每张卡自己的透明度。
+        alpha = getattr(obj, "_drifox_card_surface_alpha", None)
+        if isinstance(alpha, int):
+            make_card_content_opaque(obj, alpha)
         if apply_theme_qss(obj, ensure_colors=False):
             count += 1
         try:
@@ -184,10 +190,8 @@ def replay_theme_qss(root: Any) -> int:
 # 登记位：控件上的 Python 属性，值是「该控件最后一次刷到哪个外观纪元」。
 # None / 缺失 = 从未刷过或已置脏。随 C++ 对象销毁自然消失，无全局表。
 _THEME_EPOCH_ATTR = "_drifox_theme_epoch"
-# 每个控件应调用的样式刷新方法名，按优先级探测（插件约定 refresh_style 优先；
-# refresh_theme 排最后——它是宿主窗口的 ThemeManager 协议名，插件内容页历史上
-# 也用过，放末尾兼容但不抢占插件自己的约定）
-_STYLE_METHODS = ("refresh_style", "_apply_latest_theme", "_apply_theme", "_retheme", "refresh_theme")
+# 优先使用插件约定的 refresh_style，再兼容既有插件的主题刷新方法。
+_STYLE_METHODS = ("refresh_style", "_apply_latest_theme", "_apply_theme", "_retheme", "refresh_theme", "apply_theme")
 
 
 def mark_theme_dirty(widget: Any) -> None:
@@ -245,8 +249,24 @@ def _style_method(widget: Any) -> Optional[Callable[..., Any]]:
         except RuntimeError:
             return None  # C++ 对象已销毁
         if callable(method):
+            if name == "apply_theme":
+                try:
+                    inspect.signature(method).bind()
+                except (TypeError, ValueError):
+                    continue
             return method
     return None
+
+
+def refresh_page_theme(widget: QWidget) -> None:
+    """可见的插件页原地更新，后台页在下次显示时补刷。"""
+    try:
+        if widget.isVisible():
+            ensure_theme_fresh(widget)
+        else:
+            mark_theme_dirty(widget)
+    except RuntimeError:
+        pass  # 页面已销毁
 
 
 def ensure_theme_fresh(widget: Any) -> bool:

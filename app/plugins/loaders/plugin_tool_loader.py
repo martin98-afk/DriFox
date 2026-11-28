@@ -34,6 +34,7 @@ from typing import Callable, Dict, List, Optional, Set, Tuple
 
 from loguru import logger
 
+from app.plugins.loaders._roots import _is_selected_plugin_dir
 from app.plugins.loaders._roots import (
     _ROOT_KIND_PRIORITY,
     _ROOT_KIND_SYSTEM,
@@ -63,7 +64,7 @@ def _iter_tool_modules(plugin_root: Path):
     if not plugin_root.is_dir():
         return
     for plugin_dir in sorted(plugin_root.iterdir()):
-        if not plugin_dir.is_dir():
+        if not plugin_dir.is_dir() or not _is_selected_plugin_dir(plugin_dir):
             continue
         tools_dir = plugin_dir / "tools"
         if tools_dir.is_dir():
@@ -359,6 +360,10 @@ def _run_register(
     的 _loaded 漏记被覆盖工具，用户插件删除后系统插件无法恢复。
     """
     module = _load_module(plugin_name, py_path, root_kind=_root_kind(root))
+    return _register_module(registry, plugin_name, module, root, root_tracker)
+
+
+def _register_module(registry, plugin_name, module, root, root_tracker) -> Set[str]:
     register_fn = getattr(module, "register", None) if module else None
     if not callable(register_fn):
         return set()
@@ -705,14 +710,15 @@ class PluginToolWatcher:
                     if pname != plugin_name:
                         continue
                     try:
-                        _load_module(plugin_name, py, root_kind=_root_kind(root_path))
+                        module = _load_module(plugin_name, py, root_kind=_root_kind(root_path))
                     except Exception as e:
                         logger.warning(
                             f"[PluginToolLoader] 插件 {plugin_name} 新模块加载失败，"
                             f"保留旧注册（last-known-good）: {e}"
                         )
                         return
-                    pending.append((root_path, py))
+                    if module is not None:
+                        pending.append((root_path, module))
 
             with self._registry.notify_batch():
                 tool_names = set(self._loaded.get(plugin_name, set()))
@@ -751,10 +757,11 @@ class PluginToolWatcher:
                     logger.warning(f"[PluginToolLoader] 跳过被门禁拦截插件的工具: {plugin_name}")
                     return
                 new_names: Set[str] = set()
-                for root_path, py in pending:
+                for root_path, module in pending:
+                    sys.modules[module.__name__] = module
                     try:
                         new_names.update(
-                            _run_register(self._registry, plugin_name, py, root_path, self._root_tracker)
+                            _register_module(self._registry, plugin_name, module, root_path, self._root_tracker)
                         )
                     except Exception as e:
                         # exec 已在试加载阶段验证通过；此处失败属 register 期错误，

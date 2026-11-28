@@ -109,6 +109,35 @@ class TestRegistrySharing:
         assert reg.acquire(png, 12) is not src
 
 class TestClockLifecycle:
+    def test_shared_source_only_notifies_visible_layers(self, png):
+        src = AnimationRegistry.instance().acquire(png)
+        clock = BackgroundClock.instance()
+        layers = [_FakeLayer(visible=i == 0) for i in range(8)]
+        for layer in layers:
+            src.subscribe(layer)
+        clock.track(src)
+        clock._tick()
+        assert [len(layer.frames) for layer in layers] == [1, 0, 0, 0, 0, 0, 0, 0]
+
+    def test_destroyed_qt_layer_releases_decoder_with_python_reference(self, png):
+        from PyQt5 import sip
+        from PyQt5.QtWidgets import QWidget
+
+        reg = AnimationRegistry.instance()
+        src = reg.acquire(png)
+        layer = QWidget()
+        src.subscribe(layer)
+        src.register_geometry(id(layer), (32, 32, "cover", "center"))
+        clock = BackgroundClock.instance()
+        clock.track(src)
+        sip.delete(layer)
+        clock._tick()
+        assert not src._geometries
+        assert png not in reg._sources
+        src._prefetch_thread.join(timeout=2)
+        assert not src._prefetch_thread.is_alive()
+        assert not src._prefetch
+
     def test_track_starts_timer(self, png):
         clock = BackgroundClock()
         clock.track(AnimationSource(png, 12))

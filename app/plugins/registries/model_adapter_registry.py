@@ -18,6 +18,8 @@ from app.plugins.contracts.model_adapter import ModelAdapter
 class ModelAdapterRegistry:
     """适配器注册表：register 覆盖同名；resolve 取 matches 最大者，无匹配返回 None"""
 
+    reload_fields = ("_adapters",)
+
     def __init__(self) -> None:
         self._adapters: Dict[str, Tuple[ModelAdapter, str]] = {}  # id -> (adapter, source)
         self._lock = threading.Lock()

@@ -139,8 +139,7 @@ def _reload_ui(ctx: ReloadContext) -> Any:
         UIPluginRegistry.get_instance().unload_plugin(ctx.plugin_name)
         logger.info(f"[builtin_reloaders] ui 组件已停用，已卸载: {ctx.plugin_name}")
         return True
-    UIPluginRegistry.get_instance().reload_plugin(ctx.plugin_name, ctx.plugin.path)
-    return True
+    return UIPluginRegistry.get_instance().reload_plugin(ctx.plugin_name, ctx.plugin.path)
 
 
 def _reload_tools(ctx: ReloadContext) -> Any:
@@ -206,9 +205,8 @@ def _reload_model_adapters(ctx: ReloadContext) -> Any:
         if watcher is not None:
             if ctx.plugin is None:
                 watcher.unload_plugin(ctx.plugin_name)
-            else:
-                watcher.reload_plugin(ctx.plugin_name)
-            return True
+                return True
+            return watcher.reload_plugin(ctx.plugin_name) is not False
     except Exception as e:
         logger.warning(f"[builtin_reloaders] model_adapters 重载失败: {e}")
     return False
@@ -223,9 +221,8 @@ def _reload_loop_policies(ctx: ReloadContext) -> Any:
         if watcher is not None:
             if ctx.plugin is None:
                 watcher.unload_plugin(ctx.plugin_name)
-            else:
-                watcher.reload_plugin(ctx.plugin_name)
-            return True
+                return True
+            return watcher.reload_plugin(ctx.plugin_name) is not False
     except Exception as e:
         logger.warning(f"[builtin_reloaders] loop_policies 重载失败: {e}")
     return False
@@ -240,9 +237,8 @@ def _reload_hook_policies(ctx: ReloadContext) -> Any:
         if watcher is not None:
             if ctx.plugin is None:
                 watcher.unload_plugin(ctx.plugin_name)
-            else:
-                watcher.reload_plugin(ctx.plugin_name)
-            return True
+                return True
+            return watcher.reload_plugin(ctx.plugin_name) is not False
     except Exception as e:
         logger.warning(f"[builtin_reloaders] hook_policies 重载失败: {e}")
     return False
@@ -257,9 +253,8 @@ def _reload_transports(ctx: ReloadContext) -> Any:
         if watcher is not None:
             if ctx.plugin is None:
                 watcher.unload_plugin(ctx.plugin_name)
-            else:
-                watcher.reload_plugin(ctx.plugin_name)
-            return True
+                return True
+            return watcher.reload_plugin(ctx.plugin_name) is not False
     except Exception as e:
         logger.warning(f"[builtin_reloaders] transports 重载失败: {e}")
     return False
@@ -274,9 +269,8 @@ def _reload_stream_sinks(ctx: ReloadContext) -> Any:
         if watcher is not None:
             if ctx.plugin is None:
                 watcher.unload_plugin(ctx.plugin_name)
-            else:
-                watcher.reload_plugin(ctx.plugin_name)
-            return True
+                return True
+            return watcher.reload_plugin(ctx.plugin_name) is not False
     except Exception as e:
         logger.warning(f"[builtin_reloaders] stream_sinks 重载失败: {e}")
     return False
@@ -291,9 +285,8 @@ def _reload_storages(ctx: ReloadContext) -> Any:
         if watcher is not None:
             if ctx.plugin is None:
                 watcher.unload_plugin(ctx.plugin_name)
-            else:
-                watcher.reload_plugin(ctx.plugin_name)
-            return True
+                return True
+            return watcher.reload_plugin(ctx.plugin_name) is not False
     except Exception as e:
         logger.warning(f"[builtin_reloaders] storages 重载失败: {e}")
     return False
@@ -308,9 +301,8 @@ def _reload_serializers(ctx: ReloadContext) -> Any:
         if watcher is not None:
             if ctx.plugin is None:
                 watcher.unload_plugin(ctx.plugin_name)
-            else:
-                watcher.reload_plugin(ctx.plugin_name)
-            return True
+                return True
+            return watcher.reload_plugin(ctx.plugin_name) is not False
     except Exception as e:
         logger.warning(f"[builtin_reloaders] serializers 重载失败: {e}")
     return False
@@ -325,9 +317,8 @@ def _reload_engines(ctx: ReloadContext) -> Any:
         if watcher is not None:
             if ctx.plugin is None:
                 watcher.unload_plugin(ctx.plugin_name)
-            else:
-                watcher.reload_plugin(ctx.plugin_name)
-            return True
+                return True
+            return watcher.reload_plugin(ctx.plugin_name) is not False
     except Exception as e:
         logger.warning(f"[builtin_reloaders] engines 重载失败: {e}")
     return False
@@ -381,51 +372,37 @@ def _reload_gateways(ctx: ReloadContext) -> Any:
             mgr.stop_plugin_platforms(ctx.plugin_name, wait=True)
 
         # 2. 清理 module 引用（彻底去除依赖）
-        _purge_gateway_plugin_modules(ctx.plugin_name)
+        if ctx.plugin is None:
+            _purge_gateway_plugin_modules(ctx.plugin_name)
 
         # 3. 精准注销/重载：删除路径 unload_plugin；更新路径 reload_plugin
         watcher = ensure_gateway_watcher()
-        if watcher is not None:
-            if ctx.plugin is None:
-                watcher.unload_plugin(ctx.plugin_name)
-            else:
-                watcher.reload_plugin(ctx.plugin_name)
+        if watcher is None:
+            return False
+        ok = True
+        if ctx.plugin is None:
+            watcher.unload_plugin(ctx.plugin_name)
+        else:
+            ok = watcher.reload_plugin(ctx.plugin_name) is not False
 
         # 4. 更新路径：用新 def 重建 adapter（热更新生效）
         if ctx.plugin is not None and mgr is not None:
             mgr.rebuild_plugin_platforms(ctx.plugin_name, restart_if_running=True)
-        return True
+        return ok
     except Exception as e:
         logger.warning(f"[builtin_reloaders] gateways 重载失败: {e}")
     return False
 
 
 def _reload_context_policies(ctx: ReloadContext) -> Any:
-    """context_tiers / budget_resolvers 分支：精准卸载/重载单插件
+    """两类贡献各自替换，仅整插件卸载时由宿主分别派发清理。"""
+    from app.plugins.loaders.runtime_component_loader import _persistent_loader
 
-    两类组件共用 ContextPolicyRegistry 与同一个 watcher（扫 context_tiers 目录）；
-    budget_resolvers 的变更由同插件的 context_tiers 重载一并覆盖（registry 按
-    plugin:<name> source 清理，两类条目同 source）。
-    """
-    from app.plugins.loaders.runtime_component_loader import (
-        _persistent_loader,
-        ensure_context_watcher,
-    )
-
-    watcher = ensure_context_watcher()
-    if watcher is None:
-        return False
-    # 用模块级持久 loader（_persistent_loader）而非 _make_budget_resolver_loader()
-    # 临时实例：临时实例的 _occupied/_sources 是空的，unload/reload 时看不见
-    # warmup 那一轮注册占用的 item id → 精准卸载漏项、跨根覆盖判定失真。
-    budget_loader = _persistent_loader("budget_resolvers")
+    loader = _persistent_loader(ctx.component)
     if ctx.plugin is None:
-        watcher.unload_plugin(ctx.plugin_name)
-        budget_loader.unload_plugin(ctx.plugin_name)
-    else:
-        watcher.reload_plugin(ctx.plugin_name)
-        budget_loader.reload_plugin(ctx.plugin_name)
-    return True
+        loader.unload_plugin(ctx.plugin_name)
+        return True
+    return loader.reload_plugin(ctx.plugin_name)
 
 
 # 运行时句柄：backend 初始化后注入（避免循环 import — reloader 不能 import backend）

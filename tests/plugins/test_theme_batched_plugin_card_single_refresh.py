@@ -150,3 +150,15 @@ def test_batched_scope_merge_same_type_stays(monkeypatch, qapp):
         OpenAIChatToolWindow._on_settings_config_changed(win_self)
 
     assert OpenAIChatToolWindow._theme_batch_scope == "font_size"
+
+
+def test_deferred_theme_survives_later_font_change():
+    from types import SimpleNamespace
+
+    from app.utils.theme_refresh import ThemeRefreshCoordinator
+
+    window = SimpleNamespace(_theme_needs_refresh=True, _theme_needs_refresh_scope="theme")
+    assert ThemeRefreshCoordinator.pending_window_scope(window, "theme") == "theme"
+    window._theme_needs_refresh_scope = ThemeRefreshCoordinator.pending_window_scope(window, "font_size")
+    assert ThemeRefreshCoordinator.pending_window_scope(window, "font_family") is None
+    assert window._theme_needs_refresh_scope is None

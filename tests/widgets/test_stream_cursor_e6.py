@@ -2,7 +2,7 @@
 """[E6] 游标化批实施回归测试：流式主链 O(n²) 消除后的行为等价锁定。
 
 覆盖四块，全部围绕「逐字节等价」这一硬门槛：
-1. 项5 _stream_text_snapshot 游标推进：parts 不清空 + solid 指针，
+1. 项5 _stream_text_snapshot 采样后释放片段，
    无新段拍 O(1) 直返（acc 对象身份不变），有新段只拼新增。
 2. 项1 append_text 块级 "_pend" + _solidify_text_blocks 固化：随机切分
    （含 1 字符 chunk / emoji 中点劈开 / <think> 劈开 / fence 行劈开）逐字节
@@ -74,27 +74,23 @@ def test_snapshot_cursor_byte_equivalence(qapp):
 
 
 def test_snapshot_no_new_parts_returns_cached_acc(qapp):
-    """无新段拍：solid 不动、acc 对象身份不变（O(1) 直返，无重拼拷贝）。"""
+    """采样后不再保留片段，无新文本时返回相同快照。"""
     card = _make_card()
     card.update_content("AAAA")
     acc1 = card._stream_text_snapshot()
-    solid1 = card._stream_text_parts_solid
-    # 无新 chunk 的采样拍：直返缓存 acc（同一对象），游标不动
+    assert card._stream_text_parts == []
     acc2 = card._stream_text_snapshot()
     assert acc2 is acc1
-    assert card._stream_text_parts_solid == solid1 == 1
 
 
-def test_snapshot_clear_resets_solid(qapp):
-    """_stream_text_clear 后 solid 同步复位，新流从头累计。"""
+def test_snapshot_clear_resets_pending_and_delta(qapp):
+    """清空后新流从头累计，增量采样从零开始。"""
     card = _make_card()
     card.update_content("AAAA")
-    card._stream_text_snapshot()
-    assert card._stream_text_parts_solid == 1
+    assert card._footer_stat_context(streaming=True)["live_text"] == "AAAA"
     card._stream_text_clear()
-    assert card._stream_text_parts_solid == 0
-    card.update_content("XY")
-    assert card._stream_text_snapshot() == "XY"
+    card.update_content("XY123")
+    assert card._footer_stat_context(streaming=True)["live_text_delta"] == "XY123"
 
 
 def test_snapshot_multiple_readers_idempotent(qapp):
@@ -108,7 +104,7 @@ def test_snapshot_multiple_readers_idempotent(qapp):
     c2 = card._stream_text_snapshot()
     assert a == b == "AA"
     assert c1 is c2 == "AABB"
-    assert card._stream_text_parts_solid == 2
+    assert card._stream_text_parts == []
 
 
 # ── 项1：append_text "_pend" + 固化等价 ──────────────────────────
@@ -224,11 +220,11 @@ def test_proto_state_matches_fulltext_fuzz(qapp):
     fence：text_so_far 以 \\n 收尾的拍严格等价（尾行完整 → fence_carry 空）；
     其余拍状态机可能延后一拍（设计内语义，终态补 \\n 后对拍兜底）。
     """
+    card = _make_card()
     for seed in (7, 101, 999, 31415, 2026):
         rng = random.Random(seed)
         for round_no in range(40):
             text = _fuzz_text(rng)
-            card = _make_card()
             card._proto_state_reset()
             st = card._proto_state
             so_far = ""
@@ -267,6 +263,28 @@ def test_proto_state_chunk_split_protocol_marks(qapp):
     got = card._proto_scan_chunk(st, "nk> tail")
     assert got == (False, False, False, False)  # 闭合，carry 清空
     assert st["carry"] == ""
+
+
+def test_split_plugin_tag_only_queries_registry_for_candidates(qapp, monkeypatch):
+    card = _make_card()
+    card._proto_state_reset()
+    calls = []
+
+    def tags():
+        calls.append(1)
+        return ["test-tag"]
+
+    monkeypatch.setattr(mc, "_registered_tag_names_safe", tags)
+    scan = card._proto_scan_chunk
+    state = card._proto_state
+    scan(state, "正文")
+    assert calls == []
+    scan(state, "<<test-")
+    assert scan(state, "tag>")[1]
+    assert scan(state, "正文")[1]
+    scan(state, "</test-")
+    assert not scan(state, "tag>")[1]
+    assert len(calls) == 4
 
 
 def test_proto_state_reset_between_streams(qapp):

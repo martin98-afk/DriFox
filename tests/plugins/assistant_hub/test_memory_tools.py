@@ -143,6 +143,9 @@ class _Mgr:
         self.gate_calls += 1
         return self.gate_text
 
+    def memory_usage_chars(self, aid):
+        return {"global": len(self.read_global_memory(aid))}
+
     def memory_max_chars(self, aid=""):
         return {"global": 4000, "project": 3000}
 

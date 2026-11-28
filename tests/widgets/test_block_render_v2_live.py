@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import json as stdlib_json
+import re
 import sys
 from typing import Any, Dict, List, Optional
 
@@ -111,7 +112,49 @@ def _long_text(n: int = 600) -> str:
     return "段落内容测试。" * (n // 7 + 1)
 
 
+def test_prose_markup_matches_streaming_prefixes():
+    reference = re.compile(r"[`~*#<>\[\]_|$\\&]|(?:^|\n)\s*(?:[-+=>:]|\d+[.)]\s| {4}|\t)")
+    for lead in ("", "正文", "正文\n\n", "\r\n \n\u3000", "\n   "):
+        for token in ("１2)\u00a0", "1. ", "-", "+", "=", ":", "    ", "\t", *"`~*#<>[]_|$\\&"):
+            text = lead + token + "余文"
+            for end in range(len(lead), len(text) + 1):
+                prefix = text[:end]
+                assert CodeWebViewer._has_prose_markup(prefix) == bool(reference.search(prefix)), repr(prefix)
+    assert not CodeWebViewer._has_prose_markup("段落" + "\n" * 1500 + "继续")
+
+
+def test_clean_boundary_matches_trimmed_suffix():
+    for ending in ("", "\n\n", "</think>", "```", "~~~", "~~~x", "``", "正文"):
+        for trailing in ("", "\n", " \r\n", "\u3000\u00a0", "\t", "\n\n"):
+            text = "中间有 ``` 和 </think> 的长正文。" * 100 + ending + trailing
+            expected = text.endswith("\n\n") or text.rstrip().endswith(("</think>", "```", "~~~"))
+            assert CodeWebViewer._has_reached_clean_boundary(text) == expected
+
+
 # ── 1. render 层：live key 恒定，内容增长不产生 patch ────────────────
+
+
+def test_compact_first_burst_reveals_only_new_message(monkeypatch):
+    text = '首段内容' * 14
+    blocks = [{'type': 'text', 'text': text}]
+    v = _make_viewer(monkeypatch, blocks)
+    monkeypatch.setattr(CodeWebViewer, '_tool_compact_mode', property(lambda self: True))
+    monkeypatch.setattr(CodeWebViewer, '_v2_render_ctx', lambda self: RenderCtx(compact=True, streaming=True))
+    assert v._perform_update_v2()
+    js = ''.join(v._page.js_calls)
+    assert text[:8] in js and text not in js
+    assert f'''window._v2LiveAppend('content-placeholder',"live:0","{text[8:]}",false)''' in js
+
+    v._page.js_calls.clear()
+    blocks[0]['text'] += '续写'
+    assert v._perform_update_v2()
+    assert f'''window._v2LiveAppend('content-placeholder',"live:0","续写",false)''' in ''.join(v._page.js_calls)
+
+    v._page.js_calls.clear()
+    v._needs_full_render = True
+    assert v._perform_update_v2()
+    js = ''.join(v._page.js_calls)
+    assert text + '续写' in js and "window._v2LiveAppend('" not in js
 
 
 def test_live_block_identity_stable_across_growth():
@@ -267,6 +310,21 @@ def test_formalize_on_boundary_then_append_again(monkeypatch):
     assert "_v2LiveAppend(" in js or "_v2LiveSplit(" in js or "patchBlocks" in js
 
 
+@pytest.mark.parametrize('reasoning', [False, True])
+def test_formalize_patch_matches_live_key(monkeypatch, reasoning):
+    field = 'content' if reasoning else 'text'
+    blocks = [{'type': 'reasoning' if reasoning else 'text', field: '首段' * 300}]
+    v = _make_viewer(monkeypatch, blocks)
+    monkeypatch.setattr(CodeWebViewer, '_v2_render_ctx', lambda self: RenderCtx(streaming=True, compact=True))
+    assert v._perform_update_v2()
+    v._page.js_calls.clear()
+    blocks[0][field] += '**重点**' + '续写' * 220
+    assert v._perform_update_v2()
+    js = ''.join(v._page.js_calls)
+    ops = _patch_ops(js, 'content-placeholder') + _patch_ops(js, 'tool-content')
+    assert [item['key'] for op in ops for item in op['items']] == ['live:0']
+
+
 # ── 5. 文本回退 → 整卡重落地 ──────────────────────────────────────
 
 
@@ -288,14 +346,14 @@ def test_rollback_forces_full_reload(monkeypatch):
 # ── 6. 门槛以下不启用 ─────────────────────────────────────────────
 
 
-def test_short_text_keeps_regular_path(monkeypatch):
+def test_compact_short_prose_enters_live_path(monkeypatch):
     blocks = [{"type": "text", "text": "短文本"}]
     v = _make_viewer(monkeypatch, blocks)
     assert v._perform_update_v2() is True
     js = "".join(v._page.js_calls)
     ops = _patch_ops(js, "content-placeholder")
-    assert ops and ops[0]["items"][0]["key"] != "live:0"
-    assert v._v2_live_key == ""
+    assert ops and ops[0]["items"][0]["key"] == "live:0"
+    assert v._v2_live_active([{'type': 'text', 'text': '**短文本**'}], 0) is None
 
 
 # ── 7. 骨架 JS 防线：新增的两个函数必须真实存在且语法有效 ──────────
@@ -382,6 +440,7 @@ def _build_skeleton_html() -> str:
     v._v2_last = None
     v.page = lambda: page
     v.setHtml = lambda html, url=None: captured.setdefault("html", html)
+    v._doc_resize_quiet_timer = None
     v.ensure_transparent_composition = lambda: None
     v._load_skeleton()
     return captured.get("html", "")

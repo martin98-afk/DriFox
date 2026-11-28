@@ -41,9 +41,9 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 from qfluentwidgets import (
-    FluentIcon as FIF,
     ScrollArea,
 )
+from app.utils.app_icon import AppIcon as FIF
 from qfluentwidgets import (
     TransparentToolButton,
     isDarkTheme,
@@ -59,13 +59,13 @@ from app.utils.design_tokens import (
     Colors,
     font_size_css,
     get_unified_scrollbar_style,
+    make_scroll_content_opaque,
     scale_font_size,
     scale_icon_size,
     set_style_sheet_if_changed,
 )
 from app.utils.motion import retarget
 from app.utils.scroll_tuning import install_fast_wheel
-from app.utils.theme_manager import theme_manager
 from app.utils.utils import get_font_family_css, get_icon, get_unified_font
 from app.widgets.cards.settings.gitee_card import GiteeAccountRow
 from app.widgets.elided_label import _ElidedLabel
@@ -616,7 +616,7 @@ class TabItem(QFrame):
         self._pin_btn.clicked.connect(lambda *_a: self.pinToggleRequested.emit())
         layout.addWidget(self._pin_btn)
 
-        # 关闭按钮（与主标题栏一致的 FluentIcon.CLOSE，支持内联二次确认）
+        # 关闭按钮（与主标题栏一致的 AppIcon.CLOSE，支持内联二次确认）
         self._close_btn = TransparentToolButton(self)
         self._close_btn.setIcon(FIF.CLOSE)
         self._close_btn.setFixedSize(20, 20)
@@ -1836,8 +1836,6 @@ class TabPanel(QWidget):
         self._tree_snapshot = None  # 树节点签名，用于跳过无变化的重建
         self._plugin_divider: Optional[QFrame] = None  # 常驻区 pin ↔ 非 pin 的分隔线（重建时重建）
         self._setup_ui()
-        # 注册主题刷新回调：主题/字体变更后刷新所有 Tab 项样式
-        theme_manager.register_refresh_target(self)
 
     # ══════════════════════════════════════════════════════════
     # 分隔线 QSS（三条共用一个生成入口）
@@ -1942,14 +1940,7 @@ class TabPanel(QWidget):
         self._custom_plugin_layout = custom_plugin_layout
         self._custom_plugin_section.setStyleSheet("background: transparent;")
         self._custom_plugin_scroll.setWidget(self._custom_plugin_section)
-        # 内容层不透明实底：启用 Qt 滚动位块传输（blit），否则每滚动一步全视口
-        # 重绘（实测 200 行列表 30 次 paint/步 → 4 次）。必须在 setWidget 之后。
-        # 底色 = #tabFrame(CARD_BG a150) 叠窗口 CONTENT_BG 的等价实色，视觉不变。
-        from app.utils.design_tokens import Colors, make_scroll_content_opaque
-
-        make_scroll_content_opaque(
-            self._custom_plugin_section, Colors.CARD_BG.format(alpha=255), 150, Colors.CONTENT_BG
-        )
+        self._apply_scroll_surface(self._custom_plugin_section)
         self._custom_plugin_scroll.setVisible(False)
         card_layout.addWidget(self._custom_plugin_scroll)
 
@@ -2038,14 +2029,7 @@ class TabPanel(QWidget):
         self._list_layout.setSpacing(2)
         self._list_layout.addStretch()
         self._scroll_area.setWidget(self._list_widget)
-        # 内容层不透明实底：启用 Qt 滚动位块传输（blit），否则每滚动一步全视口
-        # 重绘（实测 200 行列表 30 次 paint/步 → 4 次）。必须在 setWidget 之后。
-        # 底色 = #tabFrame(CARD_BG a150) 叠窗口 CONTENT_BG 的等价实色，视觉不变。
-        from app.utils.design_tokens import Colors, make_scroll_content_opaque
-
-        make_scroll_content_opaque(
-            self._list_widget, Colors.CARD_BG.format(alpha=255), 150, Colors.CONTENT_BG
-        )
+        self._apply_scroll_surface(self._list_widget)
         layout.addWidget(self._scroll_area, 1)
 
         # ── 中间（树模式）：工作区树 项目 → 工作树 → 会话 ──
@@ -2097,14 +2081,7 @@ class TabPanel(QWidget):
         self._refresh_tree_header_style()
         self._tree_header.setVisible(False)
         self._tree_scroll.setWidget(self._tree_widget)
-        # 内容层不透明实底：启用 Qt 滚动位块传输（blit），否则每滚动一步全视口
-        # 重绘（实测 200 行列表 30 次 paint/步 → 4 次）。必须在 setWidget 之后。
-        # 底色 = #tabFrame(CARD_BG a150) 叠窗口 CONTENT_BG 的等价实色，视觉不变。
-        from app.utils.design_tokens import Colors, make_scroll_content_opaque
-
-        make_scroll_content_opaque(
-            self._tree_widget, Colors.CARD_BG.format(alpha=255), 150, Colors.CONTENT_BG
-        )
+        self._apply_scroll_surface(self._tree_widget)
         self._tree_scroll.setVisible(False)
         layout.addWidget(self._tree_scroll, 1)
 
@@ -4493,7 +4470,7 @@ class TabPanel(QWidget):
         装饰性**的无限循环动画，关掉后仍有静态状态色与图标反馈，不需要运动。
         放在这个唯一入口上，``set_resizing(False)`` 的恢复路径也自动受控。
         """
-        if not Animations.motion_enabled():
+        if self._is_resizing or not self.isVisible() or not Animations.motion_enabled():
             return
         if self._anim_timer is None:
             from PyQt5.QtCore import QTimer
@@ -4511,6 +4488,16 @@ class TabPanel(QWidget):
         if self._anim_timer and self._anim_timer.isActive():
             self._anim_timer.stop()
         self._anim_phase = 0.0
+
+    def hideEvent(self, event):
+        super().hideEvent(event)
+        if self._anim_timer is not None:
+            self._anim_timer.stop()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if self._streaming_count + self._question_count + self._error_count:
+            self._ensure_anim_timer()
 
     def set_resizing(self, active: bool):
         """设置 resize 活跃状态
@@ -4543,6 +4530,47 @@ class TabPanel(QWidget):
                 # 仅置 phase 不主动 update：下方 item.update() 会带出重绘）
                 item._icon_widget.set_status_ring(*item._ring_spec())
                 item.update()
+
+    @staticmethod
+    def _region_backdrop_visible() -> bool:
+        """窗口 / sidebar 区域是否配了可见背景（壁纸 / 动画 / 底色）
+
+        ★ 判据必须看**实际挂载点**：sidebar 背景 label 挂在 #tabFrame 上、
+        window 背景挂在窗口自身，两者都在本面板之下。任一存在时，滚动内容
+        层刷不透明实底就会把背景整块压掉（表现为标签页列表背景变成实心色块）。
+        """
+        try:
+            from app.utils.theme_manager import theme_manager
+
+            bgs = theme_manager.get_theme_backgrounds(theme_manager.get_current_theme_id())
+        except Exception:
+            return False
+        for area in ("sidebar", "window"):
+            cfg = bgs.get(area) or {}
+            if not cfg.get("enabled", True):
+                continue
+            if cfg.get("image") or cfg.get("color") or cfg.get("animation"):
+                return True
+        return False
+
+    @staticmethod
+    def _apply_scroll_surface(content) -> None:
+        """滚动内容层底色：无区域背景时刷等价实底启用 blit，有背景时保持透明
+
+        实底值 = CARD_BG a150 叠 CONTENT_BG 的预合成色，只在面板下方是纯色
+        时视觉等价；一旦主题给 window / sidebar 配了背景，合成色就对不上，
+        只能放弃 blit 优化换取半透明穿透。
+        """
+        if TabPanel._region_backdrop_visible():
+            try:
+                content.setAutoFillBackground(False)
+                pal = content.palette()
+                pal.setColor(content.backgroundRole(), QColor(0, 0, 0, 0))
+                content.setPalette(pal)
+            except RuntimeError:
+                pass  # widget 已销毁
+            return
+        make_scroll_content_opaque(content, Colors.CARD_BG.format(alpha=255), 150, Colors.CONTENT_BG)
 
     def _reapply_scroll_styles(self):
         """重新应用侧边两个滚动区的滚动条 QSS（含滚动条颜色跟随主题）。
@@ -4636,6 +4664,8 @@ class TabPanel(QWidget):
         # 重新应用侧边两个滚动区的滚动条 QSS（滚动条颜色随主题）
         _TRC.timer_start("tab_scroll")
         self._reapply_scroll_styles()
+        for content in (self._custom_plugin_section, self._list_widget, self._tree_widget):
+            self._apply_scroll_surface(content)
         _TRC.timer_end("tab_scroll")
         # 「工作区」标题行样式（颜色/字号随主题与字体缩放）
         _TRC.timer_start("tab_header")

@@ -55,7 +55,6 @@ from PyQt5.QtWidgets import (
 )
 from qfluentwidgets import (
     BodyLabel,
-    FluentIcon,
     MaskDialogBase,
     ScrollArea,
     SmoothScrollDelegate,
@@ -63,6 +62,8 @@ from qfluentwidgets import (
     TransparentToolButton,
     isDarkTheme,
 )
+from qfluentwidgets import FluentIcon, FluentIconBase
+from app.plugins.sdk import caps_for
 
 from .global_preview import GlobalPreviewDialog
 from .openwith import (
@@ -90,6 +91,8 @@ from .tree_widget import (
     RenameDelegate,
 )
 from .watcher import _DirWatcher
+
+icons = caps_for("ui.icons", plugin="file-tree", surface="ui") or FluentIcon
 
 # ── 常量 ──────────────────────────────────────────────────
 
@@ -140,6 +143,12 @@ def _text_color(secondary: bool = False) -> str:
         return "rgba(255,255,255,0.55)" if secondary else "rgba(255,255,255,0.9)"
     return "rgba(0,0,0,0.45)" if secondary else "rgba(0,0,0,0.85)"
 
+
+def _file_tree_context(ctx: dict) -> dict:
+    # 工作台页可能比会话窗口长寿。仅保留绘制和目录定位用到的值，
+    # backend 只作 WorkbenchPanel 的就绪标志，不持有后端实例。
+    fields = ("colors", "is_dark", "card_bg", "font_family", "font_size", "project_root")
+    return {**{k: ctx[k] for k in fields if k in ctx}, "backend": bool(ctx.get("backend"))}
 
 def _ctx_text_color(ctx: dict, secondary: bool = False) -> str:
     colors = ctx.get("colors", {})
@@ -216,10 +225,10 @@ class _MenuIconStyle(QProxyStyle):
         super().drawPrimitive(element, option, painter, widget)
 
 
-def _menu_icon(icon: FluentIcon, color: QColor) -> QIcon:
+def _menu_icon(icon: FluentIconBase, color: QColor) -> QIcon:
     """按主题文字色给菜单图标着色（菜单项用 icon 代替 emoji）
 
-    FluentIcon 资源是 SVG，``icon(theme=..., color=...)`` 才会重新着色；
+    AppIcon 资源是 SVG，``icon(theme=..., color=...)`` 才会重新着色；
     裸 ``icon()`` 取的是固定黑/白版，在亮底或暗底菜单里会看不清。
     """
     try:
@@ -423,12 +432,12 @@ class FileTreeCard(QWidget):
         # 浮动卡的取数链路（project_root / 主题色 / 字体等字段同构）
         # 挂到实例属性：WorkbenchPanel._page_context_incomplete 据此检测
         # 「启动早期宿主未就绪 → 拿到残缺 context」的坏页并触发重建
-        self._context = context if isinstance(context, dict) else {}
+        self._context = _file_tree_context(context) if isinstance(context, dict) and context else {}
         # 宿主上下文拉取入口（工作台页由 WorkbenchPanel._make_page_widget 注入）：
         # 构造时的 context 是快照，项目切换后 project_root 会过期，refresh_data
         # 时经此重取最新上下文。
         self._host_context_provider: Optional[Callable[[], dict]] = (
-            self._context.get("context_provider") if self._context else None
+            context.get("context_provider") if self._context else None
         )
         if not callable(self._host_context_provider):
             self._host_context_provider = None
@@ -572,19 +581,19 @@ class FileTreeCard(QWidget):
         self._root_label.setMinimumWidth(36)
 
         # 快捷预览开关（眼睛）：开启后树下方展开面板，随选中项实时预览
-        self._quick_btn = TransparentToolButton(FluentIcon.VIEW, self._tree_header)
+        self._quick_btn = TransparentToolButton(icons.VIEW, self._tree_header)
         self._quick_btn.setFixedSize(26, 26)
         self._quick_btn.setCheckable(True)
         self._quick_btn.setToolTip("快捷预览：选中文件即在下方预览")
         self._quick_btn.toggled.connect(self._on_quick_preview_toggled)
-        self._refresh_btn = TransparentToolButton(FluentIcon.SYNC, self._tree_header)
+        self._refresh_btn = TransparentToolButton(icons.SYNC, self._tree_header)
         self._refresh_btn.setFixedSize(26, 26)
         self._refresh_btn.setToolTip("刷新文件树")
         self._refresh_btn.clicked.connect(self._on_refresh)
 
         # 分裂按钮：左半直接交给系统默认程序，右半拉候选列表
         self._folder_btn = _SplitButton(self._tree_header)
-        self._folder_btn.set_icon(FluentIcon.FOLDER.icon())
+        self._folder_btn.set_icon(icons.FOLDER.icon())
         self._folder_btn.set_tooltip(f"在{_FILE_MANAGER}中打开")
         self._folder_btn.default_clicked.connect(self._open_root_folder)
         self._folder_btn.menu_clicked.connect(self._show_root_open_with_menu)
@@ -698,8 +707,10 @@ class FileTreeCard(QWidget):
         """
         if not isinstance(context, dict) or not context:
             return
-        self._context = context
-        self._context_provider = lambda: context
+        if callable(context.get("context_provider")):
+            self._host_context_provider = context["context_provider"]
+        self._context = _file_tree_context(context)
+        self._context_provider = lambda ctx=self._context: ctx
         if self.isVisible():
             self.show_card()
 
@@ -866,6 +877,11 @@ class FileTreeCard(QWidget):
         self._apply_latest_theme()
         self._async_load_tree()
 
+    def refresh_style(self) -> None:
+        """只更新外观，保留树模型、展开项和当前预览。"""
+        self._refresh_host_context()
+        self._apply_latest_theme()
+
     def _refresh_host_context(self) -> None:
         """向宿主拉最新上下文（拿不到时保持旧 context，不抛）"""
         provider = self._host_context_provider
@@ -876,8 +892,8 @@ class FileTreeCard(QWidget):
         except Exception:
             return
         if isinstance(ctx, dict) and ctx:
-            self._context = ctx
-            self._context_provider = lambda _ctx=ctx: _ctx
+            self._context = _file_tree_context(ctx)
+            self._context_provider = lambda _ctx=self._context: _ctx
 
     # ── 主题色 ──
 
@@ -963,7 +979,10 @@ class FileTreeCard(QWidget):
         # setStyleSheet + setFont 会触发整树 unpolish/polish + 全量重绘
         # （树 2000+ 行时单次 40-130ms，实测），而主题 / 字体 / 颜色未变时
         # 产出必然不变 —— 跳过后切页路径零成本。
-        signature = (tree_style, placeholder_style, header_style, root_style, split_style, quick_handle_qss, font_family, font_size)
+        signature = (
+            tree_style, placeholder_style, header_style, root_style, split_style, quick_handle_qss,
+            font_family, font_size, self._colors["text_secondary"].rgba(), self._colors["card_bg"].rgba(),
+        )
         if signature == self._theme_signature:
             return
         self._theme_signature = signature
@@ -972,15 +991,15 @@ class FileTreeCard(QWidget):
         self._tree_header.setStyleSheet(header_style)
         self._root_label.setStyleSheet(root_style)
         secondary = self._colors.get("text_secondary", QColor(150, 150, 150))
-        self._refresh_btn.setIcon(FluentIcon.SYNC.icon(color=secondary))
+        self._refresh_btn.setIcon(icons.SYNC.icon(color=secondary))
         self._quick_btn.setIcon(
-            FluentIcon.VIEW.icon(
+            icons.VIEW.icon(
                 color=self._colors["accent"] if self._quick_preview_on else secondary
             )
         )
         # 主图标与刷新钮同口径显式带色：icon() 无 color 时按 qfluentwidgets
         # isDarkTheme() 翻转，深色模式下翻转未命中 → 图标仍是黑色
-        self._folder_btn.set_icon(FluentIcon.FOLDER.icon(color=secondary))
+        self._folder_btn.set_icon(icons.FOLDER.icon(color=secondary))
         self._folder_btn.set_icon_color(secondary)
         self._folder_btn.set_hover_color(
             QColor(255, 255, 255, 26) if is_dark else QColor(0, 0, 0, 18)
@@ -1019,6 +1038,9 @@ class FileTreeCard(QWidget):
             font_size=font_size,
             scrollbar_qss=scrollbar_style,
         )
+
+        if self._global_preview is not None:
+            self._global_preview.set_colors(self._colors, scrollbar_style)
 
     # ── 异步加载 ──
 
@@ -1763,68 +1785,68 @@ class FileTreeCard(QWidget):
         # 菜单图标按主题文字色着色（裸 icon() 是固定黑白版，暗底/亮底会看不清）
         icon_color = tc
 
-        def _act(icon: FluentIcon, text: str):
+        def _act(icon: FluentIconBase, text: str):
             action = menu.addAction(_menu_icon(icon, icon_color), text)
             return action
 
         # 系统操作置顶：打开类动作是右键最高频入口，不再埋到菜单底部
         if item_path:
             if not is_dir:
-                _act(FluentIcon.APPLICATION, "用默认程序打开").triggered.connect(
+                _act(icons.APPLICATION, "用默认程序打开").triggered.connect(
                     lambda: self._open_file(item_path)
                 )
             _act(
-                FluentIcon.FOLDER,
+                icons.FOLDER,
                 f"在{_FILE_MANAGER}中打开" if is_dir else "打开所在文件夹",
             ).triggered.connect(lambda: self._open_in_explorer(item_path))
             # 可预览文件：预览 / 全局面板 / 引用三件套（图片同样适用）
             # ★ QAction.triggered 会带一个 checked(bool)：lambda 必须先用 *_) 吃掉它，
             #   否则默认参数 p 会被覆盖成 False，动作静默失灵（踩过）
             if not is_dir and detect_kind(item_path):
-                _act(FluentIcon.VIEW, "预览").triggered.connect(
+                _act(icons.VIEW, "预览").triggered.connect(
                     lambda *_, p=item_path: self._open_preview(p)
                 )
-                _act(FluentIcon.FULL_SCREEN, "全局预览").triggered.connect(
+                _act(icons.FULL_SCREEN, "全局预览").triggered.connect(
                     lambda *_, p=item_path: self._open_global_preview(p)
                 )
-                _act(FluentIcon.SHARE, "引用到输入框").triggered.connect(
+                _act(icons.SHARE, "引用到输入框").triggered.connect(
                     lambda *_, p=item_path: self._quote_file(p)
                 )
             menu.addSeparator()
 
         # 信息类
         if item_path:
-            _act(FluentIcon.LINK, "复制路径").triggered.connect(lambda: self._copy_to_clipboard(item_path))
+            _act(icons.LINK, "复制路径").triggered.connect(lambda: self._copy_to_clipboard(item_path))
 
         if item_name:
-            _act(FluentIcon.LABEL, "复制文件名").triggered.connect(lambda: self._copy_to_clipboard(item_name))
+            _act(icons.LABEL, "复制文件名").triggered.connect(lambda: self._copy_to_clipboard(item_name))
 
         if item_path:
             menu.addSeparator()
 
         # 剪贴板操作
         has_selection = bool(self._tree_view.selected_source_paths())
-        action_cut = _act(FluentIcon.CUT, "剪切")
+        action_cut = _act(icons.CUT, "剪切")
         action_cut.setEnabled(has_selection)
         action_cut.triggered.connect(self.cut_to_clipboard)
 
-        action_copy = _act(FluentIcon.COPY, "复制")
+        action_copy = _act(icons.COPY, "复制")
         action_copy.setEnabled(has_selection)
         action_copy.triggered.connect(self.copy_to_clipboard)
 
         # 粘贴：剪贴板空时不显示（禁用态只添噪音，用户无内容可贴时也不需要入口）
         if self._clipboard:
-            _act(FluentIcon.PASTE, "粘贴").triggered.connect(self.paste_from_clipboard)
+            _act(icons.PASTE, "粘贴").triggered.connect(self.paste_from_clipboard)
 
         menu.addSeparator()
 
         # 编辑操作
         if item_path:
-            _act(FluentIcon.EDIT, "重命名").triggered.connect(
+            _act(icons.EDIT, "重命名").triggered.connect(
                 lambda: self._tree_view.start_rename_at_index(src_idx)
             )
 
-            _act(FluentIcon.DELETE, "删除").triggered.connect(
+            _act(icons.DELETE, "删除").triggered.connect(
                 lambda: self._on_delete_requested([item_path])
             )
 
@@ -1832,18 +1854,18 @@ class FileTreeCard(QWidget):
         if is_dir:
             menu.addSeparator()
 
-            _act(FluentIcon.DOCUMENT, "新建文件...").triggered.connect(
+            _act(icons.DOCUMENT, "新建文件...").triggered.connect(
                 lambda: self._create_new_file(parent_path)
             )
 
-            _act(FluentIcon.FOLDER_ADD, "新建文件夹...").triggered.connect(
+            _act(icons.FOLDER_ADD, "新建文件夹...").triggered.connect(
                 lambda: self._create_new_dir(parent_path)
             )
 
             menu.addSeparator()
 
             # 刷新（原顶栏刷新按钮入口，顶栏已移除）
-            _act(FluentIcon.SYNC, "刷新").triggered.connect(self._on_refresh)
+            _act(icons.SYNC, "刷新").triggered.connect(self._on_refresh)
 
         menu.adjustSize()
         self._round_menu(menu)
@@ -1945,7 +1967,7 @@ class FileTreeCard(QWidget):
         self._style_menu(menu)
         icon_color = self._colors.get("text", QColor(255, 255, 255))
 
-        def _act(icon: FluentIcon, text: str):
+        def _act(icon: FluentIconBase, text: str):
             return menu.addAction(_menu_icon(icon, icon_color), text)
 
         is_dir = os.path.isdir(path)
@@ -1957,7 +1979,7 @@ class FileTreeCard(QWidget):
         if is_dir:
             # 目录候选首项就是文件管理器（默认），再列通用项会重复
             if not openers:
-                _act(FluentIcon.FOLDER, f"在{_FILE_MANAGER}中显示").triggered.connect(
+                _act(icons.FOLDER, f"在{_FILE_MANAGER}中显示").triggered.connect(
                     lambda: self._open_in_explorer(path)
                 )
             menu.exec_(self._menu_position(menu, anchor))
@@ -1965,10 +1987,10 @@ class FileTreeCard(QWidget):
         if openers:
             menu.addSeparator()
 
-        _act(FluentIcon.APPLICATION, "用系统默认程序打开").triggered.connect(
+        _act(icons.APPLICATION, "用系统默认程序打开").triggered.connect(
             lambda: self._open_file(path)
         )
-        _act(FluentIcon.FOLDER, f"在{_FILE_MANAGER}中显示").triggered.connect(
+        _act(icons.FOLDER, f"在{_FILE_MANAGER}中显示").triggered.connect(
             lambda: self._open_in_explorer(path)
         )
         menu.exec_(self._menu_position(menu, anchor))
@@ -2049,42 +2071,42 @@ class FileTreeCard(QWidget):
         self._style_menu(menu)
         icon_color = self._colors.get("text", QColor(255, 255, 255))
 
-        def _act(icon: FluentIcon, text: str):
+        def _act(icon: FluentIconBase, text: str):
             return menu.addAction(_menu_icon(icon, icon_color), text)
 
         if page.current_kind() == "image":
             image_path = page.current_path()
             # triggered(bool) 会把默认参数覆盖掉：一律用 *_ 吃掉 checked
-            _act(FluentIcon.SHARE, "引用到输入框").triggered.connect(
+            _act(icons.SHARE, "引用到输入框").triggered.connect(
                 lambda *_, p=image_path: self._quote_file(p)
             )
             if not self._is_global_preview_page(page):
-                _act(FluentIcon.FULL_SCREEN, "全局预览").triggered.connect(
+                _act(icons.FULL_SCREEN, "全局预览").triggered.connect(
                     lambda *_, p=image_path: self._open_global_preview(p)
                 )
-            _act(FluentIcon.LINK, "复制路径").triggered.connect(
+            _act(icons.LINK, "复制路径").triggered.connect(
                 lambda *_, p=image_path: self._copy_to_clipboard(p)
             )
             menu.addSeparator()
-            _act(FluentIcon.APPLICATION, "用默认程序打开").triggered.connect(
+            _act(icons.APPLICATION, "用默认程序打开").triggered.connect(
                 lambda *_, p=image_path: self._open_file(p)
             )
-            _act(FluentIcon.SYNC, "重新加载").triggered.connect(lambda *_: page.reload_current())
+            _act(icons.SYNC, "重新加载").triggered.connect(lambda *_: page.reload_current())
             menu.exec_(self._menu_position(menu, global_pos))
             return
 
         path, _start, _end, selected = page.quote_payload()
         if path:
             label = "引用选中内容到输入框" if selected else "引用文件到输入框"
-            _act(FluentIcon.SHARE, label).triggered.connect(
+            _act(icons.SHARE, label).triggered.connect(
                 lambda *_, p=page: self._quote_from_page(p)
             )
             menu.addSeparator()
 
-        copy_act = _act(FluentIcon.COPY, "复制")
+        copy_act = _act(icons.COPY, "复制")
         copy_act.setEnabled(page.has_selection())
         copy_act.triggered.connect(page.copy_selection)
-        _act(FluentIcon.ACCEPT, "全选").triggered.connect(page.select_all_text)
+        _act(icons.ACCEPT, "全选").triggered.connect(page.select_all_text)
         menu.addSeparator()
 
         wrap_act = menu.addAction(
@@ -2093,11 +2115,11 @@ class FileTreeCard(QWidget):
         )
         wrap_act.triggered.connect(page.toggle_wrap)
         highlight_text = f"语法高亮：{'开' if page.highlight_enabled() else '关'}"
-        highlight_act = menu.addAction(_menu_icon(FluentIcon.CODE, icon_color), highlight_text)
+        highlight_act = menu.addAction(_menu_icon(icons.CODE, icon_color), highlight_text)
         highlight_act.triggered.connect(page.toggle_highlight)
         menu.addSeparator()
 
-        _act(FluentIcon.SYNC, "重新加载").triggered.connect(page.reload_current)
+        _act(icons.SYNC, "重新加载").triggered.connect(page.reload_current)
         menu.exec_(self._menu_position(menu, global_pos))
 
     # ── 预览 ──
@@ -2364,7 +2386,7 @@ class FileTreeCard(QWidget):
         self._quick_preview_on = bool(checked)
         secondary = self._colors.get("text_secondary", QColor(150, 150, 150))
         self._quick_btn.setIcon(
-            FluentIcon.VIEW.icon(
+            icons.VIEW.icon(
                 color=self._colors.get("accent", QColor(80, 150, 220)) if checked else secondary
             )
         )

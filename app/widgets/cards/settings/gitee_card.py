@@ -25,7 +25,8 @@ from PyQt5.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-from qfluentwidgets import FluentIcon, InfoBar, InfoBarPosition, MaskDialogBase, SettingCard, SwitchButton
+from qfluentwidgets import InfoBar, InfoBarPosition, MaskDialogBase, SettingCard, SwitchButton
+from app.utils.app_icon import AppIcon
 
 from app.core.infra import window_registry
 from app.core.auth.base import CANCEL_MESSAGE
@@ -362,7 +363,7 @@ class _RepoVisibilityDialog(MaskDialogBase):
         layout.setContentsMargins(24, 24, 24, 20)
         layout.setSpacing(12)
 
-        title_label = QLabel("🔒 仓库可见性", self.widget)
+        title_label = QLabel("仓库可见性", self.widget)
         title_label.setStyleSheet(
             f"color: {Colors.TEXT_PRIMARY}; background: transparent; "
             f"{get_font_family_css()} {font_size_css(16)}; font-weight: bold;"
@@ -399,7 +400,7 @@ class _RepoVisibilityDialog(MaskDialogBase):
         )
 
         # ── 公开按钮 ──
-        public_btn = QPushButton("🌐  公开仓库", self.widget)
+        public_btn = QPushButton(get_icon("websearch"), "公开仓库", self.widget)
         public_btn.setCursor(Qt.PointingHandCursor)
         public_btn.setFixedHeight(56)
         public_btn.setStyleSheet(btn_style)
@@ -411,7 +412,7 @@ class _RepoVisibilityDialog(MaskDialogBase):
         layout.addWidget(public_hint)
 
         # ── 私有按钮 ──
-        private_btn = QPushButton("🔒  私有仓库", self.widget)
+        private_btn = QPushButton(get_icon("锁定"), "私有仓库", self.widget)
         private_btn.setCursor(Qt.PointingHandCursor)
         private_btn.setFixedHeight(56)
         private_btn.setStyleSheet(btn_style)
@@ -493,7 +494,7 @@ class GiteeAccountRow(QFrame):
         self._name_label = _ClickableElidedLabel("", self)
         layout.addWidget(self._name_label, 1)
 
-        from qfluentwidgets import FluentIcon as _FIF
+        from app.utils.app_icon import AppIcon as _FIF
         from qfluentwidgets import TransparentToolButton as _TransparentToolButton
 
         # popup 关闭时刻（monotonic 秒）：防抖用，见 _toggle_popup
@@ -695,7 +696,7 @@ class GiteeAccountRow(QFrame):
             f"{get_font_family_css()} {font_size_css(12)}; font-weight: 500;"
         )
         # 图标染灰（弱于前景色）；主题/字号变化经 refresh_style → _refresh_ui → 本方法重染
-        from qfluentwidgets import FluentIcon as _FIF
+        from app.utils.app_icon import AppIcon as _FIF
 
         muted = QColor(Colors.TEXT_MUTED)
         self._settings_btn.setIcon(_FIF.SETTING.colored(muted, muted))
@@ -965,7 +966,7 @@ class GiteeAccountRow(QFrame):
 
 
 def _menu_icon_pixmap(icon_src, size: int) -> QPixmap:
-    """菜单行图标 → QPixmap：字符串走主题感知资源图标，FluentIcon 枚举走动态主题图标"""
+    """菜单行图标 → QPixmap：字符串走主题感知资源图标，AppIcon 枚举走动态主题图标"""
     if isinstance(icon_src, str):
         return get_icon(icon_src).pixmap(size, size)
     if hasattr(icon_src, "qicon"):
@@ -1150,7 +1151,7 @@ class _GiteeMorePopup(QWidget):
         self._mode_selector.set_mode(theme_mode.current_mode(), emit=False, animate=False)
         self._mode_selector.modeChanged.connect(self._on_theme_mode_changed)
         self._appearance_mode_row = _MenuRow(
-            FluentIcon.BRIGHTNESS, "外观模式", right=self._mode_selector, parent=self._container
+            AppIcon.BRIGHTNESS, "外观模式", right=self._mode_selector, parent=self._container
         )
         layout.addWidget(self._appearance_mode_row)
 
@@ -1160,7 +1161,7 @@ class _GiteeMorePopup(QWidget):
         topmost_switch.label.setVisible(False)
         topmost_switch.setChecked(bool(self._cfg.window_always_on_top.value))
         topmost_switch.checkedChanged.connect(self._on_topmost_toggled)
-        self._topmost_row = _MenuRow(FluentIcon.PIN, "窗口置顶", right=topmost_switch, parent=self._container)
+        self._topmost_row = _MenuRow(AppIcon.PIN, "窗口置顶", right=topmost_switch, parent=self._container)
         layout.addWidget(self._topmost_row)
         # 保持 Python 引用，防止 SwitchButton 被提前 GC 回收
         self._switch_refs = [self._mode_selector, topmost_switch]
@@ -1175,14 +1176,14 @@ class _GiteeMorePopup(QWidget):
         layout.addWidget(self._appearance_row)
 
         self._plugins_row = _MenuRow(
-            FluentIcon.APPLICATION, "插件设置", right=self._make_chevron(), parent=self._container
+            AppIcon.APPLICATION, "插件设置", right=self._make_chevron(), parent=self._container
         )
         self._plugins_row.clicked.connect(lambda: self._open_settings_tab("plugins"))
         layout.addWidget(self._plugins_row)
 
         # ── 帮助与反馈 ──
         self._feedback_row = _MenuRow(
-            FluentIcon.FEEDBACK, "帮助与反馈", right=self._make_chevron(), parent=self._container
+            AppIcon.FEEDBACK, "帮助与反馈", right=self._make_chevron(), parent=self._container
         )
         self._feedback_row.clicked.connect(self._on_help_feedback)
         layout.addWidget(self._feedback_row)
@@ -1193,7 +1194,7 @@ class _GiteeMorePopup(QWidget):
             f"color: {Colors.TEXT_MUTED}; background: transparent; {get_font_family_css()} {font_size_css(11)};"
         )
         self._version_lbl.setAttribute(Qt.WA_TransparentForMouseEvents, True)
-        self._update_row = _MenuRow(FluentIcon.UPDATE, "检查更新", right=self._version_lbl, parent=self._container)
+        self._update_row = _MenuRow(AppIcon.UPDATE, "检查更新", right=self._version_lbl, parent=self._container)
         self._update_row.clicked.connect(self._on_check_update)
         layout.addWidget(self._update_row)
 
@@ -1583,16 +1584,6 @@ class GiteeCard(SettingCard):
         self._bind_btn.setFixedWidth(76)
         self._bind_btn.setMinimumHeight(30)
         self._bind_btn.setCursor(Qt.PointingHandCursor)
-        self._bind_btn.setStyleSheet(
-            f"QPushButton {{"
-            f"background-color: #0078d4; color: #ffffff; border: none;"
-            f"border-radius: 5px; padding: 5px 16px; {font_size_css(13)}"
-            f"font-weight: bold;"
-            f"}}"
-            f"QPushButton:hover {{ background-color: {Colors.BORDER_ACCENT}; }}"
-            f"QPushButton:pressed {{ background-color: {Colors.SELECTED_BG}; }}"
-            f"QPushButton:disabled {{ background-color: #444; color: #888; }}"
-        )
         self._bind_btn.clicked.connect(self._on_bind_clicked)
         self.hBoxLayout.addWidget(self._bind_btn)
 
@@ -1642,14 +1633,6 @@ class GiteeCard(SettingCard):
             self._load_avatar_async(owner)
             self._bind_btn.setText("解绑")
             self._bind_btn.setCursor(Qt.PointingHandCursor)
-            self._bind_btn.setStyleSheet(
-                f"QPushButton {{"
-                f"color: #fa5151; border: 1px solid #fa5151; border-radius: 6px;"
-                f"padding: 5px 12px; font-size: {scale_font_size(12)}px;"
-                f"background: transparent;"
-                f"}}"
-                f"QPushButton:hover {{ background-color: rgba(250, 81, 81, 0.1); }}"
-            )
             # 已绑定 → 自动启用同步（如尚未启动）；与启动链共用幂等函数
             self._auto_enable_sync()
         else:
@@ -1661,6 +1644,22 @@ class GiteeCard(SettingCard):
             self._avatar.setToolTip("未绑定")
             self._bind_btn.setText("绑定")
             self._bind_btn.setCursor(Qt.PointingHandCursor)
+            self._sync_dot.hide()
+
+        self.refresh_style()
+
+    def refresh_style(self):
+        """单独更新按钮配色，避免外观变化触发同步或头像请求。"""
+        if self._bound_owner:
+            self._bind_btn.setStyleSheet(
+                f"QPushButton {{"
+                f"color: #fa5151; border: 1px solid #fa5151; border-radius: 6px;"
+                f"padding: 5px 12px; font-size: {scale_font_size(12)}px;"
+                f"background: transparent;"
+                f"}}"
+                f"QPushButton:hover {{ background-color: rgba(250, 81, 81, 0.1); }}"
+            )
+        else:
             self._bind_btn.setStyleSheet(
                 f"QPushButton {{"
                 f"background-color: #0078d4; color: #ffffff; border: none;"
@@ -1671,7 +1670,6 @@ class GiteeCard(SettingCard):
                 f"QPushButton:pressed {{ background-color: {Colors.SELECTED_BG}; }}"
                 f"QPushButton:disabled {{ background-color: #444; color: #888; }}"
             )
-            self._sync_dot.hide()
 
     # ── 真实头像拉取（与 GiteeAccountRow 共用模块级 helpers） ──
 

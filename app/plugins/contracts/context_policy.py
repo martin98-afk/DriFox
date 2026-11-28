@@ -36,6 +36,11 @@ CACHE_INVALIDATE = "invalidate"  # 破坏前缀，cache 失效
 TIER_FAILURE_LIMIT = 2
 
 
+def needs_tool_projection(message: Dict[str, Any]) -> bool:
+    """新结果在 ingest 定稿，旧会话的未标记结果仍可投影。"""
+    return message.get("role") == "tool" and not message.get("_context_ingested")
+
+
 @dataclass(frozen=True)
 class TierOutcome:
     """tier.apply 的返回。

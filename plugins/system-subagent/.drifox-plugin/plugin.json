@@ -22,6 +22,7 @@
         "ui": true
     },
     "capabilities": [
+        "ui.icons",
         "config.read",
         "config.write",
         "model.config",

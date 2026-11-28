@@ -8,6 +8,19 @@ import pytest
 
 from loguru import logger
 
+
+@pytest.fixture
+def output_config_schema(monkeypatch):
+    import json
+    from app.plugins.contracts.plugin_config import parse_config_schema
+    from app.plugins.registries.plugin_config_registry import PluginConfigRegistry
+
+    name = 'system-message-output'
+    path = Path(__file__).resolve().parents[1] / 'plugins' / name / '.drifox-plugin' / 'plugin.json'
+    registry = PluginConfigRegistry()
+    registry.register(parse_config_schema(name, json.loads(path.read_text(encoding='utf-8'))['config_schema']))
+    monkeypatch.setattr(PluginConfigRegistry, 'get_instance', lambda: registry)
+
 # ⚠️ 必须模块级（收集期生效）：pytest 收集测试文件即触发 app 模块链式
 # import → provider 加载 → codebuddy._bootstrap 启动守护线程；session
 # fixture 首测试前才运行，届时线程已在 urlopen 阻塞（退出期竞态 0x8001010D）。
@@ -200,3 +213,32 @@ def plugin_enabled():
         return restore
 
     return _enable
+
+
+@pytest.fixture
+def plugin_reload_host(tmp_path, monkeypatch, qapp):
+    """真实宿主分派与插件发现，所有插件、发现缓存和注册表均隔离。"""
+    from app.core.services.plugin_host_service import PluginHostService
+    from app.plugins import kernel
+    from app.plugins.builtin_reloaders import register_builtin_reloaders
+    from app.plugins.managers.plugin_manager import PluginManager
+    from PyQt5.QtCore import QObject
+
+    pm = PluginManager()
+    pm._SYSTEM_PLUGIN_DIR = tmp_path / "system"
+    pm._CLAUDE_USER_SKILLS_DIR = tmp_path / "claude"
+    pm._CLAUDE_PLUGIN_CACHE_DIR = tmp_path / "claude-cache"
+    pm._app_data_dir = tmp_path / "data"
+    pm._initialized = True
+    monkeypatch.setattr(pm, "_discovery_cache_path", lambda: tmp_path / "cache.json")
+    monkeypatch.setattr(pm, "_restore_enabled_from_settings", lambda: None)
+    monkeypatch.setattr(pm, "is_enabled", lambda name: True)
+    monkeypatch.setattr(PluginManager, "_instance", pm)
+    dispatcher = kernel.ComponentReloaderRegistry()
+    monkeypatch.setattr(kernel, "_registry", dispatcher)
+    # 隔离幂等登记簿，避免临时 dispatcher 被进程单例持有。
+    monkeypatch.setattr("app.plugins.builtin_reloaders._BUILTIN_REGISTERED", [])
+    register_builtin_reloaders(dispatcher)
+    svc = PluginHostService.__new__(PluginHostService)
+    QObject.__init__(svc)
+    return pm, svc

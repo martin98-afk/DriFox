@@ -11,7 +11,8 @@ _resolve_nav_icon 曾用 icon() → 改为 qicon()。
 """
 
 import pytest
-from qfluentwidgets import FluentIcon, Theme, isDarkTheme, setTheme
+from app.utils.app_icon import AppIcon
+from qfluentwidgets import Theme, isDarkTheme, setTheme
 
 from app.widgets.cards.settings.llm_settings_card import LLMSettingsCard
 
@@ -24,7 +25,7 @@ def _icon_avg_color(icon, size=18) -> str:
     for y in range(img.height()):
         for x in range(img.width()):
             c = img.pixelColor(x, y)
-            if c.alpha() > 100:
+            if c.alpha() == 255:
                 r += c.red()
                 g += c.green()
                 b += c.blue()
@@ -42,7 +43,7 @@ def _restore_theme():
     setTheme(original)
 
 
-@pytest.mark.parametrize("fluent_icon", [FluentIcon.SETTING, FluentIcon.UPDATE, FluentIcon.APPLICATION])
+@pytest.mark.parametrize("fluent_icon", [AppIcon.SETTING, AppIcon.UPDATE, AppIcon.APPLICATION])
 def test_fluent_nav_icon_follows_theme(qapp, fluent_icon, _restore_theme):
     """NAV_GROUPS 三个 FluentIcon 枚举源图标深浅切换后颜色跟随"""
     icon = LLMSettingsCard._resolve_nav_icon(fluent_icon)
@@ -55,4 +56,4 @@ def test_fluent_nav_icon_follows_theme(qapp, fluent_icon, _restore_theme):
     # 深色主题白图标、浅色主题黑图标，且两态颜色不同
     assert dark_color != "transparent" and light_color != "transparent"
     assert dark_color != light_color
-    assert light_color == "#000000"
+    assert light_color == "#333333"

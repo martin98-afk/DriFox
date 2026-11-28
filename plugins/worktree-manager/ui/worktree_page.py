@@ -1,15 +1,14 @@
 # -*- coding: utf-8 -*-
 """工作树页 —— git 工作树管理（主仓库卡片 + 子工作树列表）
 
-page_id="worktree-manager"（与插件同名）：注册它即填充右侧工作台的「工作树」页。
-插件卸载后显示占位页。
+左侧边栏卡片，显示时从活跃对话窗口拉取项目与工作目录。
 
 历史：本页原先还承载「关键文档列表」（拖拽文件/文件夹/URL，设为工作目录）。
 该功能已下线，工作目录改由 project_workdir 表记录，页面只做工作树管理。
 
 宿主契约：
 - set_project(project, workdir=None)：接收当前项目与工作目录并刷新
-- refresh_data()：数据自拉入口（宿主 refresh_current_page_data 调用）
+- show_card()：打开卡片并刷新数据
 - refresh_style()：主题刷新
 """
 
@@ -18,17 +17,17 @@ from __future__ import annotations
 import concurrent.futures
 import dataclasses
 import os
-from typing import Dict, Optional
+from typing import Callable, Dict, Optional
 
 from loguru import logger
 
 from PyQt5.QtCore import QObject, QRunnable, QThreadPool, Qt, pyqtSignal
-from PyQt5.QtWidgets import QHBoxLayout, QLabel, QSizePolicy, QVBoxLayout, QWidget
-from qfluentwidgets import BodyLabel
+from PyQt5.QtWidgets import QFrame, QHBoxLayout, QLabel, QScrollArea, QSizePolicy, QVBoxLayout, QWidget
+from qfluentwidgets import BodyLabel, IconWidget, TransparentToolButton, isDarkTheme
 
 from app.plugins.sdk import Colors, font_size_css
 from app.plugins.sdk import GitWorktreeDetector
-from app.plugins.sdk import get_font_family_css
+from app.plugins.sdk import get_font_family_css, get_icon
 from .worktree_section import (
     WorktreeSectionWidget,
     _DELETE_DONE,
@@ -200,11 +199,11 @@ class SystemWorktreePage(QWidget):
     """工作树页：主仓库卡片 + 子工作树列表"""
 
     workingDirChanged = pyqtSignal(str)  # 工作目录路径，空字符串=清除
+    closed = pyqtSignal()
 
-    def __init__(self, parent=None, context: Optional[Dict[str, object]] = None):
+    def __init__(self, parent=None):
         super().__init__(parent)
-        self._context = context or {}
-        self._memory_manager = None
+        self._context_provider: Callable[[], dict] = dict
         self._current_project = "默认项目"
         # 多窗口隔离：实例级工作目录缓存（{project: workdir_path}）
         self._instance_workdir: Dict[str, str] = {}
@@ -219,6 +218,9 @@ class SystemWorktreePage(QWidget):
         self._load_job = None
         self._connect_change_bridge()
         self._init_ui()
+        events = _caps("ui.events")
+        if events is not None:
+            events()["subscribe"]("tab_switched", self._on_tab_switched)
 
     # ── 宿主/插件的连接 ──
 
@@ -235,25 +237,40 @@ class SystemWorktreePage(QWidget):
         logger.info(f"[worktree-manager] 工具操作工作树，刷新页面: {summary}")
         self.refresh_data()
 
+    def set_context_provider(self, provider: Callable[[], dict]) -> None:
+        self._context_provider = provider
+
+    # ── 头部（标题 + 插件图标）──
+
+    @staticmethod
+    def _title_qss() -> str:
+        return (
+            f"color: {Colors.TEXT_PRIMARY}; background: transparent;"
+            f" {get_font_family_css()} {font_size_css(16)} font-weight: 600;"
+        )
+
+    def _apply_plugin_icon(self) -> None:
+        """用插件目录自带的 icon.svg / icon_dark.svg（按当前主题）"""
+        try:
+            from PyQt5.QtGui import QIcon
+
+            path = os.path.join(
+                os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                "icon_dark.svg" if isDarkTheme() else "icon.svg",
+            )
+            self._header_icon.setIcon(QIcon(path) if os.path.exists(path) else QIcon())
+        except Exception as e:
+            logger.debug(f"[worktree-manager] 头部图标应用失败: {e}")
+
     def _get_memory_manager(self):
-        """从 context 的 backend 获取 memory_manager（宿主未就绪时返回 None）"""
-        if self._memory_manager:
-            return self._memory_manager
-        backend = self._context.get("backend")
-        mgr = getattr(backend, "memory_manager", None)
-        if mgr is not None:
-            self._memory_manager = mgr
-        return mgr
+        return getattr(self._context_provider().get("backend"), "memory_manager", None)
 
     def _emit_working_dir(self, path: str) -> None:
-        """工作目录变更：信号 + context 回调双通道（宿主转发给活跃窗口）"""
+        """复用原工作目录变更入口，同步到当前对话、分支标签与团队。"""
         self.workingDirChanged.emit(path)
-        cb = self._context.get("working_dir_changed_callback")
-        if callable(cb):
-            try:
-                cb(path)
-            except Exception:
-                pass
+        host = self._context_provider().get("main_widget")
+        if host is not None:
+            host._on_working_dir_changed(path)
 
     # ── 数据 ──
 
@@ -265,19 +282,21 @@ class SystemWorktreePage(QWidget):
         self._rebuild()
 
     def refresh_data(self) -> None:
-        """数据自拉入口（工作台通用页协议）"""
-        project = ""
-        workdir: Optional[str] = None
-        try:
-            snap = _caps("window.current")
-            if snap is not None:
-                snap = snap()
-            if snap:
-                project = snap.get("project") or ""
-                workdir = snap.get("workdir")
-        except Exception:
-            pass
-        self.set_project(project, workdir)
+        ctx = self._context_provider()
+        self.set_project(ctx.get("project_name") or "", ctx.get("project_root") or "")
+
+    def show_card(self) -> None:
+        self.refresh_data()
+        self.setVisible(True)
+
+    def on_project_changed(self, project: str, workdir: str, window_id: str = "") -> None:
+        if project != self._current_project or workdir != self._instance_workdir.get(project):
+            self.set_project(project, workdir)
+
+    def _on_tab_switched(self, _payload: dict) -> None:
+        if self.isVisible():
+            ctx = self._context_provider()
+            self.on_project_changed(ctx.get("project_name") or "", ctx.get("project_root") or "")
 
     def _get_effective_workdir(self, project: str) -> Optional[str]:
         """有效工作目录（实例缓存优先，回退 DB）"""
@@ -298,17 +317,43 @@ class SystemWorktreePage(QWidget):
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
-
-        # 页面标题由右侧工作台页签承担，页内不再重复
-
-        # 内容容器
         Colors.refresh()
-        self._body = QWidget(self)
+
+        header = QHBoxLayout()
+        header.setContentsMargins(12, 8, 8, 0)
+        header.setSpacing(8)
+        # 头部图标：插件目录自带的 icon.svg / icon_dark.svg
+        self._header_icon = IconWidget(self)
+        self._header_icon.setFixedSize(22, 22)
+        header.addWidget(self._header_icon)
+        self._title = QLabel("工作树", self)
+        self._title.setStyleSheet(self._title_qss())
+        header.addWidget(self._title)
+        header.addStretch(1)
+        self._close_btn = TransparentToolButton(get_icon("关闭"), self)
+        self._close_btn.setFixedSize(30, 30)
+        self._close_btn.setToolTip("关闭工作树")
+        self._close_btn.setAccessibleName("关闭工作树")
+        self._close_btn.clicked.connect(self.closed.emit)
+        header.addWidget(self._close_btn)
+        root.addLayout(header)
+
+        # 侧栏可用高度有限，工作树较多时允许滚动。
+        scroll = QScrollArea(self)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setWidgetResizable(True)
+        root.addWidget(scroll)
+        self._apply_plugin_icon()
+        self._body = QWidget(scroll)
         self._body_layout = QVBoxLayout(self._body)
         self._body_layout.setContentsMargins(12, 12, 12, 12)
         self._body_layout.setSpacing(8)
         self._body_layout.addStretch(1)
-        root.addWidget(self._body, 1)
+        scroll.setWidget(self._body)
+        # setWidget 会开启内容的背景填充；透出侧栏主题底色。
+        scroll.setStyleSheet("QScrollArea { background: transparent; border: none; }")
+        scroll.viewport().setAutoFillBackground(False)
+        self._body.setAutoFillBackground(False)
 
         # 空态提示（非 git 仓库 / 无工作目录）
         self._empty_hint = BodyLabel("", self)
@@ -337,6 +382,7 @@ class SystemWorktreePage(QWidget):
 
     def _rebuild(self):
         """按当前项目/工作目录重建内容（git 探测走后台线程，主线程不阻塞）"""
+        self._request_id += 1
         self._clear_body()
         self._repo_info = None
 
@@ -357,7 +403,6 @@ class SystemWorktreePage(QWidget):
         self._mount_workdir_card(workdir, is_git=True)
 
         # 探测中：占位提示（避免空白页误以为没数据）
-        self._request_id += 1
         req = self._request_id
         self._show_empty("正在读取仓库信息…")
 
@@ -523,6 +568,8 @@ class SystemWorktreePage(QWidget):
     def refresh_style(self):
         """主题刷新：重建整页（内联样式在构造时写死）"""
         Colors.refresh()
+        self._title.setStyleSheet(self._title_qss())
+        self._apply_plugin_icon()
         self._empty_hint.setStyleSheet(
             f"background: transparent; color: {Colors.TEXT_MUTED};"
             f" {get_font_family_css()} {font_size_css(13)} padding: 24px;"

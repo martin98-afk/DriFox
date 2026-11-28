@@ -235,7 +235,16 @@ def _read_impl(tool_ctx, **kw) -> ToolResult:
             lines.append("归属判定：改变做事方式进理性区，改变我对这个人或对自己位置的看法进感性区。")
             lines.append("配额是上限不是任务：写不满就空着；超配额先合并同义条目再删过时内容。")
             return ToolResult(True, content="\n".join(lines))
+        if kw.get("id") and scope != "global":
+            return ToolResult(False, error="按 id 读取仅支持 scope=global")
         if scope == "global":
+            entry_id = str(kw.get("id") or "").strip()
+            if entry_id:
+                item = mgr.memory_state(aid)["entries"].get(entry_id)
+                if not item or item["state"] != "active":
+                    return ToolResult(False, error=f"条目 {entry_id} 不存在或已停用")
+                entry = item["active"]
+                return ToolResult(True, content=f"## {entry.get('section') or '未分区'}\n- [{entry_id}] {entry['text']}")
             text = mgr.read_global_memory(aid).strip()
             lim = mgr.memory_max_chars(aid)["global"]
             used = int(mgr.memory_usage_chars(aid)["global"])
@@ -421,7 +430,12 @@ def _write_impl(tool_ctx, **kw) -> ToolResult:
     scope = str(kw.get("scope") or "").strip().lower()
     content = str(kw.get("content") or "").strip()
     is_mark = scope == "daily" and bool(kw.get("mark_distilled"))
-    if not content and not is_mark:
+    mode = str(kw.get("mode") or "replace").strip().lower()
+    if scope == "daily" and kw.get("mode") and mode != "append":
+        return ToolResult(False, error="每日日志仅支持追加和蒸馏打标")
+    if scope == "project" and mode not in ("append", "replace"):
+        return ToolResult(False, error="项目记忆仅支持 append 或 replace")
+    if not content and not is_mark and not (scope == "global" and mode in ("delete", "plan")):
         return ToolResult(False, error="content 不能为空")
     wd = _workdir(tool_ctx)
 
@@ -441,7 +455,6 @@ def _write_impl(tool_ctx, **kw) -> ToolResult:
                 return ToolResult(True, content="当前没有设置工作目录，无法写项目记忆。")
             lim = mgr.memory_max_chars(aid)[scope]
             label = "全局" if scope == "global" else "项目"
-            mode = str(kw.get("mode") or "replace").strip().lower()
             if mode not in ("replace", "append", "delete", "update", "merge", "plan"):
                 return ToolResult(
                     False,
@@ -471,7 +484,9 @@ def _write_impl(tool_ctx, **kw) -> ToolResult:
                     )
                 else:
                     r = mgr.apply_memory_plan(aid, kw.get("plan") or [], str(kw.get("reason") or ""))
-                return ToolResult(bool(r.get("ok")), content=str(r.get("message") or r.get("error") or ""))
+                if not r.get("ok"):
+                    return ToolResult(False, error=str(r.get("error") or "写入失败"))
+                return ToolResult(True, content=str(r["message"]))
             if scope == "global" and mode == "delete" and str(kw.get("id") or "").strip():
                 r = mgr.delete_memory_entry_by_id(aid, str(kw["id"]), str(kw.get("reason") or ""))
                 if not r.get("ok"):
@@ -746,6 +761,7 @@ _READ_SCHEMA = {
             "type": "object",
             "properties": {
                 "scope": {"type": "string", "description": "global / project / daily / sections；缺省返回概览"},
+                "id": {"type": "string", "description": "scope=global 时按条目 id 读取完整正文"},
                 "date": {
                     "type": "string",
                     "description": "scope=daily 时的日期 YYYY-MM-DD；缺省列出近期索引；与 from_date/to_date 互斥",
@@ -815,7 +831,7 @@ _WRITE_SCHEMA = {
                 "mode": {
                     "type": "string",
                     "description": (
-                        "scope=global/project：append(新增一条，高频用)/update(按 id 改)"
+                        "project 仅支持 append/replace。global 还支持 update(按 id 改)"
                         "/delete(按 id 软删，历史保留；也可 section+index 按序号删)/merge(多个 id 合并为一条)"
                         "/plan(批量补丁，整理用)/replace(整篇替换，兼容旧提示词)。"
                         "scope=daily 不需要 mode；mark_distilled=true 用于打标。"
@@ -873,7 +889,7 @@ _WRITE_SCHEMA = {
                 "plan": {
                     "type": "array",
                     "items": {"type": "object"},
-                    "description": "mode=plan 的批量操作：[{op, id, content?, section?, reason?}]，整批原子应用",
+                    "description": "整批提交 update/delete/move/pin。各项带 id，update 带 content，move 带 section，pin 带布尔值 pinned",
                 },
             },
             "required": ["scope"],

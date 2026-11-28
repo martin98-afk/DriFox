@@ -24,15 +24,15 @@ from loguru import logger
 
 from .display_name import plugin_display_name
 
-# FluentIcon SVG 渲染缓存补丁：必须在导入 qfluentwidgets 前生效
+# AppIcon SVG 渲染缓存补丁：必须在导入 qfluentwidgets 前生效
 from . import _icon_cache_patch as _icon_patch
 
 _icon_patch._apply_icon_cache_patch()
 
 from PyQt5 import sip
 
-from PyQt5.QtCore import QObject, QRect, QSize, QThread, Qt, QTimer, pyqtSignal
-from PyQt5.QtGui import QColor, QFont, QFontMetrics
+from PyQt5.QtCore import QEvent, QObject, QRect, QSize, QThread, Qt, QTimer, pyqtSignal
+from PyQt5.QtGui import QColor, QFont, QFontMetrics, QTextLayout, QTextOption
 from PyQt5.QtWidgets import (
     QFrame,
     QGridLayout,
@@ -49,7 +49,6 @@ from PyQt5.QtWidgets import (
 from qfluentwidgets import (
     BodyLabel,
     ComboBox,
-    FluentIcon,
     FluentLabelBase,
     IconWidget,
     InfoBar,
@@ -57,6 +56,8 @@ from qfluentwidgets import (
     MaskDialogBase,
     PushButton,
     ScrollArea,
+    SearchLineEdit,
+    SegmentedWidget,
     SingleDirectionScrollArea,
     SmoothScrollDelegate,
     StrongBodyLabel,
@@ -65,6 +66,8 @@ from qfluentwidgets import (
     TransparentToolButton,
     isDarkTheme,
 )
+from qfluentwidgets import FluentIcon
+from app.plugins.sdk import caps_for
 
 from app.plugins.sdk import ElidedLabel as _ElidedLabel
 
@@ -81,6 +84,8 @@ from ._squircle_avatar import (
     name_color,
     resolve_remote_icon_urls,
 )
+
+icons = caps_for("ui.icons", plugin="plugin-marketplace", surface="ui") or FluentIcon
 
 # 模块级孤儿线程容器：跨卡片生命周期持有已 quit 的线程
 # （防止 running 线程随卡片析构被连带销毁 → Qt abort 0xC0000409）
@@ -636,8 +641,7 @@ class _PluginDetailDialog(MaskDialogBase):
     滚动查看）。
 
     底部操作分两组：
-    - 左（次要，仅已安装）：打开目录 / 禁用·启用 / 卸载，规则与行内
-      ``_PluginRow._update_manage_buttons`` 完全一致
+    - 左（次要，仅已安装）：打开目录 / 禁用·启用 / 卸载
     - 右（主操作）：安装 / 更新 / 已安装（禁用态）+ 关闭
     """
 
@@ -698,14 +702,14 @@ class _PluginDetailDialog(MaskDialogBase):
             #marketPluginDetail {{
                 background-color: {card_bg};
                 border: 1px solid {border_c};
-                border-radius: 8px;
+                border-radius: 14px;
             }}
             """
         )
 
         ff_qss = f'font-family: "{ff}";' if ff else ""
         layout = QVBoxLayout(self.widget)
-        layout.setContentsMargins(26, 22, 26, 18)
+        layout.setContentsMargins(28, 24, 28, 20)
         layout.setSpacing(0)
 
         # ── 标题行：名称 + 版本徽标（徽标独立成 chip，不再用内联 HTML 拼字符串） ──
@@ -718,9 +722,10 @@ class _PluginDetailDialog(MaskDialogBase):
         head_lay.setSpacing(8)
 
         title_lb = QLabel(name, head)
+        title_lb.setWordWrap(True)
         title_lb.setTextInteractionFlags(Qt.TextSelectableByMouse)
         title_lb.setStyleSheet(
-            f"color: {tc}; background: transparent; {ff_qss} font-size: {max(10, fs + 4)}px; font-weight: bold;"
+            f"color: {tc}; background: transparent; {ff_qss} font-size: {max(10, fs + 8)}px; font-weight: 600;"
         )
         head_lay.addWidget(title_lb, 0)
         ver_chip = self._badge_chip(self._version_badge(), fs, ff_qss, head)
@@ -744,7 +749,7 @@ class _PluginDetailDialog(MaskDialogBase):
         # ── 信息区（滚动，字段多时不撑爆）──
         # 三列网格：图标 | 字段名 | 值。原先每行都是「<b>标签</b>：值」的整行富文本，
         # 标签与值同字号同颜色、靠一个「：」分隔，字段一多就读成一团；图标也还是
-        # emoji（👤📜🏷📦…），与全 UI 的 FluentIcon 体系脱节、各平台字形不一致。
+        # emoji（👤📜🏷📦…），与全 UI 的 AppIcon 体系脱节、各平台字形不一致。
         scroll = ScrollArea(self.widget)
         scroll.setWidgetResizable(True)
         scroll.setStyleSheet("background: transparent; border: none;")
@@ -840,9 +845,9 @@ class _PluginDetailDialog(MaskDialogBase):
                 author_val = _field_value(f'<a href="{a_url}" style="color:{accent_bg};">{a_name or a_url}</a>')
             else:
                 author_val = _field_value(a_name or "—")
-            base_rows.append((FluentIcon.PEOPLE, "作者", author_val))
+            base_rows.append((icons.PEOPLE, "作者", author_val))
         elif author:
-            base_rows.append((FluentIcon.PEOPLE, "作者", _field_value(str(author))))
+            base_rows.append((icons.PEOPLE, "作者", _field_value(str(author))))
         # 宿主版本要求（未声明不显示，老插件零噪音）
         min_host = self._meta.get("min_host_version")
         if min_host:
@@ -850,26 +855,26 @@ class _PluginDetailDialog(MaskDialogBase):
 
             if self._ver_ok:
                 base_rows.append(
-                    (FluentIcon.IOT, "需要 DriFox", _field_value(f"v{min_host} 及以上"))
+                    (icons.IOT, "需要 DriFox", _field_value(f"v{min_host} 及以上"))
                 )
             else:
                 need = _field_value(f"v{min_host} 及以上")
                 need.setStyleSheet(
                     f"color: #EF5350; background: transparent; {ff_qss} font-size: {max(8, fs - 1)}px;"
                 )
-                base_rows.append((FluentIcon.IOT, "需要 DriFox", need))
+                base_rows.append((icons.IOT, "需要 DriFox", need))
                 cur = _field_value(f"当前 v{host_version_string()}，请先升级 DriFox")
                 cur.setStyleSheet(
                     f"color: #EF5350; background: transparent; {ff_qss} font-size: {max(8, fs - 1)}px;"
                 )
-                base_rows.append((FluentIcon.SYNC, "当前版本过低", cur))
+                base_rows.append((icons.SYNC, "当前版本过低", cur))
         # 平台兼容（platforms 缺省不显示，全平台插件零噪音）
         platforms = self._meta.get("platforms")
         if isinstance(platforms, list) and platforms:
             plat_names = {"windows": "Windows", "linux": "Linux", "darwin": "macOS"}
             if self._plat_ok_platform:
                 base_rows.append(
-                    (FluentIcon.IOT, "支持平台", _chips([plat_names.get(p, p) for p in platforms]))
+                    (icons.IOT, "支持平台", _chips([plat_names.get(p, p) for p in platforms]))
                 )
             else:
                 plat_text = " / ".join(plat_names.get(p, p) for p in platforms)
@@ -877,27 +882,27 @@ class _PluginDetailDialog(MaskDialogBase):
                 bad.setStyleSheet(
                     f"color: #EF5350; background: transparent; {ff_qss} font-size: {max(8, fs - 1)}px;"
                 )
-                base_rows.append((FluentIcon.IOT, "支持平台", bad))
+                base_rows.append((icons.IOT, "支持平台", bad))
         license_ = self._meta.get("license", "")
         if license_:
-            base_rows.append((FluentIcon.CERTIFICATE, "License", _field_value(str(license_))))
+            base_rows.append((icons.CERTIFICATE, "License", _field_value(str(license_))))
         tags = self._meta.get("_cached_tags", []) or []
         if tags:
-            base_rows.append((FluentIcon.TAG, "标签", _chips([str(t) for t in tags])))
+            base_rows.append((icons.TAG, "标签", _chips([str(t) for t in tags])))
         marketplace = self._meta.get("_marketplace", "")
         if marketplace:
-            base_rows.append((FluentIcon.SHOPPING_CART, "来源市场", _field_value(str(marketplace))))
-        downloads = self._meta.get("downloads", 0)
-        if downloads:
+            base_rows.append((icons.SHOPPING_CART, "来源市场", _field_value(str(marketplace))))
+        downloads = self._meta.get("downloads")
+        if isinstance(downloads, int) and downloads >= 0:
             base_rows.append(
-                (FluentIcon.DOWNLOAD, "下载量", _field_value(f"{downloads:,} 次安装", accent=True))
+                (icons.DOWNLOAD, "下载量", _field_value(f"{downloads:,} 次下载", accent=True))
             )
         homepage = _PluginRow._compute_homepage(self._meta)
         if homepage:
             link = _field_value(f'<a href="{homepage}" style="color:{accent_bg};">{homepage}</a>')
-            base_rows.append((FluentIcon.LINK, "官网", link))
+            base_rows.append((icons.LINK, "官网", link))
         if not base_rows:
-            base_rows.append((FluentIcon.INFO, "信息", _field_value("该插件未提供更多信息")))
+            base_rows.append((icons.INFO, "信息", _field_value("该插件未提供更多信息")))
 
         info_layout.addWidget(_section("基本信息", first=True))
         base_grid = _new_grid()
@@ -910,23 +915,23 @@ class _PluginDetailDialog(MaskDialogBase):
             contents = _collect_plugin_contents(_PluginRow._find_local_plugin_path(name))
             content_rows = []
             if contents.get("skills"):
-                content_rows.append((FluentIcon.LIBRARY, "技能", "，".join(contents["skills"])))
+                content_rows.append((icons.LIBRARY, "技能", "，".join(contents["skills"])))
             if contents.get("mcp"):
-                content_rows.append((FluentIcon.CONNECT, "MCP", "，".join(contents["mcp"])))
+                content_rows.append((icons.CONNECT, "MCP", "，".join(contents["mcp"])))
             if contents.get("commands"):
-                content_rows.append((FluentIcon.COMMAND_PROMPT, "命令", "，".join(contents["commands"])))
+                content_rows.append((icons.COMMAND_PROMPT, "命令", "，".join(contents["commands"])))
             if contents.get("agents"):
-                content_rows.append((FluentIcon.ROBOT, "Agents", "，".join(contents["agents"])))
+                content_rows.append((icons.ROBOT, "Agents", "，".join(contents["agents"])))
             if contents.get("hooks"):
-                content_rows.append((FluentIcon.CODE, "Hooks", "，".join(contents["hooks"])))
+                content_rows.append((icons.CODE, "Hooks", "，".join(contents["hooks"])))
             if contents.get("themes"):
-                content_rows.append((FluentIcon.PALETTE, "主题", "，".join(contents["themes"])))
+                content_rows.append((icons.PALETTE, "主题", "，".join(contents["themes"])))
             if contents.get("tools"):
-                content_rows.append((FluentIcon.DEVELOPER_TOOLS, "工具", "，".join(contents["tools"])))
+                content_rows.append((icons.DEVELOPER_TOOLS, "工具", "，".join(contents["tools"])))
             if contents.get("ui"):
-                content_rows.append((FluentIcon.LAYOUT, "UI", "，".join(contents["ui"])))
+                content_rows.append((icons.LAYOUT, "UI", "，".join(contents["ui"])))
             if not content_rows:
-                content_rows.append((FluentIcon.INFO, "内容", "该插件未声明可展示的组件"))
+                content_rows.append((icons.INFO, "内容", "该插件未声明可展示的组件"))
 
             info_layout.addWidget(_section("组件内容"))
             content_grid = _new_grid()
@@ -952,7 +957,7 @@ class _PluginDetailDialog(MaskDialogBase):
         elif self._has_update:
             main_text, main_fn = "更新", self._on_update
         elif self._installed:
-            main_text, main_fn = "已安装", None
+            main_text, main_fn = "", None
         else:
             main_text, main_fn = "安装", self._on_install
 
@@ -1003,11 +1008,14 @@ class _PluginDetailDialog(MaskDialogBase):
         close_btn.clicked.connect(self.close)
 
         # 左：管理操作（打开目录 / 禁用·启用 / 卸载）；右：主操作 + 依赖兜底 + 关闭。
-        # 行内这些管理按钮是右侧竖排的窄按钮，详情弹窗信息更全，横排在底部更顺手。
         for w in self._build_manage_buttons(tc, fs, ff_qss):
             btn_layout.addWidget(w)
         btn_layout.addStretch(1)
         btn_layout.addWidget(main_btn)
+        if self._installed:
+            mark = _InstalledMark(self.widget)
+            mark.sync(True, self._status, self._has_update or not self._plat_ok)
+            btn_layout.addWidget(mark)
         # 依赖兑底：已安装且兼容但 pip 依赖缺失 → 「安装依赖」次按钮（手动重试）
         if self._installed and self._plat_ok:
             self._make_deps_button(tc, fs, ff_qss, btn_layout, main_btn)
@@ -1016,7 +1024,7 @@ class _PluginDetailDialog(MaskDialogBase):
 
         self.widget.setFixedSize(620, 560)
 
-    # ── 底部管理操作（与行内 _PluginRow._update_manage_buttons 同规则） ──
+    # ── 底部管理操作 ──
 
     def _footer_btn(self, text: str, tc: str, fs: int, ff_qss: str, slot, color: Optional[str] = None):
         """底部次要按钮：给了 color 用同色描边（危险/警示语义），否则中性描边"""
@@ -1053,7 +1061,7 @@ class _PluginDetailDialog(MaskDialogBase):
         原先详情弹窗只有「安装 / 更新 / 关闭」，已安装插件在行内能做的操作
         （禁用、卸载、打开目录）在详情页全都没有，只能退出去点行上的按钮。
         """
-        if not self._installed or self._status == "system":
+        if not self._installed:
             return []
 
         buttons = []
@@ -1062,6 +1070,8 @@ class _PluginDetailDialog(MaskDialogBase):
             buttons.append(
                 self._footer_btn("打开目录", tc, fs, ff_qss, lambda: self.openDirRequested.emit(str(path)))
             )
+        if self._status == "system":
+            return buttons
         if self._status in ("disabled", "builtin_disabled"):
             buttons.append(self._footer_btn("启用", tc, fs, ff_qss, self._emit_enable, "#4CAF50"))
         else:
@@ -1450,6 +1460,50 @@ class _ConfirmUninstallDialog(MaskDialogBase):
         self.reject()
 
 
+class _InstalledMark(QLabel):
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.setObjectName("marketInstalledMark")
+        self.setAlignment(Qt.AlignCenter)
+        self.setFixedSize(22, 22)
+        self._style_key = None
+
+    def sync(self, installed, status, action_visible=False):
+        disabled = status in ("disabled", "builtin_disabled")
+        self.setVisible(installed and (disabled or not action_visible))
+        key = (disabled, isDarkTheme())
+        if self._style_key == key:
+            return
+        self._style_key = key
+        if disabled:
+            glyph, label = "×", "已禁用"
+            ink = "#ffaaa4" if isDarkTheme() else "#a43c39"
+            fill = "rgba(200,78,72,0.14)"
+        else:
+            glyph, label = "✓", "已安装"
+            ink = "#91dbad" if isDarkTheme() else "#227347"
+            fill = "rgba(69,160,104,0.16)"
+        self.setText(glyph)
+        self.setAccessibleName(label)
+        self.setToolTip(label)
+        self.setStyleSheet(
+            f"color: {ink}; background: {fill}; border-radius: 11px;"
+            " font-family: 'Segoe UI Symbol'; font-size: 15px; font-weight: 600;"
+        )
+
+
+class _DownloadCount(QLabel):
+    def __init__(self, count, parent):
+        super().__init__(parent)
+        self.setObjectName("marketDownloads")
+        self.set_count(count)
+
+    def set_count(self, count):
+        known = isinstance(count, int) and count >= 0
+        self.setText(f"{count:,} 次下载" if known else "")
+        self.setVisible(known)
+
+
 class _PluginRow(QFrame):
     """单个插件的展示行（简约卡片风格）
 
@@ -1462,12 +1516,7 @@ class _PluginRow(QFrame):
 
     installRequested = pyqtSignal(dict)  # plugin_meta
     updateRequested = pyqtSignal(dict)  # plugin_meta（有新版时触发）
-    openUrlRequested = pyqtSignal(str)  # 打开插件官网 URL
-    openDirRequested = pyqtSignal(str)  # 打开插件所在本地目录
     detailRequested = pyqtSignal(dict)  # 打开插件详情面板
-    enableRequested = pyqtSignal(dict)  # 启用已禁用插件
-    disableRequested = pyqtSignal(dict)  # 禁用已启用插件
-    uninstallRequested = pyqtSignal(dict)  # 卸载插件
     cancelRequested = pyqtSignal(str)  # 取消进行中的安装/更新（插件名）
 
     def __init__(
@@ -1524,52 +1573,6 @@ class _PluginRow(QFrame):
             return max(8, self._font_size + offset)
         return base_px
 
-    def sizeHint(self):
-        """行 sizeHint：已布局时按当前宽度用 heightForWidth 计算
-
-        修复「加载更多」按钮下大段空白：QLabel(wordWrap) 的默认 sizeHint
-        按理想宽度（未约束）计算换行高度，比实际布局高度大（实测 75 vs
-        67，行多时累积成 stretch 空白区）。已布局（width>0）时返回
-        heightForWidth(当前宽度)，与 QVBoxLayout 布局行时使用的高度一致；
-        未布局（width=0）时回退默认（该状态行处于隐藏、不参与布局
-        sizeHint 累加，无影响）。
-        """
-        from PyQt5.QtCore import QSize
-
-        base = super().sizeHint()
-        lay = self.layout()
-        if lay is not None and self.width() > 0:
-            h = lay.heightForWidth(self.width())
-            if h > 0:
-                return QSize(base.width(), h)
-        return base
-
-    def minimumSizeHint(self):
-        """行最小高度对齐 sizeHint —— 修复「描述文字被挤掉半行」
-
-        根因：Qt 的 ``QWidgetItem::sizeHint()`` 取
-        ``max(widget.sizeHint(), widget.minimumSizeHint())``，而 QLayout 就是按
-        这个值分配垂直空间的。本类覆写了 ``sizeHint()``（按当前宽度算
-        heightForWidth，避免 wordWrap QLabel 按理想宽度放大），但
-        ``minimumSizeHint()`` 仍是 QWidget 默认（``layout().totalMinimumSize()``，
-        wordWrap QLabel 按「不换行的单行宽度」推导）——实测 18/30 行出现
-        ``minimumSizeHint > sizeHint``（+1~7px，如 87 vs 80）。
-
-        于是列表容器按 ``sizeHint`` 之和预留高度（_content_height），比 Qt 实际
-        需要的少 ~70px/30 行 → QVBoxLayout 压缩行；而 wordWrap 的 QLabel 是唯一
-        可压缩项（minimumSizeHint 只按一行算）→ 描述被挤掉半行（截图里
-        anything2explainer / archify 那种「字形被横向切一半」）。
-
-        两者对齐后 ``QWidgetItem::sizeHint() == sizeHint()``，缺口归零，
-        既不会被压缩，也不会多出 stretch 空白。
-        """
-        from PyQt5.QtCore import QSize
-
-        hint = self.sizeHint()
-        if self.width() > 0 and hint.height() > 0:
-            return QSize(hint.width(), hint.height())
-        return super().minimumSizeHint()
-
     def _font_qss(self, size_px: int) -> str:
         """生成 font-size + font-family 的 QSS 片段"""
         qss = f"font-size: {size_px}px;"
@@ -1578,172 +1581,49 @@ class _PluginRow(QFrame):
         return qss
 
     def _apply_child_fonts(self):
-        """字号/字体变化时更新行内各标签（替代原 _retheme 全树遍历）
-
-        优化：缓存已设置的 QSS 字符串，无变化时跳过 setStyleSheet 调用
-        （QSS 解析 + 触发布局重算在 30+ 行时是滚动卡顿主因之一）。
-        """
-        if self._desc_label is not None:
-            new_qss = f"color: {self._tcs}; {self._font_qss(self._derive_size(12, -4))} background: transparent;"
-            if getattr(self, "_desc_qss_cached", None) != new_qss:
-                self._desc_qss_cached = new_qss
-                self._desc_label.setStyleSheet(new_qss)
-        new_tag_qss = self._tag_stylesheet()
-        if getattr(self, "_tag_qss_cached", None) != new_tag_qss:
-            self._tag_qss_cached = new_tag_qss
-            for lbl in self._tag_labels:
-                lbl.setStyleSheet(new_tag_qss)
-        if getattr(self, "_mp_label", None) is not None:
-            new_mp_qss = f"color: {self._tcs}; {self._font_qss(self._derive_size(10, 0))} background: transparent;"
-            if getattr(self, "_mp_qss_cached", None) != new_mp_qss:
-                self._mp_qss_cached = new_mp_qss
-                self._mp_label.setStyleSheet(new_mp_qss)
-        if getattr(self, "_dl_label", None) is not None:
-            new_dl_qss = f"color: {self._tcs}; {self._font_qss(self._derive_size(11, 0))} background: transparent;"
-            if getattr(self, "_dl_qss_cached", None) != new_dl_qss:
-                self._dl_qss_cached = new_dl_qss
-                self._dl_label.setStyleSheet(new_dl_qss)
+        self._title_label.setStyleSheet(
+            f"color: {self._tc}; font-weight: 600; background: transparent; {self._font_qss(self._derive_size(16, 1))}"
+        )
+        for label, size in (
+            (self._desc_label, self._derive_size(13, -1)),
+            (self._meta_label, self._derive_size(12, -3)),
+            (self._down_label, self._derive_size(12, -3)),
+        ):
+            if label is not None:
+                label.setStyleSheet(f"color: {self._tcs}; background: transparent; {self._font_qss(size)}")
 
     # ── 状态标签（启用/禁用/系统） ──────────────────────────
 
-    def _status_text(self) -> str:
-        """按安装状态生成状态标签文本
-
-        内置非 system 插件（builtin_enabled/builtin_disabled）与用户插件
-        显示同样的启用/禁用文本；真系统插件保留「系统插件」。
-        """
-        if self._status in ("disabled", "builtin_disabled"):
-            return "已禁用"
-        if self._status == "system":
-            return "系统插件"
-        if self._status in ("enabled", "builtin_enabled"):
-            return "已启用"
-        return ""
-
-    def _status_color(self) -> str:
-        """状态标签颜色"""
-        if self._status in ("disabled", "builtin_disabled"):
-            return "#FF9800"
-        if self._status == "system":
-            return "#2196F3"
-        if self._status in ("enabled", "builtin_enabled"):
-            return "#4CAF50"
-        return self._tcs
-
     def _setup_ui(self):
         self.setObjectName("pluginRow")
-        # 扁平列表：去掉四周描边（密集列表下每行一个圆角框会显得「漂浮」、也把行间空隙
-        # 撑成视觉噪声），改为底部 1px 分隔线 + 整行 hover 高亮。分隔线用中性灰、
-        # 深/浅主题都不突兀。
         self.setStyleSheet(
-            "#pluginRow { background: transparent; border: none;"
-            " border-bottom: 1px solid rgba(128,128,128,0.14); }"
-            "#pluginRow:hover { background: rgba(128,128,128,0.07); }"
+            "#pluginRow { background: rgba(128,128,128,0.035); border: 1px solid rgba(128,128,128,0.24);"
+            " border-radius: 12px; } #pluginRow:hover { border-color: rgba(128,128,128,0.48); }"
+            "#pluginRow:focus { border-color: #548bc2; }"
         )
-        self.setMinimumWidth(0)
         self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(12, 8, 12, 8)
-        layout.setSpacing(8)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(18, 16, 18, 14)
+        layout.setSpacing(10)
 
-        # 插件图标：SVG icon 优先，无图标则用缩写头像
+        head = QHBoxLayout()
+        head.setSpacing(12)
         self._avatar = self._create_icon_widget()
-        layout.addWidget(self._avatar)
-
-        # 信息区
-        info_layout = QVBoxLayout()
-        info_layout.setSpacing(2)
-        self._info_layout = info_layout
-        # info 在行布局中的固定 index（heightForWidth 手动计算用）
-        self._info_index = 1
-
+        head.addWidget(self._avatar)
         name = plugin_display_name(self._meta)
-        self._name_raw = name
-        # 标题行：只有插件名（下载量已移到下方元信息行，见 meta_row）
-        title_row = QWidget(self)
-        title_row.setStyleSheet("background: transparent;")
-        title_layout = QHBoxLayout(title_row)
-        title_layout.setContentsMargins(0, 0, 0, 0)
-        title_layout.setSpacing(8)
-        self._title_label = QLabel("", title_row)
+        self._title_label = _ElidedLabel(name, self, elide_mode=Qt.ElideRight)
+        self._title_label.setTextInteractionFlags(Qt.NoTextInteraction)
         self._title_label.setObjectName("pluginRowTitle")
-        ff_qss = f" font-family: '{self._ff}';" if self._ff else ""
-        self._title_label.setStyleSheet(f"color: {self._tc}; font-weight: bold;{ff_qss} background: transparent;")
-        self._refresh_title()
-        title_layout.addWidget(self._title_label)
-        # 下载量：靠标题行右侧（与插件名同一视觉带，扫列表时一眼可见）。
-        # 曾下移到元信息行与「来源市场」并排，实测不好扫读，回归标题行。
-        downloads = self._meta.get("downloads", 0)
-        self._dl_label = None
-        if downloads:
-            title_layout.addStretch(1)
-            dl_icon = IconWidget(FluentIcon.DOWNLOAD, title_row)
-            dl_icon.setFixedSize(14, 14)
-            title_layout.addWidget(dl_icon)
-            self._dl_label = QLabel(
-                f'<span style="color:#FFA726; font-weight:bold;">{downloads:,}</span>',
-                title_row,
-            )
-            self._dl_label.setStyleSheet(
-                f"color: {self._tcs}; {self._font_qss(self._derive_size(11, 0))} background: transparent;"
-            )
-            title_layout.addWidget(self._dl_label)
-        info_layout.addWidget(title_row)
+        head.addWidget(self._title_label, 1)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setFocusPolicy(Qt.StrongFocus)
+        self.setAccessibleName(f"{name}，查看详情")
+        layout.addLayout(head)
 
-        # 版本更新徽标已内嵌在标题（v1.0 → v2.0），不再单独建标签
-
-        desc = self._meta.get("description", "")
-        self._desc_label = None
-        self._desc_raw = ""
-        if desc:
-            self._desc_raw = desc[:120]
-            desc_text = _highlight_html(self._desc_raw, self._search_query)
-            self._desc_label = QLabel(desc_text, self)
-            self._desc_label.setWordWrap(True)
-            self._desc_label.setObjectName("pluginRowDesc")
-            self._desc_label.setStyleSheet(
-                f"color: {self._tcs}; {self._font_qss(self._derive_size(12, -4))} background: transparent;"
-            )
-            info_layout.addWidget(self._desc_label)
-
-        # Tag 标签行（FlowLayout 自动换行，不撑大卡片宽度）
-        self._tag_labels: list = []
-        if self._tags:
-            tags_widget = QWidget(self)
-            tags_layout = _FlowLayout(tags_widget, spacing=4)
-            tags_layout.setContentsMargins(0, 2, 0, 0)
-            for tag in self._tags:
-                tag_text = (
-                    _highlight_html(tag, self._search_query)
-                    if (self._search_query and self._search_query.lower() in tag.lower())
-                    else tag.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-                )
-                lbl = QLabel(tag_text, tags_widget)
-                lbl.setObjectName("pluginRowTag")
-                lbl.setStyleSheet(self._tag_stylesheet())
-                tags_layout.addWidget(lbl)
-                self._tag_labels.append(lbl)
-            info_layout.addWidget(tags_widget)
-
-        # 元信息行：市场来源（下载量在标题行右侧）
-        meta_row = QWidget(self)
-        meta_row.setStyleSheet("background: transparent;")
-        meta_layout = QHBoxLayout(meta_row)
-        meta_layout.setContentsMargins(0, 0, 0, 0)
-        meta_layout.setSpacing(8)
-
-        marketplace = self._meta.get("_marketplace", "")
-        self._mp_label = None
-        if marketplace:
-            self._mp_label = QLabel(f"📦 {marketplace}", meta_row)
-            self._mp_label.setStyleSheet(
-                f"color: {self._tcs}; {self._font_qss(self._derive_size(10, 0))} background: transparent;"
-            )
-            meta_layout.addWidget(self._mp_label)
-        # 末尾 stretch：两项各保持自然宽度、左对齐相邻，否则 QLabel 会平分行宽
-        # 把市场来源挤到行中间（实测下载量 x=20、来源 x=331）
-        meta_layout.addStretch(1)
-        info_layout.addWidget(meta_row)
+        self._desc_label = _CardSummary(self._meta.get("description") or "", self)
+        self._desc_label.setObjectName("pluginRowDesc")
+        layout.addWidget(self._desc_label)
+        layout.addStretch(1)
 
         # 下载进度条（默认隐藏）：高度 3px 细条，贴在元信息行下方。
         # 布局常驻（不加/删 widget），显隐只切 visible，避免触发行高跳动。
@@ -1758,68 +1638,33 @@ class _PluginRow(QFrame):
             "QProgressBar::chunk { background: #62a0ea; border-radius: 1px; }"
         )
         self._progress.setVisible(False)
-        info_layout.addWidget(self._progress)
+        layout.addWidget(self._progress)
+        footer = QHBoxLayout()
+        footer.setSpacing(8)
+        self._meta_label = _ElidedLabel("", self, elide_mode=Qt.ElideRight)
+        self._meta_label.setObjectName("pluginRowMeta")
+        self._meta_label.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Preferred)
+        self._meta_label.setMinimumWidth(1)
+        footer.addWidget(self._meta_label)
+        self._down_label = _DownloadCount(self._meta.get("downloads"), self)
+        footer.addWidget(self._down_label)
+        footer.addStretch(1)
+        self._apply_child_fonts()
+        self._refresh_title()
+        self._highlight_summary()
 
-        layout.addLayout(info_layout, 1)
-
-        # 图标按钮列（目录/官网/信息）：置顶排列，不垂直居中
-        icon_col = QVBoxLayout()
-        icon_col.setSpacing(4)
-
-        # 打开插件所在文件夹按钮（仅已安装时可见，未安装无本地目录）
-        self._dir_btn = None
-        local_path = self._local_path
-        if local_path:
-            self._dir_btn = TransparentToolButton(FluentIcon.FOLDER, self)
-            self._dir_btn.setFixedSize(28, 28)
-            self._dir_btn.setToolTip(f"打开插件所在文件夹 {local_path}")
-            self._dir_btn.clicked.connect(lambda checked, p=local_path: self.openDirRequested.emit(str(p)))
-            self._dir_btn.setVisible(self._installed)
-            icon_col.addWidget(self._dir_btn)
-
-        # 官网链接按钮（仅未安装时显示；已安装可在详情弹窗查看官网）
-        homepage = self._compute_homepage(self._meta)
-        if homepage and not self._installed:
-            link_btn = TransparentToolButton(FluentIcon.LINK, self)
-            link_btn.setFixedSize(28, 28)
-            link_btn.setToolTip(f"打开官网 {homepage}")
-            link_btn.clicked.connect(lambda checked, u=homepage: self.openUrlRequested.emit(u))
-            icon_col.addWidget(link_btn)
-
-        # 详情按钮（未安装也能查看完整信息）
-        detail_btn = TransparentToolButton(FluentIcon.INFO, self)
-        detail_btn.setFixedSize(28, 28)
-        detail_btn.setToolTip("查看详情")
-        detail_btn.clicked.connect(lambda checked, m=self._meta: self.detailRequested.emit(m))
-        icon_col.addWidget(detail_btn)
-
-        icon_col.addStretch(1)
-        layout.addLayout(icon_col)
-
-        # 操作列：主按钮在上，管理按钮（启用/禁用/卸载）竖排在下
-        action_col = QVBoxLayout()
-        action_col.setSpacing(4)
-
-        # 管理按钮区（启用/禁用/卸载，已安装用户插件时显示）
-        self._manage_layout = QVBoxLayout()
-        self._manage_layout.setSpacing(4)
-
-        # 操作按钮（查看/安装/更新）
         self._btn = TransparentPushButton(self)
-        self._btn.setFixedSize(100, 30)
-        # 保存 FluentUI 默认样式，仅追加 font-size 不改其他
+        self._btn.setMinimumSize(58, 28)
+        self._installed_mark = _InstalledMark(self)
+        footer.addWidget(self._installed_mark)
         self._original_btn_style = self._btn.styleSheet()
         self._update_btn_text()
         self._btn.clicked.connect(self._on_click)
-        action_col.addWidget(self._btn)
-
-        action_col.addLayout(self._manage_layout)
-        action_col.addStretch(1)
-
-        layout.addLayout(action_col)
+        footer.addWidget(self._btn)
+        layout.addLayout(footer)
 
     def _update_btn_text(self):
-
+        self._installed_mark.sync(self._installed, self._status, self._has_update or self._busy or not self._plat_ok)
         fs = self._btn_font_size
         btn_font = self._btn.font()
         btn_font.setPixelSize(fs)
@@ -1865,7 +1710,6 @@ class _PluginRow(QFrame):
             # 与管理按钮（禁用/卸载）统一描边风格，不再用 Fluent 默认透明样式
             self._btn.setStyleSheet(self._outline_btn_style("#2196F3"))
             self._btn.setVisible(True)
-        self._update_manage_buttons()
 
     # ── 管理按钮（启用/禁用/卸载，行内直接操作） ─────────────
 
@@ -1883,56 +1727,24 @@ class _PluginRow(QFrame):
         """描边按钮样式（安装/启用/禁用/卸载统一）：同色边框+彩色文字，hover 浅色底"""
         r, g, b = (int(color[i : i + 2], 16) for i in (1, 3, 5))
         return (
-            f"PushButton {{ color: {color}; border: 1px solid {color};"
-            " border-radius: 4px; padding: 2px 6px; background: transparent; }"
+            f"PushButton {{ color: {color}; border: 1px solid rgba({r},{g},{b},0.38);"
+            " border-radius: 6px; padding: 2px 8px; background: transparent; }"
             f"PushButton:hover {{ background: rgba({r},{g},{b},0.12); }}"
         )
 
-    def _make_manage_btn(self, text: str, color: str, slot) -> TransparentPushButton:
-        """创建紧凑管理按钮（与主按钮同宽同高，竖排对齐）"""
-        btn = TransparentPushButton(text, self)
-        btn.setFixedSize(100, 30)
-        btn.setStyleSheet(
-            self._outline_btn_style(color) + f" PushButton {{ font-size: {max(10, self._btn_font_size - 2)}px; }}"
-        )
-        btn.clicked.connect(slot)
-        return btn
-
-    def _update_manage_buttons(self):
-        """按安装状态刷新管理按钮（系统/未安装隐藏；禁用→启用；启用→禁用）
-
-        - status=system（真系统插件）：无管理按钮；有更新时更新按钮在主按钮位
-          （_update_btn_text 的 has_update 分支），行内不重复
-        - builtin_enabled/builtin_disabled（内置非 system）：显示禁用/启用，
-          不显示卸载（目录随主程序分发，删除不可恢复）
-        - enabled/disabled（用户插件）：禁用/启用 + 卸载
-        """
-        while self._manage_layout.count():
-            item = self._manage_layout.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
-
-        if self._busy or not self._installed:
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.LeftButton and self.rect().contains(event.pos()):
+            event.accept()
+            self.detailRequested.emit(self._meta)
             return
-        if self._status == "system":
-            # 真系统插件只读，行内不提供管理操作（详情弹窗同样无）
+        super().mouseReleaseEvent(event)
+
+    def keyPressEvent(self, event):
+        if event.key() in (Qt.Key_Return, Qt.Key_Enter, Qt.Key_Space):
+            event.accept()
+            self.detailRequested.emit(self._meta)
             return
-
-        if self._status in ("disabled", "builtin_disabled"):
-            self._manage_layout.addWidget(self._make_manage_btn("启用", "#4CAF50", self._on_enable))
-        else:
-            self._manage_layout.addWidget(self._make_manage_btn("禁用", "#FF9800", self._on_disable))
-        if self._status not in ("builtin_enabled", "builtin_disabled"):
-            self._manage_layout.addWidget(self._make_manage_btn("卸载", "#F44336", self._on_uninstall))
-
-    def _on_enable(self):
-        self.enableRequested.emit(self._meta)
-
-    def _on_disable(self):
-        self.disableRequested.emit(self._meta)
-
-    def _on_uninstall(self):
-        self.uninstallRequested.emit(self._meta)
+        super().keyPressEvent(event)
 
     def _on_click(self):
         if self._busy:
@@ -1984,8 +1796,6 @@ class _PluginRow(QFrame):
         if changed:
             self._refresh_title()
         # 文件夹按钮仅已安装时可见
-        if self._dir_btn is not None:
-            self._dir_btn.setVisible(installed)
         self._update_btn_text()
 
     def set_downloading(self):
@@ -2026,30 +1836,19 @@ class _PluginRow(QFrame):
         self._cancellable = False
 
     def _refresh_title(self):
-        """按当前状态重算标题：名称 + 彩色版本徽标 + 状态标签
-
-        - 有更新：v{local} → v{remote}（橙色）
-        - 已安装且最新：v{local}（绿色）
-        - 未安装：v{remote}（次级色）
-        - 已安装：追加状态标签（已启用 / 已禁用 / 系统插件）
-        """
-        remote_ver = self._meta.get("version", "")
-        ver_html = ""
-        if self._has_update and self._local_version and remote_ver:
-            ver_html = f' <span style="color:#FFA726;">v{self._local_version} → v{remote_ver}</span>'
-        elif self._installed and self._local_version:
-            ver_html = f' <span style="color:#4CAF50;">v{self._local_version}</span>'
-        elif remote_ver:
-            ver_html = f' <span style="color:{self._tcs};">v{remote_ver}</span>'
-        status_html = ""
-        if self._installed and not self._busy:
-            st = self._status_text()
-            if st:
-                status_html = f' <span style="color:{self._status_color()}; font-weight:bold;">{st}</span>'
-        self._version_suffix = ver_html + status_html
-        title_fs = max(9, self._font_size - 2) if self._font_size > 0 else 13
-        name_html = _highlight_html(self._name_raw, self._search_query)
-        self._title_label.setText(f'<span style="font-size:{title_fs}pt;">{name_html}{ver_html}{status_html}</span>')
+        """分类、版本和状态放在页脚，长名称独占标题行。"""
+        version = self._local_version or self._meta.get("version")
+        ver = f"v{version}" if version else ""
+        if self._has_update and self._local_version and self._meta.get("version"):
+            ver += f" → v{self._meta['version']}"
+        tag = next((t for t in self._tags if self._search_query and self._search_query.lower() in t.lower()), None)
+        category = tag or next(iter(self._tags), "")
+        status = "系统插件" if self._installed and self._status == "system" else ""
+        self._meta_label.setText("  ·  ".join(filter(None, [_EXPLORE_CATEGORY_LABELS.get(category, category), ver, status])))
+        details = [self._meta.get("_marketplace"), *self._tags]
+        if self._meta.get("downloads"):
+            details.append(f"{self._meta['downloads']:,} 次下载")
+        self._meta_label.setToolTip("  ·  ".join(filter(None, details)))
 
     def set_error(self):
         """安装/更新失败后恢复按钮"""
@@ -2068,12 +1867,10 @@ class _PluginRow(QFrame):
            manifest.icon + source 指向 git-subdir GitHub 源）
         3. SquircleAvatar 缩写头像（兜底）
 
-        卡片行内图标按 font_size * 3.4 放大（最小 48px），让图标在列表中
-        更醒目。当前 font_size=14 → 48px（之前 36px，更早 23px）。
+        图标随字号适度缩放，给名称与摘要保留横向空间。
         """
         plugin_name = self._meta.get("name", "?")
-        # 卡片行内放大：font_size > 0 时按 3.4 倍率放大，下限 48px
-        icon_size = max(48, int(self._font_size * 3.4)) if self._font_size > 0 else 48
+        icon_size = self._row_icon_size()
 
         local_path = self._local_path
         if local_path:
@@ -2152,14 +1949,16 @@ class _PluginRow(QFrame):
                 return p
         return None
 
+    def _row_icon_size(self):
+        return max(32, min(42, (self._font_size or 14) * 2 + 6))
+
     def set_font_size(self, font_size: int):
         """根据上下文字体大小动态调整头像尺寸 + 行内标签字号"""
         if font_size <= 0:
             return
         self._font_size = font_size
         if self._avatar is not None:
-            # 卡片行内图标按字号 3.4 倍放大（最小 48px），与 _create_icon_widget 保持一致
-            icon_size = max(48, int(font_size * 3.4))
+            icon_size = self._row_icon_size()
             if hasattr(self._avatar, "set_icon_size"):
                 self._avatar.set_icon_size(icon_size)
             elif hasattr(self._avatar, "set_size"):
@@ -2222,37 +2021,18 @@ class _PluginRow(QFrame):
             return u.replace(".git", "")
         return ""
 
-    def _tag_stylesheet(self) -> str:
-        """tag 标签 QSS 样式（字号跟随上下文派生）"""
-        return (
-            f"background: rgba(128,128,128,0.10); color: {self._tcs}; border-radius: 4px; padding: 1px 6px; "
-            f"{self._font_qss(self._derive_size(10, -5))}"
-        )
+    def _highlight_summary(self):
+        queries = [self._search_query] if self._search_query else []
+        color = "#9ac9ff" if isDarkTheme() else "#185aa5"
+        self._title_label.setHighlights(queries, color)
+        self._meta_label.setHighlights(queries, color)
+        self._desc_label.set_query(self._search_query)
 
     def update_search_highlight(self, query: str):
-        """搜索词变化时更新标题/描述/tag 的高亮 HTML，无需重建 widget"""
-        if query == self._search_query:
-            return
-        self._search_query = query
-
-        # 标题
-        title_fs = max(9, self._font_size - 2) if self._font_size > 0 else 13
-        name_html = _highlight_html(self._name_raw, query)
-        self._title_label.setText(f'<span style="font-size:{title_fs}pt;">{name_html}{self._version_suffix}</span>')
-
-        # 描述
-        if self._desc_label is not None:
-            self._desc_label.setText(_highlight_html(self._desc_raw, query))
-
-        # Tag
-        for i, tag in enumerate(self._tags):
-            if i < len(self._tag_labels):
-                tag_text = (
-                    _highlight_html(tag, query)
-                    if query and query.lower() in tag.lower()
-                    else tag.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-                )
-                self._tag_labels[i].setText(tag_text)
+        if query != self._search_query:
+            self._search_query = query
+            self._refresh_title()
+            self._highlight_summary()
 
 
 # ── 探索模式（精选分组横滑卡片） ─────────────────────────────
@@ -2271,16 +2051,82 @@ _EXPLORE_CATEGORY_LABELS = {
 }
 # 分类分组展示顺序（不在表中的分类排后面，按首字母）
 _EXPLORE_CATEGORY_ORDER = ["agent", "lsp", "language", "mcp", "stats", "theme", "tool", "ui", "workflow"]
-_EXPLORE_GROUP_SIZE = 6  # 精选页每组网格卡片数（3 列 × 2 行）
+_EXPLORE_GROUP_SIZE = 6
+_CARD_GAP = 16
+
+
+def _catalog_columns(available_width: int) -> int:
+    """两张卡各有 350 逻辑像素时采用双列。"""
+    return 2 if available_width >= 2 * 350 + _CARD_GAP else 1
+
+
+class _CardSummary(QLabel):
+    """用 Qt 原生断行展示两行摘要，末行随宽度省略，悬停可读全文。"""
+
+    def __init__(self, text, parent):
+        super().__init__(parent)
+        self._source = " ".join(text.split())
+        self._query = ""
+        self.setToolTip(text)
+        self.setTextFormat(Qt.RichText)
+        self.setTextInteractionFlags(Qt.NoTextInteraction)
+        self.setAlignment(Qt.AlignLeft | Qt.AlignTop)
+        self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
+        self._fit_text()
+
+    def sizeHint(self):
+        return QSize(0, self.fontMetrics().lineSpacing() * 2 + 2)
+
+    def minimumSizeHint(self):
+        return self.sizeHint()
+
+    def set_query(self, query):
+        if self._query != query:
+            self._query = query
+            self._fit_text()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._fit_text()
+
+    def changeEvent(self, event):
+        super().changeEvent(event)
+        if event.type() == QEvent.FontChange and hasattr(self, "_source"):
+            self._fit_text()
+            self.updateGeometry()
+
+    def _fit_text(self):
+        text = self._source
+        width = max(1, self.contentsRect().width() - 2)
+        fm = self.fontMetrics()
+        if self._query:
+            start = text.lower().find(self._query.lower())
+            if start > 0 and fm.horizontalAdvance(text[:start + len(self._query)]) > width:
+                text = "…" + text[max(0, start - 4):]
+        layout = QTextLayout(text, self.font())
+        option = QTextOption()
+        option.setWrapMode(QTextOption.WrapAtWordBoundaryOrAnywhere)
+        layout.setTextOption(option)
+        layout.beginLayout()
+        line = layout.createLine()
+        if line.isValid():
+            line.setLineWidth(width)
+        layout.endLayout()
+        if not line.isValid():
+            self.clear()
+            return
+        raw = text.encode("utf-16-le")
+        cut = line.textLength() * 2
+        first = raw[:cut].decode("utf-16-le").rstrip()
+        rest = raw[cut:].decode("utf-16-le").lstrip()
+        lines = [first]
+        if rest:
+            lines.append(fm.elidedText(rest, Qt.ElideRight, width))
+        self.setText("<br>".join(_highlight_html(part, self._query) for part in lines))
 
 
 class _ExploreCard(QFrame):
-    """探索模式横滑卡片（商店卡片风格：固定宽、竖排图标+名称+描述+操作）
-
-    与 _PluginRow（列表行）不同：固定宽度紧凑竖排、支持横向滚动容器；
-    复用同一套状态语义（installed/has_update/status/busy）与信号，
-    由 MarketplaceCard 统一连接安装/更新/详情处理。
-    """
+    """精选分类中的插件卡片。"""
 
     installRequested = pyqtSignal(dict)
     updateRequested = pyqtSignal(dict)
@@ -2332,75 +2178,59 @@ class _ExploreCard(QFrame):
 
     def _setup_ui(self):
         self.setObjectName("exploreCard")
-        # 网格模式：不设固定宽（随 QGridLayout 列拉伸自适应），仅保最小宽
-        self.setMinimumWidth(170)
-        self.setStyleSheet(
-            "#exploreCard { background: rgba(128,128,128,0.08);"
-            " border: 1px solid rgba(128,128,128,0.15); border-radius: 10px; }"
-            "#exploreCard:hover { border: 1px solid rgba(98,160,234,0.6); background: rgba(128,128,128,0.12); }"
-        )
+        self.setFocusPolicy(Qt.StrongFocus)
+        self.setAccessibleName(plugin_display_name(self._meta))
+        self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(12, 12, 12, 10)
-        lay.setSpacing(6)
+        lay.setContentsMargins(16, 16, 16, 12)
+        lay.setSpacing(10)
 
-        # 图标 + 名称行
-        head = QWidget(self)
-        head.setStyleSheet("background: transparent;")
-        head_lay = QHBoxLayout(head)
-        head_lay.setContentsMargins(0, 0, 0, 0)
-        head_lay.setSpacing(8)
-        self._avatar = self._create_icon_widget(head)
-        head_lay.addWidget(self._avatar)
-
-        name = plugin_display_name(self._meta)
-        self._name_label = QLabel(name, head)
-        self._name_label.setObjectName("exploreCardName")
-        self._name_label.setStyleSheet(
-            f"color: {self._tc}; font-weight: bold; background: transparent;"
-            f" {self._font_qss(self._derive_size(13, -1))}"
+        head = QHBoxLayout()
+        head.setSpacing(12)
+        icon_tile = QFrame(self)
+        icon_tile.setObjectName("marketIconTile")
+        icon_tile.setStyleSheet(
+            f"#marketIconTile {{ background: {name_color(self._meta.get('name', ''), 36)}; border-radius: 12px; }}"
         )
-        self._name_label.setWordWrap(True)
-        head_lay.addWidget(self._name_label, 1)
-        lay.addWidget(head)
+        tile_layout = QHBoxLayout(icon_tile)
+        tile_layout.setContentsMargins(8, 8, 8, 8)
+        self._avatar = self._create_icon_widget(icon_tile)
+        tile_layout.addWidget(self._avatar)
+        head.addWidget(icon_tile)
+        identity = QVBoxLayout()
+        identity.setSpacing(2)
+        self._name_label = _ElidedLabel(plugin_display_name(self._meta), self, elide_mode=Qt.ElideRight)
+        self._name_label.setObjectName("exploreCardName")
+        identity.addWidget(self._name_label)
+        author = self._meta.get("author")
+        if isinstance(author, dict):
+            author = author.get("name")
+        self._author_label = None
+        if author:
+            self._author_label = _ElidedLabel(str(author), self, elide_mode=Qt.ElideRight)
+            identity.addWidget(self._author_label)
+        head.addLayout(identity, 1)
+        lay.addLayout(head)
 
-        # 描述（两行截断）
-        desc = self._meta.get("description", "")
-        self._desc_label = None
-        if desc:
-            fm = self._name_label.fontMetrics()
-            elided = fm.elidedText(desc[:80], Qt.ElideRight, 176 - 24)
-            self._desc_label = QLabel(elided, self)
-            self._desc_label.setObjectName("exploreCardDesc")
-            self._desc_label.setStyleSheet(
-                f"color: {self._tcs}; background: transparent; {self._font_qss(self._derive_size(11, -3))}"
-            )
-            lay.addWidget(self._desc_label)
+        desc = self._meta.get("description") or ""
+        self._desc_label = _CardSummary(desc, self)
+        self._desc_label.setObjectName("exploreCardDesc")
+        lay.addWidget(self._desc_label)
+        lay.addStretch()
 
-        # 下载量 + 版本
-        meta_row = QWidget(self)
-        meta_row.setStyleSheet("background: transparent;")
-        meta_lay = QHBoxLayout(meta_row)
-        meta_lay.setContentsMargins(0, 0, 0, 0)
-        meta_lay.setSpacing(6)
-        downloads = self._meta.get("downloads", 0)
-        self._down_label = None
-        if downloads:
-            self._down_label = QLabel(f"{downloads:,} 下载", meta_row)
-            self._down_label.setObjectName("exploreCardDown")  # 橙色固定，主题 re-theme 跳过
-            self._down_label.setStyleSheet(
-                f"color: #FFA726; background: transparent; {self._font_qss(self._derive_size(10, -3))}"
-            )
-            meta_lay.addWidget(self._down_label)
-        ver = self._meta.get("version", "")
+        footer = QHBoxLayout()
+        footer.setSpacing(8)
+        ver = self._meta.get("version")
+        self._ver_label = None
         if ver:
-            self._ver_label = QLabel(f"v{ver}", meta_row)
+            self._ver_label = _ElidedLabel(f"v{ver}", self, elide_mode=Qt.ElideRight)
             self._ver_label.setObjectName("exploreCardVer")
-            self._ver_label.setStyleSheet(
-                f"color: {self._tcs}; background: transparent; {self._font_qss(self._derive_size(10, -3))}"
-            )
-            meta_lay.addWidget(self._ver_label)
-        meta_lay.addStretch(1)
-        lay.addWidget(meta_row)
+            self._ver_label.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Preferred)
+            self._ver_label.setMinimumWidth(1)
+            footer.addWidget(self._ver_label)
+        self._down_label = _DownloadCount(self._meta.get("downloads"), self)
+        footer.addWidget(self._down_label)
+        footer.addStretch(1)
 
         # 下载进度条（默认隐藏，与列表行同语义）
         self._progress = QProgressBar(self)
@@ -2415,19 +2245,24 @@ class _ExploreCard(QFrame):
         self._progress.setVisible(False)
         lay.addWidget(self._progress)
 
-        # 关注点：下载量标签不随主题 re-theme（橙色固定），objectName 保留
-
-        # 操作按钮
         self._btn = QPushButton(self)
         self._btn.setCursor(Qt.PointingHandCursor)
-        self._btn.setFixedHeight(28)
+        self._btn.setMinimumSize(58, 28)
+        self._installed_mark = _InstalledMark(self)
+        footer.addWidget(self._installed_mark)
         self._btn.clicked.connect(self._on_main_action)
-        self._style_button()
-        lay.addWidget(self._btn)
-        self._update_btn_text()
+        footer.addWidget(self._btn)
+        lay.addLayout(footer)
+        self.apply_theme(self._tc, self._tcs, self._ff, self._font_size)
 
         # 点击卡片空白区域 → 详情
         self._install_mouse_forward()
+
+    def keyPressEvent(self, event):
+        if event.key() in (Qt.Key_Return, Qt.Key_Enter, Qt.Key_Space):
+            self.detailRequested.emit(self._meta)
+            return
+        super().keyPressEvent(event)
 
     def _install_mouse_forward(self):
         """卡片内非交互区域点击 → 打开详情（商店卡片整卡可点）"""
@@ -2452,7 +2287,7 @@ class _ExploreCard(QFrame):
         return super().eventFilter(obj, event)
 
     def _style_button(self):
-        accent = "#62a0ea"
+        accent = "#9ac9ff" if isDarkTheme() else "#185aa5"
         self._btn.setStyleSheet(
             f"QPushButton {{ background: rgba(98,160,234,0.15); color: {accent};"
             f" border: none; border-radius: 6px; {self._font_qss(self._derive_size(11, -2))} }}"
@@ -2461,6 +2296,11 @@ class _ExploreCard(QFrame):
         )
 
     def _update_btn_text(self):
+        installed_only = self._installed and not self._has_update and not self._busy
+        self._installed_mark.sync(self._installed, self._status, self._has_update or self._busy)
+        self._btn.setVisible(not installed_only)
+        if installed_only:
+            return
         if self._busy:
             if self._cancellable:
                 # 可取消阶段：按钮变「取消」且保持可点（进度看上方细条）
@@ -2481,14 +2321,11 @@ class _ExploreCard(QFrame):
         if not self._installed:
             self._btn.setText("安装")
             self._btn.setEnabled(True)
+            self._style_button()
         elif self._has_update:
             self._btn.setText("更新")
             self._btn.setEnabled(True)
             self._style_update_button()
-        else:
-            self._btn.setText("已安装")
-            self._btn.setEnabled(False)
-            self._style_button()
 
     def _style_update_button(self):
         self._btn.setStyleSheet(
@@ -2579,7 +2416,7 @@ class _ExploreCard(QFrame):
     def _create_icon_widget(self, parent) -> QWidget:
         """创建插件图标（复用 _PluginRow 的优先级逻辑：本地 SVG → 远程 → 缩写头像）"""
         plugin_name = self._meta.get("name", "?")
-        icon_size = 40
+        icon_size = 32
         local_path = self._local_path
         if local_path:
             manifest = get_installer()._manifest_cache.get(plugin_name)
@@ -2620,43 +2457,28 @@ class _ExploreCard(QFrame):
             font_size=self._font_size,
         )
 
-    def set_font_size(self, font_size: int):
-        """字号变化：头像自适应 + 复垦标签（与 _PluginRow.set_font_size 同范式）"""
-        if font_size <= 0:
-            return
-        self._font_size = font_size
-        if self._avatar is not None:
-            if hasattr(self._avatar, "set_icon_size"):
-                self._avatar.set_icon_size(40)
-            elif hasattr(self._avatar, "set_size"):
-                self._avatar.set_size(40)
-            elif hasattr(self._avatar, "set_font_size"):
-                self._avatar.set_font_size(font_size)
-        self._name_label.setStyleSheet(
-            f"color: {self._tc}; font-weight: bold; background: transparent;"
-            f" {self._font_qss(self._derive_size(13, -1))}"
+    def apply_theme(self, tc, tcs, family, size):
+        self._tc, self._tcs, self._ff, self._font_size = tc, tcs, family, size
+        surface = "rgba(255,255,255,0.055)" if isDarkTheme() else "rgba(255,255,255,0.86)"
+        self.setStyleSheet(
+            f"#exploreCard {{ background: {surface}; border: 1px solid rgba(128,128,128,0.24); border-radius: 12px; }}"
+            "#exploreCard:hover { border-color: rgba(128,128,128,0.55); }"
+            "#exploreCard:focus { border: 2px solid #548bc2; }"
         )
-        if self._desc_label is not None:
-            self._desc_label.setStyleSheet(
-                f"color: {self._tcs}; background: transparent; {self._font_qss(self._derive_size(11, -3))}"
-            )
-        if getattr(self, "_ver_label", None) is not None:
-            self._ver_label.setStyleSheet(
-                f"color: {self._tcs}; background: transparent; {self._font_qss(self._derive_size(10, -3))}"
-            )
-        self._style_button()
-        if self._has_update and self._installed:
-            self._style_update_button()
+        self._name_label.setStyleSheet(
+            f"color: {tc}; font-weight: 600; background: transparent; {self._font_qss(self._derive_size(16, 2))}"
+        )
+        for label in (self._author_label, self._ver_label, self._down_label):
+            if label is not None:
+                label.setStyleSheet(f"color: {tcs}; background: transparent; {self._font_qss(self._derive_size(12, -2))}")
+        self._desc_label.setStyleSheet(
+            f"color: {tc}; background: transparent; {self._font_qss(self._derive_size(13, -1))}"
+        )
+        self._update_btn_text()
 
 
 class _ExploreGridSection(QFrame):
-    """探索分组：圆角边框容器（标题行 + 数量 + 查看更多）+ 3 列网格卡片
-
-    与旧版 _ExploreSection（横向滚动）不同：无任何滚动容器，
-    卡片按 QGridLayout 3 列排布（组内约 6 张：3×2）；
-    右上「查看更多 →」按钮点击后调用 on_more(tag) 回调，
-    由 MarketplaceCard 切到「全部」列表并激活对应分类过滤。
-    """
+    """精选分组按可用宽度重排，已有卡片保留操作和下载状态。"""
 
     def __init__(
         self,
@@ -2667,15 +2489,11 @@ class _ExploreGridSection(QFrame):
     ):
         super().__init__(parent)
         self.setObjectName("exploreSection")
-        # 圆角边框容器：浅背景 + 细边框（内容区留白靠 layout margins）
-        self.setStyleSheet(
-            "#exploreSection { background: rgba(128,128,128,0.05);"
-            " border: 1px solid rgba(128,128,128,0.14); border-radius: 12px; }"
-        )
+        self._columns = 1
         self._cards: list = []  # [(name, _ExploreCard)]
         self._title = title
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(14, 12, 14, 12)
+        lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(10)
 
         # 标题行：组名 + 数量角标 +（右）查看更多
@@ -2685,40 +2503,45 @@ class _ExploreGridSection(QFrame):
         title_lay.setContentsMargins(2, 0, 2, 0)
         title_lay.setSpacing(8)
         t = StrongBodyLabel(title, title_row)
-        t.setStyleSheet(f"color: {_text_color()}; background: transparent;")
+        t.setObjectName("marketSectionTitle")
+        t.setStyleSheet(f"color: {_text_color()}; font-size: 19px; font-weight: 600; background: transparent;")
         title_lay.addWidget(t)
         if subtitle:
             sub = BodyLabel(subtitle, title_row)
-            sub.setStyleSheet(f"color: {_text_color(secondary=True)}; background: transparent;")
+            sub.setObjectName("marketSectionCount")
+            sub.setStyleSheet(f"color: {_text_color(secondary=True)}; font-size: 12px; background: transparent;")
             title_lay.addWidget(sub)
         title_lay.addStretch(1)
         if on_more is not None:
             more_btn = TransparentPushButton("查看更多 →", title_row)
             more_btn.setCursor(Qt.PointingHandCursor)
-            more_btn.setStyleSheet(
-                "QPushButton { background: transparent; border: none; color: #62a0ea;"
-                " font-size: 12px; font-weight: bold; }"
-                "QPushButton:hover { color: #82b4f0; }"
-            )
             more_btn.clicked.connect(on_more)
             title_lay.addWidget(more_btn)
         lay.addWidget(title_row)
         self._title_label = t
 
-        # 3 列网格（组内 6 张 = 3×2，数量少于 6 时行数自适应）
         self._card_layout = QGridLayout()
         self._card_layout.setContentsMargins(0, 0, 0, 0)
-        self._card_layout.setSpacing(10)
+        self._card_layout.setSpacing(_CARD_GAP)
         self._card_layout.setColumnStretch(0, 1)
-        self._card_layout.setColumnStretch(1, 1)
-        self._card_layout.setColumnStretch(2, 1)
         lay.addLayout(self._card_layout)
 
     def add_card(self, name: str, card: _ExploreCard):
-        """插入卡片：按当前数量计算网格位置（col = n % 3, row = n // 3）"""
         n = len(self._cards)
-        self._card_layout.addWidget(card, n // 3, n % 3)
+        self._card_layout.addWidget(card, *divmod(n, self._columns))
         self._cards.append((name, card))
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        columns = _catalog_columns(event.size().width())
+        if columns == self._columns:
+            return
+        for col in range(max(self._columns, columns)):
+            self._card_layout.setColumnStretch(col, int(col < columns))
+        self._columns = columns
+        for i, (_, card) in enumerate(self._cards):
+            self._card_layout.removeWidget(card)
+            self._card_layout.addWidget(card, *divmod(i, columns))
 
     def cards(self):
         return self._cards
@@ -2782,7 +2605,6 @@ class MarketplaceCard(QWidget):
         self._source_filter: str = ""  # 市场来源过滤（"" = 全部）
         self._sort_mode: str = "default"
         self._load_more_btn: Optional[QPushButton] = None
-        self._header_icon: Optional[IconWidget] = None
         # ── 渲染合并与线程清理状态（B2/B4） ──
         self._render_pending = False  # 市场数据已合并待渲染（同帧合并标志）
         self._initial_view_done = False  # 首屏是否已渲染（本地/合并）
@@ -2824,7 +2646,6 @@ class MarketplaceCard(QWidget):
         self.setVisible(True)
         _t_show = time.perf_counter()
         self._apply_latest_theme()
-        self._apply_plugin_icon()
         # 首次打开进精选探索页（商店首页语义）；之后保留上次浏览的 tab 与位置
         if not self._ever_shown:
             self._ever_shown = True
@@ -2900,22 +2721,6 @@ class MarketplaceCard(QWidget):
         self._plugin_data = []
         self._render_plugins(self._plugin_data, auto_fill=False)
 
-    def _apply_plugin_icon(self):
-        """从上下文获取插件图标并更新头部图标"""
-        if self._context_provider is None or self._header_icon is None:
-            return
-        try:
-            from PyQt5.QtGui import QIcon
-
-            ctx = self._context_provider()
-            icon_info = ctx.get("plugin_icon", {})
-            theme = "dark" if isDarkTheme() else "light"
-            icon_path = icon_info.get(theme, "")
-            if icon_path:
-                self._header_icon.setIcon(QIcon(icon_path))
-        except Exception:
-            pass
-
     def _apply_latest_theme(self):
         """从上下文拉取最新主题色 + 字体并刷新全部子控件样式
 
@@ -2938,7 +2743,7 @@ class MarketplaceCard(QWidget):
         tcs = _ctx_text_color(ctx, secondary=True)
         border_c = _ctx_border_color(ctx)
 
-        theme_key = (tc, tcs, font_family, font_size)
+        theme_key = (tc, tcs, dict(ctx.get("colors", {})), isDarkTheme(), font_family, font_size)
         theme_changed = getattr(self, "_last_theme_key", None) != theme_key
         self._last_theme_key = theme_key
 
@@ -2952,8 +2757,6 @@ class MarketplaceCard(QWidget):
         if font_size != getattr(self, "_last_font_size", None):
             for row in self.findChildren(_PluginRow):
                 row.set_font_size(font_size)
-            for card in self.findChildren(_ExploreCard):
-                card.set_font_size(font_size)
             self._last_font_size = font_size
 
         # ── 字体（通过 QFont 级联，使用系统字体大小） ──
@@ -2967,41 +2770,34 @@ class MarketplaceCard(QWidget):
         # 主题真变化时才全树 re-theme + 更新搜索框/分隔线（日常打开/切换不触发）
         if theme_changed:
             self._apply_content_surface_color()
+            for card in self.findChildren(_ExploreCard):
+                card.apply_theme(tc, tcs, font_family, font_size)
             self._retheme()
-            try:
-                self._search_edit.setStyleSheet(
-                    f"background: rgba(128,128,128,0.1); border-radius: 8px; padding: 4px 8px; color: {tc};"
-                )
-            except RuntimeError:
-                pass
             self._sync_sort_combo_metrics()
             for sep in self.findChildren(QFrame):
                 try:
                     if sep.frameShape() == QFrame.HLine:
-                        sep.setStyleSheet(f"background: {border_c}; max-height: 1px;")
+                        sep.setStyleSheet(f"border: none; background: {border_c}; max-height: 1px;")
                 except RuntimeError:
                     pass
 
     # objectName → font-size 偏移（用于插件行的标题/描述/tag）
-    # pluginRowTitle: 标题用 font_size - 2（让标题比上下文默认小 2 号）
-    # pluginRowDesc:  描述用 font_size - 4（再小 2 号，作为辅助文字）
-    # pluginRowTag:   tag 标签用 font_size - 5（最小号辅助信息）
     _PLUGIN_ROW_SIZE_OFFSETS = {
-        "pluginRowTitle": -2,
-        "pluginRowDesc": -4,
-        "pluginRowTag": -5,
+        "marketSectionTitle": 5,
+        "marketSectionCount": -2,
+        "pluginRowTitle": 1,
+        "pluginRowDesc": -1,
+        "pluginRowMeta": -3,
+        "marketDownloads": -3,
         "pluginRowUpdateTag": -3,
-        "marketRowName": -1,  # 市场行名称 18px → fs-1
+        "marketRowName": 2,
         "marketRowUrl": -2,  # 市场行 URL   14px → fs-2
-        "proxySectionTitle": -1,  # 加速页段标题（启用/配置/帮助）
+        "proxySectionTitle": 2,
         "proxyStatus": -2,  # 加速页状态行
         "proxyHelp": -2,  # 加速页帮助正文
-        "proxyRecordTitle": -1,  # 记录区段标题
+        "proxyRecordTitle": 2,
         "proxyRecordRow": -2,  # 记录行正文（动作/插件名/原因）
         "proxyRecordTime": -3,  # 记录行时间
-        "exploreCardName": -1,  # 探索卡片名称
-        "exploreCardDesc": -3,  # 探索卡片描述
-        "exploreCardVer": -3,  # 探索卡片版本
     }
 
     def _apply_content_surface_color(self):
@@ -3025,7 +2821,10 @@ class MarketplaceCard(QWidget):
 
             # CARD_BG 是 "rgba(r,g,b,{alpha})" 模板；rgba 解析必须走
             # qcolor_from_token（QColor 构造函数不认 CSS rgba 写法）
-            color = qcolor_from_token(Colors.CARD_BG.format(alpha=alpha))
+            theme = getattr(self, "_cached_theme_colors", {})
+            token = theme.get("card_bg") or theme.get("content_bg") or Colors.CARD_BG.format(alpha=alpha)
+            color = qcolor_from_token(token)
+            color.setAlpha(alpha)
             if not color.isValid():
                 raise ValueError(color.name())
         except Exception:
@@ -3050,10 +2849,10 @@ class MarketplaceCard(QWidget):
         fs = getattr(self, "_cached_font_size", 14)
 
         for child in self.findChildren(QLabel):
-            if child.objectName() == "updatesBadge":
+            if child.objectName() in ("updatesBadge", "marketInstalledMark"):
                 continue  # 亮黄 badge 固定黑字，不跟随主题文字色
-            if child.objectName() == "exploreCardDown":
-                continue  # 探索卡片下载量固定橙色，不跟随主题
+            if isinstance(child.parentWidget(), _ExploreCard):
+                continue
             try:
                 # 标题/描述应用 font_size 偏移
                 offset = self._PLUGIN_ROW_SIZE_OFFSETS.get(child.objectName(), 0)
@@ -3069,7 +2868,10 @@ class MarketplaceCard(QWidget):
                     continue
                 import re
 
-                new_ss = re.sub(r"color:\s*[^;]+;", f"color: {tc};", ss)
+                label_color = self._cached_tcs if child.objectName() in (
+                    "marketSectionCount", "pluginRowDesc", "pluginRowMeta", "marketDownloads", "marketRowUrl", "proxyHelp"
+                ) else tc
+                new_ss = re.sub(r"color:\s*[^;]+;", f"color: {label_color};", ss)
                 # 替换 font-size（QSS 优先级高于 QFont，必须替换）
                 if target_fs:
                     new_ss = re.sub(r"font-size:\s*[^;]+;", f"font-size: {target_fs}px;", new_ss)
@@ -3087,16 +2889,13 @@ class MarketplaceCard(QWidget):
             if isinstance(child, ComboBox):
                 continue
             try:
-                cur = child.styleSheet()
-                btn_fs = max(fs - 2, 11)
-                style_extra = f" font-size: {btn_fs}px;"
-                # 加载更多按钮主题切换时同步文字色（创建时可能用旧主题色）
-                if child.objectName() == "loadMoreBtn":
-                    cur = re.sub(r"color:\s*[^;]+;", f"color: {tc};", cur)
-                # 仅在上下文提供字体家族时追加，否则保持系统默认字体
+                font = child.font()
                 if ff:
-                    style_extra += f" font-family: '{ff}';"
-                child.setStyleSheet(cur + style_extra)
+                    font.setFamily(ff)
+                font.setPixelSize(max(fs - 2, 11))
+                child.setFont(font)
+                if child.objectName() == "loadMoreBtn":
+                    child.setStyleSheet(re.sub(r"color:\s*[^;]+;", f"color: {tc};", child.styleSheet()))
             except RuntimeError:
                 pass
 
@@ -3113,44 +2912,32 @@ class MarketplaceCard(QWidget):
 
         # ── 头部（全局固定，切换标签不变）──
         header = QWidget(self)
-        header.setStyleSheet("background: transparent;")
         header_layout = QHBoxLayout(header)
-        header_layout.setContentsMargins(16, 12, 16, 4)
-        header_layout.setSpacing(8)
+        header_layout.setContentsMargins(14, 5, 14, 4)
+        header_layout.setSpacing(6)
 
-        icon = IconWidget(FluentIcon.SHOPPING_CART, header)
-        icon.setFixedSize(22, 22)
-        header_layout.addWidget(icon)
-        self._header_icon = icon
-
-        title = StrongBodyLabel("插件市场", header)
-        title.setStyleSheet(f"color: {_text_color()}; background: transparent;")
-        header_layout.addWidget(title)
-
-        # ── 浏览/市场切换（标题行内）──
         from qfluentwidgets import Pivot
 
-        self._tab_bar = Pivot(header)
+        self._tab_bar = SegmentedWidget(header)
         self._tab_bar.addItem("browse", "浏览", None, None)
-        self._tab_bar.addItem("markets", "市场", None, None)
+        self._tab_bar.addItem("markets", "市场源", None, None)
         self._tab_bar.addItem("proxy", "代理", None, None)
         self._tab_bar.setCurrentItem("browse")
         self._tab_bar.currentItemChanged.connect(self._on_tab_changed)
         header_layout.addWidget(self._tab_bar)
 
-        header_layout.addStretch(1)
-
-        self._status_label = QLabel("", header)
+        self._status_label = _ElidedLabel("", header, elide_mode=Qt.ElideRight)
+        self._status_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         self._status_label.setStyleSheet(
             f"color: {_text_color(secondary=True)}; font-size: 12px; background: transparent;"
         )
-        header_layout.addWidget(self._status_label)
+        header_layout.addWidget(self._status_label, 2)
 
         # 一键更新 + 诊断 + 刷新 + 关闭（一键更新在最左）
         # 一键更新：待更新 >1 时出现图标，右上角 badge 显示数量（归零即隐藏）
         # 图标用 DOWNLOAD（向下载入）：UPDATE 画成 ⟲ 时钟样，与旁边 ⟳ 刷新易混
-        self._update_all_btn = TransparentToolButton(FluentIcon.DOWNLOAD, header)
-        self._update_all_btn.setFixedSize(24, 24)
+        self._update_all_btn = TransparentToolButton(icons.DOWNLOAD, header)
+        self._update_all_btn.setFixedSize(30, 30)
         self._update_all_btn.setToolTip("一键更新")
         self._update_all_btn.clicked.connect(self._on_update_all)
         self._update_all_btn.setVisible(False)
@@ -3193,20 +2980,20 @@ class MarketplaceCard(QWidget):
 
         # 诊断 + 刷新 + 关闭（诊断在刷新左侧）
         # 诊断导出：汇总插件状态/兼容性/依赖/日志错误，复制给 AI 排查
-        self._diag_btn = TransparentToolButton(FluentIcon.DEVELOPER_TOOLS, header)
-        self._diag_btn.setFixedSize(24, 24)
+        self._diag_btn = TransparentToolButton(icons.DEVELOPER_TOOLS, header)
+        self._diag_btn.setFixedSize(30, 30)
         self._diag_btn.setToolTip("导出插件诊断（复制给 AI 排查）")
         self._diag_btn.clicked.connect(self._on_export_diagnostics)
         header_layout.addWidget(self._diag_btn)
 
-        self._refresh_btn = TransparentToolButton(FluentIcon.SYNC, header)
-        self._refresh_btn.setFixedSize(24, 24)
+        self._refresh_btn = TransparentToolButton(icons.SYNC, header)
+        self._refresh_btn.setFixedSize(30, 30)
         self._refresh_btn.setToolTip("刷新")
         self._refresh_btn.clicked.connect(self._on_refresh)
         header_layout.addWidget(self._refresh_btn)
 
-        self._close_btn = TransparentToolButton(FluentIcon.CLOSE, header)
-        self._close_btn.setFixedSize(24, 24)
+        self._close_btn = TransparentToolButton(icons.CLOSE, header)
+        self._close_btn.setFixedSize(30, 30)
         self._close_btn.setToolTip("关闭")
         self._close_btn.clicked.connect(self._on_close)
         header_layout.addWidget(self._close_btn)
@@ -3216,7 +3003,7 @@ class MarketplaceCard(QWidget):
         # ── 分隔线 ──
         sep = QFrame(self)
         sep.setFrameShape(QFrame.HLine)
-        sep.setStyleSheet("background: rgba(128,128,128,0.15); max-height: 1px;")
+        sep.setStyleSheet("border: none; background: rgba(128,128,128,0.18); max-height: 1px;")
         root.addWidget(sep)
 
         # ── 页面堆叠 ──
@@ -3236,7 +3023,7 @@ class MarketplaceCard(QWidget):
         self._filter_row = filter_row
         filter_row.setStyleSheet("background: transparent;")
         filter_layout = QHBoxLayout(filter_row)
-        filter_layout.setContentsMargins(12, 2, 12, 0)
+        filter_layout.setContentsMargins(14, 1, 14, 2)
         filter_layout.setSpacing(8)
 
         self._filter_bar = Pivot(filter_row)
@@ -3277,14 +3064,12 @@ class MarketplaceCard(QWidget):
         except Exception as e:
             logger.warning(f"[Marketplace] InfoBadge 挂载失败: {e}")
 
-        # 搜索框（排序下拉左侧）
-        self._search_edit = LineEdit(filter_row)
-        self._search_edit.setPlaceholderText("搜索插件…")
-        self._search_edit.setClearButtonEnabled(True)
-        self._search_edit.setFixedWidth(160)
-        self._search_edit.setStyleSheet(
-            f"background: rgba(128,128,128,0.1); border-radius: 8px; padding: 4px 8px; color: {_text_color()};"
-        )
+        # 浏览页所有视图共用搜索框，精选中输入后进入目录。
+        self._search_edit = SearchLineEdit(header)
+        self._search_edit.setPlaceholderText("搜索插件")
+        self._search_edit.setAccessibleName("搜索插件")
+        self._search_edit.setMinimumWidth(100)
+        self._search_edit.setMaximumWidth(320)
         # 防抖 300ms，避免每敲一个字就全量重建
         from PyQt5.QtCore import QTimer
 
@@ -3292,7 +3077,9 @@ class MarketplaceCard(QWidget):
         self._search_debounce.setSingleShot(True)
         self._search_debounce.timeout.connect(self._filter_plugins)
         self._search_edit.textChanged.connect(self._on_search_text_changed)
-        filter_layout.addWidget(self._search_edit)
+        self._search_edit.searchSignal.connect(self._filter_plugins)
+        self._search_edit.returnPressed.connect(self._filter_plugins)
+        header_layout.insertWidget(header_layout.indexOf(self._update_all_btn), self._search_edit, 3)
 
         # 排序下拉：qfluentwidgets ComboBox（与左侧搜索框、代理页同源控件，
         # 自带 Fluent 主题 QSS / 下拉动画 / 箭头，不再自绘 QSS）
@@ -3305,9 +3092,18 @@ class MarketplaceCard(QWidget):
         self._sort_combo.setFixedHeight(33)
         self._sync_sort_combo_metrics()
         self._sort_combo.currentIndexChanged.connect(self._on_sort_changed)
-        filter_layout.addWidget(self._sort_combo)
+        self._filter_toggle = TransparentPushButton("筛选", filter_row)
+        self._filter_toggle.setCheckable(True)
+        self._filter_toggle.setToolTip("来源、类型和排序")
+        self._filter_toggle.toggled.connect(self._sync_filter_panel)
+        filter_layout.addWidget(self._filter_toggle)
 
         browse_root.addWidget(filter_row)
+        self._filter_panel = QWidget(self._browse_page)
+        panel_layout = QVBoxLayout(self._filter_panel)
+        panel_layout.setContentsMargins(0, 0, 0, 0)
+        panel_layout.setSpacing(0)
+        browse_root.addWidget(self._filter_panel)
 
         # ── 市场来源过滤栏（横向滚动，数据加载后构建）──
         # ── 市场来源过滤行（来源: 标签 + 横向滚动按钮）──
@@ -3315,18 +3111,19 @@ class MarketplaceCard(QWidget):
         self._source_row = source_row
         source_row.setStyleSheet("background: transparent;")
         source_row_layout = QHBoxLayout(source_row)
-        source_row_layout.setContentsMargins(12, 0, 12, 0)
+        source_row_layout.setContentsMargins(20, 0, 20, 0)
         source_row_layout.setSpacing(6)
 
-        self._source_label = QLabel("来源:", source_row)
+        self._source_label = QLabel("来源", source_row)
         self._source_label.setFixedWidth(44)
-        self._source_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self._source_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         self._source_label.setStyleSheet(
             f"color: {_text_color(secondary=True)}; font-size: 11px; background: transparent;"
         )
         source_row_layout.addWidget(self._source_label)
 
         self._source_bar = SingleDirectionScrollArea(source_row, Qt.Horizontal)
+        self._source_bar.setFrameShape(QFrame.NoFrame)
         self._source_bar.setWidgetResizable(True)
         self._source_bar.setFixedHeight(34)
         self._source_bar.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
@@ -3342,7 +3139,8 @@ class MarketplaceCard(QWidget):
         self._source_layout.setSpacing(6)
         self._source_bar.setWidget(self._source_content)
         source_row_layout.addWidget(self._source_bar, 1)
-        browse_root.addWidget(source_row)
+        source_row_layout.addWidget(self._sort_combo)
+        panel_layout.addWidget(source_row)
         source_row.setVisible(False)  # 无数据时隐藏
 
         # ── Tag 过滤行（类型: 标签 + 横向滚动按钮）──
@@ -3350,18 +3148,19 @@ class MarketplaceCard(QWidget):
         self._tag_row = tag_row
         tag_row.setStyleSheet("background: transparent;")
         tag_row_layout = QHBoxLayout(tag_row)
-        tag_row_layout.setContentsMargins(12, 0, 12, 0)
+        tag_row_layout.setContentsMargins(20, 0, 20, 0)
         tag_row_layout.setSpacing(6)
 
-        self._tag_label = QLabel("类型:", tag_row)
+        self._tag_label = QLabel("类型", tag_row)
         self._tag_label.setFixedWidth(44)
-        self._tag_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self._tag_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         self._tag_label.setStyleSheet(
             f"color: {_text_color(secondary=True)}; font-size: 11px; background: transparent;"
         )
         tag_row_layout.addWidget(self._tag_label)
 
         self._tag_bar = SingleDirectionScrollArea(tag_row, Qt.Horizontal)
+        self._tag_bar.setFrameShape(QFrame.NoFrame)
         self._tag_bar.setWidgetResizable(True)
         self._tag_bar.setFixedHeight(38)
         self._tag_bar.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
@@ -3377,7 +3176,7 @@ class MarketplaceCard(QWidget):
         self._tag_layout.setSpacing(6)
         self._tag_bar.setWidget(self._tag_content)
         tag_row_layout.addWidget(self._tag_bar, 1)
-        browse_root.addWidget(tag_row)
+        panel_layout.addWidget(tag_row)
         tag_row.setVisible(False)  # 无 tag 数据时隐藏
 
         self._content_stack = QStackedWidget(self._browse_page)
@@ -3402,12 +3201,11 @@ class MarketplaceCard(QWidget):
         # opaque 判定。
         # 实际底色在 setWidget 之后由 _apply_content_surface_color
         # 统一设置（见 tests/perf/test_marketplace_scroll_blit.py）。
-        self._content_layout = QVBoxLayout(self._content)
-        self._content_layout.setContentsMargins(12, 8, 12, 8)
-        # 间距 0：行与行之间靠行自身的 1px 分隔线分隔（行上下各有 8px 内边距，
-        # 分隔线恰好居中），相邻行的 hover 高亮也连成整块而不是各留一条缝
-        self._content_layout.setSpacing(0)
+        self._content_layout = QGridLayout(self._content)
+        self._content_layout.setContentsMargins(20, 12, 20, 20)
+        self._content_layout.setSpacing(_CARD_GAP)
         self._content_layout.setAlignment(Qt.AlignTop)
+        self._grid_items = None
         self._scroll.setWidget(self._content)
         # 平滑滚动：qfluentwidgets SmoothScrollDelegate（与主程序对话区同款引擎）
         # 400ms 插值 60fps + 连滚加速；自绘悬浮滚动条接管原生条（同主程序视觉）
@@ -3435,32 +3233,15 @@ class MarketplaceCard(QWidget):
         self._explore_root_layout.setContentsMargins(0, 0, 0, 0)
         self._explore_root_layout.setSpacing(0)
 
-        # 精选页工具行：说明 + 「刷新分组」按钮（重新随机分类）
-        tool_row = QWidget(self._explore_content)
-        tool_row.setStyleSheet("background: transparent;")
-        tool_lay = QHBoxLayout(tool_row)
-        tool_lay.setContentsMargins(16, 8, 16, 0)
-        tool_lay.setSpacing(8)
-        tip = BodyLabel("为你随机推荐的分类精选", tool_row)
-        tip.setStyleSheet(f"color: {_text_color(secondary=True)}; background: transparent;")
-        tool_lay.addWidget(tip)
-        tool_lay.addStretch(1)
-        refresh_btn = TransparentToolButton(FluentIcon.SYNC, tool_row)
-        refresh_btn.setToolTip("刷新分组")
-        refresh_btn.setCursor(Qt.PointingHandCursor)
-        refresh_btn.setFixedSize(30, 30)
-        refresh_btn.setStyleSheet(
-            "QToolButton { border: none; border-radius: 8px; }QToolButton:hover { background: rgba(128,128,128,0.15); }"
-        )
-        refresh_btn.clicked.connect(self._rebuild_explore)
-        tool_lay.addWidget(refresh_btn)
-        self._explore_refresh_btn = refresh_btn
-        self._explore_root_layout.addWidget(tool_row)
+        self._explore_refresh_btn = TransparentPushButton("换一组", filter_row)
+        self._explore_refresh_btn.setToolTip("重新选择精选分类")
+        self._explore_refresh_btn.clicked.connect(self._rebuild_explore)
+        filter_layout.addWidget(self._explore_refresh_btn)
 
-        # 分组容器（重建只清空分组、保留工具行）
+        # 分组容器
         self._explore_layout = QVBoxLayout()
-        self._explore_layout.setContentsMargins(12, 8, 12, 8)
-        self._explore_layout.setSpacing(18)
+        self._explore_layout.setContentsMargins(20, 12, 20, 20)
+        self._explore_layout.setSpacing(22)
         self._explore_layout.setAlignment(Qt.AlignTop)
         self._explore_root_layout.addLayout(self._explore_layout)
         # 内容不足一屏时：多余空间由底部 stretch 吸收（空白收在最后，
@@ -3484,7 +3265,7 @@ class MarketplaceCard(QWidget):
 
         add_row = QWidget(self._markets_page)
         add_layout = QHBoxLayout(add_row)
-        add_layout.setContentsMargins(16, 12, 16, 4)
+        add_layout.setContentsMargins(20, 16, 20, 8)
         add_layout.setSpacing(8)
 
         self._market_url_edit = LineEdit(add_row)
@@ -3508,8 +3289,8 @@ class MarketplaceCard(QWidget):
         self._markets_content = QWidget(self._markets_scroll)
         self._markets_content.setStyleSheet("background: transparent;")
         self._markets_content_layout = QVBoxLayout(self._markets_content)
-        self._markets_content_layout.setContentsMargins(16, 4, 16, 8)
-        self._markets_content_layout.setSpacing(6)
+        self._markets_content_layout.setContentsMargins(20, 4, 20, 16)
+        self._markets_content_layout.setSpacing(8)
         self._markets_content_layout.setAlignment(Qt.AlignTop)
         self._markets_scroll.setWidget(self._markets_content)
         markets_root.addWidget(self._markets_scroll, 1)
@@ -3519,11 +3300,12 @@ class MarketplaceCard(QWidget):
         # ===== 加速配置页 =====
         self._proxy_page = QWidget(self._page_stack)
         proxy_root = QVBoxLayout(self._proxy_page)
-        proxy_root.setContentsMargins(16, 12, 16, 12)
+        proxy_root.setContentsMargins(20, 16, 20, 16)
         proxy_root.setSpacing(10)
         self._page_stack.addWidget(self._proxy_page)
 
         self._page_stack.setCurrentIndex(0)
+        self._apply_browse_mode("featured")
         root.addWidget(self._page_stack, 1)
 
     # ── 高度模式 ──
@@ -3638,6 +3420,14 @@ class MarketplaceCard(QWidget):
         # 否则每开一次都触发全量 reconcile + 自动补行（每开 +15 行、
         # 滚动撞上补行即卡 1-3s 的直接来源）。
         if old and self._row_map and self._plugins_same(old, merged):
+            counts = {
+                b["name"]: b.get("downloads") for a, b in zip(old, merged)
+                if a.get("downloads") != b.get("downloads")
+            }
+            if counts:
+                self._sync_download_counts(counts)
+                if self._sort_mode == "downloads":
+                    self._reconcile_rows(auto_fill=False)
             return
         if old and self._row_map:
             # 诊断：内容判定为变化时打出首个差异字段（历版疑似 downloads
@@ -3749,7 +3539,7 @@ class MarketplaceCard(QWidget):
 
     # ── 渲染 ──
 
-    _RENDER_BATCH = 15  # 首批同步渲染行数：单行构造 ~13ms，30 行一帧 400ms 是打开掉帧主力，减半打散
+    _RENDER_BATCH = 16  # 双列每批八行；单帧构建仍受时间预算限制。
     # [PERF] 单帧渲染时间预算（毫秒）。实测「加载更多」一次 15 行同步建完主线程
     # 阻塞 502ms（单行 ~33ms，比 _RENDER_BATCH 注释估计的 13ms 高一倍多）。
     # 取 60ms ≈ 4 帧预算内的可接受停顿；超预算立即让出事件循环续帧。
@@ -3864,7 +3654,7 @@ class MarketplaceCard(QWidget):
 
         downloads 不参与比较：服务端下载量统计频繁抖动，纳入判定会导致
         每次网络到达都全量重建（tag/来源/探索页 rebuild 数百 ms 单帧卡顿），
-        下载量显示滞后到下次真实变化完全可接受。
+        仅计数变化时由 _sync_download_counts 原地更新。
         """
         if old is new:
             return True
@@ -3925,6 +3715,22 @@ class MarketplaceCard(QWidget):
         self._dl_fetch_thread.finished.connect(self._dl_fetch_thread.deleteLater)
         self._dl_fetch_thread.start()
 
+    def _sync_download_counts(self, counts):
+        for plugin in self._all_plugins:
+            name = plugin.get("name")
+            if name in counts:
+                if counts[name] is None:
+                    plugin.pop("downloads", None)
+                else:
+                    plugin["downloads"] = counts[name]
+        for name, row in self._row_map.items():
+            if name in counts:
+                row._down_label.set_count(counts[name])
+        for section in self._explore_sections:
+            for name, card in section.cards():
+                if name in counts:
+                    card._down_label.set_count(counts[name])
+
     def _on_downloads_fetched(self, result):
         """查询完成：回填 downloads；有新增值则重渲染"""
         if not self._alive():
@@ -3949,6 +3755,7 @@ class MarketplaceCard(QWidget):
                 p["downloads"] = count
                 changed = True
         if changed:
+            self._sync_download_counts({name: plugin_by_name[name].get("downloads") for name in result if name in plugin_by_name})
             self._render_plugins(getattr(self, "_all_plugins", []) or [], auto_fill=False)
 
     def _cleanup_dl_fetch_worker(self):
@@ -4195,6 +4002,7 @@ class MarketplaceCard(QWidget):
             self._all_loaded = True
             self._remove_load_more_button()
             return
+        remaining = len(missing)
         if not auto_fill:
             first_batch = {p.get("name", "") for p in self._matched[: self._RENDER_BATCH]}
             missing = [p for p in missing if p.get("name", "") in first_batch]
@@ -4202,7 +4010,7 @@ class MarketplaceCard(QWidget):
                 return
         # 只取本批上限；帧内按时间预算再切
         batch = missing[: self._RENDER_BATCH]
-        self._render_rows_framed(batch, remaining_after=len(missing) - len(batch))
+        self._render_rows_framed(batch, remaining_after=remaining - len(batch))
 
     def _render_rows_framed(self, rows: list, remaining_after: int, start_idx: int = 0):
         """按时间预算逐行渲染（每帧到点让出事件循环，下一帧续）
@@ -4252,12 +4060,6 @@ class MarketplaceCard(QWidget):
                 "PushButton:hover { background: rgba(128,128,128,0.2); }"
             )
             btn.clicked.connect(self._on_load_more)
-            count = self._content_layout.count()
-            last_item = self._content_layout.itemAt(count - 1) if count > 0 else None
-            if last_item and last_item.widget() is None:
-                self._content_layout.insertWidget(count - 1, btn)
-            else:
-                self._content_layout.addWidget(btn)
             self._load_more_btn = btn
         btn.setText(f"加载更多 ({remaining} 个)")
         btn.show()
@@ -4268,6 +4070,7 @@ class MarketplaceCard(QWidget):
         if btn is not None:
             try:
                 self._content_layout.removeWidget(btn)
+                btn.hide()
                 btn.deleteLater()
             except RuntimeError:
                 pass
@@ -4314,12 +4117,7 @@ class MarketplaceCard(QWidget):
         row.installRequested.connect(self._async_install)
         row.updateRequested.connect(self._async_update)
         row.cancelRequested.connect(self._cancel_task)
-        row.openUrlRequested.connect(self._open_url)
-        row.openDirRequested.connect(self._on_open_plugin_dir)
         row.detailRequested.connect(self._on_plugin_detail)
-        row.enableRequested.connect(self._async_enable)
-        row.disableRequested.connect(self._async_disable)
-        row.uninstallRequested.connect(self._async_uninstall)
         return row
 
     def _render_rows(self, rows: list):
@@ -4339,38 +4137,12 @@ class MarketplaceCard(QWidget):
             if row is None:
                 continue
             row.hide()  # 防 QScrollArea 未扩展前的压缩帧
-            # 新行插入「加载更多」按钮之前：按钮随新行自然下移，
-            # 避免新行跑到 stretch 后面造成按钮卡在中间（不滚动视口）
-            btn = getattr(self, "_load_more_btn", None)
-            if btn is not None:
-                self._content_layout.insertWidget(self._content_layout.indexOf(btn), row)
-            else:
-                # 无按钮（全部渲染完，如搜索过滤后补行）：新行必须插到
-                # stretch 之前。否则 addWidget 会追加到 stretch 后面 →
-                # stretch 被夹在行中间吃满剩余空间 → 中间大段空白、
-                # 新行被推到最底部。
-                count = self._content_layout.count()
-                last = self._content_layout.itemAt(count - 1) if count > 0 else None
-                if last is not None and last.widget() is None and last.spacerItem() is not None:
-                    self._content_layout.insertWidget(count - 1, row)
-                else:
-                    self._content_layout.addWidget(row)
             self._row_map[p.get("name", "")] = row
-        # 布局无 stretch（全量重建清空后首批）→ 补 stretch
-        if rows and not self._layout_has_stretch():
-            self._content_layout.addStretch(1)
         if rows:
             # 新行已入 _row_map：恢复任务行 busy（全量重建后行对象是新的，
             # _busy 丢失；排队/运行中任务的行必须保持禁用防重复提交）
             self._restore_task_busy()
             self._schedule_reveal()
-
-    def _layout_has_stretch(self) -> bool:
-        """布局是否已含 stretch（全量重建清空后无；复用行路径已有）"""
-        for i in range(self._content_layout.count()):
-            if self._content_layout.itemAt(i).spacerItem() is not None:
-                return True
-        return False
 
     def _schedule_reveal(self):
         """渲染完成后延迟显示新行（等 QScrollArea 内容扩展稳定后一次到位）
@@ -4415,13 +4187,9 @@ class MarketplaceCard(QWidget):
             except RuntimeError:
                 pass  # 行已被销毁（并发清理），忽略
         try:
-            self._content_layout.activate()
             # widgetResizable=False：手动同步 content 尺寸到实际内容高度，
             # 不依赖 layout.sizeHint()（QLabel wordWrap 的 sizeHint 与实际
             # 布局高度有每行 ~8px 偏差，行多时累积成 stretch 空白区）
-            self._sync_content_size()
-            # 同步后 content 宽度/高度变化 → 行按新宽度重排（wordWrap
-            # 换行数可能变化）→ 行高变化 → 二次同步确保高度准确
             self._sync_content_size()
             # 刷新 QWidget::sizeHint 缓存：布局激活后缓存可能被冻结为
             # 旧值/异常值，不清除会让 QScrollArea 在窗口 resize 等时机
@@ -4452,75 +4220,33 @@ class MarketplaceCard(QWidget):
         self._pending_scroll = 0
         sb.setValue(min(saved, sb.maximum()))
 
-    def _layout_need_height(self, width: int) -> int:
-        """列表容器「需要多高」——以 QVBoxLayout 自己的 heightForWidth 为准
-
-        为什么不用「逐行 sizeHint 累加」（旧实现）：
-
-        实测 30 行、视口宽 869 时，``Σ 行.sizeHint() + 间距 + 边距 = 2733``，
-        而 ``layout.heightForWidth(869) = 2823`` —— 手动累加少算 90px。原因是
-        QVBoxLayout 的垂直分配走的是 ``QBoxLayoutPrivate::heightForWidth()``
-        这条链路，逐行读取的行高需求比 ``widget.sizeHint()`` 更大（尤其是描述
-        折行 + 标签 FlowLayout 的行：``sum_row_h`` 撑开后要到 2601，而
-        ``Σ sizeHint`` 只有 2543，差 58px）。
-
-        少算的后果不是「空白」而是「压行」：QVBoxLayout 拿到 2765 可用高度却
-        需要 2823，只能压缩行；而行内唯一可压缩项是 wordWrap 的 QLabel →
-        描述被挤掉一整行（截图里 anything2explainer / archify 那种「字形被横向
-        切一半」）。
-
-        回退：布局未布局过 / 返回 -1 时用逐行 sizeHint 累加兜底。
-        """
-        h = self._content_layout.heightForWidth(width)
-        if h > 0:
-            return h
-        return self._content_height()
-
-    def _content_height(self) -> int:
-        """按布局内可见行理想高度累加内容高度（兜底，不依赖 C++ sizeHint 缓存）
-
-        用 Python 侧 w.sizeHint()（_PluginRow override：已布局时返回
-        heightForWidth(当前宽度) = 与实际布局一致的理想高度），避免 C++
-        QWidgetItem::sizeHint（QLabel wordWrap 放大值）。行在受限 content 高度
-        下被压缩后的实际几何高度同样不能用，那会把「压行」状态固化下来。
-        """
-        lay = self._content_layout
-        spacing = lay.spacing()
-        mg = lay.contentsMargins()
-        total = 0
-        vis = 0
-        for i in range(lay.count()):
-            it = lay.itemAt(i)
-            w = it.widget()
-            if w is not None and w.isVisible():
-                total += max(w.sizeHint().height(), w.minimumSizeHint().height())
-                vis += 1
-        return total + spacing * max(0, vis - 1) + mg.top() + mg.bottom()
-
     def _sync_content_size(self):
-        """手动同步列表内容 widget 尺寸（widgetResizable=False 路径）
-
-        两阶段都以「布局需求高度」为准（_layout_need_height）：第一阶段先用
-        当前宽度撑开 content，resize 触发行按新宽度重排（wordWrap 换行数、
-        标签 FlowLayout 行数都可能变化）后再取一次，变化超过 4px 才二次 resize。
-
-        **注意**：绝不能用「行实际几何高度累加」回调 content 高度 —— 行被压缩
-        后实际高度会小于需求，回调等于把压行状态写死，且此后每轮都自洽，
-        再也弹不回来（这正是描述被裁掉半行后不恢复的机制）。宽度 = 视口宽；
-        行少时高度保持视口高，stretch 填满底部不出现空白。
-        """
-        try:
-            vp = self._scroll.viewport()
-            w = vp.width()
-            h1 = self._layout_need_height(w)
-            self._content.resize(w, max(h1, vp.height()))
-            # resize 后行按新宽度重排 → 再取一次需求高度
-            self._content_layout.activate()
-            h2 = self._layout_need_height(w)
-            if abs(h2 - h1) > 4:
-                self._content.resize(w, max(h2, vp.height()))
-        except RuntimeError:
-            pass  # 卡片已销毁
+        """按筛选、排序结果重排现有控件；加载按钮占满最后一行。"""
+        viewport = self._scroll.viewport()
+        grid = self._content_layout
+        margins = grid.contentsMargins()
+        columns = _catalog_columns(viewport.width() - margins.left() - margins.right())
+        cards = tuple(
+            row for plugin in self._matched
+            if (row := self._row_map.get(plugin.get("name"))) is not None and not row.isHidden()
+        )
+        footer = self._load_more_btn
+        items = (columns, cards, footer)
+        if self._grid_items != items:
+            while grid.count():
+                grid.takeAt(grid.count() - 1)
+            grid.setColumnStretch(0, 1)
+            grid.setColumnStretch(1, int(columns == 2))
+            for i, card in enumerate(cards):
+                row, col = divmod(i, columns)
+                span = columns if i == len(cards) - 1 and col == 0 else 1
+                grid.addWidget(card, row, col, 1, span)
+            if footer is not None:
+                grid.addWidget(footer, (len(cards) + columns - 1) // columns, 0, 1, columns)
+            self._grid_items = items
+        height = max(viewport.height(), grid.sizeHint().height())
+        self._content.resize(viewport.width(), height)
+        grid.activate()
 
     def _update_empty_state(self):
         """匹配为空时显示空态提示（精选模式不参与，探索视图独立占位）"""
@@ -4545,17 +4271,14 @@ class MarketplaceCard(QWidget):
 
     def _clear_plugin_list(self):
         """清空插件列表"""
-        self._row_map.clear()
         self._all_loaded = False
         self._remove_load_more_button()
-        while self._content_layout.count():
-            item = self._content_layout.takeAt(0)
-            if item.widget():
-                # 立即隐藏：takeAt 移出布局后 widget 无几何管理，deleteLater 前
-                # 会残留原位置造成闪帧（与压缩帧同源）
-                item.widget().hide()
-                item.widget().deleteLater()
-            item = None  # 释放 QLayoutItem 引用
+        for row in self._row_map.values():
+            self._content_layout.removeWidget(row)
+            row.hide()
+            row.deleteLater()
+        self._row_map.clear()
+        self._grid_items = None
         # 同步收缩内容高度 + 刷新 sizeHint 缓存：QScrollArea 的收缩依赖
         # LayoutRequest（滞后多轮事件循环），残留旧高度会让滚动范围保留旧值，
         # 在下一批行 reveal 之前用户可滚到大段空白区（加载更多/刷新竞态场景）
@@ -4571,7 +4294,16 @@ class MarketplaceCard(QWidget):
         self._search_debounce.start(300)
 
     def _filter_plugins(self):
-        """搜索过滤（复用已有行，不重建 widget）"""
+        """精选中搜索整个目录；列表中沿用当前的来源和分类筛选。"""
+        self._search_debounce.stop()
+        if self._current_filter == "featured":
+            if self._search_edit.text().strip():
+                self._active_tags.clear()
+                self._source_filter = ""
+                self._filter_bar.setCurrentItem("all")
+                self._sync_source_buttons()
+                self._sync_tag_buttons()
+            return
         self._reconcile_rows(auto_fill=True)
 
     def _reconcile_rows(self, auto_fill: bool = True):
@@ -5331,7 +5063,7 @@ class MarketplaceCard(QWidget):
         fs = getattr(self, "_cached_font_size", 14) or 14
         theme_colors = getattr(self, "_cached_theme_colors", {}) or {}
         accent_bg = theme_colors.get("accent", "#62a0ea")
-        card_bg = theme_colors.get("content_bg", "#2a2a2e")
+        card_bg = theme_colors.get("content_bg", "#2a2a2e" if isDarkTheme() else "#fafbfc")
         border_c = theme_colors.get("border", "rgba(128,128,128,0.15)")
 
         bar_parent = _host_parent(self)
@@ -5559,14 +5291,15 @@ class MarketplaceCard(QWidget):
         """
         if getattr(self, "_proxy_built", False):
             return
+        tc = getattr(self, "_cached_tc", None) or _text_color()
         tcs = getattr(self, "_cached_tcs", None) or _text_color(secondary=True)
-        card_bg = getattr(self, "_cached_theme_colors", {}).get("content_bg", "#2a2a2e")
+        card_bg = getattr(self, "_cached_theme_colors", {}).get("content_bg", "#2a2a2e" if isDarkTheme() else "#fafbfc")
         border_c = getattr(self, "_cached_theme_colors", {}).get("border", "rgba(128,128,128,0.15)")
         accent = getattr(self, "_cached_theme_colors", {}).get("accent", "#62a0ea")
         # 字号/字体跟随 UI 上下文（fs 为基础字号，段标题 fs-1，正文/状态 fs-2）
         fs = getattr(self, "_cached_font_size", 0) or 14
         ff = getattr(self, "_cached_font_family", "") or ""
-        fs_title = max(10, fs - 1)
+        fs_title = fs + 2
         fs_body = max(9, fs - 2)
         ff_qss = f" font-family: '{ff}';" if ff else ""
 
@@ -5579,7 +5312,7 @@ class MarketplaceCard(QWidget):
         outer.setObjectName("proxyOuter")
         outer.setAttribute(Qt.WA_StyledBackground, True)
         outer.setStyleSheet(
-            f"#proxyOuter {{ background: {card_bg}; border: 1px solid {border_c}; border-radius: 8px; }}"
+            f"#proxyOuter {{ background: {card_bg}; border: 1px solid {border_c}; border-radius: 12px; }}"
         )
         outer_layout = QVBoxLayout(outer)
         outer_layout.setContentsMargins(14, 4, 14, 4)
@@ -5589,9 +5322,9 @@ class MarketplaceCard(QWidget):
         enable_row = QWidget(outer)
         enable_layout = QHBoxLayout(enable_row)
         enable_layout.setContentsMargins(0, 8, 0, 8)
-        title_lb = QLabel("启用", enable_row)
+        title_lb = QLabel("下载代理", enable_row)
         title_lb.setObjectName("proxySectionTitle")
-        title_lb.setStyleSheet(f"color: {tcs}; font-size: {fs_title}px; background: transparent;{ff_qss}")
+        title_lb.setStyleSheet(f"color: {tc}; font-size: {fs_title}px; font-weight: 600; background: transparent;{ff_qss}")
         enable_layout.addWidget(title_lb)
         enable_layout.addStretch(1)
         # 连接状态行（原测试连接按钮下方）移到这里：开关左侧显示
@@ -5623,9 +5356,9 @@ class MarketplaceCard(QWidget):
         config_layout.setContentsMargins(0, 10, 0, 8)
         config_layout.setSpacing(8)
 
-        cfg_title = QLabel("配置", config_widget)
+        cfg_title = QLabel("连接设置", config_widget)
         cfg_title.setObjectName("proxySectionTitle")
-        cfg_title.setStyleSheet(f"color: {tcs}; font-size: {fs_title}px; background: transparent;{ff_qss}")
+        cfg_title.setStyleSheet(f"color: {tc}; font-size: {fs_title}px; font-weight: 600; background: transparent;{ff_qss}")
         config_layout.addWidget(cfg_title)
 
         self._proxy_mode_combo = ComboBox(config_widget)
@@ -5647,10 +5380,10 @@ class MarketplaceCard(QWidget):
         btn_layout.setContentsMargins(0, 0, 0, 0)
         btn_layout.setSpacing(8)
         btn_layout.addStretch(1)  # 右对齐：按钮组靠右
-        test_btn = PushButton("测试连接", btn_row, FluentIcon.CAFE)
+        test_btn = PushButton("测试连接", btn_row, icons.CAFE)
         test_btn.clicked.connect(self._on_proxy_test)
         btn_layout.addWidget(test_btn)
-        save_btn = PushButton("保存", btn_row, FluentIcon.SAVE)
+        save_btn = PushButton("保存", btn_row, icons.SAVE)
         save_btn.clicked.connect(self._on_proxy_save)
         btn_layout.addWidget(save_btn)
         config_layout.addWidget(btn_row)
@@ -5668,9 +5401,9 @@ class MarketplaceCard(QWidget):
         help_layout = QVBoxLayout(help_widget)
         help_layout.setContentsMargins(0, 10, 0, 8)
         help_layout.setSpacing(4)
-        help_title = QLabel("💡 帮助", help_widget)
+        help_title = QLabel("连接说明", help_widget)
         help_title.setObjectName("proxySectionTitle")
-        help_title.setStyleSheet(f"color: {tcs}; font-size: {fs_title}px; background: transparent;{ff_qss}")
+        help_title.setStyleSheet(f"color: {tc}; font-size: {fs_title}px; font-weight: 600; background: transparent;{ff_qss}")
         help_layout.addWidget(help_title)
         self._proxy_help_label = QLabel("", help_widget)
         self._proxy_help_label.setObjectName("proxyHelp")
@@ -5687,7 +5420,7 @@ class MarketplaceCard(QWidget):
         records_outer.setObjectName("proxyRecordsOuter")
         records_outer.setAttribute(Qt.WA_StyledBackground, True)
         records_outer.setStyleSheet(
-            f"#proxyRecordsOuter {{ background: {card_bg}; border: 1px solid {border_c}; border-radius: 8px; }}"
+            f"#proxyRecordsOuter {{ background: {card_bg}; border: 1px solid {border_c}; border-radius: 12px; }}"
         )
         records_layout = QVBoxLayout(records_outer)
         records_layout.setContentsMargins(14, 4, 14, 8)
@@ -5697,9 +5430,9 @@ class MarketplaceCard(QWidget):
         rec_title_row = QWidget(records_outer)
         rec_title_layout = QHBoxLayout(rec_title_row)
         rec_title_layout.setContentsMargins(0, 8, 0, 4)
-        rec_title = QLabel("📜 下载 / 更新记录", rec_title_row)
+        rec_title = QLabel("下载与更新记录", rec_title_row)
         rec_title.setObjectName("proxyRecordTitle")
-        rec_title.setStyleSheet(f"color: {tcs}; font-size: {fs_title}px; background: transparent;{ff_qss}")
+        rec_title.setStyleSheet(f"color: {tc}; font-size: {fs_title}px; font-weight: 600; background: transparent;{ff_qss}")
         rec_title_layout.addWidget(rec_title)
         rec_title_layout.addStretch(1)
         clear_btn = QPushButton("清空", rec_title_row)
@@ -6060,6 +5793,9 @@ class MarketplaceCard(QWidget):
 
     def _on_tab_changed(self, key: str):
         """标签切换"""
+        self._search_edit.setVisible(key == "browse")
+        if key != "browse":
+            self._search_debounce.stop()
         if key == "browse":
             self._page_stack.setCurrentIndex(0)
             # 浏览页可能在校验/后台刷新期间以「不可见」状态完成渲染：
@@ -6077,6 +5813,7 @@ class MarketplaceCard(QWidget):
 
     def _on_filter_changed(self, key: str):
         """筛选标签切换（featured=精选探索页，其余=列表/空态）"""
+        self._search_debounce.stop()
         self._current_filter = key
         self._apply_browse_mode(key)
         if key == "featured":
@@ -6087,7 +5824,7 @@ class MarketplaceCard(QWidget):
     def _apply_browse_mode(self, key: str):
         """浏览页模式切换：精选 vs 列表（展示对应视图 + 显隐筛选控件）
 
-        精选页只保留 Pivot，隐藏搜索/排序/来源/标签行（商店首页干净形态）；
+        精选页保留搜索和分类导航，隐藏排序、来源和标签；
         列表模式恢复全部筛选控件。
         """
         featured = key == "featured"
@@ -6105,27 +5842,14 @@ class MarketplaceCard(QWidget):
             self._content_stack.setCurrentWidget(self._scroll)
         else:
             self._content_stack.setCurrentWidget(self._empty_label)
-        # 精选模式隐藏筛选辅助控件
-        for w in (self._filter_row, self._source_row, self._tag_row):
-            try:
-                w.setVisible(True)
-            except RuntimeError:
-                pass
-        if featured:
-            self._source_row.setVisible(False)
-            self._tag_row.setVisible(False)
-        else:
-            # 列表模式：按数据状态恢复（不能用 isVisible——父被隐藏时恒 False；
-            # 用布局内容判断是否有数据）
-            has_src = bool(getattr(self, "_source_layout", None) and self._source_layout.count() > 1)
-            self._source_row.setVisible(has_src)
-            has_tags = bool(getattr(self, "_tag_layout", None) and self._tag_layout.count() > 1)
-            self._tag_row.setVisible(has_tags)
-        try:
-            self._search_edit.setVisible(not featured)
-            self._sort_combo.setVisible(not featured)
-        except RuntimeError:
-            pass
+        self._explore_refresh_btn.setVisible(featured)
+        self._filter_toggle.setVisible(not featured)
+        self._sync_filter_panel()
+
+    def _sync_filter_panel(self):
+        active = len(self._active_tags) + bool(self._source_filter) + (self._sort_mode != "default")
+        self._filter_toggle.setText(f"筛选 ({active})" if active else "筛选")
+        self._filter_panel.setVisible(self._current_filter != "featured" and self._filter_toggle.isChecked())
 
     # ── 精选探索视图 ──
 
@@ -6185,7 +5909,7 @@ class MarketplaceCard(QWidget):
             group = sorted(by_cat[cat], key=lambda p: p.get("downloads", 0) or 0, reverse=True)
             total = len(group)  # 角标显示分类总数（组内只展示 Top N）
             group = group[:_EXPLORE_GROUP_SIZE]
-            label = _EXPLORE_CATEGORY_LABELS.get(cat, f"📁 {cat}")
+            label = _EXPLORE_CATEGORY_LABELS.get(cat, cat)
             self._add_explore_section(label, f"{total} 个", group, tag=cat)
 
         if not self._explore_sections:
@@ -6241,6 +5965,10 @@ class MarketplaceCard(QWidget):
         激活分类 tag → 切 filter tab 到 all（触发 _apply_browse_mode +
         _render_plugins 按新条件过滤）→ 同步 tag 按钮高亮。
         """
+        self._search_edit.clear()
+        self._search_debounce.stop()
+        self._source_filter = ""
+        self._sync_source_buttons()
         self._active_tags = {tag}
         self._filter_bar.setCurrentItem("all")
         sync = getattr(self, "_sync_tag_buttons", None)
@@ -6501,6 +6229,7 @@ class MarketplaceCard(QWidget):
             btn = TransparentPushButton(text, self._source_content)
             btn.setCheckable(True)
             btn.setCursor(Qt.PointingHandCursor)
+            btn.setProperty("marketSource", value)
             btn.setChecked(value == getattr(self, "_source_filter", ""))
             btn.setStyleSheet(_filter_chip_qss(tc))
             btn.clicked.connect(lambda checked, v=value, b=btn: self._on_source_toggled(v, b))
@@ -6523,6 +6252,7 @@ class MarketplaceCard(QWidget):
         重建），计数会停留在全量数据上。这里按当前 filter_mode 重新统计
         并更新按钮文本，保持「全部」= 当前 tab 插件总数。
         """
+        self._sync_filter_panel()
         if not self._all_plugins:
             return
         view_plugins = list(self._all_plugins) + self._build_local_extra_plugins()
@@ -6581,7 +6311,7 @@ class MarketplaceCard(QWidget):
             item = self._source_layout.itemAt(i)
             w = item.widget() if item else None
             if isinstance(w, QPushButton) and w.isCheckable():
-                w.setChecked(w.text().split(" (")[0] == getattr(self, "_source_filter", ""))
+                w.setChecked(w.property("marketSource") == self._source_filter)
 
     def _on_source_toggled(self, source: str, btn: QPushButton):
         """来源按钮点击：单选过滤（点击同一按钮取消）"""
@@ -6625,7 +6355,7 @@ class MarketplaceCard(QWidget):
             ff=getattr(self, "_cached_font_family", ""),
             fs=getattr(self, "_cached_font_size", 14) or 14,
             accent_bg=(getattr(self, "_cached_theme_colors", {}) or {}).get("accent", "#62a0ea"),
-            card_bg=getattr(self, "_cached_theme_colors", {}).get("content_bg", "#2a2a2e"),
+            card_bg=getattr(self, "_cached_theme_colors", {}).get("content_bg", "#2a2a2e" if isDarkTheme() else "#fafbfc"),
             border_c=(getattr(self, "_cached_theme_colors", {}) or {}).get("border", "rgba(128,128,128,0.15)"),
         )
         if dialog.exec_():
@@ -6657,7 +6387,7 @@ class MarketplaceCard(QWidget):
             ff=getattr(self, "_cached_font_family", ""),
             fs=getattr(self, "_cached_font_size", 14) or 14,
             accent_bg=theme_colors.get("accent", "#62a0ea"),
-            card_bg=theme_colors.get("content_bg", "#2a2a2e"),
+            card_bg=theme_colors.get("content_bg", "#2a2a2e" if isDarkTheme() else "#fafbfc"),
             border_c=theme_colors.get("border", "rgba(128,128,128,0.15)"),
         )
         # 管理与主操作全部复用行内同一批处理器（_async_* 自带状态刷新 / 二次确认）
@@ -6712,10 +6442,14 @@ class MarketplaceCard(QWidget):
         # → 必须在 QSS 里显式写 font-family（与代理页记录行 _refresh_records_ui 同款）。
         ff = getattr(self, "_cached_font_family", "") or ""
         ff_qss = f" font-family: '{ff}';" if ff else ""
-        row = QWidget(self._markets_content)
-        row.setStyleSheet("background: rgba(128,128,128,0.08); border-radius: 8px;")
+        row = QFrame(self._markets_content)
+        row.setObjectName("marketSource")
+        row.setStyleSheet(
+            "#marketSource { background: rgba(128,128,128,0.06); border: 1px solid rgba(128,128,128,0.20);"
+            " border-radius: 10px; }"
+        )
         h = QHBoxLayout(row)
-        h.setContentsMargins(12, 8, 12, 8)
+        h.setContentsMargins(16, 12, 16, 12)
         h.setSpacing(8)
 
         # 名称 + 来源
@@ -6736,7 +6470,10 @@ class MarketplaceCard(QWidget):
         # 名称用 _ElidedLabel：长名自动中间省略 + tooltip 全文，不再把徽标挤出行
         name_label = _ElidedLabel(name_text, name_row)
         name_label.setObjectName("marketRowName")
-        name_label.setStyleSheet(f"color: {tc}; font-weight: bold; font-size: 18px; background: transparent;{ff_qss}")
+        fs = getattr(self, "_cached_font_size", 14) or 14
+        name_label.setStyleSheet(
+            f"color: {tc}; font-weight: 600; font-size: {fs + 2}px; background: transparent;{ff_qss}"
+        )
         name_row_layout.addWidget(name_label, 1)
 
         # 拉取状态徽标（读 manager 持久化状态；无记录 → 未拉取）
@@ -6755,13 +6492,13 @@ class MarketplaceCard(QWidget):
         # （原为 len>60 硬截断加 "..."，全文无法查看）
         url_label = _ElidedLabel(src_text, row)
         url_label.setObjectName("marketRowUrl")
-        url_label.setStyleSheet(f"color: {tcs}; font-size: 14px; background: transparent;{ff_qss}")
+        url_label.setStyleSheet(f"color: {tcs}; font-size: {max(11, fs - 2)}px; background: transparent;{ff_qss}")
         info.addWidget(url_label)
 
         h.addLayout(info, 1)
 
         # 校验按钮：单独强制重拉该源
-        check_btn = TransparentToolButton(FluentIcon.SYNC, row)
+        check_btn = TransparentToolButton(icons.SYNC, row)
         check_btn.setFixedSize(28, 28)
         check_btn.setToolTip(f"重新拉取 {src_def['name']}")
         check_btn.clicked.connect(lambda checked, n=src_def["name"]: self._check_source(n))
@@ -6782,7 +6519,7 @@ class MarketplaceCard(QWidget):
                 link_url = u.replace(".git", "")
 
         if link_url:
-            link_btn = TransparentToolButton(FluentIcon.LINK, row)
+            link_btn = TransparentToolButton(icons.LINK, row)
             link_btn.setFixedSize(28, 28)
             link_btn.setToolTip(f"打开 {link_url}")
             link_btn.clicked.connect(lambda checked, u=link_url: self._open_url(u))
@@ -6790,7 +6527,7 @@ class MarketplaceCard(QWidget):
 
         # 删除按钮（内置市场不可删）
         if not src_def.get("builtin"):
-            del_btn = TransparentToolButton(FluentIcon.DELETE, row)
+            del_btn = TransparentToolButton(icons.DELETE, row)
             del_btn.setFixedSize(28, 28)
             del_btn.setToolTip("移除市场")
             del_btn.clicked.connect(lambda checked, n=src_def["name"]: self._on_remove_marketplace(n))

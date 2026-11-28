@@ -315,6 +315,16 @@ class CapabilityRegistry:
     def track_subscription(self, plugin: str, signal: Any, slot: Any) -> None:
         self._plugin_subs.setdefault(plugin or "", []).append((signal, slot))
 
+    def forget_subscription(self, plugin: str, signal: Any, slot: Any) -> None:
+        """已在宿主退订，只移除该连接的卸载登记。"""
+        key = plugin or ""
+        pairs = self._plugin_subs.get(key)
+        if pairs is None:
+            return
+        pairs[:] = [(s, cb) for s, cb in pairs if s is not signal or cb is not slot]
+        if not pairs:
+            del self._plugin_subs[key]
+
     def release_plugin(self, plugin: str) -> int:
         """断开该插件登记的全部订阅，返回成功断开数。卸载插件时调用。"""
         pairs = self._plugin_subs.pop(plugin or "", [])

@@ -20,6 +20,8 @@ from app.plugins.contracts.dialogue_engine import EngineFactory
 
 
 class EngineRegistry:
+    reload_fields = ("_factories",)
+
     def __init__(self) -> None:
         self._factories: Dict[str, Tuple[EngineFactory, str]] = {}
         self._lock = threading.Lock()

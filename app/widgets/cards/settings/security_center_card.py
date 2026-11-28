@@ -28,8 +28,8 @@ try:
         PushSettingCard,
         SpinBox,
         SwitchSettingCard,
-        FluentIcon as FIF,
     )
+    from app.utils.app_icon import AppIcon as FIF
 except ImportError:  # 兜底：qfluentwidgets 缺失时用 Qt 原生，保功能不保观感
     from PyQt5.QtWidgets import QCheckBox as SwitchSettingCard  # type: ignore
     from PyQt5.QtWidgets import QSpinBox  # type: ignore

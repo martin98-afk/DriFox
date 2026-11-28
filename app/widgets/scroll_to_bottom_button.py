@@ -56,23 +56,6 @@ _ICON_LIGHT_REL = "icons/light/scroll_to_bottom.svg"
 _ICON_DARK_QRC = ":/icons/scroll_to_bottom.svg"
 _ICON_LIGHT_QRC = ":/icons_light/scroll_to_bottom.svg"
 
-# 内联 SVG：向下箭头 + 底部横线（viewBox 1024×1024）
-# 与 icons/scroll_to_bottom.svg 同形，只在**图标文件整体缺失**时兜底渲染，
-# fill 在渲染时按主题替换。改图标请改 icons/ 下的文件，别改这里。
-_ICON_PATH_D = (
-    "M512 1.28c-34.986667 0-63.573333 29.013333-63.573333 64.853333l-0.426667 544.426667"
-    "-212.053333-212.053333c-24.746667-25.173333-64.853333-25.173333-89.6 0"
-    "-24.746667 25.173333-24.746667 66.56 0 91.733333l311.466666 313.173333"
-    "c11.093333 18.346667 31.146667 30.293333 53.76 30.293334 14.08 0 27.306667-4.693333"
-    " 37.973334-12.8 2.986667-2.133333 5.546667-4.266667 8.106666-7.253334"
-    " 2.56-2.56 4.693333-5.12 6.4-7.68l314.026667-317.866666"
-    "c24.746667-25.173333 24.746667-66.56 0-91.733334s-64.853333-25.173333-89.6 0"
-    "l-213.333333 215.466667 0.426666-545.706667C575.146667 30.293333 546.986667 1.28 512 1.28z"
-    "M1024 960c0-35.413333-28.586667-64-64-64H64c-35.413333 0-64 28.586667-64 64"
-    "s28.586667 64 64 64h896c35.413333 0 64-28.586667 64-64z"
-)
-
-
 def _load_theme_icon(is_light: bool) -> QIcon:
     """按主题取「回到底部」图标。
 
@@ -114,9 +97,10 @@ def _build_icon(color: str, size: int = _ICON_SIZE) -> QIcon:
     QSvgRenderer 不支持 CSS 的 currentColor，只能把颜色烧进 fill。
     """
     svg = (
-        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" '
+        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" '
         f'width="{size}" height="{size}">'
-        f'<path d="{_ICON_PATH_D}" fill="{color}"/></svg>'
+        f'<path d="M12 3v12m-5-5 5 5 5-5M5 21h14" fill="none" stroke="{color}" '
+        'stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>'
     )
     renderer = QSvgRenderer(QByteArray(svg.encode("utf-8")))
     pixmap = QPixmap(size, size)
@@ -129,15 +113,7 @@ def _build_icon(color: str, size: int = _ICON_SIZE) -> QIcon:
     return QIcon(pixmap)
 
 
-# ── 主题切换刷新：走 UIEventBus，不是 theme_manager.register_refresh_target ──
-# 🐛 根因（2026-08-30 实修）：主程序的主题切换走
-# `main_widget._execute_batched_theme_refresh`，它只做 Colors.refresh() +
-# theme_manager.on_theme_changed() + per-window `_apply_runtime_ui_settings()`，
-# **从不调用 theme_manager.dispatch_refresh()** → 注册进 _refresh_targets 的
-# widget 一个都收不到 refresh_theme()（main_widget.py:9185 的注释也点明了这一点）。
-# dispatch_refresh() 只在 theme_manager.reload() / config_sync 里被调用。
-# 可靠的广播源是 `on_theme_changed()` 发布的 EV_THEME_CHANGED 事件。
-#
+# EV_THEME_CHANGED 在全局配色更新后发出。
 # ⚠️ UIEventBus.subscribe 持有回调的**强引用**，直接传 self._apply_style 会让
 # 按钮永远不被回收（父窗口销毁后仍滞留）。因此这里用模块级 WeakSet 登记实例，
 # 只订阅一次模块级函数。
@@ -198,14 +174,10 @@ class ScrollToBottomButton(QPushButton):
         if on_click is not None:
             self.clicked.connect(on_click)
 
-        # 主题切换：EV_THEME_CHANGED 才是真正会被派发的广播
-        # （register_refresh_target 走的 dispatch_refresh 在主题切换路径上没人调，
-        #  但 reload() / config_sync 会调，两条都留着，靠签名去重）
         self.refresh_theme = self._apply_style
         try:
             _BUTTONS.add(self)
             _ensure_theme_subscription()
-            theme_manager.register_refresh_target(self)
         except Exception:  # noqa: BLE001
             pass
 

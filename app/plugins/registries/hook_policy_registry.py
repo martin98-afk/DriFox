@@ -37,6 +37,8 @@ _FALLBACK_POLICY_ID = "all"
 
 
 class HookPolicyRegistry:
+    reload_fields = ("_policies", "_active")
+
     def __init__(self) -> None:
         # policy_id -> (policy, source, scope)
         self._policies: Dict[str, Tuple[HookPolicy, str, str]] = {}

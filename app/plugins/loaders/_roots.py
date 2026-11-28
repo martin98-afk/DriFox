@@ -57,6 +57,15 @@ def _root_kind(root: Optional[Path]) -> str:
     return _ROOT_KIND_SYSTEM
 
 
+def _is_selected_plugin_dir(directory: Path) -> bool:
+    """同名插件已有发现结果时，仅加载生效副本；独立运行的 loader 仍可发现新插件。"""
+    from app.plugins.managers.plugin_manager import PluginManager
+
+    pm = PluginManager.get_instance()
+    selected = pm.get_plugin(directory.name) if pm.is_initialized() else None
+    return selected is None or selected.path == directory or selected.path.resolve() == directory.resolve()
+
+
 def _is_plugin_load_blocked(plugin_name: str, *, log_tag: str) -> bool:
     """P1/P2：检查插件是否被版本/平台门禁拦截（load_blocked）。
 

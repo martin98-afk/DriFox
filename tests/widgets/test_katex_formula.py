@@ -102,10 +102,21 @@ def test_katex_vendor_files_exist():
     assert (vdir / "fonts" / "KaTeX_Main-Regular.woff2").is_file()
 
 
-def test_get_katex_urls_local_first():
-    from app.widgets import message_card
+def test_get_katex_urls_local_first(tmp_path, monkeypatch):
+    import sys
+    from pathlib import Path
 
-    message_card._katex_vendor_urls_cache = None
-    css_url, js_url = message_card._get_katex_urls()
-    assert css_url.startswith("file://") and js_url.startswith("file://")
-    assert message_card._katex_vendor_urls_cache is not None
+    from PyQt5.QtCore import QUrl
+
+    from app.widgets import card_render_core
+
+    vendor = tmp_path / "_internal/app/resources/web/vendor/katex"
+    vendor.mkdir(parents=True)
+    css, js = vendor / "katex.min.css", vendor / "katex.min.js"
+    css.touch()
+    js.touch()
+    monkeypatch.setattr(card_render_core, "_katex_vendor_urls_cache", None)
+    monkeypatch.setattr(card_render_core, "_PROJECT_ROOT", str(tmp_path))
+    monkeypatch.setattr(sys, "_MEIPASS", str(tmp_path / "_internal"), raising=False)
+    urls = card_render_core._get_katex_urls()
+    assert tuple(Path(QUrl(url).toLocalFile()) for url in urls) == (css, js)

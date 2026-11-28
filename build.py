@@ -70,6 +70,10 @@ to_remove_linux = [
 # Windows 专用（.dll 文件）
 to_remove_windows = [
     "numpy",
+    "PyQt5/Qt5/bin/Qt5XmlPatterns.dll",
+    # 内置 WebEngine 优先加载 WOFF2，KaTeX 的每个字形系列均随包提供该格式。
+    "app/resources/web/vendor/katex/fonts/*.woff",
+    "app/resources/web/vendor/katex/fonts/*.ttf",
     # 注意：libEGL.dll/libGLESv2.dll/d3dcompiler_47.dll 是 ANGLE 三件套，必须保留。
     # main.py 强制 AA_UseOpenGLES（ANGLE→D3D11），缺 libGLESv2 会导致启动即
     # "Failed to create OpenGL context" 崩溃（2026-09-08 v0.5.10b2 实测踩坑）。
@@ -242,6 +246,10 @@ _exclude_modules = [
     "tox",
 ]
 
+if platform.system() == "Windows":
+    # pywin32 的 COM 浏览器会带入 PythonWin 及其 MFC 依赖。
+    _exclude_modules.append("win32ui")
+
 # 3. 构造参数列表
 params = [
     "main.py",
@@ -258,7 +266,7 @@ params = [
     f"--add-data=app/resources/web/vendor/echarts.min.js{os.pathsep}app/resources/web/vendor",
     f"--add-data=app/resources/web/vendor/echarts-wordcloud.min.js{os.pathsep}app/resources/web/vendor",
     # KaTeX 公式渲染 vendor：整目录收集（js + css + fonts/，css 相对路径引字体）
-    f"--add-data=app/resources/web/vendor/katex{os.pathsep}app/resources/web/vendor",
+    f"--add-data=app/resources/web/vendor/katex{os.pathsep}app/resources/web/vendor/katex",
     # 隐藏导入：gateway adapter 模块（importlib.import_module 动态加载，PyInstaller 无法自动发现）
     *[f"--hidden-import={m}" for m in _hidden_imports],
     # 排除插件自包含依赖（由插件 deps/ 目录运行时提供）

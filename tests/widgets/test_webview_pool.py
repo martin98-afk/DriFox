@@ -206,6 +206,8 @@ class TestSignalPairing:
         "codeActionRequested",
         "contextActionRequested",
         "contentHeightChanged",
+        "groupHeightChanged",
+        "groupToggleRequested",
         "toolDiffRequested",
         "subAgentLogRequested",
         "saveFileRequested",

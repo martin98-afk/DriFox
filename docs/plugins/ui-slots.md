@@ -164,6 +164,8 @@ def register_ui(registry):
 > - **常驻**（`register_titlebar_tab`）：始终显示在标题栏 tab 区（「聊天」右侧），不可关闭，点击触发插件回调。
 > - **非常驻**（`register_floating_card(container="full")`）：卡片打开时动态出现在标题栏（带 × 关闭钮），关闭即从标题栏移除；点击 tab 切换覆盖层显示。
 
+切换深浅主题时，工作台、工作区和设置中已经打开的插件页会就地刷新，后台页在下次显示时补刷。Qt 页面可实现无参 `refresh_style()`，或通过 SDK 的 `bind_theme_qss` 为控件登记样式。工作台页需要宿主颜色时，可调用 `context["context_provider"]()` 获取当前配色。欢迎页插件的 HTML 会用新的 `is_dark` 重新渲染。
+
 > **工作台 tab（`register_workbench_tab`）**：注册到右侧工作台（WorkbenchPanel）的页签条。★ 面板**零保留槽位、零 page_id 语义**：页序 = `(metadata["order_hint"], 注册序)`，默认落点 = `metadata["default_landing"]` 标记页（缺省顺序第一页），一个页都没注册时空态页。宿主在 `refresh_workbench` 时调 `panel.sync_plugin_pages(tabs)` reconcile；页签一律按 **tab_id** 定位（`set_current_tab_by_id` / `current_tab_id`），宿主不得假设 index。**注册即联动注册 `/{page_id}` 命令**。数据由页面**自拉**：面板只发无参 `refresh_current_page_data()`，页面实现可选协议 `refresh_data()`（从 `context` / 活跃窗口取数）。参考实现：`plugins/artifacts-manager/ui/artifacts_page.py`、`plugins/worktree-manager/ui/worktree_page.py`、`plugins/history-manager/ui/history_page.py`。
 
 > **向工作台页定向投递**（插件 A 把内容交给插件 B 的页）：`registry.open_workbench_page(page_id)` 展开工作台、定位该页并**返回页面实例**（不可用返回 `None`），拿不到副作用时用 `registry.get_workbench_page(page_id)` 只查询已挂载实例。面板侧对应 `WorkbenchPanel.get_plugin_page(page_id)`，外部不要直接摸 `_plugin_widgets`。页面自行暴露接收方法（如文件树页的 `preview_path(path) -> bool`）。注意首次打开工作台时页面刚构建、`sync_plugin_pages` 尚未跑过，`open_workbench_page` 内部会先 reconcile 再展开；页面自身的定位/加载很可能仍是异步的（如文件树页的根扫描），接收方法不该假设「调用返回时内容已就绪」。

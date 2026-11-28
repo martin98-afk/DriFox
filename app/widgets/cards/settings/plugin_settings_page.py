@@ -18,9 +18,10 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, List, Optional
 
-from PyQt5.QtCore import QSize, Qt, QTimer, QUrl, pyqtSignal
+from PyQt5.QtCore import QEvent, QSize, Qt, QTimer, QUrl, pyqtSignal
 from PyQt5.QtGui import QDesktopServices, QIcon, QPixmap
 from PyQt5.QtWidgets import (
+    QBoxLayout,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -35,7 +36,6 @@ from qfluentwidgets import (
     CaptionLabel,
     ComboBox,
     HyperlinkButton,
-    PillPushButton,
     PushButton,
     SearchLineEdit,
     SegmentedWidget,
@@ -50,12 +50,13 @@ from app.plugins.contracts.plugin_display import plugin_display_name
 from app.plugins.kernel import COMPONENT_ORDER
 from app.plugins.registries.plugin_config_registry import PluginConfigRegistry
 from app.utils.design_tokens import Colors
-from app.utils.scroll_tuning import install_fast_wheel
+from app.utils.scroll_tuning import install_fast_wheel, scroll_wheel_to
 from app.widgets.cards.settings.plugin_config_form import PluginConfigForm, evaluate_config_status
 from app.widgets.cards.settings.plugin_components_card import _component_display_name
 
 _SEARCH_DEBOUNCE_MS = 180
-_LIST_WIDTH = 236
+_LIST_WIDTH = 252
+_STATUS_FILTERS = {"configured": "有配置", "todo": "待配置", "none": "无配置", "all": "全部"}
 # 类型下拉最多直接可见的档位数，超出滚动（默认 -1 会按屏幕高度撑满）
 _TYPE_COMBO_MAX_VISIBLE_ITEMS = 10
 _STATE_RANK = {"missing": 0, "unconfigured": 1, "ok": 2, "none": 3}
@@ -80,6 +81,20 @@ class PluginEntry:
     def has_config(self) -> bool:
         return self.has_schema or bool(self.custom_cards)
 
+    def matches(self, keyword: str) -> bool:
+        if not keyword:
+            return True
+        info = self.info
+        terms = [plugin_display_name(info.manifest), info.name, info.description, *self.components]
+        terms.extend(info.manifest.get("capabilities") or [])
+        terms.extend(card.title for card in self.custom_cards)
+        schema = PluginConfigRegistry.get_instance().get(info.name)
+        if schema is not None:
+            terms.append(schema.title)
+            for item in schema.fields:
+                terms.extend((item.label, item.key, item.description))
+        return any(keyword in str(text).casefold() for text in terms if text)
+
 
 class _PluginListRow(QWidget):
     """插件列表行：状态点 + 图标 + 名称（单行，参考服务商列表）；点击切换右侧详情。
@@ -98,6 +113,8 @@ class _PluginListRow(QWidget):
         # #pluginListRow 的 background/border-left 全部不生效（选中态看不见）
         self.setAttribute(Qt.WA_StyledBackground, True)
         self.setCursor(Qt.PointingHandCursor)
+        self.setFocusPolicy(Qt.StrongFocus)
+        self.setAccessibleName(plugin_display_name(entry.info.manifest))
         self.setMinimumHeight(40)
 
         layout = QHBoxLayout(self)
@@ -121,6 +138,7 @@ class _PluginListRow(QWidget):
         layout.addWidget(self._name, 1)
 
         _font_px(self._name, 0)
+        self.update_entry(entry.state, entry.missing)
         self._apply_style()
 
     def set_selected(self, selected: bool) -> None:
@@ -130,27 +148,13 @@ class _PluginListRow(QWidget):
         self._apply_style()
 
     def _apply_style(self) -> None:
-        if self._selected:
-            self.setStyleSheet(
-                f"""
-                #pluginListRow {{
-                    background: {Colors.TAB_ACTIVE_BG};
-                    border-left: 3px solid {Colors.TEXT_ACCENT};
-                    border-radius: 6px;
-                }}
-                """
-            )
-        else:
-            self.setStyleSheet(
-                f"""
-                #pluginListRow {{
-                    background: transparent;
-                    border-left: 3px solid transparent;
-                    border-radius: 6px;
-                }}
-                #pluginListRow:hover {{ background: {Colors.HOVER_BG}; }}
-                """
-            )
+        bg = Colors.HOVER_BG_STRONG if self._selected else "transparent"
+        self.setStyleSheet(
+            f"#pluginListRow {{ background: {bg}; border: 1px solid transparent;"
+            " border-radius: 6px; }"
+            f"#pluginListRow:hover {{ background: {Colors.HOVER_BG}; }}"
+            f"#pluginListRow:focus {{ border-color: {Colors.TEXT_ACCENT}; }}"
+        )
 
     def refresh_icon(self) -> None:
         """主题深浅切换后按对应侧重解码图标（构造时烧死的 pixmap 不跟主题）"""
@@ -165,26 +169,20 @@ class _PluginListRow(QWidget):
         self._entry.state = state
         self._entry.missing = missing
         self._dot.setStyleSheet(f"background: {_state_color(self._entry)}; border-radius: 4px;")
+        self._dot.setVisible(state in ("missing", "unconfigured") or not self._entry.enabled)
 
-    def matches(self, keyword: str) -> bool:
-        kw = (keyword or "").strip().lower()
-        if not kw:
-            return True
-        info = self._entry.info
-        haystack = [
-            plugin_display_name(info.manifest),
-            info.name,
-            info.description,
-            " ".join(self._entry.components),
-        ]
-        schema = PluginConfigRegistry.get_instance().get(info.name)
-        if schema is not None:
-            haystack.append(schema.title)
-            for f in schema.fields:
-                haystack.extend((f.label, f.key))
-        for cap in info.manifest.get("capabilities") or []:
-            haystack.append(str(cap))
-        return any(kw in str(text).lower() for text in haystack if text)
+        status = "已启用" if self._entry.enabled else "已停用"
+        if state in ("missing", "unconfigured"):
+            status += " · 待配置"
+        self.setAccessibleDescription(status)
+        self.setToolTip(f"{self._name.text()} · {status}")
+
+    def keyPressEvent(self, event) -> None:
+        if event.key() in (Qt.Key_Return, Qt.Key_Enter, Qt.Key_Space):
+            self.clicked.emit(self._entry.info.name)
+            event.accept()
+            return
+        super().keyPressEvent(event)
 
     def mouseReleaseEvent(self, event) -> None:
         if event.button() == Qt.LeftButton:
@@ -198,7 +196,7 @@ class _KeyValueRow(QWidget):
     def __init__(self, key: str, value: str, parent=None):
         super().__init__(parent)
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(0, 3, 0, 3)
+        layout.setContentsMargins(0, 5, 0, 5)
         layout.setSpacing(16)
         label = CaptionLabel(key, self)
         label.setObjectName("kvLabel")
@@ -218,27 +216,16 @@ class _SectionTitle(QLabel):
     def __init__(self, text: str, parent=None):
         super().__init__(text, parent)
         self.setObjectName("sectionTitle")
-        self.setStyleSheet(
-            f"color: {Colors.TEXT_MUTED}; font-size: 12px; padding: 14px 0 2px 0;"
-        )
+        _font_px(self, 0)
+        self.setStyleSheet(self.styleSheet() + "font-weight: 600; padding: 12px 0 4px 0;")
 
 
 def _h_line(parent: QWidget) -> QFrame:
     """1px 分隔线（关于页分组之间）"""
     line = QFrame(parent)
     line.setFixedHeight(1)
-    line.setStyleSheet(f"background: {Colors.BORDER}; border: none;")
+    line.setObjectName("pluginSectionDivider")
     return line
-
-
-def _badge(text: str, parent: QWidget) -> QLabel:
-    """组件徽章：accent 文字 + 半透明底"""
-    label = QLabel(text, parent)
-    label.setStyleSheet(
-        f"color: {Colors.TEXT_ACCENT}; background: {Colors.TAB_ACTIVE_BG};"
-        "border-radius: 4px; padding: 1px 8px; font-size: 12px;"
-    )
-    return label
 
 
 class _EmptyHint(QWidget):
@@ -304,9 +291,12 @@ _PAINT_RULES = {
     "detailMeta": "secondary",
     "fieldLabel": "primary",
     "configHint": "secondary",
+    "missingConfig": "error",
     "kvLabel": "secondary",
     "kvValue": "primary",
-    "sectionTitle": "muted",
+    "sectionTitle": "primary",
+    "aboutDescription": "secondary",
+    "resultCount": "secondary",
     "emptyTitle": "primary",
     "emptyDetail": "secondary",
     "permCap": "primary",
@@ -318,7 +308,8 @@ def _detail_frame_css() -> str:
     """详情面板背景/边框：每次调用重读 Colors token（主题切换后重算）"""
     return (
         f"#pluginDetailFrame {{ background: {Colors.CARD_BG.format(alpha=140)};"
-        f" border: 1px solid {Colors.BORDER}; border-radius: 8px; }}"
+        f" border: none; border-radius: 0; }}"
+        f"QFrame#pluginSectionDivider {{ background: {Colors.DIVIDER_COLOR}; border: none; }}"
     )
 
 def _paint_theme_colors(root: QWidget) -> None:
@@ -335,10 +326,15 @@ def _paint_theme_colors(root: QWidget) -> None:
             "primary": Colors.TEXT_PRIMARY,
             "secondary": Colors.TEXT_SECONDARY,
             "muted": Colors.TEXT_MUTED,
+            "error": Colors.ERROR,
         }
         import re
 
         for label in root.findChildren(QLabel):
+            if label.objectName() == "permBadge":
+                color = getattr(Colors, label.property("colorToken"))
+                label.setStyleSheet(f"color: {color}; border: 1px solid {color}; border-radius: 4px;")
+                continue
             role = _PAINT_RULES.get(label.objectName())
             if not role:
                 continue
@@ -379,7 +375,7 @@ class _FlexSegmented(SegmentedWidget):
     这里抬高 sizeHint 让默认更宽松，最小尺寸仍是文字宽（外层布局可压到该下限）。
     """
 
-    _ITEM_PREF_W = 88
+    _ITEM_PREF_W = 58
 
     def sizeHint(self):
         s = super().sizeHint()
@@ -398,8 +394,9 @@ class _PluginDetailView(QWidget):
         self._form: Optional[PluginConfigForm] = None
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(14, 10, 6, 10)
-        layout.setSpacing(8)
+        # 顶部不留空白：详情图标与左栏标题行同一水平线（顶到顶）
+        layout.setContentsMargins(24, 3, 18, 14)
+        layout.setSpacing(20)
 
         header = QHBoxLayout()
         header.setContentsMargins(0, 0, 0, 0)
@@ -412,19 +409,20 @@ class _PluginDetailView(QWidget):
         title_box.setSpacing(1)
         self._title = StrongBodyLabel("", self)
         self._title.setObjectName("detailTitle")
+        self._title.setWordWrap(True)
         self._meta = CaptionLabel("", self)
         self._meta.setObjectName("detailMeta")
+        self._meta.setWordWrap(True)
         title_box.addWidget(self._title)
         title_box.addWidget(self._meta)
         header.addLayout(title_box, 1)
 
-        # 页签贴插件名右侧同一行（原为独立整行，占掉一屏高度）
         self._seg = _FlexSegmented(self)
         self._seg.addItem("config", "配置")
         self._seg.addItem("perms", "权限")
         self._seg.addItem("about", "关于")
         self._seg.currentItemChanged.connect(self._on_segment_changed)
-        header.addWidget(self._seg, 0, Qt.AlignVCenter)
+        header.addWidget(self._seg, 0, Qt.AlignRight | Qt.AlignVCenter)
         layout.addLayout(header)
 
         self._stack = QStackedWidget(self)
@@ -472,6 +470,15 @@ class _PluginDetailView(QWidget):
         _apply_font(self)
         _paint_theme_colors(self)
 
+    def refresh_theme(self) -> None:
+        from app.utils.theme_style import refresh_page_theme
+
+        if self._entry and self._entry.custom_cards:
+            body = self._pages["config"].widget()
+            for card in body.findChildren(QWidget, options=Qt.FindDirectChildrenOnly):
+                refresh_page_theme(card)
+        self.refresh_icon()
+
     def refresh_icon(self) -> None:
         """主题深浅切换后按对应侧重解码头部图标"""
         if self._entry is None:
@@ -518,6 +525,10 @@ class _PluginDetailView(QWidget):
         if area is not None:
             self._stack.setCurrentWidget(area)
 
+    def current_scroll(self) -> QScrollArea:
+        """当前页签的滚动区（详情头部空白处的滚轮要转给它）。"""
+        return self._stack.currentWidget()
+
     # ── 配置页 ────────────────────────────────────────────
 
     def _build_config_page(self, entry: PluginEntry) -> QWidget:
@@ -534,17 +545,17 @@ class _PluginDetailView(QWidget):
         layout = QVBoxLayout(body)
         layout.setContentsMargins(2, 4, 8, 12)
         layout.setSpacing(6)
-        if entry.state == "missing":
-            warn = CaptionLabel(f"待填写：{'、'.join(entry.missing)}", body)
-            warn.setWordWrap(True)
-            warn.setStyleSheet(f"color: {Colors.ERROR};")
-            layout.addWidget(warn)
+        self._missing_hint = CaptionLabel(body)
+        self._missing_hint.setWordWrap(True)
+        self._missing_hint.setObjectName("missingConfig")
+        layout.addWidget(self._missing_hint)
+        self._update_missing_hint(entry)
         form = PluginConfigForm(entry.info.name, body)
         _apply_font(form)
         form.valueChanged.connect(lambda _k, _e=entry: self._on_value_changed(_e))
         self._form = form
         layout.addWidget(form)
-        layout.addWidget(CaptionLabel("改动即时保存，无需确认按钮", body))
+        layout.addWidget(CaptionLabel("自动保存", body))
         layout.addStretch(1)
         return body
 
@@ -582,7 +593,13 @@ class _PluginDetailView(QWidget):
         state, missing = evaluate_config_status(entry.info.name)
         entry.state = state
         entry.missing = missing
+        if self._entry is entry:
+            self._update_missing_hint(entry)
         self.configChanged.emit(entry)
+
+    def _update_missing_hint(self, entry: PluginEntry) -> None:
+        self._missing_hint.setText(f"待填写：{'、'.join(entry.missing)}")
+        self._missing_hint.setVisible(bool(entry.missing))
 
     # ── 权限页 ────────────────────────────────────────────
 
@@ -602,11 +619,7 @@ class _PluginDetailView(QWidget):
             spec = CATALOG.get(cap)
             level = getattr(spec.level, "value", spec.level) if spec is not None else "none"
             level_cn = _LEVEL_CN.get(str(level).lower(), str(level))
-            color = {
-                "high": Colors.ERROR,
-                "medium": Colors.WARNING,
-                "low": Colors.SUCCESS,
-            }.get(str(level).lower(), Colors.TEXT_MUTED)
+            color_token = {"high": "ERROR", "medium": "WARNING", "low": "SUCCESS"}.get(str(level).lower(), "TEXT_MUTED")
             row = QWidget(body)
             row_layout = QHBoxLayout(row)
             row_layout.setContentsMargins(0, 3, 0, 3)
@@ -614,7 +627,8 @@ class _PluginDetailView(QWidget):
             badge = CaptionLabel(level_cn, row)
             badge.setFixedWidth(28)
             badge.setAlignment(Qt.AlignCenter)
-            badge.setStyleSheet(f"color: {color}; border: 1px solid {color}; border-radius: 4px;")
+            badge.setObjectName("permBadge")
+            badge.setProperty("colorToken", color_token)
             row_layout.addWidget(badge, 0, Qt.AlignTop)
             text_box = QVBoxLayout()
             text_box.setContentsMargins(0, 0, 0, 0)
@@ -647,36 +661,21 @@ class _PluginDetailView(QWidget):
 
         body = QWidget()
         layout = QVBoxLayout(body)
-        layout.setContentsMargins(2, 8, 12, 16)
-        layout.setSpacing(2)
+        layout.setContentsMargins(0, 4, 12, 16)
+        layout.setSpacing(3)
 
         # 描述独立成段：不塞进键值行，避免长描述把两列撑歪
         desc = BodyLabel(info.description or "此插件未提供描述", body)
+        desc.setObjectName("aboutDescription")
         desc.setWordWrap(True)
         layout.addWidget(desc)
 
         layout.addWidget(_SectionTitle("基本信息", body))
         layout.addWidget(_h_line(body))
-        layout.addWidget(_KeyValueRow("版本", str(info.version), body))
         layout.addWidget(_KeyValueRow("许可证", str(manifest.get("license") or "未声明"), body))
-        layout.addWidget(_KeyValueRow("来源", "内置插件" if info.is_system else "用户插件", body))
-        layout.addWidget(_KeyValueRow("状态", "已启用" if entry.enabled else "已停用", body))
         if entry.components:
-            comp_row = QWidget(body)
-            h = QHBoxLayout(comp_row)
-            h.setContentsMargins(0, 3, 0, 3)
-            h.setSpacing(16)
-            lbl = CaptionLabel("组件", comp_row)
-            lbl.setFixedWidth(104)
-            lbl.setStyleSheet(f"color: {Colors.TEXT_SECONDARY};")
-            h.addWidget(lbl, 0, Qt.AlignTop)
-            badges = QHBoxLayout()
-            badges.setSpacing(6)
-            for comp in entry.components:
-                badges.addWidget(_badge(_component_display_name(comp), comp_row))
-            badges.addStretch(1)
-            h.addLayout(badges, 1)
-            layout.addWidget(comp_row)
+            components = "、".join(_component_display_name(comp) for comp in entry.components)
+            layout.addWidget(_KeyValueRow("组件", components, body))
 
         if author_name or home:
             layout.addWidget(_SectionTitle("作者与来源", body))
@@ -690,9 +689,12 @@ class _PluginDetailView(QWidget):
                 hh.setSpacing(16)
                 home_lbl = CaptionLabel("主页", home_row)
                 home_lbl.setFixedWidth(104)
-                home_lbl.setStyleSheet(f"color: {Colors.TEXT_SECONDARY};")
+                home_lbl.setObjectName("kvLabel")
                 hh.addWidget(home_lbl, 0, Qt.AlignTop)
-                hh.addWidget(HyperlinkButton(home, home, home_row), 1)
+                link = HyperlinkButton(home, "访问主页", home_row)
+                link.setToolTip(home)
+                hh.addWidget(link, 0, Qt.AlignLeft)
+                hh.addStretch(1)
                 layout.addWidget(home_row)
 
         layout.addWidget(_SectionTitle("兼容性", body))
@@ -748,6 +750,9 @@ class PluginSettingsPage(QWidget):
         # 类型筛选（组件能力维度）：None=全部类型，否则为组件键（tools/skills…）
         self._type_keys: List[Optional[str]] = [None]
         self._type_filter: Optional[str] = None
+        self._visible_names: set[str] = set()
+        self._row_timer = QTimer(self)
+        self._row_timer.timeout.connect(self._append_rows)
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -755,8 +760,19 @@ class PluginSettingsPage(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(8)
 
-        self._search = SearchLineEdit(self)
-        self._search.setPlaceholderText("搜索插件、配置项、能力…")
+        self._sidebar = QWidget(self)
+        sidebar_layout = QVBoxLayout(self._sidebar)
+        sidebar_layout.setContentsMargins(4, 4, 4, 4)
+        sidebar_layout.setSpacing(8)
+        self._sidebar_layout = sidebar_layout
+        # 页标题行挂载点（全宽模式下设置卡把「显示设置导航 + 插件设置」搬进来）：
+        # 标题与右侧详情头部同处一行，右栏从页面最顶端开始。
+        self._header_row: Optional[QWidget] = None
+        self._header_layout: Optional[QHBoxLayout] = None
+        self._header_widgets: tuple = ()
+        self._search = SearchLineEdit(self._sidebar)
+        self._search.setPlaceholderText("搜索插件")
+        self._search.setToolTip("搜索插件、配置字段或能力名称")
         self._search.setClearButtonEnabled(True)
         self._search.setFixedHeight(32)
         self._search_timer = QTimer(self)
@@ -764,53 +780,40 @@ class PluginSettingsPage(QWidget):
         self._search_timer.setInterval(_SEARCH_DEBOUNCE_MS)
         self._search_timer.timeout.connect(self._apply_filter)
         self._search.textChanged.connect(self._on_search_text_changed)
+        self._search.searchSignal.connect(self._apply_filter)
 
-        # 类型下拉（搜索框左侧）：按组件能力过滤（工具/技能/智能体…），
-        # 档位在 reload 时按插件清单实际出现的组件动态生成，避免空档
+        sidebar_layout.addWidget(self._search)
+        self._status_combo = ComboBox(self._sidebar)
+        self._status_combo.setAccessibleName("配置状态")
+        for key, title in _STATUS_FILTERS.items():
+            self._status_combo.addItem(title, userData=key)
+        self._status_combo.currentIndexChanged.connect(self._on_status_changed)
         self._type_combo = ComboBox(self)
         self._type_combo.setFixedHeight(32)
-        self._type_combo.setMinimumWidth(132)
+        self._type_combo.setAccessibleName("组件类型")
         self._type_combo.setMaxVisibleItems(_TYPE_COMBO_MAX_VISIBLE_ITEMS)
         self._type_combo.addItem("全部类型")
         self._type_combo.currentIndexChanged.connect(self._on_type_changed)
         search_row = QHBoxLayout()
         search_row.setContentsMargins(0, 0, 0, 0)
         search_row.setSpacing(8)
-        search_row.addWidget(self._type_combo)
-        search_row.addWidget(self._search, 1)
-        layout.addLayout(search_row)
-
-        # 筛选 chips：不进页面布局，由设置卡取走放到「返回设置」那一行（全宽模式）
-        # 状态档去掉「已停用」：数量常年为 0 且圆点灰色已表达停用，停用插件搜索/类型筛选照常可见
-        self.filter_bar = QWidget(self)
-        chips = QHBoxLayout(self.filter_bar)
-        chips.setContentsMargins(0, 0, 0, 0)
-        chips.setSpacing(6)
-        self._chips = {}
-        # 默认只看「有配置」：插件页的主要任务是配置，无配置插件与全量放后面
-        for key, text in (
-            ("configured", "有配置"),
-            ("todo", "待配置"),
-            ("none", "无配置"),
-            ("all", "全部"),
-        ):
-            chip = PillPushButton(text, self.filter_bar)
-            chip.setCheckable(True)
-            chip.setChecked(key == "configured")
-            chip.clicked.connect(lambda _c=False, k=key: self._on_chip_clicked(k))
-            chips.addWidget(chip)
-            self._chips[key] = chip
-        chips.addStretch(1)
+        search_row.addWidget(self._status_combo, 1)
+        search_row.addWidget(self._type_combo, 1)
+        sidebar_layout.addLayout(search_row)
+        self._result_count = CaptionLabel(self._sidebar)
+        self._result_count.setObjectName("resultCount")
+        sidebar_layout.addWidget(self._result_count)
 
         body = QHBoxLayout()
         body.setContentsMargins(0, 0, 0, 0)
         body.setSpacing(10)
+        self._panes = body
 
         self._list_area = QScrollArea(self)
         self._list_area.setWidgetResizable(True)
         install_fast_wheel(self._list_area)
         self._list_area.setFrameShape(QFrame.NoFrame)
-        self._list_area.setFixedWidth(_LIST_WIDTH)
+        self._sidebar.setFixedWidth(_LIST_WIDTH)
         self._list_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self._list_area.setStyleSheet("QScrollArea { background: transparent; border: none; }")
         list_body = QWidget()
@@ -819,14 +822,24 @@ class PluginSettingsPage(QWidget):
         self._list_layout.setSpacing(2)
         self._list_layout.addStretch(1)
         self._list_area.setWidget(list_body)
-        body.addWidget(self._list_area)
+        sidebar_layout.addWidget(self._list_area, 1)
+        body.addWidget(self._sidebar)
 
         self._detail_frame = QFrame(self)
         self._detail_frame.setObjectName("pluginDetailFrame")
         self._detail_frame.setStyleSheet(_detail_frame_css())
         detail_layout = QVBoxLayout(self._detail_frame)
         detail_layout.setContentsMargins(0, 0, 0, 0)
-        self._empty = _EmptyHint("选择左侧插件查看详情", "配置 / 权限 / 关于都在这里。")
+        self._empty = QWidget(self._detail_frame)
+        empty_layout = QVBoxLayout(self._empty)
+        empty_layout.addStretch()
+        self._empty_text = BodyLabel(self._empty)
+        self._empty_text.setObjectName("emptyTitle")
+        empty_layout.addWidget(self._empty_text, 0, Qt.AlignCenter)
+        self._reset = PushButton("清除筛选", self._empty)
+        self._reset.clicked.connect(self._reset_filters)
+        empty_layout.addWidget(self._reset, 0, Qt.AlignCenter)
+        empty_layout.addStretch()
         self._detail = _PluginDetailView(self._detail_frame)
         self._detail.configChanged.connect(self.refresh_entry_state)
         self._detail.hide()
@@ -835,9 +848,103 @@ class PluginSettingsPage(QWidget):
         body.addWidget(self._detail_frame, 1)
 
         layout.addLayout(body, 1)
-        # 页面挂在设置页的 QScrollArea 里，不给最小高度会被压成 sizeHint 高度
-        self.setMinimumHeight(480)
+        # 两栏外的空白（标题行/搜索框/详情头部）滚轮交给各自的滚动区，
+        # 否则滚不动：外层已禁滚，事件到这里就断了。
+        self._sidebar.installEventFilter(self)
+        self._detail.installEventFilter(self)
         _apply_font(self)
+
+    def eventFilter(self, obj, event):  # noqa: N802 - Qt 回调
+        """两栏空白处的滚轮转给当前滚动区（外层已禁滚，不转就没人接）。"""
+        if event.type() == QEvent.Wheel:
+            if obj is self._sidebar:
+                area = self._list_area
+            elif obj is self._detail:
+                area = self._detail.current_scroll()
+            else:
+                area = None
+            if area is not None and scroll_wheel_to(area, event):
+                event.accept()
+                return True
+        return super().eventFilter(obj, event)
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._size_sidebar()
+
+    def set_list_visible(self, visible: bool) -> None:
+        self._sidebar.setVisible(visible)
+
+    def list_hidden(self) -> bool:
+        return self._sidebar.isHidden()
+
+    def adopt_page_header(self, back_btn: QWidget, title: QWidget) -> None:
+        """把设置卡顶部条收进左栏顶部（幂等）。
+
+        全宽模式下左侧导航已收起，那条只剩「显示设置导航 + 插件设置」；
+        搬进左栏后右侧详情头部能与标题同处一行，两栏都顶到页面最上端。
+        控件只是换父容器，信号与样式跟随实例，不重建。
+        """
+        widgets = (back_btn, title)
+        if self._header_row is None:
+            row = QWidget(self._sidebar)
+            row_layout = QHBoxLayout(row)
+            row_layout.setContentsMargins(4, 4, 4, 4)
+            row_layout.setSpacing(12)
+            self._sidebar_layout.insertWidget(0, row)
+            self._header_row = row
+            self._header_layout = row_layout
+        if self._header_widgets == widgets:
+            self._header_row.setVisible(True)
+            return
+        row_layout = self._header_layout
+        if row_layout is None:
+            return
+        row_layout.addWidget(back_btn, 0)
+        row_layout.addWidget(title, 1)
+        self._header_widgets = widgets
+        self._header_row.setVisible(True)
+        for widget in widgets:
+            widget.setVisible(True)
+        self._size_sidebar()
+
+    def release_page_header(self) -> tuple:
+        """交出顶部条控件（由设置卡搬回自己的容器），返回当初托管的控件对。"""
+        widgets = self._header_widgets
+        self._header_widgets = ()
+        if self._header_row is not None:
+            self._header_row.setVisible(False)
+        return widgets
+
+    def _size_sidebar(self) -> None:
+        # 数量、组件名与字体都会变化；为文字与下拉箭头分别留出空间。
+        filter_width = 16
+        for combo in (self._status_combo, self._type_combo):
+            text_width = combo.fontMetrics().horizontalAdvance(combo.currentText())
+            width = max(combo.sizeHint().width(), text_width + 50)
+            combo.setMinimumWidth(width)
+            filter_width += width
+        header_width = 0
+        header_layout = self._header_layout
+        if self._header_widgets and header_layout is not None:
+            # 按控件自身尺寸算：header_row.sizeHint() 会跟着被拉伸后的实际宽度变大，
+            # 拿它当输入会自激（越窄→判定越宽→越早切上下布局）
+            header_width = (
+                sum(w.sizeHint().width() for w in self._header_widgets)
+                + header_layout.spacing()
+                + 8
+            )
+        sidebar_width = max(_LIST_WIDTH, filter_width, header_width)
+        compact = self.width() < sidebar_width + 398
+        if compact:
+            self._sidebar.setMinimumWidth(0)
+            self._sidebar.setMaximumWidth(16777215)
+            self._list_area.setFixedHeight(110)
+        else:
+            self._sidebar.setFixedWidth(sidebar_width)
+            self._list_area.setMinimumHeight(0)
+            self._list_area.setMaximumHeight(16777215)
+        self._panes.setDirection(QBoxLayout.TopToBottom if compact else QBoxLayout.LeftToRight)
 
     # ── 数据与刷新 ────────────────────────────────────────
 
@@ -851,11 +958,7 @@ class PluginSettingsPage(QWidget):
         self._entries = entries
         self._rebuild_type_options()
         self._rebuild_rows()
-        self._update_counts()
-        if self._current and any(e.info.name == self._current for e in entries):
-            self._select(self._current, force=True)
-        elif entries:
-            self._select(entries[0].info.name)
+        self._apply_filter(refresh_detail=True)
 
     @staticmethod
     def _signature(entries: List[PluginEntry]) -> tuple:
@@ -905,32 +1008,31 @@ class PluginSettingsPage(QWidget):
         return entries
 
     def _rebuild_rows(self) -> None:
+        self._row_timer.stop()
         for row in self._rows:
             self._list_layout.removeWidget(row)
+            row.hide()
             row.deleteLater()
         self._rows = []
-        # 分帧挂载：60+ 行含图标解码，一帧建完会在打开设置时顿卡
-        entries = list(self._entries)
+        # 使用页面持有的定时器；热重载或页面销毁时不会再追加旧列表行。
+        self._pending_rows = iter(self._entries.copy())
+        self._row_timer.start(0)
 
-        def _build_next(idx: int) -> None:
-            if idx >= len(entries):
-                # 分帧建行完成后统一补刷：行内 qfluentwidgets 标签构造时按浅色主题
-                # 烧死黑色文字，不刷则深色主题下列表不可读（详情页由 show_entry 刷）
-                _paint_theme_colors(self)
+    def _append_rows(self) -> None:
+        for _ in range(4):
+            entry = next(self._pending_rows, None)
+            if entry is None:
+                self._row_timer.stop()
                 return
-            entry = entries[idx]
             row = _PluginListRow(entry, self._list_area.widget())
             row.clicked.connect(self._select)
-            row.setVisible(row.matches(self._keyword) and self._match_filter(entry))
-            if entry.info.name == self._current:
-                row.set_selected(True)
+            row.setVisible(entry.info.name in self._visible_names)
+            row.set_selected(entry.info.name == self._current)
             insert_at = self._list_layout.count() - 1
             self._list_layout.insertWidget(insert_at, row)
             self._rows.append(row)
             _apply_font(row)
-            QTimer.singleShot(0, lambda i=idx + 1: _build_next(i))
-
-        QTimer.singleShot(0, lambda: _build_next(0))
+            _paint_theme_colors(row)
 
     # ── 筛选与搜索 ────────────────────────────────────────
 
@@ -960,11 +1062,31 @@ class PluginSettingsPage(QWidget):
         self._type_combo.setCurrentIndex(keys.index(self._type_filter))
         self._type_combo.blockSignals(False)
 
-    def _apply_filter(self) -> None:
-        self._keyword = self._search.text().strip()
+    def _reset_filters(self) -> None:
+        self._search.clear()
+        self._type_combo.setCurrentIndex(0)
+        self._status_combo.setCurrentIndex(self._status_combo.findData("all"))
+        self._apply_filter()
+        self._search.setFocus()
+
+    def _apply_filter(self, *, refresh_detail: bool = False) -> None:
+        self._keyword = self._search.text().strip().casefold()
+        matches = [e.info.name for e in self._entries if self._match_filter(e) and e.matches(self._keyword)]
+        self._visible_names = set(matches)
         for row in self._rows:
-            visible = row.matches(self._keyword) and self._match_filter(row._entry)
-            row.setVisible(visible)
+            row.setVisible(row._entry.info.name in self._visible_names)
+        self._result_count.setText(f"{len(matches)} 个结果")
+        self._result_count.setVisible(bool(self._keyword or self._type_filter))
+        if matches:
+            self._select(self._current if self._current in self._visible_names else matches[0], force=refresh_detail)
+        else:
+            self._current = None
+            for row in self._rows:
+                row.set_selected(False)
+            self._detail.hide()
+            self._empty_text.setText("没有匹配的插件" if self._entries else "尚未加载插件")
+            self._reset.setVisible(bool(self._entries))
+            self._empty.show()
         self._update_counts()
 
     def _match_filter(self, entry: PluginEntry) -> bool:
@@ -978,20 +1100,18 @@ class PluginSettingsPage(QWidget):
             return entry.state in ("missing", "unconfigured")
         return True
 
-    def _on_chip_clicked(self, key: str) -> None:
-        self._filter = key
-        for k, chip in self._chips.items():
-            chip.setChecked(k == key)
+    def _on_status_changed(self, index: int) -> None:
+        self._filter = self._status_combo.itemData(index)
         self._apply_filter()
 
     def _update_counts(self) -> None:
         total = len(self._entries)
         todo = sum(1 for e in self._entries if e.state in ("missing", "unconfigured"))
         configured = sum(1 for e in self._entries if e.has_config)
-        self._chips["configured"].setText(f"有配置 {configured}")
-        self._chips["todo"].setText(f"待配置 {todo}")
-        self._chips["none"].setText(f"无配置 {total - configured}")
-        self._chips["all"].setText(f"全部 {total}")
+        counts = {"configured": configured, "todo": todo, "none": total - configured, "all": total}
+        for index, (key, title) in enumerate(_STATUS_FILTERS.items()):
+            self._status_combo.setItemText(index, f"{title} {counts[key]}")
+        self._size_sidebar()
 
     # ── 选中与详情 ────────────────────────────────────────
 
@@ -1017,13 +1137,15 @@ class PluginSettingsPage(QWidget):
         for row in self._rows:
             row._apply_style()
             row.refresh_icon()
+            row.update_entry(row._entry.state, row._entry.missing)
             _font_px(row._name, 0)
-        self._detail.refresh_icon()
+        self._detail.refresh_theme()
         _font_px(self._detail._title, 3)
         _font_px(self._detail._meta, -1)
         _refresh_hint_fonts(self._detail)
         self._detail_frame.setStyleSheet(_detail_frame_css())
         _apply_font(self)
+        self._size_sidebar()
         _paint_theme_colors(self)
 
     def refresh_entry_state(self, entry: PluginEntry) -> None:
@@ -1032,6 +1154,9 @@ class PluginSettingsPage(QWidget):
             if row._entry.info.name == entry.info.name:
                 row.update_entry(entry.state, entry.missing)
                 break
+        old_order = [e.info.name for e in self._entries]
         self._entries.sort(key=lambda e: (_STATE_RANK.get(e.state, 3), not e.info.is_system, e.info.name.lower()))
+        if old_order != [e.info.name for e in self._entries]:
+            self._rebuild_rows()
         self._sig = self._signature(self._entries)
-        self._update_counts()
+        self._apply_filter()

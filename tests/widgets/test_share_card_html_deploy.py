@@ -30,7 +30,7 @@ def share_src() -> str:
 
 def test_upload_button_text_switches_by_format(share_src: str):
     """HTML 格式按钮文案为「发布网页」，其它格式为「生成链接」"""
-    assert '"🌐 发布网页" if fmt_id == "html" else "🔗 生成链接"' in share_src
+    assert '"发布网页" if fmt_id == "html" else "生成链接"' in share_src
 
 
 def test_on_upload_dispatches_html_to_deploy(share_src: str):
@@ -52,8 +52,8 @@ def test_deploy_thread_calls_edgeone_deployer(share_src: str):
 
 def test_deploy_button_shows_pending_and_restores(share_src: str):
     """发布期间按钮禁用并提示，完成后恢复可点"""
-    assert '"⏳ 发布中…"' in share_src
-    assert '"🌐 发布网页"' in share_src
+    assert '"发布中…"' in share_src
+    assert '"发布网页"' in share_src
 
 
 def test_success_message_mentions_expiry(share_src: str):

@@ -27,6 +27,7 @@ from qfluentwidgets import ScrollArea
 from app.utils.design_tokens import CardStyles, Colors, readable_text_on
 from app.utils.motion import LoopTimer
 from app.utils.scroll_tuning import install_fast_wheel
+from app.widgets.ui_helpers import _ThemedIconLabel
 from app.utils.utils import _is_current_theme_light, get_font_family_css, get_icon, get_unified_font
 from app.widgets.cards.card_container import CardContainer
 
@@ -259,10 +260,9 @@ class _AgentTaskRow(QFrame):
         detail_layout.setContentsMargins(28, 4, 8, 4)
         detail_layout.setSpacing(6)
 
-        def _make_item(icon_char: str, text: str, text_color: str = None) -> tuple:
+        def _make_item(icon_name: str, text: str, text_color: str = None) -> tuple:
             """返回 (icon_widget, label_widget)"""
-            icon = QLabel(icon_char, self._detail_panel)
-            icon.setFont(get_unified_font(9))
+            icon = _ThemedIconLabel(icon_name, 14, self._detail_panel)
             label = QLabel(text, self._detail_panel)
             label.setFont(get_unified_font(8))
             c = text_color if text_color else f"{Colors.REALTIME_TEXT_SECONDARY}"
@@ -278,24 +278,24 @@ class _AgentTaskRow(QFrame):
         # Row 1: 📊 上下文    | ⏱ 耗时
         # Row 2: 🔗 进入会话  | ⏹ 停止
 
-        mdl_icon, self._model_label_detail = _make_item("🧠", self.model_name or "未指定")
+        mdl_icon, self._model_label_detail = _make_item("大模型", self.model_name or "未指定")
         detail_layout.addWidget(mdl_icon, 0, 0)
         detail_layout.addWidget(self._model_label_detail, 0, 1)
 
-        tool_icon, self._tool_label_detail = _make_item("🔧", "0 次调用")
+        tool_icon, self._tool_label_detail = _make_item("工具", "0 次调用")
         detail_layout.addWidget(tool_icon, 0, 2)
         detail_layout.addWidget(self._tool_label_detail, 0, 3)
 
-        ctx_icon, self._ctx_label_detail = _make_item("📊", "—")
+        ctx_icon, self._ctx_label_detail = _make_item("上下文", "—")
         detail_layout.addWidget(ctx_icon, 1, 0)
         detail_layout.addWidget(self._ctx_label_detail, 1, 1)
 
-        elp_icon, self._elapsed_label_detail = _make_item("⏱", "00:00")
+        elp_icon, self._elapsed_label_detail = _make_item("历史对话", "00:00")
         detail_layout.addWidget(elp_icon, 1, 2)
         detail_layout.addWidget(self._elapsed_label_detail, 1, 3)
 
         # 进入会话按钮
-        self._enter_session_btn = QPushButton("🔗 进入会话", self._detail_panel)
+        self._enter_session_btn = QPushButton(get_icon("link"), "进入会话", self._detail_panel)
         self._enter_session_btn.setFont(get_unified_font(8))
         self._enter_session_btn.setFixedHeight(22)
         Colors.refresh()
@@ -321,7 +321,7 @@ class _AgentTaskRow(QFrame):
         detail_layout.addWidget(self._enter_session_btn, 2, 0, 1, 2)
 
         # 停止按钮（运行中可见）
-        self._stop_btn_detail = QPushButton("⏹ 停止", self._detail_panel)
+        self._stop_btn_detail = QPushButton(get_icon("窗体-最大化"), "停止", self._detail_panel)
         self._stop_btn_detail.setFont(get_unified_font(8))
         self._stop_btn_detail.setFixedHeight(22)
         Colors.refresh()
@@ -431,7 +431,7 @@ class _AgentTaskRow(QFrame):
             self._header_widget.layout().removeWidget(self._rotating_icon)
             self._header_widget.layout().insertWidget(idx, self._success_label)
         else:
-            self._error_label = QLabel("❌", self._header_widget)
+            self._error_label = _ThemedIconLabel("惊叹号", 16, self._header_widget)
             self._error_label.setObjectName("agentTaskErrorLabel")
             self._error_label.setFixedSize(16, 16)
             idx = self._header_widget.layout().indexOf(self._rotating_icon)
@@ -667,7 +667,10 @@ class SubAgentCompactFloatingWidget(QWidget):
 
         header.addStretch()
 
-        self.close_btn = QPushButton("✕", self)
+        self.close_btn = QPushButton(self)
+        self.close_btn.setIcon(get_icon("关闭"))
+        self.close_btn.setIconSize(QSize(12, 12))
+        self.close_btn.setToolTip("关闭")
         self.close_btn.setObjectName("subAgentCloseBtn")
         self.close_btn.setFixedSize(20, 20)
         self.close_btn.clicked.connect(self._on_close)

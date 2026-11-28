@@ -38,6 +38,7 @@ def _make_window(**overrides):
     # getattr 兜不住这个异常。凡走 _is_destroyed 守卫的方法都要靠它。
     win._is_destroyed = False
     win._pending_lazy_cards = []
+    win._batch_cards = []
     win._loading_session = False
     win._lazy_batch_timer_active = False
     win._is_widget_alive = lambda card: True

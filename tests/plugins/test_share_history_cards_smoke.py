@@ -50,16 +50,16 @@ def _theme():
     }
 
 
-def test_type_icons_are_fluent_icons(qt_app):
-    """类型图标应为 FluentIcon，不再是 emoji 字符串"""
-    from qfluentwidgets import FluentIcon
+def test_type_icons_are_app_icons(qt_app):
+    """类型图标应支持 Fluent 图标接口，不再是 emoji 字符串"""
+    from qfluentwidgets import FluentIconBase
 
     from ui.cards import _TYPE_ICONS, _TYPE_ICON_FALLBACK
 
     assert set(_TYPE_ICONS) == {"session", "project"}
     for icon in _TYPE_ICONS.values():
-        assert isinstance(icon, FluentIcon)
-    assert isinstance(_TYPE_ICON_FALLBACK, FluentIcon)
+        assert isinstance(icon, FluentIconBase)
+    assert isinstance(_TYPE_ICON_FALLBACK, FluentIconBase)
 
 
 def test_no_emoji_in_source():
@@ -74,7 +74,7 @@ def test_no_emoji_in_source():
 
 def test_record_item_with_local_file(qt_app, tmp_path):
     """有本地文件时应构建打开按钮 + 复制链接按钮"""
-    from qfluentwidgets import FluentIcon, TransparentPushButton, TransparentToolButton
+    from qfluentwidgets import TransparentPushButton, TransparentToolButton
 
     from ui.cards import _RecordItem
 

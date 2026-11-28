@@ -31,7 +31,7 @@ class BottomToolbarModule(UIModule):
     module_id = "bottom_toolbar"
 
     def build(self, host) -> None:
-        from PyQt5.QtCore import Qt
+        from PyQt5.QtCore import QSize, Qt
         from PyQt5.QtGui import QColor
         from PyQt5.QtWidgets import (
             QGraphicsDropShadowEffect,
@@ -251,7 +251,9 @@ class BottomToolbarModule(UIModule):
         tt_layout.addWidget(host._tool_count_label)
 
         # 恢复按钮（仅 agent 覆盖时显示，不打开卡片即可恢复）
-        host._tool_restore_btn = QPushButton("↺", host._tool_toggle_btn)
+        host._tool_restore_btn = QPushButton(host._tool_toggle_btn)
+        host._tool_restore_btn.setIcon(get_icon("还原"))
+        host._tool_restore_btn.setIconSize(QSize(14, 14))
         host._tool_restore_btn.setObjectName("toolRestoreBtn")
         host._tool_restore_btn.setFixedSize(20, 20)
         host._tool_restore_btn.setCursor(Qt.PointingHandCursor)

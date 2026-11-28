@@ -12,6 +12,7 @@ utils → widgets 反向依赖（diff_viewer 等 utils 模块需要 diff 高亮�
 import difflib
 import os
 import re
+from functools import lru_cache
 from html import escape
 
 # ===== Pygments 语法高亮（行内 diff 代码着色，复用与 message_card 一致的 dracula 主题）=====
@@ -62,9 +63,9 @@ def set_diff_highlight_style(style_name: str):
         _DIFF_FORMATTER_CACHE["style"] = None
 
 
-def _get_diff_formatter():
-    """获取当前 diff 高亮 formatter，随主题风格切换重建"""
-    style = _current_diff_style
+def _get_diff_formatter(style: str | None = None):
+    """获取 diff 高亮 formatter，随风格切换重建（缺省用当前全局风格）"""
+    style = style or _current_diff_style
     if _DIFF_FORMATTER_CACHE["style"] != style:
         _DIFF_FORMATTER_CACHE["style"] = style
         _DIFF_FORMATTER_CACHE["formatter"] = HtmlFormatter(nowrap=True, style=style, noclasses=False)
@@ -166,19 +167,38 @@ def _get_diff_lexer(path: str):
     return lex
 
 
+# 行级高亮结果缓存上限。500 行 diff 单次渲染的「唯一文本段」约 500 条，
+# 4096 限制条目数，长行另行绕过，避免生成的大段 HTML 长期驻留。
+_HL_CACHE_MAX = 4096
+_HL_CACHE_MAX_CHARS = 1024
+
+
+@lru_cache(maxsize=_HL_CACHE_MAX)
+def _highlight_code_line_cached(text: str, lexer, style: str) -> str:
+    """_highlight_code_line 的缓存实现；style 入 key，切主题后旧条目自然不命中。"""
+    try:
+        return _pyg_highlight(text, lexer, _get_diff_formatter(style)).rstrip("\n")
+    except Exception:
+        return escape(text)
+
+
 def _highlight_code_line(text: str, lexer) -> str:
     """对单行代码做语法高亮，返回带内联 color 的 HTML（nowrap，无 <pre> 包裹）
 
     注意：Pygments 在 nowrap 模式下会在输出末尾追加一个 "\\n"。词级差异会把每个
     词段单独高亮后拼接，若保留该换行，整行会被切碎、出现多余空白与异常换行。
     这里统一剥掉末尾换行（高亮的都是单行/单词段，不含真实换行）。
+
+    perf：同一段文本在 _render_diff_preview 里会被重复高亮 —— 单列视图与双列
+    视图各一份、词级 diff 的 equal 段在 old/new 两侧各一份。实测 500 行 diff
+    的 1499 次调用里 993 次同参重复（66%），逐行 Pygments lexer 是主要成本
+    （单卡冷渲染 40ms → 21ms）。纯文本 lexer 走 escape，无需缓存。
     """
     if lexer is None or lexer is _TEXT_LEXER:
         return escape(text)
-    try:
-        return _pyg_highlight(text, lexer, _get_diff_formatter()).rstrip("\n")
-    except Exception:
-        return escape(text)
+    if len(text) > _HL_CACHE_MAX_CHARS:
+        return _highlight_code_line_cached.__wrapped__(text, lexer, _current_diff_style)
+    return _highlight_code_line_cached(text, lexer, _current_diff_style)
 
 
 def _highlighted_word_diff_html(old_text: str, new_text: str, lexer) -> tuple:

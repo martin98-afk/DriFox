@@ -69,12 +69,12 @@ def _session_with_long_tool(long_chars=30000):
 
 class TestSnapshotPruneProjection:
     def test_snapshot_uses_pruned_tokens(self):
-        """投影语义（诊#16 b 方案）：未超预算时有损层不介入 → pruned_tokens=0，
-        投影等于实际发送（工具结果原样计入）"""
+        """已定稿的历史内容，即使大于当前阈值，UI 也应按保存值估算。"""
         session = _session_with_long_tool()
+        session.messages[2]["_context_ingested"] = True
         engine = _engine(session)
         snap = engine.get_context_usage_snapshot(session=session, llm_config={"model": "gpt-4o", "max_tokens": 8000})
-        # 未超预算（7.5k token << budget）：不截断，投影 = 原始
+        # 此结果已定稿，例如来自先前更宽的配置。
         assert snap["pruned_tokens"] == 0, "未超预算时不应截断"
         tool_entry = [b for b in snap["breakdown"] if b["key"] == "tool"]
         assert tool_entry, "应有工具结果占比"

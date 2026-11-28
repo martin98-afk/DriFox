@@ -18,7 +18,7 @@ import fnmatch
 import os
 import re
 from uuid import uuid4
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 from itertools import islice
 from pathlib import Path
 from typing import Dict, Optional
@@ -368,7 +368,7 @@ def _read_impl(tool_ctx, **kwargs):
         header = f"#File: {display} (Lines {startline}-{end_idx} of {total_lines})"
         if show_line_numbers:
             body = "\n".join(
-                f"{start_idx + i}:{line.rstrip(chr(10))}" for i, line in enumerate(content_slice)
+                f"{lineno}:{line.rstrip(chr(10))}" for lineno, line in enumerate(content_slice, start_idx + 1)
             )
         else:
             body = "".join(content_slice).rstrip(chr(10))
@@ -772,32 +772,31 @@ def _grep_impl(tool_ctx, **kwargs):
             result = _grep_single(workdir, search_root, pattern, path)
             return result or ToolResult(True, content="无匹配")
 
-        # 目录：递归搜索（并行收集）
-        def _search_file(fp: Path):
-            if _excluded_dir(fp.name, _GREP_EXCLUDE_DIRS) and fp.is_dir():
-                return None
-            if include and not fnmatch.fnmatch(fp.name, include):
-                return None
+        # 先按文件名筛选，再有界提交读取，避免大仓库为每个文件都创建 Future。
+        def candidates():
+            for root, dirs, names in os.walk(search_root):
+                dirs[:] = [d for d in dirs if not _excluded_dir(d, _GREP_EXCLUDE_DIRS)]
+                for name in names:
+                    if not include or fnmatch.fnmatch(name, include):
+                        yield Path(root) / name
+
+        def search_file(fp: Path):
             return _grep_single(workdir, fp, pattern, str(fp))
 
-        results = []
-        files = []
-        for root, dirs, names in os.walk(search_root):
-            dirs[:] = [d for d in dirs if not _excluded_dir(d, _GREP_EXCLUDE_DIRS)]
-            for name in names:
-                files.append(Path(root) / name)
+        count = 0
+        preview = []
+        remaining = _MAX_GREP_CONTENT_LENGTH
         with ThreadPoolExecutor(max_workers=4) as pool:
-            futures = [pool.submit(_search_file, fp) for fp in files]
-            for fut in as_completed(futures):
-                r = fut.result()
-                if r:
-                    results.append(r)
-        if not results:
+            for result in pool.map(search_file, candidates(), buffersize=16):
+                if result:
+                    count += 1
+                    if remaining > 0:
+                        chunk = ("\n" if preview else "") + str(result.content)
+                        preview.append(chunk[:remaining])
+                        remaining -= len(chunk)
+        if not count:
             return ToolResult(True, content=f"无匹配（pattern: {pattern_str}）")
-        return ToolResult(
-            True,
-            content=f"搜索到 {len(results)} 个文件:\n" + "\n".join(str(r.content) for r in results)[:_MAX_GREP_CONTENT_LENGTH],
-        )
+        return ToolResult(True, content=f"搜索到 {count} 个文件:\n" + "".join(preview))
     except re.error as e:
         return ToolResult(False, error=f"无效正则: {e}")
     except Exception as e:
@@ -879,7 +878,7 @@ def _glob_impl(tool_ctx, **kwargs):
 
         norm_pattern = pattern.replace("\\", "/")
         full_pattern = str(search_path / norm_pattern)
-        raw_matches = _std_glob.glob(full_pattern, recursive=True)
+        raw_matches = _std_glob.iglob(full_pattern, recursive=True)
         matches = []
         for fp_str in raw_matches:
             fp = Path(fp_str)

@@ -2,7 +2,7 @@
 """worktree-manager 插件 UI 注册入口
 
 职责：
-- 注册工作台「工作树」页（page_id="worktree-manager"，与插件同名，默认落点）
+- 注册左侧边栏「工作树」卡片
 - 注册 WorktreeService（主程序门面查询：会话联动 + 分支标签）
 - 注册标题栏分支标签 widget 工厂（slot="branch"）
 """
@@ -19,18 +19,16 @@ def register_ui(registry) -> None:
     try:
         from .worktree_page import SystemWorktreePage
 
-        # 工作树页：page_id 与插件同名，order_hint=0 → 页签首位
-        registry.register_workbench_tab(
+        registry.register_floating_card(
             plugin_name=_PLUGIN_NAME,
-            page_id="worktree-manager",
-            label="工作树",
+            card_id=_PLUGIN_NAME,
+            title="工作树",
             widget_class=SystemWorktreePage,
-            priority=20,
-            metadata={"source": "system", "order_hint": 0},
+            container="left",
         )
-        logger.info("[worktree-manager] 已注册工作台 tab: worktree-manager")
+        logger.info("[worktree-manager] 已注册左侧工作树卡片")
     except Exception as e:
-        logger.warning(f"[worktree-manager] 注册工作树页失败（将显示占位页）: {e}")
+        logger.warning(f"[worktree-manager] 注册工作树卡片失败: {e}")
     try:
         # 服务：主程序 5 个门面方法的实现体
         service = WorktreeService()

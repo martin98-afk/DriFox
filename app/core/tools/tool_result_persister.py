@@ -22,6 +22,8 @@
 import hashlib
 import json as stdjson
 import time
+from pathlib import Path
+from tempfile import NamedTemporaryFile
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Tuple
 
@@ -102,7 +104,10 @@ class ToolResultPersister:
     def __init__(self, session_id: str):
         self._session_id = session_id
         # 路径: {app_data_dir}/projects/{session_id}/tool-results/
-        self._root_dir = get_app_data_dir() / "projects" / session_id / "tool-results"
+        folder = session_id
+        if folder and (Path(folder).name != folder or folder in (".", "..") or ":" in folder):
+            folder = hashlib.sha256(folder.encode()).hexdigest()
+        self._root_dir = get_app_data_dir() / "projects" / folder / "tool-results"
         self._root_dir.mkdir(parents=True, exist_ok=True)
         # 替换决策冻结表: {tool_call_id: persisted_file_path}
         # 后续每轮 LLM 调用都用同一份预览重新注入, 保证前缀字节级稳定
@@ -313,11 +318,16 @@ class ToolResultPersister:
         # 用格式化后的内容计算 hash
         content_hash = hashlib.sha256(formatted.encode("utf-8", errors="replace")).hexdigest()[:16]
         ts = int(time.time() * 1000)
-        filename = f"{tc_id}_{ts}_{content_hash}.txt"
+        # 同一结果在恢复/重试后仍生成相同引用；调用 ID 来自供应商，不直接用作路径。
+        call_hash = hashlib.sha256(str(tc_id).encode()).hexdigest()[:16]
+        filename = f"{call_hash}_{content_hash}.txt"
         file_path = self._root_dir / filename
 
         # 写完整内容 (已格式化为多行, LLM 可直接读取)
-        file_path.write_text(formatted, encoding="utf-8", errors="replace")
+        meta_path = file_path.with_suffix(".meta.json")
+        if file_path.exists() and meta_path.exists():
+            return str(file_path.resolve())
+        self._write_atomic(file_path, formatted.encode("utf-8", errors="replace"))
         # 写元信息 (调试/审计用)
         meta = {
             "tool_call_id": tc_id,
@@ -329,11 +339,15 @@ class ToolResultPersister:
             "saved_at": ts,
             "session_id": self._session_id,
         }
-        file_path.with_suffix(".meta.json").write_text(
-            orjson.dumps(meta, option=orjson.OPT_INDENT_2).decode("utf-8"),
-            encoding="utf-8",
-        )
+        self._write_atomic(meta_path, orjson.dumps(meta, option=orjson.OPT_INDENT_2))
         return str(file_path.resolve())
+
+    @staticmethod
+    def _write_atomic(path: Path, data: bytes) -> None:
+        with NamedTemporaryFile(dir=path.parent, delete_on_close=False) as tmp:
+            tmp.write(data)
+            tmp.close()
+            Path(tmp.name).replace(path)
 
     @staticmethod
     def _render_json_preview(content: str, max_chars: int = 2000) -> str:

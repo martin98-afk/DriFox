@@ -273,13 +273,14 @@ def _question_control(host: Any, ctx: Any):
     调用侧 ``pool["question.control"]["answer"](...)``。
     """
     real = host if host is not None else _resolve_active_host(None)
+    signal = _QuestionSignal(real)
 
     def subscribe(callback):
         if real is None or not hasattr(real, "question_control_subscribe"):
             raise RuntimeError("宿主窗口不支持提问控制")
         if not real.question_control_subscribe(callback):
             return False
-        ctx.registry.track_subscription(ctx.plugin, _QuestionSignal(real, callback), callback)
+        ctx.registry.track_subscription(ctx.plugin, signal, callback)
         return True
 
     def snapshot() -> dict:
@@ -295,7 +296,10 @@ def _question_control(host: Any, ctx: Any):
         return bool(real.question_control_stop_countdown()) if real is not None else False
 
     def unsubscribe(callback) -> bool:
-        return bool(real.question_control_unsubscribe(callback)) if real is not None else False
+        try:
+            return bool(real.question_control_unsubscribe(callback)) if real is not None else False
+        finally:
+            ctx.registry.forget_subscription(ctx.plugin, signal, callback)
 
     return {
         "subscribe": subscribe,
@@ -310,13 +314,12 @@ def _question_control(host: Any, ctx: Any):
 class _QuestionSignal:
     """把「从宿主监听者列表移除」适配成 signal.disconnect 形状（供能力注册表退订）。"""
 
-    def __init__(self, widget: Any, callback: Any):
+    def __init__(self, widget: Any):
         self._widget = widget
-        self._callback = callback
 
-    def disconnect(self, *_args) -> None:  # noqa: D401 - 与 Qt signal 同形
+    def disconnect(self, callback) -> None:  # noqa: D401 - 与 Qt signal 同形
         try:
-            self._widget.question_control_unsubscribe(self._callback)
+            self._widget.question_control_unsubscribe(callback)
         except Exception:  # noqa: BLE001 - 窗口已销毁时静默
             pass
 
@@ -558,6 +561,12 @@ def _project_workdir(host: Any):
 
 
 # ──────────────────── 上下文 / 引擎 ────────────────────
+
+
+def _ui_icons(host: Any):
+    from app.utils.app_icon import AppIcon
+
+    return AppIcon
 
 
 def _theme_read(host: Any):
@@ -2146,6 +2155,7 @@ def register(registry) -> None:
     reg.register("storage.db", _storage_db, surface="ui", owner="core:ui")
     # 上下文 / 引擎
     reg.register("theme.read", _theme_read, surface="ui", owner="core:ui")
+    reg.register("ui.icons", _ui_icons, surface="ui", owner="core:ui")
     reg.register("engine.stack", _engine_stack, surface="ui", owner="core:ui")
     reg.register("engine.session", _engine_session, surface="ui", owner="core:ui")
     reg.register(

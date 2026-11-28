@@ -23,7 +23,7 @@ macOS: AVFoundation）。同一份素材能不能播取决于那台机器装了�
 [PERF] 解码移出主线程（2026-11-09）：WebP 单帧解码实测 1600x900 约 4.8ms，
 15fps 下占主线程 7.2%。改为后台线程预解码到小容量帧队列，主线程 advance()
 只从队列取现成帧（微秒级）；队列空（刚启动/刚重建）时回退同步解码，
-行为与旧实现逐一等价。队列上限 3 帧，满则工作线程等待，内存最坏 +16.5MB。
+行为与旧实现逐一等价。最多预读 3 帧，按原帧与缩放图的合计大小调整深度。
 """
 from __future__ import annotations
 
@@ -34,6 +34,7 @@ import time
 import weakref
 from typing import Dict, List, Optional
 
+from PyQt5 import sip
 from PyQt5.QtCore import QObject, Qt, QRect, QTimer
 from PyQt5.QtGui import QImage, QImageReader
 
@@ -62,6 +63,7 @@ UNFOCUSED_TICK_MS = _TICK_MS * _UNFOCUSED_FACTOR
 # （弹窗/流式长帧），又不会把内存抬太多（1600x900 单帧 5.5MB → 最坏 +16.5MB）。
 # 队列满则工作线程等待，不会无限堆积。
 _PREFETCH_MAX = 3
+_PREFETCH_TARGET_BYTES = 24 * 1024 * 1024
 
 def _scale_frame_for(
     img: QImage, tw: int, th: int, fit: str, position: str
@@ -113,7 +115,7 @@ class AnimationSource:
         self.current: Optional[QImage] = None
         self.frame_count = 0
         self.failed = False
-        self._subscribers: List[weakref.ref] = []
+        self._subscribers: Dict[int, weakref.ref] = {}
         self._last_advance_ms = -(10**9)  # 首帧立即推进
         self._reader = QImageReader(path)
         self._reader.setAutoTransform(True)
@@ -168,10 +170,11 @@ class AnimationSource:
         """后台循环：队列有空位就解一帧。"""
         reader = QImageReader(self.path)
         reader.setAutoTransform(True)
+        depth = _PREFETCH_MAX
         while not self._prefetch_stop.is_set():
             with self._prefetch_lock:
-                while len(self._prefetch) >= _PREFETCH_MAX and not self._prefetch_stop.is_set():
-                    self._prefetch_space.wait(0.2)
+                while len(self._prefetch) >= depth and not self._prefetch_stop.is_set():
+                    self._prefetch_space.wait()
                 if self._prefetch_stop.is_set():
                     return
             img = reader.read()
@@ -197,15 +200,21 @@ class AnimationSource:
             if snapshot:
                 iw, ih = img.width(), img.height()
                 for key, (tw, th, fit, pos) in snapshot.items():
-                    if fit == "tile" or tw <= 0:
+                    size_key = (iw, ih, tw, th, fit, pos)
+                    if fit == "tile" or tw <= 0 or size_key in scaled_map:
                         continue
                     scaled = _scale_frame_for(img, tw, th, fit, pos)
                     if scaled is None or scaled.isNull():
                         continue
-                    scaled_map[(iw, ih, tw, th, fit, pos)] = scaled
+                    scaled_map[size_key] = scaled
                     if chosen_key is None:
                         chosen_key = key
+            # 以最近一帧估算下一帧开销。4K 或多个视图同时预缩放时仍保留一帧前瞻。
+            frame_bytes = img.sizeInBytes() + sum(frame.sizeInBytes() for frame in scaled_map.values())
+            depth = max(1, min(_PREFETCH_MAX, _PREFETCH_TARGET_BYTES // frame_bytes))
             with self._prefetch_lock:
+                if self._prefetch_stop.is_set():
+                    return
                 self._prefetch.append((img, chosen_key, scaled_map))
 
     def _take_prefetched(self) -> Optional[QImage]:
@@ -214,8 +223,7 @@ class AnimationSource:
             if not self._prefetch:
                 return None
             item = self._prefetch.popleft()
-            if len(self._prefetch) < _PREFETCH_MAX:
-                self._prefetch_space.notify()
+            self._prefetch_space.notify()
             return item
 
     def stop_prefetch(self) -> None:
@@ -279,19 +287,23 @@ class AnimationSource:
             self._geometries.pop(key, None)
 
     def subscribe(self, layer) -> None:
-        if not any(r() is layer for r in self._subscribers):
-            self._subscribers.append(weakref.ref(layer))
+        self._subscribers[id(layer)] = weakref.ref(layer)
 
     def unsubscribe(self, layer) -> None:
-        self._subscribers = [r for r in self._subscribers if r() not in (None, layer)]
+        self._subscribers.pop(id(layer), None)
+        self.unregister_geometry(id(layer))
 
-    def notify(self) -> None:
-        alive: List[weakref.ref] = []
-        for ref in self._subscribers:
+    def _live_layers(self):
+        for key, ref in tuple(self._subscribers.items()):
             layer = ref()
-            if layer is None:
+            if layer is None or (isinstance(layer, QObject) and sip.isdeleted(layer)):
+                self._subscribers.pop(key, None)
+                self.unregister_geometry(key)
                 continue
-            alive.append(ref)
+            yield layer
+
+    def notify(self, layers=None) -> None:
+        for layer in self._live_layers() if layers is None else layers:
             try:
                 # perf: O1 有预缩放成品才带第二参下发，保持旧单参调用形态
                 # 兼容（空 map/None 等效，订阅者无几何注册时不新增签名负担）
@@ -302,10 +314,9 @@ class AnimationSource:
                     layer.on_animation_frame(self.current)
             except RuntimeError:
                 continue  # C++ 对象已销毁
-        self._subscribers = alive
 
     def has_subscribers(self) -> bool:
-        return any(r() is not None for r in self._subscribers)
+        return next(self._live_layers(), None) is not None
 
 class AnimationRegistry:
     """路径 → AnimationSource（同素材多区域共享解码）"""
@@ -383,19 +394,25 @@ class BackgroundClock(QObject):
         now_ms = int(time.monotonic() * 1000)
         alive: List[weakref.ref] = []
         any_visible = False
+        orphaned = False
         for ref in self._sources:
             src = ref()
-            if src is None:
+            if src is None or src._prefetch_stop.is_set():
                 continue
             alive.append(ref)
-            if not src.has_subscribers():
-                continue
-            if not self._source_visible(src):
+            visible = [layer for layer in src._live_layers() if self._layer_visible(layer)]
+            if not visible:
+                orphaned |= not src._subscribers
                 continue
             any_visible = True
             if src.advance(now_ms):
-                src.notify()
+                src.notify(visible)
         self._sources = alive
+        if orphaned and AnimationRegistry._instance is not None:
+            AnimationRegistry._instance.prune()
+        if not alive:
+            self._timer.stop()
+            return
         # 三档节流：可见且有焦点→全速抽帧；可见但失焦→降帧 3 倍（壁纸是
         # 氛围层，用户在看别的窗口时没必要全速重绘整窗）；全部不可见→降频
         # 轮询。不停表：停表后无人能重启，窗口恢复可见后动画就永远卡在
@@ -422,26 +439,11 @@ class BackgroundClock(QObject):
             return True  # 查询失败按有焦点处理，宁可全速不可卡帧
 
     @staticmethod
-    def _source_visible(source: AnimationSource) -> bool:
-        """源是否有可见订阅者（隐藏窗口/最小化的区域不推进解码）"""
-        for ref in source._subscribers:
-            layer = ref()
-            if layer is None:
-                continue
-            try:
-                if not layer.isVisible():
-                    continue
-            except RuntimeError:
-                continue
-            win = layer.window()
-            if win is not None:
-                try:
-                    if win.isMinimized():
-                        continue
-                except RuntimeError:
-                    pass
-            return True
-        return False
+    def _layer_visible(layer) -> bool:
+        if not layer.isVisible():
+            return False
+        win = layer.window()
+        return win is None or not win.isMinimized()
 
     def stop(self) -> None:
         self._timer.stop()
@@ -452,4 +454,6 @@ def reset_for_tests() -> None:
     if clock is not None:
         clock.stop()
         clock._sources = []
-    AnimationRegistry._instance = None
+    if AnimationRegistry._instance is not None:
+        AnimationRegistry._instance.clear()
+        AnimationRegistry._instance = None

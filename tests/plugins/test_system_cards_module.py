@@ -22,8 +22,6 @@ pytest.importorskip("PyQt5.QtWidgets")
 _CONTRACT_ATTRS = (
     "_share_card",
     "_share_card_content",
-    "_history_questions_card",
-    "_history_questions_card_content",
     "_memory_card",
     "_memory_card_popup",
     "_model_config_card",

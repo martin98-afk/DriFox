@@ -71,6 +71,19 @@ def test_space_confirm_keeps_literal_when_path_missing(qapp, tmp_path):
     assert confirmed == []
 
 
+def test_space_confirm_after_multiline_text_with_non_bmp_characters(qapp, tmp_path):
+    target = tmp_path / "示例🌲.py"
+    target.touch()
+    editor = _editor_with_root(qapp, str(tmp_path))
+    confirmed = []
+    editor.fileMentionConfirmed.connect(confirmed.append)
+    _type(editor, "😀上一段 @old\n😀 正文 @示例🌲.py  ")
+    editor._on_at_trigger_check()
+    assert confirmed == [str(target)]
+    assert editor.toPlainText() == "😀上一段 @old\n😀 正文 [[示例🌲.py]]  "
+    assert editor.textCursor().atEnd()
+
+
 def test_space_confirm_handles_directory_with_trailing_slash(qapp, tmp_path):
     (tmp_path / "pkg").mkdir()
     editor = _editor_with_root(qapp, str(tmp_path))

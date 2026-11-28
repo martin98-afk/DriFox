@@ -58,6 +58,7 @@ class GlobalCardController:
         # 若不加保护，会在 _settings_popup 赋值前递归构建多张设置卡（P024：重叠显示）。
         self._settings_popup_building = False
         self._provider_edit_card = None
+        self._return_to_settings_after_picker = True
         self._provider_picker_card = None
         self._provider_picker_popup = None
         # ── 服务商卡导航状态（卡内面包屑，单卡双视图）──
@@ -189,7 +190,8 @@ class GlobalCardController:
         self._card_manager.hide_card(card_id, GLOBAL_WINDOW_ID)
         if card_id in ("provider_picker", "provider_edit"):
             self._release_provider_edit_form()
-        self._card_manager.show_card("settings", GLOBAL_WINDOW_ID)
+        if card_id != "provider_picker" or self._return_to_settings_after_picker:
+            self._card_manager.show_card("settings", GLOBAL_WINDOW_ID)
 
     def _release_provider_edit_form(self):
         """编辑结束即释放一次性表单；下次进入原本就会重新构建。"""
@@ -313,6 +315,21 @@ class GlobalCardController:
             self._settings_popup.raise_()
             self._settings_popup.activateWindow()
 
+    def open_gitee_settings(self):
+        """从引导页进入同一个账户卡，复用仓库选择、授权中止与结果提示。"""
+        self.open_settings("provider")
+        popup = self._settings_popup
+        popup._page_widgets["provider"].ensureWidgetVisible(popup.giteeCard)
+        if not self.cfg.gitee_bound.value:
+            popup.giteeCard._on_bind()
+
+    def open_secret_settings(self):
+        self.open_settings("provider")
+        popup = self._settings_popup
+        card = popup.secretModeCard
+        card.setExpand(True)
+        popup._page_widgets["provider"].ensureWidgetVisible(card.card)
+
     def on_settings_config_changed(self):
         """外观设置变更 → 刷新所有窗口的模型列表 + 批量主题刷新"""
 
@@ -378,8 +395,9 @@ class GlobalCardController:
         )
         self._global_card_container.add_card("provider_picker", self._provider_picker_card)
 
-    def _show_provider_picker_card(self):
+    def _show_provider_picker_card(self, *, return_to_settings: bool = True):
         """显示服务商卡（卡片墙视图；添加服务商的统一入口）"""
+        self._return_to_settings_after_picker = return_to_settings
         self._ensure_provider_picker_card()
         self._provider_view = "picker"
         self._card_manager.hide_card("settings", GLOBAL_WINDOW_ID)
@@ -529,6 +547,7 @@ class GlobalCardController:
         display_name = provider_info.get("name", "") or provider_info.get("provider_name", config_id)
         if "provider_name" not in provider_info:
             provider_info["provider_name"] = display_name
+        self._return_to_settings_after_picker = True
         self._enter_provider_edit_view(
             origin="settings",
             title=f"编辑: {display_name}",

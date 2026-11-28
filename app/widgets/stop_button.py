@@ -15,7 +15,8 @@ from PyQt5.QtGui import (
     QRadialGradient,
 )
 from PyQt5.QtWidgets import QWidget
-from qfluentwidgets import FluentIcon
+from app.utils.app_icon import AppIcon
+from app.utils.design_tokens import readable_text_on
 
 from app.utils.motion import LoopTimer
 
@@ -26,7 +27,7 @@ class SendStopButton(QWidget):
     一个控件替代 TransparentToolButton + AnimatedStopButton 两个按钮。
 
     两种模式：
-    - 发送模式 (MODE_SEND)：金色渐变圆底 + FluentIcon.SEND 图标
+    - 发送模式 (MODE_SEND)：金色渐变圆底 + AppIcon.SEND 图标
     - 停止模式 (MODE_STOP)：金色渐变圆底 + 缩放呼吸方块
     """
 
@@ -68,6 +69,7 @@ class SendStopButton(QWidget):
 
         # 颜色
         self._square_color = QColor(self.SQUARE_COLOR)
+        self._send_icons: dict[str, QIcon] = {}
 
         # 注册主题刷新
         self._register_theme()
@@ -86,7 +88,7 @@ class SendStopButton(QWidget):
     def refresh_theme(self):
         """主题切换时清除图标缓存"""
         self._square_color = QColor(self.SQUARE_COLOR)
-        self._send_icon_cache = None
+        self._send_icons.clear()
         self.update()
 
     # ── 模式切换 ──────────────────────────────────────
@@ -175,12 +177,12 @@ class SendStopButton(QWidget):
         # _get_bg_colors 中已 Colors.refresh()，这里直接读缓存值
         from app.utils.design_tokens import Colors as _C
 
+        start_color, end_color = self._get_bg_colors()
         btn_r = min(_C.SEND_BTN_RADIUS, w / 2, h / 2)
 
         bg_path = QPainterPath()
         bg_path.addRoundedRect(0, 0, w, h, btn_r, btn_r)
 
-        start_color, end_color = self._get_bg_colors()
         if end_color is None:
             painter.fillPath(bg_path, QColor(start_color))
         else:
@@ -191,16 +193,23 @@ class SendStopButton(QWidget):
 
         # 2. 根据模式绘制内容
         if self._mode == self.MODE_SEND:
-            self._draw_send_icon(painter, center_x, center_y)
+            mid = QColor(start_color)
+            if end_color:
+                end = QColor(end_color)
+                mid.setRgb((mid.red() + end.red()) // 2, (mid.green() + end.green()) // 2, (mid.blue() + end.blue()) // 2)
+            self._draw_send_icon(painter, center_x, center_y, readable_text_on(mid.name(), "#ffffff", 4.5))
         else:
             self._draw_stop_square(painter, center_x, center_y)
 
         painter.end()
 
-    def _draw_send_icon(self, painter: QPainter, cx: float, cy: float):
-        """绘制 FluentIcon.SEND 发送图标（透明度由 paintEvent 统一控制）"""
-        icon = FluentIcon.SEND.icon()
-        icon_size = 18
+    def _draw_send_icon(self, painter: QPainter, cx: float, cy: float, foreground: str):
+        """绘制 AppIcon.SEND 发送图标（透明度由 paintEvent 统一控制）"""
+        icon = self._send_icons.get(foreground)
+        if icon is None:
+            icon = AppIcon.SEND.icon(color=QColor(foreground))
+            self._send_icons[foreground] = icon
+        icon_size = 23
         x, y = int(cx - icon_size / 2), int(cy - icon_size / 2)
         icon.paint(painter, x, y, icon_size, icon_size, Qt.AlignCenter, QIcon.Normal)
 

@@ -82,6 +82,15 @@ def test_host_raw_only_when_declared(monkeypatch):
     assert pool["host.raw"] is host
 
 
+def test_theme_icons_require_declaration(monkeypatch):
+    from app.utils.app_icon import AppIcon
+
+    allowed, _ = _build(monkeypatch, {"ui.icons"}, _Tm())
+    denied, _ = _build(monkeypatch, set(), _Tm())
+    assert allowed["ui.icons"].SEND is AppIcon.SEND
+    assert "ui.icons" not in denied
+
+
 def test_compat_period_grants_all_registered(monkeypatch):
     tm = _Tm()
     pool, _ = _build(monkeypatch, None, tm)

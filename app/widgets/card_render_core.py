@@ -237,25 +237,6 @@ _PYGMENTS_CSS_CACHE: dict = {}
 # 生成时带上 pre 才能同时命中 pre 自身（前景/背景）与内部 span。
 _PYGMENTS_CSS_SCOPE = ".code-content pre"
 
-# ======== 流式态单色 tint（替代原彩虹循环色板）========
-# 旧 _RAINBOW_NORMAL 为 10 色高饱和绕卡循环，色相跳变（青→紫→粉→橙→绿）
-# 过于抢眼；现流式指示统一走单色（accent / 警示红），运动只保留底部光块。
-_STREAM_TINT_RETRY = "#ff2222"
-
-# ======== 流式底部光块运动参数 ========
-# 单程时长(ms)：往返一趟 = 2 × _STREAM_BAND_SWEEP_MS
-_STREAM_BAND_SWEEP_MS = 1600.0
-# 单拍最大推进(ms)：主线程被内容渲染占满时 Qt 定时器会延迟触发，若按真实 dt
-# 全额推进，恢复后光块会一次瞬移到新位置（观感「跳变」）。钳到一帧多的量，
-# 掉帧只表现为动画变慢，不瞬移、也不在恢复时集中补帧（观感「卡住后猛冲」）。
-_STREAM_BAND_MAX_DT_MS = 100.0
-_STREAM_BAND_H = 3  # 光块高度(px)
-_STREAM_BAND_BOTTOM = 3  # 光块距卡片底边(px)
-# 动画帧脏区在光块上下的纵向余量(px)。必须让脏区保持在内壁描边**之上**：
-# 脏区一旦覆盖底部描边，重绘会先擦掉该带内的描边、而窄带重绘只画光块，
-# 描边就在「整卡重绘画出」与「动画帧擦掉」之间反复 —— 表现为下边框闪烁。
-_STREAM_BAND_REPAINT_PAD = 1
-
 # ===== 性能缓存：图标前缀和字号（避免每块代码都查主题和计算字号） =====
 # ⚠️ 默认值按「深色」写（`qrc:/icons` 是白图标）；浅色主题下必须由
 # `_update_icon_prefix()` 换成 `qrc:/icons_light`，**且只能经 `current_icon_prefix()`
@@ -532,6 +513,13 @@ STREAM_HEIGHT_TRACK_EPSILON = 2
 # 不存在「常开空转」问题（那是 MIN_DELTA 存在的历史原因，已被 epsilon
 # 停拍机制覆盖）。
 STREAM_HEIGHT_ANIM_MIN_DELTA = 2
+# 落后续隙（px）：目标比当前 viewer 高出这么多时**直接对齐**，不再走插值追踪。
+# 背景（用户可见）：大量正文流式输出时，JS 上报本身已是 80ms 级台阶，追踪再
+# 用 50ms/84% 逼近 → 卡片高度持续落后内容 1~2 拍（约 20~40px）。落后期间正文
+# 底部顶在 viewer 视口边缘（被裁）或被裁后突然蹦出 = 「与气泡高度不同步 / 局部
+# 空白」的体感来源。跨过一行的余隙就直接 snap，把「落后窗口」从 ~150ms 压到
+# 一拍；小步增长（< 该值）仍走追踪，保持连续生长的观感。
+STREAM_HEIGHT_SNAP_GAP_PX = 32
 # 结束态（FINISH 窗口）追踪的逼近比例：比流式更缓——结束态的高度变化
 # 与页面内 CSS 过渡（200ms）/ FLIP（220ms）同量级，追踪太快会"Qt 侧先到、
 # 页面还在动"的两段感，即丝绸尾音。[T34] 0.28 → 0.12：按 τ 不变重算
@@ -812,6 +800,15 @@ def _plugin_fence_placeholder(info, code_content_raw: str) -> str:
     return _CHART_SKELETON_HTML
 
 
+def _chart_failure(message: str, source: str) -> str:
+    # 已识别为图表的围栏不再落入普通代码路径；源码仍可通过复制按钮取回。
+    raw = _unescape_html(source)
+    payload = base64.b64encode(raw.encode('utf-8')).decode('ascii')
+    return (f'<div class="chart-failure" role="note"><span>{escape(message)}</span>'
+            f'<button type="button" class="code-btn" data-action="copy" data-copy="{payload}" '
+            'aria-label="复制图表源码" data-tooltip="复制图表源码"><span class="ci ci-copy"></span></button></div>')
+
+
 def _render_render_fence(lang: str, code_content_raw: str) -> Optional[str]:
     """渲染型 fence → 图表/卡片容器 HTML；非渲染型返回 None。
 
@@ -827,7 +824,10 @@ def _render_render_fence(lang: str, code_content_raw: str) -> Optional[str]:
     # <lang>-streaming。这里必须在此之前拦截：残缺 JSON 若照常包成
     # .echarts-container，其 b64 每轮随内容增长而变化 → vault key 每轮都不同，
     # 节点被反复塞进 vault 迅速膨胀（多图白屏的次因）。骨架不入 vault、不 init。
-    if lang in ("echarts-streaming", "mermaid-streaming", "html-streaming", "widget-streaming"):
+    lang = lang.lower()
+    if lang.endswith('-incomplete') and _is_render_fence_lang(lang[:-11]):
+        return _chart_failure('内容未显示：输出结束时，渲染块尚未闭合。', code_content_raw)
+    if lang in ("echarts-streaming", "mermaid-streaming", "html-streaming", "widget-streaming", "svg-streaming"):
         return _CHART_SKELETON_HTML
     # 插件注册的 fence 在流式期同样降级为占位：半截源码交给 render_func
     # 必然产出残缺节点，且内容每轮变化会让产物反复变更、高度抖动。
@@ -851,16 +851,16 @@ def _render_render_fence(lang: str, code_content_raw: str) -> Optional[str]:
         try:
             # 解码 HTML 实体（&quot; → " 等），确保 JSON 可解析
             json_text = _unescape_html(code_content_raw)
-            json.loads(json_text)  # 校验：非法 JSON 降级为普通代码块，不留空洞容器
+            if not isinstance(json.loads(json_text), dict):
+                return _chart_failure('图表未显示：配置必须是 JSON 对象。', code_content_raw)
             # base64 编码防止 HTML 属性转义问题
             b64_json = base64.b64encode(json_text.encode("utf-8")).decode("ascii")
             chart_id = "echart-" + hashlib.sha1(json_text.encode("utf-8")).hexdigest()[:12]
             return f'''
                 <div id="{chart_id}" class="echarts-container" data-echarts-json="{b64_json}" style="width: 100%; height: 400px; margin: 12px 0; border-radius: 10px; overflow: hidden;"></div>
                 '''
-        except Exception:
-            # JSON 解析失败，降级为普通代码块
-            return None
+        except (ValueError, TypeError, RecursionError):
+            return _chart_failure('图表未显示：配置不是有效的 JSON。', code_content_raw)
 
     # ===== Mermaid 代码块：渲染为矢量图表 =====
     # 这里只产出占位容器，真正的 vendor（polyfill + mermaid 10.9.1）
@@ -879,7 +879,7 @@ def _render_render_fence(lang: str, code_content_raw: str) -> Optional[str]:
                 )
         except Exception:
             pass
-        return None
+        return _chart_failure('流程图未显示：图表描述为空或无法读取。', code_content_raw)
 
     # ===== SVG 代码块：透传 raw HTML，浏览器直渲 =====
     # 协议上 SVG 应内联正文（visualization skill），但模型习惯性输出 ```svg 围栏，
@@ -1189,7 +1189,7 @@ def _escape_bare_hash_headers(md_text: str) -> str:
     return "\n".join(out)
 
 
-def _sanitize_incomplete_markdown(md_text: str) -> str:
+def _sanitize_incomplete_markdown(md_text: str, *, final: bool = False) -> str:
     if not md_text:
         return ""
     # 裸井号编号转义：`#56 …` 会被 Python-Markdown 当成 ATX 标题（它不要求
@@ -1232,11 +1232,11 @@ def _sanitize_incomplete_markdown(md_text: str) -> str:
         stripped = lines[fence_open_line].strip()
         lang_token = stripped[3:].strip()
         if (
-            lang_token.lower() in ("mermaid", "echarts", "html", "widget")
+            lang_token.lower() in ("mermaid", "echarts", "html", "widget", "svg")
             or _get_plugin_fence_renderer(lang_token.lower()) is not None
         ):
             lines[fence_open_line] = lines[fence_open_line].replace(
-                lang_token, f"{lang_token}-streaming", 1
+                lang_token, f"{lang_token}-{'incomplete' if final else 'streaming'}", 1
             )
             md_text = "\n".join(lines)
         md_text += "\n" + fence_marker
@@ -1309,11 +1309,6 @@ def _get_think_block_styles() -> str:
     return f"{get_font_family_css()} font-size: {scale_font_size(13)}px;"
 
 
-# 预览采样目标长度：未达此值则继续拼接下一句（上限仍是 max_length）
-_PREVIEW_TARGET_LEN: int = 60
-# 结论标记之后的正文最小长度：短于此说明标记紧贴文末，不构成摘要，退回开头采样
-_PREVIEW_MIN_CONCLUSION_BODY: int = 8
-
 # Responses 思考摘要的小节标题：summary_text 首行的 `**标题**`。
 # 服务端没有独立 title 字段（事件只带 delta / summary_index），ChatGPT 与
 # Codex 客户端那个分段标题就是这一行加粗文本（2026-11-07 实测 OpenCode Go）。
@@ -1335,118 +1330,63 @@ def _split_think_title(content: str) -> tuple:
     return match.group(1).strip(), (rest.lstrip("\n") if sep else "")
 
 
-def _get_think_preview(content: str, max_length: int = 160) -> str:
-    """生成思考内容折叠框的预览文本
-
-    策略（连贯优先）：
-      1. 结论标记 → 展示从该标记起的连续内容（取文中**最早**出现的标记）
-      2. 无结论（或结论片段过短）→ 从开头取连续句，拼到 60 字或 max_length 为止
-      3. 末尾未覆盖全文时追加省略号
-
-    刻意不做跳跃采样：预览是单行 ellipsis 显示，中间插 " ... " 的三段式
-    采样读起来是三句不相干的话，信息量低于等长的连续开头片段。
-    """
-    if not content:
-        return ""
-
-    text = content.strip()
-    if not text:
-        return ""
-
-    # 预览单行显示（CSS nowrap），换行塌成空格
-    flat = text.replace("\n", " ")
-    norm_len = len(flat.replace(" ", ""))
-
-    def _is_full(preview_len: int) -> bool:
-        """预览是否已覆盖完整内容（忽略空白、换行差异）"""
-        return preview_len >= norm_len
-
-    def _finish(preview: str) -> str:
-        """收尾：超长则从句边界回退截断，未覆盖全文则补省略号"""
-        if len(preview) > max_length:
-            for i in range(max_length, 0, -1):
-                if preview[i - 1] in "。！？.!?；;":
-                    preview = preview[:i]
-                    break
-            else:
-                preview = preview[:max_length]
-        return preview if _is_full(len(preview)) else preview + "..."
-
-    # ── 策略1: 结论优先（按文中最早出现的标记，而非 markers 元组顺序）──
-    best_idx = -1
-    best_marker = ""
-    for marker in _CONCLUSION_MARKERS:
-        idx = flat.find(marker)
-        if idx != -1 and (best_idx == -1 or idx < best_idx):
-            best_idx, best_marker = idx, marker
-    if best_idx != -1:
-        conclusion = flat[best_idx:].strip()
-        # 标记后必须有实质内容才认（排除「…最终。」这类紧贴文末的退化命中）
-        if len(conclusion) - len(best_marker) >= _PREVIEW_MIN_CONCLUSION_BODY:
-            return _finish(conclusion)
-
-    # ── 策略2: 从开头取连续句 ──
-    # 中文按句末标点切；英文为主时按「标点 + 空格 + 大写」切，避免 1. / U.S. / v2.5
-    # 被误判成句子边界
-    cjk_count = sum(1 for c in flat if "\u4e00" <= c <= "\u9fff")
-    is_english_heavy = cjk_count < len(flat) * 0.3
-    if is_english_heavy:
-        sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+(?=[A-Z])", flat) if s.strip()]
-    else:
-        sentences = []
-        current = ""
-        for ch in flat:
-            current += ch
-            if ch in "。！？.!?；;":
-                if current.strip():
-                    sentences.append(current.strip())
-                current = ""
-        if current.strip():
-            sentences.append(current.strip())
-
-    if not sentences:
-        # 无句边界（纯短语 / 列表式思考）：直接按字符截断
-        if len(flat) <= max_length:
-            return flat
-        for i in range(max_length, 0, -1):
-            if flat[i - 1] in " ，,、；;：:.":
-                return flat[:i].rstrip(" ，,、.") + "..."
-        return flat[:max_length] + "..."
-
-    preview = ""
-    for s in sentences:
-        # 英文句子的分隔符（空格）已被 strip 吃掉，拼回来否则 "a.B" 粘连
-        preview += (s if not preview else (s if not is_english_heavy else " " + s))
-        if len(preview) >= _PREVIEW_TARGET_LEN or len(preview) >= max_length:
-            break
-
-    return _finish(preview)
-
-
-# 结论标记（中英文，优先级最高）
-_CONCLUSION_MARKERS = (
-    "因此",
-    "所以",
-    "综上",
-    "综上所述",
-    "总而言之",
-    "总的来说",
-    "建议",
-    "推荐",
-    "结论是",
-    "答案是",
-    "总结一下",
-    "也就是说",
-    "最终",
-    "therefore",
-    "in conclusion",
-    "overall",
-    "the answer is",
-    "the solution is",
-    "i recommend",
-    "i suggest",
-    "so the answer",
+# 按句评估；英文句点后需有空白，保留文件名和版本号中的点。
+_THINK_SENTENCE_BREAK = re.compile(r"(?<=[。！？])(?=[^。！？])|(?<=[!?])[^\S\n]+|(?<=\.)[^\S\n]+(?=[A-Z])|\n+")
+_THINK_LIST_PREFIX = re.compile(r"^[^\S\n]*(?:[-*+]|\d{1,9}[.)])(?:[^\S\n]+|$)", re.M)
+_THINK_WORD = re.compile(r"[^\W_]")
+_THINK_FINDING = re.compile(
+    r"根因(?:是|在|为|[：:])|原因(?:是|在于|[：:])|已(?:经)?(?:确认|定位|验证|修复)|"
+    r"结论(?:是|为|[：:])|答案(?:是|为|[：:])|问题(?:出在|在于)|结果(?:显示|表明)|"
+    r"\b(?:root cause|the (?:cause|answer|solution) is|confirmed that|turns out|in conclusion)\b",
+    re.I,
 )
+_THINK_ACTION = re.compile(
+    r"^(?:因此|所以|综上|最终|建议|推荐|下一步|接下来|决定|改为|采用|"
+    r"(?:therefore|so|overall|next|instead|i recommend|we should)\b)",
+    re.I,
+)
+_THINK_TENTATIVE = re.compile(
+    r"^(?:如果|假如|假设|也许|可能|(?:首先|先)(?:看|分析|检查|确认)|让我|我需要先|用户(?:希望|想要)|"
+    r"(?:if|maybe|perhaps|let me|i need to|the user wants)\b)",
+    re.I,
+)
+
+
+def _think_sentence_rank(sentence: str) -> int:
+    if sentence.endswith(("?", "？", ":", "：")) or _THINK_TENTATIVE.match(sentence):
+        return -1
+    if _THINK_FINDING.search(sentence):
+        return 2
+    if _THINK_ACTION.match(sentence):
+        return 1
+    return 0
+
+
+def _get_think_preview(content: str, max_length: int = 160) -> str:
+    """摘出一句原文，优先结论或发现，其次是决定或下一步。"""
+    if not content or max_length <= 0:
+        return ""
+
+    best = ""
+    best_rank = -2
+    prose = _CODE_BLOCK_REMOVE_PATTERN.sub("\n", content) if "```" in content else content
+    # 纯代码块仍可摘出一行代码，跳过围栏和语言名；列表编号不能成为单独的句子。
+    if not prose.strip():
+        prose = "\n".join(line for line in content.splitlines() if not line.lstrip().startswith("```"))
+    for raw in _THINK_SENTENCE_BREAK.split(_THINK_LIST_PREFIX.sub("", prose)):
+        sentence = " ".join(raw.split())
+        if not _THINK_WORD.search(sentence):
+            continue
+        rank = _think_sentence_rank(sentence)
+        # 多次修订时取较晚的发现或决定；无明确信号时保留首个陈述。
+        if rank > best_rank or (rank == best_rank and rank > 0):
+            best, best_rank = sentence, rank
+
+    if len(best) <= max_length:
+        return best
+    suffix = "..."[:max_length]
+    prefix = best[: max_length - len(suffix)]
+    return prefix.rstrip() + suffix
 
 
 # ★ 着色用 #RRGGBB + stroke-opacity：QtSvg（QSvgRenderer）不支持 CSS rgba() 函数——
@@ -1598,7 +1538,7 @@ def _render_tool_streaming_block(
             <span style="position:relative;display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;flex:0 0 auto;">
                 {icon_html}
             </span>
-            <span style="white-space: nowrap; flex: 0 0 auto; color: {title_color}; font-size: {scale_font_size(13)}px; font-weight: 500; line-height: 22px;">{escape(cn_name)}</span>
+            <span style="white-space: nowrap; flex: 0 0 auto; margin-left: 6px; color: {title_color}; font-size: {scale_font_size(13)}px; font-weight: 500; line-height: 22px;">{escape(cn_name)}</span>
             {spinner_html}
         </span>
         <span class="tool-streaming-preview" style="flex: 0 1 auto; min-width: 0; text-align: left; color: var(--text-secondary); font-size: {scale_font_size(11)}px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-left: 12px;">
@@ -1619,33 +1559,29 @@ def _render_think_block(content: str, completed: bool = True, compact: bool = Fa
         # Responses 摘要自带小节标题（首行 **标题**）：标题进 summary 行、正文去掉该行，
         # 避免展开后重复一行带星号的标题。无标题时回到旧行为（预览采样）。
         think_title, think_body = _split_think_title(content)
+
+        # ── 简洁模式：纯文本行，不走折叠框（避免 save/restore 导致的消失→重现闪烁）──
+        # 带标题的摘要同时显示正文摘句。
+        if compact:
+            title = think_title if _THINK_WORD.search(think_title) else ""
+            sample = _get_think_preview(think_body)
+            preview = " · ".join(part for part in (title, sample) if part) or "思考已结束"
+            label = escape(sample or preview)
+            if title:
+                label = f"<strong>{escape(title)}</strong>" + (f" · {escape(sample)}" if sample else "")
+            block_seed = f"{content}|1"
+            block_key = "think-" + hashlib.sha1(block_seed.encode("utf-8")).hexdigest()[:12]
+            return (
+                f'<div class="think-compact" data-block-key="{block_key}"{_flip_attr}>'
+                f'{_get_think_icon_html(scale_icon_size(14))}'
+                f'<span class="think-preview-text" title="{escape(preview)}">{label}</span></div>'
+            )
+
+        # ── 非简洁模式：完整折叠框UI（图标标签 + 预览 + 可展开全文）──
         body_source = think_body or content
         think_icon = _get_think_icon_html()
         status_text = f'<span class="think-bulb">{think_icon}</span>'
         font_style = _get_think_block_styles()
-
-        # ── 简洁模式：纯文本行，不走折叠框（避免 save/restore 导致的消失→重现闪烁）──
-        # 带标题特例（Responses API）必须拼「标题 · 正文片段」：单行形态正文无处可见，
-        # 只显示标题会让思考内容彻底不可见（088c365e 回归）。无标题保持原预览采样。
-        if compact:
-            if think_title:
-                body_sample = _get_think_preview(think_body) if think_body.strip() else ""
-                preview = f"{think_title} · {body_sample}" if body_sample else think_title
-            else:
-                preview = _get_think_preview(content)
-            preview_weight = "500" if think_title else "normal"
-            block_seed = f"{content}|1"
-            block_key = "think-" + hashlib.sha1(block_seed.encode("utf-8")).hexdigest()[:12]
-            preview_right = (
-                f'<span style="color: var(--text-secondary); font-weight: {preview_weight}; margin-left: 8px; font-size: {scale_font_size(11)}px;">'
-                f"{escape(preview)}</span>"
-            )
-            return f"""<div class="think-compact" data-block-key="{block_key}"{_flip_attr} style="margin: 2px 0; padding: 4px 8px; {font_style} display: flex; align-items: baseline; gap: 6px; border-radius: 4px;">
-    <span style="white-space: nowrap; flex-shrink: 0;">{status_text}</span>
-    {preview_right}
-</div>"""
-
-        # ── 非简洁模式：完整折叠框UI（图标标签 + 预览 + 可展开全文）──
         # 标题进 summary 行、正文在展开区完整可见，preview 用标题（无标题退回采样）。
         preview = think_title or _get_think_preview(body_source)
         preview_weight = '500' if think_title else 'normal'
@@ -3913,7 +3849,27 @@ _SKELETON_CACHE_MAX = 48
 # 自动置底前按几何自愈、内层标志翻转即时上报、复用清理复位容器 expando。
 # 修「已滚到底但流式不再自动跟随」（内容在 scroll 事件派发前增长导致 atBottom
 # 判定失真，标志被误置为上滚阅读后永久卡住）。JS 资产变更，旧骨架缓存须失效。
-_SKELETON_CACHE_VERSION = 87
+# v88：简洁阅读样式和图表状态变更，池化前的旧骨架不可复用。
+# v89：简洁正文揭示加入视口反馈，换行后按真实布局上报。
+# v90：工具完成框头部与运行行同边距（图标右侧 6px 间距、行高 22px、左右 10px），
+# 流式块→完成块替换时标题不再左移/下移；参数行与结果区分隔线降为弱对比，
+# 折叠框内不再出现硬表格线叠围栏；完成块可点标题补 hover 浅底。CSS 资产变更，
+# 旧骨架缓存须失效。
+# v91：流式期折叠工具栏相对已落地的 WebView 视口对齐。
+# v92：向 Qt 同步底部工具区的实际显隐，用于流式表面限高。
+# v93：恢复图表占位柱条和扫光；长正文不按聊天区一屏截高。
+# v94：简洁模式的原位分组按钮与有序块布局。
+# v95：展示方式按消息绑定，摘要样式由系统插件提供。
+# v96：摘要文字独立于失败计数，鼠标和键盘焦点分离。
+# v97：简洁摘要的内容高度过渡与中途反向。
+# v98：分组内容共享流式滚动窗口，完成后按自然高度展开。
+# v99：分组模式无旧工具页脚，不以延迟到达的 Qt 视口高度限制正文。
+# v100：已完成分组的标题带动作图标和右侧箭头。
+# v102：分组流式工具栏的跟随态加固——程序置底改深度令牌识别（_followGroupTail /
+# _progDepth，替代 _lastFollowTop 等值比较），scroll 判定容差 4px→24px，新一轮
+# 流式重置 _followTail，搬移/重排后补一次置底。修「没动滚轮，工具栏自己就不置底」。
+# v103：简洁思考预览按内容宽度排版，最多两行；原位更新保留图标和文字样式。
+_SKELETON_CACHE_VERSION = 103
 
 
 def _js_literal(value) -> str:
@@ -4127,7 +4083,8 @@ def _extract_closed_segments(md: str):
         - stable_md_len: 最后一个完整闭合段结束后的字符偏移
         - segments: 闭合段列表（完整段落/代码块 markdown 原文）
     """
-    if not md:
+    # 空行是唯一切段边界。长段落仍在增长时，可直接跳过协议标签扫描。
+    if not md or "\n\n" not in md:
         return 0, []
 
     # 🐛 起点防护：扫描起点可能位于未闭合 `<think>`/`<tool>` 块内部
@@ -4433,6 +4390,16 @@ _STREAMING_DOCK_CSS = """
                    流式期间工具/思考条目数量不可控，不限高会把正文一路顶出视口；
                    264px ≈ 9-10 行，常规工具序列可看到实时进度，且卡片总高不随
                    流式膨胀。 */
+                /* 只约束当前已落地的视口；scrollHeight 仍保留真实文档高度用于 Qt 上报。 */
+                .compact-reading body.streaming-dock.dock-collapsed-footer:not(.dfx-grouped) {
+                    max-height: min(100vh, var(--dfx-body-max-h, 3000px));
+                    box-sizing: border-box;
+                }
+                .compact-reading body.streaming-dock.dock-collapsed-footer:not(.dock-reading) #content-placeholder + #tool-section {
+                    position: sticky;
+                    bottom: 0;
+                    background-color: var(--bg);
+                }
                 body.streaming-dock #tool-content {
                     max-height: 264px;
                 }
@@ -4441,7 +4408,7 @@ _STREAMING_DOCK_CSS = """
                    可见内容，仍会占一段空白；判据由 reportHeight 维护
                    （body.cp-blank）：正文无可见文本且无图片/公式/表格等实体内容时
                    置位，有内容即摘除。 */
-                body.streaming-dock.cp-blank #content-placeholder {
+                body.streaming-dock.cp-blank:not(.dfx-grouped) #content-placeholder {
                     display: none;
                 }
 """
@@ -4502,7 +4469,9 @@ _STREAMING_DOCK_JS = """
 _RESET_CONTENT_FOR_REUSE_JS = """
                 (function () {
                     var c = document.getElementById('content-placeholder');
-                    if (c) { c.innerHTML = ''; c.removeAttribute('data-pending-break'); c.scrollTop = 0; }
+                    if (c) { c.innerHTML = ''; c.removeAttribute('data-pending-break'); c.scrollTop = 0;
+                        delete c._groupOverrides; delete c._currentGroups; }
+                    document.body.classList.remove('dfx-grouped');
                     var t = document.getElementById('tool-content');
                     if (t) { t.innerHTML = ''; t.scrollTop = 0; }
                     // 计数药丸复位：清空工具区不等于清空头部文本，不复位会让
@@ -4510,7 +4479,7 @@ _RESET_CONTENT_FOR_REUSE_JS = """
                     var _tsc = document.querySelector('#tool-separator > .ts-count');
                     if (_tsc) { _tsc.textContent = ''; _tsc.style.display = 'none'; }
                     var ts = document.getElementById('tool-section');
-                    if (ts) { ts.removeAttribute('data-collapsed'); ts.style.display = ''; }
+                    if (ts) { ts.removeAttribute('data-collapsed'); ts.style.display = 'none'; }
                     // 坞态/滚动跟随等易失标志复位（避免沿用上一张卡片的阅读状态）
                     document.body.classList.remove('streaming-dock');
                     // [T38] 空正文折叠标志同样复位：上一张卡可能停在 cp-blank，
@@ -5221,6 +5190,7 @@ _CONTENT_AUTOSCROLL_JS = """
                             var _growth = Math.max(0, _max - (el._downScrollBaseMax || 0));
                             if ((el.scrollHeight - el.scrollTop - el.clientHeight) < (_tol + _growth)) {
                                 el._userScrolledUp = false;
+                                _progScroll(el, el.scrollHeight);
                                 if (typeof reportHeightDebounced === 'function') reportHeightDebounced();
                                 else if (typeof reportHeight === 'function') reportHeight();
                                 return;
@@ -5260,6 +5230,7 @@ _CONTENT_AUTOSCROLL_JS = """
                             var _growth = Math.max(0, _max - (b._downScrollBaseMax || 0));
                             if ((b.scrollHeight - b.scrollTop - b.clientHeight) < (_tol + _growth)) {
                                 window._userScrolledWithin = false;
+                                b.scrollTop = b.scrollHeight;
                                 if (typeof reportHeightDebounced === 'function') reportHeightDebounced();
                                 return;
                             }
@@ -5449,11 +5420,9 @@ _CONTENT_AUTOSCROLL_JS = """
                 // _cp（坞态正文容器）停在旧位置，下一个 chunk 的 updateContent
                 // 又拉回底部 → 视口在「固定位置 ↔ 底部」往返抖动（图表卡片
                 // 滚轮来回跳的根因）。增高完成后立即补滚。
-                // 守卫：仅坞态流式生效；用户上滚阅读（_userScrolledUp）不拉底，
-                // 由 _autoScrollStreamingBody 内部判定；非流式（历史卡片懒渲染
-                // 图表）绝不滚动。
-                function _autoScrollAfterAsyncRender() {
-                    if (window._streamingActive && typeof _autoScrollStreamingBody === 'function') {
+                // 终帧之后仍可能有图表落高。只延续布局变化前的贴底位置。
+                function _autoScrollAfterAsyncRender(wasAtBottom) {
+                    if (window._streamingActive || wasAtBottom) {
                         _autoScrollStreamingBody();
                     }
                 }
@@ -5508,9 +5477,10 @@ _BODY_HEIGHT_CAP_JS = """
                     if (!h) return;
                     var prev = parseInt(f.getAttribute('data-dfx-h') || '0', 10) || 0;
                     if (Math.abs(h - prev) < 4) return;  // 4px 死区：抑制重排噪声
+                    var wasAtBottom = _dfxNearBottom(document.body);
                     f.setAttribute('data-dfx-h', String(h));
                     f.style.height = h + 'px';
-                    if (typeof _autoScrollAfterAsyncRender === 'function') _autoScrollAfterAsyncRender();
+                    _autoScrollAfterAsyncRender(wasAtBottom);
                     if (typeof reportHeightDebounced === 'function') reportHeightDebounced();
                 };
                 window._dfxSetResizing = function (on) {

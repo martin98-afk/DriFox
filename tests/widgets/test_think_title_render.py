@@ -7,7 +7,7 @@ summary_text 首行的 `**标题**`（ChatGPT / Codex 客户端同款）。渲�
 无标题形态（chat/completions 的 reasoning_content）必须保持旧行为。
 """
 
-from app.widgets.card_render_core import _render_think_block, _split_think_title
+from app.widgets.card_render_core import _get_think_preview, _render_think_block, _split_think_title
 
 
 def test_split_title_extracts_bold_first_line():
@@ -62,11 +62,11 @@ def test_render_compact_with_title_shows_title_plus_body_sample():
     content = "**Planning fresh news search**\n\nI see that the search results have been unreliable. So, I want to query fresh sources like Reuters."
     html = _render_think_block(content, completed=True, compact=True)
     assert "Planning fresh news search" in html, f"标题丢失: {html!r}"
-    assert "I see that" in html, f"正文片段丢失（单行只剩标题）: {html!r}"
+    assert "So, I want to query fresh sources like Reuters." in html, f"正文片段丢失（单行只剩标题）: {html!r}"
     assert "**" not in html, f"星号标题行泄漏: {html!r}"
 
-def test_render_compact_without_title_keeps_old_preview():
-    """无标题形态（chat/completions reasoning_content）：简洁模式保持原预览采样。"""
+def test_render_compact_without_title_shows_first_statement():
+    """无标题形态（chat/completions reasoning_content）：无结论标记时展示首个陈述。"""
     content = "核对一下状态：三个文件都是 staged。继续处理剩余改动。"
     html = _render_think_block(content, completed=True, compact=True)
     assert "核对一下状态" in html, f"预览采样丢失: {html!r}"
@@ -76,3 +76,45 @@ def test_render_compact_title_only_no_separator_tail():
     html = _render_think_block("**Plan**", completed=True, compact=True)
     assert "Plan" in html
     assert " · " not in html, f"空正文拼出悬空分隔符: {html!r}"
+
+
+def test_preview_prefers_confirmed_finding_over_early_suggestion_and_followup():
+    content = "所以先查缓存。已确认根因是连接池耗尽。下一步补回归测试。"
+    assert _get_think_preview(content) == "已确认根因是连接池耗尽。"
+
+
+def test_preview_keeps_negation_and_ignores_later_hypothesis():
+    content = "先看日志。最终不建议清空缓存。如果根因是网络，还需要再做验证。"
+    assert _get_think_preview(content) == "最终不建议清空缓存。"
+
+
+def test_preview_prefers_latest_finding_and_preserves_technical_names():
+    content = "The root cause may be DNS. Confirmed that api.py still loads v1.2. Next, add a test."
+    assert _get_think_preview(content) == "Confirmed that api.py still loads v1.2."
+
+
+def test_preview_skips_code_when_prose_is_available():
+    content = "先看日志。\n下一步检查连接池。\n```python\nreason = '根因是超时'\n```"
+    assert _get_think_preview(content) == "下一步检查连接池。"
+
+
+def test_preview_fallback_and_truncation():
+    assert _get_think_preview("让我看看。\n请求在第二次重试时超时。") == "请求在第二次重试时超时。"
+    assert _get_think_preview("一段很长的连续文本" * 20, max_length=8) == "一段很长的..."
+    assert _get_think_preview(" \n ") == ""
+
+
+def test_preview_skips_stray_closing_punctuation_and_numbered_list_markers():
+    assert _get_think_preview("先看近期的性能记录。\n）。\n下一批记录需要复核。") == "下一批记录需要复核。"
+    assert _get_think_preview("1.\n2. Check api.py for retries.") == "Check api.py for retries."
+
+
+def test_compact_preview_fallback_for_punctuation_and_code():
+    assert "思考已结束" in _render_think_block("）。", compact=True)
+    assert _get_think_preview("```python\nreturn value\n```") == "return value"
+
+
+def test_compact_preview_escapes_title_sample_and_tooltip():
+    html = _render_think_block('**<Plan>**\nUse "a" & "b".', compact=True)
+    assert "<strong>&lt;Plan&gt;</strong> · Use &quot;a&quot; &amp; &quot;b&quot;." in html
+    assert 'title="&lt;Plan&gt; · Use &quot;a&quot; &amp; &quot;b&quot;."' in html

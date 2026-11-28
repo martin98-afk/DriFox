@@ -231,6 +231,26 @@ class TestWelcomeTabBar:
         finally:
             card.deleteLater()
 
+    def test_open_plugin_body_rerenders_with_current_theme(self, _qt_app, monkeypatch):
+        from app.utils.theme_manager import theme_manager
+
+        registry = UIPluginRegistry.get_instance()
+        monkeypatch.setattr(registry, "_welcome_tabs", dict(registry._welcome_tabs))
+        registry.register_welcome_tab(
+            "test", "theme-page", "主题页", lambda ctx: "深色正文" if ctx["is_dark"] else "浅色正文"
+        )
+        card = _make_card(_qt_app)
+        try:
+            for light, expected in ((True, "浅色正文"), (False, "深色正文")):
+                monkeypatch.setattr(theme_manager, "is_light_theme", lambda: light)
+                if card._welcome_mode != "theme-page":
+                    card.set_welcome_mode("theme-page")
+                card.refresh_theme()
+                assert card._welcome_mode == "theme-page"
+                assert expected in card._pending_welcome_md
+        finally:
+            card.deleteLater()
+
     def test_switch_mode_syncs_highlight_without_animation(self, _qt_app):
         """静态路径（不经点击）切 mode 时高亮要跟着走"""
         UIPluginRegistry.get_instance().register_welcome_tab(

@@ -311,7 +311,7 @@ def test_thumb_closure_holds_scaled_only(ui_app, qtbot, tmp_path):
     host.layout().addWidget(card)
     card.show()
     card.set_image_attachments([str(png)])
-    qtbot.wait(300)
+    qtbot.waitUntil(lambda: not card._thumbnail_jobs)
 
     thumbs = [x for x in card._image_strip.findChildren(QLabel) if x.pixmap() is not None and not x.pixmap().isNull()]
     assert thumbs, "缩略图条未构建"
@@ -321,5 +321,52 @@ def test_thumb_closure_holds_scaled_only(ui_app, qtbot, tmp_path):
         held = [pm for pm in defaults if hasattr(pm, "width")]
         # 闭包捕获的是 (source, data_uri) 字符串——不得再持有任何 pixmap
         assert not held, f"点击闭包仍持有 pixmap（宽 {', '.join(str(p.width()) for p in held)}px）"
+
+
+@pytest.mark.parametrize("close_card", [False, True])
+def test_attachment_decode_keeps_ui_responsive(ui_app, qtbot, monkeypatch, tmp_path, close_card):
+    from threading import Event
+
+    from PyQt5.QtCore import Qt
+    from PyQt5.QtGui import QImage
+    from PyQt5.QtWidgets import QLabel, QLineEdit
+
+    from app.widgets import attachment_thumbnails
+    from app.widgets.message_card import MessageCard
+
+    entered, release = Event(), Event()
+    decoded = []
+
+    def decode(path, uri, dpr):
+        decoded.append(path)
+        entered.set()
+        assert release.wait(5)
+        image = QImage(80, 80, QImage.Format_RGB32)
+        image.fill(Qt.blue)
+        return image
+
+    monkeypatch.setattr(attachment_thumbnails, "_read_thumbnail", decode)
+    paths = [tmp_path / "a.png", tmp_path / "b.png"]
+    for path in paths:
+        path.touch()
+    host = _host(qtbot)
+    card = MessageCard("user", parent=host)
+    edit = QLineEdit(host)
+    host.layout().addWidget(card)
+    host.layout().addWidget(edit)
+    card.set_image_attachments([str(p) for p in paths])
+    try:
+        qtbot.waitUntil(entered.is_set)
+        qtbot.keyClicks(edit, "typing")
+        assert edit.text() == "typing"
+        if close_card:
+            card.close()
+    finally:
+        release.set()
+    qtbot.waitUntil(lambda: attachment_thumbnails._pool.activeThreadCount() == 0)
+    qtbot.waitUntil(lambda: not card._thumbnail_jobs)
+    tips = [w.toolTip() for w in card._image_strip.findChildren(QLabel)]
+    assert tips == ([] if close_card else ["a.png", "b.png"])
+    assert len(decoded) == (1 if close_card else 2)
 
 

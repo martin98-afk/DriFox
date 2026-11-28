@@ -20,6 +20,8 @@ _DEFAULT_ID = "openai_chat"
 class TransportRegistry:
     """协议传输器注册表：register 覆盖同名；resolve 按 id 取，无该 id 回退 openai_chat"""
 
+    reload_fields = ("_transports",)
+
     def __init__(self) -> None:
         self._transports: Dict[str, Tuple[Any, str]] = {}  # id -> (transport, source)
         self._lock = threading.Lock()

@@ -24,6 +24,8 @@ _SCOPE_DEFAULTS: Dict[str, str] = {
 
 
 class LoopPolicyRegistry:
+    reload_fields = ("_policies", "_active")
+
     def __init__(self) -> None:
         # policy_id -> (policy, source, scope)
         self._policies: Dict[str, Tuple[LoopPolicy, str, str]] = {}

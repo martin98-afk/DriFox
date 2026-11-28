@@ -20,11 +20,11 @@ from typing import Any, Dict, List, Optional
 
 from PyQt5.QtCore import QEvent, Qt, pyqtSignal
 from PyQt5.QtWidgets import QHBoxLayout, QVBoxLayout, QWidget
-from qfluentwidgets import TransparentToolButton
 
+from app.utils.design_tokens import BorderRadius, Colors
 from app.utils.motion import LoopTimer
-from app.utils.utils import get_icon
 from app.widgets._workbench_helpers import _SectionHeader
+from app.widgets.inline_disclosure import DisclosureButton, DisclosureMotion
 
 from .agent_row import AgentTaskRow
 
@@ -64,15 +64,16 @@ class SubAgentRunPanel(QWidget):
 
         # ── 头部：图标 + 标题 + 统计 + 折叠按钮 ──
         self._header = _SectionHeader("子智能体", "设置-subagent", self)
-        self._collapse_btn = TransparentToolButton(get_icon("展开"), self)
-        self._collapse_btn.setFixedSize(22, 22)
-        self._collapse_btn.setToolTip("展开子智能体列表")
+        # 悬停底色的内缩边距（原 (2,0,2,0) 贴字太紧）
+        self._header.layout().setContentsMargins(6, 0, 4, 0)
+        self._collapse_btn = DisclosureButton(self._header)
+        self._collapse_btn.setToolTip("折叠子智能体列表")
         self._collapse_btn.clicked.connect(self._on_collapse_clicked)
         hdr_layout = self._header.layout()
         hdr_layout.insertWidget(hdr_layout.count(), self._collapse_btn)
-        self._header.installEventFilter(self)
         self._header.setCursor(Qt.PointingHandCursor)
-        self._header.setToolTip("点击展开子智能体列表")
+        self._header.setToolTip("点击折叠子智能体列表")
+        self._apply_header_style()
         layout.addWidget(self._header)
 
         # ── 行容器（展开态可见，全量展示不限高）──
@@ -82,6 +83,11 @@ class SubAgentRunPanel(QWidget):
         self._body_layout.setContentsMargins(0, 0, 0, 0)
         self._body_layout.setSpacing(4)
         layout.addWidget(self._body_wrap)
+
+        self._motion = DisclosureMotion(self._body_wrap, self._emit_height)
+        self._motion.progressChanged.connect(self._collapse_btn.set_progress)
+        self._collapse_btn.set_progress(1.0)
+        self._header.installEventFilter(self)
 
         self.hide()  # 无任务整区隐藏
 
@@ -156,7 +162,7 @@ class SubAgentRunPanel(QWidget):
         self._enforce_finished_fifo()
         self._update_stats()
         if all(not r.is_running for r in self._rows.values()):
-            self._set_collapsed(True)
+            self._set_collapsed(True, animate=True)
         self._emit_height()
 
     def add_tool_call(self, task_id: str, tool_name: str = "", args: Optional[dict] = None) -> None:
@@ -309,10 +315,17 @@ class SubAgentRunPanel(QWidget):
 
     # ── 视觉刷新 ──
 
+    def _apply_header_style(self) -> None:
+        self._header.refresh_style()
+        self._header.setStyleSheet(self._header.styleSheet() + (
+            f"QFrame#workbenchSectionHeader:hover {{ background: {Colors.HOVER_BG}; border-radius: {BorderRadius.SM}; }}"
+        ))
+        self._header._title_label.setStyleSheet(f"color: {Colors.TEXT_PRIMARY}; font-weight: 600;")
+
     def refresh_style(self) -> None:
         """主题切换：头部与所有行重放固定 QSS（宿主在主题切换时调用）。"""
         try:
-            self._header.refresh_style()
+            self._apply_header_style()
             for row in self._rows.values():
                 row.refresh_row_style()
         except RuntimeError:
@@ -328,14 +341,11 @@ class SubAgentRunPanel(QWidget):
         return super().eventFilter(obj, event)
 
     def _on_collapse_clicked(self) -> None:
-        self._set_collapsed(not self._collapsed)
-        self._emit_height()
+        self._set_collapsed(not self._collapsed, animate=True)
 
-    def _set_collapsed(self, collapsed: bool) -> None:
-        """设置折叠态（不 emit，由调用方决定何时上报高度）。"""
+    def _set_collapsed(self, collapsed: bool, animate: bool = False) -> None:
         self._collapsed = collapsed
-        self._body_wrap.setVisible(not collapsed)
-        self._collapse_btn.setIcon(get_icon("展开" if collapsed else "折叠"))
+        self._motion.set_expanded(not collapsed, animate=animate)
         self._collapse_btn.setToolTip("展开子智能体列表" if collapsed else "折叠子智能体列表")
         self._header.setToolTip("点击展开子智能体列表" if collapsed else "点击折叠子智能体列表")
 
@@ -401,6 +411,7 @@ class SubAgentRunPanel(QWidget):
     # ── 内部：行信号 ──
 
     def _on_row_toggled(self, task_id: str = "") -> None:
+        self._motion.refresh_target()
         self._emit_height()
 
     def _on_row_enter_session(self, task_id: str) -> None:

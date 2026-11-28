@@ -41,12 +41,12 @@ from PyQt5.QtWidgets import (
 from qfluentwidgets import (
     CardWidget,
     ExpandSettingCard,
-    FluentIcon,
     PushButton,
     SearchLineEdit,
     SwitchButton,
     TransparentToolButton,
 )
+from app.utils.app_icon import AppIcon
 
 from app.plugins.component_items import (
     ComponentItem,
@@ -363,7 +363,7 @@ class ComponentRow(CardWidget):
         header_layout.addWidget(self._token_label)
 
         # 展开细项（可单独关闭其中某一项）
-        self._expand_btn = TransparentToolButton(FluentIcon.CHEVRON_RIGHT_MED, self)
+        self._expand_btn = TransparentToolButton(AppIcon.CHEVRON_RIGHT_MED, self)
         self._expand_btn.setFixedSize(22, 22)
         self._expand_btn.setCheckable(True)
         self._expand_btn.setToolTip("展开细项（可单独开关其中某一项）")
@@ -428,7 +428,7 @@ class ComponentRow(CardWidget):
             self.height_changed_cb()
 
     def _set_chevron(self, expanded: bool):
-        self._expand_btn.setIcon(FluentIcon.CHEVRON_DOWN_MED if expanded else FluentIcon.CHEVRON_RIGHT_MED)
+        self._expand_btn.setIcon(AppIcon.CHEVRON_DOWN_MED if expanded else AppIcon.CHEVRON_RIGHT_MED)
 
     @property
     def is_expanded(self) -> bool:

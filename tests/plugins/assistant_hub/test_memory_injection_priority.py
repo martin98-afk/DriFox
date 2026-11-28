@@ -121,3 +121,23 @@ def test_pack_project_tiny_budget_returns_empty():
     packed = view.pack_project("## 甲\n" + "甲" * 500, 30)
     assert packed["text"] == ""
     assert packed["omitted"]
+
+def test_recent_edit_wins_without_changing_markdown_order():
+    state = entries.empty_state()
+    old = _put(state, "工具与环境", "原" * 60, "2026-01-01T00:00:00+08:00")
+    new = _put(state, "工具与环境", "新" * 60, "2026-02-01T00:00:00+08:00")
+    old.update(text="改" * 60, updated_at="2026-01-31T20:00:00+00:00")
+    entries._apply_put(state, {"id": old["id"], "entry": old, "supersedes": old["id"]})
+    packed = view.pack_injection(state, SECTIONS, {"工具与环境": 80}, 80)
+    assert [item["id"] for item in packed["omitted"]] == [new["id"]]
+    md = view.render_markdown(state, SECTIONS)
+    assert md.index(old["id"]) < md.index(new["id"])
+
+
+def test_project_heading_inside_code_stays_with_section():
+    raw = "## 长节\n~~~python\n# 注释\n" + "x" * 200 + "\n~~~\n\n## 短节\n保留"
+    packed = view.pack_project(raw, 80)
+    assert packed["omitted"] == ["## 长节"]
+    assert "## 短节\n保留" in packed["text"]
+    assert "~~~python" not in packed["text"]
+    assert len(packed["text"]) <= 80

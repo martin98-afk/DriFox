@@ -102,6 +102,11 @@ class GlobalPreviewDialog(MaskDialogBase):
         height = min(height, max(240, avail.height() - 80))
         self.widget.setFixedSize(width, height)
 
+    def set_colors(self, colors: dict, scrollbar_qss: str) -> None:
+        self._colors = dict(colors)
+        self._scrollbar_qss = scrollbar_qss
+        self._apply_theme()
+
     def _apply_theme(self) -> None:
         colors = self._colors
         bg = colors.get("card_bg", QColor(33, 33, 38))

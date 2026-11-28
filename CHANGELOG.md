@@ -1,6 +1,103 @@
-## [v0.7.6] - 2026-11-27
+## 未发布
 
-自 v0.7.5 以来的变更 | 提交数：9 · 文件变更：52 · +8937/-485 | 贡献者：mading, martin98-afk
+- 助手记忆工具按作用域校验写入模式。项目笔记支持追加和整体替换，全局条目支持按 ID 阅读、修改和删除。批量整理先依次验证全部操作，再一次提交。
+- 会话开始时，全局记忆在分区内优先展示置顶和最近更新的条目，项目笔记按完整章节或自然段取舍。日常写入只追加事件日志，显式压缩支持按设备归档。
+
+## [v0.7.7] - 2026-11-28 (重新发布 #3)
+
+自 v0.7.6 以来的变更 | 提交数：48 · 文件变更：664 · +37466/-18027 | 贡献者：dingma, drifox-bot
+
+### ✨ 新功能 (New Features)
+
+- **系统消息输出插件** (`plugins/system-message-output/` · `app/plugins/contracts/message_layout.py` · `app/plugins/registries/ui_plugin_registry.py` · `app/widgets/card_render_core.py`): 新增独立插件，提供紧凑 / 原始两种展示模式与动态摘要；消息布局契约按消息类型给出折叠策略，UI 插件注册表据此选择渲染器，设置页可切换输出模式与摘要开关。
+- **消息内联分组（compact mode）** (`app/widgets/render/group_dom.py` · `app/widgets/message_card.py` · `card_render_core.py` · `plugins/system-message-output/ui/compact.py`): 相邻同类消息按组合并渲染，组内动作图标与折叠组可见性动画统一；骨架缓存版本随结构递增，组高调整与展开请求走同一入口。回归 `tests/ui/test_compact_group_scroll.py`。
+- **插件按需加载** (`app/core/services/plugin_host_service.py` · `app/plugins/managers/plugin_manager.py` · `app/plugins/registries/ui_plugin_registry.py`): 新增 `ensure_plugin_loaded`，UI 能力在插件尚未加载时先装载再解析，避免首次调用落空。
+- **设置页检索与导航** (`app/widgets/cards/settings/llm_settings_card.py` · `plugin_settings_page.py` · `plugin_config_form.py`): LLM 设置卡新增搜索过滤与分组导航；插件设置页过滤时保留详情视图；通用设置页改为动态分区标题。
+- **Windows 原生回复通知** (`app/utils/windows_reply_toast.py` · `app/tray_manager.py` · `app/main_widget.py`): 托盘通知改走系统原生 toast 并支持直接回复；聊天消息对齐规则统一。
+- **附件缩略图按需解码** (`app/widgets/attachment_thumbnails.py` · `app/widgets/bottom_input_area.py`): 输入区附件用 `QImageReader` 按目标尺寸缩放取缩略图，长图不再整幅解码。
+- **MessageCard diff 控件懒加载** (`app/widgets/message_card.py` · `card_viewers.py` · `modules/message_bubble.py`): diff 控件延迟创建，组高调整与切换请求集中处理；气泡边框渲染一致化。
+- **插件市场**：精选、目录和搜索结果支持宽屏双列、窄屏单列。卡片展示图标、名称和两行简介，分类、版本和下载次数在页脚左对齐，已安装插件在原操作位以 ✓ 和 × 区分启用与禁用。双列列表每批加载八行，最后单出的卡片占满整行。浏览工具栏整合导航与搜索，来源、类型和排序按需展开。点卡片直接打开详情，主页与管理操作集中在详情面板；安装、更新和取消可直接在卡片上操作。
+- **Build 对话效率**：常规问答直接回答，预期明确的修复直接定位、修改和验证。`/技能名` 自动注入的正文直接使用，其他所需技能按需加载。影响交付的独立问题可以一次问清。
+
+### 🐛 问题修复 (Bug Fixes)
+
+- **消息卡片图表滚动**：图表替换占位块或异步增高时，已滚到底部的卡片继续跟随最新内容。向上滚动阅读时保留当前位置。
+- **底部吸附重试** (`app/main_widget.py`): 内容送达后的到底部吸附加一次重试，异步增高不再停在半途。
+- **TabPanel 折叠状态恢复** (`app/widgets/tab_manager_window.py`): 折叠时补发状态信号，重建时还原面板可见性，折叠态切换标签页不再丢状态。
+- **助手气泡对比度** (`app/widgets/modules/message_bubble.py` · `app/widgets/message_card.py`): 去掉 alpha 上限，按背景亮度选择前后景色，初始化与样式更新走同一路径。
+- **背景动画 prefetch 停止条件** (`app/widgets/anim_background.py`): 显隐切换时正确停止预取，隐藏后不再继续渲染。
+- **插件内置 UI 图标** (`plugins/file-tree/ui/` · `app/plugins/capabilities/providers/ui_core.py`): 插件自带图标改由能力池解析，打包环境不再因资源路径缺失丢图标。
+- **LLM 设置分组布局** (`app/widgets/cards/settings/llm_settings_card.py`): 修正分组垂直居中与间距。
+- **UI 测试初始化竞态** (`tests/ui/test_worktree_share_panels.py`): 断言前先等待 UI 初始化完成，消除假红。
+
+### ♻️ 代码重构 (Refactoring)
+
+- **字体处理统一** (`app/main_widget.py` · `app/utils/config.py` · `app/widgets/cards/session_card.py`): 聊天字体与 UI 字体解耦，`chat_font_family` 直接生效；补充字体步进器、身份头与折叠控件测试。
+- **图标能力与测试基座** (`app/plugins/capabilities/catalog.py` · `providers/ui_core.py` · `app/tray_manager.py`): 断言从 `FluentIcon` 改为 `AppIcon`，补聊天菜单派发、归档删除与会话完整性用例。
+- **worktree / share-history UI** (`app/widgets/workbench_panel.py` · `tab_manager_window.py` · `plugins/worktree-manager/` · `plugins/share-history/`): 组件可见性与交互对齐，补齐面板测试。
+- **技能加载描述** (`plugins/system-hooks/hooks/inject_skills_content.py` · `plugins/assistant_hub/personas/build/persona.md` · `plugins/system-agents/agents/build.md`): 技能注入与提问规范措辞统一。
+- **性能账本与 viewer 高度回归** (`docs/perf/perf-ledger.md` · `tests/perf/` · `tests/widgets/`): 记录新基线，补齐 viewer 高度与流式游标测试。
+- **插件设置页滚动与布局** (`app/widgets/cards/settings/plugin_settings_page.py` · `llm_settings_card.py` · `tests/widgets/test_plugin_settings_page.py`): 设置页随窗口高度铺满内容区，左侧插件列表与右侧详情分别处理滚轮事件，滚动到边界时标题与筛选栏保持固定；页头与侧栏顶部对齐，新增页头 adopt / release 供布局接管，补齐页面控件与滚动行为用例，移除失效的滚动探针脚本。
+- **分组面板跟随状态** (`app/widgets/render/group_dom.py` · `app/widgets/card_render_core.py`): 内容持续增长时保持跟随最新状态，滚动容差一并调整。
+- **回复预览清理逻辑** (`app/utils/session_preview.py` · `tests/test_reply_preview.py`): 预览文本清洗规则增强，覆盖分支补单测。
+
+### 🔧 其他 (Chores & Build)
+
+- 插件市场索引自动重生成（`marketplace.json`，CI）。
+- 版本号升至 v0.7.7（`pyproject.toml` / `app/utils/config.py` / `dist/installer.iss` / `README.md`）。
+
+### ✨ 新功能 (New Features)
+
+- **输入区图片标注与预览** (`app/widgets/image_annotations.py` · `app/widgets/image_lightbox.py` · `app/widgets/bottom_input_area.py` · `app/main_widget.py`): 输入区图片支持双击预览并直接标注；新增 `ImageAnnotations` 组件承载标注数据与绘制，`ImageLightbox` 展示已有标注。回归 `tests/widgets/test_input_image_annotation.py` · `tests/ui/test_screenshot_annotation.py`。
+- **记忆存储原子化与设备级压缩** (`plugins/assistant_hub/core/memory/entries.py` · `view.py` · `tools/memory_tools.py`): 写入改走临时文件原子替换并加事务锁，中断不再丢数据；快照按设备归档，压缩按设备独立进行且不丢条目，批量追加支持单次原子提交。补齐压缩、注入优先级与工具路由用例。
+- **Windows 命令诊断与替代指引** (`plugins/system-core/tools/terminal_tools.py`): cmd 缺 head/tail/grep 等 Unix 命令时在错误里补充替代工具说明；`bash` 工具描述按平台生成。
+- **grep / glob 大仓库收敛** (`plugins/system-core/tools/file_tools.py`): 目录搜索先按文件名筛出候选再有界提交读取，不再为每个文件创建 Future；`glob` 改用 `iglob` 惰性遍历；结果按内容长度上限截断。
+- **Worktree 页头动态插件图标** (`plugins/worktree-manager/ui/worktree_page.py`): 页头图标随插件动态解析，样式同步调整。
+
+### 🐛 问题修复 (Bug Fixes)
+
+- **read 行号偏移** (`plugins/system-core/tools/file_tools.py`): 带行号读取按真实行号输出，起始行不再错位。回归 `tests/tools/test_file_search_read.py`。
+- **worktree 缓存失效** (`plugins/worktree-manager/tools/worktree_tools.py` · `ui/worktree_section.py`): 清理缓存改全清，避免残留条目刷新后命中旧数据；补契约用例。
+
+### ♻️ 代码重构 (Refactoring)
+
+- **简洁模式思考预览提取** (`app/widgets/card_render_core.py`): 预览改为按句评估，优先选已确认的结论，其次选决定或下一步，跳过试探性开场；模型给出小节标题时与选中句一起展示。`plugins/system-message-output/README.md` 同步说明。
+- **首运行引导账号与安全设置** (`app/widgets/first_run_guide.py` · `app/main_widget.py` · `app/utils/safe_mode.py` · `app/widgets/cards/global_card_controller.py`): 引导流程补充账号与安全设置步骤，安全模式说明同步更新，设置卡可唤起引导；补 `tests/widgets/test_first_run_guide.py`。
+
+### 🔧 其他 (Chores & Build)
+
+- 重新发布 #2：纳入 2026-11-28 17:05~17:42 的 7 个提交，重建 tag 与 Release。
+
+### ✨ 新功能 (New Features) (重新发布 #3 追加)
+
+- **主题切换原地刷新** (`app/utils/theme_refresh.py` · `theme_manager.py` · `theme_mode.py` · `theme_style.py` · `design_tokens.py` · `app/widgets/tab_panel.py` · `workbench_panel.py` · `workspace_page_host.py` · `plugins/*/ui/`): 切换主题不再重建窗口，已打开的工作台、标签页与插件卡片就地重绘；YAML 未声明的主题 token 回落到类默认值，不再沿用上一主题的覆盖色。回归 `tests/ui/test_theme_mode_switch.py` · `tests/plugins/test_theme_batched_plugin_card_single_refresh.py`。
+- **紧凑模式思考预览限两行** (`app/widgets/card_render_core.py` · `card_viewers.py`): 思考预览固定两行，超出部分折叠。
+
+### 🐛 问题修复 (Bug Fixes) (重新发布 #3 追加)
+
+- **插件事务化重载** (`app/plugins/managers/plugin_manager.py` · `loaders/runtime_component_loader.py` · `builtin_reloaders.py` · `registries/*`): 同组件目录的多个模块先在临时注册表导入并执行入口，全部成功后一次替换注册项；任一模块失败则返回失败状态、原注册对象继续可用。修改清单会刷新该插件全部现存组件并卸载已删除组件，同名插件按系统 / Claude / 用户来源与覆盖设置重新选择生效版本。回归 `tests/plugins/test_runtime_reload_transaction.py` · `tests/perf/test_plugin_reload_real.py`。
+- **历史工具结果按消息投影** (`app/core/context/pipeline.py` · `plugins/system-context/context_tiers/`): 旧格式工具结果按所属消息投影，不再跨消息串位。
+- **工具结果入库定型与路径守卫** (`app/core/tools/tool_result_persister.py` · `context/budget.py` · `workers/chat_worker.py` · `subagent_worker.py`): 工具结果写入即定型，会话 ID 含路径分隔符时转哈希，避免越级落盘；发送前预算估算只写本地诊断，不中断请求也不改写前缀。回归 `tests/core/test_context_prefix_cache.py`。
+- **上下文层只作用于摄入阶段** (`plugins/system-context/context_tiers/tool_normalize.py` · `tool_shape.py` · `tool_prune.py`): 归一化、整形与裁剪限定在摄入阶段生效，重复处理不再逐步改写历史消息。
+- **样式方法优先级与插件兼容** (`app/utils/theme_style.py` · `plugins/*/ui/cards.py`): 样式方法按优先级解析，插件卡片沿用自身样式不再被宿主覆盖。
+- **欢迎态与标签管理器判断** (`app/widgets/message_card.py` · `tab_manager_window.py`): 欢迎模式条件收敛，标签管理器类型判断修正。
+- **BOM 配置解析** (`tests/widgets/test_dock_card_display_contract.py`): 带 BOM 的文件按 `utf-8-sig` 解析。
+
+### ⚡ 性能优化 (Performance) (重新发布 #3 追加)
+
+- **渲染缓存按字节预算与图片流式落盘** (`app/widgets/markdown_block_viewer.py` · `app/core/store/session_repository.py` · `app/widgets/anim_background.py` · `app/utils/image_utils.py`): Markdown HTML 前缀缓存 2 MiB、段落块缓存 4 MiB 执行 LRU 淘汰，主题与字号仍参与匹配；图片边解码边写盘，同批重复图片只解码一次；动画背景按上一帧及缩放成品估算预读深度，目标 24 MiB、保留 1~3 帧。实测：约 3 万字回复追加 180 段，Qt 控件 RSS 增量 65.88 → 33.28 MiB、Python 堆 39.99 → 5.96 MiB；保存 24 个 1 MiB 图片块堆峰值 26.68 → 2.69 MiB；3840×2160 背景预读 94.92 → 31.64 MiB。基线见 `docs/perf/perf-ledger.md`，复测 `tests/perf/test_render_attachment_memory.py`。
+
+### 📚 文档 (Docs) (重新发布 #3 追加)
+
+- `docs/architecture/plugin-architecture.md` 明确工具消息处理与 JSON 归一化边界；`docs/plugins/runtime-engines.md` 补热更新失败恢复语义与重载性能测量方法。
+
+### 🔧 其他 (Chores & Build) (重新发布 #3 追加)
+
+- 重新发布 #3：纳入 2026-11-28 19:24~19:32 的 7 个提交（85 文件 / +1717-985），重建 tag 与 Release。
+
+## [v0.7.6] - 2026-11-27 (重新发布 #2)
+
+自 v0.7.5 以来的变更 | 提交数：26 · 文件变更：133 · +17622/-3690 | 贡献者：mading, martin98-afk, dingma
 
 ### ✨ 新功能 (New Features)
 - **性能基准、预算门禁与测量规程** (`tools/perf/benchmark_core.py` · `measure_gate.py` · `check_plan_coverage.py` · `tests/perf/`): 新增核心性能基准、测量规程、证伪清单与下一轮优先项文档；加入启动/内存预算门、插件加载冒烟、AST 与 code cache 安全测试。顺带修复 AST 门禁缓存绕过、会话 CAS 静默失败、缓存泄漏与动画源回收遗漏；优化设置页懒建、主题探测、日志 formatter、插件编译缓存及 renderer 回收。
@@ -17,7 +114,35 @@
 ### 🔧 其他 (Chores & Build)
 - 版本号升至 v0.7.6（`pyproject.toml` / `app/utils/config.py` / `dist/installer.iss` / `README.md`）。
 
-## [v0.7.5] - 2026-11-23
+### ✨ 新功能 (New Features)
+- **历史会话首屏渐进渲染 (History First Paint)** (`app/widgets/message_card.py` · `app/main_widget.py` · `app/core/history_core.py`): 新增 `HistoryFirstPaintGate` 管理历史会话首屏展示，确保加载期间无缝体验；集成主题变化与会话状态处理；取消切换会话时的前次加载；归档流程直接调用新会话归档方法；移除过时测试并更新现有测试；覆盖欢迎卡与长短会话场景。
+- **Tab 管理器动画与尺寸过渡** (`app/widgets/tab_manager.py` · `_DockSideWrapper`): 卡片动画期间禁用最小尺寸提示；左侧卡片区域平滑宽度过渡；改进面板展开/折叠体验。
+- **Backdrop 检测扩展 window 区域与视频背景** (`app/main_widget.py` · chat theme): backdrop 检测逻辑纳入 window 区域并支持视频背景。
+- **SQL 查询优化与会话计数** (`app/core/store/session_repository.py`): 优化 SQL 查询与会话计数逻辑；新增项目查询单元测试。
+- **统一消息注入 OpenAIChatWorker** (`app/core/workers/chat_worker.py`): 所有流统一消息注入；新增消息处理回归测试。
+- **UI 能力与动画处理增强** (`app/main_widget.py`): 增强 UI 能力与动画处理；新增上下文管理与内存测试。
+- **SlideTabAnimator 动画稳定性** (`app/widgets/slide_tab_animator.py`): 增强动画处理与稳定性；新增可见文本节奏与内存性能测试。
+- **参数化 compact stream geometry 测试** (`tests/...`): 参数化 `test_compact_stream_geometry` 覆盖折叠行为；改进元素测量逻辑。
+
+### 🐛 问题修复 (Bug Fixes)
+- **骨架缓存版本更新与图表占位动画** (`app/...`): 更新骨架缓存版本并改进图表占位动画。
+- **聊天容器尺寸策略调整** (`app/widgets/...`): 调整聊天容器尺寸策略改善布局处理。
+- **聊天工具与 Tab 管理器 resize 处理** (`app/widgets/...`): 改进 resize 处理。
+- **工作台拖动与窗口状态切换聊天卡片闪空** (`app/main_widget.py` · `message_card.py`): 修复拖动与状态切换时聊天卡片闪空。
+
+### ♻️ 代码重构 (Refactoring)
+- **代码结构重构** (`app/`): 重构代码结构提升可读性与可维护性。
+
+### 🔄 其他变更 (Other Changes)
+- **UI 测试覆盖**: 新增 user bubble viewport edge、workbench drag pixels、history first paint 测试套件。
+- **消息卡片底部面板折叠动效与键盘交互优化** (`app/widgets/message_card.py`): 优化折叠动效与键盘交互。
+- **首批正文出字节奏与工具完成框原位过渡优化** (`app/...`): 优化出字节奏与完成框过渡。
+- **综合测试覆盖**: 新增 token estimation、rendering、UI behavior 测试。
+
+### 🔧 其他 (Chores & Build)
+- 版本号升至 v0.7.6（重新发布 #2）（`pyproject.toml` / `app/utils/config.py` / `dist/installer.iss` / `README.md`）。
+
+
 
 自 v0.7.4 以来的变更 | 提交数：17 · 文件变更：95 · +8706/-748 | 贡献者：drifox-bot, mading
 

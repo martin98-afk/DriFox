@@ -8,7 +8,7 @@
 3. get_full_messages 旧 blob 防御迁移：后台线程落盘图 + DB 回写 ref，
    读路径原样返回（内存侧不换 ref）
 
-无 QApplication 依赖（__new__ 桩 + monkeypatch get_app_data_dir）。
+无 QApplication 依赖，附件与迁移线程共用隔离数据目录。
 """
 
 from __future__ import annotations
@@ -44,9 +44,7 @@ def vision_env(tmp_path, monkeypatch):
     """落盘根目录指向临时目录（迁移后台线程的延迟 import 同样命中 patch）。"""
     root = tmp_path / "appdata"
     root.mkdir()
-    import app.utils.utils as uutils
-
-    monkeypatch.setattr(uutils, "get_app_data_dir", lambda: str(root))
+    monkeypatch.setenv("DRIFOX_DATA_DIR", str(root))
     yield root
 
 

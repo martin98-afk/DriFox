@@ -12,7 +12,8 @@ Chromium / QtWebEngine 只在进程启动时读一次环境变量 → 本页（R
 from __future__ import annotations
 
 from PyQt5.QtCore import Qt
-from qfluentwidgets import ConfigItem, FluentIcon, PrimaryPushButton, SettingCard
+from qfluentwidgets import ConfigItem, PrimaryPushButton, SettingCard
+from app.utils.app_icon import AppIcon
 
 from app.utils.app_restart import restart_application
 from app.utils.design_tokens import ButtonStyles, Colors, font_size_css
@@ -30,7 +31,7 @@ class RenderRestartCard(SettingCard):
             render_items: Render 组 ConfigItem 列表（变更计数与基线比对的监控对象）
             parent: 父控件
         """
-        super().__init__(FluentIcon.ROTATE, "手动重启", self._IDLE_TEXT, parent)
+        super().__init__(AppIcon.ROTATE, "手动重启", self._IDLE_TEXT, parent)
         self._items: list[ConfigItem] = list(render_items)
         self._baseline = [item.value for item in self._items]
 

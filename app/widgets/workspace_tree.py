@@ -39,7 +39,7 @@ from PyQt5.QtCore import (
 )
 from PyQt5.QtGui import QColor, QPainter, QPainterPath
 from PyQt5.QtWidgets import QFrame, QHBoxLayout, QLabel, QSizePolicy, QVBoxLayout, QWidget
-from qfluentwidgets import FluentIcon as FIF
+from app.utils.app_icon import AppIcon as FIF
 from qfluentwidgets import TransparentToolButton, isDarkTheme
 
 from app.utils.color_parse import parse_color as _parse_color_shared

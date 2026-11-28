@@ -220,3 +220,20 @@ def test_config_changed_rebuilds_nav_style_even_if_listener_clears_flag(qapp, mo
     finally:
         LLMSettingsCard._last_change_type = None
         monkeypatch.setattr(design_tokens, "_cached_font_size_key", None)
+
+
+def test_chat_font_is_independent_of_ui_font(qapp, monkeypatch):
+    from app.utils.config import Settings
+    from app.utils.design_tokens import _get_global_font, chat_font_family, invalidate_font_cache, system_font_family
+
+    cfg = Settings.get_instance()
+    with monkeypatch.context() as patch:
+        patch.setattr(cfg.ui_font_family, "value", "Tahoma")
+        patch.setattr(cfg.llm_font_family, "value", "")
+        invalidate_font_cache()
+        assert _get_global_font() == "Tahoma"
+        assert chat_font_family() == system_font_family()
+        patch.setattr(cfg.llm_font_family, "value", "Arial")
+        assert chat_font_family() == "Arial"
+        assert _get_global_font() == "Tahoma"
+    invalidate_font_cache()

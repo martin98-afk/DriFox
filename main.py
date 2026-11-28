@@ -95,6 +95,7 @@ try:
 except Exception:
     pass
 _startup_mark_stderr("shell_migrate_app_data")
+_FRESH_INSTALL = not os.path.isfile(default_config_path())
 
 # 防御：QSG_RHI* 残留会让场景图走 RHI D3D11 合成，WebEngine 的 GL 纹理接不上 → 整块黑。
 for _env_key in ("QSG_RHI", "QSG_RHI_BACKEND"):
@@ -775,17 +776,19 @@ def main():
         setTheme(Theme.DARK)
     _probe("p1b.after_setTheme")
 
-    # 获取全局字体配置
     from app.utils.config import Settings
+    from app.utils.design_tokens import _get_global_font
 
-    try:
-        settings = Settings.get_instance()
-        font_family = settings.llm_font_family.value
-    except Exception:
-        try:
-            font_family = Settings.get_instance().canvas_font_selected.value
-        except Exception:
-            font_family = "Segoe UI"
+    def apply_ui_family():
+        from app.utils.design_tokens import invalidate_font_cache
+        from app.utils.utils import invalidate_font_family_css_cache
+
+        invalidate_font_cache()
+        invalidate_font_family_css_cache()
+        setFontFamilies([_get_global_font()])
+
+    apply_ui_family()
+    Settings.get_instance().ui_font_family.valueChanged.connect(apply_ui_family)
     _probe("p1c.after_font_config")
 
     # 注意：不在这里设置 QToolTip/ToolTip 样式，
@@ -802,7 +805,6 @@ def main():
         def __init__(self):
             super().__init__()
             self.cfg = Settings.get_instance()
-            setFontFamilies([self.cfg.llm_font_family.value])
 
         def isActiveWindow(self):
             return True
@@ -912,6 +914,7 @@ def main():
 
         _smark("import_main_widget", level="info")
         chat_window = OpenAIChatToolWindow(fake_page)
+        chat_window.enable_first_run_guide(_FRESH_INSTALL)
         _smark("first_chat_window", level="info")
         tm.add_window(chat_window)
         tm.remove_boot_placeholder()

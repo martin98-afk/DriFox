@@ -28,6 +28,7 @@ from typing import Dict, List, Optional, Set
 
 from loguru import logger
 
+from app.plugins.loaders._roots import _is_selected_plugin_dir
 from app.plugins.loaders._roots import (
     _ROOT_KIND_PRIORITY,
     _ROOT_KIND_SYSTEM,
@@ -104,7 +105,7 @@ def _iter_provider_modules(plugin_root: Path):
     if not plugin_root.is_dir():
         return
     for plugin_dir in sorted(plugin_root.iterdir()):
-        if not plugin_dir.is_dir():
+        if not plugin_dir.is_dir() or not _is_selected_plugin_dir(plugin_dir):
             continue
         providers_dir = plugin_dir / "providers"
         if providers_dir.is_dir():

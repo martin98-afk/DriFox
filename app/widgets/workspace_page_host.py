@@ -14,7 +14,7 @@ from loguru import logger
 class WorkspacePageHost:
     def __init__(self):
         self._tab_window: Optional[Any] = None
-        self._loaded: Dict[str, Tuple[Any, Any]] = {}  # page_id -> (info, widget)
+        self._loaded: Dict[str, Tuple[Any, Any, dict]] = {}  # page_id -> (info, widget, context)
         self._page_indexes: Dict[str, int] = {}  # page_id -> content_area index
         self._sidebar_item_ids: List[str] = []
         self._derived_tab_ids: List[Tuple[str, str]] = []  # (plugin_name, tab_id) primary_entry 派生
@@ -122,7 +122,7 @@ class WorkspacePageHost:
             widget = info.widget_class(parent=self._tab_window._content_area, context=context)
             idx = self._tab_window._content_area.addWidget(widget)
             self._page_indexes[page_id] = idx
-            self._loaded[page_id] = (info, widget)
+            self._loaded[page_id] = (info, widget, context)
         self._tab_window._content_area.setCurrentIndex(self._page_indexes[page_id])
         # 切页补刷外观：工作区页不在 WorkbenchPanel 的派发范围内（独立宿主），
         # 主题切换期间它不可见 → 只置脏，这里补到当前纪元。
@@ -133,11 +133,24 @@ class WorkspacePageHost:
         except RuntimeError:
             pass
 
+    def refresh_theme(self) -> None:
+        """保留页面创建时的会话上下文，仅更新外观字段和已加载的控件。"""
+        if not self._loaded or self._tab_window is None:
+            return
+        from app.utils.theme_style import refresh_page_theme
+
+        current = self._tab_window._build_ui_context()
+        keys = ("theme_id", "theme_name", "is_dark", "font_family", "font_size", "colors")
+        appearance = {key: current[key] for key in keys if key in current}
+        for _info, widget, context in list(self._loaded.values()):
+            context.update(appearance)
+            refresh_page_theme(widget)
+
     def teardown_plugin(self, plugin_name: str) -> None:
         """插件卸载：销毁其页面 + 移除 content_area 占位 + 清入口"""
         if self._tab_window is None:
             return
-        for page_id, (info, _w) in list(self._loaded.items()):
+        for page_id, (info, _w, _ctx) in list(self._loaded.items()):
             if info.plugin_name != plugin_name:
                 continue
             self._destroy_page(page_id)
@@ -173,7 +186,7 @@ class WorkspacePageHost:
         pair = self._loaded.pop(page_id, None)
         if pair is None:
             return
-        _info, widget = pair
+        _info, widget, _ctx = pair
         try:
             self._tab_window._content_area.removeWidget(widget)
             widget.deleteLater()

@@ -13,7 +13,7 @@ import subprocess
 from datetime import datetime
 from typing import Any, Dict, List
 
-from PyQt5.QtCore import Qt, QThread, pyqtSignal
+from PyQt5.QtCore import QSize, Qt, QThread, pyqtSignal
 from PyQt5.QtWidgets import (
     QApplication,
     QFileDialog,
@@ -21,15 +21,16 @@ from PyQt5.QtWidgets import (
     QLabel,
     QPushButton,
     QSizePolicy,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
 from qfluentwidgets import InfoBar, InfoBarPosition, ScrollArea
 
-from app.utils.design_tokens import Colors, current_theme, get_unified_scrollbar_style
+from app.utils.design_tokens import Colors, current_theme, font_size_css, get_unified_scrollbar_style, readable_text_on
 from app.utils.scroll_tuning import install_fast_wheel
 from app.utils.theme_manager import theme_manager
-from app.utils.utils import get_unified_font
+from app.utils.utils import get_font_family_css, get_icon, get_unified_font
 
 from app.utils.share_records import ensure_dirs, get_sessions_dir, insert_record
 
@@ -733,8 +734,9 @@ details.reasoning summary {{ font-weight: 600; color: var(--text-muted); cursor:
 class ShareCardContent(QWidget):
     """分享卡片的内容（格式选择 + 预览 + 操作按钮），由 BaseSettingsCard 包裹"""
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, *, header_label=None):
         super().__init__(parent)
+        self._header_label = header_label
         self._messages: List[Dict] = []
         self._record: Dict = {}
         self._selected_format = "json"
@@ -744,77 +746,92 @@ class ShareCardContent(QWidget):
         self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
 
         main_layout = QVBoxLayout(self)
-        main_layout.setContentsMargins(0, 0, 0, 0)
-        main_layout.setSpacing(6)
+        main_layout.setContentsMargins(4, 4, 4, 6)
+        main_layout.setSpacing(10)
+        heading = QVBoxLayout()
+        heading.setSpacing(3)
+        self._title = QLabel(self)
+        self._title.setTextFormat(Qt.PlainText)
+        self._title.setWordWrap(True)
+        self._meta = QLabel(self)
+        self._meta.setTextFormat(Qt.PlainText)
+        heading.addWidget(self._title)
+        heading.addWidget(self._meta)
+        main_layout.addLayout(heading)
 
         # ── 格式选择 ──
         self._format_btns = {}
-        fmt_layout = QHBoxLayout()
-        fmt_layout.setSpacing(4)
+        formats = QWidget(self)
+        formats.setObjectName("shareFormats")
+        fmt_layout = QHBoxLayout(formats)
+        fmt_layout.setContentsMargins(3, 3, 3, 3)
+        fmt_layout.setSpacing(2)
         Colors.refresh()
         for fmt_id, fmt_name in [
-            ("json", "📊 JSON"),
-            ("markdown", "📝 Markdown"),
-            ("html", "🌐 HTML"),
+            ("json", "JSON"),
+            ("markdown", "Markdown"),
+            ("html", "HTML"),
         ]:
             btn = QPushButton(fmt_name, self)
             btn.setCursor(Qt.PointingHandCursor)
-            btn.setFixedHeight(30)
-            btn.setFont(get_unified_font(11))
-            btn.setStyleSheet(self._btn_style(False))
+            btn.setObjectName("shareFormat")
+            btn.setCheckable(True)
+            btn.setAutoExclusive(True)
             btn.clicked.connect(lambda checked, f=fmt_id: self._select_format(f))
             self._format_btns[fmt_id] = btn
-            fmt_layout.addWidget(btn)
-        main_layout.addLayout(fmt_layout)
+            fmt_layout.addWidget(btn, 1)
+        main_layout.addWidget(formats)
 
         # ── 预览区 ──
+        self._preview_toggle = QToolButton(self)
+        self._preview_toggle.setObjectName("sharePreviewToggle")
+        self._preview_toggle.setText("文件预览")
+        self._preview_toggle.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        self._preview_toggle.setArrowType(Qt.RightArrow)
+        self._preview_toggle.setCheckable(True)
+        self._preview_toggle.setCursor(Qt.PointingHandCursor)
+        self._preview_toggle.toggled.connect(self._toggle_preview)
+        main_layout.addWidget(self._preview_toggle, 0, Qt.AlignLeft)
         self._preview_area = ScrollArea(self)
         self._preview_area.setWidgetResizable(True)
         install_fast_wheel(self._preview_area)
         self._preview_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self._preview_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self._preview_area.setFrameShape(ScrollArea.NoFrame)
-        self._preview_area.setFixedHeight(160)
-        self._preview_area.setStyleSheet(
-            f"QScrollArea {{ background: {Colors.CONTENT_BG}; border: 1px solid {Colors.BORDER}; "
-            f"border-radius: 6px; }}" + get_unified_scrollbar_style(4)
-        )
 
         self._preview_content = QLabel()
         self._preview_content.setWordWrap(True)
-        self._preview_content.setFont(get_unified_font(10))
-        self._preview_content.setStyleSheet(f"color: {Colors.TEXT_SECONDARY}; background: transparent; padding: 8px;")
+        self._preview_content.setTextFormat(Qt.PlainText)
+        self._preview_content.setAlignment(Qt.AlignLeft | Qt.AlignTop)
         self._preview_content.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self._preview_area.setWidget(self._preview_content)
         main_layout.addWidget(self._preview_area)
+        self._preview_area.hide()
 
         # ── 操作按钮 ──
         actions_layout = QHBoxLayout()
         actions_layout.setSpacing(6)
 
-        self._copy_btn = QPushButton("📋 复制内容", self)
+        self._copy_btn = QPushButton(get_icon("复制"), "复制", self)
+        self._copy_btn.setToolTip("复制导出内容")
         self._copy_btn.setCursor(Qt.PointingHandCursor)
-        self._copy_btn.setFixedHeight(34)
-        self._copy_btn.setFont(get_unified_font(11, bold=True))
-        self._copy_btn.setStyleSheet(self._btn_style(False))
         self._copy_btn.clicked.connect(self._on_copy)
 
-        self._save_btn = QPushButton("💾 保存文件", self)
+        self._save_btn = QPushButton(get_icon("save"), "保存", self)
+        self._save_btn.setToolTip("保存到文件")
         self._save_btn.setCursor(Qt.PointingHandCursor)
-        self._save_btn.setFixedHeight(34)
-        self._save_btn.setFont(get_unified_font(11, bold=True))
-        self._save_btn.setStyleSheet(self._btn_style(False))
         self._save_btn.clicked.connect(self._on_save_file)
 
-        self._upload_btn = QPushButton("🔗 生成链接", self)
+        self._upload_btn = QPushButton(get_icon("link"), "生成链接", self)
         self._upload_btn.setCursor(Qt.PointingHandCursor)
-        self._upload_btn.setFixedHeight(34)
-        self._upload_btn.setFont(get_unified_font(11, bold=True))
-        self._upload_btn.setStyleSheet(self._btn_style(False))
+        self._upload_btn.setObjectName("sharePrimary")
         self._upload_btn.clicked.connect(self._on_upload)
+        for btn in (self._copy_btn, self._save_btn, self._upload_btn):
+            btn.setIconSize(QSize(16, 16))
 
         actions_layout.addWidget(self._copy_btn)
         actions_layout.addWidget(self._save_btn)
+        actions_layout.addStretch()
         actions_layout.addWidget(self._upload_btn)
         main_layout.addLayout(actions_layout)
 
@@ -826,57 +843,70 @@ class ShareCardContent(QWidget):
         main_layout.addWidget(self._empty_label)
         self._empty_label.hide()
 
+        self.refresh_style()
         self._select_format(self._selected_format)
 
-    def _btn_style(self, selected: bool) -> str:
-        Colors.refresh()
-        if selected:
-            return (
-                f"QPushButton {{ background: {Colors.SELECTED_BG}; border: 1px solid {Colors.TAB_ACTIVE_BG}; "
-                f"border-radius: 5px; padding: 4px 10px; color: {Colors.TEXT_PRIMARY}; }}"
-            )
-        return (
-            f"QPushButton {{ background: {Colors.CONTENT_BG}; border: 1px solid {Colors.BORDER}; "
-            f"border-radius: 5px; padding: 4px 10px; color: {Colors.TEXT_PRIMARY}; }}"
-            f"QPushButton:hover {{ background: {Colors.HOVER_BG_STRONG}; border: 1px solid {Colors.TEXT_ACCENT}; }}"
-        )
-
     def refresh_style(self):
-        """主题切换时刷新按钮样式"""
         Colors.refresh()
-        for fid, btn in self._format_btns.items():
-            btn.setStyleSheet(self._btn_style(fid == self._selected_format))
-        self._copy_btn.setStyleSheet(self._btn_style(False))
-        self._save_btn.setStyleSheet(self._btn_style(False))
-        self._upload_btn.setStyleSheet(self._btn_style(False))
+        accent = Colors.TEXT_ACCENT
+        foreground = readable_text_on(accent, Colors.BUTTON_TEXT_ON_ACCENT, min_ratio=4.5)
+        self.setStyleSheet(f"""
+            QLabel, QPushButton, QToolButton {{ {get_font_family_css()} {font_size_css(13)} color: {Colors.TEXT_PRIMARY}; }}
+            QToolButton#sharePreviewToggle {{ border: none; padding: 2px; color: {Colors.TEXT_SECONDARY}; }}
+            QToolButton#sharePreviewToggle:hover {{ color: {Colors.TEXT_PRIMARY}; }}
+            QWidget#shareFormats {{ background: {Colors.HOVER_BG}; border-radius: 7px; }}
+            QPushButton {{ padding: 6px 10px; border: 1px solid {Colors.BORDER}; border-radius: 5px;
+                           background: transparent; }}
+            QPushButton:hover {{ background: {Colors.HOVER_BG}; }}
+            QPushButton#shareFormat {{ border-color: transparent; color: {Colors.TEXT_SECONDARY}; }}
+            QPushButton#shareFormat:checked {{ background: {Colors.CONTENT_BG}; color: {Colors.TEXT_PRIMARY};
+                                               border-color: {Colors.BORDER}; font-weight: 600; }}
+            QPushButton#sharePrimary {{ background: {accent}; color: {foreground}; border-color: transparent;
+                                       font-weight: 600; }}
+            QPushButton:focus {{ border-color: {Colors.BORDER_ACCENT}; }}
+        """)
+        if self._header_label is not None:
+            self._header_label.setStyleSheet(
+                f"{get_font_family_css()} {font_size_css(14)} color: {Colors.TEXT_SECONDARY}; font-weight: 500;"
+            )
+        self._title.setStyleSheet(f"{font_size_css(16)} font-weight: 600;")
+        self._meta.setStyleSheet(f"{font_size_css(12)} color: {Colors.TEXT_MUTED};")
         self._preview_area.setStyleSheet(
-            f"QScrollArea {{ background: {Colors.CONTENT_BG}; border: 1px solid {Colors.BORDER}; "
-            f"border-radius: 6px; }}" + get_unified_scrollbar_style(4)
+            f"QScrollArea {{ border: none; background: {Colors.CONTENT_BG}; }}" + get_unified_scrollbar_style(4)
         )
-        self._preview_content.setStyleSheet(f"color: {Colors.TEXT_SECONDARY}; background: transparent; padding: 8px;")
-        self._empty_label.setStyleSheet(f"color: {Colors.INPUT_PLACEHOLDER}; background: transparent; padding: 20px;")
+        self._preview_content.setStyleSheet(
+            f"color: {Colors.TEXT_SECONDARY}; background: {Colors.HOVER_BG}; border-radius: 5px; padding: 8px 12px;"
+        )
+        self._preview_area.setFixedHeight(self._preview_content.fontMetrics().height() * 4 + 20)
+
+    def _toggle_preview(self, expanded: bool):
+        self._preview_toggle.setArrowType(Qt.DownArrow if expanded else Qt.RightArrow)
+        self._preview_area.setVisible(expanded)
+        if expanded:
+            self._update_preview()
 
     def _select_format(self, fmt_id: str):
         self._selected_format = fmt_id
-        for fid, btn in self._format_btns.items():
-            btn.setStyleSheet(self._btn_style(fid == fmt_id))
+        self._format_btns[fmt_id].setChecked(True)
 
         # HTML 走 EdgeOne 在线渲染，按钮语义与其它格式不同
-        self._upload_btn.setText("🌐 发布网页" if fmt_id == "html" else "🔗 生成链接")
+        if self._upload_btn.isEnabled():
+            self._upload_btn.setIcon(get_icon("websearch" if fmt_id == "html" else "link"))
+            self._upload_btn.setText("发布网页" if fmt_id == "html" else "生成链接")
 
+        self._empty_label.setVisible(not self._messages)
+        if self._preview_toggle.isChecked():
+            self._update_preview()
+
+    def _update_preview(self):
         if not self._messages:
-            self._preview_content.setText("")
-            self._empty_label.show()
+            self._preview_content.clear()
             return
-        self._empty_label.hide()
-
+        fmt_id = self._selected_format
         try:
             if fmt_id == "html":
-                self._preview_content.setText(
-                    f"🌐 HTML 文档　·　{len(self._messages)} 条消息\n"
-                    f"标题：{self._record.get('title') or _get_session_title(self._messages)}\n"
-                    f"已套用当前主题卡片样式，复制/保存后在浏览器查看完整效果。"
-                )
+                message = next((m for m in self._messages if m.get("role") == "user"), self._messages[0])
+                self._preview_content.setText(_message_snippet(message, limit=200))
             else:
                 text = self._get_export_text(fmt_id)
                 self._preview_content.setText(text[:400] + ("…" if len(text) > 400 else ""))
@@ -896,6 +926,9 @@ class ShareCardContent(QWidget):
     def set_messages(self, record: Dict, title: str = ""):
         self._record = record or {}
         self._messages = self._record.get("messages", []) or []
+        self._title.setText(self._record.get("title") or title or _get_session_title(self._messages))
+        project = self._record.get("project") or ""
+        self._meta.setText("  ·  ".join(filter(None, (project, f"{len(self._messages)} 条消息"))))
         self._select_format(self._selected_format)
 
     def _on_copy(self):
@@ -1019,7 +1052,8 @@ class ShareCardContent(QWidget):
                 return
             # ── M3：异步上传，避免点击"生成链接"后 UI 冻结（后台线程）──
             self._upload_btn.setEnabled(False)
-            self._upload_btn.setText("⏳ 上传中…")
+            self._upload_btn.setIcon(get_icon("执行中"))
+            self._upload_btn.setText("上传中…")
             self._pending_upload_path = save_path
             self._pending_title = title
             self._pending_fmt = fmt
@@ -1030,17 +1064,20 @@ class ShareCardContent(QWidget):
                 self._upload_thread.start()
             except Exception as e:
                 self._upload_btn.setEnabled(True)
-                self._upload_btn.setText("🔗 生成链接")
+                self._upload_btn.setIcon(get_icon("link"))
+                self._upload_btn.setText("生成链接")
                 self._show_info(f"上传启动失败: {e}（文件已保存到本地）", "warning")
         except Exception as e:
             self._upload_btn.setEnabled(True)
-            self._upload_btn.setText("🔗 生成链接")
+            self._upload_btn.setIcon(get_icon("link"))
+            self._upload_btn.setText("生成链接")
             self._show_info(f"上传异常: {e}（文件已保存到本地）", "warning")
 
     def _on_deploy_html(self, html_text: str, save_path, title: str):
         """把 HTML 部署到 EdgeOne 匿名站点（后台线程，链 30 分钟内有效）"""
         self._upload_btn.setEnabled(False)
-        self._upload_btn.setText("⏳ 发布中…")
+        self._upload_btn.setIcon(get_icon("执行中"))
+        self._upload_btn.setText("发布中…")
         self._pending_upload_path = save_path
         self._pending_title = title
         self._pending_fmt = "html"
@@ -1051,7 +1088,8 @@ class ShareCardContent(QWidget):
             self._deploy_thread.start()
         except Exception as e:
             self._upload_btn.setEnabled(True)
-            self._upload_btn.setText("🌐 发布网页")
+            self._upload_btn.setIcon(get_icon("websearch"))
+            self._upload_btn.setText("发布网页")
             self._show_info(f"发布启动失败: {e}（文件已保存到本地）", "warning")
 
     def _on_deploy_finished(self, result):
@@ -1059,7 +1097,8 @@ class ShareCardContent(QWidget):
         save_path = self._pending_upload_path
         title = self._pending_title
         self._upload_btn.setEnabled(True)
-        self._upload_btn.setText("🌐 发布网页")
+        self._upload_btn.setIcon(get_icon("websearch"))
+        self._upload_btn.setText("发布网页")
         if err:
             self._show_info(f"发布失败: {err}（文件已保存到本地）", "warning")
             insert_record(
@@ -1096,7 +1135,8 @@ class ShareCardContent(QWidget):
         fmt = self._pending_fmt
         fmt_name = {"markdown": "md", "json": "json", "html": "html"}.get(fmt, fmt)
         self._upload_btn.setEnabled(True)
-        self._upload_btn.setText("🔗 生成链接")
+        self._upload_btn.setIcon(get_icon("link"))
+        self._upload_btn.setText("生成链接")
         if err:
             self._show_info(f"上传失败: {err}（文件已保存到本地）", "warning")
             insert_record(

@@ -28,7 +28,8 @@ import re
 
 from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtWidgets import QHBoxLayout, QLabel, QVBoxLayout, QWidget
-from qfluentwidgets import ConfigItem, ExpandSettingCard, FluentIcon, SwitchButton
+from qfluentwidgets import ConfigItem, ExpandSettingCard, SwitchButton
+from app.utils.app_icon import AppIcon
 
 from app.utils.config import Settings
 from app.utils.design_tokens import Colors, SwitchStyles, font_size_css, scale_font_size
@@ -139,7 +140,7 @@ class RenderAdvancedCard(DynamicHeightExpandCardMixin, ExpandSettingCard):
             items: 高级项清单，见 ADVANCED_ITEMS
             parent: 父控件
         """
-        super().__init__(FluentIcon.DEVELOPER_TOOLS, "高级配置", "Chromium 高级开关", parent)
+        super().__init__(AppIcon.DEVELOPER_TOOLS, "高级配置", "Chromium 高级开关", parent)
         self.cfg = Settings.get_instance()
         self._feature_item = feature_item
         self._flag_item = flag_item
