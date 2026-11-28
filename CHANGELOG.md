@@ -3,9 +3,9 @@
 - 助手记忆工具按作用域校验写入模式。项目笔记支持追加和整体替换，全局条目支持按 ID 阅读、修改和删除。批量整理先依次验证全部操作，再一次提交。
 - 会话开始时，全局记忆在分区内优先展示置顶和最近更新的条目，项目笔记按完整章节或自然段取舍。日常写入只追加事件日志，显式压缩支持按设备归档。
 
-## [v0.7.7] - 2026-11-28 (重新发布 #2)
+## [v0.7.7] - 2026-11-28 (重新发布 #3)
 
-自 v0.7.6 以来的变更 | 提交数：41 · 文件变更：579 · +35749/-17964 | 贡献者：dingma, drifox-bot
+自 v0.7.6 以来的变更 | 提交数：48 · 文件变更：664 · +37466/-18027 | 贡献者：dingma, drifox-bot
 
 ### ✨ 新功能 (New Features)
 
@@ -67,6 +67,33 @@
 ### 🔧 其他 (Chores & Build)
 
 - 重新发布 #2：纳入 2026-11-28 17:05~17:42 的 7 个提交，重建 tag 与 Release。
+
+### ✨ 新功能 (New Features) (重新发布 #3 追加)
+
+- **主题切换原地刷新** (`app/utils/theme_refresh.py` · `theme_manager.py` · `theme_mode.py` · `theme_style.py` · `design_tokens.py` · `app/widgets/tab_panel.py` · `workbench_panel.py` · `workspace_page_host.py` · `plugins/*/ui/`): 切换主题不再重建窗口，已打开的工作台、标签页与插件卡片就地重绘；YAML 未声明的主题 token 回落到类默认值，不再沿用上一主题的覆盖色。回归 `tests/ui/test_theme_mode_switch.py` · `tests/plugins/test_theme_batched_plugin_card_single_refresh.py`。
+- **紧凑模式思考预览限两行** (`app/widgets/card_render_core.py` · `card_viewers.py`): 思考预览固定两行，超出部分折叠。
+
+### 🐛 问题修复 (Bug Fixes) (重新发布 #3 追加)
+
+- **插件事务化重载** (`app/plugins/managers/plugin_manager.py` · `loaders/runtime_component_loader.py` · `builtin_reloaders.py` · `registries/*`): 同组件目录的多个模块先在临时注册表导入并执行入口，全部成功后一次替换注册项；任一模块失败则返回失败状态、原注册对象继续可用。修改清单会刷新该插件全部现存组件并卸载已删除组件，同名插件按系统 / Claude / 用户来源与覆盖设置重新选择生效版本。回归 `tests/plugins/test_runtime_reload_transaction.py` · `tests/perf/test_plugin_reload_real.py`。
+- **历史工具结果按消息投影** (`app/core/context/pipeline.py` · `plugins/system-context/context_tiers/`): 旧格式工具结果按所属消息投影，不再跨消息串位。
+- **工具结果入库定型与路径守卫** (`app/core/tools/tool_result_persister.py` · `context/budget.py` · `workers/chat_worker.py` · `subagent_worker.py`): 工具结果写入即定型，会话 ID 含路径分隔符时转哈希，避免越级落盘；发送前预算估算只写本地诊断，不中断请求也不改写前缀。回归 `tests/core/test_context_prefix_cache.py`。
+- **上下文层只作用于摄入阶段** (`plugins/system-context/context_tiers/tool_normalize.py` · `tool_shape.py` · `tool_prune.py`): 归一化、整形与裁剪限定在摄入阶段生效，重复处理不再逐步改写历史消息。
+- **样式方法优先级与插件兼容** (`app/utils/theme_style.py` · `plugins/*/ui/cards.py`): 样式方法按优先级解析，插件卡片沿用自身样式不再被宿主覆盖。
+- **欢迎态与标签管理器判断** (`app/widgets/message_card.py` · `tab_manager_window.py`): 欢迎模式条件收敛，标签管理器类型判断修正。
+- **BOM 配置解析** (`tests/widgets/test_dock_card_display_contract.py`): 带 BOM 的文件按 `utf-8-sig` 解析。
+
+### ⚡ 性能优化 (Performance) (重新发布 #3 追加)
+
+- **渲染缓存按字节预算与图片流式落盘** (`app/widgets/markdown_block_viewer.py` · `app/core/store/session_repository.py` · `app/widgets/anim_background.py` · `app/utils/image_utils.py`): Markdown HTML 前缀缓存 2 MiB、段落块缓存 4 MiB 执行 LRU 淘汰，主题与字号仍参与匹配；图片边解码边写盘，同批重复图片只解码一次；动画背景按上一帧及缩放成品估算预读深度，目标 24 MiB、保留 1~3 帧。实测：约 3 万字回复追加 180 段，Qt 控件 RSS 增量 65.88 → 33.28 MiB、Python 堆 39.99 → 5.96 MiB；保存 24 个 1 MiB 图片块堆峰值 26.68 → 2.69 MiB；3840×2160 背景预读 94.92 → 31.64 MiB。基线见 `docs/perf/perf-ledger.md`，复测 `tests/perf/test_render_attachment_memory.py`。
+
+### 📚 文档 (Docs) (重新发布 #3 追加)
+
+- `docs/architecture/plugin-architecture.md` 明确工具消息处理与 JSON 归一化边界；`docs/plugins/runtime-engines.md` 补热更新失败恢复语义与重载性能测量方法。
+
+### 🔧 其他 (Chores & Build) (重新发布 #3 追加)
+
+- 重新发布 #3：纳入 2026-11-28 19:24~19:32 的 7 个提交（85 文件 / +1717-985），重建 tag 与 Release。
 
 ## [v0.7.6] - 2026-11-27 (重新发布 #2)
 
