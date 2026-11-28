@@ -23,7 +23,7 @@ macOS: AVFoundation）。同一份素材能不能播取决于那台机器装了�
 [PERF] 解码移出主线程（2026-11-09）：WebP 单帧解码实测 1600x900 约 4.8ms，
 15fps 下占主线程 7.2%。改为后台线程预解码到小容量帧队列，主线程 advance()
 只从队列取现成帧（微秒级）；队列空（刚启动/刚重建）时回退同步解码，
-行为与旧实现逐一等价。队列上限 3 帧，满则工作线程等待，内存最坏 +16.5MB。
+行为与旧实现逐一等价。最多预读 3 帧，按原帧与缩放图的合计大小调整深度。
 """
 from __future__ import annotations
 
@@ -63,6 +63,7 @@ UNFOCUSED_TICK_MS = _TICK_MS * _UNFOCUSED_FACTOR
 # （弹窗/流式长帧），又不会把内存抬太多（1600x900 单帧 5.5MB → 最坏 +16.5MB）。
 # 队列满则工作线程等待，不会无限堆积。
 _PREFETCH_MAX = 3
+_PREFETCH_TARGET_BYTES = 24 * 1024 * 1024
 
 def _scale_frame_for(
     img: QImage, tw: int, th: int, fit: str, position: str
@@ -169,9 +170,10 @@ class AnimationSource:
         """后台循环：队列有空位就解一帧。"""
         reader = QImageReader(self.path)
         reader.setAutoTransform(True)
+        depth = _PREFETCH_MAX
         while not self._prefetch_stop.is_set():
             with self._prefetch_lock:
-                while len(self._prefetch) >= _PREFETCH_MAX and not self._prefetch_stop.is_set():
+                while len(self._prefetch) >= depth and not self._prefetch_stop.is_set():
                     self._prefetch_space.wait()
                 if self._prefetch_stop.is_set():
                     return
@@ -207,6 +209,9 @@ class AnimationSource:
                     scaled_map[size_key] = scaled
                     if chosen_key is None:
                         chosen_key = key
+            # 以最近一帧估算下一帧开销。4K 或多个视图同时预缩放时仍保留一帧前瞻。
+            frame_bytes = img.sizeInBytes() + sum(frame.sizeInBytes() for frame in scaled_map.values())
+            depth = max(1, min(_PREFETCH_MAX, _PREFETCH_TARGET_BYTES // frame_bytes))
             with self._prefetch_lock:
                 if self._prefetch_stop.is_set():
                     return
@@ -218,8 +223,7 @@ class AnimationSource:
             if not self._prefetch:
                 return None
             item = self._prefetch.popleft()
-            if len(self._prefetch) < _PREFETCH_MAX:
-                self._prefetch_space.notify()
+            self._prefetch_space.notify()
             return item
 
     def stop_prefetch(self) -> None:

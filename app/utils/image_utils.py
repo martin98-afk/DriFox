@@ -112,10 +112,8 @@ def compress_data_uri(data_uri: str, max_bytes: int = 5 * 1024 * 1024) -> str:
     header_end = data_uri.find(",")
     if header_end == -1:
         return data_uri
-    b64_data = data_uri[header_end + 1 :]
-
-    # 检查是否需要压缩
-    if len(b64_data) <= max_bytes:
+    # 普通附件直接复用原字符串，避免仅为测长就复制完整图片。
+    if len(data_uri) - header_end - 1 <= max_bytes:
         return data_uri
 
     digest = _data_uri_digest(data_uri)

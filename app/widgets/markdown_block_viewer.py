@@ -19,8 +19,10 @@ import hashlib
 import json
 import os
 import re
+import sys
 import time
 from collections import OrderedDict
+from collections.abc import MutableMapping
 from typing import Any, Dict, List, Optional, Tuple
 
 from PyQt5.QtCore import QFile, QEasingCurve, QPropertyAnimation, QRectF, QSize, Qt, QTimer, pyqtSignal
@@ -386,16 +388,64 @@ class _ThinkingSpinner(QWidget):
 
 # ── 通用标记段切分 ────────────────────────────────────────────────
 # [PERF] 增量 HTML 转换（_md_to_html_incremental）的缓存与合并判定。
-# 上限：单条 HTML 长数百至数千字符，按 128 条 × 1-4 KB/条 计约数百 KB，内存可控。
-# ⚠️ 上限必须显著大于真实回复的段数：一条长回复可切出上百段，上限过小会频繁
-# 触顶；触顶后用真 LRU 淘汰最久未用项（move_to_end + popitem(last=False)），
-# 平滑退化而不是整体 clear（clear 会让所有稳定段同时失效 → 周期性全量重算）。
+# 普通短段保留原条数上限；流式长段的历史版本按实际对象大小提前淘汰。
+def _render_payload_size(value) -> int:
+    """统计缓存持有的字符串、块字典和表格行/单元格；共享子对象保守重复计费。"""
+    size = sys.getsizeof(value)
+    if isinstance(value, dict):
+        return size + sum(_render_payload_size(item) for item in value.values())
+    if isinstance(value, (list, tuple)):
+        return size + sum(_render_payload_size(item) for item in value)
+    return size
+
+
+class _RenderCache(MutableMapping):
+    def __init__(self, max_entries: int, max_bytes: int):
+        self._entries = OrderedDict()
+        self._max_entries = max_entries
+        self._max_bytes = max_bytes
+        self._used_bytes = 0
+
+    def __len__(self):
+        return len(self._entries)
+
+    def __iter__(self):
+        return iter(self._entries)
+
+    def __getitem__(self, key):
+        return self._entries[key][0]
+
+    def get(self, key, default=None):
+        entry = self._entries.get(key)
+        if entry is None:
+            return default
+        self._entries.move_to_end(key)
+        return entry[0]
+
+    def __delitem__(self, key):
+        _, size = self._entries.pop(key)
+        self._used_bytes -= size
+
+    def __setitem__(self, key, value):
+        if key in self._entries:
+            del self[key]
+        size = _render_payload_size(key) + _render_payload_size(value)
+        if size > self._max_bytes:
+            return
+        while len(self) >= self._max_entries or self._used_bytes + size > self._max_bytes:
+            del self[next(iter(self._entries))]
+        self._entries[key] = (value, size)
+        self._used_bytes += size
+
+    def clear(self):
+        self._entries.clear()
+        self._used_bytes = 0
+
+
 _HTML_PREFIX_CACHE_MAX = 128
-_HTML_PREFIX_CACHE: "OrderedDict[str, str]" = OrderedDict()
-# [PERF] 段级块列表缓存（_plain_text_blocks）：key = 配置指纹 + 文本段原文，
-# value = 块列表。上限/LRU 策略同上。
+_HTML_PREFIX_CACHE = _RenderCache(_HTML_PREFIX_CACHE_MAX, 2 * 1024 * 1024)
 _TEXT_BLOCK_CACHE_MAX = 512
-_TEXT_BLOCK_CACHE: "OrderedDict[str, List[Dict[str, Any]]]" = OrderedDict()
+_TEXT_BLOCK_CACHE = _RenderCache(_TEXT_BLOCK_CACHE_MAX, 4 * 1024 * 1024)
 # [PERF] 代码块 Pygments 高亮结果缓存：key = (code, lang, style, 字号档位 key)，
 # value = <pre> inner HTML。虚拟滚动把 CodeBlockWidget 卸载/重建当常态（批次
 # 回收 → 滚动回看 → 原位重建），实例级缓存随实例死亡、重建路径命中率恒为 0，
@@ -515,7 +565,7 @@ def _config_fingerprint() -> str:
         return "default"
 
 
-def _text_block_cache_key(text: str) -> str:
+def _text_block_cache_key(text: str) -> tuple[str, str]:
     """段级缓存的 key：配置指纹 + 段原文。
 
     ⚠️ 必须带配置指纹：`_md_to_html` 产出的 inline style 内嵌**当前主题色**与
@@ -523,7 +573,7 @@ def _text_block_cache_key(text: str) -> str:
     命中旧配置的 HTML（实测 b1==b2 stale 复现）。带上指纹即可根治任何漏掉的
     刷新入口（配置一变 key 就变）。
     """
-    return f"{_config_fingerprint()}\x00{text}"
+    return _config_fingerprint(), text
 
 
 def _last_top_block_opens_mergeable(prefix: str) -> bool:
@@ -986,8 +1036,7 @@ def _md_to_html_incremental(text: str) -> str:
        prefix 末块合并（列表延续 / 相邻 blockquote 合并），分转会改变结构。
     3. 无空行边界时退化为整段转换。
 
-    缓存：`OrderedDict` LRU（上限 _HTML_PREFIX_CACHE_MAX，逾顶走真 LRU 淘汰
-    ——popitem(last=False) 逐条丢弃最久未用项，与 _cache_put 实际行为对齐）。
+    缓存按条数和字节数淘汰最久未用前缀。
     只缓存「以空行结尾的已闭合前缀」，不含变动中的尾部，故命中率随会话
     长度单调上升。
     """
@@ -1027,10 +1076,10 @@ def _md_to_html_incremental(text: str) -> str:
     try:
         # prefix 缓存也带配置指纹：其 HTML 同样内嵌主题色与字号
         pkey = _text_block_cache_key(prefix)
-        pre_html = _cache_get(_HTML_PREFIX_CACHE, pkey)
+        pre_html = _HTML_PREFIX_CACHE.get(pkey)
         if pre_html is None:
             pre_html = _md_to_html(prefix)
-            _cache_put(_HTML_PREFIX_CACHE, pkey, pre_html, _HTML_PREFIX_CACHE_MAX)
+            _HTML_PREFIX_CACHE[pkey] = pre_html
         if tail.endswith("\n\n"):
             return pre_html + _md_to_html(tail)
         return pre_html + "\n" + _md_to_html(tail)
@@ -1056,11 +1105,11 @@ def _plain_text_blocks(text: str) -> List[Dict[str, Any]]:
     if not text.strip():
         return []
     key = _text_block_cache_key(text)
-    cached = _cache_get(_TEXT_BLOCK_CACHE, key)
+    cached = _TEXT_BLOCK_CACHE.get(key)
     if cached is not None:
         return [dict(b) for b in cached]
     blocks = _plain_text_blocks_uncached(text)
-    _cache_put(_TEXT_BLOCK_CACHE, key, [dict(b) for b in blocks], _TEXT_BLOCK_CACHE_MAX)
+    _TEXT_BLOCK_CACHE[key] = [dict(b) for b in blocks]
     return blocks
 
 

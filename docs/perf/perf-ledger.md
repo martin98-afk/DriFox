@@ -222,3 +222,18 @@ perf 基线曾判「灌入 120 张、配额 12，淘汰 Δ=0，回收未生效�
 | 存量失败 6 个（transport 插件注册 / 测试环境类） | 建议另开单 | 本轮多单基线对照反复复现（HEAD 上即失败），与本轮改动无关；集中在 transport 插件注册与测试环境假设 |
 | 素材卡规范改进 | 建议采纳 | 出卡附「已核对 commit 范围」+「同函数族 ±30 行 [PERF] 注释」字段——本轮多单实际受益于人工补做这两步 |
 | 存量测试债（并行批遗留） | 已登记 | `-k "tier or context..."` 组合下 5 失败（`test_three_tiers_no_full_recount` ×3、`test_tool_result_pruner` ×2）与 TeamMail 过滤点 AST 守卫（期望 12 实际 10）、`test_lsp_gate_source.py` 2 失败（mock 未跟上 `command` kwarg）、`test_serializer_single_entry`/`test_e2e_serializer_plugin` 3 失败——均为 HEAD 基线复现的存量，建议随「存量失败 6 个」一并另开单 |
+
+## 2026-11-28 长回复、会话图片与动画背景内存
+
+Windows、Python 3.14.2，同机同负载。Qt 控件回放按预热后至回放结束的进程 RSS 差值计量，解析缓存与图片保存用 `tracemalloc` 计量，背景用预读队列内 `QImage` 的像素字节数计量。
+
+| 场景 | 计量范围 | 优化前 | 优化后 |
+| --- | --- | ---: | ---: |
+| 离屏 Qt Markdown 控件，约 3 万字回复追加 180 段并逐次刷新 | 测试进程 RSS 增量 | 65.88 MiB | 33.28 MiB |
+| 约 3 万字的 Qt 回复追加 180 段 | 预热后 Python 堆持有量 | 39.99 MiB | 5.96 MiB |
+| 保存 24 个不同的 1 MiB 图片块 | 输入已构造，保存期间额外 Python 堆峰值 | 26.68 MiB | 2.69 MiB |
+| 3840 × 2160 背景，单视图、无预缩放成品 | 预读队列原帧像素 | 94.92 MiB（3 帧） | 31.64 MiB（1 帧） |
+
+Qt 的 HTML 前缀缓存与段落块缓存分别按 2 MiB 和 4 MiB 预算执行 LRU 淘汰，主题与字号仍参与匹配。图片落盘后只复用文件名，同批重复图片仍只解码一次。每个动画源按上一帧及其缩放成品的大小估算预读深度，目标 24 MiB，保留 1 至 3 帧。当前显示帧、解码器和绘制表面另计。
+
+运行 `python -m pytest tests/perf/test_render_attachment_memory.py -q -s` 可复测 Python 堆与后台队列的三项指标。

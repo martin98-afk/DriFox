@@ -283,6 +283,39 @@ def _light_msg_fingerprint(msg: Any) -> tuple:
     ))
 
 
+def _persist_inline_image(url: str, out_dir: Path, saved: dict[tuple[str, bytes], str]) -> tuple[str, str]:
+    """临时解码缓冲只存活一张图，成功发布后仅缓存文件名。"""
+    import base64
+    import os
+    import tempfile
+
+    header_end = url.index(",")
+    meta = url[5:header_end]
+    payload = url[header_end + 1 :].encode("ascii")
+    key = (meta, hashlib.sha256(payload).digest())
+    name = saved.get(key)
+    if name is None:
+        raw = base64.b64decode(payload)
+        del payload
+        ext = ".png" if "png" in meta else (".jpg" if "jpeg" in meta or "jpg" in meta else ".bin")
+        name = hashlib.sha1(raw).hexdigest()[:16] + ext
+        target = out_dir / name
+        if not target.exists():
+            out_dir.mkdir(parents=True, exist_ok=True)
+            # 每个写入者独占临时文件，并发保存相同截图也只发布完整内容。
+            tmp = tempfile.NamedTemporaryFile(dir=out_dir, suffix=".tmp", delete=False)
+            try:
+                with tmp:
+                    tmp.write(raw)
+                    tmp.flush()
+                    os.fsync(tmp.fileno())
+                os.replace(tmp.name, target)
+            finally:
+                Path(tmp.name).unlink(missing_ok=True)
+        saved[key] = name
+    return name, meta
+
+
 def _persist_vision_image_blocks_impl(messages: List[Any], session_id: str, root_dir) -> List[Any]:
     """把消息 content 中 data:image 块替换为 image_ref 引用块（就地修改）。
 
@@ -291,17 +324,8 @@ def _persist_vision_image_blocks_impl(messages: List[Any], session_id: str, root
     - 已是 ``type=image_ref`` 的块跳过（幂等：二次 save 不重复落盘）
     - 单块失败隔离：该块保留原样（对齐 save 链既有逐段 try 风格）
     """
-    import base64 as _base64
-    import hashlib as _hashlib
-    import os as _os
-
     out_dir = Path(root_dir) / "screenshots" / "persisted" / session_id
-    # 优化点：原行为=每个 data:image 块都重复 b64decode+sha1（同一图被多条
-    # 消息/多块引用时按块数全量重解码，单图可达数 MB），fpath.exists() 只挡
-    # 写盘不挡解码；新行为=同一次 persist 调用内按完整 data URI 复用
-    # (raw, digest, ext, meta) 解码结果，失败块不缓存保持逐块 try 语义；
-    # 根因=解码结果只取决于 b64 串，重复解码是纯浪费。
-    decode_cache: Dict[str, tuple] = {}
+    saved: dict[tuple[str, bytes], str] = {}
     for msg in messages:
         if not isinstance(msg, dict):
             continue
@@ -316,33 +340,10 @@ def _persist_vision_image_blocks_impl(messages: List[Any], session_id: str, root
             if not isinstance(url, str) or not url.startswith("data:image"):
                 continue
             try:
-                header_end = url.find(",")
-                if header_end == -1:
-                    continue
-                cached = decode_cache.get(url)
-                if cached is not None:
-                    raw, digest, ext, meta = cached
-                else:
-                    meta = url[len("data:") : header_end]  # image/png;base64
-                    ext = ".png" if "png" in meta else (".jpg" if "jpeg" in meta or "jpg" in meta else ".bin")
-                    b64 = url[header_end + 1 :]
-                    raw = _base64.b64decode(b64)
-                    digest = _hashlib.sha1(raw).hexdigest()[:16]
-                    decode_cache[url] = (raw, digest, ext, meta)
-                out_dir.mkdir(parents=True, exist_ok=True)
-                fpath = out_dir / f"{digest}{ext}"
-                if not fpath.exists():  # 幂等：同图（同 sha1）不重复写
-                    # 原子写：先写同目录 .tmp 再 os.replace，避免进程中断留下
-                    # 半截文件（revive 侧读到损坏文件 → QImage 解码失败丢图）。
-                    tmp = out_dir / f".{digest}{ext}.tmp"
-                    with open(tmp, "wb") as _fh:
-                        _fh.write(raw)
-                        _fh.flush()
-                        _os.fsync(_fh.fileno())
-                    _os.replace(tmp, fpath)
+                name, meta = _persist_inline_image(url, out_dir, saved)
                 content[bi] = {
                     "type": "image_ref",
-                    "image_ref": {"file": fpath.name, "meta": meta, "session_id": session_id},
+                    "image_ref": {"file": name, "meta": meta, "session_id": session_id},
                 }
             except Exception:  # noqa: BLE001 — 单块失败保留原样
                 continue
