@@ -3653,6 +3653,33 @@ class CodeWebViewer(QWebEngineView):
                     background: {"rgba(15, 23, 42, 0.03)" if _is_light_diff else "rgba(255, 255, 255, 0.03)"};
                     border-radius: 4px;
                 }}
+                .think-compact[data-block-key] {{
+                    display: flex;
+                    align-items: flex-start;
+                    gap: 6px;
+                    box-sizing: border-box;
+                    width: fit-content;
+                    max-width: 100%;
+                    margin: 2px 0;
+                    padding: 3px 8px;
+                    color: var(--text-secondary);
+                    font-family: var(--dfx-font-family);
+                    font-size: {tag_font_size}px;
+                    line-height: 1.5;
+                }}
+                .think-compact > .ci-think {{
+                    flex: none;
+                    margin-top: calc(0.75em - {scale_icon_size(14) / 2}px);
+                }}
+                .think-preview-text {{
+                    display: -webkit-box;
+                    -webkit-box-orient: vertical;
+                    -webkit-line-clamp: 2;
+                    min-width: 0;
+                    overflow: hidden;
+                    white-space: normal;
+                    overflow-wrap: anywhere;
+                }}
                 .think-block__summary {{
                     padding: 5px 10px;
                     color: var(--text-secondary);
@@ -6564,23 +6591,25 @@ class CodeWebViewer(QWebEngineView):
                                         // 用户展开的思考/工具卡每批闪一次（2026-10-30 实测
                                         // 「工具与思考里面展开还是会闪烁」）。折叠态、展开 body、
                                         // 滚动位置都挂在外壳/子节点上，整块替换必然丢。
-                                        if ((sEl.textContent || '').length > (cur.textContent || '').length) {{
-                                            if (cur.classList && cur.classList.contains('think-compact')) {{
-                                                // 简洁模式思考纯文本行：无折叠结构，原地换文本
-                                                cur.textContent = sEl.textContent;
-                                            }} else {{
-                                                var _exp = cur.getAttribute('data-expanded');
-                                                var _oldBody = cur.querySelector('.cm-collapsible__body, .tool-block__body');
-                                                var _oldBodyHTML = _oldBody ? _oldBody.innerHTML : '';
+                                        if (cur.matches('.think-compact[data-block-key]') &&
+                                            sEl.matches('.think-compact[data-block-key]')) {{
+                                            // 新结论可能更短；按内容键同步，保留图标与限行结构。
+                                            if (cur.dataset.blockKey !== sEl.dataset.blockKey) {{
                                                 cur.innerHTML = sEl.innerHTML;
-                                                if (_exp !== null) {{
-                                                    cur.setAttribute('data-expanded', _exp);
-                                                    var _sum = cur.querySelector('.cm-collapsible__summary');
-                                                    if (_sum) _sum.setAttribute('aria-expanded', _exp);
-                                                }}
-                                                var _newBody = cur.querySelector('.cm-collapsible__body, .tool-block__body');
-                                                if (_newBody && _oldBodyHTML) _newBody.innerHTML = _oldBodyHTML;
+                                                cur.dataset.blockKey = sEl.dataset.blockKey;
                                             }}
+                                        }} else if ((sEl.textContent || '').length > (cur.textContent || '').length) {{
+                                            var _exp = cur.getAttribute('data-expanded');
+                                            var _oldBody = cur.querySelector('.cm-collapsible__body, .tool-block__body');
+                                            var _oldBodyHTML = _oldBody ? _oldBody.innerHTML : '';
+                                            cur.innerHTML = sEl.innerHTML;
+                                            if (_exp !== null) {{
+                                                cur.setAttribute('data-expanded', _exp);
+                                                var _sum = cur.querySelector('.cm-collapsible__summary');
+                                                if (_sum) _sum.setAttribute('aria-expanded', _exp);
+                                            }}
+                                            var _newBody = cur.querySelector('.cm-collapsible__body, .tool-block__body');
+                                            if (_newBody && _oldBodyHTML) _newBody.innerHTML = _oldBodyHTML;
                                         }}
                                         if (sEl.parentNode) sEl.parentNode.removeChild(sEl);
                                         continue;

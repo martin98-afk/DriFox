@@ -7,7 +7,7 @@
 在同一个滚动面板（.dfx-group-body[data-live]）里。思考块必须保持既有观感：
 
 * 流式活动块：``.v2-live-text.think-compact``，浅色 + 96px 限高窗口（CSS 保证）；
-* 定型块：``.think-compact`` 单行短预览（浅色背景 + 采样截断文本）。
+* 定型块：``.think-compact`` 最多两行短预览（浅色背景 + 摘句）。
 
 2026-11-28 回归：``_render_reasoning_block`` 新增 ``inline_groups and completed``
 分支，把完成态思考块降级成无样式的裸 ``div.dfx-group-reasoning``（纯文本全高

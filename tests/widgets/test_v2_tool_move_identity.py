@@ -28,9 +28,8 @@ def _after_patch_block() -> str:
     src = Path(card_viewers.__file__).read_text(encoding="utf-8")
     start = src.find("window._v2AfterPatch = function")
     assert start >= 0, "未找到 _v2AfterPatch 定义"
-    tail = src[start : start + 20000]
     # 骨架串在同一 f-string 内，按下一个 window.* 赋值切段更稳
-    m = re.search(r"window\._v2AfterPatch = function \(streaming\) \{\{.*?\n                \}\};", tail, re.S)
+    m = re.search(r"window\._v2AfterPatch = function \([^)]*\) \{\{.*?\n                \}\};", src[start:], re.S)
     assert m, "未找到 _v2AfterPatch 函数体边界"
     return m.group(0)
 

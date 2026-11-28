@@ -1332,6 +1332,8 @@ def _split_think_title(content: str) -> tuple:
 
 # 按句评估；英文句点后需有空白，保留文件名和版本号中的点。
 _THINK_SENTENCE_BREAK = re.compile(r"(?<=[。！？])(?=[^。！？])|(?<=[!?])[^\S\n]+|(?<=\.)[^\S\n]+(?=[A-Z])|\n+")
+_THINK_LIST_PREFIX = re.compile(r"^[^\S\n]*(?:[-*+]|\d{1,9}[.)])(?:[^\S\n]+|$)", re.M)
+_THINK_WORD = re.compile(r"[^\W_]")
 _THINK_FINDING = re.compile(
     r"根因(?:是|在|为|[：:])|原因(?:是|在于|[：:])|已(?:经)?(?:确认|定位|验证|修复)|"
     r"结论(?:是|为|[：:])|答案(?:是|为|[：:])|问题(?:出在|在于)|结果(?:显示|表明)|"
@@ -1368,9 +1370,12 @@ def _get_think_preview(content: str, max_length: int = 160) -> str:
     best = ""
     best_rank = -2
     prose = _CODE_BLOCK_REMOVE_PATTERN.sub("\n", content) if "```" in content else content
-    for raw in _THINK_SENTENCE_BREAK.split(prose.strip() or content):
+    # 纯代码块仍可摘出一行代码，跳过围栏和语言名；列表编号不能成为单独的句子。
+    if not prose.strip():
+        prose = "\n".join(line for line in content.splitlines() if not line.lstrip().startswith("```"))
+    for raw in _THINK_SENTENCE_BREAK.split(_THINK_LIST_PREFIX.sub("", prose)):
         sentence = " ".join(raw.split())
-        if not sentence:
+        if not _THINK_WORD.search(sentence):
             continue
         rank = _think_sentence_rank(sentence)
         # 多次修订时取较晚的发现或决定；无明确信号时保留首个陈述。
@@ -1554,34 +1559,29 @@ def _render_think_block(content: str, completed: bool = True, compact: bool = Fa
         # Responses 摘要自带小节标题（首行 **标题**）：标题进 summary 行、正文去掉该行，
         # 避免展开后重复一行带星号的标题。无标题时回到旧行为（预览采样）。
         think_title, think_body = _split_think_title(content)
+
+        # ── 简洁模式：纯文本行，不走折叠框（避免 save/restore 导致的消失→重现闪烁）──
+        # 带标题的摘要同时显示正文摘句。
+        if compact:
+            title = think_title if _THINK_WORD.search(think_title) else ""
+            sample = _get_think_preview(think_body)
+            preview = " · ".join(part for part in (title, sample) if part) or "思考已结束"
+            label = escape(sample or preview)
+            if title:
+                label = f"<strong>{escape(title)}</strong>" + (f" · {escape(sample)}" if sample else "")
+            block_seed = f"{content}|1"
+            block_key = "think-" + hashlib.sha1(block_seed.encode("utf-8")).hexdigest()[:12]
+            return (
+                f'<div class="think-compact" data-block-key="{block_key}"{_flip_attr}>'
+                f'{_get_think_icon_html(scale_icon_size(14))}'
+                f'<span class="think-preview-text" title="{escape(preview)}">{label}</span></div>'
+            )
+
+        # ── 非简洁模式：完整折叠框UI（图标标签 + 预览 + 可展开全文）──
         body_source = think_body or content
         think_icon = _get_think_icon_html()
         status_text = f'<span class="think-bulb">{think_icon}</span>'
         font_style = _get_think_block_styles()
-
-        # ── 简洁模式：纯文本行，不走折叠框（避免 save/restore 导致的消失→重现闪烁）──
-        # 带标题特例（Responses API）必须拼「标题 · 正文片段」：单行形态正文无处可见，
-        # 只显示标题会让思考内容彻底不可见（088c365e 回归）。无标题保持原预览采样。
-        if compact:
-            if think_title:
-                body_sample = _get_think_preview(think_body) if think_body.strip() else ""
-                preview = f"{think_title} · {body_sample}" if body_sample else think_title
-            else:
-                preview = _get_think_preview(content)
-            preview_weight = "500" if think_title else "normal"
-            block_seed = f"{content}|1"
-            block_key = "think-" + hashlib.sha1(block_seed.encode("utf-8")).hexdigest()[:12]
-            preview_right = (
-                f'<span style="color: var(--text-secondary); font-weight: {preview_weight}; margin-left: 8px; font-size: {scale_font_size(11)}px; '
-                'min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">'
-                f"{escape(preview)}</span>"
-            )
-            return f"""<div class="think-compact" data-block-key="{block_key}"{_flip_attr} style="margin: 2px 0; padding: 4px 8px; {font_style} display: flex; align-items: baseline; gap: 6px; border-radius: 4px;">
-    <span style="white-space: nowrap; flex-shrink: 0;">{status_text}</span>
-    {preview_right}
-</div>"""
-
-        # ── 非简洁模式：完整折叠框UI（图标标签 + 预览 + 可展开全文）──
         # 标题进 summary 行、正文在展开区完整可见，preview 用标题（无标题退回采样）。
         preview = think_title or _get_think_preview(body_source)
         preview_weight = '500' if think_title else 'normal'
@@ -3868,7 +3868,8 @@ _SKELETON_CACHE_MAX = 48
 # v102：分组流式工具栏的跟随态加固——程序置底改深度令牌识别（_followGroupTail /
 # _progDepth，替代 _lastFollowTop 等值比较），scroll 判定容差 4px→24px，新一轮
 # 流式重置 _followTail，搬移/重排后补一次置底。修「没动滚轮，工具栏自己就不置底」。
-_SKELETON_CACHE_VERSION = 102
+# v103：简洁思考预览按内容宽度排版，最多两行；原位更新保留图标和文字样式。
+_SKELETON_CACHE_VERSION = 103
 
 
 def _js_literal(value) -> str:

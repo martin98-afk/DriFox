@@ -102,3 +102,19 @@ def test_preview_fallback_and_truncation():
     assert _get_think_preview("让我看看。\n请求在第二次重试时超时。") == "请求在第二次重试时超时。"
     assert _get_think_preview("一段很长的连续文本" * 20, max_length=8) == "一段很长的..."
     assert _get_think_preview(" \n ") == ""
+
+
+def test_preview_skips_stray_closing_punctuation_and_numbered_list_markers():
+    assert _get_think_preview("先看近期的性能记录。\n）。\n下一批记录需要复核。") == "下一批记录需要复核。"
+    assert _get_think_preview("1.\n2. Check api.py for retries.") == "Check api.py for retries."
+
+
+def test_compact_preview_fallback_for_punctuation_and_code():
+    assert "思考已结束" in _render_think_block("）。", compact=True)
+    assert _get_think_preview("```python\nreturn value\n```") == "return value"
+
+
+def test_compact_preview_escapes_title_sample_and_tooltip():
+    html = _render_think_block('**<Plan>**\nUse "a" & "b".', compact=True)
+    assert "<strong>&lt;Plan&gt;</strong> · Use &quot;a&quot; &amp; &quot;b&quot;." in html
+    assert 'title="&lt;Plan&gt; · Use &quot;a&quot; &amp; &quot;b&quot;."' in html
