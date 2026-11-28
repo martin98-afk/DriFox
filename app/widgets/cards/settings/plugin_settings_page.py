@@ -291,6 +291,7 @@ _PAINT_RULES = {
     "detailMeta": "secondary",
     "fieldLabel": "primary",
     "configHint": "secondary",
+    "missingConfig": "error",
     "kvLabel": "secondary",
     "kvValue": "primary",
     "sectionTitle": "primary",
@@ -325,10 +326,15 @@ def _paint_theme_colors(root: QWidget) -> None:
             "primary": Colors.TEXT_PRIMARY,
             "secondary": Colors.TEXT_SECONDARY,
             "muted": Colors.TEXT_MUTED,
+            "error": Colors.ERROR,
         }
         import re
 
         for label in root.findChildren(QLabel):
+            if label.objectName() == "permBadge":
+                color = getattr(Colors, label.property("colorToken"))
+                label.setStyleSheet(f"color: {color}; border: 1px solid {color}; border-radius: 4px;")
+                continue
             role = _PAINT_RULES.get(label.objectName())
             if not role:
                 continue
@@ -464,6 +470,15 @@ class _PluginDetailView(QWidget):
         _apply_font(self)
         _paint_theme_colors(self)
 
+    def refresh_theme(self) -> None:
+        from app.utils.theme_style import refresh_page_theme
+
+        if self._entry and self._entry.custom_cards:
+            body = self._pages["config"].widget()
+            for card in body.findChildren(QWidget, options=Qt.FindDirectChildrenOnly):
+                refresh_page_theme(card)
+        self.refresh_icon()
+
     def refresh_icon(self) -> None:
         """主题深浅切换后按对应侧重解码头部图标"""
         if self._entry is None:
@@ -532,7 +547,7 @@ class _PluginDetailView(QWidget):
         layout.setSpacing(6)
         self._missing_hint = CaptionLabel(body)
         self._missing_hint.setWordWrap(True)
-        self._missing_hint.setStyleSheet(f"color: {Colors.ERROR};")
+        self._missing_hint.setObjectName("missingConfig")
         layout.addWidget(self._missing_hint)
         self._update_missing_hint(entry)
         form = PluginConfigForm(entry.info.name, body)
@@ -604,11 +619,7 @@ class _PluginDetailView(QWidget):
             spec = CATALOG.get(cap)
             level = getattr(spec.level, "value", spec.level) if spec is not None else "none"
             level_cn = _LEVEL_CN.get(str(level).lower(), str(level))
-            color = {
-                "high": Colors.ERROR,
-                "medium": Colors.WARNING,
-                "low": Colors.SUCCESS,
-            }.get(str(level).lower(), Colors.TEXT_MUTED)
+            color_token = {"high": "ERROR", "medium": "WARNING", "low": "SUCCESS"}.get(str(level).lower(), "TEXT_MUTED")
             row = QWidget(body)
             row_layout = QHBoxLayout(row)
             row_layout.setContentsMargins(0, 3, 0, 3)
@@ -616,7 +627,8 @@ class _PluginDetailView(QWidget):
             badge = CaptionLabel(level_cn, row)
             badge.setFixedWidth(28)
             badge.setAlignment(Qt.AlignCenter)
-            badge.setStyleSheet(f"color: {color}; border: 1px solid {color}; border-radius: 4px;")
+            badge.setObjectName("permBadge")
+            badge.setProperty("colorToken", color_token)
             row_layout.addWidget(badge, 0, Qt.AlignTop)
             text_box = QVBoxLayout()
             text_box.setContentsMargins(0, 0, 0, 0)
@@ -677,7 +689,7 @@ class _PluginDetailView(QWidget):
                 hh.setSpacing(16)
                 home_lbl = CaptionLabel("主页", home_row)
                 home_lbl.setFixedWidth(104)
-                home_lbl.setStyleSheet(f"color: {Colors.TEXT_SECONDARY};")
+                home_lbl.setObjectName("kvLabel")
                 hh.addWidget(home_lbl, 0, Qt.AlignTop)
                 link = HyperlinkButton(home, "访问主页", home_row)
                 link.setToolTip(home)
@@ -1127,7 +1139,7 @@ class PluginSettingsPage(QWidget):
             row.refresh_icon()
             row.update_entry(row._entry.state, row._entry.missing)
             _font_px(row._name, 0)
-        self._detail.refresh_icon()
+        self._detail.refresh_theme()
         _font_px(self._detail._title, 3)
         _font_px(self._detail._meta, -1)
         _refresh_hint_fonts(self._detail)

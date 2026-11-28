@@ -1584,16 +1584,6 @@ class GiteeCard(SettingCard):
         self._bind_btn.setFixedWidth(76)
         self._bind_btn.setMinimumHeight(30)
         self._bind_btn.setCursor(Qt.PointingHandCursor)
-        self._bind_btn.setStyleSheet(
-            f"QPushButton {{"
-            f"background-color: #0078d4; color: #ffffff; border: none;"
-            f"border-radius: 5px; padding: 5px 16px; {font_size_css(13)}"
-            f"font-weight: bold;"
-            f"}}"
-            f"QPushButton:hover {{ background-color: {Colors.BORDER_ACCENT}; }}"
-            f"QPushButton:pressed {{ background-color: {Colors.SELECTED_BG}; }}"
-            f"QPushButton:disabled {{ background-color: #444; color: #888; }}"
-        )
         self._bind_btn.clicked.connect(self._on_bind_clicked)
         self.hBoxLayout.addWidget(self._bind_btn)
 
@@ -1643,14 +1633,6 @@ class GiteeCard(SettingCard):
             self._load_avatar_async(owner)
             self._bind_btn.setText("解绑")
             self._bind_btn.setCursor(Qt.PointingHandCursor)
-            self._bind_btn.setStyleSheet(
-                f"QPushButton {{"
-                f"color: #fa5151; border: 1px solid #fa5151; border-radius: 6px;"
-                f"padding: 5px 12px; font-size: {scale_font_size(12)}px;"
-                f"background: transparent;"
-                f"}}"
-                f"QPushButton:hover {{ background-color: rgba(250, 81, 81, 0.1); }}"
-            )
             # 已绑定 → 自动启用同步（如尚未启动）；与启动链共用幂等函数
             self._auto_enable_sync()
         else:
@@ -1662,6 +1644,22 @@ class GiteeCard(SettingCard):
             self._avatar.setToolTip("未绑定")
             self._bind_btn.setText("绑定")
             self._bind_btn.setCursor(Qt.PointingHandCursor)
+            self._sync_dot.hide()
+
+        self.refresh_style()
+
+    def refresh_style(self):
+        """单独更新按钮配色，避免外观变化触发同步或头像请求。"""
+        if self._bound_owner:
+            self._bind_btn.setStyleSheet(
+                f"QPushButton {{"
+                f"color: #fa5151; border: 1px solid #fa5151; border-radius: 6px;"
+                f"padding: 5px 12px; font-size: {scale_font_size(12)}px;"
+                f"background: transparent;"
+                f"}}"
+                f"QPushButton:hover {{ background-color: rgba(250, 81, 81, 0.1); }}"
+            )
+        else:
             self._bind_btn.setStyleSheet(
                 f"QPushButton {{"
                 f"background-color: #0078d4; color: #ffffff; border: none;"
@@ -1672,7 +1670,6 @@ class GiteeCard(SettingCard):
                 f"QPushButton:pressed {{ background-color: {Colors.SELECTED_BG}; }}"
                 f"QPushButton:disabled {{ background-color: #444; color: #888; }}"
             )
-            self._sync_dot.hide()
 
     # ── 真实头像拉取（与 GiteeAccountRow 共用模块级 helpers） ──
 

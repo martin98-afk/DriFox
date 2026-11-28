@@ -10535,9 +10535,7 @@ class OpenAIChatToolWindow(ToolWindow):
         """[ANIM #A3] 主题切换 grab 快照淡出：用旧视觉快照遮住「瞬跳」（EXIT_MS）。
 
         时机必须在 Colors.refresh()（配色切换）之前 grab——widget.grab() 强制
-        重绘，晚于配色变化拿到的是新主题快照，淡出失效。重入门禁：appearance
-        epoch 记账，淡出完成时 epoch 已变立即让路（新快照层接管，不动它）；
-        二次切换进入时先销毁旧快照层再 grab，防双层叠加遮罩。收尾纪律同
+        重绘，晚于配色变化拿到的是新主题快照，淡出失效。二次切换先关闭旧快照。收尾纪律同
         #A1：移除 effect 与层，防常驻离屏合成。全程吞异常：快照/动画失败
         不阻塞主题切换功能本身。
         """
@@ -10576,11 +10574,6 @@ class OpenAIChatToolWindow(ToolWindow):
 
             def _cleanup():
                 try:
-                    if _TRC.get_appearance_epoch() != epoch:
-                        return  # 已让路：新快照层接管，本层由重入路径销毁
-                except RuntimeError:
-                    pass
-                try:
                     overlay.setGraphicsEffect(None)
                     overlay.close()
                     overlay.deleteLater()
@@ -10590,7 +10583,6 @@ class OpenAIChatToolWindow(ToolWindow):
                     pass
 
             fade_widget(overlay, 0.0, duration=Animations.EXIT_MS, on_finished=_cleanup)
-            self._theme_fade_epoch = epoch
         except Exception:
             pass  # 快照/动画失败不阻塞主题切换
 
@@ -10609,7 +10601,10 @@ class OpenAIChatToolWindow(ToolWindow):
             pass  # 模块 / 主题系统未就绪不阻塞主题刷新
         # [首屏一次显示] 等待中的遮罩按新主题重刷（未激活时零开销）
         self._history_first_paint_theme_changed()
-        self._apply_runtime_ui_settings(scope="theme")
+        from app.utils.theme_refresh import ThemeRefreshCoordinator
+
+        scope = ThemeRefreshCoordinator.pending_window_scope(self, "theme")
+        self._apply_runtime_ui_settings(scope=scope, _skip_global=True)
 
     # ── 多窗口批处理：避免每个窗口重复执行全局操作 ──
     _theme_batch_timer = None
@@ -10638,6 +10633,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # 多项的经典场景）。哨兵存在原因：None 双义（无待刷/全量），
         # 已合并全量后若继续用 None 表示，会被后续 scope 当成「本批第一个」覆盖。
         cls = type(self)
+        scope = scope or cls._BATCH_SCOPE_FULL
         previous = cls._theme_batch_scope
         if previous == cls._BATCH_SCOPE_FULL or previous == scope:
             pass  # 已全量 / 同类型，保持
@@ -10742,37 +10738,28 @@ class OpenAIChatToolWindow(ToolWindow):
                 _tab_active_win = _tm.get_current_window()
         except Exception:
             pass
-        for win in window_registry.alive_window_instances():
+        windows = window_registry.alive_window_instances()
+        for win in windows:
             if getattr(win, "_is_destroyed", False):
                 continue
+            scope = ThemeRefreshCoordinator.pending_window_scope(win, final_scope)
             # Tab 模式下非可见窗口跳过刷新，标记延迟
-            if _tab_active_win is not None and win is not _tab_active_win:
+            if _tab_active_win is not None and win is not _tab_active_win and win.window() is _tm:
+                win._theme_needs_refresh_scope = scope
                 win._theme_needs_refresh = True
-                # P5b：记录待刷 scope，切回 tab 补刷时精确执行（V2 方案 A）
-                win._theme_needs_refresh_scope = final_scope
                 continue
             _wid = win.__dict__.get("_window_id", "?")
             try:
                 ThemeRefreshCoordinator.timer_start(f"win-{_wid}")
-                win._apply_runtime_ui_settings(scope=final_scope, _skip_global=True)
+                win._apply_runtime_ui_settings(scope=scope, _skip_global=True)
                 ThemeRefreshCoordinator.timer_end(f"win-{_wid}")
                 win._theme_needs_refresh = False
             except Exception as e:
                 logger.warning(f"[batched theme refresh] window {win._window_id}: {e}")
         ThemeRefreshCoordinator.timer_end("windows")
 
-        # ── Tab 模式：刷新 TabManagerWindow 样式 ──
-        # 主题变更路径不走 theme_manager.dispatch_refresh()，而是手动遍历
-        # window_registry.window_instances，导致 TabManagerWindow 注册的
-        # refresh_target 回调从未触发。此处直接更新。
-        try:
-            from app.widgets.tab_manager_window import TabManagerWindow as _TabManagerWindow
-
-            _tm = _TabManagerWindow.get_instance()
-            if _tm is not None:
-                _tm._on_theme_changed()
-        except Exception as e:
-            logger.warning(f"[batched theme refresh] TabManagerWindow: {e}")
+        # 对话窗口已按 scope 处理；其余登记目标（含主框架、插件弹窗和装饰层）各刷一次。
+        theme_manager.refresh_registered_targets(exclude=windows)
 
         ThemeRefreshCoordinator.timer_end("batched_total")
         # 超过阈值就自动打一条 warning 摘要（不依赖 DRIFOX_DEBUG_THEME_PERF）：
@@ -11465,13 +11452,12 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # ── 幂等跳过：同一主题直接跳过颜色/主题块 ──
         current_theme_id = theme_manager.get_current_theme_id()
-        if is_color and getattr(self, "_last_color_theme_id", None) == current_theme_id:
-            is_color = False  # 主题未变，跳过颜色块；字体相关块照常执行
-        else:
-            self._last_color_theme_id = current_theme_id
+        color_key = (current_theme_id, ThemeRefreshCoordinator.get_version())
+        if is_color and getattr(self, "_last_color_key", None) == color_key:
+            is_color = False
 
         # ── 幂等跳过：字体族/字号未变则跳过对应块 ──
-        # 与 _last_color_theme_id 同模式。Gitee 同步场景下 LLMSettingsCard 监听链
+        # 与颜色缓存同理。Gitee 同步场景下 LLMSettingsCard 监听链
         # （30ms debounce）与同步服务兜底（150ms 分片）会对同一次字体变更各刷一遍；
         # 字体块含 findChildren 全树 + MessageCard 重渲，无哨兵即双跑（多窗口 ×2）。
         _not_seen = object()  # 哨兵默认值：属性未设时保证与任何配置值不等
@@ -11549,8 +11535,6 @@ class OpenAIChatToolWindow(ToolWindow):
             self._first_run_guide.refresh_style()
         if is_color:
             if not _skip_global:
-                theme_manager.on_theme_changed()
-
                 # 同步 qfluentwidgets 基础主题
                 # [PERF] lazy=True 同 _execute_batched_theme_refresh 的全局段
                 # （批处理路径已刷，此处是非批处理/单窗口直调兜底，语义一致）
@@ -11563,6 +11547,8 @@ class OpenAIChatToolWindow(ToolWindow):
                         setTheme(Theme.DARK, lazy=True)
                 except Exception:
                     pass
+
+                theme_manager.on_theme_changed()
 
             # 对话框背景完全透明，由外层容器兜底，不叠加独立背景层。
             # [T15] 同串短路：主题切换循环内多次进入，同串重写无谓 repolish
@@ -11800,23 +11786,8 @@ class OpenAIChatToolWindow(ToolWindow):
                 if self._settings_popup:
                     for frame in _popup_frames:
                         self._safe_refresh(frame)
-                    # 补充刷新设置弹窗中的命名子卡片（不在 findChildren 范围的子类）
-                    for card_name in (
-                        "uiFontSizeCard",
-                        "uiThemeModeCard",
-                        "uiThemeStyleCard",
-                        "llmFontCard",
-                        "llmSkillsCard",
-                        "llmProviderCard",
-                        "mcpListCard",
-                        "lspListCard",
-                        # 手风琴类卡片（ExpandSettingCard 子类，不在 SystemCardFrame
-                        # findChildren 范围，漏刷会导致内部选项颜色停留旧主题）
-                        "pluginToolCard",
-                        "pluginAgentCard",
-                        "secretModeCard",
-                    ):
-                        self._safe_refresh(getattr(self._settings_popup, card_name, None))
+                    for card in self._settings_popup.appearance_cards():
+                        self._safe_refresh(card)
                     # 刷新设置弹窗分隔标签
                     if hasattr(self._settings_popup, "_refresh_sep_labels"):
                         self._settings_popup._refresh_sep_labels()
@@ -11904,6 +11875,8 @@ class OpenAIChatToolWindow(ToolWindow):
         # 与 _settings_btn_icon 同理用当前主题重设（含自定义服务商回退图标）
         self._refresh_provider_icon_pixmap()
 
+        if is_color:
+            self._last_color_key = (current_theme_id, ThemeRefreshCoordinator.get_version())
         ThemeRefreshCoordinator.timer_end("cards_5b")
         if self._slow_refresh_cards:
             logger.warning(f"[theme refresh] 慢刷新卡: {' '.join(self._slow_refresh_cards)}")

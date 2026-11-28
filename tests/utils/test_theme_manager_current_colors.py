@@ -48,3 +48,19 @@ def test_current_colors_returns_own_theme_when_available(monkeypatch):
     own = theme_manager.get_theme(tid)
     assert own and own.get("colors")
     assert theme_manager.get_current_colors() == own["colors"]
+
+
+def test_optional_color_is_restored_when_next_theme_omits_it(monkeypatch):
+    from app.utils import design_tokens
+
+    class TestColors(design_tokens.Colors):
+        _cached_theme_items = None
+
+    theme = {"tag_green": "#123456", "text_primary": "#333333"}
+    monkeypatch.setattr(design_tokens, "current_theme", lambda: theme)
+    monkeypatch.setattr(design_tokens, "_apply_tooltip_style", lambda: None)
+    TestColors.refresh()
+    assert TestColors.TAG_GREEN == "#123456"
+    del theme["tag_green"]
+    TestColors.refresh()
+    assert TestColors.TAG_GREEN == design_tokens._THEME_TOKEN_DEFAULTS["TAG_GREEN"]

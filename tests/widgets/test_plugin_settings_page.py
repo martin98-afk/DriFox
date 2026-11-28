@@ -347,6 +347,45 @@ def test_detail_renders_plugin_custom_settings_card(env, qapp, fresh_ui_registry
     assert config_body.findChild(_CustomCard) is not None
 
 
+def test_open_custom_settings_pages_follow_theme_without_losing_input(env, qtbot, fresh_ui_registry, monkeypatch):
+    from importlib import import_module
+
+    from PyQt5.QtWidgets import QLineEdit
+
+    from app.utils.theme_refresh import ThemeRefreshCoordinator
+    from app.widgets.cards.settings.llm_settings_card import LLMSettingsCard
+
+    class SettingsEditor(QLineEdit):
+        def refresh_style(self):
+            self.setStyleSheet(f"color: {page_mod.Colors.TEXT_PRIMARY};")
+
+    gateway = import_module("plugins.system-im.ui.settings_card").ImGatewaySettingsCard
+    fresh_ui_registry.register_settings_tab("browser", "editor", "编辑器", SettingsEditor)
+    fresh_ui_registry.register_settings_card("browser", "gateway", "网关", gateway)
+    settings = LLMSettingsCard()
+    qtbot.addWidget(settings)
+    settings.show()
+    settings._set_active_page("tab:browser:editor")
+    editor = settings._plugin_tab_pages["tab:browser:editor"]
+    editor.setText("正在编辑")
+
+    settings._set_active_page("plugins")
+    page = settings.pluginSettingsPage
+    page._select("browser")
+    card = page._detail.findChild(gateway)
+    assert card is not None and card.isVisible()
+    monkeypatch.setattr(page_mod.Colors, "refresh", lambda: None)
+    monkeypatch.setattr(page_mod.Colors, "TEXT_MUTED", "#234567")
+    monkeypatch.setattr(page_mod.Colors, "TEXT_PRIMARY", "#123456")
+    monkeypatch.setattr(ThemeRefreshCoordinator, "get_appearance_epoch", lambda: 91234)
+    settings.refresh_style()
+    assert "#234567" in card._empty_label.styleSheet()
+    assert page._current == "browser"
+    settings._set_active_page("tab:browser:editor")
+    assert "#123456" in editor.styleSheet()
+    assert editor.text() == "正在编辑"
+
+
 def test_detail_shows_system_card_frame_custom_card(env, qapp, fresh_ui_registry):
     """SystemCardFrame 派生卡在详情页必须可见。
 

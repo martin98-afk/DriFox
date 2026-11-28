@@ -613,9 +613,12 @@ class ShortcutManagerCard(QWidget):
     def set_context_provider(self, provider: Callable[[], dict]):
         self._context_provider = provider
 
-    def show_card(self):
+    def refresh_style(self):
         self._apply_latest_theme()
         self._apply_plugin_icon()
+
+    def show_card(self):
+        self.refresh_style()
         self._refresh()
         self.setVisible(True)
 

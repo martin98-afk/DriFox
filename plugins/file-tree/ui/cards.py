@@ -707,6 +707,8 @@ class FileTreeCard(QWidget):
         """
         if not isinstance(context, dict) or not context:
             return
+        if callable(context.get("context_provider")):
+            self._host_context_provider = context["context_provider"]
         self._context = _file_tree_context(context)
         self._context_provider = lambda ctx=self._context: ctx
         if self.isVisible():
@@ -875,6 +877,11 @@ class FileTreeCard(QWidget):
         self._apply_latest_theme()
         self._async_load_tree()
 
+    def refresh_style(self) -> None:
+        """只更新外观，保留树模型、展开项和当前预览。"""
+        self._refresh_host_context()
+        self._apply_latest_theme()
+
     def _refresh_host_context(self) -> None:
         """向宿主拉最新上下文（拿不到时保持旧 context，不抛）"""
         provider = self._host_context_provider
@@ -972,7 +979,10 @@ class FileTreeCard(QWidget):
         # setStyleSheet + setFont 会触发整树 unpolish/polish + 全量重绘
         # （树 2000+ 行时单次 40-130ms，实测），而主题 / 字体 / 颜色未变时
         # 产出必然不变 —— 跳过后切页路径零成本。
-        signature = (tree_style, placeholder_style, header_style, root_style, split_style, quick_handle_qss, font_family, font_size)
+        signature = (
+            tree_style, placeholder_style, header_style, root_style, split_style, quick_handle_qss,
+            font_family, font_size, self._colors["text_secondary"].rgba(), self._colors["card_bg"].rgba(),
+        )
         if signature == self._theme_signature:
             return
         self._theme_signature = signature
@@ -1028,6 +1038,9 @@ class FileTreeCard(QWidget):
             font_size=font_size,
             scrollbar_qss=scrollbar_style,
         )
+
+        if self._global_preview is not None:
+            self._global_preview.set_colors(self._colors, scrollbar_style)
 
     # ── 异步加载 ──
 

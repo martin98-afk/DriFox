@@ -113,15 +113,7 @@ def _build_icon(color: str, size: int = _ICON_SIZE) -> QIcon:
     return QIcon(pixmap)
 
 
-# ── 主题切换刷新：走 UIEventBus，不是 theme_manager.register_refresh_target ──
-# 🐛 根因（2026-08-30 实修）：主程序的主题切换走
-# `main_widget._execute_batched_theme_refresh`，它只做 Colors.refresh() +
-# theme_manager.on_theme_changed() + per-window `_apply_runtime_ui_settings()`，
-# **从不调用 theme_manager.dispatch_refresh()** → 注册进 _refresh_targets 的
-# widget 一个都收不到 refresh_theme()（main_widget.py:9185 的注释也点明了这一点）。
-# dispatch_refresh() 只在 theme_manager.reload() / config_sync 里被调用。
-# 可靠的广播源是 `on_theme_changed()` 发布的 EV_THEME_CHANGED 事件。
-#
+# EV_THEME_CHANGED 在全局配色更新后发出。
 # ⚠️ UIEventBus.subscribe 持有回调的**强引用**，直接传 self._apply_style 会让
 # 按钮永远不被回收（父窗口销毁后仍滞留）。因此这里用模块级 WeakSet 登记实例，
 # 只订阅一次模块级函数。
@@ -182,14 +174,10 @@ class ScrollToBottomButton(QPushButton):
         if on_click is not None:
             self.clicked.connect(on_click)
 
-        # 主题切换：EV_THEME_CHANGED 才是真正会被派发的广播
-        # （register_refresh_target 走的 dispatch_refresh 在主题切换路径上没人调，
-        #  但 reload() / config_sync 会调，两条都留着，靠签名去重）
         self.refresh_theme = self._apply_style
         try:
             _BUTTONS.add(self)
             _ensure_theme_subscription()
-            theme_manager.register_refresh_target(self)
         except Exception:  # noqa: BLE001
             pass
 

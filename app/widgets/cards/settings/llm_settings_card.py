@@ -28,6 +28,7 @@ from qfluentwidgets import (
     ScrollArea,
     SettingCard,
     SwitchSettingCard,
+    setCustomStyleSheet,
 )
 from app.utils.app_icon import AppIcon
 
@@ -100,7 +101,11 @@ class _PreferenceRow:
         self.setMaximumHeight(16777215)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         self.setObjectName("settingsPreferenceRow")
-        self.setStyleSheet(f"QFrame#settingsPreferenceRow {{ border-bottom: 1px solid {Colors.DIVIDER_COLOR}; }}")
+        self.refresh_style()
+
+    def refresh_style(self):
+        qss = f"QFrame#settingsPreferenceRow {{ border-bottom: 1px solid {Colors.DIVIDER_COLOR}; }}"
+        setCustomStyleSheet(self, qss, qss)
 
     def paintEvent(self, event):
         QFrame.paintEvent(self, event)
@@ -1444,7 +1449,8 @@ class LLMSettingsCard(SystemCardFrame):
 
         scroll.setWidget(body)
         # 内容层不透明实底（启用 Qt 滚动 blit），必须在 setWidget 之后
-        make_scroll_content_opaque(body, Colors.CARD_BG.format(alpha=255), 230, Colors.CONTENT_BG)
+        self._nav_scroll = scroll
+        self._apply_page_surface(scroll)
         outer.addWidget(scroll)
         # 宽度按最长项自适应（sizeHint 已含图标/文字/内边距，只补左侧指示条与外边距）
         widest = max((btn.sizeHint().width() for btn in self._nav_buttons.values()), default=150)
@@ -1491,6 +1497,10 @@ class LLMSettingsCard(SystemCardFrame):
             return icon_src.qicon()
         return icon_src.icon() if hasattr(icon_src, "icon") else icon_src
 
+    @staticmethod
+    def _apply_page_surface(scroll):
+        make_scroll_content_opaque(scroll.widget(), Colors.CARD_BG.format(alpha=255), 230, Colors.CONTENT_BG)
+
     def _make_page(self) -> tuple:
         """创建单个分页：独立 QScrollArea + 垂直内容布局"""
         page = ScrollArea(self)
@@ -1506,7 +1516,7 @@ class LLMSettingsCard(SystemCardFrame):
         layout.setSpacing(6)
         page.setWidget(inner)
         # 内容层不透明实底（启用 Qt 滚动 blit），必须在 setWidget 之后
-        make_scroll_content_opaque(inner, Colors.CARD_BG.format(alpha=255), 230, Colors.CONTENT_BG)
+        self._apply_page_surface(page)
         return page, layout
 
     def _set_active_page(self, tab_id: str):
@@ -1830,6 +1840,11 @@ class LLMSettingsCard(SystemCardFrame):
     def _expand_page_cards(self, tab_id: str):
         """进入分页时展开页内可展开卡片：进页即见列表，无需再点一次标题栏"""
         self._ensure_page_ready(tab_id)
+        page_widget = self.__dict__.get("_plugin_tab_pages", {}).get(tab_id)
+        if page_widget is not None:
+            from app.utils.theme_style import ensure_theme_fresh
+
+            ensure_theme_fresh(page_widget)
         layout = self._page_layouts.get(tab_id)
         if layout is None:
             return
@@ -2053,15 +2068,20 @@ class LLMSettingsCard(SystemCardFrame):
             from app.utils.design_tokens import get_unified_scrollbar_style
 
             sb_style = get_unified_scrollbar_style(8)
-            for page in getattr(self, "_page_widgets", {}).values():
+            for page in (self.__dict__.get("_nav_scroll"), *getattr(self, "_page_widgets", {}).values()):
                 if not isinstance(page, ScrollArea):
                     continue
+                self._apply_page_surface(page)
                 for sb in (page.verticalScrollBar(), page.horizontalScrollBar()):
                     if sb is not None:
                         set_style_sheet_if_changed(sb, sb_style)
         except Exception:
             pass
         _TRC.timer_end("llm_sb")
+        from app.utils.theme_style import refresh_page_theme
+
+        for widget in self.__dict__.get("_plugin_tab_pages", {}).values():
+            refresh_page_theme(widget)
         # 插件页是自定义行控件（非 SettingCard/SystemCardFrame），不在上面两条
         # 刷新路径的 findChildren 范围内，单独刷一次行样式（选中/hover 用主题色）
         try:
@@ -2275,6 +2295,14 @@ class LLMSettingsCard(SystemCardFrame):
             except RuntimeError:
                 pass  # __new__ 桩（测试 fixture）无真实页面
 
+    def appearance_cards(self):
+        """只枚举已构建的设置卡，实时切换与隐藏后重开共用。"""
+        from app.widgets.cards.settings.security_center_card import SecurityCenterCard
+
+        for card in self.findChildren((SettingCard, ExpandSettingCard, SecurityCenterCard)):
+            if hasattr(card, "refresh_style"):
+                yield card
+
     def _refresh_appearance_from_config(self):
         """根据当前配置刷新外观样式
 
@@ -2285,11 +2313,6 @@ class LLMSettingsCard(SystemCardFrame):
         actual_size = get_ui_font_size()
         apply_font_size_to_widget(self, actual_size)
 
-        # 浅/深色切换 → 清除浅色检测缓存（图标由 QIconEngine 自动适配）
-        from app.utils.theme_manager import theme_manager
-
-        theme_manager.on_theme_changed()
-
         if hasattr(self, "refresh_style"):
             self.refresh_style()
 
@@ -2298,46 +2321,8 @@ class LLMSettingsCard(SystemCardFrame):
         for frame in self.findChildren(SystemCardFrame):
             if hasattr(frame, "refresh_style"):
                 frame.refresh_style()
-        # AppearanceComboCard / FontSettingCard（SettingCard 子类，不在以上遍历范围）
-        for card_name in (
-            "uiFontSizeCard",
-            "uiChatWidthCard",
-            "uiThemeModeCard",
-            "uiThemeStyleCard",
-            "uiMusicCard",
-            "uiFontCard",
-            "llmFontCard",
-            "renderRestartCard",
-            "renderStatusCard",
-        ):
-            card = getattr(self, card_name, None)
-            if card is not None and hasattr(card, "refresh_style"):
-                card.refresh_style()
-        # 手风琴类卡片（ExpandSettingCard 子类，不在以上遍历范围）
-        for card_name in (
-            "llmSkillsCard",
-            "llmProviderCard",
-            "hookListCard",
-            "mcpListCard",
-            "lspListCard",
-            "pluginToolCard",
-            "pluginAgentCard",
-            "renderAdvancedCard",
-            "updateProxyCard",
-            "secretModeCard",
-        ):
-            card = getattr(self, card_name, None)
-            if card is not None and hasattr(card, "refresh_style"):
-                card.refresh_style()
-        # 安全中心：容器级 QSS 构造时定格，需显式重设（页懒构建，未建时 findChildren 为空即构造时已用新主题）
-        from app.widgets.cards.settings.security_center_card import SecurityCenterCard
-
-        for card in self.findChildren(SecurityCenterCard):
-            if hasattr(card, "refresh_style"):
-                try:
-                    card.refresh_style()
-                except RuntimeError:
-                    pass
+        for card in self.appearance_cards():
+            card.refresh_style()
         # ── SettingCard 图标大小（单次 findChildren） ──
         icon_sz = scale_icon_size(16)
         for card in self.findChildren(SettingCard):

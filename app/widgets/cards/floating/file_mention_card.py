@@ -971,7 +971,8 @@ class FileMentionCard(QWidget):
                 w.refresh_theme()
             except RuntimeError:
                 continue
-        # 面包屑路径条颜色随主题重建
+        # 同一路径的文字色和字号也会变化。
+        self._breadcrumb_sig = None
         self._update_breadcrumb()
 
     def set_root_dir(self, root_dir: str):

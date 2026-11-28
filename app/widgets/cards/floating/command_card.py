@@ -1027,6 +1027,9 @@ class CommandCard(QWidget):
             self._apply_scroll_area_styles(self._detail_params_scroll)
         if hasattr(self, "_detail_value_scroll") and self._detail_value_scroll is not None:
             self._apply_scroll_area_styles(self._detail_value_scroll)
+        # 参数和值列表与主列表共用浮动卡底色。
+        for content in (self._detail_params_content, self._detail_value_content):
+            make_scroll_content_opaque(content, Colors.CARD_BG.format(alpha=255), 250, Colors.CONTENT_BG)
         # 4. 命令列表 widget（hover/selected 背景）—— 虚拟化：遍历已绑定槽
         for w in list(self._slot_widgets.values()):
             if not isinstance(w, CommandItemWidget):

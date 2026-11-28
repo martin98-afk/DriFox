@@ -21,7 +21,7 @@ from qfluentwidgets import (
     TransparentToolButton,
 )
 from qfluentwidgets import FluentIcon
-from app.plugins.sdk import caps_for
+from app.plugins.sdk import bind_theme_qss, caps_for
 
 from app.utils.design_tokens import Colors
 from app.widgets.cards.settings.base_settings_card import BaseSettingsCard
@@ -96,18 +96,16 @@ class _PlatformRow(QFrame):
         self.enable_switch.checkedChanged.connect(self._on_toggled)
         layout.addWidget(self.enable_switch)
 
-        self._apply_row_style()
-
-    def _apply_row_style(self) -> None:
-        self.setStyleSheet(
-            f"""
+        bind_theme_qss(
+            self,
+            lambda colors: f"""
             _PlatformRow {{
                 background: transparent;
-                border: 1px solid {Colors.BORDER};
+                border: 1px solid {colors.BORDER};
                 border-radius: 6px;
             }}
             _PlatformRow:hover {{
-                border-color: {Colors.BORDER_ACCENT};
+                border-color: {colors.BORDER_ACCENT};
             }}
             """
         )
@@ -203,7 +201,7 @@ class ImGatewaySettingsCard(BaseSettingsCard):
         self.content_layout.addWidget(header)
 
         hint = CaptionLabel("开启后按各平台配置建立连接；关闭则断开全部平台。", self)
-        hint.setStyleSheet(f"color: {Colors.TEXT_SECONDARY};")
+        bind_theme_qss(hint, lambda colors: f"color: {colors.TEXT_SECONDARY};")
         self.content_layout.addWidget(hint)
 
         self._platform_box = QWidget(self)
@@ -213,7 +211,7 @@ class ImGatewaySettingsCard(BaseSettingsCard):
         self.content_layout.addWidget(self._platform_box)
 
         self._empty_label = CaptionLabel("尚未注册任何 IM 平台插件。", self)
-        self._empty_label.setStyleSheet(f"color: {Colors.TEXT_MUTED};")
+        bind_theme_qss(self._empty_label, lambda colors: f"color: {colors.TEXT_MUTED};")
         self.content_layout.addWidget(self._empty_label)
 
         footer = QWidget(self)
@@ -222,7 +220,7 @@ class ImGatewaySettingsCard(BaseSettingsCard):
         footer_layout.setSpacing(8)
 
         self._session_label = CaptionLabel("", footer)
-        self._session_label.setStyleSheet(f"color: {Colors.TEXT_SECONDARY};")
+        bind_theme_qss(self._session_label, lambda colors: f"color: {colors.TEXT_SECONDARY};")
         footer_layout.addWidget(self._session_label)
         footer_layout.addStretch(1)
 

@@ -733,12 +733,18 @@ class ThemeManager:
 
         self.on_theme_changed()
 
-        alive = []
-        for ref in self._refresh_targets:
+        self.refresh_registered_targets()
+
+    def refresh_registered_targets(self, *, exclude=()) -> None:
+        """刷新本轮尚未处理的登记目标，保留回调期间的注册与注销。"""
+        from app.utils.theme_refresh import ThemeRefreshCoordinator
+
+        excluded = {id(widget) for widget in exclude}
+        self._refresh_targets = [ref for ref in self._refresh_targets if ref() is not None]
+        for ref in tuple(self._refresh_targets):
             widget = ref()
-            if widget is None:
-                continue  # 弱引用已失效，跳过
-            alive.append(ref)
+            if widget is None or id(widget) in excluded:
+                continue
             # 🛡️ 可见性过滤：仅跳过"tab 内非 active 页"窗口——自身隐藏 + 顶层
             # 窗口可见 + 有 _theme_needs_refresh 补刷链路（main_widget 系窗口），
             # 标记待刷；切回 tab 时由 _on_tab_selected 检查标志后调
@@ -765,10 +771,8 @@ class ThemeManager:
                     except Exception:
                         top_visible = False
                     if top_visible:
+                        widget._theme_needs_refresh_scope = ThemeRefreshCoordinator.pending_window_scope(widget, "theme")
                         widget._theme_needs_refresh = True
-                        # P5b：dispatch_refresh 语义恒为纯主题变化，记录 scope="theme"
-                        #（切回 tab 补刷时精确只刷颜色，避免漏刷/过度刷新）
-                        widget._theme_needs_refresh_scope = "theme"
                         logger.debug("[ThemeManager] dispatch_refresh: hidden tab target marked _theme_needs_refresh")
                         continue
             except Exception:
@@ -785,7 +789,6 @@ class ThemeManager:
                             pass
             except Exception as e:
                 logger.warning(f"[ThemeManager] dispatch_refresh error: {e}")
-        self._refresh_targets = alive
 
     def reload(self, force: bool = False):
         """重新加载所有主题（修改文件后调用）

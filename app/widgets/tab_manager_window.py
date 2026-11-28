@@ -1474,8 +1474,7 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
             f"[TabManager] complete_construction TrayManager 单例段耗时 {(_sm_time.perf_counter() - _sm_t2) * 1000:.0f}ms"
         )
 
-        # 注册主题刷新回调（虽主题切换路径不走 dispatch_refresh，
-        # 但保持接口一致性便于将来扩展）
+        # 窗口统一负责侧栏和工作台的外观刷新。
         theme_manager.register_refresh_target(self)
 
         # ── 右侧工作台面板（**嵌入式**：对话区右侧第三窗格，与左侧 TabPanel 对称）──
@@ -1498,8 +1497,6 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
         # 页面请求切换工作目录 → 转发给当前活跃窗口（实例缓存/分支标签/团队广播）
         self.workbench_panel.workingDirChanged.connect(self._on_workbench_working_dir_changed)
         self.titleBar.workbench_toggle_requested.connect(self.toggle_workbench)
-        # 主题 / 字号刷新注册
-        theme_manager.register_refresh_target(self.workbench_panel)
 
         # 圆角矩形容器（与 #tabFrame / #chatFrame 同款），作为 splitter 第三窗格。
         # 直接给 #workbenchPanel 设 border 会被 splitter handle 绘制顺序吞掉，
@@ -1665,14 +1662,6 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
 
         # 刷新右侧工作台面板（页签条 / 任务区 / 内置页 / 插件页签 / 卡片 tab
         # 全在 workbench_panel.refresh_style 内逐页分发，独立于本窗口 QSS）
-        # ★ GUI 手动切主题走 main_widget._execute_batched_theme_refresh（不走
-        #   theme_manager.dispatch_refresh），注册在 _refresh_targets 里的
-        #   workbench_panel 回调永远不会被触发，本方法才是 batched 路径触达
-        #   TabManager 区域的唯一入口。此前漏刷 → 右栏插件页内容停留旧主题。
-        #   置于方法前部 + 独立 try：后方 refresh 调用抛异常时不再腰斩本刷新
-        #   （_empty_state/titleBar 等未受保护，任一异常都会中断整段方法）。
-        #   dispatch 路径下 panel 另有独立注册，此处会重复刷新——低频云同步/
-        #   主题热重载路径，refresh_style 幂等，双刷可接受。
         try:
             ThemeRefreshCoordinator.timer_start("tm_wb")
             panel = getattr(self, "workbench_panel", None)
@@ -1681,6 +1670,10 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
             ThemeRefreshCoordinator.timer_end("tm_wb")
         except Exception:
             logger.exception("[TabManagerWindow] workbench panel theme refresh failed")
+
+        workspace = getattr(self, "_workspace_page_host", None)
+        if workspace is not None:
+            workspace.refresh_theme()
 
         # hover 预览浮层是独立顶层窗口，不继承本窗口 QSS，需单独刷新；
         # 预览中的 frame 带内联样式（脱离 QSS 作用域），同步刷新
@@ -5844,18 +5837,17 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
             # 补刷新延迟的主题变更（Tab 模式下主题刷新跳过非可见窗口）
             if getattr(win, "_theme_needs_refresh", False):
                 try:
-                    win._theme_needs_refresh = False
-
                     # P5b（V2 方案 A）：按置位时记录的 scope 精确补刷——
                     # theme→只刷颜色、font_family→只刷字体、font_size→只刷字号、
                     # None→全量刷新。scope 取自 _theme_needs_refresh_scope
                     # （batched 路径记录 final_scope，dispatch_refresh 路径记录
                     # "theme"），补刷后清空避免残留。
                     scope = getattr(win, "_theme_needs_refresh_scope", None) or None
-                    win._theme_needs_refresh_scope = None
                     win._apply_runtime_ui_settings(scope=scope, _skip_global=True)
+                    win._theme_needs_refresh = False
+                    win._theme_needs_refresh_scope = None
                 except Exception:
-                    pass
+                    logger.exception("切回标签页时刷新外观失败")
             # 切 tab 时工作台跟随激活窗：显隐/页签均按窗口独立记忆
             if getattr(self, "workbench_panel", None) is not None:
                 # 🆕 先读目标窗口记忆再做任何刷新/恢复（先读后写，防程序化切页

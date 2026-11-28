@@ -90,6 +90,10 @@ def test_overlay_fully_cleaned(qapp, monkeypatch):
     h.show()
     qapp.processEvents()
     h._snapshot()
+    # 正常切换在截图后、动画结束前推进外观纪元。
+    from app.utils.theme_refresh import ThemeRefreshCoordinator
+
+    ThemeRefreshCoordinator.bump_appearance_epoch()
     overlay = calls[0][0] if calls else None
     end = time.perf_counter() + 2.0
     while time.perf_counter() < end and getattr(h, "_theme_fade_overlay", None) is not None:

@@ -277,6 +277,8 @@ class SystemCardFrame(QFrame):
         # ── 字体/图标 ──（[PERF] setFont 同字体短路：字体不变时 setFont 仍会
         # 走 fontChange + 布局失效重算，每张卡 3\u00d7 全量遍历时成本可观）
         _TRC.timer_start("scf_fonts")
+        set_style_sheet_if_changed(self.title_label, f"color: {Colors.TEXT_ACCENT};")
+        set_style_sheet_if_changed(self._count_label, f"color: {Colors.TEXT_SECONDARY}; padding-left: 2px;")
         _title_font = get_unified_font(12, True)
         if self.title_label.font() != _title_font:
             self.title_label.setFont(_title_font)

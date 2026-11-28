@@ -88,6 +88,13 @@ class ThemeRefreshCoordinator:
             cls._refresh_cycle += 1
             return cls._refresh_cycle
 
+    @staticmethod
+    def pending_window_scope(window, scope: str | None) -> str | None:
+        """不同的待刷项合并为全量；同类变更仍只刷一次。"""
+        if getattr(window, "_theme_needs_refresh", False) and window._theme_needs_refresh_scope != scope:
+            return None
+        return scope
+
     @classmethod
     def get_refresh_cycle(cls) -> int:
         with cls._lock:

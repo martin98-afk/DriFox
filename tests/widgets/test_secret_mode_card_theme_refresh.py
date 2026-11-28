@@ -15,7 +15,7 @@
 - 抽出可重建的 QSS 工厂（`_hint_qss` / `_small_button_qss` / `_ModeRow._title_qss`）；
 - 补 `_ModeRow.refresh_style` 与 `SecretModeSettingCard.refresh_style`（后者现取
   `_refresh()` 重建选中态，选中边框走 `BORDER_ACCENT`/`HOVER_BG`）；
-- 挂进 `LLMSettingsCard.refresh_style` 的手风琴卡命名清单。
+- 由 `LLMSettingsCard.appearance_cards` 随其他已构建的设置卡一起刷新。
 
 本测试用「改主题数据源 + Colors 缓存失效」模拟真实主题切换，断言刷新后 QSS
 内出现新主题 token，且选中/未选中行的边框各自正确。
@@ -103,21 +103,8 @@ def test_refresh_style_is_idempotent(card, _switched_theme):
         card.refresh_style()
 
 
-def test_mounted_in_theme_refresh_chain():
-    """挂载点回归：主题切换链的命名清单必须含 secretModeCard
-
-    该卡继承 ExpandSettingCard（非 SettingCard 子类），且挂在分页内——
-    `findChildren(SettingCard)` 与 `SystemCardFrame._refresh_content_children`
-    两条通用链都扫不到，只能靠 `main_widget._apply_runtime_ui_settings` 的
-    命名清单显式调用（同 pluginToolCard / pluginAgentCard 的处境）。
-    漏挂 = 回到「行样式停留旧主题」。
-    """
-    src = (PROJECT_ROOT / "app/main_widget.py").read_text(encoding="utf-8-sig")
-    assert '"secretModeCard"' in src, "加密卡未挂进主题切换的命名刷新清单"
-
-
 def test_reachable_from_settings_popup(qapp, tmp_path, monkeypatch):
-    """清单靠 getattr(settings_popup, name) 取卡，属性名必须真实可达"""
+    """默认页中实际构建的加密卡要能收到主题刷新。"""
     from app.utils.config import Settings
 
     inst = Settings.get_instance()
@@ -128,7 +115,8 @@ def test_reachable_from_settings_popup(qapp, tmp_path, monkeypatch):
 
     from app.widgets.cards.settings.llm_settings_card import LLMSettingsCard
 
-    popup = LLMSettingsCard(QWidget())
+    parent = QWidget()
+    popup = LLMSettingsCard(parent)
     card = getattr(popup, "secretModeCard", None)
-    assert card is not None, "设置卡上取不到 secretModeCard 属性"
+    assert card in list(popup.appearance_cards()), "已构建的加密卡应参与外观刷新"
     assert hasattr(card, "refresh_style"), "取到的卡缺 refresh_style，刷新链会静默跳过"

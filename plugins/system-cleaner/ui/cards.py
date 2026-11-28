@@ -296,9 +296,12 @@ class SystemCleanerCard(QWidget):
     def set_context_provider(self, provider: Callable[[], dict]):
         self._context_provider = provider
 
-    def show_card(self):
+    def refresh_style(self):
         self._apply_latest_theme()
         self._apply_plugin_icon()
+
+    def show_card(self):
+        self.refresh_style()
         self._async_scan()
         self._refresh_memory()  # 内存值到达后水位环经 set_ratio 缓动到实际水位
         self.setVisible(True)

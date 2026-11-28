@@ -119,7 +119,7 @@ class WorkbenchPanel(QWidget):
         self._page_order: List[str] = []
         self._default_page_id: Optional[str] = None
         # 空态页（未注册任何插件页时占位，无对应页签）
-        self._empty_page: QWidget = _PagePlaceholder(parent=None)
+        self._empty_page = _PagePlaceholder(parent=None)
         # 宿主窗口缓存（见 _host_window：hover 预览期间 window() 会取到浮层）
         self._host_window_ref: Optional[QWidget] = None
         # 页签记忆：None = 面板尚未打开过（首次打开默认第一个页签，之后恢复上次关闭时页签）
@@ -554,7 +554,7 @@ class WorkbenchPanel(QWidget):
             if not broken:
                 return
             try:
-                probe_ctx = self._host_window()._build_ui_context()
+                probe_ctx = self._build_page_context()
             except Exception:
                 probe_ctx = {}
             if (probe_ctx or {}).get("backend"):
@@ -864,8 +864,8 @@ class WorkbenchPanel(QWidget):
             window_id=payload.get("window_id", ""),
         )
 
-    def _make_page_widget(self, info: Any) -> Optional[QWidget]:
-        """构建插件页 widget（构造 parent + context，兼容无 context 的老签名）"""
+    def _build_page_context(self) -> Dict[str, Any]:
+        """构造与补注页面上下文时都保留宿主的实时取值入口。"""
         context: Dict[str, Any] = {}
         parent_win = None
         try:
@@ -879,6 +879,10 @@ class WorkbenchPanel(QWidget):
         # 老页面不读该键，行为完全不变。
         if parent_win is not None and hasattr(parent_win, "_build_ui_context"):
             context["context_provider"] = lambda _w=parent_win: _w._build_ui_context()
+        return context
+
+    def _make_page_widget(self, info: Any) -> Optional[QWidget]:
+        context = self._build_page_context()
         try:
             widget = info.widget_class(parent=self._stack, context=context)
         except TypeError:
@@ -896,14 +900,9 @@ class WorkbenchPanel(QWidget):
         # 挂载点补刷：页面构造可能早于主题应用（启动期插件加载先于 Colors 就绪），
         # 构造期固化的 QSS 是旧主题色；此后无人再通知它。
         # 刷完记纪元，切页补刷时不会对同一页白刷第二遍。
-        if hasattr(widget, "refresh_style"):
-            widget.refresh_style()
-        try:
-            from app.utils.theme_style import stamp_theme_epoch
+        from app.utils.theme_style import ensure_theme_fresh
 
-            stamp_theme_epoch(widget)
-        except Exception:
-            pass
+        ensure_theme_fresh(widget)
         # 通用信号接线（页面若定义 workingDirChanged 则转发为面板同名信号）
         self._wire_page_signals(widget)
 
@@ -1014,38 +1013,17 @@ class WorkbenchPanel(QWidget):
         Colors.refresh()
         # 嵌入式：背景透明（由外层 #workbenchFrame 圆角矩形容器提供背景）
         self.setStyleSheet("QWidget#workbenchPanel { background: transparent; border: none; }")
+        self._empty_page.refresh_style()
         for btn in self._tab_buttons:
             btn.refresh_style()
-        # 插件页签 / 卡片 tab（right 容器 UI 插件卡片）：外部不广播主题事件，
-        # 面板统一分发；无 refresh_style 的插件页跳过。
-        # 分发后追加 replay_theme_qss 兜底：重放页面上登记过的 QSS 工厂，
-        # 覆盖渲染期动态创建、refresh_style 未枚举到的控件（空态标签/分页按钮等）。
-        #
-        # [PERF] 可见性分流：只有当前页付整棵子树 repolish，隐藏页仅置脏
-        # （QStackedWidget 非当前页 isVisible() 为 False，判据可靠）。隐藏页
-        # 在 set_current_tab 切到时由 ensure_theme_fresh 补刷，正确性由外观
-        # 纪元比对保证——不再需要「全量刷」来兜住隐藏页不自愈的问题。
-        from app.utils.theme_style import ensure_theme_fresh, mark_theme_dirty
+        from app.utils.theme_style import refresh_page_theme
 
         for widget in self._plugin_widgets.values():
-            try:
-                if widget.isVisible():
-                    ensure_theme_fresh(widget)
-                else:
-                    mark_theme_dirty(widget)
-            except RuntimeError:
-                continue  # C++ 对象已销毁
+            refresh_page_theme(widget)
         for entry in self._card_tabs.values():
             widget = entry.get("widget")
-            if widget is None:
-                continue
-            try:
-                if widget.isVisible():
-                    ensure_theme_fresh(widget)
-                else:
-                    mark_theme_dirty(widget)
-            except RuntimeError:
-                continue
+            if widget is not None:
+                refresh_page_theme(widget)
 
     def refresh_theme(self) -> None:
         """ThemeManager 协议入口（dispatch_refresh 只认 refresh_theme）
