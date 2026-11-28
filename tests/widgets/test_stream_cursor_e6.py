@@ -220,11 +220,11 @@ def test_proto_state_matches_fulltext_fuzz(qapp):
     fence：text_so_far 以 \\n 收尾的拍严格等价（尾行完整 → fence_carry 空）；
     其余拍状态机可能延后一拍（设计内语义，终态补 \\n 后对拍兜底）。
     """
+    card = _make_card()
     for seed in (7, 101, 999, 31415, 2026):
         rng = random.Random(seed)
         for round_no in range(40):
             text = _fuzz_text(rng)
-            card = _make_card()
             card._proto_state_reset()
             st = card._proto_state
             so_far = ""
