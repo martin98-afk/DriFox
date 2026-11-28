@@ -326,10 +326,9 @@ class EmptyStateWidget(QWidget):
         layout.setAlignment(Qt.AlignCenter)
         layout.setSpacing(16)
 
-        icon_label = QLabel("📑", self)
-        icon_label.setAlignment(Qt.AlignCenter)
-        icon_label.setStyleSheet("font-size: 48px; background: transparent;")
-        layout.addWidget(icon_label)
+        from app.widgets.ui_helpers import _ThemedIconLabel
+
+        layout.addWidget(_ThemedIconLabel("tab切换", 48, self), 0, Qt.AlignCenter)
 
         self._text_label = QLabel("没有打开的窗口", self)
         self._text_label.setAlignment(Qt.AlignCenter)
@@ -690,14 +689,15 @@ class _DockSideWrapper(QWidget):
         """卡片全隐：收起自身；伙伴窗格（若指定）恢复打开前宽度
 
         ★ 信号时序同 _on_expand：expandedChanged(False) 先发，宿主在回调里
-        把 TabPanel 置回展开态（静默），随后伙伴恢复宽度时不会误 emit。
+        静默恢复 TabPanel 打开卡片前的形态，随后伙伴恢复宽度时不会误 emit。
         """
-        if self.isHidden():
+        if self.isHidden() or self._pending_host_hide:
+            # 宿主已开始恢复侧栏，只是延后隐藏 wrapper，不能再次消费折叠快照。
             return
         sp = self._splitter
         if idx < len(sizes) and sp is not None:
             self._expanded_width = sizes[idx] if sizes[idx] > 0 else self._expanded_width or self.DEFAULT_EXPANDED_WIDTH
-            self.expandedChanged.emit(False)  # 宿主先备 TabPanel 展开态
+            self.expandedChanged.emit(False)  # 宿主先恢复卡片打开前的侧栏状态
             if self._host_animating:
                 # 宿主动画接管：延后 hide（要占住内层窗格，否则卡片区让出的
                 # 宽度会全被 TabPanel 吃掉——列表被拉宽再弹回），内层由它逐帧落位
@@ -2364,24 +2364,12 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
         return panel.set_current_tab_by_id(page_id, user=True)
 
     def open_workbench_memory(self, sub_tab: str = "docs") -> None:
-        """展开工作台并定位「工作树」页签（记忆功能已下线，保留兼容入口）
+        """Branch 与旧 /memory 入口均直达左侧工作树卡片。"""
+        from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
 
-        统一的「一键直达」入口：新建项目后自动展开、工作树「管理工作树」
-        按钮等场景都走这里。置顶记忆在助手中心管理，不再有记忆页。
-
-        Args:
-            sub_tab: 兼容旧签名；任何取值都落「工作树」页
-        """
-        panel = getattr(self, "workbench_panel", None)
-        if panel is None:
-            return
-        # 1) 展开工作台（不可见时 set_workbench_visible 内部会触发 refresh_workbench）
-        if not self.is_workbench_visible():
-            self.set_workbench_visible(True)
-        else:
-            self.refresh_workbench()
-        # 2) 定位「工作树」页
-        panel.set_current_tab_by_id("worktree-manager", user=True)
+        if not self._card_manager.is_card_visible("worktree-manager", self._window_id):
+            registry = UIPluginRegistry.get_instance()
+            registry.toggle_floating_card("worktree-manager", main_widget=self.get_current_window())
 
     def open_workbench_history(self) -> None:
         """打开会话历史（已迁对话区左侧停靠区的常驻浮动卡）

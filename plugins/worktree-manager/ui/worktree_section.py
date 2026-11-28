@@ -274,8 +274,18 @@ def _invalidate_repo_cache(folder: str) -> None:
     用户在 UI 里删掉 worktree 后，5 分钟内 `is_worktree(已删路径)` 仍返回
     True → 会话的 `worktree_path` 会写进已删除的目录。
     与 `tools/worktree_tools.py:_invalidate_info_cache` 保持同一清缓存集合。
+
+    `_info_cache` 用**全清**而不是按键精确 pop：它的键是 `(path, with_counts)`
+    元组，历史版本这里写的 `pop(folder, None)` 是字符串键，对元组永远 miss
+    ——等于 `_info_cache` 从未被清过。后果是新建/删除工作树后 `get_repo_info`
+    在 30s TTL 内直接返回旧 `GitRepoInfo`，连 `list_worktrees` 都不重跑
+    （下面 `_worktrees_cache.clear()` 清了也没用），表现为「新建的工作树
+    刷新不出来」，且只在距上次探测不到 30s 时复现，即用户说的「偶尔」。
+    精确匹配还漏另一类条目：以子工作树为 key 探测时 `info.root` 是子工作树
+    自身，按主仓库根比较命中不到。条目数等于被探测过的路径数（个位数），
+    全清代价可忽略；worktree 增删本就是低频操作。
     """
-    GitWorktreeDetector._info_cache.pop(folder, None)
+    GitWorktreeDetector._info_cache.clear()
     GitWorktreeDetector._worktrees_cache.clear()
     GitWorktreeDetector._branch_cache.clear()
     GitWorktreeDetector._is_worktree_cache.clear()
@@ -762,6 +772,7 @@ class _AddWorktreeRow(QWidget):
         layout.setContentsMargins(10, 2, 8, 2)
         layout.setSpacing(6)
 
+        layout.addStretch()  # 右对齐：入口贴右下，与列表行操作区同一右边界
         icon = ThemeIconLabel("新建", 13, self)
         layout.addWidget(icon)
 
@@ -774,7 +785,6 @@ class _AddWorktreeRow(QWidget):
         add_label.mousePressEvent = lambda e: self._on_add()
         icon.mousePressEvent = lambda e: self._on_add()
         layout.addWidget(add_label)
-        layout.addStretch()
 
     def _on_add(self):
         from app.plugins.sdk import SingleInputDialog

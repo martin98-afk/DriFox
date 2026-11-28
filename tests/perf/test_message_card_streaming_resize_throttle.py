@@ -19,8 +19,7 @@
          _pending_viewer_height 一次性 setFixedHeight + 触发一次 reportHeight()，
          让 Chromium 首帧 paint 就按目标高度布局，避免二次 paint 抖动。
 
-(b) 本测试未修改任何业务代码，仅静态分析：用 pathlib 读取 app/widgets/message_card.py
-    源码文本 + re 匹配，不 import PyQt5、不实例化任何 GUI 对象。
+(b) 退出 preview 用轻量 Qt 控件验证恢复时序，其余检查读取源文件。
 
 (c) 环境要求：pytest>=7 / Python3 / 对 app/ 源码有读权限 / 无需显示器 /
     无新三方依赖 / 跨平台 Windows 优先。
@@ -101,32 +100,36 @@ def test_perf_apply_viewer_height_skips_during_preview(src_text: str):
     )
 
 
-def test_perf_preview_exit_applies_pending_height(src_text: str):
-    """set_resize_preview_mode(False) 必须把累积的 _pending_viewer_height 一次性应用到 viewer。
+def test_perf_preview_exit_applies_pending_height(qtbot):
+    from unittest.mock import Mock
 
-    单一 setFixedHeight + reportHeight 触发让 Chromium 在首次 paint 时就按目标高度
-    布局，避免首帧按旧高度重排再触发二次 paint 抖动。
-    """
-    start = src_text.find("def set_resize_preview_mode(self, enabled: bool):")
-    assert start != -1, "未找到 MessageCard.set_resize_preview_mode 定义"
-    end = src_text.find("\n    def ", start + 1)
-    body = src_text[start:end]
+    from PyQt5.QtWidgets import QWidget
 
-    # 必须读取累积字段
-    assert "getattr(self, \"_pending_viewer_height\", None)" in body, (
-        "set_resize_preview_mode(False) 必须读取 _pending_viewer_height 累积值"
-    )
-    # 必须一次性应用累积高度。出口自 66b66adc 起收敛到 _commit_viewer_height
-    # （批量提交器激活时走 batch.submit，否则直接 setFixedHeight），
-    # 断言跟着改：只认 setFixedHeight 会漏掉走 batch 的那条路径。
-    assert "self._commit_viewer_height(pending_h)" in body, (
-        "set_resize_preview_mode(False) 必须经 _commit_viewer_height 一次性应用累积高度"
-    )
-    # 必须强制一次高度上报
-    assert "reportHeight()" in body, (
-        "set_resize_preview_mode(False) 必须触发一次 reportHeight() 让 Chromium "
-        "首帧 paint 按目标高度布局，避免二次 paint 抖动"
-    )
+    from app.widgets.message_card import MessageCard
+
+    card = MessageCard("assistant")
+    qtbot.addWidget(card)
+    viewer = QWidget()
+    viewer.page = Mock()
+    card.viewer = viewer
+    card._viewer_layout.addWidget(viewer)
+    viewer.setFixedHeight(80)
+    card.add_interactive_option({"label": "继续"})
+    card.show()
+    card.set_resize_preview_mode(True)
+    card._apply_viewer_height(120)
+    card._apply_viewer_height(160)
+    assert viewer.isHidden() and viewer.height() == 80
+    assert card.options_widget.isHidden()
+    assert card.resize_placeholder.isVisible()
+
+    applied = []
+    card.heightChanged.connect(lambda h: applied.append((h, viewer.height(), viewer.isHidden())))
+    card.set_resize_preview_mode(False)
+    assert applied == [(160, 160, True)]
+    assert viewer.isVisible() and card.options_widget.isVisible()
+    assert card.resize_placeholder.isHidden()
+    viewer.page().runJavaScript.assert_called_once_with("reportHeight();")
 
 
 def test_perf_pending_viewer_height_initialized(src_text: str):

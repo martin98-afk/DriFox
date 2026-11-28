@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import json as stdlib_json
+import re
 import sys
 from typing import Any, Dict, List, Optional
 
@@ -109,6 +110,25 @@ def _patch_ops(js: str, container: str) -> List[Dict[str, Any]]:
 
 def _long_text(n: int = 600) -> str:
     return "段落内容测试。" * (n // 7 + 1)
+
+
+def test_prose_markup_matches_streaming_prefixes():
+    reference = re.compile(r"[`~*#<>\[\]_|$\\&]|(?:^|\n)\s*(?:[-+=>:]|\d+[.)]\s| {4}|\t)")
+    for lead in ("", "正文", "正文\n\n", "\r\n \n\u3000", "\n   "):
+        for token in ("１2)\u00a0", "1. ", "-", "+", "=", ":", "    ", "\t", *"`~*#<>[]_|$\\&"):
+            text = lead + token + "余文"
+            for end in range(len(lead), len(text) + 1):
+                prefix = text[:end]
+                assert CodeWebViewer._has_prose_markup(prefix) == bool(reference.search(prefix)), repr(prefix)
+    assert not CodeWebViewer._has_prose_markup("段落" + "\n" * 1500 + "继续")
+
+
+def test_clean_boundary_matches_trimmed_suffix():
+    for ending in ("", "\n\n", "</think>", "```", "~~~", "~~~x", "``", "正文"):
+        for trailing in ("", "\n", " \r\n", "\u3000\u00a0", "\t", "\n\n"):
+            text = "中间有 ``` 和 </think> 的长正文。" * 100 + ending + trailing
+            expected = text.endswith("\n\n") or text.rstrip().endswith(("</think>", "```", "~~~"))
+            assert CodeWebViewer._has_reached_clean_boundary(text) == expected
 
 
 # ── 1. render 层：live key 恒定，内容增长不产生 patch ────────────────

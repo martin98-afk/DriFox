@@ -173,7 +173,7 @@ def _make_sync_stub_card(qtbot):
     card._nav_buttons = {}
     card._pages_stack = QStackedWidget()
     qtbot.addWidget(card._pages_stack)
-    card._page_scrolls = {}
+    card._page_widgets = {}
     card._page_layouts = {}
     card._nav_frame = QFrame()
     qtbot.addWidget(card._nav_frame)
@@ -240,7 +240,7 @@ class TestSettingsTabSync:
         card._sync_plugin_tabs()
         key = "tab:demo:adv"
         assert key in card._nav_buttons
-        assert key in card._page_scrolls
+        assert key in card._page_widgets
         assert card._pages_stack.count() == 2
         # 懒构造：sync 只建骨架，不实例化插件页面
         assert card._plugin_tab_pages == {}
@@ -267,7 +267,7 @@ class TestSettingsTabSync:
         fresh_registry.unload_plugin("demo")
         card._sync_plugin_tabs()
         assert key not in card._nav_buttons
-        assert key not in card._page_scrolls
+        assert key not in card._page_widgets
         assert card._current_tab == "plugins"
         assert card._pages_stack.count() == 1
         assert key not in card._page_ready

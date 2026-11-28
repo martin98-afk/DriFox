@@ -26,14 +26,17 @@ from PyQt5.QtWidgets import (
 from qfluentwidgets import (
     BodyLabel,
     CaptionLabel,
-    FluentIcon,
     MaskDialogBase,
     PushButton,
     SimpleCardWidget,
     TransparentToolButton,
 )
+from qfluentwidgets import FluentIcon
+from app.plugins.sdk import caps_for
 
 from app.plugins.sdk import ElidedLabel as _ElidedLabel
+
+icons = caps_for("ui.icons", plugin="history-manager", surface="ui") or FluentIcon
 
 # ── 分页常量 ──
 _PAGE_SIZE = 30  # 每页显示的会话数（含当前会话）
@@ -506,7 +509,7 @@ class _ArchivedItemCard(QFrame):
         btns_layout = QHBoxLayout(self._btns)
         btns_layout.setContentsMargins(0, 0, 0, 0)
         btns_layout.setSpacing(0)
-        self.delete_btn = TransparentToolButton(FluentIcon.DELETE, self._btns)
+        self.delete_btn = TransparentToolButton(icons.DELETE, self._btns)
         self.delete_btn.setToolTip("彻底删除")
         self.delete_btn.setFixedSize(22, 22)
         self.delete_btn.clicked.connect(lambda: self.permanentlyDeleted.emit(self._file_path))
@@ -725,7 +728,7 @@ class _TeamGroupCard(QFrame):
         btns_layout = QHBoxLayout(self._btns)
         btns_layout.setContentsMargins(0, 0, 0, 0)
         btns_layout.setSpacing(0)
-        self.restore_btn = TransparentToolButton(FluentIcon.PLAY, self._btns)
+        self.restore_btn = TransparentToolButton(icons.PLAY, self._btns)
         self.restore_btn.setToolTip("恢复团队")
         self.restore_btn.setFixedSize(22, 22)
         self.restore_btn.clicked.connect(lambda: self.restoreRequested.emit(self._run_id))
@@ -2464,7 +2467,7 @@ class ImportOptionDialog(MaskDialogBase):
         layout.addWidget(title_label)
 
         # 从文件导入
-        file_btn = QPushButton("📁  从文件导入", self.widget)
+        file_btn = QPushButton(get_icon("folder"), "从文件导入", self.widget)
         file_btn.setCursor(Qt.PointingHandCursor)
         file_btn.setFixedHeight(56)
         file_btn.setStyleSheet(f"""
@@ -2494,7 +2497,7 @@ class ImportOptionDialog(MaskDialogBase):
         layout.addWidget(file_hint)
 
         # 从URL导入
-        url_btn = QPushButton("🔗  从URL导入", self.widget)
+        url_btn = QPushButton(get_icon("link"), "从URL导入", self.widget)
         url_btn.setCursor(Qt.PointingHandCursor)
         url_btn.setFixedHeight(56)
         url_btn.setStyleSheet(f"""

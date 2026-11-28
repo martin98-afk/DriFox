@@ -11,7 +11,7 @@
 from typing import Optional
 
 from PyQt5.QtCore import Qt
-from PyQt5.QtGui import QBrush, QColor, QLinearGradient, QPainter, QPainterPath, QPen
+from PyQt5.QtGui import QColor, QPainter, QPainterPath, QPen
 from PyQt5.QtWidgets import QWidget
 
 from app.widgets.modules.identity_header import _qcolor
@@ -22,11 +22,6 @@ PIN_WIDTH = 13  # 引脚底边宽度
 PIN_INSET = 22  # 引脚贴边一侧距气泡边缘的距离（避开 12px 圆角区；尖端 lean 后对齐头像中心）
 RADIUS = 12  # 气泡圆角（与原 _user_bubble 样式表的 12px 一致）
 
-# 流式光带参数（与 MessageCard 卡片层原视觉一致：_STREAM_BAND_*）
-BAND_H = 3  # 光块高度(px)
-BAND_BOTTOM = 3  # 光块距气泡底边(px)
-BAND_RATIO = 0.4  # 光块宽度占气泡宽比例
-
 # 气泡可读性保障参数
 MIN_L_DIFF = 44  # 与背景 HSL 明度差低于此值视为「看不清」
 MIN_L_PUSH = 56  # 明度差不足时推开的距离（半透明叠加会稀释对比，故略高于阈值）
@@ -35,7 +30,7 @@ MAX_S = 0.30  # 明度调整后的饱和度上限（极简：艳色压柔，不�
 # assistant 专属（贴近背景的极简策略：靠边框/引脚辨识，不靠色块）
 ASSIST_L_OFFSET = 14  # 明度相对背景的微偏移量
 ASSIST_S_MAX = 0.10  # 饱和度上限（压到几乎无色）
-ASSIST_ALPHA = 150  # alpha 上限：主题原值普遍 180~225，视觉近实心；压到 150 保半透明质感
+ASSIST_ALPHA = 150  # 助手气泡底色不透明度上限（0–255）
 PIN_TIP_LEAN = 5  # 引脚尖端向头像外上方偏移量（指向感）
 BORDER_WIDTH = 1.0  # 气泡整体细边框宽度(px)
 
@@ -43,7 +38,7 @@ BORDER_WIDTH = 1.0  # 气泡整体细边框宽度(px)
 def ensure_bubble_contrast(bg_spec: str, backdrop_spec: str, role: str = "user") -> str:
     """气泡底色可读性保障（2026-09-23）。
 
-    双策略（不改 17 个 yaml，alpha 半透明质感/色相全程保留主题原样）：
+    按身份从主题色派生气泡底色：
     - assistant：贴近背景的极简策略 —— 低饱和（≤ ASSIST_S_MAX）+ 明度微偏移
       （ASSIST_L_OFFSET），颜色不抢戏，辨识靠边框与引脚；
       主题原色再重（如琥珀暖黄）也收敛到背景近邻。
@@ -51,7 +46,7 @@ def ensure_bubble_contrast(bg_spec: str, backdrop_spec: str, role: str = "user")
       饱和度夹在 [MIN_S, MAX_S]。
 
     Args:
-        bg_spec: 主题气泡色（CSS rgba/十六进制），alpha 原样保留。
+        bg_spec: 主题气泡色（CSS rgba/十六进制），用户气泡保留原透明度。
         backdrop_spec: 聊天背景基准色（Colors.CONTENT_BG）。
         role: "user" / "assistant"（welcome 不调用）。
 
@@ -59,9 +54,9 @@ def ensure_bubble_contrast(bg_spec: str, backdrop_spec: str, role: str = "user")
         rgba(r, g, b, a) 字符串；输入无效时原样返回。
     """
     color = _qcolor(bg_spec, QColor(Qt.transparent))
+    backdrop = _qcolor(backdrop_spec, QColor(Qt.transparent))
     if not color.isValid() or color.alpha() == 0:
         return bg_spec
-    backdrop = _qcolor(backdrop_spec, QColor(Qt.transparent))
 
     h, s, l, a = color.getHslF()
     if backdrop.isValid():
@@ -72,10 +67,7 @@ def ensure_bubble_contrast(bg_spec: str, backdrop_spec: str, role: str = "user")
             l = min(1.0, max(0.0, l))
             s = min(s, ASSIST_S_MAX)
             out = QColor.fromHslF(h, s, l)
-            # 半透明观感：主题 alpha 原值普遍 180~225（视觉近实心），统一钳到上限
-            out.setAlpha(min(int(round(a * 255)), ASSIST_ALPHA))
-            r, g, b, alpha = out.getRgb()
-            return f"rgba({r}, {g}, {b}, {alpha})"
+            return f"rgba({out.red()}, {out.green()}, {out.blue()}, {min(color.alpha(), ASSIST_ALPHA)})"
         if abs(l - bl) * 255 < MIN_L_DIFF:
             target = (bl - MIN_L_PUSH / 255.0) if bl >= 0.5 else (bl + MIN_L_PUSH / 255.0)
             l = min(1.0, max(0.0, target))
@@ -103,11 +95,6 @@ class MessageBubble(QWidget):
         self._pin_side = pin_side
         self._color = QColor(Qt.transparent)
         self._border_color = QColor(Qt.transparent)
-        # 流式视觉帧：phase = 三角波相位（0~1，None = 非流式）；tint = 描边/光带色。
-        # 由 MessageCard._update_anim 每帧推送（气泡自绘在底色之上，卡片层画会被
-        # 气泡不透明底色盖住 —— 2026-09-23 光带不可见根因）。
-        self._stream_phase: Optional[float] = None
-        self._stream_tint: Optional[QColor] = None
         # 气泡轮廓路径缓存（几何不变即复用，resizeEvent 失效）：流式光带
         # 50ms/帧逐次 paint 重建 addRoundedRect+united 是热点，缓存后 paint
         # 只复用现成路径（2026-11-19 采样 TOP1 修复）。
@@ -140,57 +127,33 @@ class MessageBubble(QWidget):
         if c == self._border_color:
             return
         self._border_color = c
+        self._shape_path = None  # 有无边框决定轮廓内缩量，缓存必须失效
         self.update()
 
-    def set_stream_frame(self, phase: Optional[float], tint: Optional[QColor] = None) -> None:
-        """设置流式视觉帧（phase=None 退出流式态）。幂等；变化才重绘。
-
-        [PERF] 2026-11-09：光带动画 20fps，而它只占气泡底部一条 3px 窄带。
-        旧实现无参 `self.update()` → 整气泡（长回复实测 1200x3000）每秒光栅化
-        20 次，采样中 Python paintEvent 占主线程 34%。改为只标脏光带扫过的
-        矩形（含上一帧位置），Qt 按脏区裁剪光栅化，实测平均脏区 2498 px²、
-        整卡 3.6 M px²（1/1441）。视觉不变：paintEvent 仍按同一 phase 计算
-        位置，只是被裁在脏区内；前后两帧区域取并集，不会拖尾。
-        """
-        if phase == self._stream_phase and tint == self._stream_tint:
-            return
-        prev_phase = self._stream_phase
-        self._stream_phase = phase
-        self._stream_tint = tint
-        if phase is None:
-            # 退出流式：光带消失，且描边/底色可能同帧被改（_apply_card_style
-            # 走 set_bubble_color / set_border_color），必须整气泡重绘一次 ——
-            # 只标脏底边会把上三边的旧描边留在屏上。这是「退出」的一次性
-            # 成本，不在 20fps 路径上。
-            self.update()
-            return
-        dirty = self._band_dirty_rect(phase)
-        if prev_phase is not None:
-            dirty = dirty.united(self._band_dirty_rect(prev_phase))
-        self.update(dirty)
-
-    def _band_dirty_rect(self, phase: float):
-        """指定相位下光带占用的矩形（含 1px 余量，防圆角抗锯齿被裁边）"""
-        from PyQt5.QtCore import QRect
-
-        w, h = self.width(), self.height()
-        band_w = int(BAND_RATIO * w)
-        band_x = int((0.5 * BAND_RATIO + (1.0 - BAND_RATIO) * phase) * w - 0.5 * band_w)
-        band_y = h - BAND_BOTTOM - BAND_H
-        return QRect(max(0, band_x - 1), max(0, band_y - 1), band_w + 2, BAND_H + 2)
-
     def paintEvent(self, event):
-        if self._color.alpha() == 0:
+        if self._color.alpha() == 0 and self._border_color.alpha() == 0:
             return
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
 
         top = PIN_HEIGHT if self._pin_side else 0
         w, h = self.width(), self.height()
+        has_border = self._border_color.isValid() and self._border_color.alpha() > 0
         shape = self._shape_path
         if shape is None:
+            # 描边沿轮廓线居中绘制：轮廓贴 0/h/w 时半个笔宽落在控件外被裁。
+            # 实测助手气泡左缘只剩 1 设备像素、右侧 2 像素且更实——左侧看着
+            # 像被边界切掉一点（2026-11-28）。有边框时四边内缩半个笔宽。
+            inset = (BORDER_WIDTH / 2.0) if has_border else 0.0
             path = QPainterPath()
-            path.addRoundedRect(0.0, float(top), float(w), float(max(0, h - top)), RADIUS, RADIUS)
+            path.addRoundedRect(
+                inset,
+                float(top) + inset,
+                float(w) - 2.0 * inset,
+                float(max(0.0, h - top - 2.0 * inset)),
+                RADIUS,
+                RADIUS,
+            )
 
             if self._pin_side == "right":
                 px = float(w - PIN_INSET)
@@ -206,7 +169,7 @@ class MessageBubble(QWidget):
         # 填充+描边合并为一次 drawPath（brush 填内部 + pen 描居中轮廓；Qt 同一次
         # 绘制先 brush 后 pen，与旧「先填后描」视觉等价，抗锯齿栅格化减半）。
         # 无边框时退化为 NoPen，与旧行为一致。
-        if self._border_color.isValid() and self._border_color.alpha() > 0:
+        if has_border:
             pen = QPen(self._border_color)
             pen.setWidthF(BORDER_WIDTH)
             painter.setPen(pen)
@@ -215,25 +178,6 @@ class MessageBubble(QWidget):
         painter.setBrush(self._color)
         painter.drawPath(shape)
 
-        # 流式光带：底部往返（只要动效，不画描边 —— 2026-09-23 用户明确要求）
-        if self._stream_phase is not None and self._stream_tint is not None and self._stream_tint.isValid():
-            tint = self._stream_tint
-            band_w = int(BAND_RATIO * w)
-            band_x = int(
-                (0.5 * BAND_RATIO + (1.0 - BAND_RATIO) * self._stream_phase) * w - 0.5 * band_w
-            )
-            band_y = h - BAND_BOTTOM - BAND_H
-            band = QLinearGradient(band_x, 0, band_x + band_w, 0)
-            e0 = QColor(tint)
-            e0.setAlpha(0)
-            e1 = QColor(tint)
-            e1.setAlpha(170)
-            band.setColorAt(0.0, e0)
-            band.setColorAt(0.5, e1)
-            band.setColorAt(1.0, e0)
-            painter.setPen(Qt.NoPen)
-            painter.setBrush(QBrush(band))
-            painter.drawRoundedRect(band_x, band_y, band_w, BAND_H, 1.5, 1.5)
         painter.end()
 
     @staticmethod

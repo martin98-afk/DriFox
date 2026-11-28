@@ -1,7 +1,7 @@
 {
     "icon": {
-        "light": "icons/avatars/avatar-13.png",
-        "dark": "icons/avatars/avatar-13.png"
+        "light": "icons/icon_light.svg",
+        "dark": "icons/icon.svg"
     },
     "name": "assistant_hub",
     "display_name": {

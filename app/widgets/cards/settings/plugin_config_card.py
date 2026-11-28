@@ -27,10 +27,10 @@ from PyQt5.QtWidgets import QDialog, QHBoxLayout, QLabel, QVBoxLayout
 from qfluentwidgets import (
     BodyLabel,
     ExpandSettingCard,
-    FluentIcon,
     IndeterminateProgressBar,
     isDarkTheme,
 )
+from app.utils.app_icon import AppIcon
 
 from loguru import logger
 
@@ -65,7 +65,7 @@ class PluginConfigCard(DynamicHeightExpandCardMixin, ExpandSettingCard):
             content_text = plugin_label
         self._base_content_text = content_text
 
-        icon = self._resolve_plugin_icon() or FluentIcon.SETTING
+        icon = self._resolve_plugin_icon() or AppIcon.SETTING
         super().__init__(icon, title_text, content_text, parent)
         # viewLayout 边距收紧，让多行表单更紧凑
         self.viewLayout.setContentsMargins(48, 8, 48, 8)
@@ -87,7 +87,7 @@ class PluginConfigCard(DynamicHeightExpandCardMixin, ExpandSettingCard):
         """读取插件自身 icon（按当前主题取 light/dark），失败回退 None。
 
         对齐 tab_panel._get_plugin_icon：经 PluginManager 拿 icon_config，
-        主题图标缺失/读取失败时静默回退 FluentIcon.SETTING。
+        主题图标缺失/读取失败时静默回退 AppIcon.SETTING。
         """
         try:
             from app.plugins.managers.plugin_manager import PluginManager

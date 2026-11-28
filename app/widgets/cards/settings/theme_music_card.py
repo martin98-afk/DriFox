@@ -22,7 +22,8 @@ import os
 from loguru import logger
 from PyQt5.QtCore import QEvent, QObject, Qt, pyqtSignal
 from PyQt5.QtWidgets import QHBoxLayout, QLabel, QWidget
-from qfluentwidgets import ExpandSettingCard, FluentIcon, Slider, SwitchButton
+from qfluentwidgets import ExpandSettingCard, Slider, SwitchButton
+from app.utils.app_icon import AppIcon
 
 from app.utils import theme_music_store
 from app.utils.config import Settings
@@ -154,7 +155,7 @@ class ThemeMusicCard(DynamicHeightExpandCardMixin, ExpandSettingCard):
     _skip_auto_expand = True
 
     def __init__(self, volume_item, parent=None):
-        super().__init__(FluentIcon.MUSIC, "主题音乐", "当前主题没有背景音乐", parent)
+        super().__init__(AppIcon.MUSIC, "主题音乐", "当前主题没有背景音乐", parent)
         self._volume_item = volume_item
         self.cfg = Settings.get_instance()
         self._theme_id = ""

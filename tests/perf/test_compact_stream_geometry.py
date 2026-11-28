@@ -7,7 +7,7 @@ pytestmark = pytest.mark.perf
 
 
 @pytest.mark.parametrize('collapse', [False, True], ids=['prose', 'collapse'])
-def test_compact_stream_geometry(qapp, qtbot, collapse):
+def test_compact_stream_geometry(qapp, qtbot, compact_output_plugin, collapse):
     if os.environ.get('DRIFOX_VISIBLE_CADENCE') != '1' or qapp.platformName() == 'offscreen':
         pytest.skip('需要真实前台窗口')
     from PyQt5.QtWidgets import QWidget, QVBoxLayout, QScrollArea
@@ -64,22 +64,25 @@ def test_compact_stream_geometry(qapp, qtbot, collapse):
         expected.append(chunk)
         card.append_text(chunk)
         qtbot.wait(24)
-    qtbot.wait(600)
+    expected_count = ''.join(expected).count(text)
+    qtbot.waitUntil(lambda: js("document.querySelector('#content-placeholder').innerText").count(text)
+                    == expected_count, timeout=15000)
+    qtbot.waitUntil(lambda: js('window._gapSamples.length && window._gapSamples[window._gapSamples.length-1][3]')
+                    >= expected_count * len(text), timeout=3000)
     frames = js('window._stopGap=true;window._gapSamples')
     assert len(frames) > 50
     cap = card.viewer.body_max_height_cap()
-    assert frames[-1][3] > 6000
+    decreases = [a[1]-b[1] for a,b in zip(frames, frames[1:]) if b[3] >= a[3]]
+    assert max(decreases) <= 2, f'连续追加正文期间视口回缩 {max(decreases)}px'
     gaps = [viewport - min(doc + 2, cap) for _, viewport, doc, _ in frames if doc + 2 < cap]
     assert len(gaps) > 50
     clip = sorted(max(0, -g) for g in gaps)
     blank = sorted(max(0, g) for g in gaps)
     print(f'采样={len(gaps)} 空白P95/峰值={blank[int(.95*len(gaps))]}/{blank[-1]} '
           f'裁切P95/峰值={clip[int(.95*len(gaps))]}/{clip[-1]} 终态差={gaps[-1]}', flush=True)
-    qtbot.waitUntil(lambda: js("document.querySelector('#content-placeholder').innerText").count(text)
-                    == ''.join(expected).count(text), timeout=5000)
     card.finish_streaming()
     qtbot.waitUntil(lambda: js("document.querySelector('#content-placeholder').innerText").count(text)
-                    == ''.join(expected).count(text), timeout=5000)
+                    == expected_count, timeout=5000)
     assert frames[-1][1] == cap and frames[-1][2] > cap
     line_px = js("parseFloat(getComputedStyle(document.querySelector('#content-placeholder p') || document.querySelector('#content-placeholder')).lineHeight)") or 27
     assert clip[int(.95*len(gaps))] <= 2 * round(line_px)

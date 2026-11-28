@@ -19,7 +19,6 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 from qfluentwidgets import (
-    FluentIcon,
     FluentLabelBase,
     IconWidget,
     ScrollArea,
@@ -27,7 +26,11 @@ from qfluentwidgets import (
     TransparentToolButton,
     isDarkTheme,
 )
+from qfluentwidgets import FluentIcon
+from app.plugins.sdk import caps_for
 from loguru import logger
+
+icons = caps_for("ui.icons", plugin="shortcut-manager", surface="ui") or FluentIcon
 
 
 # ── 路径常量 ──────────────────────────────────────────────
@@ -533,7 +536,7 @@ class _CommandRow(QFrame):
         self._shortcut_lb = shortcut_lb
 
         # 编辑按钮
-        self.edit_btn = TransparentToolButton(FluentIcon.EDIT, self)
+        self.edit_btn = TransparentToolButton(icons.EDIT, self)
         self.edit_btn.setToolTip("设置自定义快捷键")
         self.edit_btn.setFixedSize(28, 28)
         self.edit_btn.clicked.connect(lambda: self.edit_clicked.emit(self._cmd_name))
@@ -541,7 +544,7 @@ class _CommandRow(QFrame):
 
         # 恢复按钮
         if self._is_customized:
-            self.restore_btn = TransparentToolButton(FluentIcon.RETURN, self)
+            self.restore_btn = TransparentToolButton(icons.RETURN, self)
             self.restore_btn.setToolTip("恢复系统配置")
             self.restore_btn.setFixedSize(28, 28)
             self.restore_btn.clicked.connect(lambda: self.restore_clicked.emit(self._cmd_name))
@@ -727,7 +730,7 @@ class ShortcutManagerCard(QWidget):
         hly.setContentsMargins(16, 12, 16, 4)
         hly.setSpacing(8)
 
-        ic = IconWidget(FluentIcon.COMMAND_PROMPT, header)
+        ic = IconWidget(icons.COMMAND_PROMPT, header)
         ic.setFixedSize(22, 22)
         hly.addWidget(ic)
         self._header_icon = ic
@@ -747,12 +750,12 @@ class ShortcutManagerCard(QWidget):
         self._search.textChanged.connect(self._on_search)
         hly.addWidget(self._search)
 
-        self._refresh_btn = TransparentToolButton(FluentIcon.SYNC, header)
+        self._refresh_btn = TransparentToolButton(icons.SYNC, header)
         self._refresh_btn.setToolTip("刷新")
         self._refresh_btn.clicked.connect(self._refresh)
         hly.addWidget(self._refresh_btn)
 
-        close_btn = TransparentToolButton(FluentIcon.CLOSE, header)
+        close_btn = TransparentToolButton(icons.CLOSE, header)
         close_btn.setFixedSize(24, 24)
         close_btn.setToolTip("关闭")
         close_btn.clicked.connect(self._on_close)

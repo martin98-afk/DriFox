@@ -4,20 +4,65 @@
     <file>233键盘-线性.svg</file>
     <file>MCP.svg</file>
     <file>Search.svg</file>
+    <file>arrow-left.svg</file>
+    <file>arrow-up.svg</file>
+    <file>badge-check.svg</file>
+    <file>book-open.svg</file>
+    <file>bookmark.svg</file>
+    <file>brush-cleaning.svg</file>
     <file>chart.svg</file>
+    <file>check.svg</file>
+    <file>chevron-right.svg</file>
+    <file>circle-arrow-down.svg</file>
+    <file>clipboard-paste.svg</file>
+    <file>code.svg</file>
+    <file>coffee.svg</file>
+    <file>download.svg</file>
+    <file>eye.svg</file>
+    <file>film.svg</file>
+    <file>folder-plus.svg</file>
     <file>folder.svg</file>
+    <file>gauge.svg</file>
     <file>gitee.svg</file>
+    <file>hammer.svg</file>
     <file>hooks.svg</file>
+    <file>house.svg</file>
+    <file>image-up.svg</file>
+    <file>layout-grid.svg</file>
+    <file>library-big.svg</file>
+    <file>link.svg</file>
     <file>lsp.svg</file>
+    <file>maximize.svg</file>
+    <file>message-square-text.svg</file>
+    <file>message-square.svg</file>
+    <file>music-2.svg</file>
+    <file>network.svg</file>
+    <file>paintbrush.svg</file>
+    <file>pause.svg</file>
+    <file>play.svg</file>
+    <file>plug.svg</file>
     <file>question.svg</file>
     <file>read.svg</file>
+    <file>refresh-cw.svg</file>
+    <file>rotate-cw.svg</file>
+    <file>save.svg</file>
+    <file>scan.svg</file>
+    <file>scissors.svg</file>
     <file>scroll_to_bottom.svg</file>
     <file>setting.svg</file>
+    <file>share-2.svg</file>
     <file>shell.svg</file>
+    <file>shield-check.svg</file>
+    <file>shopping-cart.svg</file>
+    <file>sun.svg</file>
     <file>tab切换.svg</file>
+    <file>tag.svg</file>
     <file>todo.svg</file>
     <file>upload-file.svg</file>
+    <file>video.svg</file>
     <file>websearch.svg</file>
+    <file>zoom-in.svg</file>
+    <file>zoom-out.svg</file>
     <file>上下文.svg</file>
     <file>主题风格.svg</file>
     <file>云通信.svg</file>
@@ -42,6 +87,8 @@
     <file>归档.svg</file>
     <file>思考过程.svg</file>
     <file>惊叹号.svg</file>
+    <file>成功.svg</file>
+    <file>执行中.svg</file>
     <file>技能.svg</file>
     <file>折叠.svg</file>
     <file>提示.svg</file>
@@ -52,12 +99,14 @@
     <file>新建会话_temp.svg</file>
     <file>新建窗口.svg</file>
     <file>无限.svg</file>
+    <file>日志.svg</file>
     <file>智能体.svg</file>
     <file>更多.svg</file>
     <file>最大化.svg</file>
     <file>最小化.svg</file>
     <file>根目录.svg</file>
     <file>模型选择.svg</file>
+    <file>用户.svg</file>
     <file>窗体-关闭.svg</file>
     <file>窗体-向下还原.svg</file>
     <file>窗体-最大化.svg</file>

@@ -20,14 +20,11 @@ def register_ui(registry):
 
     from .cards import ShareHistoryCard
 
-    # 注册浮动卡片（自动注册对应命令 /share-history）
-    # container="right"：停靠在 Tab 窗口右侧停靠区，查阅历史不干扰当前对话
-    registry.register_floating_card(
+    registry.register_workbench_tab(
         plugin_name="share-history",
-        card_id="share-history",
+        page_id="share-history",
+        label="分享记录",
         widget_class=ShareHistoryCard,
-        container="left",
-        title="分享记录",
-        default_visible=False,
+        metadata={"order_hint": 20},
     )
     logger.info("[share-history] UI components registered")

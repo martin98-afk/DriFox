@@ -249,10 +249,11 @@ def test_name_label_font_and_size(qapp):
     assert label.font().pixelSize() == ih.scale_font_size(ih.NAME_FONT_SIZE)
     assert label.font().bold()
 
-    # 字族：必须落到用户配置的字体，而非 QSS 回落的宋体
-    from app.utils.utils import Settings
+    # 身份行属于界面，对话正文的字体配置不影响名称。
+    from app.utils.design_tokens import _get_global_font
+    from PyQt5.QtGui import QFont
 
-    expected = Settings.get_instance().llm_font_family.value
+    expected = QFontInfo(QFont(_get_global_font())).family()
     assert QFontInfo(label.font()).family() == expected, (
         f"名称字族应为 {expected!r}，实际 {QFontInfo(label.font()).family()!r}"
     )

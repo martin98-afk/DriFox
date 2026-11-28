@@ -563,6 +563,12 @@ def _project_workdir(host: Any):
 # ──────────────────── 上下文 / 引擎 ────────────────────
 
 
+def _ui_icons(host: Any):
+    from app.utils.app_icon import AppIcon
+
+    return AppIcon
+
+
 def _theme_read(host: Any):
     return host._resolve_theme_snapshot
 
@@ -2149,6 +2155,7 @@ def register(registry) -> None:
     reg.register("storage.db", _storage_db, surface="ui", owner="core:ui")
     # 上下文 / 引擎
     reg.register("theme.read", _theme_read, surface="ui", owner="core:ui")
+    reg.register("ui.icons", _ui_icons, surface="ui", owner="core:ui")
     reg.register("engine.stack", _engine_stack, surface="ui", owner="core:ui")
     reg.register("engine.session", _engine_session, surface="ui", owner="core:ui")
     reg.register(

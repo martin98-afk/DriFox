@@ -11,7 +11,6 @@
 page_id 语义，全部页由插件通过
 ``UIPluginRegistry.register_workbench_tab(plugin_name, page_id, label, widget_class, metadata=...)``
 注册：
-- ``page_id="worktree-manager"``  → ``plugins/worktree-manager/ui/worktree_page.py``（order_hint=0）
 - ``page_id="file-tree"``           → ``plugins/file-tree/ui/cards.py``（order_hint=15，default_landing）
 - ``page_id="history-manager"``  → 已迁浮动卡，不再注册工作台页
 页序 = ``(metadata["order_hint"], 注册序)``；默认落点页 = ``metadata["default_landing"]``

@@ -270,6 +270,27 @@ def test_get_project_list_distinct_sorted(monkeypatch, tmp_path):
     assert manager.get_project_list() == ["DriFox", "zero"]
 
 
+def test_delete_history_by_id_preserves_other_sessions_and_pending_on_failure(monkeypatch, tmp_path):
+    from unittest.mock import Mock
+
+    manager = _make_manager_with_records(monkeypatch, tmp_path, [_mk_record("a", pinned=True), _mk_record("b")])
+    manager._session_store = store = Mock()
+    manager._use_sqlite = True
+    manager._pending_save_session_id = "a"
+    store.delete_session.return_value = False
+    assert not manager.delete_history_by_id("a")
+    assert manager.get_pin_state("a") is True
+    assert manager._pending_save_session_id == "a"
+
+    store.delete_session.return_value = True
+    assert manager.delete_history_by_id("a")
+    store.delete_session.assert_called_with("a")
+    assert manager._pending_save_session_id is None
+    assert manager.get_pin_state("a") is None
+    assert manager.get_pin_state("b") is False
+    assert not list(manager.archive_dir.glob("*.json"))
+
+
 def test_get_project_list_sqlite_includes_projects_without_sessions(monkeypatch, tmp_path):
     """SQLite 模式：仅有 key_documents 记录的空项目也必须出现在项目列表。
 

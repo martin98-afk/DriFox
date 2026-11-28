@@ -45,7 +45,7 @@ def _info(tmp_path: Path, name: str, **manifest) -> PluginInfo:
 
 @pytest.fixture()
 def env(tmp_path, monkeypatch, qapp):
-    monkeypatch.setattr("app.utils.utils.get_app_data_dir", lambda: str(tmp_path))
+    monkeypatch.setattr("app.utils.utils.get_app_data_dir", lambda: tmp_path)
     reg = PluginConfigRegistry.get_instance()
     reg.register(
         parse_config_schema(
@@ -118,27 +118,145 @@ def test_search_by_plugin_name_and_field_label(env, qapp):
     visible = [r._entry.info.name for r in page._rows if not r.isHidden()]
     assert visible == ["voice-reply"]
     # 默认筛选只看「有配置」，搜无配置插件前先切到「全部」
-    page._on_chip_clicked("all")
+    page._status_combo.setCurrentIndex(page._status_combo.findData("all"))
     page._search.setText("browser")
     page._apply_filter()
     visible = [r._entry.info.name for r in page._rows if not r.isHidden()]
     assert visible == ["browser"]
 
 
-def test_filter_chip_pending(env, qapp):
+def test_filter_pending(env, qapp):
     page = page_mod.PluginSettingsPage()
     page.reload(force=True)
     _pump(qapp)
-    page._on_chip_clicked("todo")
+    page._status_combo.setCurrentIndex(page._status_combo.findData("todo"))
     visible = [r._entry.info.name for r in page._rows if not r.isHidden()]
     assert visible == ["voice-reply"]
+
+
+def test_filter_keeps_detail_in_results_and_recovers_from_empty(env, qapp):
+    page = page_mod.PluginSettingsPage()
+    page.reload(force=True)
+    page.reload(force=True)
+    _pump(qapp)
+    assert len(page._rows) == len(page._entries)
+    page._search.setText("提示词")
+    page._apply_filter()
+    assert page._current == "git-panel"
+    page._search.setText("没有这个字段")
+    page._apply_filter()
+    assert page._current is None
+    assert page._detail.isHidden()
+    page._reset.click()
+    assert page._current == "voice-reply"
+    assert all(not row.isHidden() for row in page._rows)
+
+
+def test_required_field_save_updates_hint_and_pending_results(env, qapp):
+    page = page_mod.PluginSettingsPage()
+    page.reload(force=True)
+    page._status_combo.setCurrentIndex(page._status_combo.findData("todo"))
+    field = page._detail._form._rows["api_key"]
+    field.setText("test-value")
+    field.editingFinished.emit()
+    _pump(qapp)
+    assert page._detail._missing_hint.isHidden()
+    assert page._status_combo.currentText() == "待配置 0"
+    assert page._current is None
+    page.reload(force=True)
+    page._status_combo.setCurrentIndex(page._status_combo.findData("configured"))
+    page._select("voice-reply")
+    assert page._detail._form._rows["api_key"].text() == "test-value"
+
+
+def test_plugin_panes_fill_settings_and_scroll_independently(env, qapp, qtbot, monkeypatch):
+    from PyQt5.QtCore import QPoint, QPointF, Qt
+    from PyQt5.QtGui import QWheelEvent
+    from PyQt5.QtWidgets import QScrollArea
+
+    from app.utils.design_tokens import Animations
+    from app.widgets.cards.settings.llm_settings_card import LLMSettingsCard
+
+    monkeypatch.setattr(Animations, "motion_enabled", classmethod(lambda cls: False))
+    card = LLMSettingsCard()
+    qtbot.addWidget(card)
+    card.resize(1100, 510)
+    card.show()
+    card._set_active_page("plugins")
+    page = card.pluginSettingsPage
+    _pump(qapp)
+    listing = page._list_area
+    detail = page._detail.current_scroll()
+    for area in (listing, detail):
+        area.widget().setMinimumHeight(1200)
+
+    def wheel_down(area):
+        viewport = area.viewport()
+        pos = viewport.rect().center()
+        event = QWheelEvent(
+            QPointF(pos), QPointF(viewport.mapToGlobal(pos)), QPoint(), QPoint(0, -120),
+            Qt.NoButton, Qt.NoModifier, Qt.NoScrollPhase, False,
+        )
+        QApplication.sendEvent(viewport, event)
+
+    for width, height in ((1100, 510), (1100, 310), (640, 510), (1100, 700)):
+        card.resize(width, height)
+        _pump(qapp)
+        # 缩放后页面上下边缘都要落在设置卡视口内，滚到底也不能推走标题。
+        viewport = card.scroll_area.viewport()
+        assert viewport.rect().contains(page.mapTo(viewport, page.rect().topLeft()))
+        assert viewport.rect().contains(page.mapTo(viewport, page.rect().bottomRight()))
+        assert page.size() == card._pages_stack.contentsRect().size()
+        ancestor = page.parentWidget()
+        while ancestor is not None:
+            if isinstance(ancestor, QScrollArea):
+                assert ancestor.verticalScrollBar().maximum() == 0
+            ancestor = ancestor.parentWidget()
+
+        left = listing.verticalScrollBar()
+        right = detail.verticalScrollBar()
+        left.setValue(0)
+        right.setValue(0)
+        title_pos = card._page_title.mapTo(card, QPoint())
+        wheel_down(listing)
+        assert left.value() > 0 and right.value() == 0
+        left_pos = left.value()
+        wheel_down(detail)
+        assert right.value() > 0 and left.value() == left_pos
+        for area in (listing, detail):
+            area.verticalScrollBar().setValue(area.verticalScrollBar().maximum())
+            wheel_down(area)
+        assert card._page_title.mapTo(card, QPoint()) == title_pos
+
+
+def test_settings_search_opens_matching_page(env, qapp):
+    from app.widgets.cards.settings.llm_settings_card import LLMSettingsCard
+
+    card = LLMSettingsCard()
+    card._nav_search.setText("提示音")
+    assert [key for key, btn in card._nav_buttons.items() if not btn.isHidden()] == ["common"]
+    card._nav_search.returnPressed.emit()
+    assert card._current_tab == "common"
+    assert card._page_title.text() == "通用"
+    card._refresh_appearance_from_config()
+    for key in ("provider", "common"):
+        card._set_active_page(key)
+        qapp.processEvents()
+        for tab in ("provider", "common"):
+            button = card._nav_buttons[tab]
+            button.ensurePolished()
+            assert button.font().bold() == (tab == key)
+    card._nav_search.setText("不存在的设置")
+    assert not card._nav_empty.isHidden()
+    card._nav_search.clear()
+    assert not card._nav_buttons["plugins"].isHidden()
 
 def test_type_combo_filters_by_component(env, qapp):
     """类型下拉按组件能力过滤，并与状态 chips 叠加（AND）；「已停用」档已移除"""
     page = page_mod.PluginSettingsPage()
     page.reload(force=True)
     _pump(qapp)
-    assert "off" not in page._chips
+    assert page._status_combo.findData("off") == -1
     # 档位只列清单实际出现的组件，按 COMPONENT_ORDER 排列：skills < mcp < ui < tools
     assert page._type_keys == [None, "skills", "mcp", "ui", "tools"]
     # 选「工具」→ 只剩 voice-reply（默认「有配置」chip 下三者都有配置）
@@ -146,7 +264,7 @@ def test_type_combo_filters_by_component(env, qapp):
     visible = [r._entry.info.name for r in page._rows if not r.isHidden()]
     assert visible == ["voice-reply"]
     # 切「全部」chip + 「界面扩展」→ 无配置的 browser 也能被类型筛出
-    page._on_chip_clicked("all")
+    page._status_combo.setCurrentIndex(page._status_combo.findData("all"))
     page._type_combo.setCurrentIndex(page._type_keys.index("ui"))
     visible = [r._entry.info.name for r in page._rows if not r.isHidden()]
     assert visible == ["browser"]
@@ -422,7 +540,7 @@ def test_detail_frame_bg_refreshes_on_theme_toggle(env, qapp, monkeypatch):
     _pump(qapp)
     old_css = page._detail_frame.styleSheet()
     monkeypatch.setattr(page_mod.Colors, "CARD_BG", "rgba(9, 8, 7, {alpha})")
-    monkeypatch.setattr(page_mod.Colors, "BORDER", "#010203")
+    monkeypatch.setattr(page_mod.Colors, "DIVIDER_COLOR", "#010203")
     page.refresh_style()
     new_css = page._detail_frame.styleSheet()
     assert new_css != old_css

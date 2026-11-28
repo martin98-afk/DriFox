@@ -10,9 +10,10 @@ from app.utils.utils import get_unified_font
 
 
 class ImageLightbox(QDialog):
-    def __init__(self, pixmap, parent=None):
+    def __init__(self, pixmap, parent=None, *, annotation_dir=None):
         owner = parent.window() if parent is not None else QApplication.activeWindow()
         super().__init__(owner, Qt.Dialog | Qt.FramelessWindowHint | Qt.NoDropShadowWindowHint)
+        self.annotations = None
         self.owner = owner
         self.image = pixmap
         self.setWindowModality(Qt.WindowModal)
@@ -29,6 +30,10 @@ class ImageLightbox(QDialog):
             owner.installEventFilter(self)
         self._sync_window()
         self.fit()
+        if annotation_dir is not None:
+            from app.widgets.image_annotations import ImageAnnotations
+
+            self.annotations = ImageAnnotations(self, annotation_dir)
 
     def _sync_window(self):
         if self.owner:
@@ -55,6 +60,8 @@ class ImageLightbox(QDialog):
     def resizeEvent(self, event):
         if self.fitted:
             self.fit()
+        if self.annotations is not None:
+            self.annotations.place_toolbar()
         super().resizeEvent(event)
 
     def zoom(self, scale, anchor):
@@ -76,9 +83,21 @@ class ImageLightbox(QDialog):
             src = QRectF((dst.x() - self.origin.x()) / self.scale, (dst.y() - self.origin.y()) / self.scale, dst.width() / self.scale, dst.height() / self.scale)
             p.setRenderHint(QPainter.SmoothPixmapTransform, self.scale < 1.)
             p.drawPixmap(dst, self.image, src)
+            if self.annotations is not None:
+                p.save()
+                p.setClipRect(dst)
+                p.translate(self.origin)
+                p.scale(self.scale, self.scale)
+                self.annotations.draw(p)
+                p.restore()
+                if self.annotations.entry.isVisible():
+                    self.annotations.position_entry()
         p.setFont(self.font())
         p.setPen(Qt.white)
         text = f'{self.scale * 100:.0f}%   ·   滚轮缩放   ·   拖动平移   ·   双击适应 / 原图   ·   Esc 关闭'
+        if self.annotations is not None and self.annotations.tool:
+            gesture = "点击图片输入文字" if self.annotations.tool == "text" else "在图片上拖动标记"
+            text = f"{self.scale * 100:.0f}%   ·   {gesture}   ·   滚轮缩放   ·   Esc 关闭"
         hint = self.rect().adjusted(8, self.height() - self.fontMetrics().height() - 12, -8, -5)
         p.fillRect(hint, QColor(0, 0, 0, 148))
         p.drawText(hint, Qt.AlignCenter, text)
@@ -90,12 +109,18 @@ class ImageLightbox(QDialog):
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
+            if self.annotations is not None and self.annotations.tool:
+                self.annotations.press_at(event.localPos())
+                return
             self.press = self.last = event.localPos()
             self.dragged = False
             self.setCursor(Qt.ClosedHandCursor)
 
     def mouseMoveEvent(self, event):
         p = event.localPos()
+        if self.annotations is not None and self.annotations.tool:
+            self.annotations.move_to(p)
+            return
         if self.press is not None and event.buttons() & Qt.LeftButton:
             if self.dragged or (p - self.press).manhattanLength() >= QApplication.startDragDistance():
                 self.origin += p - self.last
@@ -108,6 +133,9 @@ class ImageLightbox(QDialog):
 
     def mouseReleaseEvent(self, event):
         if event.button() == Qt.LeftButton:
+            if self.annotations is not None and self.annotations.tool:
+                self.annotations.release_at(event.localPos())
+                return
             if self.press is not None and not self.dragged and not self.image_rect().contains(self.press):
                 self.reject()
             self.press = self.last = None
@@ -115,6 +143,8 @@ class ImageLightbox(QDialog):
 
     def mouseDoubleClickEvent(self, event):
         if event.button() == Qt.LeftButton:
+            if self.annotations is not None and self.annotations.tool:
+                return
             if self.fitted:
                 self.zoom(1., event.localPos())
             else:

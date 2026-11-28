@@ -385,7 +385,10 @@ class CustomTabButton(QWidget):
         self._custom_widget: Optional[QWidget] = None
         self._close_btn: Optional[QPushButton] = None
         if closable:
-            self._close_btn = QPushButton("×", self)
+            self._close_btn = QPushButton(self)
+            self._close_btn.setIcon(get_icon("关闭"))
+            self._close_btn.setIconSize(QSize(12, 12))
+            self._close_btn.setToolTip("关闭标签页")
             self._close_btn.setFixedSize(16, 16)
             self._close_btn.setCursor(Qt.PointingHandCursor)
             self._close_btn.clicked.connect(lambda: self.close_clicked.emit(self.tab_id))

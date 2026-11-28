@@ -23,6 +23,7 @@
 就没缓存」而假绿），这条会失败。两者合起来才能证明「缓存存在 **且** 清得掉」。
 """
 
+import os
 import subprocess
 
 import pytest
@@ -121,7 +122,7 @@ def _load_ui_invalidate():
 # 前 4 项是本次性能改动引入 `_is_worktree_cache` 时必须一并清的集合，
 # `_detect_cache` 用循环 + abspath 匹配逐键 pop（负缓存也在此失效）。
 _UI_EXPECTED_CLEARS = (
-    ("_info_cache", "pop"),  # GitWorktreeDetector._info_cache.pop(folder, None)
+    ("_info_cache", "clear"),  # GitWorktreeDetector._info_cache.clear()
     ("_worktrees_cache", "clear"),  # .clear()
     ("_branch_cache", "clear"),  # .clear()
     ("_is_worktree_cache", "clear"),  # .clear() ← 本契约的核心
@@ -259,6 +260,46 @@ class TestCacheInvalidationContract:
         assert GitWorktreeDetector.is_worktree(str(wt)) is False, (
             "UI 层清缓存后仍判为 worktree → 用户在 UI 删 worktree 会写错会话 worktree_path"
         )
+
+    def test_invalidate_clears_subtree_keyed_info_cache(self, repo_with_worktree):
+        """会话位于子工作树时写入的 `(子工作树路径, counts)` 条目也必须失效。
+
+        回归：`_info_cache` 键是元组，且以子工作树为 key 探测时 `info.root`
+        指向子工作树自身（不是主仓库根）。两层清缓存若按 `info.root == repo_root`
+        精确匹配会漏掉这类条目 → 主仓库新建工作树后，`get_repo_info(子工作树)`
+        在 30s TTL 内返回旧列表，表现为「新建的工作树刷新不出来」。
+        """
+        repo, wt = repo_with_worktree
+
+        # 模拟「会话工作目录在子工作树里」：以子工作树为 key 探测并写缓存
+        info_in_wt = GitWorktreeDetector.get_repo_info(str(wt))
+        assert info_in_wt is not None
+        assert os.path.normcase(info_in_wt.root) == os.path.normcase(str(wt)), (
+            "前置条件变了：以子工作树探测时 info.root 应指向子工作树自身"
+        )
+        before = len(info_in_wt.worktrees)
+
+        # 主仓库里再新建一个工作树
+        wt2 = repo.parent / "wt2"
+        r = _git(repo, "worktree", "add", "-q", "-b", "wtbranch2", str(wt2))
+        if r.returncode != 0:
+            pytest.skip(f"第二个 worktree 创建失败: {r.stderr}")
+
+        # 两层清缓存都必须让「子工作树视角」的旧条目失效
+        for loader in (_load_tools_invalidate, _load_ui_invalidate):
+            invalidate = loader()
+            GitWorktreeDetector._info_cache.clear()
+            GitWorktreeDetector.get_repo_info(str(wt))  # 重新写入子工作树键条目
+            invalidate(str(repo))
+            assert not GitWorktreeDetector._info_cache, (
+                f"{loader.__name__} 清缓存后仍残留 _info_cache 条目："
+                f"{list(GitWorktreeDetector._info_cache)}"
+            )
+            after = len(GitWorktreeDetector.get_repo_info(str(wt)).worktrees)
+            assert after == before + 1, (
+                f"{loader.__name__} 后重新探测仍拿到 {after} 个工作树（应 {before + 1}）"
+                "→ 新建的工作树会刷不出来"
+            )
 
     def test_without_invalidate_stays_true_within_ttl(self, repo_with_worktree):
         """反向断言：**不清**缓存时，TTL 内仍返回 True（证明缓存确实存在）。

@@ -17,6 +17,7 @@
   "type": "system",
   "api_version": 2,
   "capabilities": [
+    "ui.icons",
     "session.history",
     "session.history.write",
     "session.manage",

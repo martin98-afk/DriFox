@@ -323,7 +323,8 @@ class HistoryFirstPaintGate(QObject):
             self._layout_quiet_since = now  # 整屏高度变了 → 重新计静默时长
         self._last_visible_sig = visible_sig
         self._last_layout_height = layout_height
-        self._visible_stable_samples = self._visible_stable_samples + 1 if visible_stable else 0
+        # 浏览器启动期间的占位高度也会静止；从屏内页面就绪后才累计静止拍数。
+        self._visible_stable_samples = self._visible_stable_samples + 1 if visible_stable and not unrendered else 0
 
         settled = visible > 0 and bool(state.get("at_bottom")) and pending == 0
         quiet_ms = (now - self._layout_quiet_since) * 1000.0

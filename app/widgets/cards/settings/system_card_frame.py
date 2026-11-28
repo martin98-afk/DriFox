@@ -19,7 +19,8 @@ from PyQt5.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-from qfluentwidgets import FluentIcon, PrimaryToolButton, ScrollArea, StrongBodyLabel, TransparentToolButton
+from qfluentwidgets import PrimaryToolButton, ScrollArea, StrongBodyLabel, TransparentToolButton
+from app.utils.app_icon import AppIcon
 
 from app.utils.design_tokens import (
     CardStyles,
@@ -157,7 +158,7 @@ class SystemCardFrame(QFrame):
         self._header_layout.addLayout(self._extra_buttons_container)
 
         # 关闭按钮
-        self.close_btn = TransparentToolButton(FluentIcon.CLOSE)
+        self.close_btn = TransparentToolButton(AppIcon.CLOSE)
         self.close_btn.setFixedSize(24, 24)
         self.close_btn.mousePressEvent = lambda e: self._on_close()
         self._header_layout.addWidget(self.close_btn)
@@ -598,7 +599,7 @@ class SystemCardFrame(QFrame):
 
         Args:
             handler: 按钮点击回调
-            icon: 图标（FluentIcon 或 QIcon，默认"导入"图标）
+            icon: 图标（AppIcon 或 QIcon，默认"导入"图标）
             tooltip: 悬浮提示文字
         """
         while self._extra_buttons_container.count():
@@ -618,7 +619,7 @@ class SystemCardFrame(QFrame):
         """向标题栏右侧添加自定义操作按钮
 
         Args:
-            icon: FluentIcon 或 QIcon 图标
+            icon: AppIcon 或 QIcon 图标
             tooltip: 按钮悬浮提示
             callback: 点击回调函数
 
@@ -660,7 +661,7 @@ class SystemCardFrame(QFrame):
     def set_save_button_handler(self, handler):
         self.clear_save_button()
 
-        btn = PrimaryToolButton(FluentIcon.SAVE, self)
+        btn = PrimaryToolButton(AppIcon.SAVE, self)
         btn.setFixedSize(30, 30)
         btn.clicked.connect(handler)
         self._extra_buttons_container.addWidget(btn)

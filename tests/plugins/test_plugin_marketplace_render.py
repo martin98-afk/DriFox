@@ -592,14 +592,13 @@ def test_rows_not_squeezed_desc_visible(monkeypatch):
 
     # 反面约束：不得为了不压行而把内容撑得过高（底部出现大段空白）
     lay = card._content_layout
-    rows_h = 0
-    for i in range(lay.count()):
-        w = lay.itemAt(i).widget()
-        if w is not None and w.isVisible():
-            rows_h += w.height()
-    assert card._content.height() - rows_h < 120, (
-        f"底部空白过大: content={card._content.height()} rows={rows_h}"
+    # 直接量最后一个可见控件至底边的距离，兼容双列及卡片间距。
+    bottom = max(
+        w.geometry().bottom() + 1
+        for i in range(lay.count())
+        if (w := lay.itemAt(i).widget()) is not None and w.isVisible()
     )
+    assert card._content.height() - bottom <= lay.contentsMargins().bottom() + 1
 
 
 def test_rows_not_squeezed_after_resize(monkeypatch):

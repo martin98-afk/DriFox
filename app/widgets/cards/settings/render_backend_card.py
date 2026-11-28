@@ -11,7 +11,8 @@ sizeHint 会沿布局链把设置弹窗顶宽（见 render_status_card 的同类
 
 from __future__ import annotations
 
-from qfluentwidgets import FluentIcon, OptionsSettingCard, qconfig
+from qfluentwidgets import OptionsSettingCard, qconfig
+from app.utils.app_icon import AppIcon
 
 # 档位 → 头部一行说明（短）。无 auto 档：它不检测机器、只是读人工放的标记文件。
 DESCRIPTIONS = {
@@ -42,7 +43,7 @@ class RenderBackendCard(OptionsSettingCard):
     """渲染后端选择卡：头部说明随档位变化 + 每档 tooltip 详解"""
 
     def __init__(self, configItem, texts, parent=None):
-        super().__init__(configItem, FluentIcon.SPEED_HIGH, "渲染后端", content="", texts=texts, parent=parent)
+        super().__init__(configItem, AppIcon.SPEED_HIGH, "渲染后端", content="", texts=texts, parent=parent)
         # 展开后的单选项挂 tooltip（基类只塞了 RadioButton，没有说明）
         for button in self.buttonGroup.buttons():
             button.setToolTip(TIPS.get(button.property(self.configName), ""))

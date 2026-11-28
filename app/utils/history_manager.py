@@ -1485,6 +1485,24 @@ class HistoryManager:
             record = self._history_sessions[index]
         return self._archive_session_record(record)
 
+    def delete_history_by_id(self, session_id: str) -> bool:
+        """永久删除历史记录。等待已交给后台的旧快照，避免删除后被写回。"""
+        self._ensure_history_loaded()
+        if not self._wait_inflight_saves():
+            return False
+        with self._history_lock:
+            index = self.find_index_by_session_id(session_id)
+            if index is None:
+                return False
+            if self._use_sqlite and (self._session_store is None or not self._session_store.delete_session(session_id)):
+                return False
+            if self._pending_save_session_id == session_id:
+                self._pending_save_session_id = None
+                self._cancel_save_timer()
+            self._history_sessions.pop(index)
+            self._mark_cache_dirty()
+            return True
+
     def remove_session(self, session_id: str, release_messages_only: bool = True) -> bool:
         """从内存缓存移除会话记录（或仅释放其消息体）。
 
@@ -1843,6 +1861,13 @@ class HistoryManager:
             )
         return None
 
+
+    def get_pin_state(self, session_id: str) -> Optional[bool]:
+        """只读历史元数据，None 表示当前对话尚未进入历史。"""
+        self._ensure_history_loaded()
+        with self._history_lock:
+            index = self.find_index_by_session_id(session_id)
+            return None if index is None else bool(self._history_sessions[index].get("pinned"))
 
     def set_session_pinned(self, session_id: str, pinned: bool) -> bool:
         """设置会话置顶标记（改内存 + 持久化 pinned 列，不动消息）

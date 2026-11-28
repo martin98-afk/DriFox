@@ -75,6 +75,8 @@ from app.utils.design_tokens import (
     BorderRadius,
     Colors,
     _get_global_font,
+    chat_font_css,
+    chat_font_family,
     current_theme,
     fade_in_widget,
     font_size_css,
@@ -97,6 +99,8 @@ from app.widgets.render import (
     live_key,
     render_message,
 )
+from app.widgets.render.group_dom import GROUP_CSS, GROUP_JS
+from app.plugins.contracts.message_layout import ORIGINAL, summary_items
 from app.widgets.render_crash_queue import RenderCrashQueue
 from app.widgets.card_render_core import (
     ACTION_COLOR_MAP,
@@ -328,6 +332,8 @@ class ConsoleMonitorPage(QWebEnginePage):
     codeActionRequested = pyqtSignal(str, str)
     contextActionRequested = pyqtSignal(str, str)
     heightReported = pyqtSignal(int)
+    groupHeightReported = pyqtSignal(int)
+    groupToggleRequested = pyqtSignal()
     # 🐛 卡片内阅读标志：reportHeight 第 4 字段翻转时推送（见 javaScriptConsoleMessage）。
     # WebEngine 内滚动不动 Qt 滚动条，宿主 away 守卫对卡内阅读完全失明，
     # 外层滚底判定必须显式查询此状态让位。
@@ -428,7 +434,7 @@ class ConsoleMonitorPage(QWebEnginePage):
         msg = message.strip()
         # [PERF] pywebview_height 是最高频信号（流式时每周期多次触发），
         # 放在首位快速短路，避免对每条 height 消息都做 startswith("pywebview_ready") 等冗余判断
-        if msg.startswith("pywebview_height:"):
+        if msg.startswith(("pywebview_height:", "pywebview_group_height:")):
             payload = msg.split(":", 1)[1]
             parsed = _parse_height_payload(payload)
             if parsed is None:
@@ -442,7 +448,10 @@ class ConsoleMonitorPage(QWebEnginePage):
             if reading is not None and reading != getattr(self, "_last_card_reading", False):
                 self._last_card_reading = reading
                 self.cardReadingChanged.emit(reading)
-            self.heightReported.emit(h)
+            if msg.startswith("pywebview_group_height:"):
+                self.groupHeightReported.emit(h)
+            else:
+                self.heightReported.emit(h)
             # 旧格式（仅高度，无几何字段）不发几何信号：wheelEvent 回退保守策略
             if dom_text_len is not None or reading is not None:
                 # ⚠️ bodyGeometryReported 必须**无条件**发：_body_geom_valid 是
@@ -456,6 +465,8 @@ class ConsoleMonitorPage(QWebEnginePage):
                 # 既有三参签名（调用方无需跟着改）。
                 if inner_scrollable is not None:
                     self.bodyInnerScrollableChanged.emit(inner_scrollable)
+        elif msg == "pywebview_action:group_toggle":
+            self.groupToggleRequested.emit()
         elif msg == "pywebview_ready":
             self.contentReady.emit()
         elif msg.startswith("pywebview_action:"):
@@ -850,6 +861,8 @@ def _show_export_info_bar(widget, ok: bool, title: str, msg: str) -> None:
 
 class CodeWebViewer(QWebEngineView):
     contentHeightChanged = pyqtSignal(int)
+    groupHeightChanged = pyqtSignal(int)
+    groupToggleRequested = pyqtSignal()
     codeActionRequested = pyqtSignal(str, str)
     contextActionRequested = pyqtSignal(str, str)
     toolDiffRequested = pyqtSignal(str)  # tool_call_id
@@ -902,6 +915,7 @@ class CodeWebViewer(QWebEngineView):
 
     def __init__(self, parent=None, light=False):
         super().__init__(parent)
+        self._output_mode = getattr(parent, '_output_mode', ORIGINAL)
         # 🛡️ 物理纹理上限钳制：Chromium 离屏表面按「逻辑尺寸 × DPR」分配物理纹理，
         # D3D11/WARP 单纹理硬上限 16384px。逻辑上限随本机 DPR 收缩，保物理
         # ≤ 16000（留 384 余量）。历史案例：10000 逻辑 @DPR2.25 → 22500 物理 →
@@ -988,6 +1002,11 @@ class CodeWebViewer(QWebEngineView):
         self._v2_live_tail_done_len = 0
         self._v2_live_tail_done_ts = 0.0
         self._v2_live_tail_html_pending: Optional[str] = None
+        # 段尾兜底：降载门限拦下的尾部 markdown 源码在暂停后补渲一次（v1 安全定时器
+        # 的 v2 对应物）。单次触发，回调只替换 .v2-live-text 内容，不重建 DOM。
+        self._v2_tail_settle_timer = QTimer(self)
+        self._v2_tail_settle_timer.setSingleShot(True)
+        self._v2_tail_settle_timer.timeout.connect(self._on_v2_tail_settle)
         # 上次「整块 formalize」时的文本长度（与 formalized_len 语义不同）
         self._v2_live_whole_done_len = 0
         # [PERF] 工具结果 markdown 缓存：tool_call_id → <tool>...</tool> markdown 字符串
@@ -1230,6 +1249,8 @@ class CodeWebViewer(QWebEngineView):
         self._page.contextActionRequested.connect(self.contextActionRequested)
         self._user_reading_inside = False
         self._page.heightReported.connect(self._on_height_reported)
+        self._page.groupHeightReported.connect(self._on_group_height_reported)
+        self._page.groupToggleRequested.connect(self.groupToggleRequested)
         self._page.bodyGeometryReported.connect(self._on_body_geometry_reported)
         self._page.bodyInnerScrollableChanged.connect(self._on_inner_scrollable_reported)
         self._page.cardReadingChanged.connect(self._on_card_reading_changed)
@@ -1401,12 +1422,7 @@ class CodeWebViewer(QWebEngineView):
 
     @property
     def _tool_compact_mode(self) -> bool:
-        try:
-            from app.utils.config import Settings
-
-            return Settings.get_instance().ui_compact_tool_area.value
-        except Exception:
-            return True
+        return self.__dict__.get('_output_mode', ORIGINAL).groups is not None
 
     def sync_compact_mode_to_js(self) -> None:
         """把当前简洁模式配置同步到 JS 全局 window._toolCompactMode。
@@ -1422,7 +1438,11 @@ class CodeWebViewer(QWebEngineView):
                 compact = "true" if self._tool_compact_mode else "false"
                 self.page().runJavaScript(
                     f"window._toolCompactMode = {compact};"
+                    f"document.body.classList.toggle('dfx-grouped',{str(bool(self._render_v2 and self._tool_compact_mode)).lower()});"
                     "document.documentElement.classList.toggle('compact-reading',window._toolCompactMode);"
+                    "var modeStyle=document.getElementById('dfx-output-style');"
+                    "if(!modeStyle){modeStyle=document.createElement('style');modeStyle.id='dfx-output-style';document.head.appendChild(modeStyle);}"
+                    + 'modeStyle.textContent=' + json.dumps(self._output_mode.css).decode('utf-8') + ';'
                 )
         except RuntimeError:
             pass
@@ -1990,7 +2010,10 @@ class CodeWebViewer(QWebEngineView):
         """
         self._user_reading_inside = reading
 
-    def _on_height_reported(self, h):
+    def _on_group_height_reported(self, h):
+        self._on_height_reported(h, group_motion=True)
+
+    def _on_height_reported(self, h, group_motion=False):
         # delegate wheel 抢断补装：高频回报时仅一次 is 比较，崩溃重建后自然重装
         self._ensure_wheel_filter_installed()
         # [render-watchdog] 文档已有高度 = 内容确实落地，清空自愈计数并停表
@@ -2050,7 +2073,9 @@ class CodeWebViewer(QWebEngineView):
                     f"pending_shrink={getattr(self, '_pending_shrink_height', None)}) → 折叠框下空白"
                 )
         final_h = h + 2
-        if abs(self.height() - final_h) > 2:
+        if group_motion:
+            self.groupHeightChanged.emit(final_h)
+        elif abs(self.height() - final_h) > 2:
             self.contentHeightChanged.emit(final_h)
 
     def _rdiag_hit(self, key: str) -> None:
@@ -2656,7 +2681,7 @@ class CodeWebViewer(QWebEngineView):
         # 字体变量兜底：骨架 HTML 是按构建期字体分桶缓存的，从取缓存到 JS
         # 就绪之间配置可能已变（用户在别的窗口切了字体）；且池化复用的骨架
         # 保留上一张卡片的字体。这里比对一次，不一致就注入（一致则零 IPC）。
-        if getattr(self, "_viewer_font_family", None) != _current_viewer_font_family():
+        if getattr(self, "_viewer_font_family", None) != self._current_viewer_font_family():
             self._refresh_viewer_font_css()
             self._apply_font_vars()
         elif getattr(self, "_font_css_pending", False):
@@ -2730,7 +2755,7 @@ class CodeWebViewer(QWebEngineView):
         if _drq is not None:
             _drq.stop()
         # 获取系统字体
-        font_family = _current_viewer_font_family()
+        font_family = self._current_viewer_font_family()
         self._viewer_font_family = font_family
         self._viewer_font_css = (
             f"{get_font_family_css()} font-family: {font_family}, sans-serif; font-size: {scale_font_size(14)}px;"
@@ -2744,7 +2769,6 @@ class CodeWebViewer(QWebEngineView):
         tag_font_size = scale_font_size(12)
         small_font_size = scale_font_size(11)
         tiny_font_size = scale_font_size(10)
-        font_family_global = _get_global_font()
 
         theme_fp = json.dumps({k: theme[k] for k in sorted(theme)}, option=json.OPT_SORT_KEYS).decode("utf-8")
         # mermaid vendor URL 进 key：热替换 vendor 文件后能让旧骨架缓存失效
@@ -2771,7 +2795,6 @@ class CodeWebViewer(QWebEngineView):
             self._light_skeleton,
             theme_fp,
             font_family,
-            font_family_global,
             body_font_size,
             code_font_size,
             tag_font_size,
@@ -2896,7 +2919,7 @@ class CodeWebViewer(QWebEngineView):
                 }
             """
         _is_light_diff = _is_light
-        mono_font = f"{font_family_global}, Consolas, monospace"
+        mono_font = "Consolas, Menlo, monospace"
         # 代码块工具栏 / 思考图标：mask 图统一内联为 data URI（qrc: 会被
         # WebEngine 的 CORS 策略拦掉，图标整片不绘制，见 _code_icon_mask_uri）
         _ci_mask_save = _code_icon_mask_css("导入.svg")
@@ -3061,12 +3084,12 @@ class CodeWebViewer(QWebEngineView):
                 h1 {{ font-size: 1.45em; margin: 18px 0 8px; }}
                 h2 {{ font-size: 1.25em; margin: 16px 0 6px; }}
                 h3 {{ font-size: 1.1em; margin: 14px 0 4px; }}
-                /* 正文行高 1.65：中英混排下兼顾可读性与密度（浏览器默认 ~1.2 过挤） */
-                p {{ margin: 8px 0; color: var(--text-secondary); line-height: 1.65; }}
+                /* 正文使用主文字色，段落和列表共享阅读行高。 */
+                p {{ margin: 0.65em 0; color: var(--text); line-height: 1.75; }}
                 a {{ color: var(--accent) !important; text-decoration: none; }}
                 a:hover {{ text-decoration: underline; }}
-                ul, ol {{ margin: 8px 0; padding-left: 24px; line-height: 1.65; }}
-                li {{ margin: 4px 0; color: var(--text-secondary); }}
+                ul, ol {{ margin: 8px 0; padding-left: 24px; line-height: 1.75; }}
+                li {{ margin: 4px 0; color: var(--text); }}
                 strong {{ color: var(--text) !important; font-weight: 600; }}
                 em {{ color: var(--text-secondary) !important; font-style: italic; }}
                 code:not(.code-content *):not(pre code) {{ 
@@ -4595,6 +4618,7 @@ class CodeWebViewer(QWebEngineView):
                     border-radius: var(--r-md); color: var(--text-secondary); font-size: .9em;
                 }}
                 .chart-failure .code-btn {{ background: transparent; border: 0; cursor: pointer; }}
+                {GROUP_CSS}
                 .compact-reading .chart-toolbar:focus-within {{ opacity: 1; }}
             </style>
             <!-- 代码高亮主题（Pygments class 化）：单独一个 style 便于运行时
@@ -4613,6 +4637,7 @@ class CodeWebViewer(QWebEngineView):
             </div>
             <div id="content-placeholder"></div>
             <script>
+                {GROUP_JS}
                 const collapsibleState = new Map();
                 // 简洁模式标志：由 Python 在 _load_skeleton 后通过 JS 同步更新
                 window._toolCompactMode = true;
@@ -5099,12 +5124,13 @@ class CodeWebViewer(QWebEngineView):
                                 window.mermaid.render(rid, decoded).then(function (r) {{
                                     var svg = r && r.svg ? r.svg : String(r);
                                     if (svg.indexOf('<svg') < 0) throw new Error('no svg in result');
+                                    var wasAtBottom = _dfxNearBottom(document.body);
                                     el.classList.remove('mermaid-pending');
                                     el.innerHTML = svg;
                                     window._chartKeyOf(el); // 清空载荷前保留身份，供后续块级替换复用
                                     el.setAttribute('data-mermaid-src', '');   // 渲染完释放 b64
                                     if (window._attachChartToolbar) window._attachChartToolbar(el, 'mermaid');
-                                    if (typeof _autoScrollAfterAsyncRender === 'function') _autoScrollAfterAsyncRender();
+                                    _autoScrollAfterAsyncRender(wasAtBottom);
                                     if (typeof reportHeightDebounced === 'function') reportHeightDebounced();
                                     done();
                                 }})['catch'](function (e) {{
@@ -5326,6 +5352,7 @@ class CodeWebViewer(QWebEngineView):
                     window.__echPumpBusy = true;
                     requestAnimationFrame(function () {{
                         window.__echPumpBusy = false;
+                        var wasAtBottom = _dfxNearBottom(document.body);
                         var _t0 = (window.performance && performance.now) ? performance.now() : Date.now();
                         while (window.__echQueue.length) {{
                             var el = window.__echQueue.shift();
@@ -5334,9 +5361,9 @@ class CodeWebViewer(QWebEngineView):
                             var _now = (window.performance && performance.now) ? performance.now() : Date.now();
                             if (_now - _t0 >= window._ECH_FRAME_BUDGET_MS) break;
                         }}
+                        _autoScrollAfterAsyncRender(wasAtBottom);
                         if (window.__echQueue.length) window._pumpEcharts();
                         else {{
-                            if (typeof _autoScrollAfterAsyncRender === 'function') _autoScrollAfterAsyncRender();
                             if (typeof reportHeightDebounced === 'function') reportHeightDebounced();
                         }}
                     }});
@@ -5906,6 +5933,10 @@ class CodeWebViewer(QWebEngineView):
                     var kids = container.children;
                     for (var i = 0; i < kids.length; i++) {{
                         if (kids[i].hasAttribute && kids[i].hasAttribute('data-block-wrapper')) out.push(kids[i]);
+                        else if (kids[i].classList.contains('dfx-group-body')) {{
+                            var items = kids[i].firstElementChild.children;
+                            for (var j=0; j<items.length; j++) out.push(items[j]);
+                        }}
                     }}
                     return out;
                 }};
@@ -5952,11 +5983,13 @@ class CodeWebViewer(QWebEngineView):
                     // 容器最前，保证新块仍在运行框之前。
                     var anchor = null;
                     var _after = nodes[base + del] || null;
-                    if (_after && _after.parentNode === container) {{
+                    var dest = container;
+                    if (_after && _after.parentNode) {{
+                        dest = _after.parentNode;
                         anchor = _after;
                     }} else if (base > 0) {{
                         var _prev = nodes[base - 1];
-                        if (_prev && _prev.parentNode === container) anchor = _prev.nextSibling;
+                        if (_prev && _prev.parentNode) {{ dest = _prev.parentNode; anchor = _prev.nextSibling; }}
                     }} else {{
                         anchor = container.firstChild;
                     }}
@@ -5979,11 +6012,7 @@ class CodeWebViewer(QWebEngineView):
                         made.push(wrap);
                     }}
                     reuse.forEach(function(rest) {{ rest.forEach(window._disposeChartNode); }});
-                    if (anchor && anchor.parentNode === container) {{
-                        container.insertBefore(frag, anchor);
-                    }} else {{
-                        container.appendChild(frag);
-                    }}
+                    dest.insertBefore(frag, anchor);
                     // 序号重排：删除+插入后整体按 DOM 顺序重编 data-block-index
                     var all = window._blockNodes(container);
                     for (var k = 0; k < all.length; k++) {{
@@ -6032,7 +6061,7 @@ class CodeWebViewer(QWebEngineView):
                 // Python 侧 live_delta 的下发节奏由批处理决定（软边界 100ms 合并 /
                 // 安全定时器 150~500ms），直接 append 到 DOM 就是"一块一块蹦"。
                 // 这里把「到达节奏」与「显示节奏」解耦：Python 只管 push 增量，
-                // rAF 每帧按指数追赶揭示（CATCHUP_MS 内排空），掉帧时按实际经过
+                // rAF 每帧按剩余字数逐步揭示，掉帧时按实际经过
                 // 时间补足欠账，不会越拖越长。
                 window._v2tw = {{
                     buf: "",          // 待揭示文本
@@ -6043,7 +6072,9 @@ class CodeWebViewer(QWebEngineView):
                     node: null,       // 节点引用缓存（patch 后 isConnected 失效自动重查）
                     reportedAt: 0,    // 上次高度上报时刻
                     reasoning: false, // 当前尾态是否属于思考块（决定 think-compact 类）
-                    CATCHUP_MS: 110,  // 目标追赶窗口：积压在此时间内排空
+                    CATCHUP_MS: 110,  // 指数追赶的时间常数
+                    lastAppendAt: 0,  // 最近一批增量入队的时间
+                    proseCharsPerMs: 0,
                     NORMAL_FRAME_MS: 33,  // 正常帧间隔基准（30fps）
                     BURST_LEN: 400,   // 超过该积压视为突发，加速揭示
                     REPORT_MS: 40     // 高度上报节流（与 v1 _twStep 同口径）
@@ -6120,6 +6151,10 @@ class CodeWebViewer(QWebEngineView):
                     var n = Math.max(1, Math.ceil(st.buf.length * (dt / st.CATCHUP_MS)));
                     if (st.buf.length > st.BURST_LEN) n = Math.max(n, Math.ceil(st.buf.length / 8));
                     if (window._toolCompactMode && !st.reasoning && window._streamingActive) {{
+                        // 以入队时的积压量保底，避免最后几个字逐帧减速。下方仍按视口限量。
+                        if (now - st.lastAppendAt >= st.CATCHUP_MS) {{
+                            n = Math.max(n, Math.ceil(st.proseCharsPerMs * dt));
+                        }}
                         var body = document.body;
                         var cap = parseInt(document.documentElement.style.getPropertyValue('--dfx-body-max-h'), 10);
                         if (cap && window.innerHeight < cap - 2) {{
@@ -6188,6 +6223,8 @@ class CodeWebViewer(QWebEngineView):
                     }}
                     st.reasoning = !!reasoning;
                     st.buf += text;
+                    st.lastAppendAt = performance.now();
+                    st.proseCharsPerMs = st.buf.length / st.CATCHUP_MS;
                     // 异常保险：正常指数追赶下缓冲稳态几百字符；超 2000 = 揭示链
                     // 被闸门/rAF 饥饿卡死，此时瞬时全显优于继续追。
                     if (st.buf.length > 2000 && (!window._toolCompactMode || st.reasoning)) {{ window._v2LiveFlush(); return true; }}
@@ -6394,12 +6431,13 @@ class CodeWebViewer(QWebEngineView):
                 //    无 data-block-key）在真实 tool_result 块落地后成为重复框，按 id 清除；
                 // 2) 工具区显隐 + 标题计数：v2 不跑 reorganizeContent，显隐由块数直接决定；
                 // 3) 流式期间工具区内部滚底（正文滚底仍由外部高度上报链负责）。
-                window._v2AfterPatch = function (streaming) {{
+                window._v2AfterPatch = function (streaming, grouped) {{
+                    document.body.classList.toggle('dfx-grouped', !!grouped);
                     try {{
                         // 工具与思考区位置（2026-11-02 用户诉求）：流式中放正文下方
                         // （跟着最新输出走），结束后回到顶部（吸顶回看，不藏在长正文
                         // 末尾）。幂等：位置已正确时只多两次属性比较，不做 DOM 操作。
-                        if (window._toolCompactMode) {{
+                        if (!grouped && window._toolCompactMode) {{
                             var _tsPos = document.getElementById('tool-section');
                             var _cpPos = document.getElementById('content-placeholder');
                             if (_tsPos && _cpPos && _cpPos.parentNode) {{
@@ -6468,7 +6506,7 @@ class CodeWebViewer(QWebEngineView):
                         //      搬入卡的折叠展开态每批重置（流式中可接受，完成后
                         //      仅跑一轮不再重置）。运行中的工具流式框（JS 注入、
                         //      data-streaming）不是搬移产物，不清理。
-                        if (window._toolCompactMode && tc) {{
+                        if (!grouped && window._toolCompactMode && tc) {{
                             var cpEl = document.getElementById('content-placeholder');
                             if (cpEl) {{
                                 // 🐛 搬移改「身份复用」（2026-10-30 用户实测：简洁模式流式
@@ -6573,23 +6611,8 @@ class CodeWebViewer(QWebEngineView):
                             if (tc.children.length > 0 && typeof _updateToolSectionHeader === 'function') _updateToolSectionHeader();
                         }}
                         if (streaming === true && typeof _scrollToolContentToBottom === 'function') _scrollToolContentToBottom();
-                        // [T43] 非流式（历史加载 / 流式终渲染）落地后：跟随态则把卡内
-                        // body 滚到底。v1 路径（updateContent）尾部自带
-                        // _autoScrollStreamingBody 兜底，v2 通道此前完全没有 body 滚底 →
-                        // 历史会话里内容超过 body max-height 的超长卡片首帧停在最上面
-                        // （流式期间是贴底的，加载历史后行为不一致，用户实测）。
-                        // 仅跟随态执行：用户已上滚阅读时保持位置，语义与
-                        // _autoScrollStreamingBody 的 _userScrolledWithin 守卫一致。
-                        if (streaming !== true && !window._userScrolledWithin) {{
-                            window._suppressScrollEvent = true;
-                            try {{
-                                document.body.scrollTop = document.body.scrollHeight;
-                            }} finally {{
-                                window._prevScrollTop = document.body.scrollTop;
-                                window._autoScrollTime = performance.now();
-                                window._suppressScrollEvent = false;
-                            }}
-                        }}
+                        // 图表替换占位块也会撑高正文，即使本批没有逐帧追加的文字。
+                        if (!window._userScrolledWithin) document.body.scrollTop = document.body.scrollHeight;
                         if (typeof reportHeightDebounced === 'function') setTimeout(function () {{ reportHeightDebounced(); }}, 0);
                     }} catch (e) {{
                         if (window.console) console.log('v2-after-patch-failed:' + e);
@@ -6732,14 +6755,16 @@ class CodeWebViewer(QWebEngineView):
                         // 漏掉它 → ins 判 0 → Python 侧把「点击正文优先滚内部」
                         // 误判成「卡内无人消费」→ 滚轮全交外层。
                         var _tcs = document.querySelectorAll(
-                            '#content-placeholder, #tool-content, .code-container, .code-content, .table-scroll-wrapper, .echarts-container'
+                            '#content-placeholder, #tool-content, .dfx-group-body[data-live], .code-container, .code-content, .table-scroll-wrapper, .echarts-container'
                         );
                         for (var _ti = 0; _ti < _tcs.length; _ti++) {{
                             var _te = _tcs[_ti];
                             if (_te.scrollHeight - _te.clientHeight > 1) _ins = 1;
                         }}
                     }} catch (_e4) {{}}
-                    console.log('pywebview_height:' + h + '|' + (_b.scrollTop|0) + '|' + (_b.clientHeight|0) + '|' + (_rd ? '1' : '0') + '|' + _cl + '|' + _ins);
+                    var prefix = _groupHeightSync ? 'pywebview_group_height:' : 'pywebview_height:';
+                    if (_groupHeightSync && !document.querySelector('[data-group-motion]')) _groupHeightSync = false;
+                    console.log(prefix + h + '|' + (_b.scrollTop|0) + '|' + (_b.clientHeight|0) + '|' + (_rd ? '1' : '0') + '|' + _cl + '|' + _ins);
                 }}
                 // 批量报告高度：合并同一帧内的多次请求，动画期间仍暂停报告。
                 //
@@ -7280,7 +7305,7 @@ class CodeWebViewer(QWebEngineView):
                     new ResizeObserver(() => {{
                         // 动画期间跳过高度报告
                         if (_collapsibleHeightReporting) return;
-                        if (window._toolCompactMode && window._streamingActive) {{
+                        if (_groupHeightSync || (window._toolCompactMode && window._streamingActive)) {{
                             // RO 在布局后投递；真实换行已发生，不再等 50ms 静默窗和下一帧。
                             if (resizeTimeout) {{ clearTimeout(resizeTimeout); resizeTimeout = null; }}
                             reportHeight();
@@ -8005,10 +8030,6 @@ class CodeWebViewer(QWebEngineView):
     # 「内容变了」误判「没变」永久跳渲。
     _TAIL_INLINE_MIN_DELTA = 512
     _TAIL_INLINE_MIN_INTERVAL_S = 1.5
-    # 预编译代码块闭合检测：``` / ~~~ 双形态（~~~ 是渲染型 fence 合法开栏，
-    # 与 _CHART_FENCE_OPEN_RE 口径对齐；缺 ~~~ 则 ~~~ 围栏结尾永不命中硬边界
-    # immediate，图表落地退化为 90/300ms 定时器）
-    _CLEAN_BOUNDARY_CODE_BLOCK_RE = re.compile(r"(?:```|~~~)[\s]*$")
     # 长内容**历史渲染**走线程池的字符阈值（仅用于非"流式结束"的渲染）。
     # ⚠️ 结束路径后面紧跟 _cleanup_render_cache()，它 `self._render_seq += 1`
     # 会把异步结果判为过期丢弃（详见 _perform_update 内注释）——所以结束态必须
@@ -8120,20 +8141,14 @@ class CodeWebViewer(QWebEngineView):
         # 段落结束（双换行）：O(1) 后缀检测
         if md_text.endswith("\n\n"):
             return True
-        # think 块 / 代码块闭合：尾向判定（P2，与软边界同款写法）。
-        # ⚠️ 不要改成尾部锚定正则（曾试过 `</think>[\s]*$|```[\s]*$`）：
-        # re 无法跳到串尾，多分支尾部匹配是全串逐位回溯，实测比 rstrip 慢 3x。
-        # 尾向 isspace 跳空白后用 endswith/search 的 (start, end) 窗口参数在
-        # **原串**上做尾窗判定：全程零拷贝（rstrip 在尾部有空白时全串拷贝），
-        # 语义与 rstrip 版严格等价——rstrip 剥 Unicode 空白全集，isspace 同全集；
-        # re 的 endpos 语义即「串在 endpos 处截断」，$ 匹配 endpos，无窗口越界。
+        # 跳过 Unicode 尾空白，直接比较闭合标记，避免每批从头搜索整段正文。
         i = len(md_text) - 1
         while i >= 0 and md_text[i].isspace():
             i -= 1
         if i < 0:
             return False
         end = i + 1
-        return md_text.endswith("</think>", 0, end) or CodeWebViewer._CLEAN_BOUNDARY_CODE_BLOCK_RE.search(md_text, 0, end) is not None
+        return md_text.endswith(("</think>", "```", "~~~"), 0, end)
 
     @staticmethod
     def _has_reached_soft_boundary(md_text: str) -> bool:
@@ -8466,6 +8481,9 @@ class CodeWebViewer(QWebEngineView):
             return
         self.refresh_font()
 
+    def _current_viewer_font_family(self):
+        return _get_global_font() if self.__dict__.get("_light_skeleton", False) else chat_font_family()
+
     def _refresh_viewer_font_css(self):
         """重算字体相关的 Python 侧缓存值（不触碰 DOM）
 
@@ -8475,7 +8493,7 @@ class CodeWebViewer(QWebEngineView):
         """
         if not hasattr(self, "_viewer_font_family"):
             return
-        self._viewer_font_family = _current_viewer_font_family()
+        self._viewer_font_family = self._current_viewer_font_family()
         body_font_size = scale_font_size(14)
         self._viewer_font_css = (
             f"{get_font_family_css()} font-family: {self._viewer_font_family}, sans-serif; "
@@ -8489,8 +8507,8 @@ class CodeWebViewer(QWebEngineView):
         字体名走 JSON 序列化（字体名可能含引号/反斜杠，拼串会产出语法错误
         的 JS —— QWebEngine 遇到语法错误静默失败，无回调也无日志）。
         """
-        font_family = f"'{_current_viewer_font_family()}', sans-serif"
-        mono_family = f"{_get_global_font()}, Consolas, monospace"
+        font_family = f"'{self._current_viewer_font_family()}', sans-serif"
+        mono_family = "Consolas, Menlo, monospace"
         body_font_size = f"{scale_font_size(14)}px"
 
         def _js_str(s: str) -> str:
@@ -8789,6 +8807,8 @@ class CodeWebViewer(QWebEngineView):
                     logger.exception("[render-v2] 渲染失败，本轮回退旧全量路径")
                     self._v2_last = None
                     self._needs_full_render = True
+                    if self.page():
+                        self.page().runJavaScript("document.body.classList.remove('dfx-grouped');")
                 else:
                     # 未接管 = 无块源（欢迎 / 用户消息的纯文本卡）：永久关闭
                     # v2 防每帧白试，并复位状态防 DOM 双写。
@@ -8798,6 +8818,7 @@ class CodeWebViewer(QWebEngineView):
                     )
                     self._render_v2 = False
                     self._v2_last = None
+                    self.sync_compact_mode_to_js()
 
             # [T44] 坞态先于内容：坞态只切工具区 264px 限高，若首个 chunk 先于
             # 它的 IPC 落地，工具区会先按自然高度排版再被压回（一次几十~几百 px
@@ -9222,6 +9243,7 @@ class CodeWebViewer(QWebEngineView):
         return RenderCtx(
             streaming=self._streaming,
             compact=self._tool_compact_mode,
+            inline_groups=self._tool_compact_mode,
             lazy_body=self._tool_lazy_body,
             heavy_caps=_HISTORY_TOOL_CAPS if getattr(self, "_is_history", False) else None,
             tool_fingerprints=frozenset(getattr(self, "_finished_tool_fingerprints", ()) or ()),
@@ -9349,7 +9371,7 @@ class CodeWebViewer(QWebEngineView):
         self._v2_live_tail_done_ts = time.monotonic()
         # 容器必须按归属选：思考块（简洁模式 home=tool-content）切到正文容器会
         # 让限高/样式选择器全部命不中（2026-11-02 思考预览无限高根因之一）。
-        _container = "tool-content" if (live_reasoning and ctx.compact) else "content-placeholder"
+        _container = "tool-content" if (live_reasoning and ctx.compact and not ctx.inline_groups) else "content-placeholder"
         try:
             page.runJavaScript(
                 "if(typeof window._v2LiveSplit==='function')window._v2LiveSplit("
@@ -9390,6 +9412,10 @@ class CodeWebViewer(QWebEngineView):
 
     def _v2_reset_live(self) -> None:
         """清空 live 尾态（force_full / 流式结束 / 文本回退时调用）。"""
+        timer = self.__dict__.get('_v2_tail_settle_timer')
+        if timer is not None:
+            timer.stop()
+        self._v2_tail_settle_key = None
         self._v2_live_key = ""
         self._v2_live_sent = ""
         self._v2_live_formalized_len = 0
@@ -9416,7 +9442,18 @@ class CodeWebViewer(QWebEngineView):
         self._v2_live_finalize_requested = True
         self._schedule_render(immediate=True)
 
-    _PROSE_MARKUP = re.compile(r"[`~*#<>\[\]_|$\\&]|(?:^|\n)\s*(?:[-+=>:]|\d+[.)]\s| {4}|\t)")
+    # 缩进只需匹配本行：跨行的空白可从下一行重新判定。否则连续空行会反复回溯。
+    _LINE_MARKUP = r"[^\S\n]*(?:[-+=>:]|\d+[.)]\s| {4}|\t)"
+    _FIRST_LINE_MARKUP = re.compile(_LINE_MARKUP)
+    _NEXT_LINE_MARKUP = re.compile(r"\n" + _LINE_MARKUP)
+
+    @classmethod
+    def _has_prose_markup(cls, text: str) -> bool:
+        return (
+            any(marker in text for marker in "`~*#<>[]_|$\\&")
+            or cls._FIRST_LINE_MARKUP.match(text) is not None
+            or cls._NEXT_LINE_MARKUP.search(text) is not None
+        )
 
     def _v2_live_active(self, blocks, active: Optional[int] = None) -> Optional[int]:
         """本批可走纯文本尾态的活动块下标；None = 走常规全量渲染。
@@ -9436,14 +9473,14 @@ class CodeWebViewer(QWebEngineView):
             return None
         _text = str((blk.get("content") if btype == "reasoning" else blk.get("text")) or "")
         if btype == 'text' and self._tool_compact_mode and (
-            '```' in _text or '~~~' in _text or '<svg' in _text.lower()
+            '```' in _text or '~~~' in _text or ('<' in _text and '<svg' in _text.lower())
         ):
             # 此块已经有结构边界；不能再把累计全文或 delta 当 textContent 送进揭示队列。
             # 后续批次仍按块 diff，普通代码继续使用正式的高亮/复制控件。
             return None
         if len(_text) < self._LIVE_MIN_CHARS:
             if not (btype == 'text' and self._tool_compact_mode and _text
-                    and not self._PROSE_MARKUP.search(_text)):
+                    and not self._has_prose_markup(_text)):
                 return None
         return active
 
@@ -9497,6 +9534,11 @@ class CodeWebViewer(QWebEngineView):
         grown = len(text) - self.__dict__.get("_v2_live_tail_done_len", 0)
         since = now - self.__dict__.get("_v2_live_tail_done_ts", 0.0)
         if grown < self._TAIL_INLINE_MIN_DELTA and since < self._TAIL_INLINE_MIN_INTERVAL_S:
+            # 段尾暂停（无后续 chunk）时降载门限会让含 markdown 标记的尾部源码
+            # 永久滞留，直到 finish 才格式化（用户可见「部分正文没渲染」）。
+            # 安排一次性兜底：降载窗口到期后补渲一次，等价于 v1 的安全定时器。
+            if self._has_prose_markup(text):
+                self._arm_v2_tail_settle(self._TAIL_INLINE_MIN_INTERVAL_S - since)
             return None
         # [E3] v2 尾部行内渲染耗时打点（守卫同 v1，见 _render_tail_inline）
         _diag_t0 = time.perf_counter() if _diag_trace_enabled() else 0.0
@@ -9511,6 +9553,47 @@ class CodeWebViewer(QWebEngineView):
         self._v2_live_tail_done_len = len(text)
         self._v2_live_tail_done_ts = now
         return html
+
+    def _arm_v2_tail_settle(self, wait_s: float):
+        """段尾兜底定时器：降载窗口到期后强制补渲一次尾部 markdown。
+
+        只安排一次（单次触发），回调直接替换 .v2-live-text 内容，不走
+        _perform_update_v2 的门限判断，避免补渲后又把自己重新挂上定时器。
+        """
+        timer = self.__dict__.get("_v2_tail_settle_timer")
+        if timer is None:
+            return
+        key = self._v2_live_key
+        if timer.isActive() and self.__dict__.get('_v2_tail_settle_key') == key:
+            return
+        self._v2_tail_settle_key = key
+        timer.start(max(60, int(wait_s * 1000) + 60))
+
+    def _on_v2_tail_settle(self):
+        """段尾兜底回调：绕过降载门限，把当前尾部 markdown 强制渲染一次。"""
+        key = self.__dict__.pop('_v2_tail_settle_key', None)
+        if not key or key != self._v2_live_key or not self._streaming or not self._render_v2:
+            return
+        tail = self._v2_live_sent[self._v2_live_formalized_len:]
+        if not tail or not self._has_prose_markup(tail):
+            return
+        html = self._v2_live_tail_html(tail, reasoning=False)
+        page = self.page()
+        if not html or page is None:
+            return
+        # 与 _pending_tail 下发同口径：先 flush 揭示缓冲让 DOM 与 Python 对齐，
+        # 再整体替换 tail 内容（前缀 part 不动）。
+        page.runJavaScript(
+            "if(typeof window._v2LiveFlush==='function')window._v2LiveFlush();"
+            "if(typeof window._v2LiveTailHtml==='function')window._v2LiveTailHtml('content-placeholder',"
+            + json.dumps(self._v2_live_key).decode("utf-8")
+            + ","
+            + json.dumps(html).decode("utf-8")
+            + ");"
+        )
+        self._v2_live_tail_done_len = len(tail)
+        self._v2_live_tail_done_ts = time.monotonic()
+
     def _v2_active_block_finalized(self, blocks, active: int, requested: bool = False) -> bool:
         """活动块是否已定型（不会再增长）。
 
@@ -9672,9 +9755,9 @@ class CodeWebViewer(QWebEngineView):
         # ⚠️ reasoning 不得切片：切片产物 .v2-live-part 是不限高的正式块，
         # 思考内容会被逐段永久铺开（预览限高窗口形同虚设）；思考也不该跑
         # markdown（与 _v2_live_tail_html 的 reasoning 保守口径一致）。
-        # 长思考靠后续整块 formalize 定型，预览始终只在 96px 窗口内滚动。
+        # 长思考只在结束或切块时定型，活动期间始终保留 96px 流式窗口。
         plain_prose = (live_index is not None and not live_reasoning and ctx.compact
-                       and not self._PROSE_MARKUP.search(live_text))
+                       and not self._has_prose_markup(live_text))
         if (
             not plain_prose and live_index is not None
             and not force_full
@@ -9689,7 +9772,7 @@ class CodeWebViewer(QWebEngineView):
                     return True
 
         formalize = (
-            not plain_prose and live_index is not None
+            not plain_prose and not live_reasoning and live_index is not None
             and not force_full
             and self._v2_live_key == live_key_now
             and self._v2_live_should_formalize(live_text)
@@ -9722,9 +9805,12 @@ class CodeWebViewer(QWebEngineView):
             self._v2_live_formalize_ts = time.monotonic()
         elif live_index is not None:
             # 纯文本尾态：活动块不跑 markdown，其余块照常（缓存命中）
-            # 只拆全新消息的首批正文。已有卡片重建、切主题和超大快照均直接恢复全文。
-            first_burst = (first_render and len(blocks) == 1 and plain_prose
-                           and 8 < len(live_text) <= 512)
+            # 新消息或分组末尾首次追加正文才拆首批；已有节点重建时恢复全文。
+            new_prose = (first_render and len(blocks) == 1) or (
+                ctx.inline_groups and not force_full and self._v2_last is not None
+                and live_index == len(self._v2_last.content)
+            )
+            first_burst = new_prose and plain_prose and 8 < len(live_text) <= 512
             initial_text = live_text[:8] if first_burst else live_text
             mr = render_message(
                 blocks,
@@ -9784,7 +9870,32 @@ class CodeWebViewer(QWebEngineView):
         # 漏判时本批只做了 tail 渲染记账（_v2_live_tail_done_len 已推进）却不发
         # JS → 尾部格式化永久丢一次，直到攒够下一个降载窗口（用户可见格式回退）。
         _pending_tail = self.__dict__.get("_v2_live_tail_html_pending")
-        if content_ops.is_empty and tool_ops.is_empty and not live_delta and _pending_tail is None:
+        groups_js = None
+        if ctx.inline_groups:
+            kinds = tuple(
+                r.kind if r.home == 'tool' else
+                'blank' if r.kind == 'text' and not (blocks[i].get('text') or '').strip() else 'body'
+                for i, r in enumerate(mr.content)
+            )
+            group_sig = (kinds, self._streaming)
+            if force_full or not content_ops.is_empty or self.__dict__.get('_layout_sig') != group_sig:
+                groups = self._output_mode.layout(kinds, streaming=self._streaming)
+                rows = []
+                for start, stop, opened in groups:
+                    items = summary_items(kinds[start:stop], blocks[start:stop])
+                    failed = sum(item.state == 'failed' for item in items)
+                    label = self._output_mode.describe(items)
+                    if failed and self._output_mode.summary:
+                        tools = [item for item in items if item.kind == 'tool']
+                        unique_targets = {item.target for item in tools}
+                        unit = '个' if None not in unique_targets and len(unique_targets) == len(tools) else '次'
+                        suffix = f'，{failed} {unit}失败'
+                    else:
+                        suffix = f' · 失败 {failed} 次' if failed else ''
+                    rows.append((start, stop, opened, label, suffix))
+                groups_js = json.dumps(rows).decode('utf-8')
+                self._layout_sig = group_sig
+        if content_ops.is_empty and tool_ops.is_empty and not live_delta and _pending_tail is None and groups_js is None:
             return True
 
         self._height_report_pending = True
@@ -9872,7 +9983,7 @@ class CodeWebViewer(QWebEngineView):
             # 硬编码 content-placeholder 会让 _v2LiveNode 在错误容器里查不到节点 →
             # _v2LiveAppend 静默返回 false → 思考增量全部丢失（实测表现为思考内容
             # 停在首帧纯文本、后续增长完全不显示）。
-            _live_cid = "tool-content" if live_reasoning else "content-placeholder"
+            _live_cid = "tool-content" if live_reasoning and ctx.compact and not ctx.inline_groups else "content-placeholder"
             js.append(
                 "if(typeof window._v2LiveAppend==='function')window._v2LiveAppend('"
                 + _live_cid
@@ -9915,7 +10026,9 @@ class CodeWebViewer(QWebEngineView):
                 "window._v2AnchorRestore(document.getElementById('tool-content'),window._v2AnchorT);}"
             )
         # v2 专属收尾：流式运行框去重 / 工具区显隐与 header / 工具区滚底
-        js.append(f"if(typeof window._v2AfterPatch==='function')window._v2AfterPatch({str(self._streaming).lower()});")
+        if groups_js is not None:
+            js.append(f"window._applyMessageGroups({groups_js},{str(self._streaming).lower()});")
+        js.append(f"if(typeof window._v2AfterPatch==='function')window._v2AfterPatch({str(self._streaming).lower()},{str(ctx.inline_groups).lower()});")
         page.runJavaScript("".join(js))
         return True
 
@@ -11984,6 +12097,9 @@ class CodeWebViewer(QWebEngineView):
             self._resize_unlock_timer,
             self._geom_poll_timer,
         ]
+        _tail_settle = self.__dict__.get("_v2_tail_settle_timer")
+        if _tail_settle is not None:
+            timers_to_stop.append(_tail_settle)
         for timer in timers_to_stop:
             try:
                 timer.stop()
@@ -11999,6 +12115,7 @@ class CodeWebViewer(QWebEngineView):
                 self._page.contextActionRequested.disconnect()
             if hasattr(self._page, "heightReported"):
                 self._page.heightReported.disconnect()
+                self._page.groupHeightReported.disconnect()
             if hasattr(self._page, "contentReady"):
                 self._page.contentReady.disconnect()
             if hasattr(self._page, "toolDiffRequested"):
@@ -12237,7 +12354,7 @@ class PlainTextViewer(QWidget):
         滚动条复用项目统一的 get_unified_scrollbar_style，与
         tab_panel / project_selector / settings 等列表的视觉风格保持一致。
         """
-        font_css = get_font_family_css()
+        font_css = chat_font_css()
         text_color = Colors.USER_CARD_TEXT
         self.text_edit.setStyleSheet(f"""
             QTextEdit {{
@@ -12251,6 +12368,9 @@ class PlainTextViewer(QWidget):
             }}
             {get_unified_scrollbar_style(6)}
         """)
+
+    def refresh_font(self):
+        self.refresh_theme()
 
     def refresh_theme(self):
         """主题切换后刷新文本颜色"""
@@ -12760,16 +12880,21 @@ def plan_image_attachment_sources(paths, fallback_content=None) -> list:
     """
     if not isinstance(paths, list):
         return []
-    image_uris = extract_image_data_uris(fallback_content)
-    plan = []
+    return list(iter_image_attachment_sources(paths, fallback_content))
+
+
+def iter_image_attachment_sources(paths, fallback_content):
+    image_uris = None
     for i, path in enumerate(paths):
         if not isinstance(path, str) or not path:
             continue
         if os.path.exists(path):
-            plan.append((path, None, path))
-        elif i < len(image_uris):
-            plan.append((None, image_uris[i], path))
-    return plan
+            yield path, None, path
+        else:
+            if image_uris is None:
+                image_uris = extract_image_data_uris(fallback_content)
+            if i < len(image_uris):
+                yield None, image_uris[i], path
 
 
 def _decode_image_url_to_pixmap(url_str: str):
@@ -12849,25 +12974,6 @@ def _download_and_preview(url_str: str, parent=None) -> None:
             pass
 
 
-def _current_viewer_font_family() -> str:
-    """读取当前生效的卡片正文字体族（与骨架构建期同源）
-
-    骨架 ``_load_skeleton`` 与运行时 ``refresh_font`` 必须读同一处配置，
-    否则切字体后两者不一致（历史包袱：骨架读 llm_font_family，回退
-    canvas_font_selected）。这里抽成单一入口。
-    """
-    try:
-        from app.utils.config import Settings
-
-        settings = Settings.get_instance()
-        font_family = settings.llm_font_family.value
-        if not font_family:
-            font_family = settings.canvas_font_selected.value or "Segoe UI, sans-serif"
-        return font_family
-    except Exception:
-        return "Segoe UI, sans-serif"
-
-
 def _fence_assets_for_skeleton() -> tuple:
     """收集当前已注册 fence 渲染器的 assets（file:// URL）与权限声明。
 
@@ -12936,13 +13042,14 @@ def _fence_assets_for_skeleton() -> tuple:
     return (assets_js, perms_js, tuple(sig))
 
 
-def _show_image_preview(pixmap, parent=None) -> None:
+def _show_image_preview(pixmap, parent=None, *, annotation_dir=None) -> str | None:
     from app.widgets.image_lightbox import ImageLightbox
 
     if pixmap is not None and not pixmap.isNull():
-        preview = ImageLightbox(pixmap, parent)
+        preview = ImageLightbox(pixmap, parent, annotation_dir=annotation_dir)
         try:
-            preview.exec_()
+            if preview.exec_() and preview.annotations is not None:
+                return preview.annotations.output_path
         finally:
             preview.deleteLater()
 

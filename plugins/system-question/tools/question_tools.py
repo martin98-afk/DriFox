@@ -18,7 +18,7 @@ _QUESTION_SCHEMA = {
     "type": "function",
     "function": {
         "name": "question",
-        "description": "向用户提问。需求/偏好/选择不明时**必用**。支持多问题，每题可带选项。",
+        "description": "需要用户决定影响交付结果的事项时提问。可在 questions 中一起提交多个独立问题，每题可带选项。",
         "parameters": {
             "type": "object",
             "properties": {

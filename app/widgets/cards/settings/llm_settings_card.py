@@ -5,7 +5,7 @@
 """
 
 from loguru import logger
-from PyQt5.QtCore import QPointF, QPropertyAnimation, QRectF, QPoint, QSize, Qt, QTimer, pyqtSignal
+from PyQt5.QtCore import QEvent, QObject, QPointF, QPropertyAnimation, QRectF, QPoint, QSize, Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QBrush, QColor, QFont, QIcon, QPainter, QPen
 from PyQt5.QtWidgets import (
     QFontComboBox,
@@ -19,8 +19,9 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 from qfluentwidgets import (
+    ComboBoxSettingCard,
     ExpandSettingCard,
-    FluentIcon,
+    SearchLineEdit,
     OptionsSettingCard,
     PrimaryPushButton,
     RangeSettingCard,
@@ -28,11 +29,14 @@ from qfluentwidgets import (
     SettingCard,
     SwitchSettingCard,
 )
+from app.utils.app_icon import AppIcon
 
 from app.utils.config import Settings
 from app.utils.design_tokens import (
     FONT_SIZE_OPTIONS,
     _DEFAULT_FONT_SIZE_KEY,
+    _get_global_font,
+    system_font_family,
     _LEGACY_FONT_SIZE_KEYS,
     Animations,
     ButtonStyles,
@@ -77,21 +81,46 @@ class NoWheelFontComboBox(QFontComboBox):
         event.ignore()
 
 
+class _PreferenceRow:
+    """通用偏好用分隔线组织，控件继续使用 Fluent 的配置绑定。"""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.hBoxLayout.setContentsMargins(0, 0, 0, 0)
+        # 布局整体垂直居中会按单行 sizeHint 截短文字列，换行时改由弹性留白居中。
+        self.hBoxLayout.setAlignment(Qt.Alignment())
+        self.vBoxLayout.setAlignment(Qt.Alignment())
+        self.vBoxLayout.insertStretch(0)
+        self.vBoxLayout.addStretch()
+        self.vBoxLayout.setSpacing(4)
+        self.hBoxLayout.setStretchFactor(self.vBoxLayout, 8)
+        self.vBoxLayout.setAlignment(self.contentLabel, Qt.Alignment())
+        self.contentLabel.setWordWrap(True)
+        self.setMinimumHeight(72)
+        self.setMaximumHeight(16777215)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        self.setObjectName("settingsPreferenceRow")
+        self.setStyleSheet(f"QFrame#settingsPreferenceRow {{ border-bottom: 1px solid {Colors.DIVIDER_COLOR}; }}")
+
+    def paintEvent(self, event):
+        QFrame.paintEvent(self, event)
+
+
+class _PreferenceSwitch(_PreferenceRow, SwitchSettingCard):
+    def setValue(self, value):
+        super().setValue(value)
+        self.switchButton.setText("")
+        self.switchButton.setAccessibleName(self.titleLabel.text())
+
+
+class _PreferenceChoice(_PreferenceRow, ComboBoxSettingCard):
+    pass
+
+
 def _font_step_text(key: str) -> str:
     """字号档位显示文本："-5".."0".."+10"（正数带 + 前缀）"""
     d = int(key)
     return f"+{d}" if d > 0 else str(d)
-
-
-def _ui_font_family() -> str:
-    """读取用户配置 UI 字体族（与 get_unified_font 同源，但不经 scale 二次缩放）"""
-    try:
-        return Settings.get_instance().llm_font_family.value
-    except Exception:
-        try:
-            return Settings.get_instance().canvas_font_selected.value
-        except Exception:
-            return "Segoe UI"
 
 
 class _FontStepTrack(QWidget):
@@ -127,7 +156,7 @@ class _FontStepTrack(QWidget):
         """按最大档位实际字号(14+10=24px)预留标签行高与最小高度（防大字号标签被裁切）"""
         from PyQt5.QtGui import QFontMetrics
 
-        fm = QFontMetrics(QFont(_ui_font_family(), 24))
+        fm = QFontMetrics(QFont(_get_global_font(), 24))
         self._label_h = max(14, fm.height() + 2)
         self.setMinimumHeight(self._NODE_Y + self._label_h + 6)
         self.updateGeometry()
@@ -194,7 +223,7 @@ class _FontStepTrack(QWidget):
             p.drawLine(int(x0), int(node_y), int(self._node_x(cur_idx)), int(node_y))
 
         # 节点 + 刻度标签（标签用对应档位实际字号渲染，直观体现大小差异）
-        family = _ui_font_family()
+        family = _get_global_font()
         for i, key in enumerate(self._steps):
             x = self._node_x(i)
             is_cur = i == cur_idx
@@ -304,7 +333,7 @@ class FontSizeStepperCard(ExpandSettingCard):
 
 class ManualUpdateCard(SettingCard):
     def __init__(self, title, content, parent_widget, parent=None):
-        super().__init__(FluentIcon.SYNC, title, content, parent)
+        super().__init__(AppIcon.SYNC, title, content, parent)
         self.parent_widget = parent_widget
 
         self.updateBtn = PrimaryPushButton("检查更新", self)
@@ -350,44 +379,110 @@ class ManualUpdateCard(SettingCard):
             logger.error(f"_on_error error: {e}")
 
 
+class _ContentHeightLock(QObject):
+    """把设置卡内容高度钉在滚动区视口：整页不再上下滚。
+
+    插件页是主从布局，滚动由左列表与右详情各自承担；设置卡自己的
+    scroll_area 若还能滚，滚轮到边界就会把两栏一起推走（看着像共用
+    一个 scroll）。插件页激活时锁高，离开时解锁，其他页行为不变。
+    """
+
+    def __init__(self, area, parent=None) -> None:
+        super().__init__(parent)
+        self._area = area
+        self._locked = False
+
+    def enable(self) -> None:
+        if self._locked:
+            self._apply()
+            return
+        self._locked = True
+        self._area.viewport().installEventFilter(self)
+        self._apply()
+
+    def disable(self) -> None:
+        if not self._locked:
+            return
+        self._locked = False
+        self._area.viewport().removeEventFilter(self)
+        widget = self._area.widget()
+        if widget is not None:
+            widget.setMinimumHeight(0)
+            widget.setMaximumHeight(16777215)
+
+    def _apply(self) -> None:
+        widget = self._area.widget()
+        height = self._area.viewport().height()
+        if widget is not None and height > 0:
+            widget.setFixedHeight(height)
+
+    def eventFilter(self, obj, event):  # noqa: N802 - Qt 回调
+        if event.type() == QEvent.Resize:
+            self._apply()
+        return False
+
+
 class LLMSettingsCard(SystemCardFrame):
     """大模型设置卡片 - 固定边框 + 垂直列表布局"""
 
     # 左侧导航分组：(分组标题, ((tab_id, 显示名, 图标源), ...))
-    # 图标源：字符串 → 主题感知资源图标 get_icon(name)；FluentIcon 枚举 → 内置图标
+    # 图标源：字符串 → 主题感知资源图标 get_icon(name)；AppIcon 枚举 → 内置图标
     # 「插件」项按注册卡片动态显隐（_sync_plugin_nav_visibility）；
     # 插件注册的独立配置大 tab（register_settings_tab）动态插到「插件」项之后
     NAV_GROUPS = (
         (
-            "模型与扩展",
+            "模型与对话",
             (
                 ("provider", "服务商", "大模型"),
-                ("hooks", "Hooks", "hooks"),
-                ("mcp", "MCP", "MCP"),
-                ("lsp", "LSP", "lsp"),
-                ("tools", "工具", "工具"),
                 ("agents", "智能体", "智能体"),
                 ("context", "上下文", "上下文"),
                 ("skills", "技能", "技能"),
-                ("plugins", "插件", FluentIcon.APPLICATION),
+            ),
+        ),
+        (
+            "插件与集成",
+            (
+                ("plugins", "插件设置", AppIcon.APPLICATION),
+                ("tools", "工具", "工具"),
+                ("hooks", "Hooks", "hooks"),
+                ("mcp", "MCP", "MCP"),
+                ("lsp", "LSP", "lsp"),
             ),
         ),
         (
             "界面",
             (
                 ("appearance", "外观", "主题风格"),
-                ("render", "渲染", FluentIcon.SPEED_HIGH),
+                ("render", "渲染", AppIcon.SPEED_HIGH),
             ),
         ),
         (
             "系统",
             (
-                ("common", "通用", FluentIcon.SETTING),
+                ("common", "通用", AppIcon.SETTING),
                 ("security", "安全中心", "锁定"),
-                ("update", "更新", FluentIcon.UPDATE),
+                ("update", "更新", AppIcon.UPDATE),
             ),
         ),
     )
+
+    # 搜索常用设置词无需提前构造各页的卡片。
+    _NAV_KEYWORDS = {
+        "provider": "模型 API Key 密钥 加密 Gitee 账号 OAuth",
+        "agents": "agent 启用",
+        "context": "预算 截断 压缩 落盘",
+        "skills": "skill 启用",
+        "plugins": "plugin 配置 权限",
+        "tools": "tool 启用",
+        "hooks": "钩子",
+        "mcp": "服务器",
+        "lsp": "语言服务器 代码诊断",
+        "appearance": "主题 深色 浅色 字体 字号 音乐 动效",
+        "render": "性能 内存 GPU WebGL 滚动 WebEngine",
+        "common": "开机自启 单实例 通知 提示音 锁屏远程 消息身份 Enter 纯 Qt",
+        "security": "沙箱 黑名单 白名单 删除保护 备份",
+        "update": "版本 检查更新 下载代理 Beta",
+    }
 
     _autostart_toggling = False  # 类级防重入标志
     _last_change_type: str | None = None  # "theme" | "font_family" | "font_size" | None(=全部)
@@ -478,50 +573,58 @@ class LLMSettingsCard(SystemCardFrame):
         tabs = [(tab_id, name) for _group, items in self.NAV_GROUPS for tab_id, name, _icon in items]
         body = QWidget(self)
         body_layout = QHBoxLayout(body)
-        body_layout.setContentsMargins(0, 0, 0, 0)
-        body_layout.setSpacing(8)
+        body_layout.setContentsMargins(8, 4, 12, 8)
+        body_layout.setSpacing(18)
         body_layout.addWidget(self._build_side_nav())
 
         self._pages_stack = QStackedWidget(self)
-        self._page_scrolls = {}
+        self._page_widgets = {}
         self._page_layouts = {}
         for tab_id, _name in tabs:
-            page, page_layout = self._make_page()
-            self._page_scrolls[tab_id] = page
+            if tab_id == "plugins":
+                # 两栏各自滚动，直接把插件页布局挂到分页容器。
+                page = QWidget(self)
+                page.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
+                page_layout = QVBoxLayout(page)
+                page_layout.setContentsMargins(0, 0, 0, 0)
+            else:
+                page, page_layout = self._make_page()
+            self._page_widgets[tab_id] = page
             self._page_layouts[tab_id] = page_layout
             self._pages_stack.addWidget(page)
-        # 全宽页（插件页/插件注册大 tab）收起左导航：分页区顶部条 = 返回按钮
-        # + 插件筛选 chips（仅插件页显示），整条只在全宽页可见（2026-11-08 设计）
+        # 页标题固定在滚动区上方，插件工作区共用此处的导航返回入口。
         self._back_btn = QToolButton(self)
         self._back_btn.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
-        self._back_btn.setIcon(FluentIcon.RETURN.qicon())
+        self._back_btn.setIcon(AppIcon.RETURN.qicon())
         self._back_btn.setIconSize(QSize(16, 16))
-        self._back_btn.setText("返回设置")
+        self._back_btn.setText("显示设置导航")
         self._back_btn.setFixedHeight(32)
         self._back_btn.setCursor(Qt.PointingHandCursor)
         self._back_btn.setStyleSheet(self._back_btn_style())
         self._back_btn.hide()
-        self._back_btn.clicked.connect(self._exit_fullwidth_mode)
-        self._chips_holder = QWidget(self)
-        chips_holder_layout = QHBoxLayout(self._chips_holder)
-        chips_holder_layout.setContentsMargins(0, 0, 0, 0)
-        chips_holder_layout.setSpacing(0)
-        chips_holder_layout.addStretch(1)
-        self._fullwidth_bar = QWidget(self)
-        bar_layout = QHBoxLayout(self._fullwidth_bar)
-        bar_layout.setContentsMargins(0, 0, 0, 0)
+        self._back_btn.clicked.connect(self._toggle_plugin_navigation)
+        self._page_title = QLabel(self)
+        self._page_title.setTextFormat(Qt.PlainText)
+        self._page_title.setStyleSheet(self._page_title_style())
+        bar_layout = QHBoxLayout()
+        bar_layout.setContentsMargins(6, 8, 8, 8)
         bar_layout.setSpacing(12)
-        bar_layout.addWidget(self._back_btn, 0, Qt.AlignLeft | Qt.AlignVCenter)
-        bar_layout.addWidget(self._chips_holder, 1)
-        self._fullwidth_bar.hide()
+        bar_layout.addWidget(self._back_btn, 0)
+        bar_layout.addWidget(self._page_title, 1)
+        # 顶部条成容器：全宽模式把两个控件搬进插件页左栏，容器自身隐藏
+        self._page_bar = QWidget(self)
+        self._page_bar.setLayout(bar_layout)
+        self._bar_layout = bar_layout
         pages_column = QWidget(self)
         pages_col_layout = QVBoxLayout(pages_column)
         pages_col_layout.setContentsMargins(0, 0, 0, 0)
         pages_col_layout.setSpacing(4)
-        pages_col_layout.addWidget(self._fullwidth_bar)
+        pages_col_layout.addWidget(self._page_bar)
         pages_col_layout.addWidget(self._pages_stack, 1)
         body_layout.addWidget(pages_column, 1)
         content_layout.addWidget(body)
+        # 插件页专用：锁住设置卡整体滚动，滚动只发生在左列表/右详情各自区内
+        self._content_height_lock = _ContentHeightLock(self.scroll_area, self)
         self._update_nav_styles()
 
         # ════ 服务商页 ════
@@ -604,6 +707,7 @@ class LLMSettingsCard(SystemCardFrame):
 
         # 连接信号
         # 注意：只有真正影响外观的变更才走 _on_config_changed（触发全量刷新）
+        self.cfg.ui_font_family.valueChanged.connect(self._on_config_changed)
         self.cfg.llm_font_family.valueChanged.connect(self._on_config_changed)
         self.cfg.ui_font_size.valueChanged.connect(self._on_config_changed)
         self.cfg.ui_theme_style.valueChanged.connect(self._on_config_changed)
@@ -621,10 +725,20 @@ class LLMSettingsCard(SystemCardFrame):
     def _build_common_page(self):
         """通用设置页：开关与通知卡"""
         common_layout = self._page_layouts["common"]
+        common_layout.setContentsMargins(16, 4, 16, 12)
+        common_layout.setSpacing(0)
+        self._common_sections = []
 
+        def add_section(text):
+            label = QLabel(text, self)
+            label.setStyleSheet(self._nav_group_style())
+            common_layout.addWidget(label)
+            self._common_sections.append(label)
+
+        add_section("启动与运行")
         # 锁屏远程
-        self.lockRemoteCard = SwitchSettingCard(
-            FluentIcon.SYNC,
+        self.lockRemoteCard = _PreferenceSwitch(
+            AppIcon.SYNC,
             "锁屏远程",
             "保持系统唤醒、屏幕常亮。",
             configItem=self.cfg.lock_screen_remote_enabled,
@@ -634,7 +748,7 @@ class LLMSettingsCard(SystemCardFrame):
         common_layout.addWidget(self.lockRemoteCard)
 
         # 开机自启
-        self.autoStartCard = SwitchSettingCard(
+        self.autoStartCard = _PreferenceSwitch(
             get_icon("开机自动启动"),
             "开机自启",
             "系统启动时自动运行 Drifox",
@@ -645,8 +759,8 @@ class LLMSettingsCard(SystemCardFrame):
         common_layout.addWidget(self.autoStartCard)
 
         # 单实例限制：同时只允许运行一个实例
-        self.singleInstanceCard = SwitchSettingCard(
-            FluentIcon.LAYOUT,
+        self.singleInstanceCard = _PreferenceSwitch(
+            AppIcon.LAYOUT,
             "单实例限制",
             "开启后限制一个 Drifox 实例，重启生效",
             configItem=self.cfg.enable_single_instance,
@@ -654,19 +768,11 @@ class LLMSettingsCard(SystemCardFrame):
         )
         common_layout.addWidget(self.singleInstanceCard)
 
-        # 简洁模式：工具调用/思考块折叠显示
-        self.compactToolCard = SwitchSettingCard(
-            FluentIcon.MENU,
-            "简洁模式",
-            "工具与思考归拢到可滚动区域",
-            configItem=self.cfg.ui_compact_tool_area,
-            parent=self,
-        )
-        common_layout.addWidget(self.compactToolCard)
+        add_section("消息与输入")
 
         # 消息身份行：每条消息顶部显示发送者头像 + 名称（插件可覆盖身份）
-        self.messageIdentityCard = SwitchSettingCard(
-            FluentIcon.PEOPLE,
+        self.messageIdentityCard = _PreferenceSwitch(
+            AppIcon.PEOPLE,
             "消息身份行",
             "每条消息显示发送者头像与名称",
             configItem=self.cfg.ui_message_identity,
@@ -675,8 +781,8 @@ class LLMSettingsCard(SystemCardFrame):
         common_layout.addWidget(self.messageIdentityCard)
 
         # 灰度开关：纯 Qt 消息渲染器（MarkdownBlockViewer 替代 QWebEngineView）
-        self.qtRendererCard = SwitchSettingCard(
-            FluentIcon.CODE,
+        self.qtRendererCard = _PreferenceSwitch(
+            AppIcon.CODE,
             "纯 Qt 消息渲染（实验）",
             "消息正文改用原生控件渲染，显著降低内存占用",
             configItem=self.cfg.qt_message_renderer,
@@ -685,9 +791,9 @@ class LLMSettingsCard(SystemCardFrame):
         common_layout.addWidget(self.qtRendererCard)
 
         # 繁忙时 Enter 键行为：智能体运行时按 Enter 的动作（Ctrl+Enter 恒为另一行为）
-        self.busyEnterCard = OptionsSettingCard(
+        self.busyEnterCard = _PreferenceChoice(
             self.cfg.busy_enter_behavior,
-            FluentIcon.SEND,
+            AppIcon.SEND,
             "繁忙时 Enter 键行为",
             "仅在智能体运行时生效；Ctrl+Enter 使用另一行为",
             texts=["插话发送", "排队发送"],
@@ -696,8 +802,9 @@ class LLMSettingsCard(SystemCardFrame):
         common_layout.addWidget(self.busyEnterCard)
 
         # ── 通知设置（并入通用页）──
+        add_section("通知")
         # 智能体完成通知
-        self.llmNotifyCard = SwitchSettingCard(
+        self.llmNotifyCard = _PreferenceSwitch(
             get_icon("提示"),
             "智能体完成通知",
             "窗口不在前台时发送通知",
@@ -707,7 +814,7 @@ class LLMSettingsCard(SystemCardFrame):
         common_layout.addWidget(self.llmNotifyCard)
 
         # 通知提示音
-        self.llmSoundCard = OptionsSettingCard(
+        self.llmSoundCard = _PreferenceChoice(
             self.cfg.llm_notify_sound,
             get_icon("提示"),
             "通知提示音",
@@ -718,7 +825,7 @@ class LLMSettingsCard(SystemCardFrame):
         common_layout.addWidget(self.llmSoundCard)
 
         # 进入时崩溃通知
-        self.crashNotifyCard = SwitchSettingCard(
+        self.crashNotifyCard = _PreferenceSwitch(
             get_icon("提示"),
             "崩溃通知",
             "检测到上次异常退出时弹出提示横幅",
@@ -784,7 +891,7 @@ class LLMSettingsCard(SystemCardFrame):
         # WebGL 按需解禁（3D 图形需要）
         self.renderWebglCard = OptionsSettingCard(
             self.cfg.render_webgl,
-            FluentIcon.GLOBE,
+            AppIcon.GLOBE,
             "WebGL / 3D 图形",
             "关闭可省 GPU 进程内存",
             texts=["自动", "开", "关"],
@@ -795,7 +902,7 @@ class LLMSettingsCard(SystemCardFrame):
         # Chromium renderer 进程硬上限（内存治理核心项）
         self.renderProcessLimitCard = RangeSettingCard(
             self.cfg.render_renderer_process_limit,
-            FluentIcon.LAYOUT,
+            AppIcon.LAYOUT,
             "Renderer 进程上限",
             "消息卡片渲染进程数硬上限",
             parent=self,
@@ -806,7 +913,7 @@ class LLMSettingsCard(SystemCardFrame):
         # 单 renderer JS 堆上限
         self.renderJsHeapCard = RangeSettingCard(
             self.cfg.render_js_heap_mb,
-            FluentIcon.CLOUD,
+            AppIcon.CLOUD,
             "单卡片 JS 堆上限 (MB)",
             "限制单张消息卡片的内存",
             parent=self,
@@ -816,7 +923,7 @@ class LLMSettingsCard(SystemCardFrame):
 
         # Chromium 低内存模式
         self.renderLowEndCard = SwitchSettingCard(
-            FluentIcon.REMOVE_FROM,
+            AppIcon.REMOVE_FROM,
             "低内存模式",
             "压低渲染缓冲/缓存，抗锯齿略降",
             configItem=self.cfg.render_low_end_device_mode,
@@ -826,7 +933,7 @@ class LLMSettingsCard(SystemCardFrame):
 
         # 合成器平滑滚动
         self.renderSmoothCard = SwitchSettingCard(
-            FluentIcon.TILES,
+            AppIcon.TILES,
             "平滑滚动",
             "卡内滚动的合成器动画",
             configItem=self.cfg.render_smooth_scrolling,
@@ -836,7 +943,7 @@ class LLMSettingsCard(SystemCardFrame):
 
         # 后台渲染节流（长对话离屏卡片被降优先级 → 流式卡顿的解药）
         self.renderThrottleCard = SwitchSettingCard(
-            FluentIcon.PAUSE,
+            AppIcon.PAUSE,
             "关闭后台渲染节流",
             "离屏卡片不再被降优先级，抗流式卡顿",
             configItem=self.cfg.render_disable_background_throttling,
@@ -846,7 +953,7 @@ class LLMSettingsCard(SystemCardFrame):
 
         # 2D canvas 抗锯齿
         self.renderCanvasAACard = SwitchSettingCard(
-            FluentIcon.BRUSH,
+            AppIcon.BRUSH,
             "Canvas 抗锯齿",
             "开启后 echarts 图表边缘更平滑",
             configItem=self.cfg.render_canvas_aa,
@@ -856,7 +963,7 @@ class LLMSettingsCard(SystemCardFrame):
 
         # 共享 GL 上下文：省约 12.7% 内存；共用一个上下文被怀疑与多卡/图表闪烁相关
         self.renderShareGLCard = SwitchSettingCard(
-            FluentIcon.LAYOUT,
+            AppIcon.LAYOUT,
             "共享 GL 上下文",
             "省约 12% 内存；渲染闪烁时可尝试关闭",
             configItem=self.cfg.render_share_gl_contexts,
@@ -900,7 +1007,7 @@ class LLMSettingsCard(SystemCardFrame):
 
         # 系统关闭「动画效果」时的逃生口：全仓动效统一查 Animations.motion_enabled()
         self.uiMotionCard = SwitchSettingCard(
-            FluentIcon.SPEED_HIGH,
+            AppIcon.SPEED_HIGH,
             "始终播放动效",
             "系统关闭动画效果时仍播放过渡动画",
             configItem=self.cfg.ui_motion_always_on,
@@ -912,6 +1019,7 @@ class LLMSettingsCard(SystemCardFrame):
         # 界面字号 + 全局字体
         appearance_layout.addWidget(self.uiFontSizeCard)
         self._setup_font_card()
+        appearance_layout.addWidget(self.uiFontCard)
         appearance_layout.addWidget(self.llmFontCard)
 
         # 对话区宽度
@@ -934,7 +1042,7 @@ class LLMSettingsCard(SystemCardFrame):
 
         # 接收 Beta 版更新（含 prerelease）
         self.betaUpdateCard = SwitchSettingCard(
-            FluentIcon.UPDATE,
+            AppIcon.UPDATE,
             "接收 Beta 版更新",
             "检查更新时包含 Beta 预览版",
             configItem=self.cfg.allow_beta_update,
@@ -958,7 +1066,7 @@ class LLMSettingsCard(SystemCardFrame):
 
     def _apply_appearance_to_page(self, tab_id: str):
         """懒构造页建好后立即对齐当前全局外观（字号/主题刷新只覆盖已存在的控件）"""
-        page = self._page_scrolls.get(tab_id)
+        page = self._page_widgets.get(tab_id)
         if page is None:
             return
         try:
@@ -1060,7 +1168,7 @@ class LLMSettingsCard(SystemCardFrame):
         self.hookListCard._refresh(reload=True)
 
     def _ensure_plugins_page(self):
-        """插件设置页容器懒建（幂等）：首次进插件页时才建页面 + 挂筛选 chips
+        """插件设置页容器懒建（幂等）：首次进插件页时才建列表及筛选控件
 
         容器下沉收益：实测 5.7ms + 一片 chips 控件。列表数据仍由
         rebuild_plugin_cards 随后的 reload 拉取，两段成本都推给首次进页。
@@ -1071,9 +1179,11 @@ class LLMSettingsCard(SystemCardFrame):
         self.pluginSettingsPage = page
         self._plugin_cards_widget = page  # 兼容既有可见性控制
         self._page_layouts["plugins"].addWidget(page, 1)
-        # 筛选 chips 挂到全宽顶部条（返回按钮右侧），跨父级 reparent 由 Qt 处理
-        self._chips_holder.layout().insertWidget(0, page.filter_bar)
         self._sync_plugin_nav_visibility()
+        # 首次进插件页时 _apply_fullwidth_mode 早于本函数执行（_set_active_page →
+        # 全宽模式 → 进页准备），那时 page 还不存在；建好后补一次，顶部条才会搬进左栏。
+        if self._current_tab == "plugins":
+            self._apply_fullwidth_mode("plugins")
 
     def _register_list_card(self, card):
         """懒构造卡片补入手风琴表 + 单卡包装（增量，防已包卡重复包）"""
@@ -1102,7 +1212,7 @@ class LLMSettingsCard(SystemCardFrame):
             ("tools",),
             "工具启用",
             "按插件控制其工具的启停",
-            FluentIcon.DEVELOPER_TOOLS,
+            AppIcon.DEVELOPER_TOOLS,
         ),
         "agents": ("pluginAgentCard", ("agents",), "智能体启用", "按插件控制其智能体的启停", None),
         "context": (
@@ -1277,8 +1387,15 @@ class LLMSettingsCard(SystemCardFrame):
         nav.setStyleSheet(self._nav_frame_style())
 
         outer = QVBoxLayout(nav)
-        outer.setContentsMargins(0, 0, 0, 0)
-        outer.setSpacing(0)
+        outer.setContentsMargins(5, 7, 6, 4)
+        outer.setSpacing(5)
+        self._nav_search = SearchLineEdit(nav)
+        self._nav_search.setPlaceholderText("查找")
+        self._nav_search.setAccessibleName("查找设置页面")
+        self._nav_search.setClearButtonEnabled(True)
+        self._nav_search.returnPressed.connect(self._open_first_nav_match)
+        self._nav_search.searchSignal.connect(self._open_first_nav_match)
+        outer.addWidget(self._nav_search)
 
         # 分组数变多后高度可能超过卡片可视区，导航自身可滚动（内容与分页共用滚动条样式）
         scroll = ScrollArea(nav)
@@ -1290,13 +1407,11 @@ class LLMSettingsCard(SystemCardFrame):
         body = QWidget()
         body.setStyleSheet("background: transparent;")
         body_layout = QVBoxLayout(body)
-        body_layout.setContentsMargins(4, 8, 8, 8)
-        body_layout.setSpacing(4)
+        body_layout.setContentsMargins(0, 2, 3, 6)
+        body_layout.setSpacing(2)
 
-        for group_idx, (group_title, items) in enumerate(self.NAV_GROUPS):
+        for group_title, items in self.NAV_GROUPS:
             if group_title:
-                if group_idx > 0:
-                    body_layout.addSpacing(14)
                 label = QLabel(group_title, body)
                 label.setStyleSheet(self._nav_group_style())
                 self._nav_group_labels.append(label)
@@ -1319,6 +1434,12 @@ class LLMSettingsCard(SystemCardFrame):
                 body_layout.addWidget(btn)
                 self._nav_buttons[tab_id] = btn
                 self._nav_order.append(tab_id)
+        self._nav_empty = QLabel("没有匹配的设置", body)
+        self._nav_empty.setAlignment(Qt.AlignCenter)
+        self._nav_empty.hide()
+        body_layout.addWidget(self._nav_empty)
+        self._has_plugins = False
+        self._nav_search.textChanged.connect(self._filter_nav)
         body_layout.addStretch(1)
 
         scroll.setWidget(body)
@@ -1327,16 +1448,41 @@ class LLMSettingsCard(SystemCardFrame):
         outer.addWidget(scroll)
         # 宽度按最长项自适应（sizeHint 已含图标/文字/内边距，只补左侧指示条与外边距）
         widest = max((btn.sizeHint().width() for btn in self._nav_buttons.values()), default=150)
-        nav.setFixedWidth(max(150, min(196, widest + 12)))
+        nav.setFixedWidth(max(180, min(208, widest + 20)))
         self._nav_full_width = nav.width()  # 全宽模式收起/展开动画的目标宽度
         self._nav_frame = nav
         # 供动态插件 tab 按钮插入（_sync_plugin_tabs）
         self._nav_body_layout = body_layout
         return nav
 
+    def _filter_nav(self) -> None:
+        query = self._nav_search.text().strip().casefold()
+        any_match = False
+        for label, (group, items) in zip(self._nav_group_labels, self.NAV_GROUPS):
+            keys = [key for key, _, _ in items]
+            if "plugins" in keys:
+                keys.extend(self._plugin_tab_infos)
+            group_match = False
+            for key in keys:
+                button = self._nav_buttons[key]
+                terms = f"{group} {button.text()} {key} {self._NAV_KEYWORDS.get(key, '')}"
+                match = query in terms.casefold() and (key != "plugins" or self._has_plugins)
+                button.setVisible(match)
+                group_match |= match
+            label.setVisible(group_match)
+            any_match |= group_match
+        self._nav_empty.setVisible(not any_match)
+
+    def _open_first_nav_match(self) -> None:
+        for index in range(self._nav_body_layout.count()):
+            button = self._nav_body_layout.itemAt(index).widget()
+            if isinstance(button, QToolButton) and not button.isHidden():
+                button.click()
+                return
+
     @staticmethod
     def _resolve_nav_icon(icon_src) -> QIcon:
-        """导航图标源 → QIcon：字符串走主题感知资源图标，FluentIcon 枚举走动态主题图标"""
+        """导航图标源 → QIcon：字符串走主题感知资源图标，AppIcon 枚举走动态主题图标"""
         if isinstance(icon_src, str):
             return get_icon(icon_src)
         # FluentIconBase.icon() 在调用瞬间把当前主题烧进静态 QIcon（文件名含颜色），
@@ -1365,10 +1511,13 @@ class LLMSettingsCard(SystemCardFrame):
 
     def _set_active_page(self, tab_id: str):
         """切换左侧导航到指定分页"""
+        if tab_id == self._current_tab == "plugins":
+            self._apply_fullwidth_mode(tab_id)
+            return
         if tab_id not in self._nav_buttons or self._current_tab == tab_id:
             return
         self._current_tab = tab_id
-        self._pages_stack.setCurrentWidget(self._page_scrolls[tab_id])
+        self._pages_stack.setCurrentWidget(self._page_widgets[tab_id])
         self._update_nav_styles()
         self._apply_fullwidth_mode(tab_id)
         self._expand_page_cards(tab_id)
@@ -1388,24 +1537,68 @@ class LLMSettingsCard(SystemCardFrame):
         """
         full = self._is_fullwidth_tab(tab_id)
         try:
+            page = self.__dict__.get("pluginSettingsPage")
+            bar = self.__dict__.get("_page_bar")
+            if full and page is not None:
+                # 顶部条搬进左栏：右栏详情头部与「插件设置」标题同一行、都顶到顶
+                adopt = getattr(page, "adopt_page_header", None)
+                if adopt is not None:
+                    adopt(self._back_btn, self._page_title)
+                    if bar is not None:
+                        bar.setVisible(False)
+                page.set_list_visible(True)
+            else:
+                self._release_page_bar()
+            lock = self.__dict__.get("_content_height_lock")
+            if lock is not None:
+                if full and page is not None:
+                    lock.enable()
+                else:
+                    lock.disable()
             self._set_nav_collapsed(full, animate=full)
             back = getattr(self, "_back_btn", None)
             if back is not None:
                 back.setVisible(full)
-            bar = getattr(self, "_fullwidth_bar", None)
-            if bar is not None:
-                bar.setVisible(full)
+                if isinstance(back, QToolButton):
+                    back.setText("显示设置导航")
         except RuntimeError:
             pass  # __new__ 桩：跳过视觉同步
 
+    def _release_page_bar(self) -> None:
+        """把顶部条控件从插件页左栏搬回自己的容器（幂等，非插件页时需要）"""
+        page = self.__dict__.get("pluginSettingsPage")
+        release = getattr(page, "release_page_header", None)
+        if release is None or not release():
+            return
+        bar_layout = self.__dict__.get("_bar_layout")
+        bar = self.__dict__.get("_page_bar")
+        if bar_layout is not None:
+            bar_layout.addWidget(self._back_btn, 0)
+            bar_layout.addWidget(self._page_title, 1)
+        self._page_title.setVisible(True)
+        if bar is not None:
+            bar.setVisible(True)
+
+    def _toggle_plugin_navigation(self):
+        if self.pluginSettingsPage is not None and self.pluginSettingsPage.list_hidden():
+            self._apply_fullwidth_mode("plugins")
+        else:
+            self._exit_fullwidth_mode()
+
     def _exit_fullwidth_mode(self) -> None:
-        """「← 返回设置」：恢复导航，只收返回按钮；顶部条（筛选 chips）保留"""
+        """恢复导航并保留当前插件表单。"""
         try:
             current = getattr(self, "_current_tab", None)
+            self._release_page_bar()
             self._set_nav_collapsed(False, animate=current == "plugins")
             back = getattr(self, "_back_btn", None)
             if back is not None:
-                back.setVisible(False)
+                page = self.__dict__.get("pluginSettingsPage")
+                if page is not None:
+                    page.set_list_visible(False)
+                    back.setText("选择插件")
+                else:
+                    back.setVisible(False)
         except RuntimeError:
             pass  # __new__ 桩：跳过视觉同步
 
@@ -1484,7 +1677,8 @@ class LLMSettingsCard(SystemCardFrame):
         if widget is not None:
             widget.setVisible(has_plugins)
         try:
-            self._nav_buttons["plugins"].setVisible(has_plugins)
+            self._has_plugins = has_plugins
+            self._filter_nav()
         except Exception:
             pass
         return has_plugins
@@ -1527,7 +1721,7 @@ class LLMSettingsCard(SystemCardFrame):
                 if nav_layout is not None:
                     nav_layout.removeWidget(btn)
                 btn.deleteLater()
-            page = self._page_scrolls.pop(key, None)
+            page = self._page_widgets.pop(key, None)
             self._page_layouts.pop(key, None)
             if page is not None:
                 self._pages_stack.removeWidget(page)
@@ -1536,7 +1730,7 @@ class LLMSettingsCard(SystemCardFrame):
                 removed_current = True
         if removed_current:
             self._current_tab = "plugins"
-            fallback = self._page_scrolls.get("plugins")
+            fallback = self._page_widgets.get("plugins")
             if fallback is not None:
                 self._pages_stack.setCurrentWidget(fallback)
             self._update_nav_styles()
@@ -1552,7 +1746,7 @@ class LLMSettingsCard(SystemCardFrame):
             infos[key] = info
             btn = QToolButton(self._nav_frame)
             btn.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
-            btn.setIcon(self._resolve_nav_icon(info.icon if info.icon is not None else FluentIcon.APPLICATION))
+            btn.setIcon(self._resolve_nav_icon(info.icon if info.icon is not None else AppIcon.APPLICATION))
             btn.setIconSize(QSize(18, 18))
             btn.setText(info.title)
             btn.setFixedHeight(36)
@@ -1570,15 +1764,17 @@ class LLMSettingsCard(SystemCardFrame):
             if insert_at is not None and nav_layout is not None:
                 nav_layout.insertWidget(insert_at + idx, btn)
             page, page_layout = self._make_page()
-            self._page_scrolls[key] = page
+            self._page_widgets[key] = page
             self._page_layouts[key] = page_layout
             self._pages_stack.addWidget(page)
         # 导航宽度按最长项自适应（上限与 _build_side_nav 一致）
         nav_frame = getattr(self, "_nav_frame", None)
         if nav_frame is not None and self._nav_buttons:
             widest = max(b.sizeHint().width() for b in self._nav_buttons.values())
-            nav_frame.setFixedWidth(max(150, min(196, widest + 12)))
+            nav_frame.setFixedWidth(max(180, min(208, widest + 20)))
             self._nav_full_width = nav_frame.width()
+        if "_nav_search" in self.__dict__:
+            self._filter_nav()
 
     def _build_plugin_tab_page(self, tab_key: str):
         """首次进入插件大 tab 时实例化页面（懒构造；失败不标 ready 由 _ensure_page_ready 重试）"""
@@ -1662,8 +1858,8 @@ class LLMSettingsCard(SystemCardFrame):
                     card.toggleExpand()
             except Exception as e:
                 logger.warning(f"[LLMSettingsCard] {tab_id} 页卡片展开失败: {e}")
-        page = self._page_scrolls.get(tab_id)
-        if page is not None:
+        page = self._page_widgets.get(tab_id)
+        if isinstance(page, ScrollArea):
             page.verticalScrollBar().setValue(0)
 
     def _update_nav_styles(self):
@@ -1692,6 +1888,8 @@ class LLMSettingsCard(SystemCardFrame):
         if prev == cur:
             return
         self._styled_tab = cur
+        if "_page_title" in self.__dict__ and cur in self._nav_buttons:
+            self._page_title.setText(self._nav_buttons[cur].text())
         for tab_id in (prev, cur):
             btn = self._nav_buttons.get(tab_id) if tab_id else None
             if btn is None:
@@ -1717,7 +1915,7 @@ class LLMSettingsCard(SystemCardFrame):
         return f"""
             QFrame#settingsSideNav {{
                 background: transparent;
-                border-right: 1px solid {Colors.BORDER};
+                border-right: 1px solid {Colors.DIVIDER_COLOR};
             }}
             {inactive}
             {active}
@@ -1746,14 +1944,17 @@ class LLMSettingsCard(SystemCardFrame):
         """
 
     @staticmethod
+    def _page_title_style() -> str:
+        return f"color: {Colors.TEXT_PRIMARY}; {get_font_family_css()} {font_size_css(19)} font-weight: 600;"
+
+    @staticmethod
     def _nav_group_style() -> str:
         return f"""
             QLabel {{
                 color: {Colors.TEXT_SECONDARY};
-                {font_size_css(10)}
+                {font_size_css(11)}
                 font-weight: bold;
-                letter-spacing: 1px;
-                padding: 2px 10px;
+                padding: 12px 8px 4px;
                 background: transparent;
                 {get_font_family_css()}
             }}
@@ -1764,20 +1965,19 @@ class LLMSettingsCard(SystemCardFrame):
         if active:
             return f"""
                 QToolButton {{
-                    color: {Colors.TEXT_ACCENT};
+                    color: {Colors.TEXT_PRIMARY};
                     {font_size_css(13)}
                     font-weight: bold;
                     padding: 0 10px;
                     border: none;
-                    border-left: 3px solid {Colors.TEXT_ACCENT};
                     border-radius: 6px;
                     text-align: left;
-                    background-color: {Colors.TAB_ACTIVE_BG};
+                    background-color: {Colors.HOVER_BG_STRONG};
                     {get_font_family_css()}
                 }}
                 QToolButton:hover, QToolButton:pressed {{
-                    color: {Colors.TEXT_ACCENT};
-                    background-color: {Colors.TAB_ACTIVE_BG};
+                    color: {Colors.TEXT_PRIMARY};
+                    background-color: {Colors.HOVER_BG_STRONG};
                 }}
                 QToolButton:focus {{
                     outline: none;
@@ -1785,11 +1985,11 @@ class LLMSettingsCard(SystemCardFrame):
             """
         return f"""
             QToolButton {{
-                color: {Colors.TEXT_SECONDARY};
+                color: {Colors.TEXT_PRIMARY};
                 {font_size_css(13)}
+                font-weight: normal;
                 padding: 0 10px;
                 border: none;
-                border-left: 3px solid transparent;
                 border-radius: 6px;
                 text-align: left;
                 background-color: transparent;
@@ -1829,13 +2029,21 @@ class LLMSettingsCard(SystemCardFrame):
         _TRC.timer_start("llm_nav")
         if self._nav_frame is not None:
             set_style_sheet_if_changed(self._nav_frame, self._nav_frame_style())
+        set_style_sheet_if_changed(
+            self.title_label,
+            f"color: {Colors.TEXT_PRIMARY}; {get_font_family_css()} {font_size_css(16)} font-weight: 600;",
+        )
         if hasattr(self, "_nav_buttons"):
             self._update_nav_styles()
         _back_btn = getattr(self, "_back_btn", None)
+        if "_page_title" in self.__dict__:
+            set_style_sheet_if_changed(self._page_title, self._page_title_style())
         if _back_btn is not None:
             set_style_sheet_if_changed(_back_btn, self._back_btn_style())
         _nav_group_css = self._nav_group_style()
         for label in getattr(self, "_nav_group_labels", []):
+            set_style_sheet_if_changed(label, _nav_group_css)
+        for label in getattr(self, "_common_sections", []):
             set_style_sheet_if_changed(label, _nav_group_css)
         _TRC.timer_end("llm_nav")
         # [PERF] 只刷滚动条控件自身：对 QScrollArea setStyleSheet 会 repolish
@@ -1845,7 +2053,9 @@ class LLMSettingsCard(SystemCardFrame):
             from app.utils.design_tokens import get_unified_scrollbar_style
 
             sb_style = get_unified_scrollbar_style(8)
-            for page in getattr(self, "_page_scrolls", {}).values():
+            for page in getattr(self, "_page_widgets", {}).values():
+                if not isinstance(page, ScrollArea):
+                    continue
                 for sb in (page.verticalScrollBar(), page.horizontalScrollBar()):
                     if sb is not None:
                         set_style_sheet_if_changed(sb, sb_style)
@@ -1871,7 +2081,7 @@ class LLMSettingsCard(SystemCardFrame):
         )
         self.uiChatWidthCard = OptionsSettingCard(
             self.cfg.ui_chat_width,
-            FluentIcon.LAYOUT,
+            AppIcon.LAYOUT,
             "对话区宽度",
             "窗口过宽时限制内容宽度并居中",
             texts=["窄", "标准", "宽", "不限宽"],
@@ -1943,21 +2153,28 @@ class LLMSettingsCard(SystemCardFrame):
         from qfluentwidgets import SettingCard
 
         class FontSettingCard(SettingCard):
-            def __init__(self, title, content, cfg, parent=None):
-                super().__init__(FluentIcon.FONT, title, content, parent)
-                self.cfg = cfg
-                self._parent = parent
+            def __init__(self, title, content, item, parent):
+                super().__init__(AppIcon.FONT, title, content, parent)
+                self.cfg = parent.cfg
+                self.item = item
 
                 self.fontCombo = NoWheelFontComboBox()
                 self.fontCombo.setFixedWidth(180)
                 self.fontCombo.setSizeAdjustPolicy(QFontComboBox.SizeAdjustPolicy.AdjustToContents)
                 self._apply_font_combo_style()
-                current_font = cfg.llm_font_family.value
-                self.fontCombo.setCurrentFont(QFont(current_font))
                 self.fontCombo.currentFontChanged.connect(self._on_font_changed)
 
                 self.hBoxLayout.addWidget(self.fontCombo)
                 self.hBoxLayout.addSpacing(16)
+                item.valueChanged.connect(self._sync_font)
+                self._sync_font()
+
+            def _sync_font(self):
+                self.fontCombo.blockSignals(True)
+                try:
+                    self.fontCombo.setCurrentFont(QFont(self.item.value or system_font_family()))
+                finally:
+                    self.fontCombo.blockSignals(False)
 
             def _apply_font_combo_style(self):
                 self.fontCombo.setStyleSheet(ComboBoxStyles.dark_combo().replace("QComboBox", "QFontComboBox"))
@@ -1975,14 +2192,13 @@ class LLMSettingsCard(SystemCardFrame):
                 self._apply_font_combo_style()
 
             def _on_font_changed(self, font):
-                self.cfg.set(self.cfg.llm_font_family, font.family(), save=True)
-                if self._parent and hasattr(self._parent, "_on_config_changed"):
-                    self._parent._on_config_changed()
+                self.cfg.set(self.item, font.family(), save=True)
 
+        self.uiFontCard = FontSettingCard("界面字体", "用于导航、菜单和设置控件。", self.cfg.ui_font_family, self)
         self.llmFontCard = FontSettingCard(
-            "全局字体",
-            "设置界面显示字体",
-            self.cfg,
+            "对话字体",
+            "用于提问和回答的正文。",
+            self.cfg.llm_font_family,
             self,
         )
 
@@ -2023,7 +2239,7 @@ class LLMSettingsCard(SystemCardFrame):
         elif sender in (self.cfg.ui_light_mode, self.cfg.ui_theme_mode):
             # 深浅 / 外观模式切档 → 实质是换主题
             LLMSettingsCard._last_change_type = "theme"
-        elif sender is self.cfg.llm_font_family:
+        elif sender in (self.cfg.llm_font_family, self.cfg.ui_font_family):
             LLMSettingsCard._last_change_type = "font_family"
         elif sender is self.cfg.ui_font_size:
             LLMSettingsCard._last_change_type = "font_size"
@@ -2089,6 +2305,7 @@ class LLMSettingsCard(SystemCardFrame):
             "uiThemeModeCard",
             "uiThemeStyleCard",
             "uiMusicCard",
+            "uiFontCard",
             "llmFontCard",
             "renderRestartCard",
             "renderStatusCard",

@@ -16,5 +16,6 @@
     "components": {
         "ui": true
     },
+    "capabilities": ["ui.icons"],
     "api_version": 2
 }

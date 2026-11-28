@@ -5,11 +5,14 @@
 
 from __future__ import annotations
 
+import gzip
 import json
 import os
 import random
 import re
+import shutil
 import threading
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
@@ -32,25 +35,34 @@ _LEAD_IDS = re.compile(r"^(\[\s*m[0-9a-z]{6}\s*\]\s*)+")
 def strip_id_prefix(text: Any) -> str:
     return _LEAD_IDS.sub("", str(text or "")).strip()
 
-_locks: Dict[str, threading.Lock] = {}
+_locks: Dict[str, threading.RLock] = {}
 _locks_guard = threading.Lock()
 
 
-def _lock_for(path: Path) -> threading.Lock:
+def transaction(path: Path) -> threading.RLock:
     key = os.path.normcase(str(path))
     with _locks_guard:
         lock = _locks.get(key)
         if lock is None:
-            lock = threading.Lock()
+            lock = threading.RLock()
             _locks[key] = lock
         return lock
 
 
-def _atomic_write(path: Path, text: str) -> None:
+@contextmanager
+def _pending_file(path: Path):
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(text, encoding="utf-8", newline="")
-    os.replace(tmp, path)
+    try:
+        yield tmp
+        os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+def _atomic_write(path: Path, text: str) -> None:
+    with _pending_file(path) as tmp:
+        tmp.write_text(text, encoding="utf-8", newline="")
 
 
 def write_text_atomic(path: Path, text: str) -> None:
@@ -70,7 +82,9 @@ def journal_path(aid_dir: Path, device: str) -> Path:
     return journal_dir(aid_dir) / f"{device}.jsonl"
 
 
-def snapshot_path(aid_dir: Path) -> Path:
+def snapshot_path(aid_dir: Path, device: str = "") -> Path:
+    if device:
+        return entries_dir(aid_dir) / f"snapshot-{device}.jsonl.gz"
     return entries_dir(aid_dir) / SNAPSHOT_FILE
 
 
@@ -101,7 +115,7 @@ def fingerprint(aid_dir: Path) -> str:
     import hashlib
 
     h = hashlib.sha1()
-    for p in sorted(entries_dir(aid_dir).rglob("*.jsonl")):
+    for p in sorted([*entries_dir(aid_dir).rglob("*.jsonl"), *entries_dir(aid_dir).glob("snapshot-*.jsonl.gz")]):
         try:
             h.update(p.name.encode("utf-8"))
             h.update(p.read_bytes())
@@ -112,8 +126,6 @@ def fingerprint(aid_dir: Path) -> str:
 
 def reset(aid_dir: Path) -> None:
     """清空事件与视图状态（清除记忆 / 快照恢复前用）。快照目录不在本函数范围。"""
-    import shutil
-
     d = entries_dir(aid_dir)
     if d.exists():
         shutil.rmtree(d, ignore_errors=True)
@@ -152,6 +164,11 @@ def new_entry(
 def load_or_create_device_id(app_data_dir: Path) -> str:
     """本机标识：放同步目录之外，避免两台设备写同一个 journal 文件。"""
     p = Path(app_data_dir) / "device_id"
+    with transaction(p):
+        return _device_id(p)
+
+
+def _device_id(p: Path) -> str:
     try:
         value = p.read_text(encoding="utf-8").strip()
         if value:
@@ -179,7 +196,7 @@ def _iter_jsonl(path: Path):
                     continue
                 if isinstance(obj, dict):
                     yield obj
-    except OSError:
+    except FileNotFoundError:
         return
 
 
@@ -195,38 +212,109 @@ def _covered(aid_dir: Path) -> Dict[str, int]:
     return dict((snap or {}).get("covered") or {})
 
 
+def _file_key(path: Path) -> tuple:
+    try:
+        st = path.stat()
+        return st.st_ino, st.st_size, st.st_mtime_ns
+    except FileNotFoundError:
+        return ()
+
+
+def state_key(aid_dir: Path, device: str = "") -> tuple:
+    if device:
+        paths = [journal_path(aid_dir, device), snapshot_path(aid_dir), snapshot_path(aid_dir, device)]
+    else:
+        paths = sorted([*entries_dir(aid_dir).rglob("*.jsonl"), *entries_dir(aid_dir).glob("snapshot-*.jsonl.gz")])
+    return tuple((p.name, _file_key(p)) for p in paths)
+
+
+def _archive_events(path: Path):
+    # 每台设备独立归档，保留操作顺序。另一台离线期间产生的 move/pin/del
+    # 在同步后仍可与这些事件按原有顺序重放。
+    with gzip.open(path, "rt", encoding="utf-8") as f:
+        for line in f:
+            yield json.loads(line)
+
+
+_seq_cache: dict[Path, tuple[tuple, int]] = {}
+
+
 def _next_seq(aid_dir: Path, device: str) -> int:
-    base = int(_covered(aid_dir).get(device, 0))
-    last = 0
-    for ev in _iter_jsonl(journal_path(aid_dir, device)):
-        last = max(last, int(ev.get("seq") or 0))
-    return max(base, last) + 1
+    p = journal_path(aid_dir, device)
+    cached = _seq_cache.get(p)
+    if cached and cached[0] == state_key(aid_dir, device):
+        return cached[1] + 1
+    last = int(_covered(aid_dir).get(device, 0))
+    archive = snapshot_path(aid_dir, device)
+    if archive.exists():
+        last = max(last, max((int(ev["seq"]) for ev in _archive_events(archive)), default=0))
+    return max(last, max((int(ev.get("seq") or 0) for ev in _iter_jsonl(p)), default=0)) + 1
+
+
+def append_events(aid_dir: Path, device: str, events: list[dict], *, atomic: bool = True) -> list[dict]:
+    """批量操作用一次原子替换提交，磁盘格式与普通逐条追加兼容。"""
+    if not events:
+        return []
+    p = journal_path(aid_dir, device)
+    with transaction(aid_dir):
+        start = _next_seq(aid_dir, device)
+        records = []
+        lines = []
+        for seq, event in enumerate(events, start):
+            ev = dict(event, device=device, seq=seq)
+            ev.setdefault("schema", SCHEMA)
+            ev.setdefault("ts", now_iso())
+            records.append(ev)
+            lines.append(json.dumps(ev, ensure_ascii=False, separators=(",", ":")) + "\n")
+        p.parent.mkdir(parents=True, exist_ok=True)
+        if not atomic and len(records) == 1:
+            with p.open("ab+") as f:
+                if f.tell():
+                    f.seek(-1, os.SEEK_END)
+                    if f.read(1) != b"\n":
+                        f.write(b"\n")
+                f.write(lines[0].encode("utf-8"))
+        else:
+            # 按字节复制原日志，历史坏行由重放层处理。
+            with _pending_file(p) as tmp, tmp.open("wb+") as dest:
+                if p.exists():
+                    with p.open("rb") as src:
+                        shutil.copyfileobj(src, dest)
+                if dest.tell():
+                    dest.seek(-1, os.SEEK_END)
+                    if dest.read(1) != b"\n":
+                        dest.write(b"\n")
+                dest.write("".join(lines).encode("utf-8"))
+        # 提交后缓存刷新失败不能造成调用方误判写入失败再试一次。
+        try:
+            _seq_cache[p] = state_key(aid_dir, device), records[-1]["seq"]
+        except OSError:
+            _seq_cache.pop(p, None)
+        return records
 
 
 def append_event(aid_dir: Path, device: str, event: Dict[str, Any]) -> Dict[str, Any]:
-    p = journal_path(aid_dir, device)
-    with _lock_for(p):
-        ev = dict(event)
-        ev.setdefault("schema", SCHEMA)
-        ev.setdefault("ts", now_iso())
-        ev["device"] = device
-        ev["seq"] = _next_seq(aid_dir, device)
-        line = json.dumps(ev, ensure_ascii=False, separators=(",", ":"))
-        p.parent.mkdir(parents=True, exist_ok=True)
-        with open(p, "a", encoding="utf-8", newline="") as f:
-            f.write(line + "\n")
-    return ev
+    return append_events(aid_dir, device, [event], atomic=False)[0]
 
 
-def read_events(aid_dir: Path) -> List[Dict[str, Any]]:
-    events: List[Dict[str, Any]] = []
+def read_events(aid_dir: Path, covered: Optional[dict] = None) -> List[Dict[str, Any]]:
+    covered = covered or {}
+    events = []
+    archived = dict(covered)
+    for p in sorted(entries_dir(aid_dir).glob("snapshot-*.jsonl.gz")):
+        for ev in _archive_events(p):
+            device, seq = ev["device"], ev["seq"]
+            if seq > covered.get(device, 0):
+                events.append(ev)
+            archived[device] = max(seq, archived.get(device, 0))
     for p in sorted(journal_dir(aid_dir).glob("*.jsonl")):
-        events.extend(_iter_jsonl(p))
+        records = _iter_jsonl(p)
+        limit = archived.get(p.stem, 0)
+        if limit:
+            records = (ev for ev in records if int(ev.get("seq") or 0) > limit)
+        events.extend(records)
     events.sort(key=lambda e: (str(e.get("ts") or ""), str(e.get("device") or ""), int(e.get("seq") or 0)))
     return events
-
-
-# ── 状态机 ──────────────────────────────────────────────
 
 
 def empty_state() -> Dict[str, Any]:
@@ -329,6 +417,7 @@ def _apply_snapshot(state: Dict[str, Any], ev: Dict[str, Any]) -> None:
         if not entry_id:
             continue
         state["entries"][entry_id] = {
+            **rec,
             "id": entry_id,
             "versions": list(rec.get("versions") or []),
             "active": rec.get("active"),
@@ -340,28 +429,37 @@ def _apply_snapshot(state: Dict[str, Any], ev: Dict[str, Any]) -> None:
 
 
 def replay(aid_dir: Path) -> Dict[str, Any]:
+    with transaction(aid_dir):
+        return _replay(aid_dir)
+
+
+def _replay(aid_dir: Path, *, record_coverage: bool = False) -> Dict[str, Any]:
     state = empty_state()
     snap = _load_snapshot(aid_dir)
     if snap:
         _apply_snapshot(state, snap)
     covered = state.get("covered") or {}
-    for ev in read_events(aid_dir):
-        device = str(ev.get("device") or "")
-        if int(ev.get("seq") or 0) <= int(covered.get(device, 0)):
-            continue
-        op = ev.get("op")
-        if op == "put":
-            _apply_put(state, ev)
-        elif op == "del":
-            _apply_del(state, ev)
-        elif op == "merge":
-            _apply_merge(state, ev)
-        elif op == "move":
-            _apply_move(state, ev)
-        elif op == "pin":
-            _apply_pin(state, ev)
+    for ev in read_events(aid_dir, covered):
+        apply_event(state, ev)
+        if record_coverage:
+            device = ev["device"]
+            state["covered"][device] = max(state["covered"].get(device, 0), ev["seq"])
     _load_legacy(state, aid_dir)
     return state
+
+
+def apply_event(state: dict, ev: dict) -> None:
+    op = ev.get("op")
+    if op == "put":
+        _apply_put(state, ev)
+    elif op == "del":
+        _apply_del(state, ev)
+    elif op == "merge":
+        _apply_merge(state, ev)
+    elif op == "move":
+        _apply_move(state, ev)
+    elif op == "pin":
+        _apply_pin(state, ev)
 
 
 def _load_legacy(state: Dict[str, Any], aid_dir: Path) -> None:
@@ -380,42 +478,55 @@ def _load_legacy(state: Dict[str, Any], aid_dir: Path) -> None:
         )
 
 
-def compact(aid_dir: Path, keep_days: int = 7) -> Dict[str, Any]:
+def compact(aid_dir: Path, keep_days: int = 7, device: str = "") -> Dict[str, Any]:
+    """显式维护入口，快照发布和日志裁剪与本进程内的读写互斥。"""
+    with transaction(aid_dir):
+        if device:
+            return _compact_device(aid_dir, device, keep_days)
+        return _compact_all(aid_dir, keep_days)
+
+
+def _compact_device(aid_dir: Path, device: str, keep_days: int) -> dict:
+    archive = snapshot_path(aid_dir, device)
+    journal = journal_path(aid_dir, device)
+    last = int(_covered(aid_dir).get(device, 0))
+    with _pending_file(archive) as tmp, gzip.open(tmp, "wt", encoding="utf-8", newline="") as dst:
+        if archive.exists():
+            for ev in _archive_events(archive):
+                dst.write(json.dumps(ev, ensure_ascii=False) + "\n")
+                last = max(last, ev["seq"])
+        for ev in _iter_jsonl(journal):
+            if ev["seq"] > last:
+                dst.write(json.dumps(ev, ensure_ascii=False) + "\n")
+                last = ev["seq"]
+    _prune_journals([journal], keep_days, {device: last})
+    return {"ok": True, "covered": {device: last}}
+
+
+def _compact_all(aid_dir: Path, keep_days: int) -> Dict[str, Any]:
     """当前状态落成 snapshot，再裁剪旧事件；读取结果与裁剪前等价。"""
-    state = replay(aid_dir)
-    covered: Dict[str, int] = {}
-    for p in journal_dir(aid_dir).glob("*.jsonl"):
-        seqs = [int(ev.get("seq") or 0) for ev in _iter_jsonl(p)]
-        covered[p.stem] = max(seqs or [0])
+    state = _replay(aid_dir, record_coverage=True)
+    covered = state["covered"]
     payload = {
         "op": "snapshot",
         "ts": now_iso(),
         "covered": covered,
-        "entries": [
-            {
-                "id": item["id"],
-                "state": item["state"],
-                "active": item.get("active"),
-                "versions": item.get("versions") or [],
-                "conflict": bool(item.get("conflict")),
-            }
-            for item in state["entries"].values()
-        ],
+        "entries": list(state["entries"].values()),
         "legacy": state.get("legacy") or [],
     }
     _atomic_write(snapshot_path(aid_dir), json.dumps(payload, ensure_ascii=False) + "\n")
-    _prune_journals(aid_dir, keep_days)
+    _prune_journals(journal_dir(aid_dir).glob("*.jsonl"), keep_days, covered)
     return {"ok": True, "entries": len(payload["entries"]), "covered": covered}
 
 
-def _prune_journals(aid_dir: Path, keep_days: int) -> None:
+def _prune_journals(paths: Iterable[Path], keep_days: int, covered: dict) -> None:
     """保留最近 keep_days 天的事件；时间解析失败的行一律保留（宁多留不误删）。"""
     cutoff = datetime.now().astimezone().timestamp() - keep_days * 86400
-    for p in journal_dir(aid_dir).glob("*.jsonl"):
+    for p in paths:
         keep: List[str] = []
         for ev in _iter_jsonl(p):
             ts = _parse_ts(ev.get("ts"))
-            if ts is None or ts.timestamp() >= cutoff:
+            if ev.get("seq", 0) > covered.get(p.stem, 0) or ts is None or ts.timestamp() >= cutoff:
                 keep.append(json.dumps(ev, ensure_ascii=False, separators=(",", ":")))
         if keep:
             _atomic_write(p, "\n".join(keep) + "\n")

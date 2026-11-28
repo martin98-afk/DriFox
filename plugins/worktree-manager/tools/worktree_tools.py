@@ -130,20 +130,17 @@ def _resolve_main_repo(tool_ctx: dict, path: str = "") -> Tuple[Optional[str], s
 
 
 def _invalidate_info_cache(repo_root: str) -> None:
-    """清掉指向该仓库的 get_repo_info/detect_git 缓存（value.root 匹配，跨 path key）
+    """清掉 get_repo_info/detect_git 等缓存（worktree 增删后必须调用）
 
-    [PERF] `_info_cache` 的键现在是 `(path, with_counts)` 元组（快速版与完整版
-    分开缓存，避免 counts 互相覆盖）；仍兼容历史纯 path 键。
+    `_info_cache` 用**全清**：键是 `(path, with_counts)` 元组，按 `info.root ==
+    repo_root` 精确匹配会漏两类条目——
+    1. 会话在子工作树里时，以子工作树路径为键探测得到的 `info.root` 是子工作树
+       自身（不是主仓库根），主仓库增删工作树后这条缓存不会失效；
+    2. None 哨兵条目没有 root 属性。
+    漏清的后果是 `get_repo_info` 在 30s TTL 内直接返回旧列表，新建的工作树
+    刷不出来。缓存条目数等于被探测过的路径数（个位数），全清代价可忽略。
     """
-    for key, entry in list(GitWorktreeDetector._info_cache.items()):
-        info = entry[0] if entry else None
-        if info is not None and getattr(info, "root", None) == repo_root:
-            GitWorktreeDetector._info_cache.pop(key, None)
-    # 键形式兜底：值不是 info（None 哨兵）时按 path 分量匹配
-    for key in list(GitWorktreeDetector._info_cache):
-        path_part = key[0] if isinstance(key, tuple) else key
-        if os.path.abspath(str(path_part)) == os.path.abspath(repo_root):
-            GitWorktreeDetector._info_cache.pop(key, None)
+    GitWorktreeDetector._info_cache.clear()
     for key in list(GitWorktreeDetector._detect_cache):
         if os.path.abspath(key) == os.path.abspath(repo_root):
             GitWorktreeDetector._detect_cache.pop(key, None)

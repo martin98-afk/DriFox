@@ -472,9 +472,9 @@ class ChartViewerCard(BaseSettingsCard):
         self._page.exportPngRequested.connect(self._save_png)
         self.content_layout.addWidget(self._webview, 1)
 
-        from qfluentwidgets import FluentIcon
+        from app.utils.app_icon import AppIcon
 
-        self._export_btn = self.add_header_button(FluentIcon.SAVE, "导出 PNG（3x 高清）", self._on_export_clicked)
+        self._export_btn = self.add_header_button(AppIcon.SAVE, "导出 PNG（3x 高清）", self._on_export_clicked)
         self._chart_type = ""
 
     def load_chart(self, chart_type: str, payload_b64: str, title: str = ""):

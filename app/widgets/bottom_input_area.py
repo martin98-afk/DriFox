@@ -13,6 +13,7 @@ from PyQt5.QtCore import (
     QEasingCurve,
     QMimeData,
     QObject,
+    QPointF,
     QRectF,
     QSize,
     QSizeF,
@@ -52,13 +53,13 @@ from PyQt5.QtWidgets import (
 )
 from qfluentwidgets import (
     ComboBox,
-    FluentIcon,
     IconWidget,
     SmoothMode,
     TextEdit,
     TransparentToolButton,
     setCustomStyleSheet,
 )
+from app.utils.app_icon import AppIcon
 
 from app.utils.scroll_tuning import install_fast_wheel
 
@@ -174,6 +175,8 @@ class SendableTextEdit(TextEdit):
     atTriggered = pyqtSignal(str)  # 检测到 @ 触发，携带查询文本
     atDismissed = pyqtSignal()  # @ 触发结束
     fileMentionConfirmed = pyqtSignal(str)  # @路径 + 空格确认：携带绝对路径，供上层登记附件
+    imagePreviewRequested = pyqtSignal(str)
+    imageReferenceReplaced = pyqtSignal(str, str)
     files_dropped = pyqtSignal(list)  # list[str] 拖入/粘贴的文件路径
     paste_image_saved = pyqtSignal(str)  # 粘贴图片后台落盘完成（跨线程刷新附件芯片用）
     enteringHistoryMode = pyqtSignal()  # 即将进入历史浏览模式（main_widget 需保存当前附件）
@@ -203,6 +206,7 @@ class SendableTextEdit(TextEdit):
         self._suppress_slash_trigger = False  # 切换历史时临时阻止 / 触发
         # 文本 → 附件 反向同步（详见 _sync_placeholder_removals）
         self._last_placeholder_names: list[str] = []  # 上一次文本里的 [[...]] 快照
+        self._image_revisions: dict[tuple[str, str], tuple[str, str]] = {}
         self._syncing_attachments = False  # 程序化改文本中：只校准快照，不上报删除
         self._sync_attachments_enabled = True  # 总开关：批量流程整体暂停反向同步
 
@@ -347,7 +351,6 @@ class SendableTextEdit(TextEdit):
         self._placeholder_tip_timer = QTimer(self)
         self._placeholder_tip_timer.setInterval(_PLACEHOLDER_ROTATE_INTERVAL_MS)
         self._placeholder_tip_timer.timeout.connect(self._rotate_placeholder_tip)
-        self._placeholder_tip_timer.start()
 
         # 使用 QTimer.singleShot(0, ...) 在事件循环启动后重置初始化标志
         QTimer.singleShot(0, self._finish_initialization)
@@ -494,17 +497,9 @@ class SendableTextEdit(TextEdit):
 
         card = self._get_card()
         try:
-            cursor = self.textCursor()
-            text = self.toPlainText()
-            # 胶囊展开后 doc 与 plain 坐标不等长；query/空格判定全在 plain 域，
-            # 命令胶囊折叠后重入本函数时尤其依赖换算（否则 query 截短 → detail 被打回列表）
-            cursor_pos = self._plain_offset_from_doc(cursor.position())
-
-            if cursor_pos < 0 or cursor_pos > len(text):
-                return
-
-            # 仅当 / 在文本开头（位置0）时触发
-
+            # 普通正文不用展开胶囊，也不用从首段逐个计算光标偏移。
+            first = self.document().characterAt(0)
+            text = self.toPlainText() if first in ("/", _OBJECT_REPLACEMENT) else ""
             if not text.startswith("/"):
                 # 没有在开头
                 self._cancel_slash_throttle()
@@ -514,6 +509,9 @@ class SendableTextEdit(TextEdit):
                 self._slash_trigger_pos = -1
                 return
 
+            cursor_pos = self._plain_offset_from_doc(self.textCursor().position())
+            if cursor_pos < 0 or cursor_pos > len(text):
+                return
             query = text[1:cursor_pos] if cursor_pos > 1 else ""
 
             # 换行符 → 关闭
@@ -684,38 +682,16 @@ class SendableTextEdit(TextEdit):
             return
 
         try:
-            # ⚠ 必须用原始文档文本（胶囊=U+FFFC 占 1 字符），与 textCursor 坐标
-            # 同系。override 的 toPlainText 会把胶囊展开成 "@名字 "（多字符），
-            # 混用会让 text[:cursor_pos] 切出幽灵 "@"（含胶囊自带的空白终止位
-            # 被切掉）→ 插入胶囊后每次输入都误弹 @ 卡片。
-            text = TextEdit.toPlainText(self)
             cursor = self.textCursor()
             cursor_pos = cursor.position()
-
-            if cursor_pos < 0 or cursor_pos > len(text):
-                return
-
-            text_before_cursor = text[:cursor_pos]
-
-            # 从光标向前找最后一个合法 @
-            at_pos = -1
-            for i in range(cursor_pos - 1, -1, -1):
-                ch = text_before_cursor[i]
-                if ch == "@":
-                    # 检查是否为单词边界
-                    if i == 0 or text_before_cursor[i - 1] in (" ", "\n", "\t", "\r"):
-                        at_pos = i
-                        break
-                    else:
-                        # 非单词边界（如 email@domain），不触发
-                        break
-                elif ch in ("\n", "\r"):
-                    # 遇到换行则停止向前搜索
-                    break
-
+            # 仅读当前段的原始文本，胶囊保持一个对象字符。selectedText 保留软换行和不换行空格。
+            cursor.setPosition(cursor_pos)
+            cursor.setPosition(cursor.block().position(), QTextCursor.KeepAnchor)
+            prefix = cursor.selectedText().replace("\u2028", "\n").replace("\xa0", " ")
+            marker = prefix.rfind("@")
             file_card = self._get_file_mention_card()
 
-            if at_pos < 0:
+            if marker < 0 or (marker and prefix[marker - 1] not in " \n\t\r"):
                 # 没有找到合法 @ → 关闭卡片
                 self._cancel_at_throttle()
                 self._at_trigger_pos = -1
@@ -724,10 +700,10 @@ class SendableTextEdit(TextEdit):
                     self.atDismissed.emit()
                 return
 
-            query = text_before_cursor[at_pos + 1 :]
+            query = prefix[marker + 1 :]
 
             # 换行 → 关闭
-            if "\n" in query:
+            if "\n" in query or "\r" in query:
                 self._cancel_at_throttle()
                 self._at_trigger_pos = -1
                 if file_card and file_card.is_card_visible:
@@ -737,10 +713,12 @@ class SendableTextEdit(TextEdit):
 
             # 空白终止：@ 后的过滤词不允许包含空白。已完成的提及
             # （如胶囊展开的 "@助手名 "）之后的正文不应再触发补全
+            # QTextCursor 以 UTF-16 计数，emoji 等字符在文档里占两格。
+            at_pos = cursor_pos - len(query.encode("utf-16-le", "surrogatepass")) // 2 - 1
             if any(ch in query for ch in (" ", "\t", "\u3000")):
                 # 空格即确认：@ 后文本是真实存在的路径时折叠成胶囊并登记附件
                 # （与 /cmd 空格的 _collapse_command_token 对称），否则保持字面
-                self._collapse_file_mention_token(at_pos, cursor_pos)
+                self._collapse_file_mention_token(at_pos, cursor_pos, query)
                 self._cancel_at_throttle()
                 self._at_trigger_pos = -1
                 if file_card and file_card.is_card_visible:
@@ -769,6 +747,7 @@ class SendableTextEdit(TextEdit):
         cursor = self.textCursor()
         cursor.setCharFormat(QTextCharFormat())
         self.setTextCursor(cursor)
+        self._image_revisions.clear()
         super().setPlainText(text)
 
     def toPlainText(self) -> str:
@@ -833,7 +812,8 @@ class SendableTextEdit(TextEdit):
         fmt = QTextCharFormat()
         fmt.setObjectType(_FILE_MENTION_TYPE)
         fmt.setProperty(_FILE_MENTION_PATH_PROP, file_path)
-        fmt.setToolTip(file_path)
+        hint = "\n双击预览与标注" if AttachmentChip.supports_image_preview(file_path) else ""
+        fmt.setToolTip(file_path + hint)
         return fmt
 
     def insert_file_mention(self, file_path: str):
@@ -861,7 +841,7 @@ class SendableTextEdit(TextEdit):
         self._at_trigger_pos = -1
         self.setFocus(Qt.OtherFocusReason)
 
-    def _collapse_file_mention_token(self, at_pos: int, cursor_pos: int) -> bool:
+    def _collapse_file_mention_token(self, at_pos: int, cursor_pos: int, raw: str) -> bool:
         """「@相对路径 + 空白」空格确认 → 折叠为一枚文件胶囊
 
         触发时机：_on_at_trigger_check 检测到 @ 后出现空白。路径按卡片
@@ -880,7 +860,6 @@ class SendableTextEdit(TextEdit):
         root_dir = getattr(file_card, "root_dir", "") if file_card is not None else ""
         if not root_dir:
             return False
-        raw = TextEdit.toPlainText(self)[at_pos + 1 : cursor_pos]
         token = raw.rstrip(" \t\u3000")
         if not token:
             return False
@@ -889,7 +868,7 @@ class SendableTextEdit(TextEdit):
         if not os.path.exists(path):
             return False
 
-        end = at_pos + 1 + len(token)  # @ 后路径的结束位置（尾随空白之前）
+        end = cursor_pos - (len(raw) - len(token))  # 尾随空白均为单个 UTF-16 单元
         self._collapsing_mention = True
         try:
             ins = QTextCursor(self.document())
@@ -898,7 +877,7 @@ class SendableTextEdit(TextEdit):
             ins.insertText(_OBJECT_REPLACEMENT, self._make_mention_format(path))
             # 光标原位：区间由 len(token)+1 字符缩成 1 字符，整体左移 len(token)
             cursor = self.textCursor()
-            cursor.setPosition(cursor_pos - len(token))
+            cursor.setPosition(at_pos + 1 + cursor_pos - end)
             self.setTextCursor(cursor)
         finally:
             self._collapsing_mention = False
@@ -1757,6 +1736,17 @@ class SendableTextEdit(TextEdit):
                 removed.append(name)
 
         self._last_placeholder_names = current
+        # 撤销/重做一次标注会同时减少和增加一个引用；恢复附件版本须先于普通删除。
+        if (
+            self._image_revisions
+            and removed
+            and len(removed) == len(remaining)
+            and len(set(removed)) == len(set(remaining)) == 1
+        ):
+            revision = self._image_revisions.get((removed[0], remaining[0]))
+            if revision:
+                self.imageReferenceReplaced.emit(*revision)
+                return
         if removed:
             self.attachmentsRemoved.emit(removed)
 
@@ -1793,6 +1783,45 @@ class SendableTextEdit(TextEdit):
         cursor.setPosition(max(0, min(cursor_pos, len(new_text))))
         self.setTextCursor(cursor)
         return True
+
+    def replace_image_reference(self, old: str, new: str, attachments: list[str]):
+        """按完整路径更新正文胶囊，兼容历史草稿里的字面占位符。"""
+        doc = self.document()
+        cursor = QTextCursor(doc)
+        cursor.beginEditBlock()
+        self._syncing_attachments = True
+        try:
+            match = doc.find(_OBJECT_REPLACEMENT)
+            found = False
+            mentioned = set()
+            while not match.isNull():
+                fmt = match.charFormat()
+                if fmt.objectType() == _FILE_MENTION_TYPE:
+                    path = fmt.stringProperty(_FILE_MENTION_PATH_PROP)
+                    mentioned.add(path)
+                    if path == old:
+                        match.setCharFormat(self._make_mention_format(new))
+                        found = True
+                match = doc.find(_OBJECT_REPLACEMENT, match)
+            if not found:
+                name = os.path.basename(old)
+                # 同名路径按附件顺序消耗；已有胶囊的路径不占用字面引用。
+                match = QTextCursor(doc)
+                for path in attachments:
+                    if os.path.basename(path) == name and path not in mentioned:
+                        match = doc.find(f"[[{name}]]", match, doc.FindCaseSensitively)
+                        if match.isNull():
+                            break
+                        if path == old:
+                            match.insertText(_OBJECT_REPLACEMENT, self._make_mention_format(new))
+                            break
+        finally:
+            cursor.endEditBlock()
+            self._syncing_attachments = False
+        old_name, new_name = os.path.basename(old), os.path.basename(new)
+        self._image_revisions[old_name, new_name] = (old, new)
+        self._image_revisions[new_name, old_name] = (new, old)
+        self.imageReferenceReplaced.emit(old, new)
 
     def remove_mention_objects(self, path: str) -> bool:
         """删除正文中指向 path 的 inline 文件胶囊（附件 → 正文 方向的同步）
@@ -2124,6 +2153,7 @@ class SendableTextEdit(TextEdit):
 
     def showEvent(self, event):
         super().showEvent(event)
+        self._placeholder_tip_timer.start()
         # 首次显示时同步定位发送按钮——showEvent 在 paintEvent 之前
         # 同步执行，且此时 width()/height() 已由父布局确定。
         # 否则：__init__ 阶段 width/height 都是 0，send_btn 落在 (0, 0)
@@ -2131,6 +2161,10 @@ class SendableTextEdit(TextEdit):
         # 异步跑一轮才到右下角——视觉上就是"刚进去按钮在左边，过一会
         # 才到右边"。后续 resize 仍走 debounce timer 路径。
         self._position_send_button()
+
+    def hideEvent(self, event):
+        self._placeholder_tip_timer.stop()
+        super().hideEvent(event)
 
     def _position_send_button(self):
         """定右下角（仅兼容兼底）：发送按钮已由 bottom_toolbar 模块迁入工具栏。
@@ -2723,6 +2757,23 @@ class SendableTextEdit(TextEdit):
         if cursor.position() > 0:
             self.ensureCursorVisible()
 
+    def mouseDoubleClickEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            # ExactHit 排除行尾空白；坐标从视口转换到可滚动的文档。
+            pos = event.localPos() + QPointF(self.horizontalScrollBar().value(), self.verticalScrollBar().value())
+            index = self.document().documentLayout().hitTest(pos, Qt.ExactHit)
+            if index >= 0 and self.document().characterAt(index) == _OBJECT_REPLACEMENT:
+                cursor = QTextCursor(self.document())
+                cursor.setPosition(index)
+                cursor.movePosition(QTextCursor.NextCharacter, QTextCursor.KeepAnchor)
+                fmt = cursor.charFormat()
+                path = fmt.stringProperty(_FILE_MENTION_PATH_PROP)
+                if fmt.objectType() == _FILE_MENTION_TYPE and AttachmentChip.supports_image_preview(path):
+                    event.accept()
+                    self.imagePreviewRequested.emit(path)
+                    return
+        super().mouseDoubleClickEvent(event)
+
     def mousePressEvent(self, event):
         # 点击时退出历史浏览模式
         # 注意：点击输入框内不主动 dismiss 命令卡片 —— 卡片跟随输入框失焦关闭
@@ -2738,6 +2789,7 @@ class SendableTextEdit(TextEdit):
     def clear(self):
         """重写 clear 方法，清空输入时退出历史浏览模式"""
         self._reset_history_mode()
+        self._image_revisions.clear()
         super().clear()
 
     @staticmethod
@@ -3064,6 +3116,7 @@ class AttachmentChip(QFrame):
     """
 
     removed = pyqtSignal(str)  # file path
+    imagePreviewRequested = pyqtSignal(str)
 
     #: 文件名最大像素宽度，超出部分中间省略
     _MAX_NAME_WIDTH = 148
@@ -3075,36 +3128,36 @@ class AttachmentChip(QFrame):
     #  svg/ico 依赖 Qt 图像插件能力，读取失败自动回退纯文本 tooltip）
     _IMAGE_PREVIEW_EXTS = (".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".svg", ".ico")
 
-    # 文件扩展名 → FluentIcon 映射
+    # 文件扩展名 → AppIcon 映射
     # 注意：单元素元组必须写尾随逗号，否则 (".cs") 是 str，
     # ``ext in exts`` 会退化成子串判断（历史 bug，曾漏掉三处逗号）。
-    _FILE_ICON_MAP: dict[tuple[str, ...], FluentIcon] = {
+    _FILE_ICON_MAP: dict[tuple[str, ...], AppIcon] = {
         # 代码
-        (".py", ".pyw", ".pyx"): FluentIcon.CODE,
-        (".js", ".jsx", ".mjs", ".cjs"): FluentIcon.CODE,
-        (".ts", ".tsx"): FluentIcon.CODE,
-        (".html", ".htm", ".css", ".scss", ".less"): FluentIcon.CODE,
-        (".java", ".kt", ".kts"): FluentIcon.CODE,
-        (".cpp", ".c", ".h", ".hpp", ".hxx", ".cxx", ".cc"): FluentIcon.CODE,
-        (".cs",): FluentIcon.CODE,
-        (".go", ".rs", ".rb", ".php"): FluentIcon.CODE,
-        (".swift", ".m", ".mm"): FluentIcon.CODE,
-        (".sql",): FluentIcon.CODE,
-        (".sh", ".bash", ".zsh", ".ps1", ".bat", ".cmd"): FluentIcon.COMMAND_PROMPT,
+        (".py", ".pyw", ".pyx"): AppIcon.CODE,
+        (".js", ".jsx", ".mjs", ".cjs"): AppIcon.CODE,
+        (".ts", ".tsx"): AppIcon.CODE,
+        (".html", ".htm", ".css", ".scss", ".less"): AppIcon.CODE,
+        (".java", ".kt", ".kts"): AppIcon.CODE,
+        (".cpp", ".c", ".h", ".hpp", ".hxx", ".cxx", ".cc"): AppIcon.CODE,
+        (".cs",): AppIcon.CODE,
+        (".go", ".rs", ".rb", ".php"): AppIcon.CODE,
+        (".swift", ".m", ".mm"): AppIcon.CODE,
+        (".sql",): AppIcon.CODE,
+        (".sh", ".bash", ".zsh", ".ps1", ".bat", ".cmd"): AppIcon.COMMAND_PROMPT,
         # 图片
-        (".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".svg", ".ico"): FluentIcon.IMAGE_EXPORT,
+        (".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".svg", ".ico"): AppIcon.IMAGE_EXPORT,
         # 视频
-        (".mp4", ".avi", ".mov", ".mkv", ".wmv", ".flv", ".webm", ".m4v"): FluentIcon.VIDEO,
+        (".mp4", ".avi", ".mov", ".mkv", ".wmv", ".flv", ".webm", ".m4v"): AppIcon.VIDEO,
         # 音频
-        (".mp3", ".wav", ".flac", ".aac", ".ogg", ".wma", ".m4a"): FluentIcon.MUSIC,
+        (".mp3", ".wav", ".flac", ".aac", ".ogg", ".wma", ".m4a"): AppIcon.MUSIC,
         # 压缩包
-        (".zip", ".rar", ".7z", ".tar", ".gz", ".bz2", ".xz", ".zst"): FluentIcon.ZIP_FOLDER,
+        (".zip", ".rar", ".7z", ".tar", ".gz", ".bz2", ".xz", ".zst"): AppIcon.ZIP_FOLDER,
         # 文档/数据
-        (".pdf",): FluentIcon.DOCUMENT,
-        (".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx"): FluentIcon.DOCUMENT,
-        (".txt", ".md", ".rst", ".log"): FluentIcon.DOCUMENT,
-        (".json", ".xml", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".conf"): FluentIcon.DOCUMENT,
-        (".csv", ".tsv"): FluentIcon.DOCUMENT,
+        (".pdf",): AppIcon.DOCUMENT,
+        (".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx"): AppIcon.DOCUMENT,
+        (".txt", ".md", ".rst", ".log"): AppIcon.DOCUMENT,
+        (".json", ".xml", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".conf"): AppIcon.DOCUMENT,
+        (".csv", ".tsv"): AppIcon.DOCUMENT,
     }
 
     def __init__(self, filepath: str, parent=None):
@@ -3113,16 +3166,27 @@ class AttachmentChip(QFrame):
         self._missing = not os.path.exists(filepath)
         self._setup_ui()
 
+    @classmethod
+    def supports_image_preview(cls, path: str) -> bool:
+        return os.path.splitext(path)[1].lower() in cls._IMAGE_PREVIEW_EXTS
+
+    def mouseDoubleClickEvent(self, event):
+        if event.button() == Qt.LeftButton and self.supports_image_preview(self.filepath):
+            event.accept()
+            self.imagePreviewRequested.emit(self.filepath)
+            return
+        super().mouseDoubleClickEvent(event)
+
     @staticmethod
-    def _get_file_icon(filepath: str) -> FluentIcon:
-        """根据文件扩展名返回对应的 FluentIcon"""
+    def _get_file_icon(filepath: str) -> AppIcon:
+        """根据文件扩展名返回对应的 AppIcon"""
         if os.path.isdir(filepath):
-            return FluentIcon.FOLDER
+            return AppIcon.FOLDER
         ext = os.path.splitext(filepath)[1].lower()
         for exts, icon in AttachmentChip._FILE_ICON_MAP.items():
             if ext in exts:
                 return icon
-        return FluentIcon.DOCUMENT
+        return AppIcon.DOCUMENT
 
     @staticmethod
     def _human_size(path: str) -> str:
@@ -3166,7 +3230,7 @@ class AttachmentChip(QFrame):
 
         # 删除按钮：16x16 命中区，图标 9x9 保持视觉轻盈
         # （原实现是 10x10 按钮，图标几乎看不见且难点中）
-        self._close_btn = TransparentToolButton(FluentIcon.CLOSE, self)
+        self._close_btn = TransparentToolButton(AppIcon.CLOSE, self)
         self._close_btn.setFixedSize(16, 16)
         self._close_btn.setIconSize(QSize(9, 9))
         self._close_btn.clicked.connect(lambda: self.removed.emit(self.filepath))
@@ -3183,9 +3247,13 @@ class AttachmentChip(QFrame):
         tip = self.filepath + (f"\n{size_text}" if size_text else "")
         if self._missing:
             tip += "\n⚠ 文件已不存在，发送时将被忽略"
+        if self.supports_image_preview(self.filepath):
+            tip += "\n双击预览与标注"
+            self._label.setAttribute(Qt.WA_TransparentForMouseEvents)
+            self._icon_widget.setAttribute(Qt.WA_TransparentForMouseEvents)
         self.setToolTip(tip)
         # 图像附件：hover 时在气泡内预览缩略图（loader 失败/非图像自动回退纯文本）
-        if not self._missing and os.path.splitext(self.filepath)[1].lower() in self._IMAGE_PREVIEW_EXTS:
+        if not self._missing and self.supports_image_preview(self.filepath):
             _f = get_hover_filter(self)
             if _f is not None:
                 _f.set_image_loader(lambda: load_preview_pixmap(self.filepath))
@@ -3256,7 +3324,7 @@ class FileMentionObject(QObject, QTextObjectInterface):
     #: 文件名最大像素宽度，超出中间省略（保证胶囊不会宽到撑坏换行）
     _MAX_TEXT_WIDTH = 148
 
-    # FluentIcon → QIcon 缓存（构造 QIcon 涉及 SVG 解析，绘制期反复调用太贵）
+    # AppIcon → QIcon 缓存（构造 QIcon 涉及 SVG 解析，绘制期反复调用太贵）
     _icon_cache: dict[str, object] = {}
 
     def intrinsicSize(self, doc, posInDocument, format) -> QSizeF:  # noqa: A002

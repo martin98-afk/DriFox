@@ -20,6 +20,7 @@
         "ui": true
     },
     "capabilities": [
+        "ui.icons",
         "engine.session",
         "engine.session.resume",
         "session.persist",
