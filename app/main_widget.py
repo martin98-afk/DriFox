@@ -20872,8 +20872,17 @@ class OpenAIChatToolWindow(ToolWindow):
         __init__ 早期装配区早于 _setup_ui 对话区创建——兜底装配与
         chat_area_module.build 两分支各自收尾时调用本方法，互斥不重入。
         """
-        self.chat_scroll_area.verticalScrollBar().rangeChanged.connect(self._on_scroll_range_changed)
+        bar = self.chat_scroll_area.verticalScrollBar()
+        bar.rangeChanged.connect(self._align_chat_messages)
+        self._align_chat_messages(bar.minimum(), bar.maximum())
+        bar.rangeChanged.connect(self._on_scroll_range_changed)
         self._wire_user_scroll_input()
+
+    def _align_chat_messages(self, minimum: int, maximum: int) -> None:
+        # 长列表收起一张卡后，容器要晚一拍才缩短。顶对齐把这段临时空白留在末尾。
+        alignment = Qt.AlignTop if maximum > minimum else Qt.AlignBottom
+        if self.chat_layout.alignment() != alignment:
+            self.chat_layout.setAlignment(alignment)
 
     def _wire_user_scroll_input(self):
         """把「真实用户滚动输入」接入 away 状态机（幂等）。
@@ -21788,7 +21797,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     # ⚠️ _on_send_click 已把按钮切为 STOP，只在非流式时恢复为 SEND
                     if not self._is_streaming:
                         self.input_area.toggle_send_button(True)
-                    if self._execute_command(cmd_result.command_name, cmd_result.remainder):
+                    if self._execute_command(cmd_result.command_name, cmd_result.remainder) and not preserve_input:
                         self._clear_attachments()
                     # 🆕 降级到 prompt 注入：_execute_command 捕获 CommandNeedDegrade 后
                     # 已写 _pending_command 并置 _team_load_degraded=True。清除标记并继续
@@ -23010,7 +23019,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     return widget
         return None
 
-    def _notify_if_inactive(self, title: str, message: str):
+    def _notify_if_inactive(self, title: str, message: str, *, reply_session_id: str = ""):
         if not self.cfg.llm_notify_enabled.value:
             return
 
@@ -23025,6 +23034,10 @@ class OpenAIChatToolWindow(ToolWindow):
         # 传递顶层窗口引用，确保点击通知时能正确恢复最小化的对话框
         from app.tray_manager import TrayManager
 
+        tray = TrayManager.get_instance()
+        if reply_session_id and tray.notify_chat_completion(title, message, self, reply_session_id):
+            return
+
         # Tab 模式：计算当前窗口对应的标签页索引，点击通知时自动跳转
         tab_index = -1
         try:
@@ -23035,7 +23048,7 @@ class OpenAIChatToolWindow(ToolWindow):
             pass
 
         top_window = self.window() if callable(self.window) else self
-        TrayManager.get_instance().notify(title, message, window=top_window, tab_index=tab_index)
+        tray.notify(title, message, window=top_window, tab_index=tab_index)
 
     def _should_show_inactive_notification(self) -> bool:
         """Only notify when the app window is not effectively visible to the user."""
@@ -23434,7 +23447,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 else:
                     preview = content[:50] + "..." if len(content) > 50 else content
                     current_title = self.title_edit.text() if self.title_edit else "对话完成"
-                    self._notify_if_inactive(current_title, preview)
+                    self._notify_if_inactive(current_title, preview, reply_session_id=session.session_id)
 
         # 对话完成后更新缓存统计显示
         self._refresh_cache_stats()

@@ -13,7 +13,7 @@ from pathlib import Path
 
 import keyboard
 from loguru import logger
-from PyQt5.QtCore import QAbstractNativeEventFilter, QObject, QTimer, QUrl, pyqtSignal
+from PyQt5.QtCore import QAbstractNativeEventFilter, QObject, Qt, QTimer, QUrl, pyqtSignal
 from PyQt5.QtGui import QDesktopServices, QIcon
 from PyQt5.QtWidgets import QApplication, QSystemTrayIcon
 
@@ -96,8 +96,10 @@ class TrayManager(QObject):
 
     # 信号：当窗口数量变为0时发出
     allWindowsClosed = pyqtSignal()
+    _chat_notification_activated = pyqtSignal(str, str, object)
 
     _instance = None
+    _reply_toaster = None
 
     @classmethod
     def get_instance(cls) -> "TrayManager":
@@ -136,6 +138,7 @@ class TrayManager(QObject):
         self._windows: list = []  # 已注册的 ToolPopupDialog 列表
         self._pending_notification: dict = {}  # 当前待处理的托盘通知 {notification_id: window}
         self._last_notification_tab_index: int = -1  # 最近通知关联的 tab 索引（Tab 模式）
+        self._chat_notification_activated.connect(self._on_chat_notification, Qt.QueuedConnection)
 
         # 创建托盘图标
         self._tray_icon = QSystemTrayIcon(self)
@@ -202,6 +205,12 @@ class TrayManager(QObject):
         显式 hide() 让 Shell 注销图标，再 deleteLater 交给事件循环回收；
         各步独立容错，已删除对象（sip.isdeleted）直接跳过。
         """
+        if self._reply_toaster is not None:
+            try:
+                self._reply_toaster.close()
+            except OSError as exc:
+                logger.debug(f"清理会话通知失败: {exc}")
+            self._reply_toaster = None
         icon = self._tray_icon
         if icon is None:
             return
@@ -568,6 +577,41 @@ class TrayManager(QObject):
             self._selected_windows.remove(window)
             self._update_selection_visuals()
         logger.debug(f"窗口已从 TrayManager 注销: {window.windowTitle()}")
+
+    def notify_chat_completion(self, title: str, message: str, chat, session_id: str) -> bool:
+        """原生快捷回复不可用时，交由调用方发送普通托盘通知。"""
+        if platform.system() != "Windows" or not self._tray_icon.isVisible():
+            return False
+        try:
+            if self._reply_toaster is None:
+                from app.utils.windows_reply_toast import WindowsReplyToaster
+
+                self._reply_toaster = WindowsReplyToaster(self._chat_notification_activated.emit)
+            self._reply_toaster.show(title, message, chat._window_id, session_id)
+            return True
+        except Exception as exc:
+            logger.warning(f"快捷回复通知不可用，回退到托盘通知: {exc}")
+            return False
+
+    def _on_chat_notification(self, window_id: str, session_id: str, reply: str | None) -> None:
+        from app.core.infra.window_registry import alive_window_instances
+
+        for chat in alive_window_instances():
+            if chat._window_id != window_id or getattr(chat, "_is_destroyed", False):
+                continue
+            session = chat.session_manager.get_current_session()
+            if session is None or session.session_id != session_id:
+                break
+            if reply is None:
+                self._show_window(chat)
+                tm = self._tab_manager_window
+                if tm is not None and (idx := tm._window_to_index.get(id(chat), -1)) >= 0:
+                    tm._tab_panel.set_active_index(idx)
+            elif reply.strip():
+                chat._on_send_clicked(user_text=reply.strip(), preserve_input=True)
+            return
+        if reply and reply.strip():
+            self.notify("快捷回复未发送", "原会话已关闭或切换。")
 
     def notify(self, title: str, message: str, window: QObject = None, tab_index: int = -1) -> None:
         """发送 Windows 通知

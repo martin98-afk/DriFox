@@ -1,6 +1,6 @@
 """在真实聊天列表中，手动折叠上方分组应保留标题的阅读位置。"""
 import pytest
-from PyQt5.QtCore import QPoint, Qt
+from PyQt5.QtCore import QEvent, QObject, QPoint, Qt
 from tests.perf.conftest import compact_output_plugin  # noqa: F401
 
 
@@ -34,7 +34,7 @@ def test_upper_group_keeps_reading_position(ui_app, qtbot):
         def header_y():
             return viewer.mapTo(area.viewport(), header).y()
 
-        bar.setValue(bar.value() + header_y() - 50)
+        bar.setValue(bar.value() + header_y() - 120)
         assert 0 <= header_y() < area.viewport().height() // 2
         initial_y = header_y()
         collapsed = viewer.height()
@@ -47,13 +47,32 @@ def test_upper_group_keeps_reading_position(ui_app, qtbot):
         bar.setValue(bar.value() + header_y() - initial_y)
         positions = []
         bar.valueChanged.connect(positions.append)
+        avatar = card._identity_header._avatar
+        viewport = area.viewport()
+        initial_avatar_y = avatar.mapTo(viewport, QPoint()).y()
+        frames = []
+
+        class Watch(QObject):
+            def eventFilter(self, obj, event):
+                if event.type() == QEvent.Paint:
+                    frames.append((avatar.mapTo(viewport, QPoint()).y(), card.height(), viewer.height()))
+                return False
+
+        watch = Watch()
+        widgets = (card, avatar, mw.chat_container, viewport, viewer)
+        for widget in widgets:
+            widget.installEventFilter(watch)
         try:
             qtbot.mouseClick(target, Qt.LeftButton, pos=header)
             qtbot.waitUntil(lambda: abs(viewer.height() - collapsed) <= 2)
             qtbot.wait(400)
             assert not positions, positions
             assert abs(header_y() - initial_y) <= 1
+            assert frames and all(abs(y - initial_avatar_y) <= 1 for y, _, _ in frames), sorted(set(frames))
+            assert all(h >= card.height() - 1 and vh >= collapsed - 1 for _, h, vh in frames), sorted(set(frames))
         finally:
+            for widget in widgets:
+                widget.removeEventFilter(watch)
             bar.valueChanged.disconnect(positions.append)
     finally:
         mw.chat_layout.removeWidget(card)
