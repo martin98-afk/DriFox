@@ -85,6 +85,11 @@ class _PreferenceRow:
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.hBoxLayout.setContentsMargins(0, 0, 0, 0)
+        # 布局整体垂直居中会按单行 sizeHint 截短文字列，换行时改由弹性留白居中。
+        self.hBoxLayout.setAlignment(Qt.Alignment())
+        self.vBoxLayout.setAlignment(Qt.Alignment())
+        self.vBoxLayout.insertStretch(0)
+        self.vBoxLayout.addStretch()
         self.vBoxLayout.setSpacing(4)
         self.hBoxLayout.setStretchFactor(self.vBoxLayout, 8)
         self.vBoxLayout.setAlignment(self.contentLabel, Qt.Alignment())
