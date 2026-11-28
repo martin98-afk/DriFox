@@ -2463,7 +2463,7 @@ class MessageCard(SimpleCardWidget):
                 # 助手正文容器承载工具区与内嵌面板。
                 # 只包 _viewer_container（正文/工具区都在 WebEngine 内），
                 # 身份行与 footer 留在气泡外。
-                self._assistant_bubble = MessageBubble(parent=self)
+                self._assistant_bubble = MessageBubble("left", self)
                 _b_lay = QVBoxLayout(self._assistant_bubble)
                 _b_lay.setContentsMargins(0, 0, 0, 0)
                 _b_lay.setSpacing(0)
@@ -2615,9 +2615,7 @@ class MessageCard(SimpleCardWidget):
                 bubble.set_border_color(Colors.BORDER)
             return
         if self.role == "assistant" and not self.error:
-            # 助手正文与阅读区共用背景；
-            # 卡片自身保持透明（身份行/footer 不吃底色），
-            # 错误/重试/上下文丢失态仍走下方原逻辑（红框提示）
+            # 实色气泡只覆盖回答正文，身份行和页脚保留外层背景。
             self.setStyleSheet(
                 """
                 CardWidget {
@@ -2628,8 +2626,8 @@ class MessageCard(SimpleCardWidget):
             )
             bubble = getattr(self, "_assistant_bubble", None)
             if bubble is not None:
-                bubble.set_bubble_color(bg or "transparent")
-                bubble.set_border_color("transparent")
+                bubble.set_bubble_color(bg or self._base_bg)
+                bubble.set_border_color(border or Colors.BORDER)
             return
         self.setStyleSheet(
             f"""

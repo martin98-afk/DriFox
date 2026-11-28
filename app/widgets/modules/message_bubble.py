@@ -30,7 +30,6 @@ MAX_S = 0.30  # 明度调整后的饱和度上限（极简：艳色压柔，不�
 # assistant 专属（贴近背景的极简策略：靠边框/引脚辨识，不靠色块）
 ASSIST_L_OFFSET = 14  # 明度相对背景的微偏移量
 ASSIST_S_MAX = 0.10  # 饱和度上限（压到几乎无色）
-ASSIST_ALPHA = 150  # alpha 上限：主题原值普遍 180~225，视觉近实心；压到 150 保半透明质感
 PIN_TIP_LEAN = 5  # 引脚尖端向头像外上方偏移量（指向感）
 BORDER_WIDTH = 1.0  # 气泡整体细边框宽度(px)
 
@@ -38,7 +37,7 @@ BORDER_WIDTH = 1.0  # 气泡整体细边框宽度(px)
 def ensure_bubble_contrast(bg_spec: str, backdrop_spec: str, role: str = "user") -> str:
     """气泡底色可读性保障（2026-09-23）。
 
-    双策略（不改 17 个 yaml，alpha 半透明质感/色相全程保留主题原样）：
+    按身份从主题色派生气泡底色：
     - assistant：贴近背景的极简策略 —— 低饱和（≤ ASSIST_S_MAX）+ 明度微偏移
       （ASSIST_L_OFFSET），颜色不抢戏，辨识靠边框与引脚；
       主题原色再重（如琥珀暖黄）也收敛到背景近邻。
@@ -46,7 +45,7 @@ def ensure_bubble_contrast(bg_spec: str, backdrop_spec: str, role: str = "user")
       饱和度夹在 [MIN_S, MAX_S]。
 
     Args:
-        bg_spec: 主题气泡色（CSS rgba/十六进制），alpha 原样保留。
+        bg_spec: 主题气泡色（CSS rgba/十六进制），用户气泡保留原透明度。
         backdrop_spec: 聊天背景基准色（Colors.CONTENT_BG）。
         role: "user" / "assistant"（welcome 不调用）。
 
@@ -54,9 +53,9 @@ def ensure_bubble_contrast(bg_spec: str, backdrop_spec: str, role: str = "user")
         rgba(r, g, b, a) 字符串；输入无效时原样返回。
     """
     color = _qcolor(bg_spec, QColor(Qt.transparent))
-    if not color.isValid() or color.alpha() == 0:
-        return bg_spec
     backdrop = _qcolor(backdrop_spec, QColor(Qt.transparent))
+    if not color.isValid() or color.alpha() == 0:
+        return backdrop.name() if role == "assistant" else bg_spec
 
     h, s, l, a = color.getHslF()
     if backdrop.isValid():
@@ -67,10 +66,8 @@ def ensure_bubble_contrast(bg_spec: str, backdrop_spec: str, role: str = "user")
             l = min(1.0, max(0.0, l))
             s = min(s, ASSIST_S_MAX)
             out = QColor.fromHslF(h, s, l)
-            # 半透明观感：主题 alpha 原值普遍 180~225（视觉近实心），统一钳到上限
-            out.setAlpha(min(int(round(a * 255)), ASSIST_ALPHA))
-            r, g, b, alpha = out.getRgb()
-            return f"rgba({r}, {g}, {b}, {alpha})"
+            # 正文使用实色，避免壁纸或视频的纹理透入文字。
+            return out.name()
         if abs(l - bl) * 255 < MIN_L_DIFF:
             target = (bl - MIN_L_PUSH / 255.0) if bl >= 0.5 else (bl + MIN_L_PUSH / 255.0)
             l = min(1.0, max(0.0, target))
