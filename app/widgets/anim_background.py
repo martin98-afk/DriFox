@@ -34,6 +34,7 @@ import time
 import weakref
 from typing import Dict, List, Optional
 
+from PyQt5 import sip
 from PyQt5.QtCore import QObject, Qt, QRect, QTimer
 from PyQt5.QtGui import QImage, QImageReader
 
@@ -113,7 +114,7 @@ class AnimationSource:
         self.current: Optional[QImage] = None
         self.frame_count = 0
         self.failed = False
-        self._subscribers: List[weakref.ref] = []
+        self._subscribers: Dict[int, weakref.ref] = {}
         self._last_advance_ms = -(10**9)  # 首帧立即推进
         self._reader = QImageReader(path)
         self._reader.setAutoTransform(True)
@@ -171,7 +172,7 @@ class AnimationSource:
         while not self._prefetch_stop.is_set():
             with self._prefetch_lock:
                 while len(self._prefetch) >= _PREFETCH_MAX and not self._prefetch_stop.is_set():
-                    self._prefetch_space.wait(0.2)
+                    self._prefetch_space.wait()
                 if self._prefetch_stop.is_set():
                     return
             img = reader.read()
@@ -197,15 +198,18 @@ class AnimationSource:
             if snapshot:
                 iw, ih = img.width(), img.height()
                 for key, (tw, th, fit, pos) in snapshot.items():
-                    if fit == "tile" or tw <= 0:
+                    size_key = (iw, ih, tw, th, fit, pos)
+                    if fit == "tile" or tw <= 0 or size_key in scaled_map:
                         continue
                     scaled = _scale_frame_for(img, tw, th, fit, pos)
                     if scaled is None or scaled.isNull():
                         continue
-                    scaled_map[(iw, ih, tw, th, fit, pos)] = scaled
+                    scaled_map[size_key] = scaled
                     if chosen_key is None:
                         chosen_key = key
             with self._prefetch_lock:
+                if self._prefetch_stop.is_set():
+                    return
                 self._prefetch.append((img, chosen_key, scaled_map))
 
     def _take_prefetched(self) -> Optional[QImage]:
@@ -279,19 +283,23 @@ class AnimationSource:
             self._geometries.pop(key, None)
 
     def subscribe(self, layer) -> None:
-        if not any(r() is layer for r in self._subscribers):
-            self._subscribers.append(weakref.ref(layer))
+        self._subscribers[id(layer)] = weakref.ref(layer)
 
     def unsubscribe(self, layer) -> None:
-        self._subscribers = [r for r in self._subscribers if r() not in (None, layer)]
+        self._subscribers.pop(id(layer), None)
+        self.unregister_geometry(id(layer))
 
-    def notify(self) -> None:
-        alive: List[weakref.ref] = []
-        for ref in self._subscribers:
+    def _live_layers(self):
+        for key, ref in tuple(self._subscribers.items()):
             layer = ref()
-            if layer is None:
+            if layer is None or (isinstance(layer, QObject) and sip.isdeleted(layer)):
+                self._subscribers.pop(key, None)
+                self.unregister_geometry(key)
                 continue
-            alive.append(ref)
+            yield layer
+
+    def notify(self, layers=None) -> None:
+        for layer in self._live_layers() if layers is None else layers:
             try:
                 # perf: O1 有预缩放成品才带第二参下发，保持旧单参调用形态
                 # 兼容（空 map/None 等效，订阅者无几何注册时不新增签名负担）
@@ -302,10 +310,9 @@ class AnimationSource:
                     layer.on_animation_frame(self.current)
             except RuntimeError:
                 continue  # C++ 对象已销毁
-        self._subscribers = alive
 
     def has_subscribers(self) -> bool:
-        return any(r() is not None for r in self._subscribers)
+        return next(self._live_layers(), None) is not None
 
 class AnimationRegistry:
     """路径 → AnimationSource（同素材多区域共享解码）"""
@@ -383,19 +390,25 @@ class BackgroundClock(QObject):
         now_ms = int(time.monotonic() * 1000)
         alive: List[weakref.ref] = []
         any_visible = False
+        orphaned = False
         for ref in self._sources:
             src = ref()
             if src is None:
                 continue
             alive.append(ref)
-            if not src.has_subscribers():
-                continue
-            if not self._source_visible(src):
+            visible = [layer for layer in src._live_layers() if self._layer_visible(layer)]
+            if not visible:
+                orphaned |= not src._subscribers
                 continue
             any_visible = True
             if src.advance(now_ms):
-                src.notify()
+                src.notify(visible)
         self._sources = alive
+        if orphaned and AnimationRegistry._instance is not None:
+            AnimationRegistry._instance.prune()
+        if not alive:
+            self._timer.stop()
+            return
         # 三档节流：可见且有焦点→全速抽帧；可见但失焦→降帧 3 倍（壁纸是
         # 氛围层，用户在看别的窗口时没必要全速重绘整窗）；全部不可见→降频
         # 轮询。不停表：停表后无人能重启，窗口恢复可见后动画就永远卡在
@@ -422,26 +435,11 @@ class BackgroundClock(QObject):
             return True  # 查询失败按有焦点处理，宁可全速不可卡帧
 
     @staticmethod
-    def _source_visible(source: AnimationSource) -> bool:
-        """源是否有可见订阅者（隐藏窗口/最小化的区域不推进解码）"""
-        for ref in source._subscribers:
-            layer = ref()
-            if layer is None:
-                continue
-            try:
-                if not layer.isVisible():
-                    continue
-            except RuntimeError:
-                continue
-            win = layer.window()
-            if win is not None:
-                try:
-                    if win.isMinimized():
-                        continue
-                except RuntimeError:
-                    pass
-            return True
-        return False
+    def _layer_visible(layer) -> bool:
+        if not layer.isVisible():
+            return False
+        win = layer.window()
+        return win is None or not win.isMinimized()
 
     def stop(self) -> None:
         self._timer.stop()
@@ -452,4 +450,6 @@ def reset_for_tests() -> None:
     if clock is not None:
         clock.stop()
         clock._sources = []
-    AnimationRegistry._instance = None
+    if AnimationRegistry._instance is not None:
+        AnimationRegistry._instance.clear()
+        AnimationRegistry._instance = None

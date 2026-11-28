@@ -148,11 +148,10 @@ class _PluginListRow(QWidget):
         self._apply_style()
 
     def _apply_style(self) -> None:
-        bg = Colors.TAB_ACTIVE_BG if self._selected else "transparent"
-        accent = Colors.TEXT_ACCENT if self._selected else "transparent"
+        bg = Colors.HOVER_BG_STRONG if self._selected else "transparent"
         self.setStyleSheet(
             f"#pluginListRow {{ background: {bg}; border: 1px solid transparent;"
-            f" border-left: 3px solid {accent}; border-radius: 6px; }}"
+            " border-radius: 6px; }"
             f"#pluginListRow:hover {{ background: {Colors.HOVER_BG}; }}"
             f"#pluginListRow:focus {{ border-color: {Colors.TEXT_ACCENT}; }}"
         )
@@ -170,6 +169,7 @@ class _PluginListRow(QWidget):
         self._entry.state = state
         self._entry.missing = missing
         self._dot.setStyleSheet(f"background: {_state_color(self._entry)}; border-radius: 4px;")
+        self._dot.setVisible(state in ("missing", "unconfigured") or not self._entry.enabled)
 
         status = "已启用" if self._entry.enabled else "已停用"
         if state in ("missing", "unconfigured"):
@@ -388,8 +388,8 @@ class _PluginDetailView(QWidget):
         self._form: Optional[PluginConfigForm] = None
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(18, 6, 12, 10)
-        layout.setSpacing(14)
+        layout.setContentsMargins(24, 16, 18, 14)
+        layout.setSpacing(20)
 
         header = QHBoxLayout()
         header.setContentsMargins(0, 0, 0, 0)
@@ -832,6 +832,12 @@ class PluginSettingsPage(QWidget):
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
         self._size_sidebar()
+
+    def set_list_visible(self, visible: bool) -> None:
+        self._sidebar.setVisible(visible)
+
+    def list_hidden(self) -> bool:
+        return self._sidebar.isHidden()
 
     def _size_sidebar(self) -> None:
         # 数量、组件名与字体都会变化；为文字与下拉箭头分别留出空间。

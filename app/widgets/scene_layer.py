@@ -390,13 +390,7 @@ class SceneLayer(QWidget):
         # 正常路径（宿主主题/背景/动画切换）走 clear() → _clear() → unsubscribe()，
         # 实测 10 次交替切换后 sources 稳态归零、预解码线程回落到基线。
         #
-        # ⚠️ 已知缺口（Qt 直接析构 SceneLayer，不走 clear() 的路径）：
-        # 会残留 1 个 AnimationSource + 1 个预解码 daemon 线程，且 **prune() 无法回收**。
-        # 原因：has_subscribers() 用 weakref 判活，C++ 对象销毁后 Python wrapper 仍可能
-        # 存活，r() is not None 恒为 True → prune 判据不成立。需等 wrapper 被 GC 后
-        # 再 prune 才生效。
-        # 修法（未实施）：has_subscribers() 里加 sip.isdeleted(r()) 判据，
-        # 详见 tools/perf/NEXT_ROUND_PRIORITIES.md。
+        # Qt 直接析构时由背景时钟在下一拍检查 sip.isdeleted 并回收源。
         #
         # 注意 scene_pixmap_cache.release 那个 destroyed 直连是安全的——零参数 bound
         # method，PyQt 丢弃信号实参，不做任何对象求值。
@@ -649,7 +643,7 @@ class SceneLayer(QWidget):
         if self._anim_source is not None:
             geo = self._content_geometry()
             self._anim_source.register_geometry(
-                id(view), (geo[2], geo[3], view._fit, view._position)
+                id(self), (geo[2], geo[3], view._fit, view._position)
             )
 
     def on_animation_frame(self, image, pending=None) -> None:
@@ -671,7 +665,7 @@ class SceneLayer(QWidget):
             if self._anim_source is not None:
                 self._anim_source.unsubscribe(self)
                 # perf: O1 注销解码线程的预缩放几何（快照只持数值不持引用）
-                self._anim_source.unregister_geometry(id(self._anim_view))
+                self._anim_source.unregister_geometry(id(self))
                 self._anim_source = None
             self._anim_view.hide()
             self._anim_view.deleteLater()
@@ -744,7 +738,7 @@ class SceneLayer(QWidget):
             # perf: O1 几何定版即登记预缩放目标（resize/configure 变更经此覆盖）
             if self._anim_source is not None:
                 self._anim_source.register_geometry(
-                    id(self._anim_view),
+                    id(self),
                     (w, h, self._anim_view._fit, self._anim_view._position),
                 )
         # 几何变化后 blur 烘焙结果尺寸不再匹配 → 防抖重烘

@@ -1546,7 +1546,7 @@ class PluginManager:
         if not self.is_component_enabled(name, "ui"):
             logger.debug(f"[PluginManager] ui 组件已停用，跳过加载: {name}")
             return
-        UIPluginRegistry.get_instance().load_plugin(name, plugin.path)
+        UIPluginRegistry.get_instance().ensure_plugin_loaded(name, plugin.path)
 
     def _unload_plugin_ui(self, name: str):
         """卸载指定插件的 UI 组件"""

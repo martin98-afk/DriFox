@@ -178,6 +178,14 @@ def test_settings_search_opens_matching_page(env, qapp):
     card._nav_search.returnPressed.emit()
     assert card._current_tab == "common"
     assert card._page_title.text() == "通用"
+    card._refresh_appearance_from_config()
+    for key in ("provider", "common"):
+        card._set_active_page(key)
+        qapp.processEvents()
+        for tab in ("provider", "common"):
+            button = card._nav_buttons[tab]
+            button.ensurePolished()
+            assert button.font().bold() == (tab == key)
     card._nav_search.setText("不存在的设置")
     assert not card._nav_empty.isHidden()
     card._nav_search.clear()

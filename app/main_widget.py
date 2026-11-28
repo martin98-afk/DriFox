@@ -4429,7 +4429,7 @@ class OpenAIChatToolWindow(ToolWindow):
         try:
             from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
 
-            ok = UIPluginRegistry.get_instance().load_plugin(name, path)
+            ok = UIPluginRegistry.get_instance().ensure_plugin_loaded(name, path)
         except Exception as e:
             logger.error(f"[MainWidget] UI 插件 {name} 装载失败: {e}")
         cost_ms = (time.perf_counter() - t0) * 1000

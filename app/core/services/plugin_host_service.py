@@ -1918,9 +1918,7 @@ class PluginHostService(QObject):
                 try:
                     from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
 
-                    UIPluginRegistry.get_instance().load_plugin(plugin_name, plugin.path)
-                    result["ui"] = True
-                    logger.info(f"[PluginHost] Plugin '{plugin_name}' UI 组件已加载")
+                    result["ui"] = UIPluginRegistry.get_instance().ensure_plugin_loaded(plugin_name, plugin.path)
                 except Exception as e:
                     logger.error(f"[PluginHost] Plugin '{plugin_name}' UI 加载失败: {e}")
 

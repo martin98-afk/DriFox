@@ -3999,6 +3999,15 @@ class UIPluginRegistry:
                     continue
 
     @_serialized
+    def ensure_plugin_loaded(self, plugin_name: str, plugin_path) -> bool:
+        """普通启用复用已成功注册的同目录插件；显式热重载仍重新执行模块。"""
+        if plugin_path is not None and self.is_loaded(plugin_name) and plugin_name in self._ui_signatures:
+            loaded_path = self._plugin_paths.get(plugin_name)
+            if loaded_path and Path(loaded_path) == plugin_path and (plugin_path / "ui" / "__init__.py").is_file():
+                return True
+        return self.load_plugin(plugin_name, plugin_path)
+
+    @_serialized
     def load_plugin(self, plugin_name: str, plugin_path) -> bool:
         """加载插件的 ui 组件
 
@@ -4023,10 +4032,7 @@ class UIPluginRegistry:
             return False
         # 记录插件根路径：fence 渲染器的 assets 以插件根为基准声明，
         # 宿主注入时要按此拼成 file:// URL（见 resolve_fence_assets）。
-        try:
-            self._plugin_paths[str(plugin_name)] = str(plugin_path)
-        except Exception:
-            pass
+        old_path = self._plugin_paths.get(plugin_name)
 
         # 先卸载旧版本。卸载前备份旧模块引用：register 失败时回滚恢复旧注册
         # （避免插件陷入「已卸载未加载」且 result[ui]=False 导致窗口零刷新的黑洞态）。
@@ -4110,14 +4116,12 @@ class UIPluginRegistry:
                 )
                 return False
             module = importlib.util.module_from_spec(spec)
+            self._plugin_paths[plugin_name] = str(plugin_path)
             sys.modules[module_name] = module
             spec.loader.exec_module(module)
             register_func = getattr(module, "register_ui", None)
             if register_func is None:
-                logger.error(
-                    f"[UIPluginRegistry] Plugin {plugin_name} ui/__init__.py missing register_ui(registry) function"
-                )
-                return False
+                raise ValueError(f"Plugin {plugin_name} ui/__init__.py missing register_ui(registry) function")
             # 刷新欢迎卡片：只要该插件注册过/注册着 welcome tab 就失效缓存——
             # 仅改渲染函数实现（tab 集合不变）也须刷新已打开窗口的快照，
             # 否则「热重载前打开的标签页」永远显示旧 tab 内容。
@@ -4148,6 +4152,9 @@ class UIPluginRegistry:
             return True
         except Exception as e:
             logger.error(f"[UIPluginRegistry] Failed to load UI for {plugin_name}: {e}")
+            # exec/register 中途失败也可能已建定时器、子模块和注册项。
+            if module_name in _sys_backup.modules:
+                self.unload_plugin(plugin_name)
             # P4：回滚——恢复旧模块与旧注册，保持插件上一版本状态可用。
             # 目标场景：插件文件短暂语法错误时已加载的工作树页等 UI 不消失，
             # 修好后下次重载自动恢复。回滚失败时也至少保 _loaded_plugins + sys.modules，
@@ -4157,6 +4164,8 @@ class UIPluginRegistry:
                     import sys as _sys_rollback
 
                     _sys_rollback.modules[module_name] = old_module
+                    if old_path is not None:
+                        self._plugin_paths[plugin_name] = old_path
                     reg = getattr(old_module, "register_ui", None)
                     if callable(reg):
                         reg(self)
@@ -4720,7 +4729,7 @@ class UIPluginRegistry:
         """
         count = 0
         for name, path in plugin_dirs:
-            if self.load_plugin(name, path):
+            if self.ensure_plugin_loaded(name, path):
                 count += 1
         return count
 
