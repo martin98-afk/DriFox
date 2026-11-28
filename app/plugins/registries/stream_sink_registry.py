@@ -18,6 +18,8 @@ _DEFAULT_ID = "openai_chat"
 class StreamSinkRegistry:
     """流式接收器注册表：register 覆盖同名；resolve 按 id 取，无该 id 回退 openai_chat"""
 
+    reload_fields = ("_sinks",)
+
     def __init__(self) -> None:
         self._sinks: Dict[str, Tuple[Any, str]] = {}  # id -> (sink, source)
         self._lock = threading.Lock()

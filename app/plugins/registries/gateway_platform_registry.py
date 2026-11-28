@@ -19,6 +19,8 @@ from app.plugins.contracts.gateway_platform import GatewayPlatformDef
 class GatewayPlatformRegistry:
     """进程级单例：按 platform_id 存 GatewayPlatformDef，list 按 ui_order 升序"""
 
+    reload_fields = ("_defs",)
+
     def __init__(self) -> None:
         self._defs: Dict[str, Tuple[GatewayPlatformDef, str]] = {}
         self._lock = threading.Lock()

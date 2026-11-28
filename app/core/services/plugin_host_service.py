@@ -1838,10 +1838,18 @@ class PluginHostService(QObject):
             # 不清理则 hooks/agents/commands/lsp 沿用旧注册（旧模块闭包），
             # 重装后仍能被旧代码执行，且新代码的 hooks 可能被去重跳过。
             if legacy_components:
+                from app.plugins.loaders.runtime_component_loader import _LOADER_SPECS
+
+                # 仍存在的运行时组件自行事务替换；预先卸载会丢掉失败时可用的旧版。
+                legacy_components = {
+                    key: present for key, present in legacy_components.items()
+                    if key not in _LOADER_SPECS or not comps.get(key)
+                }
                 _scratch = {k: (0 if k == "agents" else False) for k in _KC}
-                self._cleanup_removed_plugin_components(
-                    plugin_name, legacy_components, _scratch, tuple(_KC), manifest=legacy_manifest
-                )
+                if any(legacy_components.values()):
+                    self._cleanup_removed_plugin_components(
+                        plugin_name, legacy_components, _scratch, tuple(_KC), manifest=legacy_manifest
+                    )
                 logger.info(f"[PluginHost] 新插件「{plugin_name}」存在旧注册，已先执行完整卸载")
             logger.info(f"[PluginHost] 检测到新插件「{plugin_name}」，执行增量加载")
 
@@ -2382,6 +2390,8 @@ class PluginHostService(QObject):
             # 在 rescan（拿到最新 manifest）之后、组件分派之前统一清除，
             # 防旧模块对象滞留导致热更新代码不生效。
             plugin_rescanned = pm.get_plugin(plugin_name)
+            if plugin_before and plugin_rescanned and getattr(plugin_before, "path", None) != getattr(plugin_rescanned, "path", None):
+                component = "__manifest__"
             declared_prefixes = (getattr(plugin_rescanned, "manifest", None) or {}).get("module_prefixes") or []
             purge_prefixes = self._resolve_purge_prefixes(plugin_name, declared_prefixes)
             if purge_prefixes:

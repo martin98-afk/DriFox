@@ -58,6 +58,7 @@ class TestRescanInvalidatesMcpCache:
         fake_info.plugin_type = "user"
         pm._plugins["keep"] = fake_info
         new_info = MagicMock()
+        new_info.name = "keep"
         with patch.object(pm, "_scan_one_plugin_dir", return_value=new_info):
             pm.rescan_plugin("keep")
         assert pm._plugins["keep"] is new_info

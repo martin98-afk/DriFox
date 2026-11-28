@@ -59,7 +59,7 @@ from app.utils.safe_mode import is_safe_mode as _safe_mode_active
 _PLUGIN_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 
 # [T26/H2] 插件发现缓存 schema 版本：缓存结构变化时递增（整体失效）
-_DISCOVERY_CACHE_SCHEMA_VERSION = 1
+_DISCOVERY_CACHE_SCHEMA_VERSION = 2
 
 # [T25] config_schema 解析结果缓存：key = (plugin_name, manifest_mtime_ns, size)，
 # value = parse_config_schema() 的返回值（None 也缓存，表示"无合法 schema"）。
@@ -423,6 +423,7 @@ class PluginManager:
 
     def __init__(self):
         self._plugins: Dict[str, PluginInfo] = {}
+        self._discovery_candidates: dict[str, dict[str, PluginInfo]] = {}
         self._initialized = False
         self._app_data_dir: Optional[Path] = None
         # 安全模式：托盘「安全模式重启」注入 --safe-mode，只加载系统插件
@@ -505,15 +506,11 @@ class PluginManager:
             self._schedule_preload_plugin_tools()
             return
 
-        # 1. 扫描系统插件
-        self._discover_system_plugins()
-
-        # 2. 扫描 Claude Code 插件（优先级介于系统和用户之间）
-        self._discover_claude_plugins()
-
-        # 3. 扫描用户插件（最高优先级，可覆盖前两者）
-        if app_data_dir:
-            self._discover_user_plugins(app_data_dir)
+        selected, _ = self._scan_selected_plugins()
+        self._plugins.update(selected)
+        self._apply_deps_conflict_gate(self._plugins)
+        for plugin in self._plugins.values():
+            self._activate_discovery(plugin)
 
         logger.info(f"[PluginManager] Loaded {len(self._plugins)} plugins: {', '.join(self._plugins.keys())}")
         self._initialized = True
@@ -755,6 +752,7 @@ class PluginManager:
     def reset(self):
         """重置（主要用于测试）"""
         self._plugins.clear()
+        self._discovery_candidates = {}
         self._initialized = False
 
     def is_initialized(self) -> bool:
@@ -934,10 +932,9 @@ class PluginManager:
             return
         try:
             groups: Dict[str, list] = {"system": [], "claude": [], "user": []}
-            for p in self._plugins.values():
-                bucket = groups.get(p.plugin_type)
-                if bucket is not None:
-                    bucket.append(self._serialize_plugin_info(p))
+            for group in self._discovery_candidates.values():
+                for plugin in group.values():
+                    groups[plugin.plugin_type].append(self._serialize_plugin_info(plugin))
             payload = {"key": self._discovery_cache_key(), "groups": groups}
             cache_file = self._discovery_cache_path()
             cache_file.parent.mkdir(parents=True, exist_ok=True)
@@ -983,25 +980,17 @@ class PluginManager:
             if not rebuilt["system"]:
                 return False
             # 合并重跑（与 rescan 同源语义，[T26]）
-            allow_user_override = True
-            try:
-                from app.utils.config import Settings
-
-                allow_user_override = bool(Settings.get_instance().allow_user_override.value)
-            except Exception:
-                pass
+            self._discovery_candidates = rebuilt
             new_plugins, _changed = self._merge_discovered(
-                rebuilt["system"], rebuilt["claude"], rebuilt["user"], allow_user_override
+                rebuilt["system"], rebuilt["claude"], rebuilt["user"], self._allow_user_override()
             )
-            self._plugins = new_plugins
+            self._plugins.update(new_plugins)
             # L2：先跑依赖冲突裁决，replay 注入循环会自然跳过被裁为让出方的插件
             self._apply_deps_conflict_gate(new_plugins)
             # 副作用重放（幂等）：deps 注入仅门禁通过插件（G3 对齐）；config_schema 注册
             _probe("p2.replay.start")
             for p in self._plugins.values():
-                if not p.load_blocked:
-                    ensure_deps_on_path(p.path)
-                self._register_config_schema(p.name, p.manifest, self._manifest_file_for(p.path))
+                self._activate_discovery(p)
             _probe("p2.replay.end")
             logger.info(
                 f"[PluginManager] 插件发现命中缓存 from cache: {len(self._plugins)} 个插件（跳过全扫）"
@@ -1020,6 +1009,35 @@ class PluginManager:
                 logger.debug("[PluginManager] 发现缓存已作废（文件已删除）")
         except Exception as e:
             logger.warning(f"[PluginManager] 发现缓存删除失败（忽略）: {e}")
+
+    @staticmethod
+    def _allow_user_override() -> bool:
+        try:
+            from app.utils.config import Settings
+
+            return bool(Settings.get_instance().allow_user_override.value)
+        except Exception:
+            return True
+
+    def _discovery_roots(self):
+        yield "system", self._SYSTEM_PLUGIN_DIR
+        if not self._safe_mode:
+            yield "claude", self._CLAUDE_USER_SKILLS_DIR
+            yield "claude", self._CLAUDE_PLUGIN_CACHE_DIR
+            if self._app_data_dir:
+                yield "user", self._app_data_dir / self._USER_PLUGIN_DIR_NAME
+
+    def _scan_selected_plugins(self):
+        groups: dict[str, dict[str, PluginInfo]] = {"system": {}, "claude": {}, "user": {}}
+        for kind, root in self._discovery_roots():
+            groups[kind].update((p.name, p) for p in self._scan_plugins(root, kind))
+        self._discovery_candidates = groups
+        return self._merge_discovered(groups["system"], groups["claude"], groups["user"], self._allow_user_override())
+
+    def _activate_discovery(self, plugin: PluginInfo):
+        if not plugin.load_blocked:
+            ensure_deps_on_path(plugin.path)
+        self._register_config_schema(plugin.name, plugin.manifest, self._manifest_file_for(plugin.path))
 
     def _merge_discovered(
         self,
@@ -1043,9 +1061,11 @@ class PluginManager:
         changed: List[PluginInfo] = []
         # 先加系统插件
         for name, p in current_system.items():
+            p.overridden_by = ""
             new_plugins[name] = p
         # Claude 插件同名覆盖系统（同名覆盖显性化：warning + overridden_by 标记）
         for name, p in current_claude.items():
+            p.overridden_by = ""
             if name in new_plugins:
                 overridden = new_plugins[name]
                 logger.warning(
@@ -1054,11 +1074,10 @@ class PluginManager:
                 )
                 p.overridden_by = overridden.plugin_type
                 changed.append(p)
-                # 顺手修正：写回 _plugins，覆盖后的新实例立即生效于运行时查询
-                self._plugins[name] = p
             new_plugins[name] = p
         # 用户插件同名覆盖前两者（最高优先级）
         for name, p in current_user.items():
+            p.overridden_by = ""
             if name in new_plugins:
                 if not allow_user_override:
                     logger.warning(
@@ -1073,8 +1092,6 @@ class PluginManager:
                 )
                 p.overridden_by = overridden.plugin_type
                 changed.append(p)
-                # 顺手修正：写回 _plugins，覆盖后的新实例立即生效于运行时查询
-                self._plugins[name] = p
             new_plugins[name] = p
         return new_plugins, changed
 
@@ -1167,38 +1184,12 @@ class PluginManager:
 
         result: Dict[str, list] = {"added": [], "removed": [], "changed": []}
         old_names = set(self._plugins.keys())
-
-
-        # 1. 重新扫描系统插件
-        system_plugins = self._scan_plugins(self._SYSTEM_PLUGIN_DIR, "system")
-        current_system = {p.name: p for p in system_plugins}
-
-        # 2. 重新扫描用户插件（安全模式不加载，热重载同样不得引入）
-        user_plugins = []
-        if self._app_data_dir and not self._safe_mode:
-            user_plugin_dir = self._app_data_dir / self._USER_PLUGIN_DIR_NAME
-            user_plugins = self._scan_plugins(user_plugin_dir, "user")
-        current_user = {p.name: p for p in user_plugins}
-
-        # 2.5 重新扫描 Claude Code 插件
-        claude_plugins = []
-        if not self._safe_mode:
-            for claude_dir in (self._CLAUDE_USER_SKILLS_DIR, self._CLAUDE_PLUGIN_CACHE_DIR):
-                claude_plugins.extend(self._scan_plugins(claude_dir, "claude"))
-        current_claude = {p.name: p for p in claude_plugins}
-
-        # 3. 优先级合并（公共函数：rescan 与发现缓存命中路径共用同一语义，[T26]）
-        # allow_user_override=false 时用户目录同名插件跳过，系统版生效
-        allow_user_override = True
-        try:
-            from app.utils.config import Settings
-
-            allow_user_override = bool(Settings.get_instance().allow_user_override.value)
-        except Exception:
-            pass
-        new_plugins, changed_list = self._merge_discovered(
-            current_system, current_claude, current_user, allow_user_override
-        )
+        old_plugins = self._plugins.copy()
+        new_plugins, _ = self._scan_selected_plugins()
+        changed_list = [
+            p for name, p in new_plugins.items()
+            if name in old_plugins and (p.path != old_plugins[name].path or p.manifest != old_plugins[name].manifest)
+        ]
         # L2：全量扫完后裁决跨插件依赖冲突（注入已在扫描阶段完成，此处撤销让出方）
         self._apply_deps_conflict_gate(new_plugins)
         result["changed"] = changed_list
@@ -1208,6 +1199,10 @@ class PluginManager:
         # 4. 检测新增和移除
         added_names = new_names - old_names
         removed_names = old_names - new_names
+
+        for plugin in new_plugins.values():
+            self._plugins[plugin.name] = plugin
+            self._activate_discovery(plugin)
 
         for name in added_names:
             result["added"].append(new_plugins[name])
@@ -1253,87 +1248,63 @@ class PluginManager:
             name: 插件名称。如果插件不存在且目录被删除，则静默返回。
         """
         old = self._plugins.get(name)
-        if not old:
-            # 新插件：在已知插件目录中搜索并注册
-            self._discover_and_register(name)
-            # 新插件可能带入 MCP 配置，失效缓存（否则列表/断连逻辑读到旧数据）
-            self.invalidate_mcp_cache()
-            # [T26] 热扫描作废发现缓存（内存态已变，缓存不再可信）
-            self._invalidate_discovery_cache()
-            return
-
-        plugin_dir = old.path
-        if not plugin_dir.exists():
+        selected = self._discover_and_register(name)
+        if old is not None and selected is None:
             self._unload_plugin_ui(name)
             self._unregister_config_schema(name)
             del self._plugins[name]
-            logger.info(f"[PluginManager] Plugin removed during rescan: {name}")
-            # 插件被移除，其 MCP 配置需从缓存中剔除
-            self.invalidate_mcp_cache()
-            # [T26] 热扫描作废发现缓存（内存态已变，缓存不再可信）
-            self._invalidate_discovery_cache()
-            return
-
-        # 只扫描这一个插件目录，不走全量遍历
-        new_info = self._scan_one_plugin_dir(plugin_dir, old.plugin_type)
-        if new_info:
-            self._plugins[name] = new_info
-            logger.debug(f"[PluginManager] Rescanned plugin: {name}")
-        else:
-            # manifest 已不存在
-            self._unload_plugin_ui(name)
-            self._unregister_config_schema(name)
-            del self._plugins[name]
-            logger.info(f"[PluginManager] Plugin removed during rescan (manifest gone): {name}")
-        # 无论更新还是移除，MCP 配置都可能变化，失效缓存
         self.invalidate_mcp_cache()
-        # [T26] 热扫描作废发现缓存
         self._invalidate_discovery_cache()
 
     def _discover_and_register(self, name: str) -> Optional[PluginInfo]:
-        """在已知插件目录中按名称搜索新插件，找到后扫描并注册到 _plugins
+        """对目标名称的各来源复用全量扫描的覆盖规则。"""
+        if not _normalize_plugin_name(name, ""):
+            return None
+        groups: dict[str, dict[str, PluginInfo]] = {"system": {}, "claude": {}, "user": {}}
+        old = self._plugins.get(name)
+        known = getattr(self, "_discovery_candidates", {})
+        paths = {}
+        for kind, root in self._discovery_roots():
+            previous = known.get(kind, {}).get(name)
+            if previous and previous.path.parent == root:
+                paths[previous.path] = kind
+            paths[root / name] = kind
+        if old and old.plugin_type in groups and (not self._safe_mode or old.plugin_type == "system"):
+            paths.setdefault(old.path, old.plugin_type)
+        for path, kind in paths.items():
+            if path.is_dir():
+                plugin = self._scan_one_plugin_dir(path, kind, activate=False)
+                if plugin is not None and plugin.name == name:
+                    groups[kind][name] = plugin
+        selected, _ = self._merge_discovered(
+            groups["system"], groups["claude"], groups["user"], self._allow_user_override()
+        )
+        plugin = selected.get(name)
+        if known:
+            for kind, group in groups.items():
+                known[kind].pop(name, None)
+                known[kind].update(group)
+        if old is not None and (plugin is None or old.path != plugin.path):
+            from app.plugins.deps_loader import remove_deps_from_path
 
-        搜索顺序：系统插件 → Claude 插件 → 用户插件（优先级同 rescan）。
-        找到第一个匹配目录即停止。
+            remove_deps_from_path(old.path)
+        if plugin is not None:
+            from app.plugins.deps_loader import resolve_pip_deps
 
-        Args:
-            name: 插件名称
-
-        Returns:
-            注册后的 PluginInfo，未找到返回 None
-        """
-        # 定义搜索目录及对应类型（按优先级从低到高）
-        search_dirs: List[tuple] = [
-            (self._SYSTEM_PLUGIN_DIR, "system"),
-        ]
-        # 安全模式只搜系统插件，热更新不得把用户/Claude 插件重新拉回来
-        if not self._safe_mode:
-            for d in (self._CLAUDE_USER_SKILLS_DIR, self._CLAUDE_PLUGIN_CACHE_DIR):
-                search_dirs.append((d, "claude"))
-            if self._app_data_dir:
-                search_dirs.append((self._app_data_dir / self._USER_PLUGIN_DIR_NAME, "user"))
-
-        for base_dir, plugin_type in search_dirs:
-            if not base_dir.exists():
-                continue
-            target = base_dir / name
-            if not target.is_dir():
-                continue
-            info = self._scan_one_plugin_dir(target, plugin_type)
-            if info is not None:
-                self._plugins[name] = info
-                # 同步 Settings 启用状态（新插件默认启用）
+            self._plugins[name] = plugin
+            old_specs = resolve_pip_deps(old.manifest) if old else []
+            new_specs = resolve_pip_deps(plugin.manifest)
+            if (old_specs or new_specs) and (
+                old_specs != new_specs or old is None or old.path != plugin.path
+                or _hard_gate_blocked(old) != _hard_gate_blocked(plugin) or old.version != plugin.version
+            ):
+                self._apply_deps_conflict_gate(self._plugins)
+            elif old is not None:
+                plugin.deps_conflict_reason = old.deps_conflict_reason
+            self._activate_discovery(plugin)
+            if old is None:
                 self._restore_enabled_from_settings()
-                logger.info(f"[PluginManager] 发现并注册新插件 '{name}' ({plugin_type})")
-                # [T26] 新插件注册 → 发现缓存作废
-                self._invalidate_discovery_cache()
-                return info
-            # 目录存在但没有 manifest（.drifox-plugin/plugin.json）
-            # 此时目录存在但插件格式不对，继续搜索其他目录
-            continue
-
-        # 循环结束未找到 → 注册未发生，无需同步 Settings
-        return None
+        return plugin
 
     # ============================================================
     # 启用/禁用
@@ -1730,103 +1701,16 @@ class PluginManager:
         每个子目录如果包含 .drifox-plugin/plugin.json，即视为一个插件。
         """
         discovered = []
-        # 启动期逐条 Discovered DEBUG 最多 90+ 条，每条一次管道写入（10 个 enqueue
-        # sink 串行 put），管道满时会阻塞主线程（2026-11-06 实测 500ms）。改为循环
-        # 后聚合一次 emit：内容不变，管道往返从 N 次降到 1 次。
-        discovered_log_lines: list[str] = []
-
-        if not base_dir.exists():
-            return discovered
-
-        for item in base_dir.iterdir():
-            if not item.is_dir():
-                continue
-            if item.name.startswith(".") or item.name.startswith("_"):
-                continue
-
-            # 支持两种清单格式：.drifox-plugin/plugin.json（优先）和 .claude-plugin/plugin.json
-            manifest_path = item / ".drifox-plugin" / "plugin.json"
-            manifest_format = "drifox"
-            if not manifest_path.exists():
-                manifest_path = item / ".claude-plugin" / "plugin.json"
-                manifest_format = "claude"
-            if not manifest_path.exists():
-                continue
-
-            try:
-                manifest, schema_warnings = _load_manifest_file(manifest_path)
-                if manifest is None:
+        if base_dir.is_dir():
+            for directory in base_dir.iterdir():
+                if directory.name.startswith((".", "_")):
                     continue
-                for _w in schema_warnings:
-                    logger.warning(f"[PluginManager] {_w}")
-                plugin_name = _normalize_plugin_name(manifest.get("name"), item.name)
-                if plugin_name is None:
-                    logger.error(
-                        f"[PluginManager] 插件名非法（须匹配 [A-Za-z0-9][A-Za-z0-9_.-]* 且"
-                        f"不含路径分隔符），跳过: {manifest_path} -> {manifest.get('name')!r}"
-                    )
-                    continue
-
-                # .claude-plugin 格式：补全 type（version 缺省已由 manifest_schema 契约层提供）
-                if manifest_format == "claude":
-                    manifest.setdefault("type", plugin_type)
-
-                # 自动检测组件：扫描目录结构（两种格式都做，保证新增目录能被识别）
-                # 探测规则见 _COMPONENT_PROBES，按 kernel.KNOWN_COMPONENTS 顺序遍历
-                # 组件以物理目录检测结果为准（覆盖 manifest 声明）：
-                # 防止 manifest 声明了实际不存在的组件（如 browser 声明 commands
-                # 但无 commands/ 目录）导致热更新触发全量命令重载
-                manifest["components"] = _detect_components(item)
-
-                # —— 平台兼容检查 + deps 统一注入（幂等，热重载 rescan 同样覆盖）——
-                compatible, reason = check_platform(manifest)
-                if not compatible:
-                    logger.warning(f"[PluginManager] {plugin_name} 平台不兼容: {reason}")
-
-                # —— P1 版本契约：min_host_version 与宿主版本比对 ——
-                from app.plugins.version_gate import check_api_version, check_host_version
-
-                ver_ok, ver_reason = check_host_version(manifest, plugin_name)
-                api_ok, api_reason = check_api_version(manifest, plugin_name)
-
-                # —— G3 安全对齐：deps 注入延后到门禁之后 ——
-                # deps 目录被 insert 到 sys.path[0]（优先于 stdlib），注入即等于
-                # 赋予该插件劫持全进程导入的能力。故平台不兼容 / 版本契约未通过的
-                # 插件一律不注入，避免"未启用的插件仍能污染宿主"。
-                if compatible and ver_ok and api_ok:
-                    ensure_deps_on_path(item)
-
-                # —— E1 声明式插件配置：解析 config_schema 并注册（含自动设置卡）——
-                self._register_config_schema(plugin_name, manifest, manifest_path)
-
-                discovered.append(
-                    PluginInfo(
-                        name=plugin_name,
-                        manifest=manifest,
-                        path=item,
-                        plugin_type=plugin_type,
-                        platform_compatible=compatible,
-                        version_compatible=ver_ok,
-                        version_reason=ver_reason,
-                        api_compatible=api_ok,
-                        api_reason=api_reason,
-                        manifest_warnings=schema_warnings,
-                    )
-                )
-                discovered_log_lines.append(
-                    f"{plugin_name} (type={plugin_type}, format={manifest_format}) at {item}"
-                )
-            except Exception as e:
-                logger.error(f"[PluginManager] Failed to load plugin at {item}: {e}")
-
-        if discovered_log_lines:
-            logger.debug(
-                f"[PluginManager] Discovered plugins ({len(discovered_log_lines)}):\n  "
-                + "\n  ".join(discovered_log_lines)
-            )
+                plugin = self._scan_one_plugin_dir(directory, plugin_type, activate=False)
+                if plugin is not None:
+                    discovered.append(plugin)
         return discovered
 
-    def _scan_one_plugin_dir(self, plugin_dir: Path, plugin_type: str) -> Optional[PluginInfo]:
+    def _scan_one_plugin_dir(self, plugin_dir: Path, plugin_type: str, *, activate: bool = True) -> Optional[PluginInfo]:
         """扫描单个插件目录，返回 PluginInfo
 
         与 _scan_plugins 的单目录版本，复用相同逻辑但不遍历兄弟目录。
@@ -1844,12 +1728,15 @@ class PluginManager:
             return None
 
         try:
-            manifest, schema_warnings = _load_manifest_file(manifest_path)
-            if manifest is None:
+            parsed = _load_manifest_file(manifest_path)
+            if parsed is None:
                 return None
+            manifest, schema_warnings = parsed
             for _w in schema_warnings:
                 logger.warning(f"[PluginManager] {_w}")
-            plugin_name = manifest.get("name", plugin_dir.name)
+            plugin_name = _normalize_plugin_name(manifest.get("name"), plugin_dir.name)
+            if plugin_name is None:
+                return None
 
             if manifest_format == "claude":
                 manifest.setdefault("type", plugin_type)
@@ -1874,15 +1761,6 @@ class PluginManager:
             ver_ok, ver_reason = check_host_version(manifest, plugin_name)
             api_ok, api_reason = check_api_version(manifest, plugin_name)
 
-            # —— G3 安全对齐：deps 注入延后到门禁之后（与 _scan_plugins 同版式）——
-            # 本函数在热路径（热重载/安装/更新）：先注入会让平台/版本不符的插件
-            # 依然拿到 sys.path 劫持能力，绕过门禁
-            if compatible and ver_ok and api_ok:
-                ensure_deps_on_path(plugin_dir)
-
-            # —— E1 声明式插件配置：解析 config_schema 并注册（含自动设置卡）——
-            self._register_config_schema(plugin_name, manifest, manifest_path)
-
             info = PluginInfo(
                 name=plugin_name,
                 manifest=manifest,
@@ -1895,9 +1773,8 @@ class PluginManager:
                 api_reason=api_reason,
                 manifest_warnings=schema_warnings,
             )
-            logger.debug(
-                f"[PluginManager] Rescanned plugin: {plugin_name} (type={plugin_type}, format={manifest_format})"
-            )
+            if activate:
+                self._activate_discovery(info)
             return info
         except Exception as e:
             logger.error(f"[PluginManager] Failed to rescan plugin at {plugin_dir}: {e}")
@@ -1932,7 +1809,7 @@ class PluginManager:
             st = manifest_path.stat()
         except OSError:
             return None
-        return (plugin_name, st.st_mtime_ns, st.st_size)
+        return (plugin_name, manifest_path, st.st_mtime_ns, st.st_size)
 
     def _register_config_schema(
         self, plugin_name: str, manifest: dict, manifest_path: Optional[Path] = None
@@ -2060,20 +1937,21 @@ class PluginManager:
         plugins = self._scan_plugins(self._SYSTEM_PLUGIN_DIR, "system")
         for p in plugins:
             self._plugins[p.name] = p
+            self._activate_discovery(p)
 
     def _discover_user_plugins(self, app_data_dir: Path):
         """扫描用户插件目录 ~/.drifox/plugins/（安全模式下跳过）"""
         if self._safe_mode:
             return
         user_plugin_dir = app_data_dir / self._USER_PLUGIN_DIR_NAME
-        plugins = self._scan_plugins(user_plugin_dir, "user")
-        for p in plugins:
-            # 用户插件同名覆盖系统插件（优先级高）
-            if p.name in self._plugins:
-                existing = self._plugins[p.name]
-                if existing.is_system:
-                    logger.info(f"[PluginManager] User plugin '{p.name}' overrides system plugin")
-            self._plugins[p.name] = p
+        for plugin in self._scan_plugins(user_plugin_dir, "user"):
+            previous = self._plugins.get(plugin.name)
+            if previous is not None and previous.plugin_type != "user" and not self._allow_user_override():
+                continue
+            if previous is not None:
+                plugin.overridden_by = previous.overridden_by if previous.plugin_type == "user" else previous.plugin_type
+            self._plugins[plugin.name] = plugin
+            self._activate_discovery(plugin)
 
     def _discover_claude_plugins(self):
         """扫描 Claude Code 插件目录
@@ -2097,6 +1975,7 @@ class PluginManager:
                     if existing.is_system:
                         logger.info(f"[PluginManager] Claude plugin '{p.name}' overrides system plugin")
                 self._plugins[p.name] = p
+                self._activate_discovery(p)
 
     # ============================================================
     # 插件查询

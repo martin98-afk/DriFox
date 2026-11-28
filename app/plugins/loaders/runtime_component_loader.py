@@ -8,12 +8,13 @@ user 根可覆盖 system 根同名实现（user > system，对齐 provider_loade
 
 from __future__ import annotations
 
+import copy
 import importlib.util
 import sys
 import threading
 import time
 from pathlib import Path
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from loguru import logger
 
@@ -21,6 +22,7 @@ from app.plugins.loaders._roots import (
     _ROOT_KIND_PRIORITY,
     _ROOT_KIND_SYSTEM,
     _ROOT_KIND_USER,
+    _is_selected_plugin_dir,
     _plugin_roots,
     _root_kind,
 )
@@ -142,7 +144,11 @@ class _RegistryProxy:
         # 释放 _occupied 条目（否则低等级根恢复扫描会被残留占用挡住）
         object.__setattr__(self, "_occupied_items", set())
 
-    def __getattr__(self, name):
+    def __getattr__(self, name: str) -> Any:
+        if (self._component, name) in {
+            ("context_tiers", "register_tier"), ("budget_resolvers", "register_budget_resolver"),
+        }:
+            return self.register
         return getattr(self._registry, name)
 
     def register(self, item, source: str = "") -> None:
@@ -173,6 +179,13 @@ class _RegistryProxy:
         self._registry.register(item, source=self._source)
 
 
+def _same_registry_state(left, right) -> bool:
+    # 注册项可能是按值比较的 dataclass。换代必须按对象身份判定。
+    if isinstance(left, dict):
+        return left.keys() == right.keys() and all(value is right[key] for key, value in left.items())
+    return left == right
+
+
 class RuntimeComponentLoader:
     """一类运行时组件的扫描+注册+清理器（watcher 轮询复用 tools/providers 模式）"""
 
@@ -181,12 +194,15 @@ class RuntimeComponentLoader:
         comp_dir: str,
         registry,
         register_attr: str = "register",
-        unregister_attr: str = "unregister_source",
+        unregister_attr: Optional[str] = None,
     ):
         self._comp_dir = comp_dir
         self._registry = registry
         self._register_attr = register_attr
-        self._unregister_attr = unregister_attr
+        self._unregister_attr = unregister_attr or {
+            "context_tiers": "unregister_tiers",
+            "budget_resolvers": "unregister_resolvers",
+        }.get(comp_dir, "unregister_source")
         self._occupied: Dict[str, str] = {}
         self._sources: Set[str] = set()
         self._lock = threading.Lock()
@@ -199,6 +215,7 @@ class RuntimeComponentLoader:
         # scan_roots 整体互斥：防并发 scan 双重 unregister / 重复注册
         # （对齐 ProviderWatcher.scan_now 的 _scan_lock 模式）
         self._scan_lock = threading.Lock()
+        self._module_journal: Optional[dict] = None
 
     def scan_roots(self, roots: Optional[List[Path]] = None) -> Set[str]:
         """全量重扫（幂等，整体持锁）：先注销 loader 记录过的 plugin:* 来源，再按 root 顺序注册。
@@ -224,7 +241,7 @@ class RuntimeComponentLoader:
                 if not root.is_dir():
                     continue
                 for plugin_dir in sorted(root.iterdir()):
-                    if not plugin_dir.is_dir():
+                    if not plugin_dir.is_dir() or not _is_selected_plugin_dir(plugin_dir):
                         continue
                     comp = plugin_dir / self._comp_dir
                     if not comp.is_dir():
@@ -247,7 +264,7 @@ class RuntimeComponentLoader:
                             loaded.add(plugin_dir.name)
             return loaded
 
-    def _rescan_roots_below(self, rank: int) -> None:
+    def _rescan_roots_below(self, rank: int, skip_plugin: str = "") -> None:
         """覆盖恢复：重扫比目标根更低等级的所有根（被覆盖方），补注册被覆盖组件
 
         仅重扫低等级根（如 user 插件卸载后重扫 system 根），其模块的 register
@@ -261,6 +278,8 @@ class RuntimeComponentLoader:
             if not root.is_dir():
                 continue
             for plugin_dir in sorted(root.iterdir()):
+                if plugin_dir.name == skip_plugin or not _is_selected_plugin_dir(plugin_dir):
+                    continue
                 comp = plugin_dir / self._comp_dir
                 if not comp.is_dir():
                     continue
@@ -325,82 +344,76 @@ class RuntimeComponentLoader:
             logger.debug(f"[RuntimeLoader] 已清理模块 {len(removed)} 个: {self._comp_dir}/{plugin_name}")
         return len(removed)
 
-    def reload_plugin(self, plugin_name: str) -> None:
-        """精准重载单个插件的运行时组件（安装/更新/启用路径），不波及他插件
-
-        语义：注销该插件旧组件 → 恢复被其覆盖的低等级根同名组件 → 重新注册
-        该插件当前模块（高等级根再次覆盖）→ 最终状态与全量重扫一致。
-
-        🛡️ 失败回滚：重注册全部失败（如新代码 import 错误）且注销前确有组件时，
-        回滚到旧模块——注册表空态会让所有对话请求撞死在 resolve 报错上，
-        旧组件可用性优于空态（半新半旧优于全无）。回滚仍失败则保留空态并 error。
-        """
+    def reload_plugin(self, plugin_name: str) -> bool:
+        """在私有注册表中执行整组 register，成功后在读者共用的锁内发布。"""
         with self._scan_lock:
-            # 先捕获来源等级（_unload_source 会清除 _source_kind 记录）
-            removed_rank = _ROOT_KIND_PRIORITY.get(self._source_kind.get(f"plugin:{plugin_name}", "system"), 0)
-            removed_items = self._occupied_by_source.get(f"plugin:{plugin_name}", set())
-            had_items = bool(removed_items)
-            old_mod_names = [
-                m for m in sys.modules if m.startswith(f"drifox_rt_{self._comp_dir}_{plugin_name}_")
-            ]
-            removed_items = self._unload_source(plugin_name)
-            if removed_items:
-                logger.info(f"[RuntimeLoader] 重载前注销插件组件: {plugin_name}（{removed_items} 项）")
-            # 跨根覆盖恢复：仅重扫比目标根更低等级的根（被覆盖方）
-            self._rescan_roots_below(removed_rank)
-            # 重注册该插件当前模块（enabled 过滤与 scan_roots 一致）
-            if not _is_plugin_enabled(plugin_name):
-                logger.info(f"[RuntimeLoader] 跳过已禁用插件的组件: {plugin_name}")
-                return
-            # D9：组件整类被停用 → 只注销不重注册（与 scan_roots 过滤一致）
-            if not _is_component_enabled(plugin_name, self._comp_dir):
-                logger.info(f"[RuntimeLoader] 跳过已停用组件的重载: {plugin_name}:{self._comp_dir}")
-                return
-            # P1/P2：版本/平台门禁——load_blocked 插件不重注册其运行时组件
-            if _is_plugin_load_blocked(plugin_name):
-                logger.warning(
-                    f"[RuntimeLoader] 跳过被门禁拦截插件的组件重载: {plugin_name}:{self._comp_dir}"
-                )
-                return
-            roots = self._scan_roots_cache or _plugin_roots()
-            loaded_any = False
-            for root in roots:
-                if not (root / plugin_name).is_dir():
-                    continue
-                comp = root / plugin_name / self._comp_dir
-                if not comp.is_dir():
-                    continue
-                for py in sorted(comp.glob("*.py")):
-                    if py.name.startswith("_"):
-                        continue
-                    if self._load_module(py, plugin_name, _root_kind(root)):
-                        loaded_any = True
-            # 🛡️ 失败回滚：新模块全炸且之前有组件 → 旧模块重新 exec 注册
-            if not loaded_any and had_items and old_mod_names:
-                logger.warning(f"[RuntimeLoader] {plugin_name}:{self._comp_dir} 重载失败，回滚到旧模块")
-                for mod_name in old_mod_names:
-                    mod = sys.modules.get(mod_name)
-                    register = getattr(mod, "register", None) if mod is not None else None
-                    if not callable(register):
-                        continue
-                    try:
-                        proxy = _RegistryProxy(
-                            self._registry, plugin_name, _ROOT_KIND_PRIORITY and "system", self._occupied,
-                            self._lock, component=self._comp_dir,
-                        )
-                        register(proxy)
-                        with self._lock:
-                            self._sources.add(f"plugin:{plugin_name}")
-                            self._occupied_by_source.setdefault(f"plugin:{plugin_name}", set()).update(
-                                proxy._occupied_items
-                            )
-                            self._source_kind[f"plugin:{plugin_name}"] = "system"
-                        logger.info(f"[RuntimeLoader] 回滚成功: {plugin_name}:{self._comp_dir}")
-                    except Exception as rollback_exc:
-                        logger.error(f"[RuntimeLoader] 回滚失败 {mod_name}: {rollback_exc}")
+            registry = self._registry
+            fields = registry.reload_fields
+            with registry._lock:
+                before = {key: copy.copy(getattr(registry, key)) for key in fields}
+                staged_registry = copy.copy(registry)
+                staged_registry._lock = threading.Lock()
+                for key, value in before.items():
+                    setattr(staged_registry, key, copy.copy(value))
+
+            staged = RuntimeComponentLoader(self._comp_dir, staged_registry, self._register_attr, self._unregister_attr)
+            staged._scan_roots_cache = self._scan_roots_cache
+            staged._sources = self._sources.copy()
+            staged._source_kind = self._source_kind.copy()
+            staged._occupied = self._occupied.copy()
+            staged._occupied_by_source = {s: ids.copy() for s, ids in self._occupied_by_source.items()}
+            staged._module_journal = {}
+            try:
+                if not staged._reload_into_registry(plugin_name):
+                    return False
+                # 共享表的另一组件可能同时重载。只发布本次变更的字段。
+                changed = [key for key in fields if not _same_registry_state(getattr(staged_registry, key), before[key])]
+                with registry._lock:
+                    if any(not _same_registry_state(getattr(registry, key), before[key]) for key in changed):
+                        logger.warning(f"[RuntimeLoader] 注册表已变化，保留当前版本: {plugin_name}")
+                        return False
+                    for key in changed:
+                        setattr(registry, key, getattr(staged_registry, key))
+                self._sources = staged._sources
+                self._source_kind = staged._source_kind
+                self._occupied = staged._occupied
+                self._occupied_by_source = staged._occupied_by_source
+                staged._module_journal.clear()
+                return True
+            finally:
+                for name, previous in staged._module_journal.items():
+                    if previous is None:
+                        sys.modules.pop(name, None)
+                    else:
+                        sys.modules[name] = previous
+
+    def _reload_into_registry(self, plugin_name: str) -> bool:
+        assert self._module_journal is not None
+        source = f"plugin:{plugin_name}"
+        removed_rank = _ROOT_KIND_PRIORITY.get(self._source_kind.get(source, "system"), 0)
+        self._unload_source(plugin_name)
+        self._rescan_roots_below(removed_rank, skip_plugin=plugin_name)
+        prefix = f"drifox_rt_{self._comp_dir}_{plugin_name}_"
+        for name, module in sys.modules.copy().items():
+            if name.startswith(prefix) and Path(getattr(module, "__file__", "") or "").parent.parent.name == plugin_name:
+                self._module_journal[name] = module
+                sys.modules.pop(name, None)
+        if (not _is_plugin_enabled(plugin_name) or not _is_component_enabled(plugin_name, self._comp_dir)
+                or _is_plugin_load_blocked(plugin_name)):
+            return True
+        for root in self._scan_roots_cache or _plugin_roots():
+            directory = root / plugin_name
+            if not _is_selected_plugin_dir(directory):
+                continue
+            for py in sorted((directory / self._comp_dir).glob("*.py")):
+                if not py.name.startswith("_") and not self._load_module(py, plugin_name, _root_kind(root)):
+                    return False
+        return True
 
     def _load_module(self, py: Path, plugin_name: str, kind: str) -> bool:
         mod_name = f"drifox_rt_{self._comp_dir}_{plugin_name}_{py.stem}"
+        if self._module_journal is not None:
+            self._module_journal.setdefault(mod_name, sys.modules.get(mod_name))
         # 防模块 GC 回收导致插件类定义丢失（对齐 provider_loader._load_module）
         sys.modules.pop(mod_name, None)
         # P5/P1b：exec 前 AST 聚合门（parse-once）——sys.modules 声明式放行判定
@@ -443,7 +456,7 @@ class RuntimeComponentLoader:
                 return False
             mod = importlib.util.module_from_spec(spec)
             sys.modules[mod_name] = mod
-            spec.loader.exec_module(mod)
+            exec(compile(source, str(py), "exec"), mod.__dict__)
             register = getattr(mod, "register", None)
             if not callable(register):
                 logger.warning(f"[RuntimeLoader] {py} 缺少 register(registry)，跳过")
@@ -498,9 +511,9 @@ class _RuntimeWatcher:
         """精准卸载单插件（透传 loader，不触发全量重扫）"""
         self._loader.unload_plugin(plugin_name)
 
-    def reload_plugin(self, plugin_name: str) -> None:
-        """精准重载单插件（透传 loader，不触发全量重扫）"""
-        self._loader.reload_plugin(plugin_name)
+    def reload_plugin(self, plugin_name: str) -> bool:
+        """精准重载单插件，并向宿主返回注册结果。"""
+        return self._loader.reload_plugin(plugin_name)
 
     def _loop(self) -> None:
         while not self._stop.wait(5.0):
@@ -757,119 +770,56 @@ def _persistent_loader(comp_dir: str) -> "RuntimeComponentLoader":
         return loader
 
 
-def ensure_model_adapter_watcher() -> Optional[_RuntimeWatcher]:
-    global _adapters_loader, _adapters_watcher
+def _ensure_runtime_watcher(component: str, watcher_attr: str) -> _RuntimeWatcher:
     with _watchers_lock:
-        if _adapters_watcher is not None:
-            return _adapters_watcher
-        _adapters_loader = _adapters_loader or _make_adapters_loader()
-        _adapters_watcher = _RuntimeWatcher(_adapters_loader, "model_adapters")
-        _adapters_watcher.scan_now()
-        return _adapters_watcher
+        loader = _persistent_loader(component)
+        watcher = globals()[watcher_attr]
+        if watcher is None or watcher._loader is not loader:
+            watcher = _RuntimeWatcher(loader, component)
+            if loader._scan_roots_cache is None:
+                watcher.scan_now()
+            globals()[watcher_attr] = watcher
+        return watcher
 
 
-def ensure_loop_policy_watcher() -> Optional[_RuntimeWatcher]:
-    global _loop_loader, _loop_watcher
-    with _watchers_lock:
-        if _loop_watcher is not None:
-            return _loop_watcher
-        _loop_loader = _loop_loader or _make_loop_loader()
-        _loop_watcher = _RuntimeWatcher(_loop_loader, "loop_policies")
-        _loop_watcher.scan_now()
-        return _loop_watcher
+def ensure_model_adapter_watcher() -> _RuntimeWatcher:
+    return _ensure_runtime_watcher("model_adapters", "_adapters_watcher")
 
 
-def ensure_hook_policy_watcher() -> Optional[_RuntimeWatcher]:
-    global _hook_loader, _hook_watcher
-    with _watchers_lock:
-        if _hook_watcher is not None:
-            return _hook_watcher
-        _hook_loader = _hook_loader or _make_hook_loader()
-        _hook_watcher = _RuntimeWatcher(_hook_loader, "hook_policies")
-        _hook_watcher.scan_now()
-        return _hook_watcher
+def ensure_loop_policy_watcher() -> _RuntimeWatcher:
+    return _ensure_runtime_watcher("loop_policies", "_loop_watcher")
 
 
-def ensure_storage_watcher() -> Optional[_RuntimeWatcher]:
-    global _storage_loader, _storage_watcher
-    with _watchers_lock:
-        if _storage_watcher is not None:
-            return _storage_watcher
-        _storage_loader = _storage_loader or _make_storage_loader()
-        _storage_watcher = _RuntimeWatcher(_storage_loader, "storages")
-        _storage_watcher.scan_now()
-        return _storage_watcher
+def ensure_hook_policy_watcher() -> _RuntimeWatcher:
+    return _ensure_runtime_watcher("hook_policies", "_hook_watcher")
 
 
-def ensure_serializer_watcher() -> Optional[_RuntimeWatcher]:
-    global _serializer_loader, _serializer_watcher
-    with _watchers_lock:
-        if _serializer_watcher is not None:
-            return _serializer_watcher
-        _serializer_loader = _serializer_loader or _make_serializer_loader()
-        _serializer_watcher = _RuntimeWatcher(_serializer_loader, "serializers")
-        _serializer_watcher.scan_now()
-        return _serializer_watcher
+def ensure_storage_watcher() -> _RuntimeWatcher:
+    return _ensure_runtime_watcher("storages", "_storage_watcher")
 
 
-def ensure_transport_watcher() -> Optional[_RuntimeWatcher]:
-    global _transport_loader, _transport_watcher
-    with _watchers_lock:
-        if _transport_watcher is not None:
-            return _transport_watcher
-        _transport_loader = _transport_loader or _make_transport_loader()
-        _transport_watcher = _RuntimeWatcher(_transport_loader, "transports")
-        _transport_watcher.scan_now()
-        return _transport_watcher
+def ensure_serializer_watcher() -> _RuntimeWatcher:
+    return _ensure_runtime_watcher("serializers", "_serializer_watcher")
 
 
-def ensure_stream_sink_watcher() -> Optional[_RuntimeWatcher]:
-    global _stream_sink_loader, _stream_sink_watcher
-    with _watchers_lock:
-        if _stream_sink_watcher is not None:
-            return _stream_sink_watcher
-        _stream_sink_loader = _stream_sink_loader or _make_stream_sink_loader()
-        _stream_sink_watcher = _RuntimeWatcher(_stream_sink_loader, "stream_sinks")
-        _stream_sink_watcher.scan_now()
-        return _stream_sink_watcher
+def ensure_transport_watcher() -> _RuntimeWatcher:
+    return _ensure_runtime_watcher("transports", "_transport_watcher")
 
 
-def ensure_gateway_watcher() -> Optional[_RuntimeWatcher]:
-    global _gateway_loader, _gateway_watcher
-    with _watchers_lock:
-        if _gateway_watcher is not None:
-            return _gateway_watcher
-        _gateway_loader = _gateway_loader or _make_gateway_loader()
-        _gateway_watcher = _RuntimeWatcher(_gateway_loader, "gateways")
-        _gateway_watcher.scan_now()
-        return _gateway_watcher
+def ensure_stream_sink_watcher() -> _RuntimeWatcher:
+    return _ensure_runtime_watcher("stream_sinks", "_stream_sink_watcher")
 
 
-def ensure_engine_watcher() -> Optional[_RuntimeWatcher]:
-    global _engine_loader, _engine_watcher
-    with _watchers_lock:
-        if _engine_watcher is not None:
-            return _engine_watcher
-        _engine_loader = _engine_loader or _make_engine_loader()
-        _engine_watcher = _RuntimeWatcher(_engine_loader, "engines")
-        _engine_watcher.scan_now()
-        return _engine_watcher
+def ensure_gateway_watcher() -> _RuntimeWatcher:
+    return _ensure_runtime_watcher("gateways", "_gateway_watcher")
 
 
-def ensure_context_watcher() -> Optional[_RuntimeWatcher]:
-    """上下文 tier / 预算解析器 watcher。
+def ensure_engine_watcher() -> _RuntimeWatcher:
+    return _ensure_runtime_watcher("engines", "_engine_watcher")
 
-    两类组件共用 ContextPolicyRegistry，故只起一个 watcher 扫 context_tiers 目录；
-    budget_resolvers 由 warmup 与 reload 路径各自 scan_roots 覆盖。
-    """
-    global _context_tier_loader, _context_watcher
-    with _watchers_lock:
-        if _context_watcher is not None:
-            return _context_watcher
-        _context_tier_loader = _context_tier_loader or _make_context_tier_loader()
-        _context_watcher = _RuntimeWatcher(_context_tier_loader, "context_tiers")
-        _context_watcher.scan_now()
-        return _context_watcher
+
+def ensure_context_watcher() -> _RuntimeWatcher:
+    return _ensure_runtime_watcher("context_tiers", "_context_watcher")
 
 
 def warmup_component(

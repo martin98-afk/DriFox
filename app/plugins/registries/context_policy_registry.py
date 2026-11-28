@@ -20,6 +20,8 @@ from app.plugins.contracts.context_policy import ContextBudgetResolver, ContextT
 
 
 class ContextPolicyRegistry:
+    reload_fields = ("_tiers", "_resolvers", "_active_resolver")
+
     def __init__(self) -> None:
         self._tiers: Dict[str, Tuple[ContextTier, str]] = {}  # id -> (tier, source)
         self._resolvers: Dict[str, Tuple[ContextBudgetResolver, str]] = {}
@@ -58,6 +60,14 @@ class ContextPolicyRegistry:
                 del self._tiers[k]
             for k in [k for k, (_r, s) in self._resolvers.items() if s == source]:
                 del self._resolvers[k]
+
+    def unregister_tiers(self, source: str) -> None:
+        with self._lock:
+            self._tiers = {k: v for k, v in self._tiers.items() if v[1] != source}
+
+    def unregister_resolvers(self, source: str) -> None:
+        with self._lock:
+            self._resolvers = {k: v for k, v in self._resolvers.items() if v[1] != source}
 
     def resolve_chain(self, stage: str) -> List[ContextTier]:
         """按 order 升序返回该 stage 生效的 tier 链。"""

@@ -15,6 +15,8 @@ from app.plugins.contracts.storage import SessionStorageEngine
 
 
 class StorageRegistry:
+    reload_fields = ("_engines", "_active")
+
     def __init__(self) -> None:
         self._engines: Dict[str, Tuple[SessionStorageEngine, str]] = {}
         self._active: str = "sqlite"

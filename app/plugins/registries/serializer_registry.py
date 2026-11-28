@@ -19,6 +19,8 @@ _DEFAULT_ID = "openai"
 class SerializerRegistry:
     """序列化器注册表：register 覆盖同名；resolve 按 id 取，无该 id 回退 openai"""
 
+    reload_fields = ("_serializers",)
+
     def __init__(self) -> None:
         self._serializers: Dict[str, Tuple[MessageSerializer, str]] = {}  # id -> (serializer, source)
         self._lock = threading.Lock()

@@ -268,7 +268,7 @@ class TestDedupCacheCleanupOnRemove:
         ]
         monkeypatch.setattr(
             "app.plugins.managers.plugin_manager.PluginManager.rescan",
-            lambda self: {"added": [], "removed": fake_removed, "changed": []},
+            lambda self, force=False: {"added": [], "removed": fake_removed, "changed": []},
         )
         # reload_plugin_subsystems 前置条件：agent_manager 等为 None 时分支跳过
         svc._agent_manager = None
