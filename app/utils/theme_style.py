@@ -190,9 +190,7 @@ def replay_theme_qss(root: Any) -> int:
 # 登记位：控件上的 Python 属性，值是「该控件最后一次刷到哪个外观纪元」。
 # None / 缺失 = 从未刷过或已置脏。随 C++ 对象销毁自然消失，无全局表。
 _THEME_EPOCH_ATTR = "_drifox_theme_epoch"
-# 每个控件应调用的样式刷新方法名，按优先级探测（插件约定 refresh_style 优先；
-# refresh_theme 排最后——它是宿主窗口的 ThemeManager 协议名，插件内容页历史上
-# 也用过，放末尾兼容但不抢占插件自己的约定）
+# 优先使用插件约定的 refresh_style，再兼容既有插件的主题刷新方法。
 _STYLE_METHODS = ("refresh_style", "_apply_latest_theme", "_apply_theme", "_retheme", "refresh_theme", "apply_theme")
 
 

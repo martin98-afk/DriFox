@@ -31,7 +31,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 
 def _parse(rel_path: str) -> ast.Module:
     path = _REPO_ROOT / rel_path
-    return ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    return ast.parse(path.read_text(encoding="utf-8-sig"), filename=str(path))
 
 
 def _get_class(tree: ast.Module, class_name: str) -> ast.ClassDef:

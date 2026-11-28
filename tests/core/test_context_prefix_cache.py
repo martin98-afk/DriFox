@@ -97,3 +97,17 @@ def test_budget_check_counts_tools_and_leaves_payload_intact(monkeypatch):
     check_request_budget(msgs, tools, config)
     assert len(warnings) == 1
     assert orjson.dumps([msgs, tools]) == original
+
+
+@pytest.mark.parametrize("responses", [False, True], ids=["chat", "responses"])
+def test_legacy_json_keeps_first_sent_representation(pipeline, responses):
+    # 老版本在工具续轮直接序列化此段，重放时不能追补 JSON 骨架化。
+    serializer = import_module("plugins.system-serializers.serializers.openai").OpenAIChatSerializer()
+    ctx = SerializeContext(flags=ProtocolFlags(use_responses_api=responses))
+    msg = tool_message(orjson.dumps({"result": "abcdefgh" * 1500}).decode())
+    expected = serializer.serialize([msg], ctx)
+    for tail in ("hi", "long " * 50000):
+        projected = pipeline.project_for_send([msg, {"role": "user", "content": tail}], {})
+        actual = serializer.serialize(projected.messages[:1], ctx)
+        assert orjson.dumps(actual.messages) == orjson.dumps(expected.messages)
+        assert orjson.dumps(actual.input_items) == orjson.dumps(expected.input_items)

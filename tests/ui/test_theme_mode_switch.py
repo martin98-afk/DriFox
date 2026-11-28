@@ -4,6 +4,7 @@ from importlib import import_module
 from pathlib import Path
 
 import pytest
+from PyQt5.QtGui import QColor
 from PyQt5.QtWidgets import QLineEdit
 from qfluentwidgets import isDarkTheme
 
@@ -62,8 +63,10 @@ def test_open_widgets_follow_mode_in_both_directions(ui_app, qtbot):
                 (settings._page_widgets["provider"].widget(), 230),
             ):
                 expected = opaque_surface_color(Colors.CARD_BG.format(alpha=255), alpha, Colors.CONTENT_BG)
+                if widget in (sidebar._list_widget, sidebar._tree_widget) and sidebar._region_backdrop_visible():
+                    expected = QColor(0, 0, 0, 0)
                 actual = widget.palette().color(widget.backgroundRole())
-                assert actual == expected
+                assert actual == expected, (mode, widget.objectName(), alpha, actual.getRgb(), expected.getRgb())
     finally:
         settings._on_close()
         epoch = ThemeRefreshCoordinator.get_appearance_epoch()
@@ -118,6 +121,8 @@ def test_open_file_tree_and_workspace_update_in_place(ui_app, qtbot, monkeypatch
             assert editor.text() == "保留草稿"
             assert tree._colors["is_dark"] == (mode == "dark")
             assert tree._colors["text"].name() in tree._tree_view.styleSheet()
+            assert preview._text_color == tree._colors["text"]
+            assert tree._colors["card_bg"].name() in tree._global_preview.widget.styleSheet()
             assert preview._is_dark == tree._preview_page._is_dark == (mode == "dark")
             assert preview.current_path() == tree._preview_page.current_path() == path
         assert not scans

@@ -10,7 +10,7 @@ Windows 原生保留 Aero Snap / 摇动 / 任务栏预览 / DWM 阴影。
 import platform
 import time
 from collections import OrderedDict
-from typing import Any, Callable, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
 
 from PyQt5 import sip as _sip
 
@@ -38,6 +38,9 @@ from app.utils.utils import get_font_family_css, get_unified_font
 from app.widgets.custom_title_bar import _MacTrafficLightCenterMixin
 from app.widgets.deferred_paint_stack import DeferredPaintStack
 from app.widgets.splitter_corners import SplitterCornerController
+
+if TYPE_CHECKING:
+    from app.main_widget import OpenAIChatToolWindow
 
 # ── 对话区限宽档位（px）：窗口过宽时限制对话内容宽度并居中，两侧留白 ──
 # 避免聊天内容在超宽屏幕上被拉得难以阅读。档位可在 设置-外观 切换。

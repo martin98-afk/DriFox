@@ -772,7 +772,7 @@ class MessageCard(SimpleCardWidget):
             else:
                 self.viewer._theme_render_pending = True
                 _theme_rerender_queue.enqueue(self.viewer)
-        if self._welcome_mode and self._welcome_mode != "sessions":
+        if self.role == "welcome" and self._welcome_mode not in ("", "sessions"):
             # 插件 HTML 可在渲染时按 is_dark 生成内联色；沿用当前页签与 viewer。
             self.set_welcome_mode(self._welcome_mode, sync_tab=False)
         # 欢迎 tab 条：文字/hover/选中底色都由 CustomTabButton 实时取 Colors token，

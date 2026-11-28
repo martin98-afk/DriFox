@@ -18,7 +18,7 @@ import re
 from collections import OrderedDict
 from typing import Any, Dict, List
 
-from app.plugins.contracts.context_policy import ALL_STAGES, CACHE_NONE, TierOutcome, needs_tool_projection
+from app.plugins.contracts.context_policy import CACHE_NONE, STAGE_INGEST, TierOutcome, needs_tool_projection
 
 # 只处理长内容：短结果清洗收益低，复制开销反而显眼
 _MIN_LEN = 1024
@@ -78,9 +78,8 @@ class ToolNormalizeTier:
     order = 12
     # 设置页细项行副标题（component_items 走 AST 静态读取，仅支持字面量）
     description = "剥离 ANSI 转义与控制字符、压缩连续空行、去行尾空白；不删任何有效信息，每轮投影一致，不破坏 prompt cache"
-    stages = frozenset(ALL_STAGES)
+    stages = frozenset({STAGE_INGEST})
     cache_impact = CACHE_NONE
-    per_message = True
 
     def should_apply(self, view) -> bool:
         for m in view.messages:
