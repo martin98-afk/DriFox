@@ -80,7 +80,7 @@ def test_close_history_panel_hides_history_floating_card():
     main = _read(_MAIN)
     body = main[main.index("def _close_history_panel") : main.index("def _refresh_history_page_if_active")]
     assert 'hide_floating_card_globally("history-manager")' in body
-    assert 'set_current_tab_by_id("worktree-manager", user=True)' in body
+    assert "panel.apply_default_landing()" in body
 
 
 def test_service_exposes_project_panel_entry():

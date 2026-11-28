@@ -40,3 +40,25 @@ def test_git_timeout_marks_not_ok(branch_mod):
             task.run()
     assert captured[0][3] is False
     assert captured[0][2] == ""
+
+
+def test_worktree_scroll_shows_sidebar_background(qapp):
+    from PyQt5.QtGui import QColor
+    from PyQt5.QtWidgets import QVBoxLayout, QWidget
+
+    page_cls = importlib.import_module("plugins.worktree-manager.ui.worktree_page").SystemWorktreePage
+    sidebar = QWidget()
+    sidebar.setObjectName("testSidebar")
+    page = page_cls(sidebar)
+    QVBoxLayout(sidebar).addWidget(page)
+    sidebar.resize(320, 480)
+    sidebar.show()
+    try:
+        for color in ("#272333", "#e5ebf1"):
+            sidebar.setStyleSheet(f"QWidget#testSidebar {{ background-color: {color}; }}")
+            qapp.processEvents()
+            image = sidebar.grab().toImage()
+            assert image.pixelColor(image.width() // 2, image.height() * 3 // 4) == QColor(color)
+    finally:
+        sidebar.close()
+        sidebar.deleteLater()

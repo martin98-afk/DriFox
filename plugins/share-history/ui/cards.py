@@ -21,7 +21,7 @@ import traceback
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
-from PyQt5.QtCore import QEvent, QObject, QSize, QThread, Qt, pyqtSignal
+from PyQt5.QtCore import QObject, QThread, Qt, pyqtSignal
 from PyQt5.QtGui import QFont
 from PyQt5.QtWidgets import (
     QApplication,
@@ -644,11 +644,9 @@ class _DownloadWorker(QObject):
 
 
 class ShareHistoryCard(QWidget):
-    """分享记录管理浮动卡片"""
+    """右侧工作台常驻的分享记录页。"""
 
-    closed = pyqtSignal()
-
-    def __init__(self, parent: Optional[QWidget] = None):
+    def __init__(self, parent: Optional[QWidget] = None, context=None):
         super().__init__(parent)
         self._context_provider: Optional[Callable[[], dict]] = None
         self._worker_thread: Optional[QThread] = None
@@ -664,17 +662,20 @@ class ShareHistoryCard(QWidget):
         self._clear_btn: Optional[TransparentToolButton] = None
 
         self._setup_ui()
+        self.set_context(context or {})
 
     # ── 上下文注入 ──────────────────────────────────────
 
     def set_context_provider(self, provider: Callable[[], dict]):
         self._context_provider = provider
 
-    def show_card(self):
+    def set_context(self, context: dict):
+        self._context = context
+        self._context_provider = context.get("context_provider") or self._context.copy
+
+    def refresh_style(self):
         self._apply_latest_theme()
         self._apply_plugin_icon()
-        self._load_records()
-        self.setVisible(True)
 
     def _apply_plugin_icon(self):
         if self._context_provider is None or self._header_icon is None:
@@ -812,7 +813,7 @@ class ShareHistoryCard(QWidget):
     # ── 界面搭建 ────────────────────────────────────────
 
     def _setup_ui(self):
-        self.setMinimumWidth(420)
+        self.setMinimumWidth(0)
         self.setMinimumHeight(0)
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setStyleSheet("ShareHistoryCard { background: transparent; }")
@@ -865,7 +866,7 @@ class ShareHistoryCard(QWidget):
         root.addWidget(self._scroll, 1)
 
     def _build_header(self, root: QVBoxLayout):
-        """标题栏：图标 + 标题 + 状态 + 清空 + 刷新 + 关闭"""
+        """分享记录的状态、清空与刷新操作。"""
         header = QWidget(self)
         header.setStyleSheet("background: transparent;")
         hly = QHBoxLayout(header)
@@ -902,13 +903,6 @@ class ShareHistoryCard(QWidget):
         self._refresh_btn.setToolTip("刷新")
         self._refresh_btn.clicked.connect(self._load_records)
         hly.addWidget(self._refresh_btn)
-
-        # 关闭按钮
-        close_btn = TransparentToolButton(icons.CLOSE, header)
-        close_btn.setFixedSize(24, 24)
-        close_btn.setToolTip("关闭")
-        close_btn.clicked.connect(self._on_close)
-        hly.addWidget(close_btn)
 
         root.addWidget(header)
 
@@ -949,26 +943,11 @@ class ShareHistoryCard(QWidget):
         filtered = [r for r in self._all_records if keyword_lower in r.get("title", "").lower()]
         self._render_records(filtered, update_search=False)
 
-    # ── 比例高度 ────────────────────────────────────────
-
-    def sizeHint(self):
-        base = super().sizeHint()
-        win = self.window()
-        if win and win.height() > 0:
-            return QSize(max(base.width(), 200), int(win.height() * 0.85))
-        return base
-
     def showEvent(self, event):
         super().showEvent(event)
-        win = self.window()
-        if win:
-            win.installEventFilter(self)
-            self.updateGeometry()
-
-    def eventFilter(self, obj, event):
-        if obj is self.window() and event.type() == QEvent.Resize:
-            self.updateGeometry()
-        return super().eventFilter(obj, event)
+        self.refresh_style()
+        if self._worker_thread is None:
+            self._load_records()
 
     # ── 数据加载 ────────────────────────────────────────
 
@@ -1139,9 +1118,6 @@ class ShareHistoryCard(QWidget):
                 pass
             self._worker_thread = None
         self._worker = None
-
-    def _on_close(self):
-        self.closed.emit()
 
     def deleteLater(self):
         self._cleanup_worker()

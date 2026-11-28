@@ -2364,24 +2364,12 @@ class TabManagerWindow(_MacTrafficLightCenterMixin, FramelessWindow):
         return panel.set_current_tab_by_id(page_id, user=True)
 
     def open_workbench_memory(self, sub_tab: str = "docs") -> None:
-        """展开工作台并定位「工作树」页签（记忆功能已下线，保留兼容入口）
+        """Branch 与旧 /memory 入口均直达左侧工作树卡片。"""
+        from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
 
-        统一的「一键直达」入口：新建项目后自动展开、工作树「管理工作树」
-        按钮等场景都走这里。置顶记忆在助手中心管理，不再有记忆页。
-
-        Args:
-            sub_tab: 兼容旧签名；任何取值都落「工作树」页
-        """
-        panel = getattr(self, "workbench_panel", None)
-        if panel is None:
-            return
-        # 1) 展开工作台（不可见时 set_workbench_visible 内部会触发 refresh_workbench）
-        if not self.is_workbench_visible():
-            self.set_workbench_visible(True)
-        else:
-            self.refresh_workbench()
-        # 2) 定位「工作树」页
-        panel.set_current_tab_by_id("worktree-manager", user=True)
+        if not self._card_manager.is_card_visible("worktree-manager", self._window_id):
+            registry = UIPluginRegistry.get_instance()
+            registry.toggle_floating_card("worktree-manager", main_widget=self.get_current_window())
 
     def open_workbench_history(self) -> None:
         """打开会话历史（已迁对话区左侧停靠区的常驻浮动卡）

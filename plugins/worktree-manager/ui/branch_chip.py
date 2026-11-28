@@ -210,7 +210,7 @@ class BranchChip(QFrame):
         return p
 
     def mousePressEvent(self, event) -> None:
-        """点击打开工作台工作树页（原 main_widget._on_branch_label_clicked 迁入）。"""
+        """点击展开左侧边栏中的工作树。"""
         event.accept()
         try:
             wb = _caps("window.workbench")

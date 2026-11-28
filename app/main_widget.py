@@ -3897,11 +3897,7 @@ class OpenAIChatToolWindow(ToolWindow):
             tm.open_workbench_history()
 
     def _open_workbench_memory(self):
-        """快捷键/命令入口：打开右侧工作台并跳转「工作树」页签（直开语义）
-
-        记忆管理已下线：置顶记忆在助手中心管理，右侧工作台只保留
-        工作树页签。/memory 命令直达该页。
-        """
+        """快捷键与 /memory 命令直达左侧边栏的工作树。"""
         tm = TabManagerWindow.get_instance()
         if tm is not None:
             tm.open_workbench_memory("docs")
@@ -9277,7 +9273,7 @@ class OpenAIChatToolWindow(ToolWindow):
         if not tm.is_workbench_visible() or panel.current_tab_id() != "history-manager":
             tm.open_workbench_history()
         else:
-            panel.set_current_tab_by_id("worktree-manager", user=True)
+            panel.apply_default_landing()
 
     def _close_history_panel(self):
         """历史会话卡让位收出口：隐藏左侧停靠区「历史会话」浮动卡
@@ -9295,7 +9291,7 @@ class OpenAIChatToolWindow(ToolWindow):
             tm = TabManagerWindow.get_instance()
             panel = getattr(tm, "workbench_panel", None) if tm is not None else None
             if panel is not None and panel.current_tab_id() == "history-manager":
-                panel.set_current_tab_by_id("worktree-manager", user=True)
+                panel.apply_default_landing()
         except Exception:
             pass
         # 左侧停靠区「历史会话」浮动卡：经 registry 公开隐藏通道让位
