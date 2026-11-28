@@ -575,7 +575,7 @@
         {
             "name": "system-message-output",
             "description": "管理聊天消息的展示方式，内置按正文位置折叠思考与工具的简洁模式。",
-            "version": "0.1.1",
+            "version": "0.2.0",
             "author": "DriFoxx Team",
             "license": "GPL-3.0-or-later",
             "categories": [
