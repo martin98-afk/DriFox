@@ -42,9 +42,11 @@ from pygments import highlight
 from pygments.formatters import HtmlFormatter
 from pygments.lexers import TextLexer, get_lexer_by_name
 from PyQt5.QtCore import (
+    QBuffer,
     QByteArray,
     QEasingCurve,
     QElapsedTimer,
+    QIODevice,
     QObject,
     QRect,
     QSize,
@@ -60,6 +62,7 @@ from PyQt5.QtGui import (
     QBrush,
     QColor,
     QFontMetrics,
+    QImageReader,
     QLinearGradient,
     QPainter,
     QPainterPath,
@@ -273,6 +276,21 @@ def user_bubble_target_width(container_width: int) -> int:
     return max(320, int(container_width) - max(24, int(container_width * 0.25)))
 
 
+def _stream_boundary_tail(block: dict, limit: int = 128) -> str:
+    """只读取块末尾判定渲染边界，长回复的旧片段不参与逐次拼接。"""
+    remaining = limit
+    tail = []
+    for part in reversed(block.get("_pend") or ()):
+        suffix = part[-remaining:]
+        tail.append(suffix)
+        remaining -= len(suffix)
+        if remaining == 0:
+            break
+    if remaining:
+        tail.append(str(block.get("text") or "")[-remaining:])
+    return "".join(reversed(tail))
+
+
 class LiteIconButton(QToolButton):
     """卡片内图标按钮（取代 qfluentwidgets TransparentToolButton）。
 
@@ -304,6 +322,7 @@ class LiteIconButton(QToolButton):
 
 class MessageCard(SimpleCardWidget):
     heightChanged = pyqtSignal(int)
+    groupToggleRequested = pyqtSignal()
     deleteRequested = pyqtSignal()
     undoRequested = pyqtSignal()
     actionRequested = pyqtSignal(str, str)
@@ -942,34 +961,6 @@ class MessageCard(SimpleCardWidget):
         layout.addWidget(model_l)
         self._footer_right_items.append((None, model_l))
 
-        # 差异统计文本（点击弹差异弹窗），前置 · 分隔，有 diff 才显示。
-        # ⚠️ 拆成多段纯文本 label（N 文件 / +N / / / -N）而非单个 RichText：
-        # 富文本的 sizeHint 与基线同纯文本 label 不同（实测 sh 17 vs 15），
-        # 与左区标签并排会垂直错位（同 _refresh_footer_stats 的既有教训）。
-        diff_sep = QLabel("·", self)
-        diff_sep.setStyleSheet(label_style)
-        diff_sep.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
-        diff_sep.setVisible(False)
-        layout.addWidget(diff_sep)
-        diff_parts: List[QLabel] = []
-        for _color in (None, "#2ea043", None, "#f85149"):
-            p = QLabel("", self)
-            p.setStyleSheet(label_style if _color is None else f"{label_style} color: {_color};")
-            p.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
-            p.setTextFormat(Qt.PlainText)
-            p.setVisible(False)
-            p.setCursor(Qt.PointingHandCursor)
-            p.mousePressEvent = lambda e: self._emit_card_diff_requested()
-            install_hover_tooltip(p, "点击查看当条消息的文件差异详情")
-            layout.addWidget(p)
-            diff_parts.append(p)
-        self._footer_diff_stats_label = diff_parts[0]
-        self._footer_diff_add_label = diff_parts[1]
-        self._footer_diff_slash_label = diff_parts[2]
-        self._footer_diff_del_label = diff_parts[3]
-        self._footer_diff_parts = diff_parts
-        self._footer_right_items.append((diff_sep, diff_parts[0]))
-
         # 右侧操作区：常显操作组（审查 / 分支 / 复制 / 插件按钮）。
         # 固定尺寸占位：按钮显隐切换时 footer 尺寸不变，卡片不跳动、不重排。
         hover_btns = QWidget(self)
@@ -977,18 +968,6 @@ class MessageCard(SimpleCardWidget):
         hb = QHBoxLayout(hover_btns)
         hb.setContentsMargins(6, 0, 0, 0)
         hb.setSpacing(2)
-
-        # 审查按钮：与分支/复制同排；仅在有 diff 时显示（set_diff_stats 控制），
-        # 点击触发 code-reviewer 子智能体快速审查本次修改
-        review_icon = LiteIconButton(get_icon("Search"), self)
-        review_icon.setObjectName("footer_review_icon")
-        review_icon.setFixedSize(20, 20)
-        review_icon.clicked.connect(lambda: self._emit_review_requested())
-        review_icon.setToolTip("用 code-reviewer 子智能体快速审查本次修改")
-        install_hover_tooltip(review_icon, delay_ms=200)
-        review_icon.setVisible(False)
-        self._footer_review_icon = review_icon
-        hb.addWidget(review_icon)
 
         for ic, tp, cb in [
             (get_icon("分支"), "从此条分支新对话", lambda: self._emit_branch_requested()),
@@ -1109,6 +1088,51 @@ class MessageCard(SimpleCardWidget):
         timer.timeout.connect(_run)
         timer.start(delay_ms)
 
+    def _build_diff_controls(self):
+        layout = self._footer_bar.layout()
+        actions = self._assistant_action_btns
+        index = layout.indexOf(actions)
+        label_style = self._footer_stat_base_style
+        # 差异统计文本（点击弹差异弹窗），前置 · 分隔，有 diff 才显示。
+        # ⚠️ 拆成多段纯文本 label（N 文件 / +N / / / -N）而非单个 RichText：
+        # 富文本的 sizeHint 与基线同纯文本 label 不同（实测 sh 17 vs 15），
+        # 与左区标签并排会垂直错位（同 _refresh_footer_stats 的既有教训）。
+        diff_sep = QLabel("·", self)
+        diff_sep.setStyleSheet(label_style)
+        diff_sep.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
+        diff_sep.setVisible(False)
+        layout.insertWidget(index, diff_sep)
+        diff_parts: List[QLabel] = []
+        for _color in (None, "#2ea043", None, "#f85149"):
+            p = QLabel("", self)
+            p.setStyleSheet(label_style if _color is None else f"{label_style} color: {_color};")
+            p.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
+            p.setTextFormat(Qt.PlainText)
+            p.setVisible(False)
+            p.setCursor(Qt.PointingHandCursor)
+            p.mousePressEvent = lambda e: self._emit_card_diff_requested()
+            install_hover_tooltip(p, "点击查看当条消息的文件差异详情")
+            layout.insertWidget(index + 1 + len(diff_parts), p)
+            diff_parts.append(p)
+        self._footer_diff_stats_label = diff_parts[0]
+        self._footer_diff_add_label = diff_parts[1]
+        self._footer_diff_slash_label = diff_parts[2]
+        self._footer_diff_del_label = diff_parts[3]
+        self._footer_diff_parts = diff_parts
+        self._footer_right_items.append((diff_sep, diff_parts[0]))
+
+        # 审查按钮：与分支/复制同排；仅在有 diff 时显示（set_diff_stats 控制），
+        # 点击触发 code-reviewer 子智能体快速审查本次修改
+        review_icon = LiteIconButton(get_icon("Search"), self)
+        review_icon.setObjectName("footer_review_icon")
+        review_icon.setFixedSize(20, 20)
+        review_icon.clicked.connect(lambda: self._emit_review_requested())
+        review_icon.setToolTip("用 code-reviewer 子智能体快速审查本次修改")
+        install_hover_tooltip(review_icon, delay_ms=200)
+        review_icon.setVisible(False)
+        self._footer_review_icon = review_icon
+        actions.layout().insertWidget(0, review_icon)
+
     def set_diff_stats(self, files_count: int = 0, additions: int = 0, deletions: int = 0):
         """设置差异徽章：N 文件 +N/-N（点击弹出差异弹窗）
 
@@ -1119,9 +1143,9 @@ class MessageCard(SimpleCardWidget):
         """
         if self.role != "assistant":
             return
-        if not self._footer_diff_stats_label:
-            return
         if files_count == 0 and additions == 0 and deletions == 0:
+            if self._footer_diff_stats_label is None:
+                return
             # 无 diff：清空差异文本（驱动 · 分隔收敛）与审查按钮
             for p in getattr(self, "_footer_diff_parts", []):
                 p.setText("")
@@ -1131,7 +1155,9 @@ class MessageCard(SimpleCardWidget):
             self._refresh_footer_separators()
             return
 
-        # 逐段纯文本着色（不用 RichText，见 _build_footer_bar 处说明）
+        if self._footer_diff_stats_label is None:
+            self._build_diff_controls()
+        # 逐段纯文本着色，保持与模型名一致的基线。
         # 空格挂在首段尾部：分段 label 间距为 0，靠它维持「4 文件 +26/-2」排版
         # （挂尾部可保证只有 -N 时也显示「4 文件 -2」）
         self._footer_diff_stats_label.setText(f"{files_count} 文件 ")
@@ -1157,9 +1183,6 @@ class MessageCard(SimpleCardWidget):
         """
         if self.role != "assistant":
             return
-        if not self._footer_diff_stats_label:
-            return
-
         # 懒初始化累积计数器
         if not hasattr(self, "_diff_seen_files"):
             self._diff_seen_files = set()
@@ -2377,21 +2400,30 @@ class MessageCard(SimpleCardWidget):
             self._image_strip.setVisible(True)
 
     def _build_image_thumb(self, source, data_uri, path):
-        """构建单张缩略图 QLabel（等比 80px 高）；加载失败返回 None
-
-        记录原始 QPixmap 引用，点击弹出大图查看。
-        """
-        pixmap = QPixmap()
+        """按设备像素解码等比缩略图，点击时再加载原图。"""
         if source:
-            pixmap.load(source)
+            reader = QImageReader(source)
         elif data_uri:
             b64 = data_uri.split("base64,", 1)[-1]
-            pixmap.loadFromData(QByteArray.fromBase64(b64.encode("ascii")))
-        if pixmap.isNull():
+            buffer = QBuffer()
+            buffer.setData(QByteArray.fromBase64(b64.encode("ascii")))
+            buffer.open(QIODevice.ReadOnly)
+            reader = QImageReader(buffer)
+        else:
             return None
+        dpr = self._image_strip.devicePixelRatioF() or 1.0
+        height = max(1, int(80 * dpr))
+        size = reader.size()
+        if size.isValid() and size.height() > height:
+            width = max(1, round(size.width() * height / size.height()))
+            reader.setScaledSize(QSize(width, height))
+        image = reader.read()
+        if image.isNull():
+            return None
+        if image.height() != height:
+            image = image.scaledToHeight(height, Qt.SmoothTransformation)
+        scaled = QPixmap.fromImage(image)
         thumb = QLabel(self._image_strip)
-        dpr = thumb.devicePixelRatioF() or 1.0
-        scaled = pixmap.scaledToHeight(int(80 * dpr), Qt.SmoothTransformation)
         scaled.setDevicePixelRatio(dpr)
         thumb.setPixmap(scaled)
         thumb.setFixedHeight(80)
@@ -2497,7 +2529,25 @@ class MessageCard(SimpleCardWidget):
         self.options_widget.setVisible(False)
         main.addWidget(self.options_widget)
 
-        # 重试状态栏（默认隐藏）
+        self._retry_status_widget = None
+
+        if self.role == "welcome":  # 全减：assistant 无底部装饰线；user 简洁气泡本就不带
+            # 欢迎卡片：tab 条落在卡片**底部**（内容下方），切换区不占用
+            # 头部首位；顶部头部与底部区分隔线均已去掉（2026-09-17 用户要求）。
+            self._build_welcome_mode_tabs(main)
+
+        # ===== 助手卡片底部元信息栏（分割线下方） =====
+        if self.role == "assistant":
+            self._build_footer_bar(main)
+        # 卡片背景/圆角：user 简洁气泡 12px 圆角无边框，其余 10px
+        self._apply_card_style()
+
+        # 淡入动画：新消息微妙出现（200ms，仅透明度）
+        fade_in_widget(self, 200)
+
+    def _ensure_retry_status_bar(self):
+        if self._retry_status_widget is not None:
+            return
         self._retry_status_widget = QWidget(self)
         self._retry_status_widget.setVisible(False)
         retry_layout = QHBoxLayout(self._retry_status_widget)
@@ -2559,21 +2609,8 @@ class MessageCard(SimpleCardWidget):
             """
         )
         retry_layout.addWidget(self._retry_wait_label)
-        main.addWidget(self._retry_status_widget)
-
-        if self.role == "welcome":  # 全减：assistant 无底部装饰线；user 简洁气泡本就不带
-            # 欢迎卡片：tab 条落在卡片**底部**（内容下方），切换区不占用
-            # 头部首位；顶部头部与底部区分隔线均已去掉（2026-09-17 用户要求）。
-            self._build_welcome_mode_tabs(main)
-
-        # ===== 助手卡片底部元信息栏（分割线下方） =====
-        if self.role == "assistant":
-            self._build_footer_bar(main)
-        # 卡片背景/圆角：user 简洁气泡 12px 圆角无边框，其余 10px
-        self._apply_card_style()
-
-        # 淡入动画：新消息微妙出现（200ms，仅透明度）
-        fade_in_widget(self, 200)
+        main = self.layout()
+        main.insertWidget(main.indexOf(self.options_widget) + 1, self._retry_status_widget)
 
     def start_streaming_anim(self):
         if self._streaming:
@@ -2603,15 +2640,14 @@ class MessageCard(SimpleCardWidget):
             # 相位按真实经过时间 dt 累加（见 _update_anim），**运动速度与轨迹
             # 完全不变**，只是重绘次数降 25%。与背景动画的 15fps 同频后，两路
             # 动画天然对齐，减少一帧内两次独立合成的机会。
-            self._anim_timer.start(66)
+            if self.isVisible():
+                self._anim_timer.start(66)
         except RuntimeError:
             return
         self.update()
 
     def _update_anim(self):
-        # [V1] 可见性门控：隐藏 tab 不执行动画帧（避免隐藏页每 50ms 空转 update()）。
-        # 暂停期间重启时钟：动画位置由累积时间 _anim_t_ms 决定，不推进即停在原位置，
-        # 恢复后从原位置继续，无视觉跳变；下一拍定时器自动续跑，无需显式重启。
+        # 兜住 hideEvent 前已排队的动画帧。
         if not self.isVisible():
             self._anim_clock.restart()
             return
@@ -2765,7 +2801,8 @@ class MessageCard(SimpleCardWidget):
         except RuntimeError:
             return
         self._apply_card_style()
-        self._retry_status_widget.setVisible(False)
+        if self._retry_status_widget is not None:
+            self._retry_status_widget.hide()
         # [PERF] 去掉 repaint()：同步强制重绘会把整卡 paint 塞进当前这一拍，
         # 而结束态这一拍还要承载最终全量渲染与高度变化；异步 update() 足够，
         # 由 Qt 在下一个合成周期统一绘制。
@@ -2784,7 +2821,8 @@ class MessageCard(SimpleCardWidget):
             self._anim_t_ms = 0.0
             self._anim_clock.restart()
             try:
-                self._anim_timer.start(66)
+                if self.isVisible():
+                    self._anim_timer.start(66)
             except RuntimeError:
                 return
         # 更新状态栏
@@ -2805,7 +2843,8 @@ class MessageCard(SimpleCardWidget):
         """停止重试动画，恢复正常边框"""
         self._retrying = False
         self.error = False
-        self._retry_status_widget.setVisible(False)
+        if self._retry_status_widget is not None:
+            self._retry_status_widget.hide()
         self._apply_card_style()
         if not self._streaming:
             return
@@ -2815,6 +2854,7 @@ class MessageCard(SimpleCardWidget):
 
     def _update_retry_status_bar(self):
         """更新重试状态栏的文本内容"""
+        self._ensure_retry_status_bar()
         # 重试时恢复标准重试样式
         self._retry_status_widget.setStyleSheet(
             """
@@ -3188,12 +3228,14 @@ class MessageCard(SimpleCardWidget):
             bd = "#ff4d4d"
             bg = "#FFF5F5" if _is_light else "#2a1f1f"
         else:
-            self._retry_status_widget.setVisible(False)
+            if self._retry_status_widget is not None:
+                self._retry_status_widget.hide()
             bd, bg = self._base_border, self._base_bg
         self._apply_card_style(border=bd, bg=bg)
 
     def _show_error_status(self, error_message: str):
         """显示错误状态信息（复用重试状态栏UI，但显示错误信息）"""
+        self._ensure_retry_status_bar()
         self._retry_error_type = "错误"
         self._retry_type_label.setText("❌")
         self._retry_attempt_label.setText(error_message if error_message else "请求失败")
@@ -3293,6 +3335,20 @@ class MessageCard(SimpleCardWidget):
             # dict 保持插入序：丢弃最早写入的键
             for key in list(cache)[: len(cache) - _HEIGHT_CACHE_MAX]:
                 cache.pop(key, None)
+
+    def _apply_group_height(self, h):
+        """分组已在 WebView 内插值，卡片逐帧采用实测高度。"""
+        self._stream_height_timer.stop()
+        self._cancel_pending_shrink()
+        if self._stream_height_anim_active:
+            self._stop_stream_height_track()
+        self._height_anim.stop()
+        self._target_viewer_height = min(h, self.viewer.body_max_height_cap())
+        if not self._streaming and not self._resize_preview_mode:
+            self._remember_height_for_width(self._target_viewer_height)
+        self.setProperty("noContainerAnimation", True)
+        self._apply_viewer_height(self._target_viewer_height)
+        self._release_no_container_animation()
 
     def _update_height(self, h):
         # [DOCK-BLANK 修] 原钳 max(40, h) 与折叠态矮内容冲突：思考折叠收起 +
@@ -4176,13 +4232,9 @@ class MessageCard(SimpleCardWidget):
             self._set_actions_visible(self._user_action_btns, True)
         super().enterEvent(event)
 
-    def showEvent(self, event):
-        super().showEvent(event)
-        # macOS 兜底：后台标签页期间气泡底色的 update() 可能不被补画，
-        # 重新可见时 backing store 拿旧像素（场景背景图）直接 blit，
-        # 表现为气泡底色缺失、只有 WebEngine 文字浮在壁纸上，resize 才恢复。
-        # 显示瞬间强制整卡标脏一次，补掉这笔绘制欠账（一次性成本，非热路径）。
-        self.update()
+    def hideEvent(self, event):
+        self._anim_timer.stop()
+        super().hideEvent(event)
 
     def leaveEvent(self, event):
         if self.role == "user" and getattr(self, "_user_action_btns", None) is not None:
@@ -4266,6 +4318,9 @@ class MessageCard(SimpleCardWidget):
         另：主题切换期间本卡若不可见，内嵌插件面板只被置脏，这里补刷。
         """
         super().showEvent(event)
+        if self._streaming and not self._anim_timer.isActive():
+            self._anim_clock.restart()
+            self._anim_timer.start(66)
         # 修 #2：用户气泡 viewer 懒加载——若已暂存待显示文本且 viewer 尚未创建，补建
         if self.role == "user" and self.viewer is None and getattr(self, "_viewer_pending_text", None):
             self._ensure_user_viewer()
@@ -4335,6 +4390,8 @@ class MessageCard(SimpleCardWidget):
         v.codeActionRequested.connect(self.actionRequested)
         v.contextActionRequested.connect(self.contextActionRequested)
         v.contentHeightChanged.connect(self._update_height)
+        v.groupHeightChanged.connect(self._apply_group_height)
+        v.groupToggleRequested.connect(self.groupToggleRequested)
         v.toolDiffRequested.connect(self.toolDiffRequested)
         v.openFileRequested.connect(self.openFileRequested)
         v.subAgentLogRequested.connect(self.subAgentLogRequested)
@@ -4360,6 +4417,8 @@ class MessageCard(SimpleCardWidget):
             (v.codeActionRequested, self.actionRequested),
             (v.contextActionRequested, self.contextActionRequested),
             (v.contentHeightChanged, self._update_height),
+            (v.groupHeightChanged, self._apply_group_height),
+            (v.groupToggleRequested, self.groupToggleRequested),
             (v.toolDiffRequested, self.toolDiffRequested),
             (v.openFileRequested, self.openFileRequested),
             (v.subAgentLogRequested, self.subAgentLogRequested),
@@ -4922,13 +4981,11 @@ class MessageCard(SimpleCardWidget):
             # 只依赖尾部；极端「尾部空白 > 窗口且 </think> 在窗外」差异 = 渲染延迟
             # 一拍，无正确性影响。
             _last_block = self._content_data[-1] if self._content_data else None
-            _boundary_win = ""
-            if isinstance(_last_block, dict):
-                _pend_join = "".join(_last_block.get("_pend") or ())
-                _boundary_win = (str(_last_block.get("text", "") or "")[-160:] + _pend_join)[-128:]
             # [PERF] 软边界（句号）不再 immediate —— 与 append_chunk /
             # _schedule_render 保持一致，交由内部 90ms 短定时器合并。
-            if self._streaming and self.viewer._has_reached_clean_boundary(_boundary_win):
+            if self._streaming and self.viewer._has_reached_clean_boundary(
+                _stream_boundary_tail(_last_block) if isinstance(_last_block, dict) else ""
+            ):
                 self.viewer._schedule_render(immediate=immediate_render)
             else:
                 self.viewer._schedule_render(immediate=False)
@@ -6787,6 +6844,7 @@ class MessageCard(SimpleCardWidget):
         self.viewer = None  # 释放 viewer 引用，允许 GC
 
         # 清理大数据缓存
+        self._streaming = False
         self._content_data = None
         self._interactive_options = []
         self._markdown_text = None  # 大 markdown 文本

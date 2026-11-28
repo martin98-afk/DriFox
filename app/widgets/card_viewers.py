@@ -330,6 +330,8 @@ class ConsoleMonitorPage(QWebEnginePage):
     codeActionRequested = pyqtSignal(str, str)
     contextActionRequested = pyqtSignal(str, str)
     heightReported = pyqtSignal(int)
+    groupHeightReported = pyqtSignal(int)
+    groupToggleRequested = pyqtSignal()
     # 🐛 卡片内阅读标志：reportHeight 第 4 字段翻转时推送（见 javaScriptConsoleMessage）。
     # WebEngine 内滚动不动 Qt 滚动条，宿主 away 守卫对卡内阅读完全失明，
     # 外层滚底判定必须显式查询此状态让位。
@@ -430,7 +432,7 @@ class ConsoleMonitorPage(QWebEnginePage):
         msg = message.strip()
         # [PERF] pywebview_height 是最高频信号（流式时每周期多次触发），
         # 放在首位快速短路，避免对每条 height 消息都做 startswith("pywebview_ready") 等冗余判断
-        if msg.startswith("pywebview_height:"):
+        if msg.startswith(("pywebview_height:", "pywebview_group_height:")):
             payload = msg.split(":", 1)[1]
             parsed = _parse_height_payload(payload)
             if parsed is None:
@@ -444,7 +446,10 @@ class ConsoleMonitorPage(QWebEnginePage):
             if reading is not None and reading != getattr(self, "_last_card_reading", False):
                 self._last_card_reading = reading
                 self.cardReadingChanged.emit(reading)
-            self.heightReported.emit(h)
+            if msg.startswith("pywebview_group_height:"):
+                self.groupHeightReported.emit(h)
+            else:
+                self.heightReported.emit(h)
             # 旧格式（仅高度，无几何字段）不发几何信号：wheelEvent 回退保守策略
             if dom_text_len is not None or reading is not None:
                 # ⚠️ bodyGeometryReported 必须**无条件**发：_body_geom_valid 是
@@ -458,6 +463,8 @@ class ConsoleMonitorPage(QWebEnginePage):
                 # 既有三参签名（调用方无需跟着改）。
                 if inner_scrollable is not None:
                     self.bodyInnerScrollableChanged.emit(inner_scrollable)
+        elif msg == "pywebview_action:group_toggle":
+            self.groupToggleRequested.emit()
         elif msg == "pywebview_ready":
             self.contentReady.emit()
         elif msg.startswith("pywebview_action:"):
@@ -852,6 +859,8 @@ def _show_export_info_bar(widget, ok: bool, title: str, msg: str) -> None:
 
 class CodeWebViewer(QWebEngineView):
     contentHeightChanged = pyqtSignal(int)
+    groupHeightChanged = pyqtSignal(int)
+    groupToggleRequested = pyqtSignal()
     codeActionRequested = pyqtSignal(str, str)
     contextActionRequested = pyqtSignal(str, str)
     toolDiffRequested = pyqtSignal(str)  # tool_call_id
@@ -1238,6 +1247,8 @@ class CodeWebViewer(QWebEngineView):
         self._page.contextActionRequested.connect(self.contextActionRequested)
         self._user_reading_inside = False
         self._page.heightReported.connect(self._on_height_reported)
+        self._page.groupHeightReported.connect(self._on_group_height_reported)
+        self._page.groupToggleRequested.connect(self.groupToggleRequested)
         self._page.bodyGeometryReported.connect(self._on_body_geometry_reported)
         self._page.bodyInnerScrollableChanged.connect(self._on_inner_scrollable_reported)
         self._page.cardReadingChanged.connect(self._on_card_reading_changed)
@@ -1997,7 +2008,10 @@ class CodeWebViewer(QWebEngineView):
         """
         self._user_reading_inside = reading
 
-    def _on_height_reported(self, h):
+    def _on_group_height_reported(self, h):
+        self._on_height_reported(h, group_motion=True)
+
+    def _on_height_reported(self, h, group_motion=False):
         # delegate wheel 抢断补装：高频回报时仅一次 is 比较，崩溃重建后自然重装
         self._ensure_wheel_filter_installed()
         # [render-watchdog] 文档已有高度 = 内容确实落地，清空自愈计数并停表
@@ -2057,7 +2071,9 @@ class CodeWebViewer(QWebEngineView):
                     f"pending_shrink={getattr(self, '_pending_shrink_height', None)}) → 折叠框下空白"
                 )
         final_h = h + 2
-        if abs(self.height() - final_h) > 2:
+        if group_motion:
+            self.groupHeightChanged.emit(final_h)
+        elif abs(self.height() - final_h) > 2:
             self.contentHeightChanged.emit(final_h)
 
     def _rdiag_hit(self, key: str) -> None:
@@ -6750,7 +6766,9 @@ class CodeWebViewer(QWebEngineView):
                             if (_te.scrollHeight - _te.clientHeight > 1) _ins = 1;
                         }}
                     }} catch (_e4) {{}}
-                    console.log('pywebview_height:' + h + '|' + (_b.scrollTop|0) + '|' + (_b.clientHeight|0) + '|' + (_rd ? '1' : '0') + '|' + _cl + '|' + _ins);
+                    var prefix = _groupHeightSync ? 'pywebview_group_height:' : 'pywebview_height:';
+                    if (_groupHeightSync && !document.querySelector('[data-group-motion]')) _groupHeightSync = false;
+                    console.log(prefix + h + '|' + (_b.scrollTop|0) + '|' + (_b.clientHeight|0) + '|' + (_rd ? '1' : '0') + '|' + _cl + '|' + _ins);
                 }}
                 // 批量报告高度：合并同一帧内的多次请求，动画期间仍暂停报告。
                 //
@@ -7291,7 +7309,7 @@ class CodeWebViewer(QWebEngineView):
                     new ResizeObserver(() => {{
                         // 动画期间跳过高度报告
                         if (_collapsibleHeightReporting) return;
-                        if (window._toolCompactMode && window._streamingActive) {{
+                        if (_groupHeightSync || (window._toolCompactMode && window._streamingActive)) {{
                             // RO 在布局后投递；真实换行已发生，不再等 50ms 静默窗和下一帧。
                             if (resizeTimeout) {{ clearTimeout(resizeTimeout); resizeTimeout = null; }}
                             reportHeight();
@@ -12097,6 +12115,7 @@ class CodeWebViewer(QWebEngineView):
                 self._page.contextActionRequested.disconnect()
             if hasattr(self._page, "heightReported"):
                 self._page.heightReported.disconnect()
+                self._page.groupHeightReported.disconnect()
             if hasattr(self._page, "contentReady"):
                 self._page.contentReady.disconnect()
             if hasattr(self._page, "toolDiffRequested"):

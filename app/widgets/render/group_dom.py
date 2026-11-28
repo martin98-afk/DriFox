@@ -7,31 +7,37 @@ body.dfx-grouped #tool-section { display:none !important; }
 """
 
 GROUP_JS = """
+var _groupHeightSync = false;
 document.addEventListener('keydown', function(e) { if (e.key === 'Tab') document.body.classList.add('dfx-key-focus'); }, true);
 document.addEventListener('mousedown', function() { document.body.classList.remove('dfx-key-focus'); }, true);
 function _setGroupVisibility(node, hidden, animate) {
     var previous = node._groupMotion;
-    if (previous && previous.hidden === hidden) return;
+    if (previous && !hidden) return;
     var wasHidden = node.hasAttribute('data-group-hidden');
     if (!previous && wasHidden === hidden) return;
-    var from = wasHidden ? 0 : node.getBoundingClientRect().height;
-    var alpha = wasHidden ? 0 : parseFloat(getComputedStyle(node).opacity);
-    if (previous) { previous.animation.cancel(); node._groupMotion = null; }
-    if (!animate || matchMedia('(prefers-reduced-motion: reduce)').matches) {
+    if (previous) {
+        previous.cancel();
+        node._groupMotion = null;
+        node.removeAttribute('data-group-motion');
+    }
+    if (animate) _groupHeightSync = true;
+    // 收起只提交最终高度，避免 WebView 和外层滚动区逐帧交错移动正文。
+    if (hidden || !animate || matchMedia('(prefers-reduced-motion: reduce)').matches) {
         node.toggleAttribute('data-group-hidden', hidden);
         return;
     }
     node.removeAttribute('data-group-hidden');
-    var to = hidden ? 0 : node.getBoundingClientRect().height;
-    if (Math.abs(to-from) < 1) { node.toggleAttribute('data-group-hidden', hidden); return; }
+    var to = node.getBoundingClientRect().height;
+    if (to < 1) return;
     var motion = node.animate([
-        {height:from+'px', opacity:alpha, overflow:'hidden'},
-        {height:to+'px', opacity:hidden ? 0 : 1, overflow:'hidden'}
+        {height:'0px', opacity:0, overflow:'hidden'},
+        {height:to+'px', opacity:1, overflow:'hidden'}
     ], {duration:180, easing:'cubic-bezier(.22,.61,.36,1)', fill:'both'});
-    node._groupMotion = {hidden:hidden, animation:motion};
+    node._groupMotion = motion;
+    node.setAttribute('data-group-motion', '');
     motion.onfinish = function() {
-        if (!node._groupMotion || node._groupMotion.animation !== motion) return;
-        node.toggleAttribute('data-group-hidden', hidden);
+        if (node._groupMotion !== motion) return;
+        node.removeAttribute('data-group-motion');
         node._groupMotion = null; motion.cancel();
         if (node.isConnected) reportHeightDebounced();
     };
@@ -55,9 +61,10 @@ window._applyMessageGroups = function(groups, streaming) {
             b = document.createElement('button'); b.type = 'button';
             b.className = 'dfx-group-button'; b.dataset.groupStart = key;
             b.onclick = function() {
+                console.log('pywebview_action:group_toggle');
                 manual.set(key, b.getAttribute('aria-expanded') !== 'true');
                 window._applyMessageGroups(root._currentGroups);
-                reportHeightDebounced();
+                reportHeight();
             };
         }
         buttons.delete(key);

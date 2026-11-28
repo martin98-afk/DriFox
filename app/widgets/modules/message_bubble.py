@@ -140,6 +140,7 @@ class MessageBubble(QWidget):
         if c == self._border_color:
             return
         self._border_color = c
+        self._shape_path = None  # 有无边框决定轮廓内缩量，缓存必须失效
         self.update()
 
     def set_stream_frame(self, phase: Optional[float], tint: Optional[QColor] = None) -> None:
@@ -187,10 +188,22 @@ class MessageBubble(QWidget):
 
         top = PIN_HEIGHT if self._pin_side else 0
         w, h = self.width(), self.height()
+        has_border = self._border_color.isValid() and self._border_color.alpha() > 0
         shape = self._shape_path
         if shape is None:
+            # 描边沿轮廓线居中绘制：轮廓贴 0/h/w 时半个笔宽落在控件外被裁。
+            # 实测助手气泡左缘只剩 1 设备像素、右侧 2 像素且更实——左侧看着
+            # 像被边界切掉一点（2026-11-28）。有边框时四边内缩半个笔宽。
+            inset = (BORDER_WIDTH / 2.0) if has_border else 0.0
             path = QPainterPath()
-            path.addRoundedRect(0.0, float(top), float(w), float(max(0, h - top)), RADIUS, RADIUS)
+            path.addRoundedRect(
+                inset,
+                float(top) + inset,
+                float(w) - 2.0 * inset,
+                float(max(0.0, h - top - 2.0 * inset)),
+                RADIUS,
+                RADIUS,
+            )
 
             if self._pin_side == "right":
                 px = float(w - PIN_INSET)
@@ -206,7 +219,7 @@ class MessageBubble(QWidget):
         # 填充+描边合并为一次 drawPath（brush 填内部 + pen 描居中轮廓；Qt 同一次
         # 绘制先 brush 后 pen，与旧「先填后描」视觉等价，抗锯齿栅格化减半）。
         # 无边框时退化为 NoPen，与旧行为一致。
-        if self._border_color.isValid() and self._border_color.alpha() > 0:
+        if has_border:
             pen = QPen(self._border_color)
             pen.setWidthF(BORDER_WIDTH)
             painter.setPen(pen)

@@ -16631,6 +16631,10 @@ class OpenAIChatToolWindow(ToolWindow):
             except Exception:
                 pass
             widget.heightChanged.connect(self._on_message_card_height_changed)
+            try:
+                widget.groupToggleRequested.connect(self._on_message_group_toggle, Qt.UniqueConnection)
+            except TypeError:
+                pass  # 卡片重新插入列表时已连接
             # 🐛 修复：只在 resize 周期**真的在飞行**时才把新卡片置为占位。
             # 仅凭 _resize_preview_active（可能泄漏）会让新卡片永久空白。
             if self._resize_preview_active and self._is_resize_cycle_active():
@@ -21025,6 +21029,13 @@ class OpenAIChatToolWindow(ToolWindow):
             scroll_bar.setValue(self._landed_bottom_value())
         self._bottom_anchor_timer.start()
         self._scroll_diag("anchor")
+
+    def _on_message_group_toggle(self):
+        """在折叠改变布局前，以点击时的阅读位置决定是否继续贴底。"""
+        if not self._is_view_at_bottom():
+            self._user_intentionally_away_from_bottom = True
+            self._scroll_bottom_timer.stop()
+            self._pending_scroll_to_bottom = False
 
     def _on_message_card_height_changed(self, _height: int):
         """卡片高度变化时的滚动处理

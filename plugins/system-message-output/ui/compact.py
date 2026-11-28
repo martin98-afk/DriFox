@@ -13,9 +13,8 @@ def grouped_runs(kinds, *, streaming):
 
 CSS = '''
 #content-placeholder > .dfx-group-button { appearance:none; display:flex; align-items:center; width:100%; gap:.45em;
- background:transparent; border:0; outline:none; text-align:left; font:inherit; font-size:calc(1em - 1px);
- line-height:1.5; color:var(--text); cursor:pointer; padding:4px 0; margin:2px 0; }
-.dfx-group-button .dfx-group-label { opacity:.76; }
+ background:transparent; border:0; outline:none; text-align:left; font:inherit; font-size:.82em;
+ line-height:1.5; color:var(--text-muted); cursor:pointer; padding:4px 0; margin:2px 0; }
 .dfx-group-button::before { content:''; width:.38em; height:.38em; margin:0 .4em 0 .2em;
  border-right:1.3px solid currentColor; border-bottom:1.3px solid currentColor; opacity:.76;
  transform:rotate(-45deg); transition:transform 120ms ease; }
