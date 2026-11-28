@@ -8035,10 +8035,6 @@ class CodeWebViewer(QWebEngineView):
     # 「内容变了」误判「没变」永久跳渲。
     _TAIL_INLINE_MIN_DELTA = 512
     _TAIL_INLINE_MIN_INTERVAL_S = 1.5
-    # 预编译代码块闭合检测：``` / ~~~ 双形态（~~~ 是渲染型 fence 合法开栏，
-    # 与 _CHART_FENCE_OPEN_RE 口径对齐；缺 ~~~ 则 ~~~ 围栏结尾永不命中硬边界
-    # immediate，图表落地退化为 90/300ms 定时器）
-    _CLEAN_BOUNDARY_CODE_BLOCK_RE = re.compile(r"(?:```|~~~)[\s]*$")
     # 长内容**历史渲染**走线程池的字符阈值（仅用于非"流式结束"的渲染）。
     # ⚠️ 结束路径后面紧跟 _cleanup_render_cache()，它 `self._render_seq += 1`
     # 会把异步结果判为过期丢弃（详见 _perform_update 内注释）——所以结束态必须
@@ -8150,20 +8146,14 @@ class CodeWebViewer(QWebEngineView):
         # 段落结束（双换行）：O(1) 后缀检测
         if md_text.endswith("\n\n"):
             return True
-        # think 块 / 代码块闭合：尾向判定（P2，与软边界同款写法）。
-        # ⚠️ 不要改成尾部锚定正则（曾试过 `</think>[\s]*$|```[\s]*$`）：
-        # re 无法跳到串尾，多分支尾部匹配是全串逐位回溯，实测比 rstrip 慢 3x。
-        # 尾向 isspace 跳空白后用 endswith/search 的 (start, end) 窗口参数在
-        # **原串**上做尾窗判定：全程零拷贝（rstrip 在尾部有空白时全串拷贝），
-        # 语义与 rstrip 版严格等价——rstrip 剥 Unicode 空白全集，isspace 同全集；
-        # re 的 endpos 语义即「串在 endpos 处截断」，$ 匹配 endpos，无窗口越界。
+        # 跳过 Unicode 尾空白，直接比较闭合标记，避免每批从头搜索整段正文。
         i = len(md_text) - 1
         while i >= 0 and md_text[i].isspace():
             i -= 1
         if i < 0:
             return False
         end = i + 1
-        return md_text.endswith("</think>", 0, end) or CodeWebViewer._CLEAN_BOUNDARY_CODE_BLOCK_RE.search(md_text, 0, end) is not None
+        return md_text.endswith(("</think>", "```", "~~~"), 0, end)
 
     @staticmethod
     def _has_reached_soft_boundary(md_text: str) -> bool:
@@ -9454,7 +9444,18 @@ class CodeWebViewer(QWebEngineView):
         self._v2_live_finalize_requested = True
         self._schedule_render(immediate=True)
 
-    _PROSE_MARKUP = re.compile(r"[`~*#<>\[\]_|$\\&]|(?:^|\n)\s*(?:[-+=>:]|\d+[.)]\s| {4}|\t)")
+    # 缩进只需匹配本行：跨行的空白可从下一行重新判定。否则连续空行会反复回溯。
+    _LINE_MARKUP = r"[^\S\n]*(?:[-+=>:]|\d+[.)]\s| {4}|\t)"
+    _FIRST_LINE_MARKUP = re.compile(_LINE_MARKUP)
+    _NEXT_LINE_MARKUP = re.compile(r"\n" + _LINE_MARKUP)
+
+    @classmethod
+    def _has_prose_markup(cls, text: str) -> bool:
+        return (
+            any(marker in text for marker in "`~*#<>[]_|$\\&")
+            or cls._FIRST_LINE_MARKUP.match(text) is not None
+            or cls._NEXT_LINE_MARKUP.search(text) is not None
+        )
 
     def _v2_live_active(self, blocks, active: Optional[int] = None) -> Optional[int]:
         """本批可走纯文本尾态的活动块下标；None = 走常规全量渲染。
@@ -9474,14 +9475,14 @@ class CodeWebViewer(QWebEngineView):
             return None
         _text = str((blk.get("content") if btype == "reasoning" else blk.get("text")) or "")
         if btype == 'text' and self._tool_compact_mode and (
-            '```' in _text or '~~~' in _text or '<svg' in _text.lower()
+            '```' in _text or '~~~' in _text or ('<' in _text and '<svg' in _text.lower())
         ):
             # 此块已经有结构边界；不能再把累计全文或 delta 当 textContent 送进揭示队列。
             # 后续批次仍按块 diff，普通代码继续使用正式的高亮/复制控件。
             return None
         if len(_text) < self._LIVE_MIN_CHARS:
             if not (btype == 'text' and self._tool_compact_mode and _text
-                    and not self._PROSE_MARKUP.search(_text)):
+                    and not self._has_prose_markup(_text)):
                 return None
         return active
 
@@ -9538,7 +9539,7 @@ class CodeWebViewer(QWebEngineView):
             # 段尾暂停（无后续 chunk）时降载门限会让含 markdown 标记的尾部源码
             # 永久滞留，直到 finish 才格式化（用户可见「部分正文没渲染」）。
             # 安排一次性兜底：降载窗口到期后补渲一次，等价于 v1 的安全定时器。
-            if self._PROSE_MARKUP.search(text):
+            if self._has_prose_markup(text):
                 self._arm_v2_tail_settle(self._TAIL_INLINE_MIN_INTERVAL_S - since)
             return None
         # [E3] v2 尾部行内渲染耗时打点（守卫同 v1，见 _render_tail_inline）
@@ -9576,7 +9577,7 @@ class CodeWebViewer(QWebEngineView):
         if not key or key != self._v2_live_key or not self._streaming or not self._render_v2:
             return
         tail = self._v2_live_sent[self._v2_live_formalized_len:]
-        if not tail or not self._PROSE_MARKUP.search(tail):
+        if not tail or not self._has_prose_markup(tail):
             return
         html = self._v2_live_tail_html(tail, reasoning=False)
         page = self.page()
@@ -9758,7 +9759,7 @@ class CodeWebViewer(QWebEngineView):
         # markdown（与 _v2_live_tail_html 的 reasoning 保守口径一致）。
         # 长思考只在结束或切块时定型，活动期间始终保留 96px 流式窗口。
         plain_prose = (live_index is not None and not live_reasoning and ctx.compact
-                       and not self._PROSE_MARKUP.search(live_text))
+                       and not self._has_prose_markup(live_text))
         if (
             not plain_prose and live_index is not None
             and not force_full

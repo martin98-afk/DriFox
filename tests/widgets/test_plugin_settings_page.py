@@ -45,7 +45,7 @@ def _info(tmp_path: Path, name: str, **manifest) -> PluginInfo:
 
 @pytest.fixture()
 def env(tmp_path, monkeypatch, qapp):
-    monkeypatch.setattr("app.utils.utils.get_app_data_dir", lambda: str(tmp_path))
+    monkeypatch.setattr("app.utils.utils.get_app_data_dir", lambda: tmp_path)
     reg = PluginConfigRegistry.get_instance()
     reg.register(
         parse_config_schema(
@@ -132,6 +132,56 @@ def test_filter_chip_pending(env, qapp):
     page._on_chip_clicked("todo")
     visible = [r._entry.info.name for r in page._rows if not r.isHidden()]
     assert visible == ["voice-reply"]
+
+
+def test_filter_keeps_detail_in_results_and_recovers_from_empty(env, qapp):
+    page = page_mod.PluginSettingsPage()
+    page.reload(force=True)
+    page.reload(force=True)
+    _pump(qapp)
+    assert len(page._rows) == len(page._entries)
+    page._search.setText("提示词")
+    page._apply_filter()
+    assert page._current == "git-panel"
+    page._search.setText("没有这个字段")
+    page._apply_filter()
+    assert page._current is None
+    assert page._detail.isHidden()
+    page._reset.click()
+    assert page._current == "voice-reply"
+    assert all(not row.isHidden() for row in page._rows)
+
+
+def test_required_field_save_updates_hint_and_pending_results(env, qapp):
+    page = page_mod.PluginSettingsPage()
+    page.reload(force=True)
+    page._on_chip_clicked("todo")
+    field = page._detail._form._rows["api_key"]
+    field.setText("test-value")
+    field.editingFinished.emit()
+    _pump(qapp)
+    assert page._detail._missing_hint.isHidden()
+    assert page._chips["todo"].text() == "待配置 0"
+    assert page._current is None
+    page.reload(force=True)
+    page._on_chip_clicked("configured")
+    page._select("voice-reply")
+    assert page._detail._form._rows["api_key"].text() == "test-value"
+
+
+def test_settings_search_opens_matching_page(env, qapp):
+    from app.widgets.cards.settings.llm_settings_card import LLMSettingsCard
+
+    card = LLMSettingsCard()
+    card._nav_search.setText("提示音")
+    assert [key for key, btn in card._nav_buttons.items() if not btn.isHidden()] == ["common"]
+    card._nav_search.returnPressed.emit()
+    assert card._current_tab == "common"
+    assert card._page_title.text() == "通用"
+    card._nav_search.setText("不存在的设置")
+    assert not card._nav_empty.isHidden()
+    card._nav_search.clear()
+    assert not card._nav_buttons["plugins"].isHidden()
 
 def test_type_combo_filters_by_component(env, qapp):
     """类型下拉按组件能力过滤，并与状态 chips 叠加（AND）；「已停用」档已移除"""

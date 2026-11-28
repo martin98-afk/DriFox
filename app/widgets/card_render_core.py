@@ -4162,7 +4162,8 @@ def _extract_closed_segments(md: str):
         - stable_md_len: 最后一个完整闭合段结束后的字符偏移
         - segments: 闭合段列表（完整段落/代码块 markdown 原文）
     """
-    if not md:
+    # 空行是唯一切段边界。长段落仍在增长时，可直接跳过协议标签扫描。
+    if not md or "\n\n" not in md:
         return 0, []
 
     # 🐛 起点防护：扫描起点可能位于未闭合 `<think>`/`<tool>` 块内部

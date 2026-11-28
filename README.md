@@ -273,6 +273,8 @@ python main.py
 
 启动后进入设置添加服务商：API Key 或 OAuth 登录（GitHub Copilot / CodeBuddy / Gemini Code Assist），选择默认对话模型。模型元数据启动时从 models.dev 自动同步，24 小时缓存，增量合并。
 
+在系统设置左侧输入「字体」「通知」或「API Key」可筛选相关页面，按回车打开首个结果。「插件与集成 → 插件设置」默认显示有配置项的插件，可按组件类型、插件名称或配置字段进一步筛选。选择「待配置」可集中补齐缺项，选择「全部」可查看无配置项插件的权限与版本信息。
+
 ---
 
 ## 架构概要
@@ -435,6 +437,8 @@ pytest tests/perf -v                     # 性能基准（默认不收集）
 pytest tests/ui -m ui                    # 全链 UI 测试（默认不收集）
 python build.py                          # 打包（Win / Linux）
 ```
+
+Windows 安装包保留 Qt WebEngine 和 ANGLE，省去 PythonWin、Qt XML Patterns 及 KaTeX 的备用字体。离线公式从包内的 `app/resources/web/vendor/katex` 加载 WOFF2 字体。
 
 CI：`.github/workflows/release.yml`（tag 触发三平台构建）、`.github/workflows/marketplace.yml`（插件市场自动同步）。
 
