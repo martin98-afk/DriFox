@@ -81,6 +81,7 @@ class ToolPruneTier:
     description = "超阈值工具结果保留头尾、省略中段并附重查指引；报错结果阈值×4 优先保留错误栈；阈值为 0 时按模型上下文容量自动定"
     stages = frozenset(ALL_STAGES)
     cache_impact = CACHE_NONE
+    per_message = True
 
     def should_apply(self, view) -> bool:
         base = self._limit(view)

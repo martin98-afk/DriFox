@@ -80,6 +80,7 @@ class ToolNormalizeTier:
     description = "剥离 ANSI 转义与控制字符、压缩连续空行、去行尾空白；不删任何有效信息，每轮投影一致，不破坏 prompt cache"
     stages = frozenset(ALL_STAGES)
     cache_impact = CACHE_NONE
+    per_message = True
 
     def should_apply(self, view) -> bool:
         for m in view.messages:

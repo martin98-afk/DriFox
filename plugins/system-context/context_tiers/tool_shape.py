@@ -130,6 +130,7 @@ class ToolResultShapeTier:
     description = "超长 JSON 工具结果保留结构骨架（键名、数组头尾、长串截断），输出仍是合法 JSON，避免字符截断切碎结构；非 JSON 内容不动"
     stages = frozenset(ALL_STAGES)
     cache_impact = CACHE_NONE
+    per_message = True
 
     def _limit(self) -> int:
         return max(1000, cfg_int("json_shape_max_chars", _DEFAULT_MAX_CHARS))

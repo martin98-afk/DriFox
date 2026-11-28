@@ -95,7 +95,10 @@ class ContextPipeline:
     # ---------- 核心 cascade ----------
 
     def run(self, view: ContextView) -> ContextView:
+        target_reached = False
         for tier in self._chain(view.stage):
+            if target_reached and not getattr(tier, "per_message", False):
+                continue
             if not self._allow(tier, view):
                 continue
             try:
@@ -151,7 +154,9 @@ class ContextPipeline:
             if view.stage == STAGE_INGEST:
                 continue
             if view.used_tokens <= view.target_tokens:
-                break  # 达标即停
+                # 旧会话的逐条投影必须与追加的历史长度无关，否则续轮会改写旧前缀。
+                target_reached = True
+                continue
 
             if saved <= 0:
                 n = view.note_failure(tier.id)
