@@ -39,7 +39,6 @@ def test_upper_group_keeps_reading_position(ui_app, qtbot):
         initial_y = header_y()
         collapsed = viewer.height()
         target = viewer.focusProxy()
-        viewer._run_js_sync("""window.clickTrace=[];for(let type of ['click','mousedown','mouseup','dblclick']) document.addEventListener(type,e=>clickTrace.push([type,e.clientY,e.target.className]),true)""")
         qtbot.mouseClick(target, Qt.LeftButton, pos=header)
         qtbot.waitUntil(lambda: viewer.height() > collapsed + 10)
         qtbot.wait(350)
@@ -65,8 +64,6 @@ def test_upper_group_keeps_reading_position(ui_app, qtbot):
             widget.installEventFilter(watch)
         try:
             qtbot.mouseClick(target, Qt.LeftButton, pos=header)
-            qtbot.wait(120)
-            print("probe", viewer.height(), collapsed, viewer._run_js_sync("""[clickTrace,window.scrollY,Array.from(document.querySelectorAll('.dfx-group-button')).map(b=>[b.getAttribute('aria-expanded'), b.getBoundingClientRect().top]),document.body.scrollHeight]"""))
             qtbot.waitUntil(lambda: abs(viewer.height() - collapsed) <= 2)
             qtbot.wait(400)
             assert not positions, positions

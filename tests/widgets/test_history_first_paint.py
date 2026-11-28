@@ -451,6 +451,22 @@ def test_state_geometry_uses_screen_coordinates():
     assert state_b["layout_height"] == 1500
 
 
+def test_browser_boot_does_not_count_as_quiet_frames(qtbot, clock):
+    card = _FakeCard(y=0, height=136, settled=False, lazy=True)
+    card.viewer = types.SimpleNamespace(_is_js_ready=False)
+    win = _collector_host([card], value=0)
+    with mock.patch.object(mw, "MessageCard", _FakeCard):
+        assert win._history_first_paint_state()["unrendered_cards"] == 1
+
+    host = _Host()
+    gate = _make_gate(qtbot, host)
+    gate.begin("s1")
+    for _ in range(hfp._QUIET_TICKS + 1):
+        _tick(gate, clock, host, pending=1, unrendered=1, geometry="same")
+    _tick(gate, clock, host, pending=1, unrendered=0, geometry="same")
+    assert host.reveals == []
+
+
 def test_state_returns_none_when_geometry_unavailable():
     """窗口未布局（viewport 高度 0）→ 采集失败，状态机只等硬超时。"""
     win = _collector_host([_FakeCard(y=0, height=100, settled=True)], value=0, viewport_height=0)

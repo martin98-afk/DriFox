@@ -66,6 +66,8 @@ function _setGroupVisibility(node, hidden, animate) {
     };
 }
 window._applyMessageGroups = function(groups, streaming) {
+    // 完成态布局（含历史回放）已定型，让外层采用本批实测高度。
+    if (streaming === false && groups.length) _groupHeightSync = true;
     var root = document.getElementById('content-placeholder');
     var nodes = window._blockNodes(root);
     var manual = root._groupOverrides || (root._groupOverrides = new Map());

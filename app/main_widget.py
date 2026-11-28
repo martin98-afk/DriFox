@@ -12726,8 +12726,9 @@ class OpenAIChatToolWindow(ToolWindow):
                 if settled:
                     continue
                 pending_cards += 1
-                if getattr(widget, "role", None) != "user" and not getattr(
-                    widget, "_lazy_rendered", False
+                if getattr(widget, "role", None) != "user" and (
+                    not getattr(widget, "_lazy_rendered", False)
+                    or not getattr(getattr(widget, "viewer", None), "_is_js_ready", True)
                 ):
                     unrendered_cards += 1
         except (AttributeError, RuntimeError, TypeError):
