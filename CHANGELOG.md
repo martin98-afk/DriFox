@@ -1,10 +1,6 @@
-## 未发布
+## [v0.7.7] - 2026-11-28 (重新发布)
 
-- 插件设置页随窗口高度铺满内容区。左侧插件列表和右侧详情可独立滚动，滚动到边界时标题和筛选栏保持固定。
-
-## [v0.7.7] - 2026-11-28
-
-自 v0.7.6 以来的变更 | 提交数：31 · 文件变更：527 · +32966/-17456 | 贡献者：dingma, drifox-bot
+自 v0.7.6 以来的变更 | 提交数：34 · 文件变更：544 · +34127/-17541 | 贡献者：dingma, drifox-bot
 
 ### ✨ 新功能 (New Features)
 
@@ -36,6 +32,9 @@
 - **worktree / share-history UI** (`app/widgets/workbench_panel.py` · `tab_manager_window.py` · `plugins/worktree-manager/` · `plugins/share-history/`): 组件可见性与交互对齐，补齐面板测试。
 - **技能加载描述** (`plugins/system-hooks/hooks/inject_skills_content.py` · `plugins/assistant_hub/personas/build/persona.md` · `plugins/system-agents/agents/build.md`): 技能注入与提问规范措辞统一。
 - **性能账本与 viewer 高度回归** (`docs/perf/perf-ledger.md` · `tests/perf/` · `tests/widgets/`): 记录新基线，补齐 viewer 高度与流式游标测试。
+- **插件设置页滚动与布局** (`app/widgets/cards/settings/plugin_settings_page.py` · `llm_settings_card.py` · `tests/widgets/test_plugin_settings_page.py`): 设置页随窗口高度铺满内容区，左侧插件列表与右侧详情分别处理滚轮事件，滚动到边界时标题与筛选栏保持固定；页头与侧栏顶部对齐，新增页头 adopt / release 供布局接管，补齐页面控件与滚动行为用例，移除失效的滚动探针脚本。
+- **分组面板跟随状态** (`app/widgets/render/group_dom.py` · `app/widgets/card_render_core.py`): 内容持续增长时保持跟随最新状态，滚动容差一并调整。
+- **回复预览清理逻辑** (`app/utils/session_preview.py` · `tests/test_reply_preview.py`): 预览文本清洗规则增强，覆盖分支补单测。
 
 ### 🔧 其他 (Chores & Build)
 
