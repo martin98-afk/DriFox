@@ -23,7 +23,7 @@ from loguru import logger
 
 from PyQt5.QtCore import QObject, QRunnable, QThreadPool, Qt, pyqtSignal
 from PyQt5.QtWidgets import QFrame, QHBoxLayout, QLabel, QScrollArea, QSizePolicy, QVBoxLayout, QWidget
-from qfluentwidgets import BodyLabel, StrongBodyLabel, TransparentToolButton
+from qfluentwidgets import BodyLabel, IconWidget, TransparentToolButton, isDarkTheme
 
 from app.plugins.sdk import Colors, font_size_css
 from app.plugins.sdk import GitWorktreeDetector
@@ -239,6 +239,27 @@ class SystemWorktreePage(QWidget):
 
     def set_context_provider(self, provider: Callable[[], dict]) -> None:
         self._context_provider = provider
+        self._apply_plugin_icon()
+
+    # ── 头部（标题 + 插件图标）──
+
+    @staticmethod
+    def _title_qss() -> str:
+        return (
+            f"color: {Colors.TEXT_PRIMARY}; background: transparent;"
+            f" {get_font_family_css()} {font_size_css(16)}; font-weight: 600;"
+        )
+
+    def _apply_plugin_icon(self) -> None:
+        """用插件自己的 icon（ctx 注入的浅/深两套路径），主题切换后需重新应用"""
+        try:
+            from PyQt5.QtGui import QIcon
+
+            icon_info = (self._context_provider() or {}).get("plugin_icon") or {}
+            path = icon_info.get("dark" if isDarkTheme() else "light", "")
+            self._header_icon.setIcon(QIcon(path) if path else QIcon())
+        except Exception as e:
+            logger.debug(f"[worktree-manager] 头部图标应用失败: {e}")
 
     def _get_memory_manager(self):
         return getattr(self._context_provider().get("backend"), "memory_manager", None)
@@ -295,10 +316,17 @@ class SystemWorktreePage(QWidget):
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
+        Colors.refresh()
 
         header = QHBoxLayout()
-        header.setContentsMargins(12, 6, 8, 0)
-        self._title = StrongBodyLabel("工作树", self)
+        header.setContentsMargins(12, 8, 8, 0)
+        header.setSpacing(8)
+        # 头部图标：插件自带 icon.svg / icon_dark.svg（宿主经 ctx 注入当前主题路径）
+        self._header_icon = IconWidget(self)
+        self._header_icon.setFixedSize(18, 18)
+        header.addWidget(self._header_icon)
+        self._title = QLabel("工作树", self)
+        self._title.setStyleSheet(self._title_qss())
         header.addWidget(self._title)
         header.addStretch(1)
         self._close_btn = TransparentToolButton(get_icon("关闭"), self)
@@ -314,7 +342,7 @@ class SystemWorktreePage(QWidget):
         scroll.setFrameShape(QFrame.NoFrame)
         scroll.setWidgetResizable(True)
         root.addWidget(scroll)
-        Colors.refresh()
+        self._apply_plugin_icon()
         self._body = QWidget(scroll)
         self._body_layout = QVBoxLayout(self._body)
         self._body_layout.setContentsMargins(12, 12, 12, 12)
@@ -539,6 +567,8 @@ class SystemWorktreePage(QWidget):
     def refresh_style(self):
         """主题刷新：重建整页（内联样式在构造时写死）"""
         Colors.refresh()
+        self._title.setStyleSheet(self._title_qss())
+        self._apply_plugin_icon()
         self._empty_hint.setStyleSheet(
             f"background: transparent; color: {Colors.TEXT_MUTED};"
             f" {get_font_family_css()} {font_size_css(13)} padding: 24px;"
