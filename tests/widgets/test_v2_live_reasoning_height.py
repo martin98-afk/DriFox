@@ -5,10 +5,8 @@
 --------
 思考流式期间有两种 DOM 形态：
 
-1. 短思考（< ``_LIVE_MIN_CHARS``）走常规渲染 → ``.think-streaming`` +
-   ``.think-streaming-live``（CSS max-height: 96px，只看最新一段）。
-2. 长思考（≥ ``_LIVE_MIN_CHARS``）走 v2 纯文本尾态 → ``.v2-live-text
-   think-compact``，整段思考文本一次性进 DOM。
+1. 正文中嵌入的思考标签使用 ``.think-streaming-live``。
+2. 独立 reasoning 块从首段起使用 ``.v2-live-text.think-compact``。
 
 缺陷（2026-11-02 用户实测）
 --------------------------
@@ -74,7 +72,9 @@ def _build_skeleton_html() -> str:
 # ── 1. 骨架 CSS：思考尾态限高必须存在，且两个容器都覆盖 ──────────────
 def test_v2_reasoning_live_has_height_cap():
     html = _build_skeleton_html()
+    assert "深度思考中" not in html
     m = re.search(
+        r"\.think-streaming-live,\s*"
         r"#content-placeholder \.v2-live-text\.think-compact,\s*"
         r"#tool-content \.v2-live-text\.think-compact \{(.*?)\}",
         html,

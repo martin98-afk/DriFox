@@ -1124,7 +1124,7 @@ class CodeWebViewer(QWebEngineView):
 
         # 思考已完成标志：工具调用开始时置 True，阻止 _render_markdown_to_html 继续剥离 </think>
         self._thinking_finalized = False
-        # 流式思考首 chunk 标志：首 chunk 渲染"深度思考中..." spinner，后续静默累积不更新 DOM
+        # 流式思考首 chunk 标志：首段建立预览，后续合并刷新
         self._reasoning_streaming_started = False
         # <think> 标签文本流式思考标志：与 _reasoning_streaming_started 对应，
         # 用于 text 块中包含 <think> 标签时的静默累积策略
@@ -3118,31 +3118,22 @@ class CodeWebViewer(QWebEngineView):
                     color: var(--text-secondary);
                     line-height: 1.65;
                 }}
-                /* 思考块的尾态节点归 #tool-content（reasoning home = tool）：上一条
-                   规则带 #content-placeholder 前缀，命不中工具区 → pre-wrap 失效 →
-                   模型输出的换行被 HTML 折叠，整段思考挤成一长串连续文本。
-                   这里补齐工具区口径，并与 .think-content / .think-streaming 保持一致
-                   （斜体、思考字号）。 */
-                #tool-content .v2-live-text {{
+                /* 独立 reasoning 块和正文中的思考标签使用同一个限高预览窗口。 */
+                #content-placeholder .think-streaming-live,
+                #tool-content .think-streaming-live,
+                #content-placeholder .v2-live-text.think-compact,
+                #tool-content .v2-live-text.think-compact {{
                     white-space: pre-wrap;
                     word-break: break-word;
                     margin: 0;
+                    padding: 0;
                     color: var(--text-secondary);
-                    font-style: italic;
-                    font-size: {code_font_size + 2}px;
+                    background: {"rgba(15, 23, 42, 0.03)" if _is_light_diff else "rgba(255, 255, 255, 0.03)"};
+                    border-radius: 4px;
                     font-family: var(--dfx-font-family, '{font_family}', sans-serif);
+                    font-size: {code_font_size}px;
+                    font-style: italic;
                     line-height: 1.6;
-                }}
-                /* 思考块尾态（v2 活动 reasoning 块，见 _v2_live_html 的 think-compact）：
-                   必须与 .think-streaming-live 同口径限高 —— 只留最新一段作为预览。
-                   长思考（≥ _LIVE_MIN_CHARS）走 v2 尾态时曾是整段纯文本全高显示：
-                   切标签页返回触发 showEvent 补渲会把它从 96px 窗口换成全文
-                   （2026-11-02 用户实测「思考预览超长」）。两个容器都要覆盖：
-                   简洁模式思考 home=tool-content，非简洁模式 home=content-placeholder。
-                   overflow-y:hidden 仍可程序置 scrollTop，滚底由 _v2LiveAppendNow /
-                   _v2AfterPatch 维护。 */
-                #content-placeholder .v2-live-text.think-compact,
-                #tool-content .v2-live-text.think-compact {{
                     max-height: 96px;
                     overflow-y: hidden;
                     overflow-x: hidden;
@@ -3684,43 +3675,6 @@ class CodeWebViewer(QWebEngineView):
                     padding: 5px 10px;
                     color: var(--text-secondary);
                     font-weight: 600;
-                }}
-                /* 流式思考纯文本块（无折叠UI）— 金色圆环 + 背景 */
-                .think-streaming {{
-                    margin: 4px 0;
-                    background: transparent;
-                    border: none;
-                    border-radius: 6px;
-                    padding: 8px 10px;
-                    color: var(--text-secondary);
-                    font-style: italic;
-                    transition: border-color 220ms ease, background 220ms ease;
-                }}
-                .think-streaming[data-streaming="true"] {{
-                    background: transparent;
-                }}
-                /* 流式思考实时预览区：限高窗口（不撑卡片高度/不触发外部滚动），
-                   文本由 append_reasoning 节流 textNode append，内部程序性滚底；
-                   mask 顶部渐隐（旧内容淡出）、底部实（最新文字始终清晰可读） */
-                .think-streaming-live {{
-                    margin-top: 0;
-                    max-height: 96px;
-                    overflow-y: hidden;
-                    overflow-x: hidden;
-                    -webkit-mask-image: linear-gradient(180deg, transparent 0, #000 30%);
-                    mask-image: linear-gradient(180deg, transparent 0, #000 30%);
-                }}
-                .think-streaming-live-text {{
-                    white-space: pre-wrap;
-                    word-break: break-word;
-                    color: var(--text-muted);
-                    font-style: italic;
-                    line-height: 1.5;
-                }}
-                /* 文字未到时占位提示（首 chunk flush 后自动消失） */
-                .think-streaming-live-text:empty::before {{
-                    content: "深度思考中...";
-                    color: var(--text-muted);
                 }}
                 @keyframes think-tip-sweep {{
                     0% {{ background-position: 200% 0; }}
@@ -5692,6 +5646,9 @@ class CodeWebViewer(QWebEngineView):
                         // 必须在 _suppressScrollEvent=false 之前执行，
                         // 否则移动 DOM 触发的 scroll 事件会错误标记 _userScrolledWithin=true
                         if (window._toolCompactMode) reorganizeContent();
+                        document.querySelectorAll('.think-streaming-live').forEach(function(box) {{
+                            box.scrollTop = box.scrollHeight;
+                        }});
 
                         // 🐛 修复（区域独立 II）：所有影响正文高度的 DOM 操作（reorganize
                         // 搬移/折叠恢复/ECharts）完成后，恢复重建前的阅读位置。
@@ -6480,7 +6437,7 @@ class CodeWebViewer(QWebEngineView):
                         // 思考尾态限高窗口滚底：首帧 patch / 节点重建后没有增量
                         // append 可触发滚底，不处理会停在最旧的一段（用户看到的是
                         // 思考开头而非最新）。幂等：通常只有一个节点，O(1)。
-                        var _tlvs = document.querySelectorAll('.v2-live-text.think-compact');
+                        var _tlvs = document.querySelectorAll('.v2-live-text.think-compact, .think-streaming-live');
                         for (var _ti = 0; _ti < _tlvs.length; _ti++) {{
                             _tlvs[_ti].scrollTop = _tlvs[_ti].scrollHeight;
                         }}
@@ -9500,16 +9457,20 @@ class CodeWebViewer(QWebEngineView):
         btype = blk.get("type") if isinstance(blk, dict) else None
         if btype not in ("text", "reasoning"):
             return None
-        _text = str((blk.get("content") if btype == "reasoning" else blk.get("text")) or "")
-        if btype == 'text' and self._tool_compact_mode and (
+        if btype == "reasoning":
+            return active if str(blk.get("content") or "").strip() else None
+        _text = str(blk.get("text") or "")
+        # 协议思考须经过标签解析，长文本也不能当作普通正文追加。
+        if "<think>" in _text:
+            return None
+        if self._tool_compact_mode and (
             '```' in _text or '~~~' in _text or ('<' in _text and '<svg' in _text.lower())
         ):
             # 此块已经有结构边界；不能再把累计全文或 delta 当 textContent 送进揭示队列。
             # 后续批次仍按块 diff，普通代码继续使用正式的高亮/复制控件。
             return None
         if len(_text) < self._LIVE_MIN_CHARS:
-            if not (btype == 'text' and self._tool_compact_mode and _text
-                    and not self._has_prose_markup(_text)):
+            if not (self._tool_compact_mode and _text and not self._has_prose_markup(_text)):
                 return None
         return active
 
@@ -9631,6 +9592,8 @@ class CodeWebViewer(QWebEngineView):
         块——协议已切段，末尾 text 块不可能是活动块（``active_block_index``
         只跳过 text/reasoning，看不到这一点）。
         """
+        if blocks[active].get("type") == "reasoning" and self.__dict__.get("_thinking_finalized", False):
+            return True
         return requested or any(
             isinstance(b, dict) and b.get("type") not in ("text", "reasoning") for b in blocks[active + 1 :]
         )
@@ -10395,8 +10358,7 @@ class CodeWebViewer(QWebEngineView):
             # _markdown_text（回调到达时可能已被新 chunk 追加，造成差量跳过未渲染内容）。
             self._stable_html = html
             # 🐛 修复（思考泄漏）：md 含未闭合  thinking/<tool> 块时**不**推进差量基线。
-            # 首次流式迭代的 append_reasoning 首 chunk 会触发全量渲染（显示
-            # "深度思考中" spinner），此时 md 是部分的思考内容（未闭合 think）。
+            # 首次渲染预览时，md 可能只含未闭合的部分思考内容。
             # 若照常推进基线，后续差量扫描起点会落在 think 块内部，切片以
             # `内容 response` 开头（无 ` thinking` 配对）→ 配对守卫不触发 →
             # 残段被当普通正文渲染 → 思考内容泄漏到正文（后续全量渲染才消失）。

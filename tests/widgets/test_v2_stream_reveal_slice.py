@@ -208,6 +208,7 @@ def test_reasoning_delta_goes_to_tool_container(monkeypatch):
     reasoning = "思考内容很长的一段。" * 60  # > _LIVE_MIN_CHARS 走尾态
     blocks = [{"type": "reasoning", "content": reasoning}]
     v = _make_viewer(monkeypatch, blocks)
+    monkeypatch.setattr(CodeWebViewer, "_v2_render_ctx", lambda self: RenderCtx(streaming=True, compact=True))
     assert v._perform_update_v2() is True
 
     v._page.js_calls.clear()
@@ -241,7 +242,7 @@ def test_tool_container_has_live_text_style():
     """
     src = __import__("pathlib").Path(__file__).resolve().parents[2] / "app" / "widgets" / "card_viewers.py"
     code = src.read_text(encoding="utf-8")
-    i = code.find("#tool-content .v2-live-text {{")
+    i = code.find("#tool-content .v2-live-text.think-compact {{")
     assert i > 0, "缺少 #tool-content .v2-live-text 样式规则"
     block = code[i : code.find("}}", i)]
     assert "pre-wrap" in block, "工具区 live 尾态必须保留换行（pre-wrap）"

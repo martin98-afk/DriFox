@@ -159,69 +159,69 @@ def test_pool_lifecycle_after_cleanup(tmp_path):
 # ── 用例 3 ──
 
 
-def test_session_switch_memory_rebounds(ui_app, ui_session, qtbot, mem_sampler, tmp_path):
+def test_session_switch_memory_rebounds(ui_app, qtbot, mem_sampler, tmp_path):
     """双会话（其一含 5MB 级图片附件）切换 ×10：Private 中位数回落 ≤ 基线+30%。"""
-    from PyQt5.QtCore import Qt
-    from PyQt5.QtGui import QColor, QImage, QPainter
+    import os
 
-    mw = ui_session
-    sm = mw.session_manager
+    from PyQt5.QtGui import QImage
 
-    # 会话 B：文本 + 大 PNG 附件（随机噪声字节构造 → PNG 不可压缩，体积必达标）
-    sess_b = sm.create_new_session()
-    for i in range(20):
-        sess_b.messages.append({"role": "user", "content": f"B 问题 {i}"})
-        sess_b.messages.append({"role": "assistant", "content": "B 回答：" + "内容填充。" * 20})
-    import os as _os
+    mw = ui_app["chat_window"]
+    qtbot.wait(800)
+    sid_a, sid_b = "memory-switch-text", "memory-switch-image"
 
     w, h = 3840, 2160
-    raw = _os.urandom(w * h * 4)  # 随机 ARGB：PNG 无法压缩，文件 ≈ 位图体积的压缩上限外
+    raw = os.urandom(w * h * 4)
     big = QImage(raw, w, h, w * 4, QImage.Format_ARGB32)
     png_b = tmp_path / "b_big.png"
     assert big.save(str(png_b), "PNG")
-    size_kb = png_b.stat().st_size // 1024
-    assert size_kb > 2048, f"PNG too small: {size_kb}KB"
-    sess_b.messages[0]["_image_attachments"] = [str(png_b)]
+    del big, raw
+    assert png_b.stat().st_size > 2 * 1024 * 1024
+    for sid in (sid_a, sid_b):
+        messages = []
+        for i in range(20):
+            messages.append({"role": "user", "content": f"{sid} 问题 {i}"})
+            messages.append({"role": "assistant", "content": f"{sid} 回答：" + "内容填充。" * 20})
+        if sid == sid_b:
+            messages[-2]["_image_attachments"] = [str(png_b)]
+        mw.history_manager.save_session(messages=messages, title=sid, session_id=sid, project="UI测试项目")
+        mw.history_manager.flush()
+        assert mw.history_manager.get_session_by_session_id(sid)
 
-    def _switch(sess):
-        for idx, s in enumerate(sm.sessions):
-            if s is sess:
-                sm.switch_to_session(idx)
-                break
-        mw._display_current_session()
-        mw._release_inactive_session_messages()
+    def switch(sid):
+        mw._switch_to_session_by_id(sid)
+        assert mw.session_manager.get_current_session().session_id == sid
 
-    mem_sampler.sample("baseline")
-    session_a = sm.get_current_session()
+        def last_card_ready():
+            cards = mw._batch_cards[-1] if mw._batch_cards else None
+            return bool(cards and cards[-1]._lazy_rendered and cards[-1].is_layout_height_settled())
+
+        qtbot.waitUntil(last_card_ready, timeout=15000)
+
+    switch(sid_a)
+    qtbot.wait(800)
+    base = mem_sampler.sample("baseline")["main_private_mb"]
     for i in range(10):
-        _switch(sess_b if i % 2 == 0 else session_a)
-        if (i + 1) % 3 == 0:
-            gc.collect()
+        switch(sid_b if i % 2 == 0 else sid_a)
         mem_sampler.sample(f"switch_{i}")
         qtbot.wait(400)
-    _switch(session_a)
-    gc.collect()
-    qtbot.wait(5000)  # 终值窗口：切完 5s 内取最小
-    tail = [mem_sampler.sample(f"tail_{j}")["main_private_mb"] for j in range(3)]
 
-    base = mem_sampler.points[0]["main_private_mb"]
-    import statistics
-
-    mid = statistics.median(
-        [p["main_private_mb"] for p in mem_sampler.points[1:] if isinstance(p.get("main_private_mb"), (int, float))]
-    )
+    tail = []
+    for j in range(5):
+        qtbot.wait(1000)
+        tail.append(mem_sampler.sample(f"tail_{j}")["main_private_mb"])
     tail_min = min(v for v in tail if v is not None)
+    mid = mem_sampler.median_private()
     quota = mw._effective_max_rendered_cards()
-    assert mw._rendered_card_count <= quota, f"渲染数 {_rendered(mw)} 超配额 {quota}"
+    print(f"10 switches: private {base:.1f} -> {tail_min:.1f} MiB, rendered {mw._rendered_card_count}/{quota}")
+    assert mw._rendered_card_count <= quota, (
+        f"渲染数 {mw._rendered_card_count}/{quota}，视口 {mw._resolve_viewport_range()}，"
+        f"已渲染批次 {[i for i, cards in enumerate(mw._batch_cards) if any(c._lazy_rendered for c in cards or [])]}"
+    )
     assert pool_size(mw) <= 8, f"池 size {pool_size(mw)} > 8"
     # 中位数口径（S1-r 建议⑤），终值取切完 5s 窗口最小值
     assert tail_min <= base * 1.30 or mid <= base * 1.30, (
         f"内存未回落：base={base:.0f}MB median={mid:.0f}MB tail_min={tail_min:.0f}MB"
     )
-
-
-def _rendered(mw):
-    return mw._rendered_card_count
 
 
 def pool_size(mw):

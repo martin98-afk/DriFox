@@ -144,6 +144,35 @@ def test_recycle_path_render_is_counted_toward_quota(monkeypatch):
     assert win._rendered_card_count == 2, "补渲染必须把计数从 0 写回实况 2"
 
 
+def test_idle_sweep_reclaims_offscreen_cards_after_height_settles():
+    settled = False
+    win = _make_window(
+        _batch_cards=[[_card(idx=i)] for i in range(6)],
+        _rendered_card_count=6,
+        _effective_max_rendered_cards=lambda: 4,
+        _incremental_visible_batch_count=8,
+        _virtual_scroll_buffer=1,
+        _resolve_viewport_range=lambda vp=None: (4, 5),
+        _restore_window_batches=lambda: 1,
+        _batch_fully_rendered=lambda cards: settled,
+    )
+
+    def unload(idx):
+        win._batch_cards[idx] = None
+        win._decr_rendered_count(1)
+        return 0
+
+    win._unload_batch = unload
+    win._recycle_out_of_view_batches()
+    assert win._quota_waiting_for_height
+    assert win._rendered_card_count == 6
+
+    settled = True
+    win._recycle_out_of_view_batches()
+    assert win._rendered_card_count == 4
+    assert [i for i, cards in enumerate(win._batch_cards) if cards is None] == [0, 1]
+
+
 def test_recount_helper_uses_batch_cards_and_lazy_flag():
     """`_recount_rendered_cards` 是漂移兜底：按实况重算并同步全局计数。"""
     text = _src()
@@ -182,7 +211,7 @@ def test_stale_zero_count_recovers_before_quota_check():
         _batch_fully_rendered=lambda cards_: all(
             getattr(c, "_lazy_rendered", False) for c in cards_
         ),
-        _batch_is_protected=lambda idx, vp_range: False,
+        _batch_is_protected=lambda idx, vp_range, restore_win: False,
         _batch_distance=lambda idx, vp_range: 10 + idx,
         _resolve_viewport_range=lambda: (0, 1),
         _batch_is_streaming_or_welcome=lambda idx: False,

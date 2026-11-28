@@ -595,8 +595,7 @@ class MessageCard(SimpleCardWidget):
         # [E6] 流式协议状态机增量检测状态（append_text 首批懒建；流重置/finish/cleanup 置 None）
         self._proto_state: Optional[dict] = None
         self._pending_content: Optional[str] = None
-        # 流式思考实时预览：增量文本缓冲 + 节流推送（250ms 批量，避免逐 chunk runJavaScript）
-        self._streaming_live_buffer: str = ""
+        # 首段直接渲染，后续从活动块合并刷新。
         self._streaming_live_timer = QTimer(self)
         self._streaming_live_timer.setSingleShot(True)
         self._streaming_live_timer.setInterval(250)
@@ -4668,30 +4667,17 @@ class MessageCard(SimpleCardWidget):
                 return
             # [PERF] 增量 markdown 構建：已完成的 tool_result 塊走緩存，只有文本塊即時轉換
             self.viewer._lazy_markdown_cb = self._build_incremental_md
-            # 🆕 检测未闭合 <think> 标签：静默累积不触发渲染，与 append_reasoning 策略一致
-            # 避免每个思考文本 chunk 都触发全量渲染 → reorganizeContent → think-streaming
-            # DOM 节点反复 destroy+recreate 导致"思考中"状态闪烁。
-            # 🆕 检测未闭合 <think> / 插件注册 tag / 渲染型 fence：静默累积不触发渲染，与 append_reasoning 策略一致
-            # [E6] 检测对象从块全文改为「本卡协议状态 + 新段」增量推进（旧实现对
-            # 每批跑 4 个 O(全文) 扫描；chunk 劈开的标记串由尾部 carry 兜住）。
-            # 状态机随流重置（finish_streaming / cleanup）复位。
+            # 保留上批的半个标记，以便识别跨批到达的首段思考文字。
+            chunk = str(text or "")
+            carry = self._proto_state["carry"]
+            was_thinking = self._proto_state["think_open"]
             _think_unclosed, _tag_unclosed, _tool_unclosed, _fence_unclosed = self._proto_scan_chunk(
-                self._proto_state, str(text or "")
+                self._proto_state, chunk
             )
-            # 流式模式下增量追加纯文本到 DOM，让用户立即看到文字。
-            # 🐛 修复（高块闪现）：think 未闭合期间**不**调用 _append_text_incremental ——
-            # 否则思考内容会以普通正文逐行注入 #content-placeholder 堆叠成高块，
-            # 待 </think> 闭合后才由 _inject_think_cards 折叠成 think-compact，高块
-            # 闪现后消失。与 append_reasoning 一致：未闭合期间静默累积、仅靠全量
-            # 渲染落地；think 已闭合 / 无 think 标签时保持原有增量注入行为不变。
-            # 插件注册 tag（<mood> 等）与渲染型 fence（```echarts 等）未闭合同样
-            # 跳过增量注入：生肉进 DOM 后会被全量渲染的卡片/图表替换 →
-            # "文字/代码先流式出现又消失"
-            # 🆕 未闭合 <tool> 协议段（glm 等中转把工具调用以协议文本嵌在 content
-            # 里流式返回）同策略跳过增量注入：生肉闪现与 think 同症。
-            # [PERF] 旧实现此处对块全文跑两遍 count（O(n)），E6 已并入上方状态机增量判定。
+            # 思考（含闭合片段）、工具和未闭合插件内容交给对应渲染器，避免闪入正文。
             if (
                 self._streaming
+                and not was_thinking
                 and not _think_unclosed
                 and not _tag_unclosed
                 and not _fence_unclosed
@@ -4700,11 +4686,14 @@ class MessageCard(SimpleCardWidget):
                 self.viewer._append_text_incremental(text)
             if _think_unclosed:
                 if not self.viewer._think_text_streaming_started:
-                    # 首 chunk：立即渲染一次显示"深度思考中..." spinner
-                    self.viewer._think_text_streaming_started = True
+                    # 开标签可能单独到达，首段可见文字仍应走即时渲染。
+                    self.viewer._think_text_streaming_started = bool((carry + chunk).rpartition("<think>")[2].strip())
+                    if getattr(self.viewer, "_render_v2", True) is False:
+                        self.viewer._needs_full_render = True
                     self.viewer._thinking_finalized = False
                     self.viewer._schedule_render(immediate=immediate_render)
-                # 后续 chunk：静默累积，不触发渲染/高度更新
+                elif not self._streaming_live_timer.isActive():
+                    self._streaming_live_timer.start()
                 self._content_just_loaded = True
                 return
             # 🐛 插件注册 tag（<mood> 等）未闭合：增量注入已跳过（与 think 同策略）。
@@ -4737,6 +4726,9 @@ class MessageCard(SimpleCardWidget):
                     if self.viewer._is_js_ready and self.viewer.page():
                         self.viewer.page().runJavaScript("window._dfxStreamNote && window._dfxStreamNote.hide();")
                 self.viewer._fence_text_streaming = _fence_unclosed
+            if was_thinking and getattr(self.viewer, "_render_v2", True) is False:
+                self.viewer._needs_full_render = True
+            self._streaming_live_timer.stop()
             # <think> 已闭合或无 think 标签：恢复正常渲染
             self.viewer._think_text_streaming_started = False
             # 恢复 _thinking_finalized：避免 _render_markdown_to_html 误剥离
@@ -5286,9 +5278,8 @@ class MessageCard(SimpleCardWidget):
         # 🆕 Bug B：新块成为当前活动思考块。append_reasoning 只追加到它，
         # 避免后续 reasoning 内容合并进已完成的旧思考块导致多轮思考堆积顶部。
         self._active_thinking_block = self._content_data[-1]
-        # 新轮思考开始：丢弃旧块 live 预览残余（flush 到新块会串块；
-        # _content_data 完整，全量渲染不受影响）
-        self._discard_streaming_live()
+        # 结束上一块的定时刷新。
+        self._streaming_live_timer.stop()
         # 新一轮思考开始，仅重置 streaming 标志。
         # _thinking_finalized 留在 True（上一轮已完成），直到新 reasoning chunk 到达
         # （append_reasoning 首 chunk）才置为 False，防止在两轮之间的窗口期，
@@ -5676,9 +5667,8 @@ class MessageCard(SimpleCardWidget):
         # 🆕 Bug B：思考完成 → 活动块置空，后续 reasoning 不再追加到此块
         # （下一轮思考由 start_new_thinking_block 创建新块并重新登记）。
         self._active_thinking_block = None
-        # 清空 live 预览缓冲：残余文本随整块被完成态折叠框替换（_content_data
-        # 始终完整），不值得为被替换掉的 DOM 再发一次 append JS
-        self._discard_streaming_live()
+        # 完成态会读取整块，取消待发的预览刷新。
+        self._streaming_live_timer.stop()
         # 保持原始 content 用于 block-key 计算，确保与 _inject_think_cards
         # （通过 _build_incremental_md）产生的 key 一致。
         # 否则每次 _perform_update → reorganizeContent 会因 key 不匹配
@@ -5691,6 +5681,11 @@ class MessageCard(SimpleCardWidget):
 
         # 通知 viewer：思考已完成，后续全量渲染不要再剥离 </think>
         self.viewer._thinking_finalized = True
+
+        if getattr(self.viewer, "_render_v2", True):
+            self.viewer._lazy_markdown_cb = self._build_incremental_md
+            self.viewer._schedule_render(immediate=True)
+            return
 
         # [PERF-opt] 取消待处理的全量渲染定时器，防止覆盖增量 JS 思考框更新
         if hasattr(self.viewer, "_render_timer") and self.viewer._render_timer.isActive():
@@ -6242,111 +6237,50 @@ class MessageCard(SimpleCardWidget):
             self._pending_content = self._content_data
             return
 
-        # 🔧 不设置 _content_just_loaded：思考流式更新不应触发外部消息列表滚动，
-        # 仅 #tool-content 内部自动滚底（见 JS 注入代码）。与 _inject_tool_streaming_html
-        # 行为一致——工具与思考区是卡片内部独立滚动容器，正文区未更新时外部滚动条
-        # 不应被强制拉底（用户在阅读正文时会被打断）。
-        #
-        # 🆕 方案B：首个 reasoning chunk 渲染"深度思考中..." spinner，后续静默累积
-        # 不更新 DOM / 不触发渲染定时器 / 不更新高度，等 thinking 结束后的全量渲染
-        # （由 append_text / finish_streaming / _maybe_finish_thinking_for_tool 触发）一并处理
+        self.viewer._lazy_markdown_cb = self._build_incremental_md
         if not self.viewer._reasoning_streaming_started:
-            self.viewer._reasoning_streaming_started = True
-            # 首 chunk 也进 live buffer：全量渲染只出 spinner+空 live 区，
-            # 首 chunk 文本由 250ms 后的 flush 补上（此时渲染已完成，selector 可命中）
-            self._streaming_live_buffer += text
-            if not self._streaming_live_timer.isActive():
-                self._streaming_live_timer.start()
-            # 🐛 修复：仅在新 reasoning 真正开始接收内容时才重置 _thinking_finalized。
-            # start_new_thinking_block 不再重置此标志，防止两轮之间的空窗期
-            # 已完成 think-block 的 </think> 被错误剥离为 think-streaming。
+            self.viewer._reasoning_streaming_started = bool(text.strip())
             self.viewer._thinking_finalized = False
-            # 首 chunk：立即全量渲染显示 spinner。_schedule_render 会触发高度报告，
-            # 由 _on_message_card_height_changed 走"流式首屏"语义统一滚底——这与正文
-            # 首次到达场景一致（用户期待滚底跟随）。
-            # 不调用 _update_thinking_incremental：原方法会主动 reportHeightDebounced
-            # 并设置 _content_just_loaded，导致外部 chat_scroll_area 在正文未更新时被强制
-            # 滚底，破坏阅读。首 chunk 的全量渲染已自然带高度报告，无需额外触发。
-            self.viewer._lazy_markdown_cb = self._build_incremental_md
             self.viewer._schedule_render(immediate=True)
-        else:
-            # 后续 chunk：累积到 _content_data；同时缓冲进实时预览 buffer，
-            # 由节流 timer 批量 textNode append 到 .think-streaming-live（不重建 DOM、
-            # 不触发全量渲染、不报外部高度——live 区 CSS 限高，卡片高度不变，
-            # 外部聊天列表滚动不被打断）
-            self.viewer._lazy_markdown_cb = self._build_incremental_md
-            self._streaming_live_buffer += text
-            if not self._streaming_live_timer.isActive():
-                self._streaming_live_timer.start()
+        elif not self._streaming_live_timer.isActive():
+            self._streaming_live_timer.start()
 
     def _flush_streaming_live(self):
-        """把缓冲的思考增量文本推送到流式 live 预览区（textNode append，不重建 DOM）
-
-        节流策略：250ms 批量，避免逐 chunk runJavaScript；live 区 CSS 限高
-        （.think-streaming-live max-height:96px），内部程序性滚底，不报外部高度。
-        viewer 未就绪/已析构时静默丢弃（后续全量渲染会从 _content_data 带完整内容）。
-        """
-        if not self._streaming_live_buffer:
+        """从当前块刷新预览，首帧、延迟挂载和定时更新使用同一份文本。"""
+        if not self._lazy_rendered or not self.viewer or self.viewer._thinking_finalized:
             return
-        text = self._streaming_live_buffer
-        self._streaming_live_buffer = ""
-        if not self._lazy_rendered or not self.viewer:
-            return
-        if (self.viewer.__dict__.get('_v2_live_key') and self.viewer._render_v2
-                and self.viewer._tool_compact_mode):
-            # 首批已包含在 live 节点里；以权威块重新计算增量，不能把缓冲全文再写一遍。
-            self.viewer._lazy_markdown_cb = self._build_incremental_md
+        self.viewer._lazy_markdown_cb = self._build_incremental_md
+        inline_think = self.viewer._think_text_streaming_started
+        legacy_web = getattr(self.viewer, "_render_v2", True) is False
+        if inline_think or not legacy_web:
+            # 标签需重新解析。旧 Web 渲染器的正文差量路径会跳过未闭合标签。
+            if legacy_web:
+                self.viewer._needs_full_render = True
             self.viewer._schedule_render(immediate=True)
             return
+
+        # 旧 Web 渲染器只更新活动预览，避免重建整张卡。使用快照可兼容首帧延迟。
+        if not self._active_thinking_block:
+            return
+        self._solidify_text_blocks()
+        text = json.dumps(self._active_thinking_block["content"]).decode("utf-8")
         try:
-            # orjson.dumps 返回 bytes，需 decode 后嵌入 JS 字符串字面量；
-            # createTextNode 走安全文本节点，无 HTML 注入面
-            safe_text = json.dumps(text).decode("utf-8")
-            js_code = f"""
-            (function() {{
-                var t = document.querySelector('.think-streaming[data-streaming="true"] .think-streaming-live-text');
-                if (!t) {{ return; }}
-                t.appendChild(document.createTextNode({safe_text}));
-                var box = t.parentElement;
-                if (box) {{ box.scrollTop = box.scrollHeight; }}
-                // 工具区贴底跟随（内部有 _userScrolledUp 判断，用户上滚不拉底）
-                if (window._streamingActive && typeof _scrollToolContentToBottom === 'function') {{
-                    _scrollToolContentToBottom();
-                }}
-            }})();
-            """
             page = self.viewer.page()
-            if page is None:
-                return
-            page.runJavaScript(js_code)
-            # v2 长思考（≥ _LIVE_MIN_CHARS）活动块走 .v2-live-text 尾态，上面
-            # .think-streaming 的选择器命不中：补一条 v2 增量通道
-            # （两种形态互斥，各自 no-op 不会重复显示）。
-            _v2_key = getattr(self.viewer, "_v2_live_key", "") or ""
-            if _v2_key:
-                # 容器必须与 v2 尾态归属一致（简洁模式 tool-content，非简洁
-                # content-placeholder）：硬编码 tool-content 时非简洁模式的增量
-                # 选择器命不中，思考预览静默停更（2026-11-02 排查发现）。
-                _v2_cid = getattr(self.viewer, "_tool_target_id", "tool-content")
-                # orjson.dumps 返回 bytes：直接插进 f-string 会变成 b'...' 字面量，
-                # 发出的 JS 语法错误并静默失败（增量永不显示）。统一 decode。
-                _cid_js = json.dumps(_v2_cid).decode("utf-8")
-                _key_js = json.dumps(_v2_key).decode("utf-8")
-                page.runJavaScript(
-                    "if(typeof window._v2LiveAppend==='function')"
-                    f"window._v2LiveAppend({_cid_js},{_key_js},{safe_text},true);"
-                )
+            if page is not None:
+                page.runJavaScript(f"""
+                    (function() {{
+                        var t = document.querySelector('.think-streaming[data-streaming="true"] .think-streaming-live-text');
+                        if (!t) return;
+                        t.textContent = {text};
+                        var box = t.parentElement;
+                        box.scrollTop = box.scrollHeight;
+                        if (window._streamingActive && typeof _scrollToolContentToBottom === 'function') {{
+                            _scrollToolContentToBottom();
+                        }}
+                    }})();
+                """)
         except RuntimeError:
             pass
-
-    def _discard_streaming_live(self):
-        """清空流式 live 预览缓冲（思考块完成/新轮思考开始时调用）。
-
-        丢弃残余而非追加：旧块尾部文本若被 flush 到新块的 live 区开头会串块；
-        _content_data 始终完整，全量渲染不受影响。
-        """
-        self._streaming_live_buffer = ""
-        self._streaming_live_timer.stop()
 
     def _update_thinking_incremental(self, new_text: str):
         """流式思考增量更新（仅触发布局高度重算）
@@ -6437,6 +6371,7 @@ class MessageCard(SimpleCardWidget):
                 False，避免 N 卡同帧全量重渲；交互路径保持默认 True。
         """
         try:
+            self._streaming_live_timer.stop()
             # [PERF] 先停 20fps 流式脉冲动画：它会周期性 update() 整卡（重绘
             # 渐变边框/流动光点），与紧随其后的最终全量渲染抢主线程。
             # 这里只停定时器，不改任何状态标记（仍由下方 stop_streaming_anim 收尾）。

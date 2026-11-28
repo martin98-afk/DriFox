@@ -2,7 +2,7 @@
 """[E10] _write_extras 全删全插 → (sid, msg_idx) 差异 upsert 的红线回归。
 
 方案取舍（两候选）：
-- A（选定）：内存行集缓存 `_extras_written[sid][(idx, field)] = value_bytes` 与
+- A（选定）：内存行集缓存 `_extras_written[sid][(idx, field)] = 行指纹` 与
   本次 extract 产物 diff——新增/变更行 executemany INSERT OR REPLACE，消失行
   executemany 精确 DELETE；缓存缺失（重启首拍/写失败后）退化为旧全删全插路径
   重建基线。无变化拍 0 SQL。
@@ -303,3 +303,28 @@ def test_diff_final_state_equals_full_rewrite(store):
     # 二次相同写入：无变化拍后状态不变
     repo._write_extras("s-eq-a", e2)
     assert repo.load_extras_for_session("s-eq-a") == got_diff
+
+
+def test_evicted_session_rebuilds_extras(store, monkeypatch):
+    from app.core.store import session_repository
+
+    monkeypatch.setattr(session_repository, "_EXTRAS_BASELINE_SESSIONS", 2)
+    repo = store._session_repo
+    first = {0: {"diff": serialize("原始字段")}}
+    for sid in ("a", "b", "a", "c"):
+        repo._write_extras(sid, first)
+    assert list(repo._extras_written) == ["a", "c"]
+    assert repo.load_extras_for_session("b") == {0: {"diff": "原始字段"}}
+    repo._write_extras("b", {1: {"arguments": serialize({"n": 1})}})
+    assert repo.load_extras_for_session("b") == {1: {"arguments": {"n": 1}}}
+
+
+def test_retry_same_save_after_extras_write_failure(store, monkeypatch):
+    repo = store._session_repo
+    session = _make_session("retry", _mk_msgs(16))
+    with monkeypatch.context() as patch:
+        patch.setattr(repo, "_executemany_extras", lambda *args: False)
+        assert repo.save(session)
+    assert "retry" not in repo._extras_written
+    assert repo.save(session)
+    _assert_roundtrip(repo, "retry", session["messages"])

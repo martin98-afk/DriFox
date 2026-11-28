@@ -38,7 +38,7 @@ def test_other_four_caches_kept():
     """其余四处清理保持不动（防回归误删）。"""
     src = _cleanup_source()
     assert "clear_global_render_cache" in src
-    assert "estimate_tokens" in src and "cache_clear" in src
+    assert "clear_session_token_caches" in src
     assert "_render_tool_block_content" in src
     assert "invalidate_render_caches" in src
 

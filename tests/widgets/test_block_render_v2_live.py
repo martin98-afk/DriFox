@@ -206,7 +206,10 @@ def test_reasoning_live_active_detection(monkeypatch):
     assert v._v2_live_active(blocks, 0) == 0, "reasoning 活动块应被 live 通道接受"
 
     short = [{"type": "reasoning", "content": "短"}]
-    assert v._v2_live_active(short, 0) is None, "短内容仍走常规路径"
+    assert v._v2_live_active(short, 0) == 0
+    assert v._v2_live_active([{"type": "reasoning", "content": ""}], 0) is None
+    inline = [{"type": "text", "text": "<think>" + "长思考" * 200}]
+    assert v._v2_live_active(inline, 0) is None
 
 
 def test_finalize_incremental_skips_container_clear(monkeypatch):
@@ -322,6 +325,10 @@ def test_formalize_patch_matches_live_key(monkeypatch, reasoning):
     assert v._perform_update_v2()
     js = ''.join(v._page.js_calls)
     ops = _patch_ops(js, 'content-placeholder') + _patch_ops(js, 'tool-content')
+    if reasoning:
+        assert not ops
+        assert """_v2LiveAppend('tool-content',"live:0","**重点**""" in js
+        return
     assert [item['key'] for op in ops for item in op['items']] == ['live:0']
 
 
@@ -349,6 +356,8 @@ def test_rollback_forces_full_reload(monkeypatch):
 def test_compact_short_prose_enters_live_path(monkeypatch):
     blocks = [{"type": "text", "text": "短文本"}]
     v = _make_viewer(monkeypatch, blocks)
+    monkeypatch.setattr(CodeWebViewer, "_tool_compact_mode", True)
+    monkeypatch.setattr(CodeWebViewer, "_v2_render_ctx", lambda self: RenderCtx(streaming=True, compact=True))
     assert v._perform_update_v2() is True
     js = "".join(v._page.js_calls)
     ops = _patch_ops(js, "content-placeholder")

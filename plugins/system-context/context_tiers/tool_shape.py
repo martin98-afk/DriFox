@@ -21,9 +21,10 @@ from __future__ import annotations
 
 import json
 import re
-from collections import OrderedDict
+from itertools import islice
 from typing import Any, Dict, List
 
+from app.core.context import TextTransformMemo
 from app.plugins.contracts.context_policy import CACHE_NONE, STAGE_INGEST, TierOutcome, needs_tool_projection
 from app.plugins.sdk import cfg_int
 
@@ -43,11 +44,8 @@ _MAX_DEPTH = 6
 # 判断内容是否以 JSON 容器开头（避免 lstrip 复制大字符串）
 _JSON_START_RE = re.compile(r"\s*[\{\[]")
 
-# [E2-J] 骨架化产物 memo：(id(content), len(content)) → (原文引用, 产物)。
-# str 不可变；条目持有原文引用保证存活期内 id 不复用（键安全，参照 tool_result
-# 的 _tool_md_cache 先例）。命中即跳过 parse+dump；LRU 512 防空胀。
 _SHAPE_MEMO_MAX = 512
-_shape_memo: OrderedDict[tuple[int, int], tuple[str, str]] = OrderedDict()
+_shape_memo = TextTransformMemo(_SHAPE_MEMO_MAX, max_bytes=4 * 1024 * 1024)
 
 
 def _shrink(value: Any, depth: int = 0) -> Any:
@@ -64,12 +62,11 @@ def _shrink(value: Any, depth: int = 0) -> Any:
         # 已骨架化的对象：带省略标记且键数在上限内，原样返回（保证幂等）
         if "_omitted_keys" in value and len(value) <= _MAX_KEYS + 1:
             return value
-        items = list(value.items())
         out: Dict[str, Any] = {}
-        for k, v in items[:_MAX_KEYS]:
+        for k, v in islice(value.items(), _MAX_KEYS):
             out[str(k)] = _shrink(v, depth + 1)
-        if len(items) > _MAX_KEYS:
-            out["_omitted_keys"] = len(items) - _MAX_KEYS
+        if len(value) > _MAX_KEYS:
+            out["_omitted_keys"] = len(value) - _MAX_KEYS
         return out
     if isinstance(value, list):
         # 已骨架化的数组：头 + {"_omitted"} + 尾，原样返回（保证幂等）
@@ -87,39 +84,23 @@ def _shrink(value: Any, depth: int = 0) -> Any:
     return value
 
 
-def _shape_memo_write(memo_key: tuple[int, int], text: str, out: str) -> None:
-    """写入 memo 并在超限时按 LRU 逐出最旧条目。"""
-    _shape_memo[memo_key] = (text, out)
-    if len(_shape_memo) > _SHAPE_MEMO_MAX:
-        _shape_memo.popitem(last=False)
-
 def shape_json_text(text: str) -> str:
     """骨架化 JSON 文本；非 JSON 或无法缩短时原样返回（纯函数、幂等）。"""
-    memo_key = (id(text), len(text))
-    hit = _shape_memo.get(memo_key)
+    hit = _shape_memo.get(text)
     if hit is not None:
-        orig, out = hit
-        if orig is text:
-            _shape_memo.move_to_end(memo_key)
-            return out
-        _shape_memo.pop(memo_key, None)  # id 已被复用：过期条目，重算
-    stripped = text.strip()
-    if not stripped or stripped[0] not in "{[":
-        _shape_memo_write(memo_key, text, text)
-        return text
+        return hit
+    if not _JSON_START_RE.match(text):
+        return _shape_memo.put(text, text)
     try:
-        data = json.loads(stripped)
+        data = json.loads(text.strip())
     except Exception:
-        _shape_memo_write(memo_key, text, text)
-        return text
+        return _shape_memo.put(text, text)
     try:
         shaped = json.dumps(_shrink(data), ensure_ascii=False, separators=(",", ":"))
     except Exception:
-        _shape_memo_write(memo_key, text, text)
-        return text
+        return _shape_memo.put(text, text)
     out = shaped if len(shaped) < len(text) else text
-    _shape_memo_write(memo_key, text, out)
-    return out
+    return _shape_memo.put(text, out)
 
 
 class ToolResultShapeTier:

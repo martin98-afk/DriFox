@@ -15,9 +15,9 @@ cache_impact=none：纯函数、幂等、同内容每轮投影完全一致，前
 from __future__ import annotations
 
 import re
-from collections import OrderedDict
 from typing import Any, Dict, List
 
+from app.core.context import TextTransformMemo
 from app.plugins.contracts.context_policy import CACHE_NONE, STAGE_INGEST, TierOutcome, needs_tool_projection
 
 # 只处理长内容：短结果清洗收益低，复制开销反而显眼
@@ -39,37 +39,22 @@ _BLANK_RUN_RE = re.compile(r"\n{3,}")
 # 覆盖关系：`[ \t]+(?=\n)` 命中必然以空格或制表符收尾 → 含 " \n" 或 "\t\n"。
 _CLEAN_HINTS = ("\x1b", " \n", "\t\n", "\n\n\n")
 
-# [E2-K] 规范化产物 memo：(id(content), len(content)) → (原文引用, 产物)。
-# 规范化幂等（产物再跑输出不变），条目持原文引用保证 id 存活期内不复用；
-# 命中即跳过四条正则全文扫描。与 tool_shape 各自实现，无共享状态依赖。
 _NORM_MEMO_MAX = 512
-_norm_memo: OrderedDict[tuple[int, int], tuple[str, str]] = OrderedDict()
+_norm_memo = TextTransformMemo(_NORM_MEMO_MAX, max_bytes=4 * 1024 * 1024)
 
-def _norm_memo_write(memo_key: tuple[int, int], text: str, out: str) -> None:
-    """写入 memo 并在超限时按 LRU 逐出最旧条目。"""
-    _norm_memo[memo_key] = (text, out)
-    if len(_norm_memo) > _NORM_MEMO_MAX:
-        _norm_memo.popitem(last=False)
 
 def normalize_text(text: str) -> str:
     """无损规范化（纯函数、幂等）：ANSI / 控制字符 / 行尾空白 / 连续空行。"""
-    memo_key = (id(text), len(text))
-    hit = _norm_memo.get(memo_key)
+    hit = _norm_memo.get(text)
     if hit is not None:
-        orig, out = hit
-        if orig is text:
-            _norm_memo.move_to_end(memo_key)
-            return out
-        _norm_memo.pop(memo_key, None)  # id 已被复用：过期条目，重算
+        return hit
     if not any(h in text for h in _CLEAN_HINTS) and _CTRL_RE.search(text) is None:
-        _norm_memo_write(memo_key, text, text)
-        return text
+        return _norm_memo.put(text, text)
     out = _ANSI_RE.sub("", text)
     out = _CTRL_RE.sub("", out)
     out = _TRAILING_WS_RE.sub("", out)
     out = _BLANK_RUN_RE.sub("\n\n", out)
-    _norm_memo_write(memo_key, text, out)
-    return out
+    return _norm_memo.put(text, out)
 
 
 class ToolNormalizeTier:

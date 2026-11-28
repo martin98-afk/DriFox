@@ -281,7 +281,10 @@ def estimate_tokens(text: str, model: str = "gpt-4") -> int:
     if not text:
         return 0
     _cache_text_reg.text = text
-    return _estimate_tokens_cached(hash(text), len(text), model)
+    try:
+        return _estimate_tokens_cached(hash(text), len(text), model)
+    finally:
+        _cache_text_reg.text = None
 
 
 # 内层缓存的原文寄存器：thread-local（各线程独立，无锁）
@@ -405,6 +408,13 @@ def _get_prefix_cursors() -> dict:
         c = {}
         _prefix_cursor_cache_local.cursors = c
     return c
+
+
+def clear_session_token_caches() -> None:
+    """清理调用线程持有的消息列表和对应游标，以及进程共享的文本估算。"""
+    _get_token_cache().clear()
+    _get_prefix_cursors().clear()
+    _estimate_tokens_cached.cache_clear()
 
 
 def _prefix_cursor_store(messages: list, model: str, tools_sig: int, raw_total: int) -> None:

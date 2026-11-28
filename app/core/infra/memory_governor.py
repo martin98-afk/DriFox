@@ -160,12 +160,9 @@ def _cleanup_global_lru_caches():
     except Exception:
         pass
     try:
-        # lru_cache 挂在内层 _estimate_tokens_cached 上，estimate_tokens 是普通
-        # 函数无 cache_clear —— 曾调错对象，AttributeError 被静默吞掉，8192 条
-        # token 估算缓存从未被清理。
-        from app.core.infra.token_estimator import _estimate_tokens_cached
+        from app.core.infra.token_estimator import clear_session_token_caches
 
-        _estimate_tokens_cached.cache_clear()
+        clear_session_token_caches()
     except (ImportError, AttributeError) as e:
         logger.warning(f"[memory_governor] token 估算缓存清理失败: {e}")
     try:

@@ -1607,16 +1607,11 @@ def _render_think_block(content: str, completed: bool = True, compact: bool = Fa
     </div>
 </div>"""
 
-    # ── 流式态：无 spinner 头部行，直接展示实时思考文字（live 区）──
-    # live 区由 append_reasoning 节流推送增量文本（textNode append，不重建 DOM），
-    # 高度封顶不撑卡片，不触发外部滚动。文字为空时 CSS :empty 占位提示。
-    # 样式见 card_viewers.py 骨架 CSS。
-    font_style_inline = f"{get_font_family_css()} font-size: {scale_font_size(13)}px;"
-    return f"""<div class="think-streaming"{_flip_attr} data-streaming="true" style="margin: 4px 0; padding: 6px 10px; border: none; border-radius: 6px;">
-    <div class="think-streaming-live" style="{font_style_inline}">
-        <div class="think-streaming-live-text"></div>
-    </div>
-</div>"""
+    # 首帧及重新挂载时直接使用当前快照，HTML 中只插入转义后的文本。
+    return (
+        f'<div class="think-streaming"{_flip_attr} data-streaming="true">'
+        f'<div class="think-streaming-live"><div class="think-streaming-live-text">{escape(content)}</div></div></div>'
+    )
 
 
 def _render_think_block_lightweight(content: str, completed: bool = True) -> str:
@@ -1655,13 +1650,7 @@ def _render_think_block_lightweight(content: str, completed: bool = True) -> str
     </div>
 </div>"""
 
-    # ── 流式态：同 _render_think_block，直接展示实时思考文字 ──
-    font_style_inline = f"{get_font_family_css()} font-size: {scale_font_size(13)}px;"
-    return f"""<div class="think-streaming" data-streaming="true" style="margin: 4px 0; padding: 6px 10px; border: none; border-radius: 6px;">
-    <div class="think-streaming-live" style="{font_style_inline}">
-        <div class="think-streaming-live-text"></div>
-    </div>
-</div>"""
+    return _render_think_block(content, completed=False)
 
 
 def _has_unclosed_think(text: str) -> bool:
@@ -3869,7 +3858,8 @@ _SKELETON_CACHE_MAX = 48
 # _progDepth，替代 _lastFollowTop 等值比较），scroll 判定容差 4px→24px，新一轮
 # 流式重置 _followTail，搬移/重排后补一次置底。修「没动滚轮，工具栏自己就不置底」。
 # v103：简洁思考预览按内容宽度排版，最多两行；原位更新保留图标和文字样式。
-_SKELETON_CACHE_VERSION = 103
+# v104：两种思考流共用预览样式，移除空预览提示。
+_SKELETON_CACHE_VERSION = 104
 
 
 def _js_literal(value) -> str:
@@ -3988,8 +3978,7 @@ def _has_unclosed_think_or_tool(md: str) -> bool:
     """md 中是否存在未闭合的 ``<think>`` / ``<tool>`` / 插件注册 tag 块（开标签数 > 闭合标签数）。
 
     用途：全量渲染应用后决定是否推进差量基线 `_stable_md_len`。
-    首次流式迭代的 `append_reasoning` 首 chunk 会触发全量渲染（显示
-    "深度思考中" spinner），此时 md 是**部分**的思考内容（未闭合 think）。
+    首次渲染思考预览时，md 可能只包含尚未闭合的部分思考内容。
     若基线照常推进到该位置（think 块内部），后续差量扫描的切片会以
     `内容</think>` 开头（无 `<think>` 配对）→ 配对守卫不触发 →
     残段被当普通正文渲染 → 思考内容泄漏到正文。

@@ -44,14 +44,15 @@ def test_compact_grouped_stream(qapp, qtbot, compact_output_plugin):
         states = f"{buttons}.map(b=>b.getAttribute('aria-expanded'))"
         js("""window._legacyFrames=0; (function sample(){if(document.getElementById('tool-section').getBoundingClientRect().height>0)window._legacyFrames++;if(!window._endProbe)requestAnimationFrame(sample)})()""")
         card.start_streaming_anim()
-        first = ('长思考内容用于检验分组滚动窗口。' * 12 + '\n') * 40 + '第一段思考结尾。'
+        first = "先检查分组。"
         card.append_reasoning(first)
         live = "document.querySelector('.dfx-group-body .v2-live-text.think-compact')"
-        qtbot.waitUntil(lambda: bool(js(f'!!{live}')), timeout=5000)
-        qtbot.wait(1100)
-        addition = '继续思考到最新一行。' * 100
+        qtbot.waitUntil(lambda: js(f'{live} && {live}.textContent') == first, timeout=5000)
+        js(f'window.firstPreview = {live}')
+        addition = ('继续思考到最新一行。' * 12 + '\n') * 40
         card.append_reasoning(addition)
         qtbot.waitUntil(lambda: js(f'{live} && {live}.textContent') == first + addition, timeout=5000)
+        assert js(f'firstPreview === {live}')
         live_box = js(f'[{live}.clientHeight,{live}.scrollHeight,{live}.scrollTop]')
         height, content_height, top = live_box
         assert 0 < height <= 96 and content_height > height and abs(content_height-height-top) <= 2, live_box
@@ -149,6 +150,55 @@ def test_compact_grouped_stream(qapp, qtbot, compact_output_plugin):
             assert abs(card.height() - card.viewer.height() - overhead) <= 2
     finally:
         cfg.set(cfg.ui_compact_tool_area, old, save=False)
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_inline_think_matches_reasoning_preview(qapp, qtbot, compact_output_plugin, monkeypatch, legacy):
+    if os.environ.get("DRIFOX_VISIBLE_CADENCE") != "1" or qapp.platformName() == "offscreen":
+        pytest.skip("需开启真窗 WebEngine 回放")
+    from app.core.infra.webengine_profile import init_shared_web_profile
+    from app.widgets.message_card import MessageCard
+
+    monkeypatch.setattr("app.widgets.card_viewers._render_v2_enabled", lambda: not legacy)
+    init_shared_web_profile()
+    card = MessageCard("assistant")
+    qtbot.addWidget(card)
+    card.resize(640, 400)
+    card.show()
+    card.ensure_rendered()
+    qtbot.waitUntil(lambda: card.viewer._is_js_ready)
+    js = card.viewer._run_js_sync
+    card.start_streaming_anim()
+    card.append_reasoning("先检查输入")
+    live_class = ".think-streaming-live" if legacy else ".v2-live-text.think-compact"
+    live = f"document.querySelector('{live_class}')"
+    qtbot.waitUntil(lambda: js(f"{live} && {live}.textContent") == "先检查输入")
+
+    card.append_reasoning("并确认后续内容")
+    qtbot.waitUntil(lambda: js(f"{live} && {live}.textContent") == "先检查输入并确认后续内容")
+
+    def style(selector):
+        return js(f"""(function(el) {{
+            var s = getComputedStyle(el);
+            return [s.fontFamily, s.fontSize, s.fontStyle, s.lineHeight, s.color,
+                    s.backgroundColor, s.padding, s.whiteSpace, s.maxHeight];
+        }})({selector})""")
+
+    expected = style(live)
+    card.append_text("第一段正文。\n\n<th")
+    card.append_text("ink>")
+    card.append_text("检查 <b>文本</b> & 换行")
+    inline = "document.querySelector('.think-streaming-live')"
+    qtbot.waitUntil(lambda: js(f"{inline} && {inline}.textContent") == "检查 <b>文本</b> & 换行")
+    assert style(inline) == expected
+    rest = "\n后续思考" * 150
+    card.append_text(rest)
+    qtbot.waitUntil(lambda: js(f"{inline} && {inline}.textContent") == "检查 <b>文本</b> & 换行" + rest)
+    assert js(f"{inline}.scrollTop > 0")
+    card.append_text("</think>第二段正文。")
+    qtbot.waitUntil(lambda: bool(js(f"{inline} === null")))
+    assert "第二段正文。" in js("document.getElementById('content-placeholder').innerText")
+    card.finish_streaming()
 
 
 def test_completed_group_icons_on_replay(qapp, qtbot, compact_output_plugin):

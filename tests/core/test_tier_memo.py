@@ -64,11 +64,11 @@ def test_shape_memo_miss_recomputes():
     out = shape_json_text(_big_json(n_keys=100))
     assert '"_omitted_keys"' in out
 
-def test_shape_memo_id_reuse_stale_entry():
+def test_shape_memo_id_reuse_stale_entry(monkeypatch):
     """id 复用防线：过期条目（orig is not text）不返回 stale 产物。"""
     text = _big_json()
-    fake_orig = "unrelated text with different content body"
-    _shape_mod._shape_memo[(id(text), len(text))] = (fake_orig, "STALE")
+    monkeypatch.setattr("app.core.context.text_memo.id", lambda _: 1, raising=False)
+    _shape_mod._shape_memo.put("unrelated", "STALE")
     out = shape_json_text(text)
     assert out != "STALE"
     assert out == shape_json_text(_big_json()), "重算产物应与干净计算一致"
@@ -120,11 +120,11 @@ def test_normalize_memo_miss_and_idempotent():
     assert out2 != out1
     assert normalize_text(out1) == out1
 
-def test_normalize_memo_id_reuse_stale_entry():
+def test_normalize_memo_id_reuse_stale_entry(monkeypatch):
     """id 复用防线：过期条目不返回 stale 产物。"""
     dirty = "\x1b[31mred\x1b[0m and trailing   \n" * 30
-    fake_orig = "completely other body"
-    _norm_mod._norm_memo[(id(dirty), len(dirty))] = (fake_orig, "STALE")
+    monkeypatch.setattr("app.core.context.text_memo.id", lambda _: 1, raising=False)
+    _norm_mod._norm_memo.put("unrelated", "STALE")
     out = normalize_text(dirty)
     assert out != "STALE"
     assert out == normalize_text(dirty + "#v2").replace("#v2", "") or out.startswith("red and trailing"), (
@@ -136,6 +136,23 @@ def test_normalize_memo_lru_bound():
     for i in range(_norm_mod._NORM_MEMO_MAX + 50):
         normalize_text(f"text {i} with trailing   \n and \x1b[0m codes")
     assert len(_norm_mod._norm_memo) <= _norm_mod._NORM_MEMO_MAX
+
+def test_byte_budget_counts_shared_text_once_and_keeps_hot_entries():
+    from app.core.context import TextTransformMemo
+
+    texts = [str(i) + "正文" * 80 for i in range(4)]
+    memo = TextTransformMemo(max_entries=8, max_bytes=2 * sys.getsizeof(texts[0]))
+    first, second, third, large = texts
+    memo.put(first, first)
+    memo.put(second, second)
+    assert memo.get(first) is first
+    memo.put(third, third)
+    assert memo.get(second) is None
+    assert memo.get(first) is first and memo.get(third) is third
+    result = large * 8
+    assert memo.put(large, result) is result
+    assert memo.get(large) is None and len(memo) == 2
+
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

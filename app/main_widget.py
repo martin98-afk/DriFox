@@ -1486,6 +1486,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self._visible_batch_end = 0
         self._is_loading_history_batches = False
         self._is_virtual_recycling = False
+        self._quota_waiting_for_height = False
         # 滚动停止后延迟回收
         self._virtual_scroll_timer = QTimer(self)
         self._virtual_scroll_timer.setSingleShot(True)
@@ -13616,10 +13617,6 @@ class OpenAIChatToolWindow(ToolWindow):
                             rendered_delta += 1
             if rendered_delta > 0:
                 self._sync_global_rendered_pages(self._rendered_card_count + rendered_delta)
-                # 超配额时接续温和淘汰。此处仍在 _is_virtual_recycling 作用域内
-                # （_recycle_lru_batches 会因该标志直接返回），故延到下一帧执行。
-                if self._rendered_card_count > self._effective_max_rendered_cards():
-                    QTimer.singleShot(0, lambda: self._recycle_lru_batches())
 
             # ── 第 1.5 步：重建视口附近的已回收批次（占位死区修复）──
             # 上翻穿过「已回收批次」的等高空白占位区时没有任何重建触发点：
@@ -13854,6 +13851,10 @@ class OpenAIChatToolWindow(ToolWindow):
 
         finally:
             self._is_virtual_recycling = False
+
+        # 上一拍可能因 viewer 高度未落定而跳过离屏卡。空闲拍即使没有新建卡也要复核配额。
+        if self._rendered_card_count > self._effective_max_rendered_cards():
+            self._recycle_lru_batches()
 
     # ── B4 温和层：WebEngine 并发页上限（T12 蓝图） ──
 
@@ -14445,6 +14446,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # 候选扫描是常量。
         restore_win = self._restore_window_batches()
 
+        self._quota_waiting_for_height = False
         # 候选：所有非空批次（跳过受保护），按距离降序（最远先淘汰）
         candidates = []
         fallback_candidates = []
@@ -14454,6 +14456,7 @@ class OpenAIChatToolWindow(ToolWindow):
             # 未渲染批次不占渲染配额，淘汰它们计数不回落、纯白装失真占位 ——
             # 候选阶段直接过滤，避免 LRU 空转
             if not self._batch_fully_rendered(cards):
+                self._quota_waiting_for_height = True
                 continue
             if self._batch_is_protected(idx, vp_range, restore_win):
                 # 🐛 配额修复：保护区间按「真实视口 ±缓冲」算之后，小表（可见批次
@@ -21145,6 +21148,11 @@ class OpenAIChatToolWindow(ToolWindow):
         sender = self.sender()
         if not isinstance(sender, MessageCard):
             return
+        # 早于浏览器落高的淘汰会保留该卡。复用滚动空闲定时器合并后续上报。
+        if self.__dict__.get("_quota_waiting_for_height"):
+            self._quota_waiting_for_height = False
+            if not self._virtual_scroll_timer.isActive():
+                self._virtual_scroll_timer.start()
         # 🐛 滚动锚定补偿（v3）：Qt 滚动区没有 scroll anchoring——卡片高度变化时
         # value 不动、视口内内容整体位移。补偿**只在增量确实发生在视口上方**
         # 时才能执行，否则补偿本身会变成反向拖拽。

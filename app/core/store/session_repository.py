@@ -6,6 +6,7 @@
 """
 
 import hashlib
+from collections import OrderedDict
 from datetime import datetime
 from pathlib import Path
 from threading import RLock, Thread
@@ -28,6 +29,7 @@ OFFLOAD_FIELDS = ("reasoning_content", "arguments", "diff")
 # 保活窗：尾部 N 条消息不剥离（活跃轮次参与 API 请求，DeepSeek thinking
 # 连续推理依赖最近上下文的 reasoning_content）。
 KEEP_RECENT_ROUNDS = 3
+_EXTRAS_BASELINE_SESSIONS = 32
 # 剥离哨兵：轻量消息携带的绝对索引（int）。渲染/轨迹懒读据此定位 extras 行；
 # 老消息与保活窗内消息无哨兵 → 字段本就在消息里，无需查表。
 OFFLOAD_IDX_FIELD = "_x_idx"
@@ -610,11 +612,11 @@ class SessionRepository:
         # 内容地址缓存：session_id -> (message_count, last_msg_hash)
         # 用于跳过内容未变的重复持久化，节省全量序列化+zstd压缩开销
         self._content_hash_cache: Dict[str, tuple] = {}
-        # [E10] extras 行集基线缓存：session_id -> {(msg_idx, field): value_bytes}
+        # [E10] extras 行集基线缓存：session_id -> {(msg_idx, field): 指纹}，最近使用的会话排在末尾
         # _write_extras 差异 upsert 的比对基线（流式拍 extras 集合不变 → 0 写 SQL）。
         # 缓存缺失（重启首拍/写入失败）→ 退化为旧全删全插并重建基线；delete 清理。
         # DB extras 仅本仓储写（唯一 INSERT 点），单实例下行集缓存与 DB 一致。
-        self._extras_written: Dict[str, Dict[tuple, bytes]] = {}
+        self._extras_written: OrderedDict[str, dict[tuple[int, str], bytes]] = OrderedDict()
         # 保护 _content_hash_cache 的读写原子性。
         # Gateway（异步写入）+ UI（同步 save）跨线程访问同一缓存时，
         # 裸 dict 的复合判断+赋值在 GIL 释放窗口内可能丢失更新或脏命中，
@@ -1021,7 +1023,7 @@ class SessionRepository:
         [E10] 旧实现全删全插（DELETE 全会话行 + executemany 重插），流式拍
         extras 集合不变也要付 104ms@16K（E3 曲线 59-65%）。现按
         (session_id, msg_idx, field) 行集与基线缓存 diff：
-        - 新增/变更行 → executemany INSERT OR REPLACE（len 快筛 + bytes 逐字节比对）
+        - 新增/变更行 → executemany INSERT OR REPLACE（短值直接比较，其余按全量 SHA-256 比较）
         - 消失行（截断/清空）→ executemany 精确 DELETE，idx 复用不串字段
         - 无变化拍 → 0 写 SQL（流式拍主收益）
         - 基线缓存缺失（重启首拍/历史写入失败）→ 退化为旧全删全插并重建基线，
@@ -1036,59 +1038,53 @@ class SessionRepository:
         无反向路径），全局单向无死锁；锁内 IO 最坏为全删全插量级（104ms@16K），
         与写库本就串行于 _write_lock 的现状一致。
         """
-        try:
-            with self._cache_lock:
-                self._write_extras_locked(session_id, extras)
-        except Exception as e:
-            logger.error(f"[SessionRepository] write_extras 异常: {e}")
-
-    def _write_extras_locked(self, session_id: str, extras: Dict[int, Dict[str, bytes]]) -> None:
-        """C1 临界区体（持 _cache_lock 调用）：基线 diff 与 SQL 串行化。"""
-        try:
-            new_rows: Dict[tuple, bytes] = {
-                (i, f): v for i, fields in extras.items() for f, v in fields.items()
-            }
-            upsert_sql = (
-                "INSERT OR REPLACE INTO session_msg_extras (session_id, msg_idx, field, value) "
-                "VALUES (?, ?, ?, ?)"
-            )
-            delete_sql = "DELETE FROM session_msg_extras WHERE session_id = ? AND msg_idx = ? AND field = ?"
-            cached = self._extras_written.get(session_id)
-            if cached is None:
-                # 未知基线：旧全删全插（读回断言/既有门禁依赖的等价路径）
-                self._execute("DELETE FROM session_msg_extras WHERE session_id = ?", (session_id,))
-                if not new_rows:
-                    self._extras_written[session_id] = {}
+        with self._cache_lock:
+            try:
+                if self._write_extras_locked(session_id, extras):
                     return
-                rows = [(session_id, i, f, v) for (i, f), v in new_rows.items()]
-                if self._executemany_extras(upsert_sql, rows):
-                    self._extras_written[session_id] = new_rows
-                else:
-                    self._extras_written.pop(session_id, None)  # 全失败 → 下拍重新校准
-                return
-            # 已知基线：差异 upsert
-            to_upsert = [(session_id, i, f, v) for (i, f), v in new_rows.items() if cached.get((i, f)) != v]
-            to_delete = [(session_id, i, f) for (i, f) in cached if (i, f) not in new_rows]
-            if not to_upsert and not to_delete:
-                return  # 无变化拍：0 写 SQL
-            if len(to_delete) > 512:
-                # 大规模消失（清空/大截断）：逐行 DELETE 不如一条全删 + 全量重插
-                # （最终状态等价、SQL 数最少；512 阈值≈逐行删开始劣化的量级）
-                self._execute("DELETE FROM session_msg_extras WHERE session_id = ?", (session_id,))
-                to_upsert = [(session_id, i, f, v) for (i, f), v in new_rows.items()]
-                to_delete = []
-            ok = True
-            if to_delete:
-                ok = self._executemany_extras(delete_sql, to_delete)
-            if ok and to_upsert:
-                ok = self._executemany_extras(upsert_sql, to_upsert)
-            if ok:
-                self._extras_written[session_id] = new_rows
-            else:
-                # 降级也失败：基线不可信，清缓存 → 下拍退化为全删全插校准
-                self._extras_written.pop(session_id, None)
-        except Exception as e:
-            logger.error(f"[SessionRepository] write_extras 异常: {e}")
+                logger.error(f"[SessionRepository] write_extras 失败: {session_id}")
+            except Exception as e:
+                logger.error(f"[SessionRepository] write_extras 异常: {e}")
+            # 部分写入后，下一次相同内容的 save 也要重新同步。
+            self._extras_written.pop(session_id, None)
+            self._content_hash_cache.pop(session_id, None)
+
+    def _write_extras_locked(self, session_id: str, extras: Dict[int, Dict[str, bytes]]) -> bool:
+        """持锁比较行指纹，全部 SQL 成功后才发布新的差异基线。"""
+        signatures = {
+            (i, field): value if len(value) < 32 else hashlib.sha256(value).digest()
+            for i, fields in extras.items()
+            for field, value in fields.items()
+        }
+        cached = self._extras_written.get(session_id)
+        if cached == signatures:
+            self._extras_written.move_to_end(session_id)
+            return True
+
+        deleted = cached.keys() - signatures.keys() if cached is not None else set()
+        if cached is None or len(deleted) > 512:
+            ok, _ = self._execute("DELETE FROM session_msg_extras WHERE session_id = ?", (session_id,))
+            if not ok:
+                return False
+            changed = signatures.keys()
+        else:
+            if deleted:
+                sql = "DELETE FROM session_msg_extras WHERE session_id = ? AND msg_idx = ? AND field = ?"
+                if not self._executemany_extras(sql, [(session_id, i, field) for i, field in deleted]):
+                    return False
+            changed = [key for key, signature in signatures.items() if cached.get(key) != signature]
+
+        if changed:
+            sql = "INSERT OR REPLACE INTO session_msg_extras (session_id, msg_idx, field, value) VALUES (?, ?, ?, ?)"
+            rows = [(session_id, i, field, extras[i][field]) for i, field in changed]
+            if not self._executemany_extras(sql, rows):
+                return False
+
+        self._extras_written[session_id] = signatures
+        self._extras_written.move_to_end(session_id)
+        if len(self._extras_written) > _EXTRAS_BASELINE_SESSIONS:
+            self._extras_written.popitem(last=False)
+        return True
 
     def _executemany_extras(self, sql: str, rows: list) -> bool:
         """批量下发 extras SQL（SAVEPOINT 包裹，失败降级逐条）。
@@ -1116,7 +1112,9 @@ class SessionRepository:
                 pass  # 落到降级逐条
         for row in rows:
             try:
-                self._execute(sql, row)
+                ok, _ = self._execute(sql, row)
+                if not ok:
+                    return False
             except Exception:  # noqa: BLE001 — 单条失败静默跳过（既有语义）
                 return False
         db._schedule_commit()

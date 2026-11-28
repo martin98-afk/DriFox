@@ -1729,6 +1729,7 @@ class ThinkCard(_CollapsibleHeightAnimMixin, QFrame):
             f" font-size:{scale_font_size(13)}px; font-weight:600; background:transparent;"
         )
         self._preview_label = QLabel("", header)
+        self._preview_label.setTextFormat(Qt.PlainText)
         self._preview_label.setStyleSheet(
             f"{get_font_family_css()} color:{Colors.ASSISTANT_CARD_MUTED};"
             f" font-size:{scale_font_size(11)}px; background:transparent;"
@@ -1759,8 +1760,7 @@ class ThinkCard(_CollapsibleHeightAnimMixin, QFrame):
         )
         bw.addWidget(self._body_label)
         root.addWidget(self._body_wrap)
-        if completed:
-            self._refresh_title()
+        self.apply_streaming(not completed)
 
     def set_streaming(self) -> None:
         """流式态：单行提示，无折叠。"""
@@ -1776,18 +1776,22 @@ class ThinkCard(_CollapsibleHeightAnimMixin, QFrame):
             return
         self._streaming_active = active
         if active:
-            self._title_label.setText("深度思考中...")
-            self._preview_label.setText("")
+            self._title_label.hide()
+            self._refresh_live_preview()
             self._chevron.hide()
             self._icon_label.hide()
             self._spinner.start()
             self._spinner.show()
         else:
+            self._title_label.show()
             self._spinner.stop()
             self._spinner.hide()
             self._icon_label.show()
             self._chevron.show()
             self._refresh_title()
+
+    def _refresh_live_preview(self) -> None:
+        self._preview_label.setText(" ".join(self._content[-160:].split()))
 
     def _refresh_title(self) -> None:
         """完成态标题/预览：图标标题 + 结论优先预览（与 WebEngine 版一致）。"""
@@ -1804,8 +1808,10 @@ class ThinkCard(_CollapsibleHeightAnimMixin, QFrame):
         self._content = b.get("content") or ""
         plain = self._content.replace("```", "").strip()
         self._body_label.setText(plain)
-        if b.get("completed", True):
-            self.apply_streaming(False)
+        if not b.get("completed", True) and self._streaming_active:
+            self._refresh_live_preview()
+        else:
+            self.apply_streaming(not b.get("completed", True))
 
     def toggle(self) -> None:
         self._toggle_expanded()
@@ -2324,13 +2330,12 @@ def reconcile_widgets(
         layout.addWidget(w)
     # 统一校正流式态标记：复用控件的内容指纹不变但闭合状态可能已翻转
     # （think/tool 在流式期间闭合且内容不再变化时，需原地恢复正常态）
-    if streaming:
-        for i, (_, _, b) in enumerate(new_pairs[: len(widgets)]):
-            w = widgets[i]
-            if isinstance(w, ThinkCard):
-                w.apply_streaming(not b.get("completed", True))
-            elif isinstance(w, ToolCardWidget):
-                w.apply_streaming(not b.get("closed", True))
+    for i, (_, _, b) in enumerate(new_pairs[: len(widgets)]):
+        w = widgets[i]
+        if isinstance(w, ThinkCard):
+            w.apply_streaming(streaming and not b.get("completed", True))
+        elif streaming and isinstance(w, ToolCardWidget):
+            w.apply_streaming(not b.get("closed", True))
     return widgets, keys
 
 
@@ -2646,7 +2651,7 @@ class MarkdownBlockViewer(QWidget):
             self._sync_streaming_dock(False)
         # [X1] 收尾后挂起拍不得再触发（终态由本次 force reconcile 落定）
         self._render_timer.stop()
-        self._reconcile(force=True)
+        self._perform_update()
 
     def get_plain_text(self) -> str:
         return self._md
@@ -2882,6 +2887,8 @@ class MarkdownBlockViewer(QWidget):
     def _reconcile(self, force: bool = False) -> None:
 
         md = self._md
+        if self._streaming and self._reasoning_streaming_started and not self._thinking_finalized:
+            md = md.removesuffix("</think>")
         prev_md, prev_segs = self._parse_cache
         if prev_md is None or not md.startswith(prev_md):
             # 内容替换 / 首帧：全量解析（同时产顶层段元数据供后续增量）
