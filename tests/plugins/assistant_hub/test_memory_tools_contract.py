@@ -26,7 +26,8 @@ def test_update_requires_id_and_content():
     assert tools._validate_v2_args({"mode": "update", "content": "x"}) == "update 需要 id"
     assert tools._validate_v2_args({"mode": "update", "id": "mabc123", "content": "x"}) == ""
     assert tools._validate_v2_args({"mode": "delete", "id": "mabc123"}) == ""
-    assert tools._validate_v2_args({"mode": "delete"}) == "delete 需要 id"
+    assert "delete 需要 id" in tools._validate_v2_args({"mode": "delete"})
+    assert tools._validate_v2_args({"mode": "delete", "section": "工具", "index": 1}) == ""
 
 
 def test_merge_and_plan_validation():

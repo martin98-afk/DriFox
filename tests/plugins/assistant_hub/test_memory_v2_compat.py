@@ -84,3 +84,55 @@ def test_rename_section_moves_entries(tmp_path):
     state = mgr.memory_state(a.id)
     texts = {(e.get("section"), e.get("text")) for e in mgr._core_entries().active_entries(state)}
     assert ("改名后的区", "跟着分区搬家") in texts
+
+def test_tool_routes_project_and_global_modes(tmp_path, monkeypatch):
+    from plugins.assistant_hub.tools import memory_tools
+
+    mgr = _fresh_manager(tmp_path)
+    monkeypatch.setattr(memory_tools, "_get_manager", lambda: mgr)
+    aid = mgr.active_id()
+    ctx = {"workdir": str(tmp_path / "project")}
+    write = memory_tools._write_impl
+    assert write(ctx, scope="project", content="第一条\n第二条").success
+    for mode in ("update", "merge", "plan", "delete"):
+        result = write(ctx, scope="project", mode=mode, id="m000001", content="新内容")
+        assert not result.success
+    assert mgr.read_project_memory(aid, ctx["workdir"]).strip() == "第一条\n第二条"
+
+    entry_id = _seed(mgr, aid, "工具与环境", "正文")
+    read = memory_tools._read_impl
+    assert "正文" in read(ctx, scope="global", id=entry_id).content
+    plan = [{"op": "update", "id": entry_id, "content": "修改"}, {"op": "pin", "id": entry_id, "pinned": True}]
+    assert write(ctx, scope="global", mode="plan", plan=plan).success
+    assert "修改" in read(ctx, scope="global", id=entry_id).content
+    assert mgr.memory_state(aid)["entries"][entry_id]["active"]["pinned"]
+    assert write(ctx, scope="global", mode="delete", id=entry_id).success
+    assert not read(ctx, scope="global", id=entry_id).success
+
+
+def test_failed_plan_keeps_original_journal(tmp_path, monkeypatch):
+    import pytest
+
+    mgr = _fresh_manager(tmp_path)
+    aid = mgr.active_id()
+    entry_id = _seed(mgr, aid, "工具与环境", "原文")
+    mod = mgr._core_entries()
+    path = mod.journal_path(mgr.assistant_dir(aid), mgr.memory_device_id())
+    original = path.read_bytes()
+    delete = {"op": "delete", "id": entry_id}
+    update = {"op": "update", "id": entry_id, "content": "修改"}
+    assert not mgr.apply_memory_plan(aid, [delete, update])["ok"]
+    assert path.read_bytes() == original
+
+    def fail_publish(src, dst):
+        raise OSError("模拟提交失败")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(mod.os, "replace", fail_publish)
+        with pytest.raises(OSError, match="提交失败"):
+            mgr.apply_memory_plan(aid, [update, delete])
+    assert path.read_bytes() == original
+    assert mgr.apply_memory_plan(aid, [update, delete])["ok"]
+    item = mgr.memory_state(aid)["entries"][entry_id]
+    assert item["state"] == "deleted"
+    assert [e["text"] for e in item["versions"]] == ["原文", "修改"]
