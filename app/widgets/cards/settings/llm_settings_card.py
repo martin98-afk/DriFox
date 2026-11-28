@@ -84,8 +84,6 @@ class _PreferenceRow:
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.iconLabel.hide()
-        self.hBoxLayout.takeAt(1)  # 图标后的固定留白
         self.hBoxLayout.setContentsMargins(0, 0, 0, 0)
         self.vBoxLayout.setSpacing(4)
         self.hBoxLayout.setStretchFactor(self.vBoxLayout, 8)

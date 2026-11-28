@@ -393,7 +393,7 @@ class BackgroundClock(QObject):
         orphaned = False
         for ref in self._sources:
             src = ref()
-            if src is None:
+            if src is None or src._prefetch_stop.is_set():
                 continue
             alive.append(ref)
             visible = [layer for layer in src._live_layers() if self._layer_visible(layer)]

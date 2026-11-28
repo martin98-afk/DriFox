@@ -331,6 +331,7 @@ def tab_env():
     sink_id = _install_log_capture()
 
     tm = TabManagerWindow.create_instance()
+    tm.complete_construction()
 
     # stub 网络类延迟预热（与新建标签页链路无关，避免污染计时/引入抖动）
     mp.setattr(OpenAIChatToolWindow, "_start_models_dev_sync", lambda self: None, raising=False)
