@@ -5,6 +5,8 @@ from app.plugins.sdk import caps_for
 def _phrase(name, calls, named, file_target):
     n = len(calls)
     active = any(call.state == 'running' for call in calls)
+    if named and name == '执行命令' and not active:
+        return '运行了命令' if n == 1 else f'运行了 {n} 条命令'
     action = ('正在' + name if active else name + '了') if named else (
         f'正在调用 {name}' if active else f'调用了 {name}')
     if file_target and all(call.target is not None for call in calls):

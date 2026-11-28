@@ -78,6 +78,17 @@ window._applyMessageGroups = function(groups, streaming) {
             if (nodes[i] && nodes[i].parentNode !== panel) panel.insertBefore(nodes[i], panel.children[i-g[0]] || null);
         }
         if (follow && streaming) panel.scrollTop = panel.scrollHeight;
+        // 已结束的分组在手动展开后仍使用完成态标题。
+        b.toggleAttribute('data-group-complete', !g[2]);
+        if (!g[2]) {
+            var toolIcon = panel.querySelector('.tool-block img');
+            var src = toolIcon ? toolIcon.getAttribute('src') : '';
+            if (b._groupIconSrc !== src) {
+                b._groupIconSrc = src;
+                if (src) b.style.setProperty('--dfx-group-icon', 'url(' + JSON.stringify(src) + ')');
+                else b.style.removeProperty('--dfx-group-icon');
+            }
+        }
         var opened = manual.has(key) ? manual.get(key) : g[2];
         var label = g[3], failed = g[4] || '';
         if (b.textContent !== label + failed) {

@@ -3947,7 +3947,8 @@ _SKELETON_CACHE_MAX = 48
 # v97：简洁摘要的内容高度过渡与中途反向。
 # v98：分组内容共享流式滚动窗口，完成后按自然高度展开。
 # v99：分组模式无旧工具页脚，不以延迟到达的 Qt 视口高度限制正文。
-_SKELETON_CACHE_VERSION = 99
+# v100：已完成分组的标题带动作图标和右侧箭头。
+_SKELETON_CACHE_VERSION = 100
 
 
 def _js_literal(value) -> str:
