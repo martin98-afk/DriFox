@@ -11,6 +11,7 @@ def test_branch_opens_left_and_share_history_opens_right(ui_app, qtbot):
     from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
 
     tm, win = ui_app["tm"], ui_app["chat_window"]
+    qtbot.waitUntil(lambda: not win._initialization_in_progress, timeout=15000)
     registry = UIPluginRegistry.get_instance()
     plugins = Path(__file__).resolve().parents[2] / "plugins"
     for name in ("worktree-manager", "share-history"):
