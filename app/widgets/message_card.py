@@ -42,11 +42,9 @@ from pygments import highlight
 from pygments.formatters import HtmlFormatter
 from pygments.lexers import TextLexer, get_lexer_by_name
 from PyQt5.QtCore import (
-    QBuffer,
     QByteArray,
     QEasingCurve,
     QElapsedTimer,
-    QIODevice,
     QObject,
     QRect,
     QSize,
@@ -62,7 +60,6 @@ from PyQt5.QtGui import (
     QBrush,
     QColor,
     QFontMetrics,
-    QImageReader,
     QLinearGradient,
     QPainter,
     QPainterPath,
@@ -2299,6 +2296,7 @@ class MessageCard(SimpleCardWidget):
         # 图片附件预览条：挂 main 布局，位于气泡与底部按钮行**之间**（气泡外），
         # set_image_attachments 时才显示（懒占位）
         self._image_strip = QWidget(self)
+        self._thumbnail_jobs = set()
         self._image_strip_lay = QHBoxLayout(self._image_strip)
         self._image_strip_lay.setContentsMargins(2, 4, 2, 2)
         self._image_strip_lay.setSpacing(6)
@@ -2388,44 +2386,31 @@ class MessageCard(SimpleCardWidget):
             fallback_content: 恢复会话时的原始消息 content（multimodal list），
                    传给 plan_image_attachment_sources 做路径失效兑底。
         """
-        # stretch 放头部：缩略图右对齐（与用户气泡 AlignRight 同侧）
-        thumb_count = 0
-        for source, data_uri, path in plan_image_attachment_sources(paths, fallback_content):
-            thumb = self._build_image_thumb(source, data_uri, path)
-            if thumb is not None:
-                self._image_strip_lay.addWidget(thumb)
-                thumb_count += 1
-        if thumb_count:
-            self._image_strip_lay.insertStretch(0)
-            self._image_strip.setVisible(True)
+        if not isinstance(paths, list) or not paths:
+            return
+        from app.widgets.attachment_thumbnails import AttachmentThumbnails
 
-    def _build_image_thumb(self, source, data_uri, path):
-        """按设备像素解码等比缩略图，点击时再加载原图。"""
-        if source:
-            reader = QImageReader(source)
-        elif data_uri:
-            b64 = data_uri.split("base64,", 1)[-1]
-            buffer = QBuffer()
-            buffer.setData(QByteArray.fromBase64(b64.encode("ascii")))
-            buffer.open(QIODevice.ReadOnly)
-            reader = QImageReader(buffer)
-        else:
-            return None
-        dpr = self._image_strip.devicePixelRatioF() or 1.0
-        height = max(1, int(80 * dpr))
-        size = reader.size()
-        if size.isValid() and size.height() > height:
-            width = max(1, round(size.width() * height / size.height()))
-            reader.setScaledSize(QSize(width, height))
-        image = reader.read()
-        if image.isNull():
-            return None
-        if image.height() != height:
-            image = image.scaledToHeight(height, Qt.SmoothTransformation)
-        scaled = QPixmap.fromImage(image)
+        if not self._image_strip_lay.count():
+            self._image_strip_lay.addStretch()
+        self._image_strip.setMinimumHeight(86)  # 预留图片与布局边距，解码完成时不推移消息
+        self._image_strip.show()
+        job = AttachmentThumbnails(paths, fallback_content, self._image_strip.devicePixelRatioF() or 1.0)
+        self._thumbnail_jobs.add(job)
+        self.destroyed.connect(job.cancel)
+        job.loaded.connect(self._append_thumbnail, Qt.QueuedConnection)
+        job.finished.connect(self._finish_thumbnails, Qt.QueuedConnection)
+        job.start()
+
+    def _finish_thumbnails(self, job):
+        self._thumbnail_jobs.discard(job)
+        if not self._thumbnail_jobs and self._image_strip_lay.count() == 1:
+            self._image_strip.hide()
+
+    def _append_thumbnail(self, image, source, data_uri, path):
+        if self.sender() not in self._thumbnail_jobs:
+            return
         thumb = QLabel(self._image_strip)
-        scaled.setDevicePixelRatio(dpr)
-        thumb.setPixmap(scaled)
+        thumb.setPixmap(QPixmap.fromImage(image))
         thumb.setFixedHeight(80)
         thumb.setToolTip(os.path.basename(path))
         thumb.setCursor(Qt.PointingHandCursor)
@@ -2433,7 +2418,7 @@ class MessageCard(SimpleCardWidget):
         # 原始 pixmap 随本函数返回出作用域释放，不再被闭包长期持有
         # （3840×2160 解码后 ≈33MB RGBA/张，多张图片会话即数百 MB 常驻）。
         thumb.mousePressEvent = lambda e, src=source, uri=data_uri: self._show_image_dialog(src, uri)
-        return thumb
+        self._image_strip_lay.addWidget(thumb)
 
     def _show_image_dialog(self, source, data_uri):
         """点击缩略图放大查看（Mask 遮罩弹窗，完整等比显示、无滚动、点遮罩关闭）
@@ -6798,6 +6783,10 @@ class MessageCard(SimpleCardWidget):
         应该在删除卡片前调用，或者在 closeEvent 中自动调用。
         """
         # N8：footer provider 健康状态随会话结束/卡片销毁清零
+        if self.role == "user":
+            for job in self._thumbnail_jobs:
+                job.cancel()
+            self._thumbnail_jobs.clear()
         self._footer_provider_cost_ema.clear()
         self._footer_provider_slow_streak.clear()
         self._footer_provider_blocked.clear()

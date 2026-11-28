@@ -1,13 +1,36 @@
 """就地插入标题，不包裹或重建 patchBlocks 的子节点。"""
 GROUP_CSS = """
-.dfx-group-body { display:flow-root; }
-.dfx-group-body[data-live] { max-height:264px; overflow-y:auto; }
+.dfx-group-body, .dfx-group-items { display:flow-root; }
+.dfx-group-body[data-live] { max-height:264px; overflow-y:auto; overflow-anchor:none; }
 .dfx-group-body[data-group-hidden] { display:none !important; }
 body.dfx-grouped #tool-section { display:none !important; }
 """
 
 GROUP_JS = """
 var _groupHeightSync = false;
+// 观察内容的自然高度。外层限高后，继续追加工具或异步展开结果仍能收到通知。
+var _groupResize = new ResizeObserver(function(entries) {
+    entries.forEach(function(entry) {
+        var panel = entry.target.parentNode;
+        if (!panel || !panel.hasAttribute('data-live') || !panel.clientHeight || !panel._followTail) return;
+        panel.scrollTop = panel.scrollHeight;
+        panel._lastFollowTop = panel.scrollTop;
+    });
+});
+function _createGroupPanel() {
+    var panel = document.createElement('div');
+    panel.className = 'dfx-group-body';
+    var items = document.createElement('div');
+    items.className = 'dfx-group-items';
+    panel.appendChild(items);
+    panel._followTail = true;
+    panel.onscroll = function() {
+        if (!panel.hasAttribute('data-live') || !panel.clientHeight) return;
+        if (panel._followTail && panel.scrollTop === panel._lastFollowTop) return;
+        panel._followTail = panel.scrollHeight - panel.clientHeight - panel.scrollTop < 4;
+    };
+    return panel;
+}
 document.addEventListener('keydown', function(e) { if (e.key === 'Tab') document.body.classList.add('dfx-key-focus'); }, true);
 document.addEventListener('mousedown', function() { document.body.classList.remove('dfx-key-focus'); }, true);
 function _setGroupVisibility(node, hidden, animate) {
@@ -69,15 +92,18 @@ window._applyMessageGroups = function(groups, streaming) {
         }
         buttons.delete(key);
         var panel = b._panel;
-        if (!panel) { panel = document.createElement('div'); panel.className = 'dfx-group-body'; b._panel = panel; }
+        if (!panel) { panel = _createGroupPanel(); b._panel = panel; }
+        var items = panel.firstElementChild;
         slots[g[0]] = [b,panel];
-        var follow = panel.scrollHeight - panel.clientHeight - panel.scrollTop < 4;
+        if (panel.hasAttribute('data-live') !== !!streaming) {
+            if (streaming) _groupResize.observe(items);
+            else _groupResize.unobserve(items);
+        }
         panel.toggleAttribute('data-live', !!streaming);
         for (var i=g[0]; i<g[1]; i++) {
             assigned.add(i);
-            if (nodes[i] && nodes[i].parentNode !== panel) panel.insertBefore(nodes[i], panel.children[i-g[0]] || null);
+            if (nodes[i] && nodes[i].parentNode !== items) items.insertBefore(nodes[i], items.children[i-g[0]] || null);
         }
-        if (follow && streaming) panel.scrollTop = panel.scrollHeight;
         // 已结束的分组在手动展开后仍使用完成态标题。
         b.toggleAttribute('data-group-complete', !g[2]);
         if (!g[2]) {
@@ -85,6 +111,7 @@ window._applyMessageGroups = function(groups, streaming) {
             var src = toolIcon ? toolIcon.getAttribute('src') : '';
             if (b._groupIconSrc !== src) {
                 b._groupIconSrc = src;
+                b.toggleAttribute('data-qrc-icon', src.startsWith('qrc:'));
                 if (src) b.style.setProperty('--dfx-group-icon', 'url(' + JSON.stringify(src) + ')');
                 else b.style.removeProperty('--dfx-group-icon');
             }
@@ -113,7 +140,10 @@ window._applyMessageGroups = function(groups, streaming) {
             next=el;
         }
     }
-    buttons.forEach(function(b,k) { if(b._panel)b._panel.remove(); b.remove(); manual.delete(k); });
+    buttons.forEach(function(b,k) {
+        _groupResize.unobserve(b._panel.firstElementChild);
+        b._panel.remove(); b.remove(); manual.delete(k);
+    });
     root._currentGroups = groups;
 };
 """

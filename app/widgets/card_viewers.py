@@ -5932,7 +5932,8 @@ class CodeWebViewer(QWebEngineView):
                     for (var i = 0; i < kids.length; i++) {{
                         if (kids[i].hasAttribute && kids[i].hasAttribute('data-block-wrapper')) out.push(kids[i]);
                         else if (kids[i].classList.contains('dfx-group-body')) {{
-                            for (var j=0; j<kids[i].children.length; j++) out.push(kids[i].children[j]);
+                            var items = kids[i].firstElementChild.children;
+                            for (var j=0; j<items.length; j++) out.push(items[j]);
                         }}
                     }}
                     return out;
@@ -12877,16 +12878,21 @@ def plan_image_attachment_sources(paths, fallback_content=None) -> list:
     """
     if not isinstance(paths, list):
         return []
-    image_uris = extract_image_data_uris(fallback_content)
-    plan = []
+    return list(iter_image_attachment_sources(paths, fallback_content))
+
+
+def iter_image_attachment_sources(paths, fallback_content):
+    image_uris = None
     for i, path in enumerate(paths):
         if not isinstance(path, str) or not path:
             continue
         if os.path.exists(path):
-            plan.append((path, None, path))
-        elif i < len(image_uris):
-            plan.append((None, image_uris[i], path))
-    return plan
+            yield path, None, path
+        else:
+            if image_uris is None:
+                image_uris = extract_image_data_uris(fallback_content)
+            if i < len(image_uris):
+                yield None, image_uris[i], path
 
 
 def _decode_image_url_to_pixmap(url_str: str):

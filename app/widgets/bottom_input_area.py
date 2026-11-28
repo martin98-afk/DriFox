@@ -494,17 +494,9 @@ class SendableTextEdit(TextEdit):
 
         card = self._get_card()
         try:
-            cursor = self.textCursor()
-            text = self.toPlainText()
-            # 胶囊展开后 doc 与 plain 坐标不等长；query/空格判定全在 plain 域，
-            # 命令胶囊折叠后重入本函数时尤其依赖换算（否则 query 截短 → detail 被打回列表）
-            cursor_pos = self._plain_offset_from_doc(cursor.position())
-
-            if cursor_pos < 0 or cursor_pos > len(text):
-                return
-
-            # 仅当 / 在文本开头（位置0）时触发
-
+            # 普通正文不用展开胶囊，也不用从首段逐个计算光标偏移。
+            first = self.document().characterAt(0)
+            text = self.toPlainText() if first in ("/", _OBJECT_REPLACEMENT) else ""
             if not text.startswith("/"):
                 # 没有在开头
                 self._cancel_slash_throttle()
@@ -514,6 +506,9 @@ class SendableTextEdit(TextEdit):
                 self._slash_trigger_pos = -1
                 return
 
+            cursor_pos = self._plain_offset_from_doc(self.textCursor().position())
+            if cursor_pos < 0 or cursor_pos > len(text):
+                return
             query = text[1:cursor_pos] if cursor_pos > 1 else ""
 
             # 换行符 → 关闭
@@ -684,38 +679,16 @@ class SendableTextEdit(TextEdit):
             return
 
         try:
-            # ⚠ 必须用原始文档文本（胶囊=U+FFFC 占 1 字符），与 textCursor 坐标
-            # 同系。override 的 toPlainText 会把胶囊展开成 "@名字 "（多字符），
-            # 混用会让 text[:cursor_pos] 切出幽灵 "@"（含胶囊自带的空白终止位
-            # 被切掉）→ 插入胶囊后每次输入都误弹 @ 卡片。
-            text = TextEdit.toPlainText(self)
             cursor = self.textCursor()
             cursor_pos = cursor.position()
-
-            if cursor_pos < 0 or cursor_pos > len(text):
-                return
-
-            text_before_cursor = text[:cursor_pos]
-
-            # 从光标向前找最后一个合法 @
-            at_pos = -1
-            for i in range(cursor_pos - 1, -1, -1):
-                ch = text_before_cursor[i]
-                if ch == "@":
-                    # 检查是否为单词边界
-                    if i == 0 or text_before_cursor[i - 1] in (" ", "\n", "\t", "\r"):
-                        at_pos = i
-                        break
-                    else:
-                        # 非单词边界（如 email@domain），不触发
-                        break
-                elif ch in ("\n", "\r"):
-                    # 遇到换行则停止向前搜索
-                    break
-
+            # 仅读当前段的原始文本，胶囊保持一个对象字符。selectedText 保留软换行和不换行空格。
+            cursor.setPosition(cursor_pos)
+            cursor.setPosition(cursor.block().position(), QTextCursor.KeepAnchor)
+            prefix = cursor.selectedText().replace("\u2028", "\n").replace("\xa0", " ")
+            marker = prefix.rfind("@")
             file_card = self._get_file_mention_card()
 
-            if at_pos < 0:
+            if marker < 0 or (marker and prefix[marker - 1] not in " \n\t\r"):
                 # 没有找到合法 @ → 关闭卡片
                 self._cancel_at_throttle()
                 self._at_trigger_pos = -1
@@ -724,10 +697,10 @@ class SendableTextEdit(TextEdit):
                     self.atDismissed.emit()
                 return
 
-            query = text_before_cursor[at_pos + 1 :]
+            query = prefix[marker + 1 :]
 
             # 换行 → 关闭
-            if "\n" in query:
+            if "\n" in query or "\r" in query:
                 self._cancel_at_throttle()
                 self._at_trigger_pos = -1
                 if file_card and file_card.is_card_visible:
@@ -737,10 +710,12 @@ class SendableTextEdit(TextEdit):
 
             # 空白终止：@ 后的过滤词不允许包含空白。已完成的提及
             # （如胶囊展开的 "@助手名 "）之后的正文不应再触发补全
+            # QTextCursor 以 UTF-16 计数，emoji 等字符在文档里占两格。
+            at_pos = cursor_pos - len(query.encode("utf-16-le", "surrogatepass")) // 2 - 1
             if any(ch in query for ch in (" ", "\t", "\u3000")):
                 # 空格即确认：@ 后文本是真实存在的路径时折叠成胶囊并登记附件
                 # （与 /cmd 空格的 _collapse_command_token 对称），否则保持字面
-                self._collapse_file_mention_token(at_pos, cursor_pos)
+                self._collapse_file_mention_token(at_pos, cursor_pos, query)
                 self._cancel_at_throttle()
                 self._at_trigger_pos = -1
                 if file_card and file_card.is_card_visible:
@@ -861,7 +836,7 @@ class SendableTextEdit(TextEdit):
         self._at_trigger_pos = -1
         self.setFocus(Qt.OtherFocusReason)
 
-    def _collapse_file_mention_token(self, at_pos: int, cursor_pos: int) -> bool:
+    def _collapse_file_mention_token(self, at_pos: int, cursor_pos: int, raw: str) -> bool:
         """「@相对路径 + 空白」空格确认 → 折叠为一枚文件胶囊
 
         触发时机：_on_at_trigger_check 检测到 @ 后出现空白。路径按卡片
@@ -880,7 +855,6 @@ class SendableTextEdit(TextEdit):
         root_dir = getattr(file_card, "root_dir", "") if file_card is not None else ""
         if not root_dir:
             return False
-        raw = TextEdit.toPlainText(self)[at_pos + 1 : cursor_pos]
         token = raw.rstrip(" \t\u3000")
         if not token:
             return False
@@ -889,7 +863,7 @@ class SendableTextEdit(TextEdit):
         if not os.path.exists(path):
             return False
 
-        end = at_pos + 1 + len(token)  # @ 后路径的结束位置（尾随空白之前）
+        end = cursor_pos - (len(raw) - len(token))  # 尾随空白均为单个 UTF-16 单元
         self._collapsing_mention = True
         try:
             ins = QTextCursor(self.document())
@@ -898,7 +872,7 @@ class SendableTextEdit(TextEdit):
             ins.insertText(_OBJECT_REPLACEMENT, self._make_mention_format(path))
             # 光标原位：区间由 len(token)+1 字符缩成 1 字符，整体左移 len(token)
             cursor = self.textCursor()
-            cursor.setPosition(cursor_pos - len(token))
+            cursor.setPosition(at_pos + 1 + cursor_pos - end)
             self.setTextCursor(cursor)
         finally:
             self._collapsing_mention = False

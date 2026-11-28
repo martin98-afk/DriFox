@@ -28,6 +28,12 @@ CSS = '''
 .dfx-group-button[data-group-complete] .dfx-group-label {
  min-width:0; overflow:hidden; white-space:nowrap; text-overflow:ellipsis;
 }
+.dfx-group-button[data-group-complete]:hover .dfx-group-label,
+body.dfx-key-focus .dfx-group-button[data-group-complete]:focus .dfx-group-label { color:var(--text); }
+/* Qt WebEngine 允许背景图读取 qrc，遮罩读取 qrc 则受跨域限制。 */
+.dfx-group-button[data-group-complete][data-qrc-icon]::before {
+ -webkit-mask:none; background:var(--dfx-group-icon) center / contain no-repeat; opacity:.62;
+}
 body.dfx-key-focus .dfx-group-button:focus .dfx-group-label { text-decoration:underline; }
 .dfx-group-button .dfx-group-fail { flex:none; color:var(--danger); }
 @media(prefers-reduced-motion:reduce){.dfx-group-button::before,.dfx-group-button::after {transition:none;}}

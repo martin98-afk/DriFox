@@ -149,3 +149,86 @@ def test_compact_grouped_stream(qapp, qtbot, compact_output_plugin):
             assert abs(card.height() - card.viewer.height() - overhead) <= 2
     finally:
         cfg.set(cfg.ui_compact_tool_area, old, save=False)
+
+
+def test_completed_group_icons_on_replay(qapp, qtbot, compact_output_plugin):
+    if os.environ.get('DRIFOX_VISIBLE_CADENCE') != '1' or qapp.platformName() == 'offscreen':
+        pytest.skip('需开启真窗 WebEngine 回放')
+    from PyQt5.QtCore import QRect
+    from app.core.infra.webengine_profile import init_shared_web_profile
+    from app.widgets.message_card import MessageCard
+
+    init_shared_web_profile()
+    card = MessageCard('assistant')
+    qtbot.addWidget(card)
+    card.resize(640, 400)
+    card.set_content([
+        {'type': 'reasoning', 'content': '检查文件'},
+        {'type': 'text', 'text': '开始执行。'},
+        {'type': 'tool_result', 'name': 'bash', 'tool_call_id': 'cmd', 'result': 'ok', 'success': True},
+        {'type': 'text', 'text': '命令已完成。'},
+        {'type': 'tool_result', 'name': 'unknown_tool', 'tool_call_id': 'other', 'result': 'ok', 'success': True},
+    ])
+    card.show()
+    card.ensure_rendered()
+    qtbot.waitUntil(lambda: bool(card.viewer and card.viewer._is_js_ready))
+    js = card.viewer._run_js_sync
+    groups = "Array.from(document.querySelectorAll('.dfx-group-button[data-group-complete]'))"
+    qtbot.waitUntil(lambda: js(f"{groups}.length") == 3)
+    boxes = js(f"""{groups}.map(b => {{
+        let r = b.getBoundingClientRect(), label = b.querySelector('.dfx-group-label').getBoundingClientRect();
+        return [Math.ceil(r.left), Math.ceil(r.top), Math.floor(label.left-r.left)-1, Math.floor(r.height)];
+    }})""")
+    qtbot.wait(200)
+    # 截取图标区域，与隐藏图标后同一位置的像素比较，覆盖 qrc 遮罩读不到的情况。
+    before = [card.viewer.grab(QRect(*box)).toImage() for box in boxes]
+    js("""var hideIcons = document.createElement('style');
+        hideIcons.textContent = '.dfx-group-button::before {visibility:hidden}';
+        document.head.appendChild(hideIcons);""")
+    qtbot.wait(150)
+    try:
+        for box, visible in zip(boxes, before):
+            assert visible != card.viewer.grab(QRect(*box)).toImage(), box
+    finally:
+        js('hideIcons.remove()')
+
+
+def test_live_group_follows_growth_until_scrolled_up(qapp, qtbot, compact_output_plugin):
+    if os.environ.get('DRIFOX_VISIBLE_CADENCE') != '1' or qapp.platformName() == 'offscreen':
+        pytest.skip('需开启真窗 WebEngine 回放')
+    from app.core.infra.webengine_profile import init_shared_web_profile
+    from app.widgets.message_card import MessageCard
+
+    init_shared_web_profile()
+    card = MessageCard('assistant')
+    qtbot.addWidget(card)
+    card.resize(640, 400)
+    card.show()
+    card.ensure_rendered()
+    qtbot.waitUntil(lambda: bool(card.viewer and card.viewer._is_js_ready))
+    js = card.viewer._run_js_sync
+    card.start_streaming_anim()
+
+    def append(index):
+        card.append_tool_result(tool_call_id=f'read-{index}', tool_name='read',
+                                arguments={'path': str(index)}, result='ok', success=True)
+
+    for index in range(16):
+        append(index)
+    qtbot.waitUntil(lambda: bool(js("document.querySelector('.dfx-group-body [data-tool-call-id=\"read-15\"]') !== null")))
+    js("window.panel = document.querySelector('.dfx-group-body[data-live]')")
+    at_bottom = 'panel.scrollHeight - panel.clientHeight - panel.scrollTop <= 2'
+    qtbot.waitUntil(lambda: bool(js('panel.scrollTop > 50 && ' + at_bottom)))
+    # 模拟工具详情异步长高，此时没有新分组补丁。
+    js("panel.lastElementChild.lastElementChild.style.paddingBottom = '80px'")
+    qtbot.waitUntil(lambda: bool(js(at_bottom)))
+    js('panel.scrollTop = 24')
+    qtbot.waitUntil(lambda: bool(js('!panel._followTail')))
+    append(16)
+    qtbot.waitUntil(lambda: bool(js("!!panel.querySelector('[data-tool-call-id=\"read-16\"]')")))
+    assert js('panel.scrollTop') == 24
+    js('panel.scrollTop = panel.scrollHeight')
+    qtbot.waitUntil(lambda: bool(js('panel._followTail')))
+    append(17)
+    qtbot.waitUntil(lambda: bool(js("!!panel.querySelector('[data-tool-call-id=\"read-17\"]') && " + at_bottom)))
+    card.finish_streaming()
