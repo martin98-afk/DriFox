@@ -18,7 +18,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, List, Optional
 
-from PyQt5.QtCore import QSize, Qt, QTimer, QUrl, pyqtSignal
+from PyQt5.QtCore import QEvent, QSize, Qt, QTimer, QUrl, pyqtSignal
 from PyQt5.QtGui import QDesktopServices, QIcon, QPixmap
 from PyQt5.QtWidgets import (
     QBoxLayout,
@@ -50,7 +50,7 @@ from app.plugins.contracts.plugin_display import plugin_display_name
 from app.plugins.kernel import COMPONENT_ORDER
 from app.plugins.registries.plugin_config_registry import PluginConfigRegistry
 from app.utils.design_tokens import Colors
-from app.utils.scroll_tuning import install_fast_wheel
+from app.utils.scroll_tuning import install_fast_wheel, scroll_wheel_to
 from app.widgets.cards.settings.plugin_config_form import PluginConfigForm, evaluate_config_status
 from app.widgets.cards.settings.plugin_components_card import _component_display_name
 
@@ -388,7 +388,8 @@ class _PluginDetailView(QWidget):
         self._form: Optional[PluginConfigForm] = None
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(24, 16, 18, 14)
+        # 顶部不留空白：详情图标与左栏标题行同一水平线（顶到顶）
+        layout.setContentsMargins(24, 3, 18, 14)
         layout.setSpacing(20)
 
         header = QHBoxLayout()
@@ -508,6 +509,10 @@ class _PluginDetailView(QWidget):
         area = self._pages.get(key)
         if area is not None:
             self._stack.setCurrentWidget(area)
+
+    def current_scroll(self) -> QScrollArea:
+        """当前页签的滚动区（详情头部空白处的滚轮要转给它）。"""
+        return self._stack.currentWidget()
 
     # ── 配置页 ────────────────────────────────────────────
 
@@ -747,6 +752,12 @@ class PluginSettingsPage(QWidget):
         sidebar_layout = QVBoxLayout(self._sidebar)
         sidebar_layout.setContentsMargins(4, 4, 4, 4)
         sidebar_layout.setSpacing(8)
+        self._sidebar_layout = sidebar_layout
+        # 页标题行挂载点（全宽模式下设置卡把「显示设置导航 + 插件设置」搬进来）：
+        # 标题与右侧详情头部同处一行，右栏从页面最顶端开始。
+        self._header_row: Optional[QWidget] = None
+        self._header_layout: Optional[QHBoxLayout] = None
+        self._header_widgets: tuple = ()
         self._search = SearchLineEdit(self._sidebar)
         self._search.setPlaceholderText("搜索插件")
         self._search.setToolTip("搜索插件、配置字段或能力名称")
@@ -825,9 +836,25 @@ class PluginSettingsPage(QWidget):
         body.addWidget(self._detail_frame, 1)
 
         layout.addLayout(body, 1)
-        # 页面挂在设置页的 QScrollArea 里，不给最小高度会被压成 sizeHint 高度
-        self.setMinimumHeight(340)
+        # 两栏外的空白（标题行/搜索框/详情头部）滚轮交给各自的滚动区，
+        # 否则滚不动：外层已禁滚，事件到这里就断了。
+        self._sidebar.installEventFilter(self)
+        self._detail.installEventFilter(self)
         _apply_font(self)
+
+    def eventFilter(self, obj, event):  # noqa: N802 - Qt 回调
+        """两栏空白处的滚轮转给当前滚动区（外层已禁滚，不转就没人接）。"""
+        if event.type() == QEvent.Wheel:
+            if obj is self._sidebar:
+                area = self._list_area
+            elif obj is self._detail:
+                area = self._detail.current_scroll()
+            else:
+                area = None
+            if area is not None and scroll_wheel_to(area, event):
+                event.accept()
+                return True
+        return super().eventFilter(obj, event)
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
@@ -839,6 +866,44 @@ class PluginSettingsPage(QWidget):
     def list_hidden(self) -> bool:
         return self._sidebar.isHidden()
 
+    def adopt_page_header(self, back_btn: QWidget, title: QWidget) -> None:
+        """把设置卡顶部条收进左栏顶部（幂等）。
+
+        全宽模式下左侧导航已收起，那条只剩「显示设置导航 + 插件设置」；
+        搬进左栏后右侧详情头部能与标题同处一行，两栏都顶到页面最上端。
+        控件只是换父容器，信号与样式跟随实例，不重建。
+        """
+        widgets = (back_btn, title)
+        if self._header_row is None:
+            row = QWidget(self._sidebar)
+            row_layout = QHBoxLayout(row)
+            row_layout.setContentsMargins(4, 4, 4, 4)
+            row_layout.setSpacing(12)
+            self._sidebar_layout.insertWidget(0, row)
+            self._header_row = row
+            self._header_layout = row_layout
+        if self._header_widgets == widgets:
+            self._header_row.setVisible(True)
+            return
+        row_layout = self._header_layout
+        if row_layout is None:
+            return
+        row_layout.addWidget(back_btn, 0)
+        row_layout.addWidget(title, 1)
+        self._header_widgets = widgets
+        self._header_row.setVisible(True)
+        for widget in widgets:
+            widget.setVisible(True)
+        self._size_sidebar()
+
+    def release_page_header(self) -> tuple:
+        """交出顶部条控件（由设置卡搬回自己的容器），返回当初托管的控件对。"""
+        widgets = self._header_widgets
+        self._header_widgets = ()
+        if self._header_row is not None:
+            self._header_row.setVisible(False)
+        return widgets
+
     def _size_sidebar(self) -> None:
         # 数量、组件名与字体都会变化；为文字与下拉箭头分别留出空间。
         filter_width = 16
@@ -847,7 +912,17 @@ class PluginSettingsPage(QWidget):
             width = max(combo.sizeHint().width(), text_width + 50)
             combo.setMinimumWidth(width)
             filter_width += width
-        sidebar_width = max(_LIST_WIDTH, filter_width)
+        header_width = 0
+        header_layout = self._header_layout
+        if self._header_widgets and header_layout is not None:
+            # 按控件自身尺寸算：header_row.sizeHint() 会跟着被拉伸后的实际宽度变大，
+            # 拿它当输入会自激（越窄→判定越宽→越早切上下布局）
+            header_width = (
+                sum(w.sizeHint().width() for w in self._header_widgets)
+                + header_layout.spacing()
+                + 8
+            )
+        sidebar_width = max(_LIST_WIDTH, filter_width, header_width)
         compact = self.width() < sidebar_width + 398
         if compact:
             self._sidebar.setMinimumWidth(0)

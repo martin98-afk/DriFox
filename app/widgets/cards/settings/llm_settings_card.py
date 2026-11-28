@@ -5,7 +5,7 @@
 """
 
 from loguru import logger
-from PyQt5.QtCore import QPointF, QPropertyAnimation, QRectF, QPoint, QSize, Qt, QTimer, pyqtSignal
+from PyQt5.QtCore import QEvent, QObject, QPointF, QPropertyAnimation, QRectF, QPoint, QSize, Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QBrush, QColor, QFont, QIcon, QPainter, QPen
 from PyQt5.QtWidgets import (
     QFontComboBox,
@@ -379,6 +379,49 @@ class ManualUpdateCard(SettingCard):
             logger.error(f"_on_error error: {e}")
 
 
+class _ContentHeightLock(QObject):
+    """把设置卡内容高度钉在滚动区视口：整页不再上下滚。
+
+    插件页是主从布局，滚动由左列表与右详情各自承担；设置卡自己的
+    scroll_area 若还能滚，滚轮到边界就会把两栏一起推走（看着像共用
+    一个 scroll）。插件页激活时锁高，离开时解锁，其他页行为不变。
+    """
+
+    def __init__(self, area, parent=None) -> None:
+        super().__init__(parent)
+        self._area = area
+        self._locked = False
+
+    def enable(self) -> None:
+        if self._locked:
+            self._apply()
+            return
+        self._locked = True
+        self._area.viewport().installEventFilter(self)
+        self._apply()
+
+    def disable(self) -> None:
+        if not self._locked:
+            return
+        self._locked = False
+        self._area.viewport().removeEventFilter(self)
+        widget = self._area.widget()
+        if widget is not None:
+            widget.setMinimumHeight(0)
+            widget.setMaximumHeight(16777215)
+
+    def _apply(self) -> None:
+        widget = self._area.widget()
+        height = self._area.viewport().height()
+        if widget is not None and height > 0:
+            widget.setFixedHeight(height)
+
+    def eventFilter(self, obj, event):  # noqa: N802 - Qt 回调
+        if event.type() == QEvent.Resize:
+            self._apply()
+        return False
+
+
 class LLMSettingsCard(SystemCardFrame):
     """大模型设置卡片 - 固定边框 + 垂直列表布局"""
 
@@ -535,11 +578,18 @@ class LLMSettingsCard(SystemCardFrame):
         body_layout.addWidget(self._build_side_nav())
 
         self._pages_stack = QStackedWidget(self)
-        self._page_scrolls = {}
+        self._page_widgets = {}
         self._page_layouts = {}
         for tab_id, _name in tabs:
-            page, page_layout = self._make_page()
-            self._page_scrolls[tab_id] = page
+            if tab_id == "plugins":
+                # 两栏各自滚动，直接把插件页布局挂到分页容器。
+                page = QWidget(self)
+                page.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
+                page_layout = QVBoxLayout(page)
+                page_layout.setContentsMargins(0, 0, 0, 0)
+            else:
+                page, page_layout = self._make_page()
+            self._page_widgets[tab_id] = page
             self._page_layouts[tab_id] = page_layout
             self._pages_stack.addWidget(page)
         # 页标题固定在滚动区上方，插件工作区共用此处的导航返回入口。
@@ -559,16 +609,22 @@ class LLMSettingsCard(SystemCardFrame):
         bar_layout = QHBoxLayout()
         bar_layout.setContentsMargins(6, 8, 8, 8)
         bar_layout.setSpacing(12)
-        bar_layout.addWidget(self._back_btn)
+        bar_layout.addWidget(self._back_btn, 0)
         bar_layout.addWidget(self._page_title, 1)
+        # 顶部条成容器：全宽模式把两个控件搬进插件页左栏，容器自身隐藏
+        self._page_bar = QWidget(self)
+        self._page_bar.setLayout(bar_layout)
+        self._bar_layout = bar_layout
         pages_column = QWidget(self)
         pages_col_layout = QVBoxLayout(pages_column)
         pages_col_layout.setContentsMargins(0, 0, 0, 0)
         pages_col_layout.setSpacing(4)
-        pages_col_layout.addLayout(bar_layout)
+        pages_col_layout.addWidget(self._page_bar)
         pages_col_layout.addWidget(self._pages_stack, 1)
         body_layout.addWidget(pages_column, 1)
         content_layout.addWidget(body)
+        # 插件页专用：锁住设置卡整体滚动，滚动只发生在左列表/右详情各自区内
+        self._content_height_lock = _ContentHeightLock(self.scroll_area, self)
         self._update_nav_styles()
 
         # ════ 服务商页 ════
@@ -1010,7 +1066,7 @@ class LLMSettingsCard(SystemCardFrame):
 
     def _apply_appearance_to_page(self, tab_id: str):
         """懒构造页建好后立即对齐当前全局外观（字号/主题刷新只覆盖已存在的控件）"""
-        page = self._page_scrolls.get(tab_id)
+        page = self._page_widgets.get(tab_id)
         if page is None:
             return
         try:
@@ -1124,6 +1180,10 @@ class LLMSettingsCard(SystemCardFrame):
         self._plugin_cards_widget = page  # 兼容既有可见性控制
         self._page_layouts["plugins"].addWidget(page, 1)
         self._sync_plugin_nav_visibility()
+        # 首次进插件页时 _apply_fullwidth_mode 早于本函数执行（_set_active_page →
+        # 全宽模式 → 进页准备），那时 page 还不存在；建好后补一次，顶部条才会搬进左栏。
+        if self._current_tab == "plugins":
+            self._apply_fullwidth_mode("plugins")
 
     def _register_list_card(self, card):
         """懒构造卡片补入手风琴表 + 单卡包装（增量，防已包卡重复包）"""
@@ -1457,7 +1517,7 @@ class LLMSettingsCard(SystemCardFrame):
         if tab_id not in self._nav_buttons or self._current_tab == tab_id:
             return
         self._current_tab = tab_id
-        self._pages_stack.setCurrentWidget(self._page_scrolls[tab_id])
+        self._pages_stack.setCurrentWidget(self._page_widgets[tab_id])
         self._update_nav_styles()
         self._apply_fullwidth_mode(tab_id)
         self._expand_page_cards(tab_id)
@@ -1478,8 +1538,23 @@ class LLMSettingsCard(SystemCardFrame):
         full = self._is_fullwidth_tab(tab_id)
         try:
             page = self.__dict__.get("pluginSettingsPage")
+            bar = self.__dict__.get("_page_bar")
             if full and page is not None:
+                # 顶部条搬进左栏：右栏详情头部与「插件设置」标题同一行、都顶到顶
+                adopt = getattr(page, "adopt_page_header", None)
+                if adopt is not None:
+                    adopt(self._back_btn, self._page_title)
+                    if bar is not None:
+                        bar.setVisible(False)
                 page.set_list_visible(True)
+            else:
+                self._release_page_bar()
+            lock = self.__dict__.get("_content_height_lock")
+            if lock is not None:
+                if full and page is not None:
+                    lock.enable()
+                else:
+                    lock.disable()
             self._set_nav_collapsed(full, animate=full)
             back = getattr(self, "_back_btn", None)
             if back is not None:
@@ -1488,6 +1563,21 @@ class LLMSettingsCard(SystemCardFrame):
                     back.setText("显示设置导航")
         except RuntimeError:
             pass  # __new__ 桩：跳过视觉同步
+
+    def _release_page_bar(self) -> None:
+        """把顶部条控件从插件页左栏搬回自己的容器（幂等，非插件页时需要）"""
+        page = self.__dict__.get("pluginSettingsPage")
+        release = getattr(page, "release_page_header", None)
+        if release is None or not release():
+            return
+        bar_layout = self.__dict__.get("_bar_layout")
+        bar = self.__dict__.get("_page_bar")
+        if bar_layout is not None:
+            bar_layout.addWidget(self._back_btn, 0)
+            bar_layout.addWidget(self._page_title, 1)
+        self._page_title.setVisible(True)
+        if bar is not None:
+            bar.setVisible(True)
 
     def _toggle_plugin_navigation(self):
         if self.pluginSettingsPage is not None and self.pluginSettingsPage.list_hidden():
@@ -1499,6 +1589,7 @@ class LLMSettingsCard(SystemCardFrame):
         """恢复导航并保留当前插件表单。"""
         try:
             current = getattr(self, "_current_tab", None)
+            self._release_page_bar()
             self._set_nav_collapsed(False, animate=current == "plugins")
             back = getattr(self, "_back_btn", None)
             if back is not None:
@@ -1630,7 +1721,7 @@ class LLMSettingsCard(SystemCardFrame):
                 if nav_layout is not None:
                     nav_layout.removeWidget(btn)
                 btn.deleteLater()
-            page = self._page_scrolls.pop(key, None)
+            page = self._page_widgets.pop(key, None)
             self._page_layouts.pop(key, None)
             if page is not None:
                 self._pages_stack.removeWidget(page)
@@ -1639,7 +1730,7 @@ class LLMSettingsCard(SystemCardFrame):
                 removed_current = True
         if removed_current:
             self._current_tab = "plugins"
-            fallback = self._page_scrolls.get("plugins")
+            fallback = self._page_widgets.get("plugins")
             if fallback is not None:
                 self._pages_stack.setCurrentWidget(fallback)
             self._update_nav_styles()
@@ -1673,7 +1764,7 @@ class LLMSettingsCard(SystemCardFrame):
             if insert_at is not None and nav_layout is not None:
                 nav_layout.insertWidget(insert_at + idx, btn)
             page, page_layout = self._make_page()
-            self._page_scrolls[key] = page
+            self._page_widgets[key] = page
             self._page_layouts[key] = page_layout
             self._pages_stack.addWidget(page)
         # 导航宽度按最长项自适应（上限与 _build_side_nav 一致）
@@ -1767,8 +1858,8 @@ class LLMSettingsCard(SystemCardFrame):
                     card.toggleExpand()
             except Exception as e:
                 logger.warning(f"[LLMSettingsCard] {tab_id} 页卡片展开失败: {e}")
-        page = self._page_scrolls.get(tab_id)
-        if page is not None:
+        page = self._page_widgets.get(tab_id)
+        if isinstance(page, ScrollArea):
             page.verticalScrollBar().setValue(0)
 
     def _update_nav_styles(self):
@@ -1962,7 +2053,9 @@ class LLMSettingsCard(SystemCardFrame):
             from app.utils.design_tokens import get_unified_scrollbar_style
 
             sb_style = get_unified_scrollbar_style(8)
-            for page in getattr(self, "_page_scrolls", {}).values():
+            for page in getattr(self, "_page_widgets", {}).values():
+                if not isinstance(page, ScrollArea):
+                    continue
                 for sb in (page.verticalScrollBar(), page.horizontalScrollBar()):
                     if sb is not None:
                         set_style_sheet_if_changed(sb, sb_style)

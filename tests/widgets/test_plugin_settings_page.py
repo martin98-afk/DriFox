@@ -169,6 +169,66 @@ def test_required_field_save_updates_hint_and_pending_results(env, qapp):
     assert page._detail._form._rows["api_key"].text() == "test-value"
 
 
+def test_plugin_panes_fill_settings_and_scroll_independently(env, qapp, qtbot, monkeypatch):
+    from PyQt5.QtCore import QPoint, QPointF, Qt
+    from PyQt5.QtGui import QWheelEvent
+    from PyQt5.QtWidgets import QScrollArea
+
+    from app.utils.design_tokens import Animations
+    from app.widgets.cards.settings.llm_settings_card import LLMSettingsCard
+
+    monkeypatch.setattr(Animations, "motion_enabled", classmethod(lambda cls: False))
+    card = LLMSettingsCard()
+    qtbot.addWidget(card)
+    card.resize(1100, 510)
+    card.show()
+    card._set_active_page("plugins")
+    page = card.pluginSettingsPage
+    _pump(qapp)
+    listing = page._list_area
+    detail = page._detail.current_scroll()
+    for area in (listing, detail):
+        area.widget().setMinimumHeight(1200)
+
+    def wheel_down(area):
+        viewport = area.viewport()
+        pos = viewport.rect().center()
+        event = QWheelEvent(
+            QPointF(pos), QPointF(viewport.mapToGlobal(pos)), QPoint(), QPoint(0, -120),
+            Qt.NoButton, Qt.NoModifier, Qt.NoScrollPhase, False,
+        )
+        QApplication.sendEvent(viewport, event)
+
+    for width, height in ((1100, 510), (1100, 310), (640, 510), (1100, 700)):
+        card.resize(width, height)
+        _pump(qapp)
+        # 缩放后页面上下边缘都要落在设置卡视口内，滚到底也不能推走标题。
+        viewport = card.scroll_area.viewport()
+        assert viewport.rect().contains(page.mapTo(viewport, page.rect().topLeft()))
+        assert viewport.rect().contains(page.mapTo(viewport, page.rect().bottomRight()))
+        assert page.size() == card._pages_stack.contentsRect().size()
+        ancestor = page.parentWidget()
+        while ancestor is not None:
+            if isinstance(ancestor, QScrollArea):
+                assert ancestor.verticalScrollBar().maximum() == 0
+            ancestor = ancestor.parentWidget()
+
+        left = listing.verticalScrollBar()
+        right = detail.verticalScrollBar()
+        left.setValue(0)
+        right.setValue(0)
+        title_pos = card._page_title.mapTo(card, QPoint())
+        wheel_down(listing)
+        assert left.value() > 0 and right.value() == 0
+        left_pos = left.value()
+        wheel_down(detail)
+        assert right.value() > 0 and left.value() == left_pos
+        for area in (listing, detail):
+            area.verticalScrollBar().setValue(area.verticalScrollBar().maximum())
+            wheel_down(area)
+        assert card._page_title.mapTo(card, QPoint()) == title_pos
+
+
 def test_settings_search_opens_matching_page(env, qapp):
     from app.widgets.cards.settings.llm_settings_card import LLMSettingsCard
 

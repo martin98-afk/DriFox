@@ -109,7 +109,7 @@ def main():
     print("换色-逐页 X（对每页内容 setStyleSheet 强制 repolish）：")
     from PyQt5.QtWidgets import QWidget as _W
 
-    for tab_id, page in popup._page_scrolls.items():
+    for tab_id, page in popup._page_widgets.items():
         n = len(page.findChildren(_W))
         bump_theme(20 + len(tab_id))
         t0 = time.perf_counter()
