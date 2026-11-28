@@ -1,7 +1,8 @@
 """就地插入标题，不包裹或重建 patchBlocks 的子节点。"""
 GROUP_CSS = """
-#content-placeholder > [data-group-member] { display:flow-root; }
-#content-placeholder > [data-group-hidden] { display:none !important; }
+.dfx-group-body { display:flow-root; }
+.dfx-group-body[data-live] { max-height:264px; overflow-y:auto; }
+.dfx-group-body[data-group-hidden] { display:none !important; }
 body.dfx-grouped #tool-section { display:none !important; }
 """
 
@@ -35,7 +36,7 @@ function _setGroupVisibility(node, hidden, animate) {
         if (node.isConnected) reportHeightDebounced();
     };
 }
-window._applyMessageGroups = function(groups) {
+window._applyMessageGroups = function(groups, streaming) {
     var root = document.getElementById('content-placeholder');
     var nodes = window._blockNodes(root);
     var manual = root._groupOverrides || (root._groupOverrides = new Map());
@@ -43,7 +44,9 @@ window._applyMessageGroups = function(groups) {
     root.querySelectorAll(':scope > .dfx-group-button').forEach(function(b) {
         buttons.set(b.dataset.groupStart, b);
     });
-    var hidden = new Set(), changed = new Set(), members = new Set();
+    if (streaming === undefined) streaming = root._groupsStreaming;
+    root._groupsStreaming = streaming;
+    var slots = [], assigned = new Set();
     groups.forEach(function(g) {
         var first = nodes[g[0]], key = String(g[0]);
         if (!first) return;
@@ -58,7 +61,16 @@ window._applyMessageGroups = function(groups) {
             };
         }
         buttons.delete(key);
-        if (first.previousElementSibling !== b) root.insertBefore(b, first);
+        var panel = b._panel;
+        if (!panel) { panel = document.createElement('div'); panel.className = 'dfx-group-body'; b._panel = panel; }
+        slots[g[0]] = [b,panel];
+        var follow = panel.scrollHeight - panel.clientHeight - panel.scrollTop < 4;
+        panel.toggleAttribute('data-live', !!streaming);
+        for (var i=g[0]; i<g[1]; i++) {
+            assigned.add(i);
+            if (nodes[i] && nodes[i].parentNode !== panel) panel.insertBefore(nodes[i], panel.children[i-g[0]] || null);
+        }
+        if (follow && streaming) panel.scrollTop = panel.scrollHeight;
         var opened = manual.has(key) ? manual.get(key) : g[2];
         var label = g[3], failed = g[4] || '';
         if (b.textContent !== label + failed) {
@@ -71,16 +83,19 @@ window._applyMessageGroups = function(groups) {
         }
         var last = b.getAttribute('aria-expanded');
         if (last !== String(opened)) b.setAttribute('aria-expanded', String(opened));
-        for (var i=g[0]; i<g[1]; i++) {
-            members.add(i); if (!opened) hidden.add(i);
-            if (last !== null && last !== String(opened)) changed.add(i);
+        _setGroupVisibility(panel, !opened, last !== null && last !== String(opened));
+    });
+    // 从尾向前仅校正变动项。已稳定的正文/图表保持挂载。
+    var next = null;
+    for (var i=nodes.length-1; i>=0; i--) {
+        var row = slots[i] || (assigned.has(i) ? [] : [nodes[i]]);
+        for (var j=row.length-1; j>=0; j--) {
+            var el=row[j];
+            if (el.parentNode !== root || el.nextElementSibling !== next) root.insertBefore(el,next);
+            next=el;
         }
-    });
-    buttons.forEach(function(b,k) { b.remove(); manual.delete(k); });
-    nodes.forEach(function(n,i) {
-        n.toggleAttribute('data-group-member', members.has(i));
-        _setGroupVisibility(n, hidden.has(i), changed.has(i));
-    });
+    }
+    buttons.forEach(function(b,k) { if(b._panel)b._panel.remove(); b.remove(); manual.delete(k); });
     root._currentGroups = groups;
 };
 """

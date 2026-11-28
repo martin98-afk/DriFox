@@ -165,6 +165,8 @@ def _render_reasoning_block(block: Dict[str, Any], ctx: RenderCtx, completed: bo
     content = str(block.get("content", "") or "")
     if not content.strip():
         return ""
+    # 分组模式完成态仍走 think-compact 短预览（浅色 + 采样截断）：裸 div 全文
+    # 铺开会破坏「浅色限高流式 → 结束收成短预览」的整体观感，且无 CSS 样式。
     return _render_think_block(content, completed=completed, compact=ctx.compact, flip_idx=flip_offset)
 
 

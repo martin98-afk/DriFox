@@ -3945,7 +3945,9 @@ _SKELETON_CACHE_MAX = 48
 # v95：展示方式按消息绑定，摘要样式由系统插件提供。
 # v96：摘要文字独立于失败计数，鼠标和键盘焦点分离。
 # v97：简洁摘要的内容高度过渡与中途反向。
-_SKELETON_CACHE_VERSION = 97
+# v98：分组内容共享流式滚动窗口，完成后按自然高度展开。
+# v99：分组模式无旧工具页脚，不以延迟到达的 Qt 视口高度限制正文。
+_SKELETON_CACHE_VERSION = 99
 
 
 def _js_literal(value) -> str:
@@ -4466,7 +4468,7 @@ _STREAMING_DOCK_CSS = """
                    264px ≈ 9-10 行，常规工具序列可看到实时进度，且卡片总高不随
                    流式膨胀。 */
                 /* 只约束当前已落地的视口；scrollHeight 仍保留真实文档高度用于 Qt 上报。 */
-                .compact-reading body.streaming-dock.dock-collapsed-footer {
+                .compact-reading body.streaming-dock.dock-collapsed-footer:not(.dfx-grouped) {
                     max-height: min(100vh, var(--dfx-body-max-h, 3000px));
                     box-sizing: border-box;
                 }
@@ -4483,7 +4485,7 @@ _STREAMING_DOCK_CSS = """
                    可见内容，仍会占一段空白；判据由 reportHeight 维护
                    （body.cp-blank）：正文无可见文本且无图片/公式/表格等实体内容时
                    置位，有内容即摘除。 */
-                body.streaming-dock.cp-blank #content-placeholder {
+                body.streaming-dock.cp-blank:not(.dfx-grouped) #content-placeholder {
                     display: none;
                 }
 """
@@ -4554,7 +4556,7 @@ _RESET_CONTENT_FOR_REUSE_JS = """
                     var _tsc = document.querySelector('#tool-separator > .ts-count');
                     if (_tsc) { _tsc.textContent = ''; _tsc.style.display = 'none'; }
                     var ts = document.getElementById('tool-section');
-                    if (ts) { ts.removeAttribute('data-collapsed'); ts.style.display = ''; }
+                    if (ts) { ts.removeAttribute('data-collapsed'); ts.style.display = 'none'; }
                     // 坞态/滚动跟随等易失标志复位（避免沿用上一张卡片的阅读状态）
                     document.body.classList.remove('streaming-dock');
                     // [T38] 空正文折叠标志同样复位：上一张卡可能停在 cp-blank，

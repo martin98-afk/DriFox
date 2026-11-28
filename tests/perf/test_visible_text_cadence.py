@@ -11,7 +11,7 @@ pytestmark = pytest.mark.perf
 
 
 @pytest.mark.parametrize('batch', [1, 8], ids=['uniform', 'bursty'])
-def test_visible_text_cadence(qapp, qtbot, batch):
+def test_visible_text_cadence(qapp, qtbot, batch, compact_output_plugin):
     if os.environ.get("DRIFOX_VISIBLE_CADENCE") != "1" or qapp.platformName() == "offscreen":
         pytest.skip("需显式开启真窗可见文字回放")
     from PyQt5.QtCore import Qt, QTimer
@@ -19,10 +19,18 @@ def test_visible_text_cadence(qapp, qtbot, batch):
     from app.widgets.message_card import MessageCard
 
     init_shared_web_profile()
-    card = MessageCard("assistant")
-    qtbot.addWidget(card)
-    card.resize(900, 700)
-    card.show()
+    from PyQt5.QtWidgets import QScrollArea, QVBoxLayout, QWidget
+    area = QScrollArea()
+    qtbot.addWidget(area)
+    area.setWidgetResizable(True)
+    body = QWidget()
+    layout = QVBoxLayout(body)
+    layout.addSpacing(600)
+    card = MessageCard('assistant', parent=body)
+    layout.addWidget(card)
+    area.setWidget(body)
+    area.resize(580, 420)
+    area.show()
     card.ensure_rendered()
     qtbot.waitUntil(lambda: bool(card.viewer and card.viewer._is_js_ready), timeout=30000)
     page = card.viewer.page()
@@ -36,10 +44,17 @@ def test_visible_text_cadence(qapp, qtbot, batch):
     card.raise_()
     card.activateWindow()
     card.start_streaming_anim()
+    card.append_reasoning('准备回放正文。')
+    qtbot.waitUntil(lambda: bool(js("document.querySelector('.dfx-group-button') !== null")), timeout=5000)
+    scrollbar = area.verticalScrollBar()
+    scrollbar.setValue(max(0, scrollbar.maximum()-70))
+    positions = []
+    scrollbar.valueChanged.connect(positions.append)
     sample_origin = time.perf_counter()
     assert js("""(function(){var start=performance.now(), prev=0, stamps=[];
-        window._sampleStart=start;window._sampleDone=false;window._sampleStamps=stamps;
-        function tick(){var n=document.getElementById('content-placeholder');var size=n?n.textContent.trim().length:0;
+        window._sampleStart=start;window._sampleDone=false;window._sampleStamps=stamps;window._groupTops=[];
+        function tick(){var n=document.querySelector('[data-block-kind=text]');var size=n?n.innerText.trim().length:0;
+        var group=document.querySelector('.dfx-group-button'); if(group)window._groupTops.push([group.getBoundingClientRect().top,document.body.scrollTop,window.scrollY,document.body.className,window.innerHeight,document.body.scrollHeight]);
         if(size>prev)stamps.push([performance.now()-start,size-prev]);prev=size;
         if(!window._sampleDone)requestAnimationFrame(tick);}tick();return true;})()""")
     echo_ms = (time.perf_counter() - sample_origin) * 1000
@@ -77,6 +92,9 @@ def test_visible_text_cadence(qapp, qtbot, batch):
     first = times[0][0] - origin_to_send
     tail = times[-1][0] - origin_to_send - span
     print(f"可见增长帧={len(times)} 首批到首帧≈{first:.0f}ms 末批到末帧≈{tail:.0f}ms 对时误差≤{echo_ms:.0f}ms 首帧增字={times[0][1]} 间隔中位={gaps[len(gaps)//2]:.0f}ms P95={gaps[int(.95*len(gaps))]:.0f}ms 最长={max(gaps):.0f}ms 单帧增字P95={jumps[int(.95*len(jumps))]} 最大={max(jumps)}", flush=True)
+    samples = js('window._groupTops')
+    assert not positions, positions
+    assert max(s[0] for s in samples)-min(s[0] for s in samples) <= 1, (min(samples), max(samples))
     if batch > 1:
         assert times[0][1] < len(pieces[0]), '首批正文不应整段跳出'
     card.finish_streaming()

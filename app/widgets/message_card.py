@@ -6466,6 +6466,12 @@ class MessageCard(SimpleCardWidget):
         self._streaming_live_buffer = ""
         if not self._lazy_rendered or not self.viewer:
             return
+        if (self.viewer.__dict__.get('_v2_live_key') and self.viewer._render_v2
+                and self.viewer._tool_compact_mode):
+            # 首批已包含在 live 节点里；以权威块重新计算增量，不能把缓冲全文再写一遍。
+            self.viewer._lazy_markdown_cb = self._build_incremental_md
+            self.viewer._schedule_render(immediate=True)
+            return
         try:
             # orjson.dumps 返回 bytes，需 decode 后嵌入 JS 字符串字面量；
             # createTextNode 走安全文本节点，无 HTML 注入面

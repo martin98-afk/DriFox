@@ -37,8 +37,19 @@ def test_compact_grouped_stream(qapp, qtbot, compact_output_plugin):
 
         buttons = "Array.from(document.querySelectorAll('.dfx-group-button'))"
         states = f"{buttons}.map(b=>b.getAttribute('aria-expanded'))"
+        js("""window._legacyFrames=0; (function sample(){if(document.getElementById('tool-section').getBoundingClientRect().height>0)window._legacyFrames++;if(!window._endProbe)requestAnimationFrame(sample)})()""")
         card.start_streaming_anim()
-        card.append_reasoning('第一段思考。')
+        first = ('长思考内容用于检验分组滚动窗口。' * 12 + '\n') * 40 + '第一段思考结尾。'
+        card.append_reasoning(first)
+        live = "document.querySelector('.dfx-group-body .v2-live-text.think-compact')"
+        qtbot.waitUntil(lambda: bool(js(f'!!{live}')), timeout=5000)
+        qtbot.wait(1100)
+        addition = '继续思考到最新一行。' * 100
+        card.append_reasoning(addition)
+        qtbot.waitUntil(lambda: js(f'{live} && {live}.textContent') == first + addition, timeout=5000)
+        live_box = js(f'[{live}.clientHeight,{live}.scrollHeight,{live}.scrollTop]')
+        height, content_height, top = live_box
+        assert 0 < height <= 96 and content_height > height and abs(content_height-height-top) <= 2, live_box
         card.update_tool_streaming('late-1', 'read', {'path': 'first.txt'})
         qtbot.waitUntil(lambda: js(states) == ['true'], timeout=10000)
         card.append_text('第一段正文。\n\n')
@@ -50,8 +61,7 @@ def test_compact_grouped_stream(qapp, qtbot, compact_output_plugin):
             for opening in (True, False):
                 js("""window._heights=[]; window._sampled=false;
                   (function(){var end=performance.now()+320;firstButton.click();
-                  function sample(){var els=[firstButton.nextElementSibling,firstButton.nextElementSibling.nextElementSibling];
-                    _heights.push(els.reduce((s,e)=>s+e.getBoundingClientRect().height,0));
+                  function sample(){_heights.push(firstButton.nextElementSibling.getBoundingClientRect().height);
                     if(performance.now()<end)requestAnimationFrame(sample);else window._sampled=true;}sample()})()""")
                 qtbot.waitUntil(lambda: bool(js('window._sampled')), timeout=4000)
                 heights = js('window._heights')
@@ -79,8 +89,14 @@ def test_compact_grouped_stream(qapp, qtbot, compact_output_plugin):
         assert style == [1, True, 0.76, 'none', 'rgba(0, 0, 0, 0)'], style
         qtbot.waitUntil(lambda: bool(js("document.querySelector('[data-tool-call-id=\"late-1\"]:not(.tool-streaming-block)')" + ' !== null')), timeout=10000)
         assert js(f"firstButton === {buttons}[0]")
-        assert js(f"{buttons}[0].nextElementSibling.nextElementSibling.querySelector('[data-tool-call-id=\"late-1\"]') !== null")
+        assert js(f"{buttons}[0].nextElementSibling.querySelector('[data-tool-call-id=\"late-1\"]') !== null")
+        qtbot.wait(320)
+        preview = "firstButton._panel.querySelector('[data-block-kind=reasoning] .think-compact')"
+        assert js(f'{preview}.innerText.length < 180 && {preview}.offsetHeight > 0')
         card.finish_streaming()
         qtbot.waitUntil(lambda: js(states) == ['true', 'false'], timeout=10000)
+        qtbot.waitUntil(lambda: js("!firstButton._panel.hasAttribute('data-live')"), timeout=5000)
+        assert js(f'{preview}.innerText.length < 180 && {preview}.offsetHeight > 0')
+        assert js('window._endProbe=true;window._legacyFrames') == 0
     finally:
         cfg.set(cfg.ui_compact_tool_area, old, save=False)
