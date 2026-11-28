@@ -68,6 +68,8 @@ class RenderCtx:
 
     streaming: bool = False
     compact: bool = False
+    # 有序展示：保留块的原始顺序，供消息排版策略就地分组。
+    inline_groups: bool = False
     lazy_body: bool = False
     heavy_caps: tuple[int, int, int] | None = None
     # 已完成工具的协议段指纹集合：流式期未闭合协议段命中时丢弃，

@@ -3941,7 +3941,8 @@ _SKELETON_CACHE_MAX = 48
 # v91：流式期折叠工具栏相对已落地的 WebView 视口对齐。
 # v92：向 Qt 同步底部工具区的实际显隐，用于流式表面限高。
 # v93：恢复图表占位柱条和扫光；长正文不按聊天区一屏截高。
-_SKELETON_CACHE_VERSION = 93
+# v94：简洁模式的原位分组按钮与有序块布局。
+_SKELETON_CACHE_VERSION = 94
 
 
 def _js_literal(value) -> str:
@@ -4540,7 +4541,9 @@ _STREAMING_DOCK_JS = """
 _RESET_CONTENT_FOR_REUSE_JS = """
                 (function () {
                     var c = document.getElementById('content-placeholder');
-                    if (c) { c.innerHTML = ''; c.removeAttribute('data-pending-break'); c.scrollTop = 0; }
+                    if (c) { c.innerHTML = ''; c.removeAttribute('data-pending-break'); c.scrollTop = 0;
+                        delete c._groupOverrides; delete c._currentGroups; }
+                    document.body.classList.remove('dfx-grouped');
                     var t = document.getElementById('tool-content');
                     if (t) { t.innerHTML = ''; t.scrollTop = 0; }
                     // 计数药丸复位：清空工具区不等于清空头部文本，不复位会让

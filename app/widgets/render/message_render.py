@@ -84,8 +84,9 @@ def render_message(
         active_index = active_block_index(blocks, True)
 
     rendered = render_blocks(blocks, ctx, active_index, cache, live_index=live_index, live_html=live_html)
-    content = [it for it in rendered if it.home == HOME_CONTENT]
-    tool = [it for it in rendered if it.home == HOME_TOOL]
+    # 有序布局只更改物理容器，home 仍用于辨识应保留在正文的编辑工具。
+    content = rendered if ctx.inline_groups else [it for it in rendered if it.home == HOME_CONTENT]
+    tool = [] if ctx.inline_groups else [it for it in rendered if it.home == HOME_TOOL]
 
     if char_count and content:
         last = content[-1]

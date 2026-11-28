@@ -97,6 +97,8 @@ from app.widgets.render import (
     live_key,
     render_message,
 )
+from app.widgets.render.group_dom import GROUP_CSS, GROUP_JS
+from app.plugins.contracts.message_layout import resolve_groups
 from app.widgets.render_crash_queue import RenderCrashQueue
 from app.widgets.card_render_core import (
     ACTION_COLOR_MAP,
@@ -4595,6 +4597,7 @@ class CodeWebViewer(QWebEngineView):
                     border-radius: var(--r-md); color: var(--text-secondary); font-size: .9em;
                 }}
                 .chart-failure .code-btn {{ background: transparent; border: 0; cursor: pointer; }}
+                {GROUP_CSS}
                 .compact-reading .chart-toolbar:focus-within {{ opacity: 1; }}
             </style>
             <!-- 代码高亮主题（Pygments class 化）：单独一个 style 便于运行时
@@ -4613,6 +4616,7 @@ class CodeWebViewer(QWebEngineView):
             </div>
             <div id="content-placeholder"></div>
             <script>
+                {GROUP_JS}
                 const collapsibleState = new Map();
                 // 简洁模式标志：由 Python 在 _load_skeleton 后通过 JS 同步更新
                 window._toolCompactMode = true;
@@ -6394,12 +6398,13 @@ class CodeWebViewer(QWebEngineView):
                 //    无 data-block-key）在真实 tool_result 块落地后成为重复框，按 id 清除；
                 // 2) 工具区显隐 + 标题计数：v2 不跑 reorganizeContent，显隐由块数直接决定；
                 // 3) 流式期间工具区内部滚底（正文滚底仍由外部高度上报链负责）。
-                window._v2AfterPatch = function (streaming) {{
+                window._v2AfterPatch = function (streaming, grouped) {{
+                    document.body.classList.toggle('dfx-grouped', !!grouped);
                     try {{
                         // 工具与思考区位置（2026-11-02 用户诉求）：流式中放正文下方
                         // （跟着最新输出走），结束后回到顶部（吸顶回看，不藏在长正文
                         // 末尾）。幂等：位置已正确时只多两次属性比较，不做 DOM 操作。
-                        if (window._toolCompactMode) {{
+                        if (!grouped && window._toolCompactMode) {{
                             var _tsPos = document.getElementById('tool-section');
                             var _cpPos = document.getElementById('content-placeholder');
                             if (_tsPos && _cpPos && _cpPos.parentNode) {{
@@ -6468,7 +6473,7 @@ class CodeWebViewer(QWebEngineView):
                         //      搬入卡的折叠展开态每批重置（流式中可接受，完成后
                         //      仅跑一轮不再重置）。运行中的工具流式框（JS 注入、
                         //      data-streaming）不是搬移产物，不清理。
-                        if (window._toolCompactMode && tc) {{
+                        if (!grouped && window._toolCompactMode && tc) {{
                             var cpEl = document.getElementById('content-placeholder');
                             if (cpEl) {{
                                 // 🐛 搬移改「身份复用」（2026-10-30 用户实测：简洁模式流式
@@ -9222,6 +9227,7 @@ class CodeWebViewer(QWebEngineView):
         return RenderCtx(
             streaming=self._streaming,
             compact=self._tool_compact_mode,
+            inline_groups=self._tool_compact_mode,
             lazy_body=self._tool_lazy_body,
             heavy_caps=_HISTORY_TOOL_CAPS if getattr(self, "_is_history", False) else None,
             tool_fingerprints=frozenset(getattr(self, "_finished_tool_fingerprints", ()) or ()),
@@ -9349,7 +9355,7 @@ class CodeWebViewer(QWebEngineView):
         self._v2_live_tail_done_ts = time.monotonic()
         # 容器必须按归属选：思考块（简洁模式 home=tool-content）切到正文容器会
         # 让限高/样式选择器全部命不中（2026-11-02 思考预览无限高根因之一）。
-        _container = "tool-content" if (live_reasoning and ctx.compact) else "content-placeholder"
+        _container = "tool-content" if (live_reasoning and ctx.compact and not ctx.inline_groups) else "content-placeholder"
         try:
             page.runJavaScript(
                 "if(typeof window._v2LiveSplit==='function')window._v2LiveSplit("
@@ -9784,7 +9790,25 @@ class CodeWebViewer(QWebEngineView):
         # 漏判时本批只做了 tail 渲染记账（_v2_live_tail_done_len 已推进）却不发
         # JS → 尾部格式化永久丢一次，直到攒够下一个降载窗口（用户可见格式回退）。
         _pending_tail = self.__dict__.get("_v2_live_tail_html_pending")
-        if content_ops.is_empty and tool_ops.is_empty and not live_delta and _pending_tail is None:
+        groups_js = None
+        if ctx.inline_groups:
+            kinds = tuple(
+                r.kind if r.home == 'tool' else
+                'blank' if r.kind == 'text' and not (blocks[i].get('text') or '').strip() else 'body'
+                for i, r in enumerate(mr.content)
+            )
+            group_sig = (kinds, self._streaming)
+            if force_full or not content_ops.is_empty or self.__dict__.get('_layout_sig') != group_sig:
+                groups = resolve_groups(kinds, streaming=self._streaming)
+                rows = []
+                for start, stop, opened in groups:
+                    segment = kinds[start:stop]
+                    counts = [('思考', segment.count('reasoning')), ('工具', segment.count('tool'))]
+                    label = ' · '.join(f'{n} 次{name}' for name, n in counts if n) or '消息详情'
+                    rows.append((start, stop, opened, label))
+                groups_js = json.dumps(rows).decode('utf-8')
+                self._layout_sig = group_sig
+        if content_ops.is_empty and tool_ops.is_empty and not live_delta and _pending_tail is None and groups_js is None:
             return True
 
         self._height_report_pending = True
@@ -9872,7 +9896,7 @@ class CodeWebViewer(QWebEngineView):
             # 硬编码 content-placeholder 会让 _v2LiveNode 在错误容器里查不到节点 →
             # _v2LiveAppend 静默返回 false → 思考增量全部丢失（实测表现为思考内容
             # 停在首帧纯文本、后续增长完全不显示）。
-            _live_cid = "tool-content" if live_reasoning else "content-placeholder"
+            _live_cid = "tool-content" if live_reasoning and ctx.compact and not ctx.inline_groups else "content-placeholder"
             js.append(
                 "if(typeof window._v2LiveAppend==='function')window._v2LiveAppend('"
                 + _live_cid
@@ -9915,7 +9939,9 @@ class CodeWebViewer(QWebEngineView):
                 "window._v2AnchorRestore(document.getElementById('tool-content'),window._v2AnchorT);}"
             )
         # v2 专属收尾：流式运行框去重 / 工具区显隐与 header / 工具区滚底
-        js.append(f"if(typeof window._v2AfterPatch==='function')window._v2AfterPatch({str(self._streaming).lower()});")
+        if groups_js is not None:
+            js.append(f"window._applyMessageGroups({groups_js});")
+        js.append(f"if(typeof window._v2AfterPatch==='function')window._v2AfterPatch({str(self._streaming).lower()},{str(ctx.inline_groups).lower()});")
         page.runJavaScript("".join(js))
         return True
 

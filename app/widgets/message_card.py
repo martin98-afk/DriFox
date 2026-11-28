@@ -3327,15 +3327,19 @@ class MessageCard(SimpleCardWidget):
             <= STREAM_HEIGHT_TRACK_EPSILON
         ):
             return
-        if (self._streaming and target_height > current_height + 2
-                and not self.wants_outer_max_prelift()):
+        # 简洁模式与普通流式共用下方的 retarget/合并提交；增长回报不直接改视口。
+        # 及时撤销旧收缩，避免合并提交前旧定时器先写回矮高度。
+        if self._streaming and target_height > current_height + 2 and not self.wants_outer_max_prelift():
             self._cancel_pending_shrink()
-            self._stream_height_timer.stop()
-            if self._stream_height_anim_active:
-                self._stop_stream_height_track()
-            self._target_viewer_height = target_height
-            self._apply_viewer_height(target_height)
-            return
+            # 大台阶不能等插值：当前视口会裁掉整行正文。复用统一的 snap 阈值，
+            # 仅小步增长留给下方的合并追踪，避免对每个高度回报同步 resize。
+            if target_height - current_height >= STREAM_HEIGHT_SNAP_GAP_PX:
+                self._stream_height_timer.stop()
+                if self._stream_height_anim_active:
+                    self._stop_stream_height_track()
+                self._target_viewer_height = target_height
+                self._apply_viewer_height(target_height)
+                return
         # 注：_target_viewer_height 不再在入口无条件覆盖。追踪活跃时由下方
         # 方向守卫分支决定是否改写；其余路径在各自应用点显式赋值。
         # [L3] 稳定状态下的高度才写入宽度→高度缓存
