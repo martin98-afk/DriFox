@@ -75,6 +75,8 @@ from app.utils.design_tokens import (
     BorderRadius,
     Colors,
     _get_global_font,
+    chat_font_css,
+    chat_font_family,
     current_theme,
     fade_in_widget,
     font_size_css,
@@ -2679,7 +2681,7 @@ class CodeWebViewer(QWebEngineView):
         # 字体变量兜底：骨架 HTML 是按构建期字体分桶缓存的，从取缓存到 JS
         # 就绪之间配置可能已变（用户在别的窗口切了字体）；且池化复用的骨架
         # 保留上一张卡片的字体。这里比对一次，不一致就注入（一致则零 IPC）。
-        if getattr(self, "_viewer_font_family", None) != _current_viewer_font_family():
+        if getattr(self, "_viewer_font_family", None) != self._current_viewer_font_family():
             self._refresh_viewer_font_css()
             self._apply_font_vars()
         elif getattr(self, "_font_css_pending", False):
@@ -2753,7 +2755,7 @@ class CodeWebViewer(QWebEngineView):
         if _drq is not None:
             _drq.stop()
         # 获取系统字体
-        font_family = _current_viewer_font_family()
+        font_family = self._current_viewer_font_family()
         self._viewer_font_family = font_family
         self._viewer_font_css = (
             f"{get_font_family_css()} font-family: {font_family}, sans-serif; font-size: {scale_font_size(14)}px;"
@@ -2767,7 +2769,6 @@ class CodeWebViewer(QWebEngineView):
         tag_font_size = scale_font_size(12)
         small_font_size = scale_font_size(11)
         tiny_font_size = scale_font_size(10)
-        font_family_global = _get_global_font()
 
         theme_fp = json.dumps({k: theme[k] for k in sorted(theme)}, option=json.OPT_SORT_KEYS).decode("utf-8")
         # mermaid vendor URL 进 key：热替换 vendor 文件后能让旧骨架缓存失效
@@ -2794,7 +2795,6 @@ class CodeWebViewer(QWebEngineView):
             self._light_skeleton,
             theme_fp,
             font_family,
-            font_family_global,
             body_font_size,
             code_font_size,
             tag_font_size,
@@ -2919,7 +2919,7 @@ class CodeWebViewer(QWebEngineView):
                 }
             """
         _is_light_diff = _is_light
-        mono_font = f"{font_family_global}, Consolas, monospace"
+        mono_font = "Consolas, Menlo, monospace"
         # 代码块工具栏 / 思考图标：mask 图统一内联为 data URI（qrc: 会被
         # WebEngine 的 CORS 策略拦掉，图标整片不绘制，见 _code_icon_mask_uri）
         _ci_mask_save = _code_icon_mask_css("导入.svg")
@@ -3084,12 +3084,12 @@ class CodeWebViewer(QWebEngineView):
                 h1 {{ font-size: 1.45em; margin: 18px 0 8px; }}
                 h2 {{ font-size: 1.25em; margin: 16px 0 6px; }}
                 h3 {{ font-size: 1.1em; margin: 14px 0 4px; }}
-                /* 正文行高 1.65：中英混排下兼顾可读性与密度（浏览器默认 ~1.2 过挤） */
-                p {{ margin: 8px 0; color: var(--text-secondary); line-height: 1.65; }}
+                /* 正文使用主文字色，段落和列表共享阅读行高。 */
+                p {{ margin: 0.65em 0; color: var(--text); line-height: 1.75; }}
                 a {{ color: var(--accent) !important; text-decoration: none; }}
                 a:hover {{ text-decoration: underline; }}
-                ul, ol {{ margin: 8px 0; padding-left: 24px; line-height: 1.65; }}
-                li {{ margin: 4px 0; color: var(--text-secondary); }}
+                ul, ol {{ margin: 8px 0; padding-left: 24px; line-height: 1.75; }}
+                li {{ margin: 4px 0; color: var(--text); }}
                 strong {{ color: var(--text) !important; font-weight: 600; }}
                 em {{ color: var(--text-secondary) !important; font-style: italic; }}
                 code:not(.code-content *):not(pre code) {{ 
@@ -8494,6 +8494,9 @@ class CodeWebViewer(QWebEngineView):
             return
         self.refresh_font()
 
+    def _current_viewer_font_family(self):
+        return _get_global_font() if self.__dict__.get("_light_skeleton", False) else chat_font_family()
+
     def _refresh_viewer_font_css(self):
         """重算字体相关的 Python 侧缓存值（不触碰 DOM）
 
@@ -8503,7 +8506,7 @@ class CodeWebViewer(QWebEngineView):
         """
         if not hasattr(self, "_viewer_font_family"):
             return
-        self._viewer_font_family = _current_viewer_font_family()
+        self._viewer_font_family = self._current_viewer_font_family()
         body_font_size = scale_font_size(14)
         self._viewer_font_css = (
             f"{get_font_family_css()} font-family: {self._viewer_font_family}, sans-serif; "
@@ -8517,8 +8520,8 @@ class CodeWebViewer(QWebEngineView):
         字体名走 JSON 序列化（字体名可能含引号/反斜杠，拼串会产出语法错误
         的 JS —— QWebEngine 遇到语法错误静默失败，无回调也无日志）。
         """
-        font_family = f"'{_current_viewer_font_family()}', sans-serif"
-        mono_family = f"{_get_global_font()}, Consolas, monospace"
+        font_family = f"'{self._current_viewer_font_family()}', sans-serif"
+        mono_family = "Consolas, Menlo, monospace"
         body_font_size = f"{scale_font_size(14)}px"
 
         def _js_str(s: str) -> str:
@@ -12364,7 +12367,7 @@ class PlainTextViewer(QWidget):
         滚动条复用项目统一的 get_unified_scrollbar_style，与
         tab_panel / project_selector / settings 等列表的视觉风格保持一致。
         """
-        font_css = get_font_family_css()
+        font_css = chat_font_css()
         text_color = Colors.USER_CARD_TEXT
         self.text_edit.setStyleSheet(f"""
             QTextEdit {{
@@ -12378,6 +12381,9 @@ class PlainTextViewer(QWidget):
             }}
             {get_unified_scrollbar_style(6)}
         """)
+
+    def refresh_font(self):
+        self.refresh_theme()
 
     def refresh_theme(self):
         """主题切换后刷新文本颜色"""
@@ -12979,25 +12985,6 @@ def _download_and_preview(url_str: str, parent=None) -> None:
             QDesktopServices.openUrl(QUrl(url_str))
         except Exception:
             pass
-
-
-def _current_viewer_font_family() -> str:
-    """读取当前生效的卡片正文字体族（与骨架构建期同源）
-
-    骨架 ``_load_skeleton`` 与运行时 ``refresh_font`` 必须读同一处配置，
-    否则切字体后两者不一致（历史包袱：骨架读 llm_font_family，回退
-    canvas_font_selected）。这里抽成单一入口。
-    """
-    try:
-        from app.utils.config import Settings
-
-        settings = Settings.get_instance()
-        font_family = settings.llm_font_family.value
-        if not font_family:
-            font_family = settings.canvas_font_selected.value or "Segoe UI, sans-serif"
-        return font_family
-    except Exception:
-        return "Segoe UI, sans-serif"
 
 
 def _fence_assets_for_skeleton() -> tuple:

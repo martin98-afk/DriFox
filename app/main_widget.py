@@ -995,6 +995,8 @@ class OpenAIChatToolWindow(ToolWindow):
     _current_session_id: Optional[str] = None
     _settings_popup = None
     _is_welcome = False
+    _first_run_enabled = False
+    _first_run_guide = None
     _is_searching: bool = False
     _search_results: List[int] = []
     _current_search_index: int = -1
@@ -8127,6 +8129,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
         if not hasattr(self, "current_model_btn"):
             return
+        self._update_first_run_progress()
         # 当前服务商的显示名 + provider_name（用于找 icon）
         display = self._current_provider_name
         pname = self._current_provider_name
@@ -8588,6 +8591,8 @@ class OpenAIChatToolWindow(ToolWindow):
         """（委托全局卡片控制器 GlobalCardController）"""
         from app.widgets.cards.global_card_controller import get_global_card_controller
 
+        if _state_get("first_run_guide") == "active":
+            return
         cc = get_global_card_controller()
         if cc is not None:
             cc.check_gitee_sync_reminder()
@@ -11475,7 +11480,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # 字体块含 findChildren 全树 + MessageCard 重渲，无哨兵即双跑（多窗口 ×2）。
         _not_seen = object()  # 哨兵默认值：属性未设时保证与任何配置值不等
         try:
-            _cur_ff = self.cfg.llm_font_family.value
+            _cur_ff = (self.cfg.ui_font_family.value, self.cfg.llm_font_family.value)
             _cur_fs = self.cfg.ui_font_size.value
         except Exception:
             # 读不到配置（窗口构建极早期/降级）→ 每次用新对象，永不命中相等 → 保守照刷
@@ -11545,6 +11550,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # ── 1. 颜色/主题相关块 ──
         if is_color:
+            self._update_first_run_progress()
             if not _skip_global:
                 theme_manager.on_theme_changed()
 
@@ -12514,6 +12520,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # 会话切换：撤销条目绑定在具体 session 上，跨会话一律失效
         # （本方法是所有会话加载路径的汇聚点，在此兜底即可覆盖全部调用方）
         self._clear_undo_store_for_session_switch()
+        self._hide_first_run_guide()
         # [首屏一次显示] 上一轮等待（若有）立即撤罩作废：旧回调不得揭示新会话。
         # 放在本方法入口 = 覆盖缓存恢复 / 空会话 / 保留会话等全部早退分支。
         self._cancel_history_first_paint()
@@ -12747,6 +12754,59 @@ class OpenAIChatToolWindow(ToolWindow):
             "layout_height": layout_height,
         }
 
+    def enable_first_run_guide(self, fresh_install: bool):
+        """仅启动首窗参与，在本机记住未完成或已跳过的指引。"""
+        state = _state_get("first_run_guide")
+        self._first_run_enabled = state == "active" or (fresh_install and state is None)
+        if self._first_run_enabled:
+            _state_set("first_run_guide", "active")
+            self._schedule_initial_welcome()
+
+    def _show_first_run_guide(self):
+        from app.widgets.first_run_guide import FirstRunGuide
+
+        guide = self._first_run_guide
+        if guide is None:
+            guide = FirstRunGuide(self)
+            self._first_run_guide = guide
+            layout = self.chat_scroll_area.parentWidget().layout()
+            layout.insertWidget(layout.indexOf(self.chat_scroll_area), guide, 1)
+            guide.addProvider.connect(self._open_guide_provider_picker)
+            guide.chooseModel.connect(self._toggle_model_selector_card)
+            guide.finished.connect(self._finish_first_run_guide)
+        self._update_first_run_progress()
+        self.chat_scroll_area.hide()
+        guide.show()
+
+    def _open_guide_provider_picker(self):
+        from app.widgets.cards.global_card_controller import get_global_card_controller
+
+        controller = get_global_card_controller()
+        if controller is not None:
+            controller._show_provider_picker_card(return_to_settings=False)
+
+    def _update_first_run_progress(self):
+        guide = self._first_run_guide
+        if guide is not None:
+            configs = self._valid_configs
+            has_provider = bool(chat_fallback_candidate(configs))
+            selected = configs.get(self._current_provider_name, {})
+            model = self._current_model_name if selected and selected.get("capability_type", "chat") == "chat" else ""
+            guide.update_progress(has_provider, model)
+
+    def _hide_first_run_guide(self):
+        guide = self._first_run_guide
+        if guide is not None and not guide.isHidden():
+            guide.hide()
+            self.chat_scroll_area.show()
+
+    def _finish_first_run_guide(self):
+        self._first_run_enabled = False
+        _state_set("first_run_guide", "done")
+        self._hide_first_run_guide()
+        self._show_initial_welcome()
+        self._focus_input_if_active()
+
     def _show_initial_welcome(self):
         """仅在UI上显示欢迎卡片，不改动Session数据
 
@@ -12808,6 +12868,10 @@ class OpenAIChatToolWindow(ToolWindow):
             return
         try:
             self._clear_chat_area(delete_widgets=False)
+            if self._first_run_enabled:
+                self._show_first_run_guide()
+                self._cancel_pending_welcome_render()
+                return
             welcome_card = self._get_or_create_welcome_card()
             if welcome_card is None:
                 # 缓存重建返回 None（极端：create_welcome_card 在 try/except 内全部
@@ -16614,6 +16678,7 @@ class OpenAIChatToolWindow(ToolWindow):
     def _add_chat_widget(self, widget: QWidget, insert_index: Optional[int] = None):
         if getattr(self, "_is_destroyed", False):
             return
+        self._hide_first_run_guide()
         if insert_index is None:
             add_message_to_layout(widget, self.chat_layout, is_widget_alive)
         else:

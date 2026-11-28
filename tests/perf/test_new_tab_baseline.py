@@ -526,6 +526,50 @@ def test_new_tab_ui_elements_present(tab_env, monkeypatch):
 # ── 测试 3：双标签页上下文互相独立（重构安全网）─────────────────────────────
 
 
+def test_hidden_welcome_releases_and_restores_viewer(tab_env, qtbot, monkeypatch):
+    from app.widgets.bottom_input_area import SendableTextEdit
+
+    tm, first = tab_env["tm"], tab_env["w0"]
+    second = tm.spawn_tab(first, new_session=True)
+    assert _wait_new_tab_ready(second)
+    card = second._get_or_create_welcome_card()
+    editor = second.findChild(SendableTextEdit)
+    qtbot.waitUntil(lambda: card.viewer is not None and card.viewer._is_js_ready)
+    session_id = first._current_session_id
+    recent = [{"session_id": session_id, "title": "后台更新的会话"}]
+    monkeypatch.setattr(second, "_collect_welcome_sessions", lambda: (recent, []))
+    second._refresh_welcome_card_data()
+    qtbot.waitUntil(lambda: card.viewer.height() > 80)
+    _drain(400)
+    original = card.viewer
+    first_index, second_index = tm._windows.index(first), tm._windows.index(second)
+    tm._on_tab_selected(first_index)
+    assert not editor._placeholder_tip_timer.isActive()
+    tm._on_tab_selected(second_index)
+    assert card.viewer is original and editor._placeholder_tip_timer.isActive()
+    tm._on_tab_selected(first_index)
+    qtbot.waitUntil(lambda: card.viewer is None, timeout=5000)
+    recent[0] = {"session_id": session_id, "title": "后台更新的记录"}
+    second._refresh_welcome_card_data()
+    tm._on_tab_selected(second_index)
+    qtbot.waitUntil(lambda: card.viewer is not None and card.viewer._is_js_ready)
+
+    def click_recent():
+        result = []
+        card.viewer.page().runJavaScript(
+            "(function(){let n=document.querySelector('[data-session-id]');"
+            "if(!n || !n.textContent.includes('后台更新的记录'))return false;"
+            "let r=n.getBoundingClientRect(), hit=document.elementFromPoint(r.x+r.width/2,r.y+r.height/2);"
+            "if(!hit || !n.contains(hit))return false; hit.click();return true;})()", result.append
+        )
+        qtbot.waitUntil(lambda: bool(result))
+        return bool(result[0])
+
+    with qtbot.waitSignal(card.contextActionRequested, timeout=5000) as action:
+        qtbot.waitUntil(click_recent)
+    assert session_id in action.args
+
+
 def test_two_tabs_context_independence(tab_env):
     """改 A 的 项目/模型/工作目录/工具权限，B 不受影响（反向亦然）"""
     tm, w0 = tab_env["tm"], tab_env["w0"]

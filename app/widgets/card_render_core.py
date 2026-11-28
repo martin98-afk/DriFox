@@ -237,25 +237,6 @@ _PYGMENTS_CSS_CACHE: dict = {}
 # 生成时带上 pre 才能同时命中 pre 自身（前景/背景）与内部 span。
 _PYGMENTS_CSS_SCOPE = ".code-content pre"
 
-# ======== 流式态单色 tint（替代原彩虹循环色板）========
-# 旧 _RAINBOW_NORMAL 为 10 色高饱和绕卡循环，色相跳变（青→紫→粉→橙→绿）
-# 过于抢眼；现流式指示统一走单色（accent / 警示红），运动只保留底部光块。
-_STREAM_TINT_RETRY = "#ff2222"
-
-# ======== 流式底部光块运动参数 ========
-# 单程时长(ms)：往返一趟 = 2 × _STREAM_BAND_SWEEP_MS
-_STREAM_BAND_SWEEP_MS = 1600.0
-# 单拍最大推进(ms)：主线程被内容渲染占满时 Qt 定时器会延迟触发，若按真实 dt
-# 全额推进，恢复后光块会一次瞬移到新位置（观感「跳变」）。钳到一帧多的量，
-# 掉帧只表现为动画变慢，不瞬移、也不在恢复时集中补帧（观感「卡住后猛冲」）。
-_STREAM_BAND_MAX_DT_MS = 100.0
-_STREAM_BAND_H = 3  # 光块高度(px)
-_STREAM_BAND_BOTTOM = 3  # 光块距卡片底边(px)
-# 动画帧脏区在光块上下的纵向余量(px)。必须让脏区保持在内壁描边**之上**：
-# 脏区一旦覆盖底部描边，重绘会先擦掉该带内的描边、而窄带重绘只画光块，
-# 描边就在「整卡重绘画出」与「动画帧擦掉」之间反复 —— 表现为下边框闪烁。
-_STREAM_BAND_REPAINT_PAD = 1
-
 # ===== 性能缓存：图标前缀和字号（避免每块代码都查主题和计算字号） =====
 # ⚠️ 默认值按「深色」写（`qrc:/icons` 是白图标）；浅色主题下必须由
 # `_update_icon_prefix()` 换成 `qrc:/icons_light`，**且只能经 `current_icon_prefix()`

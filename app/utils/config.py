@@ -922,10 +922,11 @@ class Settings(QConfig):
         "interject",
         OptionsValidator(["interject", "queue"]),
     )
-    # 全局字体设置
-    llm_font_family = ConfigItem("LLM", "FontFamily", "楷体")
+    # 对话正文；沿用原存储键，空字符串表示跟随系统字体。
+    llm_font_family = ConfigItem("LLM", "FontFamily", "")
 
     # ========== UI appearance ==========
+    ui_font_family = ConfigItem("UI", "FontFamily", "")
     # 界面字号档位：delta 键 "-5".."10"（实际字号 = 14 + delta，步进 1px）
     class _FontSizeValidator(OptionsValidator):
         """字号档位校验：旧档位键（small/medium/large/superlarge）读取时自动迁移到 delta 键"""

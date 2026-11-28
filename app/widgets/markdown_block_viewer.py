@@ -65,6 +65,7 @@ from app.utils.design_tokens import (
     get_unified_scrollbar_style,
     scale_font_size,
     set_style_sheet_if_changed,
+    chat_font_css,
 )
 from app.utils.scroll_tuning import install_fast_wheel
 from app.utils.utils import get_font_family_css, get_icon
@@ -1198,8 +1199,8 @@ def _rich_styles() -> Dict[str, str]:
 
     对齐 message_card._load_skeleton 的 :root + 块级 CSS，逐条搬到 Qt 富文本：
     - 标题：字号阶梯 + 上边距 > 下边距（格式塔接近原则）+ 行高 1.3
-    - 段落：margin 8px 0、行高 1.65、text-secondary
-    - 列表：上下 margin 8px，行高 1.65
+    - 段落：margin 8px 0、行高 1.75、主文字色
+    - 列表：上下 margin 8px，行高 1.75
     - 链接：accent 色无下划线
     - 行内 code：accent-glow 底 + accent-text 字 + 圆角 + padding
     """
@@ -1216,10 +1217,10 @@ def _rich_styles() -> Dict[str, str]:
         "h5": f"font-size:{max(8, body - 1)}px; font-weight:700; color:{t['text']}; margin:8px 0 3px; line-height:1.3;",
         "h6": f"font-size:{max(8, body - 2)}px; font-weight:700; color:{t['text_muted']};"
         f" margin:8px 0 3px; line-height:1.3;",
-        "p": f"margin:8px 0; line-height:1.65; color:{t['text_secondary']};",
-        "ul": "margin:8px 0; line-height:1.65; -qt-list-indent:1;",
-        "ol": "margin:8px 0; line-height:1.65; -qt-list-indent:1;",
-        "li": f"margin:3px 0; color:{t['text_secondary']};",
+        "p": f"margin:8px 0; line-height:1.75; color:{t['text']};",
+        "ul": "margin:8px 0; line-height:1.75; -qt-list-indent:1;",
+        "ol": "margin:8px 0; line-height:1.75; -qt-list-indent:1;",
+        "li": f"margin:3px 0; color:{t['text']};",
         "a": f"color:{t['accent']}; text-decoration:none;",
         "strong": f"color:{t['text']}; font-weight:600;",
         "em": f"color:{t['text_secondary']}; font-style:italic;",
@@ -1267,6 +1268,7 @@ class RichTextLabel(QLabel):
         self.setTextFormat(Qt.RichText)
         self.setOpenExternalLinks(True)
         self.setTextInteractionFlags(Qt.TextBrowserInteraction | Qt.TextSelectableByMouse)
+        self.setProperty("chatBody", True)
         self.set_html(html)
 
     def set_html(self, html: str) -> None:
@@ -1275,7 +1277,7 @@ class RichTextLabel(QLabel):
         # QStyleSheetStyle 重建 + 子树 repolish（同串也重建），是每批固定税
         set_style_sheet_if_changed(
             self,
-            f"QLabel {{ {get_font_family_css()} font-size:{scale_font_size(14)}px;"
+            f"QLabel {{ font-size:{scale_font_size(14)}px;"
             f" color:{t['text_secondary']}; background:transparent; }}",
         )
         self.setText(html)
@@ -1309,12 +1311,13 @@ class QuoteCard(QFrame):
         bar.setStyleSheet(f"QFrame {{ background:{t['accent_warm']}; border:none; }}")
         lay.addWidget(bar)
         self._label = QLabel(self)
+        self._label.setProperty("chatBody", True)
         self._label.setWordWrap(True)
         self._label.setTextFormat(Qt.RichText)
         self._label.setOpenExternalLinks(True)
         self._label.setTextInteractionFlags(Qt.TextBrowserInteraction | Qt.TextSelectableByMouse)
         self._label.setStyleSheet(
-            f"QLabel {{ {get_font_family_css()} font-size:{scale_font_size(14)}px;"
+            f"QLabel {{ font-size:{scale_font_size(14)}px;"
             f" color:{t['text_secondary']}; background:transparent; padding:8px 12px; }}"
         )
         self._label.setText(html)
@@ -1348,6 +1351,7 @@ class TableBlockWidget(QFrame):
     def _cell_label(self, html: str, is_header: bool) -> QLabel:
         t = _qt_theme()
         lb = QLabel(html)
+        lb.setProperty("chatBody", True)
         lb.setWordWrap(True)
         lb.setTextFormat(Qt.RichText)
         lb.setTextInteractionFlags(Qt.TextSelectableByMouse)
@@ -1355,7 +1359,7 @@ class TableBlockWidget(QFrame):
         color = t["text"] if is_header else t["text_secondary"]
         weight = 600 if is_header else 400
         lb.setStyleSheet(
-            f"QLabel {{ {get_font_family_css()} font-size:{scale_font_size(14)}px;"
+            f"QLabel {{ font-size:{scale_font_size(14)}px;"
             f" color:{color}; font-weight:{weight}; background:transparent; padding:2px 4px; }}"
         )
         return lb
@@ -2547,7 +2551,7 @@ class MarkdownBlockViewer(QWidget):
         # 正文块统一挂独立容器：tool_section 常驻顶部、不做位置搬移（[T44]），
         # 独立容器只用于统一管理正文块层级
         self._body_box = QWidget()
-        self._body_box.setStyleSheet("background:transparent;")
+        self._apply_body_font()
         self._body_lay = QVBoxLayout(self._body_box)
         self._body_lay.setContentsMargins(0, 0, 0, 0)
         self._body_lay.setSpacing(2)
@@ -2597,6 +2601,15 @@ class MarkdownBlockViewer(QWidget):
 
     def get_plain_text(self) -> str:
         return self._md
+
+    def _apply_body_font(self) -> None:
+        set_style_sheet_if_changed(
+            self._body_box, f'QWidget {{ background:transparent; }} QLabel[chatBody="true"] {{ {chat_font_css()} }}'
+        )
+
+    def refresh_font(self) -> None:
+        self._apply_body_font()
+        self.refresh_theme()
 
     def refresh_theme(self) -> None:
         # ⚠️ 必须清 HTML 前缀缓存：缓存命中与否只判文本，**不感知主题令牌**。

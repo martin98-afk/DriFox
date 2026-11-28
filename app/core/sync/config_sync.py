@@ -1020,6 +1020,7 @@ class ConfigSyncService(QObject):
             # valueChanged 无监听者 → 只更新配置值不刷 UI。写回后由
             # _delayed_theme_refresh 按变更项显式驱动窗口刷新（与主题兜底同机制）。
             # getattr 防御：测试桩/降级场景缺失属性时置 None，兜底自动跳过该项。
+            _old_ui_font = getattr(getattr(cfg, "ui_font_family", None), "value", None)
             _old_font_family = getattr(cfg, "llm_font_family", None)
             _old_font_family = _old_font_family.value if _old_font_family is not None else None
             _old_font_size = getattr(cfg, "ui_font_size", None)
@@ -1218,7 +1219,7 @@ class ConfigSyncService(QObject):
                 QTimer.singleShot(
                     150,
                     lambda cfg=cfg, old=_old_theme_id, tm_diff=_cloud_theme_mode_differs, off=_old_font_family, ofs=_old_font_size: self._delayed_theme_refresh(
-                        cfg, old, tm_diff, off, ofs
+                        cfg, old, tm_diff, off, ofs, _old_ui_font
                     ),
                 )
             except Exception as _te:
@@ -1277,7 +1278,7 @@ class ConfigSyncService(QObject):
             self.syncDone.emit(True, msg)
 
     def _delayed_theme_refresh(
-        self, cfg, old_theme_id, cloud_theme_mode_differs=False, old_font_family=None, old_font_size=None
+        self, cfg, old_theme_id, cloud_theme_mode_differs=False, old_font_family=None, old_font_size=None, old_ui_font=None
     ):
         """延迟分片：写回完成后 ~150ms 执行外观显式刷新（修复 bug#6 兜底）
 
@@ -1304,6 +1305,8 @@ class ConfigSyncService(QObject):
         try:
             theme_changed = bool(cfg.ui_theme_style.value != old_theme_id or cloud_theme_mode_differs)
             _ff_changed = old_font_family is not None and cfg.llm_font_family.value != old_font_family
+            if old_ui_font is not None and cfg.ui_font_family.value != old_ui_font:
+                _ff_changed = True
             _fs_changed = old_font_size is not None and cfg.ui_font_size.value != old_font_size
             if not theme_changed and not _ff_changed and not _fs_changed:
                 return

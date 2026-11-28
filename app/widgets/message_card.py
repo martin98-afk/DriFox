@@ -46,7 +46,6 @@ from PyQt5.QtCore import (
     QEasingCurve,
     QElapsedTimer,
     QObject,
-    QRect,
     QSize,
     QThread,
     Qt,
@@ -57,13 +56,8 @@ from PyQt5.QtCore import (
     pyqtSignal,
 )
 from PyQt5.QtGui import (
-    QBrush,
     QColor,
     QFontMetrics,
-    QLinearGradient,
-    QPainter,
-    QPainterPath,
-    QPen,
     QPixmap,
     QTextDocument,
     QWheelEvent,
@@ -128,7 +122,7 @@ from app.widgets.render_helpers import (
     render_tool_block,
 )
 from app.utils.session_preview import format_relative_time
-from app.utils.scroll_tuning import is_scroll_active, scroll_wheel_to
+from app.utils.scroll_tuning import scroll_wheel_to
 from app.widgets.simple_hover_tooltip import install_hover_tooltip
 
 # 渲染管线与查看器已拆分至独立模块；此处 re-export 保持既有 import 路径兼容。
@@ -152,12 +146,6 @@ from app.widgets.card_render_core import (
     _QWIDGETSIZE_MAX,
     _refresh_code_font_size,
     _RESIZE_GHOST_QSS,
-    _STREAM_BAND_BOTTOM,
-    _STREAM_BAND_H,
-    _STREAM_BAND_MAX_DT_MS,
-    _STREAM_BAND_REPAINT_PAD,
-    _STREAM_BAND_SWEEP_MS,
-    _STREAM_TINT_RETRY,
     STREAM_HEIGHT_ANIM_ENABLED,
     STREAM_HEIGHT_ANIM_MIN_DELTA,
     STREAM_HEIGHT_SNAP_GAP_PX,
@@ -432,7 +420,6 @@ class MessageCard(SimpleCardWidget):
         self._retry_wait_time = 0.0  # 等待时间
         # 重试状态栏刷新累加器（ms）：按真实经过时间累积，与动画节拍解耦。
         # 原实现按「固定拍数」判定，节拍一变间隔就漂移。
-        self._retry_status_acc = 0.0
         self._round_index: Optional[int] = None  # 用于卡片差异功能
         self._message_index: Optional[int] = None  # 用于卡片差异和撤销功能：消息在 session.messages 中的索引
         # 底部元信息栏（助手卡片）
@@ -463,16 +450,9 @@ class MessageCard(SimpleCardWidget):
         self._elapsed_timer.timeout.connect(self._update_elapsed_display)
         self._elapsed_start_time: Optional[float] = None
         self._anim_timer = QTimer(self)
-        self._anim_timer.timeout.connect(self._update_anim)
-        # 动画累积时间(ms)：光块位置与重试 spinner 都由它推导，帧率抖动不改变速度
-        self._anim_t_ms = 0.0
-        self._anim_clock = QElapsedTimer()
-        self._anim_clock.start()
-        self._grad_main, self._grad_inner = (QLinearGradient(0, 0, 1, 1) for _ in range(2))
-        self._clip_inner = self._clip_border = QPainterPath()
-        self._clip_inner_border = self._clip_border_region = QPainterPath()
-        # 流式视觉绘制区域缓存（x/y/w/h）：assistant 跟随气泡矩形，其余整卡
-        self._clip_x = self._clip_y = self._clip_w = self._clip_h = -1
+        self._anim_timer.setInterval(200)
+        self._anim_timer.timeout.connect(self._update_retry_status_bar)
+        self._retry_clock = QElapsedTimer()
         self._height_anim = QVariantAnimation(self)
         # 插值时长占位（见下：随即被 setDuration(0) 覆盖，实际长度由每轮动画
         # 自行设置 —— 结束态收敛用 FINISH_HEIGHT_ANIM_MS，其余为 0 禁用插值）
@@ -583,6 +563,12 @@ class MessageCard(SimpleCardWidget):
         self._welcome_indicator_ctl: Optional[TabIndicatorController] = None
         self._welcome_tabs_bar_layout: Optional["FlowLayout"] = None
         self._pending_welcome_md: Optional[str] = None  # viewer 懒渲染前的等待内容
+        self._welcome_idle_timer = None
+        if self.role == "welcome":
+            self._welcome_idle_timer = QTimer(self)
+            self._welcome_idle_timer.setSingleShot(True)
+            self._welcome_idle_timer.setInterval(1500)
+            self._welcome_idle_timer.timeout.connect(self._release_hidden_welcome_viewer)
         # 异步刷新事件回调引用（destroyed 退订时按 is 匹配）
         self._welcome_refresh_cb: Optional[Callable[[Dict[str, Any]], None]] = None
         # 窗口上下文提供者（多窗口隔离）：欢迎卡片渲染插件 tab 时调用，注入
@@ -2474,10 +2460,10 @@ class MessageCard(SimpleCardWidget):
             placeholder.setAlignment(Qt.AlignCenter)
             self._viewer_layout.addWidget(placeholder)
             if self.role == "assistant":
-                # 助手气泡：全宽底色块 + 左上引脚指向头像（与用户气泡镜像，2026-09-23）。
+                # 助手正文容器承载工具区与内嵌面板。
                 # 只包 _viewer_container（正文/工具区都在 WebEngine 内），
                 # 身份行与 footer 留在气泡外。
-                self._assistant_bubble = MessageBubble("left", self)
+                self._assistant_bubble = MessageBubble(parent=self)
                 _b_lay = QVBoxLayout(self._assistant_bubble)
                 _b_lay.setContentsMargins(0, 0, 0, 0)
                 _b_lay.setSpacing(0)
@@ -2603,103 +2589,6 @@ class MessageCard(SimpleCardWidget):
         # 新轮流式开始：恢复简洁模式坞态（工具区限高内滚，实时跟随最新活动）
         if self.viewer and hasattr(self.viewer, "_sync_streaming_dock"):
             self.viewer._sync_streaming_dock(True)
-        self._anim_t_ms = 0.0
-        self._anim_clock.restart()
-        try:
-            # [PERF] 2026-11-09：20fps（50ms）→ 15fps（66ms）。光带是慢速往返的
-            # 柔和渐变（单程 1600ms、位移约 36px/50ms），15fps 与 20fps 在观感上
-            # 无差异（慢速平移 + 3px 高度，采样点从 32/单程降到 24/单程仍连续）。
-            # 相位按真实经过时间 dt 累加（见 _update_anim），**运动速度与轨迹
-            # 完全不变**，只是重绘次数降 25%。与背景动画的 15fps 同频后，两路
-            # 动画天然对齐，减少一帧内两次独立合成的机会。
-            if self.isVisible():
-                self._anim_timer.start(66)
-        except RuntimeError:
-            return
-        self.update()
-
-    def _update_anim(self):
-        # 兜住 hideEvent 前已排队的动画帧。
-        if not self.isVisible():
-            self._anim_clock.restart()
-            return
-        # 滚动活跃门控：视口正在移动时跳装饰动画帧（呼吸光带/流光）。滚动本身
-        # 每帧已经在重绘整视口，再叠一路 15fps 整卡 update() 会直接掉帧；
-        # 相位语义同上，滚动一停（120ms）从原位置继续，无视觉跳变。
-        if is_scroll_active():
-            self._anim_clock.restart()
-            return
-        # [P2-7] 视口门控：卡片滚出 chat 视口可见范围时不空耗 update()（20fps
-        # 整卡动画在长会话里大多发生在屏幕外）。与隐藏分支同款相位语义：
-        # 时钟 restart，滚回视口后从原相位继续，无视觉跳变。
-        # 显式的 getattr 判空（而非捕获 AttributeError）：无 parent / parent 无
-        # chat_scroll_area（独立窗口、测试构造、预览卡）是**常态分支**而非异常，
-        # 用异常吞掉会掩盖真实缺陷。拿不到视口 → 按「无法判定」跳过门控继续动画。
-        # RuntimeError 仍需捕获：Qt 对象被 C++ 侧销毁时的访问。
-        try:
-            scroll_area = getattr(self._parent, "chat_scroll_area", None)
-            if scroll_area is None:
-                pass
-            else:
-                top = self.window()
-                card_tl = self.mapTo(top, self.rect().topLeft())
-                viewport = scroll_area.viewport()
-                vp_tl = viewport.mapTo(top, viewport.rect().topLeft())
-                card_rect = QRect(card_tl, self.rect().size())
-                vp_rect = QRect(vp_tl, viewport.rect().size())
-                if not card_rect.intersects(vp_rect):
-                    self._anim_clock.restart()
-                    return
-        except RuntimeError:
-            pass
-        # 系统「减少动态效果」：底部光块是纯装饰动画，直接不重绘。
-        # 这是流式热路径上的逐帧绘制，关掉即省下这段开销。
-        if not Animations.motion_enabled():
-            self._anim_clock.restart()
-            return
-        # 拖拽期间暂停重绘：原生拖拽时主线程在 DefWindowProc 模态循环里，
-        # 每 50ms 触发一次 update() 会强制 DWM 对整窗重新合成 → 拖拽卡顿。
-        # 直接跳过 update() 让窗口保持静止，DWM 仅平移已有纹理，拖拽顺滑；
-        # 松手后 _any_window_dragging 复位，下一拍定时器自然恢复动画。
-        from app.utils.window_drag_state import any_window_dragging
-
-        if any_window_dragging:
-            self._anim_clock.restart()
-            return
-        # 时间驱动：按真实经过时间推进，掉帧只丢中间帧、不改变运动速度（旧实现
-        # 每拍固定 +0.035 相位，主线程一忙整条动画就变慢，恢复后又连续补帧猛冲）。
-        # 单拍钳制 _STREAM_BAND_MAX_DT_MS：被内容渲染占满 500ms 后也只前进一帧的量，
-        # 观感是「慢了一下」，而不是瞬移或猛冲。
-        dt = self._anim_clock.restart()
-        if dt <= 0.0:  # 同一拍内重复进入（理论上不会）：不推进
-            dt = 0.0
-        elif dt > _STREAM_BAND_MAX_DT_MS:
-            dt = _STREAM_BAND_MAX_DT_MS
-        self._anim_t_ms += dt
-        # 重试状态栏降频更新（~200ms 一次，避免和 paintEvent 双重刷新导致卡顿）
-        # [PERF] 2026-11-09：原按「固定拍数」计（50ms*4），节拍改 66ms 后拍数不变
-        # 会把间隔拉成 264ms。改为按真实经过时间判定，与定时器间隔解耦。
-        if self._retrying:
-            self._retry_status_acc += dt
-            if self._retry_status_acc >= 200.0:
-                self._retry_status_acc = 0.0
-                self._update_retry_status_bar()
-        # 局部重绘：动画帧只标脏底部光带这一条窄带（不碰描边所在的卡片边缘），
-        # 免得每帧都把整卡交给 Qt 重绘、和流式内容渲染抢主线程。重试中状态栏
-        # 位置不确定，退回整卡重绘。
-        bubble = self._assistant_bubble if (self.role == "assistant" and getattr(self, "_assistant_bubble", None) is not None) else None
-        if bubble is not None:
-            # 气泡自绘流式帧：推送三角波相位与 tint，气泡内部幂等判定 + 标脏重绘
-            phase = (self._anim_t_ms / _STREAM_BAND_SWEEP_MS) % 2.0
-            tri = phase if phase < 1.0 else 2.0 - phase
-            tint_s = _STREAM_TINT_RETRY if (self._retrying or self.error) else self._theme["accent"]
-            bubble.set_stream_frame(tri, QColor(tint_s))
-            return
-        if self._retrying:
-            self.update()
-        else:
-            band_top = self.height() - _STREAM_BAND_BOTTOM - _STREAM_BAND_H - _STREAM_BAND_REPAINT_PAD
-            self.update(0, band_top, self.width(), _STREAM_BAND_H + 2 * _STREAM_BAND_REPAINT_PAD)
 
     def _apply_card_style(self, border: str = None, bg: str = None):
         # [PERF] 幂等短路：setStyleSheet 会触发 Qt 样式重新 polish + 子控件 relayout，
@@ -2726,7 +2615,7 @@ class MessageCard(SimpleCardWidget):
                 bubble.set_border_color(Colors.BORDER)
             return
         if self.role == "assistant" and not self.error:
-            # 助手气泡：全宽底色块 + 左上引脚（2026-09-23，替代原「全减」透明样式）；
+            # 助手正文与阅读区共用背景；
             # 卡片自身保持透明（身份行/footer 不吃底色），
             # 错误/重试/上下文丢失态仍走下方原逻辑（红框提示）
             self.setStyleSheet(
@@ -2739,8 +2628,8 @@ class MessageCard(SimpleCardWidget):
             )
             bubble = getattr(self, "_assistant_bubble", None)
             if bubble is not None:
-                bubble.set_bubble_color(bg or self._base_bg)
-                bubble.set_border_color(Colors.BORDER)
+                bubble.set_bubble_color(bg or "transparent")
+                bubble.set_border_color("transparent")
             return
         self.setStyleSheet(
             f"""
@@ -2760,9 +2649,6 @@ class MessageCard(SimpleCardWidget):
 
     def stop_streaming_anim(self):
         self._streaming = False
-        bubble = getattr(self, "_assistant_bubble", None)
-        if bubble is not None:
-            bubble.set_stream_frame(None, None)  # 气泡退出流式态（清描边/光带）
         # 标记本轮已走过流式（含用户中断/出错中断）：viewer 创建或虚拟滚动
         # 回收重建时据此保持工具区展开，不再被判为"历史"而折叠。
         self._streaming_finished = True
@@ -2781,22 +2667,16 @@ class MessageCard(SimpleCardWidget):
         self.update()
 
     def start_retry_anim(self, error_type: str, attempt: int, max_retries: int, wait_time: float):
-        """切换到重试边框模式（红色流动+白光点）"""
+        """显示重试进度，并在可见期间更新时间提示。"""
         self._retrying = True
         self._retry_error_type = error_type
         self._retry_attempt = attempt
         self._retry_max = max_retries
         self._retry_wait_time = wait_time
-        # 确保动画定时器运行
-        if not self._streaming:
-            self._streaming = True
-            self._anim_t_ms = 0.0
-            self._anim_clock.restart()
-            try:
-                if self.isVisible():
-                    self._anim_timer.start(66)
-            except RuntimeError:
-                return
+        self._streaming = True
+        self._retry_clock.start()
+        if self.isVisible():
+            self._anim_timer.start()
         # 更新状态栏
         self._update_retry_status_bar()
         self._retry_status_widget.setVisible(True)
@@ -2812,7 +2692,8 @@ class MessageCard(SimpleCardWidget):
         self.update()
 
     def stop_retry_anim(self):
-        """停止重试动画，恢复正常边框"""
+        """停止重试状态提示。"""
+        self._anim_timer.stop()
         self._retrying = False
         self.error = False
         if self._retry_status_widget is not None:
@@ -2820,9 +2701,7 @@ class MessageCard(SimpleCardWidget):
         self._apply_card_style()
         if not self._streaming:
             return
-        # 继续正常的流式动画（彩虹边框）
         self.update()
-        self.repaint()
 
     def _update_retry_status_bar(self):
         """更新重试状态栏的文本内容"""
@@ -2839,7 +2718,8 @@ class MessageCard(SimpleCardWidget):
         )
         # 旋转图标动画
         spin_chars = ["◜", "◝", "◞", "◟"]
-        idx = int(self._anim_t_ms / 180.0) % 4  # 每 180ms 转一格
+        elapsed = self._retry_clock.elapsed() if self._retry_clock.isValid() else 0
+        idx = (elapsed // 200) % len(spin_chars) if Animations.motion_enabled() else 0
         self._retry_spinner.setText(spin_chars[idx])
         # 错误类型
         self._retry_type_label.setStyleSheet(
@@ -3046,137 +2926,10 @@ class MessageCard(SimpleCardWidget):
         # 同步宽度
         self.sync_width(force=True)
 
-    def _stream_region(self) -> QRect:
-        """流式视觉（漫射/描边/光带）的绘制区域。
-
-        assistant 气泡化（2026-09-23）后视觉主体是气泡，流式效果必须跟随气泡
-        矩形；继续画整卡会在气泡外浮出一圈与气泡无关的「外边框」。
-        其余角色仍为整卡。
-        """
-        if self.role == "assistant":
-            bubble = getattr(self, "_assistant_bubble", None)
-            if bubble is not None:
-                return bubble.geometry()
-        return QRect(0, 0, self.width(), self.height())
-
     def paintEvent(self, event):
-        # ⚠️ SimpleCardWidget.paintEvent 会无条件画一圈描边：
-        #   painter.setPen(QColor(0,0,0,12 或 48)) + drawRoundedRect(...)
-        # CSS 的 `border: none` 管不到它（这是 QPainter 直接画的，不走样式表），
-        # 于是 user 气泡（背景已移交给 _user_bubble）与 assistant 全减模式卡片
-        # 上下会残留一条淡边框。这两个角色由自身样式/子容器负责外观，
-        # 跳过父类绘制；welcome 与错误态仍需原来的卡片底与描边。
-        if self.role in ("user", "assistant") and not self.error:
-            pass
-        else:
+        # 普通消息由子容器绘制；错误与欢迎卡保留 Fluent 卡片外观。
+        if self.error or self.role not in ("user", "assistant"):
             super().paintEvent(event)
-
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.Antialiasing)
-
-        w, h = self.width(), self.height()
-        radius = 16
-
-        # 侧边竖条已整体移除：welcome 卡片的 accent 竖条（左缘那条线）由用户
-        # 2026-09-17 明确要求去掉，保持卡片四边纯净。
-
-        if not self._streaming:
-            painter.end()
-            return
-
-        if self.role == "assistant" and getattr(self, "_assistant_bubble", None) is not None:
-            # 流式视觉（描边/光带）改由气泡自绘（画在其底色之上）：卡片层画会被
-            # 气泡不透明底色盖住，且视觉主体应是气泡而非卡片外缘（2026-09-23）。
-            painter.end()
-            return
-
-        # ══════════════════════════════════════════════════════
-        #  流式态视觉：静态单色细描边 + 底部往返光块
-        # ══════════════════════════════════════════════════════
-        # 旧实现：10 色高饱和彩虹绕整卡循环 + 7px 霓虹外发光 + 3px 白色流光带，
-        # 动区覆盖整卡周长、色相跳变（青→紫→粉→橙→绿），阅读时过于抢眼。
-        # 现把「动」收敛到底部一条光带：
-        #   · 描边：1.5px 单色（accent / 重试红），完全静态（alpha 不再随呼吸调制，
-        #     否则每帧都要整卡重绘内壁渐变 + 描边，与流式内容渲染抢主线程）
-        #   · 光块：底部内侧 3px 高、约 40% 卡宽，两端淡出，左右往返（单程 1.6s）
-
-        # 单色 tint：重试/错误态用警示红，其余用主题 accent（不再循环变色）
-        if self._retrying or self.error:
-            tint = QColor(_STREAM_TINT_RETRY)
-        else:
-            tint = QColor(self._theme["accent"])
-
-        # ── 层1：内壁漫射（极柔和的边缘渗光）──
-        # M1：裁剪路径按几何缓存，仅尺寸变化时重建，不再每帧 new QPainterPath。
-        # 区域 = _stream_region()（assistant 为气泡矩形），气泡高度随流式上报变化，
-        # 四元组任一变化即重建。
-        region = self._stream_region()
-        rx, ry, rw, rh = region.x(), region.y(), region.width(), region.height()
-        if (self._clip_x, self._clip_y, self._clip_w, self._clip_h) != (rx, ry, rw, rh):
-            self._clip_x, self._clip_y, self._clip_w, self._clip_h = rx, ry, rw, rh
-            self._clip_inner = QPainterPath()
-            self._clip_inner.addRoundedRect(rx + 3, ry + 3, rw - 6, rh - 6, radius - 2, radius - 2)
-            self._clip_border = QPainterPath()
-            self._clip_border.addRoundedRect(rx, ry, rw, rh, radius + 1, radius + 1)
-            self._clip_inner_border = QPainterPath()
-            self._clip_inner_border.addRoundedRect(rx + 2, ry + 2, rw - 4, rh - 4, radius - 1, radius - 1)
-            self._clip_border_region = self._clip_border - self._clip_inner_border
-        painter.setClipPath(self._clip_inner)
-        inner_gradient = self._grad_inner
-        inner_gradient.setStart(rx, ry)
-        inner_gradient.setFinalStop(rx + rw, ry + rh)
-        _c0 = QColor(tint)
-        _c0.setAlpha(11)
-        _c1 = QColor(tint)
-        _c1.setAlpha(4)
-        inner_gradient.setColorAt(0.0, _c0)
-        inner_gradient.setColorAt(1.0, _c1)
-        painter.fillRect(rx, ry, rw, rh, inner_gradient)
-
-        # ── 层2：静态细描边（1.5px 单色，替代原 4px 彩虹循环 + 7px 外发光）──
-        # 静态层每帧照画，不做「局部重绘就跳过」的优化：动画帧的脏区是底部一条
-        # 窄带（见 _update_anim），Qt 按脏区裁剪光栅化，整卡 fillRect 的实际填充
-        # 仍被限制在窄带内；若按脏区跳过静态层，脏区覆盖到的描边会被擦掉却不
-        # 重画（下边框随动画帧一闪一闪）。
-        painter.setClipPath(self._clip_border_region)
-        _bc = QColor(tint)
-        _bc.setAlpha(92)
-        border_pen = QPen(_bc)
-        border_pen.setWidthF(1.5)
-        painter.setPen(border_pen)
-        painter.setBrush(QBrush(Qt.NoBrush))
-        painter.drawRoundedRect(rx, ry, rw, rh, radius + 1, radius + 1)
-
-        # ── 层3：底部往返光块（唯一的运动元素）──
-        painter.setClipPath(self._clip_inner_border)
-        band_h = _STREAM_BAND_H
-        band_ratio = 0.4  # 光块宽度占卡宽比例
-        travel_ratio = 1.0 - band_ratio
-        # 三角波 0→1→0：直接对累积时间取模 2，周期严格闭合。
-        # 旧写法 _t = (相位/2π) * 3.0 % 2.0 每个相位圈走 3 个半程，回绕处
-        # 从「最右」瞬跳「最左」（约每 9s 一次跳变），是跳变感的直接来源。
-        _t = (self._anim_t_ms / _STREAM_BAND_SWEEP_MS) % 2.0
-        _tri = _t if _t < 1.0 else 2.0 - _t
-        band_cx = (0.5 * band_ratio + travel_ratio * _tri) * rw
-        band_w = band_ratio * rw
-        band_x = rx + int(band_cx - 0.5 * band_w)
-        band_w = int(band_w)
-        band_y = ry + rh - _STREAM_BAND_BOTTOM - band_h
-        # 复用模板渐变：stop 位置固定（0/0.5/1），仅改坐标与颜色，不每帧 new
-        band_gradient = self._grad_main
-        band_gradient.setStart(band_x, 0)
-        band_gradient.setFinalStop(band_x + band_w, 0)
-        _b0 = QColor(tint)
-        _b0.setAlpha(0)
-        _b1 = QColor(tint)
-        _b1.setAlpha(170)
-        band_gradient.setColorAt(0.0, _b0)
-        band_gradient.setColorAt(0.5, _b1)
-        band_gradient.setColorAt(1.0, _b0)
-        painter.setPen(Qt.NoPen)
-        painter.setBrush(QBrush(band_gradient))
-        painter.drawRoundedRect(band_x, band_y, band_w, band_h, 1.5, 1.5)
-        painter.end()
 
     def set_error_state(self, is_error: bool, error_message: str = ""):
         """设置错误状态
@@ -3188,6 +2941,7 @@ class MessageCard(SimpleCardWidget):
         self.error = is_error
         if is_error:
             self._retrying = False
+            self._anim_timer.stop()
             # 显示错误状态栏（而不是隐藏）
             self._show_error_status(error_message)
             # 检测深浅色模式，选择合适背景
@@ -4207,7 +3961,23 @@ class MessageCard(SimpleCardWidget):
 
     def hideEvent(self, event):
         self._anim_timer.stop()
+        if self._welcome_idle_timer is not None and self.viewer is not None and self._welcome_mode == "sessions":
+            self._welcome_idle_timer.start()
         super().hideEvent(event)
+
+    def _release_hidden_welcome_viewer(self):
+        if self.isVisible() or self.viewer is None or self._welcome_mode != "sessions":
+            return
+        from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+
+        if "sessions" in UIPluginRegistry.get_instance().get_welcome_tabs():
+            return  # 插件页面可能有只存在于 DOM 中的交互状态。
+        self.detach_viewer()
+        if self.viewer is None:
+            # 软刷新可能只更新过 DOM，必须用最新会话列表恢复。
+            body = _render_sessions_body(self._welcome_recent, self._welcome_top, suppress_anim=True)
+            self._render_welcome_with_body(body)
+            self._render_deferred = True
 
     def leaveEvent(self, event):
         if self.role == "user" and getattr(self, "_user_action_btns", None) is not None:
@@ -4291,9 +4061,10 @@ class MessageCard(SimpleCardWidget):
         另：主题切换期间本卡若不可见，内嵌插件面板只被置脏，这里补刷。
         """
         super().showEvent(event)
-        if self._streaming and not self._anim_timer.isActive():
-            self._anim_clock.restart()
-            self._anim_timer.start(66)
+        if self._welcome_idle_timer is not None:
+            self._welcome_idle_timer.stop()
+        if self._retrying:
+            self._anim_timer.start()
         # 修 #2：用户气泡 viewer 懒加载——若已暂存待显示文本且 viewer 尚未创建，补建
         if self.role == "user" and self.viewer is None and getattr(self, "_viewer_pending_text", None):
             self._ensure_user_viewer()
@@ -4472,6 +4243,8 @@ class MessageCard(SimpleCardWidget):
             return
 
         def _do_ensure_rendered():
+            if self._lazy_rendered:
+                return  # 切回标签页可能先于已排队的渲染回调完成。
             # 🛡️ 防幽灵窗口：与 _schedule_render 对称，不可见时不创建 QWebEngineView。
             # QWebEngineView 在 Windows 上创建原生 HWND 子窗口（见 _hide_for_dialog 注释）。
             # 当 widget 所在窗口不可见（Tab 管理器中非 current 标签页）时，父链无有效
@@ -4583,6 +4356,8 @@ class MessageCard(SimpleCardWidget):
                     self.viewer = None
             if self.viewer is None:
                 self.viewer = CodeWebViewer(self, light=is_welcome)
+            # 高度去重只对当前 viewer 有效；归还后的视图已复位到起步高度。
+            self._last_applied_viewer_height = self.viewer.height()
             # 高度语义标记：QWebEngine 渲染高度靠 JS 异步上报，`_lazy_rendered`
             # 置位时高度仍是起步值
             self._viewer_async_height = True
@@ -6780,6 +6555,7 @@ class MessageCard(SimpleCardWidget):
         self._footer_provider_blocked.clear()
         # 停止所有定时器
         timers_to_stop = [
+            self._welcome_idle_timer,
             self._anim_timer,
             self._height_anim,
             self._elapsed_timer,

@@ -57,6 +57,8 @@ def _stub_display_deps(inst, sid="s_team"):
     inst.title_edit = MagicMock()
     inst._current_session_id = None
     inst._restore_cached_session_cards = MagicMock(return_value=False)
+    inst._restore_kept_session = MagicMock(return_value=False)
+    inst._keep_previous_session_tab = MagicMock(return_value=False)
     inst._clear_chat_area = MagicMock()
     inst._build_user_prefix_cache = MagicMock()
     inst._initial_visible_batch_count = 10

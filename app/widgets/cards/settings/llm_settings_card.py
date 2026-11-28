@@ -35,6 +35,8 @@ from app.utils.config import Settings
 from app.utils.design_tokens import (
     FONT_SIZE_OPTIONS,
     _DEFAULT_FONT_SIZE_KEY,
+    _get_global_font,
+    system_font_family,
     _LEGACY_FONT_SIZE_KEYS,
     Animations,
     ButtonStyles,
@@ -121,17 +123,6 @@ def _font_step_text(key: str) -> str:
     return f"+{d}" if d > 0 else str(d)
 
 
-def _ui_font_family() -> str:
-    """读取用户配置 UI 字体族（与 get_unified_font 同源，但不经 scale 二次缩放）"""
-    try:
-        return Settings.get_instance().llm_font_family.value
-    except Exception:
-        try:
-            return Settings.get_instance().canvas_font_selected.value
-        except Exception:
-            return "Segoe UI"
-
-
 class _FontStepTrack(QWidget):
     """节点+轨道式字号刻度条
 
@@ -165,7 +156,7 @@ class _FontStepTrack(QWidget):
         """按最大档位实际字号(14+10=24px)预留标签行高与最小高度（防大字号标签被裁切）"""
         from PyQt5.QtGui import QFontMetrics
 
-        fm = QFontMetrics(QFont(_ui_font_family(), 24))
+        fm = QFontMetrics(QFont(_get_global_font(), 24))
         self._label_h = max(14, fm.height() + 2)
         self.setMinimumHeight(self._NODE_Y + self._label_h + 6)
         self.updateGeometry()
@@ -232,7 +223,7 @@ class _FontStepTrack(QWidget):
             p.drawLine(int(x0), int(node_y), int(self._node_x(cur_idx)), int(node_y))
 
         # 节点 + 刻度标签（标签用对应档位实际字号渲染，直观体现大小差异）
-        family = _ui_font_family()
+        family = _get_global_font()
         for i, key in enumerate(self._steps):
             x = self._node_x(i)
             is_cur = i == cur_idx
@@ -660,6 +651,7 @@ class LLMSettingsCard(SystemCardFrame):
 
         # 连接信号
         # 注意：只有真正影响外观的变更才走 _on_config_changed（触发全量刷新）
+        self.cfg.ui_font_family.valueChanged.connect(self._on_config_changed)
         self.cfg.llm_font_family.valueChanged.connect(self._on_config_changed)
         self.cfg.ui_font_size.valueChanged.connect(self._on_config_changed)
         self.cfg.ui_theme_style.valueChanged.connect(self._on_config_changed)
@@ -971,6 +963,7 @@ class LLMSettingsCard(SystemCardFrame):
         # 界面字号 + 全局字体
         appearance_layout.addWidget(self.uiFontSizeCard)
         self._setup_font_card()
+        appearance_layout.addWidget(self.uiFontCard)
         appearance_layout.addWidget(self.llmFontCard)
 
         # 对话区宽度
@@ -2067,21 +2060,28 @@ class LLMSettingsCard(SystemCardFrame):
         from qfluentwidgets import SettingCard
 
         class FontSettingCard(SettingCard):
-            def __init__(self, title, content, cfg, parent=None):
+            def __init__(self, title, content, item, parent):
                 super().__init__(AppIcon.FONT, title, content, parent)
-                self.cfg = cfg
-                self._parent = parent
+                self.cfg = parent.cfg
+                self.item = item
 
                 self.fontCombo = NoWheelFontComboBox()
                 self.fontCombo.setFixedWidth(180)
                 self.fontCombo.setSizeAdjustPolicy(QFontComboBox.SizeAdjustPolicy.AdjustToContents)
                 self._apply_font_combo_style()
-                current_font = cfg.llm_font_family.value
-                self.fontCombo.setCurrentFont(QFont(current_font))
                 self.fontCombo.currentFontChanged.connect(self._on_font_changed)
 
                 self.hBoxLayout.addWidget(self.fontCombo)
                 self.hBoxLayout.addSpacing(16)
+                item.valueChanged.connect(self._sync_font)
+                self._sync_font()
+
+            def _sync_font(self):
+                self.fontCombo.blockSignals(True)
+                try:
+                    self.fontCombo.setCurrentFont(QFont(self.item.value or system_font_family()))
+                finally:
+                    self.fontCombo.blockSignals(False)
 
             def _apply_font_combo_style(self):
                 self.fontCombo.setStyleSheet(ComboBoxStyles.dark_combo().replace("QComboBox", "QFontComboBox"))
@@ -2099,14 +2099,13 @@ class LLMSettingsCard(SystemCardFrame):
                 self._apply_font_combo_style()
 
             def _on_font_changed(self, font):
-                self.cfg.set(self.cfg.llm_font_family, font.family(), save=True)
-                if self._parent and hasattr(self._parent, "_on_config_changed"):
-                    self._parent._on_config_changed()
+                self.cfg.set(self.item, font.family(), save=True)
 
+        self.uiFontCard = FontSettingCard("界面字体", "用于导航、菜单和设置控件。", self.cfg.ui_font_family, self)
         self.llmFontCard = FontSettingCard(
-            "全局字体",
-            "设置界面显示字体",
-            self.cfg,
+            "对话字体",
+            "用于提问和回答的正文。",
+            self.cfg.llm_font_family,
             self,
         )
 
@@ -2147,7 +2146,7 @@ class LLMSettingsCard(SystemCardFrame):
         elif sender in (self.cfg.ui_light_mode, self.cfg.ui_theme_mode):
             # 深浅 / 外观模式切档 → 实质是换主题
             LLMSettingsCard._last_change_type = "theme"
-        elif sender is self.cfg.llm_font_family:
+        elif sender in (self.cfg.llm_font_family, self.cfg.ui_font_family):
             LLMSettingsCard._last_change_type = "font_family"
         elif sender is self.cfg.ui_font_size:
             LLMSettingsCard._last_change_type = "font_size"
@@ -2213,6 +2212,7 @@ class LLMSettingsCard(SystemCardFrame):
             "uiThemeModeCard",
             "uiThemeStyleCard",
             "uiMusicCard",
+            "uiFontCard",
             "llmFontCard",
             "renderRestartCard",
             "renderStatusCard",

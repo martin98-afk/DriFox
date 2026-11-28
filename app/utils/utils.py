@@ -26,7 +26,6 @@ from loguru import logger
 from PyQt5.QtCore import Qt, QThread, pyqtSignal
 from PyQt5.QtGui import QFont, QIcon, QIconEngine
 
-from app.utils.config import Settings
 from app.utils import update_proxy
 
 # ICON_NAME_TO_FILE 延迟到 _ThemeIconEngine._find_icon_file() 中导入，
@@ -706,15 +705,9 @@ def load_skill(name: str, project_dir: str | None = None) -> tuple[bool, str, st
 
 def get_unified_font(size=10, bold=False):
     """Get font with unified font family configured by user"""
-    from app.utils.design_tokens import scale_font_size
-    try:
-        font_family = Settings.get_instance().llm_font_family.value
-    except Exception:
-        try:
-            font_family = Settings.get_instance().canvas_font_selected.value
-        except Exception:
-            font_family = "Segoe UI"
-    font = QFont(font_family, scale_font_size(size))
+    from app.utils.design_tokens import _get_global_font, scale_font_size
+
+    font = QFont(_get_global_font(), scale_font_size(size))
     if bold:
         font.setBold(True)
     return font
@@ -731,14 +724,9 @@ def get_font_family_css() -> str:
     global _cached_font_family_css
     if _cached_font_family_css is not None:
         return _cached_font_family_css
-    try:
-        font_family = Settings.get_instance().llm_font_family.value
-    except Exception:
-        try:
-            font_family = Settings.get_instance().canvas_font_selected.value
-        except Exception:
-            font_family = "Segoe UI"
-    _cached_font_family_css = f"font-family: '{font_family}';"
+    from app.utils.design_tokens import _get_global_font
+
+    _cached_font_family_css = f"font-family: '{_get_global_font()}';"
     return _cached_font_family_css
 
 

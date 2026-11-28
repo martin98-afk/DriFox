@@ -347,7 +347,6 @@ class SendableTextEdit(TextEdit):
         self._placeholder_tip_timer = QTimer(self)
         self._placeholder_tip_timer.setInterval(_PLACEHOLDER_ROTATE_INTERVAL_MS)
         self._placeholder_tip_timer.timeout.connect(self._rotate_placeholder_tip)
-        self._placeholder_tip_timer.start()
 
         # 使用 QTimer.singleShot(0, ...) 在事件循环启动后重置初始化标志
         QTimer.singleShot(0, self._finish_initialization)
@@ -2098,6 +2097,7 @@ class SendableTextEdit(TextEdit):
 
     def showEvent(self, event):
         super().showEvent(event)
+        self._placeholder_tip_timer.start()
         # 首次显示时同步定位发送按钮——showEvent 在 paintEvent 之前
         # 同步执行，且此时 width()/height() 已由父布局确定。
         # 否则：__init__ 阶段 width/height 都是 0，send_btn 落在 (0, 0)
@@ -2105,6 +2105,10 @@ class SendableTextEdit(TextEdit):
         # 异步跑一轮才到右下角——视觉上就是"刚进去按钮在左边，过一会
         # 才到右边"。后续 resize 仍走 debounce timer 路径。
         self._position_send_button()
+
+    def hideEvent(self, event):
+        self._placeholder_tip_timer.stop()
+        super().hideEvent(event)
 
     def _position_send_button(self):
         """定右下角（仅兼容兼底）：发送按钮已由 bottom_toolbar 模块迁入工具栏。

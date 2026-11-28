@@ -603,13 +603,9 @@ class SubAgentSessionCard(BaseSettingsCard):
         text_muted = Colors.TEXT_MUTED
         accent_color = Colors.REALTIME_ACCENT
 
-        # 获取系统字体名称（get_font_family_css() 返回完整 CSS 声明，这里只需字体名）
-        try:
-            from app.utils.config import Settings
+        from app.utils.design_tokens import chat_font_family
 
-            _font_name = Settings.get_instance().llm_font_family.value
-        except Exception:
-            _font_name = "Segoe UI"
+        _font_name = chat_font_family()
 
         return f"""<!DOCTYPE html>
 <html lang="zh-CN">

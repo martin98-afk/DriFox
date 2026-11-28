@@ -19,8 +19,7 @@ from PyQt5.QtWidgets import QHBoxLayout, QLabel, QWidget
 from qfluentwidgets import IconWidget, TransparentToolButton
 from app.utils.app_icon import AppIcon
 
-from app.utils.config import Settings
-from app.utils.design_tokens import Colors, scale_font_size
+from app.utils.design_tokens import Colors, _get_global_font, scale_font_size
 from app.utils.utils import get_icon
 
 
@@ -74,13 +73,7 @@ class ToolWindowTitleBar(QWidget):
         layout.addWidget(self._min_btn)
         layout.addWidget(self._popup_btn)
 
-        try:
-            font_name = Settings.get_instance().llm_font_family.value
-        except Exception:
-            try:
-                font_name = Settings.get_instance().canvas_font_selected.value
-            except Exception:
-                font_name = "Microsoft YaHei"
+        font_name = _get_global_font()
 
         # 使用主题颜色
         from app.utils.design_tokens import Colors
@@ -151,13 +144,7 @@ class ToolWindowTitleBar(QWidget):
         """主题/字体变更时刷新标题栏样式"""
         Colors.refresh()
         # 重新读取字体
-        try:
-            font_name = Settings.get_instance().llm_font_family.value
-        except Exception:
-            try:
-                font_name = Settings.get_instance().canvas_font_selected.value
-            except Exception:
-                font_name = "Microsoft YaHei"
+        font_name = _get_global_font()
 
         title_color = Colors.TEXT_PRIMARY
         btn_hover = Colors.HOVER_BG
@@ -227,13 +214,7 @@ class ToolWindow(QWidget):
         return self._title_bar
 
     def _init_unified_font(self):
-        try:
-            font_name = Settings.get_instance().llm_font_family.value
-        except Exception:
-            try:
-                font_name = Settings.get_instance().canvas_font_selected.value
-            except Exception:
-                font_name = "Microsoft YaHei"
+        font_name = _get_global_font()
 
         font = self.font()
         font.setFamily(font_name)

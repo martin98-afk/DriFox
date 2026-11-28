@@ -45,6 +45,8 @@ def test_stream_animation_tracks_visibility(qtbot):
     card.start_streaming_anim()
     assert not card._anim_timer.isActive()
     card.show()
+    assert not card._anim_timer.isActive()
+    card.start_retry_anim("超时", 1, 3, 2)
     assert card._anim_timer.isActive()
     card.hide()
     assert not card._anim_timer.isActive()

@@ -24,6 +24,7 @@
 
 from __future__ import annotations
 
+from datetime import date
 from typing import Dict, Optional, Tuple
 
 from PyQt5.QtCore import QRectF, QSize, Qt
@@ -44,9 +45,7 @@ except Exception:  # noqa: BLE001
     pass
 
 # 头像尺寸（与两行文本块等高，兼顾紧凑与辨识度）
-# 2026-09-17：32 → 40。源图为 250px 上下，40px 仍在高质量降采样的安全区
-# （6:1 以内），既提升辨识度又不引入新的插值损失。
-AVATAR_SIZE = 40
+AVATAR_SIZE = 28
 
 # 名称字号（基础值，实际经 scale_font_size 叠加用户字号档位）
 NAME_FONT_SIZE = 15
@@ -348,8 +347,8 @@ class IdentityHeader(QWidget):
         self._name_label = QLabel(identity.name or "", text_col)
         self._apply_name_style()
 
-        self._time_label = QLabel(timestamp or "", text_col)
-        self._time_label.setVisible(bool(timestamp))
+        self._time_label = QLabel(text_col)
+        self.set_timestamp(timestamp)
         self._apply_time_style()
         # ⚠️ QLabel 默认 sizeHint 高度含内边距（实测 30px），两行就是 60px，
         # 远超身份行的固定高 → 第二行（时间）被推到可视区外，表现为「时间不显示」。
@@ -385,7 +384,14 @@ class IdentityHeader(QWidget):
 
     def set_timestamp(self, timestamp: str) -> None:
         """更新时间显示（空串隐藏）"""
-        self._time_label.setText(timestamp or "")
+        display = timestamp or ""
+        today = date.today()
+        for prefix in (today.strftime("%Y-%m-%d "), today.strftime("%m-%d ")):
+            if display.startswith(prefix):
+                display = display[len(prefix):][:5]
+                break
+        self._time_label.setText(display)
+        self._time_label.setToolTip(timestamp or "")
         self._time_label.setVisible(bool(timestamp))
 
     def apply_text_color(self, color: str) -> None:
@@ -426,7 +432,7 @@ class IdentityHeader(QWidget):
         self._time_label.setFont(font)
         if color:
             # 在同色系里调低不透明度：解析 #rrggbb / rgb() 后附加 alpha
-            light = self._with_alpha(color, 0.62)
+            light = self._with_alpha(color, 0.88)
             self._time_label.setStyleSheet(f"color: {light}; background: transparent;")
         else:
             self._time_label.setStyleSheet("background: transparent;")
