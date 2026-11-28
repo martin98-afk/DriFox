@@ -2615,7 +2615,7 @@ class MessageCard(SimpleCardWidget):
                 bubble.set_border_color(Colors.BORDER)
             return
         if self.role == "assistant" and not self.error:
-            # 实色气泡只覆盖回答正文，身份行和页脚保留外层背景。
+            # 半透明气泡只覆盖回答正文，身份行和页脚保留外层背景。
             self.setStyleSheet(
                 """
                 CardWidget {

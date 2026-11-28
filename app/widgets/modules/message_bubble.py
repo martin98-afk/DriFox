@@ -30,6 +30,7 @@ MAX_S = 0.30  # 明度调整后的饱和度上限（极简：艳色压柔，不�
 # assistant 专属（贴近背景的极简策略：靠边框/引脚辨识，不靠色块）
 ASSIST_L_OFFSET = 14  # 明度相对背景的微偏移量
 ASSIST_S_MAX = 0.10  # 饱和度上限（压到几乎无色）
+ASSIST_ALPHA = 150  # 助手气泡底色不透明度上限（0–255）
 PIN_TIP_LEAN = 5  # 引脚尖端向头像外上方偏移量（指向感）
 BORDER_WIDTH = 1.0  # 气泡整体细边框宽度(px)
 
@@ -55,7 +56,7 @@ def ensure_bubble_contrast(bg_spec: str, backdrop_spec: str, role: str = "user")
     color = _qcolor(bg_spec, QColor(Qt.transparent))
     backdrop = _qcolor(backdrop_spec, QColor(Qt.transparent))
     if not color.isValid() or color.alpha() == 0:
-        return backdrop.name() if role == "assistant" else bg_spec
+        return bg_spec
 
     h, s, l, a = color.getHslF()
     if backdrop.isValid():
@@ -66,8 +67,7 @@ def ensure_bubble_contrast(bg_spec: str, backdrop_spec: str, role: str = "user")
             l = min(1.0, max(0.0, l))
             s = min(s, ASSIST_S_MAX)
             out = QColor.fromHslF(h, s, l)
-            # 正文使用实色，避免壁纸或视频的纹理透入文字。
-            return out.name()
+            return f"rgba({out.red()}, {out.green()}, {out.blue()}, {min(color.alpha(), ASSIST_ALPHA)})"
         if abs(l - bl) * 255 < MIN_L_DIFF:
             target = (bl - MIN_L_PUSH / 255.0) if bl >= 0.5 else (bl + MIN_L_PUSH / 255.0)
             l = min(1.0, max(0.0, target))
