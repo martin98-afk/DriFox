@@ -20,7 +20,10 @@ _SKILL_SCHEMA = {
     "type": "function",
     "function": {
         "name": "skill",
-        "description": "加载智能体技能到当前会话。阻断要求：用户请求命中任一可用技能描述(含 /斜杠命令引用)时，必须先调用本工具加载对应技能，禁止只提及不加载；同技能已加载则勿重复调用，直接按其内容执行。可用清单见系统提示「偏好技能」段，未列出时用 manage_skill(action=list)。",
+        "description": (
+            "加载用户点名（含 /命令）、项目要求或完成任务需要的技能。已加载的技能可直接使用。"
+            "可用技能见「偏好技能」，需要查找其他技能时用 manage_skill(action=list)。"
+        ),
         "parameters": {
             "type": "object",
             "properties": {
