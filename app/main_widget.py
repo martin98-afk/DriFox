@@ -23549,7 +23549,11 @@ class OpenAIChatToolWindow(ToolWindow):
                 if last_msg.get("_hook_event"):
                     logger.debug("[Notify] Skip notification for hook message")
                 else:
-                    preview = content[:50] + "..." if len(content) > 50 else content
+                    # 直接截 raw content 会把 <plan>/思考/工具块当正文（toast 里只剩
+                    # 「目标/路径/风险」），改走清洗：剥协议块 + markdown 标记后截断。
+                    from app.utils.session_preview import get_reply_preview
+
+                    preview = get_reply_preview(content) or "回复已完成"
                     current_title = self.title_edit.text() if self.title_edit else "对话完成"
                     self._notify_if_inactive(current_title, preview, reply_session_id=session.session_id)
 
