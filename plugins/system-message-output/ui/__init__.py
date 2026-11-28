@@ -1,32 +1,45 @@
-from app.plugins.contracts.message_layout import SELECTOR, register_output_mode
-from app.plugins.managers.plugin_config_store import PluginConfigStore
-from app.utils.config import Settings
-from .compact import COMPACT
+from app.plugins.sdk import caps_for
+
+from .compact import CSS, grouped_runs
 from .settings import OutputSettingsCard
 
 NAME = 'system-message-output'
 
 
+def _cap(name):
+    return caps_for(name, plugin=NAME, surface='ui')
+
+
 def register_ui(registry):
-    store = PluginConfigStore()
-    selection = store.get(NAME, 'mode_id')
-    if not selection:
-        selection = 'compact' if Settings.get_instance().ui_compact_tool_area.value else 'original'
-        store.set_values(NAME, {'mode_id': selection})
-    state = {'id': selection}
+    state = {'id': None}
+
+    def current():
+        if state['id'] is None:
+            read = _cap('plugin.config.read')
+            value = read('mode_id') if read else None
+            if value:
+                state['id'] = value
+            else:
+                legacy = _cap('config.read')
+                value = 'original' if legacy and not legacy('ui_compact_tool_area', True) else 'compact'
+                choose(value)
+                return value
+        return state['id']
 
     def choose(mode_id):
-        if store.set_values(NAME, {'mode_id': mode_id}):
+        write = _cap('plugin.config.write')
+        if write and write('mode_id', mode_id):
             state['id'] = mode_id
             return True
         return False
 
     class SettingsCard(OutputSettingsCard):
         def __init__(self, parent=None):
-            super().__init__(registry, lambda: state['id'], choose, parent)
+            super().__init__(registry.output_mode_choices, current, choose, parent)
 
-    register_output_mode(registry, COMPACT, plugin_name=NAME)
-    registry.register_ui_module(SELECTOR, lambda: state['id'], plugin_name=NAME)
+    registry.register_output_mode('compact', '简洁', '按正文分组折叠思考与工具，单独标出失败次数。',
+                                  groups=grouped_runs, css=CSS, plugin_name=NAME)
+    registry.register_ui_module('message_output_selection', current, plugin_name=NAME)
     registry.register_settings_card(NAME, 'stream_output_modes', '流式输出方式', SettingsCard,
                                     section='plugins', priority=20,
                                     metadata={'description': '选择下一条消息使用的输出方式'})

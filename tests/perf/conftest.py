@@ -4,7 +4,7 @@ import pytest
 
 
 @pytest.fixture
-def compact_output_plugin(monkeypatch, tmp_path, qapp):
+def compact_output_plugin(monkeypatch, tmp_path, qapp, output_config_schema):
     """独立窗口回放不启动主窗口；走真实插件加载器补齐生产扩展点。"""
     from app.plugins.managers.plugin_config_store import PluginConfigStore
     from app.plugins.registries.ui_plugin_registry import UIPluginRegistry

@@ -8,6 +8,19 @@ import pytest
 
 from loguru import logger
 
+
+@pytest.fixture
+def output_config_schema(monkeypatch):
+    import json
+    from app.plugins.contracts.plugin_config import parse_config_schema
+    from app.plugins.registries.plugin_config_registry import PluginConfigRegistry
+
+    name = 'system-message-output'
+    path = Path(__file__).resolve().parents[1] / 'plugins' / name / '.drifox-plugin' / 'plugin.json'
+    registry = PluginConfigRegistry()
+    registry.register(parse_config_schema(name, json.loads(path.read_text(encoding='utf-8'))['config_schema']))
+    monkeypatch.setattr(PluginConfigRegistry, 'get_instance', lambda: registry)
+
 # ⚠️ 必须模块级（收集期生效）：pytest 收集测试文件即触发 app 模块链式
 # import → provider 加载 → codebuddy._bootstrap 启动守护线程；session
 # fixture 首测试前才运行，届时线程已在 urlopen 阻塞（退出期竞态 0x8001010D）。

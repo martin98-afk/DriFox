@@ -56,7 +56,10 @@ def test_compact_grouped_stream(qapp, qtbot, compact_output_plugin):
         assert another._output_mode.id == 'original' and card._output_mode.id == 'compact'
         card.append_tool_result(tool_call_id='late-1', tool_name='read', arguments={}, result='晚到结果', success=False)
         qtbot.waitUntil(lambda: js('firstButton.textContent') == '思考 1 次 · 工具 1 次 · 失败 1 次', timeout=10000)
-        assert js("getComputedStyle(firstButton).backgroundColor === 'rgba(0, 0, 0, 0)' && parseFloat(getComputedStyle(firstButton).fontSize) < parseFloat(getComputedStyle(firstButton.parentNode).fontSize)")
+        style = js("""(function(){var p=Array.from(document.querySelectorAll('#content-placeholder p')).find(n=>n.textContent.includes('第一段正文'));
+          firstButton.focus(); var s=getComputedStyle(firstButton), l=getComputedStyle(firstButton.querySelector('.dfx-group-label')), t=getComputedStyle(p);
+          return [parseFloat(t.fontSize)-parseFloat(l.fontSize),l.color===t.color,parseFloat(l.opacity),s.outlineStyle,s.backgroundColor];})()""")
+        assert style == [1, True, 0.76, 'none', 'rgba(0, 0, 0, 0)'], style
         qtbot.waitUntil(lambda: bool(js("document.querySelector('[data-tool-call-id=\"late-1\"]:not(.tool-streaming-block)')" + ' !== null')), timeout=10000)
         assert js(f"firstButton === {buttons}[0]")
         assert js(f"{buttons}[0].nextElementSibling.nextElementSibling.querySelector('[data-tool-call-id=\"late-1\"]') !== null")

@@ -5,6 +5,8 @@ body.dfx-grouped #tool-section { display:none !important; }
 """
 
 GROUP_JS = """
+document.addEventListener('keydown', function(e) { if (e.key === 'Tab') document.body.classList.add('dfx-key-focus'); }, true);
+document.addEventListener('mousedown', function() { document.body.classList.remove('dfx-key-focus'); }, true);
 window._applyMessageGroups = function(groups) {
     var root = document.getElementById('content-placeholder');
     var nodes = window._blockNodes(root);
@@ -32,7 +34,8 @@ window._applyMessageGroups = function(groups) {
         var opened = manual.has(key) ? manual.get(key) : g[2];
         var label = g[3], failed = g[4] || '';
         if (b.textContent !== label + failed) {
-            b.textContent = label;
+            var summary = document.createElement('span'); summary.className = 'dfx-group-label';
+            summary.textContent = label; b.textContent = ''; b.appendChild(summary);
             if (failed) {
                 var badge = document.createElement('span'); badge.className = 'dfx-group-fail';
                 badge.textContent = failed; b.appendChild(badge);

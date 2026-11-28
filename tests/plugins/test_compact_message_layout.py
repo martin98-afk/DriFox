@@ -11,7 +11,7 @@ PATH = Path(__file__).resolve().parents[2] / 'plugins' / NAME
 
 
 @pytest.mark.parametrize('legacy,expected', [(True, 'compact'), (False, 'original')])
-def test_load_choose_reload_unload(qapp, qtbot, monkeypatch, tmp_path, legacy, expected):
+def test_load_choose_reload_unload(qapp, qtbot, monkeypatch, tmp_path, output_config_schema, legacy, expected):
     from app.utils.config import Settings
 
     cfg = Settings.get_instance()
@@ -37,6 +37,17 @@ def test_load_choose_reload_unload(qapp, qtbot, monkeypatch, tmp_path, legacy, e
     assert reg.load_plugin(NAME, PATH)
     assert selected_mode() is extra
     reg.unload_plugin(NAME)
+
+
+def test_plugin_host_imports_only_capability_entry():
+    import ast
+
+    for file in (PATH / 'ui').glob('*.py'):
+        for node in ast.walk(ast.parse(file.read_text(encoding='utf-8'))):
+            if isinstance(node, ast.Import):
+                assert all(not alias.name.startswith('app.') for alias in node.names), file
+            elif isinstance(node, ast.ImportFrom) and (node.module or '').startswith('app.'):
+                assert node.module == 'app.plugins.sdk' and [n.name for n in node.names] == ['caps_for'], file
 
 
 def test_policy_failure_preserves_blocks():
